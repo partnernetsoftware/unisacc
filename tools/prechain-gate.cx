@@ -1,0 +1,186 @@
+/* tools/prechain-gate.cx -- chain-phase tool timing consistency gate (ITER-1 first version / ITER-8 core).
+ *
+ *   sh ./unisacc.com tools/prechain-gate.cx                 scan the chain tools, compare with the baseline
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --emit-baseline   print the current findings as baseline rows
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --file PATH...    scan only these files, no baseline (fixtures)
+ *
+ * Static, read-only. Scans the chain-phase tools for the class that stopped seven whole-chain starts:
+ *   LIT_NOENV   a literal seconds value in a child-run call (np_run/pr_run/eb_run) in a tool that does not
+ *               derive from UNISACC_CHAIN_PHASE_BOUND_S / ccp_sub_bound: the limit cannot follow the phase.
+ *   LIT_BELOW   the same literal in a deriving tool when it is below phase.bound default - 5 (a sub-limit
+ *               that can fire before the phase limit).
+ *   TIMEOUT_RC2 a timed_out branch that ends in die(): rc 2 (deterministic refusal) instead of 124 (retryable).
+ *   WATCHDOG_LIT a quoted literal seconds argument handed to tools/bound.
+ * The column "limits" names the build/limits.tsv id whose default equals the literal, or NONE.
+ * Known findings live in build/prechain-gate-baseline.tsv (file, rule, snippet, expires, reason); a finding
+ * not in the baseline, or whose baseline row expired, exits 1. Baseline rows that no longer match are listed
+ * as STALE (to be deleted). Output only: no PASS is granted, nothing is written. */
+#pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+static const char *files[] = {"tools/candidate-chain.cx", "tools/chain-step.cx", "tools/chain-run.cx", "tools/whole-front.cx",
+    "tools/entry-build.cx", "tools/kernel-build.cx", "tools/source-job-wave.cx", "tools/cxlib/chaincall.cx"};
+enum { MAXF = 256, SN = 80 };
+typedef struct { char file[96], rule[16], snip[SN + 1], lim[32]; int line; } finding;
+static finding fd[MAXF];
+static int nf;
+static char lim_id[64][48];
+static double lim_val[64];
+static int nlim;
+
+static void load_limits(void) {
+    size_t n; char *s = cx_read("build/limits.tsv", &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read build/limits.tsv\n"); exit(2); }
+    char *p = s;
+    while (p < s + n) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && nlim < 64) {
+            char *t1 = memchr(p, '\t', (size_t)(e - p)), *t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(e - t1 - 1)) : 0;
+            char *t3 = t2 ? memchr(t2 + 1, '\t', (size_t)(e - t2 - 1)) : 0;
+            if (t1 && t2 && t3 && t1 - p < 47) {
+                mm_copy(lim_id[nlim], sizeof lim_id[nlim], p, (size_t)(t1 - p)); lim_id[nlim][t1 - p] = 0;
+                lim_val[nlim++] = atof(t2 + 1);
+            }
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+static const char *lim_for(double v) {
+    for (int i = 0; i < nlim; i++) if (lim_val[i] == v) return lim_id[i];
+    return "NONE";
+}
+static void cpy(char *d, size_t cap, const char *s, size_t n) {
+    if (n >= cap) { fprintf(stderr, "prechain-gate: REFUSE field too long\n"); exit(2); }
+    mm_copy(d, cap, s, n); d[n] = 0;
+}
+static void add(const char *file, const char *rule, const char *snip, size_t sl, int line, const char *lim) {
+    if (nf >= MAXF) { fprintf(stderr, "prechain-gate: REFUSE too many findings\n"); exit(2); }
+    finding *f = &fd[nf++];
+    cpy(f->file, sizeof f->file, file, strlen(file)); cpy(f->rule, sizeof f->rule, rule, strlen(rule));
+    if (sl > SN) sl = SN;
+    mm_copy(f->snip, sizeof f->snip, snip, sl); f->snip[sl] = 0;
+    for (char *c = f->snip; *c; c++) if (*c == '\t') *c = ' ';
+    cpy(f->lim, sizeof f->lim, lim, strlen(lim)); f->line = line;
+}
+/* Top-level argument idx of the call whose '(' is at open; copies it trimmed into out; returns 0 if none. */
+static int call_arg(const char *open, const char *end, int idx, char *out, size_t cap) {
+    int depth = 0, k = 0; const char *a = open + 1;
+    for (const char *p = open + 1; p < end; p++) {
+        int last = 0;
+        if (*p == '(' || *p == '[' || *p == '{') { depth++; continue; }
+        if (*p == ')' || *p == ']' || *p == '}') { if (depth > 0) { depth--; continue; } last = 1; }
+        else if (!(*p == ',' && depth == 0)) continue;
+        if (k == idx) {
+            const char *q = p;
+            while (*a == ' ') a++;
+            while (q > a && q[-1] == ' ') q--;
+            if ((size_t)(q - a) >= cap) return 0;
+            mm_copy(out, cap, a, (size_t)(q - a)); out[q - a] = 0; return 1;
+        }
+        if (last) return 0;
+        k++; a = p + 1;
+    }
+    return 0;
+}
+static int all_digits(const char *s) { if (!*s) return 0; for (; *s; s++) if (!isdigit((unsigned char)*s)) return 0; return 1; }
+
+static void scan_text(const char *file, const char *text, size_t n) {
+    int derived = 0;
+    { char *t = malloc(n + 1); mm_copy(t, n + 1, text, n); t[n] = 0;
+      derived = strstr(t, "UNISACC_CHAIN_PHASE_BOUND_S") != 0 || strstr(t, "ccp_sub_bound") != 0; free(t); }
+    static const struct { const char *fn; int idx; } calls[] = {{"np_run(", 3}, {"pr_run(", 4}, {"eb_run(", 2}};
+    const char *p = text; int ln = 0;
+    while (p < text + n) {
+        const char *e = memchr(p, '\n', (size_t)(text + n - p)); if (!e) e = text + n;
+        ln++;
+        char *line = malloc((size_t)(e - p) + 1); mm_copy(line, (size_t)(e - p) + 1, p, (size_t)(e - p)); line[e - p] = 0;
+        const char *tr = line; while (*tr == ' ') tr++;
+        if (strncmp(tr, "/*", 2) && strncmp(tr, "*", 1) && strncmp(tr, "//", 2)) {
+            for (int c = 0; c < 3; c++) {
+                const char *q = line;
+                while ((q = strstr(q, calls[c].fn)) != 0) {
+                    const char *open = q + strlen(calls[c].fn) - 1; char arg[64];
+                    if (call_arg(open, line + strlen(line), calls[c].idx, arg, sizeof arg) && all_digits(arg)) {
+                        double v = atof(arg);
+                        if (!derived) add(file, "LIT_NOENV", q, strlen(q), ln, lim_for(v));
+                        else if (v < lim_val[0] - 5) add(file, "LIT_BELOW", q, strlen(q), ln, lim_for(v));
+                    }
+                    q = open;
+                }
+            }
+            const char *t = strstr(line, "timed_out");
+            if (t && strstr(t, "die(") && !strstr(line, "124") && !strstr(line, "timeout_exit")) add(file, "TIMEOUT_RC2", tr, strlen(tr), ln, "-");
+            if (strstr(line, "watchdog")) {
+                for (const char *q = line; (q = strchr(q, '"')) != 0; ) {
+                    const char *r = strchr(q + 1, '"'); if (!r) break;
+                    char lit[16];
+                    if (r - q - 1 > 0 && r - q - 1 < 8) { mm_copy(lit, sizeof lit, q + 1, (size_t)(r - q - 1)); lit[r - q - 1] = 0;
+                        if (all_digits(lit)) { add(file, "WATCHDOG_LIT", q - 0, strlen(q), ln, lim_for(atof(lit))); break; } }
+                    q = r + 1;
+                }
+            }
+        }
+        free(line); p = e + 1;
+    }
+}
+static int scan_file(const char *file) {
+    size_t n; char *s = cx_read(file, &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read %s\n", file); return -1; }
+    scan_text(file, s, n); free(s); return 0;
+}
+/* baseline: 5 TAB fields file rule snippet expires reason */
+typedef struct { char file[96], rule[16], snip[SN + 1], exp[16]; int used; } brow;
+static brow bl[MAXF];
+static int nb;
+static void load_baseline(void) {
+    size_t n; char *s = cx_read("build/prechain-gate-baseline.tsv", &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read build/prechain-gate-baseline.tsv\n"); exit(2); }
+    char *p = s;
+    while (p < s + n) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && e > p) {
+            char *f[5]; int k = 0; char *a = p;
+            for (char *c = p; c <= e && k < 5; c++) if (c == e || *c == '\t') { f[k] = a; a = c + 1; k++; }
+            if (k < 5 || nb >= MAXF) { fprintf(stderr, "prechain-gate: REFUSE bad baseline row\n"); exit(2); }
+            brow *b = &bl[nb++];
+            cpy(b->file, sizeof b->file, f[0], (size_t)(f[1] - f[0] - 1));
+            cpy(b->rule, sizeof b->rule, f[1], (size_t)(f[2] - f[1] - 1));
+            cpy(b->snip, sizeof b->snip, f[2], (size_t)(f[3] - f[2] - 1));
+            cpy(b->exp, sizeof b->exp, f[3], (size_t)(f[4] - f[3] - 1));
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+int main(int argc, char **argv) {
+    int emit = 0, only = 0;
+    load_limits();
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--emit-baseline")) emit = 1;
+        else if (!strcmp(argv[i], "--file")) { only = 1; for (i++; i < argc; i++) if (scan_file(argv[i])) return 2; }
+        else { fprintf(stderr, "usage: prechain-gate [--emit-baseline | --file PATH...]\n"); return 2; }
+    }
+    if (!only) for (size_t i = 0; i < sizeof files / sizeof *files; i++) if (scan_file(files[i])) return 2;
+    if (emit) {
+        for (int i = 0; i < nf; i++) printf("%s\t%s\t%s\t2026-12-13\t已知基线,见账本 C3-SUBBOUND-RESOLVE/C3-RETRY-CLASS;ITER-8 收敛后删除\n", fd[i].file, fd[i].rule, fd[i].snip);
+        return 0;
+    }
+    printf("PRECHAIN_GATE\tstatic scan only: no job executed, no PASS granted\n");
+    int fresh = 0, known = 0, expired = 0, stale = 0;
+    char today[16];{long z=sy_wall_s()/86400+719468,era=z/146097,doe=z-era*146097,yoe=(doe-doe/1460+doe/36524-doe/146096)/365,y=yoe+era*400,doy=doe-(365*yoe+yoe/4-yoe/100),mp=(5*doy+2)/153,d=doy-(153*mp+2)/5+1,m=mp<10?mp+3:mp-9;if(m<=2)y++;if(cx_fmt(today,sizeof today,"%04ld-%02ld-%02ld",y,m,d))return 2;}
+    if (!only) load_baseline();
+    printf("status\tfile:line\trule\tlimits\tsnippet\n");
+    for (int i = 0; i < nf; i++) {
+        const char *st = "NEW"; brow *hit = 0;
+        for (int j = 0; j < nb && !hit; j++)
+            if (!strcmp(bl[j].file, fd[i].file) && !strcmp(bl[j].rule, fd[i].rule) && !strcmp(bl[j].snip, fd[i].snip)) hit = &bl[j];
+        if (hit) { hit->used = 1; if (strcmp(hit->exp, today) < 0) { st = "EXPIRED"; expired++; } else { st = "BASELINE"; known++; } }
+        else fresh++;
+        printf("%s\t%s:%d\t%s\t%s\t%s\n", st, fd[i].file, fd[i].line, fd[i].rule, fd[i].lim, fd[i].snip);
+    }
+    for (int j = 0; j < nb; j++) if (!bl[j].used) { stale++; printf("STALE\t%s\t%s\t-\t%s\n", bl[j].file, bl[j].rule, bl[j].snip); }
+    printf("PRECHAIN_GATE_RESULT\tnew=%d\tbaselined=%d\texpired=%d\tstale=%d\n", fresh, known, expired, stale);
+    return fresh || expired ? 1 : 0;
+}

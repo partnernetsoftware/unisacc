@@ -1,0 +1,71 @@
+/* tools/check-prechain-gate.cx -- positive and negative fixtures for tools/prechain-gate.cx.
+ *
+ *   sh ./unisacc.com tools/check-prechain-gate.cx
+ *
+ * Negative fixture: a source text that breaks every rule (literal np_run seconds with no phase-bound
+ * derivation, a timed_out branch ending in die(), a literal handed to the watchdog) must be reported
+ * (rc 1, the three rule tags, status NEW). Positive fixture: a deriving tool whose timeout exits 124 and
+ * whose limits follow ccp_sub_bound must report nothing (rc 0). Then the real tree: rc 0, no NEW/EXPIRED
+ * rows, and every baseline row carries an expiry date (shape check). Fixtures go to a mkdtemp directory under /tmp.
+ * Prints PASS|FAIL lines and CHECK_PRECHAIN_GATE<TAB>failed=N. */
+#pragma unisa use text.text
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-prechain-gate.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void put(const char *path, const char *body) {
+    FILE *f = fopen(path, "w");
+    if (!f) { printf("FAIL\tcheck-prechain-gate.write\n"); exit(1); }
+    fputs(body, f); fclose(f);
+}
+/* Runs the gate with ARGS; returns exit code, fills out (truncated). */
+static int gate(const char *args, char *out, size_t cap) {
+    char cmd[512]; if (cx_fmt(cmd, sizeof cmd, "timeout 40 sh ./unisacc.com tools/prechain-gate.cx -- %s 2>&1; echo RC=$?", args)) return -1;
+    FILE *p = popen(cmd, "r"); size_t n = 0;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; pclose(p);
+    for (size_t i = n; i >= 3; i--) if (out[i - 3] == 0x52 && out[i - 2] == 0x43 && out[i - 1] == 0x3d) return atoi(out + i);
+    return -1;
+}
+int main(void) {
+    static char out[16384];
+    static char fx[] = "/tmp/pgfx-XXXXXX"; static char bad[64], good[64];
+    if (!mkdtemp(fx) || cx_fmt(bad, sizeof bad, "%s/bad.cx", fx) || cx_fmt(good, sizeof good, "%s/good.cx", fx)) { printf("FAIL\tcheck-prechain-gate.tmpdir\n"); return 1; }
+    put(bad,
+        "static int f(char **v){ np_result r; int t = np_run(v, 0, 0, 30, &r, w, sizeof w); return t; }\n"
+        "static void g(void){ if (r.timed_out) die(\"slow\"); }\n"
+        "static void h(void){ char *a[] = {watchdog, \"40\", \"sh\", 0}; }\n");
+    char arg[160]; int rc = cx_fmt(arg, sizeof arg, "--file %s", bad) ? -1 : gate(arg, out, sizeof out);
+    ck(rc == 1, "negative.rc1");
+    ck(strstr(out, ":1\tLIT_NOENV") != 0, "negative.lit_noenv");
+    ck(strstr(out, "TIMEOUT_RC2") != 0, "negative.timeout_rc2");
+    ck(strstr(out, "WATCHDOG_LIT") != 0, "negative.watchdog_lit");
+    ck(strstr(out, "new=3") != 0, "negative.count");
+    put(good,
+        "/* derives from UNISACC_CHAIN_PHASE_BOUND_S via ccp_sub_bound */\n"
+        "static int f(char **v){ np_result r; int t = np_run(v, 0, 0, sub_secs(), &r, w, sizeof w); if (t && r.timed_out) return 124; return t; }\n"
+        "static void g(void){ char *a[] = {watchdog, secs_str, \"sh\", 0}; }\n");
+    rc = cx_fmt(arg, sizeof arg, "--file %s", good) ? -1 : gate(arg, out, sizeof out);
+    ck(rc == 0 && strstr(out, "new=0") != 0, "positive.clean");
+    rc = gate("", out, sizeof out);
+    ck(rc == 0, "head.rc0");
+    ck(strstr(out, "NEW\t") == 0 && strstr(out, "EXPIRED\t") == 0, "head.no_new");
+    ck(strstr(out, "BASELINE\t") != 0, "head.lists_baseline");
+    size_t n; char *b = cx_read("build/prechain-gate-baseline.tsv", &n); int shape = b != 0, rows = 0;
+    if (b) {
+        for (char *p = b; p < b + n;) {
+            char *e = memchr(p, '\n', (size_t)(b + n - p)); if (!e) e = b + n;
+            if (*p != '#' && e > p) {
+                int tabs = 0; for (char *c = p; c < e; c++) if (*c == '\t') tabs++;
+                rows++; if (tabs < 4) shape = 0;
+            }
+            p = e + 1;
+        }
+        free(b);
+    }
+    ck(shape && rows > 0, "baseline.shape");
+    printf("CHECK_PRECHAIN_GATE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
