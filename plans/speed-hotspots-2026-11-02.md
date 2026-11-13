@@ -45,6 +45,46 @@
 - `tools/speed-probe.cx` 对 3 个 `-o` 作业三次均 rc=0 但四列全 0、`per-object.tsv` 未落盘;同命令直接跑有回执。取数缺陷未修。
 - 优化补丁:未写。前后对比:无。
 
+### SPEED-1B 冷分相与 e3 定位(2026-11-13,同候选,全新 TMPDIR,`-o` 只编不跑)
+
+各相是什么(`cx/compiler/streamname.cx`):e2 = preprocess,e1 = lex,e3 = parse,prune = prune,lower = lowering;
+units 与 elf 是整程序 `-o` 路由的合并与成像步。e2/e1 每单元各跑一次,units 之后的各相整程序各跑一次。
+回执里 `inference stage=X` 的区间是 `src/stages.cx` 中 `ex_ri_exec` 一次调用(`cx/runtime/runexec.cx` ->
+`src/executor.cx` 的 `core_run`,汇编内核);`model stage=X source=inflate` 是该相网的解压装载。
+`-o` 整程序路由的回执没有 tapecheck 相(101 行全文核过)。
+
+`tools/ratchets.cx -o`(10 单元,单元缓存 10 次全未命中,4 次,四次镜像 sha256 相同):
+
+| 相 | 最小 ms | 中位 ms | 占七相合计(最小) |
+|---|---|---|---|
+| e2(10 单元合计) | 2391.7 | 2434.9 | 33.4% |
+| e3 | 2368.7 | 2442.8 | 33.1% |
+| lower | 836.7 | 851.6 | 11.7% |
+| elf | 464.5 | 476.9 | 6.5% |
+| units | 358.2 | 362.6 | 5.0% |
+| prune | 338.9 | 342.5 | 4.7% |
+| e1(10 单元合计) | 324.3 | 325.5 | 4.5% |
+| 合计 | 7163.3 | 7256.8 | 100% |
+
+模型解压另计:合计最小 249.9 ms(e2 95.2、e1 85.6、e3 37.7)。
+
+对照(各 3 次,最小/中位 ms),用来把 e3 拆成"前导"与"用户代码"两段:
+
+| 输入 | e2 | e1 | e3 | 七相合计 |
+|---|---|---|---|---|
+| 最小 `.c`(`int main` 一行,无前导) | 2.0/2.1 | 0.2/0.2 | 2.7/2.8 | 10.8/11.1 |
+| 最小 `.cx`(同一行,只多隐式前导 `include/cx-flat.h`,9165 行) | 108.5/108.6 | 25.8/26.1 | 88.1/90.0 | 253.2/258.7 |
+
+- 实测:只多一份前导,单单元 e3 多约 85 ms、e2 多约 106 ms、e1 多约 26 ms,合计约 242 ms/单元。
+- [推断,未实测] ratchets 的 10 个单元各带一份前导;若 e3 对前导近似线性,前导约占 e3 的 880/2369 ms、
+  占 e2 的 1085/2392 ms。e3 对输入规模是否线性:UNMEASURED。
+- e3 内部更细分段:UNMEASURED。`cx/runtime/profile.cx` 写明 cx 层能看到的最细粒度是一相的墙钟(本路径
+  `prof_stage` 的步数传 -1),e3 区间内没有任何 `cx/compiler/**` 代码在途。
+- 结论:冷路径上 e2 与 e3 并列最大(各约三分之一),上一节"e3 占 55.2%"只对单元缓存命中成立。
+  可动的杠杆都在 SPEED-1B 写域之外:(1) 前导按单元重复预处理与解析(`include/cx-flat.h`、E2/E3 网、
+  `cx/runtime` 单元缓存的粒度);(2) `core_run` 与 parse 网本身(`kernel/` 生成物)。
+- SPEED-1B 优化补丁:未写。前后对比:无。不声称变快。
+
 ## 补测工具(已写,纪元后用)
 
 `tools/speed-probe.cx`(批次 `speed-probe`,check 6/6 PASS):输入 `JOBS.tsv`(每行 `NAME<TAB>ARGV...`,
