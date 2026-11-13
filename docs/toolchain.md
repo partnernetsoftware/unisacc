@@ -2,7 +2,7 @@
 
 本文是 0.0.16–0.0.18 工具链工作的设计基线：先如实记录后端形状（现行产品对应 `src/drive.cx`、`cx/compiler/tapelink.cx`、`exec/lower/`、`exec/enc/`，原 C 与 Python 参考已归档），再给出 ELF `.o` 的规格、与系统工具的互操作矩阵、三版递进和验证方式。整体架构见 [../prd.md](../prd.md)，本文只写设计。
 
-> **现状（2026-10-02，0.0.20 已发布）**：§4 的 ELF 规格已扩到 Mach-O 与 COFF（参考侧三格式；产品 Linux ELF 由模型路由 `exec/enc/` 写出，产品 Mach-O/COFF 单元容器见 `tests/objects.cx`）；单元 tape 自 0.0.20 起以 `.unit 2` 开头、带初值定义记 `.gdef`，链接器 `cx/compiler/tapelink.cx` 据此拒绝重复初值与只有 extern 的对象；汇编文本 `cx/compiler/asmtext.cx` 与 `unisacc as`/`nm`/`objdump` 见 README；分开编译与 tape 级链接器见 §7；`.data/.bss` 分界、全局/未定义符号命名（导出与未定义数据名去 `g_`）以 `exec/enc/` 与原 C 参考的 `bk_symplan` 为准。下文 §2–§4 中“本版”“0.0.16”的措辞是当时的设计语境，保留作记录；不再成立的两点已逐条标注。
+> **现状（2026-10-02，0.0.20 已发布）**：§4 的 ELF 规格已扩到 Mach-O 与 COFF（参考侧三格式；产品 Linux ELF 由模型路由 `exec/enc/` 写出，产品 Mach-O/COFF 单元容器见 `tests/objects.cx`）；单元 tape 自 0.0.20 起以 `.unit 2` 开头、带初值定义记 `.gdef`，链接器 `cx/compiler/tapelink.cx` 据此拒绝重复初值与只有 extern 的对象；汇编文本 `cx/compiler/asmtext.cx` 与 `unisacc as`/`nm`/`objdump` 见 [readme-detail.md 第一、二节](readme-detail.md)；分开编译与 tape 级链接器见 §7；`.data/.bss` 分界、全局/未定义符号命名（导出与未定义数据名去 `g_`）以 `exec/enc/` 与原 C 参考的 `bk_symplan` 为准。下文 §2–§4 中“本版”“0.0.16”的措辞是当时的设计语境，保留作记录；不再成立的两点已逐条标注。
 
 ## 1. 后端今天的形状（事实，不是愿望）
 
