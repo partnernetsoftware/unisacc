@@ -31,6 +31,7 @@ static char *find_sub(char *s, const char *needle) {
     }
     return 0;
 }
+static int count_sub(char *s, const char *needle) { int n = 0; char *at = s; while ((at = find_sub(at, needle)) != 0) { n++; at++; } return n; }
 static void ck(int ok,const char *s) { printf("%s\tcheck-release-exec.%s\n",ok?"PASS":"FAIL",s); if(!ok)failed++; }
 static int call(char **v,const char *cwd) { np_result r={0}; char why[600]; int bad=np_run(v,cwd,0,55,&r,why,sizeof why); if(r.outn)fwrite(r.out,1,r.outn,stdout); if(r.errn)fwrite(r.err,1,r.errn,stderr); int rc=bad?125:r.rc; np_free(&r); return rc; }
 static void must(char **v) { if(call(v,root))die("local fixture command"); }
@@ -93,6 +94,27 @@ static void scenario(const char *name,const char *marker,int deadline,int mode) 
      ck(rc==1&&!find_sub(log,"ci-dispatch\tDONE"),"assetguard-refuses-before-dispatch");
      path(p,fake,"log");char *trace=get(p);ck(trace&&!find_sub(trace,"workflow run"),"assetguard-CI-trace-zero");free(trace);
      ck(execute(state,cfg)!=0,"assetguard-resume-no-blind-dispatch");
+     path(p,fake,"log");trace=get(p);ck(trace&&!find_sub(trace,"workflow run"),"assetguard-resume-CI-trace-zero");free(trace);
+ }
+ if(mode==9){path(p,fake,"log");char *trace=get(p);ck(trace&&find_sub(trace,"--json apiUrl")&&!find_sub(trace,"releases/tags/"),"draft-release-id-not-from-tag-endpoint");free(trace);}
+ if(mode==12){
+     /* the guard failed before any dispatch command: RUNNING stays unknown, FAILED without a record re-enters once */
+     path(p,state,"exec.tsv");char *full=get(p),*cut=find_sub(log,"ci-dispatch\tFAILED");
+     ck(rc==1&&full&&cut,"unsent-dispatch-first-attempt-fails");if(!full||!cut)die("re-entry boundary");
+     path(p,state,"ci-dispatch.intent");ck(sy_exists(p)==0,"unsent-dispatch-leaves-no-intent");
+     *cut=0;path(p,state,"exec.tsv");put(p,log);ck(execute(state,cfg)==2,"dispatch-RUNNING-outcome-unknown-still-refused");
+     path(p,state,"exec.tsv");put(p,full);free(full);
+     path(p,fake,"assetapi");if(sy_unlink(p))die("remove own API marker");
+     (void)execute(state,cfg);path(p,state,"exec.tsv");char *after=get(p);ck(after&&find_sub(after,"ci-dispatch\tDONE")!=0,"unsent-dispatch-failure-reenters");free(after);
+     path(p,fake,"log");char *trace=get(p);ck(trace&&count_sub(trace,"workflow run")==1&&!find_sub(trace,"releases/tags/"),"reentry-dispatches-exactly-once");free(trace);
+ }
+ if(mode==13){
+     /* the dispatch command itself started and failed: its record and intent marker forbid a second one */
+     ck(rc==1&&find_sub(log,"ci-dispatch\tFAILED")!=0,"started-dispatch-failure-recorded");
+     path(p,state,"ci-dispatch.intent");ck(sy_exists(p)==1,"started-dispatch-intent-retained");
+     ck(execute(state,cfg)==2,"started-dispatch-failure-never-reentered");
+     if(sy_unlink(p))die("remove intent marker");ck(execute(state,cfg)==2,"dispatch-record-alone-still-refuses");
+     path(p,fake,"log");char *trace=get(p);ck(trace&&count_sub(trace,"workflow run")==1,"started-dispatch-not-repeated");free(trace);
  }
  free(log);path(p,fake,"public");ck(sy_exists(p)!=1,"no-real-or-fake-publication");
  if(mode==0){path(p,assets,"pkg.bin");size_t n=0;char *saved=cx_read(p,&n);if(!saved)die("save package");put(p,"changed\n");ck(execute(state,cfg)==2,"changed-asset-identity-refused");if(cx_write(p,saved,n))die("restore package");free(saved);
@@ -143,8 +165,9 @@ int main(int argc,char **argv) {
    scenario("API-failure","assetapi",20,8);
    scenario("missing-digest","assetnodigest",20,8);
    scenario("truncated-page","assettruncated",20,8);
+   scenario("malformed-release-id","assetidurl",20,8);
    }
-   if(!asset_half||asset_half==2||asset_half==5) scenario("resume-DONE-draft","assetapi",20,11);
+   if(!asset_half||asset_half==2||asset_half==5){scenario("resume-DONE-draft","assetapi",20,11);scenario("reenter-unsent-dispatch","assetapi",20,12);scenario("refuse-started-dispatch","dispatchfail",20,13);}
    if(!asset_half||asset_half==3) scenario("fourteen-complete",0,20,9);
    if(!asset_half||asset_half==4) scenario("fourteen-missing-winarm","assetmissingexport",20,10);
  }
