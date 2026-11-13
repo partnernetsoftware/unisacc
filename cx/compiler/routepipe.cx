@@ -1,0 +1,190 @@
+#pragma unisa module routepipe
+#pragma unisa use stream.item
+#pragma unisa use stream.pipe
+#pragma unisa use compiler.fwdmark
+/* The object route and the link route as cx.stream pipelines. No libc and no include.
+   The package span, the resource stack and the linker's reopen are injected by the
+   driver; this module only orders the stages. Stage ids:
+     1 front      on the object route the whole route's span
+     2 fwdsig     the forwardable signatures: on the link route the marks no unit
+                  resolved become a stub unit that joins the linked tape
+     3 back       the route's span from the stage after the tape to its end
+     4 tapecheck  the linked tape's check
+   Object:  source -1-> object (the whole route, no run-forward, no marks)
+   Link:    linked tape -2-> linked tape -4-> checked tape [-3-> image]
+   Shapes: 1 source, 3 tape, 4 final bytes, 5 checked tape.
+   Not in this version: forward marks in unit objects (front under \0cli/run-forward up to
+   e3, then fk_mark on the side-car). Under run-forward e3 rejects a called undefined
+   function that passes or returns a struct by value when the library signature resource
+   does not cover its name, so an ordinary C unit calling such a function of another unit,
+   or a .cx unit importing one (ms_of), would not compile. Until e3 leaves such a slot
+   unmarked instead, no unit object carries a mark and the link stage 2 passes the tape.
+   Result codes are the span's own (1-4), passed through unchanged by xs_run; the
+   output block is the caller's on 0. One route at a time. */
+
+typedef struct { const char *route; const char *first; const char *last; const char *extra; int extran; } RqSpan;
+static int (*rq_spanf)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+static int (*rq_putf)(const char *, int, const unsigned char *, int);
+static int (*rq_popf)(void);
+static int (*rq_moref)(unsigned char **, long *, char *, long);
+static const char *rq_tgt;
+static const char *rq_src;
+static int rq_cx;
+static RqSpan rq_st[3];
+static unsigned char rq_one = 1;
+static char rq_objroute[96];
+
+static void rq_why(char *why, int cap, const char *s) {
+    int k;
+    if (!why || cap <= 0) return;
+    for (k = 0; s[k] && k < cap - 1; k++) why[k] = s[k];
+    why[k] = 0;
+}
+static void rq_set(RqSpan *c, const char *route, const char *first, const char *last, const char *extra, int extran) {
+    c->route = route; c->first = first; c->last = last; c->extra = extra; c->extran = extran;
+}
+static int rq_pass(xs_item *in, void *vout) {
+    *(xs_item *)vout = *in;
+    xs_item_init(in);
+    return 0;
+}
+
+/* A span of the package route. The span takes the input block. */
+static int rq_span(void *ctx, void *vin, void *vout, char *why, int cap) {
+    void mm_free(void *);
+    RqSpan *c = ctx;
+    xs_item *in = vin;
+    unsigned char *b = in->buf.data;
+    unsigned char *out = 0;
+    long n = in->buf.len;
+    long outn = 0;
+    int rc;
+    xs_item_init(in);
+    if (c->extra && rq_putf(c->extra, c->extran, &rq_one, 1)) {
+        mm_free(b);
+        rq_why(why, cap, "cli");
+        return 1;
+    }
+    rc = rq_spanf(c->route, rq_tgt, rq_src, rq_cx, 0, c->first, c->last, b, n, &out, &outn, why, cap);
+    if (c->extra) (void)rq_popf();
+    return rc ? rc : xs_item_set(vout, 1, out, outn, outn);
+}
+
+/* fwdsig on the link route: no unresolved mark, the tape passes; otherwise the stub text
+   is compiled as one more unit object tape and the linker takes it. */
+static int rq_stub(void *ctx, void *vin, void *vout, char *why, int cap) {
+    void mm_free(void *);
+    RqSpan *c = ctx;
+    xs_item *in = vin;
+    unsigned char *text = 0;
+    unsigned char *unit = 0;
+    unsigned char *b;
+    long tn = 0;
+    long un = 0;
+    long n;
+    int k, rc;
+    k = fk_stub(rq_tgt, &text, &tn);
+    if (k == 0) return rq_pass(in, vout);
+    if (k < 0) {
+        rq_why(why, cap, k == -4 ? "out of memory" : "forwarding stub");
+        return 1;
+    }
+    if (rq_putf("\0cli/object", 11, &rq_one, 1)) {
+        mm_free(text);
+        rq_why(why, cap, "cli");
+        return 1;
+    }
+    if (rq_putf("\0cli/funit", 10, &rq_one, 1)) {
+        (void)rq_popf();
+        mm_free(text);
+        rq_why(why, cap, "cli");
+        return 1;
+    }
+    rc = rq_spanf(c->route, rq_tgt, "unisacc-forward-entry.c", 0, 0, c->first, c->last, text, tn, &unit, &un, why, cap);
+    (void)rq_popf();
+    (void)rq_popf();
+    if (rc) return rc;
+    if (un < 0 || un > 2147483647L) {
+        mm_free(unit);
+        rq_why(why, cap, "forwarding stub");
+        return 1;
+    }
+    b = in->buf.data;
+    n = in->buf.len;
+    xs_item_init(in);
+    rc = rq_moref(&b, &n, (char *)unit, un);
+    mm_free(unit);
+    if (rc) {
+        mm_free(b);
+        rq_why(why, cap, "forwarding stub");
+        return 1;
+    }
+    return xs_item_set(vout, 1, b, n, n);
+}
+
+static int rq_go(int h, int pr, int shape, unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
+    void mm_free(void *);
+    xs_item it, ot;
+    int rc;
+    xs_item_init(&it);
+    xs_item_init(&ot);
+    if (pr) {
+        mm_free(in);
+        (void)xs_close(h);
+        rq_why(why, cap, "pipeline");
+        return 1;
+    }
+    rc = xs_item_set(&it, shape, in, inn, inn);
+    if (!rc) rc = xs_run(h, &it, &ot, why, cap);
+    (void)xs_close(h);
+    if (rc) return rc;
+    *out = ot.buf.data;
+    *outn = ot.buf.len;
+    return 0;
+}
+
+/* A unit object from one source, .c or .cx: the whole route as one stage, the bytes the
+   plain span gives. */
+int rq_object(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int),
+              int (*put)(const char *, int, const unsigned char *, int), int (*pop)(void),
+              const char *route, const char *tgt, const char *src, int cx,
+              unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
+    void mm_free(void *);
+    int h = 0;
+    int pr;
+    if (!out || !outn) { mm_free(in); return 4; }
+    *out = 0;
+    *outn = 0;
+    rq_spanf = span; rq_putf = put; rq_popf = pop; rq_moref = 0;
+    rq_tgt = tgt; rq_src = src; rq_cx = cx;
+    rq_set(&rq_st[0], route, 0, 0, 0, 0);
+    pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 1, 1, 4, rq_span, &rq_st[0]);
+    return rq_go(h, pr, 1, in, inn, out, outn, why, cap);
+}
+
+/* A linked tape (or a tape source) to its end: fwdsig, tapecheck, then from FROM to the
+   route's end when FROM is given. more reopens the finished link for one more unit. */
+int rq_link(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int),
+            int (*put)(const char *, int, const unsigned char *, int), int (*pop)(void),
+            int (*more)(unsigned char **, long *, char *, long),
+            const char *route, const char *tgt, const char *src, int cx, const char *from,
+            unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
+    void mm_free(void *);
+    const char *tail = "/object/O0";
+    int h = 0;
+    int pr, k, j;
+    if (!out || !outn) { mm_free(in); return 4; }
+    *out = 0;
+    *outn = 0;
+    rq_spanf = span; rq_putf = put; rq_popf = pop; rq_moref = more;
+    rq_tgt = tgt; rq_src = src; rq_cx = cx;
+    for (k = 0; tgt && tgt[k] && k < 80; k++) rq_objroute[k] = tgt[k];
+    for (j = 0; tail[j]; j++) rq_objroute[k + j] = tail[j];
+    rq_objroute[k + j] = 0;
+    rq_set(&rq_st[0], rq_objroute, 0, "e3", 0, 0);
+    rq_set(&rq_st[1], route, "tapecheck", "tapecheck", 0, 0);
+    rq_set(&rq_st[2], route, from, 0, 0, 0);
+    pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 2, 3, 3, rq_stub, &rq_st[0]) ||
+         xs_add(h, 4, 3, from ? 5 : 4, rq_span, &rq_st[1]) || (from && xs_add(h, 3, 5, 4, rq_span, &rq_st[2]));
+    return rq_go(h, pr, 3, in, inn, out, outn, why, cap);
+}

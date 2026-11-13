@@ -170,8 +170,10 @@ int tl_unitver(char *t, int n) {
     }
     tl_fail("reject: tape truncated\n"); return 1;
 }
+static int tl_loose;                        /* some unit had an instruction before its first label */
 int tl_unit(char *t, int n, int u) {
-    int i; int e; int j; int q; int pass; int first; int located;
+    int i; int e; int j; int q; int pass; int first; int located; int lab;
+    lab = 0;
     i = 0; while (i < 128) { tl_source_map[i] = -1; i++; }
     /* Prefix semantics belong to the first real local TU, if one exists.
        Reserve its mapping early, without inheriting its later filename. */
@@ -247,6 +249,7 @@ int tl_unit(char *t, int n, int u) {
             } else {
                 if (tl_unlocated(t, i, e, first, &located)) return 1;
                 if (t[i] == 32 || t[i] == 9) {
+                if (!lab) tl_loose = 1;
                 j = i; while (j < e && (t[j] == 32 || t[j] == 9)) j = j + 1;
                 q = j; while (q < e && t[q] != 32 && t[q] != 9) q = q + 1;   /* the op, as it is */
                 /* `.sys NAME, ...`: NAME is a system call, never a unit's name
@@ -259,6 +262,7 @@ int tl_unit(char *t, int n, int u) {
                 tl_operands(t, q, e, u);
             } else {
                 if (t[e - 1] == 58) {
+                    lab = 1;
                     if (tl_is(t + i, e - 1 - i, "__init_u")) tl_inits = tl_inits | 0;
                     /* R19-8: an exported name defined by two units (two `main`s) */
                     if (tl_kind(t + i, e - 1 - i) == 2 && e - 1 - i < 250 && !tl_is(t + i, e - 1 - i, "__init_u")) {
@@ -306,6 +310,14 @@ static char *tl_npool; static int tl_nend;
 static int *tl_def_at; static int *tl_def_len; static int tl_ndef;
 static int *tl_ext_at; static int *tl_ext_len; static int tl_next;
 static int tl_has_entry;
+/* forward marks: `.bss __unisa_fw1_<sig>_<name> 1` says <name> is a host function the
+   link may supply a stub for. <sig> holds no underscore, so the name follows the first one. */
+static int *tl_fw_at; static int *tl_fw_len; static int tl_nfw;
+static int tl_fw_name(int i) {
+    int k; k = 12;
+    while (k < tl_fw_len[i] && tl_npool[tl_fw_at[i] + k] != 95) k = k + 1;
+    return k + 1;
+}
 int tl_inset(int *at, int *ln, int cnt, char *s, int n) {
     int i; i = 0; while (i < cnt) { if (tl_same(tl_npool + at[i], ln[i], s, n)) return 1; i = i + 1; } return 0;
 }
@@ -327,8 +339,42 @@ int tl_note_links(char *t, long n) {
         if (tl_islink(t, i, e, ".global ")) tl_addname(tl_def_at, tl_def_len, &tl_ndef, t + i + 8, (int)(e - i - 8));
         if (tl_islink(t, i, e, ".extern ")) tl_addname(tl_ext_at, tl_ext_len, &tl_next, t + i + 8, (int)(e - i - 8));
         if (tl_is(t + i, (int)(e - i), "_start:")) tl_has_entry = 1;
+        if (tl_islink(t, i, e, ".bss __unisa_fw1_")) {
+            long q; q = i + 5; while (q < e && t[q] != 32) q = q + 1;
+            tl_addname(tl_fw_at, tl_fw_len, &tl_nfw, t + i + 5, (int)(q - i - 5));
+        }
         i = e + 1;
     }
+    return 0;
+}
+int tl_defined(char *s, int n) { return tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n); }
+static int tl_fw_has(char *s, int n) {
+    int i; int k; i = 0;
+    while (i < tl_nfw) {
+        k = tl_fw_name(i);
+        if (k < tl_fw_len[i] && tl_same(tl_npool + tl_fw_at[i] + k, tl_fw_len[i] - k, s, n)) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+/* Forward mark i: its text and length when no unit defines the name, 0 when one does,
+   -1 past the last mark. */
+int tl_fwd(int i, char **s) {
+    int k;
+    if (i < 0 || i >= tl_nfw || !s) return -1;
+    k = tl_fw_name(i);
+    if (k < tl_fw_len[i] && tl_defined(tl_npool + tl_fw_at[i] + k, tl_fw_len[i] - k)) return 0;
+    *s = tl_npool + tl_fw_at[i];
+    return tl_fw_len[i];
+}
+/* The link trailer: __init calls every unit's initialiser, then the tape ends. */
+int tl_finish(int u) {
+    int k;
+    tl_os("__init:\n", 8);
+    k = 0;
+    while (k < u) { tl_os("  call __init_u", 15); tl_num(k); tl_os("\n", 1); k = k + 1; }
+    tl_os("  ret\n", 6);
+    tl_os(".end\n", 5);
     return 0;
 }
 int tl_needs(char *t, long n) {                              /* defines something still undefined? */
@@ -346,12 +392,16 @@ int tl_needs(char *t, long n) {                              /* defines somethin
 }
 /* Reject unresolved data and function externs before emitting an image.
    __init alone is synthesized below after this check. */
+static int tl_miss(int i) {                 /* extern i: no unit defines it and no forward mark covers it */
+    char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
+    return n > 0 && !tl_is(s, n, "__init") && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n) && !tl_fw_has(s, n);
+}
 int tl_check_undef(void) {
     int i; int k; char msg[320]; char *pre;
     i = 0;
     while (i < tl_next) {
         char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
-        if (n > 0 && !tl_is(s, n, "__init") && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n)) {
+        if (tl_miss(i)) {
             pre = "link: undefined reference to "; k = 0;
             while (pre[k]) { msg[k] = pre[k]; k = k + 1; }
             if (n > 2 && s[0] == 103 && s[1] == 95) { n = n - 2; s = s + 2; }
@@ -362,6 +412,193 @@ int tl_check_undef(void) {
         i = i + 1;
     }
     return 0;
+}
+/* ---- dead function removal ----
+   tl_dce runs on the linked text before tl_check_undef, and only when an extern is still
+   missing: a link with nothing missing keeps its bytes. The text is cut into groups at every
+   label that is not a compiler-local one ([__uN_]__unisacc_L<n> / R<n>); every label, local
+   or not, maps to its group. Alive: the text before the first label, the group of _start,
+   every __init_u*, every group whose address is taken anywhere (a label named by an
+   instruction that is not call / jump / jumpz, .lea for one), whatever an alive group or a
+   column-0 directive line names, and both neighbours across a group end that is not
+   ret / jump / .exit. A missing name some alive group names stays missing and
+   tl_check_undef reports it. Otherwise the dead groups lose their labels and instructions
+   (column-0 directive lines stay: .bss, .str, .unit), the missing names only they named are
+   forgotten, and the exported names they defined stop counting as defined. Declined, with
+   the text untouched: a unit with an instruction before its first label, a label that is
+   not one identifier or occurs twice, no memory. */
+static int *tl_dh; static int *tl_dg; static int tl_dmask; static char *tl_db;   /* label -> offset+1, group */
+static int *tl_dat; static char *tl_dst; static int *tl_dstk; static int tl_dsp; /* group start, 1 alive 2 falls, work stack */
+static int *tl_dum; static char *tl_dus; static int tl_dnu;                      /* missing externs, and which an alive group names */
+static int tl_dn; static int tl_dcut;
+int tl_dce_cut(void) { return tl_dcut; }
+static int tl_loc(char *s, int n) {
+    int k; k = 0;
+    if (n > 4 && s[0] == 95 && s[1] == 95 && s[2] == 117 && s[3] >= 48 && s[3] <= 57) {
+        k = 3; while (k < n && s[k] >= 48 && s[k] <= 57) k = k + 1;
+        if (k >= n || s[k] != 95) return 0;
+        k = k + 1;
+    }
+    if (n - k < 12 || !tl_same(s + k, 10, "__unisacc_", 10) || (s[k + 10] != 76 && s[k + 10] != 82)) return 0;
+    k = k + 11; while (k < n) { if (s[k] < 48 || s[k] > 57) return 0; k = k + 1; }
+    return 1;
+}
+static int tl_dslot(char *s, int n) {
+    unsigned long h; int k; int a;
+    h = 5381; k = 0;
+    while (k < n) { h = (h * 33 + (s[k] & 255)) & 4294967295; k = k + 1; }
+    k = (int)(h & (unsigned long)tl_dmask);
+    while (tl_dh[k]) {
+        a = tl_dh[k] - 1;
+        if (tl_same(tl_db + a, tl_word(tl_db, a, a + n + 1) - a, s, n)) return k;
+        k = (k + 1) & tl_dmask;
+    }
+    return k;
+}
+static void tl_dlive(int g) {
+    if (tl_dst[g] & 1) return;
+    tl_dst[g] = tl_dst[g] | 1; tl_dstk[tl_dsp] = g; tl_dsp = tl_dsp + 1;
+}
+/* Every name on the line: its group lives, a missing extern is seen. With addr set the line
+   counts only when its op is not call / jump / jumpz (it takes an address), and a missing
+   extern is not noted. */
+static void tl_dscan(long i, long e, int addr) {
+    char *b; long p; long q; int k; int j; int m;
+    b = tl_db; p = i;
+    if (b[p] == 32 || b[p] == 9) {
+        while (p < e && (b[p] == 32 || b[p] == 9)) p = p + 1;
+        q = p; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;
+        m = (int)(q - p);
+        if (addr && (tl_same(b + p, m, "call", 4) || tl_same(b + p, m, "jump", 4) || tl_same(b + p, m, "jumpz", 5))) return;
+        if (tl_same(b + p, m, ".sys", 4) || tl_same(b + p, m, ".sys6", 5)) { while (q < e && b[q] != 44) q = q + 1; }
+        p = q;
+    }
+    while (p < e) {
+        if (b[p] == 34) {
+            q = p + 1;
+            while (q < e && b[q] != 34) { if (b[q] == 92) q = q + 1; q = q + 1; }
+            p = q + 1; continue;
+        }
+        if (tl_isid(b[p] & 255) && (b[p] < 48 || b[p] > 57) && b[p] != 46 && b[p] != 36) {
+            q = p; while (q < e && tl_isid(b[q] & 255)) q = q + 1;
+            m = (int)(q - p);
+            k = tl_dslot(b + p, m);
+            if (tl_dh[k]) tl_dlive(tl_dg[k]);
+            else if (!addr) {
+                j = 0;
+                while (j < tl_dnu) {
+                    if (tl_same(tl_npool + tl_ext_at[tl_dum[j]], tl_ext_len[tl_dum[j]], b + p, m)) tl_dus[j] = 1;
+                    j = j + 1;
+                }
+            }
+            p = q; continue;
+        }
+        if (tl_isid(b[p] & 255)) { while (p < e && tl_isid(b[p] & 255)) p = p + 1; continue; }
+        p = p + 1;
+    }
+}
+long tl_dce(char *b, long n) {
+    void *mm_zalloc(long); void mm_free(void *);
+    long i; long e; long w; long j; long q; int k; int g; int ng; int nl; int t; int c; int bad; int hsz;
+    tl_dn = 0; tl_dcut = 0;
+    if (!b || n <= 0 || n > 1073741824 || tl_loose) return n;
+    tl_dnu = 0; k = 0;
+    while (k < tl_next) { if (tl_miss(k)) tl_dnu = tl_dnu + 1; k = k + 1; }
+    if (!tl_dnu) return n;
+    nl = 0; ng = 0; i = 0;
+    while (i < n) {
+        e = i; while (e < n && b[e] != 10) e = e + 1;
+        if (e > i && b[i] != 32 && b[i] != 9 && b[i] != 46 && b[e - 1] == 58) {
+            nl = nl + 1; if (!tl_loc(b + i, (int)(e - 1 - i))) ng = ng + 1;
+        }
+        i = e + 1;
+    }
+    hsz = 1024; while (hsz < 2 * nl + 2 && hsz < 67108864) hsz = hsz * 2;
+    if (hsz < 2 * nl + 2) return n;
+    tl_dh = mm_zalloc((long)hsz * (long)sizeof(int)); tl_dg = mm_zalloc((long)hsz * (long)sizeof(int));
+    tl_dat = mm_zalloc((long)(ng + 2) * (long)sizeof(int)); tl_dst = mm_zalloc((long)ng + 2);
+    tl_dstk = mm_zalloc((long)(ng + 2) * (long)sizeof(int));
+    tl_dum = mm_zalloc((long)tl_dnu * (long)sizeof(int)); tl_dus = mm_zalloc((long)tl_dnu);
+    w = n;
+    if (!tl_dh || !tl_dg || !tl_dat || !tl_dst || !tl_dstk || !tl_dum || !tl_dus) goto out;
+    c = 0; k = 0;
+    while (k < tl_next) { if (tl_miss(k)) { tl_dum[c] = k; c = c + 1; } k = k + 1; }
+    tl_db = b; tl_dmask = hsz - 1; tl_dsp = 0; bad = 0;
+    g = 0; t = 2; tl_dat[0] = 0; tl_dlive(0);
+    i = 0;
+    while (i < n && !bad) {
+        e = i; while (e < n && b[e] != 10) e = e + 1;
+        if (e > i && (b[i] == 32 || b[i] == 9)) {
+            j = i; while (j < e && (b[j] == 32 || b[j] == 9)) j = j + 1;
+            q = j; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;
+            c = (int)(q - j);
+            t = (tl_same(b + j, c, "ret", 3) || tl_same(b + j, c, "jump", 4) || tl_same(b + j, c, ".exit", 5)) ? 2 : 1;
+        } else if (e > i && b[i] != 46 && b[e - 1] == 58) {
+            c = (int)(e - 1 - i);
+            if (c <= 0 || b[i] == 36 || (b[i] >= 48 && b[i] <= 57) || tl_word(b, (int)i, (int)(e - 1)) != (int)(e - 1)) bad = 1;
+            else {
+                if (!tl_loc(b + i, c)) {
+                    if (t == 1) tl_dst[g] = tl_dst[g] | 2;
+                    g = g + 1; tl_dat[g] = (int)i; t = 1;
+                }
+                k = tl_dslot(b + i, c);
+                if (tl_dh[k]) bad = 1;
+                else { tl_dh[k] = (int)i + 1; tl_dg[k] = g; }
+                if (tl_is(b + i, c, "_start") || (c >= 8 && tl_same(b + i, 8, "__init_u", 8))) tl_dlive(g);
+            }
+        }
+        i = e + 1;
+    }
+    if (bad) goto out;
+    tl_dat[g + 1] = (int)n;
+    i = 0;
+    while (i < n) {                           /* column-0 lines that are not labels stay, so what they name lives */
+        e = i; while (e < n && b[e] != 10) e = e + 1;
+        if (e > i && b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58)) tl_dscan(i, e, 0);
+        if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 1);   /* an address taken anywhere is a root */
+        i = e + 1;
+    }
+    while (tl_dsp > 0) {
+        tl_dsp = tl_dsp - 1; g = tl_dstk[tl_dsp];
+        if ((tl_dst[g] & 2) && g < ng) tl_dlive(g + 1);
+        if (g > 0 && (tl_dst[g - 1] & 2)) tl_dlive(g - 1);
+        i = tl_dat[g];
+        while (i < tl_dat[g + 1]) {
+            e = i; while (e < n && b[e] != 10) e = e + 1;
+            if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 0);
+            i = e + 1;
+        }
+    }
+    c = 0; k = 0;
+    while (k < tl_dnu) { if (tl_dus[k]) c = 1; else tl_ext_len[tl_dum[k]] = -1; k = k + 1; }
+    if (c) goto out;                          /* an alive group names a missing extern: tl_check_undef reports it */
+    w = 0; g = 0; i = 0;
+    while (i < n) {
+        e = i; while (e < n && b[e] != 10) e = e + 1;
+        while (g < ng && i >= tl_dat[g + 1]) g = g + 1;
+        if ((tl_dst[g] & 1) || e == i || (b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58))) {
+            j = i; while (j < e) { b[w] = b[j]; w = w + 1; j = j + 1; }
+            if (e < n) { b[w] = 10; w = w + 1; }
+        } else if (b[i] != 32 && b[i] != 9 && !tl_loc(b + i, (int)(e - 1 - i))) {  /* a dropped function: its exported name is no longer defined */
+            k = 0;
+            while (k < tl_ndef) {
+                if (tl_same(tl_npool + tl_def_at[k], tl_def_len[k], b + i, (int)(e - 1 - i))) tl_def_len[k] = -1;
+                k = k + 1;
+            }
+            k = 0;                             /* and only dropped functions wanted it */
+            while (k < tl_next) {
+                if (tl_same(tl_npool + tl_ext_at[k], tl_ext_len[k], b + i, (int)(e - 1 - i))) tl_ext_len[k] = -1;
+                k = k + 1;
+            }
+        }
+        i = e + 1;
+    }
+    tl_dn = ng; k = 1;
+    while (k <= ng) { if (!(tl_dst[k] & 1)) tl_dcut = tl_dcut + 1; k = k + 1; }
+out:
+    mm_free(tl_dh); mm_free(tl_dg); mm_free(tl_dat); mm_free(tl_dst); mm_free(tl_dstk); mm_free(tl_dum); mm_free(tl_dus);
+    tl_dh = 0; tl_dg = 0; tl_dat = 0; tl_dst = 0; tl_dstk = 0; tl_dum = 0; tl_dus = 0;
+    return w;
 }
 int isarchive(char *p) { int n; n = 0; while (p[n]) n = n + 1; return n >= 2 && p[n - 2] == 46 && p[n - 1] == 97; }
 
@@ -493,6 +730,9 @@ static int tl_tables(void) {
     tl_def_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
     tl_ext_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
     tl_ext_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_fw_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_fw_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    if (!tl_fw_at || !tl_fw_len) return 1;
     if (!tl_hat || !tl_hlen || !tl_hkind || !tl_gpool || !tl_gat || !tl_glen ||
         !tl_gdef_at || !tl_gdef_len || !tl_npool || !tl_def_at || !tl_def_len || !tl_ext_at || !tl_ext_len)
         return 1;
@@ -503,7 +743,8 @@ static int tl_tables(void) {
 int tl_begin(void) {
     if (tl_tables()) { tl_fail("link: out of memory\n"); return 1; }
     tl_source_next = 0;
-    tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0;
+    tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0; tl_nfw = 0;
+    tl_loose = 0; tl_dn = 0; tl_dcut = 0;
     return 0;
 }
 void tl_adopt_first(void) {

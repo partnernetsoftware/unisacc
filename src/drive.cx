@@ -5,6 +5,7 @@
 #pragma unisa use sys.env
 #pragma unisa use runtime.holdframe
 #pragma unisa use compiler.tapebin
+#pragma unisa use compiler.routepipe
 #pragma unisa use drivelink
 #pragma unisa use drivetapebin
 #pragma unisa use driveargs
@@ -435,7 +436,7 @@ extern int cxp_object_path(const char *); extern const char *tl_first_text(void)
 extern int bx_diag_opt(const char *, int, int, int, int); extern int hb_target_id(const char *); extern int bx_diag_run(const char *, int);
 extern int cxt_text(const char *, int, int, int, int, char *, long, char *, long); extern int cxd_default_target(const char *, char *, long, char *, long); extern long long hs_ns(void);
 extern int bd_touch(void); extern int st_touch(void); extern int hs_read(const char *, unsigned char **, long *, char *, int); extern int st_gap(int, int, char *, int); extern int st_attr_reset(void);
-extern int st_extra_reset(void); extern int st_extra_put(const char *, int, const unsigned char *, int);
+extern int st_extra_reset(void); extern int st_extra_pop(void); extern int st_extra_put(const char *, int, const unsigned char *, int);
 extern int st_dirs(const unsigned char *, int, const unsigned char *, int, const unsigned char *, int); int st_includebase(const unsigned char *, int); int cxm_on_now(void);
 extern int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
 extern int ex_ri_hit(const unsigned char *, long, char **); extern int rc_open(const char *, int, char **, const char **, int, const char *, int, int, int, int, int);
@@ -741,23 +742,14 @@ dv_replay:
                                     dv_srcv, gotb, gotn, &body, &bodyn, preason, 128, &execf, mode2 != 3);
             }
             else if (as_tape || cxp_tape_path(src)) {
-                unsigned char *mid;
-                long midn;
-                const char *from;
-                mid = 0, midn = 0;
-                /* -run's argv binds here: the cache branch above skips tapes */
+                /* -run's argv binds here: the cache branch above skips tapes. The tape goes
+                   through the link pipeline: fwdsig, tapecheck, then the route's rest. */
                 pr = (mode2 == 3 && dv_bind_args(argc, argv, argstart, src, dv_argc_b, dv_argv_b, &dv_runargs))
-                     ? (tx_copy(preason, 128, "argv", 5), 1) : st_span(route, tgt, src, dv_cx(src), 0, "tapecheck", "tapecheck", gotb, gotn, &mid, &midn, preason, 128);
-                if (!pr && mode2 != 2) {
-                    from = opts.level > 0 ? "e4" : "prune";
-                    pr = st_span(route, tgt, src, dv_cx(src), 0, from, 0,
-                                 mid, midn, &body, &bodyn, preason, 128);
-                } else if (!pr) {
-                    body = mid;
-                    bodyn = midn;
-                }
-            } else
-                pr = st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
+                     ? (tx_copy(preason, 128, "argv", 5), 1) : rq_link(st_span, st_extra_put, st_extra_pop, dv_link_more, route, tgt, src, dv_cx(src),
+                                                                       mode2 == 2 ? 0 : opts.level > 0 ? "e4" : "prune", gotb, gotn, &body, &bodyn, preason, 128);
+            } else   /* a unit object goes through the object pipeline: front, fwdsig, back */
+                pr = obj && opts.funit && !asmw && nsrc == 1 ? rq_object(st_span, st_extra_put, st_extra_pop, route, tgt, src, dv_cx(src), gotb, gotn, &body, &bodyn, preason, 128)
+                     : st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
             if (lowered && !pr && dv_fwd_replay() && hf_phase_b() && !hf_stub_present(dv_fwd_file())) {
                 gotb = 0; gotn = 0;
                 pr = dv_fwd_restore(&gotb, &gotn, preason, 128);
