@@ -43,7 +43,19 @@ static void one(int mode,const char *name){
  else {int missing=absent(out);ok=rc!=0&&why[0]&&missing;}
  ck(ok,name);if(!ok)fprintf(stderr,"case=%d rc=%d why=%s\n",mode,rc,why);
 }
-int main(void){
+/* Deadline derivation fixtures: build the real tool once, drive its deadline-probe with a simulated clock (UNISACC_WF_TEST_SKEW_MS). */
+static int probe(const char *envs,const char *name,const char *want){char cmd[1024];if(cx_fmt(cmd,sizeof cmd,"env %s out/wfd-check.bin deadline-probe 2>&1",envs))return 0;FILE *f=popen(cmd,"r");if(!f)return 0;char all[2048];size_t n=0,z;while(n<sizeof all-1&&(z=fread(all+n,1,sizeof all-1-n,f))>0)n+=z;all[n]=0;pclose(f);int ok=strstr(all,want)!=0;if(!ok)printf("got: %s\n",all);ck(ok,name);return ok;}
+static void deadline_fixtures(void){
+ if(system("mkdir -p out && sh ./unisacc.com -o out/wfd-check.bin tools/whole-front.cx >/dev/null 2>&1")){ck(0,"deadline-build");return;}
+ probe("UNISACC_CHAIN_PHASE_BOUND_S=90 UNISACC_WF_TEST_SKEW_MS=50000","deadline-bound90-50s-survives","DEADLINE_OK\t85");
+ probe("UNISACC_CHAIN_PHASE_BOUND_S=90 UNISACC_WF_TEST_SKEW_MS=84000","deadline-bound90-84s-survives","DEADLINE_OK\t85");
+ probe("UNISACC_CHAIN_PHASE_BOUND_S=90 UNISACC_WF_TEST_SKEW_MS=85000","deadline-bound90-85s-dies","phase deadline (85 seconds)");
+ probe("UNISACC_CHAIN_PHASE_BOUND_S=60 UNISACC_WF_TEST_SKEW_MS=55000","deadline-bound60-55s-dies","phase deadline (55 seconds)");
+ probe("UNISACC_WF_TEST_SKEW_MS=44000","deadline-absent-44s-survives","DEADLINE_OK\t45");
+ probe("UNISACC_WF_TEST_SKEW_MS=45000","deadline-absent-45s-dies","phase deadline (45 seconds)");
+ const char *bad[]={"0","91","x","5"};for(int i=0;i<4;i++){char e[200],nm[64];if(cx_fmt(e,sizeof e,"UNISACC_CHAIN_PHASE_BOUND_S=%s UNISACC_WF_TEST_SKEW_MS=45000",bad[i])||cx_fmt(nm,sizeof nm,"deadline-invalid-%s-falls-back-45",bad[i])){ck(0,"deadline-format");continue;}probe(e,nm,"invalid UNISACC_CHAIN_PHASE_BOUND_S, using 45 s deadline");}
+}
+int main(void){deadline_fixtures();
  if(!ptf_mkdtemp(0,"whole-front-check-",base,sizeof base))owned=1;
  if(!owned||cx_fmt(part[0],sizeof part[0],"%s/part0",base)||cx_fmt(part[1],sizeof part[1],"%s/part1",base)||sy_mkdir(part[0],0700)||sy_mkdir(part[1],0700)){
   ck(0,"exclusive-fixture");
