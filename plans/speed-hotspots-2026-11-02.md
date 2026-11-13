@@ -672,6 +672,12 @@ net-build-profile(5) ebab81cb99480f8b。最小 `.cx` 两组同为 bc353670548503
   - 代价(`-o` 落盘,UNISACC_RUN_CACHE=0,墙钟各 3 次中位):s8.c 1187 -> 1953 ms(1.65 倍),tools/ratchets.cx 5527 -> 9962(1.80 倍),tools/refactor.cx 8011 -> 15460(1.93 倍);镜像 287759 -> 209935 B、446971 -> 324091 B。
   - 判断:不把 -O2 翻成默认。日常 .cx 工具是编译主导,冷编译慢 1.65 到 1.93 倍会净亏;产品自身的控制器对象已是 `-O2` 编(`tools/chain-step.cx:1251`),这一档收益已在产品里。
   - 下一条路:(1) 降 -O2 路由多出的编译耗时(ratchets 上两档差值约 4.4 s,未分相,RR_TIME 逐相待测),降下来才谈默认开;(2) 运行期主导的入口(基准、长跑检查)在调用处显式加 -O2;(3) `tools/check-bench-gencode.cx` 增加 unisacc -O2 一档,把 2.19 倍的口径改成「默认档 2.19 倍、-O2 档待测」。三项本次均未做。
+- 续测(2026-11-13,同一产品;接 SPEED-15 的结论「命中后剩余成本是 cxmd_decode 的生成代码速度」;脚本 `$CLAUDE_JOB_DIR/tmp/s16dec.cx`,材料 /tmp/unisacc-session-speed16/q):
+  - 产品自身对象早已按 -O2 编:`tools/entry-build.cx:365-367` 默认 `-O2`,只有 drive.o、host.o、driveface.o、driveroute.o、cxmod.o、tapegate.o 六个是 `-O1`(9f01c3a8ab 的理由是构造耗时:33 对象 e4 20205 -> 7327 ms,不是正确性;说明里写明 inflate、模型解码、执行器保持 -O2)。709720e434 已记过解码路径 -O0 对 -O2 为 126 对 87 ms。本次未读 local-0060 的 entry-build 回执行,只读了工具默认值。
+  - 解码探针(SPEED-15 的 h.cx 加未带快路径的打点副本 mdt0.cx,9 个模型文件,每模型 6 次取最小后求和,两档交替各 3 轮):默认档 85230/96014/86994 us(92 ns 每元素,元素数 922686),-O2 56019/58441/58718 us(60 ns 每元素),比值 0.66。SPEED-15 在产品内量到的约 58 ns 每元素与 -O2 档同档。所以「用 -O2 构造产品 cx 部分」的收益已在产品里,没有可再拿的前后差,未重建。
+  - -O1 是中间档:s8.c `-S` 17077 行,hs_swap 循环体 74 条(r7 压入/弹出各 3,槽地址 sub64 14 未并);s8 hs int 8 运行 4061 ms(1 次),与默认档无差。
+  - 默认级别是否改 -O2:默认档对 -O2 的 stdout 与 rc,12 个程序 12/12 相同(上面 6 个,加 s16dec.cx、tools/ledger-add.cx --check、tools/affected.cx --list-only、tools/bench-gencode.c 的 sha/sort/memcpy 三档);另 4 个因参数不对 rc 非 0 且无输出,属空洞对拍,不计。运行收益不均:bench-gencode sort 119.4 -> 77.9 ms,sha 135.6 -> 143.0 ms(各 1 次)。编译耗时 1.65 到 1.93 倍(见上)。结论不变:不改默认。
+  - 下一条路(未做):解码循环要再快靠源码写法(SPEED-15B 的就地变长数快路径)或 e4 自身质量;六个 -O1 驱动单元改回 -O2 可用本地重建 b3(约 80 秒)单独量一次最小程序与 ratchets 冷编译,代价是构造多约 13 秒(按 9f01c3a8ab 的 e4 差值)。
 
 ## 本地重建 0.0.60(LOCAL-REBUILD)
 
