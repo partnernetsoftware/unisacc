@@ -93,6 +93,18 @@ static int cs_phase_bound(void) {
     if (*e || ccp_limits_load(&l) || !ccp_accept_bound(&l, 0, v)) cs_die("REFUSE phase bound from caller", sy_env("UNISACC_CHAIN_PHASE_BOUND_S"));
     return (int)v;
 }
+/* Re-verification sub bound: phase bound - 5 when the caller exports one (never tighter than the phase it
+   runs in); stand-alone keeps the table default cmd.front. Total limit is the same bound in ms (stand-alone 60 s). */
+static int cs_sub_bound(void) {
+    const char *e = sy_env("UNISACC_CHAIN_PHASE_BOUND_S"); ccp_limits l;
+    if (!e || !*e) return cs_lim("cmd.front");
+    if (ccp_limits_load(&l)) cs_die("limits", 0);
+    return ccp_sub_bound(&l, 1, cs_phase_bound(), cs_lim("cmd.front"));
+}
+static long cs_total_ms(void) {
+    const char *e = sy_env("UNISACC_CHAIN_PHASE_BOUND_S");
+    return (!e || !*e) ? 60000L : (long)cs_sub_bound() * 1000L;
+}
 static int cs_run(char **argv, const char *cwd) {
     pr_result r;
     int t = pr_run(argv[0], argv, cwd, 0, cs_fp_active ? cs_lim("segment") : cs_phase_bound(), &r);
@@ -750,8 +762,9 @@ static void cs_fp_record(const char *s, const char *rev, const char *pkg, const 
                 if (fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4)||access(cs_receipt_producer,X_OK)) cs_die("REFUSE native receipt producer", cs_receipt_producer);
                 cs_sha(cs_receipt_producer, before); if (strcmp(before, producer)) cs_die("REFUSE receipt producer SHA mismatch", receipt);
                 char *v[]={(char *)cs_receipt_producer,"fp-identity",(char *)s,(char *)rev,(char *)pkg,(char *)ctor,(char *)artifact,(char *)receipt,(char *)cs_fp_helper,0};
-                char *output=0; size_t bytes=0; int rc=cx_runv_timeout(v,cs_lim("cmd.front"),&output,&bytes);
+                char *output=0; size_t bytes=0; int rc=cx_runv_timeout(v,cs_sub_bound(),&output,&bytes);
                 if (output&&sy_write_all(1,output,bytes)) cs_die("producer output", receipt); free(output); cs_sha(cs_receipt_producer, after);
+                if (rc==124) { sy_eprintf("chain-step: producer revalidation hit its bound\n"); sy_exit(124); }
                 if (rc||strcmp(before,after)) cs_die("REFUSE producer revalidation", receipt);
                 free(producer); free(r); return;
             }
@@ -978,8 +991,9 @@ static int cs_fp_accept_span(const char *s,const char *pkg,const char *ctor,cons
     for(i=0;i<nr;i++)v[ac++]=roots[i];
     if(stub){v[ac++]="--forward-stub";v[ac++]=stub;}
     v[ac++]="--resume";v[ac]=0;
-    char *output=0;size_t bytes=0;int rc=cx_runv_timeout(v,cs_lim("cmd.front"),&output,&bytes);if(output&&sy_write_all(1,output,bytes))cs_die("span output",sub);free(output);
-    if(rc||sy_now_ms()-start>60000)cs_die("REFUSE revalidation failed/deadline",cursor);
+    char *output=0;size_t bytes=0;int rc=cx_runv_timeout(v,cs_sub_bound(),&output,&bytes);if(output&&sy_write_all(1,output,bytes))cs_die("span output",sub);free(output);
+    if(rc==124||sy_now_ms()-start>cs_total_ms()){sy_eprintf("chain-step: span revalidation hit its bound\n");sy_exit(124);}
+    if(rc)cs_die("REFUSE revalidation failed/deadline",cursor);
     if(cx_fmt(line,sizeof line,"revalidation_ms\t%ld\n",sy_now_ms()-start))cs_die("wall",sub);cs_puts(binding,sizeof binding,&at,line);
     char driver_after[65];cs_sha(cs_span_driver,driver_after);if(strcmp(driver_before,driver_after))cs_die("REFUSE driver changed",cursor);
     if(cx_fmt(p,sizeof p,"%s.ok",cursor))cs_die("cursor",sub);cs_save(p,binding,at);
