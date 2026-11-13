@@ -112,6 +112,16 @@ tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `
 
 C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个公开版且 30 天。
 
+#### C5 调用者清单(2026-11-13,`sh ./unisacc.com tools/refactor.cx sites NAME,... --tracked` 实跑)
+
+11 行破坏性签名:`sy_stat_t`、`sy_truncate`、`sy_utimes`、`sy_ts_t`、`sy_spawn_t`、`sy_child_t`、`sy_tcp_accept_from`、`sy_tcp_connect_to`、`sy_udp_recv_from`、`sy_unix_connect`、`sy_tcp_dial`。`sites` 只匹配函数名后带括号的形式,共 38 处;类型名(`sy_stat_t`、`sy_ts_t`、`sy_spawn_t`、`sy_child_t`)作类型使用的位置与结构体字段访问(`.size`、`.sec`、`.deadline_ms`)未被覆盖,同候选改前须另用 `refactor.cx find` 补查,本清单不算完整。
+
+- `apps/csih`(只列出,不改,归 csih 车道,须先发信封):`apps/csih/net.cx:194` 的 `sy_tcp_dial(host, port)`(第三参数增 `sy_deadline_t`)。
+- 定义处:`cx/sys/fs.cx:243`(`sy_truncate`)、`cx/sys/posix.cx:369`(`sy_utimes`);`ext/sysx/net.cx` 的 201、510、558、675、715(`sy_tcp_dial`、`sy_tcp_accept_from`、`sy_tcp_connect_to`、`sy_udp_recv_from`、`sy_unix_connect`)。这些在 cx/sys 冻结与 ext 孵化范围,走冻结解除流程或 CXS-C9。
+- `tools/check-cx-sys-net.cx`:133、143、160、163(三处)、177(`sy_tcp_dial`);244、246、262、268、269、282、285、287、295、296、300、303(`*_to`、`*_from`、`sy_unix_connect`,末参 ms 常量)。
+- `tools/check-cx-sys.cx`:140、141、142(两处)(`sy_truncate`);477、478(两处)、479(`sy_utimes`)。
+- `tools/check-procguard.cx:227`、`tools/procguard.cx:473`(`sy_truncate`);`tools/tls13-get.cx:142`(`sy_tcp_dial`)。
+
 #### C3 逐函数返回码表(S3 已落地,S4 待办)
 
 前提事实:冻结 L0-CORE-FREEZE-049 已由账本 CXS-C3-STEP1-FREEZE-NARROW 收窄为 `cx/sys cx/core`,`cx/mem`、`cx/text` 不在冻结前缀内,S3/S4 不需要解除流程。码取 prelude 的 errno 常量,与 `cx/mem/vec.cx`、`cx/mem/map.cx`、`cx/text/iter.cx` 同一约定。成功值全部不变(0);`ms_find`、`ms_rfind` 的 `miss:-1` 是「未找到」而非错误,不变。
