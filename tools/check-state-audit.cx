@@ -1,0 +1,211 @@
+/* tools/check-state-audit.cx -- tools/state-audit.cx on private fixture tables.
+ *
+ *   sh ./unisacc.com tools/check-state-audit.cx [-- ROOT OUT]
+ *
+ * (1) a ledger NODE-DONE row (and a NODE row whose event starts with DONE) while the dag node is
+ *     TODO or RUNNING is reported as ledger-done-dag-open;
+ * (2) a dag DONE node with no ledger row and no commit in the ledger text is reported as
+ *     dag-done-no-ledger; a DONE node whose commit the ledger text names, or that owns a row, is not;
+ * (3) a NODE-STEP row on a TODO node is ledger-progress-dag-todo; a row named exactly NODE is not;
+ *     the longest node id owns a row (AB-1-DONE belongs to AB-1, not AB);
+ * (4) the id overlap of the two tables and the status distributions are counted exactly;
+ * (5) an item whose latest ledger row is DONE while its state is open is ledger-done-items-open;
+ * (6) a ledger id glued to its text is still attributed and listed as GLUED;
+ * (7) LEDGERDONE lists the last N *-DONE / *-V<n> rows with ok / stale / no-node;
+ * (8) three empty tables (headers only, and zero bytes) report zero rows and zero findings;
+ * (9) --strict is rc 1 with findings and rc 0 without; bad usage and an unreadable table are rc 2;
+ * (10) the tables are byte-identical after the runs (the tool is read-only).
+ * tools/state-audit.cx is built once (tq_native, a PREPARED line, not a result). */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define DH "# top\nid\ttitle\tstatus\tdeps\twrite_domain\towner\tacceptance\tcommit\n"
+#define IH "id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck\n"
+#define LH "time\tid\tevent\tcommit\tevidence\trole\n"
+
+#define DAG DH \
+    "AB\tn\tDONE\t-\ta/1\to\tcmd\t1111111111\n" \
+    "AB-1\tn\tTODO\t-\ta/2\to\tcmd\t-\n" \
+    "CD\tn\tRUNNING\t-\ta/3\to\tcmd\t-\n" \
+    "EF\tn\tDONE\t-\ta/4\to\tcmd\t2222222222\n" \
+    "GH\tn\tDONE\t-\ta/5\to\tcmd\t3333333333\n" \
+    "IJ\tn\tTODO\t-\ta/6\to\tcmd\t-\n" \
+    "KL\tn\tTODO\t-\ta/7\to\tcmd\t-\n" \
+    "MN\tn\tTODO\t-\ta/8\to\tcmd\t-\n" \
+    "OP\tn\tBLOCKED\t-\ta/9\to\tcmd\t-\n"
+#define ITEMS IH \
+    "AB\tg\tr\td\tgt\tc\t5\t-\tDONE-LOCAL\tme\tk\n" \
+    "KL\tg\tr\td\tgt\tc\t5\t-\tREADY\tme\tk\n" \
+    "X1\tg\tr\td\tgt\tc\t5\t-\tREADY\tme\tk\n" \
+    "X2\tg\tr\td\tgt\tc\t5\t-\tBLOCKED-WAIT\tme\tk\n" \
+    "X3\tg\tr\td\tgt\tc\t5\t-\tDONE\tme\tk\n"
+#define LEDGER LH \
+    "2026-01-01\tAB-1-DONE\ttext one\n" \
+    "2026-01-01\tCD\tDONE-LOCAL\tabc\tev\trole\n" \
+    "2026-01-01\tnote\tlanded as 2222222222 in main\n" \
+    "2026-01-01\tIJ-STEP1\ttext\n" \
+    "2026-01-01\tKL\tcreated the node\n" \
+    "2026-01-01\tX1\tDONE\t-\tev\trole\n" \
+    "2026-01-01\tX2\tDONE\t-\tev\trole\n" \
+    "2026-01-01\tX2\tREOPENED\t-\tev\trole\n" \
+    "2026-01-01\tMN-DONE:glued text\n" \
+    "2026-01-01\tTOOL-V1\tnew tool\n" \
+    "2026-01-01\tX3-DONE\ttext\n"
+
+static int failed;
+static char root[4096], work[4400], bin[4400], fd[4400], fi[4400], fl[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) {
+        failed++;
+        if (last) sy_printf("%s", last);
+    }
+    sy_printf("%s\tstate-audit.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run(const char *d, const char *i, const char *l, const char *a0, const char *a1) {
+    char *v[14];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin;
+    v[k++] = "--root"; v[k++] = work;
+    if (d) { v[k++] = "--dag"; v[k++] = (char *)d; }
+    if (i) { v[k++] = "--items"; v[k++] = (char *)i; }
+    if (l) { v[k++] = "--ledger"; v[k++] = (char *)l; }
+    if (a0) v[k++] = (char *)a0;
+    if (a1) v[k++] = (char *)a1;
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+/* Lines of the last output equal to TEXT. */
+static int line(const char *text) {
+    long i = 0, e, tl = tx_len(text, TX_ZCAP);
+    int n = 0;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (tx_same(last + i, e - i, text, tl)) n++;
+        i = e + 1;
+    }
+    return n;
+}
+
+/* Lines of the last output whose first field is KIND. */
+static int kind(const char *k) {
+    long i = 0, e, o, l;
+    int n = 0;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (e > i && !tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, k, tx_len(k, 64))) n++;
+        i = e + 1;
+    }
+    return n;
+}
+
+static int put(const char *path, const char *text) { return cx_write(path, text, (size_t)tx_len(text, TX_ZCAP)); }
+
+static int same_file(const char *path, const char *text) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    long tl = tx_len(text, TX_ZCAP);
+    int ok = b && (long)n == tl && mm_same(b, text, tl);
+    mm_free(b);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], nope[4400];
+    int rc, prep;
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/state-audit-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/out", root) || cx_fmt(work, sizeof work, "%s/check-state-audit-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/state-audit.cx", root) || cx_fmt(bin, sizeof bin, "%s/state-audit.native", work) ||
+        cx_fmt(fd, sizeof fd, "%s/dag.tsv", work) || cx_fmt(fi, sizeof fi, "%s/items.tsv", work) ||
+        cx_fmt(fl, sizeof fl, "%s/ledger.tsv", work) || cx_fmt(nope, sizeof nope, "%s/absent.tsv", work)) return 2;
+    if (tq_native(root, src, bin, why, sizeof why)) {
+        sy_printf("FAIL\tstate-audit.build-native\t%s\n", why);
+        return 1;
+    }
+
+    prep = put(fd, DAG) || put(fi, ITEMS) || put(fl, LEDGER);
+    rc = run(fd, fi, fl, 0, 0);
+    ck(!prep && rc == 0, "report-rc0");
+    /* (1) */
+    ck(line("FINDING\tledger-done-dag-open\tAB-1\tdag=TODO\tledger=AB-1-DONE\tline=2") == 1, "ledger-done-dag-todo-reported");
+    ck(line("FINDING\tledger-done-dag-open\tCD\tdag=RUNNING\tledger=CD\tline=3") == 1, "ledger-done-event-dag-running-reported");
+    /* (2) */
+    ck(line("FINDING\tdag-done-no-ledger\tGH\tdag=DONE\tcommit=3333333333\t-") == 1, "dag-done-without-ledger-reported");
+    ck(line("FINDING\tdag-done-no-ledger\tEF\tdag=DONE\tcommit=2222222222\t-") == 0 &&
+       line("FINDING\tdag-done-no-ledger\tAB\tdag=DONE\tcommit=1111111111\t-") == 1, "commit-in-ledger-text-is-evidence-and-longest-owner-takes-the-row");
+    /* (3) */
+    ck(line("FINDING\tledger-progress-dag-todo\tIJ\tdag=TODO\tledger=IJ-STEP1\tline=5") == 1, "ledger-step-dag-todo-reported");
+    ck(kind("FINDING") == 7 && line("FINDING\tledger-done-dag-open\tMN\tdag=TODO\tledger=MN-DONE\tline=10") == 1, "exact-id-row-is-not-progress-and-findings-are-exactly-seven");
+    /* (4) */
+    ck(line("OVERLAP\tdag\titems\tshared=2") == 1 && line("SHARED\tAB\tdag=DONE\titems=DONE-LOCAL") == 1 &&
+       line("SHARED\tKL\tdag=TODO\titems=READY") == 1 && kind("SHARED") == 2, "id-overlap-counted");
+    ck(line("TABLE\tdag\trows=9\tDONE=3\tTODO=4\tRUNNING=1\tBLOCKED=1") == 1 &&
+       line("TABLE\titems\trows=5\tDONE=2\tREADY=2\tBLOCKED=1") == 1 &&
+       line("TABLE\tledger\trows=11\tdone_rows=4\tglued_id=1") == 1, "status-distribution-exact");
+    /* (5) */
+    ck(line("FINDING\tledger-done-items-open\tX1\titems=READY\tledger=X1\tline=7") == 1 &&
+       line("FINDING\tledger-done-items-open\tX2\titems=BLOCKED-WAIT\tledger=X2\tline=8") == 0, "item-done-in-ledger-open-in-items-reported-latest-row-decides");
+    /* (6) */
+    ck(line("GLUED\tMN-DONE\tline=10") == 1 && kind("GLUED") == 1, "glued-ledger-id-attributed-and-listed");
+    /* (7) */
+    ck(kind("LEDGERDONE") == 4 && line("LEDGERDONE\t2\tAB-1-DONE\tAB-1\tdag=TODO\titems=-\tstale") == 1 &&
+       line("LEDGERDONE\t11\tTOOL-V1\tTOOL\tdag=-\titems=-\tno-node") == 1 &&
+       line("LEDGERDONE\t12\tX3-DONE\tX3\tdag=-\titems=DONE\tok") == 1, "ledgerdone-verdicts");
+    ck(line("STATE_AUDIT\tdag=9\titems=5\tledger=11\tshared=2\tinconsistent=7\tstale_dag=3\tprogress_dag=1\tnoevid_dag=2\tstale_items=1\tglued=1") == 1, "summary-exact");
+    rc = run(fd, fi, fl, "--recent", "1");
+    ck(rc == 0 && kind("LEDGERDONE") == 1 && line("LEDGERDONE\t12\tX3-DONE\tX3\tdag=-\titems=DONE\tok") == 1, "recent-caps-the-list");
+    /* (9) */
+    rc = run(fd, fi, fl, "--strict", 0);
+    ck(rc == 1 && kind("STATE_AUDIT") == 1, "strict-rc1-with-findings");
+    /* (10) */
+    ck(same_file(fd, DAG) && same_file(fi, ITEMS) && same_file(fl, LEDGER), "tables-unchanged");
+
+    /* (8) empty tables */
+    prep = put(fd, DH) || put(fi, IH) || put(fl, LH);
+    rc = run(fd, fi, fl, "--strict", 0);
+    ck(!prep && rc == 0 && kind("FINDING") == 0 && kind("SHARED") == 0 && kind("LEDGERDONE") == 0 &&
+       line("STATE_AUDIT\tdag=0\titems=0\tledger=0\tshared=0\tinconsistent=0\tstale_dag=0\tprogress_dag=0\tnoevid_dag=0\tstale_items=0\tglued=0") == 1, "header-only-tables-zero");
+    prep = put(fd, "") || put(fi, "") || put(fl, "");
+    rc = run(fd, fi, fl, 0, 0);
+    ck(!prep && rc == 0 && line("TABLE\tdag\trows=0") == 1 && line("TABLE\titems\trows=0") == 1 &&
+       line("STATE_AUDIT\tdag=0\titems=0\tledger=0\tshared=0\tinconsistent=0\tstale_dag=0\tprogress_dag=0\tnoevid_dag=0\tstale_items=0\tglued=0") == 1, "zero-byte-tables-zero");
+
+    /* (9) usage and unreadable */
+    rc = run(fd, fi, fl, "--frobnicate", 0);
+    ck(rc == 2, "unknown-flag-rc2");
+    rc = run(fd, fi, fl, "--recent", "x");
+    ck(rc == 2, "recent-not-a-number-rc2");
+    rc = run(nope, fi, fl, 0, 0);
+    ck(rc == 2 && kind("STATE_AUDIT") == 0, "unreadable-table-rc2-no-report");
+
+    mm_free(last);
+    last = 0;
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_STATE_AUDIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
