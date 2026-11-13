@@ -3,6 +3,7 @@
  *   sh ./unisacc.com tools/prechain-gate.cx                 scan the chain tools, compare with the baseline
  *   sh ./unisacc.com tools/prechain-gate.cx -- --emit-baseline   print the current findings as baseline rows
  *   sh ./unisacc.com tools/prechain-gate.cx -- --file PATH...    scan only these files, no baseline (fixtures)
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --dry             9 chain-tail situations on the fixture fake candidate (parallel, ~40 s), TSV case/expect/actual/ok
  *
  * Static, read-only. Scans the chain-phase tools for the class that stopped seven whole-chain starts:
  *   LIT_NOENV   a literal seconds value in a child-run call (np_run/pr_run/eb_run) in a tool that does not
@@ -154,13 +155,68 @@ static void load_baseline(void) {
     }
     free(s);
 }
+/* --dry: 9 chain tail situations, driven by the existing fake-candidate fixtures (check-chain-run.cx
+   default/--segments/--supervise, check-chaincall.cx), not new ones. The three runs are started in
+   parallel under one 58 s bound; each case lists the named PASS lines it needs. A named line that is
+   missing or FAIL, or a child that did not run, is not OK. Output TSV: case expect actual ok. */
+static const struct { const char *name, *expect, *need[4]; } dry_cases[] = {
+    {"complete", "tail 100 s left: group runs in the same segment, PREPARED, no refused call",
+        {"chain-run.tail-100-run-completes-prepared", "chain-run.tail-100-no-blocker-no-refused-call", "chain-run.tail-100-group-runs-in-the-same-segment", 0}},
+    {"segment-tail-yield", "tail 59 s left: group held, segment ends rc 75, group starts next segment",
+        {"chain-run.tail-59-group-held-not-issued", "chain-run.tail-59-segment-ends-cleanly-rc75", "chain-run.tail-59-group-starts-in-next-segment", 0}},
+    {"timeout-124", "124 retried within the resume budget, then rc 3 (exhausted or deadline)",
+        {"chain-run.exhausted-rc3", "chain-run.deadline-rc3", "chain-run.bounded-retries", 0}},
+    {"rc142", "142 (bound watchdog) consumes a resume like 137",
+        {"chain-run.rc142-consumes-a-resume-like-137", "chain-run.rc142-retried-with-a-resume", 0, 0}},
+    {"rc2-deterministic", "rc 2 / real failure is not retried: first-failure stop",
+        {"chain-run.first-failure-rc", "chain-run.first-failure-stops", "chain-run.unverified-yield-fails", 0}},
+    {"refuse", "over-limit call and corrupt owned pack refused before any child",
+        {"chain-run.over-90-refused-before-child", "chain-run.owned-corrupt-pack-refused", "chain-run.tail-old-issued-call-59-is-refused", 0}},
+    {"reentry-resume", "killed phase resumes and persists evidence",
+        {"chain-run.killed-resume", "chain-run.persisted-evidence", 0, 0}},
+    {"width-recovery", "eight clean attempts recover one unit of width, never above requested",
+        {"chain-run.eight-clean-attempts-recover-one-unit-of-width", "chain-run.recovery-never-above-the-requested-width", 0, 0}},
+    {"cmd.front-derived", "chainstep sub-bound derives from cmd.front: 90/85/120/115, absent 45, 70 s reverify fits",
+        {"check-chaincall.chainstep-sub-bound-90-85-120-115-absent-45-70s-reverify-fits", 0, 0, 0}},
+};
+static int dry(void) {
+    static char dir[] = "/tmp/pgdry-XXXXXX"; char cmd[1024]; static char all[1 << 20]; size_t n = 0;
+    if (!mkdtemp(dir)) { fprintf(stderr, "prechain-gate: REFUSE mkdtemp\n"); return 2; }
+    if (cx_fmt(cmd, sizeof cmd,
+        "d=%s; ( timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- . $d/a > $d/1.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- --segments . $d/b > $d/2.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- --supervise . $d/c > $d/3.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chaincall.cx > $d/4.txt 2>&1 & wait ) ; cat $d/1.txt $d/2.txt $d/3.txt $d/4.txt", dir)) return 2;
+    FILE *p = popen(cmd, "r");
+    if (!p) return 2;
+    while (n + 1 < sizeof all) { size_t k = fread(all + n, 1, sizeof all - 1 - n, p); if (!k) break; n += k; }
+    all[n] = 0; pclose(p);
+    printf("PRECHAIN_DRY\tfixture fake candidate: real runner and call-plan validator, no real phase work, no PASS granted\n");
+    printf("case\texpect\tactual\tok\n");
+    int bad = 0;
+    for (size_t i = 0; i < sizeof dry_cases / sizeof *dry_cases; i++) {
+        const char *act = "PASS"; int ok = 1;
+        for (int j = 0; j < 4 && dry_cases[i].need[j]; j++) {
+            char pass[256], fail[256];
+            if (cx_fmt(pass, sizeof pass, "PASS\t%s\n", dry_cases[i].need[j]) || cx_fmt(fail, sizeof fail, "FAIL\t%s\n", dry_cases[i].need[j])) return 2;
+            if (strstr(all, fail)) { act = "FAIL"; ok = 0; break; }
+            if (!strstr(all, pass)) { act = "UNRUN"; ok = 0; }
+        }
+        printf("%s\t%s\t%s\t%s\n", dry_cases[i].name, dry_cases[i].expect, act, ok ? "OK" : "FAIL");
+        if (!ok) bad++;
+    }
+    printf("PRECHAIN_DRY_RESULT\tcases=%d\tfailed=%d\n", (int)(sizeof dry_cases / sizeof *dry_cases), bad);
+    { char rm[160]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", dir)) { int r = system(rm); (void)r; } }
+    return bad ? 1 : 0;
+}
 int main(int argc, char **argv) {
     int emit = 0, only = 0;
+    if (argc == 2 && !strcmp(argv[1], "--dry")) return dry();
     load_limits();
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--emit-baseline")) emit = 1;
         else if (!strcmp(argv[i], "--file")) { only = 1; for (i++; i < argc; i++) if (scan_file(argv[i])) return 2; }
-        else { fprintf(stderr, "usage: prechain-gate [--emit-baseline | --file PATH...]\n"); return 2; }
+        else { fprintf(stderr, "usage: prechain-gate [--dry | --emit-baseline | --file PATH...]\n"); return 2; }
     }
     if (!only) for (size_t i = 0; i < sizeof files / sizeof *files; i++) if (scan_file(files[i])) return 2;
     if (emit) {
