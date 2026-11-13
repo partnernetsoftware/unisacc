@@ -149,15 +149,15 @@ int main(int argc, char **argv) {
         for (k = 1; k < argc; k++) {
             if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
             /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
-            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth")) { part_wanted = argv[k]; continue; }
             if (tx_eqz(argv[k], "--")) continue;
-            printf("usage: check-affected.cx [--part all|tiers|list|run|depth]\n");
+            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|depth]\n");
             return 2;
         }
     }
     if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
-    if (!want("tiers") && !want("list") && !want("run")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
@@ -222,7 +222,7 @@ int main(int argc, char **argv) {
            && has(o, "MATERIAL\trelease-exec\trelease-oneshot-tool\ttools/release-oneshot.cx\n"), "material-falls-back-to-tests-cases");
     }
     }
-    if (want("list")) {
+    if (want("list2")) {   /* 慢组:guard 3 次 + table 6 次整表扫描(~1.6 秒/次);list 段只留单扫描断言,以免 25 秒预算被吃满 */
     {   /* cross-targets reads its unit list at run time, so no use/literal edge reaches src/host.cx,
            cx/sys/ or include/: the guard table must select all three split batches for each of those
            subtrees.  A guard row per split id is what makes a src/-only change still run the sweep. */
@@ -292,6 +292,36 @@ int main(int argc, char **argv) {
                && !has(p, "AFFECTED\tcandidate-chain\t"), "literal-depth-daily-release-unbounded");
             }
         }
+    }
+    }
+    if (want("list")) {   /* 单扫描即可覆盖的那几条:与 list2 分开,list 段实测 24.2 -> 目标 <15 秒 */
+    {   char *a[] = {"--files", "cx/sys/time.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-sys-spawn\twhy=cx/sys/time.cx\tvia=use\n"), "time-via-net-use");
+        ck(has(o, "AFFECTED\tbatch-split\twhy=cx/sys/time.cx\tvia=literal-use\n") && !has(o, "\tcxroot-check\t"), "time-literal-use-only-where-reached");
+    }
+    {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n")
+           && has(o, "AFFECTED\tunit-frontcache-equiv0\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == 12, "tape-gap-literal");
+    }
+    {   char *a[] = {"--files", "tools/refactor/strcmp-truth.tsv", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\trefactor-tool\twhy=tools/refactor/strcmp-truth.tsv\tvia=literal\n") && others(o) == 1, "fixture-literal");
+    }
+    {   char *a[] = {"--files", "cx/text/text.cx", 0}, *b[] = {"--files", "tools/text/text.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n") && num(o, "\tbatches=") >= 100, "text-many-batches");
+        ck(rc2 == 0 && num(o, "\tbatches=") == num(p, "\tbatches=") && has(p, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n"), "link-is-one-file");
+    }
+    {   char *a[] = {"--files", "prd.md", 0}, *b[] = {"--files", "tools/no-such-affected-input.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t") && !has(o, "AFFECTED\t"), "unused-file-none");
+        ck(rc2 == 0 && has(p, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t"), "absent-file-none");
+    }
+    {   char *a[] = {"--users", "cx/mem/heap.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "USER\ttools/check-cx-sys-spawn.cx\n") && !has(o, "USER\ttools/check-core-alu.cx\n") && num(o, "\tusers=") >= 1, "users-reverse");
     }
     }
     printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);
