@@ -574,6 +574,9 @@ e1+e3 实测每单元省 151 ms(约 338 ns/空白字节);e2 在补丁后少做 4
 - 验收:四段之和与 46.6 ms 相差 15% 内,否则记 UNVERIFIED;补丁重建后最小 C 程序命中路 model 合计 <=15 ms、墙钟最小 <=60 ms(基线 89),命中与未命中产物逐字节相同。
 - 截止:定因 15 分钟;重建按慢车道。
 - 禁区:不去掉载荷校验,不让缓存失败变成编译失败,不改 kernel/,不把推算写成实测。
+- 实测(2026-11-13,最小 C `int main(void){return 0;}`,已装 unisacc.com,UNISACC_RR_TIME=1,连续 10 次,取第 2 到 10 次;负载 uptime 2.5):墙钟 119-128 ms;每次 15 行 RR_TIME,恒为 `lookup_hit=0`、`model source=inflate`,10 次 stderr 零条 `modelcache` 行;模型各相 ns(最小/中位/最大,9 次):e3 34.27/34.95/36.99 ms,e2 14.25/14.63/16.27,e1 12.90/13.09/14.54,lower 11.14/11.35/11.55,elf 4.28/4.45/4.56,prune 1.82/1.88/1.99,六相合计约 80 ms;推理 e2 2.07、e3 2.63、lower 2.07、elf 1.98、prune 1.48、e1 0.19 ms;construction 3.7 ms。stage 目录中 /tmp/unisacc-e3cache-1001 只被 strace 见到 3 次 open(.budget.lock x2 与一个 .host),没有任何 mc-* 文件被打开。UNISACC_E3CACHE 指向空目录对本入口无效(目录仍是 /tmp/unisacc-e3cache-1001)。
+- 读码定因:`src/stages.cx` 阶段装载(约 359-367 行)走 `rt_open(...ex_inflate, ex_crc32...)` + `sh_apply`,`st_stamp(stage,-1,...)` 把 rc 写死为 -1,所以「source=inflate」是硬编码标签,不代表是否命中。`mc_get` 只在 `cx/runtime/routestep.cx:60` 与 `src/executor.cx:105` 出现,而这条入口实测不打印 modelcache 行,即 SPEED-14 说的「6 hit」来自另一路径或另一版本,本入口的约 80 ms(单次 47 ms 的数量级同源)是每个进程逐阶段真 inflate + CRC,未命中缓存,不是命中后的开销。UNVERIFIED:strace -c 一次出现约 3250 次 open/read/lstat(与缓存目录 1608 项同量级),第二次 strace 仅 26 次 open,未复现,待查是否为目录扫描(淘汰/预算)。
+- 方案(只出文字,不入库):(1) 先让 st_stamp 区分 hit/inflate(把 mc 结果经 rt_open 返回出来),否则无法验收;(2) 确认 rt_open 在该入口是否调用 routestep 的 mc_get,若未调用则在 sh_apply 前对 (压缩成员 sha, 阶段) 做 mc_get,命中直接拿预解压字节,跳过 ex_inflate 与 CRC;(3) 命中的核验保持原性质:键为压缩成员 sha256(内容+适用身份),文件头存载荷 sha 并在读后复核(mc_read 已做),任何不符按 miss 回退 inflate,失败不致编译失败;(4) 预期 e3/e2/e1/lower 的 inflate 约 73 ms 降到读盘+sha 复核,验收以重建后最小 C 程序 model 合计与墙钟为准,未实测前不记数。
 
 (3) SPEED-16 求值栈槽基本块内 store->load 转发(慢车道)
 - 目标:只对编译器产生的求值栈槽,在同一基本块内把「存入后紧接读回」改为直接用源寄存器;用户变量槽、.frame 与 store 不动;默认关。第一步先证明求值栈槽在 tape 中可与用户槽区分且不被取址,证不出即停。
