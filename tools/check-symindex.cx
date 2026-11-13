@@ -82,7 +82,28 @@ static char out[CAPOUT], err[65536], out2[CAPOUT];
 static char idx[512], list[512], idx2[512], list2[512], copy[512], idx3[512], list3[512];
 
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tsymindex.%s\n", ok ? "PASS" : "FAIL", name); }
-static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, CAPOUT), needle, tx_len(needle, 4096)) >= 0; }
+/* structural row assertion over tool output: no substring search.  NEEDLE shapes: a leading newline anchors at a line start
+   (else the match begins at a tab-separated field start; a leading tab means "after some tab"); a trailing newline anchors at
+   the line end.  The needle must then equal the line text from that point (a field-sequence prefix, or whole tail when anchored). */
+static int has(const char *s, const char *needle) {
+    long n = tx_len(s, CAPOUT), nl = tx_len(needle, 4096), p = 0, q = 0, qe = nl;
+    int bol = 0, eol = 0, aft = 0;
+    if (nl > 0 && needle[0] == '\n') { bol = 1; q = 1; }
+    else if (nl > 0 && needle[0] == '\t') { aft = 1; q = 1; }
+    if (qe > q && needle[qe - 1] == '\n') { eol = 1; qe--; }
+    while (p < n) {
+        long e = p, f;
+        while (e < n && s[e] != '\n') e++;
+        for (f = p; f <= e; f++) {
+            if (f > p && s[f - 1] != '\t') continue;
+            if (bol && f != p) break;
+            if (aft && f == p) continue;
+            if (e - f >= qe - q && tx_prefix(s + f, e - f, needle + q, qe - q) && (!eol || e - f == qe - q)) return 1;
+        }
+        p = e + 1;
+    }
+    return 0;
+}
 
 /* runs sh ./unisacc.com PROG -- A...; stdout into O, stderr into err; the exit code or -1 */
 static int run(const char *prog, char **args, char *o, long cap) {
@@ -302,8 +323,8 @@ int main(void) {
         }
         rc = si(1, "update", 0, 0, 0);
         ck(rc == 0 && has(out, "files=1\treparsed=1\thashed=1"), "copy-indexed");
-        at = tx_find(b, (long)n, "fx_scale", 8);
-        if (at < 0 || sy_stat(copy, &s1) != 0) return 2;
+        for (at = 0; at + 8 <= (long)n && !tx_prefix(b + at, (long)n - at, "fx_scale", 8); at++) {}
+        if (at + 8 > (long)n|| sy_stat(copy, &s1) != 0) return 2;
         b[at + 7] = 'f';   /* fx_scale -> fx_scalf: the same size */
         if (write_file(copy, b, (long)n) || sy_set_mtime(copy, s1.mtime) != 0 || sy_stat(copy, &s2) != 0) return 2;
         ck(s1.size == s2.size && s1.mtime == s2.mtime && s1.ino == s2.ino && s1.dev == s2.dev, "rewrite-keeps-size-mtime-inode");
