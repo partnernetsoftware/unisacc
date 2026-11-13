@@ -1,0 +1,188 @@
+#pragma unisa module codec
+/* text/codec: UTF-8 encode/count, hex and base64 (std-surface cx.text, S6b).
+   Pure cx, no libc, no allocation.  Failures are negative codes; on any failure the
+   destination is left untouched (all checks run before the first write).
+   Ownership: the caller owns every buffer; nothing is retained after return. */
+
+/* Bytes of the UTF-8 form of CP (1..4), -EILSEQ for a surrogate or > U+10FFFF. */
+static int tx_u8need(unsigned cp) {
+    if (cp >= 0xD800u && cp <= 0xDFFFu) return -EILSEQ;
+    if (cp > 0x10FFFFu) return -EILSEQ;
+    if (cp < 0x80u) return 1;
+    if (cp < 0x800u) return 2;
+    if (cp < 0x10000u) return 3;
+    return 4;
+}
+
+/* Encode CP into DST. Returns bytes written (no NUL), -EILSEQ (bad scalar value) or
+   -ERANGE (CAP < needed, or DST null with CAP > 0 is -EINVAL). */
+int tx_utf8_put(char *dst, long cap, unsigned cp) {
+    int k = tx_u8need(cp);
+    if (k < 0) return k;
+    if (!dst || cap < k) return -ERANGE;
+    if (k == 1) dst[0] = (char)cp;
+    else if (k == 2) {
+        dst[0] = (char)(0xC0u | (cp >> 6));
+        dst[1] = (char)(0x80u | (cp & 0x3Fu));
+    } else if (k == 3) {
+        dst[0] = (char)(0xE0u | (cp >> 12));
+        dst[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        dst[2] = (char)(0x80u | (cp & 0x3Fu));
+    } else {
+        dst[0] = (char)(0xF0u | (cp >> 18));
+        dst[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        dst[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        dst[3] = (char)(0x80u | (cp & 0x3Fu));
+    }
+    return k;
+}
+
+/* Length in bytes of the scalar at S[0..N), or -EILSEQ (bad lead, truncated, bad
+   continuation, overlong, surrogate, > U+10FFFF). */
+static int tx_u8len(const unsigned char *s, long n) {
+    unsigned c = s[0];
+    if (c < 0x80u) return 1;
+    if (c >= 0xC2u && c <= 0xDFu) {
+        if (n < 2 || (s[1] & 0xC0u) != 0x80u) return -EILSEQ;
+        return 2;
+    }
+    if (c >= 0xE0u && c <= 0xEFu) {
+        if (n < 3 || (s[1] & 0xC0u) != 0x80u || (s[2] & 0xC0u) != 0x80u) return -EILSEQ;
+        if (c == 0xE0u && s[1] < 0xA0u) return -EILSEQ;
+        if (c == 0xEDu && s[1] > 0x9Fu) return -EILSEQ;
+        return 3;
+    }
+    if (c >= 0xF0u && c <= 0xF4u) {
+        if (n < 4 || (s[1] & 0xC0u) != 0x80u || (s[2] & 0xC0u) != 0x80u || (s[3] & 0xC0u) != 0x80u) return -EILSEQ;
+        if (c == 0xF0u && s[1] < 0x90u) return -EILSEQ;
+        if (c == 0xF4u && s[1] > 0x8Fu) return -EILSEQ;
+        return 4;
+    }
+    return -EILSEQ;
+}
+
+/* Number of code points in S[0..N). -EILSEQ if invalid UTF-8, -EINVAL if S null with N > 0
+   or N < 0. */
+long tx_utf8_count(const char *s, long n) {
+    long i = 0, cnt = 0;
+    if (n < 0 || (n > 0 && !s)) return -EINVAL;
+    while (i < n) {
+        int k = tx_u8len((const unsigned char *)s + i, n - i);
+        if (k < 0) return k;
+        i += k;
+        cnt++;
+    }
+    return cnt;
+}
+
+static const char tx_hexdig[16] = "0123456789abcdef";
+
+/* Lowercase hex of IN[0..N) into OUT plus a NUL. Returns 2*N (no NUL). -ERANGE if
+   OUTCAP < 2*N+1; -EINVAL for negative N or null IN/OUT with N > 0 / OUTCAP > 0 needed. */
+int tx_hex_encode(const void *in, long n, char *out, long outcap) {
+    const unsigned char *p = (const unsigned char *)in;
+    long i;
+    if (n < 0 || n > 0x3FFFFFFFL || (n > 0 && !in) || !out) return -EINVAL;
+    if (outcap < 2 * n + 1) return -ERANGE;
+    for (i = 0; i < n; i++) {
+        out[2 * i] = tx_hexdig[p[i] >> 4];
+        out[2 * i + 1] = tx_hexdig[p[i] & 15];
+    }
+    out[2 * n] = 0;
+    return (int)(2 * n);
+}
+
+static int tx_hexval(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode hex IN[0..N) (either case) into OUT. Returns N/2. -EINVAL: odd N, non-hex byte,
+   bad args. -ERANGE: OUTCAP < N/2. OUT untouched on failure. */
+int tx_hex_decode(const char *in, long n, void *out, long outcap) {
+    unsigned char *o = (unsigned char *)out;
+    long i;
+    if (n < 0 || n > 0x3FFFFFFFL || (n > 0 && !in)) return -EINVAL;
+    if ((n & 1) != 0) return -EINVAL;
+    for (i = 0; i < n; i++) if (tx_hexval((unsigned char)in[i]) < 0) return -EINVAL;
+    if (n > 0 && !out) return -EINVAL;
+    if (outcap < n / 2) return -ERANGE;
+    for (i = 0; i < n; i += 2)
+        o[i / 2] = (unsigned char)((tx_hexval((unsigned char)in[i]) << 4) | tx_hexval((unsigned char)in[i + 1]));
+    return (int)(n / 2);
+}
+
+static const char tx_b64alpha[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Standard base64 with padding into OUT plus a NUL. Returns bytes written without the NUL
+   (4*ceil(N/3)). -ERANGE if OUTCAP < that + 1; -EINVAL for bad args. */
+int tx_b64_encode(const void *in, long n, char *out, long outcap) {
+    const unsigned char *p = (const unsigned char *)in;
+    long i, o = 0, need;
+    if (n < 0 || n > 0x3FFFFFFFL || (n > 0 && !in) || !out) return -EINVAL;
+    need = 4 * ((n + 2) / 3);
+    if (outcap < need + 1) return -ERANGE;
+    for (i = 0; i + 2 < n; i += 3) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8) | p[i + 2];
+        out[o++] = tx_b64alpha[(v >> 18) & 63];
+        out[o++] = tx_b64alpha[(v >> 12) & 63];
+        out[o++] = tx_b64alpha[(v >> 6) & 63];
+        out[o++] = tx_b64alpha[v & 63];
+    }
+    if (n - i == 1) {
+        unsigned v = (unsigned)p[i] << 16;
+        out[o++] = tx_b64alpha[(v >> 18) & 63];
+        out[o++] = tx_b64alpha[(v >> 12) & 63];
+        out[o++] = '=';
+        out[o++] = '=';
+    } else if (n - i == 2) {
+        unsigned v = ((unsigned)p[i] << 16) | ((unsigned)p[i + 1] << 8);
+        out[o++] = tx_b64alpha[(v >> 18) & 63];
+        out[o++] = tx_b64alpha[(v >> 12) & 63];
+        out[o++] = tx_b64alpha[(v >> 6) & 63];
+        out[o++] = '=';
+    }
+    out[o] = 0;
+    return (int)o;
+}
+
+static int tx_b64val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* Strict standard base64 decode. Returns bytes written. -EINVAL: N % 4 != 0 (so missing
+   padding), whitespace or any non-alphabet byte, '=' anywhere but the last one or two
+   positions, nonzero pad bits. -ERANGE: OUTCAP too small. OUT untouched on failure. */
+int tx_b64_decode(const char *in, long n, void *out, long outcap) {
+    unsigned char *o = (unsigned char *)out;
+    long i, pad = 0, bytes, w = 0;
+    if (n < 0 || n > 0x3FFFFFFFL || (n > 0 && !in)) return -EINVAL;
+    if ((n & 3) != 0) return -EINVAL;
+    if (n == 0) return 0;
+    if (in[n - 1] == '=') pad = (in[n - 2] == '=') ? 2 : 1;
+    for (i = 0; i < n - pad; i++) if (tx_b64val((unsigned char)in[i]) < 0) return -EINVAL;
+    if (pad == 1 && (tx_b64val((unsigned char)in[n - 2]) & 3) != 0) return -EINVAL;
+    if (pad == 2 && (tx_b64val((unsigned char)in[n - 3]) & 15) != 0) return -EINVAL;
+    bytes = n / 4 * 3 - pad;
+    if (!out) return -EINVAL;
+    if (outcap < bytes) return -ERANGE;
+    for (i = 0; i < n; i += 4) {
+        unsigned a = (unsigned)tx_b64val((unsigned char)in[i]);
+        unsigned b = (unsigned)tx_b64val((unsigned char)in[i + 1]);
+        unsigned c = in[i + 2] == '=' ? 0u : (unsigned)tx_b64val((unsigned char)in[i + 2]);
+        unsigned d = in[i + 3] == '=' ? 0u : (unsigned)tx_b64val((unsigned char)in[i + 3]);
+        unsigned v = (a << 18) | (b << 12) | (c << 6) | d;
+        if (w < bytes) o[w++] = (unsigned char)(v >> 16);
+        if (w < bytes) o[w++] = (unsigned char)(v >> 8);
+        if (w < bytes) o[w++] = (unsigned char)v;
+    }
+    return (int)bytes;
+}

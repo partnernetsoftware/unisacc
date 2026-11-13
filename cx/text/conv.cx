@@ -1,0 +1,96 @@
+#pragma unisa module conv
+/* text/conv: integer <-> text with explicit base (std-surface cx.text, S6b).
+   Pure cx, no libc.  Failures are negative codes; OUT / DST untouched on failure.
+   Ownership: the caller owns every buffer; nothing is retained. */
+
+static int tx_dval(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+/* Lowercase digits of V in BASE into DST plus a NUL. Returns digit count (no NUL).
+   -EINVAL: base not 2..36 or null DST. -ERANGE: CAP < count + 1 (DST untouched). */
+static int tx_put_u(char *dst, long cap, unsigned long v, int neg, int base) {
+    char tmp[72];
+    int k = 0, total, i;
+    if (!dst || base < 2 || base > 36) return -EINVAL;
+    do {
+        int d = (int)(v % (unsigned long)base);
+        tmp[k++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+        v /= (unsigned long)base;
+    } while (v != 0);
+    total = k + (neg ? 1 : 0);
+    if (cap < total + 1) return -ERANGE;
+    i = 0;
+    if (neg) dst[i++] = '-';
+    while (k > 0) dst[i++] = tmp[--k];
+    dst[i] = 0;
+    return total;
+}
+
+/* Signed integer V as text in BASE (2..36), leading '-' when negative. */
+int tx_from_i64(char *dst, long cap, int64_t v, int base) {
+    unsigned long m = v < 0 ? 0UL - (unsigned long)v : (unsigned long)v;
+    return tx_put_u(dst, cap, m, v < 0, base);
+}
+
+/* Unsigned integer V as text in BASE (2..36). */
+int tx_from_u64(char *dst, long cap, uint64_t v, int base) {
+    return tx_put_u(dst, cap, (unsigned long)v, 0, base);
+}
+
+/* Magnitude parse of S[0..N) in BASE. 0 ok; -EINVAL (empty, non-digit); -ERANGE (> 2^64-1). */
+static int tx_parse_mag(const char *s, long n, int base, unsigned long *mag) {
+    unsigned long v = 0, lim;
+    long i;
+    if (n <= 0) return -EINVAL;
+    lim = ~0UL / (unsigned long)base;
+    for (i = 0; i < n; i++) {
+        int d = tx_dval((unsigned char)s[i]);
+        if (d < 0 || d >= base) return -EINVAL;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned long d = (unsigned long)tx_dval((unsigned char)s[i]);
+        if (v > lim) return -ERANGE;
+        v *= (unsigned long)base;
+        if (v > ~0UL - d) return -ERANGE;
+        v += d;
+    }
+    *mag = v;
+    return 0;
+}
+
+/* Parse the whole span as a signed integer: optional '+' or '-', then digits in BASE
+   (2..36, either case). No whitespace. -EINVAL: bad args, empty, sign only, non-digit.
+   -ERANGE: outside int64. */
+int tx_to_i64(const char *s, long n, int base, int64_t *out) {
+    unsigned long m = 0;
+    int neg = 0, r;
+    if (!out || n < 0 || (n > 0 && !s) || base < 2 || base > 36) return -EINVAL;
+    if (n > 0 && (s[0] == '-' || s[0] == '+')) { neg = s[0] == '-'; s++; n--; }
+    r = tx_parse_mag(s, n, base, &m);
+    if (r < 0) return r;
+    if (neg) {
+        if (m > 0x8000000000000000UL) return -ERANGE;
+        *out = (int64_t)(0UL - m);
+    } else {
+        if (m > 0x7FFFFFFFFFFFFFFFUL) return -ERANGE;
+        *out = (int64_t)m;
+    }
+    return 0;
+}
+
+/* Parse the whole span as an unsigned integer: optional '+', digits in BASE. A '-' is
+   -EINVAL. -ERANGE: > 2^64-1. */
+int tx_to_u64(const char *s, long n, int base, uint64_t *out) {
+    unsigned long m = 0;
+    int r;
+    if (!out || n < 0 || (n > 0 && !s) || base < 2 || base > 36) return -EINVAL;
+    if (n > 0 && s[0] == '+') { s++; n--; }
+    r = tx_parse_mag(s, n, base, &m);
+    if (r < 0) return r;
+    *out = (uint64_t)m;
+    return 0;
+}
