@@ -227,6 +227,12 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
 (3) SPEED-4 批次共享准备,快车道,现在就能做。
 - 目标:先测 affected 提交档 44 批里启动与 prep 各占多少;若冷启动合计 >10 s,让同一产品身份的批共享一次准备,不新做常驻服务(FOCUS-PRODUCT:基础设施不扩张)。
 - 写域:tools/affected.cx;tools/run-batch.cx。不改产品。
+- SPEED-9 实测(2026-11-13,load 1.4 至 2.4,基线表同日 6 行):
+  - check-cx-text-fmt 的 47.9 s 不是冷编译:编译 1.3 s,运行 47.9 s,全在 overflow-width 一例。prelude 的宽度填充逐字节走完才报溢出,约 89 MB/s。该例改为最小溢出 `%2147483647d%d`,批次 run_ms 29.5 s,PASS,18 例不变。
+  - 15 s 目标在检查侧走不通:溢出路下限 23.6 s(2^31 字节填充);`%lc` 非法码点与超 int 宽度都不返回负值。下一条路在 prelude 的 vsnprintf:计数越过 INT_MAX 即返回,或填充按块计数。归 cx 车道,未做。
+  - kit 命中 945/957 ms 的构成:cmd_kit 之前约 290(启动、编译装载 tlib.cx、键计算),产品摘要 56,kit_verify 8,17 包 kit_keep 循环约 590(62%)。大头是逐包复核而不是子进程启动。「进程内核键跳过子进程」的 affected 原型未做;SPEED-7 的 120 ms 探针不含 kit_keep 复核,不能当作等价替换的成本。
+  - 共享检出里 tools.cxlib STALE 时不走命中路:每次 2.75 至 2.84 s,kit.tsv 每次退役重写。
+  - 未做:tlib-link、tlib-base 的时间分解;cx-l0-text-fmt 预算列仍为 55(tests/batches.tsv 同列须同步,不在本次写域)。
 - 验收:同一提交档墙钟比改前下降,且批结果逐条不变。判据:测完把启动合计写入 build/speed-baseline.tsv 新行;若启动合计 <10 s 则本项只交测量、不改调度。工具:affected 自身计时加 run-startup-bench 的 first 796.354 作对照,不把 35 s 当实测。
 - 截止:测量 30 分。
 - 禁区:不新增长驻进程,不放宽时限,不删断言。
