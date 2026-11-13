@@ -1,0 +1,24 @@
+GHTAPE1
+day=20770
+rc=0
+ghver=gh version 2.45.0 (2024-03-04)
+argc=4
+a=api
+a=repos/partnernetsoftware/unisacc/releases/tags/v0.0.59
+a=--jq
+a=.assets[]|[.name,.digest]|@tsv
+len=1256
+build.json	sha256:38e64b9c55c7a370d98ec36cb6ac9631e0fdc026be04c9c2afc9f09dbb3bfd55
+pkg.bin	sha256:56efea531e104b4114b314d5bdb4e5efc2a6debb96f974fa5d6e32675a637db8
+SHA256SUMS	sha256:fbbc04d7ecc14eddbf3822932542e75dd28ccf0ff8d13ae3280f08198ed2d280
+slice-win-arm64	sha256:99bffaebb9ae554eca1b1baabfe54ed791c2532db945f24b9cf405dce271a4ee
+standalone-sha256.tsv	sha256:ffc44fd2eddf3834e1a2805929c94e2f7ffdeca4d6d4bbfdce56bafe0b8c271f
+unisacc-0.0.59-win-arm64.zip	sha256:802a74dc83a10fa307564fb4c6ea4cb7af6cf6e8eea9a57483d6b8f5377547a5
+unisacc-lnx64-arm	sha256:a74371f0f6e54a746d8f8e34652fe552f57fcd0e3d22b4f0d0da779a3cbc2208
+unisacc-lnx64-x86	sha256:df00d3d8267ded5205f12c1f8b8413cc92fb707eb5e114306761042923908dcf
+unisacc-osx64-arm	sha256:6117f1c2af2b4c0bf28a95faf59eacbee4620f3e8f18702d05727e42988a89ff
+unisacc-osx64-x86	sha256:b7d9ec2dbed33644e8a047813b1760096ee0add542279670fb8ff7756a4ec9e2
+unisacc-win64-arm.exe	sha256:1a0c3b1489a5c78b5fc6dd2bce23ac1a951afb45b191197adc57fa380e2d9d14
+unisacc-win64-x86.exe	sha256:dbb5a24c15e72362051973fdfde0a6cd710ab72ac346f25601e3dde8517ec6b9
+unisacc.com	sha256:e43ef36832939c7f4132937564ce50c04e50e7910112f4ca2ac0e26df649ea44
+unisacc.com.build.json	sha256:38e64b9c55c7a370d98ec36cb6ac9631e0fdc026be04c9c2afc9f09dbb3bfd55
