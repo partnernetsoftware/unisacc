@@ -29,7 +29,7 @@ static const char *TG_TABLE[TG_NT] = {"tests/batches.tsv", "tests/coverage.tsv",
 static const int TG_COLS[TG_NT] = {14, 5, 2};
 
 static int tg_index, tg_write, tg_stale, tg_written, tg_hard;
-static char *tg_buf[TG_NT]; static size_t tg_n[TG_NT]; static int tg_dirty[TG_NT];
+static char *tg_buf[TG_NT]; static size_t tg_n[TG_NT]; static int tg_dirty[TG_NT], tg_absent[TG_NT];
 
 static char *tg_read(const char *root, const char *rel, size_t *n) {
     char p[4400];
@@ -62,6 +62,7 @@ static int tg_apply(int t, const char *row) {
     char key[600]; size_t kl = 0, rl = strlen(row), i = 0, n, ins; char *b;
     while (row[kl] && row[kl] != '\t') kl++;
     if (kl == 0 || kl >= sizeof key) return 1;
+    if (tg_absent[t]) { sy_printf("MALFORMED\t%s\ttable unreadable\n", TG_TABLE[t]); return 1; }
     mm_copy(key, sizeof key, row, kl); key[kl] = 0;
     if (tg_n[t] > 0 && tg_buf[t][tg_n[t] - 1] != '\n') { if (tg_splice(t, tg_n[t], tg_n[t], "")) return 1; tg_dirty[t] = 0; }
     b = tg_buf[t]; n = tg_n[t]; ins = n;
@@ -130,8 +131,10 @@ int main(int argc, char **argv) {
     }
     if (check == tg_write || (tg_index && tg_write)) { sy_printf("usage: tables-gen.cx -- --check|--write [--index] [--root DIR]\n"); return 2; }
     for (t = 0; t < TG_NT; t++) {
+        /* an unreadable table is a hard error only once a manifest row needs it (tg_apply): a tree or index
+           with no manifests and no such table has nothing generated to compare */
         tg_buf[t] = tg_read(root, TG_TABLE[t], &tg_n[t]);
-        if (!tg_buf[t]) { sy_printf("TABLES_GEN\ttable %s unreadable\n", TG_TABLE[t]); return 2; }
+        if (!tg_buf[t]) { tg_n[t] = 0; tg_absent[t] = 1; }
     }
     { size_t i = 0; while (i < tg_n[0]) { if (tg_buf[0][i] == '\n') legacy++; i++; } if (legacy > 0) legacy--; }   /* data rows of batches.tsv */
     if (tg_index) {
