@@ -28,6 +28,23 @@
 3. **tapecheck 0.75 s**:稀疏表,可缓存每 unit 的 tape 指纹跨对象复用;[推断] 预期 40%。
 4. 其余(prune/construction/output)合计 7%,不动。
 
+## 2026-11-13 补测(SPEED-1,候选 unisacc.com sha e43ef36832939c7f,全表见 `build/speed-baseline.tsv`)
+
+`UNISACC_RR_TIME=1 sh ./unisacc.com tools/ratchets.cx -o IMAGE`(10 单元,单元缓存命中,2 次,最小值):
+
+| 相 | ms | 占五相合计 |
+|---|---|---|
+| e3 | 2460.4 | 55.2% |
+| lower | 798.8 | 17.9% |
+| elf | 464.7 | 10.4% |
+| units | 368.7 | 8.3% |
+| prune | 334.9 | 7.5% |
+
+- 与上表不同:工具整程序 `-o` 路由下最大相是 e3,不是 lower;上面"每个热点的一刀"的排序只对单对象 `entry.elf` 成立。
+- 冷 e2/e1、tapecheck:UNMEASURED。67 对象逐项:仍 UNMEASURED。
+- `tools/speed-probe.cx` 对 3 个 `-o` 作业三次均 rc=0 但四列全 0、`per-object.tsv` 未落盘;同命令直接跑有回执。取数缺陷未修。
+- 优化补丁:未写。前后对比:无。
+
 ## 补测工具(已写,纪元后用)
 
 `tools/speed-probe.cx`(批次 `speed-probe`,check 6/6 PASS):输入 `JOBS.tsv`(每行 `NAME<TAB>ARGV...`,
