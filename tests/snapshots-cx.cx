@@ -9,6 +9,7 @@
  * reaches this process's stderr directly. */
 #pragma unisa use cxlib.toolprep
 #pragma unisa use sys.time
+#pragma unisa use sys.fs
 static void die(const char *s){fprintf(stderr,"snapshots-cx: %s\n",s);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
 static void call(char **v,int seconds,const char *out,const char *label){
@@ -38,8 +39,13 @@ int main(int argc,char **argv){
     size_t n;char *s=cx_read(program,&n);if(!s)die("prepared fixture");
     const char *prefix="#pragma unisa use runtime.source_frame\n#define UNISA_CX_SOURCE_FRAME\n";
     FILE *f=fopen(wired,"wb");if(!f||fwrite(prefix,1,strlen(prefix),f)!=strlen(prefix)||fwrite(s,1,n,f)!=n||fclose(f))die("wired fixture");free(s);
-    if(tq_native(root,wired,wiredbin,why,sizeof why))die(why); PH("native-wired");
+    /* wired 镜像的编译(实测 6.4 秒)与 verify(6.2 秒)互相不依赖:wired 编译放到后台,同时跑 verify,
+       再 join。两边的判据一条不改:verify 仍是自有 bound 的完整复核,execute 仍要求镜像真的构建出来。 */
+    {   char *wb[]={"sh",product,wired,"-o",wiredbin,0}; int wp=tq_warm_start(root,40,wb); PH("warm-wired");
+        char *verify[]={bound,"18",toolbin,"--verify",root,material,"tests/cases/snapshot.cx",0};call(verify,20,argv[2],"verify"); PH("verify");
+        tq_warm_join(wp); PH("wired-join");
+        if(sy_exists(wiredbin)!=1)die("wired image not built");
+    }
     char *run[]={bound,"16",wiredbin,cases,0};call(run,18,argv[2],"execute"); PH("execute");
-    char *verify[]={bound,"18",toolbin,"--verify",root,material,"tests/cases/snapshot.cx",0};call(verify,20,argv[2],"verify"); PH("verify");
     puts("SNAPSHOTS_CX\tscope=source-wired-CX-ledger-operations-linux-x86_64-not-installed-or-foreign");return 0;
 }
