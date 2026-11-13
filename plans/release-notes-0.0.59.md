@@ -1,10 +1,19 @@
 # unisacc 0.0.59 -- 发布说明(草稿)
 
+<!-- [待填] 数据来源(步骤号见 agentwork/post-chain-runbook.tsv):
+ 提交X/Y/打包/七资产:步骤12/17 release-oneshot 状态与 git rev-parse;
+ APE sha/字节:步骤2 promote --check 的 NEED 行与 out/b1/REV 的 ape-receipt.txt;--version:sh APE --version;
+ 整链N/498:步骤1 bg-candidate status,PROMOTE_CHECK:步骤2;
+ 墙钟/各相/并发度:步骤3 phase-times-calc;chain-run.tsv 并行度同工具 --sim;
+ kernels-g2/g3 秒数:步骤4,chain-run.tsv 中 phase=kernels-g2/g3 的 ATTEMPT_TIME wall_ms 字段,对 90000/120000;
+ CI:步骤15;s9:步骤14;release-decide:步骤16;读回:步骤18;
+ 候选专属批:步骤8(现无现成入口,MISSING);0.0.58 的 Y 已核为 3700ef64a897050b2c592c0913daa80d8ed8a933。 -->
 状态:草稿,链与尾部结束前不是最终状态。以下带 [待填] 的项目尚无事实,不得当作已通过;未实跑的项一律写未跑。
 
 - 冻结提交 `fbdc99ca8921514fca927781a85ec93fbb5a82ec`(标签 v0.0.59-src2;父提交 v0.0.58-src `2a46e1a427`,加六个 P59R 文件与 release/candidate.tsv 的版本列;账本 C3-START5-059、C3-C-UNIT-COMPAT)。
 - 提交 X:[待填: 只含 release/candidate.tsv 的提交哈希,来自发布尾部]。
-- 提交 Y:[待填: tag v0.0.59 所指提交,来自发布尾部;本文件随 Y 提交]。
+- tag v0.0.59 所指提交:冻结提交 `fbdc99ca89`(工具写死 `--target build_rev`,由 GitHub 在公开时建在草稿 target 上;依据计划 plans/v0.0.59-unisacc.md 的 C4 节与 git rev-parse v0.0.59-src2^{} 实测 fbdc99ca89),不是提交 Y,与 0.0.58 不同。
+- 提交 Y:[待填: main 上的记录提交哈希,来自发布尾部;本文件随 Y 提交;Y 不是 tag 所指]。
 - 候选 APE `unisacc.com` sha256 与字节数:[待填: 来自 out/b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec 的 pack 结果],`--version` 实测:[待填]。
 - git 范围 `v0.0.58..Y`。
 
@@ -42,13 +51,17 @@
 
 ## 整链与预演经过(如实)
 
-本版共起链 5 次:
+本版共起链 7 次(第 7 次在跑):
 
 (1) 第 1 次:snap 相 preflight 规则钉了字面量 55000,与限值表改动冲突,链 0/498 停(修正 b9da262839,账本 C3-PREFLIGHT-FIX)。
 (2) 第 2 次:分组相的段内限时被拒,10/498 停(修正 65b5ce2565,账本 C3-STOP-059)。
 (3) 第 3 次:分组相段尾调用被拒,10/498 停(chaincall.cx,0223ddf096、9ffe37c948,账本 C3-STOP3-059)。其后先用真表干跑再起链(C3-DRY-059)。
 (4) 第 4 次:到 p3(329/498)后,在 gen2 的 468/498 因产品缺陷停(g2-lnx-x86_64-closure first-failure,账本 C3-PRODUCT-STOP-059),即上文的 gen1 拒编问题。
-(5) 第 5 次:起于 fbdc99ca8921;已记录到 p3(332/498,无 KILL、WIDEN、RESUME、BLOCKER)。最终结果:[待填: 来自 chain-run.tsv 与 chain-run 收尾行]。
+(5) 第 5 次:起于 fbdc99ca8921;已记录到 p3(332/498,无 KILL、WIDEN、RESUME、BLOCKER)。该次停于 whole-front 外层 45 秒限(同第 6 次一类,见下)。
+(6) 第 6 次:3/498 时被终止(账本 C3-STOP6-059,更正 C3-STOP6-CORRECTION):exit.tsv rc=143,实为协调者按真实 PGID 1310096 主动终止,原因是 candidate-chain.cx 多处 bound_sh_secs 用 cmd.front=45 秒外层限,gen1 前端子步骤并行负载下需 45 至 90 秒,预计在约 377/498 重蹈第 5 次。这是一次人工介入,且换了输出目录:失败目录移至 out/b1-old/fbdc-cmdfront-45s。
+(7) 第 7 次:账本 C3-START7-059,同冻结提交,新输出目录 out/b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec,守护 pgid 1557426,起前已过联合验收 C3-JOINT-ACCEPT(d64d394130、b92838acd7)。最终结果:[待填: 来自 chain-run.tsv 与 chain-run 收尾行]。
+
+人工介入与换目录登记(退出条件 (3),只列账本可核者):人工介入至少 1 次(第 6 次主动终止);换输出目录 1 次(第 6 次到第 7 次);另有第 1 至 5 次每次停后的修复再起链,各次人工处置与是否换目录:[待填: 逐次核账本后补全];BLOCKER 条数:[待填: 来自第 7 次 chain-run.tsv]。有以上任一项即不计「零接触」达成。
 
 链工具取自工作检出,冻结的是产品输入,不是链工具。
 
@@ -60,7 +73,7 @@
 | 链墙钟与各相 | [待填: 总墙钟、各相秒数、并发度] | 同上 chain-run.tsv |
 | kernels-g2、kernels-g3 | [待填: 实测秒数,对照 90 与 120 秒时限] | 同上 |
 | 打包 | [待填: release-run --pack 结果、源 SID] | [待填: 路径] |
-| 七资产 | [待填: 草稿读回逐件同字节、SHA256SUMS、release-layout --check] | [待填: 路径] |
+| 十四件资产(候选表七件加 `--prepare` 导出的六个独立切片与 standalone-sha256.tsv) | [待填: 草稿读回逐件同字节、SHA256SUMS、release-layout --check] | [待填: 路径] |
 | 同候选原生 CI | [待填: run id、verdict、pass/fail/not_run/invalid] | [待填: 路径] |
 | s9 commit 档 | [待填: 一行结论] | [待填: 路径] |
 | release-decide | [待填: 一行结论,需含 unknown 与 fail 计数] | [待填: 路径] |
@@ -87,7 +100,7 @@ win 与 osx 的真实可执行体只由同候选 CI 判定,本机为 linux 宿�
 
 - DEBT-C-STATIC-ASSERT:前端对含 `__builtin_offsetof` 的 `_Static_assert` 与数组界报 `not covered: nonconstant bound`,未修。
 - 18 个参考 C 夹具需要外部 -I 目录,不是回归,未处理。
-- check-model-decode-real 自 C 参考归档(e16028ffa1)起损坏,未修。
+- check-model-decode-real 自 C 参考归档(e16028ffa1)起损坏,已在 bf596b4484 修通(实跑 models=32 failed=0);但仍未登记批次。
 - 链工具中仍未钉住的:entry-build、source-job-wave、net-deps。
 - 对象路线上行与 C 单元按值结构体兼容推迟到 0.0.60。
 - 文档整并不属于本版。
@@ -96,7 +109,7 @@ win 与 osx 的真实可执行体只由同候选 CI 判定,本机为 linux 宿�
 
 ## 撤回与回滚
 
-撤回公开:`gh release edit v0.0.59 --draft=true -R partnernetsoftware/unisacc`;彻底撤回再删 tag:`git push origin :refs/tags/v0.0.59` 与 `git tag -d v0.0.59`,依运行手册。本机根回退到 0.0.58:`sh ./unisacc.com tools/install-ape.cx -- ROOT <v0.0.58 公开 APE> 3744eacfa6b2472de8b18ef3d64ffad6f6a47f956d62e4a43760dee6e768632e --write`。候选表回退到 0.0.58 记录:[待填: 0.0.58 发布提交 Y 的哈希,取其 release/candidate.tsv]。
+撤回公开:`gh release edit v0.0.59 --draft=true -R partnernetsoftware/unisacc`;彻底撤回再删 tag:`git push origin :refs/tags/v0.0.59` 与 `git tag -d v0.0.59`,依运行手册。本机根回退到 0.0.58:`sh ./unisacc.com tools/install-ape.cx -- ROOT <v0.0.58 公开 APE> 3744eacfa6b2472de8b18ef3d64ffad6f6a47f956d62e4a43760dee6e768632e --write`。候选表回退到 0.0.58 记录:提交 3700ef64a897050b2c592c0913daa80d8ed8a933(git show 该提交:release/candidate.tsv,已核其第 2 行为 v0.0.58)。
 
 规则:发布页正文必须与本文件逐字相同,公开后读回核对(DEBT-RELEASE-BODY-READBACK)。
 
@@ -107,8 +120,8 @@ win 与 osx 的真实可执行体只由同候选 CI 判定,本机为 linux 宿�
 - [ ] 候选 APE sha256、字节数、`--version`
 - [ ] stream 行为的 CI 与字节等价结论
 - [ ] C1 宽度回升的实测效果
-- [ ] 第 5 次链的最终结果
-- [ ] 身份表全部 [待填]:整链、墙钟与各相与并发度、kernels-g2/g3 秒数对 90/120、打包、七资产、CI run id 与 verdict、s9 结论、release-decide 一行、公开后读回
+- [ ] 第 7 次链的最终结果与人工介入全表
+- [ ] 身份表全部 [待填]:整链、墙钟与各相与并发度、kernels-g2/g3 秒数对 90/120、打包、十四件资产、CI run id 与 verdict、s9 结论、release-decide 一行、公开后读回
 - [ ] 已跑项与候选专属 PLANNED 批结果
 - [ ] 整版时长结论
 - [ ] 0.0.58 发布提交 Y 哈希(候选表回退用)
