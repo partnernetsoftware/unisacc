@@ -8,7 +8,7 @@
 
 | 事实 | 出处 | 对 `.o` 的含义 |
 |---|---|---|
-| `-c` 与 `-S` 早期都写出 **tape 文本**（编译器的汇编级 IR），不是目标文件或汇编 | `src/driveargs.cx` 的用法行、README 限制表、2026-10-01 对 `unisacc.com` 实测 | `-c` 的语义翻转分两步（§4） |
+| `-c` 与 `-S` 早期都写出 **tape 文本**（编译器的汇编级 IR），不是目标文件或汇编 | `src/driveargs.cx` 的用法行、[readme-detail 已知限制](readme-detail.md#七已知限制)、2026-10-01 对 `unisacc.com` 实测 | `-c` 的语义翻转分两步（§4） |
 | 映像是**固定地址**的两段静态文件：ELF 文本在 `0x400000+176`，数据紧随其后按页对齐；Mach-O、PE 同理各有基址 | `exec/enc/` 编码表与原 C 参考 `bk_assemble`、`bk_elf` | `.o` 里文本从 0 起、数据从 0 起，地址全部变成重定位 |
 | 代码引用数据只有两种编码：x86-64 一律 **RIP 相对**（`x_rip`，`mov/lea r64,[rip+d32]`，位移是指令最后 4 字节）；arm64 一律 **`adrp` + `add`**（`a_adrp_add`） | `exec/enc/` 与原 C 参考的全部 `x_rip`/`a_adrp_add` 调用点 | x86-64 只需 `R_X86_64_PC32`；arm64 只需 `R_AARCH64_ADR_PREL_PG_HI21` + `R_AARCH64_ADD_ABS_LO12_NC` |
 | 代码取**函数地址**（`.lea 标号`）也走同样两种编码；分支与调用（`jmp/call`、`b/bl`）是节内 PC 相对 | `bk_leaaddr`、`a_relf`、`x_rel` | x86-64 节内 RIP 相对差值与链接地址无关，不需要重定位；arm64 `adrp` 的页差取决于节基址的页内偏移，**文本目标也要重定位** |
@@ -18,7 +18,7 @@
 | 入口是 `_start`：先 `__init`（全部单元的全局初始化），再把 argc/argv 写进自己的单元，再 `call main`；不依赖 crt | `exec/parse2/` 与原 C 参考入口序言 | `.o` 导出全局 `_start`，`ld` 不需要 crt1；被 crt 启动（`main` 由 C 运行时调用）要等调用约定适配 |
 | `extern int x;` 没有定义时被**当作定义**（静默分配）；未定义函数报错 `undefined function` | 2026-10-01 用参考编译器实测 | 跨目标文件引用数据符号需要把 extern 变成 `UND` 符号，这是前端改动，排 0.0.17 |
 | 后端早期三份实现必须逐字节一致：原 Python 构造源头、原 C 参考、产品模型路由（`exec/enc/` 生成 `elf.net`）；现由 `tests/objects.cx` 与 `tests/run.cx` 对拍 | [../ARCHITECTURE.md](../ARCHITECTURE.md) 后端行、`exec/pipeline/image-stages.tsv` | `.o` 写出先在参考侧落地，产品 `exec/enc/` 跟进并纳入批次对拍 |
-| 随带 C 库以源码形式跟着编译器，按需裁剪进程序（`-ftrim-libc` 默认） | README、R11-3 | `.o` 自带它用到的库体，**不链接系统 libc**；与 glibc 共存要等符号前缀与调用约定问题一并解决 |
+| 随带 C 库以源码形式跟着编译器，按需裁剪进程序（`-ftrim-libc` 默认） | [docs/readme-detail.md](readme-detail.md)、R11-3 | `.o` 自带它用到的库体，**不链接系统 libc**；与 glibc 共存要等符号前缀与调用约定问题一并解决 |
 
 ## 2. 格式范围与三版递进
 
@@ -46,7 +46,7 @@
 
 ## 4. ELF 可重定位目标文件规格（0.0.16）
 
-**驱动语义。** `-c -b lnx/x86_64` 与 `-c -b lnx/arm64` 写出 `.o`（`-o` 给名，缺省 `a.o`）。**裸 `-c`（不带 `-b`）仍写 tape**，与 `-S` 同义——86 处套件和 README 的 ccparity 条目依赖这一点；等 Mach-O 与 COFF 的 `.o` 也能写（0.0.17 末）再把裸 `-c` 翻成“宿主目标文件”，并在 README 与 `ccparity` 同一提交里改口。`-c -b osx/*`、`-c -b win/*` 在 0.0.16 报错并指向本文（0.0.17 起参考侧写 Mach-O/COFF）。产品（`unisacc.com`）在本版对 `-c -b lnx/*` 仍写 tape，盘点表如实标“参考侧有，产品 0.0.17”。
+**驱动语义。** `-c -b lnx/x86_64` 与 `-c -b lnx/arm64` 写出 `.o`（`-o` 给名，缺省 `a.o`）。**裸 `-c`（不带 `-b`）仍写 tape**，与 `-S` 同义——86 处套件和 docs/readme-detail.md 的 ccparity 条目（第四节）依赖这一点；等 Mach-O 与 COFF 的 `.o` 也能写（0.0.17 末）再把裸 `-c` 翻成“宿主目标文件”，并在 docs/readme-detail.md 与 `ccparity` 同一提交里改口。`-c -b osx/*`、`-c -b win/*` 在 0.0.16 报错并指向本文（0.0.17 起参考侧写 Mach-O/COFF）。产品（`unisacc.com`）在本版对 `-c -b lnx/*` 仍写 tape，盘点表如实标“参考侧有，产品 0.0.17”。
 
 **布局**（全部小端，`ET_REL`，`e_machine` 62 / 183）：
 
