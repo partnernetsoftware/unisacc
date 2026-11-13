@@ -637,6 +637,13 @@ net-build-profile(5) ebab81cb99480f8b。最小 `.cx` 两组同为 bc353670548503
 - 实测(2026-11-13,最小 C `int main(void){return 0;}`,已装 unisacc.com,UNISACC_RR_TIME=1,连续 10 次,取第 2 到 10 次;负载 uptime 2.5):墙钟 119-128 ms;每次 15 行 RR_TIME,恒为 `lookup_hit=0`、`model source=inflate`,10 次 stderr 零条 `modelcache` 行;模型各相 ns(最小/中位/最大,9 次):e3 34.27/34.95/36.99 ms,e2 14.25/14.63/16.27,e1 12.90/13.09/14.54,lower 11.14/11.35/11.55,elf 4.28/4.45/4.56,prune 1.82/1.88/1.99,六相合计约 80 ms;推理 e2 2.07、e3 2.63、lower 2.07、elf 1.98、prune 1.48、e1 0.19 ms;construction 3.7 ms。stage 目录中 /tmp/unisacc-e3cache-1001 只被 strace 见到 3 次 open(.budget.lock x2 与一个 .host),没有任何 mc-* 文件被打开。UNISACC_E3CACHE 指向空目录对本入口无效(目录仍是 /tmp/unisacc-e3cache-1001)。
 - 读码定因:`src/stages.cx` 阶段装载(约 359-367 行)走 `rt_open(...ex_inflate, ex_crc32...)` + `sh_apply`,`st_stamp(stage,-1,...)` 把 rc 写死为 -1,所以「source=inflate」是硬编码标签,不代表是否命中。`mc_get` 只在 `cx/runtime/routestep.cx:60` 与 `src/executor.cx:105` 出现,而这条入口实测不打印 modelcache 行,即 SPEED-14 说的「6 hit」来自另一路径或另一版本,本入口的约 80 ms(单次 47 ms 的数量级同源)是每个进程逐阶段真 inflate + CRC,未命中缓存,不是命中后的开销。UNVERIFIED:strace -c 一次出现约 3250 次 open/read/lstat(与缓存目录 1608 项同量级),第二次 strace 仅 26 次 open,未复现,待查是否为目录扫描(淘汰/预算)。
 - 方案(只出文字,不入库):(1) 先让 st_stamp 区分 hit/inflate(把 mc 结果经 rt_open 返回出来),否则无法验收;(2) 确认 rt_open 在该入口是否调用 routestep 的 mc_get,若未调用则在 sh_apply 前对 (压缩成员 sha, 阶段) 做 mc_get,命中直接拿预解压字节,跳过 ex_inflate 与 CRC;(3) 命中的核验保持原性质:键为压缩成员 sha256(内容+适用身份),文件头存载荷 sha 并在读后复核(mc_read 已做),任何不符按 miss 回退 inflate,失败不致编译失败;(4) 预期 e3/e2/e1/lower 的 inflate 约 73 ms 降到读盘+sha 复核,验收以重建后最小 C 程序 model 合计与墙钟为准,未实测前不记数。
+- 更正(SPEED-15B,2026-11-13,local-0060 与已装 0.0.59 实测;上面两条「读码定因」「方案」的前提不成立,原文保留):
+  - 阶段装载一直走模型缓存:`src/stages.cx:359` 的 `rt_open` 即 `cx/runtime/routestep.cx:31`,第 60 行调 `mc_get`、第 70 行 `mc_put`。全 miss 的真因是缓存目录取 `$UNISACC_E3CACHE`,否则 `$TMPDIR/unisacc-e3cache-<uid>`(`cx/runtime/modelcache.cx:188-207`);每次换全新 TMPDIR 又不设 UNISACC_E3CACHE,目录跟着换。
+  - 最小 C `-c`,每次全新 TMPDIR:不设 UNISACC_E3CACHE 时每阶段 `modelcache result=miss`,墙钟 125 到 134 ms,model 合计 96.8 ms;UNISACC_E3CACHE 固定时第 2 到 4 次全 hit,墙钟 84 到 102 ms,model 合计 53.1 ms(e2 8.7、e1 7.9、e3 21.9、tapecheck 2.2、prune 1.1、lower 7.8、elf 3.5);miss 与 hit 产物 sha 相同。只跑 4 次,未做 10 次的最小与中位。
+  - 命中后的开销不在缓存里:e3 一次 strace 间隔,压缩成员 sha 0.94 ms、读 0.44 ms、载荷 sha 3.16 ms、锁加 touch 约 0.5 ms,其余约 17 ms 是 `cxmd_decode`(`cx/runtime/model_decode.cx:351`)。
+  - 解码分段(仓外打点副本,-run 执行,5 次最小,七个模型合计约 55.1 ms,绝对值高于产品内,只看比例):sequences 约 57%、states 约 41%、strings 不到 2%;e3 为 13.6/10.4/0.1 ms。没有可单独跳过的校验段。
+  - 快路径试验(热循环里 1、2 字节变长数就地解码):探针里七模型合计 55.1 -> 48.7 ms,约省 12%,瓶颈是逐元素循环的生成代码速度(e3 约 58 ns 每个 qa 元素),不是调用开销。补丁未在产品里编译、未重建、未对拍 CxModel 全量。
+  - 15 ms 目标:推算(未实测)七个载荷约 1.40 MB,仅每进程载荷 sha 约 8 ms,加键 sha、读盘、七次锁与 touch 后非解码部分已过 10 ms;在「命中仍核内容」不变时做不到明显低于 15 ms。当前不需补丁就能拿到的是固定 UNISACC_E3CACHE(96.8 -> 53.1 ms);哪些批次因换 TMPDIR 丢缓存尚未清点。
 
 (3) SPEED-16 求值栈槽基本块内 store->load 转发(慢车道)
 - 目标:只对编译器产生的求值栈槽,在同一基本块内把「存入后紧接读回」改为直接用源寄存器;用户变量槽、.frame 与 store 不动;默认关。第一步先证明求值栈槽在 tape 中可与用户槽区分且不被取址,证不出即停。
@@ -644,6 +651,27 @@ net-build-profile(5) ebab81cb99480f8b。最小 `.cx` 两组同为 bc353670548503
 - 验收:关时 8MB sort 与 sha 输出及镜像与现产品逐字节相同;开时输出逐字节相同,swap 内层静态条数 <=70(基线 95),同算法堆排序 5 次中位 <=3094 ms(基线 3867 的 80%);工具 tools/check-bench-gencode.cx。达不到就关着入库。
 - 截止:可区分性证明 15 分钟;实现单步不超过 5 分钟。
 - 禁区:不做跨块活跃性,不删 store,不吞 .frame,不改函数语义。
+- 实测(2026-11-13,本地 0060 产品 entry.elf 1019d26fb2f55029,lnx-only dev,NOT_RELEASE;探针 s8.c;计数脚本 `$CLAUDE_JOB_DIR/tmp/s16stat.cx`;未改产品输入、未重建、未出补丁):
+  - 结论:这条规则不用新写。产品已有 e4 阶段(prd.md 的 e4 行:窥孔、栈 -> 寄存器类改写),`-O2` 即走(`src/driveroute.cx:268/432` `cont = level ? "e4" : "prune"`)。`-O1` 实测 4061 ms,与默认档无差。再做一遍 tape 文本窥孔是重复建设,原型停在计数脚本。
+  - 指令构成(`-S` tape 文本,swap 循环体 = hs_swap 首个 L 标签到 jump):
+
+    | 项 | 默认档 | -O2 |
+    |---|---|---|
+    | swap 每字节总条数 | 95 | 27 |
+    | op / .frame | 75 / 20 | 27 / 0 |
+    | load64 / store64 | 21 / 11 | 11 / 1 |
+    | .ld / .st | 3 / 3 | 3 / 3 |
+    | r7 压入 / 弹出 | 10 / 10 | 0 / 0 |
+    | imm / r6 基 sub64 | 15 / 14 | 1 / 0 |
+    | 全文件行数 | 21705 | 10682 |
+    | 全文件 load64 / store64 | 3540 / 2885 | 1671 / 1029 |
+
+  - 8MB 同源堆排序(`s8.c -- hs int 8`,两档交替各 5 次,load1 约 5.0):默认档最小/中位 3901.6/3948.2 ms,-O2 2034.0/2143.5 ms,中位 -45.7%(1.84 倍);10 次 RESULT 行相同。已过本条验收线(<=70 条、<=3094 ms)。
+  - 对拍(默认档对 -O2,stdout 去 MS 行逐字节,各 1 次,6/6 相同):s8 hs rec(1860.7 -> 870.0 ms)、hs str(529.5 -> 274.7)、hs odd(827.7 -> 425.0)、lib pat(3370.2 -> 1798.9)、pq int 8(1029.2 -> 641.4)、s16stat.cx(未计时)。
+  - tape 不变量:.frame 线性平衡(深度不为负,每个 ret 与函数末为 0)两档各 65 函数 61 个 ret,违例 0;标签数两档同为 725。跳转目标悬挂引用未单独查(UNMEASURED),两档都过了产品自身的后续阶段并运行。
+  - 代价(`-o` 落盘,UNISACC_RUN_CACHE=0,墙钟各 3 次中位):s8.c 1187 -> 1953 ms(1.65 倍),tools/ratchets.cx 5527 -> 9962(1.80 倍),tools/refactor.cx 8011 -> 15460(1.93 倍);镜像 287759 -> 209935 B、446971 -> 324091 B。
+  - 判断:不把 -O2 翻成默认。日常 .cx 工具是编译主导,冷编译慢 1.65 到 1.93 倍会净亏;产品自身的控制器对象已是 `-O2` 编(`tools/chain-step.cx:1251`),这一档收益已在产品里。
+  - 下一条路:(1) 降 -O2 路由多出的编译耗时(ratchets 上两档差值约 4.4 s,未分相,RR_TIME 逐相待测),降下来才谈默认开;(2) 运行期主导的入口(基准、长跑检查)在调用处显式加 -O2;(3) `tools/check-bench-gencode.cx` 增加 unisacc -O2 一档,把 2.19 倍的口径改成「默认档 2.19 倍、-O2 档待测」。三项本次均未做。
 
 ## 本地重建 0.0.60(LOCAL-REBUILD)
 
