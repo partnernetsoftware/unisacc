@@ -534,6 +534,66 @@ e1+e3 实测每单元省 151 ms(约 338 ns/空白字节);e2 在补丁后少做 4
 (c) 前后各 5 次冷七相。风险:依赖 `-E` 文本逐字节的金样(pp-differential、c99-whitespace、UNIPP2 位置封装)须同候选重对。
 若 (b) 发现位置依赖,退路是 e1 对行首连续空白一步跳过(上限仅 e1 的 34 ms/单元,e3 的 117 ms 拿不到)。
 
+### 12b-2 补丁在产品编译路径上的等价与耗时(2026-11-13,已装 e43ef36832939c7f,副本 = `git archive` 4ea4ab8fb0,load1 1.2 至 3.7)
+
+状态:单网替换路上产物字节一致、诊断一致、七相变快,均为实测;这不是重建后的候选,六目标、正规构造链、
+金样批次均未跑,不声称 QUALIFIED。补丁仍未入库。
+
+做法(全部在作业临时目录 `tmp/s12b2/`,共享检出未动):
+- 构造器按 `tools/cxlib/sourcepackage.cx job_command` 的正规 argv 自建:`gcc -std=c99 -O2 -w -I seed seed/{gen,tbl,net}.c`;
+  每张网 gen 约 1.0 s、tbl 约 0.5 s、net 约 0.03 s,远低于 5 分钟。未用 `net-incremental-rehearsal`(它的 mutate 是固定场景,不收任意补丁)。
+- 包内 D 行实测:编译路由的 e2 是模型 0(`pp.locations`,配方 `pp --locations --shared-predefines`),`-E` 路由是模型 3
+  (`pp.text`,配方 `pp --shared-predefines`)。第一次只换了 `pp.text` 到模型 0,被拒 `malformed preprocessing locations`,属我配方选错,已改正。
+- 基线组与补丁组各重建这两张网,用 `tools/lab-loader/p3-swap.cx` 按序号替换 0 与 3,补 UNIPKG1 尾,
+  经 `UNISA_CONTAINER=PKG sh unisacc.com --models PKG ...` 运行(与 test-loader 的启动方式相同,切片换成整 APE)。
+  每次全新 TMPDIR、`UNISACC_RUN_CACHE=0`。网 sha256 前 16 位:`pp.locations` 基线 0834448a3b393921 / 补丁 12df055ca5db837f;
+  `pp.text` 基线 19864985e8a738fd / 补丁 a7a01695e8db6bc7。
+
+(1) `-E` 输出(最小 `.cx`):基线组 387,124 B 与已装产品逐字节相同;补丁组 38,647 B;两者都是 11,032 行。
+
+(2) 镜像对拍(真实编译,不经 `-E`):25/25 基线组与补丁组 sha256 前 16 位逐一相同。
+单单元 13 个:register-fixture 349ef150c635f985、ci-verdict e3a26330551c215a、release-body-diff fdfb51eadb8b4fa5、
+post-publish-check fc0290fbd3ca8eb7、check-ci-verdict 7d7edecf9ae550d7、check-post-publish-check 3e9c40afaf15b353、
+check-release-body-diff 788a958d2ff56dcb、pins-reanchor 81a45ae10e1b1ab4、check-chain-verdict f53c27f338550389、
+check-pins-reanchor 59e35ec1ea77f092(该文件工作区有他人未提交改动,故与 12b 表不同)、chain-verdict d6d5129f66b8a27e、
+safedel a86cc53a9748878c、cx0-extract 605ecc94dce3e9b6。
+多单元 12 个(括号内为 use 条数):ratchets(5) f1df15ef26618f21、ledger-add(9) 3900bdfed6198dc5、commit-own(8) f77857e1cf998f4f、
+own-diff(5) 39c5782efa50b6dd、register(10) 6f847bd625206855、refactor(9) b44545561aa232f6、edit-span(3) 252cd0435db9e390、
+net-digest(5) 7b0b569335f30c76、net-dump(4) 71f582fff50b4656、facts-gen(2) 6ee8c6a9a0fd96fe、cx-phase(9) a939fecc35af1ef1、
+net-build-profile(5) ebab81cb99480f8b。最小 `.cx` 两组同为 bc35367054850363(也等于已装产品)。
+未计入:test-loader 两组同样 rc=1(`sy_env exported by both sys.env and env`,stderr 逐字节相同,与补丁无关)。
+
+(3) 诊断对拍:8 类拒绝用例各出 `.cx` 与 `.c` 两份共 16 例,错误行之前都放了 `#define`、`#if 0` 跳过区、同行注释加指令、`#ifdef` 跳过区。
+完整 stdout+stderr+rc 在基线组、补丁组、已装产品三方逐字节相同,16/16:
+语法错 `syn:10:25: error: this is not the start of an expression`;未声明 `undecl:12:15: error: unknown identifier`;
+`#error` `err:11:3`;缺头 `inc:10:11: error: no such file for #include`;函数重定义、typedef 重定义、未闭合条件、未闭合字符串为不带位置的 reject。
+没有发现位置依赖。
+
+(4) 冷七相(`tools/ratchets.cx -o`,`UNISACC_RR_TIME=1`,两组交替各 5 次,十次镜像同 f1df15ef26618f21,每次 e2 推理 10 次即单元缓存未命中):
+
+| 相 | 基线组 最小/中位 ms | 补丁组 最小/中位 ms | 最小值之差 |
+|---|---|---|---|
+| e2(10 次) | 2445/2457 | 1262/1270 | -1183 |
+| e1(10 次) | 325/330 | 76/78 | -249 |
+| units | 370/371 | 169/176 | -201 |
+| e3 | 2390/2406 | 1617/1647 | -773 |
+| prune | 329/347 | 333/340 | 持平 |
+| lower | 803/817 | 799/842 | 持平 |
+| elf | 471/475 | 471/488 | 持平 |
+| 七相合计 | 7183/7205 | 4730/4859 | -2453(-34%) |
+| 墙钟 | 7908/7932 | 5189/5313 | -2719(-34%) |
+
+比 12b 的推算(仅 e1+e3 约 1.5 s)多,多出的是 e2 自身(少 OUT)与 units 相。
+
+(5) 未做与原因:
+- 金样批次 pp-differential、pp-negative(`tools/`,参数 `ROOT ABS_OUT HOST_CC`)、c99-whitespace(`tests/c99-whitespace.cx`,需 4 或 6 个参数)、
+  unipp2-reference(`ROOT PP_RUN PP_NET NEW_ABS_OUT`):在副本里经包装入口起了两次,都停在 `usage` rc=2(包装把 `--models` 插在工具路径前,
+  工具参数没有传到),按两次即停,未实跑,红绿未知。它们比对 `-E` 文本的,补丁后必然要重对或换金样。
+- 正规构造链重建候选、`kernel/` 重出、六目标、s9:未做。只测 lnx/x86_64 的 image 路由。
+- 重建的基线网与已装包内的不逐字节相同(包体 1,763,620 -> 1,764,343 B),但行为对拍相同;A/B 以同法重建的基线组为准。
+
+回滚:补丁只有一行,还原 `exec/pp/directive-scan-byte.tsv` 第 12 行即可;本节未改任何入库产品输入。
+
 ## 架构层高 ROI 审视(SPEED-14)
 
 条件:2026-11-13,已装 unisacc.com sha e43ef36832939c7f,HEAD 6ca621f388,load1 3.4 至 6.6(未因负载丢数据)。15 分钟窗口,只测未改;
