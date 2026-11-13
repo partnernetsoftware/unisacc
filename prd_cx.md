@@ -112,6 +112,41 @@ tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `
 
 C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个公开版且 30 天。
 
+#### C3 逐函数返回码表(S3 已落地,S4 待办)
+
+前提事实:冻结 L0-CORE-FREEZE-049 已由账本 CXS-C3-STEP1-FREEZE-NARROW 收窄为 `cx/sys cx/core`,`cx/mem`、`cx/text` 不在冻结前缀内,S3/S4 不需要解除流程。码取 prelude 的 errno 常量,与 `cx/mem/vec.cx`、`cx/mem/map.cx`、`cx/text/iter.cx` 同一约定。成功值全部不变(0);`ms_find`、`ms_rfind` 的 `miss:-1` 是「未找到」而非错误,不变。
+
+| 函数 | 现值(失败) | 新值 | 负例断言(`tools/check-cx-grow.cx`、`check-cx-slice.cx`) |
+|---|---|---|---|
+| `mg_reserve` | -1 | 空指针或 n<0 -> `-EINVAL`;容量翻倍不可表示 -> `-EOVERFLOW`;分配失败 -> `-ENOMEM` | reserve-negative-refused、reserve-null-einval、reserve-huge-eoverflow、reserve-huge-unchanged |
+| `mg_push` | -1 | 空指针 -> `-EINVAL`;扩容失败 -> `-ENOMEM` | null-buf-refused |
+| `mg_append` | -1 | 空指针、n<0、n>0 且 p 空、内部复制被拒 -> `-EINVAL`;长度和溢出或扩容失败 -> `-ENOMEM` | append-null-nonzero-refused、append-negative-len-einval、null-buf-refused |
+| `mg_move` | -1 | 空指针 -> `-EINVAL` | move-null-refused |
+| `mg_clear` | -1 | 空指针 -> `-EINVAL` | clear-null-einval |
+| `mg_pop` | -1 | 空指针 -> `-EINVAL`;空缓冲 -> `-ENOENT` | pop-empty-refused、pop-null-einval |
+| `mg_truncate` | -1 | 空指针 -> `-EINVAL`;n 不在 0..=len -> `-ERANGE` | truncate-over-refused、truncate-negative-erange、truncate-null-einval |
+| `mg_insert` | -1 | 空指针 -> `-EINVAL`;下标不在 0..=len -> `-ERANGE`;扩容失败 -> `-ENOMEM` | insert-oob-refused、insert-null-einval |
+| `mg_remove` | -1 | 空指针 -> `-EINVAL`;下标不在 0..len-1(含空缓冲)-> `-ERANGE` | remove-empty-erange、remove-oob-erange、remove-null-einval |
+| `mg_take` | -1 | 空指针 -> `-EINVAL` | take-null-refused |
+| `ms_at`、`ms_mut_at` | -1 | 空指针 -> `-EINVAL`;越界 -> `-ERANGE` | at-out-of-range、at-neg-off、at-null-einval、mut-at-out-of-range、mut-at-null-einval |
+| `ms_mut_fill` | -1 | 坏切片 -> `-EINVAL` | mut-fill-null-einval |
+| `ms_mut_copy` | -1 | 空指针或负长 -> `-EINVAL`;长度不等 -> `-ERANGE` | mut-copy-len-mismatch、mut-copy-null-einval |
+| `tx_snprintf`、`tx_vsnprintf` | C99:返回完整长度,截断不报错,编码错误为负 | 不改(见下) | - |
+
+调用者检查点(S3,全仓 14 个调用文件,`apps/csih` 为 0):
+
+- 写死 `== -1` 的只有 `tools/check-cx-grow.cx`、`tools/check-cx-slice.cx`、`tools/practice-grow.cx`,已改为精确码并加负例;`archive/` 不动。
+- `ext/textx/build.cx` 的 `sb_clear`、`sb_reserve`、`sb_truncate`、`sb_putn`、`sb_putc`、`sb_puts` 原样透传 mg 返回值;`sb_*` 属 `ext.textx`,其 0 或 -1 合同本步不变,透传处归一为 `? -1 : 0`(`check-cx-build`、`practice-build` 的 `== -1` 断言原样通过)。
+- 其余调用者只判真假或不看返回值(`tests/stream/xs-conform.cx`、`tools/read-all.cx` 等),不受影响。
+- `build/std-surface.tsv` 的 errors 列与实现仍有出入(如 `mg_truncate`、`mg_move`、`mg_clear`、`mg_take`、`ms_mut_fill` 记 `-ENOMEM`,`mg_pop` 只记 `-ENOENT`),该表由 CXS-C8 持表者按本表逐行改,本步不动。
+
+S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
+
+- (1) `tx_snprintf`、`tx_vsnprintf` 保留原符号与 C99 语义不动(`apps/csih` 有 64 个调用文件,归 csih 车道)。
+- (2) 在 `cx/text/fmt.cx` 新增 `tx_fmt(char *dst, size_t cap, const char *fmt, ...)` 与 `tx_vfmt`:成功返回写入长度(不含 NUL);`dst` 空且 cap>0、`fmt` 空 -> `-EINVAL`;输出放不下 -> `-EMSGSIZE`(此时 dst 仍截断并 NUL 结尾,不静默成功);编码错误 -> `-EILSEQ`。只新增符号,`cx.text` 升 Y 位。
+- (3) 非 csih 调用者由 `refactor.cx sites` 列出后分批迁移,每批跑 affected;csih 侧发信封由维护者按自己节奏迁移。
+- (4) 全仓 `tx_snprintf` 调用点清零后,旧符号在面表改标 legacy,再过 3 个公开版才可删;删除是破坏性改动,另占候选。
+
 ### 0.8 未决风险
 
 - (1) win 是最大缺口:核心 21 行未实现、68 格未核,且表内 win 路径入口是 A 结尾函数(按系统代码页而非 UTF-8,据单元格文字推断,未读源码)。

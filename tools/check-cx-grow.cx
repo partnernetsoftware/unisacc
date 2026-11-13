@@ -11,11 +11,19 @@ int main(void) {
     ok(b.len == 3 && b.cap >= 3 && b.data[0] == 'a' && b.data[2] == 'c', "push-content");
     ok(mg_append(&b, "def", 3) == 0 && b.len == 6 && b.data[5] == 'f', "append");
     ok(mg_append(&b, 0, 0) == 0 && b.len == 6, "append-empty");
-    ok(mg_append(&b, 0, 1) == -1 && b.len == 6, "append-null-nonzero-refused");
+    ok(mg_append(&b, 0, 1) == -EINVAL && b.len == 6, "append-null-nonzero-refused");
+    ok(mg_append(&b, "x", -1) == -EINVAL && b.len == 6, "append-negative-len-einval");
     ok(mg_reserve(&b, 100) == 0 && b.cap >= 100, "reserve-grow");
     ok(mg_reserve(&b, 0) == 0 && mg_reserve(&b, 50) == 0 && b.len == 6, "reserve-no-shrink-no-len-change");
-    ok(mg_push(0, 'x') == -1 && mg_append(0, "x", 1) == -1, "null-buf-refused");
-    ok(mg_reserve(&b, -1) == -1, "reserve-negative-refused");
+    ok(mg_push(0, 'x') == -EINVAL && mg_append(0, "x", 1) == -EINVAL, "null-buf-refused");
+    ok(mg_reserve(&b, -1) == -EINVAL, "reserve-negative-refused");
+    ok(mg_reserve(0, 1) == -EINVAL, "reserve-null-einval");
+    {
+        /* CXS-C3 S3: a capacity no doubling can reach is -EOVERFLOW, and b is unchanged */
+        long cap0 = b.cap, len0 = b.len; unsigned char *d0 = b.data;
+        ok(mg_reserve(&b, 0x7fffffffffffffffL) == -EOVERFLOW, "reserve-huge-eoverflow");
+        ok(b.cap == cap0 && b.len == len0 && b.data == d0, "reserve-huge-unchanged");
+    }
     {
         /* amortized: 1000 pushes stay linear, not 1000 reallocs */
         mg_buf g; int i, all = 1;
@@ -59,7 +67,7 @@ int main(void) {
         mg_free(&s);  /* no-op: source already zeroed */
         mg_free(&d);
         ok(mg_move(&d, &d) == 0, "move-self-noop");
-        ok(mg_move(0, &s) == -1 && mg_move(&d, 0) == -1, "move-null-refused");
+        ok(mg_move(0, &s) == -EINVAL && mg_move(&d, 0) == -EINVAL, "move-null-refused");
         {
             /* occupied dst is dropped first (Rust assignment, not a leak) */
             mg_buf a, c;
@@ -78,7 +86,7 @@ int main(void) {
         mg_append(&t, "abc", 3);
         ok(mg_take(&t, &p, &n, &c) == 0 && n == 3 && p[0] == 'a' && p[2] == 'c', "take-hands-out");
         ok(t.data == 0 && t.len == 0 && t.cap == 0, "take-zeros");
-        ok(mg_take(&t, 0, &n, &c) == -1, "take-null-refused");
+        ok(mg_take(&t, 0, &n, &c) == -EINVAL, "take-null-refused");
         if (p) mm_free(p);
     }
     {
@@ -87,13 +95,24 @@ int main(void) {
         mg_append(&t, "abcd", 4);
         ok(mg_pop(&t, &c) == 0 && c == 'd' && t.len == 3, "pop-last");
         ok(mg_truncate(&t, 2) == 0 && t.len == 2 && t.data[0] == 'a', "truncate");
-        ok(mg_truncate(&t, 9) == -1 && t.len == 2, "truncate-over-refused");
+        ok(mg_truncate(&t, 9) == -ERANGE && t.len == 2, "truncate-over-refused");
+        ok(mg_truncate(&t, -1) == -ERANGE && t.len == 2, "truncate-negative-erange");
+        ok(mg_truncate(0, 0) == -EINVAL, "truncate-null-einval");
         ok(mg_clear(&t) == 0 && t.len == 0 && t.cap >= 2, "clear-keeps-cap");
-        ok(mg_pop(&t, &c) == -1, "pop-empty-refused");
+        ok(mg_clear(0) == -EINVAL, "clear-null-einval");
+        ok(mg_pop(&t, &c) == -ENOENT, "pop-empty-refused");
+        ok(mg_pop(0, &c) == -EINVAL && mg_pop(&t, 0) == -EINVAL, "pop-null-einval");
+        ok(mg_remove(&t, 0, &c) == -ERANGE, "remove-empty-erange");
         mg_append(&t, "ace", 3);
         ok(mg_insert(&t, 1, 'b') == 0 && t.len == 4 && t.data[1] == 'b' && t.data[3] == 'e', "insert-middle");
         ok(mg_remove(&t, 1, &c) == 0 && c == 'b' && t.len == 3 && t.data[1] == 'c', "remove-middle");
-        ok(mg_insert(&t, 9, 'z') == -1 && t.len == 3, "insert-oob-refused");
+        ok(mg_insert(&t, 9, 'z') == -ERANGE && t.len == 3, "insert-oob-refused");
+        ok(mg_insert(0, 0, 'z') == -EINVAL, "insert-null-einval");
+        ok(mg_remove(&t, 3, &c) == -ERANGE && mg_remove(&t, -1, &c) == -ERANGE && t.len == 3, "remove-oob-erange");
+        ok(mg_remove(&t, 0, 0) == -EINVAL && mg_remove(0, 0, &c) == -EINVAL && t.len == 3, "remove-null-einval");
+        /* no failure is a bare -1 (EPERM): the codes are distinct and all below zero */
+        ok(-EINVAL < 0 && -ERANGE < 0 && -ENOENT < 0 && -ENOMEM < 0 && -EOVERFLOW < 0
+           && EINVAL != ERANGE && EINVAL != ENOENT && ERANGE != ENOENT && ENOMEM != EOVERFLOW, "codes-distinct-negative");
         mg_free(&t);
     }
     mg_free(&b);

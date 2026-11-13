@@ -10,7 +10,7 @@
      ms_is_none(s)         1 when s is absent, 0 for a real (even empty) borrow
      ms_span(p, n)        borrow n bytes at p; invalid args give ms_none
      ms_of(b)             borrow the whole contents of a grow buffer
-     ms_at(s, off, n)     sub-slice s[off..off+n); 0, or -1 when out of range
+     ms_at(s, off, n)     sub-slice s[off..off+n); 0, -EINVAL (null), -ERANGE (out of range)
      ms_len(s)            the length
      ms_eq(a, b)          1 when the two spans are byte-equal
      ms_find(s, needle)   offset of needle in s, or -1
@@ -59,7 +59,8 @@ long ms_len(const ms_slice *s) {
 }
 
 int ms_at(const ms_slice *s, long off, long n, ms_slice *out) {
-    if (!s || !out || off < 0 || n < 0 || off > s->n || n > s->n - off) return -1;
+    if (!s || !out) return -EINVAL;
+    if (off < 0 || n < 0 || off > s->n || n > s->n - off) return -ERANGE;
     out->p = s->p + off;
     out->n = n;
     return 0;
@@ -133,24 +134,27 @@ long ms_mut_len(const ms_slice_mut *s) {
 }
 
 int ms_mut_at(const ms_slice_mut *s, long off, long n, ms_slice_mut *out) {
-    if (!s || !out || off < 0 || n < 0 || off > s->n || n > s->n - off) return -1;
+    if (!s || !out) return -EINVAL;
+    if (off < 0 || n < 0 || off > s->n || n > s->n - off) return -ERANGE;
     out->p = s->p + off;
     out->n = n;
     return 0;
 }
 
-/* Fill the whole mutable slice with BYTE & 255. 0, or -1 on a bad slice. */
+/* Fill the whole mutable slice with BYTE & 255. 0, or -EINVAL on a bad slice. */
 int ms_mut_fill(ms_slice_mut *s, int byte) {
     long i;
-    if (!s || s->n < 0 || (s->n > 0 && !s->p)) return -1;
+    if (!s || s->n < 0 || (s->n > 0 && !s->p)) return -EINVAL;
     for (i = 0; i < s->n; i++) s->p[i] = (unsigned char)(byte & 255);
     return 0;
 }
 
-/* Copy the immutable SRC into DST (both must be the same length). 0, or -1. */
+/* Copy the immutable SRC into DST (both must be the same length). 0, -EINVAL (null
+   or negative length), -ERANGE (length mismatch). */
 int ms_mut_copy(ms_slice_mut *dst, const ms_slice *src) {
     long i;
-    if (!dst || !src || dst->n != src->n || dst->n < 0) return -1;
+    if (!dst || !src || dst->n < 0) return -EINVAL;
+    if (dst->n != src->n) return -ERANGE;
     for (i = 0; i < dst->n; i++) dst->p[i] = src->p[i];
     return 0;
 }
