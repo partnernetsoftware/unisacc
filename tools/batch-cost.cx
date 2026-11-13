@@ -1,0 +1,154 @@
+/* tools/batch-cost.cx -- 只读测量: 读 out 下 affected- 开头目录里的 .log, 每份日志一行 TSV, 末行汇总.
+ *   sh ./unisacc.com tools/batch-cost.cx -- [--dir OUT] [--glob 目录名前缀,默认 affected-] [--top N]
+ * 行: BATCH_COST id wall_s mat_hit mat_built mat_failed kit warm log
+ * 判据只用日志里真有的字段, 没有就写 UNMEASURED, 不编数:
+ *   wall_s     日志里的 elapsed_ms=N (affected 目前只打 stdout 不落盘, 故多数 UNMEASURED)
+ *   mat_hit    PREPARED 行的 reused=N; mat_built = units-reused; mat_failed 日志无此字段, 恒 UNMEASURED
+ *   kit        含 tlib=fallback -> fallback; 含 PREBUILD 行 -> prebuilt; 否则 UNMEASURED
+ *   warm       PREPARED 行 reason=fresh -> cold, reason=identity-hit -> hot; 否则 UNMEASURED
+ * 末行 BATCH_COST_SUMMARY: 份数、中位数、30 秒以上份数、各段已测份数/总数.
+ * --top N 另打印 N 行 TOP(按墙钟降序, 未测的排后). 不写任何文件. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXREC 1024
+typedef struct { char id[200]; long wall_ms, prep_ms, link_ms, run_ms; long hit; long built; int kit; int warm; char log[600]; } rec_t;
+static rec_t recs[MAXREC];
+static int nrec;
+static int order[MAXREC];
+
+/* 值: key 之后到空白/制表/换行的数字; 找不到 -1 */
+static long kv_num(const char *s, long n, const char *key) {
+    long kn = tx_len(key, 64), i = tx_find(s, n, key, kn), v = 0, d = 0;
+    if (i < 0) return -1;
+    for (i += kn; i < n && s[i] >= '0' && s[i] <= '9'; i++) { v = v * 10 + (s[i] - '0'); d++; }
+    return d ? v : -1;
+}
+
+static void scan(rec_t *r, const char *s, long n) {
+    long i, units, reused, p;
+    r->wall_ms = kv_num(s, n, "total_ms=");
+    if (r->wall_ms < 0) r->wall_ms = kv_num(s, n, "elapsed_ms=");
+    r->prep_ms = kv_num(s, n, "prep_ms=");
+    r->link_ms = kv_num(s, n, "link_ms=");
+    r->run_ms = kv_num(s, n, "run_ms=");
+    r->hit = r->built = -1;
+    r->warm = 0;
+    r->kit = 0;
+    /* 只看以 PREPARED 开头的行 */
+    for (i = 0; i < n;) {
+        long e = i;
+        while (e < n && s[e] != '\n') e++;
+        if (e - i >= 8 && mm_same(s + i, "PREPARED", 8)) {
+            units = kv_num(s + i, e - i, "units=");
+            reused = kv_num(s + i, e - i, "reused=");
+            if (units >= 0 && reused >= 0) { r->hit = reused; r->built = units - reused; }
+            if (tx_find(s + i, e - i, "reason=fresh", 12) >= 0) r->warm = 1;
+            else if (tx_find(s + i, e - i, "reason=identity-hit", 19) >= 0) r->warm = 2;
+        }
+        if (e - i >= 8 && mm_same(s + i, "PREBUILD", 8)) r->kit = 2;
+        i = e + 1;
+    }
+    p = tx_find(s, n, "tlib=fallback", 13);
+    if (p >= 0) r->kit = 1;
+}
+
+static void add_log(const char *dir, const char *name, long nn) {
+    unsigned char *buf;
+    int64_t n;
+    rec_t *r;
+    if (nrec >= MAXREC || nn < 5 || !mm_same(name + nn - 4, ".log", 4)) return;
+    r = &recs[nrec];
+    (void)mm_fill(r, (long)sizeof *r, 0, (long)sizeof *r);
+    if (cx_fmt(r->log, sizeof r->log, "%s/%s", dir, name)) return;
+    if (nn - 4 >= (long)sizeof r->id || mm_copy(r->id, (long)sizeof r->id, name, nn - 4)) return;
+    r->id[nn - 4] = 0;
+    if (sy_read_file(r->log, &buf, &n, 8 << 20) < 0) return;
+    scan(r, (const char *)buf, (long)n);
+    mm_free(buf);
+    nrec++;
+}
+
+static void scan_dir(const char *dir) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir) != 0) return;
+    while (sy_dir_next(&d) == 1) if (d.kind == 'f') add_log(dir, d.name, d.name_n);
+    sy_dir_close(&d);
+}
+
+static void fld(long v, char *out, int cap) {
+    if (v < 0) cx_fmt(out, cap, "UNMEASURED");
+    else cx_fmt(out, cap, "%ld", v);
+}
+
+static int opt(const char *a, const char *b) { return tx_same(a, tx_len(a, 256), b, tx_len(b, 256)); }
+
+static int ms_key(int i) { return recs[i].wall_ms; }
+
+int main(int argc, char **argv) {
+    const char *dir = "out", *glob = "affected-";
+    long top = 0, gl, i, j, measured = 0, over30 = 0, nmat = 0, nkit = 0, nwarm = 0, med = -1, link_sum = 0, run_sum = 0, nphase = 0;
+    int a;
+    sy_dir_t d;
+    int ms[MAXREC], nm = 0;
+    for (a = 1; a < argc; a++) {
+        if (opt(argv[a], "--dir") && a + 1 < argc) dir = argv[++a];
+        else if (opt(argv[a], "--glob") && a + 1 < argc) glob = argv[++a];
+        else if (opt(argv[a], "--top") && a + 1 < argc) { top = 0; for (const char *q = argv[++a]; *q >= '0' && *q <= '9'; q++) top = top * 10 + (*q - '0'); }
+        else { sy_printf("usage: batch-cost.cx -- [--dir OUT] [--glob PREFIX] [--top N]\n"); return 2; }
+    }
+    gl = tx_len(glob, 256);
+    if (sy_dir_open(&d, dir) == 0) {
+        while (sy_dir_next(&d) == 1) {
+            char sub[1024];
+            if (d.kind != 'd' || d.name_n < gl || !mm_same(d.name, glob, gl)) continue;
+            if (cx_fmt(sub, sizeof sub, "%s/%s", dir, d.name)) continue;
+            scan_dir(sub);
+        }
+        sy_dir_close(&d);
+    }
+    for (i = 0; i < nrec; i++) order[i] = (int)i;
+    for (i = 1; i < nrec; i++) {   /* 插入排序: 墙钟降序, 未测在后 */
+        int k = order[i];
+        for (j = i - 1; j >= 0 && ms_key(order[j]) < ms_key(k); j--) order[j + 1] = order[j];
+        order[j + 1] = k;
+    }
+    for (i = 0; i < nrec; i++) {
+        rec_t *r = &recs[order[i]];
+        char w[32], h[32], b[32], ph[96];
+        if (r->wall_ms >= 0) { cx_fmt(w, sizeof w, "%ld.%03ld", r->wall_ms / 1000, r->wall_ms % 1000); measured++; ms[nm++] = (int)r->wall_ms; if (r->wall_ms >= 30000) over30++; }
+        else cx_fmt(w, sizeof w, "UNMEASURED");
+        if (r->prep_ms >= 0 || r->link_ms >= 0 || r->run_ms >= 0) {
+            cx_fmt(ph, sizeof ph, "prep=%ld,link=%ld,run=%ld", r->prep_ms, r->link_ms, r->run_ms);
+            if (r->link_ms > 0) link_sum += r->link_ms, nphase++;
+            if (r->run_ms > 0) run_sum += r->run_ms;
+        } else cx_fmt(ph, sizeof ph, "UNMEASURED");
+        fld(r->hit, h, sizeof h);
+        fld(r->built, b, sizeof b);
+        if (r->hit >= 0) nmat++;
+        if (r->kit) nkit++;
+        if (r->warm) nwarm++;
+        sy_printf("BATCH_COST\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r->id, w, h, b, "UNMEASURED",
+                  r->kit == 1 ? "fallback" : r->kit == 2 ? "prebuilt" : "UNMEASURED",
+                  r->warm == 1 ? "cold" : r->warm == 2 ? "hot" : "UNMEASURED", ph, r->log);
+    }
+    for (i = 1; i < nm; i++) { int k = ms[i]; for (j = i - 1; j >= 0 && ms[j] > k; j--) ms[j + 1] = ms[j]; ms[j + 1] = k; }
+    if (nm) med = ms[nm / 2];
+    for (i = 0; i < top && i < nrec; i++) {
+        rec_t *r = &recs[order[i]];
+        if (r->wall_ms >= 0) sy_printf("TOP\t%ld\t%s\t%ld.%03ld\n", i + 1, r->id, r->wall_ms / 1000, r->wall_ms % 1000);
+        else sy_printf("TOP\t%ld\t%s\tUNMEASURED\n", i + 1, r->id);
+    }
+    if (nphase) sy_printf("BATCH_COST_PHASES\tlogs_with_phases=%ld\tlink_sum_ms=%ld\tlink_avg_ms=%ld\trun_sum_ms=%ld\trun_avg_ms=%ld\n",
+                          nphase, link_sum, link_sum / nphase, run_sum, nphase ? run_sum / nphase : 0L);
+    if (med >= 0) sy_printf("BATCH_COST_SUMMARY\tlogs=%d\tmedian_s=%ld.%03ld\tover30s=%ld\twall_measured=%ld/%d\tmaterials_measured=%ld/%d\tkit_measured=%ld/%d\twarm_measured=%ld/%d\n",
+                            nrec, med / 1000, med % 1000, over30, measured, nrec, nmat, nrec, nkit, nrec, nwarm, nrec);
+    else sy_printf("BATCH_COST_SUMMARY\tlogs=%d\tmedian_s=UNMEASURED\tover30s=0\twall_measured=0/%d\tmaterials_measured=%ld/%d\tkit_measured=%ld/%d\twarm_measured=%ld/%d\n",
+                   nrec, nrec, nmat, nrec, nkit, nrec, nwarm, nrec);
+    return 0;
+}

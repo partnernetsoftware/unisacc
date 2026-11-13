@@ -73,6 +73,7 @@ static int tlib_step(const char *script,char *const w[],int secs){
 }
 static const char *tlib_why=0;   /* set only when a listed entry was attempted and fell back to source */
 static int tlib_rc=0;
+static int tlib_mode;   /* 1 the kit already had this image (hot), 2 a kit refresh was needed (cold), 0 fallback */
 static int tlib_image(const char *entry,char *img,size_t cap){
  char bound[4400],tool[4400],product[4400],kitdir[4400];long t0=sy_now_ms();int tries;
  if(tp_prep_forbidden()||!tlib_listed(selected.entry))return 0;
@@ -85,7 +86,7 @@ static int tlib_image(const char *entry,char *img,size_t cap){
   char *kw[]={bound,product,"tools/tlib.cx","kit",0};
   int rc=sy_exists(tool)==1?tlib_step("[ -x \"$3\" ] || exit 7; exec \"$2\" \"$1\" \"$3\" prep \"$4\" -o \"$5\" --root \"$6\"",pw,20):7;
   tlib_rc=rc;
-  if(!rc&&sy_exists(img)==1)return 1;
+  if(!rc&&sy_exists(img)==1){if(tries)tlib_mode=2;else if(!tlib_mode)tlib_mode=1;return 1;}
   if(tries){tlib_why="link-failed";break;}
   if(sy_now_ms()-t0>40000){tlib_why="kit-refresh-timeout";break;}
   if(tlib_step("exec \"$2\" \"$1\" sh \"$3\" \"$4\" -- \"$5\"",kw,25)!=0){tlib_why="kit-refresh-failed";break;}
@@ -108,14 +109,15 @@ int main(int argc,char **argv){
  args[na++]=entry;args[na++]="--";int argbase=na;
  if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-argbase]);args[na]=storage[na-argbase];na++;if(!end)break;at=end+1;}}
  if(np_subreaper()<0)fprintf(stderr,"run-batch: no child-subreaper\n");   /* orphans of a killed tree land here, not on init */
- args[na]=0;np_result result={0};char reason[1200];
+ args[na]=0;np_result result={0};char reason[1200];long t_prep=sy_now_ms(),t_link,t_run,t_hash;
  /* a listed entry runs as its tlib-linked image; the link time comes out of the batch's own budget */
  char timg[4400];long tl0=sy_now_ms();char **run_args=args;char *targs[72];int via_tlib=0;
  if(tx_eqz(selected.mode,"SOURCE")&&tx_eqz(selected.headers,"product")&&tlib_image(entry,timg,sizeof timg)){
   int k=0,i;targs[k++]=timg;for(i=argbase;i<na;i++)targs[k++]=args[i];targs[k]=0;run_args=targs;via_tlib=1;}
  if(!via_tlib&&tlib_why)fprintf(stderr,"run-batch: tlib=fallback:%d:%s\n",tlib_rc,tlib_why);
  {long spent=(sy_now_ms()-tl0)/1000;seconds=spent>=seconds-3?3:(int)(seconds-spent);}
- int transport=np_run(run_args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
+ t_link=sy_now_ms();int transport=np_run(run_args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
+ t_run=sy_now_ms();
  if(via_tlib){(void)sy_unlink(timg);fprintf(stderr,"run-batch: entry linked from the tlib kit\nrun-batch: tlib=linked\n");}
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
     caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
@@ -130,5 +132,11 @@ int main(int argc,char **argv){
  int timed_out=transport&&!strncmp(reason,"subprocess.TimeoutExpired",25)&&result.residue==0;   /* a survivor is a FAIL, not UNKNOWN */
  printf("BATCH_HEADERS\t%s\t%s\n",selected.id,selected.headers);
  printf("BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\theaders=%s\tscope=actual-one-batch-no-cached-result\n",selected.id,ok?"PASS":timed_out?"UNKNOWN":"FAIL",result.rc,transport,selected.expect+4,before,selected.headers);
+ /* 分相毫秒,仅给 tools/batch-cost.cx 汇总,不参与判定:prep=进程起读到 argv 就绪,link=tlib 链接,
+   run=批本体,norm=摘要与清理。kit=hot 表示 kit 已有该镜像,cold 表示这次重建了 kit,fallback 表示走了源码路径。
+   先取 one 再打印,四个分相与 total 出自同一时刻,不会自相矛盾。 */
+ {long now=sy_now_ms(),prep=t_link-t_prep,link=t_run-t_link,run=now-t_run,total=now-t_prep;
+  printf("BATCH_TIMING\tid=%s\tprep_ms=%ld\tlink_ms=%ld\trun_ms=%ld\tnorm_ms=%ld\ttotal_ms=%ld\tkit=%s\n",
+         selected.id,prep,link,run,total-link-run-prep,total,via_tlib?(tlib_mode==2?"cold":"hot"):"fallback");}
  if(transport)fprintf(stderr,"run-batch: child transport %s\n",reason);np_free(&result);return ok?0:timed_out?3:1;
 }
