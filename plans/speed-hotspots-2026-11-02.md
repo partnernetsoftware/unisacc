@@ -210,6 +210,7 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
   - 对拍 [实测]:rec(16 字节结构 50 万)、str(指针加 strcmp 20 万,含重复)、odd(7 字节 30 万)、pat(6 种病态分布各 100 万)四程序,unisacc lib/hs/pq 与 gcc-O0 lib/pq 五路 stdout 哈希全部相同;耗时 rec 2120 至 740,str 589 至 151,odd 880 至 424,pat 7867 至 3228 ms。
   - 热循环构成 [实测,tape 行静态计数,未反汇编 x86]:swap 内层每字节 unisacc 75 条 op 加 20 条 .frame(load 24,store 14,其中求值栈压入/弹出各 10;imm 15;以 r6 为基的槽地址 sub64 14),gcc-O0 22 条(load 14,store 4)。前三项差异:求值栈往返 40 条(含 .frame),槽地址 imm 加 sub64 共 28 条,其余 27 对 22。微基准:8800 万次比较调用 1127 对 423 ms,4000 万次 4 字节 swap 1746 对 605 ms。
   - 未做:堆排序内 3867 ms 只测到比较 81607047 次(按微基准单价折算约 1045 ms,属推算),sift 与 swap 未分开计时;perf 被 perf_event_paranoid=4 挡住。include/stdlib.h 的补丁未出,kernel/unisa_headers.inc 需随产品重建;等值键的相对顺序会变(qsort 本不稳定);4/8 字节按字交换假定可非对齐访问,六目标未验。
+  - 已落地(SPEED-10,2026-11-13):include/stdlib.h 的 qsort 改为内省排序(_unisa_qintro/_unisa_qins/_unisa_qswap,_unisa_hsort 保留堆排序作回落);检查 tools/check-qsort-intro.cx;已装产品内嵌头仍是旧堆排序,产品重建后才生效;8MB int 前后 5 次最小 4235 -> 1096 ms。
   - 结论:先换运行库 qsort(收益 4.18 倍,已实测),槽级活跃性只针对剩下的 2.19 倍,其验收基线应改为同算法对照。
 - 目标:单基本块槽级活跃性,默认关;开时只删可证明的 load,保留 store 与 .frame。不重做 2.9% 直通。
 - 写域:src/stages.cx;cx/compiler/**(lower 之后的 tape 文本变换)。禁区:cx/sys、cx/core、apps/csih、ujs。
@@ -277,3 +278,56 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
   - 五相和对 first:回执合计与墙钟差在 15% 内。run-startup-bench 本身未跑(它按 8 s 界四次并有源身份观测);此处用 sh ./unisacc.com 直接对同形程序,不是该工具的输出。
 
 测量总则:每项用上表点名的工具,对照 build/speed-baseline.tsv 的 min 列。新数追加行,不改旧行。未跑记 UNMEASURED。
+
+## 编译相微重构(SPEED-12,2026-11-13,已装 unisacc.com sha e43ef36832939c7f,HEAD 3e34166ffe)
+
+状态:只交实测与定因,微重构补丁未写,字节一致证明未做,不声称变快。15 分钟窗口内未做私有重建。
+
+(1) 七相冷编译(`UNISACC_RR_TIME=1 sh ./unisacc.com tools/ratchets.cx -o`,全新 TMPDIR,4 次,load 3.1 至 3.9,
+四次镜像 sha256 前 16 位同为 48487408a68bb0e2;用 `tools/cx-phase.cx --parse` 汇总):
+
+| 相 | 调用次数 | 最小 ms | 中位 ms | 解压装载 ms |
+|---|---|---|---|---|
+| e2 | 10 | 2393 | 2484 | 94 至 104 |
+| e3 | 1 | 2363 | 2410 | 38 至 39 |
+| lower | 1 | 809 | 815 | 14 至 19 |
+| elf | 1 | 480 | 486 | 7 至 9 |
+| units | 1 | 351 | 362 | 4 至 5 |
+| prune | 1 | 320 | 339 | 3 至 4 |
+| e1 | 10 | 319 | 326 | 85 至 91 |
+| 合计 | 25 | 7051 | 7303 | 249 至 266 |
+
+(2) 函数级分解:UNMEASURED,且按现结构在 cx 层量不出来。读码事实:七相全部是同一条调用链
+`src/stages.cx st_span -> cx/runtime/runexec.cx ex_ri_exec -> src/executor.cx ex_exec -> core_run`
+(`exec/c/asm/run_x86_64.S` 268 行,加冻结的 `cx/core/execute.cx`),每相一次 core_run 解释该相的网;
+lower/elf/units/prune 不是 cx 或 C 函数,相内没有可打点的 cx 函数。`UNISACC_PROFILE=1` 实测只出
+`PROFILE 相 -1 ns`(步数传 -1),没有步数。所以「每相前三函数」这张表交不出,要得到相内分解必须在
+core_run 里加按网节点或按 op 的计数(改冻结的 cx/core 与汇编内核,需重建)。
+
+(3) 空白处理的线性度与常数(实测,`.c` 文件 = N 字节空格 + 一行 main,`UNISACC_RUN_CACHE=0`,各 3 次取最小 ms):
+
+| N 空格字节 | e2 | e1 | e3 | prune | lower | elf |
+|---|---|---|---|---|---|---|
+| 0 | 2.0 | 0.18 | 2.9 | 1.56 | 2.25 | 2.10 |
+| 100,000 | 32.0 | 7.6 | 18.3 | 1.55 | 2.27 | 2.20 |
+| 200,000 | 67.2 | 13.9 | 30.5 | 1.54 | 2.37 | 2.03 |
+| 400,000 | 126.3 | 28.3 | 59.1 | 1.58 | 2.43 | 2.32 |
+| 400,000 换行 | 153.6 | 28.3 | 62.4 | 1.61 | 2.61 | 2.32 |
+
+- 实测结论:三相对空白都是线性的,没有 O(n^2);但常数很大:每空白字节 e2 约 311 ns、e1 约 70 ns、
+  e3 约 140 ns,合计约 520 ns(换行约 610 ns)。e3 也随空白字节数涨,说明空白没有在 e1 被吃掉,一路带到 parse。
+- [推算,未实测] 每个 `.cx` 单元前导的 e2 输出 321,789 B 中约 98% 是等长空白,按上面常数约 160 ms/单元,
+  10 单元约 1.6 s,占七相合计的两成多;与 SPEED-1C 实测二(201.2 -> 27.6 ms)方向一致。
+- prune/lower/elf 不随空白变,它们的 809/480/351/320 ms 由整程序规模决定,相内原因 UNMEASURED。
+
+(4) 候选改动(都改产品输入,须重建;均未写补丁、未验证):
+
+| 热点 | 改哪里 | 依据 | 状态 |
+|---|---|---|---|
+| e2 对被裁函数体出等长空白 | E2 网的事实表(`exec/facts/pp-gen.tsv`、`exec/facts/pp-autoinc-gen.tsv`,裁剪体在 `exec/pp/ftrim-libc-body-*`)经生成器重出,被裁区只留换行 | 上表 e2 311 ns/B | 具体行未定位,UNVERIFIED |
+| e1 对连续空白逐字节走网 | `exec/facts/lex-gen.tsv` 的空白类转移,连续空白一步跳过 | 上表 e1 70 ns/B、e3 140 ns/B | 未定位,UNVERIFIED |
+| 相内无剖析 | core_run 加按 op 计数(冻结域) | (2) | 需项目所有者解冻 cx/core 才能做 |
+
+落地步骤(交集成者排候选):改事实表 -> `tools/facts-gen.cx --check` -> 正规构造链重建候选 -> 隐式前导路径上对
+10 个以上 `tools/*.cx` 对拍镜像 sha256(行号与诊断位置必须不变,只留换行即为此)-> 前后各 5 次冷七相。
+测量材料在作业临时目录 `tmp/s12/`(r1..r4.err、lin/),未入库。
