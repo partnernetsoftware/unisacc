@@ -5,6 +5,8 @@
  * Output PASS/FAIL and CHECK_STABLE_EVAL; exit 0 iff failed==0. */
 #pragma unisa use cxlib.toolprep
 #define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "check-stable-eval: format error\n"); exit(2); } } while (0)
+#pragma unisa use cxlib.surfline
+static sl_line pl;
 static int failed, checks;
 static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tstable-eval.%s\n", ok ? "PASS" : "FAIL", n); }
 static int sh(const char *cmd, char *out, int cap) {
@@ -130,6 +132,25 @@ int main(int argc, char **argv) {
     ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS11\tFAIL"), "s11-missing-close-fails");
     put(sspath, SS_OWNOK);
     ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS11\tok"), "s11-close-row-ok");
+    {   char evp[2800], extra[2900], l1[300], l2[300];
+        SP(evp, sizeof evp, "%s/build/surf.tsv", fix);
+        SP(extra, sizeof extra, "--evidence '%s/build' fx.a", fix);
+        /* no surf.tsv: every evidence clause stays UNKNOWN */
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS6\tUNKNOWN") && has(out, "CRITERION\tfx.a\tS12\tUNKNOWN"), "evidence-absent-unknown");
+        if (sl_make(l1, sizeof l1, "fx.a", "S6", "f_one", "ok", "b1", "aa11") < 0 ||
+            sl_make(l2, sizeof l2, "fx.a", "S7", "f_one", "FAIL", "b2", "bb22") < 0) { printf("FAIL\tsurfline-make\n"); return 2; }
+        { char both[700]; SP(both, sizeof both, "%s%s", l1, l2); put(evp, both); }
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS6\tok") && has(out, "CRITERION\tfx.a\tS7\tFAIL") &&
+           has(out, "CRITERION\tfx.a\tS8\tUNKNOWN") && !has(out, "CRITERION\tfx.a\tS8\tok"), "evidence-ok-fail-unknown");
+        /* evidence names a row that std-surface does not have: conflict -> FAIL, never ok */
+        if (sl_make(l1, sizeof l1, "fx.a", "S9", "f_ghost", "ok", "b1", "aa11") < 0) return 2;
+        put(evp, l1);
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS9\tFAIL") && !has(out, "CRITERION\tfx.a\tS9\tok"), "evidence-row-conflict-fails");
+        put(evp, "SURF\tfx.a\tS1\tf_one\tok\n");
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS1\tFAIL") && !has(out, "CRITERION\tfx.a\tS1\tok"), "evidence-malformed-fails");
+        ck(sl_parse("SURF\ta\tS1\t-\tok\tb\th", 18, &pl) == 1 && sl_parse("x\ty", 3, &pl) == 0 &&
+           sl_make(l1, sizeof l1, "a", "S1", "r", "", "b", "h") < 0, "surfline-parse-make");
+    }
     SP(cmd, sizeof cmd, "mv '%s' '%s.moved'", sspath, sspath);
     sh(cmd, out, sizeof out);
     ck(run(out, sizeof out, 2, "fx.a"), "missing-table-rc2");
