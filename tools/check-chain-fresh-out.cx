@@ -30,6 +30,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.chainroot
 
 static const char *OD = "out";
 static int failed;
@@ -101,6 +102,16 @@ int main(int argc, char **argv) {
     /* run-batch names OUT but leaves it to the check to create. */
     if (sy_mkdir(argv[1], 0755) && sy_exists(argv[1]) != 1) { fprintf(stderr, "check-chain-fresh-out: cannot create OUT %s\n", argv[1]); return 2; }
     if (sy_mkdir(f, 0755)) { fprintf(stderr, "check-chain-fresh-out: fixture exists or cannot be made: %s\n", f); return 2; }
+    /* The snapshot goes to the chain base (cxlib.chainroot), never to the real cache root: HOME and
+       TMPDIR of this run are side by side below the fixture's own directory and UNISACC_CHAIN_BASE
+       names a session root below that TMPDIR. */
+    char cbase[4600];
+    {
+        char fh[4400], ft[4400], ftc[4400];
+        if (cx_fmt(fh, sizeof fh, "%s.home", f) || cx_fmt(ft, sizeof ft, "%s.tmp", f) || sy_mkdir(fh, 0700) || sy_mkdir(ft, 0700) || sy_realpath(ft, ftc, sizeof ftc) < 0) return 2;
+        if (cx_fmt(cbase, sizeof cbase, "%s/unisacc-session-chain-fresh", ftc)) return 2;
+        if (setenv("HOME", fh, 1) || setenv("TMPDIR", ftc, 1) || setenv("UNISACC_CHAIN_BASE", cbase, 1)) return 2;
+    }
     static const char *dirs[] = {"seed", "tools", "build", "cx", "cx/compiler", 0};
     for (int i = 0; dirs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, dirs[i]) || sy_mkdir(p, 0755)) return 2; }
     /* tools/bound builds its watchdog from tools/bound.c and cx/compiler/boundgate.cx of the same tree. */
@@ -163,7 +174,9 @@ int main(int argc, char **argv) {
     if (cx_fmt(p, sizeof p, "%s/ctx", out)) return 2;
     ck(sy_exists(p) == 0, "fresh-out-no-ctx-before-ctx-phase");
     char snap[4400], build[4400], helper[4400], want[200];
-    if (cx_fmt(snap, sizeof snap, "%s/%s/release-snap-%.10s", f, OD, rev) || cx_fmt(build, sizeof build, "%s/build", out) || cx_fmt(helper, sizeof helper, "%s/identity-helper", build)) return 2;
+    if (cr_snap(f, rev, 0, snap, sizeof snap) || cx_fmt(build, sizeof build, "%s/build", out) || cx_fmt(helper, sizeof helper, "%s/identity-helper", build)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/%s/release-snap-%.10s", f, OD, rev)) return 2;
+    ck(sy_exists(snap) == 1 && !strncmp(snap, cbase, strlen(cbase)) && !strncmp(snap + strlen(cbase), "/snap/", 6) && sy_exists(p) != 1, "fresh-out-snap-at-chain-base-not-in-out");
     if (cx_fmt(p, sizeof p, "%s.receipt", helper)) return 2;
     ck(has(p, "chain-seed-helper-v1\n") && has(p, "\noutput_sha="), "seed-helper-receipt");
     char *hv[] = {helper, snap, 0}, *sid = 0;

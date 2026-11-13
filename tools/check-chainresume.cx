@@ -7,7 +7,8 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
 #pragma unisa use cxlib.chainfacts
-static const char *OD="out";
+#pragma unisa use cxlib.chainroot
+#pragma unisa use sys.env
 static int count_trace_line(const char *b, size_t n, const char *want) {
  size_t wl = strlen(want), at = 0; int c = 0;
  while (b && at < n) {
@@ -22,17 +23,28 @@ static int run(char **v){return cx_runv_timeout(v,12,0,0);}
 int main(int ac,char **av){
  if(ac!=4)return 2;
  char root[4400];if(sy_realpath(".",root,sizeof root)<0)return 2;
- char dir[4400];cx_fmt(dir,sizeof dir,"%s/%s/c57-fixture-%ld",root,OD,sy_now_ms());if(sy_mkdir(dir,0755)||sy_chdir(dir))return 2;
+ /* Fixture outside the checkout: BASE/home and BASE/tmp side by side (sessionroot refuses a temp root
+    that is an ancestor of HOME); the fixture repository and the chain base are session roots below
+    BASE/tmp, the chain base through UNISACC_CHAIN_BASE (cxlib.chainroot). */
+ char fbase[4400],fh[4400],ft[4400],ftc[4400],cbase[4600],dir[4400];
+ if(cx_fmt(fbase,sizeof fbase,"%s/c57-fixture-%ld",sy_tmpdir(),sy_now_ms())||cx_fmt(fh,sizeof fh,"%s/home",fbase)||cx_fmt(ft,sizeof ft,"%s/tmp",fbase))return 2;
+ if(sy_mkdir(fbase,0700)||sy_mkdir(fh,0700)||sy_mkdir(ft,0700)||sy_realpath(ft,ftc,sizeof ftc)<0)return 2;
+ if(cx_fmt(cbase,sizeof cbase,"%s/unisacc-session-chain-c57",ftc)||cx_fmt(dir,sizeof dir,"%s/unisacc-session-c57",ftc))return 2;
+ if(sy_setenv("HOME",fh,1)||sy_setenv("TMPDIR",ftc,1)||sy_setenv("UNISACC_CHAIN_BASE",cbase,1))return 2;
+ if(sy_mkdir(dir,0755)||sy_chdir(dir))return 2;
  char *init[]={"git","init","-q",0};if(run(init))return 2;
  cx_write("a","a",1);cx_write("unisacc.com","fixture",7);cx_write("unisacc.com.build.json","{}",2);
  char *add[]={"git","add","a",0};if(run(add))return 2;
  char *commit[]={"git","-c","user.name=fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};if(run(commit))return 2;
  char *revv[]={"git","rev-parse","HEAD",0},*text=0;size_t n=0;if(cx_runv_timeout(revv,5,&text,&n)||n!=41)return 2;text[40]=0;
- sy_mkdir("out",0755);char stage[4400],owner[4400],id[9000],h[65];
- cx_fmt(stage,sizeof stage,"%s/release-snap-%.10s.partial",OD,text);cx_fmt(owner,sizeof owner,"%s.owner",stage);sy_sha256_hex("{}",2,h);
+ char stage[4400],owner[4400],id[9000],h[65],snapd[4400];
+ if(cr_snap(dir,text,1,snapd,sizeof snapd)||strncmp(snapd,cbase,strlen(cbase))||strncmp(snapd+strlen(cbase),"/snap/",6))return 2;
+ cx_fmt(stage,sizeof stage,"%s.partial",snapd);cx_fmt(owner,sizeof owner,"%s.owner",stage);sy_sha256_hex("{}",2,h);
  char lh[65];sy_sha256_hex("fixture",7,lh);
  cx_fmt(id,sizeof id,"chain-snap-v1\nroot=%s\nrev=%s\nproduct=%s\n%s\n",dir,text,h,lh);cx_write(owner,id,strlen(id));sy_mkdir(stage,0755);
- char *step[]={av[1],"snap",text,"out",0};
+ char *step[]={av[1],"snap",text,0};
+ /* the former OUT argument is refused: the snapshot directory comes from chainroot only */
+ {char *stepout[]={av[1],"snap",text,"out",0};if(!run(stepout)||sy_exists("out")==1||sy_exists(snapd)==1)return 1;printf("PASS\tsnap-out-argument-refused\n");}
  cx_write(owner,"other-owner",11);if(!run(step)||!sy_exists(stage))return 1;
  printf("PASS\tsnap-other-owner-kept\n");cx_write(owner,id,strlen(id));
  char *output=0;size_t on=0;int rc=cx_runv_timeout(step,12,&output,&on);
@@ -40,10 +52,12 @@ int main(int ac,char **av){
  free(output);
  printf("PASS\tsnap-kill-resume-cleaned\n");
  if(run(step))return 1;printf("PASS\tsnap-complete-reused\n");
- char product[4400];cx_fmt(product,sizeof product,"%s/release-snap-%.10s/unisacc.com",OD,text);cx_write(product,"tampered",8);
+ char product[4400];cx_fmt(product,sizeof product,"%s/unisacc.com",snapd);
+ if(sy_exists(product)!=1||sy_exists("out")==1)return 1;printf("PASS\tsnap-at-chainroot-no-out\n");
+ cx_write(product,"tampered",8);
  if(!run(step))return 1;printf("PASS\tsnap-complete-product-mismatch-refused\n");
  cx_write(product,"fixture",7);
- char marker[4400];cx_fmt(marker,sizeof marker,"%s/release-snap-%.10s/.release-rev",OD,text);cx_write(marker,"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",40);
+ char marker[4400];cx_fmt(marker,sizeof marker,"%s/.release-rev",snapd);cx_write(marker,"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",40);
  if(run(step)==0)return 1;printf("PASS\tsnap-different-rev-refused\n");
  char *runner[]={av[2],"--rev",text,"--out",dir,0};if(run(runner)==0)return 1;printf("PASS\tchain-outside-refused\n");
  if(sy_chdir(root))return 2;

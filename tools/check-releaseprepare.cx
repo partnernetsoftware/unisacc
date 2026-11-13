@@ -3,6 +3,8 @@
 #pragma unisa use sys.io
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseprepare
+#pragma unisa use cxlib.chainroot
+#pragma unisa use sys.env
 static int bad;
 static void die(const char *s){sy_eprintf("check-release-prepare: %s\n",s);exit(2);}
 static void ck(int ok,const char *s){sy_printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)bad++;}
@@ -14,7 +16,13 @@ int main(int argc,char **argv){
  if(argc!=6||argv[2][0]!='/'||sy_mkdir(argv[2],0700))die("ROOT NEW_ABS_OUT ONESHOT FAKE RELEASE_RUN");
  char root[4400],state[4400],config[4400],assets[4400],p[4400],chain[4400],snap[4400],rev[41],text[30000];path(root,argv[2],"root");if(sy_mkdir(root,0700))die("root");path(state,argv[2],"state");path(config,argv[2],"config.tsv");path(assets,state,"rr/layout");path(chain,argv[2],"chain");
  char *init[]={"git","init","-q",root,0};git(init,argv[1]);path(p,root,"input");put(p,"frozen\n");char *add[]={"git","add","input",0};git(add,root);char *commit[]={"git","-c","user.name=Fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};git(commit,root);char *head[]={"git","rev-parse","HEAD",0};np_result r=run(head,root);if(r.rc||r.outn!=41)die("HEAD");for(int i=0;i<40;i++)rev[i]=r.out[i];rev[40]=0;np_free(&r);
- path(p,root,"unisacc.com");put(p,"not executed\n");path(p,root,"out");if(sy_mkdir(p,0700)||cx_fmt(snap,sizeof snap,"%s/release-snap-%.10s",p,rev))die("snap");
+ path(p,root,"unisacc.com");put(p,"not executed\n");
+ /* snap is cr_snap(ROOT, build_rev) (cxlib.chainroot); HOME and TMPDIR of the fixture are side by side
+    below NEW_ABS_OUT and UNISACC_CHAIN_BASE names a session root below that TMPDIR, so nothing touches
+    the real cache chain root.  The children inherit all three. */
+ {char fh[4400],ft[4400],ftc[4400],cb[4600];path(fh,argv[2],"fx-home");path(ft,argv[2],"fx-tmp");
+  if(sy_mkdir(fh,0700)||sy_mkdir(ft,0700)||sy_realpath(ft,ftc,sizeof ftc)<0||cx_fmt(cb,sizeof cb,"%s/unisacc-session-chain-rp",ftc)||sy_setenv("HOME",fh,1)||sy_setenv("TMPDIR",ftc,1)||sy_setenv("UNISACC_CHAIN_BASE",cb,1))die("chain base");
+  if(cr_snap(root,rev,0,snap,sizeof snap)||strncmp(snap,cb,strlen(cb))||strncmp(snap+strlen(cb),"/snap/",6))die("snap");}
  if(cx_fmt(text,sizeof text,"root\t%s\nbuild_rev\t%s\nconstructor\t%s\nidentity_helper\t%s\nchain_out\t%s\nsnap\t%s\nversion\t0.0.57\nrepo\tfixture/release\ntag\tv0.0.57\nworkflow\tcandidate-native.yml\nworkflow_ref\tmain\ncache_manager_x64\t%s\ncache_manager_arm64\t%s\ndeadline_s\t300\nchain_deadline_s\t300\nmax_resumes\t3\ntest_driver\t%s\n",root,rev,argv[4],argv[4],chain,snap,argv[4],argv[4],argv[4]))die("config capacity");put(config,text);
  char *prepare[]={argv[3],"--prepare",state,config,assets,"--authorize-external-operations",0};r=run(prepare,root);ck(r.rc==1,"first real child failure stops preparation");np_free(&r);
  path(p,state,"upstream-evidence.tsv");size_t n;char *e=cx_read(p,&n);ck(!e||!strstr(e,"\tPASS\t"),"failed preparation cannot issue PASS");free(e);
@@ -23,7 +31,8 @@ int main(int argc,char **argv){
  /* chain_adopt: nothing is launched; identity, compare and the final pack row are machine-checked. */
  /* chain_root (5..8): the adopted chain ran in another checkout; ROOT stays the git root at build_rev. */
  {const char *leaf[]={"adopt-none","adopt-rev","adopt-nopack","adopt-value","adopt-good","adopt-cr-good","adopt-cr-mismatch","adopt-cr-snap","adopt-cr-alone"};char base[30000],ident[6000],wrong[6000],cr[4400],crident[6000],crsnap[4400];
-  path(cr,argv[2],"chainroot");path(p,cr,"out");if(cx_fmt(crident,sizeof crident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,cr)||cx_fmt(crsnap,sizeof crsnap,"%s/release-snap-%.10s",p,rev))die("chain_root identity");
+  /* cr_snap hashes the canonical chain_root, so the other checkout is a real directory here. */
+  path(cr,argv[2],"chainroot");if(sy_mkdir(cr,0700)||cx_fmt(crident,sizeof crident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,cr)||cr_snap(cr,rev,0,crsnap,sizeof crsnap)||!strcmp(crsnap,snap))die("chain_root identity");
   z=strlen(text);text[z-2]=0;if(!strstr(text,"test_driver\t")||cx_fmt(base,sizeof base,"%s",text))die("adopt base config");
   if(cx_fmt(ident,sizeof ident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,root)||cx_fmt(wrong,sizeof wrong,"rev=0000000000000000000000000000000000000000\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",root))die("adopt identity");
   for(int i=0;i<9;i++){

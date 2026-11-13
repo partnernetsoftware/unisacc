@@ -55,6 +55,7 @@
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.shamemo
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chainroot
 #pragma unisa use cxlib.chaincall
 #pragma unisa use sys.posix
 
@@ -494,10 +495,11 @@ static int cs_snap(const char *rev, const char *out) {
     }
     for (i = 0; i < 10; i++) brief[i] = full[i];
     brief[10] = 0;
-    if (cx_fmt(dir, sizeof dir, "%s/release-snap-%s", out, brief)) cs_die("path", out);
+    /* 快照目录只经 cxlib.chainroot cr_snap 取得(HOME/.cache/unisacc/chains/snap/REV10-根摘要8位),
+       不在 ROOT/out 下;旧合同的 OUT 参数已撤,给了就拒绝。 */
     char stage[4400], owner[4400], lock[4400], root[4400], identity[9000], hash[65];
-    if (sy_realpath(".", root, sizeof root) < 0 || strcmp(out, "out")) cs_die("snap requires repository out", out);
-    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) cs_die("mkdir", out);
+    if (out) cs_die("snap takes REV only; the snapshot directory comes from chainroot", out);
+    if (sy_realpath(".", root, sizeof root) < 0 || cr_snap(root, brief, 1, dir, sizeof dir)) cs_die("snap chainroot path", brief);
     if (cx_fmt(stage,sizeof stage,"%s.partial",dir) || cx_fmt(owner,sizeof owner,"%s.owner",stage) || cx_fmt(lock,sizeof lock,"%s.lock",stage)) cs_die("path",dir);
     int lockfd=sy_open(lock,O_RDWR|O_CREAT,0600);
     if(lockfd<0 || sy_flock(lockfd,2|4)) cs_die("snapshot live owner",dir);
@@ -1111,7 +1113,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     for (i = 0; i < 40; i++) if (!((rev[i] >= '0' && rev[i] <= '9') || (rev[i] >= 'a' && rev[i] <= 'f'))) cs_die("REFUSE revision", rev);
     {
         char cwd[4400], expected[4400], actual[4400], marker[4400]; long n = 0; char *m;
-        if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_realpath(s, actual, sizeof actual) < 0 || cx_fmt(expected, sizeof expected, "%s/out/release-snap-%.10s", cwd, rev) || strcmp(expected, actual)) cs_die("REFUSE release snapshot path", s);
+        if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_realpath(s, actual, sizeof actual) < 0 || cr_snap(cwd, rev, 0, expected, sizeof expected) || strcmp(expected, actual)) cs_die("REFUSE release snapshot path", s);
         if (cx_fmt(marker, sizeof marker, "%s/.release-rev", s)) cs_die("path", s);
         m = cs_load(marker, &n); if (!m || n != 40 || memcmp(m, rev, 40)) cs_die("REFUSE snapshot revision", s); free(m);
     }
@@ -1729,8 +1731,8 @@ int main(int argc, char **argv) {
         return cs_check(argv[2]);
     }
     if (tx_eqz(argv[1], "snap")) {
-        if (argc < 3) cs_die("snap needs REV [OUT]", 0);
-        return cs_snap(argv[2], argc > 3 ? argv[3] : "out");
+        if (argc < 3) cs_die("snap needs REV", 0);
+        return cs_snap(argv[2], argc > 3 ? argv[3] : 0);
     }
     if (tx_eqz(argv[1], "routes")) {
         /* routes REV S CTX OUT：p3 的两个非源码输入（compiler.pkg 与 declaration/routes.tsv）
