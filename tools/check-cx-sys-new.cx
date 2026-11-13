@@ -1,0 +1,108 @@
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.errkind
+#pragma unisa use sys.cap
+#pragma unisa use sys.capgen
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+/* Checks cx/sys/sysinfo.cx (sy_os_name sy_arch_name sy_page_size sy_errno_name sy_errno_of sy_sig_name
+   sy_sig_number sy_write sy_seek64), cx/sys/errkind.cx (sy_err_kind) and cx/sys/cap.cx (sy_cap):
+     sh ./unisacc.com tools/check-cx-sys-new.cx
+   Prints PASS/FAIL lines and CX_SYS_NEW<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    sy_printf("%s\tsysnew.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static int same(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+int main(void) {
+    int p[2];
+    char b[8];
+    p[0] = -1;
+    p[1] = -1;
+    ck(same(sy_os_name(), "linux") || same(sy_os_name(), "macos") || same(sy_os_name(), "windows"), "os-name");
+    ck(same(sy_arch_name(), "x86_64") || same(sy_arch_name(), "arm64"), "arch-name");
+    ck(sy_page_size() == 4096 || sy_page_size() == 16384, "page-size");
+    ck(same(sy_errno_name(ENOENT), "ENOENT"), "errno-name");
+    ck(same(sy_errno_name(-ENOENT), "ENOENT"), "errno-name-neg");
+    ck(sy_errno_name(0) == 0, "errno-name-zero");
+    ck(sy_errno_name(99999) == 0, "errno-name-unknown");
+    ck(sy_errno_of("EPIPE") == EPIPE, "errno-of");
+    ck(sy_errno_of("ENOPE") == 0 && sy_errno_of(0) == 0 && sy_errno_of("") == 0, "errno-of-unknown");
+    ck(sy_errno_of("EPIP") == 0 && sy_errno_of("EPIPEX") == 0, "errno-of-prefix");
+    ck(same(sy_sig_name(SIGINT), "SIGINT") && same(sy_sig_name(SIGTERM), "SIGTERM"), "sig-name");
+    ck(sy_sig_name(0) == 0 && sy_sig_name(-3) == 0 && sy_sig_name(9999) == 0, "sig-name-unknown");
+    ck(sy_sig_number("SIGUSR1") == SIGUSR1 && sy_sig_number("SIGKILL") == SIGKILL, "sig-number");
+    ck(sy_sig_number("SIGNOPE") == 0 && sy_sig_number(0) == 0, "sig-number-unknown");
+
+    ck(sy_write(-1, "x", 1) == -EINVAL, "write-badfd-neg");
+    ck(sy_write(999999, "x", 1) == -EBADF, "write-ebadf");
+    ck(sy_write(1, 0, 1) == -EINVAL, "write-nullbuf");
+    ck(sy_write(1, "x", 0) == 0, "write-zero");
+    ck(sy_pipe(p) == 0, "pipe");
+    if (p[0] >= 0) {
+        ck(sy_write(p[1], "abc", 3) == 3, "write-pipe");
+        b[0] = 0;
+        ck(sy_read(p[0], b, 8) == 3 && b[0] == 'a' && b[2] == 'c', "write-readback");
+        sy_close(p[0]);
+        sy_close(p[1]);
+    }
+    ck(sy_seek64(-1, 0, 0) == -EINVAL, "seek-badfd");
+    ck(sy_seek64(999999, 0, 0) == -EBADF, "seek-ebadf");
+    ck(sy_seek64(0, 0, 7) == -EINVAL, "seek-whence");
+    {
+        char path[128];
+        int fd;
+        int64_t big = 5000000000LL;
+        tx_snprintf(path, sizeof path, "%s/sysnew-%d", sy_tmpdir(), sy_pid());
+        fd = sy_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        ck(fd >= 0, "file-open");
+        if (fd >= 0) {
+            ck(sy_write(fd, "0123456789", 10) == 10, "seek-fill");
+            ck(sy_seek64(fd, 3, SEEK_SET) == 3, "seek-set");
+            b[0] = 0;
+            ck(sy_read(fd, b, 1) == 1 && b[0] == '3', "seek-read");
+            ck(sy_seek64(fd, 2, SEEK_CUR) == 6, "seek-cur");
+            ck(sy_seek64(fd, 0, SEEK_END) == 10, "seek-end");
+            ck(sy_seek64(fd, big, SEEK_SET) == big, "seek-beyond-4g");
+            ck(sy_seek64(fd, -1, SEEK_SET) == -EINVAL, "seek-negative");
+            sy_close(fd);
+        }
+        sy_unlink(path);
+    }
+
+    ck(sy_err_kind(0) == SY_K_NONE, "kind-none");
+    ck(sy_err_kind(ENOENT) == SY_K_NOTFOUND && sy_err_kind(-ENOENT) == SY_K_NOTFOUND, "kind-notfound");
+    ck(sy_err_kind(-EEXIST) == SY_K_EXISTS, "kind-exists");
+    ck(sy_err_kind(-EACCES) == SY_K_PERM && sy_err_kind(-EROFS) == SY_K_PERM, "kind-perm");
+    ck(sy_err_kind(-EAGAIN) == SY_K_AGAIN && sy_err_kind(-EINTR) == SY_K_AGAIN, "kind-again");
+    ck(sy_err_kind(-EPIPE) == SY_K_PIPE, "kind-pipe");
+    ck(sy_err_kind(-EBADF) == SY_K_BADH, "kind-badh");
+    ck(sy_err_kind(-ENOSYS) == SY_K_UNSUPPORTED, "kind-unsupported");
+    ck(sy_err_kind(-ENOMEM) == SY_K_NOMEM, "kind-nomem");
+    ck(sy_err_kind(-ETIMEDOUT) == SY_K_TIMEOUT, "kind-timeout");
+    ck(sy_err_kind(99999) == SY_K_OTHER && sy_err_kind(-99999) == SY_K_OTHER, "kind-unknown");
+    ck(sy_err_kind(-2147483647 - 1) == SY_K_OTHER, "kind-intmin");
+
+    ck(sy_cap(-1) == 0 && sy_cap(SY_CAP_COUNT) == 0 && sy_cap(99999) == 0, "cap-unknown");
+    ck(sy_cap(SY_CAP_AT) == 1 && sy_cap(SY_CAP_DUP2) == 1, "cap-lnx-present");
+    ck(sy_cap(SY_CAP_MEMFD_EXEC) == (sy_cap_tab_get(SY_CAP_MEMFD_EXEC, 0) ? 1 : 0), "cap-matches-table");
+    {
+        int i, agree = 1;
+        for (i = 0; i < SY_CAP_COUNT; i++) {
+            int v = sy_cap(i);
+            if (v != 0 && v != 1) agree = 0;
+        }
+        ck(agree, "cap-boolean");
+    }
+    sy_printf("CX_SYS_NEW\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}
