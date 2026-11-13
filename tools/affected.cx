@@ -254,8 +254,15 @@ static void load_models(void) {
       }
     }
 }
+static unsigned char len_hit[4096];   /* len_hit[n]: some model name has length n (n < 4096), built lazily */
+static int len_hit_ready;
 static unsigned long model_token(const char *s, long n) {
     int m, k; unsigned long bits = 0;
+    if (!len_hit_ready) {
+        for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++) if (model_lengths[m][k] > 0 && model_lengths[m][k] < 4096) len_hit[model_lengths[m][k]] = 1;
+        len_hit_ready = 1;
+    }
+    if (n >= 0 && n < 4096 && !len_hit[n]) return 0;
     for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++)
         if (model_lengths[m][k] == n && tx_prefix(s, n, model_names[m][k], n)) bits |= 1UL << m;
     return bits;
@@ -401,10 +408,27 @@ static void mark(int ni, int via) {
     t_walk += sy_now_ms() - q; }
 }
 /* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
+/* 同一 token 同一次运行只 stat 一次:结果(返回码与 kind)按 token 记忆;冻结输入下与逐次 stat 等价。 */
+static char *ts_key[32768]; static int ts_r[32768]; static char ts_kind[32768];
+static int tok_stat(const char *tok, sy_stat_t *st) {
+    unsigned long h = hash(tok) & 32767; int i; char abs[8192];
+    for (i = 0; i < 32768; i++) {
+        unsigned long s = (h + (unsigned long)i) & 32767;
+        if (!ts_key[s]) {
+            int r;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return -ENAMETOOLONG;
+            r = sy_stat(abs, st);
+            ts_key[s] = zkeep(tok); ts_r[s] = r; ts_kind[s] = r < 0 ? 0 : st->kind;
+            return r;
+        }
+        if (tx_eqz(ts_key[s], tok)) { st->kind = ts_kind[s]; return ts_r[s]; }
+    }
+    return sy_stat("/nonexistent-affected-memo-full", st);
+}
 static void named(const char *tok, int via) {
-    char abs[8192]; sy_stat_t st; int r, ni;
-    if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return;
-    r = sy_stat(abs, &st);
+    sy_stat_t st; int r, ni;
+    r = tok_stat(tok, &st);
+    if (r == -ENAMETOOLONG) return;
     if (r < 0) { if (r != -ENOENT) fprintf(stderr, "NOTE\tliteral-stat\t%s\terr=%d\n", tok, r); return; }
     ni = path_node(tok, 1);
     if (st.kind == 'd') {
@@ -417,9 +441,8 @@ static void named(const char *tok, int via) {
 /* 传递层只跟「文件」:目录记号若也传递,任何提到 exec/parse2 这类目录名的工具都会把它变成整棵子树的
    守卫,而负控用的正是一个不存在的表路径(exec/parse2/no-such-affected-table.tsv),会因此被误选中。 */
 static void named_file(const char *tok, int via) {
-    char abs[8192]; sy_stat_t st;
-    if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return;
-    if (sy_stat(abs, &st) < 0 || st.kind != 'f') return;
+    sy_stat_t st;
+    if (tok_stat(tok, &st) < 0 || st.kind != 'f') return;
     mark(path_node(tok, 1), via);
 }
 static void mark_root(const char *rel) {
