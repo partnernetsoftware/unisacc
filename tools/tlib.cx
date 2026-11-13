@@ -54,11 +54,17 @@
  *          that is there is checked in full every time, see cmd_kit_shared)
  *          brings DIR up to date: every package of the table as a tlib,
  *          this tool as DIR/tlib-prep, and DIR/kit.tsv (product sha, the tlib files, path and sha
- *          of every unit of this tool's closure, the image sha, the kit sha). Incremental: only a
- *          package whose tlib is absent, does not verify, is not fresh or was built from another
- *          input (a rebuilt dependency included) is built, the image only when the product or this
- *          tool's closure moved; with nothing to do it writes nothing (kit=unchanged). --no-cache
- *          builds every package again. One PREPARED line, with rebuilt=N and image=kept|built.
+ *          of every unit of this tool's closure, the image sha, the kit sha). Each package mirror
+ *          is content-addressed under CACHE/PKG (input sha -> tlib); a new kit directory copies
+ *          unchanged packages from that store (private files: a hard link would let an in-place
+ *          kit tamper corrupt the shared mirror), so only a package whose input moved pays
+ *          -cx-plan/compile/ar. The prep image is content-addressed under CACHE/prep/<key>
+ *          (product sha + tools/tlib.cx closure file shas) and is reused across kit keys. Package
+ *          cache is asked before any -cx-plan; cold builds run -cx-plan for the package's units in
+ *          parallel (--jobs). Incremental in-place: only a package whose tlib is absent, does not
+ *          verify, is not fresh or was built from another input is built; with nothing to do it
+ *          writes nothing (kit=unchanged). --no-cache builds every package again. One PREPARED
+ *          line, with rebuilt=N reused=M image=kept|built|hit and pkg_built/pkg_hit/obj_built.
  * prep     what cxlib.toolprep and cxlib.runnerprep run (as DIR/tlib-prep) before they compile:
  *          links TOOL from the kit when TOOL is a row of ROOT/build/tlib-prep.tsv, the kit
  *          verifies and describes ROOT now, and every tlib passes the same structure, version and
@@ -118,6 +124,9 @@ static Lib libs[MAXLIB];
 static int nlibs;
 static Job jobs[MAXJOB];
 static char jobtext[MAXJOB][2][600];
+static char jobcmd[MAXJOB][900];
+/* last cmd_build: 1 when the package came from CACHE/PKG (hardlink/copy), else 0; obj counts for PREPARED */
+static int last_pkg_hit, last_obj_built, last_obj_reused;
 
 static int say(int rc, const char *cls, const char *what, const char *detail) {
     sy_eprintf("tlib: %s\t%s\t%s\n", cls, what ? what : "", detail ? detail : "");
@@ -464,6 +473,81 @@ static void unit_put(const char *udir, const char *key, const char *obj, int seq
     }
 }
 
+/* Place SRC at DST as a private copy. The content-addressed CACHE/PKG mirror stays immutable:
+   kit checks may damage a kit member in place (check-tlib-prep), and a hard link would have
+   corrupted the shared mirror (measured: TAMPERED object sha after that check). 0, or -1. */
+static int place_tlib(const char *src, const char *dst) {
+    (void)sy_unlink(dst);
+    return sy_copy(src, dst, 0644) ? -1 : 0;
+}
+
+/* Job K runs `product -cx-plan UNIT` and writes stdout to OUT (shell redirect; paths have no '). */
+static int set_plan(int k, const char *unit, const char *out) {
+    if (k >= MAXJOB) return -1;
+    if (cx_fmt(jobcmd[k], sizeof jobcmd[k], "sh '%s' -cx-plan '%s' > '%s'", product, unit, out)) return -1;
+    jobs[k].v[0] = "sh"; jobs[k].v[1] = "-c"; jobs[k].v[2] = jobcmd[k]; jobs[k].v[3] = 0;
+    return 0;
+}
+
+/* Parse a -cx-plan stdout file into the same malloc'd line list tp_closure returns. */
+static char *closure_from_plan(const char *plan_path, char *why, long wl) {
+    char *o = 0, one[4400], real[4400];
+    size_t n = 0;
+    long i = 0, e, off, len, rl = tx_len(root, sizeof root);
+    TpBuf out;
+    int r;
+    out.b = 0; out.n = 0; out.cap = 0; out.bad = 0;
+    o = cx_read(plan_path, &n);
+    if (!o || n < 1) { mm_free(o); (void)say(1, "FAILED", plan_path, "empty -cx-plan output"); if (why && wl > 0) tx_copy(why, wl, "empty -cx-plan", 13); return 0; }
+    while (i < (long)n) {
+        e = i;
+        while (e < (long)n && o[e] != '\n') e++;
+        if (e > i) {
+            if (tx_field(o + i, e - i, '\t', 1, &off, &len) || tx_copy(one, sizeof one, o + i + off, len)) { out.bad = 1; break; }
+            r = sy_realpath(one, real, sizeof real);
+            if (r < 0) { out.bad = 1; break; }
+            if (r > rl && tx_prefix(real, r, root, rl) && real[rl] == '/') tp_put(&out, real + rl + 1, r - rl - 1);
+            else tp_put(&out, real, r);
+            tp_put(&out, "\n", 1);
+        }
+        i = e + 1;
+    }
+    mm_free(o);
+    if (out.bad || !out.b) {
+        mm_free(out.b);
+        if (why && wl > 0) (void)cx_fmt(why, (size_t)wl, "cannot resolve the closure from %s", plan_path);
+        return 0;
+    }
+    return out.b;
+}
+
+/* Content key of the prep image: product sha and every file of tools/tlib.cx's use closure (path+sha). */
+static int prep_image_key(char hex[65], TpBuf *self_lines) {
+    char *c, why[512], one[4400], h[65];
+    long cn, i = 0, e;
+    TpBuf t;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    if (self_lines) { self_lines->b = 0; self_lines->n = 0; self_lines->cap = 0; self_lines->bad = 0; }
+    if (ensure_product_sha()) return -1;
+    tp_puts(&t, "prep\t1\nproduct_sha\t"); tp_puts(&t, product_sha); tp_puts(&t, "\n");
+    c = tp_closure(root, product, "tools/tlib.cx", why, sizeof why);
+    if (!c) { mm_free(t.b); return -1; }
+    cn = tx_len(c, TX_ZCAP);
+    for (i = 0; i < cn; i = e + 1) {
+        e = i;
+        while (e < cn && c[e] != '\n') e++;
+        if (e == i) continue;
+        if (tx_copy(one, sizeof one, c + i, e - i) || tp_sha_file(one, h)) { mm_free(c); mm_free(t.b); return -1; }
+        tp_puts(&t, "self\t"); tp_puts(&t, one); tp_puts(&t, "\t"); tp_puts(&t, h); tp_puts(&t, "\n");
+        if (self_lines) { tp_puts(self_lines, "self\t"); tp_puts(self_lines, one); tp_puts(self_lines, "\t"); tp_puts(self_lines, h); tp_puts(self_lines, "\n"); }
+    }
+    mm_free(c);
+    if (t.bad || !t.b) { mm_free(t.b); if (self_lines) mm_free(self_lines->b); return -1; }
+    tp_sha(t.b, (size_t)t.n, hex);
+    mm_free(t.b);
+    return 0;
+}
+
 static int cmd_build(const char *pkg, const char *outdir, const char *cache, int par, int use_cache) {
     char why[512], path[4400], stage[4400], dst[4400], cdir[4400], cpath[4400], kpath[4400], udir[4400], hex[65], input[65], content[65], apisha[65];
     char member[TP_MAXU][TP_NAME];
@@ -497,20 +581,11 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     for (i = 0; i < nlibs; i++) { rc = fresh(&libs[i]); if (rc) return rc; }
     if (tp_load(root, pkg, &pk, why, sizeof why)) return say(2, "UNREADABLE", pkg, why);
     put_excl(&in, &pk);
-    for (i = 0; i < pk.nunit; i++) {
-        char *c = tp_closure(root, product, pk.unit[i], why, sizeof why);
-        if (!c) return say(1, "FAILED", pk.unit[i], why);
-        rc = closure_inside(pk.unit[i], c, bdeps, pk.ndep);
-        if (rc) { mm_free(c); return rc; }
-        rc = tp_unit_key(root, product_sha, FLAGS, pk.unit[i], c, ukey[i]);
-        mm_free(c);
-        if (rc) return say(1, "FAILED", pk.unit[i], "cannot compute the unit key");
-        if (tp_member_name(pk.unit[i], member[i], TP_NAME)) return say(1, "FAILED", pk.unit[i], "member name too long");
-    }
-    /* input sha: the identity lines and every unit's path and source sha */
+    /* input sha needs only unit path+source sha: ask the package cache BEFORE any -cx-plan */
     if (input_sha(&in, &pk, input)) return 1;
     if (cx_fmt(dst, sizeof dst, "%s/%s@%s.tlib", outdir, pk.pkg, pk.version) ||
         cx_fmt(cdir, sizeof cdir, "%s/%s", cache, pk.pkg) || cx_fmt(kpath, sizeof kpath, "%s/%s.key", cdir, input)) return 2;
+    last_pkg_hit = 0; last_obj_built = 0; last_obj_reused = 0;
     if (use_cache) {
         f = cx_read(kpath, &fn);
         if (f && fn == 65 && f[64] == '\n') {
@@ -518,7 +593,8 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
             f[64] = 0;
             if (!cx_fmt(cpath, sizeof cpath, "%s/%s.tlib", cdir, f) && sy_exists(cpath) == 1 && !load_lib(L, cpath) &&
                 tx_eqz(L->input, input) && tx_eqz(L->content, f) && tx_eqz(L->pkg, pk.pkg) && tx_eqz(L->ver, pk.version)) {
-                if (sy_copy(cpath, dst, 0644)) { mm_free(f); return say(1, "FAILED", dst, "cannot copy from the cache"); }
+                if (place_tlib(cpath, dst)) { mm_free(f); return say(1, "FAILED", dst, "cannot link/copy from the cache"); }
+                last_pkg_hit = 1;
                 sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcache=HIT\tcontent_sha=%s\t%s\n",
                           pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, L->content, dst);
                 mm_free(f);
@@ -536,6 +612,27 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         if (cx_fmt(stage, sizeof stage, "%s/unisacc-tlib-stage-%s-%d", tb, pk.pkg, sy_pid())) return say(1, "FAILED", outdir, "stage path too long");
     }
     if (mkdirs(stage)) return say(1, "FAILED", outdir, "cannot create the stage directory");
+    /* -cx-plan for every unit in parallel (bounded by --jobs), then unit keys and closure checks */
+    for (i = 0; i < pk.nunit; i++) {
+        if (cx_fmt(path, sizeof path, "%s/.plan-%d", stage, i) || set_plan(i, pk.unit[i], path)) {
+            (void)cx_rmtree(stage);
+            return say(1, "FAILED", pk.unit[i], "cannot stage -cx-plan");
+        }
+    }
+    if (run_jobs(pk.nunit, par)) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "a -cx-plan failed"); }
+    for (i = 0; i < pk.nunit; i++) {
+        char *c;
+        if (cx_fmt(path, sizeof path, "%s/.plan-%d", stage, i)) { (void)cx_rmtree(stage); return 2; }
+        c = closure_from_plan(path, why, sizeof why);
+        if (!c) { (void)cx_rmtree(stage); return say(1, "FAILED", pk.unit[i], why); }
+        rc = closure_inside(pk.unit[i], c, bdeps, pk.ndep);
+        if (rc) { mm_free(c); (void)cx_rmtree(stage); return rc; }
+        rc = tp_unit_key(root, product_sha, FLAGS, pk.unit[i], c, ukey[i]);
+        mm_free(c);
+        if (rc) { (void)cx_rmtree(stage); return say(1, "FAILED", pk.unit[i], "cannot compute the unit key"); }
+        if (tp_member_name(pk.unit[i], member[i], TP_NAME)) { (void)cx_rmtree(stage); return say(1, "FAILED", pk.unit[i], "member name too long"); }
+        (void)sy_unlink(path);
+    }
     /* unit level: an object whose key (cxlib.tlibpkg tp_unit_key) has a verified entry under
        CACHE/unit is copied, every other unit is compiled and its object published there */
     if (cx_fmt(udir, sizeof udir, "%s/unit", cache)) { (void)cx_rmtree(stage); return 2; }
@@ -614,7 +711,6 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
                 (void)cx_rmtree(stage);
                 return say(1, "FAILED", pkg, "the packed archive did not verify");
             }
-            if (sy_copy(ar, dst, 0644)) { (void)cx_rmtree(stage); return say(1, "FAILED", dst, "cannot write the tlib"); }
             if (use_cache) {
                 char tmp[4400], keyline[70];
                 if (mkdirs(cdir) || cx_fmt(cpath, sizeof cpath, "%s/%s.tlib", cdir, content) ||
@@ -622,7 +718,12 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
                     sy_copy(ar, tmp, 0644) || sy_rename(tmp, cpath) ||
                     cx_write(tmp, keyline, 65) || sy_rename(tmp, kpath))
                     sy_eprintf("tlib: cache not updated under %s (the tlib itself is written)\n", cdir);
-            }
+                /* kit member is a hard link (else copy) of the content-addressed mirror */
+                if (place_tlib(cpath, dst) && sy_copy(ar, dst, 0644)) {
+                    (void)cx_rmtree(stage); return say(1, "FAILED", dst, "cannot write the tlib");
+                }
+            } else if (sy_copy(ar, dst, 0644)) { (void)cx_rmtree(stage); return say(1, "FAILED", dst, "cannot write the tlib"); }
+            last_obj_built = nj; last_obj_reused = nreuse;
             sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcompile_ms=%ld\tjobs=%d\tobj_built=%d\tobj_reused=%d\tcache=MISS\tcontent_sha=%s\t%s\n",
                       pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, t1 - t0, par, nj, nreuse, content, dst);
         }
@@ -880,13 +981,15 @@ static int kit_keep(const char *pkg, const char *outdir, int ndone) {
 }
 
 static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache) {
-    char image[4400], tmp[4400], kit[4400], hex[65], why[512];
-    char *names, *c, *o = 0, *old;
-    long nn = 0, i = 0, e, cn, t0 = sy_now_ms(), obody = 0, oself = -1;
-    size_t on = 0, okn = 0;
-    TpBuf k;
-    int rc, nlib = 0, nskip = 0, nbuilt = 0, r, image_ok = 0, retired = 0;
+    char image[4400], tmp[4400], kit[4400], hex[65], why[512], pdir[4400], pimg[4400], pself[4400], psha[4400];
+    char *names, *o = 0, *old, *sf = 0;
+    long nn = 0, i = 0, e, t0 = sy_now_ms(), obody = 0, oself = -1;
+    size_t on = 0, okn = 0, sfn = 0;
+    TpBuf k, selfb;
+    int rc, nlib = 0, nskip = 0, nbuilt = 0, npkg_hit = 0, npkg_built = 0, nobj_built = 0, r, image_ok = 0, retired = 0;
+    const char *image_how = "built";
     k.b = 0; k.n = 0; k.cap = 0; k.bad = 0;
+    selfb = k;
     if (mkdirs(outdir)) return say(2, "UNREADABLE", outdir, "cannot create the output directory");
     if (cx_fmt(image, sizeof image, "%s/tlib-prep", outdir) || cx_fmt(kit, sizeof kit, "%s/kit.tsv", outdir) ||
         cx_fmt(tmp, sizeof tmp, "%s/.kit-%d", outdir, sy_pid())) return 2;
@@ -913,7 +1016,11 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
                     retired = 1;
                 }
                 rc = cmd_build(pkg, outdir, cache, par, use_cache);
-                if (!rc) nbuilt++;
+                if (!rc) {
+                    nbuilt++;
+                    if (last_pkg_hit) npkg_hit++;
+                    else { npkg_built++; nobj_built += last_obj_built; }
+                }
             }
             if (rc) { nskip++; sy_printf("TLIB_KIT\tskipped\t%s\trc=%d\n", pkg, rc); }
             else {   /* pk is the package, libs[MAXLIB - 1] its tlib (kept, built or taken from the cache) */
@@ -932,7 +1039,8 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
     if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
     if (image_ok && !retired && oself + 1 == k.n && mm_same(old, k.b, k.n)) {
         mm_free(k.b);
-        sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=0\treused=%d\timage=kept\tkit=unchanged\t%s\n", nlib, nskip, sy_now_ms() - t0, nlib, outdir);
+        sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=0\treused=%d\timage=kept\tkit=unchanged\tpkg_built=0\tpkg_hit=0\tobj_built=0\t%s\n",
+                  nlib, nskip, sy_now_ms() - t0, nlib, outdir);
         return 0;
     }
     if (!retired) {
@@ -942,28 +1050,47 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
     if (image_ok) {
         /* the self lines and the image_sha line of the verified kit still describe ROOT and the image */
         tp_put(&k, old + oself + 1, obody - oself - 1);
+        image_how = "kept";
     } else {
-        c = tp_closure(root, product, "tools/tlib.cx", why, sizeof why);
-        if (!c) { mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", why); }
-        cn = tx_len(c, TX_ZCAP);
-        for (i = 0; i < cn; i = e + 1) {
-            char one[4400];
-            e = i;
-            while (e < cn && c[e] != '\n') e++;
-            if (e == i) continue;
-            if (tx_copy(one, sizeof one, c + i, e - i) || tp_sha_file(one, hex)) { mm_free(c); mm_free(k.b); return say(2, "UNREADABLE", "tools/tlib.cx", "a unit of its closure"); }
-            tp_puts(&k, "self\t"); tp_puts(&k, one); tp_puts(&k, "\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
+        /* content-addressed prep image: CACHE/prep/<key>/{tlib-prep,self.tsv,image.sha} shared by every kit key */
+        if (prep_image_key(hex, &selfb)) { mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", "cannot key the prep image"); }
+        if (cx_fmt(pdir, sizeof pdir, "%s/prep/%s", cache, hex) ||
+            cx_fmt(pimg, sizeof pimg, "%s/tlib-prep", pdir) ||
+            cx_fmt(pself, sizeof pself, "%s/self.tsv", pdir) ||
+            cx_fmt(psha, sizeof psha, "%s/image.sha", pdir)) { mm_free(selfb.b); mm_free(k.b); return 2; }
+        sf = use_cache ? cx_read(psha, &sfn) : 0;
+        if (use_cache && sf && sfn == 65 && sf[64] == '\n' && sy_exists(pimg) == 1 && !selfb.bad && selfb.b) {
+            char got[65];
+            sf[64] = 0;
+            if (!tp_sha_file(pimg, got) && tx_eqz(got, sf) && !place_tlib(pimg, image)) {
+                tp_put(&k, selfb.b, selfb.n);
+                tp_puts(&k, "image_sha\t"); tp_puts(&k, sf); tp_puts(&k, "\n");
+                image_how = "hit";
+            }
         }
-        mm_free(c);
-        {
-            char *v[] = {"sh", product, "tools/tlib.cx", "-o", tmp, 0};
-            rc = cx_runv_timeout(v, STEP_SECS, &o, &on);
+        mm_free(sf);
+        if (tx_eqz(image_how, "built")) {
+            if (selfb.bad || !selfb.b) { mm_free(selfb.b); mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
+            tp_put(&k, selfb.b, selfb.n);
+            {
+                char *v[] = {"sh", product, "tools/tlib.cx", "-o", tmp, 0};
+                rc = cx_runv_timeout(v, STEP_SECS, &o, &on);
+            }
+            if (o && on) (void)sy_write_all(2, o, (long)on);
+            mm_free(o);
+            if (rc || tp_sha_file(tmp, hex)) { (void)sy_unlink(tmp); mm_free(selfb.b); mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", "the prep image did not build"); }
+            tp_puts(&k, "image_sha\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
+            if (k.bad || !k.b || sy_rename(tmp, image)) { (void)sy_unlink(tmp); mm_free(selfb.b); mm_free(k.b); return say(1, "FAILED", outdir, "cannot publish the prep image"); }
+            if (use_cache) {
+                char t2[4400], line[70];
+                if (mkdirs(pdir) || cx_fmt(t2, sizeof t2, "%s/.tmp-%d", pdir, sy_pid()) ||
+                    sy_copy(image, t2, 0755) || sy_rename(t2, pimg) ||
+                    cx_write(t2, selfb.b, (size_t)selfb.n) || sy_rename(t2, pself) ||
+                    cx_fmt(line, sizeof line, "%s\n", hex) || cx_write(t2, line, 65) || sy_rename(t2, psha))
+                    sy_eprintf("tlib: prep image cache not updated under %s\n", pdir);
+            }
         }
-        if (o && on) (void)sy_write_all(2, o, (long)on);
-        mm_free(o);
-        if (rc || tp_sha_file(tmp, hex)) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", "the prep image did not build"); }
-        tp_puts(&k, "image_sha\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
-        if (k.bad || !k.b || sy_rename(tmp, image)) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", outdir, "cannot publish the prep image"); }
+        mm_free(selfb.b);
     }
     if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
     tp_sha(k.b, (size_t)k.n, hex);
@@ -974,8 +1101,10 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
     }
     mm_free(k.b);
     /* a staged kit (kit_stage_show set) is announced by cmd_kit_shared once it is published, under the directory it is published to */
-    if (cx_fmt(kit_line, sizeof kit_line, "PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=%d\treused=%d\timage=%s\tkit=written\t%s\n",
-               nlib, nskip, sy_now_ms() - t0, nbuilt, nlib - nbuilt, image_ok ? "kept" : "built", kit_stage_show ? kit_stage_show : outdir)) return 2;
+    if (cx_fmt(kit_line, sizeof kit_line,
+               "PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=%d\treused=%d\timage=%s\tkit=written\tpkg_built=%d\tpkg_hit=%d\tobj_built=%d\t%s\n",
+               nlib, nskip, sy_now_ms() - t0, nbuilt, nlib - nbuilt, image_how, npkg_built, npkg_hit, nobj_built,
+               kit_stage_show ? kit_stage_show : outdir)) return 2;
     if (!kit_stage_show) sy_printf("%s", kit_line);
     return 0;
 }
