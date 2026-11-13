@@ -204,6 +204,13 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
 ### 前 5 项五段简报
 
 (1) SPEED-2 生成代码,慢车道,必须等产品重建。
+- SPEED-8 实测更正(2026-11-13,已装 0.0.59,探针 $CLAUDE_JOB_DIR/tmp/s8/s8.c,数据行在 build/speed-baseline.tsv):8MB sort 的 8.1 倍不是纯代码生成差。运行库 qsort 是堆排序加逐字节 swap(include/stdlib.h:769-805),gcc 档链的是 glibc 归并。
+  - 拆解 [实测]:同一份堆排序源 gcc-O0 1767 ms,unisacc 3867 ms,glibc qsort(gcc-O0 比较函数)463 ms。算法倍数 3.82,代码生成倍数 2.19,乘积 8.4。
+  - 原型 [实测]:内省排序(三数取中快排,12 以下插入,超深度回落堆排序,4/8 字节按字交换)用已装产品编译,8MB sort 5 次最小/中位 998/1007 ms,对照同轮运行库 4009/4213 ms,提速 4.18 倍;5 次 stdout 逐字节相同。对 gcc-O0 的差距由 9.1 倍降到 2.18 倍。
+  - 对拍 [实测]:rec(16 字节结构 50 万)、str(指针加 strcmp 20 万,含重复)、odd(7 字节 30 万)、pat(6 种病态分布各 100 万)四程序,unisacc lib/hs/pq 与 gcc-O0 lib/pq 五路 stdout 哈希全部相同;耗时 rec 2120 至 740,str 589 至 151,odd 880 至 424,pat 7867 至 3228 ms。
+  - 热循环构成 [实测,tape 行静态计数,未反汇编 x86]:swap 内层每字节 unisacc 75 条 op 加 20 条 .frame(load 24,store 14,其中求值栈压入/弹出各 10;imm 15;以 r6 为基的槽地址 sub64 14),gcc-O0 22 条(load 14,store 4)。前三项差异:求值栈往返 40 条(含 .frame),槽地址 imm 加 sub64 共 28 条,其余 27 对 22。微基准:8800 万次比较调用 1127 对 423 ms,4000 万次 4 字节 swap 1746 对 605 ms。
+  - 未做:堆排序内 3867 ms 只测到比较 81607047 次(按微基准单价折算约 1045 ms,属推算),sift 与 swap 未分开计时;perf 被 perf_event_paranoid=4 挡住。include/stdlib.h 的补丁未出,kernel/unisa_headers.inc 需随产品重建;等值键的相对顺序会变(qsort 本不稳定);4/8 字节按字交换假定可非对齐访问,六目标未验。
+  - 结论:先换运行库 qsort(收益 4.18 倍,已实测),槽级活跃性只针对剩下的 2.19 倍,其验收基线应改为同算法对照。
 - 目标:单基本块槽级活跃性,默认关;开时只删可证明的 load,保留 store 与 .frame。不重做 2.9% 直通。
 - 写域:src/stages.cx;cx/compiler/**(lower 之后的 tape 文本变换)。禁区:cx/sys、cx/core、apps/csih、ujs。
 - 验收:关时 8MB sort 输出与现产品逐字节相同。开时 sha 输出与基线逐字节相同,且 sort 中位低于基线 3862 ms 的 80%(即 <=3089 ms,5 跑中位)。工具 tools/check-bench-gencode.cx。基线行:tools/check-bench-gencode.cx / 8MB sort unisacc / 3862。达不到 3089 就关开关入库,不声称变快。
