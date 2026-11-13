@@ -1,0 +1,116 @@
+/* check-exitclass: table, generated ec_class/ec_retryable, and the chain-run retry set.
+ *   sh ./unisacc.com tools/check-exitclass.cx [-- ROOT]
+ * Extracts r.rc==N operands from tools/chain-run.cx with cxlib.chainargv tokens (comments skipped).
+ * A RETRYABLE row absent from that set, or a set member absent from the table, is reported and fails.
+ * A synthetic pair is always compared and must report a mismatch; a silent reporter fails the check.
+ * Does not run batches and does not wire chain tools. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.chainargv
+#pragma unisa use cxlib.exitclass
+#define MAXR 32
+static int trc[MAXR], tretry[MAXR];
+static char *tname[MAXR], *tclass[MAXR];
+static int nr;
+static void die(const char *s) { fprintf(stderr, "check-exitclass: REFUSE %s\n", s); exit(2); }
+static int parse_rc(const char *s, int *out) {
+    int sign = 1, v = 0, any = 0;
+    if (*s == '-') { sign = -1; s++; }
+    if (!*s) return 0;
+    for (; *s; s++) { if (*s < '0' || *s > '9') return 0; any = 1; v = v * 10 + (*s - '0'); }
+    *out = sign * v;
+    return any;
+}
+static int has(const int *a, int n, int v) { for (int i = 0; i < n; i++) if (a[i] == v) return 1; return 0; }
+static int add(int *a, int *n, int v) { if (has(a, *n, v)) return 0; if (*n == MAXR) die("set bound"); a[(*n)++] = v; return 1; }
+/* Returns the number of set differences. Prints each one. */
+static int differ(const int *table, int nt, const int *chain, int nc, const char *tag, int quiet) {
+    int bad = 0;
+    for (int i = 0; i < nt; i++) if (!has(chain, nc, table[i])) { if (!quiet) fprintf(stderr, "MISMATCH\t%s\textra-in-table\trc=%d\n", tag, table[i]); bad++; }
+    for (int i = 0; i < nc; i++) if (!has(table, nt, chain[i])) { if (!quiet) fprintf(stderr, "MISMATCH\t%s\tmissing-in-table\trc=%d\n", tag, chain[i]); bad++; }
+    return bad;
+}
+static int rhs_int(void *tok, int i, int n, int *out) {
+    int sign = 1;
+    if (ca_token_is(tok, i, "-")) { sign = -1; i++; }
+    if (i >= n || ca_token_kind(tok, i) != 1) return 0;
+    int v; if (!parse_rc(ca_token_text(tok, i), &v) || v < 0) return 0;
+    *out = sign * v;
+    return 1;
+}
+static int chain_retry_set(const char *text, int *out, int *n) {
+    void *tok = ca_tokens(text);
+    if (!tok) die("tokens");
+    int count = ca_token_count(tok), hits = 0, assigns = 0, lo = -1, hi = -1;
+    for (int i = 1; i + 1 < count; i++) {
+        if (!ca_token_is(tok, i, "retry") || !ca_token_is(tok, i + 1, "=") || ca_token_is(tok, i - 1, ".")) continue;
+        int end = i + 2, saw = 0;
+        while (end < count && !ca_token_is(tok, end, ";")) end++;
+        if (end >= count) die("retry assignment");
+        for (int j = i + 2; j + 3 < end; j++) if (ca_token_is(tok, j, "r") && ca_token_is(tok, j + 1, ".") && ca_token_is(tok, j + 2, "rc") && ca_token_is(tok, j + 3, "==")) saw = 1;
+        if (!saw) continue;
+        assigns++; lo = i + 2; hi = end;
+    }
+    if (assigns != 1) die("retry assignment count");
+    for (int i = lo; i + 4 < hi; i++) {
+        if (!ca_token_is(tok, i, "r") || !ca_token_is(tok, i + 1, ".") || !ca_token_is(tok, i + 2, "rc") || !ca_token_is(tok, i + 3, "==")) continue;
+        int v; if (!rhs_int(tok, i + 4, hi, &v)) die("retry operand");
+        add(out, n, v); hits++;
+    }
+    ca_tokens_free(tok);
+    return hits;
+}
+static void load_table(const char *path) {
+    size_t n; char *s = cx_read(path, &n);
+    if (!s || !n || s[n - 1] != '\n') die("table text");
+    for (char *p = s; *p; ) {
+        char *e = strchr(p, '\n'); *e = 0;
+        if (*p && *p != '#') {
+            char *f[4]; int k = 0; f[k++] = p;
+            for (char *q = p; *q && k < 5; q++) if (*q == '\t') { *q = 0; if (k == 4) die("columns"); f[k++] = q + 1; }
+            if (k != 4) die("columns");
+            int rc; if (!parse_rc(f[0], &rc)) die("rc");
+            if (nr == MAXR) die("row bound");
+            trc[nr] = rc; tname[nr] = f[1]; tclass[nr] = f[2]; tretry[nr] = !strcmp(f[2], "RETRYABLE"); nr++;
+        }
+        p = e + 1;
+    }
+    if (!nr) die("empty table");
+}
+static int need(int rc, const char *name, const char *cls) {
+    for (int i = 0; i < nr; i++) if (trc[i] == rc) return !strcmp(tname[i], name) && !strcmp(tclass[i], cls);
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc > 2) die("usage [ROOT]");
+    const char *root = argc == 2 ? argv[1] : ".";
+    char table[2600], chain[2600];
+    if (cx_fmt(table, sizeof table, "%s/build/exit-classes.tsv", root) || cx_fmt(chain, sizeof chain, "%s/tools/chain-run.cx", root)) die("path bound");
+    load_table(table);
+    if (!need(-9, "SIGKILL", "RETRYABLE") || !need(-15, "SIGTERM", "RETRYABLE") || !need(124, "TIMEOUT", "RETRYABLE")
+        || !need(137, "SIGKILL_EXIT", "RETRYABLE") || !need(142, "WATCHDOG", "RETRYABLE") || !need(143, "SIGTERM_EXIT", "RETRYABLE")
+        || !need(2, "REFUSE", "DETERMINISTIC")) die("required row");
+    int chain_set[MAXR], cn = 0;
+    size_t zn; char *src = cx_read(chain, &zn);
+    if (!src) die("chain-run text");
+    int hits = chain_retry_set(src, chain_set, &cn);
+    free(src);
+    if (hits < 6) die("retry set short");
+    int live[MAXR], ln = 0;
+    for (int i = 0; i < nr; i++) if (tretry[i]) add(live, &ln, trc[i]);
+    int bad = differ(live, ln, chain_set, cn, "chain-run", 0);
+    int fake_table[1] = {124}, fake_chain[2] = {124, 142};
+    int neg = differ(fake_table, 1, fake_chain, 2, "negative-fixture", 1);
+    if (neg != 1) die("negative fixture silent");
+    for (int i = 0; i < nr; i++) {
+        const char *got = ec_class(trc[i]);
+        if (strcmp(got, tclass[i]) || ec_retryable(trc[i]) != tretry[i]) {
+            fprintf(stderr, "MISMATCH\tlibrary\trc=%d\tclass=%s\n", trc[i], got);
+            bad++;
+        }
+    }
+    if (strcmp(ec_class(99), "UNKNOWN") || ec_retryable(99) || !ec_retryable(124) || ec_retryable(2)) die("library contract");
+    if (bad) return 1;
+    printf("EXITCLASS\trows=%d\tretry=%d\tchain=%d\tnegative=%d\n", nr, ln, cn, neg);
+    return 0;
+}
