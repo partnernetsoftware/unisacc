@@ -2,11 +2,7 @@
 
 > **更简明的目录入口见 [docs/REPO-MAP.md](docs/REPO-MAP.md)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
 
-**0.0.43当前入口（2026-10-25重规划）：** 旧测试树与旧门禁已移入
-`archive/testing-c43-legacy/`。新套件由`tests/run.cx`直接默认-run；当前smoke
-只有16项局部断言，完整验收仍明确NOT_READY。产品构造支持独立在`tools/`，
-其中`tools/sourceflat.cx`已原生替代源码导出逻辑。下文涉及历史探针的条目仅描述来源，
-不能据此恢复旧队列或借用旧通过结果。
+新测试入口是`tests/run.cx`（默认-run），旧测试树在`archive/testing-c43-legacy/`；产品构造支持独立在`tools/`。下文涉及历史探针的条目仅描述来源，不能据此恢复旧队列或借用旧通过结果。
 
 **产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 [readme-detail 已知限制](docs/readme-detail.md#七已知限制)）（六目标单文件）及随带的 `include/`。编译器入口是 `src/unisacc.cx`（六层，见第 2 节），由 `tools/entry-build.cx` 构造；各阶段声明与构造器在 `exec/` 对应目录。原 Python 种子 `unisa/` 已归档到 `archive/reference-py/unisa/`（清单见 [archive/reference-py/README.md](archive/reference-py/README.md)），经典 C 参考（`unisacc.c`、`src/*.c`，以及 `exec/c/` 的驱动与运行核 C 源如 `compiler.c`、`asmcompiler.c`、`run.c`）已归档到 `archive/reference-c/`（见 [archive/reference-c/README.md](archive/reference-c/README.md)），两者只供对照，活路径不回调。生成表与 `kernel/` 改由第 3 节的 CX 工具写出；活路径上剩余的 Python 见 [plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md)。下面区分产品、参考、数据与开发工具：
 
@@ -46,9 +42,6 @@
 `research/model-bytes.json`）；模板、库源码、核与平台驱动另计，
 不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
 
-旧候选 6MB/171 项、Q 编码/177 项与各平台自举、失败及性能记录均保留在
-[S-17 迁移档案](archive/s17-migration-log-20260928.md) 和
-[原始最终证据](archive/research/20260928/s17-final-evidence.json)，不作为当前候选验收。
 固定包驱动自举不包含模型、整包或 APE 容器自构造。
 
 prune 是生产路由中的一个构造网络阶段，位于 lowering 之前
@@ -91,7 +84,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | `kernel/unisa_headers.inc` | 随身携带的 C 库（`include/*.h` 原文与 `-ftrim-libc` 闭包） | 仓内这份由 `tools/carried-header-export.cx`（`prepare`／`--verify`／`install`）写出，文件头记有该工具；`kernel-emit` 也写同名文件 |
 | `include/cx-flat.h` | `.cx` 的单文件前导（`include/cx.h` 在 `__UNISA__` 下读它） | `tools/cx-flatten.cx --write ROOT`／`--check ROOT`，源是 `include/cx-nested.h` |
 
-原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。仓内 `kernel/` 41 个文件中有 40 个的溯源注释仍写着 `python3 -m unisa emit-kernel`：这些已提交字节还没有用 `kernel-emit --write` 重写过。2026-10-30 对仓内 `kernel/` 跑 `kernel-emit --check`，41 个文件都报 DIFF（40 个首处差异在溯源注释；`unisa_headers.inc` 是 `carried-header-export` 写出的，与 `kernel-emit` 的输出不同）。同日 `facts-gen --check`、`gold-table --check`、`cx-flatten --check` 均通过。
+原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。`kernel/` 是生成物，现状与各工具 `--check` 的结果以命令实跑为准。
 
 ### 文件格式
 
@@ -115,7 +108,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 `src/` 里其余 `.cx`（`driveface`、`driveroute`、`entrybind`、`entryexec`、`hostnative`、`runcache` 等）以及软链 `src/driver`、`src/runtime`、`src/core`、`src/compiler`（指向 `cx/` 同名目录）是入口用到的其他对象。完整对象清单（33 个）写在 [`tools/entry-build.cx`](tools/entry-build.cx) 里。`src/version.h` 是产品版本声明。
 
-**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)；该计划写明截至 2026-10-30 入口候选只覆盖 lnx/x86_64，尚未换成产品。当前状态以 [prd.md](prd.md) 的思维树为准。
+**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)；当前状态以 [prd.md](prd.md) 的思维树为准。
 
 ## 3　CX 工具与分层
 
@@ -154,7 +147,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`tests/cxapis.cx`](tests/cxapis.cx) | `tests/cxapis.tsv` | `strcpy`、`strcat`、`sprintf`、`gets` 的调用 |
 | [`tests/cxtrunc.cx`](tests/cxtrunc.cx) | `tests/cxtrunc.tsv` | 丢弃返回值、长度可随输入变化的 `snprintf`、`strncpy`、`memcpy` |
 
-用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`；2026-10-30 它仍失败，29 个文件超基线。
+用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。
 
 **旧实现已归档**：Python 种子 `unisa/` 在 `archive/reference-py/unisa/`，连同依赖它的旧脚本（清单与归档依据见 [archive/reference-py/README.md](archive/reference-py/README.md)）；经典 C 参考 `unisacc.c`、`src/*.c` 与 `exec/c/` 的驱动和运行核 C 源在 `archive/reference-c/`（`exec/c/` 里仍留有检查与探针用的 `.c` 及头文件）（见 [archive/reference-c/README.md](archive/reference-c/README.md)）。两者都按原相对路径存放，只供对照，活路径不得回调。旧自举判据 `nativeboot`、`bigclosure` 等随旧测试树归档在 `archive/testing-c43-legacy/tests/`，不授权新入口。
 
