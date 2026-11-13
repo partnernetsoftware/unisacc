@@ -474,6 +474,66 @@ core_run 里加按网节点或按 op 的计数(改冻结的 cx/core 与汇编内
 10 个以上 `tools/*.cx` 对拍镜像 sha256(行号与诊断位置必须不变,只留换行即为此)-> 前后各 5 次冷七相。
 测量材料在作业临时目录 `tmp/s12/`(r1..r4.err、lin/),未入库。
 
+### 12b 等长空白的落点、被拒定因与预压对拍(2026-11-13,已装 e43ef36832939c7f,HEAD 8805d2f54e,load1 0.8 至 2.0)
+
+状态:落点已定位,补丁已出(未入库),预压路 12 单元镜像字节一致,e1/e3 收益已实测;私有重建未做,
+补丁后的 e2 相与隐式前导路径上的前后对比:UNVERIFIED。不声称产品已变快。
+
+(1) 落点(读码加实测):等长空白不出自 `exec/facts/pp-gen.tsv` 或 `lex-gen.tsv`(那两张是类表与词表生成物),
+出自 E2 网的声明源 `exec/pp/directive-scan-byte.tsv` 第 12 行 `P3BLANK * P3BLANK [["OUT",32],["ADV"]]`:
+指令行(define/include/undef/pragma push 等,先 `JUMP LS` 回行首)与条件跳过区的每个字节出一个空格,
+第 10 行遇 LF 才 `COPYT` 并 `LINES+1`。P3BLANK 只处理整行,所以被填充的行上没有任何留存记号;
+删去 `["OUT",32]` 后行号(LF 计数)不变,留存记号的列号也不变(它们不与填充同行)。
+实测 `-E`:`#if 0`、被跳过行、`#endif`、`#define M 1` 各变成与原行等长的空格行。
+
+(2) SPEED-1C 实测二被拒的定因(复现):`-include min.E x.c` 被拒 `multiple definitions of this function`,
+原因是 `min.E` 里已含 min.cx 的 `main`,x.c 又定义 `main`;换成不含 main 的 y.c 则 rc=0。另一种拒法
+`redefinition of typedef in the same scope` 出在不带 `-nostdinc` 把 `-E` 输出当 `.c` 重编(自动头重复)。
+两者都是语义重复,与空白、行号、列号无关;带空白与预压两版被拒文案相同。
+
+(3) 预压对拍(`tools/NAME.cx` 直接编;`-E` 输出原样作 A.c;A.c 中纯空格行压成空行作 B.c;A/B 均 `-nostdinc`):
+
+| 单元 | 直接 | A 原样 | B 预压 | A 字节 -> B 字节 |
+|---|---|---|---|---|
+| register-fixture | 349ef150c635f985 | 同 | 同 | 396,634 -> 39,051 |
+| ci-verdict | e3a26330551c215a | 同 | 同 | 505,336 -> 57,757 |
+| release-body-diff | fdfb51eadb8b4fa5 | 同 | 同 | 504,040 -> 55,691 |
+| post-publish-check | fc0290fbd3ca8eb7 | 同 | 同 | 461,841 -> 60,358 |
+| check-ci-verdict | 7d7edecf9ae550d7 | 同 | 同 | 505,200 -> 56,105 |
+| check-post-publish-check | 3e9c40afaf15b353 | 同 | 同 | 508,560 -> 59,490 |
+| check-release-body-diff | 788a958d2ff56dcb | 同 | 同 | 505,618 -> 56,518 |
+| pins-reanchor | 81a45ae10e1b1ab4 | 同 | 同 | 509,364 -> 61,025 |
+| check-chain-verdict | f53c27f338550389 | 同 | 同 | 504,831 -> 55,880 |
+| check-pins-reanchor | f51f31ea26f21b8a | 同 | 同 | 457,881 -> 56,074 |
+| chain-verdict | d6d5129f66b8a27e | 同 | 同 | 505,775 -> 72,130 |
+| safedel | a86cc53a9748878c | 同 | 同 | 494,609 -> 77,615 |
+
+12/12 三路镜像 sha256 前 16 位相同;最小 `.cx` 另一例三路同为 bc35367054850363(387,124 -> 38,312 B,
+11,032 行中 9,089 行是纯空格行)。未计入:cxproc(直接编即被拒 `no main`)、cx0-extract(A/B 同样
+`link: undefined reference to fchmod`,直接编 605ecc94dce3e9b6,重编路不等价于产品路)。
+范围限制:只测了单单元工具(多单元 `-E` 报 `multiple preprocessing outputs not migrated`);
+只测 lnx/x86_64;诊断文案的位置未对拍。
+
+(4) 耗时(ci-verdict,A.c 对 B.c,冷,全新 TMPDIR,`UNISACC_RUN_CACHE=0`,各 5 次,镜像十次同 sha,少 447,579 个空白字节):
+
+| 相 | A 最小/中位 ms | B 最小/中位 ms | 差(最小) |
+|---|---|---|---|
+| e1 | 45.7/46.8 | 11.7/12.8 | 34.0 |
+| e3 | 326.6/332.1 | 209.5/213.8 | 117.1 |
+| e2(重喂文本走 P3COPY,不是补丁后的 P3BLANK 路) | 121.2/122.1 | 16.9/18.3 | 仅旁证 |
+| 墙钟 | 972/1008 | 730/755 | 242 |
+
+e1+e3 实测每单元省 151 ms(约 338 ns/空白字节);e2 在补丁后少做 44.8 万次 OUT,但仍要逐字节 ADV,
+省多少 UNMEASURED。[推算] 10 单元仅 e1+e3 约 1.5 s。
+
+(5) 补丁(作业临时目录 `tmp/s12b/speed12b.patch`,`git apply --check -p2` 通过,未入库):只改上述第 12 行为 `[["ADV"]]`。
+`exec/facts/pp-gen.tsv` 的 `# input` 不含该文件,故 facts-gen 的表不需重生成;E2 网权重与 `kernel/` 须经正规构造链重出。
+未做及原因:私有重建要 `net-incremental-rehearsal`(改 pp 一处重建 3 网,构造约 12 s)再经 `test-loader --net e2=ABS --swap-tool`
+绑定 5 个 `TEST_LOADER_*` 路径,15 分钟窗口内未搭起。下一步拆三相:(a) 演练副本内套补丁重建 e2 网;
+(b) test-loader 单网替换,对上表 12 单元加 10 个多单元工具对拍镜像 sha,并对拍一批拒绝用例的诊断行列;
+(c) 前后各 5 次冷七相。风险:依赖 `-E` 文本逐字节的金样(pp-differential、c99-whitespace、UNIPP2 位置封装)须同候选重对。
+若 (b) 发现位置依赖,退路是 e1 对行首连续空白一步跳过(上限仅 e1 的 34 ms/单元,e3 的 117 ms 拿不到)。
+
 ## 架构层高 ROI 审视(SPEED-14)
 
 条件:2026-11-13,已装 unisacc.com sha e43ef36832939c7f,HEAD 6ca621f388,load1 3.4 至 6.6(未因负载丢数据)。15 分钟窗口,只测未改;
