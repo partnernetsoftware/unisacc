@@ -13,4 +13,4 @@ SPEED: 先最短可行方案+一条命令验证;失败再扩展;预算用尽必�
 DON'T: 不做任务外的审计/重构/顺手修复;不扩 domain;不改文件(除非 ROLE 明确授权)
 OUTPUT: agentwork/WORKFLOW.md §6 的 JSON
 ```
-角色:`locator`、`reviewer`、`implementer`、`arbiter`。改动角色文件=改变全体行为,走正常工作项与评审。
+角色:`locator`、`reviewer`、`implementer`、`arbiter`、`orchestrator`(编排者:拆任务、写简报、派工、独立复验、集成;含本会话沉淀的经验与反模式)。改动角色文件=改变全体行为,走正常工作项与评审。
