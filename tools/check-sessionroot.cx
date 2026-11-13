@@ -126,6 +126,33 @@ int main(int argc, char **argv) {
     ck(sr_default("a/b", dflt, sizeof dflt) == -1 && sr_default("", dflt, sizeof dflt) == -1 && sr_default("..x y", dflt, sizeof dflt) == -1, "default-refuses-bad-id");
     ck(sr_default(p, dflt, 8) == -1, "default-refuses-small-buffer");
 
+    /* (4) the persistent chain root: HOME/.cache/unisacc/chains (entry: cxlib.chainroot) */
+    {
+        char cb[4400], ct[4600];
+        ck(sr_chains_base(cb, sizeof cb) == 0 && cb[0] == '/', "chains-base");
+        cx_fmt(ct, sizeof ct, "%s/srcheck-%d", cb, pid);
+        cx_fmt(p, sizeof p, "%s/gen1", ct);
+        ck(sr_ok(root, p, why, sizeof why) == 0 && sr_chain_ok(root, p, why, sizeof why) == 0, "accept-below-chains-base");
+        ck(refused(root, cb, "not-session-root"), "refuse-chains-base-itself");
+        cx_fmt(p, sizeof p, "%s-evil/srcheck-%d", cb, pid);
+        ck(refused(root, p, "not-session-root"), "refuse-chains-base-string-prefix");
+        cx_fmt(p, sizeof p, "%s/../tlib/x", cb);
+        ck(refused(root, p, "path-not-normal"), "refuse-chains-base-dotdot");
+        why[0] = 0;
+        ck(sr_chain_ok(root, top, why, sizeof why) == 1 && !strcmp(why, "not-chain-root"), "chain-ok-refuses-temp-session");
+        cx_fmt(p, sizeof p, "%s/%s/s1", froot, "out");
+        why[0] = 0;
+        ck(sr_chain_ok(froot, p, why, sizeof why) == 1 && !strcmp(why, "inside-source-tree"), "chain-ok-refuses-root-out");
+        /* a link below the chain base that leaves it for the source tree; only when the base exists */
+        if (sy_realpath(cb, q, sizeof q) >= 0) {
+            cx_fmt(p, sizeof p, "%s/tools", froot);
+            ck(sy_symlink(p, ct) == 0 && refused(froot, ct, "symlink-or-noncanonical"), "refuse-symlink-below-chains-base");
+            cx_fmt(p, sizeof p, "%s/s1", ct);
+            ck(refused(froot, p, "symlink-or-noncanonical"), "refuse-symlink-component-below-chains-base");
+            sy_unlink(ct);
+        } else ck(0, "chains-base-absent-symlink-case-not-run");
+    }
+
     /* cleanup of this check's own fixtures */
     sy_rmdir(top);
     cx_fmt(p, sizeof p, "%s/out", froot);

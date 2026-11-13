@@ -1,0 +1,81 @@
+#pragma unisa module chainroot
+/* chainroot -- the single entry through which release chain tools obtain their directories.
+ *
+ *   int cr_dir(const char *root, const char *kind, const char *id, int create, char *out, long cap)
+ *     root    canonical absolute checkout root (borrowed); the answer is never inside it
+ *     kind    one of "snap" "chain" "build" "evidence" "tmp"
+ *     id      [A-Za-z0-9._-]+, not starting with '.': a revision prefix, version or chain id
+ *     create  nonzero: make the directory (and its parents) with mode 0700
+ *     out     receives canonical(HOME)/.cache/unisacc/chains/KIND/ID
+ *   returns 0, or -1 (bad kind/id, no HOME, refused by the guard, mkdir failure).
+ *
+ *   int cr_ok(const char *root, const char *path, char *why, long cap)
+ *     0 when PATH is an acceptable chain directory (sessionroot sr_chain_ok), 1 refused.
+ *
+ * Why this place: a chain directory lives across hours, restarts and resumes, so its path must be
+ * stable and must survive a temp sweep; it must also stay out of the checkout (ROOT/out included).
+ * HOME/.cache/unisacc/chains is persistent, per user and outside every checkout.
+ * Persistence classes of what chain tools write:
+ *   (a) chain directories (snapshot, chain workspace, build, checkpoints): here, kinds snap/chain/build;
+ *   (b) release evidence and receipts: kind "evidence" holds the working copy only.  A cache may be
+ *       dropped, so evidence that cannot be rebuilt is not kept here alone: it is committed under
+ *       agentwork/ (ledger row + evidence path) and uploaded as a release asset before publishing;
+ *   (c) temporary products: kind "tmp" below the chain id, or sy_tmpdir() session roots.
+ * Old ROOT/out chains are not migrated (ROOT/out was emptied before this entry existed).
+ *
+ * Check: tools/check-chainroot.cx (batch chainroot). */
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int cr_name(const char *s) {
+    long i;
+    if (!s || !s[0] || s[0] == '.') return 0;
+    for (i = 0; s[i]; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0;
+    }
+    return i < 200;
+}
+
+static int cr_kind(const char *k) {
+    static const char *const kinds[5] = {"snap", "chain", "build", "evidence", "tmp"};
+    int i;
+    if (!k) return 0;
+    for (i = 0; i < 5; i++) if (!strcmp(k, kinds[i])) return 1;
+    return 0;
+}
+
+/* mkdir P and every missing parent, 0700.  0 when P is a directory afterwards. */
+static int cr_mkdirs(const char *p) {
+    char cur[4400];
+    sy_stat_t st;
+    long i;
+    if (cx_fmt(cur, sizeof cur, "%s", p)) return -1;
+    for (i = 1; cur[i]; i++) {
+        if (cur[i] != '/') continue;
+        cur[i] = 0;
+        if (sy_lstat(cur, &st) != 0 && sy_mkdir(cur, 0700) && sy_lstat(cur, &st) != 0) return -1;
+        cur[i] = '/';
+    }
+    if (sy_lstat(cur, &st) != 0 && sy_mkdir(cur, 0700) && sy_lstat(cur, &st) != 0) return -1;
+    return sy_lstat(cur, &st) == 0 && st.kind == 'd' ? 0 : -1;
+}
+
+int cr_ok(const char *root, const char *path, char *why, long cap) {
+    return sr_chain_ok(root, path, why, cap);
+}
+
+int cr_dir(const char *root, const char *kind, const char *id, int create, char *out, long cap) {
+    char base[4400], path[4600];
+    if (!root || !out || cap < 1 || !cr_kind(kind) || !cr_name(id)) return -1;
+    if (sr_chains_base(base, sizeof base)) return -1;
+    if (create) {
+        /* the base may gain a canonical spelling once it exists */
+        if (cr_mkdirs(base) || sr_chains_base(base, sizeof base)) return -1;
+    }
+    if (cx_fmt(path, sizeof path, "%s/%s/%s", base, kind, id)) return -1;
+    if (sr_chain_ok(root, path, 0, 0)) return -1;
+    if (create && (cr_mkdirs(path) || sr_chain_ok(root, path, 0, 0))) return -1;
+    return cx_fmt(out, (int)cap, "%s", path) ? -1 : 0;
+}

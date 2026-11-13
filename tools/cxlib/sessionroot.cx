@@ -15,6 +15,8 @@
  *   (2) below canonical(sy_tmpdir())/unisacc-session-*  -- the default session location
  *   (3) below canonical(sy_tmpdir())/unisacc-affected-* -- a session a check creates inside the run
  *       directory tools/affected.cx hands it (the same prefix tests/run-batch.cx accepts)
+ *   (4) below canonical(HOME)/.cache/unisacc/chains     -- the persistent release chain root
+ *       (sr_chains_base; sr_chain_ok accepts only this one; entry: tools/cxlib/chainroot.cx)
  * Everything else is refused.  Invariants kept from the former "below ROOT/out" guards:
  *   - the path is lexically normal (no empty, "." or ".." component, no trailing '/');
  *   - the deepest existing ancestor is canonical, so no component is a symbolic link;
@@ -86,6 +88,48 @@ int sr_default(const char *id, char *out, long cap) {
     return 0;
 }
 
+/* canonical(HOME)/.cache/unisacc/chains: the persistent, out-of-tree base of release chain
+   directories.  Created or not, the spelling is canonical when it exists.  0, or -1. */
+int sr_chains_base(char *out, long cap) {
+    char home[4096], lex[4400], real[4096];
+    const char *h = sy_env_or("HOME", "");
+    if (!out || cap < 1 || h[0] != '/' || sy_realpath(h, home, sizeof home) < 0) return -1;
+    if (cx_fmt(lex, sizeof lex, "%s/.cache/unisacc/chains", home)) return -1;
+    if (sy_realpath(lex, real, sizeof real) >= 0) return cx_fmt(out, (int)cap, "%s", real) ? -1 : 0;
+    return cx_fmt(out, (int)cap, "%s", lex) ? -1 : 0;
+}
+
+/* PATH against the chain base: 0 accepted, 1 refused (WHY set), 2 not below the chain base.
+   The first component below the base, when present, is a directory owned by the caller. */
+static int sr_chain_case(const char *path, char *why, long cap) {
+    char base[4400], top[4400];
+    size_t n, z;
+    sy_stat_t st;
+    if (sr_chains_base(base, sizeof base)) return 2;
+    if (!sr_below(path, base)) return 2;
+    n = strlen(base) + 1;
+    z = n;
+    while (path[z] && path[z] != '/') z++;
+    if (z >= sizeof top || mm_copy(top, sizeof top, path, z)) return sr_no(why, cap, "arguments");
+    top[z] = 0;
+    if (sy_lstat(top, &st) == 0 && (st.kind != 'd' || st.uid != (long)sy_uid())) return sr_no(why, cap, "chain-root-owner");
+    return 0;
+}
+
+/* Like sr_ok, but only the persistent chain root (4) is accepted: neither ROOT/out nor a temp
+   session root.  Chain tools take their directories through cxlib.chainroot, which checks here. */
+int sr_chain_ok(const char *root, const char *path, char *why, long cap) {
+    char real[4096];
+    int k;
+    if (!root || !path || root[0] != '/' || path[0] != '/' || strlen(root) >= 4096 || strlen(path) >= 4096) return sr_no(why, cap, "arguments");
+    if (sy_realpath(root, real, sizeof real) < 0 || strcmp(real, root)) return sr_no(why, cap, "canonical-root");
+    if (!sr_normal(path)) return sr_no(why, cap, "path-not-normal");
+    if (sr_ancestor_canonical(path)) return sr_no(why, cap, "symlink-or-noncanonical");
+    if (!strcmp(path, root) || sr_below(path, root)) return sr_no(why, cap, "inside-source-tree");
+    k = sr_chain_case(path, why, cap);
+    return k == 2 ? sr_no(why, cap, "not-chain-root") : k;
+}
+
 int sr_ok(const char *root, const char *path, char *why, long cap) {
     static const char *const prefix[2] = {"unisacc-session-", "unisacc-affected-"};
     char real[4096], base[4400], tc[4096], top[4400];
@@ -97,6 +141,9 @@ int sr_ok(const char *root, const char *path, char *why, long cap) {
     /* (1) the pre-migration layout */
     if (!cx_fmt(base, sizeof base, "%s/out", root) && sy_realpath(base, real, sizeof real) >= 0 && sr_below(path, real)) return 0;
     if (!strcmp(path, root) || sr_below(path, root)) return sr_no(why, cap, "inside-source-tree");
+    /* (4) the persistent chain root */
+    k = sr_chain_case(path, why, cap);
+    if (k != 2) return k;
     /* (2)(3) the temp session roots */
     if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) return sr_no(why, cap, "tmpdir");
     for (k = 0; k < 2; k++) {
