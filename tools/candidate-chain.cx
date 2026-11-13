@@ -368,6 +368,38 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
     if (cx_fmt(done[k], sizeof done[k], "%s", native)) die("path", "tool pin");
     return name;
 }
+/* entry-build 按输出目录钉 HEAD(DSG-DRV1 第 1 片,与 tool_pinned 同一 pin 格式与拒绝文案):
+   entry-build 经 constructor 以源码方式运行(不是原生体),所以钉的是源码副本:OUT/entry-build.pin.cx
+   首次从 ROOT/tools/entry-build.cx 拷入,OUT/entry-build.pin 记工具名、输出目录与 src_sha;之后每次核对
+   副本字节与输出目录,变了拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录拒绝
+   "REFUSE chain-tool pin dir mismatch"。检出内 entry-build.cx 之后再改不影响本输出。 */
+static const char *eb_pinned(const char *root, const char *outdir, char *copy, size_t cap) {
+    char src[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], text[9000];
+    if (cx_fmt(src, sizeof src, "%s/tools/entry-build.cx", root) || cx_fmt(copy, cap, "%s/entry-build.pin.cx", outdir) ||
+        cx_fmt(pin, sizeof pin, "%s/entry-build.pin", outdir) || cx_fmt(tmp, sizeof tmp, "%s.new", copy) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
+    int lock = candidate_lock(copy, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        char *o = strstr(old, "\nout=");
+        char outl[4500];
+        if (cx_fmt(outl, sizeof outl, "\nout=%s\n", outdir) || !o || memcmp(o, outl, strlen(outl))) die("REFUSE chain-tool pin dir mismatch", pin);
+        step_hash(copy, hash);
+        char nl2[200];
+        if (cx_fmt(nl2, sizeof nl2, "\nsrc_sha=%s\n", hash) || !strstr(old, nl2)) die("REFUSE chain-tool pin mismatch", pin);
+        free(old);
+    } else {
+        size_t sn = 0; char *sb = cx_read(src, &sn);
+        if (!sb) die("eb pin source unreadable", src);
+        if (cx_write(tmp, sb, sn) || sy_rename(tmp, copy)) die("publish eb pin copy", copy);
+        free(sb);
+        step_hash(copy, hash);
+        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=entry-build\nout=%s\nsrc_sha=%s\nnative_sha=-\n", outdir, hash)) die("eb pin record", pin);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
+        sy_printf("CHAIN_TOOL_PIN\ttool=entry-build\tbuilt=%s\tsha=%s\n", copy, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", copy);
+    return copy;
+}
 /* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
    argv through a fake ROOT/unisacc.com ("TOOL -- ARGS") and produce no receipt. A chain run
    always has --out and runs the pinned executable directly. */
@@ -1253,7 +1285,7 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
                         const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,
                         const char *target, const char *slug, int gen, int resume) {
     char tool[4400], com[4400], manifest[4400], prepare[80], group[80];
-    if (cx_fmt(tool, sizeof tool, "%s/tools/entry-build.cx", snap) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
+    if (!eb_pinned(root, outdir, tool, sizeof tool) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
     if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
     char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
     pr_result result; long began = sy_now_ms();
@@ -2056,7 +2088,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
     }
     if (gen == 1 && ti < 2) {
         char gout[4400], parent[4400], ctor[4400], ebt[4400];
-        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("lane entry", lane_phase);
+        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || !eb_pinned(root, outdir, ebt, sizeof ebt)) die("lane entry", lane_phase);
         sy_mkdir(parent, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("lane output", gout);
         if (sy_setenv("UNISACC_CTOR", ctor, 1) || sy_setenv("UNISA_CONTAINER", pkg, 1) || sy_chdir(snap)) die("lane entry environment", snap);
@@ -2150,6 +2182,13 @@ int main(int argc, char **argv) {
         const char *nm = tool_pinned(argv[2], argv[4], 50, nat, sizeof nat);
         if (!nm) die("REFUSE not a pinned chain tool", argv[4]);
         sy_printf("TOOL_PIN\t%s\t%s\n", nm, nat);
+        return 0;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--eb-pin-fixture")) {
+        /* 夹具入口: --eb-pin-fixture ROOT OUT,只钉 entry-build 源码副本并打印路径 */
+        char cp[4400];
+        eb_pinned(argv[2], argv[3], cp, sizeof cp);
+        sy_printf("EB_PIN\t%s\n", cp);
         return 0;
     }
     if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {
@@ -2587,7 +2626,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-x86_64", outdir)) die("path", "g1");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
+        if (!eb_pinned(root, outdir, ebt, sizeof ebt)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
@@ -2610,7 +2649,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-arm64", outdir)) die("path", "g1a");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
+        if (!eb_pinned(root, outdir, ebt, sizeof ebt)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
