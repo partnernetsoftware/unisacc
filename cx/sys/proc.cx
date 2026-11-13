@@ -10,6 +10,26 @@
    moves here. An APE (unisacc.com) cannot be exec'd directly: run it as
    {"sh", path, ...}. */
 
+/* Pre-spawn hooks: a layer above (stdio) registers a function that runs, in
+   registration order, before every fork this module does. Plain function
+   pointers, no platform branch. Returns 0, or -EINVAL for NULL, -ENOSPC when
+   full; registering the same function twice is a no-op. */
+#define SY_ATSPAWN_MAX 8
+static void (*sy_atspawn_fn[SY_ATSPAWN_MAX])(void);
+static int sy_atspawn_n;
+int sy_atspawn(void (*fn)(void)) {
+    int i;
+    if (!fn) return -EINVAL;
+    for (i = 0; i < sy_atspawn_n; i++) if (sy_atspawn_fn[i] == fn) return 0;
+    if (sy_atspawn_n >= SY_ATSPAWN_MAX) return -ENOSPC;
+    sy_atspawn_fn[sy_atspawn_n++] = fn;
+    return 0;
+}
+static void sy_prespawn(void) {
+    int i;
+    for (i = 0; i < sy_atspawn_n; i++) sy_atspawn_fn[i]();
+}
+
 static int sy_status(int st) {
     if (WIFEXITED(st)) return WEXITSTATUS(st);
     if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
@@ -26,6 +46,7 @@ int sy_run(char **argv, char *out, int cap, int *cut) {
     if (cut) *cut = 0;
     if (!argv || !argv[0]) return -EINVAL;
     if (pipe(p) != 0) return -errno;
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { int e = errno; close(p[0]); close(p[1]); return -e; }
     if (pid == 0) {
@@ -58,6 +79,7 @@ int sy_run(char **argv, char *out, int cap, int *cut) {
 int sy_spawn(char **argv) {
     pid_t pid;
     if (!argv || !argv[0]) return -EINVAL;
+    sy_prespawn();
     pid = fork();
     if (pid < 0) return -errno;
     if (pid == 0) {
@@ -86,6 +108,7 @@ int sy_spawn_inherit(char **argv, int keep) {
     if (fcntl(p[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(p[1], F_SETFD, FD_CLOEXEC) != 0) {
         e = errno; close(p[0]); close(p[1]); return -e;
     }
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { e = errno; close(p[0]); close(p[1]); return -e; }
     if (pid == 0) {
@@ -116,6 +139,7 @@ int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
     if (!fn || !fds) return -EINVAL;
     if (pipe(po) != 0) return -errno;
     if (pipe(pe) != 0) { e = errno; close(po[0]); close(po[1]); return -e; }
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { e = errno; close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return -e; }
     if (pid == 0) {
@@ -277,7 +301,7 @@ int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) {
     if (!e && o->in_fd == SY_STDIO_PIPE && pipe(pi) != 0) e = errno;
     if (!e && o->out_fd == SY_STDIO_PIPE && pipe(po) != 0) e = errno;
     if (!e && o->err_fd == SY_STDIO_PIPE && !(o->flags & SY_SPAWN_ERR_TO_OUT) && pipe(pe) != 0) e = errno;
-    if (!e) { pid = fork(); if (pid < 0) e = errno; }
+    if (!e) { sy_prespawn(); pid = fork(); if (pid < 0) e = errno; }
     if (e) {
         int *all[4];
         all[0] = ps; all[1] = pi; all[2] = po; all[3] = pe;
