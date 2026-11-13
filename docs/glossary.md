@@ -5,7 +5,7 @@
 
 > 2026-11-07 名实合同：unisacc 是**模型驱动（事实表→生成器→VM 程序）的编译器**，不是 neural-network-based compiler。默认七流执行生成的转移/动作程序；默认阶段包另含 **42 张构造阈值网**，经典参考有 **18 张构造事实网**，二者不能混称或把 NN 绝对限定为 18 张。两类网均由事实与表确定性构造，不是训练所得，不声称学习或泛化；不得把默认产品笼统称为学习所得的神经网络推理。域内全键穷举只证明网与表相等，不证明表正确实现 C99，更不证明 C99 完整覆盖。迁 VM 的体积或性能收益须实测，尚不能作为既成收益。
 >
-> 下文词频、Python 路径与 segment/训练术语是 2026-10-23 的历史盘点，不表示默认产品存在训练过程；经典 C/Python 参考现已归档。下文 `unisa/` 历史路径现位于 `archive/reference-py/unisa/`，例如 `gold.py` 的现址是 `archive/reference-py/unisa/gold.py`，不是活工具入口。
+> 下文词频与 segment/训练术语不表示默认产品存在训练过程。`unisa/` 下的 Python 参考位于 `archive/reference-py/unisa/`（例如 `gold.py`），不是活工具入口。
 
 ## 1. 词频实测（谁在用、用得多狠）
 
@@ -64,8 +64,7 @@
 |---|---|
 | 新增 `.cx` 模块 | 一律 `net` / `stream` / `segment` / `book phase`；禁止用 `stage` 指网 |
 | 迁移现有 `.py` → `.cx` | **在迁移那一刀定名**：`gold.py STAGES` → `net.cx` 的 `net_*`；`segment.py` → `segment.cx`；`control/net.py`（神经网）→ `model.cx` |
-| 历史 `.cx` 错用记录 | `adapter/ujswasm/ujsgold.cx` 注释 "one per stage" 说的是**网** → 应用 "one per net"；现已归档的 `archive/testing-c43-legacy/tests/copycontractcheck.cx` 的 `stage` 变量实为构建目标名，不是当前测试入口 |
-| `unisa/` 下的 Python | **目标是 100% 零依赖**（主人 2026-10-23 重申：这是硬目标，不是“保留 oracle”）。基线：`python3` 调用点 **2253**、`import unisa` 文件 **86**、剩余 `.py` **452**。三者清零后 `unisa/` 移入 `archive/`（不删，仅人工参考）；迁移前不做任何重命名 |
+| `unisa/` 下的 Python | **目标是 100% 零依赖**（主人 2026-10-23 重申：这是硬目标，不是“保留 oracle”）；已移入 `archive/reference-py/unisa/`（不删，仅人工参考） |
 | 文档 | 已落 `prd.md §0` + 本文件；新文档按 §0 用词 |
 
 **不动的**：`image-stages.tsv` 的 `stage` 列（它确实指流）、`flownet` 的 `flow`/`phase` 字段名、C/.cx 里的既有符号语义。
@@ -96,7 +95,7 @@
 3. **`.py` 不重命名**：随 py2cx 波次迁移时按新名落盘（`net.cx` / `segment.cx` / `model.cx`）；长期 oracle（`unisa/gold.py`）只加顶部术语注释
 4. 文档替换：按重灾区顺序，逐处判定，不盲改
 5. 术语自动门禁未实施；§6 判据目前只能人工审读，不声称有 `tests/glossarycheck.cx` 闸
-6. 历史迁移原则：每步单独 commit，**不改语义、不改字节**；不将未实施门禁记为绿
+6. 不将未实施门禁记为绿
 
 ## 8. 一句话
 
