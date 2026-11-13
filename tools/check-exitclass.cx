@@ -1,9 +1,9 @@
 /* check-exitclass: table, generated ec_class/ec_retryable, and the chain-run retry set.
  *   sh ./unisacc.com tools/check-exitclass.cx [-- ROOT]
- * Extracts r.rc==N operands from tools/chain-run.cx with cxlib.chainargv tokens (comments skipped).
- * A RETRYABLE row absent from that set, or a set member absent from the table, is reported and fails.
+ * The unique retry= assignment in tools/chain-run.cx must call ec_retryable(r.rc)
+ * and must not contain r.rc== literals. The RETRYABLE rows are the library set.
  * A synthetic pair is always compared and must report a mismatch; a silent reporter fails the check.
- * Does not run batches and does not wire chain tools. */
+ * Confirms chain-run calls ec_retryable. Does not run batches. */
 #pragma unisa use sys.fs
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainargv
@@ -30,35 +30,30 @@ static int differ(const int *table, int nt, const int *chain, int nc, const char
     for (int i = 0; i < nc; i++) if (!has(table, nt, chain[i])) { if (!quiet) fprintf(stderr, "MISMATCH\t%s\tmissing-in-table\trc=%d\n", tag, chain[i]); bad++; }
     return bad;
 }
-static int rhs_int(void *tok, int i, int n, int *out) {
-    int sign = 1;
-    if (ca_token_is(tok, i, "-")) { sign = -1; i++; }
-    if (i >= n || ca_token_kind(tok, i) != 1) return 0;
-    int v; if (!parse_rc(ca_token_text(tok, i), &v) || v < 0) return 0;
-    *out = sign * v;
-    return 1;
-}
-static int chain_retry_set(const char *text, int *out, int *n) {
+static int chain_wired(const char *text) {
     void *tok = ca_tokens(text);
     if (!tok) die("tokens");
-    int count = ca_token_count(tok), hits = 0, assigns = 0, lo = -1, hi = -1;
+    int count = ca_token_count(tok), assigns = 0;
     for (int i = 1; i + 1 < count; i++) {
         if (!ca_token_is(tok, i, "retry") || !ca_token_is(tok, i + 1, "=") || ca_token_is(tok, i - 1, ".")) continue;
-        int end = i + 2, saw = 0;
+        int end = i + 2;
         while (end < count && !ca_token_is(tok, end, ";")) end++;
         if (end >= count) die("retry assignment");
-        for (int j = i + 2; j + 3 < end; j++) if (ca_token_is(tok, j, "r") && ca_token_is(tok, j + 1, ".") && ca_token_is(tok, j + 2, "rc") && ca_token_is(tok, j + 3, "==")) saw = 1;
-        if (!saw) continue;
-        assigns++; lo = i + 2; hi = end;
-    }
-    if (assigns != 1) die("retry assignment count");
-    for (int i = lo; i + 4 < hi; i++) {
-        if (!ca_token_is(tok, i, "r") || !ca_token_is(tok, i + 1, ".") || !ca_token_is(tok, i + 2, "rc") || !ca_token_is(tok, i + 3, "==")) continue;
-        int v; if (!rhs_int(tok, i + 4, hi, &v)) die("retry operand");
-        add(out, n, v); hits++;
+        int saw_eq = 0, saw_call = 0;
+        for (int j = i + 2; j + 3 < end; j++) {
+            if (ca_token_is(tok, j, "r") && ca_token_is(tok, j + 1, ".") && ca_token_is(tok, j + 2, "rc") && ca_token_is(tok, j + 3, "==")) saw_eq = 1;
+        }
+        for (int j = i + 2; j + 5 < end; j++) {
+            if (ca_token_is(tok, j, "ec_retryable") && ca_token_is(tok, j + 1, "(") && ca_token_is(tok, j + 2, "r")
+                && ca_token_is(tok, j + 3, ".") && ca_token_is(tok, j + 4, "rc") && ca_token_is(tok, j + 5, ")")) saw_call = 1;
+        }
+        if (saw_eq) die("hardcoded retry set");
+        if (!saw_call) continue;
+        assigns++;
     }
     ca_tokens_free(tok);
-    return hits;
+    if (assigns != 1) die("retry assignment count");
+    return 1;
 }
 static void load_table(const char *path) {
     size_t n; char *s = cx_read(path, &n);
@@ -90,15 +85,15 @@ int main(int argc, char **argv) {
     if (!need(-9, "SIGKILL", "RETRYABLE") || !need(-15, "SIGTERM", "RETRYABLE") || !need(124, "TIMEOUT", "RETRYABLE")
         || !need(137, "SIGKILL_EXIT", "RETRYABLE") || !need(142, "WATCHDOG", "RETRYABLE") || !need(143, "SIGTERM_EXIT", "RETRYABLE")
         || !need(2, "REFUSE", "DETERMINISTIC")) die("required row");
-    int chain_set[MAXR], cn = 0;
     size_t zn; char *src = cx_read(chain, &zn);
     if (!src) die("chain-run text");
-    int hits = chain_retry_set(src, chain_set, &cn);
+    int wired = chain_wired(src);
     free(src);
-    if (hits < 6) die("retry set short");
+    if (!wired) die("not wired");
     int live[MAXR], ln = 0;
     for (int i = 0; i < nr; i++) if (tretry[i]) add(live, &ln, trc[i]);
-    int bad = differ(live, ln, chain_set, cn, "chain-run", 0);
+    int cn = ln;
+    int bad = 0;
     int fake_table[1] = {124}, fake_chain[2] = {124, 142};
     int neg = differ(fake_table, 1, fake_chain, 2, "negative-fixture", 1);
     if (neg != 1) die("negative fixture silent");
