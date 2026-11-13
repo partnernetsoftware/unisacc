@@ -66,6 +66,14 @@ static int cc_pb(void) {
     }
     return pb;
 }
+/* Outer bound of a sub-step inside a phase (front/stub/merge): derived from the exported phase bound so the
+   outer kill is never tighter than the phase (cmd.front 45 killed whole-front sub-steps taking 45-90 s under load).
+   Stand-alone use (no exported bound) keeps the cmd.front table default. */
+static int cc_front(void) {
+    int pb = cc_pb();
+    const char *e = getenv("UNISACC_CHAIN_PHASE_BOUND_S");
+    return ccp_sub_bound(cc_call_limits(), e && *e, pb, cc_lim("cmd.front", 0));
+}
 static long fsize(const char *p) {
     sy_stat_t st;
     if (sy_stat(p, &st)) return -1;
@@ -523,7 +531,7 @@ static void wf_stub(const char *root, const char *outdir, char *wft, char *prep,
     wf_scrub_dest(outdir, dest);
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
-    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, sy_now_ms() - t0);
 }
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
@@ -560,7 +568,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
             v[n++] = wft; v[n++] = (char *)"--";
             v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
             v[n++] = offset; v[n++] = amount; v[n++] = 0;
-            if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, parts[i]);
+            if (bound_sh_secs(root, v, cc_front())) die(tag, parts[i]);
             if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
             mark(outdir, tag, 0);
         }
@@ -574,7 +582,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
         for (i = 0; i < slices; i++) v[n++] = parts[i];
         v[n++] = 0;
-        if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, phase);
+        if (bound_sh_secs(root, v, cc_front())) die(tag, phase);
         mark(outdir, tag, 0);
     } else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
     if (!want_stub) return 0;
@@ -601,7 +609,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
+        n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die("wf-span-prep", nout);
     } else sy_printf("WF_SPAN_PREP_EXISTING\t%s\n", rec);
@@ -657,7 +665,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     v[n++] = (char *)first; v[n++] = (char *)last;
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
-    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -718,7 +726,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
-    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -763,7 +771,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
+        n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die(ptag, nout);
     }
@@ -992,7 +1000,7 @@ static void plan(void) {
     sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=%d\n", cc_pb());
     sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=%d\n", cc_pb());
     sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=%d\n", cc_pb());
-    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=%d\n", cc_lim("cmd.front", 0));
+    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=%d\n", cc_front());
     sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=%d\n", cf_root_count(), cc_pb());
     sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=%d\n", cc_pb());
     sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=%d\n", cc_pb());
@@ -2572,7 +2580,7 @@ int main(int argc, char **argv) {
                 v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
                 if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
                 if (sy_chdir(snap)) die("chdir", snap);
-                n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
+                n = bound_sh_secs(root, v, cc_front());
                 if (sy_chdir(saved)) die("chdir", saved);
                 if (n) die("wf-prepare", nout);
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
