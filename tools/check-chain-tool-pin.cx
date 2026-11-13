@@ -113,6 +113,46 @@ int main(int argc, char **argv) {
         free(log); free(nb); free(pb);
         if (cx_fmt(wrap, sizeof wrap, "exec sh %s/unisacc.com \"$@\"\n", cwd) || cx_write(com, wrap, strlen(wrap))) return 2;
     }
+    /* entry-build 源码钉(DSG-DRV1 第 1 片):--eb-pin-fixture ROOT OUT */
+    {
+        char eroot[4400], etools[4400], esrc[4400], eo1[4400], eo2[4400], ecp[4400], epin[4400], ecp2[4400], epin2[4400];
+        if (cx_fmt(eroot, sizeof eroot, "%s/eroot", od) || cx_fmt(etools, sizeof etools, "%s/eroot/tools", od) ||
+            cx_fmt(esrc, sizeof esrc, "%s/eroot/tools/entry-build.cx", od) || cx_fmt(eo1, sizeof eo1, "%s/eout1", od) ||
+            cx_fmt(eo2, sizeof eo2, "%s/eout2", od) || cx_fmt(ecp, sizeof ecp, "%s/entry-build.pin.cx", eo1) ||
+            cx_fmt(epin, sizeof epin, "%s/entry-build.pin", eo1) || cx_fmt(ecp2, sizeof ecp2, "%s/entry-build.pin.cx", eo2) ||
+            cx_fmt(epin2, sizeof epin2, "%s/entry-build.pin", eo2)) return 2;
+        sy_mkdir(eroot, 0755); sy_mkdir(etools, 0755); sy_mkdir(eo1, 0755); sy_mkdir(eo2, 0755);
+        char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
+        if (cx_write(esrc, v1, strlen(v1))) return 2;
+        char *l = 0;
+        char *ev[] = {(char *)cc, "--eb-pin-fixture", eroot, eo1, 0};
+        int rc = run(ev, 50, &l);
+        size_t cn = 0; char *cb = cx_read(ecp, &cn);
+        size_t pn = 0; char *pb = cx_read(epin, &pn);
+        ck(rc == 0 && cb && cn == strlen(v1) && !memcmp(cb, v1, cn) && pb && has_sub(pb, "tool=entry-build\n") && has_sub(pb, "\nsrc_sha="), "entry-build-first-pin-copy-recorded");
+        free(l);
+        /* 检出内源码改动不影响钉住 */
+        if (cx_write(esrc, v2, strlen(v2))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        size_t cn2 = 0; char *cb2 = cx_read(ecp, &cn2);
+        ck(rc == 0 && cb2 && cn2 == strlen(v1) && !memcmp(cb2, v1, cn2), "entry-build-checkout-edit-keeps-pin");
+        free(l); free(cb2);
+        /* changed-input:改副本字节 */
+        if (cx_write(ecp, v2, strlen(v2))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), "entry-build-changed-input-refused");
+        free(l);
+        if (cx_write(ecp, v1, strlen(v1))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        ck(rc == 0, "entry-build-restored-input-reused");
+        free(l);
+        /* changed-dir:pin 与副本拷到别的输出目录 */
+        if (cx_write(ecp2, v1, strlen(v1)) || cx_write(epin2, pb, pn)) return 2;
+        char *ev2[] = {(char *)cc, "--eb-pin-fixture", eroot, eo2, 0};
+        l = 0; rc = run(ev2, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), "entry-build-changed-dir-refused");
+        free(l); free(cb); free(pb);
+    }
     printf("CHECK_CHAIN_TOOL_PIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
