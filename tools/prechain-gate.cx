@@ -209,8 +209,73 @@ static int dry(void) {
     { char rm[160]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", dir)) { int r = system(rm); (void)r; } }
     return bad ? 1 : 0;
 }
+/* --prestart --snap DIR [--since EPOCH] [--outdir OUTDIR] [--map FILE] [--head DIR]:
+   run snap-tool-drift.cx and snap-residue.cx (both --report, read-only) and parse their last lines.
+   snap_diff>0 or stale>0 -> REFUSE line, rc 1; else PRECHAIN_OK, rc 0. Stale boundary: --since, else the first
+   SEGMENT epoch of OUTDIR/chain-run.tsv (read by snap-residue); with neither, epoch 1: stale is report-only. */
+static long field_of(const char *txt, const char *key) {
+    const char *p = strstr(txt, key);
+    return p ? atol(p + strlen(key)) : -1;
+}
+static int slurp(const char *cmd, char *out, size_t cap) {
+    FILE *p = popen(cmd, "r"); size_t n = 0;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; return pclose(p);
+}
+static int prestart(int argc, char **argv) {
+    const char *snap = 0, *since = 0, *outdir = 0, *map = 0, *head = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--snap") && i + 1 < argc) snap = argv[++i];
+        else if (!strcmp(argv[i], "--since") && i + 1 < argc) since = argv[++i];
+        else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) map = argv[++i];
+        else if (!strcmp(argv[i], "--head") && i + 1 < argc) head = argv[++i];
+        else { fprintf(stderr, "usage: prechain-gate --prestart --snap DIR [--since EPOCH] [--outdir OUTDIR] [--map F] [--head D]\n"); return 2; }
+    }
+    if (!snap) { fprintf(stderr, "prechain-gate: REFUSE --snap required\n"); return 2; }
+    char sn[2048]; size_t sl = strlen(snap);
+    if (sl >= sizeof sn) return 2;
+    mm_copy(sn, sizeof sn, snap, sl + 1);
+    while (sl > 1 && sn[sl - 1] == '/') sn[--sl] = 0;
+    char *slash = strrchr(sn, '/'); const char *base = slash ? slash + 1 : sn;
+    if (strncmp(base, "release-snap-", 13) || strlen(base) < 23) { fprintf(stderr, "prechain-gate: REFUSE DIR name must be release-snap-<rev10>\n"); return 2; }
+    char rev[11]; mm_copy(rev, sizeof rev, base + 13, 10); rev[10] = 0;
+    char parent[2048] = ".";
+    if (slash) { size_t pl = (size_t)(slash - sn); if (pl == 0) pl = 1; mm_copy(parent, sizeof parent, sn, pl); parent[pl] = 0; }
+    static char o1[1 << 16], o2[1 << 16], cmd[8192];
+    if (cx_fmt(cmd, sizeof cmd, "timeout 55 sh ./unisacc.com tools/snap-tool-drift.cx -- --snap '%s'%s%s%s%s --report 2>&1",
+            sn, map ? " --map '" : "", map ? map : "", map ? "'" : "", "")) return 2;
+    if (head) { size_t l = strlen(cmd); if (cx_fmt(cmd + l, sizeof cmd - l, " --head '%s'", head)) return 2; }
+    slurp(cmd, o1, sizeof o1);
+    long sdiff = field_of(o1, "snap_diff=");
+    if (sdiff < 0) { printf("REFUSE\tsnap-tool-drift gave no result line\n%s", o1); return 2; }
+    char tmp[] = "/tmp/pgps-XXXXXX"; char od[512]; int mk = 0;
+    if (outdir) { if (cx_fmt(od, sizeof od, "%s", outdir)) return 2; }
+    else {
+        if (!mkdtemp(tmp)) return 2; mk = 1;
+        char f[600]; if (cx_fmt(f, sizeof f, "%s/chain-run.tsv", tmp)) return 2;
+        FILE *w = fopen(f, "w"); if (!w) return 2;
+        fprintf(w, "SEGMENT\t%ld\tn=1\tstart\n", since ? atol(since) : 1L); fclose(w);
+        if (cx_fmt(od, sizeof od, "%s", tmp)) return 2;
+    }
+    if (since && outdir) fprintf(stderr, "prechain-gate: note --since ignored because --outdir is given\n");
+    if (cx_fmt(cmd, sizeof cmd, "SNAP_RESIDUE_ROOT='%s' timeout 55 sh ./unisacc.com tools/snap-residue.cx -- %s '%s' --report 2>&1", parent, rev, od)) return 2;
+    slurp(cmd, o2, sizeof o2);
+    if (mk) { char rm[160]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", tmp)) { int r = system(rm); (void)r; } }
+    long stale = field_of(o2, "stale=");
+    if (stale < 0) { printf("REFUSE\tsnap-residue gave no result line\n%s", o2); return 2; }
+    int bounded = outdir || since;
+    printf("PRECHAIN_PRESTART\tsnap=%s\tsnap_diff=%ld\tstale=%ld\tstale_bound=%s\n", sn, sdiff, stale, bounded ? "set" : "none(report-only)");
+    if (sdiff > 0) { printf("REFUSE\tsnap_diff=%ld: snapshot driver tools differ from HEAD (source=snap)\n", sdiff); }
+    if (stale > 0 && bounded) { printf("REFUSE\tstale=%ld: stale residue in snapshot chain/\n", stale); }
+    if (sdiff > 0 || (stale > 0 && bounded)) return 1;
+    printf("PRECHAIN_OK\n");
+    return 0;
+}
 int main(int argc, char **argv) {
     int emit = 0, only = 0;
+    if (argc >= 2 && !strcmp(argv[1], "--prestart")) return prestart(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--dry")) return dry();
     load_limits();
     for (int i = 1; i < argc; i++) {
