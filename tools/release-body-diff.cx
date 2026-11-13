@@ -1,0 +1,67 @@
+/* tools/release-body-diff.cx -- byte-exact read-back of a release page body against its notes file
+ * (DEBT-RELEASE-BODY-READBACK, runbook step 18).
+ *
+ *   sh ./unisacc.com tools/release-body-diff.cx -- --tag vX.Y.Z --notes plans/release-notes-X.md [--repo OWNER/REPO] [--gh "CMD PREFIX"]
+ *
+ * Runs `GH release view TAG -R REPO --json body --jq .body` (read only; GH defaults to "gh", a check injects a
+ * fake) and compares with the notes file.  gh's --jq prints the body plus one newline, so exactly one trailing
+ * newline is dropped from the gh output; the notes file is compared as is, with exactly one trailing newline
+ * dropped as well (page bodies are stored without it); everything else, CR included, must be equal.
+ * Output: RELEASE_BODY<TAB>MATCH|DIFF|UNKNOWN<TAB>detail; DIFF adds RELEASE_BODY_DIFF line=N page=... file=...
+ * (first differing line, 1-based, each side cut to 200 bytes).  UNKNOWN when gh fails or the notes are unreadable.
+ * Exit 0 MATCH, 1 DIFF, 3 UNKNOWN, 2 usage. */
+
+static char *slurp_pipe(FILE *p, size_t *len) {
+    size_t cap = 1 << 16, n = 0;
+    char *b = malloc(cap + 1);
+    for (;;) {
+        size_t k;
+        if (n == cap) { cap *= 2; b = realloc(b, cap + 1); }
+        k = fread(b + n, 1, cap - n, p);
+        if (!k) break;
+        n += k;
+    }
+    b[n] = 0; *len = n;
+    return b;
+}
+
+static void show(const char *s, size_t n, size_t from) {
+    size_t e = from;
+    while (e < n && s[e] != '\n' && e - from < 200) e++;
+    printf("%.*s", (int)(e - from), s + from);
+}
+
+int main(int argc, char **argv) {
+    const char *tag = 0, *notes = 0, *repo = "partnernetsoftware/unisacc", *gh = "gh";
+    char cmd[2048], *a, *b;
+    size_t na, nb, i, ls = 0;
+    long line = 1;
+    int rc, k;
+    FILE *p;
+    for (k = 1; k < argc; k++) {
+        if (!strcmp(argv[k], "--tag") && k + 1 < argc) tag = argv[++k];
+        else if (!strcmp(argv[k], "--notes") && k + 1 < argc) notes = argv[++k];
+        else if (!strcmp(argv[k], "--repo") && k + 1 < argc) repo = argv[++k];
+        else if (!strcmp(argv[k], "--gh") && k + 1 < argc) gh = argv[++k];
+        else { fprintf(stderr, "usage: release-body-diff --tag T --notes FILE [--repo R] [--gh CMD]\n"); return 2; }
+    }
+    if (!tag || !notes || strspn(tag, "0123456789.v-abcdefghijklmnopqrstuvwxyz") != strlen(tag)) { fprintf(stderr, "release-body-diff: need --tag and --notes\n"); return 2; }
+    p = fopen(notes, "rb");
+    if (!p) { printf("RELEASE_BODY\tUNKNOWN\tnotes-unreadable\n"); return 3; }
+    b = slurp_pipe(p, &nb); fclose(p);
+    cx_fmt(cmd, sizeof cmd, "%s release view '%s' -R '%s' --json body --jq .body 2>/dev/null", gh, tag, repo);
+    p = popen(cmd, "r");
+    if (!p) { printf("RELEASE_BODY\tUNKNOWN\tpopen-failed\n"); return 3; }
+    a = slurp_pipe(p, &na);
+    rc = pclose(p);
+    if (rc != 0 || na == 0) { printf("RELEASE_BODY\tUNKNOWN\tgh-failed-or-empty\n"); return 3; }
+    if (a[na - 1] == '\n') na--;
+    if (nb && b[nb - 1] == '\n') nb--;
+    for (i = 0; i < na && i < nb && a[i] == b[i]; i++) if (a[i] == '\n') { line++; ls = i + 1; }
+    if (i == na && i == nb) { printf("RELEASE_BODY\tMATCH\tbytes=%zu\n", na); return 0; }
+    printf("RELEASE_BODY\tDIFF\tpage_bytes=%zu file_bytes=%zu\n", na, nb);
+    /* the differing line starts at ls on both sides */
+    printf("RELEASE_BODY_DIFF\tline=%ld\tpage=", line); show(a, na, ls);
+    printf("\tfile="); show(b, nb, ls); printf("\n");
+    return 1;
+}

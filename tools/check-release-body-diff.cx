@@ -1,0 +1,76 @@
+/* tools/check-release-body-diff.cx -- fixtures for tools/ci-verdict.cx and tools/release-body-diff.cx.
+ *
+ *   sh ./unisacc.com tools/check-release-body-diff.cx
+ *
+ * A fake gh (shell script in a mkdtemp dir, injected through --gh) serves local fixture files, so no network.
+ * ci-verdict: success (rc 0 PASS), failure job (rc 1 FAIL), missing run (rc 3 UNKNOWN), in-progress job (rc 3 UNKNOWN,
+ * never PASS), gh failure (rc 3).  release-body-diff: identical (rc 0 MATCH), one differing line (rc 1 DIFF, line 3),
+ * gh failure (rc 3 UNKNOWN). Prints PASS|FAIL lines and CHECK_CI_READBACK<TAB>failed=N. */
+static int failed;
+static void ck(int ok, const char *n) { printf("%s\tcheck-release-body-diff.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static void put(const char *d, const char *name, const char *body) {
+    char p[512]; FILE *f;
+    cx_fmt(p, sizeof p, "%s/%s", d, name);
+    f = fopen(p, "w");
+    if (!f) { printf("FAIL\tcheck-release-body-diff.write\n"); exit(1); }
+    fputs(body, f); fclose(f);
+}
+static int run(const char *cmd, char *out, size_t cap) {
+    FILE *p = popen(cmd, "r"); size_t n = 0; int rc;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; rc = pclose(p);
+    return WEXITSTATUS(rc);
+}
+static int ci(const char *d, char *out, size_t cap) {
+    char c[1024];
+    cx_fmt(c, sizeof c, "timeout 40 sh ./unisacc.com tools/ci-verdict.cx -- --sha abcdef1234 --gh 'sh %s/fake.sh %s' 2>&1", d, d);
+    return run(c, out, cap);
+}
+static int rb(const char *d, char *out, size_t cap) {
+    char c[1024];
+    cx_fmt(c, sizeof c, "timeout 40 sh ./unisacc.com tools/release-body-diff.cx -- --tag v9.9.9 --notes %s/notes.md --gh 'sh %s/fake.sh %s' 2>&1", d, d, d);
+    return run(c, out, cap);
+}
+int main(int argc, char **argv) {
+    int doci = 0, dobody = 1;
+    char d[] = "/tmp/ciread-XXXXXX", out[8192], c[256];
+    int rc;
+    if (!mkdtemp(d)) { printf("FAIL\tcheck-release-body-diff.mkdtemp\n"); return 1; }
+    /* fake gh: $1 is the fixture dir; failure when FAIL file exists */
+    put(d, "fake.sh", "D=$1; shift\n[ -f \"$D/ghfail\" ] && exit 1\ncase \"$*\" in\n*\"run list\"*) cat \"$D/runs.tsv\";;\n*\"run view\"*) cat \"$D/jobs.tsv\";;\n*\"release view\"*) cat \"$D/body.txt\";;\nesac\n");
+    if (doci) {
+    put(d, "runs.tsv", "777\tcompleted\tsuccess\n");
+    put(d, "jobs.tsv", "linux\tcompleted\tsuccess\nmac\tcompleted\tsuccess\n");
+    rc = ci(d, out, sizeof out);
+    ck(rc == 0 && strstr(out, "CI_VERDICT\tabcdef1234\tPASS") != 0, "ci.success");
+    put(d, "jobs.tsv", "linux\tcompleted\tsuccess\nwin\tcompleted\tfailure\n");
+    rc = ci(d, out, sizeof out);
+    ck(rc == 1 && strstr(out, "CI_JOB\twin\tcompleted\tfailure\tFAIL") != 0 && strstr(out, "\tFAIL\trun-or-job") != 0, "ci.failure");
+    put(d, "jobs.tsv", "linux\tcompleted\tsuccess\nmac\tin_progress\t\n");
+    rc = ci(d, out, sizeof out);
+    ck(rc == 3 && strstr(out, "\tPASS\tall-jobs") == 0 && strstr(out, "CI_VERDICT\tabcdef1234\tUNKNOWN") != 0, "ci.incomplete_unknown");
+    put(d, "runs.tsv", "");
+    rc = ci(d, out, sizeof out);
+    ck(rc == 3 && strstr(out, "UNKNOWN\tno-run") != 0, "ci.missing_run");
+    cx_fmt(c, sizeof c, "%s/ghfail", d); put(d, "ghfail", "");
+    rc = ci(d, out, sizeof out);
+    ck(rc == 3 && strstr(out, "gh-run-list-failed") != 0, "ci.gh_failure");
+    }
+    if (dobody) {
+    cx_fmt(c, sizeof c, "%s/ghfail", d); put(d, "ghfail", "");
+    rc = rb(d, out, sizeof out);
+    ck(rc == 3 && strstr(out, "UNKNOWN") != 0, "body.gh_failure");
+    remove(c);
+    put(d, "notes.md", "# T\n\nline3\nline4\n");
+    put(d, "body.txt", "# T\n\nline3\nline4\n");
+    rc = rb(d, out, sizeof out);
+    ck(rc == 0 && strstr(out, "RELEASE_BODY\tMATCH") != 0, "body.match");
+    put(d, "body.txt", "# T\n\nline3 changed\nline4\n");
+    rc = rb(d, out, sizeof out);
+    ck(rc == 1 && strstr(out, "RELEASE_BODY\tDIFF") != 0 && strstr(out, "line=3\tpage=line3 changed\tfile=line3") != 0, "body.diff_first_line");
+    }
+    cx_fmt(c, sizeof c, "rm -rf %s", d); (void)system(c);
+    printf("%s\tfailed=%d\n", doci && dobody ? "CHECK_CI_READBACK" : doci ? "CHECK_CI_VERDICT" : "CHECK_RELEASE_BODY_DIFF", failed);
+    return failed ? 1 : 0;
+}
