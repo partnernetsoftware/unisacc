@@ -1,0 +1,88 @@
+/* tools/candidate-evidence.cx -- run the five candidate-only batches (C4B) against a chain-built APE.
+ *
+ *   sh ./unisacc.com tools/candidate-evidence.cx -- --ape PATH --out DIR [--dry-run] [--only ID]
+ *
+ * One batch at a time, each as the exact command of plans/v0.0.59-unisacc.md C4B (baseline = installed
+ * "sh ./unisacc.com", candidate = "sh APE"), UNISA_JOBS=1, 55 s limit, log in DIR/ID.log.
+ * Prints CAND_EVIDENCE<TAB>id<TAB>status<TAB>rc<TAB>marker<TAB>pass<TAB>seconds<TAB>ape_sha256 per batch.
+ * status: PASS only when rc 0, the expected summary marker is in the log and the PASS-line count equals the
+ * expected count; DEVIATION when run but not so; UNRUN when not run (dry-run, or not reached). --dry-run
+ * lists the commands and prints UNRUN rows; it never runs anything. rc: 0 all five PASS (or dry-run),
+ * 1 any DEVIATION, 2 usage (missing --ape/--out, APE absent when running, DIR dce/fwd work dirs present). */
+#pragma unisa use text.text
+#pragma unisa use sys.time
+typedef struct { const char *id, *tmpl, *marker; int pass; } Job;
+/* %B baseline, %A candidate, %D out dir */
+static const Job jobs[] = {
+    {"cand-unit-compile", "tests/stream/cand-unit-compile.cx -- %D \"sh ./unisacc.com\" \"sh %A\"", "SUMMARY passed=23 failed=0", 23},
+    {"check-link-dce", "tests/check-link-dce.cx -- %D/dce \"sh %A\"", "CHECK_LINK_DCE failed=0", 37},
+    {"check-route-fwd", "tests/check-route-fwd.cx -- %D/fwd \"sh %A\"", "CHECK_ROUTE_FWD failed=0", 26},
+    {"route-equiv", "tests/stream/route-equiv.cx -- %D \"sh ./unisacc.com\" \"sh %A\"", "SUMMARY pass=145 failed=0", 145},
+    {"xs-bound-width", "tests/stream/xs-bound-width.cx -- %D %A", "SUMMARY sites=3 pass=13 failed=0", 13},
+};
+static void subst(char *o, size_t cap, const char *t, const char *ape, const char *dir) {
+    size_t n = 0;
+    for (; *t && n + 1 < cap; t++) {
+        const char *r = 0;
+        if (*t == '%' && t[1] == 'A') r = ape; else if (*t == '%' && t[1] == 'D') r = dir;
+        if (r) { t++; while (*r && n + 1 < cap) o[n++] = *r++; } else o[n++] = *t;
+    }
+    o[n] = 0;
+}
+static int shellsafe(const char *s) {
+    for (; *s; s++) if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '/' || *s == '.' || *s == '_' || *s == '-')) return 0;
+    return 1;
+}
+static void sha(const char *p, char *o, size_t cap) {
+    char c[1200]; FILE *f; o[0] = 0;
+    if (cx_fmt(c, sizeof c, "sha256sum %s 2>/dev/null", p)) { snprintf(o, cap, "ABSENT"); return; }
+    f = popen(c, "r");
+    if (f) { if (fgets(o, (int)cap, f)) o[64 < cap ? 64 : cap - 1] = 0; pclose(f); }
+    if (strlen(o) != 64) snprintf(o, cap, "ABSENT");
+}
+static int slurp(const char *p, char *b, size_t cap) {
+    FILE *f = fopen(p, "r"); size_t n = 0;
+    if (!f) { b[0] = 0; return 0; }
+    n = fread(b, 1, cap - 1, f); b[n] = 0; fclose(f); return (int)n;
+}
+int main(int argc, char **argv) {
+    const char *ape = 0, *dir = 0, *only = 0; int dry = 0, dev = 0; char hash[80]; static char log[400000];
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--ape") && i + 1 < argc) ape = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) dir = argv[++i];
+        else if (!strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+        else if (!strcmp(argv[i], "--dry-run")) dry = 1;
+        else { fprintf(stderr, "usage: candidate-evidence --ape PATH --out DIR [--dry-run] [--only ID]\n"); return 2; }
+    }
+    if (!ape || !dir) { fprintf(stderr, "REFUSE\t--ape and --out are required\n"); return 2; }
+    if (!shellsafe(ape) || !shellsafe(dir)) { fprintf(stderr, "REFUSE\tpath has characters outside [A-Za-z0-9/._-]\n"); return 2; }
+    if (!dry) {
+        char t[1200];
+        if (access(ape, R_OK)) { fprintf(stderr, "REFUSE\tAPE absent: %s\n", ape); return 2; }
+        if (cx_fmt(t, sizeof t, "%s/dce", dir) || !access(t, F_OK) || cx_fmt(t, sizeof t, "%s/fwd", dir) || !access(t, F_OK)) { fprintf(stderr, "REFUSE\tdce/fwd work dir already exists under %s\n", dir); return 2; }
+        if (cx_fmt(t, sizeof t, "mkdir -p %s", dir) || system(t)) { fprintf(stderr, "REFUSE\tmkdir failed\n"); return 2; }
+    }
+    sha(ape, hash, sizeof hash);
+    for (size_t k = 0; k < sizeof jobs / sizeof jobs[0]; k++) {
+        const Job *j = &jobs[k]; char a[900], cmd[2400], lp[1200]; double sec = 0; int rc = -1, np = 0; const char *st = "UNRUN", *mk = "none";
+        if (only && strcmp(only, j->id)) continue;
+        subst(a, sizeof a, j->tmpl, ape, dir);
+        if (cx_fmt(cmd, sizeof cmd, "UNISA_JOBS=1 timeout 55 sh ./unisacc.com %s", a) || cx_fmt(lp, sizeof lp, "%s/%s.log", dir, j->id)) return 2;
+        if (dry) printf("CMD\t%s\t%s\n", j->id, cmd);
+        else {
+            char full[2800]; long t0, t1;
+            if (cx_fmt(full, sizeof full, "%s > %s 2>&1", cmd, lp)) return 2;
+            t0 = sy_now_ms();
+            rc = system(full); rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 255;
+            t1 = sy_now_ms();
+            sec = (double)(t1 - t0) / 1000.0;
+            slurp(lp, log, sizeof log);
+            for (const char *p = log; p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : 0) if (!strncmp(p, "PASS", 4)) np++;
+            mk = strstr(log, j->marker) ? "found" : "missing";
+            st = (rc == 0 && !strcmp(mk, "found") && np == j->pass) ? "PASS" : "DEVIATION";
+            if (strcmp(st, "PASS")) dev = 1;
+        }
+        printf("CAND_EVIDENCE\t%s\t%s\trc=%d\tmarker=%s\tpass=%d/%d\tsec=%.1f\tape_sha256=%s\n", j->id, st, rc, mk, np, j->pass, sec, hash);
+    }
+    return dev ? 1 : 0;
+}
