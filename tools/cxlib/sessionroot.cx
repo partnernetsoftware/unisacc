@@ -1,0 +1,117 @@
+#pragma unisa module sessionroot
+/* sessionroot -- where an all-waves / s9 session (run) directory may live, decided in one place.
+ *
+ *   int sr_ok(const char *root, const char *path, char *why, long cap)
+ *     root  canonical absolute checkout root (borrowed)
+ *     path  absolute session path, existing or not yet created (borrowed)
+ *     why   receives a short refusal token (may be 0)
+ *   returns 0 accepted, 1 refused.
+ *
+ *   int sr_default(const char *id, char *out, long cap)
+ *     writes canonical(sy_tmpdir())/unisacc-session-<id>; id is [A-Za-z0-9._-]+.  0, or -1.
+ *
+ * Accepted session roots:
+ *   (1) below canonical(ROOT/out)                       -- sessions of the pre-migration layout
+ *   (2) below canonical(sy_tmpdir())/unisacc-session-*  -- the default session location
+ *   (3) below canonical(sy_tmpdir())/unisacc-affected-* -- a session a check creates inside the run
+ *       directory tools/affected.cx hands it (the same prefix tests/run-batch.cx accepts)
+ * Everything else is refused.  Invariants kept from the former "below ROOT/out" guards:
+ *   - the path is lexically normal (no empty, "." or ".." component, no trailing '/');
+ *   - the deepest existing ancestor is canonical, so no component is a symbolic link;
+ *   - a session is never inside the source tree (ROOT, other than ROOT/out), so it cannot change the
+ *     SID / harness digests or the worktree scan;
+ *   - a temp session root that already exists is a directory owned by the caller.
+ * This only widens the path test; locks, identities and receipts are untouched.
+ *
+ * Check: tools/check-sessionroot.cx (batch sessionroot). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int sr_no(char *why, long cap, const char *token) {
+    if (why && cap > 0) cx_fmt(why, (int)cap, "%s", token);
+    return 1;
+}
+
+/* 1 when P is strictly below BASE (BASE + "/" + something). */
+static int sr_below(const char *p, const char *base) {
+    size_t n = strlen(base);
+    return n && !strncmp(p, base, n) && p[n] == '/' && p[n + 1];
+}
+
+/* 1 when P is lexically normal: absolute, no "//", "/./", "/../", no trailing slash. */
+static int sr_normal(const char *p) {
+    size_t i = 0;
+    if (p[0] != '/' || !p[1]) return 0;
+    while (p[i]) {
+        size_t s, z;
+        if (p[i] != '/') return 0;
+        s = i + 1;
+        z = s;
+        while (p[z] && p[z] != '/') z++;
+        if (z == s) return 0;
+        if (z - s == 1 && p[s] == '.') return 0;
+        if (z - s == 2 && p[s] == '.' && p[s + 1] == '.') return 0;
+        i = z;
+    }
+    return 1;
+}
+
+/* 0 when the deepest existing ancestor of P (P included) is its own canonical spelling. */
+static int sr_ancestor_canonical(const char *p) {
+    char cur[4096], real[4096];
+    sy_stat_t st;
+    if (cx_fmt(cur, sizeof cur, "%s", p)) return 1;
+    for (;;) {
+        char *q;
+        if (sy_realpath(cur, real, sizeof real) >= 0) return strcmp(real, cur) ? 1 : 0;
+        if (sy_lstat(cur, &st) == 0) return 1; /* present but unresolvable: dangling link or denied */
+        q = strrchr(cur, '/');
+        if (!q || q == cur) return 1;
+        *q = 0;
+    }
+}
+
+int sr_default(const char *id, char *out, long cap) {
+    char tc[4096];
+    size_t i;
+    if (!id || !id[0] || !out || cap < 1) return -1;
+    for (i = 0; id[i]; i++) {
+        char c = id[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return -1;
+    }
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) return -1;
+    if (cx_fmt(out, (int)cap, "%s/unisacc-session-%s", tc, id)) return -1;
+    return 0;
+}
+
+int sr_ok(const char *root, const char *path, char *why, long cap) {
+    static const char *const prefix[2] = {"unisacc-session-", "unisacc-affected-"};
+    char real[4096], base[4400], tc[4096], top[4400];
+    int k;
+    if (!root || !path || root[0] != '/' || path[0] != '/' || strlen(root) >= 4096 || strlen(path) >= 4096) return sr_no(why, cap, "arguments");
+    if (sy_realpath(root, real, sizeof real) < 0 || strcmp(real, root)) return sr_no(why, cap, "canonical-root");
+    if (!sr_normal(path)) return sr_no(why, cap, "path-not-normal");
+    if (sr_ancestor_canonical(path)) return sr_no(why, cap, "symlink-or-noncanonical");
+    /* (1) the pre-migration layout */
+    if (!cx_fmt(base, sizeof base, "%s/out", root) && sy_realpath(base, real, sizeof real) >= 0 && sr_below(path, real)) return 0;
+    if (!strcmp(path, root) || sr_below(path, root)) return sr_no(why, cap, "inside-source-tree");
+    /* (2)(3) the temp session roots */
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) return sr_no(why, cap, "tmpdir");
+    for (k = 0; k < 2; k++) {
+        size_t n, z;
+        sy_stat_t st;
+        if (cx_fmt(base, sizeof base, "%s/%s", tc, prefix[k])) return sr_no(why, cap, "tmpdir");
+        n = strlen(base);
+        if (strncmp(path, base, n) || !path[n] || path[n] == '/') continue;
+        z = n;
+        while (path[z] && path[z] != '/') z++;
+        if (z >= sizeof top) return sr_no(why, cap, "arguments");
+        if (mm_copy(top, sizeof top, path, z)) return sr_no(why, cap, "arguments");
+        top[z] = 0;
+        if (sy_lstat(top, &st) == 0 && (st.kind != 'd' || st.uid != (long)sy_uid())) return sr_no(why, cap, "session-root-owner");
+        return 0;
+    }
+    return sr_no(why, cap, "not-session-root");
+}

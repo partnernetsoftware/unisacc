@@ -1,0 +1,140 @@
+/* tools/check-sessionroot.cx -- sr_ok accepts only the session roots it names and refuses the rest.
+ *
+ *   sh ./unisacc.com tools/check-sessionroot.cx [-- ROOT]
+ *
+ * Fixtures live in a fresh directory below sy_tmpdir() (removed at the end); nothing is written in ROOT.
+ * Covered:
+ *   (1) accepted: canonical(tmp)/unisacc-session-ID, a path below it, a path below
+ *       canonical(tmp)/unisacc-affected-ID, and (against a fixture root that has out/) ROOT/out/x;
+ *   (2) refused: a path inside the source tree (ROOT/tools/x, ROOT itself, ROOT/out itself), a temp path
+ *       without the prefix, the bare prefix with an empty id, tmp itself, a symbolic link as the session,
+ *       a symbolic link as a component, a dangling link, "..", "//", a trailing '/', a relative path, a
+ *       non-canonical root, null arguments, and a temp session root that is a file rather than a directory;
+ *   (3) sr_default answers canonical(tmp)/unisacc-session-ID, sr_ok accepts it, and a bad id is refused.
+ * Prints PASS/FAIL per case and CHECK_SESSIONROOT<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tsessionroot.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* 1 when sr_ok refuses PATH with exactly TOKEN. */
+static int refused(const char *root, const char *path, const char *token) {
+    char why[96];
+    why[0] = 0;
+    return sr_ok(root, path, why, sizeof why) == 1 && !strcmp(why, token);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], tc[4096], fix[4400], froot[4400], p[4600], q[4600], why[96], top[4400], aff[4400], filetop[4400], dflt[4400];
+    int pid = sy_pid();
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0 || sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) {
+        sy_printf("FAIL\tsessionroot.root\nCHECK_SESSIONROOT\tfailed=1\n");
+        return 2;
+    }
+    /* fixture area: tmp/unisacc-srcheck-PID (deliberately NOT a session prefix) */
+    if (cx_fmt(fix, sizeof fix, "%s/unisacc-srcheck-%d", tc, pid) || sy_mkdir(fix, 0700)) {
+        sy_printf("FAIL\tsessionroot.fixture\nCHECK_SESSIONROOT\tfailed=1\n");
+        return 2;
+    }
+    cx_fmt(froot, sizeof froot, "%s/repo", fix);
+    sy_mkdir(froot, 0700);
+    cx_fmt(p, sizeof p, "%s/out", froot);
+    sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    sy_mkdir(p, 0700);
+    cx_fmt(top, sizeof top, "%s/unisacc-session-srcheck-%d", tc, pid);
+    cx_fmt(aff, sizeof aff, "%s/unisacc-affected-srcheck-%d", tc, pid);
+    cx_fmt(filetop, sizeof filetop, "%s/unisacc-session-srfile-%d", tc, pid);
+
+    /* (1) accepted */
+    ck(sr_ok(root, top, why, sizeof why) == 0, "accept-absent-temp-session");
+    ck(sy_mkdir(top, 0700) == 0 && sr_ok(root, top, why, sizeof why) == 0, "accept-existing-own-temp-session");
+    cx_fmt(p, sizeof p, "%s/run/wave-1", top);
+    ck(sr_ok(root, p, why, sizeof why) == 0, "accept-below-temp-session");
+    cx_fmt(p, sizeof p, "%s/wt-gate/s1", aff);
+    ck(sr_ok(root, p, why, sizeof why) == 0, "accept-below-affected-run-dir");
+    cx_fmt(p, sizeof p, "%s/%s/s1", froot, "out");
+    ck(sr_ok(froot, p, why, sizeof why) == 0, "accept-legacy-below-root-out");
+    ck(sr_ok(froot, top, why, sizeof why) == 0, "accept-temp-session-for-root-with-out");
+
+    /* (2) refused */
+    cx_fmt(p, sizeof p, "%s/tools/s1", froot);
+    ck(refused(froot, p, "inside-source-tree"), "refuse-inside-source-tree");
+    cx_fmt(p, sizeof p, "%s/tools/unisacc-session-x", root);
+    ck(refused(root, p, "inside-source-tree"), "refuse-inside-real-checkout");
+    ck(refused(froot, froot, "inside-source-tree"), "refuse-root-itself");
+    cx_fmt(p, sizeof p, "%s/out", froot);
+    ck(refused(froot, p, "inside-source-tree"), "refuse-root-out-itself");
+    cx_fmt(p, sizeof p, "%s/s1", fix);
+    ck(refused(root, p, "not-session-root"), "refuse-temp-without-prefix");
+    cx_fmt(p, sizeof p, "%s/unisacc-session-", tc);
+    ck(refused(root, p, "not-session-root"), "refuse-empty-session-id");
+    cx_fmt(p, sizeof p, "%s/unisacc-session-/x", tc);
+    ck(refused(root, p, "not-session-root"), "refuse-empty-session-id-with-leaf");
+    ck(refused(root, tc, "not-session-root"), "refuse-tmp-itself");
+    ck(refused(root, "/", "path-not-normal"), "refuse-slash");
+    /* a symbolic link as the session: tmp/unisacc-session-srlink-PID -> froot/tools */
+    cx_fmt(q, sizeof q, "%s/unisacc-session-srlink-%d", tc, pid);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    ck(sy_symlink(p, q) == 0 && refused(froot, q, "symlink-or-noncanonical"), "refuse-symlink-session");
+    cx_fmt(p, sizeof p, "%s/s1", q);
+    ck(refused(froot, p, "symlink-or-noncanonical"), "refuse-symlink-component");
+    sy_unlink(q);
+    /* a dangling link */
+    cx_fmt(p, sizeof p, "%s/absent-target", fix);
+    ck(sy_symlink(p, q) == 0 && refused(root, q, "symlink-or-noncanonical"), "refuse-dangling-link");
+    sy_unlink(q);
+    /* a link below ROOT/out that leaves it */
+    cx_fmt(q, sizeof q, "%s/%s/esc", froot, "out");
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    ck(sy_symlink(p, q) == 0 && refused(froot, q, "symlink-or-noncanonical"), "refuse-symlink-below-root-out");
+    sy_unlink(q);
+    cx_fmt(p, sizeof p, "%s/../unisacc-srcheck-%d/s1", top, pid);
+    ck(refused(root, p, "path-not-normal"), "refuse-dotdot");
+    cx_fmt(p, sizeof p, "%s//s1", top);
+    ck(refused(root, p, "path-not-normal"), "refuse-empty-component");
+    cx_fmt(p, sizeof p, "%s/s1/", top);
+    ck(refused(root, p, "path-not-normal"), "refuse-trailing-slash");
+    cx_fmt(p, sizeof p, "%s/./s1", top);
+    ck(refused(root, p, "path-not-normal"), "refuse-dot-component");
+    cx_fmt(p, sizeof p, "%s/s1", "out");
+    ck(refused(root, p, "arguments"), "refuse-relative-path");
+    ck(refused("tools", top, "arguments"), "refuse-relative-root");
+    ck(sr_ok(0, top, why, sizeof why) == 1 && sr_ok(root, 0, why, sizeof why) == 1, "refuse-null-arguments");
+    cx_fmt(p, sizeof p, "%s/tools/..", froot);
+    ck(refused(p, top, "canonical-root"), "refuse-noncanonical-root");
+    ck(sr_ok(root, top, 0, 0) == 0 && sr_ok(root, fix, 0, 0) == 1, "null-why-buffer-allowed");
+    /* a temp session root that is a regular file */
+    ck(sy_write_file(filetop, "x", 1, 0600) == 0, "fixture-file-top");
+    cx_fmt(p, sizeof p, "%s", filetop);
+    ck(refused(root, p, "session-root-owner"), "refuse-file-as-session-root");
+    sy_unlink(filetop);
+
+    /* (3) sr_default */
+    cx_fmt(p, sizeof p, "srcheck-%d", pid);
+    ck(sr_default(p, dflt, sizeof dflt) == 0 && !strcmp(dflt, top) && sr_ok(root, dflt, why, sizeof why) == 0, "default-is-accepted-temp-session");
+    ck(sr_default("a/b", dflt, sizeof dflt) == -1 && sr_default("", dflt, sizeof dflt) == -1 && sr_default("..x y", dflt, sizeof dflt) == -1, "default-refuses-bad-id");
+    ck(sr_default(p, dflt, 8) == -1, "default-refuses-small-buffer");
+
+    /* cleanup of this check's own fixtures */
+    sy_rmdir(top);
+    cx_fmt(p, sizeof p, "%s/out", froot);
+    sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    sy_rmdir(p);
+    sy_rmdir(froot);
+    sy_rmdir(fix);
+
+    sy_printf("CHECK_SESSIONROOT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
