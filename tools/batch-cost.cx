@@ -17,7 +17,7 @@
 #pragma unisa use mem.bytes
 
 #define MAXREC 1024
-typedef struct { char id[200]; long wall_ms; long hit; long built; int kit; int warm; char log[600]; } rec_t;
+typedef struct { char id[200]; long wall_ms, prep_ms, link_ms, run_ms; long hit; long built; int kit; int warm; char log[600]; } rec_t;
 static rec_t recs[MAXREC];
 static int nrec;
 static int order[MAXREC];
@@ -32,7 +32,11 @@ static long kv_num(const char *s, long n, const char *key) {
 
 static void scan(rec_t *r, const char *s, long n) {
     long i, units, reused, p;
-    r->wall_ms = kv_num(s, n, "elapsed_ms=");
+    r->wall_ms = kv_num(s, n, "total_ms=");
+    if (r->wall_ms < 0) r->wall_ms = kv_num(s, n, "elapsed_ms=");
+    r->prep_ms = kv_num(s, n, "prep_ms=");
+    r->link_ms = kv_num(s, n, "link_ms=");
+    r->run_ms = kv_num(s, n, "run_ms=");
     r->hit = r->built = -1;
     r->warm = 0;
     r->kit = 0;
@@ -88,7 +92,7 @@ static int ms_key(int i) { return recs[i].wall_ms; }
 
 int main(int argc, char **argv) {
     const char *dir = "out", *glob = "affected-";
-    long top = 0, gl, i, j, measured = 0, over30 = 0, nmat = 0, nkit = 0, nwarm = 0, med = -1;
+    long top = 0, gl, i, j, measured = 0, over30 = 0, nmat = 0, nkit = 0, nwarm = 0, med = -1, link_sum = 0, run_sum = 0, nphase = 0;
     int a;
     sy_dir_t d;
     int ms[MAXREC], nm = 0;
@@ -116,17 +120,22 @@ int main(int argc, char **argv) {
     }
     for (i = 0; i < nrec; i++) {
         rec_t *r = &recs[order[i]];
-        char w[32], h[32], b[32];
+        char w[32], h[32], b[32], ph[96];
         if (r->wall_ms >= 0) { cx_fmt(w, sizeof w, "%ld.%03ld", r->wall_ms / 1000, r->wall_ms % 1000); measured++; ms[nm++] = (int)r->wall_ms; if (r->wall_ms >= 30000) over30++; }
         else cx_fmt(w, sizeof w, "UNMEASURED");
+        if (r->prep_ms >= 0 || r->link_ms >= 0 || r->run_ms >= 0) {
+            cx_fmt(ph, sizeof ph, "prep=%ld,link=%ld,run=%ld", r->prep_ms, r->link_ms, r->run_ms);
+            if (r->link_ms > 0) link_sum += r->link_ms, nphase++;
+            if (r->run_ms > 0) run_sum += r->run_ms;
+        } else cx_fmt(ph, sizeof ph, "UNMEASURED");
         fld(r->hit, h, sizeof h);
         fld(r->built, b, sizeof b);
         if (r->hit >= 0) nmat++;
         if (r->kit) nkit++;
         if (r->warm) nwarm++;
-        sy_printf("BATCH_COST\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r->id, w, h, b, "UNMEASURED",
+        sy_printf("BATCH_COST\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r->id, w, h, b, "UNMEASURED",
                   r->kit == 1 ? "fallback" : r->kit == 2 ? "prebuilt" : "UNMEASURED",
-                  r->warm == 1 ? "cold" : r->warm == 2 ? "hot" : "UNMEASURED", r->log);
+                  r->warm == 1 ? "cold" : r->warm == 2 ? "hot" : "UNMEASURED", ph, r->log);
     }
     for (i = 1; i < nm; i++) { int k = ms[i]; for (j = i - 1; j >= 0 && ms[j] > k; j--) ms[j + 1] = ms[j]; ms[j + 1] = k; }
     if (nm) med = ms[nm / 2];
@@ -135,6 +144,8 @@ int main(int argc, char **argv) {
         if (r->wall_ms >= 0) sy_printf("TOP\t%ld\t%s\t%ld.%03ld\n", i + 1, r->id, r->wall_ms / 1000, r->wall_ms % 1000);
         else sy_printf("TOP\t%ld\t%s\tUNMEASURED\n", i + 1, r->id);
     }
+    if (nphase) sy_printf("BATCH_COST_PHASES\tlogs_with_phases=%ld\tlink_sum_ms=%ld\tlink_avg_ms=%ld\trun_sum_ms=%ld\trun_avg_ms=%ld\n",
+                          nphase, link_sum, link_sum / nphase, run_sum, nphase ? run_sum / nphase : 0L);
     if (med >= 0) sy_printf("BATCH_COST_SUMMARY\tlogs=%d\tmedian_s=%ld.%03ld\tover30s=%ld\twall_measured=%ld/%d\tmaterials_measured=%ld/%d\tkit_measured=%ld/%d\twarm_measured=%ld/%d\n",
                             nrec, med / 1000, med % 1000, over30, measured, nrec, nmat, nrec, nkit, nrec, nwarm, nrec);
     else sy_printf("BATCH_COST_SUMMARY\tlogs=%d\tmedian_s=UNMEASURED\tover30s=0\twall_measured=0/%d\tmaterials_measured=%ld/%d\tkit_measured=%ld/%d\twarm_measured=%ld/%d\n",
