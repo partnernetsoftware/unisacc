@@ -2841,10 +2841,10 @@ static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_wor
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; __u_word __u_i;
-    __u_base = (char *)__u_v;
+/* Heap sort: the introsort fallback past its depth limit (worst case O(n log n)). */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hsort
+static void _unisa_hsort(char *__u_base, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
     while (__u_i > 0) { __u_i = __u_i - 1; _unisa_sift(__u_base, __u_n, __u_sz, __u_i, __u_cmp); }
@@ -2854,6 +2854,77 @@ static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(c
         _unisa_swap(__u_base, __u_base + __u_i * __u_sz, __u_sz);
         _unisa_sift(__u_base, __u_i, __u_sz, 0, __u_cmp);
     }
+}
+#endif
+
+/* Element swap: word-wise only when both addresses and the size are word aligned, else bytewise. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qswap
+static void _unisa_qswap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_t;
+    if ((((__u_word)__u_a | (__u_word)__u_b | __u_n) & (sizeof(__u_word) - 1)) == 0) {
+        __u_i = 0;
+        while (__u_i < __u_n) {
+            __u_t = *(__u_word *)(__u_a + __u_i); *(__u_word *)(__u_a + __u_i) = *(__u_word *)(__u_b + __u_i); *(__u_word *)(__u_b + __u_i) = __u_t;
+            __u_i = __u_i + sizeof(__u_word);
+        }
+        return;
+    }
+    if (__u_n == 4 && (((__u_word)__u_a | (__u_word)__u_b) & 3) == 0) {
+        int __u_x = *(int *)__u_a; *(int *)__u_a = *(int *)__u_b; *(int *)__u_b = __u_x;
+        return;
+    }
+    _unisa_swap(__u_a, __u_b, __u_n);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qins
+static void _unisa_qins(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i; __u_word __u_j;
+    __u_i = 1;
+    while (__u_i < __u_n) {
+        __u_j = __u_i;
+        while (__u_j > 0 && __u_cmp(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz) > 0) { _unisa_qswap(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz, __u_sz); __u_j = __u_j - 1; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
+/* Introsort: median-of-3 quicksort, insertion sort for short runs, heap sort past the depth limit. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qintro
+static void _unisa_qintro(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *), long __u_depth) {
+    __u_word __u_i; __u_word __u_j; __u_word __u_m;
+    while (__u_n > 12) {
+        if (__u_depth <= 0) { _unisa_hsort(__u_b, __u_n, __u_sz, __u_cmp); return; }
+        __u_depth = __u_depth - 1;
+        __u_m = __u_n / 2;
+        if (__u_cmp(__u_b + __u_m * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + __u_m * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz, __u_sz);
+        _unisa_qswap(__u_b, __u_b + __u_m * __u_sz, __u_sz);
+        __u_i = 0; __u_j = __u_n;
+        while (1) {
+            __u_i = __u_i + 1;
+            while (__u_i < __u_n && __u_cmp(__u_b + __u_i * __u_sz, __u_b) < 0) __u_i = __u_i + 1;
+            __u_j = __u_j - 1;
+            while (__u_cmp(__u_b + __u_j * __u_sz, __u_b) > 0) __u_j = __u_j - 1;
+            if (__u_i >= __u_j) break;
+            _unisa_qswap(__u_b + __u_i * __u_sz, __u_b + __u_j * __u_sz, __u_sz);
+        }
+        _unisa_qswap(__u_b, __u_b + __u_j * __u_sz, __u_sz);
+        if (__u_j < __u_n - 1 - __u_j) { _unisa_qintro(__u_b, __u_j, __u_sz, __u_cmp, __u_depth); __u_b = __u_b + (__u_j + 1) * __u_sz; __u_n = __u_n - 1 - __u_j; }
+        else { _unisa_qintro(__u_b + (__u_j + 1) * __u_sz, __u_n - 1 - __u_j, __u_sz, __u_cmp, __u_depth); __u_n = __u_j; }
+    }
+    _unisa_qins(__u_b, __u_n, __u_sz, __u_cmp);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    long __u_d; __u_word __u_t;
+    if (__u_n < 2 || __u_sz == 0) return;
+    __u_d = 2; __u_t = __u_n;
+    while (__u_t > 1) { __u_t = __u_t / 2; __u_d = __u_d + 2; }
+    _unisa_qintro((char *)__u_v, __u_n, __u_sz, __u_cmp, __u_d);
 }
 #endif
 
@@ -4308,10 +4379,10 @@ static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_wor
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; __u_word __u_i;
-    __u_base = (char *)__u_v;
+/* Heap sort: the introsort fallback past its depth limit (worst case O(n log n)). */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hsort
+static void _unisa_hsort(char *__u_base, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
     while (__u_i > 0) { __u_i = __u_i - 1; _unisa_sift(__u_base, __u_n, __u_sz, __u_i, __u_cmp); }
@@ -4321,6 +4392,77 @@ static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(c
         _unisa_swap(__u_base, __u_base + __u_i * __u_sz, __u_sz);
         _unisa_sift(__u_base, __u_i, __u_sz, 0, __u_cmp);
     }
+}
+#endif
+
+/* Element swap: word-wise only when both addresses and the size are word aligned, else bytewise. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qswap
+static void _unisa_qswap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_t;
+    if ((((__u_word)__u_a | (__u_word)__u_b | __u_n) & (sizeof(__u_word) - 1)) == 0) {
+        __u_i = 0;
+        while (__u_i < __u_n) {
+            __u_t = *(__u_word *)(__u_a + __u_i); *(__u_word *)(__u_a + __u_i) = *(__u_word *)(__u_b + __u_i); *(__u_word *)(__u_b + __u_i) = __u_t;
+            __u_i = __u_i + sizeof(__u_word);
+        }
+        return;
+    }
+    if (__u_n == 4 && (((__u_word)__u_a | (__u_word)__u_b) & 3) == 0) {
+        int __u_x = *(int *)__u_a; *(int *)__u_a = *(int *)__u_b; *(int *)__u_b = __u_x;
+        return;
+    }
+    _unisa_swap(__u_a, __u_b, __u_n);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qins
+static void _unisa_qins(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i; __u_word __u_j;
+    __u_i = 1;
+    while (__u_i < __u_n) {
+        __u_j = __u_i;
+        while (__u_j > 0 && __u_cmp(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz) > 0) { _unisa_qswap(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz, __u_sz); __u_j = __u_j - 1; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
+/* Introsort: median-of-3 quicksort, insertion sort for short runs, heap sort past the depth limit. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qintro
+static void _unisa_qintro(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *), long __u_depth) {
+    __u_word __u_i; __u_word __u_j; __u_word __u_m;
+    while (__u_n > 12) {
+        if (__u_depth <= 0) { _unisa_hsort(__u_b, __u_n, __u_sz, __u_cmp); return; }
+        __u_depth = __u_depth - 1;
+        __u_m = __u_n / 2;
+        if (__u_cmp(__u_b + __u_m * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + __u_m * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz, __u_sz);
+        _unisa_qswap(__u_b, __u_b + __u_m * __u_sz, __u_sz);
+        __u_i = 0; __u_j = __u_n;
+        while (1) {
+            __u_i = __u_i + 1;
+            while (__u_i < __u_n && __u_cmp(__u_b + __u_i * __u_sz, __u_b) < 0) __u_i = __u_i + 1;
+            __u_j = __u_j - 1;
+            while (__u_cmp(__u_b + __u_j * __u_sz, __u_b) > 0) __u_j = __u_j - 1;
+            if (__u_i >= __u_j) break;
+            _unisa_qswap(__u_b + __u_i * __u_sz, __u_b + __u_j * __u_sz, __u_sz);
+        }
+        _unisa_qswap(__u_b, __u_b + __u_j * __u_sz, __u_sz);
+        if (__u_j < __u_n - 1 - __u_j) { _unisa_qintro(__u_b, __u_j, __u_sz, __u_cmp, __u_depth); __u_b = __u_b + (__u_j + 1) * __u_sz; __u_n = __u_n - 1 - __u_j; }
+        else { _unisa_qintro(__u_b + (__u_j + 1) * __u_sz, __u_n - 1 - __u_j, __u_sz, __u_cmp, __u_depth); __u_n = __u_j; }
+    }
+    _unisa_qins(__u_b, __u_n, __u_sz, __u_cmp);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    long __u_d; __u_word __u_t;
+    if (__u_n < 2 || __u_sz == 0) return;
+    __u_d = 2; __u_t = __u_n;
+    while (__u_t > 1) { __u_t = __u_t / 2; __u_d = __u_d + 2; }
+    _unisa_qintro((char *)__u_v, __u_n, __u_sz, __u_cmp, __u_d);
 }
 #endif
 
@@ -8659,7 +8801,8 @@ extern char **environ;
         .git directory, a repository root (a directory with a .git entry); a top-level symlink whose destination is
         refused by checks 1-2 (a link into a repository, to the cwd, ...);
      2. whitelist: inside a repository (nearest ancestor with a .git entry) the target must lie strictly under its
-        out/ or .trash/; elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted
+        out/ or .trash/; strictly under $HOME/.cache/unisacc/chains (the chains root itself, its siblings and a root
+        reached through a symlink are not); elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted
         (a relative TMPDIR, /, $HOME or an ancestor of $HOME is no temp root; with neither root everything outside
         repositories is refused); a temp root itself or an ancestor of one is refused;
      3. the walk (lstat only, links never followed) counts every entry, the target included, and refuses on an entry
@@ -8706,7 +8849,7 @@ extern char **environ;
 #define SAFEDEL_DEPTH 128
 #define SAFEDEL_PATHLEN 4096
 
-struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
+struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN], chains[SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
 
 static int unisa_safedel(const char *path, unsigned flags, __u_word max_files, char *why, int whylen);
 static int unisa_safedel_purge_trash(const char *home, __u_word hours, __u_word max_files, unsigned flags, char *why, int whylen);
@@ -8784,11 +8927,17 @@ static __u_uword _unisa_sd_seq(void) { static __u_uword n; return n++; }
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_env
 static void _unisa_sd_env(struct unisa_safedel_env *e) {
 #ifdef _WIN32
-    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = "Windows";
+    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = e->chains[0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = "Windows";
 #else
     const char *h = getenv("HOME"), *t = getenv("TMPDIR"); char c[SAFEDEL_PATHLEN]; int i;
-    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = 0;
+    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = e->chains[0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = 0;
     if (h && h[0] && _unisa_sd_real(h, e->home) != 0) e->home[0] = 0;
+    if (e->home[0] && e->home[1]) {   /* the release-chain root HOME/.cache/unisacc/chains: whitelisted only when it resolves to exactly that
+                                         lexical path (no symlink in the middle) */
+        char l[SAFEDEL_PATHLEN], rr[SAFEDEL_PATHLEN];
+        if (_unisa_sd_join(l, e->home, ".cache/unisacc/chains") == 0 && _unisa_sd_real(l, rr) == 0 && !strcmp(rr, l))
+            memcpy(e->chains, rr, strlen(rr) + 1);
+    }
     if (!getcwd(c, sizeof c) || _unisa_sd_real(c, e->cwd) != 0) e->cwd[0] = 0;
     if (e->cwd[0] && !_unisa_sd_repo(e->cwd, e->cwdrepo)) e->cwdrepo[0] = 0;
     if (!t || !t[0]) t = "/tmp";
@@ -8822,13 +8971,17 @@ static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path,
         return SAFEDEL_OK;
     }
     if (dest) return SAFEDEL_OK;
+    if (e->chains[0]) {   /* HOME/.cache/unisacc/chains: strictly below it only (not the root, not its siblings such as chains-evil) */
+        if (!strcmp(t, e->chains)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the chains root itself: ", t);
+        if (_unisa_sd_below(t, e->chains)) { memcpy(home, e->chains, strlen(e->chains) + 1); return SAFEDEL_OK; }
+    }
     if (!e->tmp[0][0] && !e->tmp[1][0]) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is outside every repository and there is no temp root: ", e->tmpwhy[0]);
     {   /* the deeper of the temp roots that holds T (TMPDIR=/tmp/x: /tmp/x/y trashes into /tmp/x/.trash); a temp root
            itself, or an ancestor of one ($TMPDIR=/tmp/x from /tmp's view), is never a target */
         int i, k = -1;
         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_within(e->tmp[i], t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a temp root or an ancestor of one: ", t);
         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_below(t, e->tmp[i]) && (k < 0 || strlen(e->tmp[i]) > strlen(e->tmp[k]))) k = i;
-        if (k < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash): ", t);
+        if (k < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash, $HOME/.cache/unisacc/chains): ", t);
         memcpy(home, e->tmp[k], strlen(e->tmp[k]) + 1);
     }
     return SAFEDEL_OK;
