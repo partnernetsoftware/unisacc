@@ -205,7 +205,23 @@ static int table_has(const char *ver) {
     return ok;
 }
 
-static int bump_fx(char **out) { return run("--bump", "fx.a", fx, out); }
+/* --bump reads the git index and refuses a package path that differs from it: once the fixture is its own
+   git root, stage the package sources (fa/) before every bump, as a developer must. */
+static int fx_git;
+static int stage_fx(void) {
+    char gd[4500], *g[] = {"git", "-C", fx, "add", "-A", "--", "fa", 0}, *o = 0;
+    size_t n = 0;
+    int rc = 0;
+    if (cx_fmt(gd, sizeof gd, "%s/.git", fx)) return -1;
+    if (fx_git) rc = cx_runv_timeout(g, 20, &o, &n);
+    mm_free(o);
+    return rc;
+}
+
+static int bump_fx(char **out) {
+    (void)stage_fx();
+    return run("--bump", "fx.a", fx, out);
+}
 
 int main(int argc, char **argv) {
     char src[4400], why[256], badn[256], *out = 0, t[600];
@@ -279,6 +295,7 @@ int main(int argc, char **argv) {
             char *ga[] = {"git", "add", "--", fa, tb, 0};
             char *pv[] = {"sh", "./unisacc.com", pc, 0};
             (void)cx_runv_timeout(gi, 20, &po, &pon); mm_free(po); po = 0;
+            fx_git = 1;
             sy_setenv("GIT_DIR", gd, 1);
             sy_setenv("GIT_WORK_TREE", fx, 1);
             sy_setenv("GIT_INDEX_FILE", idx, 1);
@@ -293,6 +310,10 @@ int main(int argc, char **argv) {
         } else ck(0, "precommit-reports-tlib-bump-needed-without-blocking");
     }
 
+    /* negative: the one-byte edit is in the work tree only (never git add-ed): --bump refuses, rc 2, REFUSE names the path */
+    rc = run("--bump", "fx.a", fx, &out);
+    ck(rc == 2 && out && tx_contains(out, tx_len(out, TX_ZCAP), "REFUSE\tfx.a\tdirty-package-path\tfa/one.cx", 33), "bump-unstaged-source-refused-rc2");
+    mm_free(out);
     rc = bump_fx(&out);
     ck(rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "patch", 5) && table_has("0.1.1"), "bump-impl-change-is-z");
     mm_free(out);
