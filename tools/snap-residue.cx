@@ -1,0 +1,114 @@
+/* tools/snap-residue.cx -- 只读扫描共享快照 out/release-snap-<rev前10位>/out/chain/ 的残留。
+ *
+ *   sh ./unisacc.com tools/snap-residue.cx -- REV OUTDIR [--report]
+ *
+ * 背景:整链第 7 次因快照内旧 wf-prep 收据停链(账本 C3-STOP7-059)。快照在多次起链间共用,旧链留下的
+ * 目录、.control、.lock 不会被新链清理。本工具只列出,绝不写、移、删。
+ *
+ * 新旧界:OUTDIR/chain-run.tsv 首个 SEGMENT 行的第 2 列(epoch 秒),如
+ *   SEGMENT<TAB>1794543693<TAB>n=1<TAB>start<TAB>segment-s=270<TAB>max=160
+ * 早于该 epoch 的条目(lstat mtime 秒)记 stale;读不到或无 SEGMENT 行即退出 2。
+ *
+ * 扫描范围:chain/ 下每个条目,以及其中名为 gen* 的目录的下一层条目。类别:
+ *   control  名以 .control 结尾的目录(whole-front 的阶段控制目录;candidate-chain 起步时与 DEST 同建,
+ *            whole-front 要求 DEST 不存在才可建 DEST.control,所以孤儿 .control 会让重建 DEST 的新链
+ *            直接 die "exclusive phase/control required")
+ *   lock     名以 .lock 结尾的文件(candidate-chain.cx candidate_lock: BASE.candidate-DOMAIN.lock,
+ *            O_CREAT 后 flock;文件内容为空,只在持锁期间有意义,残留文件本身无害但 mtime 可证旧链来过)
+ *   dir      其余目录(阶段 DEST 或 wf-prep 之类的收据目录)
+ *   file     其余文件(收据)
+ * dest_without_control:dir 不是 gen* 容器、同层没有 NAME.control;control_without_dest:NAME.control 同层没有 NAME。
+ * 输出:每条 stale 一行 RESIDUE<TAB>kind<TAB>path<TAB>mtime;末行
+ *   SNAP_RESIDUE<TAB>total=N<TAB>stale=N<TAB>dest_without_control=N<TAB>control_without_dest=N
+ * 有 stale 残留 rc 1;--report 恒 rc 0(除参数/读取错误 rc 2)。 */
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+
+static long epoch_of(const char *od) {
+    char p[4400];
+    size_t n = 0;
+    if (cx_fmt(p, sizeof p, "%s/chain-run.tsv", od)) return -1;
+    char *s = cx_read(p, &n);
+    if (!s) return -1;
+    long ep = -1;
+    for (size_t i = 0; i < n;) {
+        size_t e = i;
+        while (e < n && s[e] != '\n') e++;
+        if (e - i > 8 && !memcmp(s + i, "SEGMENT\t", 8)) {
+            ep = strtol(s + i + 8, 0, 10);
+            break;
+        }
+        i = e + 1;
+    }
+    mm_free(s);
+    return ep > 0 ? ep : -1;
+}
+
+static int total, stale, dwc, cwd_;
+static long epoch;
+
+static int exists(const char *p) { struct stat st; return !lstat(p, &st); }
+static int ends(const char *s, const char *suf) {
+    size_t a = strlen(s), b = strlen(suf);
+    return a > b && !strcmp(s + a - b, suf);
+}
+
+static void scan(const char *dir, int depth) {
+    DIR *d = opendir(dir);
+    if (!d) { fprintf(stderr, "snap-residue: cannot open %s\n", dir); return; }
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char p[4400], q[4400];
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, e->d_name)) continue;
+        struct stat st;
+        if (lstat(p, &st)) continue;
+        const char *kind;
+        int isdir = S_ISDIR(st.st_mode);
+        if (isdir && ends(e->d_name, ".control")) {
+            kind = "control";
+            size_t k = strlen(e->d_name) - 8;
+            if (cx_fmt(q, sizeof q, "%s/%.*s", dir, (int)k, e->d_name) == 0 && !exists(q)) cwd_++;
+        } else if (!isdir && ends(e->d_name, ".lock")) kind = "lock";
+        else if (isdir) {
+            kind = "dir";
+            if (strncmp(e->d_name, "gen", 3) != 0) {
+                if (cx_fmt(q, sizeof q, "%s.control", p) == 0 && !exists(q)) dwc++;
+            }
+            if (depth == 0 && !strncmp(e->d_name, "gen", 3)) scan(p, 1);
+            if (depth == 1 && cx_fmt(q, sizeof q, "%s.control", p) == 0 && !exists(q)) dwc++;
+        } else kind = "file";
+        /* 容器 gen* 自身不计入 total(只计其内容) */
+        if (depth == 0 && isdir && !strncmp(e->d_name, "gen", 3) && !ends(e->d_name, ".control")) continue;
+        total++;
+        if ((long)st.st_mtime < epoch) {
+            stale++;
+            printf("RESIDUE\t%s\t%s\t%lld\n", kind, p, (long long)st.st_mtime);
+        }
+    }
+    closedir(d);
+}
+
+int main(int argc, char **argv) {
+    int report = 0, na = 0;
+    const char *a[2] = {0, 0};
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--report")) report = 1;
+        else if (na < 2) a[na++] = argv[i];
+        else na = 3;
+    }
+    if (na != 2 || strlen(a[0]) < 10) { fprintf(stderr, "usage: snap-residue.cx -- REV OUTDIR [--report]\n"); return 2; }
+    epoch = epoch_of(a[1]);
+    if (epoch < 0) { fprintf(stderr, "snap-residue: no SEGMENT epoch in %s/chain-run.tsv\n", a[1]); return 2; }
+    char root[4400];
+    if (cx_fmt(root, sizeof root, "out/release-snap-%.10s/out/chain", a[0])) return 2;
+    if (getenv("SNAP_RESIDUE_ROOT") && *getenv("SNAP_RESIDUE_ROOT")) {
+        if (cx_fmt(root, sizeof root, "%s/release-snap-%.10s/out/chain", getenv("SNAP_RESIDUE_ROOT"), a[0])) return 2;
+    }
+    if (!exists(root)) { fprintf(stderr, "snap-residue: no %s\n", root); return 2; }
+    scan(root, 0);
+    printf("SNAP_RESIDUE\ttotal=%d\tstale=%d\tdest_without_control=%d\tcontrol_without_dest=%d\n", total, stale, dwc, cwd_);
+    return report ? 0 : (stale ? 1 : 0);
+}

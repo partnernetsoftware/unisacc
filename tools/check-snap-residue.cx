@@ -1,0 +1,72 @@
+/* tools/check-snap-residue.cx -- tools/snap-residue.cx 的夹具检查,4 例,全在 sy_tmpdir()/check-snap-residue-PID 内自造:
+ *   clean   全部条目新于首个 SEGMENT epoch,rc 0,stale=0
+ *   olddest 一个旧 gen1/x-front0 目录(带新 .control),rc 1,一行 RESIDUE dir
+ *   orphan  只有旧 gen1/y-front0.control 无 dest,rc 1,control_without_dest=1
+ *   oldlock 旧 .lock 文件,rc 1,RESIDUE lock;同例加 --report 必须 rc 0
+ * 末行 CHECK_SNAP_RESIDUE<TAB>assertions=N<TAB>failed=M。只读真实快照:不碰。 */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int assertions, failed;
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) { failed++; printf("FAIL\t%s\n", what); }
+}
+static char base[4000];
+
+/* 造一个例子:TOUCH 命令串里 OLD=旧时间(epoch 500000),NEW=新时间(epoch 2000000),首段 epoch 1000000 */
+static int mk(const char *name, const char *script) {
+    char cmd[8000];
+    if (cx_fmt(cmd, sizeof cmd,
+               "set -e; d=%s/%s; mkdir -p $d/out/release-snap-abcdef0123/out/chain/gen1 $d/o; c=$d/out/release-snap-abcdef0123/out/chain; "
+               "printf 'SEGMENT\\t1000000\\tn=1\\tstart\\n' > $d/o/chain-run.tsv; %s",
+               base, name, script)) return 1;
+    return cx_run_timeout(cmd, 30, 0, 0);
+}
+static int run(const char *name, int report, char **out, size_t *n) {
+    char cmd[8000];
+    if (cx_fmt(cmd, sizeof cmd, "SNAP_RESIDUE_ROOT=%s/%s/out sh ./unisacc.com tools/snap-residue.cx -- abcdef0123456789 %s/%s/o%s",
+               base, name, base, name, report ? " --report" : "")) return -1;
+    return cx_run_timeout(cmd, 50, out, n);
+}
+static int has(const char *s, size_t n, const char *w) {
+    size_t k = strlen(w);
+    for (size_t i = 0; i + k <= n; i++)
+        if (!memcmp(s + i, w, k)) return 1;
+    return 0;
+}
+
+int main(void) {
+    char *o = 0;
+    size_t n = 0;
+    if (cx_fmt(base, sizeof base, "%s/check-snap-residue-%d", sy_tmpdir(), sy_pid())) return 2;
+    ck(mk("clean", "mkdir -p $c/gen1/a-front0 $c/gen1/a-front0.control; touch -d @2000000 $c/gen1/a-front0 $c/gen1/a-front0.control $c/gen1") == 0, "mk clean");
+    int rc = run("clean", 0, &o, &n);
+    ck(rc == 0 && o && has(o, n, "SNAP_RESIDUE\ttotal=2\tstale=0\tdest_without_control=0\tcontrol_without_dest=0\n"), "clean: rc 0, stale=0");
+    mm_free(o); o = 0;
+
+    ck(mk("olddest", "mkdir -p $c/gen1/x-front0 $c/gen1/x-front0.control; touch -d @500000 $c/gen1/x-front0; touch -d @2000000 $c/gen1/x-front0.control") == 0, "mk olddest");
+    rc = run("olddest", 0, &o, &n);
+    ck(rc == 1 && o && has(o, n, "RESIDUE\tdir\t") && has(o, n, "x-front0\t500000\n") && has(o, n, "stale=1\t"), "olddest: rc 1, RESIDUE dir");
+    mm_free(o); o = 0;
+
+    ck(mk("orphan", "mkdir -p $c/gen1/y-front0.control; touch -d @500000 $c/gen1/y-front0.control") == 0, "mk orphan");
+    rc = run("orphan", 0, &o, &n);
+    ck(rc == 1 && o && has(o, n, "RESIDUE\tcontrol\t") && has(o, n, "control_without_dest=1\n"), "orphan: rc 1, control_without_dest=1");
+    mm_free(o); o = 0;
+
+    ck(mk("oldlock", "touch $c/wf-prep.candidate-prep.lock; touch -d @500000 $c/wf-prep.candidate-prep.lock") == 0, "mk oldlock");
+    rc = run("oldlock", 0, &o, &n);
+    ck(rc == 1 && o && has(o, n, "RESIDUE\tlock\t"), "oldlock: rc 1, RESIDUE lock");
+    mm_free(o); o = 0;
+    rc = run("oldlock", 1, &o, &n);
+    ck(rc == 0 && o && has(o, n, "stale=1\t"), "oldlock --report: rc 0");
+    mm_free(o);
+
+    char cmd[4200];
+    if (!cx_fmt(cmd, sizeof cmd, "rm -rf %s", base)) cx_run_timeout(cmd, 30, 0, 0);
+    printf("CHECK_SNAP_RESIDUE\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
