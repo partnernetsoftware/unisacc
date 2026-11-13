@@ -26,7 +26,9 @@
  * Check: tools/check-chainroot.cx (batch chainroot). */
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use sys.sha
 
 static int cr_name(const char *s) {
     long i;
@@ -62,20 +64,90 @@ static int cr_mkdirs(const char *p) {
     return sy_lstat(cur, &st) == 0 && st.kind == 'd' ? 0 : -1;
 }
 
+/* 1 when P is strictly below BASE. */
+static int cr_below(const char *p, const char *base) {
+    size_t n = strlen(base);
+    return n && !strncmp(p, base, n) && p[n] == '/' && p[n + 1];
+}
+
+/* UNISACC_CHAIN_BASE: an override of the chain base for a chain run whose product cannot yet
+   delete below the cache chain root (bootstrap of the release that carries the new safedel list).
+   It takes effect only when the value is exactly canonical(sy_tmpdir())/unisacc-session-chain-NAME
+   (NAME as cr_name), is accepted by sessionroot sr_ok (normal, no symbolic link component, owned
+   directory when present) and is neither ROOT nor below it.  Anything else is ignored and the
+   default base answers: the override cannot name a place the guards would refuse.
+   1 active (OUT set), 0 not active. */
+static int cr_override(const char *root, char *out, long cap) {
+    char tc[4096], pre[4400];
+    const char *v = sy_env_or("UNISACC_CHAIN_BASE", "");
+    size_t n;
+    if (!v[0] || strlen(v) >= 4096) return 0;
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0 || cx_fmt(pre, sizeof pre, "%s/unisacc-session-chain-", tc)) return 0;
+    n = strlen(pre);
+    if (strncmp(v, pre, n) || !cr_name(v + n)) return 0;
+    if (!strcmp(v, root) || cr_below(v, root)) return 0;
+    if (sr_ok(root, v, 0, 0)) return 0;
+    return cx_fmt(out, (int)cap, "%s", v) ? 0 : 1;
+}
+
 int cr_ok(const char *root, const char *path, char *why, long cap) {
+    char ov[4400];
+    if (root && path && root[0] == '/' && path[0] == '/' && strlen(root) < 4096 && strlen(path) < 4096
+        && cr_override(root, ov, sizeof ov) && cr_below(path, ov)) {
+        if (!strcmp(path, root) || cr_below(path, root)) {
+            if (why && cap > 0) cx_fmt(why, (int)cap, "%s", "inside-source-tree");
+            return 1;
+        }
+        return sr_ok(root, path, why, cap);
+    }
     return sr_chain_ok(root, path, why, cap);
 }
 
 int cr_dir(const char *root, const char *kind, const char *id, int create, char *out, long cap) {
     char base[4400], path[4600];
+    int ov;
     if (!root || !out || cap < 1 || !cr_kind(kind) || !cr_name(id)) return -1;
-    if (sr_chains_base(base, sizeof base)) return -1;
+    ov = root[0] == '/' && strlen(root) < 4096 && cr_override(root, base, sizeof base);
+    if (!ov && sr_chains_base(base, sizeof base)) return -1;
     if (create) {
         /* the base may gain a canonical spelling once it exists */
-        if (cr_mkdirs(base) || sr_chains_base(base, sizeof base)) return -1;
+        if (cr_mkdirs(base) || (!ov && sr_chains_base(base, sizeof base))) return -1;
     }
     if (cx_fmt(path, sizeof path, "%s/%s/%s", base, kind, id)) return -1;
-    if (sr_chain_ok(root, path, 0, 0)) return -1;
-    if (create && (cr_mkdirs(path) || sr_chain_ok(root, path, 0, 0))) return -1;
+    if (cr_ok(root, path, 0, 0)) return -1;
+    if (create && (cr_mkdirs(path) || cr_ok(root, path, 0, 0))) return -1;
     return cx_fmt(out, (int)cap, "%s", path) ? -1 : 0;
+}
+
+/* The release snapshot directory of checkout ROOT at revision REV (at least 10 lowercase hex):
+     chains/snap/REV10-H8, H8 = first 8 hex of sha256(realpath(ROOT)).
+   One snapshot per checkout, as ROOT/out/release-snap-REV10 was: a second checkout of the same
+   revision gets its own directory.  This is the only place that spells the snapshot path; the
+   writers (chain-step snap, release-build rb_freeze) and every reader call it.
+   ROOT may be relative ("."); CREATE nonzero makes the parent directory, never the snapshot
+   directory itself; returns 0, or -1. */
+int cr_snap(const char *root, const char *rev, int create, char *out, long cap) {
+    char canon[4400], hex[65], id[32];
+    long i, n;
+    if (!root || !rev || !out) return -1;
+    for (i = 0; i < 10; i++) {
+        char c = rev[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
+    }
+    if (sy_realpath(root, canon, sizeof canon) < 0) return -1;
+    for (n = 0; canon[n]; n++) {}
+    if (sy_sha256_hex(canon, n, hex)) return -1;
+    if (cx_fmt(id, sizeof id, "%.10s-%.8s", rev, hex)) return -1;
+    if (create) {
+        /* CREATE makes the parent (chains/snap) only: both writers require the snapshot
+           directory itself to be absent until they populate and mark it. */
+        char first[4600];
+        long cut = -1;
+        if (cr_dir(canon, "snap", id, 0, first, sizeof first)) return -1;
+        for (i = 0; first[i]; i++) if (first[i] == '/') cut = i;
+        if (cut < 1) return -1;
+        first[cut] = 0;
+        if (cr_mkdirs(first)) return -1;
+    }
+    return cr_dir(canon, "snap", id, 0, out, cap);
 }
