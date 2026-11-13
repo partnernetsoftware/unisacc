@@ -1,0 +1,63 @@
+/* tools/cpu-meter.cx -- CPU seconds of a child command, independent of wall clock and machine load.
+   Usage: sh ./unisacc.com tools/cpu-meter.cx -- CMD ARGS...
+   Prints one line: CPU_METER<TAB>cpu_ms=N<TAB>wall_ms=N<TAB>rc=N   (rc is the child's shell-view code, 128+sig for a signal).
+   Command that cannot be started: prints a CPU_METER_ERROR line (no CPU_METER line), exit 127.
+   CPU = the delta of cutime+cstime in /proc/self/stat (fields 16,17, reaped children only) across the wait, so it
+   counts the child and its already-reaped descendants.  Units are clock ticks; USER_HZ is fixed at 100 on Linux
+   (the userspace ABI of /proc, independent of kernel CONFIG_HZ), so one tick = 10 ms.
+   Gap: L0 (cx.sys) has no getrusage/times wrapper; see agentwork/pkg-gaps.tsv CPU-METER-RUSAGE. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+
+/* utime+stime of reaped children of this process, in ticks; -1 on failure */
+static long cm_child_ticks(void) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    char *p;
+    long v[2];
+    int i;
+    if (sy_read_file("/proc/self/stat", &b, &n, 65536) != 0) return -1;
+    p = strrchr((char *)b, ')');          /* comm may contain spaces/parens: scan from the last ')' */
+    if (!p) { mm_free(b); return -1; }
+    p++;
+    /* after ')' the tokens are fields 3..: skip 13 tokens (3..15) to reach cutime (16), cstime (17) */
+    for (i = 0; i < 13; i++) {
+        while (*p == ' ') p++;
+        while (*p && *p != ' ') p++;
+    }
+    for (i = 0; i < 2; i++) {
+        char *e;
+        while (*p == ' ') p++;
+        v[i] = strtol(p, &e, 10);
+        if (e == p) { mm_free(b); return -1; }
+        p = e;
+    }
+    mm_free(b);
+    return v[0] + v[1];
+}
+
+int main(int argc, char **argv) {
+    sy_spawn_t o;
+    sy_child_t c;
+    sy_exit_t st;
+    long t0, t1, w0, w1;
+    int r, a = 1;
+    if (a < argc && !strcmp(argv[a], "--")) a++;
+    if (a >= argc) { fprintf(stderr, "usage: cpu-meter.cx -- CMD ARGS...\n"); return 2; }
+    sy_spawn_init(&o);
+    o.argv = argv + a;
+    t0 = cm_child_ticks();
+    w0 = sy_now_ms();
+    r = sy_proc_spawn(&o, &c);
+    if (r < 0) { printf("CPU_METER_ERROR\tspawn=%d\n", r); return 127; }
+    r = sy_proc_wait(&c, &st);
+    sy_proc_close(&c);
+    w1 = sy_now_ms();
+    t1 = cm_child_ticks();
+    if (r < 0 || t0 < 0 || t1 < 0) { printf("CPU_METER_ERROR\twait=%d ticks=%ld,%ld\n", r, t0, t1); return 126; }
+    r = sy_exit_code(&st);
+    printf("CPU_METER\tcpu_ms=%ld\twall_ms=%ld\trc=%d\n", (t1 - t0) * 10, w1 - w0, r);
+    return r;
+}
