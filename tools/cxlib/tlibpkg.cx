@@ -692,6 +692,42 @@ static int tp_key_file(TpBuf *t, const char *root, const char *rel, int depth) {
     return 0;
 }
 
+/* The content identity of one unit's object, as `tools/tlib.cx build` caches it under
+   CACHE/unit: sha256 over the target, the compile FLAGS, PRODUCT_SHA, the path text UNIT the
+   product is given (object bytes depend on it) and, for every file of CLOSURE (the lines of
+   tp_closure: the unit first, then every unit it reaches by `use`; ROOT-relative, or absolute
+   when outside ROOT), its path and source sha with the files it #includes (tp_key_file). Nothing
+   of ROOT's own path enters, so checkouts with the same content share the object; one changed
+   byte in the unit, in a unit it uses or in a file any of them #includes gives another key.
+   0, or -1 on a bad argument or no memory. */
+int tp_unit_key(const char *root, const char *product_sha, const char *flags, const char *unit, const char *closure, char hex[65]) {
+    char one[4400];
+    long n, i = 0, e;
+    TpBuf t;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    if (hex) hex[0] = 0;
+    if (!root || !product_sha || !product_sha[0] || !flags || !unit || !unit[0] || !closure || !closure[0] || !hex) return -1;
+    n = tx_len(closure, TX_ZCAP);
+    tp_puts(&t, "unitkey\t1\ntarget\t"); tp_puts(&t, tn_self());
+    tp_puts(&t, "\nflags\t"); tp_puts(&t, flags);
+    tp_puts(&t, "\nproduct_sha\t"); tp_puts(&t, product_sha);
+    tp_puts(&t, "\npath\t"); tp_puts(&t, unit); tp_puts(&t, "\n");
+    while (i < n) {
+        e = i;
+        while (e < n && closure[e] != '\n') e++;
+        if (e > i) {
+            if (tx_copy(one, sizeof one, closure + i, e - i)) { t.bad = 1; break; }
+            if (one[0] == '/') (void)tp_key_file(&t, "", one + 1, 0);
+            else (void)tp_key_file(&t, root, one, 0);
+        }
+        i = e + 1;
+    }
+    if (t.bad || !t.b) { mm_free(t.b); return -1; }
+    tp_sha(t.b, (size_t)t.n, hex);
+    mm_free(t.b);
+    return 0;
+}
+
 static TpPkg tp_keypkg;
 
 /* The content identity of the kit that `tools/tlib.cx kit` builds from the checkout at absolute

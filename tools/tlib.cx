@@ -26,7 +26,14 @@
  *          cache CACHE/PKG/<content-sha>.tlib (default ~/.cache/unisacc/tlib). The cache is asked
  *          by the input sha (package, version, target, flags, product sha, dependency content shas,
  *          exclusions, unit paths and source shas) and an entry is used only when it verifies and
- *          its receipt carries exactly that input sha.
+ *          its receipt carries exactly that input sha. A package that has to be built compiles
+ *          only the units whose object is not in the unit cache CACHE/unit: the key of an object
+ *          (cxlib.tlibpkg tp_unit_key) is the target, the flags, the product sha, the unit's path
+ *          and the content of the unit, of every unit of its use closure and of the files they
+ *          #include, so one changed unit recompiles itself and the units that reach it; a hit is
+ *          used only when the object's bytes hash to the sha its key names. The TLIB_BUILD line
+ *          names obj_built and obj_reused; UNISACC_TLIB_UNIT_TIMES=1 adds one TLIB_UNIT line with
+ *          the compile ms of every unit that was built. --no-cache neither reads nor writes it.
  * check    structure: the receipt sha, every object sha, the manifest sha, the content sha, no
  *          member outside the receipt, canonical member headers. --fresh adds: same version,
  *          target, product sha, exclusions, unit set and source shas as ROOT now, and the manifest
@@ -102,7 +109,7 @@ typedef struct {
     int nunit;
 } Lib;
 
-typedef struct { char *v[10]; int pid; int state; int rc; long t0; } Job;
+typedef struct { char *v[10]; int pid; int state; int rc; long t0; long ms; } Job;
 
 static char root[4096], product[4400], product_sha[65];
 static TpPkg pk;
@@ -159,6 +166,7 @@ static int run_jobs(int n, int par) {
                 jobs[i].rc = 142;
             } else jobs[i].rc = r < 0 ? 127 : ex ? code : 128 + sig;
             jobs[i].state = 2;
+            jobs[i].ms = sy_now_ms() - jobs[i].t0;
             running--;
             done++;
             moved = 1;
@@ -412,14 +420,58 @@ static int input_sha(const TpBuf *in, const TpPkg *p, char input[65]) {
     return 0;
 }
 
+/* The unit object cache UDIR (CACHE/unit), shared by every package, checkout and process:
+     <unit key>.key    one line, the sha256 of the object that key compiles to
+     <object sha>.o    the object, named by its own content
+   Both are written to a private name and published by rename(2), so a reader sees a whole file
+   or none; two processes that publish the same key publish the same bytes. */
+static char ukey[TP_MAXU][65];
+static int ujob[TP_MAXU];
+
+/* Copy the object of KEY to DST. 0 only when the entry is there and the object's bytes hash to the
+   sha the key names (checked on every hit, never remembered); 1 otherwise, and the unit compiles. */
+static int unit_take(const char *udir, const char *key, const char *dst) {
+    char p[4400], want[65], hex[65];
+    size_t n = 0;
+    char *b;
+    int rc;
+    if (cx_fmt(p, sizeof p, "%s/%s.key", udir, key)) return 1;
+    b = cx_read(p, &n);
+    if (!b) return 1;
+    if (n != 65 || b[64] != '\n' || mm_copy(want, sizeof want, b, 64)) { mm_free(b); sy_eprintf("tlib: unit cache key %s is malformed: compiling\n", key); return 1; }
+    want[64] = 0;
+    mm_free(b);
+    if (cx_fmt(p, sizeof p, "%s/%s.o", udir, want)) return 1;
+    b = cx_read(p, &n);
+    if (!b) { sy_eprintf("tlib: unit cache object of %s is absent: compiling\n", key); return 1; }
+    tp_sha(b, n, hex);
+    rc = !tx_eqz(hex, want) || cx_write(dst, b, n);
+    mm_free(b);
+    if (rc) sy_eprintf("tlib: unit cache object of %s did not verify: compiling\n", key);
+    return rc ? 1 : 0;
+}
+
+/* Publish the freshly compiled OBJ under KEY; SEQ keeps this process's private names apart. A
+   failure only costs the next build a compile, so it is named and not fatal. */
+static void unit_put(const char *udir, const char *key, const char *obj, int seq) {
+    char tmp[4400], p[4400], hex[65], line[70];
+    if (mkdirs(udir) || tp_sha_file(obj, hex) || cx_fmt(tmp, sizeof tmp, "%s/.tmp-%d-%d", udir, sy_pid(), seq) ||
+        cx_fmt(p, sizeof p, "%s/%s.o", udir, hex) || cx_fmt(line, sizeof line, "%s\n", hex) ||
+        sy_copy(obj, tmp, 0644) || sy_rename(tmp, p) ||
+        cx_fmt(p, sizeof p, "%s/%s.key", udir, key) || cx_write(tmp, line, 65) || sy_rename(tmp, p)) {
+        (void)sy_unlink(tmp);
+        sy_eprintf("tlib: unit cache not updated for %s under %s\n", obj, udir);
+    }
+}
+
 static int cmd_build(const char *pkg, const char *outdir, const char *cache, int par, int use_cache) {
-    char why[512], path[4400], stage[4400], dst[4400], cdir[4400], cpath[4400], kpath[4400], hex[65], input[65], content[65], apisha[65];
+    char why[512], path[4400], stage[4400], dst[4400], cdir[4400], cpath[4400], kpath[4400], udir[4400], hex[65], input[65], content[65], apisha[65];
     char member[TP_MAXU][TP_NAME];
     char *api, *f;
     long an = 0, t0 = sy_now_ms(), t1;
     size_t fn = 0;
     TpBuf in, rcp, ct;
-    int i, rows = 0, rc;
+    int i, rows = 0, rc, nj = 0, nreuse = 0;
     in.b = 0; in.n = 0; in.cap = 0; in.bad = 0;
     rcp = in; ct = in;
     if (tp_load(root, pkg, &pk, why, sizeof why)) return say(2, "UNREADABLE", pkg, why);
@@ -449,8 +501,10 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         char *c = tp_closure(root, product, pk.unit[i], why, sizeof why);
         if (!c) return say(1, "FAILED", pk.unit[i], why);
         rc = closure_inside(pk.unit[i], c, bdeps, pk.ndep);
+        if (rc) { mm_free(c); return rc; }
+        rc = tp_unit_key(root, product_sha, FLAGS, pk.unit[i], c, ukey[i]);
         mm_free(c);
-        if (rc) return rc;
+        if (rc) return say(1, "FAILED", pk.unit[i], "cannot compute the unit key");
         if (tp_member_name(pk.unit[i], member[i], TP_NAME)) return say(1, "FAILED", pk.unit[i], "member name too long");
     }
     /* input sha: the identity lines and every unit's path and source sha */
@@ -482,10 +536,23 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         if (cx_fmt(stage, sizeof stage, "%s/unisacc-tlib-stage-%s-%d", tb, pk.pkg, sy_pid())) return say(1, "FAILED", outdir, "stage path too long");
     }
     if (mkdirs(stage)) return say(1, "FAILED", outdir, "cannot create the stage directory");
+    /* unit level: an object whose key (cxlib.tlibpkg tp_unit_key) has a verified entry under
+       CACHE/unit is copied, every other unit is compiled and its object published there */
+    if (cx_fmt(udir, sizeof udir, "%s/unit", cache)) { (void)cx_rmtree(stage); return 2; }
     for (i = 0; i < pk.nunit; i++) {
-        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i]) || set_compile(i, pk.unit[i], path, RT_USER)) return say(1, "FAILED", pk.unit[i], "path too long");
+        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i])) { (void)cx_rmtree(stage); return say(1, "FAILED", pk.unit[i], "path too long"); }
+        if (use_cache && unit_take(udir, ukey[i], path) == 0) { nreuse++; continue; }
+        if (set_compile(nj, pk.unit[i], path, RT_USER)) { (void)cx_rmtree(stage); return say(1, "FAILED", pk.unit[i], "path too long"); }
+        ujob[nj++] = i;
     }
-    if (run_jobs(pk.nunit, par)) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "a unit did not compile"); }
+    if (run_jobs(nj, par)) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "a unit did not compile"); }
+    {
+        const char *ut = sy_env("UNISACC_TLIB_UNIT_TIMES");
+        for (i = 0; i < nj; i++) {
+            if (ut && ut[0] == '1') sy_printf("TLIB_UNIT\t%s\t%s\tms=%ld\tbuilt\n", pk.pkg, pk.unit[ujob[i]], jobs[i].ms);
+            if (use_cache && !cx_fmt(path, sizeof path, "%s/%s", stage, member[ujob[i]])) unit_put(udir, ukey[ujob[i]], path, i);
+        }
+    }
     t1 = sy_now_ms();
     api = tp_api(product, &pk, &an, &rows, why, sizeof why);
     if (!api) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, why); }
@@ -556,8 +623,8 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
                     cx_write(tmp, keyline, 65) || sy_rename(tmp, kpath))
                     sy_eprintf("tlib: cache not updated under %s (the tlib itself is written)\n", cdir);
             }
-            sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcompile_ms=%ld\tjobs=%d\tcache=MISS\tcontent_sha=%s\t%s\n",
-                      pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, t1 - t0, par, content, dst);
+            sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcompile_ms=%ld\tjobs=%d\tobj_built=%d\tobj_reused=%d\tcache=MISS\tcontent_sha=%s\t%s\n",
+                      pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, t1 - t0, par, nj, nreuse, content, dst);
         }
     }
     mm_free(api);
