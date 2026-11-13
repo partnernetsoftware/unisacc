@@ -32,6 +32,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
+#pragma unisa use sys.hostid
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -653,10 +654,110 @@ int tp_cache_dir(char *dst, long cap) {
     return cx_fmt(dst, (size_t)cap, "%s/.cache/unisacc/tlib", sy_env_or("HOME", ".")) ? -1 : 0;
 }
 
-/* The kit directory of the checkout at absolute ROOT: CACHE/kit/<sha256 of the root path>. 0, or -1. */
-int tp_kit_dir(const char *root, char *dst, long cap) {
+/* One key line for ROOT/REL (`unit` at depth 0, `inc` below): its path and the sha of its bytes, or
+   `absent`; then the same for every file it names by #include "NAME", looked up next to the
+   including file and, when not there, from ROOT. Returns 1 when the file is absent, else 0. */
+static int tp_key_file(TpBuf *t, const char *root, const char *rel, int depth) {
+    char path[4400], hex[65], inc[2 * TP_NAME + 8];
+    size_t n = 0;
+    char *b;
+    long i, e, s, q, dl = 0, k;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) { t->bad = 1; return 0; }
+    b = cx_read(path, &n);
+    tp_puts(t, depth ? "inc\t" : "unit\t"); tp_puts(t, rel); tp_puts(t, "\t");
+    if (!b) { tp_puts(t, "absent\n"); return 1; }
+    tp_sha(b, n, hex);
+    tp_puts(t, hex); tp_puts(t, "\n");
+    for (k = 0; rel[k]; k++) if (rel[k] == '/') dl = k + 1;
+    for (i = 0; depth < 8 && i < (long)n; i = e + 1) {
+        e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        s = i;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (s >= e || b[s] != '#') continue;
+        s++;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (e - s < 9 || !mm_same(b + s, "include", 7)) continue;
+        s += 7;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (s >= e || b[s] != '"') continue;
+        s++;
+        q = s;
+        while (q < e && b[q] != '"') q++;
+        if (q >= e || q == s) continue;
+        if (dl + (q - s) + 1 > (long)sizeof inc || tx_copy(inc, sizeof inc, rel, dl) || tx_copy(inc + dl, (long)sizeof inc - dl, b + s, q - s)) { t->bad = 1; break; }
+        if (tp_key_file(t, root, inc, depth + 1) && dl > 0 && !tx_copy(inc, sizeof inc, b + s, q - s)) (void)tp_key_file(t, root, inc, depth + 1);
+    }
+    mm_free(b);
+    return 0;
+}
+
+static TpPkg tp_keypkg;
+
+/* The content identity of the kit that `tools/tlib.cx kit` builds from the checkout at absolute
+   ROOT with PRODUCT: sha256 over the target, the product's sha, the package table's sha, the sha
+   of tools/tlib.cx (the prep image's root unit, which also carries the compile flags) and, for
+   every package of the table in table order, its name, version, api_sha and frozen field, the sha
+   of its build/layer-api manifest, its exclusions and every unit's path and source sha with the
+   files it #includes. Nothing of ROOT's own path enters, so two checkouts with the same content
+   share one key; one changed byte in any of the above gives another. 0, or -1 when the product
+   or the table cannot be read. */
+int tp_kit_key(const char *root, const char *product, char hex[65]) {
+    char path[4400], one[65], why[256], pkg[64];
+    char *names;
+    long nn = 0, i = 0, e;
+    int u;
+    TpBuf t;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    hex[0] = 0;
+    if (tp_sha_file(product, one)) return -1;
+    tp_puts(&t, "kitkey\t1\ntarget\t"); tp_puts(&t, tn_self());
+    tp_puts(&t, "\nproduct_sha\t"); tp_puts(&t, one);
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", root) || tp_sha_file(path, one)) { mm_free(t.b); return -1; }
+    tp_puts(&t, "\ntable\t"); tp_puts(&t, one); tp_puts(&t, "\n");
+    (void)tp_key_file(&t, root, "tools/tlib.cx", 0);
+    names = tp_names(root, &nn);
+    if (!names) { mm_free(t.b); return -1; }
+    while (i < nn) {
+        e = i;
+        while (e < nn && names[e] != '\n') e++;
+        if (e > i && !tx_copy(pkg, sizeof pkg, names + i, e - i)) {
+            if (tp_load(root, pkg, &tp_keypkg, why, sizeof why)) {
+                tp_puts(&t, "unloadable\t"); tp_puts(&t, pkg); tp_puts(&t, "\n");
+            } else {
+                const TpPkg *p = &tp_keypkg;
+                tp_puts(&t, "pkg\t"); tp_puts(&t, p->pkg); tp_puts(&t, "\t"); tp_puts(&t, p->version); tp_puts(&t, "\t");
+                tp_puts(&t, p->api_sha); tp_puts(&t, "\t"); tp_puts(&t, p->frozen); tp_puts(&t, "\nmanifest\t");
+                if (cx_fmt(path, sizeof path, "%s/build/layer-api/%s.tsv", root, p->pkg) || tp_sha_file(path, one)) tp_puts(&t, "absent");
+                else tp_puts(&t, one);
+                tp_puts(&t, "\n");
+                for (u = 0; u < p->nexcl; u++) { tp_puts(&t, "excluded\t"); tp_puts(&t, p->excl[u]); tp_puts(&t, "\n"); }
+                for (u = 0; u < p->nunit; u++) (void)tp_key_file(&t, root, p->unit[u], 0);
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(names);
+    if (t.bad || !t.b) { mm_free(t.b); return -1; }
+    tp_sha(t.b, (size_t)t.n, hex);
+    mm_free(t.b);
+    return 0;
+}
+
+/* The kit directory for the checkout at absolute ROOT built by PRODUCT: CACHE/kit/<tp_kit_key>.
+   The key is content, not the checkout path: every checkout with the same product, table and
+   sources reads and publishes the same directory. 0, or -1. */
+int tp_kit_dir_for(const char *root, const char *product, char *dst, long cap) {
     char c[4096], hex[65];
-    if (tp_cache_dir(c, sizeof c)) return -1;
-    tp_sha(root, (size_t)tx_len(root, TX_ZCAP), hex);
+    if (tp_cache_dir(c, sizeof c) || tp_kit_key(root, product, hex)) return -1;
     return cx_fmt(dst, (size_t)cap, "%s/kit/%s", c, hex) ? -1 : 0;
+}
+
+/* tp_kit_dir_for with ROOT/unisacc.com as the product: what every consumer that does not name a
+   product asks (tests/run-batch.cx, tools/affected.cx, cxlib.toolprep, cxlib.runnerprep,
+   tools/tlib-admit.cx, tools/check-tlib-prep.cx). 0, or -1. */
+int tp_kit_dir(const char *root, char *dst, long cap) {
+    char product[4400];
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return -1;
+    return tp_kit_dir_for(root, product, dst, cap);
 }

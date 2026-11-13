@@ -40,7 +40,12 @@
  *          compile in one respect: an object keeps every function of its unit, so a unit whose
  *          unused functions name symbols outside the closure does not link (the whole-program
  *          compile drops such functions).
- * kit      brings DIR (default ROOT/out/tlib) up to date: every package of the table as a tlib,
+ * kit      (default DIR: CACHE/kit/<content key>, cxlib.tlibpkg tp_kit_dir_for -- the key is the
+ *          product sha, the package table, tools/tlib.cx and every unit source with its #include
+ *          files, not the checkout path, so checkouts with the same content share one kit; a
+ *          missing kit is built in a private stage and published by one directory rename, a kit
+ *          that is there is checked in full every time, see cmd_kit_shared)
+ *          brings DIR up to date: every package of the table as a tlib,
  *          this tool as DIR/tlib-prep, and DIR/kit.tsv (product sha, the tlib files, path and sha
  *          of every unit of this tool's closure, the image sha, the kit sha). Incremental: only a
  *          package whose tlib is absent, does not verify, is not fresh or was built from another
@@ -64,6 +69,7 @@
  * Check: tools/check-tlib.cx, tools/check-tlib-base.cx, tools/check-tlib-prep.cx. */
 #pragma unisa use cxlib.tlibpkg
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -748,6 +754,8 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
    never describes another image or another set of tlibs. */
 typedef struct { char pkg[64], ver[32], content[65], api[65]; } KitLib;
 static KitLib kitlibs[MAXLIB];
+static const char *kit_stage_show;   /* set while cmd_kit fills a stage: the directory the kit will be published to */
+static char kit_line[5000];          /* the PREPARED line of the last kit that was written */
 
 /* The kit text KB[0..KN): its kit_sha, the product, every `self` unit and the image at IMAGE.
    0 with *BODY the length before the kit_sha line; 3 TAMPERED, 4 STALE, 2 unreadable product. */
@@ -857,7 +865,7 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
     if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
     if (image_ok && !retired && oself + 1 == k.n && mm_same(old, k.b, k.n)) {
         mm_free(k.b);
-        sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=0\timage=kept\tkit=unchanged\t%s\n", nlib, nskip, sy_now_ms() - t0, outdir);
+        sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=0\treused=%d\timage=kept\tkit=unchanged\t%s\n", nlib, nskip, sy_now_ms() - t0, nlib, outdir);
         return 0;
     }
     if (!retired) {
@@ -898,9 +906,64 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
         return say(1, "FAILED", outdir, "cannot publish the kit");
     }
     mm_free(k.b);
-    sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=%d\timage=%s\tkit=written\t%s\n",
-              nlib, nskip, sy_now_ms() - t0, nbuilt, image_ok ? "kept" : "built", outdir);
+    /* a staged kit (kit_stage_show set) is announced by cmd_kit_shared once it is published, under the directory it is published to */
+    if (cx_fmt(kit_line, sizeof kit_line, "PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=%d\treused=%d\timage=%s\tkit=written\t%s\n",
+               nlib, nskip, sy_now_ms() - t0, nbuilt, nlib - nbuilt, image_ok ? "kept" : "built", kit_stage_show ? kit_stage_show : outdir)) return 2;
+    if (!kit_stage_show) sy_printf("%s", kit_line);
     return 0;
+}
+
+/* Remove DIR, a directory that holds files only (a kit directory or its stage): the deletion guard
+   cx_rmtree does not take paths under the cache, and nothing here descends. */
+static void drop_flat(const char *dir) {
+    sy_dir_t d;
+    char p[4400];
+    int pass, any;
+    for (pass = 0; pass < 4; pass++) {
+        any = 0;
+        if (sy_dir_open(&d, dir)) break;
+        while (sy_dir_next(&d) == 1)
+            if (d.kind != 'd' && !cx_fmt(p, sizeof p, "%s/%s", dir, d.name)) { (void)sy_unlink(p); any = 1; }
+        (void)sy_dir_close(&d);
+        if (!any) break;
+    }
+    (void)sy_rmdir(dir);
+}
+
+/* kit into the shared, content-keyed OUTDIR (cxlib.tlibpkg tp_kit_dir_for). Any checkout with the
+   same content, and any number of processes, may arrive here at once:
+   - OUTDIR already holds a kit.tsv: cmd_kit runs on it in place. That is the full check (kit_verify,
+     then verify(), fresh() and the input sha of every tlib against ROOT now), never a remembered
+     verdict; with nothing to do it writes nothing (reused=N, kit=unchanged).
+   - otherwise the kit is built in the private sibling OUTDIR.stage-PID and published by one
+     rename(2) of the directory, so no reader ever sees a half-written kit. When the rename finds
+     that another process published first, the stage is dropped and that kit is checked in place
+     as above; a directory without kit.tsv that is in the way is moved aside and dropped. */
+static int cmd_kit_shared(const char *outdir, const char *cache, int par, int use_cache) {
+    char kit[4400], stage[4400], dead[4400];
+    int rc;
+    if (cx_fmt(kit, sizeof kit, "%s/kit.tsv", outdir) || cx_fmt(stage, sizeof stage, "%s.stage-%d", outdir, sy_pid()) ||
+        cx_fmt(dead, sizeof dead, "%s.dead-%d", outdir, sy_pid())) return 2;
+    if (use_cache && sy_exists(kit) == 1) return cmd_kit(outdir, cache, par, use_cache);
+    drop_flat(stage);   /* what an earlier process of this pid may have left */
+    kit_stage_show = outdir;
+    rc = cmd_kit(stage, cache, par, use_cache);
+    kit_stage_show = 0;
+    if (rc) { drop_flat(stage); return rc; }
+    if (sy_rename(stage, outdir) == 0) { sy_printf("%s", kit_line); return 0; }
+    if (sy_exists(kit) == 1) {   /* published by another process meanwhile */
+        drop_flat(stage);
+        sy_printf("TLIB_KIT\tpublished-by-another\t%s\n", outdir);
+        return cmd_kit(outdir, cache, par, 1);
+    }
+    if (sy_rename(outdir, dead) == 0) {
+        rc = sy_rename(stage, outdir);
+        drop_flat(dead);
+        if (!rc) { sy_printf("%s", kit_line); return 0; }
+    }
+    drop_flat(stage);
+    if (sy_exists(kit) == 1) return cmd_kit(outdir, cache, par, 1);
+    return say(1, "FAILED", outdir, "cannot publish the kit directory");
 }
 
 /* Link TOOL from the kit in KITDIR. NOT_APPLICABLE (7), silently, when the tool is not a row of
@@ -1041,13 +1104,14 @@ int main(int argc, char **argv) {
     if (tx_eqz(cmd, "prep")) {
         /* default --jobs 4 (par); a dependency enters the input sha by its api_sha: objects depend on the interface only */
         if (kitarg) { if (cx_fmt(outdir, sizeof outdir, "%s", kitarg)) return 2; }
-        else if (tp_kit_dir(root, outdir, sizeof outdir)) return 2;
+        else if (tp_kit_dir_for(root, product, outdir, sizeof outdir)) return say(2, "UNREADABLE", root, "no kit key: the product or build/tlib-packages.tsv cannot be read");
         return cmd_prep(subject, outarg, outdir, par);
     }
     if (outarg) { if (cx_fmt(outdir, sizeof outdir, "%s", outarg)) return 2; }
-    else if (tp_kit_dir(root, outdir, sizeof outdir)) return 2;
+    else if (tp_kit_dir_for(root, product, outdir, sizeof outdir)) return say(2, "UNREADABLE", root, "no kit key: the product or build/tlib-packages.tsv cannot be read");
     if (tx_eqz(cmd, "kit")) {
-        int kr = cmd_kit(outdir, cache, par, use_cache);
+        /* --out DIR is the caller's private directory, filled in place; the default is the shared content-keyed one */
+        int kr = outarg ? cmd_kit(outdir, cache, par, use_cache) : cmd_kit_shared(outdir, cache, par, use_cache);
         /* compatibility until the other consumers read tp_kit_dir: ROOT/out/tlib -> the kit dir
            (a real directory left there is moved to out/tlib.legacy-PID once) */
         if (kr == 0 && !outarg) {
