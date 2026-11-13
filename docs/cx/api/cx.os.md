@@ -11,7 +11,7 @@
 | sy_stat | int sy_stat(const char *path, sy_stat_t *out); | Rust fs::metadata; Node fs.stat; QuickJS os.stat | -errno | impl | impl | impl:GetFileAttributesExA,缺该入口时 -ENOSYS | exists | - | pre | 0.1.0 | none | - |
 | sy_lstat | int sy_lstat(const char *path, sy_stat_t *out); | Rust fs::symlink_metadata; Node fs.lstat; QuickJS os.lstat | -errno | impl | impl | impl:等同 sy_stat,kind 只有 f/d | exists | - | pre | 0.1.0 | none | - |
 | sy_reg_size | long sy_reg_size(int fd); | Rust Metadata::len | -errno | impl | impl | unverified | exists | - | legacy | 0.1.0 | none | - |
-| sy_file_size | int sy_file_size(const char *path, int64_t *out); | Rust Metadata::len; Node Stats.size | -errno | impl | impl | impl:GetFileAttributesExA 高低两半 | new | 64 位长度,补 sy_stat_t.size 在 win 的 32 位上限 | pre | 0.1.0 | none | - |
+| sy_file_size | int sy_file_size(const char *path, int64_t *out); | Rust Metadata::len; Node Stats.size | -errno | impl | impl | impl:GetFileAttributesExA 高低两半 | exists | 64 位长度,补 sy_stat_t.size 在 win 的 32 位上限 | pre | 0.1.0 | none | - |
 | sy_is_reg | int sy_is_reg(const char *path); | Rust Path::is_file | -errno;0/1 | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
 | sy_exists | int sy_exists(const char *path); | Rust Path::try_exists; Node fs.existsSync | -errno;0/1 | impl | impl | unverified | exists | 只把 ENOENT 当不存在 | pre | 0.1.0 | none | - |
 | sy_access | int sy_access(const char *path, int mode); | Node fs.access | -errno | impl | impl | refuse:ENOSYS 前导库无 _access | exists | - | pre | 0.1.0 | none | - |
@@ -35,7 +35,7 @@
 | sy_symlink | int sy_symlink(const char *target, const char *link); | QuickJS os.symlink; Node fs.symlink | -errno;-EEXIST | impl | impl | refuse:ENOSYS cap=symlink | exists | - | pre | 0.1.0 | none | - |
 | sy_readlink | long sy_readlink(const char *path, char *dst, long cap); | QuickJS os.readlink; Rust fs::read_link | -errno | impl | impl | refuse:ENOSYS cap=symlink | exists | - | pre | 0.1.0 | none | - |
 | sy_realpath | int sy_realpath(const char *path, char *dst, int cap); | QuickJS os.realpath; Rust fs::canonicalize | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
-| sy_abspath | int sy_abspath(const char *path, char *dst, int cap); | Rust path::absolute; Node path.resolve | -errno;-ERANGE | impl | impl | impl:带盘符与 UNC | new | 只拼 cwd 并规整,不解符号链接,路径可不存在 | pre | 0.1.0 | none | - |
+| sy_abspath | int sy_abspath(const char *path, char *dst, int cap); | Rust path::absolute; Node path.resolve | -errno;-ERANGE | impl | impl | impl:带盘符与 UNC | exists | 只拼 cwd 并规整,不解符号链接,路径可不存在 | pre | 0.1.0 | none | - |
 | sy_mkfifo | int sy_mkfifo(const char *path, int mode); | POSIX mkfifo | -errno | impl | refuse:ENOSYS 前导库无 mkfifo | refuse:ENOSYS cap=fifo | exists | - | pre | 0.1.0 | none | - |
 | sy_truncate | int sy_truncate(int fd, long size); | Rust File::set_len; Node fs.ftruncate | -errno;-EINVAL | impl | impl | refuse:ENOSYS 前导库无 ftruncate | exists | pending E4 | pre | 0.1.0 | none | - |
 | sy_fsync | int sy_fsync(int fd); | Rust File::sync_all; Node fs.fsync | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
@@ -51,7 +51,7 @@
 | sy_write_file | int sy_write_file(const char *path, const void *buf, int64_t n, int mode); | Rust fs::write; Node fs.writeFile | -errno | impl | impl | impl | exists | 截断重写,不保证原子 | pre | 0.1.0 | none | - |
 | sy_append_file | int sy_append_file(const char *path, const void *buf, int64_t n, int mode); | Node fs.appendFile; Rust OpenOptions::append | -errno | impl | impl | impl | exists | - | pre | 0.1.0 | none | - |
 | sy_write_atomic | int sy_write_atomic(const char *path, const void *buf, int64_t n, int mode); | Rust(tempfile) persist; Node 写临时再 rename | -errno;-EINVAL | impl:同目录临时 + fsync + rename | impl:同目录临时 + fsync + rename | impl:MoveFileExA REPLACE_EXISTING | exists | 失败时目标不变且临时文件已删 | pre | 0.1.0 | none | - |
-| sy_mkstemp | int sy_mkstemp(const char *dir, const char *prefix, char *path, int cap); | QuickJS os.mkstemp; Rust(tempfile) NamedTempFile | -errno;-ERANGE;ret:fd | impl | impl | impl | new | dir 为 0 时用 sy_tmpdir;O_EXCL 0600 建 | pre | 0.1.0 | none | - |
+| sy_mkstemp | int sy_mkstemp(const char *dir, const char *prefix, char *path, int cap); | QuickJS os.mkstemp; Rust(tempfile) NamedTempFile | -errno;-ERANGE;ret:fd | impl | impl | impl | exists | dir 为 0 时用 sy_tmpdir;O_EXCL 0600 建 | pre | 0.1.0 | none | - |
 | sy_mkdtemp | int sy_mkdtemp(const char *dir, const char *prefix, char *path, int cap); | QuickJS os.mkdtemp; Node fs.mkdtemp | -errno;-ERANGE | impl | impl | impl | exists | 0700 建 | pre | 0.1.0 | none | - |
 | sy_chdir | int sy_chdir(const char *path); | QuickJS os.chdir; Node process.chdir | -errno | impl | impl | impl:SetCurrentDirectoryA | exists | - | pre | 0.1.0 | none | - |
 | sy_cwd | int sy_cwd(char *dst, int cap); | QuickJS os.getcwd; Rust env::current_dir | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
@@ -94,8 +94,8 @@
 | sy_setenv | int sy_setenv(const char *name, const char *val, int overwrite); | QuickJS std.setenv; Rust env::set_var | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
 | sy_unsetenv | int sy_unsetenv(const char *name); | QuickJS std.unsetenv; Rust env::remove_var | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
 | sy_tmpdir | const char *sy_tmpdir(void); | Node os.tmpdir; Rust env::temp_dir | none | impl:TMPDIR 再 /tmp | impl:TMPDIR 再 /tmp | impl:TMPDIR/TEMP/TMP,都没有时为 .,统一用 / | exists | - | pre | 0.1.0 | none | - |
-| sy_homedir | int sy_homedir(char *dst, int cap); | Node os.homedir; Rust env::home_dir | -ENOENT;-ERANGE | impl:HOME | impl:HOME | impl:USERPROFILE,再 HOMEDRIVE+HOMEPATH | new | 只读环境变量,不查 passwd;未设 | pre | 0.1.0 | none | - |
-| sy_hostname | int sy_hostname(char *dst, int cap); | Node os.hostname | -errno;-ERANGE | impl:uname nodename | impl:gethostname | impl:GetComputerNameA | new | - | pre | 0.1.0 | none | - |
+| sy_homedir | int sy_homedir(char *dst, int cap); | Node os.homedir; Rust env::home_dir | -ENOENT;-ERANGE | impl:HOME | impl:HOME | impl:USERPROFILE(无 HOMEDRIVE+HOMEPATH 回退;未在目标上实跑) | exists | 只读环境变量,不查 passwd;未设 | pre | 0.1.0 | none | - |
+| sy_hostname | int sy_hostname(char *dst, int cap); | Node os.hostname | -errno;-ERANGE | impl:/proc/sys/kernel/hostname,再 HOSTNAME/COMPUTERNAME 环境变量 | impl:仅环境变量,未在目标上实跑 | impl:仅环境变量,未在目标上实跑 | exists | - | pre | 0.1.0 | none | - |
 | sy_uid | int sy_uid(void); | Node os.userInfo().uid | none | impl | impl | impl:恒 0 | exists | - | pre | 0.1.0 | none | - |
 | sy_euid | long sy_euid(void); | POSIX geteuid; Node process.geteuid | none | impl | impl | impl:恒 0 | exists | - | pre | 0.1.0 | none | - |
 | sy_self_path | int sy_self_path(char *dst, int cap); | Rust env::current_exe; Node process.execPath | -errno | impl:/proc/self/exe | impl | impl:GetModuleFileNameA,缺入口时 -ENOSYS | exists | - | pre | 0.1.0 | none | - |
@@ -115,9 +115,9 @@
 | sy_deadline_min | sy_deadline_t sy_deadline_min(const sy_deadline_t *a, const sy_deadline_t *b); | Rust Ord::min | none | impl | impl | impl | exists | 嵌套期限取较早者 | pre | 0.1.0 | none | - |
 | sy_sleep_until | int sy_sleep_until(const sy_deadline_t *d); | Rust(tokio) sleep_until 的同步版 | -errno;-EINVAL | impl | impl | impl | exists | 被信号打断后续睡到点;无期限记 -EINVAL | pre | 0.1.0 | none | - |
 | sy_timer_next | int sy_timer_next(const sy_deadline_t *ds, int n, long *wait_ms); | QuickJS os.setTimeout 的轮询版; Node timers | -EINVAL;ret:needlen | impl | impl | impl | exists | 定时器即一组 deadline;没有事件循环(OUT),调用者把 wait_ms 交给 sy_poll;返回最早一项的下标,全无期限返回 -1 | pre | 0.1.0 | none | - |
-| sy_tm_t | typedef struct { int year; int mon; int day; int hour; int min; int sec; int wday; int yday; } sy_tm_t; | C struct tm; JS Date 的 UTC 取值 | none | impl | impl | impl | new | mon 1..12,day 1..31,只表 UTC | pre | 0.1.0 | none | - |
-| sy_utc_split | int sy_utc_split(int64_t sec, sy_tm_t *out); | C gmtime_r; JS Date.getUTC* | -ERANGE | impl | impl | impl | new | 纯算术,不调宿主;年份不在 1..9999 | pre | 0.1.0 | none | - |
-| sy_utc_join | int sy_utc_join(const sy_tm_t *t, int64_t *sec); | C timegm; JS Date.UTC | -EINVAL | impl | impl | impl | new | 字段越界 | pre | 0.1.0 | none | - |
-| sy_utc_fmt | int sy_utc_fmt(char *out, int cap, int64_t sec); | JS Date.toISOString; Rust(humantime) format_rfc3339 | -ERANGE;ret:needlen | impl | impl | impl | new | 固定 YYYY-MM-DDTHH:MM:SSZ | pre | 0.1.0 | none | - |
-| sy_utc_parse | int sy_utc_parse(const char *s, long n, int64_t *sec); | JS Date.parse; Rust(humantime) parse_rfc3339 | -EINVAL | impl | impl | impl | new | 只收 sy_utc_fmt 的形状,另收纯日期 YYYY-MM-DD | pre | 0.1.0 | none | - |
+| sy_tm_t | typedef struct { int year; int mon; int day; int hour; int min; int sec; int wday; int yday; } sy_tm_t; | C struct tm; JS Date 的 UTC 取值 | none | impl | impl | impl | exists | mon 1..12,day 1..31,只表 UTC | pre | 0.1.0 | none | - |
+| sy_utc_split | int sy_utc_split(int64_t sec, sy_tm_t *out); | C gmtime_r; JS Date.getUTC* | -ERANGE | impl | impl | impl | exists | 纯算术,不调宿主;年份不在 1..9999 | pre | 0.1.0 | none | - |
+| sy_utc_join | int sy_utc_join(const sy_tm_t *t, int64_t *sec); | C timegm; JS Date.UTC | -EINVAL | impl | impl | impl | exists | 字段越界 | pre | 0.1.0 | none | - |
+| sy_utc_fmt | int sy_utc_fmt(char *out, int cap, int64_t sec); | JS Date.toISOString; Rust(humantime) format_rfc3339 | -ERANGE;ret:needlen | impl | impl | impl | exists | 固定 YYYY-MM-DDTHH:MM:SSZ | pre | 0.1.0 | none | - |
+| sy_utc_parse | int sy_utc_parse(const char *s, long n, int64_t *sec); | JS Date.parse; Rust(humantime) parse_rfc3339 | -EINVAL | impl | impl | impl | exists | 只收 sy_utc_fmt 的形状,另收纯日期 YYYY-MM-DD | pre | 0.1.0 | none | - |
 | sy_local_fmt | int sy_local_fmt(char *out, int cap, const char *fmt, long sec); | C strftime + localtime | -errno | impl | impl | unverified | exists | 本地时区;新代码优先 UTC | legacy | 0.1.0 | none | - |
