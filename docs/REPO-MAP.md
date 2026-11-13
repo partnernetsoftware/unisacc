@@ -36,7 +36,7 @@
 | `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`。过期的进 `archive/plans/` 与 `archive/docs-2026-11*/`(各带 INDEX.md) | 否 | 主线,交接单不再写带日期的 plans |
 | `docs/` | 契约与说明:`glossary.md`、`toolchain.md`、`tapebin-v1*.md/tsv`、`host-interop.md`、`cx-spec-draft.md`、`docs/cx/`、本页 | 否 | 主线 |
 | `README.md`、`spec.md`、`ARCHITECTURE.md` | 用户视角入口、条款全文、早期架构叙述(含历史段落,以 `prd.md` 为准) | 否 | 主线 |
-| `AGENTS.md`、`CLAUDE.md` | 协作与工作规则 | 否 | 主人/集成者 |
+| `AGENTS.md`、`CLAUDE.md` | 协作与工作规则 | 否 | 项目所有者/集成者 |
 | 根文件 `cxroot.tsv`、`Makefile`、`ape-receipt.txt` | cx 根登记、薄入口 make、APE 回执 | 否 | 主线 |
 
 ## 四、车道、实验与归档

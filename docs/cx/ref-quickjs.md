@@ -1,7 +1,7 @@
 # 参照调研: QuickJS 与 quickjs-ng 的核心面与版本策略
 
 用途: 为 cx 核心层(cx.sys/os/path/mem/text/stream)与扩展(ext.*)的一次性定面、定稳定性策略提供参照。
-待判假设(主人): 按 QuickJS 的风格把 sys + os + net 设计完整, 就差不多够了。
+待判假设(项目所有者): 按 QuickJS 的风格把 sys + os + net 设计完整, 就差不多够了。
 
 取证方式与可信度标注:
 

@@ -72,7 +72,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 **一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
 - **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
-- **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据；当前候选的原生 CI 结果与 Windows 两格仅 portable 子集的限制见 §9.1。
+- **六 ISA 切片是核心需求，不可降级**（项目所有者 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据；当前候选的原生 CI 结果与 Windows 两格仅 portable 子集的限制见 §9.1。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
 - **自举**：宿主构建 `unisacc-seed.com` -> 种子自建 -> 再自建，三个 sha256 相等（N22）。
 
@@ -432,7 +432,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 - 执行器、模型包与路由的规模和入口见 §3.4、§3.5；装载由 `cx/runtime/model_decode.cx`、`src/packmodel.cx` 处理。
 - 相位、身份与两代不动点见 §3.7。
 
-### 4.3 外置与内容寻址(架构方向,2026-11-02 主人定;层名已并入 §3.1 结构五层)
+### 4.3 外置与内容寻址(架构方向,2026-11-02 项目所有者定;层名已并入 §3.1 结构五层)
 
 2026-11-02 的四分法(booter / 基座 / 阶段权重 / 资源)在 2026-11-07 改成 §3.1 的结构五层;旧图的编号不再使用。仍然有效的方向:
 
@@ -518,8 +518,8 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `docs/` | 规格/术语与目录地图（docs/REPO-MAP.md、glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
 | `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、docs-2026-11/（2026-11 文档清理移入的 plans 与 research，索引 INDEX.md）、prd 历史 |
-| `apps/csih/` | csih 车道（归 csih 主人） |
-| `ujs/` | 论文 B（归论文 B 主人，unisacc 侧不碰） |
+| `apps/csih/` | csih 车道（归 csih 维护者） |
+| `ujs/` | 论文 B（归论文 B 维护者，unisacc 侧不碰） |
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
@@ -656,7 +656,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 | 构造图与相位 | `build/graph.tsv`、`build/hardwire.tsv`、候选链 35 相位 | §3.7、§2.2 |
 | .cx lint | `tools/cx-lint.cx` R1（第二真相源，只报告）/R2（子进程时限与 `--`，precommit 拦截）；check 41（8a07e8e119） | §2.2 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/) |
+| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按项目所有者新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布与历史（索引）
@@ -688,7 +688,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 
 ### 9.7 未来计划（路线与入口；细节见各版 plans 文件，数字未标出处者为估计）
 
-排序依据（主人愿景）：在稳步推进功能的基础上，优先做对提升整体开发迭代速度有用的项。每版只留一项产品或功能改动，其余槽位给缩短冻结到公开、减少人工、门吞吐、左移检查、并行化与增量复用。
+排序依据（项目所有者愿景）：在稳步推进功能的基础上，优先做对提升整体开发迭代速度有用的项。每版只留一项产品或功能改动，其余槽位给缩短冻结到公开、减少人工、门吞吐、左移检查、并行化与增量复用。
 
 - **0.0.58（进行中）**：唯一产品改动 P1 规划器单源（prd_cx.md 55-1，补丁 `c58-planner`）；工具侧 T1 至 T12（G2 预算分批、chain-run 逐相预算、按目标 4 路并行、字面锚点禁用、发布尾部自动化、assetguard、s9 红批修复、版本度量、续跑复核开销）。目标：冻结到公开不超过 100 分钟（硬线 120）、人工介入 0、chain-run 零接触。详见 `plans/v0.0.58-unisacc.md`。
 - **0.0.59**：P59 解析状态实例化（prd_cx.md 55-2，去掉对工作进程隔离的依赖）；门批量化（门栈批量与门脚本迁移）、main 健康检查与令牌池、夜跑彩排；items 整表清账（H4）、贴线批次（H5）。
