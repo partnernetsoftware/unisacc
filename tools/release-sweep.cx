@@ -96,6 +96,7 @@ static char namebuf_b[65536];
 static char trash_scan[4400];
 static char rules_path[4400];
 static char tmp_dir[4400] = "/tmp"; /* the directory the `tmp` rules scan; --tmp-dir redirects it */
+static char chains_root[4400]; /* --chains DIR: HOME/.cache/unisacc/chains, scanned as under chains/<KIND> */
 static int tmp_move_allowed;  /* --tmp: the /tmp rows a rule marks allow_tmp may move */
 static long recent_minutes = RECENT_MINUTES_DEFAULT; /* @recent-minutes in the rules table */
 static char param_recent[32];
@@ -230,6 +231,21 @@ static int is_self_or_ancestor(long pid, const long *anc, int nanc) {
 /* Check if any live process (excluding self, ancestors, and pgrep itself) references path:
  * 1) runs pgrep -f -- PATH and filters out self / ancestor chain and processes that already exited or are pgrep;
  * 2) scans /proc/<pid>/cmdline and /proc/<pid>/cwd for processes whose command line or cwd is inside path. */
+/* Does the NUL-separated environment of pid carry path (UNISACC_CHAIN_BASE names a running chain's dir)? */
+static int environ_has(long pid, const char *path) {
+    char ep[128];
+    static char eb[65536];
+    int fd;
+    long en, k, pl = (long)strlen(path);
+    if (pl <= 0 || cx_fmt(ep, sizeof ep, "/proc/%ld/environ", pid)) return 0;
+    fd = sy_open_read(ep);
+    if (fd < 0) return 0;
+    en = sy_read(fd, eb, (long)sizeof eb);
+    sy_close(fd);
+    for (k = 0; k + pl <= en; k++) if (!memcmp(eb + k, path, (size_t)pl)) return 1;
+    return 0;
+}
+
 static int is_path_busy(const char *path) {
     char *v[] = {"pgrep", "-f", "--", (char *)path, 0};
     char *out = 0;
@@ -295,6 +311,11 @@ static int is_path_busy(const char *path) {
                         char lpath[128], target[4096];
                         int fd;
                         long rl;
+                        if (environ_has(pid, path)) {
+                            mm_free(pnames);
+                            sy_close(dfd);
+                            return 1;
+                        }
                         if (!cx_fmt(lpath, sizeof lpath, "/proc/%ld/cmdline", pid) && (fd = sy_open_read(lpath)) >= 0) {
                             long cn = sy_read(fd, target, sizeof target - 1);
                             sy_close(fd);
@@ -673,17 +694,84 @@ static void scan_under(const char *under, const char *dirpath, long now) {
             if (r >= 0) {
                 sy_stat_t st;
                 int not_old = 0;
+                int idle_rule = !strcmp(rules[r].action, "move-idle");
                 if (sy_lstat(full, &st) == 0 && rules[r].arg > 0)
                     not_old = !(st.mtime >= 0 && (now - st.mtime) >= rules[r].arg * 86400);
+                /* move-idle: a peer may still be working in a young entry (a running chain), keep it */
+                if (idle_rule && recent_minutes > 0 && sy_lstat(full, &st) == 0 && st.mtime >= 0 &&
+                    (now - st.mtime) < recent_minutes * 60) {
+                    scan_add("tmp-recent", "keep", full, "-");
+                    pos += (int)len + 1;
+                    cnt--;
+                    continue;
+                }
                 /* a /tmp row moves only when the rule allows it AND the caller passed --tmp: the flag is
                    the owner's explicit order, the rule says which names that order covers */
-                if (not_old || strcmp(rules[r].action, "move") || !rules[r].allow_tmp || !tmp_move_allowed)
+                if (not_old || (strcmp(rules[r].action, "move") && !idle_rule) || !rules[r].allow_tmp || !tmp_move_allowed)
                     scan_add(under, "list", full, "-");
                 else scan_add(under, "move", full, nbuf + pos);
             }
         }
         pos += (int)len + 1;
         cnt--;
+    }
+}
+
+/* CHAINS/<KIND>/<ID>: one `chains/<KIND>` rule set per kind.  Actions: keep | list | move | move-idle (move
+   unless the entry is younger than @recent-minutes: a running chain) | keep-newest (arg = how many of the
+   newest entries of this kind stay, the rest behave as move-idle).  Which kinds exist is the rules table's
+   business: a kind directory is scanned exactly when some rule has under == chains/<KIND>. */
+#define MAX_CHAIN_ENT 256
+static void scan_chains(long now) {
+    static char nbuf[131072];
+    static long mt[MAX_CHAIN_ENT];
+    static int off[MAX_CHAIN_ENT];
+    char kinds[16][24], under[40], dir[4400], full[8800], dst[1024];
+    int nk = 0, q, k;
+    if (!chains_root[0]) return;
+    for (q = 0; q < nrules; q++) {
+        if (strncmp(rules[q].under, "chains/", 7) || !rules[q].under[7]) continue;
+        for (k = 0; k < nk; k++) if (!strcmp(kinds[k], rules[q].under + 7)) break;
+        if (k == nk && nk < 16 && !cx_fmt(kinds[nk], sizeof kinds[nk], "%s", rules[q].under + 7)) nk++;
+    }
+    for (k = 0; k < nk; k++) {
+        int fd, cnt, pos = 0, ne = 0, i, j;
+        if (cx_fmt(under, sizeof under, "chains/%s", kinds[k]) || cx_fmt(dir, sizeof dir, "%s/%s", chains_root, kinds[k])) die("path bound", kinds[k]);
+        fd = sy_open(dir, O_RDONLY, 0);
+        if (fd < 0) continue;
+        cnt = sy_dir_names(fd, nbuf, (int)sizeof nbuf);
+        sy_close(fd);
+        while (pos < (int)sizeof nbuf && cnt > 0 && ne < MAX_CHAIN_ENT) {
+            long len = tx_len(nbuf + pos, (long)sizeof nbuf - pos);
+            sy_stat_t st;
+            if (len <= 0) break;
+            if (cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + pos) == 0 && sy_lstat(full, &st) == 0) {
+                off[ne] = pos;
+                mt[ne] = st.mtime >= 0 ? st.mtime : 0;
+                ne++;
+            }
+            pos += (int)len + 1;
+            cnt--;
+        }
+        for (i = 0; i < ne; i++) {
+            int r = rule_find(under, nbuf + off[i]), rank = 0, fresh;
+            const char *act;
+            if (r < 0 || cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + off[i]) || cx_fmt(dst, sizeof dst, "chains/%s/%s", kinds[k], nbuf + off[i])) continue;
+            act = rules[r].action;
+            fresh = recent_minutes > 0 && (now - mt[i]) < recent_minutes * 60;
+            if (!strcmp(act, "keep")) { keep_add(full); scan_add("chains", "keep", full, "-"); continue; }
+            if (!strcmp(act, "list")) { scan_add("chains", "list", full, "-"); continue; }
+            if (!strcmp(act, "keep-newest")) {
+                /* rank among entries this same rule matches: newest first, ties by position */
+                for (j = 0; j < ne; j++) {
+                    if (j == i || rule_find(under, nbuf + off[j]) != r) continue;
+                    if (mt[j] > mt[i] || (mt[j] == mt[i] && j < i)) rank++;
+                }
+                if (rank < rules[r].arg) { keep_add(full); scan_add("chains-latest", "keep", full, "-"); continue; }
+            } else if (strcmp(act, "move") && strcmp(act, "move-idle")) continue;
+            if (fresh && strcmp(act, "move")) scan_add("chains-recent", "keep", full, "-");
+            else scan_add("chains", "move", full, dst);
+        }
     }
 }
 
@@ -728,6 +816,7 @@ static void scan_all(const char *rules_path) {
         scan_kit(cache_root, kit_current);
         scan_cache(cache_root);
     }
+    scan_chains(now);
     scan_under("tmp", tmp_dir, now);
     if (trash_scan[0]) scan_under("trash", trash_scan, now);
 }
@@ -831,6 +920,8 @@ int main(int argc, char **argv) {
             kit_in = argv[++i];
         } else if (!strcmp(argv[i], "--trash-scan") && i + 1 < argc) {
             trash_in = argv[++i];
+        } else if (!strcmp(argv[i], "--chains") && i + 1 < argc) {
+            if (cx_fmt(chains_root, sizeof chains_root, "%s", argv[++i])) die("path bound", argv[i]);
         } else if (!strcmp(argv[i], "--tmp")) {
             tmp_move_allowed = 1;
         } else if (!strcmp(argv[i], "--tmp-dir") && i + 1 < argc) {
@@ -867,12 +958,13 @@ int main(int argc, char **argv) {
         /* A scan row is moved only when this checkout owns it: ROOT/out, this ROOT's tlib cache and its
            kit.  A /tmp row is moved only under --tmp, and then only because the rules marked it.
            Everything else is listed: a cross-directory move is the owner's call. */
-        size_t rl = strlen(scan_root), cl = strlen(cache_root), tl2 = strlen(tmp_dir);
+        size_t rl = strlen(scan_root), cl = strlen(cache_root), tl2 = strlen(tmp_dir), chl = strlen(chains_root);
         for (i = 0; i < nrows; i++) {
             SweepRow *r = &rows[i];
             int mine;
             if (strcmp(r->action, "move")) continue;
             mine = !strncmp(r->src, scan_root, rl) || (cl && !strncmp(r->src, cache_root, cl)) ||
+                   (chl && !strncmp(r->src, chains_root, chl)) ||
                    (tmp_move_allowed && tl2 && !strncmp(r->src, tmp_dir, tl2));
             if (!mine) { if (cx_fmt(r->action, sizeof r->action, "list")) die("fmt", 0); }
         }
