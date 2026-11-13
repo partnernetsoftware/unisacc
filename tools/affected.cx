@@ -497,6 +497,23 @@ static int match(const int *changed, int nch, int *why) {
     }
     return best;
 }
+/* 批级记忆:(source,entry,args) 与 changed[] 不变时 mark_batch+match 的结论也不变,而批 id 只影响
+   mark_guards(只对 3 个 cross-targets 批生效)。1034 个 IMPLEMENTED SOURCE 批只有 560 个 distinct
+   源。命中时直接复用 (v, why),不重算闭包;guard 批仍走完整路径以免漏掉目录守卫。 */
+static char *bkey[4096]; static int bv[4096], bwhy[4096];
+static int bslot(const char *k, int create) {
+    unsigned long h = hash(k) & 4095; int i;
+    for (i = 0; i < 4096; i++) {
+        unsigned long s = (h + (unsigned long)i) & 4095;
+        if (!bkey[s]) { if (!create) return -1; bkey[s] = keep(k, tx_len(k, 8200)); return (int)s; }
+        if (tx_eqz(bkey[s], k)) return (int)s;
+    }
+    return -1;
+}
+static int batch_has_guard(const char *id) {
+    int g; for (g = 0; GUARD[g][0]; g++) if (tx_eqz(GUARD[g][0], id)) return 1;
+    return 0;
+}
 
 /* ---------- child processes ---------- */
 static int read_all(char **argv, Buf *out) {
@@ -1028,11 +1045,18 @@ int main(int argc, char **argv) {
         for (b = 0; b < nbatch; b++) {
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
             int why = -1, v;
+            char key[8400]; int slot = -1;
+            if (cx_fmt(key, sizeof key, "%s\t%s\t%s", batch[b].source, batch[b].entry, batch[b].args)) die("key bound");
             t0b = sy_now_ms();
-            mark_batch(&batch[b]);
-            t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b;
-            v = match(changed, nch, &why);
-            t_match += sy_now_ms() - t0b;
+            if (!batch_has_guard(batch[b].id)) slot = bslot(key, 0);
+            if (slot >= 0) { v = bv[slot]; why = bwhy[slot]; t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b; }
+            else {
+                mark_batch(&batch[b]);
+                t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b;
+                v = match(changed, nch, &why);
+                t_match += sy_now_ms() - t0b;
+                if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; }
+            }
             if (v == V_NONE) continue;
             printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
