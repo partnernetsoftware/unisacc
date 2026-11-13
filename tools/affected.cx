@@ -378,12 +378,14 @@ static int lit_unlimited = 1;
 static int child_via(int v) { return v == V_SOURCE ? V_USE : v == V_LIT ? V_LITUSE : v == V_ARG ? V_ARGUSE : v; }
 static void named(const char *tok, int via);
 static void named_file(const char *tok, int via);
+static long t_parse, t_walk;
 static void mark(int ni, int via) {
     Node *N = &node[ni]; int k;
     if (N->mark == epoch && N->via <= via) return;
     N->mark = epoch; N->via = via;
-    if (!N->parsed) parse(ni);
+    { long q = sy_now_ms(); if (!N->parsed) parse(ni); t_parse += sy_now_ms() - q; }
     N = &node[ni];
+    { long q = sy_now_ms();
     for (k = 0; k < N->nuse; k++) mark(N->use[k], child_via(via));
     /* 被字面量/arg 点到的文件本身也是「工具」:它自己再点名的文件同样算进来,否则 A -> tool.cx -> B
        这种两跳只跟一层(实测:改 tools/ape-pack.cx 只选中 chain-fresh-out 一批,check-release-ape 的
@@ -396,6 +398,7 @@ static void mark(int ni, int via) {
         for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via == V_ARG ? V_ARGUSE : V_LITUSE);
     else if (lit_unlimited && (via == V_LITUSE || via == V_ARGUSE))
         for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via);
+    t_walk += sy_now_ms() - q; }
 }
 /* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
 static void named(const char *tok, int via) {
@@ -444,7 +447,7 @@ static void mark_guards(const char *id) {
 }
 
 /* ---------- registry ---------- */
-typedef struct { char *id, *source, *entry, *args, *materials, *tier; } Batch;
+typedef struct { char *id, *source, *entry, *args, *materials, *tier; int budget; } Batch;
 static Batch batch[MAXBATCH];
 static int nbatch;
 static const char *selected_tier;
@@ -454,7 +457,7 @@ static void on_batch(const tp_batch_view *v, void *ctx) {
     if (nbatch == MAXBATCH) die("too many batches");
     batch[nbatch].id = zkeep(v->id); batch[nbatch].source = zkeep(v->source); batch[nbatch].entry = zkeep(v->entry);
     batch[nbatch].args = zkeep(v->args); batch[nbatch].materials = zkeep(v->materials);
-    batch[nbatch].tier = zkeep(v->tier);
+    batch[nbatch].tier = zkeep(v->tier); batch[nbatch].budget = atoi(v->budget);
     nbatch++;
 }
 static void on_cov(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
@@ -534,13 +537,22 @@ static long parse_long(const char *s, long n) { long v = 0, i; if (n < 1 || n > 
    it.  -ENOSYS where /proc is absent: the previous group kill, and a residue no code can vouch for. */
 static int kill_tree(int pid, const int *keep, int nkeep, char *rep, int repcap) {
     int sv = sy_kill_tree(pid, 2000, keep, nkeep, rep, repcap);
-    if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); }
+    if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); return sv; }
+    /* SIGKILL 到进程真正消失之间有窗口:第一轮报的 residue 可能只是还在 dying。再扫第二轮,只报第二轮
+       仍然活着的 pid —— 那才是真的没杀干净(实测 residue=1 survived=PID 全是这种竞态)。 */
+    if (sv > 0) {
+        char rep2[256];
+        sv = sy_kill_tree(pid, 2000, keep, nkeep, rep2, sizeof rep2);
+        if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); return sv; }
+        if (sv > 0 && rep && repcap > 0) { int u = 0; const char *s = rep2; while (s[u] && u < repcap - 1) { rep[u] = s[u]; u++; } rep[u] = 0; }
+    }
     return sv;
 }
 
-typedef struct { int pid, ofd, efd, bi; Buf out, err; } Child;
+typedef struct { int pid, ofd, efd, bi; long deadline; Buf out, err; } Child;
 static char outparent[4400];
 static long t_main, start_deadline = 45000, hard_deadline = 54000;
+static int deadline_hook;   /* --start/--hard-deadline-ms 是测试钩子:给了就按给的数,不再按注册预算推导 */
 
 /* the last line of S starting with PREFIX, or 0 */
 static const char *last_line(const char *s, long n, const char *prefix, long *ln) {
@@ -800,10 +812,15 @@ static void kit_prepare(void) {
     }
     if (!shown) printf("PREPARED\ttlib-kit\trebuilt=UNKNOWN\trc=%d\n", rc);
 }
+/* 每批的硬杀线 = 它自己的注册预算(batches.tsv 第 7 列)+ 2 秒收尾,而不是全局一个 42 秒:42 秒是 kit 重建
+   要吃 40 秒那时代的数,kit 现在 <1 秒,留着只会把 45/55 秒预算的批白杀。总窗口仍是单命令 60 秒:
+   窗口不够就如实 DEFERRED,注册预算本身不动。--hard-deadline-ms 是测试钩子,给了就按给的数。 */
+static long window_end;
 static int run(const int *sel, int nsel, int jobs) {
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
     long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0;
+    window_end = t_start + (deadline_hook ? hard_deadline : 57000);   /* 60 秒总上限,留 3 秒收尾 */
     sy_child_subreaper();   /* orphans of a killed batch become our children, so the sweep can see them */
     if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
         || cx_fmt(outparent, sizeof outparent, "%s/out/affected-%d", root, sy_pid())) die("path too long");
@@ -817,13 +834,15 @@ static int run(const int *sel, int nsel, int jobs) {
         kit_prepare();   /* the tlib kit once, before any batch: -j N batches then find it fresh and link from it */
         kit_ms = sy_now_ms() - k0;
     }
-    /* kit 与材料的时间都不从批次的 36/42 秒里扣:两个 deadline 从这里重新计时。
-       实测:kit 重建吃满 40 秒时,后面的批全被 start-deadline / killed-at-deadline 丢掉。 */
+    /* kit 与预建的时间都不从批次的 36/42 秒里扣:两个 deadline 在预建之后再计时。
+       实测:kit 重建吃满 40 秒时,后面的批全被 start-deadline / killed-at-deadline 丢掉;
+       预建(材料与首跑要用的编译缓存)同理,冷首跑多吃十几秒会把硬杀线吃掉。 */
     t0 = sy_now_ms(); t_main = t0;
     {   long p0 = sy_now_ms();
         if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once) */
         prep_ms = sy_now_ms() - p0;
     }
+    t_main = sy_now_ms();   /* 预建结束才起算:prep 已经计入 prep_ms,不再占批次的启动/硬杀窗口 */
     while (next < nsel || nrun) {
         sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
         long now = sy_now_ms();
@@ -837,6 +856,8 @@ static int run(const int *sel, int nsel, int jobs) {
                 av[nav] = 0;
             }
             C->bi = sel[next]; C->out.p = 0; C->out.n = C->out.cap = 0; C->err = C->out;
+            C->deadline = sy_now_ms() + (B->budget > 0 ? B->budget : 55) * 1000L + 2000;
+            if (C->deadline > window_end) C->deadline = window_end;
             C->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &C->ofd, &C->efd);
             next++;
             if (C->pid < 0) { printf("RUN_REFUSED\t%s\tspawn=%d\n", B->id, C->pid); fail++; continue; }
@@ -846,20 +867,27 @@ static int run(const int *sel, int nsel, int jobs) {
             for (; next < nsel; next++) { printf("DEFERRED\t%s\tstart-deadline\n", batch[sel[next]].id); deferred++; }
         }
         if (!nrun) continue;
-        if (now - t_main >= hard_deadline) {
-            for (k = 0; k < nrun; k++) {
-                int keep[MAXJOBS], nkeep = 0; char rep[256];
-                { int j; for (j = 0; j < nrun; j++) if (j != k) keep[nkeep++] = ch[j].pid; }
-                {   int sv = kill_tree(ch[k].pid, keep, nkeep, rep, sizeof rep);
-                    if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
-                    if (ch[k].efd >= 0) sy_close(ch[k].efd);
-                    if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
-                    else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
-                    deferred++;
+        {   int any = 0;
+            for (k = 0; k < nrun; k++) if (now >= ch[k].deadline) any = 1;
+            if (any) {
+                for (k = 0; k < nrun; k++) {
+                    int keep[MAXJOBS], nkeep = 0; char rep[256];
+                    if (now < ch[k].deadline) continue;
+                    { int j; for (j = 0; j < nrun; j++) if (j != k) keep[nkeep++] = ch[j].pid; }
+                    {   int sv = kill_tree(ch[k].pid, keep, nkeep, rep, sizeof rep);
+                        if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
+                        if (ch[k].efd >= 0) sy_close(ch[k].efd);
+                        if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
+                        else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
+                        deferred++;
+                    }
+                    ch[k] = ch[nrun - 1]; nrun--; k--;
                 }
+                continue;
             }
-            nrun = 0;
-            break;
+        }
+        if (now >= window_end) {   /* 单命令窗口用尽:剩的不再启动,如实 DEFERRED */
+            for (; next < nsel; next++) { printf("DEFERRED\t%s\tstart-deadline\n", batch[sel[next]].id); deferred++; }
         }
         for (k = 0; k < nrun; k++) {
             if (ch[k].ofd >= 0) { fds[nf].fd = ch[k].ofd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 1; }
@@ -956,12 +984,12 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
             start_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
             if (start_deadline < 0 || start_deadline > 45000) die("--start-deadline-ms 0..45000");
-            a += 2;
+            deadline_hook = 1; a += 2;
         }
         else if (tx_eqz(argv[a], "--hard-deadline-ms") && a + 1 < argc) {   /* test hook: kill what still runs after N ms */
             hard_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
             if (hard_deadline < 0 || hard_deadline > 54000) die("--hard-deadline-ms 0..54000");
-            a += 2;
+            deadline_hook = 1; a += 2;
         }
         else usage();
     }
@@ -1015,10 +1043,7 @@ int main(int argc, char **argv) {
         return mode_run ? run(sel, nsel, jobs) : 0;
     }
     if (src != 1 && src != 100) usage();
-    if (prep_on) {   /* the prebuild shares the 60 s command window: leave the kill sweep room to finish inside it */
-        if (start_deadline == 45000) start_deadline = 36000;
-        if (hard_deadline == 54000) hard_deadline = 42000;
-    }
+    /* 预建把 t_main 推到 prep 之后,这里不再收紧 start/hard:收紧只会把 45/55 秒预算的批白丢。 */
     { long r0 = sy_now_ms(); load_registry(); fprintf(stderr, "LIST_TIMING\tregistry_ms=%ld\n", sy_now_ms() - r0); }
     if (!jobs) { int c = sy_ncpu(); jobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }
     if (src == 100) {   /* --ids: run (or list) exactly these */
@@ -1040,7 +1065,7 @@ int main(int argc, char **argv) {
             at += ln + 1;
         }
     } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
-    {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b;
+    {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
         /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
         for (b = 0; b < nbatch; b++) {
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
@@ -1064,6 +1089,7 @@ int main(int argc, char **argv) {
         t_sweep = sy_now_ms() - t_reg - t_mark - t_match;
         fprintf(stderr, "LIST_TIMING\tmark_ms=%ld\tmatch_ms=%ld\tsweep_ms=%ld\tbatches=%d\tnodes=%d\tchanged=%d\n",
                 t_mark, t_match, t_sweep < 0 ? 0 : t_sweep, nbatch, nnode, nch);
+        fprintf(stderr, "LIST_TIMING2\tparse_ms=%ld\twalk_ms=%ld\n", t_parse, t_walk);
     }
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
     return mode_run ? run(sel, nsel, jobs) : 0;
