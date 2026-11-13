@@ -95,7 +95,7 @@ try {
   if (!cmd) process.exit(0);
   const why = check(cmd, input?.cwd ?? "");
   if (why) {
-    console.error(`GUARD-EDIT-V1 拒绝:${why}。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 out/ 或 /tmp。`);
+    console.error(`GUARD-EDIT-V1 拒绝:${why}。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 out/ 或 /tmp。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...`);
     process.exit(2);
   }
 } catch {
