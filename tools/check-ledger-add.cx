@@ -16,19 +16,25 @@ static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tledger-add.%s\n", ok ? "PASS" : "FAIL", name); }
 
 static int la(char **args, char *out, long cap) {
-    char *argv[24]; int i = 0, k, ofd = -1, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    char *argv[24]; int i = 0, k, rc; char *b = 0; size_t n = 0;
     argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/ledger-add.cx"; argv[i++] = "--";
     for (k = 0; args[k] && i < 23; k++) argv[i++] = args[k];
     argv[i] = 0;
-    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);   /* stderr merged into the pipe */
-    if (pid < 0) return -1;
-    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
-    out[n] = 0;
-    sy_close(ofd);
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
-    return code;
+    rc = cx_runv_timeout(argv, 50, &b, &n);   /* 50 秒有界;返回退出码,stdout 放 out */
+    out[0] = 0; if (b && (long)n < cap) { mm_copy(out, (size_t)cap, b, n); out[n] = 0; }
+    return rc;
 }
-static int has(const char *s, const char *t) { return tx_find(s, tx_len(s, 1 << 16), t, tx_len(t, 512)) >= 0; }
+static int shc(const char *cmd, char *out, long cap) {   /* sh -c,50 秒有界;输出(含 stderr,由命令自己 2>&1)放 out */
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *b = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &b, &n);
+    out[0] = 0; if (b && (long)n < cap) { mm_copy(out, (size_t)cap, b, n); out[n] = 0; }
+    return rc;
+}
+static int has(const char *s, const char *t) {   /* 被测命令输出里的子串(逐字比较,不是源码锚) */
+    long i, j, hl = tx_len(s, 1 << 16), nl = tx_len(t, 512);
+    for (i = 0; i + nl <= hl; i++) { for (j = 0; j < nl && s[i + j] == t[j]; j++) {} if (j == nl) return 1; }
+    return 0;
+}
 static char *rd(const char *p, size_t *n) { return cx_read(p, n); }
 static int same(const char *p, const char *q) { size_t a, b; char *x = rd(p, &a), *y = rd(q, &b); int r = x && y && a == b && !memcmp(x, y, a); return r; }
 static int count(const char *p, const char *t) {
@@ -79,12 +85,37 @@ int main(void) {
         cx_write(L, b, n);
     }
     {   /* two concurrent adds: both rows present, none lost */
-        char *v1[] = {"sh", "./unisacc.com", "tools/ledger-add.cx", "--", "--add", "--ledger", L, "--id", "C-1", "--text", "one", 0};
-        char *v2[] = {"sh", "./unisacc.com", "tools/ledger-add.cx", "--", "--add", "--ledger", L, "--id", "C-2", "--text", "two", 0};
-        int p1 = sy_spawn(v1), p2 = sy_spawn(v2), e = 0, c1 = -1, c2 = -1, s = 0;
-        if (p1 > 0) sy_wait_status(p1, 0, &e, &c1, &s);
-        if (p2 > 0) sy_wait_status(p2, 0, &e, &c2, &s);
-        ck(p1 > 0 && p2 > 0 && c1 == 0 && c2 == 0 && count(L, "\tC-1\tone\t") == 1 && count(L, "\tC-2\ttwo\t") == 1 && count(L, "\tT-1\t") == 1 && count(L, "\tT-2\t") == 1, "concurrent-adds-keep-both");
+        static char cc[1400]; int crc = 99;   /* 两个 add 同时在途(后台起两个再分别 wait 取各自退出码),整体 50 秒有界 */
+        if (!cx_fmt(cc, sizeof cc, "sh ./unisacc.com tools/ledger-add.cx -- --add --ledger '%s' --id C-1 --text one & p1=$!; "
+                    "sh ./unisacc.com tools/ledger-add.cx -- --add --ledger '%s' --id C-2 --text two & p2=$!; wait $p1; c1=$?; wait $p2; c2=$?; [ $c1 = 0 ] && [ $c2 = 0 ]", L, L))
+            crc = shc(cc, o, sizeof o);
+        ck(crc == 0 && count(L, "\tC-1\tone\t") == 1 && count(L, "\tC-2\ttwo\t") == 1 && count(L, "\tT-1\t") == 1 && count(L, "\tT-2\t") == 1, "concurrent-adds-keep-both");
+    }
+    {   /* precommit 账本格式闸(tools/precommit.cx ledger_gate):夹具 git 仓里顶层条目软链回本仓,agentwork/ 与 build/ 自备。
+           好行通过;新坏行被拒并点名列数;同一提交放宽基线仍被拒(基线取 HEAD);账本未暂存则不触发。 */
+        static char cmd[4096], G[300], GL[340], GB[340]; int prc;
+        const char *base = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n";
+        const char *good = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n";
+        const char *bad = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n2026-01-03\tBAD-3\tthree cols\n";
+        const char *run = "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && sh ./unisacc.com tools/precommit.cx 2>&1";
+        cx_fmt(G, sizeof G, "%s/g", td); cx_fmt(GL, sizeof GL, "%s/agentwork/ledger.tsv", G); cx_fmt(GB, sizeof GB, "%s/build/ledger-format-baseline.tsv", G);
+        prc = cx_fmt(cmd, sizeof cmd, "R=$(pwd) && mkdir -p '%s/agentwork' '%s/build' && cd '%s' && git init -q . && git config user.email a@b && git config user.name t"
+                     " && for e in \"$R\"/*; do b=${e##*/}; [ \"$b\" = agentwork ] || [ \"$b\" = build ] || ln -s \"$e\" \"$b\"; done", G, G, G) ? 99 : shc(cmd, o, sizeof o);
+        if (prc == 0) prc = cx_write(GL, base, strlen(base)) || cx_write(GB, "5\t1\n", 4);
+        if (prc == 0) prc = cx_fmt(cmd, sizeof cmd, "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && git -c core.hooksPath=/dev/null commit -q -m base", G) ? 99 : shc(cmd, o, sizeof o);
+        ck(prc == 0, "precommit-fixture-repo");
+        if (prc == 0) {
+            cx_fmt(cmd, sizeof cmd, run, G);
+            cx_write(GL, good, strlen(good)); rc = shc(cmd, o, sizeof o);
+            ck(rc == 0 && has(o, "blocked=0") && !has(o, "BLOCKED ledger"), "precommit-good-row-passes");
+            cx_write(GL, bad, strlen(bad)); rc = shc(cmd, o, sizeof o);
+            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3") && has(o, "ledger-add.cx -- --add"), "precommit-new-bad-row-blocked-naming-cols");
+            cx_write(GB, "3\t1\n5\t1\n", 8); rc = shc(cmd, o, sizeof o);
+            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3"), "precommit-baseline-loosened-in-same-commit-still-blocked");
+            cx_write(GL, base, strlen(base)); cx_write(GB, "5\t1\n", 4); rc = shc(cmd, o, sizeof o);
+            ck(rc == 0 && has(o, "blocked=0") && !has(o, "BLOCKED ledger"), "precommit-ledger-not-staged-untouched");
+        }
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", G)) shc(cmd, o, sizeof o);
     }
     printf("CHECK_LEDGER_ADD\tfailed=%d\n", failed);
     return failed ? 1 : 0;

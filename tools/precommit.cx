@@ -382,6 +382,44 @@ static int cov_gate(void) {
     return 1;
 }
 
+/* 账本格式闸(METH-LEDGER-GATE):暂存区含 agentwork/ledger.tsv 时,把索引版账本与 HEAD 版基线
+ * build/ledger-format-baseline.tsv 写到 sy_tmpdir,调用 tools/ledger-add.cx -- --check --ledger L --baseline B;
+ * 任一列数组超过基线(OVER)即拒。基线取 HEAD 而不是索引:同一提交里放宽基线不能洗白新坏行。
+ * cwd 下没有 ./unisacc.com 或 tools/ledger-add.cx,或 HEAD 没有基线文件(夹具仓)时跳过。 */
+static int ledger_gate(void) {
+    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "agentwork/ledger.tsv", 0};
+    char lp[1200], bp[1200], *names, *lb = 0, *bb = 0, *ro; long dn, ln = 0, bn = 0, rn2, at = 0; int blocked = 0;
+    char *cv[] = {"sh", "./unisacc.com", "tools/ledger-add.cx", "--", "--check", "--ledger", lp, "--baseline", bp, 0};
+    names = slurp(dv, &dn);
+    if (!names) { sy_eprintf("precommit: git diff --cached (ledger) failed\n"); return 1; }
+    mm_free(names);
+    if (dn <= 0) return 0;
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/ledger-add.cx") != 1) return 0;
+    if (cov_blob("HEAD", "build/ledger-format-baseline.tsv", &bb, &bn)) return 0;
+    if (cov_blob("", "agentwork/ledger.tsv", &lb, &ln)) { sy_eprintf("precommit: BLOCKED ledger: cannot read staged agentwork/ledger.tsv\n"); mm_free(bb); return 1; }
+    if (cx_fmt(lp, sizeof lp, "%s/precommit-ledger-%d.tsv", sy_tmpdir(), sy_pid()) || cx_fmt(bp, sizeof bp, "%s/precommit-ledger-%d.base", sy_tmpdir(), sy_pid())
+        || cx_write(lp, lb, (size_t)ln) || cx_write(bp, bb, (size_t)bn)) {
+        sy_eprintf("precommit: BLOCKED ledger: scratch files\n"); mm_free(lb); mm_free(bb); return 1;
+    }
+    mm_free(lb); mm_free(bb);
+    slurp_okrc = 1; ro = slurp(cv, &rn2); slurp_okrc = 0;
+    sy_unlink(lp); sy_unlink(bp);
+    if (!ro) { sy_eprintf("precommit: BLOCKED ledger: tools/ledger-add.cx --check did not run or hard error\n"); return 1; }
+    while (at < rn2) {
+        long e = tx_chr(ro + at, rn2 - at, '\n'), l = e < 0 ? rn2 - at : e;
+        if (tx_prefix(ro + at, l, "LEDGER_COLS\t", 12) && tx_find(ro + at, l, "\tOVER", 5) >= 0) {
+            long c = 12; while (c < l && ro[at + c] != '\t') c++;
+            sy_eprintf("precommit: BLOCKED ledger: staged agentwork/ledger.tsv has new rows with cols=%.*s (need 6) over the HEAD baseline: %.*s\n",
+                       (int)(c - 12), ro + at + 12, (int)l, ro + at);
+            blocked++;
+        }
+        at += l + 1;
+    }
+    mm_free(ro);
+    if (blocked) sy_eprintf("precommit: append ledger rows only with: sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA] [--evidence P] [--role R]; list bad rows: tools/ledger-add.cx -- --check --baseline build/ledger-format-baseline.tsv\n");
+    return blocked;
+}
+
 int main(void) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
@@ -473,6 +511,7 @@ int main(void) {
       }
     }
     blocked += freeze_gate();
+    blocked += ledger_gate();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();
     blocked += tlib_frozen_gate(names, sn);

@@ -174,7 +174,7 @@ int main(void) {
     }
 
     /* apply on a copy: accept every row of the truth rule */
-    if (cx_fmt(dir, sizeof dir, "out/check-refactor-%d", sy_pid()) || cx_fmt(copy, sizeof copy, "%s/t.cx", dir)
+    if (cx_fmt(dir, sizeof dir, "%s/check-refactor-%d", sy_tmpdir(), sy_pid()) || cx_fmt(copy, sizeof copy, "%s/t.cx", dir)
         || cx_fmt(cands, sizeof cands, "%s/cands.tsv", dir) || !src) return 2;
     sy_mkdir("out", 0755);
     if (sy_mkdir(dir, 0755) != 0 || put_file(copy, src, (long)sn)) { ck(0, "scratch-copy"); goto done; }
@@ -200,16 +200,18 @@ int main(void) {
            && has_line(after, (long)an, 'P', "#pragma unisa use text.text"),
            "apply-same-output-keeps-edit");
     }
-    sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays in out/ */
+    sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays under sy_tmpdir(), not in the repo's out/ */
     {   /* sweep in a scratch dir with its own text link and its own copy of the rules (so its skip list is its own):
            one fixable file OK, one whose compile fails before the edit SKIP and skip-listed, nothing remaining;
            a second sweep finds nothing to do */
         char sd[300], good[340], bad[340], rules[340], *sk; size_t skn, rn; char *rsrc = cx_read("tools/refactor/strcmp-eq.tsv", &rn);
         const char *gsrc = "int main(int c, char **v) { if (!strcmp(v[0], \"x\")) return 1; return c; }\n";
         const char *bsrc = "int main(void) { return !strcmp(\"a\", \"b\") + undeclared_var; }\n";
-        if (cx_fmt(sd, sizeof sd, "out/check-refactor-%d-sweep", sy_pid()) || cx_fmt(good, sizeof good, "%s/g.cx", sd)
+        char rootabs[1024], textabs[1100];   /* scratch is outside the repo, so the text link is absolute */
+        if (sy_realpath(".", rootabs, sizeof rootabs) < 0 || cx_fmt(textabs, sizeof textabs, "%s/cx/text", rootabs)) return 2;
+        if (cx_fmt(sd, sizeof sd, "%s/check-refactor-%d-sweep", sy_tmpdir(), sy_pid()) || cx_fmt(good, sizeof good, "%s/g.cx", sd)
             || cx_fmt(bad, sizeof bad, "%s/b.cx", sd) || cx_fmt(rules, sizeof rules, "%s/rules.tsv", sd) || !rsrc) return 2;
-        {   char *lnv[] = {"ln", "-s", "../../cx/text", "text", 0}; int lpid, lfd = -1;
+        {   char *lnv[] = {"ln", "-s", textabs, "text", 0}; int lpid, lfd = -1;
             if (sy_mkdir(sd, 0755) != 0 || put_file(good, gsrc, tx_len(gsrc, 4096)) || put_file(bad, bsrc, tx_len(bsrc, 4096)) || put_file(rules, rsrc, (long)rn)) { ck(0, "sweep-scratch"); goto done; }
             lpid = spawn_pipe_bounded(lnv, sd, 0, &lfd, 0);
             if (lpid > 0) { char junk[256]; while (sy_read(lfd, junk, sizeof junk) > 0) {} sy_close(lfd); sy_wait_status(lpid, 0, 0, 0, 0); }
