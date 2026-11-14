@@ -1,5 +1,7 @@
 # prd_cx.md —— cx 侧结构（流、网、编译器模块、包层）
 
+要用 cx 写工具或脚本，先读 [prd_cx_spec.md](prd_cx_spec.md)（使用规范：运行方式、语言要点、标准库速查、替代脚本对照、实测例子）；本文只管结构与路线。
+
 本文件是 [prd.md](prd.md) 的子文档，是 **cx 侧结构点的唯一权威定义**：CX0 流、cx 侧网模块、`cx/compiler` 结构、cx 包层、语言与所有权现状。产品整体结构（五层、六片、七流、金表网、构造链、测试）在 prd.md §3，这里不重复。条款在 [cx/spec.md](cx/spec.md)，pragma 扩展与目录约定在 [cx/prd.md](cx/prd.md)，本文只写结构、规模、现状与路线。
 
 **定位**：cx 是**编译器无关的语言 / 模块层**（模块化 `#pragma unisa module / use`、派生接口、运行期所有权与带界接口），不是 unisacc.com 专有。现有三个宿主：

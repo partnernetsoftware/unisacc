@@ -705,6 +705,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 ```
 prd.md                 当前状态（本文件，只写当前事实；结构点唯一定义在 §3）
 ├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
+├─ prd_cx_spec.md      cx 使用规范：怎么运行、module/use、层向、标准库速查、替代 python/shell 对照、实测例子
 ├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
 ├─ prd_hist.md         历史完成记录与证据（只读；新记录写 agentwork/ledger.tsv）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
