@@ -1,0 +1,122 @@
+/* Checks ext/net/tcp.cx (blocking TCP subset of ext.net) over loopback; Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-ext-net-tcp.cx
+   Prints PASS/FAIL lines and EXT_NET_TCP<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL.
+   One process: listen queues the connection, so connect then accept runs without fork.
+   Accept uses cx.sys sy_sock_accept (sy_tcp_accept has a ms argument and stays new). */
+#pragma unisa use net.tcp
+#pragma unisa use net.addr
+#pragma unisa use sys.netraw
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnettcp.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tnettcp.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+enum { BIG = 200000 };
+static unsigned char big[BIG], back[BIG];
+
+int main(void) {
+    char buf[64];
+    int ls, ls2, cs, as, port, i, bad;
+    long n, got, r;
+    sy_addr_t a;
+
+    ls = sy_tcp_listen(0, 8);
+    ck(ls >= 0, "listen-fd");
+    port = sy_tcp_port(ls);
+    ck(port > 0 && port < 65536, "port-range");
+    ckv(sy_tcp_port(-1), -EBADF, "port-badfd");
+    cs = sy_tcp_connect(port);
+    ck(cs >= 0, "connect-fd");
+    as = sy_sock_accept(ls, 0, 0);
+    ck(as >= 0, "accept-fd");
+
+    ckv(sy_send_all(cs, "hello", 5), 0, "send-all-5");
+    n = sy_recv(as, buf, sizeof buf);
+    ckv(n, 5, "recv-5");
+    ck(buf[0] == 'h' && buf[1] == 'e' && buf[2] == 'l' && buf[3] == 'l' && buf[4] == 'o', "recv-bytes");
+    ckv(sy_send(as, "abc", 3), 3, "send-3");
+    ckv(sy_recv(cs, buf, 2), 2, "recv-partial-2");
+    ckv(sy_recv(cs, buf + 2, 8), 1, "recv-rest-1");
+    ck(buf[0] == 'a' && buf[1] == 'b' && buf[2] == 'c', "reply-bytes");
+    ckv(sy_send_all(cs, "", 0), 0, "send-all-0");
+    ckv(sy_send_all(cs, 0, 1), -EINVAL, "send-all-null");
+    ckv(sy_send_all(cs, buf, -1), -EINVAL, "send-all-neg");
+    ckv(sy_recv(cs, 0, 1), -EINVAL, "recv-null");
+    ckv(sy_send_all(-1, "x", 1), -EBADF, "send-all-badfd");
+    ckv(sy_recv(-1, buf, 1), -EBADF, "recv-badfd");
+
+    /* large transfer: send_all of 200000 bytes needs a reader, so interleave in 32 KiB steps */
+    for (i = 0; i < BIG; i++) big[i] = (unsigned char)((i * 31 + 7) & 255);
+    got = 0; bad = 0;
+    while (got < BIG) {
+        long step = BIG - got < 32768 ? BIG - got : 32768;
+        if (sy_send_all(cs, big + got, step) != 0) { bad = 1; break; }
+        r = 0;
+        while (r < step) {
+            long k = sy_recv(as, back + got + r, step - r);
+            if (k <= 0) { bad = 2; break; }
+            r += k;
+        }
+        if (bad) break;
+        got += step;
+    }
+    ckv(bad, 0, "big-loop");
+    ckv(got, BIG, "big-count");
+    bad = 0;
+    for (i = 0; i < BIG; i++) if (back[i] != big[i]) { bad++; }
+    ckv(bad, 0, "big-bytes");
+
+    /* send_all larger than the socket buffers with a concurrent reader is not possible in one
+       process; a short write count is still a valid sy_send result */
+    r = sy_send(cs, big, BIG);
+    ck(r > 0 && r <= BIG, "send-short-ok");
+    for (n = 0; n < r; ) { long k = sy_recv(as, back, r - n > BIG ? BIG : r - n); if (k <= 0) break; n += k; }
+    ckv(n, r, "send-short-drained");
+
+    /* peer close */
+    ckv(sy_close(as), 0, "close-accepted");
+    ckv(sy_recv(cs, buf, sizeof buf), 0, "recv-after-peer-close");
+    r = sy_send(cs, "x", 1);
+    r = sy_send(cs, "x", 1);
+    ckv(r, -EPIPE, "send-after-peer-close");
+    sy_close(cs);
+
+    /* duplicate bind, refusal */
+    ls2 = sy_tcp_listen(port, 8);
+    ckv(ls2, -EADDRINUSE, "listen-same-port");
+    ckv(sy_tcp_listen(70000, 8), -EINVAL, "listen-bad-port");
+    ckv(sy_tcp_listen(-1, 8), -EINVAL, "listen-neg-port");
+    sy_addr_loopback(&a, SY_AF_INET4, port);
+    ckv(sy_tcp_listen_at(&a, 8, 0), -EADDRINUSE, "listen-at-same-port");
+    ckv(sy_tcp_listen_at(&a, 8, 64), -EINVAL, "listen-at-bad-flags");
+    ckv(sy_tcp_listen_at(0, 8, 0), -EINVAL, "listen-at-null");
+    ckv(sy_tcp_listen_at(&a, -1, 0), -EINVAL, "listen-at-neg-backlog");
+    ckv(sy_tcp_listen_at(&a, 8, SY_LISTEN_V6ONLY), -EINVAL, "listen-at-v6only-on-v4");
+    sy_close(ls);
+
+    /* port released: connect is refused (nothing listening) */
+    ckv(sy_tcp_connect(port), -ECONNREFUSED, "connect-refused");
+    ckv(sy_tcp_connect(-5), -EINVAL, "connect-bad-port");
+
+    /* listen_at with an explicit address and reuse flag */
+    sy_addr_loopback(&a, SY_AF_INET4, 0);
+    ls = sy_tcp_listen_at(&a, 4, SY_LISTEN_REUSEADDR);
+    ck(ls >= 0, "listen-at-fd");
+    port = sy_tcp_port(ls);
+    ck(port > 0, "listen-at-port");
+    cs = sy_tcp_connect(port);
+    ck(cs >= 0, "listen-at-connect");
+    as = sy_sock_accept(ls, 0, 0);
+    ck(as >= 0, "listen-at-accept");
+    ckv(sy_send_all(as, "ok", 2), 0, "listen-at-send");
+    ckv(sy_recv(cs, buf, sizeof buf), 2, "listen-at-recv");
+    sy_close(as); sy_close(cs); sy_close(ls);
+
+    printf("EXT_NET_TCP\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

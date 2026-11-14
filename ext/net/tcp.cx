@@ -1,0 +1,95 @@
+#pragma unisa module tcp
+#pragma unisa dock
+#pragma unisa use addr
+#pragma unisa use sys.netraw
+#pragma unisa use sys.fs
+/* ext.net blocking TCP subset on cx.sys netraw (build/std-surface.tsv ext.net): sy_tcp_listen,
+   sy_tcp_listen_at, sy_tcp_port, sy_tcp_connect, sy_send, sy_send_all, sy_recv.  No libc, no #if.
+   Not here (still new): anything with a deadline or ms (accept, connect_to, dial, wait_port), DNS.
+   A program uses this unit or ext/sysx/net.cx, not both.  Linux x86_64/arm64 only: on osx/win
+   the netraw calls are -ENOSYS and so are these.
+   Descriptors are closed with sy_close. */
+enum { SY_LISTEN_REUSEADDR = 1, SY_LISTEN_V6ONLY = 2 };
+
+/* sy_addr_t into a socket-address buffer; the byte length or -errno. */
+static int syt_sa(const sy_addr_t *a, unsigned char *sa, int cap) {
+    if (!a) return -EINVAL;
+    if (a->family == SY_AF_INET4) return sy_sa_inet4(sa, cap, a->ip, a->port);
+    if (a->family == SY_AF_INET6) return sy_sa_inet6(sa, cap, a->ip, a->port, a->scope);
+    if (a->family == SY_AF_UNIX) return sy_sa_unix(sa, cap, a->path);
+    return -EAFNOSUPPORT;
+}
+
+static int syt_open(int family) {
+    long af = family == SY_AF_INET6 ? sy_sock_num(SY_SN_AF_INET6)
+            : family == SY_AF_UNIX ? sy_sock_num(SY_SN_AF_UNIX) : sy_sock_num(SY_SN_AF_INET4);
+    long st = sy_sock_num(SY_SN_SOCK_STREAM);
+    if (!sy_sock_have() || af <= 0 || st <= 0) return -ENOSYS;
+    return sy_sock_open((int)af, (int)st);
+}
+
+int sy_tcp_listen_at(const sy_addr_t *a, int backlog, int flags) {
+    unsigned char sa[SY_SA_MAX];
+    int n, fd, r;
+    if (!a || backlog < 0 || (flags & ~(SY_LISTEN_REUSEADDR | SY_LISTEN_V6ONLY))) return -EINVAL;
+    if ((flags & SY_LISTEN_V6ONLY) && a->family != SY_AF_INET6) return -EINVAL;
+    if (flags & SY_LISTEN_V6ONLY) return -ENOPROTOOPT; /* netraw has no IPV6_V6ONLY name */
+    n = syt_sa(a, sa, (int)sizeof sa);
+    if (n < 0) return n;
+    fd = syt_open(a->family);
+    if (fd < 0) return fd;
+    if (flags & SY_LISTEN_REUSEADDR) {
+        r = sy_sock_setopt(fd, (int)sy_sock_num(SY_SN_SOL_SOCKET), (int)sy_sock_num(SY_SN_SO_REUSEADDR), 1);
+        if (r < 0) { sy_close(fd); return r; }
+    }
+    r = sy_sock_bind(fd, sa, n);
+    if (r < 0) { sy_close(fd); return r; }
+    r = sy_sock_listen(fd, backlog);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}
+
+int sy_tcp_listen(int port, int backlog) {
+    sy_addr_t a;
+    int r = sy_addr_loopback(&a, SY_AF_INET4, port);
+    if (r < 0) return r;
+    return sy_tcp_listen_at(&a, backlog, SY_LISTEN_REUSEADDR);
+}
+
+int sy_tcp_port(int fd) {
+    unsigned char sa[SY_SA_MAX];
+    int len = (int)sizeof sa, r;
+    r = sy_sock_name(fd, sa, &len);
+    if (r < 0) return r;
+    return sy_sa_port(sa, len);
+}
+
+int sy_tcp_connect(int port) {
+    unsigned char sa[SY_SA_MAX];
+    static const unsigned char lo[4] = {127, 0, 0, 1};
+    int n, fd, r;
+    n = sy_sa_inet4(sa, (int)sizeof sa, lo, port);
+    if (n < 0) return n;
+    fd = syt_open(SY_AF_INET4);
+    if (fd < 0) return fd;
+    r = sy_sock_connect(fd, sa, n);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}
+
+long sy_send(int fd, const void *buf, long n) { return sy_sock_send(fd, buf, n); }
+
+long sy_recv(int fd, void *buf, long n) { return sy_sock_recv(fd, buf, n); }
+
+int sy_send_all(int fd, const void *buf, long n) {
+    const unsigned char *p = (const unsigned char *)buf;
+    long done = 0, r;
+    if (!buf || n < 0) return -EINVAL;
+    while (done < n) {
+        r = sy_sock_send(fd, p + done, n - done);
+        if (r < 0) return (int)r;
+        if (r == 0) return -EIO;
+        done += r;
+    }
+    return 0;
+}
