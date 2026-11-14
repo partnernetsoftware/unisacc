@@ -9,7 +9,7 @@
 - 同候选 CI:candidate-native.yml run 43648734577,2026-11-14T22:33:41Z 触发,输入 commit 为 X、release_tag 为 v0.0.66;结果:completed success,10 个作业全 success(fetch、cell-tools、ffi-lnx、六个平台 candidate 作业、report),2026-11-14T22:36:53Z 结束。osx 与 win 的证据范围以该 run 作业为准,不扩大解读。
 - release v0.0.66 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。草稿上传后下载读回,5 件 sha256 与 SHA256SUMS 逐件一致,SHA256SUMS 与本地打包件逐字节相同(sha256 a6dfd03a55dfe5ed006a8c48a7ab76aafa93951e34e9f722a7f23ffdf7e507ff)。
 - 公开时间:2026-11-14T23:12:18Z(gh release view 的 publishedAt);标签 v0.0.66 与 v0.0.66-src 均指 F。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN),公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
-- 公开后读回:已做,下载 6 件,5 件 sha256 与 SHA256SUMS 逐件一致并与 release/candidate.tsv 各列一致,6 件与本地打包件逐字节相同(APE 75c4e940af61d995...)。本机装机:本文件定稿时未做。
+- 公开后读回:已做,下载 6 件,5 件 sha256 与 SHA256SUMS 逐件一致并与 release/candidate.tsv 各列一致,6 件与本地打包件逐字节相同(APE 75c4e940af61d995...)。本机装机:公开后已用 tools/install-ape.cx 装入本机根,--version 输出 unisacc 0.0.66(回执提交 205a39af71)。
 - 速度数字只引 build/speed-baseline.tsv 已有行。0.0.66 的启动、冷编译、生成代码对 0.0.65 的对比:公开时未测;装机后实测(已装 0.0.66 对 0.0.65,两边同走包装根,ABAB 交错 n=9,load1 0.60 至 1.27,build/speed-baseline.tsv 2026-11-15 的 0.0.66 行):首次启动 665.1 对 664.0 ms、重复启动 28.5 对 28.5 ms(run-startup-bench)、冷编译 edit-span 2634 对 2625 ms、ratchets 4989 对 4993 ms(coldcompile),差值均在噪声内;gencode 8MB 两边各只 1 轮,sha 976.2 对 987.6 ms、sort 1077.5 对 1094.1 ms、memcpy 12.02 对 12.00 ms。无变慢项,也无可声称的提升;speed-probe 未测。
 - 装后门实测(已装 0.0.66,APE 75c4e940af61d995):tests/cx-namespace.cx checks=18 failed=0 unverified=0;K3 硬模式(UNISACC_REQUIRE_N15C=1,tests/phase-timing-stamps.cx)assertions=76 failed=0;tools/check-export.cx passed=13 failed=0 unverified=0。
 
@@ -53,7 +53,7 @@
 - 0.0.65 的 tlib-prep-refuse FAIL 与 tlib-prep UNKNOWN 本次在 s9 内为 PASS;0.0.65 因候选缺可执行位失败的 7 项本次在 s9 内为 PASS。
 daily 与 release 档未跑。本机全批资格:未取得。
 (3) s9 工具缺陷(本版发现,未修):tools/s9-native.cx 的缓存键只取 s9-shards.cx 或 all-waves.cx 自身字节的 sha256,不含它们依赖的模块(如 tools/cxlib/testplan.cx)。本版 testplan.cx 改了而这两个文件没改,首两次 s9 init 命中 0.0.65 时期编出的旧 ELF,被 `REFUSE registry-metadata commit-materials row=780 id=candidate-chain` 挡住;把两个旧缓存项改名让位后第三次才跑通。上面的计数出自第三次。
-(3b) 本机装机:本文件定稿时未做。F 树内 release/candidate.tsv 的 ape_sha256 列为 0.0.65 的值(889dfe85...),X 才带本版值;s9 根取 F 树,各批输出中未见该旧值,BATCH_RUN 记录的候选 sha 均为 75c4e940...,未发现受影响的批次。
+(3b) 本机装机:公开后已做(见文首)。F 树内 release/candidate.tsv 的 ape_sha256 列为 0.0.65 的值(889dfe85...),X 才带本版值;s9 根取 F 树,各批输出中未见该旧值,BATCH_RUN 记录的候选 sha 均为 75c4e940...,未发现受影响的批次。
 (4) first_e2e 500 ms 启动门未过:装机后实测 0.0.66 首次启动 665.1 ms 对 0.0.65 的 664.0 ms(run-startup-bench,两边包装根,ABAB n=9),差在噪声内;0.0.65 装机后以 abab-bench 口径为 678.0 ms(build/speed-baseline.tsv,工具不同,不可直接比)。本版不宣称启动变化。
 (5) 已知编译缺口,未修:已装编译器对大型二维自动数组报 `not covered: an op outside the first encoder slice`(0.0.63 上发现)。0.0.66 是否同样复现:UNVERIFIED。
 (6) 库包四补丁的限定:affected 全量枚举当时 60 秒超时未记 PASS;提交 2333b3713c 记载 affected 分片当时有 cx-layers 一项 FAIL(十个 cx0/proj 模块 FREEZE-NEW),后由 a7734cfcee 补登冻结表,补登后的全量复跑结果本文件起草时未核,UNVERIFIED。
