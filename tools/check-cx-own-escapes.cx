@@ -1,0 +1,76 @@
+/* tools/check-cx-own-escapes.cx -- fixtures for `tools/cx-own.cx -- --escapes`.
+ *
+ *   sh ./unisacc.com tools/check-cx-own-escapes.cx
+ *
+ * Fixtures are written to a TMPDIR copy.  esc-return: public functions returning a mm_alloc / malloc block
+ * (3 events, one per return of an owned block).  esc-none: a static function that returns its block, a
+ * function that frees before returning, and a function returning a block the caller passed in (0 events).
+ * Last line CHECK_CX_OWN_ESCAPES<TAB>assertions=N<TAB>failed=M; rc 1 when M > 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static const char *t_ret =
+    "char *a(int n) {\n"
+    "    char *p = mm_alloc(n);\n"
+    "    return p;\n"
+    "}\n"
+    "char *b(int n) {\n"
+    "    char *q = malloc(n);\n"
+    "    if (!q) return 0;\n"
+    "    return q;\n"
+    "}\n"
+    "char *c(const char *s) {\n"
+    "    char *d = mm_strdup(s);\n"
+    "    return d;\n"
+    "}\n";
+static const char *t_none =
+    "static char *a(int n) {\n"
+    "    char *p = mm_alloc(n);\n"
+    "    return p;\n"
+    "}\n"
+    "int b(int n) {\n"
+    "    char *q = malloc(n);\n"
+    "    if (!q) return 0;\n"
+    "    free(q);\n"
+    "    return 1;\n"
+    "}\n"
+    "char *c(char *buf, int n) {\n"
+    "    char *t = mm_alloc(n);\n"
+    "    mm_free(t);\n"
+    "    return buf;\n"
+    "}\n";
+
+static int assertions, failed;
+static void ck(int ok, const char *what) { assertions++; if (!ok) { failed++; printf("FAIL\t%s\n", what); } }
+
+static long cnt(const char *o, long n, const char *w) {
+    long c = 0, at = 0, wn = tx_len(w, 256);
+    while (at < n) { long f = tx_find(o + at, n - at, w, wn); if (f < 0) break; c++; at += f + wn; }
+    return c;
+}
+
+int main(void) {
+    char dir[4400], cmd[4800], p1[4500], p2[4500], *out = 0, *out2 = 0;
+    size_t on = 0, on2 = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/check-cx-own-esc-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s", dir) || cx_run_timeout(cmd, 50, 0, 0) != 0) return 2;
+    if (cx_fmt(p1, sizeof p1, "%s/esc-return.cx", dir) || cx_fmt(p2, sizeof p2, "%s/esc-none.cx", dir)) return 2;
+    if (cx_write(p1, t_ret, (size_t)tx_len(t_ret, 1 << 16)) != 0 || cx_write(p2, t_none, (size_t)tx_len(t_none, 1 << 16)) != 0) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --escapes %s", p1)) return 2;
+    cx_run_timeout(cmd, 50, &out, &on);
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --escapes %s", p2)) return 2;
+    cx_run_timeout(cmd, 50, &out2, &on2);
+    if (!out || !out2) { fprintf(stderr, "check-cx-own-escapes: no output\n"); return 2; }
+    ck(cnt(out, (long)on, "ESCAPE\t") == 3, "esc-return: 3 events");
+    ck(cnt(out, (long)on, "\ta\tp\n") == 1 && cnt(out, (long)on, "\tb\tq\n") == 1 && cnt(out, (long)on, "\tc\td\n") == 1, "esc-return: function and variable");
+    ck(cnt(out, (long)on, "CX_OWN_ESCAPES\tfiles=1\tescapes=3\tfunctions=3\n") == 1, "esc-return: summary");
+    ck(cnt(out2, (long)on2, "ESCAPE\t") == 0, "esc-none: 0 events");
+    ck(cnt(out2, (long)on2, "CX_OWN_ESCAPES\tfiles=1\tescapes=0\tfunctions=0\n") == 1, "esc-none: summary");
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- %s", p1)) return 2;
+    cx_run_timeout(cmd, 50, &out, &on);
+    ck(out && cnt(out, (long)on, "ESCAPE") == 0 && cnt(out, (long)on, "CX_OWN_ESCAPES") == 0, "no --escapes: no escape output");
+    printf("CHECK_CX_OWN_ESCAPES\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
