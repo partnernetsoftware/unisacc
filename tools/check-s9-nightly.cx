@@ -320,6 +320,44 @@ int main(int argc, char **argv) {
         ck(s && strstr(s, "aggregate --part 0 4") && strstr(s, "aggregate --part 2 4") && strstr(s, "aggregate --part 3 4") && strstr(s, "aggregate --merge 4"), "phase-aggregate-parts-then-merge");
         ck(s && !strstr(s, "--part 1 4") && !strstr(s, "step"), "phase-aggregate-reuses-existing-part");
         free(s);
+        /* aggregate.out 落盘:merge 的完整 stdout(超 4000 字节缓冲)逐字节写入 RUN/aggregate.out,s9-verdict 读它判定 */
+        {
+            char aggf[4400], aggo[4400], tierf[4400], btf[4400], big[9000], *got, *vv[8];
+            size_t gn, w2 = 0, k;
+            cx_fmt(aggf, sizeof aggf, "%s/agg.fake", dir);
+            cx_fmt(aggo, sizeof aggo, "%s/aggregate.out", runp);
+            cx_fmt(tierf, sizeof tierf, "%s/tier", runp);
+            cx_fmt(btf, sizeof btf, "%s/batches.tsv", dir);
+            w2 = (size_t)snprintf(big, sizeof big, "BATCH\ta\tPASS\treason=");
+            for (k = 0; k < 5000; k++) big[w2++] = 'x';
+            w2 += (size_t)snprintf(big + w2, sizeof big - w2, "\nBATCH\tb\tPASS\treason=ok\nAGGREGATE\tQUALIFIED\timplemented_batches=2\tpass=2\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+            if (cx_write(aggf, big, w2) || cx_write(tierf, "all\n", 4)) die("agg-write");
+            { const char *bt = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                               "a\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\tdaily\nb\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\trelease\n";
+              if (cx_write(btf, bt, strlen(bt))) die("bt-write"); }
+            setenv("S9_FAKE_AGG_FILE", aggf, 1);
+            runv(rmx, dir, 5, buf, sizeof buf, &rc);
+            { char *rm2[] = {"rm", "-f", aggo, 0}; runv(rm2, dir, 5, buf, sizeof buf, &rc); }
+            runv(w, dir, 20, buf, sizeof buf, &rc);
+            ck(rc == 0 && strstr(buf, "status=PASS"), "aggout-phase-exit0-stdout-kept");
+            got = cx_read(aggo, &gn);
+            ck(got != 0, "aggout-file-exists");
+            ck(got && gn == w2 && !memcmp(got, big, w2), "aggout-bytes-identical-beyond-4000");
+            free(got);
+            vv[0] = "sh"; vv[1] = com; vv[2] = "tools/s9-verdict.cx"; vv[3] = "--"; vv[4] = runp; vv[5] = "--batches"; vv[6] = btf; vv[7] = 0;
+            runv(vv, root, 30, buf, sizeof buf, &rc);
+            ck(rc == 0 && strstr(buf, "4\tPASS\t") && strstr(buf, "aggregate.out"), "aggout-verdict-reads-it-pass");
+            /* 无 AGGREGATE 行的输出同样原样落盘,verdict 给 UNKNOWN */
+            { const char *two = "BATCH\ta\tPASS\treason=ok\nBATCH\tb\tPASS\treason=ok\n";
+              cx_write(aggf, two, strlen(two));
+              runv(w, dir, 20, buf, sizeof buf, &rc);
+              got = cx_read(aggo, &gn);
+              ck(got && gn == strlen(two) && !memcmp(got, two, gn), "aggout-overwritten-second-run");
+              free(got);
+              runv(vv, root, 30, buf, sizeof buf, &rc);
+              ck(strstr(buf, "4\tUNKNOWN\t") != 0, "aggout-verdict-unknown-without-aggregate-line"); }
+            unsetenv("S9_FAKE_AGG_FILE");
+        }
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);

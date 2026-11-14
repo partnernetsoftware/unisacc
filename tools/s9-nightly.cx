@@ -74,6 +74,7 @@ static int run_step(char **v, const char *cwd, int sec, np_result *r) {
     if (np_run(v, cwd, ev, sec, r, why, sizeof why)) { np_free(r); return 99; }
     return r->rc;
 }
+static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到该路径(不受 out 缓冲截断) */
 static int invoke(const char *verb, const char *a1, const char *a2, const char *a3, int sec, char *out, int ocap) {
     char com[4400], tool[4400];
     char *v[16];
@@ -104,6 +105,7 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         rc = run_step(v, root, sec, &r);
     }
     last_ms = sy_now_ms() - t0;
+    if (save_to) { if (cx_write(save_to, r.out ? r.out : "", r.out ? r.outn : 0)) die("save-stdout", save_to); }
     if (out && ocap > 0) {
         size_t n = r.outn < (size_t)(ocap - 1) ? r.outn : (size_t)(ocap - 1);
         if (r.out && n && mm_copy(out, ocap, r.out, (long)n)) { np_free(&r); die("copy", 0); }
@@ -153,7 +155,7 @@ static void write_report(const char *path, const char *status) {
 int main(int argc, char **argv) {
     const char *run = 0, *tier = "commit", *date = 0;
     int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
-    char report[4400], tmp[4000], datebuf[32];
+    char report[4400], tmp[4000], datebuf[32], aggout[4400];
     static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate"};
     int i, rc, steps, max_steps = 4, step_s = L_I("s9.step.max"), step_done = 0;
     static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
@@ -281,6 +283,8 @@ int main(int argc, char **argv) {
         }
     }
     (void)step_done;
+    if (cx_fmt(aggout, sizeof aggout, "%s/aggregate.out", run)) die("aggout-path", 0); /* s9-verdict 读此文件 */
+    if (sy_exists(run) != 1) sy_mkdir(run, 0755); /* 真 init 已建;--fake 路径可能没有 */
     if (agg_parts > 0) {
         /* 分片聚合:每片一次独立调用(<=55s);已有片记录的跳过(可续跑);全部就绪后 --merge 出唯一结论 */
         char ks[16], ns[16], pn[4400], leaf[64];
@@ -298,11 +302,15 @@ int main(int argc, char **argv) {
         }
         xa4 = ns;
         xa5 = 0;
+        save_to = aggout;
         rc = invoke("aggregate", root, run, "--merge", L_I("s9.cmd"), tmp, sizeof tmp);
+        save_to = 0;
         xa4 = xa5 = 0;
         note("aggregate-merge");
     } else {
+    save_to = aggout;
     rc = invoke("aggregate", root, run, 0, L_I("s9.cmd"), tmp, sizeof tmp);
+    save_to = 0;
     note("aggregate");
     }
     if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\treport=%s\n", rc, report); return 1; }
