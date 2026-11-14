@@ -81,6 +81,15 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (16) check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity,tty/pty 未测,六目标未跑;build/speed-baseline.tsv 未更新,run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
 (17) -c 对象路线无最终产物复用:现状是 artifact_hit 标记戳丢失(只丢戳,既有状态,每次全跑约 280 ms),丢戳的提交未二分(候选 a3a32d8a09、9b107888db 均未实证);phase-timing-stamps 断言已改为真实行为(dfe2b5fa75);真复用为 0.0.63 任务 N15。
 (18) 封网最终状态:B2 范围内 std-surface 仍有 2 行 new(sy_res_live、np_exec,见 (1));DNS 未做(见 (2));B2 六参系统调用不扩 `__syscall6`,走 sendmsg/recvmsg 三参(见 (3))。
+(19) sy_unix_connect(ext/net/unix.cx)截止时间只在调用前检查一次,之后是阻塞 connect:监听方积压满且无人 accept 时越过截止时间不返回(已复现,外层 timeout 杀掉)。绕法:监听方保持 accept 循环,或调用方自行在线程/子进程里带外部超时。0.0.63 修复补丁草稿已备(非阻塞 connect,-EAGAIN 按截止时间重试,到期 -ETIMEDOUT),仅在审查副本验证。
+(20) sy_tcp_accept_from(ext/net/tcp.cx)带 peer 时只认 inet4/inet6:对 sy_tcp_listen_at(SY_AF_UNIX) 的监听 accept 成功后返回 -EAFNOSUPPORT 并关掉已接受的连接(已复现)。绕法:unix 监听上用 peer=0 调用,或不用 listen_at 的 unix 族。补丁草稿已备(accept_from 内加 unix 分支),仅在审查副本验证。
+(21) sy_sig_taken(cx/sys/sigwatch.cx)读后清零非原子,读与清之间到达的信号计数会丢(读码推断,未复现)。绕法:只把计数当"是否非零",不依赖次数。修法需 L0 原子交换或屏蔽,冻结面不能做,UNVERIFIED。
+(22) poll 就绪后的阻塞调用不保证截止时间:udp 的 recvmsg(数据报被内核丢弃时)、accept(连接在 poll 与 accept 之间被复位)、阻塞 fd 上的 send 可能越过截止时间(读码推断,未复现)。绕法:对这些 fd 先 sy_snb_set_nonblock,或在外层加超时。
+(23) syt_wait 与 netpoll 把 EINTR 原样上抛:sy_tcp_connect_to、sy_recv_until、sy_send_all_until、sy_udp_recv_from、sy_wait_port 在等待期间收到已处理信号就返回 -EINTR(sy_send_all_until 可能已发一部分;sy_wait_port 总等待变短)(读码推断,未复现)。绕法:调用者对 -EINTR 按剩余截止时间重试(send 类需自行记已发字节),或不对同一线程装计数信号。
+(24) netmsg 的 recvmsg 入参 salen 为负时被当大无符号 namelen 交给内核,内核取走数据报后才报 -EINVAL(数据报丢失);回写的地址长度可大于入参余量(读码推断,未复现)。绕法:salen 恒传非负且不小于 SY_SA_MAX(udp.cx 现状已满足)。
+(25) osx/win 上 netraw、netpoll、netnb、netmsg 的 -ENOSYS 点没有进 exec/facts/refusals.tsv(现仅 fs 与 mem 的 10 行),按具名拒绝口径是缺口;tools/enosys-sites.cx 对账未跑(读码核对,UNVERIFIED)。绕法:无,osx/win 本版即不支持这些接口(见 (4))。
+
+(19)(20) 的补丁草稿 $CLAUDE_JOB_DIR/tmp/sx.patch.txt 在 git archive 副本上实跑:r-unix-block 复现由"越过截止时间不返回"转为各次 -110 且 300 ms 返回;r-unix-peer 复现由 -97 转为 accept 成功、连接保持;check-ext-net-unix 24 项与 check-ext-net-tcp 69 项全 PASS(各新增 3 项)。仅 lnx-x86_64 本机,未入库,未装新产品,未在 arm64/osx/win 跑。
 
 ## 撤回与回滚
 
