@@ -12,11 +12,11 @@
 源码和工作树必须干净；签名调度只能使用当前 `main`，调度 workflow 的
 `GITHUB_SHA`、checkout、远端 `main`、回执与 CI SHA 必须相同。
 
-主人在已有草稿 Release 上传两个文件（此工作流不创建草稿）：
+操作者在已有草稿 Release 上传两个文件（此工作流不创建草稿）：
 
 1. `unisacc-unsigned.zip`：仅含根目录 `unisacc.com`，没有目录、重复成员、
    符号链接、加密成员或额外文件。
-2. `unsigned-receipt.json`：如下 schema；主人计算并审核它的完整 SHA256，
+2. `unsigned-receipt.json`：如下 schema；操作者计算并审核它的完整 SHA256，
    用作 `receipt_sha256` 调度参数。文件最大 64 KiB，ZIP 最大约 16 MiB。
 
 ```json
@@ -41,7 +41,7 @@
 }
 ```
 
-`local_gate_complete` 是主人的本地构建/门禁声明字段，必须对应保留的证据；
+`local_gate_complete` 是操作者的本地构建/门禁声明字段，必须对应保留的证据；
 工作流验证封存声明和字节一致性，不会重新执行本机门禁。`upstream` 必须是
 本仓库 `.github/workflows/release-check.yml` 在 `main` 上已经成功、与RC源码匹配的精确 attempt，
 以 `windows-signing.yml` 的真实校验为准。另行调度的 `ci.yml` 是源码安全网，不能替代封存候选的六原生pull／执行证据。
@@ -51,7 +51,7 @@
 普通文件和 STORED/DEFLATED 压缩；上游API响应的 run id/attempt、下载前后资产 id、
 实际下载大小也逐项匹配，避免将替换后的资产记成原来的封存id。
 调度参数为 `mode/source_sha/seal_tag/receipt_sha256/upstream_run_id/upstream_attempt`。
-回执绑定草稿 Release id、两个资产 id 和主人审核的回执 SHA；下载后重新验哈希。
+回执绑定草稿 Release id、两个资产 id 和操作者审核的回执 SHA；下载后重新验哈希。
 
 ### 配置：一个仓库一个 Entra 身份
 
@@ -63,7 +63,7 @@ issuer 为 `https://token.actions.githubusercontent.com`，audience 为
 `api://AzureADTokenExchange`，只授予 profile 范围的
 `Artifact Signing Certificate Profile Signer`。
 
-已读回核验profile级Signer授权、联邦配置、主人审核与main-only分支约束，
+已读回核验profile级Signer授权、联邦配置、操作者审核与main-only分支约束，
 并设置身份验证标志；依据为 [PRD微软身份接入记录](../prd.md)。
 正式 OIDC 登录与企业服务签名自 0.0.10 起在每次发布中实际执行，policy 为 required（最近一次 v0.0.20，company run 36933254966）。
 以下配置名称保留供资格核对；检查时只列名称，不输出值：
@@ -72,7 +72,7 @@ issuer 为 `https://token.actions.githubusercontent.com`，audience 为
 | --- | --- |
 | Environment secrets | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
 | Environment variables | `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE` |
-| Environment variable | `UNISACC_REPO_IDENTITY_VERIFIED=true`，仅在主人核对独立 Entra 身份、精确 OIDC subject 与 profile RBAC 后设置 |
+| Environment variable | `UNISACC_REPO_IDENTITY_VERIFIED=true`，仅在操作者核对独立 Entra 身份、精确 OIDC subject 与 profile RBAC 后设置 |
 
 `UNISACC_REPO_IDENTITY_VERIFIED` 是部署检查的显式声明，不能证明 Azure 对象已
 存在；正式 Azure 登录与实际签名仍须成功。GitHub 找不到 Environment 时可能自动

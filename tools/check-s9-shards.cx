@@ -14,6 +14,7 @@
 #pragma unisa use cxlib.allsession
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
+#pragma unisa use sys.env
 static char root[4096],why[1700],diff_binary[4400],diff_a[4400],diff_b[4400];static int failures;
 static void die(const char *s){fprintf(stderr,"check-s9: %s %s\n",s,why);exit(2);}
 static void join(char *p,const char *a,const char *b){if(as_join(p,4400,a,b))die("path");}
@@ -119,10 +120,33 @@ int main(int argc,char **argv){
  }
  if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
  if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}
- else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");ck(r.rc==0&&contains(r.out,r.outn,"wt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=1"),"wt-epoch-consumer-refuses-moved-missing-unlisted");np_free(&r);
+ else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");ck(r.rc==0&&contains(r.out,r.outn,"wt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=1"),"wt-epoch-consumer-refuses-moved-missing-unlisted");
+  /* Sharded aggregate merge with retry slices: original and retry slice in different parts. */
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-retry-cross-part-accepted-retry-state-effective\tchecked=1"),"agg-merge-retry-cross-part-accepted-uses-retry-state");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-retry-of-fail-stays-fail\tchecked=1"),"agg-merge-retry-never-hides-original-fail");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-forged-state-from-non-owner-part-refused\tchecked=1"),"agg-merge-forged-state-wrong-part-refused");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-duplicate-state-refused\tchecked=1"),"agg-merge-duplicate-state-refused");
+  ck(r.rc==0&&contains(r.out,r.outn,"heavy-counted-width-runtime-cap\tchecked=1"),"heavy-slices-concurrent-not-exclusive-width-runtime-default-5-cap");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-missing-retry-state-refused\tchecked=1"),"agg-merge-missing-state-refused");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-uncovered-retry-slice-refused\tchecked=1"),"agg-merge-uncovered-slice-refused");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-owner-rule-deterministic-cover-balanced\tchecked=1"),"agg-owner-rule-balanced-not-worse-than-round-robin");
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-nonce-mismatch-refused\tchecked=1"),"agg-merge-nonce-mismatch-refused");np_free(&r);
+  /* Heavy domain: a wave of 6 tlib-family batches never runs more than 2 at once; others unaffected. */
+  {char tab[4400],bad[4400],awb[4400];join(awb,tmp,"all-waves");join(tab,tmp,"domains.tsv");join(bad,tmp,"domains-bad.tsv");
+   put(tab,"# id\tdomains\treason\tevidence\nh1\theavy\tr\te\nh2\theavy\tr\te\nh3\theavy\tr\te\nh4\theavy\tr\te\nh5\theavy\tr\te\nh6\theavy,wt\tr\te\n");
+   {char *v[]={awb,"domain-sim",tab,"8","h1","h2","h3","h4","h5","h6",0};np_result sr2={0};if(np_run(v,root,0,20,&sr2,why,sizeof why))die("domain-sim-transport");
+    ck(sr2.rc==0&&contains(sr2.out,sr2.outn,"max_heavy=2\t")&&contains(sr2.out,sr2.outn,"cap=2\t"),"heavy-domain-six-batches-never-more-than-two");np_free(&sr2);}
+   {char *v[]={awb,"domain-sim",tab,"8","n1","n2","n3","n4","n5","n6",0};np_result sr2={0};if(np_run(v,root,0,20,&sr2,why,sizeof why))die("domain-sim-transport");
+    ck(sr2.rc==0&&contains(sr2.out,sr2.outn,"max_active=6\tmax_heavy=0\t"),"non-heavy-batches-unaffected-by-heavy-cap");np_free(&sr2);}
+   put(bad,"h1\theavyy\tr\te\n");
+   {char *v[]={awb,"domain-sim",bad,"8","h1",0};np_result sr2={0};if(np_run(v,root,0,20,&sr2,why,sizeof why))die("domain-sim-transport");
+    ck(sr2.rc==2&&contains(sr2.out,sr2.outn,"domain-token-malformed"),"malformed-domain-row-refused");np_free(&sr2);}}
   /* Real wave executor in S9 shared-worktree mode: it must reach child spawn with zero worktree
      scans of its own (no run-batch beside this private binary, so it refuses right there). */
-  char aw[4400],cand[4400],out[4400],par[4400],ch[4400],dl[80],epoch[4400];join(aw,tmp,"all-waves");join(cand,root,"unisacc.com");join(out,root,"out");join(par,out,"check-s9-wtshare-parent");join(ch,out,"check-s9-wtshare-child");join(epoch,tmp,"wt-epoch-1");
+  /* The session roots must satisfy cxlib.sessionroot; this batch runs on a fresh clone with no ROOT/out,
+     so they live under canonical(tmp)/unisacc-session-* (rule 2) instead of ROOT/out. */
+  char aw[4400],cand[4400],sess[4400],par[4400],ch[4400],dl[80],epoch[4400];join(aw,tmp,"all-waves");join(cand,root,"unisacc.com");join(sess,sy_tmpdir(),"unisacc-session-s9wtshare");join(par,sess,"check-s9-wtshare-parent");join(ch,sess,"check-s9-wtshare-child");join(epoch,tmp,"wt-epoch-1");
+  if(mkdir(sess,0700)&&errno!=EEXIST)die("session-root");
   {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}
   if(cx_fmt(dl,sizeof dl,"%.9f",(double)as_now()/1e9+50)||setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");unsetenv("UNISACC_IDENTITY_PARENT");
   {char *v[]={aw,"init",root,par,cand,"-",0};np_result ir={0};if(np_run(v,root,0,25,&ir,why,sizeof why)||ir.rc)die("wtshare-parent-init");np_free(&ir);}

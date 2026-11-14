@@ -39,6 +39,8 @@
 #define P 4400
 #define DEAD 2147483646
 #define PLAN "# fixture phases\n0\tsnap\t-\t55\t-\t-\t1\n1\tctx\t-\t55\tsnap\t-\t1\n2\tcompare\touter\t55\tctx\t-\t1\n3\tpack\touter\t55\tcompare\t-\t1\n"
+/* PLAN with comment rows, column 4 (timeout_s) and columns 8.. removed: what chain-run binds as plan-semantics. */
+#define PLAN_SEM "0\tsnap\t-\t-\t-\t1\n1\tctx\t-\tsnap\t-\t1\n2\tcompare\touter\tctx\t-\t1\n3\tpack\touter\tcompare\t-\t1\n"
 #define SID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #define REV_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define REV_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -87,7 +89,8 @@ static int chain_files(const char *dir, const char *rev, int phases, int blocker
     long at = 0;
     int i;
     if (sha_text(PLAN, plan) || sha_text("pkg", a) || sha_text("slice", b) || sha_text("fake-ape", c)) return -1;
-    if (cx_fmt(t, sizeof t, "rev=%s\nmode=full\ncandidate=source\nplan=%s\ndeadline-s=9000\n", rev, plan) || put(dir, "chain-run.identity", t)) return -1;
+    if (sha_text(PLAN_SEM, plan)) return -1;
+    if (cx_fmt(t, sizeof t, "rev=%s\nmode=full\ncandidate=source\nroot=/fx\nplan-semantics=%s\nwatch=source\n", rev, plan) || put(dir, "chain-run.identity", t)) return -1;
     t[0] = 0;
     for (i = 0; i < phases; i++) {
         if (cx_fmt(t + at, (long)sizeof t - at, "DONE\t%s\twall_ms=%d\tsha=-\n", phase[i], i + 1)) return -1;
@@ -416,7 +419,28 @@ int main(int argc, char **argv) {
     rc = put(dir, "plan.tsv", PLAN "4\textra\t-\t55\tpack\t-\t1\n");
     ck(!rc && refused(b4, REV_E, "plan-mismatch"), "promote-refuses-changed-plan");
     if (join(dir, b4, REV_E) || join(t, dir, "seal.tsv") || join(aside, dir, "seal-aside.tsv")) return 2;
-    rc = put(dir, "plan.tsv", PLAN) || sy_rename(t, aside);
+    rc = put(dir, "plan.tsv", PLAN);
+    /* A timeout-only change keeps the semantics and must still pass the plan check. */
+    rc |= put(dir, "plan.tsv", "# fixture phases\n0\tsnap\t-\t99\t-\t-\t1\n1\tctx\t-\t99\tsnap\t-\t1\n2\tcompare\touter\t99\tctx\t-\t1\n3\tpack\touter\t99\tcompare\t-\t1\n");
+    ck(!rc && !refused(b4, REV_E, "plan-mismatch") && !refused(b4, REV_E, "no-plan"), "promote-accepts-timeout-only-plan-change");
+    rc = put(dir, "plan.tsv", PLAN);
+    {
+        char good_id[512], hex[65], bad[65];
+        int k;
+        if (sha_text(PLAN_SEM, hex) || sha_file(dir, "chain-run.identity", bad)) return 2;
+        for (k = 0; k < 64; k++) bad[k] = hex[k];
+        bad[63] = bad[63] == '0' ? '1' : '0';
+        bad[64] = 0;
+        if (cx_fmt(good_id, sizeof good_id, "rev=%s\nmode=full\ncandidate=source\nroot=/fx\nplan-semantics=%s\nwatch=source\n", REV_E, bad)) return 2;
+        rc |= put(dir, "chain-run.identity", good_id);
+        ck(!rc && refused(b4, REV_E, "plan-mismatch"), "promote-refuses-flipped-plan-semantics");
+        if (cx_fmt(good_id, sizeof good_id, "rev=%s\nmode=full\ncandidate=source\nroot=/fx\nplan=%s\nwatch=source\n", REV_E, hex)) return 2;
+        rc = put(dir, "chain-run.identity", good_id);
+        ck(!rc && refused(b4, REV_E, "plan-mismatch"), "promote-refuses-missing-plan-semantics");
+        if (cx_fmt(good_id, sizeof good_id, "rev=%s\nmode=full\ncandidate=source\nroot=/fx\nplan-semantics=%s\nwatch=source\n", REV_E, hex)) return 2;
+        rc = put(dir, "chain-run.identity", good_id);
+    }
+    rc |= sy_rename(t, aside);
     ck(!rc && refused(b4, REV_E, "seal-missing"), "promote-refuses-missing-seal");
 
     /* (4) prune. b2 holds five dead candidates, epochs 100 to 500, one of them unowned. */

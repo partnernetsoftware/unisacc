@@ -14,13 +14,13 @@
 #pragma unisa use sys.sha
 #pragma unisa use sys.mem
 #pragma unisa use sys.dl
+#pragma unisa use mem.heap
 #pragma unisa use sys.dlcall
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
-static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 256)) >= 0; }
 /* Child modes, run as a separate process by the posix cases. Exit 0 when the expectation holds. */
 static int child(const char *mode, const char *arg) {
     if (tx_eq(mode, "setsid", 16)) {
@@ -73,7 +73,7 @@ static const char *self = "tools/check-cx-sys.cx";
 /* Run this check file again as a child in MODE; its exit status. */
 static int run_child(const char *mode, const char *arg) {
     const char *u = sy_env_or("UNISACC", "./unisacc.com");
-    char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", (char *)mode, (char *)(arg ? arg : "-"), 0 };
+    char *av[] = { "timeout", "50", "sh", (char *)u, "-run", (char *)self, "--", "child", (char *)mode, (char *)(arg ? arg : "-"), 0 };
     char out[256];
     int cut;
     return sy_run(av, out, sizeof out, &cut);
@@ -146,41 +146,42 @@ int main(int argc, char **argv) {
 
     /* proc */
     {
-        char *av[] = { "sh", "-c", "echo out; echo err >&2; exit 3", 0 };
+        /* every child here runs under timeout(1) so a hung child cannot outlast the 55 s batch budget */
+        char *av[] = { "timeout", "50", "sh", "-c", "echo out; echo err >&2; exit 3", 0 };
         rc = sy_run(av, out, sizeof out, &cut);
-        ok(rc == 3 && has(out, "out\n") && has(out, "err\n") && !cut, "run: exit code 3, stdout and stderr captured");
+        ok(rc == 3 && tx_eq(out, "out\nerr\n", 16) && !cut, "run: exit code 3, stdout and stderr captured");
     }
     {
-        char *av[] = { "sh", "-c", "echo 0123456789", 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", "echo 0123456789", 0 };
         rc = sy_run(av, tiny, sizeof tiny, &cut);
         ok(rc == 0 && cut && tx_eq(tiny, "012", 4), "run: output cut at the buffer, *cut set");
     }
     {
-        char *av[] = { "cx-sys-no-such-program-7f3a", 0 };
+        char *av[] = { "timeout", "50", "cx-sys-no-such-program-7f3a", 0 };
         ok(sy_run(av, out, sizeof out, &cut) == 127, "run: a missing program exits 127");
     }
     {
-        char *av[] = { "sh", "-c", "kill -TERM $$", 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", "kill -TERM $$", 0 };
         ok(sy_run(av, out, sizeof out, &cut) == 128 + 15, "run: death by SIGTERM is 128+15");
     }
     ok(sy_run(0, out, sizeof out, &cut) == -EINVAL, "run: null argv is -EINVAL");
     {
-        char *av[] = { "sh", "-c", "exit 5", 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", "exit 5", 0 };
         pid = sy_spawn(av);
         ok(pid > 0 && sy_wait(pid, 0) == 5, "spawn + wait: exit 5");
     }
     {
         /* a child that would outlive us, with a grandchild in its process group */
-        char *av[] = { "sh", "-c", "sleep 31.73 & sleep 31.73", 0 };   /* a duration nothing else uses, for the pgrep below */
+        char *av[] = { "timeout", "50", "sh", "-c", "sleep 31.73 & sleep 31.73", 0 };   /* a duration nothing else uses, for the pgrep below */
         pid = sy_spawn(av);
         ok(pid > 0 && sy_wait(pid, 1) == -EAGAIN, "wait nohang: a running child is -EAGAIN");
         ok(sy_kill(pid) == 128 + 9, "kill: the group is killed, status 128+9");
         ok(sy_wait(pid, 0) == -ECHILD, "wait: a reaped pid is -ECHILD");
     }
     {
-        char *av[] = { "sh", "-c", "pgrep -f 'sleep 31[.]73' >/dev/null && echo alive || echo gone", 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", "pgrep -f 'sleep 31[.]73' >/dev/null && echo alive || echo gone", 0 };
         sy_run(av, out, sizeof out, &cut);
-        ok(has(out, "gone"), "kill: the background grandchild died with the group");
+        ok(tx_eq(out, "gone\n", 8), "kill: the background grandchild died with the group");
     }
     ok(sy_pid() > 0, "pid: positive");
     {
@@ -197,7 +198,7 @@ int main(int argc, char **argv) {
         int sv[2], n = 0;
         char fdtext[16], line[64], want[32];
         const char *u = sy_env_or("UNISACC", "./unisacc.com");
-        char *av[] = { "/bin/sh", (char *)u, "-run", (char *)self, "--", "child", "pgrp", fdtext, 0 };
+        char *av[] = { "/usr/bin/timeout", "--foreground", "50", "/bin/sh", (char *)u, "-run", (char *)self, "--", "child", "pgrp", fdtext, 0 };
         char *bad[] = { "/cx-sys-no-such-program-7f3a", 0 };
         long got;
         ok(sy_socketpair(sv) == 0, "spawn_inherit: a socketpair for the child");
@@ -228,7 +229,7 @@ int main(int argc, char **argv) {
         ok(sy_fork_session(0, 0, fds) == -EINVAL, "fork_session: a null fn is -EINVAL");
     }
     {
-        char *av[] = { "sh", "-c", "sleep 31.77", 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", "sleep 31.77", 0 };
         pid = sy_spawn(av);
         ok(pid > 0 && sy_signal(pid, 15) == 0 && sy_wait(pid, 0) == 128 + 15, "signal: SIGTERM to one pid, status 128+15");
         ok(sy_signal(0, 15) == -EINVAL && sy_signal(pid, 0) == -ESRCH, "signal: refuses pid 0; a reaped pid is -ESRCH");
@@ -285,7 +286,7 @@ int main(int argc, char **argv) {
         ok(run_child("setsid", 0) == 0, "setsid in a child: session and group become its pid");
         ok(run_child("leader-setsid", 0) == 0, "setsid as a group leader is -EPERM");
         {
-            char *av[] = { "sh", "-c", "sleep 31.79 & sleep 31.79", 0 };
+            char *av[] = { "timeout", "50", "sh", "-c", "sleep 31.79 & sleep 31.79", 0 };
             long end;
             int r;
             p = sy_spawn(av);
@@ -295,6 +296,7 @@ int main(int argc, char **argv) {
                    the kill leaves no orphan.  A group with a grandchild keeps that grandchild as a
                    zombie of whoever adopts it, and a zombie still counts as a member, so only this
                    shape can show the group really going away. */
+                /* no timeout(1) wrapper here: it would add a second member; sleep 31.79 bounds itself */
                 char *av1[] = { "sh", "-c", "exec sleep 31.79", 0 };
                 p = sy_spawn(av1);
                 sy_sleep_ms(100);
@@ -314,10 +316,10 @@ int main(int argc, char **argv) {
         }
         {
             /* on a real tty: script(1) (util-linux, -e returns the child's status) gives the child a pty */
-            char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
+            char *probe[] = { "timeout", "50", "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
             if (sy_run(probe, out, sizeof out, &cut) == 0) {
                 char cmd[700];
-                char *av[] = { "sh", "-c", cmd, 0 };
+                char *av[] = { "timeout", "50", "sh", "-c", cmd, 0 };
                 { if (cx_fmt(cmd, sizeof cmd, "script -qec 'sh %s -run %s -- child tty-pgrp -' /dev/null >/dev/null 2>&1",
                          sy_env_or("UNISACC", "./unisacc.com"), self)) { fprintf(stderr, "check-cx-sys: text too long for cmd\n"); exit(2); } }
                 ok(sy_run(av, out, sizeof out, &cut) == 0, "tcgetpgrp/tcsetpgrp on a pty: the foreground group is the child's own");
@@ -424,6 +426,74 @@ int main(int argc, char **argv) {
         }
         ok(sy_map_none(0, 4096) == -EINVAL && sy_map_none(&p, -1) == -EINVAL && sy_unmap(0, 4096) == -EINVAL &&
            sy_protect_rw(0, 4096) == -EINVAL && sy_protect_rx(0, 4096) == -EINVAL, "mem: null or negative is -EINVAL");
+    }
+
+    /* W3: fs completion */
+    {
+        char a[700], b[700], c[700], tp[700];
+        unsigned char *data = 0, rb[8];
+        int64_t dn = 0;
+        sy_dir_t it;
+        int nf = 0, nd = 0, nl = 0, nt, fd;
+        sy_stat_t t1;
+        { if (cx_fmt(a, sizeof a, "%s/w3/x/y/z", root)) exit(2); }
+        { if (cx_fmt(b, sizeof b, "%s/w3", root)) exit(2); }
+        ok(sy_mkdir_all(a, 0755) == 0 && sy_stat(a, &t1) == 0 && t1.kind == 'd', "mkdir_all: nested made");
+        ok(sy_mkdir_all(a, 0755) == 0, "mkdir_all: existing directory is 0");
+        ok(sy_mkdir_all("", 0755) == -EINVAL, "mkdir_all: empty is -EINVAL");
+        { if (cx_fmt(c, sizeof c, "%s/w3/f1", root)) exit(2); }
+        ok(sy_write_file(c, "hello", 5, 0644) == 0, "write_file: creates");
+        ok(sy_append_file(c, " world", 6, 0644) == 0, "append_file: appends");
+        ok(sy_read_file(c, &data, &dn, 0) == 0 && dn == 11 && data[11] == 0 && memcmp(data, "hello world", 11) == 0, "read_file: whole content plus NUL");
+        mm_free(data); data = 0;
+        ok(sy_read_file(c, &data, &dn, 5) == -EFBIG && data == 0, "read_file: over max is -EFBIG");
+        ok(sy_read_file(c, &data, &dn, 11) == 0 && dn == 11, "read_file: exactly max is ok");
+        mm_free(data); data = 0;
+        { if (cx_fmt(tp, sizeof tp, "%s/w3/nosuch", root)) exit(2); }
+        ok(sy_read_file(tp, &data, &dn, 0) == -ENOENT, "read_file: missing is -ENOENT");
+        ok(sy_read_file(0, &data, &dn, 0) == -EINVAL, "read_file: null is -EINVAL");
+        ok(sy_write_file(a, "x", 1, 0644) == -EISDIR, "write_file: directory is -EISDIR");
+        ok(sy_write_atomic(c, "atomic", 6, 0644) == 0 && sy_read_file(c, &data, &dn, 0) == 0 && dn == 6 && memcmp(data, "atomic", 6) == 0, "write_atomic: replaces content");
+        mm_free(data); data = 0;
+        ok(sy_write_atomic(a, "x", 1, 0644) != 0 && sy_stat(a, &t1) == 0 && t1.kind == 'd', "write_atomic: failure leaves target");
+        {
+            char tn[700], tdir[700];
+            sy_dir_t d2;
+            int junk = 0;
+            { if (cx_fmt(tdir, sizeof tdir, "%s/w3", root)) exit(2); }
+            sy_dir_open(&d2, tdir);
+            while (sy_dir_next(&d2) == 1) if (strstr(d2.name, ".tmp.")) junk++;
+            sy_dir_close(&d2);
+            ok(junk == 0, "write_atomic: no temporary left");
+            ok(sy_mkdtemp(tdir, "tp-", tn, sizeof tn) == 0 && sy_stat(tn, &t1) == 0 && t1.kind == 'd' && t1.mode == 0700, "mkdtemp: fresh 0700 directory");
+            ok(sy_mkdtemp(tdir, "tp-", tn, 4) == -ERANGE, "mkdtemp: small buffer is -ERANGE");
+            ok(sy_mkdtemp(0, "tp-", tn, sizeof tn) == -EINVAL, "mkdtemp: null dir is -EINVAL");
+        }
+        ok(sy_link(c, a) == -EEXIST, "link: existing target is -EEXIST");
+        { if (cx_fmt(tp, sizeof tp, "%s/w3/hard", root)) exit(2); }
+        ok(sy_link(c, tp) == 0 && sy_stat(tp, &t1) == 0 && t1.size == 6, "link: second name");
+        { if (cx_fmt(tp, sizeof tp, "%s/w3/sym", root)) exit(2); }
+        ok(sy_symlink(c, tp) == 0, "symlink for iterator");
+        ok(sy_utimes(c, 1000, 0, 2000000000L, 500) == 0 && sy_stat(c, &t1) == 0 && t1.mtime == 2000000000L, "utimes: mtime set");
+        ok(sy_utimes(c, 0, 1000000000L, 0, 0) == -EINVAL && sy_utimes(tp, 0, 0, 0, 0) == 0, "utimes: bad ns refused");
+        ok(sy_utimes(0, 0, 0, 0, 0) == -EINVAL, "utimes: null is -EINVAL");
+        fd = sy_open(c, O_RDWR, 0);
+        ok(fd >= 0 && sy_pread(fd, rb, 3, 1) == 3 && memcmp(rb, "tom", 3) == 0 && sy_pwrite(fd, "ZZ", 2, 0) == 2 && sy_pread(fd, rb, 2, 0) == 2 && memcmp(rb, "ZZ", 2) == 0, "pread/pwrite: offset io");
+        ok(sy_pread(fd, rb, 4, 100) == 0 && sy_pread(fd, rb, 1, -1) == -EINVAL && sy_pread(-1, rb, 1, 0) == -EBADF, "pread: end is 0, bad args refused");
+        sy_close(fd);
+        ok(sy_dir_open(&it, "/no/such/dir-w3") == -ENOENT, "dir_open: missing is -ENOENT");
+        ok(sy_dir_open(&it, c) == -ENOTDIR, "dir_open: file is -ENOTDIR");
+        ok(sy_dir_open(&it, b) == 0, "dir_open: opens");
+        while ((nt = sy_dir_next(&it)) == 1) {
+            if (it.kind == 'f') nf++;
+            else if (it.kind == 'd') nd++;
+            else if (it.kind == 'l') nl++;
+        }
+        ok(nt == 0 && nf == 2 && nd == 2 && nl == 1, "dir_next: kinds f=2 d=2 l=1, ends with 0");
+        ok(sy_dir_close(&it) == 0 && sy_dir_close(&it) == -EBADF && sy_dir_next(&it) == -EBADF, "dir_close: double close is -EBADF");
+        ok(sy_remove_all("") == -EINVAL && sy_remove_all("/") == -EINVAL && sy_remove_all(".") == -EINVAL && sy_remove_all("..") == -EINVAL, "remove_all: dangerous paths refused");
+        ok(sy_remove_all(b) == 0 && sy_exists(b) == 0, "remove_all: tree removed");
+        ok(sy_remove_all(b) == 0, "remove_all: absent is 0");
     }
 
     /* dl */

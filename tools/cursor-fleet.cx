@@ -1,0 +1,512 @@
+/* tools/cursor-fleet.cx -- run the Cursor CLI headless on bounded work nodes in private clones, harvest patches.
+ *
+ *   sh ./unisacc.com tools/cursor-fleet.cx -- run --nodes ID[,ID...] [--max N] [--agent PATH] [--model M]
+ *        [--timeout-s S] [--base REV] [--root ROOT] [--out DIR] [--template FILE] [--force-deps] [--dry-run]
+ *   sh ./unisacc.com tools/cursor-fleet.cx -- status --out DIR
+ *   sh ./unisacc.com tools/cursor-fleet.cx -- patch NODE --out DIR
+ *
+ * Defaults (command-line flags; DEBT-CURSOR-FLEET-LIMITS moves them into build/limits.tsv later):
+ *   --max 1 (1..16 children at once), --agent cursor-agent, --model auto, --timeout-s 1500 (1..3600),
+ *   --base HEAD, --root ., --out ROOT/out/cursor, --template ROOT/tools/cursor-fleet-template.txt.
+ *
+ * Per node: its row of ROOT/agentwork/dag.tsv (id title status deps write_domain owner acceptance commit) and,
+ * when the id is in ROOT/agentwork/items.tsv, goal/context/gate; a node whose deps are not DONE in dag.tsv is
+ * refused unless --force-deps; an unknown id refuses the whole call before anything starts.  The node gets a
+ * private clone OUT/NODE/repo (git clone --local --no-checkout, then a detached checkout of --base; the shared
+ * checkout is only read, no worktree), the prompt OUT/NODE/prompt.txt filled from the template, and runs
+ *   nice -n 19 AGENT -p --force --model M --output-format json PROMPT
+ * in the clone, in its own process group, stdout/stderr straight into OUT/NODE/agent.out and agent.err (files,
+ * nothing buffered).  At --timeout-s the whole group is killed.  Afterwards OUT/NODE/patch.diff is the clone's
+ * git diff against the base (untracked files included through git add -N; NOTE.txt is excluded and copied to
+ * OUT/NODE/NOTE.txt) and OUT/NODE/result.tsv records:
+ *   node status rc seconds files_changed added removed domain_ok outside_paths assertion_deletes
+ *   forbidden_touch start_ms end_ms base patch
+ * status: OK | NO_CHANGE | TIMEOUT | AGENT_FAIL | REJECTED.  REJECTED when domain_ok=0, assertion_deletes>0 or
+ * forbidden_touch>0 (the patch stays, OUT/NODE/REJECTED is written).  assertion_deletes counts, per hunk, the
+ * removed lines that look like assertions (ok( ck( ASSERT PASS FAIL expect) or removed rows of tests/*.tsv, net
+ * of added lines of the same kind in that hunk, plus every removed/added pair in which a number was raised in a
+ * file whose path has "limits" or on a line naming timeout/deadline/secs/_ms/bound/budget/limit.  forbidden_touch
+ * counts changed paths under tools/cxlib/ build/limits.tsv build/tlib- agentwork/ledger.tsv .git/ cx/runtime/
+ * unless a write_domain glob starting with that prefix lists it.  The tool never commits and never writes into
+ * the shared repo; it never reads or prints environment variables (the agent inherits the environment as is).
+ *
+ * Check: tools/check-cursor-fleet.cx. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define MAXN 32
+#define LONGP 4400
+
+typedef struct node {
+    char id[128], title[1024], status[64], deps[1024], domain[2048], accept[2048];
+    char goal[2048], gate[2048], context[2048];
+    char dir[LONGP], repo[LONGP], base[48];
+    sy_child_t c;
+    int running, finished, timed, rc;
+    long t0, t1;
+} node;
+
+static node nodes[MAXN];
+
+static void die(const char *a, const char *b) { fprintf(stderr, "cursor-fleet: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+/* copy field IDX (0 based, TAB separated) of the line [s, s+n) into out */
+static int fld(const char *s, long n, int idx, char *out, size_t cap) {
+    long i = 0; int f = 0; size_t k = 0;
+    out[0] = 0;
+    while (i < n && f < idx) { if (s[i] == '\t') f++; i++; }
+    if (f < idx) return -1;
+    while (i < n && s[i] != '\t' && k + 1 < cap) out[k++] = s[i++];
+    out[k] = 0;
+    return 0;
+}
+
+/* line of table TEXT whose first field equals ID; 0 when absent.  *LEN is its length. */
+static const char *rowof(const char *text, const char *id, long *len) {
+    const char *p = text;
+    size_t il = strlen(id);
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        long n = e ? (long)(e - p) : (long)strlen(p);
+        if (n > (long)il && p[0] != '#' && !strncmp(p, id, il) && p[il] == '\t') { *len = n; return p; }
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* glob match as tools/dag.cx: "*" within a segment, "**" across, "?" one character */
+static int gmatch(const char *p, long pn, const char *s, long sn) {
+    while (pn > 0) {
+        if (p[0] == '*') {
+            int deep = pn > 1 && p[1] == '*';
+            long skip = deep ? 2 : 1, k;
+            if (deep && pn > 2 && p[2] == '/' && gmatch(p + 3, pn - 3, s, sn)) return 1;
+            for (k = 0; k <= sn; k++) {
+                if (gmatch(p + skip, pn - skip, s + k, sn - k)) return 1;
+                if (k < sn && !deep && s[k] == '/') break;
+            }
+            return 0;
+        }
+        if (sn == 0) return 0;
+        if (p[0] == '?') { if (s[0] == '/') return 0; }
+        else if (p[0] != s[0]) return 0;
+        p++; pn--; s++; sn--;
+    }
+    return sn == 0;
+}
+
+/* next ';' or ',' separated item of LIST at *POS into out; 0 at the end */
+static int item(const char *list, size_t *pos, char sep, char *out, size_t cap) {
+    size_t k = 0;
+    while (list[*pos] == sep) (*pos)++;
+    if (!list[*pos]) return 0;
+    while (list[*pos] && list[*pos] != sep && k + 1 < cap) out[k++] = list[(*pos)++];
+    out[k] = 0;
+    return 1;
+}
+
+static int in_domain(const char *domain, const char *path) {
+    char g[512]; size_t pos = 0;
+    while (item(domain, &pos, ';', g, sizeof g)) if (gmatch(g, (long)strlen(g), path, (long)strlen(path))) return 1;
+    return 0;
+}
+
+static const char *FORBID[] = {"tools/cxlib/", "build/limits.tsv", "build/tlib-", "agentwork/ledger.tsv", ".git/", "cx/runtime/", 0};
+
+/* a forbidden prefix PATH falls under, unless a write_domain glob that starts with that prefix lists it; 0 when none */
+static int forbidden(const char *domain, const char *path) {
+    int i;
+    for (i = 0; FORBID[i]; i++) {
+        size_t pl = strlen(FORBID[i]);
+        char g[512]; size_t pos = 0;
+        int unlocked = 0;
+        if (strncmp(path, FORBID[i], pl)) continue;
+        while (item(domain, &pos, ';', g, sizeof g))
+            if (!strncmp(g, FORBID[i], pl) && gmatch(g, (long)strlen(g), path, (long)strlen(path))) unlocked = 1;
+        if (!unlocked) return 1;
+    }
+    return 0;
+}
+
+static int has_assert_token(const char *s, long n) {
+    static const char *tok[] = {"ok(", "ck(", "ASSERT", "PASS", "FAIL", "expect", 0};
+    int i;
+    for (i = 0; tok[i]; i++) {
+        size_t tl = strlen(tok[i]); long k;
+        for (k = 0; k + (long)tl <= n; k++) if (!strncmp(s + k, tok[i], tl)) return 1;
+    }
+    return 0;
+}
+
+static int has_time_word(const char *s, long n) {
+    static const char *tok[] = {"timeout", "deadline", "secs", "_ms", "bound", "budget", "limit", 0};
+    int i;
+    for (i = 0; tok[i]; i++) {
+        size_t tl = strlen(tok[i]); long k;
+        for (k = 0; k + (long)tl <= n; k++) {
+            size_t j;
+            for (j = 0; j < tl; j++) { char c = s[k + j]; if (c >= 'A' && c <= 'Z') c = (char)(c + 32); if (c != tok[i][j]) break; }
+            if (j == tl) return 1;
+        }
+    }
+    return 0;
+}
+
+/* 1 when A and B differ only in numbers and some number of B is larger */
+static int raised(const char *a, long an, const char *b, long bn) {
+    long i = 0, j = 0; int up = 0;
+    while (i < an && j < bn) {
+        int da = a[i] >= '0' && a[i] <= '9', db = b[j] >= '0' && b[j] <= '9';
+        if (da && db) {
+            long long x = 0, y = 0;
+            while (i < an && a[i] >= '0' && a[i] <= '9') { if (x < 100000000000000LL) x = x * 10 + (a[i] - '0'); i++; }
+            while (j < bn && b[j] >= '0' && b[j] <= '9') { if (y < 100000000000000LL) y = y * 10 + (b[j] - '0'); j++; }
+            if (y > x) up = 1;
+        } else if (a[i] == b[j]) { i++; j++; }
+        else return 0;
+    }
+    return up && i == an && j == bn;
+}
+
+#define HUNKCAP 2048
+typedef struct span { const char *s; long n; } span;
+static span rem[HUNKCAP], add[HUNKCAP];
+static int nrem, nadd;
+static char curpath[1024];
+static long assert_deletes;
+
+static void flush_hunk(void) {
+    int i, ra = 0, aa = 0;
+    int tsv = !strncmp(curpath, "tests/", 6) && strlen(curpath) > 4 && !strcmp(curpath + strlen(curpath) - 4, ".tsv");
+    int limfile = strstr(curpath, "limits") != 0;
+    for (i = 0; i < nrem; i++) if (has_assert_token(rem[i].s, rem[i].n) || tsv) ra++;
+    for (i = 0; i < nadd; i++) if (has_assert_token(add[i].s, add[i].n) || tsv) aa++;
+    if (ra > aa) assert_deletes += ra - aa;
+    for (i = 0; i < nrem && i < nadd; i++)
+        if ((limfile || has_time_word(rem[i].s, rem[i].n)) && raised(rem[i].s, rem[i].n, add[i].s, add[i].n)) assert_deletes++;
+    nrem = nadd = 0;
+}
+
+/* scan a git diff -U0 text; sets assert_deletes */
+static void scan_patch(const char *t) {
+    const char *p = t; int inhunk = 0;
+    assert_deletes = 0; nrem = nadd = 0; curpath[0] = 0;
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        long n = e ? (long)(e - p) : (long)strlen(p);
+        if (!strncmp(p, "diff --git ", 11)) { flush_hunk(); inhunk = 0; curpath[0] = 0; }
+        else if (!inhunk && (!strncmp(p, "--- a/", 6) || !strncmp(p, "+++ b/", 6))) { long k = n - 6; if (k > 1023) k = 1023; (void)tx_copy(curpath, (long)sizeof curpath, p + 6, k); }
+        else if (p[0] == '@' && p[1] == '@') { flush_hunk(); inhunk = 1; }
+        else if (inhunk && p[0] == '-' && nrem < HUNKCAP) { rem[nrem].s = p + 1; rem[nrem].n = n - 1; nrem++; }
+        else if (inhunk && p[0] == '+' && nadd < HUNKCAP) { add[nadd].s = p + 1; add[nadd].n = n - 1; nadd++; }
+        if (!e) break;
+        p = e + 1;
+    }
+    flush_hunk();
+}
+
+/* TEXT with every KEY replaced by VAL; malloc'd */
+static char *subst(char *text, const char *key, const char *val) {
+    size_t kl = strlen(key), vl = strlen(val), n = strlen(text), cap = n + 1, o = 0, i = 0;
+    char *out = malloc(cap);
+    if (!out) die("out of memory", 0);
+    while (i < n) {
+        size_t need = (text[i] == key[0] && !strncmp(text + i, key, kl)) ? vl : 1;
+        if (o + need + 1 > cap) { cap = (o + need + 1) * 2; out = realloc(out, cap); if (!out) die("out of memory", 0); }
+        if (need == vl && !strncmp(text + i, key, kl)) { (void)tx_copy(out + o, (long)(cap - o), val, (long)vl); o += vl; i += kl; }
+        else out[o++] = text[i++];
+    }
+    out[o] = 0;
+    free(text);
+    return out;
+}
+
+static int git(const char *cwd, char **argv, pr_result *r) {
+    int t = pr_run("git", argv, cwd, 0, 55, r);
+    return t ? -1 : r->rc;
+}
+
+static void put_agent_err(const node *nd, const char *msg) {
+    char p[LONGP];
+    if (!cx_fmt(p, sizeof p, "%s/agent.err", nd->dir)) cx_write(p, msg, strlen(msg));
+}
+
+/* clone, detach at BASE; 0 or -1 with agent.err text */
+static int prepare(node *nd, const char *root, const char *base) {
+    pr_result r;
+    char why[1200];
+    {   char *v[] = {"git", "clone", "--local", "-q", "--no-checkout", (char *)root, nd->repo, 0};
+        if (git(0, v, &r)) { cx_fmt(why, sizeof why, "clone failed: %s%s", r.why, r.err ? r.err : ""); put_agent_err(nd, why); pr_free(&r); return -1; }
+        pr_free(&r); }
+    {   char *v[] = {"git", "checkout", "-q", "--detach", (char *)base, 0};
+        if (git(nd->repo, v, &r)) { cx_fmt(why, sizeof why, "checkout %s failed: %s%s", base, r.why, r.err ? r.err : ""); put_agent_err(nd, why); pr_free(&r); return -1; }
+        pr_free(&r); }
+    {   char *v[] = {"git", "rev-parse", "HEAD", 0};
+        if (git(nd->repo, v, &r) || !r.out) { put_agent_err(nd, "rev-parse failed"); pr_free(&r); return -1; }
+        { size_t k = 0; while (r.out[k] && r.out[k] != '\n' && k < 40) { nd->base[k] = r.out[k]; k++; } nd->base[k] = 0; }
+        pr_free(&r); }
+    return 0;
+}
+
+static void write_result(node *nd, const char *status, long secs) {
+    char path[LONGP], rec[16384], outside[4096], hdr[] = "node\tstatus\trc\tseconds\tfiles_changed\tadded\tremoved\tdomain_ok\toutside_paths\tassertion_deletes\tforbidden_touch\tstart_ms\tend_ms\tbase\tpatch\n";
+    long files = 0, added = 0, removed = 0, forb = 0;
+    int domain_ok = 1;
+    pr_result r;
+    char ppath[LONGP];
+    outside[0] = 0; assert_deletes = 0;
+    if (cx_fmt(ppath, sizeof ppath, "%s/patch.diff", nd->dir)) die("path too long", 0);
+    if (sy_exists(nd->repo) == 1) {
+        char *ex = ":(exclude)NOTE.txt";
+        {   char *v[] = {"git", "add", "-N", ".", 0}; if (git(nd->repo, v, &r)) fprintf(stderr, "cursor-fleet: %s: git add -N failed\n", nd->id); pr_free(&r); }
+        {   char *v[] = {"git", "-c", "core.quotepath=false", "diff", "--no-renames", "--numstat", nd->base, "--", ".", ex, 0};
+            if (!git(nd->repo, v, &r) && r.out) {
+                const char *p = r.out;
+                size_t olen = 0;
+                while (*p) {
+                    const char *e = strchr(p, '\n');
+                    long n = e ? (long)(e - p) : (long)strlen(p);
+                    char a[32], b[32], path[1024];
+                    if (n > 0 && !fld(p, n, 0, a, sizeof a) && !fld(p, n, 1, b, sizeof b) && !fld(p, n, 2, path, sizeof path)) {
+                        files++;
+                        if (a[0] != '-') added += atol(a);
+                        if (b[0] != '-') removed += atol(b);
+                        if (!in_domain(nd->domain, path)) {
+                            size_t pl = strlen(path); olen = strlen(outside);
+                            domain_ok = 0;
+                            if (olen + pl + 2 < sizeof outside) { if (olen) outside[olen++] = ','; (void)tx_copy(outside + olen, (long)(sizeof outside - olen), path, (long)pl); }
+                        }
+                        if (forbidden(nd->domain, path)) forb++;
+                    }
+                    if (!e) break;
+                    p = e + 1;
+                }
+            }
+            pr_free(&r); }
+        {   char *v[] = {"git", "-c", "core.quotepath=false", "diff", "--no-renames", "--binary", nd->base, "--", ".", ex, 0};
+            if (!git(nd->repo, v, &r) && r.out) cx_write(ppath, r.out, r.outn); else cx_write(ppath, "", 0);
+            pr_free(&r); }
+        {   char *v[] = {"git", "-c", "core.quotepath=false", "diff", "--no-renames", "-U0", nd->base, "--", ".", ex, 0};
+            if (!git(nd->repo, v, &r) && r.out) scan_patch(r.out);
+            /* scan_patch keeps pointers into the buffer only until it returns */
+            pr_free(&r); }
+        {   char np[LONGP], dst[LONGP]; size_t n = 0; char *t;
+            if (!cx_fmt(np, sizeof np, "%s/NOTE.txt", nd->repo) && sy_exists(np) == 1 && !cx_fmt(dst, sizeof dst, "%s/NOTE.txt", nd->dir)) {
+                t = cx_read(np, &n); if (t) { cx_write(dst, t, n); free(t); }
+            } }
+    }
+    if (!strcmp(status, "OK") || !strcmp(status, "REJECTED")) {
+        if (!files) status = "NO_CHANGE";
+        else if (!domain_ok || assert_deletes > 0 || forb > 0) status = "REJECTED";
+    }
+    if (!strcmp(status, "REJECTED")) {
+        char m[LONGP], text[256];
+        if (!cx_fmt(m, sizeof m, "%s/REJECTED", nd->dir) && !cx_fmt(text, sizeof text, "domain_ok=%d assertion_deletes=%ld forbidden_touch=%ld\n", domain_ok, assert_deletes, forb)) cx_write(m, text, strlen(text));
+    }
+    if (cx_fmt(rec, sizeof rec, "%s%s\t%s\t%d\t%ld\t%ld\t%ld\t%ld\t%d\t%s\t%ld\t%ld\t%ld\t%ld\t%s\t%s\n", hdr, nd->id, status, nd->rc, secs,
+               files, added, removed, domain_ok, outside[0] ? outside : "-", assert_deletes, forb, nd->t0, nd->t1, nd->base, ppath)) die("record too long", 0);
+    if (cx_fmt(path, sizeof path, "%s/result.tsv", nd->dir) || cx_write(path, rec, strlen(rec))) die("cannot write result", nd->id);
+    printf("RESULT\t%s\t%s\trc=%d\tseconds=%ld\tfiles=%ld\tdomain_ok=%d\tassertion_deletes=%ld\tforbidden_touch=%ld\n",
+           nd->id, status, nd->rc, secs, files, domain_ok, assert_deletes, forb);
+}
+
+static int cmd_run(int argc, char **argv) {
+    const char *ids = 0, *agent = "cursor-agent", *model = "auto", *base = "HEAD", *rootarg = ".", *outarg = 0, *tplarg = 0;
+    int maxn = 1, timeout = 1500, force_deps = 0, dry = 0, n = 0, a, i;
+    char root[LONGP], out[LONGP], tpl[LONGP], p[LONGP], idl[4096];
+    char *dag, *items, *tmpl;
+    size_t sz = 0, pos = 0;
+    char one[128];
+    long total_ms, start_wall;
+    int next = 0, done = 0, running = 0, bad = 0;
+    for (a = 2; a < argc; a++) {
+        if (!strcmp(argv[a], "--force-deps")) force_deps = 1;
+        else if (!strcmp(argv[a], "--dry-run")) dry = 1;
+        else if (a + 1 < argc && !strcmp(argv[a], "--nodes")) ids = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--max")) maxn = atoi(argv[++a]);
+        else if (a + 1 < argc && !strcmp(argv[a], "--agent")) agent = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--model")) model = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--timeout-s")) timeout = atoi(argv[++a]);
+        else if (a + 1 < argc && !strcmp(argv[a], "--base")) base = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--root")) rootarg = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--out")) outarg = argv[++a];
+        else if (a + 1 < argc && !strcmp(argv[a], "--template")) tplarg = argv[++a];
+        else die("unknown or incomplete option", argv[a]);
+    }
+    if (!ids) die("run needs --nodes", 0);
+    if (maxn < 1 || maxn > 16) die("--max must be 1..16", 0);
+    if (timeout < 1 || timeout > 3600) die("--timeout-s must be 1..3600", 0);
+    if (sy_realpath(rootarg, root, sizeof root) < 0) die("cannot resolve --root", rootarg);
+    if (outarg) { if (outarg[0] == '/') { if (cx_fmt(out, sizeof out, "%s", outarg)) die("out path too long", 0); } else if (cx_fmt(out, sizeof out, "%s/%s", root, outarg)) die("out path too long", 0); }
+    else if (cx_fmt(out, sizeof out, "%s/out/cursor", root)) die("out path too long", 0);
+    if (tplarg) { if (cx_fmt(tpl, sizeof tpl, "%s", tplarg)) die("template path too long", 0); }
+    else if (cx_fmt(tpl, sizeof tpl, "%s/tools/cursor-fleet-template.txt", root)) die("template path too long", 0);
+    if (cx_fmt(p, sizeof p, "%s/agentwork/dag.tsv", root)) die("path", 0);
+    dag = cx_read(p, &sz); if (!dag) die("cannot read", p);
+    if (cx_fmt(p, sizeof p, "%s/agentwork/items.tsv", root)) die("path", 0);
+    items = cx_read(p, &sz); if (!items) items = strdup("");
+    tmpl = cx_read(tpl, &sz); if (!tmpl) die("cannot read template", tpl);
+    if (cx_fmt(idl, sizeof idl, "%s", ids)) die("--nodes too long", 0);
+
+    /* resolve every node first: any refusal ends the call before anything is created */
+    while (item(idl, &pos, ',', one, sizeof one)) {
+        long len = 0; const char *row; char d[128]; size_t dp = 0; node *nd;
+        if (n >= MAXN) die("too many nodes", 0);
+        for (i = 0; i < n; i++) if (!strcmp(nodes[i].id, one)) die("duplicate node", one);
+        row = rowof(dag, one, &len);
+        if (!row) die("unknown node (not in agentwork/dag.tsv)", one);
+        nd = &nodes[n++];
+        memset(nd, 0, sizeof *nd);
+        if (cx_fmt(nd->id, sizeof nd->id, "%s", one)) die("node id too long", one);
+        fld(row, len, 1, nd->title, sizeof nd->title); fld(row, len, 2, nd->status, sizeof nd->status);
+        fld(row, len, 3, nd->deps, sizeof nd->deps); fld(row, len, 4, nd->domain, sizeof nd->domain);
+        fld(row, len, 6, nd->accept, sizeof nd->accept);
+        row = rowof(items, one, &len);
+        if (row) { fld(row, len, 1, nd->goal, sizeof nd->goal); fld(row, len, 4, nd->gate, sizeof nd->gate); fld(row, len, 5, nd->context, sizeof nd->context); }
+        else if (cx_fmt(nd->goal, sizeof nd->goal, "%s", nd->title) || cx_fmt(nd->gate, sizeof nd->gate, "-") || cx_fmt(nd->context, sizeof nd->context, "-")) die("node text too long", one);
+        if (!nd->domain[0] || !strcmp(nd->domain, "-")) die("node has no write_domain", one);
+        while (!force_deps && item(nd->deps, &dp, ',', d, sizeof d)) {
+            long l2 = 0; const char *r2; char st[64];
+            if (!strcmp(d, "-")) continue;
+            r2 = rowof(dag, d, &l2);
+            if (!r2) die("node refused: dep not in dag.tsv", d);
+            fld(r2, l2, 2, st, sizeof st);
+            if (strncmp(st, "DONE", 4)) { fprintf(stderr, "cursor-fleet: node %s refused: dep %s is %s, not DONE (use --force-deps to override)\n", nd->id, d, st); exit(2); }
+        }
+        if (cx_fmt(nd->dir, sizeof nd->dir, "%s/%s", out, nd->id) || cx_fmt(nd->repo, sizeof nd->repo, "%s/repo", nd->dir)) die("path too long", 0);
+        if (sy_exists(nd->dir) == 1) die("node directory already exists (choose another --out)", nd->dir);
+    }
+    if (!n) die("no nodes", 0);
+    if (sy_mkdir_all(out, 0755) < 0) die("cannot create out dir", out);
+
+    /* prompts */
+    for (i = 0; i < n; i++) {
+        node *nd = &nodes[i];
+        char *t = strdup(tmpl);
+        if (sy_mkdir_all(nd->dir, 0755) < 0) die("cannot create", nd->dir);
+        t = subst(t, "{NODE}", nd->id); t = subst(t, "{TITLE}", nd->title); t = subst(t, "{GOAL}", nd->goal);
+        t = subst(t, "{CONTEXT}", nd->context); t = subst(t, "{DOMAIN}", nd->domain);
+        t = subst(t, "{ACCEPTANCE}", nd->accept); t = subst(t, "{GATE}", nd->gate);
+        if (cx_fmt(p, sizeof p, "%s/prompt.txt", nd->dir) || cx_write(p, t, strlen(t))) die("cannot write prompt", p);
+        free(t);
+        if (dry) printf("DRYRUN\t%s\tprompt=%s\n", nd->id, p);
+    }
+    if (dry) return 0;
+
+    start_wall = sy_now_ms();
+    total_ms = (long)((n + maxn - 1) / maxn) * ((long)timeout + 150) * 1000L;
+    for (;;) {
+        long now;
+        while (running < maxn && next < n) {
+            node *nd = &nodes[next++];
+            char po[LONGP], pe[LONGP], *prompt; size_t pl = 0; sy_spawn_t o; int fo, fe, rc;
+            char *av[16];
+            nd->t0 = sy_now_ms();
+            if (prepare(nd, root, base)) { nd->rc = -1; nd->t1 = sy_now_ms(); nd->finished = 1; done++; write_result(nd, "AGENT_FAIL", (nd->t1 - nd->t0) / 1000); continue; }
+            if (cx_fmt(p, sizeof p, "%s/prompt.txt", nd->dir)) die("path", 0);
+            prompt = cx_read(p, &pl); if (!prompt) die("cannot read", p);
+            if (cx_fmt(po, sizeof po, "%s/agent.out", nd->dir) || cx_fmt(pe, sizeof pe, "%s/agent.err", nd->dir)) die("path", 0);
+            fo = sy_open_new(po, 0600); fe = sy_open_new(pe, 0600);
+            av[0] = "nice"; av[1] = "-n"; av[2] = "19"; av[3] = (char *)agent; av[4] = "-p"; av[5] = "--force"; av[6] = "--model"; av[7] = (char *)model;
+            av[8] = "--output-format"; av[9] = "json"; av[10] = prompt; av[11] = 0;
+            sy_spawn_init(&o);
+            o.argv = av; o.cwd = nd->repo; o.in_fd = SY_STDIO_NULL; o.out_fd = fo >= 0 ? fo : SY_STDIO_NULL; o.err_fd = fe >= 0 ? fe : SY_STDIO_NULL; o.pgroup = -1;
+            rc = sy_proc_spawn(&o, &nd->c);
+            if (fo >= 0) close(fo);
+            if (fe >= 0) close(fe);
+            free(prompt);
+            if (rc < 0) {
+                char m[256]; cx_fmt(m, sizeof m, "spawn failed: errno %d\n", -rc); put_agent_err(nd, m);
+                nd->rc = -1; nd->t1 = sy_now_ms(); nd->finished = 1; done++; write_result(nd, "AGENT_FAIL", 0); continue;
+            }
+            nd->running = 1; running++;
+            printf("START\t%s\tpid=%d\n", nd->id, nd->c.pid);
+        }
+        now = sy_now_ms();
+        for (i = 0; i < n; i++) {
+            node *nd = &nodes[i];
+            sy_exit_t st; int r;
+            if (!nd->running) continue;
+            r = sy_proc_try_wait(&nd->c, &st);
+            if (r == 1) { nd->rc = st.exited ? st.code : 128 + st.sig; }
+            else if (now >= nd->t0 + (long)timeout * 1000L || now >= start_wall + total_ms) { sy_kill(nd->c.pid); nd->timed = 1; nd->rc = 137; r = 1; }
+            else if (r < 0) { nd->rc = -1; r = 1; }
+            if (r == 1) {
+                nd->running = 0; nd->finished = 1; running--; done++; nd->t1 = sy_now_ms();
+                write_result(nd, nd->timed ? "TIMEOUT" : (nd->rc != 0 ? "AGENT_FAIL" : "OK"), (nd->t1 - nd->t0) / 1000);
+            }
+        }
+        if (done >= n) break;
+        sy_sleep_ms(50);
+    }
+    for (i = 0; i < n; i++) {
+        char rp[LONGP]; size_t k = 0; char *t;
+        if (cx_fmt(rp, sizeof rp, "%s/result.tsv", nodes[i].dir)) continue;
+        t = cx_read(rp, &k);
+        if (t && !strstr(t, "\tOK\t") && !strstr(t, "\tNO_CHANGE\t")) bad++;
+        free(t);
+    }
+    free(dag); free(items); free(tmpl);
+    return bad ? 1 : 0;
+}
+
+static int cmd_status(int argc, char **argv) {
+    const char *outarg = 0; int a, ok = 0, nc = 0, to = 0, af = 0, rj = 0, other = 0;
+    sy_dir_t d;
+    for (a = 2; a < argc; a++) { if (a + 1 < argc && !strcmp(argv[a], "--out")) outarg = argv[++a]; else die("status takes --out DIR", argv[a]); }
+    if (!outarg) die("status needs --out DIR", 0);
+    if (sy_dir_open(&d, outarg) < 0) die("cannot open", outarg);
+    while (sy_dir_next(&d) == 1) {
+        char rp[LONGP], row[1024]; size_t sz = 0; char *t; const char *nl;
+        char st[64];
+        if (d.kind != 'd') continue;
+        if (cx_fmt(rp, sizeof rp, "%s/%s/result.tsv", outarg, d.name)) continue;
+        t = cx_read(rp, &sz);
+        if (!t) continue;
+        nl = strchr(t, '\n');
+        if (nl && nl[1]) {
+            long ln; const char *r = nl + 1; const char *e = strchr(r, '\n');
+            ln = e ? (long)(e - r) : (long)strlen(r);
+            if (ln > 1023) ln = 1023;
+            (void)tx_copy(row, (long)sizeof row, r, ln);
+            fld(row, ln, 1, st, sizeof st);
+            printf("NODE\t%s\n", row);
+            if (!strcmp(st, "OK")) ok++; else if (!strcmp(st, "NO_CHANGE")) nc++; else if (!strcmp(st, "TIMEOUT")) to++;
+            else if (!strcmp(st, "AGENT_FAIL")) af++; else if (!strcmp(st, "REJECTED")) rj++; else other++;
+        }
+        free(t);
+    }
+    sy_dir_close(&d);
+    printf("FLEET\tOK=%d\tNO_CHANGE=%d\tTIMEOUT=%d\tAGENT_FAIL=%d\tREJECTED=%d\tOTHER=%d\n", ok, nc, to, af, rj, other);
+    return 0;
+}
+
+static int cmd_patch(int argc, char **argv) {
+    const char *outarg = 0, *id = 0; int a;
+    char p[LONGP], q[LONGP], s[LONGP];
+    for (a = 2; a < argc; a++) {
+        if (a + 1 < argc && !strcmp(argv[a], "--out")) outarg = argv[++a];
+        else if (!id && argv[a][0] != '-') id = argv[a];
+        else die("patch takes NODE --out DIR", argv[a]);
+    }
+    if (!id || !outarg) die("patch needs NODE --out DIR", 0);
+    if (cx_fmt(p, sizeof p, "%s/%s/patch.diff", outarg, id) || cx_fmt(q, sizeof q, "%s/%s/REJECTED", outarg, id) || cx_fmt(s, sizeof s, "%s/%s/result.tsv", outarg, id)) die("path too long", 0);
+    if (sy_exists(p) != 1) { fprintf(stderr, "cursor-fleet: no patch for %s\n", id); return 1; }
+    printf("%s\n", p);
+    if (sy_exists(q) == 1) { fprintf(stderr, "cursor-fleet: patch of %s is REJECTED (kept for inspection)\n", id); return 3; }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: cursor-fleet run|status|patch ... (see the header of tools/cursor-fleet.cx)\n"); return 2; }
+    if (!strcmp(argv[1], "run")) return cmd_run(argc, argv);
+    if (!strcmp(argv[1], "status")) return cmd_status(argc, argv);
+    if (!strcmp(argv[1], "patch")) return cmd_patch(argc, argv);
+    fprintf(stderr, "cursor-fleet: unknown command %s\n", argv[1]);
+    return 2;
+}

@@ -1,0 +1,107 @@
+/* tools/check-patch-queue.cx -- 夹具测 patch-queue --check/--status(临时目录 + 假 git 前缀 true/false)。
+ *   sh ./unisacc.com tools/check-patch-queue.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { tool_die("check-patch-queue", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-patch-queue.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static int sh(const char *cmd, char *out, int cap) {
+    char *v[5];
+    np_result r = {0};
+    int rc;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && n && mm_copy(out, cap, r.out, (long)n)) die("copy");
+        out[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+
+static const char *HEAD = "id\t作者\t克隆路径\t补丁路径\t验证记录路径\t状态\tbase提交\t补丁sha\n";
+static char dir[4400], bin[4400];
+
+/* 以 body 写表, 用 git 前缀 gitp 跑 --check, 返回 rc 并把输出放 out */
+static int run_table(const char *body, const char *gitp, char *out, int cap) {
+    char tp[4500], cmd[9000];
+    if (cx_fmt(tp, sizeof tp, "%s/t.tsv", dir)) die("fmt");
+    if (cx_write(tp, body, strlen(body))) die("write");
+    if (cx_fmt(cmd, sizeof cmd, "PATCH_QUEUE_GIT=%s '%s' --check --table '%s' 2>&1", gitp, bin, tp)) die("fmt");
+    return sh(cmd, out, cap);
+}
+
+int main(void) {
+    char cmd[9000], out[8000], body[9000], sha[80];
+    char *pt;
+    size_t n;
+    int rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/patch-queue-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(bin, sizeof bin, "%s/pq-bin", dir) ||
+        cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/patch-queue.cx' -o '%s'", root, root, bin)) die("fmt");
+    ck(sh(cmd, out, sizeof out) == 0, "compile");
+    /* 夹具文件: clone 目录, 补丁, 验证记录 */
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/clone' && echo hi > '%s/p.patch' && echo ok > '%s/v.log'", dir, dir, dir)) die("fmt");
+    ck(sh(cmd, out, sizeof out) == 0, "seed");
+    {
+        char pp[4500];
+        if (cx_fmt(pp, sizeof pp, "%s/p.patch", dir)) die("fmt");
+        pt = cx_read(pp, &n);
+        if (!pt) die("read");
+        cx_sha256_hex(pt, n, sha);
+        free(pt);
+    }
+    rc = run_table(HEAD, "true", out, sizeof out);
+    ck(rc == 0 && strstr(out, "queued=0") && strstr(out, "bad=0"), "empty-ok");
+    rc = run_table("id\t作者\t克隆路径\n", "true", out, sizeof out);
+    ck(rc == 1 && strstr(out, "bad-header"), "bad-header-refused");
+    if (cx_fmt(body, sizeof body, "%sa1\tw\t%s/clone\t%s/p.patch\t%s/v.log\tQUEUED\tabc\n", HEAD, dir, dir, dir)) die("fmt");
+    rc = run_table(body, "true", out, sizeof out);
+    ck(rc == 1 && strstr(out, "column-count"), "missing-column-refused");
+    if (cx_fmt(body, sizeof body, "%sa1\tw\t%s/nope\t%s/p.patch\t%s/v.log\tQUEUED\tabc\t%s\n", HEAD, dir, dir, dir, sha)) die("fmt");
+    rc = run_table(body, "true", out, sizeof out);
+    ck(rc == 1 && strstr(out, "clone-missing"), "clone-missing-refused");
+    if (cx_fmt(body, sizeof body, "%sa1\tw\t%s/clone\t%s/p.patch\t%s/v.log\tQUEUED\tabc\t%s\n", HEAD, dir, dir, dir,
+               "0000000000000000000000000000000000000000000000000000000000000000")) die("fmt");
+    rc = run_table(body, "true", out, sizeof out);
+    ck(rc == 1 && strstr(out, "patch-sha-mismatch"), "sha-mismatch-refused");
+    if (cx_fmt(body, sizeof body, "%sa1\tw\t%s/clone\t%s/p.patch\t%s/v.log\tQUEUED\tabc\t%s\n", HEAD, dir, dir, dir, sha)) die("fmt");
+    rc = run_table(body, "false", out, sizeof out);
+    ck(rc == 1 && strstr(out, "clone-not-git-worktree"), "not-worktree-refused");
+    rc = run_table(body, "true", out, sizeof out);
+    ck(rc == 0 && strstr(out, "bad=0") && strstr(out, "queued=1"), "valid-row-ok");
+    /* base 非祖先: 假 git 对 rev-parse 成功, 对 merge-base 失败 */
+    if (cx_fmt(cmd, sizeof cmd, "printf '#!/bin/sh\\n[ \"$3\" = rev-parse ] && exit 0\\nexit 1\\n' > '%s/fakegit' && chmod +x '%s/fakegit'", dir, dir)) die("fmt");
+    ck(sh(cmd, out, sizeof out) == 0, "fake-git");
+    {
+        char g[4500];
+        if (cx_fmt(g, sizeof g, "%s/fakegit", dir)) die("fmt");
+        rc = run_table(body, g, out, sizeof out);
+        ck(rc == 1 && strstr(out, "base-not-ancestor"), "base-not-ancestor-refused");
+    }
+    if (cx_fmt(body, sizeof body, "%sa1\tw\t%s/clone\t%s/p.patch\t%s/nov.log\tQUEUED\tabc\t%s\n", HEAD, dir, dir, dir, sha)) die("fmt");
+    rc = run_table(body, "true", out, sizeof out);
+    ck(rc == 1 && strstr(out, "verify-record-missing"), "verify-missing-refused");
+    if (cx_fmt(body, sizeof body, "%sa1\tw\tc\tp\tv\tLANDED\tb\ts\na2\tw\tc\tp\tv\tREJECTED\tb\ts\n", HEAD)) die("fmt");
+    rc = run_table(body, "false", out, sizeof out);
+    ck(rc == 0 && strstr(out, "queued=0"), "non-queued-not-checked");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", dir)) die("fmt");
+    sh(cmd, out, sizeof out);
+    printf("CHECK_PATCH_QUEUE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

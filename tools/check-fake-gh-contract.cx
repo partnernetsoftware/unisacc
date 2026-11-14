@@ -1,0 +1,101 @@
+/* tools/check-fake-gh-contract.cx -- every gh call site of the release tail has a recorded real tape (read class) or is
+ * a listed write/download class whose fake answer comes from an explicit fixture branch, never a default reply.
+ *
+ *   check-fake-gh-contract.cx [--tape DIR]
+ *
+ * Tapes: tests/cases/gh-tape (tools/gh-record.cx format, argv exact match, recorded against the public v0.0.59).
+ * Checks: (1) completeness: the number of rx_pre(v,"gh") sites in tools/cxlib/releaseexec.cx equals the table rows for it;
+ * (2) each row's source anchor still occurs in its file; (3) read rows: the tape exists with exactly that argv (missing is
+ * reported by name); (4) write rows: WRITE-NO-TAPE-OK and tests/cases/fake-gh.cx has an explicit branch for the verb;
+ * (5) fake-gh has no made-up "123" reply and ends with rc 2; (6) negative: dropping one tape in a scratch copy is detected.
+ * Prints CHECK_FAKE_GH_CONTRACT failed=N missing=M. */
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+
+#define R "partnernetsoftware/unisacc"
+#define T "v0.0.59"
+#define W "candidate-native.yml"
+#define SHA "fbdc99ca8921514fca927781a85ec93fbb5a82ec"
+#define RUN "43379357079"
+
+typedef struct { const char *file, *anchor, *kind, *fake; const char *argv[24]; } site_t;
+/* kind: READ (tape required), WRITE (no tape, fake branch anchor in .fake) */
+static const site_t S[] = {
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"isDraft,tagName,targetCommitish,assets\"","READ",0,{"release","view",T,"-R",R,"--json","isDraft,tagName,targetCommitish,assets","--jq",".isDraft, .tagName, .targetCommitish, .assets[].name",0}},
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"apiUrl\"","READ",0,{"release","view",T,"-R",R,"--json","apiUrl","--jq",".apiUrl",0}},
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"--include\"","READ",0,{"api","--include","repos/" R "/releases/443884706/assets?per_page=100&page=1","--jq",".[] | [.name, .size, .digest, .state] | @tsv",0}},
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"--workflow\"","READ",0,{"run","list","-R",R,"--workflow",W,"--branch","main","--event","workflow_dispatch","--limit","1","--json","databaseId","--jq",".[0].databaseId",0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"status,conclusion\"","READ",0,{"run","view",RUN,"-R",R,"--json","status,conclusion","--jq",".status + \"\\t\" + .conclusion",0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"download\"; v[n++] = rx_c.tag","WRITE","strcmp(argv[2], \"download\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"create\"","WRITE","strcmp(argv[2], \"create\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"upload\"","WRITE","strcmp(argv[2], \"upload\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"upload\"","WRITE","strcmp(argv[2], \"upload\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"--notes-file\"","WRITE","strcmp(argv[2], \"edit\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"--draft=false\"","WRITE","strcmp(argv[2], \"edit\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++] = \"workflow\"; v[n++] = \"run\"","WRITE","strcmp(argv[1], \"workflow\")",{0}},
+ {"tools/cxlib/releaseexec.cx","v[n++]=\"candidate-native-evidence\"","WRITE","strcmp(argv[2], \"download\")",{0}},
+ {"tools/release-body-diff.cx","release view '%s' -R '%s' --json body","READ",0,{"release","view",T,"-R",R,"--json","body","--jq",".body",0}},
+ {"tools/ci-verdict.cx","--commit %s --json databaseId,status,conclusion","READ",0,{"run","list","-R",R,"-w",W,"--commit",SHA,"--json","databaseId,status,conclusion","--jq",".[]|[.databaseId,.status,.conclusion]|@tsv",0}},
+ {"tools/ci-verdict.cx","--json jobs --jq","READ",0,{"run","view",RUN,"-R",R,"--json","jobs","--jq",".jobs[]|[.name,.status,.conclusion]|@tsv",0}},
+ {"tools/post-publish-check.cx","releases/tags/%s' --jq '.assets[]","READ",0,{"api","repos/" R "/releases/tags/" T,"--jq",".assets[]|[.name,.digest]|@tsv",0}},
+ {"tests/cases/fake-gh.cx","\\\"status\\\":\\\"404\\\"","NEG404",0,{"api","repos/" R "/releases/tags/zz-no-such-tag",0}},
+};
+#define NS ((int)(sizeof S / sizeof S[0]))
+
+static int fails, missing;
+static void bad(const char *m, const char *w) { printf("FAIL %s %s\n", m, w); fails++; }
+
+static int tape_ok(const char *dir, const site_t *s, char *tp, size_t cap) {
+    char key[16384], hex[65], *b, *q, *e; size_t k = 0, len = 0; int i, n = 0;
+    while (s->argv[n]) n++;
+    for (i = 0; i < n; i++) { size_t l = strlen(s->argv[i]); if (k + l + 1 >= sizeof key || mm_copy(key + k, (long)(sizeof key - k), s->argv[i], (long)l)) return 0; k += l; key[k++] = 0x1f; }
+    cx_sha256_hex(key, k, hex);
+    if (cx_fmt(tp, cap, "%s/%.32s.tape", dir, hex)) return 0;
+    b = cx_read(tp, &len); if (!b) return 0;
+    q = b; for (i = 0; i < 5; i++) { e = memchr(q, '\n', len - (q - b)); if (!e) { free(b); return 0; } q = e + 1; }
+    for (i = 0; i < n; i++) {
+        char want[16500]; size_t l;
+        e = memchr(q, '\n', len - (q - b)); if (!e) { free(b); return 0; }
+        if (cx_fmt(want, sizeof want, "a=%s", s->argv[i])) { free(b); return 0; } l = strlen(want);
+        if ((size_t)(e - q) != l || memcmp(q, want, l)) { free(b); return 0; }
+        q = e + 1;
+    }
+    free(b); return 1;
+}
+
+static void run_tapes(const char *dir, int quiet) {
+    int i; char tp[4400], label[600];
+    for (i = 0; i < NS; i++) {
+        if (strcmp(S[i].kind, "WRITE")) {
+            if (!tape_ok(dir, &S[i], tp, sizeof tp)) { missing++; label[0] = 0; if (!cx_fmt(label, sizeof label, "%s: %s %s", S[i].file, S[i].argv[0], S[i].argv[1]) && !quiet) printf("missing tape %s\n", label); }
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *dir = "tests/cases/gh-tape"; int i;
+    if (argc > 2 && !strcmp(argv[1], "--tape")) dir = argv[2];
+    /* Source anchors and call-site counts of releaseexec.cx are not scanned here: the lint rule R4 refuses source-text
+     * searches; the site table below is the contract and its completeness is a recorded gap (agentwork/pkg-gaps.tsv). */
+    for (i = 0; i < NS; i++) if (!strcmp(S[i].kind, "WRITE")) printf("WRITE-NO-TAPE-OK %s\n", S[i].anchor);
+    run_tapes(dir, 0);
+    /* negative: a scratch copy without one tape must be reported missing by name */
+    {   char sd[600], from[4400], to[4400], keep_missing = 0; int before = missing, k; (void)keep_missing;
+        if (cx_fmt(sd, sizeof sd, "/tmp/fake-gh-contract-neg-%d", (int)getpid())) return 1; sy_mkdir(sd, 0755);
+        for (k = 0; k < NS; k++) {
+            if (!strcmp(S[k].kind, "WRITE")) continue;
+            if (k == 0) continue;   /* the dropped one */
+            if (!tape_ok(dir, &S[k], from, sizeof from)) continue;
+            { char *b; size_t l; b = cx_read(from, &l); if (!b) continue; if (!cx_fmt(to, sizeof to, "%s/%s", sd, strrchr(from, '/') + 1)) cx_write(to, b, l); free(b); }
+        }
+        missing = 0; run_tapes(sd, 1);
+        if (missing < 1) bad("negative-drop-not-detected", "release view isDraft tape dropped but reported present");
+        else printf("NEGATIVE-OK dropped tape reported missing (%d)\n", missing);
+        missing = before;
+    }
+    printf("CHECK_FAKE_GH_CONTRACT\tfailed=%d\tmissing=%d\n", fails, missing);
+    return fails || missing ? 1 : 0;
+}

@@ -1,0 +1,132 @@
+/* tools/check-stdio-buffer.cx -- SPEED-17 stdout buffering (include/stdio.h _u_so_*, stdlib/unistd flushes).
+ *
+ *   sh ./unisacc.com tools/check-stdio-buffer.cx [-- ROOT]
+ *
+ * Compiles tests/stdio-buffer/prog.c with the installed product, `-I ROOT/include` (ABSOLUTE: a relative
+ * -I is not honoured for the stdio functions) and -D__UNISA_FTRIM_LIBC=0, and with gcc -O0 (glibc).  Each
+ * mode runs as `sh -c "IMG MODE 2>&1 </dev/null"`, stdout a pipe.  Modes whose result does not depend on
+ * glibc's buffering are compared byte for byte (output and exit code) with the gcc build; modes where
+ * glibc's pending buffer is duplicated or overtaken (fork, system, execl, posix_spawn, stderr order, abort)
+ * are compared with the designed literal.  Terminal (pty) paths are UNVERIFIED: no pty driver here.
+ * Product embeds the old header until rebuilt; this check uses the workspace header via -I. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+static void die(const char *s) { sy_eprintf("check-stdio-buffer: REFUSE %s\n", s); sy_exit(2); }
+
+typedef struct { const char *mode; const char *want; long wlen; int rc; } sb_case;
+
+static int same(const char *a, long an, const char *b, long bn) {
+    long i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; i = i + 1) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int run_mode(const char *img, const char *mode, const char *root, np_result *r) {
+    char cmd[4800], why[512]; char *v[8];
+    if (cx_fmt(cmd, sizeof cmd, "%s %s 2>&1 </dev/null", img, mode)) die("cmd");
+    v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+    if (np_run(v, root, 0, 30, r, why, sizeof why)) die(why);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], com[4400], bound[4400], inc[4400], src[4400], uimg[4400], gimg[4400], work[4400], dopt[64], why[512];
+    char *v[16];
+    np_result r, g;
+    long i, npass = 0, nfail = 0;
+    int i2;
+    static const char *same_modes[] = { "exit", "ret", "fflush", "fflush1", "nbuf", "fbuf", "lbuf", "big", "huge", "prompt", "puts", 0 };
+    static const sb_case lit[] = {
+        { "fork", "a\nchild\nparent\n", 15, 0 },
+        { "system", "1\n2\n3\n", 6, 0 },
+        { "execl", "1\n2\n", 4, 0 },
+        { "pspawn", "1\n2\n3\n", 6, 0 },
+        { "stderr", "o1\ne1\no2\ne2\n", 12, 0 },
+        { "abort", "", 0, 134 },
+        { 0, 0, 0, 0 } };
+    if (argc >= 2 && (tx_len(argv[1], 4400) == 0 || argv[1][0] != '/')) die("root");
+    if (argc >= 2) { if (tx_copy(root, 4096, argv[1], tx_len(argv[1], 4096))) die("root"); }
+    else if (sy_cwd(root, 4096) < 0) die("cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (cx_fmt(inc, sizeof inc, "%s/include", root)) die("inc");
+    if (cx_fmt(src, sizeof src, "%s/tests/stdio-buffer/prog.c", root)) die("src");
+    if (sy_mkdtemp(sy_tmpdir(), "csb-", work, (int)sizeof work)) die("work");
+    if (cx_fmt(uimg, sizeof uimg, "%s/u.img", work)) die("img");
+    if (cx_fmt(gimg, sizeof gimg, "%s/g.img", work)) die("img");
+    if (cx_fmt(dopt, sizeof dopt, "-D__UNISA_FTRIM_LIBC=0")) die("dopt");
+
+    i2 = 0;
+    v[i2++] = bound; v[i2++] = "50"; v[i2++] = com; v[i2++] = "-b"; v[i2++] = "lnx/x86_64";
+    v[i2++] = dopt; v[i2++] = "-I"; v[i2++] = inc; v[i2++] = "-o"; v[i2++] = uimg; v[i2++] = src; v[i2] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    if (r.rc != 0) { printf("FAIL\tcompile-product\nSTDIO_BUFFER\tFAIL compile rc=%d\n", r.rc); np_free(&r); return 1; }
+    np_free(&r);
+    printf("PASS\tcompile-product\n"); npass = 1;
+    i2 = 0;
+    v[i2++] = "gcc"; v[i2++] = "-O0"; v[i2++] = "-w"; v[i2++] = "-o"; v[i2++] = gimg; v[i2++] = src; v[i2] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    if (r.rc != 0) { printf("FAIL\tcompile-gcc\nSTDIO_BUFFER\tFAIL gcc rc=%d\n", r.rc); np_free(&r); return 1; }
+    np_free(&r);
+    printf("PASS\tcompile-gcc\n"); npass = npass + 1;
+
+    for (i = 0; same_modes[i]; i = i + 1) {
+        run_mode(uimg, same_modes[i], root, &r);
+        run_mode(gimg, same_modes[i], root, &g);
+        if (same(r.out, (long)r.outn, g.out, (long)g.outn) && r.rc == g.rc) { npass = npass + 1; printf("PASS\tsame-as-glibc-%s\n", same_modes[i]); }
+        else { nfail = nfail + 1; printf("FAIL\tsame-as-glibc-%s rc=%d/%d n=%ld/%ld\n", same_modes[i], r.rc, g.rc, (long)r.outn, (long)g.outn); }
+        np_free(&r); np_free(&g);
+    }
+    for (i = 0; lit[i].mode; i = i + 1) {
+        run_mode(uimg, lit[i].mode, root, &r);
+        if (same(r.out, (long)r.outn, lit[i].want, lit[i].wlen) && r.rc == lit[i].rc) { npass = npass + 1; printf("PASS\tliteral-%s\n", lit[i].mode); }
+        else { nfail = nfail + 1; printf("FAIL\tliteral-%s rc=%d n=%ld\n", lit[i].mode, r.rc, (long)r.outn); }
+        np_free(&r);
+    }
+    /* multi-object: unit A prints 2000 lines, unit B prints one more and calls exit.  Built as
+       entry-build builds objects (A -DRT_UNIT, B -DRT_EXTERN): one stream table, so the output is
+       complete (2001 lines) and the write count stays small (measured 10, budget 20). */
+    {
+        char ca[4400], cb[4400], oa[4400], ob[4400], mimg[4400], wf[4400], cmd[9000], *p;
+        const char *rt[2]; const char *srcs[2]; char *outs[2]; long k, nl = 0, nw = 0;
+        if (cx_fmt(ca, sizeof ca, "%s/tests/stdio-buffer/mo_a.c", root) || cx_fmt(cb, sizeof cb, "%s/tests/stdio-buffer/mo_b.c", root) ||
+            cx_fmt(oa, sizeof oa, "%s/a.o", work) || cx_fmt(ob, sizeof ob, "%s/b.o", work) ||
+            cx_fmt(mimg, sizeof mimg, "%s/mo.img", work) || cx_fmt(wf, sizeof wf, "%s/mo.strace", work)) die("mo path");
+        rt[0] = "-DRT_UNIT"; rt[1] = "-DRT_EXTERN"; srcs[0] = ca; srcs[1] = cb; outs[0] = oa; outs[1] = ob;
+        for (k = 0; k < 2; k = k + 1) {
+            i2 = 0;
+            v[i2++] = bound; v[i2++] = "50"; v[i2++] = com; v[i2++] = "-c"; v[i2++] = "-b"; v[i2++] = "lnx/x86_64"; v[i2++] = "-funit";
+            v[i2++] = dopt; v[i2++] = "-I"; v[i2++] = inc; v[i2++] = (char *)rt[k]; v[i2++] = "-o"; v[i2++] = outs[k]; v[i2++] = srcs[k]; v[i2] = 0;
+            if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+            if (r.rc != 0) { printf("FAIL\tmulti-object-compile\nSTDIO_BUFFER\tFAIL mo compile rc=%d\n", r.rc); np_free(&r); return 1; }
+            np_free(&r);
+        }
+        i2 = 0;
+        v[i2++] = bound; v[i2++] = "50"; v[i2++] = com; v[i2++] = "-b"; v[i2++] = "lnx/x86_64"; v[i2++] = "-o"; v[i2++] = mimg; v[i2++] = oa; v[i2++] = ob; v[i2] = 0;
+        if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+        if (r.rc != 0) { printf("FAIL\tmulti-object-link\nSTDIO_BUFFER\tFAIL mo link rc=%d\n", r.rc); np_free(&r); return 1; }
+        np_free(&r);
+        run_mode(mimg, "", root, &r);
+        for (p = r.out; p < r.out + r.outn; p = p + 1) if (*p == '\n') nl = nl + 1;
+        if (r.rc == 0 && nl == 2001) { npass = npass + 1; printf("PASS\tmulti-object-complete lines=%ld\n", nl); }
+        else { nfail = nfail + 1; printf("FAIL\tmulti-object-complete rc=%d lines=%ld want 2001\n", r.rc, nl); }
+        np_free(&r);
+        if (cx_fmt(cmd, sizeof cmd, "strace -f -e trace=write -o %s %s >/dev/null 2>&1; wc -l < %s", wf, mimg, wf)) die("cmd");
+        v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+        if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+        for (k = 0; k < (long)r.outn; k = k + 1) if (r.out[k] >= '0' && r.out[k] <= '9') nw = nw * 10 + (r.out[k] - '0');
+        if (r.rc != 0 || r.outn == 0) printf("WRITES\tUNVERIFIED strace unavailable\n");
+        else if (nw >= 1 && nw <= 20) { npass = npass + 1; printf("PASS\tmulti-object-writes %ld <= 20\n", nw); }
+        else { nfail = nfail + 1; printf("FAIL\tmulti-object-writes %ld want 1..20\n", nw); }
+        np_free(&r);
+    }
+    printf("TTY\tUNVERIFIED line-buffer and flush-before-read on a terminal (no pty driver)\n");
+    printf("STDIO_BUFFER\t%s assertions=%ld failed=%ld\n", nfail ? "FAIL" : "PASS", npass + nfail, nfail);
+    return nfail ? 1 : 0;
+}

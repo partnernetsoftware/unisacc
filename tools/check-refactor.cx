@@ -107,6 +107,34 @@ static void lines_of(const char *tsv, const char *file, char *dst, long cap) {
     }
 }
 
+/* structural row/line assertions over tool output or a result file: no substring search.
+   mode 'P' some line (leading blanks ignored) starts with PAT; 'S' some line ends with PAT; 'E' some line equals PAT;
+   'F' some tab-separated field equals PAT; 'G' some tab-separated field starts with PAT.  Returns 1 when any line matches. */
+static int has_line(const char *buf, long n, char mode, const char *pat) {
+    long pl = tx_len(pat, 4096), p = 0;
+    while (p < n) {
+        long e = p, s;
+        while (e < n && buf[e] != '\n') e++;
+        s = p;
+        if (mode != 'S' && mode != 'E') while (s < e && (buf[s] == ' ' || buf[s] == '\t')) s++;
+        if (mode == 'P' && e - s >= pl && tx_prefix(buf + s, e - s, pat, pl)) return 1;
+        if (mode == 'S' && e - s >= pl && tx_prefix(buf + e - pl, pl, pat, pl)) return 1;
+        if (mode == 'E' && e - s == pl && tx_prefix(buf + s, e - s, pat, pl)) return 1;
+        if (mode == 'F' || mode == 'G') {
+            long f = p;
+            while (f <= e) {
+                long g = f;
+                while (g < e && buf[g] != '\t') g++;
+                if (mode == 'F' && g - f == pl && tx_prefix(buf + f, g - f, pat, pl)) return 1;
+                if (mode == 'G' && g - f >= pl && tx_prefix(buf + f, g - f, pat, pl)) return 1;
+                f = g + 1;
+            }
+        }
+        p = e + 1;
+    }
+    return 0;
+}
+
 static int put_file(const char *path, const char *s, long n) {
     int fd = sy_open_new(path, 0644), bad;
     if (fd < 0) return 1;
@@ -129,26 +157,25 @@ int main(void) {
     ck(rc == 0 && tx_eq(got, " 11", 64), "find-bang-takes-only-bang");
     {   char *ren[] = {"rename", "--auto", "oldf", "newf", "tools/refactor/rename-cases.txt", 0};
         rc = tool(ren, out, sizeof out); lines_of(out, "tools/refactor/rename-cases.txt", got, sizeof got);
-        ck(rc == 0 && tx_eq(got, " 3 4 4", 64) && tx_find(out, tx_len(out, sizeof out), "accept\t", 7) >= 0
-           && tx_find(out, tx_len(out, sizeof out), "\toldf\tnewf\t-\n", 13) >= 0, "rename-definition-pointer-call-not-comment-or-string");
+        ck(rc == 0 && tx_eq(got, " 3 4 4", 64) && has_line(out, tx_len(out, sizeof out), 'P', "accept\t")
+           && has_line(out, tx_len(out, sizeof out), 'S', "\toldf\tnewf\t-"), "rename-definition-pointer-call-not-comment-or-string");
     }
     {   char *sites[] = {"sites", "strcmp,f", (char *)cases, 0}; long nl = 0, q;
         rc = tool(sites, out, sizeof out);
         for (q = 0; out[q]; q++) if (out[q] == '\n') nl++;
-        ck(rc == 0 && nl == 13 && tx_find(out, tx_len(out, sizeof out), "truth-cases.txt:10\tf(strcmp(v[0], \"h\"))\n", 40) >= 0
-           && tx_find(out, tx_len(out, sizeof out), "truth-cases.txt:10\tstrcmp(v[0], \"h\")\n", 37) >= 0,
+        ck(rc == 0 && nl == 13 && has_line(out, tx_len(out, sizeof out), 'S', "truth-cases.txt:10\tf(strcmp(v[0], \"h\"))")
+           && has_line(out, tx_len(out, sizeof out), 'S', "truth-cases.txt:10\tstrcmp(v[0], \"h\")"),
            "sites-lists-every-call-nested-too-not-comments");
     }
     {   char *fold[] = {"find", "tools/refactor/eqz-fold.tsv", "tools/refactor/eqz-cases.txt", 0};
         rc = tool(fold, out, sizeof out); lines_of(out, "tools/refactor/eqz-cases.txt", got, sizeof got);
-        ck(rc == 0 && tx_eq(got, " 4 5", 64) && tx_find(out, tx_len(out, sizeof out), "\ttx_eqz(v[0], \"b\")\t", 19) >= 0,
+        ck(rc == 0 && tx_eq(got, " 4 5", 64) && has_line(out, tx_len(out, sizeof out), 'F', "tx_eqz(v[0], \"b\")"),
            "find-where-takes-only-that-argument-text");
     }
 
     /* apply on a copy: accept every row of the truth rule */
-    if (cx_fmt(dir, sizeof dir, "out/check-refactor-%d", sy_pid()) || cx_fmt(copy, sizeof copy, "%s/t.cx", dir)
+    if (cx_fmt(dir, sizeof dir, "%s/check-refactor-%d", sy_tmpdir(), sy_pid()) || cx_fmt(copy, sizeof copy, "%s/t.cx", dir)
         || cx_fmt(cands, sizeof cands, "%s/cands.tsv", dir) || !src) return 2;
-    sy_mkdir("out", 0755);
     if (sy_mkdir(dir, 0755) != 0 || put_file(copy, src, (long)sn)) { ck(0, "scratch-copy"); goto done; }
     {   char *find[] = {"find", "tools/refactor/strcmp-truth.tsv", copy, 0};
         rc = tool(find, out, sizeof out);
@@ -161,44 +188,46 @@ int main(void) {
     }
     {   char *revert[] = {"apply", cands, "2", "cat {file}", 0};
         rc = tool(revert, out, sizeof out); after = cx_read(copy, &an);
-        ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "REVERT\t", 7) >= 0 && after && tx_same(after, (long)an, src, (long)sn),
+        ck(rc == 1 && has_line(out, tx_len(out, sizeof out), 'P', "REVERT\t") && after && tx_same(after, (long)an, src, (long)sn),
            "apply-changed-output-reverts-byte-for-byte");
     }
     {   char *keep[] = {"apply", cands, "2", "true", 0};
         rc = tool(keep, out, sizeof out); after = cx_read(copy, &an);
-        ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "OK\t", 3) >= 0 && after
-           && tx_find(after, (long)an, "if (!tx_eq(v[0], \"a\", 1L << 20)) n++;", 37) >= 0
-           && tx_find(after, (long)an, "if (strcmp(v[0], \"e\") < 0) n++;", 31) >= 0
-           && tx_find(after, (long)an, "#pragma unisa use text.text", 27) >= 0,
+        ck(rc == 0 && has_line(out, tx_len(out, sizeof out), 'P', "OK\t") && after
+           && has_line(after, (long)an, 'P', "if (!tx_eq(v[0], \"a\", 1L << 20)) n++;")
+           && has_line(after, (long)an, 'P', "if (strcmp(v[0], \"e\") < 0) n++;")
+           && has_line(after, (long)an, 'P', "#pragma unisa use text.text"),
            "apply-same-output-keeps-edit");
     }
-    sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays in out/ */
+    sy_unlink(copy); sy_unlink(cands);   /* the empty scratch directory stays under sy_tmpdir(), not in the repo's out/ */
     {   /* sweep in a scratch dir with its own text link and its own copy of the rules (so its skip list is its own):
            one fixable file OK, one whose compile fails before the edit SKIP and skip-listed, nothing remaining;
            a second sweep finds nothing to do */
         char sd[300], good[340], bad[340], rules[340], *sk; size_t skn, rn; char *rsrc = cx_read("tools/refactor/strcmp-eq.tsv", &rn);
         const char *gsrc = "int main(int c, char **v) { if (!strcmp(v[0], \"x\")) return 1; return c; }\n";
         const char *bsrc = "int main(void) { return !strcmp(\"a\", \"b\") + undeclared_var; }\n";
-        if (cx_fmt(sd, sizeof sd, "out/check-refactor-%d-sweep", sy_pid()) || cx_fmt(good, sizeof good, "%s/g.cx", sd)
+        char rootabs[1024], textabs[1100];   /* scratch is outside the repo, so the text link is absolute */
+        if (sy_realpath(".", rootabs, sizeof rootabs) < 0 || cx_fmt(textabs, sizeof textabs, "%s/cx/text", rootabs)) return 2;
+        if (cx_fmt(sd, sizeof sd, "%s/check-refactor-%d-sweep", sy_tmpdir(), sy_pid()) || cx_fmt(good, sizeof good, "%s/g.cx", sd)
             || cx_fmt(bad, sizeof bad, "%s/b.cx", sd) || cx_fmt(rules, sizeof rules, "%s/rules.tsv", sd) || !rsrc) return 2;
-        {   char *lnv[] = {"ln", "-s", "../../cx/text", "text", 0}; int lpid, lfd = -1;
+        {   char *lnv[] = {"ln", "-s", textabs, "text", 0}; int lpid, lfd = -1;
             if (sy_mkdir(sd, 0755) != 0 || put_file(good, gsrc, tx_len(gsrc, 4096)) || put_file(bad, bsrc, tx_len(bsrc, 4096)) || put_file(rules, rsrc, (long)rn)) { ck(0, "sweep-scratch"); goto done; }
             lpid = spawn_pipe_bounded(lnv, sd, 0, &lfd, 0);
             if (lpid > 0) { char junk[256]; while (sy_read(lfd, junk, sizeof junk) > 0) {} sy_close(lfd); sy_wait_status(lpid, 0, 0, 0, 0); }
         }
         {   char *sw[] = {"sweep", rules, "2", good, bad, "--", "sh ./unisacc.com -c -b lnx/x86_64 {file} -o /dev/null && echo compiled", 0};
             rc = tool(sw, out, sizeof out); after = cx_read(good, &an);
-            ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "SWEEP\tok=1\tskip=1\trevert=0\tdefer=0\tremaining=0\t", 44) >= 0
-               && after && tx_find(after, (long)an, "tx_eq(v[0], \"x\", 1L << 20)", 26) >= 0, "sweep-fixes-one-skips-one");
+            ck(rc == 0 && has_line(out, tx_len(out, sizeof out), 'P', "SWEEP\tok=1\tskip=1\trevert=0\tdefer=0\tremaining=0\t")
+               && after && has_line(after, (long)an, 'P', "int main(int c, char **v) { if (tx_eq(v[0], \"x\", 1L << 20)) return 1; return c; }"), "sweep-fixes-one-skips-one");
         }
         {   char skp[400]; long i; char rb[340];
             tx_copy(rb, sizeof rb, rules, tx_len(rules, sizeof rb)); for (i = 0; rb[i]; i++) if (rb[i] == '/') rb[i] = '_';
-            if (cx_fmt(skp, sizeof skp, "out/refactor-verify/skip-%s.txt", rb)) return 2;
+            if (cx_fmt(skp, sizeof skp, "%s/unisacc-refactor-verify-%d/skip-%s.txt", sy_tmpdir(), sy_uid(), rb)) return 2;
             sk = cx_read(skp, &skn);
-            ck(sk && tx_find(sk, (long)skn, bad, tx_len(bad, 340)) >= 0 && tx_find(sk, (long)skn, good, tx_len(good, 340)) < 0, "sweep-skip-list-has-only-the-failed-file");
+            ck(sk && has_line(sk, (long)skn, 'E', bad) && !has_line(sk, (long)skn, 'E', good), "sweep-skip-list-has-only-the-failed-file");
             {   char *sw2[] = {"sweep", rules, "2", good, bad, "--", "true", 0};
                 rc = tool(sw2, out, sizeof out);
-                ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "SWEEP\tok=0\tskip=0\trevert=0\tdefer=0\tremaining=0\t", 44) >= 0, "sweep-again-nothing-to-do");
+                ck(rc == 0 && has_line(out, tx_len(out, sizeof out), 'P', "SWEEP\tok=0\tskip=0\trevert=0\tdefer=0\tremaining=0\t"), "sweep-again-nothing-to-do");
             }
             sy_unlink(skp);
         }
@@ -210,8 +239,8 @@ int main(void) {
             if (put_file(full, src, tx_len(src, sizeof src))) { ck(0, "use-limit-scratch"); goto done; }
             {   char *fu[] = {"find", "--auto", "tools/refactor/strcmp-eqz.tsv", full, 0};
                 rc = tool(fu, out, sizeof out);
-                ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "\tskip\ta new use would pass the 32-use limit", 41) >= 0
-                   && tx_find(out, tx_len(out, sizeof out), "\naccept\t", 8) < 0, "find-refuses-a-33rd-use");
+                ck(rc == 0 && has_line(out, tx_len(out, sizeof out), 'G', "a new use would pass the 32-use limit")
+                   && has_line(out, tx_len(out, sizeof out), 'F', "skip") && !has_line(out, tx_len(out, sizeof out), 'P', "accept\t"), "find-refuses-a-33rd-use");
             }
             sy_unlink(full);
         }

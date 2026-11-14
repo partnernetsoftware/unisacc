@@ -1,0 +1,41 @@
+<!-- 本文件由 tools/surface-doc-gen.cx 自 build/std-surface.tsv 生成,勿手改 -->
+
+# API: ext.net
+
+本文件由 tools/surface-doc-gen.cx 自 build/std-surface.tsv 生成,勿手改。列义见该表文件头。
+
+| name | signature | analogue | errors | lnx | osx | win | status | note | stab | since | own | test |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| sy_addr_t | typedef struct { int family; int port; unsigned char ip[16]; unsigned scope; char path[108]; } sy_addr_t; | Rust net::SocketAddr; Node net.SocketAddress | none | impl | impl | impl | new | family 取 SY_AF_INET4/SY_AF_INET6/SY_AF_UNIX | incubating | 0.1.0 | none | - |
+| sy_addr_parse | int sy_addr_parse(sy_addr_t *a, const char *text, int port); | Rust IpAddr::from_str; Node net.isIP | -EINVAL | impl | impl | impl | new | 收 v4 点分、v6 冒分带可选 %scope;纯文本解析,不解析域名 | incubating | 0.1.0 | none | - |
+| sy_addr_fmt | int sy_addr_fmt(const sy_addr_t *a, char *dst, int cap); | Rust SocketAddr Display | -ERANGE;ret:needlen | impl | impl | impl | new | v6 带端口时写 [addr]:port | incubating | 0.1.0 | none | - |
+| sy_addr_loopback | int sy_addr_loopback(sy_addr_t *a, int family, int port); | Rust Ipv4Addr::LOCALHOST / Ipv6Addr::LOCALHOST | -EAFNOSUPPORT | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_addr_any | int sy_addr_any(sy_addr_t *a, int family, int port); | Rust Ipv4Addr::UNSPECIFIED | -EAFNOSUPPORT | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_resolve | int sy_resolve(const char *host, int port, int family, sy_addr_t *out, int max); | Node dns.lookup all; Rust ToSocketAddrs | ret:eai;ret:count | impl:getaddrinfo | impl:getaddrinfo | impl:ws2_32 getaddrinfo | new | family 0 表 v4 与 v6 都要 | incubating | 0.1.0 | none | - |
+| sy_resolve4 | int sy_resolve4(const char *host, char *ip, int cap); | Node dns.lookup family 4 | ret:eai | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改);由 sy_resolve 取代 | legacy | 0.1.0 | none | - |
+| sy_net_error | const char *sy_net_error(int rc); | C gai_strerror + strerror | none | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_tcp_listen | int sy_tcp_listen(int port, int backlog); | Node net.createServer().listen(port, 127.0.0.1) | -errno | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改);只绑回环 v4,由 sy_tcp_listen_at 取代 | legacy | 0.1.0 | none | - |
+| sy_tcp_listen_at | int sy_tcp_listen_at(const sy_addr_t *a, int backlog, int flags); | Rust TcpListener::bind; Node server.listen(host, port) | -errno | impl | impl | impl:Winsock SOCKET 经句柄表映射成 fd | new | 绑定地址由调用者给;flags 含 SY_LISTEN_REUSEADDR、SY_LISTEN_V6ONLY | incubating | 0.1.0 | none | - |
+| sy_tcp_port | int sy_tcp_port(int fd); | Rust TcpListener::local_addr().port() | -errno | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_tcp_accept | int sy_tcp_accept(int fd, long ms); | Rust TcpListener::accept | -errno;-ETIMEDOUT | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | legacy | 0.1.0 | none | - |
+| sy_tcp_accept_from | int sy_tcp_accept_from(int fd, sy_deadline_t d, sy_addr_t *peer); | Rust TcpListener::accept(带对端地址) | -errno;-ETIMEDOUT | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_tcp_connect | int sy_tcp_connect(int port); | Node net.connect(port) | -errno | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改);只连回环 v4 | legacy | 0.1.0 | none | - |
+| sy_tcp_connect_to | int sy_tcp_connect_to(const sy_addr_t *a, sy_deadline_t d); | Rust TcpStream::connect_timeout | -errno;-ETIMEDOUT | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_tcp_dial | int sy_tcp_dial(const char *host, int port, sy_deadline_t d); | Rust TcpStream::connect(host:port); Node net.connect(port, host) | -errno;ret:eai | impl | impl | refuse:ENOSYS Winsock SOCKET 不是 fd,现未提供 | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_wait_port | int sy_wait_port(int port, long ms); | 无(wait-on 近似) | -ETIMEDOUT | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | legacy | 0.1.0 | none | - |
+| sy_send | long sy_send(int fd, const void *buf, long n); | Rust TcpStream::write; POSIX send | -errno | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_send_all | int sy_send_all(int fd, const void *buf, long n); | Rust Write::write_all | -errno | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_recv | long sy_recv(int fd, void *buf, long n); | Rust TcpStream::read; POSIX recv | -errno;ret:peer-close-0 | impl | impl | unverified | new | 已有实现在 ext/sysx/net.cx(该单元被 layer-api 以 libc-forward 排除,无生成接口,按表规不记 exists,纳入后改) | incubating | 0.1.0 | none | - |
+| sy_sock_local | int sy_sock_local(int fd, sy_addr_t *a); | Rust TcpStream::local_addr; Node socket.address | -errno | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_sock_peer | int sy_sock_peer(int fd, sy_addr_t *a); | Rust TcpStream::peer_addr; Node socket.remoteAddress | -errno;-ENOTCONN | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_shutdown | int sy_shutdown(int fd, int how); | Rust TcpStream::shutdown; Node socket.end | -errno;-ENOTCONN | impl | impl | impl | new | how 取 SY_SHUT_RD/SY_SHUT_WR/SY_SHUT_RDWR | incubating | 0.1.0 | none | - |
+| sy_sockopt_set | int sy_sockopt_set(int fd, int opt, long val); | Rust set_nodelay/set_read_timeout 等; Node setNoDelay/setKeepAlive | -errno;-ENOPROTOOPT | impl | impl | impl:SY_SO_REUSEPORT 记 -ENOPROTOOPT | new | opt 是封闭枚举:REUSEADDR REUSEPORT NODELAY KEEPALIVE RCVBUF SNDBUF RCVTIMEO_MS SNDTIMEO_MS V6ONLY BROADCAST LINGER_S;不透传原始 level/optname;不在枚举内 | incubating | 0.1.0 | none | - |
+| sy_sockopt_get | int sy_sockopt_get(int fd, int opt, long *val); | Rust nodelay()/ttl() 等 | -errno;-ENOPROTOOPT | impl | impl | impl | new | 另可读 SY_SO_ERROR | incubating | 0.1.0 | none | - |
+| sy_udp_bind | int sy_udp_bind(const sy_addr_t *a); | Rust UdpSocket::bind; Node dgram.createSocket + bind | -errno | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_udp_send_to | long sy_udp_send_to(int fd, const void *buf, long n, const sy_addr_t *to); | Rust UdpSocket::send_to; Node socket.send | -errno;-EMSGSIZE | impl | impl | impl | new | - | incubating | 0.1.0 | none | - |
+| sy_udp_recv_from | long sy_udp_recv_from(int fd, void *buf, long n, sy_addr_t *from, sy_deadline_t d); | Rust UdpSocket::recv_from | -errno;-ETIMEDOUT;-EMSGSIZE | impl | impl | impl | new | 不静默截断;报文比 n 长记 -EMSGSIZE | incubating | 0.1.0 | none | - |
+| sy_unix_listen | int sy_unix_listen(const char *path, int backlog); | Rust UnixListener::bind; Node server.listen(path) | -errno;-ENAMETOOLONG | impl | impl | impl:AF_UNIX 需 Win10 1803 起,否则 -EAFNOSUPPORT | new | 不自动删已有路径;路径超 107 | incubating | 0.1.0 | none | - |
+| sy_unix_connect | int sy_unix_connect(const char *path, sy_deadline_t d); | Rust UnixStream::connect; Node net.connect(path) | -errno;-ETIMEDOUT | impl | impl | impl:AF_UNIX 需 Win10 1803 起,否则 -EAFNOSUPPORT | new | Linux 抽象名字空间不提供 | incubating | 0.1.0 | none | - |
+| sy_socketpair | int sy_socketpair(int sv[2]); | Rust UnixStream::pair | -errno | impl | impl | refuse:ENOSYS cap=socketpair | exists | 现在 cx.base sys.posix | incubating | 0.1.0 | none | - |
+| sy_recv_until | long sy_recv_until(int fd, void *buf, long n, sy_deadline_t d); | POSIX recv 带截止 | -errno;-ETIMEDOUT | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | new | 0 表对端关闭 | incubating | 0.1.0 | none | - |
+| sy_send_all_until | int sy_send_all_until(int fd, const void *buf, long n, sy_deadline_t d); | POSIX send 写完或失败 | -errno;-ETIMEDOUT | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | new | 写完或失败 | incubating | 0.1.0 | none | - |

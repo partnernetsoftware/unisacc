@@ -1,0 +1,75 @@
+/* check-cap-gen: tools/cap-gen.cx contract with mutation controls.
+ *   sh ./unisacc.com tools/check-cap-gen.cx [-- WORK]
+ * WORK defaults to /tmp.
+ * Checks: tree --check rc 0; fixture write/check rc 0; tampered table -> --check rc 1; a new refuse row
+ * (cap=dup2 on lnx) flips the dup2 lnx entry 1 -> 0 and the fixture then differs from the tree table;
+ * a malformed cap token -> rc 2. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+static int failed, checks;
+static char fix[2600], src[2700], tab[2700], cmd[6000], outb[4000], native[2800];
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tcap-gen.%s\n", ok ? "PASS" : "FAIL", n); }
+static int has(const char *s, const char *w) {
+    size_t n = strlen(s), k = strlen(w);
+    for (size_t i = 0; i + k <= n; i++) if (!memcmp(s + i, w, k)) return 1;
+    return 0;
+}
+static int sh(const char *c, char *out, int cap) {
+    char *v[] = {"sh", "-c", (char *)c, 0}, *text = 0; size_t n = 0, i; int rc = cx_runv_timeout(v, 40, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static int run(const char *flag, const char *dir) {
+    if (cx_fmt(cmd, sizeof cmd, "'%s' %s '%s' 2>&1", native, flag, dir)) return -1;
+    return sh(cmd, outb, sizeof outb);
+}
+static int put_table(const char *orig, const char *extra) {
+    size_t n = 0, k = strlen(extra); char *s = cx_read(orig, &n), *b;
+    if (!s) return 1;
+    b = (char *)malloc(n + k + 1);
+    if (!b) return 1;
+    mm_copy(b, n + k + 1, s, n); mm_copy(b + n, k + 1, extra, k);
+    int rc = cx_write(src, b, n + k);
+    free(b); free(s);
+    return rc;
+}
+int main(int argc, char **argv) {
+    char root[2048], why[256], orig[2700];
+    const char *work = argc >= 2 && argv[1][0] != '-' ? argv[1] : "/tmp";
+    if (argc > 2 || strlen(work) > 2400 || strchr(work, '\'')) { fprintf(stderr, "check-cap-gen: usage [WORK]\n"); return 2; }
+    if (!getcwd(root, sizeof root)) return 2;
+    if (cx_fmt(fix, sizeof fix, "%s/cap-gen-fixture-%d", work, sy_pid())
+        || cx_fmt(src, sizeof src, "%s/build/std-surface.tsv", fix)
+        || cx_fmt(tab, sizeof tab, "%s/cx/sys/capgen.cx", fix)
+        || cx_fmt(orig, sizeof orig, "%s/build/std-surface.tsv", root)
+        || cx_fmt(native, sizeof native, "%s/cap-gen-native", work)) return 2;
+    if (tq_native(root, "tools/cap-gen.cx", native, why, sizeof why)) { fprintf(stderr, "check-cap-gen: %s\n", why); return 2; }
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/build' '%s/cx/sys'", fix, fix) || sh(cmd, outb, sizeof outb) != 0) { printf("FAIL\tfixture\n"); return 2; }
+    ck(run("--check", root) == 0 && has(outb, "status=CHECK"), "check-tree");
+    if (put_table(orig, "")) { printf("FAIL\tcopy-table\n"); return 2; }
+    ck(run("--write", fix) == 0 && has(outb, "status=WRITE"), "write");
+    ck(run("--check", fix) == 0 && has(outb, "status=CHECK"), "check-fixture");
+    { size_t n = 0; char *s = cx_read(tab, &n), *p = 0;
+      (void)p;
+      ck(s && has(s, "{1, 1, 0},   /* dup2"),"dup2-baseline");
+      if (s && n > 10) {
+          s[n - 3] = s[n - 3] == 'x' ? 'y' : 'x';
+          ck(!cx_write(tab, s, n) && run("--check", fix) == 1 && has(outb, "DIFF"), "neg-tamper");
+      }
+      free(s); }
+    if (put_table(orig, "cx.sys\tmut_dup2\tint mut_dup2(void)\t-\t-\trefuse:ENOSYS cap=dup2\timpl\timpl\texists\t-\t-\t-\t-\t-\n")) { printf("FAIL\tmutate\n"); return 2; }
+    ck(run("--write", fix) == 0, "mut-write");
+    { size_t n = 0; char *s = cx_read(tab, &n);
+      ck(s && has(s, "{0, 1, 0},   /* dup2: refused rows lnx=1 osx=0 win=1"),"mut-flip-lnx");
+      free(s); }
+    ck(run("--check", root) == 0, "tree-unaffected");
+    if (put_table(orig, "cx.sys\tmut_bad\tint mut_bad(void)\t-\t-\trefuse:ENOSYS cap=Bad_Cap\timpl\timpl\texists\t-\t-\t-\t-\t-\n")) { printf("FAIL\tmutate-bad\n"); return 2; }
+    ck(run("--write", fix) == 2 && has(outb, "REFUSE"), "neg-token");
+    printf("CHECK_CAP_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

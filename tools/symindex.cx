@@ -1,5 +1,5 @@
 /* tools/symindex.cx -- per-file symbol facts, content-addressed, with a stat prefilter
-   (plans/symindex-design-2026-10-30.md).  From the repo root:
+   .  From the repo root:
 
      sh ./unisacc.com tools/symindex.cx -- [--index DIR] [--in LIST] COMMAND ...
 
@@ -67,6 +67,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use mem.arena
 #pragma unisa use mem.bytes
@@ -1197,7 +1198,7 @@ int main(int argc, char **argv) {
     t0 = sy_now_ms();
     arena = ar_new(1L << 32);
     if (!arena) die("cannot create the arena");
-    if (cx_fmt(idx, sizeof idx, "out/symindex/v1")) die("path");
+    idx[0] = 0;
     while (a < argc && argv[a][0] == '-' && argv[a][1] == '-') {
         if (tx_eqz(argv[a], "--index") && a + 1 < argc) { if (cx_fmt(idx, sizeof idx, "%s", argv[a + 1])) die("path too long"); a += 2; }
         else if (tx_eqz(argv[a], "--in") && a + 1 < argc) { list = argv[a + 1]; a += 2; }
@@ -1207,6 +1208,11 @@ int main(int argc, char **argv) {
     cmd = argv[a++];
     if ((r = sy_realpath(".", root, sizeof root)) < 0) die("cannot resolve the root");
     root_n = r;
+    if (!idx[0]) {   /* default: a per-checkout cache under ~/.cache/unisacc, keyed by an FNV-1a hash of the root */
+        unsigned long h = 1469598103934665603UL; long q;
+        for (q = 0; q < root_n; q++) h = (h ^ (unsigned char)root[q]) * 1099511628211UL;
+        if (cx_fmt(idx, sizeof idx, "%s/.cache/unisacc/symindex/%016lx/v1", sy_env_or("HOME", "."), h)) die("path");
+    }
     {   /* the index directory, parents included */
         char d[4096]; long n = tx_len(idx, 4095), k; int m;
         for (k = 1; k <= n; k++) if (k == n || idx[k] == '/') {

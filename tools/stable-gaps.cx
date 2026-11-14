@@ -1,0 +1,211 @@
+/* tools/stable-gaps.cx -- list the concrete gaps behind stable-eval FAILs, per package (read-only).
+ *
+ *   sh ./unisacc.com tools/stable-gaps.cx [-- ROOT [PKG...]]
+ *
+ * Output: GAP<TAB>pkg<TAB>clause<TAB>row<TAB>action, then STABLE_GAPS total= s2= s4= s10= s13=.
+ *   S2  every std-surface row of the package with status=new
+ *   S4  every platform cell (lnx/osx/win) equal to `unverified`, row = NAME@PLATFORM
+ *   S10 every dependency (build/tlib-packages.tsv deps) whose policy is not yes
+ *   S13 one row per package without a ledger row STABLE-REVIEW-PKG with accept
+ * Parsing mirrors tools/stable-eval.cx.  Exit 0 on success (gaps are data), 2 when a table is unreadable. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+enum { SG_MAXPKG = 48, SG_NAME = 64, SG_COLS = 14 };
+
+typedef struct { const char *p; long n; } sg_span;
+
+static char pkgs[SG_MAXPKG][SG_NAME];
+static int npkgs;
+static long c2, c4, c10, c13;
+
+static int span_is(sg_span s, const char *z) { return tx_same(s.p, s.n, z, tx_len(z, 256)); }
+
+static int split(const char *p, long n, sg_span *out, int max) {
+    int k = 0;
+    long i, start = 0;
+    for (i = 0; i <= n; i++)
+        if (i == n || p[i] == '\t') {
+            if (k < max) { out[k].p = p + start; out[k].n = i - start; }
+            k++;
+            start = i + 1;
+        }
+    return k;
+}
+
+static void add_pkg(sg_span s) {
+    int i;
+    if (s.n <= 0 || s.n >= SG_NAME || npkgs >= SG_MAXPKG) return;
+    for (i = 0; i < npkgs; i++)
+        if (tx_same(pkgs[i], tx_len(pkgs[i], SG_NAME), s.p, s.n)) return;
+    tx_copy(pkgs[npkgs], SG_NAME, s.p, s.n);
+    pkgs[npkgs][s.n] = 0;
+    npkgs++;
+}
+
+static char *load(const char *root, const char *rel, size_t *n) {
+    char path[4600];
+    tx_snprintf(path, sizeof path, "%s/%s", root, rel);
+    return cx_read(path, n);
+}
+
+static int policy_yes(const char *pol, size_t pn, const char *pkg) {
+    long i = 0, kl = tx_len(pkg, SG_NAME);
+    int global = 0, own = -1;
+    while (i < (long)pn) {
+        long e = i;
+        sg_span f[3];
+        int k;
+        while (e < (long)pn && pol[e] != '\n') e++;
+        k = split(pol + i, e - i, f, 3);
+        if (pol[i] != '#' && k >= 2) {
+            int yes = span_is(f[1], "yes");
+            if (span_is(f[0], "stable")) global = yes;
+            else if (tx_same(f[0].p, f[0].n, pkg, kl)) own = yes;
+        }
+        i = e + 1;
+    }
+    return own >= 0 ? own : global;
+}
+
+static void gap(const char *pkg, const char *clause, sg_span row, const char *suffix, const char *action) {
+    sy_printf("GAP\t%s\t%s\t%.*s%s\t%s\n", pkg, clause, (int)row.n, row.p, suffix, action);
+}
+
+static void surface_gaps(const char *t, size_t tn, const char *pkg) {
+    long i = 0, kl = tx_len(pkg, SG_NAME);
+    static const char *plat[3] = { "@lnx", "@osx", "@win" };
+    while (i < (long)tn) {
+        long e = i;
+        sg_span f[SG_COLS];
+        int k, c;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, SG_COLS);
+        if (t[i] != '#' && k >= 9 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            if (span_is(f[8], "new")) {
+                gap(pkg, "S2", f[1], "", "verify the row, then set status to exists and bump the package Y");
+                c2++;
+            }
+            for (c = 5; c <= 7; c++)
+                if (span_is(f[c], "unverified")) {
+                    gap(pkg, "S4", f[1], plat[c - 5], "verify this platform cell on its target; set impl or refuse");
+                    c4++;
+                }
+        }
+        i = e + 1;
+    }
+}
+
+static void dep_gaps(const char *pk, size_t pn, const char *pol, size_t poln, const char *pkg) {
+    long i = 0, kl = tx_len(pkg, SG_NAME);
+    while (i < (long)pn) {
+        long e = i;
+        sg_span f[SG_COLS];
+        int k;
+        while (e < (long)pn && pk[e] != '\n') e++;
+        k = split(pk + i, e - i, f, SG_COLS);
+        if (pk[i] != '#' && k >= 6 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            long d = 0;
+            while (d < f[5].n) {
+                long de = d, at = -1, j;
+                char dep[SG_NAME];
+                while (de < f[5].n && f[5].p[de] != ';') de++;
+                if (de - d > 0 && !(de - d == 1 && f[5].p[d] == '-')) {
+                    for (j = d; j < de; j++)
+                        if (f[5].p[j] == '@') { at = j; break; }
+                    if (at < 0) at = de;
+                    if (at - d < SG_NAME) {
+                        sg_span r;
+                        tx_copy(dep, SG_NAME, f[5].p + d, at - d);
+                        dep[at - d] = 0;
+                        if (!policy_yes(pol, poln, dep)) {
+                            r.p = f[5].p + d;
+                            r.n = at - d;
+                            gap(pkg, "S10", r, "", "stabilize the dependency first (policy yes for it)");
+                            c10++;
+                        }
+                    }
+                }
+                d = de + 1;
+            }
+            return;
+        }
+        i = e + 1;
+    }
+}
+
+static int reviewed(const char *lg, size_t ln, const char *pkg) {
+    char id[SG_NAME + 16];
+    long i = 0, il;
+    tx_snprintf(id, sizeof id, "STABLE-REVIEW-%s", pkg);
+    il = tx_len(id, sizeof id);
+    while (i < (long)ln) {
+        long e = i;
+        sg_span f[4];
+        int k;
+        while (e < (long)ln && lg[e] != '\n') e++;
+        k = split(lg + i, e - i, f, 4);
+        if (k >= 3 && tx_same(f[1].p, f[1].n, id, il) && tx_find(f[2].p, f[2].n, "accept", 6) >= 0) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    size_t ssn = 0, pkn = 0, pon = 0, lgn = 0;
+    char *ss = load(root, "build/std-surface.tsv", &ssn);
+    char *pk = load(root, "build/tlib-packages.tsv", &pkn);
+    char *po = load(root, "build/tlib-policy.tsv", &pon);
+    char *lg = load(root, "agentwork/ledger.tsv", &lgn);
+    int i;
+    if (!ss || !pk) {
+        sy_eprintf("stable-gaps: cannot read build/std-surface.tsv or build/tlib-packages.tsv under %s\n", root);
+        return 2;
+    }
+    if (!po) { po = ""; pon = 0; }
+    if (!lg) { lg = ""; lgn = 0; }
+    if (argc > 2) {
+        for (i = 2; i < argc; i++) {
+            sg_span s;
+            s.p = argv[i];
+            s.n = tx_len(argv[i], SG_NAME);
+            add_pkg(s);
+        }
+    } else {
+        long a = 0;
+        while (a < (long)pkn) {
+            long e = a;
+            sg_span f[2];
+            while (e < (long)pkn && pk[e] != '\n') e++;
+            if (pk[a] != '#' && split(pk + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+        a = 0;
+        while (a < (long)ssn) {
+            long e = a;
+            sg_span f[2];
+            while (e < (long)ssn && ss[e] != '\n') e++;
+            if (ss[a] != '#' && split(ss + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+    }
+    for (i = 0; i < npkgs; i++) {
+        sg_span r;
+        char id[SG_NAME + 16];
+        surface_gaps(ss, ssn, pkgs[i]);
+        dep_gaps(pk, pkn, po, pon, pkgs[i]);
+        if (!reviewed(lg, lgn, pkgs[i])) {
+            tx_snprintf(id, sizeof id, "STABLE-REVIEW-%s", pkgs[i]);
+            r.p = id;
+            r.n = tx_len(id, sizeof id);
+            gap(pkgs[i], "S13", r, "", "add an accept review row to agentwork/ledger.tsv after the review");
+            c13++;
+        }
+    }
+    sy_printf("STABLE_GAPS total=%ld s2=%ld s4=%ld s10=%ld s13=%ld\n", c2 + c4 + c10 + c13, c2, c4, c10, c13);
+    return 0;
+}

@@ -1,0 +1,53 @@
+/* tools/cxlib/surfline.cx -- SURF evidence line: one tab-separated line a surface batch prints per checked item.
+ *   SURF<TAB>pkg<TAB>clause<TAB>row<TAB>result<TAB>batch<TAB>sha
+ * clause S1..S13, row = std-surface row name or `-` for a package-level item, result ok|FAIL,
+ * batch = producing batch id, sha = input hash.  No evidence line means UNKNOWN, never ok. */
+#pragma unisa module surfline
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+typedef struct { char pkg[64]; char clause[8]; char row[96]; char result[8]; char batch[64]; char sha[72]; } sl_line;
+
+/* Format one SURF line (with trailing newline) into buf; returns length or -1 when it does not fit or a field is empty/has a tab. */
+int sl_make(char *buf, int cap, const char *pkg, const char *clause, const char *row, const char *result,
+            const char *batch, const char *sha) {
+    const char *f[6];
+    int i, n;
+    f[0] = pkg; f[1] = clause; f[2] = row; f[3] = result; f[4] = batch; f[5] = sha;
+    for (i = 0; i < 6; i++) {
+        long j, l = tx_len(f[i], 256);
+        if (l <= 0) return -1;
+        for (j = 0; j < l; j++) if (f[i][j] == '\t' || f[i][j] == '\n') return -1;
+    }
+    n = tx_snprintf(buf, cap, "SURF\t%s\t%s\t%s\t%s\t%s\t%s\n", pkg, clause, row, result, batch, sha);
+    return (n < 0 || n >= cap) ? -1 : n;
+}
+
+/* Parse one line (no newline required).  Returns 1 for a well-formed SURF line, 0 for another line, -1 for a malformed SURF line. */
+int sl_parse(const char *p, long n, sl_line *out) {
+    long st[8], en[8], i, b = 0;
+    int k = 0;
+    char *dst[6];
+    int cap[6];
+    if (n < 5 || !tx_same(p, 5, "SURF\t", 5)) return 0;
+    for (i = 0; i <= n; i++)
+        if (i == n || p[i] == '\t') {
+            if (k < 8) { st[k] = b; en[k] = i; }
+            k++;
+            b = i + 1;
+        }
+    if (k != 7) return -1;
+    dst[0] = out->pkg; cap[0] = 64;
+    dst[1] = out->clause; cap[1] = 8;
+    dst[2] = out->row; cap[2] = 96;
+    dst[3] = out->result; cap[3] = 8;
+    dst[4] = out->batch; cap[4] = 64;
+    dst[5] = out->sha; cap[5] = 72;
+    for (i = 0; i < 6; i++) {
+        long l = en[i + 1] - st[i + 1];
+        if (l <= 0 || l >= cap[i]) return -1;
+        tx_copy(dst[i], cap[i], p + st[i + 1], l);
+        dst[i][l] = 0;
+    }
+    return 1;
+}

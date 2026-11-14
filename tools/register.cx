@@ -35,17 +35,21 @@
  * it at a private copy, so its fixture rows never meet another lane's writes (the byte-for-byte restore
  * assertions of tools/check-register.cx cannot hold while a third party appends in the same window).
  *
- * The root it runs in (the current directory) must hold ./unisacc.com and an out/ directory: --list and
- * run-batch are started as `sh ./unisacc.com ...` and the trial run writes out/register-ID-PID/.  A private
- * clone has neither (both are untracked), and the call then used to end in a bare ROLLED_BACK rc=1 with no
- * reason.  Both are checked before the lock and before anything is written: each missing one is named on
- * stderr with the command that fixes it, and the exit is 2. */
+ * The root it runs in (the current directory) must hold ./unisacc.com: --list and run-batch are started
+ * through it.  A root without it used to end in a bare ROLLED_BACK rc=1 with no reason; it is checked before
+ * the lock and before anything is written, named on stderr with the command that fixes it, exit 2.
+ * Nothing is created under out/ (project owner 2026-11-13): the prepared runner cache is
+ * sy_tmpdir()/unisacc-register-native and the trial run directory sy_tmpdir()/register-ID-PID; an out/
+ * directory is neither required nor made. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 #pragma unisa use text.fmt
+#pragma unisa use mem.heap
 #pragma unisa use cxlib.runnerprep
 
 static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
@@ -129,10 +133,8 @@ static int rg_root_missing(void) {
         fprintf(stderr, "register: REFUSE no ./unisacc.com in this root: the registry listing and the trial batch run are started as `sh ./unisacc.com ...` (a private clone does not carry it); fix: cp SHARED_ROOT/unisacc.com SHARED_ROOT/unisacc.com.build.json .\n");
         bad++;
     }
-    if (sy_exists("out/.") != 1) {
-        fprintf(stderr, "register: REFUSE no out/ directory in this root: the trial batch run writes out/register-ID-PID/ (out/ is untracked, a fresh clone has none); fix: mkdir out\n");
-        bad++;
-    }
+    /* no out/ requirement any more (project owner 2026-11-13: nothing may be created under out/ in the
+       checkout): the runner cache and the trial run directory live under sy_tmpdir() */
     return bad;
 }
 
@@ -221,7 +223,7 @@ int main(int argc, char **argv) {
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     char cache[4400], listbin[4400], batchbin[4400], why[512]; int reused;
-    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/out/register-native", root)) rg_die("prepare path", 0);
+    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir())) rg_die("prepare path", 0);
     if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
     if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
         rn_prepare(root, "tests/run-batch.cx", cache, batchbin, sizeof batchbin, &reused, why, sizeof why)) rg_die(why, 0);
@@ -246,8 +248,10 @@ int main(int argc, char **argv) {
         /* The batch run is outside the lock: run.cx/run-batch only read the row, while a check that itself
            registers (tools/check-register.cx) would otherwise wait on a lock its own parent holds. */
         rg_unlock(lk); lk = -1;
-        if (sy_realpath(".", root, sizeof root) < 0 || tx_snprintf(parent, sizeof parent, "%s/out/register-%s-%d", root, id, sy_pid()) >= (int)sizeof parent
-            || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory out/register-%s-%d under %s (is out/ a writable directory?)\n", id, sy_pid(), root); parent[0] = 0; }
+        /* tests/run-batch.cx accepts a canonical output parent below ROOT/out or named TMP/unisacc-affected-* only */
+        char tmpc[4096];
+        if (sy_realpath(".", root, sizeof root) < 0 || sy_realpath(sy_tmpdir(), tmpc, sizeof tmpc) < 0 || tx_snprintf(parent, sizeof parent, "%s/unisacc-affected-register-%s-%d", tmpc, id, sy_pid()) >= (int)sizeof parent
+            || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory register-%s-%d under %s (is the temp directory writable?)\n", id, sy_pid(), sy_tmpdir()); parent[0] = 0; }
         else {
             char *v[] = {"./tools/bound", "58", batchbin, root, parent, (char *)id, 0};
             rc = run(v, buf, sizeof buf);
@@ -276,5 +280,40 @@ int main(int argc, char **argv) {
     }
     if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=REGISTERED\n", id);
+    /* build/batch-packages.tsv is generated from the registry: a new batch makes the committed copy stale
+       (check-batch-packages table-fresh).  Regenerate it here, only for the real tables (a fixture run with
+       UNISACC_TABLES set must not rewrite the checked-in build table). */
+    if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
+        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--write", 0};
+        rc = run(v, buf, sizeof buf);
+        if (rc != 0) {
+            fprintf(stderr, "register: batch registered but build/batch-packages.tsv NOT regenerated (rc=%d); run tools/batch-packages-gen.cx -- --write\n", rc);
+            printf("REGISTER\tid=%s\tbatch_packages=STALE\n", id);
+            return 4;
+        }
+        printf("REGISTER\tid=%s\tbatch_packages=REGENERATED\n", id);
+        /* DSG-REG1: also leave the per-batch manifest tests/manifests/ID.tsv (checked by tools/reg-manifest.cx,
+           so a later commit that carries one of the three rows without the others is caught). */
+        {   size_t pn = 0; char *pb = (char *)cx_read("build/batch-packages.tsv", &pn), key[600], mp[700], *m;
+            size_t i = 0, kl, bl = strlen(brow), cl = strlen(crow), ml;
+            if (!pb || cx_fmt(key, sizeof key, "batch\t%s\t", id) || cx_fmt(mp, sizeof mp, "tests/manifests/%s.tsv", id)) { printf("REGISTER\tid=%s\tmanifest=SKIPPED\n", id); return 0; }
+            kl = strlen(key);
+            while (i < pn) {
+                size_t e = i; while (e < pn && pb[e] != '\n') e++;
+                if (e - i > kl && !memcmp(pb + i, key, kl)) {
+                    ml = 6 + bl + 9 + cl + 9 + (e - i) + 1; m = (char *)mm_alloc(ml + 1);
+                    if (!m) break;
+                    memcpy(m, "batch\t", 6); mm_copy(m + 6, ml + 1 - 6, brow, bl);
+                    memcpy(m + 6 + bl, "coverage\t", 9); mm_copy(m + 15 + bl, ml + 1 - 15 - bl, crow, cl);
+                    memcpy(m + 15 + bl + cl, "packages\t", 9); mm_copy(m + 24 + bl + cl, ml + 1 - 24 - bl - cl, pb + i, e - i); m[24 + bl + cl + (e - i)] = '\n';
+                    sy_mkdir("tests/manifests", 0755);
+                    printf("REGISTER\tid=%s\tmanifest=%s\n", id, cx_write(mp, m, ml) ? "WRITE_FAILED" : "WRITTEN");
+                    mm_free(m); return 0;
+                }
+                i = e + 1;
+            }
+            printf("REGISTER\tid=%s\tmanifest=SKIPPED\n", id);
+        }
+    }
     return 0;
 }

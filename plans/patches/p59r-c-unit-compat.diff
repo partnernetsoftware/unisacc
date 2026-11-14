@@ -1,0 +1,83 @@
+diff --git a/cx/compiler/routepipe.cx b/cx/compiler/routepipe.cx
+index a7aa79c0e6..a2f012a7ca 100644
+--- a/cx/compiler/routepipe.cx
++++ b/cx/compiler/routepipe.cx
+@@ -5,16 +5,20 @@
+ /* The object route and the link route as cx.stream pipelines. No libc and no include.
+    The package span, the resource stack and the linker's reopen are injected by the
+    driver; this module only orders the stages. Stage ids:
+-     1 front      the route's span up to e3 (under \0cli/run-forward on the object route)
+-     2 fwdsig     the forwardable signatures: on the object route the e3 side-car becomes
+-                  the unit tape with its forward marks (fk_mark); on the link route the
+-                  marks no unit resolved become a stub unit that joins the linked tape
++     1 front      on the object route the whole route's span
++     2 fwdsig     the forwardable signatures: on the link route the marks no unit
++                  resolved become a stub unit that joins the linked tape
+      3 back       the route's span from the stage after the tape to its end
+      4 tapecheck  the linked tape's check
+-   Object:  source -1-> side-car -2-> unit tape -3-> object
+-   Object, .cx unit:  source -1-> object (the whole route, no run-forward, no marks)
++   Object:  source -1-> object (the whole route, no run-forward, no marks)
+    Link:    linked tape -2-> linked tape -4-> checked tape [-3-> image]
+-   Shapes: 1 source, 2 side-car, 3 tape, 4 final bytes, 5 checked tape.
++   Shapes: 1 source, 3 tape, 4 final bytes, 5 checked tape.
++   Not in this version: forward marks in unit objects (front under \0cli/run-forward up to
++   e3, then fk_mark on the side-car). Under run-forward e3 rejects a called undefined
++   function that passes or returns a struct by value when the library signature resource
++   does not cover its name, so an ordinary C unit calling such a function of another unit,
++   or a .cx unit importing one (ms_of), would not compile. Until e3 leaves such a slot
++   unmarked instead, no unit object carries a mark and the link stage 2 passes the tape.
+    Result codes are the span's own (1-4), passed through unchanged by xs_run; the
+    output block is the caller's on 0. One route at a time. */
+ 
+@@ -66,21 +70,6 @@ static int rq_span(void *ctx, void *vin, void *vout, char *why, int cap) {
+     return rc ? rc : xs_item_set(vout, 1, out, outn, outn);
+ }
+ 
+-/* fwdsig on the object route: side-car in, marked unit tape out. */
+-static int rq_mark(void *ctx, void *vin, void *vout, char *why, int cap) {
+-    xs_item *in = vin;
+-    unsigned char *out = 0;
+-    long outn = 0;
+-    int rc;
+-    (void)ctx;
+-    rc = fk_mark(in->buf.data, in->buf.len, rq_src, !rq_cx, &out, &outn);
+-    if (rc) {
+-        rq_why(why, cap, rc == 1 ? "forwarding side-car missing" : rc == 4 ? "out of memory" : "forwarding side-car malformed");
+-        return 1;
+-    }
+-    return xs_item_set(vout, 1, out, outn, outn);
+-}
+-
+ /* fwdsig on the link route: no unresolved mark, the tape passes; otherwise the stub text
+    is compiled as one more unit object tape and the linker takes it. */
+ static int rq_stub(void *ctx, void *vin, void *vout, char *why, int cap) {
+@@ -154,11 +143,8 @@ static int rq_go(int h, int pr, int shape, unsigned char *in, long inn, unsigned
+     return 0;
+ }
+ 
+-/* A unit object from one source: front under run-forward, fwdsig, back.
+-   A .cx unit takes the whole route as one stage, without run-forward: none of its
+-   undefined names is ever marked (they are imports), and under run-forward e3 rejects an
+-   undefined function that passes or returns a struct by value when the library signature
+-   resource does not cover it, which is what an imported cx function such as ms_of is. */
++/* A unit object from one source, .c or .cx: the whole route as one stage, the bytes the
++   plain span gives. */
+ int rq_object(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int),
+               int (*put)(const char *, int, const unsigned char *, int), int (*pop)(void),
+               const char *route, const char *tgt, const char *src, int cx,
+@@ -171,12 +157,8 @@ int rq_object(int (*span)(const char *, const char *, const char *, int, unsigne
+     *outn = 0;
+     rq_spanf = span; rq_putf = put; rq_popf = pop; rq_moref = 0;
+     rq_tgt = tgt; rq_src = src; rq_cx = cx;
+-    rq_set(&rq_st[0], route, 0, "e3", "\0cli/run-forward", 16);
+-    rq_set(&rq_st[1], route, "tapecheck", 0, 0, 0);
+-    rq_set(&rq_st[2], route, 0, 0, 0, 0);
+-    pr = xs_open(&h, (long)(~0UL >> 1)) ||
+-         (cx ? xs_add(h, 1, 1, 4, rq_span, &rq_st[2])
+-             : (xs_add(h, 1, 1, 2, rq_span, &rq_st[0]) || xs_add(h, 2, 2, 3, rq_mark, 0) || xs_add(h, 3, 3, 4, rq_span, &rq_st[1])));
++    rq_set(&rq_st[0], route, 0, 0, 0, 0);
++    pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 1, 1, 4, rq_span, &rq_st[0]);
+     return rq_go(h, pr, 1, in, inn, out, outn, why, cap);
+ }
+ 

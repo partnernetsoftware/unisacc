@@ -1,0 +1,160 @@
+/* tools/check-stable-eval.cx -- contract check for tools/stable-eval.cx.
+ *   sh ./unisacc.com tools/check-stable-eval.cx -- ABS_WORK
+ * Fixture under WORK/stable-eval-fixture-PID/{build,agentwork}; does not read the real tables.
+ * Keeps the original 13 cases and adds v2 S3/S5/S11 cases when columns exist.
+ * Output PASS/FAIL and CHECK_STABLE_EVAL; exit 0 iff failed==0. */
+#pragma unisa use cxlib.toolprep
+#define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "check-stable-eval: format error\n"); exit(2); } } while (0)
+#pragma unisa use cxlib.surfline
+static sl_line pl;
+static int failed, checks;
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tstable-eval.%s\n", ok ? "PASS" : "FAIL", n); }
+static int sh(const char *cmd, char *out, int cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}, *text = 0;
+    size_t n = 0, i;
+    int rc = cx_runv_timeout(v, 50, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static char fix[2600], cmd[6000], native[2800], out[60000], sspath[2800], pkpath[2800], popath[2800], lgpath[2800];
+/* Fourteen-column v2 rows (stab since own test). */
+static const char *SS_NEW =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n"
+    "fx.a\tf_two\tint f_two(void)\tx\tnone\timpl\timpl\timpl\tnew\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_OK =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n"
+    "fx.a\tf_two\tint f_two(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_UNV =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\tunverified\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_ERRBAD =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\t非 0 表失败\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_CAPBAD =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\trefuse:ENOSYS cap=nope\texists\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_CAPOK =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\trefuse:ENOSYS cap=at\texists\t-\tpre\t0.1.0\tnone\t-\n";
+static const char *SS_OWNBAD =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\topen:fd close:sy_no_such\t-\n";
+static const char *SS_OWNOK =
+    "# std-surface v2\n"
+    "# cap\tat\trelative dir\n"
+    "fx.a\tsy_close\tint sy_close(int fd)\tx\t-errno\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n"
+    "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\topen:fd close:sy_close\t-\n";
+static const char *PK_DEP =
+    "# fixture\n"
+    "fx.a\t0.1.0\taa\tcx/fx\t-\tfx.dep@0.1.0\tn\n"
+    "fx.dep\t0.1.0\tbb\tcx/dep\t-\t-\tn\n";
+static const char *PK_NODEP =
+    "# fixture\n"
+    "fx.a\t0.1.0\taa\tcx/fx\t-\t-\tn\n";
+static int put(const char *path, const char *text) { return cx_write(path, text, strlen(text)); }
+static int run(char *outbuf, int cap, int want, const char *extra) {
+    int rc;
+    SP(cmd, sizeof cmd, "'%s' '%s' %s 2>&1", native, fix, extra);
+    rc = sh(cmd, outbuf, cap);
+    return rc == want;
+}
+static int has(const char *o, const char *s) { return strstr(o, s) != 0; }
+int main(int argc, char **argv) {
+    char root[2048], why[256];
+    int rc;
+    if (argc != 2 || argv[1][0] != '/' || strlen(argv[1]) > 2400 || strchr(argv[1], '\'')) {
+        fprintf(stderr, "check-stable-eval: usage ABS_WORK_DIR\n"); return 2;
+    }
+    if (!getcwd(root, sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
+    if (mkdir(argv[1], 0700) && errno != EEXIST) { fprintf(stderr, "check-stable-eval: prepare directory\n"); return 2; }
+    SP(fix, sizeof fix, "%s/stable-eval-fixture-%ld", argv[1], (long)getpid());
+    SP(sspath, sizeof sspath, "%s/build/std-surface.tsv", fix);
+    SP(pkpath, sizeof pkpath, "%s/build/tlib-packages.tsv", fix);
+    SP(popath, sizeof popath, "%s/build/tlib-policy.tsv", fix);
+    SP(lgpath, sizeof lgpath, "%s/agentwork/ledger.tsv", fix);
+    SP(native, sizeof native, "%s/stable-eval-native", argv[1]);
+    if (tq_native(root, "tools/stable-eval.cx", native, why, sizeof why)) { fprintf(stderr, "check-stable-eval: %s\n", why); return 2; }
+    SP(cmd, sizeof cmd, "mkdir -p '%s/build' '%s/agentwork'", fix, fix);
+    if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
+
+    SP(cmd, sizeof cmd, "'%s' '%s' 2>&1", native, root);
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 1 && has(out, "CHECK_STABLE\tNOT-READY") && !has(out, "STABLE-READY\tok=") && !has(out, "\tSTABLE-READY\tok"), "real-tree-not-ready");
+
+    put(sspath, SS_NEW); put(pkpath, PK_NODEP); put(popath, "stable\tno\n"); put(lgpath, "# fixture\n");
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS2\tFAIL"), "s2-new-row-fails");
+    put(sspath, SS_OK);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS2\tok"), "s2-none-new-ok");
+    put(sspath, SS_UNV);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS4\tFAIL"), "s4-unverified-fails");
+    put(sspath, SS_OK);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS4\tok"), "s4-clean-ok");
+    put(pkpath, PK_DEP);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS10\tFAIL"), "s10-dep-unstable");
+    put(popath, "stable\tno\nfx.dep\tyes\n");
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS10\tok"), "s10-dep-stable");
+    put(pkpath, PK_NODEP);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS10\tok"), "s10-no-deps-ok");
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS13\tFAIL"), "s13-missing-fails");
+    put(lgpath, "# fixture\n2026-11-12\tSTABLE-REVIEW-fx.a\treview accept api_sha=aa\t-\t-\treviewer\n");
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS13\tok"), "s13-accept-ok");
+    {   static const char *U[] = {"S1", "S6", "S7", "S8", "S9", "S12", 0};
+        int i, good = run(out, sizeof out, 1, "fx.a");
+        for (i = 0; U[i] && good; i++) {
+            char want[64], bad[64];
+            SP(want, sizeof want, "CRITERION\tfx.a\t%s\tUNKNOWN", U[i]);
+            SP(bad, sizeof bad, "CRITERION\tfx.a\t%s\tok", U[i]);
+            if (!has(out, want) || has(out, bad)) good = 0;
+        }
+        ck(good, "unknown-never-ok"); }
+    /* With v2 columns S3/S5/S11 evaluate: S2 S3 S4 S5 S10 S11 S13 can be ok (7), still NOT-READY. */
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS3\tok") && has(out, "PACKAGE\tfx.a\tNOT-READY") &&
+       has(out, "CHECK_STABLE\tNOT-READY"), "ready-needs-all-13");
+    put(sspath, SS_ERRBAD);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS3\tFAIL"), "s3-errors-grammar-fails");
+    put(sspath, SS_CAPBAD);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS5\tFAIL"), "s5-unknown-cap-fails");
+    put(sspath, SS_CAPOK);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS5\tok"), "s5-known-cap-ok");
+    put(sspath, SS_OWNBAD);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS11\tFAIL"), "s11-missing-close-fails");
+    put(sspath, SS_OWNOK);
+    ck(run(out, sizeof out, 1, "fx.a") && has(out, "CRITERION\tfx.a\tS11\tok"), "s11-close-row-ok");
+    {   char evp[2800], extra[2900], l1[300], l2[300];
+        SP(evp, sizeof evp, "%s/build/surf.tsv", fix);
+        SP(extra, sizeof extra, "--evidence '%s/build' fx.a", fix);
+        /* no surf.tsv: every evidence clause stays UNKNOWN */
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS6\tUNKNOWN") && has(out, "CRITERION\tfx.a\tS12\tUNKNOWN"), "evidence-absent-unknown");
+        if (sl_make(l1, sizeof l1, "fx.a", "S6", "f_one", "ok", "b1", "aa11") < 0 ||
+            sl_make(l2, sizeof l2, "fx.a", "S7", "f_one", "FAIL", "b2", "bb22") < 0) { printf("FAIL\tsurfline-make\n"); return 2; }
+        { char both[700]; SP(both, sizeof both, "%s%s", l1, l2); put(evp, both); }
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS6\tok") && has(out, "CRITERION\tfx.a\tS7\tFAIL") &&
+           has(out, "CRITERION\tfx.a\tS8\tUNKNOWN") && !has(out, "CRITERION\tfx.a\tS8\tok"), "evidence-ok-fail-unknown");
+        /* evidence names a row that std-surface does not have: conflict -> FAIL, never ok */
+        if (sl_make(l1, sizeof l1, "fx.a", "S9", "f_ghost", "ok", "b1", "aa11") < 0) return 2;
+        put(evp, l1);
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS9\tFAIL") && !has(out, "CRITERION\tfx.a\tS9\tok"), "evidence-row-conflict-fails");
+        put(evp, "SURF\tfx.a\tS1\tf_one\tok\n");
+        ck(run(out, sizeof out, 1, extra) && has(out, "CRITERION\tfx.a\tS1\tFAIL") && !has(out, "CRITERION\tfx.a\tS1\tok"), "evidence-malformed-fails");
+        ck(sl_parse("SURF\ta\tS1\t-\tok\tb\th", 18, &pl) == 1 && sl_parse("x\ty", 3, &pl) == 0 &&
+           sl_make(l1, sizeof l1, "a", "S1", "r", "", "b", "h") < 0, "surfline-parse-make");
+    }
+    SP(cmd, sizeof cmd, "mv '%s' '%s.moved'", sspath, sspath);
+    sh(cmd, out, sizeof out);
+    ck(run(out, sizeof out, 2, "fx.a"), "missing-table-rc2");
+
+    printf("CHECK_STABLE_EVAL\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

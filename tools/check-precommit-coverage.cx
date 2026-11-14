@@ -1,0 +1,109 @@
+/* tools/check-precommit-coverage.cx -- tools/precommit.cx 登记配对闸(REG-CLOSED-GATE)的检查,夹具为 sy_tmpdir 下的临时 git 仓。
+ *
+ *   sh ./unisacc.com tools/check-precommit-coverage.cx
+ *
+ * (1) 只暂存 batches.tsv 新行、coverage 行缺 -> 拒绝并点名批次 id 与缺行文件;(2) 两张表一起暂存 -> 通过;
+ * (3) 只暂存 coverage 行(DECLARED_DEPENDENCY)-> 通过;(4) HEAD 已未覆盖的批次不归咎;(5) 不涉及两张表的提交不受影响。
+ * 求值走夹具内的 tests/run.cx --list(与 s9 init 同一解析器),按索引内容而非工作树。输出 PASS/FAIL 与 CHECK_PRECOMMIT_COVERAGE<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char td[320], root[400];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-precommit-coverage.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-precommit-coverage.%s\n", name); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    return rc;
+}
+static int has(const char *h, const char *n) {
+    long i, j, hl = tx_len(h, 100000), nl = tx_len(n, 1000);
+    for (i = 0; i + nl <= hl; i++) { for (j = 0; j < nl && h[i + j] == n[j]; j++) {} if (j == nl) return 1; }
+    return 0;
+}
+static int w(const char *rel, const char *body) {
+    char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
+    return cx_write(p, body, tx_len(body, 100000));
+}
+
+#define BH "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+#define CH "id\tlayer\timplementation\texpected_or_gap\tsource\n"
+#define SRC "tools/check-precommit-freeze.cx"
+#define BROW(id, cov) id "\tIMPLEMENTED\tinterfaces\t" SRC "\tSOURCE\tlnx/x86_64\t55\t-\t" SRC "\t-\t" cov "\trc0:X\tproduct\tdaily\n"
+#define CROW(k) k "\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\texpected\t" SRC "\n"
+#define CDEC(k) k "\tinterfaces\tDECLARED_DEPENDENCY\tgap\t" SRC "\n"
+
+/* 在夹具里跑 precommit,返回其输出;rc 经参数 */
+static int pc(char *out, size_t cap) {
+    char cmd[1200];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/precommit.cx 2>&1", td)) return 99;
+    return sh(cmd, out, cap);
+}
+static int git(const char *args) {
+    char cmd[1200]; if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git %s >/dev/null 2>&1", td, args)) return 99;
+    return sh(cmd, 0, 0);
+}
+
+int main(int argc, char **argv) {
+    int mode_block = argc > 1 && tx_eqz(argv[1], "--block"), mode_pass = argc > 1 && tx_eqz(argv[1], "--pass");
+    char out[8192], cwd[400]; char *o = 0; size_t n = 0; int rc;
+    if (!mode_block && !mode_pass) { sy_printf("usage: --block | --pass\n"); return 2; }
+    {   char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+        mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
+        mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
+    if (cx_fmt(td, sizeof td, "%s/precommit-cov-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
+    {   char cmd[1500];
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir tests && "
+                   "ln -s '%s/unisacc.com' unisacc.com && ln -s '%s/tools' tools && ln -s '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv && "
+                   "ln -s '%s/tests/cases' tests/cases && ln -s '%s/tests/cxlib' tests/cxlib && cp '%s/tests/run.cx' tests/run.cx", td, root, root, root, root, root, root, root) || sh(cmd, 0, 0)) { ck(0, "fixture"); return 1; } }
+    if (mode_block) {
+    /* 基线提交:HEAD 有 A(已覆盖)与 P(未覆盖,既存);run.cx 在夹具内 */
+    w("tests/batches.tsv", BH BROW("a", "cov.a") BROW("p", "cov.p"));
+    w("tests/coverage.tsv", CH CROW("cov.a"));
+    git("add tests/run.cx tests/batches.tsv tests/coverage.tsv");
+    git("commit -q -m base --no-verify");
+    /* (4) HEAD 已未覆盖的 P:只暂存无关的 coverage 声明行,不归咎于 P */
+    w("tests/coverage.tsv", CH CROW("cov.a") CDEC("cov.d"));
+    git("add tests/coverage.tsv");
+    rc = pc(out, sizeof out); (void)rc;
+    ck(!has(out, "BLOCKED registry unknown-coverage"), "preexisting-uncovered-not-blamed");
+    git("reset -q tests/coverage.tsv");
+    }
+    /* 基线改为全覆盖,再做 (1)(2)(3) */
+    w("tests/batches.tsv", BH BROW("a", "cov.a"));
+    w("tests/coverage.tsv", CH CROW("cov.a"));
+    git("add tests/run.cx tests/batches.tsv tests/coverage.tsv"); git("commit -q -m base2 --no-verify");
+    w("tests/batches.tsv", BH BROW("a", "cov.a") BROW("b", "cov.b"));
+    git("add tests/batches.tsv");
+    if (mode_block) {
+    w("tests/coverage.tsv", CH CROW("cov.a") CROW("cov.b"));   /* 工作树有行、索引没有:仍须拦(工作树不能掩盖) */
+    rc = pc(out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry unknown-coverage") && has(out, "id=b") && has(out, "cov.b") && has(out, "tests/coverage.tsv"), "batches-only-blocked-naming-id-despite-worktree-row");
+    ck(has(out, "commit-own.cx -- -m MSG --keyed tests/batches.tsv b --keyed tests/coverage.tsv cov.b"), "hint-one-command");
+    } else {
+    w("tests/coverage.tsv", CH CROW("cov.a") CROW("cov.b"));
+    git("add tests/coverage.tsv");
+    rc = pc(out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0") && !has(out, "BLOCKED registry"), "both-staged-passes");
+    git("commit -q -m both --no-verify");
+    w("tests/coverage.tsv", CH CROW("cov.a") CROW("cov.b") CDEC("cov.d"));
+    git("add tests/coverage.tsv");
+    rc = pc(out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0"), "coverage-only-passes");
+    git("commit -q -m cov --no-verify");
+    w("note.txt", "x\n"); git("add note.txt");
+    rc = pc(out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0") && !has(out, "BLOCKED registry"), "unrelated-commit-unaffected");
+    }
+    {   char cmd[500]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
+    sy_printf("CHECK_PRECOMMIT_COVERAGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

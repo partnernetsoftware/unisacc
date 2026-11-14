@@ -15,7 +15,13 @@
  *   (3) --resume over the same OUT reuses (rc 0);
  *   (4) a tampered seed helper is refused on resume;
  *   (5) chain-step ctx refuses a context whose source SID differs from the receipts and accepts the
- *       matching one.
+ *       matching one;
+ *   (6) OUT/chain-step.pin names the one chain-step executable of this output and it is the
+ *       producer_sha of the receipts; a changed chain-step in the checkout (the 0.0.58 stop: "seed
+ *       helper receipt mismatch" after an edit while the chain ran) is refused by the receipt when
+ *       run directly, and does not reach a resumed chain, which keeps its pinned producer; a
+ *       changed pinned executable is refused;
+ *   (7) a context directory left without context.tsv is set aside before prepare-context.
  * Marker: CHECK_CHAIN_FRESH_OUT failed=0.  Fixture only; it does not grant construction qualification. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -24,6 +30,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.chainroot
 
 static const char *OD = "out";
 static int failed;
@@ -88,11 +95,23 @@ int main(int argc, char **argv) {
     char root[4400], com[4400], f[4400], p[4400], q[4400], script[9000];
     if (argc != 4 || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/') { fprintf(stderr, "usage: check-chain-fresh-out /ABS/OUT /ABS/chain-step-tool /ABS/candidate-chain-tool\n"); return 2; }
     const char *steptool = argv[2], *cand = argv[3];
+    /* 假根没有 kernel-route/asm-source 源文件:显式夹具开关(DSG-DRV1 第 3 片),真实链缺源副本会拒绝 */
+    setenv("UNISACC_PIN_FIXTURE", "1", 1);
     if (sy_realpath(".", root, sizeof root) < 0) return 2;
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(f, sizeof f, "%s/chain-fresh-%ld", argv[1], sy_now_ms())) return 2;
     /* run-batch names OUT but leaves it to the check to create. */
     if (sy_mkdir(argv[1], 0755) && sy_exists(argv[1]) != 1) { fprintf(stderr, "check-chain-fresh-out: cannot create OUT %s\n", argv[1]); return 2; }
     if (sy_mkdir(f, 0755)) { fprintf(stderr, "check-chain-fresh-out: fixture exists or cannot be made: %s\n", f); return 2; }
+    /* The snapshot goes to the chain base (cxlib.chainroot), never to the real cache root: HOME and
+       TMPDIR of this run are side by side below the fixture's own directory and UNISACC_CHAIN_BASE
+       names a session root below that TMPDIR. */
+    char cbase[4600];
+    {
+        char fh[4400], ft[4400], ftc[4400];
+        if (cx_fmt(fh, sizeof fh, "%s.home", f) || cx_fmt(ft, sizeof ft, "%s.tmp", f) || sy_mkdir(fh, 0700) || sy_mkdir(ft, 0700) || sy_realpath(ft, ftc, sizeof ftc) < 0) return 2;
+        if (cx_fmt(cbase, sizeof cbase, "%s/unisacc-session-chain-fresh", ftc)) return 2;
+        if (setenv("HOME", fh, 1) || setenv("TMPDIR", ftc, 1) || setenv("UNISACC_CHAIN_BASE", cbase, 1)) return 2;
+    }
     static const char *dirs[] = {"seed", "tools", "build", "cx", "cx/compiler", 0};
     for (int i = 0; dirs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, dirs[i]) || sy_mkdir(p, 0755)) return 2; }
     /* tools/bound builds its watchdog from tools/bound.c and cx/compiler/boundgate.cx of the same tree. */
@@ -114,10 +133,17 @@ int main(int argc, char **argv) {
     static const char prog[] = "int main(void) { return 0; }\n";
     if (cx_fmt(p, sizeof p, "%s/tools/source-package.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
     if (cx_fmt(p, sizeof p, "%s/tools/source-job-wave.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
+    /* 钉住 preflight 记录源码 sha:夹具检出需有该源文件(桩编译器不读它) */
+    if (cx_fmt(p, sizeof p, "%s/tools/preflight.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
     if (cx_fmt(p, sizeof p, "%s/a", f) || cx_write(p, "a\n", 2)) return 2;
+    /* The fixture checkout's chain-step: what "sh ROOT/unisacc.com ROOT/tools/chain-step.cx" builds
+       (-o) or runs. It lives outside the fixture repository so the drift case below can change it
+       the way an edit of the working checkout changes the real one. */
+    char stepcur[4400];
+    if (cx_fmt(stepcur, sizeof stepcur, "%s.step", f) || copyf(steptool, stepcur, 0755)) return 2;
     if (cx_fmt(script, sizeof script,
-        "#!/bin/sh\ncase \"$1\" in\n*/tools/preflight.cx) exit 0;;\n*/tools/chain-step.cx) shift 2; exec '%s' \"$@\";;\nesac\nexec sh '%s' \"$@\"\n",
-        steptool, com)) return 2;
+        "#!/bin/sh\ncase \"$1\" in\n*/tools/preflight.cx) if [ \"$2\" = -o ]; then printf '#!/bin/sh\\nexit 0\\n' > \"$3\"; fi; exit 0;;\n*/tools/chain-step.cx) if [ \"$2\" = -o ]; then exec cp '%s' \"$3\"; fi; shift 2; exec '%s' \"$@\";;\nesac\nexec sh '%s' \"$@\"\n",
+        stepcur, stepcur, com)) return 2;
     if (cx_fmt(p, sizeof p, "%s/unisacc.com", f) || cx_write(p, script, strlen(script)) || sy_chmod(p, 0755)) return 2;
     if (cx_fmt(p, sizeof p, "%s/unisacc.com.build.json", f) || cx_write(p, "{}", 2)) return 2;
     if (sy_chdir(f)) return 2;
@@ -138,17 +164,26 @@ int main(int argc, char **argv) {
     free(log);
     if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", out)) return 2;
     ck(has(p, "DONE\tbuild-objects\t") && has(p, "DONE\tbuild\t") && has(p, "DONE\twave-objects\t") && has(p, "DONE\twave-runner\t"), "fresh-out-four-controller-phases-done");
+    /* The fixture controller forwards no host symbol, so the first pass does not stop at the
+       checkpoint: build-front records the whole image (mode=image) and build adopts it. */
+    ck(has(p, "DONE\tbuild-front\t"), "fresh-out-build-front-done");
+    if (cx_fmt(p, sizeof p, "%s/build/source-package-O2.phase.receipt", out)) return 2;
+    ck(has(p, "\nphase=front-from-source\n") && has(p, "\nmode=image\n") && has(p, "\nstub_sha=-\n"), "fresh-out-front-image-mode-receipt");
+    if (cx_fmt(p, sizeof p, "%s/build/source-package-O2.elf.receipt", out)) return 2;
+    ck(has(p, "\nphase=link-from-source\n") && has(p, "\nfront_sha="), "fresh-out-link-binds-front-receipt");
     if (cx_fmt(p, sizeof p, "%s/ctx", out)) return 2;
     ck(sy_exists(p) == 0, "fresh-out-no-ctx-before-ctx-phase");
     char snap[4400], build[4400], helper[4400], want[200];
-    if (cx_fmt(snap, sizeof snap, "%s/%s/release-snap-%.10s", f, OD, rev) || cx_fmt(build, sizeof build, "%s/build", out) || cx_fmt(helper, sizeof helper, "%s/identity-helper", build)) return 2;
+    if (cr_snap(f, rev, 0, snap, sizeof snap) || cx_fmt(build, sizeof build, "%s/build", out) || cx_fmt(helper, sizeof helper, "%s/identity-helper", build)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/%s/release-snap-%.10s", f, OD, rev)) return 2;
+    ck(sy_exists(snap) == 1 && !strncmp(snap, cbase, strlen(cbase)) && !strncmp(snap + strlen(cbase), "/snap/", 6) && sy_exists(p) != 1, "fresh-out-snap-at-chain-base-not-in-out");
     if (cx_fmt(p, sizeof p, "%s.receipt", helper)) return 2;
     ck(has(p, "chain-seed-helper-v1\n") && has(p, "\noutput_sha="), "seed-helper-receipt");
     char *hv[] = {helper, snap, 0}, *sid = 0;
     if (run(hv, 10, &sid) || !sid || strlen(sid) != 65) { ck(0, "seed-helper-sid"); return 1; }
     sid[64] = 0;
     if (cx_fmt(want, sizeof want, "\nsource_sha=%s\n", sid)) return 2;
-    static const char *recs[] = {"source-package-O2.o", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf", 0};
+    static const char *recs[] = {"source-package-O2.o", "source-package-O2.phase", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf", 0};
     int all = 1;
     for (int i = 0; recs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s.receipt", build, recs[i]) || !has(p, want)) all = 0; }
     ck(all, "controller-receipts-bind-seed-sid");
@@ -165,6 +200,41 @@ int main(int argc, char **argv) {
     if (cx_write(helper, hb, hn) || sy_chmod(helper, 0755)) return 2;
     free(hb);
     ck(run(resume, 50, 0) == 0, "restored-seed-helper-reused");
+    /* (6) 0.0.58: the receipts name chain-step itself as producer. The chain pins one chain-step
+       executable per output; an edit of the checkout's chain-step while the chain runs must not
+       change the producer of that output. */
+    char pin[4400], native[4400], pinsha[65], prod[200];
+    size_t pn = 0, sn = 0, nn = 0;
+    if (cx_fmt(pin, sizeof pin, "%s/chain-step.pin", out) || cx_fmt(native, sizeof native, "%s/chain-step.native", out)) return 2;
+    char *pb = cx_read(pin, &pn);
+    int pinned = pb && pn == 18 + 11 + 64 + 1 && !memcmp(pb, "chain-step-pin-v1\nnative_sha=", 29) && pb[pn - 1] == '\n';
+    if (pinned) { memcpy(pinsha, pb + 29, 64); pinsha[64] = 0; }
+    if (cx_fmt(p, sizeof p, "%s.receipt", helper) || cx_fmt(prod, sizeof prod, "\nproducer_sha=%s\n", pinned ? pinsha : "-")) return 2;
+    ck(pinned && has(p, prod), "step-pin-recorded-and-is-the-receipt-producer");
+    char *sb = cx_read(stepcur, &sn), *drift = sb ? malloc(sn + 1) : 0;
+    if (!drift) return 2;
+    if (mm_copy(drift, (long)sn + 1, sb, (long)sn)) return 2;
+    drift[sn] = '\n';
+    if (cx_write(stepcur, drift, sn + 1) || sy_chmod(stepcur, 0755)) return 2;
+    /* The drifted tool itself, run the old way, refuses the receipt and names the field: the
+       mismatch that stopped the chain, and proof that the receipt check is as strict as before. */
+    char *dv[] = {stepcur, "seed-helper", rev, snap, build, "/usr/bin/x86_64-linux-gnu-gcc-11", 0};
+    log = 0; rc = run(dv, 30, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE seed helper receipt mismatch") && strstr(log, "seed helper receipt differs: recorded=[producer_sha="), "drifted-step-tool-refused-and-field-named");
+    free(log);
+    log = 0; rc = run(resume, 50, &log);
+    if (rc && log) fputs(log, stdout);
+    size_t pn2 = 0; char *pb2 = cx_read(pin, &pn2);
+    ck(rc == 0 && log && strstr(log, "CHAIN\tseed-helper\treused=") && pb2 && pn2 == pn && !memcmp(pb, pb2, pn), "checkout-step-drift-keeps-pinned-producer");
+    free(log); free(pb2);
+    char *nb = cx_read(native, &nn);
+    if (!nb || cx_write(native, drift, sn + 1) || sy_chmod(native, 0755)) return 2;
+    log = 0; rc = run(resume, 50, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE chain-step pin mismatch"), "changed-pinned-step-refused");
+    free(log);
+    if (cx_write(native, nb, nn) || sy_chmod(native, 0755)) return 2;
+    ck(run(resume, 50, 0) == 0, "restored-pinned-step-reused");
+    free(nb); free(pb); free(sb); free(drift);
     char ctx[4400], rec[9000], boot[4400];
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx-bind", f) || sy_mkdir(ctx, 0755) || cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", build)) return 2;
     if (cx_fmt(p, sizeof p, "%s/context.tsv", ctx)) return 2;
@@ -176,6 +246,15 @@ int main(int argc, char **argv) {
     if (cx_fmt(rec, sizeof rec, "context-v1\ncc\t/usr/bin/cc\nbootstrap\t%s\nsource\t%s\n", boot, sid) || cx_write(p, rec, strlen(rec))) return 2;
     log = 0; rc = run(cv, 30, &log);
     ck(rc == 0 && log && strstr(log, "ctx-bind\tsource="), "ctx-bind-same-sid-accepted");
+    free(log);
+    /* (7) a context directory without context.tsv (a failed prepare-context) is set aside before
+       the controller is asked again; the fixture controller makes no context, so the step still
+       ends on the missing record, after the set-aside. */
+    char part[4400];
+    if (cx_fmt(part, sizeof part, "%s/ctx-partial", f) || sy_mkdir(part, 0755) || cx_fmt(p, sizeof p, "%s/initial-source.status", part) || cx_write(p, "rc\t142\n", 7)) return 2;
+    char *pv[] = {(char *)steptool, "ctx", rev, snap, build, part, "/usr/bin/cc", 0};
+    log = 0; rc = run(pv, 30, &log);
+    ck(rc != 0 && log && strstr(log, "CHAIN\tctx\tset-aside=") && strstr(log, "REFUSE context record missing") && sy_exists(part) == 0, "partial-context-set-aside-before-prepare");
     free(log); free(sid); free(rev);
     printf("CHECK_CHAIN_FRESH_OUT\tfailed=%d\n", failed);
     return failed ? 1 : 0;
