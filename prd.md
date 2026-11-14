@@ -447,7 +447,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 <a id="flow-net-contracts"></a>
 ### 4.0 七流（字节管道）
 
-定义、规模、耗时见 §3.3（唯一权威）。各流做什么：e2 预处理（续行 / 注释 / 指令 / 宏 / 条件 / include）；e1 词法（最长匹配）；e3 语法 + 类型等合成段，产出 tape；e4 opt（窥孔、栈 -> 寄存器类改写）；prune 按根 / 导出剪不可达整函数（政策在代码，不读金表）；lower 把 ABI / regmap / syscall / 布局 / reloc 降到目标 ops；elf 编码并写出 ELF / Mach-O / PE。
+定义、规模、耗时见 §3.3（唯一权威）。各流做什么：e2 预处理（续行 / 注释 / 指令 / 宏 / 条件 / include）；e1 词法（最长匹配）；e3 语法 + 类型等合成段，产出 tape；e4 opt（窥孔、栈 -> 寄存器类改写）；prune 按根 / 导出剪不可达整函数（政策在代码，不读金表；回退合同：带子里有 `callr`（间接调用）则整带原样输出，见 `exec/prune/prune-result.tsv`、`tools/prune-cases-gen.cx` 的 indirect-call-preserved 用例、[prd_cx.md](prd_cx.md) 5.1 的 E2 定因）；lower 把 ABI / regmap / syscall / 布局 / reloc 降到目标 ops；elf 编码并写出 ELF / Mach-O / PE。
 
 ### 4.1 十八网（ask 事实表）
 
