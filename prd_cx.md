@@ -1115,6 +1115,56 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 - 新工具名 `tools/check-export.cx`、`tools/cxpack-gen.cx` 开工前先跑 `git log --all --oneline -- tools/NAME` 核对未被占用(本节未核)。
 - 回滚:E4 至 E6、E10 各自一个提交,撤提交即回到「export 被 `unknown unisa pragma` 拒绝」的现状;E8 撤一行即回到 cxpack 单独生效。
 
+### 10.8 sy_res_live 与 np_exec 设计(2026-11-14 设计;未实现,不得记 PASS;0.0.63 库包源类)
+
+输入身份:HEAD 4006fe4cd3 只读读码,源码未改,未实跑任何新代码;行号均取自该提交。`build/std-surface.tsv` 现余 `new` 两行:449(`long sy_res_live(int kind);`,三目标 `refuse:ENOSYS 本版未实现`,错误列 `-EINVAL`,note「句柄型资源存活数」)与 126(`int np_exec(const sy_spawn_t *o, mg_buf *out, mg_buf *err, int64_t cap, sy_exit_t *st);`,错误列 `-errno;-EMSGSIZE`,note「带界捕获;err 为 0 时并入 out;任一路超过 cap 记 -EMSGSIZE 并杀子进程」)。缺口行 `build/pkg-gaps.tsv` 40(B2f-RES)、41(B2f-NPEXEC),均 OPEN。
+
+(1) sy_res_live 语义与计数点
+
+- 决策:返回「经登记点登记、尚未注销」的句柄数,不是操作系统真值。kind 枚举放新文件:`SY_RES_FD 1`、`SY_RES_PROC 2`、`SY_RES_MAP 3`;未知 kind 返回 `-EINVAL`(与表 449 错误列一致)。计数器是模块私有 static long 数组,无系统调用,因此三目标可同码;表 449 三列由 `refuse:ENOSYS` 改 `impl` 须等各目标实跑,osx/win 先写 `unverified`(词表先例:表 124 行 win 列)。
+- 冻结约束的处理:`cx/sys`、`cx/core` 只可新增文件(本文 10.3,:812)。新增 `cx/sys/reslive.cx`(模块 `reslive`),先例是 `cx/sys/sigwatch.cx`(提交 9cdbf210ab,新增文件且未进 `tests/cx-module-freeze.tsv`;该表 33 行,cx/sys 下只列既有模块如 :31 `cx/sys/proc.cx`)。新文件导出两个名字:`sy_res_live(kind)` 与登记点 `sy_res_note(int kind, int delta)`(delta 只许 +1/-1,计数将为负时返回 `-EINVAL` 且不改值,这是重复关闭的确定性信号)。`sy_res_note` 是新增表面,须在 std-surface 补一行(新行,不是改旧行)。
+- 最小侵入:0.0.63 不改任何现有 `sy_*`(改现有文件即违反冻结)。不做包装层(`sy_open` 等同名包装会与现有定义冲突,换名包装等于再造一套 fd 面)。接入只发生在冻结集之外的上层:`np_exec`(本节 (2))对 PROC 与两个管道 fd 成对登记;`cx/stream` 的 reader/writer 开闭(`rw.cx`,10.6 句柄合同)可在 0.0.64 的 R2 接入。现有 `sy_*` 自身接入排到冻结解除之后(T5)。
+- 因此本版计数不准的范围(据实,以下开闭全部不经过登记点):
+  - fd 开:`sy_open` `cx/sys/fs.cx:57`、`sy_open_new` :84、`sy_open_read` :90、`sy_dup` `cx/sys/fd.cx:32`、`sy_dup2` :36、`sy_pipe` `cx/sys/proc.cx:171`、`sy_socketpair` `cx/sys/posix.cx:79`、`sy_dir_open` `cx/sys/posix.cx:258`、`sy_sock_open` `cx/sys/netraw.cx:168`、`sy_sock_accept` :186、`sy_tcp_listen` `cx/sys/net.cx:32`、`sy_tcp_accept` :57、`sy_tcp_dial` :202、`sy_tcp_listen_at` :501、`sy_tcp_accept_from` :511、`sy_udp_bind` :657、`sy_unix_listen` :699、`sy_unix_connect` :716、`sy_fork_session` 的两根管道 `cx/sys/proc.cx:140-141`、`sy_proc_spawn` 交回的父端 `cx/sys/proc.cx:334`。
+  - fd 闭:`sy_close` `cx/sys/fs.cx:249`、`sy_dir_close` `cx/sys/posix.cx:319`、`sy_proc_close` `cx/sys/proc.cx:395`;另外 cx/sys 内除这三个名字所在行之外还有 60 处裸 `close(`(grep 计数,未逐处归类)。
+  - 进程:`sy_spawn` `cx/sys/proc.cx:79`、`sy_spawn_inherit` :102、`sy_fork_session` :136、`sy_proc_spawn` :293、`sy_spawn_pipe` :426;回收 `syp_reap` :353、`sy_wait_status` :447、`sy_wait` :471。`np_run` 直接调 libc `pipe`/`fork`/`waitpid`(`ext/sysx/process.cx:54-56`、:101),同样不计。
+  - 映射:`sy_map_none` `cx/sys/mem.cx:72`、`sy_unmap` :79;`sy_dlopen` `cx/sys/dlcall.cx:45` 未归入任何 kind。
+  - 未逐一核:`sigwatch.cx`、`tty.cx`、`runlaunch.cx`、`netnb.cx`、`netmsg.cx`、`dl.cx`(`syd_openat` :73)内部的开闭。
+- 结论口径:0.0.63 的 `sy_res_live` 只对「自己登记的调用方」成立,发布说明必须写「不是进程级 fd/子进程/映射总数」;不得用它声称无泄漏。真值路线(lnx 扫 `/proc/self/fd`)本版不做:它本身要开一个目录 fd,且 osx/win 无对应,另列缺口。
+
+(2) np_exec 签名与合同
+
+- 签名照表 126 不改。入参约定:`o` 只读,函数内复制一份再改;`out` 必须已 `mg_init`(`cx/mem/grow.cx:36`),只追加不清空;`err` 为 0 时置 `SY_SPAWN_ERR_TO_OUT`(`cx/sys/proc.cx:190`、:303)并入 out;`cap` 是每一路新增字节上限,`cap < 0` 返回 `-EINVAL`;`st` 必填。副本强制 `out_fd = SY_STDIO_PIPE`,`err` 非 0 时 `err_fd = SY_STDIO_PIPE`;`in_fd == SY_STDIO_PIPE` 返回 `-EINVAL`(无人喂,同 `sy_proc_run` 的拒绝理由 `proc.cx:409`);`pgroup == 0` 时改 -1 使杀进程覆盖整组(`sy_proc_kill` 按组发信号,`proc.cx:345-351`)。
+- 时限:取 `o->deadline_ms`(`proc.cx:200`),0 为无时限。副本把 `deadline_ms` 清 0、由 np_exec 自己持钟(`sy_now_ms`),原因是 `sy_proc_wait` 到点直接 SIGKILL(`proc.cx:382`),交给它就做不成先 TERM 后 KILL。超时返回 0 且 `st->timed_out = 1`(与 `sy_proc_wait` :390 同口径,`sy_exit_code` 给 124,:232);超 cap 返回 `-EMSGSIZE`,该路缓冲恰好追加到 cap 为止,`st` 仍填子进程终态。
+- 循环:`sy_poll`(`cx/sys/poll.cx:51`,最多 `SY_POLL_MAX` 项,EINTR 自续)等两个父端,每轮超时取 min(剩余时限, 50 ms);就绪后 `sy_read`(`cx/sys/fs.cx:147`)读入 16 KiB 栈缓冲再 `mg_append`(`grow.cx:72`);读到 0 关该端并从轮询集移除。两端都 EOF 后 `sy_proc_wait` 收尸。不设 O_NONBLOCK(poll 就绪后单次 read 不阻塞)。对比 `np_run` 是非阻塞读加 `usleep` 2 ms 忙等(`ext/sysx/process.cx:89-90`、:134-137)。
+- 僵尸回收:`sy_proc_spawn` 成功之后的每一条出口都先 `sy_proc_wait`(无时限的阻塞 `syp_reap`,`proc.cx:388`)再 `sy_proc_close`(:395);spawn 失败时 L0 已关管道并回收(`proc.cx:305-309`、:324-329)。
+- 已知边界:子进程退出但孙进程握着管道写端时,无时限调用会一直等 EOF(与 Rust `Command::output` 同);`setsid` 脱组的后代不在组杀范围,本接口无 residue 出参,不调 `sy_kill_tree`(`cx/sys/process.cx:149`),写进发布说明。
+- osx/win:np_exec 全部经 `sy_*` 写成,自身不写平台 `#if`(架构规则);表 126 现写三目标 `impl` 且 win 写 PeekNamedPipe 轮询,与此设计不符,落地时改为 lnx `impl`、osx/win `unverified`,L0 在该目标返回的具名拒绝原样上传。`cx/sys/refusals.cx` 属冻结文件不能加行,有名拒绝登记缺口与发布说明 0.0.62 已知缺口 (25) 同类。`sy_proc_spawn`/`sy_poll` 在 osx/win 的真实行为本节未核,UNVERIFIED。
+- 与 np_run 的关系:不能复用 np_run 的函数体,理由三条:无 cap;扩容失败直接 `exit(1)`(`ext/sysx/process.cx:19`);入参与结果是 `np_result` 加 Python 风格 why 文案(:27-44、:120-127)。可复用的是 L0:`sy_proc_spawn`/`sy_proc_kill`/`sy_proc_try_wait`/`sy_proc_wait`/`sy_proc_close`(`proc.cx:293-403`),np_exec 新写的只有轮询循环。反向收编(np_run 改成 np_exec 的薄封装)本版不做:np_run 现有三份(`cx/sys/process.cx:48` 属冻结且与 `ext/sysx/process.cx:48` 经 `diff -q` 同字节,`tools/cxlib/netpack.cx:789` 第三份),且其超时走 `sy_kill_tree` 给 residue(:113-115),合同不同;排 0.0.64。
+- 放哪个包:决策为新文件 `ext/sysx/exec.cx`(模块 `exec`),不建 `ext/procx` 目录。依据:`ext/procx` 不存在;表里 `ext.procx` 是逻辑包名,np_run 行 124 已是「现在 ext.sysx」的先例;`build/tlib-packages.tsv:15` 的 ext.sysx 以整目录 `ext/sysx` 入包且已依赖 `cx.sys;cx.os;cx.mem`,新文件自动入包。tlib 影响:ext.sysx 版本 0.1.2 升一档并重算内容哈希、`build/layer-api/ext.sysx.tsv` 加一行、`build/iface-hash.tsv` 对应行变、批次 `tlib-ext-sysx`(`tests/batches.tsv:963`)须重跑;新建包则要多一行包表、一个 layer-api 文件与一个 tlib 批次,本版不值。`cx/sys/reslive.cx` 归哪个包(cx.sys 0.1.10 按文件清单入包,`tlib-packages.tsv:10`)须在包表文件清单加一项并升版。
+
+(3) 内存安全
+
+- 缓冲所有权:`out`/`err` 始终归调用者;np_exec 不 `mg_free`、不 `mg_take`。任何返回(含 `-ENOMEM`、`-EMSGSIZE`、超时)之后缓冲都处于合法状态,已追加字节保留,由调用者 `mg_free`(`grow.cx:101`)。扩容走 `mg_growto`(`grow.cx:43-57`,倍增,`-EOVERFLOW`/`-ENOMEM`,失败时原指针不动),「零写占槽、覆盖前扩容」由 mg 层承担,np_exec 不直接碰 `data`。
+- cap 判定在追加之前:本次读到 k 字节,若 `新增量 + k > cap` 只追加 `cap - 新增量` 字节,置超限标记后走杀进程路径,缓冲增长上界为 cap 加一次倍增余量。
+- 失败路径统一出口(单一 `fail:` 段):`mg_append` 失败、`sy_poll`/`sy_read` 返回非 EINTR 错误、超 cap、超时,全部走「TERM -> 宽限 -> KILL -> 阻塞 wait -> close」,再返回首个错误码。
+- 信号:`sy_proc_kill(&c, SIGTERM)`,随后在宽限期内每 5 ms `sy_proc_try_wait`(`proc.cx:367`)并继续排空管道(防子进程写满管道而收不到退出);宽限到点 `sy_proc_kill(&c, SIGKILL)`,再 `sy_proc_wait` 阻塞收尸(KILL 后必返回)。宽限值取命名常量 200 ms,若仓内限时须读表(子代理规则「限时改读表」),实现者先查 `tools/cxlib/limits.cx` 是否已有对应键,没有就在事实表加行,不写裸字面量。`sy_proc_kill` 返回 `-ESRCH` 视为已退出。
+- 不泄漏 fd:父端只存在于 `sy_child_t` 的 `out_fd`/`err_fd`(L0 已置 CLOEXEC,`proc.cx:331-333`);EOF 时逐端关并置 -1,出口再 `sy_proc_close` 关余下的(该函数对 -1 幂等,`proc.cx:397-400`)。检查用例以 `/proc/self/fd` 条目数前后相等为断言(lnx 本机),并用 `sy_res_live` 前后相等作第二断言。
+
+(4) 实现子任务(各 15 分钟内,写域互不相交;T1、T2 可并行,T3 接两者)
+
+| 项 | 内容 | 写域 | 产品输入类别 | 验收命令与预期值 |
+| --- | --- | --- | --- | --- |
+| T1 | `sy_res_live`、`sy_res_note` 与 kind 枚举;检查含:三 kind 初值 0、+1/-1 配对回 0、未知 kind `-EINVAL`、负计数拒绝且值不变、delta 非正负一拒绝 | `cx/sys/reslive.cx`(新)、`tools/check-sys-reslive.cx`(新) | 是,库包源类(`cx/` 在源身份目录集内,本文 :235) | `sh ./unisacc.com tools/check-sys-reslive.cx`:rc=0,末行 `failed=0`,断言不少于 8 项 |
+| T2 | `np_exec`;检查含:正常捕获两路字节相等、err 为 0 并入 out、超 cap 返回 `-EMSGSIZE` 且该路长度恰为 cap、超时 `timed_out=1` 且总耗时小于时限加 1 秒、忽略 TERM 的子进程被 KILL 回收、不存在的程序 `-ENOENT`、`in_fd` 为 PIPE `-EINVAL`、每例前后 `/proc/self/fd` 条目数相等且无僵尸 | `ext/sysx/exec.cx`(新)、`tools/check-ext-procx-exec.cx`(新) | 库包源类;`ext/` 不在源身份目录集(本文 :235,本次未重核) | `sh ./unisacc.com tools/check-ext-procx-exec.cx`:rc=0,`failed=0`,断言不少于 12 项,单次运行 60 秒内 |
+| T3 | 登记:两个检查入批次(`tools/register.cx`);std-surface 行 449、126 `new -> exists`,目标列按实跑改(lnx `impl`,osx/win `unverified`),补 `sy_res_note` 行;layer-api 重算(cx.sys、ext.sysx);iface-hash;tlib-packages 两包升版;pkg-gaps 40、41 改 CLOSED | `tests/batches.tsv`、`tests/coverage.tsv`、`build/std-surface.tsv`、`build/layer-api/cx.sys.tsv`、`build/layer-api/ext.sysx.tsv`、`build/iface-hash.tsv`、`build/tlib-packages.tsv`、`build/pkg-gaps.tsv`(共享表用 `tools/commit-own.cx --keyed`) | 表与生成物,随 T1/T2 同候选 | `grep -c '	new	' build/std-surface.tsv` 由 2 变 0;`sh ./unisacc.com tools/check-std-surface-v2.cx`、`tools/check-layer-api.cx`、`tools/check-iface-hash.cx`、`tools/check-tlib-frozen.cx` 各 rc=0;`sh ./unisacc.com tools/ratchets.cx` 输出 `ok=13 fail=0` |
+| T4 | 新产品装后复验与 osx/win 证据:已装产品实编两新文件;CI 上两检查在 osx/win 的结果如实回填表列 | 只读加 std-surface 两行目标列 | 否 | `sh ./unisacc.com tools/affected.cx --files cx/sys/reslive.cx ext/sysx/exec.cx --run` rc=0;osx/win 无证据则保留 `unverified` |
+| T5 | 冻结解除后:现有 `sy_*` 开闭接入 `sy_res_note`(本节 (1) 清单),np_run 三份收编为 np_exec 薄封装 | `cx/sys/fs.cx`、`fd.cx`、`proc.cx`、`mem.cx`、`posix.cx`、`net.cx`、`netraw.cx`;`ext/sysx/process.cx` | 是,需冻结解除流程,不进 0.0.63 | 0.0.64 开工前另拆 |
+
+- 新名占用已核:`git log --all --oneline -- tools/check-sys-reslive.cx tools/check-ext-procx-exec.cx cx/sys/reslive.cx ext/sysx/exec.cx` 无输出,四个名字均未被用过。
+- 未核项:`tools/check-std-surface*.cx` 是否校验包名列与文件目录一致(若校验,行 126 的 `ext.procx` 须按 np_run 行 124 的先例处理);cx.sys 新文件对 `tools/check-cx-layers.cx` 五条断言的影响;`sy_res_note` 作为新导出是否触发 `tests/coreapi.cx` 棘轮。T1/T3 开工先跑对应检查定值。
+- 回滚:T1、T2 各是纯新增文件,撤提交即回到两行 `new`;T3 用 `tools/derive.cx --write`(失败自还原)或撤提交。
+
 ## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
 
 资料:`docs/cx/ref-node.md`、`ref-rust.md`、`ref-cpython.md`、`ref-quickjs.md` 已读;这四篇侧重标准库面与稳定性策略,模块系统与内存安全的机制部分(下文带 [忆] 的)出自通用知识,本轮未联网核对一手文档,落合同前须再查。仓内没有 Bun 的参考篇(`git grep -i bun -- docs/cx` 只命中 QuickJS 篇的无关行)。不取的理由统一按四条约束写:C99 兼容(宿主 gcc/clang 须能忽略全部扩展)、单文件 APE(无运行期模块装载器、无文件系统上的包目录)、三源构造(规划器一处改三处核)、no-libc(上层不直调 libc,前导自带)。
