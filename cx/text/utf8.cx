@@ -1,0 +1,53 @@
+#pragma unisa module utf8
+#pragma unisa dock
+/* L0 text/utf8: UTF-8 validation and decoding over explicit-length spans
+   (Rust str::from_utf8 / Chars::next).  Rejects overlong encodings, surrogates
+   (U+D800..U+DFFF), values above U+10FFFF, stray continuation bytes and truncated
+   sequences.  Failure contract: negative codes only.  No libc call. */
+
+/* Decode one code point at S[at]; returns its byte length (1..4) or 0 when malformed. */
+static int u8_dec(const unsigned char *s, long n, long at, unsigned *cp) {
+    unsigned c = s[at], v; int len, i;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xC2 && c <= 0xDF) { len = 2; v = c & 0x1F; }
+    else if (c >= 0xE0 && c <= 0xEF) { len = 3; v = c & 0x0F; }
+    else if (c >= 0xF0 && c <= 0xF4) { len = 4; v = c & 0x07; }
+    else return 0;
+    if (at + len > n) return 0;
+    for (i = 1; i < len; i++) {
+        if ((s[at + i] & 0xC0) != 0x80) return 0;
+        v = (v << 6) | (s[at + i] & 0x3F);
+    }
+    if (len == 3 && (v < 0x800 || (v >= 0xD800 && v <= 0xDFFF))) return 0;
+    if (len == 4 && (v < 0x10000 || v > 0x10FFFF)) return 0;
+    *cp = v;
+    return len;
+}
+
+/* 1 when S[0..N) is well-formed UTF-8 (*BAD, if non-null, is N), 0 when not (*BAD is the offset
+   of the first bad byte; a truncated sequence is reported at its lead byte), -EINVAL for a null S
+   with N > 0 or N < 0 (*BAD untouched). */
+int tx_utf8_valid(const char *s, long n, long *bad) {
+    long at = 0; unsigned cp; int l;
+    if (n < 0 || (!s && n > 0)) return -EINVAL;
+    while (at < n) {
+        l = u8_dec((const unsigned char *)s, n, at, &cp);
+        if (!l) { if (bad) *bad = at; return 0; }
+        at += l;
+    }
+    if (bad) *bad = n;
+    return 1;
+}
+
+/* Decode the next code point of S[0..N) at *POS: 1 with *CP set and *POS advanced, 0 when
+   *POS == N (end), -EILSEQ for malformed input (*POS and *CP untouched), -EINVAL for a null
+   S/POS/CP, N < 0, or *POS outside 0..N. */
+int tx_utf8_next(const char *s, long n, long *pos, unsigned *cp) {
+    unsigned v; int l;
+    if (!pos || !cp || n < 0 || (!s && n > 0) || *pos < 0 || *pos > n) return -EINVAL;
+    if (*pos == n) return 0;
+    l = u8_dec((const unsigned char *)s, n, *pos, &v);
+    if (!l) return -EILSEQ;
+    *cp = v; *pos += l;
+    return 1;
+}

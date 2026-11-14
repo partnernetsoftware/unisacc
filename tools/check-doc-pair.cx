@@ -1,0 +1,207 @@
+/* tools/check-doc-pair.cx -- two documentation lints (DEBT-README-PAIR, DEBT-TERM-CHECK).
+ *
+ *   sh ./unisacc.com tools/check-doc-pair.cx                 -- both checks on this checkout + fixtures
+ *   sh ./unisacc.com tools/check-doc-pair.cx -- pair [ROOT]  -- README.md vs README_zh.md only
+ *   sh ./unisacc.com tools/check-doc-pair.cx -- term [ROOT]  -- retired-term scan only
+ *
+ * pair: the set of <a id="..."> anchors of README.md and README_zh.md must be equal, and every relative
+ *   link target (file part of ](...)) in either must exist next to the README.
+ * term: no .md under ROOT may contain the retired title (the Chinese word for "master/owner", U+4E3B U+4EBA).
+ *   Skipped: .git, out, archive (frozen snapshots) and docs/history (historical quotes, see
+ *   docs/history/terminology-note.md).  Real violations outside those are held by an expiring baseline
+ *   (BASELINE below, due DOC-1 sweep, 2026-12-01): a file not in the baseline fails, an expired baseline
+ *   fails, a baseline file that became clean is reported STALE and fails (shrink the list).
+ * Fixtures run in a temp dir: an inconsistent README pair and a file with the term must be reported. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define EXPIRY_S 1796054400L /* 2026-12-01 */
+#define MAXF 4000
+
+static const char *TERM = "\xe4\xb8\xbb\xe4\xba\xba";
+static const char *BASELINE[] = {
+    "apps/csih/PRD.md", "apps/csih/docs/agent-probes-ruling.md", "apps/csih/docs/csih-com.md",
+    "cx/sys/README.md", "exec/k2-boundary.md", "exec/rules.md", "ujs/ARCHITECTURE.md", "ujs/prd.md", 0
+};
+
+/* first offset of P[0..pn) in S[0..n), or -1 (document scan, not a source anchor) */
+static long dp_sub(const char *s, long n, const char *p, long pn) {
+    long i, k;
+    for (i = 0; i + pn <= n; i++) {
+        for (k = 0; k < pn && s[i + k] == p[k]; k++) {}
+        if (k == pn) return i;
+    }
+    return -1;
+}
+
+static char *slurp(const char *p, long *n) {
+    FILE *f = fopen(p, "rb");
+    long cap = 1 << 20, len = 0, k;
+    char *s;
+    if (!f) return 0;
+    s = mm_alloc(cap + 1);
+    while (s && (k = (long)fread(s + len, 1, (size_t)(cap - len), f)) > 0) {
+        len += k;
+        if (len == cap) { char *t = mm_alloc(cap * 2 + 1); if (!t) return 0; mm_copy(t, cap * 2 + 1, s, len); s = t; cap *= 2; }
+    }
+    fclose(f);
+    if (s) s[len] = 0;
+    *n = len;
+    return s;
+}
+
+/* collect values of <a id="X"> into ids (NUL separated list, count returned) */
+static int anchors(const char *s, long n, char ids[][64], int max) {
+    int c = 0;
+    long i = 0;
+    for (;;) {
+        long j = dp_sub(s + i, n - i, "<a id=\"", 7), e;
+        if (j < 0) break;
+        i += j + 7;
+        e = dp_sub(s + i, n - i, "\"", 1);
+        if (e < 0 || e > 63 || c >= max) break;
+        mm_copy(ids[c], 64, s + i, e); ids[c][e] = 0; c++;
+        i += e;
+    }
+    return c;
+}
+
+static int has(char ids[][64], int c, const char *x) { int i; for (i = 0; i < c; i++) if (!strcmp(ids[i], x)) return 1; return 0; }
+
+static int links(const char *dir, const char *name, const char *s, long n) {
+    int bad = 0;
+    long i = 0;
+    for (;;) {
+        long j = dp_sub(s + i, n - i, "](", 2), e;
+        char t[1024], pth[2048];
+        long h;
+        if (j < 0) break;
+        i += j + 2;
+        e = dp_sub(s + i, n - i, ")", 1);
+        if (e <= 0 || e > 1000) continue;
+        mm_copy(t, sizeof t, s + i, e); t[e] = 0;
+        h = dp_sub(t, e, "#", 1);
+        if (h >= 0) t[h] = 0;
+        if (!t[0] || strstr(t, "://") || !strncmp(t, "mailto:", 7)) continue;
+        cx_fmt(pth, sizeof pth, "%s/%s", dir, t);
+        if (!sy_exists(pth)) { printf("PAIR_BAD_LINK\t%s\t%s\n", name, t); bad++; }
+    }
+    return bad;
+}
+
+static int check_pair(const char *root) {
+    static char a[256][64], b[256][64];
+    char p1[2048], p2[2048];
+    long n1, n2;
+    char *s1, *s2;
+    int ca, cb, i, bad = 0;
+    cx_fmt(p1, sizeof p1, "%s/README.md", root);
+    cx_fmt(p2, sizeof p2, "%s/README_zh.md", root);
+    s1 = slurp(p1, &n1); s2 = slurp(p2, &n2);
+    if (!s1 || !s2) { printf("PAIR_MISSING\t%s\n", s1 ? "README_zh.md" : "README.md"); return 1; }
+    ca = anchors(s1, n1, a, 256); cb = anchors(s2, n2, b, 256);
+    for (i = 0; i < ca; i++) if (!has(b, cb, a[i])) { printf("PAIR_ANCHOR_ONLY_EN\t%s\n", a[i]); bad++; }
+    for (i = 0; i < cb; i++) if (!has(a, ca, b[i])) { printf("PAIR_ANCHOR_ONLY_ZH\t%s\n", b[i]); bad++; }
+    bad += links(root, "README.md", s1, n1) + links(root, "README_zh.md", s2, n2);
+    return bad;
+}
+
+static int in_baseline(const char *rel) { int i; for (i = 0; BASELINE[i]; i++) if (!strcmp(BASELINE[i], rel)) return 1; return 0; }
+
+/* returns number of failures; use_baseline=0 for fixtures */
+static int check_term(const char *root, int use_baseline) {
+    static char out[1 << 20];
+    static const char *seen[MAXF];
+    char *av[24], pr[2048], pa[2048], pb[2048], pc[2048], pd[2048];
+    int bad = 0, i, nseen = 0;
+    char *line;
+    size_t rl = strlen(root);
+    cx_fmt(pr, sizeof pr, "%s", root);
+    cx_fmt(pa, sizeof pa, "%s/.git", root);
+    cx_fmt(pb, sizeof pb, "%s/out", root);
+    cx_fmt(pc, sizeof pc, "%s/archive", root);
+    av[0] = "find"; av[1] = pr; av[2] = "("; av[3] = "-path"; av[4] = pa; av[5] = "-o"; av[6] = "-path"; av[7] = pb;
+    cx_fmt(pd, sizeof pd, "%s/.trash", root);
+    av[8] = "-o"; av[9] = "-path"; av[10] = pc; av[11] = "-o"; av[12] = "-path"; av[13] = pd; av[14] = ")";
+    av[15] = "-prune"; av[16] = "-o"; av[17] = "-name"; av[18] = 0;
+    {
+        char *av2[28];
+        for (i = 0; i < 18; i++) av2[i] = av[i];
+        av2[18] = "*.md"; av2[19] = "-type"; av2[20] = "f"; av2[21] = "-print"; av2[22] = 0;
+        pr_result r;
+        if (pr_run("doc-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= (long)sizeof out) { printf("TERM_FIND_FAILED\n"); return 1; }
+        mm_copy(out, sizeof out, r.out, r.outn); out[r.outn] = 0;
+        pr_free(&r);
+    }
+    for (line = strtok(out, "\n"); line; line = strtok(0, "\n")) {
+        const char *rel = line + rl + 1;
+        long n;
+        char *s;
+        if (strncmp(line, root, rl) || strncmp(rel, "docs/history/", 13) == 0) continue;
+        s = slurp(line, &n);
+        if (!s) continue;
+        if (dp_sub(s, n, TERM, 6) >= 0) {
+            if (use_baseline && in_baseline(rel)) { if (nseen < MAXF) seen[nseen++] = rel; }
+            else { printf("TERM_VIOLATION\t%s\n", rel); bad++; }
+        }
+        mm_free(s);
+    }
+    if (use_baseline) {
+        for (i = 0; BASELINE[i]; i++) {
+            int k, f = 0;
+            for (k = 0; k < nseen; k++) if (!strcmp(seen[k], BASELINE[i])) f = 1;
+            if (!f) { printf("TERM_BASELINE_STALE\t%s\n", BASELINE[i]); bad++; }
+        }
+        if (sy_now_ms() / 1000 > EXPIRY_S) { printf("TERM_BASELINE_EXPIRED\t2026-12-01\n"); bad++; }
+        printf("TERM_BASELINE\tfiles=%d\n", nseen);
+    }
+    return bad;
+}
+
+static int wr(const char *dir, const char *name, const char *txt) {
+    char p[2048];
+    cx_fmt(p, sizeof p, "%s/%s", dir, name);
+    return sy_write_file(p, txt, (long)strlen(txt), 0644);
+}
+
+static int selftest(void) {
+    char d[2048], d2[2048], t[4096];
+    int fails = 0;
+    if (sy_mkdtemp("/tmp", "docpair-", d, sizeof d) || sy_mkdtemp("/tmp", "docterm-", d2, sizeof d2)) { printf("FIXTURE_MKDIR_FAILED\n"); return 1; }
+    wr(d, "README.md", "<a id=\"a\"></a>\n<a id=\"b\"></a>\n[x](README_zh.md)\n");
+    wr(d, "README_zh.md", "<a id=\"a\"></a>\n[x](README.md)\n");
+    if (check_pair(d) < 1) { printf("FIXTURE_FAIL\tmismatch-not-reported\n"); fails++; }
+    wr(d, "README_zh.md", "<a id=\"a\"></a>\n<a id=\"b\"></a>\n[x](README.md) [y](nope.md#z)\n");
+    if (check_pair(d) != 1) { printf("FIXTURE_FAIL\tbad-link-not-reported\n"); fails++; }
+    wr(d, "README_zh.md", "<a id=\"b\"></a>\n<a id=\"a\"></a>\n[x](README.md#q)\n");
+    if (check_pair(d) != 0) { printf("FIXTURE_FAIL\tgood-pair-rejected\n"); fails++; }
+    cx_fmt(t, sizeof t, "x %s y\n", TERM);
+    wr(d2, "a.md", t);
+    wr(d2, "b.md", "clean\n");
+    if (check_term(d2, 0) != 1) { printf("FIXTURE_FAIL\tterm-not-reported\n"); fails++; }
+    {
+        char *rm[] = { "rm", "-rf", d, d2, 0 };
+        pr_result r;
+        if (pr_run("doc-rm", rm, 0, 0, 20, &r) == 0) pr_free(&r);
+    }
+    return fails;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = argc > 1 ? argv[1] : "all";
+    const char *root = argc > 2 ? argv[2] : ".";
+    int bad = 0;
+    if (!strcmp(mode, "pair")) bad = check_pair(root);
+    else if (!strcmp(mode, "term")) bad = check_term(root, 1);
+    else if (!strcmp(mode, "all")) { bad = check_pair(root) + check_term(root, 1) + selftest(); }
+    else { fprintf(stderr, "usage: check-doc-pair [pair|term|all] [ROOT]\n"); return 2; }
+    if (bad) { printf("DOC_PAIR_FAIL\t%d\n", bad); return 1; }
+    printf("DOC_PAIR_OK\n");
+    return 0;
+}

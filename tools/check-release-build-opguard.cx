@@ -1,0 +1,51 @@
+/* tools/check-release-build-opguard.cx -- release-build's opguard scratch directory is below sy_tmpdir(), not ROOT/out.
+ *
+ *   sh ./unisacc.com tools/check-release-build-opguard.cx [-- ROOT]
+ *
+ * (1) tools/release-build.cx source: the non-phase opguard branch spells "%s/p3-opguard-%d" with sy_tmpdir(),
+ *     and no line of it formats or creates ROOT/out/p3-opguard;
+ * (2) the session-root guard the migrated tools share (sr_ok): a tmpdir session root is accepted, a tmpdir path
+ *     without the session prefix is refused. Prints PASS/FAIL and CHECK_RB_OPGUARD<TAB>failed=N. */
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+/* First occurrence of the NUL-terminated P in S, or 0 (plain byte comparison). */
+static const char *rb_find(const char *s, const char *p) {
+    long pn = (long)strlen(p), sn = (long)strlen(s), i;
+    for (i = 0; i + pn <= sn; i++) if (mm_same(s + i, p, pn)) return s + i;
+    return 0;
+}
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\trb-opguard.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], p[4400], good[4400], bad[4400], tc[4096], why[64];
+    size_t n = 0;
+    char *b;
+    if (sy_realpath(argc > 1 ? argv[1] : ".", root, sizeof root) < 0 || cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) return 2;
+    b = cx_read(p, &n);
+    ck(b != 0, "source-read");
+    ck(b && rb_find(b, "\"%s/p3-opguard-%d\", sy_tmpdir(), sy_pid()"), "opguard-dir-below-tmpdir");
+    {   char n1[64], n2[64];
+        if (cx_fmt(n1, sizeof n1, "%%s/%s/p3-opguard", "ou" "t") || cx_fmt(n2, sizeof n2, "\"%%s/%s\", root", "ou" "t")) return 2;
+        ck(b && !rb_find(b, n1) && !rb_find(b, n2), "no-repo-out-spelling");
+    }
+    free(b);
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) return 2;
+    {   char id[64];
+        if (cx_fmt(id, sizeof id, "rbog-%ld", sy_now_ms()) || sr_default(id, good, sizeof good) || cx_fmt(bad, sizeof bad, "%s/rbog-notsession-%ld", tc, sy_now_ms())) return 2;
+    }
+    ck(sr_ok(root, good, why, sizeof why) == 0, "tmpdir-session-root-accepted");
+    ck(sr_ok(root, bad, why, sizeof why) == 1, "non-session-tmp-path-refused");
+    sy_printf("CHECK_RB_OPGUARD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -12,6 +12,7 @@
  *            left byte-identical;
  *   count    USE-PATH reports changed=1 for the plain case.
  * Prints PASS/FAIL per case and CHECK_USE_PATH<TAB>failed=N; exit 1 when N > 0, 2 on setup failure. */
+#pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -40,7 +41,8 @@ static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
     return rc;
 }
 
-#define UPW "out/check-use-path"
+static char upw[4400];
+#define UPW upw
 #define OLD "core.kernel"
 #define NEW "sys.kernel"
 
@@ -56,7 +58,7 @@ static int run(const char *name, const char *s, char *out, int cap) {
     int rc;
     long sl = tx_len(s, 1L << 16);
     char *b;
-    if (cx_fmt(path, sizeof path, UPW "/%s", name)) die("path");
+    if (cx_fmt(path, sizeof path, "%s/%s", upw, name)) die("path");
     if (cx_write(path, s, (size_t)sl) < 0) die("cannot write the fixture");
     rc = bounded_run(av, 50, got, (int)sizeof got, 0);
     b = cx_read(path, &n);                          /* the tool rewrote the file in place */
@@ -68,10 +70,11 @@ static int run(const char *name, const char *s, char *out, int cap) {
 }
 
 int main(void) {
-    char out[8192], got[8192];
-    char *mk[] = {"sh", "-c", "rm -rf " UPW " && mkdir -p " UPW, 0};
+    char out[8192], got[8192], mkbuf[4600], path[4600];
+    char *mk[] = {"sh", "-c", mkbuf, 0};
     size_t n;
-    if (bounded_run(mk, 50, got, (int)sizeof got, 0) != 0) die("cannot prepare " UPW);
+    if (cx_fmt(upw, sizeof upw, "%s/check-use-path-%d", sy_tmpdir(), sy_pid()) || cx_fmt(path, sizeof path, "%s/plain.cx", upw) || cx_fmt(mkbuf, sizeof mkbuf, "rm -rf %s && mkdir -p %s", upw, upw)) die("path");
+    if (bounded_run(mk, 50, got, (int)sizeof got, 0) != 0) die("cannot prepare the fixture directory");
 
     ck(run("plain.cx", "#pragma unisa use " OLD "\nint main(void){return 0;}\n", out, sizeof out) == 0
        && tx_eqz(out, "#pragma unisa use " NEW "\nint main(void){return 0;}\n"), "plain");
@@ -89,7 +92,7 @@ int main(void) {
        && tx_eqz(out, "#pragma unisa  use " OLD "\n"), "spacing");
 
     /* The summary line of the plain case says changed=1, so a no-op run is not mistaken for a rewrite. */
-    {   char *av[] = {"sh", "./unisacc.com", "tools/use-path.cx", "--", OLD, NEW, UPW "/plain.cx", 0};
+    {   char *av[] = {"sh", "./unisacc.com", "tools/use-path.cx", "--", OLD, NEW, path, 0};
         if (bounded_run(av, 50, got, (int)sizeof got, 0) != 0) die("cannot run the tool on the plain fixture");
         n = tx_len(got, sizeof got);
         ck(tx_find(got, (long)n, "changed=0", 9) >= 0, "count"); }   /* already rewritten: nothing left to change */

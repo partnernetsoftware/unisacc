@@ -1,0 +1,109 @@
+/* tools/check-tool-index.cx -- tools/tool-index.cx 的检查:夹具目录里验证摘要、usage、check 与批次关联、排序、篡改检测、空目录。
+ *
+ *   sh ./unisacc.com tools/check-tool-index.cx
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char dir[320];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-tool-index.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-tool-index.%s\n", name); }
+}
+static int hasl(const char *h, long hn, const char *lit) {
+    long ln = tx_len(lit, 4096), i;
+    for (i = 0; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return 1;
+    return 0;
+}
+static void put(const char *rel, const char *body) {
+    char p[500];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    cx_write(p, body, tx_len(body, 100000));
+}
+static int run(const char *mode, char *out, long cap) {
+    char cmd[900]; char *o = 0; size_t n = 0; int rc;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/tool-index.cx -- %s --root %s", mode, dir);
+    char *v[] = {"sh", "-c", cmd, 0};
+    rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && (long)n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+static char *slurp(const char *rel, long *n) {
+    char p[500]; size_t m = 0;
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    char *b = cx_read(p, &m); *n = (long)m; return b;
+}
+
+int main(void) {
+    char out[8192], cmd[700]; long n = 0; char *t, *tb;
+    if (cx_fmt(dir, sizeof dir, "%s/tool-index-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(cmd, sizeof cmd, "%s/tools", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/tools/cxlib", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/tests", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/build", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/build/layer-api", dir); mkdir(cmd, 0700);
+    put("tools/alpha.cx", "/* tools/alpha.cx -- 做甲事。后面的话。\n *\n *   sh ./unisacc.com tools/alpha.cx -- --go\n */\nint main(void){return 0;}\n");
+    put("tools/check-alpha.cx", "/* tools/check-alpha.cx -- alpha 的检查 */\nint main(void){return 0;}\n");
+    put("tools/beta.cx", "int main(void){return 0;}\n");
+    put("tools/gamma.cx", "#!/usr/bin/env x\n#pragma unisa use sys.io\n/* tools/gamma.cx -- does gamma. Then more. */\nint main(void){return 0;}\n");
+    put("tools/delta.cx", "/* tools/delta.cx\n * 只在第二行描述\n */\n");
+    put("tools/cxlib/lib.cx", "/* lib -- 库文件说明 */\n");
+    put("tools/writer.cx", "/* tools/writer.cx -- 写表 */\nconst char *t = \"build/foo.tsv\"; const char *m = \"--write\";\n");
+    put("tools/reader.cx", "/* tools/reader.cx -- 读表 */\nconst char *t = \"foo.tsv\";\n");
+    put("tests/batches.tsv", "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\n"
+        "b-alpha\tIMPLEMENTED\tx\ttools/check-alpha.cx\tSOURCE\tlnx\t5\t-\ttools/check-alpha.cx\n"
+        "b-alpha2\tIMPLEMENTED\tx\ttools/alpha.cx\tSOURCE\tlnx\t5\t-\ttools/alpha.cx\n");
+    put("build/foo.tsv", "# foo 表的用途\ta\tb\n");
+    put("build/bar.tsv", "col1\tcol2\n");
+    put("build/layer-api/p.tsv", "# 层接口\n");
+    ck(run("--write", out, sizeof out) == 0 && hasl(out, tx_len(out, 8000), "WROTE\ttools=8\ttables=3"), "write-counts");
+    t = slurp("build/tool-index.tsv", &n);
+    ck(t && hasl(t, n, "tool\tsummary\tusage\tcheck\tbatch_ids\tlines\n"), "header");
+    ck(t && hasl(t, n, "alpha.cx\t做甲事\t"), "summary-cn-sentence");
+    ck(t && hasl(t, n, "gamma.cx\tdoes gamma\t"), "summary-en-after-pragma");
+    ck(t && hasl(t, n, "delta.cx\t只在第二行描述\t"), "summary-second-line");
+    ck(t && hasl(t, n, "beta.cx\tUNDESCRIBED\t"), "undescribed");
+    ck(t && hasl(t, n, "\tsh ./unisacc.com tools/alpha.cx -- --go\t"), "usage-extract");
+    ck(t && hasl(t, n, "alpha.cx\t做甲事。") == 0, "summary-stops-at-period");
+    ck(t && hasl(t, n, "\ttools/check-alpha.cx\tb-alpha,b-alpha2\t"), "check-and-batches");
+    ck(t && hasl(t, n, "beta.cx\tUNDESCRIBED\t\t\t\t1\n"), "no-check-no-batch-lines");
+    ck(t && hasl(t, n, "cxlib/lib.cx\t库文件说明\t"), "cxlib-listed");
+    ck(t && hasl(t, n, "check-alpha.cx\talpha 的检查\t\t\tb-alpha\t"), "check-file-own-batch");
+    {
+        long a = -1, b = -1, c = -1, i;
+        for (i = 0; t && i + 9 < n; i++) {
+            if (a < 0 && mm_same(t + i, "\nalpha.cx\t", 10)) a = i;
+            if (b < 0 && mm_same(t + i, "\nbeta.cx\t", 9)) b = i;
+            if (c < 0 && mm_same(t + i, "\ncxlib/lib.cx", 13)) c = i;
+        }
+        ck(a >= 0 && b > a && c > b, "sorted-cxlib-last");
+    }
+    tb = slurp("build/table-index.tsv", &n);
+    ck(tb && hasl(tb, n, "build/foo.tsv\tfoo 表的用途 a b\ttools/writer.cx\t1\n"), "table-generator-readers");
+    ck(tb && hasl(tb, n, "build/bar.tsv\tUNDESCRIBED\t\t0\n"), "table-undescribed");
+    ck(tb && hasl(tb, n, "build/layer-api/p.tsv\t层接口\t\t0\n"), "table-layer-api");
+    ck(run("--check", out, sizeof out) == 0, "check-clean-rc0");
+    put("build/tool-index.tsv", "tampered\n");
+    ck(run("--check", out, sizeof out) != 0 && hasl(out, tx_len(out, 8000), "DIFF"), "check-tamper-fails");
+    run("--write", out, sizeof out);
+    ck(run("--undescribed", out, sizeof out) == 0 && hasl(out, tx_len(out, 8000), "UNDESCRIBED_COUNT\t1"), "undescribed-list");
+    put("tools/zeta.cx", "/* tools/zeta.cx -- 新增 */\n");
+    ck(run("--check", out, sizeof out) != 0, "check-detects-new-tool");
+    {   /* 空目录 */
+        char d2[320]; char cmd2[900]; char *o = 0; size_t m = 0; int rc;
+        cx_fmt(d2, sizeof d2, "%s/empty", dir); mkdir(d2, 0700);
+        cx_fmt(cmd, sizeof cmd, "%s/empty/build", dir); mkdir(cmd, 0700);
+        cx_fmt(cmd2, sizeof cmd2, "sh ./unisacc.com tools/tool-index.cx -- --write --root %s", d2);
+        char *v[] = {"sh", "-c", cmd2, 0};
+        rc = cx_runv_timeout(v, 50, &o, &m);
+        ck(rc == 0 && o && hasl(o, (long)m, "tools=0\ttables=0"), "empty-root");
+    }
+    ck(run("--bogus", out, sizeof out) == 2, "bad-arg-rc2");
+    sy_printf("CHECK_TOOL_INDEX\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

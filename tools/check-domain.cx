@@ -1,0 +1,60 @@
+/* check-domain.cx -- tools/domain.cx claim/release/check/list and conflict refusal, on a private registry file.
+ *   sh ./unisacc.com tools/check-domain.cx -- ROOT TMPDIR
+ * Each step runs domain.cx under tools/bound (20 s) with UNISACC_DOMAINS pointing into TMPDIR. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+typedef struct { const char *args; int want; const char *has; } Step;
+static const Step steps[] = {
+    {"check tools/a.cx", 0, "free"},
+    {"claim alice tools/ 30 note", 0, "claimed"},
+    {"claim bob tools/x.cx 30", 1, "conflict\towner=alice"},
+    {"claim bob docs/ 30", 0, "claimed"},
+    {"claim alice tools/ 30", 0, "claimed"},
+    {"check tools/a.cx", 1, "held\towner=alice\tprefix=tools/"},
+    {"check tools/a.cx --as alice", 0, "own"},
+    {"check tools/a.cx --as bob", 1, "held\towner=alice"},
+    {"check docs/z", 1, "owner=bob"},
+    {"check src/q", 0, "free"},
+    {"list", 0, "count=3"},
+    {"release alice tools/", 0, "count=2"},
+    {"check tools/a.cx", 0, "free"},
+    {"claim bob tools/x.cx 30", 0, "claimed"},
+    {"release bob", 0, "count=2"},
+    {"list", 0, "count=0"},
+    {"claim a b 0", 2, ""},
+    {"bogus", 2, ""},
+    {"claim alice tools/ 30", 0, "claimed"},
+    {"brief bob tools/y.cx 30 --goal 'g1' --accept 'echo hi:hi' --deadline 10", 1, "DOMAIN\tconflict"},
+    {"release alice", 0, "count=1"},
+    {"brief bob tools/y.cx 30 --goal 'g1' --accept 'echo hi:hi' --deadline 10", 0, "## 目标"},
+    {"release bob", 0, "count=1"},
+    {"brief bob tools/y.cx 30 --goal 'g1' --accept 'echo hi:hi' --deadline 10", 0, "## 禁区\n- 不改写域外"},
+    {"brief carol tools/y.cx 30 --goal g --accept a:b --deadline 5", 1, "DOMAIN\tconflict"},
+    {"release bob", 0, "count=1"},
+    {"claim carol tools/y.cx 30", 0, "claimed"},
+    {"release carol", 0, "count=1"},
+};
+static int failed, assertions;
+int main(int argc, char **argv) {
+    char tabp[4400], bnd[4400], dom[4400], sh[9000], out[8192]; int i, n = (int)(sizeof steps / sizeof steps[0]);
+    if (argc != 3) { fputs("usage: ROOT TMPDIR\n", stderr); return 2; }
+    sy_mkdir_all(argv[2], 0700);
+    if (cx_fmt(tabp, sizeof tabp, "%s/domains-%d.tsv", argv[2], sy_pid())) return 2;
+    (void)sy_unlink(tabp);
+    cx_fmt(bnd, sizeof bnd, "%s/tools/bound", argv[1]); cx_fmt(dom, sizeof dom, "%s/tools/domain.cx", argv[1]);
+    for (i = 0; i < n; i++) {
+        char *av[8]; int cut = 0, rc, ok;
+        cx_fmt(sh, sizeof sh, "cd %s && UNISACC_DOMAINS=%s sh ./unisacc.com %s -- %s", argv[1], tabp, dom, steps[i].args);
+        av[0] = bnd; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0;
+        out[0] = 0;
+        rc = sy_run(av, out, sizeof out, &cut);
+        ok = rc == steps[i].want && (!steps[i].has[0] || strstr(out, steps[i].has));
+        assertions++; if (!ok) failed++;
+        printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", steps[i].args, steps[i].want, rc);
+    }
+    (void)sy_unlink(tabp);
+    printf("DOMAIN_CHECK\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,146 @@
+/* tools/check-tlib-cover.cx -- tools/tlib-cover.cx on this checkout.
+ *
+ *   sh ./unisacc.com tools/check-tlib-cover.cx [-- ROOT OUT]
+ *
+ * (1) a tool whose closure lies in the packages: one COVER line, units = tlib + source, at least
+ *     one unit from a package, the tool itself among the source units, summary failed=0;
+ * (2) a program that uses a unit a package excludes (cx/sys/dlcall.cx) reports excluded >= 1;
+ * (3) a program that uses no module reports tlib=0 and source=1;
+ * (4) --batches --slice 0/64 reads the registry: at least one COVER line, as many as the summary's
+ *     files=, none failed; two different slices name different files;
+ * (5) a source that does not exist, a slice K >= N and --batches together with a file are rc 2.
+ * The tool is run through the product (default -run); no result is cached. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400], product[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-cover.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run(char *const args[]) {
+    char *v[24];
+    int k = 0, i;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = "sh"; v[k++] = product; v[k++] = "tools/tlib-cover.cx"; v[k++] = "--"; v[k++] = "--root"; v[k++] = root;
+    for (i = 0; args[i] && k < 22; i++) v[k++] = args[i];
+    v[k] = 0;
+    return cx_runv_timeout(v, 40, &last, &lastn);
+}
+
+/* The decimal value of KEY= on the first output line whose first field is TAG, or -1. */
+static long num(const char *tag, const char *key) {
+    long i = 0, e, o, l, f, kl = tx_len(key, 64), v;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, tag, tx_len(tag, 64)))
+            for (f = 1; !tx_field(last + i, e - i, '\t', f, &o, &l); f++)
+                if (l > kl && tx_prefix(last + i + o, l, key, kl)) {
+                    long j;
+                    v = 0;
+                    for (j = kl; j < l; j++) {
+                        int c = last[i + o + j];
+                        if (c < '0' || c > '9') return -1;
+                        v = v * 10 + (c - '0');
+                    }
+                    return v;
+                }
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int lines(const char *tag) {
+    long i = 0, e, o, l;
+    int n = 0;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, tag, tx_len(tag, 64))) n++;
+        i = e + 1;
+    }
+    return n;
+}
+
+int main(int argc, char **argv) {
+    char need[4400], plain[4400], first[300];
+    int rc;
+    long t0 = sy_now_ms();
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/tlib-cover-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/tlib-cover-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(need, sizeof need, "%s/need.cx", work) || cx_fmt(plain, sizeof plain, "%s/plain.cx", work)) return 2;
+    if (sy_chdir(root)) return 2;
+    if (cx_write(need, "#pragma unisa use sys.dlcall\nint main(void) { return 0; }\n", 57) ||
+        cx_write(plain, "int main(void) { return 0; }\n", 29)) { sy_printf("FAIL\ttlib-cover.fixture\n"); return 1; }
+
+    /* (1) */
+    {
+        char *a[] = {"tools/layer-api.cx", 0};
+        long u, t, s;
+        rc = run(a);
+        u = num("COVER", "units="); t = num("COVER", "tlib="); s = num("COVER", "source=");
+        ck(rc == 0 && lines("COVER") == 1 && u > 0 && t >= 1 && s >= 1 && u == t + s && num("COVER", "excluded=") == 0 &&
+           num("TLIB_COVER", "files=") == 1 && num("TLIB_COVER", "failed=") == 0 && num("TLIB_COVER", "packages=") >= 1, "packaged-closure-is-counted");
+    }
+    /* (2) */
+    {
+        char *a[] = {need, 0};
+        rc = run(a);
+        ck(rc == 0 && num("COVER", "excluded=") >= 1 && num("COVER", "source=") >= 2, "excluded-unit-is-reported");
+    }
+    /* (3) */
+    {
+        char *a[] = {plain, 0};
+        rc = run(a);
+        ck(rc == 0 && num("COVER", "units=") == 1 && num("COVER", "tlib=") == 0 && num("COVER", "source=") == 1, "program-without-modules-is-all-source");
+    }
+    /* (4) */
+    {
+        char *a[] = {"--batches", "--slice", "0/64", 0};
+        char *b[] = {"--batches", "--slice", "1/64", 0};
+        long o, l, e;
+        int n0, same;
+        rc = run(a);
+        n0 = lines("COVER");
+        first[0] = 0;
+        e = last ? tx_chr(last, (long)lastn, '\n') : -1;
+        if (e > 0 && !tx_field(last, e, '\t', 1, &o, &l)) (void)tx_copy(first, sizeof first, last + o, l);
+        ck(rc == 0 && n0 >= 1 && num("TLIB_COVER", "files=") == n0 && num("TLIB_COVER", "failed=") == 0 && first[0], "registry-slice-is-covered");
+        rc = run(b);
+        same = last && first[0] && tx_find(last, (long)lastn, first, tx_len(first, sizeof first)) >= 0;
+        ck(rc == 0 && lines("COVER") >= 1 && !same, "another-slice-names-other-files");
+    }
+    /* (5) */
+    {
+        char *a[] = {"no/such/file.cx", 0};
+        char *b[] = {"--batches", "--slice", "4/4", 0};
+        char *c[] = {"--batches", "tools/layer-api.cx", 0};
+        int r1 = run(a), r2 = run(b), r3 = run(c);
+        ck(r1 == 2 && r2 == 2 && r3 == 2, "usage-rc2");
+    }
+    mm_free(last);
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_TLIB_COVER\tfailed=%d\telapsed_ms=%ld\n", failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

@@ -26,6 +26,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 
 /* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
@@ -83,16 +84,13 @@ static void die(const char *what) {
 
 /* A split2 scratch root that does not copy the live install. Live ROOT may be APE. */
 static int make_split_root(const char *dst) {
-    char p[4400], dev[4400], src[4400];
-    size_t n = 0;
-    char *b;
+    char p[4400], dev[4400];
+    /* The booter head is a fixed stub written here: the untracked, git-ignored root file unisacc-dev
+       is absent from clones and snapshots (s9 ran every split fixture as built=0 because of it). */
+    static const char head[] = "#!/bin/sh\n# NOT_RELEASE fixture booter head\n";
     if (sy_mkdir(dst, 0700)) return -1;
-    if (cx_fmt(src, sizeof src, "%s/unisacc-dev", root)) return -1;
-    b = cx_read(src, &n);
-    if (!b || n < 8) { if (b) free(b); return -1; }
-    if (cx_fmt(p, sizeof p, "%s/unisacc.com", dst)) { free(b); return -1; }
-    if (cx_write(p, b, n)) { free(b); return -1; }
-    free(b);
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com", dst)) return -1;
+    if (cx_write(p, head, sizeof head - 1)) return -1;
     if (cx_fmt(dev, sizeof dev, "%s/unisacc.com.dev", dst)) return -1;
     if (sy_mkdir(dev, 0700)) return -1;
     if (cx_fmt(p, sizeof p, "%s/entry.elf", dev) || cx_write(p, "entry\n", 6)) return -1;
@@ -124,7 +122,8 @@ int main(int argc, char **argv) {
     int l, rc;
 
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
-    if (cx_fmt(work, sizeof work, "%s/out/productpkg-batch", root)) die("work");
+    if (argc == 2 && argv[1][0] == '/') { if (cx_fmt(work, sizeof work, "%s/productpkg-batch", argv[1])) die("work"); }
+    else if (cx_fmt(work, sizeof work, "%s/unisacc-productpkg-batch-%d", sy_tmpdir(), (int)sy_uid())) die("work");
     if (argc >= 3 && tx_eqz(argv[1], "child") && tx_eqz(argv[2], "identity-fail")) {
         if (sy_exists(work) == 1 && cx_rmtree(work)) die("child old work");
         if (sy_mkdir(work, 0700)) die("child work");
@@ -163,7 +162,14 @@ int main(int argc, char **argv) {
         } else ok(sy_exists(entry) != 2, "copy-has-entry");
     }
 
-    {   /* plans/product-identity-2026-11-02.md: identity is the member set, and the guard must
+    {   /* directory path identity: sy_stat_t.mode carries no type bits, the type is .kind.
+           A directory must hash as a product root (member set), not be refused. */
+        char hd[65], hp[65];
+        pp_digest_path_or_die(root, hd);
+        ok(pp_product_digest(root, hp) == 0 && tx_eqz(hd, hp), "directory-path-identity");
+    }
+
+    {   /* identity is the member set, and the guard must
            see a rewritten package. Before the identity change this case failed: the old guard
            hashed only the launcher, so flipping a byte in the megabyte package left it unchanged. */
         char g[4400], gp[4400], h1[65], h2[65];
@@ -316,6 +322,33 @@ int main(int argc, char **argv) {
         out[0] = 0;
         rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         ok(rc == 2, "identity-failure-refuses-not-empty");
+    }
+    {   /* kernel AF_ALG vs software SHA-256: byte-identical on every boundary length and a 1 MiB block */
+        static const long lens[] = { 0, 1, 55, 56, 63, 64, 65, 65535, 65536, 1048576 };
+        long li, bad = 0, cap = 1048576;
+        unsigned char *buf = malloc((size_t)cap);
+        unsigned long long x = 88172645463325252ULL;
+        ok(buf != 0, "kernel-sha-buffer");
+        for (li = 0; buf && li < cap; li++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; buf[li] = (unsigned char)x; }
+        for (li = 0; buf && li < (long)(sizeof lens / sizeof lens[0]); li++) {
+            char kh[65], sh[65];
+            if (sy_sha256_hex(buf, lens[li], kh) != 0) { bad++; continue; }   /* kernel path unavailable here: counted, not skipped */
+            cx_sha256_hex(buf, (size_t)lens[li], sh);
+            if (strcmp(kh, sh) != 0) bad++;
+        }
+        ok(bad == 0, "kernel-sha-equals-software-all-lengths");
+        if (buf) {
+            char kh[65], sh[65];
+            const char *com2 = com;
+            size_t pn = 0; char *pb = cx_read(com2, &pn);
+            if (pb) {
+                ok(sy_sha256_hex(pb, (long)pn, kh) == 0 && (cx_sha256_hex(pb, pn, sh), !strcmp(kh, sh)), "kernel-sha-equals-software-real-product");
+                free(pb);
+            } else skip("kernel-sha-equals-software-real-product", "product unreadable");
+            /* a failing kernel path (negative length) must be reported so callers fall back */
+            ok(sy_sha256_hex(buf, -1, kh) != 0, "kernel-sha-bad-length-reports-failure");
+            free(buf);
+        }
     }
     printf("PRODUCTPKG\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;

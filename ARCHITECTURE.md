@@ -1,14 +1,10 @@
 # 仓库地图
 
-> **更简明的目录入口见 [docs/REPO-MAP.md](docs/REPO-MAP.md)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
+> **更简明的目录入口见 [prd.md §8.1](prd.md#repo-map)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
 
-**0.0.43当前入口（2026-10-25重规划）：** 旧测试树与旧门禁已移入
-`archive/testing-c43-legacy/`。新套件由`tests/run.cx`直接默认-run；当前smoke
-只有16项局部断言，完整验收仍明确NOT_READY。产品构造支持独立在`tools/`，
-其中`tools/sourceflat.cx`已原生替代源码导出逻辑。下文涉及历史探针的条目仅描述来源，
-不能据此恢复旧队列或借用旧通过结果。
+新测试入口是`tests/run.cx`（默认-run），旧测试树在`archive/testing-c43-legacy/`；产品构造支持独立在`tools/`。下文涉及历史探针的条目仅描述来源，不能据此恢复旧队列或借用旧通过结果。
 
-**产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 README 限制表）（六目标单文件）及随带的 `include/`。编译器入口是 `src/unisacc.cx`（六层，见第 2 节），由 `tools/entry-build.cx` 构造；各阶段声明与构造器在 `exec/` 对应目录。原 Python 种子 `unisa/` 已归档到 `archive/reference-py/unisa/`（清单见 [archive/reference-py/README.md](archive/reference-py/README.md)），经典 C 参考（`unisacc.c`、`src/*.c`，以及 `exec/c/` 的驱动与运行核 C 源如 `compiler.c`、`asmcompiler.c`、`run.c`）已归档到 `archive/reference-c/`（见 [archive/reference-c/README.md](archive/reference-c/README.md)），两者只供对照，活路径不回调。生成表与 `kernel/` 改由第 3 节的 CX 工具写出；活路径上剩余的 Python 见 [plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md)。下面区分产品、参考、数据与开发工具：
+**产品**是 C99 编译器 `unisacc.com`（C99 = ISO/IEC 9899:1999 含 TC1–TC3，文本 WG14 N1256；条款覆盖账本见 archive/plans/v0.0.14.md R14-6；`#line` 主文件内已支持（0.0.14）；随带 C 库是有清单的子集，见 [readme-detail 已知限制](docs/readme-detail.md#七已知限制)）（六目标单文件）及随带的 `include/`。编译器入口是 `src/unisacc.cx`（六层，见第 2 节），由 `tools/entry-build.cx` 构造；各阶段声明与构造器在 `exec/` 对应目录。原 Python 种子 `unisa/` 已归档到 `archive/reference-py/unisa/`（清单见 [archive/reference-py/README.md](archive/reference-py/README.md)），经典 C 参考（`unisacc.c`、`src/*.c`，以及 `exec/c/` 的驱动与运行核 C 源如 `compiler.c`、`asmcompiler.c`、`run.c`）已归档到 `archive/reference-c/`（见 [archive/reference-c/README.md](archive/reference-c/README.md)），两者只供对照，活路径不回调。生成表与 `kernel/` 改由第 3 节的 CX 工具写出；活路径上剩余的 Python 见 [plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md)。下面区分产品、参考、数据与开发工具：
 
 | 类别 | 位置 | 说明 |
 |---|---|---|
@@ -16,7 +12,7 @@
 | 生成数据与归档参考 | `kernel/`（生成物）、`archive/reference-py/`、`archive/reference-c/` | `kernel/` 由 `tools/kernel-emit.cx` 等写出，禁止手改；Python 种子与经典 C 参考已归档，只供对照 |
 | 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
 | 开发工具与参考裁判 | `tools/`构造支持、`tests/`新原生合同、`iterate/`构造器；旧套件在`archive/testing-c43-legacy/` | 工具与测试分离；现有Python协调器的债务不因迁目录消失 |
-| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`tape-vs-wasm.md`、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、[prd.md](prd.md)（唯一主入口；[§2当前计划](prd.md#current-plans)、[§3七流/十八网/进度](prd.md#flow-net-contracts)、§5路线、§6问题）与 `spec.md`（条款全文，编号稳定）、`plans/v0.0.43.md`（当前执行计划，唯一索引在 `prd.md` §2；路线/构想摘要合入 §5，旧稿归 `archive/plans/`）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
+| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、[prd.md](prd.md)（唯一主入口；[§2当前计划](prd.md#current-plans)、[§3七流/十八网/进度](prd.md#flow-net-contracts)、§5路线、§6问题）与 `spec.md`（条款全文，编号稳定）、`plans/v0.0.43.md`（当前执行计划，唯一索引在 `prd.md` §2；路线/构想摘要合入 §5，旧稿归 `archive/plans/`）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
 
 `.tapebin` 的格式见 [v1 契约](docs/tapebin-v1.md)：原种子编解码器
 （`archive/reference-py/unisa/tapebin.py`）与经典参考读器
@@ -38,7 +34,7 @@
 
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
-| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md#current-plans)，每个版本带签后大小、SHA-256 与验收收据 |
+| 已发布版本及其字节 | **不在本文件重述**：权威表在 [prd §2 计划索引](prd.md#current-plans)，每个版本带签后大小、SHA-256 与验收收据 |
 
 平台验收按当前候选分别记证，完整状态见 [PRD 思维树](prd.md#work-tree)，发布证据边界见 [发布流水线](archive/plans/2026-11-01/RELEASE-PIPELINE.md)。历史 macOS/Rosetta、Lima/UTM 实跑与 Windows 双目标自举只证明当时的输入与环境，不代表当前候选六平台通过。
 历史单次 memory 计时、身份与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)及下列 S-17 迁移档案。
@@ -46,9 +42,6 @@
 `research/model-bytes.json`）；模板、库源码、核与平台驱动另计，
 不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
 
-旧候选 6MB/171 项、Q 编码/177 项与各平台自举、失败及性能记录均保留在
-[S-17 迁移档案](archive/s17-migration-log-20260928.md) 和
-[原始最终证据](archive/research/20260928/s17-final-evidence.json)，不作为当前候选验收。
 固定包驱动自举不包含模型、整包或 APE 容器自构造。
 
 prune 是生产路由中的一个构造网络阶段，位于 lowering 之前
@@ -83,7 +76,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 | 位置 | 内容 | 由谁写出 |
 |---|---|---|
-| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。经典事实网的数量与键数见 [PRD 术语表](prd.md#0-概念与术语先读歧义以本节为准)及 [README 真值表](README.md) | `tools/gold-table.cx --check ROOT` 核定义域、类与列行；有规则形 `seed/gold_<阶段>_label.c` 的 11 张可用 `--write ROOT STAGE` 重写。原 `python3 -m unisa gold-export` 已归档 |
+| `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。经典事实网的数量与键数见 [PRD 术语表](prd.md#0-概念与术语先读歧义以本节为准)及 [readme-detail 第三节阶段表](docs/readme-detail.md#三决策网与七流经典参考实例已冻结) | `tools/gold-table.cx --check ROOT` 核定义域、类与列行；有规则形 `seed/gold_<阶段>_label.c` 的 11 张可用 `--write ROOT STAGE` 重写。原 `python3 -m unisa gold-export` 已归档 |
 | `weights/built.json` | 构造出的权重，JSON，便于阅读和调试 | 冻结数据：原构造器（`archive/reference-py/unisa/construct.py`、`intnet.py`）已归档，整份文件目前没有原生写出者。单网私有重构造走 `tools/gold-partition-material.cx` 与 `tools/net-built-private.cx`，只写私有目录 |
 | `weights/built.uns2` | 同一份经典参考权重的紧凑二进制 | 冻结数据；C 开发工具 `iterate/construct/construct.c -u` 可从真值表写出 UNS2，见 [iterate/construct/README.md](iterate/construct/README.md) |
 | `exec/facts/*.tsv` 中的 30 张生成表 | 编码、镜像、tape 形状等事实（`exec/facts/` 下其余 `.tsv` 不由它写） | `tools/facts-gen.cx --write ROOT [TABLE...]`，`--check` 另核 bank 归属；每张表头注明写出者与输入 sha256。原 Python 写出者已归档到 `archive/reference-py/exec/facts/export.py` |
@@ -91,7 +84,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | `kernel/unisa_headers.inc` | 随身携带的 C 库（`include/*.h` 原文与 `-ftrim-libc` 闭包） | 仓内这份由 `tools/carried-header-export.cx`（`prepare`／`--verify`／`install`）写出，文件头记有该工具；`kernel-emit` 也写同名文件 |
 | `include/cx-flat.h` | `.cx` 的单文件前导（`include/cx.h` 在 `__UNISA__` 下读它） | `tools/cx-flatten.cx --write ROOT`／`--check ROOT`，源是 `include/cx-nested.h` |
 
-原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。仓内 `kernel/` 41 个文件中有 40 个的溯源注释仍写着 `python3 -m unisa emit-kernel`：这些已提交字节还没有用 `kernel-emit --write` 重写过。2026-10-30 对仓内 `kernel/` 跑 `kernel-emit --check`，41 个文件都报 DIFF（40 个首处差异在溯源注释；`unisa_headers.inc` 是 `carried-header-export` 写出的，与 `kernel-emit` 的输出不同）。同日 `facts-gen --check`、`gold-table --check`、`cx-flatten --check` 均通过。
+原 `tests/kernel.sh`（归档于 `archive/testing-c43-legacy/tests/kernel.sh`）的再生成对比，现由上表各工具的 `--check` 承担。`kernel/` 是生成物，现状与各工具 `--check` 的结果以命令实跑为准。
 
 ### 文件格式
 
@@ -115,7 +108,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 `src/` 里其余 `.cx`（`driveface`、`driveroute`、`entrybind`、`entryexec`、`hostnative`、`runcache` 等）以及软链 `src/driver`、`src/runtime`、`src/core`、`src/compiler`（指向 `cx/` 同名目录）是入口用到的其他对象。完整对象清单（33 个）写在 [`tools/entry-build.cx`](tools/entry-build.cx) 里。`src/version.h` 是产品版本声明。
 
-**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)；该计划写明截至 2026-10-30 入口候选只覆盖 lnx/x86_64，尚未换成产品。当前状态以 [prd.md](prd.md) 的思维树为准。
+**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)；当前状态以 [prd.md](prd.md) 的思维树为准。
 
 ## 3　CX 工具与分层
 
@@ -154,7 +147,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`tests/cxapis.cx`](tests/cxapis.cx) | `tests/cxapis.tsv` | `strcpy`、`strcat`、`sprintf`、`gets` 的调用 |
 | [`tests/cxtrunc.cx`](tests/cxtrunc.cx) | `tests/cxtrunc.tsv` | 丢弃返回值、长度可随输入变化的 `snprintf`、`strncpy`、`memcpy` |
 
-用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`；2026-10-30 它仍失败，29 个文件超基线。
+用法如 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。
 
 **旧实现已归档**：Python 种子 `unisa/` 在 `archive/reference-py/unisa/`，连同依赖它的旧脚本（清单与归档依据见 [archive/reference-py/README.md](archive/reference-py/README.md)）；经典 C 参考 `unisacc.c`、`src/*.c` 与 `exec/c/` 的驱动和运行核 C 源在 `archive/reference-c/`（`exec/c/` 里仍留有检查与探针用的 `.c` 及头文件）（见 [archive/reference-c/README.md](archive/reference-c/README.md)）。两者都按原相对路径存放，只供对照，活路径不得回调。旧自举判据 `nativeboot`、`bigclosure` 等随旧测试树归档在 `archive/testing-c43-legacy/tests/`，不授权新入口。
 
@@ -168,7 +161,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`examples/`](examples/) · `archive/testing-c43-legacy/tests/c/` · `archive/testing-c43-legacy/tests/c99/` | 示例与历史探针；历史夹具须按合同迁移 |
 | `corpus/` | 外部语料（c-testsuite、工具库），只读 |
 | [`Makefile`](Makefile) | `make`／`make smoke`（`tests/run.cx --smoke`）、`make test`（`--all`）、`make list`、`make export-ref`（`tools/sourceflat.cx`）；`make com` 仍调 `exec/c/buildcompiler.sh`，已起不来；`make release` 直接以 NOT_READY 退出 3 |
-| README 里的阶段表 | 冻结文本：原生成器 `archive/reference-py/unisa/docgen.py` 与检查 `archive/testing-c43-legacy/tests/docs.sh` 已归档；原生一致性合同待实现 |
+| docs/readme-detail.md 第三节的阶段表 | 冻结文本：原生成器 `archive/reference-py/unisa/docgen.py` 与检查 `archive/testing-c43-legacy/tests/docs.sh` 已归档；原生一致性合同待实现 |
 | [`archive/`](archive/) | 旧版 prd、已发布版本的计划与证据，以及 `reference-py/`、`reference-c/`、`testing-c43-legacy/` 三处旧实现与旧测试，只作历史 |
 | `dist/` | 发行材料，不提交；新发布收据和跨平台闸仍待重建 |
 

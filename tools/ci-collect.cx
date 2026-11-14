@@ -1,0 +1,94 @@
+#pragma unisa use cxlib.netpack
+
+/* tools/ci-collect.cx -- collect the six native candidate jobs of one CI run into a TSV (read-only).
+ *
+ *   sh ./unisacc.com tools/ci-collect.cx -- --run ID [--repo OWNER/REPO] [--gh GH_EXECUTABLE]
+ *
+ * One `gh run view ID --json jobs --jq ...` through np_run with a 60 second limit (no network in checks: --gh names
+ * a fake executable).  Native jobs are the matrix jobs named "candidate (RUNNER, OS, ARCH, SLICE)"; the six expected
+ * targets are lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64.
+ * Output: header "job target conclusion started completed url", one row per native job (conclusion PENDING when the
+ * job is not completed), one "PENDING <target> missing" row per target without a job, "CI_NOT_SUCCESS job reason" per
+ * non-success job, and a last line CI_ALL=success only when all six exist and are completed+success; otherwise
+ * CI_ALL=failure (some job failed) or CI_ALL=pending.  Exit 0 success, 1 failure, 3 pending/gh failure, 2 usage. */
+
+static const char *TG[6] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+
+static int split(char *line, char *f[6]) {
+    int i = 0;
+    char *p = line;
+    for (i = 0; i < 6; i++) f[i] = (char *)"";
+    i = 0;
+    f[i++] = p;
+    for (; *p; p++) if (*p == '\t') { *p = 0; if (i < 6) f[i++] = p + 1; }
+    return i;
+}
+
+/* "candidate (ubuntu-24.04, lnx, arm64, yes)" -> "lnx/arm64"; "" when not a native job */
+static int target_of(const char *name, char *t, size_t cap) {
+    char tmp[512], *a, *b, *c;
+    const char *o;
+    if (strncmp(name, "candidate (", 11)) return 0;
+    cx_fmt(tmp, sizeof tmp, "%s", name + 11);
+    o = tmp;
+    a = strchr(o, ',');
+    if (!a) return 0;
+    a++; while (*a == ' ') a++;
+    b = strchr(a, ',');
+    if (!b) return 0;
+    *b++ = 0; while (*b == ' ') b++;
+    c = strchr(b, ',');
+    if (c) *c = 0;
+    c = strchr(b, ')');
+    if (c) *c = 0;
+    cx_fmt(t, cap, "%s/%s", a, b);
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *run = 0, *repo = "partnernetsoftware/unisacc", *gh = "gh";
+    char *av[12], why[1024], *line, *save, *f[6], t[128];
+    char names[6][512];
+    int state[6], i, k, bad = 0, pend = 0;
+    np_result r = {0};
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--run") && i + 1 < argc) run = argv[++i];
+        else if (!strcmp(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (!strcmp(argv[i], "--gh") && i + 1 < argc) gh = argv[++i];
+        else { fprintf(stderr, "usage: ci-collect --run ID [--repo R] [--gh EXE]\n"); return 2; }
+    }
+    if (!run || !run[0] || strspn(run, "0123456789") != strlen(run)) { fprintf(stderr, "ci-collect: --run must be digits\n"); return 2; }
+    for (i = 0; i < 6; i++) state[i] = 0;
+    av[0] = (char *)gh; av[1] = "run"; av[2] = "view"; av[3] = (char *)run; av[4] = "-R"; av[5] = (char *)repo;
+    av[6] = "--json"; av[7] = "jobs"; av[8] = "--jq";
+    av[9] = ".jobs[]|[.name,.status,.conclusion,.startedAt,.completedAt,.url]|@tsv"; av[10] = 0;
+    if (np_run(av, 0, 0, 60, &r, why, sizeof why) || r.rc != 0 || r.timed_out) {
+        printf("CI_ALL=pending\tgh-run-view-failed\n");
+        return 3;
+    }
+    printf("job\ttarget\tconclusion\tstarted\tcompleted\turl\n");
+    save = r.out;
+    for (line = strtok(save, "\n"); line; line = strtok(0, "\n")) {
+        const char *con;
+        split(line, f);
+        if (!target_of(f[0], t, sizeof t)) continue;
+        con = !strcmp(f[1], "completed") && f[2][0] ? f[2] : "PENDING";
+        printf("%s\t%s\t%s\t%s\t%s\t%s\n", f[0], t, con, f[3], f[4], f[5]);
+        for (k = 0; k < 6; k++) if (!strcmp(t, TG[k])) {
+            if (!strcmp(con, "success")) state[k] = 1;
+            else if (!strcmp(con, "PENDING")) state[k] = 2;
+            else state[k] = 3;
+            cx_fmt(names[k], sizeof names[k], "%s", f[0]);
+        }
+    }
+    for (k = 0; k < 6; k++) {
+        if (state[k] == 0) { printf("PENDING\t%s\tmissing\n", TG[k]); pend++; }
+        else if (state[k] == 2) { printf("CI_NOT_SUCCESS\t%s\tPENDING\n", names[k]); pend++; }
+        else if (state[k] == 3) { printf("CI_NOT_SUCCESS\t%s\tnot-success\n", names[k]); bad++; }
+    }
+    np_free(&r);
+    if (bad) { printf("CI_ALL=failure\n"); return 1; }
+    if (pend) { printf("CI_ALL=pending\n"); return 3; }
+    printf("CI_ALL=success\n");
+    return 0;
+}

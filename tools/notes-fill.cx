@@ -1,0 +1,127 @@
+/* tools/notes-fill.cx -- fill the "待填" placeholders of a release-notes file from release records.
+ *
+ *   sh ./unisacc.com tools/notes-fill.cx -- --notes N.md --candidate candidate.tsv --decision decision.txt
+ *        [--evidence evidence.tsv] [--out PATH] [--check]
+ *
+ * Per notes line holding "待填" (lines quoting the word as 标"待填" are explanations and skipped) the known labels
+ * on that line are collected: 冻结提交 (candidate commit), 候选 APE sha256 (ape_sha256), CI run (ci_run_id),
+ * 公开时间 (decision.txt line PUBLIC_TIME<TAB>v), 裁决 (decision.txt line QUALIFIED<TAB>verdict ..., rest of line),
+ * s9 判定 (decision.txt STEP 4 s9 status), 候选速度基线 (evidence.tsv row speed_baseline<TAB>v).
+ * If every label on the line has a value, the first 待填 becomes "label=value;label=value".  A line with a missing
+ * value or no known label stays as is and prints UNFILLED line=N missing=...|none.  Last line:
+ * NOTES_FILL filled=X unfilled=Y.  --check writes nothing; otherwise --out is required.  rc 0 ok, 2 usage/read error. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+
+static char *rd(const char *p, long *n) {
+    char *b = 0;
+    if (!p || sy_read_file(p, &b, n, 1 << 24) || !b) return 0;
+    return b;
+}
+
+/* value of TSV column `col` in the first data row; 0 when absent */
+static int cand_col(const char *t, const char *col, char *out, int cap) {
+    const char *h = t, *e = strchr(t, '\n'), *r, *re; int idx = 0, k = 0, i = 0; size_t cl = strlen(col);
+    if (!e) return 0;
+    for (;;) {
+        const char *fe = h; while (fe < e && *fe != '\t') fe++;
+        if ((size_t)(fe - h) == cl && !strncmp(h, col, cl)) break;
+        if (fe >= e) return 0;
+        idx++; h = fe + 1;
+    }
+    r = e + 1; re = strchr(r, '\n'); if (!re) re = r + strlen(r);
+    while (k < idx && r < re) { if (*r == '\t') k++; r++; }
+    if (k < idx) return 0;
+    while (r < re && *r != '\t' && i < cap - 1) out[i++] = *r++;
+    out[i] = 0;
+    return i > 0;
+}
+
+/* line of text starting with `pre`; copy rest (tabs -> space) */
+static int line_with(const char *t, const char *pre, char *out, int cap) {
+    size_t pl = strlen(pre); const char *p = t;
+    while (p && *p) {
+        if (!strncmp(p, pre, pl)) {
+            const char *s = p + pl, *e = strchr(s, '\n'); int i = 0;
+            if (!e) e = s + strlen(s);
+            while (s < e && i < cap - 1) { out[i++] = *s == '\t' ? ' ' : *s; s++; }
+            out[i] = 0;
+            return i > 0;
+        }
+        p = strchr(p, '\n'); if (p) p++;
+    }
+    return 0;
+}
+
+static const char *LAB[] = { "冻结提交", "候选 APE sha256", "CI run", "公开时间", "裁决", "s9 判定", "候选速度基线", 0 };
+
+static int value(int li, const char *cand, const char *dec, const char *evd, char *out, int cap) {
+    out[0] = 0;
+    switch (li) {
+    case 0: return cand_col(cand, "commit", out, cap);
+    case 1: return cand_col(cand, "ape_sha256", out, cap);
+    case 2: return cand_col(cand, "ci_run_id", out, cap);
+    case 3: return line_with(dec, "PUBLIC_TIME\t", out, cap);
+    case 4: return line_with(dec, "QUALIFIED\t", out, cap);
+    case 5: return line_with(dec, "STEP\t4\ts9\t", out, cap);
+    case 6: return evd && line_with(evd, "speed_baseline\t", out, cap);
+    }
+    return 0;
+}
+
+static char ob[1 << 21];
+
+int main(int argc, char **argv) {
+    const char *notes = 0, *candp = 0, *decp = 0, *evp = 0, *outp = 0; int check = 0, i;
+    char *nt, *cand, *dec, *evd = 0; long nn = 0, cn, dn, en, ol = 0; int filled = 0, unfilled = 0, ln = 0; const char *p;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--notes") && i + 1 < argc) notes = argv[++i];
+        else if (!strcmp(argv[i], "--candidate") && i + 1 < argc) candp = argv[++i];
+        else if (!strcmp(argv[i], "--decision") && i + 1 < argc) decp = argv[++i];
+        else if (!strcmp(argv[i], "--evidence") && i + 1 < argc) evp = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--check")) check = 1;
+        else { fprintf(stderr, "notes-fill: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (!notes || !candp || !decp || (!check && !outp)) { fprintf(stderr, "usage: notes-fill --notes N --candidate C --decision D [--evidence E] (--out P | --check)\n"); return 2; }
+    nt = rd(notes, &nn); if (!nt) { fprintf(stderr, "notes-fill: cannot read %s\n", notes); return 2; }
+    cand = rd(candp, &cn); dec = rd(decp, &dn);
+    if (evp) evd = rd(evp, &en);
+    if (!cand || !dec) { fprintf(stderr, "notes-fill: cannot read candidate or decision\n"); return 2; }
+    if (nn * 2 + 4096 > (long)sizeof ob) { fprintf(stderr, "notes-fill: notes too large\n"); return 2; }
+    p = nt;
+    while (*p) {
+        const char *e = strchr(p, '\n'); size_t L; char line[8192], val[1024], rep[4096];
+        if (!e) e = p + strlen(p);
+        L = (size_t)(e - p); ln++;
+        if (L < sizeof line) {
+            const char *w; { size_t q; for (q = 0; q < L; q++) line[q] = p[q]; } line[L] = 0;
+            w = strstr(line, "待填");
+            if (w && !strstr(line, "标\"待填\"")) {
+                int li, have = 0, miss = 0, rl = 0, ml = 0; char mlist[512]; mlist[0] = 0; rep[0] = 0;
+                for (li = 0; LAB[li]; li++) {
+                    if (!strstr(line, LAB[li])) continue;
+                    have++;
+                    if (value(li, cand, dec, evd, val, sizeof val)) rl += snprintf(rep + rl, sizeof rep - rl, "%s%s=%s", rl ? ";" : "", LAB[li], val);
+                    else {
+                        miss++;
+                        ml += snprintf(mlist + ml, sizeof mlist - ml, "%s%s", ml ? "," : "", LAB[li]);
+                    }
+                }
+                if (have && !miss) {
+                    ol += snprintf(ob + ol, sizeof ob - ol, "%.*s%s%s\n", (int)(w - line), line, rep, w + strlen("待填"));
+                    filled++;
+                    printf("FILL line=%d labels=%d\n", ln, have);
+                    p = *e ? e + 1 : e; continue;
+                }
+                unfilled++;
+                printf("UNFILLED line=%d missing=%s\n", ln, have ? mlist : "none");
+            }
+        }
+        ol += snprintf(ob + ol, sizeof ob - ol, "%.*s%s", (int)L, p, *e ? "\n" : "");
+        p = *e ? e + 1 : e;
+    }
+    printf("NOTES_FILL filled=%d unfilled=%d\n", filled, unfilled);
+    if (!check && sy_write_atomic(outp, ob, ol, 0644)) { fprintf(stderr, "notes-fill: cannot write %s\n", outp); return 2; }
+    return 0;
+}

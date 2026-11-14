@@ -21,6 +21,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use sys.env
 
 #define NRK 13
 typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
@@ -65,6 +66,16 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
     else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --rows SAVED [--only PATH-PREFIX]]\n"); return 2; }
+    char lsf[4200]; int lsfd = -1, lspid; lsf[0] = 0;
+    if (!sy_env("UNISACC_CX_LSFILES")) {   /* one tracked-.cx listing for the round; symindex (cxlibc, coreapi: 28 queries) reuses it; fall back to its own query when absent */
+        char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}; char *lb; long ln;
+        if (!cx_fmt(lsf, sizeof lsf, "%s/ratchets-%d.lst", sy_tmpdir(), sy_pid()) && (lspid = sy_spawn_pipe(gv, 0, 0, &lsfd, 0)) > 0) {
+            int ex = 0, code = 0, sig = 0;
+            slurp(lsfd, &lb, &ln); sy_close(lsfd);
+            if (sy_wait_status(lspid, 0, &ex, &code, &sig) == lspid && ex && code == 0 && lb && ln > 0 && cx_write(lsf, lb, ln) == 0) sy_setenv("UNISACC_CX_LSFILES", lsf, 1);
+            else lsf[0] = 0;
+        } else lsf[0] = 0;
+    }
     for (k = 0; k < NRK; k++) {
         char script[64];
         if (cx_fmt(script, sizeof script, "tests/%s.cx", rk[k].name)) return 2;
@@ -100,6 +111,7 @@ int main(int argc, char **argv) {
             at += ln + 1;
         }
     }
+    if (lsf[0]) sy_unlink(lsf);
     printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
     return fail ? 1 : 0;
 }

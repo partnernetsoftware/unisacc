@@ -1,0 +1,29 @@
+/* Checks ext/net/resolve.cx (literal and localhost resolution, no DNS).
+     sh ./unisacc.com tools/check-ext-net-resolve.cx
+   Prints PASS/FAIL lines and EXT_NET_RESOLVE<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use net.resolve
+#pragma unisa use net.addr
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnetresolve.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+int main(void) {
+    sy_addr_t a[4];
+    char ip[32];
+    ck(sy_resolve("10.1.2.3", 80, 0, a, 4) == 1 && a[0].family == SY_AF_INET4 && a[0].ip[0] == 10 && a[0].port == 80, "v4-literal");
+    ck(sy_resolve("::1", 9, 0, a, 4) == 1 && a[0].family == SY_AF_INET6 && a[0].ip[15] == 1, "v6-literal");
+    ck(sy_resolve("localhost", 7, 0, a, 4) == 2 && a[0].family == SY_AF_INET4 && a[1].family == SY_AF_INET6, "localhost-both");
+    ck(sy_resolve("LocalHost", 7, SY_AF_INET4, a, 4) == 1 && a[0].ip[0] == 127 && a[0].port == 7, "localhost-v4-only");
+    ck(sy_resolve("localhost", 7, SY_AF_INET6, a, 4) == 1 && a[0].family == SY_AF_INET6, "localhost-v6-only");
+    ck(sy_resolve("localhost", 7, 0, a, 1) == 1, "max-caps-count");
+    ck(sy_resolve("10.1.2.3", 80, SY_AF_INET6, a, 4) == SY_EAI_BASE - 2, "family-mismatch");
+    ck(sy_resolve("example.invalid", 80, 0, a, 4) == SY_EAI_BASE - 2, "dns-name-refused");
+    ck(sy_resolve(0, 80, 0, a, 4) == -EINVAL && sy_resolve("localhost", 70000, 0, a, 4) == -EINVAL && sy_resolve("localhost", 1, 0, a, 0) == -EINVAL, "bad-args");
+    ck(sy_resolve("localhost", 1, 99, a, 4) == -EAFNOSUPPORT, "bad-family");
+    ck(sy_resolve4("localhost", ip, sizeof ip) == 0 && ip[0] == '1' && ip[1] == '2' && ip[2] == '7', "resolve4-localhost");
+    ck(sy_resolve4("8.8.4.4", ip, sizeof ip) == 0 && ip[0] == '8' && ip[2] == '8', "resolve4-literal");
+    ck(sy_resolve4("::1", ip, sizeof ip) == SY_EAI_BASE - 2, "resolve4-v6-rejected");
+    printf("EXT_NET_RESOLVE\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

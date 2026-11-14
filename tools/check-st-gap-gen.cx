@@ -1,0 +1,118 @@
+/* tools/check-st-gap-gen.cx -- tools/st-gap-gen.cx 的检查:仓内事实表、产物漂移、18 格真值表对独立手写 oracle、
+ * 产物 if 链与 cx/runtime/runexec.cx 的 st_gap 源逐行相同、坏表拒绝、夹具改表后产物随之变化。
+ *   sh ./unisacc.com tools/check-st-gap-gen.cx
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed, nok;
+static char dir[320];
+static void ck(int ok, const char *name) {
+    if (ok) { nok++; sy_printf("PASS\tcheck-st-gap-gen.%s\n", name); }
+    else { failed++; sy_printf("FAIL\tcheck-st-gap-gen.%s\n", name); }
+}
+static int run(const char *root, const char *mode, char *out, long cap) {
+    char cmd[900]; char *o = 0; size_t n = 0; int rc;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/st-gap-gen.cx -- %s --root %s", mode, root);
+    char *v[] = {"sh", "-c", cmd, 0};
+    rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && (long)n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+static int hasl(const char *h, const char *lit) {
+    long hn = tx_len(h, 400000), ln = tx_len(lit, 4096), i;
+    if (hn < 0) hn = 400000;
+    for (i = 0; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return 1;
+    return 0;
+}
+/* oracle: runexec.cx st_gap read by hand (read-code, not a probe) */
+static const char *oracle(int mode, int level) {
+    if (mode == 1) return "e2";
+    if (mode == 4) return "tokens";
+    if (mode == 5) return "object";
+    if (mode == 2 && level <= 0) return "tapecheck";
+    if (mode == 2) return "e4";
+    if (mode == 3) return "memory";
+    return "elf";
+}
+static void put(const char *rel, const char *body) {
+    char p[500];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    cx_write(p, body, tx_len(body, 100000));
+}
+static char *rd(const char *rel, size_t *n) {
+    char p[500];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    return cx_read(p, n);
+}
+static void bad(const char *body, const char *why, const char *name) {
+    char out[4096];
+    int rc;
+    put("exec/facts/st-gap.tsv", body);
+    rc = run(dir, "--write", out, sizeof out);
+    ck(rc == 2 && hasl(out, "REFUSE\texec/facts/st-gap.tsv") && hasl(out, why), name);
+}
+
+int main(void) {
+    char out[8192], cell[64], want[96];
+    char *t, *src, *chain; size_t m = 0, sm = 0, cm = 0;
+    int rc, md, lv, allok = 1, nl;
+    char cmd[400];
+    if (cx_fmt(dir, sizeof dir, "%s/st-gap-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(cmd, sizeof cmd, "%s/exec", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/exec/facts", dir); mkdir(cmd, 0700);
+    cx_fmt(cmd, sizeof cmd, "%s/build", dir); mkdir(cmd, 0700);
+
+    rc = run(".", "--check", out, sizeof out);
+    ck(rc == 0 && hasl(out, "ST_GAP_GEN\tok\trows=7"), "repo-check-ok");
+    t = cx_read("build/st-gap.tsv", &m);
+    ck(t != 0, "table-readable");
+    nl = 0;
+    for (md = 0; t && md < (int)m; md++) if (t[md] == '\n') nl++;
+    ck(nl == 20, "table-lines-18-cells-plus-2-header");
+    for (md = 0; md <= 5; md++)
+        for (lv = 0; lv <= 2; lv++) {
+            cx_fmt(want, sizeof want, "\n%d\t%d\t%s\n", md, lv, oracle(md, lv));
+            if (!t || !hasl(t, want)) allok = 0;
+        }
+    ck(allok, "all-18-cells-match-oracle");
+    ck(t && hasl(t, "2\t0\ttapecheck\n") && hasl(t, "2\t1\te4\n") && hasl(t, "2\t2\te4\n"), "mode2-level-split");
+    ck(t && hasl(t, "0\t0\telf\n") && hasl(t, "0\t2\telf\n"), "mode0-falls-to-elf");
+    chain = cx_read("build/st-gap-chain.txt", &cm);
+    src = cx_read("cx/runtime/runexec.cx", &sm);
+    ck(chain && cm > 0 && src && hasl(src, chain), "chain-equals-runexec-st_gap-source");
+    ck(src && hasl(src, "int st_gap(int mode, int level, char *out, int cap) {"), "st_gap-signature-unchanged");
+    {
+        /* distinct outputs: 7 names, each present in the table */
+        const char *nm[] = {"elf", "e2", "tapecheck", "e4", "memory", "tokens", "object"};
+        int k, c = 0;
+        for (k = 0; k < 7; k++) { cx_fmt(cell, sizeof cell, "\t%s\n", nm[k]); if (t && hasl(t, cell)) c++; }
+        ck(c == 7, "seven-distinct-names");
+    }
+    /* fixtures */
+    put("exec/facts/st-gap.tsv", "# st-gap v1\n1\tany\tx1\n*\tany\tz\n");
+    rc = run(dir, "--write", out, sizeof out);
+    t = rd("build/st-gap.tsv", &m);
+    ck(rc == 0 && t && hasl(t, "\n1\t2\tx1\n") && hasl(t, "\n3\t0\tz\n"), "fixture-table-changes-output");
+    rc = run(dir, "--check", out, sizeof out);
+    ck(rc == 0, "fixture-check-ok");
+    put("build/st-gap.tsv", "tampered\n");
+    rc = run(dir, "--check", out, sizeof out);
+    ck(rc == 1 && hasl(out, "DIFF"), "tamper-detected-rc1");
+    bad("1\tany\ta\n", "no-fallback", "bad-no-fallback");
+    bad("*\tany\ta\n1\tany\tb\n", "row-after-fallback", "bad-row-after-fallback");
+    bad("1\tmid\ta\n*\tany\tz\n", "bad-level", "bad-level");
+    bad("x\tany\ta\n*\tany\tz\n", "bad-mode", "bad-mode");
+    bad("1\tany\tA-b\n*\tany\tz\n", "bad-name", "bad-name");
+    bad("1\tany\n*\tany\tz\n", "field-count", "bad-field-count");
+    { char *v[] = {"rm", "-rf", dir, 0}; cx_runv_timeout(v, 20, 0, 0); }
+    sy_printf("CHECK_ST_GAP_GEN\tok=%d\tfailed=%d\n", nok, failed);
+    return failed ? 1 : 0;
+}

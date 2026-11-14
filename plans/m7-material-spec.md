@@ -75,7 +75,7 @@ loader 六批与 fan 的冻结 carrier pin 链分离：`CARRIERS` 可传 `-`，�
 
 ## M8 后纯 T2.a 移植边界与历史证据归属
 
-本节的历史 ROOT 一律以 `HISTORICAL_ROOT` 表示（只读），由历史材料 manifest/receipt 的 root 字段实际绑定；该别名不是当前私有移植树的 ROOT，不改写运行时 MAP 或材料中的真实绝对输入。当前79c09c401源码基底已实际完成 RI native/chain/seal 与 loader/swap/seal-loader 制备；所选消费者结果见下文，不把文件复制当验收。`plans/l-tests-materials-prepared.tsv` 中16 PREPARED/7 NOT_PREPARED仍是旧 ROOT 历史全表，不回填旧 s9，也不宣称0.0.48资格。
+本节的历史 ROOT 一律以 `HISTORICAL_ROOT` 表示（只读），由历史材料 manifest/receipt 的 root 字段实际绑定；该别名不是当前私有移植树的 ROOT，不改写运行时 MAP 或材料中的真实绝对输入。当前79c09c401源码基底已实际完成 RI native/chain/seal 与 loader/swap/seal-loader 制备；所选消费者结果见下文，不把文件复制当验收。历史准备记录中16 PREPARED/7 NOT_PREPARED仍是旧 ROOT 历史全表，不回填旧 s9，也不宣称0.0.48资格。
 
 相对冻结 M8 的接口变化：`units-prepare` 删除复制式 `--out/--root/--loader/--slice/--pkg/--carriers` 接口，唯一接口改为上文七个位置参数，不留兼容 shim；OUT 必须新建，阶段产物独占创建，不再幂等跳过。`materials-prepare` 是真实 RI 三阶段聚合入口；`ri-material` 保留原 action/参数与全部 SHA/ELF/flags 拒绝，仅让 -I 与既有归档解析得到的 core.h 所在目录一致，控制消费者同步其精确预期。`check-loader-targets` 仅增加单 mode argv 优先于环境，不改变十二格断言。fan 六载体与原 pin 不放宽、不以 loader6.env 代替。
 
@@ -101,5 +101,5 @@ done
 cc复核后采用方案(b)：从批次表撤下 `materials-prepare-native`，不把已知红注册成IMPLEMENTED/PLANNED daily；仅以 `agentwork/items.tsv` 的 `T2A-NATIVE-PHASE-20S` 登记KNOWN-GAP、原失败日志与分相位方案。分相位尚未实现，原预算整链实测后才重新登记。补丁重基6a3b87ab12；79制备与十INFRA证据仍只绑定79。逐行pin身份依据见 `plans/t2-pin-rationale.tsv`。
 
 
-Win 负控的历史就绪/PASS 为父当时实际 stdout 见证，banner 为 `WIN_ARM64_FIXEDPOINT_CONTROLS failed=0`，旧 ROOT `plans/l-tests-materials-prepared.tsv` 亦记录该结果；原始持久 stdout/status 日志尚未定位，由父追溯，不虚构证据路径，不为确认既有事实重跑。实际缺代输入已核，为 `$ROOT/out/ltests-c47-materials/win-arm64-missing-generations.tsv`，root/native_root 均为旧 ROOT、rev=`7b98ec2c0618df88115ae1c80cea47144e8614d3`，绑定真实 fde APE、pkg、Linux ELF 与 AA64 PE SHA。其余15项有完整原始 JSON；16 PREPARED/7 NOT_PREPARED 是旧 ROOT 历史状态，不冒称本节点或新 T2 树重新验收。可复现原接口（非本次执行）为 `tools/bound 55 sh ./unisacc.com tests/win-arm64-fixedpoint.cx -- "$MISSING_GENERATIONS_MANIFEST" "$APE"`；缺两代 rc3、实际 ELF 冒充 AA64 rc1、错误 SHA rc1 的三个拒绝合同保持原样。此负控 PASS 永远不等于真实 Windows 固定点 PASS。
+Win 负控的历史就绪/PASS 为父当时实际 stdout 见证，banner 为 `WIN_ARM64_FIXEDPOINT_CONTROLS failed=0`，旧 ROOT 的历史准备记录亦记录该结果；原始持久 stdout/status 日志尚未定位，由父追溯，不虚构证据路径，不为确认既有事实重跑。实际缺代输入已核，为 `$ROOT/out/ltests-c47-materials/win-arm64-missing-generations.tsv`，root/native_root 均为旧 ROOT、rev=`7b98ec2c0618df88115ae1c80cea47144e8614d3`，绑定真实 fde APE、pkg、Linux ELF 与 AA64 PE SHA。其余15项有完整原始 JSON；16 PREPARED/7 NOT_PREPARED 是旧 ROOT 历史状态，不冒称本节点或新 T2 树重新验收。可复现原接口（非本次执行）为 `tools/bound 55 sh ./unisacc.com tests/win-arm64-fixedpoint.cx -- "$MISSING_GENERATIONS_MANIFEST" "$APE"`；缺两代 rc3、实际 ELF 冒充 AA64 rc1、错误 SHA rc1 的三个拒绝合同保持原样。此负控 PASS 永远不等于真实 Windows 固定点 PASS。
 

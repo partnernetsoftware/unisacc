@@ -1,0 +1,53 @@
+#pragma unisa module netnb
+#pragma unisa dock
+#pragma unisa use sys.sysnums
+/* L0 sys/netnb: the non-blocking flag of a descriptor (fcntl F_GETFL/F_SETFL with O_NONBLOCK), the
+   piece a deadline connect needs.  Numbers come from exec/facts/sys-syscalls.tsv rows snb_*.
+   Targets: Linux x86_64 and arm64; elsewhere every call is -ENOSYS. */
+
+static long sy_snb_os(int lx, int la, int fb) {
+#if defined(__linux__) && defined(__aarch64__)
+    (void)lx; (void)fb;
+    return la;
+#elif defined(__linux__) && defined(__x86_64__)
+    (void)la; (void)fb;
+    return lx;
+#else
+    (void)lx; (void)la;
+    return fb;
+#endif
+}
+#define SNB_NUM(name) sy_snb_os(sn_lnx_x86_64_##name##_hi * 65536 + sn_lnx_x86_64_##name##_lo, \
+                                sn_lnx_arm64_##name##_hi * 65536 + sn_lnx_arm64_##name##_lo, \
+                                sn_fallback_##name##_hi * 65536 + sn_fallback_##name##_lo)
+
+static long sy_snb_call_os(long n, long a, long b, long c) {
+#if defined(_WIN32)
+    (void)n; (void)a; (void)b; (void)c;
+    return -ENOSYS;
+#else
+    if (!n) return -ENOSYS;
+    return __syscall6(_UNISA_SC(n), a, b, c, 0, 0);
+#endif
+}
+
+/* 1 when FD is non-blocking, 0 when blocking, or -errno (-EBADF, -ENOSYS on osx/win). */
+int sy_snb_get(int fd) {
+    long f;
+    if (fd < 0) return -EBADF;
+    f = sy_snb_call_os(SNB_NUM(snb_fcntl), fd, SNB_NUM(snb_f_getfl), 0);
+    if (f < 0) return (int)f;
+    return (f & SNB_NUM(snb_o_nonblock)) ? 1 : 0;
+}
+
+/* Turn the non-blocking flag of FD on (ON nonzero) or off, keeping the other status flags.
+   0, or -errno (-EBADF, -ENOSYS on osx/win). */
+int sy_snb_set_nonblock(int fd, int on) {
+    long f, nb = SNB_NUM(snb_o_nonblock);
+    if (fd < 0) return -EBADF;
+    f = sy_snb_call_os(SNB_NUM(snb_fcntl), fd, SNB_NUM(snb_f_getfl), 0);
+    if (f < 0) return (int)f;
+    f = on ? (f | nb) : (f & ~nb);
+    f = sy_snb_call_os(SNB_NUM(snb_fcntl), fd, SNB_NUM(snb_f_setfl), f);
+    return f < 0 ? (int)f : 0;
+}

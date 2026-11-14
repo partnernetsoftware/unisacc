@@ -1,0 +1,92 @@
+/* tools/chain-verdict.cx -- read-only post-mortem of a stopped candidate chain (point of use: 1 minute, not 15).
+ *
+ *   sh ./unisacc.com tools/chain-verdict.cx -- --dir CHAINOUT [--tools TOOLSDIR]
+ *
+ * Scans CHAINOUT/chain-run-N.{argv,result,stderr,why}, walks N downwards and takes the last attempt that failed:
+ * result rc (first field) != 0, or no .result at all (killed in flight; rc then comes from the last rc= of exit.tsv,
+ * or "-").  phase = first word of N.why, else the word after --until in N.argv, else UNKNOWN.  The first non-empty
+ * stderr line is searched in TOOLSDIR (default tools) *.cx and cxlib/*.cx: the literal head of the message (after
+ * "name: ", cut at the first digit or '/') is matched with grep -F; every file:line hit is listed, none = ORIGIN=UNKNOWN.
+ * class: rc 2 or stderr containing REFUSE -> DETERMINISTIC; rc -9 -15 124 137 142 143 -> RETRYABLE; else UNKNOWN.
+ * Output, one TSV line: phase attempt rc stderr1 ORIGIN=... class.  No failed attempt: "NONE" line, rc 0.  Exit 2 on usage. */
+static char *slurp(const char *p) {
+    FILE *f = fopen(p, "r"); size_t cap = 1 << 16, n = 0; char *b;
+    if (!f) return 0;
+    b = malloc(cap + 1);
+    for (;;) { size_t k = fread(b + n, 1, cap - n, f); if (!k) break; n += k; if (n == cap) { cap *= 2; b = realloc(b, cap + 1); } }
+    b[n] = 0; fclose(f); return b;
+}
+static char *rd(const char *d, int n, const char *ext) {
+    char p[1024]; cx_fmt(p, sizeof p, "%s/chain-run-%d.%s", d, n, ext); return slurp(p);
+}
+static int maxattempt(const char *d) {
+    DIR *dir = opendir(d); struct dirent *e; int mx = 0;
+    if (!dir) return -1;
+    while ((e = readdir(dir))) {
+        int n = 0; char ext[16];
+        if (sscanf(e->d_name, "chain-run-%d.%15s", &n, ext) == 2 && (!strcmp(ext, "argv") || !strcmp(ext, "result")) && n > mx) mx = n;
+    }
+    closedir(dir); return mx;
+}
+static void firstline(char *s, char *out, size_t cap) {
+    size_t i = 0;
+    out[0] = 0;
+    while (s && *s) {
+        char *e = strchr(s, '\n'); size_t l = e ? (size_t)(e - s) : strlen(s);
+        if (l) { size_t j; if (l >= cap) l = cap - 1; for (j = 0; j < l; j++) out[j] = s[j]; out[l] = 0; (void)i; return; }
+        if (!e) return;
+        s = e + 1;
+    }
+}
+int main(int argc, char **argv) {
+    const char *dir = 0, *tools = "tools";
+    char *res, *why, *err, *arg, line[512], phase[128] = "UNKNOWN", rcs[32] = "-", snip[512], cmd[1400], org[2048] = "ORIGIN=";
+    int i, n, mx, rc = 0, have = 0;
+    const char *cls = "UNKNOWN";
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
+        else if (!strcmp(argv[i], "--tools") && i + 1 < argc) tools = argv[++i];
+        else { fprintf(stderr, "chain-verdict: usage --dir CHAINOUT [--tools DIR]\n"); return 2; }
+    }
+    if (!dir) { fprintf(stderr, "chain-verdict: usage --dir CHAINOUT [--tools DIR]\n"); return 2; }
+    mx = maxattempt(dir);
+    if (mx < 0) { fprintf(stderr, "chain-verdict: cannot open %s\n", dir); return 2; }
+    for (n = mx; n >= 1; n--) {
+        res = rd(dir, n, "result");
+        if (res) { if (sscanf(res, "%d", &rc) == 1 && rc != 0) { have = 1; cx_fmt(rcs, sizeof rcs, "%d", rc); break; } }
+        else if (rd(dir, n, "argv")) {
+            char p[1024], *x, *q; have = 1;
+            cx_fmt(p, sizeof p, "%s/exit.tsv", dir); x = slurp(p);
+            if (x) { q = x; while ((q = strstr(q, "rc=")) != 0) { q += 3; if (sscanf(q, "%d", &rc) == 1) cx_fmt(rcs, sizeof rcs, "%d", rc); } }
+            break;
+        }
+    }
+    if (!have) { printf("NONE\t0\t0\t-\tORIGIN=-\tNONE\n"); return 0; }
+    why = rd(dir, n, "why");
+    if (why && sscanf(why, "%127s", phase) == 1) { }
+    else if ((arg = rd(dir, n, "argv")) != 0) {
+        char *u = strstr(arg, "--until\n");
+        if (u) sscanf(u + 8, "%127s", phase);
+    }
+    err = rd(dir, n, "stderr");
+    firstline(err, line, sizeof line);
+    {   /* literal head of the message */
+        char *m = strstr(line, ": "); size_t k = 0;
+        m = m ? m + 2 : line;
+        if (!strncmp(m, "REFUSE ", 7)) m += 7;
+        while (m[k] && !(m[k] >= '0' && m[k] <= '9') && m[k] != '/' && k < sizeof snip - 1) { snip[k] = m[k]; k++; }
+        snip[k] = 0;
+        while (k && (snip[k-1] == ' ' || snip[k-1] == ':' || snip[k-1] == '(')) snip[--k] = 0;
+        if (k && !strchr(snip, '\'') && !strchr(snip, '\\')) {
+            FILE *p; char hit[512];
+            cx_fmt(cmd, sizeof cmd, "grep -n -F -e '%s' %s/*.cx %s/cxlib/*.cx 2>/dev/null | cut -d: -f1,2", snip, tools, tools);
+            p = popen(cmd, "r");
+            if (p) { while (fgets(hit, sizeof hit, p)) { hit[strcspn(hit, "\n")] = 0; size_t ol = strlen(org); if (ol + strlen(hit) + 2 < sizeof org) cx_fmt(org + ol, sizeof org - ol, "%s%s", ol > 7 ? "," : "", hit); } pclose(p); }
+        }
+    }
+    if (strlen(org) == 7) cx_fmt(org, sizeof org, "ORIGIN=UNKNOWN");
+    if (!strcmp(rcs, "2") || (err && strstr(err, "REFUSE"))) cls = "DETERMINISTIC";
+    else if (!strcmp(rcs, "-9") || !strcmp(rcs, "-15") || !strcmp(rcs, "124") || !strcmp(rcs, "137") || !strcmp(rcs, "142") || !strcmp(rcs, "143")) cls = "RETRYABLE";
+    printf("%s\t%d\t%s\t%s\t%s\t%s\n", phase, n, rcs, line, org, cls);
+    return 0;
+}

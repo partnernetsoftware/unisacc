@@ -17,12 +17,38 @@
 /* Concurrency ceiling and fallback live in exec/facts/limits.tsv, so the number exists once. */
 #define WAVE_JOBS_MAX 16
 #define WAVE_JOBS_FALLBACK 4
+/* Child bound: the stand-alone default 55 s; when the chain exports UNISACC_CHAIN_PHASE_BOUND_S
+   (valid 6..90) it is raised to bound-5 (same rule as entry-build eb_secs / ccp_sub_bound), so a
+   loaded phase is ended by the phase kill. A child timeout exits 124 (retryable), never 2/3. */
+#define WAVE_SECS_DEFAULT 55
+#define WAVE_EXIT_TIMEOUT 124
+static int wave_secs(void) {
+    const char *e = getenv("UNISACC_CHAIN_PHASE_BOUND_S");
+    long v = 0;
+    if (!e || !*e) return WAVE_SECS_DEFAULT;
+    for (; *e; e++) {
+        if (*e < '0' || *e > '9' || v > 1000) return WAVE_SECS_DEFAULT;
+        v = v * 10 + (*e - '0');
+    }
+    if (v < 6 || v > 90) return WAVE_SECS_DEFAULT;
+    return (int)(v - 5) > WAVE_SECS_DEFAULT ? (int)(v - 5) : WAVE_SECS_DEFAULT;
+}
+static const char *wave_bs(void) {
+    static char b[16];
+    if (cx_fmt(b, sizeof b, "%d", wave_secs())) b[0] = 0;
+    return b;
+}
 static int wave_jobs(void) {
     char *v[] = {"nproc", 0};
     np_result r = {0};
     char why[256] = {0};
     int n = WAVE_JOBS_FALLBACK;
-    if (!np_run(v, 0, 0, 5, &r, why, sizeof why) && r.rc == 0 && r.outn > 0) {
+    int probe = np_run(v, 0, 0, 5, &r, why, sizeof why);
+    if (probe && r.timed_out) {
+        fprintf(stderr, "source-wave: nproc probe timed out after 5 s\n");
+        exit(WAVE_EXIT_TIMEOUT);
+    }
+    if (!probe && r.rc == 0 && r.outn > 0) {
         long got = strtol(r.out, 0, 10);
         if (got >= 1 && got <= 4096) n = (int)got;
     }
@@ -48,13 +74,13 @@ static int call(const char *action,const char *id,const char *label){
    printf("SKIP_COMPLETE\t%s\t%s\n",action,id);return 0;
   }
  }
- char *v[]={bound,"55",controller,(char *)action,root,ctx,(char *)id,0};if(!id)v[6]=0;
+ char *v[]={bound,wave_bs(),controller,(char *)action,root,ctx,(char *)id,0};if(!id)v[6]=0;
  np_buf argv={0};for(int i=0;v[i];i++){np_putll(&argv,i);np_puts(&argv,"\t");np_puts(&argv,v[i]);np_puts(&argv,"\n");}evidence(label,"argv.tsv",argv.p,argv.n);free(argv.p);
  char *environment[]={"CPATH=/usr/include/node",library_env,0};np_buf env={0};np_puts(&env,environment[0]);np_puts(&env,"\n");np_puts(&env,environment[1]);np_puts(&env,"\n");evidence(label,"env",env.p,env.n);free(env.p);
- np_result r={0};char why[1500]={0};long long begin=now();int transport=np_run(v,root,environment,55,&r,why,sizeof why);long long elapsed=now()-begin;
+ np_result r={0};char why[1500]={0};long long begin=now();int transport=np_run(v,root,environment,wave_secs(),&r,why,sizeof why);long long elapsed=now()-begin;
  evidence(label,"stdout",r.out,r.outn);evidence(label,"stderr",r.err,r.errn);if(transport)evidence(label,"error",why,strlen(why));
  char s[180];checked(cx_fmt(s,sizeof s,"transport\t%d\nrc\t%d\nelapsed_ns\t%lld\n",transport,r.rc,elapsed));evidence(label,"status",s,strlen(s));
- printf("%s transport=%d rc=%d wall_ns=%lld\n",label,transport,r.rc,elapsed);if((transport||r.rc)&&r.errn)fwrite(r.err,1,r.errn,stderr);int bad=transport?3:r.rc?1:0;np_free(&r);return bad;
+ printf("%s transport=%d rc=%d wall_ns=%lld\n",label,transport,r.rc,elapsed);if((transport||r.rc)&&r.errn)fwrite(r.err,1,r.errn,stderr);int bad=(transport&&r.timed_out)?WAVE_EXIT_TIMEOUT:transport?3:r.rc?1:0;np_free(&r);return bad;
 }
 /* Reuse probe: for each job of PHASE ask the controller whether its recorded
  * identity still matches the live inputs. Prints one line per job, "REUSE HIT"
@@ -76,10 +102,10 @@ static void reuse_phase(const char *phase){
  while(at<list.n){ssize_t z=write(fd,list.p+at,list.n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("reuse-id-write");at+=(size_t)z;}
  if(fsync(fd)||close(fd))die("reuse-id-close");
  free(list.p);
- { char *v[]={bound,"55",controller,"reuse-batch",root,ctx,p,0};
+ { char *v[]={bound,wave_bs(),controller,"reuse-batch",root,ctx,p,0};
    np_result r={0};char why[1500]={0};char *env[]={"CPATH=/usr/include/node",library_env,0};
    long long begin=now();
-   int transport=np_run(v,root,env,55,&r,why,sizeof why);
+   int transport=np_run(v,root,env,wave_secs(),&r,why,sizeof why);
    long long elapsed=now()-begin;
    if(r.outn)fwrite(r.out,1,r.outn,stdout);
    if(transport||r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);}
@@ -89,8 +115,8 @@ static void reuse_phase(const char *phase){
 }
 static void reuse(const char *phase,int first,int count){
  if(!reuse_enabled())die("reuse-disabled-set-UNISACC_WAVE_REUSE=1");if(count<1||count>WAVE_JOBS_MAX)die("concurrency-out-of-range");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[131],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
- int hits=0;for(int j=0;j<count;j++){const char *id=ids[selected[first+j]];char *v[]={bound,"55",controller,"reuse-job",root,ctx,(char *)id,0};
-  np_result r={0};char why[1500]={0};char *environment[]={"CPATH=/usr/include/node",library_env,0};int transport=np_run(v,root,environment,55,&r,why,sizeof why);
+ int hits=0;for(int j=0;j<count;j++){const char *id=ids[selected[first+j]];char *v[]={bound,wave_bs(),controller,"reuse-job",root,ctx,(char *)id,0};
+  np_result r={0};char why[1500]={0};char *environment[]={"CPATH=/usr/include/node",library_env,0};int transport=np_run(v,root,environment,wave_secs(),&r,why,sizeof why);
   if(transport||r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);printf("REUSE\tMISS\t%s\n",id);}
   else {hits++;printf("REUSE\tHIT\t%s\n",id);}
   np_free(&r);}
@@ -111,7 +137,7 @@ static void record_controller(void){
 static int number(const char *s){char *end;long n=strtol(s,&end,10);if(!s[0]||*end||n<0||n>131)die("number");return (int)n;}
 static void wave(const char *phase,int first,int count,const char *action){
  if(!tx_eqz(action, "start-job")&&!tx_eqz(action, "finish-job"))die("start/finish action");if(count<1||count>WAVE_JOBS_MAX)die("concurrency-out-of-range");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[131],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
- pid_t *pids=calloc((size_t)count,sizeof *pids);if(!pids)die("allocation");fflush(stdout);for(int j=0;j<count;j++){const char *id0=ids[selected[first+j]];if(!strcmp(action,"start-job")&&reuse_enabled()){char *rv[]={bound,"55",controller,"reuse-job",root,ctx,(char *)id0,0};np_result rr={0};char why2[1500]={0};char *renv[]={"CPATH=/usr/include/node",library_env,0};int tr=np_run(rv,root,renv,55,&rr,why2,sizeof why2);int hit=!tr&&!rr.rc;if(rr.errn)fwrite(rr.err,1,rr.errn,stderr);np_free(&rr);if(hit){printf("REUSED\t%s\tidentity-and-bytes-verified\n",id0);continue;}}pids[j]=fork();if(pids[j]<0)die("fork");if(!pids[j]){const char *id=ids[selected[first+j]];char label[180];checked(cx_fmt(label,sizeof label,"%s-%s",action,id));exit(call(action,id,label));}}
+ pid_t *pids=calloc((size_t)count,sizeof *pids);if(!pids)die("allocation");fflush(stdout);for(int j=0;j<count;j++){const char *id0=ids[selected[first+j]];if(!strcmp(action,"start-job")&&reuse_enabled()){char *rv[]={bound,wave_bs(),controller,"reuse-job",root,ctx,(char *)id0,0};np_result rr={0};char why2[1500]={0};char *renv[]={"CPATH=/usr/include/node",library_env,0};int tr=np_run(rv,root,renv,wave_secs(),&rr,why2,sizeof why2);int hit=!tr&&!rr.rc;if(rr.errn)fwrite(rr.err,1,rr.errn,stderr);np_free(&rr);if(hit){printf("REUSED\t%s\tidentity-and-bytes-verified\n",id0);continue;}}pids[j]=fork();if(pids[j]<0)die("fork");if(!pids[j]){const char *id=ids[selected[first+j]];char label[180];checked(cx_fmt(label,sizeof label,"%s-%s",action,id));exit(call(action,id,label));}}
  int bad=0;for(int j=0;j<count;j++){if(pids[j]<=0)continue;int st;pid_t p;do{p=waitpid(pids[j],&st,0);}while(p<0&&errno==EINTR);if(p!=pids[j]||!WIFEXITED(st)||WEXITSTATUS(st)){bad++;printf("UNKNOWN_OR_FAILED %s %s wait_status=%d\n",action,ids[selected[first+j]],p==pids[j]?st:-1);}}if(bad)die("wave failed; raw outputs retained");printf("WAVE phase=%s first=%d count=%d action=%s all_outer_rc0\n",phase,first,count,action);
 }
 static void success(const char *label){char p[4400];checked(cx_fmt(p,sizeof p,"%s/%s.status",outer,label));size_t n;char *s=load(p,&n);if(strncmp(s,"transport\t0\nrc\t0\n",17))die("UNKNOWN/nonzero outer status");free(s);}

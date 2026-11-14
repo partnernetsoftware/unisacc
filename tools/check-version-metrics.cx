@@ -3,7 +3,7 @@
  *   sh ./unisacc.com tools/check-version-metrics.cx [-- WORK]
  *
  * 覆盖：
- * (1) check-tree: 对入库 agentwork/version-metrics.tsv 执行 --check rc=0 且 rows=4；
+ * (1) check-tree: 对入库 build/version-metrics.tsv 执行 --check rc=0 且 rows=4；
  * (2) columns-and-057-row: 表含 15 列且 0.0.54..0.0.57 四行俱全，0.0.57 行等于 plan-058 §1 指标；
  * (3) write-twice: 隔离目录内两次 --write 产出逐字节相同，且等于入库表；
  * (4) neg-row-edit: 篡改一字节后 --check 返回 rc=1 并报 DIFF，且不覆盖原文件；
@@ -16,6 +16,7 @@
  * 输出 PASS/FAIL 与 CHECK_VERSION_METRICS\tfailed=N。
  */
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -28,7 +29,6 @@
 
 static int failed;
 static char root[4096], work[4400], bin[4400], why[512];
-static const char *OD = "out";
 
 static void die(const char *s) { tool_die("check-version-metrics", s, 0, 2); }
 static void ck(int ok, const char *name) {
@@ -80,10 +80,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(work, sizeof work, "%s/vm-fixture-%d", argv[2], sy_pid())) die("work path");
         sy_mkdir(argv[2], 0700);
     } else {
-        char odir[4200];
-        if (cx_fmt(odir, sizeof odir, "%s/%s", root, OD)) die("out path");
-        sy_mkdir(odir, 0700);
-        if (cx_fmt(work, sizeof work, "%s/%s/check-version-metrics-%d", root, OD, sy_pid())) die("work path");
+        if (cx_fmt(work, sizeof work, "%s/check-version-metrics-%d", sy_tmpdir(), sy_pid())) die("work path");
     }
     if (sy_mkdir(work, 0700)) die("mkdir work");
     if (cx_fmt(bin, sizeof bin, "%s/version-metrics.native", work) ||
@@ -104,7 +101,7 @@ int main(int argc, char **argv) {
     }
 
     /* (2) columns-and-057-row */
-    tree = cx_read("agentwork/version-metrics.tsv", &tn);
+    tree = cx_read("build/version-metrics.tsv", &tn);
     {
         char want54[64], want55[64], want56[64], want057[256];
         int cols_ok = 1, rows = 0;
@@ -181,6 +178,21 @@ int main(int argc, char **argv) {
             char *vc[] = {bin, "--check", "--root", root, "--table", missing, 0};
             run_bin(vc, out, sizeof out, &rc);
             ck(rc == 1 && strstr(out, "version-metrics: DIFF") != 0 && sy_exists(missing) == 0, "neg-missing-refused");
+        }
+    }
+
+    /* (6b) no archive ledger under ROOT: rule_violations cells are UNMEASURED, never empty or guessed */
+    {
+        char tblu[4400], *u = 0; size_t un = 0;
+        if (cx_fmt(tblu, sizeof tblu, "%s/unmeasured.tsv", work)) die("fmt");
+        {
+            char *vw[] = {bin, "--write", "--root", work, "--table", tblu, 0};
+            run_bin(vw, out, sizeof out, &rc);
+            u = cx_read(tblu, &un);
+            ck(rc == 0 && u != 0 && un > 0 && tree != 0 && (un != tn || memcmp(u, tree, un) != 0) &&
+               strstr(out, "UNMEASURED rule_violations") != 0, "no-ledger-unmeasured");
+            sy_unlink(tblu);
+            free(u);
         }
     }
 

@@ -1,0 +1,47 @@
+#pragma unisa module unix
+#pragma unisa dock
+#pragma unisa use sys.netraw
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+/* ext.net unix-domain stream sockets on cx.sys netraw (build/std-surface.tsv ext.net):
+   sy_unix_listen, sy_unix_connect.  No libc, no #if.  Linux x86_64/arm64 only: on osx/win the
+// ENOSYS: refusal contract documented in this comment
+   netraw calls are -ENOSYS and so are these.  A path over 107 bytes is -ENAMETOOLONG; an existing
+   path is not removed (bind fails -EADDRINUSE); the Linux abstract namespace is not offered.
+   Descriptors are closed with sy_close. */
+
+static int syu_open(void) {
+    long af = sy_sock_num(SY_SN_AF_UNIX), st = sy_sock_num(SY_SN_SOCK_STREAM);
+    if (!sy_sock_have() || af <= 0 || st <= 0) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform (netraw Linux only) */
+    return sy_sock_open((int)af, (int)st);
+}
+
+int sy_unix_listen(const char *path, int backlog) {
+    unsigned char sa[SY_SA_MAX];
+    int n, fd, r;
+    if (!path || backlog < 0) return -EINVAL;
+    n = sy_sa_unix(sa, (int)sizeof sa, path);
+    if (n < 0) return n;
+    fd = syu_open();
+    if (fd < 0) return fd;
+    r = sy_sock_bind(fd, sa, n);
+    if (r < 0) { sy_close(fd); return r; }
+    r = sy_sock_listen(fd, backlog);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}
+
+/* Local connect completes at once or fails; D is checked before the call (passed -> -ETIMEDOUT). */
+int sy_unix_connect(const char *path, sy_deadline_t d) {
+    unsigned char sa[SY_SA_MAX];
+    int n, fd, r;
+    if (!path) return -EINVAL;
+    n = sy_sa_unix(sa, (int)sizeof sa, path);
+    if (n < 0) return n;
+    if (sy_deadline_passed(&d)) return -ETIMEDOUT;
+    fd = syu_open();
+    if (fd < 0) return fd;
+    r = sy_sock_connect(fd, sa, n);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}

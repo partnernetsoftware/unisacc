@@ -1,0 +1,168 @@
+/* tools/check-out-writers.cx -- no tools/*.cx or tests/*.cx may create the repository root out/ directory.
+ *
+ *   sh ./unisacc.com tools/check-out-writers.cx [-- ROOT]
+ *
+ * Scans the top level of ROOT/tools and ROOT/tests for lines that call sy_mkdir( with a path naming the
+ * repository out directory: ("out" , "%s/out" , "%s/out/..." , "out/...".  A hit in any file other than
+ * the baseline exemption is FAIL (a new writer: use sy_tmpdir() or a tmpdir session root, see
+ * tools/cxlib/sessionroot.cx).  The baseline is tools/csih-ape.cx (csih lane, envelope sent to its
+ * maintainer, rewrite to sy_tmpdir()/csih-ape pending); the exemption expires 2026-12-31 (before the next
+ * release day): after that date the baseline file counts as a new writer too.
+ * Fixtures (fake repo trees under sy_tmpdir(), removed at the end) prove: a tree with a writer FAILs, the
+ * csih-ape exemption holds, legal tmpdir spellings pass, and an expired exemption FAILs.
+ * Prints PASS/FAIL per case and CHECK_OUT_WRITERS<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define OW_EXPIRY_S 1798675200L /* 2026-12-31T00:00:00Z */
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tout-writers.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* First occurrence of the NUL-terminated P in S, or 0 (plain byte comparison). */
+static const char *ow_find(const char *s, const char *p) {
+    long pn = (long)strlen(p), sn = (long)strlen(s), i;
+    for (i = 0; i + pn <= sn; i++) if (mm_same(s + i, p, pn)) return s + i;
+    return 0;
+}
+
+/* 1 when LINE creates a directory named out/ at the repository root. */
+static int ow_line_hits(const char *line) {
+    const char *m = ow_find(line, "sy_mkdir(");
+    if (!m) return 0;
+    m += 9;
+    if (!strncmp(m, "\"out\"", 5) || !strncmp(m, "\"out/", 5)) return 1;
+    {   const char *q = ow_find(line, "\"%s/out");
+        if (q && (q[7] == '"' || q[7] == '/') && (ow_find(q, ", root") || ow_find(q, "ROOT") || ow_find(q, "gm_root"))) return 1;
+    }
+    return 0;
+}
+
+/* Counts hit lines in FILE (0 when unreadable). */
+static int ow_file_hits(const char *path) {
+    size_t n = 0, i = 0;
+    char *b = cx_read(path, &n);
+    int hits = 0;
+    char line[8192];
+    if (!b) return 0;
+    while (i < n) {
+        size_t s = i, k;
+        while (i < n && b[i] != '\n') i++;
+        k = i - s;
+        if (k < sizeof line) {
+            if (mm_copy(line, sizeof line, b + s, (long)k)) break;
+            line[k] = 0;
+            hits += ow_line_hits(line);
+        }
+        i++;
+    }
+    free(b);
+    return hits;
+}
+
+static int ow_ends_cx(const char *s) {
+    size_t n = strlen(s);
+    return n > 3 && !strcmp(s + n - 3, ".cx");
+}
+
+/* Scans ROOT/DIR; returns the number of non-exempt hit lines, printing each one. */
+static int ow_scan_dir(const char *root, const char *dir, long now_s) {
+    char d[4400], p[4600];
+    static char names[2048][96];
+    int n = 0, i, bad = 0;
+    sy_dir_t dd;
+    if (cx_fmt(d, sizeof d, "%s/%s", root, dir)) return 0;
+    if (sy_dir_open(&dd, d)) return 0;
+    for (;;) {
+        int got = sy_dir_next(&dd);
+        if (got <= 0) break;
+        if (!ow_ends_cx(dd.name) || n == 2048 || cx_fmt(names[n], sizeof names[n], "%s", dd.name)) continue;
+        n++;
+    }
+    sy_dir_close(&dd);
+    for (i = 0; i < n; i++) {
+        int h;
+        if (!strcmp(dir, "tools") && !strcmp(names[i], "check-out-writers.cx")) continue;
+        if (cx_fmt(p, sizeof p, "%s/%s", d, names[i])) continue;
+        h = ow_file_hits(p);
+        if (!h) continue;
+        if (!strcmp(dir, "tools") && !strcmp(names[i], "csih-ape.cx") && now_s < OW_EXPIRY_S) {
+            sy_printf("EXEMPT\t%s/%s\thits=%d\texpires=2026-12-31\n", dir, names[i], h);
+            continue;
+        }
+        sy_printf("WRITER\t%s/%s\thits=%d\n", dir, names[i], h);
+        bad += h;
+    }
+    return bad;
+}
+
+static int ow_scan(const char *root, long now_s) {
+    return ow_scan_dir(root, "tools", now_s) + ow_scan_dir(root, "tests", now_s);
+}
+
+static int ow_put(const char *base, const char *rel, const char *text) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", base, rel)) return 1;
+    return sy_write_file(p, text, (long)strlen(text), 0600);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], fx[4400], t[4600], tc[4096];
+    long now_s = sy_now_ms() / 1000;
+    int k;
+    if (argc > 1) {
+        if (sy_realpath(argv[1], root, sizeof root) < 0) return 2;
+    } else if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0 || cx_fmt(fx, sizeof fx, "%s/out-writers-fx-%ld", tc, sy_now_ms())) return 2;
+    if (sy_mkdir(fx, 0700)) return 2;
+    /* line classifier */
+    ck(ow_line_hits("    sy_mkdir(\"out\", 0755);"), "line-literal-out");
+    ck(ow_line_hits("if (sy_mkdir(\"out/chain\", 0755)) die();"), "line-literal-out-subdir");
+    ck(ow_line_hits("cx_fmt(p, n, \"%s/out\", root) || sy_mkdir(p, 0755)"), "line-root-out-format");
+    ck(ow_line_hits("cx_fmt(p, n, \"%s/out/p3-%d\", root, 1) || sy_mkdir(p, 0755)"), "line-root-out-subdir-format");
+    ck(!ow_line_hits("cx_fmt(p, n, \"%s/out\", rr) || sy_mkdir(p, 0700)"), "line-private-fixture-root-passes");
+    ck(!ow_line_hits("sy_mkdir(\"%s/outer\", 0755)") && !ow_line_hits("sy_mkdir(\"%s/work/out\", 0755)"), "line-lookalikes-pass");
+    ck(!ow_line_hits("sy_mkdir(sy_tmpdir(), 0755); /* \"out\" */") && !ow_line_hits("cx_fmt(p, n, \"%s/out\", root);"), "line-legal-spellings-pass");
+    /* fake repo: only legal writers -> clean */
+    if (cx_fmt(t, sizeof t, "%s/ok", fx) || sy_mkdir(t, 0700)) return 2;
+    {   char b1[4600], b2[4600];
+        if (cx_fmt(b1, sizeof b1, "%s/tools", t) || cx_fmt(b2, sizeof b2, "%s/tests", t) || sy_mkdir(b1, 0700) || sy_mkdir(b2, 0700)) return 2;
+        ck(!ow_put(t, "tools/good.cx", "int main(void){ sy_mkdir(\"/tmp/x\", 0755); return 0; }\n") &&
+           !ow_put(t, "tests/good.cx", "static void f(void){ char p[64]; cx_fmt(p, 64, \"%s/tlib-admit-%d\", sy_tmpdir(), 1); sy_mkdir(p, 0755); }\n"), "fixture-legal-built");
+    }
+    ck(ow_scan(t, now_s) == 0, "fixture-legal-tmpdir-passes");
+    /* fake repo with a new writer in tools and one in tests */
+    if (cx_fmt(t, sizeof t, "%s/bad", fx) || sy_mkdir(t, 0700)) return 2;
+    {   char b1[4600], b2[4600];
+        if (cx_fmt(b1, sizeof b1, "%s/tools", t) || cx_fmt(b2, sizeof b2, "%s/tests", t) || sy_mkdir(b1, 0700) || sy_mkdir(b2, 0700)) return 2;
+        ow_put(t, "tools/w.cx", "int main(void){ sy_mkdir(\"out\", 0755); return 0; }\n");
+    }
+    ck(ow_scan(t, now_s) == 1, "fixture-tools-writer-fails");
+    ow_put(t, "tests/w2.cx", "static void f(char *root){ char p[64]; if (cx_fmt(p, 64, \"%s/out\", root) || sy_mkdir(p, 0755)) return; }\n");
+    ck(ow_scan(t, now_s) == 2, "fixture-tests-writer-counted");
+    /* csih-ape exemption */
+    if (cx_fmt(t, sizeof t, "%s/csih", fx) || sy_mkdir(t, 0700)) return 2;
+    {   char b1[4600], b2[4600];
+        if (cx_fmt(b1, sizeof b1, "%s/tools", t) || cx_fmt(b2, sizeof b2, "%s/tests", t) || sy_mkdir(b1, 0700) || sy_mkdir(b2, 0700)) return 2;
+        ow_put(t, "tools/csih-ape.cx", "int main(void){ sy_mkdir(\"out\", 0755); sy_mkdir(\"out/csih-ape\", 0755); return 0; }\n");
+    }
+    ck(ow_scan(t, now_s) == 0, "fixture-csih-ape-exempt");
+    ck(ow_scan(t, OW_EXPIRY_S + 1) == 1,"fixture-csih-ape-exemption-expires");
+    ow_put(t, "tools/other.cx", "int main(void){ sy_mkdir(\"out\", 0755); return 0; }\n");
+    ck(ow_scan(t, now_s) == 1, "fixture-csih-ape-exemption-is-per-file");
+    (void)cx_rmtree(fx);
+    /* the real tree */
+    k = ow_scan(root, now_s);
+    ck(k == 0, "tree-no-new-writers");
+    sy_printf("CHECK_OUT_WRITERS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

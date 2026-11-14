@@ -1,13 +1,46 @@
 /* chain-run: bounded phase-by-phase candidate-chain orchestration, never qualification.
  * --rev HEX --out ABS [--deadline-s 5400] [--max-resumes 3] [--max-attempts 4096]
- * [--candidate ABS_EXEC] [--watch ABS_EXEC] [-- child candidate options]
+ * [--candidate ABS_EXEC] [--watch ABS_EXEC] [--budget-raise LEDGER-ID] [-- child candidate options]
  * Overrides are native executables with the same argv protocol (also used by the fake fixture).
  * Persisted deadline/retry/attempt budgets are shared by subsequent invocations, not reset.
+ * Counters (chain-run.budget, format v2; an older budget is refused, start a new output dir):
+ *   event                                                     attempts  kills  resumes  width
+ *   an attempt is started                                        +1       .       .       .
+ *   rc 0, verified yield (77), clean jobs boundary (76)           .       .       .       .
+ *   bound kill (the owner killed the attempt at its bound)
+ *     while width > 1 (the chain can still derate itself)         .      +1       .      -1
+ *     at width 1 (nothing left to derate)                         .       .      +1       .
+ *   other kill (signal 9/15, child rc 124/137/142/143)              .       .      +1      -1 (min 1)
+ *   non-retryable rc, surviving processes                         .       .       .       .   (blocker, stops)
+ *   supervisor kills a segment at its backstop                    .       .       .       .   (blocker, stops)
+ *   width.recover.clean clean attempts in a row below the
+ *     requested width (widens +1, at most width.recover.max)      .       .       .      +1
+ * Every retry is preceded by the watch observation; a retry whose observation does not fit the
+ * segment is owed and settled, with the same accounting, by the next segment. A KILL row records
+ * load1 of /proc/loadavg as evidence. No counter is ever reset. The width never rises by a new
+ * invocation or option; it rises only by the recovery rule (C1): a derate answers a loaded
+ * machine, and a load that has passed must not keep the rest of the chain serial (0.0.58: three
+ * kills in gen1 left 4459 s of attempts, every later lane, at width 1). An attempt is clean when
+ * it ends with rc 0 or a verified yield/job boundary; any retry sets the run of clean attempts
+ * back to 0. Each recovery writes a WIDEN row; the run of clean attempts and the number of
+ * recoveries persist in chain-run.widen (absent = 0 0), never above the requested width. A
+ * maximum (attempts, resumes, segments) may only be raised, up to its build/limits.tsv max, by
+ * [--budget-raise ID] naming a kind=budget-raise row of build/approvals.tsv; it writes a RAISE row.
+ * Output identity (LIM-S3): rev, mode, candidate, rehearse inputs, root, watch, argv and the plan
+ * semantics (build/chain-phases.tsv without its timeout_s column). Limits (build/limits.tsv via
+ * cxlib.limits, phase bounds) and --deadline-s are not identity: each invocation writes a LIMITS
+ * row with the sha256 of build/limits.tsv and whether it changed since the previous invocation.
  * Segments (T11): [--segment-s 1..270] bounds one invocation. A phase is started only when its
  * whole bound fits before the segment end, so an expiring segment has no child to kill: it writes
  * a SEGMENT row and exits 75 (continue). [--max-segments N] is persisted with the budget; the
  * total deadline, attempts and resumes are never reset by a new segment. A retry whose watch
  * observation does not fit is carried as "owed" and settled first by the next segment.
+ * Call plan (cxlib.chaincall, shared with candidate-chain's validators): each call is RUN (a plain
+ * phase under its own bound), RUN_GROUP (a job group: --jobs-segment-s S, exported bound S, owner
+ * bound S + 3) or YIELD. YIELD: the smallest useful call (a plain phase: its bound; a group: one
+ * single-job bound + 3) does not fit the rest of the segment; nothing is issued, a HOLD row names
+ * the phase, what it needs and what is left, and the segment ends with rc 75. Work that a whole
+ * new segment could not start either stops as a "deadline" blocker.
  * [--supervise] (needs both options; [--runner ABS_EXEC] overrides the native self-build) runs
  * segments one after another until rc is not 75, the persisted caps stop it, or a segment overruns.
  * SHA memo (T11): phases get UNISACC_CHAIN_SHAMEMO(_ID), bound to this output's identity; compare
@@ -27,11 +60,22 @@
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.chainrunproc
+#pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chainroot
+#pragma unisa use cxlib.chaincall
+#pragma unisa use cxlib.exitclass
+#pragma unisa use cxlib.awpath
+#pragma unisa use cxlib.sessionroot
 
 static const char *out;
+/* Every child call (its owner bound, exported bound, group seconds, or no call at all) is decided
+   by cxlib.chaincall, the same unit candidate-chain validates with. */
+static ccp_limits call_limits;
 static long end_ms;
-static int attempts, resumes, max_attempts=4096, max_resumes=3;
-static int phase_bound=55, parallel=4;
+/* Defaults come from build/limits.tsv (cxlib.limits) at the top of main. */
+static int attempts, resumes, kills, max_attempts, max_resumes;
+static int phase_bound, parallel=4, segment_cap;
+static int ceiling, clean, widens, widen_need, widen_max;
 typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
 static int probing; static char pending[256];
@@ -39,11 +83,8 @@ static int probing; static char pending[256];
 static long seg_end_ms; static int segment_s, segments, max_segments, owed;
 static char memo_path[4400], memo_id[65]; static int memo_derived;
 static int amortize_jobs=1;
-static const char *jobs_group(const char *id) {
-    const char *groups[]={"jobs-tool","jobs-gen","jobs-tbl","jobs-net"};
-    for(int i=0;i<4;i++){size_t n=strlen(groups[i]);if(!strncmp(id,groups[i],n)&&(id[n]==0||id[n]=='-'))return groups[i];}
-    return 0;
-}
+/* The group names are cxlib.chaincall's: the same list candidate-chain accepts as a group target. */
+static const char *jobs_group(const char *id) { return ccp_group_of(id); }
 static void die(const char *s);
 static int lookup(const char *id) { for(int i=0;i<plan_count;i++)if(!strcmp(plan[i].id,id))return i;return -1; }
 static void validate_plan(void) {
@@ -52,7 +93,9 @@ static void validate_plan(void) {
     while(fgets(line,sizeof line,f)) {
         if(line[0]=='#')continue;
         if(plan_count==2048)die("phase count"); task *t=&plan[plan_count];
-        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d\t%4399s\t%255s\t%d %c",&order,t->id,t->domain,&t->bound,t->deps,t->lane,&t->width,&extra)!=7||order!=plan_count||t->bound<1||t->bound>55||t->width<1||t->width>4||lookup(t->id)>=0)die("phase table invalid");
+        /* Columns 8..10 (residue policy, record, paths) belong to candidate-chain; here they are only counted. */
+        int tabs=0;for(char *q=line;*q;q++)if(*q=='\t')tabs++;
+        if(!strchr(line,'\n')||tabs!=9||sscanf(line,"%d\t%255s\t%4399s\t%d\t%4399s\t%255s\t%d\t%c",&order,t->id,t->domain,&t->bound,t->deps,t->lane,&t->width,&extra)!=8||order!=plan_count||t->bound<1||t->bound>(int)lm_max("phase.bound",t->id)||t->width<1||t->width>4||lookup(t->id)>=0)die("phase table invalid");
         plan_count++;
     }
     if(ferror(f)||!plan_count||fclose(f))die("phase table invalid");
@@ -74,6 +117,34 @@ static void validate_plan(void) {
 }
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
+/* Every time/count default is a build/limits.tsv id; an unknown id refuses. */
+static int lim_int(const char *id) { double v=lm_get(id,0); if(v<0) die("unknown limit id"); return (int)v; }
+/* Run identity binds the plan's semantics, not its limits: every non-comment row of
+   build/chain-phases.tsv with column 4 (timeout_s) and columns 8..10 (the residue rule of
+   candidate-chain) removed. Changing a phase bound or a residue row between segments of one
+   run keeps the identity; changing order, id, domain, deps, lane or width changes it and the
+   next segment refuses. */
+static int plan_semantics_hex(char hex[65]) {
+    size_t n=0; char *b=cx_read("build/chain-phases.tsv",&n); if(!b) return -1;
+    char *s=malloc(n+1); if(!s) { free(b); return -1; }
+    size_t k=0; int field=0, comment=0, bol=1;
+    for(size_t i=0;i<n;i++) {
+        char c=b[i];
+        if(bol) { comment=c=='#'; field=0; bol=0; }
+        if(c=='\n') { if(!comment) s[k++]=c; bol=1; continue; }
+        if(comment) continue;
+        if(c=='\t') { field++; if(field==3||field>=7) continue; }
+        if(field==3||field>=7) continue;
+        s[k++]=c;
+    }
+    int rc=sy_sha256_hex(s,(long)k,hex); free(s); free(b); return rc;
+}
+/* sha256 of build/limits.tsv bytes, or "-" when the file does not exist. */
+static void limits_hex(char hex[65]) {
+    if(!sy_exists("build/limits.tsv")) { cx_fmt(hex,65,"-"); return; }
+    size_t n=0; char *b=cx_read("build/limits.tsv",&n);
+    if(!b||sy_sha256_hex(b,(long)n,hex)) die("limits identity"); free(b);
+}
 static void append(const char *file,const char *s) {
     char p[4400]; path(p,file); int fd=sy_open(p,O_WRONLY|O_CREAT|O_APPEND,0644);
     if(fd<0||sy_write_all(fd,s,strlen(s))||sy_close(fd)) die("append evidence");
@@ -86,10 +157,34 @@ static int blocker(const char *phase,const char *why,int rc) {
 }
 static void save(void) {
     char p[4400], tmp[4400], s[256]; path(p,"chain-run.budget"); path(tmp,"chain-run.budget.new");
-    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel,segments,max_segments,owed)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
+    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d %d %d %d %d v2\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel,segments,max_segments,owed,kills)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
 }
-/* A child whose whole bound does not end before the segment does is not started. */
-static int seg_fits(int bound) { return !seg_end_ms||sy_now_ms()+(long)bound*1000<=seg_end_ms; }
+/* Width recovery state: "clean widens". Written only while the width is below the requested one,
+   so a run that was never derated has no such file. */
+static void save_widen(void) {
+    char p[4400], tmp[4400], s[64]; path(p,"chain-run.widen"); path(tmp,"chain-run.widen.new");
+    if(cx_fmt(s,sizeof s,"%d %d\n",clean,widens)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save widen");
+}
+static void load_widen(void) {
+    char p[4400]; size_t n=0; path(p,"chain-run.widen"); char *b=cx_read(p,&n); char extra;
+    if(!b) return;
+    if(sscanf(b,"%d %d%c",&clean,&widens,&extra)!=3||extra!='\n'||clean<0||widens<0) die("widen record");
+    free(b);
+}
+/* One attempt ended cleanly. Below the requested width this counts toward a recovery. */
+static void clean_attempt(void) {
+    if(parallel>=ceiling||widens>=widen_max) return;
+    clean++;
+    if(clean<widen_need) { save_widen(); return; }
+    char row[200]; int run_len=clean;
+    widens++; clean=0; save_widen(); parallel++; save();
+    if(cx_fmt(row,sizeof row,"WIDEN\t%ld\t%d\tparallel=%d\tclean=%d\n",sy_wall_s(),widens,parallel,run_len)) die("widen row bound");
+    append("chain-run.tsv",row);
+}
+static void retry_resets_clean(void) { if(clean) { clean=0; save_widen(); } }
+/* Whole seconds to the segment end (0 when it has passed), or -1 without a segment. A child whose
+   whole bound does not end before the segment does is not started: ccp_call_plan answers CCP_YIELD. */
+static long seg_left(void) { if(!seg_end_ms)return -1; long ms=seg_end_ms-sy_now_ms(); return ms<0?0:ms/1000; }
 static int segment_expired(const char *next) {
     char s[600]; if(cx_fmt(s,sizeof s,"SEGMENT\t%ld\tn=%d\texpired\tnext=%s\tattempts=%d\tresumes=%d\towed=%d\n",sy_wall_s(),segments,next,attempts,resumes,owed)) die("segment bound");
     append("chain-run.tsv",s); sy_printf("CHAIN_RUN\tSEGMENT\tcontinue\tn=%d\tnext=%s\n",segments,next); return RC_SEGMENT;
@@ -115,7 +210,7 @@ static int observe(void) {
     /* The read-only observation is capped by the segment (never extended); no segment time left
        means the caller carries it to the next segment. */
     if(seg_end_ms){long seg=(seg_end_ms-sy_now_ms())/1000;if(seg<1)return RC_SEGMENT;if(seg<left)left=seg;}
-    pr_result r; int t=cr_run("chain-watch",watch_argv,left<55?(int)left:55,&r);
+    pr_result r; int t=cr_run("chain-watch",watch_argv,left<phase_bound?(int)left:phase_bound,&r);
     pr_echo(&r);
     char p[4400]; path(p,"chain-run-watch.stdout");
     if(cx_write(p,r.out?r.out:"",r.outn)) die("watch evidence");
@@ -124,6 +219,33 @@ static int observe(void) {
     pr_free(&r);
     if(bad||hung) return blocker("chain-watch",hung?"live-owner":"observation-failed",2);
     return 0;
+}
+/* Accounting of one retry (see the counter table at the top). KIND 2: every attempt being
+   retried was killed by its owner at the attempt bound; KIND 1: some other kill. A bound kill
+   while the chain can still derate itself costs a kill and one unit of width, not a resume;
+   everything else costs a resume. The watch observation comes first in both cases. Returns 0
+   to retry, RC_SEGMENT when the observation is owed to the next segment, else the blocker. */
+static int account_retry(const char *who,int kind,const char *detail,int with_width) {
+    int bound_kill=kind==2&&parallel>1;
+    if(sy_now_ms()>=end_ms) return blocker(who,"deadline",3);
+    if(!bound_kill&&resumes>=max_resumes) return blocker(who,"resumes-exhausted",3);
+    int observed=observe();
+    if(observed==RC_SEGMENT){owed=kind==2?2:1;save();return RC_SEGMENT;}
+    if(observed) return observed;
+    retry_resets_clean();
+    char row[700];
+    if(bound_kill) {
+        char load[32]="-";size_t n=0;char *b=cx_read("/proc/loadavg",&n);
+        if(b){size_t k=0;while(k<n&&k<sizeof load-1&&((b[k]>='0'&&b[k]<='9')||b[k]=='.'))k++;if(k&&!tx_copy(load,sizeof load,b,(long)k)){}else cx_fmt(load,sizeof load,"-");free(b);}
+        kills++;parallel--;owed=0;save();
+        if(cx_fmt(row,sizeof row,"KILL\t%ld\t%d\tparallel=%d\tload1=%s%s\n",sy_wall_s(),kills,parallel,load,detail)) die("kill row bound");
+    } else {
+        char width[40]="";
+        resumes++;if(parallel>1)parallel--;owed=0;save();
+        if(with_width&&cx_fmt(width,sizeof width,"\tparallel=%d",parallel)) die("resume row bound");
+        if(cx_fmt(row,sizeof row,"RESUME\t%ld\t%d%s%s\n",sy_wall_s(),resumes,width,detail)) die("resume row bound");
+    }
+    append("chain-run.tsv",row); return 0;
 }
 /* A checkpoint alone is not a pack: the producer's output SHA and byte count must match. */
 static int verify_pack(void) {
@@ -153,7 +275,8 @@ static int memo_on(const char *phase) { return memo_path[0]&&!(amortize_jobs&&jo
 static int needs_recheck(const char *phase) { return memo_path[0]&&(!strcmp(phase,"compare")||!strcmp(phase,"pack")); }
 static int is_recheck(const char *label) { size_t n=strlen(label); return n>8&&!strcmp(label+n-8,"-recheck"); }
 static void result_path(char *p,int a,const char *suffix) { char leaf[100];cx_fmt(leaf,sizeof leaf,"chain-run-%d.%s",a,suffix);path(p,leaf); }
-static void execute(const char *phase,char **v,int bound,int a) {
+static void execute(const char *phase,char **v,const ccp_plan *call,int a) {
+    int bound=call->bound;
     char p[4400];result_path(p,a,"argv");FILE *f=fopen(p,"wb");if(!f)_exit(2);
     for(int i=0;v[i];i++)fprintf(f,"%s\n",v[i]);if(fclose(f))_exit(2);
     /* The environment is rebuilt for every child: an inherited memo never reaches a phase, and a
@@ -165,10 +288,23 @@ static void execute(const char *phase,char **v,int bound,int a) {
     /* Derived memos (verify-context verdict, closure-list plan) only on --memo-derived, never inherited. */
     if(!pre&&memo_on(phase)&&memo_derived){if(sy_setenv("UNISACC_CHAIN_SHAMEMO_DERIVED","1",1))_exit(2);}
     else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO_DERIVED"))_exit(2);
-    int grouped=0;for(int i=0;v[i];i++)if(!strcmp(v[i],"--jobs-segment-s"))grouped=1;
+    int grouped=call->kind==CCP_RUN_GROUP;
     char token[300];cx_fmt(token,sizeof token,"%d:%s",a,phase);
-    if(grouped&&sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
-    long started=sy_now_ms();pr_result r;int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
+    if(sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
+    long started=sy_now_ms();pr_result r;
+    /* A plain phase is told when its attempt ends: 14 seconds before the bound, 12 before the
+       owner starts killing (bound - 2). A candidate whose next call would not fit yields
+       instead (see below). Rechecks, job groups and very short bounds get no such end
+       (cxlib.chaincall: end_s is 0 for a group and for a bound under 30). */
+    {   char at_end[40];
+        if(grouped||pre||!call->end_s){if(sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS"))_exit(2);}
+        else if(cx_fmt(at_end,sizeof at_end,"%ld",started+(long)call->end_s*1000)||sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS",at_end,1))_exit(2);
+    }
+    {   char pb[16];  /* the exported bound travels to the children; none keeps a hidden default.
+                         A plain phase: its own bound; a group: the group budget (= --jobs-segment-s). */
+        if(cx_fmt(pb,sizeof pb,"%d",call->env_bound)||sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S",pb,1))_exit(2);
+    }
+    int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
     result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
     result_path(p,a,"stderr");if(cx_write(p,r.err?r.err:"",r.errn))_exit(2);
     char timing[200];cx_fmt(timing,sizeof timing,"\nATTEMPT_TIME\tphase=%s\twall_ms=%ld",phase,sy_now_ms()-started);
@@ -181,7 +317,24 @@ static void execute(const char *phase,char **v,int bound,int a) {
         if(bytes&&!sy_sha256_hex(bytes,(long)size,hash)&&!cx_fmt(want,sizeof want,"CANDIDATE_SEGMENT\t%s\t%s\n",token,hash)&&r.out&&strstr(r.out,want))rc=76;
         free(bytes);
     }
-    int retry=(t&&r.timed_out)||(!t&&(r.rc==-9||r.rc==-15||r.rc==124||r.rc==137||r.rc==143));
+    /* A plain phase's yield: rc 75 with "CANDIDATE_YIELD token length sha256" where the first
+       LENGTH bytes of checkpoint.tsv (append-only; other lanes may have added rows since) hash to
+       SHA256. Verified, it is 77: the phase stays pending and is run again, no resume counted.
+       An unverified 75, or a candidate that returns 77 itself, is a plain failure (2). */
+    if(!grouped&&!t&&rc==77)rc=2;
+    if(!grouped&&!t&&rc==75) {
+        rc=2;
+        char cp[4400],hash[65],lead[400];size_t size=0;path(cp,"checkpoint.tsv");char *bytes=cx_read(cp,&size);
+        const char *line=!r.residue&&r.out&&!cx_fmt(lead,sizeof lead,"CANDIDATE_YIELD\t%s\t",token)?strstr(r.out,lead):0;
+        if(bytes&&line&&(line==r.out||line[-1]=='\n')) {
+            const char *q=line+strlen(lead);long length=0;int digits=0;
+            while(*q>='0'&&*q<='9'&&digits<12){length=length*10+(*q-'0');q++;digits++;}
+            if(digits&&*q=='\t'&&length>0&&(size_t)length<=size&&!sy_sha256_hex(bytes,length,hash)&&!strncmp(q+1,hash,64)&&q[65]=='\n')rc=77;
+        }
+        free(bytes);
+    }
+    /* 2: this owner killed the attempt at its bound; 1: another kill; 0: not retryable. */
+    int retry=(t&&r.timed_out)?2:(!t&&ec_retryable(r.rc))?1:0;
     char row[100];cx_fmt(row,sizeof row,"%d %d %d\n",rc,retry,r.residue);
     char final[4400];result_path(p,a,"result.new");result_path(final,a,"result");if(cx_write(p,row,strlen(row))||sy_rename(p,final))_exit(2);pr_free(&r);_exit(0);
 }
@@ -198,26 +351,37 @@ static int run(const char *phase,char **v,char *fresh_output) {
         long left=(end_ms-sy_now_ms())/1000;
         if(left<1) return blocker(phase,"deadline",3);
         if(attempts>=max_attempts) return blocker(phase,"attempts-exhausted",3);
-        int call_bound=left<phase_bound?(int)left:phase_bound;
-        if(!seg_fits(call_bound)) return segment_expired(phase);
+        ccp_plan call;
+        if(ccp_call_plan(&call_limits,0,phase_bound,seg_left(),left,&call)==CCP_YIELD) return segment_expired(phase);
+        int call_bound=call.bound;
         attempts++; save();
         if(fresh_output&&cx_fmt(fresh_output,4400,"%s/%s-%d",out,phase,attempts)) die("fresh output bound");
-        int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,call_bound,attempts);
+        int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,&call,attempts);
         outcome o=collect(owner,attempts,phase,call_bound);
         int rc=o.rc,retry=o.retry,residue=o.residue;char row[512];
         if(residue) return blocker(phase,"surviving-processes",2);
         if(!rc) return 0;
         if(!retry) return blocker(phase,"first-failure",rc);
-        if(sy_now_ms()>=end_ms) return blocker(phase,"deadline",3);
-        if(resumes>=max_resumes) return blocker(phase,"resumes-exhausted",3);
-        int observed=observe();
-        if(observed==RC_SEGMENT){owed=1;save();return segment_expired(phase);}
-        if(observed) return observed;
-        resumes++;if(parallel>1)parallel--;save();
-        cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tphase=%s\trc=%d\n",sy_wall_s(),resumes,phase,rc); append("chain-run.tsv",row);
+        if(cx_fmt(row,sizeof row,"\tphase=%s\trc=%d",phase,rc)) die("retry row bound");
+        int accounted=account_retry(phase,retry,row,0);
+        if(accounted==RC_SEGMENT) return segment_expired(phase);
+        if(accounted) return accounted;
         /* A kill can race the phase receipt: never ask --until for a target it will skip. */
         if(done(phase)) return 0;
     }
+}
+/* A raise is backed by a decision row of build/approvals.tsv (awpath kind approvals):
+   column 1 equals ID and column 2 is exactly budget-raise. No such row, no raise. */
+static int ledger_has(const char *id) {
+    size_t n=0,len=strlen(id); if(len<3||len>60) return 0;
+    for(size_t i=0;i<len;i++) if(!((id[i]>='A'&&id[i]<='Z')||(id[i]>='0'&&id[i]<='9')||id[i]=='-')) return 0;
+    const char *rel=awp_rel("approvals"); if(!rel) return 0;
+    char *b=cx_read(rel,&n); if(!b) return 0;
+    int yes=0;
+    for(char *s=b;*s&&!yes;) { char *e=strchr(s,'\n');
+        if(!strncmp(s,id,len)&&s[len]=='\t'&&!strncmp(s+len+1,"budget-raise\t",13)) yes=1;
+        if(!e) break; s=e+1; }
+    free(b); return yes;
 }
 static long number(const char *s) { char *e=0; long n=strtol(s,&e,10); if(!*s||*e||n<1||n>10000000) die("invalid positive limit"); return n; }
 /* Runtime front inventory comes from front0, not the static orchestration table.
@@ -227,7 +391,7 @@ static int front_total(const char *rev, int gen, const char *slug) {
     char p[4400], line[4400]; int total = -1;
     if(partition_work) {
         if(cx_fmt(p,sizeof p,"%s/gen%d/%s-front0/part.tsv",partition_work,gen,slug)) die("fixture manifest path");
-    } else if(cx_fmt(p,sizeof p,"out/release-snap-%.10s/out/chain/gen%d/%s-front0/part.tsv",rev,gen,slug)) die("front manifest path");
+    } else { char sn[4400]; if(cr_snap(".",rev,0,sn,sizeof sn)||cx_fmt(p,sizeof p,"%s/out/chain/gen%d/%s-front0/part.tsv",sn,gen,slug)) die("front manifest path"); }
     FILE *f=fopen(p,"rb"); if(!f) die("front manifest missing");
     while(fgets(line,sizeof line,f)) if(!strncmp(line,"total\t",6)) {
         char *e=0; long n=strtol(line+6,&e,10);
@@ -283,19 +447,20 @@ static int ready(task *t) {
 static void settle(task *t,outcome r,int *stop,int *retrying) {
     int pre=t->recheck==1; t->recheck=0;
     if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
-    else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;if(!*stop)*stop=RC_SEGMENT;}
+    else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;clean_attempt();if(!*stop)*stop=RC_SEGMENT;}
+    else if(r.rc==77&&!pre){t->state=0;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);clean_attempt();}
     else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
-    else if(r.retry){*retrying=1;t->state=0;}
-    else if(pre){t->recheck=2;t->state=0;}
+    else if(r.retry){if(r.retry!=2)*retrying=1;else if(!*retrying)*retrying=2;t->state=0;}
+    else if(pre){t->recheck=2;t->state=0;clean_attempt();}
     else if(!done(t->phase)){if(!*stop)*stop=blocker(t->phase,"missing-checkpoint",2);}
-    else t->state=done(t->id)?2:0;
+    else {t->state=done(t->id)?2:0;clean_attempt();}
 }
 static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
-    int active=0,stop=0,retrying=0;const char *held=0;
+    int active=0,stop=0,retrying=0,hold_row=0;const char *held=0; /* hold_row: one HOLD evidence row per invocation */
     for(int i=0;i<plan_count;i++) {
         task *t=&plan[i];
         if(!strncmp(t->id,"g2-lnx-x86_64-obj-",18)||!strncmp(t->id,"g2-lnx-arm64-obj-",17))t->state=2;
-        if(rehearse&&strcmp(t->id,"snap")&&strcmp(t->id,"build-objects")&&strcmp(t->id,"build")&&strcmp(t->id,"wave-objects")&&strcmp(t->id,"wave-runner")&&strcmp(t->id,"ctx"))t->state=2;
+        if(rehearse&&strcmp(t->id,"snap")&&strcmp(t->id,"build-objects")&&strcmp(t->id,"build-front")&&strcmp(t->id,"build")&&strcmp(t->id,"wave-objects")&&strcmp(t->id,"wave-runner")&&strcmp(t->id,"ctx"))t->state=2;
     }
     for(;;) {
         int remaining=0;held=0;
@@ -311,16 +476,25 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             long left=(end_ms-sy_now_ms())/1000;
             if(left<1){stop=blocker(t->phase,"deadline",3);continue;}
             if(attempts>=max_attempts){stop=blocker(t->phase,"attempts-exhausted",3);continue;}
-            int bound=left<t->bound?(int)left:t->bound;
-            char group_seconds[16];
-            if(group) {
-                long available=seg_end_ms?(seg_end_ms-sy_now_ms())/1000:270;
-                if(available>270)available=270;if(available>left)available=left;
-                if(available<58){if(!held)held=t->id;continue;}
-                bound=(int)available;cx_fmt(group_seconds,sizeof group_seconds,"%d",bound-3);
+            /* One decision for the call (cxlib.chaincall): a plain phase under its own bound, a job
+               group under what is left of the segment, or nothing. Segment end: ready work whose
+               smallest useful call does not fit (a group: one single-job bound plus the reserve) is
+               held, never started and killed, and never issued for the candidate to refuse; the
+               segment ends cleanly (rc 75) and the next one starts it. Work that would not fit a
+               whole new segment either is short of the total deadline, not of the segment. */
+            ccp_plan call;char group_seconds[16];
+            if(ccp_call_plan(&call_limits,group!=0,t->bound,seg_left(),left,&call)==CCP_YIELD) {
+                ccp_plan fresh;
+                if(ccp_call_plan(&call_limits,group!=0,t->bound,segment_s?(long)segment_s:-1,left,&fresh)==CCP_YIELD){stop=blocker(t->phase,"deadline",3);continue;}
+                if(!held)held=t->id;
+                if(!hold_row) {
+                    char row[500];hold_row=1;
+                    if(!cx_fmt(row,sizeof row,"HOLD\t%ld\tphase=%s\tneed=%d\tsegment_left=%ld\n",sy_wall_s(),t->phase,ccp_need(&call_limits,group!=0,t->bound),seg_left()))append("chain-run.tsv",row);
+                }
+                continue;
             }
-            /* Segment end: ready work that does not fit is held, never started and killed. */
-            if(!seg_fits(bound)){if(!held)held=t->id;continue;}
+            int bound=call.bound;
+            if(group&&cx_fmt(group_seconds,sizeof group_seconds,"%d",call.group_s))die("group seconds bound");
             t->attempt=++attempts;save();t->state=1;
             int pre=needs_recheck(t->phase)&&t->recheck!=2,end=tail;
             t->recheck=pre?1:0;
@@ -331,19 +505,16 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             if(group){v[end++]="--jobs-segment-s";v[end++]=group_seconds;}
             v[end]=0;
             t->call_bound=bound;
-            t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,bound,t->attempt);
+            t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,&call,t->attempt);
             active++;
         }
         if(!active) {
             if(stop)return stop==RC_SEGMENT?segment_expired("jobs-group"):stop;
             if(retrying){
-                if(sy_now_ms()>=end_ms)return blocker("scheduler","deadline",3);
-                if(resumes>=max_resumes)return blocker("scheduler","resumes-exhausted",3);
-                int rc=observe();
-                if(rc==RC_SEGMENT){owed=1;save();return segment_expired("scheduler-resume");}
+                int rc=account_retry("scheduler",retrying,"",1);
+                if(rc==RC_SEGMENT)return segment_expired("scheduler-resume");
                 if(rc)return rc;
-                resumes++;if(parallel>1)parallel--;save();
-                char row[200];cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tparallel=%d\n",sy_wall_s(),resumes,parallel);append("chain-run.tsv",row);retrying=0;continue;
+                retrying=0;continue;
             }
             if(!remaining)return 0;
             int unfinished=0;for(int i=0;i<plan_count;i++)if(plan[i].state!=2)unfinished++;
@@ -371,6 +542,34 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
         }
     }
 }
+/* The chain's own tools are read from the working checkout, which other work keeps editing. One
+   supervised run therefore builds chain-watch and candidate-chain once: the supervisor sets
+   UNISACC_CHAIN_TOOLS_EPOCH for its segments, the first segment builds each native and records
+   "epoch + sha256" beside it (NATIVE.pin), and every later segment of the same supervisor runs
+   that file after checking its bytes against the record; a mismatch is a blocker, never a silent
+   rebuild. A new supervisor (an explicit new start, e.g. after a tool fix) has a new epoch and
+   the tools are built and recorded again. Without a supervisor there is no epoch and each
+   invocation builds its tools as before. (chain-step is pinned per output by candidate-chain,
+   because the receipts name it as their producer.) */
+static int prepare_once(const char *phase,char **prepare,const char *native) {
+    char pin[4500],hash[65],text[400]; size_t en=0,pn=0,bn=0;
+    const char *given=sy_env("UNISACC_CHAIN_TOOLS_EPOCH");
+    if(!given||!given[0]) return run(phase,prepare,0);
+    en=strlen(given)+1; char *epoch=malloc(en+1);
+    if(!epoch||en>200||strchr(given,'\n')||cx_fmt(epoch,en+1,"%s\n",given)||cx_fmt(pin,sizeof pin,"%s.pin",native)) die("tool epoch record");
+    char *old=cx_read(pin,&pn);
+    if(old&&pn>en+11&&!memcmp(old,"epoch=",6)&&!memcmp(old+6,epoch,en)) {
+        char *bytes=cx_read(native,&bn);
+        int same=bytes&&!sy_sha256_hex(bytes,(long)bn,hash)&&!cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)&&pn==strlen(text)&&!memcmp(old,text,pn);
+        free(bytes); free(old); free(epoch);
+        return same?0:blocker(phase,"pinned-tool-changed",2);
+    }
+    free(old);
+    int rc=run(phase,prepare,0); if(rc){free(epoch);return rc;}
+    char *bytes=cx_read(native,&bn);
+    if(!bytes||sy_sha256_hex(bytes,(long)bn,hash)||cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)||cx_write(pin,text,strlen(text))) die("tool pin record");
+    free(bytes); free(epoch); return 0;
+}
 /* Supervisor: one bounded segment child after another. It owns no chain state: the deadline,
    attempt, resume and segment budgets live in the child's persisted budget and stop the child
    itself (rc 3). The loop is finite (max_segments + 1) and each child is killed at its
@@ -378,6 +577,9 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
 static int supervise(int argc,char **argv,int sep,const char *runner) {
     char lock[4400],native[4400],row[600]; path(lock,"chain-supervise.lock"); int fd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(fd<0||sy_flock(fd,2|4)) die("supervisor already owns output");
+    {   char epoch[80];
+        if(cx_fmt(epoch,sizeof epoch,"%ld-%d",sy_now_ms(),(int)getpid())||sy_setenv("UNISACC_CHAIN_TOOLS_EPOCH",epoch,1)) die("tool epoch");
+    }
     if(!runner) {
         path(native,"chain-run-native");
         char *prepare[]={"sh","./unisacc.com","tools/chain-run.cx","-o",native,0}; pr_result r;
@@ -415,14 +617,18 @@ static int supervise(int argc,char **argv,int sep,const char *runner) {
     return 3;
 }
 int main(int argc,char **argv) {
+    phase_bound=lim_int("phase.bound"); segment_cap=lim_int("segment");
+    if(ccp_limits_load(&call_limits)) die("call limits");
+    max_attempts=lim_int("attempts"); max_resumes=lim_int("resumes");
+    widen_need=lim_int("width.recover.clean"); widen_max=lim_int("width.recover.max");
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
     if(argc==5&&!strcmp(argv[1],"--partition-fixture")) {
         out=argv[2]; partition_work=out; end_ms=sy_now_ms()+30000;
         char *fixture[]={argv[3],"--partition-fixture",argv[4],(char*)out,(char*)out,0,0};
         return fronts("gen1-osx-x86_64","fixture",fixture,5);
     }
-    const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0,*runner=0;
-    int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=5400, entered=sy_now_ms();
+    const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0,*runner=0,*raise_id=0; int raised=0;
+    int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=lim_int("deadline.s"), entered=sy_now_ms();
     for(i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--")) { extra=i+1; break; }
         if(!strcmp(argv[i],"--rehearse")) { rehearse=1; continue; }
@@ -438,16 +644,18 @@ int main(int argc,char **argv) {
         else if(!strcmp(a,"--deadline-s")) seconds=number(b);
         else if(!strcmp(a,"--parallel")) { parallel=(int)number(b);if(parallel>4)die("parallel must be 1..4"); }
         else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
-        else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>270)die("segment must be 1..270 seconds"); }
-        else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>4096)die("max segments must be 1..4096"); }
+        else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>segment_cap){char m[64];cx_fmt(m,sizeof m,"segment must be 1..%d seconds",segment_cap);die(m);} }
+        else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>(int)lm_max("bg.segments",0))die("max segments above the bg.segments max of build/limits.tsv"); } /* the range bg-candidate hands down */
         else if(!strcmp(a,"--runner")) runner=b;
         else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
+        else if(!strcmp(a,"--budget-raise")) raise_id=b;
         else if(!strcmp(a,"--rehearse-ctor")) ctor=b;
         else if(!strcmp(a,"--rehearse-objects")) objs=b;
         else if(!strcmp(a,"--rehearse-pkg")) pkg=b;
         else die("unknown option");
     }
     if(!rev||strlen(rev)!=40||!out||out[0]!='/') die("--rev HEX40 --out ABS required");
+    ceiling=parallel; /* the requested width: recovery never goes above it */
     for(i=0;i<40;i++) if(!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex");
     if(rehearse&&(!ctor||!objs||!pkg)) die("rehearse requires explicit prepared ctor, objects and pkg");
     if(rehearse) {
@@ -463,10 +671,12 @@ int main(int argc,char **argv) {
         char out_root[4400],expected_root[4400];
         if(cx_fmt(expected_root,sizeof expected_root,"%s/out",safe_root) || sy_realpath("out",out_root,sizeof out_root)<0 || strcmp(out_root,expected_root)) die("repository out root must not redirect cleanup");
     }
-    if(strncmp(out,safe_parent,strlen(safe_parent)) || strstr(out,"/../") || strstr(out,"/./") || strstr(out,"//") || !out[strlen(safe_parent)]) die("--out must be strictly under repository out (cleanup safety)");
+    int in_repo_out = !strncmp(out,safe_parent,strlen(safe_parent)) && out[strlen(safe_parent)];
+    if(strstr(out,"/../") || strstr(out,"/./") || strstr(out,"//")) die("--out must be strictly under repository out (cleanup safety)");
+    if(!in_repo_out) { char why[64]; if(sr_ok(safe_root,out,why,sizeof why)) die("--out must be strictly under repository out or a tmpdir session root (cleanup safety)"); }
     /* Existing symlink ancestors must not redirect cleanup outside that root. */
     if(cx_fmt(safe_out,sizeof safe_out,"%s",out)) die("output bound");
-    for(char *q=safe_out+strlen(safe_parent);;q++) if(*q=='/'||!*q) {
+    if(in_repo_out) for(char *q=safe_out+strlen(safe_parent);;q++) if(*q=='/'||!*q) {
         char c=*q; *q=0;
         char resolved[4400];
         if(sy_exists(safe_out) && (sy_realpath(safe_out,resolved,sizeof resolved)<0 || strncmp(resolved,safe_parent,strlen(safe_parent)))) die("output symlink outside repository out");
@@ -478,6 +688,11 @@ int main(int argc,char **argv) {
     if(segment_s) {
         /* A phase whose bound exceeds the segment could never start: refuse before any child. */
         for(i=0;i<plan_count;i++) if(plan[i].bound>segment_s) die("segment shorter than a phase bound");
+        /* Likewise a job group that not even a whole segment could start (it would be held forever). */
+        for(i=0;i<plan_count;i++) if(amortize_jobs&&jobs_group(plan[i].id)) {
+            ccp_plan whole;
+            if(ccp_call_plan(&call_limits,1,plan[i].bound,segment_s,segment_cap,&whole)==CCP_YIELD) die("segment shorter than a job group");
+        }
         if((!watch||!candidate||(supervising&&!runner))&&segment_s<phase_bound) die("segment shorter than the native preparation bound");
     }
     sy_mkdir(out,0755);
@@ -487,11 +702,12 @@ int main(int argc,char **argv) {
     char identity[16000],p[4400];
     int used=snprintf(identity,sizeof identity,"rev=%s\nmode=%s\ncandidate=%s\nctor=%s\nobjects=%s\npkg=%s\n",rev,rehearse?"rehearse":"full",candidate?candidate:"source",ctor?ctor:"-",objs?objs:"-",pkg?pkg:"-");
     if(used<0||(size_t)used>=sizeof identity) die("identity bound");
-    char root_id[4400],plan_hash[65]; size_t plan_n=0;
+    char root_id[4400],plan_hash[65];
     if(sy_realpath(".",root_id,sizeof root_id)<0) die("root identity");
-    char *plan_bytes=cx_read("build/chain-phases.tsv",&plan_n);
-    if(!plan_bytes||sy_sha256_hex(plan_bytes,(long)plan_n,plan_hash)) die("plan identity"); free(plan_bytes);
-    int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan=%s\ndeadline-s=%ld\nwatch=%s\n",root_id,plan_hash,seconds,watch?watch:"source");
+    if(plan_semantics_hex(plan_hash)) die("plan identity");
+    /* --deadline-s is a budget, not identity: the first invocation persists end_ms in
+       chain-run.budget and later invocations never reset it. */
+    int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan-semantics=%s\nwatch=%s\n",root_id,plan_hash,watch?watch:"source");
     if(bind<0||(size_t)bind>=sizeof identity-used) die("identity bound"); used+=bind;
     for(i=extra;i<argc;i++) { int n=snprintf(identity+used,sizeof identity-used,"arg=%s\n",argv[i]); if(n<0||(size_t)n>=sizeof identity-used) die("identity bound"); used+=n; }
     path(p,"chain-run.identity"); size_t n=0; char *old=cx_read(p,&n);
@@ -508,16 +724,43 @@ int main(int argc,char **argv) {
     }
     path(p,"chain-run.budget"); old=cx_read(p,&n);
     if(old) {
-        /* 6 fields: a budget written before segments existed (no segment was ever counted). */
-        int ma,mr,width,seg=0,mseg=max_segments,ow=0; int fields=sscanf(old,"%ld %d %d %d %d %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr,&width,&seg,&mseg,&ow);
-        if((fields!=6&&fields!=9)||ma!=max_attempts||mr!=max_resumes||mseg!=max_segments||attempts<0||resumes<0||seg<0||(ow!=0&&ow!=1)||width<1||width>4) die("budget mismatch");
-        segments=seg;owed=ow;if(width<parallel)parallel=width; free(old);
+        /* Format v2 only (11 fields, kills counter). A v1 budget (6 or 9 fields) has no kills
+           counter and its resumes were counted by the old rule: such a dir is not resumed. */
+        int ma,mr,width,seg=0,mseg=0,ow=0,kl=0,version=0; int fields=sscanf(old,"%ld %d %d %d %d %d %d %d %d %d v%d",&end_ms,&attempts,&resumes,&ma,&mr,&width,&seg,&mseg,&ow,&kl,&version);
+        if(fields==6||fields==9) die("budget format v1: this output dir is not resumed, start a new output dir");
+        if(fields!=11||version!=2||attempts<0||resumes<0||kl<0||seg<0||ow<0||ow>2||width<1||width>4) die("budget mismatch");
+        if(ma!=max_attempts||mr!=max_resumes||mseg!=max_segments) {
+            /* Maxima are never lowered and never raised silently: a raise names its ledger row,
+               stays within the build/limits.tsv max and is written as a RAISE row. */
+            if(!raise_id||max_attempts<ma||max_resumes<mr||max_segments<mseg||max_attempts>(int)lm_max("attempts",0)||max_resumes>(int)lm_max("resumes",0)||!ledger_has(raise_id)) die("budget mismatch");
+            char row[500]; if(cx_fmt(row,sizeof row,"RAISE\t%ld\tid=%s\tfrom=attempts:%d,resumes:%d,segments:%d\tto=attempts:%d,resumes:%d,segments:%d\n",sy_wall_s(),raise_id,ma,mr,mseg,max_attempts,max_resumes,max_segments)) die("raise bound");
+            raised=1; append("chain-run.tsv",row);
+        }
+        segments=seg;owed=ow;kills=kl;if(width<parallel)parallel=width; free(old);
+        if(raised) save();
+        load_widen();
     }
     else { end_ms=sy_now_ms()+seconds*1000; save(); }
+    {
+        /* Limits are not identity; each invocation records the limits it runs under, and a
+           change from the previous invocation is a LIMITS row. Budgets are never reset by it. */
+        char lim[65],prev[65]="-",row[400]; int changed=0; lim[0]=0; limits_hex(lim);
+        path(p,"chain-run.limits"); old=cx_read(p,&n);
+        if(old) { if(n>=sizeof prev||tx_copy(prev,sizeof prev,old,n)) die("limits record"); free(old); changed=strcmp(prev,lim)!=0; }
+        if(cx_fmt(row,sizeof row,"LIMITS\t%ld\tn=%d\tlimits=%s\tprev=%s\tchanged=%d\n",sy_wall_s(),segments+(segment_s?1:0),lim,old?prev:"none",changed)) die("limits bound");
+        append("chain-run.tsv",row);
+        if(!old||changed) { if(cx_write(p,lim,strlen(lim))) die("limits write"); }
+    }
     if(segment_s) {
         /* The cap and the count are persisted: a new invocation continues them, it never resets them. */
         if(max_segments&&segments>=max_segments) return blocker("segment","segments-exhausted",3);
         segments++; seg_end_ms=entered+(long)segment_s*1000; save();
+        {   /* Test-only: the first segment of an output starts with part of itself already spent, so a
+               fixture can place a phase at a segment tail without waiting for it. It can only
+               shorten that one segment. */
+            const char *spent=sy_env("UNISACC_CHAINRUN_SEGMENT_SPENT_MS");
+            if(spent&&*spent&&segments==1) { long ms=number(spent); if(ms>=(long)segment_s*1000) die("segment spent seam"); seg_end_ms-=ms; }
+        }
         char row[200]; if(cx_fmt(row,sizeof row,"SEGMENT\t%ld\tn=%d\tstart\tsegment-s=%d\tmax=%d\n",sy_wall_s(),segments,segment_s,max_segments)) die("segment bound");
         append("chain-run.tsv",row);
     }
@@ -530,24 +773,20 @@ int main(int argc,char **argv) {
     if(!watch) {
         path(native_watch,"chain-run-watch");
         char *prepare[]={"sh","./unisacc.com","tools/chain-watch.cx","-o",native_watch,0};
-        if((prep_rc=run("prepare-watch",prepare,0))) return prep_rc;
+        if((prep_rc=prepare_once("prepare-watch",prepare,native_watch))) return prep_rc;
         watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0;
     }
     if(owed) {
         /* The previous segment ended between a retryable failure and its observation: settle the
            same accounting now, before any new work. */
-        if(sy_now_ms()>=end_ms) return blocker("segment","deadline",3);
-        if(resumes>=max_resumes) return blocker("segment","resumes-exhausted",3);
-        int settled=observe();
+        int settled=account_retry("segment",owed,"\towed=settled",1);
         if(settled==RC_SEGMENT) return segment_expired("owed-resume");
         if(settled) return settled;
-        resumes++;if(parallel>1)parallel--;owed=0;save();
-        char row[200];cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tparallel=%d\towed=settled\n",sy_wall_s(),resumes,parallel);append("chain-run.tsv",row);
     }
     if(!candidate&&!done("pack")) {
         path(native_candidate,"chain-run-candidate");
         char *prepare[]={"sh","./unisacc.com","tools/candidate-chain.cx","-o",native_candidate,0};
-        if((prep_rc=run("prepare-candidate",prepare,0))) return prep_rc;
+        if((prep_rc=prepare_once("prepare-candidate",prepare,native_candidate))) return prep_rc;
         candidate=native_candidate;
     }
     char *v[100]; int k=0;
@@ -561,7 +800,7 @@ int main(int argc,char **argv) {
     if(rehearse) {
         char snap[4400],prep[4400],front[4400],helper[4400],com[4400],tool[4400],tmpl[4400];
         char root[4400]; if(sy_realpath(".",root,sizeof root)<0) die("root");
-        if(cx_fmt(snap,sizeof snap,"%s/out/release-snap-%.10s",root,rev)||cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/whole-front.cx",root)||cx_fmt(tmpl,sizeof tmpl,"%s/tools/templates/whole-front.cx.in",root)) die("rehearse path");
+        if(cr_snap(root,rev,0,snap,sizeof snap)||cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/whole-front.cx",root)||cx_fmt(tmpl,sizeof tmpl,"%s/tools/templates/whole-front.cx.in",root)) die("rehearse path");
         path(helper,"ctx/identity-helper");
         if(sy_setenv("UNISACC_IDENTITY_HELPER",helper,1)||sy_chdir(snap)) die("rehearse frozen root/helper");
         char *a[]={"sh",com,tool,"--","prepare",snap,(char*)pkg,(char*)ctor,(char*)objs,prep,"--template",tmpl,0};

@@ -3,8 +3,11 @@
  *   sh ./unisacc.com tools/freeze-plan.cx -- plan ROOT OUTDIR [--ident BIN] [--ident-list F] [--alias-list F]
  *   sh ./unisacc.com tools/freeze-plan.cx -- check --ident-list FILE --draft FILE
  *   sh ./unisacc.com tools/freeze-plan.cx -- boot-list LIST
+ *   sh ./unisacc.com tools/freeze-plan.cx -- head-delta ROOT BUILD_REV
  *
- * 流式/堆扩容读取;超上限明确报错不截断。永不写 agentwork/freeze.tsv。
+ * plan/check 拒收未归类的产品输入路径(UNCLASSIFIED);head-delta 判 HEAD 领先 BUILD_REV
+ * 时差集是否只含明确的非产品路径(发布按身份而非 HEAD 绑定)。
+ * 流式/堆扩容读取;超上限明确报错不截断。永不写 build/freeze.tsv。
  * 前缀由计入文件目录级合并(cx/xx、ext/xx 两段,其余首段);tools/tests/plans/agentwork 永不冻结。
  */
 #pragma unisa use sys.io
@@ -99,6 +102,35 @@ static int under(const char *p, const char *b) {
 }
 static int never_p(const char *p) {
     return under(p, "tools") || under(p, "tests") || under(p, "plans") || under(p, "agentwork");
+}
+/* Product-input classification, kept in step with seed/ident.c historical_identity:
+   its directories, iterate/kernel/typekw.tsv and its tools/ support files are product;
+   ext/ enters through aliases; unisacc.com is the bootstrap product.  Everything else
+   must be listed as non-product explicitly, otherwise the path is UNCLASSIFIED. */
+static const char *const fp_product_dirs[] = {"cx", "ext", "src", "include", "seed", "kernel", "exec", "weights", 0};
+static const char *const fp_product_files[] = {"iterate/kernel/typekw.tsv", "unisacc.com", // lint:allow R1-product classification table entry, never an argv
+    "tools/bound", "tools/bound.c", "tools/cxbin", "tools/safedel.cx", "tools/lib.sh", "tools/build_ref.sh",
+    "tools/export_ref.sh", "tools/refshim.h", "tools/reffoot.h", "tools/sourceflat.cx", "tools/ape-pack.cx",
+    "tools/release-ape.cx", "tools/cxlib/releaseversion.cx", 0};
+static const char *const fp_other_dirs[] = {"tools", "tests", "plans", "agentwork", "archive", "research", "docs",
+    "release", "build", "bench", "examples", "apps", "ujs", "skills", "scripts", ".github", 0};
+static const char *const fp_other_files[] = {"AGENTS.md", "ARCHITECTURE.md", "CLAUDE.md", "README.md", "prd.md",
+    "prd_cx.md", "prd_hist.md", "prd_release.md", "spec.md", "ape-receipt.txt", ".gitignore", ".gitattributes", 0};
+/* 1 product input, 0 explicitly non-product, -1 unclassified */
+static int fp_class(const char *p) {
+    int i;
+    for (i = 0; fp_product_files[i]; i++) if (tx_eqz(p, fp_product_files[i])) return 1;
+    for (i = 0; fp_product_dirs[i]; i++) if (under(p, fp_product_dirs[i])) return 1;
+    for (i = 0; fp_other_dirs[i]; i++) if (under(p, fp_other_dirs[i])) return 0;
+    for (i = 0; fp_other_files[i]; i++) if (tx_eqz(p, fp_other_files[i])) return 0;
+    return -1;
+}
+/* every ident-listed (product input) file must classify as product */
+static int refuse_unclassified(void) {
+    int i, bad = 0;
+    for (i = 0; i < nfiles; i++) if (fp_class(files[i]) != 1) { sy_printf("UNCLASSIFIED\t%s\n", files[i]); bad++; }
+    if (bad) sy_eprintf("freeze-plan: UNCLASSIFIED_PRODUCT_INPUT %d path(s) are neither product nor explicitly classified\n", bad);
+    return bad;
 }
 static int covered(const char *f, const char *pr) {
     long fl = tx_len(f, 800), pl = tx_len(pr, 200);
@@ -253,9 +285,50 @@ static int slurp_v(char **argv, char **out, long *n) {
     b[*n] = 0; *out = b; return 0;
 }
 
+/* head-delta ROOT BUILD_REV: may a checkout whose HEAD is ahead of BUILD_REV stand for it?
+   BUILD_REV must be an ancestor of HEAD and every path changed between them must classify
+   as explicitly non-product.  Prints PRODUCT/UNCLASSIFIED/NONPRODUCT rows, then one
+   HEAD_DELTA verdict row; exit 0 OK, 1 REFUSE, 2 transport/usage. */
+static int rev40(char *b, long n, char out[41]) {
+    long i;
+    while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == '\r')) n--;
+    if (n != 40) return 1;
+    for (i = 0; i < 40; i++) { char c = b[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 1; out[i] = c; }
+    out[40] = 0; return 0;
+}
+static int head_delta(const char *root, const char *rev) {
+    char head[41], want[41], spec[80], *o = 0; long n = 0, at = 0; int prod = 0, unc = 0, other = 0;
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", rev)) return 2;
+    { char *v[] = {"git", "-C", (char *)root, "rev-parse", "--verify", "-q", spec, 0};
+      if (slurp_v(v, &o, &n) || rev40(o, n, want)) { sy_printf("HEAD_DELTA\tstatus=REFUSE\treason=BUILD_REV_UNKNOWN\tbuild_rev=%s\n", rev); return 1; } }
+    { char *v[] = {"git", "-C", (char *)root, "rev-parse", "--verify", "HEAD", 0};
+      if (slurp_v(v, &o, &n) || rev40(o, n, head)) { sy_eprintf("freeze-plan: head-delta cannot read HEAD of %s\n", root); return 2; } }
+    if (tx_eqz(head, want)) { sy_printf("HEAD_DELTA\tstatus=OK\treason=SAME\tchanged=0\tbuild_rev=%s\thead=%s\n", want, head); return 0; }
+    { char *v[] = {"git", "-C", (char *)root, "merge-base", "--is-ancestor", want, head, 0};
+      if (slurp_v(v, &o, &n)) { sy_printf("HEAD_DELTA\tstatus=REFUSE\treason=NOT_ANCESTOR\tbuild_rev=%s\thead=%s\n", want, head); return 1; } }
+    { char *v[] = {"git", "-C", (char *)root, "diff", "--name-only", "--no-renames", want, head, 0};
+      if (slurp_v(v, &o, &n)) { sy_eprintf("freeze-plan: head-delta git diff failed\n"); return 2; } }
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0) {
+            char p[800]; int c;
+            if (l >= (long)sizeof p) { sy_eprintf("freeze-plan: head-delta path too long, not truncated\n"); return 2; }
+            mm_copy(p, sizeof p, o + at, l); p[l] = 0; c = fp_class(p);
+            if (c == 1) { sy_printf("PRODUCT\t%s\n", p); prod++; }
+            else if (c < 0) { sy_printf("UNCLASSIFIED\t%s\n", p); unc++; }
+            else { sy_printf("NONPRODUCT\t%s\n", p); other++; }
+        }
+        at += l + 1;
+    }
+    sy_printf("HEAD_DELTA\tstatus=%s\treason=%s\tchanged=%d\tproduct=%d\tunclassified=%d\tbuild_rev=%s\thead=%s\n",
+              prod || unc ? "REFUSE" : "OK", prod ? "PRODUCT_INPUT_CHANGED" : unc ? "UNCLASSIFIED_PATH" : "NONPRODUCT_ONLY",
+              prod + unc + other, prod, unc, want, head);
+    return prod || unc ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     int i, got_root = 0; const char *cmd = 0, *root = ".", *outdir = 0, *ident = 0, *sid = "PLAN-SID", *owner = "plan";
-    const char *ident_list = 0, *alias_list = 0, *draft = 0, *boot = 0;
+    const char *ident_list = 0, *alias_list = 0, *draft = 0, *boot = 0, *hd_root = 0, *hd_rev = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         if (!cmd) { cmd = argv[i]; continue; }
@@ -267,12 +340,17 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--draft") && i + 1 < argc) { draft = argv[++i]; continue; }
         if (tx_eqz(cmd, "plan")) { if (!got_root) { root = argv[i]; got_root = 1; } else outdir = argv[i]; continue; }
         if (tx_eqz(cmd, "boot-list") && !boot) { boot = argv[i]; continue; }
+        if (tx_eqz(cmd, "head-delta") && !hd_rev) { if (!hd_root) hd_root = argv[i]; else hd_rev = argv[i]; continue; }
         sy_eprintf("freeze-plan: bad argument %s\n", argv[i]); return 2;
     }
     if (!cmd) { sy_eprintf("usage: freeze-plan plan|check|boot-list\n"); return 2; }
     if (tx_eqz(cmd, "boot-list")) {
         if (!boot) { sy_eprintf("freeze-plan: boot-list LIST\n"); return 2; }
         return boot_list(boot);
+    }
+    if (tx_eqz(cmd, "head-delta")) {
+        if (!hd_rev) { sy_eprintf("freeze-plan: head-delta ROOT BUILD_REV\n"); return 2; }
+        return head_delta(hd_root, hd_rev);
     }
     if (tx_eqz(cmd, "check")) {
         if (ident_list) {
@@ -283,6 +361,7 @@ int main(int argc, char **argv) {
             size_t n = 0; char *b = (char *)cx_read(alias_list, &n);
             if (b && parse_aliases(b, (long)n)) return 1;
         }
+        if (refuse_unclassified()) return 1;
         if (!draft) { sy_eprintf("freeze-plan: check needs --draft FILE\n"); return 2; }
         { size_t n = 0; char *b = (char *)cx_read(draft, &n); if (!b || parse_draft_paths(b, (long)n)) return 1; }
         return do_check();
@@ -291,7 +370,7 @@ int main(int argc, char **argv) {
         char commit[80], outp[400]; int k; long dl, n = 0, an = 0;
         const char *bin = ident ? ident : "./seed/ident";
         char *buf = 0, *abuf = 0, *pathrow; long prcap = 8192, used = 0;
-        if (!outdir) outdir = "out";
+        if (!outdir) outdir = sy_tmpdir();
         if (tx_find(outdir, tx_len(outdir, 400), "agentwork", 9) >= 0) {
             sy_eprintf("freeze-plan: refuse writing under agentwork/\n"); return 2;
         }
@@ -311,6 +390,7 @@ int main(int argc, char **argv) {
             char *al[] = {(char *)bin, (char *)root, "list-aliases", 0};
             if (!slurp_v(al, &abuf, &an)) parse_aliases(abuf, an);
         }
+        if (refuse_unclassified()) return 1;
         if (merge_prefs()) return 1;
         { char *gv[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; long cn = 0; char *cb = 0;
           if (slurp_v(gv, &cb, &cn) == 0 && cb) {

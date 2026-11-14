@@ -9,6 +9,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
 #pragma unisa use cxlib.releaseoneshotpack
+#pragma unisa use cxlib.chainroot
 /* G1..G6, local construction only. CONFIG is immutable TSV key/value:
  * root build_rev constructor identity_helper chain_out snap version repo tag
  * workflow workflow_ref cache_manager_x64 cache_manager_arm64 deadline_s
@@ -20,12 +21,16 @@
  * tools/chain-run.cx output of the same build_rev and root (full mode, source candidate)
  * whose checkpoint has DONE compare and ends at DONE pack. BLOCKER rows are counted
  * into STATE/chain-adopt.tsv for disclosure, never hidden. The four chain files stay sealed.
+ * Optional chain_root (absolute, only with chain_adopt) names the checkout the adopted chain
+ * ran in when ROOT is a clone at build_rev: it replaces root only in the identity root= line
+ * and in the expected snap path. The rev= line, ROOT revision, ROOT SID equal to snap SID and
+ * every sealed hash are unchanged.
  * Return 3 retains a bounded unfinished child; invoke again with identical inputs.
  */
 typedef struct { char *key,*value; } RpKey;
 static RpKey rp_keys[48];
 static int rp_nkeys,rp_seq;
-static const char *rp_state,*rp_config,*rp_assets,*rp_root;
+static const char *rp_state,*rp_config,*rp_assets,*rp_root,*rp_chain_root;
 static long rp_end;
 static char rp_sid[65],rp_ctor[65];
 static const char *rp_roles[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64"};
@@ -48,7 +53,9 @@ static void rp_load(const char *state,const char *config,const char *assets){
  if(state[0]!='/'||config[0]!='/'||assets[0]!='/')rp_die("absolute paths required");
  size_t n;char *s=cx_read(config,&n);if(!s||memchr(s,0,n))rp_die("config read");
  for(char *a=s;*a;){char *e=strchr(a,'\n');if(!e)rp_die("config newline");*e=0;if(*a&&*a!='#'){char *t=strchr(a,'\t');if(!t||rp_nkeys==48)rp_die("config fields");*t++=0;if(rp_get(a))rp_die("duplicate config key");rp_keys[rp_nkeys].key=a;rp_keys[rp_nkeys++].value=t;}a=e+1;}
- rp_root=rp_need("root");char p[4400];rp_path(p,state,"rr/layout");if(strcmp(p,assets))rp_die("assets must equal STATE/rr/layout");
+ rp_root=rp_need("root");rp_chain_root=rp_root;
+ if(rp_get("chain_root")){rp_chain_root=rp_need("chain_root");if(rp_chain_root[0]!='/')rp_die("chain_root must be absolute");if(!rp_get("chain_adopt"))rp_die("chain_root requires chain_adopt");}
+ char p[4400];rp_path(p,state,"rr/layout");if(strcmp(p,assets))rp_die("assets must equal STATE/rr/layout");
  if(strlen(rp_need("build_rev"))!=40||!rcand_hex(rp_need("build_rev"),40))rp_die("build_rev");
 }
 static long rp_mono_end;
@@ -73,9 +80,21 @@ static int rp_capture(char **argv,const char *cwd,long end,np_buf *o,np_buf *e,i
  }
  if(en==sizeof err){np_puts(e,"exec/cwd handshake failed\n");return 127;}return WIFSIGNALED(st)?128+WTERMSIG(st):WEXITSTATUS(st);
 }
+/* Exit class: 0 ok, 3 retryable (deadline, kill-class rc, 125 kill-with-residue, any residue),
+ * 1 deterministic failure only. rc 1 must never be blindly re-entered by callers. */
+int rp_classify(int rc,int residue,int past_deadline){
+ if(past_deadline||residue||rc==125||rc==142||rc==124||rc==137||rc==143)return 3;
+ return rc?1:0;
+}
+/* Per-command bound in ms: default 55s; UNISACC_CHAIN_PHASE_BOUND_S (6..90) raises it to bound-5 s, never lowers. */
+long rp_bound_ms(const char *e){
+ long v=0;if(!e||!*e)return 55000;
+ for(;*e;e++){if(*e<'0'||*e>'9'||v>1000)return 55000;v=v*10+(*e-'0');}
+ if(v<6||v>90)return 55000;return (v-5)*1000>55000?(v-5)*1000:55000;
+}
 static int rp_cmd(const char *phase,char **v,char **out){
  np_buf b={0},o={0},e={0};char p[4400],leaf[200];int residue=0;
- long hard=sy_now_ms()+55000;if(hard>rp_mono_end)hard=rp_mono_end;long end=hard-2500;if(out)*out=0;if(end-sy_now_ms()<1000)return 3;
+ long hard=sy_now_ms()+rp_bound_ms(sy_env("UNISACC_CHAIN_PHASE_BOUND_S"));if(hard>rp_mono_end)hard=rp_mono_end;long end=hard-2500;if(out)*out=0;if(end-sy_now_ms()<1000)return 3;
  for(int i=0;v[i];i++){np_puts(&b,i?"\t":"ARGV\t");np_puts(&b,v[i]);}np_puts(&b,"\nSTDOUT\n");
  if(rp_subreaper()!=0)return 2;
  int rc=rp_capture(v,rp_root,end,&o,&e,&residue);
@@ -84,7 +103,7 @@ static int rp_cmd(const char *phase,char **v,char **out){
  np_puts(&b,"RESIDUE\t");np_putll(&b,residue);np_puts(&b,"\n");
  if(cx_fmt(leaf,sizeof leaf,"prepare-%s-%ld-%d-%d.log",phase,sy_now_ms(),sy_pid(),rp_seq++))rp_die("log path");rp_path(p,rp_state,leaf);rp_write(p,b.p,b.n);free(b.p);
  if(out&&!rc){if(!o.p)np_puts(&o,"");*out=o.p;}else free(o.p);
- return sy_now_ms()>=rp_mono_end||rc==142||rc==124||rc==137||rc==143?3:rc?1:0;
+ return rp_classify(rc,residue,sy_now_ms()>=rp_mono_end);
 }
 static int rp_child(const char *phase,char **v){const char *fake=rp_get("test_driver");if(fake){char *a[]={(char*)fake,(char*)phase,(char*)rp_state,(char*)rp_config,(char*)rp_assets,0};return rp_cmd(phase,a,0);}return rp_cmd(phase,v,0);}
 static void rp_bind(int create){
@@ -95,7 +114,21 @@ static void rp_bind(int create){
 }
 static int rp_freeze(int create){
  char *o=0;char *git[]={"git","-C",(char*)rp_root,"rev-parse",(char*)(create?"HEAD":rp_need("build_rev")),0};int rc=rp_cmd("freeze-head",git,&o);if(rc)return rc;
- int ok=o&&strlen(o)==41&&!strncmp(o,rp_need("build_rev"),40)&&o[40]=='\n';free(o);if(!ok)rp_die("ROOT revision differs from BUILD_REV");
+ int ok=o&&strlen(o)==41&&!strncmp(o,rp_need("build_rev"),40)&&o[40]=='\n';free(o);
+ if(!ok&&create){
+  /* Bind by identity, not HEAD: HEAD may be ahead only when BUILD_REV is its ancestor and
+     tools/freeze-plan.cx head-delta classifies every changed path as non-product. */
+  char com[4400],tool[4400];rp_path(com,rp_root,"unisacc.com");rp_path(tool,rp_root,"tools/freeze-plan.cx"); // lint:allow R1-product the ROOT checkout product classifies its own HEAD delta, same as the chain child below
+  char *hd[]={"sh",com,tool,"--","head-delta",(char*)rp_root,(char*)rp_need("build_rev"),0};
+  np_buf so={0},se={0};int residue=0;long end=sy_now_ms()+rp_bound_ms(sy_env("UNISACC_CHAIN_PHASE_BOUND_S"));if(end>rp_mono_end)end=rp_mono_end;
+  if(rp_subreaper()!=0)return 2;int hrc=rp_capture(hd,rp_root,end,&so,&se,&residue);
+  np_puts(&so,"");rp_put("freeze-delta.tsv",so.p);free(se.p);
+  if(hrc==142||hrc==125){free(so.p);return 3;}
+  if(hrc==1){sy_eprintf("%s",so.p);free(so.p);rp_die("ROOT HEAD is ahead of BUILD_REV with product-input or unclassified changes, or BUILD_REV is not its ancestor");}
+  ok=hrc==0&&strstr(so.p,"HEAD_DELTA\tstatus=OK\t")!=0;free(so.p);if(!ok)rp_die("head-delta classification failed");
+  sy_printf("RELEASE_PREPARE\tfreeze=HEAD_AHEAD_NONPRODUCT\n");
+ }
+ if(!ok)rp_die("ROOT revision differs from BUILD_REV");
  char *sid[]={(char*)rp_need("identity_helper"),(char*)(create?rp_root:rp_need("snap")),0};rc=rp_cmd("freeze-sid",sid,&o);if(rc)return rc;
  if(!o||strlen(o)<64||!rcand_hex(o,64)||(o[64]&&strcmp(o+64,"\n")))rp_die("SID output");for(int i=0;i<64;i++)rp_sid[i]=o[i];rp_sid[64]=0;free(o);
  char row[14000];if(cx_fmt(row,sizeof row,"BUILD_REV\t%s\nsource_sid\t%s\nconstructor\t%s\nconstructor_sha256\t%s\n",rp_need("build_rev"),rp_sid,rp_need("constructor"),rp_ctor))rp_die("freeze capacity");if(!rp_equal("freeze.tsv",row,create))rp_die("freeze changed");return 0;
@@ -115,10 +148,11 @@ static void rp_sources(int create){
 static void rp_candidate(void){
  /* same role names as every published candidate table: record is unisacc.com.build.json, alias build.json, zip carries the version */
  char zip[200];if(cx_fmt(zip,sizeof zip,"unisacc-%s-win-arm64.zip",rp_need("version")))rp_die("zip name capacity");
+ int rp_zip=rcand_has_zip(rp_need("version"));if(!rp_zip&&cx_fmt(zip,sizeof zip,"-"))rp_die("zip name capacity");
  const char *names[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json","build.json",zip,"SHA256SUMS"};np_buf b={0};char row[1000],p[4400],why[400];RcCandidate c;
  np_puts(&b,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
  if(cx_fmt(row,sizeof row,"%s\t%s\t%s\t%s\t%s\t%s\t0",rp_need("repo"),rp_need("tag"),rp_need("build_rev"),rp_need("version"),rp_need("workflow"),rp_need("workflow_ref")))rp_die("candidate capacity");np_puts(&b,row);
- for(int i=0;i<7;i++){np_puts(&b,"\t");np_puts(&b,names[i]);np_puts(&b,"\t0000000000000000000000000000000000000000000000000000000000000000");}np_puts(&b,"\n");if(!rp_equal("candidate-init.tsv",b.p,1))rp_die("candidate initial identity");free(b.p);rp_path(p,rp_state,"candidate-init.tsv");if(rcand_load(p,&c,why,sizeof why))rp_die(why);
+ for(int i=0;i<7;i++){np_puts(&b,"\t");np_puts(&b,names[i]);np_puts(&b,(i==5&&!rp_zip)?"\t-":"\t0000000000000000000000000000000000000000000000000000000000000000");}np_puts(&b,"\n");if(!rp_equal("candidate-init.tsv",b.p,1))rp_die("candidate initial identity");free(b.p);rp_path(p,rp_state,"candidate-init.tsv");if(rcand_load(p,&c,why,sizeof why))rp_die(why);
  char root_table[4400];rp_path(root_table,rp_root,"release/candidate.tsv");if(sy_copy(p,root_table,0600)<0)rp_die("private candidate init");
 }
 static int rp_has_line(const char *s,const char *w){size_t n=strlen(w);while(s&&*s){const char *e=strchr(s,'\n');size_t l=e?(size_t)(e-s):strlen(s);if(l==n&&!strncmp(s,w,n))return 1;if(!e)break;s=e+1;}return 0;}
@@ -126,14 +160,14 @@ static void rp_adopt(void){
  char p[4400],row[4600];size_t n=0;int blockers=0,compare=0,pack_last=0;
  if(strcmp(rp_need("chain_adopt"),"external-chain-run"))rp_die("chain_adopt value");
  rp_path(p,rp_need("chain_out"),"chain-run.identity");char *s=cx_read(p,&n);if(!s||strlen(s)!=n)rp_die("chain adopt identity unreadable");
- int ok=!cx_fmt(row,sizeof row,"rev=%s",rp_need("build_rev"))&&rp_has_line(s,row)&&!cx_fmt(row,sizeof row,"root=%s",rp_root)&&rp_has_line(s,row)&&rp_has_line(s,"mode=full")&&rp_has_line(s,"candidate=source");
- free(s);if(!ok)rp_die("chain adopt identity is not a full source run of build_rev in root");
+ int ok=!cx_fmt(row,sizeof row,"rev=%s",rp_need("build_rev"))&&rp_has_line(s,row)&&!cx_fmt(row,sizeof row,"root=%s",rp_chain_root)&&rp_has_line(s,row)&&rp_has_line(s,"mode=full")&&rp_has_line(s,"candidate=source");
+ free(s);if(!ok)rp_die(rp_chain_root==rp_root?"chain adopt identity is not a full source run of build_rev in root":"chain adopt identity is not a full source run of build_rev in chain_root");
  rp_path(p,rp_need("chain_out"),"chain-run.tsv");s=cx_read(p,&n);if(!s||strlen(s)!=n)rp_die("chain adopt run table unreadable");
  for(char *a=s;*a;){if(!strncmp(a,"BLOCKER\t",8))blockers++;char *e=strchr(a,'\n');if(!e)break;a=e+1;}free(s);
  rp_path(p,rp_need("chain_out"),"checkpoint.tsv");s=cx_read(p,&n);if(!s||strlen(s)!=n||!n||s[n-1]!='\n')rp_die("chain adopt checkpoint unreadable");
  for(char *a=s;*a;){char *e=strchr(a,'\n');if(!e)rp_die("chain adopt checkpoint row");if(!strncmp(a,"DONE\tcompare\t",13))compare=1;pack_last=!strncmp(a,"DONE\tpack\t",10);a=e+1;}free(s);
  if(!compare||!pack_last)rp_die("chain adopt checkpoint lacks DONE compare or does not end at DONE pack");
- if(cx_fmt(row,sizeof row,"mode\texternal-chain-run\nchain_out\t%s\nblockers\t%d\n",rp_need("chain_out"),blockers))rp_die("chain adopt record");
+ if(rp_chain_root==rp_root?cx_fmt(row,sizeof row,"mode\texternal-chain-run\nchain_out\t%s\nblockers\t%d\n",rp_need("chain_out"),blockers):cx_fmt(row,sizeof row,"mode\texternal-chain-run\nchain_out\t%s\nblockers\t%d\nchain_root\t%s\n",rp_need("chain_out"),blockers,rp_chain_root))rp_die("chain adopt record");
  if(!rp_equal("chain-adopt.tsv",row,1))rp_die("adopted chain changed");
  sy_printf("RELEASE_PREPARE\tchain=ADOPTED\tblockers=%d\tlaunched=0\n",blockers);
 }
@@ -160,7 +194,7 @@ static int rp_prepare_run(const char *state,const char *config,const char *asset
  rp_map_deadline();
  if(rp_end<=sy_wall_s()*1000)return 3;
  int rc=rp_freeze(1);if(rc)return rc;
- char expected_snap[4400];if(cx_fmt(expected_snap,sizeof expected_snap,"%s/out/release-snap-%.10s",rp_root,rp_need("build_rev"))||strcmp(expected_snap,rp_need("snap")))rp_die("snap must be BUILD_REV frozen path");
+ char expected_snap[4400];if(cr_snap(rp_chain_root,rp_need("build_rev"),0,expected_snap,sizeof expected_snap)||strcmp(expected_snap,rp_need("snap")))rp_die("snap must be BUILD_REV frozen path");
  char chain[4400],seconds[32],resumes[32];rp_path(chain,rp_root,"tools/chain-run.cx");if(cx_fmt(seconds,sizeof seconds,"%ld",rp_number("chain_deadline_s",7200))||cx_fmt(resumes,sizeof resumes,"%ld",rp_number("max_resumes",100)))rp_die("chain limit");
  char com[4400];rp_path(com,rp_root,"unisacc.com");char *cv[]={"sh",com,chain,"--","--rev",(char*)rp_need("build_rev"),"--out",(char*)rp_need("chain_out"),"--deadline-s",seconds,"--max-resumes",resumes,"--","--bootstrap",(char*)rp_need("constructor"),"--cache-manager-osx",(char*)rp_need("cache_manager_x64"),(char*)rp_need("cache_manager_arm64"),0};
  if(rp_get("chain_adopt"))rp_adopt();
@@ -168,8 +202,8 @@ static int rp_prepare_run(const char *state,const char *config,const char *asset
  char *sidout=0;char *snapid[]={(char*)rp_need("identity_helper"),(char*)rp_need("snap"),0};if((rc=rp_cmd("snap-sid",snapid,&sidout)))return rc;if(!sidout||strncmp(sidout,rp_sid,64))rp_die("frozen snapshot SID differs");free(sidout);
  rp_sources(1);rp_candidate();
  char rr[4400],src[4400],table[4400],tool[4400],st[4400];rp_path(rr,state,"rr");rp_path(src,state,"src");rp_path(table,state,"candidate-init.tsv");rp_path(tool,rp_root,"tools/release-run.cx");rp_path(st,rr,"state.tsv");
- if(sy_setenv("UNISACC_IDENT_HELPER",rp_need("identity_helper"),1))rp_die("identity helper environment");
- char *pack[]={"sh",com,tool,"--","--pack",(char*)rp_root,table,src,rr,"--snap",(char*)rp_need("snap"),0};char *resume[]={"sh",com,tool,"--","--resume",rr,0};
+ char envh[4500];if(cx_fmt(envh,sizeof envh,"UNISACC_IDENT_HELPER=%s",rp_need("identity_helper")))rp_die("identity helper environment");
+ char *pack[]={"env",envh,"sh",com,tool,"--","--pack",(char*)rp_root,table,src,rr,"--snap",(char*)rp_need("snap"),0};char *resume[]={"env",envh,"sh",com,tool,"--","--resume",rr,0};
  if((rc=rp_child("pack",sy_exists(st)==1?resume:pack)))return rc;
  RcCandidate c;char why[400];rp_path(table,rr,"candidate.tsv");if(rcand_load(table,&c,why,sizeof why)||rcand_verify(&c,assets,7,why,sizeof why))rp_die("pack incomplete");
  char ape[4400],standalone[4400];rp_path(ape,assets,c.name[0]);rp_path(standalone,state,"standalone");

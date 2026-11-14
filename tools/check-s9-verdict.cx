@@ -1,0 +1,110 @@
+/* tools/check-s9-verdict.cx -- 夹具断言 tools/s9-verdict.cx 的 aggregate -> evidence 第 4 行映射。
+ *   sh ./unisacc.com tools/check-s9-verdict.cx   (在仓根)
+ * 夹具建在 /tmp/s9-verdict-check/ 下,含假 batches.tsv(tier 列 13)。输出 PASS/FAIL 行与 CHECK_S9_VERDICT checks=N failed=N。 */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed, checks;
+static char base[256] = "/tmp/s9-verdict-check";
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\ts9-verdict.%s\n", ok ? "PASS" : "FAIL", name); }
+static void put(const char *rel, const char *body) {
+    char p[512]; FILE *f;
+    if (cx_fmt(p, sizeof p, "%s/%s", base, rel)) { failed++; return; }
+    f = fopen(p, "w");
+    if (f) { fputs(body, f); fclose(f); }
+}
+static void mk(const char *rel) { char c[600]; if (cx_fmt(c, sizeof c, "mkdir -p %s/%s", base, rel) || system(c)) failed++; }
+static void run(const char *runrel, int has_bt, char *out, int cap) {
+    char c[1200];
+    char *argv[6];
+    if (cx_fmt(c, sizeof c, "sh ./unisacc.com tools/s9-verdict.cx -- %s/%s --batches %s/batches.tsv 2>&1", base, runrel, base)) { failed++; return; }
+    (void)has_bt;
+    argv[0] = "./tools/bound"; argv[1] = "50"; argv[2] = "sh"; argv[3] = "-c"; argv[4] = c; argv[5] = 0;
+    out[0] = 0;
+    sy_run(argv, out, cap, 0);
+}
+static int has(const char *s, const char *needle) { /* 逐位比较 */
+    size_t n = strlen(s), m = strlen(needle), i;
+    for (i = 0; i + m <= n; i++) if (!strncmp(s + i, needle, m)) return 1;
+    return 0;
+}
+static void put_run(const char *d, const char *tier, const char *agg) {
+    char r[300]; mk(d);
+    if (cx_fmt(r, sizeof r, "%s/tier", d)) failed++; else if (tier) put(r, tier);
+    if (cx_fmt(r, sizeof r, "%s/aggregate.out", d)) failed++; else if (agg) put(r, agg);
+}
+int main(void) {
+    char o[4096];
+    const char *hdr = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+    const char *bA = "a\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\tdaily\n";
+    const char *bB = "b\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\trelease\n";
+    const char *bC = "c\tPLANNED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\trelease\n";
+    char bt[800];
+    if (cx_fmt(bt, sizeof bt, "%s%s%s%s", hdr, bA, bB, bC)) failed++;
+    { char c[300]; if (cx_fmt(c, sizeof c, "rm -rf %s", base) || system(c)) failed++; }
+    mk("");
+    put("batches.tsv", bt);
+    const char *aggP = "BATCH\ta\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\nBATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\n"
+                       "AGGREGATE\tQUALIFIED\timplemented_batches=2\tpass=2\tfail=0\tunknown=0\tmissing=0\trefused=0\n";
+    put_run("allpass", "all\n", aggP);
+    run("allpass", 1, o, sizeof o);
+    ck(has(o, "4\tPASS\t"), "all-pass-all-tier");
+    ck(has(o, "allpass/aggregate.out"), "evidence-path-is-run-artifact");
+    ck(has(o, "reason=all-pass"), "reason-all-pass");
+    put_run("relpass", "release\n",
+        "BATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=x\nAGGREGATE\tQUALIFIED\timplemented_batches=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+    run("relpass", 1, o, sizeof o);
+    ck(has(o, "4\tPASS\t"), "release-tier-counts-only-release-rows");
+    put_run("fail", "all\n",
+        "BATCH\ta\tFAIL\tattempts=1\tunknown_attempts=0\treason=r\nBATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=r\n"
+        "AGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=1\tfail=1\tunknown=0\tmissing=0\trefused=0\n");
+    run("fail", 1, o, sizeof o);
+    ck(has(o, "4\tFAIL\t"), "contains-fail");
+    put_run("failfirst_unknown", "all\n",
+        "BATCH\ta\tFAIL\tx\nBATCH\tb\tUNKNOWN\tx\nAGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=0\tfail=1\tunknown=1\tmissing=0\trefused=0\n");
+    run("failfirst_unknown", 1, o, sizeof o);
+    ck(has(o, "4\tFAIL\t"), "fail-wins-over-unknown");
+    put_run("deferred", "all\n",
+        "BATCH\ta\tPASS\tx\nBATCH\tb\tDEFERRED\tx\nAGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+    run("deferred", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "deferred-is-unknown");
+    ck(!has(o, "4\tPASS\t"), "deferred-never-pass");
+    put_run("unknown", "all\n",
+        "BATCH\ta\tPASS\tx\nBATCH\tb\tUNKNOWN\tx\nAGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=1\tfail=0\tunknown=1\tmissing=0\trefused=0\n");
+    run("unknown", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "unknown-batch-is-unknown");
+    put_run("missing", "all\n",
+        "BATCH\ta\tPASS\tx\nBATCH\tb\tMISSING\tx\nAGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=1\tfail=0\tunknown=0\tmissing=1\trefused=0\n");
+    run("missing", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "missing-batch-is-unknown");
+    put_run("short", "all\n",
+        "BATCH\ta\tPASS\tx\nAGGREGATE\tQUALIFIED\timplemented_batches=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+    run("short", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t") && has(o, "count-mismatch"), "batch-count-mismatch-registry");
+    put_run("aggmismatch", "all\n",
+        "BATCH\ta\tPASS\tx\nBATCH\tb\tPASS\tx\nAGGREGATE\tQUALIFIED\timplemented_batches=3\tpass=2\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+    run("aggmismatch", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "aggregate-count-disagrees");
+    put_run("noaggline", "all\n", "BATCH\ta\tPASS\tx\nBATCH\tb\tPASS\tx\n");
+    run("noaggline", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t") && has(o, "no-aggregate-line"), "no-aggregate-line");
+    run("nodir", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "missing-dir");
+    mk("emptydir");
+    run("emptydir", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "empty-dir");
+    put_run("emptyagg", "all\n", "");
+    run("emptyagg", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "empty-aggregate-file");
+    put_run("commit", "commit\n", aggP);
+    run("commit", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t") && has(o, "not-full"), "commit-tier-never-full-pass");
+    put_run("pending", "all\n", "S9\tPENDING\tslices=3\tqualification=NOT_QUALIFIED\n");
+    run("pending", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "pending-is-unknown");
+    put_run("notier", 0, aggP);
+    run("notier", 1, o, sizeof o);
+    ck(has(o, "4\tUNKNOWN\t"), "tier-file-missing");
+    printf("CHECK_S9_VERDICT\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

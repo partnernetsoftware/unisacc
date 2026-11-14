@@ -1,0 +1,94 @@
+/* tools/check-cx-os-new.cx -- cx.os 新增实现(cx/os/utc.cx、cx/os/osx.cx)的正例与负例。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use os.utc
+#pragma unisa use os.osx
+
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-cx-os-new.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int same(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+int main(void) {
+    sy_tm_t t;
+    int64_t s = 0, sz = -1;
+    char b[256], p[256], q[256];
+    int fd, n;
+    /* utc */
+    ck(sy_utc_split(0, &t) == 0 && t.year == 1970 && t.mon == 1 && t.day == 1 && t.wday == 4 && t.yday == 0, "split.epoch");
+    ck(sy_utc_split(951782400LL, &t) == 0 && t.year == 2000 && t.mon == 2 && t.day == 29 && t.yday == 59, "split.leapday");
+    ck(sy_utc_split(-1, &t) == 0 && t.year == 1969 && t.mon == 12 && t.day == 31 && t.hour == 23 && t.sec == 59, "split.negative");
+    ck(sy_utc_split(253402300800LL, &t) == -ERANGE && sy_utc_split(-62135596801LL, &t) == -ERANGE, "split.range");
+    ck(sy_utc_split(0, 0) == -EINVAL, "split.null");
+    ck(sy_utc_fmt(b, sizeof b, 1700000000LL) == 20 && same(b, "2023-11-14T22:13:20Z"), "fmt.known");
+    ck(sy_utc_fmt(b, 20, 0) == -ERANGE && sy_utc_fmt(b, 21, 0) == 20, "fmt.cap");
+    ck(sy_utc_fmt(0, 30, 0) == -EINVAL, "fmt.null");
+    ck(sy_utc_parse("2023-11-14T22:13:20Z", 20, &s) == 0 && s == 1700000000LL, "parse.full");
+    ck(sy_utc_parse("2000-02-29", 10, &s) == 0 && s == 951782400LL, "parse.dateonly");
+    ck(sy_utc_parse("2001-02-29", 10, &s) == -EINVAL && sy_utc_parse("2023-13-01", 10, &s) == -EINVAL, "parse.badfield");
+    ck(sy_utc_parse("2023-11-14 22:13:20Z", 20, &s) == -EINVAL && sy_utc_parse("x", 1, &s) == -EINVAL && sy_utc_parse(0, 0, &s) == -EINVAL, "parse.badshape");
+    ck(sy_utc_join(&t, 0) == -EINVAL, "join.null");
+    t.year = 2024; t.mon = 2; t.day = 30; t.hour = 0; t.min = 0; t.sec = 0;
+    ck(sy_utc_join(&t, &s) == -EINVAL, "join.badday");
+    t.day = 29; t.hour = 24;
+    ck(sy_utc_join(&t, &s) == -EINVAL, "join.badhour");
+    {
+        int64_t k, back;
+        int rt = 1;
+        for (k = -62135596800LL; k <= 253402300799LL; k += 86400LL * 997 + 12345) {
+            if (sy_utc_split(k, &t) || sy_utc_join(&t, &back) || back != k) rt = 0;
+        }
+        ck(rt, "roundtrip.sweep");
+    }
+    /* file_size */
+    n = sy_mkstemp(0, "cxosnew-", p, sizeof p);
+    ck(n >= 0 && p[0] == '/', "mkstemp.ok");
+    if (n >= 0) {
+        sy_stat_t st;
+        ck(sy_stat(p, &st) == 0 && st.size == 0 && (st.mode & 0777) == 0600, "mkstemp.mode0600");
+        sy_close(n);
+        ck(sy_write_file(p, "hello", 5, 0600) == 0 && sy_file_size(p, &sz) == 0 && sz == 5, "file_size.ok");
+        sy_unlink(p);
+        ck(sy_file_size(p, &sz) == -ENOENT, "file_size.enoent");
+    }
+    ck(sy_file_size("/", &sz) == -EISDIR, "file_size.dir");
+    ck(sy_file_size(0, &sz) == -EINVAL && sy_file_size("", &sz) == -EINVAL && sy_file_size("/etc/hostname", 0) == -EINVAL, "file_size.einval");
+    ck(sy_file_size("/proc/1/mem/x/y", &sz) < 0, "file_size.badpath");
+    /* mkstemp negatives */
+    ck(sy_mkstemp(0, "x", p, 5) == -ERANGE, "mkstemp.erange");
+    ck(sy_mkstemp(0, "x", 0, 64) == -EINVAL, "mkstemp.null");
+    ck(sy_mkstemp("/nonexistent-cxos-dir", "x", p, sizeof p) == -ENOENT, "mkstemp.enoent");
+    ck(sy_mkstemp("/proc", "x", p, sizeof p) < 0, "mkstemp.perm");
+    fd = sy_mkstemp("/tmp", 0, p, sizeof p);
+    ck(fd >= 0, "mkstemp.dir_noprefix");
+    if (fd >= 0) { sy_close(fd); sy_unlink(p); }
+    /* abspath */
+    ck(sy_abspath("/a//b/./c/../d", b, sizeof b) == 6 && same(b, "/a/b/d"), "abspath.fold");
+    ck(sy_abspath("/", b, sizeof b) == 1 && same(b, "/"), "abspath.root");
+    ck(sy_abspath("/../..", b, sizeof b) == 1 && same(b, "/"), "abspath.aboveroot");
+    ck(sy_abspath("/no/such/path", b, sizeof b) == 13, "abspath.absent_ok");
+    ck(sy_cwd(q, sizeof q) == 0 && sy_abspath("zz/yy", b, sizeof b) > 0 && b[0] == '/', "abspath.relative");
+    ck(sy_abspath("/a/b/c", b, 6) == -ERANGE && sy_abspath("/a/b/c", b, 7) == 6, "abspath.cap");
+    ck(sy_abspath(0, b, sizeof b) == -EINVAL && sy_abspath("", b, sizeof b) == -EINVAL && sy_abspath("/a", 0, 8) == -EINVAL, "abspath.einval");
+    /* homedir / hostname */
+    if (sy_env("HOME") && sy_env("HOME")[0]) {
+        n = sy_homedir(b, sizeof b);
+        ck(n > 0 && same(b, sy_env("HOME")), "homedir.ok");
+        ck(sy_homedir(b, 1) == -ERANGE, "homedir.erange");
+    }
+    ck(sy_homedir(0, 8) == -EINVAL, "homedir.null");
+    n = sy_hostname(b, sizeof b);
+    ck(n > 0 && b[n] == 0, "hostname.ok");
+    ck(sy_hostname(b, 1) == -ERANGE && sy_hostname(0, 8) == -EINVAL, "hostname.neg");
+    printf("CHECK_CX_OS_NEW\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

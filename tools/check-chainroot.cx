@@ -1,0 +1,216 @@
+/* tools/check-chainroot.cx -- cr_dir answers only the persistent chain root and cr_ok refuses the rest.
+ *
+ *   sh ./unisacc.com tools/check-chainroot.cx [-- ROOT]
+ *
+ * Fixtures: ids "crcheck-PID" below the real chain base (HOME/.cache/unisacc/chains) and a fake
+ * checkout below tmp; both are removed at the end.  Nothing is written inside ROOT.
+ * Cases:
+ *   (1) cr_dir: stable path below the base, created on request, accepted by cr_ok and by sr_ok;
+ *   (2) cr_dir refuses unknown kinds and bad ids;
+ *   (3) cr_ok refuses: the source tree, ROOT/out, temp session roots, tmp, the base itself, a path
+ *       that only shares the base as a string prefix, symbolic-link escapes, non-normal paths;
+ *   (4) UNISACC_CHAIN_BASE takes effect only for canonical(tmp)/unisacc-session-chain-NAME; any other
+ *       value (other prefix, deeper path, relative, symbolic link, inside the checkout, ROOT/out) is
+ *       ignored and the default base answers; cr_snap spells base/snap/REV10-H8.
+ * Summary line: CHECK_CHAINROOT<TAB>failed=N. */
+#pragma unisa use cxlib.chainroot
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tchainroot.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* 1 when cr_ok refuses PATH with exactly TOKEN. */
+static int refused(const char *root, const char *path, const char *token) {
+    char why[96];
+    why[0] = 0;
+    return cr_ok(root, path, why, sizeof why) == 1 && !strcmp(why, token);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], tc[4096], base[4400], fix[4400], froot[4400], id[96], d[4600], d2[4600], p[4800], q[4800], why[96];
+    sy_stat_t st;
+    int pid = sy_pid();
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0 || sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0
+        || cx_fmt(id, sizeof id, "crcheck-%d", pid) || cx_fmt(fix, sizeof fix, "%s/unisacc-crcheck-%d", tc, pid) || sy_mkdir(fix, 0700)) {
+        sy_printf("FAIL\tchainroot.fixture\nCHECK_CHAINROOT\tfailed=1\n");
+        return 2;
+    }
+    cx_fmt(froot, sizeof froot, "%s/repo", fix);
+    sy_mkdir(froot, 0700);
+    cx_fmt(p, sizeof p, "%s/out", froot);
+    sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    sy_mkdir(p, 0700);
+
+    /* (1) the entry */
+    d[0] = 0;
+    ck(cr_dir(root, "chain", id, 0, d, sizeof d) == 0 && sy_lstat(d, &st) != 0, "dir-without-create-makes-nothing");
+    ck(cr_dir(root, "chain", id, 1, d2, sizeof d2) == 0 && !strcmp(d, d2) && sy_lstat(d2, &st) == 0 && st.kind == 'd', "dir-create-is-stable-directory");
+    ck(sr_chains_base(base, sizeof base) == 0 && cx_fmt(p, sizeof p, "%s/chain/%s", base, id) == 0 && !strcmp(p, d2), "dir-is-base-kind-id");
+    ck(sy_realpath(d2, p, sizeof p) >= 0 && !strcmp(p, d2), "dir-is-canonical");
+    ck(cr_dir(root, "chain", id, 1, p, sizeof p) == 0 && !strcmp(p, d2), "dir-create-twice-same-path");
+    ck(cr_ok(root, d2, why, sizeof why) == 0 && sr_ok(root, d2, why, sizeof why) == 0, "dir-accepted-by-both-guards");
+    cx_fmt(p, sizeof p, "%s/gen1/osx-arm64-front0", d2);
+    ck(cr_ok(root, p, why, sizeof why) == 0, "accept-below-chain-dir");
+    ck(cr_dir(froot, "snap", id, 0, p, sizeof p) == 0 && cr_ok(froot, p, why, sizeof why) == 0, "accept-for-root-with-out");
+    {
+        size_t n = strlen(root);
+        ck(strncmp(d2, root, n) || (d2[n] != '/' && d2[n]), "dir-outside-checkout");
+    }
+
+    /* (2) refused requests */
+    ck(cr_dir(root, "out", id, 0, p, sizeof p) == -1 && cr_dir(root, "", id, 0, p, sizeof p) == -1 && cr_dir(root, 0, id, 0, p, sizeof p) == -1, "dir-refuses-unknown-kind");
+    ck(cr_dir(root, "chain", "a/b", 0, p, sizeof p) == -1 && cr_dir(root, "chain", "..", 0, p, sizeof p) == -1 && cr_dir(root, "chain", "", 0, p, sizeof p) == -1
+       && cr_dir(root, "chain", ".x", 0, p, sizeof p) == -1 && cr_dir(root, "chain", "a b", 0, p, sizeof p) == -1, "dir-refuses-bad-id");
+    ck(cr_dir(root, "chain", id, 0, p, 8) == -1, "dir-refuses-small-buffer");
+    ck(cr_dir("tools", "chain", id, 0, p, sizeof p) == -1, "dir-refuses-relative-root");
+
+    /* (3) refused paths */
+    cx_fmt(p, sizeof p, "%s/tools/chain", root);
+    ck(refused(root, p, "inside-source-tree"), "refuse-inside-real-checkout");
+    cx_fmt(p, sizeof p, "%s/tools/s1", froot);
+    ck(refused(froot, p, "inside-source-tree"), "refuse-inside-source-tree");
+    cx_fmt(p, sizeof p, "%s/%s/b1", froot, "out");
+    ck(refused(froot, p, "inside-source-tree") && sr_ok(froot, p, why, sizeof why) == 0, "refuse-root-out-that-sessions-accept");
+    ck(refused(froot, froot, "inside-source-tree"), "refuse-root-itself");
+    cx_fmt(p, sizeof p, "%s/unisacc-session-%s/chain", tc, id);
+    ck(refused(root, p, "not-chain-root") && sr_ok(root, p, why, sizeof why) == 0, "refuse-temp-session-root");
+    cx_fmt(p, sizeof p, "%s/s1", fix);
+    ck(refused(root, p, "not-chain-root"), "refuse-tmp-path");
+    ck(refused(root, base, "not-chain-root"), "refuse-base-itself");
+    cx_fmt(p, sizeof p, "%s-evil/chain/%s", base, id);
+    ck(refused(root, p, "not-chain-root"), "refuse-string-prefix-sibling");
+    cx_fmt(p, sizeof p, "%s/../chains-evil/x", base);
+    ck(refused(root, p, "path-not-normal"), "refuse-dotdot");
+    cx_fmt(p, sizeof p, "%s//x", d2);
+    ck(refused(root, p, "path-not-normal"), "refuse-empty-component");
+    cx_fmt(p, sizeof p, "%s/x/", d2);
+    ck(refused(root, p, "path-not-normal"), "refuse-trailing-slash");
+    ck(refused(root, "chain/x", "arguments") && refused("tools", d2, "arguments"), "refuse-relative");
+    cx_fmt(p, sizeof p, "%s/tools/..", froot);
+    ck(refused(p, d2, "canonical-root"), "refuse-noncanonical-root");
+    /* a link below the chain dir that leaves it for the source tree */
+    cx_fmt(q, sizeof q, "%s/esc", d2);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    ck(sy_symlink(p, q) == 0 && refused(froot, q, "symlink-or-noncanonical"), "refuse-symlink-escape");
+    cx_fmt(p, sizeof p, "%s/s1", q);
+    ck(refused(froot, p, "symlink-or-noncanonical"), "refuse-symlink-component");
+    sy_unlink(q);
+    /* a dangling link */
+    cx_fmt(p, sizeof p, "%s/absent-target", fix);
+    ck(sy_symlink(p, q) == 0 && refused(root, q, "symlink-or-noncanonical"), "refuse-dangling-link");
+    sy_unlink(q);
+    /* a first component below the base that is a regular file */
+    cx_fmt(q, sizeof q, "%s/crcheck-file-%d", base, pid);
+    ck(sy_write_file(q, "x", 1, 0600) == 0, "fixture-file-top");
+    cx_fmt(p, sizeof p, "%s/x", q);
+    ck(refused(root, q, "chain-root-owner") || refused(root, p, "symlink-or-noncanonical") || refused(root, p, "chain-root-owner"), "refuse-file-as-chain-top");
+    ck(cr_ok(root, q, why, sizeof why) == 1, "refuse-file-top-itself");
+    sy_unlink(q);
+
+    /* (4) UNISACC_CHAIN_BASE: only canonical(tmp)/unisacc-session-chain-NAME takes effect */
+    {
+        char ov[4600], o1[4800], o2[4800], dflt[4800], lnk[4600];
+        cx_fmt(dflt, sizeof dflt, "%s/snap/%s", base, id);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt), "override-unset-is-default");
+        /* a legal temp session root: takes effect, creates below it, both guards agree */
+        cx_fmt(ov, sizeof ov, "%s/unisacc-session-chain-crcheck-%d", tc, pid);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, o2) && sy_lstat(ov, &st) != 0, "override-session-root-takes-effect");
+        ck(cr_dir(root, "snap", id, 1, o1, sizeof o1) == 0 && !strcmp(o1, o2) && sy_lstat(o2, &st) == 0 && st.kind == 'd', "override-create-below-session-root");
+        ck(cr_ok(root, o2, why, sizeof why) == 0 && sr_ok(root, o2, why, sizeof why) == 0, "override-dir-accepted");
+        ck(refused(root, ov, "not-chain-root"), "override-base-itself-refused");
+        cx_fmt(o1, sizeof o1, "%s/snap/../x", ov);
+        ck(refused(root, o1, "path-not-normal"), "override-refuses-dotdot");
+        cx_fmt(lnk, sizeof lnk, "%s/snap/esc", ov);
+        cx_fmt(o1, sizeof o1, "%s/tools", froot);
+        ck(sy_symlink(o1, lnk) == 0 && refused(froot, lnk, "symlink-or-noncanonical"), "override-refuses-symlink-below");
+        sy_unlink(lnk);
+        ck(cr_ok(root, dflt, why, sizeof why) == 0, "override-keeps-default-root-acceptable");
+        sy_rmdir(o2);
+        cx_fmt(o1, sizeof o1, "%s/snap", ov);
+        sy_rmdir(o1);
+        sy_rmdir(ov);
+        /* not the session-chain prefix: ignored, the default answers and the path stays refused */
+        cx_fmt(ov, sizeof ov, "%s/unisacc-crcheck-%d/base", tc, pid);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt) && refused(root, o2, "not-chain-root"), "override-non-session-prefix-ignored");
+        cx_fmt(ov, sizeof ov, "%s/unisacc-session-other-%d", tc, pid);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt) && refused(root, o2, "not-chain-root"), "override-other-session-prefix-ignored");
+        cx_fmt(ov, sizeof ov, "%s/unisacc-session-chain-crcheck-%d/deeper", tc, pid);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt), "override-below-session-root-ignored");
+        sy_setenv("UNISACC_CHAIN_BASE", "unisacc-session-chain-rel", 1);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt), "override-relative-ignored");
+        /* a symbolic link named like a session root, pointing into the source tree */
+        cx_fmt(ov, sizeof ov, "%s/unisacc-session-chain-crlink-%d", tc, pid);
+        cx_fmt(o1, sizeof o1, "%s/tools", froot);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(sy_symlink(o1, ov) == 0 && cr_dir(froot, "snap", id, 0, o1, sizeof o1) == 0 && cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt)
+           && refused(root, o2, "symlink-or-noncanonical"), "override-symlink-ignored");
+        ck(cr_dir(root, "chain", id, 1, o1, sizeof o1) == 0 && !strcmp(o1, d2) && sy_lstat(o2, &st) != 0, "override-symlink-creates-nothing-behind-link");
+        cx_fmt(o1, sizeof o1, "%s/tools/snap", froot);
+        ck(sy_lstat(o1, &st) != 0, "override-symlink-leaves-source-tree-alone");
+        sy_unlink(ov);
+        /* cr_snap: base/snap/REV10-H8, H8 from the canonical checkout root; follows a legal override */
+        {
+            char s1[4800], s2[4800], hex[65];
+            long hn = (long)strlen(root);
+            sy_setenv("UNISACC_CHAIN_BASE", "", 1);
+            ck(cr_snap(root, "0123456789abcdef", 0, s1, sizeof s1) == 0 && sy_sha256_hex(root, hn, hex) == 0
+               && cx_fmt(s2, sizeof s2, "%s/snap/0123456789-%.8s", base, hex) == 0 && !strcmp(s1, s2), "snap-is-base-snap-rev10-h8");
+            ck(cr_snap(froot, "0123456789abcdef", 0, s2, sizeof s2) == 0 && strcmp(s1, s2), "snap-differs-per-checkout");
+            ck(cr_snap(root, "0123456789", 0, s2, sizeof s2) == 0 && !strcmp(s1, s2), "snap-uses-first-ten");
+            ck(cr_snap(root, "012345678", 0, s2, sizeof s2) == -1 && cr_snap(root, "0123456789ABCDEF"+6, 0, s2, sizeof s2) == -1 && cr_snap(root, "../../../..", 0, s2, sizeof s2) == -1, "snap-refuses-bad-rev");
+            ck(cr_ok(root, s1, why, sizeof why) == 0 && sy_lstat(s1, &st) != 0, "snap-accepted-and-not-created");
+            cx_fmt(ov, sizeof ov, "%s/unisacc-session-chain-crsnap-%d", tc, pid);
+            sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+            cx_fmt(s2, sizeof s2, "%s/snap/0123456789-%.8s", ov, hex);
+            ck(cr_snap(root, "0123456789abcdef", 1, s1, sizeof s1) == 0 && !strcmp(s1, s2) && sy_lstat(s1, &st) != 0, "snap-follows-override-parent-only");
+            cx_fmt(s2, sizeof s2, "%s/snap", ov);
+            ck(sy_lstat(s2, &st) == 0 && st.kind == 'd', "snap-create-makes-parent");
+            sy_rmdir(s2);
+            sy_rmdir(ov);
+        }
+        /* inside the checkout: ROOT/tools and ROOT/out are never a base */
+        cx_fmt(ov, sizeof ov, "%s/tools/unisacc-session-chain-x", froot);
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(cr_dir(froot, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt) && refused(froot, o2, "inside-source-tree"), "override-inside-source-tree-ignored");
+        cx_fmt(ov, sizeof ov, "%s/%s/unisacc-session-chain-x", froot, "out");
+        sy_setenv("UNISACC_CHAIN_BASE", ov, 1);
+        cx_fmt(o2, sizeof o2, "%s/snap/%s", ov, id);
+        ck(cr_dir(froot, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt) && refused(froot, o2, "inside-source-tree"), "override-root-out-ignored");
+        sy_setenv("UNISACC_CHAIN_BASE", "", 1);
+        ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt), "override-empty-is-default");
+    }
+
+    /* cleanup of this check's own fixtures (kind directories stay: they are shared) */
+    sy_rmdir(d2);
+    cx_fmt(p, sizeof p, "%s/out", froot);
+    sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools", froot);
+    sy_rmdir(p);
+    sy_rmdir(froot);
+    sy_rmdir(fix);
+    ck(sy_lstat(d2, &st) != 0, "fixture-removed");
+
+    sy_printf("CHECK_CHAINROOT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,182 @@
+#pragma unisa use sys.netraw
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+/* Checks cx/sys/netraw.cx (sy_sock_* and sy_sa_*) on Linux: loopback TCP round trip on an ephemeral
+   port, AF_UNIX stream round trip, socket-address byte layouts and the refusals.
+     sh ./unisacc.com tools/check-cx-sys-netraw.cx
+   Prints PASS/FAIL lines and CX_SYS_NETRAW<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL.
+   No fork: a listening socket queues the connection, so connect then accept runs in one process. */
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    sy_printf("%s\tnetraw.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) sy_printf("NOTE\tnetraw.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+
+int main(void) {
+    static const unsigned char lo4[4] = {127, 0, 0, 1};
+    static const unsigned char lo6[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    unsigned char sa[SY_SA_MAX], sb[SY_SA_MAX], ip[16];
+    char buf[64], upath[160], longp[200];
+    int ls, cs, as, us, uc, ua, n, port, len, v, i, sol, af4, afu, st;
+
+    /* constants: Linux values from the fact table */
+    ckv(sy_sock_have(), 1, "have");
+    ckv(sy_sock_num(SY_SN_AF_UNIX), 1, "num-af-unix");
+    ckv(sy_sock_num(SY_SN_AF_INET4), 2, "num-af-inet4");
+    ckv(sy_sock_num(SY_SN_AF_INET6), 10, "num-af-inet6");
+    ckv(sy_sock_num(SY_SN_SOCK_STREAM), 1, "num-stream");
+    ckv(sy_sock_num(SY_SN_SOCK_DGRAM), 2, "num-dgram");
+    ckv(sy_sock_num(SY_SN_SOL_SOCKET), 1, "num-sol-socket");
+    ckv(sy_sock_num(SY_SN_SO_REUSEADDR), 2, "num-so-reuseaddr");
+    ckv(sy_sock_num(SY_SN_SHUT_WR), 1, "num-shut-wr");
+    ckv(sy_sock_num(999), -EINVAL, "num-unknown");
+    af4 = (int)sy_sock_num(SY_SN_AF_INET4);
+    afu = (int)sy_sock_num(SY_SN_AF_UNIX);
+    st = (int)sy_sock_num(SY_SN_SOCK_STREAM);
+    sol = (int)sy_sock_num(SY_SN_SOL_SOCKET);
+
+    /* address layouts */
+    for (i = 0; i < SY_SA_MAX; i++) sa[i] = 0xee;
+    ckv(sy_sa_inet4(sa, SY_SA_MAX, lo4, 0x1234), 16, "sa4-len");
+    ck(sa[0] == 2 && sa[1] == 0 && sa[2] == 0x12 && sa[3] == 0x34 && sa[4] == 127 && sa[5] == 0 && sa[6] == 0 && sa[7] == 1, "sa4-bytes");
+    ck(sa[8] == 0 && sa[15] == 0 && sa[16] == 0xee, "sa4-zero-pad-and-bound");
+    ckv(sy_sa_family(sa, 16), 2, "sa4-family");
+    ckv(sy_sa_port(sa, 16), 0x1234, "sa4-port");
+    ck(sy_sa_ip(sa, 16, ip, 16) == 4 && ip[0] == 127 && ip[3] == 1, "sa4-ip");
+    ckv(sy_sa_inet4(sa, 15, lo4, 1), -ERANGE, "sa4-small");
+    ckv(sy_sa_inet4(sa, SY_SA_MAX, lo4, 65536), -EINVAL, "sa4-bad-port");
+    ckv(sy_sa_inet4(0, SY_SA_MAX, lo4, 1), -EINVAL, "sa4-null");
+    ckv(sy_sa_inet6(sb, SY_SA_MAX, lo6, 443, 0x01020304), 28, "sa6-len");
+    ck(sb[0] == 10 && sb[1] == 0 && sb[2] == 1 && sb[3] == 187 && sb[4] == 0 && sb[7] == 0 && sb[8] == 0 && sb[23] == 1, "sa6-bytes");
+    ck(sb[24] == 4 && sb[25] == 3 && sb[26] == 2 && sb[27] == 1, "sa6-scope");
+    ckv(sy_sa_port(sb, 28), 443, "sa6-port");
+    ck(sy_sa_ip(sb, 28, ip, 16) == 16 && ip[15] == 1 && ip[0] == 0, "sa6-ip");
+    ckv(sy_sa_ip(sb, 28, ip, 15), -ERANGE, "sa6-ip-small");
+    ckv(sy_sa_inet6(sb, 27, lo6, 1, 0), -ERANGE, "sa6-small");
+    ckv(sy_sa_unix(sb, SY_SA_MAX, "/tmp/x"), 9, "sau-len");
+    ck(sb[0] == 1 && sb[1] == 0 && sb[2] == '/' && sb[7] == 'x' && sb[8] == 0, "sau-bytes");
+    ckv(sy_sa_port(sb, 9), -EAFNOSUPPORT, "sau-port-refused");
+    ckv(sy_sa_unix(sb, SY_SA_MAX, ""), -EINVAL, "sau-empty");
+    ckv(sy_sa_unix(sb, 8, "/tmp/x"), -ERANGE, "sau-small");
+    for (i = 0; i < 108; i++) longp[i] = 'a';
+    longp[108] = 0;
+    ckv(sy_sa_unix(sb, SY_SA_MAX, longp), -ENAMETOOLONG, "sau-108");
+    longp[107] = 0;
+    ckv(sy_sa_unix(sb, SY_SA_MAX, longp), 110, "sau-107");
+    ckv(sy_sa_family(sb, 1), -EINVAL, "family-short");
+
+    /* loopback TCP: bind port 0, listen, getsockname, connect, accept, send, recv */
+    ls = sy_sock_open(af4, st);
+    ck(ls >= 0, "tcp-open");
+    ckv(sy_sock_setopt(ls, sol, (int)sy_sock_num(SY_SN_SO_REUSEADDR), 1), 0, "tcp-setopt-reuseaddr");
+    v = -1;
+    ck(sy_sock_getopt(ls, sol, (int)sy_sock_num(SY_SN_SO_REUSEADDR), &v) == 0 && v == 1, "tcp-getopt-reuseaddr");
+    n = sy_sa_inet4(sa, SY_SA_MAX, lo4, 0);
+    ckv(sy_sock_bind(ls, sa, n), 0, "tcp-bind-port0");
+    ckv(sy_sock_listen(ls, 4), 0, "tcp-listen");
+    len = SY_SA_MAX;
+    ckv(sy_sock_name(ls, sb, &len), 0, "tcp-name");
+    ckv(len, 16, "tcp-name-len");
+    ckv(sy_sa_family(sb, len), 2, "tcp-name-family");
+    port = sy_sa_port(sb, len);
+    ck(port > 0 && port <= 65535, "tcp-name-port-assigned");
+    ck(sy_sa_ip(sb, len, ip, 16) == 4 && ip[0] == 127 && ip[1] == 0 && ip[2] == 0 && ip[3] == 1, "tcp-name-ip");
+    cs = sy_sock_open(af4, st);
+    ck(cs >= 0 && cs != ls, "tcp-open-client");
+    n = sy_sa_inet4(sa, SY_SA_MAX, lo4, port);
+    ckv(sy_sock_connect(cs, sa, n), 0, "tcp-connect");
+    len = SY_SA_MAX;
+    as = sy_sock_accept(ls, sb, &len);
+    ck(as >= 0 && as != cs && as != ls, "tcp-accept");
+    ck(len == 16 && sy_sa_family(sb, len) == 2 && sy_sa_port(sb, len) > 0, "tcp-accept-peer");
+    v = sy_sa_port(sb, len);
+    len = SY_SA_MAX;
+    ck(sy_sock_name(cs, sa, &len) == 0 && sy_sa_port(sa, len) == v, "tcp-accept-peer-is-client-local");
+    len = SY_SA_MAX;
+    ck(sy_sock_peername(cs, sa, &len) == 0 && sy_sa_port(sa, len) == port, "tcp-peername");
+    ckv(sy_sock_send(cs, "hello", 5), 5, "tcp-send");
+    for (i = 0; i < 64; i++) buf[i] = 0;
+    ckv(sy_sock_recv(as, buf, 64), 5, "tcp-recv-len");
+    ck(tx_eqz(buf, "hello"), "tcp-recv-bytes");
+    ckv(sy_sock_send(as, "pong!!", 6), 6, "tcp-send-back");
+    for (i = 0; i < 64; i++) buf[i] = 0;
+    ck(sy_sock_recv(cs, buf, 64) == 6 && tx_eqz(buf, "pong!!"), "tcp-recv-back");
+    v = -1;
+    ck(sy_sock_getopt(cs, sol, (int)sy_sock_num(SY_SN_SO_ERROR), &v) == 0 && v == 0, "tcp-so-error-0");
+    ckv(sy_sock_shutdown(cs, (int)sy_sock_num(SY_SN_SHUT_WR)), 0, "tcp-shutdown-wr");
+    ckv(sy_sock_recv(as, buf, 64), 0, "tcp-recv-eof-after-shutdown");
+    ckv(sy_sock_shutdown(cs, 99), -EINVAL, "tcp-shutdown-bad-how");
+    ckv(sy_close(cs), 0, "tcp-close-client");
+    ckv(sy_sock_send(as, "x", 1), 1, "tcp-send-to-closed-first");
+    sy_sleep_ms(50);
+    ckv(sy_sock_send(as, "x", 1), -EPIPE, "tcp-send-epipe-no-signal");
+    sy_close(as);
+
+    /* errors: second bind of the same port, refused connect, bad fds */
+    us = sy_sock_open(af4, st);
+    n = sy_sa_inet4(sa, SY_SA_MAX, lo4, port);
+    ckv(sy_sock_bind(us, sa, n), -EADDRINUSE, "bind-addrinuse");
+    sy_close(us);
+    sy_close(ls);
+    cs = sy_sock_open(af4, st);
+    ckv(sy_sock_connect(cs, sa, n), -ECONNREFUSED, "connect-refused");
+    len = SY_SA_MAX;
+    ckv(sy_sock_peername(cs, sb, &len), -ENOTCONN, "peername-notconn");
+    ckv(sy_sock_listen(cs, 1) == 0 ? sy_sock_connect(cs, sa, n) : -1, -EISCONN, "connect-on-listener");
+    sy_close(cs);
+    ckv(sy_sock_bind(-1, sa, n), -EBADF, "bind-ebadf");
+    ckv(sy_sock_listen(-1, 1), -EBADF, "listen-ebadf");
+    ckv(sy_sock_accept(-1, 0, 0), -EBADF, "accept-ebadf");
+    ckv(sy_sock_connect(-1, sa, n), -EBADF, "connect-ebadf");
+    ckv(sy_sock_send(-1, "x", 1), -EBADF, "send-ebadf");
+    ckv(sy_sock_recv(-1, buf, 1), -EBADF, "recv-ebadf");
+    len = SY_SA_MAX;
+    ckv(sy_sock_name(-1, sb, &len), -EBADF, "name-ebadf");
+    ckv(sy_sock_setopt(-1, sol, 2, 1), -EBADF, "setopt-ebadf");
+    ckv(sy_sock_shutdown(-1, 1), -EBADF, "shutdown-ebadf");
+    ckv(sy_sock_recv(0, 0, 1), -EINVAL, "recv-null");
+    ckv(sy_sock_bind(0, 0, 16), -EINVAL, "bind-null");
+    ckv(sy_sock_open(9999, st), -EAFNOSUPPORT, "open-bad-family");
+    ckv(sy_sock_send(1, "x", 1) == -ENOTSOCK || sy_sock_recv(2, buf, 0) == -ENOTSOCK, 1, "notsock");
+
+    /* AF_UNIX stream round trip */
+    tx_fmt(upath, sizeof upath, "/tmp/cx-netraw-%d-%d.sock", sy_ppid(), port);
+    sy_unlink(upath);
+    us = sy_sock_open(afu, st);
+    ck(us >= 0, "unix-open");
+    n = sy_sa_unix(sa, SY_SA_MAX, upath);
+    ck(n == 2 + (int)tx_len(upath, 160) + 1, "unix-sa-len");
+    ckv(sy_sock_bind(us, sa, n), 0, "unix-bind");
+    uc = sy_sock_open(afu, st);
+    ckv(sy_sock_bind(uc, sa, n), -EADDRINUSE, "unix-bind-path-taken");
+    sy_close(uc);
+    ckv(sy_sock_listen(us, 2), 0, "unix-listen");
+    uc = sy_sock_open(afu, st);
+    ckv(sy_sock_connect(uc, sa, n), 0, "unix-connect");
+    ua = sy_sock_accept(us, 0, 0);
+    ck(ua >= 0, "unix-accept-no-peer");
+    ckv(sy_sock_send(uc, "unix-data", 9), 9, "unix-send");
+    for (i = 0; i < 64; i++) buf[i] = 0;
+    ck(sy_sock_recv(ua, buf, 64) == 9 && tx_eqz(buf, "unix-data"), "unix-recv");
+    len = SY_SA_MAX;
+    ck(sy_sock_name(us, sb, &len) == 0 && len == n && sy_sa_family(sb, len) == 1, "unix-name");
+    sy_close(ua);
+    ckv(sy_sock_recv(uc, buf, 64), 0, "unix-recv-eof-after-close");
+    sy_close(uc);
+    sy_close(us);
+    ckv(sy_unlink(upath), 0, "unix-unlink");
+    uc = sy_sock_open(afu, st);
+    ckv(sy_sock_connect(uc, sa, n), -ENOENT, "unix-connect-missing");
+    sy_close(uc);
+
+    sy_printf("CX_SYS_NETRAW\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

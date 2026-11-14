@@ -1,0 +1,66 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+/* tools/elf-secdiff.cx -- ELF64 小端逐节对拍(.o 与可执行文件)。
+ *   sh ./unisacc.com tools/elf-secdiff.cx -- A B
+ * 每节一行(TAB 分隔): SEC name sizeA sizeB same|diff firstdiff shaA12 shaB12
+ * 按节名配对(A 的次序,再列只在 B 的节);firstdiff 为节内首个不同偏移(大小不同而前缀同时取较短者大小),same 时为 -1;
+ * 缺一侧的节记 diff,缺侧大小 -1。NOBITS(.bss)只比大小。末行 ELF_SECDIFF secs=N diff=M。退出码:0 全同,1 有差异,2 用法或格式错误。 */
+typedef struct { char name[64]; long off, size; int nobits; } sec_t;
+typedef struct { unsigned char *b; size_t n; sec_t s[96]; int ns; } elf_t;
+
+static unsigned long rd(const unsigned char *p, int w) { unsigned long v = 0; int i; for (i = w - 1; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+static int load(const char *path, elf_t *e) {
+    size_t n = 0; unsigned char *b = (unsigned char *)cx_read(path, &n);
+    unsigned long shoff, shnum, shent, stri, stroff; int i, k;
+    if (!b || n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2 || b[5] != 1) { sy_printf("not ELF64 LE: %s\n", path); return -1; }
+    e->b = b; e->n = n; e->ns = 0;
+    shoff = rd(b + 0x28, 8); shent = rd(b + 0x3A, 2); shnum = rd(b + 0x3C, 2); stri = rd(b + 0x3E, 2);
+    if (!shoff || shent < 64 || shnum > 96 || stri >= shnum || shoff + shnum * shent > n) { sy_printf("bad section table: %s\n", path); return -1; }
+    stroff = rd(b + shoff + stri * shent + 0x18, 8);
+    for (i = 1; i < (int)shnum; i++) {
+        const unsigned char *h = b + shoff + (unsigned long)i * shent;
+        unsigned long no = rd(h, 4), ty = rd(h + 4, 4);
+        sec_t *s = &e->s[e->ns];
+        s->off = (long)rd(h + 0x18, 8); s->size = (long)rd(h + 0x20, 8); s->nobits = ty == 8;
+        if (!s->nobits && (unsigned long)s->off + (unsigned long)s->size > n) { sy_printf("section out of file: %s\n", path); return -1; }
+        if (stroff + no >= n) { sy_printf("bad name: %s\n", path); return -1; }
+        for (k = 0; k < 63 && b[stroff + no + k]; k++) s->name[k] = (char)b[stroff + no + k];
+        s->name[k] = 0; e->ns++;
+    }
+    return 0;
+}
+static int same_name(const char *a, const char *b) { int i = 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
+static int find(elf_t *e, const char *nm) { int i; for (i = 0; i < e->ns; i++) if (same_name(e->s[i].name, nm)) return i; return -1; }
+static void sha12(elf_t *e, sec_t *s, char out[13]) {
+    char hex[65]; int i;
+    if (s->nobits || s->size == 0) { out[0] = '-'; out[1] = 0; return; }
+    cx_sha256_hex(e->b + s->off, (size_t)s->size, hex);
+    for (i = 0; i < 12; i++) out[i] = hex[i];
+    out[12] = 0;
+}
+static int row(elf_t *a, sec_t *x, elf_t *b, sec_t *y, const char *nm) {
+    long fd = -1, m; int diff = 0; char ha[13] = "-", hb[13] = "-";
+    if (!x || !y) diff = 1;
+    else {
+        m = x->size < y->size ? x->size : y->size;
+        if (!x->nobits && !y->nobits) { long i; for (i = 0; i < m; i++) if (a->b[x->off + i] != b->b[y->off + i]) { fd = i; break; } }
+        if (fd < 0 && x->size != y->size) fd = m;
+        diff = fd >= 0;
+    }
+    if (x) sha12(a, x, ha);
+    if (y) sha12(b, y, hb);
+    sy_printf("SEC\t%s\t%ld\t%ld\t%s\t%ld\t%s\t%s\n", nm, x ? x->size : -1L, y ? y->size : -1L, diff ? "diff" : "same", diff ? (fd < 0 ? 0L : fd) : -1L, ha, hb);
+    return diff;
+}
+int main(int argc, char **argv) {
+    static elf_t A, B; int i, secs = 0, nd = 0, j;
+    if (argc != 3) { sy_printf("usage: elf-secdiff.cx -- A B\n"); return 2; }
+    if (load(argv[1], &A) || load(argv[2], &B)) return 2;
+    for (i = 0; i < A.ns; i++) { j = find(&B, A.s[i].name); nd += row(&A, &A.s[i], &B, j >= 0 ? &B.s[j] : 0, A.s[i].name); secs++; }
+    for (j = 0; j < B.ns; j++) if (find(&A, B.s[j].name) < 0) { nd += row(&A, 0, &B, &B.s[j], B.s[j].name); secs++; }
+    sy_printf("ELF_SECDIFF secs=%d diff=%d\n", secs, nd);
+    return nd ? 1 : 0;
+}

@@ -1,7 +1,6 @@
-# 研究笔记：十八张 gold 表的变异实验（2026-11-05，供论文正文由主人定稿）
+# 研究笔记：十八张 gold 表的变异实验（2026-11-05，供论文正文由项目所有者定稿）
 
-方法：逐表改一键标签 → facts-gen 全量 + decide-gen → 42 个 recipe 全部重生网，与未变异基线比 sha256。完整表见 plans/gold-mutation-2026-11-05.md。
-
+方法：逐表改一键标签 → facts-gen 全量 + decide-gen → 42 个 recipe 全部重生网，与未变异基线比 sha256。
 结论：
 - 13 张 gold 表（pp lex type irsel enc reloc tyinfo regmap abi binsel prec opinfo peep）及 stmt、arity 两张决策表，改一键必改对应网——它们在七流出货路径上是真决策来源。
 - 5 张（combo isel parse pfconv scope）改一键，42 张网全部不变——它们只是"决策网对照臂"：进 weights/built.json 与 kernel/*.inc，供 18 网经典批次与 gold 对照工具使用，不参与编译器管线。parse 的语句分派已由 stmt 决策表接替。

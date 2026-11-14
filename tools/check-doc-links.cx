@@ -83,15 +83,59 @@ static int dl(char **args, char *out, long cap) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
-static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 16), s, tx_len(s, 512)) >= 0; }
+/* structural row assertion over tool output: no substring search.  A trailing newline anchors at the line end; the needle must
+   match from some tab-separated field start (a field-sequence prefix of that line). */
+static int has(const char *s, const char *needle) {
+    long n = tx_len(s, 1 << 16), qe = tx_len(needle, 512), p = 0;
+    int eol = 0;
+    if (qe > 0 && needle[qe - 1] == '\n') { eol = 1; qe--; }
+    while (p < n) {
+        long e = p, f;
+        while (e < n && s[e] != '\n') e++;
+        for (f = p; f <= e; f++) {
+            if (f > p && s[f - 1] != '\t') continue;
+            if (e - f >= qe && tx_prefix(s + f, e - f, needle, qe) && (!eol || e - f == qe)) return 1;
+        }
+        p = e + 1;
+    }
+    return 0;
+}
+/* number of output lines starting with PAT */
+static int nlines(const char *s, const char *pat) {
+    long n = tx_len(s, 1 << 16), pl = tx_len(pat, 512), p = 0; int c = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && s[e] != '\n') e++;
+        if (e - p >= pl && tx_prefix(s + p, e - p, pat, pl)) c++;
+        p = e + 1;
+    }
+    return c;
+}
 
+/* Expected relative link from absolute directory FROM to ROOT/LEAF, computed per path component: one "../" for each
+   component of FROM below the longest common component prefix with ROOT, then the rest of ROOT, then LEAF. */
+static int rel_expect(char *out, int cap, const char *from, const char *root, const char *leaf) {
+    long c = 0, k = 0, i, o = 0;
+    while (from[k] && root[k] && from[k] == root[k]) { if (from[k] == '/') c = k + 1; k++; }
+    if (!from[k] && root[k] == '/') c = k + 1;
+    if (!root[k] && from[k] == '/') c = k + 1;
+    for (i = c; from[i]; i++) if (from[i] == '/' || !from[i + 1]) { if (from[i] == '/' && !from[i + 1]) continue; if (o + 3 >= cap) return 1; out[o++] = '.'; out[o++] = '.'; out[o++] = '/'; }
+    if (root[c] && root[c - 1] == '/') { for (i = c; root[i]; i++) { if (o + 1 >= cap) return 1; out[o++] = root[i]; } if (o + 1 >= cap) return 1; out[o++] = '/'; }
+    for (i = 0; leaf[i]; i++) { if (o + 1 >= cap) return 1; out[o++] = leaf[i]; }
+    out[o] = 0;
+    return 0;
+}
 int main(void) {
     static char o[1 << 16]; char dir[200], docs[240], copy[280]; size_t n; char *src, *after; int rc;
     char *a1[] = {"tools/doc-links/fixture/docs/t.md", 0};
     rc = dl(a1, o, sizeof o);
     ck(rc == 1 && has(o, "DOC_LINKS\tfiles=1\tlinks=4\tbroken=3\tfixed=0\n") && has(o, "BROKEN\ttools/doc-links/fixture/docs/t.md:6\tmissing-nowhere.md\n")
-       && !has(o, "nope"), "check-four-links-three-broken-code-skipped");
-    if (cx_fmt(dir, sizeof dir, "out/check-doc-links-%d", sy_pid()) || cx_fmt(docs, sizeof docs, "%s/docs", dir) || cx_fmt(copy, sizeof copy, "%s/t.md", docs)) return 2;
+       && nlines(o, "BROKEN\t") == 3 && !has(o, "nope.md") && !has(o, "nope2.md"), "check-four-links-three-broken-code-skipped");
+    char cwd[1200], rel_a[600], rel_b[600], want[1400];
+    if (sy_cwd(cwd, sizeof cwd)) return 2;
+    if (cx_fmt(dir, sizeof dir, "%s/check-doc-links-%d", sy_tmpdir(), sy_pid()) || cx_fmt(docs, sizeof docs, "%s/docs", dir) || cx_fmt(copy, sizeof copy, "%s/t.md", docs)) return 2;
+    if (rel_expect(rel_a, sizeof rel_a, docs, cwd, "archive/reference-c/exec/c/compiler.c") || rel_expect(rel_b, sizeof rel_b, docs, cwd, "archive/reference-c/exec/enc/CONTROL_AUDIT.md")
+        || cx_fmt(want, sizeof want, "[a](%s) and [b](%s)", rel_a, rel_b)) return 2;
     src = cx_read("tools/doc-links/fixture/docs/t.md", &n);
     if (!src || sy_mkdir(dir, 0755) || sy_mkdir(docs, 0755)) return 2;
     {   int fd = sy_open_new(copy, 0644); if (fd < 0 || sy_write_all(fd, src, (long)n) || sy_close(fd)) return 2; }
@@ -99,14 +143,14 @@ int main(void) {
         rc = dl(a2, o, sizeof o);
         after = cx_read(copy, &n);
         ck(rc == 1 && has(o, "fixed=2") && has(o, "broken=1") && after
-           && tx_find(after, (long)n, "[a](../../../archive/reference-c/exec/c/compiler.c) and [b](../../../archive/reference-c/exec/enc/CONTROL_AUDIT.md)", 113) >= 0,
+           && nlines(after, want) == 1,
            "fix-moved-two-on-one-line");
     }
     {   char *a3[] = {copy, 0};
         rc = dl(a3, o, sizeof o);
         ck(rc == 1 && has(o, "links=4\tbroken=1\tfixed=0\n"), "fixed-links-resolve");
     }
-    sy_unlink(copy);
+    sy_unlink(copy); sy_rmdir(docs); sy_rmdir(dir);
     printf("CHECK_DOC_LINKS\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

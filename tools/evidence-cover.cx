@@ -1,0 +1,263 @@
+/* tools/evidence-cover.cx -- per batch: is the evidence for tree A still valid for candidate tree B?
+   Usage: sh ./unisacc.com tools/evidence-cover.cx -- --a REF_OR_DIR --b REF_OR_DIR
+   REF is a git revision (extracted with git archive into a private temp dir) or an existing directory.
+   Output (one line per tests/batches.tsv row of B, in row order):
+     NOT_A_PASS_RECORD<TAB>...   fixed first line: this is a coverage judgement, never a PASS record
+     COVERED<TAB>id
+     MUST_RERUN<TAB>id<TAB>reason     reason: new-row | row-changed | closure-hit | unknown
+   last line EVIDENCE_COVER<TAB>covered=N<TAB>must_rerun=M.  rc 0 when must_rerun=0, 1 otherwise, 2 usage.
+   Rules: files that differ between A and B (diff -rq, out/ and .git excluded) go to
+   `tools/affected.cx --files ... --list-only` run in B; selected batches are closure-hit.  The three tables
+   tests/batches.tsv, tests/coverage.tsv, build/batch-packages.tsv are compared by row key instead (a batch is
+   affected only when its own row, its coverage row or its package row differs; absent in A = new-row).
+   Anything that cannot be computed (tree, diff, affected failure, non-SOURCE batch, duplicate key) is
+   MUST_RERUN unknown: never optimistic. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+#define MAXB 4096
+#define OUTCAP (4 * 1024 * 1024)
+
+typedef struct { char *id, *cov, *impl, *mode, *line; const char *why; } Row;
+typedef struct { char *buf; char **lines; int n; } Tab;
+
+static char outbuf[OUTCAP];
+
+static int run_sh(const char *script, const char *a1, const char *a2, const char *a3, char *out, int cap) {
+    char *argv[12];
+    int i = 0;
+    argv[i++] = "./tools/bound"; argv[i++] = "55";   /* 55 s watchdog around every child */
+    argv[i++] = "sh"; argv[i++] = "-c"; argv[i++] = (char *)script; argv[i++] = "sh";
+    if (a1) argv[i++] = (char *)a1;
+    if (a2) argv[i++] = (char *)a2;
+    if (a3) argv[i++] = (char *)a3;
+    argv[i] = 0;
+    out[0] = 0;
+    return sy_run(argv, out, cap, 0);
+}
+
+/* split a file into lines (in place); returns 0 on success */
+static int load_tab(const char *path, Tab *t) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int cnt = 0;
+    char *p;
+    t->n = 0; t->lines = 0; t->buf = 0;
+    if (sy_read_file(path, &b, &n, 64 * 1024 * 1024) != 0) return -1;
+    t->buf = (char *)b;
+    for (p = t->buf; *p; p++) if (*p == '\n') cnt++;
+    t->lines = (char **)mm_alloc((size_t)(cnt + 2) * sizeof(char *));
+    if (!t->lines) return -1;
+    p = t->buf;
+    while (*p) {
+        char *e = strchr(p, '\n');
+        t->lines[t->n++] = p;
+        if (!e) break;
+        *e = 0;
+        p = e + 1;
+    }
+    return 0;
+}
+
+/* copy tab field K (0-based) of LINE into DST */
+static int field(const char *line, int k, char *dst, int cap) {
+    const char *p = line;
+    int i;
+    for (i = 0; i < k; i++) { p = strchr(p, '\t'); if (!p) return -1; p++; }
+    i = 0;
+    while (*p && *p != '\t' && i < cap - 1) dst[i++] = *p++;
+    dst[i] = 0;
+    return 0;
+}
+
+static char created[2][4096];
+static int ncreated;
+
+static void cleanup(void) {
+    static char o[4096];
+    int i;
+    for (i = 0; i < ncreated; i++) run_sh("rm -rf -- \"$1\"", created[i], 0, 0, o, sizeof o);
+    ncreated = 0;
+}
+
+static int tree_dir(const char *spec, char *dir, int cap) {
+    static char o[4096];
+    char tmp[4096];
+    if (run_sh("test -d \"$1\"", spec, 0, 0, o, sizeof o) == 0) {
+        if (sy_realpath(spec, dir, cap) < 0) return -1;
+        return 0;
+    }
+    if (sy_mkdtemp(sy_tmpdir(), "evcover-", tmp, sizeof tmp) != 0) return -1;
+    if (run_sh("git archive \"$1\" | tar -x -C \"$2\"", spec, tmp, 0, o, sizeof o) != 0) return -1;
+    if (strlen(tmp) >= (size_t)cap) return -1;
+    if (tx_copy(dir, cap, tmp, (long)strlen(tmp))) return -1;
+    if (ncreated < 2 && !tx_copy(created[ncreated], 4096, tmp, (long)strlen(tmp))) ncreated++;
+    return 0;
+}
+
+static const char *rel_after(const char *p, const char *root) {
+    size_t n = strlen(root);
+    if (strncmp(p, root, n) == 0 && p[n] == '/') return p + n + 1;
+    return 0;
+}
+
+static int is_table(const char *p) {
+    return !strcmp(p, "tests/batches.tsv") || !strcmp(p, "tests/coverage.tsv") || !strcmp(p, "build/batch-packages.tsv");
+}
+
+/* find a line of table T whose field K equals KEY (and, when K2>=0, field K2 equals KEY2); 0 absent, dup counted */
+static char *find_row(Tab *t, int k, const char *key, int k2, const char *key2, int *dups) {
+    int i;
+    char *hit = 0;
+    char f[1024];
+    *dups = 0;
+    for (i = 0; i < t->n; i++) {
+        if (field(t->lines[i], k, f, sizeof f) != 0 || strcmp(f, key)) continue;
+        if (k2 >= 0 && (field(t->lines[i], k2, f, sizeof f) != 0 || strcmp(f, key2))) continue;
+        if (hit) (*dups)++;
+        else hit = t->lines[i];
+    }
+    return hit;
+}
+
+/* 0 same, 1 differs/absent in A (new when A has none), -1 not computable */
+static int row_cmp(Tab *ta, Tab *tb, int k, const char *key, int k2, const char *key2, int *is_new) {
+    int da, db;
+    char *ra = find_row(ta, k, key, k2, key2, &da), *rb = find_row(tb, k, key, k2, key2, &db);
+    *is_new = 0;
+    if (da || db) return -1;
+    if (!rb) return 0;           /* B has no such row: nothing of B to cover */
+    if (!ra) { *is_new = 1; return 1; }
+    return strcmp(ra, rb) ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *sa = 0, *sb = 0;
+    char da[4096], db[4096], self[4096], path[4400];
+    static char dout[OUTCAP / 4];
+    static char changed[2 * 1024 * 1024];
+    static Row rows[MAXB];
+    Tab bt_a, bt_b, cv_a, cv_b, pk_a, pk_b;
+    int a, i, nrows = 0, covered = 0, rerun = 0, aff_ok = 1, nfiles = 0, tables_ok = 1;
+    char *args[4096];
+    int ai = 0;
+    char *p;
+    char *selected;
+
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--a") && a + 1 < argc) sa = argv[++a];
+        else if (!strcmp(argv[a], "--b") && a + 1 < argc) sb = argv[++a];
+        else { fprintf(stderr, "usage: evidence-cover.cx -- --a REF_OR_DIR --b REF_OR_DIR\n"); return 2; }
+    }
+    if (!sa || !sb) { fprintf(stderr, "usage: evidence-cover.cx -- --a REF_OR_DIR --b REF_OR_DIR\n"); return 2; }
+    printf("NOT_A_PASS_RECORD\tcoverage judgement only: COVERED is not a PASS and does not replace a release re-run\n");
+
+    if (sy_realpath("./unisacc.com", self, sizeof self) < 0 || tree_dir(sa, da, sizeof da) != 0 || tree_dir(sb, db, sizeof db) != 0) {
+        printf("MUST_RERUN\t*\tunknown\n");
+        printf("EVIDENCE_COVER\tcovered=0\tmust_rerun=1\n");
+        return 1;
+    }
+
+    /* registry of B */
+    tx_snprintf(path,sizeof path, "%s/tests/batches.tsv", db);
+    if (load_tab(path, &bt_b) != 0) { printf("MUST_RERUN\t*\tunknown\nEVIDENCE_COVER\tcovered=0\tmust_rerun=1\n"); return 1; }
+    tx_snprintf(path,sizeof path, "%s/tests/batches.tsv", da);
+    if (load_tab(path, &bt_a) != 0) tables_ok = 0;
+    tx_snprintf(path,sizeof path, "%s/tests/coverage.tsv", da);
+    if (load_tab(path, &cv_a) != 0) tables_ok = 0;
+    tx_snprintf(path,sizeof path, "%s/tests/coverage.tsv", db);
+    if (load_tab(path, &cv_b) != 0) tables_ok = 0;
+    tx_snprintf(path,sizeof path, "%s/build/batch-packages.tsv", da);
+    if (load_tab(path, &pk_a) != 0) tables_ok = 0;
+    tx_snprintf(path,sizeof path, "%s/build/batch-packages.tsv", db);
+    if (load_tab(path, &pk_b) != 0) tables_ok = 0;
+
+    /* changed files between the trees */
+    /* git diff --no-index treats symlinks as links (diff -r follows them and trips on loops/dangling ones) */
+    if (run_sh("git -c core.quotepath=off diff --no-index --name-only \"$1\" \"$2\"", da, db, 0, changed, sizeof changed) > 1) aff_ok = 0;
+    for (p = changed; aff_ok && *p; ) {
+        char *e = strchr(p, '\n');
+        const char *rel;
+        if (e) *e = 0;
+        rel = rel_after(p, da);
+        if (!rel) rel = rel_after(p, db);
+        if (!rel) { if (p[0]) aff_ok = 0; }
+        else if (!strncmp(rel, "out/", 4) || !strncmp(rel, ".git/", 5)) { }
+        else if (!is_table(rel)) {
+            if (ai >= 4000) aff_ok = 0;
+            else {
+                args[ai] = (char *)mm_alloc((long)strlen(rel) + 1);
+                if (!args[ai] || tx_copy(args[ai], (long)strlen(rel) + 1, rel, (long)strlen(rel))) aff_ok = 0;
+                else { ai++; nfiles++; }
+            }
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+
+    selected = dout; dout[0] = 0;
+    if (aff_ok && nfiles > 0) {
+        char *av[4120];
+        int k = 0, rc;
+        av[k++] = "./tools/bound"; av[k++] = "55";   /* deadline for the affected run */
+        av[k++] = "sh"; av[k++] = "-c";
+        av[k++] = "cd \"$1\" && u=\"$2\" && shift 2 && exec sh \"$u\" tools/affected.cx -- --files \"$@\" --list-only";
+        av[k++] = "sh"; av[k++] = db; av[k++] = self;
+        for (i = 0; i < ai; i++) av[k++] = args[i];
+        av[k] = 0;
+        rc = sy_run(av, dout, sizeof dout, 0);
+        if (rc != 0 || !strstr(dout, "AFFECTED_SUMMARY")) aff_ok = 0;
+    }
+
+    for (i = 0; i < bt_b.n && nrows < MAXB; i++) {
+        Row *r = &rows[nrows];
+        static char id[MAXB][160];
+        static char impl[MAXB][32], mode[MAXB][32], cov[MAXB][160];
+        if (i == 0 || !bt_b.lines[i][0]) continue;
+        if (field(bt_b.lines[i], 0, id[nrows], 160) || field(bt_b.lines[i], 1, impl[nrows], 32) ||
+            field(bt_b.lines[i], 4, mode[nrows], 32) || field(bt_b.lines[i], 10, cov[nrows], 160)) {
+            id[nrows][0] = '?'; id[nrows][1] = 0; cov[nrows][0] = 0; impl[nrows][0] = 0; mode[nrows][0] = 0;
+        }
+        r->id = id[nrows]; r->cov = cov[nrows]; r->impl = impl[nrows]; r->mode = mode[nrows]; r->line = bt_b.lines[i];
+        r->why = 0;
+        nrows++;
+    }
+
+    for (i = 0; i < nrows; i++) {
+        Row *r = &rows[i];
+        int isnew, c;
+        if (!tables_ok || !aff_ok || r->id[0] == '?') { r->why = "unknown"; continue; }
+        /* affected.cx only computes closures of IMPLEMENTED SOURCE batches: for others, any changed file is unknown */
+        if ((strcmp(r->impl, "IMPLEMENTED") || strcmp(r->mode, "SOURCE")) && nfiles > 0) { r->why = "unknown"; continue; }
+        c = row_cmp(&bt_a, &bt_b, 0, r->id, -1, 0, &isnew);
+        if (c < 0) { r->why = "unknown"; continue; }
+        if (c > 0) { r->why = isnew ? "new-row" : "row-changed"; continue; }
+        c = row_cmp(&cv_a, &cv_b, 0, r->cov, -1, 0, &isnew);
+        if (c < 0) { r->why = "unknown"; continue; }
+        if (c > 0) { r->why = isnew ? "new-row" : "row-changed"; continue; }
+        c = row_cmp(&pk_a, &pk_b, 1, r->id, 0, "batch", &isnew);
+        if (c < 0) { r->why = "unknown"; continue; }
+        if (c > 0) { r->why = isnew ? "new-row" : "row-changed"; continue; }
+        {   /* closure hit: an AFFECTED line naming this id */
+            char key[200];
+            tx_snprintf(key,sizeof key, "AFFECTED\t%s\t", r->id);
+            p = selected;
+            while (*p) {
+                if ((p == selected || p[-1] == '\n') && !strncmp(p, key, strlen(key))) { r->why = "closure-hit"; break; }
+                p++;
+            }
+        }
+    }
+
+    for (i = 0; i < nrows; i++) {
+        if (rows[i].why) { printf("MUST_RERUN\t%s\t%s\n", rows[i].id, rows[i].why); rerun++; }
+        else { printf("COVERED\t%s\n", rows[i].id); covered++; }
+    }
+    printf("EVIDENCE_COVER\tcovered=%d\tmust_rerun=%d\n", covered, rerun);
+    cleanup();
+    return rerun ? 1 : 0;
+}

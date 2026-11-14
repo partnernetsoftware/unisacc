@@ -1,0 +1,158 @@
+/* tools/ledger-add.cx -- the one write entry of agentwork/ledger.tsv, and its column-count check.
+ *
+ *   sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA|-] [--evidence PATHS|-] [--role R] [--ledger FILE] [--date YYYY-MM-DD]
+ *   sh ./unisacc.com tools/ledger-add.cx -- --check [--ledger FILE] [--baseline FILE]
+ *   sh ./unisacc.com tools/ledger-add.cx -- --baseline-write FILE [--ledger FILE]
+ *
+ * The ledger has six TAB columns: 时间, id, 事件(决定/依据/结果合写), commit, 证据, 角色/模型.
+ * --add appends exactly one such row (date = today UTC unless --date) and never touches an old line: the
+ * new file (old bytes + row) is written to a temp file next to the ledger and renamed over it, under an
+ * exclusive flock on out/.ledger-add.lock (ledger.lock beside the ledger when there is no out/), so two
+ * concurrent adds both land.  A TAB, newline or CR in any field, an empty or whitespace-bearing id, a
+ * missing/empty --id or --text is refused with rc 2 and nothing is written.  The id is column 2, which is
+ * the key tools/commit-own.cx --keyed PATH ID matches through own-diff --field.
+ * --check lists every line (the header excluded) whose column count is not 6: LEDGER_BAD line cols first-40-chars;
+ * then LEDGER_COLS per column count.  With --baseline FILE (rows "cols<TAB>max") a violation group above its
+ * baseline max is new and rc is 1; within the baseline rc is 0.  Without a baseline any violation is rc 1.
+ * --baseline-write records the current counts as the baseline. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+#define LA_DEF "agentwork/ledger.tsv"
+#define LA_MAXC 64
+
+static void la_die(const char *a, const char *b) { fprintf(stderr, "ledger-add: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static int la_clean(const char *s) {
+    for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0;
+    return 1;
+}
+
+static void la_today(char *d, long n) {
+    long z = sy_wall_s() / 86400 + 719468, era = z / 146097, doe = z - era * 146097;
+    long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, y = yoe + era * 400;
+    long doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153;
+    long dd = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9;
+    if (m <= 2) y++;
+    if (cx_fmt(d, n, "%04ld-%02ld-%02ld", y, m, dd)) la_die("date bound", 0);
+}
+
+static int la_lock(const char *ledger) {
+    char p[4400]; int fd, tries;
+    (void)ledger;
+    if (cx_fmt(p, sizeof p, "%s/.unisacc-ledger-add.lock", sy_tmpdir())) la_die("path bound", 0);
+    fd = sy_open(p, O_RDWR | O_CREAT, 0666);
+    if (fd < 0) la_die("cannot open lock", p);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    for (tries = 0; tries < 400; tries++) {   /* 20 s at most */
+        int r = sy_flock(fd, 2 | 4);
+        if (r == 0) return fd;
+        if (r != -EWOULDBLOCK && r != -EINTR) la_die("cannot flock", p);
+        sy_sleep_ms(50);
+    }
+    la_die("lock timeout", p);
+    return -1;
+}
+
+static int la_add(const char *ledger, const char *date, const char *id, const char *text, const char *commit, const char *evid, const char *role) {
+    char row[16384], tmp[4400]; size_t n = 0; char *old; int fd, lk; size_t extra;
+    if (!id || !*id) la_die("--id missing or empty", 0);
+    if (!text || !*text) la_die("--text missing or empty", 0);
+    for (const char *p = id; *p; p++) if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\v' || *p == '\f') la_die("id must not contain whitespace", id);
+    if (!la_clean(id) || !la_clean(text) || !la_clean(commit) || !la_clean(evid) || !la_clean(role) || !la_clean(date)) la_die("TAB, newline or CR in a field", 0);
+    if (!*commit || !*evid || !*role || !*date) la_die("empty commit/evidence/role/date (use -)", 0);
+    if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\t%s\n", date, id, text, commit, evid, role)) la_die("row too long", id);
+    lk = la_lock(ledger);
+    old = cx_read(ledger, &n);
+    if (!old) { sy_close(lk); la_die("cannot read ledger", ledger); }
+    extra = (n && old[n - 1] != '\n') ? 1 : 0;   /* a missing final newline is terminated, no old byte changes */
+    if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", ledger, sy_pid())) la_die("path bound", ledger);
+    fd = sy_open(tmp, 2 | 64 | 512, 0644);
+    if (fd < 0) { sy_close(lk); la_die("cannot create temp", tmp); }
+    if (sy_write_all(fd, old, n) || (extra && sy_write_all(fd, "\n", 1)) || sy_write_all(fd, row, (long)strlen(row))) { sy_close(fd); sy_unlink(tmp); sy_close(lk); la_die("write failed", tmp); }
+    sy_close(fd);
+    if (sy_rename(tmp, ledger)) { sy_unlink(tmp); sy_close(lk); la_die("rename failed", ledger); }
+    sy_close(lk);
+    printf("LEDGER_ADD\tid=%s\tledger=%s\n", id, ledger);
+    return 0;
+}
+
+static long la_base_max(const char *b, long nb, long cols) {
+    long at = 0;
+    while (at < nb) {
+        long e = tx_chr(b + at, nb - at, '\n'), ln = e < 0 ? nb - at : e;
+        long c = strtol(b + at, 0, 10); char *t = (char *)memchr(b + at, '\t', (size_t)ln);
+        if (t && c == cols && b[at] >= '0' && b[at] <= '9') return strtol(t + 1, 0, 10);
+        at += ln + 1;
+    }
+    return 0;
+}
+
+static int la_check(const char *ledger, const char *baseline, const char *bwrite) {
+    size_t n; char *b = cx_read(ledger, &n); long cnt[LA_MAXC + 1], at = 0, no = 0; int k, bad = 0, over = 0;
+    for (k = 0; k <= LA_MAXC; k++) cnt[k] = 0;
+    if (!b) la_die("cannot read ledger", ledger);
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, cols = 1, i, cut;
+        no++;
+        for (i = 0; i < ln; i++) if (b[at + i] == '\t') cols++;
+        if (no > 1 && cols != 6) {
+            cnt[cols > LA_MAXC ? LA_MAXC : cols]++; bad++;
+            cut = ln < 40 ? ln : 40;
+            while (cut < ln && cut > 0 && ((unsigned char)b[at + cut] & 0xC0) == 0x80) cut--;
+            { char shown[160]; long j; for (j = 0; j < cut; j++) shown[j] = b[at + j] == '\t' ? ' ' : b[at + j]; shown[cut] = 0;
+              printf("LEDGER_BAD\t%ld\t%ld\t%s\n", no, cols, shown); }
+        }
+        at += ln + 1;
+    }
+    if (bwrite) {
+        char out[1024]; long o = 0;
+        for (k = 0; k <= LA_MAXC; k++) if (cnt[k]) { int w = tx_snprintf(out + o, sizeof out - (size_t)o, "%d\t%ld\n", k, cnt[k]); if (w < 0 || o + w >= (long)sizeof out) la_die("baseline bound", 0); o += w; }
+        if (cx_write(bwrite, out, (size_t)o)) la_die("cannot write baseline", bwrite);
+        printf("LEDGER_BASELINE_WRITTEN\t%s\n", bwrite);
+        return 0;
+    }
+    {   size_t nb = 0; char *bb = 0;
+        if (baseline) { bb = cx_read(baseline, &nb); if (!bb) la_die("cannot read baseline", baseline); }
+        for (k = 0; k <= LA_MAXC; k++) if (cnt[k]) {
+            long mx = bb ? la_base_max(bb, (long)nb, k) : 0;
+            printf("LEDGER_COLS\t%d\tcount=%ld\tbaseline=%ld\t%s\n", k, cnt[k], mx, cnt[k] > mx ? "OVER" : "WITHIN");
+            if (cnt[k] > mx) over++;
+        }
+    }
+    printf("LEDGER_CHECK\tlines=%ld\tviolations=%d\tover_baseline_groups=%d\n", no, bad, over);
+    return over ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *id = 0, *text = 0, *commit = "-", *evid = "-", *role = "agent", *ledger = LA_DEF, *baseline = 0, *bwrite = 0, *date = 0;
+    int mode = 0, a;   /* 1 add, 2 check, 3 baseline-write */
+    char today[16];
+    for (a = 1; a < argc; a++) {
+        const char *s = argv[a];
+        if (tx_eqz(s, "--add")) mode = 1;
+        else if (tx_eqz(s, "--check")) mode = 2;
+        else if (tx_eqz(s, "--baseline-write") && a + 1 < argc) { mode = 3; bwrite = argv[++a]; }
+        else if (tx_eqz(s, "--id") && a + 1 < argc) id = argv[++a];
+        else if (tx_eqz(s, "--text") && a + 1 < argc) text = argv[++a];
+        else if (tx_eqz(s, "--commit") && a + 1 < argc) commit = argv[++a];
+        else if (tx_eqz(s, "--evidence") && a + 1 < argc) evid = argv[++a];
+        else if (tx_eqz(s, "--role") && a + 1 < argc) role = argv[++a];
+        else if (tx_eqz(s, "--ledger") && a + 1 < argc) ledger = argv[++a];
+        else if (tx_eqz(s, "--baseline") && a + 1 < argc) baseline = argv[++a];
+        else if (tx_eqz(s, "--date") && a + 1 < argc) date = argv[++a];
+        else la_die("usage: --add --id ID --text TEXT [--commit SHA|-] [--evidence P|-] [--role R] | --check [--baseline F] | --baseline-write F", s);
+    }
+    if (!mode) la_die("usage: --add | --check | --baseline-write", 0);
+    if (mode == 1) { if (!date) { la_today(today, sizeof today); date = today; } return la_add(ledger, date, id, text, commit, evid, role); }
+    /* default ledger without --baseline: use the committed format baseline when present, so a bare --check is not a false OVER */
+    if (mode == 2 && !baseline && tx_eqz(ledger, LA_DEF) && sy_exists("build/ledger-format-baseline.tsv") == 1) baseline = "build/ledger-format-baseline.tsv";
+    return la_check(ledger, mode == 2 ? baseline : 0, mode == 3 ? bwrite : 0);
+}

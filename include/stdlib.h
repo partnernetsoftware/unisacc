@@ -789,10 +789,10 @@ static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_wor
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; __u_word __u_i;
-    __u_base = (char *)__u_v;
+/* Heap sort: the introsort fallback past its depth limit (worst case O(n log n)). */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hsort
+static void _unisa_hsort(char *__u_base, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
     while (__u_i > 0) { __u_i = __u_i - 1; _unisa_sift(__u_base, __u_n, __u_sz, __u_i, __u_cmp); }
@@ -802,6 +802,77 @@ static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(c
         _unisa_swap(__u_base, __u_base + __u_i * __u_sz, __u_sz);
         _unisa_sift(__u_base, __u_i, __u_sz, 0, __u_cmp);
     }
+}
+#endif
+
+/* Element swap: word-wise only when both addresses and the size are word aligned, else bytewise. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qswap
+static void _unisa_qswap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_t;
+    if ((((__u_word)__u_a | (__u_word)__u_b | __u_n) & (sizeof(__u_word) - 1)) == 0) {
+        __u_i = 0;
+        while (__u_i < __u_n) {
+            __u_t = *(__u_word *)(__u_a + __u_i); *(__u_word *)(__u_a + __u_i) = *(__u_word *)(__u_b + __u_i); *(__u_word *)(__u_b + __u_i) = __u_t;
+            __u_i = __u_i + sizeof(__u_word);
+        }
+        return;
+    }
+    if (__u_n == 4 && (((__u_word)__u_a | (__u_word)__u_b) & 3) == 0) {
+        int __u_x = *(int *)__u_a; *(int *)__u_a = *(int *)__u_b; *(int *)__u_b = __u_x;
+        return;
+    }
+    _unisa_swap(__u_a, __u_b, __u_n);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qins
+static void _unisa_qins(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i; __u_word __u_j;
+    __u_i = 1;
+    while (__u_i < __u_n) {
+        __u_j = __u_i;
+        while (__u_j > 0 && __u_cmp(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz) > 0) { _unisa_qswap(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz, __u_sz); __u_j = __u_j - 1; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
+/* Introsort: median-of-3 quicksort, insertion sort for short runs, heap sort past the depth limit. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qintro
+static void _unisa_qintro(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *), long __u_depth) {
+    __u_word __u_i; __u_word __u_j; __u_word __u_m;
+    while (__u_n > 12) {
+        if (__u_depth <= 0) { _unisa_hsort(__u_b, __u_n, __u_sz, __u_cmp); return; }
+        __u_depth = __u_depth - 1;
+        __u_m = __u_n / 2;
+        if (__u_cmp(__u_b + __u_m * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + __u_m * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz, __u_sz);
+        _unisa_qswap(__u_b, __u_b + __u_m * __u_sz, __u_sz);
+        __u_i = 0; __u_j = __u_n;
+        while (1) {
+            __u_i = __u_i + 1;
+            while (__u_i < __u_n && __u_cmp(__u_b + __u_i * __u_sz, __u_b) < 0) __u_i = __u_i + 1;
+            __u_j = __u_j - 1;
+            while (__u_cmp(__u_b + __u_j * __u_sz, __u_b) > 0) __u_j = __u_j - 1;
+            if (__u_i >= __u_j) break;
+            _unisa_qswap(__u_b + __u_i * __u_sz, __u_b + __u_j * __u_sz, __u_sz);
+        }
+        _unisa_qswap(__u_b, __u_b + __u_j * __u_sz, __u_sz);
+        if (__u_j < __u_n - 1 - __u_j) { _unisa_qintro(__u_b, __u_j, __u_sz, __u_cmp, __u_depth); __u_b = __u_b + (__u_j + 1) * __u_sz; __u_n = __u_n - 1 - __u_j; }
+        else { _unisa_qintro(__u_b + (__u_j + 1) * __u_sz, __u_n - 1 - __u_j, __u_sz, __u_cmp, __u_depth); __u_n = __u_j; }
+    }
+    _unisa_qins(__u_b, __u_n, __u_sz, __u_cmp);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    long __u_d; __u_word __u_t;
+    if (__u_n < 2 || __u_sz == 0) return;
+    __u_d = 2; __u_t = __u_n;
+    while (__u_t > 1) { __u_t = __u_t / 2; __u_d = __u_d + 2; }
+    _unisa_qintro((char *)__u_v, __u_n, __u_sz, __u_cmp, __u_d);
 }
 #endif
 
@@ -957,6 +1028,7 @@ static int system(const char *__u_cmd) {
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
     if (!_unisa_env) _unisa_environ_init();   /* the child gets environ as it stands now */
     __u_env = _unisa_env;
+    _u_st_flushall();   /* SPEED-17: pending stdout goes out before the child's */
 #ifdef __APPLE__
 #ifdef __x86_64__
     __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);

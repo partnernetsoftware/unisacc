@@ -1,0 +1,143 @@
+#pragma unisa module osx
+#pragma unisa dock
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+/* cx.os osx: file size, absolute path, temp file, home dir, host name. Built on sy_* only. */
+
+static int osx_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+/* 64-bit size of the file at PATH. 0, or -errno (-ENOENT absent, -EINVAL null/empty). Directories give -EISDIR.
+   Windows: sy_stat_t.size is a 32-bit long there, so this is not 64-bit on win (not run on the target). */
+int sy_file_size(const char *path, int64_t *out) {
+    sy_stat_t st;
+    int r;
+    if (!path || !path[0] || !out) return -EINVAL;
+    r = sy_stat(path, &st);
+    if (r) return r < 0 ? r : -EIO;
+    if (st.kind == 'd') return -EISDIR;
+    *out = (int64_t)st.size;
+    return 0;
+}
+
+/* Absolute, normalised PATH ('.', '..', repeated '/' folded; symlinks not resolved; PATH may be absent) into DST.
+   Returns the length, or -errno (-ERANGE when CAP is too small, -EINVAL null/empty). POSIX separators only. */
+int sy_abspath(const char *path, char *dst, int cap) {
+    char buf[8192];
+    int n = 0, i = 0, w = 0;
+    if (!path || !path[0] || !dst || cap < 2) return -EINVAL;
+    if (path[0] != '/') {
+        int r = sy_cwd(buf, (int)sizeof buf - 2);
+        if (r) return r < 0 ? r : -EIO;
+        n = osx_len(buf);
+        if (n == 0 || buf[n - 1] != '/') buf[n++] = '/';
+    }
+    {
+        int pl = osx_len(path);
+        if (n + pl + 1 > (int)sizeof buf) return -ERANGE;
+        for (i = 0; i <= pl; i++) buf[n + i] = path[i];
+    }
+    /* normalise in place: w is the write cursor, buf is always >= read cursor */
+    i = 0;
+    {
+        char *o = buf;
+        int rd = 0;
+        w = 0;
+        while (buf[rd]) {
+            int s, e;
+            while (buf[rd] == '/') rd++;
+            s = rd;
+            while (buf[rd] && buf[rd] != '/') rd++;
+            e = rd;
+            if (e == s) break;
+            if (e - s == 1 && buf[s] == '.') continue;
+            if (e - s == 2 && buf[s] == '.' && buf[s + 1] == '.') {
+                while (w > 0 && o[w - 1] != '/') w--;
+                if (w > 0) w--;
+                continue;
+            }
+            o[w++] = '/';
+            for (i = s; i < e; i++) o[w++] = buf[i];
+        }
+        if (w == 0) o[w++] = '/';
+        o[w] = 0;
+    }
+    if (w + 1 > cap) return -ERANGE;
+    for (i = 0; i <= w; i++) dst[i] = buf[i];
+    return w;
+}
+
+static unsigned long osx_ctr;
+
+/* Create a new file DIR/PREFIXXXXXXXX (O_EXCL, mode 0600) and put its path in PATH. DIR 0 means sy_tmpdir().
+   Returns the fd, or -errno (-ERANGE when CAP is too small, -EINVAL null args). */
+int sy_mkstemp(const char *dir, const char *prefix, char *path, int cap) {
+    static const char al[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    int dl, pl, k, fd = -EEXIST;
+    unsigned long seed;
+    if (!path || cap < 1) return -EINVAL;
+    if (!prefix) prefix = "";
+    if (!dir) dir = sy_tmpdir();
+    if (!dir || !dir[0]) return -EINVAL;
+    dl = osx_len(dir);
+    pl = osx_len(prefix);
+    if (dl + 1 + pl + 6 + 1 > cap) return -ERANGE;
+    for (k = 0; k < 64 && fd == -EEXIST; k++) {
+        int i, j = 0;
+        seed = (unsigned long)sy_now_ms() * 2654435761UL + (unsigned long)sy_pid() * 40503UL + ++osx_ctr * 7919UL + (unsigned long)k;
+        for (i = 0; i < dl; i++) path[j++] = dir[i];
+        if (dl > 0 && dir[dl - 1] != '/') path[j++] = '/';
+        for (i = 0; i < pl; i++) path[j++] = prefix[i];
+        for (i = 0; i < 6; i++) { path[j++] = al[seed % 36]; seed = seed / 36 + (seed << 7) + (unsigned long)i; }
+        path[j] = 0;
+        fd = sy_open_new(path, 0600);
+    }
+    if (fd < 0) path[0] = 0;
+    return fd;
+}
+
+/* Home directory from HOME (USERPROFILE, then HOMEDRIVE+HOMEPATH on win via the env table; no passwd lookup).
+   Returns the length, -ENOENT when unset or empty, -ERANGE when CAP is too small. */
+int sy_homedir(char *dst, int cap) {
+    const char *h;
+    int n, i;
+    if (!dst || cap < 1) return -EINVAL;
+    h = sy_env("HOME");
+    if (!h || !h[0]) h = sy_env("USERPROFILE");
+    if (!h || !h[0]) return -ENOENT;
+    n = osx_len(h);
+    if (n + 1 > cap) return -ERANGE;
+    for (i = 0; i <= n; i++) dst[i] = h[i];
+    return n;
+}
+
+/* Host name: /proc/sys/kernel/hostname, else HOSTNAME / COMPUTERNAME. Length, -ENOENT, or -ERANGE.
+   Not uname/gethostname/GetComputerNameA (those are libc; not run on osx/win). */
+int sy_hostname(char *dst, int cap) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int i, len;
+    const char *e;
+    if (!dst || cap < 1) return -EINVAL;
+    if (sy_read_file("/proc/sys/kernel/hostname", &b, &n, 1024) == 0 && b) {
+        len = (int)n;
+        while (len > 0 && (b[len - 1] == '\n' || b[len - 1] == '\r')) len--;
+        if (len > 0) {
+            if (len + 1 > cap) { mm_free(b); return -ERANGE; }
+            for (i = 0; i < len; i++) dst[i] = (char)b[i];
+            dst[len] = 0;
+            mm_free(b);
+            return len;
+        }
+        mm_free(b);
+    }
+    e = sy_env("HOSTNAME");
+    if (!e || !e[0]) e = sy_env("COMPUTERNAME");
+    if (!e || !e[0]) return -ENOENT;
+    len = osx_len(e);
+    if (len + 1 > cap) return -ERANGE;
+    for (i = 0; i <= len; i++) dst[i] = e[i];
+    return len;
+}

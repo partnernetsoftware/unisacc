@@ -1,0 +1,114 @@
+/* tools/devtime.cx -- 研发耗时账本。
+ *   sh ./unisacc.com tools/devtime.cx -- append task_id 窗口 开始 交付 落地 类别 备注
+ *   sh ./unisacc.com tools/devtime.cx -- report [FILE]
+ * 类别: 链缺陷/集成摩擦/窗口停摆/误诊断/冷编争用/其它。未记标 UNMEASURED。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.die
+#pragma unisa use cxlib.awpath
+
+static char root[4096];
+static void die(const char *a, const char *b) { tool_die("devtime", a, b, 2); }
+
+static const char *cats[] = {"链缺陷","集成摩擦","窗口停摆","误诊断","冷编争用","其它",0};
+static int known_cat(const char *s) {
+    int i;
+    for (i = 0; cats[i]; i++) if (!strcmp(s, cats[i])) return 1;
+    return 0;
+}
+
+static int parse_epoch(const char *s, long *out) {
+    long x = 0;
+    if (!s || !*s) return -1;
+    if (!strcmp(s, "UNMEASURED")) { *out = -1; return 0; }
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        x = x * 10 + (*s - '0');
+    }
+    *out = x;
+    return 0;
+}
+
+static void append_row(int argc, char **argv) {
+    char path[4400], line[1600];
+    FILE *fp;
+    int n;
+    if (argc != 8) die("usage", "append task_id 窗口 开始 交付 落地 类别 备注");
+    if (!known_cat(argv[6])) die("bad-category", argv[6]);
+    if (strchr(argv[1], '\t') || strchr(argv[7], '\n')) die("field", "tab/newline");
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
+    if (awp_path(root, "devtime", path, (long)sizeof path)) die("path", 0);
+    n = snprintf(line, sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                 argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+    if (n < 0 || n >= (int)sizeof line) die("row bound", 0);
+    fp = fopen(path, "a");
+    if (!fp) die("open", path);
+    if ((int)fwrite(line, 1, (size_t)n, fp) != n) { fclose(fp); die("write", path); }
+    fclose(fp);
+    printf("DEVTIME_APPEND\ttask_id=%s\tok\n", argv[1]);
+}
+
+static void report(const char *file) {
+    char path[4400];
+    size_t n, at = 0;
+    char *s;
+    long sum[6];
+    long total = 0, unm = 0, rows = 0;
+    int i;
+    for (i = 0; i < 6; i++) sum[i] = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
+    if (file && *file) {
+        if (strlen(file) >= sizeof path) die("path", file);
+        if (tx_copy(path, (long)sizeof path, file, (long)strlen(file))) die("path", file);
+    } else if (awp_path(root, "devtime", path, (long)sizeof path)) die("path", 0);
+    s = cx_read(path, &n);
+    if (!s) die("read", path);
+    while (at < n) {
+        size_t end = at;
+        char line[1600];
+        char *f[8];
+        int nf = 0;
+        long a, b, dt;
+        int ci;
+        while (end < n && s[end] != '\n') end++;
+        if (end - at >= sizeof line) { free(s); die("line bound", 0); }
+        if (mm_copy(line, sizeof line, s + at, (long)(end - at))) { free(s); die("copy", 0); } line[end - at] = 0;
+        at = end < n ? end + 1 : end;
+        if (!line[0] || !strncmp(line, "task_id\t", 8)) continue;
+        {
+            char *p = line;
+            while (nf < 7) {
+                f[nf++] = p;
+                p = strchr(p, '\t');
+                if (!p) break;
+                *p++ = 0;
+            }
+        }
+        if (nf < 7) continue;
+        rows++;
+        if (parse_epoch(f[2], &a) || parse_epoch(f[3], &b)) { unm++; continue; }
+        if (a < 0 || b < 0) { unm++; continue; }
+        dt = b - a;
+        if (dt < 0) dt = 0;
+        for (ci = 0; cats[ci]; ci++) if (!strcmp(f[5], cats[ci])) { sum[ci] += dt; total += dt; break; }
+        if (!cats[ci]) unm++;
+    }
+    free(s);
+    printf("DEVTIME_REPORT\trows=%ld\ttotal_s=%ld\tunmeasured=%ld\n", rows, total, unm);
+    for (i = 0; cats[i]; i++) {
+        int pct = total ? (int)((sum[i] * 100) / total) : 0;
+        printf("%s\t%ld\t%d%%\n", cats[i], sum[i], pct);
+    }
+    if (!rows) printf("UNMEASURED\n");
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) die("usage", "append|report");
+    if (!strcmp(argv[1], "append")) append_row(argc - 1, argv + 1);
+    else if (!strcmp(argv[1], "report")) report(argc >= 3 ? argv[2] : 0);
+    else die("unknown", argv[1]);
+    return 0;
+}
