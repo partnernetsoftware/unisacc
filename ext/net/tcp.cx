@@ -2,6 +2,7 @@
 #pragma unisa dock
 #pragma unisa use addr
 #pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
 #pragma unisa use sys.fs
 /* ext.net blocking TCP subset on cx.sys netraw (build/std-surface.tsv ext.net): sy_tcp_listen,
    sy_tcp_listen_at, sy_tcp_port, sy_tcp_connect, sy_send, sy_send_all, sy_recv.  No libc, no #if.
@@ -34,11 +35,16 @@ int sy_tcp_listen_at(const sy_addr_t *a, int backlog, int flags) {
     int n, fd, r;
     if (!a || backlog < 0 || (flags & ~(SY_LISTEN_REUSEADDR | SY_LISTEN_V6ONLY))) return -EINVAL;
     if ((flags & SY_LISTEN_V6ONLY) && a->family != SY_AF_INET6) return -EINVAL;
-    if (flags & SY_LISTEN_V6ONLY) return -ENOPROTOOPT; /* netraw has no IPV6_V6ONLY name */
     n = syt_sa(a, sa, (int)sizeof sa);
     if (n < 0) return n;
     fd = syt_open(a->family);
     if (fd < 0) return fd;
+    if (flags & SY_LISTEN_V6ONLY) {
+        long lv = sy_sock_optnum(SY_SP_IPPROTO_IPV6), nm = sy_sock_optnum(SY_SP_IPV6_V6ONLY);
+        if (lv <= 0 || nm <= 0) { sy_close(fd); return -ENOPROTOOPT; }
+        r = sy_sock_setopt(fd, (int)lv, (int)nm, 1);
+        if (r < 0) { sy_close(fd); return r; }
+    }
     if (flags & SY_LISTEN_REUSEADDR) {
         r = sy_sock_setopt(fd, (int)sy_sock_num(SY_SN_SOL_SOCKET), (int)sy_sock_num(SY_SN_SO_REUSEADDR), 1);
         if (r < 0) { sy_close(fd); return r; }
