@@ -15,7 +15,7 @@
 - 版本:0.0.63 已公开(2026-11-14T14:12:06Z,Latest,已装,APE sha 04b85e6e4ec3ddcb)。F=9f3d367e44(v0.0.63 与 v0.0.63-src),X=86e85e60c8,Y1=d57b5be605,Y2=707e6f562e,CI run 43600577542 十作业全 success,裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。回滚:release/rollback.txt;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62(sha 83b82c8d)。
 - 整链 real7:2026-11-14 21:29 完成 rc=0(三段,第三段 20:50:57 起),compare 通过;产物 /tmp/unisacc-session-build-lr0060/chain-real7/ape-final/unisacc-next.com(sha256 前 16 位 8312372d7af1e23d,未注入版本),收据 ape-receipt.txt。该目录保留到下一版公开并读回为止。
 - 装后门已过(2026-11-14):K3 硬模式 assertions=76 failed=0、cx-namespace 18/0、速度无变慢项(build/speed-baseline.tsv 末尾);大扫除第一遍已做(/tmp 9.6G -> 7.6G,处置表 $CLAUDE_JOB_DIR/tmp/sweep63.txt);chain-real6 与 0.0.62 两份快照按 R6-H65 留到 0.0.65 公开后删。
-- 下一步:0.0.65(cxmod 三源类)在 v0.0.65 分支推进,t6t7、checkcalls、T8 已落(2ce17760c0),待补 cx.plan 的 tlib bump。
+- 0.0.65 已冻结并起整链 real8(2026-11-15 00:16:41 起,硬限 01:46:41):REV b7520b8e81(v0.0.65 已快进合入 main),私有提交 de2df6171e,链本体 PID 2656467 / PGID 2656466,看门狗 PID 2658489,日志 /tmp/unisacc-session-build-lr0060/log/real8.out,输出 chain-real8,结束写 real8.rc。终止只按 PGID 2656466 与 2656465。内容:cxmod 三源统一、D1a export、链工具三项(环境白名单、g2 金丝雀、看门狗)。
 
 ## 决定(别人必须遵守)
 
