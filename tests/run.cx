@@ -1,4 +1,5 @@
-/* Run from any cwd: sh /path/unisacc.com /path/tests/run.cx -- --smoke */
+/* Run from any cwd: sh /path/unisacc.com /path/tests/run.cx -- --smoke
+ * --commit ID: one commit batch via affected --prepare-materials, never hidden in --list/--all. */
 #pragma unisa use cases.product
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
@@ -57,8 +58,15 @@ static int join_table(char *out,size_t cap,const char *rootd,const char *name){
  return cx_fmt(out,cap,"%s/%s",rootd,rel)?-1:0;
 }
 static char *metadata_read(const char *p,const char *kind,size_t *n){struct stat st;errno=0;if(lstat(p,&st)){fprintf(stderr,"REFUSE\tmetadata-io\tkind=%s\tpath=%s\terrno=%d\n",kind,p,errno);return 0;}if(!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>4194304){fprintf(stderr,"REFUSE\tmetadata-file-shape\tkind=%s\tpath=%s\n",kind,p);return 0;}char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size){fprintf(stderr,"REFUSE\tmetadata-read-size\tkind=%s\tpath=%s\n",kind,p);free(s);return 0;}return s;}
-int main(int argc,char **argv){int session_mode=argc==3&&tx_eqz(argv[1], "--all");if(!session_mode&&(argc!=2||(tx_eqz(argv[1], "--smoke")?0:tx_eqz(argv[1], "--list")?0:strcmp(argv[1],"--all")))){fprintf(stderr,"usage: --smoke | --all [ABS_SESSION] | --list\n");return 2;}if(tx_eqz(argv[1], "--smoke"))return smoke();
+int main(int argc,char **argv){int commit_mode=argc==3&&tx_eqz(argv[1],"--commit");int session_mode=argc==3&&tx_eqz(argv[1], "--all");if(!commit_mode&&!session_mode&&(argc!=2||(tx_eqz(argv[1], "--smoke")?0:tx_eqz(argv[1], "--list")?0:strcmp(argv[1],"--all")))){fprintf(stderr,"usage: --smoke | --all [ABS_SESSION] | --list | --commit ID\n");return 2;}if(tx_eqz(argv[1], "--smoke"))return smoke();
  char root[4096],registry_path[4400],coverage_path[4400],why[600];const char *suffix="/tests/run.cx";if(!realpath(__FILE__,root)){fprintf(stderr,"REFUSE\tinventory-root-source\terrno=%d\n",errno);return 2;}size_t z=strlen(root),sn=strlen(suffix);if(z<=sn||!tx_eqz(root+z-sn, suffix)){fprintf(stderr,"REFUSE\tinventory-root-layout\texpected=ROOT/tests/run.cx\n");return 2;}root[z-sn]=0;
+ if(commit_mode){
+  char product[4400],affected[4400];
+  if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(affected,sizeof affected,"%s/tools/affected.cx",root))return 2;
+  char *av[]={"sh",product,affected,"--","--tier","commit","--ids",argv[2],"--prepare-materials","--run","-j","1",0};
+  char *out=0;size_t n=0;int rc=cx_runv_timeout(av,55,&out,&n);
+  if(out&&n)fwrite(out,1,n,stdout);free(out);return rc;
+ }
  if(join_table(registry_path,sizeof registry_path,root,"batches.tsv")||join_table(coverage_path,sizeof coverage_path,root,"coverage.tsv")){fprintf(stderr,"REFUSE\tpath-bound\ttables\n");return 2;}size_t rn,cn;char *reg=metadata_read(registry_path,"batches",&rn),*cov=metadata_read(coverage_path,"coverage",&cn);if(!reg||!cov){free(reg);free(cov);return 2;}
  tp_summary summary;int list=!strcmp(argv[1],"--list"),rc=tp_analyze(root,reg,rn,cov,cn,list,&summary,why,sizeof why);if(rc){fprintf(stderr,"REFUSE\tmetadata-schema\t%s\n",why);free(reg);free(cov);return 2;}
  if(session_mode)return all_session(root,argv[2],reg,rn,cov,cn);

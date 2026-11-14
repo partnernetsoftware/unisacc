@@ -1,5 +1,7 @@
 /* tools/check-candidate-chain.cx -- candidate-chain 负控夹具，不跑全链。
  *   sh ./unisacc.com tools/check-candidate-chain.cx -- ABS_OUT ABS_CACHE
+ *   ABS_OUT CANDIDATE_NATIVE GENERATOR_NATIVE --core | ABS_OUT CANDIDATE_NATIVE --objects|--watch
+ *   Grouped batches consume executor-verified materials; missing materials are DEFERRED, never built here.
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -659,10 +661,25 @@ int main(int argc, char **argv) {
       mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0;
       { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
     }
-    if (argc != 3 || argv[1][0] != '/' || argv[2][0] != '/') {
-        fprintf(stderr, "usage: ABS_OUT ABS_CACHE | --prepare ABS_CACHE tool|generator\n");
+    int group=0;
+    if(argc>=4){
+        if(tx_eqz(argv[argc-1],"--core"))group=1;
+        else if(tx_eqz(argv[argc-1],"--objects"))group=2;
+        else if(tx_eqz(argv[argc-1],"--watch"))group=3;
+        else return 2;
+    }
+    if(group){
+        if(argc!=(group==1?5:4)||sy_realpath(argv[2],native_tool,sizeof native_tool)<0||
+           (group==1&&sy_realpath(argv[3],native_generator,sizeof native_generator)<0)){
+            printf("DEFERRED\tneeds-materials=candidate-chain-tool,chain-phases-gen-tool\n");return 3;
+        }
+    }
+    if ((!group&&argc!=3) || argv[1][0] != '/' || argv[2][0] != '/') {
+        fprintf(stderr, "usage: ABS_OUT ABS_CACHE | ABS_OUT CANDIDATE_NATIVE [GENERATOR_NATIVE] --core|--objects|--watch\n");
         return 2;
     }
+    if(sy_mkdir(argv[1],0700)&&sy_exists(argv[1])!=1)return 2;
+    if(!group){
     /* The cache directory comes from the batch's own {out} argument (args column), and {out} itself is
        absent until this batch runs: create it and its subdirectory here instead of relying on a
        leftover ROOT/out path, which a fresh clone does not have. */
@@ -673,6 +690,7 @@ int main(int argc, char **argv) {
         pid = fork();
         if (pid < 0) return 2;
         if (pid == 0) {
+            if(group==2||group==3)_exit(0);
             if (rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
                 fprintf(stderr, "check-candidate-chain: %s\n", why); _exit(2);
             }
@@ -683,10 +701,12 @@ int main(int argc, char **argv) {
             fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
         }
         if (sy_wait(pid, 0) != 0 ||
-            rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
+            ((group==0||group==1)&&rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why))) {
             fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
         }
     }
+    }
+    if(group==0||group==1){
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "'%s' --plan 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=90") && has(out, "p3-models") && has(out, "g2-lnx-x86_64-obj-0") && has(out, "g2-lnx-arm64-obj-43") && has(out, "jobs-net-41-finish"), "plan"); }
@@ -1028,7 +1048,8 @@ int main(int argc, char **argv) {
       if (cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER=x '%s' %s", native_tool, pre)) { ck(0, "fmt"); return 1; }
       sh(cmd, out, sizeof out);
       ck(!has(out, "REFUSE chain-env"), "chain-env-helper-only-passes"); }
-    { char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
+    }
+    if(group==0||group==2){ char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
       /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */
       if(sy_realpath("unisacc.com",product,sizeof product)<0||sy_realpath("tools/check-candidate-chain.cx",self,sizeof self)<0||
          cx_fmt(launcher,sizeof launcher,"%s/canary-launcher.sh",argv[1])||
@@ -1036,7 +1057,7 @@ int main(int argc, char **argv) {
          cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-split '%s' '%s' 2>&1",product,self,argv[1],launcher))return 2;
       int rc=sh(cmd,out,sizeof out);sy_printf("%s",out);
       ck(rc==0&&has(out,"G2G3_SPLIT\tfailed=0"),"g2g3-canary-regression-fixture"); }
-    { /* Real observer process, with no chain construction and no signal intervention. */
+    if(group==0||group==3){ /* Real observer process, with no chain construction and no signal intervention. */
       char td[4400],pidpath[4500],report[4500],logdir[4500],logpath[4600];
       if(cx_fmt(td,sizeof td,"%s/watch-fixture-XXXXXX",argv[1])||!mkdtemp(td)||
          cx_fmt(pidpath,sizeof pidpath,"%s/watch.pid",td)||cx_fmt(report,sizeof report,"%s/watch.tsv",td)||
