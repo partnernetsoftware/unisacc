@@ -358,6 +358,60 @@ int main(int argc, char **argv) {
               ck(strstr(buf, "4\tUNKNOWN\t") != 0, "aggout-verdict-unknown-without-aggregate-line"); }
             unsetenv("S9_FAKE_AGG_FILE");
         }
+        /* 收据校验 refused 的 reason 具名输出与失败时落盘:片失败、merge 失败两条路径 aggregate.out 都在且含 reason */
+        {
+            char aggf[4400], aggo[4400], rm2[4400], *got;
+            const char *line = "S9_RECEIPT\tREFUSE\tbatch=x\tslice=slice-0-0\treason=receipt-sha-mismatch\n";
+            size_t gn;
+            char *rmv[] = {"rm", "-rf", "--", 0, 0, 0, 0, 0, 0};
+            char *wv[20];
+            cx_fmt(aggf, sizeof aggf, "%s/agg-refuse.fake", dir);
+            cx_fmt(aggo, sizeof aggo, "%s/aggregate.out", runp);
+            if (cx_write(aggf, line, strlen(line))) die("agg-refuse-write");
+            for (int q = 0; q < 15; q++) wv[q] = w[q];
+            wv[15] = 0;
+            setenv("S9_FAKE_AGG_FILE", aggf, 1);
+            /* 片 0 失败 */
+            for (int k = 0; k < 4; k++) {
+                cx_fmt(rm2, sizeof rm2, "%s/agg-part-%d-4", runp, k);
+                rmv[3] = rm2; rmv[4] = 0;
+                runv(rmv, dir, 5, buf, sizeof buf, &rc);
+            }
+            cx_fmt(rm2, sizeof rm2, "%s", aggo);
+            rmv[3] = rm2; rmv[4] = 0;
+            runv(rmv, dir, 5, buf, sizeof buf, &rc);
+            setenv("S9_FAKE_PART_RC", "2", 1);
+            runv(wv, dir, 20, buf, sizeof buf, &rc);
+            ck(rc == 1 && strstr(buf, "status=FAIL") && strstr(buf, "step=aggregate-part-0"), "agg-part-fail-status");
+            got = cx_read(aggo, &gn);
+            ck(got != 0, "agg-part-fail-aggout-exists");
+            ck(got && strstr(got, "S9_RECEIPT\tREFUSE") && strstr(got, "reason=receipt-sha-mismatch"), "agg-part-fail-aggout-has-reason");
+            free(got);
+            unsetenv("S9_FAKE_PART_RC");
+            /* merge 失败:先清片与旧 aggregate.out */
+            for (int k = 0; k < 4; k++) {
+                cx_fmt(rm2, sizeof rm2, "%s/agg-part-%d-4", runp, k);
+                rmv[3] = rm2; rmv[4] = 0;
+                runv(rmv, dir, 5, buf, sizeof buf, &rc);
+            }
+            cx_fmt(rm2, sizeof rm2, "%s", aggo);
+            rmv[3] = rm2; rmv[4] = 0;
+            runv(rmv, dir, 5, buf, sizeof buf, &rc);
+            setenv("S9_FAKE_MERGE_RC", "2", 1);
+            runv(wv, dir, 20, buf, sizeof buf, &rc);
+            ck(rc == 1 && strstr(buf, "status=FAIL") && strstr(buf, "step=aggregate"), "agg-merge-fail-status");
+            got = cx_read(aggo, &gn);
+            ck(got && strstr(got, "reason=receipt-sha-mismatch"), "agg-merge-fail-aggout-has-reason");
+            free(got);
+            unsetenv("S9_FAKE_MERGE_RC");
+            unsetenv("S9_FAKE_AGG_FILE");
+            /* merge 失败时仍是 4 片都跑完后才 merge;失败不改变 rc 判定(仍为 1) */
+            {
+                size_t ln; char *lg = cx_read(logp, &ln);
+                ck(lg && strstr(lg, "aggregate --part 3 4") && strstr(lg, "aggregate --merge 4"), "agg-merge-fail-after-all-parts");
+                free(lg);
+            }
+        }
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
