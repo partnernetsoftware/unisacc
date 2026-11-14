@@ -1428,6 +1428,48 @@ static void run_g2_lnx(const char *root, const char *outdir, const char *rev, co
     if (!(resume && ck_done(outdir, tag))) mark(outdir, tag, sy_now_ms() - started);
     else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
 }
+/* The two linux targets of one generation share only read-only inputs (gen1 for g2, the g2
+   lnx-x86_64 candidate for g3; build/chain-phases.tsv deps) and write fp/gN/SLUG each, so the
+   pair runs as two owner processes, as chain-run already schedules the two lanes. Each owner
+   keeps every per-call bound, checkpoint and receipt of the serial order; a failed owner fails
+   the pair after both have been waited for, so the other target's evidence stays complete.
+   --until, a yielding attempt and --parallel 1 keep the serial order. */
+static int jobs_parallel;
+static void run_g_lnx_pair(const char *root, const char *outdir, const char *rev, const char *snap,
+    const char *pkg, const char *gen1, const char *fp, const char *helper, int gen, int resume) {
+    static const char *targets[2] = {"lnx/x86_64", "lnx/arm64"}, *slugs[2] = {"lnx-x86_64", "lnx-arm64"};
+    int pid[2] = {0, 0}, bad = 0;
+    if (until_phase || attempt_end || jobs_parallel < 2) {
+        for (int i = 0; i < 2; i++) run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, targets[i], slugs[i], gen, resume);
+        return;
+    }
+    sy_printf("G_LNX_PAIR\tgen=%d\towners=2\twrite_domains=per-target-dir\n", gen);
+    sy_mkdir(fp, 0755);
+    fflush(0);
+    for (int i = 0; i < 2 && !bad; i++) {
+        pid[i] = fork();
+        if (pid[i] < 0) { pid[i] = 0; bad = 1; sy_printf("G_LNX_PAIR_FAIL\tg%d-%s\tfork\n", gen, slugs[i]); break; }
+        if (!pid[i]) {
+            char tmp[4400];
+            if (cx_fmt(tmp, sizeof tmp, "%s/tmp-g%d-%s", outdir, gen, slugs[i])) die("pair tmp", slugs[i]);
+            if (sy_mkdir(tmp, 0700) && fsize(tmp) < 0) die("pair tmp", tmp);
+            if (sy_setenv("TMPDIR", tmp, 1)) die("pair environment", slugs[i]);
+            run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, targets[i], slugs[i], gen, resume);
+            fflush(0);
+            exit(0);
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        int st = 0;
+        if (!pid[i]) continue;
+        while (waitpid(pid[i], &st, 0) < 0) { if (errno != EINTR) die("pair wait", slugs[i]); }
+        if (!WIFEXITED(st) || WEXITSTATUS(st)) {
+            bad = 1;
+            sy_printf("G_LNX_PAIR_FAIL\tg%d-%s\tstatus=%d\n", gen, slugs[i], st);
+        }
+    }
+    if (bad) die(gen == 2 ? "g2 lnx pair" : "g3 lnx pair", fp);
+}
 static int job_has_record(const char *ctx, const char *id) {
     char rec[4400];
     if (cx_fmt(rec, sizeof rec, "%s/jobs/%s/record.tsv", ctx, id)) die("path", id);
@@ -2757,10 +2799,8 @@ int main(int argc, char **argv) {
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 2, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 2, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 3, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 3, resume);
+    run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 2, resume);
+    run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 3, resume);
 
     if (!(resume && ck_done(outdir, "kernels-g2"))) {
         long t0 = sy_now_ms();
