@@ -18,7 +18,16 @@ static void path(char *p,const char *base,const char *name){int n=tx_snprintf(p,
 static int run(char **v,const char *cwd,char *out,int cap){np_result r={0};char why[512]={0};int rc;if(np_run(v,cwd,0,45,&r,why,sizeof why)){np_free(&r);return 125;}rc=r.rc;if(out&&tx_copy(out,cap,r.out,r.outn)){np_free(&r);sy_exit(2);}np_free(&r);return rc;}
 static void writefile(const char *p,const char *s){int f=sy_open(p,O_WRONLY|O_CREAT|O_TRUNC,0600);if(f<0||sy_write_all(f,s,length(s))||sy_close(f))sy_exit(2);}
 static int tool(const char *a,const char *b){char exe[4400],script[4400];char *v[]={"sh",exe,script,"--","--candidate",table,(char *)a,(char *)b,0};path(exe,root,"unisacc.com");path(script,root,"tools/release-layout.cx");return run(v,root,0,0);}
-static int contains(const char *s,const char *needle){return tx_contains(s,length(s),needle,length(needle));}
+static int tool2(const char *tbl,const char *a,const char *b){char exe[4400],script[4400];char *v[]={"sh",exe,script,"--","--candidate",(char *)tbl,(char *)a,(char *)b,0};path(exe,root,"unisacc.com");path(script,root,"tools/release-layout.cx");return run(v,root,0,0);}
+static void mktable(const char *dest,const RcCandidate *c,const char *ver,const char *zname,const char *zsha){
+    char row[4400];int g,n,i;
+    n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n%s\t%s\t%s\t%s\t%s\t%s\t%s",c->repo,c->tag,c->commit,ver,c->workflow,c->workflow_ref,c->ci_run_id);
+    if(n<0||n>=sizeof row)sy_exit(2);
+    g=sy_open_new(dest,0600);if(g<0||sy_write_all(g,row,n))sy_exit(2);
+    for(i=0;i<7;i++){const char *nm=i==5?zname:c->name[i],*sh=i==5?zsha:c->sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||n>=sizeof row||sy_write_all(g,row,n))sy_exit(2);}
+    if(sy_write_all(g,"\n",1)||sy_close(g))sy_exit(2);
+}
+static int contains(const char *s,const char *needle){long i,n=length(s),m=length(needle);for(i=0;i+m<=n;i++)if(tx_same(s+i,m,needle,m))return 1;return 0;}
 int main(void){char src[4400],out[4400],p[4400],q[4400],text[8192],why[512]={0};char *v[12];int i,n;
     if(sy_cwd(root,sizeof root)<0)return 2;path(table,root,"release/testdata/layout-candidate.tsv");if(rcand_load(table,&candidate,why,sizeof why))return 2;
     for(i=0;i<100;i++){n=tx_snprintf(tmp,sizeof tmp,"/tmp/check-release-layout-%d-%d",sy_pid(),i);if(n<0||n>=sizeof tmp)return 2;if(!sy_mkdir(tmp,0700))break;}if(i==100)return 2;
@@ -53,5 +62,22 @@ int main(void){char src[4400],out[4400],p[4400],q[4400],text[8192],why[512]={0};
         if(rcand_load(table,&changed,why,sizeof why)||rcand_verify(&changed,out,7,why,sizeof why))return 2;
     }
     v[0]="sha256sum";v[1]="-c";v[2]=candidate.name[6];v[3]=0;i=run(v,out,0,0);ck(i==0&&tool("--check",out)!=0,"zip-corruption-refused-even-with-new-manifest");
+    /* 0.0.63 contract: no win-arm64 zip. Cases above keep the 0.0.46 contract unchanged. */
+    ck(rcand_has_zip("0.0.46")&&rcand_has_zip("0.0.62")&&!rcand_has_zip("0.0.63")&&!rcand_has_zip("0.0.100")&&!rcand_has_zip("0.1.0"),"zip-threshold-version-compare");
+    {
+        char t63[4400],t62[4400],tbad[4400],o63[4400],o62[4400],obad[4400];
+        path(t63,tmp,"c63.tsv");path(t62,tmp,"c62dash.tsv");path(tbad,tmp,"c63zip.tsv");path(o63,tmp,"out63");path(o62,tmp,"out62");path(obad,tmp,"out63bad");
+        mktable(t63,&candidate,"0.0.63","-","-");mktable(t62,&candidate,"0.0.62","-","-");mktable(tbad,&candidate,"0.0.63","unisacc-0.0.63-win-arm64.zip",candidate.sha[5]);
+        ck(tool2(t63,src,o63)==0,"v63-generate-without-zip");
+        {RcCandidate c63=candidate;int r;for(r=4;r<=6;r+=2){v[0]="sha256sum";v[1]="--";v[2]=c63.name[r];v[3]=0;if(run(v,o63,text,sizeof text)||length(text)<64)return 2;text[64]=0;tx_copy(c63.sha[r],65,text,64);}
+         path(t63,tmp,"c63pinned.tsv");mktable(t63,&c63,"0.0.63","-","-");}
+        ck(tool2(t63,"--check",o63)==0,"v63-check-without-zip");
+        path(p,o63,"unisacc-0.0.63-win-arm64.zip");ck(sy_exists(p)!=1,"v63-no-zip-file-produced");
+        path(p,o63,"SHA256SUMS");{int f=sy_open_read(p);long got=f<0?-1:sy_read(f,text,sizeof text-1);int lines=0;long k;if(f>=0)sy_close(f);for(k=0;k<got;k++)if(text[k]=='\n')lines++;text[got<0?0:got]=0;ck(got>0&&lines==5&&!contains(text,"zip"),"v63-sums-cover-five-files");}
+        v[0]="sha256sum";v[1]="-c";v[2]="SHA256SUMS";v[3]=0;ck(run(v,o63,0,0)==0,"v63-external-checksums");
+        path(p,o63,"unisacc-0.0.63-win-arm64.zip");writefile(p,"extra zip");ck(tool2(t63,"--check",o63)!=0,"v63-extra-zip-refused");
+        ck(tool2(t62,src,o62)!=0,"v62-dash-zip-refused");
+        ck(tool2(tbad,src,obad)!=0,"v63-named-zip-refused");
+    }
     v[0]="rm";v[1]="-rf";v[2]=tmp;v[3]=0;if(run(v,root,0,0))return 2;n=tx_snprintf(text,sizeof text,"RELEASE_LAYOUT_CHECK\tassertions=%d\tfailed=%d\n",assertions,failed);if(n<0||n>=sizeof text)return 2;print(text);return failed?1:0;
 }

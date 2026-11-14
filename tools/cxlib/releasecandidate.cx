@@ -28,6 +28,24 @@ static const char *rcand_column(int i){
  static const char *cols[21]={"repo","tag","commit","version","workflow","workflow_ref","ci_run_id","ape","ape_sha256","package","package_sha256","win_arm64","win_arm64_sha256","record","record_sha256","build_alias","build_alias_sha256","zip","zip_sha256","checksums","checksums_sha256"};
  return cols[i];
 }
+/* Contract split (prd_mempalace win-arm64.zip removal): versions up to and including
+ * RCAND_ZIP_LAST carry the win-arm64 zip in role 5; later versions write "-" for
+ * zip and zip_sha256 and the zip is not an asset. Source: owner decision 2026-11-14. */
+#define RCAND_ZIP_LAST "0.0.62"
+static int rcand_parts(const char *s,long *p){
+ int n=0,i=0;long v;
+ for(;n<4;n++){p[n]=0;}
+ n=0;
+ while(s[i]&&n<4){v=0;while(s[i]>='0'&&s[i]<='9'){v=v*10+(s[i]-'0');i++;}p[n++]=v;if(s[i]=='.')i++;else break;}
+ return n;
+}
+int rcand_has_zip(const char *version){
+ long a[4],b[4];int i;
+ rcand_parts(version,a);rcand_parts(RCAND_ZIP_LAST,b);
+ for(i=0;i<4;i++){if(a[i]<b[i])return 1;if(a[i]>b[i])return 0;}
+ return 1;
+}
+static int rcand_nozip_slot(const RcCandidate *c){return tx_eqz(c->name[5],"-")&&tx_eqz(c->sha[5],"-");}
 static int rcand_validate(const RcCandidate *c,char *why,int cap){
  const char *s[7];int sizes[7]={128,128,41,32,64,128,32};int i,j,k,n;
  s[0]=c->repo;s[1]=c->tag;s[2]=c->commit;s[3]=c->version;s[4]=c->workflow;s[5]=c->workflow_ref;s[6]=c->ci_run_id;
@@ -40,6 +58,10 @@ static int rcand_validate(const RcCandidate *c,char *why,int cap){
  for(i=0;c->tag[i];i++)if(!rcand_alnum(c->tag[i])&&c->tag[i]!='.'&&c->tag[i]!='_'&&c->tag[i]!='-')return rcand_error(why,cap,"tag","expected a plain workflow release tag");
  for(i=0;c->ci_run_id[i];i++)if(c->ci_run_id[i]<'0'||c->ci_run_id[i]>'9')return rcand_error(why,cap,"ci_run_id","expected decimal digits");
  for(i=0;i<7;i++){
+  if(i==5){
+   if(rcand_has_zip(c->version)){if(rcand_nozip_slot(c))return rcand_error(why,cap,rcand_column(17),"zip required for this version");}
+   else{if(!rcand_nozip_slot(c))return rcand_error(why,cap,rcand_column(17),"zip must be - for this version");continue;}
+  }
   n=(int)tx_len(c->name[i],256);
   if(n<=0||!rcand_alnum(c->name[i][0]))return rcand_error(why,cap,rcand_column(7+2*i),"expected safe basename");
   for(j=0;j<n;j++)if(!rcand_alnum(c->name[i][j])&&c->name[i][j]!='.'&&c->name[i][j]!='_'&&c->name[i][j]!='-')return rcand_error(why,cap,rcand_column(7+2*i),"unsafe basename byte");
@@ -79,17 +101,18 @@ int rcand_load(const char *path,RcCandidate *c,char *why,int cap){
  *c=next;return 0;
 }
 int rcand_verify(const RcCandidate *c,const char *dir,int count,char *why,int cap){
- int i,j,n,ok,rc;size_t at=0;char detail[512];np_result r={0};char *argv[10];
+ int i,j,k,n,ok,rc,m=0,idx[7];size_t at=0;char detail[512];np_result r={0};char *argv[10];
  if(why&&cap>0)why[0]=0;
  if(!c||!dir||!dir[0]||(count!=4&&count!=7))return rcand_error(why,cap,"verify","expected candidate, directory and count 4 or 7");
  if(rcand_validate(c,why,cap)!=0)return -1;
  argv[0]="sha256sum";argv[1]="--";
- for(i=0;i<count;i++)argv[2+i]=(char *)c->name[i];
- argv[2+count]=0;detail[0]=0;
+ for(i=0;i<count;i++){if(i==5&&!rcand_has_zip(c->version))continue;idx[m]=i;argv[2+m]=(char *)c->name[i];m++;}
+ argv[2+m]=0;detail[0]=0;
  rc=np_run(argv,dir,0,15,&r,detail,sizeof detail);
  if(rc!=0){np_free(&r);return rcand_error(why,cap,"verify",detail[0]?detail:"sha256sum launch failed");}
  if(r.rc!=0||r.residue!=0||!r.out){np_free(&r);return rcand_error(why,cap,"verify","sha256sum failed or child residue");}
- for(i=0;i<count;i++){
+ for(k=0;k<m;k++){
+  i=idx[k];
   n=(int)tx_len(c->name[i],256);ok=r.outn>=at+(size_t)(67+n);
   if(ok){
    for(j=0;j<64;j++)if(r.out[at+j]!=c->sha[i][j])ok=0;
