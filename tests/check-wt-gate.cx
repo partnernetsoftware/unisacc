@@ -25,9 +25,14 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
 
-static char g_root[4096], g_tab[4400], g_keep[4400];
+static char g_root[4096], g_tab[4400], g_keep[4400], g_aw[4400];
 static int asserts, failed, g_need_restore;
-static void die(const char *s) { fprintf(stderr, "check-wt-gate: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static char g_w[4400];
+static void cleanup_scratch(void) {
+    /* every exit path (pass, fail, REFUSE) removes this run's own scratch directory */
+    if (g_w[0]) { char c[4600]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", g_w)) (void)system(c); g_w[0] = 0; }
+}
+static void die(const char *s) { fprintf(stderr, "check-wt-gate: REFUSE %s errno=%d\n", s, errno); cleanup_scratch(); exit(2); }
 static void restore_batches(void) {
     size_t kn = 0; char *kb;
     if (!g_need_restore) return;
@@ -56,11 +61,20 @@ static char *run(const char *args, int *rc) {
     np_free(&r);
     return out;
 }
-static int has(const char *s, const char *want) { return s && strstr(s, want) != 0; }
+static int has(const char *s, const char *want) {
+    size_t n, w, i;
+    if (!s) return 0;
+    n = strlen(s); w = strlen(want);
+    for (i = 0; i + w <= n; i++) if (!memcmp(s + i, want, w)) return 1;
+    return 0;
+}
 int main(int argc, char **argv) {
     char w[4400], sess_parent[4400], *o, *probe;
-    int rc, a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
-    if (argc < a + 2 || argc > a + 2) die("usage: ROOT SESSION_PARENT");
+    int rc, a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1, m_clean, m_probe;
+    if (argc != a + 3) die("usage: ROOT SESSION_PARENT clean|probe");
+    m_clean = tx_eqz(argv[a + 2], "clean");
+    m_probe = tx_eqz(argv[a + 2], "probe");
+    if (!m_clean && !m_probe) die("usage: mode must be clean or probe");
     if (!realpath(argv[a], g_root)) die("root");
     if (!realpath(argv[a + 1], sess_parent)) {
         /* run-batch hands {out}, a directory it owns; create it when this is the first batch there. */
@@ -68,19 +82,39 @@ int main(int argc, char **argv) {
         if (!realpath(argv[a + 1], sess_parent)) die("session parent");
     }
     {   const char *td = getenv("TMPDIR");
-        if (cx_fmt(w, sizeof w, "%s/wtgate-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(w)) die("scratch"); }
+        /* a run killed by its bound never reaches atexit: sweep this check's own stale scratch first --
+           only wtgate-* directories older than 10 minutes that no live process names or sits in */
+        {   char sw[9000];
+            if (cx_fmt(sw, sizeof sw, "for d in $(find '%s' -maxdepth 1 -type d -name 'wtgate-*' -mmin +10 2>/dev/null); do pgrep -f -- \"$d\" >/dev/null 2>&1 && continue; ls -l /proc/[0-9]*/cwd 2>/dev/null | grep -qF -- \"$d\" && continue; rm -rf -- \"$d\"; done", td && td[0] ? td : "/tmp")) die("cmd");
+            (void)system(sw); }
+        if (cx_fmt(w, sizeof w, "%s/wtgate-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(w)) die("scratch");
+        if (cx_fmt(g_w, sizeof g_w, "%s", w)) die("scratch");
+        atexit(cleanup_scratch); }
 
-    /* 1) a wave without the probe: STABLE, no WT_CHANGED */
+    /* all-waves in -run mode demands a native run-batch beside itself: build both natives once, scratch-local.
+       The probe clone of step 2 is made in the same parallel step (it only reads .git); the product launcher
+       is not tracked, so the clone gets its own copy of ROOT's.  rc: 3 = a native build failed, 4 = clone failed. */
     {   char a[9000];
-        if (cx_fmt(a, sizeof a, "./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/s1 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/s1 --light cx-cell cx-target", g_root, sess_parent, g_root, sess_parent)) die("cmd");
+        char cl[4600] = "true", cpl[4600] = "true";
+        if (m_probe && (cx_fmt(cl, sizeof cl, "git clone --local %s %s/pr", g_root, w) || cx_fmt(cpl, sizeof cpl, "cp ./unisacc.com %s/pr/unisacc.com", w))) die("cmd");
+        if (cx_fmt(a, sizeof a, "mkdir -p %s/nat && { sh ./unisacc.com tests/run-batch.cx -o %s/nat/run-batch & p1=$!; { %s; } >/dev/null 2>&1 & p2=$!; sh ./unisacc.com tools/all-waves.cx -o %s/nat/all-waves; r=$?; wait $p1 || r=3; [ $r = 0 ] || r=3; wait $p2 || r=4; [ $r != 0 ] || %s || r=4; exit $r; }", w, w, cl, w, cpl)) die("cmd");
+        o = run(a, &rc);
+        free(o);
+        if (rc == 4) die("local clone");
+        if (rc != 0) die("native executors"); }
+    if (cx_fmt(g_aw, sizeof g_aw, "%s/nat/all-waves", w)) die("paths");
+
+    /* 1) a wave without the probe: STABLE, no WT_CHANGED (mode clean) */
+    if (m_clean) {   char a[9000];
+        if (cx_fmt(a, sizeof a, "./tools/bound 55 %s init %s %s/s1 ./unisacc.com - >/dev/null && ./tools/bound 55 %s wave %s %s/s1 --light cx-cell cx-target", g_aw, g_root, sess_parent, g_aw, g_root, sess_parent)) die("cmd");
         o = run(a, &rc);
         ck(rc == 0, "clean-wave-exit-0", "");
         ck(has(o, "identity=STABLE") && !has(o, "WT_CHANGED"), "clean-wave-no-wt-change", "");
         free(o); }
 
     /* 2) negative control: mutate batches only inside a local clone, never the session tree */
-    {   char a[9000], pr[4400], ptab[4400];
-        const char *row = "wtprobe\tIMPLEMENTED\tcontract\ttests/cases/wtprobe-batch.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/wtprobe-batch.cx\t-\tcontract.core-opkinds\trc0:WTPROBE\tproduct\n";
+    if (m_probe) {   char a[9000], pr[4400], ptab[4400];
+        const char *row = "wtprobe\tIMPLEMENTED\tcontract\ttests/cases/wtprobe-batch.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/wtprobe-batch.cx\t-\tcontract.core-opkinds\trc0:WTPROBE\tproduct\tdaily\n";
         size_t bn = 0, kn0 = 0;
         char *body, *live;
         int inserted = 0;
@@ -88,10 +122,7 @@ int main(int argc, char **argv) {
         live = cx_read(g_tab, &kn0);
         if (!live) die("batches read");
         if (cx_write(g_keep, live, kn0)) { free(live); die("keep write"); }
-        if (cx_fmt(a, sizeof a, "git clone --no-hardlinks --local %s %s >/dev/null 2>&1", g_root, pr)) { free(live); die("cmd"); }
-        o = run(a, &rc);
-        free(o);
-        if (rc != 0) { free(live); die("local clone"); }
+        /* the clone was made alongside the native builds above */
         body = cx_read(ptab, &bn);
         if (!body) { free(live); die("pr batches"); }
         {   size_t at = 0, cap = bn + strlen(row) + 1;
@@ -111,7 +142,7 @@ int main(int argc, char **argv) {
             if (cx_write(ptab, outb, strlen(outb))) { free(outb); free(body); free(live); die("pr batches write"); }
             free(outb); }
         free(body);
-        if (cx_fmt(a, sizeof a, "mkdir -p %s/out && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/out/s2 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/out/s2 --light wtprobe cx-cell", pr, pr, pr, pr, pr)) { free(live); die("cmd"); }
+        if (cx_fmt(a, sizeof a, "mkdir -p %s/out && ./tools/bound 55 %s init %s %s/out/s2 %s/unisacc.com - >/dev/null && ./tools/bound 55 %s wave %s %s/out/s2 --light wtprobe cx-cell", pr, g_aw, pr, pr, pr, g_aw, pr, pr)) { free(live); die("cmd"); }
         probe = run(a, &rc);
         {   size_t tn = 0; char *tb = cx_read(g_tab, &tn);
             ck(tb && tn == kn0 && !memcmp(live, tb, kn0), "batches-sha-unchanged", "");
@@ -124,15 +155,12 @@ int main(int argc, char **argv) {
         ck(1, "table-restored", ""); }
 
     /* 3) the tree is clean again */
-    {   char a[9000];
+    if (m_probe) {   char a[9000];
         if (cx_fmt(a, sizeof a, "git -C . status --porcelain -- src/_wt_probe.cx")) die("cmd");
         o = run(a, &rc);
         ck(rc == 0 && (!o || !o[0]), "probe-file-removed", "");
         free(o); }
-    {   char a[4400];
-        if (cx_fmt(a, sizeof a, "rm -rf %s", w)) die("cmd");
-        o = run(a, &rc);
-        free(o); }
+    cleanup_scratch();
     printf("WT_GATE\tassertions=%d\tfailed=%d\n", asserts, failed);
     return failed ? 1 : 0;
 }
