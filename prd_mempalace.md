@@ -200,17 +200,21 @@ B. 冻结到公开的时间线(整链 3752 s 为 real6 实测;发布 12 步约 2
 - 装新产品后(按序,前两条是门):(1) `UNISACC_REQUIRE_N15C=1 sh ./unisacc.com tests/phase-timing-stamps.cx -- $PWD ./unisacc.com /tmp/ptsNEW`(目录须不存在)-> rc 0、无 FAIL、无 UNVERIFIED、obj.miss/obj.hit/obj.chg 全 PASS;(2) `sh ./unisacc.com tests/cx-namespace.cx` -> failed=0,连同 module-units 与 F4 清单里"需新产品"的批在快照根并行转真;(3) 专用缓存根重测 E3TRIM 曲线 0/2000/4000 项与满预算各 n=3、`tools/run-startup-bench.cx` n=3,入 build/speed-baseline.tsv(装后第一条命令的耗时不入基线,F21);(4) C2a 默认根口径:不设缓存变量换 TMPDIR 第二次命中;(5) 之后才做第 5 条大扫除。
 
 C. 整链 F9 门(2400 s)现状与拆分方案(现状实测;方案全为推算,待 Q1 至 Q3 只读取数)。
-- 现状(实测,build/phase-times.tsv 第 228 至 243 行,real6):整链 3752 s,差额 1352 s。g2 lnx objects 725/727 s、g3 734/734 s(x86_64 与 arm64 两道并发,g2 与 g3 之间串行),合计占 1461 s 即 39%。每道内部是两个串行批:obj-N 44 键批墙钟约 360 s,加 closure-prepare 约 23 s,加 closure-m 48 键批约 343 至 348 s(checkpoint.tsv 第 407、495 至 546 行)。道宽 4(build/chain-phases.tsv 第 7 列),本机 16 核。另:osx/win 六道 g2 加 g3 合计 787 s(148.7、134.2、100.9、100.6、77.3、75.8、74.9、74.6);p3-guard 40 相各约 4.5 s 加 init 36.5 s 约 218 s(checkpoint.tsv 第 321 至 361 行)。snap 到 p3 的串行前段在 real6 的合计未求和(0.0.58 链为 2509 s,phase-times.tsv 第 196 行,不可直接沿用),UNMEASURED。
+- 现状(实测,build/phase-times.tsv 第 228 至 243 行,real6):整链 3752 s,差额 1352 s。g2 lnx objects 725/727 s、g3 734/734 s(x86_64 与 arm64 两道并发,g2 与 g3 之间串行),合计占 1461 s 即 39%。每道内部是两个串行批:obj-N 44 键批墙钟约 360 s,加 closure-prepare 约 23 s,加 closure-m 48 键批约 343 至 348 s(checkpoint.tsv 第 407、495 至 546 行)。道宽 4(build/chain-phases.tsv 第 7 列),本机 16 核。另:osx/win 六道 g2 加 g3 合计 787 s(148.7、134.2、100.9、100.6、77.3、75.8、74.9、74.6);p3-guard 40 相各约 4.5 s 加 init 36.5 s 约 218 s(checkpoint.tsv 第 321 至 361 行)。snap 到 p3 的串行前段在 real6 实测 724 s(heartbeat.tsv:snap end 1794644777 至 p3 end 1794645501;其中 p3-guard-init 加 40 个 guard 为 1794645238 至 1794645421 的 183 s 段,余为 jobs-tool、jobs-gen、warmup 等,各段未再细分;摘要 $CLAUDE_JOB_DIR/tmp/heartbeat.tsv 与 hb-sel.tsv)。
 - 拆分候选(按预期收益排;同用 16 核,S1 与 S2 二选一不叠加):
 
 | 号 | 做法 | 预期省(推算) | 前提与风险 | 取数 |
 |---|---|---|---|---|
-| S1 | 道内 obj-N 批与 closure-m 批改并行(两批各宽 4,两道共 16 路) | 每代约 343 s,两代约 686 s | closure-m 不读 obj-N 的产物;16 路占满核后单键变慢 | Q1 |
-| S2 | 道宽 4 提到 8(两道共 16 路) | 线性时每代约 363 s,两代约 726 s | 单键是否受内存或磁盘限制未知 | Q2 |
-| S3 | osx/win 六道与 lnx 对象相重叠执行(若现为其后串行) | 上限 787 s | 现在是否已重叠未知;与 S1 或 S2 抢核 | Q3 |
-| S4 | p3-guard 40 相并行(宽 8) | 约 158 s | 守卫间无共享写 | 读 chain-phases.tsv 依赖列 |
-- 拼算(推算):3752 减 S1 约 686 减 S4 约 158 得约 2908;再需 S3 兑现 508 s 以上才到 2400。S3 若已重叠则缺口须从串行前段取,故 Q3 与前段求和先行。结论:单靠对象相拆分到不了 2400 s,至少要 S1 或 S2 加 S3 或前段之一。
-- 只读取数任务(非产品输入;用 .cx 读 /tmp/unisacc-session-build-lr0060/chain-real6/checkpoint.tsv 与 log/real6.out;写域 build/phase-times.tsv 新增行;各 15 分钟内;收据在 /tmp,大扫除前必须取完):Q1 读 tools/candidate-chain.cx:1411 至 1420 与 closure-prepare 的输入清单 -> 写明 closure-m 是否依赖 obj-N(是或否加文件行);Q2 对 obj-N 批求单键 CPU 与墙钟之比(收据无则记 UNMEASURED 并在 pkg-gaps 记缺口)-> 给出宽 8 的预期批墙钟;Q3 从 real6.out 的 RECEIPT 时间戳求各道起止 -> 一张重叠表,回答 osx/win 是否与 lnx 并发;另求 snap 至 p3 的墙钟合计一行。验收:每项在 phase-times.tsv 有 MEASURED 行或具名 UNMEASURED。
+| S1 | 道内 obj-N 批与 closure-m 批改并行(两批各一套并发) | 每代最多约 343 s,两代约 686 s(推算上限;shared fp 目录的 `.chain-steps` 并发写未验证) | Q1 实测:closure-m 不依赖 obj-N 的产物(closure-list 只读快照源、包、构造器,见 tools/candidate-chain.cx:1306 至 1312、tools/entry-build.cx:1117 至 1121,chain-phases.tsv 中 closure-prepare 依赖 gen1-lnx-x86_64 而非 obj);两批同写 fixedpoint/gN/<slug> 目录,需核写域 | Q1 已取 |
+| S2 | 道内键并发(不是把表里的"宽 4"提到 8,见下 Q2:收据里键是逐个顺序调用) | 道内键并发 8、两道共 16 路:每道每代约省 418 s,两代约 836 s(推算:obj 批 130 s 加 230/8,closure 批约 98 s 加 247/8,开销假定不并行) | CPU 占用未测(UNMEASURED);fp_commit 是否允许同相多键并发要读源核 | Q2 已取 |
+| S3 | osx/win 与 lnx 对象相重叠 | 上限约 819 s(gen1 osx/win 约 419 s 可与 g2 lnx 重叠,g2 osx/win 约 400 s 可与 g3 lnx 重叠;g3 osx/win 约 387 s 因依赖 g3-lnx-x86_64 不可重叠);比原估 787 s 高是因含 gen1 | Q3 实测:现全部串行,无任何重叠;依赖允许 | Q3 已取 |
+| S4 | p3-guard 40 相并行(宽 8) | 约 160 s(183 s 乘七分之八除一;heartbeat 实测每相约 4.6 s) | 守卫间无共享写,未核依赖列 | 读 chain-phases.tsv 依赖列 |
+- 拼算(推算,据 Q1 至 Q3 修正):3752 减 S1 约 686 或 S2 约 836(二选一)减 S4 约 160,得约 2756 至 2906;再减 S3 的 gen1 部分约 419 得 2337 至 2487,再加 g2 osx/win 约 400 得 1937 至 2087。故 S2 加 S4 加 S3 的 gen1 部分(约 2337)即可低于 2400,S1 路线则需再兑现 S3 的 g2 osx/win 部分。争用核数、写域冲突与单键变慢均未测,以上全是推算上限,须用 real6 留存件预演(F11)。
+- Q1 至 Q3 取数结果(2026-11-14,heartbeat.tsv、receipt-*.txt、checkpoint.tsv、real6.out 摘要在 $CLAUDE_JOB_DIR/tmp;原件 /tmp/unisacc-session-build-lr0060/chain-real6/ 未动;小工具 $CLAUDE_JOB_DIR/tmp/q.cx、q2.cx,仓外 .cx):
+  - Q1 实测:否,closure-m 不依赖 obj-N 的产物,依据同 S1 行(candidate-chain.cx:1306 至 1312,g2_closures 在 obj 批之后才调用只是代码顺序);checkpoint.tsv 无 CPU 列。
+  - Q2:CPU 与墙钟之比 UNMEASURED(收据无 CPU 时间;应在 pkg-gaps 记缺口:need 每键 CPU 时间,临时做法 receipt 的对象 ns 作下限,建议归属 sysx)。可得出的替代量(实测,fixedpoint/g2 与 g3 四份 receipt.txt):每道每代 92 个键各是独立一次 ENTRY_BUILD_PARALLEL 调用(每次 1 键),墙钟总和 obj 前 44 键 230.4 s、全 92 键 477.7 s(四道 472 至 478 s),其中对象编译自身 ns 总和 103 s(占 21.7%,单键约 1.1 s,调用墙钟约 5.2 s);obj 批实测墙钟 359 s、closure 批约 343 至 348 s,批墙钟大于调用墙钟总和(obj 230.4 对 359.7、比值 0.64),即道内键是顺序执行、有效并发小于 1;表里的"道宽 4"并未形成键并发。批内约 130 s(obj)与 98 s(closure)不在任何键调用内,构成未测。宽 8 预期批墙钟见 S2 行,为推算。
+  - Q3 实测(heartbeat.tsv 的 epoch 秒,相对 real6.start 1794644704):前段 chain 起 +20、snap 止 +73、p3 止 +797,snap 到 p3 共 724 s;gen1 lnx 与 gen1 osx/win(单进程顺序)约 +797 至 +1356,共 559 s,其中 osx/win 约 419 s;g2 lnx x86_64 与 arm64 两道同起 +1356 同止约 +2081(各约 725 s),g3 lnx 两道同起 +2108 止 +2867(各约 734 s),两道并发而 g2 与 g3 之间串行;g2 osx/win 四相在 g3 lnx 之后(wf-prep-g2 止 +2929,依赖 g2-lnx-x86_64 但仍排在 g3 lnx 后),g3 osx/win 四相在其后,至 +3752 收尾(含 compare、cache-manager、pack)。结论:osx/win 与 lnx 对象相从无重叠,全部由主进程 3271414 顺序执行,12 道的并发只存在于 lnx 两道之间。
+- 只读取数任务 Q1 至 Q3 已完成(见上);未入 build/phase-times.tsv 新行(本次写域仅限本块),数字可用上面的 heartbeat.tsv 摘要复算。
 - 改链工具(candidate-chain、chain-phases 事实表)属链工具非产品输入,但改后第一条整链即 0.0.64 的候选链,新相宽须先用 real6 留存件单独预演(F11);2400 s 门仍按"连续两条都不高于"判(F19)。
 
 D. 0.0.64 起手与类别排序(决定,改动第 4 条的先后)。
