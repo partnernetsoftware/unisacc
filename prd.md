@@ -557,24 +557,10 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ## 9. 当前状态与路线
 
 <a id="work-tree"></a>
-### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
+### 9.1 思维树(已迁出)
 
-**当前已发布：0.0.57**（tag `v0.0.57` -> `99fc0b48a2`，候选表 `release/candidate.tsv`，发布说明 [plans/release-notes-0.0.57.md](plans/release-notes-0.0.57.md)）。APE sha256 前缀 `c116a52f`（6,648,004 B）；构造源 `60acc817b8`，源 SID `25e41517`；整链重建一轮，链内 compare 全 same。产品字节与 0.0.56 相同，仅版本串不同；唯一产品输入改动是 basered 基线红清零。同候选六目标原生 CI 运行 43094459755 QUALIFIED 42 / 0 / 0 / 0（pass / fail / not_run / invalid）。公开无认证读回 6/6，`--version` 为 `unisacc 0.0.57`。s9 提交档实测：选 154，PASS 150、FAIL 2、UNKNOWN 2，NOT_FULL；FAIL 为 `s9-nightly-run-pass`、`s9-nightly-run-fail`（与 0.0.56 同批同检查项，s9split 的修复在真实会话未生效），UNKNOWN 为 `register-metadata-rollback`、`candidate-chain` 的 55 秒超时，四批原因未定，未修，未重跑。release-decide 步 4 记 FAIL 重裁，**全批资格 NOT_QUALIFIED**（unknown=0 fail=1）；s9 daily 713 批与 release 41 批至今没有跑通过一次。
+当前版本、阻塞、下一动作与协同规则只写在 [prd_mempalace.md](prd_mempalace.md)(项目所有者 2026-11-14:记忆宫殿是唯一协同入口,`agentwork/` 退役)。本节不再记当前状态,避免两处不一致。
 
-**本机已装根**：0.0.57 APE（`c116a52f`，`install-ape` 写 `plans/root-identity.md` 身份块与 `ape-receipt.txt`）。
-
-**当前版本：0.0.58，进行中**（计划见 `plans/v0.0.58-unisacc.md`，定稿于 2026-11-12，基线 main `1e269c53bb`）：
-- 唯一产品改动 P1：规划器单源（prd_cx.md 55-1）。`cx/compiler/cxmod.cx` 由 `cx/cx0/plan.cx` 标记区经 `tools/cx0-extract.cx --target product` 生成并受逐字门约束，`CXM_MAXU` 三处同取 128 并入 `exec/facts/limits.tsv`，壳剖面表 `exec/facts/cx0-shell.tsv`。产品必然换 SID，六片不再与 0.0.57 同字节；P1 不含 55-2、55-3、55-4。
-- 工具与测试：T1 G2 预算分批、T2 chain-run 逐相预算（K10）、T3 按目标 4 路并行（K9）、T4 字面锚点禁用（anchorban）、T5 发布尾部自动化、T6 资产齐全后触发 CI（assetguard）、T7 safe-ff、T8 release-tidy、T9 版本度量（metrics）、T10 本文回写、T11 续跑复核开销与分段、T12 s9 提交档四批修复（s9red）、sweep。
-- 目标：冻结到公开不超过 100 分钟（硬线 120）、人工介入 0、chain-run 零接触 PASS、单次操作不超过 300 秒。即使全部达标，全批资格仍是 NOT_QUALIFIED。
-- 任务以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准。
-
-阻塞（2026-11-12）：
-- **全批资格**：s9 daily / release 档未跑通过；提交档 0.0.57 为 150 / 2 / 2。
-- **链零接触未验**：T1 至 T3、T11 尚未落 main，R3 整链彩排尚未做；`g2-budget-gen` 批次门内 FAIL 原因未定。
-- **补丁队列冲突**：anchorban 与 g2batch 在 `tools/check-chain-argv-check.cx` 真冲突，s9red 与 k9 在 `tools/check-candidate-chain.cx` 真冲突，须按序重导。
-
-往期发布（0.0.49 至 0.0.56）的身份与经过见各版发布说明与 [prd_release.md](prd_release.md)；2026-11-11 自本节删去的旧段落索引在 [prd_hist.md](prd_hist.md) 末节。
 
 <a id="product-map"></a>
 ### 9.6 产品全景表（生成块；`tools/product-map.cx -- --write` 重算，勿手改；位置在 §9.1 与 §9.2 之间是历史原因）
@@ -667,25 +653,10 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 <!-- product-map:end -->
 历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `agentwork/ledger.tsv`。
 <a id="memory-palace"></a>
-### 9.2 记忆宫殿（索引；此处是唯一索引，正文各节只指向本表）
+### 9.2 记忆宫殿(索引)
 
-| 房间 | 当前事实 | 入口 |
-|---|---|---|
-| 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
-| 当前发布 | 0.0.57（§9.1），tag v0.0.57 -> 99fc0b48a2；旧候选资格不迁移 | [0.0.57 发布说明](plans/release-notes-0.0.57.md)、[prd_release.md](prd_release.md) |
-| 当前版本 | 0.0.58 进行中（P1 规划器单源 + 工具）；0.0.59 = P59 实例化 + 门批量化；0.0.60 = P60 CX0 事实表 + 列车式发布 | §9.1、§9.5、[prd_cx.md](prd_cx.md) §6、`agentwork/items.tsv` |
-| 结构总表 | 五层、六片、7 + 1 流、网四口径、执行器、格式、事实表、构造链、测试 | §3（唯一权威）；cx 侧在 [prd_cx.md](prd_cx.md) |
-| 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
-| 流/网 | 7 + 1 流；18 金表网 / 20 cx 侧模块 / 42 构造网 / 40 模型 | §0、§3.3、§3.4 |
-| 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
-| 分层 | 三套编号（术语层 T / 结构层 L0-L4 / 模块层 cx-L0..3）见 §0；模块层与包层见 prd_cx.md §3 | [plans/cx-layers.md](plans/cx-layers.md) |
-| 棘轮 | 13项，以`tools/ratchets.cx`末行为准；新增第14号net-deps，toolsloc已退役；工具行数只统计 | `tools/ratchets.cx`、§2.2 |
-| 事实表 | 事实 -> 生成器（须带 `--check`）-> 产物 | `exec/facts/`、§2.4 |
-| 构造图与相位 | `build/graph.tsv`、`build/hardwire.tsv`、候选链 35 相位 | §3.7、§2.2 |
-| .cx lint | `tools/cx-lint.cx` R1（第二真相源，只报告）/R2（子进程时限与 `--`，precommit 拦截）；check 41（8a07e8e119） | §2.2 |
-| 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按项目所有者新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/) |
-| 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
+索引与正文已迁入 [prd_mempalace.md](prd_mempalace.md);本节只留指针。
+
 
 ### 9.3 往期发布与历史（索引）
 
