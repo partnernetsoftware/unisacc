@@ -175,20 +175,30 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 
 | 号 | 目标 | 写域 | 验收命令 -> 预期值 | 分钟 |
 |---|---|---|---|---|
-| W1 | F 造法演练(避开 read-tree 的树取法首次执行) | 仅 /tmp 下全新目录与悬空对象 | 用 0.0.61 数据复演 git archive、init、提交、fetch、commit-tree -> 所得提交的树等于 `git rev-parse d4b3bf72f7^{tree}` | 10 |
-| W1 结果(2026-11-14 已验证) | 在 $CLAUDE_JOB_DIR/tmp/w1 复演:`git archive 03c4d5df9d` 解出、用 `git show d4b3bf72f7:release/candidate.tsv` 覆盖表、git init、`git add -f -A`、提交、`git fetch --no-write-fetch-head`、commit-tree -p fbdc99ca -p 03c4d5df9d | 树 7127d64b72(对上 d4b3bf72f7^{tree});父提交两个(fbdc99ca、03c4d5df9d)对上;`git diff --stat 03c4d5df9d F` 只 release/candidate.tsv 一行对上;固定作者 f61 <a@b>、日期 1794628277 +0800 与说明后,提交号 d4b3bf72f7ae999c96c0fa15d8030a7c2d4de073 逐位相同;v0.0.61 与 v0.0.61-src 均指该提交。对不上之处:(1) 不带 -f 的 `git add -A` 因 .gitignore 丢 6 个已跟踪文件(.claude/hooks/guard-edit.ts、.claude/settings.json、research/c37-host-adapter.json、tests/.register.lock、tests/fixtures/elf-text/bridge_arm64.o、bridge_x86_64.o),树变成 3179d0c706,步 2 必须用 `git add -f -A`;(2) 0.0.62 不带固定作者与日期,提交号自然不同,以树与父提交为验收。仓库 refs 前后 for-each-ref 摘要相同。未覆盖:真实 0.0.62 的 candidate.tsv 编辑未做 | 10 |
-| W2 | SRC_DIR 与 CHAIN 文件名映射 | 发布步骤节步 4 一句 | 读 tools/release-run.cx 第 9 至 40 行,对 chain-real6 已有产物名只读 ls 比对 -> 十个名字各有来源路径或标明链尾才产生 | 10 |
-| W2 结果(2026-11-14 已核) | release-run --pack 要 SRC_DIR 下十个名字(p3.pkg、win-x86_64、lnx-x86_64、lnx-arm64、osx-x86_64、osx-arm64、win-arm64、cache-manager-x64、cache-manager-arm64、sources.tsv,release-run.cx 第 33 至 34、130、375 行)。chain-real5 与 chain-real6 链目录顶层十个名字均不存在(ls 实测 no),需建符号链接目录。来源以 chain-real5/ape-final/ape-receipt.txt 为准:p3.pkg 即 CHAIN/compiler.p4.pkg(存在);lnx-x86_64 即 CHAIN/fixedpoint/g3/lnx-x86_64/entry.elf(real5 存在);lnx-arm64 即 CHAIN/fixedpoint/g2/lnx-arm64/entry.elf(real5 存在);osx-x86_64、osx-arm64、win-x86_64、win-arm64 四片来自 gen1 的 image(real5 来自 ~/.cache/unisacc/chains/snap/b418cb5d86-25fdbc68/out/chain/gen1/{osx-x86_64-b2,osx-arm64-b2,win-x86_64-image,win-arm64-image}/image,均存在);cache-manager 两份 real5 来自 borrowed-cm(两份存在),real6 起为 CHAIN/cache-manager/x64、arm64(链尾产生,现无该目录);sources.tsv 在 real5 与 real6 链目录均无,tools 内未找到生成者(0.0.61 的 /tmp/cc-rel61 类目录已不存在),缺其来源,须先查 candidate-chain 或 release-build 是否输出 sources_sha256 再定。chain-real6 当前(链未完成):只有 compiler.p4.pkg、gen1/lnx-arm64/entry.elf、gen1/lnx-x86_64/entry.elf,无 fixedpoint、cache-manager、ape-final;real6 的 lnx 片是否仍取 fixedpoint/g3 与 g2 须以 real6 完成后的 ape-receipt.txt 为准。另:整链若自带 pack,CHAIN/ape-final/unisacc-next.com 已生成,步 4 的 release-run --pack 仍是重打包与回填,不是取代 | 10 |
-| W3 | slice-migration-gen 旧记述复核 | 阻塞节该行 | `git ls-files cx/compiler/frames.cx` 与工具内引用 -> 行改为已消或保留并附当前文案 | 5 |
-| W4 | tools/status.cx 夹具重审(曾被 sed -i 改) | tools/check-status.cx 及其夹具 | `git log -p` 对照夹具内容,check failed=0 | 15 |
-| W5 | lnx/arm64 netmsg 是否在 CI 作业清单(F15) | 只读,结论写任务表 N14 行 | check-cx-sys-netmsg、check-ext-net-udp 在 candidate-native.yml 的 lnx/arm64 清单内,否则登记 DEFERRED | 10 |
-| W6 | rollback.txt、evidence.tsv 0.0.62 骨架 | $CLAUDE_JOB_DIR/tmp/rel62 下草稿(步 8 才入库) | evidence 八行齐,第 2、4、7、8 行占位 UNKNOWN;rollback 含草稿与公开后两段 | 10 |
-| W6 结果(2026-11-14 已备骨架,未入库) | $CLAUDE_JOB_DIR/tmp/rel62 下 rollback.txt(草稿删除、取消 run、revert X、公开后退草稿并 Latest 回 v0.0.61、删 v0.0.62 与 v0.0.62-src 远端与本地标签、install-ape 装回 0.0.61 sha c4c47ecb)、evidence.tsv(八行全 UNKNOWN,路径占位,第 4 行为 oneshot62F/evidence.tsv,CI 号写 TBD)、decision.txt(由 release-decide --evidence 读骨架生成,rc=0,八步 UNKNOWN,unknown=8 fail=0,NOT_QUALIFIED;命令未跑只写)。rollback 内 candidate commit、run 号、revert 提交号为 TBD,未编造;install-ape 旧件路径假定 ~/.cache/unisacc/ape-0.0.61/unisacc.com,须步 11 前确已复制 | 10 |
-| W7 | 快照根复验一条命令的工具(F13 提前动作,若未造) | tools 下新工具加 check 与批次行(先查 git log --all) | check failed=0;对 2 批 light 夹具出 PASS 行 | 15 |
+| 已落地(折叠) | W1(F 造法复演与 d4b3bf72f7 逐位相同,步 2 须 `git add -f -A`,050b1668d2)、W2(SRC_DIR 十名映射,已做成 tools/pack-srcdir.cx,57aa64bdc6;sources.tsv 来源仍未查明)、W6(rollback、evidence、decision 骨架在 $CLAUDE_JOB_DIR/tmp/rel62,未入库,b932ecb3f5) | - | 见各提交说明 | - |
+| W3 | slice-migration-gen 旧记述复核(未见结果,阻塞节该行仍写"未复核") | 阻塞节该行 | `git ls-files cx/compiler/frames.cx` 与工具内引用 -> 行改为已消或保留并附当前文案 | 5 |
+| W4 | tools/status.cx 夹具重审(曾被 sed -i 改;未见结果) | tools/check-status.cx 及其夹具 | `git log -p` 对照夹具内容,check failed=0 | 15 |
+| W5 | lnx/arm64 netmsg 是否在 CI 作业清单(F15;未见结果,N14 行未更新) | 只读,结论写任务表 N14 行 | check-cx-sys-netmsg、check-ext-net-udp 在 candidate-native.yml 的 lnx/arm64 清单内,否则登记 DEFERRED | 10 |
+| W7 | 快照根复验一条命令的工具(F13;tools/ 下已有 snap-residue.cx、snap-tool-drift.cx,是否覆盖"一条命令分波复验"未核) | tools 下新工具加 check 与批次行(先查 git log --all) | check failed=0;对 2 批 light 夹具出 PASS 行 | 15 |
 
   必须等候选产品:cx-namespace 三拒绝与别名、模块身份(osx-sentinel)、s9 commit 档、同候选 CI、速度基线四工具、check-stdio-buffer 六目标(只能经 CI)、productpkg-dir-identity、全集批次复验。无法在本版清零、只能如实入说明:osx cache-manager 在 macOS 上的运行与签名(无主机)、win 批次、daily 与 release 档 s9、wt-gate-probe。
 - 装后验证序列(B5 展开;V1 至 V4 以候选件路径为参数,CI 等待期即可跑,不必等步 11;未实跑不记 PASS):V1 `tools/release-ape.cx -- smoke W/pack/ape/unisacc-next.com` -> failed=0 且版本 0.0.62;V2 `tests/cx-namespace.cx -- ROOT 候选件 OUT` -> failed=0,UNVERIFIED needs-new-product 标注全部转真;V3 模块身份:`osx-sentinel -funit` 实编 rc=0,且 check-loader-special、check-tool-self-path、test-loader 三个 sy_env 重复导出文件规划通过(P1 被拒数 15 -> 11);V4 tests/module/units.cx 的标注转真;V5(步 11 后)productpkg-dir-identity 批转绿;V6 s9 commit 档(与 CI 并行,见上);V7 快照根全集 light 波(约 93 波,推算,夜间跑,占满核心)。速度补测排序:run-startup-bench(三次不到 1 分钟)插在 V1 之后、s9 起之前(整链刚停、机器最静的一刻);coldcompile 三文件各 3 轮、check-bench-gencode、speed-probe 排在公开之后、V7 与大扫除之前,串行,load1 低于 2 才当门,否则标 noisy 并在发布说明写 UNMEASURED,不为等安静窗口推迟公开。先测速再大扫除(见 F18)。
 - V1 至 V4 脚本已备(未入库):`sh $CLAUDE_JOB_DIR/tmp/verify-candidate.sh 候选APE路径 [ROOT]` 一条命令跑 V0 身份、V1 release-ape smoke、V2 cx-namespace(failed=0 且 unverified=0 才 PASS,否则 UNVERIFIED 并列项)、V3 units、V4 module check,逐步一行 `Vn 状态 原因 耗时`,每步限 60 秒、失败不终止;V5 标 AFTER_INSTALL、V6 标 LONG 只列命令。0.0.61 干跑:V0/V1/V3/V4 PASS,V2 UNVERIFIED(5 项需新产品),共 52 秒;V4 内部写死 ./unisacc.com,候选仅作启动器。
+
+公开后第一小时(fable 第四轮,2026-11-14 17:26;T0=步 9 公开完成。现状实测:17:25 real6 仍在途,PID 3271413 存活,已跑 3641 s(`date +%s` 减 log/real6.start 的 1794644704),已超 real5 的 3538 s,real6.out 末尾在 gen3 win-x86_64 段,无 real6.rc;GitHub Latest 仍为 0.0.61(`gh release list`)。故下表全为计划,分钟数除注明实测外均为推算;未实跑不记 PASS):
+
+| 号 | 动作 | 写域 | 验收命令 -> 预期值 | 分钟 | 依赖与并行 |
+|---|---|---|---|---|---|
+| H1 | 读回(步 10) | W/dl、evidence.tsv 第 8 行 | `sha256sum W/dl/unisacc.com` 等于 candidate.tsv 的 ape_sha256;`--version` 为 0.0.62 | 3 | 串行首步;同时核 `~/.cache/unisacc/ape-0.0.61/unisacc.com` 的 sha 为 c4c47ecb(目录 17:25 实测存在,内容未核),这是装机回滚的前提 |
+| H2 | 装机(步 11) | 仓根 unisacc.com、ape-receipt.txt、plans/root-identity.md | install-ape dry-run 非 REFUSE,再 `--write`;`sh ./unisacc.com --version` 为 0.0.62 | 5 | 必须串行且独占共享根:先 `pgrep -af 'affected|s9-|run-batch'` 无在途并在本文件记一行(见 F21);H1 之后 |
+| H3 | V5 与装机提交 | 同 H2 的两个文件 | `tools/affected.cx --ids productpkg-dir-identity --run` -> PASS rc=0 | 3 | H2 之后串行 |
+| H4 | V2 至 V4 在已装根上复跑 | 只读;结果写阻塞节"新产品验证"行与 tests 的 UNVERIFIED 标注(B5 写域) | `sh $CLAUDE_JOB_DIR/tmp/verify-candidate.sh ROOT/unisacc.com` -> V0 至 V4 全 PASS,V2 的 unverified 5 -> 0;P1 被拒数 15 -> 11 | 2(0.0.61 干跑实测 52 s) | H2 之后;与 H5 的只读部分、H8 的只读计划并行;公开前已用候选件跑过且同 sha 则只补 V3 的 osx-sentinel 实编 |
+| H5 | N8 取数与留证(必须早于 H8 的删除) | build/phase-times.tsv 新增行 | 对 chain-real6 的 checkpoint 用 .cx 求和 -> real6 各相实测行入表,g2/g3 对象相单键三分有数;把 chain-real6 的 ctrl/unisacc.com.dev/entry.elf 复制到 ~/.cache/unisacc/ 留给 chain-precheck(F11) | 10 | H1 之后即可,只读,与 H2 至 H4 并行 |
+| H6 | 速度基线补测 | build/speed-baseline.tsv(加条目数与 load1 两列,F18) | 专用 UNISACC_E3CACHE 目录下 run-startup-bench 3 次、coldcompile 三文件各 3 轮、check-bench-gencode、speed-probe 各出行;load1 低于 2 才当门,否则标 noisy | 12(run-startup-bench 不到 1 分钟为实测口径,其余推算) | H2 之后;独占机器,期间不并行任何编译或批次,只允许 H7 写文档;必须早于 H8 |
+| H7 | 发布说明回填 | plans/release-notes-0.0.62.md 的 TBD 15 行、GitHub release 正文(`gh release edit v0.0.62 --notes-file`) | `grep -c TBD plans/release-notes-0.0.62.md` -> 0 或余数逐条写明 UNMEASURED 与原因;与 H3、H6 的提交一并带上 | 10 | 依赖 H4、H6 的数;写文档部分可与 H6 并行 |
+| H8 | 大扫除(步 12) | ~/.cache/unisacc、/tmp 下自己的产物;本文件"当前发布与版本" | `tools/sweep-plan.cx` 的 DELETE 行删后复跑,DELETE 行数 0;KEEP 须含 patches-0.0.63、ape-0.0.61、H5 留的 entry.elf(现工具 KEEP 名单无前两项,见 F20,删除前人工剔除) | 10 | 只读计划可提前并行;删除必须最后,串行在 H5、H6 之后 |
+
+必须串行的只有三处:H1 -> H2 -> H3(共享根身份);H6 独占机器;H8 的删除在 H5、H6 之后。合计关键路径 3 + 5 + 3 + 12 + 10 + 10 = 43 分钟(推算),余量 17 分钟用于:对当前 HEAD 重跑七个补丁的 `git apply --check`(F20)、起 63A 的 N15-a 与 e3trim 两个补丁入库前复核。V6(s9 commit 档)按决定 5(c) 应在公开前出第 4 行,公开时若为 UNKNOWN 则本小时内在候选快照根补跑(约 6 至 8 分钟,不得与 H6 重叠);V7 夜跑。
 
 可派任务树(2026-11-14;每项 15 分钟内可交,写域互不相交;tests/batches.tsv 登记行一律走 `tools/commit-own.cx --keyed`;新建工具先 `git log --all --oneline -- tools/NAME`;预期值是验收门,未实跑不记 PASS)。开工条件:今=已装产品即可;候选=补丁今天可写,验收要含它的新产品;链=要整链窗口(同一时刻只一条)。
 
@@ -209,7 +219,7 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 | B4 | 0.0.62 候选整链 real6 | 私有构造根 | `tools/candidate-chain.cx -- --rev REV --out 全新目录 --parallel 12 --cache-manager-osx X64 ARM64` -> RELEASE_APE PACKED,墙钟不高于 3538 s,超 5400 s 即停 | 后台有界 | 链 |
 | B5 | 需新产品的断言转真 | tests/cx-namespace.cx、tests/module/units.cx 的 UNVERIFIED 标注 | `sh ./unisacc.com tests/cx-namespace.cx -- ROOT ROOT/unisacc.com OUT` failed=0;`osx-sentinel -funit` 实编 rc=0 | 15 | B4 后 |
 
-,2026-11-14;按"分而治之":工作流按耦合边界切,每版只含一类产品输入大改)
+## 进化路线(fable 编排,2026-11-14;按"分而治之":工作流按耦合边界切,每版只含一类产品输入大改)
 
 版本里程碑:
 - 0.0.62(库包与运行库类):封网清零 new 行(netraw 六参改为新增 cx/sys/netmsg.cx 走 sendmsg/recvmsg 三参,不扩 `__syscall6` 内建,不改冻结的 netraw.cx,仍属库包与运行库类,依据见任务表 B2 证据行;UDP/unix/resolve、带截止时间 TCP);SPEED-11 运行库扫描族;别名运行失败修复(cxmod 三源,按缺陷修复并入);分治工具线并行(C1 相清单化、C3 批次纯函数化、C4 接口哈希选批,不属产品输入);平台审计表扩面加有名 ENOSYS 加 CI 证据。
@@ -242,11 +252,27 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 | F16 | 冻结提交与被构造 REV 脱节:real6 起链后 main 继续进工具与测试提交,16:44 `git diff --stat b2c557b1ba origin/main -- src cx ext exec tools tests build` 已是 18 个文件加 897 行;发布步骤步 2 原文取 origin/main 的树,会使 F 不等于被构造的源,且 CI 以 commit=X 的工具验候选件,工具与产品不同提交 | 上述命令;发布步骤节步 2 | 步 2 改取 REV 的树;步 7 前核对 CI 用到的 tools 与 tests 在 REV 到 X 之间的差异并写进发布说明;长期:冻结到公开期间工具提交照常,但 F 只认 REV |
 | F17 | 多人同改的 md 无按行提交手段:`git commit -- prd_mempalace.md` 会带走他人未完成的行(本轮开工时该文件第 63 行有他人暂存改动,引用尚未入库的 tools/s9-verdict.cx);commit-own --keyed 只管表 | 本轮开工时 `git status --short` 十个他人暂存路径 | 提交前必看 `git diff HEAD -- 文件`;含他人行时用临时 index(ls-tree 加 update-index --index-info)加 commit-tree 与 update-ref 只带自己的行,或给 commit-own 加 md 行段模式(0.0.63 工具项) |
 | F18 | 速度基线口径随 e3cache 目录状态漂移:目录现 1938 项顶到 1 GiB 预算,每次首次运行约多 54 ms;大扫除清空后变成空目录冷态(发布 8 次,590 ms 档);0.0.61 基线未记条目数,0.0.62 补测与 0.0.63 的 E3TRIM 收益都不可比 | 本节 E3TRIM 条实测;build/speed-baseline.tsv 无条目数列 | 取数前用专用 UNISACC_E3CACHE 目录并记条目数;基线行加条目数与 load1 两列;顺序固定为先测速再大扫除 |
+| F19 | 整链耗时无受控样本,门值会被噪声误判:real6 在 3641 s 仍未结束,已超 real5 的 3538 s 而输入只多库包;2400 s 门与"墙钟不高于 3538 s"(B4 行)都以单次样本为准,且 timeout 5400 到点会把慢链当失败 | 17:25 `pgrep` PID 3271413 与 real6.start;阻塞节"整链耗时"行 | H5 把 real6 各相入 build/phase-times.tsv,与 real5 逐相比出差在哪一相;2400 s 门改为"连续两条链都不高于"才算过;起链期间禁重负载写进 chain-ready 的人工项 |
+| F20 | 仓外单副本材料在大扫除或作业目录回收时丢失:七个补丁只在 ~/.cache/unisacc/patches-0.0.63/,`grep -c patches tools/sweep-plan.cx` 为 0(KEEP 名单只有 borrowed-cm、ident-helper、bootstrap、release*,:210-211),ape-0.0.61 同样不在名单;verify-candidate.sh、rel62 骨架、cxr 夹具在 $CLAUDE_JOB_DIR/tmp;补丁只对 544376fde7 核过,main 每小时约 50 次提交 | 上述 grep;补丁清单表头 | H8 删除前人工剔除两目录并给 sweep-plan 加 KEEP 行(工具改动带 check);verify-candidate 逻辑改写成 .cx 入 tools/(现为 shell 算法,违反工作规则);每个补丁入候选前对当时 HEAD 重跑 apply --check,失败即重基不强套 |
+| F21 | 装机瞬间共享根换产品:在途的 affected、s9、子代理 .cx 脚本前后半段用不同产品,wt gate 判 identity=CHANGED 整波 UNKNOWN;新产品带 CX-U-2 三条新拒绝,仓外短名脚本会突然编不过;运行缓存键含产品身份,装后全冷,e3cache 里 1938 项旧条目占满 1 GiB 预算成死重 | 发布步骤步 11;阻塞节全集复验一条;E3TRIM 条 | H2 前 pgrep 无在途并记账本行;V6 只在候选快照根跑;装后第一条命令的耗时不入基线;H6 用专用缓存目录 |
+| F22 | 冻结层挡住已知缺陷:cx/sys+ext 审查 7 条里 sx 补丁只修 (1)(2),(3) sigwatch、(5) netpoll EINTR、(6) netmsg 负长度都在"只增文件"的 cx/sys,sy_res_live 也因此只能做登记计数;库包源类候选发出去后发布说明仍带 5 条同样的缺口,且越晚解冻调用者越多 | 阻塞节 cx/sys+ext 审查 (3) 至 (7);prd_cx.md 10.8 的 T5 | 库包源类候选冻结前定一次解冻窗口(只放 (3)(5)(6) 三处,各带复现夹具),或以新文件替代并在 std-surface 标旧行 deprecated;不定则在该版说明里写明"冻结所致,非未发现" |
+| F23 | 三类排队但链只有一条:63A、库包源、cxmod 三源各一版即三次整链约 3 小时纯构造(推算,3 x 3538 s),期间后两类补丁持续对 main 漂移;cxmod 的 checkcalls 是已复现的高严重度误拒,却排在最后 | 本节"0.0.63 候选组合与顺序(第四轮)" | N8 与 C4(链工具,非产品输入)排在 63A 起链之前或同时做;若 63A 冻结前 500 ms 门的探针不绿,改让 cxmod 三源类先发 |
 
 0.0.63 起手(fable 第三轮,2026-11-14 16:45;证据入口 prd_cx.md 5.1、5.2 与本节 E3TRIM 条):
 - real6 结束前可开工(不动产品输入、不取耗时、不跑重测试,写域互不相交,各 15 分钟内):N4(E4 闭包切法,写 prd_cx.md 5.1 的 E4 行);N12(CI 结果回收成表,新工具加 check);N14 登记;nn 的 X3、X4、X5、X7(只读,写 prd_cx.md 5.2 对应行);N15 拆分(只读读 src/drive.cx、src/runcache.cx 的 rc_open/rc_lookup 与 cx/runtime/runexec.cx 的 ex_ri_artifact,把"需拆"改成 15 分钟项,写任务表 N15 行);C3-1 派工行修正(写域加 src/driveunits.cx);E3TRIM 补丁复核(读 $CLAUDE_JOB_DIR/tmp/e3trim.patch.txt 对 modelcache.cx:239 至 301,只出评审意见);D0 的 T1 至 T4。取耗时的(N1、N2 严格分段、N5 实跑、X1、X2、X6)等整链结束且速度基线补测之后。
 - 类别与候选组合(决定):L1 方案 A、L2 路径无关键(C2b)、E3TRIM、N15、零解码(C3z)、C2a 全部落在 src/drive.cx、src/driveroute.cx、src/driveunits.cx、src/runcache.cx、cx/runtime/modelcache.cx、unitcache.cx、runexec.cx、routestep.cx,同属驱动与运行缓存类,规则上可同候选。分两批入候选:63A = E3TRIM 修法 (1)(3)、C2a、N7(C3-1)、L1 方案 A、N15,都是结果不变的加速器,验收统一为开缓存与 UNISACC_RUN_CACHE=0 产物同字节;63B = C2b 与 C3z,C2b 改键语义(N3 已查出相对 include 的头字节不在键内,错误命中就是正确性缺陷),C3z 上界只有约 49 ms。门:63B 只有在 63A 冻结前自身探针已绿才并入同一候选;否则作同类第二候选,且须整链不高于 2400 s(F9 的门,现 3538 s,不满足),不满足即顺延 0.0.64 之前的补丁版,不为它在一版内跑两次整链。同写域串行:modelcache.cx 为 E3TRIM -> C2a -> C3z;runcache.cx 为 N15 -> C2b;driveroute 与 unitcache 归 L1。
 - 500 ms 门的拼算(推算,非实测):671 减方案 A 约 116 得约 555,再减 E3TRIM 约 54(随目录条目数变,见 F18)约 500,贴线;63A 单独不保证过门,仍须 L5(a) 或 lower 逐函数缓存,门不放宽。
+
+0.0.63 候选组合与顺序(fable 第四轮,2026-11-14 17:26;补丁证据入口为下方"0.0.63 补丁清单",设计入口 prd_cx.md 5.1、5.2、10.5 至 10.8):
+- 结论:0.0.63 只发一个候选,即 63A。依据:整链实测 3538 s(real5),real6 在 3641 s 仍未结束(17:25 实测);F9 门要求 2400 s 以内才可同版两候选,不满足;两次整链 7076 s 加发布步骤约 25 分钟(推算)超 2 小时线。三类的整链都是同一条全链(产品输入任何一类变更都重建 gen1 至 gen3 与固定点),各自耗时无独立实测,均按 3538 s 推算;差别只在失败落点:cxmod 三源类最早(build-front 与 jobs-tool,约前 5 分钟),63A 与库包源类偏晚(g2/g3 对象相或 compare,约 12 至 50 分钟后,推算)。
+- 顺序(决定):(1) 0.0.63 = 63A(e3trim、n15、C2a、N7、L1 方案 A);(2) 其后的补丁版 = 库包源类(sx、r2、B2f-2 的 T1 reslive 与 T2 np_exec),版本号由集成者定,不占 0.0.64;(3) 0.0.64 = cxmod 三源类(t6t7 -> checkcalls -> D0 的 T8 -> D1,同写 plan.cx 串行)。63B(C2b、C3z)维持上一条的门。若 N8、C4 把整链连续两条降到 2400 s 以内,(1)(2) 可作同版两候选;否则各自一版。改序条件见 F23。
+- 各候选的验收门与回退(验收值未实跑,不记 PASS):
+
+| 候选 | 冻结前门(已装 0.0.62 上可跑) | 整链门 | 装后门 | 回退 |
+|---|---|---|---|---|
+| 63A | 各补丁对当时 HEAD `git apply --check`;开缓存与 `UNISACC_RUN_CACHE=0` 产物同字节;modelcache-budget lru/concurrent failed=0;`tools/chain-ready.cx` 全 PASS;`tools/chain-precheck.cx` 用 H5 留的 entry.elf 对改动文件预检 | candidate-chain rc=0,固定点 compare 相等,墙钟入 phase-times.tsv | run-startup-bench first_e2e 三次中位 500 ms 以下(63A 单独为贴线,推算约 500 至 555,不过则如实写未达,不放宽);第二次 -c inference 0 行且对象同字节;phase-timing-stamps 恢复 artifact_hit 断言 | 纯加速器:撤对应提交;运行期 `UNISACC_RUN_CACHE=0` 即关;发布件撤回同步骤 9 |
+| 库包源 | check-ext-net-unix 24、check-ext-net-tcp 69、check-cx-streamown、check-cx-streamapi、tests/stream/xs-conform、check-sys-reslive、check-ext-procx-exec 各 failed=0;`tools/derive.cx -- --check` 全 OK;std-surface new 行 2 -> 0 | 同上 | r-unix-block 与 r-unix-peer 两个复现在新产品上转正;改 pipe.cx 选出的 126 批重跑无新红 | 新增文件撤提交即回;sx 与 r2 改既有文件,撤提交后发布说明缺口 (19)(20) 恢复为未修 |
+| cxmod 三源 | `tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/cx0-extract.cx -- --check --all` 两行 EXACT(T8 前第二行预期 rc=2,须先做 T8 或具名豁免);P1 全量扫描新拒绝 0;checkcalls 六个误拒夹具 RC=0 且原拒绝例仍拒绝 | 同上;失败落 cxmod 按第三轮分支 C 止损 | tests/cx-namespace.cx failed=0;97 至 128 单元夹具两侧结论一致 | 三源加 driveplan 四文件换回上一发布版内容造私有提交(第三轮分支 C 第 (4) 步的做法),不在 main 上 reset |
 
 0.0.63 与 0.0.64 任务(都依赖 0.0.62 新产品已装;开工前逐项拆到 15 分钟):
 - 0.0.63(2026-11-14 按 A12 重排;依据与每个杠杆的证据入口在 prd_cx.md 第 5 节 L1 至 L5):零解码上界只有约 49 ms,不再承载 500 ms 门;主杠杆改为运行库闭包结果复用(L1,上界约 379 ms,n=1 且成因为推断)。类别:L1、L2、L4 都落在驱动与运行缓存(`src/runcache.cx`、`src/driveroute.cx`、`cx/runtime/unitcache.cx`、`cx/runtime/modelcache.cx`),与 0.0.62 的库包与运行库类不同类,也不是原定的模型与网类;speed12b 重建 e2 网与跳过 prune 属模型与网类,不得与之同候选。本条与进化路线"0.0.63 唯一大改类为模型装载零解码"冲突,待主调度改那一行。回滚:各项都是纯加速器,撤对应提交即回现状;UNISACC_RUN_CACHE=0 可随时关闭。
@@ -292,16 +318,13 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 |---|---|---|---|---|---|
 | N1 | 63 | M5 残差约 58 ms 细分 | prd_cx.md 第 5 节 M5 行 | `strace -c -f` 与 `strace -r` 各一次首次运行 -> 四项毫秒数,合计与 58 ms 相差 20% 以内,否则记 UNMEASURED | 已跑未闭合(2026-11-14):strace 下四项 13.5/298.9/1.6/9.5 ms 合计约 323,墙钟 954 对无 strace 151,膨胀 6.3 倍,671 ms 冷态未复现;新发现首次运行对 e3cache 约 3881 次逐文件 open/lstat/read,待查;详见 prd_cx.md 首次与重复之差分相行附注;状态 UNMEASURED |
 | N2 | 63 | M2 model 相读入、校验、建布局三分 | prd_cx.md 第 5 节 M2 行、build/pkg-gaps.tsv 一行 | `UNISACC_RR_TIME=1` 命中组 n=3 -> 三分各有毫秒数,取不到则 pkg-gaps 记缺口 | 今(部分完成 2026-11-14:strace 间隔估计读入约 2 至 3、校验约 8 至 10、建布局约 38 至 40 ms,load1 6 至 8 noisy,见 prd_cx.md M2 行;严格分段待 modelcache.cx 加打点,pkg-gaps 未记) |
-| N3 | 63 | C2b 前置取证:`__FILE__`、诊断路径、相对 include 对路径无关键的影响 | prd_cx.md 第 5 节 L4 行 | 三个夹具各在两个目录运行 -> 列出输出含路径的情形数,给出键须保留路径的条件 | 今(完成 2026-11-14:6 个实验,`__FILE__`/argv[0] 等于命令行路径串故路径串须留键,相对 include 头字节现不在键内为缺口,合同草案见 prd_cx.md L2 行;产物 sha 未取) |
+| 已落地(折叠) | 63 至 65 | N3(C2b 前置取证,结论在 prd_cx.md L2 行)、N9(cx-wildcard-product 棘轮规则,ratchets ok=13)、N10(三源分叉实测 8 行全部归属,prd_cx.md 10.5 T6 表)、N12(tools/ci-collect.cx,6526cd1ca8)、N15 拆分(fd5029e8da,补丁 n15 已备) | - | 见各提交与 prd_cx.md 对应行 | 完 |
 | N4 | 63 | E4 闭包切法取数 | prd_cx.md 5.1 的 E4 行 | 按 5.1 给的取数办法 -> UNMEASURED 改实测或写明缺的落盘入口 | 今 |
 | N5 | 63 | speed-probe 加 run 分相(读 UNISACC_RR_TIME 六流行) | tools/speed-probe.cx 及其 check | `tools/speed-probe.cx` 输出含六流 inference 与 model 行;check failed=0;pkg-gaps 对应缺口行销掉 | 今 |
 | N6 | 63 | C2a 缓存根默认值与 UNISACC_CACHE_DIR | `cx/runtime/modelcache.cx` 的 mc_cache_dir | 两个 TMPDIR 同源第二次 `RR_TIME lookup_hit=2`;`tools/check-unit-frontcache.cx` failed=0 | 装后 |
 | N7 | 63 | C3-1 单文件路接单元缓存入口(写域已修正为 `src/driveunits.cx` 加 `src/drive.cx` :685 入口选择,2026-11-14 读码;与 N15-a 同改 drive.cx,须在其后串行) | `src/driveunits.cx` 与 `src/drive.cx` 入口选择 | `UNISACC_RR_TIME=1` 单文件新源 `grep -c unitcache` 大于 0(现为 0) | 装后,N6 不同写域可并行 |
 | N8 | 63 | C4 对象相拆分第一步:定 closure-m*.o 单键 349.8 s 的构成 | build/phase-times.tsv 新增行 | 对 real6 的 checkpoint 用 .cx 求和 -> 单键内编译、推理、落盘三项各有实测行 | real6 后 |
-| N9 | 64 | 通配的产品层禁用规则进棘轮(F10 提前动作) | tools/ratchets.cx 的 cxapis 项及其 check | 夹具含 `use m::*` 的产品层文件 -> 棘轮 fail;现仓 ok=13 不变 | 已落地:规则 cx-wildcard-product 在 tests/cxinclude.cx(cxinclude 棘轮;产品层 src/、cx/core、cx/runtime、cx/compiler、cx/driver 出现 use X::* 计违规),另有 --wildcard-file 夹具模式;tools/check-ratchets.cx 新增 4 断言(夹具 fail 且具名、具名导入过、注释内不算、混合只点名违规者)failed=0;ratchets ok=13 fail=0;derive 有 1 项 product-map tsv-drift 属他人在途改动,非本项 |
-| N10 | 64 | D0 的 T6:三源差异表 14 行语义分叉逐行归一方案 | prd_cx.md 10.5 的 T6 行 | 14 行各有"上移到 plan.cx"或"宿主片段"的归属,无未归属行 | 今(只读) 已做:实测为 8 行(非 14),全部归属写入 prd_cx.md 10.5 的 T6 归属表(上移 4、宿主片段 3、可删 1);未改源码 |
-| N11 | 64 | D0 的 T6 至 T8 实现(同写 plan.cx,串行) | cx/cx0/plan.cx、cx/cx0/projection.tsv | `tools/cx0-extract.cx -- --check --all` 两行 EXACT;`tools/check-cxmod-tri.cx` 末行 gaps=0 | 装后 |
-| N12 | 65 | CI 平台作业结果回收成表(F5 提前动作) | tools 下新工具加 check 与批次行(先 `git log --all --oneline -- tools/NAME`) | 对 run 43554326355 出表,行数 == 六目标作业数,每行带结论与作业号 | 今 |
+| N11 | 64 | D0 的 T6 至 T8 实现(同写 plan.cx,串行;T6、T7 合并补丁 t6t7 已备,见补丁清单附注 (4)) | cx/cx0/plan.cx、cx/cx0/projection.tsv | `tools/cx0-extract.cx -- --check --all` 两行 EXACT;`tools/check-cxmod-tri.cx` 末行 gaps=0 | 装后 |
 | N13 | 65 | osx/win 有名 ENOSYS 按表断言 | exec/facts/refusals.tsv 的平台列与其 check | 生成器 `--check` OK;41 个无原因点减到 0 或余数具名 | 今(冻结 REV 之后提交,不混入 real6) |
 | N14 | 65 | lnx/arm64 netmsg 布局 CI 探针(F15) | tests/batches.tsv 的 arm64 行(commit-own --keyed) | CI lnx/arm64 作业日志含 netmsg 断言 21 条 failed=0;本机状态 DEFERRED | 今登记,CI 后转真 |
 
