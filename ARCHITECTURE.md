@@ -1,6 +1,6 @@
 # 仓库地图
 
-> **更简明的目录入口见 [docs/REPO-MAP.md](docs/REPO-MAP.md)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
+> **更简明的目录入口见 [prd.md §8.1](prd.md#repo-map)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
 
 新测试入口是`tests/run.cx`（默认-run），旧测试树在`archive/testing-c43-legacy/`；产品构造支持独立在`tools/`。下文涉及历史探针的条目仅描述来源，不能据此恢复旧队列或借用旧通过结果。
 
