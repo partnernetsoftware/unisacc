@@ -350,7 +350,7 @@ STATE43：6d 对冻结候选跑一次完整的 `all-waves` 会话：314 个 IMPL
 STATE43：6e 五个外平台（osx/x86_64、osx/arm64、lnx/arm64、win/x86_64 加 CI 上的 lnx）在同一候选上实机观察，需要把候选推到 CI（项目所有者已批准推送）；73 格。
 STATE43：6f 最后 `tests/run.cx -- --all` 输出 QUALIFIED。
 STATE43：[ ] 7 项目所有者授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
-STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格、约 580 个模块，产品还没用）、通用工具、体积优化，都是 0.0.44 的准备，见 [v0.0.44.md](../archive/research-2026-11d/plans/v0.0.44.md)。名表铺设已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [w4-dedupe-2026-11-02.md](w4-dedupe-2026-11-02.md)）。
+STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格、约 580 个模块，产品还没用）、通用工具、体积优化，都是 0.0.44 的准备，见 [v0.0.44.md](../archive/research-2026-11d/plans/v0.0.44.md)。名表铺设已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [w4-dedupe-2026-11-02.md](../archive/plans-2026-11d/w4-dedupe-2026-11-02.md)）。
 
 **已安装（2026-10-31 01:19）：** `./unisacc.com` sha=43fbbb81…，4631130 字节，冻结 rev c98f757f，五片都走 whole-o，P3 是 aec1a0bf；check-install-fixes 4/4、`--smoke` 16/16、release-ape smoke 5/5、七个棘轮全绿。旧版备份在 out/unisacc.com.79fb84e6。
 

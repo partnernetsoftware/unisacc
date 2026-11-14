@@ -273,7 +273,7 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-S-5** | 精确例外只来自 `tests/cxraw-layers.tsv` 与 `tests/cxinclude-boundary.tsv`。表外文件不得因“暂时”“引导”“探针”获得许可。每条精确例外必须带理由。引导期 `src/host.cx`、`src/hostnative.cx` 若仍在表内，只以表内那一行为准。 |
 | **CX-S-6** | `cx/cx0/` 是解析权威与兼容投影，不是 L0。文法以 **CX-G-4** 为准。`cx/workspace/` 是包图与构建，属上层。 |
 | **CX-S-7** | `ext/crypto/` 属包层纯计算，合同见 **CX-Y-5**。`cx/compiler/winprocess.cx` 是编译器侧的整数与 PE 页走查，不是宿主对接，不得迁回 `cx/sys/`。 |
-| **CX-S-8** | `tools/nametab-gen.cx` 与 `tools/nametabs.tsv` 已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [plans/w4-dedupe-2026-11-02.md](../plans/w4-dedupe-2026-11-02.md)）。本条条款不再约束任何现存文件；若未来重新引入名表生成，须先恢复本条并补消费者。 |
+| **CX-S-8** | `tools/nametab-gen.cx` 与 `tools/nametabs.tsv` 已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [archive/plans-2026-11d/w4-dedupe-2026-11-02.md](../archive/plans-2026-11d/w4-dedupe-2026-11-02.md)）。本条条款不再约束任何现存文件；若未来重新引入名表生成，须先恢复本条并补消费者。 |
 | **CX-S-9** | 分层棘轮扫描面是已跟踪的 `*.cx`，加上 `cx/**/*.c`、`cx/**/*.h`、`cx/**/*.c.in`，排除 `archive/`。`src/`、`exec/`、`tools/` 的宿主 C 不在此扫描面。已跟踪符号链接不得重复计数。 |
 | **CX-S-10** | `apps/csih/` 与 `ujs/` 不由本架构条款授权改写。测携带头本身的表面探针只以 include 边界表的精确条目存在，不得按目录放行。 |
 
