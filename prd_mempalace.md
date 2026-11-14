@@ -11,10 +11,10 @@
 
 ## 当前发布与版本
 
-- 已装根:0.0.59(APE sha256 前缀 e43ef368,本机备份 ROOT/unisacc.com.059,未入库)。
+- 已装根:本机已装 0.0.61 前的中间产物(APE sha256 前缀 c55533c7,7022820 B,版本串仍显示 0.0.59,未改版本号;来自 main 03c4d5df9d 的树的私有整链 real4,状态 PREPARED not=PASS,非发布候选)。回退:`sh ./unisacc.com tools/install-ape.cx -- ROOT --rollback --write`,或备份 ROOT/unisacc.com.059(0.0.59,前缀 e43ef368,未入库)。
 - 进行中:0.0.61(合并原 0.0.60 范围,不单独发 0.0.60)。已在 main:qsort introsort、stdout 缓冲(SPEED-17)、safedel 的 chains 根白名单、sy_atspawn、cx.stream/cx.os/cx.sys 一批实现、E2 padding 补丁(directive-scan-byte 的 P3BLANK 行)、链工具修复(entry-build RT_UNIT/RT_EXTERN 按对象键选;whole-front 的 worker 以 RT_UNIT 编译;release-build 暂存目录用 sy_rmdir;tlib kit 缓存命中后置 0755)。
-- 已证实(实测):私有整链 g3fix8 全相位走完,g2 与 g3 candidate 在 lnx-x86_64 和 lnx-arm64 的 sha256 逐位相同;打包产物对 0.0.59 的冷编译(coldcompile,单样本)ledger-add 9382 -> 6504 ms,entry-build 18427 -> 13607,whole-front 16556 -> 12532,coldcompile 9128 -> 6471(不含 E2 补丁)。
-- 在跑:对 main 03c4d5df9d 的树的真链 real4(私有构造根 /tmp/unisacc-session-build-lr0060/src,输出 chain-real4,日志 log/real4.out)。出包后:装机(install-ape)、单跑 tsv-lint 与 tlib-prep-refuse 看 BATCH_RUN、coldcompile 实测、对比 build/speed-baseline.tsv、再发布。
+- 已证实(实测):real4 整链 4829 s 全相位走完并打包(g2 与 g3 candidate sha 逐位相同;-cx-plan 与旧产品同树输出逐字节一致 9428 B)。冷编译 coldcompile 同机同树旧->新(单样本,load1 约 1.2-1.5):ledger-add 9469->6468 ms(-32%),entry-build 18703->13624(-27%),whole-front 16863->12846(-24%),coldcompile 9146->6453(-29%)。冷启动 run-startup-bench first_e2e 684/705/714 ms,对 speed-baseline 的 0.0.59 为 796/815(-14%)。E2 padding 的增量在冷编译上不可见(real4 含 E2 与 g3fix8 无 E2 数值相同,约 6.5 s),此前归给 E2 的 -34% 主要来自别的改动,不要再单算到 E2。装新根后 tsv-lint、tlib-prep-refuse 单跑 BATCH_RUN 均 PASS(FTRIM 类红随新产品消失)。
+- 在跑:无整链在跑。下一步:版本号改 0.0.61(源里版本串)并起最终发布链,然后复验、对比 speed-baseline 并更新它、公开发布、大扫除。
 
 ## 起整链的做法(已验证的配方)
 
