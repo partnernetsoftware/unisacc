@@ -120,6 +120,7 @@
     - C3z 零解码 mmap 布局(原 C3,降为次要),与 C2a 同写 `cx/runtime/modelcache.cx` 故串行在其后;另写 `cx/runtime/routestep.cx`。验收:RR_TIME 六流 model 相合计 10 ms 以下(现约 49 ms),命中与未命中同字节。
     - C4 整链对象相拆分到整链 2400 s 以内(F9 的门),不变。
 - 0.0.64:D0 cxmod 三源归一(2026-11-14 决定:先归一再加语法,依据与拆分见 prd_cx.md 10.5;`cx/compiler/cxmod.cx` 改为 `cx/cx0/plan.cx` 的第二投影,验收 `tools/cx0-extract.cx -- --check --all` 两行 EXACT、`tools/check-cxmod-tri.cx` 末行 gaps=0;其中 T1 至 T4 不动产品输入、今天可开工且互不相交,T5 至 T8 动产品输入、都写 plan.cx、串行、等 0.0.62 新产品已装;回滚:T8 之前产品件仍是手写件,撤 T5 至 T7 的提交即回到现状)-> D1 export(依赖 D0:此后每条新拒绝只改 plan.cx 一处;若 D0 的 T8 未落地则 D1 不开工,不退回手工三处对齐;验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(依赖 D1;正例 1、拒绝 5)-> D3 符号级导入收敛(依赖 D0,与 D1、D2 同写 plan.cx 故串行;`tests/module/check.cx`)-> D4 text.text 物理拆面(依赖 D1 的 export;第二候选,受 F9 门约束)-> D5 层感知前导(不依赖 D0 至 D3;末位,超 2 小时移 0.0.65)。D0 至 D3 同属 cxmod 三源一类、同候选;同写域串行,不并发。
+- 0.0.64 之后的优化候选(未排版本):prune 有 callr 时整带回退。实测凡带 stdio 闭包的程序 prune 恒等(`exit` 里一处 `callr`),用户死函数不裁,约每个小死函数多 1.1 ms、82 B(200 个:后三流多约 228 ms,ELF 36,894 对 53,278 B);对 hello 本身只差一个函数。属有意保守合同(`tools/prune-cases-gen.cx:111` 的 indirect-call-preserved),不是缺陷。改法是以取址集合为根继续裁剪,类别为模型与网类,不与驱动与运行缓存类同候选;不删现有断言。证据入口 prd_cx.md 5.1 "E2 定因"。回滚:未动产品,无需回滚。
 
 三个可测速度杠杆(数字只取自 build/speed-baseline.tsv 中四个工具的行):
 - (1) 冷启动:run-startup-bench first_e2e 三次 684.051/704.882/714.267 ms(real4 c55533c7,n=3),同工具 repeat_median3 约 27 至 29 ms(0.0.59 与 local-0060 组);首次与重复相差约 650 ms,其中推理约 531 ms、解码约 49 ms(A12 实测,零解码上界只有约 49 ms)。度量:同工具 first_e2e,目标 0.0.62 为 670 以下、0.0.63 为 500 以下。
