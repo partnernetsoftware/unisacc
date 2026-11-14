@@ -38,6 +38,7 @@
 
 ### 0.0.63 冻结前总核对(2026-11-14 实跑,输入身份 main 2bd89d4ead,已装 unisacc.com sha 83b82c8d,load1 约 3;本条取代下方 Z2、Z3 结果行与 R6-V63 行里"现缺 Z2"的旧结论)
 
+- 6-affected 两次结果不同的定因(2026-11-14 实测):不是并行争用。工作区脏 .cx 含 tools/check-releaseexec.cx 时选中 6 个带 materials 的 release-exec/release-assetguard* 批次,而 chain-ready.cx:335 调 affected.cx 只带 `--files --run`、不带 `--prepare-materials`(affected.cx:626 prep_on 默认 0),于是 affected.cx:877 对每个批次直出 `DEFERRED<TAB>id<TAB>needs-materials=release-oneshot-tool:path,...`,1.1 秒即 rc=3;该文件已提交的那次脏集为空或无带材料批次故 PASS。单独复现同输出。补丁(加 --prepare-materials,git apply --check 通过)在 $CLAUDE_JOB_DIR/tmp/chain-ready-6affected.patch.txt,待后台整跑结束再应用;注意加后 6 批 55 s 预算在单命令 57 s 窗口内实测 pass=5 fail=1 deferred=1(release-assetguard killed-at-deadline),需另核该批耗时与 -j。
 - (a) 已清零(命令与实测):
   - Z1 `tools/ratchets.cx`:rc 0,RATCHETS ok=13 fail=0,6.1 s。
   - Z2 `tools/derive.cx -- --check`:rc 0,DERIVE_SUMMARY ok=9 drift=0 refused=0,24.8 s(product-map 漂移已消;登记项现为 9,旧验收文案写的 ok=8 已过期,以 drift=0 refused=0 为准)。
