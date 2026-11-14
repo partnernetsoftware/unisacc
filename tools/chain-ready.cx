@@ -112,6 +112,10 @@ static int j_chain(const char *o, long n, int rc, char *ev, int cap) {
 static int j_affected(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "FAIL", l, sizeof l);
     if (rc == 0) { cx_fmt(ev, (size_t)cap, "rc=0 %ld bytes of output, no failure", n); return 1; }
+    if (rc == 3) {   /* affected.cx: return fail ? 1 : deferred ? 3 : 0 -- deferred batches, no FAIL: not measured */
+        char s[160]; line_with(o, n, "AFFECTED_RUN", s, sizeof s);
+        if (!l[0] && s[0]) { cx_fmt(ev, (size_t)cap, "rc=3 deferred, no FAIL: %s", s); return 2; }
+    }
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "affected --run nonzero"); return 0;
 }
 /* a pgrep -af listing: 1 when no chain process besides this tool, pgrep and shell wrappers */
@@ -189,7 +193,7 @@ static void row(const char *item, const char *st, const char *ev, long ms) {
         cx_fmt(failed_names + l, sizeof failed_names - l, "%s%s", l ? "," : "", item); nfail++;
     }
 }
-static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok ? "PASS" : "FAIL", ev, ms); }
+static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev, ms); }
 
 /* P1: all .cx files holding "#pragma unisa use", 8 lanes of cx0_plan children */
 #define LANES 8
@@ -249,7 +253,7 @@ int main(int argc, char **argv) {
         if (!b) { fprintf(stderr, "chain-ready: cannot read %s\n", argv[3]); return 2; }
         { int64_t rv = 0; tx_to_i64(argv[4], (long)tx_len(argv[4], 16), 10, &rv); ok = judge_kind(argv[2], b, (long)n, (int)rv, ev, sizeof ev); }
         if (ok < 0) { fprintf(stderr, "chain-ready: %s\n", ev); return 2; }
-        printf("%s\t%s\n", ok ? "PASS" : "FAIL", ev);
+        printf("%s\t%s\n", ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev);
         return 0;
     }
     for (a = 1; a < argc; a++) {
