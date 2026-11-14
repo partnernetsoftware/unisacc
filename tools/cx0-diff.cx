@@ -106,6 +106,7 @@ static char classify(const d_block *k, int defa, int defb) {
 /* g 注释或排版差异,x 六类之外的代码差异(候选语义分叉) */
 static char *cat_of(char c) { return c == 'e' || c == 'f' ? "语义分叉" : c == 'x' ? "其他" : c == 'g' ? "其他" : "宿主差异"; }
 static int nblk, nother, nsem_bad;
+static FILE *sink;
 static int diff_pair(const char *label, const char *fa, const char *fb) {
     char *av[8]; np_result r = {0}; char why[256]; int i, at = 0, defa = line_of(fa, "CXM_MAXU"), defb = line_of(fb, "CXM_MAXU");
     d_block k; int open = 0;
@@ -119,7 +120,7 @@ static int diff_pair(const char *label, const char *fa, const char *fb) {
         if (fin || r.out[at] == '@') {
             if (open) {
                 char c = classify(&k, defa, defb);
-                printf("%s\t%d\t%d\t%d\t%d\t%c\t%s\t%s\n", label, k.as, k.al, k.bs, k.bl, c, cat_of(c), c == 'e' || c == 'f' ? "是" : c == 'x' ? "待核" : "否");
+                fprintf(sink, "%s\t%d\t%d\t%d\t%d\t%c\t%s\t%s\n", label, k.as, k.al, k.bs, k.bl, c, cat_of(c), c == 'e' || c == 'f' ? "是" : c == 'x' ? "待核" : "否");
                 nblk++; if (c == 'x') nother++;
             }
             k.rn = k.an = 0; open = 0;
@@ -136,13 +137,19 @@ static int diff_pair(const char *label, const char *fa, const char *fb) {
 }
 int main(int argc, char **argv) {
     int check = 0, i, rc = 0;
-    char *pa = 0, *pb = 0;
+    char *pa = 0, *pb = 0, *outp = 0, *verp = 0;
+    sink = stdout;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--verify") && i + 1 < argc) verp = argv[++i];
         else if (!strcmp(argv[i], "--pair") && i + 2 < argc) { pa = argv[i + 1]; pb = argv[i + 2]; i += 2; }
         else { fprintf(stderr, "usage: cx0-diff [--check] [--pair A B]\n"); return 2; }
     }
-    printf("pair\ta_start\ta_len\tb_start\tb_len\tclass\tcategory\tsemantic\n");
+    /* --out PATH 写表;--verify PATH 与现表逐字节比,不同 rc=1(derive 生成器合同,类 x 不拦) */
+    if (outp || verp) sink = tmpfile();
+    if (!sink) { fprintf(stderr, "cx0-diff: tmpfile failed\n"); return 2; }
+    fprintf(sink, "pair\ta_start\ta_len\tb_start\tb_len\tclass\tcategory\tsemantic\n");
     if (pa) rc |= diff_pair("pair", pa, pb);
     else {
         rc |= diff_pair("plan-vs-prod", "cx/cx0/plan.cx", "cx/compiler/cxmod.cx");
@@ -150,6 +157,27 @@ int main(int argc, char **argv) {
         rc |= diff_pair("c-vs-prod", "src/cxmod.c", "cx/compiler/cxmod.cx");
     }
     fprintf(stderr, "CX0_DIFF blocks=%d other=%d\n", nblk, nother);
+    if (outp || verp) {
+        long n; char *nb, *ob = 0; FILE *g; int same;
+        fflush(sink); n = ftell(sink); rewind(sink);
+        nb = malloc((size_t)n + 1); if (fread(nb, 1, (size_t)n, sink) != (size_t)n) return 2;
+        nb[n] = 0; fclose(sink);
+        if (rc) return 2;
+        if (outp) {
+            g = fopen(outp, "w");
+            if (!g || fwrite(nb, 1, (size_t)n, g) != (size_t)n) return 2;
+            fclose(g); return 0;
+        }
+        g = fopen(verp, "r"); same = 0;
+        if (g) {
+            long m; fseek(g, 0, SEEK_END); m = ftell(g); rewind(g);
+            ob = malloc((size_t)m + 1);
+            if (fread(ob, 1, (size_t)m, g) == (size_t)m) { ob[m] = 0; same = (m == n && !memcmp(ob, nb, (size_t)n)); }
+            fclose(g);
+        }
+        if (!same) { fprintf(stderr, "DIFF cx0-three-source-diff stale\n"); return 1; }
+        return 0;
+    }
     if (check && (rc || nother)) return 2;
     return rc;
 }
