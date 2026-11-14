@@ -26,6 +26,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 
 /* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
@@ -321,6 +322,33 @@ int main(int argc, char **argv) {
         out[0] = 0;
         rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         ok(rc == 2, "identity-failure-refuses-not-empty");
+    }
+    {   /* kernel AF_ALG vs software SHA-256: byte-identical on every boundary length and a 1 MiB block */
+        static const long lens[] = { 0, 1, 55, 56, 63, 64, 65, 65535, 65536, 1048576 };
+        long li, bad = 0, cap = 1048576;
+        unsigned char *buf = malloc((size_t)cap);
+        unsigned long long x = 88172645463325252ULL;
+        ok(buf != 0, "kernel-sha-buffer");
+        for (li = 0; buf && li < cap; li++) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; buf[li] = (unsigned char)x; }
+        for (li = 0; buf && li < (long)(sizeof lens / sizeof lens[0]); li++) {
+            char kh[65], sh[65];
+            if (sy_sha256_hex(buf, lens[li], kh) != 0) { bad++; continue; }   /* kernel path unavailable here: counted, not skipped */
+            cx_sha256_hex(buf, (size_t)lens[li], sh);
+            if (strcmp(kh, sh) != 0) bad++;
+        }
+        ok(bad == 0, "kernel-sha-equals-software-all-lengths");
+        if (buf) {
+            char kh[65], sh[65];
+            const char *com2 = com;
+            size_t pn = 0; char *pb = cx_read(com2, &pn);
+            if (pb) {
+                ok(sy_sha256_hex(pb, (long)pn, kh) == 0 && (cx_sha256_hex(pb, pn, sh), !strcmp(kh, sh)), "kernel-sha-equals-software-real-product");
+                free(pb);
+            } else skip("kernel-sha-equals-software-real-product", "product unreadable");
+            /* a failing kernel path (negative length) must be reported so callers fall back */
+            ok(sy_sha256_hex(buf, -1, kh) != 0, "kernel-sha-bad-length-reports-failure");
+            free(buf);
+        }
     }
     printf("PRODUCTPKG\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
