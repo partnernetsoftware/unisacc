@@ -36,6 +36,35 @@
 
 ## 阻塞与未验证(发布前清零或如实写进发布说明)
 
+### 0.0.63 冻结前总核对(2026-11-14 实跑,输入身份 main 2bd89d4ead,已装 unisacc.com sha 83b82c8d,load1 约 3;本条取代下方 Z2、Z3 结果行与 R6-V63 行里"现缺 Z2"的旧结论)
+
+- (a) 已清零(命令与实测):
+  - Z1 `tools/ratchets.cx`:rc 0,RATCHETS ok=13 fail=0,6.1 s。
+  - Z2 `tools/derive.cx -- --check`:rc 0,DERIVE_SUMMARY ok=9 drift=0 refused=0,24.8 s(product-map 漂移已消;登记项现为 9,旧验收文案写的 ok=8 已过期,以 drift=0 refused=0 为准)。
+  - chain-ready 的 1-rev:`tools/chain-ready.cx -- --only 1-rev` PASS(src cx ext exec/facts 无未提交路径,分支 main),0.08 s;2a-derive 即 Z2。
+  - Z4 `tools/check-cxmod-tri.cx`:rc 0,passed=15 failed=0 gaps=2(CXM_MAXU 两个已知缺口)。
+  - Z5 六批(modelcache-budget-lru、-concurrent、phase-timing-stamps、chain-phases-gen、cx-driver-deps、dock-audit):AFFECTED_RUN pass=6 fail=0,27.2 s;其中后三批即 0.0.62 s9 commit 档仍红的三批,现已绿。
+  - Z7:`pgrep -f candidate-chain` 无在途链;~/.cache/unisacc/ape-0.0.62/unisacc.com 与已装件 sha 前缀同为 83b82c8d。
+  - Z8:`git diff --name-status v0.0.62..HEAD -- src cx ext exec` 仍是 5 项(modelcache.cx、runexec.cx、drive.cx、exec/facts/derive.tsv、st-gap.tsv);判读:两张 exec/facts 表的消费者只有 tools/(derive.cx、links-gen.cx、check-on-change.cx、st-gap-gen.cx、check-st-gap-gen.cx),src、cx、ext 无引用,不算库包源或三源,一版一类成立。
+  - F26:`git grep -n 'win-arm64.zip'` 命中只剩按版本分支的工具、0.0.62 及更早的候选表与历史夹具;.github/workflows 无该 zip 取件;`tools/check-release-layout.cx` 17 断言 failed=0;`gh release view v0.0.62` 资产数 7(旧合同未动)。
+  - K3:n15c 已入库(d59e4b01a0,tests/phase-timing-stamps.cx 含 UNISACC_REQUIRE_N15C);patches-0.0.63/n15c.patch.txt 对 HEAD 已不适用(已含),该补丁文件不再使用。
+  - 速度结论更正:edit-span 冷编译 2745 对 3523 未复现(复测 2743 对 2674,区间重叠);gencode sha 8MB 慢 4.5% 经 ABAB n=15 判噪声(997.1 对 995.4,产物逐字节相同)。发布说明草稿原本未引用这两个数,现已按复测值写入未达项 (1),不作卖点。
+- (d) 真阻塞冻结(只此一条):Z3 的 4-p1。最近一次完整结果仍是 READY=no failed=4-p1(新文本拒绝 10)。修复在途且未提交:tools/chain-ready.cx 工作区改动(扫描排除 archive/,三份有意拒绝的负例夹具改判"仍被拒绝才算过"),在途进程 `tools/chain-ready.cx --only 4-p1` PID 700600 PGID 700599,输出 $CLAUDE_JOB_DIR/tmp/p1new.out,本次核对结束时仍在跑(已 360 s),结果 UNMEASURED。清零条件:该次末行 READY yes,且 tools/chain-ready.cx 与 build/tool-index.tsv 由其作者提交后,在冻结 HEAD 上 `derive.cx -- --check` 仍 drift=0。
+- (b) 冻结后或整链期间可做(不卡冻结):
+  - Z6 在冻结 HEAD 重跑(现有 PASS 证据绑 c39a890651 的候选 227e63f5998e;其后 src、cx、ext 无改动,只有 exec/facts/derive.tsv 变,证据可参考但身份不是冻结提交);entry-build 约 56 s 加探针。
+  - chain-ready 的 7-recipe 与 9-ledger 是手工项:起链前在本文件写一行(REV、PID/PGID、截止、输出目录),并按起链配方 1 至 5 备私有根。
+  - `tools/chain-precheck.cx` 无参即 `REFUSE usage` rc 2:它要 ROOT CHAIN_OUT NEW_OUT 与一条已有链的输出,不是冻结前可单跑的门;Z3 行里把它列为冻结门的写法不可执行,冻结只认 chain-ready 末行,precheck 记未跑。
+  - 0.0.63 版 release/rollback.txt(现文件是 0.0.62 版)在公开前写好;发布说明含"待填"的 6 行(第 3 行口径说明;第 5 行冻结提交、候选 sha、CI run、公开时间、裁决;K3 硬模式结果;s9 判定;候选级证据;rollback 0.0.63 版)随发布步骤填。
+  - 装新产品后的门:`UNISACC_REQUIRE_N15C=1` 跑 phase-timing-stamps(K3 硬模式,现只在旧产品上以软模式 PASS)、tests/cx-namespace.cx、C2a 默认根换 TMPDIR 命中、E3TRIM 曲线与 run-startup-bench 重测入 speed-baseline.tsv、修复后 N15 的 7/0/0 入表。
+  - F26 的真实读回件数(应为 6)与 release-oneshot、releaseexec、releaseprepare、release-run 的 0.0.63 分支用例。
+  - 候选 s9 commit 档(快照根 mkdir out、RUN=ROOT/out/s9-run;0.0.62 实测 init 194 s、steps 约 1226 s、aggregate 约 180 s,合计约 27 分钟),与同候选 CI 并行。
+- (c) 必须如实带进发布说明的未达项(草稿均已写,见 plans/release-notes-0.0.63.md 未达项与已知缺口两节):first_e2e 500 ms 门未过且冷启动、冷编译、生成代码对 0.0.62 持平;E3TRIM3 淘汰到 90% 的路径耗时 UNMEASURED;s9 commit 档按设计恒为 UNKNOWN(tier-commit-not-full),裁决预计仍 NOT_QUALIFIED unknown=1,daily 与 release 档未跑;N15 键含 -o,换名不命中,链内对象相是否命中未实测(起链固定 UNISACC_RUN_CACHE=0);C2a 默认根冻结门未在冻结提交上跑;全集批次复验无有效判定;osx 与 win 无主机实跑;0.0.62 缺口 (2) 至 (16)、(18)(19)、(22)(23) 仍开(sx 补丁对 2bd89d4ead 仍只是 `git apply --check` 通过,未入库)。
+- 冻结最短路径(各步时长为本次或前次实测;总计约 100 分钟,在 2 小时线内):
+  - (1) 等 PID 700600 出结果并由其作者提交 chain-ready.cx 与 tool-index.tsv:单跑 4-p1 前次 529 s(排除 archive 后应更短,UNMEASURED)。
+  - (2) 冻结 HEAD 定后全并行只读核对,墙钟取最长一项:`sh ./unisacc.com tools/ratchets.cx`(6 s)、`tools/derive.cx -- --check`(25 s)、`tools/check-cxmod-tri.cx`(22 s)、`tools/affected.cx -- --ids modelcache-budget-lru modelcache-budget-concurrent phase-timing-stamps chain-phases-gen cx-driver-deps dock-audit --run -j 6`(27 s)、Z6(约 70 s)、Z7 与 Z8(秒级)、`tools/chain-ready.cx`(全量前次 584 s;若冻结 HEAD 相对 (1) 的输入没有任何 .cx 变化,用 `--fast` 约 30 s 并引用 (1) 的 4-p1 结果,不重做同输入作业)。
+  - (3) 写账本行,按配方起链:专用 0700 的 UNISACC_CACHE_DIR、UNISACC_RUN_CACHE=0、UNISACC_IDENT_HELPER,`tools/candidate-chain.cx -- --rev REV --out 全新目录 --parallel 12`(real6 实测 3752 s,含 pack 37.8 s)。链期间并行做 (b) 里不需要候选的项(发布说明定稿、rollback 草稿)。
+  - (4) 发布步骤 1 至 12(6 件资产):同候选 CI(0.0.62 约 8 分钟)与候选 s9 commit 档(约 27 分钟)并行,取大;随后公开、读回、装机、装后门。
+
 ### 阻塞发布
 
 - 审查 整链工具(2026-11-14,读码为主,未执行 pack/release;chain-real5 目录在本机不存在,干跑未做)。缺陷:
@@ -89,14 +118,14 @@
 
 - 新产品验证:cx-namespace CX-U-2 三缺口具名拒绝(57c7427f6f,cx.plan 0.1.3、cx.compile 0.2.7)与别名运行修复在已装 0.0.61 上标 UNVERIFIED needs-new-product。缺:候选产品。动作:整链装好后复跑 tests/cx-namespace.cx。
 - check-stdio-buffer:不覆盖 --link-only 与子集编译的缓存 identity 一致性,tty/pty 路径未测,六目标未跑。动作:补断言并在六目标主机各跑一次。
-- build/speed-baseline.tsv 未更新;run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。动作:候选装好后各跑一次并更新基线。
-- 整链耗时:real5 3538 s 对 real4 4759 s(-26%)只有一组对照,未控负载,不作结论;pack 37 s。real6 在跑。
+- 速度基线:build/speed-baseline.tsv 已有 E3TRIM3 候选(ca36d2eb、227e63f5998e)对 0.0.62 的启动、冷编译、生成代码各行,结论持平(见上方总核对);缺的是冻结候选与装机后产品的同口径重测,speed-probe 未跑。动作:装机后各跑一次入表。
+- 整链耗时:real6 已结束,墙钟 3752 s、pack 37.8 s(/tmp/unisacc-session-build-lr0060/log/real6.out);real5 3538 s、real4 4759 s 均未控负载,三个单次样本不作快慢结论(F19)。
 - osx cache-manager:借用副本(x86_64 452d9240、arm64 3f6e4cbd)不能由现有输入重现,来源未证实;自产(cache-retain.cx 按 -b osx/*,x86_64 sha 89d0b937、arm64 5096089c)已有 cache-manager 相(5c4ec0e227,argv 修 b54d7db899),但候选上首次实跑与自产件在 macOS 上的运行和签名未验证。动作:real6 看该相;需 osx 主机。
 - tsv-lint 不稳:同日三次实跑 PASS、FAIL、PASS,疑与并发写表有关,未定因;冻结窗口 `affected.cx --ids tsv-lint --run -j 1` 为 PASS rc=0 22 s。动作:下次红时先留 git status 与失败行再判。
 - wt-gate-probe 为 PLANNED(链路超 55 s 批次上限),6 条断言未验证;win 批次 wt-gate-clean-win 为 PLANNED/NOT_READY 无证据。wt-gate-clean 已 PASS。
 - slice-migration-gen:source-missing cx/compiler/frames.cx(HEAD 未跟踪),旧记述,是否仍在未复核。
 - affected-iface2 批次未取得实跑结果(affected-tool、affected-list 已修)。
-- -c 对象路线无最终产物复用(只丢标记戳,既有状态,每次全跑约 280 ms),真复用排 0.0.63 任务 N15;artifact_hit 戳消失的提交未二分(候选 a3a32d8a09、9b107888db 均未实证)。
+- -c 对象复用(N15):修复已入库(2049e14b8a),副本候选 227e63f5998e 上同命令同 -o 三连 inference 7/0/0、对象 cmp 相同(Z6 行);未验证的是装机产品上的硬模式断言(UNISACC_REQUIRE_N15C=1)、换 -o 名与链内对象相。artifact_hit 戳消失的提交未二分(候选 a3a32d8a09、9b107888db 均未实证)。
 - 已入库工具中 tools/status.cx 的测试夹具曾由子代理用 sed -i 改过,属违规,内容未重审。
 - cx 模块语法缺口(0.0.62 若做须属 cxmod 三源产品输入,先修别名):`use m::sym as alias` 通过规划但运行报 `no host function slen`(rc 127);`#pragma unisa export` 未实现;`use sys.*` 未设计;仓外脚本找不到包根(需 cxroot.tsv)。
 - cx 模块身份缺口:同一文件经软链 tools/cxlib/sys -> cx/sys 被当两个模块(`sy_env exported by both`),使 tools/osx-sentinel.cx 等编不过。修法:cxmod 按 realpath 规范化,排在别名修复 T5 之后同写域串行;冻结的 cx/sys 不改。

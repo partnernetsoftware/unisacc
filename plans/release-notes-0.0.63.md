@@ -28,14 +28,14 @@ E3TRIM2:模型缓存目录的修剪由每次发布全量扫描改为摊销账。
 
 顶满预算(MAX_BYTES=380000,1900 项):E3TRIM2 单独无收益,候选 531/415 ms 对 0.0.62 的 489/396 ms(账缺失/账已在,中位),差在噪声内,顶满仍全扫。出处:speed-baseline.tsv 满预算两行。
 
-E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 657f2113ca):满预算实测,专用 0700 缓存预填 1900 项(380155648 B)、限额 400000000,n=5 中位,每样本两个新内容程序,load1 2.2 至 2.4。出处:speed-baseline.tsv 末两行(run1_first_publish、run2_second_publish)。
+E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 657f2113ca):满预算实测,专用 0700 缓存预填 1900 项(380155648 B)、限额 400000000,n=5 中位,每样本两个新内容程序,load1 2.2 至 2.4。出处:speed-baseline.tsv 指标列为 run1_first_publish、run2_second_publish 的两行(三产品对照,E3TRIM3 列的候选为 ca36d2eb)。
 
 | 口径 | 0.0.62 | 63A | E3TRIM3 |
 | --- | --- | --- | --- |
 | 首次发布 | 463 ms | 347 ms | 280 ms |
 | 第二次发布 | 284 ms | 240 ms | 224 ms |
 
-限定:该曲线下总量未超限额,故没有走到淘汰;淘汰到 90% 的路径耗时未测(UNMEASURED,见未达项)。modelcache-budget 两批 PASS(提交说明 657f2113ca 所述,发布前以冻结提交重跑为准)。
+限定:该曲线下总量未超限额,故没有走到淘汰;淘汰到 90% 的路径耗时未测(UNMEASURED,见未达项)。modelcache-budget-lru 与 modelcache-budget-concurrent 两批 PASS(2026-11-14 在 main 2bd89d4ead 用已装 0.0.62 实跑 `tools/affected.cx --ids ... --run`,六批 pass=6 fail=0;冻结提交上须重跑)。
 
 ### (2) C2a:缓存根与 TMPDIR 解耦(UNISACC_CACHE_DIR)
 
@@ -49,7 +49,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 ### (3) N15:-c 对象复用
 
-同命令、同 -o 的 `-c` 编译,第二次起 0 行 inference。键含 argv,换 -o 文件名则键不同、重跑,不命中(有意,换名复用未做);改源后回到 7 行。证据:修复提交 2049e14b8a;副本重建候选(c0c4b24f,专用 0700 缓存根)三次 inference 为 7/0/0,对象 sha 三次相同(29227a42857f),出自 prd_mempalace.md N15 定因条。注意:build/speed-baseline.tsv 的 N15 行是修复前的 63A 候选(30ef6915)探针,三次均 7 行(落空);修复后的 7/0/0 目前只在 prd_mempalace.md 有记载,未入该表。
+同命令、同 -o 的 `-c` 编译,第二次起 0 行 inference。键含 argv,换 -o 文件名则键不同、重跑,不命中(有意,换名复用未做);改源后回到 7 行。证据:修复提交 2049e14b8a;副本重建候选(c0c4b24f,专用 0700 缓存根)三次 inference 为 7/0/0,对象 sha 三次相同(29227a42857f),出自 prd_mempalace.md N15 定因条。注意:build/speed-baseline.tsv 的 N15 行是修复前的 63A 候选(30ef6915)探针,三次均 7 行(落空);修复后的 7/0/0 目前只在 prd_mempalace.md 有记载,未入该表。第二份独立实跑(prd_mempalace.md Z6 行):origin/main c39a890651 的 git archive 副本经 entry-build 得候选 227e63f5998e,同命令同 -o 三连 inference 为 7/0/0,对象 sha 三次均 e2df35b00e46,与 `UNISACC_RUN_CACHE=0` 所得对象 cmp 相同;只测了一个极小源,换 -o 名与改源在该次未测。
 
 测试:tests/phase-timing-stamps 新断言(K3,提交 d59e4b01a0),旧产品 70 PASS、6 UNVERIFIED,候选 74 PASS(含版本槽未写导致的 ver.cold/ver.hot 两条版本串 FAIL 说明以 prd_mempalace.md K3 行为准);装新产品后须以 `UNISACC_REQUIRE_N15C=1` 重跑,结果待填。
 
@@ -59,13 +59,13 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 0.0.63 发布上传清单:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS 六件。原因:0.0.62 及以前的七件合同里,win-arm64.zip 的四个成员与单独资产重复,其中 run.cmd 从未在 Windows 原生运行验收(原生 CI 只运行 slice-win-arm64 本身),故摘除;已公开的 0.0.62 资产不改动。Windows arm64 用户直接用 slice-win-arm64 加 pkg.bin。依据与摘除实现:prd_mempalace.md "win-arm64.zip 去留"小节;工具侧 check-release-layout 17 项断言 failed=0(该节记载)。
 
-限定:摘除只在发布工具侧完成(UNVERIFIED 的部分):CI 作业取件方式、读回校验的件数断言(应改 6)、README 与安装说明的下载链接、release/rollback.txt 里是否仍按七件或仍引用该 zip,按 prd_mempalace.md F26 须在冻结前全仓逐条归属,结果待填;对 0.0.62 release 的只读预演待做。
+限定:全仓归属已做(prd_mempalace.md F26 行;2026-11-14 复核 `git grep -n 'win-arm64.zip'`):命中只剩按版本分支的发布工具、0.0.62 及更早的候选表与历史夹具,.github/workflows 无该 zip 的取件,README 与安装说明无该 zip 的下载链接,现行 release/rollback.txt(0.0.62 版)不含件数;check-release-layout 17 项断言 failed=0(同日实跑,含 0.0.62 判七件、0.0.63 判六件、多出 zip 即拒绝)。仍 UNVERIFIED:0.0.63 真实草稿与公开后的读回件数(应为 6)未跑;release-oneshot、releaseexec、releaseprepare、release-run 的 0.0.63 分支没有用例;对 0.0.62 release 只核了资产数为 7(`gh release view v0.0.62`),未用读回工具预演。
 
 ## 未达项(必须如实写)
 
-(1) first_e2e 500 ms 门未过。63A 候选(30ef6915)hello 口径 n=3:676.7/684.8/683.8 ms,中位 683.8 ms;已装 0.0.62 同口径 675.2/675.7/655.1,中位 675.2 ms;load1 3.5 至 5.8 noisy,9/9 断言过。出处:speed-baseline.tsv 倒数第 3 行。即 hello 口径冷启动本版无改善,持平。L1 方案 A 与 N7 未带(决定:收益为推算、同字节合同风险未测,见 prd_mempalace.md),500 ms 门顺延,不放宽。
+(1) first_e2e 500 ms 门未过。63A 候选(30ef6915)hello 口径 n=3:676.7/684.8/683.8 ms,中位 683.8 ms;已装 0.0.62 同口径 675.2/675.7/655.1,中位 675.2 ms;load1 3.5 至 5.8 noisy,9/9 断言过。出处:speed-baseline.tsv "63A 重建候选 30ef6915 / tools/run-startup-bench.cx --product"行。E3TRIM3 候选同工具 n=5(同表 startup_first 两行):ca36d2eb 中位 687 ms 对 0.0.62 的 691 ms;227e63f5998e 中位 664 ms 对 678 ms。即 hello 口径冷启动本版无改善,持平。冷编译与生成代码同样持平,本版不宣称变化(同表 227e63f5998e 各行,n=5):tools/edit-span.cx 冷编译 2743 ms 对 0.0.62 的 2674 ms,五次区间重叠(更早一行的 2745 对 3523 未复现,不采用);tools/ratchets.cx 冷编译 5061 对 5239 ms;gencode sha 8MB 单轮 1013 对 970 ms,经 ABAB 交错 n=15 复测为 997.1 对 995.4 ms,两编译器产出的可执行文件逐字节相同,判噪声。L1 方案 A 与 N7 未带(决定:收益为推算、同字节合同风险未测,见 prd_mempalace.md),500 ms 门顺延,不放宽。
 (2) E3TRIM3 淘汰路径耗时未测:现有满预算实测总量未超限额,淘汰到 90% 的一次性开销 UNMEASURED。若冻结时 E3TRIM3 新旧断言或满预算曲线不满足带入规则,本节(1)将改写为"顶满预算的目录无收益"。
-(3) s9 daily 与 release 档未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑、结果如实入说明、不卡发布。0.0.62 上 commit 档实测 289 批通过、11 失败(8 转绿、3 已修,提交 d892ef38b9)、4 个 watchdog UNKNOWN 未复测;0.0.63 候选的 s9 判定:待填。daily 档预测约 16111 s 为条件值,墙钟 UNMEASURED。
+(3) s9 daily 与 release 档未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑、结果如实入说明、不卡发布。0.0.62 上 commit 档实测 289 批通过、11 失败(8 转绿、3 已修,提交 d892ef38b9;该三批 chain-phases-gen、cx-driver-deps、dock-audit 于 2026-11-14 在 main 2bd89d4ead 单独复跑 PASS)、4 个 watchdog UNKNOWN 未复测;0.0.63 候选的 s9 判定:待填。daily 档预测约 16111 s 为条件值,墙钟 UNMEASURED。
 (4) 候选级证据全部待填:首个冻结候选整链、同候选 CI、本机全批资格、候选速度基线(candidate 自含入口与发布件入口的差异未隔离)。
 (5) osx 与 win 平台证据:沿用 0.0.62 缺口,0.0.63 未新增平台实跑,UNVERIFIED。
 
@@ -75,7 +75,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 (1) DNS 未做(功能边界,既定):sy_resolve/sy_resolve4 只认数字字面量与 localhost。
 (2) 0.0.62 缺口 (2):std-surface 仍有 2 行 new(sy_res_live、np_exec);本版未重算,UNVERIFIED。
-(3) 0.0.62 缺口 (3)(4)(sy_unix_connect 越过截止时间;sy_tcp_accept_from 对 unix 监听返回 -EAFNOSUPPORT):补丁草稿在 patches-0.0.63 的 sx 补丁,对 HEAD 62be4139f3 仅 `git apply --check` 通过;未入库即视为仍开,UNVERIFIED。
+(3) 0.0.62 缺口 (3)(4)(sy_unix_connect 越过截止时间;sy_tcp_accept_from 对 unix 监听返回 -EAFNOSUPPORT):补丁草稿在 patches-0.0.63 的 sx 补丁,对 main 2bd89d4ead 仅 `git apply --check` 通过(2026-11-14 复核);未入库即视为仍开,UNVERIFIED。
 (4) 0.0.62 缺口 (5)(6)(7)(8):poll 后阻塞调用不保证截止时间、EINTR 上抛、netmsg salen 为负、sy_sig_taken 非原子,均为读码推断,未修。
 (5) 0.0.62 缺口 (9):cxm_checkcalls 误拒短名函数指针调用,已复现,既有缺陷;修复补丁(checkcalls)排 0.0.65,本版不含。
 (6) 0.0.62 缺口 (10)(12):cx 模块软链被当两个模块等问题,以及 osx/win 的 -ENOSYS 点未全进 exec/facts/refusals.tsv,未修。
@@ -92,7 +92,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 ## 待核对
 
-(1) 卖点 (1) 中 E3TRIM3 数字取自 speed-baseline.tsv 末两行,"跑后"目录项数与淘汰行为以冻结提交重测为准。
+(1) 卖点 (1) 中 E3TRIM3 数字取自 speed-baseline.tsv 的 run1_first_publish、run2_second_publish 两行,"跑后"目录项数与淘汰行为以冻结提交重测为准。
 (2) 卖点 (3) 的修复后 7/0/0 只在 prd_mempalace.md,未入 speed-baseline.tsv,冻结后装新产品重测并入表。
-(3) 卖点 (4) 的 F26 全仓归属结果待填;grep 命中的工具与 release 表文件不在本文件处理范围。
+(3) 卖点 (4) 的 F26 全仓归属已填;0.0.63 草稿与公开后的读回件数、0.0.63 版 release/rollback.txt 在发布步骤中补,公开前必须写好。
 (4) 0.0.62 缺口 (3)(4)(9) 的补丁是否入 0.0.63 或 0.0.65,以冻结时 main 为准。
