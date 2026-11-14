@@ -102,7 +102,7 @@
 
 0.0.63 与 0.0.64 任务(都依赖 0.0.62 新产品已装;开工前逐项拆到 15 分钟):
 - 0.0.63:C1 零解码布局设计稿(prd_cx.md 第 5 节,今天可写,依据 A12);C2 UNISACC_CACHE_DIR 与路径无关键(产品输入,验收:两个不同 TMPDIR 下第二次运行命中缓存);C3 mmap 已解码布局实现(验收 `tools/run-startup-bench.cx` first_e2e 500 ms 以下,n=3);C4 整链对象相拆分到整链 2400 s 以内(F9 的门)。
-- 0.0.64:D1 export(三源,验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(正例 1、拒绝 5)-> D3 符号级导入收敛(`tests/module/check.cx`)-> D4 text.text 物理拆面(第二候选,受 F9 门约束)-> D5 层感知前导(末位,超 2 小时移 0.0.65)。同写域串行,不并发。
+- 0.0.64:D0 cxmod 三源归一(2026-11-14 决定:先归一再加语法,依据与拆分见 prd_cx.md 10.5;`cx/compiler/cxmod.cx` 改为 `cx/cx0/plan.cx` 的第二投影,验收 `tools/cx0-extract.cx -- --check --all` 两行 EXACT、`tools/check-cxmod-tri.cx` 末行 gaps=0;其中 T1 至 T4 不动产品输入、今天可开工且互不相交,T5 至 T8 动产品输入、都写 plan.cx、串行、等 0.0.62 新产品已装;回滚:T8 之前产品件仍是手写件,撤 T5 至 T7 的提交即回到现状)-> D1 export(依赖 D0:此后每条新拒绝只改 plan.cx 一处;若 D0 的 T8 未落地则 D1 不开工,不退回手工三处对齐;验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(依赖 D1;正例 1、拒绝 5)-> D3 符号级导入收敛(依赖 D0,与 D1、D2 同写 plan.cx 故串行;`tests/module/check.cx`)-> D4 text.text 物理拆面(依赖 D1 的 export;第二候选,受 F9 门约束)-> D5 层感知前导(不依赖 D0 至 D3;末位,超 2 小时移 0.0.65)。D0 至 D3 同属 cxmod 三源一类、同候选;同写域串行,不并发。
 
 三个可测速度杠杆(数字只取自 build/speed-baseline.tsv 中四个工具的行):
 - (1) 冷启动:run-startup-bench first_e2e 三次 684.051/704.882/714.267 ms(real4 c55533c7,n=3),同工具 repeat_median3 约 27 至 29 ms(0.0.59 与 local-0060 组);首次与重复相差约 650 ms,是零解码的可得上限。度量:同工具 first_e2e,目标 0.0.62 为 670 以下、0.0.63 为 500 以下。
