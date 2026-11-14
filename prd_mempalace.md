@@ -13,7 +13,7 @@
 ## 当前位置
 
 - 版本:0.0.62 已公开(Latest,已装,sha 83b82c8d);0.0.63 已冻结在 c06a190540(私有提交 417153841b),整链 real7 第三段在跑。入口:archive/prd_mempalace-2026-11-14.md 的"当前发布与版本"节。
-- 整链 real7:PID 1304809、PGID 1304808,起于 20:50:57,硬限 22:20:57,日志 /tmp/unisacc-session-build-lr0060/log/real7s.out,结束写 real7s.rc。终止只按 PGID 1304808 与 1304807。
+- 整链 real7:2026-11-14 21:29 完成 rc=0(三段,第三段 20:50:57 起),compare 通过;产物 /tmp/unisacc-session-build-lr0060/chain-real7/ape-final/unisacc-next.com(sha256 前 16 位 8312372d7af1e23d,未注入版本),收据 ape-receipt.txt。该目录保留到下一版公开并读回为止。
 - 下一步:整链结束 -> 发布 12 步(6 件资产,无 zip)-> 装机与装后门 G1 至 G6 -> 公开后大扫除。
 
 ## 决定(别人必须遵守)
@@ -27,7 +27,7 @@
 
 ## 阻塞发布
 
-- 整链 real7 未结束;前两段在 g2 对象相以 `chain-step timeout after 90 s`(tools/cxlib/procrun.cx:69)失败,第三段去掉 RUN_CACHE=0 后每键 6 至 7 s。入口:log/real7.out、real7r.out、real7s.out。
+- 发布 12 步未开始:命令清单 $CLAUDE_JOB_DIR/tmp/release63-steps.txt;待核两处(pack-srcdir 的 --sid 取值、F 构造时树对象须在主仓对象库)。
 - s9 commit 档按设计恒为 UNKNOWN,裁决预计 NOT_QUALIFIED unknown=1;daily 与 release 档未跑。入口:release/decision.txt。
 
 ### 仍未验证(缺什么 / 清零动作)
