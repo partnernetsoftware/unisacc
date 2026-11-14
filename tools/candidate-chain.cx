@@ -28,7 +28,6 @@
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.chainroot
 #pragma unisa use cxlib.chaincall
-#pragma unisa use cxlib.runnerprep
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -324,14 +323,14 @@ static void step_pin(const char *root, int secs) {
     }
     if (sy_close(lock)) die("candidate unlock", step_native);
 }
-/* 同一机制推广到 whole-front、preflight、release-build、release-ape(0.0.59):每个输出目录内
+/* 同一机制用于 whole-front、preflight、release-build、release-ape 与 chain-pace:每个输出目录内
    NAME.native 只构造一次,NAME.pin 记录工具名、输出目录、构造时源码 sha 与可执行体 sha256;之后每次
    (每进程首次)核对,可执行体字节变化拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录
    拒绝 "REFUSE chain-tool pin dir mismatch"。检出内工具改动不影响本输出,与 chain-step 同。 */
 static int pin_busy;
 static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap) {
-    static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", 0};
-    static char done[4][4400];
+    static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", "chain-pace", 0};
+    static char done[5][4400];
     const char *name = 0;
     char want[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], shash[65], text[9000];
     int k;
@@ -2297,9 +2296,13 @@ static int watch_worker(const char *dir, const char *pace, int life, int owner) 
     sy_close(fd);sy_close(life);return 0;
 }
 static void watch_start(const char *root,const char *dir,const char *baseline) {
-    char pace[4400],why[512],table[4400],pidfile[4400],pidtext[40];
-    int reused,p[2];
-    if(rn_prepare(root,"tools/chain-pace.cx",dir,pace,sizeof pace,&reused,why,sizeof why))die("watch prepare",why);
+    char pace[4400],source[4400],table[4400],pidfile[4400],pidtext[40];
+    int p[2];const char *saved_out=step_out;
+    if(cx_fmt(source,sizeof source,"%s/tools/chain-pace.cx",root))die("watch source",root);
+    /* Reuse the chain's source-build pin contract, never runnerprep's tlib preparation path. */
+    step_out=dir;
+    if(!tool_pinned(root,source,40,pace,sizeof pace))die("watch prepare",source);
+    step_out=saved_out;
     if(cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",dir)||
        cx_fmt(pidfile,sizeof pidfile,"%s/watch.pid",dir))die("watch path",dir);
     sy_stat_t st;int missing=baseline?sy_stat(baseline,&st):-ENOENT;
