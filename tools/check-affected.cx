@@ -383,6 +383,52 @@ int main(int argc, char **argv) {
             ck(num(q, "\tbatches=") + (has(q, "state=on") ? num(q, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=") : 0) == num(q2, "\tbatches="), "iface-real-probe-conserves");
         }
     }
+    if (want("iface2")) {   /* per-package narrowing: another package's stale table must not turn narrowing off; --iface-stale PKG is the test hook */
+        long fullt, fulls, sel, def;
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches=");
+            ck(rc == 0 && fullt >= 100, "iface-pkg-baseline-text");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fulls = num(o, "\tbatches=");
+            ck(rc == 0 && fulls >= 100, "iface-pkg-baseline-sys");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* A=cx.sys stale, change in B=cx.text */
+            rc = tool(a, p, OUTCAP); sel = num(p, "\tbatches="); def = num(p, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=");
+            ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-pkg-other-stale-stays-on");
+            ck(def > 0, "iface-pkg-other-stale-defers-some");
+            ck(sel > 0 && sel < fullt, "iface-pkg-other-stale-selects-fewer");
+            ck(sel + def == fullt, "iface-pkg-other-stale-conserves");
+            ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == def, "iface-pkg-other-stale-lists-every-deferral");
+            ck(!has(p, "pkg=cx.sys"), "iface-pkg-other-stale-reason-not-A");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* change in A itself */
+            rc = tool(a, q, OUTCAP);
+            ck(rc == 0 && has(q, "IFACE_NARROW\tstate=off\treason=pkg=cx.sys,probe=iface-hash-row\n"), "iface-pkg-own-stale-is-off");
+            ck(num(q, "\tbatches=") == fulls && !has(q, "DEFERRED_BY_IFACE"), "iface-pkg-own-stale-equals-full");
+            ck(has(q, "pkg=cx.sys"), "iface-pkg-own-stale-reason-names-package");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* two packages, one stale: full */
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "state=off\treason=pkg=cx.sys,") && !has(q2, "DEFERRED_BY_IFACE"), "iface-pkg-multi-with-stale-is-off");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.nosuch", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "IFACE_NARROW\tstate=on\treason=same\n") && has(q2, "DEFERRED_BY_IFACE_SUMMARY"), "iface-pkg-multi-all-same-is-on");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.text", "--full", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "IFACE_NARROW\tstate=off\treason=full\n") && num(q2, "\tbatches=") == fullt, "iface-pkg-full-still-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--tier", "release", "--iface-narrow", "--iface-stale", "cx.sys", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "state=off\treason=release-tier\n") && !has(q2, "DEFERRED_BY_IFACE"), "iface-pkg-release-still-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-stale", "cx.sys", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && !has(q2, "IFACE_NARROW") && num(q2, "\tbatches=") == fullt, "iface-pkg-no-switch-no-narrow");
+        }
+    }
     printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);
     return failed ? 1 : 0;
 }

@@ -1007,13 +1007,44 @@ static int iface_pkg(const char *rel, char *pkg, long cap) {
     free(t);
     return found;
 }
-/* 1 when package PKG's interface is proven the same in HEAD and in the work tree; WHY names the probe that decided */
+/* the line of TAB-table T (N bytes) whose first field is PKG: start in *S, length in *L; 1 found */
+static int pkg_line(const char *t, long n, const char *pkg, long *s, long *l) {
+    long pl = tx_len(pkg, 256), at = 0;
+    while (at < n) {
+        long e = at; while (e < n && t[e] != '\n') e++;
+        if (e - at > pl && t[at + pl] == '\t' && eqb(t + at, pkg, pl)) { *s = at; *l = e - at; return 1; }
+        at = e + 1;
+    }
+    return 0;
+}
+static int lines_eq(const char *a, long as, long al, const char *b, long bs, long bl) { return al == bl && eqb(a + as, b + bs, al); }
+static char *iface_fresh; static size_t iface_fresh_n; static int iface_fresh_state;   /* 0 not run, 1 ok, -1 failed */
+static const char *iface_stale;   /* test hook: this package's probe fails, every other package is "same" */
+/* 1 when package PKG's interface is proven the same in HEAD and in the work tree; WHY names the probe that decided.
+   Only PKG's own rows count: its layer-api table against HEAD, its iface-hash row against HEAD and against a recompute
+   written to a private temp file (the shared build/iface-hash.tsv is never written), and layer-api --check --pkg PKG.
+   Another package's stale table no longer turns narrowing off. */
 static int iface_same(const char *pkg, const char **why) {
-    char man[400]; Buf o = {0, 0, 0};
+    char man[400], tmp[600]; Buf o = {0, 0, 0}, h = {0, 0, 0}; size_t tn = 0; char *t; long s1, l1, s2, l2, s3, l3;
+    if (iface_stale) { if (tx_eqz(iface_stale, pkg)) { *why = "iface-hash-row"; return 0; } *why = "same"; return 1; }
     if (iface_verdict) { *why = "verdict-hook"; return tx_eqz(iface_verdict, "same"); }
     if (cx_fmt(man, sizeof man, "build/layer-api/%s.tsv", pkg)) { *why = "pkg-name"; return 0; }
-    { char *v[] = {"git", "diff", "--quiet", "HEAD", "--", man, "build/iface-hash.tsv", 0}; if (read_all(v, &o) != 0) { *why = "manifest-differs-from-HEAD"; return 0; } }
-    { char *v[] = {"sh", "./unisacc.com", "tools/iface-hash.cx", "--", "--check", 0}; if (read_all(v, &o) != 0) { *why = "iface-hash-check"; return 0; } }
+    { char *v[] = {"git", "diff", "--quiet", "HEAD", "--", man, 0}; if (read_all(v, &o) != 0) { *why = "manifest-differs-from-HEAD"; return 0; } }
+    if (iface_fresh_state == 0) {
+        char *v[] = {"sh", "./unisacc.com", "tools/iface-hash.cx", "--", "--write", "--table", tmp, 0};
+        iface_fresh_state = -1;
+        if (!cx_fmt(tmp, sizeof tmp, "%s/unisacc-affected-ifh-%d.tsv", sy_tmpdir(), sy_pid()) && read_all(v, &o) == 0) {
+            iface_fresh = cx_read(tmp, &iface_fresh_n); if (iface_fresh) iface_fresh_state = 1;
+        }
+        sy_unlink(tmp);
+    }
+    if (iface_fresh_state < 0) { *why = "iface-hash-recompute"; return 0; }
+    t = cx_read("build/iface-hash.tsv", &tn);
+    if (!t) { *why = "iface-hash-row"; return 0; }
+    { char *v[] = {"git", "show", "HEAD:build/iface-hash.tsv", 0}; if (read_all(v, &h) != 0) { free(t); *why = "iface-hash-row"; return 0; } }
+    if (!pkg_line(t, (long)tn, pkg, &s1, &l1) || !pkg_line(iface_fresh, (long)iface_fresh_n, pkg, &s2, &l2) || !pkg_line(h.p, h.n, pkg, &s3, &l3)
+        || !lines_eq(t, s1, l1, iface_fresh, s2, l2) || !lines_eq(t, s1, l1, h.p, s3, l3)) { free(t); *why = "iface-hash-row"; return 0; }
+    free(t);
     { char *v[] = {"sh", "./unisacc.com", "tools/layer-api.cx", "--", "--check", "--pkg", (char *)pkg, 0}; if (read_all(v, &o) != 0) { *why = "layer-api-check"; return 0; } }
     *why = "same"; return 1;
 }
@@ -1070,6 +1101,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
         else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
         else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
+        else if (tx_eqz(argv[a], "--iface-stale") && a + 1 < argc) { iface_stale = argv[a + 1]; a += 2; }   /* test hook: one package's probe fails */
         else if (tx_eqz(argv[a], "--iface-verdict") && a + 1 < argc) {   /* test hook */
             iface_verdict = argv[a + 1]; a += 2;
             if (!tx_eqz(iface_verdict, "same") && !tx_eqz(iface_verdict, "changed")) usage();
@@ -1172,7 +1204,7 @@ int main(int argc, char **argv) {
                 for (k = 0; k < nch; k++) {
                     const char *w = "same";
                     if (!iface_pkg(display(changed[k]), ipkg, (long)sizeof ipkg)) { state = "off"; reason = "file-outside-packages"; break; }
-                    if (!iface_same(ipkg, &w)) { state = "off"; reason = tx_eqz(w, "verdict-hook") ? "interface-changed" : w; break; }
+                    if (!iface_same(ipkg, &w)) { state = "off"; if (tx_eqz(w, "verdict-hook")) reason = "interface-changed"; else { static char rb[300]; cx_fmt(rb, sizeof rb, "pkg=%s,probe=%s", ipkg, w); reason = rb; } break; }
                 }
             }
             if (tx_eqz(state, "off")) iface_narrow = 0;
