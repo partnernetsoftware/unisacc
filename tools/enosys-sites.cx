@@ -3,7 +3,8 @@
  *   sh ./unisacc.com tools/enosys-sites.cx -- --write [--root DIR]   重算并写 build/enosys-sites.tsv
  *   sh ./unisacc.com tools/enosys-sites.cx -- --check [--root DIR]   重算并逐字节比对
  *
- * 列 file line function target(lnx|osx|win|all|unknown) named(yes|no)。每个含 ENOSYS 的行一行,与 git grep -c 的行计数口径一致。
+ * 列 file line function target(lnx|osx|win|all|unknown) named(yes|no)。点=代码(.cx/.c/.h,剥离字符串字面量与 // 、块注释含跨行后)里仍含 ENOSYS 的行;
+ * 纯注释行/字符串里的字样不算点,同行行尾注释仍是该点的 named 依据;非代码文件按原文逐行计。
  * target: 先看路径(osx/darwin/mac、win、lnx/linux 作为词段);再看命中行前后 8 行内的词(osx darwin macos / win windows / lnx linux),
  * 恰一族取该族,多族 all,无则 unknown。named=yes: 标识符里 ENOSYS 带前后缀(如 SY_ENOSYS_NET),或本行/上一行有 3 字符以上的注释文字。 */
 #pragma unisa use sys.io
@@ -117,11 +118,43 @@ static int has_comment(const char *s, long b, long e) {
     return 0;
 }
 
+static int is_code_path(const char *rel) {
+    long n = tx_len(rel, 900);
+    if (n > 3 && mm_same(rel + n - 3, ".cx", 3)) return 1;
+    if (n > 2 && (mm_same(rel + n - 2, ".c", 2) || mm_same(rel + n - 2, ".h", 2))) return 1;
+    return 0;
+}
+/* 复制 b 为掩码:字符串/字符字面量与 // 、块注释(含跨行)内的字节换成空格,换行保留 */
+static char *mask_code(const char *b, long n) {
+    char *m = mm_alloc(n + 1);
+    long i = 0;
+    mm_copy(m, n + 1, b, n);
+    m[n] = 0;
+    while (i < n) {
+        char c = b[i];
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') {
+            while (i < n && b[i] != '\n') m[i++] = ' ';
+        } else if (c == '/' && i + 1 < n && b[i + 1] == '*') {
+            m[i] = ' '; m[i + 1] = ' '; i += 2;
+            while (i < n && !(b[i] == '*' && i + 1 < n && b[i + 1] == '/')) { if (b[i] != '\n') m[i] = ' '; i++; }
+            if (i < n) { m[i] = ' '; if (i + 1 < n) m[i + 1] = ' '; i += 2; }
+        } else if (c == '"' || c == '\'') {
+            m[i++] = ' ';
+            while (i < n && b[i] != c && b[i] != '\n') {
+                if (b[i] == '\\' && i + 1 < n && b[i + 1] != '\n') m[i++] = ' ';
+                m[i++] = ' ';
+            }
+            if (i < n && b[i] == c) m[i++] = ' ';
+        } else i++;
+    }
+    return m;
+}
+
 static int fam_scan_path_dummy_guard(const char *rel, int *o, int *w, int *l);
 static void scan_file(const char *rel) {
     char path[900];
     size_t m = 0;
-    char *b;
+    char *b, *mk;
     long n, i, ls, nlines = 0;
     long *starts;
     int pf_o, pf_w, pf_l, pathfam;
@@ -135,13 +168,14 @@ static void scan_file(const char *rel) {
     starts[0] = 0; nlines = 1;
     for (i = 0; i < n; i++) if (b[i] == '\n') starts[nlines++] = i + 1;
     /* 末行无换行时 nlines 已含它;有换行结尾则最后一个起点在 n,为空行 */
+    mk = is_code_path(rel) ? mask_code(b, n) : b;
     pf_o = pf_w = pf_l = 0;
     pathfam = fam_scan_path_dummy_guard(rel, &pf_o, &pf_w, &pf_l);
     (void)pathfam;
     for (ls = 0; ls < nlines; ls++) {
         long lb = starts[ls], le = lb, k, hit = -1;
         while (le < n && b[le] != '\n') le++;
-        for (k = lb; k + 6 <= le; k++) if (b[k] == 'E' && mm_same(b + k, "ENOSYS", 6)) { hit = k; break; }
+        for (k = lb; k + 6 <= le; k++) if (mk[k] == 'E' && mm_same(mk + k, "ENOSYS", 6)) { hit = k; break; }
         if (hit < 0) continue;
         {
             char fn[200], num[32], row[1400];
@@ -192,6 +226,7 @@ static void scan_file(const char *rel) {
         }
     }
     mm_free(starts);
+    if (mk != b) mm_free(mk);
     mm_free(b);
 }
 
