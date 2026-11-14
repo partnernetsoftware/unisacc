@@ -12,10 +12,10 @@
 
 ## 当前位置
 
-- 版本:0.0.63 已公开(2026-11-14T14:12:06Z,Latest,已装,APE sha 04b85e6e4ec3ddcb)。F=9f3d367e44(v0.0.63 与 v0.0.63-src),X=86e85e60c8,Y1=d57b5be605,Y2=707e6f562e,CI run 43600577542 十作业全 success,裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。回滚:release/rollback.txt;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62(sha 83b82c8d)。
-- 整链 real7:2026-11-14 21:29 完成 rc=0(三段,第三段 20:50:57 起),compare 通过;产物 /tmp/unisacc-session-build-lr0060/chain-real7/ape-final/unisacc-next.com(sha256 前 16 位 8312372d7af1e23d,未注入版本),收据 ape-receipt.txt。该目录保留到下一版公开并读回为止。
-- 装后门已过(2026-11-14):K3 硬模式 assertions=76 failed=0、cx-namespace 18/0、速度无变慢项(build/speed-baseline.tsv 末尾);大扫除第一遍已做(/tmp 9.6G -> 7.6G,处置表 $CLAUDE_JOB_DIR/tmp/sweep63.txt);chain-real6 与 0.0.62 两份快照按 R6-H65 留到 0.0.65 公开后删。
-- 0.0.65 整链 real8 已完成 rc=0(一次跑通,墙钟 3694 s,compare 通过;产物 chain-real8/ape-final/unisacc-next.com,sha256 前 16 位 2e7ec678aaca5ebf,未注入版本);下一步发布 12 步。看门狗未给 --watch-baseline,按默认 60 s 阈值把 44 次长相判成 SLOW/STALLED,属误判,后续起链要带基线。原起链记录:冻结并起整链 real8(2026-11-15 00:16:41 起,硬限 01:46:41):REV b7520b8e81(v0.0.65 已快进合入 main),私有提交 de2df6171e,链本体 PID 2656467 / PGID 2656466,看门狗 PID 2658489,日志 /tmp/unisacc-session-build-lr0060/log/real8.out,输出 chain-real8,结束写 real8.rc。终止只按 PGID 2656466 与 2656465。内容:cxmod 三源统一、D1a export、链工具三项(环境白名单、g2 金丝雀、看门狗)。
+- 版本:0.0.65 已公开(2026-11-14T18:02:31Z,Latest,已装,APE sha 889dfe853837d80b)。冻结 REV b7520b8e81,F=c43ba16b01(v0.0.65 与 v0.0.65-src),X=cb1421d99f,Y1=ecd4201d42,Y2=7c219edbc3;整链 real8 一次跑通 rc=0 3694 s;CI run 43620762916 十作业全 success;裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。证据 $CLAUDE_JOB_DIR/tmp/rel65y/。回滚:release/rollback.txt;0.0.63 备份 ~/.cache/unisacc/ape-0.0.63(sha 04b85e6e)。内容:cxmod 三源统一、D1a export、链工具三项(环境白名单、g2 金丝雀、看门狗)。
+- 上一版 0.0.63:2026-11-14T14:12:06Z 公开,F=9f3d367e44,APE sha 04b85e6e;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62。
+- 下一步:0.0.65 装后门(cx-namespace 两条新产品语义断言实跑、K3 硬模式、速度对 0.0.63 重测、D1a 试点 rw.cx 落仓);公开后大扫除(chain-real6、chain-real7、0.0.62 两份快照按 R6-H65 现在可删)。
+- 0.0.65 已知缺口(发布说明已写):s9 325 批 309/12/4,7 项为 s9 根内候选缺可执行位的准备失误(单跑通过);tlib-prep-refuse 为看门狗提交引入的工具依赖缺陷;candidate-chain 批超 55 s 预算待拆批;看门狗未给基线致 44 次误判;已装编译器对大型二维自动数组报 not covered(最小复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 
 ## 决定(别人必须遵守)
 
