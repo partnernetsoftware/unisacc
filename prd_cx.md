@@ -1001,6 +1001,105 @@ R0 实测(2026-11-14,HEAD 735a161e52,lnx/x86_64,已装产品;明细 TSV 在 `$CL
 - 待测:R2 去掉私有 sha 后 pipe.cx 的选批数(预计不变,因闭包由使用方决定):UNMEASURED;tlibpkg 分面后只读表工具的选批数(现 152):UNMEASURED,由 R0-5 的使用方分布按 10.4 同法估算;R3 后改 `st_span` 签名需改文件数 5 -> 1:未实现。
 - 取数命令统一为 `sh ./unisacc.com tools/affected.cx -- --files FILE --list-only [--iface-narrow --symbol-narrow SYM]`,读 AFFECTED_SUMMARY 的 batches 与 scanned。
 
+### 10.7 export 语法与可见性合同(2026-11-14 设计;未实现,不得记 PASS;即 0.0.64 的 D1)
+
+结论:`export` 分两种形状,首版(D1a)只做「本模块自有函数的公开名单」,门面重导出(D1b)排其后。有 export 的模块以源码内名单为准,`cxpack.tsv` 的公开名列在迁移期只作校验,终态改为由 export 生成;没有 export 的模块行为完全不变。本节未跑任何命令,所有行为论断来自读源码,新产品上的行为一律 UNVERIFIED。
+
+**现状证据(读源码,HEAD 6c2b8e4776)**
+
+- 导出集现在怎么推导:`cxm_project`(`cx/cx0/plan.cx:833`)先给每个文件级项分类,`typedef` 为 1(`:841`)、`static` 为 0(`:842`)、带函数体的非 static 为 2(`:843`)、无名字的 struct/union/enum 为 1(`:845`)、其余声明为 3(`:846`)。类 1(类型)无条件写进接口文本;类 2(函数)再过 `cxm_listed`(`:915`),返回 0 就跳过(`:917`),既不写原型也不 `cxm_addsym`。
+- `cxm_listed`(`:778`)的三值:同目录没有 `cxpack.tsv` 或表里没有本文件的行,返回 2(全部非 static 函数公开);有行且名字在第三列,返回 1;有行而名字不在,返回 0。所以「公开名单」今天已经存在,只是写在包表里,不在源码里。
+- 公开名单单一来源:`cx/stream/cxpack.tsv` 三行共 30 名(item 4、pipe 9、rw 17);仓内带 `cxpack.tsv` 的目录只有 `cx/driver`、`cx/stream` 与 `tests/cxpack/` 五个夹具(`git ls-files '*cxpack.tsv'`)。
+- 指令解析:`cxm_directive`(`:570`)只认 `use`、`module`、`dock`,其余落到 `unknown unisa pragma`(`:623`);`export` 今天因此被拒,`tests/cx-namespace.cx:100`、`:102` 的 `planned-export-refused-by-name`、`planned-export-alias-refused-by-name` 断言的就是这条文案。位置约束已有:`unisa pragma after first declaration`(`:585`)、`unisa pragma inside conditional`(`:586`),export 自动继承。
+- CX-U-2 已有拒绝:符号级导入点名未导出符号,`cxm_usechk`(`:1113`)发 `module M does not export SYM (used by U)`(`:1123`);调用未导入的函数,`cxm_callerr` 发 `call to undeclared function NAME (declared in M, which U does not use)`(`:1242`)。T5 之后三源都有这两条(`cx/compiler/cxmod.cx:1105`、`:1224`;`src/cxmod.c:1082`、`:1201`)。
+- 接口表:`tools/layer-api.cx` 读产品自己的 `-cx-interface` 输出(头注释第 6 行),不读 `cxpack.tsv`;R0-1 实测 cx.stream 为 34 行(30 函数、1 typedef、3 枚举),函数行与 cxpack 30 名差集为空(10.6 R0 实测)。
+- 与 `prd_cx_spec.md` 3.5 的冲突:3.5 把 `export NAME` 定为「重导出模块 NAME」;本任务书的 D1 是「公开名单 `export NAME[,NAME...]`」。同一写法不能两义,下面 (1) 给出取舍,3.5 须随 E0 改写(不在本节写域)。
+
+**(1) 语法与 cxpack 的关系**
+
+```
+#pragma unisa export NAME[,NAME...]          D1a:NAME 是本单元定义的非 static 函数名;逗号分隔,逗号两侧可有空格;可写多行,取并集
+#pragma unisa export use MODULE[::sym]       D1b:门面重导出(即 3.5 原 export NAME 的语义),排在 D1a 之后
+```
+
+- 取舍:裸名一律是自有符号,重导出必须带 `use` 关键字。依据:单段模块名(如 `rw`)与函数名在词法上无法区分,靠查表消歧要求在指令期就知道本单元的全部定义,而 `cxm_scan` 是先处理指令再收项(`:630` 的注释);带关键字则指令期即可定形。
+- 操作数只许标识符(`cxm_idch`),不许 `*`、`.`、`::`、`as`。export 必须出现在本单元的 `#pragma unisa module` 之后。
+- 只管函数。类型(类 1)首版仍无条件公开:类型不产生链接符号,且隐藏类型会让已公开原型不可写。名单里点类型名即拒。
+- 导出集规则(替换 `:915` 至 `:917` 的判定,顺序即优先级):
+  - (a) 单元有至少一条 export:公开集就是 export 名单。此时若 `cxm_listed` 对本文件有行(返回 0 或 1 的情形),两边集合必须相等,不等即拒;没有行(返回 2)则不校验。
+  - (b) 单元没有 export:行为与今天逐字节相同(有 cxpack 行按行,否则全部非 static 函数公开)。这就是向后兼容规则,不设「默认变私有」的切换日。
+- cxpack 的去向分三期:迁移期(0.0.64)export 与 cxpack 并存且互相校验;一个包的全部单元都写了 export 之后,该包 `cxpack.tsv` 第三列改为生成物(事实 export 行 -> 生成器带 `--check` -> 表),name 与 path 两列保留给包工具;「无 export 即全公开」只对产品层收紧,用棘轮计数(只减不增),不改规划器默认。
+- 上限:每单元 export 名数上限登记到 `exec/facts/limits.tsv`,文案拼数字(T6 的做法),不写死字面量。
+
+**(2) 错误模型(文案即断言子串;rc 一律 1)**
+
+D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;下表「落点」列按 plan.cx / cxmod.cx / src/cxmod.c 给现有函数的行,供 T8 未落地时核对投影。
+
+| 编号 | 触发 | 文案 | 落点函数(三源行) |
+|---|---|---|---|
+| X1 | `export` 后无名字 | `unisa export takes a name` | `cxm_directive` 的 pragma 分支(`:623` / `:606` / `:579` 之前新增分支) |
+| X2 | 非标识符、`*`、空项(连续或结尾逗号) | `bad export name "TEXT"` | 同上 |
+| X3 | 单元无 `module` 行或 export 写在它之前 | `export outside module` | 同上 |
+| X4 | 同一名字出现两次(同行或跨行) | `module M exports NAME twice` | 同上(登记名单时查重) |
+| X5 | 名单超上限 | `module M has more than N exports` | 同上 |
+| X6 | 名字在本单元无定义 | `module M exports NAME but does not define it` | `cxm_project`(`:833` / `:898` 附近 / `:871` 附近),类 2 循环结束后逐名核对 |
+| X7 | 名字是 static 函数 | `module M exports NAME; it is static` | 同上 |
+| X8 | 名字是类型或对象 | `module M exports NAME; only functions are listed` | 同上 |
+| X9 | export 与 cxpack 行集合不等 | `module M export list differs from cxpack.tsv: NAME` | 同上,紧接 `cxm_listed` 调用处 |
+| X10 | `use M::sym` 点名未导出符号 | 沿用 `module M does not export SYM`(不改字) | `cxm_usechk`(`:1123` / `:1105` / `:1082`) |
+| X11 | 调用 M 的未导出函数 | `call to undeclared function NAME (private to M)` | `cxm_callerr`(`:1242` / `:1224` / `:1201`) |
+| X12 | `export use M::sym as alias` | `export alias unsupported`(3.5 既有) | `cxm_directive`,D1b |
+| X13 | `export use` 自己、成环 | `exports itself`、`module cycle`(3.5 既有) | `cxm_adduse`(`:495`),D1b |
+
+- 既有的导出项检查不变且只对公开项生效:`under #if (conditional interface)`、`uses macro`、`prefix is reserved for the prelude`(`cxm_exportok`,`:689`)。
+- 冲突规则:`use M::sym` 与 M 的 export 冲突就是 X10,不另立文案;`export NAME` 的 NAME 同时是本单元经 `use X::NAME as NAME` 引入的别名,按 X6 拒(别名不是本单元的定义)。
+- X11 与现有文案共用前缀 `call to undeclared function NAME`,`tests/cx-namespace.cx:124` 的子串断言不受影响。
+
+**(3) 可见性与内存安全**
+
+- 不 export 的函数不进接口文本(现有 `:917` 的路径),使用方看不到原型。
+- 要补的一处:今天未公开函数没有 `cxm_addsym`(`:917` 直接 continue),`cxm_checkcalls` 是否仍能把对它的调用归到所属模块:UNVERIFIED(未读完 checkcalls 的归属查找)。设计要求:未公开的类 2 函数以新的种类值登记进 `cxm_sym`(不写原型、不参与 `cxm_usechk` 的 `cxm_symk == 0` 匹配),使调用走 `cxm_callerr` 同一路径发 X11,而不是落到编译器的隐式声明。
+- 与 CX-U-2 的关系:CX-U-2 管「使用方选了哪些名字」(导入侧收窄),export 管「模块给出哪些名字」(导出侧收窄);两者落在同一张 `cxm_sym` 表和同一个检查函数上,export 只是让该表少登记公开项,不新增第二条检查链。
+- 不承诺的性质:export 是规划期的名字可见性,不是链接期隔离;未公开函数仍是外部链接符号,手写 `extern` 原型或 `.c` 单元(不被扫描,`src/cxmod.c:18` 注释)可以绕过。链接期隐藏(投影成 static 或改名)不在 D1 范围,不得据 D1 宣称模块私有状态已受保护。
+
+**(4) 迁移试点:cx.stream 的 rw 面**
+
+- 选它的依据:17 名已有显式名单(`cx/stream/cxpack.tsv` 第 4 行);无产品使用方(10.6 第 (2) 段),仓内使用方只有 `tools/check-cx-streamown.cx`、`tools/check-cx-streamapi.cx`;改 `rw.cx` 只选 1 批(R0-7)。`ext.net.resolve` 没有 cxpack 行可对拍,放第二个。
+- 做法:在 `cx/stream/rw.cx` 的 module 行后加 export 行,17 名与 cxpack 行逐名相同;不改任何使用方。
+- 验收命令与预期值(全部需装有 D1 的新产品;旧产品上预期 `unknown unisa pragma export`,记 UNVERIFIED needs-new-product):
+  - `sh ./unisacc.com tools/layer-api.cx -- --check --pkg cx.stream`:rc=0,`LAYER_API cx.stream ok rows=34 units=3`(与 R0-1 相同,接口字节不变)。
+  - `sh ./unisacc.com tools/check-cx-streamapi.cx`:rc=0,`CX_STREAMAPI ok=208 failed=0`。
+  - `sh ./unisacc.com tools/affected.cx -- --files cx/stream/rw.cx --run`:选 1 批,PASS。
+  - 反向一例(仓外副本):从 export 行删掉 `xs_copy`,规划 rc=1,文案 `module rw export list differs from cxpack.tsv: xs_copy`。
+  - `sh ./unisacc.com tools/cx0-extract.cx -- --check --all`:两行 `EXACT`。
+
+**(5) 次序关系**
+
+- D0:T6(MAXU 与文案拼数字)、T7(区标与投影表)、T8(产品件改生成)必须先于 D1;X5 的上限文案依赖 T6 的读表做法,十三条新文案依赖 T8 才能只改一处。T8 未落地则 D1 的实现任务(E4 起)不开工,夹具与设计任务不受限。
+- 通配棘轮 `cx-wildcard-product`:无依赖。export 名单不接受 `*`(X2),不会产生新的通配形态;棘轮规则不用改。D2(`use PFX.*`)依赖 D1b 而不是 D1a。
+- layer-api:接口表读 `-cx-interface`,export 只在公开集变化时才动它。试点要求集合相等,所以 D1a 不触发 layer-api 重生;R4(接口打印覆盖面与包根门面)排在 D1b 之后,包根门面 `stream` 用的是 `export use`。
+- 类别:D1a、D1b 都是 cxmod 三源类产品输入,与 D0、D2、D3 同候选、同写 plan.cx、串行。
+
+**(6) 子任务(每项 15 分钟内;同列写域互不相交者可并发)**
+
+| 编号 | 内容 | 写域 | 产品输入 | 类别 | 今天可做 | 验收命令与预期值 |
+|---|---|---|---|---|---|---|
+| E0 | 改写 `prd_cx_spec.md` 3.5 的 export 两行与表,对齐本节 (1) | `prd_cx_spec.md` | 否 | 文档 | 是 | `grep -c 'export use' prd_cx_spec.md` 不小于 2;3.5 表内 export 行的现行为仍写 `unknown unisa pragma export` |
+| E1 | 只读:读完 `cxm_checkcalls` 的归属查找,定 (3) 的 UNVERIFIED;清点仓内「有 cxpack 行」与「无行」的模块数 | 仅 `$CLAUDE_JOB_DIR/tmp`,结论原位填回本节 | 否 | 只读 | 是 | 给出查找所用的 `cxm_symk` 值与文件行;`git ls-files '*cxpack.tsv'` 为 7 个文件 |
+| E2 | 拒绝夹具 X1 至 X11 各一例加正例两例(有 cxpack 行、无行) | `tests/export/` 新目录 | 否 | 测试夹具 | 是 | `ls tests/export` 为 13 个子目录;每个拒绝夹具带一行预期文案文件 |
+| E3 | 检查器:对每个夹具跑规划,断言 rc 与文案子串;旧产品命中 `unknown unisa pragma export` 时打印 UNVERIFIED needs-new-product,不记 PASS | `tools/check-export.cx`、批次行(`tools/register.cx`)、`prd.md` 能力速查一行 | 否 | 工具 | 是(依赖 E2) | 旧产品:rc 非 0,末行 `CHECK_EXPORT passed=0 failed=0 unverified=13`;新产品:`passed=13 failed=0 unverified=0` |
+| E4 | 指令解析与名单表(X1 至 X5),上限入 `limits.tsv` | `cx/cx0/plan.cx`(`cxm_directive`)、`exec/facts/limits.tsv`、两个生成物 | 是 | cxmod 三源 | 否(等 T8) | `tools/cx0-extract.cx -- --check --all` 两行 `EXACT`;`check-cxmod-tri` 末行 `failed=0 gaps=0` |
+| E5 | 导出集判定与 X6 至 X9 | `cx/cx0/plan.cx`(`cxm_project`),与 E4 串行 | 是 | cxmod 三源 | 否 | 同 E4;`tests/cxpack.cx --fixtures` 仍 `rc0:CXPACK` |
+| E6 | 未公开函数登记与 X11 | `cx/cx0/plan.cx`(`cxm_project`、`cxm_callerr`),与 E5 串行 | 是 | cxmod 三源 | 否 | 同 E4;`tests/cx-namespace.cx` 的 `unimported-symbol-call-refused` 仍过 |
+| E7 | `tests/cx-namespace.cx` 的 `planned-export-refused-by-name` 换成语义断言(不删) | `tests/cx-namespace.cx` | 否 | 测试 | 否(等 E4) | 该批断言总数不减;门面正例 2、拒绝 4 留给 D1b |
+| E8 | 试点:`cx/stream/rw.cx` 加 export 行 | `cx/stream/rw.cx` | 是 | 库包源 | 否(等新产品装好) | 本节 (4) 的五条 |
+| E9 | cxpack 第三列生成器与 `--check` | `tools/cxpack-gen.cx`、`tools/check-cxpack-gen.cx`、批次行 | 否 | 工具 | 否(等 E8) | `--check` rc=0;生成结果与现 `cx/stream/cxpack.tsv` 第 4 行逐字节相同 |
+| E10 | D1b:`export use` 解析、X12、X13、门面正例 | `cx/cx0/plan.cx`,与 E6 串行 | 是 | cxmod 三源 | 否 | `tests/cx-namespace.cx` 门面正例 2、拒绝 4;`--check --all` 两行 `EXACT` |
+
+- 并发:E0、E1、E2 互不相交,今天可同时派;E3 接 E2。E4、E5、E6、E10 同写 plan.cx,串行。E8 属库包源类,与 cxmod 三源类不同类:随 D4 的第二候选,或等 D1 候选的产品装好后作下一版首个提交,不与 E4 至 E6 同候选。
+- 新工具名 `tools/check-export.cx`、`tools/cxpack-gen.cx` 开工前先跑 `git log --all --oneline -- tools/NAME` 核对未被占用(本节未核)。
+- 回滚:E4 至 E6、E10 各自一个提交,撤提交即回到「export 被 `unknown unisa pragma` 拒绝」的现状;E8 撤一行即回到 cxpack 单独生效。
+
 ## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
 
 资料:`docs/cx/ref-node.md`、`ref-rust.md`、`ref-cpython.md`、`ref-quickjs.md` 已读;这四篇侧重标准库面与稳定性策略,模块系统与内存安全的机制部分(下文带 [忆] 的)出自通用知识,本轮未联网核对一手文档,落合同前须再查。仓内没有 Bun 的参考篇(`git grep -i bun -- docs/cx` 只命中 QuickJS 篇的无关行)。不取的理由统一按四条约束写:C99 兼容(宿主 gcc/clang 须能忽略全部扩展)、单文件 APE(无运行期模块装载器、无文件系统上的包目录)、三源构造(规划器一处改三处核)、no-libc(上层不直调 libc,前导自带)。
