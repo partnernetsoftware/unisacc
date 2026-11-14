@@ -52,6 +52,16 @@ real6 已起链(2026-11-14 16:25,账本行):REV=b2c557b1ba(origin/main;之后 HE
 
 ### 阻塞发布
 
+- 审查 整链工具(2026-11-14,读码为主,未执行 pack/release;chain-real5 目录在本机不存在,干跑未做)。缺陷:
+  (1) 中 tools/candidate-chain.cx:2440-2446 前置门按 --out 字符串切父目录找 src。--out 为不含斜杠的相对名时 cut=0,HEAD 检查被静默跳过;无显式 cache-manager 时报的是"no in-chain source"的误导拒绝。--out 是符号链接时查的是链接所在目录的 src 而非真实父目录。src 存在但无 .git(归档解出)时 HEAD 检查静默跳过,且只比 HEAD 不查脏工作树。读码推断。建议:门开头要求 --out 绝对路径并先 realpath,src 存在而无 .git 时具名拒绝,另加 git status --porcelain 为空。
+  (2) 中 tools/candidate-chain.cx:2448-2450 与 :2864-2880 门检查的 src 是 --out 同级的 src,构造 cache-manager 用的却是 root/tools/cache-retain.cx;两者未断言同一路径,门绿不保证构造所读源与 --rev 一致。读码推断。建议:门里断言 root 的 realpath 等于 src 的 realpath,或构造改读 srcd。
+  (3) 低 tools/candidate-chain.cx:2879-2881 两次构造各 90 s,串行共可达 180 s,而 build/chain-phases.tsv 第 497 相超时记 90(gen 的 timeout_s 即 phase.bound)。单次调用不超 phase.bound,但相记录低估,且相合计 180 s 超过"每命令 60 s"口径需限时例外说明。建议:拆成 cache-manager-x64 与 cache-manager-arm64 两相各 90,或在表里写 180 并入 limits.tsv 豁免。读码推断。
+  (4) 低 tools/candidate-chain.cx:2879-2882 构造成功(rc 0)后未检查 cmx/cma 大小就 mark 相完成;产物为空时相已记完成,到 pack 才被 :2894 的 fsize<=0 具名拒绝(不会用空文件,该点合格),--resume 时 :2871 的 fsize>0 会令相重跑,不会被错误跳过。建议:mark 前就地检查,把拒绝前移到相内。读码确认。
+  (5) 低 tools/candidate-chain.cx:2388 --cache-manager-osx 两参数成对解析,门与 :2866 的 `cm64 && cmarm` 判断一致,未发现缺陷。显式给出的管理器路径只在 pack 相查大小,不查 Mach-O 魔数。建议:加魔数检查。读码推断。
+  (6) 低 tools/pack-srcdir.cx:63-75 来源路径存在性相对当前目录检查,符号链接却建在 OUT_DIR 内;receipt 若记相对路径,链接会悬空而检查通过。同时不检查来源非空(0 字节也算存在)。具名拒绝与不留半成品两点合格:全部缺项先收集一次列出,rc 2 后才 mkdir。另 :60 的 miss 缓冲 2048 字节溢出时静默截断缺项名。读码推断。建议:对来源 realpath 后再链接,检查 size>0。
+  (7) 低 tools/sweep-plan.cx:57-100 IN_USE 读 /proc,已退出进程无 /proc 条目故不留残余 fd,该点无问题;僵尸进程 fd 已关闭同理。局限:fd 只扫 0-63;他人属主进程的 readlink 因 EACCES 静默失败(漏报在用);cmdline 缓冲 32 KB 截断;引用缓冲满只在 stderr 提示、删除建议仍照出。KEEP 对 ident-helper/bootstrap/borrowed-cm 靠 entry() 的 keep 参数,未逐类核对调用点。tools/sweep-plan.cx:270-280 scan_build 的 git 子进程时限只在 read 返回后判断,管道阻塞时不会超时;超时分支 sy_kill 后不 wait。读码推断。建议:poll 带时限读,kill 后 wait,非本人进程存在时把整份 DELETE 降级为 ASK。
+  未审:tools/chain-ready.cx 仅核对所有 argv 带 ./tools/bound 前缀(spawn 路径 172/206 与 sweep-plan 的 git 调用无独立时限),其判定逻辑未细读;tools/chain-phases-gen.cx 只核第 497/498 行(deps compare/cache-manager、超时 90),未重跑 --check;candidate-chain 其余约 2700 行未审;未做任何动态复现(real5 目录缺失,real6 不碰)。--resume 对 497 相:ck_done 加 fsize>0 双条件,不会错误跳过;失败重跑会覆盖半成品。
+
 - 全集批次复验没有有效判定(整节最大缺口):共享检出上 wt gate 在波内因他人改动判 identity=CHANGED,整波记 UNKNOWN。实测累计只有快照根 45 批(PASS 43,FAIL 2,两项均已修,见索引),共享检出 15 批(PASS 14,FAIL 1 即 tsv-lint)。lnx IMPLEMENTED 约 1040 至 1076 批,其余未复验;约 80 个 FTRIM 红批旧估算未证实也未证伪(清单缺)。清零动作:在冻结窗口或 git archive 快照根(需在其中 git init 提交一次、拷入 unisacc.com 与 unisacc.com.build.json)用 all-waves 分波跑;会话目录必须是 /tmp/unisacc-affected-NAME/s,wave 必须用原生执行器(init 约 21 s、executor 约 37 s,wave 参数 `--light ID ID ...`,每波 8 批,wave bound 55 s 减扫描约 17 s,单批固定开销约 27 s)。light 约 742 批约 93 波(推算,非实测),heavy 313 批每波 1 批(推算约 5 小时,须分片,并需 s8c-bind 材料)。慢批(单跑改 heavy):pp-cli-includes、pp-header-locations(超 37 s 被杀),snapshots-cx 临界(批内约 30 s)。osx/win 平台批次无主机无证据。不能清零就把覆盖面原样写进发布说明。
 - 候选 s9、同候选 CI、real6 整链结果、候选速度:TBD,见发布说明占位;未出结果不得写 QUALIFIED。
 - s9 分波方案(2026-11-14 只读预备,未实跑;命令取自 tools/s9-nightly.cx、s9-nightly-run.cx、release-decide.cx 的 usage 注释)。
