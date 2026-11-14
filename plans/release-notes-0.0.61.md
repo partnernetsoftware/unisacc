@@ -45,8 +45,8 @@
 
 - 冷启动 first_e2e:684/705/714 ms,对 0.0.59 基线 796/815 ms,约 -14%(load1 约 1.2-1.5)。
 - 冷编译:ledger-add 6468 ms(旧 9469,-32%)、entry-build 13624 ms(旧 18703,-27%)、whole-front 12846 ms(旧 16863,-24%);均单样本。
-- F 重打包产物重测(见 prd_mempalace.md):first_e2e 675/676/695 ms;冷编译 ledger-add 6515 ms、entry-build 13681 ms、whole-front 12546 ms、coldcompile 6216 ms;样本数以该文件为准(待确认)。
-- 整链墙钟 4829 s(real4)。0.0.59 -> 0.0.61 没有整链重跑,版本仅在打包注入;因此最终 APE 本身未经一次完整整链构造(待确认是否另有 F 重打包整链证据)。
+- F 重打包产物(c4c47ecb)实测:first_e2e 3 样本 675/676/695 ms(run-startup-bench);冷编译各 1 样本(coldcompile):ledger-add 6515 ms、entry-build 13681 ms、whole-front 12546 ms、coldcompile 6216 ms;均非 OS 冷。
+- 整链墙钟 4829 s(real4,rev f94e1969783b,与本版冻结树 F 的差异只有 release/candidate.tsv)。0.0.59 -> 0.0.61 没有对 F 重跑整链,版本仅在打包注入;因此最终 APE 本身未经一次完整整链构造,它的六片取自 real4 整链(F 与 real4 的 SID 同为 a68bf9fc...,候选表不计入 SID)。没有 F 重打包整链证据。
 
 ## 已知缺口与未跑范围(如实)
 
@@ -57,7 +57,7 @@
 (5) 版本号跳过 0.0.60,其范围并入 0.0.61。
 (6) check-stdio-buffer 不覆盖 tty/pty 路径,也不覆盖 --link-only 与子集编译的缓存 identity 一致性;六目标未跑。
 (7) candidate-chain g2 对象相批墙钟约 320 s(real4 323.6 s),超过单次 300 s 预算;整改任务 G2-OBJ-SPLIT,限期 2026-11-30。
-(8) 速度数字均为单样本或 3 样本,非 OS 冷;run-startup-bench、check-bench-gencode、speed-probe 对新产物未全部跑完(以 prd_mempalace.md 为准,待确认)。
+(8) 速度数字均为单样本或 3 样本,非 OS 冷;run-startup-bench 与 coldcompile 已对新产物实测,check-bench-gencode 与 speed-probe(生成代码一档)对新产物未跑。
 (9) 整链约 77 分钟(4829 s 实测),g2/g3 objects 相串行;并发化未入本版。
 (10) 仍写仓根 out/ 的工具:gen-model-decode-material、csih-ape(csih 车道)、chain-run。
 
