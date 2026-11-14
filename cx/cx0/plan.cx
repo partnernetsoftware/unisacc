@@ -80,6 +80,7 @@ static int cxm_say(int fd,char *s,int n){if(n<0)return 1;return fd==2?cx0_append
 /* CX0_HOST_END head */
 #define CXM_MAXUSE 48
 #define CXM_MAXDECL 48
+#define CXM_MAXEXP 128
 #define CXM_PATHW 512
 #define CXM_NAMEW 128
 #define CXM_SRCMAX 1048576
@@ -117,8 +118,12 @@ static char cxm_renpool[CXM_MAXU * CXM_MAXDECL][CXM_PATHW]; static int cxm_nren;
 /* body-symbol rename: cxm_bodysrc[v] is a rewritten source of module v ("#define sym alias" head),
    empty = compile the original source.  One rename per module (the common case). */
 static char cxm_bodysrc[CXM_MAXU][CXM_PATHW];
+/* `#pragma unisa export NAME[,NAME...]` of the unit being scanned (reset by every cxm_scan): the public list
+   of its own non-static functions.  cxm_modseen: the unit's `#pragma unisa module` line was already read. */
+static char cxm_exp[CXM_MAXEXP][CXM_SYMW]; static int cxm_nexp; static int cxm_modseen;
 /* exported and defined names: kind 0 a module's function, 1 a module's type name (typedef, "struct T", enum
-   constant), 2 a non-static function defined by a unit that is not a module */
+   constant), 2 a non-static function defined by a unit that is not a module, 3 a module's non-static function
+   that is not public (no prototype in the interface; only names the owner of a refused call) */
 static char cxm_sym[CXM_SYMS][CXM_SYMW]; static int cxm_symu[CXM_SYMS]; static int cxm_syml[CXM_SYMS]; static int cxm_symk[CXM_SYMS];
 static int cxm_symb[CXM_SYMS]; static int cxm_syme[CXM_SYMS]; static int cxm_nsym;
 /* the file being scanned: its items and macros */
@@ -575,8 +580,41 @@ static int cxm_id(char *s, int i, int e, int *wb) {
     while (i < e && cxm_idch(s[i] & 255)) i = i + 1;
     return i;
 }
+/* the operand of `#pragma unisa export` at s[i..e): NAME[,NAME...], identifiers only, into cxm_exp */
+static int cxm_exportline(int u, int line, int i, int e) {
+    char *s; int b; int k; int q;
+    s = cxm_src;
+    while (i < e && (s[i] & 255) <= 32) i = i + 1;
+    if (i >= e) { cxm_start(u, line); cxm_m("unisa export takes a name"); return cxm_fail(); }
+    if (!cxm_modseen) { cxm_start(u, line); cxm_m("export outside module"); return cxm_fail(); }
+    while (1) {
+        while (i < e && (s[i] & 255) <= 32) i = i + 1;
+        b = i; while (i < e && cxm_idch(s[i] & 255)) i = i + 1;
+        q = i; while (q < e && (s[q] & 255) <= 32) q = q + 1;
+        if (i == b || i - b >= CXM_SYMW || (q < e && s[q] != ',')) {
+            if (i > b && i - b < CXM_SYMW) b = q;    /* a good name followed by something else: name that */
+            q = b; while (q < e && (s[q] & 255) > 32) q = q + 1;
+            cxm_start(u, line); cxm_m("bad export name \""); cxm_mn(s + b, q - b); cxm_m("\""); return cxm_fail();
+        }
+        k = 0;
+        while (k < cxm_nexp) {
+            if (cxm_eqn(s + b, i - b, cxm_exp[k])) {
+                cxm_start(u, line); cxm_m("module "); cxm_m(cxm_stem[u]); cxm_m(" exports "); cxm_mn(s + b, i - b); cxm_m(" twice"); return cxm_fail();
+            }
+            k = k + 1;
+        }
+        if (cxm_nexp >= CXM_MAXEXP) {
+            cxm_start(u, line); cxm_m("module "); cxm_m(cxm_stem[u]); cxm_m(" has more than "); cxm_md(CXM_MAXEXP); cxm_m(" exports"); return cxm_fail();
+        }
+        cxm_cpyn(cxm_exp[cxm_nexp], s + b, i - b, CXM_SYMW); cxm_nexp = cxm_nexp + 1;
+        if (q >= e) return 0;
+        i = q + 1;
+    }
+}
+static int cxm_exported(char *nm, int nl) { int k; k = 0; while (k < cxm_nexp) { if (cxm_eqn(nm, nl, cxm_exp[k])) return 1; k = k + 1; } return 0; }
 /* the directive at s[i] ('#' at the start of a line), ending at the first newline not after a splice.  mode 0 handles
-   `#pragma unisa`; every mode tracks #if nesting (*cond) and records #define names.  The line is blanked after. */
+   `#pragma unisa`; every mode reads `#pragma unisa export` (the list belongs to the scan), tracks #if nesting
+   (*cond) and records #define names.  The line is blanked after. */
 static int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, int *endp) {
     char *s; int e; int a; int b; int wb; int we; int k;
     s = cxm_src; e = i;
@@ -591,6 +629,15 @@ static int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, 
     }
     if (cxm_eqn(s + a, b - a, "pragma")) {
         we = cxm_id(s, b, e, &wb);
+        if (cxm_eqn(s + wb, we - wb, "unisa") && (we >= e || (s[we] & 255) <= 32) && mode != 0) {
+            b = cxm_word(s, we, e, &a);
+            if (cxm_eqn(s + a, b - a, "module")) cxm_modseen = 1;
+            if (cxm_eqn(s + a, b - a, "export")) {
+                if (seen) { cxm_start(u, line); cxm_m("unisa pragma after first declaration"); return cxm_fail(); }
+                if (*cond > 0) { cxm_start(u, line); cxm_m("unisa pragma inside conditional"); return cxm_fail(); }
+                if (cxm_exportline(u, line, b, e)) return 1;
+            }
+        }
         if (cxm_eqn(s + wb, we - wb, "unisa") && (we >= e || (s[we] & 255) <= 32) && mode == 0) {
             if (seen) { cxm_start(u, line); cxm_m("unisa pragma after first declaration"); return cxm_fail(); }
             if (*cond > 0) { cxm_start(u, line); cxm_m("unisa pragma inside conditional"); return cxm_fail(); }
@@ -619,7 +666,10 @@ static int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, 
                     if (!cxm_eqn(s + wb, we - wb, cxm_stem[u])) {
                         cxm_start(u, line); cxm_m("module "); cxm_mn(s + wb, we - wb); cxm_m(" is not the file stem "); cxm_m(cxm_stem[u]); return cxm_fail();
                     }
+                    cxm_modseen = 1;
                 }
+            } else if (cxm_eqn(s + a, b - a, "export")) {
+                if (cxm_exportline(u, line, b, e)) return 1;
             } else if (cxm_eqn(s + a, b - a, "dock")) {
                 /* `#pragma unisa dock` (bare) or `#pragma unisa dock include|libc`: a
                    declaration only -- it records which boundary the unit is allowed to
@@ -641,7 +691,7 @@ static int cxm_scan(int u, int mode) {
     char *s; int n; int i; int line; int bol; int depth; int cond; int seen; int ib; int iline; int icond; int body; int eq; int last; int q; int e;
     s = cxm_src; n = cxm_nsrc; i = 0; line = 1; bol = 1; depth = 0; cond = 0; seen = 0;
     ib = 0 - 1; iline = 0; icond = 0; body = 0 - 1; eq = 0; last = 0;
-    cxm_nitem = 0; cxm_nmac = 0;
+    cxm_nitem = 0; cxm_nmac = 0; cxm_nexp = 0; cxm_modseen = 0;
     while (i < n) {
         if (s[i] == '\n') { line = line + 1; bol = 1; i = i + 1; continue; }
         if ((s[i] & 255) <= 32) { i = i + 1; continue; }
@@ -865,6 +915,24 @@ static int cxm_project(int u, int lib) {
         }
         return 0;
     }
+    j = 0;
+    while (j < cxm_nexp) {                           /* every listed name is a non-static function this unit defines */
+        int why; why = 6;
+        k = 0;
+        while (k < cxm_nitem && why != 0) {
+            if (cxm_dname(s, cxm_ib[k], cxm_ibody[k] >= 0 ? cxm_ibody[k] : cxm_ie[k], &nb, &nl, &isfn) && cxm_eqn(s + nb, nl, cxm_exp[j])) {
+                if (cxm_ikind[k] == 2) why = 0;
+                else if (cxm_ibody[k] >= 0) why = 7;
+                else if (!isfn && why == 6) why = 8;
+            }
+            k = k + 1;
+        }
+        if (why != 0) {
+            cxm_start(u, 1); cxm_m("module "); cxm_m(cxm_name[u]); cxm_m(" exports "); cxm_m(cxm_exp[j]);
+            cxm_m(why == 6 ? " but does not define it" : why == 7 ? "; it is static" : "; only functions are listed"); return cxm_fail();
+        }
+        j = j + 1;
+    }
     k = 0;
     while (k < cxm_nitem) {
         b = cxm_ib[k]; e = cxm_ie[k];
@@ -924,7 +992,14 @@ static int cxm_project(int u, int lib) {
             cxm_dname(s, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn);
             pub = cxm_listed(u, s + nb, nl);
             if (pub < 0) return 1;
-            if (pub == 0) { k = k + 1; continue; }
+            if (cxm_nexp > 0) {                      /* the source list decides; a cxpack.tsv row must agree with it */
+                int in; in = cxm_exported(s + nb, nl);
+                if (pub != 2 && pub != in) {
+                    cxm_start(u, cxm_iline[k]); cxm_m("module "); cxm_m(cxm_name[u]); cxm_m(" export list differs from cxpack.tsv: "); cxm_mn(s + nb, nl); return cxm_fail();
+                }
+                pub = in;
+            }
+            if (pub == 0) { if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 3, 0, 0)) return 1; k = k + 1; continue; }
             fb = cxm_nift;
             if (cxm_emit(cxm_ib[k], cxm_ibody[k]) || cxm_nift >= CXM_IFMAX - 2) { cxm_start(u, cxm_iline[k]); cxm_m("interface too large"); return cxm_fail(); }
             cxm_ift[cxm_nift] = ';'; cxm_ift[cxm_nift + 1] = '\n'; cxm_nift = cxm_nift + 2;
@@ -1248,6 +1323,11 @@ static int cxm_owner(char *nm, int *ou) {
         if ((cxm_symk[i] == 0 || cxm_symk[i] == 2) && cxm_eq(cxm_sym[i], nm)) { *ou = cxm_symu[i]; return 1; }
         i = i + 1;
     }
+    i = 0;
+    while (i < cxm_nsym) {                           /* kind 3: a module's function that is not public */
+        if (cxm_symk[i] == 3 && cxm_eq(cxm_sym[i], nm)) { *ou = cxm_symu[i]; return 2; }
+        i = i + 1;
+    }
     return 0;
 }
 static int cxm_base(char *p, char *out) {
@@ -1257,8 +1337,11 @@ static int cxm_base(char *p, char *out) {
     return cxm_cpy(out, p + b, CXM_NAMEW);
 }
 static int cxm_callerr(int u, int line, char *nm, int owner) {
-    char base[CXM_NAMEW]; char who[CXM_NAMEW];
+    char base[CXM_NAMEW]; char who[CXM_NAMEW]; int i; int pub;
     cxm_start(u, line);
+    i = 0; pub = 0;
+    while (i < cxm_nsym) { if (cxm_symu[i] == owner && (cxm_symk[i] == 0 || cxm_symk[i] == 2) && cxm_eq(cxm_sym[i], nm)) pub = 1; i = i + 1; }
+    if (!pub) { cxm_m("call to undeclared function "); cxm_m(nm); cxm_m(" (private to "); cxm_m(cxm_name[owner]); cxm_m(")"); return cxm_fail(); }
     cxm_m("call to undeclared function "); cxm_m(nm); cxm_m(" (declared in ");
     if (cxm_lib[owner] && cxm_name[owner][0]) cxm_m(cxm_name[owner]);
     else { cxm_base(cxm_arg[owner], who); cxm_m(who); }

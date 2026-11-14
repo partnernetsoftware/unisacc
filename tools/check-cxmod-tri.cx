@@ -105,10 +105,113 @@ static void maxu_case(int n, int want_prod, int want_cx0) {
     printf("PASS\t%s-cx0\trc=%d\n", label, r1);
     printf("PASS\t%s-prod\trc=%d\n", label, r2);
 }
+static int child_cx0_if(const char *file) {
+    char *v[1]; cx0_result r; v[0] = (char *)file;
+    r = cx0_plan(1, v, 1, 0, 0, dir);
+    printf("RC=%d\n%s\n", r.status, r.diagnostic ? r.diagnostic : "");
+    if (r.text) fwrite(r.text, 1, r.bytes, stdout);
+    cx0_release(&r); return 0;
+}
+/* 试点(prd_cx.md 10.7 (4)):cx/stream/rw.cx 的副本在 module 行后加 export 行(名单取自 cx/stream/cxpack.tsv 的 rw 行),
+ * 新规划器(cx0 源)的接口文本自 #define 行之后须与原文件逐字节相同;删掉一名则按 X9 拒绝。仓内 rw.cx 不改:
+ * 已装产品尚不认 export,待装有 D1a 的产品后再落 E8。 */
+static void pilot_rw(void) {
+    static char src[262144], cp[262144], pk[8192], o0[32768], o1[32768], o2[32768];
+    char sub[400], names[2048]; int n, pn, i, j, r0, r1, r2, a0, a1; const char *key = "rw\trw.cx\t", *head = "#pragma unisa module rw\n";
+    n = cb_rd("cx/stream/rw.cx", src, sizeof src - 1); pn = cb_rd("cx/stream/cxpack.tsv", pk, sizeof pk - 1);
+    if (n <= 0 || pn <= 0 || memcmp(src, head, strlen(head))) { failed++; puts("FAIL\texport-pilot-rw\tinput"); return; }
+    src[n] = 0; pk[pn] = 0;
+    i = (int)bytes_at(pk, pn, key, (long)strlen(key));
+    if (i < 0) { failed++; puts("FAIL\texport-pilot-rw\tcxpack-row"); return; }
+    i += (int)strlen(key); j = 0; while (pk[i] && pk[i] != '\n' && j < (int)sizeof names - 1) names[j++] = pk[i++]; names[j] = 0;
+    tx_snprintf(sub, sizeof sub, "%s/pkrw0", dir); mkdir(sub, 0700);
+    tx_snprintf(sub, sizeof sub, "%s/pkrw1", dir); mkdir(sub, 0700);
+    tx_snprintf(sub, sizeof sub, "%s/pkrw2", dir); mkdir(sub, 0700);
+    put("pkrw0/cxpack.tsv", pk); put("pkrw1/cxpack.tsv", pk); put("pkrw2/cxpack.tsv", pk);
+    put("pkrw0/rw.cx", src);
+    tx_snprintf(cp, sizeof cp, "%s#pragma unisa export %s\n%s", head, names, src + strlen(head)); put("pkrw1/rw.cx", cp);
+    if (memcmp(names, "xs_copy,", 8)) { failed++; puts("FAIL\texport-pilot-rw\tfirst-name"); return; }
+    tx_snprintf(cp, sizeof cp, "%s#pragma unisa export %s\n%s", head, names + 8, src + strlen(head)); put("pkrw2/rw.cx", cp);
+    r0 = run_src("--cx0-if", "pkrw0/rw.cx", o0, sizeof o0); r1 = run_src("--cx0-if", "pkrw1/rw.cx", o1, sizeof o1); r2 = run_src("--cx0-if", "pkrw2/rw.cx", o2, sizeof o2);
+    a0 = (int)bytes_at(o0, (long)strlen(o0), "#define CXIF_", 13); a1 = (int)bytes_at(o1, (long)strlen(o1), "#define CXIF_", 13);
+    if (a0 >= 0) while (o0[a0] && o0[a0] != '\n') a0++;
+    if (a1 >= 0) while (o1[a1] && o1[a1] != '\n') a1++;
+    if (r0 == 0 && r1 == 0 && a0 > 0 && a1 > 0 && strlen(o0 + a0) > 200 && !strcmp(o0 + a0, o1 + a1) && bytes_at(o1, (long)strlen(o1), "xs_writer_fd", 12) >= 0) {
+        pass++; printf("PASS\texport-pilot-rw-interface-equal\tbytes=%d\n", (int)strlen(o0 + a0));
+    } else { failed++; printf("FAIL\texport-pilot-rw-interface-equal\trc=%d,%d\n", r0, r1); }
+    if (r2 == 1 && seen(o2, "module rw export list differs from cxpack.tsv: xs_copy")) { pass++; puts("PASS\texport-pilot-rw-minus-one-refused\trc=1"); }
+    else { failed++; printf("FAIL\texport-pilot-rw-minus-one-refused\trc=%d\n", r2); }
+}
+/* prd_cx.md 10.7 D1a:`#pragma unisa export NAME[,NAME...]` 的拒绝 X1 至 X11 与正例,三源同跑。
+ * 带 cxpack.tsv 的夹具放子目录(pk1、pk9),清单只对同目录生效。 */
+static void export_cases(void) {
+    char big[4096], sub[400]; int i, n = 0;
+    put("e1.cx", "#pragma unisa module e1\n#pragma unisa export\nint f1(void){return 1;}\n");
+    put("x1.cx", "#pragma unisa use e1\nint main(void){return 0;}\n");
+    put("e2.cx", "#pragma unisa module e2\n#pragma unisa export f2,,g2\nint f2(void){return 1;}\nint g2(void){return 2;}\n");
+    put("x2.cx", "#pragma unisa use e2\nint main(void){return 0;}\n");
+    put("e2s.cx", "#pragma unisa module e2s\n#pragma unisa export *\nint f2s(void){return 1;}\n");
+    put("x2s.cx", "#pragma unisa use e2s\nint main(void){return 0;}\n");
+    put("e2t.cx", "#pragma unisa module e2t\n#pragma unisa export f2t,\nint f2t(void){return 1;}\n");
+    put("x2t.cx", "#pragma unisa use e2t\nint main(void){return 0;}\n");
+    put("e2a.cx", "#pragma unisa module e2a\n#pragma unisa export f2a as g2a\nint f2a(void){return 1;}\n");
+    put("x2a.cx", "#pragma unisa use e2a\nint main(void){return 0;}\n");
+    put("e3.cx", "#pragma unisa export f3\n#pragma unisa module e3\nint f3(void){return 1;}\n");
+    put("x3.cx", "#pragma unisa use e3\nint main(void){return 0;}\n");
+    put("e4.cx", "#pragma unisa module e4\n#pragma unisa export f4\n#pragma unisa export f4\nint f4(void){return 1;}\n");
+    put("x4.cx", "#pragma unisa use e4\nint main(void){return 0;}\n");
+    n += tx_snprintf(big + n, sizeof big - (size_t)n, "#pragma unisa module e5\n");
+    for (i = 1; i <= 129; i++) n += tx_snprintf(big + n, sizeof big - (size_t)n, "#pragma unisa export n%d\n", i);
+    put("e5.cx", big);
+    put("x5.cx", "#pragma unisa use e5\nint main(void){return 0;}\n");
+    put("e7.cx", "#pragma unisa module e7\n#pragma unisa export f7\nstatic int f7(void){return 1;}\nint g7(void){return f7();}\n");
+    put("x7.cx", "#pragma unisa use e7\nint main(void){return 0;}\n");
+    put("e8.cx", "#pragma unisa module e8\n#pragma unisa export T8\ntypedef int T8;\nint f8(void){return 1;}\n");
+    put("x8.cx", "#pragma unisa use e8\nint main(void){return 0;}\n");
+    tx_snprintf(sub, sizeof sub, "%s/pk9", dir); mkdir(sub, 0700);
+    put("pk9/cxpack.tsv", "m9\tm9.cx\tf9,g9\n");
+    put("pk9/m9.cx", "#pragma unisa module m9\n#pragma unisa export f9\nint f9(void){return 1;}\nint g9(void){return 2;}\n");
+    put("pk9/x9.cx", "#pragma unisa use m9\nint main(void){return 0;}\n");
+    put("pk9/cxpack.tsv", "m9\tm9.cx\tf9,g9\nm9b\tm9b.cx\tf9b\n");
+    put("pk9/m9b.cx", "#pragma unisa module m9b\n#pragma unisa export f9b, g9b\nint f9b(void){return 1;}\nint g9b(void){return 2;}\n");
+    put("pk9/x9b.cx", "#pragma unisa use m9b\nint main(void){return 0;}\n");
+    put("e10.cx", "#pragma unisa module e10\n#pragma unisa export f10\nint f10(void){return 1;}\nint g10(void){return 2;}\n");
+    put("x10.cx", "#pragma unisa use e10::g10\nint main(void){return g10();}\n");
+    put("x11.cx", "#pragma unisa use e10\nint main(void){return f10()+g10();}\n");
+    tx_snprintf(sub, sizeof sub, "%s/pk1", dir); mkdir(sub, 0700);
+    put("pk1/cxpack.tsv", "m1\tm1.cx\tfa\n");
+    put("pk1/m1.cx", "#pragma unisa module m1\n#pragma unisa export fa\nint fa(void){return 1;}\nint ga(void){return 2;}\n");
+    put("pk1/y1.cx", "#pragma unisa use m1::fa\nint main(void){return fa();}\n");
+    put("pk1/y1p.cx", "#pragma unisa use m1\nint main(void){return fa()+ga();}\n");
+    put("e12.cx", "#pragma unisa module e12\n#pragma unisa export fb, hb\n#pragma unisa export kb\nint fb(void){return 1;}\nint hb(void){return 3;}\nint kb(void){return 4;}\nint gb(void){return 2;}\n");
+    put("y2.cx", "#pragma unisa use e12::hb\nint main(void){return hb();}\n");
+    put("y3.cx", "#pragma unisa use e12\nint main(void){return fb()+hb()+kb();}\n");
+    put("x13.cx", "#pragma unisa export f13\nint f13(void){return 1;}\nint main(void){return 0;}\n");
+    one_case("export-x01-no-name", "x1.cx", 1, "unisa export takes a name", 0);
+    one_case("export-x02-empty-item", "x2.cx", 1, "bad export name \",g2\"", 0);
+    one_case("export-x02-star", "x2s.cx", 1, "bad export name \"*\"", 0);
+    one_case("export-x02-trailing-comma", "x2t.cx", 1, "bad export name \"\"", 0);
+    one_case("export-x02-alias", "x2a.cx", 1, "bad export name \"as\"", 0);
+    one_case("export-x03-before-module", "x3.cx", 1, "export outside module", 0);
+    one_case("export-x03-no-module", "x13.cx", 1, "export outside module", 0);
+    one_case("export-x04-twice", "x4.cx", 1, "module e4 exports f4 twice", 0);
+    one_case("export-x05-over-limit", "x5.cx", 1, "module e5 has more than 128 exports", 0);
+    one_case("export-x07-static", "x7.cx", 1, "module e7 exports f7; it is static", 0);
+    one_case("export-x08-type", "x8.cx", 1, "module e8 exports T8; only functions are listed", 0);
+    one_case("export-x09-cxpack-has-more", "pk9/x9.cx", 1, "module m9 export list differs from cxpack.tsv: g9", 0);
+    one_case("export-x09-export-has-more", "pk9/x9b.cx", 1, "module m9b export list differs from cxpack.tsv: g9b", 0);
+    one_case("export-x10-use-unexported", "x10.cx", 1, "module e10 does not export g10", 0);
+    one_case("export-x11-call-private", "x11.cx", 1, "call to undeclared function g10 (private to e10)", 0);
+    one_case("export-x11-cxpack-private", "pk1/y1p.cx", 1, "call to undeclared function ga (private to m1)", 0);
+    one_case("export-p1-with-cxpack", "pk1/y1.cx", 0, "", 0);
+    one_case("export-p2-no-cxpack-symbol", "y2.cx", 0, "", 0);
+    one_case("export-p3-multi-line-union", "y3.cx", 0, "", 0);
+}
 int main(int argc, char **argv) {
-    char *ex[] = {"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
+    char *ex[] ={"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
     np_result r = {0}; char why[512]; int rc, extract_ok;
     if (argc == 3 && !strcmp(argv[1], "--cx0")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0(argv[2]); }
+    if (argc == 3 && !strcmp(argv[1], "--cx0-if")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_if(argv[2]); }
     if (argc == 3 && !strcmp(argv[1], "--prod")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_prod(argv[2]); }
     rc = np_run(ex, ".", 0, 50, &r, why, sizeof why);
     extract_ok = !rc && r.rc == 0 && r.out && bytes_at(r.out, r.outn, "CX0_EXTRACT\tEXACT", 17) >= 0;
@@ -135,7 +238,10 @@ int main(int argc, char **argv) {
     one_case("plain-accepted", "plain.cx", 0, "", 0);
     one_case("exported-by-both-refused", "c1.cx", 1, "clash exported by both a", 0);
     one_case("import-cycle-refused", "c5.cx", 1, "module cycle", 0);
-    one_case("planned-export-refused-by-name", "p1.cx", 1, "unknown unisa pragma export", 0);
+    /* 0.0.65 D1a:export 已实现,原 planned-export-refused-by-name(unknown unisa pragma export)换成语义断言 X6,不删 */
+    one_case("export-x06-undefined-refused", "p1.cx", 1, "module fac exports ok but does not define it", 0);
+    export_cases();
+    pilot_rw();
     one_case("planned-wildcard-refused-by-name", "p3.cx", 1, "bad module name \"sys.*\"", 0);
     one_case("planned-bare-star-refused-by-name", "p4.cx", 1, "bad module name \"*\"", 0);
     one_case("symbol-star-refused", "g0.cx", 1, "bad symbol name \"*\"", 0);
