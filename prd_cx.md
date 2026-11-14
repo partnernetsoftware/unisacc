@@ -315,7 +315,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
   - (4) 量级(每流 3 次取最小,`stream STAGE` 进程墙钟,含进程启动与模型装载,空输入启动约 5 ms;load1 2.9 至 3.0):hello(stdio 加一行 printf)对同程序加 200 个未用的小外部函数。prune 189 对 299 ms,lower 198 对 271 ms,elf 120 对 165 ms;带子 11,212 对 17,412 行,lower 输出 8,860 对 13,860 行;ELF 36,894 对 53,278 B(加 16,384 B),两者运行都输出 hi。合计约多 228 ms,约每个死函数 1.1 ms、82 B。
   - (5) 若回退解除能省多少:把 hello 带子里那一行 callr 删掉后再跑 prune(只作上界估计,该带子不可执行),11,211 行到 11,095 行,标号 388 到 383,只裁掉 `ferror` 一个函数;200 个未用函数的带子则裁到 11,126 行(199 个被裁,`unused0` 留下,原因未查)。即 stdio 闭包对 printf 程序几乎全可达,hello 的 36,894 B 与后三流耗时基本不受此影响;受影响的是用户自己的死代码和整模块引入却只用一部分的库。
   - (6) 对方案 B 的修订:上一条"前提无从成立"改为"在含可达 callr 的带子上平凡成立"。此时 prune 输出等于输入,闭包部分的保留集与用户引用面无关,闭包部分 prune 后的带子就是闭包的 e3 带子;不含 callr 的程序(如只用 string.h)会真裁,保留集随引用面变,方案 B 的键仍需带 (f) 或先判 callr。
-  - (7) 下一步:列为 0.0.64 之后的优化项"prune 有 callr 时以取址集合为根继续裁剪,不整带回退"。类别是模型与网类(prune 的表与网:`exec/prune/`、`exec/facts/prune-nametable.tsv`、`prune.net`),不得与驱动与运行缓存类同候选。验收须保留 `indirect-call-preserved` 的现有断言或以等价的取址根用例替换并写明依据,不删断言。优先级低于 L1:对 hello 的收益约 1%。另:`prd.md` 4.0 的 prune 描述没写回退,需补一句(本条未改 prd.md,不在写域)。
+  - (7) 下一步:列为 0.0.65 之后的优化项"prune 有 callr 时以取址集合为根继续裁剪,不整带回退"。类别是模型与网类(prune 的表与网:`exec/prune/`、`exec/facts/prune-nametable.tsv`、`prune.net`),不得与驱动与运行缓存类同候选。验收须保留 `indirect-call-preserved` 的现有断言或以等价的取址根用例替换并写明依据,不删断言。优先级低于 L1:对 hello 的收益约 1%。另:`prd.md` 4.0 的 prune 描述没写回退,需补一句(本条未改 prd.md,不在写域)。
 - (原 E2 记录,保留) `sh ./unisacc.com stream prune --target lnx/x86_64 < c.tape` 返回 rc 0 且输出与输入同字节(cmp 相同,11539 行不变;原因未查清(可能 -S 带子已是 prune 后,也可能 stream prune 对该输入不裁剪;c.tape 有约 400 个标号)),所以不能用它取 prune 后带子;prune 后带子缺单独导出入口(整程序 -run 内不落盘)。要做 E2 须先找出喂 prune 的正确输入形态(`stream sidecar` 的 e3 原始输出需 `stream e3` 产出,未试)或给产品加诊断导出;本轮不硬做。方案 B 判断:未决,缺 prune 后带子。
 - E3 [已测 2026-11-14,load1 2.8,脚本 `$CLAUDE_JOB_DIR/tmp/fn.cx` 不入库:按顶格 `X:` 标号切 lower 输出,略去 `@` 头行,逐段比较 (c) 与 (d)] 命令 `sh ./unisacc.com fn.cx -- c.low d.low`,输出:`labelsA=400 labelsB=424 common=398 onlyA=2 rawsame=385 normsame=385 bytes=159393 rawbytes=152103 normbytes=152103`。即共有标号段 398 个中 385 个函数体同字节,占 96.7%(按字节 95.4%);归一化(4 位以上数字换成 N)不增加同字节数,说明差异不是 @sym 数字地址。不同的 13 段:`_start`、`__init`、`__main_ret`、`main`、`atexit`、`write`、`_unisa_environ_init`、`__unisacc_R365`、`__unisacc_L367/370/371/372/374`;后一类是编译器生成的局部标号编号,随程序整体顺序变,另有仅在 (c) 的 2 个标号。含义:库函数体(占约 95% 字节)lower 后与具体程序无关,@sym 全局地址只出现在头部,函数体内不含;差异集中在启动与收尾桩、用户 main 与带全局编号的生成标号。所以"lower 逐函数独立"在库函数上基本成立,先前"至少全局布局依赖整程序"过强,只对头部 @sym 与带生成标号的少数段成立。限度:只比了 (c) 与 (d) 一对,(d) 为 (c) 加 strcmp/malloc;未含更多程序;未验证闭包函数顺序变化时同字节;lower 逐函数结果缓存后拼接还需处理 `@sym`、`@data`、`@relocs` 头与生成标号,未做。(原记录,保留)命令:`sh ./unisacc.com stream lower --target lnx/x86_64 < X.tape > X.low`(rc 0)。(c) 9135 行/166702 B,(d) 9766 行/178720 B;`diff c.low d.low` 有 733 个差异行;`@sym` 全局符号地址在 (c) 与 (d) 间不同(如 `g__unisa_freel` 66392 对另一值,35 个 @sym),即 lower 输出含全局布局地址,随程序整体变化。结论:lower 输出不是只依赖自身带子段的逐函数纯函数,至少全局数据布局依赖整程序;这是 (c)(d) 整体对比,没有按函数切段逐段比,所以不能据此判定函数体本身能否同字节,但已指向方案 B 的『lower 逐函数独立』条件需加布局无关证明才成立。按条件,方案 B 判断:未决偏否定;缺口:按标号切 lower 输出逐函数比较的脚本与 prune 后带子(见 E2)。
 - E4 [未测] 本轮 12 分钟内只做完 E1 与 E3 部分,E4 未跑;因 E1 显示闭包是 stdio.h 等头文本而非独立单元,手工拆成两个 .cx 需先决定闭包单元的切法(把 `#include` 行放哪个文件),这个前置未定。
@@ -367,7 +367,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | K2 | prune:有 `callr` 时以取址集合为根继续裁,不整带回退(5.1 E2 第 7 条) | 对 hello 约 1%(只裁掉 `ferror`);对带用户死代码的程序,每个小死函数约 1.1 ms、82 B,200 个约 228 ms [实测 5.1 E2 第 4 条] | 高:产物字节必变(本就是目的),`indirect-call-preserved` 断言须保留或以等价取址根用例替换 | 模型与网类;与 K1 甲同表同网,可同候选 |
 | K3 | lower:库函数逐函数结果复用(5.1 方案 B) | 不超过 lower 的闭包份:基准 91 减最小程序 13 约 78 ms(M1 口径 94 减 12 为 82);[实测 E3] 398 个共有段中 385 段同字节(96.7%,按字节 95.4%) | 中高:头部 `@sym`、`@data`、`@relocs` 与 13 个带生成编号的段须重算;只比过 (c)(d) 一对 | 驱动与运行缓存类,不改网;已在 5.1,不重复立项 |
 | K4 | e3:闭包带子复用(5.1 方案 A) | 约 116 ms(145 降到约 29,M1 n=3) | 中:合并后带子可能与整程序 e3 不同字节,合同落在最终 ELF | 驱动与运行缓存类;已在 5.1 |
-| K5 | e2:固定份(前导)结果预制或前导裁剪(L5(a)、10.2 紧凑前导) | 不超过最小程序 e2:89.7 至 105 ms | 预制:低(命中与未命中逐字节比);裁剪:高(改所有 e2 输出字节) | 预制属驱动与运行缓存类;裁剪属 cx 设计类(0.0.64 已排紧凑前导) |
+| K5 | e2:固定份(前导)结果预制或前导裁剪(L5(a)、10.2 紧凑前导) | 不超过最小程序 e2:89.7 至 105 ms | 预制:低(命中与未命中逐字节比);裁剪:高(改所有 e2 输出字节) | 预制属驱动与运行缓存类;裁剪属 cx 设计类(0.0.65 已排紧凑前导) |
 | K6 | e2:随用户源增长的那一份(M1 的 (d) 到 (e) 同闭包下 322 到 679 ms)。做法待 (2) 定因后选:若成因在网的每标识符或每行成本,则改 pp 事实表重构造(speed12b);若成因在驱动侧缓冲或逐行调用,则改逻辑 | 不超过 357 ms(679 减 322,n=3 中位,load1 10 至 12,噪声大);对 A12 基准程序不超过 e2 146 减固定 93.8 约 52 ms | 改网:中(e2 输出须逐字节不变,pp 金表 1,105,532 键全键验证已有工具 `tools/lab-loader/net-check.cx`);改驱动:低 | 成因未定前不归类;改 pp 表与网即模型与网类 |
 | K7 | elf:编码是查表型,无需学习。把 elf 网换回确定性逻辑 | 不超过 47 ms(7.3%);替换后的逻辑自身耗时 [UNMEASURED],净收益可能接近 0 | 高:12 个模型覆盖六目标的 image 与 object,换实现等于重写编码器,且与"以网换逻辑"方向相反 | 模型与网类;不做,理由是上界最小而面最大 |
 | K8 | e1:词法 | 不超过 8 ms | - | 不做 |
@@ -399,10 +399,10 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - 顺序约束:预制条目的键含产品身份(UNICL1 的 (b) 项),任何改网的候选都会让全部预制条目失效,须在同一次发布里重生成预制清单;反过来预制的等价检查(关、未命中、命中三次同字节)是同一产品内的比较,不受改网影响。因此先落预制(驱动与运行缓存类),后做改网候选,两者不同候选;改网候选的发布步骤里加一步"重生成预制清单并跑 `tools/check-closure-reuse.cx`"。
 - 一处会互相抵消:K2 让 prune 真裁之后,闭包的保留集随用户引用面变,5.1 方案 B 的键必须带 (f) 引用面,预制命中率下降;K1 甲不改输出,没有这个副作用。所以先 K1 甲,K2 排在方案 B 的命中率数据出来之后。
 
-(4) 路线(0.0.64 至 0.0.65)与今日可开工的只读实验
+(4) 路线(0.0.65 至 0.0.67)与今日可开工的只读实验
 
-- 0.0.64(已定为 cx 设计类,含紧凑前导):nn 侧不进产品输入,只做取数与设计:X1 至 X6 跑完并原位回填;补运行期流图事实表的草案(L3 行已记"运行期流图事实表不存在");给 `RR_TIME` 加 steps 字段的补丁草稿交集成者(驱动与运行缓存类,随 0.0.63 或 0.0.64 的同类候选带,不单开候选)。紧凑前导落地时用 X1 的截距核对 K5 的实得。
-- 0.0.65(现候选为 osx/win netraw,库包与运行库类):nn 的模型与网类候选只含 prune 一类改动(K1 甲;K2 视 X2、X3 与方案 B 命中率决定是否同候选),与 netraw 不同类,不得同候选;按 F9,整链降到 2400 s 以内才允许同版两候选,否则顺延 0.0.66。K6 若 X1 判定成因在 pp 网,另开一个只含 e2 网的候选,排在 prune 候选之后。
+- 0.0.65(已定为 cx 设计类,含紧凑前导):nn 侧不进产品输入,只做取数与设计:X1 至 X6 跑完并原位回填;补运行期流图事实表的草案(L3 行已记"运行期流图事实表不存在");给 `RR_TIME` 加 steps 字段的补丁草稿交集成者(驱动与运行缓存类,随 0.0.63 或 0.0.65 的同类候选带,不单开候选)。紧凑前导落地时用 X1 的截距核对 K5 的实得。
+- 0.0.67(nn 网化类槽;osx/win netraw 属库包与运行库类,顺延到不早于 0.0.69):nn 的模型与网类候选只含 prune 一类改动(K1 甲;K2 视 X2、X3 与方案 B 命中率决定是否同候选),与 netraw 不同类,不得同候选;按 F9,整链降到 2400 s 以内才允许同版两候选,否则顺延 0.0.68。K6 若 X1 判定成因在 pp 网,另开一个只含 e2 网的候选,排在 prune 候选之后。
 - 改网候选的验收(预先写明,不放宽):`stream-prune-cases` 批次全绿且 `indirect-call-preserved` 断言不删;K1 甲另加逐字节合同:M1 的 (a) 至 (e) 五个源改网前后最终 ELF sha256 相同;耗时用同机同负载 n=3 中位对比,未测不记 PASS。
 
 只读实验清单(单项 15 分钟内;写域均为本小节对应行的原位回填,夹具与脚本放 `$CLAUDE_JOB_DIR/tmp` 不入库;"今"表示不取耗时、整链在跑也可做,"链后"表示速度取数,须等整链结束):
@@ -489,11 +489,11 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 
 - 排序依据:最小可证看金表能否今天穷举,最大收益只认已有实测。现有实测里网侧可拿的仍是 prune 102 ms 与 e2 用户份(5.2 K1、K6);本次普查新增的 S3 至 S6 全部没有耗时数,不能排到 K1 甲之前。
 - 第一步(最小可证):S1。18 格可穷举,不加模型,不动网。只做表与生成器加 `--check` 的那一半今天即可开工(纯工具);改三处消费者属驱动与运行缓存类,随 0.0.63 同类候选或其后第一个同类候选带,不单开候选。S1 消费者补丁(2026-11-14,未入库,基 c5853f58b2):结论是 st_gap 可改为逐行查生成行表且 7 路输出不变。做法:`tools/st-gap-gen.cx` 的 `build/st-gap-chain.txt` 由 if 链改为 `st_gap_row(index,&mode,&le0,&name)` 的 7 行(沿用 `cx/runtime/endname.cx` 的生成 if 行形状,不引入数据重定位),`cx/runtime/runexec.cx` 的 st_gap 改成对行表取首个匹配行,签名不变,调用方 `src/drive.cx:600` 不改;`drive.cx:749` 与 `driveroute.cx:268` 未动。补丁 `~/.cache/unisacc/patches-0.0.64/s1.patch.txt`(4 个文件,加 38 减 23)。证据(`git archive` 解到 /tmp 的副本上,已装产品,load1 2.9):`git apply --check` rc 0;`st-gap-gen.cx -- --check` 输出 `ST_GAP_GEN ok rows=7`;`check-st-gap-gen.cx` 输出 `CHECK_ST_GAP_GEN ok=18 failed=0`;`-c cx/runtime/runexec.cx` rc 0;对拍探针把新旧 st_gap 源段原文各改名后同编,mode -1 至 9 乘 level -1 至 3 乘 cap 4 与 32 共 110 格,返回值、名字、ex_obj_mode 全同,输出 `ST_GAP_EQ cells=110 diff=0`,其中 18 格(7 路)逐行 SAME。UNMEASURED:带补丁重建产品后的整产品行为、六目标、棘轮与 derive 全闸;新增的无匹配行返回 1 分支在现表(有 `*` 行)下不可达,未实测。
-- 第二步(最大已测收益):S2 即 K1 甲,落点不变:0.0.64 只取数(X1、X2、X6),0.0.65 模型与网类候选只含 prune,整链未降到 2400 s 以内则顺延 0.0.66。K1 甲现状(2026-11-14 实测,已装产品,lnx/x86_64,load1 2.9,未改源码):结论是 prune 本身已是网(`exec/pipeline/image-stages.tsv` 的 prune 行用 prune.net,cx 侧 `cx/runtime/stream/prune.cx` 只有 16 行),不存在"用 nn 替换"的剩余逻辑;而"先扫 callr 即回退"不能做,因为它不保字节且几乎无收益。证据:(1) 回退条件依赖可达性:`int dead(int(*f)(void)){return f();}` 加 `int main(void){return 7;}` 的 -S 带子 65 行含 1 个 `callr r5`(在不可达的 dead 内),`stream prune` 后 43 行、dead 与 callr 均被裁,与不含 dead 的同程序输出行数相同;先扫即回退会输出 65 行,产物变,违反 K1 甲"输出不变"的前提;这与 X3 的 `prune-result.tsv:369`(闭包阶段读到可达函数的间接标志才回退)一致。(2) X2 耗时部分:hello 带子 11,212 行,回退路(恒等,cmp 相同)3 次 194、197、197 ms;删去 callr 行后真裁路(到 11,095 行)3 次 206、210、200 ms;两路只差约 6 至 13 ms(3% 至 6%),即耗时主体是全带扫描与建边,回退判定之后可省的闭包余段与保留集输出至多这个量级,102 ms 的上界不成立。最小可做切片:只剩"闭包遍历中首次读到间接标志即回退"(现网已如此,`:369` 在 CLOSEFACT 循环内),无新增可做项;要拿到 prune 的耗时须降扫描与建边的每行成本(属 K2 之外的另一题,未立项)。建议 0.0.65 的 prune 候选撤下 K1 甲,待集成者裁定。UNMEASURED:进程启动与模型装载在 194 ms 中的占比(本次未扣)、扫描与建边的分相、n 大于 3 的安静机复测、其余五目标。
-- 第三步:S3,条件是 Y1 取到合并相位耗时且 Y3 证明行种类有限。它与 5.1 方案 A 的关系:方案 A 把闭包 e3 带子缓存后仍要合并,合并步若进网,缓存键须含该网身份(UNICL1 的产品身份项已覆盖);所以先落方案 A(0.0.63,驱动类),S3 最早 0.0.66,且与 K1 甲同为模型与网类,可在 prune 候选发布后另开一个候选,不与之合并(一个候选只含一类大改,同类也按网分开以便定位字节差)。
-- 与 L5(a) 前导 e2 预制的衔接:预制是缓存类,减 e2 固定份;本节没有新增 e2 侧候选,H17 的手写部分并入 S7。S7 排在 55-1 之后,不早于 0.0.66。
+- 第二步(最大已测收益):S2 即 K1 甲,落点不变:0.0.65 只取数(X1、X2、X6),0.0.67 模型与网类候选只含 prune,整链未降到 2400 s 以内则顺延 0.0.68。K1 甲现状(2026-11-14 实测,已装产品,lnx/x86_64,load1 2.9,未改源码):结论是 prune 本身已是网(`exec/pipeline/image-stages.tsv` 的 prune 行用 prune.net,cx 侧 `cx/runtime/stream/prune.cx` 只有 16 行),不存在"用 nn 替换"的剩余逻辑;而"先扫 callr 即回退"不能做,因为它不保字节且几乎无收益。证据:(1) 回退条件依赖可达性:`int dead(int(*f)(void)){return f();}` 加 `int main(void){return 7;}` 的 -S 带子 65 行含 1 个 `callr r5`(在不可达的 dead 内),`stream prune` 后 43 行、dead 与 callr 均被裁,与不含 dead 的同程序输出行数相同;先扫即回退会输出 65 行,产物变,违反 K1 甲"输出不变"的前提;这与 X3 的 `prune-result.tsv:369`(闭包阶段读到可达函数的间接标志才回退)一致。(2) X2 耗时部分:hello 带子 11,212 行,回退路(恒等,cmp 相同)3 次 194、197、197 ms;删去 callr 行后真裁路(到 11,095 行)3 次 206、210、200 ms;两路只差约 6 至 13 ms(3% 至 6%),即耗时主体是全带扫描与建边,回退判定之后可省的闭包余段与保留集输出至多这个量级,102 ms 的上界不成立。最小可做切片:只剩"闭包遍历中首次读到间接标志即回退"(现网已如此,`:369` 在 CLOSEFACT 循环内),无新增可做项;要拿到 prune 的耗时须降扫描与建边的每行成本(属 K2 之外的另一题,未立项)。建议 0.0.67 的 prune 候选撤下 K1 甲,待集成者裁定。UNMEASURED:进程启动与模型装载在 194 ms 中的占比(本次未扣)、扫描与建边的分相、n 大于 3 的安静机复测、其余五目标。
+- 第三步:S3,条件是 Y1 取到合并相位耗时且 Y3 证明行种类有限。它与 5.1 方案 A 的关系:方案 A 把闭包 e3 带子缓存后仍要合并,合并步若进网,缓存键须含该网身份(UNICL1 的产品身份项已覆盖);所以先落方案 A(0.0.63,驱动类),S3 最早 0.0.68,且与 K1 甲同为模型与网类,可在 prune 候选发布后另开一个候选,不与之合并(一个候选只含一类大改,同类也按网分开以便定位字节差)。
+- 与 L5(a) 前导 e2 预制的衔接:预制是缓存类,减 e2 固定份;本节没有新增 e2 侧候选,H17 的手写部分并入 S7。S7 排在 55-1 之后,不早于 0.0.68。
 - S4、S5、S6 在 Y4 出调用面之前不排版本;若都不在默认 -run 路径,则只按"与事实表重复"处理(改成从 `exec/facts/enc-*.tsv` 生成),不立网化候选。
-- 落点汇总:0.0.64 取数与 S1 的表半边;0.0.65 S2(prune);0.0.66 S3 或 K6 二选一(看 X1 与 Y1 谁的实得大),S7 视 55-1。
+- 落点汇总:0.0.65 取数与 S1 的表半边;0.0.67 S2(prune);0.0.68 S3 或 K6 二选一(看 X1 与 Y1 谁的实得大),S7 视 55-1。
 
 (5) 今天可做的只读实验(各 15 分钟内,不取耗时的可在整链运行时做;产物写 `$CLAUDE_JOB_DIR/tmp/Y-N.tsv`,互不相交;脚本用 .cx)
 
@@ -587,10 +587,10 @@ Y4 调用面分类(git grep 取数):
 | 1 | T1 E3TRIM(含 T2) | 约 200 ms(1938 项,斜率 102);按斜率 28 为约 54 ms | 低,纯加速器 | 驱动与运行缓存 | 无;C2a 同文件串行在其后 | 0.0.63 最先做,也是最小可证(K2 曲线复测即验收) |
 | 2 | T5 N15 | 每次重复 -c 约 280 ms | 低,补丁已过 apply --check | 驱动与运行缓存 | 无;C3-1 同文件在其后 | 0.0.63 |
 | 3 | T3 方案 A | 约 116 ms | 中,合并器同字节 | 驱动与运行缓存 | E4 切法、C3-1、C3-2 | 0.0.63 |
-| 4 | T3 L5(a) | 不超过 89.7 ms | 中,前导随 `\0cli` 状态变 | 驱动与运行缓存 | unitcache 单文件入口(C3-1) | 500 ms 探针不绿则 0.0.63,否则 0.0.64 |
-| 5 | T4 零解码 | 不超过 49 ms | 中,六目标映射 | 驱动与运行缓存 | C2a 之后 | 0.0.63 末位或 0.0.64 |
-| 6 | prune 提前回退 | 不超过 102 ms(基准程序 prune 全程,恒等) | 中,不得删 indirect-call-preserved 断言 | 模型与网 | 无 | 0.0.64 之后,单独候选 |
-| 7 | T6 热路径系统调用 | 小于 8.1 ms | 低 | 驱动与运行缓存 | R2 归属结果 | 0.0.64,不单独立项 |
+| 4 | T3 L5(a) | 不超过 89.7 ms | 中,前导随 `\0cli` 状态变 | 驱动与运行缓存 | unitcache 单文件入口(C3-1) | 500 ms 探针不绿则 0.0.63,否则 0.0.65 |
+| 5 | T4 零解码 | 不超过 49 ms | 中,六目标映射 | 驱动与运行缓存 | C2a 之后 | 0.0.63 末位或 0.0.65 |
+| 6 | prune 提前回退 | 不超过 102 ms(基准程序 prune 全程,恒等) | 中,不得删 indirect-call-preserved 断言 | 模型与网 | 无 | 0.0.65 之后,单独候选 |
+| 7 | T6 热路径系统调用 | 小于 8.1 ms | 低 | 驱动与运行缓存 | R2 归属结果 | 0.0.65,不单独立项 |
 
 最大收益是 T1 与 T3 两行相加(约 200 加 206 ms,前者随目录条目数变);最先做与最小可证都是 T1。口径提醒:K2 的 0 项档首次 284 ms 与 run-startup-bench 的 715.9 ms 用的程序和目录不同,二者未对齐,见 R1。
 
@@ -978,7 +978,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 每条标:产品输入类别(cxmod 三源 | 运行库头 | 模型装载 | 非产品输入的工具与表)与版本。
 
-**P1 export 重导出(cxmod 三源;0.0.64)**
+**P1 export 重导出(cxmod 三源;0.0.65)**
 
 - 语法:`#pragma unisa export NAME` 与 `#pragma unisa export NAME::sym`。只许出现在带 `module` 行的单元里;位置规则与 use 相同(首声明前、条件外)。
 - 语义:(1) 对本模块等于 `use NAME`;(2) 直接 use 本模块的单元,视同也直接 use 了 NAME(给完整接口,而不是传递 use 的类型部分);(3) 符号身份仍属 NAME,函数体只有一份,不复制、不改名;(4) 链式重导出只沿显式 export 行传递,普通 use 仍不传递(CX-U-5 不变)。
@@ -987,7 +987,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - 层向:export 算一条 use 边,门面的层号不得低于被导出模块(`tools/check-cx-layers.cx` 同口径)。
 - 验收实验:`sh ./unisacc.com tests/cx-namespace.cx -- ROOT ROOT/unisacc.com OUT` 新增门面正例 2 条、拒绝 4 条;三源 `sh ./unisacc.com tools/cx0-extract.cx -- --check` EXACT。
 
-**P2 通配 use 的窄语义(cxmod 三源;0.0.64,排在 P1 之后)**
+**P2 通配 use 的窄语义(cxmod 三源;0.0.65,排在 P1 之后)**
 
 - 语法:只有 `#pragma unisa use PFX.*` 一种;`*` 只能是最后一段且独占一段。`PFX.*::sym`、`PFX.*.x`、`*`、`use NAME::*` 一律具名拒绝。
 - 语义:纯展开。把 PFX 解析成目录(旁边优先,其次包根),取该目录下直接子文件 `<seg>.cx` 中带 `#pragma unisa module <seg>` 的那些,按字节序展开成逐个 `use PFX.<seg>`;不递归子目录。展开后与手写完全等价:冲突仍拒、上限仍按 `CXM_MAXUSE` 计、空展开拒绝(`wildcard PFX.* matches no module`)。
@@ -995,12 +995,12 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - 代价如实:规划器要新增列目录回调(类比 `cxm_bind_real`),CX0BND1 束要记录目录列表身份;计划字节须把展开结果逐条写出,保证三宿主同字节。推荐做法仍是 P1 的显式门面,通配只是脚本便利。
 - 验收实验:同上批次,正例 1 条(展开数与目录实数相等)、拒绝 5 条。
 
-**P3 符号级导入的稳定语义(cxmod 三源;缺陷修复已并入 0.0.62,语义收敛在 0.0.64)**
+**P3 符号级导入的稳定语义(cxmod 三源;缺陷修复已并入 0.0.62,语义收敛在 0.0.65)**
 
 - (1) 可见性:`use M::sym` 只给 sym 的原型与 M 的全部类型;类型永不改名。(2) 身份:一个模块在一个程序里只有一份函数体,与被多少单元、以多少种别名导入无关;别名是使用方单元的属性。(3) 同一单元对同一模块既整模块导入又符号导入:取并集,不报错;同一 sym 两个不同别名:拒绝。(4) sym 不在 M 的公开集:具名拒绝(`module M does not export sym`)。(5) 经 P1 门面得到的模块也可写 `use FACADE::sym`,解析到真实属主。
 - 验收实验:`sh ./unisacc.com tests/module/check.cx`(批次 module-units)断言「N 种别名时单元数不变」;运行断言 UNVERIFIED-需新产品。
 
-**P4 text.text 拆面(运行库头;0.0.64,依赖 P1。先行部分为非产品输入,立即可做)**
+**P4 text.text 拆面(运行库头;0.0.65,依赖 P1。先行部分为非产品输入,立即可做)**
 
 - 目标面(按 E7 实测的使用分布,而不是按文件大小):扫描面 `text.cmp`(tx_len tx_same tx_eq tx_eqz tx_cmp tx_prefix tx_prefixz tx_suffix)与 `text.find`(tx_find tx_rfind tx_chr tx_rchr tx_contains tx_count);切分 `text.split`(tx_fields tx_field tx_trim tx_trimc);构造面 `tx_copy` 归 `text.build`;格式化面即现有 `text.fmt`、`text.num`、`text.conv`,不动。`text.text` 保留为只含 export 行的门面,826 个使用方零改动,之后按需逐步改成只 use 用到的面。
 - 为什么必须等 P1:没有 export 时,新模块与 text.text 同时定义同名函数会触发 `exported by both`,只能一次改完 826 个文件,违反分治。
@@ -1013,23 +1013,23 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - (c) 符号级选批:被改文件的改动行映射到文件作用域条目;若只落在若干导出函数体内,则只选「闭包内引用了这些函数(含同模块内调用它们的导出函数)」的批次;改动落在 static 数据、宏、类型或无法归属时退回整模块。未选中的批次打印为 DEFERRED_BY_SYMBOL,计数、可用 `--full` 重跑,不静默丢弃;release 档永远全选。
 - 验收实验:`sh ./unisacc.com tools/affected.cx -- --files cx/text/text.cx --list-only --iface-narrow` 的 `IFACE_NARROW state=on`;符号级对 `tx_trimc` 的选批数远小于 903(预估见 10.4)。
 
-**P6 前导分层(运行库头;不早于 0.0.64 末位,超 2 小时即移 0.0.65)与零解码(模型装载;0.0.63)**
+**P6 前导分层(运行库头;不早于 0.0.65 末位,超 2 小时即移 0.0.67)与零解码(模型装载;0.0.63)**
 
 - 层感知前导(CX-W-5):上层单元只见 L0 接口声明,不再每单元付 9388 行;与 0.0.63 的零解码互不依赖,分两个候选,各自用 `tools/cx-phase.cx` 冷热两组入账。
 - 验收实验:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com /tmp/h0.cx`(空 main),e2 相位下降量入 `build/phase-times.tsv`。
 
-**P7 包内可见性(非产品输入的表先行;cxmod 三源在 0.0.64 之后)**
+**P7 包内可见性(非产品输入的表先行;cxmod 三源在 0.0.65 之后)**
 
 - 不加语法。先把 `cxpack.tsv` 扩到 11 个 cx.* 包(E2),公开集 = `build/layer-api` 的行;包内帮手不进 cxpack 即包外不可见。表与检查可立即做;规划器强制(包外调用未列入符号即拒绝)已有 `tests/cxpack/bad-call` 路径,扩面属产品输入。
 
-版本映射汇总:0.0.62(库包与运行库)只并入 E1、E10 的缺陷修复与 P5、P7 表、P4 先行实验;0.0.63(模型与网)只做零解码;0.0.64(cx 设计)做 P1 -> P2 -> P3 收敛 -> P4 物理拆面 -> P6 前导(末位)。
+版本映射汇总:0.0.62(库包与运行库)只并入 E1、E10 的缺陷修复与 P5、P7 表、P4 先行实验;0.0.63(模型与网)只做零解码;0.0.65(cx 设计)做 P1 -> P2 -> P3 收敛 -> P4 物理拆面 -> P6 前导(末位)。
 
 ### 10.3 与冻结层、三源、棘轮的冲突与兼容
 
-- 冻结层:`cx/sys`、`cx/core` 只可新增文件(`tests/cx-module-freeze.tsv` 33 行,只缩不扩)。P1/P2 不改这两层的任何文件;P4 只动 `cx/text`(不在冻结集),新面是新增文件,`text.text` 改成门面属于改现有文件,须在 0.0.64 候选内一次完成并做字节等价回归(826 个使用方的 `-cx-plan` 单元集只增不减、程序输出不变)。
+- 冻结层:`cx/sys`、`cx/core` 只可新增文件(`tests/cx-module-freeze.tsv` 33 行,只缩不扩)。P1/P2 不改这两层的任何文件;P4 只动 `cx/text`(不在冻结集),新面是新增文件,`text.text` 改成门面属于改现有文件,须在 0.0.65 候选内一次完成并做字节等价回归(826 个使用方的 `-cx-plan` 单元集只增不减、程序输出不变)。
 - 三源:每条语法改动的顺序固定为 `cx/cx0/plan.cx`(权威)-> `tools/cx0-extract.cx` 投影 `src/cxmod.c`(`--check` EXACT)-> `cx/compiler/cxmod.cx` 手工对齐并在 `tests/module/units.cx` 加同名断言。4367e1b0e5 证明手工对齐会漏(`cxm_deps_same` 晚了一轮);P1 起每个新拒绝文案都要同时出现在三份源里,用一条 `git grep -c` 断言守住,直到 55-1(cxmod.cx 改为投影)落地。归一方案与先后关系见 10.5:决定为先归一(D0)再加语法(D1 起),D0 落地后本条的「手工对齐」一步取消。
 - 棘轮:srcshape 不许 `src/` 增行,P2 的列目录回调绑定须与 e576000457 同法(与现有语句同行或放 `cx/driver`);cxinclude、cxlibc、cxplatform 不受影响;通配的「产品层禁用」做成 cxapis 类棘轮的一条规则,不新开第 14 个棘轮。
-- 一版一类:P1、P2、P3 同属 cxmod 三源,可同候选;P4 物理拆面属运行库头,与前者不同类,须是 0.0.64 内的第二个候选或顺延,不得与 P1 同候选。
+- 一版一类:P1、P2、P3 同属 cxmod 三源,可同候选;P4 物理拆面属运行库头,与前者不同类,须是 0.0.65 内的第二个候选或顺延,不得与 P1 同候选。
 - 宿主:gcc_cx、clang_cx 经 `src/cxmod.c` 自动得到同一语义;export 与通配对宿主编译器仍是被忽略的 pragma 行,C99 兼容不变。
 - 不做:不引入新关键字、不引入按路径字符串的导入、不做隐式遮蔽(后 use 覆盖先 use)、不做传递可见。
 
@@ -1091,7 +1091,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - `cxm_checkcalls`:上移进 plan.cx 体内,不设区标(全宿主同语义)。效果是 cx0 与 gcc_cx/clang_cx 宿主从接受变为拒绝未导入符号的调用,行为收紧;`tools/check-cxmod-tri.cx:121` 的 gap 分支届时会按设计报 `gap cxm_checkcalls closed, revisit`(`:76`),须同提交把该用例改成普通断言。
 - `CXM_MAXU`:统一为 128。依据:产品是已发布行为,`exec/facts/limits.tsv:2` 已登记 128;降到 96 等于对用户缩限。代价:宿主静态表变大(`cxm_reach[MAXU][MAXU]`、`cxm_renpool[MAXU*CXM_MAXDECL][CXM_PATHW]`,`cx/cx0/plan.cx:104`、`:112`),增量未测,标 UNMEASURED。文案统一用 `cxm_md(CXM_MAXU)` 拼数字,不再写死。数值改由 `limits.tsv` 经表中 `limit` 行注入,关闭 A7 第 14 项与 E13。
 
-**(3) 与 0.0.64 export、通配的先后:先归一(D0),再加语法(D1 起)**
+**(3) 与 0.0.65 export、通配的先后:先归一(D0),再加语法(D1 起)**
 
 - 依据一(仓内事实):手工对齐已漏过两次。`cxm_deps_same` 晚一轮(4367e1b0e5);57c7427f6f 的提交说明写「plan.cx 与 cxmod.cx 同构」,但同一提交加的 `call to undeclared function` 只进了产品源(计数 0、0、1)。P1 加 4 条拒绝、P2 加 5 条、P3 再加若干,每条三处同现,按已有漏率至少再漏一次。
 - 依据二(成本):D0 是一次性机械变换,验收是逐字节(生成物等于现手写件,或差异逐行归到上面六类);D1 至 D3 是语义新增,验收是行为。先做 D0,D1 至 D3 每条只改 plan.cx 一处,`--check --all` 一条命令守两份生成物;反过来则 D0 要在更大的差异面上做,且 D1 至 D3 的手工对齐劳动全部作废。
@@ -1100,7 +1100,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
   - Python [忆]:导入机制只有一份实现 `importlib._bootstrap`,解释器内置的那份是由它冻结生成的产物,不是另写的 C 版本;早年 C 版 import 与 Python 版并存时行为不一致,后来收成单源再冻结。对应本方案:plan.cx 单源,产品件与宿主件都是冻结投影。
   - Node.js [忆]:`package.json` 的 `exports` 解析在 CJS 加载器与 ESM 加载器之间共用同一套解析函数,新增条件导出时两种加载器同时生效;没有为两套加载器各写一份 exports 解析。对应:先有共用解析核,再加 export 语法。
   - Rust [忆]:名字解析的权威实现在 rustc 的解析阶段;rust-analyzer 另有一份独立实现,新语法(如新版次的导入规则、宏相关可见性)在两者之间出现过滞后与结果不一致。对应:第二份手写实现在加语法期间必然滞后,即 F3。
-- 反方理由与回应:归一动产品输入,会不会拖住 0.0.64?回应:D0 的今天可做部分(T1 至 T4)不动产品输入;动产品输入的部分(T5 至 T8)各自 15 分钟内,且排在 D1 之前同一候选。
+- 反方理由与回应:归一动产品输入,会不会拖住 0.0.65?回应:D0 的今天可做部分(T1 至 T4)不动产品输入;动产品输入的部分(T5 至 T8)各自 15 分钟内,且排在 D1 之前同一候选。
 
 **(4) 任务拆分(每项 15 分钟内,写域互不相交;简报按五段式另写)**
 
@@ -1197,8 +1197,8 @@ T6 归属表(N10,2026-11-14,只读取证;来源 `tools/cx0-diff.cx -- --pair pla
 | R1 | tlibpkg 分面、包表登记 stream 两面、deps 最低版本检查 | 非产品输入的工具与表 | 不等版本 |
 
 R1 状态(2026-11-14,已做,待提交后复核):包表增第十列 faces(FACE=UNIT),cx.stream 登记 pipe(item.cx、pipe.cx)与 rw(rw.cx),只是元数据,公开集仍以 cxpack.tsv 为准;tlibpkg 增 tp_face_of、tp_dep_ok、tp_deps_check(依赖按"现版本满足最低版本"判,不要求相等;tp_ver_compat 原本即是下限语义,tlib.cx 的依赖检查未用相等,漂移只是 R0-4 差距表的口径),并在头注释按表/身份/冻结三面标注函数归属(代码未物理拆分,等 D1 export 后做门面);layer-api set_row 保留第十列;check-tlibpkg 新增 7 断言(failed=0);tools.cxlib 0.1.26 -> 0.1.27。
-| R2 | cx/stream 下层修正:K1 结果码归属、K3 去重复 sha、K5 白名单收窄 | 单类产品输入大改(库包源;routepipe 与 drivestream 是使用方) | 0.0.64 第二候选,与 D4 同类同候选;受 F9 门约束,不满足则 0.0.65。补丁草稿已备(未入仓未应用):`$CLAUDE_JOB_DIR/tmp/r2.patch.txt`(8 文件,对 HEAD `git apply --check` 通过)。副本(git archive HEAD)用已装产品实跑:check-cx-streamapi `ok=205 failed=0`(旧 208:deadline 段 11 条换成 8 条"不在公开名单且句柄不受影响"断言,净减 3,清单/覆盖表里的 208 要同步,未改);check-cx-streamown `ok=32 failed=0`(KNOWN-RISK 断言改为同强度反向断言 OWNERSHIP-ON-ERROR,xs_item_set 返回 4 不再 mg_free)。K1 实为 pipe.cx 注释里的出处说法,已改成 cx.stream 自有、仅数值与 st_span 相同;K3 未动。公开集变化:cxpack.tsv rw 面去掉 xs_reader_deadline/xs_writer_deadline,rw.cx 删两函数,layer-api 重生为 rows=32 bump=major。UNVERIFIED:build/tlib-packages.tsv 的 cx.stream 版本与 api_sha(d1a5dfff...)及内容 sha 未改(需正式 `layer-api --bump`,副本无 git);std-surface-v2.cx 里两行硬编码与派生的 build/std-surface.tsv、docs/cx/api/cx.stream.md 未重生;tests/manifests、coverage、batches 的 208 未改;routepipe.cx:70/122、drivestream.cx:411/438 三处调用 xs_item_set 未在返回 4 时释放(现实参恒合法,风险仅为理论泄漏,未改产品调用点);选批数 `affected --list-only` 129 批。 |
-| R3 | K2 `st_span` 改为模块接口、K7 FwmBuf 共享类型 | 单类产品输入大改(驱动) | 0.0.65,不与 R2 同候选 |
+| R2 | cx/stream 下层修正:K1 结果码归属、K3 去重复 sha、K5 白名单收窄 | 单类产品输入大改(库包源;routepipe 与 drivestream 是使用方) | 0.0.65 第二候选,与 D4 同类同候选;受 F9 门约束,不满足则 0.0.67。补丁草稿已备(未入仓未应用):`$CLAUDE_JOB_DIR/tmp/r2.patch.txt`(8 文件,对 HEAD `git apply --check` 通过)。副本(git archive HEAD)用已装产品实跑:check-cx-streamapi `ok=205 failed=0`(旧 208:deadline 段 11 条换成 8 条"不在公开名单且句柄不受影响"断言,净减 3,清单/覆盖表里的 208 要同步,未改);check-cx-streamown `ok=32 failed=0`(KNOWN-RISK 断言改为同强度反向断言 OWNERSHIP-ON-ERROR,xs_item_set 返回 4 不再 mg_free)。K1 实为 pipe.cx 注释里的出处说法,已改成 cx.stream 自有、仅数值与 st_span 相同;K3 未动。公开集变化:cxpack.tsv rw 面去掉 xs_reader_deadline/xs_writer_deadline,rw.cx 删两函数,layer-api 重生为 rows=32 bump=major。UNVERIFIED:build/tlib-packages.tsv 的 cx.stream 版本与 api_sha(d1a5dfff...)及内容 sha 未改(需正式 `layer-api --bump`,副本无 git);std-surface-v2.cx 里两行硬编码与派生的 build/std-surface.tsv、docs/cx/api/cx.stream.md 未重生;tests/manifests、coverage、batches 的 208 未改;routepipe.cx:70/122、drivestream.cx:411/438 三处调用 xs_item_set 未在返回 4 时释放(现实参恒合法,风险仅为理论泄漏,未改产品调用点);选批数 `affected --list-only` 129 批。 |
+| R3 | K2 `st_span` 改为模块接口、K7 FwmBuf 共享类型 | 单类产品输入大改(驱动) | 0.0.67,不与 R2 同候选 |
 | R4 | K4 接口打印覆盖面、包根门面 | 单类产品输入大改(cxmod 三源) | D1 至 D3 之后 |
 
 R0 任务(每项 15 分钟内,只读;各写各的 `$CLAUDE_JOB_DIR/tmp/R0-N.tsv`,结论由集成者原位填回本节):
@@ -1233,7 +1233,7 @@ R0 实测(2026-11-14,HEAD 735a161e52,lnx/x86_64,已装产品;明细 TSV 在 `$CL
 - 待测:R2 去掉私有 sha 后 pipe.cx 的选批数(预计不变,因闭包由使用方决定):UNMEASURED;tlibpkg 分面后只读表工具的选批数(现 152):UNMEASURED,由 R0-5 的使用方分布按 10.4 同法估算;R3 后改 `st_span` 签名需改文件数 5 -> 1:未实现。
 - 取数命令统一为 `sh ./unisacc.com tools/affected.cx -- --files FILE --list-only [--iface-narrow --symbol-narrow SYM]`,读 AFFECTED_SUMMARY 的 batches 与 scanned。
 
-### 10.7 export 语法与可见性合同(2026-11-14 设计;未实现,不得记 PASS;即 0.0.64 的 D1)
+### 10.7 export 语法与可见性合同(2026-11-14 设计;未实现,不得记 PASS;即 0.0.65 的 D1)
 
 结论:`export` 分两种形状,首版(D1a)只做「本模块自有函数的公开名单」,门面重导出(D1b)排其后。有 export 的模块以源码内名单为准,`cxpack.tsv` 的公开名列在迁移期只作校验,终态改为由 export 生成;没有 export 的模块行为完全不变。本节未跑任何命令,所有行为论断来自读源码,新产品上的行为一律 UNVERIFIED。
 
@@ -1260,7 +1260,7 @@ R0 实测(2026-11-14,HEAD 735a161e52,lnx/x86_64,已装产品;明细 TSV 在 `$CL
 - 导出集规则(替换 `:915` 至 `:917` 的判定,顺序即优先级):
   - (a) 单元有至少一条 export:公开集就是 export 名单。此时若 `cxm_listed` 对本文件有行(返回 0 或 1 的情形),两边集合必须相等,不等即拒;没有行(返回 2)则不校验。
   - (b) 单元没有 export:行为与今天逐字节相同(有 cxpack 行按行,否则全部非 static 函数公开)。这就是向后兼容规则,不设「默认变私有」的切换日。
-- cxpack 的去向分三期:迁移期(0.0.64)export 与 cxpack 并存且互相校验;一个包的全部单元都写了 export 之后,该包 `cxpack.tsv` 第三列改为生成物(事实 export 行 -> 生成器带 `--check` -> 表),name 与 path 两列保留给包工具;「无 export 即全公开」只对产品层收紧,用棘轮计数(只减不增),不改规划器默认。
+- cxpack 的去向分三期:迁移期(0.0.65)export 与 cxpack 并存且互相校验;一个包的全部单元都写了 export 之后,该包 `cxpack.tsv` 第三列改为生成物(事实 export 行 -> 生成器带 `--check` -> 表),name 与 path 两列保留给包工具;「无 export 即全公开」只对产品层收紧,用棘轮计数(只减不增),不改规划器默认。
 - 上限:每单元 export 名数上限登记到 `exec/facts/limits.tsv`,文案拼数字(T6 的做法),不写死字面量。
 
 **(2) 错误模型(文案即断言子串;rc 一律 1)**
@@ -1340,7 +1340,7 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 
 - 决策:返回「经登记点登记、尚未注销」的句柄数,不是操作系统真值。kind 枚举放新文件:`SY_RES_FD 1`、`SY_RES_PROC 2`、`SY_RES_MAP 3`;未知 kind 返回 `-EINVAL`(与表 449 错误列一致)。计数器是模块私有 static long 数组,无系统调用,因此三目标可同码;表 449 三列由 `refuse:ENOSYS` 改 `impl` 须等各目标实跑,osx/win 先写 `unverified`(词表先例:表 124 行 win 列)。
 - 冻结约束的处理:`cx/sys`、`cx/core` 只可新增文件(本文 10.3,:812)。新增 `cx/sys/reslive.cx`(模块 `reslive`),先例是 `cx/sys/sigwatch.cx`(提交 9cdbf210ab,新增文件且未进 `tests/cx-module-freeze.tsv`;该表 33 行,cx/sys 下只列既有模块如 :31 `cx/sys/proc.cx`)。新文件导出两个名字:`sy_res_live(kind)` 与登记点 `sy_res_note(int kind, int delta)`(delta 只许 +1/-1,计数将为负时返回 `-EINVAL` 且不改值,这是重复关闭的确定性信号)。`sy_res_note` 是新增表面,须在 std-surface 补一行(新行,不是改旧行)。
-- 最小侵入:0.0.63 不改任何现有 `sy_*`(改现有文件即违反冻结)。不做包装层(`sy_open` 等同名包装会与现有定义冲突,换名包装等于再造一套 fd 面)。接入只发生在冻结集之外的上层:`np_exec`(本节 (2))对 PROC 与两个管道 fd 成对登记;`cx/stream` 的 reader/writer 开闭(`rw.cx`,10.6 句柄合同)可在 0.0.64 的 R2 接入。现有 `sy_*` 自身接入排到冻结解除之后(T5)。
+- 最小侵入:0.0.63 不改任何现有 `sy_*`(改现有文件即违反冻结)。不做包装层(`sy_open` 等同名包装会与现有定义冲突,换名包装等于再造一套 fd 面)。接入只发生在冻结集之外的上层:`np_exec`(本节 (2))对 PROC 与两个管道 fd 成对登记;`cx/stream` 的 reader/writer 开闭(`rw.cx`,10.6 句柄合同)可在 0.0.65 的 R2 接入。现有 `sy_*` 自身接入排到冻结解除之后(T5)。
 - 因此本版计数不准的范围(据实,以下开闭全部不经过登记点):
   - fd 开:`sy_open` `cx/sys/fs.cx:57`、`sy_open_new` :84、`sy_open_read` :90、`sy_dup` `cx/sys/fd.cx:32`、`sy_dup2` :36、`sy_pipe` `cx/sys/proc.cx:171`、`sy_socketpair` `cx/sys/posix.cx:79`、`sy_dir_open` `cx/sys/posix.cx:258`、`sy_sock_open` `cx/sys/netraw.cx:168`、`sy_sock_accept` :186、`sy_tcp_listen` `cx/sys/net.cx:32`、`sy_tcp_accept` :57、`sy_tcp_dial` :202、`sy_tcp_listen_at` :501、`sy_tcp_accept_from` :511、`sy_udp_bind` :657、`sy_unix_listen` :699、`sy_unix_connect` :716、`sy_fork_session` 的两根管道 `cx/sys/proc.cx:140-141`、`sy_proc_spawn` 交回的父端 `cx/sys/proc.cx:334`。
   - fd 闭:`sy_close` `cx/sys/fs.cx:249`、`sy_dir_close` `cx/sys/posix.cx:319`、`sy_proc_close` `cx/sys/proc.cx:395`;另外 cx/sys 内除这三个名字所在行之外还有 60 处裸 `close(`(grep 计数,未逐处归类)。
@@ -1357,7 +1357,7 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 - 僵尸回收:`sy_proc_spawn` 成功之后的每一条出口都先 `sy_proc_wait`(无时限的阻塞 `syp_reap`,`proc.cx:388`)再 `sy_proc_close`(:395);spawn 失败时 L0 已关管道并回收(`proc.cx:305-309`、:324-329)。
 - 已知边界:子进程退出但孙进程握着管道写端时,无时限调用会一直等 EOF(与 Rust `Command::output` 同);`setsid` 脱组的后代不在组杀范围,本接口无 residue 出参,不调 `sy_kill_tree`(`cx/sys/process.cx:149`),写进发布说明。
 - osx/win:np_exec 全部经 `sy_*` 写成,自身不写平台 `#if`(架构规则);表 126 现写三目标 `impl` 且 win 写 PeekNamedPipe 轮询,与此设计不符,落地时改为 lnx `impl`、osx/win `unverified`,L0 在该目标返回的具名拒绝原样上传。`cx/sys/refusals.cx` 属冻结文件不能加行,有名拒绝登记缺口与发布说明 0.0.62 已知缺口 (25) 同类。`sy_proc_spawn`/`sy_poll` 在 osx/win 的真实行为本节未核,UNVERIFIED。
-- 与 np_run 的关系:不能复用 np_run 的函数体,理由三条:无 cap;扩容失败直接 `exit(1)`(`ext/sysx/process.cx:19`);入参与结果是 `np_result` 加 Python 风格 why 文案(:27-44、:120-127)。可复用的是 L0:`sy_proc_spawn`/`sy_proc_kill`/`sy_proc_try_wait`/`sy_proc_wait`/`sy_proc_close`(`proc.cx:293-403`),np_exec 新写的只有轮询循环。反向收编(np_run 改成 np_exec 的薄封装)本版不做:np_run 现有三份(`cx/sys/process.cx:48` 属冻结且与 `ext/sysx/process.cx:48` 经 `diff -q` 同字节,`tools/cxlib/netpack.cx:789` 第三份),且其超时走 `sy_kill_tree` 给 residue(:113-115),合同不同;排 0.0.64。
+- 与 np_run 的关系:不能复用 np_run 的函数体,理由三条:无 cap;扩容失败直接 `exit(1)`(`ext/sysx/process.cx:19`);入参与结果是 `np_result` 加 Python 风格 why 文案(:27-44、:120-127)。可复用的是 L0:`sy_proc_spawn`/`sy_proc_kill`/`sy_proc_try_wait`/`sy_proc_wait`/`sy_proc_close`(`proc.cx:293-403`),np_exec 新写的只有轮询循环。反向收编(np_run 改成 np_exec 的薄封装)本版不做:np_run 现有三份(`cx/sys/process.cx:48` 属冻结且与 `ext/sysx/process.cx:48` 经 `diff -q` 同字节,`tools/cxlib/netpack.cx:789` 第三份),且其超时走 `sy_kill_tree` 给 residue(:113-115),合同不同;排 0.0.65。
 - 放哪个包:决策为新文件 `ext/sysx/exec.cx`(模块 `exec`),不建 `ext/procx` 目录。依据:`ext/procx` 不存在;表里 `ext.procx` 是逻辑包名,np_run 行 124 已是「现在 ext.sysx」的先例;`build/tlib-packages.tsv:15` 的 ext.sysx 以整目录 `ext/sysx` 入包且已依赖 `cx.sys;cx.os;cx.mem`,新文件自动入包。tlib 影响:ext.sysx 版本 0.1.2 升一档并重算内容哈希、`build/layer-api/ext.sysx.tsv` 加一行、`build/iface-hash.tsv` 对应行变、批次 `tlib-ext-sysx`(`tests/batches.tsv:963`)须重跑;新建包则要多一行包表、一个 layer-api 文件与一个 tlib 批次,本版不值。`cx/sys/reslive.cx` 归哪个包(cx.sys 0.1.10 按文件清单入包,`tlib-packages.tsv:10`)须在包表文件清单加一项并升版。
 
 (3) 内存安全
@@ -1376,7 +1376,7 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 | T2 | `np_exec`;检查含:正常捕获两路字节相等、err 为 0 并入 out、超 cap 返回 `-EMSGSIZE` 且该路长度恰为 cap、超时 `timed_out=1` 且总耗时小于时限加 1 秒、忽略 TERM 的子进程被 KILL 回收、不存在的程序 `-ENOENT`、`in_fd` 为 PIPE `-EINVAL`、每例前后 `/proc/self/fd` 条目数相等且无僵尸 | `ext/sysx/exec.cx`(新)、`tools/check-ext-procx-exec.cx`(新) | 库包源类;`ext/` 不在源身份目录集(本文 :235,本次未重核) | `sh ./unisacc.com tools/check-ext-procx-exec.cx`:rc=0,`failed=0`,断言不少于 12 项,单次运行 60 秒内 |
 | T3 | 登记:两个检查入批次(`tools/register.cx`);std-surface 行 449、126 `new -> exists`,目标列按实跑改(lnx `impl`,osx/win `unverified`),补 `sy_res_note` 行;layer-api 重算(cx.sys、ext.sysx);iface-hash;tlib-packages 两包升版;pkg-gaps 40、41 改 CLOSED | `tests/batches.tsv`、`tests/coverage.tsv`、`build/std-surface.tsv`、`build/layer-api/cx.sys.tsv`、`build/layer-api/ext.sysx.tsv`、`build/iface-hash.tsv`、`build/tlib-packages.tsv`、`build/pkg-gaps.tsv`(共享表用 `tools/commit-own.cx --keyed`) | 表与生成物,随 T1/T2 同候选 | `grep -c '	new	' build/std-surface.tsv` 由 2 变 0;`sh ./unisacc.com tools/check-std-surface-v2.cx`、`tools/check-layer-api.cx`、`tools/check-iface-hash.cx`、`tools/check-tlib-frozen.cx` 各 rc=0;`sh ./unisacc.com tools/ratchets.cx` 输出 `ok=13 fail=0` |
 | T4 | 新产品装后复验与 osx/win 证据:已装产品实编两新文件;CI 上两检查在 osx/win 的结果如实回填表列 | 只读加 std-surface 两行目标列 | 否 | `sh ./unisacc.com tools/affected.cx --files cx/sys/reslive.cx ext/sysx/exec.cx --run` rc=0;osx/win 无证据则保留 `unverified` |
-| T5 | 冻结解除后:现有 `sy_*` 开闭接入 `sy_res_note`(本节 (1) 清单),np_run 三份收编为 np_exec 薄封装 | `cx/sys/fs.cx`、`fd.cx`、`proc.cx`、`mem.cx`、`posix.cx`、`net.cx`、`netraw.cx`;`ext/sysx/process.cx` | 是,需冻结解除流程,不进 0.0.63 | 0.0.64 开工前另拆 |
+| T5 | 冻结解除后:现有 `sy_*` 开闭接入 `sy_res_note`(本节 (1) 清单),np_run 三份收编为 np_exec 薄封装 | `cx/sys/fs.cx`、`fd.cx`、`proc.cx`、`mem.cx`、`posix.cx`、`net.cx`、`netraw.cx`;`ext/sysx/process.cx` | 是,需冻结解除流程,不进 0.0.63 | 0.0.65 开工前另拆 |
 
 - 新名占用已核:`git log --all --oneline -- tools/check-sys-reslive.cx tools/check-ext-procx-exec.cx cx/sys/reslive.cx ext/sysx/exec.cx` 无输出,四个名字均未被用过。
 - 未核项:`tools/check-std-surface*.cx` 是否校验包名列与文件目录一致(若校验,行 126 的 `ext.procx` 须按 np_run 行 124 的先例处理);cx.sys 新文件对 `tools/check-cx-layers.cx` 五条断言的影响;`sy_res_note` 作为新导出是否触发 `tests/coreapi.cx` 棘轮。T1/T3 开工先跑对应检查定值。
@@ -1507,10 +1507,10 @@ cx 现在能在编译(规划、扫描)期保证的:(1) 模块私有符号不被�
 | 号 | 增量 | 取自 | 类别与版本 | 最小验证实验 |
 |---|---|---|---|---|
 | M1 | unsafe 边界显式化与审计表:dock 模块即 cx 的 unsafe 区;建 `build/dock-audit.tsv`(模块、dock 种类、裸调用符号数、审计人、理由),dock 模块数与裸调用数只降不升 | Rust unsafe 区块 | 非产品输入的工具与表;立即 | `sh ./unisacc.com tools/dock-map.cx` 的模块数与表行数相等(现 89 docked,其中 module=1 的 84;依据 `build/dock-audit.tsv` 与 `tools/check-dock-audit.cx`) |
-| M2 | 拥有者标注 pragma:`#pragma unisa owns sym`(返回值由调用方拥有、须交给指定释放函数),先只进接口表列与文档,由 lint 检查「标注了的返回值在同函数内被释放、转移或返回」这一条流不敏感规则 | Rust 所有权、`ref-rust.md` 第 6 节(9) | 表与 lint 为非产品输入(0.0.62 可做);pragma 进规划器属 cxmod 三源,0.0.64 之后;CXIF v1 字段属 CX-W-8 | 对 `cx/mem` 的 `mg_take` 调用点跑 lint,漏放点数入表 |
+| M2 | 拥有者标注 pragma:`#pragma unisa owns sym`(返回值由调用方拥有、须交给指定释放函数),先只进接口表列与文档,由 lint 检查「标注了的返回值在同函数内被释放、转移或返回」这一条流不敏感规则 | Rust 所有权、`ref-rust.md` 第 6 节(9) | 表与 lint 为非产品输入(0.0.62 可做);pragma 进规划器属 cxmod 三源,0.0.65 之后;CXIF v1 字段属 CX-W-8 | 对 `cx/mem` 的 `mg_take` 调用点跑 lint,漏放点数入表 |
 | M3 | 句柄代际号推广:`cm_*` 的世代检查模式推广到 `sy_*` 返回的 fd、进程、套接字句柄的库面包装(关闭后使用得到确定的 `-EBADF` 而不是命中被复用的号) | Python/Node 的「已关闭即确定错误」、Rust OwnedFd | 运行库头(新增文件,不改冻结的 cx/sys 既有文件);0.0.62 候选或其后 | 新增 check:关闭后读写 10 类调用全部返回 `-EBADF` |
 | M4 | arena 作用域:`mem.arena`(现有 `ar_new`/`ar_alloc`/`ar_drop`)增加成对的 enter/leave 标记检查(leave 时回滚并使其间句柄世代失效),替代逐块释放 | Rust thread::scope 的「括住生命周期」 | 运行库头(cx/mem,非冻结);0.0.62 候选或其后 | `sh ./unisacc.com cx/check_memory.cx` 新增作用域外使用被拒的断言 |
 | M5 | 带长度字符串视图作为库面:以 `ms_slice` 为准,`tx_*` 新增接口一律取(指针,长度)或切片,不新增以 NUL 结尾为唯一边界的接口;不加语法 | Rust &str、Node Buffer | 表规则为非产品输入(立即);新接口属运行库头 | `build/std-surface.tsv` 新增行中无长度参数的指针形参数为 0(lint) |
-| M6 | 编译期可证明性质的扩面只走规划器的结构性拒绝(如「标注为独占的句柄不得出现在两个模块的静态存储里」),不做流敏感借用检查 | Rust 借用检查的可负担子集 | cxmod 三源;不早于 0.0.65,先出设计 | 设计稿每条性质配一个被拒的最小 `.cx` |
+| M6 | 编译期可证明性质的扩面只走规划器的结构性拒绝(如「标注为独占的句柄不得出现在两个模块的静态存储里」),不做流敏感借用检查 | Rust 借用检查的可负担子集 | cxmod 三源;不早于 0.0.67,先出设计 | 设计稿每条性质配一个被拒的最小 `.cx` |
 
 不取:垃圾回收与引用计数运行时(单文件 APE 与 no-libc 下要自带运行时,且改变 C/ASM 内存合同:零写占槽、覆盖前扩容);流敏感借用检查与生命周期标注(需要新语法或属性,宿主 C99 编译器无法忽略后仍同义,且检查器要在三源各实现一遍);把 `cx/owned.cx` 扩成通用所有权系统(CX-O-7 冻结)。

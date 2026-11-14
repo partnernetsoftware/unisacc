@@ -77,7 +77,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 (2) 0.0.62 缺口 (2):std-surface 仍有 2 行 new(sy_res_live、np_exec);本版未重算,UNVERIFIED。
 (3) 0.0.62 缺口 (3)(4)(sy_unix_connect 越过截止时间;sy_tcp_accept_from 对 unix 监听返回 -EAFNOSUPPORT):补丁草稿在 patches-0.0.63 的 sx 补丁,对 HEAD 62be4139f3 仅 `git apply --check` 通过;未入库即视为仍开,UNVERIFIED。
 (4) 0.0.62 缺口 (5)(6)(7)(8):poll 后阻塞调用不保证截止时间、EINTR 上抛、netmsg salen 为负、sy_sig_taken 非原子,均为读码推断,未修。
-(5) 0.0.62 缺口 (9):cxm_checkcalls 误拒短名函数指针调用,已复现,既有缺陷;修复补丁(checkcalls)排 0.0.64,本版不含。
+(5) 0.0.62 缺口 (9):cxm_checkcalls 误拒短名函数指针调用,已复现,既有缺陷;修复补丁(checkcalls)排 0.0.65,本版不含。
 (6) 0.0.62 缺口 (10)(12):cx 模块软链被当两个模块等问题,以及 osx/win 的 -ENOSYS 点未全进 exec/facts/refusals.tsv,未修。
 (7) 0.0.62 缺口 (11):-c 对象路线无最终产物复用,已由本版 N15 处理,但限定见卖点 (3)(键含 -o)。artifact_hit 戳丢失的提交未二分,不影响本条结论。
 (8) 0.0.62 缺口 (13)(14)(15)(16):arm64 msghdr 布局未实跑;osx/win 无主机实跑证据;osx cache-manager 自产件在 macOS 上的运行与签名未验证;wt-gate-probe 为 PLANNED。本版未新增证据。
@@ -95,4 +95,4 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 (1) 卖点 (1) 中 E3TRIM3 数字取自 speed-baseline.tsv 末两行,"跑后"目录项数与淘汰行为以冻结提交重测为准。
 (2) 卖点 (3) 的修复后 7/0/0 只在 prd_mempalace.md,未入 speed-baseline.tsv,冻结后装新产品重测并入表。
 (3) 卖点 (4) 的 F26 全仓归属结果待填;grep 命中的工具与 release 表文件不在本文件处理范围。
-(4) 0.0.62 缺口 (3)(4)(9) 的补丁是否入 0.0.63 或 0.0.64,以冻结时 main 为准。
+(4) 0.0.62 缺口 (3)(4)(9) 的补丁是否入 0.0.63 或 0.0.65,以冻结时 main 为准。
