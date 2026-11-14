@@ -98,7 +98,7 @@ function gitViolation(a: string[]): string | null {
   return null;
 }
 
-function check(cmd: string, cwd: string): string | null {
+function check(cmd: string, cwd: string, depth = 0): string | null {
   const s = stripBodies(cmd);
   const hasCd = /(^|[;&|(\s])(cd|pushd)\s/.test(s);
   let cur = cwd || REPO;
@@ -140,21 +140,31 @@ function check(cmd: string, cwd: string): string | null {
     const args = w.slice(k + 1);
     const fileArgs = () => args.filter((a) => !a.startsWith("-") && a !== "");
     if (first === "sed" && args.some((a) => /^-[A-Za-z]*i|^--in-place/.test(a)) ) {
-      const f = fileArgs();
-      if (f.some((a) => inRepo(a, cwd, hasCd))) return "sed -i 改仓内文件";
+      let f = fileArgs();
+      const ef = args.flatMap((a, i) => (/^-[A-Za-z]*[ef]$/.test(a) ? [args[i + 1]] : []));
+      if (ef.length) f = f.filter((a) => !ef.includes(a)); else f = f.slice(1); // 脚本不是文件
+      if (f.some((a) => inRepo(a, cur, false))) return "sed -i 改仓内文件";
     }
     if (first === "perl" && args.some((a) => /^-[A-Za-z]*i/.test(a))) {
-      if (fileArgs().some((a) => inRepo(a, cwd, hasCd))) return "perl -i 改仓内文件";
+      if (fileArgs().some((a) => inRepo(a, cur, false))) return "perl -i 改仓内文件";
     }
     if ((first === "awk" || first === "gawk") && /-i\s+inplace/.test(args.join(" "))) {
-      if (fileArgs().some((a) => inRepo(a, cwd, hasCd))) return "awk -i inplace 改仓内文件";
+      if (fileArgs().some((a) => inRepo(a, cur, false))) return "awk -i inplace 改仓内文件";
     }
+    if (["ex", "ed", "vi", "vim", "nvim"].includes(first) && fileArgs().some((a) => inRepo(a, cur, false))) return `${first} 改仓内文件`;
     if (first === "tee") {
-      if (fileArgs().some((a) => inRepo(a, cwd, hasCd))) return "tee 写仓内文件";
+      if (fileArgs().some((a) => inRepo(a, cur, false))) return "tee 写仓内文件";
     }
     for (const m of t.matchAll(/(?:^|[^<>&0-9])(?:\d?>>?|&>>?)\s*([^\s;&|<>()]+)/g)) {
       if (m[1].startsWith("&")) continue;
-      if (inRepo(m[1], cwd, hasCd) || isRepoOut(m[1], cur)) return `重定向写仓内文件 ${m[1]}`;
+      if (inRepo(m[1], cur, false) || isRepoOut(m[1], cur)) return `重定向写仓内文件 ${m[1]}`;
+    }
+  }
+  // sh -c '...' / bash -c "...":对引号内正文递归检查一次(深度 1,避免无限递归)
+  if (depth < 1) {
+    for (const m of cmd.matchAll(/\b(?:ba|z|da)?sh\s+-[a-z]*c\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g)) {
+      const r = check(m[1] ?? m[2] ?? "", cur, depth + 1);
+      if (r) return `sh -c 内 ${r}`;
     }
   }
   // python -c / node -e 内联写文件:看原始命令;仅当出现 open(...,'w'|'a') 且未提及 out/ 或 /tmp 时拦
