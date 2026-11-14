@@ -1235,7 +1235,7 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
 /* Existing --objects API accepts at most 256 keys; checkpoints remain per key.
    Always re-enter chain-step on resume: it verifies provenance and completed
    object bytes before adopting them. --until truncates the batch, not coverage. */
-static int fp_pending_limit(const char *root) {
+static int fp_pending_limit(const char *root, long *warm_ms) {
     char path[4400],line[256];long values[4];int row=0;
     const char *names[]={"budget_ms","cold_key_ms","warm_key_ms","pending_keys"};
     if(cx_fmt(path,sizeof path,"%s/build/g2-budget.tsv",root))die("budget path",root);
@@ -1249,6 +1249,7 @@ static int fp_pending_limit(const char *root) {
         if(strcmp(p,"\n")||n<1)die("budget number",path);values[row++]=n;
     }
     if(ferror(f)||fclose(f)||row!=4||values[0]!=55000||values[1]>=values[0]||values[3]!=1+(values[0]-values[1]-1)/values[2])die("REFUSE derived budget",path);
+    *warm_ms=values[2];
     return values[3];
 }
 static void fp_call(const char *root,const char *rev,const char *snap,const char *pkg,
@@ -1280,7 +1281,7 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
                      const char *gen1,const char *fp,const char *helper,
                      const char *target,const char *phase,const char *keys,int resume){
     if(!keys){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,0,resume);return;}
-    int limit=fp_pending_limit(root),pending=0,used=0;char batch[12288],path[4400],slug[80],first[160];size_t sn=0;
+    long warm_ms;int budget=fp_pending_limit(root,&warm_ms),limit=1,canary=1,pending=0,used=0;char batch[12288],path[4400],slug[80],first[160];size_t sn=0;
     const char *end=strchr(keys,',');int len=end?(int)(end-keys):(int)strlen(keys);
     if(cx_fmt(first,sizeof first,"%.*s",len,keys))die("first key",keys);
     /* Recover any in-flight key and validate the complete phase seal once,
@@ -1295,7 +1296,13 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
         const char *e=strchr(p,',');len=e?(int)(e-p):(int)strlen(p);char needle[160];
         if(len<1||cx_fmt(needle,sizeof needle,"\n%.*s\t",len,p))die("batch key",p);
         if(!strstr(steps,needle)){
-            if(pending==limit||pending==256){fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);used=0;pending=0;}
+            if(pending==limit||pending==256){
+                fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);
+                /* The first pending key probes cache warmth after the isolated first key.
+                   A slow canary keeps the rest of this lane at one key per call. */
+                if(canary){limit=fp_last_ms>=0&&fp_last_ms<=warm_ms*2?budget:1;canary=0;}
+                used=0;pending=0;
+            }
             int z=snprintf(batch+used,sizeof batch-used,"%s%.*s",pending?",":"",len,p);
             if(z<0||z>=sizeof batch-used)die("batch buffer",p);used+=z;pending++;
         }

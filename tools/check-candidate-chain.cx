@@ -563,12 +563,23 @@ int main(int argc, char **argv) {
         for (int g = 2; g <= 3; g++) {
             if (cx_fmt(dir, sizeof dir, "%s/g%d", fp, g) || sy_mkdir(dir, 0755)) return 2;
         }
+        /* The real closure path pins entry-build source even with a fake constructor. */
+        if(cx_fmt(dir,sizeof dir,"%s/tools",td)||sy_mkdir(dir,0755)||
+           cx_fmt(dir,sizeof dir,"%s/tools/entry-build.cx",td))return 2;
+        size_t entry_n=0;char *entry=cx_read("tools/entry-build.cx",&entry_n);
+        if(!entry||cx_write(dir,entry,entry_n))return 2;free(entry);
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g2-batch-objects-until");
         size_t zn; char *z = cx_read(trace, &zn);
         const char *first = z ? find_sub(z, "--objects\t") : 0;
         int calls=0,bounded=1;for(const char *p=first;p;p=find_sub(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;calls++;}
-        ck(first&&bounded&&calls==2+(cf_root_count()-1+limit-1)/limit+(3-1+limit-1)/limit&&!has(z,"--object\t")&&!has(z,"--link-only"),"g2-measured-batches-full-roots-and-closures");
+        ck(first&&bounded&&calls==4+(cf_root_count()-2+limit-1)/limit+(3-2+limit-1)/limit&&!has(z,"--object\t")&&!has(z,"--link-only"),"g2-measured-batches-full-roots-and-closures");
+        const char *second=first?find_sub(first+1,"--objects\t"):0;
+        const char *third=second?find_sub(second+1,"--objects\t"):0;
+        const char *second_end=second?strchr(second+10,'\t'):0;
+        const char *third_end=third?strchr(third+10,'\t'):0;
+        ck(second_end&&!memchr(second+10,',',second_end-second-10),"g2-after-cold-first-key-canary-is-single");
+        ck(third_end&&memchr(third+10,',',third_end-third-10),"g2-warm-canary-restores-two-key-batches");
         int covered = 0;
         for (int i = 0; i < cf_root_count(); i++) {
             char key[96];
@@ -599,6 +610,23 @@ int main(int argc, char **argv) {
         int closure_seen=0;bounded=1;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;}
         for(int i=0;i<257;i++){char key[48];if(cx_fmt(key,sizeof key,"m%d.o",i))return 2;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10,*end=strchr(q,'\t');for(const char *at=q;end&&at<end;){const char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==strlen(key)&&!memcmp(at,key,e-at)){closure_seen++;break;}at=e+1;}}}
         ck(z&&bounded&&closure_seen==257&&has(z,"--objects\tm256.o\t")&&!has(z,"--link-only"),"dynamic-257-closures-measured-budget-full-coverage");free(z);
+        /* A private budget makes a 30 ms launcher colder than twice warm_key_ms (2 ms).
+           Exercise the real scheduler, without a 48 second production cold build. */
+        char slow[8192];
+        const char *cold_budget="budget_ms\t55000\ncold_key_ms\t54998\nwarm_key_ms\t1\npending_keys\t2\n";
+        if(cx_fmt(slow,sizeof slow,"#!/bin/sh\nsleep 0.03\n%s",script)||cx_write(fake,slow,strlen(slow))||
+           cx_write(budget,cold_budget,strlen(cold_budget))||cx_fmt(dir,sizeof dir,"%s/g2/lnx-x86_64/.chain-steps",fp)||
+           cx_write(dir,"",0)||cx_write(trace,"",0)||sy_setenv("BATCH_CLOSURES","3",1))return 2;
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1",argv[3],toolpath,td,td,td,fp))return 2;
+        int cold_rc=sh(cmd,out,sizeof out),single=1,cold_calls=0;
+        z=cx_read(trace,&zn);
+        for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){
+            const char *e=strchr(p+10,'\t');
+            if(!e||memchr(p+10,',',e-p-10))single=0;
+            cold_calls++;
+        }
+        ck(cold_rc==0&&single&&cold_calls==cf_root_count()+3,"g2-cold-canary-keeps-all-remaining-root-keys-single");
+        free(z);
         printf("G2G3_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }
@@ -1000,6 +1028,14 @@ int main(int argc, char **argv) {
       if (cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER=x '%s' %s", native_tool, pre)) { ck(0, "fmt"); return 1; }
       sh(cmd, out, sizeof out);
       ck(!has(out, "REFUSE chain-env"), "chain-env-helper-only-passes"); }
+    { char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
+      /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */
+      if(sy_realpath("unisacc.com",product,sizeof product)<0||sy_realpath("tools/check-candidate-chain.cx",self,sizeof self)<0||
+         cx_fmt(launcher,sizeof launcher,"%s/canary-launcher.sh",argv[1])||
+         cx_fmt(body,sizeof body,"#!/bin/sh\nshift 2\nexec '%s' \"$@\"\n",native_tool)||cx_write(launcher,body,strlen(body))||
+         cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-split '%s' '%s' 2>&1",product,self,argv[1],launcher))return 2;
+      int rc=sh(cmd,out,sizeof out);sy_printf("%s",out);
+      ck(rc==0&&has(out,"G2G3_SPLIT\tfailed=0"),"g2g3-canary-regression-fixture"); }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
