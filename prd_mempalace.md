@@ -269,6 +269,20 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 - nn 下一步(2026-11-14 设计,未实现;全文与候选表 K1 至 K9、实验 X1 至 X7 在 prd_cx.md 5.2):决定 (1) e3 与 lower 的库份走 5.1 的预制与缓存,不动网;网侧只投 prune 与 e2,因为预制落地后基准程序剩余推理约 345 ms(拼算)里 prune 102 加 e2 146 占 72%;(2) prune 先做网内提前回退(K1 甲,输出不变,上界 102 ms,实得待 X2),取址根裁剪(K2)排其后;驱动里先扫 callr 再跳过 prune 的做法违反"差异写成模型步",否决;elf 换回逻辑(上界 47 ms)与学习意义上的量化蒸馏不做;(3) 0.0.64 nn 侧只取数与设计不进产品输入,0.0.65 的 nn 候选只含 prune 一类(模型与网类),不与 netraw 同候选,整链未降到 2400 s 以内则顺延 0.0.66;改网候选发布时须重生成预制清单。依据:A12 分相、M1、E1 至 E3;`RR_TIME` inference 行无步数字段(`cx/runtime/routetime.cx:90`),缩网收益目前只有上界。今可开工:X3、X4、X5、X7(不取耗时);X1、X2、X6 为速度取数,等整链结束。回滚:未动产品,无需回滚。
 - 0.0.63 优化候选 E3TRIM(2026-11-14 定因,N1 的 3881 次探测已查清):扫描者是 `cx/runtime/modelcache.cx:239` 的 mc_trim(预算修剪,默认 1 GiB,`UNISACC_E3CACHE_MAX_BYTES` 可调,:72),由 :301 的 mc_cache_publish 在每次成功发布后无条件调用;每个合名条目做 lstat(:274) 加 mc_complete 的 open/fstat/read 8 字节/close(:163-173)。触发条件是"每次发布",不是超阈值:新源首次运行发布 2 次(`src/runcache.cx:405`,E3 结果与 `.host`),空目录冷态发布 8 次(另 6 个 mc-);重复运行不发布,不扫。实测(xfs,load1 4.6 至 5.1,n=3 中位,假 uc- 项):条目 0/2000/4000/16000 时首次 515.6/573.9/649.9/962.9 ms,重复 8.1/8.2/8.2/8.8 ms,斜率约 28 微秒每条目每次首次运行(每次扫描约 14);冷态 590/779/1048/2316 ms。现目录 1938 项、1.1G(已顶到预算,条目数由预算除以均值约 550 KB 决定,属今日重负载下的稳态而非失控堆积),折合每次首次运行约 54 ms,与 M5 残差约 58 ms 相当。判定:预算强制是有意设计(:236-238 注明 O(N)),实现成每次发布全量扫描是可优化点,不是正确性缺陷;但只限字节不限条数,小条目多时条数无界。修法按收益排:(1) 一个进程只修剪一次,放在最后一次发布之后;(2) 降频,目录内记总量账或按写入累计量触发,未近上限不扫;(3) 扫描只 lstat,不逐项 open/read(校验留给命中路径与真正要删的候选);(4) 加条数上限。类别:驱动与运行缓存类(同 L1/L2/L4 的 modelcache.cx),随 0.0.63,不进 0.0.62 的库包与运行库类。未做:未改源码,未测修后数值,未在真实大条目目录上复测;该缓存目录未清理,清理归发布后大扫除。证据入口 prd_cx.md 第 5 节首次与重复之差分相行 E3TRIM 附注。回滚:未动产品,无需回滚。补丁草稿已备(两遍扫描:第一遍只 lstat 求大小上界,不超预算即跳过 mc_complete 的 open/read,超预算再按原样校验淘汰,语义不变),路径 `$CLAUDE_JOB_DIR/tmp/e3trim.patch.txt`;副本内 modelcache-budget lru/concurrent 断言 15/11 failed=0;4000 项改前改后首次运行耗时副本实测无差(约 185-190 ms 对 180-190 ms),因已装产品未用副本源码重建,数字不能证明收益,待 0.0.63 重建后实测。
 
+0.0.63 补丁清单(未应用,2026-11-14 17:30 核;全部在 `git archive HEAD`(544376fde7)副本里 `git apply --check -p1`,仓库未动;补丁均未入仓,归集在仓外 `~/.cache/unisacc/patches-0.0.63/`,集成者须把该目录加入发布后大扫除 `tools/sweep-plan.cx` 的 KEEP 名单(本条不改代码);sha256 前 16 位见表末):
+
+| 补丁 | 产品输入类别 | 单独 apply --check | 同候选 | 依赖与顺序 | 验收命令 | 需新产品验证 |
+|---|---|---|---|---|---|---|
+| e3trim | 63A 驱动与运行缓存(cx/runtime/modelcache.cx) | 通过 | 可,与 n15 同类 | 无;与 n15 不相交 | modelcache-budget lru/concurrent(副本 15/11 failed=0);重建后 4000 项目录首次运行耗时 | 收益数值未测,须新产品重建后实测 |
+| n15 | 63A 驱动与运行缓存(src/drive.cx、cx/runtime/runexec.cx) | 通过 | 可 | 无;N15-c 恢复 phase-timing-stamps 断言另做 | 第二次 -c inference 0 行且对象同字节;phase-timing-stamps artifact_hit 0 然后 1 | 是(对象复用命中) |
+| sx | 库包源(ext/net/unix.cx、tcp.cx 加两个 check) | 通过 | 可,独立库包类 | 无;只含 (1)(2),sigwatch 原子修法未做 | check-ext-net-unix 24、check-ext-net-tcp 69 PASS | 否(源级已绿);ext 网络类按库包类验 |
+| t6 | cxmod 三源(cx/cx0/plan.cx、src/cxmod.c、exec/facts/limits.tsv、check-cxmod-tri) | 通过 | 可,与 checkcalls 同类、与 63A 异类 | 先于 t7;改 plan.cx:75 的 CXM_MAXU | tools/check-cxmod-tri.cx;cx0-extract --check --all 两行 EXACT | 是(拒绝面与上限变动) |
+| t7 | cxmod 三源(plan.cx 与 cx/cx0/proj 全部投影、projection.tsv、cx0-extract) | 通过 | 同 t6 | 对 HEAD 单独通过,但叠在 t6 之后 apply 失败(plan.cx:75 冲突,两者都改 CXM_MAXU 邻行);须先 t6 再把 t7 对 t6 后树重基,或反之 | tools/cx0-extract.cx -- --check --all EXACT | 是 |
+| checkcalls | cxmod 三源(plan.cx、cx/compiler/cxmod.cx、src/cxmod.c) | 通过 | 可,与 t6 同类 | 不依赖 t5/t6/t7:对 HEAD、t6 后、t7 后、t6 t7 后均能 apply(t7 失败时除外),顺序任意;t5 已入库(4aee1dfb4a) | check-cxmod-tri;函数指针调用夹具 RC=0 且原拒绝例仍拒绝 | 是(cxmod.cx 行为 UNVERIFIED) |
+| r2 | 库包源(cx/stream/rw.cx、pipe.cx、item.cx、cxpack.tsv、build/layer-api/cx.stream.tsv、两 check、xs-conform) | 通过 | 可,独立库包类 | 无 | check-cx-streamown、check-cx-streamapi、tests/stream/xs-conform | 是(layer-api 表与 cxpack 变动,按库包类重算) |
+
+附注:(1) t5.patch.txt(第八份,任务单未列)对当前 HEAD 已失败(plan.cx:121、cxmod.c:70、check-cxmod-tri:143),因 4aee1dfb4a 已入库,判过期,未归集。(2) 同候选只含一类大改:63A(e3trim、n15)、库包源(sx、r2)、cxmod 三源(t6、t7、checkcalls)三类互不混装。(3) sha256 前 16 位:checkcalls 41743816170ce4d1,e3trim 132965437aa104da,n15 ae52bfebb555f3b2,r2 d3a03737762af60a,sx c974c6a936a9587c,t6 b8999922a909afa8,t7 794107da449f752f。
+
 0.0.63 至 0.0.65 任务树更新(fable 第二轮,2026-11-14 15:50;单项 15 分钟内,写域互不相交;"今"=不动产品输入、已装 0.0.61 即可开工;"装后"=等 0.0.62 新产品已装):
 
 | 号 | 版 | 目标 | 写域 | 验收命令 -> 预期值 | 开工 |
