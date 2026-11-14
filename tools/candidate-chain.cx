@@ -2448,7 +2448,12 @@ int main(int argc, char **argv) {
         const char *ih = sy_env("UNISACC_IDENT_HELPER");
         if ((!ih || !*ih) && (cx_fmt(helpa, sizeof helpa, "%s/build/identity-helper", outdir) || fsize(helpa) < 0) && (cx_fmt(helpb, sizeof helpb, "%s/ctx/identity-helper", outdir) || fsize(helpb) < 0))
             die("REFUSE UNISACC_IDENT_HELPER unset and no prebuilt identity-helper in the chain", outdir);
-        if ((!until_phase || tx_eqz(until_phase, "pack")) && (!cm64 || !cmarm)) die("REFUSE pack needs --cache-manager-osx X64 ARM64 (checked at start)", 0);
+        if ((!until_phase || tx_eqz(until_phase, "pack")) && (!cm64 || !cmarm)) {
+            /* No explicit managers: the chain builds them in phase cache-manager, which needs the source in the private src tree. */
+            char csrc[4400];
+            if (cut <= 0 || cx_fmt(csrc, sizeof csrc, "%.*ssrc/tools/cache-retain.cx", cut, outdir) || fsize(csrc) < 0)
+                die("REFUSE pack needs --cache-manager-osx X64 ARM64 (no explicit managers and no in-chain source tools/cache-retain.cx; checked at start)", 0);
+        }
     }
     jobs_segment_out = outdir;
     step_out = outdir;
@@ -2855,6 +2860,30 @@ int main(int argc, char **argv) {
         mark(outdir, "compare", sy_now_ms() - t0);
     } else sy_printf("RESUME\tcompare\n");
 
+    /* In-chain osx cache-manager: two Mach-O built by the chain's product from tools/cache-retain.cx; explicit --cache-manager-osx wins. */
+    recheck_leave(outdir, "cache-manager");
+    chain_memo_off("reached-cache-manager");
+    {
+        static char cmx[4400], cma[4400];
+        if (cm64 && cmarm) sy_printf("RESUME\tcache-manager\texplicit\n");
+        else {
+            if (cx_fmt(cmx, sizeof cmx, "%s/cache-manager/x64", outdir) || cx_fmt(cma, sizeof cma, "%s/cache-manager/arm64", outdir)) die("path", "cache-manager");
+            if (!(resume && ck_done(outdir, "cache-manager") && fsize(cmx) > 0 && fsize(cma) > 0)) {
+                long t0 = sy_now_ms();
+                char cdir[4400], ctool[4400];
+                char *b1[8], *b2[8];
+                if (cx_fmt(cdir, sizeof cdir, "%s/cache-manager", outdir) || cx_fmt(ctool, sizeof ctool, "%s/tools/cache-retain.cx", root)) die("path", "cache-manager");
+                sy_mkdir(cdir, 0755);
+                b1[0] = ctool; b1[1] = (char *)"--"; b1[2] = (char *)"-b"; b1[3] = (char *)"osx/x86_64"; b1[4] = (char *)"-o"; b1[5] = cmx; b1[6] = 0;
+                b2[0] = ctool; b2[1] = (char *)"--"; b2[2] = (char *)"-b"; b2[3] = (char *)"osx/arm64"; b2[4] = (char *)"-o"; b2[5] = cma; b2[6] = 0;
+                if (bound_sh_secs(root, b1, 90)) die("cache-manager x64", cmx);
+                if (bound_sh_secs(root, b2, 90)) die("cache-manager arm64", cma);
+                mark(outdir, "cache-manager", sy_now_ms() - t0);
+            } else sy_printf("RESUME\tcache-manager\n");
+            cm64 = cmx; cmarm = cma;
+        }
+    }
+
     recheck_leave(outdir, "pack");
     chain_memo_off("reached-pack");
     if (!(resume && ck_done(outdir, "pack"))) {
@@ -2862,7 +2891,7 @@ int main(int argc, char **argv) {
         char ape_tool[4400], packed[4400], win64[4400], lnx64[4400], lnxarm[4400], osx64[4400], osxarm[4400], winarm[4400];
         char *v[24];
         int n = 0;
-        if (!cm64 || !cmarm) die("REFUSE pack needs --cache-manager-osx X64 ARM64 (borrowed until in-chain)", 0);
+        if (!cm64 || !cmarm || fsize(cm64) <= 0 || fsize(cmarm) <= 0) die("REFUSE pack needs cache-manager X64 ARM64 (explicit --cache-manager-osx or in-chain cache-manager/x64 and arm64)", 0);
         if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
         if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
         if (pack_slice(win64, sizeof win64, "win-x86_64")) die("path", "w64");
