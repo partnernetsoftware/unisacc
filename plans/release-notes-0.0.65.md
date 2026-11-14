@@ -9,7 +9,8 @@
 - release v0.0.65 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。
 - 公开时间:2026-11-14T18:02:31Z(gh release view 的 publishedAt)。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN),公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
 - 公开后读回:下载 6 件,sha256 与 SHA256SUMS 及本地打包件逐件一致;unisacc.com sha256 同上,装入本机根后 `--version` 输出 unisacc 0.0.65;标签 v0.0.65 与 v0.0.65-src 均指 F;release 为 Latest(手工 gh 命令,未经读回工具)。
-- 速度数字只引 build/speed-baseline.tsv 已有行;装机后的 0.0.65 对 0.0.63 同口径对比尚未测,全部待填,未测不写数。
+- 速度数字只引 build/speed-baseline.tsv 已有行。装机后实测(已装 0.0.65 对 0.0.63,两边同走包装根,ABAB 交错 n=9,load1 约 1.0 至 1.5,提交 7ef6adc1ff):首次启动 678.0 对 683.0 ms、重复启动 11.0 对 11.0 ms、冷编译 edit-span 3215 对 3181 ms、ratchets 5819 对 5812 ms、gencode 8MB sha/sort/memcpy 均在噪声内,无变慢项,也无可声称的提升。
+- 装后门实测:tests/cx-namespace.cx checks=18 failed=0 unverified=0(两条 export 语义断言首次在产品上实测通过);K3 硬模式 assertions=76 failed=0;tools/check-export.cx passed=13 failed=0 unverified=0(0.0.63 上 13 条 UNVERIFIED 已清零)。
 
 ## 是什么
 
@@ -33,7 +34,7 @@ t6t7、checkcalls(cxm_checkcalls 误拒短名函数指针调用的修复,即 0.0
 
 ## 未达项与已知缺口(必须如实写)
 
-(1) first_e2e 500 ms 启动门未过。0.0.63 已装件首次启动 664.9 ms(build/speed-baseline.tsv 2026-11-14 末尾行,ABAB 交错 n=9);0.0.65 装机后的同口径数:待填。本版不宣称启动变化。
+(1) first_e2e 500 ms 启动门未过。0.0.63 已装件首次启动 664.9 ms(build/speed-baseline.tsv 2026-11-14 末尾行,ABAB 交错 n=9);0.0.65 装机后同口径(两边包装根)为 678.0 ms 对 0.0.63 的 683.0 ms,差在噪声内(包装根口径与上行不可直接比)。本版不宣称启动变化。
 (2) 已知编译缺口,未修:已装 0.0.63 编译器对大型二维自动数组报 `not covered: an op outside the first encoder slice`。最小复现在仓外(repro-large-2d-auto-array.cx,入库位置待定)。0.0.65 是否同样复现:UNVERIFIED。
 (3) tests/cx-namespace.cx 新增两条产品语义断言,待装 0.0.65 后实跑:未跑。
 (4) s9 commit 档(主机范围 lnx/x86_64):选中 325 批,309 PASS、12 FAIL、4 UNKNOWN,工具裁决 `S9_VERDICT 4 UNKNOWN reason=tier-commit-not-full`(commit 档按设计不给全批资格),decision.txt STEP 4 记 UNKNOWN,不写 PASS。定性:无产品回归。逐项:
