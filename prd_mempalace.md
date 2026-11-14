@@ -103,7 +103,20 @@
 | F10 | 通配让闭包依赖目录列表,新增一个文件就改变全部通配使用方的计划字节 | prd_cx.md 10.2 P2"代价如实" | 产品层禁用规则先进 cxapis 类棘轮,早于 P2 实现 |
 
 0.0.63 与 0.0.64 任务(都依赖 0.0.62 新产品已装;开工前逐项拆到 15 分钟):
-- 0.0.63:C1 零解码布局设计稿(prd_cx.md 第 5 节,今天可写,依据 A12);C2 UNISACC_CACHE_DIR 与路径无关键(产品输入,验收:两个不同 TMPDIR 下第二次运行命中缓存);C3 mmap 已解码布局实现(验收 `tools/run-startup-bench.cx` first_e2e 500 ms 以下,n=3);C4 整链对象相拆分到整链 2400 s 以内(F9 的门)。
+- 0.0.63(2026-11-14 按 A12 重排;依据与每个杠杆的证据入口在 prd_cx.md 第 5 节 L1 至 L5):零解码上界只有约 49 ms,不再承载 500 ms 门;主杠杆改为运行库闭包结果复用(L1,上界约 379 ms,n=1 且成因为推断)。类别:L1、L2、L4 都落在驱动与运行缓存(`src/runcache.cx`、`src/driveroute.cx`、`cx/runtime/unitcache.cx`、`cx/runtime/modelcache.cx`),与 0.0.62 的库包与运行库类不同类,也不是原定的模型与网类;speed12b 重建 e2 网与跳过 prune 属模型与网类,不得与之同候选。本条与进化路线"0.0.63 唯一大改类为模型装载零解码"冲突,待主调度改那一行。回滚:各项都是纯加速器,撤对应提交即回现状;UNISACC_RUN_CACHE=0 可随时关闭。
+  - 今天可只读取数(不改源,互不相交,各 15 分钟内,结果原位写入 prd_cx.md 第 5 节对应行;新源须每次换内容,否则命中运行缓存):
+    - M1 推理随规模的成因:`UNISACC_RR_TIME=1 sh ./unisacc.com 新源.cx 2>&1 | grep inference`,对 (a) `return 7`、(b) 基准一行 printf、(c) 调一个非 printf 运行库函数,各 n=3 取中位。预期:(a) 合计约 150 ms、(b) 约 530 ms;(c) 若接近 (b) 则 L1 的闭包推断成立,接近 (a) 则推断不成立、L1 须重定。
+    - M2 model 相 49 ms 的构成:同命令 `grep -e modelcache -e 'RR_TIME.model'`,对照加 `UNISACC_RUN_CACHE=0` 的一组,n=3。预期:命中组六行 result=hit 且合计约 49 ms;关缓存组更大,差即真 inflate;读入、校验、建布局三分仍 UNMEASURED 则在 `build/pkg-gaps.tsv` 记缺口。
+    - M3 单单元路有无单元缓存:`UNISACC_RR_TIME=1 sh ./unisacc.com 新源.cx 2>&1 | grep -c unitcache`。本次 n=1 观察为 0 行;预期 n=3 仍为 0,即单单元路未接单元缓存,L1 须新接。
+    - M4 路径无关命中率:同一内容放两个目录各跑一次,读第二次的 `RR_TIME lookup_hit=`。预期现状为 0(键含 cwd 与路径);再设 `UNISACC_E3CACHE=同一目录` 换 TMPDIR 跑,预期 lookup_hit=2(根已可解耦)。
+    - M5 残差约 58 ms 细分:`strace -c -f` 与 `strace -r` 各一次首次运行(只读系统工具),按 exec、读产品件、写缓存、子进程分摊;预期给出四项毫秒数,合计与 58 ms 相差 20% 以内,否则仍记 UNMEASURED。
+  - 实现项(都动产品输入,等 0.0.62 新产品已装;写域互不相交,各项开工前再拆到 15 分钟):
+    - C1 运行库闭包结果复用设计稿,依赖 M1、M3。写域:prd_cx.md 第 5 节 L1 行。验收:行内写明键的全部成分、失效条件、命中与未命中逐字节相同的检查命令。
+    - C2a 缓存根默认值与 `UNISACC_CACHE_DIR`。写域:`cx/runtime/modelcache.cx` 的 `mc_cache_dir`。验收:两个不同 TMPDIR、不设任何缓存变量,同源第二次运行 `RR_TIME lookup_hit=2`;`tools/check-unit-frontcache.cx` failed=0。
+    - C2b 路径无关键,依赖 M4 与 `__FILE__`、诊断、相对 include 的取证。写域:`src/runcache.cx` 的 `rc_hex_sources`。验收:同内容两个目录,第二次 lookup_hit=2 且两次标准输出、标准错误、退出码相同;含 `__FILE__` 的夹具必须仍未命中或输出正确路径。
+    - C3 闭包结果复用实现,依赖 C1。写域:`src/driveroute.cx`、`cx/runtime/unitcache.cx`。验收:`sh ./unisacc.com tools/run-startup-bench.cx` first_e2e 三次中位 500 ms 以下且断言 failed=0;关缓存(UNISACC_RUN_CACHE=0)与开缓存的产物字节相同。若 M1 否定推断,此门改口径并在此写明,不放宽不删。
+    - C3z 零解码 mmap 布局(原 C3,降为次要),与 C2a 同写 `cx/runtime/modelcache.cx` 故串行在其后;另写 `cx/runtime/routestep.cx`。验收:RR_TIME 六流 model 相合计 10 ms 以下(现约 49 ms),命中与未命中同字节。
+    - C4 整链对象相拆分到整链 2400 s 以内(F9 的门),不变。
 - 0.0.64:D0 cxmod 三源归一(2026-11-14 决定:先归一再加语法,依据与拆分见 prd_cx.md 10.5;`cx/compiler/cxmod.cx` 改为 `cx/cx0/plan.cx` 的第二投影,验收 `tools/cx0-extract.cx -- --check --all` 两行 EXACT、`tools/check-cxmod-tri.cx` 末行 gaps=0;其中 T1 至 T4 不动产品输入、今天可开工且互不相交,T5 至 T8 动产品输入、都写 plan.cx、串行、等 0.0.62 新产品已装;回滚:T8 之前产品件仍是手写件,撤 T5 至 T7 的提交即回到现状)-> D1 export(依赖 D0:此后每条新拒绝只改 plan.cx 一处;若 D0 的 T8 未落地则 D1 不开工,不退回手工三处对齐;验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(依赖 D1;正例 1、拒绝 5)-> D3 符号级导入收敛(依赖 D0,与 D1、D2 同写 plan.cx 故串行;`tests/module/check.cx`)-> D4 text.text 物理拆面(依赖 D1 的 export;第二候选,受 F9 门约束)-> D5 层感知前导(不依赖 D0 至 D3;末位,超 2 小时移 0.0.65)。D0 至 D3 同属 cxmod 三源一类、同候选;同写域串行,不并发。
 
 三个可测速度杠杆(数字只取自 build/speed-baseline.tsv 中四个工具的行):
