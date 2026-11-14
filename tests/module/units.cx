@@ -51,5 +51,29 @@ int main(void) {
     i = dv_fwd_splice("lnx/x86_64", 2, sources, &out, &outn, why, sizeof why);
     if (i != 1 || strcmp(why, "forwarding stub") || out || outn) { puts("FAIL\tforwarding-missing-frame"); failed++; }
     else puts("PASS\tforwarding-missing-frame");
+    /* one module file reached through a directory symlink and through its real directory is one module:
+       text identity (no canonical-path callback) refuses it as exported by both, the bound host callback
+       (dv_expand -> cxm_bind_real(hs_cxm_real)) plans it as main + one module. */
+    {
+        char base[64] = "/tmp/module-units-XXXXXX", p[160], q[160], mainp[160]; FILE *f; char *one[1]; int made = 0;
+        if (mkdtemp(base)) {
+            tx_snprintf(p, sizeof p, "%s/real", base); tx_snprintf(q, sizeof q, "%s/link", base);
+            if (!mkdir(p, 0700) && !symlink("real", q)) {
+                tx_snprintf(p, sizeof p, "%s/real/env.cx", base); f = fopen(p, "w");
+                if (f) { fputs("#pragma unisa module env\nint me_same(void){return 3;}\n", f); made = !fclose(f); }
+                tx_snprintf(mainp, sizeof mainp, "%s/main.cx", base); f = made ? fopen(mainp, "w") : 0; made = 0;
+                if (f) { fputs("#pragma unisa use real.env\n#pragma unisa use link.env\nint main(void){return me_same();}\n", f); made = !fclose(f); }
+            }
+        }
+        if (!made) { puts("FAIL\tsymlink-fixture"); failed++; }
+        else {
+            one[0] = mainp; cxm_bind_real(0); cxm_set_funit(0);
+            i = cxm_plan(one, 1);
+            if (!i) { puts("FAIL\tsymlink-text-identity-refused"); failed++; } else puts("PASS\tsymlink-text-identity-refused");
+            sources[0] = mainp; n = 1;
+            i = dv_expand(&n, sources, 0);
+            if (i || n != 2) { printf("FAIL\tsymlink-one-module\trc=%d\tunits=%d\n", i, n); failed++; } else puts("PASS\tsymlink-one-module");
+        }
+    }
     printf("MODULE_UNITS\tfailed=%d\n", failed); return failed ? 1 : 0;
 }
