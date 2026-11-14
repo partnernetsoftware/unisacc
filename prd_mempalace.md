@@ -153,6 +153,7 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 | W4 | tools/status.cx 夹具重审(曾被 sed -i 改) | tools/check-status.cx 及其夹具 | `git log -p` 对照夹具内容,check failed=0 | 15 |
 | W5 | lnx/arm64 netmsg 是否在 CI 作业清单(F15) | 只读,结论写任务表 N14 行 | check-cx-sys-netmsg、check-ext-net-udp 在 candidate-native.yml 的 lnx/arm64 清单内,否则登记 DEFERRED | 10 |
 | W6 | rollback.txt、evidence.tsv 0.0.62 骨架 | $CLAUDE_JOB_DIR/tmp/rel62 下草稿(步 8 才入库) | evidence 八行齐,第 2、4、7、8 行占位 UNKNOWN;rollback 含草稿与公开后两段 | 10 |
+| W6 结果(2026-11-14 已备骨架,未入库) | $CLAUDE_JOB_DIR/tmp/rel62 下 rollback.txt(草稿删除、取消 run、revert X、公开后退草稿并 Latest 回 v0.0.61、删 v0.0.62 与 v0.0.62-src 远端与本地标签、install-ape 装回 0.0.61 sha c4c47ecb)、evidence.tsv(八行全 UNKNOWN,路径占位,第 4 行为 oneshot62F/evidence.tsv,CI 号写 TBD)、decision.txt(由 release-decide --evidence 读骨架生成,rc=0,八步 UNKNOWN,unknown=8 fail=0,NOT_QUALIFIED;命令未跑只写)。rollback 内 candidate commit、run 号、revert 提交号为 TBD,未编造;install-ape 旧件路径假定 ~/.cache/unisacc/ape-0.0.61/unisacc.com,须步 11 前确已复制 | 10 |
 | W7 | 快照根复验一条命令的工具(F13 提前动作,若未造) | tools 下新工具加 check 与批次行(先查 git log --all) | check failed=0;对 2 批 light 夹具出 PASS 行 | 15 |
 
   必须等候选产品:cx-namespace 三拒绝与别名、模块身份(osx-sentinel)、s9 commit 档、同候选 CI、速度基线四工具、check-stdio-buffer 六目标(只能经 CI)、productpkg-dir-identity、全集批次复验。无法在本版清零、只能如实入说明:osx cache-manager 在 macOS 上的运行与签名(无主机)、win 批次、daily 与 release 档 s9、wt-gate-probe。
