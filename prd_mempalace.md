@@ -11,10 +11,10 @@
 
 ## 当前发布与版本
 
-- 已装根:本机已装 0.0.61 前的中间产物(APE sha256 前缀 c55533c7,7022820 B,版本串仍显示 0.0.59,未改版本号;来自 main 03c4d5df9d 的树的私有整链 real4,状态 PREPARED not=PASS,非发布候选)。回退:`sh ./unisacc.com tools/install-ape.cx -- ROOT --rollback --write`,或备份 ROOT/unisacc.com.059(0.0.59,前缀 e43ef368,未入库)。
-- 进行中:0.0.61(合并原 0.0.60 范围,不单独发 0.0.60)。已在 main:qsort introsort、stdout 缓冲(SPEED-17)、safedel 的 chains 根白名单、sy_atspawn、cx.stream/cx.os/cx.sys 一批实现、E2 padding 补丁(directive-scan-byte 的 P3BLANK 行)、链工具修复(entry-build RT_UNIT/RT_EXTERN 按对象键选;whole-front 的 worker 以 RT_UNIT 编译;release-build 暂存目录用 sy_rmdir;tlib kit 缓存命中后置 0755)。
-- 已证实(实测):real4 整链 4829 s 全相位走完并打包(g2 与 g3 candidate sha 逐位相同;-cx-plan 与旧产品同树输出逐字节一致 9428 B)。冷编译 coldcompile 同机同树旧->新(单样本,load1 约 1.2-1.5):ledger-add 9469->6468 ms(-32%),entry-build 18703->13624(-27%),whole-front 16863->12846(-24%),coldcompile 9146->6453(-29%)。冷启动 run-startup-bench first_e2e 684/705/714 ms,对 speed-baseline 的 0.0.59 为 796/815(-14%)。E2 padding 的增量在冷编译上不可见(real4 含 E2 与 g3fix8 无 E2 数值相同,约 6.5 s),此前归给 E2 的 -34% 主要来自别的改动,不要再单算到 E2。装新根后 tsv-lint、tlib-prep-refuse 单跑 BATCH_RUN 均 PASS(FTRIM 类红随新产品消失)。
-- 在跑:无整链在跑。下一步:版本号改 0.0.61(源里版本串)并起最终发布链,然后复验、对比 speed-baseline 并更新它、公开发布、大扫除。
+- 已公开:0.0.61(2026-11-14,Latest;tag v0.0.61 与 v0.0.61-src 均指冻结提交 d4b3bf72f7ae;APE sha256 c4c47ecb97ee70865edaf39d91e29f5b22b6c8efdbcfb81c4482517ffc0224c3,7022820 B)。裁决 NOT_QUALIFIED unknown=1(s9 未跑),CI 六目标原生作业全 success(run 43554326355),发布说明 plans/release-notes-0.0.61.md,撤回办法 release/rollback.txt。
+- 已装根:本机根是 real4 中间产物 c55533c7(版本串 0.0.59,非发布件);要装发布件:下载公开 unisacc.com 后 `tools/install-ape.cx -- ROOT APE SHA256 --write`。备份 ROOT/unisacc.com.059(未入库)。
+- 实测(0.0.61 发布件 vs 0.0.59 基线):first_e2e 675/676/695 ms 对 796/815;冷编译 -24% 到 -32%;数字与样本数见 build/speed-baseline.tsv 与发布说明。整链 4829 s。
+- 公开后大扫除已做:私有构造根只留 log/cxroot.tsv,chains/snap、local-0060、37 个无可执行位的 tlib kit 已清;借用的 osx cache-manager 副本在 ~/.cache/unisacc/borrowed-cm/。
 
 ## 起整链的做法(已验证的配方)
 
@@ -33,20 +33,22 @@
 - 既有红 wt-gate(5/8 断言失败,与退役和 ext.net 无关,干净工作树也红):tools/all-waves.cx 的 wave 在 `-run` 方式下要求自身可执行文件同目录有原生 `run-batch`(`executor-run-batch-required /run-batch`,tools/all-waves.cx:339),check-wt-gate 以 `sh ./unisacc.com tools/all-waves.cx` 起它,不满足。需改 check 的起法或 all-waves 的执行器发现,未做。slice-migration-gen 另有 source-missing cx/compiler/frames.cx(该文件 HEAD 未跟踪)。
 - 仓库根 out/:五个工具已迁到 $TMPDIR;仍写 out/ 的:tools/gen-model-decode-material.cx(依赖 extract-p3-models 要求 ROOT/out)、tools/csih-ape.cx(csih 车道,须由其维护者迁)、tools/chain-run.cx(--out 须在 ROOT/out 之下)。
 
-## 下一动作(按序)
+## 下一动作(0.0.62,fable 规划,主题待项目所有者对三个取舍拍板)
 
-1. real4 出包 -> 装机复验 -> 速度对比 -> 公开发布 0.0.61 -> 缓存与临时目录大扫除(含 ~/.cache/unisacc/tlib/kit 内 31 个无可执行位的旧镜像)。
-2. 整链并发化落地并实测整链墙钟。
-3. 收尾 out/ 写入点。
-4. 核心库包由内往外封装(cx.stream、tlib、S13 复评);速度项:E2 之后的冷启动与生成代码两档新实测。
-5. agentwork/ 归档:分批进行(分类表见提交 b10474a8f0 的说明)。第 1 批已做(devtime 工具与其检查移入 archive/agentwork-retire-2026-11/tools/)。仍有 48 个文件引用 agentwork/:第 2 批已做(patch-queue、unfreeze、state-audit 三个叶子工具与检查已归档,批次/覆盖/编译清单/pins 行已撤),第 3 批 archive-records、aw 检查、cursor-fleet 后 dag,第 4 批起改读写单表的通用工具并定表的去向,最后 git mv agentwork/。每批都要同步撤 tests/tools-compile-sources.tsv 与 prd.md 能力速查行。已知既有红:slice-migration-gen 报 source-missing cx/compiler/frames.cx(该文件 HEAD 未跟踪,与退役无关)。
+主题:库包由内往外,网络栈封口(cx.sys netraw/netpoll -> ext.net 清零 new 行;表中 new 共 16 行已落 14 行后以 build/std-surface.tsv 为准)。cx.stream/tlib 重构排 0.0.63。
+
+1. 主题线:L2 netraw 补六参 sendto/recvfrom 与 IPV6_V6ONLY(fable);L3 UDP/unix/resolve(sonnet);L4 带截止时间五个 TCP 行(fable);L5 cx.sys 三行加 np_exec;L6 osx/win 只交有名 ENOSYS 拒绝加 CI 证据。L1(netpoll/sock)已在 main 并复验 PASS。
+2. 速度线:冷启动 first_e2e 中位 704.9 -> 670 ms 以下;冷编译 entry-build 13624 -> 12300 ms 以下、whole-front 12846 -> 11600 ms 以下;生成代码先重测 1MB sort 再定目标(120 ms 以下为建议值);run-startup-bench、coldcompile、check-bench-gencode、speed-probe 四个工具对 0.0.61 发布件补跑入 speed-baseline。
+3. 发布线(冻结到公开 100 分钟内):R1 实测 g2/g3 并发整链(8d70af5101,预期 4829 s -> 约 3572 s,未实测);R2 拆 g2 对象相(批墙钟 323.6 s,限期 2026-11-30);R3 起链一条命令(根工作树与 REV 不同提交即拒);R4 osx cache-manager 自产(现借用副本在 ~/.cache/unisacc/borrowed-cm/);R5 CI 前后零手工;R6 s9 三档首次跑通。
+4. 基础设施(不入产品输入):I1 wt-gate 修红;I2 slice-migration-gen 定因;I3 agentwork 归档第 3 批起(分类表见提交 b10474a8f0 说明;剩约 45 到 100 个文件引用,口径待对齐);I4 out/ 写入点收尾(gen-model-decode-material、chain-run --out、csih-ape 须由其维护者迁);I5 装发布件后复验 FTRIM 类红与 DEFERRED 批。
+5. 待拍板:(a) SPEED-11 运行库扫描族进 0.0.62(推荐进);(b) 发布门不等 osx/win 的 ext.net 实现(推荐不等);(c) s9 只让 commit 档卡发布、daily/release 档夜跑(推荐)。
 
 ## 记忆宫殿(索引)
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 当前协同 | 本文件;agentwork/ 退役 | 本文件 |
-| 当前发布 | 已装 0.0.59;0.0.61 进行中 | 本文件上节、prd_release.md |
+| 当前发布 | 已公开 0.0.61(Latest);0.0.62 规划中 | 本文件上节、plans/release-notes-0.0.61.md、prd_release.md |
 | 结构总表 | 五层、六片、7 + 1 流、网、执行器、格式、事实表、构造链、测试 | prd.md §3;cx 侧 prd_cx.md |
 | 新入口 | src/unisacc.cx 六层;src/core、src/runtime 指向 cx/ | plans/cx-modules.md、prd.md §5 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | prd.md §7、tests/batches.tsv、tests/coverage.tsv |
