@@ -1,14 +1,14 @@
 # unisacc 0.0.65 -- 发布说明
 
-状态:公开前草稿,公开读回后补记。沿用 plans/release-notes-0.0.63.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
+状态:已公开,公开读回后补记。沿用 plans/release-notes-0.0.63.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
 
 - 冻结提交(REV):b7520b8e81;源标签 v0.0.65-src 指向 F:c43ba16b01dd6ba1e0f6be633c37648f971d62c8;候选表提交(X,仅改 release/candidate.tsv):cb1421d99f382027369e96b10b5d3ea328d2bfdb。整链所用私有提交:de2df6171e。
 - 候选 APE(unisacc.com)sha256:889dfe853837d80b495b3835b9272700384df4b4facfa54e4c27f11bc4291bdb(7091300 字节)。
 - 整链 real8:一次跑通,rc=0,墙钟 3694 s,compare 通过,产物 sha 前缀 2e7ec678aaca5ebf(出自记忆宫殿里程碑记载)。
 - 同候选 CI:candidate-native.yml run 43620762916,completed success,10 个作业全 success,含 6 个平台候选作业。osx 与 win 的证据范围以该 run 作业为准,不扩大解读。
 - release v0.0.65 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。
-- 公开时间:待填(gh release view 的 publishedAt)。release/decision.txt 裁决(公开前,tools/release-decide.cx 实跑):NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN;读回在公开后补)。本版不宣称 QUALIFIED。
-- 公开后读回:待填(6 件 sha256 与 SHA256SUMS 逐件核对、`--version` 输出、标签指向、Latest)。
+- 公开时间:2026-11-14T18:02:31Z(gh release view 的 publishedAt)。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN),公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
+- 公开后读回:下载 6 件,sha256 与 SHA256SUMS 及本地打包件逐件一致;unisacc.com sha256 同上,装入本机根后 `--version` 输出 unisacc 0.0.65;标签 v0.0.65 与 v0.0.65-src 均指 F;release 为 Latest(手工 gh 命令,未经读回工具)。
 - 速度数字只引 build/speed-baseline.tsv 已有行;装机后的 0.0.65 对 0.0.63 同口径对比尚未测,全部待填,未测不写数。
 
 ## 是什么
@@ -68,4 +68,4 @@ daily 与 release 档未跑。0.0.63 s9 失败批次中未修项(release-usage �
 
 (1) 整链产物 sha 前缀 2e7ec678aaca5ebf 与公开件 sha 的关系(公开件为 APE 889dfe85...,两者口径不同,读回时分别核)。
 (2) 装机后补:启动、冷编译、生成代码对 0.0.63 的同口径对比,入 build/speed-baseline.tsv 后再引。
-(3) 公开时间、读回结果(公开后补)。
+(3) 公开时间与读回结果已补(见文首);s9 第 4 步仍为 UNKNOWN。
