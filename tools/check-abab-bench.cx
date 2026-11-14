@@ -1,0 +1,78 @@
+/* check-abab-bench: tools/abab-bench.cx on stable sleep fixtures (n small, light load):
+ * line format, run count, A/B interleave order, diff_pct sign and noisy judgement (--load-max 0 forces 1). */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+
+static int failed = 0, total = 0;
+static void ck(int ok, const char *what) { total++; if (!ok) { failed++; printf("FAIL %s\n", what); } }
+
+/* offset of P in S, -1 when absent */
+static long find(const char *s, const char *p) {
+    long i, j;
+    for (i = 0; s[i]; i++) {
+        for (j = 0; p[j] && s[i + j] == p[j]; j++) ;
+        if (!p[j]) return i;
+    }
+    return -1;
+}
+
+static int has(const char *s, const char *p) { return find(s, p) >= 0; }
+
+/* append S at *AT in DST (cap CAP); nonzero when it does not fit */
+static int put(char *dst, long cap, long *at, const char *s) {
+    long i;
+    for (i = 0; s[i]; i++) { if (*at + 1 >= cap) return 1; dst[(*at)++] = s[i]; }
+    dst[*at] = 0;
+    return 0;
+}
+
+/* runs the bench under a 50 s deadline; its output goes to a spool file read back whole */
+static int run(const char *args, char *out, int cap) {
+    char cmd[1024]; char *av[4]; char *b = 0; long n = 0;
+    sy_spawn_t o; sy_exit_t st;
+    const char *pre = "sh ./unisacc.com tools/abab-bench.cx -- ", *post = " </dev/null >/tmp/abab-check.out 2>&1";
+    long at = 0;
+    if (put(cmd, sizeof cmd, &at, pre) || put(cmd, sizeof cmd, &at, args) || put(cmd, sizeof cmd, &at, post)) return -1;
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    sy_spawn_init(&o); o.argv = av; o.pgroup = -1; o.deadline_ms = 50000;
+    out[0] = 0;
+    if (sy_proc_run(&o, &st)) return -1;
+    if (sy_read_file("/tmp/abab-check.out", &b, &n, cap - 1) == 0 && b) { long k; for (k = 0; k < n; k++) out[k] = b[k]; out[n] = 0; mm_free(b); }
+    return st.timed_out ? -1 : sy_exit_code(&st);
+}
+
+static int count(const char *s, const char *p) {
+    int c = 0; long at = 0, pn = (long)strlen(p), k;
+    while ((k = find(s + at, p)) >= 0) { c++; at += k + pn; }
+    return c;
+}
+
+int main(void) {
+    static char o[16384];
+    int i;
+    char ord[16];
+    run("--n 3 --a 'sleep 0.3' --b 'sleep 0.6' --label fx --load-max 1000", o, sizeof o);
+    ck(count(o, "RUN\t") == 6, "six RUN lines");
+    ck(count(o, "SIDE\tA\t") == 1 && count(o, "SIDE\tB\t") == 1, "two SIDE lines");
+    ck(has(o, "ABAB label=fx n=3 a_med="), "ABAB line prefix");
+    ck(has(o, " b_med=") && has(o, " diff_pct=") && has(o, " a_cv=") && has(o, " b_cv=") && has(o, " noisy="), "ABAB fields");
+    for (i = 0; i < 6; i++) {
+        char pat[16];
+        long k;
+        pat[0] = 'R'; pat[1] = 'U'; pat[2] = 'N'; pat[3] = '\t'; pat[4] = (char)('0' + i); pat[5] = '\t'; pat[6] = 0;
+        k = find(o, pat);
+        ord[i] = k >= 0 ? o[k + (long)strlen(pat)] : '?';
+    }
+    ord[6] = 0;
+    ck(strcmp(ord, "ABABAB") == 0, "interleave order ABABAB");
+    ck(has(o, "diff_pct=8") || has(o, "diff_pct=9") || has(o, "diff_pct=10") || has(o, "diff_pct=11"), "diff_pct about +90..110 for 0.1 vs 0.2 s");
+    ck(has(o, "noisy=0"), "stable fixture with high load-max not noisy");
+    run("--n 2 --a 'sleep 0.05' --b 'sleep 0.05' --label nz --load-max 0", o, sizeof o);
+    ck(has(o, "noisy=1") && has(o, "label=nz n=2"), "load-max 0 forces noisy=1");
+    ck(run("--n 0 --a true --b true", o, sizeof o) == 2, "n=0 refused rc 2");
+    printf("check-abab-bench total=%d failed=%d\n", total, failed);
+    if (!failed) printf("CHECK_ABAB_BENCH\n");
+    return failed ? 1 : 0;
+}
