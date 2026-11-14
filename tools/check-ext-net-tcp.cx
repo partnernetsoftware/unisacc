@@ -4,6 +4,7 @@
    One process: listen queues the connection, so connect then accept runs without fork.
    Accept uses cx.sys sy_sock_accept (sy_tcp_accept has a ms argument and stays new). */
 #pragma unisa use net.tcp
+#pragma unisa use net.unix
 #pragma unisa use net.addr
 #pragma unisa use sys.netraw
 #pragma unisa use sys.fs
@@ -174,6 +175,21 @@ int main(void) {
         /* a deadline already passed on an unroutable address cannot be waited for */
         r = sy_tcp_connect_to(&t, sy_deadline_in(0));
         ck(r == -ETIMEDOUT || r == -ENETUNREACH || r == -EHOSTUNREACH, "connect-to-deadline-passed");
+    }
+    {   /* accept_from with a peer on a unix listener keeps the connection (was -EAFNOSUPPORT and closed it) */
+        sy_addr_t ua, up; char up2[64]; int ul, uc, uk, q;
+        const char *p = "/tmp/nt-acceptfrom-unix.sock";
+        sy_unlink(p);
+        for (q = 0; q < (int)sizeof ua; q++) ((char *)&ua)[q] = 0;
+        ua.family = SY_AF_UNIX;
+        for (q = 0; p[q]; q++) ua.path[q] = p[q];
+        ul = sy_tcp_listen_at(&ua, 4, 0);
+        uc = sy_unix_connect(p, sy_deadline_never());
+        uk = sy_tcp_accept_from(ul, sy_deadline_in(1000), &up);
+        ck(uk >= 0, "accept-from-unix-peer");
+        ck(uk >= 0 && up.family == SY_AF_UNIX, "accept-from-unix-family");
+        ck(sy_recv_until(uc, up2, 4, sy_deadline_in(200)) == -ETIMEDOUT, "accept-from-unix-conn-open");
+        sy_close(uk); sy_close(uc); sy_close(ul); sy_unlink(p);
     }
     printf("EXT_NET_TCP\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;

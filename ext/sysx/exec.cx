@@ -1,0 +1,100 @@
+/* exec.cx -- np_exec: run a child and capture stdout/stderr with a byte bound (build/std-surface.tsv ext.procx).
+ *
+ * Contract (prd_cx.md 10.8):
+ *   int np_exec(const sy_spawn_t *o, mg_buf *out, mg_buf *err, int64_t cap, sy_exit_t *st);
+ *   - out/err are initialized by the caller (mg_init), only appended to, never freed or taken here.
+ *   - err == 0: stderr is merged into out. cap is the per-stream bound on newly appended bytes.
+ *   - 0 and *st filled; a deadline (o->deadline_ms, own clock) gives 0 with st->timed_out = 1
+ *     (SIGTERM, a grace period, then SIGKILL); a stream over cap gives -EMSGSIZE with exactly cap
+ *     bytes appended. Every exit after a successful spawn waits (blocking) before closing the fds.
+ *   - Known edge: a grandchild holding the pipe write end keeps an untimed call waiting for EOF.
+ *   Platform differences stay in the sy_* layer (named refusals); nothing here is conditional. */
+#pragma unisa module exec
+#pragma unisa use sys.proc
+#pragma unisa use sys.poll
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use mem.grow
+
+enum { NPX_TERM = 15, NPX_KILL = 9, NPX_GRACE_MS = 200, NPX_SLICE_MS = 50, NPX_CHUNK = 16384 };
+
+/* Read one chunk from FD into B, counting against *USED/CAP. 1 more to come, 0 at EOF (fd closed, *FD = -1),
+   -EMSGSIZE over cap (exactly cap kept), -errno. */
+static int npx_pump(int *fd, mg_buf *b, int64_t *used, int64_t cap) {
+    unsigned char tmp[NPX_CHUNK];
+    long k = sy_read(*fd, tmp, (long)sizeof tmp);
+    int r;
+    if (k < 0) return (int)k;
+    if (k == 0) { sy_close(*fd); *fd = -1; return 0; }
+    if (*used + k > cap) {
+        long room = (long)(cap - *used);
+        if (room > 0) { r = mg_append(b, tmp, room); if (r != 0) return r; }
+        *used = cap;
+        return -EMSGSIZE;
+    }
+    r = mg_append(b, tmp, k);
+    if (r != 0) return r;
+    *used += k;
+    return 1;
+}
+
+int np_exec(const sy_spawn_t *o, mg_buf *out, mg_buf *err, int64_t cap, sy_exit_t *st) {
+    sy_spawn_t s;
+    sy_child_t c;
+    sy_pollfd_t pf[2];
+    int64_t uo = 0, ue = 0;
+    long end = 0, now;
+    int r, rc = 0, timed = 0, killed = 0, i, n, k;
+    if (!o || !out || !st || cap < 0) return -EINVAL;
+    if (o->in_fd == SY_STDIO_PIPE) return -EINVAL;
+    s = *o;
+    s.out_fd = SY_STDIO_PIPE;
+    if (err) { s.err_fd = SY_STDIO_PIPE; s.flags &= ~SY_SPAWN_ERR_TO_OUT; }
+    else { s.err_fd = SY_STDIO_INHERIT; s.flags |= SY_SPAWN_ERR_TO_OUT; }
+    if (s.pgroup == 0) s.pgroup = -1;
+    s.deadline_ms = 0;
+    r = sy_proc_spawn(&s, &c);
+    if (r != 0) return r;
+    if (o->deadline_ms > 0) end = sy_now_ms() + o->deadline_ms;
+    for (;;) {
+        long left = NPX_SLICE_MS;
+        n = 0;
+        if (c.out_fd >= 0) { pf[n].fd = c.out_fd; pf[n].events = SY_POLLIN; pf[n].revents = 0; n++; }
+        if (c.err_fd >= 0) { pf[n].fd = c.err_fd; pf[n].events = SY_POLLIN; pf[n].revents = 0; n++; }
+        if (n == 0) break;
+        if (end > 0) {
+            now = sy_now_ms();
+            if (now >= end) { timed = 1; break; }
+            if (end - now < left) left = end - now;
+        }
+        k = sy_poll(pf, n, left);
+        if (k < 0) { rc = k; break; }
+        for (i = 0; i < n && rc == 0; i++) {
+            int *fdp;
+            if (!pf[i].revents) continue;
+            fdp = (pf[i].fd == c.out_fd) ? &c.out_fd : &c.err_fd;
+            r = (fdp == &c.out_fd) ? npx_pump(fdp, out, &uo, cap) : npx_pump(fdp, err, &ue, cap);
+            if (r < 0) rc = r;
+        }
+        if (rc != 0) break;
+    }
+    if (rc != 0 || timed) {
+        /* TERM, drain during the grace period (a full pipe would block the child), then KILL. */
+        long g;
+        unsigned char sink[NPX_CHUNK];
+        sy_proc_kill(&c, NPX_TERM);
+        for (g = 0; g < NPX_GRACE_MS; g += 5) {
+            if (sy_proc_try_wait(&c, st) == 1) { killed = 2; break; }
+            if (c.out_fd >= 0 && sy_readable(c.out_fd, 0) == 1 && sy_read(c.out_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.out_fd); c.out_fd = -1; }
+            if (c.err_fd >= 0 && sy_readable(c.err_fd, 0) == 1 && sy_read(c.err_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.err_fd); c.err_fd = -1; }
+            sy_sleep_ms(5);
+        }
+        if (killed != 2) { sy_proc_kill(&c, NPX_KILL); r = sy_proc_wait(&c, st); if (r != 0 && rc == 0) rc = r; }
+    } else {
+        r = sy_proc_wait(&c, st);
+        if (r != 0) rc = r;
+    }
+    sy_proc_close(&c);
+    if (timed && rc == 0) { st->timed_out = 1; return 0; }
+    return rc;
+}

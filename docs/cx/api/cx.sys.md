@@ -62,4 +62,5 @@
 | sy_tcsetpgrp | int sy_tcsetpgrp(int fd, int pgrp); | POSIX tcsetpgrp | -errno | impl | impl | refuse:ENOSYS cap=pgroup | exists | 现在 sys.posix | pre | 0.1.0 | none | - |
 | sy_err_kind | int sy_err_kind(int e); | Rust io::Error::kind; Python OSError | none | impl | impl | impl | exists | 返回 SY_K_* 类,未知码归 OTHER | pre | 0.1.0 | none | cx-l0-sys-new |
 | sy_cap | int sy_cap(int cap); | QuickJS 能力表 | 0/1 | impl | impl | impl | exists | 能力查询,未知能力为 0 | pre | 0.1.0 | none | cx-l0-sys-new |
-| sy_res_live | long sy_res_live(int kind); | Python ResourceWarning 计数 | -EINVAL | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | new | 句柄型资源存活数 | pre | 0.1.0 | none | - |
+| sy_res_live | long sy_res_live(int kind); | Python ResourceWarning 计数 | -EINVAL | impl | unverified | unverified | exists | cx/sys/reslive.cx;经 sy_res_note 登记且未注销的句柄数,不是进程级总数;kind 为 SY_RES_FD=1、SY_RES_PROC=2、SY_RES_MAP=3,其余 -EINVAL;不线程安全 | pre | 0.1.0 | none | - |
+| sy_res_note | long sy_res_note(int kind, int delta); | Python ResourceWarning 计数 | -EINVAL | impl | unverified | unverified | exists | cx/sys/reslive.cx;登记点,delta 只许 +1/-1,返回新计数;未知 kind、其它 delta、减到负数返回 -EINVAL 且值不变 | pre | 0.1.0 | none | - |

@@ -7,7 +7,7 @@
 
 ```
 kind	id	parent	function	size_bytes	size_note	sha256	aux	cmd	verified_rev	cold_s	hot_s	last_s
-layer	L0	-	L0 sy/mem/text	249966	source-bytes	-	dirs=cx/sys,cx/mem,cx/text	git ls-files -z -- DIR && stat bytes	9cdbf210ab825c8f598ba9f7f7c10b447d929b13	UNMEASURED	UNMEASURED	UNMEASURED
+layer	L0	-	L0 sy/mem/text	251450	source-bytes	-	dirs=cx/sys,cx/mem,cx/text	git ls-files -z -- DIR && stat bytes	9cdbf210ab825c8f598ba9f7f7c10b447d929b13	UNMEASURED	UNMEASURED	UNMEASURED
 layer	L1	-	L1 core/driver/runtime/compiler	864167	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	90507688c825aae20bba57706368ef005bf4f4a2	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.host	src	host launch	16383	source-bytes	-	file=src/host.cx	stat src/host.cx	44182b4059d51191cb021241c666b521bf34b2ad	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.packmodel	src	pack model	4925	source-bytes	-	file=src/packmodel.cx	stat src/packmodel.cx	1bf6f7e8c3af3205f5bf3127972689e7dc3f0710	UNMEASURED	UNMEASURED	UNMEASURED

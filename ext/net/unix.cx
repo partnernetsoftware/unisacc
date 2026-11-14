@@ -1,6 +1,8 @@
 #pragma unisa module unix
 #pragma unisa dock
 #pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.netnb
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 /* ext.net unix-domain stream sockets on cx.sys netraw (build/std-surface.tsv ext.net):
@@ -31,17 +33,31 @@ int sy_unix_listen(const char *path, int backlog) {
     return fd;
 }
 
-/* Local connect completes at once or fails; D is checked before the call (passed -> -ETIMEDOUT). */
+/* Non-blocking connect; a full backlog (-EAGAIN) is retried until D (then -ETIMEDOUT); blocking mode is
+   restored on success. */
 int sy_unix_connect(const char *path, sy_deadline_t d) {
     unsigned char sa[SY_SA_MAX];
     int n, fd, r;
+    long left;
     if (!path) return -EINVAL;
     n = sy_sa_unix(sa, (int)sizeof sa, path);
     if (n < 0) return n;
     if (sy_deadline_passed(&d)) return -ETIMEDOUT;
     fd = syu_open();
     if (fd < 0) return fd;
-    r = sy_sock_connect(fd, sa, n);
+    r = sy_snb_set_nonblock(fd, 1);
+    if (r < 0) { sy_close(fd); return r; }
+    /* A full listen backlog answers -EAGAIN on a non-blocking unix socket: retry in 10 ms steps
+       (sy_sock_poll(-1, 0, ms) is a sleep) until D. */
+    for (;;) {
+        r = sy_sock_connect(fd, sa, n);
+        if (r != -EAGAIN) break;
+        if (sy_deadline_passed(&d)) { r = -ETIMEDOUT; break; }
+        left = sy_deadline_left(&d);
+        r = sy_sock_poll(-1, 0, left < 0 || left > 10 ? 10 : left);
+        if (r < 0) break;
+    }
+    if (r == 0) r = sy_snb_set_nonblock(fd, 0);
     if (r < 0) { sy_close(fd); return r; }
     return fd;
 }

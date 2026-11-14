@@ -5,9 +5,12 @@
  *   fd-borrow       xs_reader_fd / xs_writer_fd (own 0): closing the handle leaves the fd open
  *   fd-own          xs_pipe_pair (own 1): closing both handles closes both fds
  *   reentry         a stage calling xs_run / xs_add / xs_close on its own running pipeline gets 4
- *   item-set        xs_item_set adopts the block (0); on a bad argument it returns 4 and frees data
- * KNOWN-RISK-DOUBLE-FREE-ON-ERROR: xs_item_set(...) == 4 frees the caller's data block, so a
- *   caller that treats 4 as "ownership not transferred" frees it twice. Pinned here as documented.
+ *   item-set        xs_item_set adopts the block (0); on a bad argument it returns 4, the item is
+ *                   empty and the caller keeps ownership of data (R2: it is not freed)
+ * OWNERSHIP-ON-ERROR: the former KNOWN-RISK-DOUBLE-FREE-ON-ERROR assertion (a fresh mm_alloc(64)
+ *   after the failed call returned the same block, i.e. data was freed) is replaced by the same-strength
+ *   inverse: after xs_item_set(...) == 4 the block is still live (a fresh mm_alloc(64) is a different
+ *   block, and the caller's own mm_free of it is the only free).
  * UNMEASURED: gen wraparound (gen is 22 bits for readers/writers, 24 for pipelines; a wrap needs
  *   4194304 reopens, not run here), so acceptance of a stale handle after a wrap is not tested.
  * Prints PASS/FAIL per assertion and a last line CX_STREAMOWN ok=N failed=0; rc 1 on any FAIL. */
@@ -128,10 +131,12 @@ static void t_item(void) {
     p = (unsigned char *)mm_alloc(64);
     ck(xs_item_set(&it, 0, p, 5, 64) == 4 && it.buf.data == 0 && it.shape == 0, "item.bad-shape-returns-4-item-empty");
     q = (unsigned char *)mm_alloc(64);
-    ck(q == p, "item.KNOWN-RISK-DOUBLE-FREE-ON-ERROR-data-freed-on-4");
+    ck(q && q != p, "item.OWNERSHIP-ON-ERROR-data-not-freed-on-4");
     mm_free(q);
+    mm_free(p);
     p = (unsigned char *)mm_alloc(64);
     ck(xs_item_set(&it, 1, p, 70, 64) == 4 && it.buf.data == 0, "item.len-over-cap-returns-4");
+    mm_free(p);
     ck(xs_item_set(&it, 1, 0, 0, 0) == 0 && it.shape == 1, "item.null-empty-ok");
     xs_item_drop(&it);
     ck(xs_item_set(&it, 1, 0, 0, 8) == 4, "item.null-with-cap-returns-4");

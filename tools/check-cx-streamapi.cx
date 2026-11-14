@@ -13,7 +13,7 @@
  *   writer-fd    buffering, flush, ordering, close flushes, -ENOSPC breaks the writer
  *   copy         limit < 0, exact limit, one over the limit, bad handles
  *   pipe-pair    owned fds (the reader sees the end after the writer closes), no fd leak
- *   deadline     refused with -ENOSYS on a live handle, -EBADF on a bad one
+ *   deadline     xs_reader_deadline / xs_writer_deadline are not public (R2); handles unaffected
  *   receipt64    same fields as xs_receipt, -EBADF, -EINVAL
  * Prints PASS/FAIL per assertion and a last line CX_STREAMAPI ok=N failed=0 only when
  * nothing failed; rc 1 on any FAIL. */
@@ -22,6 +22,8 @@
 #pragma unisa use stream.rw
 #pragma unisa use mem.grow
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -399,16 +401,21 @@ static void t_deadline(void) {
     int r, w;
     mg_init(&d);
     ck(xs_reader_mem(&r, (const unsigned char *)"abc", 3) == 0 && xs_writer_buf(&w, &d, -1) == 0, "deadline.open");
-    ck(xs_reader_deadline(r, sy_deadline_in(1000)) == -ENOSYS, "deadline.reader-refused-enosys");
-    ck(xs_reader_deadline(r, sy_deadline_never()) == -ENOSYS, "deadline.reader-never-refused-enosys");
-    ck(xs_read(r, buf, 8) == 3 && eq(buf, "abc", 3), "deadline.reader-unchanged-after-refusal");
-    ck(xs_writer_deadline(w, sy_deadline_in(1000)) == -ENOSYS, "deadline.writer-refused-enosys");
-    ck(xs_writer_deadline(w, sy_deadline_never()) == -ENOSYS, "deadline.writer-never-refused-enosys");
-    ck(xs_write(w, "xy", 2) == 0 && d.len == 2, "deadline.writer-unchanged-after-refusal");
-    ck(xs_reader_deadline(w, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(r, sy_deadline_in(1)) == -EBADF, "deadline.wrong-kind-ebadf");
-    ck(xs_reader_deadline(0, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(0, sy_deadline_in(1)) == -EBADF, "deadline.zero-handle-ebadf");
+    /* R2 (K5): the refused -ENOSYS entries left the public surface. Each former assertion is
+       replaced by a same-strength statement about what remains: the names are not public,
+       and the handles behave as if they never existed. */
+    {
+        unsigned char *tab = 0;
+        int64_t tn = 0;
+        ck(sy_read_file("cx/stream/cxpack.tsv", &tab, &tn, 65536) == 0 && tn > 0, "deadline.pack-readable");
+        ck(tab && !tx_contains((const char *)tab, tn, "xs_reader_deadline", 18), "deadline.reader-not-public");
+        ck(tab && !tx_contains((const char *)tab, tn, "xs_writer_deadline", 18), "deadline.writer-not-public");
+        ck(tab && tx_contains((const char *)tab, tn, "xs_reader_fd", 12), "deadline.neighbour-still-public");
+        if (tab) mm_free(tab);
+    }
+    ck(xs_read(r, buf, 8) == 3 && eq(buf, "abc", 3), "deadline.reader-unaffected");
+    ck(xs_write(w, "xy", 2) == 0 && d.len == 2, "deadline.writer-unaffected");
     ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "deadline.close");
-    ck(xs_reader_deadline(r, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(w, sy_deadline_in(1)) == -EBADF, "deadline.closed-ebadf");
     mg_free(&d);
 }
 
