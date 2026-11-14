@@ -105,6 +105,7 @@
 0.0.63 与 0.0.64 任务(都依赖 0.0.62 新产品已装;开工前逐项拆到 15 分钟):
 - 0.0.63(2026-11-14 按 A12 重排;依据与每个杠杆的证据入口在 prd_cx.md 第 5 节 L1 至 L5):零解码上界只有约 49 ms,不再承载 500 ms 门;主杠杆改为运行库闭包结果复用(L1,上界约 379 ms,n=1 且成因为推断)。类别:L1、L2、L4 都落在驱动与运行缓存(`src/runcache.cx`、`src/driveroute.cx`、`cx/runtime/unitcache.cx`、`cx/runtime/modelcache.cx`),与 0.0.62 的库包与运行库类不同类,也不是原定的模型与网类;speed12b 重建 e2 网与跳过 prune 属模型与网类,不得与之同候选。本条与进化路线"0.0.63 唯一大改类为模型装载零解码"冲突,待主调度改那一行。回滚:各项都是纯加速器,撤对应提交即回现状;UNISACC_RUN_CACHE=0 可随时关闭。
   - 今天可只读取数(不改源,互不相交,各 15 分钟内,结果原位写入 prd_cx.md 第 5 节对应行;新源须每次换内容,否则命中运行缓存):
+    - 状态(2026-11-14 取数,load1 10.1 至 12.0,非安静机,绝对值偏高;M1 以每次换源内容注释而非换 TMPDIR 避免整程序命中,换 TMPDIR 会令 modelcache 全 miss 污染 model 相;M1 与 M3 已取,M2 部分,M4 部分,M5 未取):M1 部分成立,表与结论见 prd_cx.md L1 行;M2 命中组 model 相 50 至 54 ms、关缓存组 106 至 193 ms(n=2),读入/校验/建布局三分未取;M3 n=3 全为 0 行;M4 同内容两目录 lookup_hit=0,E3CACHE 一组未取;M5 未取(缺 strace 分摊时间)。
     - M1 推理随规模的成因:`UNISACC_RR_TIME=1 sh ./unisacc.com 新源.cx 2>&1 | grep inference`,对 (a) `return 7`、(b) 基准一行 printf、(c) 调一个非 printf 运行库函数,各 n=3 取中位。预期:(a) 合计约 150 ms、(b) 约 530 ms;(c) 若接近 (b) 则 L1 的闭包推断成立,接近 (a) 则推断不成立、L1 须重定。
     - M2 model 相 49 ms 的构成:同命令 `grep -e modelcache -e 'RR_TIME.model'`,对照加 `UNISACC_RUN_CACHE=0` 的一组,n=3。预期:命中组六行 result=hit 且合计约 49 ms;关缓存组更大,差即真 inflate;读入、校验、建布局三分仍 UNMEASURED 则在 `build/pkg-gaps.tsv` 记缺口。
     - M3 单单元路有无单元缓存:`UNISACC_RR_TIME=1 sh ./unisacc.com 新源.cx 2>&1 | grep -c unitcache`。本次 n=1 观察为 0 行;预期 n=3 仍为 0,即单单元路未接单元缓存,L1 须新接。
