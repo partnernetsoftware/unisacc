@@ -4,6 +4,7 @@
 #pragma unisa use sys.netraw
 #pragma unisa use sys.netpoll
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 /* ext.net blocking TCP subset on cx.sys netraw (build/std-surface.tsv ext.net): sy_tcp_listen,
    sy_tcp_listen_at, sy_tcp_port, sy_tcp_connect, sy_send, sy_send_all, sy_recv.  No libc, no #if.
    Not here (still new): anything with a deadline or ms (accept, connect_to, dial, wait_port), DNS.
@@ -94,6 +95,61 @@ int sy_send_all(int fd, const void *buf, long n) {
     if (!buf || n < 0) return -EINVAL;
     while (done < n) {
         r = sy_sock_send(fd, p + done, n - done);
+        if (r < 0) return (int)r;
+        if (r == 0) return -EIO;
+        done += r;
+    }
+    return 0;
+}
+
+/* Deadline variants (poll, then one call).  A passed deadline still takes what is already ready. */
+static long syt_wait(int fd, int ev, sy_deadline_t d) {
+    long r;
+    if (fd < 0) return -EBADF;   /* poll ignores a negative fd */
+    r = sy_sock_poll(fd, ev, sy_deadline_passed(&d) ? 0 : sy_deadline_left(&d));
+    if (r < 0) return r;
+    return r == 0 ? -ETIMEDOUT : 0;
+}
+
+/* Accept one connection on listener FD, waiting until D; PEER (may be 0) gets the remote address. */
+int sy_tcp_accept_from(int fd, sy_deadline_t d, sy_addr_t *peer) {
+    unsigned char sa[SY_SA_MAX];
+    int len = (int)sizeof sa, c, f, i;
+    long r = syt_wait(fd, SY_POLLIN, d);
+    if (r < 0) return (int)r;
+    c = sy_sock_accept(fd, sa, &len);
+    if (c < 0) return c;
+    if (peer) {
+        f = sy_sa_family(sa, len);
+        peer->family = f == sy_sock_num(SY_SN_AF_INET6) ? SY_AF_INET6 : SY_AF_INET4;
+        peer->port = sy_sa_port(sa, len);
+        peer->scope = 0; peer->path[0] = 0;
+        for (i = 0; i < 16; i++) peer->ip[i] = 0;
+        if (sy_sa_ip(sa, len, peer->ip, 16) < 0) { sy_close(c); return -EAFNOSUPPORT; }
+    }
+    return c;
+}
+
+/* Receive up to N bytes, waiting until D.  Count, 0 for peer close, -ETIMEDOUT, or -errno. */
+long sy_recv_until(int fd, void *buf, long n, sy_deadline_t d) {
+    long r;
+    if (!buf || n < 0) return -EINVAL;
+    r = syt_wait(fd, SY_POLLIN, d);
+    if (r < 0) return r;
+    return sy_sock_recv(fd, buf, n);
+}
+
+/* Send all N bytes or fail; each chunk waits for writability until D (chunks are small so a send
+   after POLLOUT does not block for long). */
+int sy_send_all_until(int fd, const void *buf, long n, sy_deadline_t d) {
+    const unsigned char *p = (const unsigned char *)buf;
+    long done = 0, r, c;
+    if (!buf || n < 0) return -EINVAL;
+    while (done < n) {
+        r = syt_wait(fd, SY_POLLOUT, d);
+        if (r < 0) return (int)r;
+        c = n - done > 2048 ? 2048 : n - done;
+        r = sy_sock_send(fd, p + done, c);
         if (r < 0) return (int)r;
         if (r == 0) return -EIO;
         done += r;

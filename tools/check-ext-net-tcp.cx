@@ -7,6 +7,7 @@
 #pragma unisa use net.addr
 #pragma unisa use sys.netraw
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 static int nok, nfail;
 static void ck(int c, const char *name) {
     printf("%s\tnettcp.%s\n", c ? "PASS" : "FAIL", name);
@@ -116,6 +117,25 @@ int main(void) {
     ckv(sy_send_all(as, "ok", 2), 0, "listen-at-send");
     ckv(sy_recv(cs, buf, sizeof buf), 2, "listen-at-recv");
     sy_close(as); sy_close(cs); sy_close(ls);
+
+    /* deadline variants */
+    sy_addr_loopback(&a, SY_AF_INET4, 0);
+    ls = sy_tcp_listen_at(&a, 4, SY_LISTEN_REUSEADDR);
+    port = sy_tcp_port(ls);
+    ckv(sy_tcp_accept_from(ls, sy_deadline_in(30), 0), -ETIMEDOUT, "accept-from-timeout");
+    ckv(sy_tcp_accept_from(-1, sy_deadline_in(30), 0), -EBADF, "accept-from-badfd");
+    cs = sy_tcp_connect(port);
+    as = sy_tcp_accept_from(ls, sy_deadline_in(1000), &a);
+    ck(as >= 0, "accept-from-fd");
+    ck(a.family == SY_AF_INET4 && a.ip[0] == 127 && a.port > 0, "accept-from-peer");
+    ckv(sy_recv_until(as, buf, sizeof buf, sy_deadline_in(30)), -ETIMEDOUT, "recv-until-timeout");
+    ckv(sy_send_all_until(cs, "abc", 3, sy_deadline_in(1000)), 0, "send-until-3");
+    ckv(sy_recv_until(as, buf, sizeof buf, sy_deadline_in(1000)), 3, "recv-until-3");
+    ckv(sy_recv_until(-1, buf, sizeof buf, sy_deadline_in(30)), -EBADF, "recv-until-badfd");
+    ckv(sy_send_all_until(-1, "x", 1, sy_deadline_in(30)), -EBADF, "send-until-badfd");
+    sy_close(cs);
+    ckv(sy_recv_until(as, buf, sizeof buf, sy_deadline_in(1000)), 0, "recv-until-eof");
+    sy_close(as); sy_close(ls);
 
     printf("EXT_NET_TCP\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
