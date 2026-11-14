@@ -203,6 +203,7 @@
 - R6-W8 通配禁用棘轮前置(F10):先 `git log --all --oneline -- tools/NAME` 查名;写域 tools/ 新检查加 check-*.cx 与批次行(`tools/commit-own.cx --keyed`);验收 check failed=0,在 src 夹具副本放一处 `use sys.*` 即报拒。
 - R6-W9 cx-own 基线(R6-L3):写域 build/ 下一行基线(表由 `tools/table-index.cx` 所列现成表中选,不新开表);验收 `sh ./unisacc.com tools/cx-own.cx` 对 cx/ 与 src/ 的三类报告条数各一个数入表。
 - R6-W10 verify-candidate 改 .cx(原 W6)与装后验收清单化(原 W5):写域 tools/verify-candidate.cx、tools/check-verify-candidate.cx 与批次行;验收 对已装 0.0.62 出 V0 至 V4 各一行,check failed=0。
+- R6-W11 状态事实表化最小切片 SFT-S0(设计与实测在 prd_cx.md 12 节;只读对拍,不改本文,冻结期可做):先 `git log --all --oneline -- tools/state-gen.cx build/state-unverified.tsv` 查名;写域 build/state-unverified.tsv(新表,列 id version kind state subject missing action write_domain owner evidence updated)、tools/state-gen.cx、tools/check-state-gen.cx 与批次行(`tools/commit-own.cx --keyed`);验收 `sh ./unisacc.com tools/state-gen.cx -- --emit unverified --against prd_mempalace.md` 末行 `STATE_GEN rows=N missing=0 extra=0`(N 等于当时"仍未验证"小节的条目数,2026-11-14 实测 16),`tools/check-state-gen.cx` failed=0;改由表生成本节(--write)排在 0.0.63 公开之后,不早于 0.0.65 窗口。
 - R6-R 风险(新增,编号接 F26 之后由集成者并入风险表):(1) 拆分链首条即发布链:0.0.65 的链带 S2 加 S4,预演若漏掉两道 16 路争用下的超时,失败落在对象相(约 1356 s 之后),对策是 R6-C4 第 (5) 步必须实跑且不过即退回未拆分;(2) 500 ms 门的余量靠上界相加:(b)(c) 都是上界,0.0.68 很可能仍差几十毫秒,对策是 R6-W5 先证 E2、E3 以便 (d) 可用;(3) chain-real6 被大扫除提前删则 F11 预演无件可用,对策是 R6-H63 的 KEEP;(4) D1b 与通配顺延后 cxmod 类要第二版,三源补丁再重基一次,对策是 0.0.65 冻结前把 E10 做到可判(绿就带)。
 
 ## 下一动作(0.0.63,fable 第五轮规划 2026-11-14;0.0.62 已公开,其规划折叠在本节后半仅作证据)
