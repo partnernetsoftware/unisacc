@@ -143,6 +143,8 @@ static int cxm_fail(void) { cxm_m("\n"); cxm_say(2, cxm_msg, cxm_nmsg); return 1
 /* the out buffer: generated text */
 static int cxm_o(char *s) { while (*s && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = *s; cxm_nout = cxm_nout + 1; s = s + 1; } return 0; }
 static int cxm_on2(char *s, int n) { int k; k = 0; while (k < n && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = s[k]; cxm_nout = cxm_nout + 1; k = k + 1; } return 0; }
+/* decimal v into the out buffer (cxm_md writes the message buffer, not generated text) */
+static int cxm_od(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = '0'; n = 1; } while (v > 0) { d[n] = '0' + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; cxm_on2(d + n, 1); } return 0; }
 /* like cxm_on2 over s[b..e), but every identifier token equal to SYM is written as
    ALIAS (both NUL-terminated; ALIAS empty means drop the rename).  Whitespace is
    copied as-is, so the rename is token-exact and never touches a longer name. */
@@ -205,7 +207,7 @@ static char *cxm_keep(char *p) {
     cxm_npool = cxm_npool + n + 1;
     return cxm_pool + at;
 }
-static int cxm_find(char *path) { int u; u = 0; if (cxm_on == 0) return 0 - 1; while (u < cxm_n) { if (cxm_eq(cxm_arg[u], path)) return u; u = u + 1; } return 0 - 1; }
+static int cxm_find(char *path) { int u; u = 0; if (cxm_on == 0) return 0 - 1; while (u < cxm_n) { if (cxm_eq(cxm_arg[u], path) || (cxm_bodysrc[u][0] && cxm_eq(cxm_bodysrc[u], path))) return u; u = u + 1; } return 0 - 1; }
 static int cxm_flag(char *a) {
     if (cxm_eq(a, "-cx-plan")) { cxm_wantplan = 1; return 1; }
     if (cxm_eq(a, "-cx-interface")) { cxm_wantif = 1; return 1; }
@@ -948,10 +950,23 @@ static int cxm_text(int u, int full, char *sym, char *alias) {
     cxm_o("#endif\n");
     return cxm_nout >= CXM_IFMAX;
 }
+static int cxm_outsha(char *hex) {
+    cx_sha256_hex(cxm_out, (size_t)cxm_nout, hex);
+    return 0;
+}
+/* finish a renamed-body path at out[p]: <sha16 of cxm_out>.cx, so the name follows the bytes
+   (no fixed name shared between concurrent invocations) */
+static int cxm_bodyname(char *out, int p) {
+    char hex[65]; int k;
+    cxm_outsha(hex);
+    k = 0; while (k < 16) { out[p] = hex[k]; p = p + 1; k = k + 1; }
+    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
+    return 0;
+}
 /* write cxm_out to $TMPDIR/ua-cxif-<sha16>.h unless that file already holds these bytes */
 static int cxm_put(char *path) {
     char hex[65]; char *td; int p; int k; int n;
-    cx_sha256_hex(cxm_out, (size_t)cxm_nout, hex);
+    cxm_outsha(hex);
     td = cx0_directory; /* explicit per-invocation interface resource */
     p = cxm_cpy(path, td, CXM_PATHW - 40);
     k = cxm_cpy(path + p, "/ua-cxif-", 12); p = p + k;
@@ -973,8 +988,6 @@ static int cxm_rewrite(int v, char *sym, char *alias, char *out) {
     td = cx0_directory;
     p = cxm_cpy(out, td, CXM_PATHW - 40);
     k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
-    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
-    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
     cxm_nout = 0;
     if (sym && sym[0]) {
         if (alias && alias[0]) { cxm_o("#define "); cxm_o(sym); cxm_o(" "); cxm_o(alias); cxm_o("\n"); }
@@ -983,12 +996,13 @@ static int cxm_rewrite(int v, char *sym, char *alias, char *out) {
         k = 0;
         while (k < cxm_nsym) {
             if (cxm_symu[k] == v && cxm_symk[k] == 0 && !cxm_eq(cxm_sym[k], sym)) {
-                cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n");
+                cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_od(k); cxm_o("\n");
             }
             k = k + 1;
         }
     }
     cxm_on2(cxm_cmp, n);
+    cxm_bodyname(out, p);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
 }
@@ -999,8 +1013,6 @@ static int cxm_rewrite_multi(int u, int v, char *out) {
     td = cx0_directory;
     p = cxm_cpy(out, td, CXM_PATHW - 40);
     k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
-    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
-    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
     cxm_nout = 0;
     k = 0;
     while (k < cxm_nuse[u]) {
@@ -1019,11 +1031,12 @@ static int cxm_rewrite_multi(int u, int v, char *out) {
                 if (cxm_use[u][z] == v && cxm_usym[u][z][0] && cxm_eq(cxm_usym[u][z], cxm_sym[k])) { imported = 1; break; }
                 z = z + 1;
             }
-            if (!imported) { cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n"); }
+            if (!imported) { cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_od(k); cxm_o("\n"); }
         }
         k = k + 1;
     }
     cxm_on2(cxm_cmp, n);
+    cxm_bodyname(out, p);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
 }
