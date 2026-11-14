@@ -122,7 +122,21 @@ function check(cmd: string, cwd: string, depth = 0): string | null {
       if (hit) return `${first} 写仓库根 out/ (${hit}):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp`;
     }
     // 项目所有者 2026-11-13:只在 ~/repos/unisacc 里工作;禁止克隆/worktree/外部工作目录/out/ 下建子树
-    if (first === "git" && (w[k + 1] === "clone" || (w[k + 1] === "worktree" && w[k + 2] === "add")))
+    // 2026-11-14 版本分支试行:目标在 <仓库根>/.claude/worktrees/v0.0.数字 才放行
+    const wtOk = (): boolean => {
+      const rest = w.slice(k + 3);
+      let tgt = "";
+      for (let i = 0; i < rest.length; i++) {
+        if (/^-[bB]$/.test(rest[i])) { i++; continue; }
+        if (rest[i].startsWith("-")) continue;
+        tgt = rest[i]; break;
+      }
+      tgt = tgt.replace(/^["']|["']$/g, "");
+      if (!tgt || tgt.includes("$") || tgt.includes("`")) return false;
+      const abs = tgt.startsWith("/") ? resolve(tgt) : cur ? resolve(cur, tgt) : "";
+      return new RegExp("^" + REPO.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/\\.claude/worktrees/v0\\.0\\.[0-9]+$").test(abs);
+    };
+    if (first === "git" && (w[k + 1] === "clone" || (w[k + 1] === "worktree" && w[k + 2] === "add" && !wtOk())))
       return "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
     if (first === "mkdir" && w.slice(k + 1).some((a) => /(^|\/)out\/[^\s]+|\/work(\/|$)|^~\/work|cc-work/.test(a)))
       return "mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录";
