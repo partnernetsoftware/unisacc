@@ -157,10 +157,50 @@ int main(int argc, char **argv) {
             tot = 0;
             for (k = 7; k >= 0; k--) tot = tot << 8 | ab[8 + k];
             ck(tot >= 398 && tot <= 597, "acct-grows-with-publish");
-            /* Over 90% of a small limit: full pass again, stale removed. */
-            ck(sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "600", 1) == 0, "limit-lowered");
+            /* Over the limit of a small budget: full pass again, stale removed. */
+            ck(sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "500", 1) == 0, "limit-lowered");
             store(b);
-            ck(!sy_exists(stale), "above-90-percent-publish-scans");
+            ck(!sy_exists(stale), "above-limit-publish-scans");
+            sy_unlink(stale);
+        }
+        /* Low-water eviction: limit 1000 (low mark 900), 199-byte entries. */
+        {
+            char ap[4400], stale[4400], hex[65], kp[8][4400];
+            unsigned char ab[24];
+            unsigned long long tot = 0;
+            int fd, k, ndone = 0;
+            long t2[2] = {0, 0};
+            ck(tx_snprintf(ap, sizeof ap, "%s/.budget.acct", dir) < sizeof ap, "lw-acct-path");
+            for (k = 0; k < 64; k++) hex[k] = 'b';
+            hex[64] = 0;
+            ck(tx_snprintf(stale, sizeof stale, "%s/uc-%s.tmp", dir, hex) < sizeof stale, "lw-stale-name");
+            ck(sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "1000", 1) == 0, "lw-limit");
+            sy_unlink(pa); sy_unlink(pb); sy_unlink(pc); sy_unlink(ap);
+            for (k = 0; k < 6; k++) if (path_for(kp[k], (unsigned char)(41 + k))) return 2;
+            store(41); sy_set_mtime(kp[0], 100);
+            ck(cx_write(stale, "x", 1) == 0, "lw-stale-planted");
+            for (k = 1; k < 5; k++) { store((unsigned char)(41 + k)); sy_set_mtime(kp[k], 100 * (k + 1)); }
+            ck(sy_exists(stale), "lw-up-to-limit-publish-does-not-scan");
+            ck(sy_stat(ap, &st) == 0 && st.size == 24, "lw-acct-present");
+            store(46);
+            ck(!sy_exists(stale), "lw-over-limit-publish-scans");
+            ck(!sy_exists(kp[0]) && !sy_exists(kp[1]), "lw-oldest-two-evicted");
+            ck(sy_exists(kp[2]) && sy_exists(kp[3]) && sy_exists(kp[4]) && sy_exists(kp[5]), "lw-newer-four-retained");
+            ck(cx_walk(dir, inspect, t2) == 0 && t2[0] == 796 && t2[0] <= 900, "lw-total-below-90-percent");
+            fd = sy_open_read(ap);
+            ck(fd >= 0 && sy_read_full(fd, ab, 24) == 0, "lw-acct-readable");
+            if (fd >= 0) sy_close(fd);
+            for (k = 7; k >= 0; k--) tot = tot << 8 | ab[8 + k];
+            ck(tot == 796, "lw-acct-equals-low-water-total");
+            ck(cx_write(stale, "x", 1) == 0, "lw-stale-replanted");
+            store(47);
+            ck(sy_exists(stale), "lw-headroom-publish-does-not-scan");
+            ck(cx_write(ap, "garbage-not-an-account!!", 24) == 0, "lw-acct-damaged");
+            store(48);
+            ck(!sy_exists(stale), "lw-damaged-acct-rebuilds");
+            t2[0] = 0; t2[1] = 0;
+            ck(cx_walk(dir, inspect, t2) == 0 && t2[0] <= 1000, "lw-never-above-limit");
+            (void)ndone;
             sy_unlink(stale);
         }
     }

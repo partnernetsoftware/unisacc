@@ -349,7 +349,9 @@ static void mc_trim(const char *dir, unsigned long long *final, int *okp) {
     if (total <= limit) { *final = total; *okp = 1; goto done; }
     }
     for (i = 1; i < used; i++) mc_heap_up(v, i);
-    while (total > limit && used > 0) {
+    /* Low-water eviction: above the limit, evict (oldest first) down to 90% of it, so the
+       following publishes within the headroom need no scan. Never exceeds the limit. */
+    while (total > limit - limit / 10 && used > 0) {
         if (!mc_join(path, sizeof path, dir, v[0].name) &&
             sy_lstat(path, &st) == 0 && mc_same(&v[0].st, &st) && sy_unlink(path) == 0)
             total -= (unsigned long long)st.size;
@@ -374,15 +376,15 @@ int mc_cache_publish(const char *dir, const char *tmp, const char *path, int loc
     if (have_old) old = (unsigned long long)ost.size;
     rc = sy_rename(tmp, path);
     if (rc == 0) {
-        /* Amortized budget: an O(1) account update while the running total stays within 90% of
-           the limit; a missing or damaged account, or a total above that mark, takes the full
-           scan-and-evict pass, which rebuilds the account. Replaced entries and entries removed
+        /* Amortized budget: an O(1) account update while the running total stays within the
+           limit; a missing or damaged account, or a total above it, takes the full
+           scan-and-evict pass (evicting down to 90% of the limit), which rebuilds the account. Replaced entries and entries removed
            by others only make the account too high, so the worst case is an early scan. */
         if (mc_acct_read(dir, &acct) == 0 && sy_lstat(path, &nst) == 0 && nst.kind == 'f') {
             if (acct < old) acct = 0; else acct -= old;
             if (acct <= 18446744073709551615ull - (unsigned long long)nst.size) {
                 acct += (unsigned long long)nst.size;
-                if (acct <= limit - limit / 10) { mc_acct_write(dir, acct); ok = 2; }
+                if (acct <= limit) { mc_acct_write(dir, acct); ok = 2; }
             }
         }
         if (ok != 2) {
