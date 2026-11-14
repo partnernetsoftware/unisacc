@@ -270,6 +270,37 @@ int rex_rollback_pick(const char *old, const char *version, const char *tmpl, ch
     }
     return 0;
 }
+/* Y2 lines for tools/notes-fill.cx: dec gets "PUBLIC_TIME<TAB>published_at<LF>"; evd gets "speed_baseline<TAB>..."
+   built from the last startup_first row of the baseline table (TSV text) whose candidate column (2) contains key.
+   evd stays empty when no row matches (the notes then keep the placeholder).  Returns 0, 1 when published_at is
+   empty or a buffer is too small. */
+int rex_y2_lines(const char *published_at, const char *baseline, const char *key, char *dec, int dcap, char *evd, int ecap) {
+    const char *s = baseline;
+    char f[10][200];
+    if (!published_at || !published_at[0] || !dec || !evd || dcap < 1 || ecap < 1) return 1;
+    evd[0] = 0;
+    if (cx_fmt(dec, dcap, "PUBLIC_TIME\t%s\n", published_at)) return 1;
+    while (s && key && key[0] && *s) {
+        int c = 0; long k = 0; const char *e = s;
+        while (*e && *e != '\n') e++;
+        for (int j = 0; j < 10; j++) f[j][0] = 0;
+        for (const char *q = s; q < e; q++) {
+            if (*q == '\t') { f[c < 9 ? c : 9][k] = 0; if (c < 9) c++; k = 0; }
+            else if (k < 199) f[c < 9 ? c : 9][k++] = *q;
+        }
+        f[c < 9 ? c : 9][k] = 0;
+        if (c >= 7 && !strcmp(f[3], "startup_first")) {
+            const char *a = f[1];
+            long kn = (long)strlen(key), an = (long)strlen(a);
+            for (long i = 0; i + kn <= an; i++) if (!strncmp(a + i, key, kn)) {
+                if (cx_fmt(evd, ecap, "speed_baseline\tstartup_first %s %s (reps %s, %s)\n", f[6], f[7], f[4], f[1])) return 1;
+                break;
+            }
+        }
+        s = *e ? e + 1 : e;
+    }
+    return 0;
+}
 static int rx_save(const char *file,const char *text) { char p[4400];return rx_path(p,rx_state,file)||rx_write(p,text,strlen(text),O_TRUNC); }
 static int rx_loadline(const char *file, char *o, int cap) {
     char p[4400]; size_t n = 0; char *s;
@@ -596,7 +627,27 @@ static int rx_do(int i) {
         rc = rx_view("public-view", &o);
         if (rc) return rc < 0 ? rc : rx_fail("gh release view", rx_c.tag);
         int good=rx_release_identity(o,"false");free(o);if(!good)return rx_fail("public tag/target/isDraft identity",0);
-        return rx_public_readback();
+        rc = rx_public_readback();
+        if (rc) return rc;
+        {   /* Y2 append (best effort, never changes the step verdict): PUBLIC_TIME and speed_baseline for notes-fill. */
+            char *t = 0, *bl = 0, dl[200], el[600], bp[4400], dp[4400], ep[4400], key[16];
+            size_t bn = 0;
+            char *pv[40]; int pn = rx_pre(pv, "gh");
+            pv[pn++] = "release"; pv[pn++] = "view"; pv[pn++] = rx_c.tag; pv[pn++] = "-R"; pv[pn++] = rx_c.repo;
+            pv[pn++] = "--json"; pv[pn++] = "publishedAt"; pv[pn++] = "--jq"; pv[pn++] = ".publishedAt"; pv[pn] = 0;
+            if (!rx_cmd("public-time", pv, 0, &t) && t) {
+                long tn = (long)strlen(t);
+                while (tn > 0 && (t[tn - 1] == '\n' || t[tn - 1] == '\r')) t[--tn] = 0;
+                memcpy(key, rx_c.commit, 12); key[12] = 0;
+                if (!rx_path(bp, rx_repo, "build/speed-baseline.tsv")) bl = cx_read(bp, &bn);
+                if (!rex_y2_lines(t, bl ? bl : "", key, dl, sizeof dl, el, sizeof el)
+                    && !rx_path(dp, rx_state, "decide.out") && !rx_path(ep, rx_state, "evidence.tsv")) {
+                    if (!rx_write(dp, dl, strlen(dl), O_APPEND) && el[0]) (void)rx_write(ep, el, strlen(el), O_APPEND);
+                }
+            }
+            free(t); free(bl);
+        }
+        return 0;
     }
     return rx_fail("no such sequential phase", rx_phase[i]);
 }
