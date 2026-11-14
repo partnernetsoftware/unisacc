@@ -1036,6 +1036,27 @@ int main(int argc, char **argv) {
          cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-split '%s' '%s' 2>&1",product,self,argv[1],launcher))return 2;
       int rc=sh(cmd,out,sizeof out);sy_printf("%s",out);
       ck(rc==0&&has(out,"G2G3_SPLIT\tfailed=0"),"g2g3-canary-regression-fixture"); }
+    { /* Real observer process, with no chain construction and no signal intervention. */
+      char td[4400],pidpath[4500],report[4500],logdir[4500],logpath[4600];
+      if(cx_fmt(td,sizeof td,"%s/watch-fixture-XXXXXX",argv[1])||!mkdtemp(td)||
+         cx_fmt(pidpath,sizeof pidpath,"%s/watch.pid",td)||cx_fmt(report,sizeof report,"%s/watch.tsv",td)||
+         cx_fmt(logdir,sizeof logdir,"%s/logs",td)||sy_mkdir(logdir,0755)||
+         cx_fmt(logpath,sizeof logpath,"%s/phase.log",logdir)||cx_write(logpath,"progress\n",9))return 2;
+      char *av[]={native_tool,"--watch-fixture",cwd,td,0};
+      int child=sy_spawn(av),observer=0;
+      long deadline=sy_now_ms()+20000;
+      while(child>0&&sy_now_ms()<deadline){
+          size_t pn=0;char *pidbytes=cx_read(pidpath,&pn);
+          if(pidbytes){observer=atoi(pidbytes);free(pidbytes);if(observer>0)break;}
+          sy_sleep_ms(25);
+      }
+      ck(observer>0&&kill(observer,0)==0,"watch-pid-exists-and-observer-alive-after-start");
+      int rc=child>0?sy_wait(child,0):-1;
+      ck(rc==0&&observer>0&&kill(observer,0)<0&&errno==ESRCH,"watch-exits-and-is-reaped-when-chain-ends");
+      size_t rn=0;char *rows=cx_read(report,&rn);
+      ck(rows&&has(rows,"WATCH\tepoch=")&&has(rows,"OK\twatch-probe\t")&&has(rows,"newest_log_age_s=")&&
+         !has(rows,"newest_log_age_s=-1"),"watch-appends-pace-verdict-and-log-idle");free(rows);
+    }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
