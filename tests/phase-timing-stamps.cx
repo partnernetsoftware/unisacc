@@ -573,13 +573,28 @@ int main(int argc, char **argv) {
     identity_after(&run_hit);
     finish(&run_hit);
 
-    /* -c final-artifact reuse: artifact_hit 0 then 1 (mode 2), byte-identical objects. Key binds the -o path. */
-    char obj1[65], obj2[65];
+    /* -c final-artifact reuse (N15-c, needs the 63A product: the cache gate no longer requires !opts.funit).
+       Product with N15-c: miss = lookup_hit=0 + artifact_hit=0 mode=5 + 7 inference rows; hit = lookup_hit=2 +
+       artifact_hit=1 mode=5 + no inference/model rows + one image output; same -o and argv give the same key.
+       Product without it (0.0.62): the old no-reuse form below stays asserted and the new rows print UNVERIFIED,
+       never PASS.  UNISACC_REQUIRE_N15C=1 turns the old form into FAIL (use on the new product). */
+    char obj1[65], obj2[65], obj3[65];
+    char probe2[4400];
+    int n15c;
     spawn(&obj_miss, "obj.miss", v_obj, env_hot);
+    n15c = obj_miss.st.art_n != 0;
+    if (getenv("UNISACC_REQUIRE_N15C") && !n15c) ck2(0, "obj.miss", "n15c-required-but-no-artifact_hit-stamp");
     ck2(!obj_miss.r.rc && !obj_miss.r.outn, "obj.miss", "rc0-empty-stdout");
     ck2(!obj_miss.st.bad && !obj_miss.st.mem_n, "obj.miss", "stamp-grammar-clean-no-memory_bind");
-    ck2(!obj_miss.st.art_n, "obj.miss", "no-artifact_hit-stamp(-c-has-no-final-artifact-reuse,N15)");
-    ck2(!obj_miss.st.lookup_n, "obj.miss", "no-lookup_hit-stamp");
+    if (n15c) {
+        ck2(obj_miss.st.art_n == 1 && obj_miss.st.art_hit == 0 && obj_miss.st.art_mode == 5, "obj.miss", "one-artifact_hit=0-mode=5");
+        ck2(obj_miss.st.lookup_n == 1 && obj_miss.st.lookup_hit == 0, "obj.miss", "one-lookup_hit=0");
+    } else {
+        ck2(!obj_miss.st.art_n, "obj.miss", "no-artifact_hit-stamp(old-product-no-c-reuse)");
+        ck2(!obj_miss.st.lookup_n, "obj.miss", "no-lookup_hit-stamp(old-product)");
+        printf("UNVERIFIED\tphase-timing-stamps.obj.miss.one-artifact_hit=0-mode=5\tUVR-需新产品\n");
+        printf("UNVERIFIED\tphase-timing-stamps.obj.miss.one-lookup_hit=0\tUVR-需新产品\n");
+    }
     ck2(obj_miss.st.inf_n == 7 && !obj_miss.st.inf_rc_bad && tx_eqz(obj_miss.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
         "obj.miss", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0");
     ck2(obj_miss.st.out_n == 1 && obj_miss.st.out_image_n == 1, "obj.miss", "one-output-kind=image");
@@ -589,15 +604,40 @@ int main(int argc, char **argv) {
     spawn(&obj_hit, "obj.hit", v_obj, env_hot);
     ck2(!obj_hit.r.rc && !obj_hit.r.outn, "obj.hit", "rc0-empty-stdout");
     ck2(!obj_hit.st.bad && !obj_hit.st.mem_n, "obj.hit", "stamp-grammar-clean-no-memory_bind");
-    ck2(!obj_hit.st.art_n, "obj.hit", "no-artifact_hit-stamp(-c-has-no-final-artifact-reuse,N15)");
-    ck2(!obj_hit.st.lookup_n, "obj.hit", "no-lookup_hit-stamp");
-    ck2(obj_hit.st.inf_n == 7 && !obj_hit.st.inf_rc_bad && tx_eqz(obj_hit.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
-        "obj.hit", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0");
+    if (n15c) {
+        ck2(obj_hit.st.art_n == 1 && obj_hit.st.art_hit == 1 && obj_hit.st.art_mode == 5, "obj.hit", "one-artifact_hit=1-mode=5");
+        ck2(obj_hit.st.lookup_n == 1 && obj_hit.st.lookup_hit == 2, "obj.hit", "one-lookup_hit=2");
+        ck2(!obj_hit.st.inf_n && !obj_hit.st.model_n && !obj_hit.st.con_n, "obj.hit", "inference-0-rows-no-model-no-construction");
+    } else {
+        ck2(!obj_hit.st.art_n, "obj.hit", "no-artifact_hit-stamp(old-product-no-c-reuse)");
+        ck2(!obj_hit.st.lookup_n, "obj.hit", "no-lookup_hit-stamp(old-product)");
+        ck2(obj_hit.st.inf_n == 7 && !obj_hit.st.inf_rc_bad && tx_eqz(obj_hit.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
+            "obj.hit", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0(old-product)");
+        printf("UNVERIFIED\tphase-timing-stamps.obj.hit.one-artifact_hit=1-mode=5\tUVR-需新产品\n");
+        printf("UNVERIFIED\tphase-timing-stamps.obj.hit.one-lookup_hit=2\tUVR-需新产品\n");
+        printf("UNVERIFIED\tphase-timing-stamps.obj.hit.inference-0-rows-no-model-no-construction\tUVR-需新产品\n");
+    }
     ck2(obj_hit.st.out_n == 1 && obj_hit.st.out_image_n == 1, "obj.hit", "one-output-kind=image");
     digest(object, obj2);
     ck2(tx_eqz(obj1, obj2), "obj.hit", "object-bytes-equal-to-miss");
     identity_after(&obj_hit);
     finish(&obj_hit);
+    if (n15c) {
+        /* changed source, same -o: key differs, so the miss form returns (7 rows) and the object differs */
+        char *v_obj2[] = {bound, "12", "sh", product, "-c", probe2, "-o", object, 0};
+        sample obj_chg;
+        path(probe2, sizeof probe2, work, "probe2.cx");
+        save("probe2.cx", "int main(void){puts(\"PHASE\\tok2\");return 0;}\n", strlen("int main(void){puts(\"PHASE\\tok2\");return 0;}\n"));
+        spawn(&obj_chg, "obj.chg", v_obj2, env_hot);
+        ck2(!obj_chg.r.rc && !obj_chg.r.outn && !obj_chg.st.bad, "obj.chg", "rc0-empty-stdout-grammar-clean");
+        ck2(obj_chg.st.art_n == 1 && obj_chg.st.art_hit == 0 && obj_chg.st.art_mode == 5 &&
+            obj_chg.st.lookup_n == 1 && obj_chg.st.lookup_hit == 0, "obj.chg", "changed-source-artifact_hit=0-lookup_hit=0");
+        ck2(obj_chg.st.inf_n == 7 && !obj_chg.st.inf_rc_bad, "obj.chg", "changed-source-inference-7-rows");
+        digest(object, obj3);
+        ck2(!tx_eqz(obj1, obj3), "obj.chg", "object-bytes-differ-from-first-source");
+        identity_after(&obj_chg);
+        finish(&obj_chg);
+    } else printf("UNVERIFIED\tphase-timing-stamps.obj.chg\tUVR-需新产品\n");
     printf("STAMP\tlookup\tcache-off\thit=%lld\tns=%lld\n", run_cold.st.lookup_hit, run_cold.st.lookup_ns);
     printf("STAMP\tlookup\tmiss\thit=%lld\tns=%lld\n", run_miss.st.lookup_hit, run_miss.st.lookup_ns);
     printf("STAMP\tlookup\thit\thit=%lld\tns=%lld\n", run_hit.st.lookup_hit, run_hit.st.lookup_ns);
