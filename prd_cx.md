@@ -271,7 +271,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - [读码] 现有两份跨进程缓存都是整程序键:`rc_lookup_e3`/`rc_store_e3`(`src/runcache.cx:660`、`:668`,kind 0)与 `rc_lookup_elf`/`rc_store_elf`(`:656`、`:664`,kind 1);`dv_run_lower` 只在 `nsrc != 1` 时查 e3 回执(`src/driveroute.cx:402`)。换一个注释即整程序未命中。
 - [读码] 单元缓存 `uc_span`(`cx/runtime/unitcache.cx:394`)键 = sha256("UNIUC3"、产品身份 rc_hex_ident、单元路由、已发布 `\0cli` 状态的 sha、单元字节 sha),不含单元序号与个数(`cx/runtime/unitcache.cx:28` 至 `:33`);只包 e2/e1。
 - [读码] e3 带子层已有一个"分开编译再合并"的先例:`fwm_merge`(`cx/compiler/fwdmerge.cx:233`)把单独编译的转发桩带子按行并入第一条 e3 带子(带子是行文本,有 `.unit 2` 行,:240),形状不能证明安全就退回整程序重放(`cx/compiler/fwdmerge.cx:2` 至 `:5`;`fwd_incremental` 返回 0 即全量重放,`cx/compiler/fwdincrement.cx:3` 至 `:6`)。合并后才进 prune(`src/driveroute.cx:268` 至 `:270`)。
-- [未验证] 运行库闭包以什么形态进入后四流:是随头文件文本进同一单元,还是独立 `.unit` 段。这决定闭包单元的切法,是本稿最大的未知。取数:对 M1 的 (b)(c) 两个源各取一次 e3 带子,数 `.unit` 行数、总行数、来自用户源与非用户源的行数(`fwm_location` 的 source 标记,`cx/compiler/fwdmerge.cx:232`);带子落盘入口未核实,先查 `sh ./unisacc.com tools/refactor.cx sites rc_store_kind` 与 `tools/tape-gap.cx` 的读带子方式,见分期 E1。
+- [已测,见 E1] 运行库闭包随头文件文本进同一 `.unit 0` 单元,按来源标记交错,不是独立 `.unit` 段。原问题:是随头文件文本进同一单元,还是独立 `.unit` 段。这决定闭包单元的切法,是本稿最大的未知。取数:对 M1 的 (b)(c) 两个源各取一次 e3 带子,数 `.unit` 行数、总行数、来自用户源与非用户源的行数(`fwm_location` 的 source 标记,`cx/compiler/fwdmerge.cx:232`);带子落盘入口未核实,先查 `sh ./unisacc.com tools/refactor.cx sites rc_store_kind` 与 `tools/tape-gap.cx` 的读带子方式,见分期 E1。
 
 (2) 粒度与缓存键
 
@@ -306,10 +306,10 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 
 今天可做的只读实验(不改产品输入,用已装产品,脚本用 .cx 写在 `$CLAUDE_JOB_DIR/tmp`,结果原位填回本小节):
 
-- E1 闭包形态与大小:对 M1 的 (b)(c)(d) 取 e3 带子,报告 `.unit` 段数、各段行数与字节数、闭包占比。回答(1)末条的未知并给预制体积预算。写域:本小节 E1 行。
-- E2 prune 保留集是否只由引用面决定:取两个不同用户源但对库的引用面相同(都只调 printf)的 prune 后带子,比较闭包部分是否同字节;再取引用面不同的一对作对照。写域:本小节 E2 行。
-- E3 lower 是否逐函数独立:同一闭包函数在 (c) 与 (d) 两个程序的 lower 输出里对应段是否同字节。写域:本小节 E3 行。
-- E4 合并等价:手工把 (c) 拆成用户单元加闭包走现有多单元路(`dv_units`),比较与单文件路的最终 ELF 是否同字节。若不同,方案 A 的等价合同须按差异重写。写域:本小节 E4 行。
+- E1 [已测 2026-11-14,load1 6.4 至 7.0,noisy] 取带子入口:`sh ./unisacc.com X.cx -S > X.tape`(-S 输出 tape 文本,是 e3 之后的带子,`stream sidecar` 对它报 `forwarding side-car missing`,故它已是 sidecar 后形态);`.unit 0 4:<hex 文件名>` 是来源标记行,不是单元分隔,整程序始终只有 `.unit 0` 一个单元号。脚本 `$CLAUDE_JOB_DIR/tmp/seg2.cx`(按 `.unit` 标记归属累计行与字节)。结果(行/字节):(b) return 7 共 1463/24805,用户 b.cx 44/654,cx-flat.h 1418/24143;(c) 一行 printf 共 11539/194502,用户 c.cx 51/768,errno.h 7/127,stdio.h 10462/176166,sys/_exit.h 690/11681,cx-flat.h 328/5752;(d) printf+malloc+strcmp 共 12323/207702,用户 d.cx 94/1471,stdio.h 10463/176174,sys/_exit.h 690/11681,string.h 236/4007,stdlib.h 748/12800,errno.h 7/127,cx-flat.h 84/1434。结论:闭包不是独立 `.unit` 段,而是同一 `.unit 0` 内按头文件来源标记交错的文本;非用户源占比 (b) 97.3%/(c) 99.6%/(d) 99.3%(按行),(c) 单个 stdio.h 即约 91% 行;切单元须按来源标记切带子行而非按 `.unit` 号,合并器要自行解决函数编号与局部名(`fwm_merge` 的 locals/globals);预制体积:(c) 闭包 e3 带子约 194 KB,(d) 约 206 KB,按文本计,尚未压缩。注:(b) 空程序也有 1418 行 cx-flat.h 前导,即最小闭包不为零。
+- E2 [未测,缺入口] `sh ./unisacc.com stream prune --target lnx/x86_64 < c.tape` 返回 rc 0 且输出与输入同字节(cmp 相同,11539 行不变;原因未查清(可能 -S 带子已是 prune 后,也可能 stream prune 对该输入不裁剪;c.tape 有约 400 个标号)),所以不能用它取 prune 后带子;prune 后带子缺单独导出入口(整程序 -run 内不落盘)。要做 E2 须先找出喂 prune 的正确输入形态(`stream sidecar` 的 e3 原始输出需 `stream e3` 产出,未试)或给产品加诊断导出;本轮不硬做。方案 B 判断:未决,缺 prune 后带子。
+- E3 [部分测,不充分,load1 6.4 noisy] 命令:`sh ./unisacc.com stream lower --target lnx/x86_64 < X.tape > X.low`(rc 0)。(c) 9135 行/166702 B,(d) 9766 行/178720 B;`diff c.low d.low` 有 733 个差异行;`@sym` 全局符号地址在 (c) 与 (d) 间不同(如 `g__unisa_freel` 66392 对另一值,35 个 @sym),即 lower 输出含全局布局地址,随程序整体变化。结论:lower 输出不是只依赖自身带子段的逐函数纯函数,至少全局数据布局依赖整程序;这是 (c)(d) 整体对比,没有按函数切段逐段比,所以不能据此判定函数体本身能否同字节,但已指向方案 B 的『lower 逐函数独立』条件需加布局无关证明才成立。按条件,方案 B 判断:未决偏否定;缺口:按标号切 lower 输出逐函数比较的脚本与 prune 后带子(见 E2)。
+- E4 [未测] 本轮 12 分钟内只做完 E1 与 E3 部分,E4 未跑;因 E1 显示闭包是 stdio.h 等头文本而非独立单元,手工拆成两个 .cx 需先决定闭包单元的切法(把 `#include` 行放哪个文件),这个前置未定。
 - 以上四项互相只读、可并行;取带子的落盘入口未核实,E1 先解决它并把命令写回这里供 E2/E3 复用。
 
 需新产品的实现项,与任务树对齐:
