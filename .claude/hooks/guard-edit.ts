@@ -51,10 +51,25 @@ function inRepo(p: string, cwd: string, hasCd: boolean): boolean {
   return p === REPO || p.startsWith(REPO + "/");
 }
 
+// git 子命令级违规:共享 main 上不得 stash/clean/reset --hard/checkout --/restore .,不得 --no-verify
+function gitViolation(a: string[]): string | null {
+  if (a.includes("--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) i += /^-[Cc]$|^--(git-dir|work-tree|namespace)$/.test(a[i]) ? 2 : 1;
+  const sub = a[i] ?? "", rest = a.slice(i + 1);
+  if (sub === "stash") return "git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp";
+  if (sub === "clean") return "git clean:共享 main 上不得 clean";
+  if (sub === "reset" && rest.includes("--hard")) return "git reset --hard:共享 main 上不得 reset";
+  if (sub === "checkout" && (rest.includes("--") || rest.includes("."))) return "git checkout -- / .:不得还原他人路径";
+  if (sub === "restore" && rest.includes(".")) return "git restore .:不得还原他人路径";
+  if ((sub === "commit" || sub === "push") && rest.includes("--no-verify")) return `git ${sub} --no-verify:不得绕过 precommit`;
+  return null;
+}
+
 function check(cmd: string, cwd: string): string | null {
   const s = stripBodies(cmd);
   const hasCd = /(^|[;&|(\s])(cd|pushd)\s/.test(s);
-  for (const seg of s.split(/;|&&|\|\||\||\n/)) {
+  for (const seg of s.split(/;|&&|\|\||\||\n|\$\(|`/)) {
     const t = seg.trim();
     const w = t.split(/\s+/);
     // 跳过前置环境变量赋值取首词
@@ -66,6 +81,16 @@ function check(cmd: string, cwd: string): string | null {
       return "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
     if (first === "mkdir" && w.slice(k + 1).some((a) => /(^|\/)out\/[^\s]+|\/work(\/|$)|^~\/work|cc-work/.test(a)))
       return "mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录";
+    if (first === "git") {
+      const g = gitViolation(w.slice(k + 1));
+      if (g) return g;
+    }
+    // 项目规则:不新增 Python/Bun/Node 脚本,脚本一律 .cx(宿主钩子 bun .claude/hooks/ 例外)
+    if (/^(python[0-9.]*|bun|node|perl|ruby)$/.test(first)) {
+      const a0 = w[k + 1] ?? "";
+      const hook = first === "bun" && (a0 === '""' || /(^|\/)\.claude\/hooks\//.test(a0) || /^\$\{?CLAUDE_PROJECT_DIR/.test(a0));
+      if (!hook) return `${first} 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx`;
+    }
     if (["git", "gh", "mux"].includes(first)) continue;
     const args = w.slice(k + 1);
     const fileArgs = () => args.filter((a) => !a.startsWith("-") && a !== "");
