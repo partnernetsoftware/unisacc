@@ -570,3 +570,158 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - gcc_cx.com 与 clang_cx.com 必须是同一份六格 APE(win/lnx/osx x x86_64/arm64),打包五份切片(win/arm64 复用 win/x86_64 的 PE);构建入口 `sh ./unisacc.com -run tools/build-cxcc-ape.cx`。没有 use 时直接交系统编译器(`-std=c99 -x c -include include/cx.h`);宿主不实现 `-run`。尺寸与字节数为旧快照,不并入。
 - tools/cxproc.cx 是按需模块(导出 cxproc_run);包清单 cxpack.tsv 把导入身份钉到路径;CXIF v0 文法见 archive/plans/2026-10-28/cxif-v0.md。
 - 未实现:编译期所有权(spec 第 5 节)、非本机切片未在 Windows/OSX 上执行。
+
+## 10. cx 2.0 结构草案(2026-11-14,cx 设计负责人;草案,未实现项一律不得记 PASS)
+
+立场:模块、接口、包边界是一等公民。判据只有一个:改一处,需要重编、重跑、重审的范围是否随边界缩小。本节数字除注明外均为 2026-11-14 在 HEAD 4367e1b0e5、已装产品、lnx/x86_64 上实测;已装产品不含 4aee1dfb4a、e576000457、4367e1b0e5 的修复,凡涉及它们的行为都标 UNVERIFIED-需新产品。
+
+### 10.1 边界问题清单(证据与可测度量)
+
+| 号 | 问题 | 证据 | 度量(现值 -> 目标) |
+|---|---|---|---|
+| E1 模块身份 | 同一文件经软链两条路径曾被当成两个模块;`src/` 下 7 个目录软链使同一文件有两个词法身份 | 修复 e576000457(`cxm_bind_real`)、4367e1b0e5(`cxm_deps_same`);`tests/module/units.cx` 软链夹具;A2 节 | 软链入口数 7 -> 0(`tools/check-cx-layers.cx` 口径);新产品上 `osx-sentinel -funit` 实编:UNVERIFIED |
+| E2 导出面 | 默认导出全部非 static;只有带 `cxpack.tsv` 的目录才收窄 | `git ls-files` 中 `cxpack.tsv` 7 个(5 个是 `tests/cxpack/` 夹具),产品侧只有 `cx/driver`、`cx/stream` 两个;带 `module` 行的 `.cx` 587 个 | 有显式公开集的产品包 2/11 -> 11/11(`build/layer-api` 的 cx.* 11 包) |
+| E3 重导出 | `#pragma unisa export` 未实现,门面模块写不出来,拆模块必然破坏全部使用方 | 实测 `-cx-plan`:`unknown unisa pragma export`,rc=1;`cx/spec.md` CX-W-3 | 拆一个模块需改的使用方文件数:text.text 为 826 -> 0 |
+| E4 通配 | `use sys.*` 从未设计,落到模块名文法拒绝 | 实测:`bad module name "sys.*"`,rc=1;`use text.text::*` 被当成普通名解析 | 两种写法的拒绝文案具名且被批次锁定:0 -> 2 |
+| E5 接口哈希 | 哈希粒度是包(18 行),不是模块或符号;窄化门是全局的,任一包的表过期就整体关闭 | `build/iface-hash.tsv` 18 行;实测 `affected --files cx/text/text.cx --iface-narrow` 输出 `IFACE_NARROW state=off reason=iface-hash-check`(起因是别的窗口未提交的 `build/layer-api/cx.sys.tsv`),选批 903/1069 未降 | 窄化可用率(按包判定)与选批数:903 -> 见 10.2 P5 |
+| E6 波及面 | 改 `cx/text/text.cx` 选中 903/1069 批次(84%);直接 `use text.text` 的 `.cx` 826 个 | 实测 `AFFECTED_SUMMARY changed=1 batches=903 scanned=1069`(1.6 s) | 单函数体改动的选批数:903 -> 该函数的可达批次数 |
+| E7 包拆面 | text.text 的 20 个导出里,826 个直接使用者中 552 个(67%)只用长度/比较族,用查找族 205、切分族 46、`tx_copy` 136 | `git grep -lw` 逐符号计数(tx_eqz 393 文件、tx_len 274、tx_find 138、tx_copy 117、tx_trim 2) | 改查找族时直接使用者波及 826 -> 约 205(传递闭包另计,见 P4) |
+| E8 前导 | `include/cx-flat.h` 9388 行每单元重付;空 `.cx` 冷跑 359 至 371 ms 对空 `.c` 109 至 114 ms | A8 节;`wc -l include/cx-flat.h` | 空 `.cx` 冷跑增量约 250 ms -> 层感知前导后的实测值(CX-W-5) |
+| E9 命名空间 | 可见名靠全局前缀(`tx_`、`sy_`、`mm_`)而不是模块限定;冲突只能拒绝或逐符号别名 | CX-N-1..3;`tests/cx-namespace.cx` | 仓内别名使用文件 6 个、符号级导入文件 3 个:语义未稳定前不扩大 |
+| E10 符号级导入 | 未导入的函数体仍被编译(改唯一名);多单元不同别名时只存一份改名源码;传递 use 的符号过滤不追踪 | 9.4 节已知边界;修复 4aee1dfb4a | 同一模块被 N 种别名导入时的单元数与函数体份数:应恒为 1 份 |
+| E11 可见性层级 | 只有两级:static 私有、其余全公开;没有「包内可见、包外不可见」 | `cxm_exportok` 只判 static 与 cxpack 行(`cx/cx0/plan.cx:681`) | 包内帮手被包外直接调用的点数(用 `tools/refactor.cx sites` 统计):未测 |
+| E12 封装与对接 | 允许裸 libc 与 include 的 dock 模块 56 个(cx 下 35 个),没有逐模块的审计表 | `git grep -l '^#pragma unisa dock'` | dock 模块数只降不升;每个 dock 模块有一行审计(见 11.6) |
+| E13 上限分叉 | `CXM_MAXU` 产品 128、权威 96;`CXM_MAXUSE 48` 三处各写 | `cx/compiler/cxmod.cx:28`、A7 第 14 项 | 三源常量差异 1 -> 0 |
+
+### 10.2 设计提案
+
+每条标:产品输入类别(cxmod 三源 | 运行库头 | 模型装载 | 非产品输入的工具与表)与版本。
+
+**P1 export 重导出(cxmod 三源;0.0.64)**
+
+- 语法:`#pragma unisa export NAME` 与 `#pragma unisa export NAME::sym`。只许出现在带 `module` 行的单元里;位置规则与 use 相同(首声明前、条件外)。
+- 语义:(1) 对本模块等于 `use NAME`;(2) 直接 use 本模块的单元,视同也直接 use 了 NAME(给完整接口,而不是传递 use 的类型部分);(3) 符号身份仍属 NAME,函数体只有一份,不复制、不改名;(4) 链式重导出只沿显式 export 行传递,普通 use 仍不传递(CX-U-5 不变)。
+- 冲突:使用方同时直接 use NAME 与经门面得到 NAME,是同一模块,按规范路径合并,不算冲突;两个不同模块导出同名仍报 `exported by both`(CX-N-1 不放宽)。
+- 首版明确拒绝:`export NAME::sym as alias`(文案 `export alias unsupported`);非模块单元写 export(`export outside module`);export 自己(`module M exports itself`);export 形成环(沿用 `module cycle`)。
+- 层向:export 算一条 use 边,门面的层号不得低于被导出模块(`tools/check-cx-layers.cx` 同口径)。
+- 验收实验:`sh ./unisacc.com tests/cx-namespace.cx -- ROOT ROOT/unisacc.com OUT` 新增门面正例 2 条、拒绝 4 条;三源 `sh ./unisacc.com tools/cx0-extract.cx -- --check` EXACT。
+
+**P2 通配 use 的窄语义(cxmod 三源;0.0.64,排在 P1 之后)**
+
+- 语法:只有 `#pragma unisa use PFX.*` 一种;`*` 只能是最后一段且独占一段。`PFX.*::sym`、`PFX.*.x`、`*`、`use NAME::*` 一律具名拒绝。
+- 语义:纯展开。把 PFX 解析成目录(旁边优先,其次包根),取该目录下直接子文件 `<seg>.cx` 中带 `#pragma unisa module <seg>` 的那些,按字节序展开成逐个 `use PFX.<seg>`;不递归子目录。展开后与手写完全等价:冲突仍拒、上限仍按 `CXM_MAXUSE` 计、空展开拒绝(`wildcard PFX.* matches no module`)。
+- 限制:只许 L3(tools、tests、apps)使用;产品层(`src/`、`cx/`、`ext/`)出现即棘轮拒绝。理由:通配让闭包依赖目录列表,新增一个文件就改变所有通配使用方的编译输入,与「下游只依赖用到的面」相反。
+- 代价如实:规划器要新增列目录回调(类比 `cxm_bind_real`),CX0BND1 束要记录目录列表身份;计划字节须把展开结果逐条写出,保证三宿主同字节。推荐做法仍是 P1 的显式门面,通配只是脚本便利。
+- 验收实验:同上批次,正例 1 条(展开数与目录实数相等)、拒绝 5 条。
+
+**P3 符号级导入的稳定语义(cxmod 三源;缺陷修复已并入 0.0.62,语义收敛在 0.0.64)**
+
+- (1) 可见性:`use M::sym` 只给 sym 的原型与 M 的全部类型;类型永不改名。(2) 身份:一个模块在一个程序里只有一份函数体,与被多少单元、以多少种别名导入无关;别名是使用方单元的属性。(3) 同一单元对同一模块既整模块导入又符号导入:取并集,不报错;同一 sym 两个不同别名:拒绝。(4) sym 不在 M 的公开集:具名拒绝(`module M does not export sym`)。(5) 经 P1 门面得到的模块也可写 `use FACADE::sym`,解析到真实属主。
+- 验收实验:`sh ./unisacc.com tests/module/check.cx`(批次 module-units)断言「N 种别名时单元数不变」;运行断言 UNVERIFIED-需新产品。
+
+**P4 text.text 拆面(运行库头;0.0.64,依赖 P1。先行部分为非产品输入,立即可做)**
+
+- 目标面(按 E7 实测的使用分布,而不是按文件大小):扫描面 `text.cmp`(tx_len tx_same tx_eq tx_eqz tx_cmp tx_prefix tx_prefixz tx_suffix)与 `text.find`(tx_find tx_rfind tx_chr tx_rchr tx_contains tx_count);切分 `text.split`(tx_fields tx_field tx_trim tx_trimc);构造面 `tx_copy` 归 `text.build`;格式化面即现有 `text.fmt`、`text.num`、`text.conv`,不动。`text.text` 保留为只含 export 行的门面,826 个使用方零改动,之后按需逐步改成只 use 用到的面。
+- 为什么必须等 P1:没有 export 时,新模块与 text.text 同时定义同名函数会触发 `exported by both`,只能一次改完 826 个文件,违反分治。
+- 先行(非产品输入):在只读副本里做拆面实验并用 `tools/affected.cx` 量化;预估见 10.4。
+
+**P5 接口哈希驱动的选批与增量(非产品输入的工具与表;立即可做,不等版本)**
+
+- (a) 窄化门按包判定:只要求被改文件所属包的 `layer-api` 与哈希是当前的,别的包过期不再关掉全局窄化(E5 实测的失效原因)。
+- (b) 哈希粒度加一级:`build/iface-hash.tsv` 增加模块行(`pkg/module`),符号行已有 `sig_sha`(`build/layer-api/*.tsv` 第 3 列)。
+- (c) 符号级选批:被改文件的改动行映射到文件作用域条目;若只落在若干导出函数体内,则只选「闭包内引用了这些函数(含同模块内调用它们的导出函数)」的批次;改动落在 static 数据、宏、类型或无法归属时退回整模块。未选中的批次打印为 DEFERRED_BY_SYMBOL,计数、可用 `--full` 重跑,不静默丢弃;release 档永远全选。
+- 验收实验:`sh ./unisacc.com tools/affected.cx -- --files cx/text/text.cx --list-only --iface-narrow` 的 `IFACE_NARROW state=on`;符号级对 `tx_trimc` 的选批数远小于 903(预估见 10.4)。
+
+**P6 前导分层(运行库头;不早于 0.0.64 末位,超 2 小时即移 0.0.65)与零解码(模型装载;0.0.63)**
+
+- 层感知前导(CX-W-5):上层单元只见 L0 接口声明,不再每单元付 9388 行;与 0.0.63 的零解码互不依赖,分两个候选,各自用 `tools/cx-phase.cx` 冷热两组入账。
+- 验收实验:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com /tmp/h0.cx`(空 main),e2 相位下降量入 `build/phase-times.tsv`。
+
+**P7 包内可见性(非产品输入的表先行;cxmod 三源在 0.0.64 之后)**
+
+- 不加语法。先把 `cxpack.tsv` 扩到 11 个 cx.* 包(E2),公开集 = `build/layer-api` 的行;包内帮手不进 cxpack 即包外不可见。表与检查可立即做;规划器强制(包外调用未列入符号即拒绝)已有 `tests/cxpack/bad-call` 路径,扩面属产品输入。
+
+版本映射汇总:0.0.62(库包与运行库)只并入 E1、E10 的缺陷修复与 P5、P7 表、P4 先行实验;0.0.63(模型与网)只做零解码;0.0.64(cx 设计)做 P1 -> P2 -> P3 收敛 -> P4 物理拆面 -> P6 前导(末位)。
+
+### 10.3 与冻结层、三源、棘轮的冲突与兼容
+
+- 冻结层:`cx/sys`、`cx/core` 只可新增文件(`tests/cx-module-freeze.tsv` 33 行,只缩不扩)。P1/P2 不改这两层的任何文件;P4 只动 `cx/text`(不在冻结集),新面是新增文件,`text.text` 改成门面属于改现有文件,须在 0.0.64 候选内一次完成并做字节等价回归(826 个使用方的 `-cx-plan` 单元集只增不减、程序输出不变)。
+- 三源:每条语法改动的顺序固定为 `cx/cx0/plan.cx`(权威)-> `tools/cx0-extract.cx` 投影 `src/cxmod.c`(`--check` EXACT)-> `cx/compiler/cxmod.cx` 手工对齐并在 `tests/module/units.cx` 加同名断言。4367e1b0e5 证明手工对齐会漏(`cxm_deps_same` 晚了一轮);P1 起每个新拒绝文案都要同时出现在三份源里,用一条 `git grep -c` 断言守住,直到 55-1(cxmod.cx 改为投影)落地。
+- 棘轮:srcshape 不许 `src/` 增行,P2 的列目录回调绑定须与 e576000457 同法(与现有语句同行或放 `cx/driver`);cxinclude、cxlibc、cxplatform 不受影响;通配的「产品层禁用」做成 cxapis 类棘轮的一条规则,不新开第 14 个棘轮。
+- 一版一类:P1、P2、P3 同属 cxmod 三源,可同候选;P4 物理拆面属运行库头,与前者不同类,须是 0.0.64 内的第二个候选或顺延,不得与 P1 同候选。
+- 宿主:gcc_cx、clang_cx 经 `src/cxmod.c` 自动得到同一语义;export 与通配对宿主编译器仍是被忽略的 pragma 行,C99 兼容不变。
+- 不做:不引入新关键字、不引入按路径字符串的导入、不做隐式遮蔽(后 use 覆盖先 use)、不做传递可见。
+
+### 10.4 先行实验与预估(本节数字由段 2 实测后原位更新;未测项标 UNMEASURED)
+
+- text.text 拆面波及面:UNMEASURED(待副本实验)。
+- 符号级选批对单函数的选批数:UNMEASURED。
+- export 与通配原型:UNMEASURED(段 3,只出补丁,不入主仓)。
+
+## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
+
+资料:`docs/cx/ref-node.md`、`ref-rust.md`、`ref-cpython.md`、`ref-quickjs.md` 已读;这四篇侧重标准库面与稳定性策略,模块系统与内存安全的机制部分(下文带 [忆] 的)出自通用知识,本轮未联网核对一手文档,落合同前须再查。仓内没有 Bun 的参考篇(`git grep -i bun -- docs/cx` 只命中 QuickJS 篇的无关行)。不取的理由统一按四条约束写:C99 兼容(宿主 gcc/clang 须能忽略全部扩展)、单文件 APE(无运行期模块装载器、无文件系统上的包目录)、三源构造(规划器一处改三处核)、no-libc(上层不直调 libc,前导自带)。
+
+### 11.1 Node.js(ESM 与 package.json exports)[忆]
+
+- 解决的问题:包的内部文件被外部深层导入,重构即破坏;同一包要给不同环境不同入口。
+- 机制:`exports` 字段把包的可导入路径封死成一张表,表外路径导入即报错;条件导出(`import`/`require`/`node`/`browser`)按环境选入口;`imports` 字段给包内私有别名(`#name`);ESM 静态解析、环允许但绑定延迟;`node:` 前缀隔离核心名。
+- cx 差距:公开集只在 2 个产品包有表(E2);包内任一模块都能被包外 use(没有「表外路径即拒绝」)。
+- 取:(1) 导出面封死成表 -> P7(cxpack 扩到全部 cx.* 包,表外 use 具名拒绝);(2) 核心名带命名空间前缀,`ref-node.md` 第 6 节(9) 已采纳;(3) 错误码是合同、消息不是,同篇(4) 已采纳,P1/P2 的拒绝合同按「文案关键词」而非全文断言。
+- 改造:条件导出对应六目标,但不做成导入期选择。cx 的做法是符号不消失、目标差异收在 L0 的 `_os` 表里并返回 `-ENOSYS`(`build/std-surface.tsv` 的 lnx/osx/win 列);条件导出会让同一 use 在不同目标解析到不同文件,计划字节随目标变,破坏「同一 .cx 三宿主同计划字节」。
+- 不取:循环导入的延迟绑定(cx 整程序静态合成,环一律拒绝,CX-M-3);运行期动态 `import()`(单文件 APE 无装载器);CommonJS/ESM 双形态。
+
+### 11.2 Bun [忆]
+
+- 解决的问题:解析与启动慢;单仓多包的依赖去重。
+- 机制:解析结果与转译产物缓存、一个二进制内置运行时与打包器、workspace 把仓内包按名字互相链接、`bun build --compile` 出单文件可执行。
+- cx 差距:冷启动每单元重付前导与模型解码(E8);单元产物无跨程序复用(A8 读数 4)。
+- 取:(1) 按内容寻址缓存每单元前端结果(55-7 b 已立项),键含源、强制头、模型、目标;(2) workspace 的「按名字解析、不靠相对路径与软链」即 CX-U-7 包根,已落地,继续淘汰 7 个目录软链(E1)。
+- 不取:自动安装与 lockfile(cx 无外部包源,包版本在 `build/tlib-packages.tsv`);宽松解析(自动补扩展名、目录 index):与「解析唯一、拒绝具名」相反。
+
+### 11.3 Python(import 系统)[忆]
+
+- 解决的问题:包作为命名空间、公开面声明、初始化顺序。
+- 机制:`__init__.py` 作为包入口并可重导出子模块;`__all__` 限定 `from m import *` 的面;`sys.modules` 以名字为键缓存模块对象(同一文件经两个名字导入会得到两份状态);循环导入得到半初始化模块;下划线前缀是约定而非强制。
+- cx 差距:没有包入口文件(E3);通配无定义(E4)。
+- 取:(1) 包入口 = 只含 export 行的门面模块(P1),对应 `__init__` 的重导出用途,但没有初始化代码;(2) 通配必须受显式面约束:cx 的 P2 只展开带 `module` 行的直接子模块且冲突仍拒,等价于强制的 `__all__`。
+- 引以为戒:按名字而非规范路径判同导致双份模块状态,正是 E1 的缺陷类;cx 取规范路径判同(e576000457)。
+- 不取:导入期执行代码与半初始化模块(cx 模块无顶层执行,环直接拒绝);约定式私有(cx 用 static 与 cxpack 强制);运行期可变的搜索路径(`sys.path`):计划必须可由输入字节复算。
+
+### 11.4 Rust(模块树、可见性、Cargo features)[忆,所有权部分另见 `ref-rust.md` 3.2]
+
+- 解决的问题:可见性分层、重导出稳定门面、按特性裁剪编译面、增量编译。
+- 机制:`mod` 树与 `pub`/`pub(crate)`/`pub(super)`;`pub use` 重导出;crate 是编译与版本单元,crate 间无环;features 是加法式条件编译;增量编译按查询结果的指纹判断是否重算。
+- cx 差距:可见性只有两级(E11);无重导出(E3);哈希只到包(E5)。
+- 取:(1) `pub use` -> P1,语义按 Rust:重导出不复制定义、身份属原主;(2) `pub(crate)` -> P7,以 cxpack 表表达「包内可见」而不加语法;(3) 指纹驱动增量 -> P5,符号级 `sig_sha` 已在表里;(4) 包间无环已有(CX-M-3、层向规则)。
+- 改造:features 不做成源码内条件编译(上层禁平台 `#if`);cx 的等价物是「不稳定项默认不可用,显式开门」(`ref-rust.md` 第 6 节(2)),落在表与棘轮。
+- 不取:glob 导入的遮蔽规则(显式名遮蔽 glob 名):cx 冲突一律拒绝;泛型与 trait 带来的单态化边界;edition(`ref-rust.md` 第 6 节(11))。
+
+### 11.5 QuickJS
+
+- 取其结论(`ref-quickjs.md` 第 6 节):系统面可以小,但 cx 没有宿主语言内建,text/buffer/stream 必须自己成核心层;模块以 C 侧注册表静态登记的做法与 cx 的整程序静态合成同向。不取其「单一 FILE 抽象」。
+
+### 11.6 主线 B:内存安全的诚实清单与增量
+
+cx 现有(均为运行期或约定,不是编译期证明):模块私有状态(static 不出接口,规划期强制);`mg_*`/`ms_*` 所有权合同(CX-O-1..5,调用方合同,不强制);`cm_*` 句柄世代、共享/独占借用、越界拒绝(CX-O-6,`cx/check_memory.cx` 138 条);cxraw、cxtrunc、cxlibc 棘轮(扫描期);`mm_*` 分配器与 arena(`cx/mem/arena.cx`);带长度切片 `ms_slice`(`cx/mem/slice.cx:26`)。
+
+对照:Rust 在编译期证明无释放后使用、无数据竞争、无悬垂借用,运行期没有句柄检查层,`unsafe` 把未证明的部分圈成可审计区块;Python 与 Node 靠引用计数或 GC 保证对象存活,靠运行期边界检查拒绝越界,代价是运行时与停顿,且不防逻辑上的资源泄漏(文件未关)[忆]。cx 没有 GC、没有借用检查器,也不打算把 C99 改成别的语言。
+
+cx 现在能在编译(规划、扫描)期保证的:(1) 模块私有符号不被包外引用(static 与 cxpack);(2) 未声明的跨模块调用被拒(`cxm_checkcalls`,限本程序内定义的函数;该函数只在产品源 `cx/compiler/cxmod.cx:1247`,权威 `cx/cx0/plan.cx` 中 `git grep` 无此名,属三源差异,宿主侧靠编译器 -Werror 兜住);(3) 无 dock 的单元不出现 `#include` 与裸 libc(棘轮加规划器);(4) 模块图无环、公开名不冲突;(5) 层向不上行。以上都是名字与结构性质,不是内存性质。
+
+只能运行期检查的:(1) 过期句柄使用(世代号,概率性隔离,句柄可伪造可复制);(2) 越界(仅经 `cm_*`、`ms_*`、`mg_*` 接口的访问;裸指针运算不受检);(3) 重复释放(仅 `mg_free` 幂等路径);(4) 借用冲突(仅 `cm_*` 的共享/独占计数)。
+
+不声称的:释放后使用的一般性阻止、数据竞争免疫、裸指针别名安全、编译期所有权与借用(CX-W-4 未落地)、线程安全。任何文档不得写「内存安全」。
+
+可落地的增量(每条:类别、版本、一条命令的最小验证):
+
+| 号 | 增量 | 取自 | 类别与版本 | 最小验证实验 |
+|---|---|---|---|---|
+| M1 | unsafe 边界显式化与审计表:dock 模块即 cx 的 unsafe 区;建 `build/dock-audit.tsv`(模块、dock 种类、裸调用符号数、审计人、理由),dock 模块数与裸调用数只降不升 | Rust unsafe 区块 | 非产品输入的工具与表;立即 | `sh ./unisacc.com tools/dock-map.cx` 的模块数与表行数相等(现 56) |
+| M2 | 拥有者标注 pragma:`#pragma unisa owns sym`(返回值由调用方拥有、须交给指定释放函数),先只进接口表列与文档,由 lint 检查「标注了的返回值在同函数内被释放、转移或返回」这一条流不敏感规则 | Rust 所有权、`ref-rust.md` 第 6 节(9) | 表与 lint 为非产品输入(0.0.62 可做);pragma 进规划器属 cxmod 三源,0.0.64 之后;CXIF v1 字段属 CX-W-8 | 对 `cx/mem` 的 `mg_take` 调用点跑 lint,漏放点数入表 |
+| M3 | 句柄代际号推广:`cm_*` 的世代检查模式推广到 `sy_*` 返回的 fd、进程、套接字句柄的库面包装(关闭后使用得到确定的 `-EBADF` 而不是命中被复用的号) | Python/Node 的「已关闭即确定错误」、Rust OwnedFd | 运行库头(新增文件,不改冻结的 cx/sys 既有文件);0.0.62 候选或其后 | 新增 check:关闭后读写 10 类调用全部返回 `-EBADF` |
+| M4 | arena 作用域:`mem.arena`(现有 `ar_new`/`ar_alloc`/`ar_drop`)增加成对的 enter/leave 标记检查(leave 时回滚并使其间句柄世代失效),替代逐块释放 | Rust thread::scope 的「括住生命周期」 | 运行库头(cx/mem,非冻结);0.0.62 候选或其后 | `sh ./unisacc.com cx/check_memory.cx` 新增作用域外使用被拒的断言 |
+| M5 | 带长度字符串视图作为库面:以 `ms_slice` 为准,`tx_*` 新增接口一律取(指针,长度)或切片,不新增以 NUL 结尾为唯一边界的接口;不加语法 | Rust &str、Node Buffer | 表规则为非产品输入(立即);新接口属运行库头 | `build/std-surface.tsv` 新增行中无长度参数的指针形参数为 0(lint) |
+| M6 | 编译期可证明性质的扩面只走规划器的结构性拒绝(如「标注为独占的句柄不得出现在两个模块的静态存储里」),不做流敏感借用检查 | Rust 借用检查的可负担子集 | cxmod 三源;不早于 0.0.65,先出设计 | 设计稿每条性质配一个被拒的最小 `.cx` |
+
+不取:垃圾回收与引用计数运行时(单文件 APE 与 no-libc 下要自带运行时,且改变 C/ASM 内存合同:零写占槽、覆盖前扩容);流敏感借用检查与生命周期标注(需要新语法或属性,宿主 C99 编译器无法忽略后仍同义,且检查器要在三源各实现一遍);把 `cx/owned.cx` 扩成通用所有权系统(CX-O-7 冻结)。
