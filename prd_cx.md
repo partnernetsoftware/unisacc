@@ -515,3 +515,58 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - 所有权措辞:运行期合同与句柄检查三宿主可复验(A6 表);编译期所有权在 CX-W-4 落地前三宿主都写「未声称」。
 - 分治时限:本计划内没有预计超过 5 分钟的单次操作;55-5 的慢车道若实测超限,先登记 `agentwork/phase-times.tsv` 并分解,不放宽时限。
 - 车道:`apps/csih/`、`ujs/` 不改;涉及它们依赖的别名(如 `sys.net`)先发信封。
+
+## 9. 并入:分层、模块与 use、dock、别名与再导出、L0 fmt 与 sig 合同(2026-11-14 并入,批 B3)
+
+来源:plans/cx-layers.md、plans/cx-modules.md、plans/cx-dock-pragma.md、plans/cx-use-alias-reexport.md、plans/cx-l0-fmt-2026-10-30.md、plans/cx-l0-sig-2026-10-30.md、cx/prd.md、docs/cx/prd.md(cx/prd.md 与 docs/cx/prd.md 原文已归档到 archive/plans-cx-2026-11/;六篇 plans/cx-*.md 仍被 cx/sys、cx/core、include/、ARCHITECTURE.md、prd_cx_spec.md 等写域外文件引用,check-archive-refs 会失败,故本批暂不归档,待引用改完再动;历史施工记录与 closure-once 设计过程留在原文,本节只收仍有效的规则)。原则:每条标已核对的源码路径;核不到的不并入。
+
+### 9.1 分层与层向规则
+来源 plans/cx-layers.md「层」「只有底层能用 include」「三个检查表」。已核对:cx/sys、cx/mem(arena bytes grow heap map slice vec)、cx/text(build codec conv deflate edit fmt iter num text utf8) 目录存在;build/layer-api/cx.sys.tsv 等为包面登记。
+- 层就是目录:cx/sys、cx/mem、cx/text 整体是 L0(宿主对接,可 include 与直调 libc/POSIX);cx/core、cx/runtime 是 L1;cx/driver、cx/compiler、src/ 是 L2;tools、tests、apps 是 L3。
+- 上层不写 `#include`、不直调 libc/POSIX(走 sy_* mm_* tx_*)、不写平台 `#if` 与 `__syscallN`;跨模块错误只返回 `-errno`(spec CX-Y-1..4,cx/spec.md)。产品代码严格按此;tools/tests 脚本输出允许 printf(见 9.3 判据)。
+- 许可表现状:原文的两张目录白名单(tests/cxraw-layers.tsv、tests/cxinclude-boundary.tsv)现仍在库中,但 tests/cxraw.cx、cxlibc.cx、cxplatform.cx、cxinclude.cx 已改为先读文件内 dock 声明(核对:这四个文件的注释均写 "Per plans/cx-dock-pragma.md");以 9.3 为准,原文"只看 TSV"已过时。
+- 棘轮扫描面:`git ls-files` 下 `*.cx`、`cx/**/*.c|.h|.c.in`,排除 archive;src/、exec/、tools/ 的宿主 C 不在分层叙事内。一次跑 `tools/ratchets.cx`。
+- 不并入:原文 closure-once 施工图、cli.cx 收敛阻塞链、各「已落地」流水(过时或为历史;见归档)。
+
+### 9.2 模块与 use 语法
+来源 plans/cx-modules.md 前部(需求、产品面、阶段 CX0..CX4、红线)。已核对:cx/compiler/cxmod.cx(cxm_directive 解析 module/use/dock)、cx/spec.md(CX-G-1、CX-W-3)。
+- `.cx` 逐步改造为无 `#include` 的模块,API 由 unisacc 提供;`#pragma unisa module NAME`、`#pragma unisa use a.b`(NAME 是模块路径 seg(.seg)*,seg=[a-z_][a-z0-9_]*,不是符号名)。pragma 之外不新增 C 关键字,宿主 gcc/clang 忽略整行(gcc_cx/clang_cx 的前提)。
+- 命名空间:两个被 use 的模块导出同名符号 -> 拒绝(tests/cx-namespace.cx 锁定);模块循环拒绝。
+- 不并入:原文第 133..164 节为 2026-10-30 入口候选的逐日构造记录(历史,见归档);阶段表以本文件第 8 节为准。
+
+### 9.3 dock pragma
+来源 plans/cx-dock-pragma.md。已核对:cx/compiler/cxmod.cx 第 535 行识别 `dock`;cx/sys/sig.cx 头部有 `#pragma unisa dock`;tests/cxraw.cx、cxlibc.cx、cxplatform.cx、cxinclude.cx 读 dock;tools/dock-map.cx 引用判据。
+- 语法 `#pragma unisa dock [libc|include]`:裸 dock 允许 `#include` 与裸 libc/POSIX;`dock include` 只允许 include;`dock libc` 只允许裸调。
+- 规则:无 dock 的单元出现 `#include` 或裸 libc 符号 -> 拒绝(`dock required for ...`)。上层模块可 use dock 模块。产品路径里出现 dock 须人工审。
+- 判据(2026-11-04 已定):只有声明了 `#pragma unisa module`、或被他单元 `use` 的单元才是"模块",才受 dock 约束;tools/tests 里既非模块也未被 use 的纯脚本不受约束,printf 自由。tools/cxlib/*、tools/cxcc.cx、tools/cxproc.cx 等被 use 的仍按模块处理。
+- 三源一致:cx/cx0/plan.cx(权威)、src/cxmod.c(投影)、cx/compiler/cxmod.cx;改一处须 cx0-extract --check 报 EXACT。
+- 未并入:原文"落点/迁移"计划表(已执行或已演变),待办中的"白名单 TSV 废弃"未核到完成,仍视为未完成项。
+
+### 9.4 use 别名、符号级导入与再导出
+来源 plans/cx-use-alias-reexport.md。已核对:cx/compiler/cxmod.cx 第 523 行解析 `as`、第 862 行输出 `sym as alias`;cx/spec.md 第 252 行 CX-W-3。
+- 已落地:`#pragma unisa use NAME::sym [as alias]`(符号级导入与别名),`::` 只在 pragma 行内;同名函数经别名或符号级导入消解冲突;三源(plan.cx、src/cxmod.c、cxmod.cx)一致。
+- 未落地:`export`(重导出,CX-W-3)。cxmod.cx 无 `"export"` 识别,与 spec 一致。
+- 已知边界:多单元用不同别名 use 同一模块时只存一份改名源码(单版本假设);未导入函数体仍被编译,仅改成唯一名避免链接冲突;传递 use 的符号级过滤不追踪。
+- 未核:原文"产品 unisacc.com 尚未重编因而两个用例 FAIL"是 2026-10-31 状态,已过时,未并入。
+
+### 9.5 L0 fmt、num、io 合同(2026-10-30 csih 车道需求)
+来源 plans/cx-l0-fmt-2026-10-30.md。已核对:cx/text/fmt.cx(tx_snprintf)、cx/text/num.cx(tx_atol、tx_strtol、tx_strtoul、tx_strtod 与 _r 版)、build/layer-api/cx.sys.tsv(sy_printf、sy_isatty、sy_fd_cloexec);tools/check-cx-fmt.cx 与批次 cx-l0-fmt 存在。
+- text.fmt:tx_snprintf、tx_vsnprintf 与 snprintf 逐字节等价(截断、NUL 结尾、返回完整长度、cap 为 0 时 dst 可空);cx_fmt 溢出会清空 dst,不能替代。
+- text.num:tx_atol、tx_strtol、tx_strtoul、tx_strtod 对齐 libc;errno 每单元一份、不跨模块,要判越界必须用 `_r` 版(0、-EINVAL、-ERANGE 经返回值)。迁移 `errno=0; strtol; errno==ERANGE` 写法须改 `_r`,不能只换函数名。
+- sys.io:sy_printf、sy_eprintf、sy_vprintf、sy_veprintf、sy_puts、sy_fd_nonblock、sy_fd_cloexec(0 或 -errno,Windows -ENOSYS)、sy_isatty(1 或 0)、sy_strerror;sys.env:sy_euid。标准流前导不缓冲,sy_* 与残留 printf 交错顺序一致。
+- 未并入:原文检查数字(38 条、candidate 哈希)为当日实测,不并入;现状以 `tools/check-cx-fmt.cx` 实跑为准(本批未实跑,标 UNMEASURED)。
+
+### 9.6 L0 sig、atexit、symlink、setpgid 合同
+来源 plans/cx-l0-sig-2026-10-30.md。已核对:build/layer-api/cx.sys.tsv 含 sy_sig_handle、sy_sig_default、sy_raise、sy_atexit、sy_exit;cx/sys/sig.cx 头部说明、cx/sys/fs.cx(sy_symlink)、cx/sys/proc.cx(sy_setpgid);tools/check-cx-sys-sig.cx 存在。
+- 前导 signal/sigaction 只填进程内表,不进内核;sy_sig_handle 经 rt_sigaction 真正注册(SA_RESTART),返回 0 或 -errno(越界、SIGKILL/SIGSTOP、空 fn 为 -EINVAL),macOS 与 Windows 为 -ENOSYS;sy_sig_default、sy_sig_ignore、sy_raise 同为 0 或 -errno。
+- 处理函数入口:tape ABI 与平台 C ABI 不同,不能直接把函数地址交内核;运行时映射一页 thunk 再转 syg_dispatch;arm64 用 sigaltstack(256 KiB)加 SA_ONSTACK。macOS 不提供处理函数。
+- sy_atexit/sy_exit:模块自带表,最多 32 项,后进先出;只在 main 返回(模块析构链)或 sy_exit 时运行;别的单元 exit、_exit、信号致死不运行;表满 -ENOMEM。
+- sy_symlink:0 或 -errno,空参 -EINVAL,已存在 -EEXIST,允许悬空,Windows -ENOSYS。sy_setpgid:原始系统调用,不是前导转发;-EINVAL/-ESRCH/-EACCES/-EPERM 语义见原文归档。
+- 限制:errno 每单元一份,处理函数调用本单元前导函数应自存自恢复;arm64 备用栈只设给第一个注册线程。未实跑项:osx 与 win 只编到 tape/二进制,未执行。
+
+### 9.7 扩展约定与宿主 .com 要求(并入自 cx/prd.md 与 docs/cx/prd.md 的有效部分)
+已核对:tools/build-cxcc-ape.cx、tools/cxproc.cx 存在。
+- 语言扩展继续只走 `#pragma`(宿主按标准忽略不认识的 pragma);声明级事实将来可加 C23 `[[unisa::...]]` 属性,现在不加;旁路文件只放层号、生成表、条款,不放 `use`;新关键字、宏库、注释契约不能作本树约定。
+- gcc_cx.com 与 clang_cx.com 必须是同一份六格 APE(win/lnx/osx x x86_64/arm64),打包五份切片(win/arm64 复用 win/x86_64 的 PE);构建入口 `sh ./unisacc.com -run tools/build-cxcc-ape.cx`。没有 use 时直接交系统编译器(`-std=c99 -x c -include include/cx.h`);宿主不实现 `-run`。尺寸与字节数为旧快照,不并入。
+- tools/cxproc.cx 是按需模块(导出 cxproc_run);包清单 cxpack.tsv 把导入身份钉到路径;CXIF v0 文法见 archive/plans/2026-10-28/cxif-v0.md。
+- 未实现:编译期所有权(spec 第 5 节)、非本机切片未在 Windows/OSX 上执行。
