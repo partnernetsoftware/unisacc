@@ -2178,6 +2178,64 @@ static void chain_paths(const char *root, const char *rev, char *snap) {
         cx_fmt(chain_work,sizeof chain_work,"%s/out/chain",snap)) die("path","chain workspace");
 }
 
+/* 起链环境白名单:build/chain-env.tsv(name policy reason,"*" 为未登记 UNISACC_* 的默认)。
+   环境里出现 deny 或未登记的 UNISACC_* 变量、或缺 require 变量,在任何构造之前 rc 2。 */
+static void chain_env_gate(const char *root, const char *outdir) {
+    char path[4500], defreason[300] = "未登记", reasons[16][300];
+    char *tb, **ev = sy_env_vec();
+    size_t tn = 0;
+    int defdeny = 1, nreq = 0, e;
+    const char *req[16];
+    if (cx_fmt(path, sizeof path, "%s/build/chain-env.tsv", root) || !(tb = cx_read(path, &tn))) die("REFUSE chain-env table unreadable", path);
+    for (size_t p = 0; p < tn;) {
+        char *le = memchr(tb + p, '\n', tn - p), *line = tb + p, *f1, *f2;
+        size_t ll = le ? (size_t)(le - line) : tn - p;
+        p += ll + 1;
+        if (!ll || !strncmp(line, "name\t", 5)) continue;
+        line[ll] = 0;
+        f1 = strchr(line, '\t'); if (!f1) continue;
+        *f1++ = 0; f2 = strchr(f1, '\t'); if (!f2) continue;
+        *f2++ = 0;
+        if (!strcmp(line, "*")) { defdeny = !strcmp(f1, "deny"); if (cx_fmt(defreason, sizeof defreason, "%s", f2)) die("REFUSE chain-env reason too long", line); continue; }
+        if (!strcmp(f1, "require") && nreq < 16) { req[nreq] = strdup(line); if (cx_fmt(reasons[nreq], sizeof reasons[0], "%s", f2)) die("REFUSE chain-env reason too long", line); nreq++; }
+    }
+    for (e = 0; ev && ev[e]; e++) {
+        const char *s = ev[e], *eq = strchr(s, '=');
+        char nm[160]; size_t nl = eq ? (size_t)(eq - s) : strlen(s);
+        char *tb2; size_t q = 0, tn2 = 0; int found = 0;
+        if (strncmp(s, "UNISACC_", 8) || nl >= sizeof nm) continue;
+        if (mm_copy(nm, sizeof nm, s, nl)) continue;
+        nm[nl] = 0;
+        tb2 = cx_read(path, &tn2);
+        while (tb2 && q < tn2) {
+            char *le = memchr(tb2 + q, '\n', tn2 - q), *line = tb2 + q, *f1, *f2;
+            size_t ll = le ? (size_t)(le - line) : tn2 - q;
+            q += ll + 1;
+            if (!ll) continue;
+            line[ll] = 0;
+            f1 = strchr(line, '\t'); if (!f1) continue;
+            *f1++ = 0; f2 = strchr(f1, '\t'); if (!f2) continue;
+            *f2++ = 0;
+            if (strcmp(line, nm)) continue;
+            found = 1;
+            if (!strcmp(f1, "deny")) { fprintf(stderr, "candidate-chain: REFUSE chain-env %s %s\n", nm, f2); exit(2); }
+            break;
+        }
+        free(tb2);
+        if (!found && defdeny) { fprintf(stderr, "candidate-chain: REFUSE chain-env %s %s\n", nm, defreason); exit(2); }
+    }
+    for (int r = 0; r < nreq; r++) {
+        const char *v = sy_env(req[r]);
+        char ha[4500], hb[4500];
+        if (v && *v) continue;
+        /* 与下游已有门同口径:链内已有预构 identity-helper 时不要求环境变量 */
+        if (!cx_fmt(ha, sizeof ha, "%s/build/identity-helper", outdir) && fsize(ha) >= 0) continue;
+        if (!cx_fmt(hb, sizeof hb, "%s/ctx/identity-helper", outdir) && fsize(hb) >= 0) continue;
+        fprintf(stderr, "candidate-chain: REFUSE chain-env %s missing: %s; REFUSE UNISACC_IDENT_HELPER unset and no prebuilt identity-helper in the chain\n", req[r], reasons[r]);
+        exit(2);
+    }
+    free(tb);
+}
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
@@ -2438,6 +2496,7 @@ int main(int argc, char **argv) {
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (!lane_phase && !recheck_only) {
+        chain_env_gate(root, outdir);
         /* Start gate: three mistakes that cost a whole chain before (real5 died in pack after 3538 s). */
         char srcd[4400], srcgit[4400], helpa[4400], helpb[4400], par[4400], rpar[4400]; int cut = (int)strlen(outdir);
         while (cut > 1 && outdir[cut - 1] == '/') cut--;
