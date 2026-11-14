@@ -74,6 +74,46 @@ int main(void) {
             i = dv_expand(&n, sources, 0);
             if (i || n != 2) { printf("FAIL\tsymlink-one-module\trc=%d\tunits=%d\n", i, n); failed++; } else puts("PASS\tsymlink-one-module");
         }
+        /* two lexical entries of one module merge only when their own use names resolve to the same files
+           beside both entries (cxm_deps_same, as cx/cx0/plan.cx): a dependency beside the shared directory
+           is accepted, a dependency neither entry has beside it (package root on both sides) is refused. */
+        if (made) {
+            made = 0;
+            tx_snprintf(p, sizeof p, "%s/real/dep.cx", base); f = fopen(p, "w");
+            if (f) { fputs("#pragma unisa module dep\nint md_v(void){return 4;}\n", f); made = !fclose(f); }
+            tx_snprintf(p, sizeof p, "%s/real/env2.cx", base); f = made ? fopen(p, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa module env2\n#pragma unisa use dep\nint me2_same(void){return md_v();}\n", f); made = !fclose(f); }
+            tx_snprintf(p, sizeof p, "%s/pkdir", base); made = made && !mkdir(p, 0700);
+            tx_snprintf(p, sizeof p, "%s/pkdir/leaf.cx", base); f = made ? fopen(p, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa module leaf\nint pl_v(void){return 5;}\n", f); made = !fclose(f); }
+            tx_snprintf(p, sizeof p, "%s/cxroot.tsv", base); f = made ? fopen(p, "w") : 0; made = 0;
+            if (f) { fputs("CXROOT1\nR\tpk\tpkdir\n", f); made = !fclose(f); }
+            tx_snprintf(p, sizeof p, "%s/real/env3.cx", base); f = made ? fopen(p, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa module env3\n#pragma unisa use pk.leaf\nint me3_same(void){return pl_v();}\n", f); made = !fclose(f); }
+            tx_snprintf(mainp, sizeof mainp, "%s/main2.cx", base); f = made ? fopen(mainp, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa use real.env2\n#pragma unisa use link.env2\nint main(void){return me2_same();}\n", f); made = !fclose(f); }
+            tx_snprintf(q, sizeof q, "%s/main3.cx", base); f = made ? fopen(q, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa use real.env3\n#pragma unisa use link.env3\nint main(void){return me3_same();}\n", f); made = !fclose(f); }
+            tx_snprintf(p, sizeof p, "%s/main4.cx", base); f = made ? fopen(p, "w") : 0; made = 0;
+            if (f) { fputs("#pragma unisa use real.env3\nint main(void){return me3_same();}\n", f); made = !fclose(f); }
+            if (!made) { puts("FAIL\tsymlink-deps-fixture"); failed++; }
+            else {
+                sources[0] = mainp; n = 1; i = dv_expand(&n, sources, 0);
+                if (i || n != 3) { printf("FAIL\tsymlink-deps-beside-merged\trc=%d\tunits=%d\n", i, n); failed++; } else puts("PASS\tsymlink-deps-beside-merged");
+                sources[0] = p; n = 1; i = dv_expand(&n, sources, 0);
+                if (i || n != 3) { printf("FAIL\tsymlink-deps-root-single-entry\trc=%d\tunits=%d\n", i, n); failed++; } else puts("PASS\tsymlink-deps-root-single-entry");
+                sources[0] = q; n = 1; i = dv_expand(&n, sources, 0);
+                if (!i) { printf("FAIL\tsymlink-deps-root-two-entries-refused\tunits=%d\n", n); failed++; } else puts("PASS\tsymlink-deps-root-two-entries-refused");
+            }
+        }
     }
+    /* a real tool whose modules are reached both through tools/cxlib/sys -> cx/sys and through the package
+       root, with their own use dependencies resolved by the package root on both sides, must keep planning */
+    sources[0] = "tools/osx-sentinel.cx"; n = 1;
+    i = dv_expand(&n, sources, 1);
+    if (i || n != 1) { printf("FAIL\tsymlink-root-deps-funit\trc=%d\tunits=%d\n", i, n); failed++; } else puts("PASS\tsymlink-root-deps-funit");
+    sources[0] = "tools/osx-sentinel.cx"; n = 1;
+    i = dv_expand(&n, sources, 0);
+    if (i || n < 2) { printf("FAIL\tsymlink-root-deps-plan\trc=%d\tunits=%d\n", i, n); failed++; } else { printf("PASS\tsymlink-root-deps-plan\tunits=%d\n", n); }
     printf("MODULE_UNITS\tfailed=%d\n", failed); return failed ? 1 : 0;
 }
