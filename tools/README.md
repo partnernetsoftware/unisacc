@@ -28,7 +28,7 @@ sh ./unisacc.com tools/check-edit-span.cx -- [EDIT_SPAN_BINARY]
 python3 tests/update-tools-compile.py /tmp/omp-cdx2-editspan-text-20261109 /tmp/omp-cdx2-editspan-text-20261109-tools-compile-review
 ```
 
-`agentwork/pkg-gaps.tsv`当前缺cc13–15记录，本次不补造、不改动；登记不等于库存或包缺口已闭合。
+`build/pkg-gaps.tsv`当前缺cc13–15记录，本次不补造、不改动；登记不等于库存或包缺口已闭合。
 
 Darwin 时钟常量以 `exec/facts/clock-targets.tsv` 为唯一事实，
 `tools/clock-targets-gen.cx` 维护 `include/time.h` 的标记块。
