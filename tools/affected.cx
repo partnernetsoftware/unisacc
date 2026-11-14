@@ -1059,6 +1059,48 @@ static int iface_direct(const char *rel, int ci) {
     return da >= 0 && da == dc && eqb(a, c, da);
 }
 
+/* --symbol-narrow SYMS (needs --iface-narrow on): SYMS is a comma list of functions whose bodies changed (signatures
+   did not; a signature change is the package-level interface probe's job).  Of the batches iface narrowing keeps,
+   only those whose source/entry use-closure contains a file calling one of SYMS (per tools/symindex.cx calls) stay
+   AFFECTED; the rest print DEFERRED_BY_SYMBOL.  No symbol sites found, or an unparsed node, keeps the batch. */
+static const char *sym_list;
+static char sym_state[MAXNODE]; static int sym_stamp[MAXNODE], sym_cur, sym_on;
+static int sym_reach(int ni) {
+    int k;
+    if (ni < 0 || sym_stamp[ni] == sym_cur) return 0;
+    sym_stamp[ni] = sym_cur;
+    if (sym_state[ni]) return 1;
+    if (!node[ni].parsed) return 1;
+    for (k = 0; k < node[ni].nuse; k++) if (sym_reach(node[ni].use[k])) return 1;
+    return 0;
+}
+static int sym_batch(const char *src, const char *entry) {
+    int ni = path_node(src, 0);
+    sym_cur++;
+    if (ni < 0 || sym_reach(ni)) return 1;
+    if (tx_chr(entry, tx_len(entry, 4096), '{') < 0) { int ei = path_node(entry, 0); if (ei < 0 || sym_reach(ei)) return 1; }
+    return 0;
+}
+/* mark every file calling a symbol of SYMS; returns the number of call sites (0 = cannot narrow) */
+static int sym_load(const char *syms) {
+    char *v[] = {"sh", "./unisacc.com", "tools/symindex.cx", "--", "calls", (char *)syms, "--tracked", 0}; Buf o = {0, 0, 0}; long at = 0; int n = 0;
+    if (read_all(v, &o) != 0) return 0;
+    while (at < o.n) {
+        long ln = 0, c = 0;
+        while (at + ln < o.n && o.p[at + ln] != '\n') ln++;
+        while (c < ln && o.p[at + c] != ':' && o.p[at + c] != '\t') c++;
+        if (c > 0 && c < ln && o.p[at + c] == ':' && o.p[at] != 'N' && o.p[at] != 'S' && c < 600) {
+            char path[600]; long i; int ni;
+            for (i = 0; i < c; i++) path[i] = o.p[at + i];
+            path[c] = 0; ni = path_node(path, 0);
+            if (ni >= 0) sym_state[ni] = 1;
+            n++;
+        }
+        at += ln + 1;
+    }
+    return n;
+}
+
 static int closure_dump;
 static int materials_dump;  /* --materials-dump: report each declared material's resolved source and stop */
 static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
@@ -1101,6 +1143,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
         else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
         else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
+        else if (tx_eqz(argv[a], "--symbol-narrow") && a + 1 < argc) { sym_list = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--iface-stale") && a + 1 < argc) { iface_stale = argv[a + 1]; a += 2; }   /* test hook: one package's probe fails */
         else if (tx_eqz(argv[a], "--iface-verdict") && a + 1 < argc) {   /* test hook */
             iface_verdict = argv[a + 1]; a += 2;
@@ -1211,8 +1254,13 @@ int main(int argc, char **argv) {
             if (iface_narrow && (iface_full || (selected_tier && tx_eqz(selected_tier, "release")))) die("iface narrowing reached a full-selection path");
             printf("IFACE_NARROW\tstate=%s\treason=%s\n", state, reason);
         }
+        if (sym_list) {
+            const char *sreason = "not-iface-narrowed";
+            if (iface_narrow) { if (sym_load(sym_list) > 0) { sym_on = 1; sreason = "sites-found"; } else sreason = "no-call-sites"; }
+            printf("SYMBOL_NARROW\tstate=%s\treason=%s\tsymbols=%s\n", sym_on ? "on" : "off", sreason, sym_list);
+        }
     }
-    int ndefer = 0;
+    int ndefer = 0, nsymdefer = 0;
     {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
         /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
         for (b = 0; b < nbatch; b++) {
@@ -1237,6 +1285,10 @@ int main(int argc, char **argv) {
                 printf("DEFERRED_BY_IFACE\t%s\twhy=%s\tvia=%s\treason=interface-unchanged\n", batch[b].id, display(why), via_name[v]);
                 ndefer++; continue;
             }
+            if (sym_on && (v == V_USE || v == V_LITUSE || v == V_ARGUSE) && !batch_has_guard(batch[b].id) && !sym_batch(batch[b].source, batch[b].entry)) {
+                printf("DEFERRED_BY_SYMBOL\t%s\twhy=%s\tvia=%s\treason=symbol-unreferenced\n", batch[b].id, display(why), via_name[v]);
+                nsymdefer++; continue;
+            }
             printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
         }
@@ -1245,7 +1297,8 @@ int main(int argc, char **argv) {
                 t_mark, t_match, t_sweep < 0 ? 0 : t_sweep, nbatch, nnode, nch);
         fprintf(stderr, "LIST_TIMING2\tparse_ms=%ld\twalk_ms=%ld\n", t_parse, t_walk);
     }
-    if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel, ndefer + nsel);
+    if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel + nsymdefer, ndefer + nsel + nsymdefer);
+    if (sym_on) printf("DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", nsymdefer, nsel, ndefer + nsymdefer + nsel);
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }

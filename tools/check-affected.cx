@@ -171,7 +171,7 @@ int main(int argc, char **argv) {
         for (k = 1; k < argc; k++) {
             if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
             /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
-            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym")) { part_wanted = argv[k]; continue; }
             if (tx_eqz(argv[k], "--")) continue;
             printf("usage: check-affected.cx [--part all|tiers|list|list2|run|depth]\n");
             return 2;
@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
     }
     if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
-    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
@@ -427,6 +427,47 @@ int main(int argc, char **argv) {
         {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-stale", "cx.sys", 0};
             rc = tool(a, q2, OUTCAP);
             ck(rc == 0 && !has(q2, "IFACE_NARROW") && num(q2, "\tbatches=") == fullt, "iface-pkg-no-switch-no-narrow");
+        }
+    }
+    if (want("sym")) {   /* --symbol-narrow: function-body change; only batches whose use-closure calls the symbol stay */
+        long fullt, ifs, ss, sd;
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches=");
+            ck(rc == 0 && fullt >= 100 && !has(o, "DEFERRED_BY_SYMBOL") && !has(o, "SYMBOL_NARROW"), "sym-default-prints-nothing");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", 0};
+            rc = tool(a, p, OUTCAP); ifs = num(p, "\tbatches=");
+            ck(rc == 0 && ifs > 0 && ifs < fullt && !has(p, "DEFERRED_BY_SYMBOL"), "sym-iface-only-prints-no-symbol-line");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q, OUTCAP); ss = num(q, "\tbatches="); sd = num(q, "DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=");
+            ck(rc == 0 && has(q, "SYMBOL_NARROW\tstate=on\treason=sites-found\tsymbols=tx_upper\n"), "sym-rare-symbol-on");
+            ck(ss > 0 && ss < ifs, "sym-rare-selects-fewer-than-iface");
+            ck(sd > 0 && lines(q, "DEFERRED_BY_SYMBOL\t", 19) == sd, "sym-every-deferral-listed");
+            ck(ss + sd == ifs, "sym-selected-plus-deferred-equals-iface-selection");
+            ck(has(q, "\trerun=--full\n") && num(q, "\tfull=") == fullt, "sym-summaries-name-full");
+            ck(lines(q, "AFFECTED\t", 9) == ss, "sym-affected-lines-equal-summary");
+            ck(!has(q, "\tvia=source\treason=symbol") && !has(q, "\tvia=guard\treason=symbol"), "sym-defers-use-edges-only");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_find", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && num(q2, "\tbatches=") + num(q2, "DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=") == ifs, "sym-common-symbol-conserves");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "changed", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off\treason=not-iface-narrowed") && num(q2, "\tbatches=") == fullt && !has(q2, "DEFERRED_BY_SYMBOL"), "sym-signature-change-stays-package-level-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--full", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off") && num(q2, "\tbatches=") == fullt, "sym-full-overrides");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--tier", "release", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off") && !has(q2, "DEFERRED_BY_SYMBOL"), "sym-release-tier-stays-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_no_such_function_zz", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off\treason=no-call-sites") && num(q2, "\tbatches=") == ifs, "sym-no-sites-keeps-iface-selection");
         }
     }
     printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);
