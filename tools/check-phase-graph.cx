@@ -1,0 +1,127 @@
+/* tools/check-phase-graph.cx -- tools/phase-graph.cx 的夹具检查: 自造小相表(菱形依赖、族并发、加权与计数路径不同),
+ * 并验证环/缺失依赖/重复 id/短行/坏数字/缺文件的拒绝. sh ./unisacc.com tools/check-phase-graph.cx [-- ROOT OUT] */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096], work[4400], bin[4400];
+static char *last;
+static size_t lastn;
+
+static int has(const char *needle) {
+    long nl = tx_len(needle, 512);
+    for (long i = 0; last && i + nl <= (long)lastn; i++) if (mm_same(last + i, needle, nl)) return 1;
+    return 0;
+}
+
+static void ck(int ok, const char *name) {
+    if (!ok) { failed++; if (last) sy_printf("%s", last); }
+    sy_printf("%s\tphase-graph.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run(const char *a, const char *b, const char *c, const char *d) {
+    char *v[8];
+    int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    v[k++] = bin;
+    if (a) v[k++] = (char *)a;
+    if (b) v[k++] = (char *)b;
+    if (c) v[k++] = (char *)c;
+    if (d) v[k++] = (char *)d;
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+static int put(const char *name, const char *text, char *out) {
+    if (cx_fmt(out, 4800, "%s/%s", work, name)) return -1;
+    return cx_write(out, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+#define HDR "# order\tid\texclusive_dir\ttimeout_s\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n"
+#define ROW(o, id, dir, to, deps, par) o "\t" id "\t" dir "\t" to "\t" deps "\t-\t" par "\t-\t-\t-\n"
+
+int main(int argc, char **argv) {
+    char src[4400], okp[4800], wp[4800], cyc[4800], mis[4800], dup[4800], shr[4800], bad[4800], slf[4800], inp[4800], nofile[4800];
+    int rc, own = 0;
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) { (void)sy_mkdir(argv[2], 0755); if (cx_fmt(work, sizeof work, "%s/phase-graph-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2; }
+    else { if (cx_fmt(work, sizeof work, "%s/check-phase-graph-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2; own = 1; }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/phase-graph.cx", root) || cx_fmt(bin, sizeof bin, "%s/phase-graph.native", work) ||
+        cx_fmt(nofile, sizeof nofile, "%s/absent.tsv", work)) return 2;
+    { char why[256]; if (tq_native(root, src, bin, why, sizeof why)) { sy_printf("FAIL\tphase-graph.build-native\t%s\n", why); return 1; } }
+    put("ok.tsv", HDR "# generated\n"
+        ROW("0", "a", "outer", "10", "-", "1")
+        ROW("1", "b", "outer", "20", "a", "1")
+        ROW("2", "c", "outer", "5", "a", "1")
+        ROW("3", "d", "outer", "7", "b,c", "1")
+        ROW("4", "x-0", "outer", "3", "d", "1")
+        ROW("5", "x-1", "outer", "3", "x-0", "1")
+        ROW("6", "y-0", "L", "4", "d", "4")
+        ROW("7", "z-0", "outer", "2", "d", "1"), okp);
+    put("w.tsv", HDR
+        ROW("0", "a", "outer", "1", "-", "1")
+        ROW("1", "b", "outer", "1", "a", "1")
+        ROW("2", "c", "outer", "1", "b", "1")
+        ROW("3", "h", "outer", "100", "a", "1")
+        ROW("4", "t-start", "outer", "1", "c,h", "1")
+        ROW("5", "t-finish", "outer", "1", "t-start", "1"), wp);
+    put("cyc.tsv", HDR ROW("0", "p", "outer", "1", "q", "1") ROW("1", "q", "outer", "1", "p", "1"), cyc);
+    put("slf.tsv", HDR ROW("0", "p", "outer", "1", "p", "1"), slf);
+    put("mis.tsv", HDR ROW("0", "p", "outer", "1", "-", "1") ROW("1", "q", "outer", "1", "p,ghost", "1"), mis);
+    put("dup.tsv", HDR ROW("0", "p", "outer", "1", "-", "1") ROW("1", "p", "outer", "1", "-", "1"), dup);
+    put("shr.tsv", HDR "0\tp\touter\t1\t-\n", shr);
+    put("bad.tsv", HDR ROW("0", "p", "outer", "x1", "-", "1"), bad);
+    put("inp.tsv", "# id\tinputs\nb\tphase:a,src:cx/**,table:t.tsv\nc\tphase:a,src:cx/**,table:u.tsv\nx-0\tphase:d,src:tools/**\nz-0\tphase:d,src:tools/**,table:t.tsv\n", inp);
+    rc = run(okp, 0, 0, 0);
+    ck(rc == 0, "ok-rc0");
+    ck(has("PHASES\tn=8\touter=7\tpar4=1\tdomains=2\n"), "summary-line");
+    ck(has("CRITICAL_PATH\tphases=5\tweight_s=43\tbasis=timeout_s_upper_bound\tper_phase_wall=UNMEASURED\n"), "critical-path-count-and-weight");
+    ck(has("OUTER_ON_CRITICAL\tn=5\n"), "outer-on-critical");
+    ck(has("CRITICAL_WEIGHTED\tweight_s=43\tphases=5\t"), "weighted-same-path");
+    ck(has("DEPS_ONLY_MAX_WIDTH\tlevel=3\twidth=3\n"), "max-width-level3");
+    ck(has("CRITICAL_SEG\tx\t2\t2\n") && has("CRITICAL_SEG\ta\t1\t1\n"), "segments-fold-family");
+    ck(has("FAMILY\tx\t2\touter\n") && has("FAMILY\tz\t1\touter\n") && !has("FAMILY\ty"), "families-outer-only");
+    ck(has("CONCURRENT_CANDIDATE\tb\tc\tunordered=1\tof=1\tfull=Y\tverdict=UNVERIFIED\tshared_inputs=NOINPUTS\n"), "pair-b-c-unordered");
+    ck(has("CONCURRENT_CANDIDATE\tx\tz\tunordered=2\tof=2\tfull=Y\t"), "pair-x-z-unordered");
+    ck(!has("CONCURRENT_CANDIDATE\ta\t") && !has("CONCURRENT_CANDIDATE\td\t"), "ordered-families-not-candidates");
+    ck(!has("CONCURRENT_CANDIDATE\tb\tx\t") && !has("CONCURRENT_CANDIDATE\tc\tz\t") && has("CONCURRENT_SUMMARY\tpairs=2\tshown=2\t"), "branch-ordered-via-d-not-candidates");
+    ck(has("FAMILY_ORDER_EDGE\ta\tb\t") && has("FAMILY_ORDER_EDGE\td\tz\t") && !has("FAMILY_ORDER_EDGE\tx\tx\t") && has("FAMILY_ORDER_SUMMARY\tedges=6\n"), "order-edges");
+    rc = run(okp, inp, 0, 0);
+    ck(rc == 0 && has("CONCURRENT_CANDIDATE\tb\tc\tunordered=1\tof=1\tfull=Y\tverdict=UNVERIFIED\tshared_inputs=src:cx/**\n"), "inputs-shared-src");
+    ck(has("CONCURRENT_CANDIDATE\tx\tz\tunordered=2\tof=2\tfull=Y\tverdict=UNVERIFIED\tshared_inputs=src:tools/**\n"), "inputs-shared-src-xz");
+    rc = run(okp, "--pairs", "0", 0);
+    ck(rc == 0 && !has("CONCURRENT_CANDIDATE") && has("CONCURRENT_SUMMARY\tpairs=") && has("shown=0\twrites=UNDECLARED"), "pairs-zero-shows-none");
+    rc = run(wp, 0, 0, 0);
+    ck(rc == 0 && has("CRITICAL_PATH\tphases=5\tweight_s=5\t") && has("CRITICAL_WEIGHTED\tweight_s=103\tphases=4\t"), "weighted-differs-from-count");
+    ck(has("FAMILY\tt\t2\touter\n"), "start-finish-family-fold");
+    rc = run(cyc, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tcycle\t"), "cycle-refused");
+    rc = run(slf, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tcycle\tp"), "self-dep-refused");
+    rc = run(mis, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tmissing-dep\tq\tghost\n"), "missing-dep-refused");
+    rc = run(dup, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tduplicate-id\tp\n"), "duplicate-id-refused");
+    rc = run(shr, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tshort-row\t"), "short-row-refused");
+    rc = run(bad, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tbad-number\tp\n"), "bad-number-refused");
+    rc = run(nofile, 0, 0, 0);
+    ck(rc == 3 && has("PHASE_GRAPH_REFUSE\tunreadable\t"), "missing-file-refused");
+    rc = run(0, 0, 0, 0);
+    ck(rc == 2, "no-args-rc2");
+    rc = run(okp, inp, "extra", 0);
+    ck(rc == 2, "extra-arg-rc2");
+    if (own) cx_rmtree(work);
+    sy_printf("CHECK_PHASE_GRAPH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
