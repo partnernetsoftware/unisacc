@@ -1,0 +1,334 @@
+/* tools/sweep-plan.cx -- read-only plan for the post-release sweep of cache and temp directories.
+ *
+ *   sh ./unisacc.com tools/sweep-plan.cx                       plan for this machine
+ *   sh ./unisacc.com tools/sweep-plan.cx -- [--tmp DIR] [--home DIR] [--uid N] [--repo DIR] [--job-dir DIR]
+ *                                           [--chain-root PATH] [--keep-bootstrap VER] [--min-age-s N] [--ref PATH]...
+ *
+ * Output is TSV: CATEGORY PATH BYTES OLDEST_MTIME NEWEST_MTIME IN_USE ACTION REASON, then one SUMMARY line with the
+ * reclaimable bytes (the sum over DELETE rows only; ASK rows are counted separately).  The tool never removes
+ * anything: it is the input to a human or agent decision, and a deletion is done afterwards with cx_rmtree.
+ *
+ * Categories: tmp (TMP/unisacc-* and TMP/ua-*), e3cache (TMP/unisacc-e3cache-UID), cache (HOME/.cache/unisacc, with
+ * chains/ split one level down), job (JOBDIR/tmp, this job only), out (REPO/out), build (ignored files under REPO/build,
+ * asked of git).  KEEP is decided before anything else: the in-flight chain root (and its ancestors), borrowed-cm,
+ * ident-helper, bootstrap-VER, release artifacts (names starting "release"), and every path that a live process
+ * references (its cmdline tokens, cwd, or an open fd, read from /proc; --ref adds a path by hand).  A path whose
+ * newest mtime is younger than --min-age-s (default 3600) is ASK, not DELETE.  Every DELETE row says how to get it
+ * back.  Sizes are apparent bytes (lstat), symlinks are not followed. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use text.fmt
+
+#define SP_PATH 4096
+#define SP_DEPTH 8
+#define SP_REFS (1 << 21)
+
+static char nbuf[SP_DEPTH][1 << 19];
+static char refs[SP_REFS];
+static long refs_len;
+static int refs_over, uid_over = -1;
+static char chain_root[SP_PATH], bs_keep[128], tmp_dir[SP_PATH], home_dir[SP_PATH], repo_dir[SP_PATH], job_dir[SP_PATH];
+static long min_age = 3600, reclaim, ask_bytes, n_del, n_ask, n_keep;
+
+static void ref_add(const char *s, long n) {
+    long i;
+    if (n <= 0 || n >= SP_PATH) return;      /* tx_len caps at SP_PATH: a longer token cannot be a path of ours */
+    if (refs_len + n + 1 > SP_REFS) { refs_over = 1; return; }
+    for (i = 0; i < n; i++) refs[refs_len + i] = s[i];
+    refs[refs_len + n] = 0;
+    refs_len += n + 1;
+}
+
+static void ref_add_z(const char *s) { ref_add(s, tx_len(s, SP_PATH)); }
+
+static int all_digits(const char *s) {
+    int i;
+    if (!s[0]) return 0;
+    for (i = 0; s[i]; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+/* Everything a live process points at: cmdline tokens, cwd, open fd targets. */
+static void refs_scan(int self) {
+    static char names[1 << 18];
+    static char cmd[1 << 15];
+    char p[128], link[SP_PATH];
+    int fd, n, off = 0, i;
+    fd = sy_open("/proc", O_RDONLY, 0);
+    if (fd < 0) return;
+    n = sy_dir_names(fd, names, sizeof names);
+    sy_close(fd);
+    for (i = 0; i < n; i++) {
+        const char *nm = names + off;
+        int nl = tx_len(nm, 64), k;
+        long got, j, st;
+        off += nl + 1;
+        if (!all_digits(nm) || tx_atol(nm) == self) continue;
+        tx_snprintf(p, sizeof p, "/proc/%s/cmdline", nm);
+        fd = sy_open(p, O_RDONLY, 0);
+        if (fd >= 0) {
+            got = sy_read(fd, cmd, sizeof cmd - 1);
+            sy_close(fd);
+            if (got > 0) {
+                cmd[got] = 0;
+                st = 0;
+                for (j = 0; j <= got; j++) {
+                    if (j == got || cmd[j] == 0) {
+                        long q;
+                        ref_add(cmd + st, j - st);
+                        for (q = st; q < j; q++) if (cmd[q] == '=') { ref_add(cmd + q + 1, j - q - 1); break; }
+                        st = j + 1;
+                    }
+                }
+            }
+        }
+        tx_snprintf(p, sizeof p, "/proc/%s/cwd", nm);
+        got = sy_readlink(p, link, sizeof link - 1);
+        if (got > 0) { link[got] = 0; ref_add_z(link); }
+        for (k = 0; k < 64; k++) {
+            tx_snprintf(p, sizeof p, "/proc/%s/fd/%d", nm, k);
+            got = sy_readlink(p, link, sizeof link - 1);
+            if (got > 0) { link[got] = 0; if (link[0] == '/') ref_add_z(link); }
+        }
+    }
+}
+
+static int in_use(const char *path) {
+    long plen = tx_len(path, SP_PATH), off = 0;
+    while (off < refs_len) {
+        long rl = tx_len(refs + off, SP_PATH);
+        if (rl < 0) break;
+        if (tx_prefix(refs + off, rl, path, plen) && (rl == plen || refs[off + plen] == '/')) return 1;
+        off += rl + 1;
+    }
+    return 0;
+}
+
+/* Recursive apparent size and oldest/newest mtime under PATH. */
+static int measure(const char *path, long *bytes, long *oldest, long *newest, int depth) {
+    sy_stat_t st;
+    char child[SP_PATH];
+    int fd, n, off = 0, i;
+    if (sy_lstat(path, &st) != 0) return -1;
+    *bytes = st.size; *oldest = st.mtime; *newest = st.mtime;
+    if (st.kind != 'd' || depth >= SP_DEPTH - 1) return 0;
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    n = sy_dir_names(fd, nbuf[depth], sizeof nbuf[depth]);
+    sy_close(fd);
+    for (i = 0; i < n; i++) {
+        long cb, co, cn;
+        const char *nm = nbuf[depth] + off;
+        int nl = tx_len(nm, 512);
+        off += nl + 1;
+        if (tx_len(path, SP_PATH) + nl + 2 > SP_PATH) continue;
+        tx_snprintf(child, sizeof child, "%s/%s", path, nm);
+        if (measure(child, &cb, &co, &cn, depth + 1) != 0) continue;
+        *bytes += cb;
+        if (co < *oldest) *oldest = co;
+        if (cn > *newest) *newest = cn;
+    }
+    return 0;
+}
+
+static int under(const char *a, const char *b) {     /* a equals b or lies below b */
+    long al = tx_len(a, SP_PATH), bl = tx_len(b, SP_PATH);
+    return bl > 0 && tx_prefix(a, al, b, bl) && (al == bl || a[bl] == '/');
+}
+
+/* keep: KEEP reason or 0; def: "DELETE" or "ASK"; why: reason with rollback sentence for DELETE. */
+static void entry(const char *cat, const char *path, const char *keep, const char *def, const char *why) {
+    long b = 0, o = 0, nw = 0, now = sy_wall_s();
+    int use = in_use(path), has = measure(path, &b, &o, &nw, 0) == 0;
+    const char *act = def, *reason = why;
+    if (!has) return;
+    if (keep) { act = "KEEP"; reason = keep; }
+    else if (chain_root[0] && (under(chain_root, path) || under(path, chain_root))) { act = "KEEP"; reason = "当前在途整链根"; }
+    else if (use) { act = "KEEP"; reason = "有存活进程引用(cmdline/cwd/fd)"; }
+    else if (now - nw < min_age) { act = "ASK"; reason = "最近改动距今不足最小年龄,可能在途"; }
+    if (tx_eqz(act, "DELETE")) { reclaim += b; n_del++; }
+    else if (tx_eqz(act, "ASK")) { ask_bytes += b; n_ask++; }
+    else n_keep++;
+    sy_printf("%s\t%s\t%ld\t%ld\t%ld\t%d\t%s\t%s\n", cat, path, b, o, nw, use, act, reason);
+}
+
+static void list_dir(const char *dir, char *buf, int cap, int *n) {
+    int fd = sy_open(dir, O_RDONLY, 0);
+    *n = 0;
+    if (fd < 0) return;
+    *n = sy_dir_names(fd, buf, cap);
+    sy_close(fd);
+    if (*n < 0) *n = 0;
+}
+
+static int sw(const char *s, const char *lit) { return tx_prefix(s, tx_len(s, 512), lit, tx_len(lit, 512)); }
+
+static void scan_tmp(void) {
+    static char names[1 << 19];
+    char path[SP_PATH], e3[128];
+    int n, i, off = 0;
+    tx_snprintf(e3, sizeof e3, "unisacc-e3cache-%d", uid_over >= 0 ? uid_over : sy_uid());
+    list_dir(tmp_dir, names, sizeof names, &n);
+    for (i = 0; i < n; i++) {
+        const char *nm = names + off;
+        off += tx_len(nm, 512) + 1;
+        if (!sw(nm, "unisacc-") && !sw(nm, "ua-")) continue;
+        tx_snprintf(path, sizeof path, "%s/%s", tmp_dir, nm);
+        if (tx_eqz(nm, e3))
+            entry("e3cache", path, 0, "DELETE", "模型缓存按需重建(首次运行重新发布,约数百毫秒);回滚:无需,不可再生部分不存在");
+        else
+            entry("tmp", path, 0, "DELETE", "本项目临时目录,由对应命令重新生成;回滚:重跑产生它的命令");
+    }
+}
+
+static void scan_cache(void) {
+    static char names[1 << 16], sub[1 << 16];
+    char root[SP_PATH], path[SP_PATH], bk[160];
+    int n, m, i, j, off = 0, soff;
+    tx_snprintf(root, sizeof root, "%s/.cache/unisacc", home_dir);
+    list_dir(root, names, sizeof names, &n);
+    if (bs_keep[0]) tx_snprintf(bk, sizeof bk, "bootstrap-%s", bs_keep);
+    else {                      /* no --keep-bootstrap: the greatest bootstrap-* name is the current one */
+        bk[0] = 0;
+        for (i = 0; i < n; i++) {
+            const char *nm = names + off;
+            off += tx_len(nm, 512) + 1;
+            if (sw(nm, "bootstrap-") && tx_len(nm, 150) > 0 && tx_cmp(nm, tx_len(nm, 150), bk, tx_len(bk, 150)) > 0) tx_snprintf(bk, sizeof bk, "%s", nm);
+        }
+        off = 0;
+    }
+    for (i = 0; i < n; i++) {
+        const char *nm = names + off;
+        off += tx_len(nm, 512) + 1;
+        tx_snprintf(path, sizeof path, "%s/%s", root, nm);
+        if (tx_eqz(nm, "borrowed-cm")) entry("cache", path, "KEEP名单:借用的 osx cache-manager 副本,下一版仍需", 0, 0);
+        else if (tx_eqz(nm, "ident-helper")) entry("cache", path, "KEEP名单:ident-helper,下一版仍需", 0, 0);
+        else if (tx_eqz(nm, bk)) entry("cache", path, "KEEP名单:当前 bootstrap,下一版仍需", 0, 0);
+        else if (sw(nm, "release")) entry("cache", path, "KEEP名单:当前发布件", 0, 0);
+        else if (sw(nm, "bootstrap-"))
+            entry("cache", path, 0, "DELETE", "旧版 bootstrap,不再被当前版本引用;回滚:按对应版本的 bootstrap 构造步骤重建");
+        else if (tx_eqz(nm, "chains")) {
+            soff = 0;
+            list_dir(path, sub, sizeof sub, &m);
+            for (j = 0; j < m; j++) {
+                const char *sn = sub + soff;
+                char sp[SP_PATH];
+                soff += tx_len(sn, 512) + 1;
+                tx_snprintf(sp, sizeof sp, "%s/%s", path, sn);
+                if (tx_eqz(sn, "snap"))
+                    entry("cache", sp, 0, "DELETE", "整链快照,下次起链由 chains 流程重新生成;回滚:重跑起链");
+                else
+                    entry("cache", sp, 0, "ASK", "chains 下的其它项,可能含在途链状态,需人工确认");
+            }
+        }
+        else if (tx_eqz(nm, "s9-native") || tx_eqz(nm, "tlib"))
+            entry("cache", path, 0, "ASK", "s9/工具库构造产物,重建耗时较长,需确认后再删");
+        else
+            entry("cache", path, 0, "DELETE", "派生缓存(prep-cache/symindex/内容寻址目录),下一次运行按需重建;回滚:重跑即再生");
+    }
+}
+
+static void scan_job(void) {
+    static char names[1 << 16];
+    char dir[SP_PATH], path[SP_PATH];
+    int n, i, off = 0;
+    if (!job_dir[0]) return;
+    tx_snprintf(dir, sizeof dir, "%s/tmp", job_dir);
+    list_dir(dir, names, sizeof names, &n);
+    for (i = 0; i < n; i++) {
+        const char *nm = names + off;
+        off += tx_len(nm, 512) + 1;
+        tx_snprintf(path, sizeof path, "%s/%s", dir, nm);
+        if ((tx_len(nm, 512) > 6 && tx_eqz(nm + tx_len(nm, 512) - 6, ".patch")) || sw(nm, "e3trim"))
+            entry("job", path, 0, "ASK", "补丁草稿,等待后续版本取用,需确认");
+        else
+            entry("job", path, 0, "DELETE", "本作业临时文件,可由产生它的命令再生;回滚:重跑该命令");
+    }
+}
+
+static void scan_out(void) {
+    static char names[1 << 19];
+    char dir[SP_PATH], path[SP_PATH];
+    int n, i, off = 0;
+    tx_snprintf(dir, sizeof dir, "%s/out", repo_dir);
+    list_dir(dir, names, sizeof names, &n);
+    for (i = 0; i < n; i++) {
+        const char *nm = names + off;
+        off += tx_len(nm, 512) + 1;
+        tx_snprintf(path, sizeof path, "%s/%s", dir, nm);
+        if (sw(nm, "release")) entry("out", path, "KEEP名单:当前发布件", 0, 0);
+        else entry("out", path, 0, "DELETE", "out/ 是被忽略的产物与日志根,不含源事实;回滚:重跑对应构造/检查命令");
+    }
+}
+
+static void scan_build(void) {
+    static char buf[1 << 18];
+    char *av[] = { "git", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "build", 0 };
+    int fd = -1, pid;
+    long got, len = 0, st = 0, j, deadline_s = sy_wall_s() + 30;
+    pid = sy_spawn_pipe(av, repo_dir, 0, &fd, 0);
+    if (pid < 0) return;
+    while (sy_wall_s() <= deadline_s && (got = sy_read(fd, buf + len, sizeof buf - 1 - len)) > 0) len += got;
+    sy_close(fd);
+    if (sy_wall_s() > deadline_s) sy_kill(pid); else sy_wait(pid, 0);
+    for (j = 0; j <= len; j++) {
+        if (j == len || buf[j] == '\n') {
+            if (j > st) {
+                char rel[SP_PATH], path[SP_PATH];
+                long l = j - st;
+                if (l > 0 && buf[st + l - 1] == '/') l--;
+                if (l > 0 && l < 512) {
+                    long q;
+                    for (q = 0; q < l; q++) rel[q] = buf[st + q];
+                    rel[l] = 0;
+                    tx_snprintf(path, sizeof path, "%s/%s", repo_dir, rel);
+                    entry("build", path, 0, "DELETE", "build/ 下被 git 忽略的缓存,由生成器或构造步骤再生;回滚:重跑对应生成器(--write)");
+                }
+            }
+            st = j + 1;
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    int i;
+    const char *h = sy_env("HOME"), *jd = sy_env("CLAUDE_JOB_DIR");
+    long uid = -1;
+    tx_snprintf(tmp_dir, sizeof tmp_dir, "/tmp");
+    tx_snprintf(home_dir, sizeof home_dir, "%s", h ? h : "");
+    tx_snprintf(repo_dir, sizeof repo_dir, ".");
+    tx_snprintf(job_dir, sizeof job_dir, "%s", jd ? jd : "");
+    tx_snprintf(chain_root, sizeof chain_root, "/tmp/unisacc-session-build-lr0060/chain-real6");
+    bs_keep[0] = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        int more = i + 1 < argc;
+        if (tx_eqz(a, "--tmp") && more) tx_snprintf(tmp_dir, sizeof tmp_dir, "%s", argv[++i]);
+        else if (tx_eqz(a, "--home") && more) tx_snprintf(home_dir, sizeof home_dir, "%s", argv[++i]);
+        else if (tx_eqz(a, "--repo") && more) tx_snprintf(repo_dir, sizeof repo_dir, "%s", argv[++i]);
+        else if (tx_eqz(a, "--job-dir") && more) tx_snprintf(job_dir, sizeof job_dir, "%s", argv[++i]);
+        else if (tx_eqz(a, "--chain-root") && more) tx_snprintf(chain_root, sizeof chain_root, "%s", argv[++i]);
+        else if (tx_eqz(a, "--keep-bootstrap") && more) tx_snprintf(bs_keep, sizeof bs_keep, "%s", argv[++i]);
+        else if (tx_eqz(a, "--min-age-s") && more) min_age = tx_atol(argv[++i]);
+        else if (tx_eqz(a, "--uid") && more) uid = tx_atol(argv[++i]);
+        else if (tx_eqz(a, "--ref") && more) ref_add_z(argv[++i]);
+        else { sy_eprintf("usage: sweep-plan [--tmp D] [--home D] [--uid N] [--repo D] [--job-dir D] [--chain-root P] [--keep-bootstrap V] [--min-age-s N] [--ref P]\n"); return 2; }
+    }
+    if (uid >= 0) uid_over = (int)uid;
+    refs_scan(sy_pid());
+    if (refs_over) sy_eprintf("sweep-plan: process reference buffer full, in-use detection is partial\n");
+    sy_printf("CATEGORY\tPATH\tBYTES\tOLDEST_MTIME\tNEWEST_MTIME\tIN_USE\tACTION\tREASON\n");
+    scan_tmp();
+    scan_cache();
+    scan_job();
+    scan_out();
+    scan_build();
+    sy_printf("SUMMARY\treclaimable_bytes=%ld\tdelete=%ld\task=%ld\task_bytes=%ld\tkeep=%ld\n", reclaim, n_del, n_ask, ask_bytes, n_keep);
+    return 0;
+}
