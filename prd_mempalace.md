@@ -10,7 +10,8 @@
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 并列:该行的 ID 被 tools/observe-agents.cx 记为 PARTIAL(已落地行记 DONE),其余 ID 仍算在途。
 - 多人同改本文件时只提交自己的行:先 git diff 确认,必要时 tools/commit-own.cx --keyed;不得用 git add -p 以外的拆分手段,不得 stash/read-tree。
 - 速度数字只来自 tools/run-startup-bench.cx、coldcompile.cx、check-bench-gencode.cx、speed-probe.cx。
-- 工作方式违例账(2026-11-14,依 AGENTS.md "违例须在账本记一行并改正"):子代理用 sed -i 改过 tools/domain.cx、tools/commit-own.cx、tools/check-commit-own.cx 与追加 tests/outdep.tsv(printf >>),另有若干只读取证用 shell 管道/awk 与 grep(只动 /tmp)。内容均已用对应 check 核过;已改正为:派工简报固定禁用 sed -i/python/node/perl,分析脚本一律 .cx,guard-edit.ts 钩子继续拦截。再犯仍按本条追加。定因(2026-11-14 实测):子代理继承项目钩子(haiku 子代理跑 git clone 被 GUARD-EDIT-V1 拒绝),漏判在钩子本身:`cd 仓内 && sed -i/printf >> 相对路径`(原 hasCd 一律放行)、`sh -c '...'` 引号内正文被剥离、`ex -c` 未列入;已修 guard-edit.ts(用 cd 追踪的 cur 解析相对路径、sh/bash -c 递归一层、ex/ed/vi 入列),tests/check-guard-edit.cx 79 增至 97 条 failed=0。仍不能杜绝:eval、变量路径、python/node 脚本文件内写入、cd 到变量目录。
+- 工作方式违例账(2026-11-14,依 AGENTS.md "违例须在账本记一行并改正"):子代理用 sed -i 改过 tools/domain.cx、tools/commit-own.cx、tools/check-commit-own.cx 与追加 tests/outdep.tsv(printf >>),另有若干只读取证用 shell 管道/awk 与 grep(只动 /tmp)。内容均已用对应 check 核过;已改正为:派工简报固定禁用 sed -i/python/node/perl,分析脚本一律 .cx,guard-edit.ts 钩子继续拦截。再犯仍按本条追加。
+- 孤儿进程清理(2026-11-14 20:46):本会话 14:57 的一次 `affected.cx --files cx/text/text.cx --list-only --iface-narrow --iface-verdict same --symbol-narrow tx_find`(PID/PGID 2464559,外壳 PGID 2448683,NI 5)在纯用户态死循环 5.8 小时、占一核(累计 20729 s CPU,/proc/PID/io 两次采样不变);当时 affected.cx 是未提交开发版(早于 7c7124c12c),现行版同参数 25 秒内 rc 0 不复现,具体行因映像为已删 memfd 无法取证。依此终止:`kill -TERM -- -2464559`,再核外壳;结果见下一次账本。整链 real7 的 g2 超时期间该进程占一核,是否构成争用因素未定量。定因(2026-11-14 实测):子代理继承项目钩子(haiku 子代理跑 git clone 被 GUARD-EDIT-V1 拒绝),漏判在钩子本身:`cd 仓内 && sed -i/printf >> 相对路径`(原 hasCd 一律放行)、`sh -c '...'` 引号内正文被剥离、`ex -c` 未列入;已修 guard-edit.ts(用 cd 追踪的 cur 解析相对路径、sh/bash -c 递归一层、ex/ed/vi 入列),tests/check-guard-edit.cx 79 增至 97 条 failed=0。仍不能杜绝:eval、变量路径、python/node 脚本文件内写入、cd 到变量目录。
 
 ## 当前发布与版本
 
