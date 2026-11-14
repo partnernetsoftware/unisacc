@@ -331,6 +331,12 @@ int as_entry(const char *root,const as_batch *b,const as_manifest *m,char out[44
 /* ---- the one verdict rule ------------------------------------------------------------------------- */
 static int as_line_count(const char *s,size_t n,const char *prefix){size_t pn=strlen(prefix),at=0;int c=0;while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end-at>=pn&&!memcmp(s+at,prefix,pn))c++;at=end+1;}return c;}
 static int as_last_line(const char *s,size_t n,const char **line,size_t *len){if(!n||s[n-1]!='\n')return -1;size_t end=n-1,at=end;while(at>0&&s[at-1]!='\n')at--;*line=s+at;*len=end-at;return 0;}
+/* run-batch prints one trailing BATCH_TIMING line after BATCH_RUN (timing only, never verdict): the
+   last-line rule looks past exactly that one line, and only when it is this batch's own
+   (`BATCH_TIMING\tid=ID\t`).  A second timing line, another id's, or anything else after BATCH_RUN
+   still leaves BATCH_RUN not last. */
+static size_t as_strip_timing(const char *s,size_t n,const char *id){static const char k[]="BATCH_TIMING\tid=";size_t kn=sizeof k-1,i,j;if(!n||s[n-1]!='\n')return n;size_t at=n-1;while(at>0&&s[at-1]!='\n')at--;size_t ln=n-1-at;
+ for(i=0;i<kn;i++)if(i>=ln||s[at+i]!=k[i])return n;for(j=0;id[j];j++)if(kn+j>=ln||s[at+kn+j]!=id[j])return n;return kn+j<ln&&s[at+kn+j]=='\t'?at:n;}
 const char *as_verdict(const as_facts *f,const char **reason){
  if(!f->identity_stable){*reason="identity-changed-during-wave";return "UNKNOWN";}
  if(!f->candidate_stable){*reason="candidate-changed-or-foreign";return "UNKNOWN";}
@@ -344,7 +350,7 @@ const char *as_verdict(const as_facts *f,const char **reason){
  /* bound saves the child status before returning 128+sig when it was itself interrupted, so a child
     exit 0 under a non-matching bound rc is an interrupted watchdog, never a PASS */
  if(f->bound_rc!=e){*reason="watchdog-rc-mismatch";return "UNKNOWN";}
- char prefix[200];{int z=snprintf(prefix,sizeof prefix,"BATCH_RUN\tid=%s\t",f->id);if(z<0||(size_t)z>=sizeof prefix){fprintf(stderr,"bound-format\n");exit(2);}};const char *last;size_t ln;int count=as_line_count(f->out,f->outn,prefix),tail=!as_last_line(f->out,f->outn,&last,&ln)&&ln>=strlen(prefix)&&!memcmp(last,prefix,strlen(prefix));
+ char prefix[200];{int z=snprintf(prefix,sizeof prefix,"BATCH_RUN\tid=%s\t",f->id);if(z<0||(size_t)z>=sizeof prefix){fprintf(stderr,"bound-format\n");exit(2);}};const char *last;size_t ln;int count=as_line_count(f->out,f->outn,prefix),tail=!as_last_line(f->out,as_strip_timing(f->out,f->outn,f->id),&last,&ln)&&ln>=strlen(prefix)&&!memcmp(last,prefix,strlen(prefix));
  if(e==2){*reason="runner-refused";return "UNKNOWN";}
  if(e!=0&&e!=1&&e!=3){*reason="unclassified-exit";return "UNKNOWN";}
  if(count!=1||!tail){*reason=e?"unclassified-exit":"batch-line-missing-or-not-last";return e?"UNKNOWN":"FAIL";}
