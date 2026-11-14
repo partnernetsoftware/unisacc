@@ -1,0 +1,55 @@
+/* check-notes-fill: tools/notes-fill.cx on fake notes and fake tables built under TMPDIR:
+ * full fill, missing value keeps the placeholder (UNFILLED), quoted 待填 skipped, --check never writes. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed = 0, total = 0;
+static void ck(int ok, const char *what) { total++; if (!ok) { failed++; printf("FAIL %s\n", what); } }
+static int has(const char *s, const char *p) { return tx_find(s, (long)strlen(s), p, (long)strlen(p)) >= 0; }
+
+static int run(const char *args, char *out, int cap) {
+    char cmd[2048]; char *av[6];
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/notes-fill.cx -- %s </dev/null 2>&1", args)) return -1;
+    av[0] = "timeout"; av[1] = "50"; av[2] = "sh"; av[3] = "-c"; av[4] = cmd; av[5] = 0;
+    return sy_run(av, out, cap, 0);
+}
+
+static void put(const char *p, const char *s) { sy_write_atomic(p, s, (long)strlen(s), 0644); }
+
+int main(void) {
+    static char o[8192], args[2048], d[512], np[600], cp[600], dp[600], ep[600], op[600];
+    const char *tmp = getenv("TMPDIR"); char *b = 0; long n = 0;
+    if (!tmp || !*tmp) tmp = "/tmp";
+    cx_fmt(d, sizeof d, "%s/notes-fill-chk-%d", tmp, (int)getpid());
+    { char *av[6]; char cmd[700]; cx_fmt(cmd, sizeof cmd, "mkdir -p %s", d); av[0] = "timeout"; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = cmd; av[5] = 0; sy_run(av, o, sizeof o, 0); }
+    cx_fmt(np, sizeof np, "%s/n.md", d); cx_fmt(cp, sizeof cp, "%s/c.tsv", d); cx_fmt(dp, sizeof dp, "%s/d.txt", d);
+    cx_fmt(ep, sizeof ep, "%s/e.tsv", d); cx_fmt(op, sizeof op, "%s/out.md", d);
+    put(np, "说明:未知项标\"待填\",裁决待填。\n冻结提交、CI run、裁决:待填(x)\n公开时间:待填\n普通行\n结果待填\n速度基线 候选速度基线:待填\n");
+    put(cp, "repo\tcommit\tci_run_id\tape_sha256\nr\tabc123\t777\tdeadbeef\n");
+    put(dp, "STEP\t4\ts9\tPASS\tx\nQUALIFIED\tNOT_QUALIFIED\tunknown=1\n");
+    put(ep, "speed_baseline\t12.5s\n");
+    cx_fmt(args, sizeof args, "--notes %s --candidate %s --decision %s --check", np, cp, dp);
+    run(args, o, sizeof o);
+    ck(has(o, "NOTES_FILL filled=1 unfilled=3"), "check counts 1 filled 3 unfilled (no evidence)");
+    ck(has(o, "UNFILLED line=3 missing=公开时间"), "missing value named");
+    ck(has(o, "UNFILLED line=5 missing=none"), "no-label line unfilled");
+    ck(has(o, "UNFILLED line=6 missing=候选速度基线"), "evidence missing reported");
+    ck(sy_read_file(op, &b, &n, 4096) != 0, "--check wrote no file");
+    cx_fmt(args, sizeof args, "--notes %s --candidate %s --decision %s --evidence %s --out %s", np, cp, dp, ep, op);
+    run(args, o, sizeof o);
+    ck(has(o, "NOTES_FILL filled=2 unfilled=2"), "with evidence 2 filled");
+    b = 0;
+    if (sy_read_file(op, &b, &n, 8192) == 0 && b) {
+        ck(has(b, "冻结提交、CI run、裁决:冻结提交=abc123;CI run=777;裁决=NOT_QUALIFIED unknown=1(x)"), "line 2 filled");
+        ck(has(b, "公开时间:待填\n"), "missing keeps placeholder");
+        ck(has(b, "标\"待填\"，") || has(b, "标\"待填\",裁决待填"), "quoted line untouched");
+        ck(has(b, "候选速度基线:候选速度基线=12.5s"), "evidence value filled");
+        ck(has(b, "结果待填\n"), "unlabeled line untouched");
+    } else ck(0, "out file written");
+    { char *av[6]; char cmd[700]; cx_fmt(cmd, sizeof cmd, "rm -rf %s", d); av[0] = "timeout"; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = cmd; av[5] = 0; sy_run(av, o, sizeof o, 0); }
+    printf("check-notes-fill total=%d failed=%d\n", total, failed);
+    if (!failed) printf("CHECK_NOTES_FILL\n");
+    return failed ? 1 : 0;
+}
