@@ -86,18 +86,22 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 ### 3.5 计划中语法(未实现,不可用)
 
-本节只是规格草案与拒绝合同,设计全文在 [prd_cx.md](prd_cx.md) 第 10 节。下列写法在当前产品上**全部不可用**;写了会在规划期被具名拒绝(rc=1),不会被静默接受。计划版本 0.0.64,以届时的候选为准。
+本节只是规格草案与拒绝合同,设计全文在 [prd_cx.md](prd_cx.md) 第 10 节;export 的事实来源是 10.7(D1 设计)。下列写法在当前产品上**全部未实现、不可用**;写了会在规划期被具名拒绝(rc=1),不会被静默接受。下表"计划中的拒绝"列的文案同为设计(未实现,以 10.7 的 X1 至 X13 为准),不是现产品输出。计划版本 0.0.64,以届时的候选为准。
 
 ```
-#pragma unisa export NAME        计划:门面重导出。直接 use 本模块的单元视同直接 use 了 NAME;符号身份仍属 NAME
-#pragma unisa export NAME::sym   计划:只重导出 sym
+#pragma unisa export NAME[,NAME...]   计划(D1a,首版):裸名 export 只表示本模块自有、非 static 函数的公开名单;不是重导出
+#pragma unisa export use MODULE       计划(D1b,排在 D1a 之后):门面重导出。直接 use 本模块的单元视同直接 use 了 MODULE;符号身份仍属 MODULE
+#pragma unisa export use MODULE::sym  计划(D1b):只重导出 sym
 #pragma unisa use PFX.*          计划:纯展开为 PFX 目录下每个直接子模块的 use;不递归;冲突仍拒;只许 tools/tests/apps
 ```
 
+没有 export 的模块行为完全不变;有 export 的模块以源码内名单为准,迁移期与 `cxpack.tsv` 互校(10.7 X9)。
+
 | 写法 | 现行为(2026-11-14 已装产品实测) | 计划行为 | 计划中的拒绝 |
 |---|---|---|---|
-| `export NAME` | 拒绝 `unknown unisa pragma export` | 见上 | 非模块单元写 export:`export outside module`;导出自己:`exports itself`;成环:`module cycle` |
-| `export NAME::sym as alias` | 拒绝 `unknown unisa pragma export` | 首版仍拒绝 | `export alias unsupported` |
+| `export NAME`(裸名,D1a) | 拒绝 `unknown unisa pragma export` | 公开名单,见上 | 见 10.7 X1 至 X11(名字无定义、static、类型、重复、与 cxpack 不等、调用未导出函数等) |
+| `export use MODULE[::sym]`(D1b) | 拒绝 `unknown unisa pragma export` | 门面重导出,见上 | 非模块单元写:`export outside module`;导出自己:`exports itself`;成环:`module cycle` |
+| `export use M::sym as alias` | 拒绝 `unknown unisa pragma export` | 首版仍拒绝 | `export alias unsupported` |
 | `use PFX.*` | 拒绝 `bad module name "PFX.*"` | 见上 | 空展开:`wildcard PFX.* matches no module`;产品层(`src/`、`cx/`、`ext/`)使用:棘轮拒绝;展开后超 48 条 use:沿用现上限拒绝 |
 | `use *`、`use PFX.*::sym`、`use PFX.*.x` | 拒绝 `bad module name` | 永久拒绝 | 同左 |
 | `use NAME::*` | 旧产品:被静默接受(规划 rc=0);源码已修(2026-11-14,提交 57c7427f6f):拒绝 `bad symbol name "*"` | 永久拒绝 | 同左 |
