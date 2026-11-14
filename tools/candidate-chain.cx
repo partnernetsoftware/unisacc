@@ -874,6 +874,7 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
 static char g_phasebuf[512][80];
 static const char *g_phases[512];
 static int g_nphases;
+static char g_srcroot[4400]; /* resolved private src root the start gate verified; cache-manager builds from the same tree */
 /* Columns 8..10 of the phase table (facts: build/chain-residue.tsv): 0 no rule, 's' scrub, 'r' refuse. */
 static char g_res_policy[512], g_res_record[512][200], g_res_paths[512][400];
 static const char *phases_file;
@@ -2438,12 +2439,18 @@ int main(int argc, char **argv) {
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (!lane_phase && !recheck_only) {
         /* Start gate: three mistakes that cost a whole chain before (real5 died in pack after 3538 s). */
-        char srcd[4400], srcgit[4400], helpa[4400], helpb[4400]; int cut = (int)strlen(outdir);
+        char srcd[4400], srcgit[4400], helpa[4400], helpb[4400], par[4400], rpar[4400]; int cut = (int)strlen(outdir);
         while (cut > 1 && outdir[cut - 1] == '/') cut--;
         while (cut > 0 && outdir[cut - 1] != '/') cut--;
-        if (cut > 0 && !cx_fmt(srcd, sizeof srcd, "%.*ssrc", cut, outdir) && !cx_fmt(srcgit, sizeof srcgit, "%s/.git", srcd) && fsize(srcgit) >= 0) {
-            char *hv[] = {"sh", "-c", "test \"$(git -C \"$1\" rev-parse HEAD)\" = \"$2\"", "sh", srcd, (char *)rev, 0};
-            if (runv_secs(hv, 30)) die("REFUSE private src worktree HEAD != --rev", srcd);
+        /* Normalize --out first: a bare relative name resolves against cwd, symlinks resolve to the real parent. */
+        if (cut > 0) { if (cx_fmt(par, sizeof par, "%.*s", cut, outdir)) die("path", outdir); } else { par[0] = '.'; par[1] = 0; }
+        if (sy_realpath(par, rpar, sizeof rpar) < 0) die("REFUSE --out parent unresolvable", par);
+        g_srcroot[0] = 0;
+        if (!cx_fmt(srcd, sizeof srcd, "%s/src", rpar) && sy_exists(srcd) != 0) {
+            if (cx_fmt(srcgit, sizeof srcgit, "%s/.git", srcd) || fsize(srcgit) < 0) die("REFUSE private src exists but has no .git", srcd);
+            char *hv[] = {"sh", "-c", "test \"$(git -C \"$1\" rev-parse HEAD)\" = \"$2\" && test -z \"$(git -C \"$1\" status --porcelain)\"", "sh", srcd, (char *)rev, 0};
+            if (runv_secs(hv, 30)) die("REFUSE private src worktree HEAD != --rev or worktree not clean", srcd);
+            cx_fmt(g_srcroot, sizeof g_srcroot, "%s", srcd);
         }
         const char *ih = sy_env("UNISACC_IDENT_HELPER");
         if ((!ih || !*ih) && (cx_fmt(helpa, sizeof helpa, "%s/build/identity-helper", outdir) || fsize(helpa) < 0) && (cx_fmt(helpb, sizeof helpb, "%s/ctx/identity-helper", outdir) || fsize(helpb) < 0))
@@ -2451,7 +2458,7 @@ int main(int argc, char **argv) {
         if ((!until_phase || tx_eqz(until_phase, "pack")) && (!cm64 || !cmarm)) {
             /* No explicit managers: the chain builds them in phase cache-manager, which needs the source in the private src tree. */
             char csrc[4400];
-            if (cut <= 0 || cx_fmt(csrc, sizeof csrc, "%.*ssrc/tools/cache-retain.cx", cut, outdir) || fsize(csrc) < 0)
+            if (!g_srcroot[0] || cx_fmt(csrc, sizeof csrc, "%s/tools/cache-retain.cx", g_srcroot) || fsize(csrc) < 0)
                 die("REFUSE pack needs --cache-manager-osx X64 ARM64 (no explicit managers and no in-chain source tools/cache-retain.cx; checked at start)", 0);
         }
     }
@@ -2872,12 +2879,16 @@ int main(int argc, char **argv) {
                 long t0 = sy_now_ms();
                 char cdir[4400], ctool[4400];
                 char *b1[8], *b2[8];
-                if (cx_fmt(cdir, sizeof cdir, "%s/cache-manager", outdir) || cx_fmt(ctool, sizeof ctool, "%s/tools/cache-retain.cx", root)) die("path", "cache-manager");
+                if (cx_fmt(cdir, sizeof cdir, "%s/cache-manager", outdir) || cx_fmt(ctool, sizeof ctool, "%s/tools/cache-retain.cx", g_srcroot[0] ? g_srcroot : root)) die("path", "cache-manager");
+                if (g_srcroot[0] && fsize(ctool) < 0) die("REFUSE cache-manager source differs from the gate-verified src", ctool);
                 sy_mkdir(cdir, 0755);
                 b1[0] = ctool; b1[1] = (char *)"-b"; b1[2] = (char *)"osx/x86_64"; b1[3] = (char *)"-o"; b1[4] = cmx; b1[5] = 0;
                 b2[0] = ctool; b2[1] = (char *)"-b"; b2[2] = (char *)"osx/arm64"; b2[3] = (char *)"-o"; b2[4] = cma; b2[5] = 0;
+                /* One shared 90 s budget (matches chain-phases.tsv row cache-manager = 90) for both builds. */
+                long cm_left = 90 - (sy_now_ms() - t0) / 1000;
                 if (bound_sh_secs(root, b1, 90)) die("cache-manager x64", cmx);
-                if (bound_sh_secs(root, b2, 90)) die("cache-manager arm64", cma);
+                cm_left = 90 - (sy_now_ms() - t0) / 1000;
+                if (cm_left < 1 || bound_sh_secs(root, b2, (int)cm_left)) die("cache-manager arm64 (shared 90s budget)", cma);
                 mark(outdir, "cache-manager", sy_now_ms() - t0);
             } else sy_printf("RESUME\tcache-manager\n");
             cm64 = cmx; cmarm = cma;
