@@ -184,14 +184,35 @@ static int mc_complete(const char *path, const char *name, const sy_stat_t *st) 
     }
     return (unsigned long long)st->size == n + MC_HEAD;
 }
-/* $UNISACC_E3CACHE or $TMPDIR/unisacc-e3cache-<uid>, created 0700; 1 on failure. */
+/* Create every missing parent of path (0700), not path itself. */
+static void mc_mkparents(char *path) {
+    int i;
+    for (i = 1; path[i]; i++) {
+        if (path[i] != '/') continue;
+        path[i] = 0;
+        sy_mkdir(path, 0700);
+        path[i] = '/';
+    }
+}
+
+/* Root, first match wins: $UNISACC_CACHE_DIR, $UNISACC_E3CACHE (compat),
+   $XDG_CACHE_HOME/unisacc/e3cache, $HOME/.cache/unisacc/e3cache, and only
+   without a home the old $TMPDIR/unisacc-e3cache-<uid>. The default no longer
+   follows TMPDIR or uid paths. Created 0700; 1 on failure. */
 int mc_cache_dir(char *out, int cap) {
     const char *e, *td;
     sy_stat_t st;
     int at = 0, mk;
-    e = sy_env("UNISACC_E3CACHE");
+    e = sy_env("UNISACC_CACHE_DIR");
+    if (!(e && e[0])) e = sy_env("UNISACC_E3CACHE");
     if (e && e[0]) {
         if (mc_cat(out, cap, &at, e)) return 1;
+    } else if ((e = sy_env("XDG_CACHE_HOME")) && e[0] == '/') {
+        if (mc_cat(out, cap, &at, e)) return 1;
+        if (mc_cat(out, cap, &at, "/unisacc/e3cache")) return 1;
+    } else if ((e = sy_env("HOME")) && e[0] == '/') {
+        if (mc_cat(out, cap, &at, e)) return 1;
+        if (mc_cat(out, cap, &at, "/.cache/unisacc/e3cache")) return 1;
     } else {
         td = sy_tmpdir();
         if (mc_cat(out, cap, &at, td)) return 1;
@@ -199,6 +220,7 @@ int mc_cache_dir(char *out, int cap) {
         if (mc_cat_u(out, cap, &at, (unsigned long long)sy_uid())) return 1;
     }
     out[at] = 0;
+    mc_mkparents(out);
     mk = sy_mkdir(out, 0700);
     if (mk == 0) return 0;
     if (mk != -EEXIST) return 1;
@@ -236,14 +258,49 @@ int mc_cache_lock(const char *dir) { return mc_lock_op(dir, 6); }
 /* One directory listing (grown and retried on ENOSPC), O(N) stat/header work,
    O(N) memory per successful write, O(N log N) heap work only above the limit.
    Allocation, listing and unlink failures only leave a larger cache. */
-static void mc_trim(const char *dir) {
+/* Running total of the reserved entries, in DIR/.budget.acct: 8 magic bytes, total (u64 LE),
+   total xor a constant (u64 LE). Read and written only while the caller holds .budget.lock, so
+   a plain overwrite is race free; a crash mid-write leaves a bad check and forces a rescan.
+   0 on a valid account. */
+#define MC_ACCT_MAGIC "UNIBUD1\n"
+static int mc_acct_read(const char *dir, unsigned long long *total) {
+    char path[4400];
+    unsigned char b[24];
+    sy_stat_t st;
+    unsigned long long t = 0, c = 0;
+    int fd, i, ok;
+    if (mc_join(path, sizeof path, dir, ".budget.acct")) return 1;
+    fd = sy_open_read(path);
+    if (fd < 0) return 1;
+    ok = sy_fstat(fd, &st) == 0 && st.kind == 'f' && st.size == 24 && sy_read_full(fd, b, 24) == 0;
+    sy_close(fd);
+    if (!ok || !tx_same((char *)b, 8, MC_ACCT_MAGIC, 8)) return 1;
+    for (i = 7; i >= 0; i--) { t = t << 8 | b[8 + i]; c = c << 8 | b[16 + i]; }
+    if (c != (t ^ 0x5bd1e995a5a5a5a5ull)) return 1;
+    *total = t;
+    return 0;
+}
+static void mc_acct_write(const char *dir, unsigned long long total) {
+    char path[4400];
+    unsigned char b[24];
+    unsigned long long c = total ^ 0x5bd1e995a5a5a5a5ull;
+    int i;
+    if (mc_join(path, sizeof path, dir, ".budget.acct")) return;
+    for (i = 0; i < 8; i++) b[i] = (unsigned char)MC_ACCT_MAGIC[i];
+    for (i = 0; i < 8; i++) { b[8 + i] = (unsigned char)(total >> (8 * i)); b[16 + i] = (unsigned char)(c >> (8 * i)); }
+    sy_write_file(path, b, 24, 0600);
+}
+
+/* FINAL/OK: the total left after trimming (an upper bound when the pass-0 sum was within the
+   limit), valid only when OK is set; allocation, listing and overflow failures leave it clear. */
+static void mc_trim(const char *dir, unsigned long long *final, int *okp) {
     char *names = 0, *grown;
     char path[4400];
     mc_candidate *v = 0;
     sy_stat_t st;
     unsigned long long total = 0, limit = mc_limit();
     long at = 0, used = 0, i;
-    int fd, count, cap = 8192;
+    int fd, count, cap = 8192, pass;
     fd = sy_open_read(dir);
     if (fd < 0) return;
     for (;;) {
@@ -262,6 +319,11 @@ static void mc_trim(const char *dir) {
     }
     v = mm_alloc((long)count * (long)sizeof(mc_candidate));
     if (!v) { mm_free(names); return; }
+    /* Pass 0 only lstats and sums sizes of reserved-name regular files: an upper bound of
+       the validated total. Within the limit nothing can be evicted, so the per-entry
+       open/read of mc_complete is skipped; above it pass 1 validates exactly as before. */
+    for (pass = 0; pass < 2; pass++) {
+    at = 0; used = 0; total = 0;
     for (i = 0; i < count; i++) {
         const char *name = names + at;
         long len = tx_len(name, cap - at);
@@ -271,14 +333,21 @@ static void mc_trim(const char *dir) {
         if (len == 71 && name[0] == 'u' && name[1] == 'c' && name[2] == '-' && tx_eqz(name + 67, ".tmp") &&
             !mc_join(path, sizeof path, dir, name)) { sy_unlink(path); continue; }
         if (len >= 96 || !mc_entry_name(name) || mc_join(path, sizeof path, dir, name)) continue;
-        if (sy_lstat(path, &st) || !mc_complete(path, name, &st)) continue;
-        if (total > 18446744073709551615ull - (unsigned long long)st.size) goto done;
+        if (sy_lstat(path, &st)) continue;
+        if (pass == 0) { if (st.kind != 'f' || st.size < 8) continue; }
+        else if (!mc_complete(path, name, &st)) continue;
+        if (total > 18446744073709551615ull - (unsigned long long)st.size) {
+            if (pass == 0) break;
+            goto done;
+        }
         total += (unsigned long long)st.size;
+        if (pass == 0) continue;
         v[used].name = name;
         v[used].st = st;
         used++;
     }
-    if (total <= limit) goto done;
+    if (total <= limit) { *final = total; *okp = 1; goto done; }
+    }
     for (i = 1; i < used; i++) mc_heap_up(v, i);
     while (total > limit && used > 0) {
         if (!mc_join(path, sizeof path, dir, v[0].name) &&
@@ -287,6 +356,7 @@ static void mc_trim(const char *dir) {
         mc_heap_pop(v, used);
         used--;
     }
+    *final = total; *okp = 1;
 done:
     mm_free(v);
     mm_free(names);
@@ -296,9 +366,30 @@ done:
    Trimming cannot change publication success or the enclosing program result. */
 int mc_cache_publish(const char *dir, const char *tmp, const char *path, int lockfd) {
     int rc;
+    sy_stat_t ost, nst;
+    unsigned long long acct = 0, old = 0, limit = mc_limit(), final = 0;
+    int have_old, ok = 0;
     if (lockfd < 0) return 1;
+    have_old = sy_lstat(path, &ost) == 0 && ost.kind == 'f';
+    if (have_old) old = (unsigned long long)ost.size;
     rc = sy_rename(tmp, path);
-    if (rc == 0) mc_trim(dir);
+    if (rc == 0) {
+        /* Amortized budget: an O(1) account update while the running total stays within 90% of
+           the limit; a missing or damaged account, or a total above that mark, takes the full
+           scan-and-evict pass, which rebuilds the account. Replaced entries and entries removed
+           by others only make the account too high, so the worst case is an early scan. */
+        if (mc_acct_read(dir, &acct) == 0 && sy_lstat(path, &nst) == 0 && nst.kind == 'f') {
+            if (acct < old) acct = 0; else acct -= old;
+            if (acct <= 18446744073709551615ull - (unsigned long long)nst.size) {
+                acct += (unsigned long long)nst.size;
+                if (acct <= limit - limit / 10) { mc_acct_write(dir, acct); ok = 2; }
+            }
+        }
+        if (ok != 2) {
+            mc_trim(dir, &final, &ok);
+            if (ok) mc_acct_write(dir, final);
+        }
+    }
     sy_close(lockfd);
     return rc != 0;
 }

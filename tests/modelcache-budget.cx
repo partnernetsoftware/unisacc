@@ -43,7 +43,7 @@ static int inspect(const char *p, void *ctx) {
     long *totals = ctx;
     int i;
     for (i = 0; p[i]; i++) if (p[i] == '/') s = p + i + 1;
-    if (tx_eqz(s, ".budget.lock")) return 0;
+    if (tx_eqz(s, ".budget.lock") || tx_eqz(s, ".budget.acct")) return 0;
     if (sy_lstat(p, &st) || st.kind != 'f') return -1;
     if (!tx_same(s, 3, "mc-", 3) || st.size != 199 || tx_len(s, 4400) != 39) return -1;
     totals[0] += st.size; totals[1]++;
@@ -116,6 +116,52 @@ int main(int argc, char **argv) {
             damaged[198] ^= 1;
             ck(cx_write(pb, damaged, 199) == 0 && !hit(b), "same-size-corrupt-rejected");
             store(b); ck(hit(b), "corrupt-entry-repaired-by-real-store");
+        }
+        /* Amortized account: .budget.acct tracks the running total; a damaged account is
+           rebuilt by one full pass; within 90% of the limit a publish does no scan at all
+           (proved by a stale uc-*.tmp that only a full pass unlinks). */
+        {
+            char ap[4400], stale[4400], hex[65], sname[80];
+            unsigned char ab[24];
+            unsigned long long tot = 0;
+            int fd, k;
+            ck(tx_snprintf(ap, sizeof ap, "%s/.budget.acct", dir) < sizeof ap, "acct-path");
+            for (k = 0; k < 64; k++) hex[k] = 'a';
+            hex[64] = 0;
+            ck(tx_snprintf(sname, sizeof sname, "uc-%s.tmp", hex) == 71 &&
+               tx_snprintf(stale, sizeof stale, "%s/%s", dir, sname) < sizeof stale, "stale-name");
+            ck(sy_stat(ap, &st) == 0 && st.size == 24, "acct-exists-after-publishes");
+            fd = sy_open_read(ap);
+            ck(fd >= 0 && sy_read_full(fd, ab, 24) == 0, "acct-readable");
+            if (fd >= 0) sy_close(fd);
+            for (k = 7; k >= 0; k--) tot = tot << 8 | ab[8 + k];
+            ck(tot == 398, "acct-total-equals-retained-bytes");
+            ck(cx_write(ap, "garbage-not-an-account!!", 24) == 0, "acct-damaged");
+            ck(cx_write(stale, "x", 1) == 0, "stale-planted");
+            store(a);
+            ck(!sy_exists(stale), "damaged-acct-forces-full-pass");
+            fd = sy_open_read(ap);
+            ck(fd >= 0 && sy_read_full(fd, ab, 24) == 0, "acct-rebuilt-readable");
+            if (fd >= 0) sy_close(fd);
+            tot = 0;
+            for (k = 7; k >= 0; k--) tot = tot << 8 | ab[8 + k];
+            ck(tot == 398, "acct-rebuilt-total");
+            /* Raise the limit: 398 -> 597 of 100000 is far below 90%, so no scan. */
+            ck(sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "100000", 1) == 0, "limit-raised");
+            ck(cx_write(stale, "x", 1) == 0, "stale-replanted");
+            store(c);
+            ck(sy_exists(stale), "below-90-percent-publish-does-not-scan");
+            fd = sy_open_read(ap);
+            ck(fd >= 0 && sy_read_full(fd, ab, 24) == 0, "acct-updated-readable");
+            if (fd >= 0) sy_close(fd);
+            tot = 0;
+            for (k = 7; k >= 0; k--) tot = tot << 8 | ab[8 + k];
+            ck(tot >= 398 && tot <= 597, "acct-grows-with-publish");
+            /* Over 90% of a small limit: full pass again, stale removed. */
+            ck(sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "600", 1) == 0, "limit-lowered");
+            store(b);
+            ck(!sy_exists(stale), "above-90-percent-publish-scans");
+            sy_unlink(stale);
         }
     }
     sy_printf("MODELCACHE_BUDGET\tmode=%s\tassertions=%d\tfailed=%d\n", argv[2], checks, failed);
