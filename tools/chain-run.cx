@@ -25,7 +25,7 @@
  * back to 0. Each recovery writes a WIDEN row; the run of clean attempts and the number of
  * recoveries persist in chain-run.widen (absent = 0 0), never above the requested width. A
  * maximum (attempts, resumes, segments) may only be raised, up to its build/limits.tsv max, by
- * [--budget-raise LEDGER-ID] naming a row of agentwork/ledger.tsv; it writes a RAISE row.
+ * [--budget-raise ID] naming a kind=budget-raise row of build/approvals.tsv; it writes a RAISE row.
  * Output identity (LIM-S3): rev, mode, candidate, rehearse inputs, root, watch, argv and the plan
  * semantics (build/chain-phases.tsv without its timeout_s column). Limits (build/limits.tsv via
  * cxlib.limits, phase bounds) and --deadline-s are not identity: each invocation writes a LIMITS
@@ -64,6 +64,7 @@
 #pragma unisa use cxlib.chainroot
 #pragma unisa use cxlib.chaincall
 #pragma unisa use cxlib.exitclass
+#pragma unisa use cxlib.awpath
 
 static const char *out;
 /* Every child call (its owner bound, exported bound, group seconds, or no call at all) is decided
@@ -368,14 +369,16 @@ static int run(const char *phase,char **v,char *fresh_output) {
         if(done(phase)) return 0;
     }
 }
-/* A raise is backed by a decision row: column 2 of agentwork/ledger.tsv equals ID. */
+/* A raise is backed by a decision row of build/approvals.tsv (awpath kind approvals):
+   column 1 equals ID and column 2 is exactly budget-raise. No such row, no raise. */
 static int ledger_has(const char *id) {
     size_t n=0,len=strlen(id); if(len<3||len>60) return 0;
     for(size_t i=0;i<len;i++) if(!((id[i]>='A'&&id[i]<='Z')||(id[i]>='0'&&id[i]<='9')||id[i]=='-')) return 0;
-    char *b=cx_read("agentwork/ledger.tsv",&n); if(!b) return 0;
+    const char *rel=awp_rel("approvals"); if(!rel) return 0;
+    char *b=cx_read(rel,&n); if(!b) return 0;
     int yes=0;
-    for(char *s=b;*s&&!yes;) { char *e=strchr(s,'\n'),*t=strchr(s,'\t');
-        if(t&&(!e||t<e)&&!strncmp(t+1,id,len)&&t[1+len]=='\t') yes=1;
+    for(char *s=b;*s&&!yes;) { char *e=strchr(s,'\n');
+        if(!strncmp(s,id,len)&&s[len]=='\t'&&!strncmp(s+len+1,"budget-raise\t",13)) yes=1;
         if(!e) break; s=e+1; }
     free(b); return yes;
 }
