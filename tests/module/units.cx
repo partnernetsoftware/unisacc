@@ -51,6 +51,30 @@ int main(void) {
     i = dv_fwd_splice("lnx/x86_64", 2, sources, &out, &outn, why, sizeof why);
     if (i != 1 || strcmp(why, "forwarding stub") || out || outn) { puts("FAIL\tforwarding-missing-frame"); failed++; }
     else puts("PASS\tforwarding-missing-frame");
+    /* CX-U-2 on the working-tree cxmod: a symbol-level use of `*`, of a name the module does not export,
+       and a call of a function the symbol-level use did not import are each refused; the plain symbol
+       import still plans. */
+    {
+        char base[64] = "/tmp/module-symuse-XXXXXX", p[160]; FILE *f; char *one[1]; int g;
+        static const char *src[4] = {
+            "#pragma unisa use aa::*\nint main(void){return 0;}\n",
+            "#pragma unisa use aa::nosuch\nint main(void){return 0;}\n",
+            "#pragma unisa use aa::other\nint main(void){return other()+clash();}\n",
+            "#pragma unisa use aa::other\nint main(void){return other();}\n" };
+        static const char *nm[4] = { "symbol-star-refused", "symbol-not-exported-refused", "unimported-symbol-call-refused", "symbol-import-plans" };
+        if (mkdtemp(base)) {
+            tx_snprintf(p, sizeof p, "%s/aa.cx", base); f = fopen(p, "w");
+            if (f) { fputs("#pragma unisa module aa\nint clash(void){return 1;}\nint other(void){return 7;}\n", f); fclose(f); }
+            for (g = 0; g < 4; g++) {
+                int rc;
+                tx_snprintf(p, sizeof p, "%s/g%d.cx", base, g); f = fopen(p, "w");
+                if (f) { fputs(src[g], f); fclose(f); }
+                one[0] = p; cxm_set_funit(0); rc = cxm_plan(one, 1);
+                if (!f || rc != (g < 3)) { printf("FAIL\t%s\tplan=%d\n", nm[g], rc); failed++; }
+                else printf("PASS\t%s\n", nm[g]);
+            }
+        } else { puts("FAIL\tsymbol-use-tmpdir"); failed++; }
+    }
     /* one module file reached through a directory symlink and through its real directory is one module:
        text identity (no canonical-path callback) refuses it as exported by both, the bound host callback
        (dv_expand -> cxm_bind_real(hs_cxm_real)) plans it as main + one module. */
