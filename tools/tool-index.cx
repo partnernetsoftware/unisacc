@@ -1,0 +1,405 @@
+/* tools/tool-index.cx -- 生成 build/tool-index.tsv(工具功能索引)与 build/table-index.tsv(表索引),事实由扫描产生,不手写。
+ *
+ *   sh ./unisacc.com tools/tool-index.cx -- --write [--root DIR]     重算并写 build/tool-index.tsv 与 build/table-index.tsv
+ *   sh ./unisacc.com tools/tool-index.cx -- --check [--root DIR]     重算并与已有文件逐字节比对,不一致打印 DIFF 并 rc 1
+ *   sh ./unisacc.com tools/tool-index.cx -- --undescribed [--root DIR]  列出 summary 为 UNDESCRIBED 的工具
+ *   sh ./unisacc.com tools/tool-index.cx -- --tables [--root DIR]    只重写 build/table-index.tsv
+ *
+ * 头注释约定:首个注释 `/* tools/NAME.cx -- 一句话 ... *\/`,取 `--` 后到第一个句号或换行;缺失则 UNDESCRIBED。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXF 2048
+#define OUTCAP (8 * 1024 * 1024)
+
+static const char *root = ".";
+static char *names[MAXF];     /* 相对 tools/ 的名字,cxlib 库文件为 cxlib/X.cx */
+static char *body[MAXF];
+static long blen[MAXF];
+static int nf;
+
+static int streq(const char *a, const char *b) {
+    long n = tx_len(a, 4096);
+    return n == tx_len(b, 4096) && mm_same(a, b, n);
+}
+static int has_at(const char *h, long hn, long at, const char *lit, long ln) {
+    return at + ln <= hn && mm_same(h + at, lit, ln);
+}
+static long find(const char *h, long hn, const char *lit) {
+    long ln = tx_len(lit, 4096), i;
+    for (i = 0; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return i;
+    return -1;
+}
+static void add(char *buf, long *len, const char *s, long n) {
+    long i;
+    for (i = 0; i < n && *len < OUTCAP - 2; i++) {
+        char c = s[i];
+        buf[(*len)++] = (c == '\t' || c == '\n' || c == '\r') ? ' ' : c;
+    }
+}
+static void addz(char *buf, long *len, const char *s) { add(buf, len, s, tx_len(s, 100000)); }
+static void tab(char *buf, long *len) { buf[(*len)++] = '\t'; }
+static void nl(char *buf, long *len) { buf[(*len)++] = '\n'; }
+
+static char *slurp(const char *path, long *n) {
+    size_t m = 0;
+    char *b = cx_read(path, &m), *c;
+    if (!b) return 0;
+    c = mm_alloc((long)m + 1);
+    mm_copy(c, (long)m + 1, b, (long)m);
+    c[m] = 0;
+    mm_free(b);
+    *n = (long)m;
+    return c;
+}
+
+/* 目录下 *.cx 名字加入 names(prefix 为 "" 或 "cxlib/") */
+static void scan_tools(const char *dir, const char *prefix) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        char nm[300], path[700]; long pl = tx_len(prefix, 16);
+        if ((d.kind != 'f' && d.kind != 'l') || d.name_n < 4 || !mm_same(d.name + d.name_n - 3, ".cx", 3)) continue;
+        if (nf >= MAXF || cx_fmt(nm, sizeof nm, "%s%s", prefix, d.name) || cx_fmt(path, sizeof path, "%s/%s", dir, d.name)) continue;
+        (void)pl;
+        names[nf] = mm_alloc(tx_len(nm, 300) + 1);
+        mm_copy(names[nf], tx_len(nm, 300) + 1, nm, tx_len(nm, 300) + 1);
+        body[nf] = slurp(path, &blen[nf]);
+        if (!body[nf]) { body[nf] = mm_alloc(1); body[nf][0] = 0; blen[nf] = 0; }
+        nf++;
+    }
+    sy_dir_close(&d);
+}
+
+/* 排序键:非 cxlib 在前,再按字节序;插入排序(稳定) */
+static int key_lt(int a, int b) {
+    int ca = names[a][0] == 'c' && mm_same(names[a], "cxlib/", 6);
+    int cb = names[b][0] == 'c' && mm_same(names[b], "cxlib/", 6);
+    long i;
+    if (ca != cb) return cb;
+    for (i = 0; names[a][i] && names[b][i]; i++) if (names[a][i] != names[b][i]) return (unsigned char)names[a][i] < (unsigned char)names[b][i];
+    return names[a][i] == 0 && names[b][i] != 0;
+}
+static int order[MAXF];
+static void sort_files(void) {
+    int i, j;
+    for (i = 0; i < nf; i++) order[i] = i;
+    for (i = 1; i < nf; i++) {
+        int k = order[i];
+        for (j = i - 1; j >= 0 && key_lt(k, order[j]); j--) order[j + 1] = order[j];
+        order[j + 1] = k;
+    }
+}
+
+/* 从一行文本取一句话:去注释记号与 tools/NAME.cx 记号,到句号/换行止。返回长度,0 表示无 */
+static long sentence(const char *s, long n, char *out, long cap) {
+    long i = 0, o = 0, j;
+    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '*' || s[i] == '/')) i++;
+    if (has_at(s, n, i, "tools/", 6)) {
+        while (i < n && s[i] != ' ') i++;
+        while (i < n && (s[i] == ' ' || s[i] == '-' || s[i] == ':' || s[i] == ',')) i++;
+    } else {
+        long q;
+        for (q = i; q + 4 <= n && q < i + 40; q++) if (has_at(s, n, q, " -- ", 4)) { i = q + 4; break; }
+    }
+    for (j = i; j < n; j++) {
+        if (has_at(s, n, j, "\xe3\x80\x82", 3)) break;
+        if (s[j] == '.' && (j + 1 >= n || s[j + 1] == ' ')) break;
+        if (o < cap - 1) out[o++] = s[j];
+    }
+    for (;;) {
+        while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '\t')) o--;
+        if (o >= 2 && out[o - 2] == '*' && out[o - 1] == '/') { o -= 2; continue; }
+        break;
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* 头注释区域:文件开头的 slash-star 块或连续的 // 行。返回区域长度(0 无) */
+static long header_start(const char *b, long n);
+static long header_span(const char *b, long n) {
+    long i = header_start(b, n), e;
+    if (has_at(b, n, i, "/*", 2)) {
+        for (e = i + 2; e + 1 < n; e++) if (b[e] == '*' && b[e + 1] == '/') return e + 2;
+        return 0;
+    }
+    if (has_at(b, n, i, "//", 2)) {
+        e = i;
+        while (e < n) {
+            long k = e;
+            while (k < n && b[k] != '\n') k++;
+            if (!has_at(b, n, e, "//", 2)) break;
+            e = k < n ? k + 1 : k;
+        }
+        return e;
+    }
+    return 0;
+}
+static long header_start(const char *b, long n) {
+    long i = 0;
+    for (;;) {
+        while (i < n && (b[i] == ' ' || b[i] == '\n' || b[i] == '\t' || b[i] == '\r')) i++;
+        if (i < n && b[i] == '#') { while (i < n && b[i] != '\n') i++; continue; }   /* 跳过 shebang 与 #pragma 行 */
+        return i;
+    }
+}
+
+static void describe(int f, char *sum, long cap, char *usage, long ucap) {
+    const char *b = body[f];
+    long n = blen[f], st = header_start(b, n), en = header_span(b, n), i, ls, le;
+    char needle[300];
+    sum[0] = 0; usage[0] = 0;
+    if (en <= st) { cx_fmt(sum, cap, "UNDESCRIBED"); return; }
+    /* 首条有意义的句子:首行优先,逐行找 */
+    for (ls = st; ls < en && !sum[0]; ls = le + 1) {
+        le = ls;
+        while (le < en && b[le] != '\n') le++;
+        if (le - ls > 1000) { sentence(b + ls, 1000, sum, cap); }
+        else sentence(b + ls, le - ls, sum, cap);
+        if (sum[0] && (sum[0] == '=' || sum[0] == '-' || (sum[0] == 's' && sum[1] == 'h' && sum[2] == ' '))) sum[0] = 0;
+        if (sum[0]) { /* 纯标点行不算 */
+            int alnum = 0; long k;
+            for (k = 0; sum[k]; k++) if ((unsigned char)sum[k] >= 0x80 || (sum[k] >= 'A' && sum[k] <= 'Z') || (sum[k] >= 'a' && sum[k] <= 'z') || (sum[k] >= '0' && sum[k] <= '9')) alnum = 1;
+            if (!alnum) sum[0] = 0;
+        }
+        if (le >= en) break;
+    }
+    if (!sum[0]) cx_fmt(sum, cap, "UNDESCRIBED");
+    /* usage */
+    if (names[f][0] != 'c' || !mm_same(names[f], "cxlib/", 6)) {
+        cx_fmt(needle, sizeof needle, "unisacc.com tools/%s", names[f]);
+        i = find(b + st, en - st, needle);
+        if (i >= 0) {
+            long s0 = st + i, e0 = s0, o = 0, sh;
+            while (s0 > st && b[s0 - 1] != '\n') s0--;
+            while (e0 < en && b[e0] != '\n') e0++;
+            sh = find(b + s0, e0 - s0, "sh ./");
+            if (sh >= 0 && s0 + sh <= st + i) s0 += sh;
+            while (s0 < e0 && o < ucap - 1) usage[o++] = b[s0++];
+            while (o > 0 && (usage[o - 1] == ' ' || usage[o - 1] == '\r')) o--;
+            usage[o] = 0;
+        }
+    }
+}
+
+static int exists_tool(const char *nm) {
+    int i;
+    for (i = 0; i < nf; i++) if (streq(names[i], nm)) return 1;
+    return 0;
+}
+
+/* batches.tsv:id=col0,source=col3,entry=col8 */
+static char *bt; static long btn;
+static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
+    long ls = 0, o = 0;
+    out[0] = 0;
+    while (ls < btn) {
+        long le = ls, c = 0, cs[16], k;
+        while (le < btn && bt[le] != '\n') le++;
+        cs[0] = ls;
+        for (k = ls; k < le && c < 14; k++) if (bt[k] == '\t') cs[++c] = k + 1;
+        if (c >= 8 && ls > 0) {
+            long s_e = cs[4] - 1, e_s = cs[8], e_e = le;
+            long a = cs[3];
+            int hit = 0; long q;
+            for (q = 0; q < 2; q++) {
+                const char *p = q ? p2 : p1; long pn = tx_len(p, 400);
+                if (!pn) continue;
+                if (s_e - a == pn && mm_same(bt + a, p, pn)) hit = 1;
+                if (e_e - e_s == pn && mm_same(bt + e_s, p, pn)) hit = 1;
+            }
+            if (hit) {
+                long idn = cs[1] - 1 - cs[0], ex = 0;
+                /* 去重:已出现的 id 跳过 */
+                long z = 0;
+                while (z < o) {
+                    long ze = z; while (ze < o && out[ze] != ',') ze++;
+                    if (ze - z == idn && mm_same(out + z, bt + ls, idn)) ex = 1;
+                    z = ze + 1;
+                }
+                if (!ex && o + idn + 2 < cap) {
+                    if (o) out[o++] = ',';
+                    mm_copy(out + o, cap - o, bt + ls, idn); o += idn; out[o] = 0;
+                }
+            }
+        }
+        ls = le + 1;
+    }
+}
+
+static char *build_tools(long *outn) {
+    char *out = mm_alloc(OUTCAP);
+    long len = 0;
+    int ii;
+    char path[700];
+    { const char *h = "tool\tsummary\tusage\tcheck\tbatch_ids\tlines\n"; mm_copy(out, OUTCAP, h, tx_len(h, 100)); len = tx_len(h, 100); }
+    bt = 0; btn = 0;
+    if (!cx_fmt(path, sizeof path, "%s/tests/batches.tsv", root)) bt = slurp(path, &btn);
+    if (!bt) { bt = mm_alloc(1); bt[0] = 0; btn = 0; }
+    for (ii = 0; ii < nf; ii++) {
+        int f = order[ii]; long k, lines = 0;
+        char sum[1200], usage[600], chk[300], p1[300], p2[300], ids[1200], num[24];
+        describe(f, sum, sizeof sum, usage, sizeof usage);
+        chk[0] = 0; ids[0] = 0;
+        if (!(names[f][0] == 'c' && mm_same(names[f], "cxlib/", 6))) {
+            cx_fmt(p1, sizeof p1, "tools/%s", names[f]);
+            cx_fmt(p2, sizeof p2, "tools/check-%s", names[f]);
+            if (!(names[f][0] == 'c' && mm_same(names[f], "check-", 6))) {
+                char cn[300];
+                cx_fmt(cn, sizeof cn, "check-%s", names[f]);
+                if (exists_tool(cn)) cx_fmt(chk, sizeof chk, "tools/%s", cn);
+            } else p2[0] = 0;
+            batch_ids(p1, p2, ids, sizeof ids);
+        }
+        for (k = 0; k < blen[f]; k++) if (body[f][k] == '\n') lines++;
+        cx_fmt(num, sizeof num, "%ld", lines);
+        if (names[f][0] == 'c' && mm_same(names[f], "cxlib/", 6)) cx_fmt(p1, sizeof p1, "tools/%s", names[f]);
+        addz(out, &len, names[f]); tab(out, &len);
+        addz(out, &len, sum); tab(out, &len);
+        addz(out, &len, usage); tab(out, &len);
+        addz(out, &len, chk); tab(out, &len);
+        addz(out, &len, ids); tab(out, &len);
+        addz(out, &len, num); nl(out, &len);
+    }
+    mm_free(bt);
+    *outn = len;
+    return out;
+}
+
+/* ---- 表索引 ---- */
+#define MAXT 256
+static char *tnames[MAXT]; static char *tpaths[MAXT]; static char *tbody[MAXT]; static long tlen[MAXT]; static int nt;
+static int torder[MAXT];
+
+static void scan_tables(const char *dir, const char *rel) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        char nm[300], path[700];
+        if (d.kind != 'f' || d.name_n < 5 || !mm_same(d.name + d.name_n - 4, ".tsv", 4)) continue;
+        if (streq(d.name, "tool-index.tsv") || streq(d.name, "table-index.tsv")) continue;   /* 自身产物不入表索引,保证幂等 */
+        if (nt >= MAXT || cx_fmt(nm, sizeof nm, "%s/%s", rel, d.name) || cx_fmt(path, sizeof path, "%s/%s", dir, d.name)) continue;
+        tpaths[nt] = mm_alloc(tx_len(nm, 300) + 1);
+        mm_copy(tpaths[nt], tx_len(nm, 300) + 1, nm, tx_len(nm, 300) + 1);
+        tnames[nt] = tpaths[nt] + tx_len(rel, 300) + 1;
+        tbody[nt] = slurp(path, &tlen[nt]);
+        if (!tbody[nt]) { tbody[nt] = mm_alloc(1); tbody[nt][0] = 0; tlen[nt] = 0; }
+        nt++;
+    }
+    sy_dir_close(&d);
+}
+static int tkey_lt(int a, int b) {
+    long i;
+    for (i = 0; tpaths[a][i] && tpaths[b][i]; i++) if (tpaths[a][i] != tpaths[b][i]) return (unsigned char)tpaths[a][i] < (unsigned char)tpaths[b][i];
+    return tpaths[a][i] == 0 && tpaths[b][i] != 0;
+}
+
+static char *build_tables(long *outn) {
+    char *out = mm_alloc(OUTCAP);
+    long len = 0;
+    int i, j;
+    char dir[700];
+    nt = 0;
+    cx_fmt(dir, sizeof dir, "%s/build", root);
+    scan_tables(dir, "build");
+    cx_fmt(dir, sizeof dir, "%s/build/layer-api", root);
+    scan_tables(dir, "build/layer-api");
+    for (i = 0; i < nt; i++) torder[i] = i;
+    for (i = 1; i < nt; i++) {
+        int k = torder[i];
+        for (j = i - 1; j >= 0 && tkey_lt(k, torder[j]); j--) torder[j + 1] = torder[j];
+        torder[j + 1] = k;
+    }
+    { const char *h = "table\tpurpose\tgenerator\treaders_count\n"; mm_copy(out, OUTCAP, h, tx_len(h, 100)); len = tx_len(h, 100); }
+    for (i = 0; i < nt; i++) {
+        int t = torder[i], f, readers = 0, gen = -1;
+        long pn = 0, nn = tx_len(tnames[t], 300);
+        char purpose[500], num[16];
+        if (tbody[t][0] == '#') {
+            long k = 1;
+            while (k < tlen[t] && (tbody[t][k] == ' ' || tbody[t][k] == '#')) k++;
+            while (k < tlen[t] && tbody[t][k] != '\n' && pn < 400) purpose[pn++] = tbody[t][k++];
+            while (pn > 0 && (purpose[pn - 1] == ' ' || purpose[pn - 1] == '\r')) pn--;
+        }
+        purpose[pn] = 0;
+        if (!pn && streq(tpaths[t], "build/tool-index.tsv")) cx_fmt(purpose, sizeof purpose, "工具功能索引(tools/tool-index.cx 生成)");
+        else if (!pn && streq(tpaths[t], "build/table-index.tsv")) cx_fmt(purpose, sizeof purpose, "表索引(tools/tool-index.cx 生成)");
+        else if (!pn) cx_fmt(purpose, sizeof purpose, "UNDESCRIBED");
+        for (j = 0; j < nf; j++) {
+            f = order[j];
+            if (names[f][0] == 'c' && mm_same(names[f], "check-", 6)) continue;
+            if (find(body[f], blen[f], tnames[t]) < 0 && !(nn > 4 && find(body[f], blen[f], tpaths[t]) >= 0)) continue;
+            if (gen < 0 && find(body[f], blen[f], "--write") >= 0) gen = f;
+            else readers++;
+        }
+        cx_fmt(num, sizeof num, "%d", readers);
+        addz(out, &len, tpaths[t]); tab(out, &len);
+        addz(out, &len, purpose); tab(out, &len);
+        if (gen >= 0) { addz(out, &len, "tools/"); addz(out, &len, names[gen]); }
+        tab(out, &len);
+        addz(out, &len, num); nl(out, &len);
+    }
+    *outn = len;
+    return out;
+}
+
+static int emit(const char *rel, char *buf, long n, int write_mode) {
+    char path[700]; long on = 0; char *old;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
+    if (write_mode) return cx_write(path, buf, n) ? 2 : 0;
+    old = slurp(path, &on);
+    if (!old || on != n || !mm_same(old, buf, n)) {
+        long k = 0, line = 1;
+        if (old) while (k < on && k < n && old[k] == buf[k]) { if (buf[k] == '\n') line++; k++; }
+        sy_printf("DIFF\t%s\tline=%ld\n", rel, line);
+        return 1;
+    }
+    sy_printf("OK\t%s\n", rel);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a, mode = 0, rc = 0;   /* 1 write, 2 check, 3 undescribed, 4 tables */
+    char dir[700]; long tn = 0, bn = 0; char *tb, *bb;
+    for (a = 1; a < argc; a++) {
+        if (streq(argv[a], "--write")) mode = 1;
+        else if (streq(argv[a], "--check")) mode = 2;
+        else if (streq(argv[a], "--undescribed")) mode = 3;
+        else if (streq(argv[a], "--tables")) mode = 4;
+        else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
+    }
+    if (!mode) { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
+    cx_fmt(dir, sizeof dir, "%s/tools", root);
+    scan_tools(dir, "");
+    cx_fmt(dir, sizeof dir, "%s/tools/cxlib", root);
+    scan_tools(dir, "cxlib/");
+    sort_files();
+    tb = build_tools(&tn);
+    if (mode == 3) {
+        int i, c = 0, nl_ = 0;
+        long ls = 0;
+        while (ls < tn) {
+            long le = ls, k; int cols = 0, hit = 0;
+            while (le < tn && tb[le] != '\n') le++;
+            for (k = ls; k < le; k++) if (tb[k] == '\t') { cols++; if (cols == 1 && has_at(tb, le, k + 1, "UNDESCRIBED\t", 12)) hit = 1; }
+            if (nl_++ > 0 && hit) { tb[le] = 0; sy_printf("UNDESCRIBED\t%s\n", tb + ls); c++; tb[le] = '\n'; }
+            ls = le + 1;
+        }
+        (void)i;
+        sy_printf("UNDESCRIBED_COUNT\t%d\n", c);
+        return 0;
+    }
+    bb = build_tables(&bn);
+    if (mode == 4) return emit("build/table-index.tsv", bb, bn, 1);
+    if (emit("build/tool-index.tsv", tb, tn, mode == 1)) rc = 1;
+    if (emit("build/table-index.tsv", bb, bn, mode == 1)) rc = 1;
+    if (mode == 1 && !rc) sy_printf("WROTE\ttools=%d\ttables=%d\n", nf, nt);
+    return rc;
+}

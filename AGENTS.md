@@ -12,7 +12,7 @@
 cx 架构是 unisacc 成功的核心理念之一(其余如 nn 以网换逻辑、事实表 -> 生成器 -> 表)。凡是需要写脚本、做分析、批量改文件、起子进程、算摘要、处理 TSV/文本、拼装报告的场景,**只用 unisacc + cx**,不用 python、bun、nodejs、perl、awk/sed 脚本或写在 shell 里的算法。
 
 - 怎么写与怎么跑:规范在 [prd_cx_spec.md](prd_cx_spec.md)(语法要点、`#pragma unisa module/use`、标准库速查、替代 python/bun/node 对照表、实跑过的小例子)。直接 `sh ./unisacc.com FILE.cx -- ARGS`,默认即 -run,不先编译落盘。
-- 先查现成:`prd.md` 能力速查和 `tools/` 里已有的 `.cx` 工具(`refactor.cx`、`edit-span.cx`、`affected.cx` 等)是最好的样例;同类事第二遍就造小工具,带 `check-*.cx` 检查并登记批次。
+- 先查现成:完整工具索引见 `build/tool-index.tsv`,表索引见 `build/table-index.tsv`(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算);`prd.md` 能力速查和 `tools/` 里已有的 `.cx` 工具(`refactor.cx`、`edit-span.cx`、`affected.cx` 等)是最好的样例;同类事第二遍就造小工具,带 `check-*.cx` 检查并登记批次。
 - 缺能力就暴露缺口:写 `.cx` 时遇到缺的库能力(文本扫描、TSV、哈希、进程超时、套接字),把缺口写进 `prd_mempalace.md` 的阻塞与未验证,临时做法用 `.cx` 自己补,不退回 python/bun/node。
 - 不引入新的外部解释器依赖:不新增 `.py`、`.js`、`.ts` 工具;遗留的 Python/TypeScript 依赖(例如 `.claude/hooks/*.ts` 是宿主钩子,属 Claude Code 自身机制,不在此列)必须明确记录,只减不增。
 - 改仓内文件只用 Edit/Write 工具或 `.cx` 工具,不用临时 sed/awk/perl/python 改仓内任何文件。

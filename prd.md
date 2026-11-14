@@ -92,6 +92,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 ## 2. 有什么功能（已实现能力速查）
 
+完整工具索引见 build/tool-index.tsv,表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
+
 签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界；检查 `tools/check-release-members.cx ROOT`，只证明字节/结构，不认证签名或最终候选资格。
 
 #### 2.1 日常（运行、改写、查询）
