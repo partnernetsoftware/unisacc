@@ -52,7 +52,7 @@
 - 0.0.63(模型与网类):模型装载零解码(mmap 已解码布局,先定因 D0:最小 C 命中路 46.6 ms 的构成)、speed12b 类重建 e2 网;冷启动目标 first_e2e 500 ms 以下。
 - 0.0.64(cx 设计类):export、通配、cx.stream/tlib 重构、紧凑前导。0.0.65 候选:osx/win netraw 真实现。
 已定三项取舍(主调度按推荐定):(1) 0.0.63 唯一大改类为模型装载零解码,cx.stream/tlib 重构与 export/通配挪到 0.0.64;(2) speed12b 不并入 0.0.62;(3) 平台策略:事实表扩面加有名拒绝先行,不做 NT 上的 fork 仿真,osx/win netraw 真实现推到 0.0.65。
-第一周任务(写域互不相交,P2/P3 同表串行):T1 四工具对 0.0.61 发布件补跑入 speed-baseline(含 1MB sort 118.8 ms 的 check-bench-gencode 行)、T2 命中路定因 D0、T3 g2/g3 并发整链实测(real5 在跑)、T5 别名运行失败修复、T6 netraw 六参、T7 UDP/unix/resolve、T8 SPEED-11、T9 libc 声明清点工具、T10 libc99posix 事实表扩面、T11 ENOSYS 清点表、T13 git 查询去重、T14 text 拆面方案、T15 包索引、T16 win 批次登记。
+第一周任务状态(2026-11-14 实测,已落 main 的才算数):T5 别名运行修复已入库(4aee1dfb4a,三源,断言需新产品验证)、cxmod 模块身份规范路径判同已入库(e576000457,cxm_bind_real;cxm_deps_same 三源对齐在做)、T9 libc 声明清点(build/libc-decls.tsv 1748 条,in_libc99posix=no 从 97.7% 降到约 85%)与 T11 ENOSYS 点清点(口径修正后 70 个点,无拒绝原因 41 个,全在冻结的 cx/sys,须走事实表集中拒绝原因,不逐点补注释)已入库、T10 libc99posix.tsv 30 -> 129 行(stdio 41、string 20、stdlib 38,全 cx-own)已入库、ext 下 34 个 ENOSYS 点补了原因(b0a44e212d)、C1 链相度量(phase-graph)与 C4 接口哈希选批(--iface-narrow)与变异测试补断言已入库。待做:T1 速度基线补跑(整链结束后安静机器)、T2 命中路定因、T3 g2/g3 并发整链实测(real5 在跑,G_LNX_PAIR 已出现)、T6/T7 封网、T8 SPEED-11、T13 git 查询去重、T14 text 拆面、T15 包索引、T16 win 批次登记。
 平台现状事实(2026-11-14 实测):tests/batches.tsv 平台列 lnx/x86_64 1046 行、osx/arm64 36 行、win 0 行;exec/facts/libc99posix.tsv 只有 30 行而 include/ 约 45 个头;cosmocc 参考:errno 等常量走链接期符号、运行库可按平台裁剪(-msysv、-mtinylinux)、跨平台产物字节确定(APE 格式细节与 NT 层未取到原文,UNVERIFIED)。
 
 ## 记忆宫殿(索引)
