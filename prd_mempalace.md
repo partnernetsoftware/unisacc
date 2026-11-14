@@ -627,6 +627,38 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 - (2) 冷编译:coldcompile 的 entry-build 13624、whole-front 12846、ledger-add 6468 ms(real4,各单样本),对 0.0.59 为 -27%、-24%、-32%。杠杆是每单元前导与前端结果复用;度量:同三文件 n>=3 中位。
 - (3) 生成代码与分相:check-bench-gencode 与 speed-probe 对 0.0.61 产物 UNMEASURED,先由 A1c 取数再定目标,不预设数字。
 
+## 流程精简(fable 2026-11-14)
+
+只读分析,方案待主调度裁决,未动源码、工具、规则文件;输入身份 main c1240d3ace。范围是工作方式与发布流程,不含编译器代码。铁律(不删断言、不缩覆盖、不放宽时限、未实跑不记 PASS)全部保留。
+
+五个最大复杂度来源(证据均为本日实测计数或本文件账本行):
+- (S1) 账本变成过程流水账,状态用散文存在一个文件里:最近 20 个提交有 16 个动本文件,其中 14 个只动本文件(`git log -20 --name-only` 实测),每个子代理各自提交一行取证;本文件 646 行、246434 字节,今日被提交 149 次(全仓今日 383 次的 39%),超 2000 字符的行 7 条;版本号出现 469 处(prd_cx.md 第 12 节取数时 290 处),跳过 0.0.64 只能靠"按对照读";real7 过程记录 7 行占 17295 字节,与写法规则"过程不写"相悖;F17 记有 `git commit -- prd_mempalace.md` 带走他人行,SFT-2 证实覆盖 1 次。
+- (S2) 仓外补丁堆叠加"一版一类"与"一律 main":~/.cache/unisacc/patches-0.0.63 至 0.0.67 五目录 24 个文件,单副本(F20);补丁内带派生物块(iface-hash、product-map、prd_productmap、tool-index),main 每次重生派生物补丁即失贴,rl2、npx 今日为此重基(R6-W4 行,rc 1 的原因全是派生物漂移),K1 与 W4 各做过一遍全叠人工核对。
+- (S3) 起链靠配方与环境约定,不是一条命令:配方 5 条加 chain-ready 两条手工项(7-recipe、9-ledger),私有提交、快照、cxroot、bootstrap 副本、环境变量都由人拼;UNISACC_RUN_CACHE 一个变量管两件事(N15 对象复用与模型缓存),real7 因带它在 g2 连败两次(20:15 起链至 20:50 第三段,约 35 分钟加 gen1 重算),本文件提到的 UNISACC_ 变量有 10 种。
+- (S4) 整链长且逐键串行:real6 墙钟 3752 s,g2、g3 对象相每道 725 至 734 s(54 键一次一键,热键约 7 s,首键冷约 50 s),单步上限 90 s 的余量只有约 1.7 倍;build/phase-times.tsv 243 行里 26 行实测超预算、16 行 UNMEASURED;冻结到可发布的最短路径约 100 分钟,贴 2 小时线。
+- (S5) 检查面与工具面只增不并:tools/ 1071 个文件 171272 行(.cx 961,其中 check-* 446,cxlib 62),批次 1129 行(commit 337、daily 740、release 51),棘轮 13 项、derive 9 项、chain-ready 9 项三套入口;CLAUDE.md 里"只用 cx 不用 sed/python"写了 4 处、"不用 stash/reset"写了 3 处;guard-edit 用例 79 增至 97 仍漏 sed -i(eval、变量路径不可杜绝)。
+
+各来源的最小精简办法:
+- (S1) 三步,由小到大:(a) 过程行外移,起链与取证的过程写链目录 log/,本文件每条链只留一行(REV、PGID、截止、日志路径、结论),可立刻删约 17 KB;子代理的只读取证结论回给主调度,不各自提交账本,由主调度随下一个实质提交合并写入(CLAUDE.md 已有"纯文档不单独提交",现状是未执行,不需新规则);(b) 版本号只在一张 build/state-versions.tsv 定义,正文改用类名引用(cxmod 类、库包源类、nn 网化类、驱动缓存二期),顺延时只改一行;(c) 按 prd_cx.md 第 12 节 SFT-S0 把"仍未验证"表化,行级提交用 commit-own --keyed,消除带走他人行。可放松:无;"唯一协同入口"保留,只是入口的一部分由表生成。
+- (S2) 补丁一律不带派生物块(入 main 时 `tools/derive.cx -- --write` 重生),补丁清单进 build/state-patches.tsv(SFT-4 第 4 张),全叠核对改成一条命令而不是派工;补丁文件本身入库到 plans/patches/(文本,非产品输入,不进候选树的 src、cx、ext),消除仓外单副本与 sweep 保护名单。可放松:"不把交付物留在补丁文件"这条对排队中的他类大改本来就做不到,明确写成例外即可;"一版一类"与"一律 main"都不动。
+- (S3) candidate-chain 预检加环境白名单:环境里出现未登记的 UNISACC_* 即 REFUSE,通过的环境写进链收据;配方 1 至 4 收成一个入口工具(造私有提交、快照、cxroot、写账本行),chain-ready 的两条手工项随之变可执行。长期把 RUN_CACHE 拆成两个开关,属产品输入,排驱动与运行缓存二期那一版。
+- (S4) 不新增方案:键并发即已排的 s2(0.0.65 链工具类),g2budget 备用补丁并入同一类;精简点只是把 phase-times.tsv 里已失效的 0.0.47 自报行归档,留现行相位,超限行才显眼。
+- (S5) 不删检查。合并入口:ratchets、derive --check 已被 chain-ready 调用的就不再在冻结清单里单列(冻结只认 chain-ready 末行,本文件 Z1 至 Z8 清单可缩为一行);规则文件去重由项目所有者改(本条不动 CLAUDE.md);guard-edit 不再追加枚举用例,改靠提交前 own-diff 加 check 把关;无调用者工具按 tool-index 候选表在公开后归档一轮,不设行数上限。
+
+先做的三项(按收益除以风险排序):
+- (P1) 起链环境白名单(S3)。第一步:新增事实表 build/chain-env.tsv(允许的变量名与用途,现仅 UNISACC_IDENT_HELPER),candidate-chain 预检读表拒绝其余 UNISACC_*,check-candidate-chain 加两条负控(带 UNISACC_RUN_CACHE=0、带 UNISACC_CACHE_DIR)。验收:`sh ./unisacc.com tools/check-candidate-chain.cx` 末行 failed=0 且两条负控各报 REFUSE rc 2 并点名变量(现为 81 项);`sh ./unisacc.com tools/chain-ready.cx -- --fast` 不因此新增失败。风险:链工具输入变更,须在 0.0.63 链结束后落,归 0.0.65 链工具类。
+- (P2) 账本过程行外移与版本序单点(S1 的 a、b)。第一步:real7 七行压成一行并把原文存到链目录 log/real7-ledger.txt;建 build/state-versions.tsv 六列(SFT-4 第 5 张)抄现行顺延对照。验收:`sh ./unisacc.com tools/tsv-lint.cx` 对新表无新增报错;`sh ./unisacc.com tools/status.cx` 仍 rc 0;本文件字节数下降且无单行超 2000 字符(计数用 .cx,UNMEASURED 至实施)。风险:纯文档与手写表,非产品输入;唯一风险是删掉仍被引用的证据,故原文先落盘再删。
+- (P3) 补丁去派生物加全叠一条命令(S2)。第一步:新工具 tools/patch-stack.cx 与 check-patch-stack.cx(名字历史已查:`git log --all --oneline` 对两名及 build/state-patches.tsv、build/chain-env.tsv 均无记录),读 state-patches.tsv 按叠序在 git archive 副本上 `git apply --check`,补丁触及 derive 登记输出即拒。验收:`sh ./unisacc.com tools/patch-stack.cx -- --check` 末行 `PATCH_STACK ok=N fail=0 derived=0` rc 0;check 含一条带派生物块的负控报拒;登记批次。风险:现存 24 个补丁文件里带派生物的要各重基一次(一次性)。
+- 之后才是 SFT-S0 表化(S1 的 c)与 s2 键并发(S4),二者已有设计与排期,不改序。
+
+必要的复杂度(保留及理由):
+- 两代固定点加字节相同验收:自举编译器唯一不依赖外部参考的独立判据,权重由 gold 构造,除逐字节比对外没有别的 oracle;可减的只是把"开关缓存对拍"留在快车道,不带进整链环境。
+- 一版一类:链失败落点靠它归因(real7 的冷键能定到 host 相关输入变更即因此);去掉后每次失败要在多类改动里二分。
+- 单步 60 s 与 90 s 上限、总时限、止损两次:real7 正是被 90 s 上限在 2 分钟内暴露,而不是拖成一小时的慢链;孤儿 affected 进程空转 5.8 小时是无上限的反例。
+- 一律 main 不用分支与 worktree:多代理共享检出下分支会让"谁的 HEAD 是候选"不可判定;代价是补丁排队,用 P3 降低而不是废规则。
+- 批次 1129 行与 check-* 配对:是覆盖本身,铁律不许缩;只并入口不并内容。
+- 账本留痕三类(他人须遵守的决定、不可逆对外动作、阻塞发布的未验证):跨会话唯一记忆,保留,只换存法。
+
 ## 记忆宫殿(索引)
 
 | 房间 | 当前事实 | 入口 |
