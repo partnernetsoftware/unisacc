@@ -274,7 +274,7 @@ Z1 至 Z8 实跑结果(2026-11-14,输入身份 main HEAD 6e151c7b14,已装 unisa
 | Z7 | PASS(部分) | `pgrep -f candidate-chain` 无在途链(chain-ready 8-inflight 同证);`~/.cache/unisacc/ape-0.0.62/unisacc.com` sha256 前缀 83b82c8d,与已装 unisacc.com 一致(ape-0.0.62 是目录,核的是其中 unisacc.com) |
 | Z8 | PASS(待判读) | `git diff --name-status v0.0.62..HEAD -- src cx ext exec` 共 5 项:M cx/runtime/modelcache.cx、M cx/runtime/runexec.cx、M exec/facts/derive.tsv、A exec/facts/st-gap.tsv、M src/drive.cx;无库包源、无 cxmod 三源文件;exec/facts 两项属事实表,是否算驱动与运行缓存类需冻结者判读 |
 
-结论:Z1 Z4 Z5 Z7 PASS,Z2 FAIL(product-map tsv 漂移,一步 --write 可修,属写域外未改),Z3 Z6 UNMEASURED;在 Z2 修复并重验、Z3 末行 READY=yes、Z6 实跑前不冻结。
+结论(已按冻结前总核对更新):Z1 Z2 Z4 Z5 Z6 Z7 PASS(Z2 已修,derive ok=9 drift=0;Z6 在冻结 HEAD 上须重跑),Z3 只剩 4-p1(修复在途);Z3 末行 READY=yes 前不冻结。
 
 B. 冻结到公开的时间线(整链 3752 s 为 real6 实测;发布 12 步约 25 分钟为推算;合计约 88 分钟,在 2 小时线内,无返工余量)。
 - 串行主线:Z1 至 Z8 -> 起链(起整链配方,强制专用 `UNISACC_CACHE_DIR` 与 `UNISACC_RUN_CACHE` 取值见 F25)-> compare 与 pack -> 发布步骤 1 至 12(6 件资产)-> 读回 -> 装机。
