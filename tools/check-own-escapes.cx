@@ -1,0 +1,126 @@
+/* tools/check-own-escapes.cx -- build/own-escapes.tsv versus `cx-own.cx -- --escapes` output.
+ *
+ *   sh ./unisacc.com tools/check-own-escapes.cx            (runs cx-own over cx ext src, reads the table)
+ *   sh ./unisacc.com tools/check-own-escapes.cx -- --self  (8 fixture assertions, fixtures built in memory)
+ *
+ * Table columns: file function events owns class note.  Reports UNDECLARED (escape, no row), STALE (row, no
+ * escape), DRIFT (events differ), BADROW (bad column count/value/duplicate key).
+ * Last line CHECK_OWN_ESCAPES<TAB>functions=N owns=N not_owned=N undeclared=N stale=N drift=N failed=N; rc 1 on failed. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define MAXE 512
+typedef struct { char file[300]; char fn[128]; long n; int seen; int owns; } ent;
+static ent ac[MAXE], tb[MAXE];
+static int na, nt, g_verbose = 1;
+static long c_und, c_stale, c_drift, c_bad, c_owns, c_notown;
+
+static int seq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+static int fnd(ent *a, int n, const char *f, const char *fn) {
+    for (int i = 0; i < n; i++) if (seq(a[i].file, f) && seq(a[i].fn, fn)) return i;
+    return -1;
+}
+static void cp(char *d, int cap, const char *s, long n) { if (n >= cap) n = cap - 1; for (long i = 0; i < n; i++) d[i] = s[i]; d[n] = 0; }
+/* split line [s,s+n) on tabs into at most 8 fields; returns count */
+static int split(const char *s, long n, const char **f, long *fl) {
+    int c = 0; long st = 0;
+    for (long i = 0; i <= n; i++) if (i == n || s[i] == '\t') { if (c < 8) { f[c] = s + st; fl[c] = i - st; } c++; st = i + 1; }
+    return c;
+}
+static void bad(const char *s, long n) { c_bad++; if (g_verbose) printf("BADROW\t%.*s\n", (int)n, s); }
+
+static void load_actual(const char *o, long on) {
+    long at = 0; na = 0;
+    while (at < on) {
+        long e = at; while (e < on && o[e] != '\n') e++;
+        const char *f[8]; long fl[8];
+        if (e - at > 7 && o[at] == 'E' && tx_find(o + at, e - at, "ESCAPE\t", 7) == 0 && split(o + at, e - at, f, fl) >= 3) {
+            long k = fl[1]; while (k > 0 && f[1][k - 1] != ':') k--;
+            char file[300], fn[128];
+            cp(file, sizeof file, f[1], k > 0 ? k - 1 : fl[1]); cp(fn, sizeof fn, f[2], fl[2]);
+            int i = fnd(ac, na, file, fn);
+            if (i < 0 && na < MAXE) { i = na++; cp(ac[i].file, 300, file, tx_len(file, 300)); cp(ac[i].fn, 128, fn, tx_len(fn, 128)); ac[i].n = 0; }
+            if (i >= 0) ac[i].n++;
+        }
+        at = e + 1;
+    }
+}
+static void load_table(const char *t, long tn) {
+    long at = 0; int first = 1; nt = 0; c_bad = 0;
+    while (at < tn) {
+        long e = at; while (e < tn && t[e] != '\n') e++;
+        if (e > at) {
+            const char *f[8]; long fl[8];
+            if (first && tx_find(t + at, e - at, "file\t", 5) == 0) { first = 0; at = e + 1; continue; }
+            first = 0;
+            int c = split(t + at, e - at, f, fl);
+            char file[300], fn[128], ev[24], ow[8], cl[24];
+            if (c != 6) { bad(t + at, e - at); at = e + 1; continue; }
+            cp(file, sizeof file, f[0], fl[0]); cp(fn, sizeof fn, f[1], fl[1]); cp(ev, sizeof ev, f[2], fl[2]);
+            cp(ow, sizeof ow, f[3], fl[3]); cp(cl, sizeof cl, f[4], fl[4]);
+            long n = 0; int okn = fl[2] > 0;
+            for (long i = 0; i < fl[2]; i++) { if (ev[i] < '0' || ev[i] > '9') okn = 0; else n = n * 10 + (ev[i] - '0'); }
+            int yes = seq(ow, "yes"), no = seq(ow, "no");
+            if (!okn || (!yes && !no) || !(seq(cl, "return") || seq(cl, "helper-free")) || fnd(tb, nt, file, fn) >= 0 || nt >= MAXE) { bad(t + at, e - at); at = e + 1; continue; }
+            cp(tb[nt].file, 300, file, tx_len(file, 300)); cp(tb[nt].fn, 128, fn, tx_len(fn, 128));
+            tb[nt].n = n; tb[nt].owns = yes; tb[nt].seen = 0; nt++;
+        }
+        at = e + 1;
+    }
+}
+static void compare(void) {
+    c_und = c_stale = c_drift = c_owns = c_notown = 0;
+    for (int i = 0; i < na; i++) {
+        int j = fnd(tb, nt, ac[i].file, ac[i].fn);
+        if (j < 0) { c_und++; if (g_verbose) printf("UNDECLARED\t%s\t%s\n", ac[i].file, ac[i].fn); continue; }
+        tb[j].seen = 1;
+        if (tb[j].n != ac[i].n) { c_drift++; if (g_verbose) printf("DRIFT\t%s\t%s\ttable=%ld\tactual=%ld\n", ac[i].file, ac[i].fn, tb[j].n, ac[i].n); }
+    }
+    for (int j = 0; j < nt; j++) {
+        if (!tb[j].seen) { c_stale++; if (g_verbose) printf("STALE\t%s\t%s\n", tb[j].file, tb[j].fn); }
+        else if (tb[j].owns) c_owns++; else c_notown++;
+    }
+}
+static void run(const char *o, long on, const char *t, long tn) { load_actual(o, on); load_table(t, tn); compare(); }
+
+static int g_as, g_fail;
+static void ck(int ok, const char *w) { g_as++; if (!ok) { g_fail++; printf("FAIL\t%s\n", w); } }
+static int self(void) {
+    const char *o = "ESCAPE\ta/x.cx:5\tf\tp\nESCAPE\ta/x.cx:9\tf\tq\nESCAPE\tb/y.cx:3\tg\tr\nCX_OWN_ESCAPES\tfiles=2\tescapes=3\tfunctions=2\n";
+    const char *hd = "file\tfunction\tevents\towns\tclass\tnote\n";
+    char t[1024];
+    g_verbose = 0;
+    #define MK(body) cx_fmt(t, sizeof t, "%s%s", hd, body)
+    MK("a/x.cx\tf\t2\tyes\treturn\t-\nb/y.cx\tg\t1\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024));
+    ck(c_und == 0 && c_stale == 0 && c_drift == 0 && c_bad == 0 && c_owns == 2, "clean table");
+    MK("a/x.cx\tf\t2\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_und == 1, "undeclared");
+    MK("a/x.cx\tf\t2\tyes\treturn\t-\nb/y.cx\tg\t1\tyes\treturn\t-\nc/z.cx\th\t1\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_stale == 1, "stale");
+    MK("a/x.cx\tf\t1\tyes\treturn\t-\nb/y.cx\tg\t1\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_drift == 1, "drift");
+    MK("a/x.cx\tf\t2\tyes\treturn\nb/y.cx\tg\t1\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_bad == 1, "badrow column count");
+    MK("a/x.cx\tf\t2\tmaybe\treturn\t-\nb/y.cx\tg\t1\tyes\treturn\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_bad == 1, "badrow owns value");
+    MK("a/x.cx\tf\t2\tyes\treturn\t-\na/x.cx\tf\t2\tyes\treturn\t-\nb/y.cx\tg\t1\tno\thelper-free\t-\n");
+    run(o, tx_len(o, 4096), t, tx_len(t, 1024)); ck(c_bad == 1, "badrow duplicate key");
+    ck(c_notown == 1 && c_owns == 1, "owns/not_owned counts");
+    printf("CHECK_OWN_ESCAPES_SELF\tassertions=%d\tfailed=%d\n", g_as, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && seq(argv[1], "--self")) return self();
+    char *o = 0, *t; size_t on = 0, tn = 0;
+    cx_run_timeout("sh ./unisacc.com tools/cx-own.cx -- --escapes --tracked cx ext src", 55, &o, &on);
+    t = cx_read("build/own-escapes.tsv", &tn);
+    if (!o || !t) { fprintf(stderr, "check-own-escapes: missing cx-own output or build/own-escapes.tsv\n"); return 2; }
+    run(o, (long)on, t, (long)tn);
+    long fails = c_und + c_stale + c_drift + c_bad;
+    printf("CHECK_OWN_ESCAPES\tfunctions=%d\towns=%ld\tnot_owned=%ld\tundeclared=%ld\tstale=%ld\tdrift=%ld\tfailed=%ld\n", na, c_owns, c_notown, c_und, c_stale, c_drift, fails);
+    return fails ? 1 : 0;
+}
