@@ -92,6 +92,39 @@ int main(int argc, char **argv) {
     write_file("cy3.cx", "#pragma unisa module cy3\n#pragma unisa use cy3\nint c3(void){return 3;}\n");
     write_file("c6.cx", "#pragma unisa use cy3\nint main(void){return c3();}\n");
     note(plan_rc(product, "c6.cx", 1, "module cycle", out, sizeof out), "self-cycle-refused");
+    /* planned syntax (prd_cx.md section 10, prd_cx_spec.md 3.5): not implemented.  Until it is, each spelling
+       must be refused by name before any compile -- never accepted silently.  When 0.0.64 implements export
+       or the wildcard, these rows are replaced by the semantic rows of that candidate, not deleted. */
+    write_file("fac.cx", "#pragma unisa module fac\n#pragma unisa export ok\nint facf(void){return 1;}\n");
+    write_file("p1.cx", "#pragma unisa use fac\nint main(void){return fine();}\n");
+    note(plan_rc(product, "p1.cx", 1, "unknown unisa pragma export", out, sizeof out), "planned-export-refused-by-name");
+    write_file("p2.cx", "#pragma unisa export ok::fine as f2\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p2.cx", 1, "unknown unisa pragma export", out, sizeof out), "planned-export-alias-refused-by-name");
+    write_file("p3.cx", "#pragma unisa use sys.*\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p3.cx", 1, "bad module name \"sys.*\"", out, sizeof out), "planned-wildcard-refused-by-name");
+    write_file("p4.cx", "#pragma unisa use *\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p4.cx", 1, "bad module name \"*\"", out, sizeof out), "planned-bare-star-refused-by-name");
+    write_file("p5.cx", "#pragma unisa use sys.*::sy_run\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p5.cx", 1, "bad module name \"sys.*\"", out, sizeof out), "planned-wildcard-symbol-refused-by-name");
+    /* Known gaps, measured on the installed product 2026-11-14: a symbol import of a name the module does
+       not export (`ok::*`, `ok::nosuch`) plans with rc 0, and after `use aa::other` a call of aa's unimported
+       clash() also plans (CX-U-2 says it must not be visible).  A product that refuses is counted PASS; one
+       that accepts is printed GAP and is neither PASS nor FAIL. */
+    {
+        static const char *gsrc[3] = {
+            "#pragma unisa use ok::*\nint main(void){return 0;}\n",
+            "#pragma unisa use ok::nosuch\nint main(void){return 0;}\n",
+            "#pragma unisa use aa::other\nint main(void){return other()+clash();}\n" };
+        static const char *gname[3] = { "symbol-star-refused", "symbol-not-exported-refused", "unimported-symbol-call-refused" };
+        static const char *gfile[3] = { "g1.cx", "g2.cx", "g3.cx" };
+        int g, gaps = 0;
+        for (g = 0; g < 3; g++) {
+            write_file(gfile[g], gsrc[g]);
+            if (plan_rc(product, gfile[g], 1, 0, out, sizeof out)) note(1, gname[g]);
+            else { printf("GAP\t%s\taccepted-by-product\n", gname[g]); gaps++; }
+        }
+        printf("CX_NAMESPACE_GAPS\tgaps=%d\n", gaps);
+    }
     printf("CX_NAMESPACE\tchecks=%d\tfailed=%d\tunverified=%d\n", checks, fails, unverified);
     return fails ? 1 : 0;
 }

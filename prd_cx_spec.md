@@ -84,6 +84,31 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 - 错误码只走返回值:L0 失败返回 `-errno`,不靠全局 `errno` 跨模块传递(CX-Y-4)。
 - 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build 写 `use text.build`。
 
+### 3.5 计划中语法(未实现,不可用)
+
+本节只是规格草案与拒绝合同,设计全文在 [prd_cx.md](prd_cx.md) 第 10 节。下列写法在当前产品上**全部不可用**;写了会在规划期被具名拒绝(rc=1),不会被静默接受。计划版本 0.0.64,以届时的候选为准。
+
+```
+#pragma unisa export NAME        计划:门面重导出。直接 use 本模块的单元视同直接 use 了 NAME;符号身份仍属 NAME
+#pragma unisa export NAME::sym   计划:只重导出 sym
+#pragma unisa use PFX.*          计划:纯展开为 PFX 目录下每个直接子模块的 use;不递归;冲突仍拒;只许 tools/tests/apps
+```
+
+| 写法 | 现行为(2026-11-14 已装产品实测) | 计划行为 | 计划中的拒绝 |
+|---|---|---|---|
+| `export NAME` | 拒绝 `unknown unisa pragma export` | 见上 | 非模块单元写 export:`export outside module`;导出自己:`exports itself`;成环:`module cycle` |
+| `export NAME::sym as alias` | 拒绝 `unknown unisa pragma export` | 首版仍拒绝 | `export alias unsupported` |
+| `use PFX.*` | 拒绝 `bad module name "PFX.*"` | 见上 | 空展开:`wildcard PFX.* matches no module`;产品层(`src/`、`cx/`、`ext/`)使用:棘轮拒绝;展开后超 48 条 use:沿用现上限拒绝 |
+| `use *`、`use PFX.*::sym`、`use PFX.*.x` | 拒绝 `bad module name` | 永久拒绝 | 同左 |
+| `use NAME::*` | **被静默接受**(当成名为 `*` 的符号,规划 rc=0) | 永久拒绝 | `bad symbol name` |
+
+现行缺口(实测,与计划语法相邻,修复属产品输入):
+
+- `use NAME::nosuch`(模块不导出的名字)规划 rc=0,不报错。计划:`module NAME does not export nosuch`。
+- `use aa::other` 之后直接调用 aa 的另一个公开函数 `clash()`,规划与默认运行都通过(实测 rc=8,即 7+1)。这与 CX-U-2「不得引入其余公开符号」不符:符号级导入现在只是不给原型,调用仍按隐式声明接上。在修复前,**不要把符号级导入当作封装手段**。
+- 锁定:批次 `cx-namespace`(`tests/cx-namespace.cx`)的 5 条 `planned-*-refused-by-name` 断言守住上表前四行的现行为;后三项以 `GAP` 行如实打印,不记 PASS;产品修复后自动转为 PASS。
+- 实现这些语法时,上述 5 条断言要换成对应的语义断言(同批次),不是删除。
+
 ## 4 标准库速查
 
 函数名全部取自 `build/layer-api/*.tsv`,第 9 节列出核对结果。「use」列是要写的模块名;签名与错误合同看「页」列对应的 `docs/cx/api/<页>.md`(生成物,勿手改)。
