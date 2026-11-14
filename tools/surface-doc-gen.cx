@@ -1,0 +1,80 @@
+/* surface-doc-gen: build/std-surface.tsv (v2) -> docs/cx/api/<pkg>.md, one file per pkg.
+ *   sh ./unisacc.com tools/surface-doc-gen.cx -- --write|--check [ROOT]
+ * ROOT defaults to ".". --check is nonzero on byte drift or missing file (1) or a refused table (2).
+ * Content is only table facts; the 13 data columns after pkg are rendered verbatim. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#define MAXR 1024
+#define NC 14
+static char *rows[MAXR][NC];
+static int nr;
+static const char *HDR[NC] = {"pkg", "name", "signature", "analogue", "errors", "lnx", "osx", "win", "status", "note", "stab", "since", "own", "test"};
+static void die(const char *s) { fprintf(stderr, "surface-doc-gen: REFUSE %s\n", s); exit(2); }
+static int pkg_ok(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++) if (!strchr("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.", *s)) return 0;
+    return 1;
+}
+static void cell(np_buf *b, const char *s) {
+    np_puts(b, " ");
+    for (; *s; s++) {
+        if (*s == '|') np_puts(b, "\\|");
+        else { char c[2] = {*s, 0}; np_puts(b, c); }
+    }
+    np_puts(b, " |");
+}
+int main(int argc, char **argv) {
+    if (argc < 2 || argc > 3 || (strcmp(argv[1], "--write") && strcmp(argv[1], "--check"))) {
+        fprintf(stderr, "surface-doc-gen: usage --write|--check [ROOT]\n");
+        return 2;
+    }
+    int check = !strcmp(argv[1], "--check");
+    const char *root = argc == 3 ? argv[2] : ".";
+    char src[2600], dst[2700];
+    if (cx_fmt(src, sizeof src, "%s/build/std-surface.tsv", root)) die("path bound");
+    size_t n; char *s = cx_read(src, &n);
+    if (!s || !n || n > 1048576 || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("table text");
+    if (strncmp(s, "# std-surface v2\n", 17)) die("version header");
+    for (char *p = s; *p; ) {
+        char *e = strchr(p, '\n'); *e = 0;
+        if (*p && *p != '#') {
+            int k = 0; rows[nr][k++] = p;
+            for (char *q = p; *q; q++) if (*q == '\t') { *q = 0; if (k == NC) die("columns"); rows[nr][k++] = q + 1; }
+            if (k != NC) die("columns");
+            if (!pkg_ok(rows[nr][0])) die("pkg name");
+            if (++nr == MAXR) die("row bound");
+        }
+        p = e + 1;
+    }
+    if (!nr) die("empty table");
+    int made = 0, bad = 0;
+    for (int i = 0; i < nr; i++) {
+        int seen = 0;
+        for (int j = 0; j < i; j++) if (!strcmp(rows[j][0], rows[i][0])) { seen = 1; break; }
+        if (seen) continue;
+        np_buf b = {0};
+        np_puts(&b, "<!-- 本文件由 tools/surface-doc-gen.cx 自 build/std-surface.tsv 生成,勿手改 -->\n\n");
+        np_puts(&b, "# API: "); np_puts(&b, rows[i][0]);
+        np_puts(&b, "\n\n本文件由 tools/surface-doc-gen.cx 自 build/std-surface.tsv 生成,勿手改。列义见该表文件头。\n\n|");
+        for (int c = 1; c < NC; c++) { np_puts(&b, " "); np_puts(&b, HDR[c]); np_puts(&b, " |"); }
+        np_puts(&b, "\n|");
+        for (int c = 1; c < NC; c++) np_puts(&b, " --- |");
+        np_puts(&b, "\n");
+        for (int j = i; j < nr; j++) {
+            if (strcmp(rows[j][0], rows[i][0])) continue;
+            np_puts(&b, "|");
+            for (int c = 1; c < NC; c++) cell(&b, rows[j][c]);
+            np_puts(&b, "\n");
+        }
+        if (cx_fmt(dst, sizeof dst, "%s/docs/cx/api/%s.md", root, rows[i][0])) die("path bound");
+        if (check) {
+            size_t z; char *old = cx_read(dst, &z);
+            if (!(old && z == b.n && !memcmp(old, b.p, z))) { fprintf(stderr, "surface-doc-gen: DIFF %s\n", dst); bad++; }
+            free(old);
+        } else if (cx_write(dst, b.p, b.n)) die("write doc");
+        made++;
+    }
+    printf("SURFACE_DOC_GEN\tstatus=%s\tpkgs=%d\trows=%d\tdiff=%d\n", check ? "CHECK" : "WRITE", made, nr, bad);
+    return bad ? 1 : 0;
+}

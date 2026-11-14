@@ -18,15 +18,21 @@
  * A failed or overrun build returns -1 with the exit code in WHY; the compiler's own messages have
  * already gone to this process's stderr (the child inherits it).
  *
- * Tape-library path (0.0.58): before the compile, the kit image ROOT/out/tlib/tlib-prep (built by
+ * Tape-library path (0.0.58): before the compile, the kit image <kitdir>/tlib-prep (built by
  * `tools/tlib.cx kit`) is asked to link the tool from fresh tlibs: `tlib-prep prep TOOL -o BIN`, under
  * tools/bound for TQ_KIT_SECS.  The image decides everything (tool listed in ROOT/build/tlib-prep.tsv,
  * kit and tlibs verified and fresh, no release-chain environment: tools/tlib.cx, cxlib.tlibpkg).  When
  * it exits 0 the PREPARED line carries via=tlib and the image is a link of the same units instead of the
  * one-invocation `-o` output; in every other case (no kit, tool not listed, stale or refused kit, a
  * failed link) the compile below runs exactly as before and its PREPARED line is unchanged.  Still
- * preparation only, still no result.  No module is used for this on purpose: measured 2026-11-12, one
- * more `use` here cost every check that uses this module about 2 s of cold compile.
+ * preparation only, still no result.
+ *
+ * The kit directory comes from cxlib.tlibpkg `tp_kit_dir` (CACHE/kit/<content key from tp_kit_key:
+ * product sha + package table + tools/tlib.cx + the 17 package units and their #include files>), not from
+ * ROOT/out/tlib: that path is only a compatibility symlink `tlib kit` leaves behind, and reading it
+ * made every consumer depend on the link existing.  One `use` is added for it; measured 2026-11-12, an
+ * extra module here costs every check that uses this module about 2 s of cold compile, and this one buys
+ * a single kit location instead of a second copy of the cache-dir + sha rule.
  *
  * tq_warm_start / tq_warm_join: a tool that itself issues `sh PRODUCT x -- ARG` pays that compile inside
  * the asserted step.  The check may issue the same command in the background while it builds the tool:
@@ -44,6 +50,7 @@
 #pragma unisa module toolprep
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
+#pragma unisa use cxlib.tlibpkg
 
 #define TQ_PREP_SECS 40
 #define TQ_KIT_SECS 20
@@ -66,7 +73,8 @@ int tq_native(const char *root, const char *tool, const char *bin, char *why, si
         char image[4400], limit[16];
         char *said = 0;
         size_t saidn = 0;
-        if (!cx_fmt(image, sizeof image, "%s/out/tlib/tlib-prep", root) && !cx_fmt(limit, sizeof limit, "%d", TQ_KIT_SECS)) {
+        char kitdir[4400];
+        if (!tp_kit_dir(root, kitdir, sizeof kitdir) && !cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir) && !cx_fmt(limit, sizeof limit, "%d", TQ_KIT_SECS)) {
             char *v[] = {"sh", "-c", "[ -x \"$3\" ] || exit 7; exec \"$@\"", "sh", bound, limit, image, "prep", (char *)tool, "-o", (char *)bin, "--root", (char *)root, 0};
             rc = cx_runv_timeout(v, TQ_KIT_SECS + 2, &said, &saidn);
             free(said);

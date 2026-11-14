@@ -1,0 +1,261 @@
+/* tools/unfreeze.cx -- 解冻登记表 agentwork/unfreeze.tsv 的检查与放行计划(第一版:只读,不启动任何批次/kit/构造)。
+ *
+ *   sh ./unisacc.com tools/unfreeze.cx -- --check   [--table F] [--batches F]
+ *   sh ./unisacc.com tools/unfreeze.cx -- --dry-run [--table F] [--batches F] [--load-max X] [--loadavg F]
+ *                                                   [--chain auto|running|idle] [--max N]
+ *
+ * 表列: id window wave batch_ids needs_kit materials write_domain deps status
+ *   wave: 0 1 2a 2b 3;  status: TODO RUNNING DONE UNVERIFIED DEFERRED;  batch_ids/deps 以逗号分隔,空用 "-"。
+ * --check: 列数、id 唯一、枚举、batch_ids 必须在 tests/batches.tsv 存在、deps 必须是行且无环。
+ *   输出 UNFREEZE_CHECK ok errors=N (有错 rc 1)。
+ * --dry-run: 先 check;链在跑(pgrep -f chain-run-native 的真实进程)即 UNFREEZE_REFUSE chain-running, rc 3。
+ *   否则按 波次 -> kit 先于无 kit -> 表序 逐行判定,每行一条 UNFREEZE_PLAN:
+ *   RELEASE(附将来调用 affected --ids ID --run -j 1)/WAIT(原因)/BLOCKED(依赖未 DONE)/SKIP(非 TODO)。
+ *   规则: 依赖全 DONE;kit 单写(同一时刻最多一个 needs_kit 项,RUNNING 或本次已放行即占用);
+ *   kit 占用时带 materials 的项等待;load1 闸(波 0/1 < 3,波 2a/2b/3 < 6,--load-max 覆盖所有波);每次最多放行 --max(默认 2)。
+ *   本工具不启动任何东西;放行动作留给后续版本。 */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define MAXR 128
+#define NF 9
+typedef struct { char *f[NF]; int wave, kit, order; char act; } Row;
+static Row rows[MAXR];
+static int nrows;
+static char *tbuf, *bbuf;
+static size_t tn, bn;
+static int errors;
+
+static void err(const char *id, const char *why) { printf("ERR\t%s\t%s\n", id, why); errors++; }
+
+static int wave_rank(const char *w) {
+    static const char *n[] = {"0", "1", "2a", "2b", "3"};
+    for (int i = 0; i < 5; i++) if (!strcmp(w, n[i])) return i;
+    return -1;
+}
+
+/* split a NUL-terminated buffer in place into lines */
+static int load_table(const char *path) {
+    tbuf = cx_read(path, &tn);
+    if (!tbuf) { printf("ERR\t-\t无法读取表 %s\n", path); return 1; }
+    char *p = tbuf, *end = tbuf + tn;
+    int first = 1;
+    while (p < end) {
+        char *e = memchr(p, '\n', end - p);
+        if (!e) e = end;
+        *e = 0;
+        if (*p && *p != '#') {
+            if (first) { first = 0; }
+            else if (nrows < MAXR) {
+                Row *r = &rows[nrows];
+                int k = 0;
+                char *q = p;
+                memset(r, 0, sizeof *r);
+                for (;;) {
+                    if (k < NF) r->f[k] = q;
+                    k++;
+                    char *t = strchr(q, '\t');
+                    if (!t) break;
+                    *t = 0;
+                    q = t + 1;
+                }
+                if (k != NF) { err(r->f[0] ? r->f[0] : "?", "列数不是 9"); }
+                else { r->order = nrows; nrows++; }
+            }
+        }
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int in_list(const char *list, const char *tok) {
+    size_t tl = strlen(tok);
+    const char *p = list;
+    while (*p) {
+        const char *e = strchr(p, ',');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l == tl && !memcmp(p, tok, l)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int batch_exists(const char *id, size_t l) {
+    char *p = bbuf, *end = bbuf + bn;
+    while (p < end) {
+        char *e = memchr(p, '\n', end - p);
+        if (!e) e = end;
+        char *t = memchr(p, '\t', e - p);
+        if (t && (size_t)(t - p) == l && !memcmp(p, id, l)) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int row_of(const char *id, size_t l) {
+    for (int i = 0; i < nrows; i++) if (strlen(rows[i].f[0]) == l && !memcmp(rows[i].f[0], id, l)) return i;
+    return -1;
+}
+
+static void each_tok(const char *list, int (*fn)(const char *, size_t, void *), void *u) {
+    const char *p = list;
+    if (!strcmp(list, "-")) return;
+    for (;;) {
+        const char *e = strchr(p, ',');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (fn(p, l, u)) return;
+        if (!e) return;
+        p = e + 1;
+    }
+}
+
+static int chk_batch(const char *t, size_t l, void *u) {
+    if (!batch_exists(t, l)) { printf("ERR\t%s\t批次 %.*s 不在 tests/batches.tsv\n", (char *)u, (int)l, t); errors++; }
+    return 0;
+}
+static int chk_dep(const char *t, size_t l, void *u) {
+    if (row_of(t, l) < 0) { printf("ERR\t%s\t依赖 %.*s 不是表中的行\n", (char *)u, (int)l, t); errors++; }
+    return 0;
+}
+
+static int check_table(const char *bpath) {
+    int e0 = errors;
+    bbuf = cx_read(bpath, &bn);
+    if (!bbuf) { err("-", "无法读取 batches.tsv"); return 1; }
+    for (int i = 0; i < nrows; i++) {
+        Row *r = &rows[i];
+        const char *id = r->f[0];
+        for (int j = 0; j < i; j++) if (!strcmp(rows[j].f[0], id)) err(id, "id 重复");
+        r->wave = wave_rank(r->f[2]);
+        if (r->wave < 0) err(id, "wave 不在 0/1/2a/2b/3");
+        if (strcmp(r->f[4], "0") && strcmp(r->f[4], "1")) err(id, "needs_kit 不是 0/1");
+        r->kit = !strcmp(r->f[4], "1");
+        static const char *st[] = {"TODO", "RUNNING", "DONE", "UNVERIFIED", "DEFERRED"};
+        int ok = 0;
+        for (int k = 0; k < 5; k++) if (!strcmp(r->f[8], st[k])) ok = 1;
+        if (!ok) err(id, "status 不合法");
+        if (!strcmp(r->f[3], "-") || !*r->f[3]) err(id, "batch_ids 为空");
+        each_tok(r->f[3], chk_batch, (void *)id);
+        each_tok(r->f[7], chk_dep, (void *)id);
+    }
+    /* cycle: repeatedly remove rows whose deps are all removed */
+    {
+        char gone[MAXR] = {0};
+        int moved = 1;
+        while (moved) {
+            moved = 0;
+            for (int i = 0; i < nrows; i++) {
+                if (gone[i]) continue;
+                int all = 1;
+                const char *p = rows[i].f[7];
+                while (strcmp(p, "-") && *p) {
+                    const char *e = strchr(p, ',');
+                    size_t l = e ? (size_t)(e - p) : strlen(p);
+                    int d = row_of(p, l);
+                    if (d >= 0 && !gone[d]) all = 0;
+                    if (!e) break;
+                    p = e + 1;
+                }
+                if (all) { gone[i] = 1; moved = 1; }
+            }
+        }
+        for (int i = 0; i < nrows; i++) if (!gone[i]) err(rows[i].f[0], "依赖环");
+    }
+    printf("UNFREEZE_CHECK %s errors=%d\n", errors == e0 ? "ok" : "FAIL", errors - e0);
+    return errors != e0;
+}
+
+static int chain_running(const char *mode) {
+    if (!strcmp(mode, "running")) return 1;
+    if (!strcmp(mode, "idle")) return 0;
+    char *v[] = {"pgrep", "-f", "chain-run-native", 0};
+    char *o = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(v, 10, &o, &n);
+    free(o);
+    return rc == 0 && n > 0;
+}
+
+static double load1(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    double v = 99;
+    if (b) { v = atof(b); free(b); }
+    return v;
+}
+
+static int dry_run(double lmax, int have_lmax, const char *loadavg, const char *chain, int maxrel) {
+    if (chain_running(chain)) { printf("UNFREEZE_REFUSE chain-running\n"); return 3; }
+    double ld = load1(loadavg);
+    int kit_busy = 0, released = 0;
+    for (int i = 0; i < nrows; i++) if (rows[i].kit && !strcmp(rows[i].f[8], "RUNNING")) kit_busy = 1;
+    /* order: wave, kit first, table order */
+    int ord[MAXR], n = nrows;
+    for (int i = 0; i < n; i++) ord[i] = i;
+    for (int i = 1; i < n; i++) {
+        int x = ord[i], j = i - 1;
+        while (j >= 0) {
+            Row *a = &rows[ord[j]], *b = &rows[x];
+            int gt = a->wave != b->wave ? a->wave > b->wave : (a->kit != b->kit ? a->kit < b->kit : a->order > b->order);
+            if (!gt) break;
+            ord[j + 1] = ord[j];
+            j--;
+        }
+        ord[j + 1] = x;
+    }
+    for (int q = 0; q < n; q++) {
+        Row *r = &rows[ord[q]];
+        const char *id = r->f[0], *why = "", *dep = "";
+        const char *act;
+        double lim = have_lmax ? lmax : (r->wave <= 1 ? 3.0 : 6.0);
+        if (strcmp(r->f[8], "TODO")) { act = "SKIP"; why = r->f[8]; }
+        else {
+            int blocked = 0;
+            const char *p = r->f[7];
+            while (strcmp(p, "-") && *p) {
+                const char *e = strchr(p, ',');
+                size_t l = e ? (size_t)(e - p) : strlen(p);
+                int d = row_of(p, l);
+                if (d >= 0 && strcmp(rows[d].f[8], "DONE")) { blocked = 1; dep = rows[d].f[0]; break; }
+                if (!e) break;
+                p = e + 1;
+            }
+            if (blocked) { act = "BLOCKED"; why = dep; }
+            else if (ld >= lim) { act = "WAIT"; why = "load"; }
+            else if (released >= maxrel) { act = "WAIT"; why = "max-released"; }
+            else if (r->kit && kit_busy) { act = "WAIT"; why = "kit-single-writer"; }
+            else if (!r->kit && strcmp(r->f[5], "-") && kit_busy) { act = "WAIT"; why = "kit-busy-materials"; }
+            else { act = "RELEASE"; released++; if (r->kit) kit_busy = 1; }
+        }
+        printf("UNFREEZE_PLAN\t%s\t%s\twave=%s\tload1=%.2f\tlimit=%.2f\t%s%s", id, act, r->f[2], ld, lim, !strcmp(act, "BLOCKED") ? "dep=" : "", !strcmp(act, "BLOCKED") ? dep : why);
+        if (!strcmp(act, "RELEASE"))
+            printf("\tcall=sh ./unisacc.com tools/affected.cx -- --ids %s --run -j 1", r->f[3]);
+        printf("\n");
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *table = "agentwork/unfreeze.tsv", *batches = "tests/batches.tsv", *loadavg = "/proc/loadavg", *chain = "auto";
+    int do_check = 0, do_dry = 0, have_lmax = 0, maxrel = 2;
+    double lmax = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "--check")) do_check = 1;
+        else if (!strcmp(a, "--dry-run")) do_dry = 1;
+        else if (!strcmp(a, "--table") && i + 1 < argc) table = argv[++i];
+        else if (!strcmp(a, "--batches") && i + 1 < argc) batches = argv[++i];
+        else if (!strcmp(a, "--loadavg") && i + 1 < argc) loadavg = argv[++i];
+        else if (!strcmp(a, "--chain") && i + 1 < argc) chain = argv[++i];
+        else if (!strcmp(a, "--load-max") && i + 1 < argc) { lmax = atof(argv[++i]); have_lmax = 1; }
+        else if (!strcmp(a, "--max") && i + 1 < argc) maxrel = atoi(argv[++i]);
+        else { fprintf(stderr, "usage: unfreeze.cx -- --check|--dry-run [--table F] [--batches F] [--load-max X] [--loadavg F] [--chain auto|running|idle] [--max N]\n"); return 2; }
+    }
+    if (do_check == do_dry) { fprintf(stderr, "unfreeze: 须且只能给 --check 或 --dry-run 之一\n"); return 2; }
+    if (do_dry && chain_running(chain)) { printf("UNFREEZE_REFUSE chain-running\n"); return 3; }
+    if (load_table(table)) return 1;
+    if (check_table(batches)) return 1;
+    if (do_check) return 0;
+    return dry_run(lmax, have_lmax, loadavg, chain, maxrel);
+}

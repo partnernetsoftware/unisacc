@@ -1,0 +1,328 @@
+/* tools/phase-graph.cx -- 只读度量: 读 build/chain-phases.tsv, 输出摘要/依赖关键路径/outer 相的并发候选.
+ *   sh ./unisacc.com tools/phase-graph.cx -- PHASES_TSV [INPUTS_TSV] [--pairs N]
+ * 列: order id exclusive_dir timeout_s deps lane parallelism ...; deps 以逗号分隔, "-" 为空.
+ * 输出(制表符分隔):
+ *   PHASES n= outer= par4= domains=          摘要(par4=并发度>1 的相数)
+ *   CRITICAL_PATH phases= weight_s= basis=timeout_s_upper_bound   最长依赖链(相数最多者; 权重=timeout_s 之和, 是上界, 非实测)
+ *   CRITICAL_WEIGHTED weight_s= phases=       按 timeout_s 加权的最长链(上界)
+ *   CRITICAL_SEG family count outer          关键路径上按族前缀折叠的段
+ *   OUTER_ON_CRITICAL n=                     关键路径中 exclusive_dir=outer 的相数
+ *   DEPS_ONLY_MAX_WIDTH level= width=        仅按 deps 分层的最大同层相数
+ *   FAMILY name phases dirs                  outer 相的族(去掉 -start/-finish 与尾部 -数字)
+ *   CONCURRENT_CANDIDATE A B unordered= of= full=Y|N verdict=UNVERIFIED shared_inputs=
+ *       outer 族 A,B 的相对在 deps 上互不为祖先(无顺序约束). 写集合表里没有声明, 故一律 UNVERIFIED.
+ * 拒绝(rc 3): 缺失依赖 / 环 / 重复 id / 列不足 / 超过 1024 相. 不写任何文件. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXP 1024
+#define MAXD 64
+#define MAXF 256
+typedef struct { char *id, *dir; long to; int par; int nd; int dep[MAXD]; int fam; } ph_t;
+static ph_t P[MAXP];
+static int np;
+static unsigned char anc[MAXP][MAXP];   /* anc[i][j]=1: j 是 i 的祖先 */
+static int topo[MAXP], lvl[MAXP], best_prev[MAXP], wprev[MAXP];
+static long wsum[MAXP];
+static char famname[MAXF][96];
+static int famn[MAXF], famouter[MAXF], famfirst[MAXF], nfam;
+static char *itab_id[MAXP], *itab_in[MAXP];
+static int nit;
+
+static int refuse(const char *why, const char *what) {
+    sy_printf("PHASE_GRAPH_REFUSE\t%s\t%s\n", why, what);
+    return 3;
+}
+
+static int is_digits(const char *s, long n) {
+    if (n <= 0) return 0;
+    for (long i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+/* 族前缀: 去掉末尾 -start/-finish, 再反复去掉末尾 -数字 */
+static void family_of(const char *id, char *out, int cap) {
+    long n = tx_len(id, 256);
+    if (n > 6 && mm_same(id + n - 6, "-start", 6)) n -= 6;
+    else if (n > 7 && mm_same(id + n - 7, "-finish", 7)) n -= 7;
+    for (;;) {
+        long k = n;
+        while (k > 0 && id[k - 1] != '-') k--;
+        if (k > 1 && is_digits(id + k, n - k)) n = k - 1; else break;
+    }
+    if (n >= cap) n = cap - 1;
+    mm_copy(out, cap, id, n);
+    out[n] = 0;
+}
+
+static int fam_index(const char *name) {
+    for (int i = 0; i < nfam; i++) if (tx_same(famname[i], tx_len(famname[i], 96), name, tx_len(name, 96))) return i;
+    if (nfam >= MAXF) return -1;
+    cx_fmt(famname[nfam], sizeof famname[nfam], "%s", name);
+    return nfam++;
+}
+
+static int find_id(const char *s, long n) {
+    for (int i = 0; i < np; i++) if (tx_same(P[i].id, tx_len(P[i].id, 256), s, n)) return i;
+    return -1;
+}
+
+/* 切分一行(原地把制表符改 0), 返回字段数 */
+static int split_tabs(char *line, char **f, int max) {
+    int k = 0;
+    f[k++] = line;
+    for (char *p = line; *p; p++) if (*p == '\t' && k < max) { *p = 0; f[k++] = p + 1; }
+    return k;
+}
+
+static int parse(char *buf, long n) {
+    char *lines[MAXP + 8];
+    int nl = 0, rc;
+    long i = 0;
+    while (i < n) {
+        long e = i;
+        while (e < n && buf[e] != '\n') e++;
+        buf[e] = 0;
+        if (e > i && buf[e - 1] == '\r') buf[e - 1] = 0;
+        if (buf[i] != '#' && buf[i] != 0) {
+            if (nl >= MAXP) return refuse("too-many-phases", "1024");
+            lines[nl++] = buf + i;
+        }
+        i = e + 1;
+    }
+    for (i = 0; i < nl; i++) {
+        char *f[12];
+        int k = split_tabs(lines[i], f, 12);
+        long to = 0;
+        ph_t *p = &P[np];
+        if (k < 7) return refuse("short-row", f[0]);
+        if (f[1][0] == 0) return refuse("empty-id", f[0]);
+        if (find_id(f[1], tx_len(f[1], 256)) >= 0) return refuse("duplicate-id", f[1]);
+        if (!is_digits(f[3], tx_len(f[3], 32)) || !is_digits(f[6], tx_len(f[6], 32))) return refuse("bad-number", f[1]);
+        for (const char *q = f[3]; *q; q++) to = to * 10 + (*q - '0');
+        p->id = f[1]; p->dir = f[2]; p->to = to; p->par = f[6][0] - '0'; p->nd = 0; p->fam = -1;
+        P[np].dep[0] = -1;
+        np++;
+        lines[i] = f[4];   /* 暂存 deps 串, 全部 id 登记后再解析 */
+    }
+    for (i = 0; i < np; i++) {
+        char *d = lines[i];
+        if (d[0] == '-' && d[1] == 0) continue;
+        while (*d) {
+            char *e = d;
+            int j;
+            while (*e && *e != ',') e++;
+            j = find_id(d, e - d);
+            if (j < 0) { char nm[256]; mm_copy(nm, sizeof nm, d, e - d > 255 ? 255 : e - d); nm[e - d > 255 ? 255 : e - d] = 0; sy_printf("PHASE_GRAPH_REFUSE\tmissing-dep\t%s\t%s\n", P[i].id, nm); return 3; }
+            if (P[i].nd >= MAXD) return refuse("too-many-deps", P[i].id);
+            P[i].dep[P[i].nd++] = j;
+            d = *e ? e + 1 : e;
+        }
+    }
+    rc = 0;
+    return rc;
+}
+
+static int toposort(void) {
+    static int indeg[MAXP];
+    int head = 0, tail = 0;
+    for (int i = 0; i < np; i++) indeg[i] = P[i].nd;
+    for (int i = 0; i < np; i++) if (!indeg[i]) topo[tail++] = i;
+    while (head < tail) {
+        int u = topo[head++];
+        for (int v = 0; v < np; v++)
+            for (int k = 0; k < P[v].nd; k++) if (P[v].dep[k] == u && --indeg[v] == 0) topo[tail++] = v;
+    }
+    if (tail < np) {
+        for (int i = 0; i < np; i++) if (indeg[i] > 0) { sy_printf("PHASE_GRAPH_REFUSE\tcycle\t%s\n", P[i].id); break; }
+        return 3;
+    }
+    return 0;
+}
+
+static int is_outer(int i) { return tx_same(P[i].dir, tx_len(P[i].dir, 128), "outer", 5); }
+
+static int load_inputs(const char *path) {
+    unsigned char *buf;
+    int64_t n;
+    char *s;
+    if (sy_read_file(path, &buf, &n, 8 << 20) < 0) return 0;
+    s = (char *)buf;
+    for (int64_t i = 0; i < n;) {
+        int64_t e = i;
+        while (e < n && s[e] != '\n') e++;
+        s[e] = 0;
+        if (s[i] != '#' && s[i] != 0 && nit < MAXP) {
+            char *f[3];
+            if (split_tabs(s + i, f, 3) >= 2) { itab_id[nit] = f[0]; itab_in[nit] = f[1]; nit++; }
+        }
+        i = e + 1;
+    }
+    return 1;
+}
+
+/* 两相输入串(逗号分隔, 只看 src:/table:)的公共项, 写入 out(最多 3 项), 返回公共项总数 */
+static int shared_inputs(const char *a, const char *b, char *out, int cap) {
+    int cnt = 0, w = 0;
+    out[0] = 0;
+    while (*a) {
+        const char *e = a;
+        const char *q = b;
+        int found = 0;
+        while (*e && *e != ',') e++;
+        if ((e - a > 4 && mm_same(a, "src:", 4)) || (e - a > 6 && mm_same(a, "table:", 6))) {
+            while (*q) {
+                const char *qe = q;
+                while (*qe && *qe != ',') qe++;
+                if (qe - q == e - a && mm_same(q, a, e - a)) { found = 1; break; }
+                q = *qe ? qe + 1 : qe;
+            }
+        }
+        if (found) {
+            if (cnt < 3 && w + (e - a) + 2 < cap) { if (w) out[w++] = ','; mm_copy(out + w, cap - w, a, e - a); w += (int)(e - a); out[w] = 0; }
+            cnt++;
+        }
+        a = *e ? e + 1 : e;
+    }
+    return cnt;
+}
+
+static const char *inputs_of(int phase) {
+    for (int i = 0; i < nit; i++) if (tx_same(itab_id[i], tx_len(itab_id[i], 256), P[phase].id, tx_len(P[phase].id, 256))) return itab_in[i];
+    return "";
+}
+
+int main(int argc, char **argv) {
+    const char *path = 0, *inpath = 0;
+    long maxpairs = 40, nouter = 0, npar = 0, ndom = 0, maxw = 0, maxlvl = 0, widthlvl = 0, wbest = 0;
+    unsigned char *buf;
+    int64_t n;
+    int rc, cl_end = 0, wend = 0, have_inputs = 0;
+    static int width[MAXP], seen_dom[MAXP], path_[MAXP];
+    for (int a = 1; a < argc; a++) {
+        if (tx_same(argv[a], tx_len(argv[a], 64), "--pairs", 7) && a + 1 < argc) { maxpairs = 0; for (const char *q = argv[++a]; *q >= '0' && *q <= '9'; q++) maxpairs = maxpairs * 10 + (*q - '0'); }
+        else if (!path) path = argv[a];
+        else if (!inpath) inpath = argv[a];
+        else { sy_printf("usage: phase-graph.cx -- PHASES_TSV [INPUTS_TSV] [--pairs N]\n"); return 2; }
+    }
+    if (!path) { sy_printf("usage: phase-graph.cx -- PHASES_TSV [INPUTS_TSV] [--pairs N]\n"); return 2; }
+    if (sy_read_file(path, &buf, &n, 8 << 20) < 0) { sy_printf("PHASE_GRAPH_REFUSE\tunreadable\t%s\n", path); return 3; }
+    rc = parse((char *)buf, (long)n);
+    if (rc) return rc;
+    rc = toposort();
+    if (rc) return rc;
+    if (inpath) have_inputs = load_inputs(inpath);
+    /* 祖先集, 层级, 最长链(相数 / 权重) */
+    for (int t = 0; t < np; t++) {
+        int v = topo[t], bl = -1, bw = -1;
+        lvl[v] = 0; wsum[v] = P[v].to; best_prev[v] = -1; wprev[v] = -1;
+        for (int k = 0; k < P[v].nd; k++) {
+            int d = P[v].dep[k];
+            for (int j = 0; j < np; j++) if (anc[d][j]) anc[v][j] = 1;
+            anc[v][d] = 1;
+            if (lvl[d] + 1 > lvl[v]) { lvl[v] = lvl[d] + 1; best_prev[v] = d; }
+            (void)bl;
+            if (wsum[d] + P[v].to > wsum[v]) { wsum[v] = wsum[d] + P[v].to; wprev[v] = d; }
+            (void)bw;
+        }
+    }
+    for (int i = 0; i < np; i++) {
+        if (is_outer(i)) nouter++;
+        if (P[i].par > 1) npar++;
+        { int s = 0; for (int j = 0; j < i; j++) if (tx_same(P[j].dir, tx_len(P[j].dir, 128), P[i].dir, tx_len(P[i].dir, 128))) { s = 1; break; } if (!s) ndom++; }
+        width[lvl[i]]++;
+        if (lvl[i] + 1 > maxlvl) { maxlvl = lvl[i] + 1; cl_end = i; }
+        if (wsum[i] > wbest) { wbest = wsum[i]; wend = i; }
+    }
+    (void)seen_dom;
+    for (int l = 0; l < maxlvl; l++) if (width[l] > maxw) { maxw = width[l]; widthlvl = l; }
+    sy_printf("PHASES\tn=%d\touter=%ld\tpar4=%ld\tdomains=%ld\n", np, nouter, npar, ndom);
+    {
+        long w = 0, outer_on = 0, m = 0;
+        for (int v = cl_end; v >= 0; v = best_prev[v]) { path_[m++] = v; w += P[v].to; if (is_outer(v)) outer_on++; }
+        sy_printf("CRITICAL_PATH\tphases=%ld\tweight_s=%ld\tbasis=timeout_s_upper_bound\tper_phase_wall=UNMEASURED\n", m, w);
+        sy_printf("OUTER_ON_CRITICAL\tn=%ld\n", outer_on);
+        {   /* 折叠段: 沿路径从头到尾, 相邻同族合并 */
+            char cur[96], f[96];
+            long cnt = 0, co = 0;
+            cur[0] = 0;
+            for (long k = m - 1; k >= 0; k--) {
+                family_of(P[path_[k]].id, f, sizeof f);
+                if (cnt && !tx_same(cur, tx_len(cur, 96), f, tx_len(f, 96))) { sy_printf("CRITICAL_SEG\t%s\t%ld\t%ld\n", cur, cnt, co); cnt = 0; co = 0; }
+                if (!cnt) cx_fmt(cur, sizeof cur, "%s", f);
+                cnt++; if (is_outer(path_[k])) co++;
+            }
+            if (cnt) sy_printf("CRITICAL_SEG\t%s\t%ld\t%ld\n", cur, cnt, co);
+        }
+        m = 0;
+        for (int v = wend; v >= 0; v = wprev[v]) m++;
+        sy_printf("CRITICAL_WEIGHTED\tweight_s=%ld\tphases=%ld\tbasis=timeout_s_upper_bound\n", wbest, m);
+    }
+    sy_printf("DEPS_ONLY_MAX_WIDTH\tlevel=%ld\twidth=%ld\n", widthlvl, maxw);
+    /* outer 族 */
+    for (int i = 0; i < np; i++) {
+        char f[96];
+        if (!is_outer(i)) continue;
+        family_of(P[i].id, f, sizeof f);
+        P[i].fam = fam_index(f);
+        if (P[i].fam < 0) return refuse("too-many-families", f);
+        if (famn[P[i].fam] == 0) famfirst[P[i].fam] = i;
+        famn[P[i].fam]++;
+    }
+    for (int f = 0; f < nfam; f++) sy_printf("FAMILY\t%s\t%d\touter\n", famname[f], famn[f]);
+    {
+        static int unord[MAXF][MAXF];
+        for (int i = 0; i < np; i++) {
+            if (P[i].fam < 0) continue;
+            for (int j = i + 1; j < np; j++) {
+                if (P[j].fam < 0 || P[j].fam == P[i].fam) continue;
+                if (!anc[i][j] && !anc[j][i]) { int a = P[i].fam, b = P[j].fam; if (a > b) { int t = a; a = b; b = t; } unord[a][b]++; }
+            }
+        }
+        long shown = 0, total = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int a = 0; a < nfam; a++)
+                for (int b = a + 1; b < nfam; b++) {
+                    int u = unord[a][b], tot = famn[a] * famn[b], full = (u == tot);
+                    char sh[256];
+                    int ns = 0;
+                    if (!u || (pass == 0) != full) continue;
+                    total++;
+                    if (shown >= maxpairs) continue;
+                    sh[0] = 0;
+                    if (have_inputs) ns = shared_inputs(inputs_of(famfirst[a]), inputs_of(famfirst[b]), sh, sizeof sh);
+                    sy_printf("CONCURRENT_CANDIDATE\t%s\t%s\tunordered=%d\tof=%d\tfull=%s\tverdict=UNVERIFIED\tshared_inputs=%s\n", famname[a], famname[b], u, tot, full ? "Y" : "N",
+                              have_inputs ? (ns ? sh : "none") : "NOINPUTS");
+                    shown++;
+                }
+        sy_printf("CONCURRENT_SUMMARY\tpairs=%ld\tshown=%ld\twrites=UNDECLARED\n", total, shown);
+    }
+    {   /* 族间顺序边: B 族某相 deps 含 A 族某相. 这些顺序只由 deps 给出, 写集合未声明, 无法证明必要, 故 UNVERIFIED */
+        static unsigned char edge[MAXF][MAXF];
+        long ne = 0;
+        for (int v = 0; v < np; v++) {
+            if (P[v].fam < 0) continue;
+            for (int k = 0; k < P[v].nd; k++) {
+                int d = P[v].dep[k];
+                if (P[d].fam >= 0 && P[d].fam != P[v].fam) edge[P[d].fam][P[v].fam] = 1;
+            }
+        }
+        for (int a = 0; a < nfam; a++)
+            for (int b = 0; b < nfam; b++) {
+                char sh[256];
+                int ns = 0;
+                if (!edge[a][b]) continue;
+                sh[0] = 0;
+                if (have_inputs) ns = shared_inputs(inputs_of(famfirst[a]), inputs_of(famfirst[b]), sh, sizeof sh);
+                sy_printf("FAMILY_ORDER_EDGE\t%s\t%s\tshared_inputs=%s\tnecessity=UNVERIFIED\n", famname[a], famname[b], have_inputs ? (ns ? sh : "none") : "NOINPUTS");
+                ne++;
+            }
+        sy_printf("FAMILY_ORDER_SUMMARY\tedges=%ld\n", ne);
+    }
+    return 0;
+}

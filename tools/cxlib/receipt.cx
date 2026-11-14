@@ -1,0 +1,163 @@
+#pragma unisa module receipt
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+/* Unified phase receipt: input identity recorded, adoption by one comparison.
+ * Receipt file (text, one "key<TAB>value" per line, backward compatible: readers that look up
+ * single keys ignore the new lines):
+ *   phase<TAB>ID / inputs_sha<TAB>HEX64 / output_sha<TAB>HEX64
+ * rc_hash_inputs hashes the inputs declared for a phase in the side table build/chain-phase-inputs.tsv
+ * (id<TAB>comma list of phase:ID | src:GLOB | table:PATH). src:git-tree is the git tree hash of HEAD,
+ * src:DIR/** is every regular file under DIR (sorted walk, path + content sha), src:PATH one file,
+ * table:PATH the file content, phase:ID the output_sha recorded in RECDIR/ID.receipt.
+ * Anything that cannot be computed (missing row, unknown token, empty glob, unreadable file, upstream
+ * receipt missing) fails: rc_adopt_ok then answers STALE, never optimistic.
+ * rc_write is atomic (temp file + rename). No cache: every call re-reads and re-hashes. */
+static char rc_why_buf[160];
+static char *rc_acc;
+static size_t rc_acc_n, rc_acc_cap;
+static int rc_acc_fail;
+static size_t rc_root_n;
+
+static int rc_fail(const char *why, const char *detail) {
+    cx_fmt(rc_why_buf, sizeof rc_why_buf, "%s:%s", why, detail ? detail : "");
+    return 1;
+}
+const char *rc_why(void) { return rc_why_buf; }
+static void rc_put(const char *s, size_t n) {
+    if (rc_acc_n + n + 1 > rc_acc_cap) {
+        size_t c = rc_acc_cap ? rc_acc_cap : 4096;
+        char *g;
+        while (c < rc_acc_n + n + 1) c *= 2;
+        g = realloc(rc_acc, c);
+        if (!g) { rc_acc_fail = 1; return; }
+        rc_acc = g; rc_acc_cap = c;
+    }
+    if (mm_copy(rc_acc + rc_acc_n, rc_acc_cap - rc_acc_n, s, n)) { rc_acc_fail = 1; return; }
+    rc_acc_n += n;
+}
+static int rc_file_line(const char *label, const char *path) {
+    size_t n = 0; char *b = cx_read(path, &n); char h[65];
+    if (!b) return rc_fail("unreadable", path);
+    if (sy_sha256_hex(b, (long)n, h)) { free(b); return rc_fail("sha", path); }
+    free(b);
+    rc_put(label, strlen(label)); rc_put("\t", 1); rc_put(h, 64); rc_put("\n", 1);
+    return 0;
+}
+static int rc_take(const char *path, void *ctx) {
+    (void)ctx;
+    if (rc_file_line(path + rc_root_n, path)) rc_acc_fail = 2;
+    return rc_acc_fail ? 1 : 0;
+}
+/* value of key in a receipt text; 0 ok */
+static int rc_field(const char *text, size_t n, const char *key, char *buf, size_t cap) {
+    char pat[80]; size_t k, i, e;
+    if (cx_fmt(pat, sizeof pat, "\n%s\t", key)) return 1;
+    k = strlen(pat);
+    for (i = 0; i + k <= n; i++) if (!memcmp(text + i, pat, k)) break;
+    if (i + k > n) return 1;
+    i += k;
+    for (e = i; e < n && text[e] != '\n'; e++) {}
+    if (e == i || e - i >= cap) return 1;
+    if (mm_copy(buf, cap, text + i, e - i)) return 1;
+    buf[e - i] = 0;
+    return 0;
+}
+static int rc_get(const char *rec, const char *key, char *buf, size_t cap) {
+    size_t n = 0; char *t = cx_read(rec, &n), *w; int rc;
+    if (!t || !n) { free(t); return 1; }
+    w = malloc(n + 2);
+    if (!w) { free(t); return 1; }
+    w[0] = '\n';
+    if (mm_copy(w + 1, n + 1, t, n)) { free(w); free(t); return 1; }
+    w[n + 1] = 0;
+    rc = rc_field(w, n + 1, key, buf, cap);
+    free(w); free(t);
+    return rc;
+}
+static int rc_token(const char *root, const char *recdir, const char *tok, size_t tn) {
+    char t[512], p[1100], v[80], h[65];
+    if (tn == 0 || tn >= sizeof t) return rc_fail("token", "len");
+    if (mm_copy(t, sizeof t, tok, tn)) return rc_fail("token", "copy");
+    t[tn] = 0;
+    if (!strncmp(t, "table:", 6)) {
+        if (cx_fmt(p, sizeof p, "%s/%s", root, t + 6)) return rc_fail("path", t);
+        return rc_file_line(t, p);
+    }
+    if (!strncmp(t, "phase:", 6)) {
+        if (cx_fmt(p, sizeof p, "%s/%s.receipt", recdir, t + 6)) return rc_fail("path", t);
+        if (rc_get(p, "output_sha", v, sizeof v) || strlen(v) != 64) return rc_fail("upstream", t + 6);
+        rc_put(t, strlen(t)); rc_put("\t", 1); rc_put(v, 64); rc_put("\n", 1);
+        return 0;
+    }
+    if (!strncmp(t, "src:", 4)) {
+        const char *g = t + 4; size_t gl = strlen(g);
+        if (!strcmp(g, "git-tree")) {
+            char *out = 0; size_t on = 0; char cmd[600];
+            if (cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse 'HEAD^{tree}'", root)) return rc_fail("path", t);
+            if (cx_run_timeout(cmd, 20, &out, &on) || on < 40) { free(out); return rc_fail("git-tree", root); }
+            if (sy_sha256_hex(out, (long)on, h)) { free(out); return rc_fail("sha", t); }
+            free(out);
+            rc_put(t, strlen(t)); rc_put("\t", 1); rc_put(h, 64); rc_put("\n", 1);
+            return 0;
+        }
+        if (gl > 3 && !strcmp(g + gl - 3, "/**")) {
+            char d[1100]; size_t before = rc_acc_n;
+            if (cx_fmt(d, sizeof d, "%s/%.*s", root, (int)(gl - 3), g)) return rc_fail("path", t);
+            rc_root_n = strlen(root) + 1;
+            rc_acc_fail = 0;
+            if (cx_walk(d, rc_take, 0) || rc_acc_fail) return rc_fail("walk", g);
+            if (rc_acc_n == before) return rc_fail("empty-glob", g);
+            return 0;
+        }
+        if (strchr(g, '*')) return rc_fail("unsupported-glob", g);
+        if (cx_fmt(p, sizeof p, "%s/%s", root, g)) return rc_fail("path", t);
+        return rc_file_line(t, p);
+    }
+    return rc_fail("unknown-token", t);
+}
+/* 0 and hex[65] on success; 1 when the identity cannot be computed (reason in rc_why()). */
+int rc_hash_inputs(const char *root, const char *recdir, const char *table, const char *phase, char hex[65]) {
+    size_t n = 0, i = 0, pl = strlen(phase); char *t = cx_read(table, &n); int found = 0, rc = 0;
+    hex[0] = 0;
+    if (!t) return rc_fail("no-table", table);
+    rc_acc_n = 0; rc_acc_fail = 0;
+    while (i < n) {
+        size_t e = i, tab, ee;
+        while (e < n && t[e] != '\n') e++;
+        if (t[i] != '#' && e - i > pl + 1 && !memcmp(t + i, phase, pl) && t[i + pl] == '\t') {
+            found = 1; tab = i + pl + 1;
+            while (tab < e) {
+                for (ee = tab; ee < e && t[ee] != ','; ee++) {}
+                if (rc_token(root, recdir, t + tab, ee - tab)) { rc = 1; break; }
+                tab = ee + 1;
+            }
+            break;
+        }
+        i = e + 1;
+    }
+    free(t);
+    if (rc) return 1;
+    if (!found) return rc_fail("no-row", phase);
+    if (rc_acc_fail || !rc_acc_n) return rc_fail("empty", phase);
+    if (sy_sha256_hex(rc_acc, (long)rc_acc_n, hex)) return rc_fail("sha", phase);
+    return 0;
+}
+/* atomic write: RECEIPT.new then rename */
+int rc_write(const char *receipt, const char *phase, const char *inputs_sha, const char *output_sha) {
+    char tmp[1100], body[400];
+    if (strlen(inputs_sha) != 64 || strlen(output_sha) != 64) return rc_fail("hex", phase);
+    if (cx_fmt(tmp, sizeof tmp, "%s.new", receipt)) return rc_fail("path", receipt);
+    if (cx_fmt(body, sizeof body, "phase\t%s\ninputs_sha\t%s\noutput_sha\t%s\n", phase, inputs_sha, output_sha)) return rc_fail("fmt", phase);
+    if (cx_write(tmp, body, strlen(body)) || sy_rename(tmp, receipt)) return rc_fail("write", receipt);
+    return 0;
+}
+/* 0 adoptable; 1 STALE with rc_why() = "missing:" | "no-inputs_sha:" | "phase:" | "mismatch:" */
+int rc_adopt_ok(const char *receipt, const char *phase, const char *cur_inputs_sha) {
+    char got[80], ph[160];
+    if (sy_exists(receipt) != 1) return rc_fail("missing", receipt);
+    if (rc_get(receipt, "inputs_sha", got, sizeof got)) return rc_fail("no-inputs_sha", receipt);
+    if (rc_get(receipt, "phase", ph, sizeof ph) || strcmp(ph, phase)) return rc_fail("phase", phase);
+    if (strlen(cur_inputs_sha) != 64 || strcmp(got, cur_inputs_sha)) return rc_fail("mismatch", phase);
+    return 0;
+}

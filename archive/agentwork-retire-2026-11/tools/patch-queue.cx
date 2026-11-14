@@ -1,0 +1,130 @@
+/* tools/patch-queue.cx -- 补丁队列只读视图(第一版)。
+ *   sh ./unisacc.com tools/patch-queue.cx -- --status|--check [--table FILE]
+ * 表 agentwork/patch-queue.tsv: id 作者 克隆路径 补丁路径 验证记录路径 状态 base提交 补丁sha (8 列, # 行为注释)。
+ * --status: 一行 PATCH_QUEUE queued=N landing=N landed=N rejected=N 并逐行输出 id 与状态。
+ * --check : 校验表头/列数/状态值; 每个 QUEUED 行核对克隆路径存在且是 git 工作树、补丁存在且 sha256 等于登记值、
+ *           base 是 origin/main 祖先、验证记录存在。不修改任何东西。
+ * git 命令前缀可由环境变量 PATCH_QUEUE_GIT 注入(默认 git), 调用形如 PREFIX -C CLONE ...; 夹具用 true/false。
+ * 输出 PATCH_QUEUE_CHECK rows=N bad=N; 有问题 rc 1, 原因行 BAD<TAB>id<TAB>原因。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+#define MAXROW 4096
+static const char *HEAD = "id\t作者\t克隆路径\t补丁路径\t验证记录路径\t状态\tbase提交\t补丁sha";
+static int nq, nl, nd, nr, bad, rows;
+
+static int same(const char *a, const char *b) { return tx_same(a, tx_len(a, 4096), b, tx_len(b, 4096)); }
+
+static void badrow(const char *id, const char *why) {
+    printf("BAD\t%s\t%s\n", id, why);
+    bad++;
+}
+
+static int exists(const char *p) {
+    sy_stat_t st;
+    return sy_stat(p, &st) == 0;
+}
+
+static int run_git(const char *clone, const char *tail, char *outp, int cap) {
+    const char *g = getenv("PATCH_QUEUE_GIT");
+    char cmd[8192], why[256];
+    char *v[5];
+    np_result r = {0};
+    int rc;
+    if (!g || !*g) g = "git";
+    if (cx_fmt(cmd, sizeof cmd, "%s -C '%s' %s 2>&1", g, clone, tail)) return 2;
+    v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+    if (np_run(v, ".", 0, 30, &r, why, sizeof why)) return 2;
+    rc = r.rc;
+    if (outp && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && n) mm_copy(outp, cap, r.out, (long)n);
+        outp[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+
+static void check_queued(char **f) {
+    const char *id = f[0];
+    char tail[1024], out[512], hex[80];
+    size_t n;
+    char *body;
+    if (!exists(f[2])) { badrow(id, "clone-missing"); return; }
+    if (run_git(f[2], "rev-parse --is-inside-work-tree", out, sizeof out)) { badrow(id, "clone-not-git-worktree"); return; }
+    if (!exists(f[3])) { badrow(id, "patch-missing"); return; }
+    body = cx_read(f[3], &n);
+    if (!body) { badrow(id, "patch-unreadable"); return; }
+    cx_sha256_hex(body, n, hex);
+    free(body);
+    if (!same(hex, f[7])) { badrow(id, "patch-sha-mismatch"); return; }
+    if (cx_fmt(tail, sizeof tail, "merge-base --is-ancestor '%s' origin/main", f[6])) { badrow(id, "base-too-long"); return; }
+    if (run_git(f[2], tail, out, sizeof out)) { badrow(id, "base-not-ancestor-of-origin-main"); return; }
+    if (!exists(f[4])) { badrow(id, "verify-record-missing"); return; }
+}
+
+int main(int argc, char **argv) {
+    const char *table = "agentwork/patch-queue.tsv";
+    int mode = 0, a;
+    size_t n;
+    char *txt, *p;
+    for (a = 1; a < argc; a++) {
+        if (same(argv[a], "--status")) mode = 1;
+        else if (same(argv[a], "--check")) mode = 2;
+        else if (same(argv[a], "--table") && a + 1 < argc) table = argv[++a];
+        else mode = 0;
+    }
+    if (!mode) { fprintf(stderr, "usage: patch-queue.cx -- --status|--check [--table FILE]\n"); return 2; }
+    txt = cx_read(table, &n);
+    if (!txt) { fprintf(stderr, "patch-queue: cannot read %s\n", table); return 2; }
+    p = txt;
+    {
+        int ln = 0, hdr = 0;
+        while (*p) {
+            char *nlp = strchr(p, '\n'), *f[16];
+            int nf = 0;
+            char *q;
+            if (nlp) *nlp = 0;
+            ln++;
+            if (*p && *p != '#') {
+                if (!hdr) {
+                    hdr = 1;
+                    if (!same(p, HEAD)) { badrow("-", "bad-header"); }
+                } else {
+                    q = p;
+                    f[nf++] = q;
+                    while (*q && nf < 16) {
+                        if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+                        q++;
+                    }
+                    rows++;
+                    if (nf != 8) badrow(f[0], "column-count");
+                    else {
+                        const char *s = f[5];
+                        if (same(s, "QUEUED")) { nq++; if (mode == 2) check_queued(f); }
+                        else if (same(s, "LANDING")) nl++;
+                        else if (same(s, "LANDED")) nd++;
+                        else if (same(s, "REJECTED")) nr++;
+                        else badrow(f[0], "bad-status");
+                        if (mode == 1) printf("%s\t%s\n", f[0], s);
+                    }
+                }
+            }
+            if (!nlp) break;
+            p = nlp + 1;
+        }
+        if (!hdr) badrow("-", "no-header");
+    }
+    free(txt);
+    if (mode == 1) {
+        printf("PATCH_QUEUE queued=%d landing=%d landed=%d rejected=%d\n", nq, nl, nd, nr);
+        return bad ? 1 : 0;
+    }
+    printf("PATCH_QUEUE_CHECK rows=%d bad=%d queued=%d\n", rows, bad, nq);
+    return bad ? 1 : 0;
+}

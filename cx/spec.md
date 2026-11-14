@@ -199,7 +199,9 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-A-2** | `cx/mem`：`heap` 是带长度的分配；`bytes` 带界 copy/move/fill/compare；`arena` 分组释放；`grow` 是 `Vec<u8>`；`slice` 是 `&[u8]` / `Option<&[u8]>`。 |
 | **CX-A-3** | `cx/text`：带界 z-string／span、`text.build`（`String`）、deflate、格式化、数字。新上层 API 应当优先 `(ptr,len)` 或 `ms_slice`，而不是无界 `char*`。 |
 | **CX-A-4** | 前导 `cx_*`（`cx_read`、`cx_write`、`cx_run*` 等）原地认定为 L0 接口，棘轮不计。新代码应当优先 `sy_*` / `mm_*` / `tx_*`。 |
-| **CX-A-5** | 逐函数表在各目录 README。本规格管合同形状，不把每个 `sy_*` 钉成条款。 |
+| **CX-A-5** | 逐函数表是 `build/std-surface.tsv`（事实表，一行一个函数：包、名字、签名、QuickJS/Node/Rust 对照、错误合同、lnx/osx/win 实现或带原因的拒绝、状态）。本规格管合同形状，不把每个 `sy_*` 钉成条款。 |
+
+**CX-A-5 修订（2026-11-12）**：核心面（`cx.sys`、`cx.os`、`cx.path`、`cx.mem`、`cx.text`、`cx.stream`）与扩展面（`ext.net`、`ext.procx`、`ext.textx`、`ext.memx`、`ext.crypto`、`ext.tsvx`）的逐函数表不再放各目录 README，统一为 `build/std-surface.tsv`；README 只作导航。新增或改签名一个公开函数，必须先在该表加一行或改一行，并把所属包版本 `X.Y.Z` 的 Y 位升一；表头 `# out` 列出的范围（线程、事件循环、TLS/HTTP/URL 等）不进核心面，要进先改表头。平台列只许写 `impl`、`impl:说明`、`refuse:原因`，已有实现但未实测的平台写 `unverified`，不记 `impl`。`status=exists` 只认 `build/layer-api/` 的生成接口；实现在 layer-api 排除单元里的函数记 `new` 并在备注写明。检查：`sh ./unisacc.com tools/check-std-surface.cx`（批 `std-surface`）：表行畸形、`status=exists` 的行在 `build/layer-api/` 里不存在或签名不同即失败；核心包已导出但表里还没有行的函数只报数。
 
 ---
 
@@ -271,7 +273,7 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-S-5** | 精确例外只来自 `tests/cxraw-layers.tsv` 与 `tests/cxinclude-boundary.tsv`。表外文件不得因“暂时”“引导”“探针”获得许可。每条精确例外必须带理由。引导期 `src/host.cx`、`src/hostnative.cx` 若仍在表内，只以表内那一行为准。 |
 | **CX-S-6** | `cx/cx0/` 是解析权威与兼容投影，不是 L0。文法以 **CX-G-4** 为准。`cx/workspace/` 是包图与构建，属上层。 |
 | **CX-S-7** | `ext/crypto/` 属包层纯计算，合同见 **CX-Y-5**。`cx/compiler/winprocess.cx` 是编译器侧的整数与 PE 页走查，不是宿主对接，不得迁回 `cx/sys/`。 |
-| **CX-S-8** | `tools/nametab-gen.cx` 与 `tools/nametabs.tsv` 已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [plans/w4-dedupe-2026-11-02.md](../plans/w4-dedupe-2026-11-02.md)）。本条条款不再约束任何现存文件；若未来重新引入名表生成，须先恢复本条并补消费者。 |
+| **CX-S-8** | `tools/nametab-gen.cx` 与 `tools/nametabs.tsv` 已于 2026-11-02 停止生成并删除（零消费者，字节等价验证 entry.elf 648a47ca，见 [archive/plans-2026-11d/w4-dedupe-2026-11-02.md](../archive/plans-2026-11d/w4-dedupe-2026-11-02.md)）。本条条款不再约束任何现存文件；若未来重新引入名表生成，须先恢复本条并补消费者。 |
 | **CX-S-9** | 分层棘轮扫描面是已跟踪的 `*.cx`，加上 `cx/**/*.c`、`cx/**/*.h`、`cx/**/*.c.in`，排除 `archive/`。`src/`、`exec/`、`tools/` 的宿主 C 不在此扫描面。已跟踪符号链接不得重复计数。 |
 | **CX-S-10** | `apps/csih/` 与 `ujs/` 不由本架构条款授权改写。测携带头本身的表面探针只以 include 边界表的精确条目存在，不得按目录放行。 |
 
@@ -279,7 +281,7 @@ L0 各目录的模块名单以该目录 README 为导航，不钉进条款；增
 
 ### 13.1 分层功能树（导航，不是新条款）
 
-增删模块不改 ID。逐函数表在各目录 README（**CX-A-5**）。冲突时以 **CX-S** / **CX-Y** / **CX-A** 为准。
+增删模块不改 ID。逐函数表是 `build/std-surface.tsv`（**CX-A-5**）。冲突时以 **CX-S** / **CX-Y** / **CX-A** 为准。
 
 ```text
 cx

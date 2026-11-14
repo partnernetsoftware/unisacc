@@ -1,0 +1,37 @@
+/* 夹具：source-job-wave 与 chain-step 的子进程超时合同(词法/函数体 token 核对，不用文本锚)。
+ * (1) source-job-wave 不再有写死的 55 秒 np_run/bound 参数，限时由 wave_secs 随
+ *     UNISACC_CHAIN_PHASE_BOUND_S 派生(同 entry-build eb_secs / ccp_sub_bound)；
+ * (2) 超时(timed_out)退出 124(可重试)，不是 2/3；
+ * (3) chain-step 的 controller closure 计划 pr_run 超时退出 124，非超时失败仍 cs_die。
+ * 只读源码，不编译不运行。用法：check-chain-argv-timeout [ROOT] */
+#pragma unisa use cxlib.chainargv
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+static int failed;
+static void ck(int ok,const char *name){printf("%s\tcheck-chain-argv-timeout.%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+/* 命中次数：标识符/标点 token(kind 0/1) 或字符串 token(kind 2) 文本等于 s */
+static int cnt(void *t,int lo,int hi,const char *s,int str){int c=0;for(int i=lo;i<hi;i++)if(str?(ca_token_kind(t,i)==2&&!strcmp(ca_token_text(t,i),s)):ca_token_is(t,i,s))c++;return c;}
+static int cnt_all(void *t,const char *s,int str){return cnt(t,0,ca_token_count(t),s,str);}
+/* 函数体内的命中次数，函数不存在返回 -1 */
+static int fcnt(void *t,const char *fn,const char *s,int str){int b,e;if(!ca_function(t,fn,&b,&e))return -1;return cnt(t,b,e,s,str);}
+/* name 紧跟 "(" 的调用/定义次数 */
+static int calls(void *t,const char *name){int c=0,n=ca_token_count(t);for(int i=0;i+1<n;i++)if(ca_token_is(t,i,name)&&ca_token_is(t,i+1,"("))c++;return c;}
+int main(int argc,char **argv){
+ if(argc==2&&sy_chdir(argv[1])){fprintf(stderr,"REFUSE\troot unreadable\n");return 2;}
+ size_t n,m;char *w=cx_read("tools/source-job-wave.cx",&n),*c=cx_read("tools/chain-step.cx",&m);
+ if(!w||!c){fprintf(stderr,"REFUSE\tsource unreadable\n");return 2;}
+ void *tw=ca_tokens(w),*tc=ca_tokens(c);
+ if(!tw||!tc){fprintf(stderr,"REFUSE\tsource not tokenizable\n");return 2;}
+ ck(cnt_all(tw,"55",0)<=1&&cnt_all(tw,"55",1)==0,"wave-no-literal-55");
+ ck(calls(tw,"wave_secs")>=6&&calls(tw,"wave_bs")>=5,"wave-all-sites-derived");
+ ck(fcnt(tw,"wave_secs","UNISACC_CHAIN_PHASE_BOUND_S",1)==1&&fcnt(tw,"wave_secs","6",0)==1&&fcnt(tw,"wave_secs","90",0)==1&&fcnt(tw,"wave_secs","5",0)==2,"wave-secs-from-phase-bound");
+ ck(fcnt(tw,"wave_bs","wave_secs",0)==1,"wave-bound-arg-follows-wave-secs");
+ ck(cnt_all(tw,"WAVE_EXIT_TIMEOUT",0)>=3&&fcnt(tw,"call","timed_out",0)>=1,"wave-run-timeout-124");
+ ck(fcnt(tw,"wave_jobs","timed_out",0)==1&&fcnt(tw,"wave_jobs","WAVE_EXIT_TIMEOUT",0)==1,"wave-nproc-timeout-124");
+ /* controller closure 计划所在函数名不固定：按全文件 token 计数核对 */
+ ck(cnt_all(tc,"controller closure",1)==1&&cnt_all(tc,"plan_t",0)>=3&&cnt_all(tc,"timed_out",0)>=2,"chain-step-closure-plan-timeout-token-shape");
+ ck(cnt_all(tc,"REFUSE controller closure plan",1)==1,"chain-step-closure-plan-other-failure-still-refused");
+ ca_tokens_free(tw);ca_tokens_free(tc);free(w);free(c);printf("CHECK_CHAIN_ARGV_TIMEOUT\tfailed=%d\n",failed);return failed?1:0;
+}

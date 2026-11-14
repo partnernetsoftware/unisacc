@@ -1,0 +1,265 @@
+/* tools/tlib-admit.cx -- measure whether a batch entry program may be linked from the tlib kit.
+ *
+ *   sh ./unisacc.com tools/tlib-admit.cx -- [--root ROOT] [--kit DIR] [--with MORE.cx...] SOURCE.cx...
+ *   sh ./unisacc.com tools/tlib-admit.cx -- [--root ROOT] [--kit DIR] [--slice K/N] --batches
+ *
+ * For each SOURCE the first runnable row of ROOT/tests/batches.tsv whose entry is SOURCE (IMPLEMENTED,
+ * SOURCE mode, lnx/x86_64, product headers) gives the arguments. A row with materials="-" is preferred;
+ * materials rows are accepted when no bare row exists (or as the first match after that preference).
+ * The program is run twice on those arguments with the run cache off, each time with a fresh output directory:
+ *   source: `sh ROOT/unisacc.com SOURCE -- ARGS`           (what tests/run-batch.cx does without a kit)
+ *   tlib:   kit image `link SOURCE -o IMG` then IMG ARGS   (kit libs from DIR/kit.tsv; default DIR=tp_kit_dir(ROOT))
+ * and the standard output, standard error and exit code of the two are compared.
+ *   ADMIT<TAB>source<TAB>batch<TAB>source_ms<TAB>tlib_ms<TAB>verdict
+ * verdict is `admit` only when all three are equal and the tlib side (link included) took at most nine tenths of the
+ * source side; otherwise `same-slower`, `differs-stdout`, `differs-stderr`, `differs-rc`, `no-link`, `no-kit`,
+ * `needs-materials` (args name a material placeholder this tool does not resolve), or `no-row`.
+ * --batches takes the distinct .cx entry fields of those registry rows; --slice K/N keeps every Nth starting at K.
+ * Nothing is written to the tables: the caller records admits in build/tlib-prep.tsv and lasting
+ * non-admit verdicts (deny candidates) in build/tlib-admit-verdicts.tsv.
+ * Both sides use ROOT/out/tlib-admit/N as their working directory; it is emptied first.
+ * Check: tools/check-tlib-batch.cx, tools/check-tlib-prep.cx (deny-candidates case).
+ *
+ * Wave to prep>=150 (TLIB-ADMIT / plans A7; no fake rows): after g3 closure, quiet load1<3, one kit,
+ * then --batches --slice K/N in bounded slices; only verdict=admit with measured text enters
+ * build/tlib-prep.tsv; lasting no-link/differs go to build/tlib-admit-verdicts.tsv with class+reason.
+ * Chain tools and gen1/g2/g3 builders stay off the allow-list. Current prep data rows: count the
+ * non-# lines of build/tlib-prep.tsv (was 40 at 2026-11-13 draft). */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char root[4096], kitdir[4400];
+static const char *extra[8];   /* --with SRC: further root units of the program, given to every link */
+static int nextra;
+#define MAXF 2048
+static char files[MAXF][256];
+static int nfiles;
+
+static int field(const char *l, long n, int idx, char *dst, long cap) {
+    long off, len;
+    if (tx_field(l, n, '\t', idx, &off, &len) || len >= cap) return -1;
+    if (mm_copy(dst, (size_t)cap, l + off, (size_t)len)) return -1;
+    dst[len] = 0;
+    return 0;
+}
+
+/* RUNNER words under a shell that redirects both streams to files; the exit code of the words. */
+static int timed(char *const words[], const char *outf, const char *errf, long *ms) {
+    char *v[80], *said = 0;
+    size_t saidn = 0;
+    int k = 0, i, rc;
+    long t0 = sy_now_ms();
+    v[k++] = "sh"; v[k++] = "-c"; v[k++] = "UNISACC_RUN_CACHE=0; export UNISACC_RUN_CACHE; o=$1; e=$2; shift 2; exec \"$@\" >\"$o\" 2>\"$e\"";
+    v[k++] = "sh"; v[k++] = (char *)outf; v[k++] = (char *)errf;
+    for (i = 0; words[i] && k < 78; i++) v[k++] = words[i];
+    v[k] = 0;
+    rc = cx_runv_timeout(v, 120, &said, &saidn);
+    *ms = sy_now_ms() - t0;
+    mm_free(said);
+    return rc;
+}
+
+static int same_file(const char *a, const char *b) {
+    size_t an = 0, bn = 0;
+    char *x = cx_read(a, &an), *y = cx_read(b, &bn);
+    int eq = (x ? 1 : 0) == (y ? 1 : 0) && an == bn && (!x || !memcmp(x, y, an));
+    mm_free(x);
+    mm_free(y);
+    return eq;
+}
+
+static int add_file(const char *s, long n) {
+    int i;
+    if (n <= 0 || n >= 256 || nfiles >= MAXF) return -1;
+    for (i = 0; i < nfiles; i++) if (tx_same(files[i], tx_len(files[i], 256), s, n)) return 0;
+    if (tx_copy(files[nfiles], 256, s, n)) return -1;
+    nfiles++;
+    return 0;
+}
+
+/* Distinct .cx entry fields of IMPLEMENTED SOURCE lnx/x86_64 product rows (materials allowed). */
+static int from_batches(const char *table, long tn) {
+    long i = 0, e;
+    char impl[32], mode[32], plat[32], entry[512], hdr[32];
+    while (i < tn) {
+        e = i;
+        while (e < tn && table[e] != '\n') e++;
+        if (e > i && table[i] != '#' &&
+            !field(table + i, e - i, 1, impl, sizeof impl) && tx_eqz(impl, "IMPLEMENTED") &&
+            !field(table + i, e - i, 4, mode, sizeof mode) && tx_eqz(mode, "SOURCE") &&
+            !field(table + i, e - i, 5, plat, sizeof plat) && tx_eqz(plat, "lnx/x86_64") &&
+            !field(table + i, e - i, 12, hdr, sizeof hdr) && tx_eqz(hdr, "product") &&
+            !field(table + i, e - i, 8, entry, sizeof entry) && tx_suffix(entry, tx_len(entry, sizeof entry), ".cx", 3)) {
+            if (add_file(entry, tx_len(entry, sizeof entry))) return -1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static int admit(const char *src, int slot, const char *table, long tn) {
+    char id[128] = "", impl[32], source[512], mode[32], plat[32], mats[64], entry[512], args[2048], hdr[32];
+    char id_m[128] = "", mats_m[64] = "", args_m[2048] = "";
+    char dir[4400], outdir[4500], img[4500], pa[4500], pb[4500], pc[4500], pd[4500], cand[4500], tool[4500];
+    char tok[8][600];
+    char *av[24], *bv[24];
+    long i, e, sms = 0, tms = 0;
+    int found = 0, found_m = 0, na, nb, src_rc, tl_rc, link_rc, need_mat = 0;
+    const char *verdict;
+    for (i = 0; i < tn; i = e + 1) {
+        e = i;
+        while (e < tn && table[e] != '\n') e++;
+        if (e == i || table[i] == '#') continue;
+        if (field(table + i, e - i, 1, impl, sizeof impl) || field(table + i, e - i, 3, source, sizeof source) ||
+            field(table + i, e - i, 4, mode, sizeof mode) || field(table + i, e - i, 5, plat, sizeof plat) ||
+            field(table + i, e - i, 7, mats, sizeof mats) || field(table + i, e - i, 8, entry, sizeof entry) ||
+            field(table + i, e - i, 9, args, sizeof args) || field(table + i, e - i, 12, hdr, sizeof hdr)) continue;
+        if (!(tx_eqz(impl, "IMPLEMENTED") && tx_eqz(mode, "SOURCE") && tx_eqz(plat, "lnx/x86_64") &&
+              tx_eqz(hdr, "product") && tx_eqz(entry, src))) continue;
+        if (tx_eqz(mats, "-")) {
+            if (!field(table + i, e - i, 0, id, sizeof id)) { found = 1; break; }
+        } else if (!found_m && !field(table + i, e - i, 0, id_m, sizeof id_m)) {
+            if (tx_copy(mats_m, sizeof mats_m, mats, tx_len(mats, sizeof mats)) ||
+                tx_copy(args_m, sizeof args_m, args, tx_len(args, sizeof args))) return 1;
+            found_m = 1;
+        }
+    }
+    if (!found && found_m) {
+        if (tx_copy(id, sizeof id, id_m, tx_len(id_m, sizeof id_m)) ||
+            tx_copy(args, sizeof args, args_m, tx_len(args_m, sizeof args_m)) ||
+            tx_copy(mats, sizeof mats, mats_m, tx_len(mats_m, sizeof mats_m))) return 1;
+        found = 1;
+    }
+    if (!found) { sy_printf("ADMIT\t%s\t-\t0\t0\tno-row\n", src); return 0; }
+    if (cx_fmt(dir, sizeof dir, "%s/tlib-admit-%d", sy_tmpdir(), slot) || cx_fmt(outdir, sizeof outdir, "%s/o", dir) ||
+        cx_fmt(img, sizeof img, "%s/img", dir) || cx_fmt(pa, sizeof pa, "%s/a.out", dir) || cx_fmt(pb, sizeof pb, "%s/a.err", dir) ||
+        cx_fmt(pc, sizeof pc, "%s/b.out", dir) || cx_fmt(pd, sizeof pd, "%s/b.err", dir) ||
+        cx_fmt(cand, sizeof cand, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tlib-prep", kitdir)) return 1;
+    (void)cx_rmtree(dir);
+    (void)sy_mkdir(dir, 0755);
+    na = 0;
+    av[na++] = "sh"; av[na++] = cand; av[na++] = (char *)src; av[na++] = "--";
+    nb = 0;
+    bv[nb++] = img;
+    if (!tx_eqz(args, "-")) {
+        const char *at = args;
+        int t = 0;
+        while (*at && t < 8) {
+            const char *end = strchr(at, ';');
+            long n = end ? end - at : (long)strlen(at);
+            if (n <= 0 || n >= 580) return 1;
+            if (mm_copy(tok[t], sizeof tok[t], at, (size_t)n)) return 1;
+            tok[t][n] = 0;
+            if (tok[t][0] == '{') {
+                char *c = strchr(tok[t], '}');
+                char rest[600], base[4500];
+                if (!c) return 1;
+                if (!strncmp(tok[t], "{out}", 5)) cx_fmt(base, sizeof base, "%s", outdir);
+                else if (!strncmp(tok[t], "{root}", 6)) cx_fmt(base, sizeof base, "%s", root);
+                else if (!strncmp(tok[t], "{candidate}", 11)) cx_fmt(base, sizeof base, "%s", cand);
+                else { need_mat = 1; break; }
+                cx_fmt(rest, sizeof rest, "%s", c + 1);
+                if (cx_fmt(tok[t], sizeof tok[t], "%s%s", base, rest)) return 1;
+            }
+            av[na++] = tok[t];
+            bv[nb++] = tok[t];
+            t++;
+            if (!end) break;
+            at = end + 1;
+        }
+    }
+    if (need_mat) { sy_printf("ADMIT\t%s\t%s\t0\t0\tneeds-materials\trc=0\n", src, id); return 0; }
+    av[na] = 0;
+    bv[nb] = 0;
+    (void)cx_rmtree(outdir);
+    src_rc = timed(av, pa, pb, &sms);
+    (void)cx_rmtree(outdir);
+    {   /* the tlib side: link, then run; both inside the measured time */
+        char *lv[40];
+        char errf[4500], libs[16][600], kp[4500];
+        char *kb;
+        size_t kn = 0;
+        long l0 = sy_now_ms(), ms2 = 0, q, qe, off, len;
+        int k = 0, nl = 0;
+        cx_fmt(errf, sizeof errf, "%s/link.err", dir);
+        if (cx_fmt(kp, sizeof kp, "%s/kit.tsv", kitdir)) return 1;
+        kb = cx_read(kp, &kn);
+        if (!kb) { sy_printf("ADMIT\t%s\t%s\t%ld\t0\tno-kit\trc=%d\n", src, id, sms, src_rc); return 0; }
+        lv[k++] = tool; lv[k++] = "link"; lv[k++] = (char *)src; lv[k++] = "-o"; lv[k++] = img; lv[k++] = "--root"; lv[k++] = root;
+        for (q = 0; q < (long)kn && nl < 16; q = qe + 1) {
+            qe = q;
+            while (qe < (long)kn && kb[qe] != '\n') qe++;
+            if (qe - q > 4 && !memcmp(kb + q, "lib\t", 4) && !tx_field(kb + q, qe - q, '\t', 1, &off, &len) && len < 500) {
+                char nm[500];
+                if (mm_copy(nm, sizeof nm, kb + q + off, (size_t)len)) { mm_free(kb); return 1; }
+                nm[len] = 0;
+                if (cx_fmt(libs[nl], sizeof libs[nl], "%s/%s", kitdir, nm)) { mm_free(kb); return 1; }
+                lv[k++] = "--tlib"; lv[k++] = libs[nl++];
+            }
+        }
+        mm_free(kb);
+        for (q = 0; q < nextra && k < 37; q++) { lv[k++] = "--with"; lv[k++] = (char *)extra[q]; }
+        lv[k] = 0;
+        link_rc = timed(lv, errf, errf, &ms2);
+        if (link_rc) tl_rc = -1;
+        else tl_rc = timed(bv, pc, pd, &ms2);
+        tms = sy_now_ms() - l0;
+    }
+    (void)cx_rmtree(outdir);
+    if (link_rc) verdict = "no-link";
+    else if (!same_file(pa, pc)) verdict = "differs-stdout";
+    else if (!same_file(pb, pd)) verdict = "differs-stderr";
+    else if (src_rc != tl_rc) verdict = "differs-rc";
+    else if (tms * 10 <= sms * 9) verdict = "admit";
+    else verdict = "same-slower";
+    sy_printf("ADMIT\t%s\t%s\t%ld\t%ld\t%s\trc=%d\n", src, id, sms, tms, verdict, src_rc);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char path[4400];
+    char *table;
+    size_t tn = 0;
+    int k, first = 1, slot = sy_pid(), batches = 0, sk = 0, sn = 1, bad = 0;
+    const char *rarg = ".", *karg = 0;
+    if (argc > 2 && tx_eqz(argv[1], "--root")) { rarg = argv[2]; first = 3; }
+    while (first < argc && !bad) {
+        if (tx_eqz(argv[first], "--kit") && first + 1 < argc) { karg = argv[++first]; first++; }
+        else if (tx_eqz(argv[first], "--with") && first + 1 < argc && nextra < 8) { extra[nextra++] = argv[++first]; first++; }
+        else if (tx_eqz(argv[first], "--batches")) { batches = 1; first++; }
+        else if (tx_eqz(argv[first], "--slice") && first + 1 < argc) {
+            const char *d = argv[++first];
+            sk = 0; sn = 0;
+            while (*d >= '0' && *d <= '9') sk = sk * 10 + (*d++ - '0');
+            if (*d++ != '/') bad = 1;
+            while (*d >= '0' && *d <= '9') sn = sn * 10 + (*d++ - '0');
+            if (*d || sn < 1 || sk < 0 || sk >= sn) bad = 1;
+            first++;
+        } else break;
+    }
+    if (bad || (batches && first < argc) || (!batches && first >= argc)) {
+        sy_eprintf("usage: [--root ROOT] [--kit DIR] [--with MORE.cx...] SOURCE.cx... | [--root ROOT] [--kit DIR] [--slice K/N] --batches\n");
+        return 2;
+    }
+    if (sy_realpath(rarg, root, sizeof root) < 0 || sy_chdir(root)) return 2;
+    if (karg) {
+        if (sy_realpath(karg, kitdir, sizeof kitdir) < 0) return 2;
+    } else if (tp_kit_dir(root, kitdir, sizeof kitdir)) return 2;
+    if (cx_fmt(path, sizeof path, "%s/tests/batches.tsv", root)) return 2;
+    table = cx_read(path, &tn);
+    if (!table) return 2;
+    if (batches) {
+        if (from_batches(table, (long)tn)) return 1;
+        for (k = 0; k < nfiles; k++) if (k % sn == sk) if (admit(files[k], slot * 1000 + k, table, (long)tn)) return 1;
+        return 0;
+    }
+    for (k = first; k < argc; k++) if (admit(argv[k], slot * 1000 + k, table, (long)tn)) return 1;
+    return 0;
+}

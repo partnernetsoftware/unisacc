@@ -1,0 +1,63 @@
+/* Checks ext/net/udp.cx (UDP subset of ext.net); Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-ext-net-udp.cx
+   Prints PASS/FAIL lines and EXT_NET_UDP<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use net.udp
+#pragma unisa use net.addr
+#pragma unisa use net.tcp
+#pragma unisa use sys.netraw
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnetudp.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tnetudp.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+
+int main(void) {
+    sy_addr_t lo, to, from;
+    char buf[64], big[32];
+    int a, b, pa, pb, i;
+    long n;
+    sy_deadline_t never = sy_deadline_never(), gone = sy_deadline_in(0);
+
+    sy_addr_loopback(&lo, SY_AF_INET4, 0);
+    a = sy_udp_bind(&lo);
+    ck(a >= 0, "bind-a");
+    b = sy_udp_bind(&lo);
+    ck(b >= 0, "bind-b");
+    pa = sy_tcp_port(a);
+    pb = sy_tcp_port(b);
+    ck(pa > 0 && pb > 0 && pa != pb, "ports-distinct");
+    sy_addr_loopback(&to, SY_AF_INET4, pb);
+    ckv(sy_udp_send_to(a, "hello", 5, &to), 5, "send-5");
+    n = sy_udp_recv_from(b, buf, sizeof buf, &from, sy_deadline_in(2000));
+    ckv(n, 5, "recv-5");
+    ck(buf[0] == 'h' && buf[4] == 'o', "recv-bytes");
+    ckv(from.port, pa, "from-port");
+    ck(from.family == SY_AF_INET4 && from.ip[0] == 127 && from.ip[3] == 1, "from-ip");
+    ckv(sy_udp_send_to(b, "pong", 4, &from), 4, "reply-send");
+    ckv(sy_udp_recv_from(a, buf, sizeof buf, 0, sy_deadline_in(2000)), 4, "reply-recv-null-from");
+    for (i = 0; i < 32; i++) big[i] = 'z';
+    ckv(sy_udp_send_to(a, big, 32, &to), 32, "send-32");
+    ckv(sy_udp_recv_from(b, buf, 8, &from, sy_deadline_in(2000)), -EMSGSIZE, "recv-too-long");
+    ckv(sy_udp_recv_from(b, buf, sizeof buf, &from, sy_deadline_in(50)), -ETIMEDOUT, "recv-timeout-consumed");
+    ckv(sy_udp_recv_from(b, buf, sizeof buf, &from, gone), -ETIMEDOUT, "recv-deadline-passed");
+    ckv(sy_udp_send_to(a, "q", 1, &to), 1, "send-queued");
+    ckv(sy_udp_recv_from(b, buf, sizeof buf, &from, never), 1, "recv-never-deadline");
+    ckv(sy_udp_send_to(a, "", 0, &to), 0, "send-empty");
+    ckv(sy_udp_recv_from(b, buf, sizeof buf, &from, sy_deadline_in(2000)), 0, "recv-empty");
+    ckv(sy_udp_send_to(-1, "x", 1, &to), -EBADF, "send-badfd");
+    ckv(sy_udp_recv_from(-1, buf, 1, &from, sy_deadline_in(10)), -EBADF, "recv-badfd");
+    ckv(sy_udp_send_to(a, 0, 1, &to), -EINVAL, "send-null-buf");
+    ckv(sy_udp_send_to(a, "x", 1, 0), -EINVAL, "send-null-to");
+    ckv(sy_udp_bind(0), -EINVAL, "bind-null");
+    sy_close(a); sy_close(b);
+    ckv(sy_udp_recv_from(a, buf, 1, &from, sy_deadline_in(10)), -EBADF, "recv-closed-fd");
+    n = nfail;
+    printf("EXT_NET_UDP\tok=%d\tfailed=%d\n", nok, nfail);
+    return n ? 1 : 0;
+}

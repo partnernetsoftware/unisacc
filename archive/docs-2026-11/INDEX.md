@@ -1,5 +1,8 @@
 # archive/docs-2026-11 索引
 
+注:历史用语「主人」已废弃;现行文档一律使用项目所有者(owner)/用户/维护者/操作者。
+本目录文本不得未经规范化直接抄入现行文档。
+
 2026-11-11 文档清理:移入本目录的文件保留原子路径(plans/...、research/...)。判据:除 archive/、research/、plans/、kernel/ 及账本类历史日志(agentwork/ledger|items|phase-times|pkg-gaps.tsv、prd_hist.md、prd_release.md)外,全仓无任何对其文件名的引用。仍被引用者留在原处。移入前最后提交为下表第三列(提交 日期)。
 
 注意:移入的旧计划之间的互相引用、以及账本中的历史引用,按原样保留,路径前加 archive/docs-2026-11/ 即可找到。

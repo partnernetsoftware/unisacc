@@ -21,7 +21,14 @@
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("%s %s\n", c ? "PASS" : "FAIL", name); if (c) n_ok++; else n_bad++; }
-static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 256)) >= 0; }
+static int has(const char *s, const char *needle) {
+    long i, j, n = tx_len(s, 65536), m = tx_len(needle, 256);
+    for (i = 0; i + m <= n; i++) {
+        for (j = 0; j < m && s[i + j] == needle[j]; j++) {}
+        if (j == m) return 1;
+    }
+    return 0;
+}
 
 /* This file's own path (run from the repo root), for the child run under script(1). */
 static const char *self = "tools/check-cx-sys-net.cx";
@@ -70,7 +77,7 @@ static void check_time(void) {
     r = sy_local_fmt(out, sizeof out, "%Y-%m-%d %H:%M:%S", 1700000000L);
     {
         /* oracle: GNU date(1) in the same environment (same TZ) */
-        char *av[] = { "date", "-d", "@1700000000", "+%Y-%m-%d %H:%M:%S", 0 };
+        char *av[] = { "timeout", "20", "date", "-d", "@1700000000", "+%Y-%m-%d %H:%M:%S", 0 };
         int st = sy_run(av, want, sizeof want, &cut);
         long n = tx_len(want, sizeof want);
         if (st == 0 && n > 0 && want[n - 1] == '\n') want[n - 1] = 0;
@@ -183,7 +190,7 @@ static void check_tty(void) {
     ok(sy_tty_size(-1, &rows, &cols) == -EBADF, "tty: size of fd -1 -> -EBADF");
     ok(sy_tty_raw(0) == -EINVAL && sy_tty_size(0, 0, &cols) == -EINVAL, "tty: null arguments -> -EINVAL");
     {
-        char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
+        char *probe[] = { "timeout", "20", "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
         if (sy_run(probe, out, sizeof out, &cut) != 0) {
             printf("UNMEASURED tty: raw mode and size on a pty: no util-linux script(1) here\n");
             return;
@@ -194,7 +201,7 @@ static void check_tty(void) {
     if (cx_fmt(cmd, sizeof cmd, "script -qec 'stty rows 37 cols 101 && sh %s -run %s -- child tty %s' /dev/null >/dev/null 2>&1",
                sy_env_or("UNISACC", "./unisacc.com"), self, path)) { ok(0, "tty: command"); return; }
     {
-        char *av[] = { "sh", "-c", cmd, 0 };
+        char *av[] = { "timeout", "50", "sh", "-c", cmd, 0 };
         st = sy_run(av, out, sizeof out, &cut);
     }
     fd = sy_openat(sy_at_fdcwd(), path, O_RDONLY, 0);
@@ -208,12 +215,101 @@ static void check_tty(void) {
     sy_unlink(path); sy_rmdir(td);
 }
 
+static void check_net_w5(void) {
+    sy_addr_t a, b, c, pr, lo6;
+    char t[96], tiny[4], up[160], big[200], buf[32];
+    long v = -9;
+    int l, s, k, u, u2, p, r, i;
+    ok(sy_addr_parse(&a, "10.1.2.3", 80) == 0 && a.family == SY_AF_INET4 && a.ip[0] == 10 && a.ip[3] == 3 && a.port == 80, "w5: addr_parse v4");
+    ok(sy_addr_parse(&b, "fe80::1%7", 9) == 0 && b.family == SY_AF_INET6 && b.scope == 7 && b.ip[0] == 0xfe && b.ip[15] == 1, "w5: addr_parse v6 with scope");
+    ok(sy_addr_parse(&c, "example.com", 1) == -EINVAL && sy_addr_parse(&c, "1.2.3", 1) == -EINVAL && sy_addr_parse(&c, "::1%eth0", 1) == -EINVAL && sy_addr_parse(&c, "1.1.1.1", 70000) == -EINVAL && sy_addr_parse(&c, 0, 1) == -EINVAL, "w5: addr_parse refusals");
+    ok(sy_addr_fmt(&a, t, sizeof t) == 11 && tx_eq(t, "10.1.2.3:80", 16), "w5: addr_fmt v4");
+    sy_addr_loopback(&lo6, SY_AF_INET6, 443);
+    ok(sy_addr_fmt(&lo6, t, sizeof t) > 0 && tx_eq(t, "[::1]:443", 16), "w5: addr_fmt v6 brackets");
+    ok(sy_addr_fmt(&a, tiny, sizeof tiny) == -ERANGE, "w5: addr_fmt -ERANGE");
+    ok(sy_addr_parse(&c, "2001:db8::ff00:42:8329", 1) == 0 && c.ip[0] == 0x20 && c.ip[1] == 1 && c.ip[11] == 0 && c.ip[13] == 0x42 && c.ip[15] == 0x29
+       && sy_addr_fmt(&c, t, sizeof t) > 0 && tx_eq(t, "[2001:db8::ff00:42:8329]:1", 32), "w5: v6 compression round trip");
+    ok(sy_addr_parse(&c, "::", 1) == 0 && sy_addr_parse(&c, "::ffff:1.2.3.4", 1) == 0 && c.ip[10] == 255 && c.ip[15] == 4
+       && sy_addr_parse(&c, "1::2::3", 1) == -EINVAL && sy_addr_parse(&c, "1:2:3", 1) == -EINVAL && sy_addr_parse(&c, "12345::", 1) == -EINVAL, "w5: v6 parse forms and refusals");
+    ok(sy_addr_loopback(&c, SY_AF_INET4, 5) == 0 && c.ip[0] == 127 && c.ip[3] == 1 && sy_addr_loopback(&c, 99, 5) == -EAFNOSUPPORT, "w5: addr_loopback");
+    ok(sy_addr_any(&c, SY_AF_INET6, 5) == 0 && c.ip[15] == 0 && sy_addr_any(&c, 99, 5) == -EAFNOSUPPORT, "w5: addr_any");
+    ok(sy_resolve("localhost", 80, SY_AF_INET4, &c, 1) == 1 && c.family == SY_AF_INET4 && c.ip[0] == 127 && c.port == 80, "w5: sy_resolve localhost v4");
+    ok(sy_resolve("no-such-host.invalid", 80, 0, &c, 1) <= -4096 && sy_resolve("", 80, 0, &c, 1) == -EINVAL, "w5: sy_resolve refusals");
+    sy_addr_loopback(&a, SY_AF_INET4, 0);
+    l = sy_tcp_listen_at(&a, 4, SY_LISTEN_REUSEADDR);
+    ok(l >= 0, "w5: tcp_listen_at v4");
+    p = sy_tcp_port(l);
+    sy_addr_loopback(&a, SY_AF_INET4, p);
+    ok(sy_tcp_listen_at(&a, 4, 0) < 0, "w5: tcp_listen_at EADDRINUSE");
+    s = sy_tcp_connect_to(&a, 2000);
+    ok(s >= 0, "w5: tcp_connect_to");
+    k = sy_tcp_accept_from(l, 2000, &pr);
+    ok(k >= 0 && pr.family == SY_AF_INET4 && pr.ip[0] == 127, "w5: accept_from reports peer");
+    ok(sy_sock_peer(s, &b) == 0 && b.port == p && sy_sock_local(s, &b) == 0 && b.port == pr.port, "w5: sock_peer / sock_local");
+    ok(sy_sockopt_set(s, SY_SO_NODELAY, 1) == 0 && sy_sockopt_get(s, SY_SO_NODELAY, &v) == 0 && v != 0, "w5: sockopt NODELAY");
+    ok(sy_sockopt_set(s, SY_SO_RCVTIMEO_MS, 1500) == 0 && sy_sockopt_get(s, SY_SO_RCVTIMEO_MS, &v) == 0 && v == 1500, "w5: sockopt RCVTIMEO_MS");
+    ok(sy_sockopt_set(s, SY_SO_LINGER_S, 3) == 0 && sy_sockopt_get(s, SY_SO_LINGER_S, &v) == 0 && v == 3, "w5: sockopt LINGER_S");
+    ok(sy_sockopt_get(s, SY_SO_ERROR, &v) == 0 && v == 0, "w5: sockopt get SO_ERROR");
+    ok(sy_sockopt_set(s, 999, 1) == -ENOPROTOOPT && sy_sockopt_get(s, 999, &v) == -ENOPROTOOPT && sy_sockopt_set(s, SY_SO_ERROR, 1) == -ENOPROTOOPT, "w5: sockopt unknown -ENOPROTOOPT");
+    ok(sy_shutdown(s, SY_SHUT_WR) == 0 && sy_recv(k, buf, sizeof buf) == 0, "w5: shutdown WR gives peer EOF");
+    ok(sy_shutdown(s, 9) == -EINVAL && sy_shutdown(-1, SY_SHUT_RD) < 0, "w5: shutdown refusals");
+    sy_close(s); sy_close(k);
+    sy_close(l);
+    sy_addr_loopback(&c, SY_AF_INET4, 0);
+    u = sy_udp_bind(&c);
+    ok(sy_shutdown(u, SY_SHUT_RDWR) == -ENOTCONN, "w5: shutdown on unconnected socket -ENOTCONN");
+    sy_close(u);
+    ok(sy_tcp_connect_to(&a, 1000) == -ECONNREFUSED, "w5: tcp_connect_to refused");
+    sy_addr_loopback(&lo6, SY_AF_INET6, 0);
+    l = sy_tcp_listen_at(&lo6, 4, SY_LISTEN_REUSEADDR | SY_LISTEN_V6ONLY);
+    if (l < 0) printf("UNMEASURED w5 v6: no ::1 (%d)\n", l);
+    else {
+        sy_addr_loopback(&lo6, SY_AF_INET6, sy_tcp_port(l));
+        s = sy_tcp_connect_to(&lo6, 2000);
+        k = sy_tcp_accept_from(l, 2000, &pr);
+        ok(s >= 0 && k >= 0 && pr.family == SY_AF_INET6 && pr.ip[15] == 1, "w5: tcp v6 listen/connect/accept_from");
+        ok(sy_sockopt_get(l, SY_SO_V6ONLY, &v) == 0 && v != 0, "w5: V6ONLY flag applied");
+        sy_close(s); sy_close(k); sy_close(l);
+    }
+    sy_addr_loopback(&a, SY_AF_INET4, 0);
+    u = sy_udp_bind(&a);
+    sy_addr_loopback(&b, SY_AF_INET4, 0);
+    u2 = sy_udp_bind(&b);
+    ok(u >= 0 && u2 >= 0, "w5: udp_bind");
+    sy_sock_local(u, &a);
+    ok(sy_udp_send_to(u2, "hello", 5, &a) == 5, "w5: udp_send_to");
+    buf[5] = 0;
+    r = (int)sy_udp_recv_from(u, buf, 5, &pr, 2000);
+    buf[5] = 0;
+    ok(r == 5 && tx_eq(buf, "hello", 8) && pr.family == SY_AF_INET4, "w5: udp_recv_from data and sender");
+    ok(sy_udp_recv_from(u, buf, sizeof buf, 0, 50) == -ETIMEDOUT, "w5: udp_recv_from -ETIMEDOUT");
+    sy_udp_send_to(u2, "0123456789", 10, &a);
+    ok(sy_udp_recv_from(u, buf, 4, 0, 2000) == -EMSGSIZE, "w5: udp_recv_from truncation -EMSGSIZE");
+    ok(sy_udp_send_to(u2, "x", 1, 0) == -EINVAL && sy_udp_bind(0) == -EINVAL, "w5: udp null refusals");
+    sy_close(u); sy_close(u2);
+    r = cx_fmt(up, sizeof up, "%s/cxw5-%d.sock", sy_env_or("TMPDIR", "/tmp"), sy_pid());
+    sy_unlink(up);
+    l = r ? -1 : sy_unix_listen(up, 4);
+    ok(l >= 0, "w5: unix_listen");
+    ok(sy_unix_listen(up, 4) < 0, "w5: unix_listen does not remove existing path");
+    s = sy_unix_connect(up, 1000);
+    k = sy_tcp_accept_from(l, 2000, 0);
+    ok(s >= 0 && k >= 0 && sy_send_all(s, "ab", 2) == 0 && sy_recv(k, buf, sizeof buf) == 2, "w5: unix connect/accept/data");
+    sy_close(s); sy_close(k); sy_close(l);
+    sy_unlink(up);
+    ok(sy_unix_connect(up, 500) < 0, "w5: unix_connect missing path fails");
+    for (i = 0; i < 150; i++) big[i] = 'a';
+    big[0] = '/'; big[150] = 0;
+    ok(sy_unix_listen(big, 1) == -ENAMETOOLONG && sy_unix_connect(big, 1) == -ENAMETOOLONG && sy_unix_listen("", 1) == -EINVAL, "w5: unix path > 107 -ENAMETOOLONG");
+}
+
 int main(int argc, char **argv) {
     sy_child_guard(argc, argv);
     if (argc == 4 && tx_eq(argv[1], "child", 8) && tx_eq(argv[2], "tty", 4)) return child_tty(argv[3]);
     check_time();
     check_poll();
     check_net();
+    check_net_w5();
     check_tty();
     printf("CX_SYS_NET\tfailed=%d\n", n_bad);
     return n_bad ? 1 : 0;

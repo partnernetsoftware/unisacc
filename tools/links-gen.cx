@@ -1,0 +1,114 @@
+/* tools/links-gen.cx -- 关系表 build/links.tsv 的生成器(最小切片:两种边)。
+ *
+ *   sh ./unisacc.com tools/links-gen.cx -- --check|--write
+ *
+ * 输入:exec/facts/derive.tsv(派生物清单)与 tests/batches.tsv(批次登记)。输出 build/links.tsv,五列制表符分隔:
+ *   kind src dst via attr
+ *   derive  src=生成器输入 glob(* 匹配任意字符,含 /)  dst=派生输出  via=derive.tsv 的 name  attr=bound=N;write=0|1
+ *   batch   src=批次的 source 或 entry 源文件              dst=批次 id   via=source|entry       attr=tier=T
+ * batch 边只取 IMPLEMENTED 且 mode 为 SOURCE 的行;entry 与 source 相同或含 {占位} 时不另出边。
+ * use 闭包、字面量、表依赖等更远的边不在本表,仍由 tools/affected.cx 现算。
+ * --check 只读:一致 rc 0(LINKS_GEN<TAB>OK),不一致 rc 1(DRIFT);--write 重写(内容相同不动文件)。输入坏行 rc 2。
+ * 读者:tools/on-change.cx。Check: tools/check-on-change.cx. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define OUTCAP (4 << 20)
+static char *ob; static long on; static int rows_derive, rows_batch;
+
+static int seqn(const char *a, long an, const char *b) { long n = tx_len(b, 4096); return an == n && mm_same(a, b, n); }
+static int put(const char *s, long n) {
+    if (on + n + 1 >= OUTCAP) return 1;
+    mm_copy(ob + on, OUTCAP - on, s, n); on += n;
+    return 0;
+}
+static int puts_(const char *s) { return put(s, tx_len(s, 4096)); }
+/* 把一行按制表符切开,返回字段数;fs[i] 起点,fl[i] 长度 */
+static int split(const char *l, long ln, long *fs, long *fl, int max) {
+    int nf = 0; long k, s = 0;
+    for (k = 0; k <= ln; k++) if (k == ln || l[k] == '\t') { if (nf >= max) return -1; fs[nf] = s; fl[nf] = k - s; nf++; s = k + 1; }
+    return nf;
+}
+static int refuse(const char *f, int line, const char *why) { printf("REFUSE\t%s\tline=%d\t%s\n", f, line, why); return 2; }
+
+static int gen_derive(const char *path) {
+    size_t n = 0; char *b = cx_read(path, &n); long at = 0; int line = 0;
+    if (!b) return refuse(path, 0, "unreadable");
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, fs[9], fl[9], i, o; int nf;
+        const char *l = b + at;
+        at += ln + 1; line++;
+        if (ln == 0 || l[0] == '#') continue;
+        nf = split(l, ln, fs, fl, 9);
+        if (nf != 8) return refuse(path, line, "field-count");
+        i = 0;
+        while (i < fl[5]) {   /* inputs_glob 的每个词 x outputs 的每个词 */
+            long is;
+            while (i < fl[5] && l[fs[5] + i] == ' ') i++;
+            is = i;
+            while (i < fl[5] && l[fs[5] + i] != ' ') i++;
+            if (i == is) break;
+            o = 0;
+            while (o < fl[4]) {
+                long os;
+                while (o < fl[4] && l[fs[4] + o] == ' ') o++;
+                os = o;
+                while (o < fl[4] && l[fs[4] + o] != ' ') o++;
+                if (o == os) break;
+                if (puts_("derive\t") || put(l + fs[5] + is, i - is) || puts_("\t") || put(l + fs[4] + os, o - os) || puts_("\t") ||
+                    put(l + fs[0], fl[0]) || puts_("\tbound=") || (seqn(l + fs[7], fl[7], "-") ? puts_("30") : put(l + fs[7], fl[7])) ||
+                    puts_(seqn(l + fs[3], fl[3], "-") ? ";write=0\n" : ";write=1\n")) return refuse(path, line, "output-too-large");
+                rows_derive++;
+            }
+        }
+    }
+    return 0;
+}
+static int edge_batch(const char *l, long *fs, long *fl, int src, const char *via, int nf) {
+    if (puts_("batch\t") || put(l + fs[src], fl[src]) || puts_("\t") || put(l + fs[0], fl[0]) || puts_("\t") || puts_(via) || puts_("\ttier=")) return 1;
+    if (nf >= 14 ? put(l + fs[13], fl[13]) : puts_("-")) return 1;
+    rows_batch++;
+    return puts_("\n");
+}
+static int gen_batch(const char *path) {
+    size_t n = 0; char *b = cx_read(path, &n); long at = 0; int line = 0;
+    if (!b) return refuse(path, 0, "unreadable");
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, fs[20], fl[20]; int nf;
+        const char *l = b + at;
+        at += ln + 1; line++;
+        if (line == 1 || ln == 0 || l[0] == '#') continue;
+        nf = split(l, ln, fs, fl, 20);
+        if (nf < 9) return refuse(path, line, "field-count");
+        if (!seqn(l + fs[1], fl[1], "IMPLEMENTED") || !seqn(l + fs[4], fl[4], "SOURCE")) continue;
+        if (fl[3] > 0 && !seqn(l + fs[3], fl[3], "-") && edge_batch(l, fs, fl, 3, "source", nf)) return refuse(path, line, "output-too-large");
+        if (fl[8] > 0 && !seqn(l + fs[8], fl[8], "-") && tx_chr(l + fs[8], fl[8], '{') < 0 &&
+            !(fl[8] == fl[3] && mm_same(l + fs[8], l + fs[3], fl[3])) && edge_batch(l, fs, fl, 8, "entry", nf)) return refuse(path, line, "output-too-large");
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *outp = "build/links.tsv"; int mode = 0, rc; size_t cn = 0; char *cur; int same;
+    if (argc == 2 && tx_len(argv[1], 16) == 7 && mm_same(argv[1], "--check", 7)) mode = 1;
+    else if (argc == 2 && tx_len(argv[1], 16) == 7 && mm_same(argv[1], "--write", 7)) mode = 2;
+    else { printf("usage: links-gen.cx -- --check|--write\n"); return 2; }
+    ob = mm_alloc(OUTCAP);
+    if (!ob) return 2;
+    puts_("# links v1: kind src dst via attr -- generated by tools/links-gen.cx --write from exec/facts/derive.tsv and tests/batches.tsv; do not edit. Read by tools/on-change.cx.\n");
+    if ((rc = gen_derive("exec/facts/derive.tsv")) != 0) return rc;
+    if ((rc = gen_batch("tests/batches.tsv")) != 0) return rc;
+    cur = cx_read(outp, &cn);
+    same = cur && (long)cn == on && mm_same(cur, ob, on);
+    if (mode == 1) {
+        printf("LINKS_GEN\t%s\tderive=%d\tbatch=%d\t%s\n", same ? "OK" : "DRIFT", rows_derive, rows_batch, outp);
+        return same ? 0 : 1;
+    }
+    if (!same && cx_write(outp, ob, on)) { printf("REFUSE\t%s\twrite-failed\n", outp); return 2; }
+    printf("LINKS_GEN\t%s\tderive=%d\tbatch=%d\t%s\n", same ? "UNCHANGED" : "WROTE", rows_derive, rows_batch, outp);
+    return 0;
+}

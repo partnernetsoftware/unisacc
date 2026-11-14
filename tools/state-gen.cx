@@ -1,0 +1,153 @@
+/* tools/state-gen.cx -- state table vs prd_mempalace.md, read-only (SFT-S0, prd_cx.md section 12).
+ *
+ *   sh ./unisacc.com tools/state-gen.cx -- --emit unverified                    list the subjects found in the doc section
+ *   sh ./unisacc.com tools/state-gen.cx -- --emit unverified --against DOC [--table T]
+ *   sh ./unisacc.com tools/state-gen.cx -- --emit versions [--table T]   canonical rows of build/version-seq.tsv, last line STATE_GEN versions rows=N
+ *
+ * Section: DOC lines from the heading "### " + 仍未验证 up to the next "### "; an entry is a line starting "- "
+ * (indented lines are detail of the entry above).  Entry subject = text after "- " up to the first ':' or '('
+ * (max 48 bytes, cut on a UTF-8 boundary).  Table T (default build/state-unverified.tsv) has 11 TAB columns
+ * id version kind state subject missing action write_domain owner evidence updated.  Output: one ROW/MISSING/EXTRA
+ * line per item, CONFLICT lines when two rows of different owners have overlapping write_domain (';' separated
+ * path prefixes), last line STATE_GEN rows=N missing=M extra=E.  rc 0 only when missing=0 extra=0 and no conflict.
+ * Read-only: nothing is written; --write belongs to a later window. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+#define MAXR 256
+#define SUBJ 49
+typedef struct { char subj[SUBJ]; char owner[64]; char dom[512]; char id[64]; int seen; } Row;
+static Row rows[MAXR]; static int nrows;
+static char ents[MAXR][SUBJ]; static int nents;
+
+static int load(const char *path, char **buf) {
+    unsigned char *b; int64_t n; int rc = sy_read_file(path, &b, &n, 8000000);
+    if (rc < 0) { fprintf(stderr, "state-gen: cannot read %s rc=%d\n", path, rc); return -1; }
+    *buf = (char *)b; return (int)n;
+}
+
+static void subject(const char *s, char *dst) {
+    int n = 0;
+    while (s[n] && s[n] != '\n' && s[n] != ':' && s[n] != '(' && n < SUBJ - 1) n++;
+    if (n == SUBJ - 1 && s[n] && s[n] != '\n') while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80) n--;
+    for (int k = 0; k < n; k++) dst[k] = s[k];
+    dst[n] = 0;
+}
+
+static void scan_doc(char *doc) {
+    char *p = doc; int in = 0;
+    while (*p) {
+        char *e = strchr(p, '\n'); size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (strncmp(p, "### ", 4) == 0) in = strstr(p, "\xe4\xbb\x8d\xe6\x9c\xaa\xe9\xaa\x8c\xe8\xaf\x81") && (!e || strstr(p, "\xe4\xbb\x8d") < e);
+        else if (in && len > 2 && p[0] == '-' && p[1] == ' ' && nents < MAXR) subject(p + 2, ents[nents++]);
+        if (!e) break;
+        p = e + 1;
+    }
+}
+
+static void scan_table(char *t) {
+    char *p = t; int first = 1;
+    while (*p) {
+        char *e = strchr(p, '\n'); char *f[12]; int k = 0; char *q = p;
+        if (e) *e = 0;
+        if (first) { first = 0; goto next; }
+        if (!p[0]) goto next;
+        f[k++] = q;
+        while (*q && k < 11) { if (*q == '\t') { *q = 0; f[k++] = q + 1; } q++; }
+        if (k == 11 && nrows < MAXR) {
+            Row *r = &rows[nrows++];
+            if (cx_fmt(r->id, sizeof r->id, "%s", f[0]) || cx_fmt(r->subj, sizeof r->subj, "%s", f[4]) ||
+                cx_fmt(r->dom, sizeof r->dom, "%s", f[7]) || cx_fmt(r->owner, sizeof r->owner, "%s", f[8])) {
+                fputs("state-gen: field too long\n", stderr); exit(2);
+            }
+        } else fprintf(stderr, "state-gen: bad row (%d columns)\n", k);
+next:
+        if (!e) break;
+        p = e + 1;
+    }
+}
+
+/* one write_domain prefix covers another when equal or one is a '/'-bounded prefix of the other */
+static int pre_overlap(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b), m = la < lb ? la : lb;
+    if (!la || !lb || strncmp(a, b, m) != 0) return 0;
+    if (la == lb) return 1;
+    return (la < lb ? a[la - 1] == '/' || b[la] == '/' : b[lb - 1] == '/' || a[lb] == '/');
+}
+static int dom_overlap(const char *a, const char *b) {
+    char x[512], y[512]; const char *pa = a, *pb;
+    while (*pa) {
+        int la = 0, lb; while (pa[la] && pa[la] != ';' && la < 511) { x[la] = pa[la]; la++; }
+        x[la] = 0; pb = b;
+        while (*pb) {
+            lb = 0; while (pb[lb] && pb[lb] != ';' && lb < 511) { y[lb] = pb[lb]; lb++; }
+            y[lb] = 0; if (pre_overlap(x, y)) return 1;
+            pb += lb; if (*pb == ';') pb++;
+        }
+        pa += la; if (*pa == ';') pa++;
+    }
+    return 0;
+}
+
+/* --emit versions [--table T]: canonical rows of build/version-seq.tsv (5 TAB columns slot version class state note),
+ * DUP line for a repeated version, SKIPPED line when the skipped version 0.0.64 appears; last line STATE_GEN versions rows=N. */
+static int emit_versions(const char *table) {
+    char *tab = 0; char *p; int first = 1, n = 0, bad = 0, i; char seen[64][32];
+    if (load(table, &tab) < 0) return 2;
+    p = tab;
+    while (*p) {
+        char *e = strchr(p, '\n'); char *f[6]; int k = 0; char *q = p;
+        if (e) *e = 0;
+        if (first) { first = 0; goto next; }
+        if (!p[0]) goto next;
+        f[k++] = q;
+        while (*q && k < 5) { if (*q == '\t') { *q = 0; f[k++] = q + 1; } q++; }
+        if (k != 5 || n >= 64) { fprintf(stderr, "state-gen: bad version row (%d columns)\n", k); bad++; goto next; }
+        if (cx_fmt(seen[n], sizeof seen[n], "%s", f[1])) { fputs("state-gen: version too long\n", stderr); return 2; }
+        for (i = 0; i < n; i++) if (!strcmp(seen[i], f[1])) { printf("DUP\t%s\n", f[1]); bad++; }
+        if (!strcmp(f[1], "0.0.64")) { printf("SKIPPED\t%s\n", f[1]); bad++; }
+        printf("VERSION\t%s\t%s\t%s\t%s\t%s\n", f[0], f[1], f[2], f[3], f[4]);
+        n++;
+next:
+        if (!e) break;
+        p = e + 1;
+    }
+    printf("STATE_GEN versions rows=%d\n", n);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *against = 0, *table = 0; int i, j, missing = 0, extra = 0, conflict = 0, emit = 0;
+    char *doc = 0, *tab = 0;
+    for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--emit") && i + 1 < argc && !strcmp(argv[i + 1], "versions")) emit = 2;
+    if (emit == 2) {
+        for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--table") && i + 1 < argc) table = argv[++i];
+        return emit_versions(table ? table : "build/version-seq.tsv");
+    }
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--emit") && i + 1 < argc && !strcmp(argv[i + 1], "unverified")) { emit = 1; i++; }
+        else if (!strcmp(argv[i], "--against") && i + 1 < argc) against = argv[++i];
+        else if (!strcmp(argv[i], "--table") && i + 1 < argc) table = argv[++i];
+        else { fputs("usage: --emit unverified [--against DOC] [--table T]\n", stderr); return 2; }
+    }
+    if (!emit) { fputs("usage: --emit unverified [--against DOC] [--table T]\n", stderr); return 2; }
+    if (!table) table = "build/state-unverified.tsv";
+    if (!against) against = "prd_mempalace.md";
+    if (load(against, &doc) < 0) return 2;
+    scan_doc(doc);
+    if (!sy_exists(table)) { for (i = 0; i < nents; i++) printf("ENTRY\t%s\n", ents[i]); printf("STATE_GEN rows=0 missing=%d extra=0\n", nents); return 1; }
+    if (load(table, &tab) < 0) return 2;
+    scan_table(tab);
+    for (i = 0; i < nents; i++) {
+        int hit = 0;
+        for (j = 0; j < nrows; j++) if (!strcmp(rows[j].subj, ents[i])) { rows[j].seen = 1; hit = 1; }
+        if (!hit) { missing++; printf("MISSING\t%s\n", ents[i]); }
+    }
+    for (j = 0; j < nrows; j++) if (!rows[j].seen) { extra++; printf("EXTRA\t%s\t%s\n", rows[j].id, rows[j].subj); }
+    for (i = 0; i < nrows; i++) for (j = i + 1; j < nrows; j++)
+        if (strcmp(rows[i].owner, rows[j].owner) && dom_overlap(rows[i].dom, rows[j].dom)) { conflict++; printf("CONFLICT\t%s\t%s\n", rows[i].id, rows[j].id); }
+    printf("STATE_GEN rows=%d missing=%d extra=%d\n", nrows, missing, extra);
+    return (missing || extra || conflict) ? 1 : 0;
+}

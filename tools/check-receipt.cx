@@ -1,0 +1,67 @@
+/* check-receipt: cxlib.receipt fixtures (input identity recorded; adoption = one comparison).
+ *   sh ./unisacc.com tools/check-receipt.cx
+ * Builds a throwaway tree under a temp dir: same inputs adopt; one src byte, one table byte, an upstream
+ * phase output each make STALE; missing receipt, missing row, unknown token, empty glob, missing upstream
+ * receipt all fail closed; the atomic write leaves no .new. Does not wire chain tools. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.receipt
+static int bad, total;
+static void ok(int cond, const char *what) {
+    total++;
+    if (!cond) { bad++; fprintf(stderr, "FAIL\t%s\n", what); }
+}
+static char root[400], rd[460], tb[460], rec[500], rec1[500];
+static void put(const char *rel, const char *s) {
+    char p[600]; cx_fmt(p, sizeof p, "%s/%s", root, rel);
+    if (cx_write(p, s, strlen(s))) { fprintf(stderr, "check-receipt: cannot write %s\n", p); exit(2); }
+}
+static int hash(const char *ph, char h[65]) { return rc_hash_inputs(root, rd, tb, ph, h); }
+int main(void) {
+    char h0[65], h1[65], up[65], t[500]; int i;
+    char d[400];
+    if (sy_mkdtemp(sy_tmpdir(), "recfix-", d, sizeof d)) { fprintf(stderr, "check-receipt: no tmpdir\n"); return 2; }
+    cx_fmt(root, sizeof root, "%s", d);
+    cx_fmt(t, sizeof t, "%s/src", root); sy_mkdir(t, 0755);
+    cx_fmt(t, sizeof t, "%s/rec", root); sy_mkdir(t, 0755);
+    cx_fmt(rd, sizeof rd, "%s/rec", root);
+    cx_fmt(tb, sizeof tb, "%s/sidetable.tsv", root);
+    cx_fmt(rec, sizeof rec, "%s/rec/b.receipt", root);
+    cx_fmt(rec1, sizeof rec1, "%s/rec/a.receipt", root);
+    put("src/x.txt", "alpha\n"); put("src/y.txt", "beta\n"); put("t.tsv", "k\tv\n");
+    put("sidetable.tsv", "# id\tinputs\na\tsrc:src/**,table:t.tsv\nb\tphase:a,table:t.tsv\nbad1\tsrc:nothere/**\nbad2\tfoo:bar\nbad3\tsrc:src/*.txt\nbad4\tphase:zzz\n");
+    memset(up, 'c', 64); up[64] = 0;
+    ok(!hash("a", h0), "hash a");
+    ok(!hash("a", h1) && !strcmp(h0, h1), "hash deterministic");
+    ok(rc_adopt_ok(rec1, "a", h0) == 1 && !strncmp(rc_why(), "missing", 7), "missing receipt STALE reason=missing");
+    ok(!rc_write(rec1, "a", h0, up), "write a");
+    { char n[600]; cx_fmt(n, sizeof n, "%s.new", rec1); ok(sy_exists(n) != 1, "atomic write leaves no .new"); }
+    ok(rc_adopt_ok(rec1, "a", h0) == 0, "same inputs adopt");
+    ok(rc_adopt_ok(rec1, "b", h0) == 1 && !strncmp(rc_why(), "phase", 5), "phase id mismatch STALE");
+    put("src/x.txt", "alphb\n");
+    ok(!hash("a", h1) && strcmp(h0, h1), "src byte changes hash");
+    ok(rc_adopt_ok(rec1, "a", h1) == 1 && !strncmp(rc_why(), "mismatch", 8), "src byte change STALE");
+    put("src/x.txt", "alpha\n");
+    ok(!hash("a", h1) && !strcmp(h0, h1), "restored src adopts again");
+    put("t.tsv", "k\tw\n");
+    ok(!hash("a", h1) && strcmp(h0, h1) && rc_adopt_ok(rec1, "a", h1) == 1, "table change STALE");
+    put("t.tsv", "k\tv\n");
+    ok(!hash("a", h0), "rehash a");
+    ok(!hash("b", h1), "hash b with upstream");
+    ok(!rc_write(rec, "b", h1, up), "write b");
+    ok(rc_adopt_ok(rec, "b", h1) == 0, "b adopt");
+    ok(!rc_write(rec1, "a", h0, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), "a output changes");
+    ok(!hash("b", t) && strcmp(t, h1) && rc_adopt_ok(rec, "b", t) == 1, "upstream output change STALE");
+    for (i = 0; i < 4; i++) {
+        static const char *id[4] = {"bad1", "bad2", "bad3", "bad4"};
+        ok(hash(id[i], t) == 1 && t[0] == 0, id[i]);
+    }
+    ok(hash("nosuch", t) == 1 && !strncmp(rc_why(), "no-row", 6), "missing declaration fails closed");
+    ok(rc_adopt_ok(rec, "b", "short") == 1, "bad current hash STALE");
+    put("rec/old.receipt", "phase\told\n");
+    { char o[600]; cx_fmt(o, sizeof o, "%s/rec/old.receipt", root);
+      ok(rc_adopt_ok(o, "old", h0) == 1 && !strncmp(rc_why(), "no-inputs_sha", 13), "legacy receipt without inputs_sha STALE"); }
+    cx_rmtree(d);
+    printf("CHECK_RECEIPT\ttotal=%d\tfailed=%d\n", total, bad);
+    return bad ? 1 : 0;
+}

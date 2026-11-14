@@ -1,0 +1,177 @@
+/* tools/refusals-gen.cx -- 由事实表 exec/facts/refusals.tsv 生成 cx/sys/refusals.cx(L0 拒绝原因表:sy_refusal_reason 等与 SY_REFUSAL_* 常量)。
+ *
+ *   sh ./unisacc.com tools/refusals-gen.cx -- --write [--root DIR]   校验表并写 cx/sys/refusals.cx
+ *   sh ./unisacc.com tools/refusals-gen.cx -- --check [--root DIR]   校验表并逐字节比对
+ *
+ * 表列(TAB 分隔,# 行与空行跳过): id target origin reason since tracking。
+ *   id        [A-Z][A-Z0-9_]*,唯一;常量名 SY_REFUSAL_<id>,数值 = 行序(从 1 起,0 是 SY_REFUSAL_NONE),故表只追加。
+ *   target    lnx|osx|win|all。
+ *   origin    文件:函数(如 cx/sys/fs.cx:sy_mkfifo_os);同 origin 同 target 不得重复。
+ *   reason    可打印 ASCII,不含双引号与反斜杠,不为空。
+ *   since     首次登记的版本;tracking 对应 std-surface 行或 prd_mempalace 条目,无则 -。
+ * 坏行一律 REFUSE(rc 2),不写产物。--check 字节不同 rc 1。检查: tools/check-refusals-gen.cx。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXROW 255
+#define OUTCAP (512 * 1024)
+#define NCOL 6
+
+static const char *root = ".";
+static const char *tab;
+static long fo[MAXROW][NCOL], fl[MAXROW][NCOL];
+static int nrow;
+static char *out;
+static long outn;
+static int overflow;
+
+static int streq(const char *a, const char *b) {
+    long n = tx_len(a, 4096);
+    return n == tx_len(b, 4096) && mm_same(a, b, n);
+}
+static int feq(int r, int c, const char *lit) {
+    long n = tx_len(lit, 64);
+    return fl[r][c] == n && mm_same(tab + fo[r][c], lit, n);
+}
+static int fsame(int a, int b, int c) {
+    return fl[a][c] == fl[b][c] && mm_same(tab + fo[a][c], tab + fo[b][c], fl[a][c]);
+}
+static void put(const char *s, long n) {
+    if (outn + n < OUTCAP) { mm_copy(out + outn, OUTCAP - outn, s, n); outn += n; }
+    else overflow = 1;
+}
+static void puts0(const char *s) { put(s, tx_len(s, 4096)); }
+static void putf(int r, int c) { put(tab + fo[r][c], fl[r][c]); }
+static void putnum(long v) {
+    char b[32];
+    if (!cx_fmt(b, sizeof b, "%ld", v)) puts0(b);
+}
+
+static int refuse(long line, const char *why) {
+    sy_printf("REFUSE\texec/facts/refusals.tsv\tline=%ld\t%s\n", line, why);
+    return 2;
+}
+
+/* 0 ok, 2 refused */
+static int parse(long n) {
+    long i = 0, line = 0;
+    while (i < n) {
+        long e = i, c, k;
+        int r = nrow;
+        line++;
+        while (e < n && tab[e] != '\n') e++;
+        if (e == i || tab[i] == '#') { i = e + 1; continue; }
+        if (nrow >= MAXROW) return refuse(line, "too-many-rows");
+        if (tx_fields(tab + i, e - i, '\t') != NCOL) return refuse(line, "field-count");
+        for (c = 0; c < NCOL; c++) {
+            long o, l;
+            if (tx_field(tab + i, e - i, '\t', c, &o, &l) || l == 0) return refuse(line, "empty-field");
+            fo[r][c] = i + o; fl[r][c] = l;
+        }
+        for (k = 0; k < fl[r][0]; k++) {
+            char ch = tab[fo[r][0] + k];
+            int up = ch >= 'A' && ch <= 'Z', dg = (ch >= '0' && ch <= '9') || ch == '_';
+            if (!(up || (k > 0 && dg))) return refuse(line, "bad-id");
+        }
+        if (fl[r][0] > 48) return refuse(line, "bad-id");
+        if (!feq(r, 1, "lnx") && !feq(r, 1, "osx") && !feq(r, 1, "win") && !feq(r, 1, "all")) return refuse(line, "bad-target");
+        {
+            long colon = -1;
+            for (k = 0; k < fl[r][2]; k++) {
+                char ch = tab[fo[r][2] + k];
+                if (ch == ':') { if (colon >= 0) return refuse(line, "bad-origin"); colon = k; }
+                else if (ch <= ' ' || ch > '~' || ch == '"' || ch == '\\' || ch == '*') return refuse(line, "bad-origin");
+            }
+            if (colon <= 0 || colon + 1 >= fl[r][2]) return refuse(line, "bad-origin");
+        }
+        for (c = 3; c < NCOL; c++)
+            for (k = 0; k < fl[r][c]; k++) {
+                char ch = tab[fo[r][c] + k];
+                if (ch < ' ' || ch > '~' || ch == '"' || ch == '\\') return refuse(line, c == 3 ? "bad-reason" : "bad-text");
+                if (ch == '*' && k + 1 < fl[r][c] && tab[fo[r][c] + k + 1] == '/') return refuse(line, "bad-text");
+            }
+        for (k = 0; k < r; k++) {
+            if (fsame((int)k, r, 0)) return refuse(line, "duplicate-id");
+            if (fsame((int)k, r, 2) && fsame((int)k, r, 1)) return refuse(line, "duplicate-origin-target");
+        }
+        nrow++;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static void strtab(const char *name, int col) {
+    int r;
+    puts0("static const char *const "); puts0(name); puts0("[SY_REFUSAL_COUNT] = {\n    \"\",\n");
+    for (r = 0; r < nrow; r++) { puts0("    \""); putf(r, col); puts0("\",\n"); }
+    puts0("};\n");
+}
+static void getter(const char *fn, const char *name, const char *miss) {
+    puts0("const char *"); puts0(fn); puts0("(int id) {\n    if (id <= 0 || id >= SY_REFUSAL_COUNT) return \"");
+    puts0(miss); puts0("\";\n    return "); puts0(name); puts0("[id];\n}\n");
+}
+
+static void gen(void) {
+    int r;
+    puts0("#pragma unisa module refusals\n#pragma unisa dock\n");
+    puts0("/* Generated by tools/refusals-gen.cx --write from exec/facts/refusals.tsv; do not edit by hand.\n");
+    puts0("   One id per registered refusal point (a place that answers -errno 38 for a named reason).\n");
+    puts0("   Ids are the table's row order starting at 1; the table is append-only. */\n");
+    puts0("enum {\n    SY_REFUSAL_NONE = 0,\n");
+    for (r = 0; r < nrow; r++) {
+        puts0("    SY_REFUSAL_"); putf(r, 0); puts0(" = "); putnum(r + 1); puts0(",\n");
+    }
+    puts0("    SY_REFUSAL_COUNT = "); putnum(nrow + 1); puts0("\n};\n");
+    strtab("sy_refusal_ids", 0);
+    strtab("sy_refusal_targets", 1);
+    strtab("sy_refusal_origins", 2);
+    strtab("sy_refusal_reasons", 3);
+    puts0("/* the tables are module-private: callers read them through these getters */\n");
+    puts0("int sy_refusal_count(void) {\n    return SY_REFUSAL_COUNT - 1;\n}\n");
+    getter("sy_refusal_reason", "sy_refusal_reasons", "unknown refusal");
+    getter("sy_refusal_name", "sy_refusal_ids", "");
+    getter("sy_refusal_target", "sy_refusal_targets", "");
+    getter("sy_refusal_origin", "sy_refusal_origins", "");
+}
+
+int main(int argc, char **argv) {
+    int a, mode = 0, rc;
+    char path[900], opath[900];
+    size_t m = 0, om = 0;
+    char *old;
+    for (a = 1; a < argc; a++) {
+        if (streq(argv[a], "--write")) mode = 1;
+        else if (streq(argv[a], "--check")) mode = 2;
+        else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else mode = -1;
+    }
+    if (mode <= 0) { sy_printf("usage: refusals-gen.cx -- --write|--check [--root DIR]\n"); return 2; }
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/refusals.tsv", root) || cx_fmt(opath, sizeof opath, "%s/cx/sys/refusals.cx", root)) return 2;
+    tab = cx_read(path, &m);
+    if (!tab) { sy_printf("REFUSE\texec/facts/refusals.tsv\tunreadable\n"); return 2; }
+    rc = parse((long)m);
+    if (rc) return rc;
+    if (nrow == 0) { sy_printf("REFUSE\texec/facts/refusals.tsv\tno-rows\n"); return 2; }
+    out = mm_alloc(OUTCAP);
+    gen();
+    if (overflow) { sy_printf("REFUSE\tcx/sys/refusals.cx\toutput-too-large\n"); return 2; }
+    if (mode == 1) {
+        if (cx_write(opath, out, outn)) { sy_printf("REFUSE\tcx/sys/refusals.cx\tunwritable\n"); return 2; }
+        sy_printf("REFUSALS_GEN\tWROTE\trows=%d\n", nrow);
+        return 0;
+    }
+    old = cx_read(opath, &om);
+    if (!old || (long)om != outn || !mm_same(old, out, outn)) {
+        long k = 0, line = 1;
+        if (old) while (k < (long)om && k < outn && old[k] == out[k]) { if (out[k] == '\n') line++; k++; }
+        sy_printf("DIFF\tcx/sys/refusals.cx\tline=%ld\n", line);
+        sy_printf("REFUSALS_GEN\tFAIL\trows=%d\n", nrow);
+        return 1;
+    }
+    sy_printf("REFUSALS_GEN\tok\trows=%d\n", nrow);
+    return 0;
+}

@@ -83,6 +83,86 @@ int main(void) {
         rc = try_agg(bin, root, run, g2, 2, &named); ck(rc == 2 && !named, "valid-merge-shape-passes-arg-gate");
     }
     (void)buf;
+    /* 判决规则(as_verdict)的末行合同:run-batch 在 BATCH_RUN 之后只打一行本批的 BATCH_TIMING,
+       判决只越过恰好这一行;其余情形 BATCH_RUN 仍须恰好一次且为最后一行。进程内直接求值,不起会话。 */
+    {
+        static const char *C = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        static char RUN[700], RUNF[700], TIM[300], TIMO[300], TIMX[300], TIMF[900], o[4000];
+        const char *why_v, *v;
+        static as_facts f;   /* static: every fact starts zero */
+        f.id = "vx"; f.marker = "M"; f.candidate = C; f.headers = "product";
+        f.status_known = 1; f.candidate_stable = f.identity_stable = f.inputs_stable = f.materials_stable = 1;
+        f.err = ""; f.errn = 0;
+        if (cx_fmt(RUN, sizeof RUN, "BATCH_RUN\tid=vx\tstatus=PASS\trc=0\ttransport=0\tmarker=M\tcandidate=%s\theaders=product\tscope=actual-one-batch-no-cached-result\n", C) ||
+            cx_fmt(RUNF, sizeof RUNF, "BATCH_RUN\tid=vx\tstatus=FAIL\trc=1\ttransport=0\tmarker=M\tcandidate=%s\theaders=product\tscope=actual-one-batch-no-cached-result\n", C) ||
+            cx_fmt(TIM, sizeof TIM, "BATCH_TIMING\tid=vx\tprep_ms=1\tlink_ms=2\trun_ms=3\tnorm_ms=4\ttotal_ms=10\tkit=hot\n") ||
+            cx_fmt(TIMO, sizeof TIMO, "BATCH_TIMING\tid=other\tprep_ms=1\tlink_ms=2\trun_ms=3\tnorm_ms=4\ttotal_ms=10\tkit=hot\n") ||
+            cx_fmt(TIMX, sizeof TIMX, "BATCH_TIMING\tid=vxx\tprep_ms=1\tlink_ms=2\trun_ms=3\tnorm_ms=4\ttotal_ms=10\tkit=hot\n") ||
+            cx_fmt(TIMF, sizeof TIMF, "BATCH_TIMING\tid=vx\t%s", RUN)) die("verdict-fmt");
+#define VERDICT(NAME, WANT_V, WANT_R, ...) do { \
+            if (cx_fmt(o, sizeof o, __VA_ARGS__)) die("verdict-fmt"); \
+            f.out = o; f.outn = strlen(o); v = as_verdict(&f, &why_v); \
+            ck(tx_eqz(v, WANT_V) && tx_eqz(why_v, WANT_R), NAME); } while (0)
+        f.bound_rc = 0; f.child_status = 0;
+        /* 正例 */
+        VERDICT("verdict-run-last-no-timing-pass", "PASS", "batch-pass", "noise\n%s", RUN);
+        VERDICT("verdict-run-then-one-timing-pass", "PASS", "batch-pass", "noise\n%s%s", RUN, TIM);
+        /* 计时行在 BATCH_RUN 之前只是普通前置输出(旧规则本就不限制前置行),不改变 BATCH_RUN 须为末行 */
+        VERDICT("verdict-timing-before-run-is-plain-prefix", "PASS", "batch-pass", "%s%s", TIM, RUN);
+        /* 负例:一律 FAIL batch-line-missing-or-not-last */
+        VERDICT("verdict-refuse-two-timing-lines", "FAIL", "batch-line-missing-or-not-last", "%s%s%s", RUN, TIM, TIM);
+        VERDICT("verdict-refuse-line-between-run-and-timing", "FAIL", "batch-line-missing-or-not-last", "%sextra\n%s", RUN, TIM);
+        VERDICT("verdict-refuse-timing-before-run-then-trailing-line", "FAIL", "batch-line-missing-or-not-last", "%s%sextra\n", TIM, RUN);
+        VERDICT("verdict-refuse-timing-only", "FAIL", "batch-line-missing-or-not-last", "%s", TIM);
+        VERDICT("verdict-refuse-run-forged-inside-timing-line", "FAIL", "batch-line-missing-or-not-last", "noise\n%s", TIMF);
+        VERDICT("verdict-refuse-two-run-lines-then-timing", "FAIL", "batch-line-missing-or-not-last", "%s%s%s", RUN, RUN, TIM);
+        VERDICT("verdict-refuse-timing-of-other-id", "FAIL", "batch-line-missing-or-not-last", "%s%s", RUN, TIMO);
+        VERDICT("verdict-refuse-timing-of-longer-id", "FAIL", "batch-line-missing-or-not-last", "%s%s", RUN, TIMX);
+        VERDICT("verdict-refuse-timing-without-id", "FAIL", "batch-line-missing-or-not-last", "%sBATCH_TIMING\tprep_ms=1\n", RUN);
+        VERDICT("verdict-refuse-timing-without-newline", "FAIL", "batch-line-missing-or-not-last", "%sBATCH_TIMING\tid=vx\tprep_ms=1", RUN);
+        VERDICT("verdict-refuse-indented-timing", "FAIL", "batch-line-missing-or-not-last", "%s %s", RUN, TIM);
+        /* 计时行内伪造的 PASS 不盖过真实的 FAIL 行:退出 1 的批仍是 FAIL batch-fail */
+        f.bound_rc = 1; f.child_status = 1 << 8;
+        VERDICT("verdict-real-fail-not-masked-by-forged-timing", "FAIL", "batch-fail", "%s%s", RUNF, TIMF);
+        VERDICT("verdict-fail-then-one-timing-is-batch-fail", "FAIL", "batch-fail", "%s%s", RUNF, TIM);
+        /* 变异测试补缺口(2026-11-14):前置判决链每一环、退出码分类、PASS 行逐字匹配、传输超时 */
+        {
+            static char RUNM[700], RUNL[700], RUNU[700], RUNT[700];
+            if (cx_fmt(RUNM, sizeof RUNM, "BATCH_RUN\tid=vx\tstatus=PASS\trc=0\ttransport=0\tmarker=OTHER\tcandidate=%s\theaders=product\tscope=actual-one-batch-no-cached-result\n", C) ||
+                cx_fmt(RUNL, sizeof RUNL, "BATCH_RUN\tid=vx\tstatus=PASS\trc=0\ttransport=0\tmarker=M\tcandidate=%s\theaders=product\tscope=actual-one-batch-no-cached-result\textra\n", C) ||
+                cx_fmt(RUNU, sizeof RUNU, "BATCH_RUN\tid=vx\tstatus=UNKNOWN\trc=3\ttransport=0\tmarker=M\tcandidate=%s\theaders=product\tscope=x\n", C) ||
+                cx_fmt(RUNT, sizeof RUNT, "BATCH_RUN\tid=vx\tstatus=FAIL\trc=1\ttransport=1\tmarker=M\tcandidate=%s\theaders=product\tscope=x\n", C)) die("verdict-fmt");
+            f.bound_rc = 0; f.child_status = 0;
+            f.identity_stable = 0;  VERDICT("verdict-identity-unstable-unknown", "UNKNOWN", "identity-changed-during-wave", "%s", RUN); f.identity_stable = 1;
+            f.candidate_stable = 0; VERDICT("verdict-candidate-unstable-unknown", "UNKNOWN", "candidate-changed-or-foreign", "%s", RUN); f.candidate_stable = 1;
+            f.materials_stable = 0; VERDICT("verdict-materials-unstable-fail", "FAIL", "material-changed-during-batch", "%s", RUN); f.materials_stable = 1;
+            f.inputs_stable = 0;    VERDICT("verdict-inputs-unstable-fail", "FAIL", "input-changed-during-batch", "%s", RUN); f.inputs_stable = 1;
+            f.bound_rc = 142;       VERDICT("verdict-bound-rc142-unknown", "UNKNOWN", "watchdog-deadline", "%s", RUN);
+            f.bound_rc = 1;         VERDICT("verdict-bound-rc-mismatch-unknown", "UNKNOWN", "watchdog-rc-mismatch", "%s", RUN);
+            f.bound_rc = 0;
+            f.status_known = 0;     VERDICT("verdict-status-unknown-unknown", "UNKNOWN", "watchdog-error", "%s", RUN); f.status_known = 1;
+            f.child_status = 9;     VERDICT("verdict-child-signal-unknown", "UNKNOWN", "child-signal", "%s", RUN);
+            f.child_status = 0;
+            VERDICT("verdict-pass-line-marker-mismatch-fail", "FAIL", "pass-line-mismatch", "%s", RUNM);
+            VERDICT("verdict-pass-line-trailing-extra-fail", "FAIL", "pass-line-mismatch", "%s", RUNL);
+            f.bound_rc = 2; f.child_status = 2 << 8;
+            VERDICT("verdict-exit2-runner-refused-unknown", "UNKNOWN", "runner-refused", "%s", RUNF);
+            f.bound_rc = 4; f.child_status = 4 << 8;
+            VERDICT("verdict-exit4-unclassified-unknown", "UNKNOWN", "unclassified-exit", "%s", RUNF);
+            f.bound_rc = 1; f.child_status = 1 << 8;
+            VERDICT("verdict-exit1-no-batch-line-unknown", "UNKNOWN", "unclassified-exit", "noise\n");
+            f.bound_rc = 3; f.child_status = 3 << 8;
+            VERDICT("verdict-exit3-status-unknown-batch-timeout", "UNKNOWN", "run-batch-batch-timeout", "%s", RUNU);
+            VERDICT("verdict-exit3-other-status-unclassified", "UNKNOWN", "unclassified-exit", "%s", RUNF);
+            f.bound_rc = 1; f.child_status = 1 << 8;
+            f.err = "run-batch: child transport subprocess.TimeoutExpired: x\n"; f.errn = strlen(f.err);
+            VERDICT("verdict-transport-timeout-idle-unknown", "UNKNOWN", "run-batch-idle-timeout", "%s", RUNT);
+            VERDICT("verdict-fail-line-timeout-text-without-transport-is-fail", "FAIL", "batch-fail", "%s", RUNF);
+            f.err = ""; f.errn = 0;
+            VERDICT("verdict-transport-fail-without-timeout-text-is-fail", "FAIL", "batch-fail", "%s", RUNT);
+        }
+#undef VERDICT
+    }
     printf("CHECK_S9_AGG_PARTS\tfailed=%d\n", failures);
     return failures ? 1 : 0;
 }

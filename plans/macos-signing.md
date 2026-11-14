@@ -1,6 +1,6 @@
 # macOS 签名、公证接入方案
 
-决策：首轮真签绑定下一次 **0.0.48 重建后的、主人审阅的 Draft 候选**，由人工 `workflow_dispatch` 启动受保护 CI 环境。本机只执行显式私有副本的 ad-hoc 测试与不执行命令的 dry-run。此方案和新工具没有创建 workflow、签 Developer ID、向 Apple 提交、公证、安装或改 Release 资产。
+决策：首轮真签绑定下一次 **0.0.48 重建后的、项目所有者审阅的 Draft 候选**，由人工 `workflow_dispatch` 启动受保护 CI 环境。本机只执行显式私有副本的 ad-hoc 测试与不执行命令的 dry-run。此方案和新工具没有创建 workflow、签 Developer ID、向 Apple 提交、公证、安装或改 Release 资产。
 
 ## 当前身份与已测边界
 

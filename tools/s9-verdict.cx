@@ -1,0 +1,117 @@
+/* tools/s9-verdict.cx -- 把 s9 aggregate 产物映射为 release/evidence.tsv 第 4 行(只读,不写 evidence.tsv)。
+ *   sh ./unisacc.com tools/s9-verdict.cx -- RUN [--batches tests/batches.tsv]
+ * 输入: RUN/aggregate.out(`s9-shards aggregate ROOT RUN` 的 stdout 原样落盘;发布流程负责落盘)与 RUN/tier(init 写入:commit|release|all)。
+ * 输出一行: 4<TAB>PASS|FAIL|UNKNOWN<TAB>RUN/aggregate.out ,原因写 stderr(S9_VERDICT reason=...)。
+ * 规则: 有 BATCH 行为 FAIL 或 AGGREGATE fail>0 -> FAIL;
+ *   PASS 仅当 tier 为 release 或 all、AGGREGATE 行存在、全部 BATCH 行为 PASS(无 UNKNOWN/MISSING/REFUSED/DEFERRED 等)、
+ *   BATCH 行数 == AGGREGATE implemented_batches == tests/batches.tsv 中该 tier 的 IMPLEMENTED 批数(all=全部 IMPLEMENTED);
+ *   其余一切(缺目录、空目录、缺文件、commit 档、批数不符、状态未知)记 UNKNOWN,绝不猜 PASS。 */
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static char *slurp(const char *p, size_t *n) {
+    FILE *f = fopen(p, "rb");
+    char *b; size_t cap = 1 << 16, len = 0, r;
+    if (!f) return 0;
+    b = (char *)malloc(cap + 1);
+    if (!b) { fclose(f); return 0; }
+    while ((r = fread(b + len, 1, cap - len, f)) > 0) {
+        len += r;
+        if (len == cap) { cap *= 2; b = (char *)realloc(b, cap + 1); if (!b) { fclose(f); return 0; } }
+    }
+    fclose(f);
+    b[len] = 0; *n = len;
+    return b;
+}
+/* 取第 k 个制表符字段(0 起)到 out;无则返回 0。 */
+static int field(const char *ln, int k, char *out, int cap) {
+    int i = 0;
+    while (k > 0) { while (*ln && *ln != '\t') ln++; if (!*ln) return 0; ln++; k--; }
+    while (*ln && *ln != '\t' && i < cap - 1) out[i++] = *ln++;
+    out[i] = 0;
+    return 1;
+}
+static long kv(const char *ln, const char *key) { /* 在行内找 key=数字 字段 */
+    char f[128]; int k;
+    size_t kl = strlen(key);
+    for (k = 1; field(ln, k, f, sizeof f); k++)
+        if (!strncmp(f, key, kl) && f[kl] == '=') return atol(f + kl + 1);
+    return -1;
+}
+static long expected(const char *bt, const char *tier) { /* 数 tests/batches.tsv 的 IMPLEMENTED 批,release 只数 tier 列为 release */
+    size_t n; char *s = slurp(bt, &n), *p; long c = 0; int rel = !strcmp(tier, "release");
+    if (!s) return -1;
+    p = s;
+    while (*p) {
+        char *e = p, impl[64], t[64];
+        while (*e && *e != '\n') e++;
+        { char sv = *e; *e = 0;
+          if (p != s && field(p, 1, impl, sizeof impl) && !strcmp(impl, "IMPLEMENTED")) {
+              if (!rel) c++;
+              else if (field(p, 13, t, sizeof t) && !strcmp(t, "release")) c++;
+          }
+          *e = sv; }
+        p = *e ? e + 1 : e;
+    }
+    free(s);
+    return c;
+}
+static void setwhy(char *w, const char *s) {
+    size_t n = strlen(s);
+    if (n > 199) n = 199;
+    if (mm_copy(w, 200, s, (long)n)) n = 0;
+    w[n] = 0;
+}
+static const char *judge(const char *run, const char *bt, char *why) {
+    char p[4400], tier[64] = ""; size_t n; char *s, *q; long nb = 0, agg_impl = -1, exp; int fail = 0, bad = 0, has_agg = 0;
+    if (cx_fmt(p, sizeof p, "%s/tier", run)) { setwhy(why,"path-too-long"); return "UNKNOWN"; }
+    s = slurp(p, &n);
+    if (!s) { setwhy(why, "tier-missing"); return "UNKNOWN"; }
+    { size_t i = 0; while (i < n && s[i] != '\n' && i < sizeof tier - 1) { tier[i] = s[i]; i++; } tier[i] = 0; }
+    free(s);
+    if (strcmp(tier, "release") && strcmp(tier, "all")) { if (cx_fmt(why, 200, "tier-%s-not-full", tier)) setwhy(why, "tier-not-full"); return "UNKNOWN"; }
+    if (cx_fmt(p, sizeof p, "%s/aggregate.out", run)) { setwhy(why,"path-too-long"); return "UNKNOWN"; }
+    s = slurp(p, &n);
+    if (!s || !n) { setwhy(why, "aggregate-missing-or-empty"); free(s); return "UNKNOWN"; }
+    q = s;
+    while (*q) {
+        char *e = q, k0[32], st[64];
+        while (*e && *e != '\n') e++;
+        { char sv = *e; *e = 0;
+          if (field(q, 0, k0, sizeof k0)) {
+              if (!strcmp(k0, "BATCH") && field(q, 2, st, sizeof st)) {
+                  nb++;
+                  if (!strcmp(st, "FAIL")) fail++; else if (strcmp(st, "PASS")) bad++;
+              } else if (!strcmp(k0, "AGGREGATE")) {
+                  has_agg = 1; agg_impl = kv(q, "implemented_batches");
+                  if (kv(q, "fail") > 0) fail++;
+                  if (kv(q, "unknown") != 0 || kv(q, "missing") != 0 || kv(q, "refused") != 0) bad++;
+              } else if (!strcmp(k0, "S9")) { /* PENDING/COMMIT_ONLY/REGRESSION_ONLY 等非全量结论 */
+                  bad++;
+              }
+          }
+          *e = sv; }
+        q = *e ? e + 1 : e;
+    }
+    free(s);
+    if (fail) { setwhy(why, "fail-present"); return "FAIL"; }
+    if (!has_agg) { setwhy(why, "no-aggregate-line"); return "UNKNOWN"; }
+    if (bad) { setwhy(why, "non-pass-state"); return "UNKNOWN"; }
+    exp = expected(bt, tier);
+    if (exp <= 0) { setwhy(why, "registry-unreadable-or-empty"); return "UNKNOWN"; }
+    if (nb != exp || agg_impl != exp) { if (cx_fmt(why, 200, "count-mismatch batch=%ld aggregate=%ld registry=%ld", nb, agg_impl, exp)) setwhy(why, "count-mismatch"); return "UNKNOWN"; }
+    setwhy(why, "all-pass");
+    return "PASS";
+}
+int main(int argc, char **argv) {
+    const char *bt = "tests/batches.tsv", *run;
+    char why[256] = "", ev[4400];
+    if (argc != 2 && argc != 4) { fprintf(stderr, "usage: s9-verdict RUN [--batches FILE]\n"); return 2; }
+    run = argv[1];
+    if (argc == 4) { if (strcmp(argv[2], "--batches")) { fprintf(stderr, "usage\n"); return 2; } bt = argv[3]; }
+    if (cx_fmt(ev, sizeof ev, "%s/aggregate.out", run)) { fprintf(stderr, "path-too-long\n"); return 2; }
+    { const char *v = judge(run, bt, why);
+      fprintf(stderr, "S9_VERDICT\treason=%s\n", why);
+      printf("4\t%s\t%s\n", v, ev); }
+    return 0;
+}

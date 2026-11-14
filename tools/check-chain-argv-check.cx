@@ -22,11 +22,22 @@ static void fixture_case(const char *source,const char *chain,const char *front,
 static void fixture_envelope_case(const char *args_source,const char *rest_source,const char *callee,const char *seconds,const char *capacity,const char *extra,const char *name,int want){
  char source[4096];
  int rc=cx_fmt(source,sizeof source,
- "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < %s) { v[n++] = %s[i]; i++; } v[n]=0;return %s(root,v,secs);}\n"
+ "int step_run(const char *root,char **v,int secs){if(!step_out)return %s(root,v,secs);return pr_code(\"chain-step\",v,secs);}\n"
+ "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < %s) { v[n++] = %s[i]; i++; } v[n]=0;return step_run(root,v,secs);}\n"
  "int step(const char *root,char **args){ return step_secs(root,args,%s); }\n"
  "int bound_sh_secs(const char *root,char **rest,int secs){char *v[100];int n=0,i=0;while(rest[i]&&n+1<72){v[n++]=%s[i];i++;}v[n]=0;return pr_code(root,v,secs);}\n%s\n",
- capacity,args_source,callee,seconds,rest_source,extra);
+ callee,capacity,args_source,seconds,rest_source,extra);
  fixture_ck(!rc&&ca_forwarding_envelope(source)==want,name);
+}
+/* step_secs must hand its argv to step_run (the pinned chain-step or the fixture's ROOT launcher);
+   the shape before the pin, step_secs straight into bound_sh_secs, is no longer the proven one. */
+static void fixture_envelope_bypass(void){
+ const char *source=
+ "int step_run(const char *root,char **v,int secs){if(!step_out)return bound_sh_secs(root,v,secs);return pr_code(\"chain-step\",v,secs);}\n"
+ "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < 64) { v[n++] = args[i]; i++; } v[n]=0;return bound_sh_secs(root,v,secs);}\n"
+ "int step(const char *root,char **args){ return step_secs(root,args,90); }\n"
+ "int bound_sh_secs(const char *root,char **rest,int secs){char *v[100];int n=0,i=0;while(rest[i]&&n+1<72){v[n++]=rest[i];i++;}v[n]=0;return pr_code(root,v,secs);}\n";
+ fixture_ck(ca_forwarding_envelope(source)==0,"envelope-step-run-bypass-refused");
 }
 /* --tokens 只测公共结构API，不读取仓库，不编译也不执行被分析源码。 */
 static int fixture_tokens(void){
@@ -48,25 +59,29 @@ static int fixture_tokens(void){
  t=ca_tokens("\"unterminated");fixture_ck(!t,"tokens-string-refused");ca_tokens_free(t);
  t=ca_tokens("'unterminated");fixture_ck(!t,"tokens-character-refused");ca_tokens_free(t);
  fixture_ck(!ca_tokens(0),"tokens-null-refused");
- fixture_envelope_case("args","rest","bound_sh_secs","55","64","/* formatting and comment decoy: v[n++]=wrong[i]; */","envelope-structure-positive",1);
- fixture_envelope_case("rest","rest","bound_sh_secs","55","64","","envelope-args-copy-role-refused",0);
- fixture_envelope_case("args","args","bound_sh_secs","55","64","","envelope-rest-copy-role-refused",0);
- fixture_envelope_case("args","rest","unknown_bound","55","64","","envelope-forward-call-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","cc_pb()","64","/* formatting and comment decoy: v[n++]=wrong[i]; */","envelope-structure-positive",1);
+ fixture_envelope_case("rest","rest","bound_sh_secs","cc_pb()","64","","envelope-args-copy-role-refused",0);
+ fixture_envelope_case("args","args","bound_sh_secs","cc_pb()","64","","envelope-rest-copy-role-refused",0);
+ fixture_envelope_case("args","rest","unknown_bound","cc_pb()","64","","envelope-forward-call-refused",0);
  fixture_envelope_case("args","rest","bound_sh_secs","54","64","","envelope-step-deadline-refused",0);
- fixture_envelope_case("args","rest","bound_sh_secs","55","65","","envelope-copy-bound-refused",0);
- fixture_envelope_case("args","rest","bound_sh_secs","54","64","const char *decoy=\"return step_secs(root,args,55);\";","envelope-string-decoy-refused",0);
- fixture_envelope_case("args","rest","bound_sh_secs","55","64","int step(const char *root,char **args){return step_secs(root,args,55);}","envelope-function-ambiguity-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","cc_pb()","65","","envelope-copy-bound-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","89","64","const char *decoy=\"return step_secs(root,args,90);\";","envelope-string-decoy-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","cc_pb()","64","int step(const char *root,char **args){return step_secs(root,args,90);}","envelope-function-ambiguity-refused",0);
+ fixture_envelope_bypass();
  printf("CHECK_CHAIN_ARGV_TOKENS\tfailed=%d\n",fixture_failed);return fixture_failed?1:0;
 }
 int main(int argc,char **argv){
  if(argc==2&&!strcmp(argv[1],"--tokens"))return fixture_tokens();
- if(argc!=1&&argc!=2){fprintf(stderr,"usage: check-chain-argv-check [ROOT | --tokens]\n");return 2;}
+ int part=0;/* 0=全部 1=--a 前半负控 2=--b 后半负控；两半各自重做真实源正控 */
+ if(argc==3&&!strcmp(argv[2],"--a")){part=1;argc=2;}else if(argc==3&&!strcmp(argv[2],"--b")){part=2;argc=2;}
+ if(argc!=1&&argc!=2){fprintf(stderr,"usage: check-chain-argv-check [ROOT [--a|--b] | --tokens]\n");return 2;}
  if(argc==2&&sy_chdir(argv[1])){fprintf(stderr,"REFUSE\tfixture ROOT unreadable\n");return 2;}
  size_t n;char *a=cx_read("tools/candidate-chain.cx",&n),*b=cx_read("tools/chain-step.cx",&n),*c=cx_read("tools/whole-front.cx",&n);
  if(!a||!b||!c){fprintf(stderr,"REFUSE\tfixture source unreadable\n");free(a);free(b);free(c);return 2;}
  int baseline=ca_check(a,b,c,0,0,0);fixture_ck(baseline==0,"real-source-positive");
  if(baseline){free(a);free(b);free(c);printf("CHECK_CHAIN_ARGV_CHECK\tfailed=%d\tnegative_controls=NOT_RUN-baseline-refused\n",fixture_failed);return 1;}
  /* 同一构造域的正对照，避免负控因样本自身不受支持而伪通过。 */
+ if(part!=2){
  fixture_case(a,b,c,"char *a[]={\"build\",rev,snap,build,0};step(root,a);","build-fact-positive",0);
  fixture_case(a,b,c,"char *v[]={wft,\"--\",\"prepare\",snap,pkg,ctor,objs,nout,0};bound_sh_secs(root,v,45);","prepare-fact-positive",0);
  fixture_case(a,b,c,"char *v[]={wft,\"--\",\"front\",prep,target,part,offset,amount,0};bound_sh_secs(root,v,45);","front-fact-positive",0);
@@ -78,6 +93,8 @@ int main(int argc,char **argv){
  fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,snap,rev,build,0};step(root,a);}","queue-swapped-positionals-refused","positional role/order mismatch");
  fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"unknown_queue\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build,0};step(root,a);}","queue-second-command-unknown-refused","callee parser outside support domain");
  fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<3;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build,0};step(root,a);}","queue-bound-mismatch-refused","unsupported array construction or missing terminator");
+ }
+ if(part!=1){
  fixture_case(a,b,c,"char *a[]={\"build\",rev,snap,0};step(root,a);","missing-positional","callee argc guard rejects missing argument");
  fixture_case(a,b,c,"char *a[]={\"build\",snap,rev,build,0};step(root,a);","swapped-positionals","positional role/order mismatch");
  fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,helper,\"--link-only\",0};step(root,a);","blocker3-bare-helper","bare helper or unexpected positional argument");
@@ -98,5 +115,6 @@ int main(int argc,char **argv){
  fixture_ck(rc==2&&diagnostics>0&&!mismatch,"callee-position-swap-refused");
  rc=ca_check_binding_swap(a,b,c,1,expected,&diagnostics,&mismatch);
  fixture_ck(rc==2&&diagnostics>0&&!mismatch,"callee-whole-position-swap-refused");
+ }
  free(a);free(b);free(c);printf("CHECK_CHAIN_ARGV_CHECK\tfailed=%d\n",fixture_failed);return fixture_failed?1:0;
 }

@@ -16,13 +16,23 @@ static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\tcheck-freeze-plan.%s\n", name);
     else { failed++; sy_printf("FAIL\tcheck-freeze-plan.%s\n", name); }
 }
+/* run output of the latest sh() (child stdout, never source text) and the caller buffer it was copied to */
+static char *ran; static const char *ran_copy;
 static int sh(const char *cmd, char *out, size_t cap) {
-    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
-    int rc = cx_runv_timeout(v, 50, &o, &n);
-    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &ran, &n);
+    ran_copy = 0;
+    if (out) { out[0] = 0; if (ran && n < cap) { mm_copy(out, cap, ran, n); out[n] = 0; ran_copy = out; } }
     return rc;
 }
-static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 100000), n, tx_len(n, 100)) >= 0; }
+/* H must be the buffer the latest sh() filled; the search runs on that run output itself */
+static int has(const char *h, const char *n) {
+    long rn;
+    if (!h || h != ran_copy) return 0;
+    rn = tx_len(ran, 100000);
+    if (rn < 0) rn = 100000; /* 超 cap:只查 cap 内,不把 -1 当长度 */
+    return tx_find(ran, rn, n, tx_len(n, 100)) >= 0;
+}
 static int putf(const char *rel, const char *body) {
     char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
     return cx_write(p, body, tx_len(body, 8000));
@@ -57,6 +67,14 @@ int main(void) {
       if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.wide --draft draft.wide", td, com, tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "WIDE") && has(out, "tools"), "prefix-too-wide"); }
 
+    /* 负控: 产品输入清单含未归类路径 -> plan 与 check 都拒并点名 */
+    putf("ident.unc", "src/a.dat\tabc\nweird/x.dat\tdef\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p uncout && sh '%s' '%s' -- plan . uncout --ident-list ident.unc 2>&1", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "UNCLASSIFIED\tweird/x.dat") && has(out, "UNCLASSIFIED_PRODUCT_INPUT"), "unclassified-refused-at-plan");
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.unc --draft draft.ok 2>&1", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "UNCLASSIFIED\tweird/x.dat"), "unclassified-refused-at-check"); }
+
     /* 负控3: 启动清单缺文件 */
     putf("boot.ok", "ident.ok\n");
     putf("boot.bad", "ident.ok\nno-such-file.cx\n");
@@ -70,8 +88,8 @@ int main(void) {
     { char cmd[2200];
       if (cx_fmt(cmd, sizeof cmd,
           "cd '%s' && rm -rf drill && mkdir drill && cd drill && git init -q . && git config user.email a@b && git config user.name t && "
-          "mkdir -p exec agentwork ext/memx tools && echo x > exec/a.tsv && echo y > ext/memx/t.cx && ln -s ../ext/memx/t.cx cxlink.cx && "
-          "printf 'sid1\\tbase1\\tcdx\\t4102444800\\texec ext/memx\\n' > agentwork/freeze.tsv && "
+          "mkdir -p exec build ext/memx tools && echo x > exec/a.tsv && echo y > ext/memx/t.cx && ln -s ../ext/memx/t.cx cxlink.cx && "
+          "printf 'sid1\\tbase1\\tcdx\\t4102444800\\texec ext/memx\\n' > build/freeze.tsv && "
           "git add exec/a.tsv && GIT_DIR=.git sh '%s' '%s/tools/precommit.cx' 2>&1",
           td, com, root)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 1 && has(out, "冻结中"), "drill-frozen-path"); }

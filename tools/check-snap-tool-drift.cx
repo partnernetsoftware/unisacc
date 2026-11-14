@@ -1,0 +1,77 @@
+/* tools/check-snap-tool-drift.cx -- tools/snap-tool-drift.cx 的夹具检查,3 例,全在 sy_tmpdir()/check-snap-tool-drift-PID 内自造 git 仓:
+ *   same     快照与 HEAD 全同,rc 0,diff=0
+ *   snapdiff source=snap 的工具漂移,rc 1,一行 DIFF 带漂移提交,--report rc 0
+ *   rootdiff source=root 的工具漂移,rc 0,diff=1 snap_diff=0
+ * 末行 CHECK_SNAP_TOOL_DRIFT<TAB>assertions=N<TAB>failed=M。不碰真实快照。 */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int assertions, failed;
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) { failed++; printf("FAIL\t%s\n", what); }
+}
+static char base[4000];
+
+static int has(const char *s, size_t n, const char *w) {
+    size_t k = strlen(w);
+    for (size_t i = 0; i + k <= n; i++)
+        if (!memcmp(s + i, w, k)) return 1;
+    return 0;
+}
+static int sh(const char *script) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "set -e; %s", script)) return 1;
+    return cx_run_timeout(cmd, 40, 0, 0);
+}
+/* 造例:仓 H 含 tools/a.cx tools/b.cx 并提交;快照 S=release-snap-<rev10> 拷 H/tools;再按 CHG 改 H 并提交 */
+static int mk(const char *name, const char *chg, const char *mapbody) {
+    char s[9000];
+    if (cx_fmt(s, sizeof s,
+               "d=%s/%s; rm -rf $d; mkdir -p $d/h/tools; cd $d/h; git init -q; git config user.email t@t; git config user.name t; "
+               "echo a1 > tools/a.cx; echo b1 > tools/b.cx; git add .; git commit -qm init; r=$(git rev-parse HEAD | cut -c1-10); "
+               "mkdir -p $d/release-snap-$r; cp -r tools $d/release-snap-$r/tools; printf '%s' > $d/map.tsv; %s",
+               base, name, mapbody, chg)) return 1;
+    return sh(s);
+}
+static int run(const char *name, int report, char **out, size_t *n) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "d=%s/%s; sh ./unisacc.com tools/snap-tool-drift.cx -- --snap $d/release-snap-* --map $d/map.tsv --head $d/h%s",
+               base, name, report ? " --report" : "")) return -1;
+    return cx_run_timeout(cmd, 50, out, n);
+}
+
+int main(void) {
+    char *o = 0;
+    size_t n = 0;
+    if (cx_fmt(base, sizeof base, "%s/check-snap-tool-drift-%d", sy_tmpdir(), sy_pid())) return 2;
+    const char *hdr = "tool\\tclass\\tsource\\tevidence\\n";
+    char m1[600], m2[600];
+    if (cx_fmt(m1, sizeof m1, "%sa\\t驱动\\tsnap\\tx:1\\nb\\t驱动\\tsnap\\tx:2\\n", hdr)) return 2;
+    if (cx_fmt(m2, sizeof m2, "%sa\\t驱动\\tsnap\\tx:1\\nb\\t驱动\\troot\\tx:2\\n", hdr)) return 2;
+
+    ck(mk("same", "true", m1) == 0, "mk same");
+    int rc = run("same", 0, &o, &n);
+    ck(rc == 0 && o && has(o, n, "total=2\tdiff=0\tsame=2\tsnap_diff=0\n"), "same: rc 0, diff=0");
+    mm_free(o); o = 0;
+
+    ck(mk("snapdiff", "echo a2 > tools/a.cx; git commit -qam chgA", m1) == 0, "mk snapdiff");
+    rc = run("snapdiff", 0, &o, &n);
+    ck(rc == 1 && o && has(o, n, "TOOL\ta\tsnap\tDIFF\t") && has(o, n, "chgA\t1\n") && has(o, n, "TOOL\tb\tsnap\tSAME\t"), "snapdiff: rc 1, a DIFF chgA, b SAME");
+    mm_free(o); o = 0;
+    rc = run("snapdiff", 1, &o, &n);
+    ck(rc == 0 && o && has(o, n, "snap_diff=1\n"), "snapdiff --report: rc 0");
+    mm_free(o); o = 0;
+
+    ck(mk("rootdiff", "echo b2 > tools/b.cx; git commit -qam chgB", m2) == 0, "mk rootdiff");
+    rc = run("rootdiff", 0, &o, &n);
+    ck(rc == 0 && o && has(o, n, "TOOL\tb\troot\tDIFF\t") && has(o, n, "diff=1\tsame=1\tsnap_diff=0\n"), "rootdiff: rc 0, snap_diff=0");
+    mm_free(o);
+
+    char cmd[4200];
+    if (!cx_fmt(cmd, sizeof cmd, "rm -rf %s", base)) cx_run_timeout(cmd, 30, 0, 0);
+    printf("CHECK_SNAP_TOOL_DRIFT\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

@@ -14,6 +14,7 @@
  * (8) 负控：manifest 缺参或冲突模式必拒（rc=2）。
  */
 #pragma unisa use cxlib.toolprep
+#pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
@@ -64,8 +65,13 @@ int main(int argc, char **argv) {
     if (sy_realpath(".", root, sizeof root) < 0) return 2;
     if (argc >= 3 && argv[1][0] && argv[2][0]) {
         if (sy_realpath(argv[1], root, sizeof root) < 0) return 2;
-        if (cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
-        (void)sy_mkdir(argv[2], 0755);
+        /* the tool refuses a trash under /tmp (a guard, kept): the workdir must not follow OUT, which a
+           batch runner may place under /tmp; use a unique non-/tmp dir, removed at the end */
+        /* ROOT/.trash is ignored, not under /tmp, and a root the deletion guard lets cx_rmtree empty */
+        char dtrash[4400];
+        if (cx_fmt(dtrash, sizeof dtrash, "%s/.trash", root) ||
+            cx_fmt(work, sizeof work, "%s/sweep-check-%d-%ld", dtrash, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dtrash, 0755);
     } else if (argc == 2 && argv[1][0]) {
         if (cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", argv[1], sy_pid(), sy_now_ms())) return 2;
         (void)sy_mkdir(argv[1], 0755);
@@ -274,7 +280,281 @@ int main(int argc, char **argv) {
         ck(rc1 == 2 && rc2 == 2, "refuse-conflicting-modes-and-missing-args");
     }
 
-    if (argc < 3) cx_rmtree(work);
+    /* (8) scan 正控：规则表把 out 分成保留、移动、未定三类，分类汇总给出可回收字节 */
+    {
+        char sroot[4400], scache[4400], skit[4400], skitp[4400], srules[4400], sout[4400], strash[4400];
+        char s_keep[4400], s_move[4400], s_none[4400], s_out[4400];
+        char body[8192];
+        if (cx_fmt(sroot, sizeof sroot, "%s/scan-root", work) ||
+            cx_fmt(scache, sizeof scache, "%s/scan-cache", work) ||
+            cx_fmt(skit, sizeof skit, "%s/scan-cache/kit/AAAA", work) ||
+            cx_fmt(skitp, sizeof skitp, "%s/scan-cache/kit", work) ||
+            cx_fmt(srules, sizeof srules, "%s/scan-rules.tsv", work) ||
+            cx_fmt(sout, sizeof sout, "%s/scan-out.tsv", work) ||
+            cx_fmt(strash, sizeof strash, "%s/scan-trash", work) ||
+            cx_fmt(s_out, sizeof s_out, "%s/out", sroot) ||
+            cx_fmt(s_keep, sizeof s_keep, "%s/keepme", s_out) ||
+            cx_fmt(s_move, sizeof s_move, "%s/moveme", s_out) ||
+            cx_fmt(s_none, sizeof s_none, "%s/norule", s_out)) return 2;
+        if (sy_mkdir(sroot, 0700) || sy_mkdir(scache, 0700) || sy_mkdir(skitp, 0700) || sy_mkdir(skit, 0700) || sy_mkdir(s_out, 0700)) return 2;
+        if (sy_mkdir(s_keep, 0700) || sy_mkdir(s_move, 0700) || sy_mkdir(s_none, 0700)) return 2;
+        {
+            char fx[4400];
+            if (cx_fmt(fx, sizeof fx, "%s/x.bin", s_move) || cx_write(fx, "0123456789", 10)) return 2;
+            /* norule 也要老于保留窗口，否则它只会被当成在途产物保留 */
+            if (sy_set_mtime(s_move, sy_wall_s() - 3 * 86400) || sy_set_mtime(s_none, sy_wall_s() - 3 * 86400)) return 2;
+        }
+        if (cx_fmt(body, sizeof body,
+            "@recent-minutes\t120\n"
+            "# scan rules\n"
+            "K\tout\tkeepme\tkeep\t\t\n") || cx_write(srules, body, strlen(body))) return 2;
+        /* 先造一个“最近”的条目：它在窗口内，必须 keep 而不是 move */
+        {
+            char fresh_dir[4400];
+            if (cx_fmt(fresh_dir, sizeof fresh_dir, "%s/fresh", s_out) || sy_mkdir(fresh_dir, 0700) ||
+                sy_set_mtime(fresh_dir, sy_wall_s())) return 2;
+        }
+        {
+            char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                          "--kit", skit, "--trash", strash, "--out-manifest", sout, "--dry-run", 0};
+            rc = run_sweep(av, &o, &n);
+            /* keepme 由规则保留；moveme 与 norule 无规则且已老 -> 默认 move；fresh 在窗口内 -> keep */
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tout\trows=3\tmove=2\tlist=0\tkeep=1\t"),
+               "scan-unruled-defaults-to-move");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tout-recent\trows=1\tmove=0\tlist=0\tkeep=1\t"),
+               "scan-recent-entry-kept-not-moved");
+            ck(has(o, n, "RELEASE_SWEEP_SCAN\trules=1\t"), "scan-summary-counts-rules");
+            free(o); o = 0;
+            ck(sy_exists(s_keep) == 1 && sy_exists(s_move) == 1 && sy_exists(s_none) == 1 && sy_exists(strash) == 0,
+               "scan-dry-run-leaves-filesystem-untouched");
+        }
+        /* apply: 无规则的条目真被移进 trash，保留项原样不动 */
+        {
+            char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                          "--kit", skit, "--trash", strash, "--out-manifest", sout, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && sy_exists(s_move) == 0 && sy_exists(s_keep) == 1 && sy_exists(strash) == 1,
+               "scan-apply-moves-unruled-and-keeps-the-explicit-keep");
+            free(o); o = 0;
+        }
+        /* /tmp 语义：不给 --tmp 时只列；给 --tmp 且规则 allow_tmp=1 时才 move */
+        {
+            char tdir[4400], tfile[4400], touth[4400], ttrash[4400];
+            char tb[4096];
+            if (cx_fmt(tdir, sizeof tdir, "%s/scan-tmp", work) || sy_mkdir(tdir, 0700)) return 2;
+            if (cx_fmt(tfile, sizeof tfile, "%s/unisacc-tlib-stage-x", tdir) || sy_mkdir(tfile, 0700)) return 2;
+            if (cx_fmt(touth, sizeof touth, "%s/scan-tmp-out.tsv", work) ||
+                cx_fmt(ttrash, sizeof ttrash, "%s/scan-tmp-trash", work)) return 2;
+            if (cx_fmt(tb, sizeof tb,
+                "T\ttmp\tunisacc-tlib-stage-*\tmove\t0\t1\n") || cx_write(srules, tb, strlen(tb))) return 2;
+            {
+                char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                              "--kit", skit, "--tmp-dir", tdir, "--trash", ttrash,
+                              "--out-manifest", touth, "--dry-run", 0};
+                rc = run_sweep(av, &o, &n);
+                ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\ttmp\trows=1\tmove=0\tlist=1\t"),
+                   "scan-tmp-listed-without-the-flag");
+                free(o); o = 0;
+            }
+            {
+                char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                              "--kit", skit, "--tmp-dir", tdir, "--tmp", "--trash", ttrash,
+                              "--out-manifest", touth, "--apply", 0};
+                rc = run_sweep(av, &o, &n);
+                ck(rc == 0 && sy_exists(tfile) == 0, "scan-tmp-moves-only-under-the-flag");
+                free(o); o = 0;
+            }
+        }
+    }
+    /* (9) 保护名单:用真实规则表扫一棵仿 0.0.59 的 out/,发布证据全部 keep,只有普通条目 move(dry-run) */
+    {
+        char proot[4400], pout[4400], pcache[4400], ptrash[4400], pman[4400], prules[4400];
+        char pd[4400];
+        static const char *prot[] = {"c4", "release-snap-fbdc99ca89", "release-snap-fbdc99ca89.partial.lock",
+                                     "rel058", "sweep0059", "b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec",
+                                     "b1/v059-freeze", "b1-old/c5a8-x", "b1-old/fbdc-wfprep-reuse", 0};
+        static const char *dirs[] = {"c4", "release-snap-fbdc99ca89", "rel058", "sweep0059", "b1", "b1-old",
+                                     "b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec", "b1/v059-freeze",
+                                     "b1/other", "b1-old/c5a8-x", "b1-old/fbdc-wfprep-reuse", "b1-old/zzz",
+                                     "release-snap-c5a8cc05e9", "junk", 0};
+        int i;
+        if (cx_fmt(proot, sizeof proot, "%s/prot-root", work) || cx_fmt(pout, sizeof pout, "%s/out", proot) ||
+            cx_fmt(pcache, sizeof pcache, "%s/prot-cache", work) || cx_fmt(ptrash, sizeof ptrash, "%s/prot-trash", work) ||
+            cx_fmt(pman, sizeof pman, "%s/prot-out.tsv", work) ||
+            cx_fmt(prules, sizeof prules, "%s/tools/release-sweep-rules.tsv", root)) return 2;
+        if (sy_mkdir(proot, 0700) || sy_mkdir(pcache, 0700) || sy_mkdir(pout, 0700)) return 2;
+        for (i = 0; dirs[i]; i++) {
+            if (cx_fmt(pd, sizeof pd, "%s/%s", pout, dirs[i]) || sy_mkdir(pd, 0700)) return 2;
+        }
+        {
+            char lk[4400];
+            if (cx_fmt(lk, sizeof lk, "%s/release-snap-fbdc99ca89.partial.lock", pout) || cx_write(lk, "x", 1)) return 2;
+        }
+        /* 全部造完后再把顶层老化,避免被 @recent-minutes 当成在途而掩盖规则 */
+        for (i = 0; dirs[i]; i++) {
+            if (cx_fmt(pd, sizeof pd, "%s/%s", pout, dirs[i]) || sy_set_mtime(pd, sy_wall_s() - 3 * 86400)) return 2;
+        }
+        {
+            char *av[] = {"--scan", "--rules", prules, "--root", proot, "--cache", pcache,
+                          "--trash", ptrash, "--out-manifest", pman, "--dry-run", 0};
+            char *mb = 0;
+            size_t mn = 0;
+            int bad = 0;
+            rc = run_sweep(av, &o, &n);
+            free(o); o = 0;
+            if (rc == 0) mb = (char *)cx_read(pman, &mn);
+            if (rc != 0 || !mb) bad = 1;
+            else {
+                for (i = 0; prot[i]; i++) {
+                    char want[4600];
+                    cx_fmt(want, sizeof want, "move\t%s/%s\t", pout, prot[i]);
+                    if (has(mb, mn, want)) bad++;
+                }
+                ck(has(mb, mn, "move\t") && has(mb, mn, "/out/junk\t") && has(mb, mn, "/out/b1/other\t") &&
+                   has(mb, mn, "/out/b1-old/zzz\t") && has(mb, mn, "/out/release-snap-c5a8cc05e9\t"),
+                   "protect-list-ordinary-entries-still-move");
+            }
+            ck(!bad, "protect-list-evidence-never-in-move-rows");
+            free(mb);
+        }
+    }
+    /* (10) SWEEP-NEWROOTS: 链的新位置。夹具在 sy_tmpdir() 下自建 HOME 与 TMPDIR,所有 --apply 只在夹具里跑 */
+    {
+        char base[4400], home[4400], chains[4400], ftmp[4400], froot[4400], ftrash[4400], fman[4400], rules[4400];
+        char mrules[4400], p[4400], q[4400];
+        long now = sy_wall_s(), d3 = 3 * 86400, d2 = 2 * 86400, d4 = 4 * 86400;
+        static const char *mk_chain[][2] = {
+            {"snap/s-old", "3"}, {"snap/s-new", "2"}, {"chain/c-old", "3"}, {"chain/c-new", "2"},
+            {"build/b-old", "4"}, {"build/b-new", "3"}, {"evidence/e-only", "3"},
+            {"tmp/t-old", "3"}, {"tmp/t-busy", "3"}, {"tmp/t-fresh", "0"}, {0, 0}};
+        static const char *mk_tmp[][2] = {
+            {"unisacc-session-chain-old", "3"}, {"unisacc-session-chain-fresh", "0"},
+            {"unisacc-session-nightly-old", "3"}, {"unisacc-session-nightly-fresh", "0"}, {"unisacc-affected-old", "3"},
+            {"unisacc-productpkg-batch-old", "3"}, {"someone-else-old", "3"}, {"xunisacc-session-chain-old", "3"}, {0, 0}};
+        int i, bpid;
+        char *dr = 0;
+        size_t dn = 0;
+        if (cx_fmt(base, sizeof base, "%s/rs-newroots-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms()) ||
+            cx_fmt(home, sizeof home, "%s/home", base) || cx_fmt(chains, sizeof chains, "%s/.cache/unisacc/chains", home) ||
+            cx_fmt(ftmp, sizeof ftmp, "%s/tmpdir", base) || cx_fmt(froot, sizeof froot, "%s/root", base) ||
+            cx_fmt(ftrash, sizeof ftrash, "%s/nr-trash", work) || cx_fmt(fman, sizeof fman, "%s/nr-out.tsv", work) ||
+            cx_fmt(rules, sizeof rules, "%s/tools/release-sweep-rules.tsv", root) ||
+            cx_fmt(mrules, sizeof mrules, "%s/nr-mut.tsv", work)) return 2;
+        if (sy_mkdir(base, 0700) || sy_mkdir(home, 0700) || sy_mkdir(ftmp, 0700) || sy_mkdir(froot, 0700)) return 2;
+        cx_fmt(p, sizeof p, "%s/.cache", home); (void)sy_mkdir(p, 0700);
+        cx_fmt(p, sizeof p, "%s/.cache/unisacc", home); (void)sy_mkdir(p, 0700);
+        (void)sy_mkdir(chains, 0700);
+        for (i = 0; i < 4; i++) {
+            static const char *kd[] = {"snap", "chain", "build", "evidence"};
+            cx_fmt(p, sizeof p, "%s/%s", chains, kd[i]); (void)sy_mkdir(p, 0700);
+        }
+        cx_fmt(p, sizeof p, "%s/tmp", chains); (void)sy_mkdir(p, 0700);
+        cx_fmt(p, sizeof p, "%s/%s", froot, "ou" "t"); (void)sy_mkdir(p, 0700);
+        cx_fmt(p, sizeof p, "%s/%s/release-snap-old", froot, "ou" "t");
+        if (sy_mkdir(p, 0700) || sy_set_mtime(p, now - d3)) return 2;
+        for (i = 0; mk_chain[i][0]; i++) {
+            long age = mk_chain[i][1][0] == '0' ? 0 : mk_chain[i][1][0] == '2' ? d2 : mk_chain[i][1][0] == '3' ? d3 : d4;
+            cx_fmt(p, sizeof p, "%s/%s", chains, mk_chain[i][0]);
+            if (sy_mkdir(p, 0700) || sy_set_mtime(p, now - age)) return 2;
+        }
+        for (i = 0; mk_tmp[i][0]; i++) {
+            long age = mk_tmp[i][1][0] == '0' ? 0 : d3;
+            cx_fmt(p, sizeof p, "%s/%s", ftmp, mk_tmp[i][0]);
+            if (sy_mkdir(p, 0700) || sy_set_mtime(p, now - age)) return 2;
+        }
+        {
+            char *av[] = {"--scan", "--rules", rules, "--root", froot, "--cache", base, "--chains", chains,
+                          "--tmp-dir", ftmp, "--tmp", "--trash", ftrash, "--out-manifest", fman, "--dry-run", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tchains\trows=5\tmove=5\t"), "newroots-chains-old-enumerated-for-move");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tchains-latest\trows=4\tmove=0\tlist=0\tkeep=4\t"), "newroots-latest-per-kind-kept");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tchains-recent\trows=1\tmove=0\tlist=0\tkeep=1\t"), "newroots-fresh-chain-tmp-kept");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\ttmp\trows=4\tmove=4\t") && has(o, n, "RELEASE_SWEEP_CLASS\ttmp-recent\trows=2\tmove=0\tlist=0\tkeep=2\t"),
+               "newroots-tmp-project-prefixes-enumerated-fresh-kept");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tout\trows=1\tmove=1\t"), "newroots-legacy-out-release-snap-still-swept");
+            free(o); o = 0;
+            dr = cx_read(fman, &dn);
+            ck(dr && !has(dr, dn, "someone-else-old") && !has(dr, dn, "xunisacc-session-chain-old"), "newroots-foreign-prefix-not-enumerated");
+            free(dr);
+            ck(sy_exists(ftrash) == 0, "newroots-dry-run-creates-no-trash");
+        }
+        {
+            int all = 1;
+            for (i = 0; mk_chain[i][0]; i++) { cx_fmt(p, sizeof p, "%s/%s", chains, mk_chain[i][0]); if (sy_exists(p) != 1) all = 0; }
+            for (i = 0; mk_tmp[i][0]; i++) { cx_fmt(p, sizeof p, "%s/%s", ftmp, mk_tmp[i][0]); if (sy_exists(p) != 1) all = 0; }
+            ck(all, "newroots-dry-run-deletes-nothing");
+        }
+        /* 变异对照:规则表去掉一行,对应断言必须变红 */
+        {
+            size_t rn = 0, at = 0, w = 0;
+            char *rt = cx_read(rules, &rn), *mt = mm_alloc((long)rn + 16);
+            static const char *drop[] = {"CHAINS-SNAP-LATEST\t", "TMP-SESSION-NIGHTLY\t", 0};
+            int d;
+            if (!rt || !mt) return 2;
+            for (d = 0; drop[d]; d++) {
+                size_t dl = (size_t)tx_len(drop[d], 64);
+                at = 0; w = 0;
+                while (at < rn) {
+                    size_t e = at;
+                    while (e < rn && rt[e] != '\n') e++;
+                    if (!(e - at >= dl && !memcmp(rt + at, drop[d], dl))) { if (mm_copy(mt + w, rn + 16 - w, rt + at, e - at + (e < rn))) return 2; w +=e - at + (e < rn); }
+                    at = e < rn ? e + 1 : e;
+                }
+                if (cx_write(mrules, mt, w)) return 2;
+                {
+                    char *av[] = {"--scan", "--rules", mrules, "--root", froot, "--cache", base, "--chains", chains,
+                                  "--tmp-dir", ftmp, "--tmp", "--trash", ftrash, "--out-manifest", fman, "--dry-run", 0};
+                    rc = run_sweep(av, &o, &n);
+                    if (d == 0)
+                        ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tchains-latest\trows=3\t") && !has(o, n, "chains-latest\trows=4\t"),
+                           "newroots-mutation-drop-snap-rule-turns-latest-assertion-red");
+                    else
+                        ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\ttmp-recent\trows=1\t") && !has(o, n, "RELEASE_SWEEP_CLASS\ttmp-recent\trows=2\t"),
+                           "newroots-mutation-drop-nightly-rule-turns-tmp-assertion-red");
+                    free(o); o = 0;
+                }
+            }
+            free(rt);
+            mm_free(mt);
+        }
+        /* apply:只在夹具里;进行中的(占用、近期)目录不动 */
+        cx_fmt(p, sizeof p, "%s/chain/c-new", chains);
+        cx_fmt(q, sizeof q, "%s/tmp/t-busy", chains);
+        {
+            char *sv[] = {bin, "--hold-busy", q, 0};
+            bpid = tq_warm_start(root, 6, sv);
+        }
+        sy_sleep_ms(150);
+        {
+            char *av[] = {"--scan", "--rules", rules, "--root", froot, "--cache", base, "--chains", chains,
+                          "--tmp-dir", ftmp, "--tmp", "--trash", ftrash, "--out-manifest", fman, "--apply", 0};
+            int ok = 1;
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP\tmode=APPLY\tmoved=9\t") && has(o, n, "skipped_busy=1\t"), "newroots-apply-summary-with-busy-skip");
+            free(o); o = 0;
+            tq_warm_join(bpid);
+            for (i = 0; mk_chain[i][0]; i++) {
+                int want = !strcmp(mk_chain[i][0], "snap/s-new") || !strcmp(mk_chain[i][0], "chain/c-new") ||
+                           !strcmp(mk_chain[i][0], "build/b-new") || !strcmp(mk_chain[i][0], "evidence/e-only") ||
+                           !strcmp(mk_chain[i][0], "tmp/t-busy") || !strcmp(mk_chain[i][0], "tmp/t-fresh");
+                cx_fmt(p, sizeof p, "%s/%s", chains, mk_chain[i][0]);
+                if (sy_exists(p) != (want ? 1 : 0)) ok = 0;
+            }
+            ck(ok, "newroots-apply-keeps-latest-busy-and-fresh-moves-the-rest");
+            ok = 1;
+            for (i = 0; mk_tmp[i][0]; i++) {
+                int want = !strcmp(mk_tmp[i][0], "unisacc-session-chain-fresh") || !strcmp(mk_tmp[i][0], "unisacc-session-nightly-fresh") || !strcmp(mk_tmp[i][0], "someone-else-old") ||
+                           !strcmp(mk_tmp[i][0], "xunisacc-session-chain-old");
+                cx_fmt(p, sizeof p, "%s/%s", ftmp, mk_tmp[i][0]);
+                if (sy_exists(p) != (want ? 1 : 0)) ok = 0;
+            }
+            ck(ok, "newroots-apply-tmp-only-project-prefixes-and-not-fresh");
+            cx_fmt(p, sizeof p, "%s/%s/release-snap-old", froot, "ou" "t");
+            ck(sy_exists(p) == 0, "newroots-apply-legacy-out-release-snap-moved");
+        }
+        cx_rmtree(base);
+    }
+    cx_rmtree(work);
 
     sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
     return failed ? 1 : 0;

@@ -1,0 +1,330 @@
+/* tools/libc-decl-scan.cx -- 扫 include/*.h 的函数声明、宏常量与类型名,标注是否出现在 exec/facts/libc99posix.tsv,生成 build/libc-decls.tsv。
+ *
+ *   sh ./unisacc.com tools/libc-decl-scan.cx -- --write [--root DIR]   重算并写 build/libc-decls.tsv
+ *   sh ./unisacc.com tools/libc-decl-scan.cx -- --check [--root DIR]   重算并逐字节比对,不一致打印 DIFF 并 rc 1
+ *   sh ./unisacc.com tools/libc-decl-scan.cx -- --summary [--root DIR] 打印各头的 no 数与总占比
+ *
+ * 列:header name kind(func|macro|type) in_libc99posix(yes|no) line。同头同名同类只记首次出现行;
+ * 注释与字符串先抹成空白;函数体内的内容不扫;条件编译分支一律都扫(这是声明盘点,不是预处理)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXH 128
+#define MAXN 4096
+#define MAXFACT 4096
+#define OUTCAP (4 * 1024 * 1024)
+
+static const char *root = ".";
+static char *hnames[MAXH];
+static int nh;
+static char *out;
+static long outn;
+static int total, nno;
+static int hno[MAXH], hall[MAXH];
+static char *facts[MAXFACT];
+static int nfacts;
+
+static int streq(const char *a, const char *b) {
+    long n = tx_len(a, 4096);
+    return n == tx_len(b, 4096) && mm_same(a, b, n);
+}
+static int idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int idstart(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static char *slurp(const char *path, long *n) {
+    size_t m = 0;
+    char *b = cx_read(path, &m), *c;
+    if (!b) return 0;
+    c = mm_alloc((long)m + 1);
+    mm_copy(c, (long)m + 1, b, (long)m);
+    c[m] = 0;
+    mm_free(b);
+    *n = (long)m;
+    return c;
+}
+static char *dupn(const char *s, long n) {
+    char *r = mm_alloc(n + 1);
+    mm_copy(r, n + 1, s, n);
+    r[n] = 0;
+    return r;
+}
+static int word_eq(const char *s, long n, const char *lit) {
+    long ln = tx_len(lit, 64);
+    return n == ln && mm_same(s, lit, ln);
+}
+
+/* 抹掉注释与字符串/字符字面量,保留换行(行号不变) */
+static void strip(char *s, long n) {
+    long i = 0;
+    while (i < n) {
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+            s[i] = ' '; s[i + 1] = ' '; i += 2;
+            while (i < n && !(s[i] == '*' && i + 1 < n && s[i + 1] == '/')) { if (s[i] != '\n') s[i] = ' '; i++; }
+            if (i < n) { s[i] = ' '; if (i + 1 < n) s[i + 1] = ' '; i += 2; }
+        } else if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') { s[i] = ' '; i++; }
+        } else if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i]; i++;
+            while (i < n && s[i] != q && s[i] != '\n') { if (s[i] == '\\' && i + 1 < n && s[i + 1] != '\n') { s[i] = ' '; i++; } s[i] = ' '; i++; }
+            if (i < n && s[i] == q) i++;
+        } else i++;
+    }
+}
+
+static int in_facts(const char *name, long nl) {
+    int i;
+    for (i = 0; i < nfacts; i++) if (tx_len(facts[i], 256) == nl && mm_same(facts[i], name, nl)) return 1;
+    return 0;
+}
+
+/* 当前头的去重表 */
+static char *seen_name[MAXN];
+static int seen_kind[MAXN];
+static int nseen;
+
+static void record(int h, const char *name, long nl, int kind, long line) {
+    static const char *kn[] = {"func", "macro", "type"};
+    char num[32];
+    int i, y;
+    if (nl <= 0 || nseen >= MAXN) return;
+    for (i = 0; i < nseen; i++) if (seen_kind[i] == kind && tx_len(seen_name[i], 256) == nl && mm_same(seen_name[i], name, nl)) return;
+    seen_name[nseen] = dupn(name, nl); seen_kind[nseen] = kind; nseen++;
+    y = in_facts(name, nl);
+    cx_fmt(num, sizeof num, "%ld", line);
+    {
+        char row[700];
+        char nm[300];
+        mm_copy(nm, sizeof nm, name, nl < 299 ? nl : 299);
+        nm[nl < 299 ? nl : 299] = 0;
+        if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\n", hnames[h], nm, kn[kind], y ? "yes" : "no", num)) return;
+        {
+            long rn = tx_len(row, 700);
+            if (outn + rn < OUTCAP) { mm_copy(out + outn, OUTCAP - outn, row, rn); outn += rn; }
+        }
+    }
+    total++; hall[h]++;
+    if (!y) { nno++; hno[h]++; }
+}
+
+static const char *kw[] = {"if", "while", "for", "switch", "return", "sizeof", "else", "do", "__attribute__", "__asm__", "asm", "defined", 0};
+static int is_kw(const char *s, long n) {
+    int i;
+    for (i = 0; kw[i]; i++) if (word_eq(s, n, kw[i])) return 1;
+    return 0;
+}
+
+/* 一条顶层语句(大括号内的文本已排除)。T 为其文本,L 为起始行 */
+static void finish(int h, const char *t, long n, long line) {
+    long i = 0, p, e;
+    while (i < n && t[i] == ' ') i++;
+    if (i >= n) return;
+    if (n - i > 8 && mm_same(t + i, "typedef ", 8)) {
+        long q;
+        for (q = i; q < n && t[q] != '('; q++) {}
+        if (q < n) {
+            /* 函数指针类型: typedef R (*name)(...) */
+            long k = q + 1;
+            while (k < n && (t[k] == ' ' || t[k] == '*')) k++;
+            e = k;
+            while (e < n && idch(t[e])) e++;
+            if (e > k && idstart(t[k])) record(h, t + k, e - k, 2, line);
+            return;
+        }
+        e = n;
+        while (e > i && !idch(t[e - 1])) e--;
+        p = e;
+        while (p > i && idch(t[p - 1])) p--;
+        if (e > p && idstart(t[p])) record(h, t + p, e - p, 2, line);
+        return;
+    }
+    for (p = i; p < n && t[p] != '('; p++) {}
+    if (p >= n) return;
+    {
+        long k = p + 1;
+        while (k < n && t[k] == ' ') k++;
+        if (k < n && t[k] == '*') return;      /* 函数指针变量 */
+    }
+    e = p;
+    while (e > i && t[e - 1] == ' ') e--;
+    p = e;
+    while (p > i && idch(t[p - 1])) p--;
+    if (e > p && idstart(t[p]) && !is_kw(t + p, e - p)) record(h, t + p, e - p, 0, line);
+}
+
+static void scan_header(int h, char *s, long n) {
+    char *st = mm_alloc(n + 2);
+    long sn = 0, i = 0, line = 1, sline = 0;
+    int depth = 0, bol = 1;
+    nseen = 0;
+    while (i < n) {
+        char c = s[i];
+        if (c == '\n') { line++; bol = 1; if (depth == 0 && sn > 0 && st[sn - 1] != ' ') st[sn++] = ' '; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r') { if (depth == 0 && sn > 0 && st[sn - 1] != ' ') st[sn++] = ' '; i++; continue; }
+        if (bol && c == '#') {
+            /* 预处理指令(含续行) */
+            long b = i + 1, ds, de;
+            while (b < n && (s[b] == ' ' || s[b] == '\t')) b++;
+            ds = b;
+            while (b < n && idch(s[b])) b++;
+            de = b;
+            if (depth == 0 && word_eq(s + ds, de - ds, "define")) {
+                long ns, ne, be;
+                while (b < n && (s[b] == ' ' || s[b] == '\t')) b++;
+                ns = b;
+                while (b < n && idch(s[b])) b++;
+                ne = b;
+                be = b;
+                while (be < n && s[be] != '\n') { if (s[be] == '\\' && be + 1 < n && s[be + 1] == '\n') be++; be++; }
+                {
+                    long q = ne;
+                    int empty = 1;
+                    while (q < be) { if (s[q] != ' ' && s[q] != '\t' && s[q] != '\\' && s[q] != '\n' && s[q] != '\r') empty = 0; q++; }
+                    if (ne > ns && idstart(s[ns]) && !(empty && ne - ns >= 2 && s[ne - 1] == 'H' && s[ne - 2] == '_'))
+                        record(h, s + ns, ne - ns, 1, line);
+                }
+            }
+            while (i < n && s[i] != '\n') {
+                if (s[i] == '\\' && i + 1 < n && s[i + 1] == '\n') { i++; line++; }
+                i++;
+            }
+            continue;
+        }
+        bol = 0;
+        if (c == '{') {
+            depth++;
+            if (depth == 1 && sn > 0 && st[sn - 1] != ' ') st[sn++] = ' ';
+            if (depth == 1) { st[sn++] = '{'; }
+            i++; continue;
+        }
+        if (c == '}') {
+            if (depth > 0) depth--;
+            if (depth == 0) {
+                /* 函数定义以 } 结束: 语句里有 ( 且没有 = 与 typedef 时即定义 */
+                long k; int paren = 0, eq = 0, td = 0;
+                st[sn++] = '}';
+                for (k = 0; k < sn; k++) { if (st[k] == '(') paren = 1; if (st[k] == '=') eq = 1; }
+                for (k = 0; k + 7 < sn; k++) if (mm_same(st + k, "typedef", 7)) td = 1;
+                if (paren && !eq && !td) {
+                    long z, m = 0;
+                    char *clean = mm_alloc(sn + 1);
+                    for (z = 0; z < sn; z++) if (st[z] != '{' && st[z] != '}') clean[m++] = st[z];
+                    finish(h, clean, m, sline);
+                    mm_free(clean);
+                    sn = 0; sline = 0;
+                }
+            }
+            i++; continue;
+        }
+        if (depth > 0) { i++; continue; }
+        if (c == ';') {
+            long z, m = 0;
+            char *clean = mm_alloc(sn + 1);
+            for (z = 0; z < sn; z++) if (st[z] != '{' && st[z] != '}') clean[m++] = st[z]; else clean[m++] = ' ';
+            finish(h, clean, m, sline);
+            mm_free(clean);
+            sn = 0; sline = 0; i++; continue;
+        }
+        if (sn == 0) sline = line;
+        st[sn++] = c;
+        i++;
+    }
+    mm_free(st);
+}
+
+static void load_facts(void) {
+    char path[700]; long n = 0, i = 0;
+    char *b;
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/libc99posix.tsv", root)) return;
+    b = slurp(path, &n);
+    if (!b) return;
+    while (i < n) {
+        long e = i, k = i;
+        while (e < n && b[e] != '\n') e++;
+        if (b[i] != '#' && e > i) {
+            while (k < e && b[k] != '\t') k++;
+            if (k > i && nfacts < MAXFACT) facts[nfacts++] = dupn(b + i, k - i);
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+}
+
+static void scan_dir(void) {
+    sy_dir_t d;
+    char dir[700];
+    int i, j;
+    if (cx_fmt(dir, sizeof dir, "%s/include", root) || sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        if ((d.kind != 'f' && d.kind != 'l') || d.name_n < 3 || !mm_same(d.name + d.name_n - 2, ".h", 2)) continue;
+        if (nh < MAXH) hnames[nh++] = dupn(d.name, d.name_n);
+    }
+    sy_dir_close(&d);
+    for (i = 1; i < nh; i++) {                      /* 插入排序,字节序 */
+        char *t = hnames[i];
+        long tn = tx_len(t, 256);
+        for (j = i - 1; j >= 0; j--) {
+            long jn = tx_len(hnames[j], 256), m = jn < tn ? jn : tn;
+            int c = mm_same(hnames[j], t, m) ? (jn > tn) - (jn < tn) : 0;
+            if (!c) { long q = 0; while (q < m && hnames[j][q] == t[q]) q++; c = (unsigned char)hnames[j][q] > (unsigned char)t[q] ? 1 : -1; }
+            if (c <= 0) break;
+            hnames[j + 1] = hnames[j];
+        }
+        hnames[j + 1] = t;
+    }
+    for (i = 0; i < nh; i++) {
+        char path[800]; long n = 0; char *b;
+        if (cx_fmt(path, sizeof path, "%s/include/%s", root, hnames[i])) continue;
+        b = slurp(path, &n);
+        if (!b) continue;
+        strip(b, n);
+        scan_header(i, b, n);
+        mm_free(b);
+    }
+}
+
+static int emit(const char *rel, char *buf, long n, int write_mode) {
+    char path[700]; long on = 0; char *old;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
+    if (write_mode) return cx_write(path, buf, n) ? 2 : 0;
+    old = slurp(path, &on);
+    if (!old || on != n || !mm_same(old, buf, n)) {
+        long k = 0, line = 1;
+        if (old) while (k < on && k < n && old[k] == buf[k]) { if (buf[k] == '\n') line++; k++; }
+        sy_printf("DIFF\t%s\tline=%ld\n", rel, line);
+        return 1;
+    }
+    sy_printf("OK\t%s\n", rel);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a, mode = 0, i;
+    const char *hdr = "# header\tname\tkind\tin_libc99posix\tline\n";
+    for (a = 1; a < argc; a++) {
+        if (streq(argv[a], "--write")) mode = 1;
+        else if (streq(argv[a], "--check")) mode = 2;
+        else if (streq(argv[a], "--summary")) mode = 3;
+        else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { sy_printf("usage: libc-decl-scan.cx -- --write|--check|--summary [--root DIR]\n"); return 2; }
+    }
+    if (!mode) { sy_printf("usage: libc-decl-scan.cx -- --write|--check|--summary [--root DIR]\n"); return 2; }
+    out = mm_alloc(OUTCAP);
+    mm_copy(out, OUTCAP, hdr, tx_len(hdr, 100));
+    outn = tx_len(hdr, 100);
+    load_facts();
+    scan_dir();
+    if (mode == 3) {
+        for (i = 0; i < nh; i++) if (hall[i]) sy_printf("GAP\t%s\tno=%d\tall=%d\n", hnames[i], hno[i], hall[i]);
+        sy_printf("TOTAL\trows=%d\tno=%d\n", total, nno);
+        return 0;
+    }
+    {
+        int rc = emit("build/libc-decls.tsv", out, outn, mode == 1);
+        if (mode == 1 && !rc) sy_printf("WROTE\trows=%d\tno=%d\theaders=%d\n", total, nno, nh);
+        return rc;
+    }
+}

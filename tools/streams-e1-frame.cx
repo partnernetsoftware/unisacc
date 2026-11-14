@@ -12,12 +12,29 @@ int main(int argc, char **argv) {
     size_t cap = 1 << 16, k, i, tn = 0, pay = 0; unsigned count = 0; const unsigned char *tab = 0; ssize_t r;
     unsigned char *out; const char *side = getenv("UNISA_ATTRIBUTES");
     if (argc > 1 && !strcmp(argv[1], "--")) { argc--; argv++; }
-    if (argc != 2 || strcmp(argv[1], "to1")) return bad("usage: -- to1");
+    if (argc != 2 || (strcmp(argv[1], "to1") && strcmp(argv[1], "check1") && strcmp(argv[1], "attrs"))) return bad("usage: -- to1|check1|attrs");
+    if (!strcmp(argv[1], "attrs")) {
+        /* 旧合同: UNISA_ATTRIBUTES 外部侧车须为 LE32 count + count*9 记录, 否则 run: 拒绝 rc2; 文件不存在视为未给。 */
+        int fd; unsigned char h[4]; off_t sz;
+        if (!side || !*side || (fd = open(side, O_RDONLY | O_CLOEXEC)) < 0) return 0;
+        sz = lseek(fd, 0, SEEK_END); lseek(fd, 0, SEEK_SET);
+        if (sz < 4 || read(fd, h, 4) != 4 || le(h) > 1000000u || (off_t)(4 + 9L * le(h)) != sz) { close(fd); fputs("run: malformed external attributes\n", stderr); return 2; }
+        close(fd); return 0;
+    }
     buf = malloc(cap);
     while ((r = read(0, buf + len, cap - len)) != 0) {
         if (r < 0) { if (errno == EINTR) continue; return bad("read"); }
         len += (size_t)r;
         if (len == cap) { cap *= 2; buf = realloc(buf, cap); if (!buf) return bad("alloc"); }
+    }
+    if (!strcmp(argv[1], "check1")) {
+        /* 旧合同: e3 输入以 USLATTR1 开头时, 头不足 16B 为 invalid attribute frame, count/记录/负载长不一致为 malformed USLATTR1 side-car, 均 rc2。 */
+        unsigned c;
+        if (len < 8 || memcmp(buf, "USLATTR1", 8)) return 0;
+        if (len < 16) { fputs("run: invalid attribute frame\n", stderr); return 2; }
+        c = le(buf + 8);
+        if (c > 1000000u || 16 + 5L * c > (long)len || le(buf + 12) != len - 16 - 5L * c) { fputs("run: malformed USLATTR1 side-car\n", stderr); return 2; }
+        return 0;
     }
     if (len >= 12 && !memcmp(buf, "USLATTRT", 8)) {
         tn = le(buf + 8); if (tn < 4 || tn > len - 12) return bad("table extent");

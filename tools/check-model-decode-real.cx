@@ -3,7 +3,9 @@
 #pragma unisa use sysx.process
 #pragma unisa use runtime.model_decode
 #pragma unisa use runtime.model_lifetime
+#pragma unisa use runtime.model_number
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 static void die(const char *s){fprintf(stderr,"model-decode-real: %s\n",s);exit(2);}
 static void *heap(void *p,size_t n){return realloc(p,n);}
 static void release(void *p){free(p);}
@@ -31,17 +33,23 @@ static void render(const CxModel *m,Output *b){
  }
 }
 int main(int argc,char **argv){
- char root[4096],models[4096],manifest[4400],source[4400],ref[4400],wired[4400],bound[4400],path[4400],h[65],after[65],manifestsha[65],expected[32][65];
+ char root[4096],models[4096],manifest[4400],source[4400],ref[4400],wired[4400],bound[4400],path[4400],inc[4400],h[65],after[65],manifestsha[65],expected[32][65];np_result r={0};
  if(argc!=4||!realpath(argv[1],root)||!realpath(argv[2],models)||argv[3][0]!='/')die("usage ROOT MODEL_DIR NEW_OUT");
  if(mkdir(argv[3],0700))die("new-output-required");
  if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",models)||cx_fmt(source,sizeof source,"%s/tests/cases/model_decode_reference.c",root)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(ref,sizeof ref,"%s/reference",argv[3]))die("path");
- if(cx_fmt(wired,sizeof wired,"%s/wired",argv[3]))die("path");
+ if(cx_fmt(wired,sizeof wired,"%s/wired",argv[3])||cx_fmt(inc,sizeof inc,"-I%s/exec/c",root))die("path");
  hash(manifest,manifestsha);FILE *f=fopen(manifest,"rb");if(!f)die("manifest");char line[9000];int count=0;
  while(fgets(line,sizeof line,f))if(!strncmp(line,"model\t",6)){int id;long len;if(count>=32||sscanf(line+6,"%d %ld %64s",&id,&len,expected[count])!=3||id!=count||len<=0)die("model-row");count++;}
  if(ferror(f)||fclose(f)||count!=32)die("manifest-count");
- const char *deps[]={"tests/cases/model_decode_reference.c","exec/c/run.c","exec/c/core.h","exec/c/core.c","cx/runtime/model_decode.cx","cx/runtime/model_number.cx","cx/runtime/model_lifetime.cx","tools/check-model-decode-real.cx","exec/c/model_decode_host.h","include/cx.h"};
- char dep[10][4400],dep_hash[10][65];for(int i=0;i<10;i++){if(cx_fmt(dep[i],sizeof dep[i],"%s/%s",root,deps[i]))die("path");hash(dep[i],dep_hash[i]);}
- char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",source,"-o",ref,0};np_result r=call(build,root,35);if(r.rc||r.errn)die("reference-build");np_free(&r);
+ const char *deps[]={"tests/cases/model_decode_reference.c","archive/reference-c/exec/c/run.c","exec/c/core.h","archive/reference-c/exec/c/core.c","cx/runtime/model_decode.cx","cx/runtime/model_number.cx","cx/runtime/model_lifetime.cx","tools/check-model-decode-real.cx","exec/c/model_decode_host.h","include/cx.h","cx/runtime/source_frame.cx","cx/mem/bytes.cx"};
+ char dep[12][4400],dep_hash[12][65];for(int i=0;i<12;i++){if(cx_fmt(dep[i],sizeof dep[i],"%s/%s",root,deps[i]))die("path");hash(dep[i],dep_hash[i]);}
+ char shared[2][4400];const char *shared_leaves[]={"frame.o","bytes.o"};
+ for(int i=0;i<2;i++)if(cx_fmt(shared[i],sizeof shared[i],"%s/%s",argv[3],shared_leaves[i]))die("path");
+ for(int i=0;i<2;i++){
+  char *sv[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-x","c","-include",dep[9],"-c",dep[10+i],"-o",shared[i],0};
+  r=call(sv,root,35);if(r.rc||r.errn)die("shared-build");np_free(&r);
+ }
+ char *build[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",inc,source,shared[0],shared[1],"-o",ref,0};r=call(build,root,35);if(r.rc||r.errn)die("reference-build");np_free(&r);
  char objects[3][4400];const char *leaves[]={"decode.o","number.o","lifetime.o"};
  for(int i=0;i<3;i++)if(cx_fmt(objects[i],sizeof objects[i],"%s/%s",argv[3],leaves[i]))die("path");
  for(int i=0;i<3;i++){
@@ -49,7 +57,7 @@ int main(int argc,char **argv){
   if(i){av[9]="-c";av[10]=dep[4+i];av[11]="-o";av[12]=objects[i];av[13]=0;}
   r=call(av,root,35);if(r.rc||r.errn)die("module-build");np_free(&r);
  }
- char *wb[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections","-DUNISA_CX_MODEL_DECODE",source,objects[0],objects[1],objects[2],"-o",wired,0};
+ char *wb[]={bound,"30","/usr/bin/x86_64-linux-gnu-gcc-11","-O2","-w","-ffunction-sections","-fdata-sections","-Wl,--gc-sections",inc,"-DUNISA_CX_MODEL_DECODE",source,objects[0],objects[1],objects[2],shared[0],shared[1],"-o",wired,0};
  r=call(wb,root,35);if(r.rc||r.errn)die("wired-build");np_free(&r);
  int failed=0;
  for(int i=0;i<32;i++){
@@ -62,6 +70,6 @@ int main(int argc,char **argv){
   cxml_release(&d.model,release);free(b.p);np_free(&r);np_free(&wr);hash(path,after);if(!tx_eqz(h, after))die("model-changed");
   printf("%s\tmodel-%03d\n",ok?"PASS":"FAIL",i);fflush(stdout);
  }
- hash(manifest,after);if(!tx_eqz(manifestsha, after))die("manifest-changed");for(int i=0;i<10;i++){hash(dep[i],after);if(!tx_eqz(dep_hash[i], after))die("source-changed");}
+ hash(manifest,after);if(!tx_eqz(manifestsha, after))die("manifest-changed");for(int i=0;i<12;i++){hash(dep[i],after);if(!tx_eqz(dep_hash[i], after))die("source-changed");}
  printf("CXMODEL_DECODE_REAL\tmodels=%d\tfailed=%d\tmanifest=%s\n",count,failed,manifestsha);return failed?1:0;
 }

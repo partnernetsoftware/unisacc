@@ -47,6 +47,25 @@ static int put(const char *rel, const char *text) {
     return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
 }
 
+static int putat(const char *root, const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+/* A one-package tree at ROOT for the kit key: a product, the table, the manifest, the tlib tool, a
+   unit that includes a file next to it, which includes one found from ROOT. */
+static int keytree(const char *root) {
+    static const char *dirs[] = {"", "/build", "/build/layer-api", "/pa", "/tools", "/top", 0};
+    char p[4400];
+    int i;
+    for (i = 0; dirs[i]; i++) if (cx_fmt(p, sizeof p, "%s%s", root, dirs[i]) || sy_mkdir(p, 0755)) return -1;
+    return putat(root, "unisacc.com", "product1\n") || putat(root, "build/tlib-packages.tsv", "p.a\t0.3.1\tabc\tpa\t-\t-\tnote\n") ||
+           putat(root, "build/layer-api/p.a.tsv", "m\n") || putat(root, "tools/tlib.cx", "int t;\n") ||
+           putat(root, "pa/alpha.cx", "#include \"inc.h\"\nint a;\n") || putat(root, "pa/inc.h", "#define X 1\n# include \"top/deep.h\"\n") ||
+           putat(root, "top/deep.h", "int d;\n");
+}
+
 int main(int argc, char **argv) {
     char name[300], why[256], dst[128], p[4400], q[4400];
     const char *d;
@@ -134,7 +153,14 @@ int main(int argc, char **argv) {
                 "p.baddep\t1.0.0\tdef\tpb\t-\tp.a\tnote\n"
                 "p.empty\t1.0.0\tdef\tbuild\t-\t-\tnote\n"
                 "p.opq\t1.0.0\tdef\tpa\t-\t-\tnote\tpa/zeta.cx=no-interface\n"
-                "p.badopq\t1.0.0\tdef\tpa\t-\t-\tnote\tpb/real.cx=not-a-unit\n");
+                "p.badopq\t1.0.0\tdef\tpa\t-\t-\tnote\tpb/real.cx=not-a-unit\n"
+                "p.face\t0.1.0\tdef\tpa\t-\t-\tnote\t-\t-\tf1=pa/alpha.cx;f1=pa/skip.cx;f2=pa/zeta.cx\n"
+                "p.badface\t0.1.0\tdef\tpa\t-\t-\tnote\t-\t-\tf1=pb/real.cx\n"
+                "p.dupface\t0.1.0\tdef\tpa\t-\t-\tnote\t-\t-\tf1=pa/alpha.cx;f2=pa/alpha.cx\n"
+                "p.dok\t0.1.0\tdef\tpb\t-\tp.a@0.2.0;p.a@0.3.1\tnote\n"
+                "p.dlate\t0.1.0\tdef\tpb\t-\tp.a@0.3.2\tnote\n"
+                "p.dmajor\t0.1.0\tdef\tpb\t-\tp.a@1.0.0\tnote\n"
+                "p.dgone\t0.1.0\tdef\tpb\t-\tp.nowhere@0.1.0\tnote\n");
     ck(!prep, "table-fixture");
     ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && tx_eqz(pk.version, "0.3.1") && tx_eqz(pk.api_sha, "abc") && pk.nunit == 3 &&
        tx_eqz(pk.unit[0], "pa/alpha.cx") && tx_eqz(pk.unit[1], "pa/zeta.cx") && tx_eqz(pk.unit[2], "top.cx"), "units-own-regular-files-in-path-order");
@@ -147,13 +173,24 @@ int main(int argc, char **argv) {
     {
         long nn = 0;
         char *names = tp_names(work, &nn);
-        ck(names && tx_prefix(names, nn, "p.a\np.b\n", 8) && tx_count(names, nn, "\n", 1) == 7, "package-names-in-table-order");
+        ck(names && tx_prefix(names, nn, "p.a\np.b\n", 8) && tx_count(names, nn, "\n", 1) == 14, "package-names-in-table-order");
         mm_free(names);
     }
     /* the optional eighth field: a unit packed without interface rows must be a unit of the package */
     ck(tp_load(work, "p.opq", &pk, why, sizeof why) == 0 && pk.nunit == 3 && pk.nopq == 1 && tp_find_opaque(&pk, "pa/zeta.cx") == 0 &&
        tx_eqz(pk.opq_why[0], "no-interface") && tp_find_opaque(&pk, "pa/alpha.cx") < 0 && tp_find_unit(&pk, "pa/zeta.cx") >= 0, "opaque-unit-read");
     ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && pk.nopq == 0 && tp_load(work, "p.badopq", &pk, why, sizeof why) == -1, "opaque-absent-and-non-unit-refused");
+    /* R1: faces (tenth field), dependency minimums as floors */
+    ck(tp_load(work, "p.face", &pk, why, sizeof why) == 0 && pk.nface == 3 && tx_eqz(tp_face_of(&pk, "pa/alpha.cx"), "f1") &&
+       tx_eqz(tp_face_of(&pk, "pa/skip.cx"), "f1") && tx_eqz(tp_face_of(&pk, "pa/zeta.cx"), "f2") && tp_face_of(&pk, "pa/other.cx") == 0, "face-read-and-lookup");
+    ck(tp_load(work, "p.badface", &pk, why, sizeof why) == -1 && tp_load(work, "p.dupface", &pk, why, sizeof why) == -1, "face-foreign-or-doubled-unit-refused");
+    ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && pk.nface == 0 && tp_face_of(&pk, "pa/alpha.cx") == 0 && pk.frozen[0] == '-', "face-absent-means-none");
+    ck(tp_dep_ok("0.3.1", "0.3.1") && tp_dep_ok("0.9.0", "0.1.0") && tp_dep_ok("0.1.10", "0.1.3") && !tp_dep_ok("0.1.2", "0.1.3") &&
+       !tp_dep_ok("1.0.0", "0.9.0") && !tp_dep_ok("0.9.0", "1.0.0") && !tp_dep_ok("x", "0.1.0"), "dep-minimum-is-a-floor-not-equality");
+    ck(tp_load(work, "p.dok", &pk, why, sizeof why) == 0 && pk.ndep == 2 && tp_deps_check(work, &pk, why, sizeof why) == 0, "deps-check-floor-below-current-passes");
+    ck(tp_load(work, "p.dlate", &pk, why, sizeof why) == 0 && tp_deps_check(work, &pk, why, sizeof why) == -1 && tx_find(why, tx_len(why, sizeof why), "p.a", 3) >= 0, "deps-check-provider-older-than-minimum-refused");
+    ck(tp_load(work, "p.dmajor", &pk, why, sizeof why) == 0 && tp_deps_check(work, &pk, why, sizeof why) == -1 &&
+       tp_load(work, "p.dgone", &pk, why, sizeof why) == 0 && tp_deps_check(work, &pk, why, sizeof why) == -1, "deps-check-major-or-missing-provider-refused");
     if (cx_fmt(q, sizeof q, "%s/pa/alpha.cx", work) || tp_sha_file(q, name)) name[0] = 0;
     tp_sha("int a;\n", 7, dst);
     ck(name[0] && tx_eqz(name, dst), "file-sha-equals-block-sha");
@@ -162,6 +199,58 @@ int main(int argc, char **argv) {
         tp_sha("abc", 3, a);
         cx_sha256_hex("abc", 3, b);
         ck(tx_eqz(a, b) && tx_eqz(a, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha-fast-path-equals-portable");
+    }
+
+    /* (8) the kit key is content, not the checkout path */
+    {
+        char r1[4400], r2[4400], k1[65], k2[65], k3[65], d1[4400], d2[4400], prod[4400];
+        int okp = !cx_fmt(r1, sizeof r1, "%s/key1", work) && !cx_fmt(r2, sizeof r2, "%s/deeper/key2", work) &&
+                  !cx_fmt(p, sizeof p, "%s/deeper", work) && !sy_mkdir(p, 0755) && !keytree(r1) && !keytree(r2);
+        ck(okp, "kit-key-fixture");
+        k1[0] = k2[0] = k3[0] = 0;
+        ck(okp && !cx_fmt(prod, sizeof prod, "%s/unisacc.com", r1) && tp_kit_key(r1, prod, k1) == 0 && tx_len(k1, 65) == 64 &&
+           !cx_fmt(prod, sizeof prod, "%s/unisacc.com", r2) && tp_kit_key(r2, prod, k2) == 0 && tx_eqz(k1, k2), "kit-key-same-content-two-roots-same-key");
+        ck(okp && tp_kit_dir(r1, d1, sizeof d1) == 0 && tp_kit_dir(r2, d2, sizeof d2) == 0 && tx_eqz(d1, d2) &&
+           tx_find(d1, tx_len(d1, sizeof d1), k1, 64) > 0 && tx_find(d1, tx_len(d1, sizeof d1), "key1", 4) < 0, "kit-dir-is-the-key-and-names-no-root");
+        ck(okp && !putat(r2, "pa/alpha.cx", "#include \"inc.h\"\nint b;\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "pa/alpha.cx", "#include \"inc.h\"\nint a;\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-unit-byte-changes-key-restore-returns");
+        ck(okp && !putat(r2, "pa/inc.h", "#define X 2\n# include \"top/deep.h\"\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "pa/inc.h", "#define X 1\n# include \"top/deep.h\"\n") &&tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-included-file-byte-changes-key");
+        ck(okp && !putat(r2, "top/deep.h", "int e;\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "top/deep.h", "int d;\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-nested-root-relative-include-changes-key");
+        ck(okp && !putat(r2, "unisacc.com", "product2\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "unisacc.com", "product1\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-product-changes-key");
+        ck(okp && !putat(r2, "build/layer-api/p.a.tsv", "n\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "build/layer-api/p.a.tsv", "m\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-manifest-changes-key");
+        ck(okp && !putat(r2, "tools/tlib.cx", "int u;\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "tools/tlib.cx", "int t;\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-tlib-tool-changes-key");
+        ck(okp && !putat(r2, "build/tlib-packages.tsv", "p.a\t0.3.2\tabc\tpa\t-\t-\tnote\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3) &&
+           !putat(r2, "build/tlib-packages.tsv", "p.a\t0.3.1\tabc\tpa\t-\t-\tnote\n") && tp_kit_key(r2, prod, k3) == 0 && tx_eqz(k1, k3), "kit-key-table-changes-key");
+        ck(okp && !putat(r2, "pa/beta.cx", "int n;\n") && tp_kit_key(r2, prod, k3) == 0 && !tx_eqz(k1, k3), "kit-key-added-unit-changes-key");
+        ck(okp && !cx_fmt(p, sizeof p, "%s/absent.com", r1) && tp_kit_key(r1, p, k3) == -1 && tp_kit_key(work, prod, k3) == 0 &&
+           !cx_fmt(p, sizeof p, "%s/nowhere", work) && tp_kit_key(p, prod, k3) == -1 && tp_kit_dir(p, d1, sizeof d1) == -1, "kit-key-unreadable-product-or-table-refused");
+        /* (9) the unit object key: the unit, every unit of its use closure and the files they #include */
+        {
+            const char *cl = "tools/tlib.cx\npa/alpha.cx\n";
+            char u1[65], u2[65], u3[65];
+            u1[0] = u2[0] = u3[0] = 0;
+            ck(okp && tp_unit_key(r1, "ps1", "-c", "tools/tlib.cx", cl, u1) == 0 && tx_len(u1, 65) == 64 &&
+               tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u2) == 0 && tx_eqz(u1, u2) && !tx_eqz(u1, k1), "unit-key-same-content-two-roots-same-key");
+            ck(okp && !putat(r2, "tools/tlib.cx", "int u;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               !putat(r2, "tools/tlib.cx", "int t;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && tx_eqz(u1, u3), "unit-key-unit-byte-changes-key-restore-returns");
+            ck(okp && !putat(r2, "pa/alpha.cx", "#include \"inc.h\"\nint b;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               !putat(r2, "pa/alpha.cx", "#include \"inc.h\"\nint a;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && tx_eqz(u1, u3), "unit-key-used-unit-byte-changes-key");
+            ck(okp && !putat(r2, "pa/inc.h", "#define X 2\n# include \"top/deep.h\"\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               !putat(r2, "pa/inc.h", "#define X 1\n# include \"top/deep.h\"\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && tx_eqz(u1, u3), "unit-key-included-file-of-used-unit-changes-key");
+            ck(okp && !putat(r2, "top/deep.h", "int e;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               !putat(r2, "top/deep.h", "int d;\n") && tp_unit_key(r2, "ps1", "-c", "tools/tlib.cx", cl, u3) == 0 && tx_eqz(u1, u3), "unit-key-nested-include-changes-key");
+            ck(okp && tp_unit_key(r1, "ps2", "-c", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               tp_unit_key(r1, "ps1", "-c -DX", "tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               tp_unit_key(r1, "ps1", "-c", "./tools/tlib.cx", cl, u3) == 0 && !tx_eqz(u1, u3) &&
+               tp_unit_key(r1, "ps1", "-c", "tools/tlib.cx", "tools/tlib.cx\n", u3) == 0 && !tx_eqz(u1, u3), "unit-key-product-flags-path-closure-each-change-key");
+            ck(okp && tp_unit_key(r1, "", "-c", "tools/tlib.cx", cl, u3) == -1 && tp_unit_key(r1, "ps1", "-c", "tools/tlib.cx", "", u3) == -1 &&
+               tp_unit_key(r1, "ps1", "-c", "", cl, u3) == -1, "unit-key-bad-argument-refused");
+        }
     }
 
     if (argc < 3) cx_rmtree(work);

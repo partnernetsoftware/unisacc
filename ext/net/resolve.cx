@@ -1,0 +1,47 @@
+#pragma unisa module resolve
+#pragma unisa dock
+#pragma unisa use addr
+/* ext.net name resolution without libc (build/std-surface.tsv ext.net): sy_resolve / sy_resolve4 accept
+   numeric address literals (v4 dotted, v6 colon) and the built-in name "localhost" (127.0.0.1 and ::1).
+   Any other name needs a DNS client or /etc/hosts reading and returns SY_EAI_BASE - 2 (no such name);
+   no query is sent.  Pure text, no socket, no #if. */
+static int syr_lower_localhost(const char *s) {
+    static const char L[] = "localhost";
+    int i;
+    for (i = 0; L[i]; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+        if (c != L[i]) return 0;
+    }
+    return s[i] == 0;
+}
+
+/* Up to MAX addresses of HOST with PORT; FAMILY 0 both, SY_AF_INET4 or SY_AF_INET6 one.  The count, or
+   -EINVAL (bad argument), or SY_EAI_BASE - 2 (name not resolvable here). */
+int sy_resolve(const char *host, int port, int family, sy_addr_t *out, int max) {
+    int n = 0;
+    if (!host || !out || max < 1 || port < 0 || port > 65535) return -EINVAL;
+    if (family != 0 && family != SY_AF_INET4 && family != SY_AF_INET6) return -EAFNOSUPPORT;
+    if (syr_lower_localhost(host)) {
+        if ((family == 0 || family == SY_AF_INET4) && n < max && sy_addr_loopback(&out[n], SY_AF_INET4, port) == 0) n++;
+        if ((family == 0 || family == SY_AF_INET6) && n < max && sy_addr_loopback(&out[n], SY_AF_INET6, port) == 0) n++;
+        return n;
+    }
+    if (sy_addr_parse(&out[0], host, port) == 0) {
+        if (family != 0 && out[0].family != family) return SY_EAI_BASE - 2;
+        return 1;
+    }
+    return SY_EAI_BASE - 2;
+}
+
+/* First IPv4 of HOST as dotted text into IP (CAP bytes).  0, or as sy_resolve; -ERANGE when CAP is short. */
+int sy_resolve4(const char *host, char *ip, int cap) {
+    sy_addr_t a;
+    int r;
+    if (!ip || cap < 1) return -EINVAL;
+    r = sy_resolve(host, 0, SY_AF_INET4, &a, 1);
+    if (r < 0) return r;
+    if (r == 0) return SY_EAI_BASE - 2;
+    r = sy_addr_fmt(&a, ip, cap);
+    return r < 0 ? r : 0;
+}

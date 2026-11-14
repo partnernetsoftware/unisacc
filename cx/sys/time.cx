@@ -216,3 +216,78 @@ int sy_set_mtime(const char *path, long sec) {
     if (!path || !path[0]) return -EINVAL;
     return syt_set_mtime(path, sec);
 }
+
+/* Monotonic nanoseconds (same origin as sy_now_ms), 64 bits wide so Windows' 32-bit
+   long does not limit it. Negative -errno when the clock cannot be read. */
+int64_t sy_mono_ns(void) {
+    sy_ts_t t;
+    int r = sy_mono(&t);
+    if (r < 0) return (int64_t)r;
+    return (int64_t)t.sec * 1000000000LL + (int64_t)t.nsec;
+}
+
+/* A point on the monotonic clock; at_ns 0 means no deadline. */
+typedef struct { int64_t at_ns; } sy_deadline_t;
+
+sy_deadline_t sy_deadline_never(void) {
+    sy_deadline_t d;
+    d.at_ns = 0;
+    return d;
+}
+
+/* MS from now; MS <= 0 gives a deadline that has already passed. */
+sy_deadline_t sy_deadline_in(long ms) {
+    sy_deadline_t d;
+    int64_t now = sy_mono_ns();
+    if (now < 0) now = 0;
+    d.at_ns = ms <= 0 ? now : now + (int64_t)ms * 1000000LL;
+    if (d.at_ns <= 0) d.at_ns = 1;
+    return d;
+}
+
+/* Milliseconds left, rounded up: 0 once passed, -1 for no deadline. */
+long sy_deadline_left(const sy_deadline_t *d) {
+    int64_t now, rest;
+    if (!d || d->at_ns == 0) return -1;
+    now = sy_mono_ns();
+    if (now < 0) return 0;
+    rest = d->at_ns - now;
+    if (rest <= 0) return 0;
+    rest = (rest + 999999LL) / 1000000LL;
+    return rest > 2000000000LL ? 2000000000L : (long)rest;
+}
+
+/* 1 when the deadline has passed, 0 otherwise (no deadline: 0). */
+int sy_deadline_passed(const sy_deadline_t *d) {
+    if (!d || d->at_ns == 0) return 0;
+    return sy_deadline_left(d) == 0 ? 1 : 0;
+}
+
+/* The earlier of two deadlines; a missing one (at_ns 0) yields to the other. */
+sy_deadline_t sy_deadline_min(const sy_deadline_t *a, const sy_deadline_t *b) {
+    if (!a || a->at_ns == 0) return b ? *b : sy_deadline_never();
+    if (!b || b->at_ns == 0) return *a;
+    return a->at_ns <= b->at_ns ? *a : *b;
+}
+
+/* Sleep up to D, resuming after an interruption. 0, -EINVAL for no deadline or NULL. */
+int sy_sleep_until(const sy_deadline_t *d) {
+    long left;
+    if (!d || d->at_ns == 0) return -EINVAL;
+    while ((left = sy_deadline_left(d)) > 0) {
+        int r = sy_sleep_ms(left);
+        if (r < 0) return r;
+    }
+    return 0;
+}
+
+/* Index of the earliest of DS[0..N), with *WAIT_MS its sy_deadline_left; -1 when none has a
+   deadline (*WAIT_MS -1); -EINVAL for a bad argument. */
+int sy_timer_next(const sy_deadline_t *ds, int n, long *wait_ms) {
+    int i, best = -1;
+    if (!wait_ms || n < 0 || (n > 0 && !ds)) return -EINVAL;
+    for (i = 0; i < n; i++)
+        if (ds[i].at_ns != 0 && (best < 0 || ds[i].at_ns < ds[best].at_ns)) best = i;
+    *wait_ms = best < 0 ? -1 : sy_deadline_left(&ds[best]);
+    return best;
+}

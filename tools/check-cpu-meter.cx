@@ -1,0 +1,74 @@
+/* Checks tools/cpu-meter.cx: sh ./unisacc.com tools/check-cpu-meter.cx   (from the repo root)
+   Expected values come from the contract: CPU_METER<TAB>cpu_ms=..<TAB>wall_ms=..<TAB>rc=..
+   (a) a ~1 s spinning child (timeout 1 of a busy sh loop): cpu_ms 700..1600
+   (b) a 1 s sleeping child: cpu_ms < 100 and wall_ms >= 900
+   (c) the child's exit code passes through unchanged
+   (d) a command that does not exist: nonzero rc and no CPU_METER line
+   Prints PASS/FAIL lines and CHECK_CPU_METER<TAB>checks=N<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed, checks;
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\tcpu-meter.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* run cpu-meter on CMD; OUT gets its output; returns its exit status */
+static int meter(char **cmd, char *out, int cap) {
+    char *argv[16];
+    int i = 0, k;
+    /* tools/bound gives the whole run a 50 s deadline */
+    argv[i++] = "./tools/bound"; argv[i++] = "50"; argv[i++] = "sh"; argv[i++] = "./unisacc.com";
+    argv[i++] = "tools/cpu-meter.cx"; argv[i++] = "--";
+    for (k = 0; cmd[k] && i < 15; k++) argv[i++] = cmd[k];
+    argv[i] = 0;
+    return sy_run(argv, out, cap, 0);
+}
+
+/* the start of the line that begins with "CPU_METER<TAB>" (not CPU_METER_ERROR), or 0 */
+static const char *meter_line(const char *out) {
+    const char *p = out;
+    while (*p) {
+        if (!strncmp(p, "CPU_METER\t", 10)) return p;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return 0;
+}
+
+static int has(const char *out, const char *s) { (void)s; return meter_line(out) != 0; }
+
+/* the number in tab field WHICH+1 (0 cpu_ms, 1 wall_ms, 2 rc) of the CPU_METER line, or -1 */
+static long field(const char *out, int which) {
+    const char *p = meter_line(out);
+    int t;
+    if (!p) return -1;
+    for (t = 0; t <= which; t++) {
+        while (*p && *p != '\t' && *p != '\n') p++;
+        if (*p != '\t') return -1;
+        p++;
+    }
+    while (*p && *p != '=' && *p != '\t' && *p != '\n') p++;
+    if (*p != '=') return -1;
+    return strtol(p + 1, 0, 10);
+}
+
+int main(void) {
+    static char o[8192];
+    int rc;
+    long cpu, wall;
+    { char *c[] = {"timeout", "1", "sh", "-c", "while :; do :; done", 0};
+      rc = meter(c, o, sizeof o); cpu = field(o, 0);
+      printf("INFO\tspin rc=%d cpu_ms=%ld\n", rc, cpu);
+      ck(rc == 124 && cpu >= 700 && cpu <= 1600, "spin-cpu-range"); }
+    { char *c[] = {"sleep", "1", 0};
+      rc = meter(c, o, sizeof o); cpu = field(o, 0); wall = field(o, 1);
+      printf("INFO\tsleep rc=%d cpu_ms=%ld wall_ms=%ld\n", rc, cpu, wall);
+      ck(rc == 0 && cpu >= 0 && cpu < 100, "sleep-cpu-low"); ck(wall >= 900, "sleep-wall-high"); }
+    { char *c[] = {"sh", "-c", "exit 7", 0};
+      rc = meter(c, o, sizeof o);
+      ck(rc == 7 && field(o, 2) == 7, "rc-passthrough"); }
+    { char *c[] = {"no-such-cpu-meter-cmd-xyz", 0};
+      rc = meter(c, o, sizeof o);
+      ck(rc != 0 && !has(o, "CPU_METER\t"), "missing-command"); }
+    printf("CHECK_CPU_METER\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

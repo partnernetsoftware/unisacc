@@ -5,6 +5,7 @@
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainroot
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -13,13 +14,22 @@ static void ck(int ok, const char *n) {
 }
 static void die(const char *s) { fprintf(stderr, "check-no-out-snap: %s\n", s); exit(2); }
 int main(void) {
-    char root[4400], dest[4400], outp[4400], why[512], rev[64], snapd[4400];
+    char root[4400], dest[4400], outp[4400], why[512], rev[64], snapd[4400], home[4400], cbase[4600];
     char *cl[] = {"git", "clone", "-q", "--shared", 0, 0, 0};
     char *gv[] = {"git", "rev-parse", "HEAD", 0};
     np_result r = {0};
     int i, j;
     if (sy_realpath(".", root, sizeof root) < 0) die("root");
     if (cx_fmt(dest, sizeof dest, "%s/no-out-snap-%d", sy_tmpdir(), (int)getpid())) die("dest");
+    /* 夹具用独立 HOME:快照落在 HOME/.cache/unisacc/chains,不得写进真实缓存根。 */
+    /* sessionroot 拒绝「临时根是 HOME 的祖先」,故 HOME 与 TMPDIR 并列放在同一唯一目录下。 */
+    {
+        char fh[4400], ft[4400];
+        if (cx_fmt(home, sizeof home, "%s/no-out-snap-home-%d", sy_tmpdir(), (int)getpid()) || cx_fmt(fh, sizeof fh, "%s/home", home) || cx_fmt(ft, sizeof ft, "%s/tmp", home)) die("home");
+        if (sy_mkdir(home, 0700) || sy_mkdir(fh, 0700) || sy_mkdir(ft, 0700) || sy_setenv("HOME", fh, 1) || sy_setenv("TMPDIR", ft, 1)) die("home");
+        /* 链基目录覆盖到夹具 TMPDIR 下的会话根(已装产品的 cx_rmtree 白名单含 $TMPDIR)。 */
+        if (sy_realpath(ft, fh, sizeof fh) < 0 || cx_fmt(cbase, sizeof cbase, "%s/unisacc-session-chain-nos", fh) || sy_setenv("UNISACC_CHAIN_BASE", cbase, 1)) die("chain base");
+    }
     cl[4] = root; cl[5] = dest;
     if (np_run(cl, 0, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("clone"); }
     np_free(&r);
@@ -60,7 +70,17 @@ int main(void) {
     }
     ck(snapd[0] && sy_exists(snapd) == 1, "snap-dir-created");
     {
-        char *rm[] = {"rm", "-rf", dest, 0};
+        /* 快照必须正好是 cr_snap(dest,rev) 所指的链缓存目录,且冻结后 dest 仍没有 out/。 */
+        char want[4400];
+        ck(!cr_snap(dest, rev, 0, want, sizeof want) && !strcmp(want, snapd), "snap-equals-chainroot");
+        ck(sy_exists(outp) != 1, "no-out-dir-after-freeze");
+        {
+            size_t bn = strlen(cbase);
+            ck(!strncmp(snapd, cbase, bn) && !strncmp(snapd + bn, "/snap/", 6), "snap-below-session-chain-base");
+        }
+    }
+    {
+        char *rm[] = {"rm", "-rf", dest, home, 0};
         np_run(rm, 0, 0, 10, &r, why, sizeof why);
         np_free(&r);
     }

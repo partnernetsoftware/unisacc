@@ -1,0 +1,63 @@
+/* tools/check-limits-audit.cx -- fixtures for tools/limits-audit.cx.
+ *
+ *   sh ./unisacc.com tools/check-limits-audit.cx
+ *
+ * Fixtures (mkdtemp under /tmp), scanned with --file F --phase 90: tight (literal 30 < 85) must report TIGHT;
+ * rc2 (timed_out branch ending in die) must report RC2; roomy (literal 88, 124 exit, derived limit) must report none.
+ * Then the real tree: --check rc 0 with no NEW/EXPIRED/STALE rows, --report rc 0, class table present, and a
+ * baseline shape check. Prints PASS|FAIL lines and CHECK_LIMITS_AUDIT<TAB>failed=N. */
+#pragma unisa use text.text
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-limits-audit.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void put(const char *path, const char *body) {
+    FILE *f = fopen(path, "w");
+    if (!f) { printf("FAIL\tcheck-limits-audit.write\n"); exit(1); }
+    fputs(body, f); fclose(f);
+}
+static int audit(const char *args, char *out, size_t cap) {
+    char cmd[512]; if (cx_fmt(cmd, sizeof cmd, "timeout 40 sh ./unisacc.com tools/limits-audit.cx -- %s 2>&1; echo RC=$?", args)) return -1;
+    FILE *p = popen(cmd, "r"); size_t n = 0;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; pclose(p);
+    for (size_t i = n; i >= 3; i--) if (out[i - 3] == 0x52 && out[i - 2] == 0x43 && out[i - 1] == 0x3d) return atoi(out + i);
+    return -1;
+}
+int main(void) {
+    static char out[16384], arg[256];
+    static char fx[] = "/tmp/lafx-XXXXXX"; static char tight[64], rc2[64], roomy[64];
+    if (!mkdtemp(fx) || cx_fmt(tight, sizeof tight, "%s/tight.cx", fx) || cx_fmt(rc2, sizeof rc2, "%s/rc2.cx", fx) || cx_fmt(roomy, sizeof roomy, "%s/roomy.cx", fx)) { printf("FAIL\tcheck-limits-audit.tmpdir\n"); return 1; }
+    put(tight, "static int f(char **v){ np_result r; return np_run(v, 0, 0, 30, &r, w, sizeof w); }\n");
+    put(rc2, "static void g(void){ if (r.timed_out) die(\"slow\"); }\n");
+    put(roomy, "static int f(char **v){ np_result r; int t = np_run(v, 0, 0, 88, &r, w, sizeof w); if (r.timed_out) return 124;"
+               " return np_run(v, 0, 0, sub_secs(), &r, w, sizeof w); }\n");
+    int rc = cx_fmt(arg, sizeof arg, "--file %s --phase 90 --check", tight) ? -1 : audit(arg, out, sizeof out);
+    ck(rc == 1 && strstr(out, "\tTIGHT\t") != 0 && strstr(out, "min_sub=30") != 0, "tight.reported_rc1");
+    rc = cx_fmt(arg, sizeof arg, "--file %s --phase 90 --check", rc2) ? -1 : audit(arg, out, sizeof out);
+    ck(rc == 1 && strstr(out, "\tRC2\t") != 0, "rc2.reported_rc1");
+    rc = cx_fmt(arg, sizeof arg, "--file %s --phase 90 --check", roomy) ? -1 : audit(arg, out, sizeof out);
+    ck(rc == 0 && strstr(out, "findings=0") != 0 && strstr(out, "min_sub=88") != 0, "roomy.clean_rc0");
+    rc = cx_fmt(arg, sizeof arg, "--file %s --phase 120 --check", tight) ? -1 : audit(arg, out, sizeof out);
+    ck(rc == 1 && strstr(out, "findings=1") != 0, "tight.at_phase_120");
+    rc = audit("--check", out, sizeof out);
+    ck(rc == 0, "head.check_rc0");
+    ck(strstr(out, "NEW\t") == 0 && strstr(out, "EXPIRED\t") == 0 && strstr(out, "STALE\t") == 0, "head.no_new_expired_stale");
+    ck(strstr(out, "BASELINE\t") != 0 && strstr(out, "class\tphases\tphase_s") != 0, "head.class_table_and_baseline");
+    rc = audit("--report", out, sizeof out);
+    ck(rc == 0 && strstr(out, "LIMITS_AUDIT_RESULT") != 0, "report.rc0");
+    size_t n; char *b = cx_read("build/limits-audit-baseline.tsv", &n); int shape = b != 0, rows = 0;
+    if (b) {
+        for (char *p = b; p < b + n;) {
+            char *e = memchr(p, '\n', (size_t)(b + n - p)); if (!e) e = b + n;
+            if (*p != '#' && e > p) { int tabs = 0; for (char *c = p; c < e; c++) if (*c == '\t') tabs++; rows++; if (tabs < 4) shape = 0; }
+            p = e + 1;
+        }
+        free(b);
+    }
+    ck(shape && rows > 0, "baseline.shape");
+    printf("CHECK_LIMITS_AUDIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

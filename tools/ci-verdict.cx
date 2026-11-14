@@ -1,0 +1,95 @@
+/* tools/ci-verdict.cx -- read-only GitHub Actions verdict for a head sha (runbook step 15).
+ *
+ *   sh ./unisacc.com tools/ci-verdict.cx -- --sha SHA [--repo OWNER/REPO] [--workflow FILE] [--gh "CMD PREFIX"]
+ *
+ * Asks `GH run list -w WORKFLOW --commit SHA` (newest first; the first row is the run judged) and
+ * `GH run view ID --json jobs`, both as TSV through gh's own --jq, so no JSON parsing here.  GH defaults to "gh";
+ * a check swaps in a fake command that reads local fixtures.  Only read verbs are issued; no credentials are read
+ * or printed (gh stderr is discarded).
+ * Verdict rule: PASS only for status=completed and conclusion=success; FAIL for completed with any other
+ * conclusion except skipped/cancelled-like gaps, which are UNKNOWN; everything missing, queued, in progress,
+ * a gh failure, no run, or no jobs is UNKNOWN, never PASS.  Overall: FAIL if the run or any job is FAIL, PASS only if
+ * the run and every job (at least one) is PASS, else UNKNOWN.
+ * Output TSV: CI_RUN id status conclusion verdict / CI_JOB name status conclusion verdict /
+ * CI_VERDICT sha verdict detail.  Exit 0 PASS, 1 FAIL, 3 UNKNOWN, 2 usage. */
+
+static char *run_cmd(const char *cmd, int *rc) {
+    FILE *p = popen(cmd, "r");
+    size_t cap = 1 << 16, n = 0;
+    char *b = malloc(cap + 1);
+    if (!p || !b) { *rc = -1; return 0; }
+    for (;;) {
+        size_t k;
+        if (n == cap) { cap *= 2; b = realloc(b, cap + 1); if (!b) { *rc = -1; return 0; } }
+        k = fread(b + n, 1, cap - n, p);
+        if (!k) break;
+        n += k;
+    }
+    b[n] = 0;
+    *rc = pclose(p);
+    return b;
+}
+
+static const char *verdict(const char *st, const char *co) {
+    if (!strcmp(st, "completed")) {
+        if (!strcmp(co, "success")) return "PASS";
+        if (!strcmp(co, "failure") || !strcmp(co, "timed_out") || !strcmp(co, "startup_failure")) return "FAIL";
+    }
+    return "UNKNOWN";
+}
+
+/* split a line on TAB into up to 3 fields (in place); missing fields become "" */
+static void fields(char *line, char *f[3]) {
+    int i = 0;
+    char *p = line;
+    f[0] = f[1] = f[2] = (char *)"";
+    f[i++] = p;
+    for (; *p && i <= 3; p++) if (*p == '\t') { *p = 0; if (i < 3) f[i++] = p + 1; }
+}
+
+static void say(const char *sha, const char *v, const char *why) {
+    printf("CI_VERDICT\t%s\t%s\t%s\n", sha, v, why);
+}
+static int code(const char *v) { return !strcmp(v, "PASS") ? 0 : !strcmp(v, "FAIL") ? 1 : 3; }
+
+int main(int argc, char **argv) {
+    const char *sha = 0, *repo = "partnernetsoftware/unisacc", *wf = "candidate-native.yml", *gh = "gh";
+    char cmd[2048], *out, *line, *save, *f[3], runid[64];
+    int i, rc, bad = 0, unk = 0, jobs = 0;
+    const char *rv;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--sha") && i + 1 < argc) sha = argv[++i];
+        else if (!strcmp(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (!strcmp(argv[i], "--workflow") && i + 1 < argc) wf = argv[++i];
+        else if (!strcmp(argv[i], "--gh") && i + 1 < argc) gh = argv[++i];
+        else { fprintf(stderr, "usage: ci-verdict --sha SHA [--repo R] [--workflow F] [--gh CMD]\n"); return 2; }
+    }
+    if (!sha || strlen(sha) < 7 || strspn(sha, "0123456789abcdef") != strlen(sha)) { fprintf(stderr, "ci-verdict: --sha must be lowercase hex\n"); return 2; }
+    cx_fmt(cmd, sizeof cmd, "%s run list -R '%s' -w '%s' --commit %s --json databaseId,status,conclusion --jq '.[]|[.databaseId,.status,.conclusion]|@tsv' 2>/dev/null", gh, repo, wf, sha);
+    out = run_cmd(cmd, &rc);
+    if (!out || rc != 0) { say(sha, "UNKNOWN", "gh-run-list-failed"); return 3; }
+    line = strtok(out, "\n");
+    if (!line) { say(sha, "UNKNOWN", "no-run"); return 3; }
+    fields(line, f);
+    cx_fmt(runid, sizeof runid, "%s", f[0]);
+    rv = verdict(f[1], f[2]);
+    printf("CI_RUN\t%s\t%s\t%s\t%s\n", f[0], f[1], f[2], rv);
+    if (strspn(runid, "0123456789") != strlen(runid) || !runid[0]) { say(sha, "UNKNOWN", "bad-run-id"); return 3; }
+    if (!strcmp(rv, "FAIL")) bad++; else if (strcmp(rv, "PASS")) unk++;
+    cx_fmt(cmd, sizeof cmd, "%s run view %s -R '%s' --json jobs --jq '.jobs[]|[.name,.status,.conclusion]|@tsv' 2>/dev/null", gh, runid, repo);
+    out = run_cmd(cmd, &rc);
+    if (!out || rc != 0) { say(sha, bad ? "FAIL" : "UNKNOWN", "gh-run-view-failed"); return bad ? 1 : 3; }
+    for (line = strtok(out, "\n"); line; line = strtok(0, "\n")) {
+        const char *v;
+        fields(line, f);
+        v = verdict(f[1], f[2]);
+        printf("CI_JOB\t%s\t%s\t%s\t%s\n", f[0], f[1], f[2], v);
+        jobs++;
+        if (!strcmp(v, "FAIL")) bad++; else if (strcmp(v, "PASS")) unk++;
+    }
+    if (bad) { say(sha, "FAIL", "run-or-job-failed"); return 1; }
+    if (!jobs) { say(sha, "UNKNOWN", "no-jobs"); return 3; }
+    if (unk) { say(sha, "UNKNOWN", "incomplete-or-unknown"); return 3; }
+    say(sha, "PASS", "all-jobs-success");
+    return code("PASS");
+}

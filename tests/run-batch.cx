@@ -5,6 +5,11 @@
 #pragma unisa use cxlib.testplan
 #pragma unisa use cxlib.productpkg
 #pragma unisa use text.text
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 typedef struct {char name[128],path[4096];int supplied,kind;} Material;
 typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128],headers[16];int found,source_present;} Selected;
 static Selected selected;
@@ -34,7 +39,7 @@ static char *read_regular(const char *p,size_t *n){struct stat st;errno=0;if(lst
 static void digest(const char *p,char h[65]){size_t n;char *s=read_regular(p,&n);if(n<65536||sy_sha256_hex(s,(long)n,h)!=0)cx_sha256_hex(s,n,h);free(s);}
 /* "unchanged" means the whole product: the member set under the split layout, the file itself
    under an APE. Hashing root/unisacc.com alone was blind to the megabyte package (findings in
-   plans/product-identity-2026-11-02.md). */
+   the 2026-11-02 structural findings). */
 static void product_digest(const char *r,char h[65]){if(pp_product_digest(r,h))die("product identity");}
 static void parse_materials(void){const char *at=selected.materials;tp_material_decl d;int rc;while((rc=tp_material_next(&at,&d))>0){if(nmaterial==32)die("material inventory");Material *m=&material[nmaterial];copy(m->name,sizeof m->name,d.name);m->kind=d.kind;nmaterial++;}if(rc<0)die("material inventory");}
 static void supplied(int argc,char **argv){if(argc-4!=nmaterial)die("material argument count");for(int i=4;i<argc;i++){char *eq=strchr(argv[i],'=');if(!eq||eq==argv[i]||!eq[1]||strchr(eq+1,'='))die("material assignment");size_t n=(size_t)(eq-argv[i]);int found=-1;for(int j=0;j<nmaterial;j++)if(strlen(material[j].name)==n&&!memcmp(material[j].name,argv[i],n)){found=j;break;}if(found<0||material[found].supplied)die("unknown or duplicate material");Material *m=material+found;if(!tp_material_value(m->kind,eq+1))die("material typed value");if(m->kind==2)copy(m->path,sizeof m->path,eq+1);else{struct stat st;errno=0;if(lstat(eq+1,&st))die(errno==ENOENT?"material path absent":"material path stat");if(!S_ISREG(st.st_mode)&&!S_ISDIR(st.st_mode))die("material path kind");if(!realpath(eq+1,m->path)||!tx_eqz(eq+1, m->path))die("material canonical path");}m->supplied=1;}for(int i=0;i<nmaterial;i++)if(!material[i].supplied)die("missing material");}
@@ -47,13 +52,55 @@ static int batch_platform_allowed(const char *p){
  const char *host=tn_self();
  return host&&tx_eqz(host,"osx/arm64")&&tx_eqz(p,host);
 }
+/* Linking from the tlib kit.  An entry that build/tlib-prep.tsv lists (admitted by tools/tlib-admit.cx: same stdout,
+   stderr and exit code as the source build, and faster) is linked from the kit's packages (tools/tlib.cx prep) and the
+   image is run with the batch's arguments, in place of `product ENTRY -- ARGS`.  Anything that goes wrong here, the
+   kit being absent or stale, a refused link, a release-chain environment, a bound hit, is silent: the batch then runs
+   the original way.  A kit that is absent or not fresh is brought up to date once, under its own bound. */
+static int tlib_listed(const char *rel){
+ char p[4400];size_t n=0;long i,e,off,len;int hit=0;
+ path(p,sizeof p,root,"build/tlib-prep.tsv");
+ char *t=cx_read(p,&n);if(!t)return 0;
+ for(i=0;i<(long)n&&!hit;i=e+1){e=i;while(e<(long)n&&t[e]!='\n')e++;if(e>i&&t[i]!='#'&&!tx_field(t+i,e-i,'\t',0,&off,&len)&&tx_same(t+i+off,len,rel,(long)strlen(rel)))hit=1;}
+ free(t);return hit;
+}
+/* WORDS under `sh -c SCRIPT` with the bound SECS as $1 and WORDS as $2...; the exit code, -1 on transport failure. */
+static int tlib_step(const char *script,char *const w[],int secs){
+ char *a[16],lim[16],why[400];int k=0,i;np_result r={0};
+ if(cx_fmt(lim,sizeof lim,"%d",secs))return -1;
+ a[k++]="sh";a[k++]="-c";a[k++]=(char *)script;a[k++]="sh";a[k++]=lim;
+ for(i=0;w[i]&&k<15;i++)a[k++]=w[i];
+ a[k]=0;int tr=np_run(a,root,0,secs+2,&r,why,sizeof why);int rc=tr?-1:r.rc;np_free(&r);return rc;
+}
+static const char *tlib_why=0;   /* set only when a listed entry was attempted and fell back to source */
+static int tlib_rc=0;
+static int tlib_mode;   /* 1 the kit already had this image (hot), 2 a kit refresh was needed (cold), 0 fallback */
+static int tlib_image(const char *entry,char *img,size_t cap){
+ char bound[4400],tool[4400],product[4400],kitdir[4400];long t0=sy_now_ms();int tries;
+ if(tp_prep_forbidden()||!tlib_listed(selected.entry))return 0;
+ if(tp_kit_dir(root,kitdir,sizeof kitdir)){tlib_why="path";return 0;}
+ if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(tool,sizeof tool,"%s/tlib-prep",kitdir)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)){tlib_why="path";return 0;}   /* lint:allow R1-product product is the installed launcher tlib kit must re-invoke (kw[] below), the same single name the release chain runs; no second truth source to fill it from */
+ if(cx_fmt(img,cap,"%s/.tlibimg-%s-%d",parent,selected.id,(int)sy_pid())){tlib_why="path";return 0;}
+ tlib_why="link-failed";
+ for(tries=0;tries<2;tries++){
+  char *pw[]={bound,tool,(char *)entry,img,root,0};
+  char *kw[]={bound,product,"tools/tlib.cx","kit",0};
+  int rc=sy_exists(tool)==1?tlib_step("[ -x \"$3\" ] || exit 7; exec \"$2\" \"$1\" \"$3\" prep \"$4\" -o \"$5\" --root \"$6\"",pw,20):7;
+  tlib_rc=rc;
+  if(!rc&&sy_exists(img)==1){if(tries)tlib_mode=2;else if(!tlib_mode)tlib_mode=1;return 1;}
+  if(tries){tlib_why="link-failed";break;}
+  if(sy_now_ms()-t0>40000){tlib_why="kit-refresh-timeout";break;}
+  if(tlib_step("exec \"$2\" \"$1\" sh \"$3\" \"$4\" -- \"$5\"",kw,25)!=0){tlib_why="kit-refresh-failed";break;}
+ }
+ (void)sy_unlink(img);return 0;
+}
 int main(int argc,char **argv){
  if(argc<4){fputs("usage: ROOT ABS_OUT_PARENT BATCH_ID [material=ABS_PATH ...]\n",stderr);return 2;}
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||!tx_eqz(argv[1], root)||!tx_eqz(argv[2], parent))die("canonical root and output parent");
- char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eqz(parent, canonical))die("output parent must be below root/out");
+ char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];int out_ok=realpath(outbase,canonical)&&within(parent,canonical)&&!tx_eqz(parent, canonical);char tmpc[4096],tmpbase[4400];int tmp_ok=0;if(sy_tmpdir()&&realpath(sy_tmpdir(),tmpc)&&!cx_fmt(tmpbase,sizeof tmpbase,"%s/unisacc-affected-",tmpc))tmp_ok=!strncmp(parent,tmpbase,strlen(tmpbase));if(!out_ok&&!tmp_ok)die("output parent must be below root/out or tmpdir/unisacc-affected-");
  copy(selected.id,sizeof selected.id,argv[3]);table_path(registry,sizeof registry,"batches.tsv");table_path(coverage_path,sizeof coverage_path,"coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
- if(!batch_platform_allowed(selected.platform))die("batch requires another native host");if(!tx_eqz(selected.headers, "product")&&!tx_eqz(selected.headers, "tree"))die("batch headers source");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
- path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];product_digest(root,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
+ if(!batch_platform_allowed(selected.platform))die("batch requires another native host");if(!tx_eqz(selected.headers, "product")&&!tx_eqz(selected.headers, "tree"))die("batch headers source");int seconds=atoi(selected.budget);if(seconds<1||seconds>90)die("batch budget");parse_materials();supplied(argc,argv);
+ path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];product_digest(root,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");   /* lint:allow R1-product candidate is the product this batch runs (args[na++]=candidate below); ROOT/unisacc.com is the entry contract, not a second name */
  char entry[4400];if(tx_eqz(selected.mode, "SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
  char storage[64][4400],*args[72];int na=0;char incflag[4400];args[na++]="sh";args[na++]=candidate;
  /* product: the packaged candidate's own embedded headers, nothing from the checkout.
@@ -63,7 +110,18 @@ int main(int argc,char **argv){
  args[na++]=entry;args[na++]="--";int argbase=na;
  if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-argbase]);args[na]=storage[na-argbase];na++;if(!end)break;at=end+1;}}
  if(np_subreaper()<0)fprintf(stderr,"run-batch: no child-subreaper\n");   /* orphans of a killed tree land here, not on init */
- args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
+ args[na]=0;np_result result={0};char reason[1200];long t_prep=sy_now_ms(),t_link,t_run,t_hash;
+ /* a listed entry runs as its tlib-linked image; the link time comes out of the batch's own budget */
+ char timg[4400];long tl0=sy_now_ms();long t_lib=tl0;char **run_args=args;char *targs[72];int via_tlib=0;
+ if(tx_eqz(selected.mode,"SOURCE")&&tx_eqz(selected.headers,"product")&&tlib_image(entry,timg,sizeof timg)){
+  int k=0,i;targs[k++]=timg;for(i=argbase;i<na;i++)targs[k++]=args[i];targs[k]=0;run_args=targs;via_tlib=1;}
+ if(!via_tlib&&tlib_why)fprintf(stderr,"run-batch: tlib=fallback:%d:%s\n",tlib_rc,tlib_why);
+ /* 链接时间从批的断言预算里扣(原判定保留:不改判定,只做落盘)。实测 affected-tool budget=25 时 link 吃 25 秒,
+    预算被压到 1 秒,批本体 0.8 秒就跑完仍判 UNKNOWN(transport=-1) —— 这是 DSG-CPU4 要改的排队语义,不在本次范围。 */
+ {long spent=(sy_now_ms()-tl0)/1000;seconds=spent>=seconds-3?3:(int)(seconds-spent);}
+ t_link=sy_now_ms();int transport=np_run(run_args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
+ t_run=sy_now_ms();
+ if(via_tlib){(void)sy_unlink(timg);fprintf(stderr,"run-batch: entry linked from the tlib kit\nrun-batch: tlib=linked\n");}
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
     caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
  if(transport){int st;while(waitpid(-1,&st,WNOHANG)>0);}
@@ -77,5 +135,11 @@ int main(int argc,char **argv){
  int timed_out=transport&&!strncmp(reason,"subprocess.TimeoutExpired",25)&&result.residue==0;   /* a survivor is a FAIL, not UNKNOWN */
  printf("BATCH_HEADERS\t%s\t%s\n",selected.id,selected.headers);
  printf("BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\theaders=%s\tscope=actual-one-batch-no-cached-result\n",selected.id,ok?"PASS":timed_out?"UNKNOWN":"FAIL",result.rc,transport,selected.expect+4,before,selected.headers);
+ /* 分相毫秒,仅给 tools/batch-cost.cx 汇总,不参与判定:
+   link = tlib 链接(含 kit 冷建),run = 批本体执行,norm = 收尾(产品前后摘要与清理)。
+   kit=hot|cold 表示链接走的 kit 路径;fallback 表示该 entry 不在 build/tlib-prep.tsv 或不满足产品/tree 条件。 */
+ {long now=sy_now_ms(),link=t_link-t_lib,run=t_run-t_link,norm=now-t_run;
+  printf("BATCH_TIMING\tid=%s\tprep_ms=%ld\tlink_ms=%ld\trun_ms=%ld\tnorm_ms=%ld\ttotal_ms=%ld\tkit=%s\n",
+         selected.id,t_lib-t_prep,link,run,norm,now-t_prep,via_tlib?(tlib_mode==2?"cold":"hot"):"fallback");}
  if(transport)fprintf(stderr,"run-batch: child transport %s\n",reason);np_free(&result);return ok?0:timed_out?3:1;
 }

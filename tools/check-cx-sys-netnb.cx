@@ -1,0 +1,46 @@
+/* Checks cx/sys/netnb.cx: sy_snb_get / sy_snb_set_nonblock; Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-cx-sys-netnb.cx
+   Prints PASS/FAIL lines and CX_SYS_NETNB<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netnb
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tsysnetnb.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tsysnetnb.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+int main(void) {
+    unsigned char sa[SY_SA_MAX], lo[4] = {127, 0, 0, 1};
+    int s, n, len = SY_SA_MAX, ls, port;
+    s = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_STREAM));
+    ck(s >= 0, "open");
+    ckv(sy_snb_get(s), 0, "fresh-blocking");
+    ckv(sy_snb_set_nonblock(s, 1), 0, "set-on");
+    ckv(sy_snb_get(s), 1, "reads-nonblocking");
+    ckv(sy_snb_set_nonblock(s, 1), 0, "set-on-again");
+    ckv(sy_snb_get(s), 1, "still-nonblocking");
+    ckv(sy_snb_set_nonblock(s, 0), 0, "set-off");
+    ckv(sy_snb_get(s), 0, "reads-blocking");
+    /* non-blocking connect to a listener: connect returns 0 or -EINPROGRESS */
+    ls = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_STREAM));
+    n = sy_sa_inet4(sa, (int)sizeof sa, lo, 0);
+    ckv(sy_sock_bind(ls, sa, n), 0, "bind");
+    ckv(sy_sock_listen(ls, 4), 0, "listen");
+    sy_sock_name(ls, sa, &len);
+    port = sy_sa_port(sa, len);
+    sy_snb_set_nonblock(s, 1);
+    n = sy_sa_inet4(sa, (int)sizeof sa, lo, port);
+    n = sy_sock_connect(s, sa, 16);
+    ck(n == 0 || n == -EINPROGRESS, "nb-connect-0-or-inprogress");
+    ckv(sy_snb_get(-1), -EBADF, "get-neg-fd");
+    ckv(sy_snb_set_nonblock(-1, 1), -EBADF, "set-neg-fd");
+    ckv(sy_snb_set_nonblock(9999, 1), -EBADF, "set-closed-fd");
+    sy_close(s); sy_close(ls);
+    ckv(sy_snb_get(s), -EBADF, "get-after-close");
+    printf("CX_SYS_NETNB\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

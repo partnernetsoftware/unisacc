@@ -1,0 +1,359 @@
+/* tools/state-audit.cx -- read-only consistency report over the three task-state tables.
+ *
+ *   sh ./unisacc.com tools/state-audit.cx [-- [--root ROOT] [--dag FILE] [--items FILE] [--ledger FILE]
+ *                                             [--recent N] [--strict]]
+ *
+ * Reads agentwork/dag.tsv (the task graph), agentwork/items.tsv (the archived item board) and
+ * agentwork/ledger.tsv (append-only evidence), writes nothing, and prints one TSV report:
+ *
+ *   TABLE       dag|items|ledger  rows=N  STATUS=N ...        status distribution of each table
+ *   OVERLAP     dag  items  shared=N                           ids present in both tables
+ *   SHARED      ID  dag=STATUS  items=STATE
+ *   FINDING     ledger-done-dag-open      NODE  dag=STATUS  ledger=ID  line=N
+ *   FINDING     ledger-progress-dag-todo  NODE  dag=STATUS  ledger=ID  line=N   (latest such row)
+ *   FINDING     dag-done-no-ledger        NODE  dag=DONE    commit=SHA  -
+ *   FINDING     ledger-done-items-open    ITEM  items=STATE ledger=ID  line=N
+ *   GLUED       ID  line=N                 a ledger id with no TAB before its text (counted apart)
+ *   LEDGERDONE  line  ID  BASE  dag=..  items=..  VERDICT      the last N ledger rows named *-DONE / *-V<n>
+ *   STATE_AUDIT dag=N items=N ledger=N shared=N inconsistent=N stale_dag=N progress_dag=N noevid_dag=N
+ *               stale_items=N glued=N
+ *
+ * A ledger row belongs to the dag node with the longest id that equals the row id or is followed
+ * by "-" in it.  "done" evidence for a node is a row named NODE-DONE, or a row named NODE whose
+ * event field starts with DONE; a row named NODE-<anything else> is progress (a row named exactly
+ * NODE with another event only records the node).  A DONE node has evidence
+ * when a row belongs to it or the ledger text contains the first nine characters of its commit.
+ * The ledger id is the leading run of [A-Za-z0-9._-] of field 2, so a row whose id runs into its
+ * text is still attributed (and listed as GLUED).
+ * LEDGERDONE verdicts: ok (the node or item is DONE), stale (it is not), no-node (the id is in
+ * neither table: work recorded only in the ledger).
+ * Exit: 0 report printed (1 with --strict when inconsistent > 0), 2 usage or an unreadable input. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.awpath
+#pragma unisa use mem.heap
+
+#define SA_MAXD 1024
+#define SA_MAXI 4096
+#define SA_MAXL 16384
+#define SA_MAXK 48
+#define SA_IDCAP 200
+
+typedef struct { const char *p; long n; } SaSpan;
+typedef struct { SaSpan id, st, commit; int done_line, prog_line, any; SaSpan done_id, prog_id; } SaNode;
+typedef struct { SaSpan id, st; int done_line, last_done; SaSpan done_id; } SaItem;
+typedef struct { SaSpan id, ev; int line, glued; } SaRow;
+typedef struct { SaSpan key; int n; } SaTally;
+
+static char *dbuf, *ibuf, *lbuf;
+static long dn, in, ln;
+static SaNode node[SA_MAXD];
+static SaItem item[SA_MAXI];
+static SaRow lrow[SA_MAXL];
+static int nnode, nitem, nlrow, overflow;
+
+static int same(SaSpan a, SaSpan b) { return tx_same(a.p, a.n, b.p, b.n); }
+static int samez(SaSpan a, const char *s) { return tx_same(a.p, a.n, s, tx_len(s, 256)); }
+
+static const char *z(SaSpan s) {
+    static char ring[8][SA_IDCAP + 4];
+    static int at;
+    char *o = ring[at];
+    at = (at + 1) % 8;
+    if (tx_copy(o, SA_IDCAP + 4, s.p, s.n > SA_IDCAP ? SA_IDCAP : s.n)) o[0] = 0;
+    return o;
+}
+
+static SaSpan field(const char *p, long n, int k) {
+    SaSpan s;
+    long o = 0, l = 0;
+    s.p = p;
+    s.n = 0;
+    if (!tx_field(p, n, '\t', k, &o, &l)) { s.p = p + o; s.n = l; }
+    return s;
+}
+
+static int idch(int c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+/* The status word of a state: the text before the first "-" ("DONE-LOCAL-14" is DONE). */
+static SaSpan head(SaSpan s) {
+    long i = 0;
+    while (i < s.n && s.p[i] != '-') i++;
+    s.n = i;
+    return s;
+}
+
+static void tally(SaTally *t, int *nt, SaSpan key) {
+    int i;
+    for (i = 0; i < *nt; i++) if (same(t[i].key, key)) { t[i].n++; return; }
+    if (*nt < SA_MAXK) { t[*nt].key = key; t[*nt].n = 1; (*nt)++; }
+}
+
+static void print_table(const char *name, int rows, SaTally *t, int nt) {
+    int i;
+    sy_printf("TABLE\t%s\trows=%d", name, rows);
+    for (i = 0; i < nt; i++) sy_printf("\t%s=%d", z(t[i].key), t[i].n);
+    sy_printf("\n");
+}
+
+static void load_dag(void) {
+    long i = 0, e;
+    int header = 0;
+    while (i < dn) {
+        e = i;
+        while (e < dn && dbuf[e] != '\n') e++;
+        if (e > i && dbuf[i] != '#') {
+            if (!header) header = 1;
+            else if (nnode < SA_MAXD) {
+                SaNode *d = &node[nnode++];
+                d->id = field(dbuf + i, e - i, 0);
+                d->st = field(dbuf + i, e - i, 2);
+                d->commit = field(dbuf + i, e - i, 7);
+                d->done_line = d->prog_line = d->any = 0;
+            } else overflow = 1;
+        }
+        i = e + 1;
+    }
+}
+
+static void load_items(void) {
+    long i = 0, e;
+    int header = 0;
+    while (i < in) {
+        e = i;
+        while (e < in && ibuf[e] != '\n') e++;
+        if (e > i && ibuf[i] != '#') {
+            if (!header) header = 1;
+            else if (nitem < SA_MAXI) {
+                SaItem *t = &item[nitem++];
+                t->id = field(ibuf + i, e - i, 0);
+                t->st = field(ibuf + i, e - i, 8);
+                t->done_line = t->last_done = 0;
+            } else overflow = 1;
+        }
+        i = e + 1;
+    }
+}
+
+static void load_ledger(void) {
+    long i = 0, e, k;
+    int line = 0;
+    while (i < ln) {
+        e = i;
+        while (e < ln && lbuf[e] != '\n') e++;
+        line++;
+        if (e > i && lbuf[i] >= '0' && lbuf[i] <= '9') {   /* a row starts with its date; the header does not */
+            if (nlrow < SA_MAXL) {
+                SaRow *r = &lrow[nlrow++];
+                SaSpan f = field(lbuf + i, e - i, 1);
+                k = 0;
+                while (k < f.n && idch((unsigned char)f.p[k])) k++;
+                r->glued = k < f.n;
+                r->id.p = f.p;
+                r->id.n = k;
+                r->ev = field(lbuf + i, e - i, 2);
+                r->line = line;
+            } else overflow = 1;
+        }
+        i = e + 1;
+    }
+}
+
+static int find_node(SaSpan id) {
+    int i;
+    for (i = 0; i < nnode; i++) if (same(node[i].id, id)) return i;
+    return -1;
+}
+
+static int find_item(SaSpan id) {
+    int i;
+    for (i = 0; i < nitem; i++) if (same(item[i].id, id)) return i;
+    return -1;
+}
+
+/* The node a ledger id belongs to: the longest node id that is the id or is followed by "-" in it. */
+static int owner(SaSpan id) {
+    int i, best = -1;
+    for (i = 0; i < nnode; i++) {
+        SaSpan d = node[i].id;
+        if (d.n == 0 || d.n > id.n || !tx_same(id.p, d.n, d.p, d.n)) continue;
+        if (d.n < id.n && id.p[d.n] != '-') continue;
+        if (best < 0 || d.n > node[best].id.n) best = i;
+    }
+    return best;
+}
+
+static int ends(SaSpan s, const char *suf) {
+    long m = tx_len(suf, 64);
+    return s.n >= m && tx_same(s.p + s.n - m, m, suf, m);
+}
+
+static int starts(SaSpan s, const char *pre) {
+    long m = tx_len(pre, 64);
+    return s.n >= m && tx_same(s.p, m, pre, m);
+}
+
+/* Length of the base of an id named BASE-DONE or BASE-V<digits>; 0 when it is neither. */
+static long done_base(SaSpan id) {
+    long k = id.n;
+    if (ends(id, "-DONE")) return id.n - 5;
+    while (k > 0 && id.p[k - 1] >= '0' && id.p[k - 1] <= '9') k--;
+    if (k < id.n && k >= 3 && id.p[k - 1] == 'V' && id.p[k - 2] == '-') return k - 2;
+    return 0;
+}
+
+static int in_ledger(const char *s, long m) {
+    long i;
+    if (m < 1) return 0;
+    for (i = 0; i + m <= ln; i++)
+        if (lbuf[i] == s[0] && tx_same(lbuf + i, m, s, m)) return 1;
+    return 0;
+}
+
+static int usage(void) {
+    sy_eprintf("state-audit: usage: [--root ROOT] [--dag FILE] [--items FILE] [--ledger FILE] [--recent N] [--strict]\n");
+    return 2;
+}
+
+static char *load(const char *root, const char *kind, const char *given, long *n) {
+    char path[4400];
+    size_t got = 0;
+    char *b;
+    if (given) { if (tx_copy(path, sizeof path, given, tx_len(given, 8192))) return 0; }
+    else if (awp_path(root, kind, path, (long)sizeof path)) return 0;
+    b = cx_read(path, &got);
+    if (!b) sy_eprintf("state-audit: cannot read %s\n", path);
+    *n = (long)got;
+    return b;
+}
+
+int main(int argc, char **argv) {
+    const char *rarg = ".", *darg = 0, *iarg = 0, *larg = 0;
+    char root[4096];
+    static SaTally td[SA_MAXK], ti[SA_MAXK];
+    int ntd = 0, nti = 0, k, i, j, strict = 0, shared = 0;
+    int stale_dag = 0, prog_dag = 0, noevid = 0, stale_items = 0, glued = 0, done_rows = 0, first;
+    long recent = 30;
+
+    for (k = 1; k < argc; k++) {
+        if (tx_eqz(argv[k], "--root") && k + 1 < argc) rarg = argv[++k];
+        else if (tx_eqz(argv[k], "--dag") && k + 1 < argc) darg = argv[++k];
+        else if (tx_eqz(argv[k], "--items") && k + 1 < argc) iarg = argv[++k];
+        else if (tx_eqz(argv[k], "--ledger") && k + 1 < argc) larg = argv[++k];
+        else if (tx_eqz(argv[k], "--strict")) strict = 1;
+        else if (tx_eqz(argv[k], "--recent") && k + 1 < argc) {
+            const char *m = argv[++k];
+            long q, v = 0, ml = tx_len(m, 16);
+            if (ml < 1 || ml > 6) return usage();
+            for (q = 0; q < ml; q++) {
+                if (m[q] < '0' || m[q] > '9') return usage();
+                v = v * 10 + (m[q] - '0');
+            }
+            recent = v;
+        } else return usage();
+    }
+    if (sy_realpath(rarg, root, sizeof root) < 0) { sy_eprintf("state-audit: bad root %s\n", rarg); return 2; }
+    dbuf = load(root, "dag", darg, &dn);
+    ibuf = load(root, "items", iarg, &in);
+    lbuf = load(root, "ledger", larg, &ln);
+    if (!dbuf || !ibuf || !lbuf) return 2;
+    load_dag();
+    load_items();
+    load_ledger();
+    if (overflow) { sy_eprintf("state-audit: a table has more rows than this tool holds\n"); return 2; }
+
+    /* attribute ledger rows */
+    for (i = 0; i < nlrow; i++) {
+        SaRow *r = &lrow[i];
+        int o = owner(r->id), it;
+        long base = done_base(r->id);
+        if (r->glued) glued++;
+        if (base) done_rows++;
+        if (o >= 0) {
+            SaNode *d = &node[o];
+            int exact = r->id.n == d->id.n;
+            int done = (exact && starts(r->ev, "DONE")) || (r->id.n == d->id.n + 5 && ends(r->id, "-DONE"));
+            d->any = 1;
+            if (done) { d->done_line = r->line; d->done_id = r->id; }
+            else if (!exact) { d->prog_line = r->line; d->prog_id = r->id; }   /* a row named exactly NODE records the node, not work on it */
+        }
+        it = find_item(r->id);
+        if (it >= 0) {
+            item[it].last_done = starts(r->ev, "DONE");
+            if (item[it].last_done) { item[it].done_line = r->line; item[it].done_id = r->id; }
+        } else if (ends(r->id, "-DONE")) {
+            SaSpan b = r->id;
+            b.n -= 5;
+            it = find_item(b);
+            if (it >= 0) { item[it].last_done = 1; item[it].done_line = r->line; item[it].done_id = r->id; }
+        }
+    }
+
+    for (i = 0; i < nnode; i++) tally(td, &ntd, node[i].st);
+    for (i = 0; i < nitem; i++) tally(ti, &nti, head(item[i].st));
+    print_table("dag", nnode, td, ntd);
+    print_table("items", nitem, ti, nti);
+    sy_printf("TABLE\tledger\trows=%d\tdone_rows=%d\tglued_id=%d\n", nlrow, done_rows, glued);
+
+    for (i = 0; i < nnode; i++) if (find_item(node[i].id) >= 0) shared++;
+    sy_printf("OVERLAP\tdag\titems\tshared=%d\n", shared);
+    for (i = 0; i < nnode; i++) {
+        j = find_item(node[i].id);
+        if (j >= 0) sy_printf("SHARED\t%s\tdag=%s\titems=%s\n", z(node[i].id), z(node[i].st), z(item[j].st));
+    }
+
+    for (i = 0; i < nnode; i++) {
+        SaNode *d = &node[i];
+        int is_done = samez(d->st, "DONE");
+        if (!is_done && d->done_line) {
+            stale_dag++;
+            sy_printf("FINDING\tledger-done-dag-open\t%s\tdag=%s\tledger=%s\tline=%d\n", z(d->id), z(d->st), z(d->done_id), d->done_line);
+        } else if ((samez(d->st, "TODO") || samez(d->st, "READY")) && d->prog_line) {
+            prog_dag++;
+            sy_printf("FINDING\tledger-progress-dag-todo\t%s\tdag=%s\tledger=%s\tline=%d\n", z(d->id), z(d->st), z(d->prog_id), d->prog_line);
+        } else if (is_done && !d->any && !in_ledger(d->commit.p, d->commit.n > 9 ? 9 : d->commit.n)) {
+            noevid++;
+            sy_printf("FINDING\tdag-done-no-ledger\t%s\tdag=DONE\tcommit=%s\t-\n", z(d->id), z(d->commit));
+        }
+    }
+    for (i = 0; i < nitem; i++) {
+        SaItem *t = &item[i];
+        SaSpan h = head(t->st);
+        int open = samez(h, "READY") || samez(h, "BLOCKED") || samez(h, "TODO") || samez(h, "DOING") || samez(h, "REOPENED") || samez(h, "VERIFYING");
+        if (open && t->last_done) {
+            stale_items++;
+            sy_printf("FINDING\tledger-done-items-open\t%s\titems=%s\tledger=%s\tline=%d\n", z(t->id), z(t->st), z(t->done_id), t->done_line);
+        }
+    }
+    for (i = 0; i < nlrow; i++)
+        if (lrow[i].glued) sy_printf("GLUED\t%s\tline=%d\n", z(lrow[i].id), lrow[i].line);
+
+    /* the last RECENT rows named *-DONE / *-V<n> */
+    first = 0;
+    for (i = nlrow - 1, k = 0; i >= 0 && k < recent; i--)
+        if (done_base(lrow[i].id)) { k++; first = i; }
+    for (i = first; i < nlrow && recent > 0; i++) {
+        SaSpan b = lrow[i].id;
+        long bl = done_base(b);
+        const char *verdict = "no-node";
+        int o, it;
+        if (!bl) continue;
+        b.n = bl;
+        o = find_node(b);
+        it = find_item(b);
+        if (o >= 0) verdict = samez(node[o].st, "DONE") ? "ok" : "stale";
+        else if (it >= 0) verdict = samez(head(item[it].st), "DONE") ? "ok" : "stale";
+        sy_printf("LEDGERDONE\t%d\t%s\t%s\tdag=%s\titems=%s\t%s\n", lrow[i].line, z(lrow[i].id), z(b),
+                  o >= 0 ? z(node[o].st) : "-", it >= 0 ? z(item[it].st) : "-", verdict);
+    }
+
+    k = stale_dag + prog_dag + noevid + stale_items;
+    sy_printf("STATE_AUDIT\tdag=%d\titems=%d\tledger=%d\tshared=%d\tinconsistent=%d\tstale_dag=%d\tprogress_dag=%d\tnoevid_dag=%d\tstale_items=%d\tglued=%d\n",
+              nnode, nitem, nlrow, shared, k, stale_dag, prog_dag, noevid, stale_items, glued);
+    return strict && k ? 1 : 0;
+}

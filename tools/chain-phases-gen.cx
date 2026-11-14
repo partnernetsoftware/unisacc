@@ -4,6 +4,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.sourcepackage
+#pragma unisa use cxlib.limits
 static char bytes[131072];
 static int used, count;
 static const char *outer;
@@ -11,8 +12,86 @@ static char previous[80], lane_previous[80];
 static int target_lane(const char *s) {
     return !strncmp(s,"gen1-",5)||!strncmp(s,"g2-lnx-",7)||!strncmp(s,"g3-lnx-",7)||!strncmp(s,"g2-osx-",7)||!strncmp(s,"g3-osx-",7)||!strncmp(s,"g2-win-",7)||!strncmp(s,"g3-win-",7)||!strncmp(s,"wf-",3);
 }
+/* Residue facts (build/chain-residue.tsv: phase, policy, record, paths) become columns 8..10.
+ * A path is relative to the chain output dir: no leading '/', no "." or ".." component, no "//",
+ * at least two components; one '*' is allowed in the last component of a path, never in a record. */
+static char *res_text, *res_phase[64], *res_policy[64], *res_record[64], *res_paths[64];
+static int res_n, res_used[64];
+static void res_die(const char *why, const char *what) { fprintf(stderr, "chain-phases-gen: REFUSE residue fact %s: %s\n", why, what ? what : "-"); exit(2); }
+static int res_rel(const char *s, size_t n, int glob) {
+    size_t start = 0, slash = 0; int stars = 0;
+    if (!n || s[0] == '/' || s[n - 1] == '/') return 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i < n && s[i] != '/') {
+            char c = s[i];
+            if (c == '*') { if (!glob || stars++) return 0; continue; }
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-')) return 0;
+            continue;
+        }
+        size_t len = i - start;
+        if (!len || (len == 1 && s[start] == '.') || (len == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;
+        if (i < n) { if (stars) return 0; slash++; }
+        start = i + 1;
+    }
+    return slash > 0;
+}
+static void res_load(void) {
+    size_t n = 0; res_text = cx_read("build/chain-residue.tsv", &n);
+    if (!res_text || !n || n > 16384 || res_text[n - 1] != '\n' || memchr(res_text, 0, n) || memchr(res_text, '\r', n)) res_die("text", "build/chain-residue.tsv");
+    for (char *p = res_text; *p;) {
+        char *e = strchr(p, '\n'), *v[4]; int fields = 1; *e = 0;
+        if (*p != '#') {
+            v[0] = p;
+            for (char *q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 4) res_die("columns", v[0]); v[fields++] = q + 1; }
+            if (fields != 4 || res_n == 64) res_die("columns", v[0]);
+            for (int i = 0; i < res_n; i++) if (!strcmp(res_phase[i], v[0])) res_die("duplicate phase", v[0]);
+            if (strcmp(v[1], "scrub") && strcmp(v[1], "refuse")) res_die("policy", v[1]);
+            if (!res_rel(v[2], strlen(v[2]), 0)) res_die("record", v[2]);
+            for (const char *s = v[3];;) {
+                const char *c = strchr(s, ','); size_t len = c ? (size_t)(c - s) : strlen(s);
+                if (!res_rel(s, len, 1) || (len == strlen(v[2]) && !memcmp(s, v[2], len))) res_die("path", v[3]);
+                if (!c) break;
+                s = c + 1;
+            }
+            res_phase[res_n] = v[0]; res_policy[res_n] = v[1]; res_record[res_n] = v[2]; res_paths[res_n] = v[3]; res_n++;
+        }
+        p = e + 1;
+    }
+}
+/* Input identity sidecar build/chain-phase-inputs.tsv (id, inputs). The phase table itself keeps its
+ * 10 columns because candidate-chain and chain-run refuse any other column count; a consumer joins by id.
+ * inputs is a comma list of tokens: phase:ID (upstream output; one per deps entry), src:GLOB (source
+ * tree), table:PATH (fact table); "-" only for a phase with no input at all. Derived from the phase class. */
+static char ibytes[65536];
+static int iused;
+static int starts(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+static void inputs_of(const char *id, const char *deps, char *o, size_t cap) {
+    size_t k = 0; o[0] = 0;
+    if (strcmp(deps, "-")) {
+        for (const char *s = deps;;) {
+            const char *c = strchr(s, ','); size_t len = c ? (size_t)(c - s) : strlen(s);
+            int n = snprintf(o + k, cap - k, "%sphase:%.*s", k ? "," : "", (int)len, s);
+            if (n < 0 || (size_t)n >= cap - k) { fprintf(stderr, "chain-phases-gen: inputs bound\n"); exit(2); }
+            k += (size_t)n;
+            if (!c) break;
+            s = c + 1;
+        }
+    }
+    const char *extra;
+    if (!strcmp(id, "snap")) extra = "src:git-tree";
+    else if (starts(id, "jobs-tool-") || starts(id, "jobs-gen-")) extra = "src:tools/**,table:build/chain-facts.tsv";
+    else if (starts(id, "jobs-") || starts(id, "final-net-") || starts(id, "p3-")) extra = "src:cx/**,table:build/chain-facts.tsv";
+    else if (starts(id, "kernels-")) extra = "table:build/chain-residue.tsv";
+    else if (!strcmp(id, "compare") || !strcmp(id, "pack") || !strcmp(id, "final") || !strcmp(id, "routes")) extra = "src:tools/**";
+    else if (!strcmp(id, "list") || !strcmp(id, "warmup") || !strcmp(id, "host")) extra = "src:tools/**,table:build/chain-facts.tsv";
+    else extra = "src:cx/**,src:src/**,src:seed/**,table:build/chain-facts.tsv";
+    int n = snprintf(o + k, cap - k, "%s%s,table:build/limits.tsv", k ? "," : "", extra);
+    if (n < 0 || (size_t)n >= cap - k) { fprintf(stderr, "chain-phases-gen: inputs bound\n"); exit(2); }
+}
 static void emit(const char *id) {
     char deps[2048],domain[160]; const char *lane=target_lane(outer)?outer:"-";
+    const char *policy="-",*record="-",*paths="-";
+    for(int i=0;i<res_n;i++)if(!strcmp(res_phase[i],id)){policy=res_policy[i];record=res_record[i];paths=res_paths[i];res_used[i]=1;}
     int legacy=!strncmp(id,"g2-lnx-",7)&&strstr(id,"-obj-");
     if(legacy) cx_fmt(deps,sizeof deps,"-");
     else if(strcmp(lane,"-")) {
@@ -29,9 +108,16 @@ static void emit(const char *id) {
     else if(!strcmp(id,"compare")) cx_fmt(deps,sizeof deps,"gen1-lnx-x86_64,gen1-lnx-arm64,gen1-osx-x86_64,gen1-osx-arm64,gen1-win-x86_64,gen1-win-arm64,g2-lnx-x86_64,g2-lnx-arm64,g3-lnx-x86_64,g3-lnx-arm64,kernels-g2,kernels-g3,g2-osx-x86_64,g2-osx-arm64,g2-win-x86_64,g2-win-arm64,g3-osx-x86_64,g3-osx-arm64,g3-win-x86_64,g3-win-arm64");
     else cx_fmt(deps,sizeof deps,"%s",*previous?previous:"-");
     cx_fmt(domain,sizeof domain,"%s",strcmp(lane,"-")?lane:"outer");
-    int n=snprintf(bytes+used,sizeof bytes-used,"%d\t%s\t%s\t55\t%s\t%s\t%d\n",count,id,domain,deps,lane,strcmp(lane,"-")?4:1);
+    /* timeout_s is the phase.bound limit of build/limits.tsv (scope = phase id). */
+    double bound=lm_get("phase.bound",id);
+    if(bound<1){fprintf(stderr,"chain-phases-gen: unknown limit phase.bound\n");exit(2);}
+    int n=snprintf(bytes+used,sizeof bytes-used,"%d\t%s\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\n",count,id,domain,(int)bound,deps,lane,strcmp(lane,"-")?4:1,policy,record,paths);
     if(n<0||n>=(int)sizeof bytes-used){fprintf(stderr,"chain-phases-gen: output bound\n");exit(2);}
     used+=n;count++;
+    {char in[4800];inputs_of(id,deps,in,sizeof in);
+     int m=snprintf(ibytes+iused,sizeof ibytes-iused,"%s\t%s\n",id,in);
+     if(m<0||m>=(int)sizeof ibytes-iused){fprintf(stderr,"chain-phases-gen: output bound\n");exit(2);}
+     iused+=m;}
     if(!legacy) { cx_fmt(previous,sizeof previous,"%s",id); if(strcmp(lane,"-"))cx_fmt(lane_previous,sizeof lane_previous,"%s",id); }
 }
 /* Reject a stale generated library before deriving phase expansion. */
@@ -56,11 +142,12 @@ static int facts_current(void) {
 }
 int main(int argc, char **argv) {
     const char *dst = "build/chain-phases.tsv";
-    const char *base[] = {"snap","build","ctx","host","list","warmup","jobs-tool","jobs-gen","jobs-tbl","jobs-net","final","routes","p3","gen1-lnx-x86_64","gen1-lnx-arm64","gen1-osx-x86_64","gen1-osx-arm64","gen1-win-x86_64","gen1-win-arm64","g2-lnx-x86_64","g2-lnx-arm64","g3-lnx-x86_64","g3-lnx-arm64","kernels-g2","kernels-g3","g2-osx-x86_64","g2-osx-arm64","g2-win-x86_64","g2-win-arm64","g3-osx-x86_64","g3-osx-arm64","g3-win-x86_64","g3-win-arm64","compare","pack"};
+    const char *base[] = {"snap","build","ctx","host","list","warmup","jobs-tool","jobs-gen","jobs-tbl","jobs-net","final","routes","p3","gen1-lnx-x86_64","gen1-lnx-arm64","gen1-osx-x86_64","gen1-osx-arm64","gen1-win-x86_64","gen1-win-arm64","g2-lnx-x86_64","g2-lnx-arm64","g3-lnx-x86_64","g3-lnx-arm64","kernels-g2","kernels-g3","g2-osx-x86_64","g2-osx-arm64","g2-win-x86_64","g2-win-arm64","g3-osx-x86_64","g3-osx-arm64","g3-win-x86_64","g3-win-arm64","compare","cache-manager","pack"};
     if (argc != 2 || (strcmp(argv[1], "--write") && strcmp(argv[1], "--check"))) { fprintf(stderr, "chain-phases-gen: usage --write|--check\n"); return 2; }
     if(!facts_current()){fprintf(stderr,"chain-phases-gen: DIFF construction facts\n");return 1;}
     if(cf_net_count()!=sp_model_count()||cf_tool_count()!=sp_tool_count()){fprintf(stderr,"chain-phases-gen: DIFF network counts\n");return 1;}
-    used = snprintf(bytes, sizeof bytes, "# order\tid\texclusive_dir\ttimeout_s\tdeps\tlane\tparallelism\n# generated by tools/chain-phases-gen.cx --write; do not edit\n");
+    res_load();
+    used = snprintf(bytes, sizeof bytes, "# order\tid\texclusive_dir\ttimeout_s\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n# generated by tools/chain-phases-gen.cx --write; do not edit\n");
     for (int i = 0; i < (int)(sizeof base / sizeof *base); i++) {
         outer=base[i]; lane_previous[0]=0;
         char id[80];
@@ -74,7 +161,7 @@ int main(int argc, char **argv) {
             outer=base[i];lane_previous[0]=0;
         }
         if (!strcmp(base[i], "ctx")) { emit("wave-objects"); emit("wave-runner"); }
-        if (!strcmp(base[i], "build")) emit("build-objects");
+        if (!strcmp(base[i], "build")) { emit("build-objects"); emit("build-front"); }
         if (!strncmp(base[i], "gen1-lnx-", 9)) {
             if (cx_fmt(id, sizeof id, "%s-objects", base[i])) return 2;
             emit(id);
@@ -117,6 +204,14 @@ int main(int argc, char **argv) {
             emit(id);
         }
         emit(base[i]);
+    }
+    for (int i = 0; i < res_n; i++) if (!res_used[i]) res_die("unknown phase", res_phase[i]);
+    {   const char *idst = "build/chain-phase-inputs.tsv";
+        static char ihead[] = "# id\tinputs\n# generated by tools/chain-phases-gen.cx --write; do not edit\n";
+        static char all[65664]; int an = snprintf(all, sizeof all, "%s%.*s", ihead, iused, ibytes);
+        if (an < 0 || an >= (int)sizeof all) { fprintf(stderr, "chain-phases-gen: output bound\n"); return 2; }
+        if (!strcmp(argv[1], "--write")) { if (cx_write(idst, all, (size_t)an)) return 2; }
+        else { size_t n = 0; char *s = cx_read(idst, &n); int same = s && n == (size_t)an && !memcmp(s, all, n); free(s); if (!same) { fprintf(stderr, "chain-phases-gen: DIFF inputs\n"); return 1; } }
     }
     if (!strcmp(argv[1], "--write")) { if (cx_write(dst, bytes, used)) return 2; }
     else { size_t n = 0; char *s = cx_read(dst, &n); int same = s && n == (size_t)used && !memcmp(s, bytes, n); free(s); if (!same) { fprintf(stderr, "chain-phases-gen: DIFF\n"); return 1; } }

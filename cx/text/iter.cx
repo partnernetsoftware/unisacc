@@ -1,0 +1,56 @@
+#pragma unisa module iter
+#pragma unisa dock
+/* L0 text/iter: allocation-free split and line iteration over a caller-owned span
+   (Rust str::Split / str::Lines).  The iterator holds no memory: OFF/LEN point back into
+   the original string S, which the caller keeps alive and unchanged while iterating.
+   Failure contract: negative codes only (-EINVAL); 1 is an item, 0 is the end.
+   No libc call. */
+typedef struct { const char *s; long n; long pos; long off; long len; int done; } tx_iter_t;
+
+/* Start iterating S[0..N).  A null S with N > 0, or N < 0, makes an iterator that is already
+   done (the next call returns -EINVAL for a bad span, never reads). */
+void tx_iter_init(tx_iter_t *it, const char *s, long n) {
+    if (!it) return;
+    it->s = s; it->n = n; it->pos = 0; it->off = 0; it->len = 0; it->done = 0;
+    if (n < 0 || (!s && n > 0)) { it->n = -1; it->done = 1; }
+}
+
+/* Next segment between occurrences of SEP[0..SEPN): 1 with it->off/it->len set, 0 at the end,
+   -EINVAL for a null iterator, a bad span, or an empty/null separator.  Empty segments are kept;
+   a trailing separator yields one final empty segment; an empty string yields one empty segment. */
+int tx_split_next(tx_iter_t *it, const char *sep, long sepn) {
+    long i, k;
+    if (!it || it->n < 0 || !sep || sepn <= 0) return -EINVAL;
+    if (it->done) return 0;
+    for (i = it->pos; i + sepn <= it->n; i++) {
+        for (k = 0; k < sepn; k++) if (it->s[i + k] != sep[k]) break;
+        if (k == sepn) {
+            it->off = it->pos; it->len = i - it->pos; it->pos = i + sepn;
+            return 1;
+        }
+    }
+    it->off = it->pos; it->len = it->n - it->pos; it->pos = it->n; it->done = 1;
+    return 1;
+}
+
+/* Next line: 1 with it->off/it->len (terminator excluded), 0 at the end, -EINVAL for a null
+   iterator or bad span.  LF and CRLF end a line; the last line is given without a terminator;
+   a trailing newline does not add an empty line; a lone CR is data. */
+int tx_line_next(tx_iter_t *it) {
+    long i;
+    if (!it || it->n < 0) return -EINVAL;
+    if (it->done) return 0;
+    if (it->pos >= it->n) { it->done = 1; return 0; }
+    for (i = it->pos; i < it->n; i++) if (it->s[i] == '\n') break;
+    it->off = it->pos;
+    if (i < it->n) {
+        it->len = i - it->pos;
+        if (it->len > 0 && it->s[i - 1] == '\r') it->len--;
+        it->pos = i + 1;
+    } else {
+        it->len = it->n - it->pos;
+        it->pos = it->n;
+        it->done = 1;
+    }
+    return 1;
+}

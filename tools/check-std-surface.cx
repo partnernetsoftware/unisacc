@@ -1,0 +1,383 @@
+/* tools/check-std-surface.cx -- build/std-surface.tsv (cx core surface, CX-A-5) vs build/layer-api.
+ *
+ *   sh ./unisacc.com tools/check-std-surface.cx [-- ROOT]
+ *
+ * v2 table: first line "# std-surface v2", fourteen TAB fields per data row
+ * (pkg name signature analogue errors lnx osx win status note stab since own test),
+ * at least 17 "# out" lines, 12 "# cap" vocabulary lines, a "# removed" marker.
+ *
+ * Fails (exit 1) on:
+ *   (1) malformed table (header/cols/pkg/name/signature/analogue/errors/platforms/status/
+ *       stab/since/own/test, duplicate name, bad alias-of, refuse cap not in # cap list when
+ *       written as refuse:ENOSYS cap=NAME, errors not in the closed S3 grammar);
+ *   (2) status=exists name missing from layer-api or signature text differs;
+ *   (3) status=new name already exported by layer-api.
+ * Report-only: core package exports with no table row.
+ * Prints AREA/STATUS/CORE_EXPORTS and CHECK_STD_SURFACE with version=v2. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+enum { SS_MAXROW = 4096, SS_MAXAPI = 8192, SS_MAXAREA = 64, SS_MAXCAP = 32, SS_COLS = 14 };
+
+typedef struct { const char *p; long n; } ss_span;
+typedef struct { ss_span f[SS_COLS]; int area; long line; } ss_row;
+typedef struct { ss_span name, sig, file; int pkg; } ss_api;
+
+static int failed;
+static ss_row rows[SS_MAXROW];
+static int nrows;
+static ss_api apis[SS_MAXAPI];
+static int napis;
+static char area_name[SS_MAXAREA][48];
+static int area_rows[SS_MAXAREA];
+static int nareas;
+static char api_pkg[64][64];
+static int napipkg;
+static char cap_name[SS_MAXCAP][48];
+static int ncaps;
+
+static const char *const ss_pkgs[] = { "cx.sys", "cx.os", "cx.path", "cx.mem", "cx.text", "cx.stream",
+                                       "ext.net", "ext.procx", "ext.textx", "ext.memx", "ext.crypto", "ext.tsvx", 0 };
+
+static void bad(long line, const char *what, const char *p, long n) {
+    failed++;
+    sy_printf("FAIL\tstd-surface\tline=%ld\t%s\t%.*s\n", line, what, (int)(n > 120 ? 120 : n), p ? p : "");
+}
+
+static int span_is(ss_span s, const char *z) { return tx_same(s.p, s.n, z, tx_len(z, 256)); }
+static int span_eq(ss_span a, ss_span b) { return tx_same(a.p, a.n, b.p, b.n); }
+
+static int ident(ss_span s) {
+    long i;
+    if (s.n <= 0) return 0;
+    for (i = 0; i < s.n; i++) {
+        int c = (unsigned char)s.p[i];
+        int al = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+        if (!al && !(i > 0 && c >= '0' && c <= '9')) return 0;
+    }
+    return 1;
+}
+
+static int ident_char(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int sig_names(ss_span sig, ss_span name) {
+    long i = 0;
+    while (i < sig.n) {
+        long b;
+        ss_span tok;
+        while (i < sig.n && !ident_char((unsigned char)sig.p[i])) i++;
+        b = i;
+        while (i < sig.n && ident_char((unsigned char)sig.p[i])) i++;
+        tok.p = sig.p + b;
+        tok.n = i - b;
+        if (tok.n && span_eq(tok, name)) return 1;
+    }
+    return 0;
+}
+
+static int cap_known(ss_span s) {
+    int i;
+    for (i = 0; i < ncaps; i++)
+        if (tx_same(cap_name[i], tx_len(cap_name[i], 48), s.p, s.n)) return 1;
+    return 0;
+}
+
+/* Platform cell: impl | impl:NOTE | unverified | refuse:... ; refuse:ENOSYS cap=NAME must use a # cap. */
+static int plat_ok(ss_span s) {
+    if (span_is(s, "impl") || span_is(s, "unverified")) return 1;
+    if (s.n > 5 && tx_prefix(s.p, s.n, "impl:", 5)) return 1;
+    if (s.n > 7 && tx_prefix(s.p, s.n, "refuse:", 7)) {
+        if (s.n > 19 && tx_prefix(s.p, s.n, "refuse:ENOSYS cap=", 18)) {
+            ss_span c;
+            c.p = s.p + 18;
+            c.n = s.n - 18;
+            return cap_known(c);
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* S3 closed errors grammar: tokens none|0/1|null|noreturn|miss:-1|-errno|-EName|ret:text, ';' separated. */
+static int errors_tok_ok(const char *p, long n) {
+    if (n == 4 && tx_same(p, n, "none", 4)) return 1;
+    if (n == 3 && tx_same(p, n, "0/1", 3)) return 1;
+    if (n == 4 && tx_same(p, n, "null", 4)) return 1;
+    if (n == 8 && tx_same(p, n, "noreturn", 8)) return 1;
+    if (n == 7 && tx_same(p, n, "miss:-1", 7)) return 1;
+    if (n == 6 && tx_same(p, n, "-errno", 6)) return 1;
+    if (n > 4 && tx_prefix(p, n, "ret:", 4) && n > 4) return 1;
+    if (n >= 3 && p[0] == '-' && p[1] == 'E') {
+        long i;
+        for (i = 2; i < n; i++) {
+            int c = (unsigned char)p[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int errors_ok(ss_span s) {
+    long i = 0;
+    if (s.n <= 0) return 0;
+    while (i < s.n) {
+        long b = i, e;
+        while (i < s.n && s.p[i] != ';') i++;
+        e = i;
+        if (!errors_tok_ok(s.p + b, e - b)) return 0;
+        if (i < s.n && s.p[i] == ';') i++;
+    }
+    return 1;
+}
+
+static int stab_ok(ss_span s) {
+    if (span_is(s, "incubating") || span_is(s, "pre") || span_is(s, "stable") || span_is(s, "legacy") ||
+        span_is(s, "internal")) return 1;
+    if (s.n > 11 && tx_prefix(s.p, s.n, "deprecated:CXDEP", 16)) return 1;
+    return 0;
+}
+
+static int since_ok(ss_span s) {
+    long i, dots = 0;
+    if (s.n < 3) return 0;
+    for (i = 0; i < s.n; i++) {
+        int c = (unsigned char)s.p[i];
+        if (c == '.') dots++;
+        else if (!(c >= '0' && c <= '9')) return 0;
+    }
+    return dots == 2;
+}
+
+static int own_ok(ss_span s) {
+    long i;
+    if (span_is(s, "none") || span_is(s, "borrow")) return 1;
+    if (s.n > 10 && tx_prefix(s.p, s.n, "open:", 5)) {
+        for (i = 5; i < s.n - 6; i++)
+            if (tx_same(s.p + i, 7, " close:", 7)) return 1;
+    }
+    return 0;
+}
+
+static int test_ok(ss_span s) {
+    if (span_is(s, "-")) return 1;
+    return ident(s) || (s.n > 0 && s.p[0] != '\t');
+}
+
+static int split(const char *p, long n, ss_span *out, int max) {
+    int k = 0;
+    long i, start = 0;
+    for (i = 0; i <= n; i++)
+        if (i == n || p[i] == '\t') {
+            if (k < max) { out[k].p = p + start; out[k].n = i - start; }
+            k++;
+            start = i + 1;
+        }
+    return k;
+}
+
+static int row_of(ss_span name) {
+    int i;
+    for (i = 0; i < nrows; i++)
+        if (span_eq(rows[i].f[1], name)) return i;
+    return -1;
+}
+
+static void load_api(const char *root, const char *file) {
+    char path[4600];
+    char *t;
+    size_t tn = 0;
+    long i = 0, fl = tx_len(file, 256);
+    int pkg = napipkg;
+    if (fl < 5 || !tx_suffix(file, fl, ".tsv", 4)) return;
+    if (napipkg >= 64 || fl - 4 >= 64) { bad(0, "layer-api package bound", file, fl); return; }
+    tx_copy(api_pkg[napipkg], 64, file, fl - 4);
+    api_pkg[napipkg][fl - 4] = 0;
+    napipkg++;
+    tx_snprintf(path, sizeof path, "%s/build/layer-api/%s", root, file);
+    t = cx_read(path, &tn);
+    if (!t) { bad(0, "cannot read layer-api table", path, tx_len(path, sizeof path)); return; }
+    while (i < (long)tn) {
+        long e = i;
+        ss_span f[4];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, 4);
+        if (e > i && t[i] != '#') {
+            if (k < 4) bad(0, "layer-api row is not four fields", t + i, e - i);
+            else if (napis >= SS_MAXAPI) bad(0, "layer-api bound", file, fl);
+            else { apis[napis].name = f[0]; apis[napis].sig = f[1]; apis[napis].file = f[3]; apis[napis].pkg = pkg; napis++; }
+        }
+        i = e + 1;
+    }
+}
+
+static void load_table(const char *root) {
+    char path[4600];
+    char *t;
+    size_t tn = 0;
+    long i = 0, line = 0;
+    int outs = 0, removed = 0, area = -1;
+    tx_snprintf(path, sizeof path, "%s/build/std-surface.tsv", root);
+    t = cx_read(path, &tn);
+    if (!t) { bad(0, "cannot read", path, tx_len(path, sizeof path)); return; }
+    while (i < (long)tn) {
+        long e = i, n;
+        ss_span f[SS_COLS];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        n = e - i;
+        line++;
+        if (line == 1 && !tx_same(t + i, n, "# std-surface v2", 16))
+            bad(line, "first line is not '# std-surface v2'", t + i, n);
+        if (n == 0) bad(line, "empty line", "", 0);
+        else if (t[i] == '#') {
+            k = split(t + i, n, f, SS_COLS);
+            if (span_is(f[0], "# out")) {
+                if (k != 3 || !f[1].n || !f[2].n) bad(line, "'# out' line is not ITEM and REASON", t + i, n);
+                else outs++;
+            } else if (span_is(f[0], "# cap")) {
+                /* Cap names may include '-' (e.g. posix-signal, mmap-exec). */
+                int cap_id = f[1].n > 0;
+                long ci;
+                for (ci = 0; cap_id && ci < f[1].n; ci++) {
+                    int c = (unsigned char)f[1].p[ci];
+                    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) cap_id = 0;
+                }
+                if (k != 3 || !cap_id || !f[2].n) bad(line, "'# cap' line is not NAME and REASON", t + i, n);
+                else if (ncaps >= SS_MAXCAP) bad(line, "cap bound", t + i, n);
+                else {
+                    tx_copy(cap_name[ncaps], 48, f[1].p, f[1].n);
+                    cap_name[ncaps][f[1].n] = 0;
+                    ncaps++;
+                }
+            } else if (span_is(f[0], "# removed") || (n >= 9 && tx_prefix(t + i, n, "# removed", 9))) {
+                removed = 1;
+            } else if (n > 7 && tx_prefix(t + i, n, "# area ", 7)) {
+                if (nareas >= SS_MAXAREA || n - 7 >= 48) bad(line, "area bound", t + i, n);
+                else { tx_copy(area_name[nareas], 48, t + i + 7, n - 7); area_name[nareas][n - 7] = 0; area = nareas++; }
+            }
+        } else {
+            k = split(t + i, n, f, SS_COLS);
+            if (k != SS_COLS) bad(line, "row is not fourteen TAB fields", t + i, n);
+            else if (area < 0) bad(line, "row before the first '# area' line", t + i, n);
+            else if (nrows >= SS_MAXROW) bad(line, "row bound", t + i, n);
+            else {
+                int j;
+                for (j = 0; j < SS_COLS; j++) rows[nrows].f[j] = f[j];
+                rows[nrows].area = area;
+                rows[nrows].line = line;
+                area_rows[area]++;
+                nrows++;
+            }
+        }
+        i = e + 1;
+    }
+    if (outs < 17) bad(0, "fewer than 17 '# out' lines", "", 0);
+    if (ncaps < 12) bad(0, "fewer than 12 '# cap' lines", "", 0);
+    if (!removed) bad(0, "missing '# removed' marker", "", 0);
+}
+
+static void check_rows(void) {
+    int i, j;
+    for (i = 0; i < nrows; i++) {
+        ss_row *r = &rows[i];
+        ss_span st = r->f[8];
+        int is_new = span_is(st, "new"), is_exists = span_is(st, "exists");
+        int is_alias = st.n > 9 && tx_prefix(st.p, st.n, "alias-of:", 9);
+        int found = 0, sig_same = 0, okpkg = 0;
+        for (j = 0; ss_pkgs[j]; j++) okpkg |= span_is(r->f[0], ss_pkgs[j]);
+        if (!okpkg) bad(r->line, "pkg outside the layout", r->f[0].p, r->f[0].n);
+        if (!ident(r->f[1])) { bad(r->line, "name is not an identifier", r->f[1].p, r->f[1].n); continue; }
+        if (!sig_names(r->f[2], r->f[1])) bad(r->line, "signature does not contain the name", r->f[1].p, r->f[1].n);
+        if (!r->f[3].n) bad(r->line, "empty analogue", r->f[1].p, r->f[1].n);
+        if (!errors_ok(r->f[4])) bad(r->line, "errors not in closed S3 grammar", r->f[4].p, r->f[4].n);
+        for (j = 5; j <= 7; j++)
+            if (!plat_ok(r->f[j])) bad(r->line, j == 5 ? "bad lnx field" : j == 6 ? "bad osx field" : "bad win field", r->f[j].p, r->f[j].n);
+        if (!is_new && !is_exists && !is_alias) bad(r->line, "bad status", st.p, st.n);
+        if (!stab_ok(r->f[10])) bad(r->line, "bad stab", r->f[10].p, r->f[10].n);
+        if (!since_ok(r->f[11])) bad(r->line, "bad since", r->f[11].p, r->f[11].n);
+        if (!own_ok(r->f[12])) bad(r->line, "bad own", r->f[12].p, r->f[12].n);
+        if (!test_ok(r->f[13])) bad(r->line, "bad test", r->f[13].p, r->f[13].n);
+        for (j = 0; j < i; j++)
+            if (span_eq(rows[j].f[1], r->f[1])) { bad(r->line, "duplicate name", r->f[1].p, r->f[1].n); break; }
+        if (is_alias) {
+            ss_span tg;
+            tg.p = st.p + 9;
+            tg.n = st.n - 9;
+            j = row_of(tg);
+            if (j < 0 || j == i) bad(r->line, "alias-of target is not a row", st.p, st.n);
+        }
+        for (j = 0; j < napis; j++)
+            if (span_eq(apis[j].name, r->f[1])) {
+                found = 1;
+                if (span_eq(apis[j].sig, r->f[2])) sig_same = 1;
+            }
+        if (is_exists) {
+            if (found && !sig_same) bad(r->line, "status=exists but the signature differs from layer-api", r->f[1].p, r->f[1].n);
+            if (!found) bad(r->line, "status=exists but not in layer-api", r->f[1].p, r->f[1].n);
+        }
+        if (is_new && found) bad(r->line, "status=new but layer-api already exports the name", r->f[1].p, r->f[1].n);
+    }
+}
+
+static int report_core(void) {
+    int i, core = 0, missing = 0;
+    for (i = 0; i < napis; i++) {
+        ss_api *a = &apis[i];
+        const char *pk = api_pkg[a->pkg];
+        int in = 0;
+        if (tx_eqz(pk, "cx.stream")) in = 1;
+        else if (tx_eqz(pk, "cx.base"))
+            in = tx_prefix(a->file.p, a->file.n, "cx/sys/", 7) || tx_prefix(a->file.p, a->file.n, "cx/mem/", 7) ||
+                 tx_prefix(a->file.p, a->file.n, "cx/text/", 8);
+        if (!in || !ident(a->name)) continue;
+        core++;
+        if (row_of(a->name) < 0) {
+            missing++;
+            sy_printf("NOROW\t%s\t%.*s\t%.*s\n", pk, (int)a->name.n, a->name.p, (int)a->file.n, a->file.p);
+        }
+    }
+    sy_printf("CORE_EXPORTS\ttotal=%d\tin_table=%d\tnot_in_table=%d\treport_only=1\n", core, core - missing, missing);
+    return missing;
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    char dir[4600], *names;
+    int fd, cnt, i, n_new = 0, n_exists = 0, n_alias = 0, n_unver = 0, missing;
+    long cap = 1 << 16, at = 0;
+    tx_snprintf(dir, sizeof dir, "%s/build/layer-api", root);
+    fd = sy_open_read(dir);
+    names = mm_alloc(cap);
+    if (fd < 0 || !names) { sy_printf("FAIL\tstd-surface\tcannot open %s\n", dir); return 1; }
+    cnt = sy_dir_names(fd, names, (int)cap);
+    sy_close(fd);
+    if (cnt <= 0) { sy_printf("FAIL\tstd-surface\tno layer-api tables in %s (rc=%d)\n", dir, cnt); return 1; }
+    for (i = 0; i < cnt; i++) {
+        load_api(root, names + at);
+        at += tx_len(names + at, cap - at) + 1;
+    }
+    load_table(root);
+    check_rows();
+    for (i = 0; i < nrows; i++) {
+        ss_span st = rows[i].f[8];
+        int j;
+        if (span_is(st, "new")) n_new++;
+        else if (span_is(st, "exists")) n_exists++;
+        else n_alias++;
+        for (j = 5; j <= 7; j++) n_unver += span_is(rows[i].f[j], "unverified");
+    }
+    for (i = 0; i < nareas; i++) sy_printf("AREA\t%s\trows=%d\n", area_name[i], area_rows[i]);
+    sy_printf("STATUS\texists=%d\tnew=%d\talias=%d\tunverified_cells=%d\tcaps=%d\n", n_exists, n_new, n_alias, n_unver, ncaps);
+    missing = report_core();
+    sy_printf("CHECK_STD_SURFACE\tversion=v2\trows=%d\tareas=%d\tlayer_api=%d\tnot_in_table=%d\tfailed=%d\n",
+              nrows, nareas, napis, missing, failed);
+    return failed ? 1 : 0;
+}

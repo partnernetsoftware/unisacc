@@ -1,0 +1,112 @@
+#pragma unisa module utc
+#pragma unisa dock
+/* cx.os utc: UTC calendar arithmetic, no host calls. Years 1..9999 only. */
+
+typedef struct { int year; int mon; int day; int hour; int min; int sec; int wday; int yday; } sy_tm_t;
+
+static int64_t osu_days_from_civil(int64_t y, int m, int d) {
+    int64_t era, yoe, doy, doe;
+    if (m <= 2) y -= 1;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static int osu_leap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+static int osu_mdays(int y, int m) {
+    static const int dm[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    return m == 2 && osu_leap(y) ? 29 : dm[m - 1];
+}
+
+/* Split SEC (epoch seconds) into UTC fields. 0, -EINVAL on null, -ERANGE outside years 1..9999. */
+int sy_utc_split(int64_t sec, sy_tm_t *out) {
+    int64_t days, rem, z, era, doe, yoe, y, doy, mp;
+    int m, d;
+    if (!out) return -EINVAL;
+    if (sec < -62135596800LL || sec > 253402300799LL) return -ERANGE;
+    days = sec / 86400;
+    rem = sec % 86400;
+    if (rem < 0) { rem += 86400; days -= 1; }
+    z = days + 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    m = (int)(mp < 10 ? mp + 3 : mp - 9);
+    if (m <= 2) y += 1;
+    out->year = (int)y;
+    out->mon = m;
+    out->day = d;
+    out->hour = (int)(rem / 3600);
+    out->min = (int)(rem % 3600 / 60);
+    out->sec = (int)(rem % 60);
+    out->wday = (int)(((days % 7) + 11) % 7);
+    out->yday = (int)(days - osu_days_from_civil(y, 1, 1));
+    return 0;
+}
+
+/* Join UTC fields into epoch seconds. 0, -EINVAL on null or any field out of range (leap seconds refused). */
+int sy_utc_join(const sy_tm_t *t, int64_t *sec) {
+    if (!t || !sec) return -EINVAL;
+    if (t->year < 1 || t->year > 9999 || t->mon < 1 || t->mon > 12) return -EINVAL;
+    if (t->day < 1 || t->day > osu_mdays(t->year, t->mon)) return -EINVAL;
+    if (t->hour < 0 || t->hour > 23 || t->min < 0 || t->min > 59 || t->sec < 0 || t->sec > 59) return -EINVAL;
+    *sec = osu_days_from_civil(t->year, t->mon, t->day) * 86400 + t->hour * 3600 + t->min * 60 + t->sec;
+    return 0;
+}
+
+static void osu_put(char *p, int v, int w) {
+    int i;
+    for (i = w - 1; i >= 0; i--) { p[i] = (char)('0' + v % 10); v /= 10; }
+}
+
+/* Write "YYYY-MM-DDTHH:MM:SSZ" for SEC. Returns 20 (length, without the NUL) when it fits in CAP (needs 21),
+   else -ERANGE (needlen is 21); -EINVAL on null out, and the split error for an out-of-range SEC. */
+int sy_utc_fmt(char *out, int cap, int64_t sec) {
+    sy_tm_t t;
+    int r;
+    if (!out || cap < 0) return -EINVAL;
+    r = sy_utc_split(sec, &t);
+    if (r) return r;
+    if (cap < 21) return -ERANGE;
+    osu_put(out, t.year, 4); out[4] = '-';
+    osu_put(out + 5, t.mon, 2); out[7] = '-';
+    osu_put(out + 8, t.day, 2); out[10] = 'T';
+    osu_put(out + 11, t.hour, 2); out[13] = ':';
+    osu_put(out + 14, t.min, 2); out[16] = ':';
+    osu_put(out + 17, t.sec, 2); out[19] = 'Z';
+    out[20] = 0;
+    return 20;
+}
+
+static int osu_num(const char *s, int a, int w, int *v) {
+    int i, x = 0;
+    for (i = 0; i < w; i++) {
+        if (s[a + i] < '0' || s[a + i] > '9') return -1;
+        x = x * 10 + (s[a + i] - '0');
+    }
+    *v = x;
+    return 0;
+}
+
+/* Parse "YYYY-MM-DDTHH:MM:SSZ" or "YYYY-MM-DD" (N bytes of S) into epoch seconds. 0, or -EINVAL. */
+int sy_utc_parse(const char *s, long n, int64_t *sec) {
+    sy_tm_t t;
+    int dateonly;
+    if (!s || !sec || (n != 10 && n != 20)) return -EINVAL;
+    dateonly = n == 10;
+    if (osu_num(s, 0, 4, &t.year) || s[4] != '-' || osu_num(s, 5, 2, &t.mon) || s[7] != '-' ||
+        osu_num(s, 8, 2, &t.day)) return -EINVAL;
+    t.hour = t.min = t.sec = 0;
+    if (!dateonly) {
+        if (s[10] != 'T' || osu_num(s, 11, 2, &t.hour) || s[13] != ':' || osu_num(s, 14, 2, &t.min) ||
+            s[16] != ':' || osu_num(s, 17, 2, &t.sec) || s[19] != 'Z') return -EINVAL;
+    }
+    return sy_utc_join(&t, sec);
+}

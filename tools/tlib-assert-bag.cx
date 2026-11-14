@@ -1,0 +1,240 @@
+/* tools/tlib-assert-bag.cx -- assertion multiset for check-tlib / check-tlib-prep.
+ *
+ *   sh ./unisacc.com tools/tlib-assert-bag.cx -- static PATH.cx...
+ *   sh ./unisacc.com tools/tlib-assert-bag.cx -- log LOG...
+ *   sh ./unisacc.com tools/tlib-assert-bag.cx -- compare A.bag B.bag
+ *
+ * static: extract ck(..., "NAME") string literals (one name per line, sorted).
+ * log: extract PASS/FAIL lines whose 2nd field is tlib.* or tlib-prep.* (name after dot).
+ * compare: exit 0 iff the two bags (name counts) are identical; else print DIFF and exit 1.
+ * No batch execution. Used by DEBT-TLIB-BATCH-SPLIT to prove the assertion multiset is unchanged.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define BAG_MAX 512
+#define NAME_CAP 160
+
+typedef struct { char name[NAME_CAP]; int n; } Bag;
+
+static Bag bag[BAG_MAX];
+static int nbag;
+
+static void die(const char *a, const char *b) {
+    sy_eprintf("tlib-assert-bag: %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    exit(2);
+}
+
+static int bag_add(const char *name, long len) {
+    int i;
+    if (len <= 0 || len >= NAME_CAP) return -1;
+    for (i = 0; i < nbag; i++) {
+        if (tx_same(bag[i].name, tx_len(bag[i].name, NAME_CAP), name, len)) {
+            bag[i].n++;
+            return 0;
+        }
+    }
+    if (nbag >= BAG_MAX) return -1;
+    if (tx_copy(bag[nbag].name, NAME_CAP, name, len)) return -1;
+    bag[nbag].n = 1;
+    nbag++;
+    return 0;
+}
+
+/* lexicographic compare of two C strings; <0 / 0 / >0 */
+static int name_cmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static void bag_sort(void) {
+    int i, j;
+    for (i = 1; i < nbag; i++) {
+        Bag t = bag[i];
+        j = i;
+        while (j > 0 && name_cmp(bag[j - 1].name, t.name) > 0) {
+            bag[j] = bag[j - 1];
+            j--;
+        }
+        bag[j] = t;
+    }
+}
+
+static void bag_print(void) {
+    int i, t = 0;
+    bag_sort();
+    for (i = 0; i < nbag; i++) {
+        sy_printf("%d\t%s\n", bag[i].n, bag[i].name);
+        t += bag[i].n;
+    }
+    sy_printf("BAG\tnames=%d\ttotal=%d\n", nbag, t);
+}
+
+/* Scan SRC for ck( ... , "NAME" ): match parentheses so nested calls do not end early;
+ * NAME is the last double-quoted string inside that call (the assertion label). */
+static int extract_static(const char *path) {
+    char *s;
+    size_t n = 0;
+    long i = 0;
+    s = cx_read(path, &n);
+    if (!s) die("cannot read", path);
+    while (i + 3 < (long)n) {
+        long j, q, e, depth;
+        if (!(s[i] == 'c' && s[i + 1] == 'k' && s[i + 2] == '(')) { i++; continue; }
+        /* require ck is a call: previous char not identifier */
+        if (i > 0) {
+            char p = s[i - 1];
+            if ((p >= 'a' && p <= 'z') || (p >= 'A' && p <= 'Z') || (p >= '0' && p <= '9') || p == '_') { i++; continue; }
+        }
+        j = i + 3;
+        depth = 1;
+        q = -1;
+        while (j < (long)n && depth > 0) {
+            if (s[j] == '"') {
+                e = j + 1;
+                while (e < (long)n && s[e] != '"' && s[e] != '\n') {
+                    if (s[e] == '\\' && e + 1 < (long)n) e += 2;
+                    else e++;
+                }
+                if (e < (long)n && s[e] == '"') q = j;
+                j = e + 1;
+                continue;
+            }
+            if (s[j] == '(') depth++;
+            else if (s[j] == ')') depth--;
+            j++;
+        }
+        if (depth == 0 && q >= 0) {
+            e = q + 1;
+            while (e < (long)n && s[e] != '"') {
+                if (s[e] == '\\' && e + 1 < (long)n) e += 2;
+                else e++;
+            }
+            if (e > q + 1 && bag_add(s + q + 1, e - q - 1)) { mm_free(s); die("bag overflow", path); }
+        }
+        i = j;
+    }
+    mm_free(s);
+    return 0;
+}
+
+/* PASS\ttlib.NAME or FAIL\ttlib-prep.NAME */
+static int extract_log(const char *path) {
+    char *s;
+    size_t n = 0;
+    long i = 0;
+    s = cx_read(path, &n);
+    if (!s) die("cannot read", path);
+    while (i < (long)n) {
+        long e = i, o0, l0, o1, l1, dot;
+        while (e < (long)n && s[e] != '\n') e++;
+        if (e > i && !tx_field(s + i, e - i, '\t', 0, &o0, &l0) && !tx_field(s + i, e - i, '\t', 1, &o1, &l1) &&
+            (tx_same(s + i + o0, l0, "PASS", 4) || tx_same(s + i + o0, l0, "FAIL", 4))) {
+            const char *f = s + i + o1;
+            if ((l1 > 5 && tx_same(f, 5, "tlib.", 5)) || (l1 > 10 && tx_same(f, 10, "tlib-prep.", 10))) {
+                dot = 0;
+                while (dot < l1 && f[dot] != '.') dot++;
+                if (dot < l1 - 1 && bag_add(f + dot + 1, l1 - dot - 1)) { mm_free(s); die("bag overflow", path); }
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(s);
+    return 0;
+}
+
+static int load_bag_file(const char *path, Bag *dst, int *nd) {
+    char *s;
+    size_t n = 0;
+    long i = 0;
+    *nd = 0;
+    s = cx_read(path, &n);
+    if (!s) die("cannot read", path);
+    while (i < (long)n) {
+        long e = i, o0, l0, o1, l1, cnt;
+        while (e < (long)n && s[e] != '\n') e++;
+        if (e > i && s[i] != 'B' && !tx_field(s + i, e - i, '\t', 0, &o0, &l0) && !tx_field(s + i, e - i, '\t', 1, &o1, &l1) &&
+            l0 > 0 && l1 > 0 && l1 < NAME_CAP) {
+            cnt = 0;
+            { long k; for (k = 0; k < l0; k++) { int d = s[i + o0 + k] - '0'; if (d < 0 || d > 9) { cnt = -1; break; } cnt = cnt * 10 + d; } }
+            if (cnt > 0 && *nd < BAG_MAX) {
+                if (tx_copy(dst[*nd].name, NAME_CAP, s + i + o1, l1)) { mm_free(s); die("name", path); }
+                dst[*nd].n = (int)cnt;
+                (*nd)++;
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(s);
+    return 0;
+}
+
+static int compare_files(const char *a, const char *b) {
+    Bag A[BAG_MAX], B[BAG_MAX];
+    int na = 0, nb = 0, i = 0, j = 0, bad = 0, ta = 0, tb = 0;
+    load_bag_file(a, A, &na);
+    load_bag_file(b, B, &nb);
+    /* sort A/B in place with the same insertion sort as bag_sort */
+    {
+        int p, q;
+        for (p = 1; p < na; p++) {
+            Bag t = A[p];
+            q = p;
+            while (q > 0 && name_cmp(A[q - 1].name, t.name) > 0) { A[q] = A[q - 1]; q--; }
+            A[q] = t;
+        }
+        for (p = 1; p < nb; p++) {
+            Bag t = B[p];
+            q = p;
+            while (q > 0 && name_cmp(B[q - 1].name, t.name) > 0) { B[q] = B[q - 1]; q--; }
+            B[q] = t;
+        }
+    }
+    while (i < na || j < nb) {
+        int c = i >= na ? 1 : j >= nb ? -1 : name_cmp(A[i].name, B[j].name);
+        if (c == 0) {
+            if (A[i].n != B[j].n) {
+                sy_printf("DIFF\t%s\ta=%d\tb=%d\n", A[i].name, A[i].n, B[j].n);
+                bad++;
+            }
+            ta += A[i].n;
+            tb += B[j].n;
+            i++;
+            j++;
+        } else if (c < 0) {
+            sy_printf("DIFF\t%s\ta=%d\tb=0\n", A[i].name, A[i].n);
+            ta += A[i].n;
+            bad++;
+            i++;
+        } else {
+            sy_printf("DIFF\t%s\ta=0\tb=%d\n", B[j].name, B[j].n);
+            tb += B[j].n;
+            bad++;
+            j++;
+        }
+    }
+    sy_printf("COMPARE\ta=%s\tb=%s\tnames_a=%d\tnames_b=%d\ttotal_a=%d\ttotal_b=%d\tdiff=%d\n", a, b, na, nb, ta, tb, bad);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int i;
+    if (argc < 3) die("usage", "static|log|compare ...");
+    if (tx_eqz(argv[1], "static")) {
+        for (i = 2; i < argc; i++) if (extract_static(argv[i])) return 2;
+        bag_print();
+        return 0;
+    }
+    if (tx_eqz(argv[1], "log")) {
+        for (i = 2; i < argc; i++) if (extract_log(argv[i])) return 2;
+        bag_print();
+        return 0;
+    }
+    if (tx_eqz(argv[1], "compare") && argc == 4) return compare_files(argv[2], argv[3]);
+    die("usage", "static|log|compare ...");
+    return 2;
+}

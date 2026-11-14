@@ -1,0 +1,325 @@
+/* tools/phase-times-calc.cx -- 由链自己的记录 chain-run.tsv 重算相位耗时表,并按相位表依赖现算关键路径。
+ *
+ *   sh ./unisacc.com tools/phase-times-calc.cx -- RUN.tsv PHASES.tsv [--start EPOCH] [--sim WIDTH] [--phases] [--emit-durations FILE] [--write FILE --prefix ID --source TEXT]
+ *
+ * 并行度三问(C1):
+ *   CONCURRENCY  实际同时在跑几次尝试(属主行的 start= 滴答加 wall_ms 得区间,逐时刻扫),c1_s..c4_s 为各并发度的秒数;
+ *   BYWIDTH      尝试耗时按当时生效的调度宽度分摊(起始 4;RESUME/KILL/WIDEN 行的 parallel=K 之后为 K);
+ *   SIM          --sim W 按 chain-run 调度规则用实测相位耗时重排的墙钟(见下方注释里不模拟的四项);
+ *   PHASE        --phases 逐相位列实测合计、尝试数、最早完成时刻、是否在关键路径上、lane 与宽度。
+ *
+ * RUN.tsv: 链记录;读 ATTEMPT_TIME(phase=NAME wall_ms=N)、SEGMENT/SUPERVISE 的时间戳(第 2 列 epoch)。
+ * PHASES.tsv: build/chain-phases.tsv(order id exclusive_dir timeout_s deps lane parallelism,以及 RESUME-RULE 起的三列残留规则
+ * residue_policy residue_record residue_paths;旧输出目录里的 7 列 plan.tsv 同样接受),deps 逗号分隔,必须指向更早的行。
+ * 相位归属:名字与表 id 完全相同则归该相;否则逐段去掉末尾 -xxx 找表中的父相(如 gen1-osx-arm64-front0 归 gen1-osx-arm64);
+ * 仍找不到的记为 unplaced(如 prepare-watch),计入合计与关键路径的串行前缀,单列报告。每个相位的耗时 = 它全部尝试的 wall_ms 之和(含重试)。
+ * 输出行:DOMAIN name total_s max_attempt_s count / SUM / CRITICAL / PARALLEL / PHASE_TIMES_CALC rc。
+ * wall = 末个 rc=0 的 SUPERVISE 时间戳 - START(默认首个 SEGMENT 时间戳;--start 可给 owner.tsv 首行 epoch)。
+ * --write: 对每个域追加一行 "PREFIX-域 op 300 max_s SOURCE - -" 到 FILE(同 id 已存在则跳过,不重复写)。
+ * 退出:0 成功;2 输入畸形(缺列、依赖未知或前向、wall_ms 非数字、无尝试)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define MAXP 1024
+#define MAXD 16
+#define MAXA 4096
+static char *pid[MAXP], *pdeps[MAXP], *pdom[MAXP], *plane[MAXP];
+static int pwidth[MAXP], sstate[MAXP]; static long send[MAXP];
+static long ev_t[2 * MAXA]; static int ev_d[2 * MAXA]; static int nev;
+static long wtime[5], level_ms[6];
+static long pdur[MAXP], pfin[MAXP]; static int pcnt[MAXP], ppred[MAXP];
+static int np;
+static const char *dname[MAXD] = {"closure", "gen1", "target-tail", "final-net", "jobs-tbl-net-tool", "kernels", "p3", "pack", "other"};
+static long dtot[MAXD], dmax[MAXD]; static int dcnt[MAXD];
+static char big[400000];
+
+static int split(char *line, char *f[], int max) {
+    int n = 0; f[n++] = line;
+    for (char *p = line; *p && n < max; p++) if (*p == '\t') { *p = 0; f[n++] = p + 1; }
+    return n;
+}
+static int starts(const char *s, const char *p) { int n = (int)tx_len(p, 100); return tx_cmp(s, n, p, n) == 0 && tx_len(s, 200) >= (size_t)n; }
+static int has(const char *s, const char *p) { return tx_find(s, tx_len(s, 200), p, tx_len(p, 100)) >= 0; }
+static int domain(const char *n) {
+    if (has(n, "closure")) return 0;
+    if (starts(n, "gen1")) return 1;
+    if (starts(n, "g2-") || starts(n, "g3-") || starts(n, "gen2-") || starts(n, "gen3-")) return 2;
+    if (starts(n, "final-net")) return 3;
+    if (starts(n, "jobs") || starts(n, "tbl") || starts(n, "net") || starts(n, "tool")) return 4;
+    if (starts(n, "kernels")) return 5;
+    if (starts(n, "p3")) return 6;
+    if (starts(n, "pack")) return 7;
+    return 8;
+}
+static int parse_num(const char *s, long *v) {
+    long a = 0; int i = 0;
+    if (s[0] < '0' || s[0] > '9') return 0;
+    for (; s[i] >= '0' && s[i] <= '9'; i++) a = a * 10 + (s[i] - '0');
+    if (s[i] != 0 && s[i] != '\t') return 0;
+    *v = a; return 1;
+}
+static int find(const char *name) {
+    for (int i = 0; i < np; i++) if (tx_eqz(pid[i], name)) return i;
+    return -1;
+}
+static int place(const char *name) {
+    char t[256];
+    size_t n = tx_len(name, 250);
+    mm_copy(t, sizeof t, name, n); t[n] = 0;
+    for (;;) {
+        int k = find(t); if (k >= 0) return k;
+        int cut = -1;
+        for (int i = 0; t[i]; i++) if (t[i] == '-') cut = i;
+        if (cut <= 0) return -1;
+        t[cut] = 0;
+    }
+}
+/* ms -> "S.D" 一位小数 */
+static void fmts(long ms, char *o, size_t cap) { cx_fmt(o, cap, "%ld.%ld", ms / 1000, (ms % 1000) / 100); }
+
+int main(int argc, char **argv) {
+    const char *run = 0, *ph = 0, *wfile = 0, *prefix = 0, *efile = 0, *source = "chain-run.tsv 重算";
+    long start = -1, simw = 0;
+    int i, show_phases = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--start") && i + 1 < argc) { if (!parse_num(argv[++i], &start)) { sy_eprintf("phase-times-calc: bad --start\n"); return 2; } }
+        else if (tx_eqz(argv[i], "--write") && i + 1 < argc) wfile = argv[++i];
+        else if (tx_eqz(argv[i], "--prefix") && i + 1 < argc) prefix = argv[++i];
+        else if (tx_eqz(argv[i], "--source") && i + 1 < argc) source = argv[++i];
+        else if (tx_eqz(argv[i], "--sim") && i + 1 < argc) { if (!parse_num(argv[++i], &simw) || simw < 1 || simw > 4) { sy_eprintf("phase-times-calc: --sim width must be 1..4\n"); return 2; } }
+        else if (tx_eqz(argv[i], "--phases")) show_phases = 1;
+        else if (tx_eqz(argv[i], "--emit-durations") && i + 1 < argc) efile = argv[++i];
+        else if (!run) run = argv[i];
+        else if (!ph) ph = argv[i];
+        else { sy_eprintf("phase-times-calc: extra arg\n"); return 2; }
+    }
+    if (!run || !ph) { sy_eprintf("usage: phase-times-calc RUN.tsv PHASES.tsv [--start EPOCH] [--write FILE --prefix ID --source TEXT]\n"); return 2; }
+    if (wfile && !prefix) { sy_eprintf("phase-times-calc: --write needs --prefix\n"); return 2; }
+    size_t sz = 0;
+    char *pb = cx_read(ph, &sz);
+    if (!pb) { sy_eprintf("phase-times-calc: cannot read %s\n", ph); return 2; }
+    char *at = pb; int lineno = 0;
+    while (*at) {
+        char *e = at; while (*e && *e != '\n') e++;
+        char save = *e; *e = 0; lineno++;
+        if (at[0] && at[0] != '#') {
+            char *f[11]; int n = split(at, f, 11);
+            if ((n != 7 && n != 10) || np >= MAXP) { sy_eprintf("phase-times-calc: %s:%d malformed phase row\n", ph, lineno); return 2; }
+            if (find(f[1]) >= 0) { sy_eprintf("phase-times-calc: %s:%d duplicate id %s\n", ph, lineno, f[1]); return 2; }
+            long w = 0;
+            if (!parse_num(f[6], &w) || w < 1 || w > 4) { sy_eprintf("phase-times-calc: %s:%d parallelism must be 1..4\n", ph, lineno); return 2; }
+            pid[np] = f[1]; pdom[np] = f[2]; pdeps[np] = f[4]; plane[np] = f[5]; pwidth[np] = (int)w; np++;
+        }
+        *e = save; at = save ? e + 1 : e;
+    }
+    if (np == 0) { sy_eprintf("phase-times-calc: empty phase table\n"); return 2; }
+    char *rb = cx_read(run, &sz);
+    if (!rb) { sy_eprintf("phase-times-calc: cannot read %s\n", run); return 2; }
+    long unplaced = 0, sum = 0, first_seg = -1, last_ok = -1, owner_ticks = -1; int attempts = 0, unplaced_n = 0, cur_width = 4, derates = 0, timed = 0;
+    at = rb; lineno = 0;
+    while (*at) {
+        char *e = at; while (*e && *e != '\n') e++;
+        char save = *e; *e = 0; lineno++;
+        if (starts(at, "ATTEMPT_TIME\t")) {
+            char *f[4]; int n = split(at, f, 4); long ms = 0;
+            if (n < 3 || !starts(f[1], "phase=") || !starts(f[2], "wall_ms=") || !parse_num(f[2] + 8, &ms) || f[1][6] == 0) {
+                sy_eprintf("phase-times-calc: %s:%d malformed ATTEMPT_TIME\n", run, lineno); return 2;
+            }
+            const char *name = f[1] + 6;
+            int k = place(name), d = domain(name);
+            attempts++; sum += ms; dtot[d] += ms; dcnt[d]++; if (ms > dmax[d]) dmax[d] = ms;
+            if (k < 0) { unplaced += ms; unplaced_n++; } else { pdur[k] += ms; pcnt[k]++; }
+            wtime[cur_width] += ms;
+            if (owner_ticks >= 0 && nev + 2 <= 2 * MAXA) {
+                ev_t[nev] = owner_ticks * 10; ev_d[nev++] = 1;
+                ev_t[nev] = owner_ticks * 10 + ms; ev_d[nev++] = -1; timed++;
+            }
+            owner_ticks = -1;
+        } else if (starts(at, "RESUME\t") || starts(at, "KILL\t") || starts(at, "WIDEN\t")) {
+            /* 改宽行(降宽 RESUME/KILL,回升 WIDEN): "parallel=K" 是此后生效的宽度;没有该字段的行不改宽度。 */
+            int at_p = tx_find(at, tx_len(at, 2000), "\tparallel=", 10);
+            if (at_p >= 0 && at[at_p + 10] >= '1' && at[at_p + 10] <= '4') { cur_width = at[at_p + 10] - '0'; derates++; }
+        } else if (has(at, " owner-pid=") && has(at, " start=")) {
+            /* 尝试的属主行: start= 是属主进程的启动时刻(时钟滴答,每秒 100),与随后的 wall_ms 组成区间。 */
+            int at_s = tx_find(at, tx_len(at, 2000), " start=", 7); long tk = 0; int j = at_s + 7, dg = 0;
+            for (; at[j] >= '0' && at[j] <= '9'; j++) { tk = tk * 10 + (at[j] - '0'); dg++; }
+            owner_ticks = dg ? tk : -1;
+        } else if (starts(at, "SEGMENT\t") || starts(at, "SUPERVISE\t")) {
+            int seg = starts(at, "SEGMENT\t");
+            char *f[6]; int n = split(at, f, 6); long ts = 0;
+            if (n >= 2 && parse_num(f[1], &ts)) {
+                if (seg && first_seg < 0) first_seg = ts;
+                if (!seg && n >= 4 && tx_eqz(f[3], "rc=0")) last_ok = ts;
+            }
+        }
+        *e = save; at = save ? e + 1 : e;
+    }
+    if (attempts == 0) { sy_eprintf("phase-times-calc: no ATTEMPT_TIME rows in %s\n", run); return 2; }
+    /* 关键路径:表按序,依赖必须指向更早的行 */
+    long cp = 0; int cpend = -1;
+    for (i = 0; i < np; i++) {
+        long best = 0; int pred = -1;
+        char dcopy[2048]; size_t dl = tx_len(pdeps[i], 2000); mm_copy(dcopy, sizeof dcopy, pdeps[i], dl); dcopy[dl] = 0;
+        if (!tx_eqz(dcopy, "-")) {
+            char *p = dcopy;
+            for (;;) {
+                char *c = p; while (*c && *c != ',') c++;
+                char sv = *c; *c = 0;
+                int k = find(p);
+                if (k < 0 || k >= i) { sy_eprintf("phase-times-calc: phase %s: dependency %s unknown or not earlier\n", pid[i], p); return 2; }
+                if (pfin[k] >= best) { best = pfin[k]; pred = k; }
+                if (!sv) break;
+                p = c + 1;
+            }
+        }
+        pfin[i] = best + pdur[i]; ppred[i] = pred;
+        if (pfin[i] >= cp) { cp = pfin[i]; cpend = i; }
+    }
+    int pathn = 0, pathrun = 0;
+    for (i = cpend; i >= 0; i = ppred[i]) { pathn++; if (pdur[i] > 0) pathrun++; }
+    long wall_s = (last_ok >= 0 && (start >= 0 || first_seg >= 0)) ? last_ok - (start >= 0 ? start : first_seg) : -1;
+    long cp_total = cp + unplaced;
+    char a[32], b[32], c[32];
+    for (i = 0; i < MAXD; i++) {
+        if (!dcnt[i]) continue;
+        fmts(dtot[i], a, sizeof a); fmts(dmax[i], b, sizeof b);
+        sy_printf("DOMAIN\t%s\t%s\t%s\t%d\n", dname[i], a, b, dcnt[i]);
+    }
+    fmts(sum, a, sizeof a);
+    if (wall_s > 0) {
+        long r100 = (sum * 100 / 1000 + wall_s / 2) / wall_s;
+        sy_printf("SUM\tattempts=%d\tsum_s=%s\twall_s=%ld\tratio=%ld.%02ld\n", attempts, a, wall_s, r100 / 100, r100 % 100);
+    } else sy_printf("SUM\tattempts=%d\tsum_s=%s\twall_s=UNMEASURED\tratio=UNMEASURED\n", attempts, a);
+    fmts(cp_total, b, sizeof b); fmts(unplaced, c, sizeof c);
+    sy_printf("CRITICAL\tcp_s=%s\tpath_phases=%d\tpath_with_time=%d\tunplaced_s=%s\tunplaced_attempts=%d\n", b, pathn, pathrun, c, unplaced_n);
+    {
+        long head = sum - cp_total; long pct10 = sum > 0 ? head * 1000 / sum : 0;
+        char h[32]; fmts(head, h, sizeof h);
+        char o[32]; if (wall_s > 0) cx_fmt(o, sizeof o, "%ld.%ld", sum / 1000 - wall_s, 0L); else cx_fmt(o, sizeof o, "UNMEASURED");
+        sy_printf("PARALLEL\tserial_sum_s=%s\tcritical_s=%s\theadroom_s=%s\theadroom_pct=%ld.%ld\tsum_minus_wall_s=%s\n", a, b, h, pct10 / 10, pct10 % 10, o);
+    }
+    /* 实际并发度:把每次尝试的 [属主启动, 启动 + wall_ms] 区间按时刻排序扫一遍,得到同时在跑 1..4 次(5 = 5 次及以上)的秒数。 */
+    if (timed) {
+        for (i = 1; i < nev; i++) {
+            long t = ev_t[i]; int d = ev_d[i], j = i - 1;
+            /* 同一时刻先结束后开始,首尾相接的两次尝试不算重叠 */
+            while (j >= 0 && (ev_t[j] > t || (ev_t[j] == t && ev_d[j] > d))) { ev_t[j + 1] = ev_t[j]; ev_d[j + 1] = ev_d[j]; j--; }
+            ev_t[j + 1] = t; ev_d[j + 1] = d;
+        }
+        int lvl = 0, peak = 0; long busy = 0;
+        for (i = 0; i < nev; i++) {
+            if (i && lvl > 0) { long span = ev_t[i] - ev_t[i - 1]; level_ms[lvl > 5 ? 5 : lvl] += span; busy += span; }
+            lvl += ev_d[i]; if (lvl > peak) peak = lvl;
+        }
+        char l1[32], l2[32], l3[32], l4[32], l5[32], bz[32];
+        fmts(level_ms[1], l1, sizeof l1); fmts(level_ms[2], l2, sizeof l2); fmts(level_ms[3], l3, sizeof l3);
+        fmts(level_ms[4], l4, sizeof l4); fmts(level_ms[5], l5, sizeof l5); fmts(busy, bz, sizeof bz);
+        long avg100 = busy > 0 ? (level_ms[1] + 2 * level_ms[2] + 3 * level_ms[3] + 4 * level_ms[4] + 5 * level_ms[5]) * 100 / busy : 0;
+        sy_printf("CONCURRENCY\ttimed_attempts=%d\tbusy_s=%s\tc1_s=%s\tc2_s=%s\tc3_s=%s\tc4_s=%s\tc5plus_s=%s\tpeak=%d\tmean=%ld.%02ld\n", timed, bz, l1, l2, l3, l4, l5, peak, avg100 / 100, avg100 % 100);
+        if (wall_s > 0) { char id[32]; long idle = wall_s * 1000 - busy; if (idle < 0) idle = 0; fmts(idle, id, sizeof id); sy_printf("IDLE\twall_minus_busy_s=%s\n", id); }
+    } else sy_printf("CONCURRENCY\ttimed_attempts=0\tbusy_s=UNMEASURED\n");
+    /* 尝试耗时按当时生效的调度宽度分摊(起始宽度 4;RESUME/KILL 行的 parallel=K 之后为 K)。 */
+    {
+        char w1[32], w2[32], w3[32], w4[32];
+        fmts(wtime[1], w1, sizeof w1); fmts(wtime[2], w2, sizeof w2); fmts(wtime[3], w3, sizeof w3); fmts(wtime[4], w4, sizeof w4);
+        sy_printf("BYWIDTH\twidth_rows=%d\tw4_s=%s\tw3_s=%s\tw2_s=%s\tw1_s=%s\n", derates, w4, w3, w2, w1);
+    }
+    if (show_phases) {
+        for (i = 0; i < np; i++) sstate[i] = 0;
+        for (i = cpend; i >= 0; i = ppred[i]) sstate[i] = 1;
+        for (i = 0; i < np; i++) {
+            if (!pcnt[i]) continue; /* 只列有实测尝试的相位 */
+            char d[32], fn[32]; fmts(pdur[i], d, sizeof d); fmts(pfin[i], fn, sizeof fn);
+            sy_printf("PHASE\t%s\ttotal_s=%s\tattempts=%d\tfinish_s=%s\tcritical=%d\tlane=%s\twidth=%d\n", pid[i], d, pcnt[i], fn, sstate[i], plane[i], pwidth[i]);
+        }
+    }
+    /* --sim W:按 chain-run 调度器的就绪规则,用本记录里各相位的实测合计耗时重排一遍。
+     * 规则(与 tools/chain-run.cx 的 schedule/ready 相同):依赖全部完成;在跑数 < W 且 < 该相 parallelism;
+     * 与在跑相位不同 exclusive_dir、不同 lane("-" 不比较);parallelism=1 的相位独占(它在跑时别的不起,别的在跑时它不起)。
+     * 表序优先。没有实测耗时的相位(并入作业组的、历史占位的)在依赖完成时即刻完成。
+     * 不模拟:分段边界的空等、重试观察、降宽、负载对单相耗时的影响。未入表尝试串行加在前面。 */
+    if (simw) {
+        long now = 0; int left = np, active = 0, peak = 0;
+        for (i = 0; i < np; i++) { sstate[i] = 0; send[i] = 0; }
+        while (left) {
+            int progress = 1;
+            while (progress) {
+                progress = 0;
+                for (i = 0; i < np; i++) {
+                    if (sstate[i]) continue;
+                    int ok = 1; char dcopy[2048]; size_t dl = tx_len(pdeps[i], 2000); mm_copy(dcopy, sizeof dcopy, pdeps[i], dl); dcopy[dl] = 0;
+                    if (!tx_eqz(dcopy, "-")) {
+                        char *p = dcopy;
+                        for (;;) { char *c = p; while (*c && *c != ',') c++; char sv = *c; *c = 0; if (sstate[find(p)] != 2) ok = 0; if (!sv) break; p = c + 1; }
+                    }
+                    if (!ok) continue;
+                    if (pdur[i] == 0) { sstate[i] = 2; send[i] = now; left--; progress = 1; continue; }
+                    if (active >= simw || active >= pwidth[i]) continue;
+                    for (int j = 0; j < np && ok; j++) {
+                        if (sstate[j] != 1) continue;
+                        if (pwidth[i] == 1 || pwidth[j] == 1) ok = 0;
+                        if (!tx_eqz(pdom[i], "-") && tx_eqz(pdom[i], pdom[j])) ok = 0;
+                        if (!tx_eqz(plane[i], "-") && tx_eqz(plane[i], plane[j])) ok = 0;
+                    }
+                    if (!ok) continue;
+                    sstate[i] = 1; send[i] = now + pdur[i]; active++; if (active > peak) peak = active;
+                    if (show_phases) {
+                        char s0[32], s1[32]; fmts(now, s0, sizeof s0); fmts(send[i], s1, sizeof s1);
+                        sy_printf("SIMPHASE\t%s\tstart_s=%s\tend_s=%s\n", pid[i], s0, s1);
+                    }
+                }
+            }
+            if (!left) break;
+            if (!active) { sy_eprintf("phase-times-calc: simulation stalled\n"); return 2; }
+            long next = -1;
+            for (i = 0; i < np; i++) if (sstate[i] == 1 && (next < 0 || send[i] < next)) next = send[i];
+            now = next;
+            for (i = 0; i < np; i++) if (sstate[i] == 1 && send[i] == now) { sstate[i] = 2; active--; left--; }
+        }
+        char sw[32], un[32]; fmts(now + unplaced, sw, sizeof sw); fmts(unplaced, un, sizeof un);
+        sy_printf("SIM\twidth=%ld\twall_s=%s\tunplaced_s=%s\tpeak=%d\n", simw, sw, un, peak);
+    }
+    /* --emit-durations FILE:把本记录压成「每个有耗时的相位一行 ATTEMPT_TIME(合计毫秒)」,未入表部分并成一行
+     * unplaced-serial。它是可入库的缩减记录:再喂给本工具,合计、关键路径与 --sim 的结果不变(尝试数与单次最大值会变)。 */
+    if (efile) {
+        size_t len = 0; int rows = 0;
+        cx_fmt(big, sizeof big, "# reduced chain record: per-phase attempt time totals, by tools/phase-times-calc.cx --emit-durations\n");
+        len = tx_len(big, sizeof big - 1);
+        for (i = 0; i <= np; i++) {
+            char row[400]; long ms = i < np ? pdur[i] : unplaced;
+            if (!ms) continue;
+            cx_fmt(row, sizeof row, "ATTEMPT_TIME\tphase=%s\twall_ms=%ld\n", i < np ? pid[i] : "unplaced-serial", ms);
+            size_t rl = tx_len(row, 399);
+            if (len + rl >= sizeof big) { sy_eprintf("phase-times-calc: buffer\n"); return 2; }
+            mm_copy(big + len, sizeof big - len, row, rl); len += rl; big[len] = 0; rows++;
+        }
+        if (find("unplaced-serial") >= 0 || find("unplaced") >= 0) { sy_eprintf("phase-times-calc: phase id collides with unplaced-serial\n"); return 2; }
+        if (cx_write(efile, big, len)) { sy_eprintf("phase-times-calc: cannot write %s\n", efile); return 2; }
+        sy_printf("EMIT\trows=%d\tfile=%s\n", rows, efile);
+    }
+    if (wfile) {
+        size_t fs = 0; char *old = cx_read(wfile, &fs);
+        if (!old) { sy_eprintf("phase-times-calc: cannot read %s\n", wfile); return 2; }
+        if (fs + 4096 >= sizeof big) { sy_eprintf("phase-times-calc: %s too large\n", wfile); return 2; }
+        mm_copy(big, sizeof big, old, fs); size_t len = fs; big[len] = 0;
+        if (len && big[len - 1] != '\n') big[len++] = '\n';
+        int added = 0;
+        for (i = 0; i < MAXD; i++) {
+            if (!dcnt[i]) continue;
+            char key[160], row[600]; cx_fmt(key, sizeof key, "\n%s-%s\t", prefix, dname[i]);
+            if (tx_find(big, len, key, tx_len(key, 160)) >= 0 || starts(big, key + 1)) continue;
+            fmts(dmax[i], a, sizeof a); fmts(dtot[i], b, sizeof b);
+            cx_fmt(row, sizeof row, "%s-%s\top\t300\t%s\t%s 域合计 %s 秒 %d 次尝试(单次最大值入 measured_s)\t-\t-\n", prefix, dname[i], a, source, b, dcnt[i]);
+            size_t rl = tx_len(row, 599);
+            if (len + rl >= sizeof big) { sy_eprintf("phase-times-calc: buffer\n"); return 2; }
+            mm_copy(big + len, sizeof big - len, row, rl); len += rl; big[len] = 0; added++;
+        }
+        if (added && cx_write(wfile, big, len)) { sy_eprintf("phase-times-calc: cannot write %s\n", wfile); return 2; }
+        sy_printf("WROTE\trows=%d\tfile=%s\n", added, wfile);
+    }
+    sy_printf("PHASE_TIMES_CALC\trc=0\n");
+    return 0;
+}

@@ -1,0 +1,106 @@
+#pragma unisa module awpath
+/* awpath -- where the agentwork files are, in one place.
+ *
+ *   int awp_path(const char *root, const char *kind, char *out, long cap)
+ *     root  the checkout root (borrowed); must be non-empty
+ *     kind  which agentwork file (see the table below); borrowed, borrowed text is not modified
+ *     out   receives ROOT/<relative path>; NUL-terminated
+ *     cap   bytes available in out
+ *   returns
+ *     0  out holds the path
+ *     1  unknown kind
+ *     2  the path or an argument does not fit / an argument is null or empty
+ *
+ * Today every kind resolves to the flat layout the repository uses now, so this resolver changes no
+ * behaviour: it only gives the later readers (M1: dag, units-gen, devtime, phase-budget, freeze-plan,
+ * version-metrics, observe-agents, precommit, ...) one place to ask instead of each hard-coding the
+ * spelling.  The migration that splits ledger/items into per-month / per-id files will change THIS file
+ * and nothing else; M0 deliberately keeps the answer identical to today's path so a caller can switch
+ * over with no output change at all.
+ *
+ * Kinds (the names the items.tsv row DEBT-AW-M0-RESOLVER lists):
+ *   ledger           agentwork/ledger.tsv
+ *   items            agentwork/items.tsv
+ *   dag              agentwork/dag.tsv
+ *   units            build/units.tsv
+ *   version-metrics  build/version-metrics.tsv
+ *   phase-times      build/phase-times.tsv
+ *   freeze           build/freeze.tsv
+ *   workflow         agentwork/WORKFLOW.md
+ *   roles            agentwork/roles           (a directory, not a file)
+ *   pkg-gaps         build/pkg-gaps.tsv
+ *   approvals        build/approvals.tsv       (authorisation rows and sentinel records:
+ *                                               id TAB kind TAB approver TAB date TAB note)
+ *
+ * A kind that arrives with a leading './' or trailing '/' is refused rather than guessed: the caller
+ * names a kind, not a path.
+ *
+ * Check: tools/check-awpath.cx (batch awpath). */
+#pragma unisa use sys.fs
+
+/* Kind name, relative path.  Kept as plain data so the check can drive every kind from one table. */
+typedef struct {
+    const char *kind;
+    const char *rel;
+} AwpKind;
+
+static const AwpKind awp_kinds[] = {
+    {"ledger", "agentwork/ledger.tsv"},
+    {"items", "agentwork/items.tsv"},
+    {"dag", "agentwork/dag.tsv"},
+    {"units", "build/units.tsv"},
+    {"version-metrics", "build/version-metrics.tsv"},
+    {"phase-times", "build/phase-times.tsv"},
+    {"freeze", "build/freeze.tsv"},
+    {"workflow", "agentwork/WORKFLOW.md"},
+    {"roles", "agentwork/roles"},
+    {"pkg-gaps", "build/pkg-gaps.tsv"},
+    {"approvals", "build/approvals.tsv"},
+    {0, 0}};
+
+/* How many kinds the table holds, so a check can assert it covered all of them. */
+int awp_count(void) {
+    int n = 0;
+    while (awp_kinds[n].kind) n++;
+    return n;
+}
+
+/* The kind name at index I, or 0 past the end. */
+const char *awp_kind_at(int i) {
+    if (i < 0) return 0;
+    return awp_kinds[i].kind;
+}
+
+/* The relative path of KIND, or 0 when no row names it. */
+const char *awp_rel(const char *kind) {
+    int i;
+    if (!kind || !kind[0]) return 0;
+    for (i = 0; awp_kinds[i].kind; i++) {
+        const char *a = awp_kinds[i].kind, *b = kind;
+        while (*a && *a == *b) { a++; b++; }
+        if (!*a && !*b) return awp_kinds[i].rel;
+    }
+    return 0;
+}
+
+int awp_path(const char *root, const char *kind, char *out, long cap) {
+    const char *rel;
+    long need = 0, i;
+    if (!root || !root[0] || !kind || !kind[0] || !out || cap <= 1) return 2;
+    /* a caller that passes a path instead of a kind is refused, not resolved */
+    if (kind[0] == '.' && kind[1] == '/') return 1;
+    for (i = 0; kind[i]; i++) if (kind[i] == '/') return 1;
+    rel = awp_rel(kind);
+    if (!rel) return 1;
+    while (root[need]) need++;
+    /* the bound is checked as the bytes go in: no guessed maximum length */
+    if (need + 2 >= cap) return 2;
+    for (i = 0; i < need; i++) out[i] = root[i];
+    if (out[need - 1] != '/') out[need++] = '/';
+    for (i = 0; rel[i]; i++) {
+        if (need + i + 1 >= cap) return 2;
+        out[need + i] = rel[i];
+    }
+    out[need + i] = 0;
+    return 0;
+}

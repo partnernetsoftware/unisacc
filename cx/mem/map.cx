@@ -1,0 +1,147 @@
+#pragma unisa module map
+#pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* L0 mem/map: string-keyed map, handle style (Rust HashMap<String, V> / JS Map).  A map is an int
+   handle (1..64, 0 is never valid), never a pointer; a stale, zero or out-of-range handle gives
+   -EBADF.  Keys are copied in (length KN, may contain NUL); values are the caller's pointers and are
+   never read, copied or freed by the map.  Entries keep insertion order.  Lookup is a hash-filtered
+   linear scan, O(n) per op.  Single-threaded.  On failure the map is unchanged.
+     mm_map_new(&m)            0 and *m = handle, -EINVAL (m null), -ENOMEM (no free slot or memory)
+     mm_map_set(m,k,kn,v,&old) insert/replace; *old (if old != 0) gets the previous value or 0; 0,
+                               -EBADF, -EINVAL (null key with kn > 0, kn < 0), -ENOMEM
+     mm_map_get(m,k,kn,&v)     1 found (*v set), 0 missing (*v = 0), -EBADF, -EINVAL
+     mm_map_del(m,k,kn,&old)   1 removed (*old set if old != 0), 0 missing, -EBADF, -EINVAL;
+                               later entries shift down, so a live cursor is void
+     mm_map_len(m)             entry count, -EBADF
+     mm_map_next(m,&cur,&k,&kn,&v)  walk in insertion order from *cur (start at 0); 1 item (cursor
+                               advanced; k points into map-owned memory valid until the next set/del/
+                               free), 0 end, -EBADF, -EINVAL; any set of a NEW key or del voids cur
+     mm_map_free(m)            drop the keys and the map, retire the handle (values untouched); 0,
+                               -EBADF (so a double free is detected) */
+
+typedef struct { char *key; long kn; unsigned long h; void *val; } mm_ment;
+typedef struct { mm_ment *e; long n, cap; } mm_mapt;
+static mm_mapt *mm_maps[64];
+
+static unsigned long mm_mhash(const char *k, long kn) {
+    unsigned long h = 1469598103934665603UL;
+    long i;
+    for (i = 0; i < kn; i++) { h = h ^ (unsigned char)k[i]; h = h * 1099511628211UL; }
+    return h;
+}
+
+static mm_mapt *mm_mget(int m) {
+    if (m < 1 || m > 64) return 0;
+    return mm_maps[m - 1];
+}
+
+static long mm_mfind(mm_mapt *t, const char *k, long kn, unsigned long h) {
+    long i;
+    for (i = 0; i < t->n; i++) {
+        if (t->e[i].h == h && t->e[i].kn == kn && (kn == 0 || mm_same(t->e[i].key, k, kn))) return i;
+    }
+    return -1;
+}
+
+int mm_map_new(int *m) {
+    int i;
+    mm_mapt *t;
+    if (!m) return -EINVAL;
+    for (i = 0; i < 64; i++) {
+        if (!mm_maps[i]) {
+            t = mm_zalloc(sizeof(mm_mapt));
+            if (!t) return -ENOMEM;
+            mm_maps[i] = t;
+            *m = i + 1;
+            return 0;
+        }
+    }
+    return -ENOMEM;
+}
+
+int mm_map_set(int m, const char *key, long kn, void *val, void **old) {
+    mm_mapt *t = mm_mget(m);
+    long i;
+    unsigned long h;
+    char *kc;
+    if (!t) return -EBADF;
+    if (kn < 0 || (!key && kn > 0)) return -EINVAL;
+    h = mm_mhash(key, kn);
+    i = mm_mfind(t, key, kn, h);
+    if (i >= 0) {
+        if (old) *old = t->e[i].val;
+        t->e[i].val = val;
+        return 0;
+    }
+    if (t->n >= t->cap) {
+        long nc = t->cap ? t->cap * 2 : 8;
+        mm_ment *ne;
+        if (nc > 0x7fffffffffffffffL / (long)sizeof(mm_ment)) return -ENOMEM;
+        ne = mm_grow(t->e, nc * (long)sizeof(mm_ment));
+        if (!ne) return -ENOMEM;
+        t->e = ne;
+        t->cap = nc;
+    }
+    kc = mm_alloc(kn + 1);
+    if (!kc) return -ENOMEM;
+    if (kn > 0 && mm_copy(kc, kn + 1, key, kn)) { mm_free(kc); return -EINVAL; }
+    kc[kn] = 0;
+    t->e[t->n].key = kc; t->e[t->n].kn = kn; t->e[t->n].h = h; t->e[t->n].val = val;
+    t->n = t->n + 1;
+    if (old) *old = 0;
+    return 0;
+}
+
+int mm_map_get(int m, const char *key, long kn, void **val) {
+    mm_mapt *t = mm_mget(m);
+    long i;
+    if (!t) return -EBADF;
+    if (kn < 0 || (!key && kn > 0)) return -EINVAL;
+    i = mm_mfind(t, key, kn, mm_mhash(key, kn));
+    if (val) *val = i >= 0 ? t->e[i].val : 0;
+    return i >= 0 ? 1 : 0;
+}
+
+int mm_map_del(int m, const char *key, long kn, void **old) {
+    mm_mapt *t = mm_mget(m);
+    long i;
+    if (!t) return -EBADF;
+    if (kn < 0 || (!key && kn > 0)) return -EINVAL;
+    i = mm_mfind(t, key, kn, mm_mhash(key, kn));
+    if (i < 0) { if (old) *old = 0; return 0; }
+    if (old) *old = t->e[i].val;
+    mm_free(t->e[i].key);
+    for (; i + 1 < t->n; i++) t->e[i] = t->e[i + 1];
+    t->n = t->n - 1;
+    return 1;
+}
+
+long mm_map_len(int m) {
+    mm_mapt *t = mm_mget(m);
+    if (!t) return -EBADF;
+    return t->n;
+}
+
+int mm_map_next(int m, long *cursor, const char **key, long *kn, void **val) {
+    mm_mapt *t = mm_mget(m);
+    if (!t) return -EBADF;
+    if (!cursor || *cursor < 0) return -EINVAL;
+    if (*cursor >= t->n) return 0;
+    if (key) *key = t->e[*cursor].key;
+    if (kn) *kn = t->e[*cursor].kn;
+    if (val) *val = t->e[*cursor].val;
+    *cursor = *cursor + 1;
+    return 1;
+}
+
+int mm_map_free(int m) {
+    mm_mapt *t = mm_mget(m);
+    long i;
+    if (!t) return -EBADF;
+    for (i = 0; i < t->n; i++) mm_free(t->e[i].key);
+    mm_free(t->e);
+    mm_free(t);
+    mm_maps[m - 1] = 0;
+    return 0;
+}

@@ -1,0 +1,274 @@
+/* tools/batch-packages-gen.cx -- which tape-library packages each test batch reaches, and its layer tier.
+ *
+ *   sh ./unisacc.com tools/batch-packages-gen.cx -- --write|--check [--table FILE] [--dump FILE]
+ *
+ * Run from the repo root. Facts in: `tools/affected.cx -- --closure-dump` (per IMPLEMENTED SOURCE batch
+ * of tests/batches.tsv every file its roots reach and by which edge: source, use, literal, literal-use,
+ * arg, arg-use, table, guard; directories named by a literal or a guard) and build/tlib-packages.tsv
+ * (cxlib.tlibpkg: units, exclusions, opaque units, dependencies). --dump FILE reads a saved dump instead
+ * of running affected. Table out: build/batch-packages.tsv (or --table FILE), nine TAB fields
+ *   kind  name  layer  packages  subject  ptier  basis  dependents  units
+ * layer: the coarse cut by batch id and source path prefix alone (base ext stream compiler driver chain
+ *             release; `all` for a batch no rule names -- `affected --layer L` always adds layer all).
+ * kind pkg:   packages = the package and every package it depends on (transitively); dependents = every
+ *             package that depends on it; units = every file the package owns (packed, excluded, opaque).
+ * kind batch: packages = every package one of whose files the batch reaches, closed over dependencies
+ *             (so a change to package P concerns exactly the batches that list P); subject = the reached
+ *             packages no other reached package depends on; ptier and basis:
+ *   chain        basis release (s9 tier release) or chain-tool (reaches a release-chain driver);
+ *   conformance  basis pure: no materials, every reached file is a package file or a tools/ or tests/
+ *                file reached by source/use only, and at least one package is reached -- the batch can
+ *                only fail through its own check code or through package code;
+ *   integration  everything else; basis is the first of materials, nonpkg (a product file outside every
+ *                package), edges (a literal/arg/table/guard edge to a file outside the packages), nopkg.
+ * The table marks tiers; tests/batches.tsv is not edited. It is facts about selection, never a result:
+ * nothing here is a PASS and a batch that was not run is not PASS.
+ * Coarse round (the default, and what is checked in): only the layer column is filled -- no pkg rows, and
+ * packages, subject, ptier, basis are "-" -- so the table depends on tests/batches.tsv alone and does not
+ * move while build/tlib-packages.tsv is being edited. --packages fills the package columns and pkg rows
+ * (the draft of the dependency refinement; not checked in yet, not read by affected yet).
+ * --check: rc 1 with DIFF lines unless the table equals what the facts give now. --write: writes it.
+ * Prints BATCH_PACKAGES<TAB>ok|FAIL|WROTE<TAB>batches=N<TAB>conformance=A<TAB>integration=B<TAB>chain=C<TAB>packages=K.
+ * Exit 0 ok, 1 differs, 2 usage or unreadable input. Check: tools/check-batch-packages.cx. */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+enum { MAXP = 16, MAXB = 4096 };
+static TpPkg pk[MAXP];
+static int npk;
+static unsigned depc[MAXP], rdepc[MAXP];   /* bit sets: the package with its dependency closure; its dependents */
+typedef struct { char id[160]; const char *layer; unsigned reach; int nonpkg, edges, chain, release, mat; } Bt;
+
+/* The coarse layer of a batch, from its id and source path alone (no dependency reasoning): the first
+   rule that matches; a batch no rule names is in layer `all`, which every --layer selection includes. */
+static int pre(const char *s, const char *p) { long n = tx_len(p, 64); return tx_prefix(s, tx_len(s, 4096), p, n); }
+static const char *layer_of(const char *id, const char *src, int release) {
+    if (release || pre(id, "release-")) return "release";
+    if (pre(id, "chain-") || pre(id, "candidate-chain") || pre(src, "tools/check-chain") || pre(src, "tools/chain-") || pre(src, "tools/check-candidate-chain")) return "chain";
+    if (pre(id, "stream-") || pre(id, "streams") || pre(id, "cx-stream-") || pre(src, "tests/stream")) return "stream";
+    if (pre(id, "tlib-ext-") || pre(src, "ext/")) return "ext";
+    if (pre(id, "cx-core-") || pre(id, "tlib-base") || pre(src, "cx/check_owned.cx") || pre(src, "cx/sys/") || pre(src, "cx/mem/") || pre(src, "cx/text/") || pre(src, "cx/core/")) return "base";
+    if (pre(id, "cx-driver-") || pre(id, "driver-") || pre(src, "src/")) return "driver";
+    if (pre(id, "pp-") || pre(id, "lower-") || pre(id, "opt-") || pre(id, "prune-") || pre(id, "encoder-") || pre(id, "netregen-") || pre(src, "cx/compiler/")) return "compiler";
+    return "all";
+}
+static const char *layer_of_pkg(const char *name) {
+    return tx_eqz(name, "cx.base") ? "base" : tx_eqz(name, "cx.stream") ? "stream" : pre(name, "ext.") ? "ext" :
+           tx_eqz(name, "cx.compile") ? "compiler" : tx_eqz(name, "cx.driver") ? "driver" : "all";
+}
+static Bt bt[MAXB];
+static int nbt, with_pkgs;
+
+static void die(const char *a, const char *b) { fprintf(stderr, "batch-packages-gen: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static int pkg_index(const char *name) {
+    int i;
+    for (i = 0; i < npk; i++) if (tx_eqz(pk[i].pkg, name)) return i;
+    return -1;
+}
+/* the package that owns file REL (packed, excluded or opaque), or -1 */
+static int pkg_of(const char *rel) {
+    int i;
+    for (i = 0; i < npk; i++)
+        if (tp_find_unit(&pk[i], rel) >= 0 || tp_find_excl(&pk[i], rel) >= 0 || tp_find_opaque(&pk[i], rel) >= 0) return i;
+    return -1;
+}
+/* the package one of whose units lives directly in directory REL, or -1 */
+static int pkg_of_dir(const char *rel) {
+    int i, u;
+    long n = tx_len(rel, 4096);
+    for (i = 0; i < npk; i++)
+        for (u = 0; u < pk[i].nunit; u++) {
+            const char *p = pk[i].unit[u];
+            long pn = tx_len(p, TP_NAME);
+            if (pn > n + 1 && tx_prefix(p, pn, rel, n) && p[n] == '/' && tx_chr(p + n + 1, pn - n - 1, '/') < 0) return i;
+        }
+    return -1;
+}
+static void load_packages(const char *root) {
+    char why[512];
+    long nn = 0, i = 0, e;
+    char *names = tp_names(root, &nn);
+    int k, d, changed = 1;
+    if (!names) die("cannot read build/tlib-packages.tsv", 0);
+    while (i < nn) {
+        char one[64];
+        e = i;
+        while (e < nn && names[e] != '\n') e++;
+        if (e > i) {
+            if (npk == MAXP) die("too many packages", 0);
+            if (tx_copy(one, sizeof one, names + i, e - i)) die("package name too long", 0);
+            if (tp_load(root, one, &pk[npk], why, sizeof why)) die(why, 0);
+            npk++;
+        }
+        i = e + 1;
+    }
+    mm_free(names);
+    for (k = 0; k < npk; k++) depc[k] = 1u << k;
+    while (changed) {
+        changed = 0;
+        for (k = 0; k < npk; k++)
+            for (d = 0; d < pk[k].ndep; d++) {
+                int j = pkg_index(pk[k].dep_pkg[d]);
+                unsigned was = depc[k];
+                if (j < 0) die("dependency names no package", pk[k].dep_pkg[d]);
+                depc[k] |= depc[j];
+                if (depc[k] != was) changed = 1;
+            }
+    }
+    for (k = 0; k < npk; k++) {
+        rdepc[k] = 0;
+        for (d = 0; d < npk; d++) if (d != k && (depc[d] & (1u << k))) rdepc[k] |= 1u << d;
+    }
+}
+
+static int is_chain_tool(const char *p) {
+    return tx_eqz(p, "tools/candidate-chain.cx") || tx_eqz(p, "tools/chain-run.cx") || tx_eqz(p, "tools/chain-step.cx") || tx_eqz(p, "tools/release-build.cx");
+}
+static int is_use_edge(const char *via, long n) { return (n == 6 && tx_prefix(via, n, "source", 6)) || (n == 3 && tx_prefix(via, n, "use", 3)); }
+
+/* one line of the dump; 0, or -1 when malformed */
+static int dump_line(const char *l, long n) {
+    long o[5], ln[5];
+    int f, nf = (int)tx_fields(l, n, '\t');
+    char id[160], path[4400];
+    Bt *B;
+    if (n >= 16 && tx_prefix(l, n, "CLOSURE_SUMMARY\t", 16)) return 0;
+    if (nf < 4 || nf > 5) return -1;
+    for (f = 0; f < nf; f++) if (tx_field(l, n, '\t', f, &o[f], &ln[f])) return -1;
+    if (ln[0] != 1 || tx_copy(id, sizeof id, l + o[1], ln[1])) return -1;
+    if (l[0] == 'B') {
+        if (nf != 5 || nbt == MAXB) return -1;
+        B = &bt[nbt++];
+        B->reach = 0; B->nonpkg = B->edges = B->chain = 0;
+        if (tx_copy(B->id, sizeof B->id, id, ln[1]) || tx_copy(path, sizeof path, l + o[4], ln[4])) return -1;
+        B->release = ln[2] == 7 && tx_prefix(l + o[2], 7, "release", 7);
+        B->layer = layer_of(B->id, path, B->release);
+        B->mat = !(ln[3] == 1 && l[o[3]] == '-');
+        return 0;
+    }
+    if (nf != 4 || !nbt || !tx_eqz(bt[nbt - 1].id, id)) return -1;
+    B = &bt[nbt - 1];
+    if (tx_copy(path, sizeof path, l + o[3], ln[3])) return -1;
+    if (l[0] == 'C') {
+        int p = pkg_of(path), mine = tx_prefix(path, ln[3], "tools/", 6) || tx_prefix(path, ln[3], "tests/", 6);
+        if (p >= 0) { B->reach |= 1u << p; return 0; }
+        if (is_chain_tool(path)) B->chain = 1;
+        if (!mine) B->nonpkg++;
+        else if (!is_use_edge(l + o[2], ln[2])) B->edges++;
+        return 0;
+    }
+    if (l[0] == 'D') {
+        int p = pkg_of_dir(path);
+        if (p >= 0) B->reach |= 1u << p; else B->edges++;
+        return 0;
+    }
+    return -1;
+}
+
+static void put_set(TpBuf *o, unsigned set) {
+    int k, any = 0;
+    for (k = 0; k < npk; k++) if (set & (1u << k)) { if (any) tp_put(o, ";", 1); tp_puts(o, pk[k].pkg); any = 1; }
+    if (!any) tp_put(o, "-", 1);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], table[4400], *dump = 0, *old;
+    const char *dump_file = 0, *table_arg = 0;
+    size_t dn = 0, on = 0;
+    int a, write = -1, k, u, conf = 0, integ = 0, chain = 0, bad = 0;
+    long i = 0, e;
+    TpBuf o;
+    o.b = 0; o.n = 0; o.cap = 0; o.bad = 0;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--write")) write = 1;
+        else if (tx_eqz(argv[a], "--check")) write = 0;
+        else if (tx_eqz(argv[a], "--table") && a + 1 < argc) table_arg = argv[++a];
+        else if (tx_eqz(argv[a], "--dump") && a + 1 < argc) dump_file = argv[++a];
+        else if (tx_eqz(argv[a], "--packages")) with_pkgs = 1;
+        else write = -2;
+    }
+    if (write < 0) { fprintf(stderr, "usage: batch-packages-gen.cx -- --write|--check [--packages] [--table FILE] [--dump FILE]\n"); return 2; }
+    if (sy_is_reg("tests/batches.tsv") != 1 || sy_realpath(".", root, sizeof root) < 0) die("run from the repo root", 0);
+    if (cx_fmt(table, sizeof table, "%s", table_arg ? table_arg : "build/batch-packages.tsv")) die("path too long", 0);
+    if (with_pkgs) load_packages(root);
+    if (dump_file) { dump = cx_read(dump_file, &dn); if (!dump) die("cannot read the dump", dump_file); }
+    else {
+        char prod[4400];
+        char *av[] = {"sh", prod, "tools/affected.cx", "--", "--closure-dump", 0};
+        int rc;
+        if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) die("path too long", 0);
+        rc = cx_runv_timeout(av, 50, &dump, &dn);
+        if (rc != 0 || !dump) { fprintf(stderr, "batch-packages-gen: affected --closure-dump rc=%d\n", rc); return 2; }
+    }
+    if (dn < 16 || tx_find(dump, (long)dn, "CLOSURE_SUMMARY\t", 16) < 0) die("the closure dump is incomplete (no CLOSURE_SUMMARY)", 0);
+    while (i < (long)dn) {
+        e = i;
+        while (e < (long)dn && dump[e] != '\n') e++;
+        if (e > i && dump_line(dump + i, e - i)) { fprintf(stderr, "batch-packages-gen: malformed dump line at byte %ld\n", i); return 2; }
+        i = e + 1;
+    }
+    if (!nbt) die("the closure dump names no batch", 0);
+
+    tp_puts(&o, "# build/batch-packages.tsv -- generated by tools/batch-packages-gen.cx --write; do not edit. Checked by tools/check-batch-packages.cx; read by tools/affected.cx --by-package.\n");
+    tp_puts(&o, "# pkg rows: packages = itself and what it depends on, dependents = what depends on it, units = the files it owns. batch rows: packages = every package the batch reaches (closed over dependencies), subject = the reached packages nothing else reached depends on, ptier conformance|integration|chain and its basis. Facts for selection, never a test result.\n");
+    tp_puts(&o, "# layer (coarse, by batch id and source path prefix only): base ext stream compiler driver chain release, and all for every batch no prefix rule names; a --layer selection always includes layer all.\n");
+    tp_puts(&o, "kind\tname\tlayer\tpackages\tsubject\tptier\tbasis\tdependents\tunits\n");
+    for (k = 0; k < npk; k++) {
+        int any = 0;
+        tp_puts(&o, "pkg\t"); tp_puts(&o, pk[k].pkg); tp_put(&o, "\t", 1); tp_puts(&o, layer_of_pkg(pk[k].pkg)); tp_put(&o, "\t", 1);
+        put_set(&o, depc[k]); tp_puts(&o, "\t-\t-\t-\t"); put_set(&o, rdepc[k]); tp_put(&o, "\t", 1);
+        for (u = 0; u < pk[k].nunit; u++) { if (any) tp_put(&o, ";", 1); tp_puts(&o, pk[k].unit[u]); any = 1; }
+        for (u = 0; u < pk[k].nexcl; u++) { if (any) tp_put(&o, ";", 1); tp_puts(&o, pk[k].excl[u]); any = 1; }
+        for (u = 0; u < pk[k].nopq; u++) if (tp_find_unit(&pk[k], pk[k].opq[u]) < 0) { if (any) tp_put(&o, ";", 1); tp_puts(&o, pk[k].opq[u]); any = 1; }
+        tp_put(&o, "\n", 1);
+    }
+    for (k = 0; k < nbt; k++) {
+        Bt *B = &bt[k];
+        unsigned all = 0, top;
+        const char *tier, *basis;
+        int j;
+        for (j = 0; j < npk; j++) if (B->reach & (1u << j)) all |= depc[j];
+        top = all;
+        for (j = 0; j < npk; j++) if (all & (1u << j)) top &= ~(depc[j] & ~(1u << j));
+        if (!with_pkgs) { tier = "-"; basis = "-"; }
+        else if (B->release) { tier = "chain"; basis = "release"; chain++; }
+        else if (B->chain) { tier = "chain"; basis = "chain-tool"; chain++; }
+        else if (!B->mat && !B->nonpkg && !B->edges && all) { tier = "conformance"; basis = "pure"; conf++; }
+        else { tier = "integration"; basis = B->mat ? "materials" : B->nonpkg ? "nonpkg" : B->edges ? "edges" : "nopkg"; integ++; }
+        tp_puts(&o, "batch\t"); tp_puts(&o, B->id); tp_put(&o, "\t", 1); tp_puts(&o, B->layer); tp_put(&o, "\t", 1);
+        put_set(&o, all); tp_put(&o, "\t", 1); put_set(&o, top); tp_put(&o, "\t", 1);
+        tp_puts(&o, tier); tp_put(&o, "\t", 1); tp_puts(&o, basis); tp_puts(&o, "\t-\t-\n");
+    }
+    if (o.bad || !o.b) die("out of memory", 0);
+    if (write) {
+        if (cx_write(table, o.b, (size_t)o.n)) die("cannot write", table);
+    } else {
+        old = cx_read(table, &on);
+        if (!old) { printf("DIFF\ttable-missing\t%s\n", table); bad = 1; }
+        else if ((long)on != o.n || !mm_same(old, o.b, o.n)) {
+            long x = 0, y = 0, shown = 0;   /* the first few lines that differ, by position */
+            while ((x < (long)on || y < o.n) && shown < 8) {
+                long xe = x, ye = y;
+                while (xe < (long)on && old[xe] != '\n') xe++;
+                while (ye < o.n && o.b[ye] != '\n') ye++;
+                if (xe - x != ye - y || !mm_same(old + x, o.b + y, xe - x)) {
+                    printf("DIFF\ttable=%.*s\n", (int)(xe - x > 160 ? 160 : xe - x), old + x);
+                    printf("DIFF\tfacts=%.*s\n", (int)(ye - y > 160 ? 160 : ye - y), o.b + y);
+                    shown++;
+                }
+                x = xe + 1; y = ye + 1;
+            }
+            printf("DIFF\tregenerate with: sh ./unisacc.com tools/batch-packages-gen.cx -- --write\n");
+            bad = 1;
+        }
+        mm_free(old);
+    }
+    printf("BATCH_PACKAGES\t%s\tbatches=%d\tconformance=%d\tintegration=%d\tchain=%d\tpackages=%d\n",
+           write ? "WROTE" : bad ? "FAIL" : "ok", nbt, conf, integ, chain, npk);
+    return bad;
+}

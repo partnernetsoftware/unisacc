@@ -28,7 +28,7 @@ sh ./unisacc.com tools/check-edit-span.cx -- [EDIT_SPAN_BINARY]
 python3 tests/update-tools-compile.py /tmp/omp-cdx2-editspan-text-20261109 /tmp/omp-cdx2-editspan-text-20261109-tools-compile-review
 ```
 
-`agentwork/pkg-gaps.tsv`当前缺cc13–15记录，本次不补造、不改动；登记不等于库存或包缺口已闭合。
+`build/pkg-gaps.tsv`当前缺cc13–15记录，本次不补造、不改动；登记不等于库存或包缺口已闭合。
 
 Darwin 时钟常量以 `exec/facts/clock-targets.tsv` 为唯一事实，
 `tools/clock-targets-gen.cx` 维护 `include/time.h` 的标记块。
@@ -187,7 +187,7 @@ product/OS state, so first is not an OS-cold or cache-cleared observation.
 Startup, preprocessing/modules, construction, loading, binding, inference,
 user execution, output, validation and cleanup are not measured separately;
 all remain UNMEASURED. Four samples do not estimate p95. This supplies the
-current baseline for [C44-RUN-REUSE-01](../plans/v0.0.44.md), not a cache-hit,
+current baseline for [C44-RUN-REUSE-01](../archive/research-2026-11d/plans/v0.0.44.md), not a cache-hit,
 phase-cost or acceleration claim. The run-reuse mechanism remains unimplemented.
 
 `run-watchdog-bench.cx` independently compares a guarded resolved `/bin/true`
@@ -1149,10 +1149,10 @@ tools/bound 55 sh ./unisacc.com tools/check-tsv-lint.cx
 `aw.cx` 默认根为当前目录，所有命令支持子命令之后的 `--root ROOT`。不生成 `out/aw/`，读命令不写文件；尚未迁移时拒绝，不回退旧表。
 
 ```sh
-tools/bound 55 sh ./unisacc.com tools/aw.cx -- ledger --owner agent-a --since 2026-11-01 --root out/aw-fixture
-tools/bound 55 sh ./unisacc.com tools/aw.cx -- items --state open --owner agent-a --root out/aw-fixture
-tools/bound 55 sh ./unisacc.com tools/aw.cx -- check --root out/aw-fixture
-tools/bound 55 sh ./unisacc.com tools/aw.cx -- migrate --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/aw.cx -- ledger --owner agent-a --since 2026-11-01 --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/aw.cx -- items --state open --owner agent-a --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/aw.cx -- check --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/aw.cx -- migrate --root out/aw-fixture
 ```
 
 账本规范分片带原六列表头，分片键为时间前七字节及第六列可安全文件名的角色/模型；不猜测作者。非规范历史行进入 `ledger/legacy.tsv`：严格双列表头 `aw-legacy-v1-hex<TAB>newline`，每行严格两列：原行字节的小写十六进制、换行存在位 `0|1`。存储及迁移等价保留原行内容和行尾位；排序/过滤视图在相邻记录之间始终输出LF，仅最后匹配记录保留原EOF位，避免无LF旧末行被排序到中间后粘连。正常六列分片仍严格校验日期、ID、owner及分片键。账本按整行字节排序（即时间、ID及其余字段），重复事件保留。看板每项严格为旧十一列表头加单行，文件名等于ID，按整行字节排序。筛选只使用能解释的实际字段，`since` 排除无法识别日期的历史行。
@@ -1164,9 +1164,9 @@ tools/bound 55 sh ./unisacc.com tools/aw.cx -- migrate --root out/aw-fixture
 真实CLI检查分三项，各自55秒总预算（包含原生编译），不能将三项包装为同一55秒批：
 
 ```sh
-tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- pure
-tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- parallel
-tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- conflict
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/check-aw.cx -- pure
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/check-aw.cx -- parallel
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/check-aw.cx -- conflict
 ```
 
 每模式创建唯一合成夹具，编译原生aw后真实执行；parallel另编译原生写者，两个独立main克隆的两个进程各追加20条自己的月/owner账本并改不同项，真实提交合并零冲突；conflict验证同ID冲突仅一个文件及双方状态。父最终实测pure 10.85秒、parallel 16.01秒、conflict 10.40秒，各原55秒不变，三者 `CHECK_AW failed=0`。源码仓旧表原字节及新目录存在性/身份均未变；无LF末行排序粘连、合法空owner误拒绝均已先复现再实测修复。旧items空owner及自由文本owner/state原样迁移，筛选允许空值与干净UTF8按字段相等。真实数据从未迁移；正式迁移、删旧及25处读写引用切换仅由cc静默窗口执行。
@@ -1174,9 +1174,9 @@ tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- conflict
 ### 原生追加单条事件
 
 ```sh
-tools/bound 55 sh ./unisacc.com tools/aw.cx -- append --owner agent-a --id ITEM-1 --event verified --evidence fixture --root out/aw-fixture
-tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- append
-tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- append-concurrent
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/aw.cx -- append --owner agent-a --id ITEM-1 --event verified --evidence fixture --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/check-aw.cx -- append
+tools/bound 55 sh ./unisacc.com archive/agentwork-retire-2026-11/tools/check-aw.cx -- append-concurrent
 ```
 
 `append` 只接受已迁移布局，默认真实UTC日期及commit `-`，可显式指定 `--date YYYY-MM-DD`、`--commit COMMIT`。校验六列、日期与分片键后写入 `ledger/YYYY-MM/OWNER.tsv`；完整六列事件相同为 `ALREADY_PRESENT rows_added=0`，同ID的不同事件仍追加。输出仅状态及相对分片路径，不回显证据。
@@ -1478,7 +1478,7 @@ candidate-chain pack 的固定路径收集六片/P4/两份 manager，保留原�
 的 BLOCKER 行数写入 `STATE/chain-adopt.tsv` 并打印，供发布说明披露，不隐藏、不改判。
 四个链文件仍进 `prepare.seal`。采纳不重跑 compare，链内人工介入须另行披露。
 初表七角色名与历版候选表一致：record 为 `unisacc.com.build.json`、别名 `build.json`、
-zip 为 `unisacc-VERSION-win-arm64.zip`。
+zip 为 `unisacc-VERSION-win-arm64.zip`(仅版本 0.0.62 及更早;0.0.63 起合同不含 zip,表中 zip 两列写 `-`,阈值见 `rcand_has_zip` 与 `RCAND_ZIP_LAST`)。
 
 `upstream-evidence.tsv` 的1..3只来自真实完成的准备步骤；执行者必须调用
 `rp_verify_upstream` 重核配置、原输入、收集材料、七资产和六独立片，不能接受任意配置PASS。

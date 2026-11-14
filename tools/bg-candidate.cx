@@ -6,7 +6,7 @@
  *   sh ./unisacc.com tools/bg-candidate.cx -- status [REV] [COMMON]
  *   sh ./unisacc.com tools/bg-candidate.cx -- promote --check --rev HEX40 [COMMON]
  *   sh ./unisacc.com tools/bg-candidate.cx -- prune [--keep N] [--trash ABS] [--dry-run] [COMMON]
- *   COMMON: [--root ABS] (default: the current directory)  [--base ABS] (default: ROOT/out/b1)
+ *   COMMON: [--root ABS] (default: the current directory)  [--base ABS] (default: $TMPDIR/unisacc-bg-b1-UID)
  *
  * A candidate is the directory BASE/<rev>: the --out of one tools/chain-run.cx run, cold from
  * source, with segments and the supervisor, exactly like a release chain. This tool adds no
@@ -58,10 +58,18 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.limits
 
 #define BG_PATH 4400
 #define BG_MAXC 256
-static long bg_slack_s = 600;
+/* Limits come from build/limits.tsv (cxlib.limits); an unknown id refuses. */
+static void die(const char *what, const char *arg);
+static long bg_lim(const char *id, int max) {
+    double v = max ? lm_max(id, 0) : lm_get(id, 0);
+    if (v < 1) die("unknown limit id", id);
+    return (long)v;
+}
+static long bg_slack_s;
 
 typedef struct {
     char rev[41], dir[BG_PATH];
@@ -106,6 +114,26 @@ static int file_sha(const char *path, char hex[65], long *bytes) {
     free(b);
     if (bytes) *bytes = (long)n;
     return bad ? -1 : 0;
+}
+/* Same rule as chain-run.cx plan_semantics_hex: comment rows dropped, column 4 (timeout_s) and
+   columns 8.. removed, sha256 of the rest. Must stay identical to that function. */
+static int plan_semantics_hex(const char *b, size_t n, char hex[65]) {
+    char *s = malloc(n + 1);
+    size_t i, k = 0;
+    int field = 0, comment = 0, bol = 1, rc;
+    if (!s) return -1;
+    for (i = 0; i < n; i++) {
+        char c = b[i];
+        if (bol) { comment = c == '#'; field = 0; bol = 0; }
+        if (c == '\n') { if (!comment) s[k++] = c; bol = 1; continue; }
+        if (comment) continue;
+        if (c == '\t') { field++; if (field == 3 || field >= 7) continue; }
+        if (field == 3 || field >= 7) continue;
+        s[k++] = c;
+    }
+    rc = sy_sha256_hex(s, (long)k, hex);
+    free(s);
+    return rc ? -1 : 0;
 }
 static void append_row(const char *dir, const char *leaf, const char *row) {
     char p[BG_PATH];
@@ -359,12 +387,7 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
         join(p, root, "tools/chain-run.cx");
         if (sy_exists(p) != 1) die("no chain-run at", p);
     }
-    if (sy_mkdir(base, 0755) && sy_exists(base) != 1) {
-        char parent[BG_PATH];
-        join(parent, root, "out");
-        (void)sy_mkdir(parent, 0755);
-        if (sy_mkdir(base, 0755) && sy_exists(base) != 1) die("cannot make", base);
-    }
+    if (sy_mkdir(base, 0755) && sy_exists(base) != 1) die("cannot make", base);
     n = list(names, BG_MAXC);
     if (n < 0) die("cannot list", base);
     for (i = 0; i < n; i++) {
@@ -482,7 +505,13 @@ static int cmd_promote(const char *rev) {
     if (!has_line(b, want)) { free(b); return refuse(rev, "rev-mismatch", "identity"); }
     if (!has_line(b, "mode=full") || !has_line(b, "candidate=source")) { free(b); return refuse(rev, "identity-not-full-source", 0); }
     join(p, c.dir, "plan.tsv");
-    if (file_sha(p, hex, 0) || cx_fmt(want, sizeof want, "plan=%s", hex)) { free(b); return refuse(rev, "no-plan", 0); }
+    {
+        size_t pn = 0;
+        char *pb = cx_read(p, &pn);
+        int bad = !pb || plan_semantics_hex(pb, pn, hex) || cx_fmt(want, sizeof want, "plan-semantics=%s", hex);
+        free(pb);
+        if (bad) { free(b); return refuse(rev, "no-plan", 0); }
+    }
     if (!has_line(b, want)) { free(b); return refuse(rev, "plan-mismatch", 0); }
     free(b);
     if (!c.total || c.donec != c.total) return refuse(rev, "phases-incomplete", c.last[0] ? c.last : 0);
@@ -590,7 +619,8 @@ static int usage(void) {
 }
 int main(int argc, char **argv) {
     const char *cmd = argc > 1 ? argv[1] : 0, *rev = 0, *chain = 0, *trash = 0, *only = 0, *root_arg = ".", *base_arg = 0;
-    long deadline_s = 9000, segment_s = 270, segments = 120, keep = 3;
+    long deadline_s = bg_lim("bg.deadline", 0), segment_s = bg_lim("segment", 0), segments = bg_lim("bg.segments", 0), keep = bg_lim("bg.keep", 0);
+    bg_slack_s = bg_lim("bg.slack", 0);
     int i, check = 0, dry = 0, nextra = 0;
     char **extra = 0;
     if (!cmd) return usage();
@@ -607,17 +637,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--base")) base_arg = b;
         else if (!strcmp(a, "--chain")) chain = b;
         else if (!strcmp(a, "--trash")) trash = b;
-        else if (!strcmp(a, "--deadline-s")) deadline_s = number(b, 1, 36000, a);
-        else if (!strcmp(a, "--segment-s")) segment_s = number(b, 1, 270, a);
-        else if (!strcmp(a, "--max-segments")) segments = number(b, 1, 4096, a);
-        else if (!strcmp(a, "--slack-s")) bg_slack_s = number(b, 1, 3600, a);
+        else if (!strcmp(a, "--deadline-s")) deadline_s = number(b, 1, bg_lim("bg.deadline", 1), a);
+        else if (!strcmp(a, "--segment-s")) segment_s = number(b, 1, bg_lim("segment", 1), a);
+        else if (!strcmp(a, "--max-segments")) segments = number(b, 1, bg_lim("bg.segments", 1), a);
+        else if (!strcmp(a, "--slack-s")) bg_slack_s = number(b, 1, bg_lim("bg.slack", 1), a);
         else if (!strcmp(a, "--keep")) keep = number(b, 0, BG_MAXC, a);
         else return usage();
     }
     if (sy_realpath(root_arg, root, sizeof root) < 0) die("cannot resolve root", root_arg);
     if (base_arg) {
         if (base_arg[0] != '/' || cx_fmt(base, sizeof base, "%s", base_arg)) die("--base must be an absolute path", base_arg);
-    } else join(base, root, "out/b1");
+    } else if (cx_fmt(base, sizeof base, "%s/unisacc-bg-b1-%d", sy_tmpdir(), sy_uid())) die("base path too long", 0);
     if (rev && (strlen(rev) != 40 || !is_hex(rev, 40))) die("--rev must be 40 lowercase hex digits", rev);
     if (only && (strlen(only) != 40 || !is_hex(only, 40))) return usage();
     if (trash && trash[0] != '/') die("--trash must be an absolute path", trash);

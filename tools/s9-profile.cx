@@ -1,0 +1,248 @@
+/* tools/s9-profile.cx -- read-only profile of an s9 RUN directory (OUT/s9-run): phases, per-slice wall/wave/fixed
+   overhead, slice concurrency (time-weighted mean and peak), longest batches.
+   Usage: sh ./unisacc.com tools/s9-profile.cx -- RUN_DIR
+   Reads: RUN/plan.tsv (slice, 0, exclusive flag, batch list), RUN/slice-X.start (field 5 = start ns),
+          RUN/slice-X.done (start_ns end_ns rc hash), RUN/slice-X/wave.log (WAVE_BATCH .. wall_ns=, ALL_WAVE .. wall_ns=),
+          RUN/../s9-nightly-*.md (rows "name<TAB>wall_ms" after the "log<TAB>name<TAB>wall_ms" header).
+   Output lines (TAB separated): PHASE, SLICE, TOPBATCH, then SUMMARY with slices/done/running/batches/exclusive/
+   fixed_mean_s/conc_mean/conc_peak.  A slice without .done is RUNNING (no .start: PENDING); a missing or partial
+   file never aborts.  Never writes anything.  Exit 0 if plan.tsv was readable, else 2. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define MAXS 512
+#define MAXB 4096
+
+/* path join with the result kept: a too-long path becomes "" (the read then fails and the file counts as absent) */
+static void pf(char *d, int cap, const char *f, const char *a, const char *b) {
+    int n = snprintf(d, cap, f, a, b);
+    if (n < 0 || n >= cap) d[0] = 0;
+}
+
+static char *rd(const char *path) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 8 * 1024 * 1024) != 0) return 0;
+    char *s = (char *)mm_alloc(n + 1);
+    if (!s) { mm_free(b); return 0; }
+    if (mm_copy(s, n + 1, b, n) != 0) { mm_free(b); mm_free(s); return 0; }
+    s[n] = 0;
+    mm_free(b);
+    return s;
+}
+
+/* tab field IDX (0-based) of the line starting at L (ends at \n); copies into OUT, returns 1 if present */
+static int tabf(const char *l, int idx, char *out, int cap) {
+    int i;
+    for (i = 0; i < idx; i++) {
+        while (*l && *l != '\t' && *l != '\n') l++;
+        if (*l != '\t') return 0;
+        l++;
+    }
+    int n = 0;
+    while (*l && *l != '\t' && *l != '\n' && n < cap - 1) out[n++] = *l++;
+    out[n] = 0;
+    return 1;
+}
+
+/* value of "KEY=" in line L (space or tab delimited), -1 if absent */
+static long kv(const char *l, const char *key) {
+    int kl = (int)strlen(key);
+    const char *p = l;
+    while (*p && *p != '\n') {
+        if ((p == l || p[-1] == '\t' || p[-1] == ' ') && !strncmp(p, key, kl) && p[kl] == '=')
+            return strtol(p + kl + 1, 0, 10);
+        p++;
+    }
+    return -1;
+}
+
+static const char *nextl(const char *p) {
+    while (*p && *p != '\n') p++;
+    return *p ? p + 1 : p;
+}
+
+typedef struct { char name[96]; long ns; } bt_t;
+static bt_t bts[MAXB];
+static int nbt;
+
+typedef struct { long s, e; int state; } sl_t;   /* state 0 pending 1 running 2 done */
+static sl_t sls[MAXS];
+
+int main(int argc, char **argv) {
+    const char *run;
+    char path[1024], name[128], f[256];
+    int a = 1, ns = 0, i, j, nex = 0, ndone = 0, nrun = 0, nbatch = 0;
+    long fixsum = 0, fixn = 0, lo = 0, hi = 0;
+    if (a < argc && !strcmp(argv[a], "--")) a++;
+    if (a >= argc) { fprintf(stderr, "usage: s9-profile.cx -- RUN_DIR\n"); return 2; }
+    run = argv[a];
+    pf(path, sizeof path, "%s/plan.tsv", run, 0);
+    char *plan = rd(path);
+    if (!plan) { printf("S9_PROFILE_ERROR\tno plan.tsv under %s\n", run); return 2; }
+
+    /* phases: s9-nightly-*.md next to the run directory */
+    {
+        char par[1024], names[8192];
+        int n;
+        pf(par, sizeof par, "%s/..", run, 0);
+        int fd = sy_open_read(par);
+        if (fd >= 0) {
+            n = sy_dir_names(fd, names, sizeof names);
+            sy_close(fd);
+            char *q = names;
+            for (i = 0; i < n; i++, q += strlen(q) + 1) {
+                int L = (int)strlen(q);
+                if (strncmp(q, "s9-nightly-", 11) || L < 4 || strcmp(q + L - 3, ".md")) continue;
+                pf(path, sizeof path, "%s/%s", par, q);
+                char *md = rd(path);
+                if (!md) continue;
+                const char *p = md;
+                int on = 0;
+                while (*p) {
+                    if (!strncmp(p, "log\tname\twall_ms", 15)) on = 1;
+                    else if (on && tabf(p, 0, name, sizeof name) && tabf(p, 1, f, sizeof f) && f[0] >= '0' && f[0] <= '9')
+                        printf("PHASE\t%s\t%s\t%s_ms\n", q, name, f);
+                    else if (on && tabf(p, 0, name, sizeof name) && strncmp(p, "step", 4) == 0) {
+                        long w = strtol(strrchr(p, '\t') ? strrchr(p, '\t') + 1 : "", 0, 10);
+                        (void)w;
+                    }
+                    p = nextl(p);
+                }
+                /* "step ... \t<ms>" lines (steps report) */
+                p = md;
+                while (*p) {
+                    if (!strncmp(p, "step ", 5)) {
+                        const char *e = p;
+                        while (*e && *e != '\n') e++;
+                        const char *t = e;
+                        while (t > p && t[-1] != '\t') t--;
+                        if (t > p && t[0] >= '0' && t[0] <= '9') {
+                            int k = 0;
+                            while (p + 5 + k < t - 1 && p[5 + k] != ' ' && k < 60) { name[k] = p[5 + k]; k++; }
+                            name[k] = 0;
+                            printf("PHASE\t%s\tstep:%s\t%ld_ms\n", q, name, strtol(t, 0, 10));
+                        }
+                    }
+                    p = nextl(p);
+                }
+                mm_free(md);
+            }
+        }
+    }
+
+    const char *p = plan;
+    while (*p && ns < MAXS) {
+        char sname[96], bl[1024], ex[16];
+        if (!tabf(p, 0, sname, sizeof sname) || !sname[0]) { p = nextl(p); continue; }
+        tabf(p, 2, ex, sizeof ex);
+        tabf(p, 3, bl, sizeof bl);
+        int isex = ex[0] == '1';
+        int nb = bl[0] ? 1 : 0;
+        for (i = 0; bl[i]; i++) if (bl[i] == ',') nb++;
+        nbatch += nb;
+        nex += isex;
+        sl_t *s = &sls[ns];
+        s->s = s->e = 0; s->state = 0;
+        pf(path, sizeof path, "%s/%s.start", run, sname);
+        char *st = rd(path);
+        if (st) {
+            if (tabf(st, 4, f, sizeof f)) s->s = strtol(f, 0, 10);
+            if (s->s > 0) s->state = 1;
+            mm_free(st);
+        }
+        pf(path, sizeof path, "%s/%s.done", run, sname);
+        char *dn = rd(path);
+        if (dn) {
+            long a0 = 0, a1 = 0;
+            if (tabf(dn, 0, f, sizeof f)) a0 = strtol(f, 0, 10);
+            if (tabf(dn, 1, f, sizeof f)) a1 = strtol(f, 0, 10);
+            if (a0 > 0 && a1 >= a0) { s->s = a0; s->e = a1; s->state = 2; }
+            mm_free(dn);
+        }
+        /* wave.log */
+        long wave = 0, bsum = 0;
+        pf(path, sizeof path, "%s/%s/wave.log", run, sname);
+        char *wl = rd(path);
+        if (wl) {
+            const char *q = wl;
+            while (*q) {
+                if (!strncmp(q, "WAVE_BATCH\t", 11) && nbt < MAXB) {
+                    long w = kv(q, "wall_ns");
+                    if (w >= 0) {
+                        tabf(q, 1, bts[nbt].name, sizeof bts[nbt].name);
+                        bts[nbt].ns = w;
+                        bsum += w;
+                        nbt++;
+                    }
+                } else if (!strncmp(q, "ALL_WAVE\t", 9)) {
+                    long w = kv(q, "wall_ns");
+                    if (w > 0) wave += w;
+                }
+                q = nextl(q);
+            }
+            mm_free(wl);
+        }
+        if (!wave) wave = bsum;
+        if (s->state == 2) {
+            long wall = s->e - s->s;
+            printf("SLICE\t%s\tDONE\tbatches=%d\texclusive=%d\twall_s=%.1f\twave_s=%.1f\tfixed_s=%.1f\n", sname, nb, isex,
+                   wall / 1e9, wave / 1e9, (wall - wave) / 1e9);
+            if (wave > 0) { fixsum += wall - wave; fixn++; }
+            ndone++;
+        } else {
+            printf("SLICE\t%s\t%s\tbatches=%d\texclusive=%d\twave_s=%.1f\n", sname, s->state == 1 ? "RUNNING" : "PENDING",
+                   nb, isex, wave / 1e9);
+            if (s->state == 1) nrun++;
+        }
+        ns++;
+        p = nextl(p);
+    }
+
+    /* concurrency over [min start, max end]; RUNNING slices end at the latest observed end */
+    for (i = 0; i < ns; i++) {
+        if (sls[i].state == 0) continue;
+        if (!lo || sls[i].s < lo) lo = sls[i].s;
+        if (sls[i].e > hi) hi = sls[i].e;
+    }
+    double mean = 0;
+    int peak = 0;
+    if (hi > lo) {
+        static long pts[2 * MAXS + 2];
+        int np = 0;
+        for (i = 0; i < ns; i++) {
+            if (sls[i].state == 0) continue;
+            pts[np++] = sls[i].s;
+            pts[np++] = sls[i].state == 2 ? sls[i].e : hi;
+        }
+        for (i = 1; i < np; i++) { long v = pts[i]; for (j = i - 1; j >= 0 && pts[j] > v; j--) pts[j + 1] = pts[j]; pts[j + 1] = v; }
+        double area = 0;
+        for (i = 0; i + 1 < np; i++) {
+            long m = pts[i], w = pts[i + 1] - pts[i];
+            int c = 0;
+            if (w <= 0) continue;
+            for (j = 0; j < ns; j++) {
+                long e = sls[j].state == 2 ? sls[j].e : hi;
+                if (sls[j].state != 0 && sls[j].s <= m && e > m) c++;
+            }
+            area += (double)c * w;
+            if (c > peak) peak = c;
+        }
+        mean = area / (double)(hi - lo);
+    }
+
+    /* top 10 batches */
+    for (i = 0; i < 10 && i < nbt; i++) {
+        int b = i;
+        for (j = i + 1; j < nbt; j++) if (bts[j].ns > bts[b].ns) b = j;
+        bt_t t = bts[i]; bts[i] = bts[b]; bts[b] = t;
+        printf("TOPBATCH\t%d\t%s\t%.1f_s\n", i + 1, bts[i].name, bts[i].ns / 1e9);
+    }
+    printf("S9_PROFILE\tslices=%d\tdone=%d\trunning=%d\tbatches=%d\texclusive=%d\tfixed_mean_s=%.1f\tconc_mean=%.2f\tconc_peak=%d\n",
+           ns, ndone, nrun, nbatch, nex, fixn ? fixsum / (double)fixn / 1e9 : 0.0, mean, peak);
+    mm_free(plan);
+    return 0;
+}

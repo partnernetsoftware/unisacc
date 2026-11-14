@@ -5,6 +5,7 @@
    Prints PASS/FAIL lines and CX_SYS_SPAWN<TAB>failed=N. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 #pragma unisa use sys.env
 #pragma unisa use sysx.net
 #pragma unisa use mem.bytes
@@ -135,6 +136,88 @@ int main(void) {
         { char *fresh = mm_grow(0, 32); ck(fresh != 0, "grow-null-allocates"); mm_free(fresh); }
         mm_free(g); mm_free(z); mm_free(d); mm_free(0);
         ck(1, "free-null-is-noop");
+    }
+    {   /* sy_spawn_t / sy_proc_*: the one options struct */
+        sy_spawn_t o; sy_child_t c; sy_exit_t st; int r;
+        char *v1[] = {"sh", "-c", "printf %s \"$CX_ONLY\"; pwd; cat; exit 5", 0};
+        char *envv[] = {"CX_ONLY=yes", "PATH=/usr/bin:/bin", 0};
+        sy_spawn_init(&o);
+        ck(o.argv == 0 && o.env == 0 && o.cwd == 0 && o.in_fd == SY_STDIO_INHERIT && o.out_fd == SY_STDIO_INHERIT
+           && o.err_fd == SY_STDIO_INHERIT && o.flags == 0 && o.pgroup == 0 && o.deadline_ms == 0, "init-all-inherit");
+        o.argv = v1; o.env = envv; o.cwd = "/tmp"; o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_PIPE; o.flags = SY_SPAWN_ERR_TO_OUT;
+        r = sy_proc_spawn(&o, &c);
+        ck(r == 0 && c.pid > 0 && c.out_fd >= 0 && c.in_fd == -1 && c.err_fd == -1, "proc-spawn-pipe-fields");
+        slurp(c.out_fd, buf, sizeof buf); c.out_fd = -1;
+        ck(sy_proc_wait(&c, &st) == 0 && st.exited && st.code == 5 && sy_exit_code(&st) == 5 && tx_eq(buf, "yes/tmp\n", 32), "env-cwd-stdin-null-exit5");
+        sy_proc_close(&c);
+        {   char *v[] = {"cat", 0}; char got[32]; sy_spawn_init(&o); o.argv = v; o.in_fd = SY_STDIO_PIPE; o.out_fd = SY_STDIO_PIPE; o.pgroup = -1;
+            r = sy_proc_spawn(&o, &c);
+            ck(r == 0 && c.in_fd >= 0 && c.out_fd >= 0 && sy_write_all(c.in_fd, "ping", 4) == 0, "stdin-pipe-write");
+            sy_close(c.in_fd); c.in_fd = -1;
+            slurp(c.out_fd, got, sizeof got); c.out_fd = -1;
+            ck(tx_eq(got, "ping", 8) && sy_proc_wait(&c, &st) == 0 && st.exited && st.code == 0, "stdin-pipe-echo-wait");
+            ck(sy_proc_wait(&c, &st) < 0, "wait-twice-errno");
+        }
+        {   char *v[] = {"sh", "-c", "sleep 30", 0}; long t0 = sy_now_ms(), dt;
+            sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = 200;
+            r = sy_proc_spawn(&o, &c);
+            ck(r == 0 && sy_proc_try_wait(&c, &st) == 0, "try-wait-running");
+            ck(sy_proc_wait(&c, &st) == 0, "deadline-wait-returns");
+            dt = sy_now_ms() - t0;
+            ck(st.timed_out == 1 && st.sig == 9 && sy_exit_code(&st) == 124 && dt >= 150 && dt < 5000, "deadline-kills-timed-out-124");
+        }
+        {   char *v[] = {"sh", "-c", "sleep 30", 0};
+            sy_spawn_init(&o); o.argv = v; o.pgroup = -1;
+            r = sy_proc_spawn(&o, &c);
+            ck(r == 0 && sy_proc_kill(&c, SIGTERM) == 0 && sy_proc_wait(&c, &st) == 0 && st.exited == 0 && st.sig == 15 && sy_exit_code(&st) == 143 && st.timed_out == 0, "kill-term-group-128-plus-sig");
+            ck(sy_proc_kill(&c, SIGTERM) == -ESRCH, "kill-after-reap-esrch");
+        }
+        {   char *v[] = {"sh", "-c", "exit 7", 0}; int k = 0;
+            sy_spawn_init(&o); o.argv = v; o.out_fd = SY_STDIO_NULL;
+            ck(sy_proc_run(&o, &st) == 0 && st.exited && st.code == 7, "run-exit-7");
+            r = sy_proc_spawn(&o, &c);
+            while (r == 0 && sy_proc_try_wait(&c, &st) == 0 && k++ < 500) sy_sleep_ms(5);
+            ck(r == 0 && st.exited && st.code == 7, "try-wait-reaps");
+        }
+        {   char *vn[] = {"no-such-program-cx-spawn", 0}; char *ve[] = {0}; char *vt[] = {"true", 0};
+            sy_spawn_init(&o); o.argv = vn;
+            ck(sy_proc_spawn(&o, &c) == -ENOENT && sy_proc_run(&o, &st) == -ENOENT, "missing-program-enoent-new");
+            o.argv = vn; o.env = envv;
+            ck(sy_proc_spawn(&o, &c) == -ENOENT, "missing-program-enoent-with-env");
+            o.argv = ve; o.env = 0;
+            ck(sy_proc_spawn(&o, &c) == -EINVAL && sy_proc_spawn(0, &c) == -EINVAL, "empty-argv-einval");
+            o.argv = vt; o.out_fd = SY_STDIO_PIPE;
+            ck(sy_proc_run(&o, &st) == -EINVAL, "run-refuses-pipe");
+            o.out_fd = SY_STDIO_INHERIT; o.cwd = "/no/such/dir/cx";
+            ck(sy_proc_spawn(&o, &c) == -ENOENT, "missing-cwd-enoent-new");
+            ck(sy_proc_wait(0, &st) == -EINVAL && sy_proc_kill(0, 9) == -EINVAL && sy_proc_close(0) == -EINVAL, "null-args-einval");
+        }
+        ck(sy_exit_decode(0x0300, &st) == 0 && st.exited && st.code == 3 && st.raw == 0x0300, "decode-exit");
+        ck(sy_exit_decode(9, &st) == 0 && !st.exited && st.sig == 9 && sy_exit_code(&st) == 137, "decode-signal");
+        ck(sy_exit_decode(0x7f, &st) == -EINVAL && sy_exit_decode(0, 0) == -EINVAL && sy_exit_code(0) == -EINVAL, "decode-refusals");
+        ck(sy_ppid() > 0 && sy_ppid() != sy_pid(), "ppid");
+    }
+    {   /* sy_deadline_t on the monotonic clock */
+        sy_deadline_t n = sy_deadline_never(), p = sy_deadline_in(0), f = sy_deadline_in(300), g = sy_deadline_in(100), m; long w = 0, l;
+        sy_deadline_t arr[3]; int64_t t0 = sy_mono_ns(), t1;
+        ck(t0 > 0 && (t1 = sy_mono_ns()) >= t0, "mono-ns-monotonic");
+        ck(n.at_ns == 0 && sy_deadline_left(&n) == -1 && !sy_deadline_passed(&n) && sy_deadline_left(0) == -1, "never");
+        l = sy_deadline_left(&f);
+        ck(sy_deadline_passed(&p) && sy_deadline_left(&p) == 0 && !sy_deadline_passed(&f) && l > 0 && l <= 300, "in-and-left");
+        ck(sy_deadline_in(-5).at_ns > 0 && sy_deadline_passed(&p), "in-nonpositive-expired");
+        m = sy_deadline_min(&f, &g); ck(m.at_ns == g.at_ns, "min-earlier");
+        m = sy_deadline_min(&n, &f); ck(m.at_ns == f.at_ns, "min-never-yields");
+        m = sy_deadline_min(&n, &n); ck(m.at_ns == 0, "min-both-never");
+        arr[0] = n; arr[1] = f; arr[2] = g;
+        ck(sy_timer_next(arr, 3, &w) == 2 && w > 0 && w <= 100, "timer-next-index");
+        arr[2] = n; ck(sy_timer_next(arr, 3, &w) == 1, "timer-next-skips-never");
+        arr[1] = n; ck(sy_timer_next(arr, 3, &w) == -1 && w == -1 && sy_timer_next(arr, 0, &w) == -1, "timer-next-none");
+        ck(sy_timer_next(arr, 3, 0) == -EINVAL && sy_timer_next(0, 2, &w) == -EINVAL && sy_timer_next(arr, -1, &w) == -EINVAL, "timer-next-einval");
+        {   sy_deadline_t s = sy_deadline_in(60); int64_t a = sy_mono_ns(), b;
+            ck(sy_sleep_until(&s) == 0, "sleep-until-ok"); b = sy_mono_ns();
+            ck(b - a >= 50 * 1000000LL && sy_deadline_passed(&s), "sleep-until-waited");
+            ck(sy_sleep_until(&n) == -EINVAL && sy_sleep_until(0) == -EINVAL && sy_sleep_until(&p) == 0, "sleep-until-refusals");
+        }
     }
     printf("CX_SYS_SPAWN\tfailed=%d\n", failed);
     return failed ? 1 : 0;

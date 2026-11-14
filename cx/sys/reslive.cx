@@ -1,0 +1,29 @@
+#pragma unisa module reslive
+#pragma unisa dock
+/* L0 sys/reslive: a registry count of live handle-like resources (fd, child process, mapping).
+   sy_res_note(kind, +1/-1) is the registration point: a caller that opens a resource notes +1 and one
+   that closes it notes -1. sy_res_live(kind) returns the count noted and not yet released. It is NOT
+   the operating-system total: only callers that note are counted. State is module-private; no system
+   call is made, so the code is the same on every target. Not thread-safe and not signal-safe:
+   callers must serialize notes (re-entry from a signal handler may lose an update). */
+
+enum { SY_RES_FD = 1, SY_RES_PROC = 2, SY_RES_MAP = 3, SYRL_NKIND = 4 };
+
+static long syrl_cnt[SYRL_NKIND];
+
+/* Live count of KIND (SY_RES_FD, SY_RES_PROC, SY_RES_MAP), or -EINVAL for any other kind. */
+long sy_res_live(int kind) {
+    if (kind < 1 || kind >= SYRL_NKIND) return -EINVAL;
+    return syrl_cnt[kind];
+}
+
+/* Registers (+1) or releases (-1) one resource of KIND. Returns the new count; -EINVAL for an unknown
+   kind, a DELTA other than +1/-1, or a release that would take the count below 0 (value unchanged:
+   the deterministic sign of a double close). */
+long sy_res_note(int kind, int delta) {
+    if (kind < 1 || kind >= SYRL_NKIND) return -EINVAL;
+    if (delta != 1 && delta != -1) return -EINVAL;
+    if (delta < 0 && syrl_cnt[kind] <= 0) return -EINVAL;
+    syrl_cnt[kind] = syrl_cnt[kind] + delta;
+    return syrl_cnt[kind];
+}

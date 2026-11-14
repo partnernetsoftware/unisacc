@@ -7,12 +7,12 @@
 ## 1 三条原则
 1. **事实由命令产生,判断由模型产生。** 构建、检查、字节比对、棘轮是命令节点,模型不转述其结果;模型只做定位、评审、裁决,且必须引用命令输出。
 2. **闸门是可执行命令。** 每个工作项开工前写好 gate;"完成"=gate 在干净副本上输出约定结果,而不是谁说完成。没有 gate 的工作项不入库。
-3. **改动先在私有副本;只有一个集成者写 main。** 实现节点产出 patch,不直接写共享检出。
+3. **只在 ~/repos/unisacc 里工作(项目所有者 2026-11-13);不克隆、不建 out/ 子树。** 各实现节点只提交自己的路径(`git commit -m ... -- 明确路径`),`git pull --rebase` 后推 main;同文件有他人改动时只加自己的行。
 
 ## 2 进入一个任务(任何 agent 的开工顺序)
 1. 读 `AGENTS.md`(规则)→ 本文件 → 你的角色文件 `agentwork/roles/<role>.md` → `agentwork/items.tsv` 里你的那一行。
 2. 只读该行 `context` 列出的文件;要读别的,先在回信 `needs` 里说明。
-3. 在私有副本(`git archive HEAD` 到 `out/work/<id>/`)里做;跑 gate;把输出原样附在回信里。
+3. 在 ~/repos/unisacc 里改自己的路径;跑 gate;把输出原样附在回信里。
 
 ## 3 工作项 `agentwork/items.tsv`
 制表符分隔,一项一行:
@@ -29,7 +29,7 @@
 |---|---|---|
 | CMD | pipeline runner(`tools/pipeline.cx`,cx 实现;每步沿用 55/60s bound) | 事实:rc、输出、哈希 |
 | JUDGE | `workflow` 调用:`locator` / `reviewer` / `arbiter` | 固定 JSON 决策(见 §6) |
-| IMPL | `workflow` 调用:`implementer` | patch(私有副本的 diff) |
+| IMPL | `workflow` 调用:`implementer` | 自己路径的提交 |
 | INTEGRATE | 单一集成者 | main 上的提交 + 账本行 |
 
 ```

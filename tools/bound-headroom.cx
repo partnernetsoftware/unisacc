@@ -1,0 +1,125 @@
+/* tools/bound-headroom.cx -- 统计各相位历次尝试的最长耗时与 build/limits.tsv 中 phase.bound 限时之比(只读)。
+ *
+ *   sh ./unisacc.com tools/bound-headroom.cx -- [--threshold 0.8] [--limits FILE] [--report] [DIR...]
+ *
+ * 读每个 DIR/chain-run.tsv 的 ATTEMPT_TIME(phase=NAME wall_ms=N);无 DIR 时默认 out/b1-old/* 与 out/b1/*。
+ * 限时: limits.tsv 的 phase.bound 行,scope 为 PREFIX* 的覆盖行按前缀匹配优先,否则取 * 默认行。
+ * 输出 TSV: phase 最长秒 限时 比值 来源目录 [TIGHT];末行 HEADROOM total= tight=。
+ * 比值>=阈值标 TIGHT;有 TIGHT 退出 1,--report 恒 0;参数畸形 2。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define MAXP 2048
+#define MAXL 64
+static char pname[MAXP][96], psrc[MAXP][96]; static long pmax[MAXP]; static int np;
+static char lscope[MAXL][64]; static long llim[MAXL]; static int nl; static long deflim = 90;
+
+static int split(char *line, char *f[], int max) {
+    int n = 0; f[n++] = line;
+    for (char *p = line; *p && n < max; p++) if (*p == '\t') { *p = 0; f[n++] = p + 1; }
+    return n;
+}
+static int num(const char *s, long *v) {
+    long a = 0; int i = 0;
+    if (s[0] < '0' || s[0] > '9') return 0;
+    for (; s[i] >= '0' && s[i] <= '9'; i++) a = a * 10 + (s[i] - '0');
+    if (s[i]) return 0;
+    *v = a; return 1;
+}
+static int thr_parse(const char *s, long *pm) {
+    long w = 0, f = 0; int i = 0, d = 0;
+    if (s[0] < '0' || s[0] > '9') return 0;
+    for (; s[i] >= '0' && s[i] <= '9'; i++) w = w * 10 + (s[i] - '0');
+    if (s[i] == '.') { i++; for (; s[i] >= '0' && s[i] <= '9' && d < 3; i++, d++) f = f * 10 + (s[i] - '0'); }
+    if (s[i]) return 0;
+    for (; d < 3; d++) f *= 10;
+    *pm = w * 1000 + f; return 1;
+}
+static long limit_for(const char *ph) {
+    long best = deflim; size_t bl = 0;
+    for (int i = 0; i < nl; i++) {
+        size_t n = tx_len(lscope[i], 64);
+        if (n < 2 || lscope[i][n - 1] != '*') continue;
+        n--;
+        if (tx_len(ph, 96) >= n && tx_cmp(ph, n, lscope[i], n) == 0 && n >= bl) { best = llim[i]; bl = n; }
+    }
+    return best;
+}
+static int load_limits(const char *path) {
+    size_t sz; char *b = cx_read(path, &sz);
+    if (!b) { sy_eprintf("bound-headroom: cannot read %s\n", path); return 0; }
+    char *p = b, *end = b + sz;
+    while (p < end) {
+        char *e = p; while (e < end && *e != '\n') e++;
+        *e = 0;
+        if (*p != '#' && *p) {
+            char *f[8]; int n = split(p, f, 8); long v;
+            if (n >= 5 && tx_eqz(f[0], "phase.bound") && num(f[2], &v)) {
+                if (tx_eqz(f[4], "*")) deflim = v;
+                else if (nl < MAXL) { cx_fmt(lscope[nl], 64, "%s", f[4]); llim[nl++] = v; }
+            }
+        }
+        p = e + 1;
+    }
+    return 1;
+}
+static void add(const char *ph, long ms, const char *src) {
+    int i;
+    for (i = 0; i < np; i++) if (tx_eqz(pname[i], ph)) break;
+    if (i == np) { if (np >= MAXP) return; cx_fmt(pname[np], 96, "%s", ph); pmax[np] = -1; np++; }
+    if (ms > pmax[i]) { pmax[i] = ms; cx_fmt(psrc[i], 96, "%s", src); }
+}
+static void scan(const char *dir) {
+    char path[512]; size_t sz;
+    cx_fmt(path, sizeof path, "%s/chain-run.tsv", dir);
+    char *b = cx_read(path, &sz);
+    if (!b) return;
+    const char *base = dir; for (const char *q = dir; *q; q++) if (*q == '/' && q[1]) base = q + 1;
+    char *p = b, *end = b + sz;
+    while (p < end) {
+        char *e = p; while (e < end && *e != '\n') e++;
+        *e = 0;
+        char *f[8]; int n = split(p, f, 8); long v;
+        if (n >= 3 && tx_eqz(f[0], "ATTEMPT_TIME") && tx_cmp(f[1], 6, "phase=", 6) == 0 && tx_cmp(f[2], 8, "wall_ms=", 8) == 0 && num(f[2] + 8, &v))
+            add(f[1] + 6, v, base);
+        p = e + 1;
+    }
+}
+static void scan_parent(const char *par) {
+    int fd = sy_open_read(par); if (fd < 0) return;
+    static char nb[65536]; int r = sy_dir_names(fd, nb, sizeof nb); sy_close(fd);
+    if (r < 0) return;
+    char *p = nb;
+    for (int i = 0; i < r; i++) {
+        char sub[512]; cx_fmt(sub, sizeof sub, "%s/%s", par, p); scan(sub);
+        p += tx_len(p, 256) + 1;
+    }
+}
+int main(int argc, char **argv) {
+    const char *lim = "build/limits.tsv"; long thr = 800; int report = 0, nd = 0;
+    const char *dirs[64];
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--threshold") && i + 1 < argc) { if (!thr_parse(argv[++i], &thr)) { sy_eprintf("bound-headroom: bad --threshold\n"); return 2; } }
+        else if (tx_eqz(argv[i], "--limits") && i + 1 < argc) lim = argv[++i];
+        else if (tx_eqz(argv[i], "--report")) report = 1;
+        else if (argv[i][0] == '-') { sy_eprintf("bound-headroom: bad arg %s\n", argv[i]); return 2; }
+        else if (nd < 64) dirs[nd++] = argv[i];
+    }
+    if (!load_limits(lim)) return 2;
+    if (nd) for (int i = 0; i < nd; i++) scan(dirs[i]);
+    else { scan_parent("out/b1-old"); scan_parent("out/b1"); }
+    int tight = 0;
+    sy_printf("# phase\tmax_s\tlimit_s\tratio\tsource\n");
+    for (int i = 0; i < np; i++) {
+        long L = limit_for(pname[i]), ms = pmax[i];
+        int t = L > 0 && ms >= thr * L;
+        long rp = L > 0 ? ms / L : 0;
+        sy_printf("%s\t%ld.%ld\t%ld\t%ld.%03ld\t%s%s\n", pname[i], ms / 1000, (ms % 1000) / 100, L, rp / 1000, rp % 1000, psrc[i], t ? "\tTIGHT" : "");
+        if (t) tight++;
+    }
+    sy_printf("HEADROOM\ttotal=%d\ttight=%d\n", np, tight);
+    return (tight && !report) ? 1 : 0;
+}

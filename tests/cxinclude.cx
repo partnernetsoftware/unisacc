@@ -244,9 +244,54 @@ static int selected(int argc, char **argv, const char *path) {
     }
     return 0;
 }
+/* cx-wildcard-product: product-layer files must not use `#pragma unisa use X::*` (name every import).
+   Counts pragma lines whose use target ends in the two bytes "::*". */
+static int count_wildcards(const char *b, size_t n) {
+    size_t i = 0, j, e; int c = 0;
+    while (i < n) {
+        j = i;
+        while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+        e = j;
+        while (e < n && b[e] != '\n') e++;
+        if (j < n && b[j] == '#') {
+            j++;
+            while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (e - j >= 6 && !memcmp(b + j, "pragma", 6)) {
+                j += 6;
+                while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                if (e - j >= 5 && !memcmp(b + j, "unisa", 5)) {
+                    j += 5;
+                    while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                    if (e - j >= 3 && !memcmp(b + j, "use", 3) && (j + 3 == e || b[j + 3] == ' ' || b[j + 3] == '\t')) {
+                        size_t k;
+                        for (k = j + 3; k + 3 <= e; k++)
+                            if (b[k] == ':' && b[k + 1] == ':' && b[k + 2] == '*') { c++; break; }
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return c;
+}
+static int product_layer(const char *p) {
+    return !strncmp(p, "src/", 4) || !strncmp(p, "cx/core/", 8) || !strncmp(p, "cx/runtime/", 11)
+        || !strncmp(p, "cx/compiler/", 12) || !strncmp(p, "cx/driver/", 10);
+}
 int main(int argc, char **argv) {
     char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, bfiles = 0, binc = 0, hfiles = 0, hinc = 0, k, rc;
+    if (argc >= 3 && tx_eq(argv[1], "--wildcard-file", 1L << 20)) {
+        /* fixture mode: apply the product-layer wildcard rule to the named files regardless of path */
+        int bad = 0, q;
+        for (q = 2; q < argc; q++) {
+            size_t wn; char *ws = cx_read(argv[q], &wn);
+            if (!ws) { fprintf(stderr, "cxinclude: cannot read %s\n", argv[q]); return 2; }
+            if (count_wildcards(ws, wn)) { printf("cxinclude: cx-wildcard-product: %s uses a use X::* wildcard\n", argv[q]); bad++; }
+            free(ws);
+        }
+        return bad ? 1 : 0;
+    }
     if (argc < 2 || (argc != 2 && (argc < 4 || !tx_eq(argv[1], "--check", 1L << 20) || !tx_eq(argv[2], "--files", 1L << 20)))) {
         fprintf(stderr, "usage: cxinclude.cx --check [--files PATH...] | --write (from the repo root)\n"); return 2;
     }
@@ -278,6 +323,10 @@ int main(int argc, char **argv) {
         src = cx_read(p, &n);
         c = src ? count_includes(src, n) : 0;
         docked = src && is_boundary(p, src, n);
+        if (src && product_layer(p) && count_wildcards(src, n)) {
+            printf("cxinclude: cx-wildcard-product: %s uses a use X::* wildcard (product layer must name imports)\n", p);
+            over++;
+        }
         free(src);
         if (docked) {
             bfiles++; binc += c;
