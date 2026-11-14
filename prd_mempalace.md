@@ -184,6 +184,21 @@ A. 冻结前清单(决定)。
 | Z7 | `pgrep -f candidate-chain`;`ls ~/.cache/unisacc/ape-0.0.62` 并核 sha | 无在途链;ape-0.0.62 在且 sha 前缀 83b82c8d(第 5 条,装机前置) | 秒级 |
 | Z8 | `git diff --name-status v0.0.62..HEAD -- src cx ext exec` | 只含驱动与运行缓存类文件(src/drive.cx、cx/runtime/modelcache.cx、runexec.cx、cx/driver 等);出现库包源或 cxmod 三源文件即不冻结(一版一类;F14 的变更清单也取自此命令) | 秒级 |
 
+Z1 至 Z8 实跑结果(2026-11-14,输入身份 main HEAD 6e151c7b14,已装 unisacc.com sha 83b82c8d;并行跑,load 未测;候选整链相未起):
+
+| 号 | 结果 | 实测值与命令 |
+|---|---|---|
+| Z1 | PASS | `tools/ratchets.cx` rc 0,RATCHETS ok=13 fail=0,elapsed 6.2 s |
+| Z2 | FAIL | `tools/derive.cx -- --check` rc 2,ok=7 drift=0 refused=1,25 s;product-map REFUSE tsv-drift(`tools/product-map.cx -- --check` 同,build/product-map.tsv 与重算不一致,E3TRIM3 改 modelcache.cx 后未重生);须先 `derive.cx -- --write` 再复核,验收要求 ok=8 drift=0 目前未达 |
+| Z3 | UNMEASURED(部分) | `tools/chain-ready.cx` 在 280 s 上限被 timeout 截断(rc 124,无末行 READY),已出的前 8 条:1-rev PASS、2a-derive FAIL(即 Z2 同因)、2b-ratchets PASS、3a-cxmod-tri PASS、3b-cx0-extract PASS、5-candidate-chain PASS(81/0)、8-inflight PASS;其余条目与耗时未测;`tools/chain-precheck.cx` 无参数即 REFUSE usage(需 ROOT CHAIN_OUT NEW_OUT 与 init/PHASE,属起链时调用),未实跑 |
+| Z4 | PASS | `tools/check-cxmod-tri.cx` rc 0,CXMOD_TRI passed=15 failed=0 gaps=2(CXM_MAXU 两个已知缺口),22 s |
+| Z5 | PASS | `affected.cx -- --ids modelcache-budget-lru modelcache-budget-concurrent phase-timing-stamps chain-phases-gen cx-driver-deps dock-audit --run -j 6`(批号以空格分隔,且 modelcache-budget 实为 -lru 与 -concurrent 两批)AFFECTED_RUN pass=6 fail=0,28 s,候选身份 83b82c8d(已装产品);phase-timing-stamps 本次 PASS,未见旧产品 UNVERIFIED 字样 |
+| Z6 | UNMEASURED | 需 git archive 副本加 `entry-build.cx -- ROOT P3 OUT` 构造候选及三次 -c 与 RUN_CACHE=0 对照,约 100 s 构造加探针,超出本次 15 分钟窗口未起;原样保留预期值 |
+| Z7 | PASS(部分) | `pgrep -f candidate-chain` 无在途链(chain-ready 8-inflight 同证);`~/.cache/unisacc/ape-0.0.62/unisacc.com` sha256 前缀 83b82c8d,与已装 unisacc.com 一致(ape-0.0.62 是目录,核的是其中 unisacc.com) |
+| Z8 | PASS(待判读) | `git diff --name-status v0.0.62..HEAD -- src cx ext exec` 共 5 项:M cx/runtime/modelcache.cx、M cx/runtime/runexec.cx、M exec/facts/derive.tsv、A exec/facts/st-gap.tsv、M src/drive.cx;无库包源、无 cxmod 三源文件;exec/facts 两项属事实表,是否算驱动与运行缓存类需冻结者判读 |
+
+结论:Z1 Z4 Z5 Z7 PASS,Z2 FAIL(product-map tsv 漂移,一步 --write 可修,属写域外未改),Z3 Z6 UNMEASURED;在 Z2 修复并重验、Z3 末行 READY=yes、Z6 实跑前不冻结。
+
 B. 冻结到公开的时间线(整链 3752 s 为 real6 实测;发布 12 步约 25 分钟为推算;合计约 88 分钟,在 2 小时线内,无返工余量)。
 - 串行主线:Z1 至 Z8 -> 起链(起整链配方,强制专用 `UNISACC_CACHE_DIR` 与 `UNISACC_RUN_CACHE` 取值见 F25)-> compare 与 pack -> 发布步骤 1 至 12(6 件资产)-> 读回 -> 装机。
 - 整链等待期间可做(只读或轻编辑,不取耗时,不跑重测试,F19;写域互不相交,各 15 分钟内):
