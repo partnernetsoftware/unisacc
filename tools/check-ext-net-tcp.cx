@@ -8,6 +8,7 @@
 #pragma unisa use sys.netraw
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
+#pragma unisa use sys.netnb
 static int nok, nfail;
 static void ck(int c, const char *name) {
     printf("%s\tnettcp.%s\n", c ? "PASS" : "FAIL", name);
@@ -137,6 +138,43 @@ int main(void) {
     ckv(sy_recv_until(as, buf, sizeof buf, sy_deadline_in(1000)), 0, "recv-until-eof");
     sy_close(as); sy_close(ls);
 
+    /* deadline connect_to / dial */
+    {
+        sy_addr_t t;
+        int c1, dead;
+        sy_addr_loopback(&t, SY_AF_INET4, port);
+        ls2 = sy_tcp_listen(0, 8);
+        sy_addr_loopback(&t, SY_AF_INET4, sy_tcp_port(ls2));
+        c1 = sy_tcp_connect_to(&t, sy_deadline_in(1000));
+        ck(c1 >= 0, "connect-to-loopback");
+        ckv(sy_snb_get(c1), 0, "connect-to-fd-blocking-again");
+        as = sy_sock_accept(ls2, 0, 0);
+        ck(as >= 0, "connect-to-accepted");
+        ckv(sy_send_all(c1, "q", 1), 0, "connect-to-send");
+        ckv(sy_recv(as, buf, 4), 1, "connect-to-recv");
+        sy_close(c1); sy_close(as);
+        c1 = sy_tcp_dial("127.0.0.1", sy_tcp_port(ls2), sy_deadline_in(1000));
+        ck(c1 >= 0, "dial-numeric");
+        sy_close(c1);
+        c1 = sy_tcp_dial("localhost", sy_tcp_port(ls2), sy_deadline_in(1000));
+        ck(c1 >= 0, "dial-localhost");
+        sy_close(c1);
+        dead = sy_tcp_port(ls2);
+        sy_close(ls2);
+        sy_addr_loopback(&t, SY_AF_INET4, dead);
+        ckv(sy_tcp_connect_to(&t, sy_deadline_in(1000)), -ECONNREFUSED, "connect-to-refused");
+        ckv(sy_tcp_dial("127.0.0.1", dead, sy_deadline_in(1000)), -ECONNREFUSED, "dial-refused");
+        ckv(sy_tcp_connect_to(0, sy_deadline_in(1000)), -EINVAL, "connect-to-null");
+        ckv(sy_tcp_dial(0, 80, sy_deadline_in(1000)), -EINVAL, "dial-null");
+        ck(sy_tcp_dial("no.such.name.invalid", 80, sy_deadline_in(1000)) < 0, "dial-dns-refused");
+        /* unroutable address with a short deadline: ETIMEDOUT, or ENETUNREACH when the sandbox has no route */
+        sy_addr_parse(&t, "10.255.255.1", 81);
+        r = sy_tcp_connect_to(&t, sy_deadline_in(100));
+        ck(r == -ETIMEDOUT || r == -ENETUNREACH || r == -EHOSTUNREACH, "connect-to-unroutable");
+        /* a deadline already passed on an unroutable address cannot be waited for */
+        r = sy_tcp_connect_to(&t, sy_deadline_in(0));
+        ck(r == -ETIMEDOUT || r == -ENETUNREACH || r == -EHOSTUNREACH, "connect-to-deadline-passed");
+    }
     printf("EXT_NET_TCP\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
 }

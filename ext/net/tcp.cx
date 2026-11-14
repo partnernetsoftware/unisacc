@@ -3,11 +3,13 @@
 #pragma unisa use addr
 #pragma unisa use sys.netraw
 #pragma unisa use sys.netpoll
+#pragma unisa use sys.netnb
+#pragma unisa use resolve
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 /* ext.net blocking TCP subset on cx.sys netraw (build/std-surface.tsv ext.net): sy_tcp_listen,
    sy_tcp_listen_at, sy_tcp_port, sy_tcp_connect, sy_send, sy_send_all, sy_recv.  No libc, no #if.
-   Not here (still new): anything with a deadline or ms (accept, connect_to, dial, wait_port), DNS.
+   Deadline connect_to/dial are here (dial resolves numeric or localhost only); DNS is not done.
    A program uses this unit or ext/sysx/net.cx, not both.  Linux x86_64/arm64 only: on osx/win
 // ENOSYS: refusal contract documented in this comment
    the netraw calls are -ENOSYS and so are these.
@@ -155,4 +157,44 @@ int sy_send_all_until(int fd, const void *buf, long n, sy_deadline_t d) {
         done += r;
     }
     return 0;
+}
+
+/* Connect to A, giving up at D: non-blocking connect, wait for writability, read SO_ERROR, then
+   restore blocking mode.  A connected fd, -ETIMEDOUT at the deadline, or -errno (-ECONNREFUSED...). */
+int sy_tcp_connect_to(const sy_addr_t *a, sy_deadline_t d) {
+    unsigned char sa[SY_SA_MAX];
+    int n, fd, r, e = 0;
+    if (!a) return -EINVAL;
+    n = syt_sa(a, sa, (int)sizeof sa);
+    if (n < 0) return n;
+    fd = syt_open(a->family);
+    if (fd < 0) return fd;
+    r = sy_snb_set_nonblock(fd, 1);
+    if (r < 0) { sy_close(fd); return r; }
+    r = sy_sock_connect(fd, sa, n);
+    if (r == -EINPROGRESS) {
+        r = (int)syt_wait(fd, SY_POLLOUT, d);
+        if (r == 0) {
+            r = sy_sock_getopt(fd, (int)sy_sock_num(SY_SN_SOL_SOCKET), (int)sy_sock_num(SY_SN_SO_ERROR), &e);
+            if (r == 0 && e) r = e > 0 ? -e : e;
+        }
+    }
+    if (r == 0) r = sy_snb_set_nonblock(fd, 0);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}
+
+/* Connect to HOST:PORT (numeric address or localhost via sy_resolve; no DNS) until D.  The first
+   address that connects wins; a resolver code (SY_EAI_*) is returned as is. */
+int sy_tcp_dial(const char *host, int port, sy_deadline_t d) {
+    sy_addr_t as[4];
+    int n, i, r = -EHOSTUNREACH;
+    if (!host) return -EINVAL;
+    n = sy_resolve(host, port, 0, as, 4);
+    if (n < 0) return n;
+    for (i = 0; i < n; i++) {
+        r = sy_tcp_connect_to(&as[i], d);
+        if (r >= 0) return r;
+    }
+    return r;
 }
