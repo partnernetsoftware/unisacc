@@ -11,7 +11,7 @@
 推进unisacc.com 新版本的设计与开发到发布公开(公开后要对缓存目录临时目录大扫除才继续下一个版本);
 主线:核心库包(cx/cx0/ext)由内往外封装、cx.stream 与 tape 库(tlib)重构;每轮先报告本轮落了什么到 main,没有就定因换动作;
 持续项(项目所有者 2026-11-13 强调,每份 plan 都要写):unisacc.com 自身运行速度(冷启动、冷编译典型工具、生成代码三档)要持续提升,每轮至少有一个速度项在 dag 里推进或有新实测;速度数字只用 tools/run-startup-bench.cx、tools/coldcompile.cx、tools/check-bench-gencode.cx、tools/speed-probe.cx 实测给出,不报估计;发布前对比 build/speed-baseline.tsv,变慢必须有账本理由;产品代码优先于 tools/tests/build/agentwork 基础设施(近 7 天 91% 提交只碰基础设施);
-按任务图并发推进:每轮看 agentwork/dag.tsv(有 tools/dag.cx 时跑 dag plan),写域互不相交的就绪节点全部同时派给自己的 subagent(难题与规划 fable,一般执行 sonnet);只在 ~/repos/unisacc 工作,检查一过立即提交推送,不建外部目录、不往 out/ 放交付物,不再开新规划文档;
+按任务图并发推进:每轮看 agentwork/dag.tsv(有 archive/agentwork-retire-2026-11/tools/dag.cx 时跑 dag plan),写域互不相交的就绪节点全部同时派给自己的 subagent(难题与规划 fable,一般执行 sonnet);只在 ~/repos/unisacc 工作,检查一过立即提交推送,不建外部目录、不往 out/ 放交付物,不再开新规划文档;
 
 巡检要点:subagent 超过 12 分钟催收尾、超过 15 分钟停掉接手;盯发布尾链与整链有失败立即取证。机器忙是现象不是前提:负载高时先查是谁占用,验证的判定不得依赖「机器安静」,依赖了就是缺陷要记下来。
 
