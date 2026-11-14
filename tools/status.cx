@@ -61,6 +61,17 @@ static int runcap(char **argv, const char *cwd, int secs, char **out, long *outn
     return ok && *out ? 0 : -1;
 }
 
+/* 真实 git 路径:git rev-parse --git-path REL(普通检出与工作树都对);git 失败时退回 ROOT/.git/REL 并照常 stat 报告 */
+static void git_path(const char *rel, char *dst, int cap) {
+    char *v[8], *o = 0; long n = 0;
+    v[0] = (char *)g_git; v[1] = "rev-parse"; v[2] = "--path-format=absolute"; v[3] = "--git-path"; v[4] = (char *)rel; v[5] = 0;
+    if (runcap(v, g_root, g_git_secs, &o, &n) == 0) {
+        while (n > 0 && (o[n - 1] == '\n' || o[n - 1] == '\r')) o[--n] = 0;
+        if (n > 0 && n < cap) { long i; for (i = 0; i <= n; i++) dst[i] = o[i]; mm_free(o); return; }
+    }
+    if (o) mm_free(o);
+    cx_fmt(dst, cap, "%s/.git/%s", g_root, rel);
+}
 static long file_age(const char *p, long *mt) {
     sy_stat_t st; long now = sy_wall_s();
     if (sy_stat(p, &st) != 0) return -1;
@@ -123,12 +134,12 @@ static void sec_git(void) {
     }
     mm_free(o);
     (void)i;
-    cx_fmt(lock, sizeof lock, "%s/.git/index.lock", g_root);
+    git_path("index.lock", lock, sizeof lock);
     {   long a = file_age(lock, 0);
         if (a >= 0) { cx_fmt(buf, sizeof buf, "present (report only, not removed)"); emit(S, "index.lock", buf, a, lock, a > 300 ? 2 : 1); }
         else emit(S, "index.lock", "absent", -1, lock, 0);
     }
-    cx_fmt(stp, sizeof stp, "%s/.git/logs/refs/stash", g_root);
+    git_path("logs/refs/stash", stp, sizeof stp);
     {   sy_stat_t sst; int rc = sy_stat(stp, &sst);
         if (rc == -ENOENT) emit(S, "stash", "0", -1, stp, 0);
         else if (rc != 0) unmeasured(S, "stash", "cannot stat stash log", stp);
