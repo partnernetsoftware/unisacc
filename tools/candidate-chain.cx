@@ -2,8 +2,8 @@
  *
  *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
  *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
- * --watch-baseline CHECKPOINT uses chain-pace thresholds from a previous completed chain;
- * absent or missing baseline means its documented default threshold of 60 seconds per phase.
+ * --watch-baseline CHECKPOINT overrides automatic baseline discovery. Otherwise use the newest
+ * sibling checkpoint.tsv with compare DONE (excluding this chain); no match defaults to 60 seconds.
  *
  * Each child is bounded to 90 seconds. Independent start/finish waves honor
  * --parallel (default 4) and retain per-job checkpoints. --jobs ROOT CTX BUILD
@@ -2295,7 +2295,35 @@ static int watch_worker(const char *dir, const char *pace, int life, int owner) 
     }
     sy_close(fd);sy_close(life);return 0;
 }
+/* Return a checkpoint file, as required by chain-pace thresholds, never a chain directory. */
+static const char *auto_baseline(const char *outdir,char *buf,size_t cap) {
+    char parent[4400],current[4400],dir[4400],checkpoint[4400];sy_dir_t scan;long newest=0;
+    if(sy_realpath(outdir,current,sizeof current)<0||cx_fmt(parent,sizeof parent,"%s",current))die("watch baseline parent",outdir);
+    char *slash=strrchr(parent,'/');if(!slash)die("watch baseline parent",outdir);
+    if(slash==parent)slash[1]=0;else *slash=0;
+    buf[0]=0;
+    if(sy_dir_open(&scan,parent))die("watch baseline scan",parent);
+    int next;
+    while((next=sy_dir_next(&scan))==1){
+        if(scan.kind!='d'||!strcmp(scan.name,".")||!strcmp(scan.name,".."))continue;
+        if(cx_fmt(dir,sizeof dir,"%s%s%s",parent,!strcmp(parent,"/")?"":"/",scan.name)||
+           cx_fmt(checkpoint,sizeof checkpoint,"%s/checkpoint.tsv",dir))die("watch baseline path",parent);
+        if(!strcmp(dir,current))continue;
+        sy_stat_t st;int rc=sy_stat(checkpoint,&st);
+        if(rc==-ENOENT)continue;
+        if(rc)die("watch baseline stat",checkpoint);
+        if(st.kind!='f'||!ck_done(dir,"compare"))continue;
+        if(!buf[0]||st.mtime>newest||(st.mtime==newest&&strcmp(checkpoint,buf)<0)){
+            if(cx_fmt(buf,cap,"%s",checkpoint))die("watch baseline bound",checkpoint);
+            newest=st.mtime;
+        }
+    }
+    sy_dir_close(&scan);if(next<0)die("watch baseline read",parent);
+    if(!buf[0])return 0;
+    hb(outdir,"watch-baseline",buf);return buf;
+}
 static void watch_start(const char *root,const char *dir,const char *baseline) {
+    char selected[4400];if(!baseline)baseline=auto_baseline(dir,selected,sizeof selected);
     char pace[4400],source[4400],table[4400],pidfile[4400],pidtext[40];
     int p[2];const char *saved_out=step_out;
     if(cx_fmt(source,sizeof source,"%s/tools/chain-pace.cx",root))die("watch source",root);
@@ -2356,9 +2384,10 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--jobs-segment-s")) cc_group = 1;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
-    if(argc==4&&tx_eqz(argv[1],"--watch-fixture")){
+    if((argc==4||argc==6)&&tx_eqz(argv[1],"--watch-fixture")){
+        if(argc==6&&!tx_eqz(argv[4],"--watch-baseline"))return 2;
         if(sy_mkdir(argv[3],0755)&&fsize(argv[3])<0)die("watch fixture",argv[3]);
-        hb(argv[3],"watch-probe","start");watch_start(argv[2],argv[3],0);
+        hb(argv[3],"watch-probe","start");watch_start(argv[2],argv[3],argc==6?argv[5]:0);
         sy_sleep_ms(1500);return 0;
     }
     if (argc == 4 && tx_eqz(argv[1], "--chain-work")) {

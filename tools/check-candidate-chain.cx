@@ -1077,6 +1077,42 @@ int main(int argc, char **argv) {
       size_t rn=0;char *rows=cx_read(report,&rn);
       ck(rows&&has(rows,"WATCH\tepoch=")&&has(rows,"OK\twatch-probe\t")&&has(rows,"newest_log_age_s=")&&
          !has(rows,"newest_log_age_s=-1"),"watch-appends-pace-verdict-and-log-idle");free(rows);
+      /* Freeze mtimes: the newest unfinished sibling must never become a baseline. */
+      char family[4400],sibling[4500],checkpoint[4600],old_checkpoint[4600],new_checkpoint[4600];
+      if(cx_fmt(family,sizeof family,"%s/baseline-family-XXXXXX",argv[1])||!mkdtemp(family))return 2;
+      for(int i=0;i<3;i++){
+          if(cx_fmt(sibling,sizeof sibling,"%s/%s",family,i==0?"old":i==1?"new":"unfinished")||sy_mkdir(sibling,0755)||
+             cx_fmt(checkpoint,sizeof checkpoint,"%s/checkpoint.tsv",sibling))return 2;
+          const char *body=i==0?"DONE\twatch-probe\twall_ms=45000\tsha=-\nDONE\tcompare\twall_ms=1\tsha=-\n":
+                           i==1?"DONE\twatch-probe\twall_ms=90000\tsha=-\nDONE\tcompare\twall_ms=1\tsha=-\n":
+                                "DONE\twatch-probe\twall_ms=999000\tsha=-\n";
+          if(cx_write(checkpoint,body,strlen(body))||sy_set_mtime(checkpoint,100+i*100))return 2;
+          if(i==0&&cx_fmt(old_checkpoint,sizeof old_checkpoint,"%s",checkpoint))return 2;
+          if(i==1&&cx_fmt(new_checkpoint,sizeof new_checkpoint,"%s",checkpoint))return 2;
+      }
+      char current[4500],table[4600],heartbeat[4600];
+      if(cx_fmt(current,sizeof current,"%s/current",family)||sy_mkdir(current,0755)||
+         cx_fmt(checkpoint,sizeof checkpoint,"%s/checkpoint.tsv",current)||
+         cx_write(checkpoint,"DONE\tcompare\twall_ms=1\tsha=-\n",sizeof "DONE\tcompare\twall_ms=1\tsha=-\n"-1)||sy_set_mtime(checkpoint,400)||
+         cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",current)||cx_fmt(heartbeat,sizeof heartbeat,"%s/heartbeat.tsv",current))return 2;
+      char *auto_av[]={native_tool,"--watch-fixture",cwd,current,0},*result=0;size_t bytes=0;
+      int auto_rc=cx_runv_timeout(auto_av,20,&result,&bytes);free(result);result=0;
+      size_t tn=0,hn=0;char *thresholds=cx_read(table,&tn),*selected=cx_read(heartbeat,&hn);
+      ck(auto_rc==0&&thresholds&&has(thresholds,"watch-probe\t90\t180\n")&&selected&&has(selected,new_checkpoint),
+         "watch-auto-baseline-newest-completed-sibling-excludes-self");free(thresholds);free(selected);
+      char *explicit_av[]={native_tool,"--watch-fixture",cwd,current,"--watch-baseline",old_checkpoint,0};
+      int explicit_rc=cx_runv_timeout(explicit_av,20,&result,&bytes);free(result);result=0;
+      thresholds=cx_read(table,&tn);
+      ck(explicit_rc==0&&thresholds&&has(thresholds,"watch-probe\t45\t90\n"),"watch-explicit-baseline-not-overridden");free(thresholds);
+      char empty[4400];
+      if(cx_fmt(empty,sizeof empty,"%s/no-baseline-XXXXXX",argv[1])||!mkdtemp(empty)||
+         cx_fmt(current,sizeof current,"%s/current",empty)||sy_mkdir(current,0755)||
+         cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",current)||cx_fmt(report,sizeof report,"%s/watch.tsv",current))return 2;
+      auto_av[3]=current;
+      int empty_rc=cx_runv_timeout(auto_av,20,&result,&bytes);free(result);
+      thresholds=cx_read(table,&tn);rows=cx_read(report,&rn);
+      ck(empty_rc==0&&thresholds&&!strcmp(thresholds,"phase\tbase_s\tthr_s\n")&&rows&&has(rows,"OK\twatch-probe\t")&&has(rows,"\t0\t60\n"),
+         "watch-no-completed-sibling-falls-back-to-60-seconds");free(thresholds);free(rows);
     }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
