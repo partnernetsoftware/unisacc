@@ -57,32 +57,38 @@
 4. 基础设施(不入产品输入):I1 wt-gate 修红;I2 slice-migration-gen 定因;I3 agentwork 归档第 4 批起(第 3 批已退役 archive-records、aw、check-aw、cursor-fleet、dag 及各自检查;awpath 留第 4 批;分类表见提交 b10474a8f0 说明);I4 out/ 写入点收尾(gen-model-decode-material、chain-run --out、csih-ape 须由其维护者迁);I5 装发布件后复验 FTRIM 类红与 DEFERRED 批。
 5. 已决定(2026-11-14,主调度按推荐定,项目所有者要求能做尽量做):(a) SPEED-11 运行库扫描族进 0.0.62;(b) 发布门不等 osx/win 的 ext.net 实现,只交有名 ENOSYS 拒绝加 CI 证据;(c) s9 只让 commit 档卡发布,daily/release 档夜跑并如实写进说明;(d) 0.0.62 主线为"构造链与批次分治"(C1 相清单化、C3 批次纯函数化、C4 接口哈希表),封网(ext.net/netraw)与 cx 模块语法(别名运行失败修复、export、通配)作并行线,产品输入变更合并为同一类(库包与运行库),构造链/批次工具不入产品输入。
 
+0.0.62 候选整链(real6)就绪判断(fable 第二轮,2026-11-14 15:50,基于 HEAD ebb91f2032;判断非实跑,P1 与前置条件须实跑后才算数):
+
+- 结论:现在不起。等 B2c、B2e 入库且下列前置条件全绿即起;硬截止 16:40,到点 B2c/B2e 未入库就以当时 main HEAD 起链,未完行保留 new 并如实写进发布说明。不等 B2f、B2g、B3(SPEED-11):前两项只增文件,晚到不改变风险;B3 动既有运行库扫描族,补丁未写,等它会把候选里未经新产品验证的 cxmod 改动再压一小时(F4)。B3 若在 real6 起链前探针已绿则并入,否则作同类第二候选 real7,不与其它类合并。
+- 理由:(1) 整链一次约 59 分钟,同一时刻只一条;现在起则 UDP 三行与 TCP 五行落在候选之外,封网主题要再跑一次整链。(2) 14:55 以来 pgrep 无在途 candidate-chain,load1 约 5,/ 空闲 98G(15:49 实测),资源不构成等待理由。(3) 工作树有未跟踪的产品输入 ext/net/udp.cx,此刻冻结会得到与在途工作不一致的 REV。
+- 产品输入现有变更(`git diff --name-status v0.0.61 HEAD -- src cx ext exec/facts`,28 个路径):
+  - 属库包与运行库类:cx/sys 新增 netmsg、netpoll、netraw、refusals 与只增的 sysnums;ext/net 新增 addr、sock、tcp、unix;ext/sysx 六文件与 ext/crypto 三文件(各 2 至 10 行);exec/facts 的 sys-syscalls(加 35 行)、libc99posix(加 111 行)、refusals(新)。sys-syscalls.tsv 的消费者只有 tools/target-gen.cx(`grep -rl sys-syscalls.tsv tools src cx exec build` 实证),产出 cx/sys/sysnums.cx,不进 kernel 事实,不属模型与网类;target-gen 同时写 cx/compiler/targetname.cx 与 cx/runtime/targetname.cx,diff 中两者未变。
+  - 跨类(编译计划器,不是库包):cx/cx0/plan.cx(加 199)、src/cxmod.c(加 199)、cx/compiler/cxmod.cx(加 128)、src/driveplan.cx(1 行)。第 5 条 (d) 已决定按缺陷修复并入同一类,此决定只覆盖"修复",逐项判断如下。
+- 逐项跨类风险:
+  - CX-U-2(57c7427f6f):中。三条是新增拒绝(行为收紧),不是纯修复;链内 build 与 jobs-tool 段用候选编译器编 tools 与 src,任何一处踩到新拒绝即红。缓解:P1 扫描为 0 才起链。
+  - T5 与 cxm_checkcalls 上移(4aee1dfb4a、68039f11f1、1a48fc9a0a):中。同样新增拒绝面;a415413ac2 只验了 cxcc 语料 11 文件,cx-host-run 内联夹具未枚举;build/cx0-three-source-diff.tsv 仍有 14 行标"是"的语义分叉(共 181 行),产品件是手写 cx/compiler/cxmod.cx,源级测试经 plan.cx,源级绿不等于产品绿。缓解:P1 加 `tools/check-cxmod-tri.cx` failed=0。
+  - 模块身份 realpath(e576000457):低。可选回调,未绑定或解析失败退回原文本比较;driveplan 只多一条绑定语句。
+  - cache-manager 相(5c4ec0e227、b54d7db899):不是产品输入,但改了链本身;它是第 497 相(build/chain-phases.tsv 第 500 行,compare 之后),第一次实跑要等到约 3500 s;候选 entry.elf 以 `-b osx/*` 编 tools/cache-retain.cx 未实跑(已装 0.0.61 实跑 rc 0 不等于候选)。缓解:首链不带 `--cache-manager-osx`(验证自产),该相失败则 `--resume --cache-manager-osx` 用借用副本续段(real5p 先例 rc=0),损失只有 pack 段。
+  - netmsg 与号表(832d52a8d3):低。只增文件加两行号;lnx/arm64 的 msghdr 布局未实跑(F15)。
+- 仍缺项(build/std-surface.tsv 的 new 行,15:49 为 14 行):ext.net 10 行(UDP 3 在途、TCP 3、recv_until/send_all_until 2、resolve 2)、ext.procx np_exec 1 行、cx.sys 3 行;SPEED-11 未动;osx/win 有名 ENOSYS 的 CI 证据未取。
+- 起链前置条件(全部实跑,任何一条不过不起):(1) REV 为 main HEAD,`git status --short` 无未跟踪或未提交的 src、cx、ext、exec/facts 路径;(2) `tools/derive.cx -- --check` 全 OK,`tools/ratchets.cx` 末行 ok=13 fail=0;(3) `tools/check-cxmod-tri.cx` failed=0 且 GAP 具名,`tools/cx0-extract.cx -- --check --all` EXACT;(4) P1 新拒绝数 0;(5) `tools/check-candidate-chain.cx` failed=0(含前置门 3 条与 cache-manager argv 3 条);(6) 改过的 .cx 经 `tools/affected.cx --files ... --run` 无新红;(7) 配方第 1 至 5 步(私有根检出 REV、commit-tree 私有提交、UNISACC_IDENT_HELPER、全新 --out、超时 5400 s);(8) `pgrep -af candidate-chain` 无在途,同 REV 无已完成证据;(9) 起链前在本文件记一行:REV、PID/PGID、截止、输出目录。
+- 失败的取证与重跑(整链 3538 s,两次即 7076 s,贴近 2 小时线):
+  - 取证顺序:读 real6.out 末尾的 REFUSE 或 rc 行 -> 找到发出该文案的源码行再定性(rc 2 与 REFUSE 当确定性缺陷)-> 按落点分五档:(a) 前置门(第 1 秒);(b) build、build-front、jobs-tool(约前 5 分钟,cxmod 新拒绝最可能落在这里);(c) g2/g3 对象相(real5 各约 700 s);(d) compare(固定点不等);(e) cache-manager 与 pack。
+  - 重跑:(a)(b) 修后全新目录重起,损失 5 分钟以内;(e) 用 `--resume` 续段,不重跑前段;(c)(d) 属产品输入缺陷,先用 `tools/chain-precheck.cx -- ROOT CHAIN_OUT NEW_OUT init --files LIST` 以失败链的 ctrl/unisacc.com.dev/entry.elf 对改动文件局部预检,过了再起整链。
+  - 止损:同一失败两次即停;第二次整链失败且落点在 cxmod 三源,则候选 REV 改为不含那四个提交的私有提交(用 commit-tree 造,不在 main 上 reset 或 revert 他人路径),0.0.62 只带库包,cxmod 改随 0.0.64 的 D0;第三次整链不在当天起。
+  - 观察:起链后第 5、20、45、60 分钟各做一次有界检查(读 checkpoint 与真实 PID),不派子代理干等。
+
 可派任务树(2026-11-14;每项 15 分钟内可交,写域互不相交;tests/batches.tsv 登记行一律走 `tools/commit-own.cx --keyed`;新建工具先 `git log --all --oneline -- tools/NAME`;预期值是验收门,未实跑不记 PASS)。开工条件:今=已装产品即可;候选=补丁今天可写,验收要含它的新产品;链=要整链窗口(同一时刻只一条)。
 
 | 号 | 目标 | 写域 | 验收命令 -> 预期值 | 分钟 | 开工 |
 |---|---|---|---|---|---|
-| A1a | 冷启动基线补到 0.0.61 发布件 | build/speed-baseline.tsv 的 startup 行 | `sh ./unisacc.com tools/run-startup-bench.cx` 三次独立调用 -> 9/9 断言三次均过,新增 1 行 n=3 | 10 | 今(机器安静) |
-| A1b | 冷编译基线由单样本补到 n>=3 | 同表 coldcompile 行 | `tools/coldcompile.cx -- OUT.tsv SCRATCH tools/ledger-add.cx tools/entry-build.cx tools/whole-front.cx` 跑三轮 -> 三文件各 1 行 n=3,带中位与最大 | 12 | 今 |
-| A1c | 生成代码与探针基线 | 同表 gencode、probe 行 | `tools/check-bench-gencode.cx -- ROOT 5 1` -> 三档 RESULT 逐字节相同,无 INVALID;`tools/speed-probe.cx` 出数入表 | 12 | 今 |
-| A2 | 已装 0.0.61 发布件上复验红批(I5);另查 affected-tool、affected-list 两条字面量失败的根因 | 阻塞节前两条与 affected 一条 | `tools/affected.cx --files tools/tsv-lint.cx --run` -> `_u_so_put` 不再出现;FTRIM 类按 4 片并行复验,每片一条命令,仍红的逐批留名 | 15 | 今 |
-| A3 | real5 各相墙钟入表,定下一个最大头 | build/phase-times.tsv | 对 real5.out 的 RECEIPT wall_ms 用 .cx 求和 -> 整链行 measured_s=3538,对象相、jobs 三族、p3-guard 各有实测行 | 10 | 今 |
-| A4 | 起链前置门(R3) | tools/candidate-chain.cx 的参数检查段及其 check | 根工作树提交 != REV -> REFUSE 且 rc 非 0;未设 UNISACC_IDENT_HELPER -> REFUSE;缺 --cache-manager-osx 在起链第 1 秒拒绝而不是跑完 3538 s 才拒 | 15 | 今 |
-| A5 | osx cache-manager 链内自产(R4)先定因 | 只读,产出写回本表本行 | 说明借用副本的构造命令、输入身份与缺的链相;给出改 build/chain-phases.tsv 的补丁草案 | 15 | 今 |
-| A6 | cxmod 三源一致性门 | tools/check-cxmod-tri.cx(新)加批次行 | failed=0;常量分叉(CXM_MAXU 128 对 96)与 `cxm_checkcalls` 只在产品源两条输出具名 GAP,不记 PASS | 15 | 今 |
-| A7a | 符号级选批第一步:改动行归属到文件作用域条目 | tools/affected.cx 的归属段 | 夹具只改 `tx_trimc` 函数体 -> 输出归属 1 个导出函数;改宏或类型 -> 退回整模块 | 15 | 今 |
-| A7b | 符号级选批第二步:按归属选批 | tools/check-affected 的符号段 | `tools/affected.cx -- --files cx/text/text.cx --list-only --iface-narrow` 在 A7a 夹具下 selected 小于 765,打印 DEFERRED_BY_SYMBOL 计数;--full 与 release 档仍全选 | 15 | 今,A7a 后 |
-| A8 | dock 审计表(M1) | build/dock-audit.tsv、tools/check-dock-audit.cx(新) | `sh ./unisacc.com tools/dock-map.cx` 模块数 == 表行数(现 56) | 12 | 今 |
-| A9 | win 批次登记与 osx 行核对(T16) | tests/batches.tsv 的 win 行 | win 行数 0 -> 至少 1,本机状态 DEFERRED 不是 PASS;`tests/run.cx -- --list` 可见 | 10 | 今 |
-| A10 | wt-gate 修红(I1) | tools/check-wt-gate.cx | 该 check 8/8 断言通过,不删断言,不改 all-waves 合同 | 15 | 今 |
-| A11 | text.text 拆面只读实验(P4 先行) | prd_cx.md 10.4 的三行 | $TMPDIR 副本内拆面后 `tools/affected.cx` 给出改查找族的选批数,UNMEASURED 改成实测值 | 15 | 今 |
-| A12 | 命中路定因 D0(0.0.63 前置) | prd_cx.md 第 5 节一行 | `tools/speed-probe.cx` 分相读数,指出首次与重复之差落在哪一相 | 15 | 已测 2026-11-14:差约 642 ms,推理 82.7%、解码 7.7%、残差 9%;零解码单做不够 500 ms 门,见 prd_cx.md 第 5 节 |
-| B1 | 封网 L2 netraw 六参与 V6ONLY(T6) | ext/net 的 netraw 文件 | `tools/check-ext-net-sock.cx` failed=0 | 15 | 今 |
-| B2 | 封网 L3 UDP/unix/resolve、L4 带截止时间 TCP(T7)。六参阻塞已定方案(2026-11-14):不动编译器,UDP 带地址收发改走 sendmsg/recvmsg(三参,msghdr 56 字节缓冲),拆 B2a 至 B2e 见下。真正被六参卡住的只有 sy_udp_send_to、sy_udp_recv_from 两行;unix(流式,netraw 已有 sy_sa_unix/bind/connect)与带截止时间 TCP(netpoll)不受其限;sy_resolve 表内写 impl:getaddrinfo 而 cx 层无 libc,另属未决,不随本方案解决 | 见 B2a 至 B2e | 见 B2a 至 B2e | 15 x 5 | 今 |
-| B2a | 号表加 sendmsg/recvmsg | exec/facts/sys-syscalls.tsv 追加 snr_sendmsg(46、211,其余列 0)、snr_recvmsg(47、212)两行;tools/target-gen.cx 的 NSYS 钉 51 -> 53;重生 cx/sys/sysnums.cx(只增) | 按 959908611f 的做法重生后 `tools/check-cx-sys-netraw.cx`、`tools/check-cx-sys-netpoll.cx` 均 failed=0;sysnums 的 diff 只有新增行 | 10 | 今 |
-| B2b | cx.sys 新模块 netmsg(冻结层只增文件,不改 netraw.cx) | cx/sys/netmsg.cx(新,sy_sock_sendto、sy_sock_recvfrom 经 `__syscall6` 三参调 sendmsg/recvmsg;osx/win 返回 -ENOSYS)、tools/check-cx-sys-netmsg.cx(新)加批次行、layer-api 与包版本 | check failed=0,至少含:环回 UDP 往返收 4 字节、回填 namelen == 16、对端端口等于发端绑定端口、报文长于缓冲时 msg_flags 带 MSG_TRUNC、坏 fd 得 -EBADF;`tools/ratchets.cx` ok=13 | 15 | B2a 后 |
-| B2c | ext.net UDP 三行 | ext/net/udp.cx(新,sy_udp_bind、sy_udp_send_to、sy_udp_recv_from)、tools/check-ext-net-udp.cx(新)加批次行、std-surface 这三行 | check failed=0;超长报文得 -EMSGSIZE 不静默截断;截止到期得 -ETIMEDOUT;三行 new -> exists | 15 | B2b 后 |
-| B2d | ext.net unix 两行(不依赖六参,可与 B2a 至 B2c 并行) | ext/net/unix.cx(新)、tools/check-ext-net-unix.cx(新)加批次行、std-surface 这两行 | check failed=0;路径超 107 得 -ENAMETOOLONG;已有路径不自动删;两行 new -> exists | 15 | 今 |
-| B2e | 带截止时间 TCP 五行与 sy_recv_until、sy_send_all_until(不依赖六参,可并行);sy_resolve、sy_resolve4 先定因再定做法 | ext/net/tcp.cx、tools/check-ext-net-tcp.cx、std-surface 对应行 | `tools/check-ext-net-tcp.cx` failed=0;resolve 两行若本版不做,保留 new 并写明原因,"表内 new 行数 0"如实改成实际余数 | 15 | 今 |
+| 已落地 | A1a、A1b、A1c(基线 6bcd7a98fb,冷编译标 noisy,speed-probe 仍 UNMEASURED)、A2、A3、A4(9a97992301)、A5(cache-manager 相 5c4ec0e227)、A6、A7a、A7b(7c7124c12c)、A8、A9、A11、A12、B1(c945e3a153)、B2a、B2b(832d52a8d3,cx.sys 0.1.7)、B2d(3502c3966d,ext.net 0.1.5) | - | `git log --oneline v0.0.61..HEAD` 对应提交 | - | 完 |
+| A10 | wt-gate-probe 6 条断言转真(wt-gate-clean 已 PASS) | tools/check-wt-gate.cx | probe 批次拆到 55 秒内,6 条断言实跑通过,不删断言 | 15 | 今 |
+| B2c | ext.net UDP 三行(在途:ext/net/udp.cx 与 tools/check-ext-net-udp.cx 15:49 尚未跟踪) | ext/net/udp.cx、tools/check-ext-net-udp.cx 加批次行、std-surface 三行 | check failed=0;超长报文 -EMSGSIZE;截止到期 -ETIMEDOUT;三行 new -> exists | 15 | 在途 |
+| B2e | 带截止时间 TCP 三行(sy_tcp_accept_from、sy_tcp_connect_to、sy_tcp_dial)与 sy_recv_until、sy_send_all_until | ext/net/tcp.cx、tools/check-ext-net-tcp.cx、std-surface 五行 | `tools/check-ext-net-tcp.cx` failed=0;五行 new -> exists | 15 | 今 |
+| B2f | L5:cx.sys 三行(sy_sig_watch、sy_sig_taken、sy_res_live)与 ext.procx np_exec | 各自新文件加 check 与批次行(冻结层只增文件) | 各 check failed=0;std-surface 的 new 行 14 -> 余数如实 | 15 x 2 | 今,不卡 real6 |
+| B2g | sy_resolve、sy_resolve4 定因(表写 impl:getaddrinfo 而 cx 层无 libc) | 只读,结论写回本行 | 给出做法或"本版保留 new"及原因 | 10 | 今,不卡 real6 |
+| P1 | 起链前新拒绝扫描(CX-U-2 三拒绝、cxm_checkcalls 上移,对链内会编的源) | 只读;结果写回"0.0.62 候选整链就绪判断"前置条件 (4) | 对 tools/*.cx、src/*.cx 及 cx-host-run 内联夹具经 cx0_plan 规划,新拒绝数 == 0(a415413ac2 只扫了 cxcc 语料 11 文件) | 15 | 今,卡 real6 |
 | B2 证据 | (1) 内建只有号加五参:exec/facts/gen2-literals.tsv:13 `["__syscall6","syscall",6]`,exec/facts/k2-call.tsv:8 `sys25 kind=sys6 op=syscall`,tools/opinfo-cases-gen.cx:61 `.sys6 syscall, r1, r3, r4, r5, r2, r0` 共六个操作数;cx/sys/netraw.cx:41 `if (f) return -ENOSYS`。(2) 产品头早已同法绕过:include/sys/socket.h:136 注明 gate 只带五个,sendto/recvfrom 经 sendmsg/recvmsg。(3) 本机实跑探针(lnx/x86_64,已装产品,`sh ./unisacc.com /tmp/b2probe/p.cx`,rc=0):`sendmsg=4`、`recvmsg=4 namelen=16 from_family=2 from_port_eq=1 data=ping`。未验证:arm64 上的 msghdr 布局(按 LP64 同为 56 字节,未实跑);`.sys6` 各目标的寄存器分配与溢出区未读到编码行。(4) 不选扩内建:加七操作数形态要动 gen2-literals 的 intrinsics、k2-gen2 的 syscalls、k2-call 的 sysrows 新 kind、lower-code/lower-abi 六目标与 tools/facts-gen.cx,属模型与网类,须重建 kernel 与两代 GEN,和 0.0.62 的库包与运行库类不同类,不得同候选;回滚办法:本方案全是新增文件加两行号表,撤对应提交即回现状 | - | - | - | - |
 | B3 | SPEED-11 运行库扫描族(T8) | 运行库对应源(产品输入)加其 check | 补丁先交集成者;字节等价回归输出不变 | 15 | 候选 |
 | B4 | 0.0.62 候选整链 real6 | 私有构造根 | `tools/candidate-chain.cx -- --rev REV --out 全新目录 --parallel 12 --cache-manager-osx X64 ARM64` -> RELEASE_APE PACKED,墙钟不高于 3538 s,超 5400 s 即停 | 后台有界 | 链 |
@@ -113,6 +119,11 @@
 | F8 | 速度门假红假绿:冷编译三项目标都以单样本为基线 | build/speed-baseline.tsv 末三行(n=1) | A1b 补到 n>=3 后再把 12300、11600 当门 |
 | F9 | 0.0.64 一版两候选(cxmod 三源与运行库头不同类)即两次整链,约 2 小时只花在构造上 | prd_cx.md 10.3"一版一类" | 门:整链降到 2400 s 以内才允许同版两候选,否则 P4 物理拆面顺延 0.0.65 |
 | F10 | 通配让闭包依赖目录列表,新增一个文件就改变全部通配使用方的计划字节 | prd_cx.md 10.2 P2"代价如实" | 产品层禁用规则先进 cxapis 类棘轮,早于 P2 实现 |
+| F11 | 新链相在链尾才第一次实跑:cache-manager 是第 497 相,失败要到约 3500 s 才知道;以后每加一个尾部相都重演 | build/chain-phases.tsv 第 500 行;阻塞节整链一条"候选 entry.elf 能否 -b osx 未实跑" | 首链失败走 `--resume` 续段;立规:新相入链前须用上一条链留存的 entry.elf 单独预演一次并留证,链目录清扫时保留最近一条的 ctrl/ |
+| F12 | 源级绿不等于产品绿:三源差异表仍有 14 行语义分叉,产品带手写 cxmod.cx,测试走 plan.cx;CXM_MAXU 96 对 128 | build/cx0-three-source-diff.tsv(181 行);4a94e2b141 | 起链前 check-cxmod-tri 必跑;装新产品后 B5 第一批就跑 cx-namespace 与 module-units;D0 的 T6 至 T8 提到 0.0.64 首位 |
+| F13 | 共享检出上全集复验得不出判定:wt gate 在波内遇他人改动即整波 UNKNOWN,而提交速率约每小时 50 次;装新产品后的红批清单(F4)只能来自快照根,现为手工五步 | 阻塞节红批复验与快照根复验两条 | 把快照根会话做成一条命令的工具(每波 8 批、慢批单列),在 real6 跑的 59 分钟内造好,B5 直接用 |
+| F14 | 冻结点落在派生物过期的提交上:derive 派生物今天三次事后重生(028e7da9d5、3fc367fef1、eea4d03204),另有两条说明为"x"的提交含产品输入(f0030a16a8 含 netmsg.cx),发布说明按提交说明取材会漏项 | `git log --oneline v0.0.61..HEAD` | 冻结 REV 前跑 `tools/derive.cx -- --check`(已列前置条件 2);发布说明的变更清单改由 `git diff --name-status` 生成而不是读提交说明 |
+| F15 | lnx/arm64 的 netmsg 只有 CI 能证:msghdr 布局按 LP64 推为 56 字节未实跑,`.sys6` 寄存器编码未读;红了要到发布后的 CI 才知道 | 任务表 B2 证据行"未验证" | 起链前确认 check-cx-sys-netmsg、check-ext-net-udp 批次在 CI 的 lnx/arm64 作业清单内;不在则先登记,不记 PASS |
 
 0.0.63 与 0.0.64 任务(都依赖 0.0.62 新产品已装;开工前逐项拆到 15 分钟):
 - 0.0.63(2026-11-14 按 A12 重排;依据与每个杠杆的证据入口在 prd_cx.md 第 5 节 L1 至 L5):零解码上界只有约 49 ms,不再承载 500 ms 门;主杠杆改为运行库闭包结果复用(L1,上界约 379 ms,n=1 且成因为推断)。类别:L1、L2、L4 都落在驱动与运行缓存(`src/runcache.cx`、`src/driveroute.cx`、`cx/runtime/unitcache.cx`、`cx/runtime/modelcache.cx`),与 0.0.62 的库包与运行库类不同类,也不是原定的模型与网类;speed12b 重建 e2 网与跳过 prune 属模型与网类,不得与之同候选。本条与进化路线"0.0.63 唯一大改类为模型装载零解码"冲突,待主调度改那一行。回滚:各项都是纯加速器,撤对应提交即回现状;UNISACC_RUN_CACHE=0 可随时关闭。
@@ -132,6 +143,27 @@
     - C4 整链对象相拆分到整链 2400 s 以内(F9 的门),不变。
 - 0.0.64:D0 cxmod 三源归一(2026-11-14 决定:先归一再加语法,依据与拆分见 prd_cx.md 10.5;`cx/compiler/cxmod.cx` 改为 `cx/cx0/plan.cx` 的第二投影,验收 `tools/cx0-extract.cx -- --check --all` 两行 EXACT、`tools/check-cxmod-tri.cx` 末行 gaps=0;其中 T1 至 T4 不动产品输入、今天可开工且互不相交,T5 至 T8 动产品输入、都写 plan.cx、串行、等 0.0.62 新产品已装;回滚:T8 之前产品件仍是手写件,撤 T5 至 T7 的提交即回到现状)-> D1 export(依赖 D0:此后每条新拒绝只改 plan.cx 一处;若 D0 的 T8 未落地则 D1 不开工,不退回手工三处对齐;验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(依赖 D1;正例 1、拒绝 5)-> D3 符号级导入收敛(依赖 D0,与 D1、D2 同写 plan.cx 故串行;`tests/module/check.cx`)-> D4 text.text 物理拆面(依赖 D1 的 export;第二候选,受 F9 门约束)-> D5 层感知前导(不依赖 D0 至 D3;末位,超 2 小时移 0.0.65)。D0 至 D3 同属 cxmod 三源一类、同候选;同写域串行,不并发。
 - 0.0.64 之后的优化候选(未排版本):prune 有 callr 时整带回退。实测凡带 stdio 闭包的程序 prune 恒等(`exit` 里一处 `callr`),用户死函数不裁,约每个小死函数多 1.1 ms、82 B(200 个:后三流多约 228 ms,ELF 36,894 对 53,278 B);对 hello 本身只差一个函数。属有意保守合同(`tools/prune-cases-gen.cx:111` 的 indirect-call-preserved),不是缺陷。改法是以取址集合为根继续裁剪,类别为模型与网类,不与驱动与运行缓存类同候选;不删现有断言。证据入口 prd_cx.md 5.1 "E2 定因"。回滚:未动产品,无需回滚。
+
+0.0.63 至 0.0.65 任务树更新(fable 第二轮,2026-11-14 15:50;单项 15 分钟内,写域互不相交;"今"=不动产品输入、已装 0.0.61 即可开工;"装后"=等 0.0.62 新产品已装):
+
+| 号 | 版 | 目标 | 写域 | 验收命令 -> 预期值 | 开工 |
+|---|---|---|---|---|---|
+| N1 | 63 | M5 残差约 58 ms 细分 | prd_cx.md 第 5 节 M5 行 | `strace -c -f` 与 `strace -r` 各一次首次运行 -> 四项毫秒数,合计与 58 ms 相差 20% 以内,否则记 UNMEASURED | 今 |
+| N2 | 63 | M2 model 相读入、校验、建布局三分 | prd_cx.md 第 5 节 M2 行、build/pkg-gaps.tsv 一行 | `UNISACC_RR_TIME=1` 命中组 n=3 -> 三分各有毫秒数,取不到则 pkg-gaps 记缺口 | 今 |
+| N3 | 63 | C2b 前置取证:`__FILE__`、诊断路径、相对 include 对路径无关键的影响 | prd_cx.md 第 5 节 L4 行 | 三个夹具各在两个目录运行 -> 列出输出含路径的情形数,给出键须保留路径的条件 | 今 |
+| N4 | 63 | E4 闭包切法取数 | prd_cx.md 5.1 的 E4 行 | 按 5.1 给的取数办法 -> UNMEASURED 改实测或写明缺的落盘入口 | 今 |
+| N5 | 63 | speed-probe 加 run 分相(读 UNISACC_RR_TIME 六流行) | tools/speed-probe.cx 及其 check | `tools/speed-probe.cx` 输出含六流 inference 与 model 行;check failed=0;pkg-gaps 对应缺口行销掉 | 今 |
+| N6 | 63 | C2a 缓存根默认值与 UNISACC_CACHE_DIR | `cx/runtime/modelcache.cx` 的 mc_cache_dir | 两个 TMPDIR 同源第二次 `RR_TIME lookup_hit=2`;`tools/check-unit-frontcache.cx` failed=0 | 装后 |
+| N7 | 63 | C3-1 单文件路接单元缓存入口(写域须含 `src/driveunits.cx`,原派工行已不够) | `src/driveunits.cx` 与入口选择 | `UNISACC_RR_TIME=1` 单文件新源 `grep -c unitcache` 大于 0(现为 0) | 装后,N6 不同写域可并行 |
+| N8 | 63 | C4 对象相拆分第一步:定 closure-m*.o 单键 349.8 s 的构成 | build/phase-times.tsv 新增行 | 对 real6 的 checkpoint 用 .cx 求和 -> 单键内编译、推理、落盘三项各有实测行 | real6 后 |
+| N9 | 64 | 通配的产品层禁用规则进棘轮(F10 提前动作) | tools/ratchets.cx 的 cxapis 项及其 check | 夹具含 `use m::*` 的产品层文件 -> 棘轮 fail;现仓 ok=13 不变 | 今 |
+| N10 | 64 | D0 的 T6:三源差异表 14 行语义分叉逐行归一方案 | prd_cx.md 10.5 的 T6 行 | 14 行各有"上移到 plan.cx"或"宿主片段"的归属,无未归属行 | 今(只读) |
+| N11 | 64 | D0 的 T6 至 T8 实现(同写 plan.cx,串行) | cx/cx0/plan.cx、cx/cx0/projection.tsv | `tools/cx0-extract.cx -- --check --all` 两行 EXACT;`tools/check-cxmod-tri.cx` 末行 gaps=0 | 装后 |
+| N12 | 65 | CI 平台作业结果回收成表(F5 提前动作) | tools 下新工具加 check 与批次行(先 `git log --all --oneline -- tools/NAME`) | 对 run 43554326355 出表,行数 == 六目标作业数,每行带结论与作业号 | 今 |
+| N13 | 65 | osx/win 有名 ENOSYS 按表断言 | exec/facts/refusals.tsv 的平台列与其 check | 生成器 `--check` OK;41 个无原因点减到 0 或余数具名 | 今(冻结 REV 之后提交,不混入 real6) |
+| N14 | 65 | lnx/arm64 netmsg 布局 CI 探针(F15) | tests/batches.tsv 的 arm64 行(commit-own --keyed) | CI lnx/arm64 作业日志含 netmsg 断言 21 条 failed=0;本机状态 DEFERRED | 今登记,CI 后转真 |
+
+速度杠杆下一个可测动作(第二轮,每档一个):(1) 冷启动:N1 的 M5 残差细分,之后才能判断 500 ms 门靠方案 A 加 L5(a) 是否够;(2) 冷编译:现有 n=3 行标 noisy(6bcd7a98fb),在 load1 低于 2 的窗口重跑 `tools/coldcompile.cx` 三文件各 3 轮,极差除以中位低于 10% 才把 12300 与 11600 当门,否则门不生效并写明;(3) 生成代码与分相:N5 让 speed-probe 出 run 分相,出数后入 build/speed-baseline.tsv 的 probe 行,UNMEASURED 才能销。
 
 三个可测速度杠杆(数字只取自 build/speed-baseline.tsv 中四个工具的行):
 - (1) 冷启动:run-startup-bench first_e2e 三次 684.051/704.882/714.267 ms(real4 c55533c7,n=3),同工具 repeat_median3 约 27 至 29 ms(0.0.59 与 local-0060 组);首次与重复相差约 650 ms,其中推理约 531 ms、解码约 49 ms(A12 实测,零解码上界只有约 49 ms)。度量:同工具 first_e2e,目标 0.0.62 为 670 以下、0.0.63 为 500 以下。
