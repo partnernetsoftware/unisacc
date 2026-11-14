@@ -1,0 +1,84 @@
+/* tools/check-archive-mv.cx -- tools/archive-mv.cx against a fixture repo in /tmp (never the real tree).
+ *
+ *   sh ./unisacc.com tools/check-archive-mv.cx
+ *
+ * The fixture is a fresh git repo seeded with archive/ARCHIVE.tsv taken by git archive from HEAD; it holds
+ * fx/a.md plus fx/ref.txt (two references, one already archive/-prefixed, one longer name fx/a.mdx) and
+ * tools/ref2.sh (executable).  Asserts: dry-run lists and changes nothing; a real move relocates the file,
+ * rewrites exactly the real references (mode kept), appends the table row; a failing verify rolls
+ * everything back (git status clean).  Prints one PASS/FAIL line per assertion, then CHECK_ARCHIVE_MV.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char out[1 << 16];
+static int pass_n, fail_n;
+
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};   /* deadline 55 s */
+    return sy_run(a, out, sizeof out, 0);
+}
+static void ok(const char *name, int cond) {
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+    if (cond) pass_n++; else fail_n++;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+
+int main(void) {
+    char root[1024], cwd[1024], cmd[4096];
+    int rc;
+    if (sh("pwd") != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    if (sh("mktemp -d /tmp/archive-mv-check-XXXXXX") != 0) return 2;
+    cx_fmt(root, sizeof root, "%s", out);
+    { long n = tx_len(root, sizeof root); while (n > 0 && root[n - 1] == '\n') root[--n] = 0; }
+
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd %s && git archive HEAD archive/ARCHIVE.tsv | tar -x -C %s && cd %s && git init -q && "
+        "git config user.email a@b && git config user.name t && mkdir -p fx tools && "
+        "printf 'alpha\\n' > fx/a.md && printf 'see fx/a.md here\\nold archive/fx/a.md and fx/a.mdx and fx/a.md.\\nnone\\n' > fx/ref.txt && "
+        "printf '#!/bin/sh\\necho fx/a.md\\n' > tools/ref2.sh && chmod 755 tools/ref2.sh && "
+        "git add -A && git commit -q -m fixture && echo FIXTURE_OK", cwd, root, root);
+    rc = sh(cmd);
+    ok("fixture built", rc == 0 && has("FIXTURE_OK"));
+    if (rc) { printf("%s\n", out); return 2; }
+
+    /* dry run */
+    cx_fmt(cmd, sizeof cmd, "sh %s/unisacc.com %s/tools/archive-mv.cx -- --dry-run --root %s fx/a.md; cd %s && git status --porcelain", cwd, cwd, root, root);
+    rc = sh(cmd);
+    ok("dry-run reports 2 files 3 lines", has("DRYRUN\tpath=fx/a.md\tfiles=2\tlines=3"));
+    ok("dry-run changes nothing", !has("??") && !has(" M ") && !has("R "));
+
+    /* real move, no verify */
+    cx_fmt(cmd, sizeof cmd, "sh %s/unisacc.com %s/tools/archive-mv.cx -- --no-verify --root %s fx/a.md; echo RC=$?", cwd, cwd, root);
+    sh(cmd);
+    ok("move status OK", has("ARCHIVE_MV\tstatus=OK") && has("RC=0"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && test ! -e fx/a.md && test -f archive/fx/a.md && echo MOVED", root);
+    sh(cmd); ok("file relocated", has("MOVED"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && cat fx/ref.txt", root);
+    sh(cmd);
+    ok("refs rewritten", has("see archive/fx/a.md here"));
+    ok("already-prefixed untouched", has("old archive/fx/a.md and"));
+    ok("longer name untouched", has("fx/a.mdx and archive/fx/a.md."));
+    cx_fmt(cmd, sizeof cmd, "cd %s && cat tools/ref2.sh && test -x tools/ref2.sh && echo EXEC_KEPT; tail -n 1 archive/ARCHIVE.tsv", root);
+    sh(cmd);
+    ok("script rewritten, mode kept", has("echo archive/fx/a.md") && has("EXEC_KEPT"));
+    ok("table row appended", has("fx/a.md"));
+
+    /* rollback: verify command fails */
+    cx_fmt(cmd, sizeof cmd, "cd %s && git add -A && git commit -q -m moved && printf 'x fx/b.md\\n' > fx/ref3.txt && printf 'b\\n' > fx/b.md && git add -A && git commit -q -m b && echo READY", root);
+    sh(cmd); ok("second fixture commit", has("READY"));
+    cx_fmt(cmd, sizeof cmd, "sh %s/unisacc.com %s/tools/archive-mv.cx -- --unisacc /nonexistent-unisacc --root %s fx/b.md; echo RC=$?; cd %s && git status --porcelain && cat fx/ref3.txt", cwd, cwd, root, root);
+    sh(cmd);
+    ok("verify failure rolls back", has("status=ROLLED_BACK") && has("RC=1"));
+    ok("rollback leaves tree clean", !has("??") && !has(" M ") && !has("R ") && !has("A "));
+    ok("rollback restored reference", has("x fx/b.md"));
+
+    cx_fmt(cmd, sizeof cmd, "rm -rf %s", root);
+    sh(cmd);
+    printf("passed=%d failed=%d\n", pass_n, fail_n);
+    if (!fail_n) printf("CHECK_ARCHIVE_MV\n");
+    return fail_n ? 1 : 0;
+}
