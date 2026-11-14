@@ -1,0 +1,256 @@
+/* tools/enosys-sites.cx -- 扫 cx/sys、cx/os、ext、tools/cxlib 中含 ENOSYS 的每一行,推断所在函数、目标平台与是否有名拒绝,生成 build/enosys-sites.tsv。
+ *
+ *   sh ./unisacc.com tools/enosys-sites.cx -- --write [--root DIR]   重算并写 build/enosys-sites.tsv
+ *   sh ./unisacc.com tools/enosys-sites.cx -- --check [--root DIR]   重算并逐字节比对
+ *
+ * 列 file line function target(lnx|osx|win|all|unknown) named(yes|no)。每个含 ENOSYS 的行一行,与 git grep -c 的行计数口径一致。
+ * target: 先看路径(osx/darwin/mac、win、lnx/linux 作为词段);再看命中行前后 8 行内的词(osx darwin macos / win windows / lnx linux),
+ * 恰一族取该族,多族 all,无则 unknown。named=yes: 标识符里 ENOSYS 带前后缀(如 SY_ENOSYS_NET),或本行/上一行有 3 字符以上的注释文字。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXF 4096
+#define OUTCAP (4 * 1024 * 1024)
+#define MAXFILE (4 * 1024 * 1024)
+
+static const char *root = ".";
+static char *files[MAXF];
+static int nf;
+static char *out;
+static long outn;
+static int rows, nnamed;
+
+static int streq(const char *a, const char *b) {
+    long n = tx_len(a, 4096);
+    return n == tx_len(b, 4096) && mm_same(a, b, n);
+}
+static int idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int idstart(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static char *dupn(const char *s, long n) {
+    char *r = mm_alloc(n + 1);
+    mm_copy(r, n + 1, s, n);
+    r[n] = 0;
+    return r;
+}
+static char lowc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+
+/* 在 [b,e) 内是否有独立词(两侧非字母数字)等于 w(小写比较) */
+static int has_word(const char *s, long b, long e, const char *w) {
+    long wl = tx_len(w, 32), i;
+    for (i = b; i + wl <= e; i++) {
+        long k = 0;
+        if (i > b && (idch(s[i - 1]) && s[i - 1] != '_')) continue;
+        while (k < wl && lowc(s[i + k]) == w[k]) k++;
+        if (k < wl) continue;
+        if (i + wl < e && idch(s[i + wl]) && s[i + wl] != '_') continue;
+        return 1;
+    }
+    return 0;
+}
+/* 词段: 以 _ . / - 分隔的片段等于 w */
+static int has_seg(const char *s, long n, const char *w) {
+    long wl = tx_len(w, 32), i;
+    for (i = 0; i + wl <= n; i++) {
+        long k = 0;
+        if (i > 0 && s[i - 1] != '_' && s[i - 1] != '.' && s[i - 1] != '/' && s[i - 1] != '-') continue;
+        while (k < wl && lowc(s[i + k]) == w[k]) k++;
+        if (k < wl) continue;
+        if (i + wl < n && s[i + wl] != '_' && s[i + wl] != '.' && s[i + wl] != '/' && s[i + wl] != '-') continue;
+        return 1;
+    }
+    return 0;
+}
+static int fam_scan(const char *s, long b, long e, int *o, int *w, int *l) {
+    *o = has_word(s, b, e, "osx") || has_word(s, b, e, "darwin") || has_word(s, b, e, "macos");
+    *w = has_word(s, b, e, "win") || has_word(s, b, e, "windows") || has_word(s, b, e, "win32");
+    *l = has_word(s, b, e, "lnx") || has_word(s, b, e, "linux");
+    return *o + *w + *l;
+}
+static const char *pick(int o, int w, int l) {
+    int n = o + w + l;
+    if (n == 0) return "unknown";
+    if (n > 1) return "all";
+    return o ? "osx" : w ? "win" : "lnx";
+}
+
+static void add_file(const char *path) {
+    if (nf < MAXF) files[nf++] = dupn(path, tx_len(path, 700));
+}
+static void walk(const char *rel) {
+    sy_dir_t d;
+    char dir[900];
+    if (cx_fmt(dir, sizeof dir, "%s/%s", root, rel) || sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        char r[900];
+        if (d.name_n == 0 || d.name[0] == '.') continue;
+        if (cx_fmt(r, sizeof r, "%s/%s", rel, d.name)) continue;
+        if (d.kind == 'd') walk(r);
+        else if (d.kind == 'f') add_file(r);
+    }
+    sy_dir_close(&d);
+}
+
+static int cmp(const char *a, const char *b) {
+    long i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return (unsigned char)a[i] - (unsigned char)b[i];
+}
+
+static void put(const char *s, long n) {
+    if (outn + n < OUTCAP) { mm_copy(out + outn, OUTCAP - outn, s, n); outn += n; }
+}
+
+static int has_comment(const char *s, long b, long e) {
+    long i;
+    for (i = b; i + 1 < e; i++) {
+        if (s[i] == '/' && (s[i + 1] == '/' || s[i + 1] == '*')) {
+            long k = i + 2, text = 0;
+            while (k < e && text < 3) { if (s[k] != ' ' && s[k] != '*' && s[k] != '/' && s[k] != '\t') text++; k++; }
+            if (text >= 3) return 1;
+        }
+    }
+    return 0;
+}
+
+static int fam_scan_path_dummy_guard(const char *rel, int *o, int *w, int *l);
+static void scan_file(const char *rel) {
+    char path[900];
+    size_t m = 0;
+    char *b;
+    long n, i, ls, nlines = 0;
+    long *starts;
+    int pf_o, pf_w, pf_l, pathfam;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return;
+    b = cx_read(path, &m);
+    if (!b) return;
+    n = (long)m;
+    if (n > MAXFILE) { mm_free(b); return; }
+    for (i = 0; i < n; i++) if (b[i] == '\n') nlines++;
+    starts = mm_alloc((nlines + 2) * (long)sizeof(long));
+    starts[0] = 0; nlines = 1;
+    for (i = 0; i < n; i++) if (b[i] == '\n') starts[nlines++] = i + 1;
+    /* 末行无换行时 nlines 已含它;有换行结尾则最后一个起点在 n,为空行 */
+    pf_o = pf_w = pf_l = 0;
+    pathfam = fam_scan_path_dummy_guard(rel, &pf_o, &pf_w, &pf_l);
+    (void)pathfam;
+    for (ls = 0; ls < nlines; ls++) {
+        long lb = starts[ls], le = lb, k, hit = -1;
+        while (le < n && b[le] != '\n') le++;
+        for (k = lb; k + 6 <= le; k++) if (b[k] == 'E' && mm_same(b + k, "ENOSYS", 6)) { hit = k; break; }
+        if (hit < 0) continue;
+        {
+            char fn[200], num[32], row[1400];
+            long fs = hit, fe;
+            int named = 0, o, w, l, tn;
+            long wb, we, q;
+            const char *tg;
+            /* 命名: 标识符带前后缀 */
+            fs = hit; fe = hit + 6;
+            while (fs > lb && idch(b[fs - 1])) fs--;
+            while (fe < le && idch(b[fe])) fe++;
+            if (fs != hit || fe != hit + 6) named = 1;
+            if (has_comment(b, lb, le)) named = 1;
+            if (!named && ls > 0 && has_comment(b, starts[ls - 1], lb > 0 ? lb - 1 : 0)) named = 1;
+            /* 函数: 向上找最近的列 0 起头、含 ( 的定义行 */
+            fn[0] = '-'; fn[1] = 0;
+            for (q = ls; q >= 0; q--) {
+                long a = starts[q], z = a, p;
+                while (z < n && b[z] != '\n') z++;
+                if (z > a && idstart(b[a]) && !(b[a] == 'e' && z - a > 7 && mm_same(b + a, "else", 4))) {
+                    for (p = a; p < z && b[p] != '('; p++) {}
+                    if (p < z && p > a) {
+                        long e2 = p, s2;
+                        while (e2 > a && b[e2 - 1] == ' ') e2--;
+                        s2 = e2;
+                        while (s2 > a && idch(b[s2 - 1])) s2--;
+                        if (e2 > s2 && e2 - s2 < 190 && !(e2 - s2 == 2 && b[s2] == 'i' && b[s2 + 1] == 'f') && !(e2 - s2 == 3 && mm_same(b + s2, "for", 3)) && !(e2 - s2 == 5 && mm_same(b + s2, "while", 5)) && !(e2 - s2 == 6 && mm_same(b + s2, "switch", 6)) && !(e2 - s2 == 6 && mm_same(b + s2, "return", 6))) {
+                            mm_copy(fn, sizeof fn, b + s2, e2 - s2); fn[e2 - s2] = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            /* 目标 */
+            if (pf_o + pf_w + pf_l == 1) tg = pick(pf_o, pf_w, pf_l);
+            else {
+                wb = ls >= 8 ? starts[ls - 8] : 0;
+                we = (ls + 9 < nlines) ? starts[ls + 9] : n;
+                tn = fam_scan(b, wb, we, &o, &w, &l);
+                (void)tn;
+                tg = pick(o, w, l);
+                if (pf_o + pf_w + pf_l > 1) tg = "all";
+            }
+            cx_fmt(num, sizeof num, "%ld", ls + 1);
+            if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\n", rel, num, fn, tg, named ? "yes" : "no")) continue;
+            put(row, tx_len(row, 1400));
+            rows++; nnamed += named;
+        }
+    }
+    mm_free(starts);
+    mm_free(b);
+}
+
+static int fam_scan_path_dummy_guard(const char *rel, int *o, int *w, int *l) {
+    long n = tx_len(rel, 900);
+    *o = has_seg(rel, n, "osx") || has_seg(rel, n, "darwin") || has_seg(rel, n, "macos");
+    *w = has_seg(rel, n, "win") || has_seg(rel, n, "windows") || has_seg(rel, n, "win32");
+    *l = has_seg(rel, n, "lnx") || has_seg(rel, n, "linux");
+    return *o + *w + *l;
+}
+
+static char *slurp(const char *path, long *n) {
+    size_t m = 0;
+    char *b = cx_read(path, &m), *c;
+    if (!b) return 0;
+    c = mm_alloc((long)m + 1);
+    mm_copy(c, (long)m + 1, b, (long)m);
+    c[m] = 0;
+    mm_free(b);
+    *n = (long)m;
+    return c;
+}
+static int emit(const char *rel, char *buf, long n, int write_mode) {
+    char path[700]; long on = 0; char *old;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
+    if (write_mode) return cx_write(path, buf, n) ? 2 : 0;
+    old = slurp(path, &on);
+    if (!old || on != n || !mm_same(old, buf, n)) {
+        long k = 0, line = 1;
+        if (old) while (k < on && k < n && old[k] == buf[k]) { if (buf[k] == '\n') line++; k++; }
+        sy_printf("DIFF\t%s\tline=%ld\n", rel, line);
+        return 1;
+    }
+    sy_printf("OK\t%s\n", rel);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a, mode = 0, i, j;
+    const char *hdr = "# file\tline\tfunction\ttarget\tnamed\n";
+    for (a = 1; a < argc; a++) {
+        if (streq(argv[a], "--write")) mode = 1;
+        else if (streq(argv[a], "--check")) mode = 2;
+        else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { sy_printf("usage: enosys-sites.cx -- --write|--check [--root DIR]\n"); return 2; }
+    }
+    if (!mode) { sy_printf("usage: enosys-sites.cx -- --write|--check [--root DIR]\n"); return 2; }
+    out = mm_alloc(OUTCAP);
+    put(hdr, tx_len(hdr, 100));
+    walk("cx/sys"); walk("cx/os"); walk("ext"); walk("tools/cxlib");
+    for (i = 1; i < nf; i++) {
+        char *t = files[i];
+        for (j = i - 1; j >= 0 && cmp(files[j], t) > 0; j--) files[j + 1] = files[j];
+        files[j + 1] = t;
+    }
+    for (i = 0; i < nf; i++) scan_file(files[i]);
+    {
+        int rc = emit("build/enosys-sites.tsv", out, outn, mode == 1);
+        if (mode == 1 && !rc) sy_printf("WROTE\trows=%d\tnamed=%d\tfiles=%d\n", rows, nnamed, nf);
+        return rc;
+    }
+}
