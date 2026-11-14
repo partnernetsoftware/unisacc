@@ -505,6 +505,40 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | Y4 | S4、S5、S6 是否在默认 -run 路径 | `sh ./unisacc.com tools/refactor.cx sites tb_encode,tl_bind,at_bind --tracked`,对每个调用点读其守卫条件 | 回填三行的"调用面";预期 tb_encode 只在 emitbin 且 mode 2(本次已读 `drive.cx:385`);另两个未知,如实记录 |
 | Y5 | 薄壳确认 | 读 `cx/compiler/stream/*.cx`、`image/*.cx`、`net/*.cx`(共 31 个文件约 300 行) | 预期全部只有 module/use 与转调,无分支逻辑;有例外则补进 (1) 的手写表 |
 
+Y3 与 Y4 结果(2026-11-14,只读取证,`cx/compiler/fwdmerge.cx`、`src/drive*.cx` 原文):
+
+Y3 fwdmerge 行种类表(行号为 `cx/compiler/fwdmerge.cx`):
+
+| 行种类 | 识别形态 | 行号 | 行间依赖 |
+|---|---|---|---|
+| 结束行 | 整行 `.end`,且必须是最后一行 | `:99` `:100` | 无 |
+| 单元头(基带) | 仅首行 `.unit 2` | `:103` `:105` | 无 |
+| 来源行 | `.unit ID LEN:HEX`,ID 小于 128,十六进制对不含 00 | `:106`、`fwm_source :64` 至 `:86` | 有:记为后续各行的 source,影响 `.unit` 重发 |
+| 全局声明 | 前缀 `.global ` | `:259` | 全局名表(上限 4096 个) |
+| 桩区声明 | 前缀 `.global `、`.extern `、`.gdef ` | `:285` `:329` 等 | 跳过 |
+| bss 名 | 前缀 `.bss ` 后接标识符 | `:288` | 收集局部名 |
+| 标号 | 非空格开头、以 `:` 结尾 | `:290` | 收集局部名 |
+| 锚点 | 整行 `main:`、`__init_u:`、`__main_ret:`(桩);`__init:`、`__main_ret:`(基带) | `:263` 至 `:270` | 全局位置:取各锚点首次出现的行号,须满足 body<main<sinit<sret、ainit<aret |
+| ret 行 | 整行 `  ret` | `:276` `:280` | 位置依赖(最后一个 ret 为插入点) |
+| 调用行 | 前缀 `  call ` | `:284` `:288` | 插入点向前回溯连续 call 行 |
+| 退出行 | `  .exit r0`、`  call exit`、`.extern __init`(尾部只许这三类与 `.str `) | `:292` `:293` | 位置 |
+| 字符串行 | 前缀 `.str `(引号内不改写) | `:206` `:297` | 无 |
+| 系统调用行 | 前缀 `  .sys `、`  .sys6 `(逗号前原样) | `:200` | 无 |
+| 标识符内的改名 | `__unisacc_L/R<数>`、`S<数>`、`ls<数>`、局部名 | `:214` `:217` `:219` `:223` | 偏移量由基带全表最大值决定 |
+
+Y3 结论:行种类本身是有限集,识别只看行首前缀或整行相等,所以"行种类判定"可以进事实表。但合并语义不是有限状态转移:(1) 必须先整带切成行再全局找 7 个锚点(`:263` 至 `:270`);(2) 局部名集合依赖符号名内容,`fwm_hasname/fwm_isexport`(`:120` `:124`)查开放集合,上限 4096 名、1024 字节(`:131`);(3) 标号与字符串偏移取基带全带最大编号 labmax/strmax(`:296` 至 `:312`),是先扫后用,不是邻行转移;(4) 来源映射表 128 项(`:179` `:183`)。判定:行种类有限,合并整体需要"先全扫(锚点、名集合、最大值)后写(带偏移改名)"的两遍序列网,不能表示为事实表加有限状态转移;S3 风险维持"中高"。
+默认 -run 路径:`fwm_merge` 经 `dv_fw_merge`(`src/driveroute.cx:107`)作为回调传入 `fwd_incremental`(`src/driveroute.cx:262` 至 `:264`),只有增量路径(fast>0)才执行;最小程序 `int main(void){return 0;}` 的 `UNISACC_RR_TIME=1` 输出只有 e1/e3/prune/lower/elf 五个 inference 行,无合并相位。多单元增量下是否调用 [UNVERIFIED:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com A.cx B.cx 2>&1 | grep -ci merge`]。
+
+Y4 调用面分类(git grep 取数):
+
+| 函数 | 调用点 | 守卫 | 分类 |
+|---|---|---|---|
+| `tb_encode` | `src/drive.cx:385` | `emitbin && mode2 == 2`(--tapebin 的 -S) | 仅 -S 路径;另有 `tools/check-tapebin.cx:28,44` |
+| `tl_bind` | `src/drivelink.cx:193`(`dv_link_objects`);`tools/image-contrib.cx:59`;`tools/tape-origin.cx:85` | `dv_link_objects` 由 `src/drive.cx:229`(`dv_link_objects_route`)调用,`src/drive.cx:502` 守卫 `cxp_object_path(src)`,输入是 .o 才走 | 仅链接 .o 路径与工具;源 .cx 默认 -run 不走 |
+| `at_bind` | `src/driveface.cx:125`(as)与 `:169`(nm/objdump);`tools/check-asmtext-tables.cx:104` | 入口是 as/nm/objdump/ar 子命令 | 仅工具型子命令,不在默认 -run |
+
+三项均不是默认路径热点。回填:S4、S6 不排版本(按 5.3 既定,只按与事实表重复处理);S5 只在链接 .o 时用,收益面窄。UNVERIFIED:加载层面是否读到这三个单元(`.com` 是单一二进制,strace 的 openat 区分不出),取数 `sh ./unisacc.com tools/refactor.cx sites tb_encode,tl_bind,at_bind --tracked`(本次以 git grep 代替)。
+
 未做与限度:H3、H5、H6、H8 至 H11、H15 只做了计数与读文件头;`src/driveunits.cx`(451 行)、`src/stages.cx`(424 行)、`cx/compiler/routepipe.cx`(190 行)、`tools/facts-gen.cx`(4343 行)、`tools/target-gen.cx`(422 行)、`build/graph.tsv`(211 行)只取了行数,没有读内容,其中的手写逻辑未进本表 [UNVERIFIED:按 (1) 的 IO 数与字面量计数口径补做];本节所有新候选没有任何耗时实测。
 
 ## 6. 路线：cx 流网设计与实现（0.0.58 至 0.0.60）
