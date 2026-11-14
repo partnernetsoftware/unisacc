@@ -7,7 +7,7 @@
 - 同候选 CI run:TBD。
 - 候选 APE `unisacc.com` sha256 与字节数、`--version`:TBD(0.0.62 整链 real6 结果待定)。
 - 裁决(release/decision.txt 末行 QUALIFIED 字段):TBD,由发布流程填。
-- git 范围 `v0.0.61..HEAD`:截至本文件起草时共 170 个提交(`git log --oneline v0.0.61..HEAD`);最终范围与计数:TBD(以冻结点为准重算)。
+- git 范围 `v0.0.61..HEAD`:截至本文件起草时共 171 个提交(git rev-list 实测)(`git log --oneline v0.0.61..HEAD`);最终范围与计数:TBD(以冻结点为准重算)。
 
 ## 是什么
 
@@ -15,7 +15,7 @@
 
 ## 行为变化(产品输入)
 
-库包与运行库(版本以 build/tlib-packages.tsv 为准:cx.sys 0.1.10、ext.net 0.1.8、cx.plan 0.1.2、cx.compile 0.2.6):
+库包与运行库(版本以 build/tlib-packages.tsv 为准:cx.sys 0.1.10、ext.net 0.1.8、cx.plan 0.1.3、cx.compile 0.2.7):
 
 (1) cx.sys netraw(91a399dea0):套接字原语层,仅 Linux x86_64/arm64,osx/win 记 -ENOSYS;sys-syscalls.tsv 追加 snr_* 行并重生 sysnums;check-cx-sys-netraw 92 断言。
 (2) cx.sys netpoll(959908611f):sy_sock_poll(基于 ppoll)与 sy_sock_optnum。
@@ -54,7 +54,7 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (24) tools/chain-ready.cx 起链前置条件一条命令(28459b3911,f87d3ee2c9 补 affected 退出码 3 判 UNMEASURED),check-chain-ready 32 断言。
 (25) tools/cx0-diff.cx cxmod 三源差异表(62901f0fc7、3761234e57),落 build/cx0-three-source-diff.tsv;tools/check-cxmod-tri.cx 改行为级比较并含 CXM_MAXU 夹具(98e5adbc09、4a94e2b141)。
 (26) dock-audit:build/dock-audit.tsv 与 tools/check-dock-audit.cx(d755923493、2fc15b0295);审计人、理由、裸调用符号数逐项未填,均 UNAUDITED。
-(27) 批次选择:affected --iface-narrow(接口摘要未变时下游 use 批降级为 DEFERRED_BY_IFACE,3d7c610228,1420444e98 改按包判定)与 --symbol-narrow(符号级收窄,7c7124c12c);tools/iface-hash.cx 与 build/iface-hash.tsv(80e001c0b4)。实测选批数:改 cx/text/text.cx 由 895 降到 757(iface),符号级再降到 4、延后 764;只作选批降级,默认与 --run 不带开关仍全量。符号级不识别函数指针与宏引用的间接调用。
+(27) 批次选择:affected --iface-narrow(接口摘要未变时下游 use 批降级为 DEFERRED_BY_IFACE,3d7c610228,1420444e98 改按包判定)与 --symbol-narrow(符号级收窄,7c7124c12c);tools/iface-hash.cx 与 build/iface-hash.tsv(80e001c0b4)。实测选批数(各提交说明原文,基线不同):iface 段改 cx/text/text.cx 由 895 降到 757(3d7c610228,scanned=1061);符号级段改 tx_upper 体由 768 降到 4、延后 764(7c7124c12c);只作选批降级,默认与 --run 不带开关仍全量。符号级不识别函数指针与宏引用的间接调用。
 (28) 其他:tools/phase-graph.cx、build/chain-phase-outputs.tsv(写集未经 strace,UNVERIFIED);cxinclude 棘轮新增 cx-wildcard-product(N9);guard-edit 钩子拦解释器与 stash/reset 等(a3fb9da2f4,59 断言)。
 
 ## 实测速度
