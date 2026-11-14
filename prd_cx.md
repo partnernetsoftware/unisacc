@@ -1515,6 +1515,62 @@ cx 现在能在编译(规划、扫描)期保证的:(1) 模块私有符号不被�
 
 不取:垃圾回收与引用计数运行时(单文件 APE 与 no-libc 下要自带运行时,且改变 C/ASM 内存合同:零写占槽、覆盖前扩容);流敏感借用检查与生命周期标注(需要新语法或属性,宿主 C99 编译器无法忽略后仍同义,且检查器要在三源各实现一遍);把 `cx/owned.cx` 扩成通用所有权系统(CX-O-7 冻结)。
 
+### 11.7 内存安全基线(2026-11-14 实测与设计;设计部分未实现,不得记 PASS;承 R6-L3)
+
+定位:10.7 是 export 合同,不含内存安全;本节给 (1) `tools/cx-own.cx` 报告条数基线,(2) 运行期检查覆盖表,(3) 一条最小编译期可检性质的方案与落点。本节不声称 Rust 级所有权,不改变 11.6「任何文档不得写内存安全」的约束。
+
+**(1) cx-own 基线**(输入身份 main HEAD dc966931c7 的工作区,已装产品实跑;命令 `sh ./unisacc.com tools/cx-own.cx -- --tracked DIR/`,五目录并行,各自单次墙钟 5.6 至 7.0 秒,均在 60 秒内;rc 1 表示有报告,rc 0 表示无)
+
+| 目录 | rc | files | functions | analyzed | skipped | owners | DOUBLE-FREE | USE-AFTER-FREE | LEAK |
+|---|---|---|---|---|---|---|---|---|---|
+| cx/ | 0 | 235 | 1933 | 1925 | 8(goto) | 63 | 0 | 0 | 0 |
+| ext/ | 0 | 38 | 389 | 388 | 1(goto) | 5 | 0 | 0 | 0 |
+| src/ | 1 | 25 | 266 | 262 | 4(goto) | 15 | 1 | 0 | 3 |
+| tools/(参考,非门) | 1 | 933 | 9236 | 9209 | 27(goto 26、parse 1) | 1297 | 1 | 6 | 377 |
+| tests/(参考,非门) | 1 | 347 | 2843 | 2841 | 2(goto) | 343 | 0 | 0 | 17 |
+
+cx/ 子目录(同命令,报告三类全为 0):cx/sys files=26 functions=297 skipped=0;cx/core 9/71/1;cx/mem 6/60/0;cx/compiler 78/619/3;cx/cx0 2/107/1;cx/runtime 87/480/3;cx/driver 10/93/0。cx/ 跟踪 `.cx` 249 个,分析 235 个,差 14 个为符号链接(`git ls-files -s` 模式 120000 实数 14,工具按头注释跳过)。
+
+src/ 四条明细:`LEAK src/drivestream.cx:222`、`:223`、`:229`(fn=ds_attr_in,alloc=220,变量 tab;222 与 223 两行是 `mm_copy`/`mm_move` 失败的 `return 1` 未放 tab,读源码看是真漏放,229 未逐行复核);`DOUBLE-FREE src/stages.cx:370`(fn=st_span,变量 owned;369 与 370 行的条件 `pr == 3` 与 `pr == 2` 互斥,是误报,与 `prd.md` 能力速查 2026-11-03 的记载一致)。
+
+门口径(R6-L3 的「cx/ 与 src/ 报告条数不增」):cx/ 三类合计 0;src/ 为 DOUBLE-FREE 1、USE-AFTER-FREE 0、LEAK 3。skipped 不计入报告但须同报(cx/ 8、src/ 4),跳过数上升等于覆盖下降,不得用它换报告条数下降。
+
+基线的限制(如实):cx-own 只看函数内局部指针对 malloc/mm_alloc 一族的拥有;cx/ 全树只有 63 个局部 owner、src/ 15 个,产品的所有权多在结构体字段、`mg_buf`、`cm_*` 句柄与 arena 里,不在分析范围。「cx/ 报告 0」的含义是这 63 个局部 owner 未见三类问题,不是 cx/ 无内存缺陷。误报率与漏报率对 cx/、src/ 为 UNMEASURED(仅有 2026-11-03 全仓抽 10 条 LEAK 全真的旧抽样)。基线尚未入 build/ 下的表(R6-W9 的写域,不在本节写域内)。
+
+**(2) 运行期检查:已覆盖与未覆盖**(只读;依据 `cx/core/memory.cx`、`cx/core/mem/{heap,bytes,slice,grow}.cx`、`cx/sys/mem.cx`;cx/sys 与 cx/core 冻结,未改)
+
+| 性质 | `cm_*` 句柄面(cx/core/memory.cx) | `mm_*` 堆面(mem/heap.cx、bytes.cx) | `ms_*`/`mg_*` 带界面 | `sy_*`(cx/sys/mem.cx 与 fd 类) |
+|---|---|---|---|---|
+| use-after-release | 已覆盖:`cm_drop` 把槽的 token 清 0,token 由 `cm_issue` 单调发放不复用,旧 owner 再用得 `CM_INVALID_OWNER`(memory.cx:21 至 24、:59);`cm_move` 换新 token 使旧句柄失效(:58);lease 在 owner token 变化后得 `CM_INVALID_LEASE`(:25 至 29) | 未覆盖:`mm_free` 后指针仍可解引用,语义等同 libc free(heap.cx 头注释明写不加所有权与边界检查) | 未覆盖:`ms_slice` 是(指针,长度)值,不跟踪底层 `mg_buf` 的存活,`mg_free` 后旧切片悬垂 | 未覆盖:`sy_unmap` 后地址、关闭后的 fd 号可被复用命中(11.6 的 M3 与 10.8 的 `sy_res_live` 均未实现) |
+| 越界 | 已覆盖:`CM_BOUNDS`,`cm_range` 用 `count<=length-offset` 的不溢出写法(:30);lease 访问限在 lease 的 offset/length 内(:69、:70) | 部分:`mm_copy`/`mm_move`/`mm_fill` 带目的容量 dcap,超出得 `-ERANGE`;源长度与裸指针下标、指针运算不受检 | 部分:`ms_at` 越界得 `-ERANGE`(slice.cx:63);取出 `s->p` 之后的裸访问不受检 | 未覆盖:`sy_map_none`/`sy_unmap`/`sy_protect_*` 收裸指针加长度,长度是否属于同一映射不核 |
+| 双释放 | 已覆盖:第二次 `cm_drop` 得 `CM_INVALID_OWNER`,第二次 `cm_release` 得 `CM_INVALID_LEASE`;有活 lease 时 drop 得 `CM_BUSY` | 未覆盖:`mm_free(0)` 无操作,同一非空指针放两次即 libc 双释放 | 部分:`mg_free` 释放后把结构清零(grow.cx:27 合同),同一结构再放无害;结构被复制后各放一次不防 | 未覆盖 |
+| 跨模块持有 | 未覆盖:句柄是可复制、可伪造的值(memory.cx:5),无模块身份;只核跨实例(`CM_CROSS_INSTANCE`),任何拿到值的模块都能用、能 drop | 未覆盖 | 未覆盖 | 未覆盖 |
+| 借用冲突 | 已覆盖(仅本面):读写计数,冲突得 `CM_BUSY`,只读 lease 写得 `CM_READ_ONLY` | 无此概念 | 无此概念 | 无此概念 |
+
+`cm_*` 面的边界:单线程;上限 16 实例、64 缓冲、128 lease、64 MiB;token 用尽得 `CM_TOKEN_EXHAUSTED`;`cm_unsafe_import` 收裸源指针,源长度不受检;该面逐字节访问,产品热路径不走它(调用者数 UNMEASURED,本轮未用 `refactor.cx sites` 清点)。结论:四条性质里只有 `cm_*` 面覆盖前三条,产品实际使用的 `mm_*`、`mg_*`、`ms_*`、`sy_*` 面对 use-after-release 与双释放基本不设防;「跨模块持有」在所有面都没有任何运行期或编译期检查。
+
+**(3) 最小编译期可检性质 OWN-E1:转出须声明**
+
+- 性质:非 static(模块公开)函数若把本函数内由 `mm_alloc`、`mm_zalloc`、`mm_grow`、`mm_strdup` 得到的块经 `return` 交给调用方,该函数名必须出现在本单元的 `#pragma unisa owns NAME` 里;反向,`owns NAME` 必须指向本单元定义的非 static 函数。static 函数不受检(块未出模块)。选它的理由:cx-own 已在函数内判定「所有权经 return 离开函数」这一事件(头注释 Ownership leaves the function),只是现在不输出;它是名字加声明的一致性,不需要流敏感借用检查与生命周期标注;它正是「跨模块持有」这一全空白性质的最小切口。
+- 它证明什么、不证明什么:只证明「公开面上转出所有权的函数都有声明」,使调用方的释放义务可以从接口上机械列出;不证明调用方会释放、不证明无释放后使用、无双释放,也不管经 `*out = p`、结构体字段、全局存储转出的块(这几类先只计数,见下)。
+- 检查位置,分两期:
+  - 甲期(非产品输入,工具类,可立即做):`tools/cx-own.cx` 新增 `--escapes`,对每个经 return 转出的块输出 `ESCAPE-RETURN<TAB>FILE:LINE<TAB>VAR<TAB>fn=NAME<TAB>linkage=public|static`,另输出 `ESCAPE-STORE`(`*out`、字段、全局)只供计数;末行 `CX_OWN_ESC` 给各类条数。声明先放表不放 pragma:现成表里选一张加列或行(按 R6-W9 口径不新开表),lint 核「public 的 ESCAPE-RETURN 全在表内、表内无多余名」。
+  - 乙期(产品输入,cxmod 三源类):检查写在权威 `cx/cx0/plan.cx` 的规划期(与 `cxm_checkcalls` 同一遍函数体记号扫描),经 `tools/cx0-extract.cx` 投影到其余两源,不在 `cx/compiler/cxmod.cx` 手写第二份;因此前置条件是 10.5 的 D0 三源归一完成(`check-cxmod-tri.cx` gaps=0)。乙期判定收窄为流不敏感的名字规则:公开函数体内某个 `return` 的表达式是上述四个分配函数的直接调用,或是在同一函数内被赋过这类调用结果的局部名。
+- 拒绝文案(沿 `cxm_start` 的 `FILE:LINE:` 前缀与现有英文风格):
+  - `FILE:LINE: function NAME returns an owned block; declare it with #pragma unisa owns NAME`
+  - `FILE:LINE: unisa owns NAME: no non-static function NAME in this unit`
+  - `FILE:LINE: unisa owns takes a function name`
+- 夹具(`tests/` 下新目录,五个最小 `.cx`):(a) 公开函数 return mm_alloc 结果且有 owns,接受;(b) 同 (a) 无 owns,拒,文案第一条;(c) owns 指向不存在或 static 的名字,拒,文案第二条;(d) static 函数 return mm_alloc 结果无 owns,接受;(e) 公开函数 return 入参指针(借用,不拥有),接受。
+- 验收命令与预期值(均为设计预期,未实现未实跑,不得记 PASS):
+  - 甲期:`sh ./unisacc.com tools/check-cx-own.cx` 末行仍 rc0:CHECK_CX_OWN 且新增 escapes 夹具 5 条全过;`sh ./unisacc.com tools/cx-own.cx -- --escapes --tracked cx/ src/ ext/` 末行 `CX_OWN_ESC` 的 public 未声明数入表作基线(现值 UNMEASURED,工具尚无该输出)。
+  - 乙期:`sh ./unisacc.com tools/check-own-escape.cx` 末行 `CHECK_OWN_ESCAPE passed=5 failed=0`,其中 (b)(c) 两条 rc 1 且 stderr 逐字含上列文案;`sh ./unisacc.com tools/check-cxmod-tri.cx` 末行 failed=0 gaps=0;`sh ./unisacc.com tools/cx0-extract.cx -- --check --all` 两行 EXACT;全树 `cx/`、`src/`、`ext/` 用新产品实编被本规则拒绝的单元数为 0(开启规则前先由甲期把未声明数清到 0)。
+- 版本落点(R6-V 版本序):甲期不动产品输入,不占版本槽,可在 0.0.65 周期内随工具提交。乙期是 cxmod 三源类产品输入:不进 0.0.65(该候选是 D0 归一加 export D1a,不与 export 同候选);0.0.66 库包源、0.0.67 cx.stream R3(驱动)、0.0.68 驱动与运行缓存二期都不是 cxmod 类,且 R6-L3 已定 0.0.63 至 0.0.68 不排内存安全实现;故乙期落在 0.0.68 之后的第一个 cxmod 三源类候选,不早于 0.0.69,单独一类不夹带。与 11.6 的 M2(owns 标注)、M6(结构性拒绝,不早于 0.0.67)是同一条线的具体化:甲期即 M2 的表与 lint,乙期即 M6 的第一条性质。
+- 取消条件:甲期测得 public ESCAPE-RETURN 数为 0 或误报率过半,则乙期不做,把结论原位写回本节。
+
+**仍是运行期而非编译期的性质**(乙期落地后也不变):use-after-release(仅 `cm_*` 面按 token 拒绝,`mm_*`/`mg_*`/`ms_*`/`sy_*` 面无检查);越界(仅经带界接口的访问);双释放(仅 `cm_*` 面与 `mg_free` 清零路径);借用冲突(仅 `cm_*` 计数);句柄伪造与复制(无任何检查)。完全没有的:数据竞争免疫、裸指针别名安全、生命周期证明。OWN-E1 是声明一致性检查,不是所有权系统;发布说明继续保留「运行期检查,不是编译期所有权」一句。
+
+UNMEASURED 汇总:cx-own 对 cx/、src/ 的误报率与漏报率;public ESCAPE-RETURN 与 ESCAPE-STORE 条数;`cm_*` 面的产品调用者数;`src/drivestream.cx:229` 一条 LEAK 的真伪;乙期规划期耗时增量;osx、win 宿主上 cx-own 的基线(本轮只在 Linux x86_64 跑)。
+
 ## 12. 状态事实表化(2026-11-14,只读评估与设计;未实现,不得记 PASS)
 - SFT-0 结论:缺的不是数据库,是"状态"这一类事实还没进表。代码侧已有 57 张登记表(build/table-index.tsv),状态侧只有一份 168820 字节的 prd_mempalace.md,建文件当天(2026-11-14 10:53 起约 9 小时)被提交 110 次,峰值每小时 24 次;先把"仍未验证"16 条做成一张表并只读对拍(SFT-S0),对拍为 0 差异后再让文档该节由表生成。不用 SQLite、python、node,只用 TSV 加 .cx。
 - SFT-1 痛点实测(git log/numstat 与文本计数,输入身份 main HEAD 0c6847a90d;近 7 天窗口内该文件只存在 1 天):提交 110 次,占同期全仓 1447 次的 7.6%;其中只动这一个文件的 70 次(64%);增 736 行删 209 行;行数 527(取数期间他人未提交改动使其到 571);最长一行 2822 字符,超过 500 字符的行 47 条;版本号出现 290 次(0.0.62 108 次、0.0.63 81 次、0.0.65 33 次),所以改一次版本序要动上百处;不同任务号(K/H/N/W/S/Z/F 加数字)87 个;含 UNVERIFIED 或 UNMEASURED 的行 56 条;"下一动作"节条目 83 条、"仍未验证"16 条、"阻塞发布"4 条。
