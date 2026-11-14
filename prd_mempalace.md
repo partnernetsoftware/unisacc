@@ -54,7 +54,7 @@
   - Z6 在冻结 HEAD 重跑(现有 PASS 证据绑 c39a890651 的候选 227e63f5998e;其后 src、cx、ext 无改动,只有 exec/facts/derive.tsv 变,证据可参考但身份不是冻结提交);entry-build 约 56 s 加探针。
   - chain-ready 的 7-recipe 与 9-ledger 是手工项:起链前在本文件写一行(REV、PID/PGID、截止、输出目录),并按起链配方 1 至 5 备私有根。
   - `tools/chain-precheck.cx` 无参即 `REFUSE usage` rc 2:它要 ROOT CHAIN_OUT NEW_OUT 与一条已有链的输出,不是冻结前可单跑的门;Z3 行里把它列为冻结门的写法不可执行,冻结只认 chain-ready 末行,precheck 记未跑。
-  - 0.0.63 版 release/rollback.txt(现文件是 0.0.62 版)在公开前写好;发布说明含"待填"的 6 行(第 3 行口径说明;第 5 行冻结提交、候选 sha、CI run、公开时间、裁决;K3 硬模式结果;s9 判定;候选级证据;rollback 0.0.63 版)随发布步骤填。
+  - 0.0.63 版 release/rollback.txt(现文件是 0.0.62 版)在公开前写好(草稿已出:$CLAUDE_JOB_DIR/tmp/rollback-0.0.63.draft.txt,即 /home/devali/.claude/jobs/2798e440/tmp/rollback-0.0.63.draft.txt,未入库;ape-0.0.62 目录与 sha 83b82c8d 实核 OK,6 件无 zip 与窗口规则 R6-H63 已写入,RUN_ID/X/Y1/Y2 提交号待公开时填;注意 tools/cxlib/releaseexec.cx 第 537 行 i==13 步用 rx_save 生成的 rollback.txt 是固定三行模板,不含件数故不按版本取资产数,但会覆盖手写件,而第 541 行把它拷到 release/rollback.txt,公开前须决定改生成器读手写件或跳过第 537 行,本次未改);发布说明含"待填"的 6 行(第 3 行口径说明;第 5 行冻结提交、候选 sha、CI run、公开时间、裁决;K3 硬模式结果;s9 判定;候选级证据;rollback 0.0.63 版)随发布步骤填。
   - 装新产品后的门:`UNISACC_REQUIRE_N15C=1` 跑 phase-timing-stamps(K3 硬模式,现只在旧产品上以软模式 PASS)、tests/cx-namespace.cx、C2a 默认根换 TMPDIR 命中、E3TRIM 曲线与 run-startup-bench 重测入 speed-baseline.tsv、修复后 N15 的 7/0/0 入表。
   - F26 的真实读回件数(应为 6)与 release-oneshot、releaseexec、releaseprepare、release-run 的 0.0.63 分支用例。
   - 候选 s9 commit 档(快照根 mkdir out、RUN=ROOT/out/s9-run;0.0.62 实测 init 194 s、steps 约 1226 s、aggregate 约 180 s,合计约 27 分钟),与同候选 CI 并行。
