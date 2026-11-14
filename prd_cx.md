@@ -701,7 +701,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 **(2) 若全生成受阻时的最小切分(备选,不是首选)**
 
-- 受阻点只有一个可预见:`cxm_checkcalls` 上移到权威后 `src/cxmod.c` 增约 138 行,而 srcshape 棘轮不许 `src/` 增行(10.3 棘轮条)。`src/cxmod.c` 是否计入 srcshape 口径:UNVERIFIED,见下 T4。若计入且不能豁免,则 `checkcalls` 区对 `src/cxmod.c` 目标按表 `drop`,对产品目标 `keep`;这仍是一份源,不是手写第二份。
+- 受阻点只有一个可预见:`cxm_checkcalls` 上移到权威后 `src/cxmod.c` 增约 138 行,而 srcshape 棘轮不许 `src/` 增行(10.3 棘轮条)。`src/cxmod.c` 不计入 srcshape 口径(T4 实测:`tests/srcshape.cx` 第 101 行只取 `git ls-files -s -z -- 'src/*.cx'`;基线 `tests/srcshape.tsv`;`src/cxmod.c` 现 1271 行,不在其中)。故无需豁免;若仍需对 `src/cxmod.c` 减行,则 `checkcalls` 区对 `src/cxmod.c` 目标按表 `drop`,对产品目标 `keep`;这仍是一份源,不是手写第二份。
 - 必须共享(决定接受或拒绝、决定计划字节或 CXIF 字节的函数,任何一个分叉都会让三宿主结果不同):`cxm_directive`、`cxm_adduse`、`cxm_scan`、`cxm_exportok`、`cxm_typenames`、`cxm_project`、`cxm_text`、`cxm_emit`、`cxm_collisions`、`cxm_usechk`、`cxm_dfs`、`cxm_deps_same`、`cxm_rootfind`、`cxm_rewrite`、`cxm_rewrite_multi`、`cxm_plan`、`cxm_planprint`、`cxm_interface`、`cxm_checkcalls`,以及全部 `CXM_*` 上限与全部拒绝文案。函数名入口:`grep -n '^int cxm_\|^static int cxm_' cx/compiler/cxmod.cx`。
 - 允许留在差异层的只有:`cxm_rd`、`cxm_wr`、`cxm_say`、`cxm_digest` 的实现来源,临时目录从哪里来,`cxm_samefile` 的规范路径来源,对外入口(`cxm_bind` 对 `cx0_plan`),可见性。差异层不得出现 `cxm_m(` 调用(即不得发出任何拒绝文案),这条可做成 `--check` 的一条断言。
 
@@ -736,7 +736,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 - 并发关系:T1、T2、T3、T4 写域互不相交,可同时派;T5 至 T8 都写 plan.cx,串行。T5 至 T8 合计四个 15 分钟片,排在 D1 之前。
 - 遍历消费者(限时与字面量改读表的铁律):T6 的消费者清单是 `cx/cx0/plan.cx`、`src/cxmod.c`、`cx/compiler/cxmod.cx`、`DV_MAXU` 的使用方(`grep -rn DV_MAXU src cx`)、`exec/facts/limits.tsv:2`、`tools/check-cxmod-tri.cx:122`;T8 的消费者是 15 个 `use compiler.cxmod` 的文件(`grep -rln 'compiler.cxmod' src cx tools tests`,其中 `src/` 6 个)。
-- 未验证与风险:(1) 生成的产品件能否与现手写件逐字节相等:UNMEASURED,T3 给数;不等时以「差异逐行归入六类且 `tests/module/units.cx` 全绿」为准,不强求字节相等。(2) srcshape 对 `src/cxmod.c`:UNVERIFIED(T4)。(3) MAXU 升到 128 后宿主静态内存增量:UNMEASURED。(4) `cxm_checkcalls` 上移后宿主侧现有语料(`tests/cx-host-run.cx`、`tests/cxcc/units.tsv`)是否有被新拒绝的正例:UNVERIFIED,T5 验收须加跑批次 `cx-host-run`。(5) 本节全部为设计,T1 至 T8 均未开工。
+- 未验证与风险:(1) 生成的产品件能否与现手写件逐字节相等:UNMEASURED,T3 给数;不等时以「差异逐行归入六类且 `tests/module/units.cx` 全绿」为准,不强求字节相等。(2) srcshape 对 `src/cxmod.c`:已核实不计(T4,见上;cxapis、cxlibc 对生成物 `cx/compiler/cxmod.cx` 的影响仍 UNVERIFIED,未跑 `tools/ratchets.cx`)。(3) MAXU 升到 128 后宿主静态内存增量:UNMEASURED。(4) `cxm_checkcalls` 上移后宿主侧语料新拒绝:T4 实测对 `tests/cxcc/units.tsv` 全部 10 个源与 `tests/cx-host-run.cx` 共 11 个文件逐个跑产品 `cxm_plan`(`sh ./unisacc.com tools/check-cxmod-tri.cx -- --prod FILE`):因 "call to undeclared function" 被拒 0 个;被拒 3 个均为表内 refuse 正例(cxcc_missing、cxcycle/ping、cxstd_unknown,原因分别为缺模块、环、未知 std 模块),其余 8 个 rc=0。产品源本就含 `cxm_checkcalls`,上移不改变这批结论。未覆盖:`tests/cx-host-run.cx` 内联字符串夹具(运行时才生成)与其它批次语料:UNVERIFIED。T5 验收仍须加跑批次 `cx-host-run`。(5) 本节全部为设计,T1 至 T8 均未开工。
 
 ## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
 
