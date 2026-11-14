@@ -615,6 +615,25 @@ Y4 调用面分类(git grep 取数):
 | R4 | T2 阈值可行性 | 用 .cx 列缓存目录条目大小,分小于 50 KB 与其余两档计数与字节和 | 未知;小条目占条数多而字节少才值得做阈值 |
 | R5 | T1 修法 (3) 的份额 | K2 同法造 2000 个假 uc- 项,对比 `strace -c -f` 里 lstat 与 open/read/close 的次数 | 每条目 lstat 1 次、open/fstat/read/close 各 1 次;只留 lstat 约去掉五分之四的调用数,耗时份额待测 |
 
+R2 结果(2026-11-14,表中 R2 即任务称的"R1";已装 0.0.62,`strace -f -ttt -T`,hello.c 第二次运行,n=1,整程序缓存命中):全程 444 行,失败 135 次,按名与 errno 分类如下。strace 放大约 6 倍,真实值取 1/6 量级。
+
+| 名 | errno | 次数 | 调用方 | 实测耗时(strace 内) |
+|---|---|---|---|---|
+| close(4..62) | EBADF | 59 | `src/host.cx` 约 422 行 memfd 启动后的 `while (c < 63)` 循环:对 3..62 逐个 `HS_CLOSE`,仅 `hs_fd_argv(argv)` 位图保留的 fd 跳过;fd 3 是 memfd 刚 dup3 到 63 后已关,4..62 全无效 | 0.335 ms(整程序 24.3 ms 的 1.4%) |
+| newfstatat | ENOENT | 60 | 不在 unisacc 运行库,在 unisacc.com 的 APE sh 前奏:`u=$(uname -sm)` 与 `chmod 700 "$d"` 两个外部命令,sh 按 PATH 逐项探测(本机 PATH 前 31 项不含该命令,uname 与 chmod 各约 30 次失败后命中 /usr/bin);生成源 `tools/ape-pack.cx` 约 109 行 | 0.792 ms(3.3%) |
+| arch_prctl 加 access ld.so.preload | EINVAL/ENOENT | 各 3 | 三个 sh 子进程(sh、uname、chmod)的动态装载 | 约 0.1 ms |
+| wait4 WNOHANG | ECHILD | 5 | sh 自身 | 可忽略 |
+| mkdir/open/symlink/memfd_create(旧标志)/ioctl | EEXIST/EINVAL/ENOTTY | 各 1 至 2 | unisacc 运行库:E3 缓存目录与 `.budget.lock`(正常竞争探测)、`host.cx` 先试 `MFD_CLOEXEC|0x10`(EINVAL 回退,内核 5.15 不认 MFD_NOEXEC_SEAL)、`runlaunch.cx` 约 164 行 symlink、isatty | 合计约 0.1 ms |
+
+结论:135 次失败里 119 次(close 59、newfstatat 60)有两个独立来源,前者是 unisacc 自己的运行库(库包与运行库类),后者是 APE 头 sh 前奏(驱动与运行缓存类,生成物在 ape-pack)。两类合计 1.13 ms,占 strace 内 24.3 ms 的 4.7%;按 6 倍放大折合真实约 0.19 ms,上界很小,收益不在耗时而在系统调用条数(444 条里占 27%)。真正耗时在三次 fork+execve(sh、uname、chmod)与 gzip 外壳,不在失败调用本身。
+
+最小修法(至多 3 条):
+(1) close 循环改 `close_range(3, 62, 0)`(Linux 5.9+,一次系统调用),需保留位图中的 fd 时分段调用;ENOSYS 时退回现循环。写域 `src/host.cx` 一处,59 次降到 1 次,省约 58 次调用。类别:库包与运行库类。
+(2) APE 头去掉 `uname -sm` 外部命令:Linux 路径先按 `$BASH_VERSINFO` 之外的纯 sh 手段难判架构,可改为按 `[ -x "$d/unisacc-$k" ]` 对两个已知 k 先后探测,命中即跳过 uname;`chmod 700 "$d"` 改为只在 `[ -O "$d" ]` 且权限位不是 700 时才调用(`[ -d "$d" ]` 已在前面做过,热路径目录必为 0700)。写域 `tools/ape-pack.cx` 头模板,省两次 fork+execve 与 60 次失败探测。类别:驱动与运行缓存类。注意 APE 头字节变动会改 unisacc.com 身份与 SID 以外的头校验,需重打包。
+(3) 若不想动头:在 `memfd_create` 的 EINVAL 回退处缓存结果(进程内一次)已是现状,不再另改;留作不做。
+
+没测到的:未在 PATH 短的环境对比 newfstatat 条数(PATH 越长越多,本机 31 项是用户环境,CI 上会少);真实(非 strace)耗时未单测。
+
 未做与限度:U4 与单文件可执行文档页 404,B2 只有检索摘要;U3 与 U7 只读了前 10 万字符;没有读 Bun 源码;H2 无原文;[本次] 实测只有 R2 的总数一项且 n=1;T1 至 T6 没有任何修后数值。
 
 ## 6. 路线：cx 流网设计与实现（0.0.58 至 0.0.60）
