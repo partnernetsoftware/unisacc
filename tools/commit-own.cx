@@ -117,6 +117,39 @@ int main(int argc, char **argv) {
         }
         if (keys[k] || link[k]) sy_unlink(src);
     }
+    {   /* 提示:on-change --dry-run 的 pending= 项(只读,不写、不阻断、不改 rc);失败或超时静默跳过 */
+        char *ov[CO_MAX + 8], oc[16384], seen[1024]; int n = 0; long at = 0, no;
+        seen[0] = 0;
+        ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run";
+        for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
+        ov[n] = 0;
+        if (sy_exists("tools/on-change.cx") && run(ov, oc, sizeof oc) >= 0) {
+            no = tx_len(oc, sizeof oc);
+            while (at < no) {
+                long e = tx_chr(oc + at, no - at, '\n'), ln = e < 0 ? no - at : e, p = tx_find(oc + at, ln, " pending=", 9);
+                if (p >= 0) {
+                    long s = at + p + 9, q = s;
+                    while (q < at + ln && oc[q] != ' ') q++;
+                    while (s < q) {
+                        long c = s, w; char item[128];
+                        while (c < q && oc[c] != ',') c++;
+                        w = c - s;
+                        if (w > 0 && !(w == 1 && oc[s] == '-') && w < (long)sizeof item) {
+                            char key[136];
+                            tx_copy(item, sizeof item, oc + s, w); item[w] = 0;
+                            if (tx_snprintf(key, sizeof key, ",%s,", item) < (int)sizeof key && tx_find(seen, tx_len(seen, sizeof seen), key, tx_len(key, 136)) < 0) {
+                                long sl = tx_len(seen, sizeof seen);
+                                if (sl + w + 2 < (long)sizeof seen) tx_snprintf(seen + sl, sizeof seen - sl, "%s", key);
+                                sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s\n", item, item);
+                            }
+                        }
+                        s = c + 1;
+                    }
+                }
+                at += ln + (e >= 0);
+            }
+        }
+    }
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64]; int rc;
         for (k = 0; k < np; k++) { char m[8]; entry("HEAD", path[k], old[k], m); }
