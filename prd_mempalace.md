@@ -52,6 +52,17 @@ real6 已起链(2026-11-14 16:25,账本行):REV=b2c557b1ba(origin/main;之后 HE
 
 - 全集批次复验没有有效判定(整节最大缺口):共享检出上 wt gate 在波内因他人改动判 identity=CHANGED,整波记 UNKNOWN。实测累计只有快照根 45 批(PASS 43,FAIL 2,两项均已修,见索引),共享检出 15 批(PASS 14,FAIL 1 即 tsv-lint)。lnx IMPLEMENTED 约 1040 至 1076 批,其余未复验;约 80 个 FTRIM 红批旧估算未证实也未证伪(清单缺)。清零动作:在冻结窗口或 git archive 快照根(需在其中 git init 提交一次、拷入 unisacc.com 与 unisacc.com.build.json)用 all-waves 分波跑;会话目录必须是 /tmp/unisacc-affected-NAME/s,wave 必须用原生执行器(init 约 21 s、executor 约 37 s,wave 参数 `--light ID ID ...`,每波 8 批,wave bound 55 s 减扫描约 17 s,单批固定开销约 27 s)。light 约 742 批约 93 波(推算,非实测),heavy 313 批每波 1 批(推算约 5 小时,须分片,并需 s8c-bind 材料)。慢批(单跑改 heavy):pp-cli-includes、pp-header-locations(超 37 s 被杀),snapshots-cx 临界(批内约 30 s)。osx/win 平台批次无主机无证据。不能清零就把覆盖面原样写进发布说明。
 - 候选 s9、同候选 CI、real6 整链结果、候选速度:TBD,见发布说明占位;未出结果不得写 QUALIFIED。
+- s9 分波方案(2026-11-14 只读预备,未实跑;命令取自 tools/s9-nightly.cx、s9-nightly-run.cx、release-decide.cx 的 usage 注释)。
+  (1) 定义:s9 是同次运行、不跨次缓存结果的全批资格(tools/s9-shards.cx 分片、tools/s9-nightly.cx 编排),档位由 tests/batches.tsv 的 tier 列定:commit 140 批、daily 650 批(不带 --tier 即 FULL)、release 41 批(prd.md 436 行,以 init 实际选出为准)。实测只有 commit 档 3 步 252.7 / 87.3 / 12.7 s(0.0.53);tests/tier-runtime-summary.tsv 预测 daily-layer 约 16111 s(条件值,322 批 UNMEASURED)、commit-layer 约 290 s;release 档墙钟 UNMEASURED;daily 与 release 档至今未跑通一次。
+  (2) 分波(ROOT 用仓外私有克隆或快照根并自带 unisacc.com,产物写 $TMPDIR 或快照根,不写仓 out/;每步自动设 UNISACC_BOUND_DEADLINE_MONO,单步 240 s;并发宽度环境变量 S9_WIDTH 1..15,默认 5):
+  W0 一次有界:`sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit|release --phase init`(daily 档用 --tier daily),退出 0 即 PREPARED。
+  W1..Wn 循环(总次数上限与总 deadline 自设):`sh ./unisacc.com tools/s9-nightly.cx -- ROOT --resume RUN --phase steps --max-steps 1`,退出 3 为 PENDING 续跑,0 为 STEPS_DONE;中断片保持 UNKNOWN,不静默重跑;间隙用 `sh ./unisacc.com tools/s9-profile.cx -- RUN` 只读看进度。
+  Wa 汇总:`sh ./unisacc.com tools/s9-nightly.cx -- ROOT --resume RUN --phase aggregate --agg-parts 4`。
+  夜跑薄入口:`sh ./unisacc.com tools/s9-nightly-run.cx -- --clone DIR --evidence DIR --tier release|daily [--max-steps N] [--load-max L]`(负载高只加 nice,不降宽)。
+  顺序:先 commit 档(约 6 分钟、3 步各小于 5 分钟)得首个 PASS/FAIL 基线,再 release 档,最后 daily 夜跑;依决定 5(c) 只有 commit 档卡发布。
+  (3) 进 evidence:release/evidence.tsv 第 4 行 `4<TAB>PASS|FAIL|UNKNOWN<TAB>RUN 证据路径`。release-decide.cx 只认 step/verdict/path 三列,缺行即 UNKNOWN,不解析 s9 内部字段。0.0.61 第 4 行 UNKNOWN(指向 oneshot61F,其 08/09 plan 为 MODE=DRY_RUN),故 NOT_QUALIFIED unknown=1。要变 QUALIFIED:第 1 至 8 行全 PASS,其中第 4 行须由 aggregate 无 FAIL/UNKNOWN/DEFERRED 得出。aggregate 到第 4 行的映射目前靠人工判读,无工具(UNVERIFIED,缺口)。0.0.62 现缺第 2 行(real6 整链)、第 4 行、第 7 行(同候选 CI)。
+  (4) 可行性核对:s9-nightly.cx 的 --fake SCRIPT(夹具 tests/fixtures/s9-nightly-fake.cx、检查 tools/check-s9-nightly.cx)可验编排顺序而不跑真批次;--phase init 含 build/prepare,较重,real6 在跑时不做(UNVERIFIED);tools/check-s9-release-tier.cx 核 release 档 id 与 batches.tsv 一致(需 ABS_OUT_DIR,未实跑)。
+  (5) 清零最短路径:real6 结束后,在冻结候选快照根跑 commit 档 init、steps(约 3 轮)、aggregate 并回填第 4 行;同候选 CI 回填第 7 行;release、daily 档夜跑,结果如实入发布说明,不卡发布;另补 aggregate -> evidence 第 4 行的小工具并在 build/pkg-gaps.tsv 记缺口。
 
 ### 仍未验证(缺什么 / 清零动作)
 
