@@ -10,7 +10,7 @@
 
 ## 是什么
 
-面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.58 的产品改动只有一类:cx.stream(含其 Windows 修正)。上一发布版见 `plans/release-notes-0.0.57.md`。
+面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.58 的产品改动只有一类:cx.stream(含其 Windows 修正)。上一发布版见 `prd_hist.md` 往期发布小节。
 
 ## 行为变化(产品输入)
 

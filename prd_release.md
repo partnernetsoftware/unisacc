@@ -112,12 +112,14 @@
 
 ## 7. 往期发布
 
+现行发布说明全文:[plans/release-notes-0.0.59.md](plans/release-notes-0.0.59.md)、[plans/release-notes-0.0.61.md](plans/release-notes-0.0.61.md)(0.0.48/0.0.57/0.0.58 的身份摘要与已知缺口并入 [prd_hist.md 往期发布](prd_hist.md))。
+
 | 版本 | 状态 | 入口 |
 |---|---|---|
 | 0.0.43 | 历史 | [plans/release-0.0.43.md](plans/release-0.0.43.md) |
 | 0.0.45 | 公开预发布 | GitHub Release 页 v0.0.45(发布说明文件已不在 plans/) |
 | 0.0.47 | 已发布 | [archive/docs-2026-11b/plans/release-notes-0.0.47.md](archive/docs-2026-11b/plans/release-notes-0.0.47.md) |
-| 0.0.48 | 正式版，CI 42/0（运行 42545543777），APE sha256 `559705097427cf8f…` | [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md) |
+| 0.0.48 | 正式版，CI 42/0（运行 42545543777），APE sha256 `559705097427cf8f…` | [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md);摘要见 [prd_hist.md 往期发布](prd_hist.md) |
 | 0.0.48.1 | macOS 签名/公证草稿（v0.0.48.1-osx-launch-rc1，CI 42555350465 42/0，DMG 6e25e7c9…）；未作为正式版公开 | 发布说明已不在 plans/、[prd_hist.md](prd_hist.md)「0.0.49 收尾」 |
 | 0.0.50 | 正式版（2026-11-10，tag `v0.0.50` 指向提交 Y `31c5886469`），CI 42/0（运行 42767415154，提交 X `114ef751be`），APE sha256 `76ed4200aaaf71b2…`；后备候选：产品字节同 0.0.49 源 `979b56e4` 六片只换版本串，Y-0 因 setpgid 回归留 0.0.51；s9 三档未跑 | GitHub Release 页 v0.0.50(发布说明文件已不在 plans/) |
 | 0.0.49 | 正式版（2026-11-10，tag 指向 `35cfdd1e`），CI 42/0（运行 42661106290），APE sha256 `2d3852a8404e1ba3…`，s9 仅提交档 96/96 | GitHub Release 页 v0.0.49(发布说明文件已不在 plans/) |

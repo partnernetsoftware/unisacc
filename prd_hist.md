@@ -292,6 +292,23 @@ OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.
 
 ---
 
+## 往期发布(自 plans/release-notes-0.0.48/57/58.md 并入,2026-11-14;原文见 archive/docs-2026-11c/)
+
+### 0.0.48(正式版,非预发布;全文仍在 plans/release-notes-0.0.48.md,因 tools/check-release-decide.cx 引用暂不归档)
+- 身份:APE `unisacc.com` SHA256 `559705097427cf8f4e483bb6e5f702e0714623a81644991c087b17e3505d9032`,6426254 字节;源 SID `798321e8919815b8e4a6c5860be5210c8cd702a8cd7c8b280218acb539b011d4`;构造 131 作业退出码 0,42 个网全键验证 35,080,489 观察、135,914 状态一致;同候选六目标原生 CI 运行 42545543777,QUALIFIED 42/0。
+- 行为变化:(1) Linux 裸 `-c` 产出单元对象(可无 main,不能直接交宿主 ld,整程序对象用 `-c -S`);(2) tape 必须以单独一行 `.end` 结尾,无旧兼容;(3) 新增文件定位帧 `.unit N B:HEX`,预处理位置元数据升 `UNIPP2`;(4) osx/win 主机裸 `-S` 默认目标表驱动。
+- 已知缺口:s9 全批未达资格(提交档 81 项通过,daily 约 544 与 release 约 39 项未跑);Mac/Win/Linux ARM 切片只经交叉构造,原生证据仅 CI;TAPEBIN-ORIGIN-5 五个夹具与断言不符(未改断言);T1 棘轮(srcshape、drivetapebin、net-deps、八行 check-literal)限期豁免;p1-baseline、check-cx-entry 无批次;候选构造约 2 小时。
+
+### 0.0.57(工具面为主)
+- 身份:候选 APE c116a52f,提交 X 3d04b5eb06,SHA256SUMS 48a91c8fb79033cca00f6c147e663de84e168365c1a94fd0cfd16ae63708dd20(6/6 OK);同候选 CI 运行 43094459755 QUALIFIED 42/0(首次 43093841811 为 FAIL 36/1);s9 commit 档 selected 154、PASS 150、FAIL 2、UNKNOWN 2,NOT_FULL(12 个 osx 批本机不适用);release/daily 档未跑。
+- 产品改动仅 basered:frames/frameparts 由 cx/compiler 移到 cx/runtime(消 runtime->compiler 反向依赖),runcache 上限改引用 DV_MAXU;单元前端缓存行为不变。
+- 整链一轮约 180 分钟,人工介入:RESUME-1(snap 相 55s 子调用超时)、BLOCKER-1/MANUAL-2(续跑清理拒仓外 OUT)、BLOCKER-2/MANUAL-3(chain-run 55s 逐相界过紧,退回 0.0.56 逐相 --until)。
+- 已知缺口:chain-run、g2g3split 真实链不可用;slice-inventory 冷跑被杀(53.9s,未放宽);osx-sentinel 六批本机 RUN_REFUSED;四批 commit 档改 daily;release-exec/prepare/oneshot/run 批缺材料 DEFERRED;组 A2 的 74 批汇总门内未复核(32 PASS、34 NOT_RUN、6 RUN_REFUSED);BASE6 字节 oracle 与 p3 的 28 个 release-ctor case 未重建;s9 release/daily 未跑;全域矩阵 release 档 15 红未回填。
+
+### 0.0.58(公开,Latest)
+- 身份:候选 APE sha256 `3744eacfa6b2472de8b18ef3d64ffad6f6a47f956d62e4a43760dee6e768632e`,6751268 字节;同候选 CI 运行 43247952428 QUALIFIED 42/0;s9 commit 档 selected=223 PASS NOT_FULL(osx 12 批不适用);release-decide QUALIFIED YES unknown=0 fail=0。
+- s9 经过:第一轮 selected=210 FAIL 1(S9-058-R3);修 cx-reaper 余量(awk 读 /proc 竞态致上限变 1000)与 s9-shards 重试切片 merge(S9-AGG-MERGE-RETRY),断言未改;第二轮首次 RUN 因克隆根 unisacc.com 无执行位作废。有 LIMIT-90-TEMP 时限临时放宽记录。
+- 已知缺口:s9 只跑 commit 档且在 main 较新提交上而非 X;release/daily 档未跑;win PE 行为只由同候选 CI 判定。现行全文仍在 plans/release-notes-0.0.58.md(账本与角色提示词引用,暂不归档)。
 ## 2026-11-11 prd.md 重整时删去的段落（索引，非逐字；原文以 `git show 6a4fa1fa6f:prd.md` 为准）
 
 本次没有把旧段落逐字搬来，因为它们与各版发布说明重复或已被后续事实推翻。逐项列出原位置与去向：
