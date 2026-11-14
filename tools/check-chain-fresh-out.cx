@@ -115,9 +115,27 @@ int main(int argc, char **argv) {
     static const char *dirs[] = {"seed", "tools", "build", "cx", "cx/compiler", 0};
     for (int i = 0; dirs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, dirs[i]) || sy_mkdir(p, 0755)) return 2; }
     /* tools/bound builds its watchdog from tools/bound.c and cx/compiler/boundgate.cx of the same tree. */
-    static const char *same[] = {"tools/bound", "seed/ident.c", "seed/sha256.h", "build/chain-phases.tsv", "tools/bound.c", "cx/compiler/boundgate.cx", 0};
+    static const char *same[] = {"tools/bound", "seed/ident.c", "seed/sha256.h", "build/chain-phases.tsv", "build/chain-env.tsv", "tools/chain-pace.cx", "tools/bound.c", "cx/compiler/boundgate.cx", 0};
     for (int i = 0; same[i]; i++) {
         if (cx_fmt(p, sizeof p, "%s/%s", root, same[i]) || cx_fmt(q, sizeof q, "%s/%s", f, same[i]) || copyf(p, q, i == 0 ? 0755 : 0644)) return 2;
+    }
+    /* The fixture's own copy of the env whitelist gets one extra allow row for the fixture switch set above;
+       the real build/chain-env.tsv is untouched (no widening of the product whitelist). */
+    {
+        size_t en = 0; char *eb, *star; char *nb; const char row[] = "UNISACC_PIN_FIXTURE\tallow\t本夹具显式开关(无源副本的假根)\nUNISACC_CHAIN_BASE\tallow\t本夹具把快照根指到夹具私有会话根\n";
+        if (cx_fmt(q, sizeof q, "%s/build/chain-env.tsv", f)) return 2;
+        eb = cx_read(q, &en);
+        if (!eb) return 2;
+        star = 0;
+        for (size_t k = 0; k + 1 < en; k++) {   /* first line whose first field is the wildcard "*" */
+            if (eb[k] == '*' && eb[k + 1] == '\t' && (k == 0 || eb[k - 1] == '\n')) { star = eb + k; break; }
+        }
+        if (!star) { free(eb); return 2; }
+        nb = malloc(en + sizeof row);
+        if (!nb) { free(eb); return 2; }
+        if (cx_fmt(nb, en + sizeof row, "%.*s%s%s", (int)(star - eb), eb, row, star)) { free(eb); free(nb); return 2; }
+        if (cx_write(q, nb, strlen(nb))) { free(eb); free(nb); return 2; }
+        free(eb); free(nb);
     }
     /* seed/ident.c (F-v2) walks this fixed package layout and refuses a missing root, so the fixture
        holds one placeholder per package and per support file it names. */
@@ -157,6 +175,12 @@ int main(int argc, char **argv) {
     if (cx_fmt(out, sizeof out, "%s/%s/chain", f, OD)) return 2;
     if (sy_mkdir(OD, 0755)) return 2;
     if (sy_exists(out) == 1) return 2;
+    /* The env whitelist requires UNISACC_IDENT_HELPER to be set; the chain builds its own seed helper at
+       OUT/build/identity-helper (seed-helper-receipt below), which is the path named here. */
+    {
+        char ihp[4500];
+        if (cx_fmt(ihp, sizeof ihp, "%s/build/identity-helper", out) || setenv("UNISACC_IDENT_HELPER", ihp, 1)) return 2;
+    }
     char *chain[] = {(char *)cand, "--rev", rev, "--out", out, "--until", "wave-runner", 0};
     int rc = run(chain, 50, &log);
     if (rc && log) fputs(log, stdout);
