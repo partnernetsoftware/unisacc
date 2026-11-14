@@ -82,6 +82,31 @@ static void one_case(const char *name, const char *f, int rc, const char *frag, 
     if (r1 != rc || (frag[0] && !seen(o1, frag))) { failed++; printf("FAIL\t%s\tcx0 rc=%d want=%d frag=%s\n", name, r1, rc, frag); return; }
     pass++; printf("PASS\t%s\trc=%d\n", name, rc);
 }
+/* CXM_MAXU 夹具:总单元数 n(主文件 + n-1 个链式模块 mu1..mu(n-1),每个只 use 下一个,避开每单元 48 条 use 上限)。
+ * want_prod: 产品期望 rc;cx0 期望 rc 1 且文案含 "more than 96 units"。 */
+static void maxu_case(int n, int want_prod, int want_cx0) {
+    char nm[64], body[256]; char o1[4096], o2[4096]; int i, r1, r2, ok2, ok1;
+    char label[64];
+    for (i = 1; i < n; i++) {
+        tx_snprintf(nm, sizeof nm, "mu%d.cx", i);
+        if (i + 1 < n) tx_snprintf(body, sizeof body, "#pragma unisa module mu%d\n#pragma unisa use mu%d\nint mf%d(void){return mf%d();}\n", i, i + 1, i, i + 1);
+        else tx_snprintf(body, sizeof body, "#pragma unisa module mu%d\nint mf%d(void){return 1;}\n", i, i);
+        put(nm, body);
+    }
+    put("mumain.cx", "#pragma unisa use mu1\nint main(void){return mf1();}\n");
+    r1 = run_src("--cx0", "mumain.cx", o1, sizeof o1);
+    r2 = run_src("--prod", "mumain.cx", o2, sizeof o2);
+    tx_snprintf(label, sizeof label, "CXM_MAXU-%d-units", n);
+    ok1 = r1 == want_cx0 && seen(o1, "more than 96 units");
+    ok2 = r2 == want_prod && (want_prod == 0 || seen(o2, "units"));
+    if (!ok1 || !ok2) { failed++; printf("FAIL\t%s\tcx0 rc=%d(want %d) prod rc=%d(want %d)\n", label, r1, want_cx0, r2, want_prod); return; }
+    /* 两条实测断言各记一次 PASS;分叉本身(97)或同拒(129)另输出具名 GAP 行带实测 */
+    pass += 2;
+    printf("PASS\t%s-cx0\trc=%d message='more than 96 units in one program'\n", label, r1);
+    printf("PASS\t%s-prod\trc=%d\n", label, r2);
+    gaps++;
+    printf("GAP\tCXM_MAXU\t%d units measured: cx0/plan.cx rc=%d, product cxmod.cx rc=%d (product limit 128 vs plan.cx/src 96)\n", n, r1, r2);
+}
 int main(int argc, char **argv) {
     char *ex[] = {"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
     np_result r = {0}; char why[512]; int rc, extract_ok;
@@ -119,7 +144,8 @@ int main(int argc, char **argv) {
     one_case("symbol-not-exported-refused", "g1.cx", 1, "does not export nosuch", 0);
     one_case("symbol-import-plans", "g3.cx", 0, "", 0);
     one_case("unimported-symbol-call-refused", "g2.cx", 1, "call to undeclared function clash", "cxm_checkcalls");
-    gaps++; puts("GAP\tCXM_MAXU\tproduct 128 vs plan.cx/src 96 (message 'more than 96 units in one program'); not run, needs 97 fixtures");
+    maxu_case(97, 0, 1);
+    maxu_case(129, 1, 1);
     printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d\n", pass, failed, gaps);
     return failed != 0;
 }
