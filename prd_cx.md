@@ -963,6 +963,8 @@ T6 归属表(N10,2026-11-14,只读取证;来源 `tools/cx0-diff.cx -- --pair pla
 |---|---|---|---|
 | R0 | 只读取数与文档(下表 7 项) | 纯工具/文档 | 今天 |
 | R1 | tlibpkg 分面、包表登记 stream 两面、deps 最低版本检查 | 非产品输入的工具与表 | 不等版本 |
+
+R1 状态(2026-11-14,已做,待提交后复核):包表增第十列 faces(FACE=UNIT),cx.stream 登记 pipe(item.cx、pipe.cx)与 rw(rw.cx),只是元数据,公开集仍以 cxpack.tsv 为准;tlibpkg 增 tp_face_of、tp_dep_ok、tp_deps_check(依赖按"现版本满足最低版本"判,不要求相等;tp_ver_compat 原本即是下限语义,tlib.cx 的依赖检查未用相等,漂移只是 R0-4 差距表的口径),并在头注释按表/身份/冻结三面标注函数归属(代码未物理拆分,等 D1 export 后做门面);layer-api set_row 保留第十列;check-tlibpkg 新增 7 断言(failed=0);tools.cxlib 0.1.26 -> 0.1.27。
 | R2 | cx/stream 下层修正:K1 结果码归属、K3 去重复 sha、K5 白名单收窄 | 单类产品输入大改(库包源;routepipe 与 drivestream 是使用方) | 0.0.64 第二候选,与 D4 同类同候选;受 F9 门约束,不满足则 0.0.65 |
 | R3 | K2 `st_span` 改为模块接口、K7 FwmBuf 共享类型 | 单类产品输入大改(驱动) | 0.0.65,不与 R2 同候选 |
 | R4 | K4 接口打印覆盖面、包根门面 | 单类产品输入大改(cxmod 三源) | D1 至 D3 之后 |

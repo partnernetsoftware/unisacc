@@ -13,6 +13,13 @@
  * exclude  ';' list of PATH=REASON, or '-'. An excluded unit is never packed; a link whose closure
  *          needs it is refused.
  * deps     ';' list of PKG@X.Y.Z (the minimum provider version), or '-'.
+ * frozen   ninth field, '-' or a sha256 (see tp_load). faces: optional tenth field, ';' list of
+ *          FACE=UNIT: independent parts of one package; every UNIT must belong to the package.
+ *
+ * Faces of this file (names are by responsibility; the code stays one unit until export lands):
+ *   table     tp_load, tp_names, tp_find_*, tp_member_name, tp_face_of, tp_ver_*, tp_dep_ok, tp_deps_check
+ *   identity  tp_put*, tp_sha*, tp_unit_key, tp_kit_*, tp_cache_dir, tp_closure, tp_api, tp_ar_*, tp_rc_get
+ *   frozen    the `frozen` field of TpPkg and layer-api's set_row (freshness checks live in tlib.cx)
  * api_sha  sha256 of ROOT/build/layer-api/PKG.tsv at this version: an interface change shows up as
  *          a table edit next to the version it belongs to.
  *
@@ -37,7 +44,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-enum { TP_MAXU = 160, TP_MAXX = 16, TP_MAXD = 8, TP_NAME = 128, TP_SIGSHOW = 400 };
+enum { TP_MAXU = 160, TP_MAXX = 16, TP_MAXD = 8, TP_NAME = 128, TP_SIGSHOW = 400, TP_MAXF = 8 };
 
 typedef struct {
     char pkg[64];
@@ -54,6 +61,9 @@ typedef struct {
     int ndep;
     char dep_pkg[TP_MAXD][64];
     char dep_ver[TP_MAXD][32];
+    int nface;         /* optional tenth field: independent faces of one package, FACE=UNIT items */
+    char face[TP_MAXF * 4][16];
+    char face_unit[TP_MAXF * 4][TP_NAME];
     char frozen[65];   /* '-' or a sha256: a frozen package's input key and freshness do not name the product */
 } TpPkg;
 
@@ -268,6 +278,24 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
                         }
                     }
                 }
+                /* optional tenth field: FACE=UNIT items; parse only, absent or '-' means no faces */
+                {
+                    long fo2 = 0, fl2 = 0;
+                    if (!tx_field(b + i, e - i, '\t', 9, &fo2, &fl2))
+                        for (k = 0;; k++) {
+                            long eq;
+                            int r = tp_item(b + i + fo2, fl2, k, item, sizeof item);
+                            if (r > 0) break;
+                            eq = r ? -1 : tx_chr(item, tx_len(item, sizeof item), '=');
+                            if (r < 0 || eq <= 0 || p->nface >= TP_MAXF * 4 ||
+                                tx_copy(p->face[p->nface], 16, item, eq) ||
+                                tx_copy(p->face_unit[p->nface], TP_NAME, item + eq + 1, tx_len(item + eq + 1, 512))) {
+                                mm_free(b);
+                                return tp_fail(why, wl, "bad faces list for ", pkg);
+                            }
+                            p->nface++;
+                        }
+                }
                 for (k = 0;; k++) {
                     long at;
                     int v[3];
@@ -309,6 +337,41 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
         long u;
         for (u = 0; u < p->nunit && !tx_eqz(p->unit[u], p->opq[k]); u++) {}
         if (u == p->nunit) return tp_fail(why, wl, "opaque unit is not a unit of the package: ", p->opq[k]);
+    }
+    for (k = 0; k < p->nface; k++) {
+        long u, j;
+        for (u = 0; u < p->nunit && !tx_eqz(p->unit[u], p->face_unit[k]); u++) {}
+        if (u == p->nunit) return tp_fail(why, wl, "face unit is not a unit of the package: ", p->face_unit[k]);
+        for (j = 0; j < k; j++)
+            if (tx_eqz(p->face_unit[j], p->face_unit[k])) return tp_fail(why, wl, "unit in two faces: ", p->face_unit[k]);
+    }
+    return 0;
+}
+
+/* The face name of unit REL, or 0 when the package declares no face for it. */
+const char *tp_face_of(const TpPkg *p, const char *rel) {
+    int k;
+    for (k = 0; k < p->nface; k++) if (tx_eqz(p->face_unit[k], rel)) return p->face[k];
+    return 0;
+}
+
+/* 1 when PROVIDER satisfies the minimum version MIN (same major, (minor,patch) not older). A
+   dependency minimum is a floor: the provider moving past it is normal, not drift. */
+int tp_dep_ok(const char *provider, const char *min) {
+    return tp_ver_compat(provider, min) == 0;
+}
+
+/* Every dependency of P is a package of the table whose current version satisfies the recorded
+   minimum. 0, or -1 with WHY naming the first dependency that does not. */
+int tp_deps_check(const char *root, const TpPkg *p, char *why, long wl) {
+    int k;
+    for (k = 0; k < p->ndep; k++) {
+        TpPkg *d = mm_alloc(sizeof *d);
+        int ok;
+        if (!d) return tp_fail(why, wl, "out of memory", 0);
+        ok = tp_load(root, p->dep_pkg[k], d, why, wl) == 0 && tp_dep_ok(d->version, p->dep_ver[k]);
+        mm_free(d);
+        if (!ok) return tp_fail(why, wl, "dependency not satisfied by the current version: ", p->dep_pkg[k]);
     }
     return 0;
 }
