@@ -2,6 +2,8 @@
  *
  *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
  *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
+ * --watch-baseline CHECKPOINT uses chain-pace thresholds from a previous completed chain;
+ * absent or missing baseline means its documented default threshold of 60 seconds per phase.
  *
  * Each child is bounded to 90 seconds. Independent start/finish waves honor
  * --parallel (default 4) and retain per-job checkpoints. --jobs ROOT CTX BUILD
@@ -26,6 +28,7 @@
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.chainroot
 #pragma unisa use cxlib.chaincall
+#pragma unisa use cxlib.runnerprep
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -1235,7 +1238,7 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
 /* Existing --objects API accepts at most 256 keys; checkpoints remain per key.
    Always re-enter chain-step on resume: it verifies provenance and completed
    object bytes before adopting them. --until truncates the batch, not coverage. */
-static int fp_pending_limit(const char *root) {
+static int fp_pending_limit(const char *root, long *warm_ms) {
     char path[4400],line[256];long values[4];int row=0;
     const char *names[]={"budget_ms","cold_key_ms","warm_key_ms","pending_keys"};
     if(cx_fmt(path,sizeof path,"%s/build/g2-budget.tsv",root))die("budget path",root);
@@ -1249,6 +1252,7 @@ static int fp_pending_limit(const char *root) {
         if(strcmp(p,"\n")||n<1)die("budget number",path);values[row++]=n;
     }
     if(ferror(f)||fclose(f)||row!=4||values[0]!=55000||values[1]>=values[0]||values[3]!=1+(values[0]-values[1]-1)/values[2])die("REFUSE derived budget",path);
+    *warm_ms=values[2];
     return values[3];
 }
 static void fp_call(const char *root,const char *rev,const char *snap,const char *pkg,
@@ -1280,7 +1284,7 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
                      const char *gen1,const char *fp,const char *helper,
                      const char *target,const char *phase,const char *keys,int resume){
     if(!keys){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,0,resume);return;}
-    int limit=fp_pending_limit(root),pending=0,used=0;char batch[12288],path[4400],slug[80],first[160];size_t sn=0;
+    long warm_ms;int budget=fp_pending_limit(root,&warm_ms),limit=1,canary=1,pending=0,used=0;char batch[12288],path[4400],slug[80],first[160];size_t sn=0;
     const char *end=strchr(keys,',');int len=end?(int)(end-keys):(int)strlen(keys);
     if(cx_fmt(first,sizeof first,"%.*s",len,keys))die("first key",keys);
     /* Recover any in-flight key and validate the complete phase seal once,
@@ -1295,7 +1299,13 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
         const char *e=strchr(p,',');len=e?(int)(e-p):(int)strlen(p);char needle[160];
         if(len<1||cx_fmt(needle,sizeof needle,"\n%.*s\t",len,p))die("batch key",p);
         if(!strstr(steps,needle)){
-            if(pending==limit||pending==256){fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);used=0;pending=0;}
+            if(pending==limit||pending==256){
+                fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);
+                /* The first pending key probes cache warmth after the isolated first key.
+                   A slow canary keeps the rest of this lane at one key per call. */
+                if(canary){limit=fp_last_ms>=0&&fp_last_ms<=warm_ms*2?budget:1;canary=0;}
+                used=0;pending=0;
+            }
             int z=snprintf(batch+used,sizeof batch-used,"%s%.*s",pending?",":"",len,p);
             if(z<0||z>=sizeof batch-used)die("batch buffer",p);used+=z;pending++;
         }
@@ -2178,14 +2188,176 @@ static void chain_paths(const char *root, const char *rev, char *snap) {
         cx_fmt(chain_work,sizeof chain_work,"%s/out/chain",snap)) die("path","chain workspace");
 }
 
+/* 起链环境白名单:build/chain-env.tsv(name policy reason,"*" 为未登记 UNISACC_* 的默认)。
+   环境里出现 deny 或未登记的 UNISACC_* 变量、或缺 require 变量,在任何构造之前 rc 2。 */
+static void chain_env_gate(const char *root, const char *outdir) {
+    char path[4500], defreason[300] = "未登记", reasons[16][300];
+    char *tb, **ev = sy_env_vec();
+    size_t tn = 0;
+    int defdeny = 1, nreq = 0, e;
+    const char *req[16];
+    if (cx_fmt(path, sizeof path, "%s/build/chain-env.tsv", root) || !(tb = cx_read(path, &tn))) die("REFUSE chain-env table unreadable", path);
+    for (size_t p = 0; p < tn;) {
+        char *le = memchr(tb + p, '\n', tn - p), *line = tb + p, *f1, *f2;
+        size_t ll = le ? (size_t)(le - line) : tn - p;
+        p += ll + 1;
+        if (!ll || !strncmp(line, "name\t", 5)) continue;
+        line[ll] = 0;
+        f1 = strchr(line, '\t'); if (!f1) continue;
+        *f1++ = 0; f2 = strchr(f1, '\t'); if (!f2) continue;
+        *f2++ = 0;
+        if (!strcmp(line, "*")) { defdeny = !strcmp(f1, "deny"); if (cx_fmt(defreason, sizeof defreason, "%s", f2)) die("REFUSE chain-env reason too long", line); continue; }
+        if (!strcmp(f1, "require") && nreq < 16) { req[nreq] = strdup(line); if (cx_fmt(reasons[nreq], sizeof reasons[0], "%s", f2)) die("REFUSE chain-env reason too long", line); nreq++; }
+    }
+    for (e = 0; ev && ev[e]; e++) {
+        const char *s = ev[e], *eq = strchr(s, '=');
+        char nm[160]; size_t nl = eq ? (size_t)(eq - s) : strlen(s);
+        char *tb2; size_t q = 0, tn2 = 0; int found = 0;
+        if (strncmp(s, "UNISACC_", 8) || nl >= sizeof nm) continue;
+        if (mm_copy(nm, sizeof nm, s, nl)) continue;
+        nm[nl] = 0;
+        tb2 = cx_read(path, &tn2);
+        while (tb2 && q < tn2) {
+            char *le = memchr(tb2 + q, '\n', tn2 - q), *line = tb2 + q, *f1, *f2;
+            size_t ll = le ? (size_t)(le - line) : tn2 - q;
+            q += ll + 1;
+            if (!ll) continue;
+            line[ll] = 0;
+            f1 = strchr(line, '\t'); if (!f1) continue;
+            *f1++ = 0; f2 = strchr(f1, '\t'); if (!f2) continue;
+            *f2++ = 0;
+            if (strcmp(line, nm)) continue;
+            found = 1;
+            if (!strcmp(f1, "deny")) { fprintf(stderr, "candidate-chain: REFUSE chain-env %s %s\n", nm, f2); exit(2); }
+            break;
+        }
+        free(tb2);
+        if (!found && defdeny) { fprintf(stderr, "candidate-chain: REFUSE chain-env %s %s\n", nm, defreason); exit(2); }
+    }
+    for (int r = 0; r < nreq; r++) {
+        const char *v = sy_env(req[r]);
+        char ha[4500], hb[4500];
+        if (v && *v) continue;
+        /* 与下游已有门同口径:链内已有预构 identity-helper 时不要求环境变量 */
+        if (!cx_fmt(ha, sizeof ha, "%s/build/identity-helper", outdir) && fsize(ha) >= 0) continue;
+        if (!cx_fmt(hb, sizeof hb, "%s/ctx/identity-helper", outdir) && fsize(hb) >= 0) continue;
+        fprintf(stderr, "candidate-chain: REFUSE chain-env %s missing: %s; REFUSE UNISACC_IDENT_HELPER unset and no prebuilt identity-helper in the chain\n", req[r], reasons[r]);
+        exit(2);
+    }
+    free(tb);
+}
+/* The observer owns no chain state or signalling authority. EOF on its lifetime pipe
+   ends it; a changed parent also ends it after abrupt owner loss (including PID reuse). */
+static int watch_owner, watch_pid, watch_life = -1;
+static void watch_finish(void) {
+    if (sy_pid() != watch_owner) return;
+    if (watch_life >= 0) { sy_close(watch_life); watch_life = -1; }
+    if (watch_pid > 0) { sy_wait(watch_pid, 0); watch_pid = 0; }
+}
+static int watch_worker(const char *dir, const char *pace, int life, int owner) {
+    char hbfile[4400], table[4400], log[4400], output[4400];
+    if (cx_fmt(hbfile,sizeof hbfile,"%s/heartbeat.tsv",dir)||cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",dir)||
+        cx_fmt(log,sizeof log,"%s/logs",dir)||cx_fmt(output,sizeof output,"%s/watch.tsv",dir)) return 2;
+    int fd=sy_open(output,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0644);
+    if(fd<0)return 2;
+    long next=0;
+    while(sy_ppid()==owner){
+        int ready=sy_readable(life,0);
+        if(ready<0)break;
+        if(ready){char byte;if(sy_read(life,&byte,1)<=0)break;}
+        long now=sy_now_ms();
+        if(now>=next){
+            /* Include only actual logs, never watch.tsv itself, in idle accounting. */
+            /* Installed 0.0.63 rejects the large automatic form; /tmp/cc-watch-stack-probe.cx reproduces it. */
+            char *av[261];static char paths[256][4400];int n=0,count=0;
+            av[n++]=(char *)pace;av[n++]="watch";av[n++]=hbfile;av[n++]=table;
+            sy_dir_t d;
+            if(!sy_dir_open(&d,log)){
+                while(sy_dir_next(&d)==1&&count<256){
+                    if(d.kind!='f')continue;
+                    if(cx_fmt(paths[count],sizeof paths[count],"%s/%s",log,d.name))continue;
+                    av[n++]=paths[count++];
+                }
+                sy_dir_close(&d);
+            }
+            av[n]=0;
+            char *result=0;size_t bytes=0;
+            /* Only our own judgement subprocess is bounded; never signal the observed chain. */
+            int rc=cx_runv_timeout(av,55,&result,&bytes);
+            char row[160];
+            int bad=cx_fmt(row,sizeof row,"%s\tepoch=%ld\tpid=%d\trc=%d\n",rc==124||rc==142?"TIMEOUT":"WATCH",sy_wall_s(),owner,rc);
+            if(!bad)bad=sy_write_all(fd,row,strlen(row));
+            if(!bad&&result&&bytes)bad=sy_write_all(fd,result,bytes);
+            free(result);if(bad)break;
+            next=now+60000;
+        }
+        long left=next-sy_now_ms();if(left>1000)left=1000;if(left<0)left=0;
+        if(sy_readable(life,left)<0)break;
+    }
+    sy_close(fd);sy_close(life);return 0;
+}
+static void watch_start(const char *root,const char *dir,const char *baseline) {
+    char pace[4400],why[512],table[4400],pidfile[4400],pidtext[40];
+    int reused,p[2];
+    if(rn_prepare(root,"tools/chain-pace.cx",dir,pace,sizeof pace,&reused,why,sizeof why))die("watch prepare",why);
+    if(cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",dir)||
+       cx_fmt(pidfile,sizeof pidfile,"%s/watch.pid",dir))die("watch path",dir);
+    sy_stat_t st;int missing=baseline?sy_stat(baseline,&st):-ENOENT;
+    if(missing&&missing!=-ENOENT)die("watch baseline stat",baseline);
+    if(!missing){
+        char *av[]={pace,"thresholds",(char *)baseline,0};
+        char *result=0;size_t bytes=0;
+        int rc=cx_runv_timeout(av,55,&result,&bytes);
+        if(rc==124||rc==142){
+            char report[4400];
+            if(cx_fmt(report,sizeof report,"%s/watch.tsv",dir))die("watch timeout path",dir);
+            int fd=sy_open(report,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0644);
+            if(fd<0||sy_write_all(fd,"TIMEOUT\tthresholds\n",19)||sy_close(fd))die("watch timeout report",dir);
+        }
+        if(rc||!result||cx_write(table,result,bytes)){free(result);die("watch thresholds",dir);}
+        free(result);
+    }else if(cx_write(table,"phase\tbase_s\tthr_s\n",19))die("watch thresholds",dir);
+    if(sy_pipe(p))die("watch pipe",dir);
+    watch_owner=sy_pid();
+    /* fork preserves default-run's in-memory code; no dependency on /proc/self/exe being a native candidate. */
+    fflush(0);
+    int child=fork();
+    if(child<0)die("watch fork",dir);
+    if(!child){
+        sy_close(p[1]);sy_setsid();
+        int dn=sy_open("/dev/null",O_RDWR,0);
+        if(dn<0||dup2(dn,0)<0||dup2(dn,1)<0||dup2(dn,2)<0)_exit(2);
+        if(dn>2)sy_close(dn);
+        /* Drop inherited chain locks and lifetime writers before observing. This host-only
+           orchestration tool already uses /proc identity; enumerate first, then close. */
+        sy_dir_t d;int fds[4096],nf=0;
+        if(sy_dir_open(&d,"/proc/self/fd"))_exit(2);
+        while(sy_dir_next(&d)==1){
+            if(d.name[0]<'0'||d.name[0]>'9')continue;
+            int fd=atoi(d.name);if(fd<3||fd==p[0])continue;
+            if(nf==4096)_exit(2);fds[nf++]=fd;
+        }
+        sy_dir_close(&d);for(int j=0;j<nf;j++)sy_close(fds[j]);
+        _exit(watch_worker(dir,pace,p[0],watch_owner));
+    }
+    sy_close(p[0]);watch_life=p[1];watch_pid=child;
+    if(atexit(watch_finish))die("watch exit hook",dir);
+    if(cx_fmt(pidtext,sizeof pidtext,"%d\n",child)||cx_write(pidfile,pidtext,strlen(pidtext)))die("watch pid",dir);
+}
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
+    const char *watch_baseline=0;
     const char *jobs_root = 0, *jobs_ctx = 0, *jobs_build = 0, *jobs_phase = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
     for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--jobs-segment-s")) cc_group = 1;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
+    if(argc==4&&tx_eqz(argv[1],"--watch-fixture")){
+        if(sy_mkdir(argv[3],0755)&&fsize(argv[3])<0)die("watch fixture",argv[3]);
+        hb(argv[3],"watch-probe","start");watch_start(argv[2],argv[3],0);
+        sy_sleep_ms(1500);return 0;
+    }
     if (argc == 4 && tx_eqz(argv[1], "--chain-work")) {
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("workspace root", argv[2]);
         chain_paths(root, argv[3], snap);
@@ -2385,6 +2557,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--out") && i + 1 < argc) { outdir = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--watch-baseline") && i + 1 < argc) { watch_baseline = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--cc") && i + 1 < argc) { cc = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--cache-manager-osx") && i + 2 < argc) { cm64 = argv[++i]; cmarm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--bootstrap") && i + 1 < argc) { boot = argv[++i]; continue; }
@@ -2438,6 +2611,7 @@ int main(int argc, char **argv) {
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (!lane_phase && !recheck_only) {
+        chain_env_gate(root, outdir);
         /* Start gate: three mistakes that cost a whole chain before (real5 died in pack after 3538 s). */
         char srcd[4400], srcgit[4400], helpa[4400], helpb[4400], par[4400], rpar[4400]; int cut = (int)strlen(outdir);
         while (cut > 1 && outdir[cut - 1] == '/') cut--;
@@ -2479,7 +2653,7 @@ int main(int argc, char **argv) {
     if (until_phase && !recheck_only) residue_before(outdir, until_phase);
     chain_memo(until_phase, outdir);
     if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
-    if (!lane_phase) hb(outdir, "chain", "start");
+    if (!lane_phase) { hb(outdir, "chain", "start"); watch_start(root, outdir, watch_baseline); }
     chain_paths(root, rev, snap);
     if (cx_fmt(build, sizeof build, "%s/build", outdir)) die("path", "build");
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("path", "ctx");

@@ -202,10 +202,11 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 链检查证据结构 | `tools/check-chain-run.cx`（批 chain-run/chain-run-segments/chain-run-supervise） | 阶段表由显式 put_plan 写入，不从路径子串猜类型；证据经现有 tx_fields/tx_field 拆记录/字段，限定协议字母表与标识符组件边界后匹配，未知字节拒绝。全部原行为断言保留，另测组件前缀误命中及未知协议字节负控；不读取源码文字作判据，不改执行链资格。 |
 | 构造图检查（G1） | `sh ./unisacc.com tools/graph-check.cx [-- --graph F --chain F --hardwire F --no-hardwire]` | 读 `build/graph.tsv`（203 节点事实表）：无环/依赖存在/kind 枚举/budget≤60；六目标次序与 `tools/chain-step.cx` 三份常量比对（不一致 ORDER_MISMATCH+rc1）；`build/hardwire.tsv` 32 条第二真相源模式逐行扫描只计数；末行 `GRAPH_CHECK\tnodes=\tedges=\tcycles=\torder_mismatch=\thardwire=`；夹具 `tools/check-graph-check.cx` |
 | 根独立/帧规范化（0.0.50） | `sh ./unisacc.com tools/root-canon.cx -- --map PREFIX=PLACE... [--diff A B \| --scan F \| F]`；`tools/root-independent.cx -- --a DIRA --b DIRB --list F --map ...` | 多前缀最长优先替换，按 formats.md 重算 phase/单元/UNIPP2 LE32 长度；末行 `ROOT_CANON_DIFF\traw_equal\traw_len_delta\tprefix_bytes\tnonprefix_bytes\tcanon_equal`；独立性 list 行 `node\tproduct\|frame\trelpath`，product 逐字节且不含根、frame 规范化相等；`build/graph.tsv` 第 12 列 root_dependent 由 graph-check 校验；夹具 `tools/check-root-canon.cx`、`tools/check-root-independent.cx` |
+| 链相位进度巡检（chain-pace） | `sh ./unisacc.com tools/chain-pace.cx -- thresholds CKPT > 表` ; `-- watch HB 表 [--now N] [LOG...]` | thresholds 由基线链（如 real6）checkpoint.tsv 生成每相 `phase/base_s/thr_s`，thr=max(2倍同相时长,60)；watch 读当前链 heartbeat.tsv 对每个未结束相判 OK(<=1.5倍基线)/SLOW(<=thr)/STALLED(>thr)，未知相基线0、thr 60；无在跑相时相间 >60s 输出 GAP（否则 BETWEEN）；只读，不写链目录；与 chain-watch 的 idle/liveness 互补；夹具 `tools/check-chain-pace.cx`（12 项，批次 chain-pace） |
 | 链看门狗（0.0.51 W/W2） | `sh ./unisacc.com tools/chain-watch.cx -- DIR [--idle-min N] [--final PHASE] [--resume-cmd 'CMD'] [--max-resumes K] [--now EPOCH_S]` | 读 `DIR/checkpoint.tsv`（candidate-chain 的 `DONE\tphase\t...` 行）取 last_phase，进展时间取 checkpoint/DIR 顶层/`DIR/logs` 最新 mtime；N 分钟（默认 10）无进展判 STALLED，含 final 相位（默认 pack）判 DONE；STALLED 前核 `DIR/heartbeat.tsv` 末行（`epoch\tphase\tpid\tpgid[\tstart\|end]`，由链每相位写）的 pid/pgid 存活：liveness=HUNG（存活）\|DEAD（不存活）\|UNKNOWN（无心跳），三者都续跑；一行 `CHAIN_WATCH\tstatus=RUNNING\|STALLED\|DONE\tlast_phase=\tidle_s=\tliveness=`，现场写 `DIR/state.md`；STALLED 且给 `--resume-cmd` 时经 `sh -c` 执行一次（55s 上界），次数记 `DIR/chain-watch.tsv` 封顶 K（默认 3，耗尽 rc3 不再重启）；退出码 0 RUNNING/DONE、1 STALLED、3 耗尽、2 用法；夹具 `tools/check-chain-watch.cx`（临时目录伪造三态、HUNG/DEAD 与封顶，19 项） |
 | 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal/net-deps；toolsloc退役，新增net-deps沿计划保留第14号门称呼；旧通过记录不迁移 |
 | 发布说明占位"待填"按标签填值 | `sh ./unisacc.com tools/notes-fill.cx -- --notes N.md --candidate release/candidate.tsv --decision release/decision.txt [--evidence E.tsv] (--out P \| --check)`；检查 `tools/check-notes-fill.cx` | 逐行按标签(冻结提交、候选 APE sha256、CI run、公开时间、裁决、s9 判定、候选速度基线)取值替换首个待填;缺值或无标签行原样保留并输出 `UNFILLED line= missing=`;末行 `NOTES_FILL filled= unfilled=`;--check 不写盘 |
-| ABAB 交错对拍两条命令 | `sh ./unisacc.com tools/abab-bench.cx -- --n N --a 命令A --b 命令B [--label X] [--load-max L]`；检查 `tools/check-abab-bench.cx` | A B 交错各 N 次(sy 子进程,60 秒上限,丢弃输出),RUN 行记墙钟 ms 与运行前 load1,SIDE 行 min/med/max/cv,末行 `ABAB label= n= a_med= b_med= diff_pct= a_cv= b_cv= noisy=`;任一侧 cv>5 或 load1 最大值>=L(默认 6)判 noisy=1;任一次超时或非零退出则 rc 1 |
+| ABAB 交错对拍两条命令 | `sh ./unisacc.com tools/abab-bench.cx -- --n N --a 命令A --b 命令B [--label X] [--load-max L]`；检查 `tools/check-abab-bench.cx` | A B 交错各 N 次(sy 子进程,60 秒上限,丢弃输出),RUN 行记墙钟 ms 与运行前 load1,SIDE 行 min/med/max/cv,末行 `ABAB label= n= a_med= b_med= diff_pct= a_cv= b_cv= noisy=`;任一侧 cv>5 或 load1 最大值>=L(默认 6)判 noisy=1;任一次超时或非零退出则 rc 1;调用时加 `</dev/null`(rc 147 挂起未能复现,UNVERIFIED,保留限定直到有复现或排除证据) |
 | 起链前置条件一条命令 | `sh ./unisacc.com tools/chain-ready.cx [-- --fast]` | 九条前置:REV 干净、derive --check、ratchets ok=13、cxmod-tri、cx0-extract、P1 新拒绝(--fast 跳过标 SKIPPED)、check-candidate-chain、affected、在途进程;每条一行 TSV(PASS/FAIL/UNMEASURED/SKIPPED,证据,ms),末行 READY=yes/no;配方五步与账本行为人工项标 UNMEASURED;只读;检查 `tools/check-chain-ready.cx` |
 | tools 统计与候选清理 | `sh ./unisacc.com tools/tool-inventory.cx -- --recent 10` | 总行数、按目录/文件及近N次提交增量；无调用者/无批次/疑似重复只报告；不设总量或逐文件上限。tests/toolsloc.tsv退役保留；precommit只对新增tool缺check或批次登记拦截 |
 | 检查源码锚禁止合同（0.0.58） | `tools/cx-lint.cx --strict --rules R4`；提交门同规则强制执行；配套 `tools/check-cx-lint.cx` | 禁止把源码原始字节中的实现语句、格式或替换锚当作通过/拒绝依据；事实表、运行结果与结构化 token/调用参数分析不是源码字面锚。WFE、limits、graph-check、whole-o、chain-argv 同样适用，不设文件豁免。结构分析的未知构造须具名拒绝，不能当作检查通过；原拒绝覆盖及时间预算不变。 |
@@ -609,43 +610,49 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 逐版发布历史见 [prd_release.md](prd_release.md) §往期发布；0.0.43 见 [plans/release-0.0.43.md](plans/release-0.0.43.md)，0.0.45 及 0.0.48 至 0.0.53 见 `plans/release-notes-<版本>.md`。0.0.47 逻辑分布普查结论与 0.0.48.1/0.0.49 收尾记录已迁入 [prd_hist.md](prd_hist.md)。
 
-### 9.4 路线
-- **0.0.43 – 0.0.57**：已收口并发布（计划 `plans/v0.0.4x*.md`、`v0.0.5x-unisacc.md`，发布说明 `plans/release-notes-*.md`）；agent harness（cx-csih）仍归 csih 车道。
-- **0.0.58**：进行中，唯一产品改动为规划器单源 P1（55-1），其余为工具与测试（§9.1、§9.5）。
-- **0.0.59**：P59 解析状态实例化（55-2）加门批量化、main 健康检查、夜跑彩排。
-- **0.0.60**：P60 CX0 事实表入库与第 8 流（55-4）加列车式发布；骨架网第一批随之裁定（prd_cx.md B2 55-4..55-6）。
-- **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）；gcc_cx / clang_cx 宿主现状见 prd_cx.md 开篇。
+### 9.4 路线(2026-11-14 理顺;版本序唯一定义在 `build/version-seq.tsv`,本节只解释它,冲突时以表为准)
+
+已发布:0.0.43 至 0.0.63 均已公开,逐版身份见 [prd_release.md](prd_release.md) 往期发布与 `plans/release-notes-<版本>.md`。0.0.58 至 0.0.60 的旧路线(P1 规划器单源、P59 解析状态实例化、P60 CX0 第 8 流)不再是现行计划:P1 的后续即 0.0.65 的 cxmod 三源归一,CX0 入表入流进候选池。0.0.64 跳过。
+
+终点线(四个数,每版公开后各读一次;某版四个数一个都没动,就不算向终点线前进):
+
+节拍(项目所有者 2026-11-14:不按人的日历排,按迭代次数排):路线的单位是"版"和"链",不是周和月。一版的耗时下限 = 一条整链(E2)加冻结到公开(E3),现约 3 小时机器时间,所以先压 E2、E3,它们每降一半,同样的日历时间里能走的版数翻倍。写域不相交的版本(版本分支各一条)并行开发,只有冻结、整链、公开三步串行。按此,近期线 = 再 4 版(0.0.65 至 0.0.68),中期线 = 其后约 10 版,远期线 = 再其后约 30 版;日历上分别约为 2 至 4 天、1 至 2 周、3 至 6 周(推算,前提是 E3 按下表逐级降到 60 分钟与 30 分钟;降不下来就是设计要改,不是加班赶)。
+
+| 终点线 | 0.0.63 实测 | 近期线(0.0.68 公开时,再 4 版) | 中期线(其后约 10 版) | 远期线(再其后约 30 版) | 读数命令或出处 |
+|---|---|---|---|---|---|
+| E1 首次启动(hello,n=5 中位) | 664.9 ms,推理占 83% | 不高于 500 ms | 不高于 350 ms(推算,须前导预制加零解码都落) | 不高于 200 ms(推算,须闭包结果复用全覆盖) | `sh ./unisacc.com tools/run-startup-bench.cx`;`build/speed-baseline.tsv` |
+| E2 整链墙钟 | real6 3752 s,39% 花在逐键起进程 | 连续两条不高于 2400 s | 不高于 1200 s(逐键起进程改批量后,推算) | 不高于 600 s | 链目录 checkpoint.tsv;`build/phase-times.tsv` |
+| E3 冻结到公开 | 0.0.57 实测 190.6 分钟;0.0.63 未同口径测(UNMEASURED) | 不超过 120 分钟,人工介入不多于 2 次 | 不超过 60 分钟,人工介入 0 | 不超过 30 分钟,按固定节拍发车 | 发布说明的冻结与公开时间差 |
+| E4 能用清单(真实程序在已装产品上编译、运行、输出与预期一致的个数) | 清单未建(UNMEASURED);`examples/apps` 现有 18 个源未成批验收 | 清单建表并测出首个基线(只读数,不设门) | 30 个里过 25 个,且 s9 daily 档跑通一次 | 50 个里过 45 个,其中至少 5 个是仓外第三方 C 程序、至少 5 个是用 `.cx` 写的常驻工具 | 待建:清单表加一个批次(0.0.65 周期内随工具提交,不占版本槽) |
+
+版本表(一版一类产品输入大改;验收未实跑不记 PASS;预期值为推算的已标出):
+
+| 版本 | 一类大改 | 终点线贡献 | 首个任务 | 验收命令 |
+|---|---|---|---|---|
+| 0.0.65(进行中,分支 v0.0.65) | cxmod 三源归一(D0)加 export 首版 D1a,修 checkcalls 误拒 | E4 前置(模块边界可写清);E2 首条拆分链样本(推算约 2756 s,不过门,如实写) | D1a export 全树扫描,列出各包应写而未写 export 的单元 | `sh ./unisacc.com tools/check-cxmod-tri.cx` 末行 failed=0 gaps=0;`sh ./unisacc.com tools/cx0-extract.cx -- --check --all` 两行 EXACT;`sh ./unisacc.com tools/check-export.cx` failed=0 |
+| 0.0.66 | 库包源补丁版(sx、r2、rl2、npx 四份),不新增语法 | E4(unix connect 截止、accept_from 等 7 项库缺陷清零);E2 第二条样本 | 四份补丁对当时 main 逐份 `git apply --check`,列冲突 | `sh ./unisacc.com tools/affected.cx -- --files <四份补丁所动文件> --run` 末行 fail=0 |
+| 0.0.67 | cx.stream R3:`st_span` 改模块接口,FwmBuf 共享类型(驱动) | E1 前置(流边界归一后 0.0.68 才能按流缓存);E2 | 七个基线源的 `-o` 产物 sha256 表(改前) | `git grep -c 'int st_span(' -- src` 合计 5 -> 1;七源 `-o` 产物 sha256 改前改后逐个相同 |
+| 0.0.68 | 驱动与运行缓存二期(闭包结果复用方案 A、前导预制 L5(a)、S1 消费者,视取数加零解码 L4) | E1 过 500 ms 门(拼算上界约 432 ms,余量小) | R6-W5 取数:prune 保留集是否只由引用面决定、lower 是否逐函数独立 | `sh ./unisacc.com tools/run-startup-bench.cx` n=5 中位 first 不高于 500 ms 且 load1 低于 2 |
+| 0.0.69 | netraw(osx、win 库包与运行库;候选不早于本版) | E4(网络面三平台) | 0.0.68 公开前把首个任务与验收命令写进本表;现为未定 | 未定 |
+
+候选池(未入 `build/version-seq.tsv`;入序时一行一版、一版一类,先定终点线贡献再排):
+
+- nn 网化 prune K1 甲(模型与网类;原记在 0.0.67 槽,与 cx.stream R3 不同类,移出;设计在 prd_cx.md 5.2、5.3)。贡献 E1。
+- 链逐键起进程批量化(链工具,非产品输入,不占版本槽;E2 中期线靠它,最早随 0.0.66 的链试)。
+- 内存安全乙期(cxmod 三源类,不早于 0.0.69;甲期是工具,不占槽;设计在 prd_cx.md 11.7)。
+- CX0 事实表入库与第 8 流、骨架网落行为(prd_cx.md 第 8 节 B2 的 55-4 至 55-6、B3)。
+- 状态事实表化(prd_cx.md 第 12 节;工具与表)。
+- 目标可外部扩展与交叉编译结构调查;外置加载器与按目标独立可执行;N0 APE 头压缩(省约 36%,单独立版);新目标 lnx-x86-32 先于 lnx-arm-32;链接单元 CX-W-1;yb-all。
+- 0.1.x:Clang/GCC/TinyCC 接入 `.cx`(共用前端加后端插件)。
 
 <a id="optimization-leads"></a>
-### 9.5 提速线索（0.0.58；基线数字一律引 §3，不在此重复）
+### 9.5 提速线索(已并入 9.4)
 
-| 对象 | 现状 | 线索与归属 |
-|---|---|---|
-| 冻结到公开 | 0.0.57 实测 190.6 分钟（冻结 01:07 起链至 04:18 公开） | 目标不超过 100 分钟（硬线 120）；T1 至 T3、T11 合计压缩，以 R3 整链彩排实测为准 |
-| G2 预算分批 | 0.0.57 手工续跑，BLOCKER-3 至 MANUAL-5 | T1：逐键 journal 续跑（`c57-g2batch-r3`）；先定 `g2-budget-gen` 批次门内 FAIL 的原因 |
-| chain-run 预算与所有权 | 逐相预算不持久，进程所有权靠人工 | T2：逐相预算、持久 deadline、进程所有权（K10） |
-| 相位并行 | 按目标串行 | T3：按目标最多 4 路并行，七列相位表（K9） |
-| 续跑复核开销 | 五个观测点 13 至 169 秒，总量 UNMEASURED | T11：实测每次重入固定开销，超 15 秒则做带身份与失效规则的持久备忘；chain-run 增段秒数与监督器自动续段（每段不超过 280 秒） |
-| 发布尾部 | 17 相命令已有，缺 CONFIG 与 dry-run | T5：对 rel057 材料 dry-run；T6：资产齐全后才触发 CI（assetguard） |
-| s9 | 0.0.57 提交档 150 PASS / 2 FAIL / 2 UNKNOWN，NOT_QUALIFIED；daily 713 批、release 41 批至今没有跑通过一次 | T12：四批修复（s9red），冻结前应落、不卡冻结；daily / release 整档属 0.0.59 门批量化 |
-| 字面锚点 | 五域共 68 处发现 | T4：cx-lint R4 禁用，计数入表只降不升 |
-| 版本度量 | 无统一表 | T9：`build/version-metrics.tsv` 加生成器，回填 0.0.54 至 0.0.57 |
-| L0 / APE 体积 | 头 42.2% 未压缩、padding 7.1%（§3.0） | 属产品输入大改，不进 0.0.58 |
+0.0.58 时期的提速线索表(T1 至 T12)已过期:现行数字只看 9.4 的 E1 至 E3 与 `build/speed-baseline.tsv`、`build/phase-times.tsv`;旧表原文以 `git show 3c2fad9f8e:prd.md` 为准。
 
-### 9.7 未来计划（路线与入口；细节见各版 plans 文件，数字未标出处者为估计）
+### 9.7 未来计划(已并入 9.4)
 
-排序依据（项目所有者愿景）：在稳步推进功能的基础上，优先做对提升整体开发迭代速度有用的项。每版只留一项产品或功能改动，其余槽位给缩短冻结到公开、减少人工、门吞吐、左移检查、并行化与增量复用。
-
-- **0.0.58（进行中）**：唯一产品改动 P1 规划器单源（prd_cx.md 55-1，补丁 `c58-planner`）；工具侧 T1 至 T12（G2 预算分批、chain-run 逐相预算、按目标 4 路并行、字面锚点禁用、发布尾部自动化、assetguard、s9 红批修复、版本度量、续跑复核开销）。目标：冻结到公开不超过 100 分钟（硬线 120）、人工介入 0、chain-run 零接触。详见 `plans/v0.0.58-unisacc.md`。
-- **0.0.59**：P59 解析状态实例化（prd_cx.md 55-2，去掉对工作进程隔离的依赖）；门批量化（门栈批量与门脚本迁移）、main 健康检查与令牌池、夜跑彩排；items 整表清账（H4）、贴线批次（H5）。
-- **0.0.60**：P60 CX0 事实表入库与第 8 流（prd_cx.md 55-4，及 cx-tri 三宿主门 55-3 视矩阵结果）；列车式发布（固定节拍，随车搭载已绿的工具与产品改动）。
-- **0.0.61 及以后**：
-  - 目标可外部扩展的设计（目标枚举与路由数据驱动，外部包按 manifest 追加模型、路由、预定义、头文件，与 prd_cx.md B3-B5 外置分层合并）；交叉编译结构调查（用户程序出码是否链入预编原生对象、nativeabi/symbols 模型作用、e3 类型网是否按目标区分，结论写回 §3）。
-  - 外置加载器 `unisacc-loader.com` 与按目标独立可执行（量化 L0 启动器开销），原属 0.0.55 可砍线，未落地，重新排期。
-  - N0 APE 头压缩（省约 36%，单独立版）。
-  - 新目标 lnx-x86-32 先于 lnx-arm-32，以扩展包形式提供，依赖目标可外部扩展；交叉出码到 32 位，编译器本身不在 32 位运行；ARM32 编码为大头。
-  - 链接单元 CX-W-1。
-  - yb-all 待门与链提速后测量再定。
+排序原则不变:每版只留一类产品输入大改,其余槽位给缩短冻结到公开、减少人工、门吞吐与增量复用。逐版内容见 9.4 的版本表与候选池;0.0.58 至 0.0.61 的旧条目原文以 `git show 3c2fad9f8e:prd.md` 为准。
 
 ## 10. 子文档与归档索引（树）
 
