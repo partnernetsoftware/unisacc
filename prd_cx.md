@@ -1344,6 +1344,10 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 - 缺"从 C99 到 cx 的对照"小例(同一个 fib 或 wordfreq 的 .c 与 .cx 并列);
 - 缺把示例和 spec 例子交叉引用的索引(examples/README 不存在)。
 
+### 梳理发现:examples/cx-lab/out/ 是已跟踪的 out/ 且示例运行会改写它
+
+`examples/cx-lab/out/` 是仓库内被跟踪的 out/ 目录(runtimeio.tsv、times.tsv、tokens.tsv),time_run.cx 与 runtimeiocheck.cx 运行时会改写其中文件,与"仓库内 out/ 清理目标"冲突。本次梳理实跑这两个示例时改写了已跟踪文件 `examples/cx-lab/out/runtimeio.tsv` 与 `examples/cx-lab/out/times.tsv`(git status 为 M),由调度者恢复。后续取证应把示例拷到 `$CLAUDE_JOB_DIR/tmp` 再跑;根治办法是把输出目录改到 tmp 或取消这些产物的跟踪。
+
 ### 未验证与限制
 
 apps、win、run-speed、https 未实跑;引用计数仅按上述口径,tests/ 里以 glob 形式引用 `examples/*.c` 的不会被 -F 计入;建议动作均未执行。
