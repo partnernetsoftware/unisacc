@@ -107,6 +107,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 查 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 模块循环硬拒绝，报 `module cycle` |
 | 用系统 GCC/Clang 编 `.cx` | `sh ./gcc_cx.com FILE.cx -o OUT` / `sh ./clang_cx.com` | 六格 APE 宿主驱动，不调 unisacc.com |
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
+| st_gap 真值表 | `sh ./unisacc.com tools/st-gap-gen.cx -- --check` | exec/facts/st-gap.tsv 生成 build/st-gap.tsv(18 格)与 if 链;检查 check-st-gap-gen.cx;0.0.64 换消费者的合同 |
 | 查共享快照残留 | `sh ./unisacc.com tools/snap-residue.cx -- REV OUTDIR [--report]` | 只读;早于 chain-run.tsv 首段 epoch 的 dir/control/lock/file 记 RESIDUE,末行 SNAP_RESIDUE;有残留 rc 1,--report 恒 0 |
 | 查快照链内工具漂移 | `sh ./unisacc.com tools/snap-tool-drift.cx -- --snap out/release-snap-REV10 [--report]` | 只读;按 build/chain-driver-map.tsv 比快照与 HEAD 的 tools/NAME(sha256),列 SAME/DIFF 与漂移提交;source=snap 且 DIFF 时 rc 1,--report 恒 0 |
 | 解冻放行计划(已退役) | 工具 unfreeze 与其检查已归档于 `archive/agentwork-retire-2026-11/tools/` | agentwork 退役第 2 批,批次 unfreeze 已撤 |
