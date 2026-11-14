@@ -44,6 +44,16 @@
 4. 基础设施(不入产品输入):I1 wt-gate 修红;I2 slice-migration-gen 定因;I3 agentwork 归档第 4 批起(第 3 批已退役 archive-records、aw、check-aw、cursor-fleet、dag 及各自检查;awpath 留第 4 批;分类表见提交 b10474a8f0 说明);I4 out/ 写入点收尾(gen-model-decode-material、chain-run --out、csih-ape 须由其维护者迁);I5 装发布件后复验 FTRIM 类红与 DEFERRED 批。
 5. 已决定(2026-11-14,主调度按推荐定,项目所有者要求能做尽量做):(a) SPEED-11 运行库扫描族进 0.0.62;(b) 发布门不等 osx/win 的 ext.net 实现,只交有名 ENOSYS 拒绝加 CI 证据;(c) s9 只让 commit 档卡发布,daily/release 档夜跑并如实写进说明;(d) 0.0.62 主线为"构造链与批次分治"(C1 相清单化、C3 批次纯函数化、C4 接口哈希表),封网(ext.net/netraw)与 cx 模块语法(别名运行失败修复、export、通配)作并行线,产品输入变更合并为同一类(库包与运行库),构造链/批次工具不入产品输入。
 
+## 进化路线(fable 编排,2026-11-14;按"分而治之":工作流按耦合边界切,每版只含一类产品输入大改)
+
+版本里程碑:
+- 0.0.62(库包与运行库类):封网清零 new 行(netraw 六参、UDP/unix/resolve、带截止时间 TCP);SPEED-11 运行库扫描族;别名运行失败修复(cxmod 三源,按缺陷修复并入);分治工具线并行(C1 相清单化、C3 批次纯函数化、C4 接口哈希选批,不属产品输入);平台审计表扩面加有名 ENOSYS 加 CI 证据。
+- 0.0.63(模型与网类):模型装载零解码(mmap 已解码布局,先定因 D0:最小 C 命中路 46.6 ms 的构成)、speed12b 类重建 e2 网;冷启动目标 first_e2e 500 ms 以下。
+- 0.0.64(cx 设计类):export、通配、cx.stream/tlib 重构、紧凑前导。0.0.65 候选:osx/win netraw 真实现。
+已定三项取舍(主调度按推荐定):(1) 0.0.63 唯一大改类为模型装载零解码,cx.stream/tlib 重构与 export/通配挪到 0.0.64;(2) speed12b 不并入 0.0.62;(3) 平台策略:事实表扩面加有名拒绝先行,不做 NT 上的 fork 仿真,osx/win netraw 真实现推到 0.0.65。
+第一周任务(写域互不相交,P2/P3 同表串行):T1 四工具对 0.0.61 发布件补跑入 speed-baseline(含 1MB sort 118.8 ms 的 check-bench-gencode 行)、T2 命中路定因 D0、T3 g2/g3 并发整链实测(real5 在跑)、T5 别名运行失败修复、T6 netraw 六参、T7 UDP/unix/resolve、T8 SPEED-11、T9 libc 声明清点工具、T10 libc99posix 事实表扩面、T11 ENOSYS 清点表、T13 git 查询去重、T14 text 拆面方案、T15 包索引、T16 win 批次登记。
+平台现状事实(2026-11-14 实测):tests/batches.tsv 平台列 lnx/x86_64 1046 行、osx/arm64 36 行、win 0 行;exec/facts/libc99posix.tsv 只有 30 行而 include/ 约 45 个头;cosmocc 参考:errno 等常量走链接期符号、运行库可按平台裁剪(-msysv、-mtinylinux)、跨平台产物字节确定(APE 格式细节与 NT 层未取到原文,UNVERIFIED)。
+
 ## 记忆宫殿(索引)
 
 | 房间 | 当前事实 | 入口 |
