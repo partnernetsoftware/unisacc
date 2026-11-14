@@ -5,7 +5,7 @@
 - 冻结提交:TBD(候选 REV 待定;real6 起链所用 REV 为 `b2c557b1ba`,见 prd_mempalace.md real6 账本行)。
 - 提交 X、提交 Y:TBD。
 - 同候选 CI run:TBD。
-- 候选 APE `unisacc.com` sha256 与字节数、`--version`:TBD(0.0.62 整链 real6 结果待定)。
+- 候选 APE `unisacc.com`(real6 链内产物,链内版本串 0.0.61,版本注入前):sha256=5dee23615a37181dcac3062e1404a139c2722ebfb45675c591e94f730f780100,7059300 B。最终 APE sha256 与 `--version`:TBD(注入 0.0.62 后会变)。
 - 裁决(release/decision.txt 末行 QUALIFIED 字段):TBD,由发布流程填。
 - git 范围 `v0.0.61..HEAD`:截至本文件起草时共 171 个提交(git rev-list 实测)(`git log --oneline v0.0.61..HEAD`);最终范围与计数:TBD(以冻结点为准重算)。
 
@@ -42,9 +42,9 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 
 ## 整链与构造改进(非产品输入,随本版带出)
 
-(18) candidate-chain 新增 cache-manager 相(5c4ec0e227、b54d7db899):链内用 tools/cache-retain.cx 自产 osx x86_64/arm64 两份,pack 默认用之,`--cache-manager-osx` 显式覆盖优先;check 加 6 条断言。该相在候选上的首次实跑结果:TBD(real6)。
+(18) candidate-chain 新增 cache-manager 相(5c4ec0e227、b54d7db899):链内用 tools/cache-retain.cx 自产 osx x86_64/arm64 两份,pack 默认用之,`--cache-manager-osx` 显式覆盖优先;check 加 6 条断言。该相在候选上的首次实跑结果(real6):链内自产 osx cache-manager(不再借用副本),pack 链内 37.8 s,FAIL/REFUSE 为 0。
 (19) 起链前置门(9a97992301):拒绝 src 工作树 HEAD 与 `--rev` 不符、无 ident helper、pack 缺 `--cache-manager-osx`(rc 2,具名)。
-(20) 整链墙钟:real5(g2/g3 linux 对并发,G_LNX_PAIR=2)3538 s,对照 real4 的 4759 s(-26%);只有这一组对照,未控制机器负载,不作结论(prd_mempalace.md 阻塞节整链一条)。real6(0.0.62 候选整链):TBD,起链于 2026-11-14 16:25,REV `b2c557b1ba`,账本截止约 17:55。
+(20) 整链墙钟:real5(g2/g3 linux 对并发,G_LNX_PAIR=2)3538 s,对照 real4 的 4759 s(-26%);只有这一组对照,未控制机器负载,不作结论(prd_mempalace.md 阻塞节整链一条)。real6(0.0.62 候选整链):REV `b2c557b1ba`(私有提交 70c31f0e9f),rc=0,墙钟 3752 s(与 real5 3538 s、real4 4759 s 各为一组未控负载对照,不作结论);g2/g3 linux 并发;g2/g3 对象各 18 项,FAIL/REFUSE 为 0;最长相 g3-lnx-x86_64-objects 734 s、g3-lnx-arm64-objects 734 s,g2 两个约 725 s。
 (21) 其他:默认写仓根 out/ 的工具改写 TMPDIR(1ecb358822);ratchets 共享一次 `git ls-files` 清单与 coreapi 改 -run 查询,ratchets 墙钟约 12.8 秒降到约 6 秒(8c8067d764,单次观测);check-* 里 tx_len 返回 -1 的越界读修复(b4328f4381、cc22f4539d)。
 
 ## 工具层(非产品输入)
@@ -91,10 +91,10 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 
 ### 丙、未跑的验证范围
 
-(17) 新产品验证:CX-U-2 三条拒绝、T5 cxm_checkcalls 上移与别名运行修复需要新产品验证:tests/cx-namespace.cx 的两条别名运行断言在已装 0.0.61 上输出 UNVERIFIED needs-new-product,不计 PASS 也不计 FAIL。起链前的 P1 扫描(HEAD b2c557b1ba,1190 个含 use 的 .cx,cx0 与产品各 1175 通过 15 被拒,新拒绝数 0)是已装产品上的规划扫描,不等于候选产品验证。build/cx0-three-source-diff.tsv 仍有语义分叉行;cxmod 三源中产品件是手写 cx/compiler/cxmod.cx。check-cxmod-tri 有具名 GAP(CXM_MAXU:97 单元 plan.cx 拒绝、产品通过;128 边界未测)。
+(17) 新产品验证:CX-U-2 三条拒绝、T5 cxm_checkcalls 上移与别名运行修复需要新产品验证:tests/cx-namespace.cx 的两条别名运行断言在已装 0.0.61 上输出 UNVERIFIED needs-new-product,不计 PASS 也不计 FAIL。已在 real6 候选(sha256 5dee2361...,链内版本串 0.0.61)上验证:tests/cx-namespace failed=0 unverified=0,CX-U-2 三条拒绝、别名运行、通配拒绝转真;候选上 V0 身份 PASS、V1 release-ape smoke PASS、V3 module units PASS、V4 module check PASS(V4 内部实际验证的是已装产品,不作候选证据);V5 装机后跑,V6 s9 commit 档进行中,均未出结果。起链前的 P1 扫描(HEAD b2c557b1ba,1190 个含 use 的 .cx,cx0 与产品各 1175 通过 15 被拒,新拒绝数 0)是已装产品上的规划扫描,不等于候选产品验证。build/cx0-three-source-diff.tsv 仍有语义分叉行;cxmod 三源中产品件是手写 cx/compiler/cxmod.cx。check-cxmod-tri 有具名 GAP(CXM_MAXU:97 单元 plan.cx 拒绝、产品通过;128 边界未测)。
 (18) 批次复验面:lnx IMPLEMENTED 约 1040 批至 1076 批(口径随登记变化,以 `tests/run.cx -- --list` 为准:TBD),在快照根复验的累计只有 45 批(PASS 43,FAIL 2,为两项修复之前的口径,修复后两项在共享检出上各自复验为 PASS,但没有在快照根上重跑);其余未复验。FAIL 两项均已修:ri-image-pem(duplicate-key-row,a1bf73b583)与 phase-timing-stamps(断言期望改为真实行为,dfe2b5fa75);两项修后的复验计数以 prd_mempalace.md 阻塞节为准,本文不据此改写累计数。共享检出另有 15 批(PASS 14,FAIL 1 即 tsv-lint,见本条后段)。约 80 个 FTRIM-bootstrap 红批装新产品后复验,未验证。全集复验必须分片(推算,非实测):单批固定开销约 27 s,慢批 pp-cli-includes、pp-header-locations 超 37 s 被杀(须单跑改 heavy),snapshots-cx 临界(批内约 30 s);light 约 742 批约 93 波、heavy 313 批每波 1 批。tsv-lint 同日三次实跑 PASS、FAIL、PASS,疑与并发写表有关,未定因(实测);冻结窗口单跑 `affected.cx --ids tsv-lint --run -j 1` 为 PASS rc=0 22 s。affected 选批降级不替代全量复验。
 (19) s9 未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑,结果如实入说明,不卡发布。如实状态:commit 档只有 0.0.53 的实测(3 步 252.7 / 87.3 / 12.7 s),0.0.62 候选上未跑;daily 档(预测约 16111 s,条件值)与 release 档至今未跑通一次,墙钟 UNMEASURED。aggregate 到 release/evidence.tsv 第 4 行的映射靠人工判读,没有工具(缺口,待记 build/pkg-gaps.tsv)。0.0.61 的第 4 行为 UNKNOWN。候选 s9 判定:TBD。
-(20) cache-manager 相在候选上的首次实跑、real6 整链结果:TBD。首链不带 `--cache-manager-osx`;若该相失败则以借用副本续段(real5p 先例)。
+(20) cache-manager 相在候选上的首次实跑与 real6 整链结果:已实跑,首链不带 `--cache-manager-osx`,链内自产 osx cache-manager,未借用副本,rc=0(见行为变化 (18)、(20))。
 (21) 同候选 CI、本机全批资格:TBD。以上未验证项不得在发布页写成已验证。
 (22) 其他未覆盖:check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity,tty/pty 未测,六目标未跑;build/speed-baseline.tsv 未更新,run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
 (23) 审计与派生登记不全:dock-audit 全部 UNAUDITED;derive 总闸登记项仅 6 至 7 项。
