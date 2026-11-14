@@ -1,0 +1,132 @@
+/* tools/domain.cx -- write-domain registry for agents sharing one checkout (the guard-edit hook reads it).
+ *
+ *   sh ./unisacc.com tools/domain.cx -- claim AGENT PREFIX MINUTES [NOTE]
+ *   sh ./unisacc.com tools/domain.cx -- release AGENT [PREFIX]
+ *   sh ./unisacc.com tools/domain.cx -- list
+ *   sh ./unisacc.com tools/domain.cx -- check PATH [--as AGENT]
+ *
+ * Registry: $UNISACC_DOMAINS, default ~/.cache/unisacc/domains.tsv (not tracked; per machine).  Four TAB
+ * columns: agent, path prefix (repo-relative; a trailing * is dropped; a prefix ending in / or equal to the
+ * path covers it), deadline (epoch seconds UTC), note.  Expired rows are ignored and dropped on the next write.
+ * claim is refused (rc 1, DOMAIN<TAB>conflict) when another agent holds an overlapping live prefix.
+ * check prints DOMAIN<TAB>free (rc 0) or DOMAIN<TAB>held<TAB>owner=A<TAB>prefix=P (rc 1; rc 0 if the owner is --as).
+ * Known limit: the table is rewritten whole without a lock; two claims in the same instant can lose one. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define DM_MAX 512
+typedef struct { char agent[64]; char pre[512]; long dl; char note[256]; } Row;
+static Row rows[DM_MAX];
+static int nrows;
+static char tab[1024];
+static long now_s;
+
+static void die(const char *m) { fprintf(stderr, "domain: %s\n", m); exit(2); }
+
+static void tab_path(void) {
+    const char *e = sy_env("UNISACC_DOMAINS");
+    if (e && e[0]) { if (cx_fmt(tab, sizeof tab, "%s", e)) die("path too long"); return; }
+    if (cx_fmt(tab, sizeof tab, "%s/.cache/unisacc/domains.tsv", sy_env_or("HOME", "."))) die("path too long");
+}
+
+static void norm(char *p) {   /* strip repo root and trailing * */
+    const char *r = sy_env("UNISACC_REPO"); char root[600]; long n = (long)strlen(p);
+    if (!r || !r[0]) { if (cx_fmt(root, sizeof root, "%s/repos/unisacc/", sy_env_or("HOME", "."))) return; }
+    else if (cx_fmt(root, sizeof root, "%s/", r)) return;
+    if (strncmp(p, root, strlen(root)) == 0) memmove(p, p + strlen(root), strlen(p) - strlen(root) + 1);
+    n = (long)strlen(p);
+    while (n > 0 && p[n - 1] == '*') p[--n] = 0;
+}
+
+static int covers(const char *pre, const char *path) {
+    size_t n = strlen(pre);
+    if (n == 0) return 0;
+    return strncmp(path, pre, n) == 0;
+}
+
+static void load(void) {
+    size_t n = 0; char *b = cx_read(tab, &n); size_t at = 0;
+    nrows = 0;
+    if (!b) return;
+    while (at < n && nrows < DM_MAX) {
+        char *f[4]; int k = 0; size_t s = at;
+        while (at < n && b[at] != '\n') at++;
+        { size_t e = at; f[0] = b + s; for (size_t i = s; i < e && k < 3; i++) if (b[i] == '\t') { b[i] = 0; f[++k] = b + i + 1; } b[e] = 0; }
+        if (at < n) at++;
+        if (k < 3 || !f[0][0]) continue;
+        {
+            long dl = atol(f[2]);
+            if (dl <= now_s) continue;
+            Row *r = &rows[nrows++];
+            (void)cx_fmt(r->agent, sizeof r->agent, "%s", f[0]); (void)cx_fmt(r->pre, sizeof r->pre, "%s", f[1]);
+            r->dl = dl; (void)cx_fmt(r->note, sizeof r->note, "%s", f[3]);
+        }
+    }
+    mm_free(b);
+}
+
+static void save(void) {
+    static char out[DM_MAX * 900]; size_t o = 0; char dir[1024]; char *sl;
+    for (int i = 0; i < nrows; i++) {
+        char line[1000];
+        if (cx_fmt(line, sizeof line, "%s\t%s\t%ld\t%s\n", rows[i].agent, rows[i].pre, rows[i].dl, rows[i].note)) die("row too long");
+        if (mm_copy(out + o, sizeof out - o, line, strlen(line))) die("registry too large");
+        o += strlen(line);
+    }
+    (void)cx_fmt(dir, sizeof dir, "%s", tab);
+    sl = strrchr(dir, '/'); if (sl) { *sl = 0; sy_mkdir_all(dir, 0700); }
+    if (cx_write(tab, out, o)) die("cannot write registry");
+}
+
+static int bad(const char *s) { return !s[0] || strchr(s, '\t') || strchr(s, '\n'); }
+
+int main(int argc, char **argv) {
+    const char *cmd = argc > 1 ? argv[1] : "";
+    now_s = sy_wall_s();
+    tab_path(); load();
+    if (!strcmp(cmd, "claim") && argc >= 5) {
+        char pre[512]; long min = atol(argv[4]);
+        if (bad(argv[2]) || bad(argv[3]) || min <= 0 || nrows >= DM_MAX) die("bad claim arguments");
+        if (cx_fmt(pre, sizeof pre, "%s", argv[3])) die("prefix too long");
+        norm(pre);
+        if (!pre[0]) die("empty prefix");
+        for (int i = 0; i < nrows; i++)
+            if (strcmp(rows[i].agent, argv[2]) && (covers(rows[i].pre, pre) || covers(pre, rows[i].pre))) {
+                printf("DOMAIN\tconflict\towner=%s\tprefix=%s\n", rows[i].agent, rows[i].pre); return 1;
+            }
+        { Row *r = &rows[nrows++]; (void)cx_fmt(r->agent, sizeof r->agent, "%s", argv[2]); (void)cx_fmt(r->pre, sizeof r->pre, "%s", pre);
+          r->dl = now_s + min * 60; (void)cx_fmt(r->note, sizeof r->note, "%s", argc > 5 ? argv[5] : "-"); if (strchr(r->note, '\t')) r->note[0] = '-'; }
+        save(); printf("DOMAIN\tclaimed\tagent=%s\tprefix=%s\n", argv[2], pre); return 0;
+    }
+    if (!strcmp(cmd, "release") && argc >= 3) {
+        char pre[512]; int w = 0, dropped = 0; pre[0] = 0;
+        if (argc > 3) { (void)cx_fmt(pre, sizeof pre, "%s", argv[3]); norm(pre); }
+        for (int i = 0; i < nrows; i++) {
+            if (!strcmp(rows[i].agent, argv[2]) && (!pre[0] || !strcmp(rows[i].pre, pre))) { dropped++; continue; }
+            rows[w++] = rows[i];
+        }
+        nrows = w; save(); printf("DOMAIN\treleased\tagent=%s\tcount=%d\n", argv[2], dropped); return 0;
+    }
+    if (!strcmp(cmd, "list")) {
+        for (int i = 0; i < nrows; i++) printf("%s\t%s\t%ld\t%s\n", rows[i].agent, rows[i].pre, rows[i].dl, rows[i].note);
+        printf("DOMAIN\tlist\tcount=%d\n", nrows); return 0;
+    }
+    if (!strcmp(cmd, "check") && argc >= 3) {
+        char p[512]; const char *as = (argc >= 5 && !strcmp(argv[3], "--as")) ? argv[4] : "";
+        if (cx_fmt(p, sizeof p, "%s", argv[2])) die("path too long");
+        norm(p);
+        for (int i = 0; i < nrows; i++)
+            if (covers(rows[i].pre, p)) {
+                if (as[0] && !strcmp(rows[i].agent, as)) { printf("DOMAIN\town\towner=%s\tprefix=%s\n", rows[i].agent, rows[i].pre); return 0; }
+                printf("DOMAIN\theld\towner=%s\tprefix=%s\n", rows[i].agent, rows[i].pre); return 1;
+            }
+        printf("DOMAIN\tfree\n"); return 0;
+    }
+    die("usage: claim AGENT PREFIX MINUTES [NOTE] | release AGENT [PREFIX] | list | check PATH [--as AGENT]");
+    return 2;
+}

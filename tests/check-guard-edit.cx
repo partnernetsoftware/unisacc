@@ -132,6 +132,34 @@ int main(int argc, char **argv) {
         if (!ok) failed++;
         printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", cases[i].name, cases[i].want, rc);
     }
+    /* write-domain branch (tools/domain.cx registry): Edit/Write refused only when UNISACC_AGENT is set and another agent holds the path */
+    {
+        static const struct { const char *name, *tool, *env, *path; int want; } dc[] = {
+            {"dom-noagent-edit", "Edit", "", "/home/devali/repos/unisacc/tools/x.cx", 0},
+            {"dom-other-edit", "Edit", "UNISACC_AGENT=bob", "/home/devali/repos/unisacc/tools/x.cx", 2},
+            {"dom-other-write", "Write", "UNISACC_AGENT=bob", "/home/devali/repos/unisacc/tools/y/z.cx", 2},
+            {"dom-own-edit", "Edit", "UNISACC_AGENT=alice", "/home/devali/repos/unisacc/tools/x.cx", 0},
+            {"dom-free-path", "Edit", "UNISACC_AGENT=bob", "/home/devali/repos/unisacc/src/x.c", 0},
+            {"dom-outside-repo", "Write", "UNISACC_AGENT=bob", "/tmp/x.txt", 0},
+        };
+        char tp[4400], jp[4400], hk[4400], bnd[4400], row[600], json[2048], sh[9000]; int d;
+        cx_path_join(tp, sizeof tp, tmpdir, "guard-domains.tsv");
+        cx_fmt(row, sizeof row, "alice\ttools/\t4102444800\t-\n");
+        cx_write(tp, row, tx_len(row, sizeof row));
+        cx_path_join(jp, sizeof jp, tmpdir, "guard-dom.json");
+        cx_path_join(bnd, sizeof bnd, argv[1], "tools/bound");
+        cx_path_join(hk, sizeof hk, argv[1], ".claude/hooks/guard-edit.ts");
+        for (d = 0; d < (int)(sizeof dc / sizeof dc[0]); d++) {
+            char *av[8]; int cut = 0, rc, ok;
+            cx_fmt(json, sizeof json, "{\"tool_name\":\"%s\",\"tool_input\":{\"file_path\":\"%s\"}}", dc[d].tool, dc[d].path);
+            cx_write(jp, json, tx_len(json, sizeof json));
+            cx_fmt(sh, sizeof sh, "UNISACC_DOMAINS=%s %s bun %s < %s", tp, dc[d].env, hk, jp);
+            av[0] = bnd; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0;
+            rc = sy_run(av, outbuf, sizeof outbuf, &cut);
+            ok = rc == dc[d].want; assertions++; if (!ok) failed++;
+            printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", dc[d].name, dc[d].want, rc);
+        }
+    }
     printf("GUARD_EDIT\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
 }

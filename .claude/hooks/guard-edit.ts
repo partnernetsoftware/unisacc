@@ -5,11 +5,32 @@
 // 这是工具链之外的配置脚本,不承载项目算法。fail-open:任何解析错误或不确定一律放行(exit 0)。
 // 已知不能杜绝:eval、sh -c "..."(引号内容被剥离)、python/node 脚本文件写入、cd 后的相对路径、变量路径。
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 const HOME = process.env.HOME ?? "/home/devali";
 const REPO = process.env.GUARD_REPO ?? `${HOME}/repos/unisacc`;
 const JOB = process.env.CLAUDE_JOB_DIR ?? "";
 const SAFE = ["/tmp/", "/dev/", `${HOME}/cc-work/`, ...(JOB ? [JOB + "/"] : [])];
+
+// 写域登记(tools/domain.cx):设置 UNISACC_AGENT 且登记表有未过期行时,Edit/Write 目标被他人占用则拒绝。
+// 未设置 UNISACC_AGENT 时不做任何事(向后兼容);表缺失或解析失败一律放行。
+function domainOwner(path: string, agent: string): string | null {
+  const tab = process.env.UNISACC_DOMAINS ?? `${HOME}/.cache/unisacc/domains.tsv`;
+  let txt = "";
+  try { txt = readFileSync(tab, "utf8"); } catch { return null; }
+  let p = resolve(path);
+  if (!(p === REPO || p.startsWith(REPO + "/"))) return null;
+  p = p.slice(REPO.length + 1);
+  const now = Date.now() / 1000;
+  let other: string | null = null;
+  for (const line of txt.split("\n")) {
+    const f = line.split("\t");
+    if (f.length < 4 || !(Number(f[2]) > now) || !f[1] || !p.startsWith(f[1])) continue;
+    if (f[0] === agent) return null;
+    other ??= `${f[0]} (前缀 ${f[1]})`;
+  }
+  return other;
+}
 
 function stripBodies(cmd: string): string {
   // 去 heredoc 正文(保留首行),再去引号内容,避免文本里的 > 与 sed -i 误报
@@ -144,6 +165,18 @@ function check(cmd: string, cwd: string): string | null {
 
 try {
   const input = JSON.parse(await Bun.stdin.text());
+  if (input?.tool_name === "Edit" || input?.tool_name === "Write") {
+    const agent = process.env.UNISACC_AGENT ?? "";
+    const fp: string = input?.tool_input?.file_path ?? "";
+    if (agent && fp) {
+      const o = domainOwner(fp, agent);
+      if (o) {
+        console.error(`GUARD-EDIT-V1 拒绝:${fp} 的写域被 ${o} 占用,当前代理 ${agent}。先 sh ./unisacc.com tools/domain.cx -- check PATH 查看,或等对方 release/到期。`);
+        process.exit(2);
+      }
+    }
+    process.exit(0);
+  }
   if (input?.tool_name && input.tool_name !== "Bash") process.exit(0);
   const cmd: string = input?.tool_input?.command ?? "";
   if (!cmd) process.exit(0);
