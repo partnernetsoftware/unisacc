@@ -7,6 +7,8 @@
 - 只写当前事实:谁在做什么、卡在哪、下一步命令。过程、重跑记录、单个批次 PASS 不写。
 - 三类才写进来:别的 agent 必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
 - 每条事实带证据入口(命令或路径),过期就改,不留"曾经"。
+- 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 并列:该行的 ID 被 tools/observe-agents.cx 记为 PARTIAL(已落地行记 DONE),其余 ID 仍算在途。
+- 多人同改本文件时只提交自己的行:先 git diff 确认,必要时 tools/commit-own.cx --keyed;不得用 git add -p 以外的拆分手段,不得 stash/read-tree。
 - 速度数字只来自 tools/run-startup-bench.cx、coldcompile.cx、check-bench-gencode.cx、speed-probe.cx。
 
 ## 当前发布与版本
