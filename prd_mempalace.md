@@ -38,7 +38,7 @@
 2. 整链并发化落地并实测整链墙钟。
 3. 收尾 out/ 写入点。
 4. 核心库包由内往外封装(cx.stream、tlib、S13 复评);速度项:E2 之后的冷启动与生成代码两档新实测。
-5. agentwork/ 归档:现有 50 个工具/测试文件引用它(ledger-add、dag、items、phase-times 检查等),需先改引用再 git mv 到 archive/;未做。
+5. agentwork/ 归档:分批进行。第 1 批已做:tools/devtime.cx 与 tools/check-devtime.cx 移入 archive/agentwork-retire-2026-11/tools/,批次 devtime 及其覆盖、编译清单、批次包行已撤,check-archive-refs failed=0。仍有 48 个工具/测试文件引用 agentwork/:下一批退役只服务它的叶子(patch-queue、unfreeze、state-audit、archive-records、aw 的检查、cursor-fleet 后 dag),再改读写单表的通用工具(awpath 表、ledger-add、phase-budget、version-metrics、precommit 两道闸、stable-eval/gaps、slice-freeze、chain-run 的 raise),最后 git mv agentwork/ 本身。affected 本轮 pass=16 fail=1 deferred=184:失败项 slice-migration-gen 报 source-missing cx/compiler/frames.cx,与本批无关,未修;deferred 未实跑。
 
 ## 记忆宫殿(索引)
 
