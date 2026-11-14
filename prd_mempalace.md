@@ -127,7 +127,10 @@
 - wt-gate 旧"5/8 红":前提不成立,wt-gate-clean 实跑 PASS(check 自建原生 run-batch)。
 - 红批复验过程细节(16 核 WAVE_JOBS_MAX=16、超时定因、剩余波数推算)已浓缩进"阻塞发布"首条;原长文见 git show fd7a68eb36:prd_mempalace.md 的本节。
 
-### win-arm64.zip 去留(2026-11-14,只读评估,未改工具与 release)
+### win-arm64.zip 去留(2026-11-14,只读评估;摘除已实施于工具,release 未动)
+
+- 摘除状态(2026-11-14):已实施。rcand_has_zip(tools/cxlib/releasecandidate.cx,阈值常量 RCAND_ZIP_LAST=0.0.62)分支合同;0.0.63 起 zip 两列写 -,release-layout 生成与 --check、release-run 回填、releaseprepare 初始行、release-dispatch/oneshot/releaseexec 的上传、校验、草稿核对均跳过 zip 槽(rcand_skip)。0.0.63 发布上传清单:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS 六件(0.0.62 的七件做法不变)。check-release-layout 新增 9 条断言(共 17,failed=0)。
+- 未验证:release-oneshot、releaseexec、releaseprepare、release-run 的检查需预构材料,本轮未能跑,记 DEFERRED;这些消费者的 0.0.63 分支只有代码改动,没有用例,发布前须补跑并补 0.0.63 夹具。pins(check-pack-srcdir.cx 未声明 pin)与 enosys-sites(build/enosys-sites.tsv 第 21 行,cx/sys 侧)两批红,与本改动无关(均不涉及被改文件),未碰。
 
 - 生成者:tools/release-layout.cx(member 表 15 行、README 文本 17 行、zip() 46-47 行、--candidate 生成约 72 行);tools/release-run.cx 生成时复制 build.json 别名与 zip、写 SHA256SUMS(17-19、249 行);tools/cxlib/releaseprepare.cx:150 拼 zip 名。
 - 校验者:tools/check-release-layout.cx:30-31(unzip 成员序与 run.cmd 内容)、tools/release-layout.cx:60("zip fixed contents")、tools/check-release-run.cx:118(资产名单含 zip)、release/tools/c47-1-readback.cx:39(回读成员)。文档只描述布局:release/README.md:142-143、tools/README.md:1481;没有用户向文档教人用 run.cmd。release/ci/capsulezip.cx 是证据胶囊 evidence.zip 解析器,与此无关,不可误删。

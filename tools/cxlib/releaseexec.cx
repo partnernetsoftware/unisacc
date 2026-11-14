@@ -318,7 +318,7 @@ static int rx_verify(const char *dir);
 static int rx_assetguard(void) {
     char *v[40],*o=0,endpoint[600],p[4400],sha[65],*names[14],*dirs[14];
     char export_names[6][256];int count=7,n,rc;size_t bytes=0;
-    for(int i=0;i<7;i++){names[i]=rx_c.name[i];dirs[i]=rx_assets;}
+    count=0;for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;names[count]=rx_c.name[i];dirs[count++]=rx_assets;}
     char standalone[4400];rx_path(standalone,rx_state,"standalone");
     rx_path(p,rx_state,"standalone-sha256.tsv");
     if(rx_upstream_ok||sy_exists(p)==1){
@@ -380,9 +380,9 @@ static int rx_assetguard(void) {
 }
 static int rx_verify(const char *dir) {
     char *v[12],*o=0;int rc;size_t at=0;
-    v[0]="sha256sum";v[1]="--";for(int i=0;i<7;i++)v[i+2]=rx_c.name[i];v[9]=0;
+    int vm=0;v[0]="sha256sum";v[1]="--";for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;v[2+vm++]=rx_c.name[i];}v[2+vm]=0;
     rc=rx_cmd("verify-seven",v,dir,&o);if(rc)return rc<0?rc:rx_fail("seven digest command",dir);
-    for(int i=0;i<7;i++){size_t n=strlen(rx_c.name[i]);if(!o||strlen(o+at)<67+n||strncmp(o+at,rx_c.sha[i],64)||strncmp(o+at+64,"  ",2)||strncmp(o+at+66,rx_c.name[i],n)||o[at+66+n]!='\n'){free(o);return rx_fail("seven digest mismatch",rx_c.name[i]);}at+=67+n;}rc=o[at]!=0;free(o);if(rc)return rx_fail("digest output suffix",0);return 0;
+    for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;size_t n=strlen(rx_c.name[i]);if(!o||strlen(o+at)<67+n||strncmp(o+at,rx_c.sha[i],64)||strncmp(o+at+64,"  ",2)||strncmp(o+at+66,rx_c.name[i],n)||o[at+66+n]!='\n'){free(o);return rx_fail("seven digest mismatch",rx_c.name[i]);}at+=67+n;}rc=o[at]!=0;free(o);if(rc)return rx_fail("digest output suffix",0);return 0;
 }
 static int rx_layout(const char *dir) {
     char candidate[4400],com[4400],tool[4400],*v[40];int n=0,rc=rx_verify(dir);if(rc)return rc;
@@ -419,6 +419,7 @@ static int rx_public_readback(void) {
     char dir[4400],leaf[100],url[1000],p[4400],ape[4400];int rc;
     if(cx_fmt(leaf,sizeof leaf,"public-%ld-%d",sy_now_ms(),sy_pid())||rx_path(dir,rx_state,leaf)||sy_mkdir(dir,0700))return rx_fail("fresh public directory",0);
     for(int i=0;i<7+(rx_upstream_ok?7:0);i++){
+        if(rcand_skip(&rx_c,i))continue;
         const char *name=i<7?rx_c.name[i]:rx_export(i-7);
         if(cx_fmt(url,sizeof url,"https://github.com/%s/releases/download/%s/%s",rx_c.repo,rx_c.tag,name)||rx_path(p,dir,name))return rx_fail("public URL/path",0);
         char *v[]={"curl","-q","--fail","--silent","--show-error","--location","--proto","=https","--proto-redir","=https","--netrc-file","/dev/null","--output",p,"--",url,0};
@@ -488,6 +489,7 @@ static int rx_do(int i) {
     }
     if (i == 4) {
         for (k = 0; k < 7; k++) {   /* one asset per bounded command */
+            if (rcand_skip(&rx_c, k)) continue;
             if (rx_path(p, rx_assets, rx_c.name[k])) return rx_fail("path", 0);
             n = rx_pre(v, "gh");
             v[n++] = "release"; v[n++] = "upload"; v[n++] = rx_c.tag; v[n++] = p; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--clobber"; v[n] = 0;
@@ -506,7 +508,7 @@ static int rx_do(int i) {
         if (rc) return rc < 0 ? rc : rx_fail("gh release view", rx_c.tag);
         rx_first(o, first, sizeof first);
         if(!rx_release_identity(o,"true")){free(o);return rx_fail("draft tag/target/isDraft identity",0);}
-        for (k = 0; k < 7; k++) if (!rx_hasline(o, rx_c.name[k])) { free(o); return rx_fail("draft lacks asset", rx_c.name[k]); }
+        for (k = 0; k < 7; k++) if (!rcand_skip(&rx_c, k) && !rx_hasline(o, rx_c.name[k])) { free(o); return rx_fail("draft lacks asset", rx_c.name[k]); }
         free(o);
         return 0;
     }

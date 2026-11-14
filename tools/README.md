@@ -1478,7 +1478,7 @@ candidate-chain pack 的固定路径收集六片/P4/两份 manager，保留原�
 的 BLOCKER 行数写入 `STATE/chain-adopt.tsv` 并打印，供发布说明披露，不隐藏、不改判。
 四个链文件仍进 `prepare.seal`。采纳不重跑 compare，链内人工介入须另行披露。
 初表七角色名与历版候选表一致：record 为 `unisacc.com.build.json`、别名 `build.json`、
-zip 为 `unisacc-VERSION-win-arm64.zip`。
+zip 为 `unisacc-VERSION-win-arm64.zip`(仅版本 0.0.62 及更早;0.0.63 起合同不含 zip,表中 zip 两列写 `-`,阈值见 `rcand_has_zip` 与 `RCAND_ZIP_LAST`)。
 
 `upstream-evidence.tsv` 的1..3只来自真实完成的准备步骤；执行者必须调用
 `rp_verify_upstream` 重核配置、原输入、收集材料、七资产和六独立片，不能接受任意配置PASS。

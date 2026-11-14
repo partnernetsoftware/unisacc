@@ -140,7 +140,8 @@ sh "$ROOT/unisacc.com" "$ROOT/release/tools/c47-1-readback.cx" -- "$ROOT" "$TABL
 这四项 SHA256，不改写源目录，再生成其余三项。生成结束及 `--check` 均核对
 全部七项。六项外部 manifest 按角色顺序列出，不包含 manifest 自身。
 ZIP 外部名来自表，内部成员仍严格为 `slice-win-arm64`、`pkg.bin`、`run.cmd`、
-`README-win-arm64.txt`。
+`README-win-arm64.txt`。以上只适用于版本 0.0.62 及更早;0.0.63 起不再发布该 zip,
+候选表 zip 与 zip_sha256 两列写 `-`,发布资产为六件(含 SHA256SUMS,其摘要覆盖五个文件)。
 
 读回 CLI 为 `ROOT TABLE NEW_OUT OLD_APE true|false`；`NEW_OUT` 必须绝对且不存在。
 它先绝对化表路径，再从表中仓库与 tag 下载四项，直接以 download 目录作布局源，
