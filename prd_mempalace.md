@@ -80,9 +80,9 @@
 
 版本里程碑:
 - 0.0.62(库包与运行库类):封网清零 new 行(netraw 六参、UDP/unix/resolve、带截止时间 TCP);SPEED-11 运行库扫描族;别名运行失败修复(cxmod 三源,按缺陷修复并入);分治工具线并行(C1 相清单化、C3 批次纯函数化、C4 接口哈希选批,不属产品输入);平台审计表扩面加有名 ENOSYS 加 CI 证据。
-- 0.0.63(模型与网类):模型装载零解码(mmap 已解码布局,先定因 D0:最小 C 命中路 46.6 ms 的构成)、speed12b 类重建 e2 网;冷启动目标 first_e2e 500 ms 以下。
+- 0.0.63(驱动与运行缓存类,2026-11-14 按 A12 重排,详见下方 0.0.63 条目):主杠杆是运行库闭包结果复用(上界约 379 ms,成因待 M1 取数证实),零解码只剩约 49 ms 降为次要;speed12b 类重建 e2 网不并入;目标 first_e2e 500 ms 以下,M1 否定则改口径,不放宽。
 - 0.0.64(cx 设计类):export、通配、cx.stream/tlib 重构、紧凑前导。0.0.65 候选:osx/win netraw 真实现。
-已定三项取舍(主调度按推荐定):(1) 0.0.63 唯一大改类为模型装载零解码,cx.stream/tlib 重构与 export/通配挪到 0.0.64;(2) speed12b 不并入 0.0.62;(3) 平台策略:事实表扩面加有名拒绝先行,不做 NT 上的 fork 仿真,osx/win netraw 真实现推到 0.0.65。
+已定三项取舍(主调度按推荐定):(1) 0.0.63 唯一大改类为驱动与运行缓存(原定模型装载零解码,A12 实测后改),cx.stream/tlib 重构与 export/通配挪到 0.0.64;(2) speed12b 不并入 0.0.62;(3) 平台策略:事实表扩面加有名拒绝先行,不做 NT 上的 fork 仿真,osx/win netraw 真实现推到 0.0.65。
 第一周任务状态(2026-11-14 实测,已落 main 的才算数):T5 别名运行修复已入库(4aee1dfb4a,三源,断言需新产品验证)、cxmod 模块身份规范路径判同已入库(e576000457,cxm_bind_real;cxm_deps_same 三源对齐在做)、T9 libc 声明清点(build/libc-decls.tsv 1748 条,in_libc99posix=no 从 97.7% 降到约 85%)与 T11 ENOSYS 点清点(口径修正后 70 个点,无拒绝原因 41 个,全在冻结的 cx/sys,须走事实表集中拒绝原因,不逐点补注释)已入库、T10 libc99posix.tsv 30 -> 129 行(stdio 41、string 20、stdlib 38,全 cx-own)已入库、ext 下 34 个 ENOSYS 点补了原因(b0a44e212d)、C1 链相度量(phase-graph)与 C4 接口哈希选批(--iface-narrow)与变异测试补断言已入库。待做:T1 速度基线补跑(整链结束后安静机器)、T2 命中路定因、T3 g2/g3 并发整链已实测(real5,3538 s,见下一动作第 3 条)、T6/T7 封网、T8 SPEED-11、T13 git 查询去重、T14 text 拆面、T15 包索引、T16 win 批次登记。
 工具层与反应器(fable 推演,2026-11-14,已定顺序):(1) tools/derive.cx 加 exec/facts/derive.tsv(事实表生成器 -> layer-api -> iface-hash -> batch-packages-gen -> tools-compile --register -> product-map -> tool-index 的依赖序,--check 只读汇总,--write 失败还原),已派;(2) tools/status.cx --fast(状态摘要,10 秒内,主调度每轮只读它),已派;(3) 之后:tools/ask.cx 用量闸(build/ask-budget.tsv,防递归环境标记、去重、断路器、16KB 上限、审计行,只接桩,不接真实后端)与 tools/triage.cx(先 exec/facts/red-fingerprints.tsv 确定性命中,未命中才升级,模型输出只作 SUGGESTION);黑名单:产品输入提交、判决规则、授权与预算 raise、断路器复位、任何写仓内文件的动作不得调用模型。(4) 运行缓存:缓存根与 TMPDIR 解耦(UNISACC_CACHE_DIR)与路径无关键、头文件私有目录(产品输入,0.0.63);热进程价值低(命中约 110 ms)暂不建。(5) 变异测试工具化 tools/mutate.cx(表驱动,先做 affected/precommit/sessionroot/check-archive-refs 四点)。
 平台现状事实(2026-11-14 实测):tests/batches.tsv 平台列 lnx/x86_64 1046 行、osx/arm64 36 行、win 0 行;exec/facts/libc99posix.tsv 只有 30 行而 include/ 约 45 个头;cosmocc 参考:errno 等常量走链接期符号、运行库可按平台裁剪(-msysv、-mtinylinux)、跨平台产物字节确定(APE 格式细节与 NT 层未取到原文,UNVERIFIED)。
@@ -120,7 +120,7 @@
 - 0.0.64:D0 cxmod 三源归一(2026-11-14 决定:先归一再加语法,依据与拆分见 prd_cx.md 10.5;`cx/compiler/cxmod.cx` 改为 `cx/cx0/plan.cx` 的第二投影,验收 `tools/cx0-extract.cx -- --check --all` 两行 EXACT、`tools/check-cxmod-tri.cx` 末行 gaps=0;其中 T1 至 T4 不动产品输入、今天可开工且互不相交,T5 至 T8 动产品输入、都写 plan.cx、串行、等 0.0.62 新产品已装;回滚:T8 之前产品件仍是手写件,撤 T5 至 T7 的提交即回到现状)-> D1 export(依赖 D0:此后每条新拒绝只改 plan.cx 一处;若 D0 的 T8 未落地则 D1 不开工,不退回手工三处对齐;验收 `tests/cx-namespace.cx` 门面正例 2、拒绝 4,`tools/cx0-extract.cx -- --check` EXACT)-> D2 通配(依赖 D1;正例 1、拒绝 5)-> D3 符号级导入收敛(依赖 D0,与 D1、D2 同写 plan.cx 故串行;`tests/module/check.cx`)-> D4 text.text 物理拆面(依赖 D1 的 export;第二候选,受 F9 门约束)-> D5 层感知前导(不依赖 D0 至 D3;末位,超 2 小时移 0.0.65)。D0 至 D3 同属 cxmod 三源一类、同候选;同写域串行,不并发。
 
 三个可测速度杠杆(数字只取自 build/speed-baseline.tsv 中四个工具的行):
-- (1) 冷启动:run-startup-bench first_e2e 三次 684.051/704.882/714.267 ms(real4 c55533c7,n=3),同工具 repeat_median3 约 27 至 29 ms(0.0.59 与 local-0060 组);首次与重复相差约 650 ms,是零解码的可得上限。度量:同工具 first_e2e,目标 0.0.62 为 670 以下、0.0.63 为 500 以下。
+- (1) 冷启动:run-startup-bench first_e2e 三次 684.051/704.882/714.267 ms(real4 c55533c7,n=3),同工具 repeat_median3 约 27 至 29 ms(0.0.59 与 local-0060 组);首次与重复相差约 650 ms,其中推理约 531 ms、解码约 49 ms(A12 实测,零解码上界只有约 49 ms)。度量:同工具 first_e2e,目标 0.0.62 为 670 以下、0.0.63 为 500 以下。
 - (2) 冷编译:coldcompile 的 entry-build 13624、whole-front 12846、ledger-add 6468 ms(real4,各单样本),对 0.0.59 为 -27%、-24%、-32%。杠杆是每单元前导与前端结果复用;度量:同三文件 n>=3 中位。
 - (3) 生成代码与分相:check-bench-gencode 与 speed-probe 对 0.0.61 产物 UNMEASURED,先由 A1c 取数再定目标,不预设数字。
 
