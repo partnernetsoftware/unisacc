@@ -88,6 +88,7 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (23) syt_wait 与 netpoll 把 EINTR 原样上抛:sy_tcp_connect_to、sy_recv_until、sy_send_all_until、sy_udp_recv_from、sy_wait_port 在等待期间收到已处理信号就返回 -EINTR(sy_send_all_until 可能已发一部分;sy_wait_port 总等待变短)(读码推断,未复现)。绕法:调用者对 -EINTR 按剩余截止时间重试(send 类需自行记已发字节),或不对同一线程装计数信号。
 (24) netmsg 的 recvmsg 入参 salen 为负时被当大无符号 namelen 交给内核,内核取走数据报后才报 -EINVAL(数据报丢失);回写的地址长度可大于入参余量(读码推断,未复现)。绕法:salen 恒传非负且不小于 SY_SA_MAX(udp.cx 现状已满足)。
 (25) osx/win 上 netraw、netpoll、netnb、netmsg 的 -ENOSYS 点没有进 exec/facts/refusals.tsv(现仅 fs 与 mem 的 10 行),按具名拒绝口径是缺口;tools/enosys-sites.cx 对账未跑(读码核对,UNVERIFIED)。绕法:无,osx/win 本版即不支持这些接口(见 (4))。
+(26) cxm_checkcalls 误拒短名函数指针调用写法:单元里「标识符后跟 (」与程序中某个未被本单元 use 的模块的导出函数同名时,报 `call to undeclared function NAME (declared in M, which X does not use)`,包括结构成员 `o.bf()`、局部/形参/文件级函数指针、typedef 返回类型的原型、`#include` 头里的原型(已复现)。已装 0.0.61 发布件同样报错,是既有缺陷,不是 0.0.62 回归。绕法:把函数指针调用写成经本单元声明的间接名,或重命名导出函数。0.0.64 修;补丁草稿已备,仅在审查副本验证(误拒夹具转 RC=0,原拒绝例仍拒绝),未入库,未装新产品。
 
 (19)(20) 的补丁草稿 $CLAUDE_JOB_DIR/tmp/sx.patch.txt 在 git archive 副本上实跑:r-unix-block 复现由"越过截止时间不返回"转为各次 -110 且 300 ms 返回;r-unix-peer 复现由 -97 转为 accept 成功、连接保持;check-ext-net-unix 24 项与 check-ext-net-tcp 69 项全 PASS(各新增 3 项)。仅 lnx-x86_64 本机,未入库,未装新产品,未在 arm64/osx/win 跑。
 
