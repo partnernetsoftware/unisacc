@@ -56,7 +56,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 同命令、同 -o 的 `-c` 编译,第二次起 0 行 inference。键含 argv,换 -o 文件名则键不同、重跑,不命中(有意,换名复用未做);改源后回到 7 行。证据:修复提交 2049e14b8a;副本重建候选(c0c4b24f,专用 0700 缓存根)三次 inference 为 7/0/0,对象 sha 三次相同(29227a42857f),出自 prd_mempalace.md N15 定因条。注意:build/speed-baseline.tsv 的 N15 行是修复前的 63A 候选(30ef6915)探针,三次均 7 行(落空);修复后的 7/0/0 目前只在 prd_mempalace.md 有记载,未入该表。第二份独立实跑(prd_mempalace.md Z6 行):origin/main c39a890651 的 git archive 副本经 entry-build 得候选 227e63f5998e,同命令同 -o 三连 inference 为 7/0/0,对象 sha 三次均 e2df35b00e46,与 `UNISACC_RUN_CACHE=0` 所得对象 cmp 相同;只测了一个极小源,换 -o 名与改源在该次未测。
 
-测试:tests/phase-timing-stamps 新断言(K3,提交 d59e4b01a0),旧产品 70 PASS、6 UNVERIFIED,候选 74 PASS(含版本槽未写导致的 ver.cold/ver.hot 两条版本串 FAIL 说明以 prd_mempalace.md K3 行为准);装新产品后须以 `UNISACC_REQUIRE_N15C=1` 重跑,结果待填。
+测试:tests/phase-timing-stamps 新断言(K3,提交 d59e4b01a0),旧产品 70 PASS、6 UNVERIFIED,候选 74 PASS(含版本槽未写导致的 ver.cold/ver.hot 两条版本串 FAIL 说明以 prd_mempalace.md K3 行为准);装新产品后以 `UNISACC_REQUIRE_N15C=1` 重跑(2026-11-14 实测,已装 0.0.63 sha 04b85e6e):rc 0,`PHASE_TIMING_STAMPS assertions=76 failed=0`,无 UNVERIFIED;同时 tests/cx-namespace.cx `checks=18 failed=0 unverified=0`。
 
 限定:对真实构建系统,若每次换 -o 文件名,命中率为 0,本卖点可能落空。自举链内对象相是否命中缓存(固定点比较变缓存对缓存)链内未实测,UNVERIFIED;起链前须固定 UNISACC_RUN_CACHE=0 或断言对象相 artifact_hit 为 0。
 
@@ -74,7 +74,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 (4) 候选级证据:
 - 整链 real7:共三段。前两段因设置 UNISACC_RUN_CACHE=0,在 g2 阶段超时失败;第三段通过(rc=0,compare 通过,产物 unisacc-next.com sha 8312372d7af1e23d,冻结 F 为 9f3d367e44d7)。前两段失败原始记录保留,不抹去。
 - 同候选 CI:run 43600577542,10 个作业全 success,含 6 个平台候选作业。osx 与 win 平台证据范围以该 run 作业为准,不扩大解读,见未达项 (5)。
-- 本机全批资格:未取得(s9 commit 档 313 PASS、6 FAIL、2 UNKNOWN,见 (3));仍待填:候选速度基线:build/speed-baseline.tsv 中暂无含 9f3d367e44d7 的行(grep 计数 0),待填,未测不写数(candidate 自含入口与发布件入口的差异未隔离)。
+- 本机全批资格:未取得(s9 commit 档 313 PASS、6 FAIL、2 UNKNOWN,见 (3));发布件速度(装机后实测,已装 0.0.63 对 0.0.62,ABAB 交错 n=9,load1 0.9 至 1.7,见 build/speed-baseline.tsv 末尾):首次启动 664.9 对 666.0 ms、重复启动 28.5 对 28.4 ms、gencode sha/sort/memcpy 8MB 均在噪声内,无变慢项;冷编译 edit-span 2596 对 3212 ms、ratchets 5082 对 5937 ms,但 0.0.62 一侧经包装根运行,这一差值不能当作本版收益(同日另一口径曾测得 2743 对 2674 ms,不显差)。500 ms 启动门未过。
 (5) osx 与 win 平台证据:沿用 0.0.62 缺口,0.0.63 未新增平台实跑,UNVERIFIED。
 
 ## 0.0.62 已知缺口里仍开的项
