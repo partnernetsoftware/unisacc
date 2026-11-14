@@ -10,6 +10,7 @@
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 并列:该行的 ID 被 tools/observe-agents.cx 记为 PARTIAL(已落地行记 DONE),其余 ID 仍算在途。
 - 多人同改本文件时只提交自己的行:先 git diff 确认,必要时 tools/commit-own.cx --keyed;不得用 git add -p 以外的拆分手段,不得 stash/read-tree。
 - 速度数字只来自 tools/run-startup-bench.cx、coldcompile.cx、check-bench-gencode.cx、speed-probe.cx。
+- 工作方式违例账(2026-11-14,依 AGENTS.md "违例须在账本记一行并改正"):子代理用 sed -i 改过 tools/domain.cx、tools/commit-own.cx、tools/check-commit-own.cx 与追加 tests/outdep.tsv(printf >>),另有若干只读取证用 shell 管道/awk 与 grep(只动 /tmp)。内容均已用对应 check 核过;已改正为:派工简报固定禁用 sed -i/python/node/perl,分析脚本一律 .cx,guard-edit.ts 钩子继续拦截。再犯仍按本条追加。
 
 ## 当前发布与版本
 
