@@ -638,7 +638,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 候选池(未入 `build/version-seq.tsv`;入序时一行一版、一版一类,先定终点线贡献再排):
 
 - nn 网化 prune K1 甲(模型与网类;原记在 0.0.67 槽,与 cx.stream R3 不同类,移出;设计在 prd_cx.md 5.2、5.3)。贡献 E1。
-- 链逐键起进程批量化(链工具,非产品输入,不占版本槽;E2 中期线靠它,最早随 0.0.66 的链试)。
+- 链逐键起进程批量化(链工具,非产品输入,不占版本槽;E2 中期线靠它,最早随 0.0.66 的链试)。2026-11-15 新依据:real9 gen1 lnx 对象 51.3 s 对 g2 706 s(13.8 倍),同代两目标 24 进程压 16 核疑过订;先测 g2 对象波 parallel 8 对 12。
+- 加速方案(2026-11-15 fable 分析,real9 checkpoint 实算,均不占版本槽;一版下限约 151 分钟,A 加 B 推算降到约 100 分钟):
+  (A) g3 移出关键路径:pack 取 g2,g3 与 compare 成独立车道,公开硬门加 compare DONE 且 g2 等于 g3;到可用候选 3676 s -> 约 2530 s(推算,g3 整代约 1150 s)。首步:核 real9 g2 与 g3 六目标 sha,读 build/chain-phases.tsv 确认 pack 取哪一代。
+  (B) s9 前移预演并与公开并行:版本分支上预演 init 加一步;冻结后 pack 一出即后台起,不挡公开(commit 档裁决恒为 UNKNOWN);E3 约 90 -> 约 60 分钟(推算)。
+  (C) g2 对象跨版与跨目标内容寻址收养(键:编译器 sha、单元源 sha、目标、选项,带负控);不动编译器的版本 g2 lnx 706 -> 约 70 s(推算)。
+  (D) gen1 单目标开发候选(--until gen1-lnx-x86_64 带 --baseline-ctx,产物只记 PREPARED):产品改动验证 61 分钟 -> 约 2 至 3 分钟一轮(推算)。
+  (E) 发布 12 步各带 RECEIPT 并合成一条有界编排命令;先把约 60 分钟未分项的 E3 变成实测。
+  应停:s9 commit 档作公开前串行门、全量 g3 挡 pack、UNISACC_RUN_CACHE=0 只靠记忆禁用(应由 chain-ready 拒)、build/phase-times.tsv 0.0.47 至 0.0.49 旧行(归档)、drive.sh 手写循环(沉淀进 s9-nightly)、release-sweep 拒 /tmp 根与临时产物放 /tmp 规则冲突。
 - 内存安全乙期(cxmod 三源类,不早于 0.0.69;甲期是工具,不占槽;设计在 prd_cx.md 11.7)。
 - CX0 事实表入库与第 8 流、骨架网落行为(prd_cx.md 第 8 节 B2 的 55-4 至 55-6、B3)。
 - 状态事实表化(prd_cx.md 第 12 节;工具与表)。
