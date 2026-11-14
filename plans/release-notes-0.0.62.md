@@ -99,6 +99,7 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (21) 同候选 CI、本机全批资格:TBD。以上未验证项不得在发布页写成已验证。
 (22) 其他未覆盖:check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity,tty/pty 未测,六目标未跑;build/speed-baseline.tsv 未更新,run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
 (23) 审计与派生登记不全:dock-audit 全部 UNAUDITED;derive 总闸登记项仅 6 至 7 项。
+(25) win-arm64.zip 的来由与状态:发布资产合同自 0.0.46 起为七件,其中 unisacc-0.0.62-win-arm64.zip 固定四成员(slice-win-arm64、pkg.bin、run.cmd、README-win-arm64.txt),内容与单独资产 slice-win-arm64、pkg.bin 重复。run.cmd 从未在 Windows 原生运行验收(.github/workflows/candidate-native.yml 的 win-arm64 步骤只运行 slice-win-arm64 本身,见 81、320-332 行,不解 zip、不跑 run.cmd);zip 只经 tools/check-release-layout.cx 做成员与字节布局检查。故该 zip 是未经原生验收的重复包装,不构成 Windows 可用性承诺;建议直接用 slice-win-arm64 加 pkg.bin。0.0.63 建议摘除 zip 出资产合同(详见 prd_mempalace.md "win-arm64.zip 去留");已公开的 0.0.62 资产不改动。
 (24) 0.0.63 项不在本版:E3TRIM(modelcache.cx 每次发布全量扫描修剪,补丁未入库)、-c 对象路线真复用(N15,见 (11))、L1/L2/L4 驱动与运行缓存加速、SPEED-11、cx.stream/tlib 重构、export/通配语法(D1/D2)均不在 0.0.62。
 
 ## 撤回与回滚

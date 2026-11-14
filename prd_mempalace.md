@@ -126,6 +126,15 @@
 - wt-gate 旧"5/8 红":前提不成立,wt-gate-clean 实跑 PASS(check 自建原生 run-batch)。
 - 红批复验过程细节(16 核 WAVE_JOBS_MAX=16、超时定因、剩余波数推算)已浓缩进"阻塞发布"首条;原长文见 git show fd7a68eb36:prd_mempalace.md 的本节。
 
+### win-arm64.zip 去留(2026-11-14,只读评估,未改工具与 release)
+
+- 生成者:tools/release-layout.cx(member 表 15 行、README 文本 17 行、zip() 46-47 行、--candidate 生成约 72 行);tools/release-run.cx 生成时复制 build.json 别名与 zip、写 SHA256SUMS(17-19、249 行);tools/cxlib/releaseprepare.cx:150 拼 zip 名。
+- 校验者:tools/check-release-layout.cx:30-31(unzip 成员序与 run.cmd 内容)、tools/release-layout.cx:60("zip fixed contents")、tools/check-release-run.cx:118(资产名单含 zip)、release/tools/c47-1-readback.cx:39(回读成员)。文档只描述布局:release/README.md:142-143、tools/README.md:1481;没有用户向文档教人用 run.cmd。release/ci/capsulezip.cx 是证据胶囊 evidence.zip 解析器,与此无关,不可误删。
+- 原生运行证据:.github/workflows/candidate-native.yml 的 win-arm64 部分只用 slice-win-arm64(81、92、221、320-332、613-614 行),全文无 zip、run.cmd;archive/docs-2026-11/plans/v0.0.46-unisacc.md:250-262 自述 run.cmd 未原生验收。结论:未验收的重复包装,无已知真实消费者。
+- build.json 别名与 unisacc.com.build.json 同内容,仅布局检查与 check-release-run.cx:118 名单引用;可同批摘,收益小。
+- 摘除方案(0.0.63 起,旧版发布物不改):(1) release-layout.cx 去 member 表、README 文本、zip()、--candidate 的 zip 输出与固定内容比对;(2) release-run.cx 去复制 zip(及别名)与 SHA256SUMS 条目;(3) releaseprepare.cx:150 去 zip 名;(4) release/candidate.tsv 名单列对新版不含 zip,解析保留旧列以读 0.0.46 至 0.0.62 的历史行;(5) check-release-layout.cx、check-release-run.cx:118、c47-1-readback.cx 的期望改按版本分支,保留旧合同用例;(6) release/README.md:142-143、tools/README.md:1481、发布说明模板去 zip 描述;(7) 发布步骤的资产上传清单同步。不触产品输入与 candidate-native.yml。
+- 建议:0.0.63 摘除,不补 Windows 原生验收。补验收要在 windows-arm64 runner 新增解压并跑 run.cmd 的作业与维护面,而 slice 本身已被 CI 资格覆盖,zip 无独立价值;摘除是五到七处小改加夹具更新,成本更低。日后若要 Windows 友好包装,先验收后入合同。
+
 ## 下一动作(0.0.63,fable 第五轮规划 2026-11-14;0.0.62 已公开,其规划折叠在本节后半仅作证据)
 
 0.0.63 实施规划(只是规划,未实跑不记 PASS;输入身份:main HEAD 62be4139f3,已装产品 0.0.62 sha 83b82c8d;"实测"与"推算"逐条标注):
