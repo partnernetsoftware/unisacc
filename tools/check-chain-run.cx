@@ -11,7 +11,15 @@
 #pragma unisa use sys.sha
 #pragma unisa use cxlib.chaincall
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.env
 static int bad;
+/* 1 when the runner output N bytes at O carries its "--out must be" refusal (plain byte comparison). */
+static int refused_out(const char *o,long n) {
+    static const char want[]="--out must be";long i;
+    for(i=0;i+13<=n;i++)if(mm_same(o+i,want,13))return 1;
+    return 0;
+}
 static void ck(int yes,const char *s) { sy_printf("%s\tchain-run.%s\n",yes?"PASS":"FAIL",s); if(!yes) bad++; }
 static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s)))exit(2); }
 /* Callers explicitly choose the phase-table grammar; paths never select behavior. */
@@ -701,5 +709,14 @@ int main(int argc,char **argv) {
     ck(runv("jobsexpire","jobs-expire","600",jseg,0,12)==0,"jobs-next-segment-finishes-group");
     ck(runv("jobsforged","jobs-forged","600",jseg,0,12)==2,"jobs-unproven-75-blocks");
     ck(runv("jobsinternal","jobs-internal","600",jseg,0,12)==2,"jobs-internal-code-not-forgeable");
+    { /* --out: a tmpdir session root is accepted by the path guard; any other absolute path is refused */
+        char sid[64],good[4400],badp[4400],tc[4096];char *o=0;size_t n=0;
+        if(cx_fmt(sid,sizeof sid,"crout-%ld",sy_now_ms())||sr_default(sid,good,sizeof good)||sy_realpath(sy_tmpdir(),tc,sizeof tc)<0||cx_fmt(badp,sizeof badp,"%s/crout-notsession-%ld",tc,sy_now_ms())) return 2;
+        char *g[]={"sh","-c","exec \"$0\" \"$@\" 2>&1",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",good,"--deadline-s","5",0};
+        cx_runv_timeout(g,12,&o,&n);ck(!(o&&refused_out(o,(long)n)),"out-tmpdir-session-root-accepted");free(o);o=0;n=0;
+        char *b[]={"sh","-c","exec \"$0\" \"$@\" 2>&1",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",badp,"--deadline-s","5",0};
+        cx_runv_timeout(b,12,&o,&n);ck(o&&refused_out(o,(long)n),"out-non-session-root-refused");free(o);
+        (void)cx_rmtree(good);(void)cx_rmtree(badp);
+    }
     sy_printf("CHECK_CHAIN_RUN\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }

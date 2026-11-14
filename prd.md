@@ -108,6 +108,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 用系统 GCC/Clang 编 `.cx` | `sh ./gcc_cx.com FILE.cx -o OUT` / `sh ./clang_cx.com` | 六格 APE 宿主驱动，不调 unisacc.com |
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
 | st_gap 真值表 | `sh ./unisacc.com tools/st-gap-gen.cx -- --check` | exec/facts/st-gap.tsv 生成 build/st-gap.tsv(18 格)与 if 链;检查 check-st-gap-gen.cx;0.0.64 换消费者的合同 |
+| 根下 C99 示例冒烟 | `sh ./unisacc.com tests/check-examples-smoke.cx` | 9 个示例拷进临时目录默认 -run,断言 rc 与输出(19 条);批次 examples-smoke;cx-lab 产物写 $CXLAB_OUT,见 examples/cx-lab/README.md |
 | 查共享快照残留 | `sh ./unisacc.com tools/snap-residue.cx -- REV OUTDIR [--report]` | 只读;早于 chain-run.tsv 首段 epoch 的 dir/control/lock/file 记 RESIDUE,末行 SNAP_RESIDUE;有残留 rc 1,--report 恒 0 |
 | 查快照链内工具漂移 | `sh ./unisacc.com tools/snap-tool-drift.cx -- --snap out/release-snap-REV10 [--report]` | 只读;按 build/chain-driver-map.tsv 比快照与 HEAD 的 tools/NAME(sha256),列 SAME/DIFF 与漂移提交;source=snap 且 DIFF 时 rc 1,--report 恒 0 |
 | 解冻放行计划(已退役) | 工具 unfreeze 与其检查已归档于 `archive/agentwork-retire-2026-11/tools/` | agentwork 退役第 2 批,批次 unfreeze 已撤 |
@@ -120,6 +121,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | `use` 的包根解析 | 仓根 `cxroot.tsv`（`R<TAB>PREFIX<TAB>DIR`）；工具侧 `use cxlib.cxroot` 调 `cxr_path`；`sh ./unisacc.com tools/check-cxroot.cx` | 旁边找不到时查最近祖先的 `cxroot.tsv`，最长前缀映射（cx/spec.md CX-U-7）；编译器侧已改 `plan.cx`/`cxmod.cx`，**已装产品要重建安装后才生效**，软链届时逐目录淘汰 |
 | 源码所有权检查（CX-W-4 路线 B） | `sh ./unisacc.com tools/cx-own.cx -- FILE...` 或 `-- --tracked`；夹具 `tools/check-cx-own.cx` | 函数内局部 owner 的 DOUBLE-FREE / USE-AFTER-FREE / LEAK；保守（转给未知函数视作可能转出）。2026-11-03 全仓：9043 函数，LEAK 220（抽 10 全真，多为工具错误路径），DOUBLE-FREE 1（误报，互斥整数条件），产品目录只有 60 个局部 owner——产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到 |
 | 批量机械改写 | `refactor.cx -- find/apply/sweep` | 每文件改前改后验证，不过即还原 |
+| 查仓库根 out/ 写入者 | `sh ./unisacc.com tools/check-out-writers.cx` | 扫 tools/tests 的 sy_mkdir 仓根 out;csih-ape 带期限豁免(2026-12-31),新增写入者即 FAIL |
 | 轻量模型辅助（日志定因、状态摘要、提交说明草稿） | `cc-lite [haiku\|sonnet] "指令" [文件...]`，也可经 stdin | `~/bin/cc-lite`（源在 moltbaby `bin/cc-lite`）；默认 haiku，无工具、只读，单个文件上限 64KB，不改文件、不做裁决；结论仍由调用者核实。脚本里没有凭据，经 `claude -p` 调用，凭据来自运行环境。目前没有任何用量控制：不要放进循环、定时器或事件反应器；计划的 `tools/ask.cx` 会加预算、去重、断路器与防递归（见 prd_mempalace.md 进化路线）。 |
 | C47 whole函数来源 | `tools/whole-function-origin.cx -- MATERIAL UNITS FRAMES CONFIG WATCH OUTPUT NEWDIR [--sidecar]`；`tools/module-byte-map.cx -- --whole-context …` | 校验normalized帧地图及同位置快照；后改写、区间外与跨上下文保持UNKNOWN，stub单列SYNTHETIC；非排他所有权 |
 | C47双段观察消费 | `lower-row-origin.cx`、`encoder-record-origin.cx`、`arm-encoder-record-origin.cx` 的显式 `--watch-bundle`；共享 `cxlib.watchbundle`，登记 `register.cx … --args '分号分隔参数'` | 两段最多2M条/128MiB，旧单文件预算不变；manifest/execution/每段SHA及连续序号全核，新证书绑定实际manifest；有界拼接，非恒定内存 |
