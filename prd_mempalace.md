@@ -12,9 +12,9 @@
 
 ## 当前位置
 
-- 版本:0.0.62 已公开(Latest,已装,sha 83b82c8d);0.0.63 已冻结在 c06a190540(私有提交 417153841b),整链 real7 第三段在跑。入口:archive/prd_mempalace-2026-11-14.md 的"当前发布与版本"节。
+- 版本:0.0.63 已公开(2026-11-14T14:12:06Z,Latest,已装,APE sha 04b85e6e4ec3ddcb)。F=9f3d367e44(v0.0.63 与 v0.0.63-src),X=86e85e60c8,Y1=d57b5be605,Y2=707e6f562e,CI run 43600577542 十作业全 success,裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。回滚:release/rollback.txt;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62(sha 83b82c8d)。
 - 整链 real7:2026-11-14 21:29 完成 rc=0(三段,第三段 20:50:57 起),compare 通过;产物 /tmp/unisacc-session-build-lr0060/chain-real7/ape-final/unisacc-next.com(sha256 前 16 位 8312372d7af1e23d,未注入版本),收据 ape-receipt.txt。该目录保留到下一版公开并读回为止。
-- 下一步:整链结束 -> 发布 12 步(6 件资产,无 zip)-> 装机与装后门 G1 至 G6 -> 公开后大扫除。
+- 下一步:装后门 G2(K3 硬模式 UNISACC_REQUIRE_N15C=1)、G5(速度重测入 build/speed-baseline.tsv 并与 0.0.62 对比)-> 公开后大扫除(清单见归档 R6-H63-S)-> 0.0.65 在 v0.0.65 分支推进。
 
 ## 决定(别人必须遵守)
 
@@ -27,7 +27,7 @@
 
 ## 阻塞发布
 
-- 发布 12 步未开始:命令清单 $CLAUDE_JOB_DIR/tmp/release63-steps.txt;待核两处(pack-srcdir 的 --sid 取值、F 构造时树对象须在主仓对象库)。
+- 0.0.63 已公开;s9 commit 档 321 批 313 PASS、6 FAIL、2 UNKNOWN(derive、tlib-frozen 已在 main 41a15ffc7f 修;release-usage 待单跑;其余三个为冻结根环境造成),发布说明已如实写。
 - s9 commit 档按设计恒为 UNKNOWN,裁决预计 NOT_QUALIFIED unknown=1;daily 与 release 档未跑。入口:release/decision.txt。
 
 ### 仍未验证(缺什么 / 清零动作)
