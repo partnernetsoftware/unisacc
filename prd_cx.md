@@ -726,6 +726,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 | 号 | 内容 | 写域 | 产品输入 | 今天可开工 | 验收命令与预期值 |
 |---|---|---|---|---|---|
 | T1 | 三源差异表:按函数对齐 plan.cx 与 cxmod.cx,输出函数、差异类(a 至 f)、是否语义(即 B1 的 54-1 `cx0-diff`) | `tools/cx0-diff.cx`、`tools/check-cx0-diff.cx`、`build/cx0-three-source-diff.tsv`、批次行 | 否 | 是 | `sh ./unisacc.com tools/check-cx0-diff.cx` rc=0;表中「是否语义=是」的行恰为 (e)(f) 两类,其余为 0;68 块全部归类,未归类 0 |
+| T1 实测更正 | tools/cx0-diff.cx 已落(62901f0fc7,check 27 条 failed=0):plan.cx 对产品 68 块与上文相符;但 4 块落在六类之外(类 x),含三处 10.5 未列的语义分叉:cxm_load 的 `if (n == -3) return 1;` 只在 plan.cx;cxm_text 的 CXIF 防重复宏名后缀 `_sym` 只在 plan.cx;`cxm_rootn = n;` 只在产品。T5/T6 上移范围须含这三处;真实三源 `--check` 因此 rc=2 属有意 | - | - | - | - |
 | T2 | MAXU GAP 实跑:生成 97 与 129 个单元夹具,对 cx0 与产品各跑一次,把 `:122` 的静态 GAP 改成实测 GAP | `tools/check-cxmod-tri.cx` | 否 | 是 | 末行仍 `failed=0 gaps=2`;GAP 行带实测 rc(预期 97 单元:cx0 rc=1 文案 `more than 96 units`,产品 rc=0;129 单元:两者均 rc=1) |
 | T3 | 第二投影原型:用现有 `--output` 把产品目标生成到仓外,量与手写件的剩余差异 | 仅 `$CLAUDE_JOB_DIR/tmp`(不入库);结论原位更新本节 | 否 | 是 | `sh ./unisacc.com tools/cx0-extract.cx -- --output /tmp/cxmod-proto.c` 输出 `PREPARED`;`git diff --no-index --numstat /tmp/cxmod-proto.c cx/compiler/cxmod.cx` 与本节 +253 -79 相符,并给出去掉 (b)(e)(f) 后的剩余行数 |
 | T4 | 棘轮核实:`src/cxmod.c` 增行是否触发 srcshape;`cx/compiler/cxmod.cx` 成为生成物是否触发 cxapis、cxlibc 等 | 只读;结论原位更新本节 UNVERIFIED 项 | 否 | 是 | `sh ./unisacc.com tools/ratchets.cx` 末行 13 项现值入账;给出 srcshape 对 `src/cxmod.c` 的判定源码行 |
