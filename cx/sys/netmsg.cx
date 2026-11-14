@@ -1,0 +1,70 @@
+#pragma unisa module netmsg
+#pragma unisa dock
+#pragma unisa use sys.sysnums
+/* L0 sys/netmsg: datagram send/receive with an address, through sendmsg/recvmsg (three arguments),
+   because the gate carries no sixth argument for sendto/recvfrom. Numbers come from
+   exec/facts/sys-syscalls.tsv rows snr_sendmsg/snr_recvmsg. The msghdr is the LP64 56-byte layout:
+   name(0) namelen(8) iov(16) iovlen(24) control(32) controllen(40) flags(48).
+   Targets: Linux x86_64 and arm64; elsewhere every call is -ENOSYS. */
+
+static long sy_snm_os(int lx, int la, int fb) {
+#if defined(__linux__) && defined(__aarch64__)
+    (void)lx; (void)fb;
+    return la;
+#elif defined(__linux__) && defined(__x86_64__)
+    (void)la; (void)fb;
+    return lx;
+#else
+    (void)lx; (void)la;
+    return fb;
+#endif
+}
+#define SNM_NUM(name) sy_snm_os(sn_lnx_x86_64_##name##_hi * 65536 + sn_lnx_x86_64_##name##_lo, \
+                                sn_lnx_arm64_##name##_hi * 65536 + sn_lnx_arm64_##name##_lo, \
+                                sn_fallback_##name##_hi * 65536 + sn_fallback_##name##_lo)
+
+static long sy_snm_call_os(long n, long a, long b, long c) {
+#if defined(_WIN32)
+    (void)n; (void)a; (void)b; (void)c;
+    return -ENOSYS;
+#else
+    if (!n) return -ENOSYS;
+    return __syscall6(_UNISA_SC(n), a, b, c, 0, 0);
+#endif
+}
+
+enum { SY_SNM_MSG_TRUNC = 32 };
+
+/* Fill msghdr MSG (7 longs) and iovec IOV (2 longs). */
+static void sy_snm_fill(long *msg, long *iov, void *sa, int salen, void *buf, long n) {
+    int i;
+    for (i = 0; i < 7; i++) msg[i] = 0;
+    iov[0] = (long)buf; iov[1] = n;
+    msg[0] = (long)sa;
+    *(unsigned int *)(msg + 1) = (unsigned int)salen;
+    msg[2] = (long)iov; msg[3] = 1;
+}
+
+/* Send N bytes of BUF as one datagram to address SA (SALEN bytes) on FD. The count sent, or
+   -errno (-EBADF, -EMSGSIZE, ...). */
+long sy_snm_sendto(int fd, const void *buf, long n, const unsigned char *sa, int salen) {
+    long msg[7], iov[2];
+    if (!buf || n < 0 || !sa || salen <= 0) return -EINVAL;
+    sy_snm_fill(msg, iov, (void *)sa, salen, (void *)buf, n);
+    return sy_snm_call_os(SNM_NUM(snr_sendmsg), fd, (long)msg, 0);
+}
+
+/* Receive one datagram into BUF (room N). The sender address goes to SA with *SALEN as room on
+   entry and the address length on return (SA may be 0). *FLAGS (may be 0) gets msg_flags, so a
+   datagram longer than N shows SY_SNM_MSG_TRUNC. The count received, or -errno. */
+long sy_snm_recvfrom(int fd, void *buf, long n, unsigned char *sa, int *salen, int *flags) {
+    long msg[7], iov[2], r;
+    int room = (sa && salen) ? *salen : 0;
+    if (!buf || n < 0) return -EINVAL;
+    sy_snm_fill(msg, iov, room ? (void *)sa : (void *)0, room, buf, n);
+    r = sy_snm_call_os(SNM_NUM(snr_recvmsg), fd, (long)msg, 0);
+    if (r < 0) return r;
+    if (room) *salen = (int)*(unsigned int *)(msg + 1);
+    if (flags) *flags = *(int *)(msg + 6);
+    return r;
+}
