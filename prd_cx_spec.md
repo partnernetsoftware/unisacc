@@ -100,14 +100,34 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 | `export NAME::sym as alias` | 拒绝 `unknown unisa pragma export` | 首版仍拒绝 | `export alias unsupported` |
 | `use PFX.*` | 拒绝 `bad module name "PFX.*"` | 见上 | 空展开:`wildcard PFX.* matches no module`;产品层(`src/`、`cx/`、`ext/`)使用:棘轮拒绝;展开后超 48 条 use:沿用现上限拒绝 |
 | `use *`、`use PFX.*::sym`、`use PFX.*.x` | 拒绝 `bad module name` | 永久拒绝 | 同左 |
-| `use NAME::*` | **被静默接受**(当成名为 `*` 的符号,规划 rc=0) | 永久拒绝 | `bad symbol name` |
+| `use NAME::*` | 旧产品:被静默接受(规划 rc=0);源码已修(2026-11-14,提交 57c7427f6f):拒绝 `bad symbol name "*"` | 永久拒绝 | 同左 |
 
 现行缺口(实测,与计划语法相邻,修复属产品输入):
 
-- `use NAME::nosuch`(模块不导出的名字)规划 rc=0,不报错。计划:`module NAME does not export nosuch`。
-- `use aa::other` 之后直接调用 aa 的另一个公开函数 `clash()`,规划与默认运行都通过(实测 rc=8,即 7+1)。这与 CX-U-2「不得引入其余公开符号」不符:符号级导入现在只是不给原型,调用仍按隐式声明接上。在修复前,**不要把符号级导入当作封装手段**。
-- 锁定:批次 `cx-namespace`(`tests/cx-namespace.cx`)的 5 条 `planned-*-refused-by-name` 断言守住上表前四行的现行为;后三项以 `GAP` 行如实打印,不记 PASS;产品修复后自动转为 PASS。
-- 实现这些语法时,上述 5 条断言要换成对应的语义断言(同批次),不是删除。
+CX-U-2 三条具名拒绝(源码已修,提交 57c7427f6f 与 68039f11f1;事实来源 `tests/cx-namespace.cx` 的 `symbol-star-refused`、`symbol-not-exported-refused`、`unimported-symbol-call-refused` 与 `tools/check-cxmod-tri.cx` 同名三例):
+
+- (1) `use NAME::*` -> rc 1,文案 `bad symbol name "*"`。
+- (2) `use NAME::nosuch`(模块未导出的符号)-> rc 1,文案 `module NAME does not export nosuch`。
+- (3) `use aa::other` 之后调用未导入的 `clash()` -> rc 1,文案 `call to undeclared function clash`。符号级导入从此可以当作封装手段,但仅限新产品。
+- 状态:三条在 tests/cx-namespace.cx 是真断言(rc 1 加具名文案)。装在本机的旧产品内嵌旧 cxmod,遇到接受时该批次打印 `UNVERIFIED needs-new-product`,不记 PASS;新产品仍接受则记 FAIL。三条的新产品验证待下一轮整链,现为 UNVERIFIED。
+- 产品层禁止 `use X::*`:棘轮规则 `cx-wildcard-product`(`tests/cxinclude.cx`,提交 4966abbf9c),按行数 `#pragma unisa use` 目标以 `::*` 结尾者;产品层须逐名导入。
+- 实现其余计划语法时,同批次的 `planned-*-refused-by-name` 断言要换成对应语义断言,不是删除。
+
+cxmod 三源归一现状(事实来源:`tools/check-cxmod-tri.cx` 头注释与提交 68039f11f1、3761234e57):
+
+- 权威源:`cx/cx0/plan.cx`(`CX0_COMPAT_BODY`,函数 `cx0_plan`)。`src/cxmod.c` 由 `cx0-extract` 从 plan.cx 逆投影生成,`--check` 判 EXACT(最近记录 bytes=73271),不手改。`cx/compiler/cxmod.cx`(`cxm_plan`)手工对齐。
+- `sh ./unisacc.com tools/check-cxmod-tri.cx`:同一批夹具经 plan.cx 与产品 cxmod.cx 真跑,比 rc 与拒绝文案;C 源随 plan.cx 计,不另编译;已知分叉输出具名 GAP,不记 PASS 也不记 FAIL。
+- `sh ./unisacc.com tools/cx0-diff.cx [-- --check|--pair A B|--out|--verify]`:三对源的 hunk 差异按六类归 (a)(b)(c)(d)(e)(f)(t);(e)(f) 为语义分叉(cxm_checkcalls 一族、上限 CXM_MAXU),其余为宿主差异;`--check` 断言无「其他」块;差异表 `build/cx0-three-source-diff.tsv`。设计背景见 prd_cx.md 10.5。
+
+cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-cx-streamown.cx`,批次 `cx-streamown`):
+
+- reader、writer、pipeline 句柄 close 后恒被拒;同槽重开 4096 次,gen 逐次加 1(gen 回绕未测,UNMEASURED:需 4194304 次重开)。
+- `xs_reader_fd`/`xs_writer_fd` 借用 fd(own 0),关句柄不关 fd;`xs_pipe_pair`(own 1)关两个句柄即关两个 fd。
+- stage 在自己所在的运行中管线上调 `xs_run`/`xs_add`/`xs_close` 返回 4。
+- 已知风险 KNOWN-RISK-DOUBLE-FREE-ON-ERROR:`xs_item_set` 参数非法返回 4 时仍释放调用方的 data;若调用方把 4 当「所有权未转移」再释放,即双重释放。检查中按现行为固定,未修。
+- 10.6 的整体重构设计未实现,不得记 PASS。
+
+封网新增接口索引(只引用,签名与文案见生成页,不手改):`sy_snm_sendto`、`sy_snm_recvfrom`(netmsg)、`sy_snb_get`、`sy_snb_set_nonblock`(netnb)、`sy_sig_watch`、`sy_sig_taken`(sigwatch),见 [docs/cx/api/cx.sys.md](docs/cx/api/cx.sys.md);`sy_resolve`、`sy_tcp_connect_to`、`sy_tcp_accept_from`、`sy_tcp_dial`、`sy_udp_*`、`sy_unix_listen`/`sy_unix_connect`、`sy_recv_until`、`sy_send_all_until`(带 `sy_deadline_t` 截止时间),见 [docs/cx/api/ext.net.md](docs/cx/api/ext.net.md)。osx/win 行为未验证,看各行的 lnx/osx/win 列。
 
 ## 4 标准库速查
 
