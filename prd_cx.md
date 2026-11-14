@@ -837,6 +837,84 @@ T6 归属表(N10,2026-11-14,只读取证;来源 `tools/cx0-diff.cx -- --pair pla
 - 遍历消费者(限时与字面量改读表的铁律):T6 的消费者清单是 `cx/cx0/plan.cx`、`src/cxmod.c`、`cx/compiler/cxmod.cx`、`DV_MAXU` 的使用方(`grep -rn DV_MAXU src cx`)、`exec/facts/limits.tsv:2`、`tools/check-cxmod-tri.cx:122`;T8 的消费者是 15 个 `use compiler.cxmod` 的文件(`grep -rln 'compiler.cxmod' src cx tools tests`,其中 `src/` 6 个)。
 - 未验证与风险:(1) 生成的产品件能否与现手写件逐字节相等:UNMEASURED,T3 给数;不等时以「差异逐行归入六类且 `tests/module/units.cx` 全绿」为准,不强求字节相等。(2) srcshape 对 `src/cxmod.c`:已核实不计(T4,见上;cxapis、cxlibc 对生成物 `cx/compiler/cxmod.cx` 的影响仍 UNVERIFIED,未跑 `tools/ratchets.cx`)。(3) MAXU 升到 128 后宿主静态内存增量:UNMEASURED。(4) `cxm_checkcalls` 上移后宿主侧语料新拒绝:T4 实测对 `tests/cxcc/units.tsv` 全部 10 个源与 `tests/cx-host-run.cx` 共 11 个文件逐个跑产品 `cxm_plan`(`sh ./unisacc.com tools/check-cxmod-tri.cx -- --prod FILE`):因 "call to undeclared function" 被拒 0 个;被拒 3 个均为表内 refuse 正例(cxcc_missing、cxcycle/ping、cxstd_unknown,原因分别为缺模块、环、未知 std 模块),其余 8 个 rc=0。产品源本就含 `cxm_checkcalls`,上移不改变这批结论。未覆盖:`tests/cx-host-run.cx` 内联字符串夹具(运行时才生成)与其它批次语料:UNVERIFIED。T5 验收仍须加跑批次 `cx-host-run`。(5) 本节全部为设计,T1 至 T8 均未开工。
 
+### 10.6 cx.stream 与 tlib 重构(2026-11-14 设计;未实现,不得记 PASS)
+
+口径:数字为 2026-11-14 在 HEAD 4966abbf9c、已装产品、lnx/x86_64 实测;行号以该提交为准。未核项标 UNVERIFIED 或 UNMEASURED 并给取数命令。
+
+**(1) 现状**
+
+| 号 | 事实 | 证据 |
+|---|---|---|
+| S1 包边界 | cx.stream 0.1.1 只含 `cx/stream` 三单元(item 46 行、pipe 319 行、rw 504 行),deps 为 cx.sys、cx.os、cx.mem、cx.text、ext.memx | `build/tlib-packages.tsv` cx.stream 行;`wc -l cx/stream/*.cx` |
+| S2 导出面 | 已有显式公开集 30 名:item 4、pipe 9、rw 17;static 帮手不出包 | `cx/stream/cxpack.tsv`;定义行 `item.cx:18,24,30,43`、`pipe.cx:134,153,170,219,242,248,261,280,309`、`rw.cx:164,171,214,241,256,305,311,327,334,359,405,412,418,438,469,494,500`;`build/layer-api/cx.stream.tsv` 36 行(与 30 名的差为表头或类型行:UNVERIFIED,取数见 R0-1) |
+| S3 依赖方 | 产品侧只有两个文件 use,且都只用 item 与 pipe:`cx/compiler/routepipe.cx:2-3`、`src/drivestream.cx:39-40`;rw 没有产品使用方,只有 `tests/stream` 与 `tools/check-cx-streamapi.cx` | `git grep -n '^#pragma unisa use stream\.' -- cx src ext` 共 4 行 |
+| S4 波及面已分叉 | 改 pipe.cx 或 item.cx 选 126 批,改 rw.cx 选 1 批(scanned=1079):同包内已是两个互不依赖的面 | `sh ./unisacc.com tools/affected.cx -- --files cx/stream/rw.cx --list-only` 的 AFFECTED_SUMMARY |
+| S5 名字三义 | "stream" 同时指 (a) `cx/stream` 的 xs_ 库,(b) `cx/compiler/stream` 与 `cx/runtime/stream` 各 7 个流单元(encode lex lowering opt parse preprocess prune,分属 cx.compile 与 cx.runtime 包),(c) 驱动的 `src/drivestream.cx` | `ls cx/compiler/stream cx/runtime/stream`;`build/tlib-packages.tsv` cx.compile、cx.runtime 行的 roots |
+| S6 tlib 边界 | tlib 是工具侧机制:包表 `build/tlib-packages.tsv`(18 包),读表库 `tools/cxlib/tlibpkg.cx`(799 行),命令 `tools/tlib.cx`(1315 行),接口表 `tools/layer-api.cx`(451 行)生成 `build/layer-api/*.tsv`(18 个);发布链与 gen1/g2/g3 冷构造不读 tlib | 表头注释(`build/tlib-packages.tsv:1-6`);`exec/facts/derive.tsv:4`(layer-api 派生行) |
+| S7 tlib 波及面 | 改 `tools/cxlib/tlibpkg.cx` 选 152 批;`tools/affected.cx:833` 起 `tools/tlib.cx kit`,`:1048` 起 `layer-api --check --pkg`,即选批器本身依赖 tlib | 同 S4 命令换文件 |
+
+不干净的耦合:
+
+- K1 合同倒挂:下层 `cx/stream/pipe.cx:15` 用上层 `src/stages.cx` 的 `st_span` 结果码定义自己的返回码 1 至 4;权威应在下层或表里,上层引用。
+- K2 `st_span` 手抄原型:`src/driveroute.cx:68,225,378` 三处函数内 extern 原型,`src/drive.cx:441` 一处,定义在 `src/stages.cx:253`(13 个参数);`cx/runtime/unitcache.cx:392` 以函数指针接收同一签名。签名变一处须改五处,无模块接口守护。
+- K3 重复实现:`pipe.cx:68-115` 自带 sha256(xs_rot、xs_block、xs_sha 与常量表),而包 deps 已含 cx.sys(`cx/sys/sha.cx` 在 cx.sys roots 内)。是否有意避开 kernel 哈希以保证跨目标同值:UNVERIFIED(取数:`git log --oneline -3 -- cx/stream/pipe.cx` 与 `git grep -n 'sys.sha' -- cx/stream`)。
+- K4 类型擦除:stage 与 tap 以 `void *` 传 `xs_item *`,原因写在 pipe.cx 头注释(函数指针参数里的结构体类型不是已覆盖的导入接口声明形式,约 `pipe.cx:39-43`);这是规划器接口打印的缺口,不是流库的设计选择。
+- K5 未实现面进了公开集:`xs_reader_deadline`、`xs_writer_deadline` 恒返回 -ENOSYS(`rw.cx:497,503`),却在 cxpack 白名单里。
+- K6 最低版本漂移:cx.compile 的 deps 写 `cx.stream@0.1.0`,现版 0.1.1;18 包全部 deps 的"最低版本对现版本"差距未统计(UNMEASURED,取数见 R0-4)。
+- K7 fwdmerge 与驱动:`cx/compiler/fwdmerge.cx:9` 的 FwmBuf 注明"与驱动布局一致",`src/driveroute.cx:108` 以强制转换传入,布局靠注释对齐;分配器经 `fwm_bind` 注入(`fwdmerge.cx:18`、`driveroute.cx:188`),这一半是干净的。改 fwdmerge.cx 选 123 批。
+- K8 tlib 与 kernel:`tools/cxlib/tlibpkg.cx:86` 的块哈希取 sys.sha 的 kernel 哈希;包版本、api_sha 与 kernel 事实表之间是否还有别的读写关系:UNVERIFIED(取数见 R0-3)。任务书举例的"tlib 包版本与 kernel 事实表耦合"本轮未找到文件行证据,不作论断。
+
+**(2) 目标结构**
+
+参考系 [忆,未核]:Rust 的 `pub`/`pub(crate)` 与 crate 根重导出、Node `package.json` 的 `exports` 白名单、Python 的 `__all__` 与包 `__init__` 门面。取其三点:包根是唯一入口;公开集是显式白名单;包内可见与包外可见分开。
+
+- 层与边界:cx.stream 拆成两个面,`stream.pipe`(含 item;有产品使用方,属产品输入)与 `stream.rw`(无产品使用方)。S4 证明两面已互不依赖,本条是把事实写进包表,不是新拆。包根门面 `stream`(只含 export 行)在 D1 之后才写得出。
+- 公开集(保持 `cx/stream/cxpack.tsv` 为单一来源,`build/layer-api/cx.stream.tsv` 为派生):item 4 名、pipe 9 名、rw 15 名;两个 deadline 名移出白名单,等 cx.sys 非阻塞面就绪再加(加为 Y 位版本)。移出属破坏性变更(X 位),使用方数量未测(取数:`git grep -lw 'xs_reader_deadline\|xs_writer_deadline'`)。
+- 内部:句柄表、槽位编码、sha 帮手、`xs_no` 一律 static;结果码 1 至 5 成为下层权威,`src/stages.cx` 引用(消 K1)。
+- 改名消 S5:`cx/compiler/stream`、`cx/runtime/stream` 的目录名属另两个包,本重构不动;文档与批次名里以 "xs 库" 称 (a)、"七流" 称 (b)。是否改目录名另议,不在本节。
+- 句柄生命周期合同(以现实现为准的成文,除标注外均有行号):
+  - 句柄是 int,编码 `gen << 8 | kind << 5 | slot + 1`(`rw.cx:74`);表容量 XS_MAXRW 16(`rw.cx:52`)、XS_MAXPIPE 4 与 XS_MAXSTAGE 16(pipe.cx 头注释之后的 enum)。超限返回码 5 或负 errno,不截断(`pipe.cx:21-22`)。
+  - 状态机:open -> (run 或读写)* -> close;close 后句柄恒被拒(`pipe.cx:38`),陈旧句柄靠 gen 位识别。gen 回绕后的行为:UNVERIFIED(取数:读 `rw.cx:100-128` 的 xs_rnew、xs_wnew)。
+  - 重入:在运行中的 stage 内调用同一管线返回 4(`pipe.cx:20`)。
+  - 所有权:管线运行后不保留字节,收据只存摘要与长度(`pipe.cx:39`);`xs_writer_close` 即使 flush 失败也释放句柄并返回首个错误(`rw.cx:41-42`);`xs_reader_mem` 借用调用方内存、`xs_writer_buf` 借用调用方 mg_buf。fd 的归属由内部 own 位决定(`rw.cx:130,147`),各入口取值:UNVERIFIED(取数:`grep -n 'xs_rmake\|xs_wmake' cx/stream/rw.cx`)。`xs_item_set` 是否接管 data:UNVERIFIED(取数:读 `item.cx:30-42`)。
+  - 未声称:无并发安全(模块级静态表);运行期句柄检查不等于编译期所有权(见第 4 节)。
+- tlib 目标:tlibpkg.cx 按职责分三面(读表与校验、内容身份、冻结判定),使只用读表的工具不随身份算法重跑;纯工具改动,不进产品输入。分面前先量各面使用方(R0-5)。
+
+**(3) 与 D0 至 D3 的依赖次序**
+
+- 不依赖 D0 至 D3、可先行:公开集收窄(cxpack 表,规划器已强制,`tests/cxpack/bad-call` 路径)、K1/K3/K5 的下层修正、tlib 工具分面、全部 R0。
+- 依赖 D1(export):包根门面 `stream` 与 tlibpkg 门面(零使用方改动的拆面)。D1 未落地时只做"不需要门面"的部分。
+- 与 D2(通配)无关:产品层禁用通配(棘轮 cx-wildcard-product,4966abbf9c)。
+- 与 D0 无写域交集:本重构不写 `cx/cx0/plan.cx`;K4 的根治(接口打印覆盖带结构体的函数指针参数)写 plan.cx,必须排在 D0 的 T8 之后,与 D1 至 D3 串行。
+
+**(4) 分期**
+
+| 期 | 内容 | 类别 | 版本 |
+|---|---|---|---|
+| R0 | 只读取数与文档(下表 7 项) | 纯工具/文档 | 今天 |
+| R1 | tlibpkg 分面、包表登记 stream 两面、deps 最低版本检查 | 非产品输入的工具与表 | 不等版本 |
+| R2 | cx/stream 下层修正:K1 结果码归属、K3 去重复 sha、K5 白名单收窄 | 单类产品输入大改(库包源;routepipe 与 drivestream 是使用方) | 0.0.64 第二候选,与 D4 同类同候选;受 F9 门约束,不满足则 0.0.65 |
+| R3 | K2 `st_span` 改为模块接口、K7 FwmBuf 共享类型 | 单类产品输入大改(驱动) | 0.0.65,不与 R2 同候选 |
+| R4 | K4 接口打印覆盖面、包根门面 | 单类产品输入大改(cxmod 三源) | D1 至 D3 之后 |
+
+R0 任务(每项 15 分钟内,只读;各写各的 `$CLAUDE_JOB_DIR/tmp/R0-N.tsv`,结论由集成者原位填回本节):
+
+| 号 | 目标 | 验收命令 | 预期值 |
+|---|---|---|---|
+| R0-1 | 核 cxpack 30 名与 layer-api 36 行的差集 | `sh ./unisacc.com tools/layer-api.cx -- --check --pkg cx.stream` | rc=0;差集逐行归类,函数行恰 30 |
+| R0-2 | `st_span` 原型副本清点 | `git grep -c 'int st_span(' -- src` | driveroute.cx 3、drive.cx 1、stages.cx 1,合计 5 |
+| R0-3 | tlib 对 kernel 的全部读点 | `git grep -n 'kernel' -- tools/tlib.cx tools/cxlib/tlibpkg.cx tools/layer-api.cx build/tlib-packages.tsv` | 至少含 `tlibpkg.cx:86`;每个命中标"读哈希/读表/无关" |
+| R0-4 | 18 包 deps 最低版本对现版本差距表 | `sh ./unisacc.com tools/check-tlibpkg.cx` | rc=0;差距表至少含 cx.compile -> cx.stream 0.1.0 对 0.1.1 一行 |
+| R0-5 | tlibpkg 各导出函数的使用文件数 | `sh ./unisacc.com tools/symindex.cx -- calls NAME --tracked`(逐导出名) | 每名一行;三面归属无交叉调用或列出交叉点 |
+| R0-6 | 句柄合同四个 UNVERIFIED 项定值(gen 回绕、own 位、item_set 归属、deadline 使用方) | `sh ./unisacc.com tools/check-cx-streamapi.cx` | rc=0;四项各给文件行 |
+| R0-7 | 18 包逐根选批数基线 | `sh ./unisacc.com tools/affected.cx -- --files FILE --list-only`(每包取一个代表文件) | pipe.cx 126、rw.cx 1、item.cx 126、tlibpkg.cx 152、fwdmerge.cx 123 复现(scanned 随批次表变) |
+
+**(5) 度量**
+
+- 已测(S4、S7):同包两面 126 对 1,即 rw 面的改动与 pipe 面的 125 批可并发、互不重跑;这是"面独立即批次独立"的现成证据,与 10.4 的 text.text find 族 769 -> 预计 385 同口径。
+- 待测:R2 去掉私有 sha 后 pipe.cx 的选批数(预计不变,因闭包由使用方决定):UNMEASURED;tlibpkg 分面后只读表工具的选批数(现 152):UNMEASURED,由 R0-5 的使用方分布按 10.4 同法估算;R3 后改 `st_span` 签名需改文件数 5 -> 1:未实现。
+- 取数命令统一为 `sh ./unisacc.com tools/affected.cx -- --files FILE --list-only [--iface-narrow --symbol-narrow SYM]`,读 AFFECTED_SUMMARY 的 batches 与 scanned。
+
 ## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
 
 资料:`docs/cx/ref-node.md`、`ref-rust.md`、`ref-cpython.md`、`ref-quickjs.md` 已读;这四篇侧重标准库面与稳定性策略,模块系统与内存安全的机制部分(下文带 [忆] 的)出自通用知识,本轮未联网核对一手文档,落合同前须再查。仓内没有 Bun 的参考篇(`git grep -i bun -- docs/cx` 只命中 QuickJS 篇的无关行)。不取的理由统一按四条约束写:C99 兼容(宿主 gcc/clang 须能忽略全部扩展)、单文件 APE(无运行期模块装载器、无文件系统上的包目录)、三源构造(规划器一处改三处核)、no-libc(上层不直调 libc,前导自带)。
