@@ -1298,7 +1298,7 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 | 根 do/fact/fib/hello/host/indirect6/ptr/struct/switch .c(9) | C99 最小例:do-while、递归、指针、结构体、switch、间接调用、host 判别 | 各 1;hello 2 | `tools/check-cx-entry.cx`(全部 9 个);hello 另被 `docs/toolchain.md` | 全部 rc=0:do 输出 3、fact 120、fib 55、hello "from hello.c"、host "host: linux"、indirect6 15/16、ptr 7、struct 9、switch 6 |
 | cx-lab/cxlab.cx(1) | cx 模块 `#pragma unisa module cxlab`,TSV 装载与命令中位数的共享帮手 | 3 | `tests/cxraw.tsv`、`tests/cxlibc.tsv` 及一处 | 单独跑 rc=1 "not covered: no main"(模块无 main,预期;只能经 `use cxlab` 被引) |
 | cx-lab/lex_table.cx(1) | 表驱动词法器(charclass.tsv + transition.tsv -> tokens.tsv) | 3 | 同上两棘轮表等 | rc=0 "lex_table: ok tokens=88 classes=9 rules=29" |
-| cx-lab/time_run.cx(1) | 对 `./unisacc.com -run` 若干命令计中位耗时,写 out/times.tsv | 2 | cxraw/cxlibc 表 | rc=0 "time_run: wrote examples/cx-lab/out/times.tsv"(跑一次会改写已跟踪的 out/times.tsv,注意工作区被弄脏) |
+| cx-lab/time_run.cx(1) | 对 `./unisacc.com -run` 若干命令计中位耗时,写 times.tsv 到 $CXLAB_OUT(默认 $TMPDIR/cx-lab-out) | 2 | cxraw/cxlibc 表 | rc=0 "time_run: wrote <dir>/times.tsv"(已整改:不再改写仓内文件) |
 | cx-lab/runtimeiocheck.cx(1) | 运行库 IO 字节对照检查 | 4 | cxraw/cxlibc/批次相关 | rc=1 "runtimeiocheck: FAIL":`tests/runtimeiobytes.c` 不存在(cc1 fatal),native 构建失败。确定性缺陷:依赖的测试文件已缺 |
 | cx-lab 其余数据(8):charclass.tsv、transition.tsv、sample.c、out/{.gitignore,runtimeio.tsv,times.tsv,tokens.tsv} | 词法表、样本、产物 | 多数 0 | sample.c 与 times.tsv 仅文件名误中 | 不适用(数据与产物;out/*.tsv 是已跟踪的生成物,与 out/ 只放产物的规则相容但不应入库) |
 | apps(18):README + 17 个 .c(args bf calc colorpack ctour dijkstra exeinfo life mandel memmap procview queens sieve winlayout winlist wordfreq xgui) | 较大的 C99/POSIX 程序;procview/memmap/exeinfo 用 /proc 或 libproc;winlayout/winlist/xgui 用 macOS CoreGraphics FFI 或 X11 | 全 .c 为 0(xgui 另有 1 处文件名误中);README 2 | README 被 `docs/readme-detail.md`、`docs/sweep/md-*/lanes-and-rest.tsv` 引 | 未跑(任务限根下;apps 需平台或较大) |
@@ -1330,7 +1330,7 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 | 根 9 个 C99 示例 | 保留;新增 1 个冒烟批次:对每个文件 `sh ./unisacc.com FILE` 比对期望输出(do 3、fact 120、fib 55、hello、host 为 host: linux 仅本机、indirect6 15/16、ptr 7、struct 9、switch 6),用 `tools/register.cx` 登记 | 全部实跑通过,现仅被 check-cx-entry 间接引用,没有断言输出 | host.c 输出随平台变,断言只在 linux 期望 linux |
 | cx-lab/runtimeiocheck.cx | 修复(恢复 tests/runtimeiobytes.c 的来源,或改为内联字节)优先于归档;若确认该合同已迁到别处,再归档并同步棘轮表 | rc=1 是确定性缺陷,不得以"负载"定性;先读 runtimeiocheck.cx 报 FAIL 的源码行与上游文件的 git log | 删/移会破 cxraw/cxlibc 行数登记,须同步 |
 | cx-lab 其余 3 个 .cx | 保留;新增 `examples/cx-lab/README.md`(入口文档:3 个脚本、如何 `use cxlab`、运行命令与期望输出);lex_table/time_run 的 libc 调用逐步改 `sy_*/tx_*` | 无入口文档,是教学缺口;time_run 会弄脏已跟踪的 out/times.tsv | 改 libc 调用要同步 cxlibc.tsv 计数(只降不升) |
-| cx-lab/out/*.tsv 三个已跟踪产物 | 建议后续从版本库移出(git rm --cached 由集成者决定),`.gitignore` 已在 out/ | 产物不应入库;跑一次就变更 | 若有测试读它们需先查 |
+| cx-lab 三个已跟踪产物 tsv | 已 git mv 到 archive/examples-cx-lab-out/ 并登记 ARCHIVE.tsv;示例写出位置改为 $CXLAB_OUT | 产物不应入库;跑一次就变更 | 已无活引用 |
 | run-speed headers/headers_once/include_only | 先确认有无外部使用,无则列归档候选(`git mv` 到 `archive/examples-run-speed/` 并在 `archive/ARCHIVE.tsv` 加原路径行,原路径不得再被 tools tests src cx prd.md 引用) | 零引用 | 时间基准是历史量,归档后 time_run 仍用 empty 与 printf_hi,保留这两个 |
 | apps 17 个 .c | 保留不归档;挑 3 至 4 个无平台依赖者(calc、queens、sieve、bf、wordfreq、dijkstra、life)登记冒烟批次 | 纯 C99/POSIX,零引用但有教学价值;procview/memmap/exeinfo 依赖 /proc 或 libproc,winlayout/winlist/xgui 依赖 macOS 或 X11 FFI,留作平台批次不入冒烟 | 未逐个实跑,先跑再登记,输出须稳定(mandel、life 视输出而定) |
 | win 19 个文件 | 先不动;若归档,README 的两处文档引用(readme-detail、sweep 表)要先改,gui 与 refused 的拒绝合同要先确认已有等价批次 | 零引用的 18 个 .c 是实测记录,价值在历史证据 | 误归档会丢 Windows 回归线索;refused/ 可能是未被其它批次覆盖的拒绝合同 |
@@ -1344,9 +1344,9 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 - 缺"从 C99 到 cx 的对照"小例(同一个 fib 或 wordfreq 的 .c 与 .cx 并列);
 - 缺把示例和 spec 例子交叉引用的索引(examples/README 不存在)。
 
-### 梳理发现:examples/cx-lab/out/ 是已跟踪的 out/ 且示例运行会改写它
+### 梳理发现与整改状态:cx-lab 示例写仓内 out/(已整改)
 
-`examples/cx-lab/out/` 是仓库内被跟踪的 out/ 目录(runtimeio.tsv、times.tsv、tokens.tsv),time_run.cx 与 runtimeiocheck.cx 运行时会改写其中文件,与"仓库内 out/ 清理目标"冲突。本次梳理实跑这两个示例时改写了已跟踪文件 `examples/cx-lab/out/runtimeio.tsv` 与 `examples/cx-lab/out/times.tsv`(git status 为 M),由调度者恢复。后续取证应把示例拷到 `$CLAUDE_JOB_DIR/tmp` 再跑;根治办法是把输出目录改到 tmp 或取消这些产物的跟踪。
+原状:cx-lab 的 out/ 目录里有三个已跟踪产物 tsv,示例运行会改写它们。整改:(1) 三个 tsv 已 git mv 到 `archive/examples-cx-lab-out/` 并追加 `archive/ARCHIVE.tsv`,无活引用;(2) time_run、lex_table、runtimeiocheck 的写出位置改为 `$CXLAB_OUT`(默认 `${TMPDIR:-/tmp}/cx-lab-out`,由 cxlab 模块的 cxlab_outdir 创建);(3) 根下 9 个 C99 示例登记冒烟批次 examples-smoke(19 条断言);(4) 新增 examples/cx-lab/README.md。runtimeiocheck 的依赖 tests/runtimeiobytes.c 已随 tests/ 归档到 `archive/testing-c43-legacy/tests/`,且它包含的 run.c 现依赖 .cx 实现的 cxcodec 符号,plain cc 链不过;现改为具名拒绝(rc 2,不是 PASS 也不是 FAIL),二进制 IO 性质在此示例中未被检查(UNVERIFIED)。
 
 ### 未验证与限制
 
