@@ -22,7 +22,7 @@
 - 起整链的环境只设 UNISACC_IDENT_HELPER,不设 UNISACC_RUN_CACHE 与 UNISACC_CACHE_DIR(RUN_CACHE=0 经 cx/runtime/modelcache.cx mc_off() 关掉模型缓存,real7 因此在 g2 两次超 90 s)。
 - 起链配方与 0.0.62 发布 12 步:见 archive/prd_mempalace-2026-11-14.md 的"起整链的做法"与"0.0.62 发布实际做法"两节;发布说明占位由 tools/notes-fill.cx 填。
 - own-leak 补丁不与 cxmod 同候选,顺延 0.0.68;s2 补丁先过 F11 预演再入 main。
-- 每个候选只含一类大改;整链起来后 main 可继续前进,发布只取冻结提交的树。
+- 版本分支(项目所有者 2026-11-14 试行):main 只做集成与发布;开发中版本各一条分支 v0.0.NN,工作目录 .claude/worktrees/v0.0.NN;一条分支只放一类大改,冻结时合入 main。0.0.65(cxmod 三源类)分支在建。规则全文见 AGENTS.md"版本分支"条。
 - 子代理用 sed -i、printf >> 等写仓内文件属违例;guard-edit.ts 已补 `cd 目录 && sed -i` 与 `sh -c` 漏洞。
 
 ## 阻塞发布
