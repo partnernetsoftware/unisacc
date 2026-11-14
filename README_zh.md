@@ -58,7 +58,7 @@ sh ./unisacc.com tests/run.cx -- --smoke      # 测试入口;另有 --all、--li
 | 往期发布与历史记录 | [prd.md 9.3 往期发布](prd.md)、[prd_hist.md](prd_hist.md) |
 | 工具链内部(目标文件、汇编、链接) | [docs/toolchain.md](docs/toolchain.md)、[tools/kernels.md](tools/kernels.md)、[tools/packages.md](tools/packages.md) |
 | 格式与互操作 | [docs/tapebin-v1.md](docs/tapebin-v1.md)、[docs/host-interop.md](docs/host-interop.md)、[docs/glossary.md](docs/glossary.md) |
-| 任务看板、账本、工作流 | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md)、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
+| 任务看板、账本、工作流 | [prd_mempalace.md](prd_mempalace.md)(唯一协同入口;`agentwork/` 已退役,仅作历史) |
 | agent 工作规则 | [AGENTS.md](AGENTS.md#unisacc-工作规则)(`CLAUDE.md` 是其软链) |
 | 当前版本计划与发布说明 | [plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)、[plans/](plans/) |
 | 先验工作综述 | [research/prior-art.md](research/prior-art.md) |

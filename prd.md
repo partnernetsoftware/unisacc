@@ -569,7 +569,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 想做 | 去 |
 |---|---|
-| 看现在做到哪、有什么阻塞 | 本文 §9、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
+| 看现在做到哪、有什么阻塞 | 本文 §9、[prd_mempalace.md](prd_mempalace.md)(`agentwork/` 已退役) |
 | 找一个工具 | 本文 §2 能力速查，或 `ls tools \| grep 关键字` |
 | 看候选构造图与隐性前提 | `build/graph.tsv`、`build/preflight-rules.tsv`、`tools/graph-check.cx` |
 | 改一张解析/约束表 | 改 `exec/parse2/*.tsv` -> `tools/a12-cycle.cx` -> `tools/affected.cx --files 表` |
@@ -589,7 +589,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ### 9.6 产品全景表（生成文件，已切出）
 
 产品全景表(层、六片、七流、42 构造网及术语表)是随源码字节数频繁变化的生成块，已于 2026-11-14 切出到 [prd_productmap.md](prd_productmap.md)；`tools/product-map.cx -- --write` 重算、`-- --check` 核对，勿手改。本文其它章节引用的「生成块 9.6」即指该文件。
-历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `agentwork/ledger.tsv`。
+历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `prd_mempalace.md`(`agentwork/` 已退役)。
 <a id="memory-palace"></a>
 ### 9.2 记忆宫殿(索引)
 
@@ -645,7 +645,7 @@ prd.md                 当前状态（本文件，只写当前事实；结构点
 ├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
 ├─ prd_cx_spec.md      cx 使用规范：怎么运行、module/use、层向、标准库速查、替代 python/shell 对照、实测例子
 ├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
-├─ prd_hist.md         历史完成记录与证据（只读；新记录写 agentwork/ledger.tsv）
+├─ prd_hist.md         历史完成记录与证据（只读；新记录写 prd_mempalace.md）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
 ├─ plans/              各版计划与发布说明（最新 v0.0.58-unisacc.md、release-notes-0.0.57.md）
 ├─ build/graph.tsv     构造图事实表（graph-check 读）；build/product-map.tsv 全景表

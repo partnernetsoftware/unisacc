@@ -39,7 +39,7 @@ cx 架构是 unisacc 成功的核心理念之一(其余如 nn 以网换逻辑、
 - 每轮先读 `prd_mempalace.md`（当前版本、阻塞、下一动作、记忆宫殿索引）和 `prd.md` 的能力速查。事实、阻塞和下一动作原位更新，旧进度不能继续冒充当前状态。
 - 旧测试及工作规则在 `archive/testing-c43-legacy/`；旧1333项队列已停调度，不再作为主入口或完成率。原始失败和未知状态保留。
 - 新测试入口：`sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`。smoke是局部验证；`--all`在覆盖不完整时必须非零。
-- 工作流与管道见 `agentwork/WORKFLOW.md`(事实由命令产生、判断由模型产生;gate 是可执行命令;只有一个集成者写 main)。当前任务与进度只看 `prd_mempalace.md`（`agentwork/` 的表与账本退役，仅供旧工具读取；归档待改引用）。**不再为交接单写带日期的 plans/*.md。**
+- 工作流与管道见 `agentwork/WORKFLOW.md`(已退役,仅作历史;事实由命令产生、判断由模型产生;gate 是可执行命令;只有一个集成者写 main)。当前任务与进度只看 `prd_mempalace.md`（`agentwork/` 的表与账本退役，仅供旧工具读取；归档待改引用）。**不再为交接单写带日期的 plans/*.md。**
 
 ## 直接使用自身体系
 

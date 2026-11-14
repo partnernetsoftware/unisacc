@@ -58,7 +58,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | Past releases and history | [prd.md 9.3 past releases](prd.md)、[prd_hist.md](prd_hist.md) |
 | Toolchain internals (object files, assembler, linker) | [docs/toolchain.md](docs/toolchain.md)、[tools/kernels.md](tools/kernels.md)、[tools/packages.md](tools/packages.md) |
 | Formats and interoperability | [docs/tapebin-v1.md](docs/tapebin-v1.md)、[docs/host-interop.md](docs/host-interop.md)、[docs/glossary.md](docs/glossary.md) |
-| Task board, ledger, workflow | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md)、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
+| Task board, ledger, workflow | [prd_mempalace.md](prd_mempalace.md) (the only coordination entry; `agentwork/` is retired, history only) |
 | Agent working rules | [AGENTS.md](AGENTS.md#unisacc-工作规则) (`CLAUDE.md` is a symlink to it) |
 | Current version plan and release notes | [plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)、[plans/](plans/) |
 | Prior-work survey | [research/prior-art.md](research/prior-art.md) |
