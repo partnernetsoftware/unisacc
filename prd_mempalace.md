@@ -69,7 +69,7 @@
 | A9 | win 批次登记与 osx 行核对(T16) | tests/batches.tsv 的 win 行 | win 行数 0 -> 至少 1,本机状态 DEFERRED 不是 PASS;`tests/run.cx -- --list` 可见 | 10 | 今 |
 | A10 | wt-gate 修红(I1) | tools/check-wt-gate.cx | 该 check 8/8 断言通过,不删断言,不改 all-waves 合同 | 15 | 今 |
 | A11 | text.text 拆面只读实验(P4 先行) | prd_cx.md 10.4 的三行 | $TMPDIR 副本内拆面后 `tools/affected.cx` 给出改查找族的选批数,UNMEASURED 改成实测值 | 15 | 今 |
-| A12 | 命中路定因 D0(0.0.63 前置) | prd_cx.md 第 5 节一行 | `tools/speed-probe.cx` 分相读数,指出首次与重复之差落在哪一相 | 15 | 今 |
+| A12 | 命中路定因 D0(0.0.63 前置) | prd_cx.md 第 5 节一行 | `tools/speed-probe.cx` 分相读数,指出首次与重复之差落在哪一相 | 15 | 已测 2026-11-14:差约 642 ms,推理 82.7%、解码 7.7%、残差 9%;零解码单做不够 500 ms 门,见 prd_cx.md 第 5 节 |
 | B1 | 封网 L2 netraw 六参与 V6ONLY(T6) | ext/net 的 netraw 文件 | `tools/check-ext-net-sock.cx` failed=0 | 15 | 今 |
 | B2 | 封网 L3 UDP/unix/resolve、L4 带截止时间 TCP(T7) | ext/net 其余文件、build/std-surface.tsv 的 net 行 | `tools/check-ext-net-tcp.cx` failed=0;表内 new 行数 0 | 15 x 2 | 今,B1 后 |
 | B3 | SPEED-11 运行库扫描族(T8) | 运行库对应源(产品输入)加其 check | 补丁先交集成者;字节等价回归输出不变 | 15 | 候选 |
