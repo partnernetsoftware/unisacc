@@ -1,12 +1,13 @@
 # unisacc 0.0.63 -- 发布说明
 
-状态:草稿,定稿于公开之前。沿用 plans/release-notes-0.0.62.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。候选提交、CI run、sha256、公开时间、裁决等字段尚无事实,标"待填",由发布流程填写,不得臆测。
+状态:已公开,公开读回后补记。沿用 plans/release-notes-0.0.62.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。候选提交、CI run、sha256、公开时间、裁决等字段尚无事实,标"待填",由发布流程填写,不得臆测。
 
 - 冻结提交(F):9f3d367e44d7e6e89aca9279272f0b0472e31166;候选表提交(X,仅改 release/candidate.tsv):86e85e60c8686e50c3330b6496505811465216f1。
 - 候选 APE(unisacc.com)sha256:04b85e6e4ec3ddcb076aa5af02185ee8f3f8f1e3e9c5808776ab0a5e21b2c9a5。
 - 同候选 CI:candidate-native.yml run 43600577542,completed success,10 个作业全 success,含 6 个平台候选作业。
-- 草稿 release v0.0.63(未公开)资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。
-- 公开时间:待填(公开后由读回填);release/decision.txt 裁决(公开前,tools/release-decide.cx 实跑):NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN;读回在公开后补)。
+- release v0.0.63 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。
+- 公开时间:2026-11-14T14:12:06Z(gh release view 的 publishedAt);release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN),公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
+- 公开后读回:下载 6 件,sha256 与 SHA256SUMS 及本地打包件逐件一致;unisacc.com sha256 同上,`--version` 输出 unisacc 0.0.63;标签 v0.0.63 与 v0.0.63-src 均指 F;release 为 Latest。
 - 速度数字只引 build/speed-baseline.tsv 已有行,下文逐条标出处;未测不写数。
 - 规划与口径依据:prd_mempalace.md "下一动作(0.0.63,fable 第五轮规划 2026-11-14)"节的卖点四条与未达项。
 
@@ -63,7 +64,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 0.0.63 发布上传清单:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS 六件。原因:0.0.62 及以前的七件合同里,win-arm64.zip 的四个成员与单独资产重复,其中 run.cmd 从未在 Windows 原生运行验收(原生 CI 只运行 slice-win-arm64 本身),故摘除;已公开的 0.0.62 资产不改动。Windows arm64 用户直接用 slice-win-arm64 加 pkg.bin。依据与摘除实现:prd_mempalace.md "win-arm64.zip 去留"小节;工具侧 check-release-layout 17 项断言 failed=0(该节记载)。
 
-限定:全仓归属已做(prd_mempalace.md F26 行;2026-11-14 复核 `git grep -n 'win-arm64.zip'`):命中只剩按版本分支的发布工具、0.0.62 及更早的候选表与历史夹具,.github/workflows 无该 zip 的取件,README 与安装说明无该 zip 的下载链接,现行 release/rollback.txt(0.0.62 版)不含件数;check-release-layout 17 项断言 failed=0(同日实跑,含 0.0.62 判七件、0.0.63 判六件、多出 zip 即拒绝)。仍 UNVERIFIED:0.0.63 真实草稿与公开后的读回件数(应为 6)未跑;release-oneshot、releaseexec、releaseprepare、release-run 的 0.0.63 分支没有用例;对 0.0.62 release 只核了资产数为 7(`gh release view v0.0.62`),未用读回工具预演。
+限定:全仓归属已做(prd_mempalace.md F26 行;2026-11-14 复核 `git grep -n 'win-arm64.zip'`):命中只剩按版本分支的发布工具、0.0.62 及更早的候选表与历史夹具,.github/workflows 无该 zip 的取件,README 与安装说明无该 zip 的下载链接,现行 release/rollback.txt(0.0.62 版)不含件数;check-release-layout 17 项断言 failed=0(同日实跑,含 0.0.62 判七件、0.0.63 判六件、多出 zip 即拒绝)。0.0.63 草稿与公开后的读回件数已实核为 6(手工 gh 命令,未经读回工具)。仍 UNVERIFIED:release-oneshot、releaseexec、releaseprepare、release-run 的 0.0.63 分支没有用例;对 0.0.62 release 只核了资产数为 7(`gh release view v0.0.62`),未用读回工具预演。
 
 ## 未达项(必须如实写)
 
