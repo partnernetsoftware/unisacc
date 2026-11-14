@@ -1,0 +1,130 @@
+#pragma unisa module sock
+#pragma unisa dock
+#pragma unisa use addr
+#pragma unisa use tcp
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.fs
+/* ext.net socket queries, options and deadline-bound TCP rows on cx.sys netraw + netpoll
+   (build/std-surface.tsv ext.net): sy_sock_local, sy_sock_peer, sy_shutdown, sy_sockopt_set,
+   sy_sockopt_get, sy_tcp_accept, sy_wait_port. No libc, no #if. Linux x86_64/arm64 only; elsewhere
+// ENOSYS: refusal contract documented in this comment
+   the netraw/netpoll calls are -ENOSYS and so are these.
+   Options not in netraw's integer-option shape (RCVTIMEO_MS, SNDTIMEO_MS, LINGER_S) are
+   -ENOPROTOOPT here. */
+enum { SY_SHUT_RD = 0, SY_SHUT_WR = 1, SY_SHUT_RDWR = 2 };
+enum {
+    SY_SO_REUSEADDR = 1, SY_SO_REUSEPORT = 2, SY_SO_NODELAY = 3, SY_SO_KEEPALIVE = 4,
+    SY_SO_RCVBUF = 5, SY_SO_SNDBUF = 6, SY_SO_RCVTIMEO_MS = 7, SY_SO_SNDTIMEO_MS = 8,
+    SY_SO_V6ONLY = 9, SY_SO_BROADCAST = 10, SY_SO_LINGER_S = 11, SY_SO_ERROR = 12
+};
+
+static int sys_from_sa(const unsigned char *sa, int len, sy_addr_t *a) {
+    int f = sy_sa_family(sa, len), i;
+    if (f < 0) return f;
+    a->family = 0; a->port = 0; a->scope = 0; a->path[0] = 0;
+    for (i = 0; i < 16; i++) a->ip[i] = 0;
+    if (f == sy_sock_num(SY_SN_AF_INET4) || f == sy_sock_num(SY_SN_AF_INET6)) {
+        int r = sy_sa_ip(sa, len, a->ip, 16);
+        if (r < 0) return r;
+        a->family = r == 4 ? SY_AF_INET4 : SY_AF_INET6;
+        a->port = sy_sa_port(sa, len);
+        if (r == 16 && len >= 28) a->scope = (unsigned)sa[24] | ((unsigned)sa[25] << 8) | ((unsigned)sa[26] << 16) | ((unsigned)sa[27] << 24);
+        return 0;
+    }
+    if (f == sy_sock_num(SY_SN_AF_UNIX)) {
+        a->family = SY_AF_UNIX;
+        for (i = 0; i < 107 && 2 + i < len && sa[2 + i]; i++) a->path[i] = (char)sa[2 + i];
+        a->path[i] = 0;
+        return 0;
+    }
+    return -EAFNOSUPPORT;
+}
+
+int sy_sock_local(int fd, sy_addr_t *a) {
+    unsigned char sa[SY_SA_MAX];
+    int len = (int)sizeof sa, r;
+    if (!a) return -EINVAL;
+    r = sy_sock_name(fd, sa, &len);
+    if (r < 0) return r;
+    return sys_from_sa(sa, len, a);
+}
+
+int sy_sock_peer(int fd, sy_addr_t *a) {
+    unsigned char sa[SY_SA_MAX];
+    int len = (int)sizeof sa, r;
+    if (!a) return -EINVAL;
+    r = sy_sock_peername(fd, sa, &len);
+    if (r < 0) return r;
+    return sys_from_sa(sa, len, a);
+}
+
+int sy_shutdown(int fd, int how) {
+    long h;
+    if (how < SY_SHUT_RD || how > SY_SHUT_RDWR) return -EINVAL;
+    h = sy_sock_num(how == SY_SHUT_RD ? SY_SN_SHUT_RD : how == SY_SHUT_WR ? SY_SN_SHUT_WR : SY_SN_SHUT_RDWR);
+    return sy_sock_shutdown(fd, (int)h);
+}
+
+/* level and option number of opt; 0 on success, -errno otherwise. */
+static int sys_opt(int opt, long *level, long *name) {
+    long sol = sy_sock_num(SY_SN_SOL_SOCKET);
+    if (!sy_sock_have()) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform (netraw Linux only) */
+    switch (opt) {
+    case SY_SO_REUSEADDR: *level = sol; *name = sy_sock_num(SY_SN_SO_REUSEADDR); return 0;
+    case SY_SO_ERROR: *level = sol; *name = sy_sock_num(SY_SN_SO_ERROR); return 0;
+    case SY_SO_REUSEPORT: *level = sol; *name = sy_sock_optnum(SY_SP_SO_REUSEPORT); return 0;
+    case SY_SO_KEEPALIVE: *level = sol; *name = sy_sock_optnum(SY_SP_SO_KEEPALIVE); return 0;
+    case SY_SO_RCVBUF: *level = sol; *name = sy_sock_optnum(SY_SP_SO_RCVBUF); return 0;
+    case SY_SO_SNDBUF: *level = sol; *name = sy_sock_optnum(SY_SP_SO_SNDBUF); return 0;
+    case SY_SO_BROADCAST: *level = sol; *name = sy_sock_optnum(SY_SP_SO_BROADCAST); return 0;
+    case SY_SO_NODELAY: *level = sy_sock_optnum(SY_SP_IPPROTO_TCP); *name = sy_sock_optnum(SY_SP_TCP_NODELAY); return 0;
+    case SY_SO_V6ONLY: *level = sy_sock_optnum(SY_SP_IPPROTO_IPV6); *name = sy_sock_optnum(SY_SP_IPV6_V6ONLY); return 0;
+    case SY_SO_RCVTIMEO_MS: case SY_SO_SNDTIMEO_MS: case SY_SO_LINGER_S: return -ENOPROTOOPT;
+    }
+    return -ENOPROTOOPT;
+}
+
+int sy_sockopt_set(int fd, int opt, long val) {
+    long level = 0, name = 0;
+    int r = sys_opt(opt, &level, &name);
+    if (r < 0) return r;
+    if (opt == SY_SO_ERROR) return -ENOPROTOOPT;
+    return sy_sock_setopt(fd, (int)level, (int)name, (int)val);
+}
+
+int sy_sockopt_get(int fd, int opt, long *val) {
+    long level = 0, name = 0;
+    int r = sys_opt(opt, &level, &name), v = 0;
+    if (r < 0) return r;
+    if (!val) return -EINVAL;
+    r = sy_sock_getopt(fd, (int)level, (int)name, &v);
+    if (r < 0) return r;
+    *val = v;
+    return 0;
+}
+
+/* Accept one connection waiting at most MS milliseconds (negative waits forever). The new fd,
+   -ETIMEDOUT, or -errno. */
+int sy_tcp_accept(int fd, long ms) {
+    int r;
+    if (fd < 0) return -EBADF;
+    r = sy_sock_poll(fd, SY_POLLIN, ms);
+    if (r < 0) return r;
+    if (r == 0) return -ETIMEDOUT;
+    return sy_sock_accept(fd, 0, 0);
+}
+
+/* Wait until 127.0.0.1:PORT accepts a connection, retrying every 10 ms for at most MS. 0, or
+   -ETIMEDOUT; -EINVAL for a bad port. The probe connection is closed at once. */
+int sy_wait_port(int port, long ms) {
+    long left = ms;
+    for (;;) {
+        int c = sy_tcp_connect(port);
+        if (c >= 0) { sy_close(c); return 0; }
+        if (c == -EINVAL || c == -ENOSYS) return c; /* ENOSYS: propagated from the netraw layer unchanged */
+        if (left <= 0) return -ETIMEDOUT;
+        sy_sock_poll(-1, 0, left < 10 ? left : 10);
+        left -= 10;
+    }
+}

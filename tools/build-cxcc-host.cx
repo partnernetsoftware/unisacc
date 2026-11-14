@@ -41,6 +41,21 @@ static int write_text(const char *path, const char *text) {
     return n == want ? 0 : -1;
 }
 
+/* Host build dir: $TMPDIR (default /tmp)/unisacc-cxcc-host-UID.  tools/cxcc.cx computes the same path. */
+static char H[256];
+static int host_dir_init(void) {
+    const char *td = getenv("TMPDIR");
+    int k;
+    if (!td || !td[0]) td = getenv("TEMP");
+    if (!td || !td[0]) td = "/tmp";
+#ifdef _WIN32
+    k = snprintf(H, sizeof H, "%s/unisacc-cxcc-host-w", td);
+#else
+    k = snprintf(H, sizeof H, "%s/unisacc-cxcc-host-%lu", td, (unsigned long)getuid());
+#endif
+    return (k < 0 || k >= (int)sizeof H) ? -1 : 0;
+}
+
 static int ensure_dir(const char *path) {
     struct stat st;
     if (mkdir(path, 0755) == 0) return 0;
@@ -111,7 +126,7 @@ static int write_launcher(const char *cmdname, const char *bin) {
     k = snprintf(text, sizeof text,
                  "#!/bin/sh\n"
                  "here=$(CDPATH= cd -- \"$(dirname \"$0\")\" && pwd) || exit 2\n"
-                 "exec \"$here/out/cxcc-host/%s\" \"$@\"\n",
+                 "exec \"${TMPDIR:-/tmp}/unisacc-cxcc-host-$(id -u)/%s\" \"$@\"\n",
                  bin);
     if (k < 0 || k >= (int)sizeof text) return -1;
     if (write_text(path, text)) return -1;
@@ -120,16 +135,16 @@ static int write_launcher(const char *cmdname, const char *bin) {
 }
 
 static int build_pch(const char *cc, const char *tag) {
+    char d[320], line[1024];
+    int k;
     (void)cc;
-    if (tag[0] == 'c') {
-        if (ensure_dir("out/cxcc-host/clang-trim")) return 1;
-        if (run("cp include/cx.h include/cx-nested.h include/unisa_sha256.h include/unisa_safedel.h out/cxcc-host/clang-trim/")) return 1;
-        if (run("clang -std=c99 -D__UNISA_FTRIM_LIBC=1 -x c-header out/cxcc-host/clang-trim/cx.h -o out/cxcc-host/clang-trim/cx.h.pch")) return 1;
-    } else {
-        if (ensure_dir("out/cxcc-host/gcc-trim")) return 1;
-        if (run("cp include/cx.h include/cx-nested.h include/unisa_sha256.h include/unisa_safedel.h out/cxcc-host/gcc-trim/")) return 1;
-        if (run("gcc -std=c99 -D__UNISA_FTRIM_LIBC=1 -x c-header out/cxcc-host/gcc-trim/cx.h -o out/cxcc-host/gcc-trim/cx.h.gch")) return 1;
-    }
+    k = snprintf(d, sizeof d, "%s/%s-trim", H, tag[0] == 'c' ? "clang" : "gcc");
+    if (k < 0 || k >= (int)sizeof d || ensure_dir(d)) return 1;
+    k = snprintf(line, sizeof line, "cp include/cx.h include/cx-nested.h include/unisa_sha256.h include/unisa_safedel.h %s/", d);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
+    if (tag[0] == 'c') k = snprintf(line, sizeof line, "clang -std=c99 -D__UNISA_FTRIM_LIBC=1 -x c-header %s/cx.h -o %s/cx.h.pch", d, d);
+    else k = snprintf(line, sizeof line, "gcc -std=c99 -D__UNISA_FTRIM_LIBC=1 -x c-header %s/cx.h -o %s/cx.h.gch", d, d);
+    if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     return 0;
 }
 
@@ -139,24 +154,24 @@ static int build_one(const char *cc, const char *cmdname) {
     int k;
     if (host_bin_name(cmdname, bin, sizeof bin)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -Werror=implicit-function-declaration -include stdlib.h -DCXM_HOST_REALPATH -c src/cxmod.c -o out/cxcc-host/%s-cxmod.o",
-                 cc, cc);
+                 "%s -std=c99 -Werror=implicit-function-declaration -include stdlib.h -DCXM_HOST_REALPATH -c src/cxmod.c -o %s/%s-cxmod.o",
+                 cc, H, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxcc.cx -o out/cxcc-host/%s-cxcc.o",
-                 cc, cc);
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxcc.cx -o %s/%s-cxcc.o",
+                 cc, H, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxproc.cx -o out/cxcc-host/%s-cxproc.o",
-                 cc, cc);
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/cxproc.cx -o %s/%s-cxproc.o",
+                 cc, H, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/%s.cx -o out/cxcc-host/%s-main.o",
-                 cc, cmdname, cc);
+                 "%s -std=c99 -Werror=implicit-function-declaration -include include/cx.h -x c -c tools/%s.cx -o %s/%s-main.o",
+                 cc, cmdname, H, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     k = snprintf(line, sizeof line,
-                 "%s -std=c99 -o out/cxcc-host/%s out/cxcc-host/%s-cxcc.o out/cxcc-host/%s-cxproc.o out/cxcc-host/%s-cxmod.o out/cxcc-host/%s-main.o",
-                 cc, bin, cc, cc, cc, cc);
+                 "%s -std=c99 -o %s/%s %s/%s-cxcc.o %s/%s-cxproc.o %s/%s-cxmod.o %s/%s-main.o",
+                 cc, H, bin, H, cc, H, cc, H, cc, H, cc);
     if (k < 0 || k >= (int)sizeof line || run(line)) return 1;
     if (write_launcher(cmdname, bin)) return 1;
     printf("build-cxcc-host: %s\n", bin);
@@ -251,19 +266,19 @@ static int host_bin_name(const char *cmd, char *out, size_t cap) {
 }
 
 static int build_one(const char *cc, const char *cmdname) {
-    char omod[160], occ[160], oproc[160], omain[160], obin[160], srcpath[80], com[80], bin[80];
+    char omod[320], occ[320], oproc[320], omain[320], obin[320], srcpath[80], com[80], bin[80];
     char *av[20];
     int k;
-    k = snprintf(omod, sizeof omod, "out/cxcc-host/%s-cxmod.o", cc);
+    k = snprintf(omod, sizeof omod, "%s/%s-cxmod.o", H, cc);
     if (k < 0 || k >= (int)sizeof omod) return 1;
-    k = snprintf(occ, sizeof occ, "out/cxcc-host/%s-cxcc.o", cc);
+    k = snprintf(occ, sizeof occ, "%s/%s-cxcc.o", H, cc);
     if (k < 0 || k >= (int)sizeof occ) return 1;
-    k = snprintf(oproc, sizeof oproc, "out/cxcc-host/%s-cxproc.o", cc);
+    k = snprintf(oproc, sizeof oproc, "%s/%s-cxproc.o", H, cc);
     if (k < 0 || k >= (int)sizeof oproc) return 1;
-    k = snprintf(omain, sizeof omain, "out/cxcc-host/%s-main.o", cc);
+    k = snprintf(omain, sizeof omain, "%s/%s-main.o", H, cc);
     if (k < 0 || k >= (int)sizeof omain) return 1;
     if (host_bin_name(cmdname, bin, sizeof bin)) return 1;
-    k = snprintf(obin, sizeof obin, "out/cxcc-host/%s", bin);
+    k = snprintf(obin, sizeof obin, "%s/%s", H, bin);
     if (k < 0 || k >= (int)sizeof obin) return 1;
     k = snprintf(srcpath, sizeof srcpath, "tools/%s.cx", cmdname);
     if (k < 0 || k >= (int)sizeof srcpath) return 1;
@@ -322,7 +337,7 @@ static int build_one(const char *cc, const char *cmdname) {
 
 int main(void) {
     int built = 0;
-    if (ensure_dir("out") || ensure_dir("out/cxcc-host")) return 1;
+    if (host_dir_init() || ensure_dir(H)) return 1;
     if (on_path("gcc")) {
         if (build_one("gcc", "gcc_cx")) return 1;
         if (build_pch("gcc", "gcc")) return 1;

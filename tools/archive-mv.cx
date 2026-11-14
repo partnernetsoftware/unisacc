@@ -1,0 +1,218 @@
+/* tools/archive-mv.cx -- archive one tracked file in one step, with rollback.
+ *
+ *   sh ./unisacc.com tools/archive-mv.cx -- [--dry-run] [--root DIR] [--unisacc PATH] [--no-verify] PATH
+ *
+ * (1) git grep -l -F PATH lists the live references (archive/ and this tool and its check are excluded),
+ * (2) git mv PATH archive/PATH, (3) every reference to PATH becomes archive/PATH (an occurrence already
+ * preceded by "archive/", or continuing into a longer path name, is not a reference and stays; after the
+ * rewrite no reference may remain or the run is refused), (4) one line PATH is appended to
+ * archive/ARCHIVE.tsv (file rows there are the bare path), (5) tools/check-archive-refs.cx is run with
+ * the product at --unisacc (default ./unisacc.com); on failure the move, the rewritten files and the
+ * table are restored byte for byte.  --dry-run only prints REF lines (file:line, text) and the totals.
+ * --no-verify skips step 5 (for fixtures without a product).  Exit 0 done, 1 verify failed and rolled
+ * back, 2 refused/usage.  Only PATH under git, regular file, not under archive/, destination absent.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define AM_MAXF 512
+#define AM_BUF (1 << 20)
+
+typedef struct { char path[1024]; char *orig; long on; int mode; } AmFile;
+static AmFile am_f[AM_MAXF];
+static int am_nf;
+static char am_out[AM_BUF];
+
+static int am_die(const char *a, const char *b) { fprintf(stderr, "archive-mv: %s%s%s\n", a, b ? ": " : "", b ? b : ""); return 2; }
+
+/* every child runs under a 55 s timeout (deadline) */
+static int am_run(char **av, char *out, int cap) {
+    char *argv[28]; int i = 0, k;
+    argv[i++] = "timeout"; argv[i++] = "55";
+    for (k = 0; av[k] && i < 26; k++) argv[i++] = av[k];
+    argv[i] = 0;
+    return sy_run(argv, out, cap, 0);
+}
+
+static int am_git(char **av, char *out, int cap) {
+    char *argv[24]; int i = 0, k;
+    argv[i++] = "git";
+    for (k = 0; av[k] && i < 22; k++) argv[i++] = av[k];
+    argv[i] = 0;
+    return am_run(argv, out, cap);
+}
+
+static int am_pathch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'; }
+
+/* does a reference to OLD (length on) start at b[j]?  */
+static int am_hit(const char *b, long n, long j, const char *old, long on) {
+    long e = j + on;
+    if (j + on > n || !tx_same(b + j, on, old, on)) return 0;
+    if (j >= 8 && tx_same(b + j - 8, 8, "archive/", 8)) return 0;
+    if (j > 0 && am_pathch((unsigned char)b[j - 1])) return 0;
+    if (e < n) {
+        int c = (unsigned char)b[e];
+        if (am_pathch(c) || c == '/') return 0;
+        if (c == '.' && e + 1 < n && am_pathch((unsigned char)b[e + 1])) return 0;
+    }
+    return 1;
+}
+
+/* rewrite into dst (cap dcap) when dst is given; returns the hit count, -1 on overflow */
+static long am_rewrite(const char *b, long n, const char *old, long on, const char *nw, long nn, char *dst, long dcap, long *dn) {
+    long j = 0, o = 0, hits = 0, k;
+    while (j < n) {
+        if (am_hit(b, n, j, old, on)) {
+            hits++;
+            if (dst) {
+                if (o + nn > dcap) return -1;
+                for (k = 0; k < nn; k++) dst[o++] = nw[k];
+            }
+            j += on;
+        } else {
+            if (dst) { if (o + 1 > dcap) return -1; dst[o++] = b[j]; }
+            j++;
+        }
+    }
+    if (dn) *dn = o;
+    return hits;
+}
+
+static int am_write(const char *path, const char *b, long n, int mode) {
+    char tmp[1100]; int fd, bad;
+    if (cx_fmt(tmp, sizeof tmp, "%s.archive-mv-XXXXXX", path)) return -1;
+    fd = mkstemp(tmp);
+    if (fd < 0) return -1;
+    bad = sy_write_all(fd, b, n);
+    if (!bad) bad = sy_chmod(tmp, mode);
+    if (sy_close(fd)) bad = 1;
+    if (!bad && sy_rename(tmp, path)) bad = 1;
+    if (bad) { sy_unlink(tmp); return -1; }
+    return 0;
+}
+
+static void am_restore(void) {
+    int i;
+    for (i = 0; i < am_nf; i++) am_write(am_f[i].path, am_f[i].orig, am_f[i].on, am_f[i].mode);
+}
+
+int main(int argc, char **argv) {
+    int dry = 0, verify = 1, i, rc, lines = 0;
+    const char *root = 0, *uni = "./unisacc.com", *path = 0;
+    char dest[1100], newref[1100], *tsv = 0, *tsvnew;
+    size_t tsvn = 0;
+    long pn, nn;
+    sy_stat_t st;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--dry-run")) dry = 1;
+        else if (tx_eqz(argv[i], "--no-verify")) verify = 0;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--unisacc") && i + 1 < argc) uni = argv[++i];
+        else if (!path && argv[i][0] != '-') path = argv[i];
+        else return am_die("usage: [--dry-run] [--root DIR] [--unisacc PATH] [--no-verify] PATH", 0);
+    }
+    if (!path) return am_die("usage: [--dry-run] [--root DIR] [--unisacc PATH] [--no-verify] PATH", 0);
+    if (root && chdir(root)) return am_die("cannot enter root", root);
+    pn = tx_len(path, 1000);
+    if (pn <= 0 || pn >= 1000 || path[0] == '/' || tx_find(path, pn, "..", 2) >= 0) return am_die("bad PATH (repo-relative, no ..)", path);
+    if (pn >= 8 && tx_same(path, 8, "archive/", 8)) return am_die("already under archive/", path);
+    if (sy_lstat(path, &st) || st.kind != 'f') return am_die("not a regular file", path);
+    { char *a[] = {"ls-files", "--error-unmatch", "--", (char *)path, 0};
+      if (am_git(a, am_out, sizeof am_out) != 0) return am_die("not tracked by git", path); }
+    cx_fmt(dest, sizeof dest, "archive/%s", path);
+    cx_fmt(newref, sizeof newref, "archive/%s", path);
+    nn = tx_len(newref, 1100);
+    if (!sy_lstat(dest, &st)) return am_die("destination exists", dest);
+    tsv = cx_read("archive/ARCHIVE.tsv", &tsvn);
+    if (!tsv) return am_die("cannot read", "archive/ARCHIVE.tsv");
+    { long p = 0;
+      while (p < (long)tsvn) {
+          long e = p; while (e < (long)tsvn && tsv[e] != '\n') e++;
+          if (e - p == pn && tx_same(tsv + p, pn, path, pn)) return am_die("already listed in ARCHIVE.tsv", path);
+          p = e + 1;
+      } }
+    /* (1) references */
+    { char ex1[] = ":!archive", ex2[] = ":!tools/archive-mv.cx", ex3[] = ":!tools/check-archive-mv.cx";
+      char exs[1100];
+      char *a[] = {"grep", "-I", "-l", "-F", "-e", (char *)path, "--", ".", ex1, ex2, ex3, exs, 0};
+      long p = 0, len;
+      cx_fmt(exs, sizeof exs, ":!%s", path);
+      rc = am_git(a, am_out, sizeof am_out);
+      if (rc != 0 && rc != 1) return am_die("git grep failed", am_out);
+      len = tx_len(am_out, AM_BUF);
+      while (p < len) {
+          long e = p, hits; char *b; size_t bn; sy_stat_t fs;
+          while (e < len && am_out[e] != '\n') e++;
+          if (e > p) {
+              char name[1024];
+              if (e - p >= (long)sizeof name || am_nf >= AM_MAXF) return am_die("too many or too long references", 0);
+              { long k; for (k = 0; k < e - p; k++) name[k] = am_out[p + k]; name[e - p] = 0; }
+              b = cx_read(name, &bn);
+              if (!b) return am_die("cannot read", name);
+              hits = am_rewrite(b, (long)bn, path, pn, newref, nn, 0, 0, 0);
+              if (hits > 0) {
+                  AmFile *f = &am_f[am_nf++];
+                  if (sy_lstat(name, &fs)) return am_die("cannot stat", name);
+                  cx_fmt(f->path, sizeof f->path, "%s", name);
+                  f->orig = b; f->on = (long)bn; f->mode = fs.mode;
+              }
+          }
+          p = e + 1;
+      } }
+    for (i = 0; i < am_nf; i++) {
+        AmFile *f = &am_f[i]; long j = 0, ls = 0, ln = 1;
+        for (j = 0; j <= f->on; j++) {
+            if (j == f->on || f->orig[j] == '\n') {
+                long k, hit = 0;
+                for (k = ls; k < j; k++) if (am_hit(f->orig, f->on, k, path, pn)) { hit = 1; break; }
+                if (hit) { long m = j - ls; if (m > 160) m = 160; lines++; printf("REF\t%s:%ld\t%.*s\n", f->path, ln, (int)m, f->orig + ls); }
+                ls = j + 1; ln++;
+            }
+        }
+    }
+    printf("%s\tpath=%s\tfiles=%d\tlines=%d\n", dry ? "DRYRUN" : "PLAN", path, am_nf, lines);
+    if (dry) return 0;
+    /* (2) move */
+    { char dir[1100]; long k, last = -1;
+      for (k = 0; k < nn; k++) if (dest[k] == '/') last = k;
+      for (k = 0; k < last; k++) dir[k] = dest[k];
+      dir[last] = 0;
+      { char *a[] = {"mkdir", "-p", dir, 0}; if (am_run(a, am_out, sizeof am_out) != 0) return am_die("mkdir failed", dir); } }
+    { char *a[] = {"git", "mv", (char *)path, dest, 0};
+      if (am_run(a, am_out, sizeof am_out) != 0) return am_die("git mv failed", am_out); }
+    /* (3) rewrite the references */
+    for (i = 0; i < am_nf; i++) {
+        AmFile *f = &am_f[i]; char *nb; long nlen = 0, again;
+        nb = malloc(f->on + (nn - pn > 0 ? (nn - pn) * (lines + 1) : 0) + 16);
+        if (!nb || am_rewrite(f->orig, f->on, path, pn, newref, nn, nb, f->on + (nn - pn) * (lines + 1) + 16, &nlen) <= 0) { rc = -1; goto fail; }
+        again = am_rewrite(nb, nlen, path, pn, newref, nn, 0, 0, 0);
+        if (again != 0) { rc = -2; goto fail; }
+        if (am_write(f->path, nb, nlen, f->mode)) { rc = -3; goto fail; }
+    }
+    /* (4) table row */
+    {
+        long tn = (long)tsvn;
+        tsvnew = malloc(tn + pn + 2);
+        if (!tsvnew) { rc = -4; goto fail; }
+        for (i = 0; i < tn; i++) tsvnew[i] = tsv[i];
+        if (tn > 0 && tsv[tn - 1] != '\n') tsvnew[tn++] = '\n';
+        for (i = 0; i < pn; i++) tsvnew[tn++] = path[i];
+        tsvnew[tn++] = '\n';
+        if (am_write("archive/ARCHIVE.tsv", tsvnew, tn, 0644)) { rc = -5; goto fail; }
+    }
+    /* (5) verify */
+    if (verify) {
+        char *a[] = {"sh", (char *)uni, "tools/check-archive-refs.cx", 0};
+        rc = am_run(a, am_out, sizeof am_out);
+        if (rc != 0) { fprintf(stderr, "%s\n", am_out); goto fail; }
+    }
+    printf("ARCHIVE_MV\tstatus=OK\tpath=%s\tto=%s\tfiles=%d\n", path, dest, am_nf);
+    return 0;
+fail:
+    am_restore();
+    am_write("archive/ARCHIVE.tsv", tsv, (long)tsvn, 0644);
+    { char *a[] = {"git", "mv", dest, (char *)path, 0}; am_run(a, am_out, sizeof am_out); }
+    printf("ARCHIVE_MV\tstatus=ROLLED_BACK\tpath=%s\trc=%d\n", path, rc);
+    return 1;
+}

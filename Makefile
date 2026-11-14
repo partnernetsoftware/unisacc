@@ -18,7 +18,7 @@ help:
 	@echo 'list: implemented cases and explicit gaps'
 	@echo 'export-ref OUT=...: native complete source export'
 	@echo 'streams STREAM_DIR=... STREAM_OUT=...: partial seven-stream contracts, fresh output required'
-	@echo 'the old com/model-com/comboot-* steps ran exec/c/buildcompiler.sh (archived Python and C); the CX entry is built by tools/entry-build.cx'
+	@echo 'the old com/model-com/comboot-* steps are retired; the CX entry is built by tools/entry-build.cx'
 nets:
 	@test -n "$(NET_MATERIAL)" || { echo 'set NET_MATERIAL; prepare and verify it first' >&2; exit 2; }
 	@tools/bound 55 sh "$(UNISACC)" "$(NET_MATERIAL)/nets.cx" -- "$(CURDIR)"

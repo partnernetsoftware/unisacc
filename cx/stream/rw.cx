@@ -1,0 +1,504 @@
+#pragma unisa module rw
+#pragma unisa use mem.grow
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+/* cx.stream rw: buffered byte readers and writers behind handles.
+   A reader or a writer is a handle into this module's private tables. A handle carries
+   its slot, its kind (reader or writer) and the slot's generation, so a closed handle, a
+   handle of the other kind and a handle whose slot was reused are all refused with
+   -EBADF. Every failure is a negative errno; nothing is ever truncated silently.
+   Ownership:
+     xs_reader_fd / xs_writer_fd   borrow the fd: closing the handle does not close it
+     xs_reader_mem                 borrows the bytes, no copy; they must outlive the handle
+     xs_writer_buf                 borrows the mg_buf; the caller still frees it
+     xs_pipe_pair                  owns both fds: closing a handle closes its fd
+   The internal buffer of an fd reader or writer is a mem.grow block owned by the slot
+   and freed when the handle is closed.
+     xs_reader_fd(&r, fd, bufcap)      a reader over FD; bufcap 0 means XS_BUFDEF.
+                                       0, -EINVAL, -EMFILE (table full), -ENOMEM
+     xs_reader_mem(&r, p, n)           a reader over p[0..n). 0, -EINVAL, -EMFILE
+     xs_read(r, buf, n)                up to N bytes; the count, 0 at the end, -errno.
+                                       n == 0 gives 0, n < 0 is -EINVAL
+     xs_read_full(r, buf, n)           exactly N bytes; 0, -errno, -EPIPE when the input
+                                       ends first (the bytes before the end are consumed)
+     xs_read_line(r, &line, max)       the next line into LINE (cleared first) without
+                                       its LF or CRLF; 1 a line, 0 the end, -errno. A
+                                       last line without a newline is given. A line of
+                                       more than MAX bytes is -EMSGSIZE: LINE is empty
+                                       and the reader stays inside that line
+     xs_reader_count(r)                bytes consumed through the handle (64 bits)
+     xs_reader_close(r)                release the handle
+     xs_writer_fd(&w, fd, bufcap)      a writer to FD; bufcap 0 means XS_BUFDEF
+     xs_writer_buf(&w, &dst, limit)    a writer appending to DST; more than LIMIT bytes
+                                       in total is -EMSGSIZE (limit < 0: no limit)
+     xs_write(w, p, n)                 all N bytes or an error: 0, -errno, -EMSGSIZE.
+                                       After a failed fd write the writer is broken and
+                                       every later write or flush returns that error
+     xs_flush(w)                       push buffered bytes to the fd; 0, -errno
+     xs_writer_count(w)                bytes accepted by xs_write (64 bits)
+     xs_writer_close(w)                flush, then release the handle even when the
+                                       flush failed; the first error is returned
+     xs_copy(r, w, limit, &copied)     reader to writer until the end; limit < 0 is no
+                                       limit. When the input holds more than LIMIT bytes
+                                       exactly LIMIT are copied and the result is
+                                       -EMSGSIZE. COPIED (may be 0) gets the byte count.
+                                       The writer is not flushed
+     xs_pipe_pair(&r, &w, bufcap)      a reader and a writer over a new sy_pipe
+     xs_reader_deadline(r, d)          refused in this version: -ENOSYS on a live
+     xs_writer_deadline(w, d)          handle (nothing changes), -EBADF on a bad one */
+
+enum { XS_MAXRW = 16, XS_BUFDEF = 4096, XS_CHUNK = 0x40000000 };
+enum { XS_KR = 1, XS_KW = 2 };
+
+static struct {
+    int open, gen, mem, fd, own;
+    mg_buf buf;
+    long cap, pos, lim;
+    const unsigned char *mp;
+    int64_t mn, mpos, count;
+} xs_rd[XS_MAXRW];
+
+static struct {
+    int open, gen, mem, fd, own, err;
+    mg_buf buf;
+    long cap;
+    mg_buf *dst;
+    int64_t limit, count;
+} xs_wr[XS_MAXRW];
+
+/* The buffer capacity is the one asked for (the slot's cap), not the possibly larger
+   block mem.grow reserved: buffering is the same whatever the allocator rounds to.
+   A handle is gen << 8 | kind << 5 | slot + 1 with slot + 1 in 1..XS_MAXRW. */
+static int xs_h(int gen, int kind, int slot) { return (gen << 8) | (kind << 5) | (slot + 1); }
+
+/* The slot H names when it has kind KIND, or -1. The caller still checks the generation. */
+static int xs_slot(int h, int kind) {
+    int s;
+    if (h <= 0 || ((h >> 5) & 7) != kind) return -1;
+    s = (h & 31) - 1;
+    if (s < 0 || s >= XS_MAXRW) return -1;
+    return s;
+}
+
+static int xs_rget(int r) {
+    int s;
+    s = xs_slot(r, XS_KR);
+    if (s < 0 || !xs_rd[s].open || xs_rd[s].gen != (r >> 8)) return -1;
+    return s;
+}
+
+static int xs_wget(int w) {
+    int s;
+    s = xs_slot(w, XS_KW);
+    if (s < 0 || !xs_wr[s].open || xs_wr[s].gen != (w >> 8)) return -1;
+    return s;
+}
+
+/* A free reader slot opened with the next generation, or -1. */
+static int xs_rnew(void) {
+    int i;
+    int gen;
+    for (i = 0; i < XS_MAXRW; i++) {
+        if (xs_rd[i].open) continue;
+        gen = (xs_rd[i].gen + 1) & 0x3fffff;
+        mm_fill(&xs_rd[i], sizeof(xs_rd[0]), 0, sizeof(xs_rd[0]));
+        xs_rd[i].open = 1;
+        xs_rd[i].gen = gen;
+        xs_rd[i].fd = -1;
+        return i;
+    }
+    return -1;
+}
+
+static int xs_wnew(void) {
+    int i;
+    int gen;
+    for (i = 0; i < XS_MAXRW; i++) {
+        if (xs_wr[i].open) continue;
+        gen = (xs_wr[i].gen + 1) & 0x3fffff;
+        mm_fill(&xs_wr[i], sizeof(xs_wr[0]), 0, sizeof(xs_wr[0]));
+        xs_wr[i].open = 1;
+        xs_wr[i].gen = gen;
+        xs_wr[i].fd = -1;
+        return i;
+    }
+    return -1;
+}
+
+static int xs_rmake(int *r, int fd, long bufcap, int own) {
+    int s;
+    int rc;
+    s = xs_rnew();
+    if (s < 0) return -EMFILE;
+    rc = mg_reserve(&xs_rd[s].buf, bufcap > 0 ? bufcap : XS_BUFDEF);
+    if (rc) {
+        xs_rd[s].open = 0;
+        return -ENOMEM;
+    }
+    xs_rd[s].cap = bufcap > 0 ? bufcap : XS_BUFDEF;
+    xs_rd[s].fd = fd;
+    xs_rd[s].own = own;
+    *r = xs_h(xs_rd[s].gen, XS_KR, s);
+    return 0;
+}
+
+static int xs_wmake(int *w, int fd, long bufcap, int own) {
+    int s;
+    int rc;
+    s = xs_wnew();
+    if (s < 0) return -EMFILE;
+    rc = mg_reserve(&xs_wr[s].buf, bufcap > 0 ? bufcap : XS_BUFDEF);
+    if (rc) {
+        xs_wr[s].open = 0;
+        return -ENOMEM;
+    }
+    xs_wr[s].cap = bufcap > 0 ? bufcap : XS_BUFDEF;
+    xs_wr[s].fd = fd;
+    xs_wr[s].own = own;
+    *w = xs_h(xs_wr[s].gen, XS_KW, s);
+    return 0;
+}
+
+int xs_reader_fd(int *r, int fd, long bufcap) {
+    if (!r) return -EINVAL;
+    *r = 0;
+    if (fd < 0 || bufcap < 0) return -EINVAL;
+    return xs_rmake(r, fd, bufcap, 0);
+}
+
+int xs_reader_mem(int *r, const unsigned char *p, int64_t n) {
+    int s;
+    if (!r) return -EINVAL;
+    *r = 0;
+    if (n < 0 || (!p && n > 0)) return -EINVAL;
+    s = xs_rnew();
+    if (s < 0) return -EMFILE;
+    xs_rd[s].mem = 1;
+    xs_rd[s].mp = p;
+    xs_rd[s].mn = n;
+    *r = xs_h(xs_rd[s].gen, XS_KR, s);
+    return 0;
+}
+
+/* The bytes slot S can give without another read: *P and the count, 0 at the end of
+   the input, or -errno. An fd reader whose buffer is empty reads once to refill it. */
+static long xs_peek(int s, const unsigned char **p) {
+    int64_t left;
+    long k;
+    if (xs_rd[s].mem) {
+        left = xs_rd[s].mn - xs_rd[s].mpos;
+        *p = xs_rd[s].mp + xs_rd[s].mpos;
+        return left > XS_CHUNK ? (long)XS_CHUNK : (long)left;
+    }
+    if (xs_rd[s].pos >= xs_rd[s].lim) {
+        xs_rd[s].pos = 0;
+        xs_rd[s].lim = 0;
+        k = sy_read(xs_rd[s].fd, xs_rd[s].buf.data, xs_rd[s].cap);
+        if (k <= 0) return k;
+        if (k > xs_rd[s].cap) return -EIO;
+        xs_rd[s].lim = k;
+    }
+    *p = xs_rd[s].buf.data + xs_rd[s].pos;
+    return xs_rd[s].lim - xs_rd[s].pos;
+}
+
+/* Consume K of the bytes xs_peek gave. */
+static void xs_eat(int s, long k) {
+    if (xs_rd[s].mem) xs_rd[s].mpos = xs_rd[s].mpos + k;
+    else xs_rd[s].pos = xs_rd[s].pos + k;
+    xs_rd[s].count = xs_rd[s].count + k;
+}
+
+int64_t xs_read(int r, void *buf, int64_t n) {
+    const unsigned char *p;
+    int s;
+    long k;
+    long want;
+    s = xs_rget(r);
+    if (s < 0) return -EBADF;
+    if (n < 0 || (!buf && n > 0)) return -EINVAL;
+    if (n == 0) return 0;
+    want = n > XS_CHUNK ? (long)XS_CHUNK : (long)n;
+    if (!xs_rd[s].mem && xs_rd[s].pos >= xs_rd[s].lim && want >= xs_rd[s].cap) {
+        /* an empty buffer and a large request: read straight into the caller's block */
+        k = sy_read(xs_rd[s].fd, buf, want);
+        if (k <= 0) return k;
+        if (k > want) return -EIO;
+        xs_rd[s].count = xs_rd[s].count + k;
+        return k;
+    }
+    p = 0;
+    k = xs_peek(s, &p);
+    if (k <= 0) return k;
+    if (k > want) k = want;
+    if (mm_copy(buf, want, p, k)) return -EINVAL;
+    xs_eat(s, k);
+    return k;
+}
+
+int xs_read_full(int r, void *buf, int64_t n) {
+    int64_t got;
+    int64_t k;
+    if (xs_rget(r) < 0) return -EBADF;
+    if (n < 0 || (!buf && n > 0)) return -EINVAL;
+    got = 0;
+    while (got < n) {
+        k = xs_read(r, (unsigned char *)buf + got, n - got);
+        if (k < 0) return (int)k;
+        if (k == 0) return -EPIPE;
+        got = got + k;
+    }
+    return 0;
+}
+
+int xs_read_line(int r, mg_buf *line, long max) {
+    const unsigned char *p;
+    int s;
+    long k;
+    long i;
+    long room;
+    int any;
+    int rc;
+    s = xs_rget(r);
+    if (s < 0) return -EBADF;
+    if (!line || max < 0) return -EINVAL;
+    if (mg_clear(line)) return -EINVAL;
+    any = 0;
+    for (;;) {
+        p = 0;
+        k = xs_peek(s, &p);
+        if (k < 0) {
+            mg_clear(line);
+            return (int)k;
+        }
+        if (k == 0) break;
+        any = 1;
+        /* LINE may run one byte past MAX only while that byte is a CR waiting for its LF */
+        for (i = 0; i < k && p[i] != '\n'; i++) {
+            room = max - line->len - i;
+            if (room > 0 || (room == 0 && p[i] == '\r')) continue;
+            xs_eat(s, i);
+            mg_clear(line);
+            return -EMSGSIZE;
+        }
+        rc = i > 0 ? mg_append(line, p, i) : 0;
+        if (rc) {
+            mg_clear(line);
+            return rc;
+        }
+        if (i < k) {
+            xs_eat(s, i + 1);
+            if (line->len > 0 && line->data[line->len - 1] == '\r') line->len = line->len - 1;
+            return 1;
+        }
+        xs_eat(s, i);
+    }
+    if (line->len > max) {
+        mg_clear(line);
+        return -EMSGSIZE;
+    }
+    return any;
+}
+
+int64_t xs_reader_count(int r) {
+    int s;
+    s = xs_rget(r);
+    return s < 0 ? -EBADF : xs_rd[s].count;
+}
+
+int xs_reader_close(int r) {
+    int s;
+    int rc;
+    s = xs_rget(r);
+    if (s < 0) return -EBADF;
+    rc = 0;
+    mg_free(&xs_rd[s].buf);
+    if (xs_rd[s].own) rc = sy_close(xs_rd[s].fd);
+    xs_rd[s].open = 0;
+    xs_rd[s].fd = -1;
+    xs_rd[s].own = 0;
+    xs_rd[s].mp = 0;
+    xs_rd[s].mn = 0;
+    return rc;
+}
+
+int xs_writer_fd(int *w, int fd, long bufcap) {
+    if (!w) return -EINVAL;
+    *w = 0;
+    if (fd < 0 || bufcap < 0) return -EINVAL;
+    return xs_wmake(w, fd, bufcap, 0);
+}
+
+int xs_writer_buf(int *w, mg_buf *dst, int64_t limit) {
+    int s;
+    if (!w) return -EINVAL;
+    *w = 0;
+    if (!dst) return -EINVAL;
+    s = xs_wnew();
+    if (s < 0) return -EMFILE;
+    xs_wr[s].mem = 1;
+    xs_wr[s].dst = dst;
+    xs_wr[s].limit = limit;
+    *w = xs_h(xs_wr[s].gen, XS_KW, s);
+    return 0;
+}
+
+/* Push the buffered bytes of fd writer S out. A failure breaks the writer. */
+static int xs_drain(int s) {
+    int rc;
+    if (xs_wr[s].err) return xs_wr[s].err;
+    if (xs_wr[s].mem || xs_wr[s].buf.len == 0) return 0;
+    rc = sy_write_all(xs_wr[s].fd, xs_wr[s].buf.data, xs_wr[s].buf.len);
+    xs_wr[s].buf.len = 0;
+    if (rc) xs_wr[s].err = rc < 0 ? rc : -EIO;
+    return xs_wr[s].err;
+}
+
+int xs_write(int w, const void *p, int64_t n) {
+    const unsigned char *q;
+    int64_t left;
+    long k;
+    int s;
+    int rc;
+    s = xs_wget(w);
+    if (s < 0) return -EBADF;
+    if (n < 0 || (!p && n > 0)) return -EINVAL;
+    if (xs_wr[s].err) return xs_wr[s].err;
+    if (n == 0) return 0;
+    if (xs_wr[s].mem) {
+        if (xs_wr[s].limit >= 0 && n > xs_wr[s].limit - xs_wr[s].count) return -EMSGSIZE;
+        if (n > XS_CHUNK) return -ENOMEM;
+        rc = mg_append(xs_wr[s].dst, p, (long)n);
+        if (rc) return rc;
+        xs_wr[s].count = xs_wr[s].count + n;
+        return 0;
+    }
+    if (n > xs_wr[s].cap - xs_wr[s].buf.len) {
+        rc = xs_drain(s);
+        if (rc) return rc;
+    }
+    if (n < xs_wr[s].cap) {
+        rc = mg_append(&xs_wr[s].buf, p, (long)n);
+        if (rc) return rc;
+        xs_wr[s].count = xs_wr[s].count + n;
+        return 0;
+    }
+    /* at least a buffer's worth and the buffer is empty: write straight through */
+    q = p;
+    left = n;
+    while (left > 0) {
+        k = left > XS_CHUNK ? (long)XS_CHUNK : (long)left;
+        rc = sy_write_all(xs_wr[s].fd, q, k);
+        if (rc) {
+            xs_wr[s].err = rc < 0 ? rc : -EIO;
+            return xs_wr[s].err;
+        }
+        q = q + k;
+        left = left - k;
+    }
+    xs_wr[s].count = xs_wr[s].count + n;
+    return 0;
+}
+
+int xs_flush(int w) {
+    int s;
+    s = xs_wget(w);
+    if (s < 0) return -EBADF;
+    return xs_drain(s);
+}
+
+int64_t xs_writer_count(int w) {
+    int s;
+    s = xs_wget(w);
+    return s < 0 ? -EBADF : xs_wr[s].count;
+}
+
+int xs_writer_close(int w) {
+    int s;
+    int rc;
+    int cr;
+    s = xs_wget(w);
+    if (s < 0) return -EBADF;
+    rc = xs_drain(s);
+    mg_free(&xs_wr[s].buf);
+    if (xs_wr[s].own) {
+        cr = sy_close(xs_wr[s].fd);
+        if (!rc) rc = cr;
+    }
+    xs_wr[s].open = 0;
+    xs_wr[s].fd = -1;
+    xs_wr[s].own = 0;
+    xs_wr[s].dst = 0;
+    xs_wr[s].err = 0;
+    return rc;
+}
+
+int xs_copy(int r, int w, int64_t limit, int64_t *copied) {
+    const unsigned char *p;
+    int64_t total;
+    long k;
+    int s;
+    int rc;
+    if (copied) *copied = 0;
+    s = xs_rget(r);
+    if (s < 0 || xs_wget(w) < 0) return -EBADF;
+    total = 0;
+    for (;;) {
+        p = 0;
+        k = xs_peek(s, &p);
+        if (k < 0) return (int)k;
+        if (k == 0) return 0;
+        if (limit >= 0 && k > limit - total) {
+            k = (long)(limit - total);
+            rc = k > 0 ? xs_write(w, p, k) : 0;
+            if (rc) return rc;
+            xs_eat(s, k);
+            if (copied) *copied = total + k;
+            return -EMSGSIZE;
+        }
+        rc = xs_write(w, p, k);
+        if (rc) return rc;
+        xs_eat(s, k);
+        total = total + k;
+        if (copied) *copied = total;
+    }
+}
+
+int xs_pipe_pair(int *r, int *w, long bufcap) {
+    int fds[2];
+    int rc;
+    if (r) *r = 0;
+    if (w) *w = 0;
+    if (!r || !w || bufcap < 0) return -EINVAL;
+    rc = sy_pipe(fds);
+    if (rc) return rc < 0 ? rc : -EIO;
+    rc = xs_rmake(r, fds[0], bufcap, 1);
+    if (!rc) {
+        rc = xs_wmake(w, fds[1], bufcap, 1);
+        if (rc) {
+            /* the reader owns fds[0]: closing it closes that end */
+            xs_reader_close(*r);
+            *r = 0;
+            sy_close(fds[1]);
+            return rc;
+        }
+        return 0;
+    }
+    sy_close(fds[0]);
+    sy_close(fds[1]);
+    return rc;
+}
+
+int xs_reader_deadline(int r, sy_deadline_t d) {
+    (void)d;
+    if (xs_rget(r) < 0) return -EBADF;
+    return -ENOSYS;
+}
+
+int xs_writer_deadline(int w, sy_deadline_t d) {
+    (void)d;
+    if (xs_wget(w) < 0) return -EBADF;
+    return -ENOSYS;
+}

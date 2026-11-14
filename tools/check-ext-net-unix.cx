@@ -1,0 +1,69 @@
+/* Checks ext/net/unix.cx (unix-domain stream subset of ext.net); Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-ext-net-unix.cx
+   Prints PASS/FAIL lines and EXT_NET_UNIX<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use net.unix
+#pragma unisa use net.tcp
+#pragma unisa use sys.netraw
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnetunix.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tnetunix.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+
+int main(void) {
+    char path[128], longp[200], buf[16];
+    int ls, cs, as, i, r;
+    long n;
+    sy_deadline_t never = sy_deadline_never(), gone = sy_deadline_in(0);
+
+    {   char dg[16]; int nd = 0, pid = sy_pid(), k = 0, j;
+        const char *pre = "/tmp/nu", *suf = ".sock";
+        while (pid > 0) { dg[nd++] = (char)('0' + pid % 10); pid /= 10; }
+        for (j = 0; pre[j]; j++) path[k++] = pre[j];
+        while (nd > 0) path[k++] = dg[--nd];
+        for (j = 0; suf[j]; j++) path[k++] = suf[j];
+        path[k] = 0;
+    }
+    sy_unlink(path);
+    ls = sy_unix_listen(path, 4);
+    ck(ls >= 0, "listen-fd");
+    cs = sy_unix_connect(path, never);
+    ck(cs >= 0, "connect-fd");
+    as = sy_sock_accept(ls, 0, 0);
+    ck(as >= 0, "accept-fd");
+    ckv(sy_send_all(cs, "ping", 4), 0, "send-all");
+    ckv(sy_recv(as, buf, sizeof buf), 4, "recv-4");
+    ck(buf[0] == 'p' && buf[3] == 'g', "recv-bytes");
+    ckv(sy_send(as, "ok", 2), 2, "reply-send");
+    ckv(sy_recv(cs, buf, sizeof buf), 2, "reply-recv");
+    ckv(sy_unix_listen(path, 4), -EADDRINUSE, "listen-existing-kept");
+    ck(sy_unix_connect(path, gone) == -ETIMEDOUT, "connect-deadline-passed");
+    ckv(sy_close(cs), 0, "close-client");
+    ckv(sy_recv(as, buf, sizeof buf), 0, "recv-after-peer-close-eof");
+    sy_close(as);
+    ckv(sy_recv(cs, buf, sizeof buf), -EBADF, "recv-closed-fd");
+    sy_close(ls);
+    ckv(sy_recv(-1, buf, 1), -EBADF, "recv-badfd");
+    ckv(sy_unix_connect(path, never), -ECONNREFUSED, "connect-no-listener");
+    sy_unlink(path);
+    ckv(sy_unix_connect(path, never), -ENOENT, "connect-missing-path");
+
+    for (i = 0; i < 150; i++) longp[i] = 'a';
+    longp[0] = '/'; longp[150] = 0;
+    ckv(sy_unix_listen(longp, 4), -ENAMETOOLONG, "listen-path-long");
+    r = sy_unix_connect(longp, never);
+    ckv(r, -ENAMETOOLONG, "connect-path-long");
+    ckv(sy_unix_listen(0, 4), -EINVAL, "listen-null");
+    ckv(sy_unix_listen("", 4), -EINVAL, "listen-empty");
+    ckv(sy_unix_connect(0, never), -EINVAL, "connect-null");
+    n = nfail;
+    printf("EXT_NET_UNIX\tok=%d\tfailed=%d\n", nok, nfail);
+    return n ? 1 : 0;
+}

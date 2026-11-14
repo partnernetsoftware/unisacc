@@ -1,0 +1,80 @@
+#pragma unisa module netpoll
+#pragma unisa dock
+#pragma unisa use sys.sysnums
+/* L0 sys/netpoll: readiness wait for descriptors (ppoll) and the extra socket-option numbers that
+   cx/sys/netraw.cx does not carry. Numbers come from exec/facts/sys-syscalls.tsv rows snp_*.
+   Targets: Linux x86_64 and arm64; elsewhere every call is -ENOSYS and every number is 0. */
+
+static long sy_snp_os(int lx, int la, int fb) {
+#if defined(__linux__) && defined(__aarch64__)
+    (void)lx; (void)fb;
+    return la;
+#elif defined(__linux__) && defined(__x86_64__)
+    (void)la; (void)fb;
+    return lx;
+#else
+    (void)lx; (void)la;
+    return fb;
+#endif
+}
+#define SNP_NUM(name) sy_snp_os(sn_lnx_x86_64_##name##_hi * 65536 + sn_lnx_x86_64_##name##_lo, \
+                                sn_lnx_arm64_##name##_hi * 65536 + sn_lnx_arm64_##name##_lo, \
+                                sn_fallback_##name##_hi * 65536 + sn_fallback_##name##_lo)
+
+static long sy_snp_call_os(long n, long a, long b, long c, long d, long e) {
+#if defined(_WIN32)
+    (void)n; (void)a; (void)b; (void)c; (void)d; (void)e;
+    return -ENOSYS;
+#else
+    if (!n) return -ENOSYS;
+    return __syscall6(_UNISA_SC(n), a, b, c, d, e);
+#endif
+}
+
+/* Event bits for sy_sock_poll (the values are the same on every target that has poll). */
+enum { SY_POLLIN = 1, SY_POLLOUT = 4, SY_POLLERR = 8, SY_POLLHUP = 16, SY_POLLNVAL = 32 };
+
+/* Names for sy_sock_optnum. */
+enum {
+    SY_SP_SO_REUSEPORT = 1, SY_SP_SO_KEEPALIVE = 2, SY_SP_SO_RCVBUF = 3, SY_SP_SO_SNDBUF = 4,
+    SY_SP_SO_BROADCAST = 5, SY_SP_IPPROTO_TCP = 6, SY_SP_TCP_NODELAY = 7,
+    SY_SP_IPPROTO_IPV6 = 8, SY_SP_IPV6_V6ONLY = 9
+};
+
+/* The target's number for option name WHICH (SY_SP_*): 0 on a target without sockets, -EINVAL for
+   an unknown name. Use with sy_sock_setopt/getopt from cx.sys netraw. */
+long sy_sock_optnum(int which) {
+    switch (which) {
+    case SY_SP_SO_REUSEPORT: return SNP_NUM(snp_so_reuseport);
+    case SY_SP_SO_KEEPALIVE: return SNP_NUM(snp_so_keepalive);
+    case SY_SP_SO_RCVBUF: return SNP_NUM(snp_so_rcvbuf);
+    case SY_SP_SO_SNDBUF: return SNP_NUM(snp_so_sndbuf);
+    case SY_SP_SO_BROADCAST: return SNP_NUM(snp_so_broadcast);
+    case SY_SP_IPPROTO_TCP: return SNP_NUM(snp_ipproto_tcp);
+    case SY_SP_TCP_NODELAY: return SNP_NUM(snp_tcp_nodelay);
+    case SY_SP_IPPROTO_IPV6: return SNP_NUM(snp_ipproto_ipv6);
+    case SY_SP_IPV6_V6ONLY: return SNP_NUM(snp_ipv6_v6only);
+    }
+    return -EINVAL;
+}
+
+/* Wait until FD has one of EVENTS (SY_POLL* bits) or TIMEOUT_MS passes (negative waits forever).
+   Returns the ready event bits (nonzero, may include ERR/HUP/NVAL), 0 on timeout, or -errno
+   (-EINTR, -EINVAL for events outside the SY_POLL bits). A negative FD is ignored by the kernel, so
+   sy_sock_poll(-1, 0, ms) is a plain sleep of MS. A nonnegative FD that is not open is -EBADF. */
+int sy_sock_poll(int fd, int events, long timeout_ms) {
+    int pfd[2];
+    long ts[2];
+    long r;
+    if (events & ~(SY_POLLIN | SY_POLLOUT | SY_POLLERR | SY_POLLHUP)) return -EINVAL;
+    pfd[0] = fd;
+    pfd[1] = events & 0xffff;   /* events in the low 16 bits, revents (high 16) zero */
+    ts[0] = timeout_ms / 1000;
+    ts[1] = (timeout_ms % 1000) * 1000000;
+    r = sy_snp_call_os(SNP_NUM(snp_ppoll), (long)pfd, 1, timeout_ms < 0 ? 0 : (long)ts, 0, 8);
+    if (r < 0) return (int)r;
+    if (r == 0) return 0;
+    r = (pfd[1] >> 16) & 0xffff;
+    if (r & SY_POLLNVAL) return -EBADF;
+    return (int)r;
+}

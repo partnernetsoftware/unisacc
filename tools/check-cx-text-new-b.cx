@@ -1,0 +1,113 @@
+/* Checks cx/text/codec.cx and cx/text/conv.cx (std-surface cx.text new rows, S6b):
+   sh ./unisacc.com tools/check-cx-text-new-b.cx ; behaviour assertions only; prints failed=N, exit 1 on any failure. */
+#pragma unisa use text.codec
+#pragma unisa use text.conv
+static int bad, total;
+static void ok(int c, const char *name) { total++; if (!c) { bad++; printf("FAIL\t%s\n", name); } else printf("PASS\t%s\n", name); }
+static int same(const char *a, const char *b, int n) { int i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+int main(void) {
+    char b[80], c[80];
+    unsigned char raw[8];
+    int64_t i64 = 77;
+    uint64_t u64 = 77;
+    int i;
+    /* utf8_put */
+    ok(tx_utf8_put(b, 4, 'A') == 1 && b[0] == 'A', "put-1");
+    ok(tx_utf8_put(b, 4, 0xE9) == 2 && (unsigned char)b[0] == 0xC3 && (unsigned char)b[1] == 0xA9, "put-2");
+    ok(tx_utf8_put(b, 4, 0x20AC) == 3 && (unsigned char)b[0] == 0xE2 && (unsigned char)b[1] == 0x82 && (unsigned char)b[2] == 0xAC, "put-3");
+    ok(tx_utf8_put(b, 4, 0x1F600) == 4 && (unsigned char)b[0] == 0xF0 && (unsigned char)b[1] == 0x9F && (unsigned char)b[2] == 0x98 && (unsigned char)b[3] == 0x80, "put-4");
+    ok(tx_utf8_put(b, 4, 0x10FFFF) == 4 && tx_utf8_put(b, 4, 0x7F) == 1 && tx_utf8_put(b, 4, 0x80) == 2 && tx_utf8_put(b, 4, 0x7FF) == 2 && tx_utf8_put(b, 4, 0x800) == 3 && tx_utf8_put(b, 4, 0xFFFF) == 3 && tx_utf8_put(b, 4, 0x10000) == 4, "put-boundaries");
+    ok(tx_utf8_put(b, 4, 0xD800) == -EILSEQ && tx_utf8_put(b, 4, 0xDFFF) == -EILSEQ && tx_utf8_put(b, 4, 0x110000) == -EILSEQ, "put-eilseq");
+    b[0] = 'Z';
+    ok(tx_utf8_put(b, 3, 0x1F600) == -ERANGE && tx_utf8_put(b, 0, 'a') == -ERANGE && b[0] == 'Z', "put-erange-untouched");
+    /* utf8_count */
+    ok(tx_utf8_count("", 0) == 0 && tx_utf8_count("abc", 3) == 3, "count-ascii");
+    ok(tx_utf8_count("\xC3\xA9\xE2\x82\xAC\xF0\x9F\x98\x80z", 10) == 4, "count-mixed");
+    ok(tx_utf8_count("\xC3", 1) == -EILSEQ && tx_utf8_count("\xC0\x80", 2) == -EILSEQ && tx_utf8_count("\xE0\x80\x80", 3) == -EILSEQ, "count-truncated-overlong");
+    ok(tx_utf8_count("\xED\xA0\x80", 3) == -EILSEQ && tx_utf8_count("\xF4\x90\x80\x80", 4) == -EILSEQ && tx_utf8_count("\x80", 1) == -EILSEQ && tx_utf8_count("\xFF", 1) == -EILSEQ, "count-surrogate-range-badlead");
+    ok(tx_utf8_count("a\xC3", 2) == -EILSEQ && tx_utf8_count("\xC3\xA9", 1) == -EILSEQ, "count-bounded-by-n");
+    ok(tx_utf8_count(0, 0) == 0 && tx_utf8_count(0, 1) == -EINVAL && tx_utf8_count("a", -1) == -EINVAL, "count-bad-args");
+    /* roundtrip put -> count */
+    ok(tx_utf8_put(b, 4, 0x1F600) == 4 && tx_utf8_count(b, 4) == 1, "put-count-roundtrip");
+    /* hex */
+    raw[0] = 0x00; raw[1] = 0xAB; raw[2] = 0xFF; raw[3] = 0x10;
+    ok(tx_hex_encode(raw, 4, b, 9) == 8 && same(b, "00abff10", 9), "hex-enc");
+    ok(tx_hex_encode(raw, 0, b, 1) == 0 && b[0] == 0, "hex-enc-empty");
+    b[0] = 'Z';
+    ok(tx_hex_encode(raw, 4, b, 8) == -ERANGE && b[0] == 'Z', "hex-enc-erange-untouched");
+    ok(tx_hex_encode(raw, -1, b, 9) == -EINVAL && tx_hex_encode(0, 1, b, 9) == -EINVAL, "hex-enc-bad-args");
+    ok(tx_hex_decode("00abFF10", 8, raw, 4) == 4 && raw[0] == 0 && raw[1] == 0xAB && raw[2] == 0xFF && raw[3] == 0x10, "hex-dec-either-case");
+    ok(tx_hex_decode("", 0, raw, 0) == 0, "hex-dec-empty");
+    raw[0] = 9;
+    ok(tx_hex_decode("abc", 3, raw, 4) == -EINVAL && tx_hex_decode("zz", 2, raw, 4) == -EINVAL && tx_hex_decode("a ", 2, raw, 4) == -EINVAL && tx_hex_decode("0g", 2, raw, 4) == -EINVAL, "hex-dec-einval");
+    ok(tx_hex_decode("aabb", 4, raw, 1) == -ERANGE && raw[0] == 9, "hex-dec-erange-untouched");
+    ok(tx_hex_decode("aa0g", 4, raw, 2) == -EINVAL && raw[0] == 9, "hex-dec-bad-tail-untouched");
+    /* b64 encode (RFC 4648 vectors) */
+    ok(tx_b64_encode("", 0, b, 1) == 0 && b[0] == 0, "b64-enc-empty");
+    ok(tx_b64_encode("f", 1, b, 5) == 4 && same(b, "Zg==", 5), "b64-enc-1");
+    ok(tx_b64_encode("fo", 2, b, 5) == 4 && same(b, "Zm8=", 5), "b64-enc-2");
+    ok(tx_b64_encode("foo", 3, b, 5) == 4 && same(b, "Zm9v", 5), "b64-enc-3");
+    ok(tx_b64_encode("foobar", 6, b, 9) == 8 && same(b, "Zm9vYmFy", 9), "b64-enc-6");
+    raw[0] = 0xFB; raw[1] = 0xFF; raw[2] = 0xBF;
+    ok(tx_b64_encode(raw, 3, b, 5) == 4 && same(b, "+/+/", 5), "b64-enc-alphabet");
+    b[0] = 'Z';
+    ok(tx_b64_encode("foo", 3, b, 4) == -ERANGE && b[0] == 'Z', "b64-enc-erange-untouched");
+    ok(tx_b64_encode("a", -1, b, 9) == -EINVAL && tx_b64_encode(0, 1, b, 9) == -EINVAL, "b64-enc-bad-args");
+    /* b64 decode */
+    ok(tx_b64_decode("", 0, c, 0) == 0, "b64-dec-empty");
+    ok(tx_b64_decode("Zg==", 4, c, 1) == 1 && c[0] == 'f', "b64-dec-1");
+    ok(tx_b64_decode("Zm8=", 4, c, 2) == 2 && same(c, "fo", 2), "b64-dec-2");
+    ok(tx_b64_decode("Zm9vYmFy", 8, c, 6) == 6 && same(c, "foobar", 6), "b64-dec-6");
+    ok(tx_b64_decode("+/+/", 4, raw, 3) == 3 && raw[0] == 0xFB && raw[1] == 0xFF && raw[2] == 0xBF, "b64-dec-alphabet");
+    c[0] = 'Z';
+    ok(tx_b64_decode("Zm9", 3, c, 9) == -EINVAL && tx_b64_decode("Zg", 2, c, 9) == -EINVAL, "b64-dec-missing-pad");
+    ok(tx_b64_decode("Zm9v ", 5, c, 9) == -EINVAL && tx_b64_decode("Zm 9", 4, c, 9) == -EINVAL && tx_b64_decode("Zm9\n", 4, c, 9) == -EINVAL, "b64-dec-whitespace");
+    ok(tx_b64_decode("Zm=v", 4, c, 9) == -EINVAL && tx_b64_decode("=Zg=", 4, c, 9) == -EINVAL && tx_b64_decode("====", 4, c, 9) == -EINVAL, "b64-dec-pad-position");
+    ok(tx_b64_decode("Zm9-", 4, c, 9) == -EINVAL && tx_b64_decode("Zm9_", 4, c, 9) == -EINVAL, "b64-dec-urlsafe-refused");
+    ok(tx_b64_decode("Zh==", 4, c, 9) == -EINVAL && tx_b64_decode("Zm9=", 4, c, 9) == -EINVAL, "b64-dec-nonzero-padbits");
+    ok(tx_b64_decode("Zm9vYmFy", 8, c, 5) == -ERANGE && tx_b64_decode("Zg==", 4, c, 0) == -ERANGE && c[0] == 'Z', "b64-dec-erange-untouched");
+    for (i = 0; i < 8; i++) raw[i] = (unsigned char)(i * 37 + 3);
+    ok(tx_b64_encode(raw, 8, b, 20) == 12 && tx_b64_decode(b, 12, c, 8) == 8 && same(c, (const char *)raw, 8), "b64-roundtrip");
+    /* from_i64 / from_u64 */
+    ok(tx_from_i64(b, 8, 0, 10) == 1 && same(b, "0", 2), "i64-zero");
+    ok(tx_from_i64(b, 8, -255, 16) == 3 && same(b, "-ff", 4), "i64-neg-hex");
+    ok(tx_from_i64(b, 8, 255, 2) == -ERANGE, "i64-bin-needs-nul-room");
+    ok(tx_from_i64(b, 9, 255, 2) == 8 && same(b, "11111111", 9), "i64-bin");
+    ok(tx_from_i64(b, 20, 35, 36) == 1 && b[0] == 'z', "i64-base36");
+    ok(tx_from_i64(b, 30, (int64_t)(-9223372036854775807L - 1), 10) == 20 && same(b, "-9223372036854775808", 21), "i64-min");
+    ok(tx_from_i64(b, 30, 9223372036854775807L, 10) == 19 && same(b, "9223372036854775807", 20), "i64-max");
+    b[0] = 'Z';
+    ok(tx_from_i64(b, 3, 123, 10) == -ERANGE && tx_from_i64(b, 0, 1, 10) == -ERANGE && b[0] == 'Z', "i64-erange-untouched");
+    ok(tx_from_i64(b, 8, 1, 1) == -EINVAL && tx_from_i64(b, 8, 1, 37) == -EINVAL && tx_from_i64(b, 8, 1, 0) == -EINVAL && tx_from_i64(0, 8, 1, 10) == -EINVAL, "i64-einval");
+    ok(tx_from_u64(b, 30, 18446744073709551615UL, 10) == 20 && same(b, "18446744073709551615", 21), "u64-max");
+    ok(tx_from_u64(b, 30, 18446744073709551615UL, 16) == 16 && same(b, "ffffffffffffffff", 17), "u64-max-hex");
+    ok(tx_from_u64(b, 3, 123, 10) == -ERANGE && tx_from_u64(b, 8, 1, 1) == -EINVAL, "u64-errors");
+    /* to_i64 */
+    ok(tx_to_i64("0", 1, 10, &i64) == 0 && i64 == 0, "toi64-zero");
+    ok(tx_to_i64("-ff", 3, 16, &i64) == 0 && i64 == -255, "toi64-neg-hex");
+    ok(tx_to_i64("+42", 3, 10, &i64) == 0 && i64 == 42, "toi64-plus");
+    ok(tx_to_i64("Zz", 2, 36, &i64) == 0 && i64 == 35 * 36 + 35, "toi64-base36-case");
+    ok(tx_to_i64("9223372036854775807", 19, 10, &i64) == 0 && i64 == 9223372036854775807L, "toi64-max");
+    ok(tx_to_i64("-9223372036854775808", 20, 10, &i64) == 0 && i64 == (-9223372036854775807L - 1), "toi64-min");
+    i64 = 77;
+    ok(tx_to_i64("9223372036854775808", 19, 10, &i64) == -ERANGE && tx_to_i64("-9223372036854775809", 20, 10, &i64) == -ERANGE && tx_to_i64("99999999999999999999999", 23, 10, &i64) == -ERANGE && i64 == 77, "toi64-erange-untouched");
+    ok(tx_to_i64("", 0, 10, &i64) == -EINVAL && tx_to_i64("-", 1, 10, &i64) == -EINVAL && tx_to_i64("+", 1, 10, &i64) == -EINVAL && i64 == 77, "toi64-empty-sign");
+    ok(tx_to_i64(" 1", 2, 10, &i64) == -EINVAL && tx_to_i64("1 ", 2, 10, &i64) == -EINVAL && tx_to_i64("1x", 2, 10, &i64) == -EINVAL && tx_to_i64("--1", 3, 10, &i64) == -EINVAL, "toi64-nondigit");
+    ok(tx_to_i64("12", 2, 2, &i64) == -EINVAL && tx_to_i64("8", 1, 8, &i64) == -EINVAL && i64 == 77, "toi64-digit-beyond-base");
+    ok(tx_to_i64("123", 2, 10, &i64) == 0 && i64 == 12, "toi64-bounded-by-n");
+    ok(tx_to_i64("1", 1, 1, &i64) == -EINVAL && tx_to_i64("1", 1, 37, &i64) == -EINVAL && tx_to_i64("1", 1, 10, 0) == -EINVAL && tx_to_i64("1", -1, 10, &i64) == -EINVAL && tx_to_i64(0, 1, 10, &i64) == -EINVAL, "toi64-bad-args");
+    /* to_u64 */
+    ok(tx_to_u64("18446744073709551615", 20, 10, &u64) == 0 && u64 == 18446744073709551615UL, "tou64-max");
+    ok(tx_to_u64("ffffffffffffffff", 16, 16, &u64) == 0 && u64 == 18446744073709551615UL, "tou64-max-hex");
+    ok(tx_to_u64("+7", 2, 10, &u64) == 0 && u64 == 7, "tou64-plus");
+    u64 = 77;
+    ok(tx_to_u64("18446744073709551616", 20, 10, &u64) == -ERANGE && tx_to_u64("1ffffffffffffffff", 17, 16, &u64) == -ERANGE && u64 == 77, "tou64-erange-untouched");
+    ok(tx_to_u64("-1", 2, 10, &u64) == -EINVAL && tx_to_u64("", 0, 10, &u64) == -EINVAL && tx_to_u64("+", 1, 10, &u64) == -EINVAL && tx_to_u64("1_0", 3, 10, &u64) == -EINVAL && u64 == 77, "tou64-einval");
+    ok(tx_to_u64("1", 1, 1, &u64) == -EINVAL && tx_to_u64("1", 1, 10, 0) == -EINVAL, "tou64-bad-args");
+    /* format -> parse roundtrip */
+    i = tx_from_i64(b, 30, -123456789, 7);
+    ok(i > 0 && tx_to_i64(b, i, 7, &i64) == 0 && i64 == -123456789, "i64-roundtrip-base7");
+    printf("%s\n", bad ? "CX_TEXT_NEW_B FAIL" : "CX_TEXT_NEW_B");
+    printf("total=%d failed=%d\n", total, bad);
+    return bad ? 1 : 0;
+}

@@ -1,0 +1,222 @@
+/* tools/on-change.cx -- 文件变化联动:给定改动路径,查关系表并立即做该做的事,每个路径输出一行摘要。
+ *
+ *   sh ./unisacc.com tools/on-change.cx -- [--dry-run] [--auto-bound N] PATH...
+ *   sh ./unisacc.com tools/on-change.cx -- --hook        (Claude Code PostToolUse 钩子:stdin 收 JSON,取 tool_input.file_path)
+ *
+ * 每个路径(仓内相对路径;绝对路径若在当前目录下会被改成相对)做四件事:
+ *   (a) 派生:在 build/links.tsv 的 derive 边里找 src glob 命中该路径的派生项。write=1 且 bound<=N(--auto-bound,默认 20)
+ *       的项合并成一次 tools/derive.cx --write --only NAME,...(整次经 ./tools/bound 13 限时);其余(write=0 或 bound 更大,
+ *       如 tool-index、layer-api)只列入 pending=,提示要另跑 derive。--dry-run 不写,全部列入 pending。
+ *   (b) 批次:tools/affected.cx --files PATH --list-only --tier commit 的 AFFECTED 行数与前 5 个 id,不实跑。
+ *       affected 非 0 或超过 14 秒(冷编译实测约 13 秒,热约 1 秒)时 batches=-1,表示未测,不是 0。docs=-1 同理。
+ *   (c) 文档:git grep -l -F PATH -- '*.md' 命中的文件数。
+ *   (d) 占用:tools/domain.cx 存在时跑 check PATH,claim=free 或 claim=持有者;不存在为 claim=-。
+ * 输出(单空格分隔,一行一个路径):
+ *   ON_CHANGE path=P derived=N batches=N docs=N claim=C wrote=a,b pending=c,d failed=e ids=i1,i2 ms=T
+ *   derived 是命中的派生项个数;wrote/pending/failed/ids 为空时写 -。关系表读不到时 derived=0 并带 links=missing。
+ * --hook:从 stdin 的 JSON 里取 "file_path";路径不在当前目录下,或在 .git/、out/ 下,静默 rc 0。否则把摘要包成
+ *   {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"ON_CHANGE ..."}} 打到 stdout。
+ *   钩子模式任何情况都 rc 0(只告警不阻断);本工具不调用 Edit/Write,派生写入由子进程直接落盘,不会再触发钩子。
+ * 退出码(非钩子):0 正常;1 有 failed 的派生项;2 用法错。
+ * Check: tools/check-on-change.cx. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXN 32
+#define NAMEW 64
+static char out[1 << 18];
+static char *links; static long links_n;
+static int dry, auto_bound = 20, any_failed;
+
+static long slen(const char *s) { return tx_len(s, 1 << 16); }
+static int seq(const char *a, const char *b) { long n = slen(a); return n == slen(b) && mm_same(a, b, n); }
+static int glob(const char *g, long gn, const char *s, long sn) {
+    while (gn > 0) {
+        if (g[0] == '*') { long k; for (k = 0; k <= sn; k++) if (glob(g + 1, gn - 1, s + k, sn - k)) return 1; return 0; }
+        if (sn <= 0 || g[0] != s[0]) return 0;
+        g++; gn--; s++; sn--;
+    }
+    return sn == 0;
+}
+typedef struct { char name[MAXN][NAMEW]; int n; } Set;
+static void set_add(Set *s, const char *p, long n) {
+    int i;
+    if (n <= 0 || n >= NAMEW) return;
+    for (i = 0; i < s->n; i++) if (slen(s->name[i]) == n && mm_same(s->name[i], p, n)) return;
+    if (s->n >= MAXN) return;
+    mm_copy(s->name[s->n], NAMEW, p, n); s->name[s->n][n] = 0; s->n++;
+}
+static void set_join(Set *s, char *dst, long cap) {
+    long at = 0; int i;
+    dst[0] = 0;
+    for (i = 0; i < s->n; i++) {
+        long n = slen(s->name[i]);
+        if (at + n + 2 >= cap) break;
+        if (i) dst[at++] = ',';
+        mm_copy(dst + at, cap - at, s->name[i], n); at += n; dst[at] = 0;
+    }
+    if (!at) { dst[0] = '-'; dst[1] = 0; }
+}
+/* attr 里 key= 后的十进制数;没有则 dflt */
+static int attr_int(const char *a, long an, const char *key, int dflt) {
+    long kn = slen(key), p = tx_find(a, an, key, kn); int v = 0, any = 0;
+    if (p < 0) return dflt;
+    for (p += kn; p < an && a[p] >= '0' && a[p] <= '9'; p++) { v = v * 10 + (a[p] - '0'); any = 1; }
+    return any ? v : dflt;
+}
+/* (a) 的查表:derive 边里 src glob 命中 path 的项,分到 autos 与 pend */
+static void match_derive(const char *path, Set *autos, Set *pend) {
+    long at = 0, pn = slen(path);
+    while (at < links_n) {
+        long e = tx_chr(links + at, links_n - at, '\n'), ln = e < 0 ? links_n - at : e, f[5], fl[5], k, s = 0; int nf = 0;
+        const char *l = links + at;
+        at += ln + 1;
+        if (ln < 7 || !mm_same(l, "derive\t", 7)) continue;
+        for (k = 0; k <= ln && nf < 5; k++) if (k == ln || l[k] == '\t') { f[nf] = s; fl[nf] = k - s; nf++; s = k + 1; }
+        if (nf != 5 || !glob(l + f[1], fl[1], path, pn)) continue;
+        if (!dry && attr_int(l + f[4], fl[4], "write=", 0) == 1 && attr_int(l + f[4], fl[4], "bound=", 999) <= auto_bound) set_add(autos, l + f[3], fl[3]);
+        else set_add(pend, l + f[3], fl[3]);
+    }
+}
+/* 跑一次 derive --write --only,按 DERIVE 行把 autos 分成 wrote 与 failed */
+static void run_derive(Set *autos, Set *wrote, Set *failed) {
+    char only[MAXN * NAMEW]; char *a[] = {"./tools/bound", "13", "sh", "./unisacc.com", "tools/derive.cx", "--", "--write", "--only", only, 0};
+    int i;
+    if (!autos->n) return;
+    set_join(autos, only, sizeof only);
+    out[0] = 0;
+    sy_run(a, out, sizeof out, 0);
+    for (i = 0; i < autos->n; i++) {
+        char pat[NAMEW + 24];
+        cx_fmt(pat, sizeof pat, "DERIVE\t%s\tWROTE\t", autos->name[i]);
+        if (tx_find(out, slen(out), pat, slen(pat)) >= 0) set_add(wrote, autos->name[i], slen(autos->name[i]));
+        else { set_add(failed, autos->name[i], slen(autos->name[i])); any_failed = 1; }
+    }
+}
+static int batches_of(const char *path, Set *ids) {
+    char *a[] = {"./tools/bound", "14", "sh", "./unisacc.com", "tools/affected.cx", "--", "--files", (char *)path, "--list-only", "--tier", "commit", 0};
+    long at = 0, n; int cnt = 0;
+    out[0] = 0;
+    if (sy_run(a, out, sizeof out, 0) != 0) return -1;
+    n = slen(out);
+    while (at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e; const char *l = out + at;
+        at += ln + 1;
+        if (ln < 10 || !mm_same(l, "AFFECTED\t", 9)) continue;
+        cnt++;
+        if (ids->n < 5) { long t = tx_chr(l + 9, ln - 9, '\t'); set_add(ids, l + 9, t < 0 ? ln - 9 : t); }
+    }
+    return cnt;
+}
+static int docs_of(const char *path) {
+    char *a[] = {"./tools/bound", "8", "git", "grep", "-l", "-F", "-e", (char *)path, "--", "*.md", 0};
+    long k, n; int cnt = 0, rc;
+    out[0] = 0;
+    rc = sy_run(a, out, sizeof out, 0);
+    if (rc != 0 && rc != 1) return -1;
+    n = slen(out);
+    for (k = 0; k < n; k++) if (out[k] == '\n') cnt++;
+    return cnt;
+}
+static void claim_of(const char *path, char *dst, long cap) {
+    char *a[] = {"./tools/bound", "5", "sh", "./unisacc.com", "tools/domain.cx", "--", "check", (char *)path, 0};
+    long n, p;
+    dst[0] = '-'; dst[1] = 0;
+    if (sy_is_reg("tools/domain.cx") != 1) return;
+    out[0] = 0;
+    sy_run(a, out, sizeof out, 0);
+    n = slen(out);
+    if (tx_find(out, n, "DOMAIN\tfree", 11) >= 0) { cx_fmt(dst, cap, "free"); return; }
+    p = tx_find(out, n, "owner=", 6);
+    if (p >= 0) {
+        long k = p + 6, s = k;
+        while (k < n && out[k] != '\t' && out[k] != '\n' && out[k] != ' ') k++;
+        if (k > s && k - s < cap) { mm_copy(dst, cap, out + s, k - s); dst[k - s] = 0; }
+    }
+}
+/* 一个路径的整行摘要写进 line */
+static void one(const char *path, char *line, long cap) {
+    static Set autos, pend, wrote, failed, ids;
+    char w[1024], p[1024], f[1024], i5[512], claim[80]; int nb, nd; long t0 = sy_now_ms();
+    autos.n = pend.n = wrote.n = failed.n = ids.n = 0;
+    if (links) match_derive(path, &autos, &pend);
+    run_derive(&autos, &wrote, &failed);
+    nb = batches_of(path, &ids);
+    nd = docs_of(path);
+    claim_of(path, claim, sizeof claim);
+    set_join(&wrote, w, sizeof w); set_join(&pend, p, sizeof p); set_join(&failed, f, sizeof f); set_join(&ids, i5, sizeof i5);
+    cx_fmt(line, cap, "ON_CHANGE path=%s derived=%d batches=%d docs=%d claim=%s wrote=%s pending=%s failed=%s ids=%s%s ms=%ld",
+           path, autos.n + pend.n, nb, nd, claim, w, p, f, i5, links ? "" : " links=missing", sy_now_ms() - t0);
+}
+/* 绝对路径在当前目录下就改成相对;返回 0 表示不在仓内(仅绝对路径会这样) */
+static const char *relative(const char *path, char *buf, long cap) {
+    char cwd[4096]; int cn; long n = slen(path);
+    if (path[0] != '/') { while (path[0] == '.' && path[1] == '/') path += 2; return path; }
+    cn = sy_realpath(".", cwd, sizeof cwd);
+    if (cn <= 0) return 0;
+    if (!(n > cn + 1 && mm_same(path, cwd, cn) && path[cn] == '/')) {   /* 字面不带前缀时再按真实路径比一次 */
+        int rn = sy_realpath(path, buf, (int)cap);
+        if (rn <= cn + 1 || !mm_same(buf, cwd, cn) || buf[cn] != '/') return 0;
+        return buf + cn + 1;
+    }
+    return path + cn + 1;
+}
+static int hook(void) {
+    static char in[1 << 20], fp[4096], rel[4096], line[8192], esc[16384];
+    long n = 0, g, p, k, o = 0; const char *r;
+    while (n < (long)sizeof in - 1 && (g = sy_read_once(0, in + n, (long)sizeof in - 1 - n)) > 0) n += g;
+    p = tx_find(in, n, "\"file_path\"", 11);
+    if (p < 0) return 0;
+    p += 11;
+    while (p < n && (in[p] == ' ' || in[p] == ':')) p++;
+    if (p >= n || in[p] != '"') return 0;
+    for (k = p + 1; k < n && in[k] != '"' && o < (long)sizeof fp - 1; k++) {
+        if (in[k] == '\\' && k + 1 < n) k++;   /* \" \\ \/ 取后一个字符;路径里不该有其它转义 */
+        fp[o++] = in[k];
+    }
+    fp[o] = 0;
+    r = relative(fp, rel, sizeof rel);
+    if (!r || !r[0]) return 0;
+    if ((slen(r) >= 5 && mm_same(r, ".git/", 5)) || (slen(r) >= 4 && mm_same(r, "out/", 4))) return 0;
+    one(r, line, sizeof line);
+    o = 0;
+    for (k = 0; line[k] && o < (long)sizeof esc - 8; k++) {
+        if (line[k] == '"' || line[k] == '\\') esc[o++] = '\\';
+        if ((unsigned char)line[k] < 32) { esc[o++] = ' '; continue; }
+        esc[o++] = line[k];
+    }
+    esc[o] = 0;
+    printf("{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"%s\"}}\n", esc);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    static char line[8192], rel[4096];
+    int a, hookmode = 0, np = 0; size_t ln = 0;
+    for (a = 1; a < argc; a++) {
+        if (seq(argv[a], "--hook")) hookmode = 1;
+        else if (seq(argv[a], "--dry-run")) dry = 1;
+        else if (seq(argv[a], "--auto-bound") && a + 1 < argc) { auto_bound = attr_int(argv[a + 1], slen(argv[a + 1]), "", -1); a++; if (auto_bound < 0) { printf("usage: bad --auto-bound\n"); return 2; } }
+        else if (argv[a][0] == '-' && argv[a][1] == '-') { printf("usage: on-change.cx -- [--dry-run] [--auto-bound N] PATH... | --hook\n"); return 2; }
+        else np++;
+    }
+    links = cx_read("build/links.tsv", &ln); links_n = (long)ln;
+    if (hookmode) return hook();
+    if (!np) { printf("usage: on-change.cx -- [--dry-run] [--auto-bound N] PATH... | --hook\n"); return 2; }
+    for (a = 1; a < argc; a++) {
+        const char *r;
+        if (seq(argv[a], "--dry-run")) continue;
+        if (seq(argv[a], "--auto-bound")) { a++; continue; }
+        r = relative(argv[a], rel, sizeof rel);
+        if (!r) { printf("ON_CHANGE path=%s outside=1\n", argv[a]); continue; }
+        one(r, line, sizeof line);
+        printf("%s\n", line);
+    }
+    return any_failed ? 1 : 0;
+}

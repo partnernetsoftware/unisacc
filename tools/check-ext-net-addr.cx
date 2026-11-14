@@ -1,0 +1,120 @@
+/* Checks ext/net/addr.cx (sy_addr_t sy_addr_parse sy_addr_fmt sy_addr_loopback sy_addr_any sy_net_error):
+     sh ./unisacc.com tools/check-ext-net-addr.cx
+   Prints PASS/FAIL lines and EXT_NET_ADDR<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use net.addr
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnetaddr.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static int same(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+static int fmteq(const sy_addr_t *a, const char *want) {
+    char t[160];
+    int n = sy_addr_fmt(a, t, sizeof t);
+    return n == slen(want) && same(t, want);
+}
+static int ipeq(const unsigned char *x, const unsigned char *y) {
+    int i;
+    for (i = 0; i < 16; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+static int rt(const char *text, int port, const char *want) {
+    sy_addr_t a, b;
+    char t[160];
+    int n;
+    if (sy_addr_parse(&a, text, port) != 0) return 0;
+    n = sy_addr_fmt(&a, t, sizeof t);
+    if (n <= 0 || !same(t, want)) return 0;
+    /* parse the host part of the formatted text again: strip port and brackets */
+    {
+        char h[100];
+        int k = 0, s = 0, e = n - 1;
+        while (e > 0 && t[e] != ':') e--;
+        if (t[0] == '[') { s = 1; e--; }
+        for (; s < e && k < 99; s++) h[k++] = t[s];
+        h[k] = 0;
+        return sy_addr_parse(&b, h, port) == 0 && b.family == a.family && b.port == a.port && b.scope == a.scope
+               && ipeq(b.ip, a.ip);
+    }
+}
+int main(void) {
+    sy_addr_t a, c;
+    char t[160], tiny[4], ex[12];
+    int i, n;
+    ck(sy_addr_parse(&a, "10.1.2.3", 80) == 0 && a.family == SY_AF_INET4 && a.ip[0] == 10 && a.ip[1] == 1 && a.ip[2] == 2 && a.ip[3] == 3 && a.port == 80, "p4-basic");
+    ck(sy_addr_parse(&a, "0.0.0.0", 0) == 0 && a.ip[0] == 0 && a.ip[3] == 0 && a.port == 0, "p4-zero");
+    ck(sy_addr_parse(&a, "255.255.255.255", 65535) == 0 && a.ip[0] == 255 && a.ip[3] == 255 && a.port == 65535, "p4-max");
+    ck(sy_addr_parse(&a, "256.1.1.1", 1) == -EINVAL, "p4-octet-256");
+    ck(sy_addr_parse(&a, "1.2.3", 1) == -EINVAL, "p4-three-parts");
+    ck(sy_addr_parse(&a, "1.2.3.4.5", 1) == -EINVAL, "p4-five-parts");
+    ck(sy_addr_parse(&a, "1..3.4", 1) == -EINVAL, "p4-empty-part");
+    ck(sy_addr_parse(&a, "01.2.3.4", 1) == -EINVAL, "p4-leading-zero");
+    ck(sy_addr_parse(&a, "1.2.3.4%1", 1) == -EINVAL, "p4-scope-refused");
+    ck(sy_addr_parse(&a, "1.2.3.4 ", 1) == -EINVAL, "p4-trailing-space");
+    ck(sy_addr_parse(&a, "-1.2.3.4", 1) == -EINVAL, "p4-sign");
+    ck(sy_addr_parse(&a, "fe80::1%7", 9) == 0 && a.family == SY_AF_INET6 && a.scope == 7 && a.ip[0] == 0xfe && a.ip[1] == 0x80 && a.ip[15] == 1 && a.port == 9, "p6-scope");
+    ck(sy_addr_parse(&a, "::1", 5) == 0 && a.ip[15] == 1 && a.ip[0] == 0 && a.scope == 0, "p6-loopback");
+    ck(sy_addr_parse(&a, "::", 5) == 0 && a.ip[15] == 0 && a.family == SY_AF_INET6, "p6-any");
+    ck(sy_addr_parse(&a, "2001:db8::ff00:42:8329", 1) == 0 && a.ip[0] == 0x20 && a.ip[1] == 1 && a.ip[2] == 0x0d && a.ip[3] == 0xb8, "p6-compress-parse");
+    ck(sy_addr_parse(&a, "2001:db8::ff00:42:8329", 1) == 0 && a.ip[10] == 0xff && a.ip[11] == 0 && a.ip[13] == 0x42 && a.ip[14] == 0x83 && a.ip[15] == 0x29, "p6-compress-bytes");
+    ck(sy_addr_parse(&a, "1:2:3:4:5:6:7:8", 1) == 0 && a.ip[1] == 1 && a.ip[3] == 2 && a.ip[15] == 8, "p6-full");
+    ck(sy_addr_parse(&a, "::ffff:1.2.3.4", 1) == 0 && a.ip[10] == 255 && a.ip[11] == 255 && a.ip[12] == 1 && a.ip[15] == 4, "p6-mapped-v4");
+    ck(sy_addr_parse(&a, "1::2::3", 1) == -EINVAL, "p6-two-gaps");
+    ck(sy_addr_parse(&a, "1:2:3", 1) == -EINVAL, "p6-short");
+    ck(sy_addr_parse(&a, "12345::", 1) == -EINVAL, "p6-group-5-digits");
+    ck(sy_addr_parse(&a, "1:2:3:4:5:6:7:8:9", 1) == -EINVAL, "p6-nine-groups");
+    ck(sy_addr_parse(&a, "::1%eth0", 1) == -EINVAL, "p6-scope-name-refused");
+    ck(sy_addr_parse(&a, "::1%", 1) == -EINVAL, "p6-scope-empty");
+    ck(sy_addr_parse(&a, "example.com", 1) == -EINVAL, "name-refused");
+    ck(sy_addr_parse(&a, "", 1) == -EINVAL, "empty-refused");
+    ck(sy_addr_parse(&a, 0, 1) == -EINVAL && sy_addr_parse(0, "1.2.3.4", 1) == -EINVAL, "null-refused");
+    ck(sy_addr_parse(&a, "1.1.1.1", 70000) == -EINVAL && sy_addr_parse(&a, "1.1.1.1", -1) == -EINVAL, "port-range");
+    sy_addr_parse(&a, "1.2.3.4", 80);
+    ck(sy_addr_parse(&a, "bogus", 1) == -EINVAL && a.family == 0 && a.ip[0] == 0 && a.port == 0, "failure-zeroes");
+    sy_addr_parse(&a, "10.1.2.3", 80);
+    ck(fmteq(&a, "10.1.2.3:80"), "fmt-v4");
+    sy_addr_loopback(&a, SY_AF_INET6, 443);
+    ck(fmteq(&a, "[::1]:443"), "fmt-v6-brackets");
+    sy_addr_parse(&a, "fe80::1%7", 9);
+    ck(fmteq(&a, "[fe80::1%7]:9"), "fmt-v6-scope");
+    sy_addr_parse(&a, "2001:0db8:0:0:0:0:0:1", 1);
+    ck(fmteq(&a, "[2001:db8::1]:1"), "fmt-v6-compress");
+    sy_addr_parse(&a, "1:0:3:0:0:6:0:8", 1);
+    ck(fmteq(&a, "[1:0:3::6:0:8]:1"), "fmt-v6-longest-run");
+    sy_addr_parse(&a, "1:2:3:4:5:6:7:8", 1);
+    ck(fmteq(&a, "[1:2:3:4:5:6:7:8]:1"), "fmt-v6-full");
+    sy_addr_parse(&a, "10.1.2.3", 80);
+    ck(sy_addr_fmt(&a, tiny, sizeof tiny) == -ERANGE && tiny[0] == 0, "fmt-erange");
+    n = 11;
+    ck(sy_addr_fmt(&a, ex, 11) == -ERANGE && sy_addr_fmt(&a, ex, 12) == n && same(ex, "10.1.2.3:80"), "fmt-needlen-boundary");
+    ck(sy_addr_fmt(&a, t, 0) == -EINVAL && sy_addr_fmt(&a, 0, 8) == -EINVAL && sy_addr_fmt(0, t, 8) == -EINVAL, "fmt-invalid-args");
+    sy_addr_any(&c, SY_AF_INET4, 1); c.family = 77;
+    ck(sy_addr_fmt(&c, t, sizeof t) == -EINVAL, "fmt-bad-family");
+    sy_addr_any(&c, SY_AF_INET4, 1); c.family = SY_AF_UNIX; c.path[0] = '/'; c.path[1] = 'a'; c.path[2] = 0;
+    ck(fmteq(&c, "/a"), "fmt-unix");
+    ck(rt("10.1.2.3", 80, "10.1.2.3:80"), "roundtrip-v4");
+    ck(rt("2001:db8::1", 8080, "[2001:db8::1]:8080"), "roundtrip-v6");
+    ck(rt("fe80::abcd:1%12", 3, "[fe80::abcd:1%12]:3"), "roundtrip-v6-scope");
+    ck(rt("::ffff:1.2.3.4", 7, "[::ffff:102:304]:7"), "roundtrip-mapped");
+    ck(sy_addr_loopback(&a, SY_AF_INET4, 5) == 0 && a.family == SY_AF_INET4 && a.ip[0] == 127 && a.ip[1] == 0 && a.ip[3] == 1 && a.port == 5, "loopback-v4");
+    ck(sy_addr_loopback(&a, SY_AF_INET6, 6) == 0 && a.family == SY_AF_INET6 && a.ip[15] == 1 && a.ip[0] == 0 && a.port == 6, "loopback-v6");
+    ck(sy_addr_loopback(&a, 99, 5) == -EAFNOSUPPORT && sy_addr_loopback(&a, SY_AF_UNIX, 5) == -EAFNOSUPPORT && sy_addr_loopback(0, SY_AF_INET4, 5) == -EINVAL, "loopback-refusals");
+    ck(sy_addr_any(&a, SY_AF_INET4, 9) == 0 && fmteq(&a, "0.0.0.0:9"), "any-v4");
+    ck(sy_addr_any(&a, SY_AF_INET6, 9) == 0 && fmteq(&a, "[::]:9"), "any-v6");
+    ck(sy_addr_any(&a, 99, 5) == -EAFNOSUPPORT && sy_addr_any(0, SY_AF_INET6, 5) == -EINVAL, "any-refusals");
+    for (i = 0; i < 16; i++) a.ip[i] = 9;
+    sy_addr_any(&a, SY_AF_INET4, 1);
+    ck(a.ip[0] == 0 && a.ip[15] == 0 && a.scope == 0, "any-zeroes-rest");
+    ck(same(sy_net_error(0), "ok") && same(sy_net_error(5), "ok"), "err-ok");
+    ck(same(sy_net_error(-EINVAL), "EINVAL") && same(sy_net_error(-ERANGE), "ERANGE"), "err-errno");
+    ck(same(sy_net_error(-ECONNREFUSED), "ECONNREFUSED") && same(sy_net_error(-ETIMEDOUT), "ETIMEDOUT"), "err-net-errno");
+    ck(same(sy_net_error(-4097), "name resolution failure") && same(sy_net_error(SY_EAI_BASE), "name resolution failure"), "err-eai");
+    ck(same(sy_net_error(-3999), "error") && same(sy_net_error(-3), "error"), "err-unknown");
+    printf("EXT_NET_ADDR\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

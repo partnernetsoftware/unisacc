@@ -1,0 +1,81 @@
+/* tools/check-safedel-chains.cx -- include/unisa_safedel.h whitelist root $HOME/.cache/unisacc/chains.
+ *
+ *   sh ./unisacc.com tools/check-safedel-chains.cx [-- ROOT]
+ *
+ * Compiles tests/safedel-chains/prog.c with the product, `-I ROOT/include` (an explicit -I directory is searched
+ * before the embedded table, so <unisa_safedel.h> is the WORKSPACE header) and -D__UNISA_FTRIM_LIBC=0, then runs
+ * it against a fresh fixture (HOME and TMPDIR as siblings).  prog.c asserts: a subdirectory/file of the chains
+ * root is deletable; the chains root itself (also with a trailing slash or "/."), the cache root, a sibling
+ * (other, chains-evil), .. escapes, symlink escapes, a symlinked chains root or a symlink in its path, and a
+ * missing chains root are refused; the existing roots (TMPDIR subdir ok, TMPDIR itself, /, /usr refused) are
+ * unchanged.  This tool relays the PASS/FAIL lines and counts them. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+static void die(const char *s) { sy_eprintf("check-safedel-chains: REFUSE %s\n", s); sy_exit(2); }
+
+static int starts(const char *s, long n, const char *p) {
+    long i, pl = tx_len(p, 64);
+    if (n < pl) return 0;
+    for (i = 0; i < pl; i = i + 1) if (s[i] != p[i]) return 0;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], com[4400], bound[4400], inc[4400], src[4400], img[4400], work[4400], base[4400], dopt[64];
+    char *v[16]; char why[512];
+    np_result r;
+    long i, ls, npass = 0, nfail = 0, total = -1;
+    int i2;
+    if (argc >= 2 && (tx_len(argv[1], 4400) == 0 || argv[1][0] != '/')) die("root");
+    if (argc >= 2) { if (tx_copy(root, 4096, argv[1], tx_len(argv[1], 4096))) die("root"); }
+    else if (sy_cwd(root, 4096) < 0) die("cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (cx_fmt(inc, sizeof inc, "%s/include", root)) die("inc");
+    if (cx_fmt(src, sizeof src, "%s/tests/safedel-chains/prog.c", root)) die("src");
+    if (sy_mkdtemp(sy_tmpdir(), "csdc-", work, (int)sizeof work)) die("work");
+    if (cx_fmt(img, sizeof img, "%s/prog.img", work)) die("img");
+    if (cx_fmt(base, sizeof base, "%s/base", work)) die("base");
+    if (sy_mkdir(base, 0755)) die("base mkdir");
+    if (cx_fmt(dopt, sizeof dopt, "-D__UNISA_FTRIM_LIBC=0")) die("dopt");
+
+    i2 = 0;
+    v[i2++] = bound; v[i2++] = "50"; v[i2++] = com;
+    v[i2++] = "-b"; v[i2++] = "lnx/x86_64";
+    v[i2++] = dopt; v[i2++] = "-I"; v[i2++] = inc;
+    v[i2++] = "-o"; v[i2++] = img; v[i2++] = src; v[i2] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    if (r.rc != 0) {
+        printf("FAIL\tcompile-with-workspace-header\n");
+        if (r.err) printf("%.*s\n", (int)(r.errn > 600 ? 600 : r.errn), r.err);
+        printf("SAFEDEL_CHAINS\tFAIL compile rc=%d\n", r.rc);
+        np_free(&r);
+        return 1;
+    }
+    np_free(&r);
+    printf("PASS\tcompile-with-workspace-header\n");
+    npass = 1;
+
+    v[0] = bound; v[1] = "50"; v[2] = img; v[3] = base; v[4] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    ls = 0;
+    for (i = 0; i <= (long)r.outn; i = i + 1) {
+        if (i == (long)r.outn || r.out[i] == '\n') {
+            const char *l = r.out + ls; long n = i - ls;
+            if (starts(l, n, "PASS\t")) { npass = npass + 1; printf("%.*s\n", (int)n, l); }
+            else if (starts(l, n, "FAIL\t")) { nfail = nfail + 1; printf("%.*s\n", (int)n, l); }
+            else if (starts(l, n, "TOTAL\t")) { long k; total = 0; for (k = 6; k < n && l[k] >= '0' && l[k] <= '9'; k = k + 1) total = total * 10 + (l[k] - '0'); }
+            ls = i + 1;
+        }
+    }
+    if (r.rc != 0) nfail = nfail + 1;
+    if (total < 20) nfail = nfail + 1;
+    printf("SAFEDEL_CHAINS\t%s assertions=%ld failed=%ld prog_total=%ld prog_rc=%d\n", nfail ? "FAIL" : "PASS", npass + nfail, nfail, total, r.rc);
+    np_free(&r);
+    return nfail ? 1 : 0;
+}

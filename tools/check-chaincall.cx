@@ -1,0 +1,146 @@
+/* tools/check-chaincall.cx -- cxlib.chaincall, the call plan chain-run decides with and
+ * candidate-chain / chain-step accept with. In-process only: no child, no clock, no file.
+ *
+ *   sh ./unisacc.com tools/check-chaincall.cx
+ *
+ * The unit is swept under the limits of build/limits.tsv and under three synthetic limit sets, for
+ * every plain bound 1..phase_max and for a group, every whole second left in the segment and a
+ * grid of total-deadline seconds (with and without a segment). The properties are those a runner
+ * and a validator that must never disagree need: an issued call is always accepted, nothing is
+ * issued only when no useful accepted call fits, a whole segment starts everything, and more time
+ * never takes a call away. The same properties over the real phase table, and the real
+ * candidate-chain's verdicts, are in tools/check-candidate-chain.cx --lane-split; the real runner
+ * at a segment tail is in tools/check-chain-run.cx --supervise.
+ * Prints PASS|FAIL lines and CHECK_CHAINCALL<TAB>failed=N<TAB>cases=M. */
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chaincall
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-chaincall.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-chaincall.%s\n", n); }
+}
+static long cases;
+static int bad_shape, bad_accept, bad_yield, bad_starve, bad_mono, bad_grid, bad_end;
+/* The validator written again from the limits alone (not through the unit). */
+static int oracle(const ccp_limits *l, int g, const ccp_plan *p) {
+    if (g) return p->group_s >= l->phase_default && p->group_s <= l->segment - l->reserve && p->env_bound >= 1 &&
+                  p->env_bound <= l->segment - l->reserve && p->bound >= 1 && p->bound <= l->segment &&
+                  p->group_s + l->reserve <= p->bound && p->end_s == 0;
+    return p->group_s == 0 && p->env_bound >= 1 && p->env_bound <= l->phase_max && p->bound == p->env_bound;
+}
+static void sweep_kind(const ccp_limits *l, int g, int b, int full_grid) {
+    const long far = 1000000;
+    int prev = CCP_YIELD, prev_bound = 0;
+    for (int r = 1; r <= l->segment; r++) {
+        ccp_plan p; int k = ccp_call_plan(l, g, b, r, far, &p); cases++;
+        if (k != p.kind || !(k == CCP_YIELD || k == (g ? CCP_RUN_GROUP : CCP_RUN))) bad_shape++;
+        if (k == CCP_YIELD) {
+            if (p.bound || p.env_bound || p.group_s || p.end_s || ccp_accept(l, &p)) bad_shape++;
+            if (!g && b <= r) bad_yield++;
+            if (g) for (int s = 1; s + l->reserve <= r; s++) if (s >= l->phase_default && s <= l->segment - l->reserve) bad_yield++;
+        } else {
+            if (!oracle(l, g, &p) || p.bound > r || !ccp_accept(l, &p) || !ccp_accept_bound(l, g, p.env_bound) ||
+                (g && !ccp_accept_group(l, l->phase_default, p.group_s)) || (!g && p.bound != b)) bad_accept++;
+            if (p.bound < prev_bound) bad_mono++;
+            /* a plain phase is told to end before its owner starts killing (bound - 2), or not told at all */
+            if (!g && (p.end_s != (b < l->end_min ? 0 : b - l->end_margin) || (p.end_s && (p.end_s < 1 || p.end_s + 2 >= p.bound)))) bad_end++;
+        }
+        if (prev != CCP_YIELD && k == CCP_YIELD) bad_mono++;
+        if ((k == CCP_YIELD) != (r < ccp_need(l, g, b))) bad_yield++;
+        if (r == l->segment && k == CCP_YIELD) bad_starve++;
+        prev = k; prev_bound = p.bound;
+    }
+    if (!full_grid) return;
+    for (int r = -1; r <= l->segment; r++) {
+        if (!r) continue;
+        int before = CCP_YIELD;
+        for (int d = 1; d <= l->segment + 5; d++) {
+            ccp_plan p; int k = ccp_call_plan(l, g, b, r, d, &p); cases++;
+            long room = r < 0 || d < r ? d : r;
+            if (g) {
+                long avail = room > l->segment ? l->segment : room; int want = avail >= l->phase_default + l->reserve;
+                if ((k == CCP_RUN_GROUP) != want || (!want && k != CCP_YIELD)) bad_grid++;
+                else if (want && (p.bound != avail || p.group_s != avail - l->reserve || p.env_bound != p.group_s || !ccp_accept(l, &p) || !oracle(l, 1, &p))) bad_grid++;
+            } else {
+                long bb = d < b ? d : b; int want = r < 0 || bb <= r;
+                if ((k == CCP_RUN) != want || (!want && k != CCP_YIELD)) bad_grid++;
+                else if (want && (p.bound != bb || p.env_bound != bb || !ccp_accept(l, &p) || !oracle(l, 0, &p))) bad_grid++;
+            }
+            /* a longer total deadline never takes a group call away; a plain phase whose bound was shortened by
+               the deadline to fit the segment may stop fitting once the deadline lets it be whole again */
+            if (g && before != CCP_YIELD && k == CCP_YIELD) bad_mono++;
+            before = k;
+        }
+    }
+}
+static void sweep(const ccp_limits *l) {
+    for (int b = 1; b <= l->phase_max; b++)
+        sweep_kind(l, 0, b, b == 1 || b == l->end_min - 1 || b == l->end_min || b == l->phase_default || b == l->phase_max);
+    sweep_kind(l, 1, l->phase_default, 1);
+}
+
+int main(void) {
+    ccp_limits t;
+    int loaded = !ccp_limits_load(&t);
+    ck(loaded && t.phase_default == (int)lm_get("phase.bound", 0) && t.phase_max == (int)lm_max("phase.bound", 0) &&
+       t.segment == (int)lm_get("segment", 0) && t.reserve == 3 && t.end_margin == 14 && t.end_min == 30 &&
+       ccp_group_max(&t) == t.segment - 3 && t.phase_max <= ccp_group_max(&t), "limits-loaded-from-the-limits-table");
+    if (!loaded) { sy_printf("CHECK_CHAINCALL\tfailed=%d\tcases=0\n", failed); return 1; }
+    /* validators at their edges */
+    ck(!ccp_accept_bound(&t, 0, 0) && ccp_accept_bound(&t, 0, 1) && ccp_accept_bound(&t, 0, t.phase_max) && !ccp_accept_bound(&t, 0, t.phase_max + 1) &&
+       !ccp_accept_bound(&t, 0, -5), "plain-bound-accepted-1-to-phase-max");
+    ck(!ccp_accept_bound(&t, 1, 0) && ccp_accept_bound(&t, 1, 1) && ccp_accept_bound(&t, 1, t.segment - 3) && !ccp_accept_bound(&t, 1, t.segment - 2) &&
+       !ccp_accept_bound(&t, 1, t.segment), "group-bound-accepted-1-to-segment-less-reserve");
+    ck(!ccp_accept_group(&t, t.phase_default, t.phase_default - 1) && ccp_accept_group(&t, t.phase_default, t.phase_default) &&
+       ccp_accept_group(&t, t.phase_default, t.segment - 3) && !ccp_accept_group(&t, t.phase_default, t.segment - 2) &&
+       !ccp_accept_group(&t, 0, 10) && !ccp_accept_group(&t, t.phase_default, 0), "group-seconds-accepted-one-job-to-segment-less-reserve");
+    ck(ccp_need(&t, 0, 7) == 7 && ccp_need(&t, 1, 7) == t.phase_default + 3, "need-is-own-bound-or-one-job-plus-reserve");
+    /* ccp_accept refuses what is not a well-formed issued call */
+    {   ccp_plan p; int k = ccp_call_plan(&t, 0, t.phase_default, t.segment, 1000000, &p);
+        ccp_plan a = p, b = p, c, d, e, y;
+        a.group_s = t.phase_default; b.env_bound = p.bound - 1;
+        int kg = ccp_call_plan(&t, 1, t.phase_default, t.segment, 1000000, &c);
+        d = c; d.bound = d.group_s + 2; e = c; e.env_bound = t.segment;
+        y.kind = CCP_YIELD; y.bound = y.env_bound = y.group_s = y.end_s = 0;
+        ck(k == CCP_RUN && ccp_accept(&t, &p) && !ccp_accept(&t, &a) && !ccp_accept(&t, &b) && kg == CCP_RUN_GROUP && ccp_accept(&t, &c) &&
+           !ccp_accept(&t, &d) && !ccp_accept(&t, &e) && !ccp_accept(&t, &y), "accept-refuses-malformed-calls-and-a-yield");
+    }
+    /* the three 0.0.59 stops of the old split rule, as calls this unit never issues */
+    {   ccp_plan p; int k62 = ccp_call_plan(&t, 1, t.phase_default, 62, 1000000, &p);
+        ccp_plan q; int k269 = ccp_call_plan(&t, 1, t.phase_default, t.segment - 1, 1000000, &q);
+        ccp_plan r; int k227 = ccp_call_plan(&t, 1, t.phase_default, 230, 1000000, &r);
+        ck(k62 == CCP_YIELD && !ccp_accept_group(&t, t.phase_default, 59), "segment-tail-62s-left-is-a-yield-not-the-refused-59");
+        ck(k269 == CCP_RUN_GROUP && q.env_bound == t.segment - 4 && !ccp_accept_bound(&t, 1, t.segment - 1), "segment-start-exports-group-seconds-not-the-refused-remainder");
+        ck(k227 == CCP_RUN_GROUP && r.group_s == 227 && r.env_bound == 227 && r.bound == 230 && !ccp_accept_bound(&t, 0, 227), "group-budget-227-is-a-group-call-never-a-plain-bound");
+    }
+    /* group names */
+    ck(ccp_group_of("jobs-tool") && ccp_group_of("jobs-gen-3-start") && ccp_group_of("jobs-tbl") && ccp_group_of("jobs-net-0") &&
+       tx_eqz(ccp_group_of("jobs-gen-3-start"), "jobs-gen") && !ccp_group_of("jobs-toolx") && !ccp_group_of("jobs") && !ccp_group_of("snap") &&
+       ccp_group_target("jobs-net") && !ccp_group_target("jobs-net-0") && !ccp_group_target("pack") && !ccp_group_target(0), "group-names-and-targets");
+    /* sweeps: the table's limits and three synthetic sets (short segment, default = max, a larger reserve) */
+    ccp_limits sets[4] = {t, {5, 8, 30, 3, 14, 30}, {55, 55, 270, 3, 14, 30}, {40, 60, 200, 7, 10, 20}};
+    for (int i = 0; i < 4; i++) sweep(&sets[i]);
+    ck(cases > 100000 && !bad_shape, "answer-is-run-run-group-or-yield");
+    ck(!bad_accept, "every-issued-call-passes-the-validator");
+    ck(!bad_yield, "yield-only-when-no-valid-call-fits");
+    ck(!bad_starve, "whole-segment-starts-every-kind");
+    ck(!bad_mono, "more-time-never-turns-run-into-yield");
+    ck(!bad_grid, "deadline-grid-with-and-without-segment");
+    ck(!bad_end, "plain-phase-told-to-end-before-the-owner-kills");
+    /* chain-step re-verification bounds derive from the phase bound (sub = bound - 5, total = sub * 1000 ms),
+       and a bound hit exits 124 (retryable kill class), never rc 2. */
+    ck(ccp_sub_bound(&t, 1, 90, 45) == 85 && ccp_sub_bound(&t, 1, 120, 45) == 115 && ccp_sub_bound(&t, 0, 90, 45) == 45 &&
+       ccp_sub_bound(&t, 1, 70, 45) * 1000L >= 65000L, "chainstep-sub-bound-90-85-120-115-absent-45-70s-reverify-fits");
+    {
+        FILE *f = fopen("tools/chain-step.cx", "rb"); static char src[400000]; size_t n = f ? fread(src, 1, sizeof src - 1, f) : 0;
+        if (f) fclose(f); src[n] = 0;
+        ck(n > 0 && !strstr(src, "60000)cs_die") && !strstr(src, "cx_runv_timeout(v,cs_lim(\"cmd.front\")") &&
+           strstr(src, "cs_total_ms()") && strstr(src, "cx_runv_timeout(v,cs_sub_bound()") && strstr(src, "sy_exit(124)"),
+           "chainstep-reverify-bound-derived-and-hit-is-rc124");
+    }
+    sy_printf("CHECK_CHAINCALL\tfailed=%d\tcases=%ld\n", failed, cases);
+    return failed ? 1 : 0;
+}

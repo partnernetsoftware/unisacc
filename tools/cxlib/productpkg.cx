@@ -1,5 +1,6 @@
 #pragma unisa module productpkg
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
 #pragma unisa use packagefooter
 /* cxlib/productpkg: which file actually carries the P3 package of an installed product, and
    what it takes to copy that product somewhere else.
@@ -124,7 +125,7 @@ char *pp_read_package(const char *root, size_t *n) {
  * "Unchanged" must mean the whole product, not one file. Under PP_SPLIT the launcher is 624
  * bytes and the package is megabytes, so hashing the launcher alone lets a batch rewrite the
  * package and still look unchanged -- a gap found while closing the 2026-11-02 structural
- * failures (plans/product-identity-2026-11-02.md).
+ * failures.
  *
  * PP_APE degenerates to sha256(whole file), exactly what the old guard computed, so old
  * evidence is not reinterpreted. PP_SPLIT hashes the member set:
@@ -169,7 +170,9 @@ static int pp_file_hex(const char *src, const char *name, char hex[65]) {
     if (pp_present(p) != 1) return -1;
     b = cx_read(p, &n);
     if (!b) return -1;
-    cx_sha256_hex(b, n, hex);
+    /* same bytes, same SHA-256: a large member goes through the kernel AF_ALG path (sys.sha) and any
+       failure there falls back to the software primitive, the shape tests/run-batch.cx digest() has */
+    if (n < 65536 || sy_sha256_hex(b, (long)n, hex) != 0) cx_sha256_hex(b, n, hex);
     free(b);
     return 0;
 }
@@ -442,7 +445,7 @@ static int pp_path_hex(const char *path, char hex[65]) {
     size_t n = 0;
     char *b;
     if (sy_stat(path, &st) != 0) return -1;
-    if (S_ISDIR(st.mode)) return pp_product_digest(path, hex);
+    if (st.kind == 'd') return pp_product_digest(path, hex);
     b = cx_read(path, &n);
     if (!b) return -1;
     cx_sha256_hex(b, n, hex);

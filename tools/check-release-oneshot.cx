@@ -9,6 +9,39 @@ static void ck(int ok,const char *s){printf("%s\tcheck-release-oneshot.%s\n",ok?
 static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))exit(2);}
 static int call(char **v,const char *cwd){pr_result r={0};int t=pr_run("oneshot fixture",v,cwd,0,12,&r);pr_echo(&r);int rc=t?125:r.rc;pr_free(&r);return rc;}
 static char *readall(const char *p){size_t n;char *s=cx_read(p,&n);if(!s)exit(2);return s;}
+/* --prepare binds by identity, not HEAD: a fixture git root whose HEAD moves ahead of build_rev.
+ * Only the freeze gate is qualified here; the fake driver then fails the chain child (rc 1). */
+static char hroot[4400],hdrv[4400];
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))exit(2);}
+static int git(const char *a,const char *b,const char *c,const char *d,char rev[41]){
+ char *v[]={"git","-c","user.name=Fixture","-c","user.email=fixture@invalid",(char*)a,(char*)b,(char*)c,(char*)d,0};pr_result r={0};
+ int t=pr_run("oneshot git",v,hroot,0,12,&r),rc=t?125:r.rc;if(!rc&&rev){if(r.outn<40)rc=1;else{for(int i=0;i<40;i++)rev[i]=r.out[i];rev[40]=0;}}pr_free(&r);return rc;
+}
+static int commit(const char *rel,const char *body,char rev[41]){char p[4400];path(p,hroot,rel);put(p,body);return git("add","--",rel,0,0)||git("commit","-qm",rel,0,0)||git("rev-parse","HEAD",0,0,rev);}
+static int prep(const char *bin,const char *out,const char *leaf,const char *rev,pr_result *r){
+ char st[4400],cf[4400],as[4400],text[12000],name[200];path(st,out,leaf);path(as,st,"rr/layout");if(cx_fmt(name,sizeof name,"%s.tsv",leaf))exit(2);path(cf,out,name);
+ if(cx_fmt(text,sizeof text,"root\t%s\nbuild_rev\t%s\nconstructor\t%s\nidentity_helper\t%s\nchain_out\t%s/%s.chain\nsnap\t%s/out/release-snap-%.10s\nversion\t1.2.3\nrepo\tfixture/repo\ntag\tv1.2.3\nworkflow\tcandidate-native.yml\nworkflow_ref\tmain\ncache_manager_x64\t%s\ncache_manager_arm64\t%s\ndeadline_s\t300\nchain_deadline_s\t300\nmax_resumes\t3\ntest_driver\t%s\n",hroot,rev,hdrv,hdrv,out,leaf,hroot,rev,hdrv,hdrv,hdrv))exit(2);put(cf,text);
+ char *v[]={(char*)bin,"--prepare",st,cf,as,"--authorize-external-operations",0};int t=pr_run("oneshot prepare",v,hroot,0,45,r);pr_echo(r);return t?125:r->rc;
+}
+static void headahead(const char *root,const char *out,const char *bin){
+ char p[4400],q[4400],base[41],head[41],orphan[41];pr_result r={0};
+ path(hroot,out,"headroot");path(hdrv,out,"fake-driver.sh");
+ put(hdrv,"#!/bin/sh\nif [ $# -eq 1 ]; then echo 1111111111111111111111111111111111111111111111111111111111111111; exit 0; fi\necho \"FAKE_PREPARE phase=$1\"; exit 9\n");
+ if(sy_chmod(hdrv,0700)||sy_mkdir(hroot,0700))exit(2);
+ char *init[]={"git","init","-q",hroot,0};if(call(init,out))exit(2);
+ path(p,hroot,"tools");path(q,hroot,"src");if(sy_mkdir(p,0700)||sy_mkdir(q,0700))exit(2);path(p,hroot,"plans");path(q,hroot,"out");if(sy_mkdir(p,0700)||sy_mkdir(q,0700))exit(2);
+ path(p,root,"unisacc.com");path(q,hroot,"unisacc.com");if(sy_symlink(p,q))exit(2);path(p,root,"tools/freeze-plan.cx");path(q,hroot,"tools/freeze-plan.cx");if(sy_symlink(p,q))exit(2);
+ if(git("add","unisacc.com","tools/freeze-plan.cx",0,0)||commit("src/a.dat","a\n",base)||commit("plans/note.md","non-product\n",head))exit(2);
+ int rc=prep(bin,out,"ahead-nonproduct",base,&r);path(p,out,"ahead-nonproduct/freeze.tsv");
+ ck(rc==1&&r.out&&strstr(r.out,"freeze=HEAD_AHEAD_NONPRODUCT")&&sy_exists(p)==1&&(!r.err||!strstr(r.err,"REFUSED")),"head-ahead-nonproduct-passes-prepare-freeze");pr_free(&r);
+ path(p,out,"ahead-nonproduct/freeze-delta.tsv");size_t sn=0;char *s=cx_read(p,&sn);ck(s&&strstr(s,"NONPRODUCT\tplans/note.md\n")&&strstr(s,"status=OK"),"head-ahead-delta-recorded");free(s);
+ if(commit("src/a.dat","b\n",head))exit(2);
+ rc=prep(bin,out,"ahead-product",base,&r);ck(rc==2&&r.err&&strstr(r.err,"PRODUCT\tsrc/a.dat\n")&&strstr(r.err,"REFUSED"),"head-ahead-product-change-refuses-naming-path");pr_free(&r);
+ if(git("commit-tree","HEAD^{tree}","-m","orphan",orphan))exit(2);
+ rc=prep(bin,out,"not-ancestor",orphan,&r);ck(rc==2&&r.err&&strstr(r.err,"reason=NOT_ANCESTOR"),"build-rev-not-ancestor-refuses");pr_free(&r);
+ path(p,hroot,"weird");if(sy_mkdir(p,0700))exit(2);if(commit("weird/x.txt","unclassified\n",orphan))exit(2);
+ rc=prep(bin,out,"unclassified",head,&r);ck(rc==2&&r.err&&strstr(r.err,"UNCLASSIFIED\tweird/x.txt\n"),"unclassified-path-refuses-at-freeze");pr_free(&r);
+}
 int main(int argc,char **argv){
  if(argc!=4){fprintf(stderr,"check-release-oneshot: needs explicit prebuilt ONESHOT_BINARY\n");return 77;}const char *root=argv[1],*out=argv[2];if(out[0]!='/'||sy_mkdir(out,0700))return 2;
  char bin[4400],table[4400],assets[4400],state[4400],p[4400];
@@ -28,5 +61,6 @@ int main(int argc,char **argv){
  path(p,assets,names[0]);if(cx_write(p,"changed",7))return 2;ck(call(resume,root)==2,"changed-input-refuses-resume");
  if(cx_write(p,"fixture-asset-0\n",strlen("fixture-asset-0\n")))return 2;
  path(p,state,"checkpoint.tsv");if(cx_write(p,"9\twrong\tPLANNED\n",strlen("9\twrong\tPLANNED\n")))return 2;ck(call(resume,root)==2,"corrupt-checkpoint-refuses");
- printf("CHECK_RELEASE_ONESHOT\tfailed=%d\tscope=isolated-dry-run\n",failed);return failed?1:0;
+ headahead(root,out,bin);
+ printf("CHECK_RELEASE_ONESHOT\tfailed=%d\tscope=isolated-dry-run+prepare-freeze\n",failed);return failed?1:0;
 }

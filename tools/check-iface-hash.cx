@@ -1,0 +1,169 @@
+/* tools/check-iface-hash.cx -- tools/iface-hash.cx on fixture layer-api directories.
+ *
+ *   sh ./unisacc.com tools/check-iface-hash.cx [-- ROOT WORKDIR]
+ *
+ * Writes small DIR/PKG.tsv fixtures under WORKDIR and runs the generator on them: a signature edit changes
+ * the hash, a body-only edit (layer-api carries no bodies, so: same signatures, other sig_sha/file columns)
+ * and a row reorder and blank noise do not, add/remove/rename change it, empty package, duplicate rows
+ * refused, write then --check passes, one flipped byte fails --check, and the checked-in table is current.
+ * Prints PASS/FAIL lines and IFACE_HASH_CHECK<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nok, nfail;
+static char root[4096], work[4400], prod[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int c, const char *name) {
+    sy_printf("%s\tiface-hash.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static int gen(const char *mode, const char *api, const char *table) {
+    char *v[10];
+    int k = 0;
+    v[k++] = "sh"; v[k++] = prod; v[k++] = "tools/iface-hash.cx"; v[k++] = "--";
+    v[k++] = (char *)mode;
+    if (api) { v[k++] = "--api"; v[k++] = (char *)api; }
+    if (table) { v[k++] = "--table"; v[k++] = (char *)table; }
+    v[k] = 0;
+    mm_free(last); last = 0; lastn = 0;
+    return cx_runv_timeout(v, 50, &last, &lastn);
+}
+static void put(const char *dir, const char *file, const char *text) {
+    char p[4400];
+    (void)sy_mkdir(dir, 0755);
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, file) || cx_write(p, text, (size_t)tx_len(text, 100000))) sy_printf("FAIL\tfixture %s/%s\n", dir, file);
+}
+/* field F of data row R (0-based, after two header lines) of TABLE into out; 0 ok */
+static int cell(const char *table, int r, int f, char *out, int cap) {
+    size_t n = 0;
+    char *t = cx_read(table, &n);
+    long i = 0, e, o, l;
+    int line = -2, rc = 1;
+    if (!t) return 1;
+    while (i < (long)n) {
+        e = i;
+        while (e < (long)n && t[e] != '\n') e++;
+        if (line == r && !tx_field(t + i, e - i, '\t', f, &o, &l) && !tx_copy(out, cap, t + i + o, l)) { rc = 0; break; }
+        line++;
+        i = e + 1;
+    }
+    mm_free(t);
+    return rc;
+}
+static char *dir(const char *name) {
+    static char d[8][4400];
+    static int k;
+    char *p = d[k++ & 7];
+    cx_fmt(p, 4400, "%s/%s", work, name);
+    return p;
+}
+/* hash of the single package p in fixture dir NAME; 0 if the run failed */
+static int hash_of(const char *name, char *hex, int *rcp) {
+    char tb[4400];
+    cx_fmt(tb, sizeof tb, "%s/%s.out", work, name);
+    *rcp = gen("--write", dir(name), tb);
+    hex[0] = 0;
+    return *rcp == 0 && !cell(tb, 0, 1, hex, 80) && tx_len(hex, 80) == 64;
+}
+
+int main(int argc, char **argv) {
+    char h0[80], h1[80], tb[4400], tb2[4400], num[32];
+    int rc, ok;
+    if (argc >= 3) { tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096)); cx_fmt(work, sizeof work, "%s", argv[2]); }
+    else if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s/check-iface-hash-%d", sy_tmpdir(), sy_pid())) return 2;
+    (void)sy_mkdir(work, 0755);
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || sy_chdir(root)) return 2;
+
+    put(dir("base"), "p.tsv", "# layer-api v1 p\n# name\tsignature\tsig_sha\tfile\nf\tint f(int a);\t1111\tx.cx\ng\tint g(void);\t2222\tx.cx\nh\tlong h(long n, char *s);\t3333\ty.cx\n");
+    put(dir("sigchg"), "p.tsv", "# layer-api v1 p\nf\tint f(long a);\t1111\tx.cx\ng\tint g(void);\t2222\tx.cx\nh\tlong h(long n, char *s);\t3333\ty.cx\n");
+    put(dir("bodyonly"), "p.tsv", "# layer-api v1 p\nf\tint f(int a);\taaaa\tz.cx\ng\tint g(void);\tbbbb\tz.cx\nh\tlong h(long n, char *s);\tcccc\tz.cx\n");
+    put(dir("reorder"), "p.tsv", "h\tlong h(long n, char *s);\t3333\ty.cx\n\ng\tint g(void);\t2222\tx.cx\n# note\nf\tint f(int a);\t1111\tx.cx\n");
+    put(dir("blanks"), "p.tsv", "f\t  int   f(int a);  \t1\tx.cx\ng\tint  g(void);\t2\tx.cx\nh\tlong h(long n,   char *s);\t3\ty.cx\n");
+    put(dir("added"), "p.tsv", "f\tint f(int a);\t1\tx.cx\ng\tint g(void);\t2\tx.cx\nh\tlong h(long n, char *s);\t3\ty.cx\nk\tint k(void);\t4\tx.cx\n");
+    put(dir("removed"), "p.tsv", "f\tint f(int a);\t1\tx.cx\ng\tint g(void);\t2\tx.cx\n");
+    put(dir("renamed"), "p.tsv", "f\tint f(int a);\t1\tx.cx\ng\tint g2(void);\t2\tx.cx\nh\tlong h(long n, char *s);\t3\ty.cx\n");
+    put(dir("empty"), "p.tsv", "# layer-api v1 p\n# name\tsignature\tsig_sha\tfile\n# excluded\tx.cx\tlibc-forward\n");
+    put(dir("dup"), "p.tsv", "f\tint f(int a);\t1\tx.cx\ng\tint g(void);\t2\tx.cx\nf\tint f(int a);\t1\tx.cx\n");
+    put(dir("tagfn"), "p.tsv", "f\ttypedef struct f { int a; } f;\t1\tx.cx\nf\tint f(int a);\t2\tx.cx\n");
+    put(dir("two"), "b.tsv", "f\tint f(void);\t1\tx.cx\n");
+    put(dir("two"), "a.tsv", "g\tint g(void);\t1\tx.cx\ng2\tint g2(void);\t1\tx.cx\n");
+
+    ok = hash_of("base", h0, &rc);
+    ck(ok, "base-write-rc0-hash64");
+    cx_fmt(tb, sizeof tb, "%s/base.out", work);
+    ck(!cell(tb, 0, 2, num, sizeof num) && tx_eqz(num, "3"), "base-n-exports-3");
+    ck(!cell(tb, 0, 0, num, sizeof num) && tx_eqz(num, "p"), "base-pkg-name");
+
+    ok = hash_of("sigchg", h1, &rc);
+    ck(ok && !tx_eqz(h0, h1), "signature-change-changes-hash");
+    ok = hash_of("bodyonly", h1, &rc);
+    ck(ok && tx_eqz(h0, h1), "same-signatures-other-sha-and-file-same-hash");
+    ok = hash_of("reorder", h1, &rc);
+    ck(ok && tx_eqz(h0, h1), "row-order-comments-blank-lines-irrelevant");
+    ok = hash_of("blanks", h1, &rc);
+    ck(ok && tx_eqz(h0, h1), "blank-runs-collapsed");
+    ok = hash_of("added", h1, &rc);
+    ck(ok && !tx_eqz(h0, h1), "added-export-changes-hash");
+    cx_fmt(tb, sizeof tb, "%s/added.out", work);
+    ck(!cell(tb, 0, 2, num, sizeof num) && tx_eqz(num, "4"), "added-n-exports-4");
+    ok = hash_of("removed", h1, &rc);
+    ck(ok && !tx_eqz(h0, h1), "removed-export-changes-hash");
+    cx_fmt(tb, sizeof tb, "%s/removed.out", work);
+    ck(!cell(tb, 0, 2, num, sizeof num) && tx_eqz(num, "2"), "removed-n-exports-2");
+    ok = hash_of("renamed", h1, &rc);
+    ck(ok && !tx_eqz(h0, h1), "renamed-export-changes-hash");
+
+    ok = hash_of("empty", h1, &rc);
+    ck(ok && tx_eqz(h1, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "empty-package-hashes-empty-string");
+    cx_fmt(tb, sizeof tb, "%s/empty.out", work);
+    ck(!cell(tb, 0, 2, num, sizeof num) && tx_eqz(num, "0"), "empty-n-exports-0");
+
+    cx_fmt(tb, sizeof tb, "%s/dup.out", work);
+    rc = gen("--write", dir("dup"), tb);
+    ck(rc == 2, "duplicate-rows-rc2");
+    ck(last && lastn > 6 && tx_prefix(last, (long)lastn, "REFUSE", 6) && cell(tb, 0, 0, num, sizeof num), "duplicate-rows-REFUSE-no-table");
+    ok = hash_of("tagfn", h1, &rc);
+    ck(ok, "same-name-different-signature-allowed");
+
+    cx_fmt(tb, sizeof tb, "%s/two.out", work);
+    rc = gen("--write", dir("two"), tb);
+    ck(rc == 0 && !cell(tb, 0, 0, num, sizeof num) && tx_eqz(num, "a") && !cell(tb, 1, 0, num, sizeof num) && tx_eqz(num, "b"), "packages-sorted-by-name");
+    ck(!cell(tb, 0, 2, num, sizeof num) && tx_eqz(num, "2"), "two-first-package-n-2");
+
+    cx_fmt(tb, sizeof tb, "%s/base.out", work);
+    rc = gen("--check", dir("base"), tb);
+    ck(rc == 0, "check-after-write-rc0");
+    rc = gen("--check", dir("sigchg"), tb);
+    ck(rc == 1 && last && lastn > 4 && tx_prefix(last, (long)lastn, "DIFF", 4), "check-against-other-source-rc1-DIFF");
+    {   size_t n = 0;
+        char *t = cx_read(tb, &n);
+        long i, pos = -1;
+        for (i = 0; t && i < (long)n; i++) if (t[i] == 'p' && i > 0 && t[i - 1] == '\n' && t[i + 1] == '\t') { pos = i + 2; break; }
+        ck(pos > 0, "tamper-locate-hash");
+        if (pos > 0) t[pos] = t[pos] == '0' ? '1' : '0';
+        cx_fmt(tb2, sizeof tb2, "%s/tampered.out", work);
+        ck(t && !cx_write(tb2, t, n), "tamper-write");
+        rc = gen("--check", dir("base"), tb2);
+        ck(rc == 1 && last && lastn > 4 && tx_prefix(last, (long)lastn, "DIFF", 4), "one-flipped-byte-check-fails-DIFF");
+        mm_free(t);
+    }
+    cx_fmt(tb2, sizeof tb2, "%s/absent.out", work);
+    rc = gen("--check", dir("base"), tb2);
+    ck(rc == 1, "check-missing-table-rc1");
+    rc = gen("--check", dir("nonexistent-dir"), tb);
+    ck(rc == 2, "unreadable-api-dir-rc2");
+    rc = gen("--bogus", 0, 0);
+    ck(rc == 2, "usage-rc2");
+    rc = gen("--check", 0, 0);
+    ck(rc == 0 && last && lastn > 10 && tx_prefix(last, (long)lastn, "IFACE_HASH\tok", 13), "checked-in-table-current");
+
+    sy_printf("IFACE_HASH_CHECK\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

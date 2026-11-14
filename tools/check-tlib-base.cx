@@ -16,7 +16,14 @@
  *  (7) when the line names ext.memx, ext.textx or ext.sysx: a second probe that calls into each of
  *      them (growable buffer, slice, arena; formatting, numbers, string builder; descriptor dup and a
  *      child run through the prelude's cx_runv_timeout) links against the tlibs and behaves as its
- *      source build, for two inputs.
+ *      source build, for two inputs;
+ *  (8) when the line names cx.compile, cx.runtime, cx.driver or cx.plan: a ring probe that calls
+ *      into each of them by its package-root module name links against the tlibs and behaves as
+ *      its source build, for two inputs.
+ * A token dep=PKG names a dependency of the line that is not asserted here: its tlib is material,
+ * taken from the default package cache (verified by structure and input sha, as every build does)
+ * or built now, and the links verify it like any other tlib; (1)-(4), (7) and (8) are for the
+ * packages named without the prefix, whose own batches carry the dependencies' assertions.
  * One MEASURED line per package (units, bytes, cold build ms) and one for the probe link; they are
  * measurements, not results. tools/tlib.cx is built once (tq_native: PREPARED, not a result). */
 #pragma unisa use cxlib.toolprep
@@ -28,7 +35,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-#define MAXP 6
+#define MAXP 12
 
 static int failed;
 static char root[4096], work[4400], tlib[4400];
@@ -107,6 +114,7 @@ int main(int argc, char **argv) {
     char src[4400], why[256], outdir[4400], cache[4400], probe[4400], need[4400], srcbin[4400], tlbin[4400], tdir[4400], manifest[4400];
     char ver[32], sha1[65], sha2[65], units[16], bytes[24], ms[24];
     const char *pkgs[MAXP];
+    int isdep[MAXP];
     int npkg = 0, rc, prep = 0, i, built = 0;
     long t0 = sy_now_ms();
 
@@ -119,8 +127,18 @@ int main(int argc, char **argv) {
         if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/tlib-base-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
         (void)sy_mkdir(dot, 0755);
     }
-    for (i = 3; i < argc && npkg < MAXP; i++) if (argv[i][0]) pkgs[npkg++] = argv[i];
-    if (!npkg) pkgs[npkg++] = "cx.base";
+    for (i = 3; i < argc && npkg < MAXP; i++) {
+        if (!argv[i][0]) continue;
+        isdep[npkg] = tx_prefixz(argv[i], "dep=", 4) ? 1 : 0;
+        pkgs[npkg] = isdep[npkg] ? argv[i] + 4 : argv[i];
+        npkg++;
+    }
+    if (!npkg) {
+        /* 17-package layout: the cx-only probe uses sys/os/text/mem, which live in sibling packages
+           that cx.base no longer contains; they are dependencies of the line, cx.base the subject. */
+        static const char *dflt[] = {"cx.mem", "cx.sys", "cx.os", "cx.text", "cx.base"};
+        for (i = 0; i < 5; i++) { pkgs[npkg] = dflt[i]; isdep[npkg] = i < 4; npkg++; }
+    }
     if (sy_mkdir(work, 0700) || sy_realpath(work, work, sizeof work) < 0) return 2;
     if (cx_fmt(tlib, sizeof tlib, "%s/tlib.native", work) || cx_fmt(outdir, sizeof outdir, "%s/o", work) || cx_fmt(cache, sizeof cache, "%s/cache", work) ||
         cx_fmt(tdir, sizeof tdir, "%s/t", work) || cx_fmt(probe, sizeof probe, "%s/probe.cx", tdir) || cx_fmt(need, sizeof need, "%s/need.cx", tdir) ||
@@ -133,8 +151,24 @@ int main(int argc, char **argv) {
 
     for (i = 0; i < npkg; i++) {
         char *b[] = {"build", (char *)pkgs[i], "--out", outdir, "--cache", cache, 0};
+        char *bd[] = {"build", (char *)pkgs[i], "--out", outdir, 0};
         size_t mn = 0;
         char *m;
+        if (isdep[i]) {
+            /* a dependency of the line: material only, from the default cache or built now; its own
+               assertions are its own batch's. The link below verifies it like any other tlib. */
+            long e, o, l;
+            rc = run(bd);
+            e = last ? tx_chr(last, (long)lastn, '\n') : -1;
+            if (rc || e < 0 || tx_field(last, e, '\t', 2, &o, &l) || tx_copy(ver, sizeof ver, last + o, l) ||
+                cx_fmt(path[i], 4400, "%s/%s@%s.tlib", outdir, pkgs[i], ver)) {
+                ck(0, pkgs[i], "dependency-tlib-prepared");
+                continue;
+            }
+            sy_printf("PREPARED\t%s@%s\tdependency\tno-test-result\n", pkgs[i], ver);
+            built++;
+            continue;
+        }
         rc = run(b);
         ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && !field("TLIB_BUILD", "content_sha=", sha1, sizeof sha1), pkgs[i], "cold-build-from-source");
         if (rc || field("TLIB_BUILD", "units=", units, sizeof units) || field("TLIB_BUILD", "bytes=", bytes, sizeof bytes) || field("TLIB_BUILD", "ms=", ms, sizeof ms)) continue;
@@ -207,7 +241,7 @@ int main(int argc, char **argv) {
         ck(r6 == 6 && sy_exists(tlbin) == 0, "set", "link-refuses-closure-with-excluded-unit");
         /* The cx-only probe belongs to the line that names cx.base alone (batch tlib-base); a line
            with outer packages runs the second probe below instead, inside the same time budget. */
-        for (i = 0; i < npkg; i++) if (tx_prefixz(pkgs[i], "ext.", 4)) outer = 1;
+        for (i = 0; i < npkg; i++) if (!isdep[i] && !tx_eqz(pkgs[i], "cx.base")) outer = 1;
         tl0 = sy_now_ms();
         rc = outer ? -1 : run(l);
         tl0 = sy_now_ms() - tl0;
@@ -227,6 +261,7 @@ int main(int argc, char **argv) {
     {
         int memx = 0, textx = 0, sysx = 0;
         for (i = 0; i < npkg; i++) {
+            if (isdep[i]) continue;
             if (tx_eqz(pkgs[i], "ext.memx")) memx = 1;
             if (tx_eqz(pkgs[i], "ext.textx")) textx = 1;
             if (tx_eqz(pkgs[i], "ext.sysx")) sysx = 1;
@@ -273,6 +308,62 @@ int main(int argc, char **argv) {
                 sy_printf("MEASURED\text-probe\ttlib_link_ms=%ld\tsource_build_ms=%ld\ttlib_units=%s\tmemx=%d\ttextx=%d\tsysx=%d\tno-test-result\n",
                           tl0, sy_now_ms() - ts0, units, memx, textx, sysx);
                 ck(!prep && same_behaviour(src2, tl2, "tape", 0) && same_behaviour(src2, tl2, "library-probe", 0), "set", "ext-probe-behaves-as-source-build");
+            }
+        }
+    }
+
+    /* (8) ring packages: a probe that calls into each ring package asserted on the line, by the
+       package-root module names (compiler.*, runtime.*, driver.*, cx0.*). */
+    {
+        int comp = 0, runt = 0, driv = 0, plan = 0;
+        for (i = 0; i < npkg; i++) {
+            if (isdep[i]) continue;
+            if (tx_eqz(pkgs[i], "cx.compile")) comp = 1;
+            if (tx_eqz(pkgs[i], "cx.runtime")) runt = 1;
+            if (tx_eqz(pkgs[i], "cx.driver")) driv = 1;
+            if (tx_eqz(pkgs[i], "cx.plan")) plan = 1;
+        }
+        if ((comp || runt || driv || plan) && !prep && built == npkg) {
+            static char text[8192];
+            char probe3[4400], src3[4400], tl3[4400];
+            char *l[8 + 2 * MAXP];
+            long tl0, ts0;
+            int k = 0;
+            prep = cx_fmt(probe3, sizeof probe3, "%s/probe3.cx", tdir) || cx_fmt(src3, sizeof src3, "%s/probe3.src", work) || cx_fmt(tl3, sizeof tl3, "%s/probe3.tl", work);
+            prep |= cx_fmt(text, sizeof text, "%s%s%s%s%s%s%s%s%s%s",
+                "#pragma unisa use sys.io\n#pragma unisa use text.text\n",
+                comp ? "#pragma unisa use compiler.archname\n#pragma unisa use compiler.leword\n" : "",
+                runt ? "#pragma unisa use runtime.archname\n#pragma unisa use runtime.routetime\n" : "",
+                driv ? "#pragma unisa use driver.path\n" : "",
+                plan ? "#pragma unisa use cx0.bundle\n" : "",
+                "int main(int argc, char **argv) {\n    const char *w = argc > 1 ? argv[1] : \"a.o\";\n    int rc = 20;\n    (void)w;\n",
+                comp ? "    { const char *n = 0; unsigned char le[8]; int r = arc_at(0, &n), k = lw_put(le, 8, 0x1122334455667788ULL);\n"
+                       "      sy_printf(\"compile archs=%d first=%s rc=%d le=%d %02x\\n\", arc_count(), n ? n : \"-\", r, k, le[0]); rc += arc_count(); }\n" : "",
+                runt ? "    { const char *n = 0; int r = rarc_at(0, &n);\n"
+                       "      sy_printf(\"runtime archs=%d first=%s rc=%d ns=%lld\\n\", rarc_count(), n ? n : \"-\", r, rr_ns(1, 5, 2, 7)); rc += rarc_count(); }\n" : "",
+                driv ? "    { sy_printf(\"driver object=%d archive=%d tape=%d\\n\", cxp_object_path(w), cxp_archive_path(w), cxp_tape_path(w));\n"
+                       "      rc += cxp_archive_path(w) ? 3 : 1; }\n" : "",
+                plan ? "    { cxb_bundle b; char why[128]; int r; why[0] = 0; r = cxb_read(w, (size_t)tx_len(w, 200), &b, why, sizeof why);\n"
+                       "      sy_printf(\"plan read=%d why=%s\\n\", r, why); rc += r ? 2 : 0; }\n" : "");
+            prep |= tx_len(text, sizeof text) > (long)sizeof text - 32;
+            if (!prep) {
+                long tn = tx_len(text, sizeof text);
+                prep = cx_fmt(text + tn, sizeof text - (size_t)tn, "    return rc;\n}\n");
+            }
+            prep |= cx_write(probe3, text, (size_t)tx_len(text, sizeof text));
+            l[k++] = "link"; l[k++] = probe3; l[k++] = "-o"; l[k++] = tl3;
+            for (i = 0; i < npkg; i++) { l[k++] = "--tlib"; l[k++] = path[i]; }
+            l[k] = 0;
+            tl0 = sy_now_ms();
+            rc = prep ? -1 : run(l);
+            tl0 = sy_now_ms() - tl0;
+            ck(!prep && rc == 0 && sy_exists(tl3) == 1, "set", "ring-probe-links-against-tlibs");
+            if (!prep && !rc && !field("TLIB_LINK", "tlib_units=", units, sizeof units)) {
+                ts0 = sy_now_ms();
+                prep = tq_native(root, probe3, src3, why, sizeof why);
+                sy_printf("MEASURED\tring-probe\ttlib_link_ms=%ld\tsource_build_ms=%ld\ttlib_units=%s\tcompile=%d\truntime=%d\tdriver=%d\tplan=%d\tno-test-result\n",
+                          tl0, sy_now_ms() - ts0, units, comp, runt, driv, plan);
+                ck(!prep && same_behaviour(src3, tl3, "a.o", 0) && same_behaviour(src3, tl3, "lib.a", 0), "set", "ring-probe-behaves-as-source-build");
             }
         }
     }

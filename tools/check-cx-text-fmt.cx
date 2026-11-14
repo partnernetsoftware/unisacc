@@ -1,0 +1,39 @@
+/* Checks tx_fmt / tx_vfmt (CXS-C3 S4): negative-code contract.  Prints PASS/FAIL, exit 1 on FAIL. */
+#pragma unisa use text.fmt
+
+static int failed = 0, total = 0;
+static void eq(const char *name, int got, int want) {
+    total++;
+    if (got != want) { failed++; printf("FAIL %s got=%d want=%d\n", name, got, want); }
+}
+static int vwrap(char *d, size_t cap, const char *f, ...) {
+    va_list ap; int n;
+    va_start(ap, f); n = tx_vfmt(d, cap, f, ap); va_end(ap);
+    return n;
+}
+int main(void) {
+    char b[8], c[4];
+    eq("ok", tx_fmt(b, 8, "a%db", 12), 4);
+    eq("ok-text", strcmp(b, "a12b"), 0);
+    eq("exact-fit", tx_fmt(b, 8, "%s", "1234567"), 7);
+    eq("trunc", tx_fmt(b, 8, "%s", "12345678"), -EMSGSIZE);
+    eq("trunc-prefix", strcmp(b, "1234567"), 0);
+    eq("trunc-cap1", tx_fmt(c, 1, "x"), -EMSGSIZE);
+    eq("trunc-cap1-nul", c[0], 0);
+    eq("null-dst", tx_fmt(0, 4, "x"), -EINVAL);
+    eq("null-fmt", tx_fmt(b, 8, 0), -EINVAL);
+    eq("zero-cap-null-dst-empty", tx_fmt(0, 0, ""), 0);
+    eq("zero-cap-null-dst-nonempty", tx_fmt(0, 0, "x"), -EMSGSIZE);
+    eq("zero-cap-buf", tx_fmt(b, 0, "x"), -EMSGSIZE);
+    eq("empty", tx_fmt(b, 8, ""), 0);
+    /* Smallest total past INT_MAX (INT_MAX + 1).  The prelude pads every byte before it reports
+       the overflow (measured 89 MB/s), so this one case is the whole run time of the check:
+       two INT_MAX widths cost 47.9 s, one costs 23.6 s.  Same contract, half the padding. */
+    eq("overflow-width", tx_fmt(b, 8, "%2147483647d%d", 1, 1), -EILSEQ);
+    eq("v-ok", vwrap(b, 8, "%d", 42), 2);
+    eq("v-trunc", vwrap(c, 4, "%d", 12345), -EMSGSIZE);
+    eq("v-null", vwrap(0, 4, "x"), -EINVAL);
+    eq("legacy-snprintf-unchanged", tx_snprintf(c, 4, "%d", 12345), 5);
+    printf("CX_TEXT_FMT\ttotal=%d failed=%d\n", total, failed);
+    return failed ? 1 : 0;
+}

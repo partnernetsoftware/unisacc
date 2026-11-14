@@ -1,0 +1,156 @@
+/* tools/tlib-cover.cx -- how much of a program's use closure the tape-library packages provide.
+ *
+ *   sh ./unisacc.com tools/tlib-cover.cx -- [--root ROOT] [--product FILE] [--slice K/N] FILE.cx...
+ *   sh ./unisacc.com tools/tlib-cover.cx -- [--root ROOT] [--product FILE] [--slice K/N] --batches
+ *
+ * For each FILE (ROOT-relative or absolute) the use closure comes from the product's -cx-plan and
+ * every unit of it is looked up in the packages of ROOT/build/tlib-packages.tsv:
+ *   COVER<TAB>file<TAB>units=N<TAB>tlib=M<TAB>source=K<TAB>excluded=X
+ * tlib: units a package packs; source: units a `tools/tlib.cx link` would compile (the file itself
+ * is always one); excluded: units a package excludes, which make that link refuse (rc 6 there).
+ * --batches takes the distinct source fields of the IMPLEMENTED SOURCE rows of ROOT/tests/batches.tsv
+ * that end in .cx. --slice K/N keeps the files whose position modulo N is K, so a long list runs
+ * as several bounded calls. A file whose plan fails is reported as COVER_FAILED<TAB>file<TAB>why.
+ * Ends with TLIB_COVER<TAB>files=..<TAB>failed=..<TAB>packages=..
+ * This counts units only: it says where a tlib link could pay, not that the link works (an object
+ * keeps every function of its unit; see tools/tlib.cx link).
+ * Exit: 0, 1 when a plan failed, 2 usage or an unreadable input.
+ * Check: tools/check-tlib-cover.cx. */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXPK 24
+#define MAXF 2048
+
+static TpPkg pks[MAXPK];
+static int npk;
+static char root[4096], product[4400];
+static char files[MAXF][256];
+static int nfiles;
+
+static int add_file(const char *s, long n) {
+    int i;
+    if (n <= 0 || n >= 256 || nfiles >= MAXF) return -1;
+    for (i = 0; i < nfiles; i++) if (tx_same(files[i], tx_len(files[i], 256), s, n)) return 0;
+    if (tx_copy(files[nfiles], 256, s, n)) return -1;
+    nfiles++;
+    return 0;
+}
+
+/* The distinct .cx source fields of the IMPLEMENTED SOURCE rows of the batch registry. */
+static int from_batches(void) {
+    char path[4400];
+    size_t n = 0;
+    char *b;
+    long i = 0, e, o, l, o1, l1, o4, l4;
+    if (cx_fmt(path, sizeof path, "%s/tests/batches.tsv", root)) return -1;
+    b = cx_read(path, &n);
+    if (!b) return -1;
+    while (i < (long)n) {
+        e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e > i && !tx_field(b + i, e - i, '\t', 1, &o1, &l1) && tx_same(b + i + o1, l1, "IMPLEMENTED", 11) &&
+            !tx_field(b + i, e - i, '\t', 4, &o4, &l4) && tx_same(b + i + o4, l4, "SOURCE", 6) &&
+            !tx_field(b + i, e - i, '\t', 3, &o, &l) && tx_suffix(b + i + o, l, ".cx", 3)) {
+            if (add_file(b + i + o, l)) { mm_free(b); return -1; }
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *rarg = ".", *parg = 0;
+    char why[512];
+    char *names;
+    long nn = 0, i = 0, e;
+    int k, batches = 0, sk = 0, sn = 1, failed = 0, shown = 0, bad = 0;
+    for (k = 1; k < argc && !bad; k++) {
+        if (tx_eqz(argv[k], "--root") && k + 1 < argc) rarg = argv[++k];
+        else if (tx_eqz(argv[k], "--product") && k + 1 < argc) parg = argv[++k];
+        else if (tx_eqz(argv[k], "--batches")) batches = 1;
+        else if (tx_eqz(argv[k], "--slice") && k + 1 < argc) {
+            const char *d = argv[++k];
+            sk = 0; sn = 0;
+            while (*d >= '0' && *d <= '9' && sk < 100000) sk = sk * 10 + (*d++ - '0');
+            if (*d++ != '/') bad = 1;
+            while (!bad && *d >= '0' && *d <= '9' && sn < 100000) sn = sn * 10 + (*d++ - '0');
+            if (bad || *d || sn < 1 || sk >= sn) bad = 1;
+        }
+        else if (argv[k][0] != '-') { if (add_file(argv[k], tx_len(argv[k], 300))) bad = 1; }
+        else bad = 1;
+    }
+    if (bad || (batches && nfiles) || (!batches && !nfiles)) {
+        sy_eprintf("tlib-cover: usage: [--root ROOT] [--product FILE] [--slice K/N] (FILE.cx... | --batches)\n");
+        return 2;
+    }
+    if (sy_realpath(rarg, root, sizeof root) < 0) { sy_eprintf("tlib-cover: bad root %s\n", rarg); return 2; }
+    if (parg) { if (sy_realpath(parg, product, sizeof product) < 0) { sy_eprintf("tlib-cover: bad product %s\n", parg); return 2; } }
+    else if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 2;
+    /* files named relative to the caller's directory keep meaning that after the move to ROOT */
+    {
+        char cwd[4096], abs[4400], real[4400];
+        long rl = tx_len(root, sizeof root);
+        if (sy_cwd(cwd, sizeof cwd) < 0) return 2;
+        for (k = 0; k < nfiles && !batches; k++) {
+            int r;
+            if (files[k][0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", files[k])) return 2; }
+            else if (cx_fmt(abs, sizeof abs, "%s/%s", cwd, files[k])) return 2;
+            r = sy_realpath(abs, real, sizeof real);
+            if (r < 0) { sy_eprintf("tlib-cover: no such source %s\n", files[k]); return 2; }
+            if (r > rl && tx_prefix(real, r, root, rl) && real[rl] == '/') { if (tx_copy(files[k], 256, real + rl + 1, r - rl - 1)) return 2; }
+            else if (tx_copy(files[k], 256, real, r)) return 2;
+        }
+    }
+    if (sy_chdir(root)) { sy_eprintf("tlib-cover: cannot enter %s\n", root); return 2; }
+    if (batches && from_batches()) { sy_eprintf("tlib-cover: cannot read tests/batches.tsv\n"); return 2; }
+    names = tp_names(root, &nn);
+    if (!names) { sy_eprintf("tlib-cover: no package table\n"); return 2; }
+    while (i < nn) {
+        char pkg[64];
+        e = i;
+        while (e < nn && names[e] != '\n') e++;
+        if (e > i && !tx_copy(pkg, sizeof pkg, names + i, e - i)) {
+            if (npk >= MAXPK || tp_load(root, pkg, &pks[npk], why, sizeof why)) { sy_eprintf("tlib-cover: %s: %s\n", pkg, why); return 2; }
+            npk++;
+        }
+        i = e + 1;
+    }
+    mm_free(names);
+    for (k = 0; k < nfiles; k++) {
+        char *c;
+        long cn, j = 0, je;
+        int units = 0, in = 0, ex = 0, p;
+        if (k % sn != sk) continue;
+        shown++;
+        c = tp_closure(root, product, files[k], why, sizeof why);
+        if (!c) { failed++; sy_printf("COVER_FAILED\t%s\t%s\n", files[k], why); continue; }
+        cn = tx_len(c, TX_ZCAP);
+        while (j < cn) {
+            char one[4400];
+            je = j;
+            while (je < cn && c[je] != '\n') je++;
+            if (je > j && !tx_copy(one, sizeof one, c + j, je - j)) {
+                int hit = 0, out = 0;
+                units++;
+                for (p = 0; p < npk && !hit; p++) {
+                    if (tp_find_unit(&pks[p], one) >= 0) hit = 1;
+                    else if (tp_find_excl(&pks[p], one) >= 0) out = 1;
+                }
+                if (hit) in++;
+                else if (out) ex++;
+            }
+            j = je + 1;
+        }
+        mm_free(c);
+        sy_printf("COVER\t%s\tunits=%d\ttlib=%d\tsource=%d\texcluded=%d\n", files[k], units, in, units - in, ex);
+    }
+    sy_printf("TLIB_COVER\tfiles=%d\tfailed=%d\tpackages=%d\n", shown, failed, npk);
+    return failed ? 1 : 0;
+}

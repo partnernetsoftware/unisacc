@@ -9,10 +9,13 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainroot
 
-static const char OD[] = "out"; /* 快照路径合同要求 CWD/out 下 */
+/* 快照路径合同:必须等于 cr_snap(CWD, REV)(cxlib.chainroot);夹具把链基目录经 UNISACC_CHAIN_BASE
+   指到自己 TMPDIR 下的会话根,HOME 与 TMPDIR 并列放在唯一目录下,不写仓内 out/ 与真实缓存链根。 */
 static int failed;
 static char root[4096], why[512];
+static char fx_base[4400], fx_snap[4400], fx_out[4400], fx_helper[4400];
 static void die(const char *s) { fprintf(stderr, "check-chain-batchkeys: %s\n", s); exit(2); }
 static void ck(int ok, const char *n) {
     printf("%s\tcheck-chain-batchkeys.%s\n", ok ? "PASS" : "FAIL", n);
@@ -20,13 +23,11 @@ static void ck(int ok, const char *n) {
 }
 static const char REV[] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 static int fp(const char *extra1, const char *extra2, const char *extra3, const char *needle, const char *name) {
-    char snap[4400], out[4400], helper[4400];
+    const char *snap = fx_snap, *out = fx_out, *helper = fx_helper;
     char *v[28]; int n = 0, rc; np_result r = {0}; int ok;
-    if (cx_fmt(snap, sizeof snap, "%s/%s/release-snap-deadbeefde", root, OD) || cx_fmt(out, sizeof out, "%s/%s/chain-batchkeys-fp", root, OD)) die("path");
-    if (cx_fmt(helper, sizeof helper, "%s/%s/chain-batchkeys-helper.sh", root, OD)) die("path");
     v[n++] = "sh"; v[n++] = "./unisacc.com"; /* lint:allow R1-product 检查合同就是跑已装产品 */ v[n++] = "tools/chain-step.cx"; v[n++] = "--";
-    v[n++] = "fixedpoint"; v[n++] = (char *)REV; v[n++] = snap; v[n++] = "x.pkg"; v[n++] = "x.gen1"; v[n++] = out;
-    v[n++] = "--identity-helper"; v[n++] = helper;
+    v[n++] = "fixedpoint"; v[n++] = (char *)REV; v[n++] = (char *)snap; v[n++] = "x.pkg"; v[n++] = "x.gen1"; v[n++] = (char *)out;
+    v[n++] = "--identity-helper"; v[n++] = (char *)helper;
     v[n++] = "--phase"; v[n++] = "g2"; v[n++] = "--target"; v[n++] = "lnx/x86_64";
     if (extra1) v[n++] = (char *)extra1;
     if (extra2) v[n++] = (char *)extra2;
@@ -43,22 +44,51 @@ int main(void) {
     char snap[4400],out[4400],gen[4400],sub[4400],helper[4400],marker[4400],record[4400];
     int rc;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    {
+        char fh[4400], ft[4400], ftc[4400], cbase[4600];
+        size_t bn;
+        if (cx_fmt(fx_base, sizeof fx_base, "%s/chain-batchkeys-%d", sy_tmpdir(), (int)getpid()) || cx_fmt(fh, sizeof fh, "%s/home", fx_base) || cx_fmt(ft, sizeof ft, "%s/tmp", fx_base)) die("fixture base");
+        if (sy_mkdir(fx_base, 0700) || sy_mkdir(fh, 0700) || sy_mkdir(ft, 0700) || sy_realpath(ft, ftc, sizeof ftc) < 0) die("fixture base");
+        if (cx_fmt(cbase, sizeof cbase, "%s/unisacc-session-chain-batchkeys", ftc) || sy_setenv("HOME", fh, 1) || sy_setenv("TMPDIR", ftc, 1) || sy_setenv("UNISACC_CHAIN_BASE", cbase, 1)) die("fixture env");
+        if (cr_snap(root, REV, 1, fx_snap, sizeof fx_snap)) die("fixture snap path");
+        bn = strlen(cbase);
+        ck(!strncmp(fx_snap, cbase, bn) && !strncmp(fx_snap + bn, "/snap/deadbeefde-", 17), "snap-path-from-chainroot");
+        if (cx_fmt(fx_out, sizeof fx_out, "%s/chain-batchkeys-fp", ftc) || cx_fmt(fx_helper, sizeof fx_helper, "%s/chain-batchkeys-helper.sh", ftc)) die("fixture path");
+    }
     fp("--objects", "m1.o,m2.o,m1.o", 0, "REFUSE duplicate object key", "dup-key");
     fp("--objects", "m1.o,,m2.o", 0, "REFUSE objects list", "empty-key");
     fp("--objects", "m1.o,m2.o", "--object", "REFUSE unknown/duplicate option", "object-after-missing-arg");
     fp("--objects", "A.o,m2.o", 0, "REFUSE object key", "bad-char-key");
     fp("--objects", "m1.o", "--link-only", "REFUSE --objects with --object/--link-only", "with-link-only");
     /* 假快照 + 已存在未记录的 slice 目录: 首键必须拒绝, 且不写 phase-0.tsv */
-    if(sy_mkdir(OD,0755)&&errno!=EEXIST)die("fixture parent");
-    if(cx_fmt(snap,sizeof snap,"%s/release-snap-deadbeefde",OD)||cx_fmt(out,sizeof out,"%s/chain-batchkeys-fp",OD)||cx_fmt(gen,sizeof gen,"%s/g2",out)||cx_fmt(sub,sizeof sub,"%s/lnx-x86_64",gen)||cx_fmt(helper,sizeof helper,"%s/chain-batchkeys-helper.sh",OD)||cx_fmt(marker,sizeof marker,"%s/.release-rev",snap)||cx_fmt(record,sizeof record,"%s/phase-0.tsv",gen))die("fixture path");
+    if(cx_fmt(snap,sizeof snap,"%s",fx_snap)||cx_fmt(out,sizeof out,"%s",fx_out)||cx_fmt(gen,sizeof gen,"%s/g2",out)||cx_fmt(sub,sizeof sub,"%s/lnx-x86_64",gen)||cx_fmt(helper,sizeof helper,"%s",fx_helper)||cx_fmt(marker,sizeof marker,"%s/.release-rev",snap)||cx_fmt(record,sizeof record,"%s/phase-0.tsv",gen))die("fixture path");
     struct stat st;const char *owned[]={snap,out,helper};for(int i=0;i<3;i++){if(!lstat(owned[i],&st)||errno!=ENOENT)die("REFUSE existing/nonprivate fixture");}
     const char *body="#!/bin/sh\nprintf '0000000000000000000000000000000000000000000000000000000000000000\\n'\n";
     if(sy_mkdir(snap,0755)||sy_mkdir(out,0755)||sy_mkdir(gen,0755)||sy_mkdir(sub,0755)||cx_write(marker,REV,40)||cx_write(helper,body,strlen(body))||chmod(helper,0700))die("fixture");
     rc = fp("--objects", "m1.o,m2.o", 0, "REFUSE unrecorded/existing phase", "existing-unrecorded");
     (void)rc;
     ck(lstat(record,&st)&&errno==ENOENT,"no-phase-record-written");
+    /* 同强度负例:快照不在 cr_snap 所指处(旧的 CWD/out/release-snap-REV10 拼法,此处取夹具内同名目录)必须被路径合同拒绝 */
+    {
+        char other[4400];
+        if (cx_fmt(other, sizeof other, "%s/release-snap-deadbeefde", fx_out) || sy_mkdir(other, 0755)) die("fixture other snap");
+        if (cx_fmt(fx_snap, sizeof fx_snap, "%s", other)) die("fixture other snap");
+        fp("--objects", "m1.o,m2.o", 0, "REFUSE release snapshot path", "snapshot-not-at-chainroot-refused");
+        if (rmdir(other)) die("fixture cleanup");
+    }
+    {
+        char o2[4400];
+        ck(!cx_fmt(o2, sizeof o2, "%s/out", root) && lstat(o2, &st) && errno == ENOENT, "no-out-dir-in-checkout");
+    }
     /* Remove only the exact files and empty directories owned by this run. */
     if(unlink(marker)||unlink(helper)||rmdir(sub)||rmdir(gen)||rmdir(out)||rmdir(snap))die("fixture cleanup");
+    {
+        /* 夹具根(home、tmp、链基目录)整体收掉;路径是本进程 mkdir 出来的唯一目录 */
+        char *rm[] = {"rm", "-rf", fx_base, 0};
+        np_result r = {0};
+        np_run(rm, 0, 0, 10, &r, why, sizeof why);
+        np_free(&r);
+    }
     printf("CHECK_CHAIN_BATCHKEYS\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

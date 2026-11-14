@@ -1,0 +1,133 @@
+/* tools/check-unfreeze.cx -- tools/unfreeze.cx 的夹具检查: 真实表 check ok、链在跑拒绝(rc 3)、
+ * load 超闸拒绝(WAIT load)、kit 单写排序、依赖环拒绝、未知批次拒绝、依赖未 DONE 为 BLOCKED。
+ * 不启动任何批次。  sh ./unisacc.com tools/check-unfreeze.cx [-- ROOT OUT] */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define HD "id\twindow\twave\tbatch_ids\tneeds_kit\tmaterials\twrite_domain\tdeps\tstatus\n"
+
+static int failed;
+static char root[4096], work[4400], bin[4400], tab[4400], bat[4400], lav[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) { failed++; if (last) sy_printf("%s", last); }
+    sy_printf("%s\tunfreeze.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run(const char *table, const char *a0, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
+    char *v[20];
+    int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    v[k++] = bin; v[k++] = (char *)a0;
+    if (table) { v[k++] = "--table"; v[k++] = (char *)table; v[k++] = "--batches"; v[k++] = bat; }
+    if (a1) v[k++] = (char *)a1;
+    if (a2) v[k++] = (char *)a2;
+    if (a3) v[k++] = (char *)a3;
+    if (a4) v[k++] = (char *)a4;
+    if (a5) v[k++] = (char *)a5;
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+static int has(const char *needle) {
+    long nl = tx_len(needle, 256);
+    for (long i = 0; last && i + nl <= (long)lastn; i++) if (mm_same(last + i, needle, nl)) return 1;
+    return 0;
+}
+
+static int put(const char *p, const char *text) { return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP)); }
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], dot[4400];
+    int rc, own = 0;
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) { (void)sy_mkdir(argv[2], 0755); if (cx_fmt(work, sizeof work, "%s/unfreeze-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2; }
+    else {
+        if (cx_fmt(dot, sizeof dot, "%s", sy_tmpdir()) || cx_fmt(work, sizeof work, "%s/check-unfreeze-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        own = 1;
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/unfreeze.cx", root) || cx_fmt(bin, sizeof bin, "%s/unfreeze.native", work) ||
+        cx_fmt(tab, sizeof tab, "%s/u.tsv", work) || cx_fmt(bat, sizeof bat, "%s/b.tsv", work) || cx_fmt(lav, sizeof lav, "%s/load", work)) return 2;
+    if (tq_native(root, src, bin, why, sizeof why)) { sy_printf("FAIL\tunfreeze.build-native\t%s\n", why); return 1; }
+    put(bat, "id\timpl\nb1\tx\nb2\tx\nb3\tx\n");
+
+    /* (1) real table */
+    {
+        char rt[4400], rb[4400];
+        cx_fmt(rt, sizeof rt, "%s/agentwork/unfreeze.tsv", root);
+        cx_fmt(rb, sizeof rb, "%s/tests/batches.tsv", root);
+        rc = run(rt, "--check", 0, 0, 0, 0, 0);
+        /* run() passes the fixture batches path; redo against the real one */
+        char *v[] = {bin, "--check", "--table", rt, "--batches", rb, 0};
+        mm_free(last); last = 0;
+        rc = cx_runv_timeout(v, 20, &last, &lastn);
+        ck(rc == 0 && has("UNFREEZE_CHECK ok errors=0"), "real-table-check");
+    }
+    /* (2) chain running refused, rc 3 */
+    put(tab, HD "A\tw\t1\tb1\t0\t-\td\t-\tTODO\n");
+    rc = run(tab, "--dry-run", "--chain", "running", 0, 0, 0);
+    ck(rc == 3 && has("UNFREEZE_REFUSE chain-running") && !has("UNFREEZE_PLAN"), "chain-running-refused");
+    /* (3) load over the gate: wave 1 needs < 3 */
+    put(lav, "3.50 1 1 1/1 1\n");
+    rc = run(tab, "--dry-run", "--chain", "idle", "--loadavg", lav, 0);
+    ck(rc == 0 && has("A\tWAIT") && has("load") && !has("RELEASE"), "load-gate-wait");
+    rc = run(tab, "--dry-run", "--chain", "idle", "--loadavg", lav, "--load-max");
+    ck(rc == 2, "load-max-needs-value");
+    {
+        char *v[] = {bin, "--dry-run", "--table", tab, "--batches", bat, "--chain", "idle", "--loadavg", lav, "--load-max", "5", 0};
+        mm_free(last); last = 0;
+        rc = cx_runv_timeout(v, 20, &last, &lastn);
+        ck(rc == 0 && has("A\tRELEASE"), "load-max-override");
+    }
+    /* (4) kit single writer and ordering: K1 K2 both kit, N has materials, E has none */
+    put(lav, "0.50 1 1 1/1 1\n");
+    put(tab, HD "E\tw\t1\tb1\t0\t-\td\t-\tTODO\n"
+             "K1\tw\t1\tb2\t1\t-\td\t-\tTODO\n"
+             "K2\tw\t1\tb3\t1\t-\td\t-\tTODO\n"
+             "N\tw\t1\tb1\t0\tm:path\td\t-\tTODO\n");
+    {
+        char *v[] = {bin, "--dry-run", "--table", tab, "--batches", bat, "--chain", "idle", "--loadavg", lav, "--max", "9", 0};
+        mm_free(last); last = 0;
+        rc = cx_runv_timeout(v, 20, &last, &lastn);
+        ck(rc == 0 && has("K1\tRELEASE") && has("K2\tWAIT") && has("kit-single-writer") && has("N\tWAIT") && has("E\tRELEASE"), "kit-single-writer");
+        long k1 = -1, e = -1;
+        for (long i = 0; last && i + 3 < (long)lastn; i++) {
+            if (k1 < 0 && mm_same(last + i, "\tK1\t", 4)) k1 = i;
+            if (e < 0 && mm_same(last + i, "\tE\t", 3)) e = i;
+        }
+        ck(k1 >= 0 && e >= 0 && k1 < e, "kit-before-plain");
+    }
+    /* (5) dependency cycle refused */
+    put(tab, HD "A\tw\t1\tb1\t0\t-\td\tB\tTODO\nB\tw\t1\tb2\t0\t-\td\tA\tTODO\n");
+    rc = run(tab, "--check", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("依赖环") && !has("UNFREEZE_CHECK ok"), "dep-cycle-refused");
+    /* (6) unknown batch / unknown dep refused */
+    put(tab, HD "A\tw\t1\tnope\t0\t-\td\tZ\tTODO\n");
+    rc = run(tab, "--check", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("不在 tests/batches.tsv") && has("不是表中的行"), "unknown-batch-dep-refused");
+    /* (7) dep not DONE is BLOCKED, DONE dep releases */
+    put(tab, HD "A\tw\t1\tb1\t0\t-\td\t-\tTODO\nB\tw\t1\tb2\t0\t-\td\tA\tTODO\n");
+    rc = run(tab, "--dry-run", "--chain", "idle", "--loadavg", lav, 0);
+    ck(rc == 0 && has("B\tBLOCKED") && has("dep=A"), "dep-blocked");
+    put(tab, HD "A\tw\t1\tb1\t0\t-\td\t-\tDONE\nB\tw\t1\tb2\t0\t-\td\tA\tTODO\n");
+    rc = run(tab, "--dry-run", "--chain", "idle", "--loadavg", lav, 0);
+    ck(rc == 0 && has("A\tSKIP") && has("B\tRELEASE"), "dep-done-releases");
+    /* (8) bad usage */
+    rc = run(0, "--bogus", 0, 0, 0, 0, 0);
+    ck(rc == 2, "usage-rc2");
+
+    if (own) cx_rmtree(work);
+    sy_printf("CHECK_UNFREEZE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

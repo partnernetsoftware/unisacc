@@ -8,6 +8,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use sysx.reaper
 #pragma unisa use sys.time
+#pragma unisa use cxlib.limits
 #pragma unisa use sys.posix
 #define CR_MAX 1024
 typedef struct { int pid,pg,fd; long long start; } cr_identity;
@@ -66,6 +67,22 @@ static int cr_scan(cr_identity *e,int *n,int own,long long earliest,int before) 
  if(closedir(d))bad=1;return bad?-1:0;
 }
 static int cr_alive(cr_identity *e,int n){int k=0;for(int i=0;i<n;i++){int live=cr_live(&e[i]);if(live<0)return -1;k+=live;}return k;}
+/* The table holds every descendant ever admitted, each with an open pidfd. A phase that starts
+ * more than CR_MAX processes over its life (0.0.58: g2-lnx-x86_64-closure-prepare, 58 s in)
+ * filled it, the next admission failed, and a phase with nothing left alive was reported as
+ * residue=-1 "surviving-processes". An identity confirmed gone (its starttime no longer there,
+ * or a zombie) can never be live again and is no ownership edge (cr_scan asks cr_live of the
+ * parent), so it is released: reaped if it is our child, its pidfd closed, its slot reused.
+ * Slot 0, the phase's own child, stays: its exit status is collected by the caller. An identity
+ * whose state cannot be read is kept, and the caller's own check reports it. */
+static void cr_release_gone(cr_identity *e,int *n){
+ int k=1;
+ for(int i=1;i<*n;i++){
+  if(cr_live(&e[i])){e[k++]=e[i];continue;}
+  int status;waitpid(e[i].pid,&status,WNOHANG);close(e[i].fd);
+ }
+ if(*n>0)*n=k;
+}
 static int cr_owned(const char *label,char **v,int bound,int maximum,pr_result *r) {
  memset(r,0,sizeof *r);r->rc=-1;
  if(bound<1||bound>maximum){cx_fmt(r->why,sizeof r->why,"%s invalid execution bound",label);return -1;}
@@ -86,7 +103,7 @@ static int cr_owned(const char *label,char **v,int bound,int maximum,pr_result *
  while(1){long now=sy_now_ms();
   if(oo){int k=read(po[0],buf,sizeof buf);if(k>0)np_put(&o,buf,k);else if(!k||(errno!=EAGAIN&&errno!=EINTR)){close(po[0]);oo=0;}}
   if(oe){int k=read(pe[0],buf,sizeof buf);if(k>0)np_put(&err,buf,k);else if(!k||(errno!=EAGAIN&&errno!=EINTR)){close(pe[0]);oe=0;}}
-  if(now>=scan){if(cr_scan(e,&n,own,start,0))bad=cleanup=1;scan=now+5;}
+  if(now>=scan){if(n>CR_MAX/4)cr_release_gone(e,&n);if(cr_scan(e,&n,own,start,0))bad=cleanup=1;scan=now+5;}
   if(!reaped){int w=waitpid(pid,&st,WNOHANG);if(w==pid)reaped=1;}
   int alive=cr_alive(e,n);
   if(alive<0)bad=cleanup=1;
@@ -111,6 +128,7 @@ static int cr_owned(const char *label,char **v,int bound,int maximum,pr_result *
  cx_fmt(r->why,sizeof r->why,"%s owner-pid=%d pgid=%d start=%lld cleanup=%d residue=%d bound=%d",label,pid,pid,start,cleanup,r->residue,bound);
  return timeout||bad?-1:0;
 }
-int cr_run(const char *label,char **v,int bound,pr_result *r) { return cr_owned(label,v,bound,55,r); }
-/* Only a multi-phase candidate segment uses this owner; its children remain <=55 seconds. */
-int cr_segment(const char *label,char **v,int bound,pr_result *r) { return cr_owned(label,v,bound,270,r); }
+static int cr_cap(const char *id) { double d=lm_max(id,0); if(d<1){fprintf(stderr,"chainrunproc: unknown limit id: %s\n",id);exit(2);} return (int)d; }
+int cr_run(const char *label,char **v,int bound,pr_result *r) { return cr_owned(label,v,bound,cr_cap("phase.bound"),r); }
+/* Only a multi-phase candidate segment uses this owner; its children stay within the phase bound. */
+int cr_segment(const char *label,char **v,int bound,pr_result *r) { return cr_owned(label,v,bound,cr_cap("segment"),r); }

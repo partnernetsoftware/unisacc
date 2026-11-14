@@ -1,0 +1,46 @@
+/* check-state-gen.cx -- tools/state-gen.cx: clean pass plus three negative controls (missing row, extra row,
+ * overlapping write_domain of two owners), each on a private table/doc in TMPDIR.
+ *   sh ./unisacc.com tools/check-state-gen.cx -- ROOT TMPDIR */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+static int failed, assertions;
+static const char *HDR = "id\tversion\tkind\tstate\tsubject\tmissing\taction\twrite_domain\towner\tevidence\tupdated\n";
+static const char *DOC = "### x\n\n- a\n\n### \xe4\xbb\x8d\xe6\x9c\xaa\xe9\xaa\x8c\xe8\xaf\x81(t)\n\n- alpha: d\n  detail\n- beta: e\n\n### z\n\n- gamma: no\n";
+static void row(char *dst, int cap, const char *id, const char *subj, const char *dom, const char *owner) {
+    int n = (int)strlen(dst);
+    if (cx_fmt(dst + n, cap - n, "%s\t0.0.65\tk\tUNVERIFIED\t%s\tm\ta\t%s\t%s\te\t2026-11-14\n", id, subj, dom, owner)) exit(2);
+}
+static void run(const char *root, const char *tmp, const char *name, const char *tbl, int want, const char *has) {
+    char tp[4400], dp[4400], sh[9000], bnd[4400], sc[4400], out[8192]; char *av[8]; int cut = 0, rc, ok;
+    cx_fmt(tp, sizeof tp, "%s/sg-%s.tsv", tmp, name); cx_fmt(dp, sizeof dp, "%s/sg-doc.md", tmp);
+    sy_write_file(tp, tbl, (int64_t)strlen(tbl), 0600); sy_write_file(dp, DOC, (int64_t)strlen(DOC), 0600);
+    cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root); cx_fmt(sc, sizeof sc, "%s/tools/state-gen.cx", root);
+    cx_fmt(sh, sizeof sh, "cd %s && sh ./unisacc.com %s -- --emit unverified --against %s --table %s", root, sc, dp, tp);
+    av[0] = bnd; av[1] = "30"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0; out[0] = 0;
+    rc = sy_run(av, out, sizeof out, &cut);
+    ok = rc == want && strstr(out, has);
+    assertions++; if (!ok) failed++;
+    printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", name, want, rc);
+    (void)sy_unlink(tp);
+}
+int main(int argc, char **argv) {
+    char t[4096];
+    if (argc != 3) { fputs("usage: ROOT TMPDIR\n", stderr); return 2; }
+    sy_mkdir_all(argv[2], 0700);
+    if (cx_fmt(t, sizeof t, "%s", HDR)) return 2;
+    row(t, sizeof t, "U1", "alpha", "a/", "o1"); row(t, sizeof t, "U2", "beta", "b/", "o2");
+    run(argv[1], argv[2], "clean", t, 0, "rows=2 missing=0 extra=0");
+    if (cx_fmt(t, sizeof t, "%s", HDR)) return 2;
+    row(t, sizeof t, "U1", "alpha", "a/", "o1");
+    run(argv[1], argv[2], "missing", t, 1, "missing=1");
+    if (cx_fmt(t, sizeof t, "%s", HDR)) return 2;
+    row(t, sizeof t, "U1", "alpha", "a/", "o1"); row(t, sizeof t, "U2", "beta", "b/", "o2"); row(t, sizeof t, "U3", "delta", "c/", "o1");
+    run(argv[1], argv[2], "extra", t, 1, "extra=1");
+    if (cx_fmt(t, sizeof t, "%s", HDR)) return 2;
+    row(t, sizeof t, "U1", "alpha", "a/", "o1"); row(t, sizeof t, "U2", "beta", "a/x.cx;b/", "o2");
+    run(argv[1], argv[2], "overlap", t, 1, "CONFLICT");
+    printf("STATE_GEN_CHECK\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

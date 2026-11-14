@@ -1,0 +1,169 @@
+/* tools/tables-gen.cx -- the registration tables' manifest-owned rows are generated from tests/manifests (S7, DSG-REG1 step 3).
+ *
+ *   sh ./unisacc.com tools/tables-gen.cx -- --check|--write [--index] [--root DIR]
+ *
+ * tests/manifests/<batch-id>.tsv is the source of truth for the rows it names ("KIND<TAB>ROW"):
+ *   batch<TAB>ROW      14 columns, key column 1 (= file stem)          -> tests/batches.tsv
+ *   coverage<TAB>ROW   5 columns, key column 1                         -> tests/coverage.tsv
+ *   compile<TAB>ROW    2 columns "PATH<TAB>regular|symlink", optional, repeatable -> tests/tools-compile-sources.tsv
+ *   packages<TAB>ROW   left to tools/reg-manifest.cx and tools/batch-packages-gen.cx (not read here)
+ * Rows of batches without a manifest (legacy) are not touched and are counted as legacy=N.
+ * --check: every manifest row must be in its table byte for byte.  Absent key: MISSING<TAB>table<TAB>key;
+ *   key present with other content: STALE<TAB>table<TAB>key.  Exit 1 on any, 2 on a malformed manifest, else 0.
+ * --write: regenerates: a STALE row is replaced in place by the manifest's row, a MISSING batch or coverage row
+ *   is appended, a MISSING compile row is inserted in byte order.  Unlike reg-manifest --write, the manifest wins.
+ * --index: read manifests and tables from the git index (precommit); read-only, refused with --write.
+ * Last line: TABLES_GEN<TAB>manifests=N<TAB>stale=N<TAB>written=N<TAB>legacy=N<TAB>hard=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define TG_NT 3
+static const char *TG_KIND[TG_NT] = {"batch", "coverage", "compile"};
+static const char *TG_TABLE[TG_NT] = {"tests/batches.tsv", "tests/coverage.tsv", "tests/tools-compile-sources.tsv"};
+static const int TG_COLS[TG_NT] = {14, 5, 2};
+
+static int tg_index, tg_write, tg_stale, tg_written, tg_hard;
+static char *tg_buf[TG_NT]; static size_t tg_n[TG_NT]; static int tg_dirty[TG_NT], tg_absent[TG_NT];
+
+static char *tg_read(const char *root, const char *rel, size_t *n) {
+    char p[4400];
+    *n = 0;
+    if (tg_index) {
+        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0};
+        if (cx_fmt(spec, sizeof spec, ":%s", rel)) return 0;
+        if (cx_runv_timeout(v, 20, &o, n) != 0) { mm_free(o); *n = 0; return 0; }
+        return o;
+    }
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
+    return (char *)cx_read(p, n);
+}
+
+static int tg_cols(const char *s) { int n = 1; for (; *s; s++) if (*s == '\t') n++; return n; }
+
+/* put ROW (no newline) into table T replacing bytes [from, to) (to == from: pure insert); 0 on success */
+static int tg_splice(int t, size_t from, size_t to, const char *row) {
+    size_t rl = strlen(row), n = tg_n[t], nn = from + rl + 1 + (n - to); char *nb = (char *)mm_alloc(nn + 1);
+    if (!nb) return 1;
+    if (from) mm_copy(nb, nn + 1, tg_buf[t], from);
+    mm_copy(nb + from, nn + 1 - from, row, rl); nb[from + rl] = '\n';
+    if (n > to) mm_copy(nb + from + rl + 1, nn - from - rl, tg_buf[t] + to, n - to);
+    mm_free(tg_buf[t]); tg_buf[t] = nb; tg_n[t] = nn; tg_dirty[t] = 1;
+    return 0;
+}
+
+/* bring one manifest row into table T (or report it); 0 unless a write failed */
+static int tg_apply(int t, const char *row) {
+    char key[600]; size_t kl = 0, rl = strlen(row), i = 0, n, ins; char *b;
+    while (row[kl] && row[kl] != '\t') kl++;
+    if (kl == 0 || kl >= sizeof key) return 1;
+    if (tg_absent[t]) { sy_printf("MALFORMED\t%s\ttable unreadable\n", TG_TABLE[t]); return 1; }
+    mm_copy(key, sizeof key, row, kl); key[kl] = 0;
+    if (tg_n[t] > 0 && tg_buf[t][tg_n[t] - 1] != '\n') { if (tg_splice(t, tg_n[t], tg_n[t], "")) return 1; tg_dirty[t] = 0; }
+    b = tg_buf[t]; n = tg_n[t]; ins = n;
+    while (i < n) {
+        size_t e = i; while (e < n && b[e] != '\n') e++;
+        if (e - i > kl && !memcmp(b + i, key, kl) && b[i + kl] == '\t') {
+            if (e - i == rl && !memcmp(b + i, row, rl)) return 0;
+            sy_printf("STALE\t%s\t%s\n", TG_TABLE[t], key); tg_stale++;
+            if (tg_write) { if (tg_splice(t, i, e < n ? e + 1 : e, row)) return 1; tg_written++; }
+            return 0;
+        }
+        if (t == 2 && ins == n) {   /* first line that sorts after ROW in byte order */
+            size_t l = e - i, m = l < rl ? l : rl; int c = memcmp(b + i, row, m);
+            if (c > 0 || (c == 0 && l > rl)) ins = i;
+        }
+        i = e + 1;
+    }
+    sy_printf("MISSING\t%s\t%s\n", TG_TABLE[t], key); tg_stale++;
+    if (tg_write) { if (tg_splice(t, ins, ins, row)) return 1; tg_written++; }
+    return 0;
+}
+
+static void tg_one(const char *root, const char *file, const char *stem) {
+    char path[4400], ln[8300]; size_t sz = 0, i = 0, sl = strlen(stem); char *m; int got[TG_NT] = {0, 0, 0}, k;
+    if (cx_fmt(path, sizeof path, "tests/manifests/%s", file)) { tg_hard++; return; }
+    m = tg_read(root, path, &sz);
+    if (!m) { sy_printf("MALFORMED\t%s\tunreadable\n", file); tg_hard++; return; }
+    /* pass 1 validates the whole manifest, pass 2 applies it: a malformed manifest changes nothing */
+    for (k = 0; k < 2; k++) {
+        i = 0;
+        while (i < sz) {
+            size_t e = i, t; int found = -1, q;
+            while (e < sz && m[e] != '\n') e++;
+            if (e == i) { i = e + 1; continue; }
+            if (e - i >= sizeof ln) { sy_printf("MALFORMED\t%s\tline too long\n", file); tg_hard++; mm_free(m); return; }
+            mm_copy(ln, sizeof ln, m + i, e - i); ln[e - i] = 0; i = e + 1;
+            for (t = 0; ln[t] && ln[t] != '\t'; t++) {}
+            if (t == 8 && !memcmp(ln, "packages", 8)) continue;
+            for (q = 0; q < TG_NT; q++) if (strlen(TG_KIND[q]) == t && !memcmp(ln, TG_KIND[q], t)) found = q;
+            if (k == 1) { if (tg_apply(found, ln + t + 1)) tg_hard++; continue; }
+            if (found < 0 || !ln[t] || (found < 2 && got[found])) { sy_printf("MALFORMED\t%s\tbad or duplicate kind line\n", file); tg_hard++; mm_free(m); return; }
+            if (tg_cols(ln + t + 1) != TG_COLS[found]) { sy_printf("MALFORMED\t%s\t%s needs %d columns\n", file, TG_KIND[found], TG_COLS[found]); tg_hard++; mm_free(m); return; }
+            if (found == 0 && (strncmp(ln + t + 1, stem, sl) || ln[t + 1 + sl] != '\t')) { sy_printf("MALFORMED\t%s\tbatch id is not the file stem\n", file); tg_hard++; mm_free(m); return; }
+            got[found]++;
+        }
+        if (k == 0 && !(got[0] && got[1])) { sy_printf("MALFORMED\t%s\tneed batch and coverage lines\n", file); tg_hard++; mm_free(m); return; }
+    }
+    mm_free(m);
+}
+
+/* 1 when NAME is a manifest file name; STEM receives it without ".tsv" */
+static int tg_stem(const char *name, size_t l, char *stem, size_t cap) {
+    if (l < 5 || l - 4 >= cap || memcmp(name + l - 4, ".tsv", 4)) return 0;
+    mm_copy(stem, cap, name, l - 4); stem[l - 4] = 0;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *root = "."; int check = 0, a, n = 0, t; long legacy = 0; char dir[4400], stem[300], file[300];
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--check")) check = 1;
+        else if (!strcmp(argv[a], "--write")) tg_write = 1;
+        else if (!strcmp(argv[a], "--index")) tg_index = 1;
+        else if (!strcmp(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { sy_printf("usage: tables-gen.cx -- --check|--write [--index] [--root DIR]\n"); return 2; }
+    }
+    if (check == tg_write || (tg_index && tg_write)) { sy_printf("usage: tables-gen.cx -- --check|--write [--index] [--root DIR]\n"); return 2; }
+    for (t = 0; t < TG_NT; t++) {
+        /* an unreadable table is a hard error only once a manifest row needs it (tg_apply): a tree or index
+           with no manifests and no such table has nothing generated to compare */
+        tg_buf[t] = tg_read(root, TG_TABLE[t], &tg_n[t]);
+        if (!tg_buf[t]) { tg_n[t] = 0; tg_absent[t] = 1; }
+    }
+    { size_t i = 0; while (i < tg_n[0]) { if (tg_buf[0][i] == '\n') legacy++; i++; } if (legacy > 0) legacy--; }   /* data rows of batches.tsv */
+    if (tg_index) {
+        char *lv[] = {"git", "ls-files", "--", "tests/manifests", 0}, *o = 0; size_t on = 0, i = 0; const char *pre = "tests/manifests/"; size_t pl = strlen(pre);
+        if (cx_runv_timeout(lv, 20, &o, &on) != 0) { sy_printf("TABLES_GEN\tindex listing failed\n"); return 2; }
+        while (i < on) {
+            size_t e = i; while (e < on && o[e] != '\n') e++;
+            if (e - i > pl && e - i - pl < sizeof file && !memcmp(o + i, pre, pl)) {
+                mm_copy(file, sizeof file, o + i + pl, e - i - pl); file[e - i - pl] = 0;
+                if (tg_stem(file, e - i - pl, stem, sizeof stem)) { tg_one(root, file, stem); n++; }
+            }
+            i = e + 1;
+        }
+        mm_free(o);
+    } else {
+        sy_dir_t d;
+        if (cx_fmt(dir, sizeof dir, "%s/tests/manifests", root) || sy_dir_open(&d, dir)) { sy_printf("TABLES_GEN\tno manifest dir\n"); return 2; }
+        while (sy_dir_next(&d) == 1) {
+            if (!tg_stem(d.name, strlen(d.name), stem, sizeof stem)) continue;
+            tg_one(root, d.name, stem); n++;
+        }
+        sy_dir_close(&d);
+    }
+    if (tg_write && !tg_hard) for (t = 0; t < TG_NT; t++) if (tg_dirty[t]) {
+        char tp[4400];
+        if (cx_fmt(tp, sizeof tp, "%s/%s", root, TG_TABLE[t]) || cx_write(tp, tg_buf[t], tg_n[t])) { sy_printf("TABLES_GEN\tcannot write %s\n", TG_TABLE[t]); tg_hard++; }
+        else sy_printf("WROTE\t%s\n", TG_TABLE[t]);
+    }
+    sy_printf("TABLES_GEN\tmanifests=%d\tstale=%d\twritten=%d\tlegacy=%ld\thard=%d\n", n, tg_stale, tg_hard ? 0 : tg_written, legacy - n < 0 ? 0 : legacy - n, tg_hard);
+    if (tg_hard) return 2;
+    return (tg_stale && !tg_write) ? 1 : 0;
+}

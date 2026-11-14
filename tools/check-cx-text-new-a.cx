@@ -1,0 +1,102 @@
+/* Checks cx/text iter/edit/utf8 (CXS-C3 S6a): behavior assertions only. */
+#pragma unisa use text.iter
+#pragma unisa use text.edit
+#pragma unisa use text.utf8
+static int bad, total;
+static void ok(int c, const char *name) { total++; printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+/* collect segments joined by '|' into out */
+static int seg(const char *s, long n, const char *sep, long sepn, char *out) {
+    tx_iter_t it; int r, k = 0, o = 0, i;
+    tx_iter_init(&it, s, n);
+    while ((r = tx_split_next(&it, sep, sepn)) == 1) {
+        if (k++) out[o++] = '|';
+        for (i = 0; i < it.len; i++) out[o++] = s[it.off + i];
+    }
+    out[o] = 0;
+    return r < 0 ? r : k;
+}
+static int lines(const char *s, long n, char *out) {
+    tx_iter_t it; int r, k = 0, o = 0, i;
+    tx_iter_init(&it, s, n);
+    while ((r = tx_line_next(&it)) == 1) {
+        if (k++) out[o++] = '|';
+        for (i = 0; i < it.len; i++) out[o++] = s[it.off + i];
+    }
+    out[o] = 0;
+    return r < 0 ? r : k;
+}
+static int streq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+int main(void) {
+    char o[64], b[32]; tx_iter_t it; long bad_at, pos; unsigned cp; int i;
+    ok(seg("a,b,c", 5, ",", 1, o) == 3 && streq(o, "a|b|c"), "split-basic");
+    ok(seg("a,,b", 4, ",", 1, o) == 3 && streq(o, "a||b"), "split-keeps-empty");
+    ok(seg("a,", 2, ",", 1, o) == 2 && streq(o, "a|"), "split-trailing-sep-empty-tail");
+    ok(seg("", 0, ",", 1, o) == 1 && streq(o, ""), "split-empty-string-one-empty");
+    ok(seg("a::b::c", 7, "::", 2, o) == 3 && streq(o, "a|b|c"), "split-multibyte-sep");
+    ok(seg(",,", 2, ",", 1, o) == 3, "split-only-seps");
+    ok(seg("abc", 3, ",", 1, o) == 1 && streq(o, "abc"), "split-no-sep");
+    ok(seg("a,b", 3, "", 0, o) == -EINVAL, "split-empty-sep-einval");
+    ok(seg("a,b", 3, 0, 1, o) == -EINVAL, "split-null-sep-einval");
+    ok(seg("a,b", -1, ",", 1, o) == -EINVAL, "split-negative-n-einval");
+    ok(seg(0, 3, ",", 1, o) == -EINVAL, "split-null-s-einval");
+    ok(tx_split_next(0, ",", 1) == -EINVAL, "split-null-iter-einval");
+    tx_iter_init(&it, "a", 1);
+    ok(tx_split_next(&it, ",", 1) == 1 && it.off == 0 && it.len == 1 && tx_split_next(&it, ",", 1) == 0 && tx_split_next(&it, ",", 1) == 0, "split-end-sticky-and-off-len");
+    ok(lines("a\nb\n", 4, o) == 2 && streq(o, "a|b"), "line-trailing-nl-no-extra");
+    ok(lines("a\r\nb", 4, o) == 2 && streq(o, "a|b"), "line-crlf-last-unterminated");
+    ok(lines("", 0, o) == 0, "line-empty-none");
+    ok(lines("\n", 1, o) == 1 && streq(o, ""), "line-single-empty");
+    ok(lines("a\r", 2, o) == 1 && o[1] == '\r', "line-lone-cr-is-data");
+    ok(lines("\r\n\r\n", 4, o) == 2 && streq(o, "|"), "line-crlf-empty-lines");
+    ok(lines("a", -1, o) == -EINVAL && tx_line_next(0) == -EINVAL, "line-bad-args");
+    ok(tx_replace(b, 32, "aXbXc", 5, "X", 1, "--", 2) == 7 && !tx_ieq(b, 7, "a--b-c", 6) && tx_ieq(b, 7, "a--b--c", 7), "replace-grow");
+    ok(tx_replace(b, 32, "aXbXc", 5, "X", 1, "", 0) == 3 && tx_ieq(b, 3, "abc", 3), "replace-delete");
+    ok(tx_replace(b, 32, "aaaa", 4, "aa", 2, "b", 1) == 2 && tx_ieq(b, 2, "bb", 2), "replace-non-overlapping");
+    ok(tx_replace(b, 32, "", 0, "x", 1, "y", 1) == 0, "replace-empty-src");
+    ok(tx_replace(b, 32, "abc", 3, "z", 1, "y", 1) == 3 && tx_ieq(b, 3, "abc", 3), "replace-absent");
+    for (i = 0; i < 8; i++) b[i] = 'Q';
+    ok(tx_replace(b, 3, "aXb", 3, "X", 1, "yyy", 3) == -ERANGE && b[0] == 'Q' && b[2] == 'Q', "replace-erange-dst-untouched");
+    ok(tx_replace(b, 5, "aXb", 3, "X", 1, "yyy", 3) == 5, "replace-exact-cap-fits");
+    ok(tx_replace(b, 32, "abc", 3, "", 0, "y", 1) == -EINVAL, "replace-empty-from-einval");
+    ok(tx_replace(b, 32, "abc", 3, 0, 1, "y", 1) == -EINVAL && tx_replace(b, 32, 0, 3, "a", 1, "y", 1) == -EINVAL, "replace-null-einval");
+    ok(tx_replace(b, 32, "abc", -1, "a", 1, "y", 1) == -EINVAL && tx_replace(b, -1, "abc", 3, "a", 1, "y", 1) == -EINVAL, "replace-negative-einval");
+    { char s[8] = "abcabc"; ok(tx_replace(s + 1, 6, s, 6, "a", 1, "x", 1) == -EINVAL, "replace-overlap-einval"); }
+    { char s[16] = "Hello, W0rld!\xc3\xa9"; int n;
+      n = tx_lower(s, 15); ok(n == 2 && tx_ieq(s, 15, "hello, w0rld!\xc3\xa9", 15) && s[0] == 'h' && s[14] == (char)0xa9, "lower-ascii-only-count");
+      n = tx_upper(s, 15); ok(n == 9 && s[0] == 'H' && s[7] == 'W' && s[13] == (char)0xc3, "upper-ascii-only-count");
+      ok(tx_lower(s, 0) == 0 && tx_lower(0, 0) == 0, "lower-empty");
+      ok(tx_lower(0, 3) == -EINVAL && tx_upper(s, -1) == -EINVAL, "case-bad-args"); }
+    ok(tx_ieq("AbC", 3, "aBc", 3) && !tx_ieq("abc", 3, "abd", 3) && !tx_ieq("abc", 3, "ab", 2), "ieq-basic");
+    ok(tx_ieq("", 0, "", 0) && tx_ieq(0, 0, 0, 0) && !tx_ieq(0, 1, "a", 1) && !tx_ieq("a", -1, "a", -1), "ieq-edge");
+    ok(!tx_ieq("\xc3", 1, "\xe3", 1) && !tx_ieq("@", 1, "`", 1) && !tx_ieq("[", 1, "{", 1), "ieq-non-letter-boundary");
+    ok(tx_utf8_valid("", 0, &bad_at) == 1 && tx_utf8_valid("abc", 3, &bad_at) == 1 && bad_at == 3, "valid-ascii-bad-is-n");
+    ok(tx_utf8_valid("\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 9, 0) == 1, "valid-2-3-4-byte-null-bad");
+    ok(tx_utf8_valid("a\x80", 2, &bad_at) == 0 && bad_at == 1, "invalid-stray-continuation");
+    ok(tx_utf8_valid("\xc0\x80", 2, &bad_at) == 0 && bad_at == 0 && tx_utf8_valid("\xc1\xbf", 2, &bad_at) == 0, "invalid-overlong-2");
+    ok(tx_utf8_valid("\xe0\x80\x80", 3, &bad_at) == 0 && tx_utf8_valid("\xf0\x80\x80\x80", 4, &bad_at) == 0, "invalid-overlong-3-4");
+    ok(tx_utf8_valid("\xed\xa0\x80", 3, &bad_at) == 0 && tx_utf8_valid("\xed\x9f\xbf", 3, &bad_at) == 1 && tx_utf8_valid("\xee\x80\x80", 3, &bad_at) == 1, "surrogate-boundary");
+    ok(tx_utf8_valid("\xf4\x90\x80\x80", 4, &bad_at) == 0 && tx_utf8_valid("\xf4\x8f\xbf\xbf", 4, &bad_at) == 1 && tx_utf8_valid("\xf5\x80\x80\x80", 4, &bad_at) == 0, "max-codepoint-boundary");
+    ok(tx_utf8_valid("ab\xe2\x82", 4, &bad_at) == 0 && bad_at == 2, "invalid-truncated-at-lead");
+    ok(tx_utf8_valid("\xff", 1, &bad_at) == 0 && tx_utf8_valid("\xfe", 1, &bad_at) == 0, "invalid-lead-ff-fe");
+    bad_at = 77;
+    ok(tx_utf8_valid(0, 3, &bad_at) == -EINVAL && tx_utf8_valid("a", -1, &bad_at) == -EINVAL && bad_at == 77, "valid-bad-args-bad-untouched");
+    pos = 0;
+    ok(tx_utf8_next("a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10, &pos, &cp) == 1 && cp == 'a' && pos == 1, "next-ascii");
+    ok(tx_utf8_next("a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10, &pos, &cp) == 1 && cp == 0xE9 && pos == 3, "next-2byte");
+    ok(tx_utf8_next("a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10, &pos, &cp) == 1 && cp == 0x20AC && pos == 6, "next-3byte");
+    ok(tx_utf8_next("a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10, &pos, &cp) == 1 && cp == 0x1F600 && pos == 10, "next-4byte");
+    ok(tx_utf8_next("a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", 10, &pos, &cp) == 0 && pos == 10, "next-end-zero");
+    pos = 0; cp = 99;
+    ok(tx_utf8_next("\xc0\x80", 2, &pos, &cp) == -EILSEQ && pos == 0 && cp == 99, "next-eilseq-untouched");
+    pos = 1;
+    ok(tx_utf8_next("a\xe2\x82", 3, &pos, &cp) == -EILSEQ && pos == 1, "next-truncated-eilseq");
+    pos = 4;
+    ok(tx_utf8_next("abc", 3, &pos, &cp) == -EINVAL, "next-pos-beyond-n-einval");
+    pos = -1;
+    ok(tx_utf8_next("abc", 3, &pos, &cp) == -EINVAL && tx_utf8_next("abc", 3, 0, &cp) == -EINVAL && tx_utf8_next("abc", 3, &pos, 0) == -EINVAL, "next-bad-args");
+    pos = 0;
+    ok(tx_utf8_next(0, 0, &pos, &cp) == 0 && tx_utf8_next(0, 2, &pos, &cp) == -EINVAL, "next-null-s");
+    printf("%s\n", bad ? "CX_TEXT_NEW_A FAIL" : "CX_TEXT_NEW_A");
+    printf("total=%d failed=%d\n", total, bad);
+    return bad;
+}

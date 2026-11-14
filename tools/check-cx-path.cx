@@ -1,0 +1,191 @@
+/* tools/check-cx-path.cx -- checks cx/path/path.cx (pure path text functions), posix and win styles on any host.
+   sh ./unisacc.com tools/check-cx-path.cx   prints one CHECK_CX_PATH line; exit 1 on any failure. */
+#pragma unisa use text.text
+#pragma unisa use path.path
+
+static int bad, okn;
+
+static void ok(int c, const char *name) {
+    if (c) okn++; else { bad++; printf("  FAIL  %s\n", name); }
+}
+static int same(const char *a, const char *b) { return strcmp(a, b) == 0; }
+
+static void nrm(int st, const char *in, const char *want) {
+    char b[256];
+    long r = pt_normalize_as(st, b, sizeof b, in, strlen(in));
+    int c = r >= 0 && same(b, want) && r == (long)strlen(want);
+    ok(c, "normalize");
+    if (!c) printf("    normalize(%d,\"%s\") got \"%s\" want \"%s\"\n", st, in, r < 0 ? "ERR" : b, want);
+}
+static void jn(int st, const char *a, const char *b, const char *want) {
+    char d[256];
+    long r = pt_join_as(st, d, sizeof d, a, b);
+    int c = r >= 0 && same(d, want);
+    ok(c, "join");
+    if (!c) printf("    join(%d,\"%s\",\"%s\") got \"%s\" want \"%s\"\n", st, a, b, r < 0 ? "ERR" : d, want);
+}
+static void part(int which, int st, const char *p, const char *want) {
+    long off = -1, len = -1, i;
+    char got[256];
+    int c;
+    int r = which == 0 ? pt_dirname_as(st, p, strlen(p), &off, &len)
+          : which == 1 ? pt_basename_as(st, p, strlen(p), &off, &len)
+          : which == 2 ? pt_ext_as(st, p, strlen(p), &off, &len)
+          : pt_stem_as(st, p, strlen(p), &off, &len);
+    got[0] = 0;
+    if (r == 0 && len >= 0 && len < 255) { for (i = 0; i < len; i++) got[i] = p[off + i]; got[len] = 0; }
+    c = r == 0 && same(got, want);
+    ok(c, "part");
+    if (!c) printf("    part%d(%d,\"%s\") got \"%s\" want \"%s\"\n", which, st, p, got, want);
+}
+static void rel(int st, const char *f, const char *t, const char *want) {
+    char d[256];
+    long r = pt_relative_as(st, d, sizeof d, f, t);
+    int c = r >= 0 && same(d, want);
+    ok(c, "relative");
+    if (!c) printf("    relative(%d,\"%s\",\"%s\") got \"%s\" want \"%s\"\n", st, f, t, r < 0 ? "ERR" : d, want);
+}
+static void pre(int st, const char *p, const char *d, int want) {
+    int c = pt_has_prefix_as(st, p, strlen(p), d, strlen(d)) == want;
+    ok(c, "has_prefix");
+    if (!c) printf("    has_prefix(%d,\"%s\",\"%s\") want %d\n", st, p, d, want);
+}
+
+int main(void) {
+    char d[256], small[4];
+    long off, len, pos, r;
+    const char *parts[3];
+    int n;
+    /* is_abs */
+    ok(pt_is_abs_as(0, "/a", 2) == 1, "abs posix /a");
+    ok(pt_is_abs_as(0, "a/b", 3) == 0, "abs posix rel");
+    ok(pt_is_abs_as(0, "C:\\a", 4) == 0, "abs posix drive is relative");
+    ok(pt_is_abs_as(1, "C:\\a", 4) == 1, "abs win C:\\a");
+    ok(pt_is_abs_as(1, "C:/a", 4) == 1, "abs win C:/a");
+    ok(pt_is_abs_as(1, "C:a", 3) == 0, "abs win C:a");
+    ok(pt_is_abs_as(1, "\\a", 2) == 0, "abs win lone backslash");
+    ok(pt_is_abs_as(1, "\\\\srv\\sh\\x", 10) == 1, "abs win UNC");
+    ok(pt_is_abs_as(1, "\\\\?\\C:\\x", 8) == 1, "abs win verbatim");
+    ok(pt_is_abs_as(1, "", 0) == 0, "abs empty");
+    ok(pt_is_abs_as(7, "/a", 2) == -22, "abs bad style");
+    ok(pt_is_abs_as(0, 0, 3) == -22, "abs null");
+    ok(pt_is_abs("/x", 2) == 1 && pt_is_sep('/') == 1 && (pt_sep() == '/' || pt_sep() == '\\'), "host forms");
+    ok(pt_root_len(0, "/a", 2) == 1 && pt_root_len(1, "C:\\a", 4) == 3 && pt_root_len(1, "\\\\s\\h\\x", 7) == 6
+       && pt_root_len(0, "a", 1) == 0 && pt_root_len(9, "a", 1) == -22, "root_len");
+    /* normalize */
+    nrm(0, "/a//b/./c/../d/", "/a/b/d");
+    nrm(0, "", ".");
+    nrm(0, ".", ".");
+    nrm(0, "/", "/");
+    nrm(0, "/..", "/");
+    nrm(0, "/../../a", "/a");
+    nrm(0, "../a/../..", "../..");
+    nrm(0, "a/..", ".");
+    nrm(0, "//x", "/x");
+    nrm(0, "a\\b", "a\\b");
+    nrm(1, "C:/a//b/../c", "C:\\a\\c");
+    nrm(1, "C:\\..\\x", "C:\\x");
+    nrm(1, "C:a/../b", "C:b");
+    nrm(1, "\\\\srv\\sh", "\\\\srv\\sh\\");
+    nrm(1, "a/b\\c", "a\\b\\c");
+    nrm(1, "\\a\\..\\..", "\\");
+    nrm(1, "..\\x", "..\\x");
+    r = pt_normalize_as(0, small, sizeof small, "/abcdef", 7);
+    ok(r == -34, "normalize ERANGE");
+    ok(pt_normalize_as(5, d, sizeof d, "a", 1) == -22 && pt_normalize_as(0, 0, 4, "a", 1) == -22, "normalize bad args");
+    /* join */
+    jn(0, "a", "b", "a/b");
+    jn(0, "a/", "b", "a/b");
+    jn(0, "a", "/b", "/b");
+    jn(0, "", "b", "b");
+    jn(0, "a", "", "a");
+    jn(0, "/", "x", "/x");
+    jn(1, "C:\\a", "b/c", "C:\\a\\b\\c");
+    jn(1, "C:", "x", "C:x");
+    jn(1, "a/b", "D:\\x", "D:\\x");
+    jn(1, "C:\\a", "\\x", "C:\\x");
+    r = pt_join_as(0, small, sizeof small, "abc", "def");
+    ok(r == -34, "join ERANGE");
+    ok(pt_join_as(0, d, sizeof d, 0, "x") == -22, "join null");
+    parts[0] = "a"; parts[1] = "b"; parts[2] = "/c";
+    n = 2;
+    ok(pt_join_n(d, sizeof d, parts, n) >= 0 && (pt_sep() == '/' ? same(d, "a/b") : same(d, "a\\b")), "join_n 2");
+    ok(pt_join_n(d, sizeof d, parts, 3) >= 0 && same(d, "/c"), "join_n abs resets");
+    ok(pt_join_n(d, sizeof d, parts, 0) == 0 && d[0] == 0, "join_n empty");
+    ok(pt_join_n(d, sizeof d, 0, 2) == -22, "join_n null");
+    /* dirname/basename/ext/stem */
+    part(0, 0, "/a/b/c", "/a/b");
+    part(0, 0, "/a/b/", "/a");
+    part(0, 0, "a", "");
+    part(0, 0, "/a", "/");
+    part(0, 0, "/", "/");
+    part(0, 0, "a//b", "a");
+    part(0, 1, "C:\\a\\b", "C:\\a");
+    part(0, 1, "C:\\a", "C:\\");
+    part(1, 0, "/a/b.txt", "b.txt");
+    part(1, 0, "/a/b/", "b");
+    part(1, 0, "/", "");
+    part(1, 1, "C:\\a\\b.c", "b.c");
+    part(1, 0, "a\\b", "a\\b");
+    part(2, 0, "/a/b.tar.gz", ".gz");
+    part(2, 0, "/a/.bashrc", "");
+    part(2, 0, "x", "");
+    part(2, 0, "..", "");
+    part(2, 0, "a.", ".");
+    part(2, 1, "d.x\\f.cx", ".cx");
+    part(3, 0, "/a/b.tar.gz", "b.tar");
+    part(3, 0, "/a/.bashrc", ".bashrc");
+    part(3, 0, "/a/", "a");
+    ok(pt_dirname_as(0, "a", 1, 0, &len) == -22 && pt_basename_as(9, "a", 1, &off, &len) == -22, "part bad args");
+    ok(pt_dirname("/a/b", 4, &off, &len) == 0 && len == 2 && pt_basename("/a/b", 4, &off, &len) == 0 && len == 1, "part host");
+    ok(pt_ext("a.c", 3, &off, &len) == 0 && len == 2 && pt_stem("a.c", 3, &off, &len) == 0 && len == 1, "part host ext/stem");
+    /* next */
+    pos = 0;
+    ok(pt_next_as(0, "/a//bc/", 7, &pos, &off, &len) == 1 && off == 0 && len == 1, "next root");
+    ok(pt_next_as(0, "/a//bc/", 7, &pos, &off, &len) == 1 && off == 1 && len == 1, "next a");
+    ok(pt_next_as(0, "/a//bc/", 7, &pos, &off, &len) == 1 && off == 4 && len == 2, "next bc");
+    ok(pt_next_as(0, "/a//bc/", 7, &pos, &off, &len) == 0, "next end");
+    pos = 0;
+    ok(pt_next_as(1, "C:\\x/y", 6, &pos, &off, &len) == 1 && len == 3, "next win drive root");
+    ok(pt_next_as(1, "C:\\x/y", 6, &pos, &off, &len) == 1 && off == 3 && len == 1, "next win x");
+    ok(pt_next_as(1, "C:\\x/y", 6, &pos, &off, &len) == 1 && off == 5 && len == 1, "next win y");
+    pos = 0;
+    ok(pt_next_as(0, "ab", 2, &pos, &off, &len) == 1 && off == 0 && len == 2 && pt_next_as(0, "ab", 2, &pos, &off, &len) == 0, "next relative");
+    pos = 9;
+    ok(pt_next_as(0, "ab", 2, &pos, &off, &len) == -22, "next bad pos");
+    pos = 0;
+    ok(pt_next("a", 1, &pos, &off, &len) == 1, "next host");
+    /* relative */
+    rel(0, "/a/b", "/a/b/c/d", "c/d");
+    rel(0, "/a/b/c", "/a/x", "../../x");
+    rel(0, "/a/b", "/a/b", ".");
+    rel(0, "/a/b/", "/a", "..");
+    rel(0, "a/b", "a/c", "../c");
+    rel(0, "", "x", "x");
+    rel(1, "C:\\a\\b", "C:\\a\\c\\d", "..\\c\\d");
+    rel(1, "C:\\a", "c:\\a\\x", "x");
+    rel(1, "C:\\a", "D:\\x", "D:\\x");
+    ok(pt_relative_as(0, d, sizeof d, "/a", "b") == -22, "relative abs vs rel");
+    ok(pt_relative_as(0, d, sizeof d, "../a", "b") == -22, "relative unresolvable ..");
+    ok(pt_relative_as(0, small, sizeof small, "/a", "/a/bbbbbb") == -34, "relative ERANGE");
+    ok(pt_relative_as(0, d, sizeof d, 0, "b") == -22 && pt_relative_as(4, d, sizeof d, "a", "b") == -22, "relative bad args");
+    ok(pt_relative(d, sizeof d, "/a", "/a/b") >= 0, "relative host");
+    /* has_prefix */
+    pre(0, "/a/b/c", "/a/b", 1);
+    pre(0, "/ab", "/a", 0);
+    pre(0, "/a/b/../c", "/a/c", 1);
+    pre(0, "/a/b", "/a/b/c", 0);
+    pre(0, "/a", "/", 1);
+    pre(0, "a/b", "/a", 0);
+    pre(0, "/a/../..", "/a", 0);
+    pre(1, "C:\\A\\b", "c:/a", 1);
+    pre(1, "D:\\a", "C:\\a", 0);
+    ok(pt_has_prefix_as(9, "a", 1, "a", 1) == -22 && pt_has_prefix("/a/b", 4, "/a", 2) == 1, "has_prefix bad/host");
+    /* conversion */
+    ok(pt_to_slash(d, sizeof d, "a/b", 3) == 3 && same(d, "a/b"), "to_slash plain");
+    ok(pt_to_native(d, sizeof d, "a/b", 3) == 3, "to_native len");
+    ok(pt_to_slash(small, sizeof small, "abcd", 4) == -34 && pt_to_native(0, 4, "a", 1) == -22, "convert errors");
+    printf("CHECK_CX_PATH\tok=%d\tbad=%d\t%s\n", okn, bad, bad ? "FAIL" : "PASS");
+    if (!bad) printf("CX_PATH_PASS\n");
+    return bad ? 1 : 0;
+}

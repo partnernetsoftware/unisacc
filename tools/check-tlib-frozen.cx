@@ -1,0 +1,385 @@
+/* tools/check-tlib-frozen.cx -- versioned-package gate: every package of build/tlib-packages.tsv whose ninth
+ * field (content sha, frozen) is not "-" must still hash to that sha (tools/layer-api.cx --freeze). A change
+ * under the package's roots is accepted only together with `layer-api --bump PKG`, which rewrites version,
+ * api_sha and the content sha in one step.
+ *
+ *   sh ./unisacc.com tools/check-tlib-frozen.cx [-- ROOT OUT]
+ *   sh ./unisacc.com tools/check-tlib-frozen.cx -- --fast ROOT PKG...
+ *
+ * (1) real: ROOT's versioned packages equal their recorded content sha (none set yet is reported, not an error);
+ * (2) fixture: --bump adopts (sets the sha, same version), the gate passes; a one-byte edit makes the gate
+ *     fail naming the package; --bump (api unchanged) makes it a Z bump and the gate passes; an additive edit
+ *     is a Y bump; a breaking edit is an X bump.
+ * tools/layer-api.cx is built once (tq_native, a PREPARED line, not a result). Exit 0 all ok, 1 a check failed. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400], fx[4400], bin[4400];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-frozen.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* Run layer-api with up to 5 args under R; output text to *out (caller frees). rc of the tool. */
+static int run(const char *a, const char *b, const char *r, char **out) {
+    char *v[8];
+    size_t n = 0;
+    int k = 0;
+    *out = 0;
+    v[k++] = bin;
+    v[k++] = (char *)a;
+    v[k++] = (char *)b;
+    v[k++] = "--root";
+    v[k++] = (char *)r;
+    v[k] = 0;
+    return cx_runv_timeout(v, 55, out, &n);
+}
+
+/* 1 when OUT has a line "VERSIONED<TAB>PKG<TAB>..." carrying frozen=HEX into hex. */
+static int frozen_of(const char *out, const char *pkg, char hex[65]) {
+    long n = out ? tx_len(out, TX_ZCAP) : 0, i = 0, e, o, l, f;
+    while (i < n) {
+        e = i;
+        while (e < n && out[e] != '\n') e++;
+        if (!tx_field(out + i, e - i, '\t', 0, &o, &l) && tx_same(out + i + o, l, "VERSIONED", 9) &&
+            !tx_field(out + i, e - i, '\t', 1, &o, &l) && l == tx_len(pkg, 128) && tx_same(out + i + o, l, pkg, l))
+            for (f = 2; !tx_field(out + i, e - i, '\t', (int)f, &o, &l); f++)
+                if (l == 71 && tx_prefix(out + i + o, l, "frozen=", 7)) return tx_copy(hex, 65, out + i + o + 7, 64) ? 0 : 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* The gate on tree R. Returns the number of mismatching packages; *versioned counts the checked ones;
+   names of failing packages are printed as "FROZEN<TAB>PKG<TAB>MISMATCH". */
+/* Fast content-sha calculation (same as layer-api content_sha) without spawning layer-api. */
+static int fast_sha(const char *r, const char *name, char hex[65]) {
+    static char ord[TP_MAXU + TP_MAXX];
+    TpPkg pk;
+    char why[512], fh[65], line[4800], p[4400];
+    TpBuf b = {0, 0, 0, 0};
+    int i, j, n, t;
+    if (tp_load(r, name, &pk, why, sizeof why)) return 2;
+    n = pk.nunit + pk.nexcl;
+    for (i = 0; i < n; i++) ord[i] = (char)i;
+    for (i = 1; i < n; i++) {
+        t = ord[i];
+        for (j = i - 1; j >= 0; j--) {
+            const char *a = ord[j] < pk.nunit ? pk.unit[(int)ord[j]] : pk.excl[ord[j] - pk.nunit];
+            const char *c = t < pk.nunit ? pk.unit[t] : pk.excl[t - pk.nunit];
+            int ka = ord[j] < pk.nunit ? 0 : 1, kc = t < pk.nunit ? 0 : 1;
+            if (ka < kc || (ka == kc && tx_cmp(a, tx_len(a, TX_ZCAP), c, tx_len(c, TX_ZCAP)) <= 0)) break;
+            ord[j + 1] = ord[j];
+        }
+        ord[j + 1] = (char)t;
+    }
+    for (i = 0; i < n; i++) {
+        int isu = ord[i] < pk.nunit;
+        const char *rel = isu ? pk.unit[(int)ord[i]] : pk.excl[ord[i] - pk.nunit];
+        if (cx_fmt(p, sizeof p, "%s/%s", r, rel)) return 2;
+        if (tp_sha_file(p, fh)) {
+            if (isu) return 2;
+            fh[0] = '-'; fh[1] = 0;
+        }
+        if (cx_fmt(line, sizeof line, isu ? "unit\t%s\t%s\n" : "excl\t%s\t%s\n", rel, fh)) return 2;
+        tp_puts(&b, line);
+    }
+    if (b.bad || !b.b) return 2;
+    tp_sha(b.b, (size_t)b.n, hex);
+    mm_free(b.b);
+    return 0;
+}
+
+/* Fast mode (--fast ROOT PKG...): check only the named packages in ROOT. Prints
+   FROZEN<TAB>PKG<TAB>MISMATCH<TAB>source changed without `layer-api --bump PKG` on mismatch. */
+static int fast_gate(const char *r, int npkg, char **pkgs) {
+    char path[4400], *t;
+    size_t tn = 0;
+    long i = 0, e, o, l;
+    int nbad = 0, k;
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", r)) return 1;
+    t = cx_read(path, &tn);
+    if (!t) { sy_printf("FROZEN\t-\tunreadable-table\n"); return 1; }
+    while (i < (long)tn) {
+        long o9, l9;
+        e = i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (t[i] != '#' && !tx_field(t + i, e - i, '\t', 0, &o, &l) && !tx_field(t + i, e - i, '\t', 8, &o9, &l9) &&
+            !(l9 == 1 && t[i + o9] == '-')) {
+            int want_pkg = 0;
+            for (k = 0; k < npkg; k++)
+                if (l == tx_len(pkgs[k], 128) && tx_same(t + i + o, l, pkgs[k], l)) { want_pkg = 1; break; }
+            if (want_pkg) {
+                char name[64], want[65], have[65];
+                if (tx_copy(name, sizeof name, t + i + o, l) || l9 != 64 || tx_copy(want, sizeof want, t + i + o9, 64)) {
+                    sy_printf("FROZEN\t%.*s\tbad-field\n", (int)l, t + i + o);
+                    nbad++;
+                } else if (fast_sha(r, name, have) || !tx_eqz(have, want)) {
+                    sy_printf("FROZEN\t%s\tMISMATCH\tsource changed without `layer-api --bump %s`\n", name, name);
+                    nbad++;
+                }
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(t);
+    return nbad ? 1 : 0;
+}
+
+static int gate(const char *r, int *versioned, char *bad, long badcap) {
+    char path[4400], *t;
+    size_t tn = 0;
+    long i = 0, e, o, l;
+    int nbad = 0;
+    *versioned = 0;
+    bad[0] = 0;
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", r)) return 1;
+    t = cx_read(path, &tn);
+    if (!t) { sy_printf("FROZEN\t-\tunreadable-table\n"); return 1; }
+    while (i < (long)tn) {
+        long o9, l9;
+        e = i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (t[i] != '#' && !tx_field(t + i, e - i, '\t', 0, &o, &l) && !tx_field(t + i, e - i, '\t', 8, &o9, &l9) &&
+            !(l9 == 1 && t[i + o9] == '-')) {
+            char name[64], want[65], have[65], *out = 0;
+            int rc;
+            (*versioned)++;
+            if (tx_copy(name, sizeof name, t + i + o, l) || l9 != 64 || tx_copy(want, sizeof want, t + i + o9, 64)) {
+                sy_printf("FROZEN\t%s\tbad-field\n", name);
+                nbad++;
+            } else {
+                have[0] = 0;
+                rc = run("--freeze", name, r, &out);
+                if (rc || !frozen_of(out, name, have) || !tx_eqz(have, want)) {
+                    sy_printf("FROZEN\t%s\tMISMATCH\tsource changed without `layer-api --bump %s`\n", name, name);
+                    nbad++;
+                    if (tx_len(bad, badcap) + l + 2 < badcap) { tx_copy(bad + tx_len(bad, badcap), badcap - tx_len(bad, badcap), name, tx_len(name, 64)); }
+                }
+                mm_free(out);
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(t);
+    return nbad;
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int dir(const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return sy_mkdir(p, 0755);
+}
+
+/* 1 when the fixture table's fx.a row has version VER. */
+static int table_has(const char *ver) {
+    char p[4400], *t;
+    size_t n = 0;
+    long i = 0, e, o, l;
+    int ok = 0;
+    if (cx_fmt(p, sizeof p, "%s/build/tlib-packages.tsv", fx)) return 0;
+    t = cx_read(p, &n);
+    while (t && i < (long)n) {
+        e = i;
+        while (e < (long)n && t[e] != '\n') e++;
+        if (t[i] != '#' && !tx_field(t + i, e - i, '\t', 0, &o, &l) && tx_same(t + i + o, l, "fx.a", 4) && l == 4 &&
+            !tx_field(t + i, e - i, '\t', 1, &o, &l) && l == tx_len(ver, 32) && tx_same(t + i + o, l, ver, l)) ok = 1;
+        i = e + 1;
+    }
+    mm_free(t);
+    return ok;
+}
+
+/* --bump reads the git index and refuses a package path that differs from it: once the fixture is its own
+   git root, stage the package sources (fa/) before every bump, as a developer must. */
+static int fx_git;
+static int stage_fx(void) {
+    char gd[4500], *g[] = {"git", "-C", fx, "add", "-A", "--", "fa", 0}, *o = 0;
+    size_t n = 0;
+    int rc = 0;
+    if (cx_fmt(gd, sizeof gd, "%s/.git", fx)) return -1;
+    if (fx_git) rc = cx_runv_timeout(g, 20, &o, &n);
+    mm_free(o);
+    return rc;
+}
+
+static int bump_fx(char **out) {
+    (void)stage_fx();
+    return run("--bump", "fx.a", fx, out);
+}
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], badn[256], *out = 0, t[600];
+    char sha0[65];
+    int rc, prep = 0, nv, nb;
+
+    if (argc >= 3 && tx_eqz(argv[1], "--fast")) {
+        if (sy_realpath(argv[2][0] ? argv[2] : ".", root, sizeof root) < 0) return 2;
+        return fast_gate(root, argc - 3, argv + 3);
+    }
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/tlib-frozen-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/tlib-frozen-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/layer-api.cx", root) || cx_fmt(bin, sizeof bin, "%s/layer-api.native", work) ||
+        cx_fmt(fx, sizeof fx, "%s/fx", work)) return 2;
+    sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("GIT_INDEX_FILE");
+    if (tq_native(root, src, bin, why, sizeof why)) { sy_printf("FAIL\ttlib-frozen.build-native\t%s\n", why); return 1; }
+
+    /* (1) this checkout */
+    nb = gate(root, &nv, badn, sizeof badn);
+    sy_printf("INFO\ttlib-frozen.versioned-packages=%d\n", nv);
+    ck(nb == 0, "real-versioned-packages-match-content-sha");
+
+    /* (2) fixture */
+    {
+        char p[4400];
+        prep |= sy_mkdir(fx, 0755) || dir("build") || dir("fa");
+        prep |= cx_fmt(p, sizeof p, "%s/unisacc.com", fx) || sy_symlink("../../../../unisacc.com", p);
+    }
+    prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\n");
+    prep |= put("build/tlib-packages.tsv", "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\n"
+                                           "fx.a\t0.1.0\tPENDING\tfa\t-\t-\tfixture\n");
+    if (prep) { sy_printf("FAIL\ttlib-frozen.fixture-prepare\n"); return 1; }
+    /* the symlink above depends on the work dir depth; repoint at the real product */
+    {
+        char p[4400], prod[4400];
+        (void)cx_fmt(p, sizeof p, "%s/unisacc.com", fx);
+        (void)cx_fmt(prod, sizeof prod, "%s/unisacc.com", root);
+        (void)sy_unlink(p);
+        if (sy_symlink(prod, p)) { sy_printf("FAIL\ttlib-frozen.fixture-prepare\n"); return 1; }
+    }
+    rc = bump_fx(&out);
+    ck(rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "adopt", 5) && table_has("0.1.0"), "bump-adopts-at-same-version");
+    mm_free(out);
+    nb = gate(fx, &nv, badn, sizeof badn);
+    ck(nb == 0 && nv == 1, "gate-passes-after-adopt");
+
+    prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 2; }\n");
+    nb = gate(fx, &nv, badn, sizeof badn);
+    ck(!prep && nb == 1 && tx_eqz(badn, "fx.a"), "one-byte-edit-fails-naming-package");
+    {
+        char *p1[] = {"fx.a"};
+        ck(fast_gate(fx, 1, p1) == 1, "fast-mode-detects-mismatch");
+    }
+    {
+        char gd[4500], idx[4500], pc[4500], fa[4500], tb[4500], *po = 0;
+        size_t pon = 0;
+        int prc = -1;
+        if (!cx_fmt(gd, sizeof gd, "%s/.git", fx) && !cx_fmt(idx, sizeof idx, "%s/index", work) &&
+            !cx_fmt(pc, sizeof pc, "%s/tools/precommit.cx", root) &&
+            !cx_fmt(fa, sizeof fa, "%s/fa/one.cx", fx) && !cx_fmt(tb, sizeof tb, "%s/build/tlib-packages.tsv", fx)) {
+            char *gi[] = {"git", "init", "-q", fx, 0};
+            char *ga[] = {"git", "add", "--", fa, tb, 0};
+            char *pv[] = {"sh", "./unisacc.com", pc, 0};
+            (void)cx_runv_timeout(gi, 20, &po, &pon); mm_free(po); po = 0;
+            fx_git = 1;
+            sy_setenv("GIT_DIR", gd, 1);
+            sy_setenv("GIT_WORK_TREE", fx, 1);
+            sy_setenv("GIT_INDEX_FILE", idx, 1);
+            (void)cx_runv_timeout(ga, 20, &po, &pon); mm_free(po); po = 0;
+            prc = cx_runv_timeout(pv, 45, &po, &pon);
+            ck(prc == 0 && po && tx_contains(po, (long)pon, "TLIB_BUMP_NEEDED\tfx.a", 21) &&
+               tx_contains(po, (long)pon, "layer-api.cx -- --bump fx.a", 27) &&
+               tx_contains(po, (long)pon, "PRECOMMIT\tstaged_cx=1\tblocked=0", 31),
+               "precommit-reports-tlib-bump-needed-without-blocking");
+            mm_free(po); po = 0;
+            sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("GIT_INDEX_FILE");
+        } else ck(0, "precommit-reports-tlib-bump-needed-without-blocking");
+    }
+
+    /* negative: the one-byte edit is in the work tree only (never git add-ed): --bump refuses, rc 2, REFUSE names the path */
+    rc = run("--bump", "fx.a", fx, &out);
+    ck(rc == 2 && out && tx_contains(out, tx_len(out, TX_ZCAP), "REFUSE\tfx.a\tdirty-package-path\tfa/one.cx", 33), "bump-unstaged-source-refused-rc2");
+    mm_free(out);
+    rc = bump_fx(&out);
+    ck(rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "patch", 5) && table_has("0.1.1"), "bump-impl-change-is-z");
+    mm_free(out);
+    nb = gate(fx, &nv, badn, sizeof badn);
+    ck(nb == 0, "gate-passes-after-bump");
+    {
+        char *p1[] = {"fx.a"};
+        ck(fast_gate(fx, 1, p1) == 0, "fast-mode-passes-after-bump");
+    }
+    {
+        char gd[4500], idx[4500], pc[4500], fa[4500], tb[4500], *po = 0;
+        size_t pon = 0;
+        int prc = -1;
+        if (!cx_fmt(gd, sizeof gd, "%s/.git", fx) && !cx_fmt(idx, sizeof idx, "%s/index", work) &&
+            !cx_fmt(pc, sizeof pc, "%s/tools/precommit.cx", root) &&
+            !cx_fmt(fa, sizeof fa, "%s/fa/one.cx", fx) && !cx_fmt(tb, sizeof tb, "%s/build/tlib-packages.tsv", fx)) {
+            char *ga[] = {"git", "add", "--", fa, tb, 0};
+            char *pv[] = {"sh", "./unisacc.com", pc, 0};
+            sy_setenv("GIT_DIR", gd, 1);
+            sy_setenv("GIT_WORK_TREE", fx, 1);
+            sy_setenv("GIT_INDEX_FILE", idx, 1);
+            (void)cx_runv_timeout(ga, 20, &po, &pon); mm_free(po); po = 0;
+            prc = cx_runv_timeout(pv, 45, &po, &pon);
+            ck(prc == 0 && po && !tx_contains(po, (long)pon, "TLIB_BUMP_NEEDED", 16) &&
+               tx_contains(po, (long)pon, "PRECOMMIT\tstaged_cx=1\tblocked=0", 31),
+               "precommit-silent-when-bumped");
+            mm_free(po); po = 0;
+            sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("GIT_INDEX_FILE");
+        } else ck(0, "precommit-silent-when-bumped");
+    }
+
+    prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 2; }\nint fa_more(void) { return 4; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "minor", 5) && table_has("0.2.0"), "bump-additive-is-y");
+    mm_free(out);
+
+    prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nint fa_more(void) { return 4; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "major", 5) && table_has("1.0.0"), "bump-breaking-is-x");
+    mm_free(out);
+    nb = gate(fx, &nv, badn, sizeof badn);
+    ck(nb == 0, "gate-passes-after-major");
+
+    /* pre-stable policy: stable=no caps y and x at z; a per-package stable=yes row restores them */
+    prep = put("build/tlib-policy.tsv", "stable\tno\n");
+    prep |= put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nint fa_more(void) { return 4; }\nint fa_more2(void) { return 5; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "pre-stable class=z (would be y)", 30) && table_has("1.0.1"), "prestable-caps-additive-at-z");
+    mm_free(out);
+    prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nlong fa_more(void) { return 4; }\nint fa_more2(void) { return 5; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "pre-stable class=z (would be x)", 30) && table_has("1.0.2"), "prestable-caps-breaking-at-z");
+    mm_free(out);
+    nb = gate(fx, &nv, badn, sizeof badn);
+    ck(nb == 0, "gate-passes-after-prestable-bumps");
+    prep = put("build/tlib-policy.tsv", "stable\tno\nfx.a\tyes\n");
+    prep |= put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nlong fa_more(void) { return 4; }\nint fa_more2(void) { return 5; }\nint fa_more3(void) { return 6; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "minor", 5) && table_has("1.1.0"), "stable-yes-restores-y");
+    mm_free(out);
+    prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nlong fa_more(void) { return 4; }\nint fa_more2(void) { return 5; }\nlong fa_more3(void) { return 6; }\n");
+    rc = bump_fx(&out);
+    ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "major", 5) && table_has("2.0.0"), "stable-yes-restores-x");
+    mm_free(out);
+    (void)t; (void)sha0;
+    sy_printf("tlib-frozen failed=%d\n", failed);
+    if (!failed) sy_printf("CHECK_TLIB_FROZEN\n");
+    return failed ? 1 : 0;
+}

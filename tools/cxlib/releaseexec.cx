@@ -1,11 +1,12 @@
 /* Explicitly authorized release execution; planning remains in release-oneshot.
  * CONFIG TSV: root, repo_dir, build_rev, prev_tag, notes, deadline_s; argv prefixes
- * gh, s9, decide; optional layout_check, s9_tiers, s9_call_s (1..55), poll_ms.
+ * gh, s9, decide; optional layout_check, s9_tiers, s9_call_s (1..90), poll_ms.
  * The configuration bytes and original candidate inputs are immutable across resumes.
  * deadline.tsv persists the preparation+execution wall budget, never refreshed.
  * Commands retain argv/output/exit status, are bounded by 55s and the remaining
  * monotonic budget; checkpoint persistence failure terminates before more work.
- * Interrupted CI dispatch is not repeated. RUNNING s9 resumes its existing session;
+ * Interrupted CI dispatch is not repeated; a dispatch phase that failed before any
+ * dispatch command started (no intent marker, no command record) is re-entered. RUNNING s9 resumes its existing session;
  * the inherited execution lock prevents concurrent or orphaned consumers.
  * Upstream PASS requires releaseprepare's fixed, recomputed seal, not config text.
  * s9 runner completion is not FULL qualification: the actual candidate consumer,
@@ -250,6 +251,25 @@ static int rx_hasline(const char *s, const char *w) {
     return 0;
 }
 static void rx_first(const char *s, char *o, int cap) { int k = 0; while (s && s[k] && s[k] != '\n' && k < cap - 1) { o[k] = s[k]; k++; } o[k] = 0; }
+/* Rollback declaration choice: an existing hand-written text whose first line names this version is kept
+   verbatim; otherwise the template.  Returns 0 and fills o, nonzero when the chosen text does not fit. */
+int rex_rollback_pick(const char *old, const char *version, const char *tmpl, char *o, int cap) {
+    long vn = version ? (long)strlen(version) : 0, i, k = 0;
+    int keep = 0;
+    if (old && vn > 0) {
+        for (i = 0; old[i] && old[i] != '\n' && !keep; i++) {
+            long j = 0;
+            while (j < vn && old[i + j] && old[i + j] != '\n' && old[i + j] == version[j]) j++;
+            if (j == vn) keep = 1;
+        }
+    }
+    {
+        const char *src = keep ? old : tmpl;
+        while (src[k]) { if (k + 1 >= cap) return 1; o[k] = src[k]; k++; }
+        o[k] = 0;
+    }
+    return 0;
+}
 static int rx_save(const char *file,const char *text) { char p[4400];return rx_path(p,rx_state,file)||rx_write(p,text,strlen(text),O_TRUNC); }
 static int rx_loadline(const char *file, char *o, int cap) {
     char p[4400]; size_t n = 0; char *s;
@@ -317,7 +337,7 @@ static int rx_verify(const char *dir);
 static int rx_assetguard(void) {
     char *v[40],*o=0,endpoint[600],p[4400],sha[65],*names[14],*dirs[14];
     char export_names[6][256];int count=7,n,rc;size_t bytes=0;
-    for(int i=0;i<7;i++){names[i]=rx_c.name[i];dirs[i]=rx_assets;}
+    count=0;for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;names[count]=rx_c.name[i];dirs[count++]=rx_assets;}
     char standalone[4400];rx_path(standalone,rx_state,"standalone");
     rx_path(p,rx_state,"standalone-sha256.tsv");
     if(rx_upstream_ok||sy_exists(p)==1){
@@ -341,10 +361,17 @@ static int rx_assetguard(void) {
     rc=rx_verify(rx_assets);if(rc)return rc;
     rc=rx_view("assetguard-identity",&o);if(rc)return rc<0?rc:rx_fail("assetguard release identity query",0);
     int good=rx_release_identity(o,"true");free(o);o=0;if(!good)return rx_fail("assetguard wrong candidate release",0);
-    if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/releases/tags/%s",rx_c.repo,rx_c.tag))return rx_fail("assetguard endpoint",0);
-    n=rx_pre(v,"gh");v[n++]="api";v[n++]=endpoint;v[n++]="--jq";v[n++]=".id";v[n]=0;
+    /* A draft has no tag ref yet, so the REST tag lookup of a draft answers 404.  The id is the last
+     * segment of the release's own API URL, which the CLI resolves for drafts as well; nothing but
+     * https://api.github.com/repos/REPO/releases/DIGITS and one newline is accepted. */
+    n=rx_pre(v,"gh");v[n++]="release";v[n++]="view";v[n++]=rx_c.tag;v[n++]="-R";v[n++]=rx_c.repo;v[n++]="--json";v[n++]="apiUrl";v[n++]="--jq";v[n++]=".apiUrl";v[n]=0;
     rc=rx_cmd("assetguard-release-id",v,0,&o);if(rc)return rc<0?rc:rx_fail("assetguard release id query",0);
-    char id[64];rx_first(o,id,sizeof id);good=o&&strlen(o)==strlen(id)+1&&id[0]&&strspn(id,"0123456789")==strlen(id);free(o);o=0;
+    char id[64];size_t lead=0,digits=0;id[0]=0;
+    good=o&&!cx_fmt(endpoint,sizeof endpoint,"https://api.github.com/repos/%s/releases/",rx_c.repo);
+    if(good){lead=strlen(endpoint);good=!strncmp(o,endpoint,lead);}
+    if(good){digits=strspn(o+lead,"0123456789");good=digits>0&&digits<sizeof id&&o[lead+digits]=='\n'&&!o[lead+digits+1];}
+    if(good){good=!mm_copy(id,(long)sizeof id-1,o+lead,(long)digits);id[good?digits:0]=0;}
+    free(o);o=0;
     if(!good)return rx_fail("assetguard release id malformed",0);
     if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/releases/%s/assets?per_page=100&page=1",rx_c.repo,id))return rx_fail("assetguard endpoint",0);
     n=rx_pre(v,"gh");v[n++]="api";v[n++]="--include";v[n++]=endpoint;v[n++]="--jq";v[n++]=".[] | [.name, .size, .digest, .state] | @tsv";v[n]=0;
@@ -372,9 +399,9 @@ static int rx_assetguard(void) {
 }
 static int rx_verify(const char *dir) {
     char *v[12],*o=0;int rc;size_t at=0;
-    v[0]="sha256sum";v[1]="--";for(int i=0;i<7;i++)v[i+2]=rx_c.name[i];v[9]=0;
+    int vm=0;v[0]="sha256sum";v[1]="--";for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;v[2+vm++]=rx_c.name[i];}v[2+vm]=0;
     rc=rx_cmd("verify-seven",v,dir,&o);if(rc)return rc<0?rc:rx_fail("seven digest command",dir);
-    for(int i=0;i<7;i++){size_t n=strlen(rx_c.name[i]);if(!o||strlen(o+at)<67+n||strncmp(o+at,rx_c.sha[i],64)||strncmp(o+at+64,"  ",2)||strncmp(o+at+66,rx_c.name[i],n)||o[at+66+n]!='\n'){free(o);return rx_fail("seven digest mismatch",rx_c.name[i]);}at+=67+n;}rc=o[at]!=0;free(o);if(rc)return rx_fail("digest output suffix",0);return 0;
+    for(int i=0;i<7;i++){if(rcand_skip(&rx_c,i))continue;size_t n=strlen(rx_c.name[i]);if(!o||strlen(o+at)<67+n||strncmp(o+at,rx_c.sha[i],64)||strncmp(o+at+64,"  ",2)||strncmp(o+at+66,rx_c.name[i],n)||o[at+66+n]!='\n'){free(o);return rx_fail("seven digest mismatch",rx_c.name[i]);}at+=67+n;}rc=o[at]!=0;free(o);if(rc)return rx_fail("digest output suffix",0);return 0;
 }
 static int rx_layout(const char *dir) {
     char candidate[4400],com[4400],tool[4400],*v[40];int n=0,rc=rx_verify(dir);if(rc)return rc;
@@ -411,6 +438,7 @@ static int rx_public_readback(void) {
     char dir[4400],leaf[100],url[1000],p[4400],ape[4400];int rc;
     if(cx_fmt(leaf,sizeof leaf,"public-%ld-%d",sy_now_ms(),sy_pid())||rx_path(dir,rx_state,leaf)||sy_mkdir(dir,0700))return rx_fail("fresh public directory",0);
     for(int i=0;i<7+(rx_upstream_ok?7:0);i++){
+        if(rcand_skip(&rx_c,i))continue;
         const char *name=i<7?rx_c.name[i]:rx_export(i-7);
         if(cx_fmt(url,sizeof url,"https://github.com/%s/releases/download/%s/%s",rx_c.repo,rx_c.tag,name)||rx_path(p,dir,name))return rx_fail("public URL/path",0);
         char *v[]={"curl","-q","--fail","--silent","--show-error","--location","--proto","=https","--proto-redir","=https","--netrc-file","/dev/null","--output",p,"--",url,0};
@@ -480,6 +508,7 @@ static int rx_do(int i) {
     }
     if (i == 4) {
         for (k = 0; k < 7; k++) {   /* one asset per bounded command */
+            if (rcand_skip(&rx_c, k)) continue;
             if (rx_path(p, rx_assets, rx_c.name[k])) return rx_fail("path", 0);
             n = rx_pre(v, "gh");
             v[n++] = "release"; v[n++] = "upload"; v[n++] = rx_c.tag; v[n++] = p; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--clobber"; v[n] = 0;
@@ -498,7 +527,7 @@ static int rx_do(int i) {
         if (rc) return rc < 0 ? rc : rx_fail("gh release view", rx_c.tag);
         rx_first(o, first, sizeof first);
         if(!rx_release_identity(o,"true")){free(o);return rx_fail("draft tag/target/isDraft identity",0);}
-        for (k = 0; k < 7; k++) if (!rx_hasline(o, rx_c.name[k])) { free(o); return rx_fail("draft lacks asset", rx_c.name[k]); }
+        for (k = 0; k < 7; k++) if (!rcand_skip(&rx_c, k) && !rx_hasline(o, rx_c.name[k])) { free(o); return rx_fail("draft lacks asset", rx_c.name[k]); }
         free(o);
         return 0;
     }
@@ -522,10 +551,14 @@ static int rx_do(int i) {
         return 0;
     }
     if (i == 13) {
-        const char *notes = rx_one("notes"); char text[1200], subject[300], y[64];
+        const char *notes = rx_one("notes"); char text[1200], subject[300], y[64], pick[16384]; char *old = 0; size_t oldn = 0;
         if (rx_path(p, rx_repo, notes) || sy_exists(p) != 1) return rx_fail("release notes missing", notes);
-        if (cx_fmt(text, sizeof text, "gh -R %s release edit %s --draft=true\ngh -R %s release edit %s --latest\n# no tag is deleted\n", rx_c.repo, rx_c.tag, rx_c.repo, rx_one("prev_tag")) || rx_save("rollback.txt", text))
+        if (cx_fmt(text, sizeof text, "gh -R %s release edit %s --draft=true\ngh -R %s release edit %s --latest\n# no tag is deleted\n", rx_c.repo, rx_c.tag, rx_c.repo, rx_one("prev_tag")))
             return rx_fail("rollback declaration", 0);
+        if (!rx_path(q, rx_repo, "release/rollback.txt") && sy_exists(q) == 1) old = cx_read(q, &oldn);
+        rc = rex_rollback_pick(old, rx_c.version, text, pick, sizeof pick);
+        free(old);
+        if (rc || rx_save("rollback.txt", pick)) return rx_fail("rollback declaration", 0);
         if (rx_path(q, rx_repo, "release/candidate.tsv") || rx_candidate_write(q, rx_run)) return rx_fail("candidate write", q);
         if (cx_fmt(subject, sizeof subject, "%s Y: ci_run_id=%s, release notes", rx_c.version, rx_run)) return rx_fail("subject", 0);
         {const char *from[]={"evidence.tsv","rollback.txt","decide.out"};const char *to[]={"release/evidence.tsv","release/rollback.txt","release/decision.txt"};for(k=0;k<3;k++){if(rx_path(p,rx_state,from[k])||rx_path(q,rx_repo,to[k])||sy_copy(p,q,0644))return rx_fail("Y evidence/rollback copy",0);}}
@@ -591,6 +624,7 @@ static int rx_dispatch(void) {
     rc=rx_assetguard();if(rc)return rc;
     rc=rx_run_id(before);if(rc)return rc<0?rc:rx_fail("cannot snapshot CI run list",0);
     if (cx_fmt(f1, sizeof f1, "commit=%s", rx_x) || cx_fmt(f2, sizeof f2, "ape_sha256=%s", rx_c.sha[0]) || cx_fmt(f3, sizeof f3, "release_tag=%s", rx_c.tag)) return rx_fail("inputs", 0);
+    if(rx_save("ci-dispatch.intent",f1))return rx_fail("dispatch intent persistence",0);   /* from here on a failure is never re-entered */
     n = rx_pre(v, "gh");
     v[n++] = "workflow"; v[n++] = "run"; v[n++] = rx_c.workflow; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--ref"; v[n++] = rx_c.workflow_ref; v[n++] = "-f"; v[n++] = f1; v[n++] = "-f"; v[n++] = f2; v[n++] = "-f"; v[n++] = f3; v[n] = 0;
     rc = rx_cmd("ci-dispatch", v, 0, 0);
@@ -601,6 +635,17 @@ static int rx_dispatch(void) {
         sy_sleep_ms(rx_poll < 3000 ? rx_poll : 3000);
     }
     return rx_fail("dispatched run did not appear", before);
+}
+/* 1 only when this state provably never started a dispatch command: no intent marker and no retained
+ * cmd-ci-dispatch-* record.  A state directory that cannot be read answers 0: unknown stays refused. */
+static int rx_dispatch_unsent(void) {
+    static char names[262144];char p[4400];int fd,count,seen,at=0;
+    if(rx_path(p,rx_state,"ci-dispatch.intent")||sy_exists(p)!=0)return 0;
+    fd=sy_open(rx_state,O_RDONLY|O_DIRECTORY,0);if(fd<0)return 0;
+    count=sy_dir_names(fd,names,(int)sizeof names);
+    if(sy_close(fd)||count<0)return 0;
+    for(seen=0;seen<count;seen++){if(!strncmp(names+at,"cmd-ci-dispatch-",16))return 0;at+=(int)strlen(names+at)+1;}
+    return 1;
 }
 /* 1 concluded and qualified, 0 still running, 2 concluded otherwise (rx_why), -3 deadline */
 static int rx_observe(void) {
@@ -722,13 +767,15 @@ int rex_execute(const char *state, const char *config, const char *assets) {
         else{start=now;finish=now+v*1000;if(cx_fmt(text,sizeof text,"%ld\t%ld\n",start,finish)||rx_write(p,text,strlen(text),O_EXCL))return rx_refuse("deadline persistence",0);}
         rx_deadline=sy_now_ms()+(finish-now);if(finish<=now)return 3;
     }
-    if(rx_get("s9_call_s")){if(rx_num("s9_call_s",1,55,&v))return rx_refuse("s9_call_s outside 1..55",0);rx_s9call=(int)v;}
+    if(rx_get("s9_call_s")){if(rx_num("s9_call_s",1,90,&v))return rx_refuse("s9_call_s outside 1..90",0);rx_s9call=(int)v;}
     if (rx_get("poll_ms")) { if (rx_num("poll_ms", 100, 60000, &v)) return rx_refuse("poll_ms outside 100..60000", 0); rx_poll = v; }
     if (rx_path(p, rx_state, "candidate.tsv") || rcand_load(p, &rx_c, why, sizeof why)) return rx_refuse("state candidate", why);
     if(strspn(rx_c.repo,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")!=strlen(rx_c.repo)||!strchr(rx_c.repo,'/')||strchr(strchr(rx_c.repo,'/')+1,'/')||strstr(rx_c.repo,".."))return rx_refuse("unsafe repository identity",0);
     if(strcmp(rx_c.commit,rx_one("build_rev")))return rx_refuse("candidate commit differs from build_rev",0);
     if(rx_progress())return rx_refuse("exec checkpoint corrupt",0);
-    if(rx_st[6]==RX_RUNNING||rx_st[6]==RX_FAILED)return rx_refuse("CI dispatch outcome unknown; refusing duplicate dispatch",0);
+    /* FAILED before any dispatch command started (assetguard, run-list snapshot) is re-entered and
+     * rechecked in full; RUNNING, or FAILED with an intent marker or a dispatch record, is unknown. */
+    if(rx_st[6]==RX_RUNNING||(rx_st[6]==RX_FAILED&&!rx_dispatch_unsent()))return rx_refuse("CI dispatch outcome unknown; refusing duplicate dispatch",0);
     (void)rx_loadline("commit-x.txt", rx_x, sizeof rx_x);
     (void)rx_loadline("ci-run-id.txt", rx_run, sizeof rx_run);
     if(rx_st[1]==RX_DONE&&(strlen(rx_x)!=40||!rcand_hex(rx_x,40)))return rx_refuse("missing X identity",0);

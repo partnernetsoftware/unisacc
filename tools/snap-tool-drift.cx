@@ -1,0 +1,108 @@
+/* tools/snap-tool-drift.cx -- 只读比对共享快照内的链内工具与 HEAD 同名文件。
+ *
+ *   sh ./unisacc.com tools/snap-tool-drift.cx -- --snap DIR [--map FILE] [--head DIR] [--report]
+ *
+ * 背景:链从快照 out/release-snap-<rev10>/tools/ 取用 entry-build、kernel-route、release-build 等,
+ * HEAD 上对它们的修复在链内不生效。事实表 build/chain-driver-map.tsv(列 tool class source evidence)
+ * 记每个工具链实际从哪取用(snap/root/pinned/UNVERIFIED)。
+ * 每工具比 sha256(DIR/tools/<tool>.cx 与 HEAD/tools/<tool>.cx),输出
+ *   TOOL<TAB>name<TAB>source<TAB>SAME|DIFF<TAB>首条漂移提交或-<TAB>漂移条数
+ * 漂移提交为 git log --oneline <rev10>..HEAD -- tools/<tool>.cx 的首条与条数,rev10 取自 DIR 目录名
+ * release-snap-<rev10>。末行 SNAP_TOOL_DRIFT<TAB>total=N<TAB>diff=N<TAB>same=N<TAB>snap_diff=N。
+ * 有 source=snap 且 DIFF 的工具 rc 1;--report 恒 0;参数/读取错误 rc 2。只读,不写任何文件。 */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+
+static int sha(const char *p, char *out) {
+    char cmd[9000];
+    char *o = 0;
+    size_t n = 0;
+    out[0] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "sha256sum '%s' 2>/dev/null | cut -c1-64", p)) return 1;
+    cx_run_timeout(cmd, 20, &o, &n);
+    if (o && n >= 64) { memcpy(out, o, 64); out[64] = 0; }
+    if (o) mm_free(o);
+    return out[0] ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    const char *snap = 0, *map = "build/chain-driver-map.tsv", *head = ".";
+    int report = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--report")) report = 1;
+        else if (!strcmp(argv[i], "--snap") && i + 1 < argc) snap = argv[++i];
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) map = argv[++i];
+        else if (!strcmp(argv[i], "--head") && i + 1 < argc) head = argv[++i];
+        else { fprintf(stderr, "usage: snap-tool-drift.cx -- --snap DIR [--map FILE] [--head DIR] [--report]\n"); return 2; }
+    }
+    if (!snap) { fprintf(stderr, "snap-tool-drift: --snap required\n"); return 2; }
+    char sn[4400];
+    size_t sl = strlen(snap);
+    if (sl >= sizeof sn) return 2;
+    if (mm_copy(sn, sizeof sn, snap, sl + 1)) return 2;
+    while (sl > 1 && sn[sl - 1] == '/') sn[--sl] = 0;
+    const char *base = strrchr(sn, '/');
+    base = base ? base + 1 : sn;
+    if (strncmp(base, "release-snap-", 13) || strlen(base) < 23) { fprintf(stderr, "snap-tool-drift: DIR name must be release-snap-<rev10>\n"); return 2; }
+    char rev[11];
+    memcpy(rev, base + 13, 10);
+    rev[10] = 0;
+    size_t mn = 0;
+    char *m = cx_read(map, &mn);
+    if (!m) { fprintf(stderr, "snap-tool-drift: cannot read %s\n", map); return 2; }
+    int total = 0, diff = 0, same = 0, sdiff = 0, hdr = 1;
+    for (size_t i = 0; i < mn;) {
+        size_t e = i;
+        while (e < mn && m[e] != '\n') e++;
+        char line[2000];
+        size_t ll = e - i < sizeof line - 1 ? e - i : sizeof line - 1;
+        if (mm_copy(line, sizeof line, m + i, ll)) return 2;
+        line[ll] = 0;
+        i = e + 1;
+        if (hdr) { hdr = 0; continue; }
+        if (!line[0]) continue;
+        char *f[4] = {line, 0, 0, 0};
+        int nf = 1;
+        for (char *c = line; *c && nf < 4; c++)
+            if (*c == '\t') { *c = 0; f[nf++] = c + 1; }
+        if (nf < 3) { fprintf(stderr, "snap-tool-drift: bad map row\n"); return 2; }
+        char a[4500], b[4500], ha[65], hb[65];
+        /* 默认比 tools/NAME.cx;HEAD 无该 .cx(如 bound 是 C 加原生看门狗)时比无后缀文件 */
+        const char *ext = ".cx";
+        char hp[4500];
+        sy_stat_t sb;
+        if (cx_fmt(hp, sizeof hp, "%s/tools/%s.cx", head, f[0])) return 2;
+        if (sy_lstat(hp, &sb)) ext = "";
+        if (cx_fmt(a, sizeof a, "%s/tools/%s%s", sn, f[0], ext) || cx_fmt(b, sizeof b, "%s/tools/%s%s", head, f[0], ext)) return 2;
+        if (sha(a, ha) || sha(b, hb)) { fprintf(stderr, "snap-tool-drift: cannot hash %s or %s\n", a, b); return 2; }
+        total++;
+        int same_ = !strcmp(ha, hb);
+        char first[400] = "-";
+        int cnt = 0;
+        if (!same_) {
+            diff++;
+            if (!strcmp(f[2], "snap")) sdiff++;
+            char cmd[9000];
+            char *o = 0;
+            size_t n = 0;
+            if (cx_fmt(cmd, sizeof cmd, "git -C '%s' log --oneline %s..HEAD -- tools/%s%s 2>/dev/null", head, rev, f[0], ext)) return 2;
+            cx_run_timeout(cmd, 30, &o, &n);
+            if (o) {
+                for (size_t k = 0; k < n; k++) if (o[k] == '\n') cnt++;
+                size_t k = 0;
+                while (k < n && o[k] != '\n' && k < sizeof first - 1) { first[k] = o[k]; k++; }
+                first[k] = 0;
+                if (!first[0]) first[0] = '-', first[1] = 0;
+                mm_free(o);
+            }
+        } else same++;
+        printf("TOOL\t%s\t%s\t%s\t%s\t%d\n", f[0], f[2], same_ ? "SAME" : "DIFF", first, cnt);
+    }
+    mm_free(m);
+    printf("SNAP_TOOL_DRIFT\ttotal=%d\tdiff=%d\tsame=%d\tsnap_diff=%d\n", total, diff, same, sdiff);
+    return report ? 0 : (sdiff ? 1 : 0);
+}

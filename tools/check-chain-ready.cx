@@ -1,0 +1,158 @@
+/* tools/check-chain-ready.cx -- fixtures for tools/chain-ready.cx: the judges on crafted outputs, a fake git
+ * repository (clean and dirty), a fake in-flight process, and --fast.  No full chain-ready run (that takes minutes).
+ *   sh ./unisacc.com tools/check-chain-ready.cx
+ * Ends with CHAIN_READY_CHECK passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/chain-ready.cx under the installed product */
+static int passed, failed;
+static char tmpd[300];
+
+static void ck(int ok, const char *name) {
+    if (ok) { passed++; printf("PASS\t%s\n", name); } else { failed++; printf("FAIL\t%s\n", name); }
+}
+static int has(const char *h, const char *w) {
+    long hn, wn, i;
+    if (!h) return 0;
+    hn = (long)tx_len(h, 1 << 20); wn = (long)tx_len(w, 4096);
+    for (i = 0; i + wn <= hn; i++) if (!memcmp(h + i, w, (size_t)wn)) return 1;
+    return 0;
+}
+
+/* run ARGV (null-terminated) with stderr merged; out gets the text; returns the exit code or -1 */
+static int run(char **argv, char *out, int cap) {
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    out[0] = 0;
+    long deadline_ms = 0; (void)deadline_ms;   /* the deadline lives in the ./tools/bound argv prefix */
+    /* callers pass ./tools/bound SECONDS argv (bound-limited), or the 17.31 s sleep stand-in */
+    pid = sy_spawn_pipe(argv, 0, 0, &fd, 0);
+    if (pid <= 0) return -1;
+    while (n < cap - 1 && (r = sy_read(fd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0; sy_close(fd);
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
+}
+/* the judge on TEXT with exit code RC */
+static int judge(const char *kind, const char *text, const char *rc, char *out, int cap) {
+    char f[400]; char *v[8];
+    static int seq; cx_fmt(f, sizeof f, "%s/j%d.txt", tmpd, ++seq);
+    cx_write(f, text, tx_len(text, 1 << 20));
+    v[0] = "./tools/bound"; v[1] = "40"; v[2] = "sh"; v[3] = UC; v[4] = "tools/chain-ready.cx"; v[5] = "--"; v[6] = "--judge";
+    {   char *w[12]; int i; for (i = 0; i < 7; i++) w[i] = v[i]; w[7] = (char *)kind; w[8] = f; w[9] = (char *)rc; w[10] = 0;
+        return run(w, out, cap); }
+}
+static void jt(const char *name, const char *kind, const char *text, const char *rc, const char *want, const char *frag) {
+    char out[2048]; int r = judge(kind, text, rc, out, sizeof out);
+    ck(r == 0 && tx_prefix(out, 4, want, 4) && (!frag || has(out, frag)), name);
+}
+static void git(const char *dir, const char *a, const char *b, const char *c) {
+    char out[512]; char *v[16]; int n = 0;
+    v[n++] = "./tools/bound"; v[n++] = "20"; v[n++] = "git"; v[n++] = "-c"; v[n++] = "user.name=t"; v[n++] = "-c"; v[n++] = "user.email=t@t";
+    v[n++] = "-C"; v[n++] = (char *)dir; v[n++] = (char *)a; if (b) v[n++] = (char *)b; if (c) v[n++] = (char *)c; v[n] = 0;
+    run(v, out, sizeof out);
+}
+
+int main(void) {
+    char repo[400], out[8192]; int rc;
+    if (sy_mkdtemp(sy_tmpdir(), "chain-ready-check-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
+    /* judges */
+    jt("rev-clean-pass", "rev", "", "0", "PASS", "no uncommitted");
+    jt("rev-dirty-fail", "rev", " M cx/sys/sysnums.cx\n?? cx/sys/netnb.cx\n", "0", "FAIL", "2 uncommitted");
+    jt("rev-git-error-fail", "rev", "", "128", "FAIL", "rc=128");
+    jt("branch-main-pass", "branch", "main\n", "0", "PASS", "branch main");
+    jt("branch-other-fail", "branch", "feature\n", "0", "FAIL", "not main");
+    jt("derive-ok-pass", "derive", "DERIVE\ttables-gen\tOK\t5\nDERIVE_SUMMARY\tok=7\tdrift=0\trefused=0\tskipped=0\telapsed_ms=9\n", "0", "PASS", "drift=0");
+    jt("derive-drift-fail", "derive", "DERIVE\ttool-index\tDRIFT\t6\trc=1\tx\nDERIVE_SUMMARY\tok=4\tdrift=2\trefused=0\tskipped=0\telapsed_ms=9\n", "1", "FAIL", "DRIFT");
+    jt("derive-refused-fail", "derive", "DERIVE\tproduct-map\tREFUSED\t1\trc=2\tx\nDERIVE_SUMMARY\tok=4\tdrift=0\trefused=1\tskipped=0\telapsed_ms=9\n", "2", "FAIL", "REFUSED");
+    jt("derive-no-summary-fail", "derive", "garbage\n", "0", "FAIL", "no DERIVE_SUMMARY");
+    jt("ratchets-13-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=13\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=13");
+    jt("ratchets-12-fail", "ratchets", "RATCHETS\tok=12\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    jt("tri-pass", "tri", "GAP\tCXM_MAXU\tnamed\nCXMOD_TRI\tpassed=15\tfailed=0\tgaps=2\n", "0", "PASS", "failed=0");
+    jt("tri-fail", "tri", "CXMOD_TRI\tpassed=14\tfailed=1\tgaps=2\n", "1", "FAIL", "failed=1");
+    jt("extract-exact-pass", "extract", "CX0_EXTRACT\tEXACT\tbytes=1\n", "0", "PASS", "EXACT");
+    jt("extract-drift-fail", "extract", "CX0_EXTRACT\tDRIFT\tbytes=1\n", "1", "FAIL", "DRIFT");
+    jt("chain-fail-row", "chain", "PASS\ta\nFAIL\tcheck-candidate-chain.b\n", "1", "FAIL", "fail=1");
+    jt("chain-pass", "chain", "PASS\ta\nPASS\tb\n", "0", "PASS", "pass=2");
+    jt("inflight-wrappers-pass", "inflight", "11 /bin/bash -c pgrep -af candidate-chain\n12 pgrep -af candidate-chain\n13 sh ./unisacc.com tools/chain-ready.cx\n", "0", "PASS", "no candidate-chain");
+    jt("inflight-chain-fail", "inflight", "99 sh ./unisacc.com tools/candidate-chain.cx -- --out x\n", "0", "FAIL", "1 chain process");
+    jt("p1-new-text-fail", "p1file", "RC=1\ncx: a.cx:3: m does not export f\n", "0", "FAIL", 0);
+    jt("p1-old-text-pass", "p1file", "RC=1\ncx: a.cx:1: module x: no file x.cx\n", "0", "PASS", 0);
+    jt("p1-ok-pass", "p1file", "RC=0\n\n", "0", "PASS", 0);
+    jt("affected-rc3-deferred-unmeasured", "affected", "DEFERRED\tb1\tstart-deadline\nAFFECTED_RUN\tpass=2\tfail=0\tdeferred=1\n", "3", "UNME", "deferred=1");
+    jt("affected-rc3-with-fail-stays-fail", "affected", "FAIL\tb2\nAFFECTED_RUN\tpass=2\tfail=1\tdeferred=1\n", "3", "FAIL", "FAIL");
+    jt("affected-rc1-fail", "affected", "FAIL\tb2\nAFFECTED_RUN\tpass=2\tfail=1\tdeferred=0\n", "1", "FAIL", "rc=1");
+    jt("affected-rc0-pass", "affected", "AFFECTED_RUN\tpass=2\tfail=0\tdeferred=0\n", "0", "PASS", 0);
+    /* a fake git repo: clean, then dirty (untracked file under src) */
+    cx_fmt(repo, sizeof repo, "%s/repo", tmpd);
+    { char *v[] = {"./tools/bound", "20", "git", "init", "-q", "-b", "main", repo, 0}; run(v, out, sizeof out); }
+    { char f[420]; cx_fmt(f, sizeof f, "%s/f.txt", repo); cx_write(f, "a\n", 2); }
+    git(repo, "add", "f.txt", 0); git(repo, "commit", "-qm", "init");
+    {   char *v[] = {"./tools/bound", "60", "sh", UC, "tools/chain-ready.cx", "--", "--repo", repo, "--only", "1-rev", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "1-rev\tPASS") && has(out, "READY\tyes"), "repo-clean-ready-yes");
+        { char d[420], f[460]; cx_fmt(d, sizeof d, "%s/src", repo); sy_mkdir(d, 0755); cx_fmt(f, sizeof f, "%s/src/a.cx", repo); cx_write(f, "int x;\n", 7); }
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "1-rev\tFAIL") && has(out, "READY\tno\tfailed=1-rev"), "repo-dirty-ready-no");
+    }
+    /* a fake in-flight process matched by --pgrep-pat */
+    {   char *sv[] = {"sleep", "17.31", 0}; int fd, pid, ex = 0, code = 0, sig = 0;
+        pid = sy_spawn_pipe(sv, 0, 0, &fd, 0);
+        if (pid > 0) {
+            char *v[] = {"./tools/bound", "60", "sh", UC, "tools/chain-ready.cx", "--", "--only", "8-inflight", "--pgrep-pat", "sleep 17.31", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "8-inflight\tFAIL") && has(out, "chain process"), "inflight-process-detected");
+            sy_kill(pid); sy_close(fd); sy_wait_status(pid, 0, &ex, &code, &sig);
+        } else ck(0, "inflight-process-detected");
+        { char *v[] = {"./tools/bound", "60", "sh", UC, "tools/chain-ready.cx", "--", "--only", "8-inflight", "--pgrep-pat", "sleep 17.31", 0};
+          rc = run(v, out, sizeof out);
+          ck(rc == 0 && has(out, "8-inflight\tPASS"), "inflight-process-gone-pass"); }
+    }
+    /* --fast and the manual rows */
+    {   char *v[] = {"./tools/bound", "60", "sh", UC, "tools/chain-ready.cx", "--", "--fast", "--only", "4-p1", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "4-p1\tSKIPPED") && has(out, "READY\tno"), "fast-skips-p1-not-ready");
+    }
+    {   char *v[] = {"./tools/bound", "60", "sh", UC, "tools/chain-ready.cx", "--", "--only", "9-ledger", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "9-ledger\tUNMEASURED") && !has(out, "9-ledger\tPASS"), "manual-item-unmeasured-not-pass");
+    }
+    /* is_negfix: the real function text is cut out of chain-ready.cx into a tiny probe program (no interface change) */
+    {   size_t sn; char *src = cx_read("tools/chain-ready.cx", &sn); long a = -1, b = -1, i;
+        static const char *P[] = {"tests/cxclash/main.cx", "tools/install-fixes/iproto/main.cx", "tools/install-fixes/iproto/user.cx", "tools/symindex/fixture/proto/user.cx",
+            "tests/cxclash/left/u.cx", "tools/install-fixes/iproto/mid.cx", "tools/symindex/fixture/proto/lib.cx", "archive/tests/cxclash/main.cx", "src/main.cx",
+            "tests/cxclash/main.cxx", "tests/cxclash/main.c", "tools/install-fixes/iproto/user.cx/", "tools/symindex/fixture/proto/user.c", 0};
+        static const int W[] = {1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        char pf[420], body[8192], pout[1024], exp[256]; int k, bl = 0;
+        if (src) {
+            for (i = 0; i + 21 < (long)sn; i++) if (!memcmp(src + i, "static int is_negfix(", 21)) { a = i; break; }
+            if (a >= 0) for (i = a; i + 2 < (long)sn; i++) if (src[i] == '\n' && src[i + 1] == '}' && src[i + 2] == '\n') { b = i + 3; break; }
+        }
+        ck(a >= 0 && b > a && b - a < 2000, "negfix-extract-function");
+        if (a >= 0 && b > a && b - a < 2000) {
+            cx_fmt(body, sizeof body, "#pragma unisa use text.text\n"); bl = (int)tx_len(body, sizeof body);
+            for (i = a; i < b; i++) body[bl++] = src[i];
+            body[bl] = 0;
+            cx_fmt(body + bl, sizeof body - bl, "int main(int argc, char **argv) { int k; for (k = 1; k < argc; k++) printf(\"%%d\\n\", is_negfix(argv[k])); return 0; }\n");
+            bl = (int)tx_len(body, sizeof body);
+            cx_fmt(pf, sizeof pf, "%s/negfix_probe.cx", tmpd); cx_write(pf, body, bl);
+            {   char lk[420], rt[420]; const char *rtx = "CXROOT1\nR\ttext\tr/cx/text\nR\tsys\tr/cx/sys\nR\tmem\tr/cx/mem\n";   /* out-of-tree unit: own package root through a link to the repo */
+                cx_fmt(lk, sizeof lk, "%s/r", tmpd); cx_fmt(rt, sizeof rt, "%s/cxroot.tsv", tmpd);
+                { char cw[400]; if (sy_cwd(cw, sizeof cw) == 0) sy_symlink(cw, lk); } cx_write(rt, rtx, tx_len(rtx, 256)); }
+            {   char *v[24]; int n = 0, np = 0; v[n++] = "./tools/bound"; v[n++] = "60"; v[n++] = "sh"; v[n++] = UC; v[n++] = pf; v[n++] = "--";
+                for (np = 0; P[np]; np++) v[n++] = (char *)P[np]; v[n] = 0;
+                rc = run(v, pout, sizeof pout);
+                exp[0] = 0; for (k = 0; k < np; k++) { int l = (int)tx_len(exp, 256); cx_fmt(exp + l, sizeof exp - l, "%d\n", W[k]); }
+                ck(rc == 0 && !strcmp(pout, exp), "negfix-4-exact-paths-1-others-0");
+                ck(rc == 0 && pout[0] == '1' && pout[2] == '1' && pout[4] == '1' && pout[6] == '1', "negfix-four-paths-each-1");
+                ck(rc == 0 && !strcmp(pout + 8, exp + 8), "negfix-neighbours-archive-src-longer-shorter-0");
+            }
+        }
+    }
+    printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

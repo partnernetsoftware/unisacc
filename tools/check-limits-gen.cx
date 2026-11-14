@@ -1,0 +1,91 @@
+/* tools/check-limits-gen.cx -- contract check for tools/limits-gen.cx.
+ *   sh ./unisacc.com tools/check-limits-gen.cx -- ABS_WORK
+ * 生成器经 cxlib.toolprep 只编一次; 夹具在 WORK/limits-gen-fixture-PID/{build,tools/cxlib}。
+ *   (1) check-tree      --check 对已入库表与库: rc 0
+ *   (2) write-check     夹具 --write 后 --check rc 0
+ *   (3) pass-override   带 ledger_id 与未来 expires 的覆盖行: rc 0
+ *   (4) neg-drift       库改一字节: rc 1 DIFF
+ *   (5) neg-no-ledger   覆盖行缺 ledger_id: rc 2
+ *   (6) neg-no-expires  覆盖行缺 expires: rc 2
+ *   (7) neg-expired     覆盖行已过期: rc 2
+ *   (8) neg-segment     segment+margin>op.rule: rc 2
+ *   (9) neg-phase-max   phase.bound max>segment-3: rc 2
+ * 输出 PASS/FAIL<TAB>limits-gen.NAME 与 CHECK_LIMITS_GEN<TAB>checks=N<TAB>failed=M; 退出 0 当且仅当 failed==0。 */
+#pragma unisa use cxlib.toolprep
+#define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "check-limits-gen: format error\n"); exit(2); } } while (0)
+static int failed, checks;
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tlimits-gen.%s\n", ok ? "PASS" : "FAIL", n); }
+static int sh(const char *cmd, char *out, int cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}, *text = 0;
+    size_t n = 0, i;
+    int rc = cx_runv_timeout(v, 50, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static const char *HEAD = "# fixture\n";
+static const char *BASE =
+    "phase.bound\ts\t90\t90\t*\t-\t-\n"
+    "segment\ts\t270\t270\t*\t-\t-\n"
+    "op.rule\ts\t300\t300\t*\t-\t-\n"
+    "segment.margin\ts\t30\t30\t*\t-\t-\n";
+static char fix[2600], tbl[2700], lib[2700], cmd[6000], out[4000], native[2800];
+static int put(const char *extra, const char *base) {
+    char t[3000];
+    SP(t, sizeof t, "%s%s%s", HEAD, base, extra);
+    return cx_write(tbl, t, strlen(t));
+}
+static int run(const char *mode, const char *what, int want, const char *msg) {
+    int rc;
+    SP(cmd, sizeof cmd, "'%s' %s '%s' 2>&1", native, mode, fix);
+    rc = sh(cmd, out, sizeof out);
+    (void)what;
+    return rc == want && (!msg || strstr(out, msg));
+}
+int main(int argc, char **argv) {
+    char root[2048], why[256];
+    int rc;
+    if (argc != 2 || argv[1][0] != '/' || strlen(argv[1]) > 2400 || strchr(argv[1], '\'')) {
+        fprintf(stderr, "check-limits-gen: usage ABS_WORK_DIR\n"); return 2;
+    }
+    if (!getcwd(root, sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
+    if (mkdir(argv[1], 0700) && errno != EEXIST) { fprintf(stderr, "check-limits-gen: prepare directory\n"); return 2; }
+    SP(fix, sizeof fix, "%s/limits-gen-fixture-%ld", argv[1], (long)getpid());
+    SP(tbl, sizeof tbl, "%s/build/limits.tsv", fix);
+    SP(lib, sizeof lib, "%s/tools/cxlib/limits.cx", fix);
+    SP(native, sizeof native, "%s/limits-gen-native", argv[1]);
+    if (tq_native(root, "tools/limits-gen.cx", native, why, sizeof why)) { fprintf(stderr, "check-limits-gen: %s\n", why); return 2; }
+    SP(cmd, sizeof cmd, "mkdir -p '%s/build' '%s/tools/cxlib'", fix, fix);
+    if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
+
+    SP(cmd, sizeof cmd, "'%s' --check '%s' 2>&1", native, root);
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0 && strstr(out, "status=CHECK"), "check-tree");
+
+    ck(!put("", BASE) && run("--write", "w", 0, "status=WRITE") && run("--check", "c", 0, "status=CHECK"), "write-check");
+
+    ck(!put("phase.bound\ts\t120\t120\tkernels-*\tLIMIT-X\t2099-01-01\n", BASE) && run("--write", "w", 0, 0) && run("--check", "c", 0, 0), "pass-override");
+
+    {   size_t n = 0; char *s = cx_read(lib, &n);
+        if (s && n > 10) { s[n - 3] = (s[n - 3] == 'x') ? 'y' : 'x'; ck(!cx_write(lib, s, n) && run("--check", "c", 1, "limits-gen: DIFF"), "neg-drift"); }
+        else ck(0, "neg-drift");
+        free(s); }
+
+    /* Fixture table (not the real one): max 120 makes a kernels-* 120 row legal; 121 above the max is refused. */
+    {   static const char *B120 = "phase.bound\ts\t90\t120\t*\t-\t-\nsegment\ts\t270\t270\t*\t-\t-\nop.rule\ts\t300\t300\t*\t-\t-\nsegment.margin\ts\t30\t30\t*\t-\t-\n";
+        ck(!put("phase.bound\ts\t120\t120\tkernels-*\tLIMIT-X\t2099-01-01\n", B120) && run("--write", "w", 0, 0) && run("--check", "c", 0, 0), "pass-kernels-120-under-max");
+        ck(!put("phase.bound\ts\t121\t120\tkernels-*\tLIMIT-X\t2099-01-01\n", B120) && run("--write", "w", 2, 0), "neg-kernels-above-max");
+    }
+    ck(!put("phase.bound\ts\t120\t120\tkernels-*\t-\t2099-01-01\n", BASE) && run("--write", "w", 2, "ledger_id"), "neg-no-ledger");
+    ck(!put("phase.bound\ts\t120\t120\tkernels-*\tLIMIT-X\t-\n", BASE) && run("--write", "w", 2, "expires"), "neg-no-expires");
+    ck(!put("phase.bound\ts\t120\t120\tkernels-*\tLIMIT-X\t2020-01-01\n", BASE) && run("--check", "c", 2, "expired"), "neg-expired");
+    ck(!put("", "phase.bound\ts\t90\t90\t*\t-\t-\nsegment\ts\t280\t280\t*\t-\t-\nop.rule\ts\t300\t300\t*\t-\t-\nsegment.margin\ts\t30\t30\t*\t-\t-\n")
+       && run("--check", "c", 2, "op.rule"), "neg-segment");
+    ck(!put("", "phase.bound\ts\t90\t268\t*\t-\t-\nsegment\ts\t270\t270\t*\t-\t-\nop.rule\ts\t300\t300\t*\t-\t-\nsegment.margin\ts\t30\t30\t*\t-\t-\n")
+       && run("--check", "c", 2, "segment-3"), "neg-phase-max");
+
+    printf("CHECK_LIMITS_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

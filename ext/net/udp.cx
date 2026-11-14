@@ -1,0 +1,79 @@
+#pragma unisa module udp
+#pragma unisa dock
+#pragma unisa use addr
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.netmsg
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+/* ext.net UDP subset on cx.sys netraw + netmsg + netpoll (build/std-surface.tsv ext.net):
+   sy_udp_bind, sy_udp_send_to, sy_udp_recv_from.  No libc, no #if.  Linux x86_64/arm64 only: on osx/win
+// ENOSYS: refusal contract documented in this comment
+   the socket calls are -ENOSYS and so are these.
+   A datagram longer than the receive room is never cut silently: msg_flags shows MSG_TRUNC, the datagram
+   is consumed and the call returns -EMSGSIZE.  A deadline that passes with nothing to read is -ETIMEDOUT.
+   Descriptors are closed with sy_close. */
+
+static int syd_sa(const sy_addr_t *a, unsigned char *sa, int cap) {
+    if (!a) return -EINVAL;
+    if (a->family == SY_AF_INET4) return sy_sa_inet4(sa, cap, a->ip, a->port);
+    if (a->family == SY_AF_INET6) return sy_sa_inet6(sa, cap, a->ip, a->port, a->scope);
+    return -EAFNOSUPPORT;
+}
+
+int sy_udp_bind(const sy_addr_t *a) {
+    unsigned char sa[SY_SA_MAX];
+    long af, st;
+    int n, fd, r;
+    if (!a) return -EINVAL;
+    n = syd_sa(a, sa, (int)sizeof sa);
+    if (n < 0) return n;
+    af = sy_sock_num(a->family == SY_AF_INET6 ? SY_SN_AF_INET6 : SY_SN_AF_INET4);
+    st = sy_sock_num(SY_SN_SOCK_DGRAM);
+    if (!sy_sock_have() || af <= 0 || st <= 0) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform (netraw Linux only) */
+    fd = sy_sock_open((int)af, (int)st);
+    if (fd < 0) return fd;
+    r = sy_sock_bind(fd, sa, n);
+    if (r < 0) { sy_close(fd); return r; }
+    return fd;
+}
+
+long sy_udp_send_to(int fd, const void *buf, long n, const sy_addr_t *to) {
+    unsigned char sa[SY_SA_MAX];
+    int sl;
+    if (!buf || n < 0 || !to) return -EINVAL;
+    sl = syd_sa(to, sa, (int)sizeof sa);
+    if (sl < 0) return sl;
+    return sy_snm_sendto(fd, buf, n, sa, sl);   /* too large for UDP: kernel -EMSGSIZE */
+}
+
+long sy_udp_recv_from(int fd, void *buf, long n, sy_addr_t *from, sy_deadline_t d) {
+    unsigned char sa[SY_SA_MAX];
+    int salen = (int)sizeof sa, fl = 0, f;
+    long r, left;
+    if (!buf || n < 0) return -EINVAL;
+    if (fd < 0) return -EBADF;   /* poll ignores a negative fd */
+    if (sy_deadline_passed(&d)) {
+        r = sy_sock_poll(fd, SY_POLLIN, 0);     /* an already queued datagram still wins */
+    } else {
+        left = sy_deadline_left(&d);
+        r = sy_sock_poll(fd, SY_POLLIN, left);
+    }
+    if (r < 0) return r;
+    if (r == 0) return -ETIMEDOUT;
+    r = sy_snm_recvfrom(fd, buf, n, sa, &salen, &fl);
+    if (r < 0) return r;
+    if (fl & SY_SNM_MSG_TRUNC) return -EMSGSIZE;
+    if (from) {
+        f = sy_sa_family(sa, salen);
+        if (f < 0) return f;
+        from->family = f == sy_sock_num(SY_SN_AF_INET6) ? SY_AF_INET6 : SY_AF_INET4;
+        from->port = sy_sa_port(sa, salen);
+        from->scope = 0; from->path[0] = 0;
+        { int i; for (i = 0; i < 16; i++) from->ip[i] = 0; }
+        if (sy_sa_ip(sa, salen, from->ip, 16) < 0) return -EAFNOSUPPORT;
+        if (from->family == SY_AF_INET6 && salen >= 28)
+            from->scope = (unsigned)sa[24] | ((unsigned)sa[25] << 8) | ((unsigned)sa[26] << 16) | ((unsigned)sa[27] << 24);
+    }
+    return r;
+}

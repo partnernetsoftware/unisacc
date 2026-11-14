@@ -1,4 +1,4 @@
-/* tools/slice-freeze.cx -- the slice freeze gate (plans/v0.0.45-slice-freeze-design.md).
+/* tools/slice-freeze.cx -- the slice freeze gate.
  *   sh ./unisacc.com tools/slice-freeze.cx -- list
  *   sh ./unisacc.com tools/slice-freeze.cx -- check BASE [HEAD] [--receipts DIR] [--baseline DIR]
  *        [--mode advisory|enforce]
@@ -6,8 +6,8 @@
  * Read-only: it never writes the repository. BASE..HEAD (HEAD defaults to the work tree's
  * HEAD) is intersected with the globs of tests/slice-freeze.tsv; a commit that touches the
  * thin interface layer must (a) bring a regression case under tests/cases/ whose batch is
- * named by a hit row, (b) add a agentwork/ledger.tsv row kind=SLICE-CHANGE whose 5th field starts
- * "A " or "B " (affected targets) and whose 6th field names cc, and (c) leave the sha of every
+ * named by a hit row, (b) add a build/approvals.tsv row kind=slice-change whose 5th field (note) starts
+ * "A " or "B " (affected targets) and whose 3rd field (approver) names cc, and (c) leave the sha of every
  * target that is NOT declared affected unchanged between --baseline and --receipts.
  *
  * Two validations keep the gate from being green by construction: every batch named in the
@@ -236,19 +236,20 @@ static void bytes_section(const char *base, const char *head, const char *aff) {
     else if (un) cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10);
     else cp(verdict_bytes, sizeof verdict_bytes, "ok", 2);
 }
-/* does BASE..HEAD add a ledger SLICE-CHANGE row that names cc and an A/B target list? */
+/* does BASE..HEAD add a build/approvals.tsv slice-change row that names cc and an A/B target list?
+   Row: id TAB kind TAB approver TAB date TAB note. */
 static int approval(const char *range) {
-    char out[1 << 15]; char *v[] = {(char *)"git", (char *)"diff", (char *)"-U0", (char *)range, (char *)"--", (char *)"agentwork/ledger.tsv", (char *)"agentwork/ledger", 0};
+    char out[1 << 15]; char *v[] = {(char *)"git", (char *)"diff", (char *)"-U0", (char *)range, (char *)"--", (char *)"build/approvals.tsv", 0};
     const char *p; char one[1200]; int ok = 0;
     if (run(v, out, sizeof out) != 0) return 0;
     for (p = out; line(&p, one, sizeof one);) {
         const char *f5, *f6; size_t n5, n6;
         if (one[0] != '+') continue;
-        if (!field(one + 1, strlen(one + 1), 3, &f5, &n5)) continue;
-        if (!(n5 == 12 && !memcmp(f5, "SLICE-CHANGE", 12))) continue;
+        if (!field(one + 1, strlen(one + 1), 2, &f5, &n5)) continue;
+        if (!(n5 == 12 && !memcmp(f5, "slice-change", 12))) continue;
         if (!field(one + 1, strlen(one + 1), 5, &f5, &n5)) continue;
         if (!(n5 > 1 && (f5[0] == 'A' || f5[0] == 'B') && f5[1] == ' ')) continue;
-        if (!field(one + 1, strlen(one + 1), 6, &f6, &n6)) continue;
+        if (!field(one + 1, strlen(one + 1), 3, &f6, &n6)) continue;
         { size_t q; for (q = 0; q + 2 <= n6; q++) if (!memcmp(f6 + q, "cc", 2)) ok = 1; }
     }
     return ok;
@@ -342,7 +343,7 @@ int main(int argc, char **argv) {
       if (case_ok(range, affbatches)) cp(verdict_case, sizeof verdict_case, "ok", 2);
       printf("SLICE_CASE\t%s\t%s\n", verdict_case, affbatches);
       if (approval(range)) cp(verdict_appr, sizeof verdict_appr, "ok", 2);
-      printf("SLICE_APPROVAL\t%s\t%s\n", verdict_appr, "agentwork/ledger.tsv");
+      printf("SLICE_APPROVAL\t%s\t%s\n", verdict_appr, "build/approvals.tsv");
       if (!advisory && !eqz(verdict_appr, "ok")) {  /* B is reported only when the row says B */
           /* no-op: the row's own letter is not carried here; NO_APPROVAL covers both */
       }

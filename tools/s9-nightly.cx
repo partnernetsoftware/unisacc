@@ -27,6 +27,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.limits
 
 static char root[4096], why[512];
 static const char *fake;
@@ -37,6 +38,7 @@ static long last_ms;
 static int step_s_cur; /* >0 仅在 step 调用期间设置 */
 static const char *xa4, *xa5;
 static void die(const char *a, const char *b) { tool_die("s9-nightly", a, b, 2); }
+static int L_I(const char *id) { double v = lm_get(id, 0); if (v < 0) die("limit-unknown", id); return (int)v; }
 /* 每行 "名称\t墙钟毫秒";超过上限(预留 16 字节给标记)则截断并记 TRUNCATED,不 die。 */
 static void note(const char *s) {
     char line[256];
@@ -72,6 +74,7 @@ static int run_step(char **v, const char *cwd, int sec, np_result *r) {
     if (np_run(v, cwd, ev, sec, r, why, sizeof why)) { np_free(r); return 99; }
     return r->rc;
 }
+static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到该路径(不受 out 缓冲截断) */
 static int invoke(const char *verb, const char *a1, const char *a2, const char *a3, int sec, char *out, int ocap) {
     char com[4400], tool[4400];
     char *v[16];
@@ -102,6 +105,7 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         rc = run_step(v, root, sec, &r);
     }
     last_ms = sy_now_ms() - t0;
+    if (save_to) { if (cx_write(save_to, r.out ? r.out : "", r.out ? r.outn : 0)) die("save-stdout", save_to); }
     if (out && ocap > 0) {
         size_t n = r.outn < (size_t)(ocap - 1) ? r.outn : (size_t)(ocap - 1);
         if (r.out && n && mm_copy(out, ocap, r.out, (long)n)) { np_free(&r); die("copy", 0); }
@@ -151,9 +155,9 @@ static void write_report(const char *path, const char *status) {
 int main(int argc, char **argv) {
     const char *run = 0, *tier = "commit", *date = 0;
     int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
-    char report[4400], tmp[4000], datebuf[32];
+    char report[4400], tmp[4000], datebuf[32], aggout[4400];
     static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate"};
-    int i, rc, steps, max_steps = 4, step_s = 290, step_done = 0;
+    int i, rc, steps, max_steps = 4, step_s = L_I("s9.step.max"), step_done = 0;
     static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
     if (argc < 3) die("usage", "ROOT RUN --tier commit|daily|release [--date D] [--fake SCRIPT]");
     if (sy_realpath(argv[1], root, sizeof root) < 0) die("root", argv[1]);
@@ -187,7 +191,7 @@ int main(int argc, char **argv) {
     if (phase == 1 && resume) die("phase", "init takes RUN, not --resume");
     if ((phase == 2 || phase == 3) && !resume) die("phase", "steps|aggregate need --resume RUN");
     if (phase == 2 && !max_set) max_steps = 1;
-    if (phase == 2 && !step_set) step_s = 240;
+    if (phase == 2 && !step_set) step_s = L_I("s9.step");
     if (phase == 3 && !agg_parts) agg_parts = 4;
     if (agg_parts < 0 || agg_parts > 64) die("agg-parts", "need 0..64");
     if (max_steps < 1) die("max-steps", "need >= 1");
@@ -197,7 +201,14 @@ int main(int argc, char **argv) {
         if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");
         date = datebuf;
     }
-    if (cx_fmt(report, sizeof report, "%s/%s/s9-nightly-%s-%s%s.md", root, "out", date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
+    {   /* report lives beside the run directory (its parent), never under ROOT/out */
+        char rd[4400];
+        long sl = tx_rchr(run, (long)strlen(run), '/');
+        size_t rn = sl > 0 ? (size_t)sl : 0;
+        if (rn >= sizeof rd) die("report", 0);
+        if (rn) { if (mm_copy(rd, (long)sizeof rd, run, (long)rn)) die("report", 0); rd[rn] = 0; } else { rd[0] = '.'; rd[1] = 0; }
+        if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s%s.md", rd, date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
+    }
     if (resume) {
         char sess[4400];
         if (cx_fmt(sess, sizeof sess, "%s/session.tsv", run) || sy_exists(sess) != 1) die("resume-no-session", run);
@@ -206,19 +217,19 @@ int main(int argc, char **argv) {
     notexec_n = 1;
     note(resume ? "resume" : "begin");
     if (!resume) {
-    rc = invoke("build", 0, 0, 0, 55, tmp, sizeof tmp);
+    rc = invoke("build", 0, 0, 0, L_I("s9.cmd"), tmp, sizeof tmp);
     note("build");
     if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
     /* s9-shards init: commit 与 release 透传 --tier; daily 不带 --tier 即 FULL。 */
     if (!strcmp(tier, "commit") || !strcmp(tier, "release")) { xa4 = "--tier"; xa5 = (char *)tier; }
-    rc = invoke("init", root, run, "-", 55, tmp, sizeof tmp);
+    rc = invoke("init", root, run, "-", L_I("s9.cmd"), tmp, sizeof tmp);
     xa4 = xa5 = 0;
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
     for (i = 0; i < 6; i++) {
-        rc = invoke("prepare", root, run, preps[i], 55, tmp, sizeof tmp);
+        rc = invoke("prepare", root, run, preps[i], L_I("s9.cmd"), tmp, sizeof tmp);
         note(preps[i]);
         if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[i], rc, report); return 1; }
         pass_n++;
@@ -267,11 +278,13 @@ int main(int argc, char **argv) {
     {
         int starts, dones, nu = scan_run(run, &starts, &dones), k;
         for (k = 0; k < nu; k++) {
-            rc = invoke("retry", root, run, unk[k], 55, tmp, sizeof tmp);
+            rc = invoke("retry", root, run, unk[k], L_I("s9.cmd"), tmp, sizeof tmp);
             note("retry");
         }
     }
     (void)step_done;
+    if (cx_fmt(aggout, sizeof aggout, "%s/aggregate.out", run)) die("aggout-path", 0); /* s9-verdict 读此文件 */
+    if (sy_exists(run) != 1) sy_mkdir(run, 0755); /* 真 init 已建;--fake 路径可能没有 */
     if (agg_parts > 0) {
         /* 分片聚合:每片一次独立调用(<=55s);已有片记录的跳过(可续跑);全部就绪后 --merge 出唯一结论 */
         char ks[16], ns[16], pn[4400], leaf[64];
@@ -283,17 +296,23 @@ int main(int argc, char **argv) {
             cx_fmt(ks, sizeof ks, "%d", k);
             if (cx_fmt(leaf, sizeof leaf, "agg-part-%d-%d", k, agg_parts) || cx_fmt(pn, sizeof pn, "%s/%s", run, leaf)) die("part-path", 0);
             if (sy_exists(pn) == 1) { note("aggregate-part-reused"); continue; }
-            rc = invoke("aggregate", root, run, "--part", 55, tmp, sizeof tmp);
+            save_to = aggout; /* 片失败时也留下 aggregate.out(含 S9_RECEIPT reason);成功则由随后的 merge 覆盖 */
+            rc = invoke("aggregate", root, run, "--part", L_I("s9.cmd"), tmp, sizeof tmp);
+            save_to = 0;
             note("aggregate-part");
             if (rc != 0) { xa4 = xa5 = 0; fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate-part-%d\trc=%d\treport=%s\n", k, rc, report); return 1; }
         }
         xa4 = ns;
         xa5 = 0;
-        rc = invoke("aggregate", root, run, "--merge", 55, tmp, sizeof tmp);
+        save_to = aggout;
+        rc = invoke("aggregate", root, run, "--merge", L_I("s9.cmd"), tmp, sizeof tmp);
+        save_to = 0;
         xa4 = xa5 = 0;
         note("aggregate-merge");
     } else {
-    rc = invoke("aggregate", root, run, 0, 55, tmp, sizeof tmp);
+    save_to = aggout;
+    rc = invoke("aggregate", root, run, 0, L_I("s9.cmd"), tmp, sizeof tmp);
+    save_to = 0;
     note("aggregate");
     }
     if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\treport=%s\n", rc, report); return 1; }

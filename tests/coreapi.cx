@@ -132,19 +132,11 @@ static int sym_command(char **av, char *tool, size_t cap) {
 static void prepare_symindex(void) {
     char tool[P];
     if (cx_fmt(sym_tool_dir, sizeof sym_tool_dir, "/tmp/coreapi-tool-XXXXXX") || !mkdtemp(sym_tool_dir)) die("helper directory");
-    join2(sym_tool_dir, "symindex", sym_native, sizeof sym_native);
-    abs_path("tools/symindex.cx", tool, sizeof tool);
-    char *av[] = {"sh", (char *)prod, "-o", sym_native, tool, 0};
-    char *out = child(av, "compile current symindex");
-    mm_free(out);
+    (void)tool;   /* sym_native stays empty: sym_command runs tools/symindex.cx default -run (0.23 s per query, versus a 7.8 s native compile) */
 }
 
-static void dump_module(int mi, const char *idx) {
-    char *av[12]; int n = 0; char tool[P], mrel[P], adx[P], *txt, *line;
-    n = sym_command(av, tool, sizeof tool);
-    av[n++] = "--index"; av[n++] = abs_path(idx, adx, sizeof adx); av[n++] = "dump";
-    av[n++] = join2(root, mods[mi], mrel, sizeof mrel); av[n] = 0;   /* repo-relative: the index key is the tracked path */
-    txt = child(av, mods[mi]);
+static void parse_dump(int mi, char *txt) {
+    char *line;
     for (line = txt; *line; ) {
         char *e = line, *f[10]; int nf = 0, more; char *q;
         while (*e && *e != '\n') e++;
@@ -222,6 +214,20 @@ static int alias_callers(const char *sym, const char *defpath, const char *idx, 
     return callers;
 }
 
+/* The sites=N allowance of a mark: split the mark into blank/comma separated key=value fields and
+ * read the value of the field whose key is "sites" (key compared whole, not searched as text). */
+static long mark_sites(const char *mark) {
+    long n = tx_len(mark, 4096), i = 0;
+    while (i < n) {
+        long s = i, e, q;
+        while (i < n && mark[i] != ' ' && mark[i] != ',') i++;
+        e = i;
+        while (i < n && (mark[i] == ' ' || mark[i] == ',')) i++;
+        q = tx_chr(mark + s, e - s, '=');
+        if (q == 5 && tx_prefix(mark + s, q, "sites", 5)) return tx_strtol(mark + s + q + 1, 0, 10);
+    }
+    return 0;
+}
 static int eq_mark(const char *mark, const char *key) { return tx_eqz(mark, key) || tx_prefix(mark, tx_len(mark, 4096), key, tx_len(key, 4096)); }
 
 static void compare(const char *idx, const char *inlist) {
@@ -248,8 +254,7 @@ static void compare(const char *idx, const char *inlist) {
             }
         }
         if (eq_mark(r->mark, "DEPRECATED-ALIAS")) {
-            long at = tx_find(r->mark, tx_len(r->mark, 4096), "sites=", 6);
-            long allowed = at >= 0 ? tx_strtol(r->mark + at + 6, 0, 10) : 0;
+            long allowed = mark_sites(r->mark);
             int have = alias_callers(r->sym, r->path, idx, inlist);
             if (have > allowed) {
                 red_alias++;
@@ -267,7 +272,45 @@ static void compare(const char *idx, const char *inlist) {
     }
 }
 
-static void scan(const char *idx) { int k; for (k = 0; k < nmods; k++) dump_module(k, idx); }
+static void dump_args(int mi, const char *idx, char **av, char *tool, char *mrel, char *adx) {
+    int n = sym_command(av, tool, P);
+    av[n++] = "--index"; av[n++] = abs_path(idx, adx, P); av[n++] = "dump";
+    av[n++] = join2(root, mods[mi], mrel, P); av[n] = 0;   /* repo-relative: the index key is the tracked path */
+}
+
+static void slurp_fd(int fd, char **buf) {
+    long cap = 1 << 16, n = 0, r; char *b = mm_alloc(cap);
+    while (b && (r = sy_read(fd, b + n, cap - 1 - n)) > 0) {
+        n += r;
+        if (n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (!b) die("out of memory");
+    b[n] = 0;
+    *buf = b;
+}
+
+/* The first dump runs alone (it may build the index); the remaining dumps are read-only and run concurrently. */
+static void scan(const char *idx) {
+    int k, pid[MAXMOD], fd[MAXMOD];
+    char *av[12], tool[P], mrel[P], adx[P], *txt;
+    if (nmods <= 0) return;
+    dump_args(0, idx, av, tool, mrel, adx);
+    txt = child(av, mods[0]);
+    parse_dump(0, txt);
+    for (k = 1; k < nmods; k++) {
+        char *v[14], t2[P], m2[P], a2[P];
+        dump_args(k, idx, v + 2, t2, m2, a2);
+        v[0] = "./tools/bound"; v[1] = "50";   /* each dump bounded at 50 s like child() */
+        pid[k] = sy_spawn_pipe(v, 0, 0, &fd[k], 0);
+        if (pid[k] < 0) die("dump spawn failed");
+    }
+    for (k = 1; k < nmods; k++) {
+        int ex = 0, code = 0, sig = 0;
+        slurp_fd(fd[k], &txt); sy_close(fd[k]);
+        if (sy_wait_status(pid[k], 0, &ex, &code, &sig) != pid[k] || !ex || code != 0) { sy_eprintf("coreapi: dump %s failed\n", mods[k]); die(mods[k]); }
+        parse_dump(k, txt);
+    }
+}
 
 static void summary(int mode_write) {
     int uniq = 0, k;

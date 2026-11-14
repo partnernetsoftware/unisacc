@@ -1,5 +1,5 @@
 /* tools/refactor.cx -- find, confirm, then apply mechanical call rewrites in parallel, each file
-   verified against its own command and reverted on any difference (plans/refactor-tool-2026-10-30.md).
+   verified against its own command and reverted on any difference.
 
      sh ./unisacc.com tools/refactor.cx -- find [--auto] RULES FILE...   > CANDIDATES.tsv
      sh ./unisacc.com tools/refactor.cx -- apply CANDIDATES.tsv JOBS VERIFY...
@@ -490,6 +490,13 @@ static char *reg_text; static size_t reg_n;
 static char *reg_expect;   /* the matched row's expect field, e.g. rc0:MARKER */
 static char root_abs[4096];
 static int verify_seq;
+/* the scratch root of verify outputs, backups and skip lists: <tmpdir>/unisacc-refactor-verify-UID (never inside the repo) */
+static char rv_root[4400];
+static void rv_init(void) {
+    if (rv_root[0]) return;
+    if (cx_fmt(rv_root, sizeof rv_root, "%s/unisacc-refactor-verify-%d", sy_tmpdir(), sy_uid())) die("path");
+    if (sy_mkdir(rv_root, 0700) < 0 && sy_exists(rv_root) != 1) die("cannot make the verify scratch directory");
+}
 /* append S single-quoted for sh */
 static void put_quoted(Buf *b, const char *s, long n) {
     long i;
@@ -513,7 +520,7 @@ static char *registry_cmd(const char *file, char **outp) {
             if (!tx_same(f[8], tx_len(f[8], CAP), file, fl) && !tx_same(f[3], tx_len(f[3], CAP), file, fl)) continue;
             {   Buf c = {0, 0, 0}; char outdir[4400]; char *a = f[9]; long al = tx_len(a, CAP), s = 0, k;
                 /* unique per process and call: a check that refuses an existing output must never see one */
-                if (cx_fmt(outdir, sizeof outdir, "%s/out/refactor-verify/%d-%d", root_abs, sy_pid(), ++verify_seq)) return 0;
+                if (cx_fmt(outdir, sizeof outdir, "%s/%d-%d", (rv_init(), rv_root), sy_pid(), ++verify_seq)) return 0;
                 reg_expect = zdup(f[11]);
                 puts_(&c, "sh ./unisacc.com "); put_quoted(&c, f[8], tx_len(f[8], CAP));
                 if (!tx_eq(a, "-", 4)) {
@@ -668,9 +675,11 @@ static int apply(const char *candpath, int jobs, const char *verify) {
             {   /* the original first goes to out/refactor-verify/backup/, so a killed run can be undone by hand */
                 char bp[4400]; static int bseq; long q, fl = tx_len(J->file, CAP); Buf nm = {0, 0, 0};
                 for (q = 0; q < fl; q++) put(&nm, J->file[q] == '/' ? "%" : J->file + q, 1);
-                if (sy_mkdir("out/refactor-verify", 0700) < 0 && sy_exists("out/refactor-verify") != 1) die("cannot make out/refactor-verify");
-                if (sy_mkdir("out/refactor-verify/backup", 0700) < 0 && sy_exists("out/refactor-verify/backup") != 1) die("cannot make the backup directory");
-                if (cx_fmt(bp, sizeof bp, "out/refactor-verify/backup/%d-%d-%s", sy_pid(), ++bseq, nm.p)) die("backup path");
+                char bd[4400];
+                rv_init();
+                if (cx_fmt(bd, sizeof bd, "%s/backup", rv_root)) die("backup path");
+                if (sy_mkdir(bd, 0700) < 0 && sy_exists(bd) != 1) die("cannot make the backup directory");
+                if (cx_fmt(bp, sizeof bp, "%s/%d-%d-%s", bd, sy_pid(), ++bseq, nm.p)) die("backup path");
                 if (cx_write(bp, J->orig, J->on) != 0) { printf("SKIP\t%s\tcannot write its backup\n", J->file); skip++; state[k - j] = 0; continue; }
             }
             if (cx_write(J->file, nb, (size_t)nn) != 0) { printf("SKIP\t%s\tcannot write\n", J->file); skip++; state[k - j] = 0; continue; }
@@ -752,8 +761,8 @@ static int sweep(char **argv, int argc) {
     tracked = dash == 5 && tx_eq(argv[4], "--tracked", 16);
     {   long i; char *rb = zdup(argv[2]);   /* the skip list is per rules file: out/refactor-verify/skip-<rules path with / as _>.txt */
         for (i = 0; rb[i]; i++) if (rb[i] == '/') rb[i] = '_';
-        sy_mkdir("out/refactor-verify", 0700);
-        if (cx_fmt(skp, sizeof skp, "out/refactor-verify/skip-%s.txt", rb) || cx_fmt(cand, sizeof cand, "out/refactor-verify/sweep-%d.tsv", sy_pid())) die("path");
+        rv_init();
+        if (cx_fmt(skp, sizeof skp, "%s/skip-%s.txt", rv_root, rb) || cx_fmt(cand, sizeof cand, "%s/sweep-%d.tsv", rv_root, sy_pid())) die("path");
     }
     sk = cx_read(skp, &skn0); skn = sk ? (long)skn0 : 0; if (!sk) sk = "";
     sweep_find(&c, argv + 4, (int)(dash - 4), tracked, sk, skn, &acc);
@@ -874,11 +883,7 @@ int main(int argc, char **argv) {
             reg_text = cx_read(argv[5], &reg_n);
             if (!reg_text) die("cannot read the registry");
             if (sy_realpath(".", root_abs, sizeof root_abs) < 0) die("cannot resolve the root");
-            {   char vd[4400]; int m;
-                if (cx_fmt(vd, sizeof vd, "%s/out/refactor-verify", root_abs)) die("path");
-                m = sy_mkdir(vd, 0700);
-                if (m != 0 && m != -EEXIST) die("cannot make out/refactor-verify");
-            }
+            rv_init();
             return apply(argv[2], jobs, 0);
         }
         for (k = 4; k < argc; k++) { if (k > 4) put(&v, " ", 1); puts_(&v, argv[k]); }

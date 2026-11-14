@@ -1,0 +1,54 @@
+/* tools/check-tlib-admit.cx -- tools/tlib-admit.cx refuses what it cannot judge and writes no table.
+ *
+ *   sh ./unisacc.com tools/check-tlib-admit.cx -- ROOT
+ *
+ * (1) no source given: exit 2 and no ADMIT line;
+ * (2) a source that is the entry of no registered batch: exit 0 and exactly one ADMIT line whose verdict
+ *     (last tab field but the exit note) says there is no row, with both times 0; nothing compiled;
+ * (3) tests/batches.tsv and build/tlib-prep.tsv are byte-equal before and after the call.
+ * Prints PASS/FAIL per case and CHECK_TLIB_ADMIT<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-admit.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int same(const char *a, size_t an, const char *b, size_t bn) { return a && b && an == bn && !memcmp(a, b, an); }
+
+int main(int argc, char **argv) {
+    char root[4096], product[4400], b1[4400], p1[4400], tool[4400];
+    char *v[12], *o = 0, *tb0, *tb1, *tp0, *tp1;
+    size_t on = 0, nb0 = 0, nb1 = 0, np0 = 0, np1 = 0;
+    long off, len, k;
+    int rc, lines = 0;
+    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0 || sy_chdir(root)) return 2;
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(b1, sizeof b1, "%s/tests/batches.tsv", root) ||
+        cx_fmt(p1, sizeof p1, "%s/build/tlib-prep.tsv", root) || cx_fmt(tool, sizeof tool, "%s/tools/tlib-admit.cx", root)) return 2;
+    tb0 = cx_read(b1, &nb0);
+    tp0 = cx_read(p1, &np0);
+    v[0] = "sh"; v[1] = product; v[2] = tool; v[3] = "--"; v[4] = "--root"; v[5] = root; v[6] = 0;
+    rc = cx_runv_timeout(v, 50, &o, &on);
+    ck(rc == 2, "no-source-is-usage-error");
+    mm_free(o);
+    o = 0;
+    on = 0;
+    v[6] = "tests/no-such-entry-anywhere.cx"; v[7] = 0;
+    rc = cx_runv_timeout(v, 50, &o, &on);
+    for (k = 0; o && k < (long)on; k++) if (o[k] == 0x0a) lines++;
+    ck(rc == 0 && lines == 1 && o && !tx_field(o, (long)on, 0x09, 0, &off, &len) && tx_same(o + off, len, "ADMIT", 5), "unlisted-source-gets-one-line");
+    ck(o && !tx_field(o, (long)on, 0x09, 5, &off, &len) && len > 0 && !tx_field(o, (long)on, 0x09, 3, &off, &len) && tx_same(o + off, len, "0", 1), "unlisted-source-measures-nothing");
+    mm_free(o);
+    tb1 = cx_read(b1, &nb1);
+    tp1 = cx_read(p1, &np1);
+    ck(same(tb0, nb0, tb1, nb1) && same(tp0, np0, tp1, np1), "tables-unchanged");
+    sy_printf("CHECK_TLIB_ADMIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

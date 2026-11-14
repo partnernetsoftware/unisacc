@@ -1,0 +1,307 @@
+/* tools/prechain-gate.cx -- chain-phase tool timing consistency gate (ITER-1 first version / ITER-8 core).
+ *
+ *   sh ./unisacc.com tools/prechain-gate.cx                 scan the chain tools, compare with the baseline
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --emit-baseline   print the current findings as baseline rows
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --file PATH...    scan only these files, no baseline (fixtures)
+ *   sh ./unisacc.com tools/prechain-gate.cx -- --dry             9 chain-tail situations on the fixture fake candidate (parallel, ~40 s), TSV case/expect/actual/ok
+ *
+ * Static, read-only. Scans the chain-phase tools for the class that stopped seven whole-chain starts:
+ *   LIT_NOENV   a literal seconds value in a child-run call (np_run/pr_run/eb_run) in a tool that does not
+ *               derive from UNISACC_CHAIN_PHASE_BOUND_S / ccp_sub_bound: the limit cannot follow the phase.
+ *   LIT_BELOW   the same literal in a deriving tool when it is below phase.bound default - 5 (a sub-limit
+ *               that can fire before the phase limit).
+ *   TIMEOUT_RC2 a timed_out branch that ends in die(): rc 2 (deterministic refusal) instead of 124 (retryable).
+ *   WATCHDOG_LIT a quoted literal seconds argument handed to tools/bound.
+ * The column "limits" names the build/limits.tsv id whose default equals the literal, or NONE.
+ * Known findings live in build/prechain-gate-baseline.tsv (file, rule, snippet, expires, reason); a finding
+ * not in the baseline, or whose baseline row expired, exits 1. Baseline rows that no longer match are listed
+ * as STALE (to be deleted). Output only: no PASS is granted, nothing is written. */
+#pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+static const char *files[] = {"tools/candidate-chain.cx", "tools/chain-step.cx", "tools/chain-run.cx", "tools/whole-front.cx",
+    "tools/entry-build.cx", "tools/kernel-build.cx", "tools/source-job-wave.cx", "tools/cxlib/chaincall.cx"};
+enum { MAXF = 256, SN = 80 };
+typedef struct { char file[96], rule[16], snip[SN + 1], lim[32]; int line; } finding;
+static finding fd[MAXF];
+static int nf;
+static char lim_id[64][48];
+static double lim_val[64];
+static int nlim;
+
+static void load_limits(void) {
+    size_t n; char *s = cx_read("build/limits.tsv", &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read build/limits.tsv\n"); exit(2); }
+    char *p = s;
+    while (p < s + n) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && nlim < 64) {
+            char *t1 = memchr(p, '\t', (size_t)(e - p)), *t2 = t1 ? memchr(t1 + 1, '\t', (size_t)(e - t1 - 1)) : 0;
+            char *t3 = t2 ? memchr(t2 + 1, '\t', (size_t)(e - t2 - 1)) : 0;
+            if (t1 && t2 && t3 && t1 - p < 47) {
+                mm_copy(lim_id[nlim], sizeof lim_id[nlim], p, (size_t)(t1 - p)); lim_id[nlim][t1 - p] = 0;
+                lim_val[nlim++] = atof(t2 + 1);
+            }
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+static const char *lim_for(double v) {
+    for (int i = 0; i < nlim; i++) if (lim_val[i] == v) return lim_id[i];
+    return "NONE";
+}
+static void cpy(char *d, size_t cap, const char *s, size_t n) {
+    if (n >= cap) { fprintf(stderr, "prechain-gate: REFUSE field too long\n"); exit(2); }
+    mm_copy(d, cap, s, n); d[n] = 0;
+}
+static void add(const char *file, const char *rule, const char *snip, size_t sl, int line, const char *lim) {
+    if (nf >= MAXF) { fprintf(stderr, "prechain-gate: REFUSE too many findings\n"); exit(2); }
+    finding *f = &fd[nf++];
+    cpy(f->file, sizeof f->file, file, strlen(file)); cpy(f->rule, sizeof f->rule, rule, strlen(rule));
+    if (sl > SN) sl = SN;
+    mm_copy(f->snip, sizeof f->snip, snip, sl); f->snip[sl] = 0;
+    for (char *c = f->snip; *c; c++) if (*c == '\t') *c = ' ';
+    cpy(f->lim, sizeof f->lim, lim, strlen(lim)); f->line = line;
+}
+/* Top-level argument idx of the call whose '(' is at open; copies it trimmed into out; returns 0 if none. */
+static int call_arg(const char *open, const char *end, int idx, char *out, size_t cap) {
+    int depth = 0, k = 0; const char *a = open + 1;
+    for (const char *p = open + 1; p < end; p++) {
+        int last = 0;
+        if (*p == '(' || *p == '[' || *p == '{') { depth++; continue; }
+        if (*p == ')' || *p == ']' || *p == '}') { if (depth > 0) { depth--; continue; } last = 1; }
+        else if (!(*p == ',' && depth == 0)) continue;
+        if (k == idx) {
+            const char *q = p;
+            while (*a == ' ') a++;
+            while (q > a && q[-1] == ' ') q--;
+            if ((size_t)(q - a) >= cap) return 0;
+            mm_copy(out, cap, a, (size_t)(q - a)); out[q - a] = 0; return 1;
+        }
+        if (last) return 0;
+        k++; a = p + 1;
+    }
+    return 0;
+}
+static int all_digits(const char *s) { if (!*s) return 0; for (; *s; s++) if (!isdigit((unsigned char)*s)) return 0; return 1; }
+
+static void scan_text(const char *file, const char *text, size_t n) {
+    int derived = 0;
+    { char *t = malloc(n + 1); mm_copy(t, n + 1, text, n); t[n] = 0;
+      derived = strstr(t, "UNISACC_CHAIN_PHASE_BOUND_S") != 0 || strstr(t, "ccp_sub_bound") != 0; free(t); }
+    static const struct { const char *fn; int idx; } calls[] = {{"np_run(", 3}, {"pr_run(", 4}, {"eb_run(", 2}};
+    const char *p = text; int ln = 0;
+    while (p < text + n) {
+        const char *e = memchr(p, '\n', (size_t)(text + n - p)); if (!e) e = text + n;
+        ln++;
+        char *line = malloc((size_t)(e - p) + 1); mm_copy(line, (size_t)(e - p) + 1, p, (size_t)(e - p)); line[e - p] = 0;
+        const char *tr = line; while (*tr == ' ') tr++;
+        if (strncmp(tr, "/*", 2) && strncmp(tr, "*", 1) && strncmp(tr, "//", 2)) {
+            for (int c = 0; c < 3; c++) {
+                const char *q = line;
+                while ((q = strstr(q, calls[c].fn)) != 0) {
+                    const char *open = q + strlen(calls[c].fn) - 1; char arg[64];
+                    if (call_arg(open, line + strlen(line), calls[c].idx, arg, sizeof arg) && all_digits(arg)) {
+                        double v = atof(arg);
+                        if (!derived) add(file, "LIT_NOENV", q, strlen(q), ln, lim_for(v));
+                        else if (v < lim_val[0] - 5) add(file, "LIT_BELOW", q, strlen(q), ln, lim_for(v));
+                    }
+                    q = open;
+                }
+            }
+            const char *t = strstr(line, "timed_out");
+            if (t && strstr(t, "die(") && !strstr(line, "124") && !strstr(line, "timeout_exit")) add(file, "TIMEOUT_RC2", tr, strlen(tr), ln, "-");
+            if (strstr(line, "watchdog")) {
+                for (const char *q = line; (q = strchr(q, '"')) != 0; ) {
+                    const char *r = strchr(q + 1, '"'); if (!r) break;
+                    char lit[16];
+                    if (r - q - 1 > 0 && r - q - 1 < 8) { mm_copy(lit, sizeof lit, q + 1, (size_t)(r - q - 1)); lit[r - q - 1] = 0;
+                        if (all_digits(lit)) { add(file, "WATCHDOG_LIT", q - 0, strlen(q), ln, lim_for(atof(lit))); break; } }
+                    q = r + 1;
+                }
+            }
+        }
+        free(line); p = e + 1;
+    }
+}
+static int scan_file(const char *file) {
+    size_t n; char *s = cx_read(file, &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read %s\n", file); return -1; }
+    scan_text(file, s, n); free(s); return 0;
+}
+/* baseline: 5 TAB fields file rule snippet expires reason */
+typedef struct { char file[96], rule[16], snip[SN + 1], exp[16]; int used; } brow;
+static brow bl[MAXF];
+static int nb;
+static void load_baseline(void) {
+    size_t n; char *s = cx_read("build/prechain-gate-baseline.tsv", &n);
+    if (!s) { fprintf(stderr, "prechain-gate: REFUSE cannot read build/prechain-gate-baseline.tsv\n"); exit(2); }
+    char *p = s;
+    while (p < s + n) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && e > p) {
+            char *f[5]; int k = 0; char *a = p;
+            for (char *c = p; c <= e && k < 5; c++) if (c == e || *c == '\t') { f[k] = a; a = c + 1; k++; }
+            if (k < 5 || nb >= MAXF) { fprintf(stderr, "prechain-gate: REFUSE bad baseline row\n"); exit(2); }
+            brow *b = &bl[nb++];
+            cpy(b->file, sizeof b->file, f[0], (size_t)(f[1] - f[0] - 1));
+            cpy(b->rule, sizeof b->rule, f[1], (size_t)(f[2] - f[1] - 1));
+            cpy(b->snip, sizeof b->snip, f[2], (size_t)(f[3] - f[2] - 1));
+            cpy(b->exp, sizeof b->exp, f[3], (size_t)(f[4] - f[3] - 1));
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+/* --dry: 9 chain tail situations, driven by the existing fake-candidate fixtures (check-chain-run.cx
+   default/--segments/--supervise, check-chaincall.cx), not new ones. The three runs are started in
+   parallel under one 58 s bound; each case lists the named PASS lines it needs. A named line that is
+   missing or FAIL, or a child that did not run, is not OK. Output TSV: case expect actual ok. */
+static const struct { const char *name, *expect, *need[4]; } dry_cases[] = {
+    {"complete", "tail 100 s left: group runs in the same segment, PREPARED, no refused call",
+        {"chain-run.tail-100-run-completes-prepared", "chain-run.tail-100-no-blocker-no-refused-call", "chain-run.tail-100-group-runs-in-the-same-segment", 0}},
+    {"segment-tail-yield", "tail 59 s left: group held, segment ends rc 75, group starts next segment",
+        {"chain-run.tail-59-group-held-not-issued", "chain-run.tail-59-segment-ends-cleanly-rc75", "chain-run.tail-59-group-starts-in-next-segment", 0}},
+    {"timeout-124", "124 retried within the resume budget, then rc 3 (exhausted or deadline)",
+        {"chain-run.exhausted-rc3", "chain-run.deadline-rc3", "chain-run.bounded-retries", 0}},
+    {"rc142", "142 (bound watchdog) consumes a resume like 137",
+        {"chain-run.rc142-consumes-a-resume-like-137", "chain-run.rc142-retried-with-a-resume", 0, 0}},
+    {"rc2-deterministic", "rc 2 / real failure is not retried: first-failure stop",
+        {"chain-run.first-failure-rc", "chain-run.first-failure-stops", "chain-run.unverified-yield-fails", 0}},
+    {"refuse", "over-limit call and corrupt owned pack refused before any child",
+        {"chain-run.over-90-refused-before-child", "chain-run.owned-corrupt-pack-refused", "chain-run.tail-old-issued-call-59-is-refused", 0}},
+    {"reentry-resume", "killed phase resumes and persists evidence",
+        {"chain-run.killed-resume", "chain-run.persisted-evidence", 0, 0}},
+    {"width-recovery", "eight clean attempts recover one unit of width, never above requested",
+        {"chain-run.eight-clean-attempts-recover-one-unit-of-width", "chain-run.recovery-never-above-the-requested-width", 0, 0}},
+    {"cmd.front-derived", "chainstep sub-bound derives from cmd.front: 90/85/120/115, absent 45, 70 s reverify fits",
+        {"check-chaincall.chainstep-sub-bound-90-85-120-115-absent-45-70s-reverify-fits", 0, 0, 0}},
+};
+static int dry(void) {
+    static char dir[] = "/tmp/pgdry-XXXXXX"; char cmd[1024]; static char all[1 << 20]; size_t n = 0;
+    if (!mkdtemp(dir)) { fprintf(stderr, "prechain-gate: REFUSE mkdtemp\n"); return 2; }
+    if (cx_fmt(cmd, sizeof cmd,
+        "d=%s; ( timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- . $d/a > $d/1.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- --segments . $d/b > $d/2.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chain-run.cx -- --supervise . $d/c > $d/3.txt 2>&1 &"
+        " timeout 58 sh ./unisacc.com tools/check-chaincall.cx > $d/4.txt 2>&1 & wait ) ; cat $d/1.txt $d/2.txt $d/3.txt $d/4.txt", dir)) return 2;
+    FILE *p = popen(cmd, "r");
+    if (!p) return 2;
+    while (n + 1 < sizeof all) { size_t k = fread(all + n, 1, sizeof all - 1 - n, p); if (!k) break; n += k; }
+    all[n] = 0; pclose(p);
+    printf("PRECHAIN_DRY\tfixture fake candidate: real runner and call-plan validator, no real phase work, no PASS granted\n");
+    printf("case\texpect\tactual\tok\n");
+    int bad = 0;
+    for (size_t i = 0; i < sizeof dry_cases / sizeof *dry_cases; i++) {
+        const char *act = "PASS"; int ok = 1;
+        for (int j = 0; j < 4 && dry_cases[i].need[j]; j++) {
+            char pass[256], fail[256];
+            if (cx_fmt(pass, sizeof pass, "PASS\t%s\n", dry_cases[i].need[j]) || cx_fmt(fail, sizeof fail, "FAIL\t%s\n", dry_cases[i].need[j])) return 2;
+            if (strstr(all, fail)) { act = "FAIL"; ok = 0; break; }
+            if (!strstr(all, pass)) { act = "UNRUN"; ok = 0; }
+        }
+        printf("%s\t%s\t%s\t%s\n", dry_cases[i].name, dry_cases[i].expect, act, ok ? "OK" : "FAIL");
+        if (!ok) bad++;
+    }
+    printf("PRECHAIN_DRY_RESULT\tcases=%d\tfailed=%d\n", (int)(sizeof dry_cases / sizeof *dry_cases), bad);
+    { char rm[160]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", dir)) { int r = system(rm); (void)r; } }
+    return bad ? 1 : 0;
+}
+/* --prestart --snap DIR [--since EPOCH] [--outdir OUTDIR] [--map FILE] [--head DIR]:
+   run snap-tool-drift.cx and snap-residue.cx (both --report, read-only) and parse their last lines.
+   snap_diff>0 or stale>0 -> REFUSE line, rc 1; else PRECHAIN_OK, rc 0. Stale boundary: --since, else the first
+   SEGMENT epoch of OUTDIR/chain-run.tsv (read by snap-residue); with neither, epoch 1: stale is report-only. */
+static long field_of(const char *txt, const char *key) {
+    const char *p = strstr(txt, key);
+    return p ? atol(p + strlen(key)) : -1;
+}
+static int slurp(const char *cmd, char *out, size_t cap) {
+    FILE *p = popen(cmd, "r"); size_t n = 0;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; return pclose(p);
+}
+static int prestart(int argc, char **argv) {
+    const char *snap = 0, *since = 0, *outdir = 0, *map = 0, *head = 0;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--snap") && i + 1 < argc) snap = argv[++i];
+        else if (!strcmp(argv[i], "--since") && i + 1 < argc) since = argv[++i];
+        else if (!strcmp(argv[i], "--outdir") && i + 1 < argc) outdir = argv[++i];
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) map = argv[++i];
+        else if (!strcmp(argv[i], "--head") && i + 1 < argc) head = argv[++i];
+        else { fprintf(stderr, "usage: prechain-gate --prestart --snap DIR [--since EPOCH] [--outdir OUTDIR] [--map F] [--head D]\n"); return 2; }
+    }
+    if (!snap) { fprintf(stderr, "prechain-gate: REFUSE --snap required\n"); return 2; }
+    char sn[2048]; size_t sl = strlen(snap);
+    if (sl >= sizeof sn) return 2;
+    mm_copy(sn, sizeof sn, snap, sl + 1);
+    while (sl > 1 && sn[sl - 1] == '/') sn[--sl] = 0;
+    char *slash = strrchr(sn, '/'); const char *base = slash ? slash + 1 : sn;
+    if (strncmp(base, "release-snap-", 13) || strlen(base) < 23) { fprintf(stderr, "prechain-gate: REFUSE DIR name must be release-snap-<rev10>\n"); return 2; }
+    char rev[11]; mm_copy(rev, sizeof rev, base + 13, 10); rev[10] = 0;
+    char parent[2048] = ".";
+    if (slash) { size_t pl = (size_t)(slash - sn); if (pl == 0) pl = 1; mm_copy(parent, sizeof parent, sn, pl); parent[pl] = 0; }
+    static char o1[1 << 16], o2[1 << 16], cmd[8192];
+    if (cx_fmt(cmd, sizeof cmd, "timeout 55 sh ./unisacc.com tools/snap-tool-drift.cx -- --snap '%s'%s%s%s%s --report 2>&1",
+            sn, map ? " --map '" : "", map ? map : "", map ? "'" : "", "")) return 2;
+    if (head) { size_t l = strlen(cmd); if (cx_fmt(cmd + l, sizeof cmd - l, " --head '%s'", head)) return 2; }
+    slurp(cmd, o1, sizeof o1);
+    long sdiff = field_of(o1, "snap_diff=");
+    if (sdiff < 0) { printf("REFUSE\tsnap-tool-drift gave no result line\n%s", o1); return 2; }
+    char tmp[] = "/tmp/pgps-XXXXXX"; char od[512]; int mk = 0;
+    if (outdir) { if (cx_fmt(od, sizeof od, "%s", outdir)) return 2; }
+    else {
+        if (!mkdtemp(tmp)) return 2; mk = 1;
+        char f[600]; if (cx_fmt(f, sizeof f, "%s/chain-run.tsv", tmp)) return 2;
+        FILE *w = fopen(f, "w"); if (!w) return 2;
+        fprintf(w, "SEGMENT\t%ld\tn=1\tstart\n", since ? atol(since) : 1L); fclose(w);
+        if (cx_fmt(od, sizeof od, "%s", tmp)) return 2;
+    }
+    if (since && outdir) fprintf(stderr, "prechain-gate: note --since ignored because --outdir is given\n");
+    if (cx_fmt(cmd, sizeof cmd, "SNAP_RESIDUE_ROOT='%s' timeout 55 sh ./unisacc.com tools/snap-residue.cx -- %s '%s' --report 2>&1", parent, rev, od)) return 2;
+    slurp(cmd, o2, sizeof o2);
+    if (mk) { char rm[160]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", tmp)) { int r = system(rm); (void)r; } }
+    long stale = field_of(o2, "stale=");
+    if (stale < 0) { printf("REFUSE\tsnap-residue gave no result line\n%s", o2); return 2; }
+    int bounded = outdir || since;
+    printf("PRECHAIN_PRESTART\tsnap=%s\tsnap_diff=%ld\tstale=%ld\tstale_bound=%s\n", sn, sdiff, stale, bounded ? "set" : "none(report-only)");
+    if (sdiff > 0) { printf("REFUSE\tsnap_diff=%ld: snapshot driver tools differ from HEAD (source=snap)\n", sdiff); }
+    if (stale > 0 && bounded) { printf("REFUSE\tstale=%ld: stale residue in snapshot chain/\n", stale); }
+    if (sdiff > 0 || (stale > 0 && bounded)) return 1;
+    printf("PRECHAIN_OK\n");
+    return 0;
+}
+int main(int argc, char **argv) {
+    int emit = 0, only = 0;
+    if (argc >= 2 && !strcmp(argv[1], "--prestart")) return prestart(argc, argv);
+    if (argc == 2 && !strcmp(argv[1], "--dry")) return dry();
+    load_limits();
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--emit-baseline")) emit = 1;
+        else if (!strcmp(argv[i], "--file")) { only = 1; for (i++; i < argc; i++) if (scan_file(argv[i])) return 2; }
+        else { fprintf(stderr, "usage: prechain-gate [--dry | --emit-baseline | --file PATH...]\n"); return 2; }
+    }
+    if (!only) for (size_t i = 0; i < sizeof files / sizeof *files; i++) if (scan_file(files[i])) return 2;
+    if (emit) {
+        for (int i = 0; i < nf; i++) printf("%s\t%s\t%s\t2026-12-13\t已知基线,见账本 C3-SUBBOUND-RESOLVE/C3-RETRY-CLASS;ITER-8 收敛后删除\n", fd[i].file, fd[i].rule, fd[i].snip);
+        return 0;
+    }
+    printf("PRECHAIN_GATE\tstatic scan only: no job executed, no PASS granted\n");
+    int fresh = 0, known = 0, expired = 0, stale = 0;
+    char today[16];{long z=sy_wall_s()/86400+719468,era=z/146097,doe=z-era*146097,yoe=(doe-doe/1460+doe/36524-doe/146096)/365,y=yoe+era*400,doy=doe-(365*yoe+yoe/4-yoe/100),mp=(5*doy+2)/153,d=doy-(153*mp+2)/5+1,m=mp<10?mp+3:mp-9;if(m<=2)y++;if(cx_fmt(today,sizeof today,"%04ld-%02ld-%02ld",y,m,d))return 2;}
+    if (!only) load_baseline();
+    printf("status\tfile:line\trule\tlimits\tsnippet\n");
+    for (int i = 0; i < nf; i++) {
+        const char *st = "NEW"; brow *hit = 0;
+        for (int j = 0; j < nb && !hit; j++)
+            if (!strcmp(bl[j].file, fd[i].file) && !strcmp(bl[j].rule, fd[i].rule) && !strcmp(bl[j].snip, fd[i].snip)) hit = &bl[j];
+        if (hit) { hit->used = 1; if (strcmp(hit->exp, today) < 0) { st = "EXPIRED"; expired++; } else { st = "BASELINE"; known++; } }
+        else fresh++;
+        printf("%s\t%s:%d\t%s\t%s\t%s\n", st, fd[i].file, fd[i].line, fd[i].rule, fd[i].lim, fd[i].snip);
+    }
+    for (int j = 0; j < nb; j++) if (!bl[j].used) { stale++; printf("STALE\t%s\t%s\t-\t%s\n", bl[j].file, bl[j].rule, bl[j].snip); }
+    printf("PRECHAIN_GATE_RESULT\tnew=%d\tbaselined=%d\texpired=%d\tstale=%d\n", fresh, known, expired, stale);
+    return fresh || expired ? 1 : 0;
+}

@@ -1,0 +1,373 @@
+/* tools/chain-ready.cx -- the nine pre-chain conditions of prd_mempalace.md "0.0.62 候选整链就绪判断" in one command.
+ *
+ *   sh ./unisacc.com tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only NAME]]
+ *   sh ./unisacc.com tools/chain-ready.cx -- --judge KIND FILE RC     (the pure judge on a saved output; fixtures)
+ *
+ * One TSV row per item: ITEM  PASS|FAIL|UNMEASURED|SKIPPED  evidence  ms.  Last row:
+ *   READY  yes|no  failed=<names>  ms
+ * READY=yes needs every row PASS or UNMEASURED-by-design (the two manual items: recipe steps (7), ledger line (9));
+ * a SKIPPED P1 (--fast) or a FAIL makes it no.  Items:
+ *   1-rev          git status --short on src cx ext exec/facts is empty and the branch is main
+ *   2a-derive      tools/derive.cx -- --check: DERIVE_SUMMARY drift=0 refused=0
+ *   2b-ratchets    tools/ratchets.cx last line ok=13 fail=0
+ *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
+ *   3b-cx0-extract tools/cx0-extract.cx -- --check prints CX0_EXTRACT EXACT
+ *   4-p1           every .cx with a `#pragma unisa use` goes through cx0_plan (check-cxmod-tri.cx --cx0, bound 40,
+ *                  8 lanes); a new rejection is one whose diagnostic has "bad symbol name", "does not export" or
+ *                  "undeclared function"; must be 0.  --fast: SKIPPED.  Other rejections are reported as a count only.
+ *   5-candidate-chain  tools/check-candidate-chain.cx -- TMP/out TMP/cache: rc 0 and no FAIL row
+ *   6-affected     tools/affected.cx --files <changed .cx> --run (dirty files, plus --since REV..HEAD); none changed: PASS
+ *   7-recipe       manual (private root checkout, commit-tree, UNISACC_IDENT_HELPER, fresh --out, 5400 s): UNMEASURED
+ *   8-inflight     pgrep -af candidate-chain: no process other than this tool, pgrep and shell wrappers
+ *   9-ledger       manual (one ledger line before the chain): UNMEASURED
+ * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
+ * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.conv
+#pragma unisa use sys.env
+
+#define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
+#define MAXJ 12
+#define NEWMSG_N 3
+
+typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long n; int rc; long t0, ms; int state; } Job;
+
+static const char *newmsg[NEWMSG_N] = {"bad symbol name", "does not export", "undeclared function"};
+
+static int has(const char *h, long n, const char *w) { return tx_find(h, n, w, (long)tx_len(w, 4096)) >= 0; }
+
+/* the first line of H (len n) holding W, copied into DST (sanitised), or "" */
+static void line_with(const char *h, long n, const char *w, char *dst, int cap) {
+    long at = 0; dst[0] = 0;
+    while (at < n) {
+        long e = tx_chr(h + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (has(h + at, ln, w)) {
+            long i, k = 0;
+            for (i = 0; i < ln && k < cap - 1 && k < 150; i++) { char c = h[at + i]; dst[k++] = (c == '\t' || c == '\r') ? ' ' : c; }
+            dst[k] = 0; return;
+        }
+        at += ln + 1;
+    }
+}
+static void put_ev(char *ev, int cap, const char *s) { cx_fmt(ev, (size_t)cap, "%s", s); }
+
+/* ---- pure judges: 1 PASS, 0 FAIL; ev gets the evidence sentence ---- */
+static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
+    long at = 0, dirty = 0; char first[160]; first[0] = 0;
+    if (rc != 0) { cx_fmt(ev, (size_t)cap, "git status rc=%d", rc); return 0; }
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 0) { if (!dirty) { long k = ln < 100 ? ln : 100; mm_copy(first, sizeof first, o + at, (size_t)k); first[k] = 0; } dirty++; }
+        at += ln + 1;
+    }
+    if (dirty) { cx_fmt(ev, (size_t)cap, "%ld uncommitted or untracked paths under src cx ext exec/facts, first: %s", dirty, first); return 0; }
+    put_ev(ev, cap, "no uncommitted or untracked paths under src cx ext exec/facts"); return 1;
+}
+static int j_branch(const char *o, long n, char *ev, int cap) {
+    if (n >= 4 && tx_prefix(o, n, "main", 4) && (n == 4 || o[4] == '\n')) { put_ev(ev, cap, "branch main"); return 1; }
+    cx_fmt(ev, (size_t)cap, "branch is not main: %.40s", n > 0 ? o : "(none)"); return 0;
+}
+static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; line_with(o, n, "DERIVE_SUMMARY", l, sizeof l);
+    if (!l[0]) { cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d", rc); return 0; }
+    if (rc == 0 && has(l, (long)tx_len(l, 200), "drift=0") && has(l, (long)tx_len(l, 200), "refused=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    {   char d[160]; line_with(o, n, "\tDRIFT\t", d, sizeof d); if (!d[0]) line_with(o, n, "\tREFUSED\t", d, sizeof d);
+        cx_fmt(ev, (size_t)cap, "%.60s; first: %.90s", l, d); }
+    return 0;
+}
+static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
+    if (rc == 0 && has(l, (long)tx_len(l, 200), "ok=13") && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); return 0;
+}
+static int j_tri(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; line_with(o, n, "CXMOD_TRI\t", l, sizeof l);
+    if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "failed=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no CXMOD_TRI line"); return 0;
+}
+static int j_extract(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; line_with(o, n, "CX0_EXTRACT\tEXACT", l, sizeof l);
+    if (rc == 0 && l[0]) { cx_fmt(ev, (size_t)cap, "%.140s", l); return 1; }
+    line_with(o, n, "CX0_EXTRACT", l, sizeof l);
+    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no CX0_EXTRACT line"); return 0;
+}
+static int j_chain(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; long at = 0, nfail = 0, npass = 0;
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (tx_prefix(o + at, ln, "FAIL\t", 5)) { if (!nfail) { long k = ln < 140 ? ln : 140; mm_copy(l, sizeof l, o + at, (size_t)k); l[k] = 0; } nfail++; }
+        else if (tx_prefix(o + at, ln, "PASS\t", 5)) npass++;
+        at += ln + 1;
+    }
+    if (rc == 0 && nfail == 0 && npass > 0) { cx_fmt(ev, (size_t)cap, "rc=0 pass=%ld fail=0", npass); return 1; }
+    if (nfail) cx_fmt(ev, (size_t)cap, "rc=%d pass=%ld fail=%ld first: %s", rc, npass, nfail, l);
+    else cx_fmt(ev, (size_t)cap, "rc=%d pass=%ld, no FAIL row", rc, npass);
+    return 0;
+}
+static int j_affected(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; line_with(o, n, "FAIL", l, sizeof l);
+    if (rc == 0) { cx_fmt(ev, (size_t)cap, "rc=0 %ld bytes of output, no failure", n); return 1; }
+    if (rc == 3) {   /* affected.cx: return fail ? 1 : deferred ? 3 : 0 -- deferred batches, no FAIL: not measured */
+        char s[160]; line_with(o, n, "AFFECTED_RUN", s, sizeof s);
+        if (!l[0] && s[0]) { cx_fmt(ev, (size_t)cap, "rc=3 deferred, no FAIL: %s", s); return 2; }
+    }
+    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "affected --run nonzero"); return 0;
+}
+/* a pgrep -af listing: 1 when no chain process besides this tool, pgrep and shell wrappers */
+static int j_inflight(const char *o, long n, char *ev, int cap) {
+    long at = 0, hits = 0; char first[160]; first[0] = 0;
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 0 && !has(o + at, ln, "chain-ready") && !has(o + at, ln, "pgrep") && !has(o + at, ln, "bash -c") && !has(o + at, ln, "sh -c")
+            && !has(o + at, ln, "tools/bound")) {
+            if (!hits) { long k = ln < 120 ? ln : 120; mm_copy(first, sizeof first, o + at, (size_t)k); first[k] = 0; }
+            hits++;
+        }
+        at += ln + 1;
+    }
+    if (hits) { cx_fmt(ev, (size_t)cap, "%ld chain process(es) running, first: %s", hits, first); return 0; }
+    put_ev(ev, cap, "no candidate-chain process"); return 1;
+}
+/* one P1 child output: 1 when the file was planned or rejected with an old message, 0 on a new rejection */
+static int j_p1file(const char *o, long n) {
+    int i;
+    for (i = 0; i < NEWMSG_N; i++) if (has(o, n, newmsg[i])) return 0;
+    return 1;
+}
+
+static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev, int cap) {
+    if (tx_eqz(kind, "rev")) return j_rev(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "branch")) return j_branch(o, n, ev, cap);
+    if (tx_eqz(kind, "derive")) return j_derive(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "ratchets")) return j_ratchets(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "tri")) return j_tri(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "extract")) return j_extract(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "chain")) return j_chain(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "affected")) return j_affected(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
+    if (tx_eqz(kind, "p1file")) { put_ev(ev, cap, "p1file"); return j_p1file(o, n); }
+    put_ev(ev, cap, "unknown judge kind"); return -1;
+}
+
+/* ---- processes ---- */
+static void slurp(int fd, char **buf, long *n) {
+    long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (b) b[*n] = 0;
+    *buf = b;
+}
+static int start(Job *j) {
+    long deadline_ms = 0; (void)deadline_ms;   /* the deadline lives in the ./tools/bound argv prefix */
+    j->t0 = sy_now_ms();
+    /* every argv here starts with ./tools/bound SECONDS: the child is bound-limited */
+    j->pid = sy_spawn_pipe(j->argv, 0, 0, &j->ofd, 0);   /* stderr merged into the pipe */
+    j->state = j->pid > 0 ? 1 : 3;
+    return j->pid > 0 ? 0 : -1;
+}
+static void finish(Job *j) {
+    int ex = 0, code = 0, sig = 0;
+    if (j->state == 1) {
+        slurp(j->ofd, &j->out, &j->n); sy_close(j->ofd);
+        j->rc = sy_wait_status(j->pid, 0, &ex, &code, &sig) == j->pid && ex ? code : -1;
+    } else { j->out = 0; j->n = 0; j->rc = -1; }
+    j->ms = sy_now_ms() - j->t0; j->state = 2;
+}
+static void argv_set(Job *j, const char *name, int bound, ...) {
+    (void)bound; j->name = name;
+}
+
+static char failed_names[1024]; static int nfail;
+static void row(const char *item, const char *st, const char *ev, long ms) {
+    printf("%s\t%s\t%s\t%ld\n", item, st, ev, ms);
+    if (tx_eqz(st, "FAIL") || tx_eqz(st, "SKIPPED")) {
+        size_t l = tx_len(failed_names, sizeof failed_names);
+        cx_fmt(failed_names + l, sizeof failed_names - l, "%s%s", l ? "," : "", item); nfail++;
+    }
+}
+static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev, ms); }
+
+/* P1: all .cx files holding "#pragma unisa use", 8 lanes of cx0_plan children */
+#define LANES 8
+/* negative fixtures refused on purpose (check-install-fixes iproto; cxclash "must still be refused"; symindex proto) */
+static int is_negfix(const char *nm) {
+    long n = (long)tx_len(nm, 512);
+    /* exact files only: helpers in those directories (cxclash left/ right/, iproto mid.cx, symindex proto libs) are ordinary inputs */
+    return tx_eqz(nm, "tests/cxclash/main.cx") || tx_eqz(nm, "tools/install-fixes/iproto/main.cx") || tx_eqz(nm, "tools/install-fixes/iproto/user.cx") || tx_eqz(nm, "tools/symindex/fixture/proto/user.cx");
+}
+static void run_p1(long *ms_out, char *ev, int cap) {
+    long negok = 0, t0 = sy_now_ms(), nfiles = 0, rejected = 0, newrej = 0, failed_start = 0, at = 0;
+    char *lb; long ln; int fd, pid, ex = 0, code = 0, sig = 0; char *gv[] = {"./tools/bound", "30", "git", "ls-files", "-z", "--", "*.cx", ":!archive", 0};   /* archive/ is retired legacy, never in a chain build */
+    char *names[1400]; long cnt = 0, next = 0; char first[160]; first[0] = 0;
+    Job lane[LANES]; int i, active = 0;
+    /* gv is ./tools/bound 30 git ls-files: bound-limited */
+    pid = sy_spawn_pipe(gv, 0, 0, &fd, 0);
+    if (pid <= 0) { put_ev(ev, cap, "cannot start git ls-files"); *ms_out = sy_now_ms() - t0; return; }
+    slurp(fd, &lb, &ln); sy_close(fd); sy_wait_status(pid, 0, &ex, &code, &sig);
+    while (at < ln && cnt < 1400) {   /* NUL-separated; keep the ones that hold a use pragma */
+        long e = tx_chr(lb + at, ln - at, 0), len = e < 0 ? ln - at : e;
+        if (len > 0) {
+            size_t sz; char *src; lb[at + len] = 0; src = cx_read(lb + at, &sz);
+            if (src) { if (has(src, (long)sz, "#pragma unisa use")) names[cnt++] = lb + at; mm_free(src); }
+        }
+        at += len + 1;
+    }
+    for (i = 0; i < LANES; i++) lane[i].state = 0;
+    while (next < cnt || active > 0) {
+        for (i = 0; i < LANES; i++) {
+            if (lane[i].state == 0 && next < cnt) {
+                static const char *fixed[] = {"./tools/bound", "40", "sh", UC, "tools/check-cxmod-tri.cx", "--", "--cx0"};
+                int k; for (k = 0; k < 7; k++) lane[i].argv[k] = (char *)fixed[k];
+                lane[i].argv[7] = names[next++]; lane[i].argv[8] = 0; lane[i].name = lane[i].argv[7];
+                if (start(&lane[i]) == 0) active++; else { failed_start++; lane[i].state = 0; }
+            }
+        }
+        for (i = 0; i < LANES; i++) {
+            if (lane[i].state == 1) {
+                finish(&lane[i]);
+                nfiles++;
+                if (!lane[i].out || lane[i].rc != 0) failed_start++;
+                else {
+                    if (!has(lane[i].out, lane[i].n, "RC=0")) rejected++;
+                    /* deliberate negative fixtures must stay refused with a new-text diagnostic; one that is accepted is a failure */
+                    if (is_negfix(lane[i].name)) { if (j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "negfix-accepted %.100s", lane[i].name); } else negok++; }
+                    else if (!j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "%.120s", lane[i].name); }
+                }
+                if (lane[i].out) mm_free(lane[i].out);
+                lane[i].state = 0; active--;
+                break;   /* refill before the next collect */
+            }
+        }
+    }
+    cx_fmt(ev, (size_t)cap, "%ld files planned by cx0_plan, rejected(any text)=%ld, new-text rejections=%ld, negative fixtures still refused=%ld%s%s, child failures=%ld",
+           nfiles, rejected, newrej, negok, first[0] ? " first=" : "", first, failed_start);
+    *ms_out = sy_now_ms() - t0;
+    if (newrej || failed_start) { *ms_out = -*ms_out; }
+}
+
+int main(int argc, char **argv) {
+    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0;
+    long T0 = sy_now_ms();
+    if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
+        size_t n; char *b = cx_read(argv[3], &n); char ev[512]; int ok;
+        if (!b) { fprintf(stderr, "chain-ready: cannot read %s\n", argv[3]); return 2; }
+        { int64_t rv = 0; tx_to_i64(argv[4], (long)tx_len(argv[4], 16), 10, &rv); ok = judge_kind(argv[2], b, (long)n, (int)rv, ev, sizeof ev); }
+        if (ok < 0) { fprintf(stderr, "chain-ready: %s\n", ev); return 2; }
+        printf("%s\t%s\n", ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev);
+        return 0;
+    }
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--fast")) fast = 1;
+        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) repo = argv[++a];
+        else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
+        else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
+        else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] | --judge KIND FILE RC]\n"); return 2; }
+    }
+    static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
+    char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
+    tmpd[0] = 0; chfiles[0] = 0; changed[0] = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "chain-ready-", tmpd, sizeof tmpd) == 0) have_tmp = 1;
+    cx_fmt(outd, sizeof outd, "%s/out", tmpd); cx_fmt(cached, sizeof cached, "%s/cache", tmpd);
+    (void)argv_set; (void)changed;
+
+#define WANT(nm) (!only || tx_prefix(nm, (long)tx_len(nm, 64), only, (long)tx_len(only, 64)))
+    /* job table: slot order is the report order */
+    static char *g_status[] = {"./tools/bound", "20", "git", "-C", 0, "status", "--short", "--", "src", "cx", "ext", "exec/facts", 0};
+    static char *g_branch[] = {"./tools/bound", "20", "git", "-C", 0, "rev-parse", "--abbrev-ref", "HEAD", 0};
+    static char *g_derive[] = {"./tools/bound", "80", "sh", UC, "tools/derive.cx", "--", "--check", 0};
+    static char *g_rat[] = {"./tools/bound", "60", "sh", UC, "tools/ratchets.cx", 0};
+    static char *g_tri[] = {"./tools/bound", "60", "sh", UC, "tools/check-cxmod-tri.cx", 0};
+    static char *g_ext[] = {"./tools/bound", "55", "sh", UC, "tools/cx0-extract.cx", "--", "--check", 0};
+    static char *g_chain[] = {"./tools/bound", "80", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, 0};
+    static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
+    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg};
+    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight"};
+    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight"};
+    g_status[4] = (char *)repo; g_branch[4] = (char *)repo; g_pg[4] = (char *)pat;
+    g_chain[6] = outd; g_chain[7] = cached;
+    for (k = 0; k < 8; k++) {
+        int c, i;
+        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev"))) continue;
+        if (k == 6 && !have_tmp) continue;
+        for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
+        J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; (void)i;
+        nj++;
+    }
+    /* item 6: changed .cx files (dirty, and --since REV..HEAD), each handed to affected --files */
+    {   int want6 = WANT("6-affected");
+        if (want6) {
+            char *gv[8]; Job g[2]; int gi, ng = 0, npath = 0; char *paths[200]; char *tb[2] = {0, 0}; long tl[2] = {0, 0};
+            gv[0] = "./tools/bound"; gv[1] = "20"; gv[2] = "git"; gv[3] = "-C"; gv[4] = (char *)repo; gv[5] = "status"; gv[6] = "--short"; gv[7] = 0;
+            { int x; for (x = 0; x < 8; x++) g[0].argv[x] = gv[x]; start(&g[0]); finish(&g[0]); tb[0] = g[0].out; tl[0] = g[0].n; ng = 1; }
+            if (since) {
+                char *dv[] = {"./tools/bound", "20", "git", "-C", (char *)repo, "diff", "--name-only", 0, 0};
+                char rng[200]; int x; cx_fmt(rng, sizeof rng, "%s..HEAD", since); dv[7] = rng;
+                for (x = 0; x < 9; x++) g[1].argv[x] = dv[x];
+                start(&g[1]); finish(&g[1]); tb[1] = g[1].out; tl[1] = g[1].n; ng = 2;
+            }
+            for (gi = 0; gi < ng; gi++) {
+                long at = 0;
+                while (tb[gi] && at < tl[gi] && npath < 200) {
+                    long e = tx_chr(tb[gi] + at, tl[gi] - at, '\n'), ln = e < 0 ? tl[gi] - at : e;
+                    char *p = tb[gi] + at; long pl = ln;
+                    if (gi == 0 && pl > 3) { p += 3; pl -= 3; }   /* "XY path" */
+                    if (pl > 3 && p[pl - 3] == '.' && p[pl - 2] == 'c' && p[pl - 1] == 'x' && !(gi == 0 && tb[gi][at] == 'D')) {
+                        p[pl] = 0;   /* in place; the line ends here */
+                        { int dup = 0, y; for (y = 0; y < npath; y++) if (tx_eqz(paths[y], p)) dup = 1; if (!dup) paths[npath++] = p; }
+                    }
+                    at += ln + 1;
+                }
+            }
+            if (npath > 0) {
+                int c = 0, y;
+                J[nj].argv[c++] = "./tools/bound"; J[nj].argv[c++] = "80"; J[nj].argv[c++] = "sh"; J[nj].argv[c++] = UC;
+                J[nj].argv[c++] = "tools/affected.cx"; J[nj].argv[c++] = "--"; J[nj].argv[c++] = "--files";
+                for (y = 0; y < npath && c < 20; y++) J[nj].argv[c++] = paths[y];
+                J[nj].argv[c++] = "--run"; J[nj].argv[c] = 0; J[nj].name = "6-affected"; items[nj] = "affected"; nj++;
+            } else { row("6-affected", "PASS", "no changed .cx files (dirty tree and --since range)", 0); }
+        }
+    }
+    /* run: at most four at a time, collect in slot order */
+    {   int started = 0, done = 0, running = 0;
+        for (k = 0; k < nj; k++) J[k].state = 0;
+        while (done < nj) {
+            while (started < nj && running < 4) {
+                if (start(&J[started]) == 0) running++; else { J[started].ms = 0; J[started].out = 0; J[started].n = 0; J[started].rc = -1; done++; }
+                started++;
+            }
+            for (k = 0; k < nj; k++) if (J[k].state == 1) { finish(&J[k]); running--; done++; break; }
+        }
+    }
+    {   char ev[640]; int ok;
+        char rev_ev[640]; int rev_ok = -1; long rev_ms = 0;
+        for (k = 0; k < nj; k++) {
+            ok = judge_kind(items[k], J[k].out ? J[k].out : "", J[k].n, J[k].rc, ev, sizeof ev);
+            if (J[k].state == 3) { ok = 0; cx_fmt(ev, sizeof ev, "cannot start child"); }
+            if (tx_eqz(items[k], "rev")) { rev_ok = ok; put_ev(rev_ev, sizeof rev_ev, ev); rev_ms = J[k].ms; continue; }
+            if (tx_eqz(items[k], "branch")) {
+                int bok = ok;   /* merged row 1-rev: status and branch */
+                if (rev_ok >= 0) { char both[700]; cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev); row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms); }
+                continue;
+            }
+            row_judged(J[k].name, ok, ev, J[k].ms);
+        }
+    }
+    if (WANT("4-p1")) {
+        if (fast) row("4-p1", "SKIPPED", "--fast: cx0_plan scan of every .cx with a use pragma not run", 0);
+        else { char ev[640]; long ms; run_p1(&ms, ev, sizeof ev); row_judged("4-p1", ms >= 0, ev, ms < 0 ? -ms : ms); }
+    }
+    if (WANT("7-recipe")) row("7-recipe", "UNMEASURED", "manual: recipe steps 1-5 (private root checkout of REV, commit-tree, UNISACC_IDENT_HELPER, fresh --out, 5400 s)", 0);
+    if (WANT("9-ledger")) row("9-ledger", "UNMEASURED", "manual: one ledger line in prd_mempalace.md (REV, PID/PGID, deadline, output dir) before the chain", 0);
+    printf("READY\t%s\t%s%s\t%ld\n", nfail ? "no" : "yes", nfail ? "failed=" : "failed=none", failed_names, sy_now_ms() - T0);
+    if (have_tmp) { /* the tool only wrote below its own temp dir; leave contents to the system temp cleaner */ }
+    return nfail ? 1 : 0;
+}

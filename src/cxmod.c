@@ -70,6 +70,13 @@ int cxm_symb[CXM_SYMS]; int cxm_syme[CXM_SYMS]; int cxm_nsym;
 int cxm_ib[CXM_ITEMS]; int cxm_ie[CXM_ITEMS]; int cxm_ibody[CXM_ITEMS]; int cxm_iline[CXM_ITEMS]; int cxm_icond[CXM_ITEMS];
 int cxm_ikind[CXM_ITEMS]; int cxm_nitem;
 char cxm_mac[CXM_MACROS][CXM_SYMW]; int cxm_nmac;
+/* -funit support: the product driver compiles only the first cxm_rootn units; the host never reads it */
+int cxm_rootn;
+/* function declarators this unit itself writes (a prototype or a definition). A call is visible when the
+   name is here or exported by a module this unit directly uses. */
+#define CXM_LOCS 4096
+char cxm_locn[CXM_LOCS][CXM_SYMW]; int cxm_locu[CXM_LOCS]; int cxm_nloc;
+int cxm_badcalls;
 int cxm_tokb; int cxm_tokl;
 
 int cxm_len(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
@@ -92,6 +99,8 @@ int cxm_fail(void) { cxm_m("\n"); cxm_say(2, cxm_msg, cxm_nmsg); return 1; }
 /* the out buffer: generated text */
 int cxm_o(char *s) { while (*s && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = *s; cxm_nout = cxm_nout + 1; s = s + 1; } return 0; }
 int cxm_on2(char *s, int n) { int k; k = 0; while (k < n && cxm_nout < CXM_IFMAX) { cxm_out[cxm_nout] = s[k]; cxm_nout = cxm_nout + 1; k = k + 1; } return 0; }
+/* decimal v into the out buffer (cxm_md writes the message buffer, not generated text) */
+int cxm_od(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = '0'; n = 1; } while (v > 0) { d[n] = '0' + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; cxm_on2(d + n, 1); } return 0; }
 /* like cxm_on2 over s[b..e), but every identifier token equal to SYM is written as
    ALIAS (both NUL-terminated; ALIAS empty means drop the rename).  Whitespace is
    copied as-is, so the rename is token-exact and never touches a longer name. */
@@ -154,7 +163,7 @@ char *cxm_keep(char *p) {
     cxm_npool = cxm_npool + n + 1;
     return cxm_pool + at;
 }
-int cxm_find(char *path) { int u; u = 0; if (cxm_on == 0) return 0 - 1; while (u < cxm_n) { if (cxm_eq(cxm_arg[u], path)) return u; u = u + 1; } return 0 - 1; }
+int cxm_find(char *path) { int u; u = 0; if (cxm_on == 0) return 0 - 1; while (u < cxm_n) { if (cxm_eq(cxm_arg[u], path) || (cxm_bodysrc[u][0] && cxm_eq(cxm_bodysrc[u], path))) return u; u = u + 1; } return 0 - 1; }
 int cxm_flag(char *a) {
     if (cxm_eq(a, "-cx-plan")) { cxm_wantplan = 1; return 1; }
     if (cxm_eq(a, "-cx-interface")) { cxm_wantif = 1; return 1; }
@@ -543,6 +552,7 @@ int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, int *en
                         nl = k;
                         sb = k + 2; k = k + 2; sl = 0;
                         while (k < wn && cxm_idch(w[k] & 255)) { sl = sl + 1; k = k + 1; }
+                        if (sl == 0 || k < wn) { cxm_start(u, line); cxm_m("bad symbol name \""); cxm_mn(w + sb, wn - sb); cxm_m("\""); return cxm_fail(); }
                         q = cxm_word(s, we, e, &i);
                         if (q > i && cxm_eqn(s + i, q - i, "as")) {
                             q = cxm_word(s, q, e, &ab);
@@ -904,10 +914,23 @@ int cxm_text(int u, int full, char *sym, char *alias) {
     cxm_o("#endif\n");
     return cxm_nout >= CXM_IFMAX;
 }
+int cxm_outsha(char *hex) {
+    unisa_sha256_hex(cxm_out, (size_t)cxm_nout, hex);
+    return 0;
+}
+/* finish a renamed-body path at out[p]: <sha16 of cxm_out>.cx, so the name follows the bytes
+   (no fixed name shared between concurrent invocations) */
+int cxm_bodyname(char *out, int p) {
+    char hex[65]; int k;
+    cxm_outsha(hex);
+    k = 0; while (k < 16) { out[p] = hex[k]; p = p + 1; k = k + 1; }
+    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
+    return 0;
+}
 /* write cxm_out to $TMPDIR/ua-cxif-<sha16>.h unless that file already holds these bytes */
 int cxm_put(char *path) {
     char hex[65]; char *td; int p; int k; int n;
-    unisa_sha256_hex(cxm_out, (size_t)cxm_nout, hex);
+    cxm_outsha(hex);
     td = getenv("TMPDIR"); if (td == 0 || td[0] == 0) td = getenv("TEMP");   /* TEMP: Windows, as the forwarding unit */
     if (td == 0 || td[0] == 0) td = "/tmp";
     p = cxm_cpy(path, td, CXM_PATHW - 40);
@@ -931,8 +954,6 @@ int cxm_rewrite(int v, char *sym, char *alias, char *out) {
     if (td == 0 || td[0] == 0) td = "/tmp";
     p = cxm_cpy(out, td, CXM_PATHW - 40);
     k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
-    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
-    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
     cxm_nout = 0;
     if (sym && sym[0]) {
         if (alias && alias[0]) { cxm_o("#define "); cxm_o(sym); cxm_o(" "); cxm_o(alias); cxm_o("\n"); }
@@ -941,12 +962,13 @@ int cxm_rewrite(int v, char *sym, char *alias, char *out) {
         k = 0;
         while (k < cxm_nsym) {
             if (cxm_symu[k] == v && cxm_symk[k] == 0 && !cxm_eq(cxm_sym[k], sym)) {
-                cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n");
+                cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_od(k); cxm_o("\n");
             }
             k = k + 1;
         }
     }
     cxm_on2(cxm_cmp, n);
+    cxm_bodyname(out, p);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
 }
@@ -958,8 +980,6 @@ int cxm_rewrite_multi(int u, int v, char *out) {
     if (td == 0 || td[0] == 0) td = "/tmp";
     p = cxm_cpy(out, td, CXM_PATHW - 40);
     k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
-    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
-    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
     cxm_nout = 0;
     k = 0;
     while (k < cxm_nuse[u]) {
@@ -978,11 +998,12 @@ int cxm_rewrite_multi(int u, int v, char *out) {
                 if (cxm_use[u][z] == v && cxm_usym[u][z][0] && cxm_eq(cxm_usym[u][z], cxm_sym[k])) { imported = 1; break; }
                 z = z + 1;
             }
-            if (!imported) { cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n"); }
+            if (!imported) { cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_od(k); cxm_o("\n"); }
         }
         k = k + 1;
     }
     cxm_on2(cxm_cmp, n);
+    cxm_bodyname(out, p);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
 }
@@ -1047,6 +1068,27 @@ int cxm_imports(int w, int v, char *sym) {
     }
     return cxm_reach[w][v];
 }
+/* a symbol-level use must name a function its module exports (CX-U-2) */
+int cxm_usechk(void) {
+    int u; int k; int i; int v;
+    u = 0;
+    while (u < cxm_n) {
+        k = 0;
+        while (k < cxm_nuse[u]) {
+            if (cxm_usym[u][k][0]) {
+                v = cxm_use[u][k]; i = 0;
+                while (i < cxm_nsym && !(cxm_symu[i] == v && cxm_symk[i] == 0 && cxm_eq(cxm_sym[i], cxm_usym[u][k]))) i = i + 1;
+                if (i == cxm_nsym) {
+                    cxm_start(0 - 1, 0); cxm_m("module "); cxm_m(cxm_name[v]); cxm_m(" does not export "); cxm_m(cxm_usym[u][k]);
+                    cxm_m(" (used by "); cxm_m(cxm_arg[u]); cxm_m(")"); return cxm_fail();
+                }
+            }
+            k = k + 1;
+        }
+        u = u + 1;
+    }
+    return 0;
+}
 int cxm_collisions(void) {
     int a; int b; int w; int seen;
     a = 0;
@@ -1092,11 +1134,150 @@ int cxm_collisions(void) {
     }
     return 0;
 }
+/* a word that opens a declaration (storage class or type specifier), not sizeof */
+int cxm_declword(char *t, int l) {
+    char *k; int i; int b;
+    k = "auto char const double enum extern float inline int long register restrict short signed static struct "
+        "typedef union unsigned void volatile _Bool _Complex _Imaginary _Noreturn __inline __inline__ __restrict "
+        "__restrict__ __const __volatile__ __signed__ __extension__ _Thread_local ";
+    i = 0;
+    while (k[i]) {
+        b = i; while (k[i] != ' ') i = i + 1;
+        if (i - b == l) { int j; j = 0; while (j < l && k[b + j] == t[j]) j = j + 1; if (j == l) return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int cxm_addloc(int u, char *t, int l) {
+    int i;
+    if (l <= 0 || l >= CXM_SYMW) return 0;
+    i = 0;
+    while (i < cxm_nloc) { if (cxm_locu[i] == u && cxm_eqn(t, l, cxm_locn[i])) return 0; i = i + 1; }
+    if (cxm_nloc >= CXM_LOCS) { cxm_start(u, 1); cxm_m("too many local declarations for the call check"); return cxm_fail(); }
+    cxm_cpyn(cxm_locn[cxm_nloc], t, l, CXM_SYMW);
+    cxm_locu[cxm_nloc] = u; cxm_nloc = cxm_nloc + 1;
+    return 0;
+}
+/* 1 when unit u defines the name or directly uses the module that exports it */
+int cxm_sees(int u, char *nm) {
+    int i; int k; int v;
+    i = 0;
+    while (i < cxm_nloc) { if (cxm_locu[i] == u && cxm_eq(cxm_locn[i], nm)) return 1; i = i + 1; }
+    k = 0;
+    while (k < cxm_nuse[u]) {
+        v = cxm_use[u][k];
+        i = 0;
+        while (i < cxm_nsym) {
+            if (cxm_symk[i] == 0 && cxm_symu[i] == v) {
+                /* a symbol-level use shows only its symbol, under the alias when it has one */
+                if (!cxm_usym[u][k][0]) { if (cxm_eq(cxm_sym[i], nm)) return 1; }
+                else if (cxm_eq(cxm_sym[i], cxm_usym[u][k]) && cxm_eq(cxm_ualias[u][k][0] ? cxm_ualias[u][k] : cxm_usym[u][k], nm)) return 1;
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+/* kind 0 (module export) or kind 2 (a non-module unit's function). At most one: collisions already refused two. */
+int cxm_owner(char *nm, int *ou) {
+    int i;
+    i = 0;
+    while (i < cxm_nsym) {
+        if ((cxm_symk[i] == 0 || cxm_symk[i] == 2) && cxm_eq(cxm_sym[i], nm)) { *ou = cxm_symu[i]; return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int cxm_base(char *p, char *out) {
+    int n; int b;
+    n = cxm_len(p); b = n;
+    while (b > 0 && p[b - 1] != '/') b = b - 1;
+    return cxm_cpy(out, p + b, CXM_NAMEW);
+}
+int cxm_callerr(int u, int line, char *nm, int owner) {
+    char base[CXM_NAMEW]; char who[CXM_NAMEW];
+    cxm_start(u, line);
+    cxm_m("call to undeclared function "); cxm_m(nm); cxm_m(" (declared in ");
+    if (cxm_lib[owner] && cxm_name[owner][0]) cxm_m(cxm_name[owner]);
+    else { cxm_base(cxm_arg[owner], who); cxm_m(who); }
+    cxm_m(", which "); cxm_base(cxm_arg[u], base); cxm_m(base); cxm_m(" does not use)");
+    return cxm_fail();
+}
+int cxm_isskip(char *t, int l) {
+    if (cxm_eqn(t, l, "__attribute__") || cxm_eqn(t, l, "__attribute")) return 1;
+    if (cxm_eqn(t, l, "__asm__") || cxm_eqn(t, l, "__asm") || cxm_eqn(t, l, "asm")) return 1;
+    if (cxm_eqn(t, l, "__declspec") || cxm_eqn(t, l, "_Alignas")) return 1;
+    return 0;
+}
+/* one file-scope item. A declaration's function declarator is local. Anything else followed by '(' is a call.
+   A call whose name some other unit defines, and this unit cannot see, is refused. */
+int cxm_scanreg(int u, char *s, int b, int e, int line) {
+    int i; int from; int paren; int indecl; int seeneq;
+    i = b; from = b; paren = 0; indecl = 0; seeneq = 0;
+    while (i < e) {
+        int tb; int tl; int after; int look; int line_here;
+        i = cxm_tok(s, i, e);
+        if (cxm_tokl == 0) break;
+        while (from < cxm_tokb) { if (s[from] == '\n') line = line + 1; from = from + 1; }
+        tb = cxm_tokb; tl = cxm_tokl; after = i; line_here = line; from = after;
+        if (tl == 1 && !cxm_idch(s[tb] & 255)) {
+            if (s[tb] == '(') paren = paren + 1;
+            else if (s[tb] == ')') { if (paren > 0) paren = paren - 1; }
+            else if (s[tb] == '{' || s[tb] == '}') { indecl = 0; seeneq = 0; }
+            else if (s[tb] == ';' && paren == 0) { indecl = 0; seeneq = 0; }
+            else if (s[tb] == '=' && paren == 0) { seeneq = 1; indecl = 0; }
+            continue;
+        }
+        if (!cxm_idch(s[tb] & 255) || (s[tb] >= '0' && s[tb] <= '9')) continue;
+        if (paren == 0 && !indecl && !seeneq && cxm_declword(s + tb, tl)) { indecl = 1; continue; }
+        look = cxm_tok(s, after, e);
+        if (cxm_tokl == 0) break;
+        if (cxm_tokl == 1 && s[cxm_tokb] == '(' && cxm_isskip(s + tb, tl)) {
+            i = cxm_skipgrp(s, look, e); from = after; continue;
+        }
+        if (cxm_tokl == 1 && s[cxm_tokb] == '(') {
+            if (indecl && paren == 0 && !seeneq) { if (cxm_addloc(u, s + tb, tl)) return 1; }
+            else if (!cxm_ismac(s + tb, tl)) {
+                char nm[CXM_SYMW]; int owner;
+                cxm_cpyn(nm, s + tb, tl, CXM_SYMW);
+                if (!cxm_sees(u, nm) && cxm_owner(nm, &owner) && owner != u) {
+                    cxm_callerr(u, line_here, nm, owner); cxm_badcalls = 1;
+                }
+            }
+            i = cxm_tokb; from = after; continue;
+        }
+        i = cxm_tokb; from = after;
+    }
+    return 0;
+}
+/* reload each .cx unit and refuse a call that would be compiled as an implicit declaration */
+int cxm_checkcalls(void) {
+    int u;
+    cxm_nloc = 0; cxm_badcalls = 0;
+    u = 0;
+    while (u < cxm_n) {
+        int r; int k;
+        if (!cxm_iscx[u]) { u = u + 1; continue; }
+        r = cxm_load(cxm_arg[u], u);
+        if (r > 0) return 1;
+        if (r < 0) { u = u + 1; continue; }
+        if (cxm_scan(u, 1)) return 1;
+        k = 0;
+        while (k < cxm_nitem) {
+            if (cxm_scanreg(u, cxm_src, cxm_ib[k], cxm_ie[k], cxm_iline[k])) return 1;
+            k = k + 1;
+        }
+        u = u + 1;
+    }
+    return cxm_badcalls;
+}
 /* the program's units: paths[0..n) as given (the command line), then every module their `use` closure reaches.
    0 with cxm_n units (cxm_arg[u] is the path to compile, the given string for a command-line unit), 1 refused. */
 int cxm_plan(char **paths, int n) {
     int u; int k; int t; int v; int r; int direct;
     cxm_n = 0; cxm_on = 1; cxm_nsym = 0; cxm_nift = 0; cxm_ntopo = 0; cxm_nstk = 0; cxm_nren = 0;
+    cxm_rootn = n;
     u = 0;
     while (u < n) {
         if (u >= CXM_MAXU) { cxm_start(0 - 1, 0); cxm_m("more than 96 units in one program"); cxm_on = 0; return cxm_fail(); }
@@ -1147,7 +1328,9 @@ int cxm_plan(char **paths, int n) {
         }
         u = u + 1;
     }
+    if (cxm_usechk()) { cxm_on = 0; return 1; }
     if (cxm_collisions()) { cxm_on = 0; return 1; }
+    if (cxm_checkcalls()) { cxm_on = 0; return 1; }
     u = 0;
     while (u < cxm_n) {
         if (cxm_lib[u]) {

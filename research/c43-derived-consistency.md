@@ -43,7 +43,7 @@
 ## 5. 当前状况（实测，只读）
 `sh unisacc.com -run tests/abimanifestcheck.cx -- --check`（根产品）返回 rc1，输出提示“commit the manifest with the change”，即 `tests/abi.manifest` 与当前工作区源不一致。该不一致来自工作区中他人的未提交改动（`exec/c/libunisacc.c` 等），不是 HEAD 的状态；这正说明派生检查应该在干净导出中运行。
 
-## 6. 建议的落地顺序（待主人裁定）
+## 6. 建议的落地顺序（待项目所有者裁定）
 1. 先补声明：`facts-export`、`gate-layers` 进入 gatedeps（经 `refresh_gatedeps.py`，需登记窗）。
 2. 写映射表与干净导出（在 `release/` 下，不改 `commitgate.sh` 之前先作为只读工具验证）。
 3. 验证：对历史上两次红的提交（`unisa/tape.py` 与 `src/front_pp.c` 那两笔）回放，映射表应报出缺失的派生文件。
