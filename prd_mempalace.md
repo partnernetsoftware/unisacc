@@ -25,6 +25,8 @@
 
 ## 阻塞与未验证(发布前清零或如实写进发布说明)
 
+- 疑似编译器缺陷(2026-11-14 取证,未最小化):tools/check-candidate-chain.cx(87291 字节,main 自第 230 行起约千行)在第 974 行前再插入任一含 `has(...)` 的 `ck(...)` 行即运行时段错误(rc=139,即 -11),与取反无关:`ck(cc && has(cc,"QQ"),"x")` 正向同样崩,`ck(1,"x")` 与 `ck(cc != 0,"x")` 正常。崩溃发生在已 PASS 的 gate-no-ident-helper-refused-rc2 之后、新行之前(新行输出未见),`-o` 落盘后的二进制同样 rc=139(归属编译器 lowering/代码生成,非 -run 装载器);`ulimit -s unlimited` 与 64M 无改善(非栈上限)。复现:`head -973 tools/check-candidate-chain.cx > /tmp/x.cx; echo '        ck(cc && has(cc, "QQ"), "zz");' >> /tmp/x.cx; tail -n +974 tools/check-candidate-chain.cx >> /tmp/x.cx; mkdir -p /tmp/o /tmp/c; sh ./unisacc.com /tmp/x.cx -- /tmp/o /tmp/c`(须置于 tools/ 下运行以解析模块;实测 rc=139)。已排除:独立小程序(has 为 strstr 包装,1 至 5000 个 `if(!(cc && has(cc,..)))` 的 main)均 rc=0,故触发条件是大 main 内的某种规模或帧布局而非 has 本身。未做:缩到 30 行以内(无 gdb,未定位崩溃指令),未确认是调用点数、局部数组总帧大小还是跳转位移越界;不入回归批次(复现件不小)。临时规避:新断言避免增加 has 调用点,或拆出独立函数。
+
 - 已装 0.0.59 落后于工作区:tsv-lint 在 affected 下报 `_u_so_put` 未定义(FTRIM-bootstrap 类),装新产品后应转绿,未验证。
 - 约 80 个批次此前红,大半属 FTRIM-bootstrap(装新产品后复验);27 + 36 个批次因窗口 DEFERRED 未跑;osx/win 平台批次需对应主机,无证据。
 - check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity 一致性;tty/pty 路径未测;六目标未跑。
