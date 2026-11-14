@@ -6,7 +6,9 @@
  * 列 file line function target(lnx|osx|win|all|unknown) named(yes|no)。点=代码(.cx/.c/.h,剥离字符串字面量与 // 、块注释含跨行后)里仍含 ENOSYS 的行;
  * 纯注释行/字符串里的字样不算点,同行行尾注释仍是该点的 named 依据;非代码文件按原文逐行计。
  * target: 先看路径(osx/darwin/mac、win、lnx/linux 作为词段);再看命中行前后 8 行内的词(osx darwin macos / win windows / lnx linux),
- * 恰一族取该族,多族 all,无则 unknown。named=yes: 标识符里 ENOSYS 带前后缀(如 SY_ENOSYS_NET),或本行/上一行有 3 字符以上的注释文字。 */
+ * 恰一族取该族,多族 all,无则 unknown。named=yes: 标识符里 ENOSYS 带前后缀(如 SY_ENOSYS_NET),或本行/上一行有 3 字符以上的注释文字,
+ * 或该点的 文件:函数 在 ROOT/exec/facts/refusals.tsv 的 origin 列有登记(一行登记抵该函数内一个无注释点,按行序先到先得;表读不到则无登记)。
+ * 表里有 origin 没抵到任何点时逐条打 ORPHAN 并 REFUSE(rc 2),不写不比。有登记时另打 REGISTERED rows=N named-by-table=M。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -77,6 +79,36 @@ static const char *pick(int o, int w, int l) {
     if (n == 0) return "unknown";
     if (n > 1) return "all";
     return o ? "osx" : w ? "win" : "lnx";
+}
+
+/* 登记表 exec/facts/refusals.tsv(列 id target origin ...):origin = 文件:函数。一行登记抵该函数内一个无注释点(按行序先到先得)。 */
+#define MAXREG 512
+static char *reg_origin[MAXREG];
+static int reg_used[MAXREG];
+static int nreg, nregnamed;
+static void reg_load(void) {
+    char path[900];
+    size_t m = 0;
+    char *t;
+    long n, i = 0;
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/refusals.tsv", root)) return;
+    t = cx_read(path, &m);
+    if (!t) return;
+    n = (long)m;
+    while (i < n) {
+        long e = i, o, l;
+        while (e < n && t[e] != '\n') e++;
+        if (e > i && t[i] != '#' && nreg < MAXREG && !tx_field(t + i, e - i, '\t', 2, &o, &l) && l > 0) reg_origin[nreg++] = dupn(t + i + o, l);
+        i = e + 1;
+    }
+    mm_free(t);
+}
+static int reg_take(const char *rel, const char *fn) {
+    char key[1200];
+    int i;
+    if (!nreg || cx_fmt(key, sizeof key, "%s:%s", rel, fn)) return 0;
+    for (i = 0; i < nreg; i++) if (!reg_used[i] && streq(reg_origin[i], key)) { reg_used[i] = 1; nregnamed++; return 1; }
+    return 0;
 }
 
 static void add_file(const char *path) {
@@ -209,6 +241,7 @@ static void scan_file(const char *rel) {
                     }
                 }
             }
+            if (!named && reg_take(rel, fn)) named = 1;
             /* 目标 */
             if (pf_o + pf_w + pf_l == 1) tg = pick(pf_o, pf_w, pf_l);
             else {
@@ -282,7 +315,14 @@ int main(int argc, char **argv) {
         for (j = i - 1; j >= 0 && cmp(files[j], t) > 0; j--) files[j + 1] = files[j];
         files[j + 1] = t;
     }
+    reg_load();
     for (i = 0; i < nf; i++) scan_file(files[i]);
+    {
+        int orphan = 0;
+        for (i = 0; i < nreg; i++) if (!reg_used[i]) { sy_printf("ORPHAN\texec/facts/refusals.tsv\t%s\n", reg_origin[i]); orphan++; }
+        if (orphan) { sy_printf("REFUSE\torphan-origins=%d\n", orphan); return 2; }
+        if (nreg) sy_printf("REGISTERED\trows=%d\tnamed-by-table=%d\n", nreg, nregnamed);
+    }
     {
         int rc = emit("build/enosys-sites.tsv", out, outn, mode == 1);
         if (mode == 1 && !rc) sy_printf("WROTE\trows=%d\tnamed=%d\tfiles=%d\n", rows, nnamed, nf);

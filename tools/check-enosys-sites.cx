@@ -109,6 +109,29 @@ int main(void) {
     ck(rc == 2, "usage-rc2");
     rc = run(".", "--check", out, sizeof out);
     ck(rc == 0, "repo-table-current");
+    /* 登记表: origin = 文件:函数,一行抵一个无注释点 */
+    mk("exec"); mk("exec/facts");
+    put("ext/a/dup.cx", "int dupf(int x) {\n    if (x) return -ENOSYS;\n    return -ENOSYS;\n}\n");
+    put("exec/facts/refusals.tsv", "# refusals v1\n# id\ttarget\torigin\treason\tsince\ttracking\nPLAIN\tall\tcx/os/plain.cx:plain_fn\tplain has no call\t0.0.60\t-\nDUP_A\twin\text/a/dup.cx:dupf\tfirst branch\t0.0.60\t-\n");
+    rc = run(dir, "--write", out, sizeof out);
+    ck(rc == 0 && hasl(out, "WROTE\trows=11\tnamed=6\tfiles=11"), "registered-write-summary");
+    ck(hasl(out, "REGISTERED\trows=2\tnamed-by-table=2"), "registered-line");
+    cx_fmt(p, sizeof p, "%s/build/enosys-sites.tsv", dir);
+    { size_t m = 0; t = cx_read(p, &m); n = (long)m; }
+    if (!t) { ck(0, "read-output-registered"); return 1; }
+    ck(rowcount(t, n, "cx/os/plain.cx\t3\tplain_fn\tunknown\tyes") == 1 && rowcount(t, n, "cx/os/plain.cx\t3\tplain_fn\tunknown\tno") == 0, "registered-origin-named");
+    ck(rowcount(t, n, "ext/a/dup.cx\t2\tdupf\tunknown\tyes") == 1 && rowcount(t, n, "ext/a/dup.cx\t3\tdupf\tunknown\tno") == 1, "one-row-covers-one-site");
+    ck(rowcount(t, n, "ext/a/mix.cx\t4\tmix\tall\tno") == 1, "unregistered-stays-unnamed");
+    ck(rowcount(t, n, "cx/sys/foo_osx.cx\t2\tosx_open\tosx\tyes") == 1, "comment-named-unchanged-with-table");
+    put("exec/facts/refusals.tsv", "PLAIN\tall\tcx/os/plain.cx:plain_fn\tplain has no call\t0.0.60\t-\nDUP_A\twin\text/a/dup.cx:dupf\tfirst branch\t0.0.60\t-\nDUP_B\tosx\text/a/dup.cx:dupf\tsecond branch\t0.0.60\t-\n");
+    rc = run(dir, "--write", out, sizeof out);
+    ck(rc == 0 && hasl(out, "WROTE\trows=11\tnamed=7\tfiles=11") && hasl(out, "named-by-table=3"), "second-row-covers-second-site");
+    put("exec/facts/refusals.tsv", "GONE\twin\tcx/os/plain.cx:no_such_fn\tstale\t0.0.60\t-\n");
+    rc = run(dir, "--check", out, sizeof out);
+    ck(rc == 2 && hasl(out, "ORPHAN\texec/facts/refusals.tsv\tcx/os/plain.cx:no_such_fn") && hasl(out, "REFUSE\torphan-origins=1"), "orphan-origin-refused");
+    put("exec/facts/refusals.tsv", "OVER\tosx\tcx/sys/foo_osx.cx:osx_open\talready has a comment\t0.0.60\t-\n");
+    rc = run(dir, "--check", out, sizeof out);
+    ck(rc == 2 && hasl(out, "ORPHAN\texec/facts/refusals.tsv\tcx/sys/foo_osx.cx:osx_open"), "row-on-comment-named-site-is-orphan");
     sy_printf("ENOSYS_SITES\tok=%d\tfailed=%d\n", nok, failed);
     return failed ? 1 : 0;
 }
