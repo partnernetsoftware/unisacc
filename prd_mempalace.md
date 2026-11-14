@@ -72,7 +72,13 @@
 | A11 | text.text 拆面只读实验(P4 先行) | prd_cx.md 10.4 的三行 | $TMPDIR 副本内拆面后 `tools/affected.cx` 给出改查找族的选批数,UNMEASURED 改成实测值 | 15 | 今 |
 | A12 | 命中路定因 D0(0.0.63 前置) | prd_cx.md 第 5 节一行 | `tools/speed-probe.cx` 分相读数,指出首次与重复之差落在哪一相 | 15 | 已测 2026-11-14:差约 642 ms,推理 82.7%、解码 7.7%、残差 9%;零解码单做不够 500 ms 门,见 prd_cx.md 第 5 节 |
 | B1 | 封网 L2 netraw 六参与 V6ONLY(T6) | ext/net 的 netraw 文件 | `tools/check-ext-net-sock.cx` failed=0 | 15 | 今 |
-| B2 | 封网 L3 UDP/unix/resolve、L4 带截止时间 TCP(T7) | ext/net 其余文件、build/std-surface.tsv 的 net 行 | `tools/check-ext-net-tcp.cx` failed=0;表内 new 行数 0 | 15 x 2 | 今,B1 后 |
+| B2 | 封网 L3 UDP/unix/resolve、L4 带截止时间 TCP(T7)。六参阻塞已定方案(2026-11-14):不动编译器,UDP 带地址收发改走 sendmsg/recvmsg(三参,msghdr 56 字节缓冲),拆 B2a 至 B2e 见下。真正被六参卡住的只有 sy_udp_send_to、sy_udp_recv_from 两行;unix(流式,netraw 已有 sy_sa_unix/bind/connect)与带截止时间 TCP(netpoll)不受其限;sy_resolve 表内写 impl:getaddrinfo 而 cx 层无 libc,另属未决,不随本方案解决 | 见 B2a 至 B2e | 见 B2a 至 B2e | 15 x 5 | 今 |
+| B2a | 号表加 sendmsg/recvmsg | exec/facts/sys-syscalls.tsv 追加 snr_sendmsg(46、211,其余列 0)、snr_recvmsg(47、212)两行;tools/target-gen.cx 的 NSYS 钉 51 -> 53;重生 cx/sys/sysnums.cx(只增) | 按 959908611f 的做法重生后 `tools/check-cx-sys-netraw.cx`、`tools/check-cx-sys-netpoll.cx` 均 failed=0;sysnums 的 diff 只有新增行 | 10 | 今 |
+| B2b | cx.sys 新模块 netmsg(冻结层只增文件,不改 netraw.cx) | cx/sys/netmsg.cx(新,sy_sock_sendto、sy_sock_recvfrom 经 `__syscall6` 三参调 sendmsg/recvmsg;osx/win 返回 -ENOSYS)、tools/check-cx-sys-netmsg.cx(新)加批次行、layer-api 与包版本 | check failed=0,至少含:环回 UDP 往返收 4 字节、回填 namelen == 16、对端端口等于发端绑定端口、报文长于缓冲时 msg_flags 带 MSG_TRUNC、坏 fd 得 -EBADF;`tools/ratchets.cx` ok=13 | 15 | B2a 后 |
+| B2c | ext.net UDP 三行 | ext/net/udp.cx(新,sy_udp_bind、sy_udp_send_to、sy_udp_recv_from)、tools/check-ext-net-udp.cx(新)加批次行、std-surface 这三行 | check failed=0;超长报文得 -EMSGSIZE 不静默截断;截止到期得 -ETIMEDOUT;三行 new -> exists | 15 | B2b 后 |
+| B2d | ext.net unix 两行(不依赖六参,可与 B2a 至 B2c 并行) | ext/net/unix.cx(新)、tools/check-ext-net-unix.cx(新)加批次行、std-surface 这两行 | check failed=0;路径超 107 得 -ENAMETOOLONG;已有路径不自动删;两行 new -> exists | 15 | 今 |
+| B2e | 带截止时间 TCP 五行与 sy_recv_until、sy_send_all_until(不依赖六参,可并行);sy_resolve、sy_resolve4 先定因再定做法 | ext/net/tcp.cx、tools/check-ext-net-tcp.cx、std-surface 对应行 | `tools/check-ext-net-tcp.cx` failed=0;resolve 两行若本版不做,保留 new 并写明原因,"表内 new 行数 0"如实改成实际余数 | 15 | 今 |
+| B2 证据 | (1) 内建只有号加五参:exec/facts/gen2-literals.tsv:13 `["__syscall6","syscall",6]`,exec/facts/k2-call.tsv:8 `sys25 kind=sys6 op=syscall`,tools/opinfo-cases-gen.cx:61 `.sys6 syscall, r1, r3, r4, r5, r2, r0` 共六个操作数;cx/sys/netraw.cx:41 `if (f) return -ENOSYS`。(2) 产品头早已同法绕过:include/sys/socket.h:136 注明 gate 只带五个,sendto/recvfrom 经 sendmsg/recvmsg。(3) 本机实跑探针(lnx/x86_64,已装产品,`sh ./unisacc.com /tmp/b2probe/p.cx`,rc=0):`sendmsg=4`、`recvmsg=4 namelen=16 from_family=2 from_port_eq=1 data=ping`。未验证:arm64 上的 msghdr 布局(按 LP64 同为 56 字节,未实跑);`.sys6` 各目标的寄存器分配与溢出区未读到编码行。(4) 不选扩内建:加七操作数形态要动 gen2-literals 的 intrinsics、k2-gen2 的 syscalls、k2-call 的 sysrows 新 kind、lower-code/lower-abi 六目标与 tools/facts-gen.cx,属模型与网类,须重建 kernel 与两代 GEN,和 0.0.62 的库包与运行库类不同类,不得同候选;回滚办法:本方案全是新增文件加两行号表,撤对应提交即回现状 | - | - | - | - |
 | B3 | SPEED-11 运行库扫描族(T8) | 运行库对应源(产品输入)加其 check | 补丁先交集成者;字节等价回归输出不变 | 15 | 候选 |
 | B4 | 0.0.62 候选整链 real6 | 私有构造根 | `tools/candidate-chain.cx -- --rev REV --out 全新目录 --parallel 12 --cache-manager-osx X64 ARM64` -> RELEASE_APE PACKED,墙钟不高于 3538 s,超 5400 s 即停 | 后台有界 | 链 |
 | B5 | 需新产品的断言转真 | tests/cx-namespace.cx、tests/module/units.cx 的 UNVERIFIED 标注 | `sh ./unisacc.com tests/cx-namespace.cx -- ROOT ROOT/unisacc.com OUT` failed=0;`osx-sentinel -funit` 实编 rc=0 | 15 | B4 后 |
@@ -80,7 +86,7 @@
 ,2026-11-14;按"分而治之":工作流按耦合边界切,每版只含一类产品输入大改)
 
 版本里程碑:
-- 0.0.62(库包与运行库类):封网清零 new 行(netraw 六参、UDP/unix/resolve、带截止时间 TCP);SPEED-11 运行库扫描族;别名运行失败修复(cxmod 三源,按缺陷修复并入);分治工具线并行(C1 相清单化、C3 批次纯函数化、C4 接口哈希选批,不属产品输入);平台审计表扩面加有名 ENOSYS 加 CI 证据。
+- 0.0.62(库包与运行库类):封网清零 new 行(netraw 六参改为新增 cx/sys/netmsg.cx 走 sendmsg/recvmsg 三参,不扩 `__syscall6` 内建,不改冻结的 netraw.cx,仍属库包与运行库类,依据见任务表 B2 证据行;UDP/unix/resolve、带截止时间 TCP);SPEED-11 运行库扫描族;别名运行失败修复(cxmod 三源,按缺陷修复并入);分治工具线并行(C1 相清单化、C3 批次纯函数化、C4 接口哈希选批,不属产品输入);平台审计表扩面加有名 ENOSYS 加 CI 证据。
 - 0.0.63(驱动与运行缓存类,2026-11-14 按 A12 重排,详见下方 0.0.63 条目):主杠杆是运行库闭包结果复用(上界约 379 ms,成因待 M1 取数证实),零解码只剩约 49 ms 降为次要;speed12b 类重建 e2 网不并入;目标 first_e2e 500 ms 以下,M1 否定则改口径,不放宽。
 - 0.0.64(cx 设计类):export、通配、cx.stream/tlib 重构、紧凑前导。0.0.65 候选:osx/win netraw 真实现。
 已定三项取舍(主调度按推荐定):(1) 0.0.63 唯一大改类为驱动与运行缓存(原定模型装载零解码,A12 实测后改),cx.stream/tlib 重构与 export/通配挪到 0.0.64;(2) speed12b 不并入 0.0.62;(3) 平台策略:事实表扩面加有名拒绝先行,不做 NT 上的 fork 仿真,osx/win netraw 真实现推到 0.0.65。
