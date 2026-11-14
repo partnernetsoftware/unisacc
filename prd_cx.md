@@ -500,7 +500,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | 号 | 目标 | 命令 | 验收与预期值 |
 |---|---|---|---|
 | Y1 | 手写胶水在一次运行里占多少 | 链后:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com hello.cx 2>&1`,列出全部 RR_TIME 行种类并分 inference 与其余求和,n=3 中位 | inference 之和预期约 531 ms(A12);其余行之和即 S3 至 S8 的总上界;预期不超过 642 减 531 减 inflate 49 约 62 ms,若成立则本节所有驱动侧候选的速度上界合计不超过 62 ms,网化理由只剩结构而非速度 |
-| Y2 | S1 的消费者全集与 18 格真值表 | `sh ./unisacc.com tools/refactor.cx sites st_gap --tracked`;`grep -rn '"e4"\|"prune"\|"tapecheck"' src cx/runtime cx/compiler cx/driver --include=*.cx`;按 `runexec.cx:760` 至 `:774` 手列 mode 0 至 5 乘 level 0 至 2 | st_gap 定义 1 处、调用 1 处(`drive.cx:598`,本次已核);"e4" 命中预期 11 行(本次 grep 得 10 个文件 11 行,含 `drive.cx:749` 与 `driveroute.cx:268`);真值表 18 格,7 个不同输出 |
+| Y2(2026-11-14 已做:st_gap 定义 runexec.cx:760,唯一调用 drive.cx:598;drive.cx:749 与 driveroute.cx:268 是另一映射 level>0?e4:prune,不是 st_gap 副本,S1 须另立事实行;18 格读码手算(st_gap 不可从探针直调),实际 7 个不同输出,见 build/st-gap.tsv;S1 表半边已做:exec/facts/st-gap.tsv、tools/st-gap-gen.cx、check-st-gap-gen.cx,消费者未改) | S1 的消费者全集与 18 格真值表 | `sh ./unisacc.com tools/refactor.cx sites st_gap --tracked`;`grep -rn '"e4"\|"prune"\|"tapecheck"' src cx/runtime cx/compiler cx/driver --include=*.cx`;按 `runexec.cx:760` 至 `:774` 手列 mode 0 至 5 乘 level 0 至 2 | st_gap 定义 1 处、调用 1 处(`drive.cx:598`,本次已核);"e4" 命中预期 11 行(本次 grep 得 10 个文件 11 行,含 `drive.cx:749` 与 `driveroute.cx:268`);真值表 18 格,7 个不同输出 |
 | Y3 | fwdmerge 行种类是否有限 | 读 `cx/compiler/fwdmerge.cx:48` 至 `:130` 与 `:175` 至 `:351`,列出 `fwm_eq/fwm_prefix/fwm_metaword` 的全部字面量参数 | 判定调用 34 处(本次已数);去重字面量预期不超过 29 个(本次计数全文件 29 个);列出后回填 S3 行,若出现依赖符号名内容的分支(`fwm_hasname`、`fwm_isexport`,`:120`、`:124`)则记为"状态随输入增长",S3 风险升为高 |
 | Y4 | S4、S5、S6 是否在默认 -run 路径 | `sh ./unisacc.com tools/refactor.cx sites tb_encode,tl_bind,at_bind --tracked`,对每个调用点读其守卫条件 | 回填三行的"调用面";预期 tb_encode 只在 emitbin 且 mode 2(本次已读 `drive.cx:385`);另两个未知,如实记录 |
 | Y5 | 薄壳确认 | 读 `cx/compiler/stream/*.cx`、`image/*.cx`、`net/*.cx`(共 31 个文件约 300 行) | 预期全部只有 module/use 与转调,无分支逻辑;有例外则补进 (1) 的手写表 |
@@ -1287,7 +1287,68 @@ D0 的 T8 落地后三源只改 `cx/cx0/plan.cx` 一处,另两源是生成物;�
 - 未核项:`tools/check-std-surface*.cx` 是否校验包名列与文件目录一致(若校验,行 126 的 `ext.procx` 须按 np_run 行 124 的先例处理);cx.sys 新文件对 `tools/check-cx-layers.cx` 五条断言的影响;`sy_res_note` 作为新导出是否触发 `tests/coreapi.cx` 棘轮。T1/T3 开工先跑对应检查定值。
 - 回滚:T1、T2 各是纯新增文件,撤提交即回到两行 `new`;T3 用 `tools/derive.cx --write`(失败自还原)或撤提交。
 
-## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)
+## 10.x examples/ 梳理(2026-11-14,只读梳理,未改 examples/;已装 0.0.62)
+
+范围:`git ls-files examples` 共 64 个文件(apps 18、cx-lab 11、win 19、run-speed 6、https 1、根下 9)。引用计数口径:`git grep -l -F 路径 -- tests tools build docs 'prd*.md' ARCHITECTURE.md`(按完整路径计;括号内 base 为仅按文件名的粗计,含同名误中,不作证据)。`examples/apps/csih` 在本仓不存在,csih 车道无关。取证命令:`for f in examples/*.c examples/cx-lab/*.cx; do timeout 20 sh ./unisacc.com $f </dev/null; done`。
+
+### (1)(2) 清单与实跑
+
+| 范围(文件数) | 是什么 | 引用计数(路径) | 引用点 | 实跑 0.0.62 |
+|---|---|---|---|---|
+| 根 do/fact/fib/hello/host/indirect6/ptr/struct/switch .c(9) | C99 最小例:do-while、递归、指针、结构体、switch、间接调用、host 判别 | 各 1;hello 2 | `tools/check-cx-entry.cx`(全部 9 个);hello 另被 `docs/toolchain.md` | 全部 rc=0:do 输出 3、fact 120、fib 55、hello "from hello.c"、host "host: linux"、indirect6 15/16、ptr 7、struct 9、switch 6 |
+| cx-lab/cxlab.cx(1) | cx 模块 `#pragma unisa module cxlab`,TSV 装载与命令中位数的共享帮手 | 3 | `tests/cxraw.tsv`、`tests/cxlibc.tsv` 及一处 | 单独跑 rc=1 "not covered: no main"(模块无 main,预期;只能经 `use cxlab` 被引) |
+| cx-lab/lex_table.cx(1) | 表驱动词法器(charclass.tsv + transition.tsv -> tokens.tsv) | 3 | 同上两棘轮表等 | rc=0 "lex_table: ok tokens=88 classes=9 rules=29" |
+| cx-lab/time_run.cx(1) | 对 `./unisacc.com -run` 若干命令计中位耗时,写 out/times.tsv | 2 | cxraw/cxlibc 表 | rc=0 "time_run: wrote examples/cx-lab/out/times.tsv"(跑一次会改写已跟踪的 out/times.tsv,注意工作区被弄脏) |
+| cx-lab/runtimeiocheck.cx(1) | 运行库 IO 字节对照检查 | 4 | cxraw/cxlibc/批次相关 | rc=1 "runtimeiocheck: FAIL":`tests/runtimeiobytes.c` 不存在(cc1 fatal),native 构建失败。确定性缺陷:依赖的测试文件已缺 |
+| cx-lab 其余数据(8):charclass.tsv、transition.tsv、sample.c、out/{.gitignore,runtimeio.tsv,times.tsv,tokens.tsv} | 词法表、样本、产物 | 多数 0 | sample.c 与 times.tsv 仅文件名误中 | 不适用(数据与产物;out/*.tsv 是已跟踪的生成物,与 out/ 只放产物的规则相容但不应入库) |
+| apps(18):README + 17 个 .c(args bf calc colorpack ctour dijkstra exeinfo life mandel memmap procview queens sieve winlayout winlist wordfreq xgui) | 较大的 C99/POSIX 程序;procview/memmap/exeinfo 用 /proc 或 libproc;winlayout/winlist/xgui 用 macOS CoreGraphics FFI 或 X11 | 全 .c 为 0(xgui 另有 1 处文件名误中);README 2 | README 被 `docs/readme-detail.md`、`docs/sweep/md-*/lanes-and-rest.tsv` 引 | 未跑(任务限根下;apps 需平台或较大) |
+| run-speed(6):empty headers headers_once include_only printf_hi .c + times.tsv | 启动耗时基准的空程序与头文件程序 | 路径 0 | 仅被 `cx-lab/time_run.cx` 内部硬编码路径(empty、printf_hi)使用;headers/headers_once/include_only 无任何使用 | 未跑 |
+| https/post.c(1) | 经系统 libcurl 的 HTTPS POST(`-lcurl`,0.0.28 N1) | 1 | 一处文档/表 | 需网络,只列不跑 |
+| win(19):README、顶层 10 个 .c(clockfmt envdir fileio mailbox outparam posix procsnap structs tick vmem)、gui 4(capture dll input window)、refused 4(argceil createfile7 shm wideargs) | Windows 11 上的实测与修复记录(README 自述"不是示例");refused/ 是被拒绝合同的最小复现 | 全 .c 为 0;README 2 | README 与 apps/README 被同批文档引 | 需 Windows,只列不跑 |
+
+实跑汇总:根下 9 个 C 与 3 个可独立运行的 .cx 中,12 个里 11 个能编能跑(cxlab.cx 为模块,runtimeiocheck.cx 失败)。注意 shell 管道 `| head` 会给出 rc=141(SIGPIPE),上表 rc 已用重定向重测。
+
+被引用计数为 0 的文件(路径口径):apps 全部 17 个 .c;run-speed 的 headers、headers_once、include_only、printf_hi(empty 与 printf_hi 被 time_run 的字符串内路径用,git grep -F 路径可能因相对写法漏计,按"弱引用"处理);win 全部 .c(18 个,含 gui 与 refused)与 README 之外的;cx-lab 的 charclass.tsv、transition.tsv、sample.c、out/*.tsv(数据,被 cx 程序按路径字符串使用,不是死文件)。
+
+### (3) 规则核对(cx 系列 4 个 .cx 对照 prd_cx_spec.md 与 CLAUDE.md)
+
+- 无手写 `#include`、无平台 `#if`;cxlab/lex_table/time_run 用 `#pragma unisa module/use cxlab`,合规。
+- 直接 libc:cxlab.cx 用 `strchr`、`free`、`snprintf`;lex_table.cx 用 `printf/exit/strcmp/isalpha/fprintf` 等(约 50 处,`tests/cxlibc.tsv` 已把计数登记为棘轮,cxlib 53、cxraw 37);time_run.cx 用 `fopen/fprintf/printf`(18 处,同表)。依现行规则,examples 属 `tools/tests` 外的教学材料,既不是产品代码也不是工具,按产品入口教学的标准应改为 `sy_*/mm_*/tx_*`;现状由棘轮冻结计数而非清零。
+- C99 示例本就是 C,不算违规。
+
+### (4) 与 spec/docs 的重复与过期
+
+- spec `prd_cx_spec.md` 与 `docs/cx/` 已有用 `use` 的小例子和替代 python/bun/node 对照;cx-lab 的"表驱动词法器"与"中位数计时"在 spec 里无同价物,有教学价值,保留。
+- `docs/cx/api/ext.net.md` 列了 `sy_tcp_listen_at` 等 ext.net 接口,但 examples 里没有任何 cx 的 ext.net 示例;现有唯一联网示例是 https/post.c(C 加 libcurl),与 cx 方向不一致。
+- win/README 自称"实测记录不是示例",且 18 个 .c 零引用:是记录而非教学,应归档候选。
+- cx-lab/runtimeiocheck.cx 已因依赖文件缺失而失效,且 4 处引用(棘轮表)会让简单搬走触发棘轮;需先改表。
+
+### (5) 建议动作表
+
+| 对象 | 动作 | 理由 | 风险 |
+|---|---|---|---|
+| 根 9 个 C99 示例 | 保留;新增 1 个冒烟批次:对每个文件 `sh ./unisacc.com FILE` 比对期望输出(do 3、fact 120、fib 55、hello、host 为 host: linux 仅本机、indirect6 15/16、ptr 7、struct 9、switch 6),用 `tools/register.cx` 登记 | 全部实跑通过,现仅被 check-cx-entry 间接引用,没有断言输出 | host.c 输出随平台变,断言只在 linux 期望 linux |
+| cx-lab/runtimeiocheck.cx | 修复(恢复 tests/runtimeiobytes.c 的来源,或改为内联字节)优先于归档;若确认该合同已迁到别处,再归档并同步棘轮表 | rc=1 是确定性缺陷,不得以"负载"定性;先读 runtimeiocheck.cx 报 FAIL 的源码行与上游文件的 git log | 删/移会破 cxraw/cxlibc 行数登记,须同步 |
+| cx-lab 其余 3 个 .cx | 保留;新增 `examples/cx-lab/README.md`(入口文档:3 个脚本、如何 `use cxlab`、运行命令与期望输出);lex_table/time_run 的 libc 调用逐步改 `sy_*/tx_*` | 无入口文档,是教学缺口;time_run 会弄脏已跟踪的 out/times.tsv | 改 libc 调用要同步 cxlibc.tsv 计数(只降不升) |
+| cx-lab/out/*.tsv 三个已跟踪产物 | 建议后续从版本库移出(git rm --cached 由集成者决定),`.gitignore` 已在 out/ | 产物不应入库;跑一次就变更 | 若有测试读它们需先查 |
+| run-speed headers/headers_once/include_only | 先确认有无外部使用,无则列归档候选(`git mv` 到 `archive/examples-run-speed/` 并在 `archive/ARCHIVE.tsv` 加原路径行,原路径不得再被 tools tests src cx prd.md 引用) | 零引用 | 时间基准是历史量,归档后 time_run 仍用 empty 与 printf_hi,保留这两个 |
+| apps 17 个 .c | 保留不归档;挑 3 至 4 个无平台依赖者(calc、queens、sieve、bf、wordfreq、dijkstra、life)登记冒烟批次 | 纯 C99/POSIX,零引用但有教学价值;procview/memmap/exeinfo 依赖 /proc 或 libproc,winlayout/winlist/xgui 依赖 macOS 或 X11 FFI,留作平台批次不入冒烟 | 未逐个实跑,先跑再登记,输出须稳定(mandel、life 视输出而定) |
+| win 19 个文件 | 先不动;若归档,README 的两处文档引用(readme-detail、sweep 表)要先改,gui 与 refused 的拒绝合同要先确认已有等价批次 | 零引用的 18 个 .c 是实测记录,价值在历史证据 | 误归档会丢 Windows 回归线索;refused/ 可能是未被其它批次覆盖的拒绝合同 |
+| https/post.c | 保留,标需网络;不进冒烟 | 唯一 libcurl 示例 | 无 |
+
+### examples 作为产品入口教学材料缺什么
+
+- 缺 cx 模块 `use` 示例的最小入口(cx-lab 有 cxlab,但无 README、也无 `sy_*` 写法);
+- 缺 ext.net 示例:可用 0.0.62 新封网接口 udp/unix/tcp 的截止时间版写一个回环示例,须自带期限且只绑回环;
+- 缺 `sy_*/mm_*/tx_*` 写法的 hello 级示例(现有 cx 示例均仍用 printf);
+- 缺"从 C99 到 cx 的对照"小例(同一个 fib 或 wordfreq 的 .c 与 .cx 并列);
+- 缺把示例和 spec 例子交叉引用的索引(examples/README 不存在)。
+
+### 未验证与限制
+
+apps、win、run-speed、https 未实跑;引用计数仅按上述口径,tests/ 里以 glob 形式引用 `examples/*.c` 的不会被 -F 计入;建议动作均未执行。
+
+## 11. 参考系对照与取舍(2026-11-14,项目所有者补充要求)(2026-11-14,项目所有者补充要求)
 
 资料:`docs/cx/ref-node.md`、`ref-rust.md`、`ref-cpython.md`、`ref-quickjs.md` 已读;这四篇侧重标准库面与稳定性策略,模块系统与内存安全的机制部分(下文带 [忆] 的)出自通用知识,本轮未联网核对一手文档,落合同前须再查。仓内没有 Bun 的参考篇(`git grep -i bun -- docs/cx` 只命中 QuickJS 篇的无关行)。不取的理由统一按四条约束写:C99 兼容(宿主 gcc/clang 须能忽略全部扩展)、单文件 APE(无运行期模块装载器、无文件系统上的包目录)、三源构造(规划器一处改三处核)、no-libc(上层不直调 libc,前导自带)。
 
