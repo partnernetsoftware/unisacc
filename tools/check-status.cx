@@ -1,0 +1,143 @@
+/* tools/check-status.cx -- fixture checks for tools/status.cx: lock, stash, behind/ahead, chain logs, derive, batches, residue, TSV, timeout.
+ *
+ *   sh ./unisacc.com tools/check-status.cx      (from the repo root; prints PASS/FAIL lines and CHECK_STATUS failed=N) */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sysx.process
+
+static int checks, bad;
+static char F[300], R[400], T[400], T2[400], R2[400];
+
+static long slen(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static int has(const char *h, long n, const char *nd) {
+    long m = slen(nd), i, j;
+    for (i = 0; i + m <= n; i++) { for (j = 0; j < m && h[i + j] == nd[j]; j++) ; if (j == m) return 1; }
+    return 0;
+}
+static void ck(int ok, const char *label) { checks++; if (!ok) bad++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); }
+
+/* the output text of argv (stdout), NULL on spawn failure; *rc the exit code, *ms the wall time */
+static char *run(char **argv, const char *cwd, int secs, int *rc, long *ms) {
+    np_result r = {0}; char why[256] = {0}; long t0 = sy_now_ms(); int tr = np_run(argv, cwd, 0, secs, &r, why, sizeof why);
+    char *o = mm_alloc((long)r.outn + 1); long i;
+    if (ms) *ms = sy_now_ms() - t0;
+    if (rc) *rc = tr ? -1 : r.rc;
+    for (i = 0; o && i < (long)r.outn; i++) o[i] = r.out[i];
+    if (o) o[r.outn] = 0;
+    np_free(&r);
+    return o;
+}
+static void sh(const char *script) { char *v[] = {"sh", "-c", (char *)script, 0}; int rc; char *o = run(v, 0, 30, &rc, 0); if (rc) { fprintf(stderr, "fixture step failed: %s\n", script); bad++; } mm_free(o); }
+/* 1 when some line contains both KEY and NEEDLE */
+static int row(const char *o, const char *key, const char *nd) {
+    long at = 0, n = slen(o);
+    while (at < n) {
+        long e = at; while (e < n && o[e] != '\n') e++;
+        if (has(o + at, e - at, key) && has(o + at, e - at, nd)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+static int has_line(const char *o, const char *nd) { return row(o, nd, ""); }
+static char *status(const char *args, int *rc, long *ms) {
+    char cmd[1500]; char *v[] = {"sh", "-c", cmd, 0};
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/status.cx -- %s 2>&1", args);
+    return run(v, 0, 55, rc, ms);
+}
+static void w(const char *path, const char *text) { if (cx_write(path, text, slen(text))) { fprintf(stderr, "cannot write %s\n", path); bad++; } }
+
+int main(void) {
+    char c[2000], a[1500]; char *o; int rc; long ms;
+    cx_fmt(F, sizeof F, "%s/status-fixture-%d", sy_tmpdir(), sy_pid());
+    cx_fmt(R, sizeof R, "%s/repo", F); cx_fmt(R2, sizeof R2, "%s/repo2", F);
+    cx_fmt(T, sizeof T, "%s/tmp", F); cx_fmt(T2, sizeof T2, "%s/tmp2", F);
+    cx_fmt(c, sizeof c, "rm -rf %s && mkdir -p %s %s %s/unisacc-session-build-lr9001/log %s/unisacc-affected-777 %s/wtgate-1 %s/ua-cxif-1 %s/ua-cxif-2 %s", F, R, R2, T, T, T, T, T, T2);
+    sh(c);
+    /* repo: c1 on main, c2 on side = origin/main, c3 on main => ahead 1 behind 1 */
+    cx_fmt(c, sizeof c, "cd %s && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m c1 && git checkout -q -b side && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m c2side && git update-ref refs/remotes/origin/main HEAD && git checkout -q main && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m c3 && echo s > staged.txt && git add staged.txt && echo u > untracked.txt", R);
+    sh(c);
+    cx_fmt(c, sizeof c, "cd %s && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m only", R2);
+    sh(c);
+    /* lock, stash log (2 lines) */
+    cx_fmt(a, sizeof a, "%s/.git/index.lock", R); w(a, "");
+    sh("true");
+    cx_fmt(c, sizeof c, "mkdir -p %s/.git/logs/refs", R); sh(c);
+    cx_fmt(a, sizeof a, "%s/.git/logs/refs/stash", R); w(a, "x\ny\n");
+    /* chain logs: real1 failed rc=1 with a FAIL line; real2 no rc; real3 done rc=0 with 3 G_LNX_PAIR; real4-pack ignored */
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real1.out", T); w(a, "start\nFAIL gate x\nlast line one\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real1.rc", T); w(a, "rc=1\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real1.start", T); w(a, "rev=abc main=def\n1000\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real1.end", T); w(a, "1100\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real2.out", T); w(a, "working\nstill working\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real2.start", T); w(a, "1000\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real3.out", T); w(a, "G_LNX_PAIR a\nG_LNX_PAIR b\nG_LNX_PAIR c\nall done\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real3.rc", T); w(a, "rc=0\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-session-build-lr9001/log/real4-pack.out", T); w(a, "pack\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-derive-last.tsv", T); w(a, "DERIVE\tgen-a\tok\t120\nDERIVE\tgen-b\tFAIL\t80\nnoise line\n");
+    cx_fmt(a, sizeof a, "%s/unisacc-affected-777/b1.log", T);
+    w(a, "BATCH_RUN\tid=b1\tstatus=PASS\trc=0\nBATCH_RUN\tid=b2\tstatus=FAIL\trc=1\nBATCH_RUN\tid=b3\tstatus=DEFERRED\trc=0\nBATCH_RUN\tid=b4\tstatus=PASS\trc=0\nother text\n");
+
+    cx_fmt(a, sizeof a, "--fast --no-fetch --root %s --tmp %s --pg-pat [z]zz-no-such-proc-zzz --tsv %s/out.tsv", R, T, F);
+    o = status(a, &rc, &ms);
+    ck(o && rc == 0, "full fixture run exits 0");
+    ck(o && row(o, "git\tbehind\t1", "c2side"), "git behind=1 with first commit subject");
+    ck(o && row(o, "git\tahead\t1", ""), "git ahead=1");
+    ck(o && row(o, "git\tworktree", "staged=1 unstaged=0 untracked=1"), "worktree staged/unstaged/untracked counts");
+    ck(o && row(o, "git\tindex.lock\tpresent", ""), "index.lock present reported");
+    {   char lp[500]; sy_stat_t st; cx_fmt(lp, sizeof lp, "%s/.git/index.lock", R); ck(sy_stat(lp, &st) == 0, "index.lock not deleted by status"); }
+    ck(o && row(o, "git\tstash\t2", ""), "stash count from logs/refs/stash lines = 2");
+    ck(o && row(o, "real1", "state=done") && row(o, "real1", "rc=1") && row(o, "real1", "elapsed_s=100"), "chain real1 done rc=1 elapsed 100 s from .start/.end");
+    ck(o && row(o, "real1", "fail=FAIL gate x"), "chain real1 failure line extracted");
+    ck(o && row(o, "real1", "last=last line one"), "chain real1 last line");
+    ck(o && row(o, "real2", "state=stopped-no-rc"), "chain real2 no rc and no process -> stopped-no-rc");
+    ck(o && row(o, "real3", "G_LNX_PAIR=3") && row(o, "real3", "state=done") && row(o, "real3", " rc=0 "), "chain real3 done rc=0 with G_LNX_PAIR=3");
+    ck(o && !row(o, "real4-pack", "") , "chain: real4-pack.out is not a chain row");
+    ck(o && row(o, "derive\tgen-a", "ok ms=120") && row(o, "derive\tgen-b", "FAIL ms=80"), "derive rows parsed with status and ms");
+    ck(o && row(o, "batches\tunisacc-affected-777", "PASS=2 FAIL=1 DEFERRED=1"), "batches counts PASS/FAIL/DEFERRED");
+    ck(o && row(o, "residue\tunisacc-affected-", "count=1") && row(o, "residue\tua-cxif-", "count=2") && row(o, "residue\twtgate-", "count=1"), "residue counts per prefix");
+    ck(o && has_line(o, "STATUS ok=") && !has(o, slen(o), "\nSTATUS ok=\n"), "STATUS summary line present");
+    {   long n = o ? slen(o) : 0, at = 0; int rowsok = 1, rows = 0, lastis = 0;
+        while (at < n) {
+            long e = at, tabs = 0, k; while (e < n && o[e] != '\n') { if (o[e] == '\t') tabs++; e++; }
+            if (e > at) { if (o[at] == 'S' && has(o + at, e - at, "STATUS ok=")) lastis = 1; else { lastis = 0; rows++; if (tabs != 4) rowsok = 0; } }
+            at = e + 1; (void)k;
+        }
+        ck(rows > 10 && rowsok, "every row has five tab-separated fields");
+        ck(lastis, "STATUS is the last line");
+    }
+    {   char tp[500]; long n; size_t k; char *b; cx_fmt(tp, sizeof tp, "%s/out.tsv", F); b = cx_read(tp, &k); n = (long)k;
+        ck(b && has(b, n, "STATUS ok=") && has(b, n, "chain\t"), "--tsv file written with rows and STATUS"); }
+    mm_free(o);
+
+    /* no derive file, no stash log, no lock, section filter, tmp without sessions */
+    cx_fmt(a, sizeof a, "--fast --no-fetch --root %s --tmp %s --pg-pat [z]zz-no-such-proc-zzz", R2, T2);
+    o = status(a, &rc, &ms);
+    ck(o && row(o, "derive\tlast\tUNMEASURED", ""), "--fast without derive file marks UNMEASURED");
+    ck(o && row(o, "git\tstash\t0", "") && row(o, "git\tindex.lock\tabsent", ""), "no stash log -> 0, no lock -> absent");
+    ck(o && row(o, "chain\tsessions\tUNMEASURED", "") && row(o, "batches\tsessions\tUNMEASURED", ""), "missing session directories are UNMEASURED");
+    ck(o && row(o, "git\tbehind\tUNMEASURED", ""), "no origin/main -> behind UNMEASURED, not guessed");
+    ck(o && row(o, "STATUS", "warn=") && !row(o, "STATUS", "warn=0"), "UNMEASURED items counted as warn");
+    mm_free(o);
+
+    cx_fmt(a, sizeof a, "--fast --section residue --tmp %s", T);
+    o = status(a, &rc, &ms);
+    ck(o && row(o, "residue\t", "") && !row(o, "git\t", "") && !row(o, "chain\t", ""), "--section residue prints only residue rows");
+    mm_free(o);
+
+    /* timeout: fake git sleeps 30 s, bound 1 s */
+    {   char fk[500]; cx_fmt(fk, sizeof fk, "%s/fakegit.sh", F); w(fk, "#!/bin/sh\nsleep 30\n"); cx_fmt(c, sizeof c, "chmod +x %s", fk); sh(c);
+        cx_fmt(a, sizeof a, "--fast --no-fetch --section git --root %s --git-bin %s --git-secs 1", R2, fk);
+        o = status(a, &rc, &ms);
+        ck(o && row(o, "git\tbehind\tUNMEASURED", "") && row(o, "git\tworktree\tUNMEASURED", ""), "git timeout -> UNMEASURED rows");
+        ck(ms < 25000, "timeouts bound the run (3 git calls at 1 s each, well under 25 s incl. compile)");
+        mm_free(o); }
+
+    {   char *v[] = {"sh", "./unisacc.com", "tools/status.cx", "--", "--bogus", 0}; o = run(v, 0, 55, &rc, 0); ck(rc == 2, "unknown option exits 2"); mm_free(o); }
+    cx_fmt(c, sizeof c, "rm -rf %s", F); sh(c);
+    printf("CHECK_STATUS\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

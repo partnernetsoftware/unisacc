@@ -1,0 +1,78 @@
+/* Checks tools/s9-profile.cx: sh ./unisacc.com tools/check-s9-profile.cx   (from the repo root)
+   Builds fixture RUN dirs under /tmp/s9-profile-check/ (ignored dir) and checks the SUMMARY line:
+   (a) two done slices (30 s and 20 s, overlapping 10 s, wave 15 s and 5 s): slices=2 done=2 batches=3 exclusive=1,
+       fixed_mean_s=15.0, conc_peak=2, top batch is the 12 s one
+   (b) one done and one RUNNING slice: running=1, done=1
+   (c) an empty run directory (no plan.tsv): exit 2
+   Prints PASS/FAIL lines and CHECK_S9_PROFILE<TAB>checks=N<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed, checks;
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\ts9-profile.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static void put(const char *dir, const char *rel, const char *body) {
+    char p[512];
+    FILE *f;
+    int n = snprintf(p, sizeof p, "%s/%s", dir, rel);
+    if (n < 0 || n >= (int)sizeof p) return;
+    f = fopen(p, "w");
+    if (f) { fputs(body, f); fclose(f); }
+}
+
+static int prof(const char *dir, char *out, int cap) {
+    char *argv[8];
+    argv[0] = "./tools/bound"; argv[1] = "50"; argv[2] = "sh"; argv[3] = "./unisacc.com";
+    argv[4] = "tools/s9-profile.cx"; argv[5] = "--"; argv[6] = (char *)dir; argv[7] = 0;
+    return sy_run(argv, out, cap, 0);
+}
+
+static int has(const char *o, const char *s) {
+    int n = (int)strlen(s);
+    for (; *o; o++) if (!strncmp(o, s, n)) return 1;
+    return 0;
+}
+
+int main(void) {
+    static char o[16384];
+    char *mk[] = {"mkdir", "-p", "/tmp/s9-profile-check/a/s9-run/slice-0-0", "/tmp/s9-profile-check/a/s9-run/slice-0-1",
+                  "/tmp/s9-profile-check/b/s9-run/slice-0-0", "/tmp/s9-profile-check/b/s9-run/slice-0-1",
+                  "/tmp/s9-profile-check/c/s9-run", 0};
+    int rc;
+    sy_run(mk, o, sizeof o, 0);
+    {
+        const char *d = "/tmp/s9-profile-check/a/s9-run";
+        put(d, "plan.tsv", "slice-0-0\t0\t0\tx,y\nslice-0-1\t0\t1\tz\n");
+        put(d, "slice-0-0.start", "1\t1\t1\th\t100000000000\n");
+        put(d, "slice-0-0.done", "100000000000\t130000000000\t0\th\n");
+        put(d, "slice-0-1.start", "1\t1\t1\th\t120000000000\n");
+        put(d, "slice-0-1.done", "120000000000\t140000000000\t0\th\n");
+        put(d, "slice-0-0/wave.log", "WAVE_BATCH\tx\tPASS\tbound_rc=0\twall_ns=12000000000\tstdout=a\n"
+                                      "WAVE_BATCH\ty\tPASS\tbound_rc=0\twall_ns=3000000000\tstdout=a\n"
+                                      "ALL_WAVE\twave=1\tmode=heavy\tjobs=2\twall_ns=15000000000\n");
+        put(d, "slice-0-1/wave.log", "WAVE_BATCH\tz\tPASS\tbound_rc=0\twall_ns=5000000000\tstdout=a\n"
+                                      "ALL_WAVE\twave=1\tmode=heavy\tjobs=1\twall_ns=5000000000\n");
+        rc = prof(d, o, sizeof o);
+        ck(rc == 0, "a.rc0");
+        ck(has(o, "slices=2\tdone=2\trunning=0\tbatches=3\texclusive=1\tfixed_mean_s=15.0"), "a.summary");
+        ck(has(o, "conc_peak=2"), "a.peak");
+        ck(has(o, "TOPBATCH\t1\tx\t12.0_s"), "a.top");
+    }
+    {
+        const char *d = "/tmp/s9-profile-check/b/s9-run";
+        put(d, "plan.tsv", "slice-0-0\t0\t0\tx\nslice-0-1\t0\t0\ty\n");
+        put(d, "slice-0-0.start", "1\t1\t1\th\t100000000000\n");
+        put(d, "slice-0-0.done", "100000000000\t130000000000\t0\th\n");
+        put(d, "slice-0-1.start", "1\t1\t1\th\t120000000000\n");
+        rc = prof(d, o, sizeof o);
+        ck(rc == 0, "b.rc0");
+        ck(has(o, "slice-0-1\tRUNNING"), "b.running-slice");
+        ck(has(o, "done=1\trunning=1"), "b.summary");
+    }
+    {
+        rc = prof("/tmp/s9-profile-check/c/s9-run", o, sizeof o);
+        ck(rc == 2, "c.empty-rc2");
+    }
+    printf("CHECK_S9_PROFILE\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed != 0;
+}

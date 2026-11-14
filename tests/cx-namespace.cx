@@ -7,21 +7,49 @@ static int fails, checks;
 static char dir[4096];
 static void note(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); checks++; if (!ok) fails++; }
 static int write_file(const char *rel, const char *s) { char p[4096]; if (cx_path_join(p, sizeof p, dir, rel)) return 1; return cx_write(p, s, tx_len(s, 1L << 20)); }
+/* every child runs under tools/bound with a 20 second deadline (rc 142 on expiry, which no check expects) */
+static char bound[4400];
+/* first offset of the N bytes at W inside the HN bytes at H, or -1 */
+static long bytes_at(const char *h, long hn, const char *w, long n) {
+    long i;
+    for (i = 0; i + n <= hn; i++) if (!memcmp(h + i, w, (size_t)n)) return i;
+    return -1;
+}
 static int plan_rc(const char *product, const char *main, int exp, const char *want, char *out, int cap) {
     char full[4096]; char *av[8]; int rc, cut = 0; long n;
     if (cx_path_join(full, sizeof full, dir, main)) return 0;
-    av[0] = "sh"; av[1] = (char *)product; av[2] = "-cx-plan"; av[3] = full; av[4] = 0;
+    av[0] = bound; av[1] = "20"; av[2] = "sh"; av[3] = (char *)product; av[4] = "-cx-plan"; av[5] = full; av[6] = 0;
     rc = sy_run(av, out, cap, &cut);
     if (rc != exp) return 0;
-    if (want) { n = tx_len(want, 512); if (tx_find(out, tx_len(out, cap), want, n) < 0) return 0; }
+    if (want) { n = tx_len(want, 512); if (bytes_at(out, tx_len(out, cap), want, n) < 0) return 0; }
     return 1;
+}
+/* Run MAIN with the product: 1 when rc == exp, 0 on a mismatch, 2 when the product's embedded cxmod
+   predates the run-path alias fix (its renamed-body path is not ua-bodysrc<16 hex>.cx), which
+   is reported UNVERIFIED and never as PASS. */
+static int unverified;
+static int run_rc(const char *product, const char *main, int exp, char *out, int cap) {
+    char full[4096]; char *av[8]; int rc, cut = 0; long at, n;
+    if (cx_path_join(full, sizeof full, dir, main)) return 0;
+    av[0] = bound; av[1] = "20"; av[2] = "sh"; av[3] = (char *)product; av[4] = full; av[5] = 0;
+    rc = sy_run(av, out, cap, &cut);
+    if (rc == exp) return 1;
+    av[4] = "-cx-plan"; av[5] = full; av[6] = 0;
+    if (sy_run(av, out, cap, &cut) != 0) return 0;
+    n = tx_len(out, cap); at = bytes_at(out, n, "/ua-bodysrc", 11);
+    if (at >= 0 && (at + 11 + 16 >= n || out[at + 11 + 16] != '.')) return 2;
+    return 0;
+}
+static void note_run(int state, const char *name) {
+    if (state == 2) { printf("UNVERIFIED\t%s\tneeds-new-product\n", name); unverified++; return; }
+    note(state == 1, name);
 }
 int main(int argc, char **argv) {
     char out[8192]; char root[4096], product[4096];
     if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], product) || !argv[3][0]) { fputs("usage: ROOT PRODUCT NEW_DIR\n", stderr); return 2; }
     { if (cx_fmt(dir, sizeof dir, "%s", argv[3])) return 2; }
     if (sy_mkdir(dir, 0700) != 0) { perror("output dir"); return 2; }
-    (void)root;
+    if (cx_path_join(bound, sizeof bound, root, "tools/bound")) return 2;
     write_file("a.cx", "#pragma unisa module a\nint clash(void){return 1;}\n");
     write_file("b.cx", "#pragma unisa module b\nint clash(void){return 2;}\n");
     write_file("c1.cx", "#pragma unisa use a\n#pragma unisa use b\nint main(void){return clash();}\n");
@@ -39,6 +67,19 @@ int main(int argc, char **argv) {
     /* symbol-level import + alias: use a::clash as ca and b::clash as cb, the clash is renamed away */
     write_file("ca1.cx", "#pragma unisa use a::clash as ca\n#pragma unisa use b::clash as cb\nint main(void){return ca()+cb();}\n");
     note(plan_rc(product, "ca1.cx", 0, 0, out, sizeof out), "alias-renames-away-clash");
+    /* the aliases must also run: each alias reaches its own module body (rc = ca()*10 + cb()) */
+    write_file("ca2.cx", "#pragma unisa use a::clash as ca\n#pragma unisa use b::clash as cb\nint main(void){return ca()*10+cb();}\n");
+    note_run(run_rc(product, "ca2.cx", 12, out, sizeof out), "alias-runs-each-body");
+    /* text.text::tx_len as slen runs (the module has other exports, each needing its own unique name) */
+    {
+        char from[4096], sub[4096]; size_t tn = 0; char *ts;
+        if (cx_path_join(from, sizeof from, root, "cx/text/text.cx") || cx_path_join(sub, sizeof sub, dir, "text")) return 2;
+        ts = cx_read(from, &tn);
+        if (!ts || sy_mkdir(sub, 0700) != 0 || cx_path_join(from, sizeof from, sub, "text.cx") || cx_write(from, ts, (long)tn)) { fputs("text module copy\n", stderr); return 2; }
+        free(ts);
+        write_file("tx1.cx", "#pragma unisa use text.text::tx_len as slen\nint main(void){return slen(\"hello\", 64) == 5 ? 0 : 9;}\n");
+        note_run(run_rc(product, "tx1.cx", 0, out, sizeof out), "alias-tx-len-as-slen-runs");
+    }
     /* symbol-level import without alias: use aa::other imports only other, so bb's clash no longer clashes */
     write_file("aa.cx", "#pragma unisa module aa\nint clash(void){return 1;}\nint other(void){return 7;}\n");
     write_file("bb.cx", "#pragma unisa module bb\nint clash(void){return 2;}\n");
@@ -51,6 +92,49 @@ int main(int argc, char **argv) {
     write_file("cy3.cx", "#pragma unisa module cy3\n#pragma unisa use cy3\nint c3(void){return 3;}\n");
     write_file("c6.cx", "#pragma unisa use cy3\nint main(void){return c3();}\n");
     note(plan_rc(product, "c6.cx", 1, "module cycle", out, sizeof out), "self-cycle-refused");
-    printf("CX_NAMESPACE\tchecks=%d\tfailed=%d\n", checks, fails);
+    /* planned syntax (prd_cx.md section 10, prd_cx_spec.md 3.5): not implemented.  Until it is, each spelling
+       must be refused by name before any compile -- never accepted silently.  When 0.0.64 implements export
+       or the wildcard, these rows are replaced by the semantic rows of that candidate, not deleted. */
+    write_file("fac.cx", "#pragma unisa module fac\n#pragma unisa export ok\nint facf(void){return 1;}\n");
+    write_file("p1.cx", "#pragma unisa use fac\nint main(void){return fine();}\n");
+    note(plan_rc(product, "p1.cx", 1, "unknown unisa pragma export", out, sizeof out), "planned-export-refused-by-name");
+    write_file("p2.cx", "#pragma unisa export ok::fine as f2\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p2.cx", 1, "unknown unisa pragma export", out, sizeof out), "planned-export-alias-refused-by-name");
+    write_file("p3.cx", "#pragma unisa use sys.*\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p3.cx", 1, "bad module name \"sys.*\"", out, sizeof out), "planned-wildcard-refused-by-name");
+    write_file("p4.cx", "#pragma unisa use *\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p4.cx", 1, "bad module name \"*\"", out, sizeof out), "planned-bare-star-refused-by-name");
+    write_file("p5.cx", "#pragma unisa use sys.*::sy_run\nint main(void){return 0;}\n");
+    note(plan_rc(product, "p5.cx", 1, "bad module name \"sys.*\"", out, sizeof out), "planned-wildcard-symbol-refused-by-name");
+    /* Known gaps, measured on the installed product 2026-11-14: a symbol import of a name the module does
+       not export (`ok::*`, `ok::nosuch`) plans with rc 0, and after `use aa::other` a call of aa's unimported
+       clash() also plans (CX-U-2 says it must not be visible).  A product that refuses is counted PASS; one
+       that accepts is printed GAP and is neither PASS nor FAIL. */
+    {
+        static const char *gsrc[3] = {
+            "#pragma unisa use ok::*\nint main(void){return 0;}\n",
+            "#pragma unisa use ok::nosuch\nint main(void){return 0;}\n",
+            "#pragma unisa use aa::other\nint main(void){return other()+clash();}\n" };
+        static const char *gname[3] = { "symbol-star-refused", "symbol-not-exported-refused", "unimported-symbol-call-refused" };
+        static const char *gfile[3] = { "g1.cx", "g2.cx", "g3.cx" };
+        /* Fixed in source 2026-11-14 (cxm_usechk, bad symbol name, symbol-filtered cxm_sees).  Each row is a
+           real assertion of rc 1 and the named refusal.  A product whose embedded cxmod predates the
+           run-path alias fix (renamed-body path not ua-bodysrc<16 hex>.cx) also predates this fix: there
+           an accepting product is reported UNVERIFIED, never PASS; a newer product that accepts is FAIL. */
+        static const char *gwant[3] = { "bad symbol name \"*\"", "module ok does not export nosuch", "call to undeclared function clash" };
+        int g, gaps = 0, old = 0; long at, n;
+        if (plan_rc(product, "ca1.cx", 0, 0, out, sizeof out)) {
+            n = tx_len(out, sizeof out); at = bytes_at(out, n, "/ua-bodysrc", 11);
+            if (at >= 0 && (at + 11 + 16 >= n || out[at + 11 + 16] != '.')) old = 1;
+        }
+        for (g = 0; g < 3; g++) {
+            write_file(gfile[g], gsrc[g]);
+            if (plan_rc(product, gfile[g], 1, gwant[g], out, sizeof out)) note(1, gname[g]);
+            else if (old) { printf("UNVERIFIED\t%s\tneeds-new-product\n", gname[g]); unverified++; gaps++; }
+            else note(0, gname[g]);
+        }
+        printf("CX_NAMESPACE_GAPS\tgaps=%d\n", gaps);
+    }
+    printf("CX_NAMESPACE\tchecks=%d\tfailed=%d\tunverified=%d\n", checks, fails, unverified);
     return fails ? 1 : 0;
 }

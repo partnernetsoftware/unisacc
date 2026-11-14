@@ -1,0 +1,464 @@
+/* tools/check-cx-streamapi.cx -- behavior check of the cx.stream readers and writers
+ * (cx/stream/rw.cx) and of xs_receipt64 (cx/stream/pipe.cx).
+ *
+ *   sh ./unisacc.com tools/check-cx-streamapi.cx
+ *
+ * Every assertion is an exact return code, an exact byte compare or an exact count:
+ *   reader-mem   borrow, short reads, end of input, n == 0 and n < 0, guard bytes
+ *   handles      closed, stale (slot reused), wrong kind, table full (-EMFILE), double close
+ *   reader-fd    small buffer over a pipe, direct large reads, fd left open, OS error passed
+ *   read-full    exact reads, -EPIPE on an early end
+ *   read-line    LF, CRLF, a lone CR kept, last line without newline, -EMSGSIZE, max 0
+ *   writer-buf   limit, all-or-nothing, borrowed destination
+ *   writer-fd    buffering, flush, ordering, close flushes, -ENOSPC breaks the writer
+ *   copy         limit < 0, exact limit, one over the limit, bad handles
+ *   pipe-pair    owned fds (the reader sees the end after the writer closes), no fd leak
+ *   deadline     refused with -ENOSYS on a live handle, -EBADF on a bad one
+ *   receipt64    same fields as xs_receipt, -EBADF, -EINVAL
+ * Prints PASS/FAIL per assertion and a last line CX_STREAMAPI ok=N failed=0 only when
+ * nothing failed; rc 1 on any FAIL. */
+#pragma unisa use stream.item
+#pragma unisa use stream.pipe
+#pragma unisa use stream.rw
+#pragma unisa use mem.grow
+#pragma unisa use mem.bytes
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+
+static int passed, failed;
+static void ck(int ok, const char *label) {
+    sy_printf("%s\tstreamapi.%s\n", ok ? "PASS" : "FAIL", label);
+    if (ok) passed++; else failed++;
+}
+
+enum { BIG = 10000 };
+static unsigned char big[BIG];
+static unsigned char got[BIG + 16];
+
+static void fill_big(void) {
+    long i;
+    for (i = 0; i < BIG; i++) big[i] = (unsigned char)((i * 7 + i / 251) & 255);
+}
+
+static int eq(const void *a, const char *b, long n) { return mm_same(a, b, n); }
+
+static void t_reader_mem(void) {
+    const unsigned char *src = (const unsigned char *)"hello world";
+    unsigned char buf[32];
+    int r, r2, w;
+    mg_buf d;
+    r = 77;
+    ck(xs_reader_mem(0, src, 11) == -EINVAL, "reader-mem.null-handle");
+    ck(xs_reader_mem(&r, src, -1) == -EINVAL && r == 0, "reader-mem.negative-length");
+    r = 77;
+    ck(xs_reader_mem(&r, 0, 3) == -EINVAL && r == 0, "reader-mem.null-bytes");
+    ck(xs_reader_mem(&r, 0, 0) == 0 && r > 0 && xs_read(r, buf, 4) == 0 && xs_reader_close(r) == 0, "reader-mem.empty");
+    ck(xs_reader_mem(&r, src, 11) == 0 && r > 0, "reader-mem.open");
+    mm_fill(buf, 32, 0x5a, 32);
+    ck(xs_read(r, buf, 5) == 5 && eq(buf, "hello", 5) && buf[5] == 0x5a, "reader-mem.read-5-guard-intact");
+    ck(xs_reader_count(r) == 5, "reader-mem.count-5");
+    ck(xs_read(r, buf, 0) == 0 && xs_reader_count(r) == 5, "reader-mem.n-zero");
+    ck(xs_read(r, buf, -1) == -EINVAL && xs_reader_count(r) == 5, "reader-mem.n-negative");
+    ck(xs_read(r, 0, 3) == -EINVAL, "reader-mem.null-buffer");
+    mm_fill(buf, 32, 0x5a, 32);
+    ck(xs_read(r, buf, 20) == 6 && eq(buf, " world", 6) && buf[6] == 0x5a, "reader-mem.short-read-at-tail");
+    ck(xs_read(r, buf, 20) == 0 && xs_read(r, buf, 20) == 0, "reader-mem.eof-twice");
+    ck(xs_reader_count(r) == 11, "reader-mem.count-11");
+    ck(xs_reader_close(r) == 0, "reader-mem.close");
+    ck(xs_reader_close(r) == -EBADF, "handles.reader-double-close");
+    ck(xs_read(r, buf, 1) == -EBADF && xs_reader_count(r) == -EBADF, "handles.reader-closed-refused");
+    ck(xs_read_full(r, buf, 1) == -EBADF && xs_read_line(r, &d, 9) == -EBADF, "handles.reader-closed-full-line");
+    ck(xs_reader_mem(&r2, src, 11) == 0 && r2 != r, "handles.reader-slot-reused-new-handle");
+    ck(xs_read(r, buf, 1) == -EBADF && xs_read(r2, buf, 1) == 1 && buf[0] == 'h', "handles.reader-stale-refused");
+    mg_init(&d);
+    ck(xs_writer_buf(&w, &d, -1) == 0, "handles.writer-open");
+    ck(xs_read(w, buf, 1) == -EBADF && xs_reader_close(w) == -EBADF, "handles.writer-handle-as-reader");
+    ck(xs_write(r2, "x", 1) == -EBADF && xs_flush(r2) == -EBADF && xs_writer_close(r2) == -EBADF, "handles.reader-handle-as-writer");
+    ck(xs_read(0, buf, 1) == -EBADF && xs_read(-1, buf, 1) == -EBADF && xs_read(0x7fffffff, buf, 1) == -EBADF, "handles.reader-garbage");
+    ck(xs_write(0, "x", 1) == -EBADF && xs_write(-1, "x", 1) == -EBADF && xs_write(0x7fffffff, "x", 1) == -EBADF, "handles.writer-garbage");
+    ck(xs_reader_close(r2) == 0 && xs_writer_close(w) == 0 && d.len == 0, "handles.cleanup");
+    mg_free(&d);
+}
+
+static void t_table(void) {
+    int h[16];
+    int extra, i, ok, first;
+    mg_buf d;
+    ok = 1;
+    for (i = 0; i < 16; i++) if (xs_reader_mem(&h[i], big, 4) != 0 || h[i] <= 0) ok = 0;
+    ck(ok, "handles.reader-16-open");
+    extra = 5;
+    ck(xs_reader_mem(&extra, big, 4) == -EMFILE && extra == 0, "handles.reader-17th-emfile");
+    extra = 5;
+    ck(xs_reader_fd(&extra, 0, 0) == -EMFILE && extra == 0, "handles.reader-fd-emfile");
+    first = h[0];
+    ck(xs_reader_close(h[0]) == 0 && xs_reader_mem(&h[0], big, 4) == 0 && h[0] != first, "handles.reader-generation-advances");
+    ck(xs_reader_count(first) == -EBADF && xs_reader_count(h[0]) == 0, "handles.reader-old-generation-refused");
+    ok = 1;
+    for (i = 0; i < 16; i++) if (xs_reader_close(h[i]) != 0) ok = 0;
+    ck(ok, "handles.reader-16-close");
+    mg_init(&d);
+    ok = 1;
+    for (i = 0; i < 16; i++) if (xs_writer_buf(&h[i], &d, -1) != 0 || h[i] <= 0) ok = 0;
+    ck(ok, "handles.writer-16-open");
+    extra = 5;
+    ck(xs_writer_buf(&extra, &d, -1) == -EMFILE && extra == 0, "handles.writer-17th-emfile");
+    extra = 5;
+    ck(xs_writer_fd(&extra, 1, 0) == -EMFILE && extra == 0, "handles.writer-fd-emfile");
+    first = h[3];
+    ck(xs_writer_close(h[3]) == 0 && xs_writer_buf(&h[3], &d, -1) == 0 && h[3] != first, "handles.writer-generation-advances");
+    ck(xs_writer_count(first) == -EBADF && xs_writer_count(h[3]) == 0, "handles.writer-old-generation-refused");
+    ok = 1;
+    for (i = 0; i < 16; i++) if (xs_writer_close(h[i]) != 0) ok = 0;
+    ck(ok, "handles.writer-16-close");
+    mg_free(&d);
+}
+
+static void t_reader_fd(void) {
+    int fds[2];
+    int r, dfd;
+    long total, k, want;
+    int ok;
+    r = 9;
+    ck(xs_reader_fd(0, 0, 0) == -EINVAL, "reader-fd.null-handle");
+    ck(xs_reader_fd(&r, -1, 0) == -EINVAL && r == 0, "reader-fd.negative-fd");
+    r = 9;
+    ck(xs_reader_fd(&r, 0, -1) == -EINVAL && r == 0, "reader-fd.negative-bufcap");
+    ck(sy_pipe(fds) == 0 && sy_write_all(fds[1], big, BIG) == 0 && sy_close(fds[1]) == 0, "reader-fd.pipe-filled");
+    ck(xs_reader_fd(&r, fds[0], 7) == 0 && r > 0, "reader-fd.open-bufcap-7");
+    mm_fill(got, BIG + 16, 0xa5, BIG + 16);
+    total = 0;
+    ok = 1;
+    want = 1;
+    for (;;) {
+        /* sizes 1, 3, 5, ... cross the 7-byte buffer: buffered copies and direct reads */
+        k = (long)xs_read(r, got + total, want > BIG - total ? BIG - total : want);
+        if (k < 0) { ok = 0; break; }
+        if (k == 0) break;
+        total = total + k;
+        want = want >= 301 ? 1 : want + 2;
+        if (total >= BIG) break;
+    }
+    ck(ok && total == BIG && mm_same(got, big, BIG), "reader-fd.bytes-equal");
+    ck(got[BIG] == 0xa5, "reader-fd.guard-intact");
+    ck(xs_read(r, got, 8) == 0, "reader-fd.eof");
+    ck(xs_reader_count(r) == BIG, "reader-fd.count");
+    ck(xs_reader_close(r) == 0, "reader-fd.close");
+    ck(sy_close(fds[0]) == 0, "reader-fd.fd-left-open-by-close");
+    dfd = sy_open(".", O_RDONLY, 0);
+    ck(dfd >= 0 && xs_reader_fd(&r, dfd, 0) == 0, "reader-fd.directory-open");
+    ck(xs_read(r, got, 8) == -EISDIR && xs_reader_count(r) == 0, "reader-fd.os-error-passed-buffered");
+    ck(xs_read(r, got, 8192) == -EISDIR, "reader-fd.os-error-passed-direct");
+    ck(xs_read_full(r, got, 4) == -EISDIR, "read-full.os-error-passed");
+    ck(xs_reader_close(r) == 0 && sy_close(dfd) == 0, "reader-fd.directory-close");
+}
+
+static void t_read_full(void) {
+    unsigned char buf[16];
+    int fds[2];
+    int r;
+    ck(xs_reader_mem(&r, (const unsigned char *)"abcdef", 6) == 0, "read-full.open");
+    mm_fill(buf, 16, 0x5a, 16);
+    ck(xs_read_full(r, buf, 4) == 0 && eq(buf, "abcd", 4) && buf[4] == 0x5a, "read-full.exact-4");
+    ck(xs_read_full(r, buf, 0) == 0 && xs_reader_count(r) == 4, "read-full.n-zero");
+    ck(xs_read_full(r, buf, -2) == -EINVAL && xs_read_full(r, 0, 2) == -EINVAL, "read-full.bad-arguments");
+    ck(xs_read_full(r, buf, 3) == -EPIPE, "read-full.early-end-epipe");
+    ck(xs_reader_count(r) == 6 && xs_read_full(r, buf, 1) == -EPIPE, "read-full.tail-consumed");
+    ck(xs_reader_close(r) == 0, "read-full.close");
+    ck(sy_pipe(fds) == 0 && sy_write_all(fds[1], big, 1000) == 0 && sy_close(fds[1]) == 0 && xs_reader_fd(&r, fds[0], 13) == 0, "read-full.pipe-open");
+    ck(xs_read_full(r, got, 999) == 0 && mm_same(got, big, 999), "read-full.across-refills");
+    ck(xs_read_full(r, got, 2) == -EPIPE && xs_reader_count(r) == 1000, "read-full.pipe-early-end");
+    ck(xs_reader_close(r) == 0 && sy_close(fds[0]) == 0, "read-full.pipe-close");
+}
+
+static int line_is(int rc, const mg_buf *l, const char *want, long n) {
+    return rc == 1 && l->len == n && (n == 0 || mm_same(l->data, want, n));
+}
+
+static void t_read_line(void) {
+    const char *a = "a\r\nbb\n\n\rc\r\r\nlast";
+    const char *b = "abc\nabcd\nxy\nabc\r\nabc\r";
+    const char *c = "\n\nx";
+    const char *p = "0123456789\r\nabcdefghij\nend";
+    mg_buf l;
+    int fds[2];
+    int r, rc;
+    mg_init(&l);
+    ck(xs_reader_mem(&r, (const unsigned char *)a, 16) == 0, "read-line.open");
+    ck(xs_read_line(r, 0, 9) == -EINVAL && xs_read_line(r, &l, -1) == -EINVAL && xs_reader_count(r) == 0, "read-line.bad-arguments");
+    rc = xs_read_line(r, &l, 100);
+    ck(line_is(rc, &l, "a", 1), "read-line.crlf-stripped");
+    rc = xs_read_line(r, &l, 100);
+    ck(line_is(rc, &l, "bb", 2), "read-line.lf-stripped");
+    rc = xs_read_line(r, &l, 100);
+    ck(line_is(rc, &l, "", 0), "read-line.empty-line");
+    rc = xs_read_line(r, &l, 100);
+    ck(line_is(rc, &l, "\rc\r", 3), "read-line.only-one-cr-stripped");
+    rc = xs_read_line(r, &l, 100);
+    ck(line_is(rc, &l, "last", 4), "read-line.last-line-without-newline");
+    ck(xs_reader_count(r) == 16, "read-line.count");
+    ck(xs_read_line(r, &l, 100) == 0 && l.len == 0, "read-line.end-clears-line");
+    ck(xs_read_line(r, &l, 100) == 0 && xs_reader_close(r) == 0, "read-line.end-twice");
+    ck(xs_reader_mem(&r, (const unsigned char *)b, 21) == 0, "read-line.max-open");
+    rc = xs_read_line(r, &l, 3);
+    ck(line_is(rc, &l, "abc", 3), "read-line.exactly-max");
+    ck(xs_read_line(r, &l, 3) == -EMSGSIZE && l.len == 0, "read-line.over-max-emsgsize-not-truncated");
+    ck(xs_reader_count(r) == 7, "read-line.over-max-reader-inside-line");
+    rc = xs_read_line(r, &l, 3);
+    ck(line_is(rc, &l, "d", 1), "read-line.rest-of-long-line");
+    rc = xs_read_line(r, &l, 3);
+    ck(line_is(rc, &l, "xy", 2), "read-line.after-long-line");
+    rc = xs_read_line(r, &l, 3);
+    ck(line_is(rc, &l, "abc", 3), "read-line.max-plus-crlf");
+    ck(xs_read_line(r, &l, 3) == -EMSGSIZE && l.len == 0, "read-line.max-plus-cr-at-end-emsgsize");
+    ck(xs_reader_close(r) == 0, "read-line.max-close");
+    ck(xs_reader_mem(&r, (const unsigned char *)c, 3) == 0, "read-line.max0-open");
+    rc = xs_read_line(r, &l, 0);
+    ck(line_is(rc, &l, "", 0), "read-line.max0-empty-line");
+    rc = xs_read_line(r, &l, 0);
+    ck(line_is(rc, &l, "", 0), "read-line.max0-empty-line-2");
+    ck(xs_read_line(r, &l, 0) == -EMSGSIZE && xs_reader_close(r) == 0, "read-line.max0-one-byte-emsgsize");
+    ck(xs_reader_mem(&r, 0, 0) == 0 && xs_read_line(r, &l, 9) == 0 && xs_reader_close(r) == 0, "read-line.empty-input");
+    ck(sy_pipe(fds) == 0 && sy_write_all(fds[1], p, 26) == 0 && sy_close(fds[1]) == 0 && xs_reader_fd(&r, fds[0], 11) == 0, "read-line.pipe-open-bufcap-11");
+    rc = xs_read_line(r, &l, 10);
+    ck(line_is(rc, &l, "0123456789", 10), "read-line.cr-and-lf-split-by-refill");
+    rc = xs_read_line(r, &l, 10);
+    ck(line_is(rc, &l, "abcdefghij", 10), "read-line.line-across-refills");
+    rc = xs_read_line(r, &l, 10);
+    ck(line_is(rc, &l, "end", 3), "read-line.pipe-last-line");
+    ck(xs_read_line(r, &l, 10) == 0 && xs_reader_count(r) == 26, "read-line.pipe-end");
+    ck(xs_reader_close(r) == 0 && sy_close(fds[0]) == 0, "read-line.pipe-close");
+    mg_free(&l);
+}
+
+static void t_writer_buf(void) {
+    mg_buf d;
+    int w, i, ok;
+    mg_init(&d);
+    w = 9;
+    ck(xs_writer_buf(0, &d, 5) == -EINVAL, "writer-buf.null-handle");
+    ck(xs_writer_buf(&w, 0, 5) == -EINVAL && w == 0, "writer-buf.null-destination");
+    ck(xs_writer_buf(&w, &d, 5) == 0 && w > 0, "writer-buf.open-limit-5");
+    ck(xs_write(w, "abc", 3) == 0 && d.len == 3, "writer-buf.write-3");
+    ck(xs_write(w, "def", 3) == -EMSGSIZE && d.len == 3, "writer-buf.over-limit-nothing-written");
+    ck(xs_write(w, "de", 2) == 0 && d.len == 5 && eq(d.data, "abcde", 5), "writer-buf.fill-to-limit");
+    ck(xs_write(w, "f", 1) == -EMSGSIZE && d.len == 5, "writer-buf.one-over-limit");
+    ck(xs_write(w, "f", 0) == 0 && xs_write(w, 0, 0) == 0, "writer-buf.n-zero");
+    ck(xs_write(w, "f", -1) == -EINVAL && xs_write(w, 0, 1) == -EINVAL, "writer-buf.bad-arguments");
+    ck(xs_writer_count(w) == 5 && xs_flush(w) == 0, "writer-buf.count-and-flush");
+    ck(xs_writer_close(w) == 0, "writer-buf.close");
+    ck(d.len == 5 && eq(d.data, "abcde", 5), "writer-buf.destination-kept-after-close");
+    ck(xs_writer_close(w) == -EBADF, "handles.writer-double-close");
+    ck(xs_write(w, "x", 1) == -EBADF && xs_flush(w) == -EBADF && xs_writer_count(w) == -EBADF && d.len == 5, "handles.writer-closed-refused");
+    mg_free(&d);
+    ck(xs_writer_buf(&w, &d, 0) == 0 && xs_write(w, "x", 1) == -EMSGSIZE && d.len == 0 && xs_writer_close(w) == 0, "writer-buf.limit-0");
+    ck(xs_writer_buf(&w, &d, -1) == 0, "writer-buf.open-unlimited");
+    ok = 1;
+    for (i = 0; i < 10; i++) if (xs_write(w, big, BIG) != 0) ok = 0;
+    ck(ok && d.len == 10L * BIG && xs_writer_count(w) == 10L * BIG, "writer-buf.unlimited-100000");
+    ck(mm_same(d.data + 9L * BIG, big, BIG) && xs_writer_close(w) == 0, "writer-buf.unlimited-bytes");
+    mg_free(&d);
+}
+
+static void t_writer_fd(void) {
+    unsigned char buf[32];
+    int fds[2];
+    int w, ffd;
+    w = 9;
+    ck(xs_writer_fd(0, 1, 0) == -EINVAL, "writer-fd.null-handle");
+    ck(xs_writer_fd(&w, -1, 0) == -EINVAL && w == 0, "writer-fd.negative-fd");
+    w = 9;
+    ck(xs_writer_fd(&w, 1, -1) == -EINVAL && w == 0, "writer-fd.negative-bufcap");
+    ck(sy_pipe(fds) == 0 && xs_writer_fd(&w, fds[1], 8) == 0 && w > 0, "writer-fd.open-bufcap-8");
+    ck(xs_write(w, "abc", 3) == 0 && sy_readable(fds[0], 0) == 0, "writer-fd.small-write-buffered");
+    ck(xs_writer_count(w) == 3, "writer-fd.count-includes-buffered");
+    ck(xs_flush(w) == 0 && sy_readable(fds[0], 0) == 1, "writer-fd.flush-reaches-fd");
+    ck(sy_read(fds[0], buf, 32) == 3 && eq(buf, "abc", 3), "writer-fd.flushed-bytes");
+    ck(xs_flush(w) == 0 && sy_readable(fds[0], 0) == 0, "writer-fd.flush-empty");
+    ck(xs_write(w, "ab", 2) == 0 && xs_write(w, "0123456789", 10) == 0, "writer-fd.buffered-then-large");
+    ck(sy_read(fds[0], buf, 32) == 12 && eq(buf, "ab0123456789", 12), "writer-fd.order-kept-large-goes-through");
+    ck(xs_write(w, "12345", 5) == 0 && xs_write(w, "6789", 4) == 0, "writer-fd.overflow-drains-first");
+    ck(sy_read(fds[0], buf, 32) == 5 && eq(buf, "12345", 5), "writer-fd.drained-part");
+    ck(xs_write(w, "", 0) == 0 && xs_write(w, "x", -1) == -EINVAL && xs_write(w, 0, 2) == -EINVAL, "writer-fd.n-zero-and-bad-arguments");
+    ck(xs_writer_count(w) == 24, "writer-fd.count");
+    ck(xs_writer_close(w) == 0, "writer-fd.close");
+    ck(sy_read(fds[0], buf, 32) == 4 && eq(buf, "6789", 4), "writer-fd.close-flushes");
+    ck(sy_write_all(fds[1], "z", 1) == 0 && sy_close(fds[1]) == 0, "writer-fd.fd-left-open-by-close");
+    ck(sy_read(fds[0], buf, 32) == 1 && sy_read(fds[0], buf, 32) == 0 && sy_close(fds[0]) == 0, "writer-fd.pipe-drained");
+    ffd = sy_open("/dev/full", O_WRONLY, 0);
+    ck(ffd >= 0 && xs_writer_fd(&w, ffd, 16) == 0, "writer-fd.full-device-open");
+    ck(xs_write(w, "abc", 3) == 0, "writer-fd.full-buffered-accepts");
+    ck(xs_flush(w) == -ENOSPC, "writer-fd.flush-error-passed");
+    ck(xs_write(w, "d", 1) == -ENOSPC && xs_flush(w) == -ENOSPC, "writer-fd.broken-after-error");
+    ck(xs_writer_close(w) == -ENOSPC, "writer-fd.close-reports-error");
+    ck(xs_writer_count(w) == -EBADF && xs_writer_close(w) == -EBADF, "writer-fd.close-released-handle-despite-error");
+    ck(xs_writer_fd(&w, ffd, 4) == 0 && xs_write(w, "0123456789", 10) == -ENOSPC && xs_writer_count(w) == 0, "writer-fd.direct-write-error");
+    ck(xs_writer_close(w) == -ENOSPC, "writer-fd.direct-error-close");
+    ck(xs_writer_fd(&w, ffd, 16) == 0 && xs_write(w, "abc", 3) == 0 && xs_writer_close(w) == -ENOSPC, "writer-fd.close-flush-fails");
+    ck(xs_writer_count(w) == -EBADF, "writer-fd.close-flush-fails-released");
+    ck(sy_close(ffd) == 0, "writer-fd.full-device-fd-left-open");
+}
+
+static void t_copy(void) {
+    mg_buf d;
+    unsigned char one[2];
+    int64_t n;
+    int r, w;
+    mg_init(&d);
+    ck(xs_reader_mem(&r, big, BIG) == 0 && xs_writer_buf(&w, &d, -1) == 0, "copy.open");
+    n = 99;
+    ck(xs_copy(r, w, -1, &n) == 0 && n == BIG, "copy.unlimited");
+    ck(d.len == BIG && mm_same(d.data, big, BIG) && xs_reader_count(r) == BIG && xs_writer_count(w) == BIG, "copy.bytes-and-counts");
+    n = 99;
+    ck(xs_copy(r, w, 0, &n) == 0 && n == 0, "copy.empty-input-limit-0");
+    ck(xs_copy(r, w, -1, 0) == 0, "copy.null-count-allowed");
+    n = 99;
+    ck(xs_copy(r + 1, w, -1, &n) == -EBADF && n == 0, "copy.bad-reader");
+    n = 99;
+    ck(xs_copy(r, r, -1, &n) == -EBADF && n == 0, "copy.bad-writer");
+    ck(xs_copy(w, r, -1, &n) == -EBADF, "copy.swapped-handles");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "copy.close");
+    mg_free(&d);
+    ck(xs_reader_mem(&r, big, 100) == 0 && xs_writer_buf(&w, &d, -1) == 0, "copy.limit-open");
+    ck(xs_copy(r, w, 100, &n) == 0 && n == 100 && d.len == 100, "copy.exact-limit");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "copy.limit-close");
+    mg_free(&d);
+    ck(xs_reader_mem(&r, big, 100) == 0 && xs_writer_buf(&w, &d, -1) == 0, "copy.over-open");
+    n = 0;
+    ck(xs_copy(r, w, 99, &n) == -EMSGSIZE && n == 99, "copy.one-over-limit-emsgsize");
+    ck(d.len == 99 && mm_same(d.data, big, 99) && xs_reader_count(r) == 99, "copy.exactly-limit-bytes-copied");
+    ck(xs_read(r, one, 2) == 1 && one[0] == big[99], "copy.excess-byte-left-in-reader");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "copy.over-close");
+    mg_free(&d);
+    ck(xs_reader_mem(&r, big, 10) == 0 && xs_writer_buf(&w, &d, -1) == 0, "copy.limit0-open");
+    n = 5;
+    ck(xs_copy(r, w, 0, &n) == -EMSGSIZE && n == 0 && d.len == 0 && xs_reader_count(r) == 0, "copy.limit-0-nonempty-emsgsize");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "copy.limit0-close");
+    ck(xs_reader_mem(&r, big, 10) == 0 && xs_writer_buf(&w, &d, 4) == 0, "copy.writer-limit-open");
+    n = 5;
+    ck(xs_copy(r, w, -1, &n) == -EMSGSIZE && n == 0 && d.len == 0 && xs_reader_count(r) == 0, "copy.writer-limit-refuses-whole-block");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "copy.writer-limit-close");
+    mg_free(&d);
+}
+
+static void t_pipe_pair(void) {
+    unsigned char buf[32];
+    int h[16];
+    mg_buf d;
+    int probe[2];
+    int after[2];
+    int64_t n;
+    int r, w, r2, w2, i, ok;
+    r = 9; w = 9;
+    ck(xs_pipe_pair(0, &w, 0) == -EINVAL && w == 0, "pipe-pair.null-reader");
+    ck(xs_pipe_pair(&r, 0, 0) == -EINVAL && r == 0, "pipe-pair.null-writer");
+    r = 9; w = 9;
+    ck(xs_pipe_pair(&r, &w, -1) == -EINVAL && r == 0 && w == 0, "pipe-pair.negative-bufcap");
+    ck(sy_pipe(probe) == 0 && sy_close(probe[0]) == 0 && sy_close(probe[1]) == 0, "pipe-pair.fd-probe");
+    ck(xs_pipe_pair(&r, &w, 16) == 0 && r > 0 && w > 0, "pipe-pair.open");
+    ck(xs_write(w, "hello pipe", 10) == 0 && xs_flush(w) == 0, "pipe-pair.write-flush");
+    ck(xs_read_full(r, buf, 10) == 0 && eq(buf, "hello pipe", 10), "pipe-pair.read-back");
+    ck(xs_write(w, "tail", 4) == 0 && xs_writer_close(w) == 0, "pipe-pair.writer-close-flushes");
+    ck(xs_read(r, buf, 32) == 4 && eq(buf, "tail", 4), "pipe-pair.tail-read");
+    ck(xs_read(r, buf, 32) == 0, "pipe-pair.end-after-writer-close-fd-owned");
+    ck(xs_reader_count(r) == 14 && xs_reader_close(r) == 0, "pipe-pair.reader-close");
+    ck(xs_reader_close(r) == -EBADF && xs_writer_close(w) == -EBADF, "pipe-pair.double-close");
+    ck(sy_pipe(after) == 0 && after[0] == probe[0] && after[1] == probe[1], "pipe-pair.both-fds-closed");
+    sy_close(after[0]); sy_close(after[1]);
+    ok = 1;
+    for (i = 0; i < 16; i++) if (xs_reader_mem(&h[i], big, 1) != 0) ok = 0;
+    r = 9; w = 9;
+    ck(ok && xs_pipe_pair(&r, &w, 0) == -EMFILE && r == 0 && w == 0, "pipe-pair.reader-table-full-emfile");
+    ck(sy_pipe(after) == 0 && after[0] == probe[0] && after[1] == probe[1], "pipe-pair.reader-table-full-no-fd-leak");
+    sy_close(after[0]); sy_close(after[1]);
+    for (i = 0; i < 16; i++) if (xs_reader_close(h[i]) != 0) ok = 0;
+    mg_init(&d);
+    for (i = 0; i < 16; i++) if (xs_writer_buf(&h[i], &d, -1) != 0) ok = 0;
+    r = 9; w = 9;
+    ck(ok && xs_pipe_pair(&r, &w, 0) == -EMFILE && r == 0 && w == 0, "pipe-pair.writer-table-full-emfile");
+    ck(sy_pipe(after) == 0 && after[0] == probe[0] && after[1] == probe[1], "pipe-pair.writer-table-full-no-fd-leak");
+    sy_close(after[0]); sy_close(after[1]);
+    for (i = 0; i < 16; i++) if (xs_writer_close(h[i]) != 0) ok = 0;
+    for (i = 0; i < 16; i++) if (xs_reader_mem(&h[i], big, 1) != 0) ok = 0;
+    for (i = 0; i < 16; i++) if (xs_reader_close(h[i]) != 0) ok = 0;
+    ck(ok, "pipe-pair.reader-slot-released-after-failure");
+    mg_free(&d);
+    /* reader -> pipe writer -> pipe reader -> buffer writer, 10000 bytes through a 64-byte buffer */
+    ck(xs_pipe_pair(&r, &w, 64) == 0 && xs_reader_mem(&r2, big, BIG) == 0 && xs_writer_buf(&w2, &d, -1) == 0, "pipe-pair.copy-open");
+    ck(xs_copy(r2, w, -1, &n) == 0 && n == BIG && xs_writer_close(w) == 0, "pipe-pair.copy-into-pipe");
+    ck(xs_copy(r, w2, -1, &n) == 0 && n == BIG && d.len == BIG && mm_same(d.data, big, BIG), "pipe-pair.copy-out-of-pipe");
+    ck(xs_reader_close(r) == 0 && xs_reader_close(r2) == 0 && xs_writer_close(w2) == 0, "pipe-pair.copy-close");
+    mg_free(&d);
+}
+
+static void t_deadline(void) {
+    unsigned char buf[8];
+    mg_buf d;
+    int r, w;
+    mg_init(&d);
+    ck(xs_reader_mem(&r, (const unsigned char *)"abc", 3) == 0 && xs_writer_buf(&w, &d, -1) == 0, "deadline.open");
+    ck(xs_reader_deadline(r, sy_deadline_in(1000)) == -ENOSYS, "deadline.reader-refused-enosys");
+    ck(xs_reader_deadline(r, sy_deadline_never()) == -ENOSYS, "deadline.reader-never-refused-enosys");
+    ck(xs_read(r, buf, 8) == 3 && eq(buf, "abc", 3), "deadline.reader-unchanged-after-refusal");
+    ck(xs_writer_deadline(w, sy_deadline_in(1000)) == -ENOSYS, "deadline.writer-refused-enosys");
+    ck(xs_writer_deadline(w, sy_deadline_never()) == -ENOSYS, "deadline.writer-never-refused-enosys");
+    ck(xs_write(w, "xy", 2) == 0 && d.len == 2, "deadline.writer-unchanged-after-refusal");
+    ck(xs_reader_deadline(w, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(r, sy_deadline_in(1)) == -EBADF, "deadline.wrong-kind-ebadf");
+    ck(xs_reader_deadline(0, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(0, sy_deadline_in(1)) == -EBADF, "deadline.zero-handle-ebadf");
+    ck(xs_reader_close(r) == 0 && xs_writer_close(w) == 0, "deadline.close");
+    ck(xs_reader_deadline(r, sy_deadline_in(1)) == -EBADF && xs_writer_deadline(w, sy_deadline_in(1)) == -EBADF, "deadline.closed-ebadf");
+    mg_free(&d);
+}
+
+/* stage: the input twice over */
+static int st_twice(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)ctx; (void)why; (void)cap;
+    if (mg_append(&out->buf, in->buf.data, in->buf.len)) return 1;
+    return mg_append(&out->buf, in->buf.data, in->buf.len) ? 1 : 0;
+}
+
+static void t_receipt64(void) {
+    xs_item a, b;
+    mg_buf m;
+    int64_t in64, out64;
+    long in_n, out_n;
+    int h, id, rc, id2, rc2;
+    xs_item_init(&a); xs_item_init(&b);
+    mg_init(&m);
+    ck(xs_open(&h, 100000) == 0 && xs_add(h, 7, 1, 2, st_twice, 0) == 0 && xs_add(h, 9, 2, 3, st_twice, 0) == 0, "receipt64.pipeline");
+    ck(mg_append(&m, big, 300) == 0 && xs_item_set(&a, 1, m.data, m.len, m.cap) == 0, "receipt64.item");
+    ck(xs_run(h, &a, &b, 0, 0) == 0 && b.buf.len == 1200, "receipt64.run");
+    in64 = -1; out64 = -1; id = -1; rc = -1;
+    ck(xs_receipt64(h, 0, &id, &rc, &in64, &out64) == 0 && id == 7 && rc == 0 && in64 == 300 && out64 == 600, "receipt64.stage-0");
+    ck(xs_receipt64(h, 1, &id, &rc, &in64, &out64) == 0 && id == 9 && rc == 0 && in64 == 600 && out64 == 1200, "receipt64.stage-1");
+    ck(xs_receipt(h, 1, &id2, &rc2, &in_n, &out_n) == 0 && id2 == id && rc2 == rc && in_n == in64 && out_n == out64, "receipt64.same-as-receipt");
+    ck(xs_receipt64(h, 2, &id, &rc, &in64, &out64) == -EINVAL && xs_receipt64(h, -1, &id, &rc, &in64, &out64) == -EINVAL, "receipt64.index-out-of-range");
+    ck(xs_receipt64(h, 0, 0, &rc, &in64, &out64) == -EINVAL && xs_receipt64(h, 0, &id, &rc, 0, &out64) == -EINVAL, "receipt64.null-result");
+    ck(xs_receipt64(0, 0, &id, &rc, &in64, &out64) == -EBADF, "receipt64.zero-handle");
+    xs_item_drop(&b);
+    ck(xs_close(h) == 0 && xs_receipt64(h, 0, &id, &rc, &in64, &out64) == -EBADF, "receipt64.closed-handle");
+}
+
+int main(void) {
+    fill_big();
+    t_reader_mem();
+    t_table();
+    t_reader_fd();
+    t_read_full();
+    t_read_line();
+    t_writer_buf();
+    t_writer_fd();
+    t_copy();
+    t_pipe_pair();
+    t_deadline();
+    t_receipt64();
+    if (failed) {
+        sy_printf("STREAMAPI_FAILED\tok=%d\tfailed=%d\n", passed, failed);
+        return 1;
+    }
+    sy_printf("CX_STREAMAPI\tok=%d\tfailed=0\n", passed);
+    return 0;
+}

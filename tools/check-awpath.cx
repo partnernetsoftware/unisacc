@@ -1,0 +1,133 @@
+/* tools/check-awpath.cx -- awp_path answers every kind named in agentwork/items.tsv, and refuses what is
+ * not a kind.
+ *
+ *   sh ./unisacc.com tools/check-awpath.cx [-- ROOT]
+ *
+ * Why: DEBT-AW-M0-RESOLVER is step one of the agentwork refactor (M0 resolver -> M1 readers -> ...).  Today
+ * every reader writes the flat spelling `agentwork/<file>` itself and the refactor moves those files, so the
+ * readers have to ask one function instead.  This step adds the function and changes no behaviour: every kind
+ * still answers today's flat path, so a reader can switch over with no output change at all.
+ *
+ * Covered:
+ *   (1) for every kind of the module's table the resolver returns 0, the answer is ROOT + "/" + the flat
+ *       spelling, and that path exists in ROOT (a row pointing at a file that is not there would make the
+ *       resolver useless to its readers);
+ *   (2) a root whose spelling already ends in '/' gives the same answer, so no caller has to trim it;
+ *   (3) no two kinds answer one path (two kinds aliased to one file would merge two tables);
+ *   (4) refusals -- unknown kind, a kind that spells a path ("./x", "a/b", "agentwork/ledger.tsv", a
+ *       trailing '/'), an empty or null kind, an empty or null root, a null buffer, and a buffer too small
+ *       for the answer -- each returns non-zero and leaves the caller's first byte untouched;
+ *   (5) the length boundary is exact: cap = strlen(answer)+1 succeeds, cap = strlen(answer) fails;
+ *   (6) awp_count/awp_kind_at cover the table with no gap and no duplicate.
+ *
+ * Prints PASS/FAIL per case and CHECK_AWPATH<TAB>failed=N; exit 0 only when 0; exit 2 on an unreadable ROOT.
+ * Read-only: it writes nothing and compiles no product, so it is safe during a release freeze. */
+#pragma unisa use cxlib.awpath
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tawpath.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* A byte that a refusal must leave in place. */
+#define UNTOUCHED 0x5a
+
+/* Fill N bytes of B with UNTOUCHED, so a later write is visible. */
+static void poison(char *b, long n) {
+    long i;
+    for (i = 0; i < n; i++) b[i] = (char)UNTOUCHED;
+}
+
+int main(int argc, char **argv) {
+    char out[4096], other[4096], expect[4096], small[8];
+    int i, n, all = 1, exists = 1, distinct = 1, exact = 0;
+    const char *kind, *rel;
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) {
+        sy_printf("FAIL\tawpath.root\nCHECK_AWPATH\tfailed=1\n");
+        return 2;
+    }
+
+    n = awp_count();
+    ck(n == 11, "table-holds-eleven-kinds");
+
+    /* (1)(3) every kind resolves to today's flat path, that path exists, and no two kinds collide. */
+    for (i = 0; i < n; i++) {
+        int j;
+        kind = awp_kind_at(i);
+        rel = awp_rel(kind);
+        if (!kind || !rel) { all = 0; continue; }
+        if (awp_path(root, kind, out, (long)sizeof out) != 0) { all = 0; continue; }
+        if (cx_fmt(expect, sizeof expect, "%s/%s", root, rel)) { all = 0; continue; }
+        if (strcmp(out, expect)) all = 0;
+        if (sy_exists(out) != 1) { exists = 0; sy_printf("MISSING\t%s\t%s\n", kind, out); }
+        for (j = 0; j < i; j++) {
+            if (awp_path(root, awp_kind_at(j), other, (long)sizeof other) == 0 && !strcmp(other, out)) distinct = 0;
+        }
+    }
+    ck(all, "every-kind-resolves-to-todays-flat-path");
+    ck(exists, "every-answer-exists-in-this-checkout");
+    ck(distinct, "kinds-are-distinct-paths");
+
+    /* (2) a root already ending in '/' answers the same path. */
+    {
+        int ok = 0;
+        if (cx_fmt(other, sizeof other, "%s/", root) == 0 && awp_path(other, "ledger", out, (long)sizeof out) == 0 &&
+            awp_path(root, "ledger", expect, (long)sizeof expect) == 0 && !strcmp(out, expect))
+            ok = 1;
+        ck(ok, "root-trailing-slash-does-not-double");
+    }
+
+    /* (4) refusals: non-zero, and the caller's first byte is untouched. */
+    {
+        static const char *bad[] = {"nonsense", "./ledger", "a/b", "agentwork/ledger.tsv", "ledger/", "", 0};
+        int k, ok = 1;
+        for (k = 0; bad[k]; k++) {
+            poison(small, (long)sizeof small);
+            if (awp_path(root, bad[k], small, (long)sizeof small) == 0 || small[0] != (char)UNTOUCHED) ok = 0;
+        }
+        poison(small, (long)sizeof small);
+        if (awp_path(root, 0, small, (long)sizeof small) == 0 || small[0] != (char)UNTOUCHED) ok = 0;
+        if (awp_path(root, "ledger", 0, 64) == 0) ok = 0;
+        poison(small, (long)sizeof small);
+        if (awp_path("", "ledger", small, (long)sizeof small) == 0 || small[0] != (char)UNTOUCHED) ok = 0;
+        poison(small, (long)sizeof small);
+        if (awp_path(0, "ledger", small, (long)sizeof small) == 0 || small[0] != (char)UNTOUCHED) ok = 0;
+        ck(ok, "refuses-unknown-kind-path-kind-and-bad-arguments");
+    }
+
+    /* (5) the length boundary is exact and a short buffer is refused, never truncated. */
+    if (awp_path(root, "ledger", out, (long)sizeof out) == 0) {
+        long need = (long)strlen(out) + 1;
+        char *exactbuf = mm_alloc(need);
+        char *shortbuf = need > 1 ? mm_alloc(need - 1) : 0;
+        exact = 1;
+        if (!exactbuf || awp_path(root, "ledger", exactbuf, need) != 0 || strcmp(exactbuf, out)) exact = 0;
+        if (!shortbuf || awp_path(root, "ledger", shortbuf, need - 1) == 0) exact = 0;
+        mm_free(exactbuf);
+        mm_free(shortbuf);
+    }
+    ck(exact, "buffer-boundary-is-exact-not-truncating");
+
+    /* (6) the table has no gap and no duplicate. */
+    {
+        int ok = 1, j;
+        for (i = 0; i < n; i++) {
+            const char *a = awp_kind_at(i);
+            if (!a) ok = 0;
+            for (j = 0; j < i; j++) if (a && awp_kind_at(j) && !strcmp(awp_kind_at(j), a)) ok = 0;
+        }
+        if (awp_kind_at(n) != 0) ok = 0;
+        ck(ok, "kind-table-has-no-gap-or-duplicate");
+    }
+
+    sy_printf("CHECK_AWPATH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

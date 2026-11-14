@@ -62,6 +62,8 @@
 #pragma unisa use cxlib.netwire
 #pragma unisa use cxlib.productpkg
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chainroot
 
 #define RB_FILES 128
 #define RB_REL 192
@@ -69,11 +71,22 @@
 /* objects route whole-run hang ceiling (ms). entry-build already bounds each
    child (compile 55, link 45, plan 50); this is only the outer "the whole
    entry-build never finishes" guard, not a per-job limit. */
-#define RB_OBJ_DEADLINE_MS 240000
+#define RB_OBJ_DEADLINE_MS rb_lim_ms("rb.objects")
 /* Complete 44-root whole-o job: at most 60s, including child output capture.
    The dispatcher owns this watchdog and kills/reaps the child's process group
    before removing a partial image. Test overrides can only shorten the cap. */
-#define RB_WHOLE_DEADLINE_MS 60000
+#define RB_WHOLE_DEADLINE_MS rb_lim_ms("rb.whole")
+/* Every time bound comes from build/limits.tsv via cxlib.limits; an unknown id refuses. */
+static long rb_lim_ms(const char *id) {
+    double v = lm_get(id, 0);
+    if (v < 0) { sy_eprintf("release-build: unknown limit id %s\n", id); sy_exit(2); }
+    return (long)(v * 1000.0);
+}
+static const char *rb_child_s(void) {
+    static char b[16];
+    if (!b[0]) cx_fmt(b, sizeof b, "%ld", rb_lim_ms("rb.child") / 1000);
+    return b;
+}
 
 /* The whole-o ceiling is overridable only so a test can shrink it and watch the
    timeout path actually fire; a production run never sets it. */
@@ -379,7 +392,7 @@ static void rb_base_check(const char *root, const unsigned char *body, const CxP
       char *d[18];
       int m = 0;
       rb_ctor(ctor);
-      d[m++] = "sh"; d[m++] = bnd; d[m++] = "55"; d[m++] = "sh"; d[m++] = ctor;
+      d[m++] = "sh"; d[m++] = bnd; d[m++] = (char *)rb_child_s(); d[m++] = "sh"; d[m++] = ctor;
       d[m++] = "tools/kernel-route.cx"; d[m++] = "--"; d[m++] = (char *)root; d[m++] = out;
       d[m++] = "--constructor"; d[m++] = ctor;
       for (j = 0; j < 2; j++) if (!only || tx_eqz(only, isa[j])) { d[m++] = "--isa"; d[m++] = (char *)isa[j]; }
@@ -477,7 +490,7 @@ static void rb_route_prepare(const char *root) {
     char bnd[RB_FULL], ctor[RB_FULL]; char *d[12]; int m = 0, t; pr_result r;
     if (cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("opguard path");
     rb_ctor(ctor);
-    d[m++] = "sh"; d[m++] = bnd; d[m++] = "55"; d[m++] = "sh"; d[m++] = ctor;
+    d[m++] = "sh"; d[m++] = bnd; d[m++] = (char *)rb_child_s(); d[m++] = "sh"; d[m++] = ctor;
     d[m++] = "tools/kernel-route.cx"; d[m++] = "--"; d[m++] = (char *)root; d[m++] = (char *)rb_run;
     d[m++] = "--constructor"; d[m++] = ctor; d[m] = 0;
     t = pr_run("opguard-prep kernel-route", d, root, 0, (int)(rb_pipe_deadline() / 1000), &r);
@@ -512,7 +525,7 @@ static void rb_nets_guard(const char *nets, const char *root) {
     /* T1: every net that enters the package is checked key by key against its own table. */
     if (rb_phase) rb_phase_path(rb_t1, "t1-net-check");
     else if (cx_fmt(rb_t1, sizeof rb_t1, "%s.t1-net-check", ctx)) rb_die("--nets path");
-    { char *c[9] = {"sh", bnd, "55", "sh", "unisacc.com", "tools/lab-loader/net-check.cx", "-o", rb_t1, 0};
+    { char *c[9] = {"sh", bnd, (char *)rb_child_s(), "sh", "unisacc.com", "tools/lab-loader/net-check.cx", "-o", rb_t1, 0};
       if (rb_pipe("--nets T1 checker build", c, root, 0, 0)) rb_die("--nets T1 checker build"); }
 }
 
@@ -968,10 +981,11 @@ static long rb_pipe_deadline(void) {
     const char *v = sy_env("UNISACC_RB_PIPE_MS");
     long ms = 0;
     const char *p;
-    if (!v || !v[0]) return 55000;
+    long cap = rb_lim_ms("rb.pipe");
+    if (!v || !v[0]) return cap;
     for (p = v; *p >= '0' && *p <= '9'; p++) ms = ms * 10 + (*p - '0');
-    if (*p || ms < 1 || ms > 55000) return 55000;
-    if (ms % 1000) return 55000;
+    if (*p || ms < 1 || ms > cap) return cap;
+    if (ms % 1000) return cap;
     return ms;
 }
 
@@ -1060,7 +1074,10 @@ static void rb_freeze_product(const char *root, const char *dir) {
     /* build record first, launcher last: a reader never sees a new launcher with an old record */
     if (cx_fmt(a, sizeof a, "%s/unisacc.com.build.json", dir) || sy_rename(b, a)) rb_die("copy compiler: rename-record");
     if (cx_fmt(a, sizeof a, "%s/unisacc.com", tmp) || cx_fmt(b, sizeof b, "%s/unisacc.com", dir) || sy_rename(a, b)) rb_die("copy compiler: rename-launcher");
-    if (cx_rmtree(tmp)) rb_die("copy compiler: stage-cleanup");
+    /* both product files were renamed out, so the stage dir is normally empty: drop it with a plain rmdir. The
+       guarded cx_rmtree is only the fallback; a bootstrap-built release-build embeds a guard that predates the
+       HOME/.cache/unisacc/chains whitelist and would refuse the stage dir under the chains root. */
+    if (sy_rmdir(tmp) && cx_rmtree(tmp)) rb_die("copy compiler: stage-cleanup");
     sy_printf("release-build\tfreeze-product\trewritten\n");
 }
 
@@ -1091,7 +1108,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
     rb_rev_full[40] = 0;
     for (i = 0; i < 10; i++) brief[i] = rb_rev_full[i];
     brief[10] = 0;
-    if (cx_fmt(dir, sizeof dir, "%s/out/release-snap-%s", root, brief)) rb_die("path");
+    if (cr_snap(root, brief, 1, dir, sizeof dir)) rb_die("path");
     if (cx_fmt(mark, sizeof mark, "%s/.release-rev", dir)) rb_die("path");
     marker = cx_read(mark, &mn);
     if (!(marker && mn >= 40 && mm_same(marker, rb_rev_full, 40))) {

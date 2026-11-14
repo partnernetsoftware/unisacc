@@ -2,7 +2,7 @@
  *
  *   sh ./unisacc.com tools/version-metrics.cx -- --write|--check [--root DIR] [--table FILE]
  *
- * 从证据文件与账本决定性派生 agentwork/version-metrics.tsv，一版一行，列：
+ * 从证据文件与账本决定性派生版本度量表(解析器的 version-metrics kind；账本取 ledger kind)，一版一行，列：
  *   version freeze_to_public_min chain_wall_min chain_compute_min tail_min
  *   chain_rebuilds manual_count blockers_chain blockers_gate gate_stalls
  *   max_single_op_s s9 ci rule_violations product_change
@@ -16,7 +16,9 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.awpath
 
 static char root[4096], tblpath[4400], evarch[4400], ev057[4400], rel057[4400];
 static void die(const char *a, const char *b) { tool_die("version-metrics", a, b, 2); }
@@ -177,6 +179,17 @@ static int verify_ledger_anchors(const char *lpath, int *v054, int *v055, int *v
     char *s = cx_read(lpath, &n);
     int seen54 = 0, seen55 = 0, seen56 = 0, seen57 = 0;
     if (!s) die("cannot read ledger", lpath);
+    {   /* old rows live in archive/work/ledger-202611.tsv after the retired archive-records tool ran: scan them too, the version anchors are history */
+        size_t pl = strlen(lpath), sl = strlen("agentwork/ledger.tsv");
+        if (pl >= sl && !strcmp(lpath + pl - sl, "agentwork/ledger.tsv")) {
+            char apath[4400], *a; size_t an = 0;
+            if (!cx_fmt(apath, sizeof apath, "%.*sarchive/work/ledger-202611.tsv", (int)(pl - sl), lpath) && (a = cx_read(apath, &an)) != 0) {
+                char *m = mm_alloc((long)(n + an + 2));
+                if (m) { mm_copy(m, (long)(n + an + 2), s, (long)n); m[n] = '\n'; mm_copy(m + n + 1, (long)(an + 1), a, (long)an); m[n + 1 + an] = 0; free(s); s = m; n = n + 1 + an; }
+                free(a);
+            }
+        }
+    }
     *v054 = 0; *v055 = 0; *v056 = 0; *v057 = 0;
     while (at < n) {
         size_t e = at;
@@ -224,7 +237,7 @@ static void build_table(char *out, size_t cap, int *rows_out) {
     long s9tot56 = 0, s9ok56 = 0, s9max56 = 455, s9fs56 = 0, s9le56 = 0;
     int used = 0, n;
 
-    if (cx_fmt(lpath, sizeof lpath, "%s/agentwork/ledger.tsv", root)) die("path", 0);
+    if (awp_path(root, "ledger", lpath, (long)sizeof lpath)) die("path", 0);
     verify_ledger_anchors(lpath, &v054, &v055, &v056, &v057);
 
     /* Read live evidence directories when present; validate invariants against known facts */
@@ -319,7 +332,7 @@ int main(int argc, char **argv) {
     if (targ) {
         if (cx_fmt(tblpath, sizeof tblpath, "%s", targ)) die("table path bound", targ);
     } else {
-        if (cx_fmt(tblpath, sizeof tblpath, "%s/agentwork/version-metrics.tsv", root)) die("table path bound", 0);
+        if (awp_path(root, "version-metrics", tblpath, (long)sizeof tblpath)) die("table path bound", 0);
     }
     if (!hm) hm = ".";
     if ((earg ? cx_fmt(evarch, sizeof evarch, "%s", earg) : cx_fmt(evarch, sizeof evarch, "%s/cc-work/evidence-archive", hm)) ||

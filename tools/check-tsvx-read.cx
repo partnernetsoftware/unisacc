@@ -1,0 +1,65 @@
+/* Checks ext.tsvx read.cx (tv_row_next/tv_field/tv_col/tv_expect_cols): behavior assertions only. */
+#pragma unisa use text.iter
+#pragma unisa use tsvx.read
+static int bad, total;
+static void ok(int c, const char *name) { total++; printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+static int fld(const char *s, long n, int row, int idx, char *out) {
+    tx_iter_t it; int r, c, k = 0; long o, l;
+    tx_iter_init(&it, s, n);
+    while ((r = tv_row_next(&it, &c)) == 1) {
+        if (k++ == row) {
+            r = tv_field(&it, idx, &o, &l);
+            if (r) return r;
+            for (r = 0; r < l; r++) out[r] = s[o + r];
+            out[l] = 0; return (int)l;
+        }
+    }
+    return -100;
+}
+int main(void) {
+    char b[64]; long bl = -1; int c = 0; tx_iter_t it;
+    const char *t = "# c\na\tb\tc\n\n\tx\t\n#z\nlast\t\t1";
+    long n = (long)strlen(t);
+    tx_iter_init(&it, t, n);
+    ok(tv_row_next(&it, &c) == 1 && c == 3, "row1-cols-skip-comment");
+    ok(tv_row_next(&it, &c) == 1 && c == 3, "row2-empty-fields-skip-blank");
+    ok(tv_row_next(&it, &c) == 1 && c == 3, "row3-no-trailing-newline");
+    ok(tv_row_next(&it, &c) == 0 && tv_row_next(&it, &c) == 0, "end-stays-0");
+    ok(fld(t, n, 0, 1, b) == 1 && b[0] == 'b', "field-mid");
+    ok(fld(t, n, 1, 0, b) == 0 && b[0] == 0, "field-empty-first");
+    ok(fld(t, n, 1, 2, b) == 0, "field-empty-last");
+    ok(fld(t, n, 2, 2, b) == 1 && b[0] == '1', "field-last-no-newline");
+    ok(fld(t, n, 0, 3, b) == -ERANGE && fld(t, n, 0, -1, b) == -ERANGE, "field-out-of-range");
+    ok(fld("a\tb\r\nc\td\r\n", 10, 0, 1, b) == 1 && b[0] == 'b', "crlf-stripped");
+    ok(tv_row_next(0, &c) == -EINVAL && tv_row_next(&it, 0) == -EINVAL, "row-next-null");
+    tx_iter_init(&it, 0, -1);
+    ok(tv_row_next(&it, &c) == -EINVAL, "row-next-bad-span");
+    {
+        long o, l; tx_iter_t j; tx_iter_init(&j, "a\0b\tc\n", 6);
+        ok(tv_row_next(&j, &c) == 1 && c == 2 && tv_field(&j, 0, &o, &l) == 0 && l == 3 && tv_field(&j, 1, &o, &l) == 0 && l == 1, "nul-in-row");
+        ok(tv_field(0, 0, &o, &l) == -EINVAL, "field-null-it");
+    }
+    ok(tv_expect_cols("a\tb\n#x\n\nc\td\n", 12, 2, &bl) == 0 && bl == 0, "expect-ok");
+    ok(tv_expect_cols("a\tb\n#x\n\nc\td\te\n", 14, 2, &bl) == -EINVAL && bl == 4, "expect-bad-line-physical");
+    ok(tv_expect_cols("a\tb\nc", 5, 2, &bl) == -EINVAL && bl == 2, "expect-short-last-no-newline");
+    ok(tv_expect_cols("a\tb\r\nc\td\r\n", 10, 2, 0) == 0, "expect-crlf-null-badline");
+    ok(tv_expect_cols("", 0, 2, &bl) == 0, "expect-empty-table");
+    ok(tv_expect_cols("a", 1, 0, &bl) == -EINVAL && tv_expect_cols(0, 1, 1, &bl) == -EINVAL, "expect-bad-args");
+    {
+        const char *h = "id\tname\tval\n"; tx_iter_t j;
+        tx_iter_init(&j, h, (long)strlen(h));
+        ok(tv_row_next(&j, &c) == 1, "hdr-row");
+        ok(tv_col(&j, "id", 2) == 0 && tv_col(&j, "val", 3) == 2, "col-found");
+        ok(tv_col(&j, "nam", 3) == -ERANGE && tv_col(&j, "names", 5) == -ERANGE && tv_col(&j, "", 0) == -ERANGE, "col-missing");
+        ok(tv_col(&j, 0, 1) == -EINVAL && tv_col(0, "id", 2) == -EINVAL, "col-bad-args");
+    }
+    {
+        char big[40000]; int i; for (i = 0; i < 39999; i++) big[i] = i % 3 == 1 ? '\t' : 'x';
+        big[39999] = '\n';
+        ok(tv_expect_cols(big, 40000, 13334, &bl) == 0, "long-line");
+        ok(fld(big, 40000, 0, 13333, b) == 1, "long-line-last-field");
+    }
+    printf("%s\n", bad ? "TSVX_READ FAIL" : "TSVX_READ");
+    printf("total=%d failed=%d\n", total, bad);
+    return bad;
+}

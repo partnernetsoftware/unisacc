@@ -27,14 +27,60 @@ static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\
 
 /* run command, capture combined output into out; returns the exit code, -1 when not a plain exit */
 static int sh(const char *cmd, char *out, int cap) {
-    FILE *f = popen(cmd, "r");
-    int n = 0, c;
-    if (!f) return -1;
-    while ((c = fgetc(f)) != EOF) if (n < cap - 1) out[n++] = (char)c;
-    out[n] = 0;
-    c = pclose(f);
-    if (c < 0 || (c & 127)) return -1;
-    return (c >> 8) & 255;
+    char *v[] = {"sh", "-c", (char *)cmd, 0}, *text = 0;
+    size_t n = 0, i;
+    int rc = cx_runv_timeout(v, 50, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+
+/* Input-identity sidecar lint: rows match the phase table's ids in order; inputs non-empty ("-" only
+ * alone); each token is phase:ID / src:GLOB / table:PATH; phase:ID names an existing phase with a
+ * smaller order (so no self reference and no cycle). Returns 0 ok, else a short reason. */
+static const char *inputs_lint(const char *in_text) {
+    static char ids[600][80]; int nid = 0;
+    size_t tbn = 0; char *tbl_text = cx_read("build/chain-phases.tsv", &tbn);
+    if (!tbl_text) return "table read";
+    for (const char *p = tbl_text; *p;) {
+        const char *e = strchr(p, '\n'); if (!e) break;
+        if (*p != '#') {
+            const char *t1 = memchr(p, '\t', (size_t)(e - p)); if (!t1) return "table row";
+            const char *t2 = memchr(t1 + 1, '\t', (size_t)(e - t1 - 1)); if (!t2 || nid == 600 || t2 - t1 - 1 >= 80) return "table row";
+            if (snprintf(ids[nid], 80, "%.*s", (int)(t2 - t1 - 1), t1 + 1) < 0) return "table row";
+            nid++;
+        }
+        p = e + 1;
+    }
+    int row = 0;
+    for (const char *p = in_text; *p;) {
+        const char *e = strchr(p, '\n'); if (!e) return "unterminated";
+        if (*p != '#') {
+            const char *t = memchr(p, '\t', (size_t)(e - p));
+            if (!t || row >= nid) return "row count";
+            if ((size_t)(t - p) != strlen(ids[row]) || memcmp(p, ids[row], (size_t)(t - p))) return "row id";
+            const char *s = t + 1;
+            if (s == e) return "empty inputs";
+            if (e - s == 1 && *s == '-') { p = e + 1; row++; continue; }
+            for (;;) {
+                const char *c = memchr(s, ',', (size_t)(e - s)); const char *te = c ? c : e;
+                if (te == s) return "empty token";
+                if (!strncmp(s, "phase:", 6)) {
+                    int found = -1;
+                    for (int i = 0; i < nid; i++) if (strlen(ids[i]) == (size_t)(te - s - 6) && !memcmp(ids[i], s + 6, (size_t)(te - s - 6))) found = i;
+                    if (found < 0) return "unknown phase";
+                    if (found >= row) return "forward or self phase (cycle)";
+                } else if (!((!strncmp(s, "src:", 4) || !strncmp(s, "table:", 6)) && te - s > (s[0] == 's' ? 4 : 6))) return "token syntax";
+                if (!c) break;
+                s = c + 1;
+            }
+            row++;
+        }
+        p = e + 1;
+    }
+    return row == nid ? 0 : "row count";
 }
 
 int main(int argc, char **argv) {
@@ -43,7 +89,8 @@ int main(int argc, char **argv) {
     size_t tn = 0, an = 0, bn = 0, mn = 0, i;
     int rc;
     char check_marker[96],write_marker[96],count_marker[64];
-    int expected=35+3+2+cf_net_count()+cf_p3_count()+2*(cf_tool_count()+3*cf_net_count())+2*(cf_root_count()+3)+6+6;
+    /* 35 base phases; 4 controller rows beside build/ctx (build-objects, build-front, wave-objects, wave-runner). */
+    int expected=35+4+2+cf_net_count()+cf_p3_count()+2*(cf_tool_count()+3*cf_net_count())+2*(cf_root_count()+3)+6+6;
     SP(check_marker,sizeof check_marker,"CHAIN_PHASES\tstatus=CHECK\tn=%d\n",expected);
     SP(write_marker,sizeof write_marker,"CHAIN_PHASES\tstatus=WRITE\tn=%d\n",expected);
     SP(count_marker,sizeof count_marker,"status=CHECK\tn=%d",expected);
@@ -66,7 +113,10 @@ int main(int argc, char **argv) {
     if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
     {char factpath[3000];size_t z;char *facts=cx_read("build/chain-facts.tsv",&z);
      SP(factpath,sizeof factpath,"%s/build/chain-facts.tsv",fix);
-     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tfacts-copy\n");return 2;}free(facts);}
+     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tfacts-copy\n");return 2;}free(facts);
+     facts=cx_read("build/chain-residue.tsv",&z);
+     SP(factpath,sizeof factpath,"%s/build/chain-residue.tsv",fix);
+     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tresidue-facts-copy\n");return 2;}free(facts);}
 
     SP(cmd, sizeof cmd, "%s --check 2>&1", gen);
     rc = sh(cmd, out, sizeof out);
@@ -83,7 +133,67 @@ int main(int argc, char **argv) {
     b = cx_read(tbl, &bn);
     ck(rc == 0 && a && b && an > 0 && an == bn && !memcmp(a, b, an), "write-twice");
     ck(tree && b && tn == bn && !memcmp(tree, b, tn), "write-equals-tree");
-    ck(tree && strstr(tree,"\tdeps\tlane\tparallelism\n") && strstr(tree,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t55\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\n"), "dependency-and-parallelism-facts");
+    /* The limit comes from the generator's own output (the single source), not a literal: the snap row's timeout column. */
+    {char want[160],*snap=b?strstr(b,"\n0\tsnap\touter\t"):0;int lim=snap?atoi(snap+14):0;
+     SP(want,sizeof want,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t%d\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\t-\t-\t-\n",lim);
+     ck(lim>0 && tree && strstr(tree,"\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n") && strstr(tree,want), "dependency-and-parallelism-facts");
+     /* C1: the closure-class phases of the two lnx targets are parallel by table. In each of g2 and g3,
+        the closure-prepare and closure rows of x86_64 and of arm64 are in different lanes and exclusive
+        dirs, width 4, and no row of one target depends on a closure row of the other; the scheduler may
+        therefore run the pair side by side (tools/chain-run.cx ready()). */
+     {int pair_ok=tree!=0;
+      for(int g=2;g<=3&&pair_ok;g++) for(int t=0;t<2&&pair_ok;t++) {
+          const char *arch=t?"arm64":"x86_64",*other=t?"x86_64":"arm64";char row[400],first[200],cross[80];
+          if(g==2) SP(first,sizeof first,"gen1-lnx-x86_64");
+          else if(t) SP(first,sizeof first,"g2-lnx-x86_64,g2-lnx-arm64");
+          else SP(first,sizeof first,"g2-lnx-x86_64");
+          SP(row,sizeof row,"\tg%d-lnx-%s-closure-prepare\tg%d-lnx-%s\t%d\t%s\tg%d-lnx-%s\t4\t",g,arch,g,arch,lim,first,g,arch);
+          if(!strstr(tree,row)) pair_ok=0;
+          SP(row,sizeof row,"\tg%d-lnx-%s-closure\tg%d-lnx-%s\t%d\tg%d-lnx-%s-closure-prepare\tg%d-lnx-%s\t4\t",g,arch,g,arch,lim,g,arch,g,arch);
+          if(!strstr(tree,row)) pair_ok=0;
+          /* no dependency list names the other target's closure rows of the same generation */
+          SP(cross,sizeof cross,"g%d-lnx-%s-closure",g,other);
+          for(const char *line=tree;line&&*line&&pair_ok;) {
+              const char *e=strchr(line,'\n');size_t len=e?(size_t)(e-line):strlen(line);char own[80];
+              SP(own,sizeof own,"\tg%d-lnx-%s",g,arch);
+              const char *hit=line;
+              while((hit=strstr(hit,cross))&&hit<line+len) {
+                  /* a row of this target (its id starts right after the order column) naming the other target's closure */
+                  const char *tab=memchr(line,'\t',len);
+                  if(tab&&!strncmp(tab,own,strlen(own))) pair_ok=0;
+                  hit++;
+              }
+              line=e?e+1:0;
+          }
+      }
+      ck(pair_ok, "lnx-closure-pairs-in-separate-lanes-without-cross-dependency");}
+     /* The residue rule of a phase is a generated column triple; the kernels rows carry the 0.0.58 rule. */
+     ck(tree && strstr(tree,"\tkernels-g2\touter\t") && strstr(tree,"\t1\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route,fixedpoint/g2/*.kernel\n")
+        && strstr(tree,"\t1\tscrub\tfixedpoint/g3/phase-6.tsv\tfixedpoint/g3/kernel-route,fixedpoint/g3/*.kernel\n"), "residue-facts-in-table");}
+
+    /* Residue facts that leave the output dir, name no phase or have no known policy are refused; nothing is written. */
+    {char factpath[3000];size_t z,gn=0;char *facts,*good;int refused=0;
+     static const char *bad_rows[8]={
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\t../outside/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/../../x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\t/tmp/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/*/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\ttoplevel\n",
+       "kernels-g2\tscrub\t../phase-6.tsv\tfixedpoint/g2/kernel-route\n",
+       "kernels-g2\twipe\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route\n",
+       "no-such-phase\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route\n"};
+     SP(factpath,sizeof factpath,"%s/build/chain-residue.tsv",fix);good=cx_read(factpath,&gn);
+     SP(cmd, sizeof cmd, "cd '%s' && %s --write 2>&1", fix, gen);
+     facts=cx_read(tbl,&z);
+     for(int j=0;j<8;j++){size_t after=0;char *now;
+       if(cx_write(factpath,bad_rows[j],strlen(bad_rows[j])))return 2;
+       rc=sh(cmd,out,sizeof out);now=cx_read(tbl,&after);
+       if(rc==2&&strstr(out,"chain-phases-gen: REFUSE residue fact")&&!strstr(out,"status=WRITE")&&facts&&now&&after==z&&!memcmp(now,facts,z))refused++;
+       free(now);}
+     ck(refused==8,"neg-residue-fact-refused-no-write");
+     if(!good||cx_write(factpath,good,gn))return 2;
+     free(good);free(facts);
+     SP(cmd, sizeof cmd, "cd '%s' && %s --check 2>&1", fix, gen);}
 
     SP(cmd, sizeof cmd, "cd '%s' && %s --check 2>&1", fix, gen);
     ck(sh(cmd, out, sizeof out) == 0 && strstr(out, count_marker), "check-fixture");
@@ -106,6 +216,7 @@ int main(int argc, char **argv) {
             mn = bn;
             for (i = 0; i < bn; i++) if (b[i] == '\n' && ++nl == 3) { at = i - 1; break; }
             if (at && m[at] >= '0' && m[at] <= '9') m[at] = m[at] == '9' ? '0' : (char)(m[at] + 1);
+            else if (at && m[at] == '-') m[at] = 'x'; /* the row now ends with its residue_paths column */
             else mn = 0;
         }
     }
@@ -142,6 +253,35 @@ int main(int argc, char **argv) {
     SP(cmd, sizeof cmd, "cd '%s' && %s --regen 2>&1", fix, gen);
     ck(rc == 2 && sh(cmd, out, sizeof out) == 2 && strstr(out, "usage --write|--check"), "neg-usage");
 
+    /* DSG-RUN1: input-identity sidecar. The checked-in sidecar passes the lint; seeded defects are rejected. */
+    {   size_t sn = 0; char *side = cx_read("build/chain-phase-inputs.tsv", &sn);
+        ck(side && tree && !inputs_lint(side), "inputs-lint-tree");
+        int rej = 0, tries = 0;
+        if (side && tree) {
+            /* each mutation: replace the inputs of the 'snap' row (first data row) with a bad value */
+            static const char *bad[] = {"", "phase:no-such-phase", "phase:ctx", "phase:snap", "foo:bar", "src:", "phase:snap,"};
+            char *row = strstr(side, "\nsnap\t");
+            for (int j = 0; row && j < 7; j++) {
+                char *eol = strchr(row + 1, '\n'); size_t head = (size_t)(row + 6 - side), tail = sn - (size_t)(eol - side);
+                char *mut = malloc(head + strlen(bad[j]) + tail + 1);
+                if (!mut) continue;
+                if (snprintf(mut, head + strlen(bad[j]) + tail + 1, "%.*s%s%s", (int)head, side, bad[j], eol) < 0) { free(mut); continue; }
+                tries++; if (inputs_lint(mut)) rej++;
+                free(mut);
+            }
+            /* a dropped last row is a count mismatch */
+            size_t cl = strlen(side);
+            char *cut = malloc(cl + 1);
+            if (cut && cl > 2 && snprintf(cut, cl + 1, "%s", side) >= 0) { cut[cl - 1] = 0; char *q = strrchr(cut, '\n'); if (q) { q[1] = 0; tries++; if (inputs_lint(cut)) rej++; } }
+            free(cut);
+        }
+        ck(tries == 8 && rej == 8, "neg-inputs-lint-rejects");
+        int nonempty = 1;
+        /* the sidecar written into the fixture equals the tree's */
+        char cmpcmd[6000]; SP(cmpcmd, sizeof cmpcmd, "cmp -s '%s/build/chain-phase-inputs.tsv' build/chain-phase-inputs.tsv", fix);
+        ck(nonempty && side && sh(cmpcmd, out, sizeof out) == 0, "inputs-write-equals-tree");
+        free(side);
+    }
     free(tree); free(a); free(b); free(m);
     printf("EVIDENCE\t%s\n",fix);
     printf("CHECK_CHAIN_PHASES_GEN\tchecks=%d\tfailed=%d\n", checks, failed);

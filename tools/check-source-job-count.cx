@@ -15,9 +15,14 @@
  *   N == 5 + 3*G
  *   tools == 5
  * Adding a recipe without bumping the wave numbers turns this red immediately
- * instead of failing mid-epoch with "authoritative NNN inventory". */
+ * instead of failing mid-epoch with "authoritative NNN inventory".
+ *
+ * Provenance: token walk via cxlib.chainargv (ca_tokens), not substring anchors. */
+#pragma unisa use cxlib.chainargv
 #pragma unisa use sys.fs
+#pragma unisa use sys.io
 #pragma unisa use text.text
+#pragma unisa use mem.heap
 
 static int failed;
 
@@ -26,69 +31,113 @@ static void ok(int cond, const char *name) {
     printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
 }
 
-/* whole file with a NUL terminator, for strstr/strchr; 0 on read failure */
 static char *loadz(const char *p, long *n) {
     size_t zn;
     char *s = cx_read(p, &zn);
     char *z;
+    size_t i;
     if (!s) return 0;
-    z = malloc(zn + 1);
-    if (!z) { free(s); return 0; }
-    { size_t i; for (i = 0; i < zn; i++) z[i] = s[i]; }
+    z = mm_alloc(zn + 1);
+    if (!z) { mm_free(s); return 0; }
+    for (i = 0; i < zn; i++) z[i] = s[i];
     z[zn] = 0;
-    free(s);
+    mm_free(s);
     *n = (long)zn;
     return z;
 }
 
-/* recipes entries in the SpModel array: {"<letter-starting-id>", ... */
-static long count_recipes(const char *s) {
-    const char *p = strstr(s, "static const SpModel recipes");
-    const char *brace, *q;
-    long cnt = 0;
-    if (!p) return -1;
-    brace = strchr(p, '{');
-    if (!brace) return -1;
-    q = brace + 1;
-    while (*q) {
-        if (q[0] == '{' && q[1] == '"' &&
-            ((q[2] >= 'a' && q[2] <= 'z') || (q[2] >= 'A' && q[2] <= 'Z'))) cnt++;
-        if (q[0] == '}' && q[1] == ';') break;
-        q++;
+static long dec_tok(void *t, int i) {
+    const char *s;
+    long v = 0;
+    int any = 0;
+    if (ca_token_kind(t, i) != 1 && ca_token_kind(t, i) != 0) return -1;
+    s = ca_token_text(t, i);
+    if (!s) return -1;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (long)(*s - '0'); s++; any = 1; }
+    return any && !*s ? v : -1;
+}
+
+/* recipes entries: {"<letter-starting-id>", ... inside SpModel recipes[] */
+static long count_recipes(void *t) {
+    int n = ca_token_count(t), i, j, cnt = 0, body = -1;
+    for (i = 0; i + 1 < n; i++) {
+        if (ca_token_is(t, i, "SpModel") && ca_token_is(t, i + 1, "recipes")) {
+            for (j = i + 2; j < n; j++) {
+                if (ca_token_is(t, j, "{")) { body = j + 1; break; }
+            }
+            break;
+        }
+    }
+    if (body < 0) return -1;
+    for (i = body; i + 1 < n; i++) {
+        if (ca_token_is(t, i, "}") && ca_token_is(t, i + 1, ";")) break;
+        if (ca_token_is(t, i, "{") && ca_token_kind(t, i + 1) == 2) {
+            const char *s = ca_token_text(t, i + 1);
+            if (s && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z'))) cnt++;
+        }
     }
     return cnt;
 }
 
-/* first unsigned decimal after KEY in S, or -1 */
-static long after(const char *s, const char *key) {
-    const char *p = strstr(s, key);
-    long v = 0;
-    int any = 0;
-    if (!p) return -1;
-    p += strlen(key);
-    while (*p >= '0' && *p <= '9') { v = v * 10 + (long)(*p - '0'); p++; any = 1; }
-    return any ? v : -1;
+/* first ids[N] dimension */
+static long ids_cap(void *t) {
+    int n = ca_token_count(t), i;
+    for (i = 0; i + 2 < n; i++) {
+        if (ca_token_is(t, i, "ids") && ca_token_is(t, i + 1, "[")) {
+            long v = dec_tok(t, i + 2);
+            if (v > 0) return v;
+        }
+    }
+    return -1;
+}
+
+/* first counts[K]!=N  -> N (K is "0" or "1") */
+static long counts_ne(void *t, const char *k) {
+    int n = ca_token_count(t), i;
+    for (i = 0; i + 5 < n; i++) {
+        if (ca_token_is(t, i, "counts") && ca_token_is(t, i + 1, "[") && ca_token_is(t, i + 2, k) &&
+            ca_token_is(t, i + 3, "]") && (ca_token_is(t, i + 4, "!=") ||
+            (ca_token_is(t, i + 4, "!") && ca_token_is(t, i + 5, "=")))) {
+            int ni = ca_token_is(t, i + 4, "!=") ? i + 5 : i + 6;
+            long v = dec_tok(t, ni);
+            if (v > 0) return v;
+        }
+    }
+    return -1;
 }
 
 int main(void) {
     char *r, *w;
+    void *tr, *tw;
     long rn, wn, recipes, ids, gen, tools;
     r = loadz("tools/source-package.cx", &rn);
     w = loadz("tools/source-job-wave.cx", &wn);
     if (!r || !w) { fprintf(stderr, "check-source-job-count: read failed\n"); return 2; }
-    recipes = count_recipes(r);
-    ids = after(w, "ids[");
-    gen = after(w, "counts[1]!=");
-    tools = after(w, "counts[0]!=");
+    tr = ca_tokens(r);
+    tw = ca_tokens(w);
+    if (!tr || !tw) {
+        fprintf(stderr, "check-source-job-count: tokenize failed\n");
+        if (tr) ca_tokens_free(tr);
+        if (tw) ca_tokens_free(tw);
+        mm_free(r); mm_free(w);
+        return 2;
+    }
+    recipes = count_recipes(tr);
+    ids = ids_cap(tw);
+    gen = counts_ne(tw, "1");
+    tools = counts_ne(tw, "0");
     ok(recipes > 0, "recipes-counted");
     ok(ids > 0, "wave-ids-array-cap");
     ok(gen > 0, "wave-gen-count");
     ok(recipes == gen, "recipes-equal-gen-tbl-net-count");
     ok(ids == 5 + 3 * gen, "ids-cap-equals-5-plus-3-times-recipes");
     ok(tools == 5, "tools-count-is-5");
-    printf("SOURCE_JOB_COUNT\trecipes=%ld\ttools=5\tgen=tbl=net=%ld\tjobs=%ld\n", recipes, gen, ids);
-    printf("SOURCE_JOB_COUNT\tassertions=6\tfailed=%d\n", failed);
-    free(r);
-    free(w);
+    /* One final marker line only (register/run-batch expect a single SOURCE_JOB_COUNT token). */
+    printf("SOURCE_JOB_COUNT\tassertions=6\tfailed=%d\trecipes=%ld\ttools=5\tgen=%ld\tjobs=%ld\n",
+           failed, recipes, gen, ids);
+    ca_tokens_free(tr);
+    ca_tokens_free(tw);
+    mm_free(r);
+    mm_free(w);
     return failed ? 1 : 0;
 }

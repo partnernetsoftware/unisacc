@@ -1,6 +1,8 @@
 #pragma unisa module posix
 #pragma unisa dock
 #pragma unisa use sys.sysnums
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
 /* L0 sys/posix: the POSIX calls the carried runtime does not provide on
    0.0.43 (plans/cx-layers.md; apps/csih/docs/python-debt.md BLOCKED list),
    made from the system calls themselves. No #include: __syscall6 is the
@@ -232,4 +234,162 @@ static long syp_rlimit_as_os(void) {
 
 long sy_rlimit_as(void) {
     return syp_rlimit_as_os();
+}
+
+/* ---- W3: directory iterator with kinds, remove_all, link, utimes, pread/pwrite
+   (build/std-surface.tsv rows).  Linux first-class; macOS written from the headers (not run on a Mac);
+   Windows: every call here is -ENOSYS (stated, not emulated). ---- */
+
+typedef struct { int h; int kind; long name_n; char name[256]; } sy_dir_t;
+
+#define SYP_DSLOTS 32
+static struct { int used, fd; long pos, len, base; char path[512]; unsigned char buf[4096]; } syp_ds[SYP_DSLOTS];
+
+/* Directory-open flags; Windows' prelude has no O_DIRECTORY (and sy_openat is -ENOSYS there anyway). */
+static int syp_dirflags_os(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    return O_RDONLY | O_DIRECTORY;
+#endif
+}
+
+/* Open directory PATH for iteration with sy_dir_next.  0, or -errno (-EMFILE: 32 iterators open). */
+int sy_dir_open(sy_dir_t *d, const char *path) {
+    int i, fd;
+    if (!d || !path || !path[0]) return -EINVAL;
+    memset(d, 0, sizeof *d);
+    for (i = 0; i < SYP_DSLOTS && syp_ds[i].used; i++) {}
+    if (i == SYP_DSLOTS) return -EMFILE;
+    fd = sy_openat(sy_at_fdcwd(), path, syp_dirflags_os(), 0);
+    if (fd < 0) return fd;
+    syp_ds[i].used = 1;
+    syp_ds[i].fd = fd;
+    syp_ds[i].pos = syp_ds[i].len = syp_ds[i].base = 0;
+    syp_ds[i].path[0] = 0;
+    if (strlen(path) < sizeof syp_ds[i].path) { if (mm_copy(syp_ds[i].path, (long)sizeof syp_ds[i].path, path, (long)strlen(path) + 1)) syp_ds[i].path[0] = 0; }
+    d->h = i + 1;
+    return 0;
+}
+
+/* The next entry of D (not "." or ".."): 1 with D->name, D->name_n and D->kind set ('f' 'd' 'l' 's' 'p' or '?'),
+   0 at the end, -errno otherwise (-ENAMETOOLONG: the name is over 255 bytes; the entry is skipped). */
+int sy_dir_next(sy_dir_t *d) {
+    int i;
+    if (!d || d->h < 1 || d->h > SYP_DSLOTS || !syp_ds[d->h - 1].used) return -EBADF;
+    i = d->h - 1;
+    for (;;) {
+        long at, reclen, len, ty;
+        const unsigned char *r;
+        const char *name;
+        if (syp_ds[i].pos >= syp_ds[i].len) {
+            long n = syp_mac ? syp(syp_dents, syp_ds[i].fd, (long)syp_ds[i].buf, sizeof syp_ds[i].buf, (long)&syp_ds[i].base, 0)
+                             : syp(syp_dents, syp_ds[i].fd, (long)syp_ds[i].buf, sizeof syp_ds[i].buf, 0, 0);
+            if (n < 0) return (int)n;
+            if (n == 0) return 0;
+            syp_ds[i].pos = 0;
+            syp_ds[i].len = n;
+        }
+        at = syp_ds[i].pos;
+        r = syp_ds[i].buf + at;
+        reclen = r[16] | (r[17] << 8);
+        if (reclen < 20) return -EIO;
+        syp_ds[i].pos += reclen;
+        name = (const char *)r + (syp_mac ? 21 : 19);
+        ty = syp_mac ? r[20] : r[18];
+        if (syp_mac) len = r[18] | (r[19] << 8);
+        else { len = 0; while (at + 19 + len < syp_ds[i].len && at + 19 + len < at + reclen && name[len]) len++; }
+        ty = syp_mac ? r[20] : r[18];
+        if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')) continue;
+        if (len > 255) return -ENAMETOOLONG;
+        if (mm_copy(d->name, (long)sizeof d->name, name, len)) return -ENAMETOOLONG;
+        d->name[len] = 0;
+        d->name_n = len;
+        d->kind = ty == 8 ? 'f' : ty == 4 ? 'd' : ty == 10 ? 'l' : ty == 12 ? 's' : ty == 1 ? 'p' : '?';
+        if (ty == 0) {
+            char full[1024];
+            sy_stat_t st;
+            if (!cx_fmt(full, sizeof full, "%s/%s", syp_ds[i].path, d->name) && sy_lstat(full, &st) == 0) d->kind = st.kind;
+        }
+        return 1;
+    }
+}
+
+/* Close D.  0, or -EBADF (never opened, or already closed). */
+int sy_dir_close(sy_dir_t *d) {
+    int i, rc;
+    if (!d || d->h < 1 || d->h > SYP_DSLOTS || !syp_ds[d->h - 1].used) return -EBADF;
+    i = d->h - 1;
+    rc = sy_close(syp_ds[i].fd);
+    syp_ds[i].used = 0;
+    d->h = 0;
+    return rc;
+}
+
+static int syp_rm_all(const char *path, int depth) {
+    sy_stat_t st;
+    int rc;
+    sy_dir_t d;
+    char child[1024];
+    rc = sy_lstat(path, &st);
+    if (rc == -ENOENT) return 0;
+    if (rc) return rc;
+    if (st.kind != 'd') return sy_unlink(path);
+    if (depth >= SYP_DSLOTS - 1) return -ELOOP;
+    rc = sy_dir_open(&d, path);
+    if (rc) return rc;
+    for (;;) {
+        int n = sy_dir_next(&d);
+        if (n < 0) { rc = n; break; }
+        if (n == 0) break;
+        if (cx_fmt(child, sizeof child, "%s/%s", path, d.name)) { rc = -ENAMETOOLONG; break; }
+        rc = syp_rm_all(child, depth + 1);
+        if (rc && rc != -ENOENT) break;
+        rc = 0;
+    }
+    sy_dir_close(&d);
+    if (rc) return rc;
+    return sy_rmdir(path);
+}
+
+/* rm -r PATH (Rust remove_dir_all; Node rm recursive).  Never follows a symbolic link; an absent PATH is 0;
+   "", "/", "." and ".." are -EINVAL.  0, or the first -errno. */
+int sy_remove_all(const char *path) {
+    if (!path || !path[0] || !strcmp(path, "/") || !strcmp(path, ".") || !strcmp(path, "..")) return -EINVAL;
+    return syp_rm_all(path, 0);
+}
+
+/* link(2): FROM gets a second name TO.  0, or -errno (-EEXIST).  -ENOSYS on Windows. */
+int sy_link(const char *from, const char *to) {
+    return sy_linkat(sy_at_fdcwd(), from, sy_at_fdcwd(), to, 0);
+}
+
+/* Set PATH's access and modification times (seconds + nanoseconds; follows symbolic links).
+   0, or -errno; -EINVAL for ns outside 0..999999999; -ENOSYS on Windows. */
+static long syp_sc3_os(long num, long a, long b, long c, long d) {
+#ifdef _WIN32
+    (void)num; (void)a; (void)b; (void)c; (void)d;
+    return -ENOSYS;
+#else
+    return __syscall6(_UNISA_SC(num), a, b, c, d, 0);
+#endif
+}
+
+int sy_utimes(const char *path, long atime_s, long atime_ns, long mtime_s, long mtime_ns) {
+    long ts[4];
+    if (!path || !path[0] || atime_ns < 0 || atime_ns > 999999999L || mtime_ns < 0 || mtime_ns > 999999999L) return -EINVAL;
+    ts[0] = atime_s; ts[1] = atime_ns; ts[2] = mtime_s; ts[3] = mtime_ns;
+    return (int)syp_sc3_os(280, sy_at_fdcwd(), (long)path, (long)ts, 0);
+}
+
+/* read at byte offset OFF without moving the file position.  Bytes read (0 at end), or -errno. */
+long sy_pread(int fd, void *buf, long n, int64_t off) {
+    if (!buf || n < 0 || off < 0) return -EINVAL;
+    return syp_sc3_os(17, fd, (long)buf, n, (long)off);
+}
+
+/* write at byte offset OFF without moving the file position.  Bytes written, or -errno. */
+long sy_pwrite(int fd, const void *buf, long n, int64_t off) {
+    if (!buf || n < 0 || off < 0) return -EINVAL;
+    return syp_sc3_os(18, fd, (long)buf, n, (long)off);
 }

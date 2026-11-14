@@ -1,0 +1,222 @@
+/* tools/check-chain-tool-pin.cx -- 链工具按输出目录钉住(0.0.59 DEBT-CHAIN-PIN-REST)。
+ *
+ *   sh ./unisacc.com tools/check-chain-tool-pin.cx -- /ABS/OUT /ABS/candidate-chain-tool
+ *
+ * 对 whole-front、preflight、release-build、release-ape 各一遍(candidate-chain 的 --tool-pin-fixture
+ * 入口,与链内 bound_sh_secs 同一函数 tool_pinned,机制同 chain-step 钉住):
+ *   (1) 首次钉住:NAME.native 与 NAME.pin 出现,pin 记工具名、输出目录、源码 sha、可执行体 sha;
+ *   (2) 正控:未改的 pin 再用一次不重编 -- 此时夹具根的 unisacc.com 已换成必失败的桩,重编必败;
+ *   (3) 检出内工具源码改动后 pin 仍复用(不再读检出);
+ *   (4) 负控 changed-input:改动 NAME.native 字节,拒绝 "REFUSE chain-tool pin mismatch";还原后复用;
+ *   (5) 负控 changed-dir:把 NAME.pin 与 NAME.native 拷到另一输出目录使用,拒绝 "REFUSE chain-tool pin dir mismatch"。
+ * 夹具根里的四个工具是平凡程序;真工具的可编译性由各自的 check 与链覆盖。
+ * Marker: CHECK_CHAIN_TOOL_PIN failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+
+static int failed;
+static void ck(int ok, const char *what) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+static int run(char **v, int secs, char **out) {
+    char *w[40]; int k = 0;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$0\" \"$@\" 2>&1";
+    for (int i = 0; v[i] && k < 39; i++) w[k++] = v[i];
+    w[k] = 0;
+    size_t n = 0; char *o = 0;
+    int rc = cx_runv_timeout(w, secs, &o, &n);
+    if (out) { *out = o; } else { if (rc && o) fwrite(o, 1, n, stdout); free(o); }
+    return rc;
+}
+static const char *has_sub(const char *b, const char *needle) {
+    size_t bl = strlen(b), nl = strlen(needle), i;
+    for (i = 0; i + nl <= bl; i++) if (!memcmp(b + i, needle, nl)) return b + i;
+    return 0;
+}
+static int copyfile_fixture(const char *from, const char *to) {
+    size_t n = 0; char *b = cx_read(from, &n);
+    if (!b) return 1;
+    int rc = cx_write(to, b, n); free(b);
+    return rc || sy_chmod(to, 0755);
+}
+static int pinrun(const char *cc, const char *root, const char *out, const char *tool, char **log) {
+    char *v[] = {(char *)cc, "--tool-pin-fixture", (char *)root, (char *)out, (char *)tool, 0};
+    return run(v, 50, log);
+}
+int main(int argc, char **argv) {
+    static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", 0};
+    char root[4400], tdir[4400], com[4400];
+    if (argc < 3) return 2;
+    const char *od = argv[1], *cc = argv[2];
+    if (cx_fmt(root, sizeof root, "%s/root", od) || cx_fmt(tdir, sizeof tdir, "%s/root/tools", od) ||
+        cx_fmt(com, sizeof com, "%s/root/unisacc.com", od)) return 2;
+    sy_mkdir(od, 0755); sy_mkdir(root, 0755); sy_mkdir(tdir, 0755);
+    char cwd[4400];
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    char wrap[9000];
+    if (cx_fmt(wrap, sizeof wrap, "exec sh %s/unisacc.com \"$@\"\n", cwd) || cx_write(com, wrap, strlen(wrap))) return 2;
+    for (int k = 0; names[k]; k++) {
+        char src[4400], out[4400], out2[4400], nat[4400], pin[4400], nat2[4400], pin2[4400], tool[4400], body[200];
+        if (cx_fmt(src, sizeof src, "%s/%s.cx", tdir, names[k]) || cx_fmt(out, sizeof out, "%s/out-%s", od, names[k]) ||
+            cx_fmt(out2, sizeof out2, "%s/out2-%s", od, names[k]) || cx_fmt(nat, sizeof nat, "%s/%s.native", out, names[k]) ||
+            cx_fmt(pin, sizeof pin, "%s/%s.pin", out, names[k]) || cx_fmt(nat2, sizeof nat2, "%s/%s.native", out2, names[k]) ||
+            cx_fmt(pin2, sizeof pin2, "%s/%s.pin", out2, names[k]) || cx_fmt(tool, sizeof tool, "%s", src)) return 2;
+        if (cx_fmt(body, sizeof body, "int main(void){ return %d; }\n", 0) || cx_write(src, body, strlen(body))) return 2;
+        sy_mkdir(out, 0755); sy_mkdir(out2, 0755);
+        char *log = 0, label[200];
+        /* (1) 首次钉住 */
+        int rc = pinrun(cc, root, out, tool, &log);
+        size_t pn = 0; char *pb = cx_read(pin, &pn);
+        char outl[4500];
+        cx_fmt(outl, sizeof outl, "\nout=%s\n", out);
+        cx_fmt(label, sizeof label, "%s-first-pin-recorded", names[k]);
+        ck(rc == 0 && pb && has_sub(pb, "chain-tool-pin-v1\n") && has_sub(pb, outl) && has_sub(pb, "\nsrc_sha=") && has_sub(pb, "\nnative_sha=") && sy_access(nat, 0) == 0, label);
+        free(log);
+        /* (2) 正控:换成必败的编译桩后,未改的 pin 仍复用,即未重编 */
+        char *bad = "exit 7\n";
+        if (cx_write(com, bad, strlen(bad))) return 2;
+        log = 0; rc = pinrun(cc, root, out, tool, &log);
+        cx_fmt(label, sizeof label, "%s-unchanged-pin-reused-without-recompile", names[k]);
+        ck(rc == 0 && log && has_sub(log, "TOOL_PIN") && !has_sub(log, "CHAIN_TOOL_PIN"), label);
+        free(log);
+        /* (3) 检出内源码改动不影响钉住 */
+        if (cx_fmt(body, sizeof body, "int main(void){ return %d; }\n", 3) || cx_write(src, body, strlen(body))) return 2;
+        log = 0; rc = pinrun(cc, root, out, tool, &log);
+        size_t pn3 = 0; char *pb3 = cx_read(pin, &pn3);
+        cx_fmt(label, sizeof label, "%s-checkout-edit-keeps-pin", names[k]);
+        ck(rc == 0 && pb3 && pn3 == pn && !memcmp(pb, pb3, pn), label);
+        free(log); free(pb3);
+        /* (4) changed-input 负控 */
+        size_t nn = 0; char *nb = cx_read(nat, &nn);
+        char *junk = malloc(nn + 2);
+        if (!nb || !junk) return 2;
+        if (mm_copy(junk, (long)nn + 2, nb, (long)nn)) return 2;
+        junk[nn] = '\n';
+        if (cx_write(nat, junk, nn + 1) || sy_chmod(nat, 0755)) return 2;
+        log = 0; rc = pinrun(cc, root, out, tool, &log);
+        cx_fmt(label, sizeof label, "%s-changed-input-refused", names[k]);
+        ck(rc != 0 && log && has_sub(log, "REFUSE chain-tool pin mismatch"), label);
+        free(log); free(junk);
+        if (cx_write(nat, nb, nn) || sy_chmod(nat, 0755)) return 2;
+        log = 0; rc = pinrun(cc, root, out, tool, &log);
+        cx_fmt(label, sizeof label, "%s-restored-input-reused", names[k]);
+        ck(rc == 0, label);
+        free(log);
+        /* (5) changed-dir 负控 */
+        if (copyfile_fixture(nat, nat2) || copyfile_fixture(pin, pin2)) return 2;
+        log = 0; rc = pinrun(cc, root, out2, tool, &log);
+        cx_fmt(label, sizeof label, "%s-changed-dir-refused", names[k]);
+        ck(rc != 0 && log && has_sub(log, "REFUSE chain-tool pin dir mismatch"), label);
+        free(log); free(nb); free(pb);
+        if (cx_fmt(wrap, sizeof wrap, "exec sh %s/unisacc.com \"$@\"\n", cwd) || cx_write(com, wrap, strlen(wrap))) return 2;
+    }
+    /* entry-build 源码钉(DSG-DRV1 第 1 片):--eb-pin-fixture ROOT OUT */
+    {
+        char eroot[4400], etools[4400], esrc[4400], eo1[4400], eo2[4400], ecp[4400], epin[4400], ecp2[4400], epin2[4400];
+        if (cx_fmt(eroot, sizeof eroot, "%s/eroot", od) || cx_fmt(etools, sizeof etools, "%s/eroot/tools", od) ||
+            cx_fmt(esrc, sizeof esrc, "%s/eroot/tools/entry-build.cx", od) || cx_fmt(eo1, sizeof eo1, "%s/eout1", od) ||
+            cx_fmt(eo2, sizeof eo2, "%s/eout2", od) || cx_fmt(ecp, sizeof ecp, "%s/entry-build.pin.cx", eo1) ||
+            cx_fmt(epin, sizeof epin, "%s/entry-build.pin", eo1) || cx_fmt(ecp2, sizeof ecp2, "%s/entry-build.pin.cx", eo2) ||
+            cx_fmt(epin2, sizeof epin2, "%s/entry-build.pin", eo2)) return 2;
+        sy_mkdir(eroot, 0755); sy_mkdir(etools, 0755); sy_mkdir(eo1, 0755); sy_mkdir(eo2, 0755);
+        char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
+        if (cx_write(esrc, v1, strlen(v1))) return 2;
+        char *l = 0;
+        char *ev[] = {(char *)cc, "--eb-pin-fixture", eroot, eo1, 0};
+        int rc = run(ev, 50, &l);
+        size_t cn = 0; char *cb = cx_read(ecp, &cn);
+        size_t pn = 0; char *pb = cx_read(epin, &pn);
+        ck(rc == 0 && cb && cn == strlen(v1) && !memcmp(cb, v1, cn) && pb && has_sub(pb, "tool=entry-build\n") && has_sub(pb, "\nsrc_sha="), "entry-build-first-pin-copy-recorded");
+        free(l);
+        /* 检出内源码改动不影响钉住 */
+        if (cx_write(esrc, v2, strlen(v2))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        size_t cn2 = 0; char *cb2 = cx_read(ecp, &cn2);
+        ck(rc == 0 && cb2 && cn2 == strlen(v1) && !memcmp(cb2, v1, cn2), "entry-build-checkout-edit-keeps-pin");
+        free(l); free(cb2);
+        /* changed-input:改副本字节 */
+        if (cx_write(ecp, v2, strlen(v2))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), "entry-build-changed-input-refused");
+        free(l);
+        if (cx_write(ecp, v1, strlen(v1))) return 2;
+        l = 0; rc = run(ev, 50, &l);
+        ck(rc == 0, "entry-build-restored-input-reused");
+        free(l);
+        /* changed-dir:pin 与副本拷到别的输出目录 */
+        if (cx_write(ecp2, v1, strlen(v1)) || cx_write(epin2, pb, pn)) return 2;
+        char *ev2[] = {(char *)cc, "--eb-pin-fixture", eroot, eo2, 0};
+        l = 0; rc = run(ev2, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), "entry-build-changed-dir-refused");
+        free(l); free(cb); free(pb);
+    }
+    /* kernel-route 与 asm-source 源码钉(DSG-DRV1 第 2 片):--src-pin-fixture ROOT OUT NAME */
+    {
+        const char *names[2] = {"kernel-route", "asm-source"};
+        for (int k = 0; k < 2; k++) {
+            const char *nm = names[k];
+            char kroot[4400], ktools[4400], ksrc[4400], ko1[4400], ko2[4400], kcp[4400], kcp2[4400], kpin[4400], kpin2[4400], lab[200];
+            if (cx_fmt(kroot, sizeof kroot, "%s/kroot-%s", od, nm) || cx_fmt(ktools, sizeof ktools, "%s/tools", kroot) ||
+                cx_fmt(ksrc, sizeof ksrc, "%s/tools/%s.cx", kroot, nm) || cx_fmt(ko1, sizeof ko1, "%s/kout1-%s", od, nm) ||
+                cx_fmt(ko2, sizeof ko2, "%s/kout2-%s", od, nm) || cx_fmt(kcp, sizeof kcp, "%s/%s.pin.cx", ko1, nm) ||
+                cx_fmt(kcp2, sizeof kcp2, "%s/%s.pin.cx", ko2, nm) || cx_fmt(kpin, sizeof kpin, "%s/%s.pin", ko1, nm) ||
+                cx_fmt(kpin2, sizeof kpin2, "%s/%s.pin", ko2, nm)) return 2;
+            sy_mkdir(kroot, 0755); sy_mkdir(ktools, 0755); sy_mkdir(ko1, 0755); sy_mkdir(ko2, 0755);
+            char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
+            if (cx_write(ksrc, v1, strlen(v1))) return 2;
+            char *l = 0;
+            char *ev[] = {(char *)cc, "--src-pin-fixture", kroot, ko1, (char *)nm, 0};
+            int rc = run(ev, 50, &l);
+            size_t cn = 0; char *cb = cx_read(kcp, &cn);
+            size_t pn = 0; char *pb = cx_read(kpin, &pn);
+            cx_fmt(lab, sizeof lab, "%s-first-pin-copy-recorded", nm);
+            ck(rc == 0 && cb && cn == strlen(v1) && !memcmp(cb, v1, cn) && pb && has_sub(pb, "\nsrc_sha="), lab);
+            free(l);
+            if (cx_write(ksrc, v2, strlen(v2))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            size_t cn2 = 0; char *cb2 = cx_read(kcp, &cn2);
+            cx_fmt(lab, sizeof lab, "%s-checkout-edit-keeps-pin", nm);
+            ck(rc == 0 && cb2 && cn2 == strlen(v1) && !memcmp(cb2, v1, cn2), lab);
+            free(l); free(cb2);
+            if (cx_write(kcp, v2, strlen(v2))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-changed-input-refused", nm);
+            ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), lab);
+            free(l);
+            if (cx_write(kcp, v1, strlen(v1))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-restored-input-reused", nm);
+            ck(rc == 0, lab);
+            free(l);
+            if (cx_write(kcp2, v1, strlen(v1)) || cx_write(kpin2, pb, pn)) return 2;
+            char *ev2[] = {(char *)cc, "--src-pin-fixture", kroot, ko2, (char *)nm, 0};
+            l = 0; rc = run(ev2, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-changed-dir-refused", nm);
+            ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), lab);
+            free(l); free(cb); free(pb);
+        }
+    }
+    /* 静默回退加固(DSG-DRV1 第 3 片):真实模式缺源副本拒绝,夹具模式回退并打印 PIN_FALLBACK */
+    {
+        char mroot[4400], mtools[4400], mout[4400];
+        if (cx_fmt(mroot, sizeof mroot, "%s/mroot", od) || cx_fmt(mtools, sizeof mtools, "%s/tools", mroot) || cx_fmt(mout, sizeof mout, "%s/mout", od)) return 2;
+        sy_mkdir(mroot, 0755); sy_mkdir(mtools, 0755); sy_mkdir(mout, 0755);
+        char *ev[] = {(char *)cc, "--kr-pin-env-fixture", mroot, mout, 0};
+        char *l = 0;
+        sy_unsetenv("UNISACC_PIN_FIXTURE");
+        int rc = run(ev, 50, &l);
+        ck(rc == 2 && l && has_sub(l, "REFUSE chain-tool pin source missing") && has_sub(l, "kernel-route"), "kr-pin-missing-source-refused-real-mode");
+        free(l);
+        sy_setenv("UNISACC_PIN_FIXTURE", "1", 1);
+        l = 0; rc = run(ev, 50, &l);
+        ck(rc == 0 && l && has_sub(l, "PIN_FALLBACK"), "kr-pin-missing-source-fixture-fallback");
+        free(l);
+        sy_unsetenv("UNISACC_PIN_FIXTURE");
+    }
+    printf("CHECK_CHAIN_TOOL_PIN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

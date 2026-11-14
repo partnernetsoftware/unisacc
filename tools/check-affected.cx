@@ -1,17 +1,17 @@
 /* Checks tools/affected.cx: sh ./unisacc.com tools/check-affected.cx   (from the repo root)
    Expected values come from reading the sources (2026-10-30):
    - cx/sys/time.cx: tools/check-cx-sys-spawn.cx uses sysx.net and ext/sysx/net.cx uses time, so
-     cx-l0-sys-spawn is affected via use; tools/check-refactor.cx names "tools/refactor.cx", which uses
-     sys.time, so refactor-tool is affected via literal-use; tools/check-tape-gap.cx reaches no time.cx.
-   - tools/tape-gap.cx is named only by tools/check-tape-gap.cx (and this file): tape-gap-tool via
-     literal and no other batch but affected-tool itself.
+     cx-l0-sys-spawn is affected via use; tools/check-batch-split.cx names "tools/batch-split.cx", which uses
+     sys.time, so batch-split is affected via literal-use; tools/check-cxroot.cx reaches no time.cx.
+   - tools/tape-gap.cx is named by tools/check-tape-gap.cx, tools/check-unit-frontcache.cx (11 batches),
+     and this file: tape-gap-tool via literal plus the 11 unit-frontcache batches (others == 12).
    - tools/refactor/strcmp-truth.tsv likewise: refactor-tool via literal, no other batch but affected-tool.
    - cx/text/text.cx: tools/check-cx-fmt.cx uses text.text directly (cx-l0-fmt via use), and most
      batches do (at least 100); tools/text/text.cx is the same file through the tools/text link, so it
      gives the same summary and reports why=cx/text/text.cx.
    - prd.md and a path that does not exist are named by no batch: batches=0, rc 0.
    - --users cx/mem/heap.cx lists tools/check-cx-sys-spawn.cx (it uses mem.heap) and not
-     tools/check-tape-gap.cx (text.text, sys.fs, sys.proc only).
+     tools/check-core-alu.cx (core.alu only).
    - --ids with --start-deadline-ms 0 --run starts nothing: both DEFERRED, rc 3; an unknown id and no
      selection are rc 2.
    - --run -j 2 --ids tape-gap-tool runs the real batch through tests/run-batch.cx: one BATCH_RUN line
@@ -82,10 +82,17 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\taffected.%s\n", ok ? "PASS" : "FAIL", name); }
 
+/* ROOT's product and this tool by absolute path, so a fixture cwd can still run them. */
+static char root_abs[4096], tool_abs[4400], prod_abs[4400];
+static const char *part_wanted = "all";
+static int want(const char *part) { return tx_eqz(part_wanted, "all") || tx_eqz(part_wanted, part); }
 /* sh ./unisacc.com tools/affected.cx -- ARGS...; stdout into OUT; the exit code, or -1 */
 static int tool(char **args, char *out, long cap) {
     char *argv[16]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/affected.cx"; argv[i++] = "--";
+    argv[i++] = "sh";
+    argv[i++] = prod_abs;
+    argv[i++] = tool_abs;
+    argv[i++] = "--";
     for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
     argv[i] = 0;
     pid = spawn_pipe_bounded(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
@@ -101,60 +108,86 @@ static int tool(char **args, char *out, long cap) {
 static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, OUTCAP), s, tx_len(s, 512)) >= 0; }
 /* the number after KEY in OUT, or -1 */
 static long num(const char *out, const char *key) {
-    long at = tx_find(out, tx_len(out, OUTCAP), key, tx_len(key, 64)), v = 0;
-    if (at < 0) return -1;
+    long n = tx_len(out, OUTCAP), kl = tx_len(key, 64), at = 0, v = 0;
+    while (at + kl <= n && !tx_prefix(out + at, n - at, key, kl)) at++;
+    if (at + kl > n) return -1;
     at += tx_len(key, 64);
     if (out[at] < '0' || out[at] > '9') return -1;
     while (out[at] >= '0' && out[at] <= '9') v = v * 10 + (out[at++] - '0');
     return v;
 }
-/* AFFECTED lines other than this check's own batch (affected-tool names the same paths in its literals) */
+/* AFFECTED lines other than this check's own batches.  The check file names the paths it probes, so
+   affected-tool, and now its split batches affected-tiers/list/run, are its own rows and not evidence that
+   some other batch writes that path. */
+static int own(const char *line, long n) {
+    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", 0};
+    int k; char pre[64];
+    for (k = 0; mine[k]; k++) {
+        int pl = (int)strlen(mine[k]);
+        if (9 + pl + 1 >= (int)sizeof pre) continue;
+        if (cx_fmt(pre, sizeof pre, "AFFECTED\t%s\t", mine[k])) continue;
+        if (tx_prefix(line, n, pre, 9 + pl + 1)) return 1;
+    }
+    return 0;
+}
+/* lines of OUT that start with PRE (PL bytes) */
+static long lines(const char *out, const char *pre, long pl) {
+    long at = 0, n = tx_len(out, OUTCAP), c = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && out[e] != '\n') e++;
+        if (tx_prefix(out + at, e - at, pre, pl)) c++;
+        at = e + 1;
+    }
+    return c;
+}
+/* lines of OUT that start with PRE and end with SUF */
+static long tails(const char *out, const char *pre, long pl, const char *suf, long sl) {
+    long at = 0, n = tx_len(out, OUTCAP), c = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && out[e] != '\n') e++;
+        if (e - at >= pl + sl && tx_prefix(out + at, e - at, pre, pl) && tx_prefix(out + e - sl, sl, suf, sl)) c++;
+        at = e + 1;
+    }
+    return c;
+}
 static int others(const char *out) {
     long at = 0, n = tx_len(out, OUTCAP); int c = 0;
     while (at < n) {
         long e = at;
         while (e < n && out[e] != '\n') e++;
-        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9) && !tx_prefix(out + at, e - at, "AFFECTED\taffected-tool\t", 23)) c++;
+        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9) && !own(out + at, e - at)) c++;
         at = e + 1;
     }
     return c;
 }
 
-int main(void) {
-    static char o[OUTCAP], p[OUTCAP];
+
+int main(int argc, char **argv) {
+    static char o[OUTCAP], p[OUTCAP], q[OUTCAP], q2[OUTCAP];
     int rc, rc2;
+    {   int k;
+        for (k = 1; k < argc; k++) {
+            if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
+            /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "--")) continue;
+            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|depth]\n");
+            return 2;
+        }
+    }
+    if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","release",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-release-includes-commit-id"); }
     { char *a[]={"--files","tools/tape-gap.cx","--tier","unknown",0};rc=tool(a,o,OUTCAP);ck(rc==2,"unknown-tier-refused"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","commit","--run","--hard-deadline-ms","0",0};rc=tool(a,o,OUTCAP);ck(rc==3&&!has(o,"BATCH_RUN"),"tier-run-hard-deadline"); }
-    {   char *a[] = {"--files", "cx/sys/time.cx", 0};
-        rc = tool(a, o, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-sys-spawn\twhy=cx/sys/time.cx\tvia=use\n"), "time-via-net-use");
-        ck(has(o, "AFFECTED\tcommit-own\twhy=cx/sys/time.cx\tvia=literal-use\n") && !has(o, "\tcxroot-check\t"), "time-literal-use-only-where-reached");
     }
-    {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0};
-        rc = tool(a, o, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == 1, "tape-gap-literal");
-    }
-    {   char *a[] = {"--files", "tools/refactor/strcmp-truth.tsv", 0};
-        rc = tool(a, o, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\trefactor-tool\twhy=tools/refactor/strcmp-truth.tsv\tvia=literal\n") && others(o) == 1, "fixture-literal");
-    }
-    {   char *a[] = {"--files", "cx/text/text.cx", 0}, *b[] = {"--files", "tools/text/text.cx", 0};
-        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n") && num(o, "\tbatches=") >= 100, "text-many-batches");
-        ck(rc2 == 0 && num(o, "\tbatches=") == num(p, "\tbatches=") && has(p, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n"), "link-is-one-file");
-    }
-    {   char *a[] = {"--files", "prd.md", 0}, *b[] = {"--files", "tools/no-such-affected-input.cx", 0};
-        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t") && !has(o, "AFFECTED\t"), "unused-file-none");
-        ck(rc2 == 0 && has(p, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t"), "absent-file-none");
-    }
-    {   char *a[] = {"--users", "cx/mem/heap.cx", 0};
-        rc = tool(a, o, OUTCAP);
-        ck(rc == 0 && has(o, "USER\ttools/check-cx-sys-spawn.cx\n") && !has(o, "USER\ttools/check-tape-gap.cx\n") && num(o, "\tusers=") >= 1, "users-reverse");
-    }
+    if (want("run")) {
     {   char *a[] = {"--ids", "tape-gap-tool", "refactor-tool", "--run", "--start-deadline-ms", "0", 0};
         rc = tool(a, o, OUTCAP);
         ck(rc == 3 && has(o, "DEFERRED\ttape-gap-tool\tstart-deadline\n") && has(o, "DEFERRED\trefactor-tool\tstart-deadline\n")
@@ -167,7 +200,21 @@ int main(void) {
     {   char *a[] = {"--run", "-j", "2", "--ids", "tape-gap-tool", 0};
         rc = tool(a, o, OUTCAP);
         ck(rc == 0 && has(o, "BATCH_RUN\tid=tape-gap-tool\tstatus=PASS\t") && has(o, "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\t"), "real-run");
+        ck(has(o, "PREPARED\ttlib-kit") && has(o, "rebuilt="), "kit-prepared-once");
     }
+    {   /* A material named `<x>-tool` whose source is not tools/<x>.cx must resolve to tests/cases/<x>.cx:
+           release-exec's fake-gh / fake-s9 fixtures live there, and before that fallback existed the batch
+           was DEFERRED with prepare-failed=source-absent=tools/fake-gh.cx.  --materials-dump answers exactly
+           what the build path resolves to (one shared function) and builds nothing, so this case costs one
+           registry read instead of five cold compiles. */
+        char *a[] = {"--materials-dump", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "MATERIAL\trelease-exec\tfake-gh-tool\ttests/cases/fake-gh.cx\n")
+           && has(o, "MATERIAL\trelease-exec\tfake-s9-tool\ttests/cases/fake-s9.cx\n")
+           && has(o, "MATERIAL\trelease-exec\trelease-oneshot-tool\ttools/release-oneshot.cx\n"), "material-falls-back-to-tests-cases");
+    }
+    }
+    if (want("list2")) {   /* 慢组:guard 3 次 + table 6 次整表扫描(~1.6 秒/次);list 段只留单扫描断言,以免 25 秒预算被吃满 */
     {   /* cross-targets reads its unit list at run time, so no use/literal edge reaches src/host.cx,
            cx/sys/ or include/: the guard table must select all three split batches for each of those
            subtrees.  A guard row per split id is what makes a src/-only change still run the sweep. */
@@ -215,7 +262,214 @@ int main(void) {
           rc = tool(c, p, OUTCAP);
           ck(rc == 0 && has(p, "AFFECTED\tsource-job-union\twhy=exec/tapeframe/frame-result.tsv\tvia=table\n")
              && !has(p, "AFFECTED\ttape-gap-tool\t"), "new-static-frame-reaches-real-consumer"); }
+        {   /* 被字面量点到的工具自己再点名的文件也要算进来:A -> release-ape.cx -> ape-pack.cx,
+               闭包只跟一层时这里只选出 chain-fresh-out 一批(实测改前 batches=1)。 */
+            char *c[] = {"--files", "tools/ape-pack.cx", "--list-only", 0};
+            rc = tool(c, p, OUTCAP);
+            ck(rc == 0 && has(p, "AFFECTED\trelease-ape-replacements\twhy=tools/ape-pack.cx\tvia=literal")
+               && num(p, "\tbatches=") > 1, "spawn-literal-transitive");
+        }
+        {   /* 深度随档位:commit 只多跟一层(上限 4 批,防拖慢提交),daily 与 release 无限传递并去环,
+               必须同时选中数 >= commit 档且到得了三跳批(candidate-chain 由 chain-run 点名、
+               chain-step 再点名 ape-pack 那一路)。 */
+            if (tx_eqz(part_wanted, "all")) {
+            char *cc[] = {"--files", "tools/ape-pack.cx", "--tier", "commit", 0};
+            char *cd2[] = {"--files", "tools/ape-pack.cx", "--tier", "daily", 0};
+            char *cr[] = {"--files", "tools/ape-pack.cx", "--tier", "release", 0};
+            rc = tool(cc, p, OUTCAP); int nc = num(p, "batches=");
+            rc |= tool(cd2, q, OUTCAP); int nd = num(q, "\tbatches=");
+            rc |= tool(cr, q2, OUTCAP); int nr = num(q2, "batches=");
+            /* check-affected 自己的每个分段批都字面量点名 tools/ape-pack.cx,所以 commit 档至少包含它们:
+               分段数(affected-tool/tiers/list/list2/run 共 5)+ 不外扩。上限随分段数走,守的是「不被整链拖住」
+               这个性质(失控时是 37 批),不是某个硬编码数字。 */
+            ck(rc == 0 && nc >= 1 && nc <= 5, "literal-depth-commit-capped");
+            ck(nd >= nc && nr >= nc && has(q, "AFFECTED\tcandidate-chain\t") && has(q2, "AFFECTED\tchain-run\t")
+               && !has(p, "AFFECTED\tcandidate-chain\t"), "literal-depth-daily-release-unbounded");
+            }
+        }
     }
-    printf("CHECK_AFFECTED\tfailed=%d\n", failed);
+    }
+    if (want("list")) {   /* 单扫描即可覆盖的那几条:与 list2 分开,list 段实测 24.2 -> 目标 <15 秒 */
+    {   char *a[] = {"--files", "cx/sys/time.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-sys-spawn\twhy=cx/sys/time.cx\tvia=use\n"), "time-via-net-use");
+        ck(has(o, "AFFECTED\tbatch-split\twhy=cx/sys/time.cx\tvia=literal-use\n") && !has(o, "\tcxroot-check\t"), "time-literal-use-only-where-reached");
+    }
+    {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n")
+           && has(o, "AFFECTED\tunit-frontcache-equiv0\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == 12, "tape-gap-literal");
+    }
+    {   char *a[] = {"--files", "tools/refactor/strcmp-truth.tsv", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\trefactor-tool\twhy=tools/refactor/strcmp-truth.tsv\tvia=literal\n") && others(o) == 1, "fixture-literal");
+    }
+    {   char *a[] = {"--files", "cx/text/text.cx", 0}, *b[] = {"--files", "tools/text/text.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n") && num(o, "\tbatches=") >= 100, "text-many-batches");
+        ck(rc2 == 0 && num(o, "\tbatches=") == num(p, "\tbatches=") && has(p, "AFFECTED\tcx-l0-fmt\twhy=cx/text/text.cx\tvia=use\n"), "link-is-one-file");
+    }
+    {   char *a[] = {"--files", "prd.md", 0}, *b[] = {"--files", "tools/no-such-affected-input.cx", 0};
+        rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
+        ck(rc == 0 && has(o, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t") && !has(o, "AFFECTED\t"), "unused-file-none");
+        ck(rc2 == 0 && has(p, "AFFECTED_SUMMARY\tchanged=1\tbatches=0\t"), "absent-file-none");
+    }
+    {   char *a[] = {"--users", "cx/mem/heap.cx", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "USER\ttools/check-cx-sys-spawn.cx\n") && !has(o, "USER\ttools/check-core-alu.cx\n") && num(o, "\tusers=") >= 1, "users-reverse");
+    }
+    }
+    if (want("iface")) {   /* --iface-narrow: cx/sys/sha.cx is a unit of cx.sys; --iface-verdict is the probe test hook */
+        long full, nsel, ndef;
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); full = num(o, "\tbatches=");
+            ck(rc == 0 && full >= 100, "iface-baseline-full");
+            ck(!has(o, "IFACE_NARROW\t") && !has(o, "DEFERRED_BY_IFACE"), "iface-default-prints-no-narrow-line");
+            ck(lines(o, "AFFECTED\t", 9) == full, "iface-baseline-lines-equal-summary");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", 0};   /* body-only change */
+            rc = tool(a, p, OUTCAP); nsel = num(p, "\tbatches="); ndef = num(p, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=");
+            ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-same-narrows");
+            ck(nsel > 0 && nsel < full, "iface-same-selects-fewer");
+            ck(ndef > 0, "iface-same-defers-some");
+            ck(nsel + ndef == full, "iface-same-selected-plus-deferred-is-full");
+            ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == ndef && lines(p, "AFFECTED\t", 9) == nsel, "iface-same-every-deferral-listed");
+            ck(num(p, "\tfull=") == full && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
+            ck(tails(p, "AFFECTED\t", 9, "\tvia=use", 8) > 0, "iface-same-keeps-direct-users");
+            ck(!has(p, "\tvia=source\treason=") && !has(p, "\tvia=literal\treason=") && !has(p, "\tvia=arg\treason=") && !has(p, "\tvia=table\treason=") && !has(p, "\tvia=guard\treason="), "iface-same-defers-use-edges-only");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-verdict", "changed", 0};   /* signature change */
+            rc = tool(a, q, OUTCAP);
+            ck(rc == 0 && has(q, "IFACE_NARROW\tstate=off\treason=interface-changed\n"), "iface-changed-is-off");
+            ck(num(q, "\tbatches=") == full && !has(q, "DEFERRED_BY_IFACE"), "iface-changed-equals-full");
+        }
+        {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0}, *b[] = {"--files", "tools/tape-gap.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", 0};   /* outside every package */
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
+            ck(rc == 0 && rc2 == 0 && has(q2, "IFACE_NARROW\tstate=off\treason=file-outside-packages\n"), "iface-outside-is-off");
+            ck(num(q, "\tbatches=") > 0 && num(q, "\tbatches=") == num(q2, "\tbatches=") && !has(q2, "DEFERRED_BY_IFACE"), "iface-outside-equals-full");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "tools/tape-gap.cx", "--list-only", 0}, *b[] = {"--files", "cx/sys/sha.cx", "tools/tape-gap.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", 0};   /* one outside file keeps everything */
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
+            ck(rc == 0 && rc2 == 0 && has(q2, "state=off\treason=file-outside-packages\n") && num(q, "\tbatches=") == num(q2, "\tbatches="), "iface-mixed-equals-full");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--full", 0};
+            rc = tool(a, q, OUTCAP);
+            ck(rc == 0 && has(q, "IFACE_NARROW\tstate=off\treason=full\n") && num(q, "\tbatches=") == full && !has(q, "DEFERRED_BY_IFACE"), "iface-full-overrides");
+        }
+    }
+    if (want("iface2")) {   /* the paths that must stay full: release tier, --run without the switch; and the real probes */
+        long r1, r2;
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "release", 0}, *b[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "release", "--iface-narrow", "--iface-verdict", "same", 0};
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
+            ck(rc == 0 && rc2 == 0 && has(q2, "IFACE_NARROW\tstate=off\treason=release-tier\n"), "iface-release-ignores-narrow");
+            ck(num(q, "\tbatches=") >= 100 && num(q, "\tbatches=") == num(q2, "\tbatches=") && !has(q2, "DEFERRED_BY_IFACE"), "iface-release-equals-full");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "commit", 0}, *b[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "commit", "--iface-narrow", "--iface-verdict", "same", 0};
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
+            ck(rc == 0 && rc2 == 0 && num(q2, "\tbatches=") + num(q2, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=") == num(q, "\tbatches="), "iface-commit-tier-conserves");
+        }
+        {   char *a[] = {"--files", "ext/net/addr.cx", "--run", "--start-deadline-ms", "0", 0}, *b[] = {"--files", "ext/net/addr.cx", "--run", "--start-deadline-ms", "0", "--full", 0};   /* --run: no switch == --full */
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP); r1 = lines(q, "DEFERRED\t", 9); r2 = lines(q2, "DEFERRED\t", 9);
+            ck(rc == rc2 && rc == 3, "iface-run-default-rc-equals-full");
+            ck(r1 > 0 && r1 == r2 && num(q, "\tbatches=") == num(q2, "\tbatches="), "iface-run-default-equals-full");
+            ck(!has(q, "IFACE_NARROW") && !has(q, "DEFERRED_BY_IFACE") && !has(q2, "DEFERRED_BY_IFACE"), "iface-run-default-never-narrows");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-verdict", "bogus", 0};
+            rc = tool(a, q, OUTCAP); ck(rc == 2, "iface-bad-verdict-refused");
+        }
+        {   char *a[] = {"--files", "ext/net/addr.cx", "--list-only", "--iface-narrow", 0}, *b[] = {"--files", "ext/net/addr.cx", "--list-only", 0};   /* the real probes; the verdict depends on the tree, the conservation does not */
+            rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
+            ck(rc == 0 && rc2 == 0 && (has(q, "IFACE_NARROW\tstate=on\treason=same\n") || has(q, "IFACE_NARROW\tstate=off\treason=")), "iface-real-probe-reports");
+            ck(num(q, "\tbatches=") + (has(q, "state=on") ? num(q, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=") : 0) == num(q2, "\tbatches="), "iface-real-probe-conserves");
+        }
+    }
+    if (want("iface2")) {   /* per-package narrowing: another package's stale table must not turn narrowing off; --iface-stale PKG is the test hook */
+        long fullt, fulls, sel, def;
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches=");
+            ck(rc == 0 && fullt >= 100, "iface-pkg-baseline-text");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fulls = num(o, "\tbatches=");
+            ck(rc == 0 && fulls >= 100, "iface-pkg-baseline-sys");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* A=cx.sys stale, change in B=cx.text */
+            rc = tool(a, p, OUTCAP); sel = num(p, "\tbatches="); def = num(p, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=");
+            ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-pkg-other-stale-stays-on");
+            ck(def > 0, "iface-pkg-other-stale-defers-some");
+            ck(sel > 0 && sel < fullt, "iface-pkg-other-stale-selects-fewer");
+            ck(sel + def == fullt, "iface-pkg-other-stale-conserves");
+            ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == def, "iface-pkg-other-stale-lists-every-deferral");
+            ck(!has(p, "pkg=cx.sys"), "iface-pkg-other-stale-reason-not-A");
+        }
+        {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* change in A itself */
+            rc = tool(a, q, OUTCAP);
+            ck(rc == 0 && has(q, "IFACE_NARROW\tstate=off\treason=pkg=cx.sys,probe=iface-hash-row\n"), "iface-pkg-own-stale-is-off");
+            ck(num(q, "\tbatches=") == fulls && !has(q, "DEFERRED_BY_IFACE"), "iface-pkg-own-stale-equals-full");
+            ck(has(q, "pkg=cx.sys"), "iface-pkg-own-stale-reason-names-package");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.sys", 0};   /* two packages, one stale: full */
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "state=off\treason=pkg=cx.sys,") && !has(q2, "DEFERRED_BY_IFACE"), "iface-pkg-multi-with-stale-is-off");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "cx/sys/sha.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.nosuch", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "IFACE_NARROW\tstate=on\treason=same\n") && has(q2, "DEFERRED_BY_IFACE_SUMMARY"), "iface-pkg-multi-all-same-is-on");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-stale", "cx.text", "--full", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "IFACE_NARROW\tstate=off\treason=full\n") && num(q2, "\tbatches=") == fullt, "iface-pkg-full-still-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--tier", "release", "--iface-narrow", "--iface-stale", "cx.sys", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "state=off\treason=release-tier\n") && !has(q2, "DEFERRED_BY_IFACE"), "iface-pkg-release-still-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-stale", "cx.sys", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && !has(q2, "IFACE_NARROW") && num(q2, "\tbatches=") == fullt, "iface-pkg-no-switch-no-narrow");
+        }
+    }
+    if (want("sym")) {   /* --symbol-narrow: function-body change; only batches whose use-closure calls the symbol stay */
+        long fullt, ifs, ss, sd;
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", 0};
+            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches=");
+            ck(rc == 0 && fullt >= 100 && !has(o, "DEFERRED_BY_SYMBOL") && !has(o, "SYMBOL_NARROW"), "sym-default-prints-nothing");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", 0};
+            rc = tool(a, p, OUTCAP); ifs = num(p, "\tbatches=");
+            ck(rc == 0 && ifs > 0 && ifs < fullt && !has(p, "DEFERRED_BY_SYMBOL"), "sym-iface-only-prints-no-symbol-line");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q, OUTCAP); ss = num(q, "\tbatches="); sd = num(q, "DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=");
+            ck(rc == 0 && has(q, "SYMBOL_NARROW\tstate=on\treason=sites-found\tsymbols=tx_upper\n"), "sym-rare-symbol-on");
+            ck(ss > 0 && ss < ifs, "sym-rare-selects-fewer-than-iface");
+            ck(sd > 0 && lines(q, "DEFERRED_BY_SYMBOL\t", 19) == sd, "sym-every-deferral-listed");
+            ck(ss + sd == ifs, "sym-selected-plus-deferred-equals-iface-selection");
+            ck(has(q, "\trerun=--full\n") && num(q, "\tfull=") == fullt, "sym-summaries-name-full");
+            ck(lines(q, "AFFECTED\t", 9) == ss, "sym-affected-lines-equal-summary");
+            ck(!has(q, "\tvia=source\treason=symbol") && !has(q, "\tvia=guard\treason=symbol"), "sym-defers-use-edges-only");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_find", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && num(q2, "\tbatches=") + num(q2, "DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=") == ifs, "sym-common-symbol-conserves");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "changed", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off\treason=not-iface-narrowed") && num(q2, "\tbatches=") == fullt && !has(q2, "DEFERRED_BY_SYMBOL"), "sym-signature-change-stays-package-level-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--full", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off") && num(q2, "\tbatches=") == fullt, "sym-full-overrides");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--tier", "release", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_upper", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off") && !has(q2, "DEFERRED_BY_SYMBOL"), "sym-release-tier-stays-full");
+        }
+        {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", "--iface-narrow", "--iface-verdict", "same", "--symbol-narrow", "tx_no_such_function_zz", 0};
+            rc = tool(a, q2, OUTCAP);
+            ck(rc == 0 && has(q2, "SYMBOL_NARROW\tstate=off\treason=no-call-sites") && num(q2, "\tbatches=") == ifs, "sym-no-sites-keeps-iface-selection");
+        }
+    }
+    printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);
     return failed ? 1 : 0;
 }

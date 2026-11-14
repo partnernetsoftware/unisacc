@@ -1,0 +1,88 @@
+/* Checks tools/evidence-cover.cx: sh ./unisacc.com tools/check-evidence-cover.cx   (from the repo root)
+   Builds a private base tree (git archive HEAD plus the working tests/coverage.tsv so the registry is valid)
+   and a copy of it, then:
+   (a) A = B: rc 0, must_rerun=0, NOT_A_PASS_RECORD printed first, no MUST_RERUN line
+   (b) B = A with one byte appended to tools/cpu-meter.cx: rc 1, batch cpu-meter MUST_RERUN closure-hit
+   (c) B = A with one extra row in tests/batches.tsv: that batch MUST_RERUN, an unrelated batch COVERED
+   (d) an unresolvable B: MUST_RERUN unknown, rc 1
+   Prints PASS/FAIL lines and CHECK_EVIDENCE_COVER<TAB>checks=N<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
+
+static int failed, checks;
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\tevidence-cover.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static char out[1024 * 1024];
+
+static int sh(const char *script, const char *a1, const char *a2) {
+    char *argv[12];
+    int i = 0;
+    argv[i++] = "./tools/bound"; argv[i++] = "55";   /* 55 s watchdog around every child */
+    argv[i++] = "sh"; argv[i++] = "-c"; argv[i++] = (char *)script; argv[i++] = "sh";
+    if (a1) argv[i++] = (char *)a1;
+    if (a2) argv[i++] = (char *)a2;
+    argv[i] = 0;
+    return sy_run(argv, out, sizeof out, 0);
+}
+
+static int cover(const char *a, const char *b) {
+    char *argv[12];
+    int i = 0;
+    argv[i++] = "./tools/bound"; argv[i++] = "50"; argv[i++] = "sh"; argv[i++] = "./unisacc.com";
+    argv[i++] = "tools/evidence-cover.cx"; argv[i++] = "--"; argv[i++] = "--a"; argv[i++] = (char *)a;
+    argv[i++] = "--b"; argv[i++] = (char *)b; argv[i] = 0;
+    return sy_run(argv, out, sizeof out, 0);
+}
+
+static int has_line(const char *s) {
+    const char *p = out;
+    size_t n = strlen(s);
+    while (*p) {
+        if (!strncmp(p, s, n) && (p[n] == '\n' || p[n] == 0)) return 1;
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return 0;
+}
+
+int main(void) {
+    char root[4096], a[4096], b[4096];
+    int rc;
+    if (sy_mkdtemp(sy_tmpdir(), "evck-", root, sizeof root) != 0) { printf("FAIL\tevidence-cover.tmpdir\n"); return 1; }
+    tx_snprintf(a, sizeof a, "%s/a", root);
+    tx_snprintf(b, sizeof b, "%s/b", root);
+    rc = sh("mkdir \"$1/a\" && git archive HEAD | tar -x -C \"$1/a\" && t=$(printf '\\t') && cut -f11 \"$1/a/tests/batches.tsv\" | sort -u | while read k; do grep -q -F -- \"$k$t\" \"$1/a/tests/coverage.tsv\" || { grep -m1 -F -- \"$k$t\" tests/coverage.tsv >> \"$1/a/tests/coverage.tsv\"; }; done; cp -a \"$1/a\" \"$1/b\"", root, 0);
+    ck(rc == 0, "setup");
+
+    rc = cover(a, a);
+    ck(rc == 0, "same-tree-rc0");
+    ck(!strncmp(out, "NOT_A_PASS_RECORD\t", 18), "not-a-pass-first-line");
+    ck(strstr(out, "EVIDENCE_COVER\tcovered=") && strstr(out, "\tmust_rerun=0\n"), "same-tree-must-rerun-0");
+    ck(strstr(out, "MUST_RERUN") == 0, "same-tree-no-rerun-lines");
+
+    /* (b) one byte changed in the checker of batch cpu-meter */
+    rc = sh("printf ' ' >> \"$1/b/tools/cpu-meter.cx\"", root, 0);
+    ck(rc == 0, "mutate-byte");
+    rc = cover(a, b);
+    ck(rc == 1, "one-byte-rc1");
+    ck(has_line("MUST_RERUN\tcpu-meter\tclosure-hit"), "one-byte-cpu-meter-must-rerun");
+    ck(has_line("COVERED\tmodelcache-budget-lru"), "one-byte-unrelated-covered");
+
+    /* (c) a new batch row (the cpu-meter row under a new id), file mutation of (b) reverted */
+    rc = sh("cp \"$1/a/tools/cpu-meter.cx\" \"$1/b/tools/cpu-meter.cx\" && { printf 'cpu-meter-ec-new\\t'; grep -P '^cpu-meter\\t' \"$1/a/tests/batches.tsv\" | cut -f2-; } >> \"$1/b/tests/batches.tsv\"", root, 0);
+    ck(rc == 0, "mutate-row");
+    rc = cover(a, b);
+    ck(rc == 1, "new-row-rc1");
+    ck(has_line("MUST_RERUN\tcpu-meter-ec-new\tnew-row"), "new-row-must-rerun");
+    ck(has_line("COVERED\tmodelcache-budget-lru"), "new-row-unrelated-covered");
+
+    /* (d) not computable */
+    rc = cover(a, "no-such-ref-evidence-cover-xyz");
+    ck(rc == 1 && has_line("MUST_RERUN\t*\tunknown"), "unresolvable-is-unknown");
+
+    sh("rm -rf -- \"$1\"", root, 0);
+    printf("CHECK_EVIDENCE_COVER\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

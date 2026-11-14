@@ -1,11 +1,12 @@
 /* Explicitly authorized release execution; planning remains in release-oneshot.
  * CONFIG TSV: root, repo_dir, build_rev, prev_tag, notes, deadline_s; argv prefixes
- * gh, s9, decide; optional layout_check, s9_tiers, s9_call_s (1..55), poll_ms.
+ * gh, s9, decide; optional layout_check, s9_tiers, s9_call_s (1..90), poll_ms.
  * The configuration bytes and original candidate inputs are immutable across resumes.
  * deadline.tsv persists the preparation+execution wall budget, never refreshed.
  * Commands retain argv/output/exit status, are bounded by 55s and the remaining
  * monotonic budget; checkpoint persistence failure terminates before more work.
- * Interrupted CI dispatch is not repeated. RUNNING s9 resumes its existing session;
+ * Interrupted CI dispatch is not repeated; a dispatch phase that failed before any
+ * dispatch command started (no intent marker, no command record) is re-entered. RUNNING s9 resumes its existing session;
  * the inherited execution lock prevents concurrent or orphaned consumers.
  * Upstream PASS requires releaseprepare's fixed, recomputed seal, not config text.
  * s9 runner completion is not FULL qualification: the actual candidate consumer,
@@ -341,10 +342,17 @@ static int rx_assetguard(void) {
     rc=rx_verify(rx_assets);if(rc)return rc;
     rc=rx_view("assetguard-identity",&o);if(rc)return rc<0?rc:rx_fail("assetguard release identity query",0);
     int good=rx_release_identity(o,"true");free(o);o=0;if(!good)return rx_fail("assetguard wrong candidate release",0);
-    if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/releases/tags/%s",rx_c.repo,rx_c.tag))return rx_fail("assetguard endpoint",0);
-    n=rx_pre(v,"gh");v[n++]="api";v[n++]=endpoint;v[n++]="--jq";v[n++]=".id";v[n]=0;
+    /* A draft has no tag ref yet, so the REST tag lookup of a draft answers 404.  The id is the last
+     * segment of the release's own API URL, which the CLI resolves for drafts as well; nothing but
+     * https://api.github.com/repos/REPO/releases/DIGITS and one newline is accepted. */
+    n=rx_pre(v,"gh");v[n++]="release";v[n++]="view";v[n++]=rx_c.tag;v[n++]="-R";v[n++]=rx_c.repo;v[n++]="--json";v[n++]="apiUrl";v[n++]="--jq";v[n++]=".apiUrl";v[n]=0;
     rc=rx_cmd("assetguard-release-id",v,0,&o);if(rc)return rc<0?rc:rx_fail("assetguard release id query",0);
-    char id[64];rx_first(o,id,sizeof id);good=o&&strlen(o)==strlen(id)+1&&id[0]&&strspn(id,"0123456789")==strlen(id);free(o);o=0;
+    char id[64];size_t lead=0,digits=0;id[0]=0;
+    good=o&&!cx_fmt(endpoint,sizeof endpoint,"https://api.github.com/repos/%s/releases/",rx_c.repo);
+    if(good){lead=strlen(endpoint);good=!strncmp(o,endpoint,lead);}
+    if(good){digits=strspn(o+lead,"0123456789");good=digits>0&&digits<sizeof id&&o[lead+digits]=='\n'&&!o[lead+digits+1];}
+    if(good){good=!mm_copy(id,(long)sizeof id-1,o+lead,(long)digits);id[good?digits:0]=0;}
+    free(o);o=0;
     if(!good)return rx_fail("assetguard release id malformed",0);
     if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/releases/%s/assets?per_page=100&page=1",rx_c.repo,id))return rx_fail("assetguard endpoint",0);
     n=rx_pre(v,"gh");v[n++]="api";v[n++]="--include";v[n++]=endpoint;v[n++]="--jq";v[n++]=".[] | [.name, .size, .digest, .state] | @tsv";v[n]=0;
@@ -591,6 +599,7 @@ static int rx_dispatch(void) {
     rc=rx_assetguard();if(rc)return rc;
     rc=rx_run_id(before);if(rc)return rc<0?rc:rx_fail("cannot snapshot CI run list",0);
     if (cx_fmt(f1, sizeof f1, "commit=%s", rx_x) || cx_fmt(f2, sizeof f2, "ape_sha256=%s", rx_c.sha[0]) || cx_fmt(f3, sizeof f3, "release_tag=%s", rx_c.tag)) return rx_fail("inputs", 0);
+    if(rx_save("ci-dispatch.intent",f1))return rx_fail("dispatch intent persistence",0);   /* from here on a failure is never re-entered */
     n = rx_pre(v, "gh");
     v[n++] = "workflow"; v[n++] = "run"; v[n++] = rx_c.workflow; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--ref"; v[n++] = rx_c.workflow_ref; v[n++] = "-f"; v[n++] = f1; v[n++] = "-f"; v[n++] = f2; v[n++] = "-f"; v[n++] = f3; v[n] = 0;
     rc = rx_cmd("ci-dispatch", v, 0, 0);
@@ -601,6 +610,17 @@ static int rx_dispatch(void) {
         sy_sleep_ms(rx_poll < 3000 ? rx_poll : 3000);
     }
     return rx_fail("dispatched run did not appear", before);
+}
+/* 1 only when this state provably never started a dispatch command: no intent marker and no retained
+ * cmd-ci-dispatch-* record.  A state directory that cannot be read answers 0: unknown stays refused. */
+static int rx_dispatch_unsent(void) {
+    static char names[262144];char p[4400];int fd,count,seen,at=0;
+    if(rx_path(p,rx_state,"ci-dispatch.intent")||sy_exists(p)!=0)return 0;
+    fd=sy_open(rx_state,O_RDONLY|O_DIRECTORY,0);if(fd<0)return 0;
+    count=sy_dir_names(fd,names,(int)sizeof names);
+    if(sy_close(fd)||count<0)return 0;
+    for(seen=0;seen<count;seen++){if(!strncmp(names+at,"cmd-ci-dispatch-",16))return 0;at+=(int)strlen(names+at)+1;}
+    return 1;
 }
 /* 1 concluded and qualified, 0 still running, 2 concluded otherwise (rx_why), -3 deadline */
 static int rx_observe(void) {
@@ -722,13 +742,15 @@ int rex_execute(const char *state, const char *config, const char *assets) {
         else{start=now;finish=now+v*1000;if(cx_fmt(text,sizeof text,"%ld\t%ld\n",start,finish)||rx_write(p,text,strlen(text),O_EXCL))return rx_refuse("deadline persistence",0);}
         rx_deadline=sy_now_ms()+(finish-now);if(finish<=now)return 3;
     }
-    if(rx_get("s9_call_s")){if(rx_num("s9_call_s",1,55,&v))return rx_refuse("s9_call_s outside 1..55",0);rx_s9call=(int)v;}
+    if(rx_get("s9_call_s")){if(rx_num("s9_call_s",1,90,&v))return rx_refuse("s9_call_s outside 1..90",0);rx_s9call=(int)v;}
     if (rx_get("poll_ms")) { if (rx_num("poll_ms", 100, 60000, &v)) return rx_refuse("poll_ms outside 100..60000", 0); rx_poll = v; }
     if (rx_path(p, rx_state, "candidate.tsv") || rcand_load(p, &rx_c, why, sizeof why)) return rx_refuse("state candidate", why);
     if(strspn(rx_c.repo,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")!=strlen(rx_c.repo)||!strchr(rx_c.repo,'/')||strchr(strchr(rx_c.repo,'/')+1,'/')||strstr(rx_c.repo,".."))return rx_refuse("unsafe repository identity",0);
     if(strcmp(rx_c.commit,rx_one("build_rev")))return rx_refuse("candidate commit differs from build_rev",0);
     if(rx_progress())return rx_refuse("exec checkpoint corrupt",0);
-    if(rx_st[6]==RX_RUNNING||rx_st[6]==RX_FAILED)return rx_refuse("CI dispatch outcome unknown; refusing duplicate dispatch",0);
+    /* FAILED before any dispatch command started (assetguard, run-list snapshot) is re-entered and
+     * rechecked in full; RUNNING, or FAILED with an intent marker or a dispatch record, is unknown. */
+    if(rx_st[6]==RX_RUNNING||(rx_st[6]==RX_FAILED&&!rx_dispatch_unsent()))return rx_refuse("CI dispatch outcome unknown; refusing duplicate dispatch",0);
     (void)rx_loadline("commit-x.txt", rx_x, sizeof rx_x);
     (void)rx_loadline("ci-run-id.txt", rx_run, sizeof rx_run);
     if(rx_st[1]==RX_DONE&&(strlen(rx_x)!=40||!rcand_hex(rx_x,40)))return rx_refuse("missing X identity",0);

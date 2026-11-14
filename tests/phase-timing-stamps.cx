@@ -188,6 +188,8 @@ typedef struct stamps {
        construction (package parse), model (per stage: inflate or cache bind), inference (per stage), output */
     int con_n, model_n, model_inflate_n, model_cache_n, inf_n, inf_rc_bad, out_n, modelcache_n;
     long long con_ns, model_ns, inf_ns, out_ns;
+    int out_image_n;
+    char inf_seq[96];   /* inference stage names in print order, each followed by one space */
 } stamps;
 /* "...\tns=N" as the last field of a stamp line, N positive. */
 static int tail_ns(const char *l, size_t n, long long *ns) {
@@ -234,8 +236,18 @@ static void parse_stamps(const char *e, size_t n, stamps *st) {
         } else if (prefixed(l, ln, "RR_TIME\tinference\tstage=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\trc=")) {
             st->inf_n++; st->inf_ns += b;
             if (!has_field(l, ln, "\trc=0\t")) st->inf_rc_bad++;
+            {
+                size_t s = k, t = k, cur = strlen(st->inf_seq);
+                while (t < ln && l[t] != '\t') t++;
+                if (cur + (t - s) + 1 < sizeof st->inf_seq) {
+                    for (size_t q = 0; q < t - s; q++) st->inf_seq[cur + q] = l[s + q];
+                    st->inf_seq[cur + (t - s)] = ' ';
+                    st->inf_seq[cur + (t - s) + 1] = 0;
+                }
+            }
         } else if (prefixed(l, ln, "RR_TIME\toutput\tkind=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\tbytes=")) {
             st->out_n++; st->out_ns += b;
+            if (prefixed(l + k, ln - k, "image\t", &k2)) st->out_image_n++;
         } else st->bad++;
         at = end + 1;
     }
@@ -565,15 +577,23 @@ int main(int argc, char **argv) {
     char obj1[65], obj2[65];
     spawn(&obj_miss, "obj.miss", v_obj, env_hot);
     ck2(!obj_miss.r.rc && !obj_miss.r.outn, "obj.miss", "rc0-empty-stdout");
-    ck2(!obj_miss.st.bad && obj_miss.st.art_n == 1 && obj_miss.st.art_hit == 0 && obj_miss.st.art_mode == 2 &&
-        !obj_miss.st.lookup_n && !obj_miss.st.mem_n, "obj.miss", "stamp-grammar-one-artifact_hit=0-mode=2");
+    ck2(!obj_miss.st.bad && !obj_miss.st.mem_n, "obj.miss", "stamp-grammar-clean-no-memory_bind");
+    ck2(!obj_miss.st.art_n, "obj.miss", "no-artifact_hit-stamp(-c-has-no-final-artifact-reuse,N15)");
+    ck2(!obj_miss.st.lookup_n, "obj.miss", "no-lookup_hit-stamp");
+    ck2(obj_miss.st.inf_n == 7 && !obj_miss.st.inf_rc_bad && tx_eqz(obj_miss.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
+        "obj.miss", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0");
+    ck2(obj_miss.st.out_n == 1 && obj_miss.st.out_image_n == 1, "obj.miss", "one-output-kind=image");
     digest(object, obj1);
     identity_after(&obj_miss);
     finish(&obj_miss);
     spawn(&obj_hit, "obj.hit", v_obj, env_hot);
     ck2(!obj_hit.r.rc && !obj_hit.r.outn, "obj.hit", "rc0-empty-stdout");
-    ck2(!obj_hit.st.bad && obj_hit.st.art_n == 1 && obj_hit.st.art_hit == 1 && obj_hit.st.art_mode == 2 &&
-        !obj_hit.st.lookup_n && !obj_hit.st.mem_n, "obj.hit", "stamp-grammar-one-artifact_hit=1-mode=2");
+    ck2(!obj_hit.st.bad && !obj_hit.st.mem_n, "obj.hit", "stamp-grammar-clean-no-memory_bind");
+    ck2(!obj_hit.st.art_n, "obj.hit", "no-artifact_hit-stamp(-c-has-no-final-artifact-reuse,N15)");
+    ck2(!obj_hit.st.lookup_n, "obj.hit", "no-lookup_hit-stamp");
+    ck2(obj_hit.st.inf_n == 7 && !obj_hit.st.inf_rc_bad && tx_eqz(obj_hit.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
+        "obj.hit", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0");
+    ck2(obj_hit.st.out_n == 1 && obj_hit.st.out_image_n == 1, "obj.hit", "one-output-kind=image");
     digest(object, obj2);
     ck2(tx_eqz(obj1, obj2), "obj.hit", "object-bytes-equal-to-miss");
     identity_after(&obj_hit);
@@ -581,8 +601,8 @@ int main(int argc, char **argv) {
     printf("STAMP\tlookup\tcache-off\thit=%lld\tns=%lld\n", run_cold.st.lookup_hit, run_cold.st.lookup_ns);
     printf("STAMP\tlookup\tmiss\thit=%lld\tns=%lld\n", run_miss.st.lookup_hit, run_miss.st.lookup_ns);
     printf("STAMP\tlookup\thit\thit=%lld\tns=%lld\n", run_hit.st.lookup_hit, run_hit.st.lookup_ns);
-    printf("STAMP\tartifact\tmiss\thit=%lld\tmode=%lld\tns=UNMEASURED\n", obj_miss.st.art_hit, obj_miss.st.art_mode);
-    printf("STAMP\tartifact\thit\thit=%lld\tmode=%lld\tns=UNMEASURED\n", obj_hit.st.art_hit, obj_hit.st.art_mode);
+    printf("STAMP\tartifact\tmiss\thit=UNMEASURED\tmode=UNMEASURED\tns=UNMEASURED\treason=no-final-artifact-reuse-on-c(N15)\n");
+    printf("STAMP\tartifact\thit\thit=UNMEASURED\tmode=UNMEASURED\tns=UNMEASURED\treason=no-final-artifact-reuse-on-c(N15)\n");
     printf("STAMP\tmemory_bind\tcount_cold=%d\tcount_miss=%d\tcount_hit=%d\n", run_cold.st.mem_n, run_miss.st.mem_n,
            run_hit.st.mem_n);
 

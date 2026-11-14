@@ -1,0 +1,202 @@
+/* tools/check-derive.cx -- tools/derive.cx 的检查:夹具清单加假生成器(sh 薄壳)覆盖全清、漂移、拒绝、超时、并发与顺序、--write 失败还原、--only、--changed、--index、清单坏行,并核对仓内清单可读。
+ *
+ *   sh ./unisacc.com tools/check-derive.cx
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed, nok;
+static char dir[320], mf[400];
+static char out[16384];
+static void ck(int ok, const char *name) {
+    if (ok) { nok++; sy_printf("PASS\tcheck-derive.%s\n", name); }
+    else { failed++; sy_printf("FAIL\tcheck-derive.%s\n", name); }
+}
+static void put(const char *rel, const char *body) {
+    char p[500];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    cx_write(p, body, tx_len(body, 100000));
+}
+static int hasl(const char *h, const char *lit) {
+    long hn = tx_len(h, 200000), ln = tx_len(lit, 4096), i;
+    if (hn < 0) hn = 200000; /* 超 cap:只查 cap 内,不把 -1 当长度 */
+    for (i = 0; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return 1;
+    return 0;
+}
+/* 文件内容等于 want;want 为 0 时断言文件不存在 */
+static int file_is(const char *rel, const char *want) {
+    char p[500]; size_t m = 0; char *t;
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    if (!want) return sy_is_reg(p) == -ENOENT;
+    t = cx_read(p, &m);
+    return t && (long)m == tx_len(want, 4096) && mm_same(t, want, (long)m);
+}
+static void rm(const char *rel) { char p[500]; cx_fmt(p, sizeof p, "%s/%s", dir, rel); unlink(p); }
+static long elapsed(void) {
+    const char *k = "elapsed_ms="; long hn = tx_len(out, 200000), i, v = 0;
+    for (i = 0; i + 11 <= hn; i++) if (mm_same(out + i, k, 11)) { i += 11; while (out[i] >= '0' && out[i] <= '9') v = v * 10 + (out[i++] - '0'); return v; }
+    return -1;
+}
+static int run(const char *args) {
+    char cmd[1200]; char *o = 0; size_t n = 0; int rc;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/derive.cx -- %s", args);
+    char *v[] = {"sh", "-c", cmd, 0};
+    rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && (long)n < (long)sizeof out) { mm_copy(out, sizeof out, o, n); out[n] = 0; }
+    return rc;
+}
+static int runm(const char *args) { char a[900]; cx_fmt(a, sizeof a, "%s --manifest %s", args, mf); return run(a); }
+static char mbuf[8192]; static long mlen;
+static void m_begin(void) { mlen = 0; mbuf[0] = 0; }
+/* 一行夹具:假生成器行为 beh,输出 outs(相对夹具目录,空格分隔,至多两个),inputs 原样 */
+static void m_row(const char *name, const char *beh, int order, const char *bound, const char *ins, int nowrite, int two_outs) {
+    char l[1500], o2[400], wr[500];
+    o2[0] = 0;
+    if (two_outs) cx_fmt(o2, sizeof o2, " %s/%s.new", dir, name);
+    if (nowrite) cx_fmt(wr, sizeof wr, "-"); else cx_fmt(wr, sizeof wr, "sh %s/gen.sh %s %s write %s", dir, dir, name, beh);
+    cx_fmt(l, sizeof l, "%s\tfake/%s\tsh %s/gen.sh %s %s check %s\t%s\t%s/%s.out%s\t%s\t%d\t%s\n", name, name, dir, dir, name, beh, wr, dir, name, o2, ins, order, bound);
+    mm_copy(mbuf + mlen, sizeof mbuf - mlen, l, tx_len(l, 1500) + 1); mlen += tx_len(l, 1500);
+}
+static void m_end(void) { put("derive.tsv", mbuf); rm("log"); }
+static void bad(const char *body, const char *why, const char *name) {
+    int rc;
+    put("derive.tsv", body);
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "REFUSE\t") && hasl(out, why) && !hasl(out, "DERIVE_SUMMARY"), name);
+}
+#define GEN "#!/bin/sh\n" \
+    "echo \"$2\" >> \"$1/log\"\n" \
+    "case \"$4\" in\n" \
+    "ok) if [ \"$3\" = write ]; then echo \"new-$2\" > \"$1/$2.out\"; fi; echo \"fake $2 ok\"; exit 0;;\n" \
+    "drift) if [ \"$3\" = write ]; then echo \"new-$2\" > \"$1/$2.out\"; exit 0; fi; echo \"DIFF $2 stale\"; exit 1;;\n" \
+    "refuse) if [ \"$3\" = write ]; then echo half > \"$1/$2.out\"; echo x > \"$1/$2.new\"; fi; echo \"REFUSE $2 bad-input\"; exit 2;;\n" \
+    "slow) sleep 1; exit 0;;\n" \
+    "hang) if [ \"$3\" = write ]; then echo half > \"$1/$2.out\"; fi; sleep 6; exit 0;;\n" \
+    "esac\nexit 3\n"
+
+int main(void) {
+    int rc; long ms;
+    if (cx_fmt(dir, sizeof dir, "%s/derive-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(mf, sizeof mf, "%s/derive.tsv", dir);
+    put("gen.sh", GEN);
+    /* 全清与顺序:c 的 order 最大,即使写在清单最前也最后跑 */
+    m_begin(); m_row("c", "ok", 2, "20", "x/y.tsv", 0, 0); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "ok", 1, "-", "tools/*", 0, 0); m_end();
+    rc = runm("--check");
+    ck(rc == 0, "all-clean-rc0");
+    ck(hasl(out, "DERIVE\ta\tOK\t") && hasl(out, "DERIVE\tb\tOK\t") && hasl(out, "DERIVE\tc\tOK\t"), "all-clean-lines");
+    ck(hasl(out, "DERIVE_SUMMARY\tok=3\tdrift=0\trefused=0\tskipped=0\telapsed_ms="), "all-clean-summary");
+    ck(file_is("log", "a\nb\nc\n") || file_is("log", "b\na\nc\n"), "order-low-first");
+    ck(hasl(out, "DERIVE\tb\tOK") && !hasl(out, "DERIVE\tc\tOK\t0\nDERIVE\ta"), "report-in-order");
+    ck(file_is("a.out", 0) && file_is("b.out", 0), "check-writes-nothing");
+    /* 漂移 */
+    m_begin(); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "drift", 1, "20", "tools/*", 0, 0); m_end();
+    rc = runm("--check");
+    ck(rc == 1 && hasl(out, "DERIVE\tb\tDRIFT\t") && hasl(out, "rc=1\tDIFF b stale"), "drift-rc1-named");
+    ck(hasl(out, "DERIVE_SUMMARY\tok=1\tdrift=1\trefused=0\tskipped=0"), "drift-summary");
+    /* 拒绝压过漂移 */
+    m_begin(); m_row("a", "drift", 1, "20", "src/*.c", 0, 0); m_row("b", "refuse", 2, "20", "tools/*", 0, 0); m_end();
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "DERIVE\tb\tREFUSED\t") && hasl(out, "rc=2\tREFUSE b bad-input"), "refuse-rc2-named");
+    ck(hasl(out, "DERIVE_SUMMARY\tok=0\tdrift=1\trefused=1\tskipped=0"), "refuse-summary");
+    /* 超时:bound_s=1 */
+    m_begin(); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("h", "hang", 1, "1", "tools/*", 0, 0); m_end();
+    rc = runm("--check");
+    ms = elapsed();
+    ck(rc == 2 && hasl(out, "DERIVE\th\tTIMEOUT\t") && hasl(out, "DERIVE\ta\tOK\t"), "timeout-rc2-named");
+    ck(ms >= 900 && ms < 5000, "timeout-bounded-by-table");
+    /* 并发:同 order 三个各睡 1 秒,总时不到 2.7 秒;五个时最多 4 路,至少 2 秒 */
+    m_begin(); m_row("s1", "slow", 1, "20", "-", 0, 0); m_row("s2", "slow", 1, "20", "-", 0, 0); m_row("s3", "slow", 1, "20", "-", 0, 0); m_end();
+    rc = runm("--check"); ms = elapsed();
+    ck(rc == 0 && ms >= 1000 && ms < 2700, "same-order-parallel");
+    m_begin(); m_row("s1", "slow", 1, "20", "-", 0, 0); m_row("s2", "slow", 1, "20", "-", 0, 0); m_row("s3", "slow", 1, "20", "-", 0, 0); m_row("s4", "slow", 1, "20", "-", 0, 0); m_row("s5", "slow", 1, "20", "-", 0, 0); m_end();
+    rc = runm("--check"); ms = elapsed();
+    ck(rc == 0 && ms >= 2000 && ms < 4500 && hasl(out, "ok=5"), "at-most-four-at-once");
+    m_begin(); m_row("s1", "slow", 1, "20", "-", 0, 0); m_row("s2", "slow", 2, "20", "-", 0, 0); m_end();
+    rc = runm("--check"); ms = elapsed();
+    ck(rc == 0 && ms >= 2000, "different-order-serial");
+    /* --only */
+    m_begin(); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "drift", 1, "20", "tools/*", 0, 0); m_row("tool-index", "ok", 3, "20", "x/y.tsv", 0, 0); m_end();
+    rc = runm("--check --only a");
+    ck(rc == 0 && hasl(out, "DERIVE\ta\tOK\t") && hasl(out, "DERIVE\tb\tSKIPPED\t0") && file_is("log", "a\n"), "only-runs-named");
+    ck(hasl(out, "DERIVE_SUMMARY\tok=1\tdrift=0\trefused=0\tskipped=2"), "skipped-not-counted-ok");
+    rc = runm("--check --only a,nosuch");
+    ck(rc == 2 && hasl(out, "REFUSE\tonly\tunknown-name\tnosuch"), "only-unknown-refused");
+    /* --changed 与 --index */
+    rm("log");
+    rc = runm("--check --changed tools/foo.cx docs/x.md");
+    ck(rc == 1 && hasl(out, "DERIVE\tb\tDRIFT") && hasl(out, "DERIVE\ta\tSKIPPED") && hasl(out, "DERIVE\ttool-index\tSKIPPED") && file_is("log", "b\n"), "changed-selects-by-glob");
+    rc = runm("--check --changed src/deep/x.c");
+    ck(rc == 0 && hasl(out, "DERIVE\ta\tOK") && hasl(out, "ok=1\tdrift=0\trefused=0\tskipped=2"), "changed-star-crosses-slash");
+    rc = runm("--check --changed docs/x.md");
+    ck(rc == 0 && hasl(out, "DERIVE_SUMMARY\tok=0\tdrift=0\trefused=0\tskipped=3"), "changed-unrelated-all-skipped");
+    rc = runm("--check --changed docs/x.md --index");
+    ck(rc == 0 && hasl(out, "DERIVE\ttool-index\tOK") && hasl(out, "ok=1\tdrift=0\trefused=0\tskipped=2"), "index-forces-tool-index");
+    rc = runm("--check --only a --changed tools/foo.cx");
+    ck(rc == 0 && hasl(out, "skipped=3"), "only-and-changed-intersect");
+    /* --write 成功 */
+    m_begin(); m_row("a", "ok", 1, "20", "-", 0, 0); m_row("b", "drift", 2, "20", "-", 0, 0); m_end();
+    put("a.out", "old-a\n"); put("b.out", "old-b\n");
+    rc = runm("--write");
+    ck(rc == 0 && hasl(out, "DERIVE\ta\tWROTE\t") && hasl(out, "DERIVE\tb\tWROTE\t") && hasl(out, "ok=2\tdrift=0\trefused=0"), "write-ok");
+    ck(file_is("a.out", "new-a\n") && file_is("b.out", "new-b\n") && file_is("log", "a\nb\n"), "write-outputs-and-serial-order");
+    /* --write 失败还原:a 已写成功、b 写了半成品并新建一个登记文件后拒绝、c 不再跑;未登记的文件不动 */
+    m_begin(); m_row("a", "ok", 1, "20", "-", 0, 0); m_row("b", "refuse", 2, "20", "-", 0, 1); m_row("c", "ok", 3, "20", "-", 0, 0); m_end();
+    put("a.out", "old-a\n"); put("b.out", "old-b\n"); rm("c.out"); rm("b.new"); put("other.txt", "mine\n");
+    rc = runm("--write");
+    ck(rc == 2 && hasl(out, "DERIVE\ta\tWROTE\t") && hasl(out, "DERIVE\tb\tREFUSED\t"), "write-fail-rc2-named");
+    ck(file_is("a.out", "old-a\n"), "write-fail-restores-earlier-generator");
+    ck(file_is("b.out", "old-b\n"), "write-fail-restores-half-product");
+    ck(file_is("b.new", 0) && hasl(out, "b.new\tremoved"), "write-fail-removes-new-registered-file");
+    ck(hasl(out, "DERIVE\tc\tNOTRUN\t0") && file_is("c.out", 0) && file_is("log", "a\nb\n"), "write-fail-stops-later");
+    ck(file_is("other.txt", "mine\n"), "write-touches-only-registered-outputs");
+    ck(hasl(out, "DERIVE_RESTORED\t") && hasl(out, "a.out\trewritten") && hasl(out, "refused=1\tskipped=1"), "write-fail-reports-restore");
+    /* --write 超时同样还原 */
+    m_begin(); m_row("h", "hang", 1, "1", "-", 0, 0); m_end();
+    put("h.out", "old-h\n");
+    rc = runm("--write");
+    ck(rc == 2 && hasl(out, "DERIVE\th\tTIMEOUT\t") && file_is("h.out", "old-h\n"), "write-timeout-restored");
+    /* --write 的 --only 不碰未选中的 */
+    m_begin(); m_row("a", "ok", 1, "20", "-", 0, 0); m_row("b", "ok", 2, "20", "-", 0, 0); m_end();
+    put("a.out", "old-a\n"); put("b.out", "old-b\n");
+    rc = runm("--write --only b");
+    ck(rc == 0 && file_is("a.out", "old-a\n") && file_is("b.out", "new-b\n") && hasl(out, "DERIVE\ta\tSKIPPED"), "write-only-leaves-others");
+    /* write_argv 为 -:不自动写,只报需 bump */
+    m_begin(); m_row("api", "drift", 1, "20", "-", 1, 0); m_end();
+    put("api.out", "old-api\n");
+    rc = runm("--write");
+    ck(rc == 1 && hasl(out, "DERIVE\tapi\tNEEDS_BUMP\t") && hasl(out, "note=interface-changed-needs-bump") && file_is("api.out", "old-api\n"), "no-write-argv-reports-needs-bump");
+    rc = runm("--check");
+    ck(rc == 1 && hasl(out, "DERIVE\tapi\tDRIFT\t") && hasl(out, "note=interface-changed-needs-bump"), "check-drift-notes-bump");
+    /* 清单坏行 */
+    bad("a\tg\tsh x\tsh y\to\ti\t1\n", "field-count", "refuse-seven-fields");
+    bad("a\tg\tsh x\tsh y\to\ti\t1\t20\textra\n", "field-count", "refuse-nine-fields");
+    bad("# c\na\tg\tsh x\tsh y\to\ti\t1\t20\na\tg\tsh x\tsh y\to\ti\t1\t20\n", "line=3\tduplicate-name", "refuse-duplicate-name-with-line");
+    bad("a\tg\tsh x\tsh y\to\ti\tx\t20\n", "bad-order", "refuse-bad-order");
+    bad("a\tg\tsh x\tsh y\to\ti\t1\t0\n", "bad-bound", "refuse-zero-bound");
+    bad("a\tg\tsh x\tsh y\to\ti\t1\t999\n", "bad-bound", "refuse-bound-over-300");
+    bad("A b\tg\tsh x\tsh y\to\ti\t1\t20\n", "bad-name", "refuse-bad-name");
+    bad("a\tg\t-\tsh y\to\ti\t1\t20\n", "no-check-argv", "refuse-no-check-argv");
+    bad("a\tg\tsh x\tsh y\t\ti\t1\t20\n", "empty-or-long-field", "refuse-empty-outputs");
+    bad("# only comments\n", "no-rows", "refuse-empty-manifest");
+    rm("derive.tsv");
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "unreadable"), "refuse-missing-manifest");
+    rc = run("--bogus");
+    ck(rc == 2 && hasl(out, "usage:"), "usage-rc2");
+    rc = run("--only a");
+    ck(rc == 2 && hasl(out, "usage:"), "mode-required");
+    /* 仓内清单:可读,六个生成器在册,只跑最快的一个 */
+    rc = run("--check --only tables-gen");
+    ck((rc == 0 || rc == 1) && hasl(out, "DERIVE\ttables-gen\t") && hasl(out, "DERIVE\tiface-hash\tSKIPPED") && hasl(out, "DERIVE\tproduct-map\tSKIPPED") && hasl(out, "DERIVE\ttool-index\tSKIPPED") &&
+       hasl(out, "DERIVE\tbatch-packages-gen\tSKIPPED") && hasl(out, "DERIVE\tlayer-api\tSKIPPED") && hasl(out, "skipped=6"), "repo-manifest-loads");
+    ck(hasl(out, "DERIVE\tcx0-three-source\tSKIPPED"), "repo-manifest-has-cx0-three-source");
+    sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\n", nok, failed);
+    return failed ? 1 : 0;
+}

@@ -3,6 +3,8 @@
 #pragma unisa use sys.io
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseprepare
+#pragma unisa use cxlib.chainroot
+#pragma unisa use sys.env
 static int bad;
 static void die(const char *s){sy_eprintf("check-release-prepare: %s\n",s);exit(2);}
 static void ck(int ok,const char *s){sy_printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)bad++;}
@@ -14,21 +16,33 @@ int main(int argc,char **argv){
  if(argc!=6||argv[2][0]!='/'||sy_mkdir(argv[2],0700))die("ROOT NEW_ABS_OUT ONESHOT FAKE RELEASE_RUN");
  char root[4400],state[4400],config[4400],assets[4400],p[4400],chain[4400],snap[4400],rev[41],text[30000];path(root,argv[2],"root");if(sy_mkdir(root,0700))die("root");path(state,argv[2],"state");path(config,argv[2],"config.tsv");path(assets,state,"rr/layout");path(chain,argv[2],"chain");
  char *init[]={"git","init","-q",root,0};git(init,argv[1]);path(p,root,"input");put(p,"frozen\n");char *add[]={"git","add","input",0};git(add,root);char *commit[]={"git","-c","user.name=Fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};git(commit,root);char *head[]={"git","rev-parse","HEAD",0};np_result r=run(head,root);if(r.rc||r.outn!=41)die("HEAD");for(int i=0;i<40;i++)rev[i]=r.out[i];rev[40]=0;np_free(&r);
- path(p,root,"unisacc.com");put(p,"not executed\n");path(p,root,"out");if(sy_mkdir(p,0700)||cx_fmt(snap,sizeof snap,"%s/release-snap-%.10s",p,rev))die("snap");
+ path(p,root,"unisacc.com");put(p,"not executed\n");
+ /* snap is cr_snap(ROOT, build_rev) (cxlib.chainroot); HOME and TMPDIR of the fixture are side by side
+    below NEW_ABS_OUT and UNISACC_CHAIN_BASE names a session root below that TMPDIR, so nothing touches
+    the real cache chain root.  The children inherit all three. */
+ {char fh[4400],ft[4400],ftc[4400],cb[4600];path(fh,argv[2],"fx-home");path(ft,argv[2],"fx-tmp");
+  if(sy_mkdir(fh,0700)||sy_mkdir(ft,0700)||sy_realpath(ft,ftc,sizeof ftc)<0||cx_fmt(cb,sizeof cb,"%s/unisacc-session-chain-rp",ftc)||sy_setenv("HOME",fh,1)||sy_setenv("TMPDIR",ftc,1)||sy_setenv("UNISACC_CHAIN_BASE",cb,1))die("chain base");
+  if(cr_snap(root,rev,0,snap,sizeof snap)||strncmp(snap,cb,strlen(cb))||strncmp(snap+strlen(cb),"/snap/",6))die("snap");}
  if(cx_fmt(text,sizeof text,"root\t%s\nbuild_rev\t%s\nconstructor\t%s\nidentity_helper\t%s\nchain_out\t%s\nsnap\t%s\nversion\t0.0.57\nrepo\tfixture/release\ntag\tv0.0.57\nworkflow\tcandidate-native.yml\nworkflow_ref\tmain\ncache_manager_x64\t%s\ncache_manager_arm64\t%s\ndeadline_s\t300\nchain_deadline_s\t300\nmax_resumes\t3\ntest_driver\t%s\n",root,rev,argv[4],argv[4],chain,snap,argv[4],argv[4],argv[4]))die("config capacity");put(config,text);
  char *prepare[]={argv[3],"--prepare",state,config,assets,"--authorize-external-operations",0};r=run(prepare,root);ck(r.rc==1,"first real child failure stops preparation");np_free(&r);
  path(p,state,"upstream-evidence.tsv");size_t n;char *e=cx_read(p,&n);ck(!e||!strstr(e,"\tPASS\t"),"failed preparation cannot issue PASS");free(e);
  ck(rp_verify_upstream(state,config,assets)!=0,"test driver never qualifies upstream");
  size_t z=strlen(text);if(z+3>=sizeof text)die("mutation capacity");text[z]='#';text[z+1]='\n';text[z+2]=0;put(config,text);r=run(prepare,root);ck(r.rc==2,"changed configuration refuses resume");np_free(&r);
  /* chain_adopt: nothing is launched; identity, compare and the final pack row are machine-checked. */
- {const char *leaf[]={"adopt-none","adopt-rev","adopt-nopack","adopt-value","adopt-good"};char base[30000],ident[6000],wrong[6000];
+ /* chain_root (5..8): the adopted chain ran in another checkout; ROOT stays the git root at build_rev. */
+ {const char *leaf[]={"adopt-none","adopt-rev","adopt-nopack","adopt-value","adopt-good","adopt-cr-good","adopt-cr-mismatch","adopt-cr-snap","adopt-cr-alone"};char base[30000],ident[6000],wrong[6000],cr[4400],crident[6000],crsnap[4400];
+  /* cr_snap hashes the canonical chain_root, so the other checkout is a real directory here. */
+  path(cr,argv[2],"chainroot");if(sy_mkdir(cr,0700)||cx_fmt(crident,sizeof crident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,cr)||cr_snap(cr,rev,0,crsnap,sizeof crsnap)||!strcmp(crsnap,snap))die("chain_root identity");
   z=strlen(text);text[z-2]=0;if(!strstr(text,"test_driver\t")||cx_fmt(base,sizeof base,"%s",text))die("adopt base config");
   if(cx_fmt(ident,sizeof ident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,root)||cx_fmt(wrong,sizeof wrong,"rev=0000000000000000000000000000000000000000\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",root))die("adopt identity");
-  for(int i=0;i<5;i++){
+  for(int i=0;i<9;i++){
    char st[4400],cf[4400],as[4400],ch[4400],leafcfg[200];path(st,argv[2],leaf[i]);path(as,st,"rr/layout");if(cx_fmt(leafcfg,sizeof leafcfg,"%s.tsv",leaf[i]))die("adopt leaf");path(cf,argv[2],leafcfg);if(cx_fmt(leafcfg,sizeof leafcfg,"%s.chain",leaf[i]))die("adopt leaf");path(ch,argv[2],leafcfg);if(sy_mkdir(ch,0700))die("adopt chain dir");
    char *at=strstr(base,"chain_out\t"),*end=at?strchr(at,'\n'):0;if(!at||!end)die("adopt chain_out");
-   np_buf c={0};np_put(&c,base,(size_t)(at-base));np_puts(&c,"chain_out\t");np_puts(&c,ch);np_puts(&c,end);np_puts(&c,"chain_adopt\t");np_puts(&c,i==3?"yes":"external-chain-run");np_puts(&c,"\n");put(cf,c.p);free(c.p);
-   if(i){path(p,ch,"chain-run.identity");put(p,i==1?wrong:ident);path(p,ch,"chain-run.tsv");put(p,"ATTEMPT\t1\tphase=x\trc=124\tresidue=1\nBLOCKER\tphase=x\treason=fixture\trc=2\tattempts=1\tresumes=0\n");path(p,ch,"checkpoint.tsv");put(p,i==2?"DONE\tcompare\twall_ms=1\tsha=-\n":"DONE\tcompare\twall_ms=1\tsha=-\nDONE\tpack\twall_ms=1\tsha=-\n");}
+   np_buf c={0};np_put(&c,base,(size_t)(at-base));np_puts(&c,"chain_out\t");np_puts(&c,ch);
+   if(i==5||i==6){char *se=strncmp(end,"\nsnap\t",6)?0:strchr(end+1,'\n');if(!se)die("adopt snap line");np_puts(&c,"\nsnap\t");np_puts(&c,crsnap);np_puts(&c,se);}else np_puts(&c,end);
+   if(i!=8){np_puts(&c,"chain_adopt\t");np_puts(&c,i==3?"yes":"external-chain-run");np_puts(&c,"\n");}
+   if(i>=5){np_puts(&c,"chain_root\t");np_puts(&c,cr);np_puts(&c,"\n");}put(cf,c.p);free(c.p);
+   if(i){path(p,ch,"chain-run.identity");put(p,i==1?wrong:(i==5||i==7)?crident:ident);path(p,ch,"chain-run.tsv");put(p,"ATTEMPT\t1\tphase=x\trc=124\tresidue=1\nBLOCKER\tphase=x\treason=fixture\trc=2\tattempts=1\tresumes=0\n");path(p,ch,"checkpoint.tsv");put(p,i==2?"DONE\tcompare\twall_ms=1\tsha=-\n":"DONE\tcompare\twall_ms=1\tsha=-\nDONE\tpack\twall_ms=1\tsha=-\n");}
    char *adopt[]={argv[3],"--prepare",st,cf,as,"--authorize-external-operations",0};r=run(adopt,root);
    if(i==0)ck(r.rc==2&&r.err&&strstr(r.err,"chain adopt identity unreadable"),"adopt without chain output refused");
    if(i==1)ck(r.rc==2&&r.err&&strstr(r.err,"not a full source run of build_rev"),"adopt of another revision refused");
@@ -36,6 +50,11 @@ int main(int argc,char **argv){
    if(i==3)ck(r.rc==2&&r.err&&strstr(r.err,"chain_adopt value"),"adopt value other than external-chain-run refused");
    if(i==4){ck(r.out&&strstr(r.out,"chain=ADOPTED\tblockers=1\tlaunched=0"),"adopt passes identity and discloses BLOCKER count");ck(r.rc==2&&r.err&&strstr(r.err,"compiler.p4.pkg"),"adopted chain still needs real sources");
     path(p,st,"chain-adopt.tsv");char *a=cx_read(p,&n);ck(a&&strstr(a,"blockers\t1\n"),"adopt record retained");free(a);path(p,st,"upstream-evidence.tsv");ck(sy_exists(p)!=1,"adopt alone issues no upstream evidence");}
+   if(i==5){ck(r.out&&strstr(r.out,"chain=ADOPTED\tblockers=1\tlaunched=0"),"chain_root adopt passes when identity root equals chain_root and ROOT HEAD equals build_rev");ck(r.rc==2&&r.err&&strstr(r.err,"compiler.p4.pkg"),"chain_root adopt still needs real sources");
+    char want[4600];if(cx_fmt(want,sizeof want,"chain_root\t%s\n",cr))die("chain_root row");path(p,st,"chain-adopt.tsv");char *a=cx_read(p,&n);ck(a&&strstr(a,want)&&strstr(a,"blockers\t1\n"),"chain_root recorded in adopt record");free(a);path(p,st,"upstream-evidence.tsv");ck(sy_exists(p)!=1,"chain_root adopt alone issues no upstream evidence");}
+   if(i==6)ck(r.rc==2&&r.err&&strstr(r.err,"not a full source run of build_rev in chain_root")&&(!r.out||!strstr(r.out,"chain=ADOPTED")),"chain_root differing from identity root refused");
+   if(i==7)ck(r.rc==2&&r.err&&strstr(r.err,"snap must be BUILD_REV frozen path")&&(!r.out||!strstr(r.out,"chain=ADOPTED")),"chain_root with snap outside chain_root refused");
+   if(i==8)ck(r.rc==2&&r.err&&strstr(r.err,"chain_root requires chain_adopt"),"chain_root without chain_adopt refused");
    np_free(&r);
   }
  }
@@ -43,5 +62,8 @@ int main(int argc,char **argv){
  const char *roles[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};np_buf bind={0};if(cx_fmt(text,sizeof text,"%s\n%s\n%s\n%s\n0000000000000000000000000000000000000000000000000000000000000000\n",root,table,src,snap))die("resume binding");np_puts(&bind,text);cx_sha256_hex("fixture\n",8,h);
  for(int i=0;i<10;i++){path(p,src,roles[i]);put(p,"fixture\n");np_puts(&bind,roles[i]);np_puts(&bind,"\t");np_puts(&bind,h);np_puts(&bind,"\n");}path(binding,rr,"pack-inputs.tsv");if(cx_write(binding,bind.p,bind.n))die("resume binding write");free(bind.p);
  char *resume_pack[]={argv[5],"--resume",rr,0};r=run(resume_pack,root);ck(r.rc==2&&r.err&&strstr(r.err,"pack input changed"),"pack resume rejects original table digest mismatch");np_free(&r);
+ ck(rp_classify(125,1,0)==3&&rp_classify(125,0,0)==3&&rp_classify(1,1,0)==3&&rp_classify(142,0,0)==3&&rp_classify(0,0,1)==3,"rp_classify: kill/residue/deadline are retryable rc 3");
+ ck(rp_classify(1,0,0)==1&&rp_classify(2,0,0)==1&&rp_classify(0,0,0)==0,"rp_classify: deterministic failure rc 1, success 0");
+ ck(rp_bound_ms(0)==55000&&rp_bound_ms("")==55000&&rp_bound_ms("5")==55000&&rp_bound_ms("91")==55000&&rp_bound_ms("x")==55000&&rp_bound_ms("40")==55000&&rp_bound_ms("90")==85000,"rp_bound_ms: default floor, valid 6..90 raises to bound-5, never lowers");
  sy_printf("RELEASE_PREPARE_CHECK\tfailed=%d\tqualification=NOT_CLAIMED\n",bad);return bad?1:0;
 }

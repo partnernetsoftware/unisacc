@@ -1,4 +1,4 @@
-# 开发方法学调整（2026-10-28，主人裁定：凡能加速整体开发的都做）
+# 开发方法学调整（2026-10-28，项目所有者裁定：凡能加速整体开发的都做）
 
 依据：0.0.43 最近两周的实测。产品与自举链本身可靠（同源两代固定点 25 分钟闭合），慢在围绕它的流程：
 每个修复都走发布级重证、表接线只能构网后用探针发现、完成门含本机不可达项、协作靠串行窗口。
@@ -8,7 +8,7 @@
 | 车道 | 触发 | 内容 | 时限目标 |
 |---|---|---|---|
 | 快车道（开发） | 每个修复 | 当前已装 Root 直接 `-run` 或私有网；探针集 + 表 lint + `sim --cov`；UCN-free/变更无关输入的 `-E`/token 字节等价回归；交付 = diff + 生成器 + 探针 + 报告（仓内 `out/` 仅放日志与产物） | 改→探针绿 ≤ 1 h |
-| 慢车道（纪元） | 每周一次，或主人点名 | 正规 context 107 → PC → 两代 GEN → kind2 → 安装 → 全部 SOURCE 批 → 矩阵换标 | ≤ 2 h（构造 25 min + 批 ~10 min + 换标脚本化） |
+| 慢车道（纪元） | 每周一次，或项目所有者点名 | 正规 context 107 → PC → 两代 GEN → kind2 → 安装 → 全部 SOURCE 批 → 矩阵换标 | ≤ 2 h（构造 25 min + 批 ~10 min + 换标脚本化） |
 
 规则：
 - 矩阵证据只绑定"最近一次慢车道纪元"的候选；两次纪元之间的提交不迁移矩阵，也不因 SID 变化把已有证据标失效（证据带候选 SHA，读者自己判断年龄）。
@@ -31,10 +31,10 @@
 - MISSING 格优先用"事实枚举"关闭：从 `weights/gold/*.tsv`、`exec/facts/*.tsv` 生成边界用例（范围端点、两种拼写、首位/续位、每类一正一负），一次产出几十到几百条，oracle 来自同一事实而非手写。
 - 新增矩阵格必须同时写明 oracle 来源与证据批；写不出的不进必选。
 
-## 5. 完成门拆分（需主人确认后改 prd/plans）
+## 5. 完成门拆分（需项目所有者确认后改 prd/plans）
 
 - 本机门：19 域的本机必选格 + N22 本机可证部分；`--all` 的本机子集 rc0 作为日常完成信号。
-- 外宿主门：79 个 NEEDS_FOREIGN_HOST + hosts 域（2026-10-28 19:0x 机械复核：lnx/arm64 19、osx/x86_64 18、osx/arm64 18、win/x86_64 18、win/arm64 6；计划见 plans/foreign-host-runbook-cc.md），单列，待真实宿主通道；不计入本机进度。
+- 外宿主门：79 个 NEEDS_FOREIGN_HOST + hosts 域（2026-10-28 19:0x 机械复核：lnx/arm64 19、osx/x86_64 18、osx/arm64 18、win/x86_64 18、win/arm64 6），单列，待真实宿主通道；不计入本机进度。
 - 6 个具名 BLOCKED：两周内裁定（删格或定合同）。
 - 36 个 NEEDS_PRODUCT_CHANGE（15 个已有源修复）：下一个慢车道纪元集中清理，这是唯一真正的产品工作。
 
@@ -90,7 +90,7 @@
   - retarget（to_jump）：E4 在重定向后同时删除已不可达的落点 `jump`（死码，非窥孔关系）；oracle 期望删除后的形态。
   - TABLE_SUSPECT 16（金表给出非 keep 的 y，但参考分类器对该类对永不产生该关系）：a_dead×{other,none}（load64/imm/mov/alu，8 键：`ol_scan` 把 tape 末尾与 OK_OTHER 行视为读全部寄存器）、copy_into×{load64,imm,jump,jumpz,other}（5 键：b 不读 rY 或非 simple）、to_next×none（2 键）、other.mov.dest_to_mov（1 键）。不可达，无行为影响；金表若按参考收紧应改这 16 行为 keep（经生成器路线）。
   - 待办：登记批 `stream-e4-peep`（tests/batches.tsv 当前由 cdx 暂存，待其提交后再加）。
-  - TABLE_SUSPECT 16 行的归属路线（fable 子代理裁定 2026-10-28，仅记录为线索、本窗不改）：`weights/gold/peep.tsv` 由 `unisa/gold.py:peep_label` 经 `gold-export` 生成，并经 `build-weights --from-tsv --check` → `emit-kernel` 进入 kernel/ 与 SID；改 16 个 y 等于改权重字节与内核，需慢车道纪元与表主人（主人/cdx）决定。建议：把 `peep_label` 收紧到参考分类器可达集合。
+  - TABLE_SUSPECT 16 行的归属路线（fable 子代理裁定 2026-10-28，仅记录为线索、本窗不改）：`weights/gold/peep.tsv` 由 `unisa/gold.py:peep_label` 经 `gold-export` 生成，并经 `build-weights --from-tsv --check` → `emit-kernel` 进入 kernel/ 与 SID；改 16 个 y 等于改权重字节与内核，需慢车道纪元与表项目所有者（项目所有者/cdx）决定。建议：把 `peep_label` 收紧到参考分类器可达集合。
 
 ## 11. 事实生成用例二：`e4.gold.opinfo-73`（已实现：tools/opinfo-cases-gen.cx）
 
@@ -195,7 +195,7 @@
 - B1 预准入差分（csr/cdx 2026-10-28 批复，等重活窗）：已在仓外准备 `/home/devali/repos/unisacc-cc-b1-43d0de34f3`（git archive HEAD；`unisacc.real.com`=d65c1474，`compiler.pkg`=661c2b02 私包 NON_ADMITTED；`unisacc.com` 为 4 行 sh 包装，`exec sh unisacc.real.com --models compiler.pkg "$@"`，使每个子进程继承显式私包——验证：经包装编译运行 rc 3 正确，移走包后同命令拒绝 "cannot open compiler.pkg"）。交窗后在该导出 ROOT 上用 tests/run-batch.cx 顺序跑 35 批（materials streams riroot-01、ref 0ed46192；nice；每行 ≤55 s），逐行与 out/c43-cc-reg-01（d65）比对，结果只写本节与 out/，不换标、不授资格。
 - B1 结果（2026-10-28 14:5x–15:1x，cdx 交窗，`/home/devali/repos/unisacc-cc-b1-43d0de34f3`，身份 unisacc.real.com=d65c1474、compiler.pkg=661c2b02 NON_ADMITTED、包装 SHA dfe4098e 即 run-batch 的 candidate 字段；materials streams riroot-01、ref 0ed46192；nice -n 5 顺序、每行 ≤55 s、总 ~20 min、监视器绑定循环 PID 且 1500 s 总期限，无残留）：35/35 `status=PASS`，逐行 PASS 计数与 SUMMARY 行同 d65 完全相同（out/DIFF.tsv：35 SAME，0 DIFF）。子调用继承私包已验证：包装移走后 run-batch 拒绝 "cannot open compiler.pkg"，归还后 PASS。
   - 对象分类（out/SUBJECTS.tsv，按 cdx 要求逐行标明）：所有 35 批的 .cx 工具本身由 661c 产品编译（E3 走私包，150–400 行 C 源）；其上真正经 661c 的 E3 编译 C 源的批：prune（经典 tapeprune.c 驱动）、properties det/meta/bound/tu/lower/random、optimization 9、formats——共 16 批；peep 8、opinfo 2、o2 1 只证明控制器在 661c 下兼容（对象是 riroot-01 旧 stream4 与独立 ref）；layout 7 片喂 tape（E4–E7 路径，E3 不在路径）。因此结论限定为："661c 对这 16 批的 C 源编译与 d65 行为逐项相同，19 批证明控制器兼容"，不概括为"新 E3 全覆盖"，不授任何资格，不换标。
-- peep TABLE_SUSPECT 复核（2026-10-28，轻活，无重活窗）：16 个中 4 个是生成器漏实现而非金表问题——jump/jumpz.none.to_next（`pk_bcls` 越过 ol_n 即 "none"，标签在末尾）、other.mov.dest_to_mov（`.lea` 是 acls=other 的 simple 指令）、mov.load64.copy_into（load 读基址寄存器）；容器实测均按金表改写，生成器已补（out/c43-cc-peep-03 四键 PASS），全片重跑待空闲窗（届时 TABLE_SUSPECT 应为 12）。其余 12 个确为分类器不可达（a_dead×{none,other}、copy_into×{imm,jump,jumpz,other}），收紧提案 archive/plans/2026-11-08b/peep-tighten-proposal.md 交表主人，走慢车道纪元。
+- peep TABLE_SUSPECT 复核（2026-10-28，轻活，无重活窗）：16 个中 4 个是生成器漏实现而非金表问题——jump/jumpz.none.to_next（`pk_bcls` 越过 ol_n 即 "none"，标签在末尾）、other.mov.dest_to_mov（`.lea` 是 acls=other 的 simple 指令）、mov.load64.copy_into（load 读基址寄存器）；容器实测均按金表改写，生成器已补（out/c43-cc-peep-03 四键 PASS），全片重跑待空闲窗（届时 TABLE_SUSPECT 应为 12）。其余 12 个确为分类器不可达（a_dead×{none,other}、copy_into×{imm,jump,jumpz,other}），收紧提案 archive/plans/2026-11-08b/peep-tighten-proposal.md 交表项目所有者，走慢车道纪元。
 - 换标迁移已工具化（2026-10-28）：`tools/matrix-flip-gen.cx … --migrate OLDHEX NEWHEX LOGDIR` 把已为 COVERED_LOCAL 且证据含 @OLDHEX 的 60 格重贴到新候选与新日志目录并加迁移注（干跑：d65c1474→ace3b447 生成+--check 通过；普通模式对已换标矩阵正确拒绝 cell-not-missing）。下一纪元流程：在冻结导出上重跑 35 批到 out/c43-cc-reg-NN → `--migrate d65c1474 <new> out/c43-cc-reg-NN` 生成 → --check → 覆盖五张矩阵。
 
 ## 22. 15 分钟重活窗（2026-10-28 16:1x，csr 交窗；产品 f3705dfa，对象旧 riroot-01 流，不换标为新候选资格）

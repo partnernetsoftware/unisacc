@@ -1,0 +1,45 @@
+/* tools/check-candidate-evidence.cx -- fixtures for tools/candidate-evidence.cx (never runs the five batches).
+ *
+ *   sh ./unisacc.com tools/check-candidate-evidence.cx
+ *
+ * (1) dry-run with a fake APE path: rc 0, five CMD lines, five UNRUN rows, no PASS row, the fake APE named in
+ * every command, sha256 ABSENT; (2) missing --ape is refused rc 2; (3) a real run with an absent APE is refused
+ * rc 2 with no CAND_EVIDENCE row. Counting is done by grep on the tool's output. Prints PASS|FAIL lines and
+ * CHECK_CANDIDATE_EVIDENCE<TAB>failed=N. */
+#pragma unisa use text.text
+static int failed;
+static void ck(int ok, const char *n) { printf("%s\tcheck-candidate-evidence.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+/* number printed by: tool ARGS 2>&1 | grep -c PAT   (PAT is a fixed literal at every call site) */
+static int cnt(const char *args, const char *pat) {
+    char c[900]; char b[32]; FILE *p; int v = -1;
+    if (cx_fmt(c, sizeof c, "timeout 40 sh ./unisacc.com tools/candidate-evidence.cx -- %s 2>&1 | grep -c '%s'", args, pat)) return -1;
+    p = popen(c, "r"); if (!p) return -1;
+    if (fgets(b, sizeof b, p)) v = atoi(b);
+    pclose(p); return v;
+}
+static int rcof(const char *args) {
+    char c[900]; int r;
+    if (cx_fmt(c, sizeof c, "timeout 40 sh ./unisacc.com tools/candidate-evidence.cx -- %s >/dev/null 2>&1", args)) return -1;
+    r = system(c); return WIFEXITED(r) ? WEXITSTATUS(r) : 255;
+}
+int main(void) {
+    const char *dry = "--ape /nonexistent/fake-ape --out /tmp/ce-fixture-none --dry-run";
+    const char *real = "--ape /nonexistent/fake-ape --out /tmp/ce-fixture-none";
+    ck(rcof(dry) == 0, "dry.rc0");
+    ck(cnt(dry, "^CMD") == 5, "dry.five-cmds");
+    ck(cnt(dry, "UNRUN") == 5 && cnt(dry, "PASS") == 0, "dry.unrun-no-pass");
+    ck(cnt(dry, "/nonexistent/fake-ape") == 5 && cnt(dry, "ape_sha256=ABSENT") == 5, "dry.ape-identity");
+    ck(cnt(dry, "cand-unit-compile\\|check-link-dce\\|check-route-fwd\\|route-equiv\\|xs-bound-width") == 10, "dry.ids");
+    ck(rcof("--out /tmp/ce-fixture-none --dry-run") == 2 && cnt("--out /tmp/ce-fixture-none --dry-run", "REFUSE") == 1, "refuse.missing-ape");
+    ck(rcof(real) == 2 && cnt(real, "APE absent") == 1 && cnt(real, "CAND_EVIDENCE") == 0, "refuse.absent-ape-real-run");
+    {
+        const char *rel = "--ape out/rel-fake-ape --out out/rel-fake-dir --dry-run";
+        ck(cnt(rel, "[ \"]/[^ ]*out/rel-fake-ape") == 5 && cnt(rel, "[ \"]out/rel-fake") == 0, "dry.relative-ape-absolute-cmd");
+        ck(cnt(rel, "\"sh ./unisacc.com") == 0 && cnt(rel, "sh /[^ ]*/unisacc.com") >= 2, "dry.baseline-absolute");
+    }
+    /* markers must come from the real batch sources */
+    ck(system("grep -q 'CAND_UNIT_COMPILE_SUMMARY' tests/stream/cand-unit-compile.cx && grep -q 'ROUTE_EQUIV_SUMMARY' tests/stream/route-equiv.cx && grep -q 'XS_BOUND_WIDTH_SUMMARY' tests/stream/xs-bound-width.cx && grep -q 'CHECK_LINK_DCE failed' tests/check-link-dce.cx && grep -q 'CHECK_ROUTE_FWD failed' tests/check-route-fwd.cx") == 0, "markers.in-batch-sources");
+    ck(system("grep -c 'CAND_UNIT_COMPILE_SUMMARY\\\\tpassed=23\\\\tfailed=0' tools/candidate-evidence.cx >/dev/null && grep -c 'ROUTE_EQUIV_SUMMARY\\\\tpass=145' tools/candidate-evidence.cx >/dev/null && grep -c 'XS_BOUND_WIDTH_SUMMARY\\\\tsites=3' tools/candidate-evidence.cx >/dev/null") == 0, "markers.tool-uses-real-literals");
+    printf("CHECK_CANDIDATE_EVIDENCE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

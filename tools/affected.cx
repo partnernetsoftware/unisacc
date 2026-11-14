@@ -15,8 +15,10 @@
               cx/compiler/cxmod.cx does: beside the using file, else by the nearest cxroot.tsv -- cxlib.cxroot);
      literal  named inside a string literal of a root source as a repo-relative path that exists (a leading ./
               or / is dropped; a directory with two or more components matches every file below it);
-     literal-use  in the use closure of a .cx file named that way (a check that spawns a tool);
-     arg / arg-use  the same for a path token of the args field;
+    literal-use  in the use closure of a .cx file named that way (a check that spawns a tool); the file so
+             named is itself a tool, so its own path literals count too (one more hop at --tier commit, the
+             full transitive closure at every other tier -- see `Tier depth` below);
+    arg / arg-use  the same for a path token of the args field;
      table    observed exec/*.tsv generator input of an exactly named recipe/job/artifact (see below).
    Files are compared by sy_realpath, so two link spellings of one file are one file.
    Prints AFFECTED<TAB>id<TAB>why=FILE<TAB>via=KIND per batch (the strongest match, first changed file on a
@@ -27,8 +29,18 @@
    <TAB>elapsed_ms=..  No batch is started after 45 s; batches still running at 54 s are killed with their
    process groups (Linux: descendants found with pgrep -P) -- both are reported DEFERRED<TAB>id, to be run
    again with --ids.  A batch that declares materials is DEFERRED (run-batch needs them supplied).
+   AFFECTED_RUN also carries kit_ms=, prep_ms= and run_ms=: kit is the tlib kit pre-build, prep is the
+   material pre-build, run is start-to-finish of the batches; the three add up to elapsed_ms.  They exist
+   for tools/batch-cost.cx to attribute cold builds and link time, and change no decision.
+   tests/run-batch.cx prints BATCH_TIMING after BATCH_RUN with prep_ms/link_ms/run_ms/norm_ms/total_ms and
+   kit=hot|cold|fallback, so a single batch's phases are attributable without parsing its stderr.
    rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
    2 usage, registry or I/O error.
+  Tier depth: the literal-hop depth follows --tier.  commit keeps the registry read cheap for every commit:
+  one extra hop (a changed tool's own literals, so a two-hop defect like check-release-ape -> ape-pack is
+  still caught) but no transitive closure.  daily, release, and every invocation without --tier take the
+  full transitive closure, decycled by the (epoch, via) monotonicity in mark(): a node re-enters only when
+  its via strengthens.  An unknown tier name is a usage error.
    --users FILE: every tracked .cx (archive/ and symlinks skipped) whose use closure holds FILE, as
    USER<TAB>path, then USERS_SUMMARY<TAB>file=..<TAB>users=N<TAB>scanned=K.
    Table inputs: exec/pipeline/table-deps.tsv is net-deps' static conservative manifest closure.
@@ -48,6 +60,7 @@
 #pragma unisa use cxlib.cxroot
 #pragma unisa use sys.env
 #pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.tlibpkg
 
 /* an unlinked spool file the drained output of a bounded child goes to */
 static int spool_open(void) {
@@ -161,14 +174,38 @@ static int lookup(const char *key, const char *given, int create) {
     }
 }
 /* REL repo-relative (or absolute): its node */
+/* 同一次运行里同一拼写只 realpath 一次、同一字面量 token 只 stat 一次:
+   1034 个批共享大量同名源(尤其 cx/sys/*),不做记忆时每批都要重做这些系统调用。 */
+static char *spell[8192]; static int spell_node[8192];
+static int spell_get(const char *rel) {
+    unsigned long h = hash(rel) & 8191; int i;
+    for (i = 0; i < 8192; i++) {
+        unsigned long s = (h + (unsigned long)i) & 8191;
+        if (!spell[s]) return -1;
+        if (tx_eqz(spell[s], rel)) return spell_node[s];
+    }
+    return -1;
+}
+static void spell_put(const char *rel, int ni) {
+    unsigned long h = hash(rel) & 8191; int i;
+    for (i = 0; i < 8192; i++) {
+        unsigned long s = (h + (unsigned long)i) & 8191;
+        if (!spell[s]) { spell[s] = keep(rel, tx_len(rel, 8192)); spell_node[s] = ni; return; }
+        if (tx_eqz(spell[s], rel)) { spell_node[s] = ni; return; }
+    }
+}
 static int path_node(const char *rel, int create) {
-    char abs[8192], real[4096]; int r; const char *given = rel;
+    char abs[8192], real[4096]; int r, cached; const char *given = rel;
+    if (rel[0] != '/' && (cached = spell_get(rel)) >= 0) return cached;
     if (rel[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", rel)) die("path too long"); }
     else if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long");
     if (rel[0] == '/' && tx_prefix(rel, tx_len(rel, 8192), root, root_n) && rel[root_n] == '/') given = rel + root_n + 1;
     r = sy_realpath(abs, real, sizeof real);
     if (r < 0 && r != -ENOENT && r != -ENOTDIR) fprintf(stderr, "NOTE\trealpath\t%s\terr=%d\n", rel, r);
-    return lookup(r >= 0 ? real : abs, given, create);
+    {   int ni = lookup(r >= 0 ? real : abs, given, create);
+        if (create && rel[0] != '/') spell_put(rel, ni);
+        return ni;
+    }
 }
 static const char *display(int ni) {
     const char *k = node[ni].key;
@@ -217,8 +254,15 @@ static void load_models(void) {
       }
     }
 }
+static unsigned char len_hit[4096];   /* len_hit[n]: some model name has length n (n < 4096), built lazily */
+static int len_hit_ready;
 static unsigned long model_token(const char *s, long n) {
     int m, k; unsigned long bits = 0;
+    if (!len_hit_ready) {
+        for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++) if (model_lengths[m][k] > 0 && model_lengths[m][k] < 4096) len_hit[model_lengths[m][k]] = 1;
+        len_hit_ready = 1;
+    }
+    if (n >= 0 && n < 4096 && !len_hit[n]) return 0;
     for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++)
         if (model_lengths[m][k] == n && tx_prefix(s, n, model_names[m][k], n)) bits |= 1UL << m;
     return bits;
@@ -335,20 +379,56 @@ static void parse(int ni) {
 
 /* ---------- closure of one batch (or one file) ---------- */
 static int dirs[4096], dirvia[4096], ndirs;
+/* 字面量传递深度随档位:commit 只多跟一层(不改「很多工具都点名同一个文件」时的提交代价),
+   daily/release/--all/默认 无限传递并靠 via 单调性去环(发布与日档要的是完整闭包)。 */
+static int lit_unlimited = 1;
 static int child_via(int v) { return v == V_SOURCE ? V_USE : v == V_LIT ? V_LITUSE : v == V_ARG ? V_ARGUSE : v; }
+static void named(const char *tok, int via);
+static void named_file(const char *tok, int via);
+static long t_parse, t_walk;
 static void mark(int ni, int via) {
     Node *N = &node[ni]; int k;
     if (N->mark == epoch && N->via <= via) return;
     N->mark = epoch; N->via = via;
-    if (!N->parsed) parse(ni);
+    { long q = sy_now_ms(); if (!N->parsed) parse(ni); t_parse += sy_now_ms() - q; }
     N = &node[ni];
+    { long q = sy_now_ms();
     for (k = 0; k < N->nuse; k++) mark(N->use[k], child_via(via));
+    /* 被字面量/arg 点到的文件本身也是「工具」:它自己再点名的文件同样算进来,否则 A -> tool.cx -> B
+       这种两跳只跟一层(实测:改 tools/ape-pack.cx 只选中 chain-fresh-out 一批,check-release-ape 的
+       夹具陈旧红了数天没人发现)。
+       commit 档只再跟一层:链工具(candidate-chain/chain-step/chain-run 等)都字面量点名 ape-pack,
+       无限传递会让改 ape-pack 选中 37 个 commit 档批次,每次提交都得跑整链。
+       daily/release/--all/默认 无限传递:发布与日档要完整闭包,三跳以上也必须到。
+       去环靠 mark 的 (epoch, via) 单调性:同一节点只在其 via 变强时重入,child_via 只会变弱。 */
+    if (via == V_LIT || via == V_ARG)
+        for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via == V_ARG ? V_ARGUSE : V_LITUSE);
+    else if (lit_unlimited && (via == V_LITUSE || via == V_ARGUSE))
+        for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via);
+    t_walk += sy_now_ms() - q; }
 }
 /* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
+/* 同一 token 同一次运行只 stat 一次:结果(返回码与 kind)按 token 记忆;冻结输入下与逐次 stat 等价。 */
+static char *ts_key[32768]; static int ts_r[32768]; static char ts_kind[32768];
+static int tok_stat(const char *tok, sy_stat_t *st) {
+    unsigned long h = hash(tok) & 32767; int i; char abs[8192];
+    for (i = 0; i < 32768; i++) {
+        unsigned long s = (h + (unsigned long)i) & 32767;
+        if (!ts_key[s]) {
+            int r;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return -ENAMETOOLONG;
+            r = sy_stat(abs, st);
+            ts_key[s] = zkeep(tok); ts_r[s] = r; ts_kind[s] = r < 0 ? 0 : st->kind;
+            return r;
+        }
+        if (tx_eqz(ts_key[s], tok)) { st->kind = ts_kind[s]; return ts_r[s]; }
+    }
+    return sy_stat("/nonexistent-affected-memo-full", st);
+}
 static void named(const char *tok, int via) {
-    char abs[8192]; sy_stat_t st; int r, ni;
-    if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return;
-    r = sy_stat(abs, &st);
+    sy_stat_t st; int r, ni;
+    r = tok_stat(tok, &st);
+    if (r == -ENAMETOOLONG) return;
     if (r < 0) { if (r != -ENOENT) fprintf(stderr, "NOTE\tliteral-stat\t%s\terr=%d\n", tok, r); return; }
     ni = path_node(tok, 1);
     if (st.kind == 'd') {
@@ -357,6 +437,13 @@ static void named(const char *tok, int via) {
         return;
     }
     if (st.kind == 'f') mark(ni, via);
+}
+/* 传递层只跟「文件」:目录记号若也传递,任何提到 exec/parse2 这类目录名的工具都会把它变成整棵子树的
+   守卫,而负控用的正是一个不存在的表路径(exec/parse2/no-such-affected-table.tsv),会因此被误选中。 */
+static void named_file(const char *tok, int via) {
+    sy_stat_t st;
+    if (tok_stat(tok, &st) < 0 || st.kind != 'f') return;
+    mark(path_node(tok, 1), via);
 }
 static void mark_root(const char *rel) {
     int ni = path_node(rel, 1), k;
@@ -383,7 +470,7 @@ static void mark_guards(const char *id) {
 }
 
 /* ---------- registry ---------- */
-typedef struct { char *id, *source, *entry, *args, *materials, *tier; } Batch;
+typedef struct { char *id, *source, *entry, *args, *materials, *tier; int budget; } Batch;
 static Batch batch[MAXBATCH];
 static int nbatch;
 static const char *selected_tier;
@@ -393,7 +480,7 @@ static void on_batch(const tp_batch_view *v, void *ctx) {
     if (nbatch == MAXBATCH) die("too many batches");
     batch[nbatch].id = zkeep(v->id); batch[nbatch].source = zkeep(v->source); batch[nbatch].entry = zkeep(v->entry);
     batch[nbatch].args = zkeep(v->args); batch[nbatch].materials = zkeep(v->materials);
-    batch[nbatch].tier = zkeep(v->tier);
+    batch[nbatch].tier = zkeep(v->tier); batch[nbatch].budget = atoi(v->budget);
     nbatch++;
 }
 static void on_cov(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
@@ -436,6 +523,23 @@ static int match(const int *changed, int nch, int *why) {
     }
     return best;
 }
+/* 批级记忆:(source,entry,args) 与 changed[] 不变时 mark_batch+match 的结论也不变,而批 id 只影响
+   mark_guards(只对 3 个 cross-targets 批生效)。1034 个 IMPLEMENTED SOURCE 批只有 560 个 distinct
+   源。命中时直接复用 (v, why),不重算闭包;guard 批仍走完整路径以免漏掉目录守卫。 */
+static char *bkey[4096]; static int bv[4096], bwhy[4096];
+static int bslot(const char *k, int create) {
+    unsigned long h = hash(k) & 4095; int i;
+    for (i = 0; i < 4096; i++) {
+        unsigned long s = (h + (unsigned long)i) & 4095;
+        if (!bkey[s]) { if (!create) return -1; bkey[s] = keep(k, tx_len(k, 8200)); return (int)s; }
+        if (tx_eqz(bkey[s], k)) return (int)s;
+    }
+    return -1;
+}
+static int batch_has_guard(const char *id) {
+    int g; for (g = 0; GUARD[g][0]; g++) if (tx_eqz(GUARD[g][0], id)) return 1;
+    return 0;
+}
 
 /* ---------- child processes ---------- */
 static int read_all(char **argv, Buf *out) {
@@ -456,13 +560,22 @@ static long parse_long(const char *s, long n) { long v = 0, i; if (n < 1 || n > 
    it.  -ENOSYS where /proc is absent: the previous group kill, and a residue no code can vouch for. */
 static int kill_tree(int pid, const int *keep, int nkeep, char *rep, int repcap) {
     int sv = sy_kill_tree(pid, 2000, keep, nkeep, rep, repcap);
-    if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); }
+    if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); return sv; }
+    /* SIGKILL 到进程真正消失之间有窗口:第一轮报的 residue 可能只是还在 dying。再扫第二轮,只报第二轮
+       仍然活着的 pid —— 那才是真的没杀干净(实测 residue=1 survived=PID 全是这种竞态)。 */
+    if (sv > 0) {
+        char rep2[256];
+        sv = sy_kill_tree(pid, 2000, keep, nkeep, rep2, sizeof rep2);
+        if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); return sv; }
+        if (sv > 0 && rep && repcap > 0) { int u = 0; const char *s = rep2; while (s[u] && u < repcap - 1) { rep[u] = s[u]; u++; } rep[u] = 0; }
+    }
     return sv;
 }
 
-typedef struct { int pid, ofd, efd, bi; Buf out, err; } Child;
+typedef struct { int pid, ofd, efd, bi; long deadline; Buf out, err; } Child;
 static char outparent[4400];
 static long t_main, start_deadline = 45000, hard_deadline = 54000;
+static int deadline_hook;   /* --start/--hard-deadline-ms 是测试钩子:给了就按给的数,不再按注册预算推导 */
 
 /* the last line of S starting with PREFIX, or 0 */
 static const char *last_line(const char *s, long n, const char *prefix, long *ln) {
@@ -477,8 +590,11 @@ static const char *last_line(const char *s, long n, const char *prefix, long *ln
 }
 /* 1 PASS, 0 not */
 static int finish(Child *C, int ex, int code, int sig) {
-    char logp[4600], pre[256]; Buf lg = {0, 0, 0}; long ln = 0; const char *line; const char *id = batch[C->bi].id;
+    char logp[4600], pre[256]; Buf lg = {0, 0, 0}; long ln = 0, ln2 = 0; const char *line; const char *id = batch[C->bi].id;
     put(&lg, C->out.p ? C->out.p : "", C->out.n); puts_(&lg, "\n--- stderr ---\n"); put(&lg, C->err.p ? C->err.p : "", C->err.n);
+    {   const char *tl = last_line(C->out.p ? C->out.p : "", C->out.n, "BATCH_TIMING\t", &ln2);
+        if (tl) { puts_(&lg, ""); put(&lg, tl, ln2); }
+    }
     if (cx_fmt(logp, sizeof logp, "%s/%s.log", outparent, id) || cx_write(logp, lg.p, (size_t)lg.n)) fprintf(stderr, "NOTE\tlog\tcannot write %s\n", logp);
     if (cx_fmt(pre, sizeof pre, "BATCH_RUN\tid=%s\t", id)) die("id too long");
     line = last_line(C->out.p ? C->out.p : "", C->out.n, pre, &ln);
@@ -492,50 +608,264 @@ static int finish(Child *C, int ex, int code, int sig) {
     return 0;
 }
 /* --prepare-materials: resolve each declared material to a canonical path before run-batch.
-   Only `NAME-tool:path` (-> tools/NAME.cx, a regular file) is resolvable today; anything else stays
-   DEFERRED with a named reason.  Each resolved material is printed as PREPARED with its sha256.
-   A receipt is not a PASS and is never reused as one. */
+   Preparable kinds: `NAME-tool:path` (-> tools/NAME.cx, falling back to tests/cases/NAME.cx when that file does
+   not exist, built native by the toolprep kit, else the product under tools/bound 55; PREP_SECS 90 under the
+   owner ceiling) and `streams` (tools/streams-material.cx: a directory of seven legacy-contract shims).
+   Everything else stays DEFERRED with a named reason (sha256 values and any name without a producer).
+   The builds run BEFORE the batch loop, at most PREP_PAR at a time, each bounded at PREP_SECS (and
+   never past the run's own 54 s kill), and no build starts after PREP_BUDGET_MS from process start (the rest are DEFERRED prebuild-budget; a rerun
+   resumes from the cache).  Identity = sha256 over the source use/literal closure plus the product sha;
+   the result lives at out/prep-cache/NAME-ID16.{bin,rcpt}; a hit is re-verified by the file's own sha256.
+   A receipt is never a PASS and a PASS is never cached. */
+#define PREP_PAR 3
+#define PREP_SECS 90
+#define PREP_BUDGET_MS 38000
+typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65]; long ms; int cached; } Prep;
+enum { PK_TOOL = 1, PK_STREAMS = 2 };   /* PK_STREAMS: a directory of seven shims from tools/streams-material.cx; its artifact sha is that of streams.json */
+enum { PS_TODO = 0, PS_READY, PS_FAILED };
 static int prep_on = 0;
+static Prep prep[32];
+static int nprep = 0;
+static char prod_sha[65];
+static char cachedir[4400];
+
+static int prep_find(const char *name) { int k; for (k = 0; k < nprep; k++) if (tx_eqz(prep[k].name, name)) return k; return -1; }
+static int cmp_s(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+/* sha256 over the sorted "path<TAB>filesha" lines of the source closure of REL */
+static int closure_sha(const char *rel, char *out65) {
+    char **ln = ar_alloc(arena, 4096 * (long)sizeof(char *)); int k, n = 0; Buf all = {0, 0, 0};
+    if (!ln) die("out of memory");
+    epoch++;
+    mark_root(rel);
+    for (k = 0; k < nnode && n < 4096; k++) {
+        char *s; size_t sz; char h[65], line[8400]; if (node[k].mark != epoch) continue;
+        s = cx_read(node[k].key, &sz);
+        if (!s) return -1;
+        cx_sha256_hex(s, sz, h);
+        free(s);
+        if (cx_fmt(line, sizeof line, "%s\t%s\n", display(k), h)) return -1;
+        ln[n++] = zkeep(line);
+    }
+    qsort(ln, n, sizeof(char *), cmp_s);
+    for (k = 0; k < n; k++) puts_(&all, ln[k]);
+    cx_sha256_hex(all.p ? all.p : "", (size_t)all.n, out65);
+    return 0;
+}
+static int file_sha(const char *p, char *h) { size_t sz; char *s = cx_read(p, &sz); if (!s) return -1; tp_sha(s, sz, h); free(s); return 0; }   /* same SHA-256; cxlib.tlibpkg tp_sha = kernel AF_ALG with the portable fallback */
+static int prep_art_sha(const Prep *P, char *h) {
+    char leaf[4500];
+    if (P->kind != PK_STREAMS) return file_sha(P->path, h);
+    if (cx_fmt(leaf, sizeof leaf, "%s/streams.json", P->path)) return -1;
+    return file_sha(leaf, h);
+}
+/* 1 when the stored receipt names exactly this identity and the artifact's own sha256 still matches */
+static int prep_verify(Prep *P) {
+    char leaf[4400], want[400], *s; size_t sz; int ok;
+    if (cx_fmt(leaf, sizeof leaf, "%s", P->path)) return 0;
+    if (prep_art_sha(P, P->sha)) return 0;
+    if (cx_fmt(want, sizeof want, "closure=%s\tproduct=%s\tartifact=%s\n", P->closure, prod_sha, P->sha)) return 0;
+    s = cx_read(P->rcpt, &sz);
+    if (!s) return 0;
+    ok = sz == (size_t)tx_len(want, sizeof want) && !memcmp(s, want, sz);
+    free(s);
+    return ok;
+}
+/* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
+   absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
+   resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
+static int prep_source(const char *name, int kind, char *src, long cap, char *why, int whycap) {
+    long nl = tx_len(name, 256);
+    char cand[600];
+    if (kind == 2) { cx_fmt(why, whycap, "unpreparable=sha256-value:%s", name); return -1; }
+    if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) {
+        if (cx_fmt(src, cap, "tools/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, whycap, "source-name-too-long=%s", name); return -1; }
+        if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) {
+            if (cx_fmt(src, cap, "tests/cases/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, whycap, "source-name-too-long=%s", name); return -1; }
+        }
+    } else if (tx_eqz(name, "streams")) { if (cx_fmt(src, cap, "tools/streams-material.cx")) return -1; }
+    else { cx_fmt(why, whycap, "no-producer=%s", name); return -1; }
+    if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) { cx_fmt(why, whycap, "source-absent=%s", src); return -1; }
+    return 0;
+}
+/* register NAME when it is preparable; returns its slot or -1 (with WHY set) */
+static int prep_plan(const char *name, int kind, char *why, int cap) {
+    int k = prep_find(name); Prep *P; char h[65], buf[600];
+    if (k >= 0) return k;
+    if (nprep >= 32) { cx_fmt(why, cap, "too-many-materials"); return -1; }
+    P = &prep[nprep];
+    memset(P, 0, sizeof *P);
+    cx_fmt(P->name, sizeof P->name, "%s", name);
+    P->kind = tx_eqz(name, "streams") ? PK_STREAMS : PK_TOOL;
+    if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
+    if (closure_sha(P->src, P->closure)) { cx_fmt(why, cap, "closure-unreadable=%s", P->src); return -1; }
+    if (P->kind == PK_STREAMS) {   /* the shims call tools/streams-e1-frame.cx at run time: its closure is part of the identity */
+        char h2[65], both[140];
+        if (closure_sha("tools/streams-e1-frame.cx", h2) || cx_fmt(both, sizeof both, "%s%s", P->closure, h2)) { cx_fmt(why, cap, "closure-unreadable=tools/streams-e1-frame.cx"); return -1; }
+        cx_sha256_hex(both, (size_t)tx_len(both, sizeof both), P->closure);
+    }
+    {   char idb[200]; if (cx_fmt(idb, sizeof idb, "%s%s", P->closure, prod_sha)) { cx_fmt(why, cap, "identity=%s", name); return -1; }
+        cx_sha256_hex(idb, (size_t)tx_len(idb, sizeof idb), h);
+        memcpy(P->id, h, 16); P->id[16] = 0; }
+    if (cx_fmt(P->path, sizeof P->path, "%s/%s-%s.%s", cachedir, name, P->id, P->kind == PK_STREAMS ? "dir" : "bin")
+        || cx_fmt(P->rcpt, sizeof P->rcpt, "%s/%s-%s.rcpt", cachedir, name, P->id)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
+    if (prep_verify(P)) { P->state = PS_READY; P->cached = 1; }
+    return nprep++;
+}
+typedef struct { int pid, ofd, efd, job, secs; long t0; char tmp[4400]; Buf out, err; } PJob;
+static int prep_start(PJob *J, int k) {
+    Prep *P = &prep[k]; char product[4400], bound[4400], image[4400], kitdir[4400], srcabs[4400], pid_s[32];
+    char *av[16]; int n = 0;
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)
+        || tp_kit_dir(root, kitdir, sizeof kitdir) || cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir)
+        || cx_fmt(srcabs, sizeof srcabs, "%s/%s", root, P->src)
+        || cx_fmt(pid_s, sizeof pid_s, "%d", sy_pid())
+        || cx_fmt(J->tmp, sizeof J->tmp, "%s/%s-%s.%s.tmp", cachedir, P->name, P->id, pid_s)) return -1;
+    {
+        static char s_all[16], s_kit[16];
+        static const char *script = "[ -x \"$2\" ] && \"$1\" \"$8\" \"$2\" prep \"$3\" -o \"$4\" --root \"$5\" && exit 0; exec \"$1\" \"$7\" sh \"$6\" \"$3\" -o \"$4\"";
+        static const char *sscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- \"$5\" \"$4\" >/dev/null";   /* streams-material.cx ROOT NEW_OUTDIR (absent) */
+        long left = (hard_deadline - (sy_now_ms() - t_main)) / 1000 - 2;   /* a build never outlives the run's own kill deadline */
+        J->secs = left < PREP_SECS ? (int)left : PREP_SECS;
+        if (J->secs < 6) return -2;
+        if (cx_fmt(s_all, sizeof s_all, "%d", J->secs) || cx_fmt(s_kit, sizeof s_kit, "%d", J->secs < 20 ? J->secs : 20)) return -1;
+        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(P->kind == PK_STREAMS ? sscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
+    }
+    av[n] = 0;
+    J->job = k; J->t0 = sy_now_ms(); J->out.p = 0; J->out.n = J->out.cap = 0; J->err = J->out;
+    J->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &J->ofd, &J->efd);
+    return J->pid < 0 ? J->pid : 0;
+}
+static void prep_done(PJob *J, int ok) {
+    Prep *P = &prep[J->job]; char rc[800];
+    P->ms = sy_now_ms() - J->t0;
+    if (ok) {
+        (void)sy_rename(J->tmp, P->path);   /* a concurrent run may have placed the same identity first: verified below */
+        if (prep_art_sha(P, P->sha)) ok = 0;
+        if (ok && !cx_fmt(rc, sizeof rc, "closure=%s\tproduct=%s\tartifact=%s\n", P->closure, prod_sha, P->sha) && cx_write(P->rcpt, rc, (size_t)tx_len(rc, sizeof rc)) == 0) { P->state = PS_READY; return; }
+    }
+    P->state = PS_FAILED;
+    if (!P->why[0]) cx_fmt(P->why, sizeof P->why, "build-failed=%s", P->name);
+}
+static void prebuild(const int *sel, int nsel) {
+    int b, todo[32], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
+    if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."))) die("path too long");
+    {   char od[4400]; long n = tx_len(cachedir, sizeof cachedir), k; int r;   /* the cache directory, parents included */
+        for (k = 1; k <= n; k++) if (k == n || cachedir[k] == '/') {
+            if (tx_copy(od, sizeof od, cachedir, k)) die("path too long");
+            r = sy_mkdir(od, 0755); if (r < 0 && r != -EEXIST) die("cannot make the prep-cache directory");
+        } }
+    { char pu[4400]; if (cx_fmt(pu, sizeof pu, "%s/unisacc.com", root) || file_sha(pu, prod_sha)) die("cannot hash unisacc.com"); }
+    for (b = 0; b < nsel; b++) {
+        const char *at = batch[sel[b]].materials; tp_material_decl d; int rc;
+        if (tx_eqz(at, "-")) continue;
+        while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; (void)prep_plan(d.name, d.kind, why, sizeof why); }
+    }
+    for (k = 0; k < nprep; k++) { if (prep[k].state == PS_READY) hits++; else todo[ntodo++] = k; }
+    while (nextt < ntodo || nact) {
+        sy_pollfd_t fds[2 * PREP_PAR]; int who[2 * PREP_PAR], isout[2 * PREP_PAR], nf = 0, m;
+        while (nact < PREP_PAR && nextt < ntodo) {
+            Prep *P = &prep[todo[nextt]];
+            if (sy_now_ms() - t_main >= PREP_BUDGET_MS) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "prebuild-budget=%s", P->name); deferred++; nextt++; continue; }
+            {   int sr = prep_start(&job[nact], todo[nextt]);
+                if (sr == -2) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "prebuild-budget=%s", P->name); deferred++; nextt++; continue; }
+                if (sr < 0) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "spawn-failed=%s", P->name); failed++; nextt++; continue; }
+            }
+            nact++; nextt++;
+        }
+        if (!nact) continue;
+        for (k = 0; k < nact; k++) {
+            if (job[k].ofd >= 0) { fds[nf].fd = job[k].ofd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 1; }
+            if (job[k].efd >= 0) { fds[nf].fd = job[k].efd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 0; }
+        }
+        if (nf && sy_poll(fds, nf, 200) < 0) die("poll");
+        for (m = 0; m < nf; m++) {
+            int c = who[m]; char chunk[16384]; long r;
+            if (!fds[m].revents) continue;
+            r = sy_read(fds[m].fd, chunk, sizeof chunk);
+            if (r > 0) { if ((isout[m] ? job[c].out.n : job[c].err.n) < 65536) put(isout[m] ? &job[c].out : &job[c].err, chunk, r); continue; }
+            if (r == -EINTR || r == -EAGAIN) continue;
+            sy_close(fds[m].fd);
+            if (isout[m]) job[c].ofd = -1; else job[c].efd = -1;
+        }
+        for (k = 0; k < nact; k++) {
+            int ex = 0, code = 0, sig = 0, over = sy_now_ms() - job[k].t0 > (job[k].secs + 3) * 1000L;
+            if (over && (job[k].ofd >= 0 || job[k].efd >= 0)) {
+                char rep[128]; (void)kill_tree(job[k].pid, 0, 0, rep, sizeof rep);
+                if (job[k].ofd >= 0) sy_close(job[k].ofd);
+                if (job[k].efd >= 0) sy_close(job[k].efd);
+                job[k].ofd = job[k].efd = -1;
+                cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "build-timeout-%ds=%s", job[k].secs, prep[job[k].job].name);
+                (void)sy_wait_status(job[k].pid, 0, &ex, &code, &sig); prep_done(&job[k], 0); failed++;
+                job[k] = job[nact - 1]; nact--; k--; continue;
+            }
+            if (job[k].ofd >= 0 || job[k].efd >= 0) continue;
+            if (sy_wait_status(job[k].pid, 0, &ex, &code, &sig) < 0) { ex = 1; code = 255; }
+            if (ex && code == 0) prep_done(&job[k], 1);
+            else { cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "build-failed=%s:rc=%d", prep[job[k].job].name, ex ? code : 128 + sig); prep_done(&job[k], 0); }
+            if (prep[job[k].job].state == PS_READY) built++; else { failed++; if (job[k].err.n) fprintf(stderr, "%.*s", (int)(job[k].err.n > 2000 ? 2000 : job[k].err.n), job[k].err.p); }
+            job[k] = job[nact - 1]; nact--; k--;
+        }
+    }
+    for (k = 0; k < nprep; k++)
+        if (prep[k].state == PS_READY) printf("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
+        else printf("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
+    printf("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
+}
 static char prep_val[32][4400];
-static char built[32][128];
-static int nbuilt = 0;
+/* the material arguments of batch B, or a named reason */
 static int prepare_materials(const Batch *B, const char **av, int *nav, char *why, int cap) {
     const char *at = B->materials; tp_material_decl d; int rc, n = 0;
     while ((rc = tp_material_next(&at, &d)) > 0) {
-        long nl = tx_len(d.name, 256); char src[4400], bin[4400], h[65], w2[256]; size_t sz; char *s; int k, hit = -1;
+        int k = prep_find(d.name);
         if (n >= 32) { cx_fmt(why, cap, "too-many-materials"); return 1; }
-        if (d.kind == 2 || nl < 6 || !tx_eqz(d.name + nl - 5, "-tool")) { cx_fmt(why, cap, "unpreparable=%s", d.name); return 1; }
-        if (cx_fmt(src, sizeof src, "%s/tools/%.*s.cx", root, (int)(nl - 5), d.name)
-            || cx_fmt(bin, sizeof bin, "%s/mat-%s", outparent, d.name)) { cx_fmt(why, cap, "path-too-long=%s", d.name); return 1; }
-        if (sy_exists(src) != 1) { cx_fmt(why, cap, "source-absent=%s", d.name); return 1; }
-        for (k = 0; k < nbuilt; k++) if (tx_eqz(built[k], d.name)) hit = k;
-        if (hit < 0) {   /* one bounded native build per material per run (toolprep, 40 s) */
-            if (nbuilt >= 32 || tq_native(root, src, bin, w2, sizeof w2)) { cx_fmt(why, cap, "build-failed=%s:%s", d.name, w2); return 1; }
-            cx_fmt(built[nbuilt], sizeof built[nbuilt], "%s", d.name); nbuilt++;
-        }
-        s = cx_read(bin, &sz);
-        if (!s || cx_sha256_hex(s, sz, h)) { cx_fmt(why, cap, "unreadable=%s", d.name); return 1; }
-        free(s);
-        cx_fmt(prep_val[n], sizeof prep_val[n], "%s=%s", d.name, bin);
-        av[(*nav)++] = prep_val[n]; n++;
-        printf("PREPARED\t%s\t%s\tsha256=%s\treused=%d\n", B->id, d.name, h, hit >= 0);
+        if (k < 0) { if (prep_plan(d.name, d.kind, why, cap) < 0) return 1; k = prep_find(d.name); }
+        if (k < 0 || prep[k].state != PS_READY) { cx_fmt(why, cap, "%s", k >= 0 && prep[k].why[0] ? prep[k].why : "not-prepared"); return 1; }
+        cx_fmt(prep_val[n], sizeof prep_val[0], "%s=%s", d.name, prep[k].path);
+        av[*nav] = prep_val[n]; (*nav)++; n++;
     }
     if (rc < 0) { cx_fmt(why, cap, "materials-syntax"); return 1; }
     return 0;
 }
+/* tools/tlib.cx kit under a 40 s bound; its own PREPARED line (rebuilt=N) is forwarded, else a visible FAILED line. */
+static void kit_prepare(void) {
+    char bound[4400], product[4400], lim[8] = "40"; Buf out = {0, 0, 0}; char *av[8]; int rc, shown = 0; long i, e;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return;
+    av[0] = bound; av[1] = lim; av[2] = "sh"; av[3] = product; av[4] = "tools/tlib.cx"; av[5] = "--"; av[6] = "kit"; av[7] = 0;
+    rc = read_all(av, &out);
+    for (i = 0; i < out.n; i = e + 1) {
+        e = i; while (e < out.n && out.p[e] != '\n') e++;
+        if (tx_prefix(out.p + i, e - i, "PREPARED\ttlib-kit", 17)) { printf("%.*s\n", (int)(e - i), out.p + i); shown = 1; }
+    }
+    if (!shown) printf("PREPARED\ttlib-kit\trebuilt=UNKNOWN\trc=%d\n", rc);
+}
+/* 每批的硬杀线 = 它自己的注册预算(batches.tsv 第 7 列)+ 2 秒收尾,而不是全局一个 42 秒:42 秒是 kit 重建
+   要吃 40 秒那时代的数,kit 现在 <1 秒,留着只会把 45/55 秒预算的批白杀。总窗口仍是单命令 60 秒:
+   窗口不够就如实 DEFERRED,注册预算本身不动。--hard-deadline-ms 是测试钩子,给了就按给的数。 */
+static long window_end;
 static int run(const int *sel, int nsel, int jobs) {
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
-    long t0 = sy_now_ms();
+    long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0;
+    window_end = t_start + (deadline_hook ? hard_deadline : 57000);   /* 60 秒总上限,留 3 秒收尾 */
     sy_child_subreaper();   /* orphans of a killed batch become our children, so the sweep can see them */
     if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
-        || cx_fmt(outparent, sizeof outparent, "%s/out/affected-%d", root, sy_pid())) die("path too long");
-    {   char od[4400]; int r;
-        if (cx_fmt(od, sizeof od, "%s/out", root)) die("path too long");
-        r = sy_mkdir(od, 0755); if (r < 0 && r != -EEXIST) die("cannot make out/");
-        if (sy_mkdir(outparent, 0755) < 0) die("cannot make out/affected-PID");
+        || cx_fmt(outparent, sizeof outparent, "%s/unisacc-affected-%d", sy_tmpdir(), sy_pid())) die("path too long");
+    /* run-batch.cx accepts an output parent below ROOT/out or below sy_tmpdir()/unisacc-affected-; no repo-local out/ is created */
+    if (sy_mkdir(outparent, 0755) < 0) die("cannot make unisacc-affected-PID");
+    printf("RUN_DIR\t%s\tjobs=%d\n", outparent, jobs);
+    {   long k0 = sy_now_ms();
+        kit_prepare();   /* the tlib kit once, before any batch: -j N batches then find it fresh and link from it */
+        kit_ms = sy_now_ms() - k0;
     }
-    printf("RUN_DIR\t%s\tjobs=%d\n", outparent + root_n + 1, jobs);
+    /* kit 与预建的时间都不从批次的 36/42 秒里扣:两个 deadline 在预建之后再计时。
+       实测:kit 重建吃满 40 秒时,后面的批全被 start-deadline / killed-at-deadline 丢掉;
+       预建(材料与首跑要用的编译缓存)同理,冷首跑多吃十几秒会把硬杀线吃掉。 */
+    t0 = sy_now_ms(); t_main = t0;
+    {   long p0 = sy_now_ms();
+        if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once) */
+        prep_ms = sy_now_ms() - p0;
+    }
+    t_main = sy_now_ms();   /* 预建结束才起算:prep 已经计入 prep_ms,不再占批次的启动/硬杀窗口 */
     while (next < nsel || nrun) {
         sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
         long now = sy_now_ms();
@@ -549,6 +879,8 @@ static int run(const int *sel, int nsel, int jobs) {
                 av[nav] = 0;
             }
             C->bi = sel[next]; C->out.p = 0; C->out.n = C->out.cap = 0; C->err = C->out;
+            C->deadline = sy_now_ms() + (B->budget > 0 ? B->budget : 55) * 1000L + 2000;
+            if (C->deadline > window_end) C->deadline = window_end;
             C->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &C->ofd, &C->efd);
             next++;
             if (C->pid < 0) { printf("RUN_REFUSED\t%s\tspawn=%d\n", B->id, C->pid); fail++; continue; }
@@ -558,20 +890,27 @@ static int run(const int *sel, int nsel, int jobs) {
             for (; next < nsel; next++) { printf("DEFERRED\t%s\tstart-deadline\n", batch[sel[next]].id); deferred++; }
         }
         if (!nrun) continue;
-        if (now - t_main >= hard_deadline) {
-            for (k = 0; k < nrun; k++) {
-                int keep[MAXJOBS], nkeep = 0; char rep[256];
-                { int j; for (j = 0; j < nrun; j++) if (j != k) keep[nkeep++] = ch[j].pid; }
-                {   int sv = kill_tree(ch[k].pid, keep, nkeep, rep, sizeof rep);
-                    if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
-                    if (ch[k].efd >= 0) sy_close(ch[k].efd);
-                    if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
-                    else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
-                    deferred++;
+        {   int any = 0;
+            for (k = 0; k < nrun; k++) if (now >= ch[k].deadline) any = 1;
+            if (any) {
+                for (k = 0; k < nrun; k++) {
+                    int keep[MAXJOBS], nkeep = 0; char rep[256];
+                    if (now < ch[k].deadline) continue;
+                    { int j; for (j = 0; j < nrun; j++) if (j != k) keep[nkeep++] = ch[j].pid; }
+                    {   int sv = kill_tree(ch[k].pid, keep, nkeep, rep, sizeof rep);
+                        if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
+                        if (ch[k].efd >= 0) sy_close(ch[k].efd);
+                        if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
+                        else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
+                        deferred++;
+                    }
+                    ch[k] = ch[nrun - 1]; nrun--; k--;
                 }
+                continue;
             }
-            nrun = 0;
-            break;
+        }
+        if (now >= window_end) {   /* 单命令窗口用尽:剩的不再启动,如实 DEFERRED */
+            for (; next < nsel; next++) { printf("DEFERRED\t%s\tstart-deadline\n", batch[sel[next]].id); deferred++; }
         }
         for (k = 0; k < nrun; k++) {
             if (ch[k].ofd >= 0) { fds[nf].fd = ch[k].ofd; fds[nf].events = SY_POLLIN; fds[nf].revents = 0; who[nf] = k; isout[nf++] = 1; }
@@ -595,7 +934,8 @@ static int run(const int *sel, int nsel, int jobs) {
             ch[k] = ch[nrun - 1]; nrun--; k--;
         }
     }
-    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\n", pass, fail, deferred, sy_now_ms() - t0);
+    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\n",
+           pass, fail, deferred, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms);
     return fail ? 1 : deferred ? 3 : 0;
 }
 
@@ -622,8 +962,150 @@ static int users(const char *file) {
     return 0;
 }
 
+/* --iface-narrow (C4): a changed file that is a unit of a tlib package whose interface is the same before and
+   after the change cannot change what a downstream unit compiles against; only its behaviour can differ.
+   Batches that reach it through use edges only (use / literal-use / arg-use) and whose root neither sits
+   beside it nor uses it directly are then printed as DEFERRED_BY_IFACE instead of AFFECTED: listed, counted,
+   never silently dropped.  The interface is "the same" only when all three hold: build/layer-api/P.tsv and
+   build/iface-hash.tsv are byte-equal to HEAD, tools/iface-hash.cx --check passes, and tools/layer-api.cx
+   --check --pkg P passes on the work tree (manifest == what the source gives now).  Any other outcome,
+   a changed file outside every package, --full, or --tier release keeps the full selection. */
+static int iface_narrow, iface_full;
+static const char *iface_verdict;   /* test hook: same|changed replaces the three probes, not the package lookup */
+static int eqb(const char *a, const char *b, long n) { long i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+/* the package whose layer-api manifest names REL in its file column, into PKG; 1 found, 0 none */
+static int iface_pkg(const char *rel, char *pkg, long cap) {
+    size_t tn, mn; char *t = cx_read("build/iface-hash.tsv", &tn), *m; long at = 0, rl = tx_len(rel, 4096); int found = 0;
+    if (!t) return 0;
+    while (at < (long)tn && !found) {
+        long e = at, f[4], nf = 0, i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (t[at] != '#' && e > at) {
+            char src[600];
+            f[nf++] = at;
+            for (i = at; i < e && nf < 4; i++) if (t[i] == '\t') f[nf++] = i + 1;
+            if (nf == 4 && e - f[3] < (long)sizeof src && f[1] - 1 - f[0] < cap) {
+                for (i = 0; i < e - f[3]; i++) src[i] = t[f[3] + i];
+                src[e - f[3]] = 0;
+                m = cx_read(src, &mn);
+                if (m) {
+                    long a2 = 0;
+                    while (a2 < (long)mn && !found) {
+                        long e2 = a2, tabs = 0, s3 = -1, j;
+                        while (e2 < (long)mn && m[e2] != '\n') e2++;
+                        if (m[a2] != '#') for (j = a2; j < e2; j++) if (m[j] == '\t' && ++tabs == 3) { s3 = j + 1; break; }
+                        if (s3 >= 0 && e2 - s3 == rl && eqb(m + s3, rel, rl)) found = 1;
+                        a2 = e2 + 1;
+                    }
+                    free(m);
+                    if (found) { for (i = 0; i < f[1] - 1 - f[0]; i++) pkg[i] = t[f[0] + i]; pkg[f[1] - 1 - f[0]] = 0; }
+                }
+            }
+        }
+        at = e + 1;
+    }
+    free(t);
+    return found;
+}
+/* the line of TAB-table T (N bytes) whose first field is PKG: start in *S, length in *L; 1 found */
+static int pkg_line(const char *t, long n, const char *pkg, long *s, long *l) {
+    long pl = tx_len(pkg, 256), at = 0;
+    while (at < n) {
+        long e = at; while (e < n && t[e] != '\n') e++;
+        if (e - at > pl && t[at + pl] == '\t' && eqb(t + at, pkg, pl)) { *s = at; *l = e - at; return 1; }
+        at = e + 1;
+    }
+    return 0;
+}
+static int lines_eq(const char *a, long as, long al, const char *b, long bs, long bl) { return al == bl && eqb(a + as, b + bs, al); }
+static char *iface_fresh; static size_t iface_fresh_n; static int iface_fresh_state;   /* 0 not run, 1 ok, -1 failed */
+static const char *iface_stale;   /* test hook: this package's probe fails, every other package is "same" */
+/* 1 when package PKG's interface is proven the same in HEAD and in the work tree; WHY names the probe that decided.
+   Only PKG's own rows count: its layer-api table against HEAD, its iface-hash row against HEAD and against a recompute
+   written to a private temp file (the shared build/iface-hash.tsv is never written), and layer-api --check --pkg PKG.
+   Another package's stale table no longer turns narrowing off. */
+static int iface_same(const char *pkg, const char **why) {
+    char man[400], tmp[600]; Buf o = {0, 0, 0}, h = {0, 0, 0}; size_t tn = 0; char *t; long s1, l1, s2, l2, s3, l3;
+    if (iface_stale) { if (tx_eqz(iface_stale, pkg)) { *why = "iface-hash-row"; return 0; } *why = "same"; return 1; }
+    if (iface_verdict) { *why = "verdict-hook"; return tx_eqz(iface_verdict, "same"); }
+    if (cx_fmt(man, sizeof man, "build/layer-api/%s.tsv", pkg)) { *why = "pkg-name"; return 0; }
+    { char *v[] = {"git", "diff", "--quiet", "HEAD", "--", man, 0}; if (read_all(v, &o) != 0) { *why = "manifest-differs-from-HEAD"; return 0; } }
+    if (iface_fresh_state == 0) {
+        char *v[] = {"sh", "./unisacc.com", "tools/iface-hash.cx", "--", "--write", "--table", tmp, 0};
+        iface_fresh_state = -1;
+        if (!cx_fmt(tmp, sizeof tmp, "%s/unisacc-affected-ifh-%d.tsv", sy_tmpdir(), sy_pid()) && read_all(v, &o) == 0) {
+            iface_fresh = cx_read(tmp, &iface_fresh_n); if (iface_fresh) iface_fresh_state = 1;
+        }
+        sy_unlink(tmp);
+    }
+    if (iface_fresh_state < 0) { *why = "iface-hash-recompute"; return 0; }
+    t = cx_read("build/iface-hash.tsv", &tn);
+    if (!t) { *why = "iface-hash-row"; return 0; }
+    { char *v[] = {"git", "show", "HEAD:build/iface-hash.tsv", 0}; if (read_all(v, &h) != 0) { free(t); *why = "iface-hash-row"; return 0; } }
+    if (!pkg_line(t, (long)tn, pkg, &s1, &l1) || !pkg_line(iface_fresh, (long)iface_fresh_n, pkg, &s2, &l2) || !pkg_line(h.p, h.n, pkg, &s3, &l3)
+        || !lines_eq(t, s1, l1, iface_fresh, s2, l2) || !lines_eq(t, s1, l1, h.p, s3, l3)) { free(t); *why = "iface-hash-row"; return 0; }
+    free(t);
+    { char *v[] = {"sh", "./unisacc.com", "tools/layer-api.cx", "--", "--check", "--pkg", (char *)pkg, 0}; if (read_all(v, &o) != 0) { *why = "layer-api-check"; return 0; } }
+    *why = "same"; return 1;
+}
+/* 1 when batch root REL sits in the directory of changed node CI or uses it directly (or cannot be told) */
+static int iface_direct(const char *rel, int ci) {
+    int ni = path_node(rel, 0), k; const char *a, *c = display(ci); long la, lc, da = -1, dc = -1, i;
+    if (ni < 0 || !node[ni].parsed) return 1;
+    for (k = 0; k < node[ni].nuse; k++) if (node[ni].use[k] == ci) return 1;
+    a = display(ni); la = tx_len(a, 4096); lc = tx_len(c, 4096);
+    for (i = 0; i < la; i++) if (a[i] == '/') da = i;
+    for (i = 0; i < lc; i++) if (c[i] == '/') dc = i;
+    return da >= 0 && da == dc && eqb(a, c, da);
+}
+
+/* --symbol-narrow SYMS (needs --iface-narrow on): SYMS is a comma list of functions whose bodies changed (signatures
+   did not; a signature change is the package-level interface probe's job).  Of the batches iface narrowing keeps,
+   only those whose source/entry use-closure contains a file calling one of SYMS (per tools/symindex.cx calls) stay
+   AFFECTED; the rest print DEFERRED_BY_SYMBOL.  No symbol sites found, or an unparsed node, keeps the batch. */
+static const char *sym_list;
+static char sym_state[MAXNODE]; static int sym_stamp[MAXNODE], sym_cur, sym_on;
+static int sym_reach(int ni) {
+    int k;
+    if (ni < 0 || sym_stamp[ni] == sym_cur) return 0;
+    sym_stamp[ni] = sym_cur;
+    if (sym_state[ni]) return 1;
+    if (!node[ni].parsed) return 1;
+    for (k = 0; k < node[ni].nuse; k++) if (sym_reach(node[ni].use[k])) return 1;
+    return 0;
+}
+static int sym_batch(const char *src, const char *entry) {
+    int ni = path_node(src, 0);
+    sym_cur++;
+    if (ni < 0 || sym_reach(ni)) return 1;
+    if (tx_chr(entry, tx_len(entry, 4096), '{') < 0) { int ei = path_node(entry, 0); if (ei < 0 || sym_reach(ei)) return 1; }
+    return 0;
+}
+/* mark every file calling a symbol of SYMS; returns the number of call sites (0 = cannot narrow) */
+static int sym_load(const char *syms) {
+    char *v[] = {"sh", "./unisacc.com", "tools/symindex.cx", "--", "calls", (char *)syms, "--tracked", 0}; Buf o = {0, 0, 0}; long at = 0; int n = 0;
+    if (read_all(v, &o) != 0) return 0;
+    while (at < o.n) {
+        long ln = 0, c = 0;
+        while (at + ln < o.n && o.p[at + ln] != '\n') ln++;
+        while (c < ln && o.p[at + c] != ':' && o.p[at + c] != '\t') c++;
+        if (c > 0 && c < ln && o.p[at + c] == ':' && o.p[at] != 'N' && o.p[at] != 'S' && c < 600) {
+            char path[600]; long i; int ni;
+            for (i = 0; i < c; i++) path[i] = o.p[at + i];
+            path[c] = 0; ni = path_node(path, 0);
+            if (ni >= 0) sym_state[ni] = 1;
+            n++;
+        }
+        at += ln + 1;
+    }
+    return n;
+}
+
+static int closure_dump;
+static int materials_dump;  /* --materials-dump: report each declared material's resolved source and stop */
+static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
 static void usage(void) {
-    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]] | --users FILE\n");
+    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] [--iface-narrow] [--full] | --users FILE | --closure-dump\n");
     exit(2);
 }
 int main(int argc, char **argv) {
@@ -649,24 +1131,90 @@ int main(int argc, char **argv) {
             src += ids ? 100 : 1;
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
-        else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
+        else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
+        else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--layer") && a + 1 < argc) {
+            static const char *known[] = {"base", "ext", "stream", "compiler", "driver", "chain", "release", "all", 0}; int q;
+            layer = argv[a + 1]; a += 2;
+            for (q = 0; known[q] && !tx_eqz(known[q], layer); q++) {}
+            if (!known[q]) die("--layer: base|ext|stream|compiler|driver|chain|release|all");
+        }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
+        else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
+        else if (tx_eqz(argv[a], "--symbol-narrow") && a + 1 < argc) { sym_list = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--iface-stale") && a + 1 < argc) { iface_stale = argv[a + 1]; a += 2; }   /* test hook: one package's probe fails */
+        else if (tx_eqz(argv[a], "--iface-verdict") && a + 1 < argc) {   /* test hook */
+            iface_verdict = argv[a + 1]; a += 2;
+            if (!tx_eqz(iface_verdict, "same") && !tx_eqz(iface_verdict, "changed")) usage();
+        }
         else if (tx_eqz(argv[a], "--prepare-materials")) { prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
             start_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
             if (start_deadline < 0 || start_deadline > 45000) die("--start-deadline-ms 0..45000");
-            a += 2;
+            deadline_hook = 1; a += 2;
         }
         else if (tx_eqz(argv[a], "--hard-deadline-ms") && a + 1 < argc) {   /* test hook: kill what still runs after N ms */
             hard_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
             if (hard_deadline < 0 || hard_deadline > 54000) die("--hard-deadline-ms 0..54000");
-            a += 2;
+            deadline_hook = 1; a += 2;
         }
         else usage();
     }
+    if (materials_dump) {   /* the source each declared material resolves to, and nothing built */
+        if (src || mode_run) usage();
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            const char *at = batch[b].materials; tp_material_decl d; int rc2;
+            if (tx_eqz(at, "-")) continue;
+            while ((rc2 = tp_material_next(&at, &d)) > 0) {
+                char src[600], why[200];
+                if (prep_source(d.name, d.kind, src, (long)sizeof src, why, (int)sizeof why))
+                    printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
+                else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, src);
+            }
+        }
+        return 0;
+    }
+    if (closure_dump) {   /* the facts tools/batch-packages-gen.cx builds build/batch-packages.tsv from */
+        if (src || mode_run) usage();
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            int ni, d;
+            mark_batch(&batch[b]);
+            printf("B\t%s\t%s\t%s\t%s\n", batch[b].id, batch[b].tier, batch[b].materials, batch[b].source);
+            for (ni = 0; ni < nnode; ni++) if (node[ni].mark == epoch) printf("C\t%s\t%s\t%s\n", batch[b].id, via_name[node[ni].via], display(ni));
+            for (d = 0; d < ndirs; d++) printf("D\t%s\t%s\t%s\n", batch[b].id, via_name[dirvia[d]], display(dirs[d]));
+        }
+        printf("CLOSURE_SUMMARY\tbatches=%d\tfiles=%d\n", nbatch, nnode);
+        return 0;
+    }
+    if (layer) {   /* coarse cut: the batches build/batch-packages.tsv puts in LAYER, plus layer `all` and every batch the table does not name */
+        size_t tn; char *t = cx_read("build/batch-packages.tsv", &tn); int own = 0, all = 0, missing = 0;
+        if (src) usage();
+        if (!t) die("cannot read build/batch-packages.tsv (tools/batch-packages-gen.cx -- --write)");
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            char key[400]; long at, kl, ll = 0; const char *lay = "-";
+            if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
+            if (cx_fmt(key, sizeof key, "\nbatch\t%s\t", batch[b].id)) die("id too long");
+            kl = tx_len(key, sizeof key); at = tx_find(t, (long)tn, key, kl);
+            if (at >= 0) { lay = t + at + kl; while (at + kl + ll < (long)tn && lay[ll] != '\t' && lay[ll] != '\n') ll++; }
+            if (at < 0) missing++;
+            else if (ll == 3 && tx_prefix(lay, 3, "all", 3)) all++;
+            else if (ll == tx_len(layer, 64) && tx_prefix(lay, ll, layer, ll)) own++;
+            else continue;
+            printf("LAYER\t%s\tlayer=%.*s\n", batch[b].id, at < 0 ? 7 : (int)ll, at < 0 ? "unknown" : lay);
+            sel[nsel++] = b;
+        }
+        printf("LAYER_SUMMARY\tlayer=%s\tbatches=%d\town=%d\tall=%d\tunknown=%d\tscanned=%d\n", layer, nsel, own, all, missing, nbatch);
+        return mode_run ? run(sel, nsel, jobs) : 0;
+    }
     if (src != 1 && src != 100) usage();
-    load_registry();
+    /* 预建把 t_main 推到 prep 之后,这里不再收紧 start/hard:收紧只会把 45/55 秒预算的批白丢。 */
+    { long r0 = sy_now_ms(); load_registry(); fprintf(stderr, "LIST_TIMING\tregistry_ms=%ld\n", sy_now_ms() - r0); }
     if (!jobs) { int c = sy_ncpu(); jobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }
     if (src == 100) {   /* --ids: run (or list) exactly these */
         for (k = 0; k < nfiles; k++) {
@@ -687,15 +1235,70 @@ int main(int argc, char **argv) {
             at += ln + 1;
         }
     } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
-    for (b = 0; b < nbatch; b++) {
-        if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
-        int why = -1, v;
-        mark_batch(&batch[b]);
-        v = match(changed, nch, &why);
-        if (v == V_NONE) continue;
-        printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
-        sel[nsel++] = b;
+    {   /* interface narrowing: off unless asked, never at --tier release, never with --full, and only when
+           every changed file is a unit of a package whose interface is proven unchanged */
+        const char *state = "off", *reason = "not-requested"; static char ipkg[128];
+        if (iface_narrow) {
+            if (iface_full) reason = "full";
+            else if (selected_tier && tx_eqz(selected_tier, "release")) reason = "release-tier";
+            else if (!nch) reason = "no-changed-file";
+            else {
+                state = "on"; reason = "same";
+                for (k = 0; k < nch; k++) {
+                    const char *w = "same";
+                    if (!iface_pkg(display(changed[k]), ipkg, (long)sizeof ipkg)) { state = "off"; reason = "file-outside-packages"; break; }
+                    if (!iface_same(ipkg, &w)) { state = "off"; if (tx_eqz(w, "verdict-hook")) reason = "interface-changed"; else { static char rb[300]; cx_fmt(rb, sizeof rb, "pkg=%s,probe=%s", ipkg, w); reason = rb; } break; }
+                }
+            }
+            if (tx_eqz(state, "off")) iface_narrow = 0;
+            if (iface_narrow && (iface_full || (selected_tier && tx_eqz(selected_tier, "release")))) die("iface narrowing reached a full-selection path");
+            printf("IFACE_NARROW\tstate=%s\treason=%s\n", state, reason);
+        }
+        if (sym_list) {
+            const char *sreason = "not-iface-narrowed";
+            if (iface_narrow) { if (sym_load(sym_list) > 0) { sym_on = 1; sreason = "sites-found"; } else sreason = "no-call-sites"; }
+            printf("SYMBOL_NARROW\tstate=%s\treason=%s\tsymbols=%s\n", sym_on ? "on" : "off", sreason, sym_list);
+        }
     }
+    int ndefer = 0, nsymdefer = 0;
+    {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
+        /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
+        for (b = 0; b < nbatch; b++) {
+            if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
+            int why = -1, v;
+            char key[8400]; int slot = -1;
+            if (cx_fmt(key, sizeof key, "%s\t%s\t%s", batch[b].source, batch[b].entry, batch[b].args)) die("key bound");
+            t0b = sy_now_ms();
+            if (!batch_has_guard(batch[b].id)) slot = bslot(key, 0);
+            if (slot >= 0) { v = bv[slot]; why = bwhy[slot]; t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b; }
+            else {
+                mark_batch(&batch[b]);
+                t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b;
+                v = match(changed, nch, &why);
+                t_match += sy_now_ms() - t0b;
+                if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; }
+            }
+            if (v == V_NONE) continue;
+            if (iface_narrow && (v == V_USE || v == V_LITUSE || v == V_ARGUSE) && !batch_has_guard(batch[b].id)
+                && !iface_direct(batch[b].source, why)
+                && (tx_chr(batch[b].entry, tx_len(batch[b].entry, 4096), '{') >= 0 || !iface_direct(batch[b].entry, why))) {
+                printf("DEFERRED_BY_IFACE\t%s\twhy=%s\tvia=%s\treason=interface-unchanged\n", batch[b].id, display(why), via_name[v]);
+                ndefer++; continue;
+            }
+            if (sym_on && (v == V_USE || v == V_LITUSE || v == V_ARGUSE) && !batch_has_guard(batch[b].id) && !sym_batch(batch[b].source, batch[b].entry)) {
+                printf("DEFERRED_BY_SYMBOL\t%s\twhy=%s\tvia=%s\treason=symbol-unreferenced\n", batch[b].id, display(why), via_name[v]);
+                nsymdefer++; continue;
+            }
+            printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
+            sel[nsel++] = b;
+        }
+        t_sweep = sy_now_ms() - t_reg - t_mark - t_match;
+        fprintf(stderr, "LIST_TIMING\tmark_ms=%ld\tmatch_ms=%ld\tsweep_ms=%ld\tbatches=%d\tnodes=%d\tchanged=%d\n",
+                t_mark, t_match, t_sweep < 0 ? 0 : t_sweep, nbatch, nnode, nch);
+        fprintf(stderr, "LIST_TIMING2\tparse_ms=%ld\twalk_ms=%ld\n", t_parse, t_walk);
+    }
+    if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel + nsymdefer, ndefer + nsel + nsymdefer);
+    if (sym_on) printf("DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", nsymdefer, nsel, ndefer + nsymdefer + nsel);
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }

@@ -1,0 +1,122 @@
+#!/usr/bin/env -S unisacc.com -run
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* check-guard-edit.cx -- .claude/hooks/guard-edit.ts (GUARD-EDIT-V1): each Bash command string is fed to
+ * the hook as PreToolUse JSON on stdin and the exit code is asserted (2 = refused, 0 = allowed).
+ *   sh ./unisacc.com tests/check-guard-edit.cx -- ROOT TMPDIR
+ * Every child runs under tools/bound with a 20 second deadline (rc 142 on expiry, which no case expects). */
+typedef struct { const char *name; const char *cmd; int want; } Case;
+static const Case cases[] = {
+    /* rule a: script interpreters in command position */
+    {"py-c", "python3 -c 1", 2},
+    {"py-stdin", "python3 -", 2},
+    {"py-bare", "python3", 2},
+    {"py-plain", "python x.py", 2},
+    {"py-after-and", "ls && python3 x.py", 2},
+    {"py-after-pipe", "cat f | python3 -", 2},
+    {"py-after-semi", "ls; python3 x.py", 2},
+    {"py-after-subst", "x=$(python3 -V)", 2},
+    {"py-after-backtick", "x=`python3 -V`", 2},
+    {"py-env-prefix", "A=1 python3 x.py", 2},
+    {"node-cmd", "node x.js", 2},
+    {"bun-cmd", "bun run x.ts", 2},
+    {"perl-cmd", "perl -e 1", 2},
+    {"ruby-cmd", "ruby x.rb", 2},
+    {"py-abs-path", "/usr/bin/python3 x.py", 2},
+    /* rule a negatives */
+    {"which-py", "which python3", 0},
+    {"echo-quoted-py", "echo \"python3\"", 0},
+    {"echo-single-py", "echo 'python3 -c 1'", 0},
+    {"grep-py", "grep -n python3 notes.txt", 0},
+    {"git-grep-py", "git grep -n python3 -- tools", 0},
+    {"command-v-py", "command -v python3", 0},
+    {"hook-bun", "bun .claude/hooks/guard-edit.ts", 0},
+    {"hook-bun-env", "bun \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-edit.ts\"", 0},
+    {"heredoc-py", "cat > /tmp/x.txt <<'EOF'\npython3 -c 1\ngit stash\nEOF", 0},
+    /* rule b: destructive git */
+    {"git-stash", "git stash", 2},
+    {"git-stash-pop", "git stash pop", 2},
+    {"git-clean", "git clean -fd", 2},
+    {"git-reset-hard", "git reset --hard HEAD", 2},
+    {"git-checkout-dd", "git checkout -- tools/x.cx", 2},
+    {"git-checkout-dot", "git checkout .", 2},
+    {"git-restore-dot", "git restore .", 2},
+    {"git-autostash", "git rebase --autostash origin/main", 2},
+    {"git-pull-autostash", "git pull --rebase --autostash", 2},
+    {"git-C-stash", "git -C /tmp stash", 2},
+    {"git-after-and", "ls && git stash pop", 2},
+    /* rule b negatives */
+    {"log-grep-stash", "git log --grep=stash", 0},
+    {"git-grep-stash", "git grep -n stash", 0},
+    {"echo-git-stash", "echo \"git stash\"", 0},
+    {"reset-soft", "git reset --soft HEAD~1", 0},
+    {"checkout-branch", "git checkout main", 0},
+    {"restore-one", "git restore tools/x.cx", 0},
+    {"status", "git status --short", 0},
+    {"pull-rebase", "git pull --rebase", 0},
+    /* rule c: --no-verify */
+    {"commit-noverify", "git commit --no-verify -m x", 2},
+    {"commit-noverify-late", "git commit -m x --no-verify", 2},
+    {"push-noverify", "git push --no-verify origin HEAD:main", 2},
+    {"commit-n-short", "git commit -n -m x", 0},
+    {"commit-plain", "git commit -m x -- tools/a.cx", 0},
+    {"push-plain", "git push origin HEAD:main", 0},
+    {"msg-noverify-text", "git commit -m \"do not use --no-verify\" -- a", 0},
+    /* existing rules do not regress */
+    {"sed-i-repo", "sed -i s/a/b/ /home/devali/repos/unisacc/tools/x.cx", 2},
+    {"sed-i-tmp", "sed -i s/a/b/ /tmp/x.txt", 0},
+    {"redirect-repo", "echo a > /home/devali/repos/unisacc/x.txt", 2},
+    {"redirect-tmp", "echo a > /tmp/x.txt", 0},
+    {"tee-repo", "echo a | tee /home/devali/repos/unisacc/x.txt", 2},
+    {"git-clone", "git clone x y", 2},
+    {"plain-ls", "ls -la", 0},
+    {"sh-unisacc", "sh ./unisacc.com tools/x.cx -- a", 0},
+    {"plain-grep", "grep -rn foo cx | head", 0},
+};
+
+static int failed, assertions;
+static char tmpdir[4096], outbuf[8192];
+
+static void json_cmd(const char *c, char *o, int cap) {
+    int n = 0;
+    const char *h = "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"";
+    while (*h && n < cap - 8) o[n++] = *h++;
+    for (; *c && n < cap - 8; c++) {
+        if (*c == '"' || *c == '\\') { o[n++] = '\\'; o[n++] = *c; }
+        else if (*c == '\n') { o[n++] = '\\'; o[n++] = 'n'; }
+        else o[n++] = *c;
+    }
+    h = "\"}}";
+    while (*h) o[n++] = *h++;
+    o[n] = 0;
+}
+
+static int run_hook(const char *root, const char *cmd) {
+    char json[4096], jp[4400], sh[9000], bnd[4400], hk[4400];
+    char *av[8]; int cut = 0;
+    json_cmd(cmd, json, sizeof json);
+    if (cx_path_join(jp, sizeof jp, tmpdir, "guard-in.json")) return -1;
+    if (cx_write(jp, json, tx_len(json, sizeof json))) return -1;
+    if (cx_path_join(bnd, sizeof bnd, root, "tools/bound")) return -1;
+    if (cx_path_join(hk, sizeof hk, root, ".claude/hooks/guard-edit.ts")) return -1;
+    if (cx_fmt(sh, sizeof sh, "bun %s < %s", hk, jp)) return -1;
+    av[0] = bnd; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0;
+    return sy_run(av, outbuf, sizeof outbuf, &cut);
+}
+
+int main(int argc, char **argv) {
+    int i, n = (int)(sizeof cases / sizeof cases[0]);
+    if (argc != 3) { fputs("usage: ROOT TMPDIR\n", stderr); return 2; }
+    if (cx_fmt(tmpdir, sizeof tmpdir, "%s", argv[2])) return 2;
+    sy_mkdir_all(tmpdir, 0700);
+    for (i = 0; i < n; i++) {
+        int rc = run_hook(argv[1], cases[i].cmd);
+        int ok = rc == cases[i].want;
+        assertions++;
+        if (!ok) failed++;
+        printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", cases[i].name, cases[i].want, rc);
+    }
+    printf("GUARD_EDIT\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

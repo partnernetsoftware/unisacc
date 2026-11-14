@@ -3,7 +3,7 @@
  *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
  *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
  *
- * Each child is bounded to 55 seconds. Independent start/finish waves honor
+ * Each child is bounded to 90 seconds. Independent start/finish waves honor
  * --parallel (default 4) and retain per-job checkpoints. --jobs ROOT CTX BUILD
  * PHASE --job-index N runs one resumable job; --touch REL selects affected nets.
  * --baseline-ctx BASE accepts unchanged jobs only through verified adoption.
@@ -23,10 +23,57 @@
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.shamemo
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chainroot
+#pragma unisa use cxlib.chaincall
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
     exit(2);
+}
+/* Time bounds come from build/limits.tsv (cxlib.limits); an unknown id refuses. */
+static int cc_lim(const char *id, const char *scope) {
+    double v = lm_get(id, scope);
+    if (v < 1) die("unknown limit id", id);
+    return (int)v;
+}
+/* The default child/phase bound (phase.bound, scope *). */
+/* A caller (chain-run) passes the phase's own bound in UNISACC_CHAIN_PHASE_BOUND_S; it must lie in 1..phase.bound max. */
+/* A grouped call (--jobs-segment-s) receives the GROUP budget in that variable (the segment remainder, 1..segment-3);
+   every job inside is still bounded by the single-job value (table default phase.bound), never the group budget,
+   and the variable is rewritten to that per-job value so children (chain-step) keep the single-job ceiling. */
+/* What is accepted here is decided by cxlib.chaincall (ccp_accept_bound, ccp_accept_group), the unit
+   chain-run plans its calls with: the runner never issues a call this validator refuses. */
+static int cc_group;
+static ccp_limits *cc_call_limits(void) {
+    static ccp_limits l; static int loaded;
+    if (!loaded) { if (ccp_limits_load(&l)) die("unknown limit id", "phase.bound/segment"); loaded = 1; }
+    return &l;
+}
+static int cc_pb(void) {
+    static int pb;
+    if (!pb) {
+        const char *e = getenv("UNISACC_CHAIN_PHASE_BOUND_S");
+        pb = cc_lim("phase.bound", 0);
+        if (e && *e) {
+            char *end = 0; long v = strtol(e, &end, 10);
+            if (*end || !ccp_accept_bound(cc_call_limits(), cc_group, v)) die("REFUSE phase bound from caller", e);
+            if (!cc_group) pb = (int)v;
+        }
+        if (cc_group) {
+            char s[16];
+            if (!ccp_accept_bound(cc_call_limits(), 0, pb) || cx_fmt(s, sizeof s, "%d", pb) || sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S", s, 1)) die("group per-job bound", 0);
+        }
+    }
+    return pb;
+}
+/* Outer bound of a sub-step inside a phase (front/stub/merge): derived from the exported phase bound so the
+   outer kill is never tighter than the phase (cmd.front 45 killed whole-front sub-steps taking 45-90 s under load).
+   Stand-alone use (no exported bound) keeps the cmd.front table default. */
+static int cc_front(void) {
+    int pb = cc_pb();
+    const char *e = getenv("UNISACC_CHAIN_PHASE_BOUND_S");
+    return ccp_sub_bound(cc_call_limits(), e && *e, pb, cc_lim("cmd.front", 0));
 }
 static long fsize(const char *p) {
     sy_stat_t st;
@@ -65,6 +112,29 @@ static void segment_admit(int secs) {
         exit(75);
     }
 }
+/* A phase whose work is many bounded calls with its own committed progress (the fixedpoint root
+   and closure objects: one call per batch of keys, each committed key recorded in .chain-steps)
+   can need more than one attempt. Running into the attempt bound is a kill: the in-flight batch
+   is lost and the runner counts a resume, of which a whole chain has three (0.0.58: g2 closure
+   prepare was killed at the bound in every attempt and the chain stopped on resumes-exhausted
+   with 38 of 44 root keys committed). The runner hands each attempt its end
+   (UNISACC_CHAIN_ATTEMPT_END_MS) and a token; when the next call would not fit and this attempt
+   has committed at least one batch, the candidate stops itself: it names the token and the
+   checkpoint bytes it saw (length and sha256; the file only grows, so the prefix stays
+   checkable while other lanes append) and exits 75. The runner verifies the line and runs the
+   phase again without counting a resume. No progress in the attempt means no yield. */
+static long attempt_end;
+static void phase_yield(const char *why, long last_ms, long need_ms) {
+    char p[4400], hash[65]; size_t n = 0;
+    const char *token = sy_env("UNISACC_CHAIN_SEGMENT_TOKEN");
+    if (!token || !jobs_segment_out || cx_fmt(p, sizeof p, "%s/checkpoint.tsv", jobs_segment_out)) die("yield identity", 0);
+    char *b = cx_read(p, &n);
+    if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); die("yield checkpoint", p); }
+    free(b);
+    sy_printf("PHASE_YIELD\t%s\tlast_ms=%ld\tneed_ms=%ld\n", why, last_ms, need_ms);
+    sy_printf("CANDIDATE_YIELD\t%s\t%ld\t%s\n", token, (long)n, hash);
+    exit(75);
+}
 static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
     segment_admit(secs);
     pr_result r;
@@ -89,7 +159,7 @@ static void candidate_lock_fd(int fd, const char *path) {
         int rc = sy_flock(fd, 2 | 4);
         if (!rc) break;
         if (rc != -EWOULDBLOCK && rc != -EAGAIN && rc != -EINTR) die("candidate lock", path);
-        if (sy_now_ms() - start + candidate_lock_wait_ms >= 55000) die("candidate lock deadline", path);
+        if (sy_now_ms() - start + candidate_lock_wait_ms >= cc_pb() * 1000L) die("candidate lock deadline", path);
         usleep(1000);
     }
     candidate_lock_wait_ms += sy_now_ms() - start;
@@ -102,14 +172,24 @@ static int candidate_lock(const char *base, const char *domain) {
     candidate_lock_fd(fd, p);
     return fd;
 }
+static const char *step_out;
+static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap);
 static int bound_sh_secs(const char *root, char **rest, int secs) {
-    char com[4400];
+    char com[4400], pnative[4400];
     char *v[128+28];
     int n = 0, i = 0;
-    if (secs < 1 || secs > 60) die("bound secs", "1..60");
+    const char *pname = 0;
+    if (secs < 1 || secs > (int)lm_max("phase.bound", 0)) die("REFUSE bound secs above phase.bound max", 0);
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
-    v[n++] = (char *)"sh";
-    v[n++] = com;
+    if (step_out && rest[0] && rest[1] && !strcmp(rest[1], "--")) pname = tool_pinned(root, rest[0], secs, pnative, sizeof pnative);
+    if (pname) {
+        /* 钉住的链工具:直接跑输出目录内那一份可执行体,不再读工作检出 */
+        v[n++] = pnative;
+        i = 2;
+    } else {
+        v[n++] = (char *)"sh";
+        v[n++] = com;
+    }
     while (rest[i] && n + 1 < 72) {
         v[n++] = rest[i];
         i++;
@@ -118,7 +198,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     int lock = -1;
     if (rest[0] && strstr(rest[0], "/tools/whole-front.cx") && rest[1] && rest[2] && rest[3])
         lock = candidate_lock(!strcmp(rest[2], "prepare") ? rest[7] : rest[3], "prep");
-    int budget = 55 - (int)((candidate_lock_wait_ms + 999) / 1000);
+    int budget = cc_pb() - (int)((candidate_lock_wait_ms + 999) / 1000);
     if (budget < 1) die("candidate lock/call deadline", rest[0]);
     if (secs > budget) secs = budget;
     int rc = pr_code(rest[0] ? rest[0] : "sh", v, secs);
@@ -126,7 +206,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     if (lock >= 0 && sy_close(lock)) die("candidate unlock", rest[0]);
     return rc;
 }
-static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
+static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, cc_pb()); }
 /* Run tools/preflight.cx at one hook point (entry, post-snap, pre-p3, post-p3) under --strict:
    only that hook's rules from build/preflight-rules.tsv; a variable the chain has produced by
    then but missing is a FAIL, and a SKIP is a failure too. Any failure stops the chain here,
@@ -148,7 +228,7 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     v[n++] = tool; v[n++] = (char *)"--"; v[n++] = rules;
     v[n++] = a_root; v[n++] = a_build; v[n++] = a_snap; v[n++] = a_rev; v[n++] = a_pkg;
     v[n++] = a_hook; v[n++] = (char *)"--strict"; v[n] = 0;
-    if (bound_sh_secs(root, v, 55)) die("REFUSE preflight", hook);
+    if (bound_sh_secs(root, v, cc_pb())) die("REFUSE preflight", hook);
     sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
 }
 /* Make CTOR executable (0755) only when its mode differs. An unconditional chmod moves the
@@ -160,13 +240,31 @@ static int ctor_exec(const char *ctor) {
     if (!sy_stat(ctor, &st) && st.kind == 'f' && (st.mode & 07777) == 0755) return 0;
     return sy_chmod(ctor, 0755);
 }
+/* The watchdog of a constructor step is SNAP/tools/bound: a frozen input of the rev, with the
+   range that rev was frozen with. A rev frozen before the temporary 55 -> 90 raise accepts
+   1..60 and answers 90 with its usage line (0.0.58, gen1-lnx-arm64-objects: rc 2 in 0.4 s,
+   nothing built). The chain asks the snapshot's own watchdog once whether it takes the step
+   bound; if not, the step runs under 60, the largest value every frozen watchdog accepts.
+   Never more than the step bound, and a watchdog that takes neither is a refusal. */
+static int ctor_bound_secs(const char *bound, int want) {
+    static int known;
+    if (known) return known;
+    char secbuf[8];
+    char *probe[] = {(char *)bound, secbuf, (char *)"true", 0};
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", want)) die("fmt", "secs");
+    if (!runv_secs(probe, 30)) return known = want;
+    int frozen = cc_lim("ctor.frozen", 0);
+    if (want <= frozen || cx_fmt(secbuf, sizeof secbuf, "%d", frozen) || runv_secs(probe, 30)) die("REFUSE snapshot watchdog accepts neither the step bound nor the frozen range", bound);
+    sy_printf("CTOR_BOUND\tsnapshot-watchdog=%d\tstep-bound=%d\treason=frozen-range\n", frozen, want);
+    return known = frozen;
+}
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target, const char *phase) {
     char bound[4400], secbuf[8];
     char *v[24];
     int n = 0;
     if (ctor_exec(ctor)) die("chmod ctor", ctor);
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", snap)) die("path", "bound");
-    if (cx_fmt(secbuf, sizeof secbuf, "%d", 55)) die("fmt", "secs");
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", ctor_bound_secs(bound, cc_pb()))) die("fmt", "secs");
     v[n++] = bound;
     v[n++] = secbuf;
     v[n++] = (char *)"sh";
@@ -182,23 +280,173 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
     v[n++] = (char *)target;
     v[n++] = (char *)phase;
     v[n++] = 0;
-    return runv_secs(v, 55);
+    return runv_secs(v, cc_pb());
+}
+/* chain-step is the producer named in the seed-helper, controller and fixedpoint receipts
+   (producer_sha/chain_sha = its own executable). Run from ROOT/tools/chain-step.cx on every call,
+   that identity followed the working checkout: any edit of chain-step.cx or of a module it uses,
+   made while a chain was running, changed the producer and the next resume refused its own
+   receipts ("seed helper receipt mismatch", 0.0.58). The chain therefore pins one executable per
+   output: OUT/chain-step.native, built once from ROOT, with OUT/chain-step.pin recording its
+   sha256. Every later call of this output runs that file and refuses when its bytes no longer
+   match the record; the checkout is not read again. A new output pins the tool anew. */
+static char step_native[4400];
+static void step_hash(const char *path, char hash[65]) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); die("REFUSE chain-step pin unreadable", path); }
+    free(b);
+}
+static void step_pin(const char *root, int secs) {
+    char pin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], text[4800];
+    if (step_native[0]) return;
+    if (cx_fmt(step_native, sizeof step_native, "%s/chain-step.native", step_out) || cx_fmt(pin, sizeof pin, "%s/chain-step.pin", step_out) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", step_native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step pin");
+    int lock = candidate_lock(step_native, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        step_hash(step_native, hash);
+        if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash) || n != strlen(text) || memcmp(old, text, n)) die("REFUSE chain-step pin mismatch", pin);
+        free(old);
+    } else {
+        /* No record: nothing of this output was produced by a pinned tool yet (a native without
+           its record is what a killed attempt left and is replaced). */
+        char *a[] = {tool, (char *)"-o", tmp, 0};
+        if (bound_sh_secs(root, a, secs)) die("chain-step pin build", tool);
+        step_hash(tmp, hash);
+        if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash)) die("chain-step pin record", pin);
+        if (sy_chmod(tmp, 0755) || sy_rename(tmp, step_native)) die("publish chain-step native", step_native);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-step pin", pin);
+        sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\n", step_native, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", step_native);
+}
+/* 同一机制推广到 whole-front、preflight、release-build、release-ape(0.0.59):每个输出目录内
+   NAME.native 只构造一次,NAME.pin 记录工具名、输出目录、构造时源码 sha 与可执行体 sha256;之后每次
+   (每进程首次)核对,可执行体字节变化拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录
+   拒绝 "REFUSE chain-tool pin dir mismatch"。检出内工具改动不影响本输出,与 chain-step 同。 */
+static int pin_busy;
+static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap) {
+    static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", 0};
+    static char done[4][4400];
+    const char *name = 0;
+    char want[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], shash[65], text[9000];
+    int k;
+    size_t tl = strlen(tool);
+    if (pin_busy) return 0;
+    for (k = 0; names[k]; k++) {
+        if (cx_fmt(want, sizeof want, "/tools/%s.cx", names[k])) die("path", "tool pin");
+        if (tl > strlen(want) && !strcmp(tool + tl - strlen(want), want)) { name = names[k]; break; }
+    }
+    if (!name) return 0;
+    if (cx_fmt(native, cap, "%s/%s.native", step_out, name) || cx_fmt(pin, sizeof pin, "%s/%s.pin", step_out, name) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "tool pin");
+    if (!strcmp(done[k], native)) return name;
+    int lock = candidate_lock(native, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        char *o = strstr(old, "\nout=");
+        char outl[4500];
+        if (cx_fmt(outl, sizeof outl, "\nout=%s\n", step_out) || !o || memcmp(o, outl, strlen(outl))) die("REFUSE chain-tool pin dir mismatch", pin);
+        step_hash(native, hash);
+        char nl2[200];
+        if (cx_fmt(nl2, sizeof nl2, "\nnative_sha=%s\n", hash) || n < strlen(nl2) || memcmp(old + n - strlen(nl2), nl2, strlen(nl2))) die("REFUSE chain-tool pin mismatch", pin);
+        free(old);
+    } else {
+        char *a[] = {(char *)tool, (char *)"-o", tmp, 0};
+        pin_busy = 1;
+        int rc = bound_sh_secs(root, a, secs);
+        pin_busy = 0;
+        if (rc) die("chain-tool pin build", tool);
+        step_hash(tool, shash);
+        step_hash(tmp, hash);
+        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=%s\n", name, step_out, shash, hash)) die("chain-tool pin record", pin);
+        if (sy_chmod(tmp, 0755) || sy_rename(tmp, native)) die("publish chain-tool native", native);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-tool pin", pin);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, native, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", native);
+    if (cx_fmt(done[k], sizeof done[k], "%s", native)) die("path", "tool pin");
+    return name;
+}
+/* entry-build 按输出目录钉 HEAD(DSG-DRV1 第 1 片,与 tool_pinned 同一 pin 格式与拒绝文案):
+   entry-build 经 constructor 以源码方式运行(不是原生体),所以钉的是源码副本:OUT/entry-build.pin.cx
+   首次从 ROOT/tools/entry-build.cx 拷入,OUT/entry-build.pin 记工具名、输出目录与 src_sha;之后每次核对
+   副本字节与输出目录,变了拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录拒绝
+   "REFUSE chain-tool pin dir mismatch"。检出内 entry-build.cx 之后再改不影响本输出。 */
+static const char *src_pinned(const char *root, const char *outdir, const char *name, char *copy, size_t cap) {
+    char src[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], text[9000];
+    if (cx_fmt(src, sizeof src, "%s/tools/%s.cx", root, name) || cx_fmt(copy, cap, "%s/%s.pin.cx", outdir, name) ||
+        cx_fmt(pin, sizeof pin, "%s/%s.pin", outdir, name) || cx_fmt(tmp, sizeof tmp, "%s.new", copy) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
+    int lock = candidate_lock(copy, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        char *o = strstr(old, "\nout=");
+        char outl[4500];
+        if (cx_fmt(outl, sizeof outl, "\nout=%s\n", outdir) || !o || memcmp(o, outl, strlen(outl))) die("REFUSE chain-tool pin dir mismatch", pin);
+        step_hash(copy, hash);
+        char nl2[200];
+        if (cx_fmt(nl2, sizeof nl2, "\nsrc_sha=%s\n", hash) || !strstr(old, nl2)) die("REFUSE chain-tool pin mismatch", pin);
+        free(old);
+    } else {
+        size_t sn = 0; char *sb = cx_read(src, &sn);
+        if (!sb) die("eb pin source unreadable", src);
+        if (cx_write(tmp, sb, sn) || sy_rename(tmp, copy)) die("publish eb pin copy", copy);
+        free(sb);
+        step_hash(copy, hash);
+        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=-\n", name, outdir, hash)) die("eb pin record", pin);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, copy, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", copy);
+    return copy;
+}
+static const char *eb_pinned(const char *root, const char *outdir, char *copy, size_t cap) {
+    return src_pinned(root, outdir, "entry-build", copy, cap);
+}
+/* DSG-DRV1 第 2 片: kernel-route 与 asm-source 同样钉源码副本,路径经环境变量交给 chain-step
+   (chain-step 的两处 kernel-route 取用点与 kernel-route 取 asm-source 的取用点读这两个变量,未设置时退回快照)。 */
+static void kr_pin_env(const char *root, const char *outdir) {
+    char kr[4400], as[4400], probe[4400];
+    /* 真实链下源副本缺失一律拒绝(rc 2,点名驱动);只有显式夹具开关 UNISACC_PIN_FIXTURE=1 才允许退回快照路径并打印 PIN_FALLBACK */
+    static const char *drv[2] = {"kernel-route", "asm-source"};
+    for (int k = 0; k < 2; k++) {
+        if (cx_fmt(probe, sizeof probe, "%s/tools/%s.cx", root, drv[k])) die("path", "kr pin");
+        if (fsize(probe) >= 0) continue;
+        if (sy_env("UNISACC_PIN_FIXTURE") && tx_eqz(sy_env("UNISACC_PIN_FIXTURE"), "1")) { sy_printf("PIN_FALLBACK\ttool=%s\treason=fixture-root-without-source\n", drv[k]); return; }
+        die("REFUSE chain-tool pin source missing", drv[k]);
+    }
+    if (!src_pinned(root, outdir, "kernel-route", kr, sizeof kr) || !src_pinned(root, outdir, "asm-source", as, sizeof as)) die("path", "kr pin");
+    if (sy_setenv("UNISACC_KERNEL_ROUTE_SRC", kr, 1) || sy_setenv("UNISACC_ASM_SOURCE_SRC", as, 1)) die("env", "kr pin");
+}
+/* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
+   argv through a fake ROOT/unisacc.com ("TOOL -- ARGS") and produce no receipt. A chain run
+   always has --out and runs the pinned executable directly. */
+static int step_run(const char *root, char **v, int secs) {
+    if (!step_out) return bound_sh_secs(root, v, secs);
+    return pr_code("chain-step", v, secs);
 }
 static int step_secs(const char *root, char **args, int secs) {
     char tool[4400];
     char *v[64];
     int n = 0, i = 0;
-    if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
-    v[n++] = tool;
-    v[n++] = (char *)"--";
+    if (step_out) {
+        step_pin(root, secs);
+        kr_pin_env(root, step_out);
+        v[n++] = step_native;
+    } else {
+        if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
+        v[n++] = tool;
+        v[n++] = (char *)"--";
+    }
     while (args[i] && n + 1 < 64) {
         v[n++] = args[i];
         i++;
     }
     v[n] = 0;
-    return bound_sh_secs(root, v, secs);
+    return step_run(root, v, secs);
 }
-static int step(const char *root, char **args) { return step_secs(root, args, 55); }
+static int step(const char *root, char **args) { return step_secs(root, args, cc_pb()); }
 static char chain_work[4400];
 static int derived_shape(const char *snap, const char *extra, const char *extra_skip, char fp[65]);
 /* 0.0.49: osx=front/merge/stub; win=front/merge then st_span units/e3/prune-elf. */
@@ -309,7 +557,8 @@ static int known_front_phase(const char *root, const char *rev, const char *phas
             if (cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slugs[t], i)) die("fmt", "front phase");
             if (strcmp(tag, phase)) continue;
             if (!i) return 1;
-            if (cx_fmt(p0, sizeof p0, "%s/out/release-snap-%.10s/out/chain/gen%d/%s-front0", root, rev, gen, slugs[t])) die("path", "front phase");
+            char sn0[4400];
+            if (cr_snap(root, rev, 0, sn0, sizeof sn0) || cx_fmt(p0, sizeof p0, "%s/out/chain/gen%d/%s-front0", sn0, gen, slugs[t])) die("path", "front phase");
             return i * cf_front_slice() < wf_total(p0);
         }
         if (cx_fmt(tag, sizeof tag, "gen%d-%s-merge", gen, slugs[t])) die("fmt", "merge phase");
@@ -320,6 +569,23 @@ static int known_front_phase(const char *root, const char *rev, const char *phas
         }
     }
     return 0;
+}
+/* The stub step of one osx target. whole-front stub insists on making DEST and DEST.control
+   itself; an attempt killed at its bound leaves both behind (0.0.58, gen1-osx-x86_64-stub: the
+   retry was refused with "exclusive phase/control required" and the chain stopped). Like front
+   and merge, an unfinished DEST is scrubbed before the step runs; a finished one (checkpoint
+   row and a non-empty stub.c) is never touched. */
+static void wf_stub(const char *root, const char *outdir, char *wft, char *prep, const char *target, char *phase, char *dest, const char *tag) {
+    char sc[4400];
+    char *v[12];
+    int n = 0; long t0 = sy_now_ms();
+    if (cx_fmt(sc, sizeof sc, "%s/stub.c", dest)) die("path", "stubc");
+    if (ck_complete(outdir, tag, sc)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); return; }
+    wf_scrub_dest(outdir, dest);
+    v[n++] = wft; v[n++] = (char *)"--";
+    v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
+    mark(outdir, tag, sy_now_ms() - t0);
 }
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
     char wft[4400], prep[4400], phase[4400], dest[4400], tag[80];
@@ -355,7 +621,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
             v[n++] = wft; v[n++] = (char *)"--";
             v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
             v[n++] = offset; v[n++] = amount; v[n++] = 0;
-            if (bound_sh_secs(root, v, 45)) die(tag, parts[i]);
+            if (bound_sh_secs(root, v, cc_front())) die(tag, parts[i]);
             if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
             mark(outdir, tag, 0);
         }
@@ -369,27 +635,17 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
         for (i = 0; i < slices; i++) v[n++] = parts[i];
         v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die(tag, phase);
+        if (bound_sh_secs(root, v, cc_front())) die(tag, phase);
         mark(outdir, tag, 0);
     } else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
     if (!want_stub) return 0;
     if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-stub", slug) : cx_fmt(tag, sizeof tag, "gen%d-%s-stub", gen, slug))) die("fmt", slug);
-    {
-        char sc[4400];
-        if (cx_fmt(sc, sizeof sc, "%s/stub.c", dest)) die("path", "stubc");
-        if (ck_complete(outdir, tag, sc)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
-        else {
-        char *v[12];
-        int n = 0; long t0 = sy_now_ms();
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die(tag, dest);
-        mark(outdir, tag, sy_now_ms() - t0);
-        }
-    }
+    wf_stub(root, outdir, wft, prep, target, phase, dest, tag);
     return 0;
 }
 static int clean_phase_path(const char *outdir, const char *phase, const char *path, const char *receipt);
+static int clean_stale_prep(const char *outdir, const char *phase, const char *path, const char *receipt,
+    const char *snap, const char *pkg, const char *ctor, const char *helper, const char *tmpl, const char *objs);
 static int wf_span_prep(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
     char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
     char *v[16];
@@ -401,6 +657,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
     if (gen > 1) clean_phase_path(outdir, ptag, nout, rec);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-win-span.cx.in", root)) die("path", "wtmpl");
+    clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     if (fsize(rec) < 0) {
         v[n++] = wft; v[n++] = (char *)"--";
@@ -408,7 +665,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, 45);
+        n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die("wf-span-prep", nout);
     } else sy_printf("WF_SPAN_PREP_EXISTING\t%s\n", rec);
@@ -464,7 +721,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     v[n++] = (char *)first; v[n++] = (char *)last;
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
-    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -525,7 +782,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
-    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -563,6 +820,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "wtmpl");
     check_whole_front_template(tmpl);
+    clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     if (fsize(rec) < 0) {
         v[n++] = wft; v[n++] = (char *)"--";
@@ -570,7 +828,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, 45);
+        n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die(ptag, nout);
     }
@@ -616,10 +874,105 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
 static char g_phasebuf[512][80];
 static const char *g_phases[512];
 static int g_nphases;
+/* Columns 8..10 of the phase table (facts: build/chain-residue.tsv): 0 no rule, 's' scrub, 'r' refuse. */
+static char g_res_policy[512], g_res_record[512][200], g_res_paths[512][400];
 static const char *phases_file;
 static int chain_phase_index(const char *id) {
     for (int i = 0; i < g_nphases; i++) if (!strcmp(id, g_phases[i])) return i;
     return -1;
+}
+/* A residue path is relative to the output dir: no leading '/', no "." or ".." component, no
+   "//", at least two components; one '*' only in the last component of a path, never a record. */
+static int res_rel(const char *s, long n, int glob) {
+    long start = 0, slash = 0, i; int stars = 0;
+    if (n < 1 || s[0] == '/' || s[n - 1] == '/') return 0;
+    for (i = 0; i <= n; i++) {
+        if (i < n && s[i] != '/') {
+            char c = s[i];
+            if (c == '*') { if (!glob || stars++) return 0; continue; }
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-')) return 0;
+            continue;
+        }
+        long len = i - start;
+        if (!len || (len == 1 && s[start] == '.') || (len == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;
+        if (i < n) { if (stars) return 0; slash++; }
+        start = i + 1;
+    }
+    return slash > 0;
+}
+/* One listed entry of a phase without a record. Pass 0 only proves that it lies inside the
+   output dir (a link must resolve inside it); pass 1 removes it (a link is unlinked, never
+   followed). Returns 1 when the entry exists. */
+static int residue_entry(const char *real_out, const char *full, int act) {
+    sy_stat_t st; char real[4400];
+    int rc = sy_lstat(full, &st);
+    if (rc == -ENOENT) return 0;
+    if (rc) die("REFUSE residue stat", full);
+    if (st.kind == 'l' && (sy_realpath(full, real, sizeof real) < 0 || !under_dir(real, real_out))) die("REFUSE residue link outside output", full);
+    if (!act) return 1;
+    if (st.kind == 'd' ? cx_rmtree(full) : sy_unlink(full)) die("rm residue", full);
+    sy_printf("CLEANUP\t%s\n", full);
+    return 1;
+}
+/* The table-driven rule for a phase that is about to run (again). Scope: only the paths listed
+   for PHASE in the phase table, only inside OUTDIR, only while PHASE has no recorded success
+   (its record file is absent and it has no checkpoint row). With a record nothing is touched.
+   scrub removes the listed residue; refuse stops when any exists. Every listed path is proved
+   to be inside the output dir before the first removal. (0.0.58: a kernels attempt killed at
+   its bound left gN/kernel-route without phase-6.tsv and chain-step refused every retry.) */
+static void residue_before(const char *outdir, const char *phase) {
+    int at = chain_phase_index(phase), pass, found = 0;
+    char real_out[4400], rec[4400];
+    sy_stat_t st;
+    if (at < 0 || !g_res_policy[at]) return;
+    if (!outdir || outdir[0] != '/' || has_dotdot(outdir) || sy_realpath(outdir, real_out, sizeof real_out) < 0) die("REFUSE residue output dir", outdir);
+    if (cx_fmt(rec, sizeof rec, "%s/%s", outdir, g_res_record[at])) die("path", phase);
+    {   int rc = sy_lstat(rec, &st);
+        if (!rc) return;
+        if (rc != -ENOENT) die("REFUSE residue record stat", rec);
+    }
+    if (ck_done(outdir, phase)) return;
+    for (pass = 0; pass < 2; pass++) {
+        const char *s = g_res_paths[at];
+        for (;;) {
+            const char *c = strchr(s, ','); long len = c ? (long)(c - s) : (long)strlen(s), cut = len;
+            char dir[4400], real[4400], full[4700], leaf[256], sub[400];
+            while (cut > 0 && s[cut - 1] != '/') cut--;
+            if (cut < 2 || len - cut >= (long)sizeof leaf || tx_copy(leaf, sizeof leaf, s + cut, len - cut) || tx_copy(sub, sizeof sub, s, cut - 1) || cx_fmt(dir, sizeof dir, "%s/%s", outdir, sub)) die("REFUSE residue path", phase);
+            int rc = sy_lstat(dir, &st);
+            if (rc && rc != -ENOENT) die("REFUSE residue stat", dir);
+            if (!rc) {
+                if (sy_realpath(dir, real, sizeof real) < 0 || !under_dir(real, real_out)) die("REFUSE residue path outside output", dir);
+                const char *star = strchr(leaf, '*');
+                if (!star) {
+                    if (cx_fmt(full, sizeof full, "%s/%s", dir, leaf)) die("path", dir);
+                    found += residue_entry(real_out, full, pass && g_res_policy[at] == 's');
+                } else {
+                    static char names[64][256]; int n = 0, i; sy_dir_t d;
+                    long pre = (long)(star - leaf), suf = (long)strlen(star + 1);
+                    if (st.kind != 'd') die("REFUSE residue directory", dir);
+                    if (sy_dir_open(&d, dir)) die("REFUSE residue directory", dir);
+                    for (;;) {
+                        int got = sy_dir_next(&d);
+                        if (got < 0) { sy_dir_close(&d); die("REFUSE residue directory read", dir); }
+                        if (!got) break;
+                        if (d.name_n < pre + suf || memcmp(d.name, leaf, (size_t)pre) || memcmp(d.name + d.name_n - suf, star + 1, (size_t)suf)) continue;
+                        if (n == 64 || cx_fmt(names[n], sizeof names[n], "%s", d.name)) { sy_dir_close(&d); die("REFUSE residue match count", dir); }
+                        n++;
+                    }
+                    if (sy_dir_close(&d)) die("REFUSE residue directory", dir);
+                    for (i = 0; i < n; i++) {
+                        if (cx_fmt(full, sizeof full, "%s/%s", dir, names[i])) die("path", dir);
+                        found += residue_entry(real_out, full, pass && g_res_policy[at] == 's');
+                    }
+                }
+            }
+            if (!c) break;
+            s = c + 1;
+        }
+        if (!pass && found && g_res_policy[at] == 'r') die("REFUSE unrecorded residue of phase", phase);
+        if (!found) return;
+    }
 }
 static void load_chain_phases(const char *root) {
     char path[4400]; size_t n = 0; char *s, *p;
@@ -630,20 +983,34 @@ static void load_chain_phases(const char *root) {
     if (!s || !n || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("REFUSE chain-phases text", path);
     p = s; g_nphases = 0;
     while (*p) {
-        char *e = strchr(p, '\n'), *v[7], *q; int fields = 1, j; char order[20];
+        char *e = strchr(p, '\n'), *v[10], *q; int fields = 1, j; char order[20];
         *e = 0;
         if (*p == '#') { p = e + 1; continue; }
         v[0] = p;
-        for (q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 7) die("REFUSE chain-phases fields", path); v[fields++] = q + 1; }
-        if (fields != 7 || g_nphases == 512) die("REFUSE chain-phases fields/count", path);
+        for (q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 10) die("REFUSE chain-phases fields", path); v[fields++] = q + 1; }
+        if (fields != 10 || g_nphases == 512) die("REFUSE chain-phases fields/count", path);
         if (cx_fmt(order, sizeof order, "%d", g_nphases) || strcmp(v[0], order)) die("REFUSE chain-phases order", path);
         if (!*v[1] || strlen(v[1]) >= 80) die("REFUSE chain-phases id", path);
         for (q = v[1]; *q; q++) if (!((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_')) die("REFUSE chain-phases id", path);
         for (j = 0; j < g_nphases; j++) if (!strcmp(g_phases[j], v[1])) die("REFUSE chain-phases duplicate", path);
         if (!*v[2] || strlen(v[2]) >= 80) die("REFUSE chain-phases exclusive_dir", path);
-        if (strcmp(v[3], "55")) die("REFUSE chain-phases timeout", path);
+        { char want[16]; if (cx_fmt(want, sizeof want, "%d", cc_lim("phase.bound", v[1])) || strcmp(v[3], want)) die("REFUSE chain-phases timeout", path); }
         if (strcmp(v[6], "1") && strcmp(v[6], "2") && strcmp(v[6], "3") && strcmp(v[6], "4")) die("REFUSE chain-phases parallelism", path);
         if (!*v[4] || strlen(v[4]) >= 4400 || !*v[5] || strlen(v[5]) >= 80) die("REFUSE chain-phases deps/lane", path);
+        if (!strcmp(v[7], "-")) {
+            if (strcmp(v[8], "-") || strcmp(v[9], "-")) die("REFUSE chain-phases residue", v[1]);
+            g_res_policy[g_nphases] = 0;
+        } else {
+            if (strcmp(v[7], "scrub") && strcmp(v[7], "refuse")) die("REFUSE chain-phases residue policy", v[7]);
+            if (!res_rel(v[8], (long)strlen(v[8]), 0) || cx_fmt(g_res_record[g_nphases], 200, "%s", v[8]) || cx_fmt(g_res_paths[g_nphases], 400, "%s", v[9])) die("REFUSE chain-phases residue record", v[8]);
+            for (q = v[9];;) {
+                char *c = strchr(q, ','); long len = c ? (long)(c - q) : (long)strlen(q);
+                if (!res_rel(q, len, 1)) die("REFUSE chain-phases residue path", v[9]);
+                if (!c) break;
+                q = c + 1;
+            }
+            g_res_policy[g_nphases] = v[7][0];
+        }
         deps[g_nphases] = v[4]; lanes[g_nphases] = v[5]; domains[g_nphases] = v[2];
         if (cx_fmt(g_phasebuf[g_nphases], 80, "%s", v[1])) die("phase id", path);
         g_phases[g_nphases] = g_phasebuf[g_nphases]; g_nphases++; p = e + 1;
@@ -684,16 +1051,16 @@ static void plan(void) {
     int i;
     sy_printf("CANDIDATE_CHAIN\tplan\tphases=%d\n", g_nphases);
     for (i = 0; i < g_nphases; i++)
-        sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
+        sy_printf("PHASE\t%d\t%s\tchild_bound=%d\n", i, g_phases[i], cc_lim("phase.bound", g_phases[i]));
     sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
-    sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=55\n");
-    sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=55\n");
-    sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=55\n");
-    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=45\n");
-    sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=55\n", cf_root_count());
-    sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=55\n");
-    sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=55\n");
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=%d\n", cc_pb());
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=%d\n", cc_pb());
+    sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=%d\n", cc_pb());
+    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=%d\n", cc_front());
+    sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=%d\n", cf_root_count(), cc_pb());
+    sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=%d\n", cc_pb());
+    sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=%d\n", cc_pb());
 }
 
 static int hex40(const char *s) {
@@ -800,6 +1167,64 @@ static int clean_phase_path(const char *outdir, const char *phase, const char *p
     if (cx_rmtree(path)) die("cleanup failed", path);
     return 1;
 }
+/* prepare 收据复用前核对本次输入(C3-WFPREP-REUSE-FIX)。prepare 目录在按 rev 命名的共享快照内,
+   换输出目录重起后旧收据仍在;收据存在不等于对本次输入有效。逐项与 whole-front.cx inputs() 的
+   输入核对同口径:root/pkg/ctor/helper/template/objects 路径与 pkg/ctor/helper/template/对象收据
+   的 sha256。返回 0 为可复用,否则把首个不符的键写入 why。 */
+static int prep_field(const char *text, long n, const char *key, char *buf, long cap) {
+    char pat[80]; long k, at, e;
+    if (cx_fmt(pat, sizeof pat, "\n%s\t", key)) return 1;
+    k = tx_len(pat, 80); at = tx_find(text, n, pat, k);
+    if (at < 0) return 1;
+    at += k;
+    for (e = at; e < n && text[e] != '\n'; e++) {}
+    if (e == n || e == at || e - at >= cap) return 1;
+    if (mm_copy(buf, cap, text + at, e - at)) return 1;
+    buf[e - at] = 0;
+    return 0;
+}
+static int prep_receipt_stale(const char *rec, const char *snap, const char *pkg, const char *ctor, const char *helper,
+    const char *tmpl, const char *objs, const char **why) {
+    static const char *pk[6] = {"root", "pkg", "ctor", "helper", "template", "objects"};
+    static const char *hk[5] = {"pkg_sha", "ctor_sha", "helper_sha", "template_sha", "object_receipt_sha"};
+    const char *pv[6], *hv[5];
+    char orec[4400], want[4400], real[4400], hash[65];
+    size_t n = 0; char *text; int i;
+    if (cx_fmt(orec, sizeof orec, "%s/receipt.txt", objs)) die("path", "prep objs receipt");
+    pv[0] = snap; pv[1] = pkg; pv[2] = ctor; pv[3] = helper; pv[4] = tmpl; pv[5] = objs;
+    hv[0] = pkg; hv[1] = ctor; hv[2] = helper; hv[3] = tmpl; hv[4] = orec;
+    text = cx_read(rec, &n);
+    *why = "receipt";
+    if (!text || !n || memchr(text, 0, n)) { free(text); return 1; }
+    for (i = 0; i < 6; i++) {
+        *why = pk[i];
+        if (prep_field(text, (long)n, pk[i], want, sizeof want) || sy_realpath(pv[i], real, sizeof real) < 0 || strcmp(want, real)) { free(text); return 1; }
+    }
+    for (i = 0; i < 5; i++) {
+        size_t bn = 0; char *b = cx_read(hv[i], &bn);
+        *why = hk[i];
+        if (!b || sy_sha256_hex(b, (long)bn, hash) || prep_field(text, (long)n, hk[i], want, sizeof want) || strcmp(want, hash)) { free(b); free(text); return 1; }
+        free(b);
+    }
+    free(text);
+    *why = "";
+    return 0;
+}
+/* 收据在且与本次输入不符 -> 打 WF_PREP_STALE 并清掉整个 prepare 目录,调用点随后按无收据重做;
+   相符或无收据不动。返回 1 表示已清理。路径守卫与 clean_phase_path 相同。 */
+static int clean_stale_prep(const char *outdir, const char *phase, const char *path, const char *receipt,
+    const char *snap, const char *pkg, const char *ctor, const char *helper, const char *tmpl, const char *objs) {
+    const char *why = "";
+    if (!path || !*path) die("REFUSE cleanup empty path", phase);
+    if (has_dotdot(path) || !(under_dir(path, outdir) || (chain_work[0] && under_dir(path, chain_work))))
+        die("REFUSE cleanup path outside out/chain", path);
+    if (fsize(receipt) < 0) return 0;
+    if (!prep_receipt_stale(receipt, snap, pkg, ctor, helper, tmpl, objs, &why)) return 0;
+    sy_printf("WF_PREP_STALE\t%s\tkey=%s\t%s\n", phase, why, receipt);
+    sy_printf("CLEANUP\t%s\t%s\n", phase, path);
+    if (cx_rmtree(path)) die("cleanup failed", path);
+    return 1;
+}
 /* fixedpoint g2/g3: 独占输出为 FP/gN/<target>,完成收据为 FP/gN/phase-<i>.tsv。 */
 static void clean_fp_phase(const char *outdir, const char *fp, const char *phase, int g, const char *slug, int idx) {
     char d[4400], rc[4400];
@@ -834,6 +1259,22 @@ static void fp_call(const char *root,const char *rev,const char *snap,const char
     if(keys){a[n++]="--objects";a[n++]=(char *)keys;}else a[n++]="--link-only";
     if(resume)a[n++]="--resume";a[n]=0;if(step(root,a))die(keys?"fixedpoint objects":"fixedpoint link",phase);
 }
+/* One batch of uncommitted keys. Before it starts: if this attempt already committed a batch and
+   the next one is not expected to fit before the attempt ends, yield (phase_yield). The estimate
+   is twice the last batch of this attempt, at least 15 and at most 55 seconds (the measured
+   budget of a batch, build/g2-budget.tsv). */
+static int fp_committed; static long fp_last_ms;
+static void fp_commit(const char *root,const char *rev,const char *snap,const char *pkg,
+                      const char *gen1,const char *fp,const char *helper,
+                      const char *target,const char *phase,const char *batch){
+    if(attempt_end&&fp_committed){
+        long need=fp_last_ms*2;if(need<15000)need=15000;if(need>55000)need=55000;
+        if(sy_now_ms()+need>attempt_end)phase_yield("fixedpoint-batch",fp_last_ms,need);
+    }
+    long t0=sy_now_ms();
+    fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);
+    fp_last_ms=sy_now_ms()-t0;fp_committed++;
+}
 static void fp_batch(const char *root,const char *rev,const char *snap,const char *pkg,
                      const char *gen1,const char *fp,const char *helper,
                      const char *target,const char *phase,const char *keys,int resume){
@@ -853,19 +1294,19 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
         const char *e=strchr(p,',');len=e?(int)(e-p):(int)strlen(p);char needle[160];
         if(len<1||cx_fmt(needle,sizeof needle,"\n%.*s\t",len,p))die("batch key",p);
         if(!strstr(steps,needle)){
-            if(pending==limit||pending==256){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);used=0;pending=0;}
+            if(pending==limit||pending==256){fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);used=0;pending=0;}
             int z=snprintf(batch+used,sizeof batch-used,"%s%.*s",pending?",":"",len,p);
             if(z<0||z>=sizeof batch-used)die("batch buffer",p);used+=z;pending++;
         }
         p=e?e+1:p+len;
     }
-    free(steps);if(pending)fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);
+    free(steps);if(pending)fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);
 }
 static void g2_closures(const char *root, const char *outdir, const char *rev, const char *snap, const char *pkg,
                         const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,
                         const char *target, const char *slug, int gen, int resume) {
     char tool[4400], com[4400], manifest[4400], prepare[80], group[80];
-    if (cx_fmt(tool, sizeof tool, "%s/tools/entry-build.cx", snap) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
+    if (!eb_pinned(root, outdir, tool, sizeof tool) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
     if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
     char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
     pr_result result; long began = sy_now_ms();
@@ -987,6 +1428,48 @@ static void run_g2_lnx(const char *root, const char *outdir, const char *rev, co
     if (!(resume && ck_done(outdir, tag))) mark(outdir, tag, sy_now_ms() - started);
     else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
 }
+/* The two linux targets of one generation share only read-only inputs (gen1 for g2, the g2
+   lnx-x86_64 candidate for g3; build/chain-phases.tsv deps) and write fp/gN/SLUG each, so the
+   pair runs as two owner processes, as chain-run already schedules the two lanes. Each owner
+   keeps every per-call bound, checkpoint and receipt of the serial order; a failed owner fails
+   the pair after both have been waited for, so the other target's evidence stays complete.
+   --until, a yielding attempt and --parallel 1 keep the serial order. */
+static int jobs_parallel;
+static void run_g_lnx_pair(const char *root, const char *outdir, const char *rev, const char *snap,
+    const char *pkg, const char *gen1, const char *fp, const char *helper, int gen, int resume) {
+    static const char *targets[2] = {"lnx/x86_64", "lnx/arm64"}, *slugs[2] = {"lnx-x86_64", "lnx-arm64"};
+    int pid[2] = {0, 0}, bad = 0;
+    if (until_phase || attempt_end || jobs_parallel < 2) {
+        for (int i = 0; i < 2; i++) run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, targets[i], slugs[i], gen, resume);
+        return;
+    }
+    sy_printf("G_LNX_PAIR\tgen=%d\towners=2\twrite_domains=per-target-dir\n", gen);
+    sy_mkdir(fp, 0755);
+    fflush(0);
+    for (int i = 0; i < 2 && !bad; i++) {
+        pid[i] = fork();
+        if (pid[i] < 0) { pid[i] = 0; bad = 1; sy_printf("G_LNX_PAIR_FAIL\tg%d-%s\tfork\n", gen, slugs[i]); break; }
+        if (!pid[i]) {
+            char tmp[4400];
+            if (cx_fmt(tmp, sizeof tmp, "%s/tmp-g%d-%s", outdir, gen, slugs[i])) die("pair tmp", slugs[i]);
+            if (sy_mkdir(tmp, 0700) && fsize(tmp) < 0) die("pair tmp", tmp);
+            if (sy_setenv("TMPDIR", tmp, 1)) die("pair environment", slugs[i]);
+            run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, targets[i], slugs[i], gen, resume);
+            fflush(0);
+            exit(0);
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        int st = 0;
+        if (!pid[i]) continue;
+        while (waitpid(pid[i], &st, 0) < 0) { if (errno != EINTR) die("pair wait", slugs[i]); }
+        if (!WIFEXITED(st) || WEXITSTATUS(st)) {
+            bad = 1;
+            sy_printf("G_LNX_PAIR_FAIL\tg%d-%s\tstatus=%d\n", gen, slugs[i], st);
+        }
+    }
+    if (bad) die(gen == 2 ? "g2 lnx pair" : "g3 lnx pair", fp);
+}
 static int job_has_record(const char *ctx, const char *id) {
     char rec[4400];
     if (cx_fmt(rec, sizeof rec, "%s/jobs/%s/record.tsv", ctx, id)) die("path", id);
@@ -1040,7 +1523,7 @@ static int warmup_tools(const char *root) {
         char *a[3];
         if (cx_fmt(p, sizeof p, "%s/%s", root, w[i])) die("path", w[i]);
         a[0] = p; a[1] = (char *)"-c"; a[2] = 0;
-        if (bound_sh_secs(root, a, 55)) die("warmup", w[i]);
+        if (bound_sh_secs(root, a, cc_pb())) die("warmup", w[i]);
         sy_printf("WARMUP\t%s\n", w[i]);
     }
     return 0;
@@ -1063,7 +1546,7 @@ static int sjw(const char *s, const char *ctx, const char *b, const char *phase,
     v[n++] = counts;
     v[n++] = (char *)act;
     v[n++] = 0;
-    return pr_code_at("source-job-wave",v,s,55);
+    return pr_code_at("source-job-wave",v,s,cc_pb());
 }
 /* --touch paths are repository-relative dependency inputs, not output selectors. */
 static const char *touches[48];
@@ -1079,7 +1562,7 @@ static void select_nets(const char *s) {
     v[n++] = "sh"; v[n++] = com; v[n++] = toolpath; v[n++] = "--"; v[n++] = "--root"; v[n++] = (char *)s; v[n++] = "--touch";
     for (int i = 0; i < ntouch; i++) v[n++] = (char *)touches[i];
     v[n] = 0; pr_result r;
-    if (pr_run("net-deps-touch", v, 0, 0, 55, &r) || r.rc) die("REFUSE net-deps --touch", s);
+    if (pr_run("net-deps-touch", v, 0, 0, cc_pb(), &r) || r.rc) die("REFUSE net-deps --touch", s);
     if (!r.out || !r.outn || r.out[r.outn - 1] != '\n' || memchr(r.out, 0, r.outn) || memchr(r.out, '\r', r.outn)) die("REFUSE net-deps wire", s);
     char *p = r.out; int footer = 0; nselected = 0;
     while (*p) {
@@ -1143,7 +1626,7 @@ static void verify_segment_jobs(const char *outdir,const char *s,const char *ctx
     if(!segment_verified_count)return;
     if(cx_fmt(path,sizeof path,"%s/segment-verify.ids",outdir)||cx_write(path,list,used)||cx_fmt(controller,sizeof controller,"%s/source-package-O2.elf",build))die("segment verify list",outdir);
     char *v[]={controller,"reuse-batch",(char *)s,(char *)ctx,path,0};long began=sy_now_ms();
-    if(pr_code_at("segment-reuse-batch",v,s,55))die("REFUSE segment job identity/bytes",path);
+    if(pr_code_at("segment-reuse-batch",v,s,cc_pb()))die("REFUSE segment job identity/bytes",path);
     sy_printf("SEGMENT_VERIFY\tjobs=%d\twall_ms=%ld\tscope=process-only\n",segment_verified_count,sy_now_ms()-began);
 }
 static void verify_reuse(const char *s, const char *ctx, const char *b, const char *id) {
@@ -1152,11 +1635,11 @@ static void verify_reuse(const char *s, const char *ctx, const char *b, const ch
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", b)) die("path", id);
     if (baseline_ctx && !job_has_record(ctx, id)) {
         char *a[] = {controller, "adopt-job", (char *)s, (char *)ctx, (char *)baseline_ctx, (char *)id, 0};
-        if (pr_code_at("adopt-job", a, s, 55)) die("REFUSE adoption identity/bytes", id);
+        if (pr_code_at("adopt-job", a, s, cc_pb())) die("REFUSE adoption identity/bytes", id);
         return; /* adopt-job already performs the canonical final verification. */
     }
     char *v[] = {controller, "reuse-job", (char *)s, (char *)ctx, (char *)id, 0};
-    if (pr_code_at("reuse-job", v, s, 55)) die("REFUSE unchanged job identity/bytes", id);
+    if (pr_code_at("reuse-job", v, s, cc_pb())) die("REFUSE unchanged job identity/bytes", id);
     sy_printf("REUSED\t%s\tidentity-and-bytes-verified\n", id);
 }
 static void invalidate_job(const char *outdir, const char *ctx, const char *b, const char *id) {
@@ -1401,7 +1884,7 @@ static void final_proof(const char *root, const char *ctx, const char *build, co
     }
     char line[256]; if (cx_fmt(line, sizeof line, "%s\n%s", id, index == 0 ? "tool-compilerpack\ntool-pack\n" : "") || cx_write(idsfile, line, strlen(line))) die("final ids", idsfile);
     char *v[] = {controller, "verify-jobs", (char *)root, (char *)ctx, idsfile, 0}; pr_result r;
-    if (pr_run("final net verification", v, root, 0, 55, &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
+    if (pr_run("final net verification", v, root, 0, cc_pb(), &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
     if (!r.out || strncmp(r.out, "VERIFY_JOBS\t", 12) || !strchr(r.out, '\n') || strchr(r.out, '\n')[1]) { pr_free(&r); die("final verification wire", id); }
     final_fingerprint(ctx, id + 4, after);
     if (strcmp(before, after)) { pr_free(&r); die("final artifacts changed during verification", id); }
@@ -1432,7 +1915,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
         !sm_sha(controller, vhash) && !cx_fmt(vkey, sizeof vkey, "verify-context\n%s\n%s\n%s\n%s\n%s\n%s\n", vhash, root, ctx, cch, bsh, brh) && !derived_shape(root, ctx, "jobs", vshape)) vmemo = 1;
     if (vmemo && !sm_value_get(vkey, vshape, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
     else {
-        if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
+        if (pr_code_at("final context", v, root, cc_pb())) die("final current SID/context", ctx);
         char again[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", again) && !strcmp(again, vshape)) sm_value_put(vkey, vshape, verified); else vmemo = 0;
     }
@@ -1446,7 +1929,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
     {   /* The closing bracket is the same question: a hit needs the same key and the listing as it is now. */
         char after[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", after) && !sm_value_get(vkey, after, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
-        else if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
+        else if (pr_code_at("final context", v, root, cc_pb())) die("final current SID/context changed", ctx);
     }
     sy_printf("FINAL\tmodels=%d\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n", cf_net_count());
     return 0;
@@ -1558,7 +2041,7 @@ static int uc_guard(const char *root, const char *dir) {
     static const char sa[] = "int bf(int);\nint main(void){ return bf(1) - 2; }\n", sb[] = "int bf(int x){ return x + 1; }\n";
     if (cx_write(a, sa, sizeof sa - 1) || cx_write(b, sb, sizeof sb - 1)) return -1;
     if (cx_fmt(cmd, sizeof cmd, "UNISACC_RR_TIME=1 UNISACC_E3CACHE='%s/uc-guard-cache' sh '%s/unisacc.com' '%s' '%s' -o '%s/uc-guard.bin' 2>'%s'", dir, root, a, b, dir, err)) return -1;
-    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, 55)) return -1; }
+    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, cc_pb())) return -1; }
     e = cx_read(err, &en);
     if (!e) return -1;
     for (k = 0; k < 3; k++) {
@@ -1668,7 +2151,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
     }
     if (gen == 1 && ti < 2) {
         char gout[4400], parent[4400], ctor[4400], ebt[4400];
-        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("lane entry", lane_phase);
+        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || !eb_pinned(root, outdir, ebt, sizeof ebt)) die("lane entry", lane_phase);
         sy_mkdir(parent, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("lane output", gout);
         if (sy_setenv("UNISACC_CTOR", ctor, 1) || sy_setenv("UNISA_CONTAINER", pkg, 1) || sy_chdir(snap)) die("lane entry environment", snap);
@@ -1690,7 +2173,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
 static void chain_paths(const char *root, const char *rev, char *snap) {
     if (strlen(rev) != 40) die("revision hex", rev);
     for (int i=0;i<40;i++) if (!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex",rev);
-    if (cx_fmt(snap,4400,"%s/out/release-snap-%.10s",root,rev) ||
+    if (cr_snap(root,rev,0,snap,4400) ||
         cx_fmt(chain_work,sizeof chain_work,"%s/out/chain",snap)) die("path","chain workspace");
 }
 
@@ -1699,6 +2182,7 @@ int main(int argc, char **argv) {
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
     const char *jobs_root = 0, *jobs_ctx = 0, *jobs_build = 0, *jobs_phase = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
+    for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--jobs-segment-s")) cc_group = 1;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
     if (argc == 4 && tx_eqz(argv[1], "--chain-work")) {
@@ -1708,11 +2192,18 @@ int main(int argc, char **argv) {
         return 0;
     }
     /* 链内产物不得依赖单元前端缓存(plans/unit-frontcache.md):强制关,子进程继承;设不上或读回不是 0 即拒绝 */
+    {   const char *ae = sy_env("UNISACC_CHAIN_ATTEMPT_END_MS");
+        if (ae && *ae) {
+            long value = 0;
+            for (const char *q = ae; *q; q++) { if (*q < '0' || *q > '9' || value > 4000000000000L) die("REFUSE attempt end", ae); value = value * 10 + (*q - '0'); }
+            attempt_end = value;
+        }
+    }
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
     if (argc == 6 && tx_eqz(argv[1], "--segment-jobs-fixture")) {
-        jobs_segment_end=sy_now_ms()+267000;
+        jobs_segment_end=sy_now_ms()+ccp_group_max(cc_call_limits())*1000L;
         verify_segment_jobs(argv[3],argv[2],argv[4],argv[5]);
         for(int i=0;i<segment_verified_count;i++) {
             verify_reuse(argv[2],argv[4],argv[5],segment_verified[i]);
@@ -1725,14 +2216,61 @@ int main(int argc, char **argv) {
         until_phase = tx_eqz(argv[5], "-") ? 0 : argv[5];
         return wf_fronts(argv[2], argv[3], "fixture-helper", 1, "osx/x86_64", "osx-x86_64", 1);
     }
+    if (argc == 5 && tx_eqz(argv[1], "--residue-fixture")) {
+        /* PHASES OUT PHASE: only the table-driven residue rule that precedes a phase. */
+        phases_file = argv[2];
+        load_chain_phases(root);
+        if (chain_phase_index(argv[4]) < 0) die("REFUSE residue fixture phase", argv[4]);
+        residue_before(argv[3], argv[4]);
+        sy_printf("RESIDUE_RULE\t%s\t%s\n", argv[4], g_res_policy[chain_phase_index(argv[4])] ? "applied" : "none");
+        return 0;
+    }
+    if (argc == 9 && tx_eqz(argv[1], "--wf-stub-fixture")) {
+        /* ROOT OUT PREP TARGET PHASE DEST TAG: the stub step alone, against a fake ROOT/unisacc.com. */
+        char wft[4400];
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", argv[2])) die("path", "wf");
+        wf_stub(argv[2], argv[3], wft, argv[4], argv[5], argv[6], argv[7], argv[8]);
+        return 0;
+    }
     if (argc == 11 && tx_eqz(argv[1], "--gen1-entry-fixture")) {
         until_phase = tx_eqz(argv[10], "-") ? 0 : argv[10];
         gen1_entry(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7],
                    argv[8], "gen1-lnx-fixture", tx_eqz(argv[9], "resume"));
         return 0;
     }
+    if (argc == 5 && tx_eqz(argv[1], "--tool-pin-fixture")) {
+        /* 夹具入口: --tool-pin-fixture ROOT OUT TOOL.cx,只做钉住并打印可执行体路径 */
+        char nat[4400];
+        step_out = argv[3];
+        const char *nm = tool_pinned(argv[2], argv[4], 50, nat, sizeof nat);
+        if (!nm) die("REFUSE not a pinned chain tool", argv[4]);
+        sy_printf("TOOL_PIN\t%s\t%s\n", nm, nat);
+        return 0;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--eb-pin-fixture")) {
+        /* 夹具入口: --eb-pin-fixture ROOT OUT,只钉 entry-build 源码副本并打印路径 */
+        char cp[4400];
+        eb_pinned(argv[2], argv[3], cp, sizeof cp);
+        sy_printf("EB_PIN\t%s\n", cp);
+        return 0;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--kr-pin-env-fixture")) {
+        /* 夹具入口: --kr-pin-env-fixture ROOT OUT,只跑 kr_pin_env(源副本缺失的拒绝/回退合同) */
+        kr_pin_env(argv[2], argv[3]);
+        sy_printf("KR_PIN_ENV\tok\n");
+        return 0;
+    }
+    if (argc == 5 && tx_eqz(argv[1], "--src-pin-fixture")) {
+        /* 夹具入口: --src-pin-fixture ROOT OUT NAME,钉 NAME(kernel-route 或 asm-source)源码副本并打印路径 */
+        char cp[4400];
+        if (!tx_eqz(argv[4], "kernel-route") && !tx_eqz(argv[4], "asm-source")) die("REFUSE not a source-pinned tool", argv[4]);
+        src_pinned(argv[2], argv[3], argv[4], cp, sizeof cp);
+        sy_printf("SRC_PIN\t%s\n", cp);
+        return 0;
+    }
     if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {
         until_phase = tx_eqz(argv[8], "-") ? 0 : argv[8];
+        jobs_segment_out = argv[3];
         run_g2_lnx(argv[2], argv[3], "23a873aaa156440b99c25ef48c2d94f6ca32e858", argv[4],
                    "package", "constructor", argv[5], "identity-helper", "lnx/x86_64", "lnx-x86_64",
                    tx_eqz(argv[6], "g3") ? 3 : 2, tx_eqz(argv[7], "resume"));
@@ -1760,7 +2298,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--recheck-only")) { recheck_only = 1; continue; }
         if (tx_eqz(argv[i], "--jobs-segment-s") && i + 1 < argc) {
             const char *p = argv[++i]; char *end = 0; long secs = strtol(p, &end, 10);
-            if (!*p || *end || secs < 55 || secs > 267) die("REFUSE jobs segment 55..267", p);
+            if (!*p || *end || !ccp_accept_group(cc_call_limits(), cc_pb(), secs)) die("REFUSE jobs segment phase.bound..segment-3", p);
             jobs_segment_end = sy_now_ms() + secs * 1000; continue;
         }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
@@ -1803,6 +2341,11 @@ int main(int argc, char **argv) {
             /* 夹具入口: --clean-phase OUT WORK PHASE PATH RECEIPT(- 为无) */
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             return clean_phase_path(argv[i + 1], argv[i + 3], argv[i + 4], tx_eqz(argv[i + 5], "-") ? 0 : argv[i + 5]) ? 0 : 3;
+        }
+        if (tx_eqz(argv[i], "--clean-stale-prep") && i + 11 < argc) {
+            /* 夹具入口: --clean-stale-prep OUT WORK PHASE PATH RECEIPT SNAP PKG CTOR HELPER TEMPLATE OBJECTS;清理返回 0,可复用返回 3 */
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            return clean_stale_prep(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5], argv[i + 6], argv[i + 7], argv[i + 8], argv[i + 9], argv[i + 10], argv[i + 11]) ? 0 : 3;
         }
         if (tx_eqz(argv[i], "--clean-job") && i + 5 < argc) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
@@ -1864,7 +2407,7 @@ int main(int argc, char **argv) {
     if (jobs_root) {
         if (!strcmp(jobs_phase, "final")) {
             if (!outdir || !*outdir) die("REFUSE final --out required", 0);
-            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=%d\tchild_bound=55\n", cf_net_count()); return 0; }
+            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=%d\tchild_bound=%d\n", cf_net_count(), cc_pb()); return 0; }
             if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
             if (jobs_index >= 0) {
                 char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", jobs_index)) die("phase", "final");
@@ -1893,8 +2436,28 @@ int main(int argc, char **argv) {
         if (!u && !known_closure_phase(outdir, until_phase) && !known_front_phase(root, rev, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
+    if (!lane_phase && !recheck_only) {
+        /* Start gate: three mistakes that cost a whole chain before (real5 died in pack after 3538 s). */
+        char srcd[4400], srcgit[4400], helpa[4400], helpb[4400]; int cut = (int)strlen(outdir);
+        while (cut > 1 && outdir[cut - 1] == '/') cut--;
+        while (cut > 0 && outdir[cut - 1] != '/') cut--;
+        if (cut > 0 && !cx_fmt(srcd, sizeof srcd, "%.*ssrc", cut, outdir) && !cx_fmt(srcgit, sizeof srcgit, "%s/.git", srcd) && fsize(srcgit) >= 0) {
+            char *hv[] = {"sh", "-c", "test \"$(git -C \"$1\" rev-parse HEAD)\" = \"$2\"", "sh", srcd, (char *)rev, 0};
+            if (runv_secs(hv, 30)) die("REFUSE private src worktree HEAD != --rev", srcd);
+        }
+        const char *ih = sy_env("UNISACC_IDENT_HELPER");
+        if ((!ih || !*ih) && (cx_fmt(helpa, sizeof helpa, "%s/build/identity-helper", outdir) || fsize(helpa) < 0) && (cx_fmt(helpb, sizeof helpb, "%s/ctx/identity-helper", outdir) || fsize(helpb) < 0))
+            die("REFUSE UNISACC_IDENT_HELPER unset and no prebuilt identity-helper in the chain", outdir);
+        if ((!until_phase || tx_eqz(until_phase, "pack")) && (!cm64 || !cmarm)) {
+            /* No explicit managers: the chain builds them in phase cache-manager, which needs the source in the private src tree. */
+            char csrc[4400];
+            if (cut <= 0 || cx_fmt(csrc, sizeof csrc, "%.*ssrc/tools/cache-retain.cx", cut, outdir) || fsize(csrc) < 0)
+                die("REFUSE pack needs --cache-manager-osx X64 ARM64 (no explicit managers and no in-chain source tools/cache-retain.cx; checked at start)", 0);
+        }
+    }
     jobs_segment_out = outdir;
-    if (jobs_segment_end && (!resume || !until_phase || (strcmp(until_phase,"jobs-tool") && strcmp(until_phase,"jobs-gen") && strcmp(until_phase,"jobs-tbl") && strcmp(until_phase,"jobs-net")))) die("REFUSE jobs segment target", until_phase);
+    step_out = outdir;
+    if (jobs_segment_end && (!resume || !ccp_group_target(until_phase))) die("REFUSE jobs segment target", until_phase);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
     if (recheck_only) {
         /* Only for the two phases that require it, only when everything before them is complete:
@@ -1904,6 +2467,9 @@ int main(int argc, char **argv) {
             die("REFUSE --recheck-only needs --resume --until compare|pack", until_phase);
         for (int pi = 0; pi < limit; pi++) if (!ck_done(outdir, g_phases[pi])) die("REFUSE --recheck-only before an unfinished phase", g_phases[pi]);
     }
+    /* General dispatch of the residue rule: chain-run retries a phase with --until PHASE, so a
+       table row needs no code of its own. The call sites before a step cover a run without --until. */
+    if (until_phase && !recheck_only) residue_before(outdir, until_phase);
     chain_memo(until_phase, outdir);
     if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
     if (!lane_phase) hb(outdir, "chain", "start");
@@ -1925,7 +2491,7 @@ int main(int argc, char **argv) {
     if (!(resume && ck_done(outdir, "snap"))) {
         long t0 = sy_now_ms();
         char *a[4];
-        a[0] = (char *)"snap"; a[1] = (char *)rev; a[2] = (char *)"out"; a[3] = 0;
+        a[0] = (char *)"snap"; a[1] = (char *)rev; a[2] = 0; a[3] = 0;
         if (step(root, a)) die("snap", snap);
         mark(outdir, "snap", sy_now_ms() - t0);
     } else sy_printf("RESUME\tsnap\n");
@@ -1994,6 +2560,14 @@ int main(int argc, char **argv) {
         if(step(root,a))die("build-objects",build);
         mark(outdir,"build-objects",sy_now_ms()-t0);
     } else {sy_printf("RESUME\tbuild-objects\n");if(until_phase && !strcmp(until_phase,"build-objects"))exit(0);}
+    /* The controller image no longer fits one 90 second phase from source: build-front stops at
+       the bootstrap's phase checkpoint under its own receipt, build finishes from it. */
+    if (!(resume && ck_done(outdir,"build-front"))) {
+        long t0=sy_now_ms();
+        char *a[]={"build-front",(char *)rev,snap,build,0};
+        if(step(root,a))die("build-front",build);
+        mark(outdir,"build-front",sy_now_ms()-t0);
+    } else {sy_printf("RESUME\tbuild-front\n");if(until_phase && !strcmp(until_phase,"build-front"))exit(0);}
     if (!(resume && ck_done(outdir,"build"))) {
         long t0 = sy_now_ms();
         char *a[5];
@@ -2148,7 +2722,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-x86_64", outdir)) die("path", "g1");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
+        if (!eb_pinned(root, outdir, ebt, sizeof ebt)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
@@ -2171,7 +2745,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-arm64", outdir)) die("path", "g1a");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
+        if (!eb_pinned(root, outdir, ebt, sizeof ebt)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
@@ -2199,6 +2773,11 @@ int main(int argc, char **argv) {
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
         check_whole_front_template(tmpl);
+        {
+            char wrc[4400];
+            if (cx_fmt(wrc, sizeof wrc, "%s/receipt.txt", nout)) die("path", "wrc");
+            clean_stale_prep(outdir, "wf-prepare", nout, wrc, snap, pkg, ctor, helper, tmpl, objs);
+        }
         if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
         {
             char rec[4400], saved[4400];
@@ -2208,7 +2787,7 @@ int main(int argc, char **argv) {
                 v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
                 if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
                 if (sy_chdir(snap)) die("chdir", snap);
-                n = bound_sh_secs(root, v, 45);
+                n = bound_sh_secs(root, v, cc_front());
                 if (sy_chdir(saved)) die("chdir", saved);
                 if (n) die("wf-prepare", nout);
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
@@ -2239,16 +2818,15 @@ int main(int argc, char **argv) {
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 2, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 2, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 3, resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 3, resume);
+    run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 2, resume);
+    run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 3, resume);
 
     if (!(resume && ck_done(outdir, "kernels-g2"))) {
         long t0 = sy_now_ms();
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
         a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g2"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        residue_before(outdir, "kernels-g2");
         if (step(root, a)) die("kernels-g2", fp);
         mark(outdir, "kernels-g2", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g2\n");
@@ -2258,6 +2836,7 @@ int main(int argc, char **argv) {
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
         a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g3"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        residue_before(outdir, "kernels-g3");
         if (step(root, a)) die("kernels-g3", fp);
         mark(outdir, "kernels-g3", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g3\n");
@@ -2281,6 +2860,30 @@ int main(int argc, char **argv) {
         mark(outdir, "compare", sy_now_ms() - t0);
     } else sy_printf("RESUME\tcompare\n");
 
+    /* In-chain osx cache-manager: two Mach-O built by the chain's product from tools/cache-retain.cx; explicit --cache-manager-osx wins. */
+    recheck_leave(outdir, "cache-manager");
+    chain_memo_off("reached-cache-manager");
+    {
+        static char cmx[4400], cma[4400];
+        if (cm64 && cmarm) sy_printf("RESUME\tcache-manager\texplicit\n");
+        else {
+            if (cx_fmt(cmx, sizeof cmx, "%s/cache-manager/x64", outdir) || cx_fmt(cma, sizeof cma, "%s/cache-manager/arm64", outdir)) die("path", "cache-manager");
+            if (!(resume && ck_done(outdir, "cache-manager") && fsize(cmx) > 0 && fsize(cma) > 0)) {
+                long t0 = sy_now_ms();
+                char cdir[4400], ctool[4400];
+                char *b1[8], *b2[8];
+                if (cx_fmt(cdir, sizeof cdir, "%s/cache-manager", outdir) || cx_fmt(ctool, sizeof ctool, "%s/tools/cache-retain.cx", root)) die("path", "cache-manager");
+                sy_mkdir(cdir, 0755);
+                b1[0] = ctool; b1[1] = (char *)"-b"; b1[2] = (char *)"osx/x86_64"; b1[3] = (char *)"-o"; b1[4] = cmx; b1[5] = 0;
+                b2[0] = ctool; b2[1] = (char *)"-b"; b2[2] = (char *)"osx/arm64"; b2[3] = (char *)"-o"; b2[4] = cma; b2[5] = 0;
+                if (bound_sh_secs(root, b1, 90)) die("cache-manager x64", cmx);
+                if (bound_sh_secs(root, b2, 90)) die("cache-manager arm64", cma);
+                mark(outdir, "cache-manager", sy_now_ms() - t0);
+            } else sy_printf("RESUME\tcache-manager\n");
+            cm64 = cmx; cmarm = cma;
+        }
+    }
+
     recheck_leave(outdir, "pack");
     chain_memo_off("reached-pack");
     if (!(resume && ck_done(outdir, "pack"))) {
@@ -2288,7 +2891,7 @@ int main(int argc, char **argv) {
         char ape_tool[4400], packed[4400], win64[4400], lnx64[4400], lnxarm[4400], osx64[4400], osxarm[4400], winarm[4400];
         char *v[24];
         int n = 0;
-        if (!cm64 || !cmarm) die("REFUSE pack needs --cache-manager-osx X64 ARM64 (borrowed until in-chain)", 0);
+        if (!cm64 || !cmarm || fsize(cm64) <= 0 || fsize(cmarm) <= 0) die("REFUSE pack needs cache-manager X64 ARM64 (explicit --cache-manager-osx or in-chain cache-manager/x64 and arm64)", 0);
         if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
         if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
         if (pack_slice(win64, sizeof win64, "win-x86_64")) die("path", "w64");
@@ -2304,7 +2907,7 @@ int main(int argc, char **argv) {
         v[n++] = (char *)"pack"; v[n++] = (char *)"--cache-manager-osx"; v[n++] = (char *)cm64; v[n++] = (char *)cmarm;
         v[n++] = packed; v[n++] = pkg; v[n++] = win64; v[n++] = lnx64; v[n++] = lnxarm;
         v[n++] = osx64; v[n++] = osxarm; v[n++] = winarm; v[n++] = 0;
-        if (bound_sh_secs(root, v, 55)) die("pack", packed);
+        if (bound_sh_secs(root, v, cc_pb())) die("pack", packed);
         if (chdir(root)) die("chdir root", root);
         mark(outdir, "pack", sy_now_ms() - t0);
     } else sy_printf("RESUME\tpack\n");

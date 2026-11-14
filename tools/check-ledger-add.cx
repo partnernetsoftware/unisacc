@@ -1,0 +1,122 @@
+/* Checks tools/ledger-add.cx: sh ./unisacc.com tools/check-ledger-add.cx   (from the repo root)
+   Fixtures use a private temp ledger: add ok, TAB/newline/whitespace-id/missing-text refusals (rc 2, ledger
+   byte-identical), --check reports 5-column old lines and passes inside a baseline, a new bad line beyond the
+   baseline is rc 1, two concurrent adds both land, and an added row is a 6-column line whose id is column 2
+   (the commit-own --keyed key).  Prints PASS/FAIL lines and CHECK_LEDGER_ADD<TAB>failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tledger-add.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int la(char **args, char *out, long cap) {
+    char *argv[24]; int i = 0, k, rc; char *b = 0; size_t n = 0;
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/ledger-add.cx"; argv[i++] = "--";
+    for (k = 0; args[k] && i < 23; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    rc = cx_runv_timeout(argv, 50, &b, &n);   /* 50 秒有界;返回退出码,stdout 放 out */
+    out[0] = 0; if (b && (long)n < cap) { mm_copy(out, (size_t)cap, b, n); out[n] = 0; }
+    return rc;
+}
+static int shc(const char *cmd, char *out, long cap) {   /* sh -c,50 秒有界;输出(含 stderr,由命令自己 2>&1)放 out */
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *b = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &b, &n);
+    out[0] = 0; if (b && (long)n < cap) { mm_copy(out, (size_t)cap, b, n); out[n] = 0; }
+    return rc;
+}
+static int has(const char *s, const char *t) {   /* 被测命令输出里的子串(逐字比较,不是源码锚) */
+    long i, j, hl = tx_len(s, 1 << 16), nl = tx_len(t, 512);
+    for (i = 0; i + nl <= hl; i++) { for (j = 0; j < nl && s[i + j] == t[j]; j++) {} if (j == nl) return 1; }
+    return 0;
+}
+static char *rd(const char *p, size_t *n) { return cx_read(p, n); }
+static int same(const char *p, const char *q) { size_t a, b; char *x = rd(p, &a), *y = rd(q, &b); int r = x && y && a == b && !memcmp(x, y, a); return r; }
+static int count(const char *p, const char *t) {
+    size_t n; char *b = rd(p, &n); int c = 0; long at = 0, tl = tx_len(t, 200);
+    if (!b) return -1;
+    while (at + tl <= (long)n) { long f = tx_find(b + at, (long)n - at, t, tl); if (f < 0) break; c++; at += f + tl; }
+    return c;
+}
+
+int main(void) {
+    static char o[1 << 16];
+    char td[200], L[300], B[300], K[300]; int rc;
+    if (cx_fmt(td, sizeof td, "%s/check-ledger-add-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(td)) return 2;
+    cx_fmt(L, sizeof L, "%s/l.tsv", td); cx_fmt(B, sizeof B, "%s/base.tsv", td); cx_fmt(K, sizeof K, "%s/keep.tsv", td);
+    cx_write(L, "时间\tid\t事件\tcommit\t证据\t角色/模型\n2026-01-01\tOLD-1\tx\t-\t-\tr\n2026-01-01\tOLD-5\tonly five\t-\tr\n", 0 + 0 + (size_t)strlen("时间\tid\t事件\tcommit\t证据\t角色/模型\n2026-01-01\tOLD-1\tx\t-\t-\tr\n2026-01-01\tOLD-5\tonly five\t-\tr\n"));
+    cx_write(B, "5\t1\n", 4);
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-1", "--text", "decided and done", "--commit", "abc1234", "--evidence", "ev/x", "--role", "tester", "--date", "2026-02-03", 0};
+        rc = la(a, o, sizeof o);
+        ck(rc == 0 && has(o, "LEDGER_ADD") && count(L, "2026-02-03\tT-1\tdecided and done\tabc1234\tev/x\ttester\n") == 1, "add-ok-six-columns-id-second");
+    }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-2", "--text", "auto date", 0};
+        rc = la(a, o, sizeof o);
+        ck(rc == 0 && count(L, "\tT-2\tauto date\t-\t-\tagent\n") == 1, "add-defaults");
+    }
+    cx_write(K, "", 0);
+    {   size_t n; char *b = rd(L, &n); cx_write(K, b, n); }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", "--text", "a\tb", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-tab"); }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", "--text", "a\nb", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-newline"); }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T 3", "--text", "ok", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-id-whitespace"); }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-missing-text"); }
+    {   char *a[] = {"--add", "--ledger", L, "--text", "no id", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-missing-id"); }
+    {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", "--text", "ok", "--evidence", "a\tb", 0}; rc = la(a, o, sizeof o);
+        ck(rc == 2 && same(L, K), "refuse-tab-in-evidence"); }
+    {   char *a[] = {"--check", "--ledger", L, 0}; rc = la(a, o, sizeof o);
+        ck(rc == 1 && has(o, "LEDGER_BAD\t3\t5\t") && has(o, "LEDGER_COLS\t5\tcount=1"), "check-reports-five-column-line"); }
+    {   char *a[] = {"--check", "--ledger", L, "--baseline", B, 0}; rc = la(a, o, sizeof o);
+        ck(rc == 0 && has(o, "WITHIN") && same(L, K), "check-within-baseline-rc0-no-edit"); }
+    {   /* a new bad line appended by hand (the thing the tool prevents) goes over the baseline */
+        size_t n; char *b = rd(L, &n); char *nb = (char *)mm_alloc(n + 64); mm_copy(nb, n + 64, b, n); mm_copy(nb + n, 64, "2026-01-01\tBAD-5\tfive cols\t-\tr\n", 33);
+        cx_write(L, nb, n + 33);
+        {   char *a[] = {"--check", "--ledger", L, "--baseline", B, 0}; rc = la(a, o, sizeof o);
+            ck(rc == 1 && has(o, "OVER") && has(o, "LEDGER_BAD\t6\t5\t"), "new-bad-line-over-baseline-rc1"); }
+        cx_write(L, b, n);
+    }
+    {   /* two concurrent adds: both rows present, none lost */
+        static char cc[1400]; int crc = 99;   /* 两个 add 同时在途(后台起两个再分别 wait 取各自退出码),整体 50 秒有界 */
+        if (!cx_fmt(cc, sizeof cc, "sh ./unisacc.com tools/ledger-add.cx -- --add --ledger '%s' --id C-1 --text one & p1=$!; "
+                    "sh ./unisacc.com tools/ledger-add.cx -- --add --ledger '%s' --id C-2 --text two & p2=$!; wait $p1; c1=$?; wait $p2; c2=$?; [ $c1 = 0 ] && [ $c2 = 0 ]", L, L))
+            crc = shc(cc, o, sizeof o);
+        ck(crc == 0 && count(L, "\tC-1\tone\t") == 1 && count(L, "\tC-2\ttwo\t") == 1 && count(L, "\tT-1\t") == 1 && count(L, "\tT-2\t") == 1, "concurrent-adds-keep-both");
+    }
+    {   /* precommit 账本格式闸(tools/precommit.cx ledger_gate):夹具 git 仓里顶层条目软链回本仓,agentwork/ 与 build/ 自备。
+           好行通过;新坏行被拒并点名列数;同一提交放宽基线仍被拒(基线取 HEAD);账本未暂存则不触发。 */
+        static char cmd[4096], G[300], GL[340], GB[340]; int prc;
+        const char *base = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n";
+        const char *good = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n";
+        const char *bad = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n2026-01-03\tBAD-3\tthree cols\n";
+        const char *run = "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && sh ./unisacc.com tools/precommit.cx 2>&1";
+        cx_fmt(G, sizeof G, "%s/g", td); cx_fmt(GL, sizeof GL, "%s/agentwork/ledger.tsv", G); cx_fmt(GB, sizeof GB, "%s/build/ledger-format-baseline.tsv", G);
+        prc = cx_fmt(cmd, sizeof cmd, "R=$(pwd) && mkdir -p '%s/agentwork' '%s/build' && cd '%s' && git init -q . && git config user.email a@b && git config user.name t"
+                     " && for e in \"$R\"/*; do b=${e##*/}; [ \"$b\" = agentwork ] || [ \"$b\" = build ] || ln -s \"$e\" \"$b\"; done", G, G, G) ? 99 : shc(cmd, o, sizeof o);
+        if (prc == 0) prc = cx_write(GL, base, strlen(base)) || cx_write(GB, "5\t1\n", 4);
+        if (prc == 0) prc = cx_fmt(cmd, sizeof cmd, "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && git -c core.hooksPath=/dev/null commit -q -m base", G) ? 99 : shc(cmd, o, sizeof o);
+        ck(prc == 0, "precommit-fixture-repo");
+        if (prc == 0) {
+            cx_fmt(cmd, sizeof cmd, run, G);
+            cx_write(GL, good, strlen(good)); rc = shc(cmd, o, sizeof o);
+            ck(rc == 0 && has(o, "blocked=0") && !has(o, "BLOCKED ledger"), "precommit-good-row-passes");
+            cx_write(GL, bad, strlen(bad)); rc = shc(cmd, o, sizeof o);
+            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3") && has(o, "ledger-add.cx -- --add"), "precommit-new-bad-row-blocked-naming-cols");
+            cx_write(GB, "3\t1\n5\t1\n", 8); rc = shc(cmd, o, sizeof o);
+            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3"), "precommit-baseline-loosened-in-same-commit-still-blocked");
+            cx_write(GL, base, strlen(base)); cx_write(GB, "5\t1\n", 4); rc = shc(cmd, o, sizeof o);
+            ck(rc == 0 && has(o, "blocked=0") && !has(o, "BLOCKED ledger"), "precommit-ledger-not-staged-untouched");
+        }
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", G)) shc(cmd, o, sizeof o);
+    }
+    printf("CHECK_LEDGER_ADD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

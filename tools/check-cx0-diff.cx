@@ -1,0 +1,89 @@
+/* tools/check-cx0-diff.cx -- tools/cx0-diff.cx 的夹具断言(只读仓内文件,夹具写 $TMPDIR 或 /tmp)。
+ *   sh ./unisacc.com tools/check-cx0-diff.cx
+ * 一对夹具覆盖九类块(b a e f c d g x t),再验证 --check 的退出码。真实三源计数只作信息行,不入断言。 */
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+static int pass, failed;
+static void ok(int c, const char *name) {
+    if (c) { pass++; } else { failed++; printf("FAIL\t%s\n", name); }
+}
+static const char *LA[] = {"/* head */", "int bind_a;", "/* m */", "#define CXM_MAXU 96", "int s1;",
+    "static int cxm_v(void){return 1;}", "int s2;", "int cxm_checkcalls(void){return 0;}", "int s3;",
+    "if(n>96) m(\"more than 96 units\");", "int s4;", "td = cx0_directory;", "int s5;",
+    "int cxm_samefile(char*a){return 0;}", "int s6;", "/* old comment */ int k;", "int s7;", "int q = 1;", "int s8;",
+    "cx0_result cx0_plan(int a);", "int s9;", 0};
+static const char *LB[] = {"/* head */", "int bind_b;", "/* m */", "#define CXM_MAXU 96", "int s1;",
+    "int cxm_v(void){return 1;}", "int s2;", "int cxm_checkcalls(void){return 1;}", "int s3;",
+    "if(n>128) m(\"more than 128 units\");", "int s4;", "td = cxm_tmpdir;", "int s5;",
+    "int cxm_samefile(char*a){return 1;}", "int s6;", "/* new words */ int k;", "int s7;", "int q = 2;", "int s8;",
+    "cxm_plan(int a);", "int s9;", 0};
+static void write_fix(const char *path, const char **l, int skip_x) {
+    FILE *f = fopen(path, "w"); int i;
+    for (i = 0; l[i]; i++) {
+        if (skip_x && i == 17) fputs("int q = 1;\n", f);
+        else { fputs(l[i], f); fputc('\n', f); }
+    }
+    fclose(f);
+}
+static int run_tool(const char *a, const char *b, int check, char *out, int cap, char *errout, int ecap) {
+    char *av[10]; np_result r = {0}; char why[256]; int n = 0, i, rc;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/cx0-diff.cx"; av[3] = "--"; av[4] = "--pair"; av[5] = (char *)a; av[6] = (char *)b; av[7] = check ? "--check" : 0; av[8] = 0; /* lint:allow R1 runs the tool under test as a child, same as tools/check-cxmod-tri.cx */
+    np_run(av, ".", 0, 40, &r, why, sizeof why); rc = r.rc;
+    for (i = 0; i < r.outn && n < cap - 1; i++) out[n++] = r.out[i];
+    out[n] = 0; n = 0;
+    for (i = 0; i < r.errn && n < ecap - 1; i++) errout[n++] = r.err[i];
+    errout[n] = 0; np_free(&r);
+    return rc;
+}
+/* 第 row 个数据行(0 起)第 col 列(0 起)的首字符串,写入 o */
+static int field(const char *out, int row, int col, char *o, int cap) {
+    int line = 0, c = 0, i = 0, n = 0;
+    o[0] = 0;
+    while (out[i]) {
+        if (out[i] == '\n') { line++; c = 0; }
+        else if (out[i] == '\t') c++;
+        else if (line == row + 1 && c == col && n < cap - 1) { o[n++] = out[i]; o[n] = 0; }
+        i++;
+    }
+    return n;
+}
+static int has(const char *h, const char *w) {
+    int i, j;
+    for (i = 0; h[i]; i++) { for (j = 0; w[j] && h[i + j] == w[j]; j++) {} if (!w[j]) return 1; }
+    return 0;
+}
+int main(void) {
+    char out[8192], err[512], v[64], pa[200], pb[200], pc[200]; const char *dir = "/tmp"; int i, rc;
+    const char *want = "baefcdgxt"; const char *sem[] = {"否", "否", "是", "是", "否", "否", "否", "待核", "否"};
+    char name[64];
+    tx_snprintf(pa, sizeof pa, "%s/cx0diff-fix-a.txt", dir); tx_snprintf(pb, sizeof pb, "%s/cx0diff-fix-b.txt", dir);
+    tx_snprintf(pc, sizeof pc, "%s/cx0diff-fix-c.txt", dir);
+    write_fix(pa, LA, 0); write_fix(pb, LB, 0); write_fix(pc, LB, 1);
+    rc = run_tool(pa, pb, 0, out, sizeof out, err, sizeof err);
+    ok(rc == 0, "pair run rc=0");
+    ok(has(out, "pair\ta_start\ta_len\tb_start\tb_len\tclass\tcategory\tsemantic"), "header row");
+    for (i = 0; i < 9; i++) {
+        field(out, i, 5, v, sizeof v);
+        tx_snprintf(name, sizeof name, "block %d class %c", i, want[i]);
+        ok(v[0] == want[i] && !v[1], name);
+    }
+    for (i = 0; i < 9; i++) {
+        field(out, i, 7, v, sizeof v);
+        tx_snprintf(name, sizeof name, "block %d semantic %s", i, sem[i]);
+        ok(!strcmp(v, sem[i]), name);
+    }
+    field(out, 2, 6, v, sizeof v); ok(!strcmp(v, "语义分叉"), "category e is 语义分叉");
+    field(out, 0, 6, v, sizeof v); ok(!strcmp(v, "宿主差异"), "category b is 宿主差异");
+    field(out, 6, 6, v, sizeof v); ok(!strcmp(v, "其他"), "category g is 其他");
+    ok(has(err, "blocks=9 other=1"), "summary counts 9 blocks, 1 unclassified");
+    rc = run_tool(pa, pb, 1, out, sizeof out, err, sizeof err);
+    ok(rc == 2, "--check rc=2 when an unclassified block exists");
+    rc = run_tool(pa, pc, 1, out, sizeof out, err, sizeof err);
+    ok(rc == 0 && has(err, "other=0"), "--check rc=0 when every block is classified");
+    field(out, 6, 5, v, sizeof v); ok(v[0] == 'x' || v[0] == 'g', "clean pair still lists rows");
+    printf("CX0_DIFF_CHECK passed=%d failed=%d\n", pass, failed);
+    if (!failed) printf("CX0_DIFF_CHECK_PASS\n");
+    return failed ? 1 : 0;
+}

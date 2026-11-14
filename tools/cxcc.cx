@@ -277,6 +277,20 @@ static int cxcc_ensure_dir(const char *path) {
     return -1;
 }
 
+/* Host dir shared with tools/build-cxcc-host.cx: $TMPDIR (default /tmp)/unisacc-cxcc-host-UID. */
+static int cxcc_host_dir(char *dst, size_t cap) {
+    const char *td = getenv("TMPDIR");
+    int k;
+    if (!td || !td[0]) td = getenv("TEMP");
+    if (!td || !td[0]) td = "/tmp";
+#ifdef _WIN32
+    k = snprintf(dst, cap, "%s/unisacc-cxcc-host-w", td);
+#else
+    k = snprintf(dst, cap, "%s/unisacc-cxcc-host-%lu", td, (unsigned long)getuid());
+#endif
+    return (k < 0 || (size_t)k >= cap) ? -1 : 0;
+}
+
 static void cxcc_fold(unsigned char acc[32], const void *p, size_t n) {
     unsigned char one[32], cat[64];
     cx_sha256(p, n, one);
@@ -587,7 +601,7 @@ static int cxcc_cache_open(const char *root, const char *compiler, const char *c
                            char *cached, size_t cap) {
     unsigned char acc[32];
     char hex[65];
-    char dir[CXCC_PATH];
+    char dir[CXCC_PATH], hd[256];
     struct stat st;
     int i, k;
     cached[0] = 0;
@@ -617,11 +631,10 @@ static int cxcc_cache_open(const char *root, const char *compiler, const char *c
         if (cxcc_fold_file(acc, fields[i])) return -1;
     }
     cxcc_hex32(acc, hex);
-    k = snprintf(dir, sizeof dir, "%s/out", root);
+    if (cxcc_host_dir(hd, sizeof hd) || cxcc_ensure_dir(hd)) return -1;
+    k = snprintf(dir, sizeof dir, "%s/cache", hd);
     if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
-    k = snprintf(dir, sizeof dir, "%s/out/cxcc-cache", root);
-    if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
-    k = snprintf(dir, sizeof dir, "%s/out/cxcc-cache/%s", root, compiler);
+    k = snprintf(dir, sizeof dir, "%s/cache/%s", hd, compiler);
     if (k < 0 || k >= (int)sizeof dir || cxcc_ensure_dir(dir)) return -1;
     k = snprintf(cached, cap, "%s/%s.o", dir, hex);
     if (k < 0 || k >= (int)cap) { cached[0] = 0; return -1; }
@@ -751,10 +764,13 @@ static int cxcc_trim_pch(const char *root, const char *compiler,
                          int *clang) {
     const char *tag;
     struct stat st;
+    char hd[256];
     int k;
     *clang = cxcc_is_clang(compiler);
     tag = *clang ? "clang" : "gcc";
-    k = snprintf(header, hcap, "%s/out/cxcc-host/%s-trim/cx.h", root, tag);
+    (void)root;
+    if (cxcc_host_dir(hd, sizeof hd)) return 0;
+    k = snprintf(header, hcap, "%s/%s-trim/cx.h", hd, tag);
     if (k < 0 || k >= (int)hcap) return 0;
     k = snprintf(pch, pcap, "%s%s", header, *clang ? ".pch" : ".gch");
     if (k < 0 || k >= (int)pcap) return 0;

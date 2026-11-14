@@ -465,11 +465,66 @@ static int _u_st_slot(FILE *__u_f) {
     return __u_i;
 }
 #endif
+/* SPEED-17: stdout is buffered through its slot (fd 1 is a slot like any fopen stream).  Mode, once
+   probed: 1 = full (stdout not a terminal), 2 = line (a terminal: flushed at each newline and
+   before stdin is read), 3 = unbuffered (setvbuf _IONBF).  stderr stays unbuffered, but a write
+   to it first flushes stdout, so a 2>&1 capture keeps the order the unbuffered library gave.
+   exit / return from main flush (_u_st_flushall); fork, exec, system, popen and posix_spawn
+   flush first, so a child neither repeats nor overtakes the parent's pending output.  abort and a
+   fatal signal do not flush (C99 7.20.4.1).  Direct write(1,...) bypasses the buffer, as in glibc. */
+_U_SHARED int _u_so_mode _U_ZERO;
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_probe
+static int _u_so_probe(void) {
+#ifdef _WIN32
+    return 2;
+#else
+    unsigned char __u_t[128]; __u_word __u_r;
+#ifdef __APPLE__
+    __u_r = __ioctl(1, 0x40487413L, (char *)__u_t);
+#else
+    __u_r = __ioctl(1, 0x5401L, (char *)__u_t);
+#endif
+    return __u_r < 0 ? 1 : 2;
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_flush
+static void _u_so_flush(void) {
+    int __u_j; __u_j = 0;
+    while (__u_j < _u_st_n) {
+        if (_u_st_fd[__u_j] == 1) { _u_st_wflush(__u_j); return; }
+        __u_j = __u_j + 1;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_put
+static __u_word _u_so_put(FILE *__u_f, const char *__u_p, __u_word __u_n) {
+    int __u_i; __u_word __u_k;
+    if (_u_so_mode == 0) _u_so_mode = _u_so_probe();
+    if (_u_so_mode == 3) return _u_st_raw(1, __u_p, __u_n);
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return _u_st_raw(1, __u_p, __u_n);
+    if (_u_st_wlen[__u_i] + __u_n > _U_BUFSZ) { if (_u_st_wflush(__u_i) != 0) return 0; }
+    if (__u_n >= _U_BUFSZ) return _u_st_raw(1, __u_p, __u_n);
+    _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ + _u_st_wlen[__u_i], __u_p, __u_n);
+    _u_st_wlen[__u_i] = _u_st_wlen[__u_i] + (int)__u_n;
+    if (_u_so_mode == 2) {
+        __u_k = 0;
+        while (__u_k < __u_n) {
+            if (__u_p[__u_k] == 10) { if (_u_st_wflush(__u_i) != 0) return 0; break; }
+            __u_k = __u_k + 1;
+        }
+    }
+    return __u_n;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
 static __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
     if (__u_n <= 0) return 0;
+    if (__u_fd == 1 && (__u_word)__u_f >= _UNISA_STDIO_BASE) return _u_so_put(__u_f, __u_p, __u_n);
+    if (__u_fd == 2 && (__u_word)__u_f >= _UNISA_STDIO_BASE) _u_so_flush();
     if ((__u_word)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
     __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return _u_st_raw(__u_fd, __u_p, __u_n);
@@ -522,8 +577,7 @@ static int fputs(const char *__u_s, FILE *__u_f) {
 #if !__UNISA_FTRIM_LIBC || __UN_puts
 static int puts(const char *__u_s) {
     if (fputs(__u_s, stdout) < 0) return 0 - 1;
-    _unisa_ch = 10;
-    if (__write(1, &_unisa_ch, 1) != 1) { _u_st_serr[1] = 1; return 0 - 1; }
+    if (fputc(10, stdout) < 0) { _u_st_serr[1] = 1; return 0 - 1; }   /* SPEED-17: through the buffer, so puts keeps its order with printf */
     return 0;
 }
 #endif
@@ -611,6 +665,12 @@ static int ungetc(int __u_c, FILE *__u_f) {
 #if !__UNISA_FTRIM_LIBC || __UN_setvbuf
 static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, __u_word __u_size) {
     if (__u_f == NULL) return 0 - 1;
+    if (_unisa_fd(__u_f) == 1 && (__u_word)__u_f >= _UNISA_STDIO_BASE) {
+        _u_so_flush();
+        if (__u_mode == _IONBF) _u_so_mode = 3;
+        else if (__u_mode == _IOLBF) _u_so_mode = 2;
+        else if (__u_mode == _IOFBF) _u_so_mode = 1;
+    }
     return 0;
 }
 #endif
@@ -641,6 +701,7 @@ static __u_word fread(void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f)
     }
     __u_got = 0;
     if (__u_want > __u_pre) {
+        if (_u_so_mode == 2 && _unisa_fd(__u_f) == 0) _u_so_flush();   /* a prompt without newline shows before the read */
         if (__u_i >= 0 && __u_want - __u_pre < _U_BUFSZ) {
             __u_got = __read(_unisa_fd(__u_f), _u_st_buf + __u_i * _U_BUFSZ, _U_BUFSZ);
             _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = __u_got > 0 ? (int)__u_got : 0;
@@ -1030,6 +1091,7 @@ static int fflush(FILE *__u_f) {
     if (__u_f == NULL) { _u_st_flushall(); return 0; }
     if ((__u_word)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) {
         __u_fd = _unisa_fd(__u_f);
+        if (__u_fd == 1) _u_so_flush();
         if (__u_fd >= 0 && __u_fd <= 2 && _u_st_serr[__u_fd]) return 0 - 1;
         return 0;
     }
@@ -2841,10 +2903,10 @@ static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_wor
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; __u_word __u_i;
-    __u_base = (char *)__u_v;
+/* Heap sort: the introsort fallback past its depth limit (worst case O(n log n)). */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hsort
+static void _unisa_hsort(char *__u_base, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
     while (__u_i > 0) { __u_i = __u_i - 1; _unisa_sift(__u_base, __u_n, __u_sz, __u_i, __u_cmp); }
@@ -2854,6 +2916,77 @@ static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(c
         _unisa_swap(__u_base, __u_base + __u_i * __u_sz, __u_sz);
         _unisa_sift(__u_base, __u_i, __u_sz, 0, __u_cmp);
     }
+}
+#endif
+
+/* Element swap: word-wise only when both addresses and the size are word aligned, else bytewise. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qswap
+static void _unisa_qswap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_t;
+    if ((((__u_word)__u_a | (__u_word)__u_b | __u_n) & (sizeof(__u_word) - 1)) == 0) {
+        __u_i = 0;
+        while (__u_i < __u_n) {
+            __u_t = *(__u_word *)(__u_a + __u_i); *(__u_word *)(__u_a + __u_i) = *(__u_word *)(__u_b + __u_i); *(__u_word *)(__u_b + __u_i) = __u_t;
+            __u_i = __u_i + sizeof(__u_word);
+        }
+        return;
+    }
+    if (__u_n == 4 && (((__u_word)__u_a | (__u_word)__u_b) & 3) == 0) {
+        int __u_x = *(int *)__u_a; *(int *)__u_a = *(int *)__u_b; *(int *)__u_b = __u_x;
+        return;
+    }
+    _unisa_swap(__u_a, __u_b, __u_n);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qins
+static void _unisa_qins(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i; __u_word __u_j;
+    __u_i = 1;
+    while (__u_i < __u_n) {
+        __u_j = __u_i;
+        while (__u_j > 0 && __u_cmp(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz) > 0) { _unisa_qswap(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz, __u_sz); __u_j = __u_j - 1; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
+/* Introsort: median-of-3 quicksort, insertion sort for short runs, heap sort past the depth limit. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qintro
+static void _unisa_qintro(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *), long __u_depth) {
+    __u_word __u_i; __u_word __u_j; __u_word __u_m;
+    while (__u_n > 12) {
+        if (__u_depth <= 0) { _unisa_hsort(__u_b, __u_n, __u_sz, __u_cmp); return; }
+        __u_depth = __u_depth - 1;
+        __u_m = __u_n / 2;
+        if (__u_cmp(__u_b + __u_m * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + __u_m * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz, __u_sz);
+        _unisa_qswap(__u_b, __u_b + __u_m * __u_sz, __u_sz);
+        __u_i = 0; __u_j = __u_n;
+        while (1) {
+            __u_i = __u_i + 1;
+            while (__u_i < __u_n && __u_cmp(__u_b + __u_i * __u_sz, __u_b) < 0) __u_i = __u_i + 1;
+            __u_j = __u_j - 1;
+            while (__u_cmp(__u_b + __u_j * __u_sz, __u_b) > 0) __u_j = __u_j - 1;
+            if (__u_i >= __u_j) break;
+            _unisa_qswap(__u_b + __u_i * __u_sz, __u_b + __u_j * __u_sz, __u_sz);
+        }
+        _unisa_qswap(__u_b, __u_b + __u_j * __u_sz, __u_sz);
+        if (__u_j < __u_n - 1 - __u_j) { _unisa_qintro(__u_b, __u_j, __u_sz, __u_cmp, __u_depth); __u_b = __u_b + (__u_j + 1) * __u_sz; __u_n = __u_n - 1 - __u_j; }
+        else { _unisa_qintro(__u_b + (__u_j + 1) * __u_sz, __u_n - 1 - __u_j, __u_sz, __u_cmp, __u_depth); __u_n = __u_j; }
+    }
+    _unisa_qins(__u_b, __u_n, __u_sz, __u_cmp);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    long __u_d; __u_word __u_t;
+    if (__u_n < 2 || __u_sz == 0) return;
+    __u_d = 2; __u_t = __u_n;
+    while (__u_t > 1) { __u_t = __u_t / 2; __u_d = __u_d + 2; }
+    _unisa_qintro((char *)__u_v, __u_n, __u_sz, __u_cmp, __u_d);
 }
 #endif
 
@@ -3009,6 +3142,7 @@ static int system(const char *__u_cmd) {
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
     if (!_unisa_env) _unisa_environ_init();   /* the child gets environ as it stands now */
     __u_env = _unisa_env;
+    _u_st_flushall();   /* SPEED-17: pending stdout goes out before the child's */
 #ifdef __APPLE__
 #ifdef __x86_64__
     __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);
@@ -4308,10 +4442,10 @@ static void _unisa_sift(char *__u_base, __u_word __u_n, __u_word __u_sz, __u_wor
 }
 #endif
 
-#if !__UNISA_FTRIM_LIBC || __UN_qsort
-static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
-    char *__u_base; __u_word __u_i;
-    __u_base = (char *)__u_v;
+/* Heap sort: the introsort fallback past its depth limit (worst case O(n log n)). */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hsort
+static void _unisa_hsort(char *__u_base, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i;
     if (__u_n < 2) return;
     __u_i = __u_n / 2;
     while (__u_i > 0) { __u_i = __u_i - 1; _unisa_sift(__u_base, __u_n, __u_sz, __u_i, __u_cmp); }
@@ -4321,6 +4455,77 @@ static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(c
         _unisa_swap(__u_base, __u_base + __u_i * __u_sz, __u_sz);
         _unisa_sift(__u_base, __u_i, __u_sz, 0, __u_cmp);
     }
+}
+#endif
+
+/* Element swap: word-wise only when both addresses and the size are word aligned, else bytewise. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qswap
+static void _unisa_qswap(char *__u_a, char *__u_b, __u_word __u_n) {
+    __u_word __u_i; __u_word __u_t;
+    if ((((__u_word)__u_a | (__u_word)__u_b | __u_n) & (sizeof(__u_word) - 1)) == 0) {
+        __u_i = 0;
+        while (__u_i < __u_n) {
+            __u_t = *(__u_word *)(__u_a + __u_i); *(__u_word *)(__u_a + __u_i) = *(__u_word *)(__u_b + __u_i); *(__u_word *)(__u_b + __u_i) = __u_t;
+            __u_i = __u_i + sizeof(__u_word);
+        }
+        return;
+    }
+    if (__u_n == 4 && (((__u_word)__u_a | (__u_word)__u_b) & 3) == 0) {
+        int __u_x = *(int *)__u_a; *(int *)__u_a = *(int *)__u_b; *(int *)__u_b = __u_x;
+        return;
+    }
+    _unisa_swap(__u_a, __u_b, __u_n);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qins
+static void _unisa_qins(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    __u_word __u_i; __u_word __u_j;
+    __u_i = 1;
+    while (__u_i < __u_n) {
+        __u_j = __u_i;
+        while (__u_j > 0 && __u_cmp(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz) > 0) { _unisa_qswap(__u_b + (__u_j - 1) * __u_sz, __u_b + __u_j * __u_sz, __u_sz); __u_j = __u_j - 1; }
+        __u_i = __u_i + 1;
+    }
+}
+#endif
+
+/* Introsort: median-of-3 quicksort, insertion sort for short runs, heap sort past the depth limit. */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_qintro
+static void _unisa_qintro(char *__u_b, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *), long __u_depth) {
+    __u_word __u_i; __u_word __u_j; __u_word __u_m;
+    while (__u_n > 12) {
+        if (__u_depth <= 0) { _unisa_hsort(__u_b, __u_n, __u_sz, __u_cmp); return; }
+        __u_depth = __u_depth - 1;
+        __u_m = __u_n / 2;
+        if (__u_cmp(__u_b + __u_m * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + __u_m * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b, __u_sz);
+        if (__u_cmp(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz) < 0) _unisa_qswap(__u_b + (__u_n - 1) * __u_sz, __u_b + __u_m * __u_sz, __u_sz);
+        _unisa_qswap(__u_b, __u_b + __u_m * __u_sz, __u_sz);
+        __u_i = 0; __u_j = __u_n;
+        while (1) {
+            __u_i = __u_i + 1;
+            while (__u_i < __u_n && __u_cmp(__u_b + __u_i * __u_sz, __u_b) < 0) __u_i = __u_i + 1;
+            __u_j = __u_j - 1;
+            while (__u_cmp(__u_b + __u_j * __u_sz, __u_b) > 0) __u_j = __u_j - 1;
+            if (__u_i >= __u_j) break;
+            _unisa_qswap(__u_b + __u_i * __u_sz, __u_b + __u_j * __u_sz, __u_sz);
+        }
+        _unisa_qswap(__u_b, __u_b + __u_j * __u_sz, __u_sz);
+        if (__u_j < __u_n - 1 - __u_j) { _unisa_qintro(__u_b, __u_j, __u_sz, __u_cmp, __u_depth); __u_b = __u_b + (__u_j + 1) * __u_sz; __u_n = __u_n - 1 - __u_j; }
+        else { _unisa_qintro(__u_b + (__u_j + 1) * __u_sz, __u_n - 1 - __u_j, __u_sz, __u_cmp, __u_depth); __u_n = __u_j; }
+    }
+    _unisa_qins(__u_b, __u_n, __u_sz, __u_cmp);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
+static void qsort(void *__u_v, __u_word __u_n, __u_word __u_sz, int (*__u_cmp)(const void *, const void *)) {
+    long __u_d; __u_word __u_t;
+    if (__u_n < 2 || __u_sz == 0) return;
+    __u_d = 2; __u_t = __u_n;
+    while (__u_t > 1) { __u_t = __u_t / 2; __u_d = __u_d + 2; }
+    _unisa_qintro((char *)__u_v, __u_n, __u_sz, __u_cmp, __u_d);
 }
 #endif
 
@@ -4476,6 +4681,7 @@ static int system(const char *__u_cmd) {
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
     if (!_unisa_env) _unisa_environ_init();   /* the child gets environ as it stands now */
     __u_env = _unisa_env;
+    _u_st_flushall();   /* SPEED-17: pending stdout goes out before the child's */
 #ifdef __APPLE__
 #ifdef __x86_64__
     __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);
@@ -5242,9 +5448,11 @@ static pid_t getpid(void) {
 #if !__UNISA_FTRIM_LIBC || __UN_getppid
 static pid_t getppid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getppid), 0, 0, 0, 0, 0); }
 #endif
+
 #if !__UNISA_FTRIM_LIBC || __UN_fork
 static pid_t fork(void) {
     __u_word __u_r;
+    _u_st_flushall();   /* SPEED-17: buffered stdout is written once, before the split */
 #ifdef __APPLE__
     long __u_me; __u_me = getpid();
     __u_r = __syscall6(_UNISA_SC(_UNISA_NR_fork), 0, 0, 0, 0, 0);
@@ -5259,6 +5467,7 @@ static pid_t fork(void) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execve
 static int execve(const char *__u_path, char *const __u_argv[], char *const __u_envp[]) {
+    _u_st_flushall();   /* the image is replaced: pending stdout would be lost */
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (__u_word)__u_path, (__u_word)__u_argv, (__u_word)__u_envp, 0, 0));
 }
 #endif
@@ -6647,9 +6856,11 @@ static pid_t getpid(void) {
 #if !__UNISA_FTRIM_LIBC || __UN_getppid
 static pid_t getppid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getppid), 0, 0, 0, 0, 0); }
 #endif
+
 #if !__UNISA_FTRIM_LIBC || __UN_fork
 static pid_t fork(void) {
     __u_word __u_r;
+    _u_st_flushall();   /* SPEED-17: buffered stdout is written once, before the split */
 #ifdef __APPLE__
     long __u_me; __u_me = getpid();
     __u_r = __syscall6(_UNISA_SC(_UNISA_NR_fork), 0, 0, 0, 0, 0);
@@ -6664,6 +6875,7 @@ static pid_t fork(void) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execve
 static int execve(const char *__u_path, char *const __u_argv[], char *const __u_envp[]) {
+    _u_st_flushall();   /* the image is replaced: pending stdout would be lost */
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (__u_word)__u_path, (__u_word)__u_argv, (__u_word)__u_envp, 0, 0));
 }
 #endif
@@ -8659,7 +8871,8 @@ extern char **environ;
         .git directory, a repository root (a directory with a .git entry); a top-level symlink whose destination is
         refused by checks 1-2 (a link into a repository, to the cwd, ...);
      2. whitelist: inside a repository (nearest ancestor with a .git entry) the target must lie strictly under its
-        out/ or .trash/; elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted
+        out/ or .trash/; strictly under $HOME/.cache/unisacc/chains (the chains root itself, its siblings and a root
+        reached through a symlink are not); elsewhere strictly under a temp root: realpath($TMPDIR) and realpath(/tmp), both whitelisted
         (a relative TMPDIR, /, $HOME or an ancestor of $HOME is no temp root; with neither root everything outside
         repositories is refused); a temp root itself or an ancestor of one is refused;
      3. the walk (lstat only, links never followed) counts every entry, the target included, and refuses on an entry
@@ -8706,7 +8919,7 @@ extern char **environ;
 #define SAFEDEL_DEPTH 128
 #define SAFEDEL_PATHLEN 4096
 
-struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
+struct unisa_safedel_env { char home[SAFEDEL_PATHLEN], cwd[SAFEDEL_PATHLEN], cwdrepo[SAFEDEL_PATHLEN], tmp[2][SAFEDEL_PATHLEN], chains[SAFEDEL_PATHLEN]; const char *tmpwhy[2]; };
 
 static int unisa_safedel(const char *path, unsigned flags, __u_word max_files, char *why, int whylen);
 static int unisa_safedel_purge_trash(const char *home, __u_word hours, __u_word max_files, unsigned flags, char *why, int whylen);
@@ -8784,11 +8997,17 @@ static __u_uword _unisa_sd_seq(void) { static __u_uword n; return n++; }
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_env
 static void _unisa_sd_env(struct unisa_safedel_env *e) {
 #ifdef _WIN32
-    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = "Windows";
+    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = e->chains[0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = "Windows";
 #else
     const char *h = getenv("HOME"), *t = getenv("TMPDIR"); char c[SAFEDEL_PATHLEN]; int i;
-    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = 0;
+    e->home[0] = e->cwd[0] = e->cwdrepo[0] = e->tmp[0][0] = e->tmp[1][0] = e->chains[0] = 0; e->tmpwhy[0] = e->tmpwhy[1] = 0;
     if (h && h[0] && _unisa_sd_real(h, e->home) != 0) e->home[0] = 0;
+    if (e->home[0] && e->home[1]) {   /* the release-chain root HOME/.cache/unisacc/chains: whitelisted only when it resolves to exactly that
+                                         lexical path (no symlink in the middle) */
+        char l[SAFEDEL_PATHLEN], rr[SAFEDEL_PATHLEN];
+        if (_unisa_sd_join(l, e->home, ".cache/unisacc/chains") == 0 && _unisa_sd_real(l, rr) == 0 && !strcmp(rr, l))
+            memcpy(e->chains, rr, strlen(rr) + 1);
+    }
     if (!getcwd(c, sizeof c) || _unisa_sd_real(c, e->cwd) != 0) e->cwd[0] = 0;
     if (e->cwd[0] && !_unisa_sd_repo(e->cwd, e->cwdrepo)) e->cwdrepo[0] = 0;
     if (!t || !t[0]) t = "/tmp";
@@ -8822,13 +9041,17 @@ static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path,
         return SAFEDEL_OK;
     }
     if (dest) return SAFEDEL_OK;
+    if (e->chains[0]) {   /* HOME/.cache/unisacc/chains: strictly below it only (not the root, not its siblings such as chains-evil) */
+        if (!strcmp(t, e->chains)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the chains root itself: ", t);
+        if (_unisa_sd_below(t, e->chains)) { memcpy(home, e->chains, strlen(e->chains) + 1); return SAFEDEL_OK; }
+    }
     if (!e->tmp[0][0] && !e->tmp[1][0]) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is outside every repository and there is no temp root: ", e->tmpwhy[0]);
     {   /* the deeper of the temp roots that holds T (TMPDIR=/tmp/x: /tmp/x/y trashes into /tmp/x/.trash); a temp root
            itself, or an ancestor of one ($TMPDIR=/tmp/x from /tmp's view), is never a target */
         int i, k = -1;
         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_within(e->tmp[i], t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a temp root or an ancestor of one: ", t);
         for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_below(t, e->tmp[i]) && (k < 0 || strlen(e->tmp[i]) > strlen(e->tmp[k]))) k = i;
-        if (k < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash): ", t);
+        if (k < 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is not strictly under a whitelisted root ($TMPDIR, /tmp, <repo>/out, <repo>/.trash, $HOME/.cache/unisacc/chains): ", t);
         memcpy(home, e->tmp[k], strlen(e->tmp[k]) + 1);
     }
     return SAFEDEL_OK;

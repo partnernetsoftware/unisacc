@@ -1,0 +1,129 @@
+/* Behavior check of cx/mem/vec.cx and cx/mem/map.cx (CXS-C3 S5): sh ./unisacc.com tools/check-cx-buffer.cx; exit 1 on any FAIL. */
+#pragma unisa use mem.vec
+#pragma unisa use mem.map
+#pragma unisa use mem.heap
+static int bad;
+static void ok(int c, const char *name) { printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+int main(void) {
+    {
+        unsigned char *p = mm_alloc_n(4, 8);
+        int z = 1, i;
+        ok(p != 0, "alloc_n-ok");
+        for (i = 0; p && i < 32; i++) if (p[i]) z = 0;
+        ok(z, "alloc_n-zeroed");
+        mm_free(p);
+        ok(mm_alloc_n(0, 8) == 0 && mm_alloc_n(8, 0) == 0 && mm_alloc_n(-1, 8) == 0, "alloc_n-nonpositive-null");
+        ok(mm_alloc_n(0x4000000000000000L, 4) == 0, "alloc_n-overflow-null");
+    }
+    {
+        ok(mm_find("hello world", 11, "o w", 3) == 4, "find-mid");
+        ok(mm_find("hello", 5, "hello", 5) == 0 && mm_find("hello", 5, "lo", 2) == 3, "find-edges");
+        ok(mm_find("hello", 5, "", 0) == 0 && mm_find("", 0, "", 0) == 0, "find-empty-needle");
+        ok(mm_find("abc", 3, "abcd", 4) == -1 && mm_find("abc", 3, "x", 1) == -1, "find-miss");
+        ok(mm_find(0, 3, "a", 1) == -1 && mm_find("a", 1, 0, 1) == -1 && mm_find("a", -1, "a", 1) == -1, "find-bad-args");
+        ok(mm_find("a\0b\0c", 5, "\0c", 2) == 3, "find-embedded-nul");
+    }
+    {
+        mm_vec v; int i, x, got, good = 1; int *q;
+        mm_vec_init(&v, sizeof(int));
+        ok(v.data == 0 && v.len == 0 && v.cap == 0 && v.elem == sizeof(int), "vec-init");
+        ok(mm_vec_at(&v, 0) == 0, "vec-at-empty-null");
+        ok(mm_vec_pop(&v, &x) == 0, "vec-pop-empty-0");
+        for (i = 0; i < 100; i++) { x = i * 3; if (mm_vec_push(&v, &x)) good = 0; }
+        ok(good && v.len == 100 && v.cap >= 100 && v.cap < 200, "vec-push-100-amortized");
+        q = mm_vec_at(&v, 99);
+        ok(q && *q == 297, "vec-at-last");
+        ok(mm_vec_at(&v, 100) == 0 && mm_vec_at(&v, -1) == 0, "vec-at-out-of-range-null");
+        ok(mm_vec_push(&v, 0) == -EINVAL && v.len == 100, "vec-push-null-item");
+        ok(mm_vec_push(0, &x) == -EINVAL, "vec-push-null-vec");
+        got = mm_vec_pop(&v, &x);
+        ok(got == 1 && x == 297 && v.len == 99, "vec-pop-value");
+        ok(mm_vec_pop(&v, 0) == 1 && v.len == 98, "vec-pop-discard");
+        ok(mm_vec_truncate(&v, 10) == 0 && v.len == 10, "vec-truncate");
+        ok(mm_vec_truncate(&v, 11) == -EINVAL && mm_vec_truncate(&v, -1) == -EINVAL && v.len == 10, "vec-truncate-bad");
+        ok(mm_vec_truncate(&v, 0) == 0 && v.len == 0 && v.cap >= 100, "vec-truncate-zero-keeps-cap");
+        ok(mm_vec_reserve(&v, 1000) == 0 && v.cap >= 1000, "vec-reserve");
+        ok(mm_vec_reserve(&v, -1) == -EINVAL, "vec-reserve-negative");
+        ok(mm_vec_reserve(&v, 0x7fffffffffffffffL) == -EOVERFLOW && v.cap >= 1000, "vec-reserve-overflow-unchanged");
+        mm_vec_free(&v);
+        ok(v.data == 0 && v.len == 0 && v.cap == 0, "vec-free-zeros");
+        mm_vec_free(&v);
+        ok(v.data == 0, "vec-double-free-noop");
+        mm_vec_free(0);
+    }
+    {
+        mm_vec w; char big[24]; char out[24]; int i, same = 1;
+        for (i = 0; i < 24; i++) big[i] = (char)(i + 1);
+        mm_vec_init(&w, 24);
+        ok(mm_vec_push(&w, big) == 0 && mm_vec_pop(&w, out) == 1, "vec-wide-elem");
+        for (i = 0; i < 24; i++) if (out[i] != big[i]) same = 0;
+        ok(same, "vec-wide-elem-content");
+        mm_vec_free(&w);
+        mm_vec_init(&w, 0);
+        ok(w.elem == 0 && mm_vec_push(&w, big) == -EINVAL && mm_vec_reserve(&w, 4) == -EINVAL, "vec-elem0-refused");
+    }
+    {
+        int m = 0, n = 0, a = 1, b = 2, c = 3;
+        void *v = 0, *old = 0;
+        const char *k; long kn, cur = 0;
+        ok(mm_map_new(0) == -EINVAL, "map-new-null");
+        ok(mm_map_new(&m) == 0 && m >= 1, "map-new");
+        ok(mm_map_len(m) == 0, "map-len-empty");
+        ok(mm_map_set(m, "x", 1, &a, &old) == 0 && old == 0 && mm_map_len(m) == 1, "map-set-new");
+        ok(mm_map_set(m, "y", 1, &b, 0) == 0 && mm_map_set(m, "x", 1, &c, &old) == 0 && old == &a && mm_map_len(m) == 2, "map-set-replace-returns-old");
+        ok(mm_map_get(m, "x", 1, &v) == 1 && v == &c, "map-get-yes");
+        ok(mm_map_get(m, "z", 1, &v) == 0 && v == 0, "map-get-no");
+        ok(mm_map_get(m, "xy", 1, &v) == 1 && v == &c, "map-key-length-bounds");
+        ok(mm_map_set(m, 0, 0, &a, 0) == 0 && mm_map_get(m, "", 0, &v) == 1 && v == &a, "map-empty-key");
+        ok(mm_map_set(m, "a\0b", 3, &b, 0) == 0 && mm_map_get(m, "a\0c", 3, &v) == 0 && mm_map_get(m, "a\0b", 3, &v) == 1, "map-key-with-nul");
+        ok(mm_map_set(m, 0, 2, &a, 0) == -EINVAL && mm_map_set(m, "k", -1, &a, 0) == -EINVAL, "map-bad-key");
+        ok(mm_map_get(m, 0, 1, &v) == -EINVAL && mm_map_del(m, 0, 1, 0) == -EINVAL, "map-bad-key-get-del");
+        {
+            char kb[4]; kb[0] = 'q'; kb[1] = 0;
+            mm_map_set(m, kb, 1, &a, 0);
+            kb[0] = 'r';
+            ok(mm_map_get(m, "q", 1, &v) == 1 && v == &a, "map-key-copied-in");
+        }
+        ok(mm_map_len(m) == 5, "map-len-5");
+        cur = 0;
+        ok(mm_map_next(m, &cur, &k, &kn, &v) == 1 && kn == 1 && k[0] == 'x' && v == &c && cur == 1, "map-next-first-insertion-order");
+        ok(mm_map_next(m, &cur, 0, 0, 0) == 1 && cur == 2, "map-next-null-outs");
+        cur = 5;
+        ok(mm_map_next(m, &cur, &k, &kn, &v) == 0 && cur == 5, "map-next-end");
+        cur = -1;
+        ok(mm_map_next(m, &cur, &k, &kn, &v) == -EINVAL && mm_map_next(m, 0, &k, &kn, &v) == -EINVAL, "map-next-bad-cursor");
+        ok(mm_map_del(m, "y", 1, &old) == 1 && old == &b && mm_map_len(m) == 4, "map-del-yes");
+        ok(mm_map_del(m, "y", 1, &old) == 0 && old == 0, "map-del-no");
+        cur = 0;
+        mm_map_next(m, &cur, &k, &kn, &v);
+        mm_map_next(m, &cur, &k, &kn, &v);
+        ok(kn == 0, "map-order-after-del");
+        {
+            int m2 = 0, i2, all = 1;
+            char kk[8];
+            ok(mm_map_new(&m2) == 0 && m2 != m, "map-second-handle");
+            for (i2 = 0; i2 < 500; i2++) {
+                kk[0] = (char)('a' + i2 % 26); kk[1] = (char)('a' + (i2 / 26) % 26); kk[2] = (char)('a' + (i2 / 676));
+                if (mm_map_set(m2, kk, 3, &a, 0)) all = 0;
+            }
+            ok(all && mm_map_len(m2) == 500, "map-500-keys");
+            ok(mm_map_len(m) == 4, "map-isolated");
+            ok(mm_map_free(m2) == 0, "map-free-second");
+        }
+        ok(mm_map_free(m) == 0, "map-free");
+        ok(mm_map_free(m) == -EBADF, "map-double-free-detected");
+        ok(mm_map_len(m) == -EBADF && mm_map_get(m, "x", 1, &v) == -EBADF && mm_map_set(m, "x", 1, &a, 0) == -EBADF, "map-stale-handle-ebadf");
+        ok(mm_map_del(m, "x", 1, 0) == -EBADF && mm_map_next(m, &cur, &k, &kn, &v) == -EBADF, "map-stale-del-next-ebadf");
+        ok(mm_map_len(0) == -EBADF && mm_map_free(0) == -EBADF && mm_map_len(65) == -EBADF && mm_map_len(-3) == -EBADF, "map-handle-range");
+        {
+            int hs[64], i3, full = 0, last = 0;
+            for (i3 = 0; i3 < 64; i3++) { if (mm_map_new(&hs[i3])) { full = 1; break; } }
+            last = mm_map_new(&n);
+            ok(!full && last == -ENOMEM, "map-65th-refused-enomem");
+            for (i3 = 0; i3 < 64; i3++) mm_map_free(hs[i3]);
+            ok(mm_map_new(&n) == 0 && mm_map_free(n) == 0, "map-slots-reusable");
+        }
+    }
+    printf("%s\n", bad ? "CX_BUFFER FAIL" : "CX_BUFFER");
+    return bad;
+}
