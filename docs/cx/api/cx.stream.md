@@ -35,5 +35,3 @@
 | xs_writer_close | int xs_writer_close(int w); | Rust drop(BufWriter) 但报告 flush 错误 | -errno;-EBADF | impl | impl | impl | exists | 先 flush;flush 失败也释放句柄并回报错误 | pre | 0.1.0 | none | cx-streamapi |
 | xs_copy | int xs_copy(int r, int w, int64_t limit, int64_t *copied); | Rust io::copy; Node stream.pipeline | -errno;-EMSGSIZE | impl | impl | impl | exists | limit 小于 0 表不限;超过 limit 记 -EMSGSIZE | pre | 0.1.0 | none | cx-streamapi |
 | xs_pipe_pair | int xs_pipe_pair(int *r, int *w, long bufcap); | Node stream.PassThrough; Rust io::pipe | -errno;-EMFILE | impl | impl | impl:CreatePipe | exists | 经 sy_pipe 的一对读写端;关句柄时关 fd | pre | 0.1.0 | none | cx-streamapi |
-| xs_reader_deadline | int xs_reader_deadline(int r, sy_deadline_t d); | Rust Read 带超时 | -EBADF | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | exists | 之后的读到期返回 -ETIMEDOUT | pre | 0.1.0 | none | cx-streamapi |
-| xs_writer_deadline | int xs_writer_deadline(int w, sy_deadline_t d); | Rust Write 带超时 | -EBADF | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | refuse:ENOSYS 本版未实现 | exists | 之后的写到期返回 -ETIMEDOUT | pre | 0.1.0 | none | cx-streamapi |
