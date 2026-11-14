@@ -4,8 +4,8 @@
  * guessing); no match is one FAILED line and never stops the other panes. --fixture FILE reads panels from a text
  * file instead of tmux ("=== PANE NAME ===" starts one), which is what tests/check-observe-agents.cx drives.
  * Busy comes from the pane's own relative duration (`12m`), never a state file. STALE = a plan/task line names an
- * item whose agentwork/items.tsv status is DONE, CLOSED... or SUPERSEDED; DONE-PARTIAL / DONE-EVIDENCE /
- * DONE-IN-CLONE-NOT-MERGED print PARTIAL instead. Status line = the last line shaped "<glyph> [<dur>] > ..." (a
+ * id on a prd_mempalace.md "| 已落地 | ID、ID |" row; ids on a "| 部分落地 | ... |" row print PARTIAL instead.
+ * Without prd_mempalace.md under the root one UNMEASURED row is printed and nothing is guessed. Status line = the last line shaped "<glyph> [<dur>] > ..." (a
  * duration means busy, none means idle); plan/topic/task = the last line containing "计划:", "话题:", "任务 ".
  * Output is TSV, at most 30 lines. */
 #pragma unisa use cxlib.netpack
@@ -13,7 +13,6 @@
 #pragma unisa use sys.proc
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
-#pragma unisa use cxlib.awpath
 #define OA_MAXP 16
 #define OA_ID 600
 #define OA_LINE 1400
@@ -22,7 +21,7 @@ typedef struct { char name[80], text[OA_PANEL]; } Pane;
 static Pane panes[OA_MAXP]; static int npane;
 static char ids[OA_ID][80], ids_status[OA_ID][40]; static int nids;
 static char root[4096];
-static int emitted, truncated, failed, stales;
+static int emitted, truncated, failed, stales, have_tasks;
 static void die(const char *a) { fprintf(stderr, "observe-agents: %s\n", a); exit(2); }
 static int eqz(const char *a, const char *b) { return a && b && !strcmp(a, b); }
 /* copy at most N bytes, never cutting a UTF-8 sequence in half */
@@ -80,34 +79,29 @@ static int status_line(const char *line, int *busy, char *dur) {
     if (*p != '>') return 0;
     *busy = 1; clip(dur, 12, q, dl); return 1;
 }
-/* field WANT (1-based) of the TAB-separated LINE; 0 when the line has fewer fields */
-static int field(const char *line, size_t ln, int want, const char **val, size_t *vn) {
-    size_t k, f = 1, fs = 0;
-    for (k = 0; k <= ln; k++) {
-        if (k != ln && line[k] != '\t') continue;
-        if (f == want) { *val = line + fs; *vn = k - fs; return 1; }
-        f++; fs = k + 1;
-    }
-    return 0;
-}
-/* agentwork/items.tsv field 1 (id) and field 9 (status), one row per line */
+/* task ids and status from prd_mempalace.md landed-rows; no file -> have_tasks = 0 and main prints UNMEASURED */
 static void load_items(void) {
     char p[4400]; size_t n = 0; char *b; const char *at, *end;
-    if (awp_path(root, "items", p, (long)sizeof p)) die("path");
+    if (cx_fmt(p, sizeof p, "%s/prd_mempalace.md", root)) die("path");
     b = cx_read(p, &n);
-    if (!b) {   /* 分片布局:agentwork/items/<ID>.tsv(cc 2026-11-09) */
-        char cmd[4600]; char *v[] = {"sh", "-c", cmd, 0}; char *o = 0; size_t on = 0;
-        if (!cx_fmt(cmd, sizeof cmd, "cat '%s/agentwork/items/'*.tsv 2>/dev/null", root) && cx_runv_timeout(v, 20, &o, &on) == 0 && o && on) { b = o; n = on; }
-    }
-    if (!b) { fprintf(stderr, "observe-agents: no items table, STALE disabled\n"); return; }
+    if (!b) { have_tasks = 0; return; }
+    have_tasks = 1;
+    /* task-table rows "| 已落地 | ID、ID |" (DONE) and "| 部分落地 | ID、ID |" (DONE-PARTIAL); every other id is live */
     for (at = b, end = b + n; at < end && nids < OA_ID;) {
-        const char *e = memchr(at, '\n', (size_t)(end - at)), *v1, *v9;
-        size_t ln = e ? (size_t)(e - at) : (size_t)(end - at), n1 = 0, n9 = 0;
-        if (ln && at[0] != '#' && field(at, ln, 1, &v1, &n1) && field(at, ln, 9, &v9, &n9) &&
-            n1 && n1 < sizeof ids[0] && n9 < sizeof ids_status[0]) {
-            if (mm_copy(ids[nids], (long)sizeof ids[0], v1, (long)n1) ||
-                mm_copy(ids_status[nids], (long)sizeof ids_status[0], v9, (long)n9)) die("items field");
-            ids[nids][n1] = 0; ids_status[nids][n9] = 0; nids++;
+        const char *e = memchr(at, '\n', (size_t)(end - at)), *q;
+        size_t ln = e ? (size_t)(e - at) : (size_t)(end - at);
+        const char *st = 0, *cell = 0, *cend = at + ln;
+        if (ln > 14 && !strncmp(at, "| 已落地 | ", 14)) { st = "DONE"; cell = at + 14; }
+        else if (ln > 18 && !strncmp(at, "| 部分落地 | ", 17)) { st = "DONE-PARTIAL"; cell = at + 17; }
+        if (st) {
+            for (q = cell; q < cend && *q != '|';) {
+                size_t k = 0; char tok[80];
+                if (!((*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9'))) { q++; continue; }
+                while (q < cend && k + 1 < sizeof tok && ((*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'z') || *q == '-')) tok[k++] = *q++;
+                tok[k] = 0;
+                if (k >= 2 && nids < OA_ID && mm_copy(ids[nids], (long)sizeof ids[0], tok, (long)k + 1) == 0 &&
+                    mm_copy(ids_status[nids], (long)sizeof ids_status[0], st, (long)strlen(st) + 1) == 0) nids++;
+            }
         }
         at = e ? e + 1 : end;
     }
@@ -277,6 +271,7 @@ int main(int argc, char **argv) {
     }
     load_items();
     if (fixture) capture_fixture(fixture); else capture_tmux(names);
+    if (!have_tasks) emit("UNMEASURED", "stale", "no prd_mempalace.md under root, STALE/PARTIAL not evaluated");
     pane_block(fixture ? "fixture" : "tmux");
     if (dogit) git_block();
     disk_block();
