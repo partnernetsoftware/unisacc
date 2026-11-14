@@ -113,7 +113,56 @@
 - wt-gate 旧"5/8 红":前提不成立,wt-gate-clean 实跑 PASS(check 自建原生 run-batch)。
 - 红批复验过程细节(16 核 WAVE_JOBS_MAX=16、超时定因、剩余波数推算)已浓缩进"阻塞发布"首条;原长文见 git show fd7a68eb36:prd_mempalace.md 的本节。
 
-## 下一动作(0.0.62,fable 规划;取舍已定见第 5 条,可派任务树见本节末表)
+## 下一动作(0.0.63,fable 第五轮规划 2026-11-14;0.0.62 已公开,其规划折叠在本节后半仅作证据)
+
+0.0.63 实施规划(只是规划,未实跑不记 PASS;输入身份:main HEAD 62be4139f3,已装产品 0.0.62 sha 83b82c8d;"实测"与"推算"逐条标注):
+
+1. 63A 实施顺序与冻结点(决定)。
+   - 补丁现状(实测,2026-11-14 对 HEAD 62be4139f3 在仓内只读跑 `git apply --check ~/.cache/unisacc/patches-0.0.63/NAME.patch.txt`):e3trim、n15、sx、r2、npx、t6t7、checkcalls 七份单独通过;rl 失败(`patch failed: build/tool-index.tsv:20`,生成表漂移,须重基:去掉生成表块,改由 `tools/tool-index.cx -- --write` 重算)。各补丁互相叠加后的可贴性未核(任务 K1)。C2a、N7、L1 方案 A 三项没有补丁,只有设计(prd_cx.md 5.1 与任务表 N6、N7 行)。
+   - 入候选顺序(同文件串行,依据任务表 N7 行"与 N15-a 同改 drive.cx,须在其后"与进化路线"C3z 与 C2a 同写 modelcache.cx"):(1) e3trim(cx/runtime/modelcache.cx,无依赖)-> (2) C2a(同文件 mc_cache_dir,叠在 e3trim 之后);(3) n15(N15-a src/drive.cx :545 与 :561,N15-b cx/runtime/runexec.cx 死码)-> (4) N7(src/driveunits.cx 加 drive.cx :685,叠在 n15 之后)-> (5) L1 方案 A(写域按 prd_cx.md 5.1,若碰 drive.cx 则串在 N7 之后)。两条串(1)(2) 与 (3)(4)(5) 写域不相交,可并行出补丁。
+   - 冻结点:F63 = 上述补丁全部入 main 且 `tools/chain-ready.cx` 全 PASS、`tools/ratchets.cx` 末行 ok=13 fail=0、第 2 条的探针有结果之后的 main HEAD。硬规则:到冻结时刻 C2a、N7、L1 方案 A 哪个探针未绿就不带哪个,63A 最小集为 e3trim 加 n15(两份补丁已备),不为等补丁推迟冻结超过一个工作日(推算口径,非实测)。
+   - 各项重建后验收(候选件或装后产品上跑;预期值是门):
+
+| 项 | 命令 | 预期值 | 0.0.62 上现在就能看的 |
+|---|---|---|---|
+| e3trim | `sh ./unisacc.com tools/affected.cx -- --ids modelcache-budget --run`;专用 `UNISACC_E3CACHE` 目录放 0/2000/4000 个假 uc- 项各测首次运行 n=3 | modelcache-budget lru/concurrent failed=0(副本实测 15/11 断言);4000 项首次与 0 项首次之差 10 ms 以内(推算门;修前实测差 134 ms:515.6 对 649.9,斜率约 28 微秒每条目) | 修前曲线可直接在 0.0.62 重测作对照(任务 K2);原实测未记产品版本,见进化路线 E3TRIM 条 |
+| n15 | 同一源 `-c -o X.o` 连跑两次,`UNISACC_RR_TIME=1` | 第二次 inference 0 行、两次对象 sha 相同;改源后未命中;`tests/phase-timing-stamps.cx` 恢复 artifact_hit 0 然后 1 | 只能看基线:0.0.62 上两次各 inference 恰 7 行(P2 已落地断言,`affected --ids phase-timing-stamps` PASS);"0 行"必须重建后才有,不能在 0.0.62 上判收益 |
+| C2a | 两个不同 TMPDIR、不设缓存变量,同源第二次运行;`tools/check-unit-frontcache.cx` | `RR_TIME lookup_hit=2`;failed=0 | 现值未测,K2 顺带记一次作基线 |
+| N7 | `UNISACC_RR_TIME=1` 单文件新源 | `grep -c unitcache` 大于 0 | 现为 0(任务表 N7 行) |
+| L1 方案 A | `tools/run-startup-bench.cx` | first_e2e 三次中位下降约 116 ms(推算,prd_cx.md 5.1) | 基线实测 715.9 ms(speed-baseline 第 137 行) |
+| 全体 | 每项开缓存与 `UNISACC_RUN_CACHE=0` 各编一次 | 产物同字节 | - |
+
+2. 500 ms 门探针(冻结前做;下面全是用已有实测拼的推算)。
+   - 做法:`git archive HEAD` 解到 /tmp/p63a(只读副本,不建克隆)-> 逐份 `git apply` 63A 补丁 -> 用已装 0.0.62 起链的前段得到候选驱动 `ctrl/unisacc.com.dev/entry.elf`(前段约 5 分钟为第二轮"失败取证 (b) 档"的记述;candidate-chain 是否有只跑到 entry.elf 即停的开关未核,任务 K4)-> 以该件在专用空 `UNISACC_E3CACHE` 目录跑 run-startup-bench 三次取中位,并在放 1938 个假项的目录再跑三次(F18:两种口径都记,带条目数与 load1)。load1 低于 2 才当门,否则标 noisy。
+   - 预期上界(推算):基线 715.9 ms(0.0.62 实测,三次 715.9/692.8/774.9,load1 约 3,缓存目录条目数未记)减 L1 方案 A 约 116(推算)得约 600;E3TRIM 约 54 只在约 1938 项的目录上兑现(实测斜率乘条目数),故带项目录口径约 546,空目录口径约 600。n15、C2a、N7 不作用于首个目标进程的首次运行,不计。第三轮按 671 起算得约 500 至 555;按 0.0.62 实测基线重算后上界为 546 至 600,即 63A 单独大概率不过 500 ms 门(推算,待探针证实)。
+   - 裁决(决定,依 F23):探针中位 500 ms 以下则 0.0.63 = 63A;不绿则 0.0.63 改发 cxmod 三源最小集(t6t7 -> checkcalls,两份补丁对 HEAD 单独可贴),63A 顺延下一版并补 L5(a) 或 lower 逐函数缓存,门不放宽、不改口径。因推算偏向不绿,cxmod 线的起链前置(K1 叠加核对、`tools/check-cxmod-tri.cx` failed=0、`tools/cx0-extract.cx -- --check --all` 两行 EXACT、P1 新拒绝扫描为 0)与探针同时准备,不等探针结果。
+
+3. 今天可开工的并行任务(非产品输入;各 15 分钟内;写域互不相交;K2 与 K9 取数或跑批,二者不得重叠且期间不并行编译;补丁草稿一律落仓外 `~/.cache/unisacc/patches-0.0.63/`,不入库):
+
+| 号 | 目标 | 写域 | 验收命令 -> 预期值 | 分钟 |
+|---|---|---|---|---|
+| K1 | 补丁叠加核对与 rl 重基 | 仅 patches-0.0.63/rl.patch.txt;其余只读(/tmp 的 git archive 副本) | 副本内依次 apply:e3trim 加 n15 -> 通过;t6t7 加 checkcalls -> 通过或列冲突块;sx 加 r2 加 npx 加重基后的 rl -> 通过;各份 sha256 前 16 位回报 | 15 |
+| K2 | E3TRIM 修前曲线在 0.0.62 重测,带条目数与 load1 | build/speed-baseline.tsv 新行 | 专用 UNISACC_E3CACHE,0/2000/4000 项各 n=3 -> 三行入表,斜率在 20 至 36 微秒每条目(实测 28 的正负三成,推算带),出带外如实记不改门 | 15 |
+| K3 | N15-c 测试补丁草稿(装后才入库) | patches-0.0.63/n15c.patch.txt | `git apply --check` 通过;内容恢复 artifact_hit 0 然后 1,断言总数不少于 68 | 10 |
+| K4 | 探针前段构造法核实(只读) | 无(结论回报主调度写回第 2 条) | 给出只构造到 entry.elf 的确切命令与实测墙钟,或"无此开关"加最短替代;核 H5 留存的 entry.elf 是否在 ~/.cache/unisacc(`ls` 顶层 2026-11-14 未见同名文件,chains/ 内未核) | 10 |
+| K5 | run-startup-bench 接受候选件路径参数(先 `git log --all --oneline -- tools/run-startup-bench.cx` 并读现参数) | tools/run-startup-bench.cx 及其 check | 对已装 0.0.62 路径三次中位落在 690 至 780 ms(实测范围 692.8 至 774.9);check failed=0;`affected --files` 无新红 | 15 |
+| K6 | C2a 补丁草稿(叠在 e3trim 之后) | patches-0.0.63/c2a.patch.txt | 副本先贴 e3trim 再 `git apply --check` 通过;只动 mc_cache_dir | 15 |
+| K7 | N7 补丁草稿(叠在 n15 之后) | patches-0.0.63/n7.patch.txt | 副本先贴 n15 再 `git apply --check` 通过;只动 src/driveunits.cx 与 drive.cx 入口选择 | 15 |
+| K8 | L1 方案 A 补丁草稿(读 prd_cx.md 5.1;与 K7 相交则叠其后) | patches-0.0.63/l1a.patch.txt | `git apply --check` 通过;回报所动文件清单 | 15 |
+| K9 | s9 commit 档按 ROOT/out/s9-run 放法重跑,清 0.0.62 的 unknown=1(分两段:init 加 steps 实测 170 加 459 s;aggregate 加 verdict) | 候选快照根的 out/s9-run;结果写阻塞节 s9 行 | `tools/s9-verdict.cx -- RUN` 第 4 行不为 UNKNOWN(现为 UNKNOWN tier-commit-not-full,304 批全 UNKNOWN,见提交 62be4139f3) | 11 加 10 |
+| K10 | verify-candidate 改写成 .cx(F20 未修项;先 `git log --all --oneline -- tools/verify-candidate.cx`) | tools/verify-candidate.cx、tools/check-verify-candidate.cx、批次行(commit-own --keyed) | 对已装 0.0.62 出 V0 至 V4 各一行;check failed=0 | 15 |
+| K11 | 发布说明骨架与回滚办法预写(纯文档,随下一实质提交带上) | plans/release-notes-0.0.63.md | 含两种分支(63A 或 cxmod 先发)的已知缺口、未跑范围、撤回办法;`grep -c TBD` 回报行数 | 10 |
+| K12 | N8 与 C4 取数(链工具,非产品输入,F23 要求排在起链前) | build/phase-times.tsv 新增行 | real6 各相行已由提交 2177f47d92 入表(整链 3752 s,差额 1352 s);余下只做:按相列出可砍到 2400 s 的拆分候选与各自实测占比 | 15 |
+
+4. 0.0.62 已知缺陷分流(决定)。
+   - 受 F9 约束的结论:整链实测 3538 s(real5),real6 整链 3752 s(实测,build/phase-times.tsv,提交 2177f47d92),均高于 2400 s 的门,故 0.0.63 不做同版两候选,三类各占一次整链。
+   - 库包源类(sx、r2、npx、rl 加 B2f-2 的 T2 np_exec):排 0.0.63 之后紧接的补丁版(版本号集成者定,不占 0.0.64);与 63A、cxmod 都不同候选。rl 须先按 K1 重基。
+   - cxmod 三源类(t6t7 -> checkcalls -> D0 的 T8 -> D1,同写 plan.cx 串行):默认 0.0.64;第 2 条探针不绿时 t6t7 加 checkcalls 提前为 0.0.63,D0 的 T8 与 D1 仍留 0.0.64(D1 依赖 T8,见进化路线 D1 条)。checkcalls 是已复现的高严重度误拒(F23),两种排法里都不晚于库包源类之后的那一版。
+   - 仅当 K12 与 C4 把整链连续两条实测降到 2400 s 以内,才允许把库包源类并为 0.0.63 的第二候选。
+
+5. 发布后大扫除(决定)。时机:0.0.63 公开、读回、装机之后,且 N8 取数与速度基线补测都已入表(F18:先测速再大扫除),删除放最后串行;`tools/sweep-plan.cx` 只读计划可提前并行。KEEP 清单与解除条件:patches-0.0.63(248K;某份补丁对应提交入 main 后才可删该份,三类全部落地后删目录;sweep-plan 已对 patches-* 记 KEEP,F20)、ape-0.0.61(6.7M;0.0.63 装机前必须先把 0.0.62 发布件存为 ape-0.0.62 并核 sha 83b82c8d,此后 ape-0.0.61 才可删;现缓存内无 ape-0.0.62 目录,2026-11-14 `ls` 实测)、ident-helper(48K,起链配方第 3 步在用,长期)、borrowed-cm(424K,osx cache-manager 自产在 macOS 上验证前保留,R4)、bootstrap-0.0.59(6.6M,长期)。占用实测(`du -sh`):tlib 3.4G、chains 1.9G 是大头,去留以 sweep-plan 输出为准(本轮未跑);chains 内若有 chain-precheck 要用的 entry.elf 须先按 K4 定位再删。
+
+### 0.0.62 规划(已完成,折叠:以下各条已执行完毕或被上面第 1 至 5 条取代,只留作证据,不再派工)
 
 0.0.62 已公开(主题线封网、速度线、发布线均已交付,证据见上节与 plans/release-notes-0.0.62.md);发布后序列 H1 至 H4、H6、H7 已完成,H5(N8 取数)待核,H8 大扫除待做(等 s9 子代理收尾,删除须在 H5 之后)。以下 4、5 条为沿用的基础设施与已定取舍。
 4. 基础设施(不入产品输入):I1 wt-gate 修红;I2 slice-migration-gen 定因;I3 agentwork 归档第 4 批起(第 3 批已退役 archive-records、aw、check-aw、cursor-fleet、dag 及各自检查;awpath 留第 4 批;分类表见提交 b10474a8f0 说明;第 4 批已归档 roles 下 6 个无引用角色文件到 archive/agentwork-retire-2026-11/roles/,ledger/items/dag/WORKFLOW.md/roles/README.md/release-tail-058.md 仍有活引用未动,活依赖清单见该提交说明;observe-agents 已改读 prd_mempalace.md 的「已落地」「部分落地」行,无该文件输出 UNMEASURED;version-metrics 规则违反计数改读 archive/work/ledger-202611.tsv,读不到输出 UNMEASURED,二者不再读 agentwork/);I4 out/ 写入点收尾(gen-model-decode-material、chain-run --out、csih-ape 须由其维护者迁);I5 装发布件后复验 FTRIM 类红与 DEFERRED 批。
@@ -237,6 +286,8 @@ real6 结果后的分支与发布排程(fable 第三轮,2026-11-14 16:45;real6 �
 | F21 | 装机瞬间共享根换产品:在途的 affected、s9、子代理 .cx 脚本前后半段用不同产品,wt gate 判 identity=CHANGED 整波 UNKNOWN;新产品带 CX-U-2 三条新拒绝,仓外短名脚本会突然编不过;运行缓存键含产品身份,装后全冷,e3cache 里 1938 项旧条目占满 1 GiB 预算成死重 | 发布步骤步 11;阻塞节全集复验一条;E3TRIM 条 | H2 前 pgrep 无在途并记账本行;V6 只在候选快照根跑;装后第一条命令的耗时不入基线;H6 用专用缓存目录 |
 | F22 | 冻结层挡住已知缺陷:cx/sys+ext 审查 7 条里 sx 补丁只修 (1)(2),(3) sigwatch、(5) netpoll EINTR、(6) netmsg 负长度都在"只增文件"的 cx/sys,sy_res_live 也因此只能做登记计数;库包源类候选发出去后发布说明仍带 5 条同样的缺口,且越晚解冻调用者越多 | 阻塞节 cx/sys+ext 审查 (3) 至 (7);prd_cx.md 10.8 的 T5 | 库包源类候选冻结前定一次解冻窗口(只放 (3)(5)(6) 三处,各带复现夹具),或以新文件替代并在 std-surface 标旧行 deprecated;不定则在该版说明里写明"冻结所致,非未发现" |
 | F23 | 三类排队但链只有一条:63A、库包源、cxmod 三源各一版即三次整链约 3 小时纯构造(推算,3 x 3538 s),期间后两类补丁持续对 main 漂移;cxmod 的 checkcalls 是已复现的高严重度误拒,却排在最后 | 本节"0.0.63 候选组合与顺序(第四轮)" | N8 与 C4(链工具,非产品输入)排在 63A 起链之前或同时做;若 63A 冻结前 500 ms 门的探针不绿,改让 cxmod 三源类先发 |
+
+第五轮更新(2026-11-14,0.0.62 公开后):当前有效的 0.0.63 规划在"下一动作"节第 1 至 5 条,本节第三轮、第四轮两段与之冲突处以该节为准。三点修正:(a) 500 ms 门按 0.0.62 实测基线 715.9 ms 重算,63A 推算上界 546 至 600 ms(原按 671 起算得 500 至 555),探针大概率不绿,F23 的改序条件按"下一动作"第 2 条执行;(b) 补丁对 HEAD 62be4139f3 复核:七份单独可贴,rl 因 build/tool-index.tsv:20 失败须重基,C2a、N7、L1 方案 A 尚无补丁;(c) 库包源类增 npx、rl 两份,排 0.0.63 之后的补丁版,cxmod 三源默认 0.0.64。
 
 0.0.63 起手(fable 第三轮,2026-11-14 16:45;证据入口 prd_cx.md 5.1、5.2 与本节 E3TRIM 条):
 - real6 结束前可开工(不动产品输入、不取耗时、不跑重测试,写域互不相交,各 15 分钟内):N4(E4 闭包切法,写 prd_cx.md 5.1 的 E4 行);N12(CI 结果回收成表,新工具加 check);N14 登记;nn 的 X3、X4、X5、X7(只读,写 prd_cx.md 5.2 对应行);N15 拆分(只读读 src/drive.cx、src/runcache.cx 的 rc_open/rc_lookup 与 cx/runtime/runexec.cx 的 ex_ri_artifact,把"需拆"改成 15 分钟项,写任务表 N15 行);C3-1 派工行修正(写域加 src/driveunits.cx);E3TRIM 补丁复核(读 $CLAUDE_JOB_DIR/tmp/e3trim.patch.txt 对 modelcache.cx:239 至 301,只出评审意见);D0 的 T1 至 T4。取耗时的(N1、N2 严格分段、N5 实跑、X1、X2、X6)等整链结束且速度基线补测之后。
