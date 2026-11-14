@@ -1,0 +1,80 @@
+/* tools/pack-srcdir.cx -- 按 ape-receipt.txt 的来源路径装配 release-run --pack 的 SRC_DIR(十个名字,符号链接)。
+ *   sh ./unisacc.com tools/pack-srcdir.cx -- RECEIPT OUT_DIR [--sid HEX64 | --sources FILE]
+ * OUT_DIR 必须不存在(全新)。缺来源(receipt 无该行/源文件不存在)具名拒绝并列出全部缺项,rc 2,不留半成品。
+ * sources.tsv 不在 receipt 内:它是候选提交源快照的 identity-helper 输出(64 位 sources_sha256),
+ *   由 --sid 写成带 "# origin" 注释的单行文件,或由 --sources 链接现成文件。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static const char *names[9]  = {"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64"};
+static const char *keys[9]   = {"p3","win/x86_64","lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/arm64","cache-manager/osx/x86_64","cache-manager/osx/arm64"};
+static const char *keys2[9]  = {0,0,0,0,0,0,0,"cache-manager/x64","cache-manager/arm64"};
+
+static int is_hex64(const char *s) {
+    int i;
+    for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return s[64] == 0;
+}
+/* 在 receipt 文本中找以 key 开头、后接制表符的行,取第二列到下一个制表符/换行 */
+static int find_src(const char *buf, const char *key, char *out, int cap) {
+    size_t kl = strlen(key); const char *p = buf;
+    while (*p) {
+        if (!strncmp(p, key, kl) && p[kl] == '\t') {
+            const char *s = p + kl + 1, *e = s; int n;
+            while (*e && *e != '\t' && *e != '\n') e++;
+            n = (int)(e - s);
+            if (n <= 0 || n >= cap) return 0;
+            { int k; for (k = 0; k < n; k++) out[k] = s[k]; out[n] = 0; }
+            return 1;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    return 0;
+}
+static void addmiss(char *miss, const char *name) {
+    char t[2048];
+    if (cx_fmt(t, sizeof t, "%s %s", miss, name)) return;
+    cx_fmt(miss, 2048, "%s", t);
+}
+int main(int argc, char **argv) {
+    const char *rec, *outd, *sid = 0, *srcf = 0; char *buf; size_t n;
+    char path[9][1024]; char miss[2048]; int i, nm = 0; char dst[1100];
+    if (argc < 3) { fprintf(stderr, "usage: pack-srcdir RECEIPT OUT_DIR [--sid HEX64|--sources FILE]\n"); return 2; }
+    rec = argv[1]; outd = argv[2];
+    for (i = 3; i + 1 < argc; i += 2) {
+        if (!strcmp(argv[i], "--sid")) sid = argv[i + 1];
+        else if (!strcmp(argv[i], "--sources")) srcf = argv[i + 1];
+        else { fprintf(stderr, "pack-srcdir: REFUSE unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (sid && !is_hex64(sid)) { fprintf(stderr, "pack-srcdir: REFUSE --sid not 64 lowercase hex\n"); return 2; }
+    if (sy_exists(outd) != 0) { fprintf(stderr, "pack-srcdir: REFUSE out dir exists (need fresh): %s\n", outd); return 2; }
+    buf = cx_read(rec, &n);
+    if (!buf) { fprintf(stderr, "pack-srcdir: REFUSE receipt unreadable: %s\n", rec); return 2; }
+    miss[0] = 0;
+    for (i = 0; i < 9; i++) {
+        int ok = find_src(buf, keys[i], path[i], 1024) || (keys2[i] && find_src(buf, keys2[i], path[i], 1024));
+        if (ok && sy_exists(path[i]) != 1) { ok = 0; }
+        if (!ok) { addmiss(miss, names[i]); nm++; }
+    }
+    if (!sid && !srcf) { addmiss(miss, "sources.tsv"); nm++; }
+    else if (srcf && sy_exists(srcf) != 1) { addmiss(miss, "sources.tsv"); nm++; }
+    if (nm) { fprintf(stderr, "pack-srcdir: REFUSE missing %d:%s\n", nm, miss); return 2; }
+    if (sy_mkdir(outd, 0755)) { fprintf(stderr, "pack-srcdir: mkdir failed\n"); return 2; }
+    for (i = 0; i < 9; i++) {
+        if (cx_fmt(dst, sizeof dst, "%s/%s", outd, names[i]) || sy_symlink(path[i], dst)) { fprintf(stderr, "pack-srcdir: symlink failed %s\n", names[i]); return 2; }
+    }
+    if (cx_fmt(dst, sizeof dst, "%s/sources.tsv", outd)) return 2;
+    if (srcf) {
+        char rp[1024];
+        if (sy_realpath((char *)srcf, rp, sizeof rp) < 0 || sy_symlink(rp, dst)) { fprintf(stderr, "pack-srcdir: symlink failed sources.tsv\n"); return 2; }
+    } else {
+        FILE *f = fopen(dst, "w");
+        if (!f) return 2;
+        fprintf(f, "# origin: identity-helper sources_sha256 of candidate source snapshot (pack-srcdir --sid)\n%s\n", sid);
+        fclose(f);
+    }
+    printf("PACK_SRCDIR ok names=10 out=%s\n", outd);
+    return 0;
+}

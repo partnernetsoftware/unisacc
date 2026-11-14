@@ -1,0 +1,48 @@
+/* tools/check-pack-srcdir.cx -- 夹具断言 tools/pack-srcdir.cx:装配成功、十个名字、缺项具名拒绝、全新目录要求。
+ *   sh ./unisacc.com tools/check-pack-srcdir.cx   (在仓根) */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed, checks;
+static const char *B = "/tmp/pack-srcdir-check";
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\tpack-srcdir.%s\n", ok ? "PASS" : "FAIL", name); }
+static int sh(const char *c, char *out, int cap) {
+    char *argv[6]; argv[0] = "./tools/bound"; argv[1] = "50"; argv[2] = "sh"; argv[3] = "-c"; argv[4] = (char *)c; argv[5] = 0;
+    out[0] = 0; return sy_run(argv, out, cap, 0);
+}
+int main(void) {
+    char c[1500], o[2048]; int i;
+    const char *nm[10] = {"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};
+    const char *sid = "73cb7149358013f1fb7f462c9526d5c566587fc8b452ee0ba91ad70e64045c02";
+    cx_fmt(c, sizeof c, "rm -rf %s; mkdir -p %s/in; for f in p3 w1 l1 l2 o1 o2 w2 c1 c2; do echo $f > %s/in/$f; done", B, B, B);
+    sh(c, o, sizeof o);
+    cx_fmt(c, sizeof c, "printf 'p3\\t%s/in/p3\\tsha=x\\nwin/x86_64\\t%s/in/w1\\nlnx/x86_64\\t%s/in/l1\\nlnx/arm64\\t%s/in/l2\\nosx/x86_64\\t%s/in/o1\\nosx/arm64\\t%s/in/o2\\nwin/arm64\\t%s/in/w2\\ncache-manager/osx/x86_64\\t%s/in/c1\\ncache-manager/osx/arm64\\t%s/in/c2\\n' > %s/full.txt", B,B,B,B,B,B,B,B,B,B);
+    sh(c, o, sizeof o);
+    cx_fmt(c, sizeof c, "grep -v '^win/arm64' %s/full.txt > %s/miss.txt; sed -e 's/^cache-manager\\/osx\\/x86_64/cache-manager\\/x64/' -e 's/^cache-manager\\/osx\\/arm64/cache-manager\\/arm64/' %s/full.txt > %s/cm.txt", B, B, B, B);
+    sh(c, o, sizeof o);
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/full.txt %s/o1 --sid %s 2>&1; echo rc=$?", B, B, sid);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "PACK_SRCDIR ok names=10") != 0 && strstr(o, "rc=0") != 0, "ok-run");
+    for (i = 0; i < 10; i++) { char p[600]; cx_fmt(p, sizeof p, "%s/o1/%s", B, nm[i]); ck(sy_exists(p) == 1, nm[i]); }
+    { size_t n; char p[600]; char *b; cx_fmt(p, sizeof p, "%s/o1/win-x86_64", B); b = cx_read(p, &n); ck(b && n == 3 && !strncmp(b, "w1\n", 3), "link-resolves-to-source"); }
+    { size_t n; char p[600]; char *b; cx_fmt(p, sizeof p, "%s/o1/sources.tsv", B); b = cx_read(p, &n); ck(b && strstr(b, sid) && b[0] == '#', "sources-origin-comment-and-sid"); }
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/miss.txt %s/o2 --sid %s 2>&1; echo rc=$?", B, B, sid);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "REFUSE missing 1: win-arm64") != 0 && strstr(o, "rc=2") != 0, "missing-named");
+    { char p[600]; cx_fmt(p, sizeof p, "%s/o2", B); ck(sy_exists(p) == 0, "no-partial-dir"); }
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/full.txt %s/o3 2>&1; echo rc=$?", B, B);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "REFUSE missing 1: sources.tsv") != 0, "no-sid-refused");
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/full.txt %s/o1 --sid %s 2>&1; echo rc=$?", B, B, sid);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "out dir exists") != 0, "fresh-dir-required");
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/cm.txt %s/o4 --sid %s 2>&1; echo rc=$?", B, B, sid);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "PACK_SRCDIR ok") != 0, "real6-style-cache-manager-keys");
+    cx_fmt(c, sizeof c, "sh ./unisacc.com tools/pack-srcdir.cx -- %s/full.txt %s/o5 --sid abc 2>&1; echo rc=$?", B, B);
+    sh(c, o, sizeof o);
+    ck(strstr(o, "not 64") != 0, "bad-sid-refused");
+    printf("CHECK_PACK_SRCDIR\tchecks=%d failed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
