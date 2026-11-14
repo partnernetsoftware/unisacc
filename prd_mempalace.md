@@ -31,6 +31,7 @@
 - build/speed-baseline.tsv 未更新;run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
 - 整链 77 分钟(4625 s);g2/g3 的 objects 相按目标串行约 2480 s。fable 正在改相并发;预期节省未实跑。
 - cx 模块语法缺口(prd_cx_spec.md 实测,2026-11-14):`use m::sym as alias` 能通过规划但运行报 `no host function slen`(rc 127),设计文档称已端到端实现,与实测不符;`#pragma unisa export` 未实现(`unknown unisa pragma export`);`use sys.*` 通配从未设计(`bad module name`);仓外脚本找不到包根,需脚本目录放仓根链接与自备 cxroot.tsv。0.0.62 若做 export/通配,属 cxmod 三源(cx/cx0/plan.cx、src/cxmod.c、cx/compiler/cxmod.cx)产品输入,先修别名。
+- cx 模块身份缺口(2026-11-14 实测):同一文件经两条路径(软链 tools/cxlib/sys -> cx/sys)被 cxmod 当成两个模块,报 `sy_env exported by both env (tools/cxlib/sys/env.cx:11) and sys.env (cx/sys/env.cx:11)`,使 tools/osx-sentinel.cx 等经 cxlib.toolselfpath 与 cxlib.netpack 的工具编不过。修法:cxmod 解析模块文件时按 realpath 规范化身份(cxmod 三源产品输入,排在别名修复 T5 之后,同写域串行);冻结的 cx/sys 不改。
 - 既有红 wt-gate(5/8 断言失败,与退役和 ext.net 无关,干净工作树也红):tools/all-waves.cx 的 wave 在 `-run` 方式下要求自身可执行文件同目录有原生 `run-batch`(`executor-run-batch-required /run-batch`,tools/all-waves.cx:339),check-wt-gate 以 `sh ./unisacc.com tools/all-waves.cx` 起它,不满足。需改 check 的起法或 all-waves 的执行器发现,未做。slice-migration-gen 另有 source-missing cx/compiler/frames.cx(该文件 HEAD 未跟踪)。
 - 仓库根 out/:五个工具已迁到 $TMPDIR;仍写 out/ 的:tools/gen-model-decode-material.cx(依赖 extract-p3-models 要求 ROOT/out)、tools/csih-ape.cx(csih 车道,须由其维护者迁)、tools/chain-run.cx(--out 须在 ROOT/out 之下)。
 
