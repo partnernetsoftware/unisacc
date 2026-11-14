@@ -197,9 +197,15 @@ static void row_judged(const char *item, int ok, const char *ev, long ms) { row(
 
 /* P1: all .cx files holding "#pragma unisa use", 8 lanes of cx0_plan children */
 #define LANES 8
+/* negative fixtures refused on purpose (check-install-fixes iproto; cxclash "must still be refused"; symindex proto) */
+static int is_negfix(const char *nm) {
+    long n = (long)tx_len(nm, 512);
+    /* exact files only: helpers in those directories (cxclash left/ right/, iproto mid.cx, symindex proto libs) are ordinary inputs */
+    return tx_eqz(nm, "tests/cxclash/main.cx") || tx_eqz(nm, "tools/install-fixes/iproto/main.cx") || tx_eqz(nm, "tools/install-fixes/iproto/user.cx") || tx_eqz(nm, "tools/symindex/fixture/proto/user.cx");
+}
 static void run_p1(long *ms_out, char *ev, int cap) {
-    long t0 = sy_now_ms(), nfiles = 0, rejected = 0, newrej = 0, failed_start = 0, at = 0;
-    char *lb; long ln; int fd, pid, ex = 0, code = 0, sig = 0; char *gv[] = {"./tools/bound", "30", "git", "ls-files", "-z", "--", "*.cx", 0};
+    long negok = 0, t0 = sy_now_ms(), nfiles = 0, rejected = 0, newrej = 0, failed_start = 0, at = 0;
+    char *lb; long ln; int fd, pid, ex = 0, code = 0, sig = 0; char *gv[] = {"./tools/bound", "30", "git", "ls-files", "-z", "--", "*.cx", ":!archive", 0};   /* archive/ is retired legacy, never in a chain build */
     char *names[1400]; long cnt = 0, next = 0; char first[160]; first[0] = 0;
     Job lane[LANES]; int i, active = 0;
     /* gv is ./tools/bound 30 git ls-files: bound-limited */
@@ -231,7 +237,9 @@ static void run_p1(long *ms_out, char *ev, int cap) {
                 if (!lane[i].out || lane[i].rc != 0) failed_start++;
                 else {
                     if (!has(lane[i].out, lane[i].n, "RC=0")) rejected++;
-                    if (!j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "%.120s", lane[i].name); }
+                    /* deliberate negative fixtures must stay refused with a new-text diagnostic; one that is accepted is a failure */
+                    if (is_negfix(lane[i].name)) { if (j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "negfix-accepted %.100s", lane[i].name); } else negok++; }
+                    else if (!j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "%.120s", lane[i].name); }
                 }
                 if (lane[i].out) mm_free(lane[i].out);
                 lane[i].state = 0; active--;
@@ -239,8 +247,8 @@ static void run_p1(long *ms_out, char *ev, int cap) {
             }
         }
     }
-    cx_fmt(ev, (size_t)cap, "%ld files planned by cx0_plan, rejected(any text)=%ld, new-text rejections=%ld%s%s, child failures=%ld",
-           nfiles, rejected, newrej, first[0] ? " first=" : "", first, failed_start);
+    cx_fmt(ev, (size_t)cap, "%ld files planned by cx0_plan, rejected(any text)=%ld, new-text rejections=%ld, negative fixtures still refused=%ld%s%s, child failures=%ld",
+           nfiles, rejected, newrej, negok, first[0] ? " first=" : "", first, failed_start);
     *ms_out = sy_now_ms() - t0;
     if (newrej || failed_start) { *ms_out = -*ms_out; }
 }
