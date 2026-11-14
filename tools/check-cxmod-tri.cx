@@ -1,0 +1,125 @@
+/* tools/check-cxmod-tri.cx -- cxmod 三源一致性门(行为级)。
+ *   sh ./unisacc.com tools/check-cxmod-tri.cx
+ * 同一批夹具(取自 tests/module/units.cx 与 tests/cx-namespace.cx 的用例)由三源真正跑 plan:
+ *   cx0   cx/cx0/plan.cx 的 CX0_COMPAT_BODY(cx0_plan)
+ *   prod  cx/compiler/cxmod.cx(cxm_plan,产品源)
+ *   cc    src/cxmod.c:与 plan.cx 的逆投影逐字一致(cx0-extract --check EXACT),行为随 cx0 计;不另编译。
+ * 比较 rc 与拒绝文案片段;已知分叉(cxm_checkcalls、CXM_MAXU)输出具名 GAP,不记 PASS 也不记 FAIL。
+ * 子进程模式:--cx0 FILE | --prod FILE,打印 RC=n 与诊断。 */
+#pragma unisa use cx0.plan
+#pragma unisa use compiler.cxmod
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+/* 与 src/host.cx 的 hs_cxm_* 同合同的本地回调(-run 下宿主函数不可用) */
+static int cb_rd(char *path, char *buf, int cap) {
+    FILE *f; int n;
+    if (!path || !buf || cap <= 0) return -3;
+    f = fopen(path, "rb"); if (!f) return -1;
+    n = (int)fread(buf, 1, (size_t)cap, f); fclose(f);
+    return n >= cap ? -2 : n;
+}
+static int cb_wr(char *path, char *buf, int n) {
+    FILE *f = fopen(path, "wb"); if (!f) return 1;
+    if (n > 0 && fwrite(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); return 1; }
+    return fclose(f) != 0;
+}
+static int cb_say(int fd, char *s, int n) { return n > 0 && fwrite(s, 1, (size_t)n, fd == 1 ? stdout : stderr) != (size_t)n; }
+static void cb_sha(char *p, int n, char *hex) { if (hex) cx_sha256_hex(p, n > 0 ? (size_t)n : 0, hex); }
+static int failed, pass, gaps;
+static char dir[256];
+static long bytes_at(const char *h, long hn, const char *w, long n) {
+    long i;
+    for (i = 0; i + n <= hn; i++) if (!memcmp(h + i, w, (size_t)n)) return i;
+    return -1;
+}
+static void put(const char *name, const char *text) {
+    char p[400]; FILE *f; tx_snprintf(p, sizeof p, "%s/%s", dir, name); f = fopen(p, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+static int child_cx0(const char *file) {
+    char *v[1]; cx0_result r; v[0] = (char *)file;
+    r = cx0_plan(0, v, 1, 0, 0, dir);
+    printf("RC=%d\n%s\n", r.status, r.diagnostic ? r.diagnostic : "");
+    cx0_release(&r); return 0;
+}
+static int child_prod(const char *file) {
+    char *v[1]; int rc; v[0] = (char *)file;
+    if (cxm_bind(cb_rd, cb_wr, cb_say, cb_sha, dir)) return 2;
+    cxm_set_funit(0); rc = cxm_plan(v, 1);
+    printf("RC=%d\n", rc); return 0;
+}
+/* 跑一个源:rc 与合并输出;ex 1 表示期望拒绝 */
+static int run_src(const char *mode, const char *file, char *out, int cap) {
+    char full[400]; char *av[8]; np_result r = {0}; char why[256]; int rc, n = 0, i;
+    tx_snprintf(full, sizeof full, "%s/%s", dir, file);
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/check-cxmod-tri.cx"; av[3] = "--"; av[4] = (char *)mode; av[5] = full; av[6] = 0; /* lint:allow R1 tool re-runs itself as child under the installed product, same as tools/ratchets.cx */
+    rc = np_run(av, ".", 0, 20, &r, why, sizeof why);
+    out[0] = 0;
+    if (rc) return -1;
+    for (i = 0; i < r.outn && n < cap - 1; i++) out[n++] = r.out[i];
+    for (i = 0; i < r.errn && n < cap - 1; i++) out[n++] = r.err[i];
+    out[n] = 0; np_free(&r);
+    i = (int)bytes_at(out, n, "RC=", 3);
+    return i < 0 ? -1 : out[i + 3] - '0';
+}
+static int seen(const char *out, const char *frag) {
+    return bytes_at(out, (long)tx_len(out, 4096), frag, (long)tx_len(frag, 256)) >= 0;
+}
+/* 夹具:文件 f,期望 rc,文案片段 frag(rc 0 时为空),gap 非 0 表示 cx0 已知接受(产品拒绝) */
+static void one_case(const char *name, const char *f, int rc, const char *frag, const char *gapname) {
+    char o1[4096], o2[4096]; int r1 = run_src("--cx0", f, o1, sizeof o1), r2 = run_src("--prod", f, o2, sizeof o2);
+    int pok = r2 == rc && (!frag[0] || seen(o2, frag));
+    if (!pok) { failed++; printf("FAIL\t%s\tprod rc=%d want=%d frag=%s\n", name, r2, rc, frag); return; }
+    if (gapname) {
+        if (r1 == 0) { gaps++; printf("GAP\t%s\t%s: cx0/src-cxmod-c accept, product refuses (%s)\n", name, gapname, frag); }
+        else if (r1 == rc) { failed++; printf("FAIL\t%s\tgap %s closed, revisit\n", name, gapname); }
+        else { failed++; printf("FAIL\t%s\tcx0 rc=%d\n", name, r1); }
+        return;
+    }
+    if (r1 != rc || (frag[0] && !seen(o1, frag))) { failed++; printf("FAIL\t%s\tcx0 rc=%d want=%d frag=%s\n", name, r1, rc, frag); return; }
+    pass++; printf("PASS\t%s\trc=%d\n", name, rc);
+}
+int main(int argc, char **argv) {
+    char *ex[] = {"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
+    np_result r = {0}; char why[512]; int rc, extract_ok;
+    if (argc == 3 && !strcmp(argv[1], "--cx0")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0(argv[2]); }
+    if (argc == 3 && !strcmp(argv[1], "--prod")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_prod(argv[2]); }
+    rc = np_run(ex, ".", 0, 50, &r, why, sizeof why);
+    extract_ok = !rc && r.rc == 0 && r.out && bytes_at(r.out, r.outn, "CX0_EXTRACT\tEXACT", 17) >= 0;
+    np_free(&r);
+    if (extract_ok) { pass++; puts("PASS\tplan-vs-src-cxmod-c-extract-exact"); } else { failed++; puts("FAIL\tplan-vs-src-cxmod-c-extract-exact"); }
+    tx_snprintf(dir, sizeof dir, "/tmp/cxmod-tri-XXXXXX");
+    if (!mkdtemp(dir)) { puts("FAIL\ttmpdir"); return 1; }
+    put("a.cx", "#pragma unisa module a\nint clash(void){return 1;}\n");
+    put("b.cx", "#pragma unisa module b\nint clash(void){return 2;}\n");
+    put("aa.cx", "#pragma unisa module aa\nint clash(void){return 1;}\nint other(void){return 7;}\n");
+    put("cy1.cx", "#pragma unisa module cy1\n#pragma unisa use cy2\nint f1(void){return 1;}\n");
+    put("cy2.cx", "#pragma unisa module cy2\n#pragma unisa use cy1\nint f2(void){return 2;}\n");
+    put("fac.cx", "#pragma unisa module fac\n#pragma unisa export ok\nint facf(void){return 1;}\n");
+    put("plain.cx", "int main(void){return 7;}\n");
+    put("c1.cx", "#pragma unisa use a\n#pragma unisa use b\nint main(void){return clash();}\n");
+    put("c5.cx", "#pragma unisa use cy1\nint main(void){return f1();}\n");
+    put("p1.cx", "#pragma unisa use fac\nint main(void){return fine();}\n");
+    put("p3.cx", "#pragma unisa use sys.*\nint main(void){return 0;}\n");
+    put("p4.cx", "#pragma unisa use *\nint main(void){return 0;}\n");
+    put("g0.cx", "#pragma unisa use aa::*\nint main(void){return 0;}\n");
+    put("g1.cx", "#pragma unisa use aa::nosuch\nint main(void){return 0;}\n");
+    put("g2.cx", "#pragma unisa use aa::other\nint main(void){return other()+clash();}\n");
+    put("g3.cx", "#pragma unisa use aa::other\nint main(void){return other();}\n");
+    one_case("plain-accepted", "plain.cx", 0, "", 0);
+    one_case("exported-by-both-refused", "c1.cx", 1, "clash exported by both a", 0);
+    one_case("import-cycle-refused", "c5.cx", 1, "module cycle", 0);
+    one_case("planned-export-refused-by-name", "p1.cx", 1, "unknown unisa pragma export", 0);
+    one_case("planned-wildcard-refused-by-name", "p3.cx", 1, "bad module name \"sys.*\"", 0);
+    one_case("planned-bare-star-refused-by-name", "p4.cx", 1, "bad module name \"*\"", 0);
+    one_case("symbol-star-refused", "g0.cx", 1, "bad symbol name \"*\"", 0);
+    one_case("symbol-not-exported-refused", "g1.cx", 1, "does not export nosuch", 0);
+    one_case("symbol-import-plans", "g3.cx", 0, "", 0);
+    one_case("unimported-symbol-call-refused", "g2.cx", 1, "call to undeclared function clash", "cxm_checkcalls");
+    gaps++; puts("GAP\tCXM_MAXU\tproduct 128 vs plan.cx/src 96 (message 'more than 96 units in one program'); not run, needs 97 fixtures");
+    printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d\n", pass, failed, gaps);
+    return failed != 0;
+}
