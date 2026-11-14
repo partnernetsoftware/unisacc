@@ -25,6 +25,19 @@ static void run(const char *root, const char *tmp, const char *name, const char 
     printf("%s\t%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", name, want, rc);
     (void)sy_unlink(tp);
 }
+static void runv(const char *root, const char *tmp, const char *name, const char *tbl, int want, const char *has, const char *hasnot) {
+    char tp[4400], sh[9000], bnd[4400], sc[4400], out[8192]; char *av[8]; int cut = 0, rc, ok;
+    cx_fmt(tp, sizeof tp, "%s/sg-v-%s.tsv", tmp, name);
+    sy_write_file(tp, tbl, (int64_t)strlen(tbl), 0600);
+    cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root); cx_fmt(sc, sizeof sc, "%s/tools/state-gen.cx", root);
+    cx_fmt(sh, sizeof sh, "cd %s && sh ./unisacc.com %s -- --emit versions --table %s", root, sc, tp);
+    av[0] = bnd; av[1] = "30"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0; out[0] = 0;
+    rc = sy_run(av, out, sizeof out, &cut);
+    ok = rc == want && strstr(out, has) && (!hasnot || !strstr(out, hasnot));
+    assertions++; if (!ok) failed++;
+    printf("%s\tversions-%s\twant=%d\tgot=%d\n", ok ? "PASS" : "FAIL", name, want, rc);
+    (void)sy_unlink(tp);
+}
 int main(int argc, char **argv) {
     char t[4096];
     if (argc != 3) { fputs("usage: ROOT TMPDIR\n", stderr); return 2; }
@@ -41,6 +54,28 @@ int main(int argc, char **argv) {
     if (cx_fmt(t, sizeof t, "%s", HDR)) return 2;
     row(t, sizeof t, "U1", "alpha", "a/", "o1"); row(t, sizeof t, "U2", "beta", "a/x.cx;b/", "o2");
     run(argv[1], argv[2], "overlap", t, 1, "CONFLICT");
+    {
+        const char *vh = "slot\tversion\tclass\tstate\tnote\n";
+        char v[1024];
+        cx_fmt(v, sizeof v, "%s1\t0.0.63\tc\ts\tn\n2\t0.0.65\tc\ts\tn\n", vh);
+        runv(argv[1], argv[2], "ok", v, 0, "versions rows=2", "0.0.64");
+        cx_fmt(v, sizeof v, "%s1\t0.0.63\tc\ts\tn\n2\t0.0.63\tc\ts\tn\n", vh);
+        runv(argv[1], argv[2], "dup", v, 1, "DUP", 0);
+        cx_fmt(v, sizeof v, "%s1\t0.0.63\tc\ts\tn\n2\t0.0.64\tc\ts\tn\n", vh);
+        runv(argv[1], argv[2], "skipped", v, 1, "SKIPPED", 0);
+        cx_fmt(v, sizeof v, "%s", "");
+        {
+            char rp[4400], sh[9000], bnd[4400], sc[4400], out[8192]; char *av[8]; int cut = 0, rc, ok;
+            cx_fmt(bnd, sizeof bnd, "%s/tools/bound", argv[1]); cx_fmt(sc, sizeof sc, "%s/tools/state-gen.cx", argv[1]);
+            cx_fmt(rp, sizeof rp, "%s", argv[1]);
+            cx_fmt(sh, sizeof sh, "cd %s && sh ./unisacc.com %s -- --emit versions", rp, sc);
+            av[0] = bnd; av[1] = "30"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0; out[0] = 0;
+            rc = sy_run(av, out, sizeof out, &cut);
+            ok = rc == 0 && strstr(out, "versions rows=6") && !strstr(out, "VERSION\t2\t0.0.64");
+            assertions++; if (!ok) failed++;
+            printf("%s\tversions-real\twant=0\tgot=%d\n", ok ? "PASS" : "FAIL", rc);
+        }
+    }
     printf("STATE_GEN_CHECK\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
 }
