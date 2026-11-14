@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 const HOME = process.env.HOME ?? "/home/devali";
 const REPO = process.env.GUARD_REPO ?? `${HOME}/repos/unisacc`;
 const JOB = process.env.CLAUDE_JOB_DIR ?? "";
-const SAFE = ["/tmp/", "/dev/", `${HOME}/cc-work/`, `${REPO}/out/`, ...(JOB ? [JOB + "/"] : [])];
+const SAFE = ["/tmp/", "/dev/", `${HOME}/cc-work/`, ...(JOB ? [JOB + "/"] : [])];
 
 function stripBodies(cmd: string): string {
   // 去 heredoc 正文(保留首行),再去引号内容,避免文本里的 > 与 sed -i 误报
@@ -51,6 +51,17 @@ function inRepo(p: string, cwd: string, hasCd: boolean): boolean {
   return p === REPO || p.startsWith(REPO + "/");
 }
 
+// 项目所有者 2026-11-14:仓库根 out/ 本身不得创建或写入。cur=当前目录(cd 追踪;未知为 "")。
+function isRepoOut(p: string, cur: string): boolean {
+  p = p.replace(/^["']|["']$/g, "");
+  p = p.replace(/^~(?=\/|$)/, HOME).replace(/^\$\{?HOME\}?/, HOME);
+  if (JOB) p = p.replace(/^\$\{?CLAUDE_JOB_DIR\}?/, JOB);
+  if (p.includes("$") || p.includes("`") || p === "") return false;
+  if (!p.startsWith("/")) { if (!cur) return false; p = resolve(cur, p); } else p = resolve(p);
+  if (SAFE.some((s) => p.startsWith(s))) return false;
+  return p === REPO + "/out" || p.startsWith(REPO + "/out/");
+}
+
 // git 子命令级违规:共享 main 上不得 stash/clean/reset --hard/checkout --/restore .,不得 --no-verify
 function gitViolation(a: string[]): string | null {
   if (a.includes("--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
@@ -69,6 +80,7 @@ function gitViolation(a: string[]): string | null {
 function check(cmd: string, cwd: string): string | null {
   const s = stripBodies(cmd);
   const hasCd = /(^|[;&|(\s])(cd|pushd)\s/.test(s);
+  let cur = cwd || REPO;
   for (const seg of s.split(/;|&&|\|\||\||\n|\$\(|`/)) {
     const t = seg.trim();
     const w = t.split(/\s+/);
@@ -76,6 +88,18 @@ function check(cmd: string, cwd: string): string | null {
     let k = 0;
     while (k < w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k])) k++;
     const first = (w[k] ?? "").replace(/^.*\//, "");
+    if (first === "cd" || first === "pushd") {
+      const d = (w[k + 1] ?? "").replace(/^["']|["']$/g, "").replace(/^~(?=\/|$)/, HOME).replace(/^\$\{?HOME\}?/, HOME);
+      cur = d && !d.includes("$") && !d.includes("`") ? (d.startsWith("/") ? resolve(d) : cur ? resolve(cur, d) : "") : "";
+      continue;
+    }
+    {
+      const oa = w.slice(k + 1).filter((a) => !a.startsWith("-") && a !== "");
+      let hit = "";
+      if (first === "mkdir" || first === "touch") hit = oa.find((a) => isRepoOut(a, cur)) ?? "";
+      else if (["cp", "mv", "install", "ln", "rsync"].includes(first) && oa.length > 1 && isRepoOut(oa[oa.length - 1], cur)) hit = oa[oa.length - 1];
+      if (hit) return `${first} 写仓库根 out/ (${hit}):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp`;
+    }
     // 项目所有者 2026-11-13:只在 ~/repos/unisacc 里工作;禁止克隆/worktree/外部工作目录/out/ 下建子树
     if (first === "git" && (w[k + 1] === "clone" || (w[k + 1] === "worktree" && w[k + 2] === "add")))
       return "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
@@ -109,7 +133,7 @@ function check(cmd: string, cwd: string): string | null {
     }
     for (const m of t.matchAll(/(?:^|[^<>&0-9])(?:\d?>>?|&>>?)\s*([^\s;&|<>()]+)/g)) {
       if (m[1].startsWith("&")) continue;
-      if (inRepo(m[1], cwd, hasCd)) return `重定向写仓内文件 ${m[1]}`;
+      if (inRepo(m[1], cwd, hasCd) || isRepoOut(m[1], cur)) return `重定向写仓内文件 ${m[1]}`;
     }
   }
   // python -c / node -e 内联写文件:看原始命令;仅当出现 open(...,'w'|'a') 且未提及 out/ 或 /tmp 时拦
