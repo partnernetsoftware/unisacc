@@ -29,7 +29,7 @@
 - 约 80 个批次此前红,大半属 FTRIM-bootstrap(装新产品后复验);27 + 36 个批次因窗口 DEFERRED 未跑;osx/win 平台批次需对应主机,无证据。
 - check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity 一致性;tty/pty 路径未测;六目标未跑。
 - build/speed-baseline.tsv 未更新;run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
-- 整链:real5(g2/g3 linux 对并发,G_LNX_PAIR=2)3538 s,real4 为 4759 s(-26%);只有这一组对照,未控制机器负载,不作结论。pack 37 s。
+- 整链:real5(g2/g3 linux 对并发,G_LNX_PAIR=2)3538 s,real4 为 4759 s(-26%);只有这一组对照,未控制机器负载,不作结论。pack 37 s。osx cache-manager 借用定因(A5/R4,2026-11-14):它就是 `tools/cache-retain.cx` 按 `-b osx/x86_64`、`-b osx/arm64` 编出的两份 Mach-O,release-ape pack 不给 `--cache-manager-osx` 时本就会自产(收据记 BUILT_CURRENT_PRODUCT);借用是 candidate-chain 自己的硬拒(tools/candidate-chain.cx:2451 与 2865,引入于 83297e1560「构造未入链」),chain-phases.tsv 里没有构造它的相。实测(已装产品 sha c4c47ecb,HEAD 0e39f4de,cache-retain.cx blob ed70dc63):`sh ./unisacc.com tools/cache-retain.cx -b osx/x86_64 -o OUT` 4.7 s rc 0,sha 89d0b937(两次构造相同),arm64 5.0 s sha 5096089c;与借用副本(x86_64 452d9240、arm64 3f6e4cbd)不同,用 bootstrap 0.0.59(e43ef368)编当前源也不同(c16ec506、888bbbd2),即借用副本不能由现有输入重现,来源未证实。缺的是:pack 前一个链相,用本链候选编译器(不是根目录 bootstrap)编这两份并把路径传给 pack;候选 entry.elf 能否直接 `-b osx/*` 编 tools 源未实跑,自产件在 macOS 上的运行与签名未验证(UNVERIFIED,需 osx 主机)。
 - 已入库待新产品验证:cx-namespace CX-U-2 三缺口具名拒绝(57c7427f6f,cx.plan 0.1.2、cx.compile 0.2.6),旧产品上标 UNVERIFIED,下一轮整链后复验。
 - 已入库工具:tools/derive.cx 派生物总闸(六个生成器 --check 全 OK,22 s)、tools/status.cx(--fast 实测 0.97 s 热态)、affected --iface-narrow 按包判定(cx/text/text.cx 实测 903 -> 765 选中)。tools/status.cx 的测试夹具由子代理用过 sed -i,属违规已记于此,内容未重审。
 - affected-tool、affected-list 批次 FAIL(tape-gap-literal、fixture-literal 两条),HEAD 版同样失败,根因未查;affected-iface2 批次未取得实跑结果。
