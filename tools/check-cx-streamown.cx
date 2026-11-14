@@ -1,0 +1,153 @@
+/* tools/check-cx-streamown.cx -- ownership and handle-safety check of cx.stream
+ * (cx/stream/item.cx, pipe.cx, rw.cx). Regression assertions on current behavior:
+ *   close-refused   a closed reader, writer and pipeline handle is refused forever
+ *   gen-monotonic   reopening one slot 4096 times: gen grows by exactly 1 each time
+ *   fd-borrow       xs_reader_fd / xs_writer_fd (own 0): closing the handle leaves the fd open
+ *   fd-own          xs_pipe_pair (own 1): closing both handles closes both fds
+ *   reentry         a stage calling xs_run / xs_add / xs_close on its own running pipeline gets 4
+ *   item-set        xs_item_set adopts the block (0); on a bad argument it returns 4 and frees data
+ * KNOWN-RISK-DOUBLE-FREE-ON-ERROR: xs_item_set(...) == 4 frees the caller's data block, so a
+ *   caller that treats 4 as "ownership not transferred" frees it twice. Pinned here as documented.
+ * UNMEASURED: gen wraparound (gen is 22 bits for readers/writers, 24 for pipelines; a wrap needs
+ *   4194304 reopens, not run here), so acceptance of a stale handle after a wrap is not tested.
+ * Prints PASS/FAIL per assertion and a last line CX_STREAMOWN ok=N failed=0; rc 1 on any FAIL. */
+#pragma unisa use stream.item
+#pragma unisa use stream.pipe
+#pragma unisa use stream.rw
+#pragma unisa use mem.grow
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+
+static int passed, failed;
+static void ck(int ok, const char *label) {
+    sy_printf("%s\tstreamown.%s\n", ok ? "PASS" : "FAIL", label);
+    if (ok) passed++; else failed++;
+}
+
+static int g_h, g_run, g_add, g_close;
+static int stage_reenter(void *ctx, void *in, void *out, char *why, int cap) {
+    xs_item a, b;
+    xs_item_init(&a);
+    xs_item_init(&b);
+    g_run = xs_run(g_h, &a, &b, why, cap);
+    g_add = xs_add(g_h, 9, 1, 1, stage_reenter, 0);
+    g_close = xs_close(g_h);
+    return 0;
+}
+
+static void t_close_refused(void) {
+    int r, w, h, rc, ok, i;
+    unsigned char buf[8];
+    ck(xs_reader_mem(&r, (const unsigned char *)"abc", 3) == 0 && xs_reader_close(r) == 0, "close.reader-open-close");
+    ok = 1;
+    for (i = 0; i < 3; i++)
+        if (xs_read(r, buf, 3) >= 0 || xs_reader_close(r) != -EBADF) ok = 0;
+    ck(ok, "close.reader-refused-forever");
+    ck(xs_pipe_pair(&r, &w, 0) == 0 && xs_writer_close(w) == 0 && xs_reader_close(r) == 0, "close.pair-open-close");
+    ck(xs_write(w, "x", 1) < 0 && xs_flush(w) < 0 && xs_writer_close(w) == -EBADF, "close.writer-refused");
+    ck(xs_open(&h, 100) == 0 && xs_close(h) == 0, "close.pipe-open-close");
+    rc = xs_close(h);
+    ck(rc == 4 && xs_add(h, 1, 1, 1, stage_reenter, 0) == 4, "close.pipe-refused");
+}
+
+static void t_gen(void) {
+    int r, i, ok, g0, g, prev, h0, h;
+    r = 0;
+    ck(xs_reader_mem(&r, (const unsigned char *)"a", 1) == 0, "gen.reader-first");
+    g0 = r >> 8;
+    xs_reader_close(r);
+    ok = 1; prev = g0;
+    for (i = 0; i < 4096; i++) {
+        if (xs_reader_mem(&r, (const unsigned char *)"a", 1) != 0) { ok = 0; break; }
+        g = r >> 8;
+        if (g != ((prev + 1) & 0x3fffff)) ok = 0;
+        prev = g;
+        xs_reader_close(r);
+    }
+    ck(ok && prev == ((g0 + 4096) & 0x3fffff), "gen.reader-4096-reopens-monotonic-step-1");
+    xs_open(&h0, 10);
+    xs_close(h0);
+    ok = 1; prev = (h0 - 1) / 4;
+    for (i = 0; i < 4096; i++) {
+        if (xs_open(&h, 10) != 0) { ok = 0; break; }
+        g = (h - 1) / 4;
+        if (g != ((prev + 1) & 0xffffff)) ok = 0;
+        prev = g;
+        xs_close(h);
+    }
+    ck(ok, "gen.pipe-4096-reopens-monotonic-step-1");
+    ck(xs_open(&h, 10) == 0 && h != h0 && xs_close(h) == 0, "gen.pipe-new-handle-differs");
+    ck(xs_close(h0) == 4, "gen.pipe-stale-handle-refused");
+    sy_printf("UNMEASURED\tstreamown.gen.wraparound-after-4194304-reopens\n");
+}
+
+
+static void t_fd(void) {
+    int p[2], r, w, a[2];
+    unsigned char buf[8];
+    ck(sy_pipe(p) == 0, "fd.pipe");
+    ck(xs_reader_fd(&r, p[0], 0) == 0 && xs_writer_fd(&w, p[1], 0) == 0, "fd.borrow-open");
+    ck(xs_write(w, "hi", 2) == 0 && xs_writer_close(w) == 0, "fd.borrow-writer-close-flushes");
+    ck(sy_write_all(p[1], "z", 1) == 0, "fd.borrowed-write-fd-still-open");
+    ck(xs_reader_close(r) == 0 && sy_read(p[0], buf, 3) == 3 && buf[0] == 'h' && buf[2] == 'z', "fd.borrowed-read-fd-still-open");
+    sy_close(p[0]); sy_close(p[1]);
+    ck(xs_pipe_pair(&r, &w, 0) == 0, "fd.own-open");
+    ck(xs_writer_close(w) == 0 && xs_reader_close(r) == 0, "fd.own-close");
+    ck(sy_pipe(a) == 0 && a[0] >= 0, "fd.own-reopen-probe");
+    sy_close(a[0]); sy_close(a[1]);
+}
+
+static void t_reentry(void) {
+    xs_item in, out;
+    int h, rc;
+    unsigned char *p;
+    char why[64];
+    ck(xs_open(&h, 100) == 0 && xs_add(h, 1, 1, 1, stage_reenter, 0) == 0, "reentry.setup");
+    g_h = h; g_run = g_add = g_close = -99;
+    xs_item_init(&in); xs_item_init(&out);
+    p = (unsigned char *)mm_alloc(8);
+    ck(p && xs_item_set(&in, 1, p, 3, 8) == 0, "reentry.item");
+    rc = xs_run(h, &in, &out, why, 64);
+    ck(g_run == 4 && g_add == 4 && g_close == 4, "reentry.run-add-close-return-4");
+    ck(rc == 0 && xs_close(h) == 0, "reentry.pipeline-survives");
+    xs_item_drop(&out);
+}
+
+static void t_item(void) {
+    xs_item it;
+    unsigned char *p, *q;
+    ck(1, "item.begin");
+    xs_item_init(&it);
+    p = (unsigned char *)mm_alloc(64);
+    ck(p && xs_item_set(&it, 1, p, 5, 64) == 0 && it.buf.data == p && it.shape == 1, "item.set-adopts-block");
+    xs_item_drop(&it);
+    ck(it.buf.data == 0 && it.shape == 0, "item.drop-zeroes");
+    p = (unsigned char *)mm_alloc(64);
+    ck(xs_item_set(&it, 0, p, 5, 64) == 4 && it.buf.data == 0 && it.shape == 0, "item.bad-shape-returns-4-item-empty");
+    q = (unsigned char *)mm_alloc(64);
+    ck(q == p, "item.KNOWN-RISK-DOUBLE-FREE-ON-ERROR-data-freed-on-4");
+    mm_free(q);
+    p = (unsigned char *)mm_alloc(64);
+    ck(xs_item_set(&it, 1, p, 70, 64) == 4 && it.buf.data == 0, "item.len-over-cap-returns-4");
+    ck(xs_item_set(&it, 1, 0, 0, 0) == 0 && it.shape == 1, "item.null-empty-ok");
+    xs_item_drop(&it);
+    ck(xs_item_set(&it, 1, 0, 0, 8) == 4, "item.null-with-cap-returns-4");
+    ck(xs_item_set(0, 1, 0, 0, 0) == 4, "item.null-item-returns-4");
+}
+
+int main(void) {
+    t_close_refused();
+    t_gen();
+    t_fd();
+    t_reentry();
+    t_item();
+    if (failed) {
+        sy_printf("STREAMOWN_FAILED\tok=%d\tfailed=%d\n", passed, failed);
+        return 1;
+    }
+    sy_printf("CX_STREAMOWN\tok=%d\tfailed=0\n", passed);
+    return 0;
+}

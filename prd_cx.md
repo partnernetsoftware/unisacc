@@ -874,9 +874,9 @@ T6 归属表(N10,2026-11-14,只读取证;来源 `tools/cx0-diff.cx -- --pair pla
 - 改名消 S5:`cx/compiler/stream`、`cx/runtime/stream` 的目录名属另两个包,本重构不动;文档与批次名里以 "xs 库" 称 (a)、"七流" 称 (b)。是否改目录名另议,不在本节。
 - 句柄生命周期合同(以现实现为准的成文,除标注外均有行号):
   - 句柄是 int,编码 `gen << 8 | kind << 5 | slot + 1`(`rw.cx:74`);表容量 XS_MAXRW 16(`rw.cx:52`)、XS_MAXPIPE 4 与 XS_MAXSTAGE 16(pipe.cx 头注释之后的 enum)。超限返回码 5 或负 errno,不截断(`pipe.cx:21-22`)。
-  - 状态机:open -> (run 或读写)* -> close;close 后句柄恒被拒(`pipe.cx:38`),陈旧句柄靠 gen 位识别。gen 回绕后的行为:UNVERIFIED(取数:读 `rw.cx:100-128` 的 xs_rnew、xs_wnew)。
+  - 状态机:open -> (run 或读写)* -> close;close 后句柄恒被拒(`pipe.cx:38`),陈旧句柄靠 gen 位识别。gen 回绕后的行为:读码已定(`rw.cx` xs_rnew/xs_wnew 22 位掩码,`pipe.cx` xs_open 24 位),槽重开 4096 次 gen 逐次加 1 已由 `tools/check-cx-streamown.cx` 断言(批次 cx-streamown);回绕后旧句柄被接受:UNMEASURED(需 4194304 次重开,未跑)。
   - 重入:在运行中的 stage 内调用同一管线返回 4(`pipe.cx:20`)。
-  - 所有权:管线运行后不保留字节,收据只存摘要与长度(`pipe.cx:39`);`xs_writer_close` 即使 flush 失败也释放句柄并返回首个错误(`rw.cx:41-42`);`xs_reader_mem` 借用调用方内存、`xs_writer_buf` 借用调用方 mg_buf。fd 的归属由内部 own 位决定(`rw.cx:130,147`),各入口取值:UNVERIFIED(取数:`grep -n 'xs_rmake\|xs_wmake' cx/stream/rw.cx`)。`xs_item_set` 是否接管 data:UNVERIFIED(取数:读 `item.cx:30-42`)。
+  - 所有权:管线运行后不保留字节,收据只存摘要与长度(`pipe.cx:39`);`xs_writer_close` 即使 flush 失败也释放句柄并返回首个错误(`rw.cx:41-42`);`xs_reader_mem` 借用调用方内存、`xs_writer_buf` 借用调用方 mg_buf。fd 的归属由内部 own 位决定(`rw.cx:130,147`),各入口取值:xs_reader_fd/xs_writer_fd 为 0(借用,关句柄不关 fd),xs_pipe_pair 为 1(拥有,关句柄即关 fd),已实跑断言(cx-streamown)。`xs_item_set` 接管 data,参数非法返回 4 时仍释放调用方的 data(KNOWN-RISK-DOUBLE-FREE-ON-ERROR:调用方若按"未转移"再释放即二次释放),现状已实跑钉住;stage 内重入 xs_run/xs_add/xs_close 均返回 4 已断言。
   - 未声称:无并发安全(模块级静态表);运行期句柄检查不等于编译期所有权(见第 4 节)。
 - tlib 目标:tlibpkg.cx 按职责分三面(读表与校验、内容身份、冻结判定),使只用读表的工具不随身份算法重跑;纯工具改动,不进产品输入。分面前先量各面使用方(R0-5)。
 
