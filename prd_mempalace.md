@@ -38,7 +38,7 @@
 2. 整链并发化落地并实测整链墙钟。
 3. 收尾 out/ 写入点。
 4. 核心库包由内往外封装(cx.stream、tlib、S13 复评);速度项:E2 之后的冷启动与生成代码两档新实测。
-5. agentwork/ 归档:分批进行。第 1 批已做:tools/devtime.cx 与 tools/check-devtime.cx 移入 archive/agentwork-retire-2026-11/tools/,批次 devtime 及其覆盖、编译清单、批次包行已撤,check-archive-refs failed=0。仍有 48 个工具/测试文件引用 agentwork/:下一批退役只服务它的叶子(patch-queue、unfreeze、state-audit、archive-records、aw 的检查、cursor-fleet 后 dag),再改读写单表的通用工具(awpath 表、ledger-add、phase-budget、version-metrics、precommit 两道闸、stable-eval/gaps、slice-freeze、chain-run 的 raise),最后 git mv agentwork/ 本身。affected 本轮 pass=16 fail=1 deferred=184:失败项 slice-migration-gen 报 source-missing cx/compiler/frames.cx,与本批无关,未修;deferred 未实跑。
+5. agentwork/ 归档:分批进行(分类表见提交 b10474a8f0 的说明)。第 1 批已做(devtime 工具与其检查移入 archive/agentwork-retire-2026-11/tools/)。仍有 48 个文件引用 agentwork/:第 2 批退役只服务它的叶子(patch-queue、unfreeze、state-audit),第 3 批 archive-records、aw 检查、cursor-fleet 后 dag,第 4 批起改读写单表的通用工具并定表的去向,最后 git mv agentwork/。每批都要同步撤 tests/tools-compile-sources.tsv 与 prd.md 能力速查行。已知既有红:slice-migration-gen 报 source-missing cx/compiler/frames.cx(该文件 HEAD 未跟踪,与退役无关)。
 
 ## 记忆宫殿(索引)
 
