@@ -1,0 +1,184 @@
+/* tools/iface-hash.cx -- per-package interface hash table from build/layer-api/*.tsv.
+ *
+ *   sh ./unisacc.com tools/iface-hash.cx -- --write|--check [--api DIR] [--table FILE]
+ *
+ * Run from the repo root. Facts in: every DIR/PKG.tsv (default build/layer-api), the authoritative export
+ * list of a package: rows `name<TAB>signature<TAB>sig_sha<TAB>file`; `#` lines and blank lines are skipped.
+ * The interface hash of a package is the sha256 of its rows sorted by name (byte order), each rendered as
+ * `name<TAB>signature<LF>` with the signature's runs of blanks collapsed to one space and trimmed. A
+ * function body is not in layer-api, so a body-only edit leaves the hash unchanged; a signature edit,
+ * an added or removed export, or a rename changes it. Row order in the file does not matter. A package
+ * with two identical rows (same name and same signature text) is refused (REFUSE, rc 2). An empty package hashes the empty string.
+ * Table out: build/iface-hash.tsv (or --table FILE), four TAB fields `pkg iface_sha256 n_exports source`.
+ * --check: rc 1 with DIFF lines unless the table equals what the facts give now. --write: writes it.
+ * Prints IFACE_HASH<TAB>ok|FAIL|WROTE<TAB>packages=N. Exit 0 ok, 1 differs, 2 usage/unreadable/refused.
+ * Nothing here is a test result; it is a fact table for later batch selection. Check: tools/check-iface-hash.cx. */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+enum { MAXR = 4096, MAXP = 64 };
+static long rn[MAXR], rl[MAXR];      /* per row: name offset/len */
+static long sn[MAXR], sl[MAXR];      /* signature offset/len */
+static int ord[MAXR];
+static char names[MAXP][128];
+
+static int cmp_row(const char *t, int a, int b) {
+    long la = rl[a], lb = rl[b], m = la < lb ? la : lb, i;
+    for (i = 0; i < m; i++) {
+        unsigned char x = (unsigned char)t[rn[a] + i], y = (unsigned char)t[rn[b] + i];
+        if (x != y) return x < y ? -1 : 1;
+    }
+    if (la != lb) return la < lb ? -1 : 1;
+    /* a struct tag and a function may share a name: the tie breaks on the signature text */
+    la = sl[a]; lb = sl[b]; m = la < lb ? la : lb;
+    for (i = 0; i < m; i++) {
+        unsigned char x = (unsigned char)t[sn[a] + i], y = (unsigned char)t[sn[b] + i];
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return la < lb ? -1 : la > lb ? 1 : 0;
+}
+
+/* The hash of one layer-api text. 0 ok, -1 duplicate name (*dup = row of the second one), -2 too many rows or bad row. */
+static int iface_of(const char *t, long n, char hex[65], int *nex, int *dup) {
+    TpBuf b = {0, 0, 0, 0};
+    long i = 0, e, o, l, k;
+    int r = 0, a, c, rc = 0;
+    *nex = 0; *dup = -1;
+    while (i < n) {
+        e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e > i && t[i] != '#') {
+            if (r >= MAXR || tx_field(t + i, e - i, '\t', 0, &o, &l) || l == 0) return -2;
+            rn[r] = i + o; rl[r] = l;
+            if (tx_field(t + i, e - i, '\t', 1, &o, &l)) { sn[r] = i; sl[r] = 0; } else { sn[r] = i + o; sl[r] = l; }
+            ord[r] = r; r++;
+        }
+        i = e + 1;
+    }
+    for (a = 1; a < r; a++) {
+        int v = ord[a];
+        c = a - 1;
+        while (c >= 0 && cmp_row(t, ord[c], v) > 0) { ord[c + 1] = ord[c]; c--; }
+        ord[c + 1] = v;
+    }
+    for (a = 0; a < r && rc == 0; a++) {
+        int w = ord[a];
+        int inws = 0;
+        if (a > 0 && cmp_row(t, ord[a - 1], w) == 0) { *dup = w; rc = -1; break; }
+        tp_put(&b, t + rn[w], rl[w]);
+        tp_put(&b, "\t", 1);
+        for (k = 0; k < sl[w]; k++) {
+            char ch = t[sn[w] + k];
+            if (ch == ' ' || ch == '\t' || ch == '\r') inws = 1;
+            else { if (inws && b.n > 0 && b.b[b.n - 1] != '\t') tp_put(&b, " ", 1); inws = 0; tp_put(&b, &ch, 1); }
+        }
+        tp_put(&b, "\n", 1);
+    }
+    if (rc == 0) {
+        if (b.bad) rc = -2;
+        else sy_sha256_hex(b.b ? (const char *)b.b : "", (long)b.n, hex);
+    }
+    *nex = r;
+    mm_free(b.b);
+    return rc;
+}
+
+static int zcmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a < (unsigned char)*b ? -1 : (unsigned char)*a > (unsigned char)*b ? 1 : 0;
+}
+
+static int sort_names(int np) {
+    int a, c;
+    for (a = 1; a < np; a++) {
+        char tmp[128];
+        tx_copy(tmp, sizeof tmp, names[a], tx_len(names[a], 128));
+        c = a - 1;
+        while (c >= 0 && zcmp(names[c], tmp) > 0) { tx_copy(names[c + 1], 128, names[c], tx_len(names[c], 128)); c--; }
+        tx_copy(names[c + 1], 128, tmp, tx_len(tmp, 128));
+    }
+    return 0;
+}
+
+static int build(const char *api, TpBuf *out) {
+    sy_dir_t d;
+    int np = 0, a;
+    if (sy_dir_open(&d, api) < 0) { sy_eprintf("iface-hash: cannot open %s\n", api); return 2; }
+    while (sy_dir_next(&d) > 0) {
+        long n = d.name_n;
+        if (n > 4 && n < 120 && tx_eqz(d.name + n - 4, ".tsv") && np < MAXP) {
+            tx_copy(names[np], 128, d.name, n - 4);
+            np++;
+        }
+    }
+    sy_dir_close(&d);
+    sort_names(np);
+    tp_puts(out, "# iface-hash v1: sha256 of a package's layer-api rows sorted by name (name TAB blank-collapsed signature LF); tools/iface-hash.cx\n");
+    tp_puts(out, "# pkg\tiface_sha256\tn_exports\tsource\n");
+    for (a = 0; a < np; a++) {
+        char path[4400], hex[65], num[24];
+        size_t n = 0;
+        int nex, dup, rc;
+        char *t;
+        if (cx_fmt(path, sizeof path, "%s/%s.tsv", api, names[a])) return 2;
+        t = cx_read(path, &n);
+        if (!t) { sy_eprintf("iface-hash: unreadable %s\n", path); return 2; }
+        rc = iface_of(t, (long)n, hex, &nex, &dup);
+        if (rc == -1) {
+            sy_printf("REFUSE\t%s\tduplicate-name\t%.*s\n", names[a], (int)rl[dup], t + rn[dup]);
+            mm_free(t);
+            return 2;
+        }
+        if (rc) { sy_eprintf("iface-hash: bad rows in %s\n", path); mm_free(t); return 2; }
+        mm_free(t);
+        cx_fmt(num, sizeof num, "%d", nex);
+        tp_puts(out, names[a]); tp_put(out, "\t", 1); tp_puts(out, hex); tp_put(out, "\t", 1);
+        tp_puts(out, num); tp_put(out, "\t", 1); tp_puts(out, path); tp_put(out, "\n", 1);
+    }
+    return out->bad ? 2 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *api = "build/layer-api", *table = "build/iface-hash.tsv";
+    int write = -1, k, rc, np = 0;
+    long i;
+    TpBuf b = {0, 0, 0, 0};
+    for (k = 1; k < argc; k++) {
+        if (tx_eqz(argv[k], "--write") && write < 0) write = 1;
+        else if (tx_eqz(argv[k], "--check") && write < 0) write = 0;
+        else if (tx_eqz(argv[k], "--api") && k + 1 < argc) api = argv[++k];
+        else if (tx_eqz(argv[k], "--table") && k + 1 < argc) table = argv[++k];
+        else { write = -1; break; }
+    }
+    if (write < 0) { sy_eprintf("iface-hash: usage: --write|--check [--api DIR] [--table FILE]\n"); return 2; }
+    rc = build(api, &b);
+    if (rc) { mm_free(b.b); return rc; }
+    for (i = 0; i < (long)b.n; i++) if (b.b[i] == '\n') np++;
+    np -= 2;
+    if (write) {
+        if (cx_write(table, b.b, (size_t)b.n)) { sy_eprintf("iface-hash: cannot write %s\n", table); mm_free(b.b); return 2; }
+        sy_printf("IFACE_HASH\tWROTE\tpackages=%d\n", np);
+        mm_free(b.b);
+        return 0;
+    } else {
+        size_t on = 0;
+        char *old = cx_read(table, &on);
+        if (!old) { sy_printf("DIFF\ttable-missing\t%s\n", table); sy_printf("IFACE_HASH\tFAIL\tpackages=%d\n", np); mm_free(b.b); return 1; }
+        if (on != b.n || !mm_same(old, b.b, (long)on)) {
+            sy_printf("DIFF\ttable-differs-from-source\t%s\n", table);
+            sy_printf("IFACE_HASH\tFAIL\tpackages=%d\n", np);
+            mm_free(old); mm_free(b.b);
+            return 1;
+        }
+        sy_printf("IFACE_HASH\tok\tpackages=%d\n", np);
+        mm_free(old); mm_free(b.b);
+        return 0;
+    }
+}
