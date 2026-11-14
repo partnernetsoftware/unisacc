@@ -409,6 +409,22 @@ static void mark(int ni, int via) {
 }
 /* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
 /* 同一 token 同一次运行只 stat 一次:结果(返回码与 kind)按 token 记忆;冻结输入下与逐次 stat 等价。 */
+/* .git/ 前缀 token:工作树里 .git 是 gitdir 指针文件,经 git rev-parse --git-path 取真实路径(50 s 时限);
+   成功返回 1 并写 abs,失败返回 0(调用方按原拼接,stat 错误照常报告)。 */
+static int git_path_abs(const char *tok, char *abs, int cap) {
+    char *v[8]; int ofd, pid, ex = 0, code = 0, sig = 0; long n, got = 0; char b[4096];
+    if (!(tok[0] == '.' && tok[1] == 'g' && tok[2] == 'i' && tok[3] == 't' && tok[4] == '/' && tok[5])) return 0;
+    v[0] = "git"; v[1] = "rev-parse"; v[2] = "--path-format=absolute"; v[3] = "--git-path"; v[4] = (char *)tok + 5; v[5] = 0;
+    pid = spawn_pipe_bounded(v, root, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    while (got < (long)sizeof b - 1 && (n = sy_read(ofd, b + got, (long)sizeof b - 1 - got)) > 0) got += n;
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0 || !ex || code != 0) return 0;
+    while (got > 0 && (b[got - 1] == '\n' || b[got - 1] == '\r')) got--;
+    if (got <= 0 || got >= cap) return 0;
+    { long i; for (i = 0; i < got; i++) abs[i] = b[i]; abs[got] = 0; }
+    return 1;
+}
 static char *ts_key[32768]; static int ts_r[32768]; static char ts_kind[32768];
 static int tok_stat(const char *tok, sy_stat_t *st) {
     unsigned long h = hash(tok) & 32767; int i; char abs[8192];
@@ -416,7 +432,7 @@ static int tok_stat(const char *tok, sy_stat_t *st) {
         unsigned long s = (h + (unsigned long)i) & 32767;
         if (!ts_key[s]) {
             int r;
-            if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return -ENAMETOOLONG;
+            if (!git_path_abs(tok, abs, sizeof abs) && cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return -ENAMETOOLONG;
             r = sy_stat(abs, st);
             ts_key[s] = zkeep(tok); ts_r[s] = r; ts_kind[s] = r < 0 ? 0 : st->kind;
             return r;
