@@ -67,13 +67,20 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (2) DNS 未做:sy_resolve/sy_resolve4 只认数字字面量与 localhost,其余名返回 SY_EAI_BASE-2;sy_tcp_dial 同。
 (3) arm64 的 msghdr 布局(netmsg)只按 LP64 同为 56 字节推断,未实跑;lnx/x86_64 探针 `sendmsg=4`、`recvmsg=4` 为本机一次实跑(prd_mempalace.md B2 证据行)。六参系统调用 `__syscall6` 未扩。
 (4) osx/win 无证据:netraw、netpoll、netnb、sigwatch、netmsg 在 osx/win 为有名 ENOSYS 拒绝,没有对应主机实跑;osx/win 平台批次需对应主机。
-(5) 批次复验面:lnx IMPLEMENTED 约 1040 批至 1076 批(口径随登记变化,以 `tests/run.cx -- --list` 为准:TBD),在快照根复验的累计只有 45 批(PASS 43,FAIL 2);其余未复验。FAIL 两项:ri-image-pem(duplicate-key-row,他人在修)与 phase-timing-stamps(断言期望已改为真实行为,批次 PASS,P2)。约 80 个 FTRIM-bootstrap 红批装新产品后复验,未验证。
+(5) 批次复验面:lnx IMPLEMENTED 约 1040 批至 1076 批(口径随登记变化,以 `tests/run.cx -- --list` 为准:TBD),在快照根复验的累计只有 45 批(PASS 43,FAIL 2);其余未复验。FAIL 两项均已修:ri-image-pem(duplicate-key-row,a1bf73b583)与 phase-timing-stamps(断言期望改为真实行为,dfe2b5fa75);两项修后的复验计数以 prd_mempalace.md 阻塞节为准,本文不据此改写累计数。共享检出另有 15 批(PASS 14,FAIL 1 即 tsv-lint,见 (12))。约 80 个 FTRIM-bootstrap 红批装新产品后复验,未验证。
 (6) CX-U-2 三条拒绝、T5 cxm_checkcalls 上移与别名运行修复需要新产品验证:tests/cx-namespace.cx 的两条别名运行断言在已装 0.0.61 上输出 UNVERIFIED needs-new-product,不计 PASS 也不计 FAIL。起链前的 P1 扫描(HEAD b2c557b1ba,1190 个含 use 的 .cx,cx0 与产品各 1175 通过 15 被拒,新拒绝数 0)是已装产品上的规划扫描,不等于候选产品验证。build/cx0-three-source-diff.tsv 仍有语义分叉行;cxmod 三源中产品件是手写 cx/compiler/cxmod.cx。check-cxmod-tri 有具名 GAP(CXM_MAXU:97 单元 plan.cx 拒绝、产品通过;128 边界未测)。
-(7) s9 未跑:daily/release 档夜跑,只有 commit 档卡发布;候选 s9 判定:TBD。
+(7) s9 未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑,结果如实入说明,不卡发布。如实状态:commit 档只有 0.0.53 的实测(3 步 252.7 / 87.3 / 12.7 s),0.0.62 候选上未跑;daily 档(预测约 16111 s,条件值)与 release 档至今未跑通一次,墙钟 UNMEASURED。aggregate 到 release/evidence.tsv 第 4 行的映射靠人工判读,没有工具(缺口,待记 build/pkg-gaps.tsv)。0.0.61 的第 4 行为 UNKNOWN。候选 s9 判定:TBD。
 (8) 0.0.63 项不在本版:E3TRIM(modelcache.cx 每次发布全量扫描修剪,补丁未入库)、-c 对象路线真复用(N15)、L1/L2/L4 驱动与运行缓存加速、SPEED-11、cx.stream/tlib 重构、export/通配语法(D1/D2)均不在 0.0.62。
 (9) cache-manager 相在候选上的首次实跑、real6 整链结果:TBD。首链不带 `--cache-manager-osx`;若该相失败则以借用副本续段(real5p 先例)。
 (10) dock-audit 全部 UNAUDITED;derive 总闸登记项仅 6 至 7 项;affected 选批降级不替代全量复验。
 (11) 同候选 CI、本机全批资格:TBD。以上未验证项不得在发布页写成已验证。
+(12) 全集复验必须分片:单批固定开销约 27 s,慢批 pp-cli-includes、pp-header-locations 超 37 s 被杀(须单跑改 heavy),snapshots-cx 临界(批内约 30 s);light 约 742 批约 93 波、heavy 313 批每波 1 批(均为推算,非实测)。tsv-lint 同日三次实跑 PASS、FAIL、PASS,疑与并发写表有关,未定因;冻结窗口单跑 `affected.cx --ids tsv-lint --run -j 1` 为 PASS rc=0 22 s。
+(13) osx cache-manager:借用副本(x86_64 452d9240、arm64 3f6e4cbd)不能由现有输入重现,来源未证实;自产件(x86_64 89d0b937、arm64 5096089c)在 macOS 上的运行与签名未验证,需 osx 主机。
+(14) wt-gate-probe 为 PLANNED(链路超 55 s 批次上限),6 条断言未验证;wt-gate-clean-win 为 PLANNED/NOT_READY,无证据。wt-gate-clean 已 PASS。
+(15) cx 模块缺口:同一文件经软链(tools/cxlib/sys -> cx/sys)被当两个模块(`sy_env exported by both`),使 tools/osx-sentinel.cx 等编不过,未修;`use m::sym as alias` 通过规划但运行报 `no host function slen`(rc 127,修复见上文行为变化第 (14) 项 4aee1dfb4a,新产品上未验证);`#pragma unisa export` 未实现;`use sys.*` 未设计;仓外脚本找不到包根。
+(16) check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity,tty/pty 未测,六目标未跑;build/speed-baseline.tsv 未更新,run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
+(17) -c 对象路线无最终产物复用:现状是 artifact_hit 标记戳丢失(只丢戳,既有状态,每次全跑约 280 ms),丢戳的提交未二分(候选 a3a32d8a09、9b107888db 均未实证);phase-timing-stamps 断言已改为真实行为(dfe2b5fa75);真复用为 0.0.63 任务 N15。
+(18) 封网最终状态:B2 范围内 std-surface 仍有 2 行 new(sy_res_live、np_exec,见 (1));DNS 未做(见 (2));B2 六参系统调用不扩 `__syscall6`,走 sendmsg/recvmsg 三参(见 (3))。
 
 ## 撤回与回滚
 
