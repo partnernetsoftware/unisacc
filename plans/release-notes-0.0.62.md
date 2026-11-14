@@ -2,12 +2,13 @@
 
 状态:草稿,定稿于公开之前。沿用 plans/release-notes-0.0.61.md 的口径:只写已入库事实;未实跑的项一律写未跑,未证实的项不写 PASS;本文件不宣称 QUALIFIED。带 TBD 的字段由发布流程填写,不得在此臆测。本文件随提交 Y 入库,不含 Y 自身哈希,也不含公开之后才发生的读回结果。
 
-- 冻结提交:TBD(候选 REV 待定;real6 起链所用 REV 为 `b2c557b1ba`,见 prd_mempalace.md real6 账本行)。
-- 提交 X、提交 Y:TBD。
-- 同候选 CI run:TBD。
-- 候选 APE `unisacc.com`(real6 链内产物,链内版本串 0.0.61,版本注入前):sha256=5dee23615a37181dcac3062e1404a139c2722ebfb45675c591e94f730f780100,7059300 B。最终 APE sha256 与 `--version`:TBD(注入 0.0.62 后会变)。
-- 裁决(release/decision.txt 末行 QUALIFIED 字段):TBD,由发布流程填。
-- git 范围 `v0.0.61..HEAD`:截至本文件起草时共 171 个提交(git rev-list 实测)(`git log --oneline v0.0.61..HEAD`);最终范围与计数:TBD(以冻结点为准重算)。
+- 冻结提交 F=9269dfa6f4883ad8dd3595de6c133d4d23d6f00c(标签 v0.0.62 与 v0.0.62-src 均指它;real6 起链所用 REV 为 `b2c557b1ba`,F 取其树)。F 的 release/candidate.tsv 行有缺陷(20 列、commit 列空),规范表由 X 携带。
+- 提交 X=cccf51ada6ae2d23a664681452f35f7a7e3efb68;提交 Y1=73f861c674dec5611fbe6b881e6b56fe0c94b581;Y2:TBD(提交号定稿后补)。
+- 同候选 CI run 43581179059:全部 10 作业 success,ci-verdict PASS all-jobs-success。
+- 候选 APE `unisacc.com`(real6 链内产物,链内版本串 0.0.61,版本注入前):sha256=5dee23615a37181dcac3062e1404a139c2722ebfb45675c591e94f730f780100,7059300 B。公开 APE(注入 0.0.62 后):sha256=83b82c8dbd1a2426d29844d0ec1bb0db58246067110f02bc882c7bd688b4fd4d,7059300 B,`--version` 为 unisacc 0.0.62;公开后读回 sha 与 release/candidate.tsv 一致;SHA256SUMS 含七个资产。
+- 公开:2026-11-14 09:41Z,GitHub Latest,https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.62 。装机已完成(本机根 sha 同上,productpkg-dir-identity 批次 PASS)。
+- 裁决(release/decision.txt):NOT_QUALIFIED,unknown=1(s9 commit 档未出 PASS;公开后读回已 PASS)。公开前 decision.txt 记 unknown=2。
+- git 范围 `v0.0.61..b2c557b1ba`:165 个提交(git rev-list --count 实测);此前起草时的 171 为 `v0.0.61..HEAD` 的旧读数,以 165 为准。
 
 ## 是什么
 
@@ -92,7 +93,7 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 ### 丙、未跑的验证范围
 
 (17) 新产品验证:CX-U-2 三条拒绝、T5 cxm_checkcalls 上移与别名运行修复需要新产品验证:tests/cx-namespace.cx 的两条别名运行断言在已装 0.0.61 上输出 UNVERIFIED needs-new-product,不计 PASS 也不计 FAIL。已在 real6 候选(sha256 5dee2361...,链内版本串 0.0.61)上验证:tests/cx-namespace failed=0 unverified=0,CX-U-2 三条拒绝、别名运行、通配拒绝转真;候选上 V0 身份 PASS、V1 release-ape smoke PASS、V3 module units PASS、V4 module check PASS(V4 内部实际验证的是已装产品,不作候选证据);V5 装机后跑,V6 s9 commit 档进行中,均未出结果。起链前的 P1 扫描(HEAD b2c557b1ba,1190 个含 use 的 .cx,cx0 与产品各 1175 通过 15 被拒,新拒绝数 0)是已装产品上的规划扫描,不等于候选产品验证。build/cx0-three-source-diff.tsv 仍有语义分叉行;cxmod 三源中产品件是手写 cx/compiler/cxmod.cx。check-cxmod-tri 有具名 GAP(CXM_MAXU:97 单元 plan.cx 拒绝、产品通过;128 边界未测)。
-(18) 批次复验面:lnx IMPLEMENTED 约 1040 批至 1076 批(口径随登记变化,以 `tests/run.cx -- --list` 为准:TBD),在快照根复验的累计只有 45 批(PASS 43,FAIL 2,为两项修复之前的口径,修复后两项在共享检出上各自复验为 PASS,但没有在快照根上重跑);其余未复验。FAIL 两项均已修:ri-image-pem(duplicate-key-row,a1bf73b583)与 phase-timing-stamps(断言期望改为真实行为,dfe2b5fa75);两项修后的复验计数以 prd_mempalace.md 阻塞节为准,本文不据此改写累计数。共享检出另有 15 批(PASS 14,FAIL 1 即 tsv-lint,见本条后段)。约 80 个 FTRIM-bootstrap 红批装新产品后复验,未验证。全集复验必须分片(推算,非实测):单批固定开销约 27 s,慢批 pp-cli-includes、pp-header-locations 超 37 s 被杀(须单跑改 heavy),snapshots-cx 临界(批内约 30 s);light 约 742 批约 93 波、heavy 313 批每波 1 批。tsv-lint 同日三次实跑 PASS、FAIL、PASS,疑与并发写表有关,未定因(实测);冻结窗口单跑 `affected.cx --ids tsv-lint --run -j 1` 为 PASS rc=0 22 s。affected 选批降级不替代全量复验。
+(18) 批次复验面:lnx IMPLEMENTED 约 1040 批至 1076 批(口径随登记变化,以 `tests/run.cx -- --list` 为准;2026-11-14 实测 PLAN 行:batches=1111,implemented_batches=1089,planned_batches=22,executed_batches=0,该口径为全平台合计,未单独拆出 lnx 数),在快照根复验的累计只有 45 批(PASS 43,FAIL 2,为两项修复之前的口径,修复后两项在共享检出上各自复验为 PASS,但没有在快照根上重跑);其余未复验。FAIL 两项均已修:ri-image-pem(duplicate-key-row,a1bf73b583)与 phase-timing-stamps(断言期望改为真实行为,dfe2b5fa75);两项修后的复验计数以 prd_mempalace.md 阻塞节为准,本文不据此改写累计数。共享检出另有 15 批(PASS 14,FAIL 1 即 tsv-lint,见本条后段)。约 80 个 FTRIM-bootstrap 红批装新产品后复验,未验证。全集复验必须分片(推算,非实测):单批固定开销约 27 s,慢批 pp-cli-includes、pp-header-locations 超 37 s 被杀(须单跑改 heavy),snapshots-cx 临界(批内约 30 s);light 约 742 批约 93 波、heavy 313 批每波 1 批。tsv-lint 同日三次实跑 PASS、FAIL、PASS,疑与并发写表有关,未定因(实测);冻结窗口单跑 `affected.cx --ids tsv-lint --run -j 1` 为 PASS rc=0 22 s。affected 选批降级不替代全量复验。
 (19) s9 未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑,结果如实入说明,不卡发布。如实状态:commit 档只有 0.0.53 的实测(3 步 252.7 / 87.3 / 12.7 s),0.0.62 候选上未跑;daily 档(预测约 16111 s,条件值)与 release 档至今未跑通一次,墙钟 UNMEASURED。aggregate 到 release/evidence.tsv 第 4 行的映射靠人工判读,没有工具(缺口,待记 build/pkg-gaps.tsv)。0.0.61 的第 4 行为 UNKNOWN。候选 s9 判定:TBD。
 (20) cache-manager 相在候选上的首次实跑与 real6 整链结果:已实跑,首链不带 `--cache-manager-osx`,链内自产 osx cache-manager,未借用副本,rc=0(见行为变化 (18)、(20))。
 (21) 同候选 CI、本机全批资格:TBD。以上未验证项不得在发布页写成已验证。
@@ -114,3 +115,5 @@ cxmod 三源(cx/cx0/plan.cx 权威、src/cxmod.c 由 cx0-extract 生成、cx/com
 (2) 缺口 (18) 中"共享检出另有 15 批(PASS 14,FAIL 1 即 tsv-lint)"与同条"tsv-lint 同日三次 PASS、FAIL、PASS"并存,未核对其时序与最终状态。
 (3) 行为变化 (20) 与"已知缺口 (20)"编号相互独立(前者是整链墙钟,后者是 real6/cache-manager 未跑),正文引用均已按新编号核过;缺口 (10) 引用的"第 (14) 项"指行为变化节。
 (4) 缺口 (3)(4) 的补丁文件 $CLAUDE_JOB_DIR/tmp/sx.patch.txt 位于作业临时目录,发布前是否应入库待定。
+
+公开后待补:候选速度基线(first_e2e、冷编译)、s9 全批(commit 档候选实跑结果及 daily/release 档)、Y2 提交号。
