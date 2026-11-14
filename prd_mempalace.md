@@ -64,6 +64,25 @@
   (7 续) 续跑完成(同日):steps 6/7/8 为 rc=3 184 s、rc=3 51 s、rc=0 14 s(STEPS_DONE),steps 共 8 步约 1226 s;aggregate 4 片各约 41 s 加 merge 13.7 s,rc=1(S9_NIGHTLY status=FAIL)。s9-nightly 此次未落 RUN/aggregate.out(仅 s9-verdict 能读到路径),改直接跑 s9-native aggregate --merge 4 取 stdout:S9 COMMIT_ONLY selected=304 status=FAIL failed_or_unknown=304 pending=0 NOT_APPLICABLE 12;s9-verdict 输出 `4<TAB>UNKNOWN`,reason=tier-commit-not-full(设计内)。片级 wave.log 的 WAVE_BATCH:PASS 289、FAIL 11、UNKNOWN 4(无 DEFERRED)。FAIL 前 10:report-verify-tool、release-usage、preflight-tool、chain-batchkeys、chain-phases-gen、tlib-ext-textx、xs-conform、productpkg-dir-identity、enosys-sites、dock-audit(另 cx-driver-deps 共 11),均 bound_rc=1 由批次自身退出码,未逐个读源定性;xs-conform stderr 为 cx/stream/item.cx 的 #include /tmp/ua-cxif-*.h 找不到(疑环境:该头在 /tmp 且被并行清扫或隔离)。UNKNOWN 4:fixedpoint-sample、precommit-coverage-block、precommit-coverage-pass、prechain-gate,reason=watchdog-deadline bound_rc=142(单批 41 至 55 s 触顶)。关键:aggregate 仍判 300 批 refused(state last=R,s9-shards 第 267 行 as_check_receipt 非 0)、4 批 U;as_check_receipt 在 tools/cxlib/allsession.cx 第 478 行起有十余种 reason(如 receipt-input-changed-since-run、receipt-registry-mismatch、receipt-sid-mismatch),但 s9-shards 不打印该 reason,故 refused 原因 UNDETERMINED,且 aggregate 计数不能当批次结果。缺口:s9-shards aggregate 须在 refused 时输出 as_check_receipt 的 reason;s9-nightly 在 aggregate rc 非 0 时未落 aggregate.out。结论:commit 档在 0.0.62 候选上 aggregate 通过 0、失败或未知 304(非有效基线);片级 PASS 289 仅为过程数据,未经收据校验。s9-root 与 out/s9-run 保留,报告后可清理。
   (7 补) 300 批 refused 原因复查(2026-11-14):s9-shards 在收据校验 refused 时新增输出 `S9_RECEIPT REFUSE batch= slice= reason=`,s9-nightly 片失败时也落 aggregate.out(判定不变,check-s9-nightly 新增 6 条断言 failed=0)。用该现场(旧四片备份在 /tmp/s9-aggbak)用新 ELF 重跑 `aggregate --part 0..3 4` 加 `--merge 4`:四片均无 S9_RECEIPT 行,merge 结果为 selected=304 failed_or_unknown=15 pending=0,300 批 refused 未复现;原因 UNMEASURED(原片已被覆盖,现场状态与当时不同,不能据此回溯)。下次整链遇 refused 时 reason 会直接在 aggregate.out。
 
+  (7 表) commit 档 11 个失败批次逐个复测(2026-11-14,已装 0.0.62 候选 83b82c8d,命令 `sh ./unisacc.com tools/affected.cx -- --ids ID --run -j 1`,每个 timeout 60;为赶 15 分钟时限 11 个并发起跑,每个内部 -j 1,并发可能影响耗时,不影响 rc 判读)。结果 8 转绿、3 仍红;4 个 watchdog UNKNOWN 本轮未复测:
+
+  | 批次 | 现状 | rc | 耗时 | 原因(读发 rc 的源码行) |
+  |---|---|---|---|---|
+  | report-verify-tool | PASS | 0 | 13.7 s | 转绿,原失败原因 UNMEASURED |
+  | release-usage | PASS | 0 | 39.2 s | 转绿,原失败原因 UNMEASURED |
+  | preflight-tool | PASS | 0 | 22.7 s | 转绿,原失败原因 UNMEASURED |
+  | chain-batchkeys | PASS | 0 | 42.1 s | 转绿,原失败原因 UNMEASURED |
+  | tlib-ext-textx | PASS | 0 | 33.5 s | 转绿,原失败原因 UNMEASURED |
+  | xs-conform | PASS | 0 | 5.7 s | 转绿;原疑环境(/tmp/ua-cxif-*.h 找不到)未再现,原因 UNMEASURED |
+  | productpkg-dir-identity | PASS | 0 | 19.4 s | 转绿(已知) |
+  | enosys-sites | PASS | 0 | 3.2 s | 转绿(已知) |
+  | chain-phases-gen | FAIL | 1 | 39.0 s | tools/check-chain-phases-gen.cx:26 ck() 计失败,末行 CHECK_CHAIN_PHASES_GEN checks=16 failed=3;失败项 check-tree(:123 --check 在检入表上 rc 非 0 或无标记)、write-twice(:134 两次 --write 字节不等或 rc 非 0)、check-fixture;确定性缺陷,具体子进程输出未读,根因 UNMEASURED |
+  | cx-driver-deps | FAIL | 1 | 4.3 s | tools/check-driver-deps.cx:201 末项 stdout 断言不成立(要求 ready 且 rc==0 且输出文件等于 "a.o: a.c\n"),:203-204 failed=1 返回 1;直接运行该工具打印同样 `FAIL stdout` / `CXD failed=1`,确定性缺陷;ready 或 rc 哪一项不成立 UNMEASURED |
+  | dock-audit | FAIL | 1 | 11.5 s | tools/check-dock-audit.cx:31 计失败,末行 DOCK_AUDIT_CHECK assertions=453 failed=8;失败项 A1-rows-equal-docked-count(:135 rows=89 与 docked=95 不等)、A1b-summary-docked-equals-rows,另 cx/sys/netmsg.cx、netnb.cx、sigwatch.cx、ext/net/resolve.cx、udp.cx、unix.cx 六个文件未审计行;确定性缺陷(审计表落后于新增 docked 点) |
+  | fixedpoint-sample、precommit-coverage-block、precommit-coverage-pass、prechain-gate | UNMEASURED | - | - | 4 个 watchdog-deadline UNKNOWN,本轮未复测(单次 60 秒不足以判定,需 s9 内同条件) |
+
+  复测证据在 /tmp/s9r/*.log(临时)。三个仍红批次的修复另派,本节不改工具与测试源码。
+
 ### 仍未验证(缺什么 / 清零动作)
 
 - 新产品验证:cx-namespace CX-U-2 三缺口具名拒绝(57c7427f6f,cx.plan 0.1.3、cx.compile 0.2.7)与别名运行修复在已装 0.0.61 上标 UNVERIFIED needs-new-product。缺:候选产品。动作:整链装好后复跑 tests/cx-namespace.cx。
