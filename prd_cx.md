@@ -909,6 +909,20 @@ R0 任务(每项 15 分钟内,只读;各写各的 `$CLAUDE_JOB_DIR/tmp/R0-N.tsv`
 | R0-6 | 句柄合同四个 UNVERIFIED 项定值(gen 回绕、own 位、item_set 归属、deadline 使用方) | `sh ./unisacc.com tools/check-cx-streamapi.cx` | rc=0;四项各给文件行 |
 | R0-7 | 18 包逐根选批数基线 | `sh ./unisacc.com tools/affected.cx -- --files FILE --list-only`(每包取一个代表文件) | pipe.cx 126、rw.cx 1、item.cx 126、tlibpkg.cx 152、fwdmerge.cx 123 复现(scanned 随批次表变) |
 
+R0 实测(2026-11-14,HEAD 735a161e52,lnx/x86_64,已装产品;明细 TSV 在 `$CLAUDE_JOB_DIR/tmp/R0-N.tsv`,不入库;7 项中完成 5 项、部分 2 项):
+
+- R0-1 完成:`sh ./unisacc.com tools/layer-api.cx -- --check --pkg cx.stream` rc=0,`LAYER_API cx.stream ok rows=34 units=3`。`build/layer-api/cx.stream.tsv` 36 行 = 2 行表头注释 + 34 数据行;34 行 = 30 个函数行(与 cxpack 30 名一致,差集为空)+ 1 行 typedef `xs_item` + 3 行枚举 `enum:XS_MAXPIPE`、`enum:XS_MAXRW`、`enum:XS_KR`(各带 XS_MAXSTAGE、XS_BUFDEF/XS_CHUNK、XS_KW)。S2 的 UNVERIFIED 解除。
+- R0-2 完成:`git grep -c 'int st_span(' -- src` = drive.cx 1、driveroute.cx 3、stages.cx 1,合计 5,与预期一致。
+- R0-3 部分:`git grep -n 'kernel' -- tools/tlib.cx tools/cxlib/tlibpkg.cx tools/layer-api.cx build/tlib-packages.tsv` 仅 2 行命中:`tlibpkg.cx:86`(读哈希:sys.sha 的 kernel 块哈希,注释)与 `build/tlib-packages.tsv:9`(cx.sys 行 roots 里的路径,读表,无关);tools/tlib.cx 与 tools/layer-api.cx 零命中。只查了字面词 kernel,未穷举 sha 调用点:K8 的"别的读写关系"仍 UNVERIFIED。
+- R0-4 完成:`sh ./unisacc.com tools/check-tlibpkg.cx` rc=0,`CHECK_TLIBPKG failed=0`(该检查本身不输出差距表;差距表是读 `build/tlib-packages.tsv` 的 deps 列与版本列对拍得到,只读取数)。18 包 deps 共 44 条,最低版本不等于现版本的 42 条,仅 2 条相等;含预期行 `cx.compile -> cx.stream 0.1.0 对 0.1.1`。除 `ext.net -> cx.sys 0.1.3 对 0.1.9` 外,其余全是 0.1.0 对现版本。K6 定值:漂移是常态,最低版本检查应判"现版本是否满足最低版本",而不是相等。
+- R0-5 完成(用 `git grep -lw` 取数,没用 symindex;统计 tools 与 tests 下除 tlibpkg.cx 自身的文件数):tp_put 5、tp_puts 5、tp_sha 5、tp_sha_file 4、tp_ver_parse 2、tp_ver_compat 2、tp_load 6、tp_find_opaque 2、tp_prep_forbidden 3、tp_names 5、tp_find_unit 5、tp_find_excl 5、tp_member_name 2、tp_closure 3、tp_api 2、tp_ar_next/canon/find 各 2、tp_rc_get 3、tp_is_frozen 1、tp_cache_dir 1、tp_unit_key 2、tp_kit_key 3、tp_kit_dir_for 1、tp_kit_dir 10(含 tests 下 tsv 的文本引用,偏高)。交叉点:身份面(tp_sha*、tp_unit_key、tp_kit_*、tp_cache_dir)与读表面(tp_load、tp_names、tp_find_*)被 tools/tlib.cx、layer-api.cx、tlib-cover.cx 同时调用;batch-packages-gen.cx 只用读表面加 tp_put 与 tp_sha 之外的输出帮手。三面归属的划分本轮未做,只给使用方分布。
+- R0-6 部分:`sh ./unisacc.com tools/check-cx-streamapi.cx` rc=0,`CX_STREAMAPI ok=208 failed=0`;四项定值见"合同四项"。
+- R0-7 部分(只复现本节引用的 5 个文件,18 包逐根未做,UNMEASURED):`affected.cx --files F --list-only` 的 AFFECTED_SUMMARY:pipe.cx batches=126、rw.cx 1、item.cx 126、tlibpkg.cx 152、fwdmerge.cx 123,scanned=1079,与基线完全一致。
+- K3 定值:pipe.cx 私有 sha256 是有意的。引入提交 2afa486d68(0.0.58 cx.stream 核心包);`pipe.cx:91-92` 注释写明 L0 sys.sha 是 Linux 内核套接字调用,而收据必须在每个目标上同值。`git grep -n 'sys.sha' -- cx/stream` 无命中。后果:R2 的"K3 去重复 sha"不能直接改用 sys.sha,前提是 osx/win 上有同值的实现,否则 K3 应改判为"保留,并把理由写进接口文档"。
+- K5 使用方数:`git grep -lw 'xs_reader_deadline\|xs_writer_deadline'` 共 11 个文件:实现与导出 3(`cx/stream/rw.cx`、`cx/stream/cxpack.tsv`、`build/layer-api/cx.stream.tsv`);派生表与文档 4(`build/std-surface.tsv`、`docs/cx/api/cx.stream.md`、`docs/cx/design-core.md`、`prd_cx.md`);测试与工具 4(`tools/check-cx-streamapi.cx`、`tests/manifests/cx-streamapi.tsv`、`tests/coverage.tsv`、`tools/std-surface-v2.cx`)。`src/`、`cx/compiler`、`cx/driver` 零使用方:移出白名单不破坏产品调用点,只需同步测试与派生表。
+- K7 FwmBuf:`fwdmerge.cx:9` 的 `FwmBuf` 是 `{unsigned char *b; long long *at; int n, cap;}`;`driveroute.cx:108` 把 `const void *` 强转为 `const FwmBuf *`,该文件内没有同名结构定义(只见强转行),驱动侧传入对象的真实类型本轮未追到,布局一致性无编译期守护:风险成立,但未做布局字节对拍(UNMEASURED)。
+- 合同四项:(1) gen 回绕:`rw.cx` 的 xs_rnew/xs_wnew 用 `(gen + 1) & 0x3fffff`(22 位),`gen << 8` 共 30 位不溢出 int;同一槽重开 4194304 次后 gen 回到 0,此时一个 4194304 代之前的旧句柄会被接受(陈旧句柄检测的最小周期),不是崩溃。(2) own 位:`xs_reader_fd`、`xs_writer_fd` 传 0(借用,关闭时不 close,`rw.cx:168,331`);`xs_pipe_pair` 对两端传 1(`rw.cx:477,479`);`xs_reader_close`、`xs_writer_close` 据 own 调 `sy_close`(`rw.cx:318,426`)。(3) `xs_item_set` 接管 data:是。`item.cx:30-42` 先 `xs_item_drop(it)`,再把 `{data,len,cap}` 直接装入 `it->buf`,不复制;参数非法(返回 4)时执行 `mg_free(&b)`,即也会释放调用方传入的 data,调用方须按"传入即交出"约定。(4) deadline 使用方:见上 K5 使用方数。
+
 **(5) 度量**
 
 - 已测(S4、S7):同包两面 126 对 1,即 rw 面的改动与 pipe 面的 125 批可并发、互不重跑;这是"面独立即批次独立"的现成证据,与 10.4 的 text.text find 族 769 -> 预计 385 同口径。
