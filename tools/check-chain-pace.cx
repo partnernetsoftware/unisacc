@@ -1,0 +1,88 @@
+/* tools/check-chain-pace.cx -- chain-pace 阈值表生成与 OK/SLOW/STALLED/GAP 判定。
+ * 夹具全在 /tmp/check-chain-pace-MS 内:假 checkpoint(A 100s、B 10s)与假 heartbeat,用 --now 固定观测时间。
+ *   thr(A)=200:OK <=150、SLOW <=200、STALLED >200;B 基线 10s -> thr 60(下限);未知相 thr 60;相间超 60 秒 GAP。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-chain-pace.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-chain-pace.%s\n", n); }
+}
+static int has(const char *buf, size_t n, const char *needle) {
+    return buf && tx_find(buf, (long)n, needle, tx_len(needle, 300)) >= 0;
+}
+static char com[500], tool[500], dir[200], ckp[300], hb[300], thr[300];
+
+static int run(const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, char **out, size_t *n) {
+    char *v[12]; int k = 0;
+    v[k++] = (char *)"sh"; v[k++] = com; v[k++] = tool; v[k++] = (char *)"--";
+    v[k++] = (char *)a1; v[k++] = (char *)a2;
+    if (a3) v[k++] = (char *)a3;
+    if (a4) v[k++] = (char *)a4;
+    if (a5) v[k++] = (char *)a5;
+    v[k] = 0;
+    return cx_runv_timeout(v, 50, out, n);
+}
+static int watch(long now, char **out, size_t *n) {
+    char s[32];
+    if (cx_fmt(s, sizeof s, "%ld", now)) return -1;
+    return run("watch", hb, thr, "--now", s, out, n);
+}
+static int put(const char *p, const char *body) { return cx_write(p, body, tx_len(body, 2000)); }
+
+int main(void) {
+    char cwd[400], *o = 0;
+    size_t n = 0;
+    int rc;
+    { char *v[] = {"pwd", 0};
+      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; free(o); o = 0;
+      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
+    }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/chain-pace.cx", cwd)
+        || cx_fmt(dir, sizeof dir, "/tmp/check-chain-pace-%ld", sy_now_ms())
+        || cx_fmt(ckp, sizeof ckp, "%s/checkpoint.tsv", dir) || cx_fmt(hb, sizeof hb, "%s/heartbeat.tsv", dir)
+        || cx_fmt(thr, sizeof thr, "%s/thr.tsv", dir)) { ck(0, "path"); return 1; }
+    cx_rmtree(dir);
+    if (sy_mkdir(dir, 0755)) { ck(0, "mkdir"); return 1; }
+    if (put(ckp, "DONE\tA\twall_ms=100000\tsha=-\nDONE\tB\twall_ms=10000\tsha=-\n")) { ck(0, "write-ckp"); return 1; }
+
+    /* (1) 阈值表 */
+    rc = run("thresholds", ckp, 0, 0, 0, &o, &n);
+    ck(rc == 0 && has(o, n, "A\t100\t200\n") && has(o, n, "B\t10\t60\n"), "thresholds-rule");
+    if (o && n) { if (cx_write(thr, o, n)) ck(0, "write-thr"); }
+    free(o); o = 0;
+    rc = run("thresholds", "/nonexistent-chain-pace", 0, 0, 0, &o, &n);
+    ck(rc == 2, "thresholds-missing-file"); free(o); o = 0;
+
+    /* (2) 在跑相 A 自 1000 起 */
+    if (put(hb, "900\tchain\t1\t1\tstart\n1000\tA\t1\t1\tstart\n")) { ck(0, "write-hb"); return 1; }
+    rc = watch(1120, &o, &n); ck(rc == 0 && has(o, n, "OK\tA\t120\t100\t200\n"), "ok"); free(o); o = 0;
+    rc = watch(1180, &o, &n); ck(rc == 0 && has(o, n, "SLOW\tA\t180\t100\t200\n"), "slow"); free(o); o = 0;
+    rc = watch(1250, &o, &n); ck(rc == 0 && has(o, n, "STALLED\tA\t250\t100\t200\n"), "stalled"); free(o); o = 0;
+
+    /* (3) 未知相缺省阈值 60 */
+    if (put(hb, "900\tchain\t1\t1\tstart\n1000\tX\t1\t1\tstart\n")) { ck(0, "write-hb2"); return 1; }
+    rc = watch(1020, &o, &n); ck(rc == 0 && has(o, n, "OK\tX\t20\t0\t60\n"), "unknown-ok"); free(o); o = 0;
+    rc = watch(1050, &o, &n); ck(rc == 0 && has(o, n, "SLOW\tX\t50\t0\t60\n"), "unknown-slow"); free(o); o = 0;
+    rc = watch(1070, &o, &n); ck(rc == 0 && has(o, n, "STALLED\tX\t70\t0\t60\n"), "unknown-stalled-default-60"); free(o); o = 0;
+
+    /* (4) 相间 GAP:A 已结束,B 迟迟未起 */
+    if (put(hb, "900\tchain\t1\t1\tstart\n1000\tA\t1\t1\tstart\n1100\tA\t1\t1\tend\n")) { ck(0, "write-hb3"); return 1; }
+    rc = watch(1130, &o, &n); ck(rc == 0 && has(o, n, "BETWEEN\tafter:A\t30\tB\t60\n") && !has(o, n, "GAP"), "between-no-gap"); free(o); o = 0;
+    rc = watch(1190, &o, &n); ck(rc == 0 && has(o, n, "GAP\tafter:A\t90\tB\t60\n"), "gap-triggers"); free(o); o = 0;
+
+    /* (5) 已结束相不判定;用法错误退 2 */
+    if (put(hb, "1000\tA\t1\t1\tstart\n1100\tA\t1\t1\tend\n1100\tB\t1\t1\tstart\n")) { ck(0, "write-hb4"); return 1; }
+    rc = watch(1110, &o, &n); ck(rc == 0 && has(o, n, "OK\tB\t10\t10\t60\n") && !has(o, n, "\tA\t"), "closed-phase-skipped"); free(o); o = 0;
+    rc = run("bogus", "x", 0, 0, 0, &o, &n); ck(rc == 2, "usage-rc2"); free(o); o = 0;
+    cx_rmtree(dir);
+    sy_printf("check-chain-pace failed=%d\n", failed);
+    if (!failed) sy_printf("CHECK_CHAIN_PACE\n");
+    return failed ? 1 : 0;
+}

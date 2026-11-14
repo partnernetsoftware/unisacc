@@ -1,0 +1,103 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+/* tools/chain-pace.cx -- 链相位进度巡检(按基线链同相时长判速度;与 chain-watch 的 idle/liveness 判定互补)。
+ *   thresholds CHKPT          : 由基线链(如 real6)checkpoint.tsv 输出阈值表(TSV)到 stdout
+ *   watch HB TABLE [--now N] [LOG...] : 对当前链 heartbeat.tsv 每个在跑相输出判定
+ * 阈值 thr = max(2*基线时长s, 60);OK: elapsed<=1.5*基线 或 <=thr/2;SLOW: <=thr;STALLED: >thr;
+ * 未知相(表内无)基线 0、thr 60。无在跑相时输出 GAP 行:上一行事件后经过时间超过 60 秒则 GAP 触发(状态 GAP),否则 BETWEEN。
+ * 输出只读;不写任何链目录文件。 */
+typedef struct { char name[96]; long dur, thr; } ph_t;
+static ph_t P[2048]; static int NP;
+typedef struct { long t; char name[96]; char kind[8]; } hb_t;
+static hb_t H[8192]; static int NH;
+
+static void cpyn(char *d, int cap, const char *s) { int i = 0; while (i < cap - 1 && s[i]) { d[i] = s[i]; i++; } d[i] = 0; }
+static int rdlines(const char *path, char **buf, long *n) {
+    unsigned char *b = 0; int64_t m = 0;
+    if (sy_read_file(path, &b, &m, 1 << 24)) { fprintf(stderr, "cannot read %s\n", path); return -1; }
+    *buf = (char *)b; *n = (long)m; return 0;
+}
+static int fld(const char *l, int len, int k, char *out, int cap) {
+    int i = 0, f = 0, s = 0, o = 0;
+    for (i = 0; i <= len; i++) {
+        if (i == len || l[i] == '\t') {
+            if (f == k) { for (o = 0; s + o < i && o < cap - 1; o++) out[o] = l[s + o]; out[o] = 0; return 0; }
+            f++; s = i + 1;
+        }
+    }
+    out[0] = 0; return -1;
+}
+static int load_hb(const char *path) {
+    char *b; long n, i = 0, s; char t[32], nm[96], kd[16];
+    if (rdlines(path, &b, &n)) return -1;
+    NH = 0;
+    while (i < n) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        if (i > s && fld(b + s, (int)(i - s), 0, t, 32) == 0 && fld(b + s, (int)(i - s), 1, nm, 96) == 0 && fld(b + s, (int)(i - s), 4, kd, 16) == 0 && NH < 8192) {
+            H[NH].t = atol(t); cpyn(H[NH].name, 96, nm); cpyn(H[NH].kind, 8, kd); NH++;
+        }
+        i++;
+    }
+    return 0;
+}
+static ph_t *findp(const char *nm) { int i; for (i = 0; i < NP; i++) if (!strcmp(P[i].name, nm)) return &P[i]; return 0; }
+static int do_thresholds(const char *ck) {
+    char *b; long n, i = 0, s; char nm[96], w[48]; int k;
+    if (rdlines(ck, &b, &n)) return 2;
+    while (i < n) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        if (i > s && fld(b + s, (int)(i - s), 1, nm, 96) == 0 && fld(b + s, (int)(i - s), 2, w, 48) == 0
+            && !strncmp(w, "wall_ms=", 8) && NP < 2048) {
+            cpyn(P[NP].name, 96, nm); P[NP].dur = atol(w + 8) / 1000; NP++;
+        }
+        i++;
+    }
+    printf("phase\tbase_s\tthr_s\n");
+    for (k = 0; k < NP; k++) {
+        long thr = P[k].dur * 2; if (thr < 60) thr = 60;
+        printf("%s\t%ld\t%ld\n", P[k].name, P[k].dur, thr);
+    }
+    return 0;
+}
+static int do_watch(const char *hb, const char *tb, long now, int nl, char **logs) {
+    char *b; long n, i = 0, s, newest = 0; char nm[96], w[48]; int k, j, open = 0, last = -1; ph_t *p; sy_stat_t st;
+    if (load_hb(hb) || rdlines(tb, &b, &n)) return 2;
+    NP = 0;
+    while (i < n) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        if (i > s && b[s] != 'p' && fld(b + s, (int)(i - s), 0, nm, 96) == 0 && NP < 2048) {
+            cpyn(P[NP].name, 96, nm); fld(b + s, (int)(i - s), 1, w, 48); P[NP].dur = atol(w);
+            fld(b + s, (int)(i - s), 2, w, 48); P[NP].thr = atol(w); NP++;
+        }
+        i++;
+    }
+    for (j = 0; j < nl; j++) if (!sy_stat(logs[j], &st) && st.mtime > newest) newest = st.mtime;
+    printf("now=%ld hb_rows=%d last_hb_age_s=%ld newest_log_age_s=%ld\n", now, NH, NH ? now - H[NH - 1].t : -1, newest ? now - newest : -1);
+    printf("state\tphase\telapsed_s\tbase_s\tthr_s\n");
+    for (k = 0; k < NH; k++) {
+        int closed = 0;
+        if (strcmp(H[k].kind, "start")) continue;
+        for (j = k + 1; j < NH; j++) if (!strcmp(H[j].name, H[k].name) && !strcmp(H[j].kind, "end")) { closed = 1; break; }
+        if (closed || !strcmp(H[k].name, "chain") || !strncmp(H[k].name, "jobs-", 5)) continue;
+        { long el = now - H[k].t, bs = 0, th = 60; const char *sn; p = findp(H[k].name);
+          if (p) { bs = p->dur; th = p->thr; if (th < 60) th = 60; }
+          sn = (el * 2 <= bs * 3 || el <= th / 2) ? "OK" : (el <= th ? "SLOW" : "STALLED");
+          printf("%s\t%s\t%ld\t%ld\t%ld\n", sn, H[k].name, el, bs, th); open++; }
+    }
+    for (k = NH - 1; k >= 0; k--) if (strncmp(H[k].name, "jobs-", 5)) { last = k; break; }
+    if (!open && last >= 0) {
+        long el = now - H[last].t; int nx = -1; p = findp(H[last].name);
+        if (p) nx = (int)(p - P) + 1;
+        printf("%s\tafter:%s\t%ld\t%s\t60\n", el > 60 ? "GAP" : "BETWEEN", H[last].name, el, nx >= 0 && nx < NP ? P[nx].name : "?");
+    }
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "thresholds")) return do_thresholds(argv[2]);
+    if (argc >= 4 && !strcmp(argv[1], "watch")) {
+        long now = sy_wall_s(); int a = 4;
+        if (argc >= 6 && !strcmp(argv[4], "--now")) { now = atol(argv[5]); a = 6; }
+        return do_watch(argv[2], argv[3], now, argc - a, argv + a);
+    }
+    fprintf(stderr, "usage: thresholds CKPT | watch HB TABLE [--now N] [LOG...]\n"); return 2;
+}
