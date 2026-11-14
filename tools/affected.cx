@@ -962,11 +962,77 @@ static int users(const char *file) {
     return 0;
 }
 
+/* --iface-narrow (C4): a changed file that is a unit of a tlib package whose interface is the same before and
+   after the change cannot change what a downstream unit compiles against; only its behaviour can differ.
+   Batches that reach it through use edges only (use / literal-use / arg-use) and whose root neither sits
+   beside it nor uses it directly are then printed as DEFERRED_BY_IFACE instead of AFFECTED: listed, counted,
+   never silently dropped.  The interface is "the same" only when all three hold: build/layer-api/P.tsv and
+   build/iface-hash.tsv are byte-equal to HEAD, tools/iface-hash.cx --check passes, and tools/layer-api.cx
+   --check --pkg P passes on the work tree (manifest == what the source gives now).  Any other outcome,
+   a changed file outside every package, --full, or --tier release keeps the full selection. */
+static int iface_narrow, iface_full;
+static const char *iface_verdict;   /* test hook: same|changed replaces the three probes, not the package lookup */
+static int eqb(const char *a, const char *b, long n) { long i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+/* the package whose layer-api manifest names REL in its file column, into PKG; 1 found, 0 none */
+static int iface_pkg(const char *rel, char *pkg, long cap) {
+    size_t tn, mn; char *t = cx_read("build/iface-hash.tsv", &tn), *m; long at = 0, rl = tx_len(rel, 4096); int found = 0;
+    if (!t) return 0;
+    while (at < (long)tn && !found) {
+        long e = at, f[4], nf = 0, i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (t[at] != '#' && e > at) {
+            char src[600];
+            f[nf++] = at;
+            for (i = at; i < e && nf < 4; i++) if (t[i] == '\t') f[nf++] = i + 1;
+            if (nf == 4 && e - f[3] < (long)sizeof src && f[1] - 1 - f[0] < cap) {
+                for (i = 0; i < e - f[3]; i++) src[i] = t[f[3] + i];
+                src[e - f[3]] = 0;
+                m = cx_read(src, &mn);
+                if (m) {
+                    long a2 = 0;
+                    while (a2 < (long)mn && !found) {
+                        long e2 = a2, tabs = 0, s3 = -1, j;
+                        while (e2 < (long)mn && m[e2] != '\n') e2++;
+                        if (m[a2] != '#') for (j = a2; j < e2; j++) if (m[j] == '\t' && ++tabs == 3) { s3 = j + 1; break; }
+                        if (s3 >= 0 && e2 - s3 == rl && eqb(m + s3, rel, rl)) found = 1;
+                        a2 = e2 + 1;
+                    }
+                    free(m);
+                    if (found) { for (i = 0; i < f[1] - 1 - f[0]; i++) pkg[i] = t[f[0] + i]; pkg[f[1] - 1 - f[0]] = 0; }
+                }
+            }
+        }
+        at = e + 1;
+    }
+    free(t);
+    return found;
+}
+/* 1 when package PKG's interface is proven the same in HEAD and in the work tree; WHY names the probe that decided */
+static int iface_same(const char *pkg, const char **why) {
+    char man[400]; Buf o = {0, 0, 0};
+    if (iface_verdict) { *why = "verdict-hook"; return tx_eqz(iface_verdict, "same"); }
+    if (cx_fmt(man, sizeof man, "build/layer-api/%s.tsv", pkg)) { *why = "pkg-name"; return 0; }
+    { char *v[] = {"git", "diff", "--quiet", "HEAD", "--", man, "build/iface-hash.tsv", 0}; if (read_all(v, &o) != 0) { *why = "manifest-differs-from-HEAD"; return 0; } }
+    { char *v[] = {"sh", "./unisacc.com", "tools/iface-hash.cx", "--", "--check", 0}; if (read_all(v, &o) != 0) { *why = "iface-hash-check"; return 0; } }
+    { char *v[] = {"sh", "./unisacc.com", "tools/layer-api.cx", "--", "--check", "--pkg", (char *)pkg, 0}; if (read_all(v, &o) != 0) { *why = "layer-api-check"; return 0; } }
+    *why = "same"; return 1;
+}
+/* 1 when batch root REL sits in the directory of changed node CI or uses it directly (or cannot be told) */
+static int iface_direct(const char *rel, int ci) {
+    int ni = path_node(rel, 0), k; const char *a, *c = display(ci); long la, lc, da = -1, dc = -1, i;
+    if (ni < 0 || !node[ni].parsed) return 1;
+    for (k = 0; k < node[ni].nuse; k++) if (node[ni].use[k] == ci) return 1;
+    a = display(ni); la = tx_len(a, 4096); lc = tx_len(c, 4096);
+    for (i = 0; i < la; i++) if (a[i] == '/') da = i;
+    for (i = 0; i < lc; i++) if (c[i] == '/') dc = i;
+    return da >= 0 && da == dc && eqb(a, c, da);
+}
+
 static int closure_dump;
-static int materials_dump;   /* --materials-dump: report each declared material's resolved source and stop */
+static int materials_dump;  /* --materials-dump: report each declared material's resolved source and stop */
 static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
 static void usage(void) {
-    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] | --users FILE | --closure-dump\n");
+    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] [--iface-narrow] [--full] | --users FILE | --closure-dump\n");
     exit(2);
 }
 int main(int argc, char **argv) {
@@ -1002,6 +1068,12 @@ int main(int argc, char **argv) {
             if (!known[q]) die("--layer: base|ext|stream|compiler|driver|chain|release|all");
         }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
+        else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
+        else if (tx_eqz(argv[a], "--iface-verdict") && a + 1 < argc) {   /* test hook */
+            iface_verdict = argv[a + 1]; a += 2;
+            if (!tx_eqz(iface_verdict, "same") && !tx_eqz(iface_verdict, "changed")) usage();
+        }
         else if (tx_eqz(argv[a], "--prepare-materials")) { prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
@@ -1088,6 +1160,27 @@ int main(int argc, char **argv) {
             at += ln + 1;
         }
     } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
+    {   /* interface narrowing: off unless asked, never at --tier release, never with --full, and only when
+           every changed file is a unit of a package whose interface is proven unchanged */
+        const char *state = "off", *reason = "not-requested"; static char ipkg[128];
+        if (iface_narrow) {
+            if (iface_full) reason = "full";
+            else if (selected_tier && tx_eqz(selected_tier, "release")) reason = "release-tier";
+            else if (!nch) reason = "no-changed-file";
+            else {
+                state = "on"; reason = "same";
+                for (k = 0; k < nch; k++) {
+                    const char *w = "same";
+                    if (!iface_pkg(display(changed[k]), ipkg, (long)sizeof ipkg)) { state = "off"; reason = "file-outside-packages"; break; }
+                    if (!iface_same(ipkg, &w)) { state = "off"; reason = tx_eqz(w, "verdict-hook") ? "interface-changed" : w; break; }
+                }
+            }
+            if (tx_eqz(state, "off")) iface_narrow = 0;
+            if (iface_narrow && (iface_full || (selected_tier && tx_eqz(selected_tier, "release")))) die("iface narrowing reached a full-selection path");
+            printf("IFACE_NARROW\tstate=%s\treason=%s\n", state, reason);
+        }
+    }
+    int ndefer = 0;
     {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
         /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
         for (b = 0; b < nbatch; b++) {
@@ -1106,6 +1199,12 @@ int main(int argc, char **argv) {
                 if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; }
             }
             if (v == V_NONE) continue;
+            if (iface_narrow && (v == V_USE || v == V_LITUSE || v == V_ARGUSE) && !batch_has_guard(batch[b].id)
+                && !iface_direct(batch[b].source, why)
+                && (tx_chr(batch[b].entry, tx_len(batch[b].entry, 4096), '{') >= 0 || !iface_direct(batch[b].entry, why))) {
+                printf("DEFERRED_BY_IFACE\t%s\twhy=%s\tvia=%s\treason=interface-unchanged\n", batch[b].id, display(why), via_name[v]);
+                ndefer++; continue;
+            }
             printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
         }
@@ -1114,6 +1213,7 @@ int main(int argc, char **argv) {
                 t_mark, t_match, t_sweep < 0 ? 0 : t_sweep, nbatch, nnode, nch);
         fprintf(stderr, "LIST_TIMING2\tparse_ms=%ld\twalk_ms=%ld\n", t_parse, t_walk);
     }
+    if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel, ndefer + nsel);
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }
