@@ -1,0 +1,51 @@
+/* Checks tools/run-startup-bench.cx K5 options: default call unchanged (4 samples, failed=0, no E3CACHE line, LOAD1 present),
+   --product PATH accepted (explicit installed product), --e3cache DIR prints E3CACHE entries=N (before/after-first),
+   missing --product file refused by name, missing option values refused, extra positional refused.
+   Prints CHECK_RUN_STARTUP_BENCH<TAB>assertions=N failed=N. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+static int failed, total;
+static void ck(int ok, const char *n) { total++; if (!ok) failed++; printf("%s\trun-startup-bench-check.%s\n", ok ? "PASS" : "FAIL", n); }
+static int has(const char *s, const char *w) {
+    if (!s) return 0;
+    size_t n = strlen(w);
+    for (; *s; s++) if (!strncmp(s, w, n)) return 1;
+    return 0;
+}
+static int run(char **x, np_result *r) {
+    char *v[20] = { "tools/bound", "50", "sh", "./unisacc.com", "tools/run-startup-bench.cx", "--" }; int i = 6; char why[512];
+    while (*x && i < 19) v[i++] = *x++;
+    v[i] = 0; return np_run(v, 0, 0, 55, r, why, sizeof why) ? -1 : r->rc;
+}
+int main(int argc, char **argv) {
+    char d[4096], o1[4400], o2[4400], o3[4400], e3[4400], root[4096], prod[4400]; np_result r = { 0 };
+    if (!realpath(".", root) || cx_fmt(d, sizeof d, "%s/check-run-startup-bench-%d", sy_tmpdir(), (int)getpid())) return 2;
+    sy_mkdir(d, 0700);
+    if (cx_fmt(o1, sizeof o1, "%s/a", d) || cx_fmt(o2, sizeof o2, "%s/b", d) || cx_fmt(o3, sizeof o3, "%s/c", d) || cx_fmt(e3, sizeof e3, "%s/e3", d)) return 2;
+    if (argc != 2 || snprintf(prod, sizeof prod, "%s", argv[1]) >= (int)sizeof prod) return 2; /* argv[1]: product entry to pass to --product */
+    sy_mkdir(e3, 0700);
+    char *a1[] = { root, o1, 0 };
+    int rc = run(a1, &r);
+    ck(rc == 0 && has(r.out, "RUN_STARTUP_BENCH\tsamples=4\tassertions=9\tfailed=0"), "default-call-unchanged");
+    ck(!has(r.out, "E3CACHE"), "default-no-e3cache-line");
+    ck(has(r.out, "LOAD1 ") && has(r.out, "when=before"), "load1-line");
+    np_free(&r);
+    char *a2[] = { root, o2, "--product", prod, "--e3cache", e3, 0 };
+    rc = run(a2, &r);
+    ck(rc == 0 && has(r.out, "failed=0") && has(r.out, "product="), "product-option-accepted");
+    ck(has(r.out, "E3CACHE entries=") && has(r.out, "when=after-first"), "e3cache-line");
+    np_free(&r);
+    char *a3[] = { root, o3, "--product", "/nonexistent/candidate.bin", 0 };
+    rc = run(a3, &r);
+    ck(rc == 2 && has(r.err, "REFUSE product missing"), "missing-product-named-refusal");
+    np_free(&r);
+    char o4[4400]; if (cx_fmt(o4, sizeof o4, "%s/d", d)) return 2;
+    char *a4[] = { root, o4, "--product", 0 };
+    rc = run(a4, &r);
+    ck(rc == 2 && has(r.err, "--product needs PATH"), "product-value-required");
+    np_free(&r);
+    printf("CHECK_RUN_STARTUP_BENCH\tassertions=%d failed=%d\n", total, failed);
+    return failed ? 1 : 0;
+}
