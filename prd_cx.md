@@ -1569,7 +1569,8 @@ src/ 四条明细:`LEAK src/drivestream.cx:222`、`:223`、`:229`(fn=ds_attr_in,
 
 **仍是运行期而非编译期的性质**(乙期落地后也不变):use-after-release(仅 `cm_*` 面按 token 拒绝,`mm_*`/`mg_*`/`ms_*`/`sy_*` 面无检查);越界(仅经带界接口的访问);双释放(仅 `cm_*` 面与 `mg_free` 清零路径);借用冲突(仅 `cm_*` 计数);句柄伪造与复制(无任何检查)。完全没有的:数据竞争免疫、裸指针别名安全、生命周期证明。OWN-E1 是声明一致性检查,不是所有权系统;发布说明继续保留「运行期检查,不是编译期所有权」一句。
 
-UNMEASURED 汇总:cx-own 对 cx/、src/ 的误报率与漏报率;public ESCAPE-RETURN 与 ESCAPE-STORE 条数;`cm_*` 面的产品调用者数;`src/drivestream.cx:229` 一条 LEAK 的真伪;乙期规划期耗时增量;osx、win 宿主上 cx-own 的基线(本轮只在 Linux x86_64 跑)。
+UNMEASURED 汇总:cx-own 对 cx/、src/ 的误报率与漏报率;public ESCAPE-RETURN 与 ESCAPE-STORE 条数;`cm_*` 面的产品调用者数;乙期规划期耗时增量;osx、win 宿主上 cx-own 的基线(本轮只在 Linux x86_64 跑)。
+复核结论(2026-11-14,cx-own 复现 leak=3 double_free=1):ds_attr_in 的 LEAK 222、223、229 三条均为真漏放(错误路径):220 行 mm_alloc 的 tab 在 mm_copy 失败(222)、mm_move 失败(223)、st_attr_reset 失败(229)三处 return 1 前未释放,成功路径经 230 行 st_attr_exchange 转交,故只漏在失败时,触发需分配后复制、移动或重置返回非零(注入失败夹具,当前无);补丁 ~/.cache/unisacc/patches-0.0.65/own-leak.patch.txt(git apply --check rc 0,未应用,待 0.0.63 冻结后);另 else 分支 cxaf_strip 失败时 tab 归属未核(未验证);src/stages.cx:370 的 DOUBLE-FREE 为误报:369 与 370 行 pr==3 与 pr==2 互斥,同一次进入至多释放一次 owned。
 
 ## 12. 状态事实表化(2026-11-14,只读评估与设计;未实现,不得记 PASS)
 - SFT-0 结论:缺的不是数据库,是"状态"这一类事实还没进表。代码侧已有 57 张登记表(build/table-index.tsv),状态侧只有一份 168820 字节的 prd_mempalace.md,建文件当天(2026-11-14 10:53 起约 9 小时)被提交 110 次,峰值每小时 24 次;先把"仍未验证"16 条做成一张表并只读对拍(SFT-S0),对拍为 0 差异后再让文档该节由表生成。不用 SQLite、python、node,只用 TSV 加 .cx。
