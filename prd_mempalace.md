@@ -12,7 +12,7 @@
 ## 当前发布与版本
 
 - 已公开:0.0.61(2026-11-14,Latest;tag v0.0.61 与 v0.0.61-src 均指冻结提交 d4b3bf72f7ae;APE sha256 c4c47ecb97ee70865edaf39d91e29f5b22b6c8efdbcfb81c4482517ffc0224c3,7022820 B)。裁决 NOT_QUALIFIED unknown=1(s9 未跑),CI 六目标原生作业全 success(run 43554326355),发布说明 plans/release-notes-0.0.61.md,撤回办法 release/rollback.txt。
-- 已装根:本机根是 real4 中间产物 c55533c7(版本串 0.0.59,非发布件);要装发布件:下载公开 unisacc.com 后 `tools/install-ape.cx -- ROOT APE SHA256 --write`。备份 ROOT/unisacc.com.059(未入库)。
+- 已装根:本机根已是公开 0.0.61 发布件(sha256 同上)。real5 整链(同 REV b418cb5d86)打包产物 sha256 与之逐字节相同,两次独立整链可复现。
 - 实测(0.0.61 发布件 vs 0.0.59 基线):first_e2e 675/676/695 ms 对 796/815;冷编译 -24% 到 -32%;数字与样本数见 build/speed-baseline.tsv 与发布说明。整链 4829 s。
 - 公开后大扫除已做:私有构造根只留 log/cxroot.tsv,chains/snap、local-0060、37 个无可执行位的 tlib kit 已清;借用的 osx cache-manager 副本在 ~/.cache/unisacc/borrowed-cm/。
 
@@ -29,7 +29,10 @@
 - 约 80 个批次此前红,大半属 FTRIM-bootstrap(装新产品后复验);27 + 36 个批次因窗口 DEFERRED 未跑;osx/win 平台批次需对应主机,无证据。
 - check-stdio-buffer 不覆盖 --link-only 与子集编译的缓存 identity 一致性;tty/pty 路径未测;六目标未跑。
 - build/speed-baseline.tsv 未更新;run-startup-bench、check-bench-gencode、speed-probe 对新产物未跑。
-- 整链 77 分钟(4625 s);g2/g3 的 objects 相按目标串行约 2480 s。fable 正在改相并发;预期节省未实跑。
+- 整链:real5(g2/g3 linux 对并发,G_LNX_PAIR=2)3538 s,real4 为 4759 s(-26%);只有这一组对照,未控制机器负载,不作结论。pack 37 s。
+- 已入库待新产品验证:cx-namespace CX-U-2 三缺口具名拒绝(57c7427f6f,cx.plan 0.1.2、cx.compile 0.2.6),旧产品上标 UNVERIFIED,下一轮整链后复验。
+- 已入库工具:tools/derive.cx 派生物总闸(六个生成器 --check 全 OK,22 s)、tools/status.cx(--fast 实测 0.97 s 热态)、affected --iface-narrow 按包判定(cx/text/text.cx 实测 903 -> 765 选中)。tools/status.cx 的测试夹具由子代理用过 sed -i,属违规已记于此,内容未重审。
+- affected-tool、affected-list 批次 FAIL(tape-gap-literal、fixture-literal 两条),HEAD 版同样失败,根因未查;affected-iface2 批次未取得实跑结果。
 - cx 模块语法缺口(prd_cx_spec.md 实测,2026-11-14):`use m::sym as alias` 能通过规划但运行报 `no host function slen`(rc 127),设计文档称已端到端实现,与实测不符;`#pragma unisa export` 未实现(`unknown unisa pragma export`);`use sys.*` 通配从未设计(`bad module name`);仓外脚本找不到包根,需脚本目录放仓根链接与自备 cxroot.tsv。0.0.62 若做 export/通配,属 cxmod 三源(cx/cx0/plan.cx、src/cxmod.c、cx/compiler/cxmod.cx)产品输入,先修别名。
 - cx 模块身份缺口(2026-11-14 实测):同一文件经两条路径(软链 tools/cxlib/sys -> cx/sys)被 cxmod 当成两个模块,报 `sy_env exported by both env (tools/cxlib/sys/env.cx:11) and sys.env (cx/sys/env.cx:11)`,使 tools/osx-sentinel.cx 等经 cxlib.toolselfpath 与 cxlib.netpack 的工具编不过。修法:cxmod 解析模块文件时按 realpath 规范化身份(cxmod 三源产品输入,排在别名修复 T5 之后,同写域串行);冻结的 cx/sys 不改。
 - 既有红 wt-gate(5/8 断言失败,与退役和 ext.net 无关,干净工作树也红):tools/all-waves.cx 的 wave 在 `-run` 方式下要求自身可执行文件同目录有原生 `run-batch`(`executor-run-batch-required /run-batch`,tools/all-waves.cx:339),check-wt-gate 以 `sh ./unisacc.com tools/all-waves.cx` 起它,不满足。需改 check 的起法或 all-waves 的执行器发现,未做。slice-migration-gen 另有 source-missing cx/compiler/frames.cx(该文件 HEAD 未跟踪)。
