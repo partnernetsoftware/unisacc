@@ -327,7 +327,7 @@ static void step_pin(const char *root, int secs) {
    NAME.native 只构造一次,NAME.pin 记录工具名、输出目录、构造时源码 sha 与可执行体 sha256;之后每次
    (每进程首次)核对,可执行体字节变化拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录
    拒绝 "REFUSE chain-tool pin dir mismatch"。检出内工具改动不影响本输出,与 chain-step 同。 */
-static int pin_busy;
+static int pin_busy, pin_soft;
 static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap) {
     static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", "chain-pace", 0};
     static char done[5][4400];
@@ -359,6 +359,7 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
         pin_busy = 1;
         int rc = bound_sh_secs(root, a, secs);
         pin_busy = 0;
+        if (rc && pin_soft) { sy_close(lock); return 0; }   /* the read-only watchdog may fail to build without stopping the chain */
         if (rc) die("chain-tool pin build", tool);
         step_hash(tool, shash);
         step_hash(tmp, hash);
@@ -2329,8 +2330,18 @@ static void watch_start(const char *root,const char *dir,const char *baseline) {
     if(cx_fmt(source,sizeof source,"%s/tools/chain-pace.cx",root))die("watch source",root);
     /* Reuse the chain's source-build pin contract, never runnerprep's tlib preparation path. */
     step_out=dir;
-    if(!tool_pinned(root,source,40,pace,sizeof pace))die("watch prepare",source);
+    pin_soft=1;
+    const char *pinned=tool_pinned(root,source,40,pace,sizeof pace);
+    pin_soft=0;
     step_out=saved_out;
+    if(!pinned){   /* the watchdog is a read-only observer: no watch.pid, the chain goes on */
+        char report[4400];
+        hb(dir,"watch","WATCH-UNAVAILABLE\tprepare-failed");
+        if(cx_fmt(report,sizeof report,"%s/watch.tsv",dir))die("watch report path",dir);
+        int fd=sy_open(report,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0644);
+        if(fd<0||sy_write_all(fd,"WATCH-UNAVAILABLE\tprepare-failed\n",33)||sy_close(fd))die("watch unavailable report",dir);
+        return;
+    }
     if(cx_fmt(table,sizeof table,"%s/watch-thresholds.tsv",dir)||
        cx_fmt(pidfile,sizeof pidfile,"%s/watch.pid",dir))die("watch path",dir);
     sy_stat_t st;int missing=baseline?sy_stat(baseline,&st):-ENOENT;
