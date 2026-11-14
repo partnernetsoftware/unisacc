@@ -818,6 +818,21 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 | T7 | 区标与投影表:plan.cx 加五对 `CX0_HOST` 区标,建 `cx/cx0/projection.tsv` 与 `cx/cx0/proj/` 片段,`cx0-extract` 改读表,`src/cxmod.c` 逐字节不变 | `cx/cx0/plan.cx`(与 T6 串行)、`cx/cx0/projection.tsv`、`cx/cx0/proj/`、`tools/cx0-extract.cx` | 是(区标是注释,投影后须从 C 目标剥掉,保证字节不变) | 否(在 T6 之后) | `cx0-extract -- --check` 的 sha256 与 T6 结束时相同;工具内不再有 `replace_one(body,"` 字面量(`grep -c` 为 0) |
 | T8 | 产品目标切换:`--all` 生成 `cx/compiler/cxmod.cx`,删手写件的手工对齐义务,登记批次 | `cx/compiler/cxmod.cx`(生成)、`tools/check-cx0-extract-all.cx`、批次行、`tests/module/units.cx` 只增断言 | 是 | 否(在 T7 之后) | `sh ./unisacc.com tools/cx0-extract.cx -- --check --all` 两行均 `EXACT`、rc=0;`sh ./unisacc.com tools/affected.cx -- --files cx/compiler/cxmod.cx --run` 全绿;`sh ./unisacc.com tests/module/check.cx` 断言数不减 |
 
+T6 归属表(N10,2026-11-14,只读取证;来源 `tools/cx0-diff.cx -- --pair plan.cx cxmod.cx` 实测 8 行 e/f/x 待判:6 行语义分叉加 2 行类 x 待核,不是 14 行;`build/cx0-three-source-diff.tsv` 另含 plan-vs-c 3 行、c-vs-prod 8 行,是同批分叉在 cxmod.cx 视角的重复投影,随下表同归属;未实跑修改,不记 PASS):
+
+| plan 行 / prod 行 | 类 | 归属 | 依据 |
+|---|---|---|---|
+| 1-78 / 1-28 | f | 宿主片段 | 模块头(`#pragma unisa module/use`)与投影说明注释,只在 plan.cx 的 CX0 实际编译形态有意义,属 cx/cx0/proj/ 头片段 |
+| 90 / 65-68 | e | 上移到 plan.cx | prod 有 `cxm_funit` 与 -funit 注释,plan 没有;引入提交 `git log -S cxm_funit`:b393ac30bc(-funit 只编命令行单元),权威源缺该能力 |
+| 124 / (无) | x | 可删(已冗余) | plan 单独声明 `cxm_rootn`("宿主从不读"),上移 funit 后与 prod 同行 `cxm_funit; cxm_rootn` 合并,此行冗余 |
+| 527 / 509 | f | 上移到 plan.cx | `cxm_n >= CXM_MAXU` 文案写死 "96",prod 为 `cxm_md(CXM_MAXU)`;即 T6 本体(MAXU 统一 128,文案拼数字) |
+| 930 / 913 | x | 上移到 plan.cx | `cxm_text` 的符号级导入说明(SYM 非空只出该原型)只在 prod 注释;引入 e32df07ef4(`-S _sym`、符号级导入),plan 须同步,否则 D3 无权威注释 |
+| 1296 / 1278 | e | 宿主片段 | `cxm_checkcalls` plan 为 static,prod 为外部可见;T5 已上移函数体(b2f2e45ef6),可见性是投影差,D1 export 落地后由 `export` 统一,此前留投影片段 |
+| 1324 / 1306 | f | 上移到 plan.cx | `u >= CXM_MAXU` 文案写死 "96",同 527 行,属 T6 |
+| 1460-1512 / 1442-1450 | e | 宿主片段(其中 `cxm_count` 的 funit 分支上移) | plan 为 CX0_COMPAT_BODY_END 后的 `cx0_*` 读写封装(read_all/invalid/execute,只宿主用);prod 为 `cxm_count/set_funit/unit_path/wants_*/set_on` 取值器,属 cx/cx0/proj/;`cxm_count` 返回 funit 时的 rootn,随第 90 行上移 |
+
+对 D1 至 D3 的先后影响(上移项:90、527、930、1324 四行):(1) 90、527、1324 是 T6 与 funit 同批,须在 D1(export)之前落,否则 D1 的导出集在 plan.cx 与 prod 间仍差 funit 访问器与 MAXU 文案,三源 `--check` 无法收敛;(2) 930 是符号导入(D3)的前置,只需在 D3 前落,不挡 D1、D2;(3) D2(通配)不依赖任一上移行;(4) 1296 与 1460 的宿主片段在 D1 之后可再收缩为 `export` 标注,不阻塞 D1。排序:T6(90、527、1324)-> D1 -> D2 -> 930 -> D3。
+
 - 并发关系:T1、T2、T3、T4 写域互不相交,可同时派;T5 至 T8 都写 plan.cx,串行。T5 至 T8 合计四个 15 分钟片,排在 D1 之前。
 - 遍历消费者(限时与字面量改读表的铁律):T6 的消费者清单是 `cx/cx0/plan.cx`、`src/cxmod.c`、`cx/compiler/cxmod.cx`、`DV_MAXU` 的使用方(`grep -rn DV_MAXU src cx`)、`exec/facts/limits.tsv:2`、`tools/check-cxmod-tri.cx:122`;T8 的消费者是 15 个 `use compiler.cxmod` 的文件(`grep -rln 'compiler.cxmod' src cx tools tests`,其中 `src/` 6 个)。
 - 未验证与风险:(1) 生成的产品件能否与现手写件逐字节相等:UNMEASURED,T3 给数;不等时以「差异逐行归入六类且 `tests/module/units.cx` 全绿」为准,不强求字节相等。(2) srcshape 对 `src/cxmod.c`:已核实不计(T4,见上;cxapis、cxlibc 对生成物 `cx/compiler/cxmod.cx` 的影响仍 UNVERIFIED,未跑 `tools/ratchets.cx`)。(3) MAXU 升到 128 后宿主静态内存增量:UNMEASURED。(4) `cxm_checkcalls` 上移后宿主侧语料新拒绝:T4 实测对 `tests/cxcc/units.tsv` 全部 10 个源与 `tests/cx-host-run.cx` 共 11 个文件逐个跑产品 `cxm_plan`(`sh ./unisacc.com tools/check-cxmod-tri.cx -- --prod FILE`):因 "call to undeclared function" 被拒 0 个;被拒 3 个均为表内 refuse 正例(cxcc_missing、cxcycle/ping、cxstd_unknown,原因分别为缺模块、环、未知 std 模块),其余 8 个 rc=0。产品源本就含 `cxm_checkcalls`,上移不改变这批结论。未覆盖:`tests/cx-host-run.cx` 内联字符串夹具(运行时才生成)与其它批次语料:UNVERIFIED。T5 验收仍须加跑批次 `cx-host-run`。(5) 本节全部为设计,T1 至 T8 均未开工。
