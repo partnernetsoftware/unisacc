@@ -2,7 +2,11 @@
 
 状态:草稿,定稿于公开之前。沿用 plans/release-notes-0.0.62.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。候选提交、CI run、sha256、公开时间、裁决等字段尚无事实,标"待填",由发布流程填写,不得臆测。
 
-- 冻结提交、候选 APE sha256、同候选 CI run、公开时间、release/decision.txt 裁决:待填(首个冻结候选整链尚未起,见未达项)。
+- 冻结提交(F):9f3d367e44d7e6e89aca9279272f0b0472e31166;候选表提交(X,仅改 release/candidate.tsv):86e85e60c8686e50c3330b6496505811465216f1。
+- 候选 APE(unisacc.com)sha256:04b85e6e4ec3ddcb076aa5af02185ee8f3f8f1e3e9c5808776ab0a5e21b2c9a5。
+- 同候选 CI:candidate-native.yml run 43600577542,completed success,10 个作业全 success,含 6 个平台候选作业。
+- 草稿 release v0.0.63(未公开)资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。
+- 公开时间:待填(公开后由读回填);release/decision.txt 裁决(公开前,tools/release-decide.cx 实跑):NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN;读回在公开后补)。
 - 速度数字只引 build/speed-baseline.tsv 已有行,下文逐条标出处;未测不写数。
 - 规划与口径依据:prd_mempalace.md "下一动作(0.0.63,fable 第五轮规划 2026-11-14)"节的卖点四条与未达项。
 
@@ -65,8 +69,11 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 (1) first_e2e 500 ms 门未过。63A 候选(30ef6915)hello 口径 n=3:676.7/684.8/683.8 ms,中位 683.8 ms;已装 0.0.62 同口径 675.2/675.7/655.1,中位 675.2 ms;load1 3.5 至 5.8 noisy,9/9 断言过。出处:speed-baseline.tsv "63A 重建候选 30ef6915 / tools/run-startup-bench.cx --product"行。E3TRIM3 候选同工具 n=5(同表 startup_first 两行):ca36d2eb 中位 687 ms 对 0.0.62 的 691 ms;227e63f5998e 中位 664 ms 对 678 ms。即 hello 口径冷启动本版无改善,持平。冷编译与生成代码同样持平,本版不宣称变化(同表 227e63f5998e 各行,n=5):tools/edit-span.cx 冷编译 2743 ms 对 0.0.62 的 2674 ms,五次区间重叠(更早一行的 2745 对 3523 未复现,不采用);tools/ratchets.cx 冷编译 5061 对 5239 ms;gencode sha 8MB 单轮 1013 对 970 ms,经 ABAB 交错 n=15 复测为 997.1 对 995.4 ms,两编译器产出的可执行文件逐字节相同,判噪声。L1 方案 A 与 N7 未带(决定:收益为推算、同字节合同风险未测,见 prd_mempalace.md),500 ms 门顺延,不放宽。
 (2) E3TRIM3 淘汰路径耗时未测:现有满预算实测总量未超限额,淘汰到 90% 的一次性开销 UNMEASURED。若冻结时 E3TRIM3 新旧断言或满预算曲线不满足带入规则,本节(1)将改写为"顶满预算的目录无收益"。
-(3) s9 daily 与 release 档未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑、结果如实入说明、不卡发布。0.0.62 上 commit 档实测 289 批通过、11 失败(8 转绿、3 已修,提交 d892ef38b9;该三批 chain-phases-gen、cx-driver-deps、dock-audit 于 2026-11-14 在 main 2bd89d4ead 单独复跑 PASS)、4 个 watchdog UNKNOWN 未复测;0.0.63 候选的 s9 判定:待填。daily 档预测约 16111 s 为条件值,墙钟 UNMEASURED。
-(4) 候选级证据全部待填:首个冻结候选整链、同候选 CI、本机全批资格、候选速度基线(candidate 自含入口与发布件入口的差异未隔离)。
+(3) s9 daily 与 release 档未跑:按决定只有 commit 档计划卡发布,daily 与 release 档夜跑、结果如实入说明、不卡发布。0.0.62 上 commit 档实测 289 批通过、11 失败(8 转绿、3 已修,提交 d892ef38b9;该三批 chain-phases-gen、cx-driver-deps、dock-audit 于 2026-11-14 在 main 2bd89d4ead 单独复跑 PASS)、4 个 watchdog UNKNOWN 未复测;0.0.63 候选的 s9 commit 档(在冻结 F 的快照根上实跑,主机范围 lnx/x86_64):选中 321 批,313 PASS、6 FAIL、2 UNKNOWN,工具裁决 `S9_VERDICT 4 UNKNOWN reason=tier-commit-not-full`(commit 档按设计不给全批资格),decision.txt STEP 4 记 UNKNOWN,不写 PASS。6 个 FAIL 的定因:derive、tlib-frozen 为 0.0.63 真缺陷,属检查与登记,不进产品(check-derive 断言未随第九个生成器入册更新;tools.cxlib 改动后未补版本号致冻结摘要不符),已在 main 提交 41a15ffc7f 修复;发布树(F)内含这两项检查的旧版,即在 F 上重跑仍会红。release-usage 推断为真缺陷,未单跑复核(UNVERIFIED)。chain-batchkeys、preflight-tool、report-verify-tool 定因为冻结快照根的环境所致,未在其他根复跑证实(UNVERIFIED)。2 个 UNKNOWN 为 fixedpoint-sample、prechain-gate(watchdog-deadline,既有,未复测)。daily 档预测约 16111 s 为条件值,墙钟 UNMEASURED。
+(4) 候选级证据:
+- 整链 real7:共三段。前两段因设置 UNISACC_RUN_CACHE=0,在 g2 阶段超时失败;第三段通过(rc=0,compare 通过,产物 unisacc-next.com sha 8312372d7af1e23d,冻结 F 为 9f3d367e44d7)。前两段失败原始记录保留,不抹去。
+- 同候选 CI:run 43600577542,10 个作业全 success,含 6 个平台候选作业。osx 与 win 平台证据范围以该 run 作业为准,不扩大解读,见未达项 (5)。
+- 本机全批资格:未取得(s9 commit 档 313 PASS、6 FAIL、2 UNKNOWN,见 (3));仍待填:候选速度基线:build/speed-baseline.tsv 中暂无含 9f3d367e44d7 的行(grep 计数 0),待填,未测不写数(candidate 自含入口与发布件入口的差异未隔离)。
 (5) osx 与 win 平台证据:沿用 0.0.62 缺口,0.0.63 未新增平台实跑,UNVERIFIED。
 
 ## 0.0.62 已知缺口里仍开的项
@@ -86,7 +93,7 @@ E3TRIM3(低水位淘汰,淘汰到预算的 90%、记账门槛 100%,入库提交 
 
 ## 撤回与回滚
 
-按运行手册(release/rollback.txt 形态,0.0.63 版:待填):撤回公开用 `gh release edit v0.0.63 --draft=true` 并把 v0.0.62 重设为 Latest;main 上提交只用 `git revert`,不 force push;本机根回退用 `tools/install-ape.cx --rollback`。回滚核对项:资产件数按 6 件,不得按七件核对。
+按运行手册(release/rollback.txt 形态,0.0.63 版已写,首行含 0.0.63,随 Y1 入库):撤回公开用 `gh release edit v0.0.63 --draft=true` 并把 v0.0.62 重设为 Latest;main 上提交只用 `git revert`,不 force push;本机根回退用 `tools/install-ape.cx --rollback`。回滚核对项:资产件数按 6 件,不得按七件核对。
 
 规则:发布页正文必须与本文件逐字相同,公开后读回核对;读回结果记账本。
 
