@@ -654,8 +654,21 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 ### 10.4 先行实验与预估(本节数字由段 2 实测后原位更新;未测项标 UNMEASURED)
 
-- text.text 拆面波及面:UNMEASURED(待副本实验)。
-- 符号级选批对单函数的选批数:UNMEASURED。
+- text.text 拆面波及面(2026-11-14 实测,A11,只读):当前改 text.cx 任一符号,`affected.cx --files cx/text/text.cx --list-only --iface-narrow --symbol-narrow SYM` 对 tx_find、tx_rfind、tx_copy、tx_trim、tx_fields、tx_eq、tx_len、tx_prefix、tx_count 全部给 batches=769(scanned=1073),符号级收窄对 text.text 内符号等于没收窄;只有 tx_upper(定义不在 text.cx)给 4。拆面后预计批次数的算法:`symindex.cx calls SYM --tracked` 取各族调用点文件(去 archive/ 与 text.cx 自身),再 `affected.cx --files <这些文件> --list-only` 数 use 闭包波及批次(上界:调用方文件变动波及,而非调用方使用该族):
+
+| 族(符号) | 调用文件数 | 当前选中批次 | 拆面后预计批次 |
+|---|---|---|---|
+| find(tx_find tx_rfind tx_chr tx_rchr tx_contains) | 201 | 769 | 385 |
+| copy(tx_copy) | 130 | 769 | 459 |
+| trim(tx_trim tx_trimc tx_is_ws) | 2 | 769 | 1 |
+| split(tx_fields tx_field tx_count) | 44 | 769 | 207 |
+| cmp(tx_eq tx_eqz tx_same tx_cmp) | 487 | 769 | 596 |
+| prefix(tx_prefix tx_prefixz tx_suffix) | 93 | 769 | 266 |
+| len(tx_len) | 308 | 769 | 420 |
+| upper(tx_upper,对照) | 2 | 4 | 15 |
+
+  结论:trim、split、prefix 拆成独立模块收益大(769 -> 1/207/266),find 减半,cmp 与 len 收益有限(调用面广)。未测:真实拆面后的 use 闭包(未改源码,为调用文件反推估算)、拆面对 tx_* 内部互相调用的影响;upper 估算(15)大于符号收窄(4),说明该估算偏保守。
+- 符号级选批对单函数的选批数:text.text 内符号 769,text.text 外 tx_upper 4(见上);其它模块未测,UNMEASURED。
 - export 与通配原型:UNMEASURED(段 3,只出补丁,不入主仓)。
 
 ### 10.5 cxmod 三源归一(2026-11-14 设计;未实现,不得记 PASS;即 B2 的 55-1 细化)
