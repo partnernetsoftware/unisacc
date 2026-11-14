@@ -46,8 +46,8 @@
 | sy_sig_default | int sy_sig_default(int sig); | QuickJS os.signal(sig, null); SIG_DFL | -errno | impl | impl | refuse:ENOSYS cap=posix-signal | exists | - | pre | 0.1.0 | none | - |
 | sy_sig_ignore | int sy_sig_ignore(int sig); | QuickJS os.signal(sig, undefined); SIG_IGN | -errno | impl | impl | refuse:ENOSYS cap=posix-signal | exists | - | pre | 0.1.0 | none | - |
 | sy_raise | int sy_raise(int sig); | C raise; Node process.kill(process.pid) | -errno | impl | impl | refuse:ENOSYS cap=posix-signal | exists | - | pre | 0.1.0 | none | - |
-| sy_sig_watch | int sy_sig_watch(int sig); | Rust(signal-hook) flag::register; Node process.on(signal) | -errno;-EINVAL | impl:处理函数只置位 | impl:kqueue EVFILT_SIGNAL,不进处理函数 | impl:SetConsoleCtrlHandler,仅 SIGINT 与 SIGTERM,其余 -EINVAL | new | 置位式,不跑用户回调;三平台同一合同;不可捕获的信号 | pre | 0.1.0 | none | - |
-| sy_sig_taken | int sy_sig_taken(int sig); | Rust(signal-hook) AtomicBool::swap | -EINVAL;ret:needlen | impl | impl | impl | new | 未 watch;返回自上次调用以来的次数并清零 | pre | 0.1.0 | none | - |
+| sy_sig_watch | int sy_sig_watch(int sig); | Rust(signal-hook) flag::register; Node process.on(signal) | -errno;-EINVAL | impl:处理函数只置位 | refuse:ENOSYS 随 sy_sig_handle,kqueue 未做 | refuse:ENOSYS 随 sy_sig_handle,SetConsoleCtrlHandler 未做 | exists | cx/sys/sigwatch.cx;置位式,不跑用户回调;经 sy_sig_handle 实现,仅 Linux;不可捕获的信号 -EINVAL | pre | 0.1.0 | none | - |
+| sy_sig_taken | int sy_sig_taken(int sig); | Rust(signal-hook) AtomicBool::swap | -EINVAL;ret:needlen | impl | refuse:ENOSYS 随 sy_sig_watch | refuse:ENOSYS 随 sy_sig_watch | exists | cx/sys/sigwatch.cx;未 watch 返回 0;返回自上次调用以来的次数并清零 | pre | 0.1.0 | none | - |
 | sy_sig_name | const char *sy_sig_name(int sig); | Node os.constants.signals 反查 | null | impl | impl | impl | exists | 返回 SIGINT 这类名字;表由事实表生成 | pre | 0.1.0 | none | cx-l0-sys-new |
 | sy_sig_number | int sy_sig_number(const char *name); | Node os.constants.signals | null | impl | impl | impl | exists | 各平台编号不同(SIGUSR1 等),上层不得写死数字 | pre | 0.1.0 | none | cx-l0-sys-new |
 | sy_atexit | int sy_atexit(void (*fn)(void)); | C atexit; Node process.on(exit) | -errno | impl | impl | unverified | exists | - | pre | 0.1.0 | none | - |
