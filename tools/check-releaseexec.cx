@@ -133,6 +133,27 @@ static void scenario(const char *name,const char *marker,int deadline,int mode) 
      if(sy_unlink(p))die("remove intent marker");ck(execute(state,cfg)==2,"dispatch-record-alone-still-refuses");
      path(p,fake,"log");char *trace=get(p);ck(trace&&count_sub(trace,"workflow run")==1,"started-dispatch-not-repeated");free(trace);
  }
+ if(mode==14||mode==15){
+     /* Y step end to end: seed phases 0..12 as completed (the fake CI can never unlock them), leave the
+        evidence/decision inputs the Y copy needs, put a hand-written rollback file in the fixture repo, resume. */
+     const char *ph[]={"candidate-sha","commit-x","push-x","draft","upload","draft-check","ci-dispatch","ci-observe","s9-commit","s9-release","s9-daily","draft-readback","decide"};
+     np_buf seed={0};char row[200],q[4400];
+     for(int k=0;k<13;k++){if(cx_fmt(row,sizeof row,"%s\tRUNNING\t0\t0\t-\n%s\tDONE\t0\t1\t-\n",ph[k],ph[k]))die("seed row");np_puts(&seed,row);}
+     path(p,state,"commit-x.txt");char *cx=get(p);ck(cx&&strlen(cx)>=40,"y-seed-has-recorded-X");free(cx);
+     path(p,state,"ci-run-id.txt");char *rid=get(p);ck(rid&&rid[0]>='0'&&rid[0]<='9',"y-seed-has-CI-run-id");free(rid);
+     path(p,state,"exec.tsv");put(p,seed.p);free(seed.p);
+     path(p,state,"evidence.tsv");put(p,"fixture evidence\n");path(p,state,"decide.out");put(p,"fixture decide\n");
+     const char *hand=mode==14?"# 1.2.3 private draft withdrawal\ngh hand written line\n":"# 1.2.2 private draft withdrawal\nnot this version\n";
+     path(p,repo,"release/rollback.txt");put(p,hand);
+     (void)execute(state,cfg);path(p,state,"exec.tsv");char *after=get(p);
+     ck(after&&find_sub(after,"commit-y\tDONE")!=0,mode==14?"y-step-keep-commit-y-done":"y-step-replace-commit-y-done");free(after);
+     path(p,repo,"release/rollback.txt");char *got=get(p);path(q,state,"rollback.txt");char *saved=get(q);
+     if(mode==14)ck(got&&saved&&!strcmp(got,hand)&&!strcmp(saved,hand),"y-step-handwritten-rollback-kept-verbatim");
+     else ck(got&&saved&&!strcmp(got,saved)&&find_sub(got,"release edit")&&find_sub(got,"# no tag is deleted")&&!find_sub(got,"not this version"),"y-step-stale-rollback-replaced-by-template");
+     free(got);free(saved);
+     char *lg[]={"git","-C",repo,"log","-1","--name-only","--format=%s",0};np_result r={0};char why[600];
+     ck(!np_run(lg,root,0,5,&r,why,sizeof why)&&r.rc==0&&find_sub(r.out,"Y: ci_run_id=")&&find_sub(r.out,"release/rollback.txt"),"y-step-commit-contains-rollback");np_free(&r);
+ }
  free(log);path(p,fake,"public");ck(sy_exists(p)!=1,"no-real-or-fake-publication");
  if(mode==0){path(p,assets,"pkg.bin");size_t n=0;char *saved=cx_read(p,&n);if(!saved)die("save package");put(p,"changed\n");ck(execute(state,cfg)==2,"changed-asset-identity-refused");if(cx_write(p,saved,n))die("restore package");free(saved);
  char *text=get(cfg);if(!text)die("config read");np_buf changed={0};np_puts(&changed,text);np_puts(&changed,"# changed configuration identity\n");put(cfg,changed.p);free(text);free(changed.p);ck(execute(state,cfg)==2,"changed-config-identity-refused");}
@@ -176,6 +197,7 @@ int main(int argc,char **argv) {
   path(p,out,"success-v0.0.62/fake/log");t=get(p);path(q,out,"success-v0.0.63/fake/log");char *u=get(q);
   ck(t&&u&&count_sub(t,"release upload")==7&&count_sub(u,"release upload")==6,"v0062-seven-v0063-six-upload-commands");free(t);free(u);}
  ver="1.2.3";
+ scenario("y-step-keep-handwritten",0,20,14);scenario("y-step-replace-stale",0,20,15);
  s9_resume();
  }else{
    /* Four halves, each owning scenes of one kind, so every batch fits a 25 s budget while their union is
