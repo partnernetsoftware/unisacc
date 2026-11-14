@@ -419,6 +419,94 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 
 未做与限度:本节没有新实测;(0) 的每行成本是跨运行拼算;K1 甲的收益在 X2 之前只有上界;K6 在 X1 之前不归类;六目标里只有 lnx/x86_64 有上述数字,其余目标的推理耗时 [UNMEASURED]。
 
+### 5.3 切片逻辑网化普查(2026-11-14;只读普查与排序,未改源码,未训练,不得记 PASS)
+
+标注同 5.2:[实测] 只引已有数(A12、M1、E1 至 E3、X3 至 X5);[读码] 为本次只读,精度分两档:"读行"指读过该行内容,"计数"指只做了 `wc -l` 与 grep 计数、没有逐函数读;[推断] 未证实;[UNVERIFIED] 附取数命令。本次限时 12 分钟,计数档居多,凡计数档的候选在立项前必须先做 (5) 的只读实验。本节没有新跑任何计时。
+
+(1) 现状地图
+
+已是网的阶段(流表 `exec/pipeline/image-stages.tsv` 共 7 行,读行):
+
+| 流 | 输入 -> 输出 | 网 | 固定成本与增长 [实测,5.2 (0)] |
+|---|---|---|---|
+| e2 preprocess | src.c -> pp.text | e2.net | 最小程序 89.7 至 105 ms(调度口径 93.8),基准 146 |
+| e1 lex | pp.text -> tokens.typed | e1.net | 基准 8 |
+| e3 parse | tokens.typed -> tape.text | e3.net | 基准 143,随闭包增长 |
+| e4 opt | tape.text -> tape.text | e4.net | 仅 level 大于 0 时进(`src/driveroute.cx:268`),耗时 [UNVERIFIED:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com -O1 X.cx 2>&1`] |
+| prune | tape.text -> tape.text | prune.net | 基准 102,最小程序 10.6 |
+| lower | tape.text -> target.text | lower.net(12 个) | 基准 91 |
+| elf encode | target.text -> image.bytes | elf.net(12 个,含 macho、pe、object) | 基准 47 |
+
+- [计数] 流与封装在 cx 侧只剩薄壳:`cx/compiler/stream/*.cx` 7 个文件各 16 行,`cx/compiler/image/{elf,macho,pe,object}.cx` 各 10 行,`cx/compiler/net/*.cx` 20 个文件合计 148 行;对应事实表在 `exec/facts/enc-elf.tsv`、`enc-macho.tsv`、`enc-pe.tsv`、`enc-x86*.tsv`、`enc-arm*.tsv` 与 `exec/lower/*.tsv`。所以任务书所举"elf 头"与"lowering 的目标特判"在产品路径上已在表与网里,不是手写候选;薄壳内容未逐行读 [UNVERIFIED:读这 31 个文件,合计约 300 行]。
+- 另有 tapecheck(`exec/tapecheck/`,mode 2 且 level 不大于 0 时的终点名,`cx/runtime/runexec.cx:767`)。
+
+仍是手写确定性逻辑的相邻部分(行数为 `wc -l`;"IO 数"为 `grep -c 'sy_open\|sy_read\|sy_write\|fopen\|sy_stat\|sy_spawn\|hs_read\|sy_close'`,0 表示经注入回调输出、本体无文件与进程调用):
+
+| 号 | 位置 | 行数 | IO 数 | 做什么(精度) |
+|---|---|---|---|---|
+| H1 | `cx/runtime/runexec.cx:760` 至 `:774` st_gap | 15 | 0 | mode 与 level 到终点流名的 7 路分支(读行):e2、tokens、object、tapecheck、e4、memory、elf;唯一调用 `src/drive.cx:598` |
+| H2 | `src/drive.cx:749`、`src/driveroute.cx:268` | 2 处 | 0 | 同一判定的字面量副本:level 大于 0 取 "e4" 否则 "prune"(读行);另有 6 个生成的流名表各带 "e4" 行(`cx/runtime/endname.cx:14`、`routename.cx:13`、`codename.cx:15`、`streamname.cx:15`、`cx/compiler/streamname.cx:14`、`src/stream.cx:12`) |
+| H3 | `cx/driver/route.cx` | 420 | 0 | 路线选择,文件头自述"不分配、不 exit、不打印、无模块状态"(读头 6 行,函数未读) |
+| H4 | `cx/compiler/fwdmerge.cx` | 351 | 0 | 按行扫带子文本并合并基带、桩、单元三份(读函数表到 :175);行种类判定 `fwm_eq/fwm_prefix/fwm_metaword` 共 34 处;e3 可拆的先例在 `:233` |
+| H5 | `cx/compiler/fwdstub.cx` | 174 | 0 | 转发桩文本生成,去重字面量 86 个(计数) |
+| H6 | `cx/compiler/fwdsig.cx`、`fwdmark.cx`、`fwdincrement.cx` | 514、250、112 | 18、8、未数 | 转发签名侧车与标记,带文件读写(计数) |
+| H7 | `src/driveroute.cx` | 470 | 未数 | 流间胶水:`dv_fw_take/front/range/merge`(`:61` 至 `:108`)调 st_span 取区间、塞 `cli/funit` 附加输入、调 fwm_merge;`dv_fwd_one`(`:111`)解侧车(读行到 :130) |
+| H8 | `cx/compiler/tapebin.cx` | 378 | 0 | 带子文本到二进制编码 tb_encode(调用 `src/drive.cx:385`);计数 |
+| H9 | `cx/compiler/tapegate.cx` | 686 | 0 | LEB、引号、容器头判定与规范记录文本(读头) |
+| H10 | `cx/compiler/tapelink.cx` | 762 | 0 | 产品带子链接器,驱动注入字节输出与失败回调,一次一链(读头) |
+| H11 | `cx/compiler/asmtext.cx` | 2268 | 0 | ELF 汇编文本,去重字面量 476 个,固定容量表(`AT_MAXS 262144` 等,读头 12 行);本组最大的手写块 |
+| H12 | `cx/compiler/cxmod.cx`、`cx/cx0/plan.cx` | 1450、1512 | 0(经宿主回调) | 模块 plan:`cxm_plan`(`:1300`)、`cxm_planprint`(`:1411`);两份同文(`cxmod.cx:408` 注释自述与 cx/cx0/plan.cx 同文),即 10.5 的三源 |
+| H13 | `cx/runtime/unitcache.cx:247` 至 `:256` uc_keymake | 约 10 | - | 拼 blob 后 sha256 得键(读行);`cx/runtime/modelcache.cx` 397 行、`src/runcache.cx` 670 行同类 |
+| H14 | `src/drive.cx:358` 至 `:390` dv_finish | 约 33 | 有 | 按 mode 分支落盘、a.out 默认名、tb_encode、rc_store_elf(读行) |
+| H15 | `cx/driver/cli.cx`、`args.cx` | 559、279 | 未数 | 选项解析(计数) |
+| H16 | `tools/ape-pack.cx` | 456 | 有 | APE 打包,构造期工具,不在每次编译路径上 |
+| H17 | 前导与头文件展开 | - | - | 展开本体在 e2 网内;名表 `cx/compiler/predefname.cx` 22 行、`hdrname.cx` 18 行为生成物;手写部分是 cxmod 的强制 include 列表(并入 H12) |
+
+(2) 判据
+
+适合变网(五条都要成立):(a) 有精确金表或可由现实现穷举导出金表,输入输出是有限状态或带子/字节序列;(b) 本体无外部副作用(IO 数为 0,输出经回调或缓冲);(c) 现实现可作逐字节对照的参考,新旧产物 sha256 可比;(d) 输入输出本来就是流表里的类型(pp.text、tokens.typed、tape.text、target.text、image.bytes),接进 `image-stages.tsv` 不需新容器;(e) 状态量有上界且可验证(固定容量表要么能证不溢出,要么保留具名拒绝)。
+
+不适合:依赖文件系统、进程、时间、环境变量(H6、H13、H14、H16);开放世界输入且无法穷举验证(H15 的 argv、H12 的路径与闭包解析);本体是密码学哈希或键拼装(H13:`exec/facts/enc-sha256.tsv` 已有 sha 的表,但键的成分是文件身份,网化无意义);只是有限映射而没有序列(H1、H2:该改成"事实表 -> 生成器 -> 表",不该加一个网,加网要多一次模型装载,第 8 节 B2 的 55-5 行按 A8 记每个模型约 12 至 30 ms)。
+
+(3) 候选清单
+
+模型数代价的口径:现 42 个模型;每加一个模型的整链增量 [UNVERIFIED:取 `build/graph.tsv` 里 kind 为 net 与 wave 的行的 observed_wall_s,按模型分摊;整链现 3538 s(prd_mempalace F1)],运行期每多装一个模型约 12 至 30 ms(A8),所以"扩现有网"优先于"新增网"。
+
+| 号 | 候选 | 收益(上界) | 风险 | 类别 | 依赖 |
+|---|---|---|---|---|---|
+| S1 | H1 加 H2:终点流名与 e4/prune 分叉改为读流表(`image-stages.tsv` 加 mode、level 列或新增一张路线事实表,生成器出表,三处手写分支改查表)。不加网 | 速度 0;结构收益:消掉 3 处同义特判,符合"差异写成模型步";速度不取数 | 低:7 路输出可穷举(mode 0 至 5 乘 level 0、1、2),改前改后逐格比;风险在"遍历所有消费者",已知 3 处加 6 个名表 | 驱动与运行缓存类(改 `src/`、`cx/runtime`);若只加表与生成器、不改消费者则是纯工具,不进产品输入 | 无;与 K1 甲不同类不得同候选 |
+| S2 | prune 网内提前回退(5.2 K1 甲,已排项,列此为锚) | 不超过 102 ms [实测上界],实得待 X2 | 见 5.2 | 模型与网类 | X2 |
+| S3 | H4 fwdmerge 并入 e3 之后的带子流:做成 tape.text -> tape.text 的合并步(扩 e3 或 prune 邻接的网,或新增第 8 流) | [UNMEASURED] 现耗时未单列:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com A.cx B.cx 2>&1`,看非 inference 行里有无 merge 相位;若 RR_TIME 无此行则缺口同 X7 | 中高:三输入合并不是单带子流,需把基带、桩、单元串成一条带或用 `st_extra_put` 附加输入(`driveroute.cx:99` 已有此机制);金表来源是现 fwm_merge 的输出,行种类 34 处判定须先枚举成有限集;模型数可能加 1 | 模型与网类 | Y3;5.1 方案 A(闭包 e3 带子复用也依赖合并语义,先后顺序须一致) |
+| S4 | H8 tapebin:带子文本 -> 二进制,扩 elf/encode 一族的表 | [UNMEASURED] 只在 emitbin 且 mode 2 时走(`drive.cx:385`),不在默认 -run 路径,速度收益对 first_e2e 为 0 | 中:逐字节金表可由现 tb_encode 导出;受益面窄 | 模型与网类 | Y4 |
+| S5 | H10 tapelink 与 H9 tapegate:多带子链接做成流 | [UNMEASURED];是否在默认路径 [UNVERIFIED:`sh ./unisacc.com tools/refactor.cx sites tl_bind,tl_emit --tracked`] | 高:符号解析是开放集合(符号名任意),状态量随输入增长,判据 (e) 存疑 | 模型与网类 | Y4;先确认调用面 |
+| S6 | H11 asmtext:2268 行 ELF 汇编文本 | [UNMEASURED];调用面 [UNVERIFIED:`sh ./unisacc.com tools/refactor.cx sites at_bind --tracked`];若只服务 -S 输出则不在 -run 路径 | 高:476 个字面量说明规则面大;固定容量表 4 张须保留拒绝合同;与 elf 网可能重复同一批编码事实(`enc-x86.tsv`),若重复则应改成从同一事实表生成,而不是再造网 | 模型与网类 | Y4;先核与 `exec/facts/enc-*.tsv` 的重叠 |
+| S7 | H12 plan 里"pragma 行识别与判定"一份:即第 8 节 55-5 (a)"仅判定走网、机制留在切片" | 速度可能为负(多一次模型装载 12 至 30 ms,55-5 行已记);收益是三源归一后判定单源 | 高:55-5 自评为该线最重一步,波及 pp/lower/generator/facts(net-deps 门) | 模型与网类 | 10.5 三源归一(55-1)先完成 |
+| S8 | H3 路线选择入表 | 速度 0 | 低至中:文件头自述纯函数,适合出金表;函数体未读 | 驱动与运行缓存类(同 S1,可同候选) | S1;Y2 |
+| - | H5(桩文本生成) | 随 S3 一并评;单做无意义 | - | - | S3 |
+| - | H6、H7 的 IO 部分、H13、H14、H15、H16、H17 | 不做:按 (2) 不适合 | - | - | - |
+
+(4) 排序与路线
+
+- 排序依据:最小可证看金表能否今天穷举,最大收益只认已有实测。现有实测里网侧可拿的仍是 prune 102 ms 与 e2 用户份(5.2 K1、K6);本次普查新增的 S3 至 S6 全部没有耗时数,不能排到 K1 甲之前。
+- 第一步(最小可证):S1。18 格可穷举,不加模型,不动网。只做表与生成器加 `--check` 的那一半今天即可开工(纯工具);改三处消费者属驱动与运行缓存类,随 0.0.63 同类候选或其后第一个同类候选带,不单开候选。
+- 第二步(最大已测收益):S2 即 K1 甲,落点不变:0.0.64 只取数(X1、X2、X6),0.0.65 模型与网类候选只含 prune,整链未降到 2400 s 以内则顺延 0.0.66。
+- 第三步:S3,条件是 Y1 取到合并相位耗时且 Y3 证明行种类有限。它与 5.1 方案 A 的关系:方案 A 把闭包 e3 带子缓存后仍要合并,合并步若进网,缓存键须含该网身份(UNICL1 的产品身份项已覆盖);所以先落方案 A(0.0.63,驱动类),S3 最早 0.0.66,且与 K1 甲同为模型与网类,可在 prune 候选发布后另开一个候选,不与之合并(一个候选只含一类大改,同类也按网分开以便定位字节差)。
+- 与 L5(a) 前导 e2 预制的衔接:预制是缓存类,减 e2 固定份;本节没有新增 e2 侧候选,H17 的手写部分并入 S7。S7 排在 55-1 之后,不早于 0.0.66。
+- S4、S5、S6 在 Y4 出调用面之前不排版本;若都不在默认 -run 路径,则只按"与事实表重复"处理(改成从 `exec/facts/enc-*.tsv` 生成),不立网化候选。
+- 落点汇总:0.0.64 取数与 S1 的表半边;0.0.65 S2(prune);0.0.66 S3 或 K6 二选一(看 X1 与 Y1 谁的实得大),S7 视 55-1。
+
+(5) 今天可做的只读实验(各 15 分钟内,不取耗时的可在整链运行时做;产物写 `$CLAUDE_JOB_DIR/tmp/Y-N.tsv`,互不相交;脚本用 .cx)
+
+| 号 | 目标 | 命令 | 验收与预期值 |
+|---|---|---|---|
+| Y1 | 手写胶水在一次运行里占多少 | 链后:`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1 sh ./unisacc.com hello.cx 2>&1`,列出全部 RR_TIME 行种类并分 inference 与其余求和,n=3 中位 | inference 之和预期约 531 ms(A12);其余行之和即 S3 至 S8 的总上界;预期不超过 642 减 531 减 inflate 49 约 62 ms,若成立则本节所有驱动侧候选的速度上界合计不超过 62 ms,网化理由只剩结构而非速度 |
+| Y2 | S1 的消费者全集与 18 格真值表 | `sh ./unisacc.com tools/refactor.cx sites st_gap --tracked`;`grep -rn '"e4"\|"prune"\|"tapecheck"' src cx/runtime cx/compiler cx/driver --include=*.cx`;按 `runexec.cx:760` 至 `:774` 手列 mode 0 至 5 乘 level 0 至 2 | st_gap 定义 1 处、调用 1 处(`drive.cx:598`,本次已核);"e4" 命中预期 11 行(本次 grep 得 10 个文件 11 行,含 `drive.cx:749` 与 `driveroute.cx:268`);真值表 18 格,7 个不同输出 |
+| Y3 | fwdmerge 行种类是否有限 | 读 `cx/compiler/fwdmerge.cx:48` 至 `:130` 与 `:175` 至 `:351`,列出 `fwm_eq/fwm_prefix/fwm_metaword` 的全部字面量参数 | 判定调用 34 处(本次已数);去重字面量预期不超过 29 个(本次计数全文件 29 个);列出后回填 S3 行,若出现依赖符号名内容的分支(`fwm_hasname`、`fwm_isexport`,`:120`、`:124`)则记为"状态随输入增长",S3 风险升为高 |
+| Y4 | S4、S5、S6 是否在默认 -run 路径 | `sh ./unisacc.com tools/refactor.cx sites tb_encode,tl_bind,at_bind --tracked`,对每个调用点读其守卫条件 | 回填三行的"调用面";预期 tb_encode 只在 emitbin 且 mode 2(本次已读 `drive.cx:385`);另两个未知,如实记录 |
+| Y5 | 薄壳确认 | 读 `cx/compiler/stream/*.cx`、`image/*.cx`、`net/*.cx`(共 31 个文件约 300 行) | 预期全部只有 module/use 与转调,无分支逻辑;有例外则补进 (1) 的手写表 |
+
+未做与限度:H3、H5、H6、H8 至 H11、H15 只做了计数与读文件头;`src/driveunits.cx`(451 行)、`src/stages.cx`(424 行)、`cx/compiler/routepipe.cx`(190 行)、`tools/facts-gen.cx`(4343 行)、`tools/target-gen.cx`(422 行)、`build/graph.tsv`(211 行)只取了行数,没有读内容,其中的手写逻辑未进本表 [UNVERIFIED:按 (1) 的 IO 数与字面量计数口径补做];本节所有新候选没有任何耗时实测。
+
 ## 6. 路线：cx 流网设计与实现（0.0.58 至 0.0.60）
 
 版本划分（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`；后经 `VER055-SPEED` 改判，2026-11-12 再按 0.0.58 计划重排）：0.0.54 只做梳理与提速；cx 流网的步骤按每版一项产品改动重排：55-1（规划器单源）= 0.0.58 的 P1，55-2（解析状态实例化）= 0.0.59 的 P59，55-4（CX0 事实表入库与第 8 流）= 0.0.60 的 P60，55-3（cx-tri 门）视矩阵结果随其后（见 [prd.md](prd.md) §9.7、[plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)）。下文凡写 0.0.55 处，55-1 按 0.0.58、55-2 按 0.0.59、55-4 及以后按 0.0.60 理解。范围、前置、验收与分步的唯一权威是下文「进化计划」B1（0.0.54 前置）与 B2（0.0.55 主线），B4 为贯穿各版的不变式。补充两条前置：`research/cx2-module-design.md` 没有进表或成网的设计（其 §7 把「现在就用完整 E3 解析器推导 CXIF」列为与约束冲突的做法），0.0.55 须先写 CX0 事实表划分与流格式（B1 54-6）；`check-cx-layers` 的 1 条向上边（`cx/runtime/holdframe.cx:5`）先处置。
