@@ -1,0 +1,174 @@
+/* tools/check-harness-contracts.cx -- every row of tests/harness-contracts.tsv must point at a live
+ * negative control.  For an OK row: the fix commit is an ancestor of HEAD, the negctl batch exists in
+ * tests/batches.tsv, and running that batch (its entry and args, {root} -> ROOT) prints a PASS line for
+ * the named case and no FAIL line for it.  Behaviour evidence only: a case name present in source but
+ * never printed PASS is red.  PENDING rows are reported, never counted green.
+ *   sh ./unisacc.com tools/check-harness-contracts.cx [-- ROOT]
+ * Batches run in parallel, one process group each, 55 s deadline.  Last line:
+ *   HARNESS_CONTRACTS rows=N ok=N pending=N failed=N      exit 0 only when failed=0.
+ * Batch registration and commit are left to the integrator (shared tables were held by another
+ * window when this file was written). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define UC "./unisacc.com" /* lint:allow R1 referenced batches run under the installed product, as tests/run.cx does */
+#define MAXR 64
+#define MAXB 32
+static char root[4096], tmpd[512];
+static int failed;
+
+typedef struct { char id[96], negctl[256], fix[64], status[16], batch[96], cas[160]; } row_t;
+typedef struct { char id[96], entry[512], args[1024], out[600]; int rc, started; sy_child_t c; } bat_t;
+static row_t rows[MAXR]; static int nr;
+static bat_t bats[MAXB]; static int nb;
+
+static int has(const char *h, long hn, const char *w) {
+    long wn = (long)tx_len(w, 4096), i;
+    for (i = 0; i + wn <= hn; i++) if (!memcmp(h + i, w, (size_t)wn)) return 1;
+    return 0;
+}
+static char *slurp(const char *p, long *n) {
+    unsigned char *b = 0; int64_t m = 0;
+    if (sy_read_file(p, &b, &m, 8 << 20)) return 0;
+    *n = (long)m; return (char *)b;
+}
+/* split LINE (NUL-terminated, tabs) into at most MAX fields in place */
+static int fields(char *line, char **f, int max) {
+    int k = 0; f[k++] = line;
+    for (char *p = line; *p && k < max; p++) if (*p == '\t') { *p = 0; f[k++] = p + 1; }
+    return k;
+}
+static int quiet(char **argv) {
+    sy_spawn_t o; sy_exit_t st;
+    sy_spawn_init(&o); o.argv = argv; o.cwd = root; o.deadline_ms = 20000; o.pgroup = -1;
+    o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+    if (sy_proc_run(&o, &st)) return -1;
+    return st.exited ? st.code : -1;
+}
+static int find_batch(const char *id) { for (int i = 0; i < nb; i++) if (tx_eqz(bats[i].id, id)) return i; return -1; }
+
+/* case token: preceded by tab or '.', followed by end, tab, '.' or newline */
+static int line_has_case(const char *s, long n, const char *cas) {
+    long cn = (long)tx_len(cas, 160);
+    for (long i = 1; i + cn <= n; i++)
+        if ((s[i - 1] == '\t' || s[i - 1] == '.') && !memcmp(s + i, cas, (size_t)cn)
+            && (i + cn == n || s[i + cn] == '\t' || s[i + cn] == '.' || s[i + cn] == '\n')) return 1;
+    return 0;
+}
+static void judge_case(const char *out, long n, const char *cas, int *pass, int *fail) {
+    long at = 0; *pass = *fail = 0;
+    while (at < n) {
+        long e = at; while (e < n && out[e] != '\n') e++;
+        if (line_has_case(out + at, e - at, cas)) {
+            /* two verdict shapes in use: "PASS\tname..." and "S9_CHECK\tname\tPASS" */
+            int lead_p = e - at >= 5 && !memcmp(out + at, "PASS\t", 5), lead_f = e - at >= 5 && !memcmp(out + at, "FAIL\t", 5);
+            int tail_p = e - at >= 5 && !memcmp(out + e - 5, "\tPASS", 5), tail_f = e - at >= 5 && !memcmp(out + e - 5, "\tFAIL", 5);
+            if (lead_f || tail_f) (*fail)++;
+            else if (lead_p || tail_p) (*pass)++;
+        }
+        at = e + 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    char p[4400]; long n = 0; char *t;
+    if (argc > 1) { if (cx_fmt(root, sizeof root, "%s", argv[1])) return 2; }
+    else if (sy_cwd(root, (int)sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
+    {   const char *tmp = getenv("CLAUDE_JOB_DIR");
+        if (cx_fmt(tmpd, sizeof tmpd, "%s/tmp/harness-contracts-%d", tmp && *tmp ? tmp : "/tmp", sy_pid())) return 2;
+        if (sy_mkdir_all(tmpd, 0700)) { printf("FAIL\ttmpdir\t%s\n", tmpd); return 2; } }
+
+    /* (1) the contract table */
+    if (cx_fmt(p, sizeof p, "%s/tests/harness-contracts.tsv", root) || !(t = slurp(p, &n))) { printf("FAIL\ttable-unreadable\n"); return 2; }
+    for (long at = 0, ln = 0; at < n; ln++) {
+        long e = at; while (e < n && t[e] != '\n') e++;
+        t[e] = 0; char *line = t + at; at = e + 1;
+        if (!ln || !*line) continue;
+        char *f[8]; int k = fields(line, f, 8);
+        if (k < 6 || nr == MAXR) { printf("FAIL\ttable-row-shape\tline=%ld\n", ln + 1); failed++; continue; }
+        row_t *r = &rows[nr++];
+        if (cx_fmt(r->id, sizeof r->id, "%s", f[0]) || cx_fmt(r->negctl, sizeof r->negctl, "%s", f[3])
+            || cx_fmt(r->fix, sizeof r->fix, "%s", f[4]) || cx_fmt(r->status, sizeof r->status, "%s", f[5])) return 2;
+        char *colon = strchr(r->negctl, ':');
+        if (colon) { *colon = 0; cx_fmt(r->batch, sizeof r->batch, "%s", r->negctl); cx_fmt(r->cas, sizeof r->cas, "%s", colon + 1); *colon = ':'; }
+    }
+    free(t);
+
+    /* (2) the batch registry: id, entry, args */
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) || !(t = slurp(p, &n))) { printf("FAIL\tbatches-unreadable\n"); return 2; }
+    for (int i = 0; i < nr; i++) {
+        if (!tx_eqz(rows[i].status, "OK") || !rows[i].batch[0] || find_batch(rows[i].batch) >= 0) continue;
+        long at = 0; int found = 0;
+        while (at < n && !found) {
+            long e = at; while (e < n && t[e] != '\n') e++;
+            char line[4096]; long L = e - at < 4095 ? e - at : 4095;
+            if (mm_copy(line, sizeof line, t + at, (size_t)L)) return 2;
+            line[L] = 0; at = e + 1;
+            char *f[16]; int k = fields(line, f, 16);
+            if (k >= 10 && tx_eqz(f[0], rows[i].batch) && nb < MAXB) {
+                bat_t *b = &bats[nb++]; found = 1;
+                cx_fmt(b->id, sizeof b->id, "%s", f[0]); cx_fmt(b->entry, sizeof b->entry, "%s", f[8]);
+                cx_fmt(b->args, sizeof b->args, "%s", f[9]);
+            }
+        }
+    }
+    free(t);
+
+    /* (3) run every referenced batch in parallel */
+    for (int i = 0; i < nb; i++) {
+        bat_t *b = &bats[i]; char *v[24]; int k = 0; static char argbuf[MAXB][1024];
+        v[k++] = "sh"; v[k++] = UC; v[k++] = b->entry; v[k++] = "--";
+        if (!tx_eqz(b->args, "-")) {
+            char *a = argbuf[i]; long o = 0;
+            for (const char *s = b->args; *s && o < 1000; ) {
+                if (!memcmp(s, "{root}", 6)) { long rl = (long)tx_len(root, 4096); if (o + rl >= 1000 || mm_copy(a + o, (size_t)(1024 - o), root, (size_t)rl)) break; o += rl; s += 6; }
+                else a[o++] = *s++;
+            }
+            a[o] = 0; v[k++] = a;
+            for (char *s = a; *s && k < 22; s++) if (*s == ';') { *s = 0; v[k++] = s + 1; }
+        }
+        v[k] = 0;
+        cx_fmt(b->out, sizeof b->out, "%s/%s.out", tmpd, b->id);
+        int fd = sy_open_new(b->out, 0600);
+        if (fd < 0) { printf("FAIL\tbatch-out\t%s\n", b->id); failed++; continue; }
+        sy_spawn_t o; sy_spawn_init(&o); o.argv = v; o.cwd = root; o.out_fd = fd; o.flags = SY_SPAWN_ERR_TO_OUT;
+        o.in_fd = SY_STDIO_NULL; o.pgroup = -1; o.deadline_ms = 55000;
+        b->started = sy_proc_spawn(&o, &b->c) == 0; sy_close(fd);
+        if (!b->started) { printf("FAIL\tbatch-spawn\t%s\n", b->id); failed++; }
+    }
+    for (int i = 0; i < nb; i++) {
+        sy_exit_t st; bat_t *b = &bats[i]; b->rc = -1;
+        if (b->started && !sy_proc_wait(&b->c, &st)) b->rc = st.exited ? st.code : -1;
+        printf("BATCH\t%s\trc=%d\tlog=%s\n", b->id, b->rc, b->out);
+    }
+
+    /* (4) judge rows */
+    int ok = 0, pending = 0, bad;
+    for (int i = 0; i < nr; i++) {
+        row_t *r = &rows[i]; bad = 0;
+        char why[256] = "-";
+        if (tx_eqz(r->status, "PENDING")) { printf("PENDING\t%s\tnegctl=%s\tfix=%s\n", r->id, r->negctl, r->fix); pending++; continue; }
+        if (!tx_eqz(r->status, "OK")) { cx_fmt(why, sizeof why, "status=%s", r->status); bad = 1; }
+        if (!bad) {
+            char *g[] = {"git", "merge-base", "--is-ancestor", r->fix, "HEAD", 0};
+            if (!r->fix[0] || tx_eqz(r->fix, "-") || quiet(g) != 0) { cx_fmt(why, sizeof why, "fix-not-reachable=%s", r->fix); bad = 1; }
+        }
+        int bi = bad ? -1 : find_batch(r->batch);
+        if (!bad && (bi < 0 || !r->cas[0])) { cx_fmt(why, sizeof why, "batch-not-registered=%s", r->negctl); bad = 1; }
+        if (!bad) {
+            long on = 0; char *out = slurp(bats[bi].out, &on); int ps = 0, fs = 0;
+            if (out) { judge_case(out, on, r->cas, &ps, &fs); free(out); }
+            /* the verdict is per case: a red batch elsewhere is surfaced, the case itself must PASS */
+            if (bats[bi].rc != 0) printf("WARN\t%s\tbatch=%s\trc=%d\tother-cases-red\n", r->id, bats[bi].id, bats[bi].rc);
+            if (!ps || fs) { cx_fmt(why, sizeof why, "case-pass=%d-fail=%d-batch-rc=%d", ps, fs, bats[bi].rc); bad = 1; }
+        }
+        if (bad) { failed++; printf("FAIL\t%s\t%s\n", r->id, why); }
+        else { ok++; printf("PASS\t%s\tnegctl=%s\tfix=%s\n", r->id, r->negctl, r->fix); }
+    }
+    printf("HARNESS_CONTRACTS\trows=%d\tok=%d\tpending=%d\tfailed=%d\n", nr, ok, pending, failed);
+    return failed ? 1 : 0;
+}

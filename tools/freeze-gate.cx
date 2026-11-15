@@ -1,0 +1,297 @@
+/* tools/freeze-gate.cx -- resident freeze gate: run every gate a version must pass before freeze on the version
+ * branch, keyed by commit, so the freeze step only reads one row (and reruns it when the row is not fresh).
+ * This moves the real runs earlier; it does not cache a conclusion: a row is fresh only for rev == HEAD.
+ *
+ *   sh ./unisacc.com tools/freeze-gate.cx [-- [--since TAG] [--deadline S] [--lanes N] [--state-dir DIR]
+ *                                            [--rev SHA] [--boot-cc PATH] [--boot-files F...] [--gates FILE]]
+ *   sh ./unisacc.com tools/freeze-gate.cx -- --status REV [--head SHA] [--state-dir DIR]
+ *
+ * Gates (default table; every child runs under ./tools/bound, gates run in parallel, read only):
+ *   chain-ready   tools/chain-ready.cx -- --since TAG --only ITEM, one job per item (bound 95 s each, the
+ *                 tools/bound cap); each of its rows becomes one gate (cr:<item>).  On a branch
+ *                 other than main, 1-rev / 1-branch are SKIPPED-branch (rerun on main at freeze); the manual
+ *                 items 7-recipe / 9-ledger are SKIPPED-manual.
+ *   tlib          tools/check-tlib-frozen.cx: rc 0.
+ *   boot          the bootstrap compiler (default ~/.cache/unisacc/bootstrap-0.0.59/unisacc.com) compiles every
+ *                 src/ and cx/ .cx changed since TAG with -c -funit, plus a minimal two-unit probe (module + use,
+ *                 linked and run); any failure is FAIL naming the unit (the real10 class of failure).  A unit the
+ *                 installed ./unisacc.com rejects as well (e.g. cx0 project fixtures) is counted both-reject, not FAIL.
+ *   TAG defaults to the highest public tag v0.0.N (not *-src) by version order.
+ * --gates FILE replaces the external table: lines NAME<TAB>BOUND_S<TAB>CMD WORD... (rc 0 is PASS); fixtures.
+ * Total deadline (default 280 s, under the 5 min rule): a gate not started before it is FAIL "deadline"; each
+ * child's bound is clamped to what remains.  At most --lanes (default 6) external gates run at a time.
+ * Output: GATE<TAB>name<TAB>PASS|FAIL|SKIPPED<TAB>evidence, last line
+ *   FREEZE_GATE rev=<sha> pass=N fail=N skipped=N ms=N
+ * The same lines go to STATE_DIR/<rev>.tsv (default $HOME/.cache/unisacc/freeze-gate, not in the repo).
+ * --status REV prints that file's FREEZE_GATE line and FRESH yes|no (yes only when REV equals HEAD);
+ * exit 0 only for fresh and fail=0.  Exit: 0 fail=0, 1 a gate failed, 2 usage.
+ * Not yet registered as a batch and not committed: waiting for the main scheduler to register and commit
+ * (tests/batches.tsv write window was taken when this was written). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+
+#define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/chain-ready.cx */
+#define MAXG 32
+#define MAXF 256
+
+typedef struct { char name[64]; char *argv[40]; char bs[16]; int bound, pid, ofd, rc, state, kind; char *out; long n, ms, t0; } Job;
+
+static char *outbuf; static long outn, outcap;
+static int npass, nfail, nskip;
+
+static void emit(const char *s) {
+    long l = (long)tx_len(s, 1 << 20);
+    if (outn + l + 1 >= outcap) { long c = (outcap ? outcap : 4096); while (outn + l + 1 >= c) c *= 2; outbuf = mm_grow(outbuf, c); outcap = c; }
+    tx_copy(outbuf + outn, outcap - outn, s, l); outn += l;
+    sy_printf("%s", s);
+}
+static void gate(const char *name, const char *st, const char *ev) {
+    char line[1024], e[600]; long i, k = 0;
+    for (i = 0; ev[i] && k < 590; i++) e[k++] = (ev[i] == '\t' || ev[i] == '\n' || ev[i] == '\r') ? ' ' : ev[i];
+    e[k] = 0;
+    if (tx_prefix(st, (long)tx_len(st, 32), "PASS", 4)) npass++; else if (tx_prefix(st, (long)tx_len(st, 32), "SKIP", 4)) nskip++; else nfail++;
+    cx_fmt(line, sizeof line, "GATE\t%s\t%s\t%s\n", name, st, e);
+    emit(line);
+}
+
+static void slurp(int fd, char **buf, long *n) {
+    long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (b) b[*n] = 0;
+    *buf = b;
+}
+/* argv[0..1] are ./tools/bound SECONDS: every child is bound-limited */
+static void start(Job *j) {
+    /* every argv here starts with ./tools/bound SECONDS: the child is bound-limited */
+    (void)j->bound; j->t0 = sy_now_ms(); j->pid = sy_spawn_pipe(j->argv, 0, 0, &j->ofd, 0); j->state = j->pid > 0 ? 1 : 3; }
+static void finish(Job *j) {
+    int ex = 0, code = 0, sig = 0;
+    if (j->state == 1) { slurp(j->ofd, &j->out, &j->n); sy_close(j->ofd); j->rc = sy_wait_status(j->pid, 0, &ex, &code, &sig) == j->pid && ex ? code : -1; }
+    else { j->out = 0; j->n = 0; j->rc = -1; }
+    j->ms = sy_now_ms() - j->t0; j->state = 2;
+}
+/* run a bound-limited argv, capture output; returns rc (-1 not started) */
+static int run_cap(char **argv, char **out, long *n) {
+    Job j; int i; for (i = 0; argv[i] && i < 39; i++) j.argv[i] = argv[i];
+    j.argv[i] = 0; start(&j); finish(&j); *out = j.out; *n = j.n; return j.rc;
+}
+static void trim(char *s) { long l = (long)tx_len(s, 4096); while (l > 0 && (s[l - 1] == '\n' || s[l - 1] == '\r' || s[l - 1] == ' ')) s[--l] = 0; }
+static void last_line(const char *o, long n, char *dst, int cap) {
+    long e = n; while (e > 0 && (o[e - 1] == '\n' || o[e - 1] == '\r')) e--;
+    { long b = e; while (b > 0 && o[b - 1] != '\n') b--; { long l = e - b; if (l > cap - 1) l = cap - 1; tx_copy(dst, cap, o + b, l); } }
+}
+
+/* chain-ready rows ITEM ST EV MS -> gates */
+static void judge_chain_ready(Job *j, int on_main) {
+    long at = 0; int rows = 0;
+    while (j->out && at < j->n) {
+        long e = tx_chr(j->out + at, j->n - at, '\n'), ln = e < 0 ? j->n - at : e;
+        char line[1024], *f[5]; int nf = 0; long i;
+        if (ln > 1000) ln = 1000;
+        tx_copy(line, sizeof line, j->out + at, ln); at += ln + 1;
+        f[nf++] = line;
+        for (i = 0; line[i] && nf < 5; i++) if (line[i] == '\t') { line[i] = 0; f[nf++] = line + i + 1; }
+        if (nf < 3 || tx_eqz(f[0], "READY")) continue;
+        if (!(tx_eqz(f[1], "PASS") || tx_eqz(f[1], "FAIL") || tx_eqz(f[1], "UNMEASURED") || tx_eqz(f[1], "SKIPPED"))) continue;
+        {
+            char nm[96], ev[700]; rows++;
+            cx_fmt(nm, sizeof nm, "cr:%s", f[0]);
+            if (!on_main && (tx_eqz(f[0], "1-rev") || tx_eqz(f[0], "1-branch"))) {
+                cx_fmt(ev, sizeof ev, "branch, not main; rerun on main at freeze (was %s: %s)", f[1], f[2]); gate(nm, "SKIPPED-branch", ev);
+            } else if (tx_eqz(f[1], "UNMEASURED")) {
+                cx_fmt(ev, sizeof ev, "manual item by design: %s", f[2]); gate(nm, "SKIPPED-manual", ev);
+            } else gate(nm, f[1], f[2]);
+        }
+    }
+    if (!rows) { char ev[300], ll[200]; last_line(j->out ? j->out : "", j->n, ll, sizeof ll); cx_fmt(ev, sizeof ev, "no rows rc=%d %ldms bound=%ss: %s", j->rc, j->ms, j->bs, ll); gate(j->name, "FAIL", ev); }
+}
+
+static char files[MAXF][512]; static int nfiles;
+static char tmpd[1024];
+
+static void boot_gate(const char *cc, long deadline) {
+    char ev[700], bad[400]; int i, nbad = 0, nok = 0, nboth = 0; long t0 = sy_now_ms(); bad[0] = 0;
+    if (!sy_exists(cc)) { cx_fmt(ev, sizeof ev, "bootstrap compiler missing: %s", cc); gate("boot", "FAIL", ev); return; }
+    for (i = 0; i < nfiles; i++) {
+        char o[1200], *out; long n; int rc;
+        char *av[] = {"./tools/bound", "40", "sh", (char *)cc, "-c", "-funit", files[i], "-o", o, 0};
+        if (sy_now_ms() >= deadline) { cx_fmt(ev, sizeof ev, "deadline after %d of %d units", i, nfiles); gate("boot", "FAIL", ev); return; }
+        cx_fmt(o, sizeof o, "%s/u%d.o", tmpd, i);
+        rc = run_cap(av, &out, &n);
+        if (rc != 0) {   /* differential: a unit the installed product rejects too is not a bootstrap failure */
+            char *iv[] = {"./tools/bound", "40", "sh", UC, "-c", "-funit", files[i], "-o", o, 0};
+            if (run_cap(iv, &out, &n) != 0) { nboth++; continue; }
+        }
+        if (rc == 0) nok++;
+        else { long l = (long)tx_len(bad, 400); nbad++; if (l < 300) cx_fmt(bad + l, sizeof bad - (size_t)l, "%s%s(rc=%d)", l ? "," : "", files[i], rc); }
+        (void)sy_unlink(o);
+    }
+    {   /* minimal two-unit probe: module + use, linked and run */
+        char m[1200], u[1200], b[1200], *out; long n; int rc, prc = 1;
+        cx_fmt(m, sizeof m, "%s/fgm.cx", tmpd); cx_fmt(u, sizeof u, "%s/fgmain.cx", tmpd); cx_fmt(b, sizeof b, "%s/fgprobe.bin", tmpd);
+        {
+            const char *ms = "#pragma unisa module fgm\nint fgm_add(int a, int b) { return a + b; }\n";
+            const char *us = "#pragma unisa use fgm\nint main(void) { return fgm_add(2, 3) == 5 ? 0 : 1; }\n";
+            if (cx_write(m, ms, tx_len(ms, 4096)) || cx_write(u, us, tx_len(us, 4096))) { gate("boot", "FAIL", "cannot write probe"); return; }
+        }
+        {
+            char *av[] = {"./tools/bound", "40", "sh", (char *)cc, u, m, "-o", b, 0};
+            rc = run_cap(av, &out, &n);
+            if (rc == 0) { char *pv[] = {"./tools/bound", "10", b, 0}; prc = run_cap(pv, &out, &n); }
+        }
+        if (rc != 0 || prc != 0) { long l = (long)tx_len(bad, 400); nbad++; cx_fmt(bad + l, sizeof bad - (size_t)l, "%sprobe(cc=%d run=%d)", l ? "," : "", rc, prc); }
+        else nok++;
+        (void)sy_unlink(m); (void)sy_unlink(u); (void)sy_unlink(b);
+    }
+    cx_fmt(ev, sizeof ev, "units=%d ok=%d bad=%d both-reject=%d %ldms%s%s", nfiles + 1, nok, nbad, nboth,sy_now_ms() - t0, nbad ? " failed=" : "", bad);
+    gate("boot", nbad ? "FAIL" : "PASS", ev);
+}
+
+static int status_mode(const char *rev, const char *head, const char *sdir) {
+    char p[1400], ll[600]; size_t n; char *b; int fail = 1;
+    cx_fmt(p, sizeof p, "%s/%s.tsv", sdir, rev);
+    b = cx_read(p, &n);
+    if (!b) { sy_printf("FREEZE_GATE rev=%s none\nFRESH no\n", rev); return 1; }
+    last_line(b, (long)n, ll, sizeof ll);
+    sy_printf("%s\n", ll);
+    { long k = tx_find(ll, (long)tx_len(ll, 600), " fail=", 6); if (k >= 0) fail = ll[k + 6] != '0' || (ll[k + 7] >= '0' && ll[k + 7] <= '9'); }
+    {
+        int fresh = head && tx_eqz(rev, head);
+        sy_printf("FRESH %s\n", fresh ? "yes" : "no");
+        return fresh && !fail ? 0 : 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *since = 0, *sdir = 0, *rev = 0, *cc = 0, *gfile = 0, *status = 0, *head = 0;
+    long dl_s = 280, T0 = sy_now_ms(), deadline; int lanes = 6, a, bootf = 0, on_main = 0;
+    char sdbuf[1024], ccbuf[1024], revbuf[128], headbuf[128], tagbuf[128], brbuf[128];
+    static Job J[MAXG]; int nj = 0, i;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--") ) continue;
+        if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
+        else if (tx_eqz(argv[a], "--deadline") && a + 1 < argc) { int64_t v = 0; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &v); dl_s = (long)v; a++; }
+        else if (tx_eqz(argv[a], "--lanes") && a + 1 < argc) { int64_t v = 0; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &v); lanes = v > 0 ? (int)v : 1; a++; }
+        else if (tx_eqz(argv[a], "--state-dir") && a + 1 < argc) sdir = argv[++a];
+        else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) rev = argv[++a];
+        else if (tx_eqz(argv[a], "--head") && a + 1 < argc) head = argv[++a];
+        else if (tx_eqz(argv[a], "--boot-cc") && a + 1 < argc) cc = argv[++a];
+        else if (tx_eqz(argv[a], "--gates") && a + 1 < argc) gfile = argv[++a];
+        else if (tx_eqz(argv[a], "--status") && a + 1 < argc) status = argv[++a];
+        else if (tx_eqz(argv[a], "--boot-files")) { bootf = 1; while (a + 1 < argc && argv[a + 1][0] != '-' && nfiles < MAXF) cx_fmt(files[nfiles++], 512, "%s", argv[++a]); }
+        else { sy_eprintf("usage: tools/freeze-gate.cx [-- [--since TAG] [--deadline S] [--lanes N] [--state-dir DIR] [--rev SHA] [--boot-cc PATH] [--boot-files F...] [--gates FILE] | --status REV [--head SHA]]\n"); return 2; }
+    }
+    if (!sdir) { const char *h = sy_env("HOME"); cx_fmt(sdbuf, sizeof sdbuf, "%s/.cache/unisacc/freeze-gate", h ? h : "/tmp"); sdir = sdbuf; }
+    if (!head || !rev) {
+        char *gv[] = {"./tools/bound", "20", "git", "rev-parse", "HEAD", 0}, *o; long n;
+        if (run_cap(gv, &o, &n) == 0 && o) { long l = n < 120 ? n : 120; tx_copy(headbuf, sizeof headbuf, o, l); trim(headbuf); if (!head) head = headbuf; if (!rev) rev = headbuf; }
+    }
+    if (status) return status_mode(status, head, sdir);
+    if (!rev) { sy_eprintf("freeze-gate: cannot read HEAD\n"); return 2; }
+    deadline = T0 + dl_s * 1000;
+    {
+        char *gv[] = {"./tools/bound", "20", "git", "rev-parse", "--abbrev-ref", "HEAD", 0}, *o; long n;
+        if (run_cap(gv, &o, &n) == 0 && o) { long l = n < 120 ? n : 120; tx_copy(brbuf, sizeof brbuf, o, l); trim(brbuf); on_main = tx_eqz(brbuf, "main"); }
+    }
+    if (!since && !gfile) {
+        /* the last public tag by version order (the branch may not contain it; diff is TAG..HEAD either way) */
+        char *gv[] = {"./tools/bound", "20", "git", "tag", "--list", "v0.0.[0-9]*", "--sort=-v:refname", 0}, *o; long n, at = 0;
+        if (run_cap(gv, &o, &n) == 0 && o)
+            while (at < n) {
+                long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+                if (ln > 0 && ln < 100 && !(ln > 4 && tx_find(o + at, ln, "-src", 4) >= 0)) { tx_copy(tagbuf, sizeof tagbuf, o + at, ln); since = tagbuf; break; }
+                at += ln + 1;
+            }
+    }
+    if (sy_mkdtemp(sy_tmpdir(), "freeze-gate-", tmpd, sizeof tmpd) != 0) { sy_eprintf("freeze-gate: no temp dir\n"); return 2; }
+    {   char h[300]; cx_fmt(h, sizeof h, "# freeze-gate rev=%s branch=%s since=%s deadline=%lds\n", rev, on_main ? "main" : "branch", since ? since : "-", dl_s); emit(h); }
+
+    /* external gate table */
+    if (gfile) {
+        size_t n; char *b = cx_read(gfile, &n); long at = 0;
+        if (!b) { sy_eprintf("freeze-gate: cannot read %s\n", gfile); return 2; }
+        while (at < (long)n && nj < MAXG) {
+            long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e; char *s = b + at; int c = 2; long k; char *p;
+            at += ln + 1; s[ln] = 0;
+            if (!ln || s[0] == '#') continue;
+            p = s; while (*p && *p != '\t') p++;
+            if (!*p) continue;
+            *p++ = 0; cx_fmt(J[nj].name, 64, "%s", s);
+            { int64_t v = 0; char *q = p; while (*q && *q != '\t') q++; if (!*q) continue; *q++ = 0; tx_to_i64(p, (long)tx_len(p, 16), 10, &v); J[nj].bound = v < 1 ? 1 : v > 95 ? 95 : (int)v; p = q; }   /* tools/bound accepts 1..95 */
+            k = 0; (void)k;
+            while (*p && c < 38) { while (*p == ' ') p++; if (!*p) break; J[nj].argv[c++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = 0; }
+            J[nj].argv[c] = 0; J[nj].kind = 0; nj++;
+        }
+    } else {
+        /* chain-ready one item per job (tools/bound caps a child at 95 s); 7-recipe / 9-ledger are manual */
+        static const char *items[] = {"1-", "2a", "2b", "3a", "3b", "4-", "5-", "6-", "8-", "10"};
+        static char *tl[] = {"sh", UC, "tools/check-tlib-frozen.cx", 0};
+        int c, k;
+        for (k = 0; k < 10; k++) {
+            char *cr[] = {"sh", UC, "tools/chain-ready.cx", "--", "--since", (char *)(since ? since : "HEAD"), "--only", (char *)items[k], 0};
+            cx_fmt(J[nj].name, 64, "chain-ready:%s", items[k]); J[nj].bound = 95; J[nj].kind = 1;
+            for (c = 0; cr[c]; c++) J[nj].argv[2 + c] = cr[c];
+            J[nj].argv[2 + c] = 0; nj++;
+        }
+        gate("cr:7-recipe", "SKIPPED-manual", "manual by design (chain-ready UNMEASURED): private root checkout, fresh --out");
+        gate("cr:9-ledger", "SKIPPED-manual", "manual by design (chain-ready UNMEASURED): one ledger line before the chain");
+        cx_fmt(J[nj].name, 64, "tlib"); J[nj].bound = 60; J[nj].kind = 0;
+        for (c = 0; tl[c]; c++) J[nj].argv[2 + c] = tl[c];
+        J[nj].argv[2 + c] = 0; nj++;
+    }
+    for (i = 0; i < nj; i++) { J[i].argv[0] = "./tools/bound"; J[i].argv[1] = J[i].bs; J[i].state = 0; }
+
+    /* boot unit list: changed src/ cx/ .cx since TAG */
+    if (!gfile && !bootf && since) {
+        char rng[300], *o; long n, at = 0;
+        char *gv[] = {"./tools/bound", "20", "git", "diff", "--name-only", "--diff-filter=AM", rng, "--", "src/*.cx", "cx/*.cx", 0};
+        cx_fmt(rng, sizeof rng, "refs/tags/%s..HEAD", since);
+        if (run_cap(gv, &o, &n) == 0 && o)
+            while (at < n && nfiles < MAXF) {
+                long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+                if (ln > 0 && ln < 500) { tx_copy(files[nfiles], 512, o + at, ln); nfiles++; }
+                at += ln + 1;
+            }
+    }
+    if (!cc) { const char *h = sy_env("HOME"); cx_fmt(ccbuf, sizeof ccbuf, "%s/.cache/unisacc/bootstrap-0.0.59/unisacc.com", h ? h : "/tmp"); cc = ccbuf; }
+
+    /* lanes: start up to `lanes`; the boot gate runs in this process meanwhile; then drain in order */
+    {
+        int next = 0, done = 0, running = 0, boot_done = gfile && !bootf;
+        while (done < nj || !boot_done) {
+            while (next < nj && running < lanes) {
+                long left = (deadline - sy_now_ms()) / 1000;
+                if (left < 1) { char ev[120]; cx_fmt(ev, sizeof ev, "deadline: not started (%lds total)", dl_s); J[next].state = 4; gate(J[next].name, "FAIL", ev); next++; done++; continue; }
+                cx_fmt(J[next].bs, 16, "%ld", (long)J[next].bound < left ? (long)J[next].bound : left);
+                start(&J[next]); running++; next++;
+            }
+            if (!boot_done) { boot_gate(cc, deadline); boot_done = 1; continue; }
+            for (i = 0; i < next; i++) if (J[i].state == 1 || J[i].state == 3) {
+                finish(&J[i]); running--; done++;
+                if (J[i].kind == 1) judge_chain_ready(&J[i], on_main);
+                else { char ev[400], ll[200]; last_line(J[i].out ? J[i].out : "", J[i].n, ll, sizeof ll); cx_fmt(ev, sizeof ev, "rc=%d %ldms bound=%ss: %s", J[i].rc, J[i].ms, J[i].bs, ll); gate(J[i].name, J[i].rc == 0 ? "PASS" : "FAIL", ev); }
+                break;
+            }
+        }
+    }
+    (void)sy_rmdir(tmpd);
+    {
+        char t[300], p[1400];
+        cx_fmt(t, sizeof t, "FREEZE_GATE rev=%s pass=%d fail=%d skipped=%d ms=%ld\n", rev, npass, nfail, nskip, sy_now_ms() - T0);
+        emit(t);
+        (void)sy_mkdir(sdir, 0755);
+        cx_fmt(p, sizeof p, "%s/%s.tsv", sdir, rev);
+        if (cx_write(p, outbuf, (size_t)outn)) sy_eprintf("freeze-gate: cannot write %s\n", p);
+    }
+    return nfail ? 1 : 0;
+}

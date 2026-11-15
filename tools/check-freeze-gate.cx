@@ -1,0 +1,108 @@
+/* tools/check-freeze-gate.cx -- fixture checks for tools/freeze-gate.cx (stand-in gates, no real gate runs).
+ *
+ *   sh ./unisacc.com tools/check-freeze-gate.cx
+ *
+ * (1) one stand-in gate passes and one fails: GATE rows PASS / FAIL, FREEZE_GATE pass=1 fail=1, rc 1;
+ * (2) freshness: --status REV --head REV is FRESH yes; --head OTHER is FRESH no (rc 1); a missing rev is "none";
+ * (3) batching under the total deadline: --lanes 1 --deadline 3 with an 8 s gate first leaves the next gate
+ *     FAIL "deadline: not started";
+ * (4) a failing stand-in bootstrap compiler (a script exiting 1) is reported as GATE boot FAIL naming the unit;
+ *     a working stand-in (writes a runnable stub) is boot PASS; a missing compiler is boot FAIL.
+ * Prints CHECK_FREEZE_GATE checks=N failed=N.  Exit 0 all ok, 1 a check failed.
+ * Not yet registered as a batch and not committed: waiting for the main scheduler to register and commit. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define UC "./unisacc.com" /* lint:allow R1 runs the tool under test with the installed product */
+
+static int checks, failed;
+static char tmpd[1024];
+
+static void slurp(int fd, char **buf, long *n) {
+    long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    *n = 0;
+    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (b) b[*n] = 0;
+    *buf = b;
+}
+/* argv starts with ./tools/bound SECONDS: bound-limited */
+static int run(char **argv, char **out, long *n) {
+    /* every argv here starts with ./tools/bound SECONDS: the child is bound-limited */
+    const char *bound = argv[0];   /* "./tools/bound" */
+    int fd, ex = 0, code = 0, sig = 0, pid;
+    (void)bound; pid = sy_spawn_pipe(argv, 0, 0, &fd, 0);
+    if (pid <= 0) { *out = ""; *n = 0; return -1; }
+    slurp(fd, out, n); sy_close(fd);
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
+}
+static void expect(const char *what, int ok, const char *out) {
+    checks++;
+    if (ok) sy_printf("ok\t%s\n", what);
+    else { failed++; sy_printf("FAIL\t%s\n---\n%s\n---\n", what, out ? out : ""); }
+}
+static int has(const char *h, long n, const char *w) { return tx_find(h, n, w, (long)tx_len(w, 4096)) >= 0; }
+
+int main(void) {
+    char g1[1200], g2[1200], st[1200], ccbad[1200], ccok[1200], *o; long n; int rc;
+    if (sy_mkdtemp(sy_tmpdir(), "check-freeze-gate-", tmpd, sizeof tmpd) != 0) { sy_eprintf("no temp dir\n"); return 1; }
+    cx_fmt(g1, sizeof g1, "%s/g1.tsv", tmpd); cx_fmt(g2, sizeof g2, "%s/g2.tsv", tmpd); cx_fmt(st, sizeof st, "%s/state", tmpd);
+    { const char *s = "good\t5\ttrue\nbad\t5\tfalse\n"; if (cx_write(g1, s, tx_len(s, 256))) return 1; }
+    { const char *s = "slow\t20\tsleep 8\nlate\t5\ttrue\n"; if (cx_write(g2, s, tx_len(s, 256))) return 1; }
+    /* stand-in compilers, run as `sh CC ...`: the bad one exits 1; the good one writes a runnable stub to its last arg */
+    cx_fmt(ccbad, sizeof ccbad, "%s/ccbad.sh", tmpd); cx_fmt(ccok, sizeof ccok, "%s/ccok.sh", tmpd);
+    { const char *s = "exit 1\n"; if (cx_write(ccbad, s, tx_len(s, 256))) return 1; }
+    { const char *s = "for a; do o=$a; done\nprintf '#!/bin/sh\\nexit 0\\n' > \"$o\"\nchmod +x \"$o\"\n"; if (cx_write(ccok, s, tx_len(s, 256))) return 1; }
+
+    {   /* (1) */
+        char *av[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--gates", g1, "--state-dir", st, "--rev", "r1", 0};
+        rc = run(av, &o, &n);
+        expect("(1) stand-in gate PASS row", has(o, n, "GATE\tgood\tPASS\t"), o);
+        expect("(1) stand-in gate FAIL row", has(o, n, "GATE\tbad\tFAIL\t"), o);
+        expect("(1) summary pass=1 fail=1 skipped=0", has(o, n, "FREEZE_GATE rev=r1 pass=1 fail=1 skipped=0"), o);
+        expect("(1) rc 1 on a failed gate", rc == 1, o);
+    }
+    {   /* (2) */
+        char *a1[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--status", "r1", "--head", "r1", "--state-dir", st, 0};
+        char *a2[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--status", "r1", "--head", "r2", "--state-dir", st, 0};
+        char *a3[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--status", "zz", "--head", "zz", "--state-dir", st, 0};
+        rc = run(a1, &o, &n);
+        expect("(2) status reads the stored line", has(o, n, "FREEZE_GATE rev=r1 pass=1 fail=1"), o);
+        expect("(2) rev == HEAD is FRESH yes", has(o, n, "FRESH yes"), o);
+        expect("(2) fresh but fail=1 is rc 1", rc == 1, o);
+        rc = run(a2, &o, &n);
+        expect("(2) rev != HEAD is FRESH no, rc 1", has(o, n, "FRESH no") && rc == 1, o);
+        rc = run(a3, &o, &n);
+        expect("(2) missing rev is none, FRESH no", has(o, n, "rev=zz none") && has(o, n, "FRESH no") && rc == 1, o);
+    }
+    {   /* (3) */
+        char *av[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--gates", g2, "--state-dir", st, "--rev", "r3", "--lanes", "1", "--deadline", "3", 0};
+        rc = run(av, &o, &n);
+        expect("(3) gate after the deadline is not started", has(o, n, "GATE\tlate\tFAIL\tdeadline: not started"), o);
+        expect("(3) running gate is clamped to the remaining time", has(o, n, "GATE\tslow\tFAIL\trc=") && !has(o, n, "bound=5s"), o);
+    }
+    {   /* (4) */
+        char *a1[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--gates", g1, "--state-dir", st, "--rev", "r4", "--boot-cc", ccbad, "--boot-files", "tools/check-freeze-gate.cx", 0};
+        char *a2[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--gates", g1, "--state-dir", st, "--rev", "r5", "--boot-cc", ccok, "--boot-files", "tools/check-freeze-gate.cx", 0};
+        char *a3[] = {"./tools/bound", "30", "sh", UC, "tools/freeze-gate.cx", "--", "--gates", g1, "--state-dir", st, "--rev", "r6", "--boot-cc", "/nonexistent/cc.sh", "--boot-files", "tools/check-freeze-gate.cx", 0};
+        rc = run(a1, &o, &n);
+        expect("(4) failing bootstrap compiler is boot FAIL naming the unit", has(o, n, "GATE\tboot\tFAIL\t") && has(o, n, "failed=tools/check-freeze-gate.cx(rc=1)") && has(o, n, "probe(cc=1"), o);
+        rc = run(a2, &o, &n);
+        expect("(4) working stand-in compiler is boot PASS", has(o, n, "GATE\tboot\tPASS\tunits=2 ok=2 bad=0"), o);
+        rc = run(a3, &o, &n);
+        expect("(4) missing bootstrap compiler is boot FAIL", has(o, n, "GATE\tboot\tFAIL\tbootstrap compiler missing"), o);
+    }
+    {   /* clean the fixture state */
+        const char *r[] = {"r1", "r3", "r4", "r5", "r6"}; int i; char p[1400];
+        for (i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s.tsv", st, r[i]); (void)sy_unlink(p); }
+        (void)sy_rmdir(st); (void)sy_unlink(ccbad); (void)sy_unlink(ccok); (void)sy_unlink(g1); (void)sy_unlink(g2); (void)sy_rmdir(tmpd);
+    }
+    sy_printf("CHECK_FREEZE_GATE\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

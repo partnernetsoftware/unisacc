@@ -1,0 +1,123 @@
+/* prune-identity.cx -- census: is the prune stage's output byte-identical to its input?
+ *
+ *   sh ./unisacc.com tools/prune-identity.cx [-- [--product P] [--max N] [--skip K] [--deadline S] PATH...]
+ *
+ * PATH is a .c file or a directory (searched for *.c, sorted). Default PATH set: tests examples apps.
+ * Each sample runs the single-source pipe exactly as tests/check-stream-pipe.cx does:
+ *   e2|e1|e3 --route T/run/O0 --res run-forward, sidecar, then prune --route T/image/O0
+ * every stage one bounded child (np_run, 20 s, group kill). Samples whose front stages fail are
+ * reported SKIP (not counted). Per sample:
+ *   PRUNE_ID<TAB>path<TAB>same|diff<TAB>callr=N<TAB>bytes=N<TAB>removed=N
+ * callr = occurrences of "callr" in the prune input; bytes = prune input size; removed = input
+ * lines minus output lines. Last line: PRUNE_IDENTITY samples=N same=N diff=N skip=N.
+ * --max/--skip slice the list (whole run must stay under 5 minutes; default deadline 270 s, a
+ * slice that hits the deadline prints TRUNCATED and exits 3). rc 0 ok, 2 usage/transport.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.hostid
+#pragma unisa use sys.time
+
+static char pi_prod[4400] = "./unisacc.com";
+static char pi_dir[4400];
+static char pi_tgt[64];
+static char *pi_env[] = {"UNISA_JOBS=1", 0};
+
+static void pi_die(const char *s) { fprintf(stderr, "prune-identity: %s\n", s); exit(2); }
+
+static int pi_sh(const char *cmd, char **out, size_t *outn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t, rc;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    t = np_run(av, 0, pi_env, 20, &r, why, sizeof why);
+    if (t) { fprintf(stderr, "prune-identity: transport %s\n", why); np_free(&r); return -1; }
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+static int pi_stage(const char *stage, const char *args, const char *in, const char *out) {
+    char cmd[12000];
+    if (cx_fmt(cmd, sizeof cmd, "exec %s stream %s %s < '%s' > '%s' 2>/dev/null", pi_prod, stage, args, in, out)) pi_die("cmd");
+    return pi_sh(cmd, 0, 0);
+}
+static size_t pi_lines(const char *b, size_t n) { size_t i, c = 0; for (i = 0; i < n; i++) if (b[i] == '\n') c++; return c; }
+static size_t pi_count(const char *b, size_t n, const char *w) {
+    size_t i, c = 0, k = strlen(w);
+    for (i = 0; i + k <= n; i++) if (!memcmp(b + i, w, k)) c++;
+    return c;
+}
+
+/* 0 same, 1 diff, -1 skip */
+static int pi_one(const char *src, size_t *callr, size_t *bytes, long *removed) {
+    char run[5000], img[5000], f[5][4600];
+    char *a, *b;
+    size_t na, nb;
+    int k, r;
+    for (k = 0; k < 5; k++) if (cx_fmt(f[k], sizeof f[k], "%s/s%d", pi_dir, k)) pi_die("path");
+    if (cx_fmt(run, sizeof run, "--route %s/run/O0 --res run-forward --source '%s'", pi_tgt, src)) pi_die("args");
+    if (cx_fmt(img, sizeof img, "--route %s/image/O0 --source '%s'", pi_tgt, src)) pi_die("args");
+    if (pi_stage("e2", run, src, f[0]) || pi_stage("e1", run, f[0], f[1]) || pi_stage("e3", run, f[1], f[2]) ||
+        pi_stage("sidecar", "", f[2], f[3]) || pi_stage("prune", img, f[3], f[4])) return -1;
+    a = cx_read(f[3], &na);
+    b = cx_read(f[4], &nb);
+    if (!a || !b || !na) { free(a); free(b); return -1; }
+    *callr = pi_count(a, na, "callr");
+    *bytes = na;
+    *removed = (long)pi_lines(a, na) - (long)pi_lines(b, nb);
+    r = !(na == nb && !memcmp(a, b, na));
+    free(a); free(b);
+    return r;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *p, *q;
+    size_t ln = 0;
+    char paths[16000] = "";
+    long max = -1, skip = 0, deadline = 270, idx = 0;
+    int i, ns = 0, nsame = 0, ndiff = 0, nskip = 0;
+    long long t0 = sy_now_ms();
+    const char *self, *tmp;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--product") && i + 1 < argc) { if (cx_fmt(pi_prod, sizeof pi_prod, "%s", argv[++i])) pi_die("product"); }
+        else if (!strcmp(argv[i], "--max") && i + 1 < argc) max = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--skip") && i + 1 < argc) skip = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--deadline") && i + 1 < argc) deadline = atol(argv[++i]);
+        else if (argv[i][0] == '-') { fprintf(stderr, "usage: prune-identity.cx [--product P] [--max N] [--skip K] [--deadline S] PATH...\n"); return 2; }
+        else { size_t o = strlen(paths); if (cx_fmt(paths + o, sizeof paths - o, " '%s'", argv[i])) pi_die("paths"); }
+    }
+    if (!paths[0] && cx_fmt(paths, sizeof paths, " tests examples apps")) pi_die("paths");
+    self = tn_self();
+    if (!self || !self[0] || cx_fmt(pi_tgt, sizeof pi_tgt, "%s", self)) pi_die("self target");
+    tmp = getenv("TMPDIR");
+    if (cx_fmt(pi_dir, sizeof pi_dir, "%s/prune-id-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(pi_dir)) pi_die("scratch");
+    {
+        char cmd[17000];
+        if (cx_fmt(cmd, sizeof cmd, "for p in%s; do if [ -d \"$p\" ]; then find \"$p\" -name '*.c' -type f | LC_ALL=C sort; elif [ -f \"$p\" ]; then echo \"$p\"; fi; done", paths)) pi_die("list");
+        if (pi_sh(cmd, &list, &ln) != 0 || !list) pi_die("list failed");
+    }
+    for (p = list; p < list + ln && *p; p = q + 1) {
+        size_t callr = 0, bytes = 0; long removed = 0; int r;
+        q = strchr(p, '\n');
+        if (!q) q = p + strlen(p);
+        *q = 0;
+        if (!*p) continue;
+        if (idx++ < skip) continue;
+        if (max >= 0 && ns + nskip >= max) break;
+        if (sy_now_ms() - t0 >= deadline * 1000LL) { printf("TRUNCATED\tdeadline=%ld\tnext_skip=%ld\n", deadline, idx - 1); break; }
+        r = pi_one(p, &callr, &bytes, &removed);
+        if (r < 0) { nskip++; printf("SKIP\t%s\n", p); }
+        else {
+            ns++; if (r) ndiff++; else nsame++;
+            printf("PRUNE_ID\t%s\t%s\tcallr=%zu\tbytes=%zu\tremoved=%ld\n", p, r ? "diff" : "same", callr, bytes, removed);
+        }
+        fflush(stdout);
+    }
+    {
+        char cmd[5000];
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", pi_dir)) pi_sh(cmd, 0, 0);
+    }
+    printf("PRUNE_IDENTITY samples=%d same=%d diff=%d skip=%d\n", ns, nsame, ndiff, nskip);
+    return 0;
+}

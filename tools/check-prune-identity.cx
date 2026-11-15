@@ -1,0 +1,41 @@
+/* check-prune-identity.cx -- fixtures for tools/prune-identity.cx.
+ *
+ *   sh ./unisacc.com tools/check-prune-identity.cx [-- PRODUCT]
+ *
+ * Writes two sources into a mkdtemp scratch: min.c (only main, prune must be identity) and
+ * dead.c (two never-called static functions, no callr, prune must drop lines). Runs the census
+ * on both and asserts: min.c same removed=0, dead.c diff removed>0, summary samples=2 same=1 diff=1.
+ * Last line CHECK_PRUNE_IDENTITY failed=N; rc 1 on any FAIL.
+ */
+#pragma unisa use cxlib.netpack
+
+static int cp_failed;
+static void cp_ck(int ok, const char *l) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", l); if (!ok) cp_failed++; }
+static void cp_die(const char *s) { fprintf(stderr, "check-prune-identity: %s\n", s); exit(2); }
+
+int main(int argc, char **argv) {
+    char dir[4400], a[4600], b[4600], cmd[16000], line[5000];
+    const char *prod = argc > 1 ? argv[1] : "./unisacc.com";
+    const char *tmp = getenv("TMPDIR");
+    const char *mn = "int main(void){return 0;}\n";
+    const char *dd = "static int dead(int x){return x*3;}\nstatic int dead2(void){return dead(4);}\nint main(void){return 0;}\n";
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    if (cx_fmt(dir, sizeof dir, "%s/cpi-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(dir)) cp_die("scratch");
+    if (cx_fmt(a, sizeof a, "%s/min.c", dir) || cx_fmt(b, sizeof b, "%s/dead.c", dir)) cp_die("path");
+    if (cx_write(a, mn, strlen(mn)) || cx_write(b, dd, strlen(dd))) cp_die("write");
+    if (cx_fmt(cmd, sizeof cmd, "%s tools/prune-identity.cx -- --product %s --deadline 50 %s %s; rc=$?; rm -rf '%s'; exit $rc", prod, prod, a, b, dir)) cp_die("cmd");
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    if (np_run(av, 0, 0, 58, &r, why, sizeof why)) cp_die(why);
+    cp_ck(r.rc == 0, "rc0");
+    if (r.out) fwrite(r.out, 1, r.outn, stdout);
+    if (cx_fmt(line, sizeof line, "PRUNE_ID\t%s\tsame\tcallr=0\t", a)) cp_die("l");
+    cp_ck(r.out && strstr(r.out, line) && strstr(strstr(r.out, line), "removed=0\n"), "min-same");
+    if (cx_fmt(line, sizeof line, "PRUNE_ID\t%s\tdiff\tcallr=0\t", b)) cp_die("l");
+    cp_ck(r.out && strstr(r.out, line) && !strstr(strstr(r.out, line), "removed=0\n") && !strstr(strstr(r.out, line), "removed=-"), "dead-diff-removed");
+    cp_ck(r.out && strstr(r.out, "PRUNE_IDENTITY samples=2 same=1 diff=1 skip=0\n"), "summary");
+    np_free(&r);
+    printf("CHECK_PRUNE_IDENTITY\tfailed=%d\n", cp_failed);
+    return cp_failed ? 1 : 0;
+}
