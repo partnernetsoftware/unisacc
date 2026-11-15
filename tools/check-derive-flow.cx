@@ -2,6 +2,9 @@
  * (去掉 ms 列)排序后逐行相同,DERIVE_SUMMARY 计数相同,退出码相同;并核 --write 无参转调串行(用法错 rc 2)。
  *   sh ./unisacc.com tools/check-derive-flow.cx */
 #pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
@@ -39,17 +42,31 @@ static int runv(const char *tool, const char *args, char **o, size_t *n) {
 int main(void) {
     char *so, *fo, ss[300], fs[300], *sl[64], **r; size_t sn, fn; int src, frc, ns, i, same;
     {   /* 两版并发起跑(各自输出与退出码落临时目录),总时约等于较慢一版 */
-        char cmd[1200], p[400], *v[] = {"sh", "-c", cmd, 0}, *o = 0, *t; size_t n = 0, m = 0;
-        const char *d = "/tmp/check-derive-flow.d";
-        cx_fmt(cmd, sizeof cmd, "mkdir -p %s; (sh ./unisacc.com tools/derive.cx -- --check > %s/s.out; echo $? > %s/s.rc) & "
-               "(sh ./unisacc.com tools/derive-flow.cx -- --check > %s/f.out; echo $? > %s/f.rc) & wait", d, d, d, d, d);
+        char cmd[2400], p[400], *v[] = {"sh", "-c", cmd, 0}, *o = 0, *t; size_t n = 0, m = 0;
+        /* 副本放固定私有位置 ~/.cache/unisacc/check-derive-flow/<仓根 FNV-1a 64>/,跨次复用产品 -run 编译缓存(缓存按路径取键,
+         * 换路径即冷编,见 build/pkg-gaps.tsv);每次只同步变化文件(cp -pP 全量覆盖,保留 mtime 与符号链接)。flock 防两份同时跑。
+         * 副本内容取工作区已跟踪与未跟踪文件(git ls-files -co);git 身份与共享检出一致:objects 走 alternates,
+         * HEAD 同提交号,index 拷一份(product-map 等把 HEAD 与 ls-files 写进表),免 git add -A。
+         * 两版执行体先各编一次(--plan 与用法错),编译不计入并发段。 */
+        static char d[600], cwd[600]; const char *home = sy_env("HOME"); unsigned long long hh = 1469598103934665603ULL; long q;
+        if (!home || sy_cwd(cwd, sizeof cwd)) { ck(0, "home-cwd"); return 1; }
+        for (q = 0; cwd[q]; q++) { hh ^= (unsigned char)cwd[q]; hh *= 1099511628211ULL; }
+        cx_fmt(d, sizeof d, "%s/.cache/unisacc/check-derive-flow/%016llx", home, hh);
+        cx_fmt(cmd, sizeof cmd, "R=$PWD; H=$(git rev-parse HEAD) && mkdir -p %s/w && exec 9> %s/.lock && { flock -n 9 || { echo LOCKED; exit 3; }; } && "
+               "rm -f %s/s.out %s/f.out %s/s.rc %s/f.rc && git ls-files -co --exclude-standard -z | xargs -0 cp -pP --remove-destination --parents -t %s/w 2>/dev/null; "
+               "cd %s/w && ln -sfn \"$R/unisacc.com\" unisacc.com && { [ -d .git ] || git init -q; } && echo \"$R/.git/objects\" > .git/objects/info/alternates && "
+               "git update-ref HEAD $H && cp \"$R/.git/index\" .git/index && "
+               "sh ./unisacc.com tools/derive.cx -- --plan > /dev/null && { sh ./unisacc.com tools/derive-flow.cx -- --bogus > /dev/null; true; } && "
+               "{ (sh ./unisacc.com tools/derive.cx -- --check > %s/s.out; echo $? > %s/s.rc) & "
+               "(sh ./unisacc.com tools/derive-flow.cx -- --check > %s/f.out; echo $? > %s/f.rc) & wait; }", d, d, d, d, d, d, d, d, d, d, d, d);
         cx_runv_timeout(v, 58, &o, &n);
+        if (o && n >= 6 && mm_same(o, "LOCKED", 6)) { sy_printf("REFUSE\tcheck-derive-flow\tlocked\t%s/.lock\n", d); return 2; }
         cx_fmt(p, sizeof p, "%s/s.out", d); so = cx_read(p, &sn);
         cx_fmt(p, sizeof p, "%s/f.out", d); fo = cx_read(p, &fn);
         cx_fmt(p, sizeof p, "%s/s.rc", d); t = cx_read(p, &m); src = t && m ? t[0] - '0' : -1;
         cx_fmt(p, sizeof p, "%s/f.rc", d); t = cx_read(p, &m); frc = t && m ? t[0] - '0' : -1;
     }
-    ck(so && fo && src == frc && (src == 0 || src == 1), "check-rc-equal");
+    ck(so && fo && src == frc && src >= 0 && src <= 2, "check-rc-equal");   /* derive.cx:234 return refused ? 2 : drift ? 1 : 0;两版须相等(工作区真实漂移或拒绝时同为 1 或 2) */
     if (!so || !fo) { sy_printf("DERIVE_FLOW_CHECK\tok=%d\tfailed=%d\n", nok, failed); return 1; }
     norm(so, (long)sn, &r, ss, sizeof ss); ns = nl; for (i = 0; i < ns; i++) sl[i] = lines[i];
     norm(fo, (long)fn, &r, fs, sizeof fs);
