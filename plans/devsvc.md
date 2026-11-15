@@ -77,6 +77,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - (4) 需要交互或保持 shell 状态(cd、环境变量跨调用)的操作:x 每次是独立进程,用 `--cwd` 与节点 `env` 键显式给。
 - (5) file.* 节点在引擎进程里内联执行,彼此串行;并发收益来自 exec 节点。大量文件读写想并发就拆成多个客户端调用。
 - (6) 版本工作目录里先按规则放 `unisacc.com` 符号链接;写根缺省为当前目录,跨目录写须设 `UNISACC_FLOW_ROOT`。
+- 只读 git 用 `devsvc git log|diff|show|status ARGS|blame|ls-files ...` 代替原生 git(不取锁,stdout 上限 1 MB,超出打 DEVSVC_TRUNCATED);事件同时落盘实例目录 events.tsv(超 4 MB 轮转 events.tsv.1,$DEVSVC_EV_ROTATE 可调),每条命令记 <命令>.<子命令> owner=($DEVSVC_OWNER,缺省 auto-<pid>) rc ms,供 tools/devsvc-usage.cx 计数;请设 DEVSVC_OWNER=<窗口名>。
 
 ## 6 已知限制与下一单
 
@@ -90,6 +91,11 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - (8) 开发库自举缺口:devsvc 自身依赖 `cxlib.flowexec`、`cxlib.flowfile`,改这两个库的中间态编不过时 `f edit` 也随之不可用,只能退回原生编辑;应让 f 与 x 走已缓存的原生执行体或上一版可用的库。
 - (9) 节点输出回显:`flowrun --echo` 已有 `--echo-max N`(字节,默认 65536,超出打 `ECHO_TRUNC` 行);devsvc `flow --cat` 尚未接同一上限。
 - (10) flow 节点事件现在流结束后才入环,改为运行中实时入环,file.* 节点改为可并发。
+- (2026-11-15 cc 排期)配置表随 HEAD 固定、锁释放 not-held 定因与续租:在途。
+- (2026-11-15 cc 排期)devsvc-usage 使用率度量(每会话 devsvc 与原生调用占比),巡检每轮跑,原生用法排名前列者优先补能力:在途。
+- (2026-11-15 cc 排期)register 提速(并行与增量,判定强度不降):在途。
+- (2026-11-15 cc 排期)precommit 迁为 flow 节点图并与原门对拍:在途。
+- (2026-11-15 cc 排期)待排:x --cat 上限与 --cwd(限仓内 .claude/worktrees/)、--bg 加 events wait、tools.cxlib bump 经 devsvc git 内部暂存完成、auto-continue 判断收紧、钩子对 Bash 直跑 git commit 与 unisacc.com 先告警后拒绝、关系 DAG G2 至 G12、build/*.tsv 第一批读者切换。
 
 ## 7 路线
 
