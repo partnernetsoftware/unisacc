@@ -45,6 +45,18 @@ static void mc_say(const char *result, unsigned long n) {
     if (!e || !e[0]) return;
     sy_eprintf("RR_TIME\tmodelcache\tresult=%s\tbytes=%lu\n", result, n);
 }
+/* Nested load phases have their own category: summing RR_TIME model must not double count them. */
+long long mc_phase_begin(void) {
+    sy_ts_t t;
+    if (!sy_env("UNISACC_RR_TIME") || sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + t.nsec;
+}
+void mc_phase_end(const char *stage, long long begin, int rc) {
+    sy_ts_t t;long long end;
+    if(begin<0||sy_mono(&t))return;
+    end=(long long)t.sec*1000000000LL+t.nsec;
+    if(end>=begin)sy_eprintf("RR_TIME\tmodelphase\tstage=%s\trc=%d\tns=%lld\n",stage,rc,end-begin);
+}
 
 static int mc_cat(char *out, int cap, int *at, const char *s) {
     int i = 0;
@@ -436,7 +448,11 @@ static int mc_read(const char *path, unsigned char *out, unsigned long olen) {
     sy_close(fd);
     mm_copy(hex, 64, head + 6, 64);
     hex[64] = 0;
-    if (sy_sha256_hex(out, (long)olen, back) != 0 || !tx_eqz(back, hex)) return 0;
+    long long verify_begin=mc_phase_begin();
+    int verify_rc=sy_sha256_hex(out,(long)olen,back);
+    if(!verify_rc&&!tx_eqz(back,hex))verify_rc=1;
+    mc_phase_end("verify",verify_begin,verify_rc);
+    if(verify_rc)return 0;
     return 1;
 }
 
@@ -445,7 +461,10 @@ int mc_get(const unsigned char *comp, unsigned long clen, unsigned char *out, un
     char hex[65], dir[4096], path[4400];
     sy_stat_t st;
     if (mc_off() || !comp || !out || clen == 0 || olen == 0) return 0;
-    if (sy_sha256_hex(comp, (long)clen, hex) != 0) return 0;
+    long long key_begin=mc_phase_begin();
+    int key_rc=sy_sha256_hex(comp,(long)clen,hex);
+    mc_phase_end("verify",key_begin,key_rc);
+    if(key_rc)return 0;
     if (mc_cache_dir(dir, (int)sizeof dir)) return 0;
     if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return 0;
     if (mc_read(path, out, olen)) { mc_cache_touch(dir, path); mc_say("hit", olen); return 1; }
