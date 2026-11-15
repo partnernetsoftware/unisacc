@@ -11,7 +11,13 @@
  * --date 缺省取当日(sy_wall_s + sy_local_fmt);--max-steps 缺省 4。每步记墙钟毫秒;日志超 8000 字节截断标 TRUNCATED。
  *
  * 子阶段(0.0.57,每次调用独立有界、可重复,调用方循环到非 PENDING):
- *   ROOT RUN --tier T --phase init                 build/init/prepare,退出 0 status=PREPARED
+ *   ROOT RUN --tier T --phase init                 薄入口依次运行下列同一帮手
+ *   ROOT RUN --tier T --phase build|map|init-session|prepare-1..6
+ *   ROOT RUN --tier T --phase map-register-N       第N个材料登记(六prepare后；N从1起)
+ *   ROOT RUN --tier T --phase map --map-family NAME 每材料族独立准备；全部族完成后 --phase map 聚合封口。
+ * 每子相内部预算50s，收据绑定内容身份；相同输入核验后SKIP。材料族使用完整材料名精确匹配。
+ * 显式子相须在编排源码树运行；跨cwd时 UNISACC_S9_NIGHTLY_SOURCE 指向实际编排源以核身份。
+ * 94de54e70b将原spawn/drain两循环分别改成invoke，造成两套相同prepare；本次合并为一次。
  *   ROOT --resume RUN --phase steps [--max-steps N] 默认 1 步、每步 240s;仍有新片退出 3 status=PENDING,走完退出 0 STEPS_DONE
  *   ROOT --resume RUN --phase aggregate [--agg-parts N]  retry UNKNOWN 片,再 N(默认 4)片 aggregate --part K N(已有片记录跳过)+ --merge N
  * 缺省 --phase all 行为不变(含单次整体 aggregate;--agg-parts N 可在 all 里改用分片)。
@@ -29,6 +35,8 @@
 #pragma unisa use cxlib.die
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.s9map
+#pragma unisa use cxlib.testplan
+#pragma unisa use cxlib.allsession
 
 static char root[4096], why[512];
 static const char *fake;
@@ -97,8 +105,10 @@ static char mapfile[16384];      /* the map's CONTENT, as the dump printed it */
 static char mappath[4400];       /* the file that content was written to: init takes a path, not content */
 static char s9run[4400];         /* the RUN directory, set once in main: the map file lives beside it */
 static char why4[300];
+static int map_budget;
+static const char *map_family;
 static int materials_map(char *map, long cap, char *why, int whycap) {
-    char product[4400], tool[4400], *v[8];
+    char product[4400], tool[4400], *v[10];
     np_result r = {0};
     int k = 0, rc;
     if (cx_fmt(product, sizeof product, "%s/%s", root, "unisacc" ".com") ||
@@ -111,10 +121,11 @@ static int materials_map(char *map, long cap, char *why, int whycap) {
         else {
             v[k++] = "sh"; v[k++] = product; v[k++] = tool; v[k++] = "--";
             v[k++] = "--materials-dump"; v[k++] = "--prepare-materials";
+            if (map_family) { v[k++] = "--family"; v[k++] = (char *)map_family; }
         }
     }
     v[k] = 0;
-    rc = run_step(v, root, L_I("s9.cmd"), &r);
+    rc = run_step(v, root, map_budget > 0 ? map_budget : L_I("s9.cmd"), &r);
     if (rc) { cx_fmt(why, whycap, "materials-dump rc=%d", rc); np_free(&r); return 1; }
     /* the format and the absolute-path rule live in one place, tools/cxlib/s9map.cx, so this reader and the
        check that asserts it cannot drift again.  An empty map is a failure, not a quiet full run: every
@@ -278,14 +289,199 @@ static void write_report(const char *path, const char *status) {
     if (n < 0 || n >= (int)sizeof body) die("report-bound", 0);
     if (cx_write(path, body, (size_t)n)) die("write", path);
 }
+/* 初始化收据只缓存构造，不缓存任何测试结论。调用方 cwd 必须是本工具源码树。
+ * build -> map -> init-session -> prepare-1..6；每次显式子相只运行一相。
+ * RUN 不存在时用 RUN.nightly-init (0700)，init 后原子迁入 RUN/.nightly-init。
+ * 每相前后重新读取内容身份；身份不符硬拒绝，不能把旧构造算作成功。 */
+static const char *init_names[73] = {"build", "map", "init-session", "prepare-1", "prepare-2", "prepare-3", "prepare-4", "prepare-5", "prepare-6"};
+static char init_material_names[64][32];
+static const char *init_preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
+static char init_state[4600], init_side[4600];
+static long init_t0;
+static int init_left(void) {
+    long left = 50000 - (sy_now_ms() - init_t0);
+    return left > 0 ? (int)(left / 1000) : 0;
+}
+static int init_identity(const char *tier, int mapped, char hex[65]) {
+    as_ident id; char own[65], mh[65], fh[65], body[8192];
+    if (fake) {
+        static const char *trees[] = {"tests", "tools", "cx", "src", "seed"};
+        np_buf b = {0}; char p[4400], h[65]; int i;
+        memset(&id, 0, sizeof id);
+        for (i = 0; i < 5; i++) {
+            if (as_join(p, sizeof p, root, trees[i])) { free(b.p); return -1; }
+            if (sy_exists(p) == 1) {
+                if (as_tree(p, 1, h, 0, why, sizeof why)) { free(b.p); return -1; }
+                np_puts(&b, trees[i]); np_puts(&b, h);
+            }
+        }
+        cx_sha256_hex(b.p ? b.p : "", b.n, id.harness); free(b.p);
+        if (as_join(p, sizeof p, root, "unisacc.com")) return -1;
+        if (sy_exists(p) == 1 && as_sha_file(p, 1, id.candidate, 0, why, sizeof why)) return -1;
+    } else if (as_identity(root, 1, &id, why, sizeof why)) return -1;
+    { const char *source=sy_env("UNISACC_S9_NIGHTLY_SOURCE");
+      if (as_sha_file(source&&*source?source:"tools/s9-nightly.cx",1,own,0,why,sizeof why)) return -1; }
+    cx_sha256_hex("", 0, mh); cx_sha256_hex("", 0, fh);
+    if (mapped && as_sha_file(mappath, 0, mh, 0, why, sizeof why)) return -1;
+    if (fake && as_sha_file(fake, 1, fh, 0, why, sizeof why)) return -1;
+    if (cx_fmt(body, sizeof body, "S9INIT-v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+        root, tier, id.candidate_kind, id.candidate, id.legacy_candidate,
+        id.registry, id.sid, id.harness, own, mh, fake ? fake : "-", fh)) return -1;
+    cx_sha256_hex(body, strlen(body), hex); return 0;
+}
+static int init_receipt(int n, const char *identity, int write_it) {
+    char p[4800], pending[4840], body[256]; size_t z; char *saved; int ok;
+    if (cx_fmt(p, sizeof p, "%s/%s.done", init_state, init_names[n]) ||
+        cx_fmt(body, sizeof body, "S9INIT-v1\t%s\t%s\n", init_names[n], identity)) return -1;
+    if (write_it) {
+        if (cx_fmt(pending, sizeof pending, "%s.pending-%ld", p, (long)getpid()) || cx_write(pending, body, strlen(body))) return -1;
+        return rename(pending, p);
+    }
+    if (sy_exists(p) != 1) return 0;
+    saved = as_read(p, 0, &z, why, sizeof why); if (!saved) return -1;
+    ok = z == strlen(body) && !memcmp(saved, body, z); free(saved);
+    if (!ok) { cx_fmt(why, sizeof why, "identity-changed %s", init_names[n]); return -1; }
+    return 1;
+}
+/* 一个材料一相，避免登记持有同一会话写锁的子进程并发。 */
+static int init_material_count(void) {
+    size_t z, i; int n = 0; char *s = as_read(mappath, 0, &z, why, sizeof why);
+    if (!s) return -1;
+    for (i = 0; i < z; i++) if (s[i] == '\n') n++;
+    free(s); return n <= 64 ? n : -1;
+}
+static int init_materials(int wanted, const char *run, char *out, int cap) {
+    size_t z; char *s = as_read(mappath, 0, &z, why, sizeof why), *at;
+    int rc = -1, row = 0;
+    if (!s) return -1;
+    at = s;
+    while (*at) {
+        char *end = strchr(at, '\n'), *tab = strchr(at, '\t');
+        if (!end || !tab || tab > end) break;
+        if (row++ == wanted) {
+            *tab = 0; xa4 = at;
+            rc = init_left() < 1 ? 124 : invoke("prepare", root, run, "material", init_left(), out, cap);
+            xa4 = 0; break;
+        }
+        at = end + 1;
+    }
+    free(s); return rc;
+}
+static char map_families[256][128];
+static int map_families_load(void) {
+    as_registry r; int n=0;
+    if(as_registry_load(root,&r,why,sizeof why)) return -1;
+    for(int i=0;i<r.nb;i++) {
+        const char *at=r.b[i].materials; tp_material_decl d; int rc;
+        while((rc=tp_material_next(&at,&d))>0) {
+            int j; for(j=0;j<n&&strcmp(map_families[j],d.name);j++) {}
+            if(j==n) { if(n==256||cx_fmt(map_families[n],sizeof map_families[n],"%s",d.name)) {as_registry_free(&r);return -1;} n++; }
+        }
+        if(rc<0) {as_registry_free(&r);return -1;}
+    }
+    as_registry_free(&r); return n;
+}
+/* A family receipt binds both its immutable input identity and exact dump bytes.
+ * Sealing reads every declared family, including explicit refusals, before making MAP. */
+static int map_family_phase(const char *run,const char *tier,const char *family,int seal) {
+    char state[4600],p[4800],rec[4800],identity[65],h[65],want[200];
+    int nn=map_families_load(); np_buf all={0};
+    if(nn<0||cx_fmt(state,sizeof state,"%s.nightly-init",run))return 1;
+    if(sy_exists(state)!=1&&mkdir(state,0700))return 1;
+    if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||init_identity(tier,0,identity))return 1;
+    for(int i=0;i<nn;i++) {
+        if(!seal&&strcmp(family,map_families[i]))continue;
+        if(cx_fmt(p,sizeof p,"%s/family-%s.dump",state,map_families[i])||cx_fmt(rec,sizeof rec,"%s.sha",p))return 1;
+        size_t z=0,rz=0;char *b=cx_read(p,&z),*saved=cx_read(rec,&rz);
+        int valid=0;
+        if(b&&saved) {cx_sha256_hex(b,z,h);if(cx_fmt(want,sizeof want,"%s\t%s\n",identity,h)){free(b);free(saved);return 1;} valid=rz==strlen(want)&&!memcmp(saved,want,rz);}
+        free(saved);
+        if(!valid&&!seal) {
+            free(b); b=0; char product[4400],tool[4400],*v[10];np_result r={0};
+            if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/affected.cx",root))return 1;
+            v[0]="sh";v[1]=product;v[2]=tool;v[3]="--";v[4]="--materials-dump";v[5]="--prepare-materials";v[6]="--family";v[7]=map_families[i];v[8]=0;
+            int rc=run_step(v,root,50,&r);
+            if(rc||r.residue){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc?rc:1;}
+            cx_sha256_hex(r.out?r.out:"",r.outn,h);
+            char after[65];if(init_identity(tier,0,after)||strcmp(identity,after)){np_free(&r);return 1;}
+            if(cx_fmt(want,sizeof want,"%s\t%s\n",identity,h)||cx_write(p,r.out?r.out:"",r.outn)||cx_write(rec,want,strlen(want))){np_free(&r);return 1;}
+            np_free(&r);printf("S9_MAP_FAMILY\tname=%s\tstatus=PREPARED\n",map_families[i]);return 0;
+        }
+        if(!valid){free(b);free(all.p);fprintf(stderr,"s9-nightly: missing or stale family %s\n",map_families[i]);return 1;}
+        if(!seal){free(b);printf("S9_MAP_FAMILY\tname=%s\tstatus=SKIP\n",map_families[i]);return 0;}
+        np_put(&all,b,z);free(b);
+    }
+    if(!seal){free(all.p);return 2;}
+    int rc=s9_map_from_dump(all.p?all.p:"",all.n,mapfile,sizeof mapfile,why,sizeof why);free(all.p);
+    if(rc||!s9_map_rows())return 1;
+    return cx_write(mappath,mapfile,strlen(mapfile));
+}
+static int init_one(int n, const char *run, const char *tier, int reuse, char *out, int cap) {
+    char before[65], after[65], predecessor[65], base[65], inside[4600]; int rc, j;
+    init_t0 = sy_now_ms();
+    if (cx_fmt(init_side, sizeof init_side, "%s.nightly-init", run) ||
+        cx_fmt(inside, sizeof inside, "%s/.nightly-init", run) ||
+        cx_fmt(mappath, sizeof mappath, "%s.materials.tsv", run)) return -1;
+    if (cx_fmt(init_state, sizeof init_state, "%s", sy_exists(inside) == 1 ? inside : init_side)) return -1;
+    out[0] = 0;
+    if (reuse) {
+        if (sy_exists(init_state) != 1 && mkdir(init_state, 0700)) return -1;
+        if (init_identity(tier, n > 1, before)) return -1;
+        if (n > 0 && init_identity(tier, 0, base)) return -1;
+        for (j = 0; j < n; j++) {
+            if (init_receipt(j, j == 0 ? base : before, 0) != 1) {
+                cx_fmt(why, sizeof why, "prerequisite %s", init_names[j]); return -1;
+            }
+        }
+        if (n == 1 && sy_exists(mappath) == 1) {
+            if (init_identity(tier, 1, predecessor)) return -1;
+            rc = init_receipt(n, predecessor, 0);
+        } else rc = init_receipt(n, before, 0);
+        if (rc < 0) return -1;
+        if (rc == 1) { note(init_names[n]); printf("S9_INIT\tphase=%s\tstatus=SKIP\n", init_names[n]); return 0; }
+    }
+    if (init_left() < 1) return 124;
+    if (n == 0) rc = invoke("build", 0, 0, 0, init_left(), out, cap);
+    else if (n == 1) {
+        if (fake) rc = cx_write(mappath, "", 0);
+        else if(sy_env("UNISACC_S9_MATERIALS_DUMP_SEAM")) { map_budget=init_left();rc=materials_map(mapfile,sizeof mapfile,why,sizeof why);map_budget=0; }
+        else rc=map_family_phase(run,tier,0,1);
+    } else if (n == 2) {
+        if (!fake && sy_exists(run) == 1) { cx_fmt(why, sizeof why, "init requires absent RUN"); return -1; }
+        if (strcmp(tier, "daily")) { xa4 = "--tier"; xa5 = tier; }
+        rc = invoke("init", root, run, fake ? "-" : mappath, init_left(), out, cap);
+        xa4 = xa5 = 0; if (rc == 3) rc = 0;
+        if (!rc && fake && sy_exists(run) != 1 && mkdir(run, 0700)) return -1;
+    } else if (n >= 9) {
+        rc = init_materials(n - 9, run, out, cap);
+    } else {
+        rc = invoke("prepare", root, run, init_preps[n - 3], init_left(), out, cap);
+    }
+    note(init_names[n]); if (rc) return rc;
+    if (reuse) {
+        if (init_identity(tier, n > 0, after)) return -1;
+        if (n != 1 && strcmp(before, after)) { cx_fmt(why, sizeof why, "identity changed during %s", init_names[n]); return -1; }
+        if (n == 1) {
+            /* 允许本相新建映射，但候选、源码等输入不能随之变化。 */
+            if (init_identity(tier, 0, predecessor)) return -1;
+            if (strcmp(base, predecessor)) { cx_fmt(why, sizeof why, "identity changed during map"); return -1; }
+        }
+        if (n == 2 && strcmp(init_state, inside)) {
+            if (rename(init_state, inside)) return -1;
+            if (cx_fmt(init_state, sizeof init_state, "%s", inside)) return -1;
+        }
+        if (init_receipt(n, after, 1)) return -1;
+    }
+    printf("S9_INIT\tphase=%s\tstatus=DONE\n", init_names[n]); return 0;
+}
 
 int main(int argc, char **argv) {
     const char *run = 0, *tier = "commit", *date = 0;
     int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
     char report[4400], tmp[4000], datebuf[32], aggout[4400];
-    static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate"};
+    static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate", "-build", "-map", "-init-session", "-prepare-1", "-prepare-2", "-prepare-3", "-prepare-4", "-prepare-5", "-prepare-6"};
     int i, rc, steps, max_steps = 4, step_s = L_I("s9.step.max"), step_done = 0;
-    static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
+    int init_part;
     if (argc < 3) die("usage", "ROOT RUN --tier commit|daily|release [--date D] [--fake SCRIPT]");
     if (sy_realpath(argv[1], root, sizeof root) < 0) die("root", argv[1]);
     run = argv[2];
@@ -300,6 +496,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--tier") && i + 1 < argc) tier = argv[++i];
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
+        else if (!strcmp(argv[i], "--map-family") && i + 1 < argc) map_family = argv[++i];
         else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) { step_s = atoi(argv[++i]); step_set = 1; }
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) { max_steps = atoi(argv[++i]); max_set = 1; }
         else if (!strcmp(argv[i], "--agg-parts") && i + 1 < argc) agg_parts = atoi(argv[++i]);
@@ -309,6 +506,20 @@ int main(int argc, char **argv) {
             else if (!strcmp(ph, "init")) phase = 1;
             else if (!strcmp(ph, "steps")) phase = 2;
             else if (!strcmp(ph, "aggregate")) phase = 3;
+            else if (!strcmp(ph, "build")) phase = 4;
+            else if (!strcmp(ph, "map")) phase = 5;
+            else if (!strcmp(ph, "init-session")) phase = 6;
+            else if (!strcmp(ph, "prepare-1")) phase = 7;
+            else if (!strcmp(ph, "prepare-2")) phase = 8;
+            else if (!strcmp(ph, "prepare-3")) phase = 9;
+            else if (!strcmp(ph, "prepare-4")) phase = 10;
+            else if (!strcmp(ph, "prepare-5")) phase = 11;
+            else if (!strcmp(ph, "prepare-6")) phase = 12;
+            else if (!strncmp(ph, "map-register-", 13)) {
+                int mat = atoi(ph + 13); char canonical[32];
+                if (mat < 1 || mat > 64 || cx_fmt(canonical, sizeof canonical, "map-register-%d", mat) || strcmp(canonical, ph)) die("phase", ph);
+                phase = 12 + mat;
+            }
             else die("phase", ph);
         }
         else die("unknown", argv[i]);
@@ -316,7 +527,7 @@ int main(int argc, char **argv) {
     /* 子阶段(0.0.57,0.0.56 起跑 455s 超 5 分钟铁律):init 只做 build/init/prepare;steps 默认只走 1 步且每步 240s;
      * aggregate 默认分 4 片(s9-shards aggregate --part K N)再 --merge,每次调用都在 55s 内。steps/aggregate 沿用已 init 的 RUN,须配 --resume。
      * 每个子阶段都可重复执行(已存在的片记录跳过),调用方循环到非 PENDING 即可。 */
-    if (phase == 1 && resume) die("phase", "init takes RUN, not --resume");
+    if ((phase == 1 || phase >= 4) && resume) die("phase", "initialization takes RUN, not --resume");
     if ((phase == 2 || phase == 3) && !resume) die("phase", "steps|aggregate need --resume RUN");
     if (phase == 2 && !max_set) max_steps = 1;
     if (phase == 2 && !step_set) step_s = L_I("s9.step");
@@ -335,7 +546,9 @@ int main(int argc, char **argv) {
         size_t rn = sl > 0 ? (size_t)sl : 0;
         if (rn >= sizeof rd) die("report", 0);
         if (rn) { if (mm_copy(rd, (long)sizeof rd, run, (long)rn)) die("report", 0); rd[rn] = 0; } else { rd[0] = '.'; rd[1] = 0; }
-        if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s%s.md", rd, date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
+        if (phase >= 13) {
+            if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s-map-register-%d.md", rd, date, tier, phase - 12)) die("report", 0);
+        } else if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s%s.md", rd, date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
     }
     if (resume) {
         char sess[4400];
@@ -354,110 +567,48 @@ int main(int argc, char **argv) {
             }
         }
     }
+    if(map_family) {
+        if(phase!=5||fake)die("map-family","requires real --phase map");
+        long t0=sy_now_ms();int mr=map_family_phase(run,tier,map_family,0);
+        printf("S9_MAP_FAMILY\trc=%d\twall_ms=%ld\n",mr,sy_now_ms()-t0);return mr;
+    }
     pass_n = fail_n = 0;
     notexec_n = 1;
     note(resume ? "resume" : "begin");
     if (!resume) {
-    rc = invoke("build", 0, 0, 0, L_I("s9.cmd"), tmp, sizeof tmp);
-    note("build");
-    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\treport=%s\n", rc, report); return 1; }
-    pass_n++;
-    /* s9-shards init: commit 与 release 透传 --tier; daily 不带 --tier 即 FULL。 */
-    if (!strcmp(tier, "commit") || !strcmp(tier, "release")) { xa4 = "--tier"; xa5 = (char *)tier; }
-    mapfile[0] = 0; mappath[0] = 0; why4[0] = 0;
-    /* --fake 只测编排:临时根里没有真产品,不跑材料准备,按空 MAP 继续。 */
-    if (!fake && materials_map(mapfile, (long)sizeof mapfile, why4, (int)sizeof why4)) {
-        fail_n++; write_report(report, "FAIL");
-        printf("S9_NIGHTLY\tstatus=FAIL\tstep=init-materials\treason=%s\treport=%s\n", why4, report);
-        return 1;
-    }
-    rc = invoke("init", root, run, mappath[0] ? mappath : "-", L_I("s9.cmd"), tmp, sizeof tmp);
-    xa4 = xa5 = 0;
-    note("init");
-    if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
-    pass_n++;
-    /* 六个 prepare 只能串行,不是保守而是 s9-shards 的合同:每个 prepare 都要拿会话的排他写锁
-       (as_lock(sd,1)),并行起时后起的直接 REFUSE run-busy session-busy(实测,证据见提交说明)。
-       想并行得先让 s9-shards 支持每相独立会话,那是它的改动,不在编排里绕。
-       失败合同仍按「失败即停、后面不跑、报告逐条具名」办(与 Q1 前的语义一致)。 */
-    {   int pi;
-        for (pi = 0; pi < 6; pi++) {
-            const char *nm = preps[pi];
-            rc = invoke("prepare", root, run, preps[pi], L_I("s9.cmd"), tmp, sizeof tmp);
-            note(preps[pi]);
-            if (rc != 0) {
-                /* 子进程自己的话是唯一能定因的证据:4 KiB 尾部,走 stderr,报告保持报告 */
-                if (tmp[0]) fprintf(stderr, "s9-nightly: %s rc=%d\n%.*s\n", nm, rc, (int)tx_len(tmp, (long)sizeof tmp), tmp);
-                for (pi++; pi < 6; pi++) note_not_run(preps[pi]);
+        int init_total = 9, mi;
+        for (mi = 0; mi < 64; mi++) {
+            if (cx_fmt(init_material_names[mi], sizeof init_material_names[mi], "map-register-%d", mi + 1)) die("phase", 0);
+            init_names[9 + mi] = init_material_names[mi];
+        }
+        if (phase >= 13) init_total = phase - 3;
+        for (init_part = 0; init_part < init_total; init_part++) {
+            if (phase >= 4 && init_part != phase - 4) continue;
+            tmp[0] = 0; why[0] = 0;
+            if(init_part==1&&phase<4&&!fake&&!sy_env("UNISACC_S9_MATERIALS_DUMP_SEAM")) {
+                int nf=map_families_load();if(nf<0)die("map-families",why);
+                for(int fi=0;fi<nf;fi++)if(map_family_phase(run,tier,map_families[fi],0))die("map-family",map_families[fi]);
+            }
+            rc = init_one(init_part, run, tier, !(fake && phase == 0), tmp, sizeof tmp);
+            if (rc) {
+                if (tmp[0]) fprintf(stderr, "s9-nightly: %s\n", tmp);
+                fprintf(stderr, "s9-nightly: %s\n", why);
                 fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", nm, rc, report);
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=%s\trc=%d\treport=%s\n", init_names[init_part], rc, report);
                 return 1;
             }
             pass_n++;
-        }
-    }
-    {   int pi;
-        for (pi = 0; pi < 6; pi++) {
-            rc = invoke("prepare", root, run, preps[pi], L_I("s9.cmd"), tmp, sizeof tmp);
-            note(preps[pi]);
-            if (rc != 0) {
-                /* 子进程自己的话是唯一能定因的证据:4 KiB 尾部,走 stderr,报告保持报告 */
-                if (tmp[0]) fprintf(stderr, "s9-nightly: %s rc=%d\n%.*s\n", preps[pi], rc, (int)tx_len(tmp, (long)sizeof tmp), tmp);
-                for (pi++; pi < 6; pi++) note_not_run(preps[pi]);
-                fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[pi], rc, report);
-                return 1;
+            if (init_part == 8 && phase < 4 && !fake) {
+                mi = init_material_count();
+                if (mi < 0) die("materials-map", why);
+                init_total = 9 + mi;
             }
-            pass_n++;
         }
-    }
-    /* 映射里的每个材料也要在会话里登记并装配:s9-shards 的 prepare material NAME 就是这一相。它必须在
-       checker 之后、六个构建 prepare 之前(它要 checker 已就位),所以单独一相、一起起、按序收。材料数不
-       等于批数(一个材料被多条批声明),所以按名字逐个起,不再按 6 个写死。 */
-    if (mappath[0]) {
-        char *names[64]; int nn = 0, k2;
-        long at = 0, mlen = (long)tx_len(mapfile, (long)sizeof mapfile);
-        while (at < mlen && nn < 64) {
-            long e = at;
-            while (e < mlen && mapfile[e] != '\n') e++;
-            mapfile[e] = 0;
-            {   char *tab = strchr(mapfile + at, '\t');
-                if (tab) { *tab = 0; names[nn++] = mapfile + at; } }
-            at = e + 1;
+        if (phase == 1 || phase >= 4) {
+            write_report(report, phase == 1 ? "PREPARED" : "INIT_PHASE_DONE");
+            printf("S9_NIGHTLY\tstatus=%s\tpass=%d\treport=%s\n", phase == 1 ? "PREPARED" : "INIT_PHASE_DONE", pass_n, report);
+            return 0;
         }
-        {   ParJob *pj = calloc((size_t)nn, sizeof *pj);
-            if (!pj) die("allocation", 0);
-            for (k2 = 0; k2 < nn; k2++) {
-                if (par_spawn(&pj[k2], "prepare", root, run, "material", names[k2], 0, L_I("s9.cmd"))) {
-                    int q;
-                    for (q = 0; q < k2; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(names[q]); }
-                    free(pj); fail_n++; write_report(report, "FAIL");
-                    printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-material-%s\treason=cannot-start\treport=%s\n", names[k2], report);
-                    return 1;
-                }
-            }
-            for (k2 = 0; k2 < nn; k2++) {
-                int prc = -1, dr = par_drain(&pj[k2], &prc), q;
-                if (dr || prc != 0) {
-                    for (q = k2 + 1; q < nn; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(names[q]); }
-                    par_free(&pj[k2]);
-                    fail_n++; write_report(report, "FAIL");
-                    printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-material-%s\trc=%d\treport=%s\n", names[k2], prc, report);
-                    free(pj);
-                    return 1;
-                }
-                note("prepare-material");
-                pass_n++;
-                par_free(&pj[k2]);
-            }
-            free(pj);
-        }
-    }
-    if (phase == 1) {
-        write_report(report, "PREPARED");
-        printf("S9_NIGHTLY\tstatus=PREPARED\tpass=%d\tfail=%d\tnot_executed=%d\treport=%s\n", pass_n, fail_n, notexec_n, report);
-        return 0;
-    }
     }
     if (phase != 3)
     for (steps = 0; steps < max_steps; steps++) {

@@ -3,6 +3,12 @@
 
      sh ./unisacc.com tools/affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]]
      sh ./unisacc.com tools/affected.cx -- --users FILE
+     sh ./unisacc.com tools/affected.cx -- --materials-dump [--ids ID...] [--family NAME] [--prepare-materials]
+
+   Material dump filters: --ids accepts batch IDs (including comma lists). --family NAME selects an exact,
+   complete material name: one material is one family, not a hyphen prefix. Repeat --family to select a
+   union of names. With both filters, only their intersection is emitted/prepared. Unknown IDs and names
+   are independently refused, even when the intersection is empty. No filters preserves registry order.
 
    Changed files: --since REV is `git diff --name-only REV --` (tracked files changed between REV and the
    working tree; untracked files are not listed), --files names them (repo-relative or absolute; a file that
@@ -896,6 +902,13 @@ static int prep_quiet;
 static int prep_only, pb_materials, pb_hits, pb_built, pb_failed;
 static const char *kit_state = "unknown";
 static void prep_print(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(prep_quiet ? stderr : stdout, fmt, ap); va_end(ap); }
+static const char *material_family[MAXBATCH]; static int nmaterial_family;
+static int material_wanted(const char *name) {
+    int k;
+    if (!nmaterial_family) return 1;
+    for (k = 0; k < nmaterial_family; k++) if (tx_eqz(name, material_family[k])) return 1;
+    return 0;
+}
 static void prebuild(const int *sel, int nsel) {
     int b, todo[PREP_MAX], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
     if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."))) die("path too long");
@@ -908,7 +921,7 @@ static void prebuild(const int *sel, int nsel) {
     for (b = 0; b < nsel; b++) {
         const char *at = batch[sel[b]].materials; tp_material_decl d; int rc;
         if (tx_eqz(at, "-")) continue;
-        while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; (void)prep_plan(d.name, d.kind, why, sizeof why); }
+        while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; if (material_wanted(d.name)) (void)prep_plan(d.name, d.kind, why, sizeof why); }
     }
     for (k = 0; k < nprep; k++) { if (prep[k].state == PS_READY) hits++; else if (prep[k].kind != PK_SVAL && prep[k].kind != PK_SID) todo[ntodo++] = k; }
     while (nextt < ntodo || nact) {
@@ -1312,6 +1325,10 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--family") && a + 1 < argc) {
+            if (nmaterial_family == MAXBATCH || !argv[a + 1][0] || tx_prefix(argv[a + 1], tx_len(argv[a + 1], 4096), "--", 2)) usage();
+            material_family[nmaterial_family++] = argv[a + 1]; a += 2;
+        }
         else if (tx_eqz(argv[a], "--layer") && a + 1 < argc) {
             static const char *known[] = {"base", "ext", "stream", "compiler", "driver", "chain", "release", "all", 0}; int q;
             layer = argv[a + 1]; a += 2;
@@ -1347,21 +1364,41 @@ int main(int argc, char **argv) {
                                fields plus the reason on a refusal -- and with --prepare-materials it is the
                                built artifact's absolute cache path instead of a repo-relative source, so a
                                caller can hand it straight to run-batch without knowing the cache layout. */
-        if (src || mode_run) usage();
+        if ((src && src != 100) || mode_run || layer || closure_dump) usage();
         load_registry();
+        for (k = 0; k < nfiles; k++) {
+            for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
+            if (b == nbatch) { fprintf(stderr, "affected: REFUSE id %s is not an IMPLEMENTED SOURCE batch\n", files[k]); return 2; }
+        }
+        for (k = 0; k < nmaterial_family; k++) {
+            int found = 0;
+            for (b = 0; b < nbatch && !found; b++) {
+                const char *at = batch[b].materials; tp_material_decl d;
+                while (tp_material_next(&at, &d) > 0) if (tx_eqz(d.name, material_family[k])) { found = 1; break; }
+            }
+            if (!found) { fprintf(stderr, "affected: REFUSE family %s is not a declared material name\n", material_family[k]); return 2; }
+        }
+        for (b = 0; b < nbatch; b++) {
+            if (src == 100) {
+                for (k = 0; k < nfiles && !tx_eqz(batch[b].id, files[k]); k++) {}
+                if (k == nfiles) continue;
+            }
+            sel[nsel++] = b;
+        }
         if (prep_on) {   /* build first: the row must be what run-batch will be handed, not a plan; the
                             build reports go to stderr so this output stays one row per material. */
-            int sel[MAXBATCH], nsel = 0;
-            for (b = 0; b < nbatch; b++) if (!tx_eqz(batch[b].materials, "-")) sel[nsel++] = b;
+            /* Only selected batches and material names enter the prebuild plan. */
             prep_quiet = 1;
             prebuild(sel, nsel);
             prep_quiet = 0;
         }
-        for (b = 0; b < nbatch; b++) {
-            const char *at = batch[b].materials; tp_material_decl d; int rc2;
+        for (k = 0; k < nsel; k++) {
+            const char *at; tp_material_decl d; int rc2;
+            b = sel[k]; at = batch[b].materials;
             if (tx_eqz(at, "-")) continue;
             while ((rc2 = tp_material_next(&at, &d)) > 0) {
                 char src[600], why[200];
+                if (!material_wanted(d.name)) continue;
                 why[0] = 0;
                 if (prep_on) {
                     int k = prep_find(d.name);
@@ -1376,6 +1413,7 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
+    if (nmaterial_family) usage();
     if (closure_dump) {   /* the facts tools/batch-packages-gen.cx builds build/batch-packages.tsv from */
         if (src || mode_run) usage();
         load_registry();

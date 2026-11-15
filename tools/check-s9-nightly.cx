@@ -39,7 +39,8 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
 int main(int argc, char **argv) {
     const char *am = argc == 2 ? argv[1] : "";
     int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases"), mat = !*am || !strcmp(am, "materials");
-    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph && !mat)) { fprintf(stderr, "usage: [core|materials|tiers|limits|resume|phases]\n"); return 2; }
+    int split = !*am || !strcmp(am,"split");
+    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph && !mat && !split)) { fprintf(stderr, "usage: [core|materials|tiers|limits|resume|phases|split]\n"); return 2; }
     char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
     char *v[16];
     int rc;
@@ -62,6 +63,7 @@ int main(int argc, char **argv) {
         runv(mk, dir, 5, buf, sizeof buf, &rc);
     }
     setenv("S9_FAKE_LOG", logp, 1);
+    setenv("UNISACC_S9_NIGHTLY_SOURCE", tool, 1);
     v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = dir; v[5] = runp;
     v[6] = "--tier"; v[7] = "commit"; v[8] = "--date"; v[9] = "2026-11-10"; v[10] = "--fake"; v[11] = fake; v[12] = 0;
     if (core) {
@@ -487,6 +489,30 @@ int main(int argc, char **argv) {
             ck(rc == 1 && strstr(buf, "step=init-materials") && strstr(buf, "materials-map-empty"), "map-empty-dump-refused-by-name");
             ck(rc == 1 && !strstr(buf, "status=PASS"), "map-empty-dump-not-a-pass");
         }
+    }
+    if (split) {
+        char splitrun[4400], *w[17]; size_t n; char *s;
+        const char *parts[] = {"build", "map", "init-session", "prepare-1", "prepare-2", "prepare-3", "prepare-4", "prepare-5", "prepare-6"};
+        if (cx_fmt(splitrun, sizeof splitrun, "%s/split-run", dir)) die("split-path");
+        w[0]="sh"; w[1]=com; w[2]=tool; w[3]="--"; w[4]=dir; w[5]=splitrun;
+        w[6]="--tier"; w[7]="commit"; w[8]="--date"; w[9]="2026-11-15";
+        w[10]="--fake"; w[11]=fake; w[12]="--phase"; w[14]=0;
+        for (int k=0;k<9;k++) {
+            w[13]=(char *)parts[k];
+            runv(w,root,20,buf,sizeof buf,&rc);
+            ck(rc==0 && has(buf,"status=DONE"),parts[k]);
+        }
+        { char *rm[] = {"rm","-f",logp,0}; runv(rm,dir,5,buf,sizeof buf,&rc); }
+        w[13]="prepare-6";
+        runv(w,root,20,buf,sizeof buf,&rc);
+        s=cx_read(logp,&n);
+        ck(rc==0 && has(buf,"status=SKIP") && !s,"split-completed-phase-no-child");
+        free(s);
+        w[7]="daily";
+        runv(w,root,20,buf,sizeof buf,&rc);
+        s=cx_read(logp,&n);
+        ck(rc!=0 && !s,"split-tier-change-refused-before-child");
+        free(s);
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);

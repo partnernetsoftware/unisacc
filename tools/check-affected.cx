@@ -1,4 +1,7 @@
 /* Checks tools/affected.cx: sh ./unisacc.com tools/check-affected.cx   (from the repo root)
+   --part materials runs material mapping/filter checks without constructing materials.
+   AFFECTED_NATIVE=/absolute/path/to/affected uses an already-built affected executable for child calls;
+   otherwise calls retain the source-run path. All parts use the same assertions and child deadlines.
    Expected values come from reading the sources (2026-10-30):
    - cx/sys/time.cx: tools/check-cx-sys-spawn.cx uses sysx.net and ext/sysx/net.cx uses time, so
      cx-l0-sys-spawn is affected via use; tools/check-batch-split.cx names "tools/batch-split.cx", which uses
@@ -89,10 +92,15 @@ static int want(const char *part) { return tx_eqz(part_wanted, "all") || tx_eqz(
 /* sh ./unisacc.com tools/affected.cx -- ARGS...; stdout into OUT; the exit code, or -1 */
 static int tool(char **args, char *out, long cap) {
     char *argv[16]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    argv[i++] = "sh";
-    argv[i++] = prod_abs;
-    argv[i++] = tool_abs;
-    argv[i++] = "--";
+    { const char *native = getenv("AFFECTED_NATIVE");
+      if (native && *native) argv[i++] = (char *)native;
+      else {
+          argv[i++] = "sh";
+          argv[i++] = prod_abs;
+          argv[i++] = tool_abs;
+          argv[i++] = "--";
+      }
+    }
     for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
     argv[i] = 0;
     pid = spawn_pipe_bounded(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
@@ -105,7 +113,29 @@ static int tool(char **args, char *out, long cap) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
-static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, OUTCAP), s, tx_len(s, 512)) >= 0; }
+static int has(const char *out, const char *s) {
+    long n=tx_len(out,OUTCAP),m=tx_len(s,512);
+    for(long i=0;i+m<=n;i++) if(tx_prefix(out+i,n-i,s,m)) return 1;
+    return 0;
+}
+/* Fact TSV rows have exactly two columns: model and repository-relative input.
+   Ignore comments; prose is not part of the fact contract. A null model matches any model. */
+static int fact_row(const char *data, const char *model, const char *path) {
+    long at = 0, n = tx_len(data, OUTCAP), pn = tx_len(path, 4096), mn = model ? tx_len(model, 128) : 0;
+    while (at < n) {
+        long e = at, tab, end;
+        while (e < n && data[e] != '\n') e++;
+        if (data[at] != '#') {
+            tab = at; while (tab < e && data[tab] != '\t') tab++;
+            end = tab + 1; while (end < e && data[end] != '\t') end++;
+            if (tab > at && tab < e && end == e && e - tab - 1 == pn
+                && (!model || (tab - at == mn && tx_same(data + at, mn, model, mn)))
+                && tx_same(data + tab + 1, pn, path, pn)) return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
 /* the number after KEY in OUT, or -1 */
 static long num(const char *out, const char *key) {
     long n = tx_len(out, OUTCAP), kl = tx_len(key, 64), at = 0, v = 0;
@@ -203,15 +233,15 @@ int main(int argc, char **argv) {
         for (k = 1; k < argc; k++) {
             if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
             /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
-            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym") || tx_eqz(argv[k], "materials")) { part_wanted = argv[k]; continue; }
             if (tx_eqz(argv[k], "--")) continue;
-            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|depth]\n");
+            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|materials|depth]\n");
             return 2;
         }
     }
     if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
-    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym") && !want("materials")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
@@ -273,6 +303,8 @@ int main(int argc, char **argv) {
         ck(rc == 0 && has(o, "BATCH_RUN\tid=tape-gap-tool\tstatus=PASS\t") && has(o, "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\t"), "real-run");
         ck(has(o, "PREPARED\ttlib-kit") && has(o, "rebuilt="), "kit-prepared-once");
     }
+    }
+    if (want("materials")) {
     {   /* A material named `<x>-tool` whose source is not tools/<x>.cx must resolve to tests/cases/<x>.cx:
            release-exec's fake-gh / fake-s9 fixtures live there, and before that fallback existed the batch
            was DEFERRED with prepare-failed=source-absent=tools/fake-gh.cx.  --materials-dump answers exactly
@@ -289,7 +321,76 @@ int main(int argc, char **argv) {
            && has(o, "MATERIAL\tnet-controls\tnets\ttools/net-material.cx\n") && has(o, "MATERIAL\tobjects-link\tobjects\ttools/object-material.cx\n")
            && has(o, "MATERIAL\tstream-lower-independent\tstream-lower-sha\tstreams/streams.json:lower\n")
            && has(o, "MATERIAL\tadopted-package\tcurrent-source-id\tidentity-helper:ROOT\n"), "f4a-producers-resolve");
+        {   /* No builds: byte-for-byte repeated default dump, then partition every full row by exact
+               material name. Each unique family must equal its ordered full-dump projection; together
+               those disjoint projections contain every full row exactly once. */
+            static char names[512][128]; int nn = 0, good = 1, j; long at = 0, total = 0, fulln = tx_len(o, OUTCAP);
+            rc = tool(a, p, OUTCAP);
+            ck(rc == 0 && tx_eqz(o, p), "materials-default-byte-stable");
+            {   /* Explicitly enumerate every batch represented in the legacy unfiltered row stream.
+                   Selection must not reorder or duplicate any byte, even with repeated IDs. */
+                long pos = 0, nids = 0;
+                while (pos < fulln) {
+                    long e = pos, f = pos, g, h;
+                    while (e < fulln && o[e] != '\n') e++;
+                    while (f < e && o[f] != '\t') f++;
+                    g = ++f; while (g < e && o[g] != '\t') g++;
+                    if (nids) q2[nids++] = ',';
+                    for (h = f; h < g && nids < OUTCAP - 1; h++) q2[nids++] = o[h];
+                    pos = e + 1;
+                }
+                q2[nids] = 0;
+                { char *allids[] = {"--materials-dump", "--ids", q2, 0};
+                  rc = tool(allids, p, OUTCAP);
+                  ck(rc == 0 && tx_eqz(o, p), "materials-default-equals-explicit-all-ids-bytes"); }
+            }
+            while (at < fulln) {
+                long e = at, f = at, g, h; int tabs = 0;
+                while (e < fulln && o[e] != '\n') e++;
+                while (f < e && tabs < 2) if (o[f++] == '\t') tabs++;
+                g = f; while (g < e && o[g] != '\t') g++;
+                if (tabs != 2 || g - f < 1 || g - f >= 128) { good = 0; break; }
+                for (j = 0; j < nn; j++) if (tx_len(names[j], 128) == g - f && tx_prefix(o + f, g - f, names[j], g - f)) break;
+                if (j == nn) {
+                    if (nn == 512 || tx_copy(names[nn], 128, o + f, g - f)) { good = 0; break; }
+                    nn++;
+                }
+                at = e + 1;
+            }
+            for (j = 0; j < nn && good; j++) {
+                char *fa[] = {"--materials-dump", "--family", names[j], 0}; long n = 0;
+                at = 0;
+                while (at < fulln) {
+                    long e = at, f = at, g; int tabs = 0;
+                    while (e < fulln && o[e] != '\n') e++;
+                    while (f < e && tabs < 2) if (o[f++] == '\t') tabs++;
+                    g = f; while (g < e && o[g] != '\t') g++;
+                    if (g - f == tx_len(names[j], 128) && tx_prefix(o + f, g - f, names[j], g - f)) {
+                        long h; for (h = at; h <= e; h++) q[n++] = o[h];
+                    }
+                    at = e + 1;
+                }
+                q[n] = 0; rc = tool(fa, p, OUTCAP);
+                if (rc || !tx_eqz(p, q)) good = 0;
+                total += n;
+            }
+            ck(good && nn > 1 && total == fulln, "materials-family-shards-union-equals-full-bytes");
+            { char *ids[] = {"--materials-dump", "--ids", "release-exec", 0};
+              char *both[] = {"--materials-dump", "--ids", "release-exec", "--family", "fake-gh-tool", "--family", "fake-s9-tool", 0};
+              rc = tool(ids, p, OUTCAP);
+              ck(rc == 0 && has(p, "MATERIAL\trelease-exec\tfake-gh-tool\ttests/cases/fake-gh.cx\n") && !has(p, "MATERIAL\tidentity\t"), "materials-ids-filter");
+              rc = tool(both, p, OUTCAP);
+              ck(rc == 0 && tx_eqz(p, "MATERIAL\trelease-exec\tfake-gh-tool\ttests/cases/fake-gh.cx\nMATERIAL\trelease-exec\tfake-s9-tool\ttests/cases/fake-s9.cx\n"), "materials-intersection-repeated-exact-family"); }
+            { char *badid[] = {"--materials-dump", "--ids", "no-such-batch-id", "--family", "fake-gh-tool", 0};
+              char *badfam[] = {"--materials-dump", "--ids", "tape-gap-tool", "--family", "fake-gh", 0};
+              char *empty[] = {"--materials-dump", "--ids", "tape-gap-tool", "--family", "fake-gh-tool", 0};
+              ck(tool(badid, p, OUTCAP) == 2 && !p[0], "materials-unknown-id-refused-independently");
+              ck(tool(badfam, p, OUTCAP) == 2 && !p[0], "materials-unknown-prefix-family-refused-independently");
+              ck(tool(empty, p, OUTCAP) == 0 && !p[0], "materials-known-empty-intersection"); }
+        }
     }
+    }
+    if (want("run")) {
     {   /* F4a: each new producer class PREPARED with the right identity.  Product = the root's own unisacc.com
            sha; host oracle = file sha + a version line; material dirs built by their tool; stream-STAGE-sha =
            streams.json com_sha256 of that stage (from the PREPARED streams material, not the object under test);
@@ -337,17 +438,16 @@ int main(int argc, char **argv) {
         char *a[] = {"--files", "exec/parse2/control-result.tsv", "--list-only", 0};
         char *b[] = {"--files", "exec/parse2/no-such-affected-table.tsv", "--list-only", 0};
         size_t n; char *reads = cx_read("tools/affected-model-inputs.tsv", &n);
-        ck(reads && has(reads, "shared-e3\texec/parse2/control-result.tsv\n")
-           && !has(reads, "\tseed/gen.c\n")
-           && has(reads, "warnparse\texec/parse2/control-result.tsv\n")
-           && has(reads, "errorparse\texec/parse2/control-result.tsv\n")
-           && !has(reads, "warnunits\texec/parse2/control-result.tsv\n"), "observed-control-models-not-units");
+        ck(reads && fact_row(reads, "shared-e3", "exec/parse2/control-result.tsv")
+           && !fact_row(reads, 0, "seed/gen.c")
+           && fact_row(reads, "warnparse", "exec/parse2/control-result.tsv")
+           && fact_row(reads, "errorparse", "exec/parse2/control-result.tsv")
+           && !fact_row(reads, "warnunits", "exec/parse2/control-result.tsv"), "observed-control-models-not-units");
         free(reads);
         reads = cx_read("exec/pipeline/table-deps.tsv", &n);
-        ck(reads && has(reads, "# Static conservative manifest closure;")
-           && has(reads, "shared-e3\texec/parse2/control-result.tsv\n")
-           && has(reads, "\texec/tapeframe/frame-result.tsv\n")
-           && !has(reads, "\tseed/gen.c\n"), "static-table-closure-not-generator");
+        ck(reads && fact_row(reads, "shared-e3", "exec/parse2/control-result.tsv")
+           && fact_row(reads, 0, "exec/tapeframe/frame-result.tsv")
+           && !fact_row(reads, 0, "seed/gen.c"), "static-table-closure-not-generator");
         free(reads);
         rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
         ck(rc == 0 && has(o, "AFFECTED\tsource-job-union\twhy=exec/parse2/control-result.tsv\tvia=table\n")
