@@ -16,6 +16,9 @@
  *   ROOT RUN --tier T --phase build|map|init-session|prepare-1..6
  *   ROOT RUN --tier T --phase map-register-N       第N个材料登记(六prepare后；N从1起)
  *   ROOT RUN --tier T --phase map --map-family NAME 每材料族独立准备；全部族完成后 --phase map 聚合封口。
+ * 恢复协议：执行前 intent，成功后同会话 owned-outputs 证据，最后原子写 done。
+ * done 丢失但输入、执行体及本相产物 SHA 全部核对一致时补写并记 RECOVERED；任一失配 REFUSE，不重造覆盖。
+ * 旧协议只有产物而无成功证据时不追认；必须保留原拒绝。准备证据不是测试结论。
  * 每子相内部预算50s，收据绑定内容身份；相同输入核验后SKIP。材料族使用完整材料名精确匹配。
  * 显式子相须在编排源码树运行；跨cwd时 UNISACC_S9_NIGHTLY_SOURCE 指向实际编排源以核身份。
  * 94de54e70b将原spawn/drain两循环分别改成invoke，造成两套相同prepare；本次合并为一次。
@@ -93,7 +96,9 @@ static int run_step(char **v, const char *cwd, int sec, np_result *r) {
         step_env[1] = 0;
         ev = step_env;
     }
-    if (np_run(v, cwd, ev, sec, r, why, sizeof why)) { np_free(r); return 99; }
+    if (np_run(v, cwd, ev, sec, r, why, sizeof why)) {
+        fprintf(stderr,"s9-nightly: transport %s\n",why); return 99;
+    }
     return r->rc;
 }
 /* The s9 root is a frozen `git archive` tree (F). A batch material declared as
@@ -149,9 +154,17 @@ static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到
  * Receipts bind current inputs AND image bytes, never a test result. */
 static int init_identity(const char *tier, int mapped, char hex[65]);
 static const char *native_tier;
+/* 原子持久化证据，缺失与内容失配严格区分。 */
+static int evidence_file(const char *p,const char *body,int save) {
+    char tmp[5000];size_t z;char *s;
+    if(save){if(cx_fmt(tmp,sizeof tmp,"%s.pending-%ld",p,(long)getpid())||cx_write(tmp,body,strlen(body)))return -1;return rename(tmp,p);}
+    if(sy_exists(p)!=1)return 0;
+    s=as_read(p,0,&z,why,sizeof why);int ok=s&&z==strlen(body)&&!memcmp(s,body,z);free(s);
+    if(!ok){cx_fmt(why,sizeof why,"REFUSE evidence-changed %s",p);return -1;}return 1;
+}
 static int native_image(int waves, int build, char bin[4800]) {
-    char state[4600], inside[4600], rec[4840], source[4400], product[4400];
-    char input[65], after[65], hash[65], body[256];
+    char state[4600], inside[4600], rec[4840], source[4400], product[4400], done[4840],intent[4840];
+    char input[65], after[65], hash[65], body[5000];
     const char *leaf = waves ? "build-waves" : "build-shards";
     size_t z; char *saved; int rc;
     long started = sy_now_ms();
@@ -161,16 +174,22 @@ static int native_image(int waves, int build, char bin[4800]) {
     if (build && sy_exists(state)!=1 && mkdir(state,0700)) return -1;
     if (cx_fmt(bin,4800,"%s/%s.bin",state,leaf) || cx_fmt(rec,sizeof rec,"%s/%s.native",state,leaf) ||
         init_identity(native_tier,0,input)) return -1;
+    if(cx_fmt(done,sizeof done,"%s/%s.done",state,leaf)||cx_fmt(intent,sizeof intent,"%s/%s.intent",state,leaf))return -1;
     if (sy_exists(rec)==1) {
+        if(cx_fmt(body,sizeof body,"S9INTENT-v1\t%s\t%s\t%s\n",s9run,leaf,input)||evidence_file(intent,body,0)!=1)return -1;
         if (as_sha_file(bin,1,hash,0,why,sizeof why) || sy_access(bin,1)) return -1;
-        if (cx_fmt(body,sizeof body,"S9NATIVE-v1\t%s\t%s\n",input,hash)) return -1;
+        if (cx_fmt(body,sizeof body,"S9NATIVE-v2\t%s\t%s\t%s\n",s9run,input,hash)) return -1;
         saved=as_read(rec,0,&z,why,sizeof why);
         rc=saved && z==strlen(body) && !memcmp(saved,body,z); free(saved);
         if (!rc) { cx_fmt(why,sizeof why,"native-identity-changed %s",leaf); return -1; }
-        if(build) printf("S9_INIT\tphase=%s\tstatus=SKIP\n",leaf);
+        int sealed=evidence_file(done,body,0);if(sealed<0)return -1;
+        if(!sealed){if(evidence_file(done,body,1))return -1;printf("S9_INIT\tphase=%s\tstatus=RECOVERED\n",leaf);}
+        else if(build)printf("S9_INIT\tphase=%s\tstatus=SKIP\n",leaf);
         return 0;
     }
     if (!build) { cx_fmt(why,sizeof why,"missing-native %s",leaf); return -1; }
+    if(sy_exists(bin)==1){cx_fmt(why,sizeof why,"REFUSE native-success-evidence-missing %s",leaf);return -1;}
+    if(cx_fmt(body,sizeof body,"S9INTENT-v1\t%s\t%s\t%s\n",s9run,leaf,input)||evidence_file(intent,body,1))return -1;
     np_result r={0};
     if(fake) {
         char *v[]={(char *)fake,"build",root,s9run,(char *)leaf,0};
@@ -191,7 +210,8 @@ static int native_image(int waves, int build, char bin[4800]) {
     if(rc || sy_now_ms()-started>=50000) return rc?rc:124;
     if(init_identity(native_tier,0,after)||strcmp(input,after)||as_sha_file(bin,1,hash,0,why,sizeof why)||sy_access(bin,1))return -1;
     if(sy_now_ms()-started>=50000)return 124;
-    if(cx_fmt(body,sizeof body,"S9NATIVE-v1\t%s\t%s\n",input,hash)||cx_write(rec,body,strlen(body)))return -1;
+    if(cx_fmt(body,sizeof body,"S9NATIVE-v2\t%s\t%s\t%s\n",s9run,input,hash)||evidence_file(rec,body,1))return -1;
+    if(evidence_file(done,body,1))return -1;
     printf("S9_INIT\tphase=%s\tstatus=DONE\n",leaf);return 0;
 }
 static int native_exec(char bin[4800]) {
@@ -229,6 +249,10 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         rc = run_step(v, root, sec, &r);
     }
     last_ms = sy_now_ms() - t0;
+    if (rc) {
+        if (r.out && r.outn) fwrite(r.out,1,r.outn,stderr);
+        if (r.err && r.errn) fwrite(r.err,1,r.errn,stderr);
+    }
     if (save_to) { if (cx_write(save_to, r.out ? r.out : "", r.out ? r.outn : 0)) die("save-stdout", save_to); }
     if (out && ocap > 0) {
         size_t n = r.outn < (size_t)(ocap - 1) ? r.outn : (size_t)(ocap - 1);
@@ -463,31 +487,44 @@ static int map_families_load(void) {
 /* A family receipt binds both its immutable input identity and exact dump bytes.
  * Sealing reads every declared family, including explicit refusals, before making MAP. */
 static int map_family_phase(const char *run,const char *tier,const char *family,int seal) {
-    char state[4600],p[4800],rec[4800],identity[65],h[65],want[200];
+    char state[4600],p[4800],rec[4800],identity[65],h[65],want[5000],done[4840],intent[4840];
     int nn=map_families_load(); np_buf all={0};
     if(nn<0||cx_fmt(state,sizeof state,"%s.nightly-init",run))return 1;
+    char inside[4600];if(cx_fmt(inside,sizeof inside,"%s/.nightly-init",run))return 1;
+    if(sy_exists(inside)==1&&cx_fmt(state,sizeof state,"%s",inside))return 1;
     if(sy_exists(state)!=1&&mkdir(state,0700))return 1;
     if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||init_identity(tier,0,identity))return 1;
     for(int i=0;i<nn;i++) {
         if(!seal&&strcmp(family,map_families[i]))continue;
         if(cx_fmt(p,sizeof p,"%s/family-%s.dump",state,map_families[i])||cx_fmt(rec,sizeof rec,"%s.sha",p))return 1;
+        if(cx_fmt(done,sizeof done,"%s.done",p)||cx_fmt(intent,sizeof intent,"%s.intent",p))return 1;
         size_t z=0,rz=0;char *b=cx_read(p,&z),*saved=cx_read(rec,&rz);
         int valid=0;
-        if(b&&saved) {cx_sha256_hex(b,z,h);if(cx_fmt(want,sizeof want,"%s\t%s\n",identity,h)){free(b);free(saved);return 1;} valid=rz==strlen(want)&&!memcmp(saved,want,rz);}
+        if(b&&saved) {cx_sha256_hex(b,z,h);if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,h)){free(b);free(saved);return 1;} valid=rz==strlen(want)&&!memcmp(saved,want,rz);}
         free(saved);
+        if ((b || sy_exists(rec)==1) && !valid) {
+            free(b); fprintf(stderr,"s9-nightly: REFUSE family-provenance %s\n",map_families[i]); return 1;
+        }
         if(!valid&&!seal) {
             free(b); b=0; char product[4400],tool[4400],*v[10];np_result r={0};
             if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/affected.cx",root))return 1;
             v[0]="sh";v[1]=product;v[2]=tool;v[3]="--";v[4]="--materials-dump";v[5]="--prepare-materials";v[6]="--family";v[7]=map_families[i];v[8]=0;
+            if(evidence_file(intent,identity,1))return 1;
             int rc=run_step(v,root,50,&r);
             if(rc||r.residue){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc?rc:1;}
             cx_sha256_hex(r.out?r.out:"",r.outn,h);
             char after[65];if(init_identity(tier,0,after)||strcmp(identity,after)){np_free(&r);return 1;}
-            if(cx_fmt(want,sizeof want,"%s\t%s\n",identity,h)||cx_write(p,r.out?r.out:"",r.outn)||cx_write(rec,want,strlen(want))){np_free(&r);return 1;}
+            if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,h)||cx_write(p,r.out?r.out:"",r.outn)||evidence_file(rec,want,1)){np_free(&r);return 1;}
+            if(evidence_file(done,want,1)){np_free(&r);return 1;}
             np_free(&r);printf("S9_MAP_FAMILY\tname=%s\tstatus=PREPARED\n",map_families[i]);return 0;
         }
         if(!valid){free(b);free(all.p);fprintf(stderr,"s9-nightly: missing or stale family %s\n",map_families[i]);return 1;}
-        if(!seal){free(b);printf("S9_MAP_FAMILY\tname=%s\tstatus=SKIP\n",map_families[i]);return 0;}
+        if(evidence_file(intent,identity,0)!=1){free(b);fprintf(stderr,"s9-nightly: REFUSE family-intent %s\n",map_families[i]);return 1;}
+        if(!seal){
+            int sealed=evidence_file(done,want,0);if(sealed<0){free(b);return 1;}
+            if(!sealed&&evidence_file(done,want,1)){free(b);return 1;}
+            free(b);printf("S9_MAP_FAMILY\tname=%s\tstatus=%s\n",map_families[i],sealed?"SKIP":"RECOVERED");return 0;
+        }
         np_put(&all,b,z);free(b);
     }
     if(!seal){free(all.p);for(int i=0;i<map_planned_n;i++)if(!strcmp(family,map_planned[i]))return 0;return 2;}
@@ -517,8 +554,60 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     mapfile[canonical.n]=0;free(canonical.p);
     return cx_write(mappath,mapfile,strlen(mapfile));
 }
+/* 成功 outputs 在 .done 前落盘；旧产物没有成功证据时绝不补历史。 */
+static int phase_outputs(int n,const char *run,char hex[65]) {
+    np_buf b={0};char p[4800],h[65],bin[4800];int rc=0;
+    for(int k=0;k<2;k++) {
+        if(native_image(k,0,bin)||as_sha_file(bin,0,h,0,why,sizeof why)){free(b.p);return -1;}
+        np_puts(&b,h);
+    }
+    if(n==1){if(as_sha_file(mappath,0,h,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,h);}
+    else if(n>=2) {
+        static const char *const owned[]={
+            "materials.tsv","nonce","nonce.sha256","mode","mode.sha256","tier","tier.sha256","selection.tsv","selection.tsv.sha256","inputs","inputs.sha256",0,
+            "checker","checker.sha256","checker.identity","checker.identity.sha256",0,
+            "executor/all-waves","executor/all-waves.stage","executor/all-waves.copy",0,
+            "executor/run-batch","executor/run-batch.stage",0,
+            "executor/all-waves","executor/run-batch",0,
+            "driver","driver.sha256",0,
+            "plan.tsv","plan.tsv.sha256",0};
+        if(!fake) {
+            as_manifest m;as_ident live;
+            if(as_load(run,&m,why,sizeof why)) {free(b.p);return -1;}
+            if(as_identity(root,1,&live,why,sizeof why)||as_ident_diff(&live,&m.ident)||strcmp(live.sid,m.ident.sid)||strcmp(root,m.root)){as_free(&m);free(b.p);return -1;}
+            np_puts(&b,m.root);np_putll(&b,m.created);np_puts(&b,m.map_sha);
+            if(n==6) {if(!m.has_executor){as_free(&m);free(b.p);return -1;}np_puts(&b,m.exec_sha);np_puts(&b,m.runner_sha);}
+            if(n>=9) {
+                size_t z;char *map=as_read(mappath,0,&z,why,sizeof why),*at=map;int row=0;const as_material *material=0;
+                while(at&&*at){char *end=strchr(at,'\n'),*tab=strchr(at,'\t');if(!end||!tab||tab>end)break;if(row++==n-9){*tab=0;material=as_find_material(&m,at);break;}at=end+1;}
+                if(!material||as_material_fp(material,h,why,sizeof why)||strcmp(h,material->fingerprint))rc=-1;
+                else {np_puts(&b,material->name);np_puts(&b,material->path);np_puts(&b,material->content);np_puts(&b,h);}
+                free(map);
+            }
+            as_free(&m);
+        }
+        if(n<9) {
+            int group=0;size_t i=0;while(group<n-2){if(!owned[i++])group++;}
+            for(;owned[i];i++) {
+                if(as_join(p,sizeof p,run,owned[i])){rc=-1;break;}
+                if(fake&&sy_exists(p)!=1)continue;
+                if(as_sha_file(p,0,h,0,why,sizeof why)){rc=-1;break;}
+                np_puts(&b,owned[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");
+            }
+        }
+    }
+    if(!rc)cx_sha256_hex(b.p?b.p:"",b.n,hex);free(b.p);return rc;
+}
+static int phase_evidence(int n,const char *suffix,const char *identity,const char *output,int write_it) {
+    char p[4800],tmp[4840],body[512];size_t z;char *saved;
+    if(cx_fmt(p,sizeof p,"%s/%s.%s",init_state,init_name(n),suffix)||cx_fmt(body,sizeof body,"S9EVIDENCE-v1\t%s\t%s\t%s\t%s\n",s9run,init_name(n),identity,output))return -1;
+    if(write_it){if(cx_fmt(tmp,sizeof tmp,"%s.pending-%ld",p,(long)getpid())||cx_write(tmp,body,strlen(body)))return -1;return rename(tmp,p);}
+    if(sy_exists(p)!=1)return 0;
+    saved=as_read(p,0,&z,why,sizeof why);int ok=saved&&z==strlen(body)&&!memcmp(saved,body,z);free(saved);
+    if(!ok){cx_fmt(why,sizeof why,"REFUSE phase-provenance %s",init_name(n));return -1;}return 1;
+}
 static int init_one(int n, const char *run, const char *tier, int reuse, char *out, int cap) {
-    char before[65], after[65], predecessor[65], base[65], inside[4600]; int rc, j;
+    char before[65], after[65], predecessor[65], base[65], inside[4600], outputs[65]; int rc, j;
     init_t0 = sy_now_ms();
     if (cx_fmt(init_side, sizeof init_side, "%s.nightly-init", run) ||
         cx_fmt(inside, sizeof inside, "%s/.nightly-init", run) ||
@@ -541,8 +630,27 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
         if (rc < 0) return -1;
         if (rc == 1) {
             if(n==0) { char bin[4800];if(native_image(0,0,bin)||native_image(1,0,bin))return -1; }
+            const char *expected=n==1?predecessor:before;
+            int ev=phase_evidence(n,"intent",before,"-",0);
+            if(ev<0)return -1;
+            if(ev==1&&(phase_outputs(n,run,outputs)||phase_evidence(n,"outputs",expected,outputs,0)!=1))return -1;
             note(init_name(n)); printf("S9_INIT\tphase=%s\tstatus=SKIP\n", init_name(n)); return 0;
         }
+        const char *expected=before;
+        if(n==1&&sy_exists(mappath)==1)expected=predecessor;
+        int evidence=phase_evidence(n,"intent",before,"-",0);
+        if(evidence<0)return -1;
+        if(evidence==1) {
+            if(phase_outputs(n,run,outputs))return -1;
+            evidence=phase_evidence(n,"outputs",expected,outputs,0);
+            if(evidence<0)return -1;
+            if(evidence==1) {
+                if(init_receipt(n,expected,1))return -1;
+                printf("S9_INIT\tphase=%s\tstatus=RECOVERED\n",init_name(n));return 0;
+            }
+            cx_fmt(why,sizeof why,"REFUSE phase-success-evidence-missing %s",init_name(n));return -1;
+        }
+        if(phase_evidence(n,"intent",before,"-",1))return -1;
     }
     if (init_left() < 1) return 124;
     if (n == 0 && fake && !reuse) rc=invoke("build",0,0,0,init_left(),out,cap);
@@ -579,6 +687,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
             if (rename(init_state, inside)) return -1;
             if (cx_fmt(init_state, sizeof init_state, "%s", inside)) return -1;
         }
+        if(phase_outputs(n,run,outputs)||phase_evidence(n,"outputs",after,outputs,1))return -1;
         if (init_receipt(n, after, 1)) return -1;
     }
     printf("S9_INIT\tphase=%s\tstatus=DONE\n", init_name(n)); return 0;
