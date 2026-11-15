@@ -95,6 +95,31 @@ int main(void) {
         rc = run(a4, fx, envv); ck(rc == 0 && has("renewed") && !has("expires_in_s=5\n"), "lock-renew-does-not-shorten");
         rc = run(r3, fx, envv); ck(rc == 0 && has("released"), "lock-release-after-renew-ok");
         (void)run(st, fx, envv); }
+    /* (7) 版本工作树:git worktree 内只有指向产品的符号链接,普通调用可用(按工作树顶层取 HEAD 配置表) */
+    {   char wt[200], lk[300]; F(wt, sizeof wt, "%s-wt", fx); F(lk, sizeof lk, "%s/unisacc.com", wt);
+        {   char *v[] = {"git", "worktree", "add", "-q", wt, 0}; rc = run(v, fx, 0); }
+        if (rc != 0 || ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-worktree\n"); return 1; }
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "wt-ok", 0}; rc = run(v, wt, envv); }
+        ck(rc == 0 && has("wt-ok") && !has("repo table") && !has("using the working copy"), "worktree-call-works");
+        {   char *v[] = {"rm", "-rf", wt, 0}; (void)run(v, 0, 0); } }
+    /* (8) 内容相同的第二个克隆共享固定版本缓存:首次调用即命中(小于 3 s) */
+    {   char fx2[200], lk[300]; long t1, ms2; F(fx2, sizeof fx2, "%s-c2", fx); F(lk, sizeof lk, "%s/unisacc.com", fx2);
+        {   char *v[] = {"git", "clone", "-q", "--local", fx, fx2, 0}; rc = run(v, 0, 0); }
+        if (rc != 0 || ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-clone2\n"); return 1; }
+        {   /* 先在 fx2 暖启动器自身的 -run 编译缓存(按路径,属产品侧),再计时;另断言固定版本缓存目录没有新增键 */
+            char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "c2-warm", 0}; char *ls[] = {"ls", "-1", pin, 0}; int n0 = -1, n1 = -1; char *q;
+            if (run(ls, 0, 0) == 0) for (n0 = 0, q = out; *q; q++) n0 += *q == '\n';
+            t1 = sy_now_ms(); rc = run(v, fx2, envv); ms2 = sy_now_ms() - t1;
+            ck(rc == 0 && has("c2-warm") && !has("using the working copy"), "second-clone-first-call-runs");
+            if (run(ls, 0, 0) == 0) for (n1 = 0, q = out; *q; q++) n1 += *q == '\n';
+            ck(n0 > 0 && n0 == n1, "second-clone-reuses-pinned-key");
+            printf("NOTE\tsecond-clone-first-call-ms\t%ld\n", ms2); }
+        t1 = sy_now_ms();
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "c2-ok", 0}; rc = run(v, fx2, envv); }
+        ms2 = sy_now_ms() - t1;
+        ck(rc == 0 && has("c2-ok") && ms2 < 3000, "second-clone-hits-cache");
+        if (ms2 >= 3000) printf("NOTE\tsecond-clone-ms\t%ld\n", ms2);
+        {   char *v[] = {"rm", "-rf", fx2, 0}; (void)run(v, 0, 0); } }
     /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
     {   char p[400]; const char *junk = "\n@@ this is not valid cx @@\n"; unsigned char *b = 0; int64_t n = 0; unsigned char *nb;
         F(p, sizeof p, "%s/tools/devsvc-core.cx", fx);

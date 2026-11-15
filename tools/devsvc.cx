@@ -145,7 +145,12 @@ int main(int argc, char **argv) {
     if (argc > a && !strcmp(argv[a], "--dev")) { dev = 1; a++; }
     if (de && *de) dev = 1;
     if (argc <= a || argc - a > 250) { fprintf(stderr, "usage: devsvc [--dev] <subcommand...>   (pinned to git HEAD unless --dev; subcommands: see tools/devsvc-core.cx header)\n"); return 2; }
-    if (sy_cwd(root, sizeof root) < 0) return 3;
+    {   /* 按当前 git 顶层取根(版本工作树一个树一个实例);不在 git 内时退回 cwd */
+        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl;
+        if (sy_cwd(root, sizeof root) < 0) return 3;
+        if (runcap(gv, root, real, sizeof real) == 0 && real[0] == '/') { nl = strchr(real, '\n'); if (nl) *nl = 0; F(root, sizeof root, "%s", real); }
+        real[0] = 0; }
+
     int fromhead = 0;
     if (cfg_load(root, dev, &fromhead)) { fprintf(stderr, "devsvc: repo table unreadable or missing product/self/cache_sub/lib\n"); return 3; }
     F(prod, sizeof prod, "%s/%s", root, c_product); F(selfp, sizeof selfp, "%s/%s", root, c_self);
@@ -162,7 +167,12 @@ int main(int argc, char **argv) {
             fprintf(stderr, "dv: no committed %s at HEAD here, using the working copy\n", c_self); dev = 1; }
     }
     if (!dev) {
-        F(keysrc, sizeof keysrc, "%s|%s|%ld|%ld", trees, real, (long)psz, headtab_n);
+        {   /* 产品身份按内容哈希(不含仓路径,跨克隆/工作树共享缓存) */
+            unsigned char *pb = 0; int64_t pn = 0; char ph[65];
+            if (sy_read_file(real, &pb, &pn, 1LL << 30) || !pb || sy_sha256_hex(pb, (long)pn, ph)) { if (pb) free(pb); return 3; }
+            free(pb);
+            F(keysrc, sizeof keysrc, "%s|%s|%ld|%ld", trees, ph, (long)psz, headtab_n); }
+
         if (sy_sha256_hex(keysrc, strlen(keysrc), hex)) return 3;
         hex[20] = 0;
         if (dvdir && *dvdir) F(base, sizeof base, "%s", dvdir);
