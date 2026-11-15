@@ -41,6 +41,17 @@
  *       fl_order(&f, order)          topological order (indices)
  *       fl_run(&f, run_dir, jobs, deadline_ms, echo, &sum)   0 all ok, 1 some node not ok, <0 -errno
  *
+ * Transaction: a line `txn 1` (or the caller setting f.txn) makes the flow all-or-nothing for its
+ * file.write / file.edit / doc.* / stdout_to writes: while the nodes run nothing is written (each
+ * write is staged; later nodes of the flow read the staged content, exec nodes still see the disk),
+ * and after the last node cxlib.flowfile ff_txn_commit checks the whole set (staged .cx and their
+ * direct consumers compile, `txn_consumers N` caps the consumers; the tests/batches.tsv and
+ * tests/coverage.tsv pair is valid; no staged file changed on disk meanwhile) and then publishes
+ * every file, or none.  Any node not ok also means none.  The outcome is one more event pair with
+ * the id TXN (summary `FLOW_TXN committed ...` or `TXN_ABORT reason= node= path= ...`), the report
+ * RUN/out/TXN.out, fl_sum.txn (1 committed, 2 nothing written); on a refusal the write nodes are
+ * re-reported fail rc 125.  Without `txn 1` nothing of this applies.
+ *
  * file.* nodes call cxlib.flowfile ff_run(op, args, &out) (args and refusals: its header; write and
  * edit need a root).  They run inline in the engine process (no threads in cx), so they are serial
  * by construction; the lock rule still applies against running exec nodes.  out->buf goes to
@@ -70,8 +81,10 @@ typedef struct fl_node {
     sy_child_t child;
 } fl_node;
 
-typedef struct fl_flow { fl_node *n; int count; char *text; } fl_flow;
-typedef struct fl_sum { int ok, fail, timeout, skip; long wall_ms; int max_running; } fl_sum;
+/* txn: 1 = transactional flow (see fl_run); txn_consumers: consumer compile cap, -1 = default */
+typedef struct fl_flow { fl_node *n; int count; char *text; int txn, txn_consumers; } fl_flow;
+/* txn: 0 not a transaction, 1 committed, 2 nothing written (aborted or rolled back) */
+typedef struct fl_sum { int ok, fail, timeout, skip; long wall_ms; int max_running; int txn; } fl_sum;
 
 /* Diagnostic text into DST: what does not fit is cut and the cut is marked with "..." (a message,
    never a path).  Returns the length written. */
@@ -154,7 +167,7 @@ void fl_free(fl_flow *f) { if (f->n) mm_free(f->n); if (f->text) mm_free(f->text
 /* Parse and validate PATH. 0, or 2 with WHY naming the refusal. */
 int fl_load(const char *path, fl_flow *f, char *why, int cap) {
     unsigned char *t = 0; int64_t tn = 0; char *p, **deps; int i, r, line = 0, *ord;
-    f->n = 0; f->count = 0; f->text = 0;
+    f->n = 0; f->count = 0; f->text = 0; f->txn = 0; f->txn_consumers = -1;
     r = sy_read_file(path, &t, &tn, 16L << 20);
     if (r) { fl_say(why,(size_t)cap, "cannot read flow file %s (%d)", path, r); return 2; }
     f->text = (char *)t;
@@ -166,6 +179,16 @@ int fl_load(const char *path, fl_flow *f, char *why, int cap) {
         while (*e && *e != '\n') e++;
         line++;
         if (e == p || *p == '#') { p = *e ? e + 1 : e; continue; }
+        {   /* directive lines (no further TAB): `txn 0|1`, `txn_consumers N` */
+            int isc = !strncmp(p, "txn_consumers", 13), kl = isc ? 13 : 3;
+            if ((isc || !strncmp(p, "txn", 3)) && (p[kl] == ' ' || p[kl] == '\t') && !memchr(p + kl + 1, '\t', (size_t)(e - p - kl - 1))) {
+                const char *v = p + kl + 1, *q = v; long val = 0;
+                while (q < e && *q >= '0' && *q <= '9' && val < 1000) val = val * 10 + (*q++ - '0');
+                if (q == v || q != e || (!isc && val > 1) || val > 64) { fl_say(why,(size_t)cap, "line %d: want `txn 0|1` or `txn_consumers 0..64`", line); goto refuse; }
+                if (isc) f->txn_consumers = (int)val; else f->txn = (int)val;
+                p = *e ? e + 1 : e; continue;
+            }
+        }
         {   char *q = p; c[nc++] = q;
             for (; q < e; q++) if (*q == '\t' && nc < 4) { *q = 0; c[nc++] = q + 1; }
         }
@@ -399,6 +422,47 @@ static void fl_file(fl_ctx *x, fl_node *nd) {
     else fl_finish(x, nd, r == 0 ? FL_OK : FL_FAIL, r == 0 ? 0 : (o.rc ? o.rc : r), r == 0 ? 0 : o.why);
 }
 
+/* 1 when ND is a node whose effect is a file write (so a transaction stages it) */
+static int fl_writes(fl_node *nd) {
+    char t[8];
+    if (!strcmp(nd->op, "file.write") || !strcmp(nd->op, "file.edit")) return 1;
+    if (!strncmp(nd->op, "doc.", 4)) return strcmp(nd->op, "doc.get") && strcmp(nd->op, "doc.list");
+    return !strcmp(nd->op, "exec") && fl_arg(nd->args, "stdout_to", 0, t, sizeof t) != -1;
+}
+
+/* End of a transactional flow: every node ok -> ff_txn_commit (checks, then all files or none);
+   else nothing is written.  One more event pair with the id TXN carries the outcome, the report is
+   RUN/out/TXN.out, and on a refusal every write node becomes fail rc 125 (it wrote nothing). */
+static int fl_txn_end(fl_ctx *x, fl_flow *f) {
+    static fl_node tn;
+    ff_out o; char p[2600]; int i, bad = -1, r;
+    memset(&o, 0, sizeof o); memset(&tn, 0, sizeof tn);
+    tn.id = "TXN"; tn.op = "txn"; tn.args = ""; tn.t0 = sy_now_ms();
+    for (i = 0; i < f->count && bad < 0; i++) if (f->n[i].state != FL_OK) bad = i;
+    fl_evt(x, &tn, FL_RUNNING, 0, 0, "txn");
+    if (bad >= 0) {
+        char rep[900]; int staged = ff_txn_count(), n;
+        ff_txn_abort();
+        fl_say(o.why, sizeof o.why, "TXN_ABORT reason=ENODE node=%.100s path=- node ended %s, nothing written (staged=%d)", f->n[bad].id, fl_state_name[f->n[bad].state], staged);
+        n = fl_say(rep, sizeof rep, "TXN_ABORT\treason=ENODE\tnode=%.100s\tpath=-\tnode ended %s, nothing written (staged=%d)\nFLOW_TXN\taborted\tpaths=0\tcompiled=0\tconsumers=0\tof=0\tundecided=0\n",
+                   f->n[bad].id, fl_state_name[f->n[bad].state], staged);
+        o.buf = mm_alloc(n + 1);
+        if (o.buf && !mm_copy(o.buf, (long)n + 1, rep, (long)n + 1)) o.n = n;
+        r = 1;
+    } else r = ff_txn_commit(f->txn_consumers, &o);
+    if (!fl_path(p, x->run, "TXN", "out")) sy_write_file(p, o.buf ? o.buf : "", o.buf ? o.n : 0, 0644);
+    if (!fl_path(p, x->run, "TXN", "err")) sy_write_file(p, o.why, (int64_t)strlen(o.why), 0644);
+    for (i = 0; r && i < f->count; i++) {
+        fl_node *nd = &f->n[i];
+        if (nd->state != FL_OK || !fl_writes(nd)) continue;
+        nd->state = FL_FAIL; nd->rc = 125;
+        fl_evt(x, nd, FL_FAIL, 0, 125, "txn aborted: this node wrote nothing");
+    }
+    fl_finish(x, &tn, r ? FL_FAIL : FL_OK, r ? 1 : 0, o.why);
+    ff_out_free(&o);
+    return r;
+}
+
 static void fl_kill_wait(fl_node *nd) {
     sy_exit_t st; int i;
     sy_proc_kill(&nd->child, SIGKILL);
@@ -426,7 +490,8 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
     if (cx_fmt(p, sizeof p, "%s/events.tsv", x.run)) return -ENAMETOOLONG;
     x.evfd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (x.evfd < 0) return x.evfd;
-    sum->ok = sum->fail = sum->timeout = sum->skip = 0; sum->max_running = 0;
+    sum->ok = sum->fail = sum->timeout = sum->skip = 0; sum->max_running = 0; sum->txn = 0;
+    if (f->txn) ff_txn_begin();
     while (left > 0) {
         int progress = 0; long now = sy_now_ms(); int late = now >= end;
         if (!fl_cancelled && fl_cancel_fn && fl_cancel_fn()) fl_cancelled = 1;
@@ -438,6 +503,7 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
             r = sy_proc_try_wait(&nd->child, &st);
             if (r == 1) {
                 int c = sy_exit_code(&st); char note[400];
+                if (f->txn) ff_txn_tag(nd->id);
                 if (fx_save(&x, nd, note, sizeof note)) fl_finish(&x, nd, FL_FAIL, 125, note);
                 else fl_finish(&x, nd, c == 0 ? FL_OK : FL_FAIL, c, 0);
             }
@@ -479,15 +545,16 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
             if (!strcmp(nd->op, "exec")) {
                 if (fx_start(&x, nd) == 0) { running++; if (running > sum->max_running) sum->max_running = running; }
                 else left--;
-            } else { fl_file(&x, nd); left--; }
+            } else { if (f->txn) ff_txn_tag(nd->id); fl_file(&x, nd); left--; }
         }
         if (!progress) sy_sleep_ms(2);
     }
+    if (f->txn) sum->txn = fl_txn_end(&x, f) ? 2 : 1;
     sy_close(x.evfd);
     for (i = 0; i < f->count; i++) {
         int s = f->n[i].state;
         if (s == FL_OK) sum->ok++; else if (s == FL_FAIL) sum->fail++; else if (s == FL_TIMEOUT) sum->timeout++; else sum->skip++;
     }
     sum->wall_ms = sy_now_ms() - x.t0;
-    return sum->ok == f->count ? 0 : 1;
+    return sum->ok == f->count && sum->txn != 2 ? 0 : 1;
 }

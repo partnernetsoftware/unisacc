@@ -54,6 +54,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.sha
 #pragma unisa use sys.proc
+#pragma unisa use sys.time
 #pragma unisa use os.osx
 #pragma unisa use mem.heap
 #pragma unisa use text.text
@@ -350,12 +351,60 @@ static int ff_target(const char *root, const char *full, int mkdir, char *target
 }
 
 /* Read the current file for write/edit.  *EXISTS 0 only on ENOENT. */
+/* ---- transaction: staged writes.  Between ff_txn_begin and ff_txn_commit / ff_txn_abort a
+   file.write or file.edit (and what goes through them: doc.*, stdout_to) changes no file: the new
+   content is kept here, and later reads, edits and expect_sha in the same transaction see it. ---- */
+enum { FF_TX_MAX = 64, FF_TX_CONS = 8, FF_TX_CC = 96, FF_PATHN = 4096 };
+typedef struct ff_stg {
+    char *target, *buf, *orig;   /* resolved path; new content; the file as it was when first staged */
+    long n, on;
+    int mode, exists, nocc;
+    char root[FF_PATHN];
+    char tag[204];               /* the flow node that staged it last */
+} ff_stg;
+static ff_stg ff_tx[FF_TX_MAX];
+static int ff_tx_on, ff_tx_n;
+static char ff_tx_tag[204];
+
+static char *ff_dup(const char *b, long n) {
+    char *r = (char *)mm_alloc(n + 1);
+    long i;
+    if (!r) return 0;
+    for (i = 0; i < n; i++) r[i] = b[i];
+    r[n] = 0;
+    return r;
+}
+
+static int ff_tx_find(const char *target) {
+    int i;
+    if (!ff_tx_on) return -1;
+    for (i = 0; i < ff_tx_n; i++) if (tx_eqz(ff_tx[i].target, target)) return i;
+    return -1;
+}
+
+/* the staged entry a read of FULL must see (FULL as placed, or its real path), or -1 */
+static int ff_tx_view(const char *full) {
+    char rp[FF_PATH];
+    int k = ff_tx_find(full);
+    if (k < 0 && ff_tx_on && ff_tx_n > 0 && sy_realpath(full, rp, FF_PATH) >= 0) k = ff_tx_find(rp);
+    return k;
+}
+
 static int ff_load(const char *target, char **buf, long *n, int *mode, int *exists, ff_out *o) {
     sy_stat_t st;
     unsigned char *b = 0;
     int64_t bn = 0;
     int rc = sy_stat(target, &st);
     *buf = 0; *n = 0; *mode = 0644; *exists = 0;
+    {
+        int k = ff_tx_find(target);
+        if (k >= 0) {   /* staged in this transaction: that is the current content */
+            *buf = ff_dup(ff_tx[k].buf, ff_tx[k].n);
+            if (!*buf) return ff_fail(o, "ENOMEM", "no memory for", target);
+            *n = ff_tx[k].n; *mode = ff_tx[k].mode; *exists = 1;
+            return 0;
+        }
+    }
     if (rc == -ENOENT) return 0;
     if (rc != 0) return ff_os(o, rc, "stat", target);
     if (st.kind == 'd') return ff_fail(o, "EISDIR", "is a directory", target);
@@ -467,11 +516,18 @@ static int ff_read(const char *args, const char *root, const char *path, ff_out 
     if (ff_num(args, "offset_line", &off, &hoff, o)) return 1;
     if (ff_num(args, "limit_line", &lim, &hlim, o)) return 1;
     if (hoff && off < 1) return ff_fail(o, "EARG", "offset_line starts at 1", full);
-    rc = sy_stat(full, &st);
-    if (rc != 0) return ff_os(o, rc, "stat", full);
-    if (st.kind == 'd') return ff_fail(o, "EISDIR", "is a directory", full);
-    rc = sy_read_file(full, &b, &bn, FF_MAX_FILE);
-    if (rc != 0) return ff_os(o, rc, "read", full);
+    rc = ff_tx_view(full);
+    if (rc >= 0) {   /* staged in this transaction */
+        b = (unsigned char *)ff_dup(ff_tx[rc].buf, ff_tx[rc].n);
+        bn = ff_tx[rc].n;
+        if (!b) return ff_fail(o, "ENOMEM", "no memory for", full);
+    } else {
+        rc = sy_stat(full, &st);
+        if (rc != 0) return ff_os(o, rc, "stat", full);
+        if (st.kind == 'd') return ff_fail(o, "EISDIR", "is a directory", full);
+        rc = sy_read_file(full, &b, &bn, FF_MAX_FILE);
+        if (rc != 0) return ff_os(o, rc, "read", full);
+    }
     n = (long)bn;
     sy_sha256_hex(b, n, o->sha);
     o->lines = ff_count_lines((const char *)b, n);
@@ -623,6 +679,42 @@ out:
     return bad;
 }
 
+/* Keep N bytes as the pending content of TARGET instead of writing it (transaction on). */
+static int ff_stage(const char *args, const char *root, const char *target, const char *buf, long n, int mode, ff_out *o) {
+    int k = ff_tx_find(target), nocc = 0;
+    char *nb, *s = 0;
+    ff_stg *e;
+    if (ff_arg(args, "compile_check", &s, 0) == 1) { nocc = tx_eqz(s, "0"); }
+    if (s) mm_free(s);
+    nb = ff_dup(buf ? buf : "", n);
+    if (!nb) return ff_fail(o, "ENOMEM", "no memory for", target);
+    if (k < 0) {
+        sy_stat_t st;
+        unsigned char *b = 0;
+        int64_t bn = 0;
+        int rc;
+        if (ff_tx_n >= FF_TX_MAX) { mm_free(nb); return ff_fail(o, "ERANGE", "more than 64 files in one transaction:", target); }
+        e = &ff_tx[ff_tx_n];
+        e->orig = 0; e->on = 0; e->exists = 0;
+        rc = sy_stat(target, &st);
+        if (rc == 0) {
+            rc = sy_read_file(target, &b, &bn, FF_MAX_FILE);
+            if (rc != 0) { mm_free(nb); return ff_os(o, rc, "read", target); }
+            e->orig = (char *)b; e->on = b ? (long)bn : 0; e->exists = 1;
+        } else if (rc != -ENOENT) { mm_free(nb); return ff_os(o, rc, "stat", target); }
+        e->target = ff_dup(target, tx_len(target, FF_PATH));
+        if (!e->target) { mm_free(nb); if (e->orig) mm_free(e->orig); return ff_fail(o, "ENOMEM", "no memory for", target); }
+        e->root[0] = 0; ff_cat(e->root, FF_PATH, root);
+        ff_tx_n++;
+    } else {
+        e = &ff_tx[k];
+        mm_free(e->buf);
+    }
+    e->buf = nb; e->n = n; e->mode = mode; e->nocc = nocc;
+    e->tag[0] = 0; ff_cat(e->tag, sizeof e->tag, ff_tx_tag);
+    return 0;
+}
+
 static int ff_write(const char *args, const char *root, int haveroot, const char *path, ff_out *o) {
     char full[FF_PATH], target[FF_PATH];
     char *content = 0, *from = 0, *cur = 0;
@@ -648,8 +740,11 @@ static int ff_write(const char *args, const char *root, int haveroot, const char
     if (ff_target(root, full, mkdir, target, o)) goto done;
     if (ff_load(target, &cur, &curn, &mode, &exists, o)) goto done;
     if (ff_expect(args, cur, curn, exists, target, o)) goto done;
-    if (ff_ccheck(args, root, target, content, cn, o)) goto done;
-    if (ff_publish(target, content, cn, mode, o)) goto done;
+    if (ff_tx_on) { if (ff_stage(args, root, target, content, cn, mode, o)) goto done; }
+    else {
+        if (ff_ccheck(args, root, target, content, cn, o)) goto done;
+        if (ff_publish(target, content, cn, mode, o)) goto done;
+    }
     bad = ff_report(o, content, cn, 0);
 done:
     if (content) mm_free(content);
@@ -703,8 +798,11 @@ static int ff_edit(const char *args, const char *root, int haveroot, const char 
         res[w] = 0;
         if (w != rn) { ff_fail(o, "EIO", "internal length mismatch editing", target); goto done; }
     }
-    if (ff_ccheck(args, root, target, res, rn, o)) goto done;
-    if (ff_publish(target, res, rn, mode, o)) goto done;
+    if (ff_tx_on) { if (ff_stage(args, root, target, res, rn, mode, o)) goto done; }
+    else {
+        if (ff_ccheck(args, root, target, res, rn, o)) goto done;
+        if (ff_publish(target, res, rn, mode, o)) goto done;
+    }
     bad = ff_report(o, res, rn, count);
 done:
     if (old) mm_free(old);
@@ -1033,6 +1131,447 @@ done:
 }
 
 int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out);
+/* ---- transaction commit.
+   ff_txn_begin()            start staging (drops anything staged before)
+   ff_txn_tag(ID)            the flow node the next staged writes belong to
+   ff_txn_count()            files staged so far
+   ff_txn_abort()            drop everything staged; nothing was written
+   ff_txn_commit(N, out)     check, then write all or nothing.  0 committed, 1 not.
+     checks, all before the first byte is written:
+       (c) every staged file is still on disk what the transaction read (ESHA)
+       (a) every staged .cx (unless its node gave compile_check=0) compiles in one view holding ALL
+           staged contents (a temporary directory: staged files real, everything else symlinks into
+           the root), and so do its direct consumers: the .cx files below the root with a
+           `#pragma unisa use M` whose M names the staged file (a.b <-> .../a/b.cx), at most N of them
+           in path order (N < 0: $UNISACC_TXN_CONSUMERS, else 8; 0 none).  A consumer that fails is
+           compiled once more against the root as it is: failing there too it is `prebroken` and
+           does not stop the transaction.  ECOMPILE (a staged file) / ECONSUMER.  A compile that
+           times out (10 s) or cannot start is `undecided` and allowed, as in the single file guard.
+       (b) when tests/batches.tsv or tests/coverage.tsv is staged: ROOT/tests/run.cx -- --list run
+           in that same view must exit 0 and print metadata_valid=1 (EREGISTRY; cannot run = refused)
+     then every file is published in staging order (sibling temporary + rename each).  A publish that
+     fails restores the files already published to their former bytes (or removes the new ones):
+     EPUBLISH.  $UNISACC_TXN_FAIL_AT=K makes the K-th publish (0-based) fail, for the checks.
+     out->buf: TXN_CHECK lines, TXN_ABORT<TAB>reason=<TAB>node=<TAB>path= plus detail lines, and last
+     FLOW_TXN<TAB>committed|aborted|rolled_back|rollback_failed<TAB>paths=N<TAB>compiled=<TAB>consumers=<TAB>of=<TAB>undecided=
+     out->err the reason, out->why one line (TXN_ABORT ... or FLOW_TXN committed ...). ---- */
+void ff_txn_abort(void) {
+    int i;
+    for (i = 0; i < ff_tx_n; i++) {
+        if (ff_tx[i].target) mm_free(ff_tx[i].target);
+        if (ff_tx[i].buf) mm_free(ff_tx[i].buf);
+        if (ff_tx[i].orig) mm_free(ff_tx[i].orig);
+        ff_tx[i].target = 0; ff_tx[i].buf = 0; ff_tx[i].orig = 0;
+    }
+    ff_tx_n = 0; ff_tx_on = 0; ff_tx_tag[0] = 0;
+}
+void ff_txn_begin(void) { ff_txn_abort(); ff_tx_on = 1; }
+void ff_txn_tag(const char *id) { ff_tx_tag[0] = 0; ff_cat(ff_tx_tag, sizeof ff_tx_tag, id ? id : ""); }
+int ff_txn_count(void) { return ff_tx_on ? ff_tx_n : 0; }
+
+/* the path of E below ROOT, or 0 */
+static const char *ff_tx_rel(const ff_stg *e, const char *root) {
+    long rl = tx_len(root, FF_PATH), i;
+    while (rl > 1 && root[rl - 1] == '/') rl--;
+    if (tx_len(e->target, FF_PATH) <= rl || e->target[rl] != '/') return 0;
+    for (i = 0; i < rl; i++) if (e->target[i] != root[i]) return 0;
+    return e->target + rl + 1;
+}
+
+/* Put BUF at REL in the view SH of ROOT: each directory level on the way is a real directory whose
+   other entries are symlinks into ROOT; a link standing where a real entry is needed is removed
+   first, so nothing is ever written through a link into ROOT. */
+static int ff_ov_put(const char *root, const char *sh, const char *rel, const char *buf, long n) {
+    char rd[FF_PATH], sd[FF_PATH], comp[256];
+    long i = 0, k;
+    int fd;
+    sy_stat_t st;
+    rd[0] = 0; ff_cat(rd, sizeof rd, root);
+    sd[0] = 0; ff_cat(sd, sizeof sd, sh);
+    for (;;) {
+        for (k = 0; rel[i + k] && rel[i + k] != '/' && k < 255; k++) comp[k] = rel[i + k];
+        comp[k] = 0;
+        ff_cc_mirror(rd, sd, comp);
+        ff_cat(rd, sizeof rd, "/"); ff_cat(rd, sizeof rd, comp);
+        ff_cat(sd, sizeof sd, "/"); ff_cat(sd, sizeof sd, comp);
+        if (sy_lstat(sd, &st) == 0 && st.kind != 'd') sy_unlink(sd);
+        if (!rel[i + k]) break;
+        sy_mkdir(sd, 0755);
+        i += k + 1;
+    }
+    if (sy_lstat(sd, &st) == 0) return -1;   /* still something there: do not write through it */
+    fd = sy_open_new(sd, 0644);
+    if (fd < 0) return -1;
+    if (n > 0) sy_write_all(fd, buf, n);
+    sy_close(fd);
+    return 0;
+}
+
+enum { FF_J_PEND = 0, FF_J_RUN, FF_J_OK, FF_J_FAIL, FF_J_UNDEC, FF_J_PREBROKEN };
+typedef struct ff_ccj {
+    char *rel;          /* compiled path below the root */
+    int ent, kind;      /* staged entry it belongs to; 0 the staged file itself, 1 a consumer */
+    int state;
+    long t0;
+    sy_child_t ch;
+    char logp[FF_PATHN], outp[FF_PATHN];
+} ff_ccj;
+
+static int ff_cc_spawn(const char *prod, const char *cwd, ff_ccj *j) {
+    char *argv[7];
+    sy_spawn_t sp;
+    int fd, r;
+    sy_unlink(j->logp);
+    fd = sy_open_new(j->logp, 0644);
+    if (fd < 0) return -1;
+    argv[0] = "sh"; argv[1] = (char *)prod; argv[2] = "-c"; argv[3] = j->rel; argv[4] = "-o"; argv[5] = j->outp; argv[6] = 0;
+    sy_spawn_init(&sp);
+    sp.argv = argv; sp.cwd = cwd; sp.in_fd = SY_STDIO_NULL; sp.out_fd = fd; sp.err_fd = fd; sp.pgroup = -1;
+    r = sy_proc_spawn(&sp, &j->ch);
+    sy_close(fd);
+    return r < 0 ? -1 : 0;
+}
+
+/* Compile the NJ jobs in CWD, PAR at a time, 10 s each. */
+static void ff_cc_wave(const char *prod, const char *cwd, ff_ccj *j, int nj, int par) {
+    int running = 0, next = 0, done = 0, i;
+    while (done < nj) {
+        int moved = 0;
+        long now = sy_now_ms();
+        for (i = 0; i < next; i++) {
+            sy_exit_t st;
+            int r;
+            if (j[i].state != FF_J_RUN) continue;
+            r = sy_proc_try_wait(&j[i].ch, &st);
+            if (r == 1) j[i].state = (st.exited && st.code == 0) ? FF_J_OK : st.timed_out ? FF_J_UNDEC : FF_J_FAIL;
+            else if (r < 0) j[i].state = FF_J_UNDEC;
+            else if (now - j[i].t0 >= 10000) {
+                int w;
+                sy_proc_kill(&j[i].ch, SIGKILL);
+                for (w = 0; w < 400 && sy_proc_try_wait(&j[i].ch, &st) == 0; w++) sy_sleep_ms(5);
+                j[i].state = FF_J_UNDEC;
+            } else continue;
+            running--; done++; moved = 1;
+        }
+        while (running < par && next < nj) {
+            if (ff_cc_spawn(prod, cwd, &j[next]) == 0) { j[next].state = FF_J_RUN; j[next].t0 = sy_now_ms(); running++; }
+            else { j[next].state = FF_J_UNDEC; done++; }
+            next++; moved = 1;
+        }
+        if (!moved) sy_sleep_ms(5);
+    }
+}
+
+/* first LINES lines (at most CAP bytes) of the file PATH appended to S */
+static void ff_tx_log(ff_sb *s, const char *path, long lines, long cap) {
+    unsigned char *lb = 0;
+    int64_t ln = 0;
+    long i, seen = 0;
+    if (sy_read_file(path, &lb, &ln, 4L << 20) != 0 || !lb) return;
+    for (i = 0; i < (long)ln && i < cap && seen < lines; i++) if (lb[i] == '\n') seen++;
+    ff_put(s, (const char *)lb, i);
+    if (i > 0 && lb[i - 1] != '\n') ff_puts(s, "\n");
+    mm_free(lb);
+}
+
+/* Record a refusal: the first one names out->err / out->why; every one is a TXN_ABORT line. */
+static int ff_tx_fail(ff_out *o, ff_sb *rep, const char *reason, const char *tag, const char *path, const char *detail) {
+    if (!o->err[0]) {
+        o->rc = 1;
+        ff_cat(o->err, sizeof o->err, reason);
+        o->why[0] = 0;
+        ff_cat(o->why, sizeof o->why, "TXN_ABORT reason="); ff_cat(o->why, sizeof o->why, reason);
+        ff_cat(o->why, sizeof o->why, " node="); ff_cat(o->why, sizeof o->why, tag && tag[0] ? tag : "-");
+        ff_cat(o->why, sizeof o->why, " path="); ff_cat(o->why, sizeof o->why, path ? path : "-");
+        ff_cat(o->why, sizeof o->why, " "); ff_cat(o->why, sizeof o->why, detail ? detail : "");
+    }
+    ff_puts(rep, "TXN_ABORT\treason="); ff_puts(rep, reason);
+    ff_puts(rep, "\tnode="); ff_puts(rep, tag && tag[0] ? tag : "-");
+    ff_puts(rep, "\tpath="); ff_puts(rep, path ? path : "-");
+    ff_puts(rep, "\t"); ff_puts(rep, detail ? detail : ""); ff_puts(rep, "\n");
+    return 1;
+}
+
+/* ---- direct consumers: the use edges, read from the tree as it is ---- */
+enum { FF_CS_MAX = 256 };
+static char *ff_cs[FF_CS_MAX];
+static int ff_cs_ent[FF_CS_MAX], ff_cs_n;
+static long ff_cs_total, ff_cs_files;
+static char ff_cs_dot[FF_TX_MAX][512];   /* staged .cx as a.b.c ("" when not taking part) */
+static const char *ff_cs_root;
+
+static int ff_scmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+/* 1 when the text B has a `#pragma unisa use M` line and DOT ends with M at a component boundary */
+static int ff_uses(const char *b, long n, const char *dot) {
+    static const char pre[] = "#pragma unisa use ";
+    long dl = tx_len(dot, 512), i = 0, k, ml;
+    while (i < n) {
+        long le = i;
+        while (le < n && b[le] != '\n') le++;
+        for (k = 0; k < 18 && i + k < le && b[i + k] == pre[k]; k++) { }
+        if (k == 18) {
+            long ms = i + 18;
+            while (ms < le && (b[ms] == ' ' || b[ms] == '\t')) ms++;
+            ml = 0;
+            while (ms + ml < le && b[ms + ml] != ' ' && b[ms + ml] != '\t' && b[ms + ml] != '\r') ml++;
+            if (ml > 0 && ml <= dl && (ml == dl || dot[dl - ml - 1] == '.')) {
+                for (k = 0; k < ml && b[ms + k] == dot[dl - ml + k]; k++) { }
+                if (k == ml) return 1;
+            }
+        }
+        i = le + 1;
+    }
+    return 0;
+}
+
+static void ff_cons_dir(const char *dir, int depth) {
+    sy_dir_t d;
+    char child[FF_PATH];
+    long rl = tx_len(ff_cs_root, FF_PATH);
+    if (depth > 12 || ff_cs_files > 50000) return;
+    if (sy_dir_open(&d, dir) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        child[0] = 0;
+        ff_cat(child, FF_PATH, dir); ff_cat(child, FF_PATH, "/"); ff_cat(child, FF_PATH, d.name);
+        if (d.kind == 'd') {
+            if (tx_eqz(d.name, "out") || tx_eqz(d.name, "archive") || tx_eqz(d.name, "kernel") || tx_eqz(d.name, "node_modules")) continue;
+            ff_cons_dir(child, depth + 1);
+        } else if (d.kind == 'f' && ff_is_cx(child)) {
+            unsigned char *b = 0;
+            int64_t bn = 0;
+            const char *rel = child + rl + 1;
+            int e, staged = 0;
+            ff_cs_files++;
+            for (e = 0; e < ff_tx_n; e++) {
+                const char *sr = ff_tx_rel(&ff_tx[e], ff_cs_root);
+                if (sr && tx_eqz(sr, rel)) staged = 1;
+            }
+            if (staged) continue;   /* compiled as a staged file already */
+            if (sy_read_file(child, &b, &bn, 2L << 20) != 0 || !b) continue;
+            for (e = 0; e < ff_tx_n; e++) {
+                if (!ff_cs_dot[e][0] || !ff_uses((const char *)b, (long)bn, ff_cs_dot[e])) continue;
+                ff_cs_total++;
+                if (ff_cs_n < FF_CS_MAX) {
+                    ff_cs[ff_cs_n] = ff_dup(rel, tx_len(rel, FF_PATH));
+                    ff_cs_ent[ff_cs_n] = e;
+                    if (ff_cs[ff_cs_n]) ff_cs_n++;
+                }
+                break;
+            }
+            mm_free(b);
+        }
+    }
+    sy_dir_close(&d);
+}
+
+static void ff_cons_sort(void) {
+    int i, j;
+    for (i = 1; i < ff_cs_n; i++) {
+        char *v = ff_cs[i];
+        int ve = ff_cs_ent[i];
+        for (j = i; j > 0 && ff_scmp(ff_cs[j - 1], v) > 0; j--) { ff_cs[j] = ff_cs[j - 1]; ff_cs_ent[j] = ff_cs_ent[j - 1]; }
+        ff_cs[j] = v; ff_cs_ent[j] = ve;
+    }
+}
+
+int ff_txn_commit(int max_cons, ff_out *o) {
+    static ff_ccj jobs[FF_TX_CC];
+    ff_sb rep;
+    char sh[FF_PATH], prod[FF_PATH], regl[FF_PATH];
+    const char *root, *state = "committed";
+    int i, k, nj = 0, bad = 0, ncx = 0, reg = 0, have_sh = 0, und = 0, ncons = 0, npub = 0;
+    if (!o) return 1;
+    rep.b = 0; rep.n = 0; rep.cap = 0; rep.bad = 0;
+    o->rc = 0; o->buf = 0; o->n = 0; o->err[0] = 0; o->why[0] = 0; o->sha[0] = 0; o->lines = 0; o->count = 0; o->ccnote = 0;
+    if (!ff_tx_on) return ff_fail(o, "EARG", "no transaction is open", 0);
+    if (max_cons < 0) {
+        const char *ev = sy_env("UNISACC_TXN_CONSUMERS");
+        max_cons = FF_TX_CONS;
+        if (ev && ev[0] >= '0' && ev[0] <= '9') for (max_cons = 0; *ev >= '0' && *ev <= '9' && max_cons < 100; ev++) max_cons = max_cons * 10 + (*ev - '0');
+    }
+    if (max_cons > 64) max_cons = 64;
+    root = ff_tx_n ? ff_tx[0].root : "";
+    sh[0] = 0; regl[0] = 0; ff_cs_n = 0; ff_cs_total = 0; ff_cs_files = 0;
+    /* (c) the files are still what this transaction read */
+    for (i = 0; i < ff_tx_n; i++) {
+        ff_stg *e = &ff_tx[i];
+        sy_stat_t st;
+        unsigned char *b = 0;
+        int64_t bn = 0;
+        int rc = sy_stat(e->target, &st), same = 0;
+        long q;
+        if (rc == -ENOENT) same = !e->exists;
+        else if (rc == 0 && e->exists && sy_read_file(e->target, &b, &bn, FF_MAX_FILE) == 0) {
+            if (!b) bn = 0;
+            same = (long)bn == e->on;
+            for (q = 0; same && q < e->on; q++) if ((char)b[q] != e->orig[q]) same = 0;
+        }
+        if (b) mm_free(b);
+        if (!same) bad = ff_tx_fail(o, &rep, "ESHA", e->tag, e->target, "changed on disk since this transaction read it");
+    }
+    /* what needs the view */
+    for (i = 0; i < ff_tx_n; i++) {
+        const char *rel = ff_tx_rel(&ff_tx[i], root);
+        ff_cs_dot[i][0] = 0;
+        if (!rel) continue;
+        if (tx_eqz(rel, "tests/batches.tsv") || tx_eqz(rel, "tests/coverage.tsv")) reg = 1;
+        if (ff_is_cx(rel) && !ff_tx[i].nocc && nj < FF_TX_CC && tx_len(rel, FF_PATH) < 500) {
+            long q, rn = tx_len(rel, FF_PATH) - 3;
+            for (q = 0; q < rn; q++) ff_cs_dot[i][q] = rel[q] == '/' ? '.' : rel[q];
+            ff_cs_dot[i][rn] = 0;
+            jobs[nj].rel = (char *)rel; jobs[nj].ent = i; jobs[nj].kind = 0; jobs[nj].state = FF_J_PEND;
+            nj++; ncx++;
+        }
+    }
+    if (!bad && (ncx || reg)) {
+        sy_stat_t ps;
+        const char *ev = sy_env("UNISACC_CC_PRODUCT");
+        prod[0] = 0; ff_cat(prod, sizeof prod, root); ff_cat(prod, sizeof prod, "/unisacc.com");
+        if (ev && ev[0]) { prod[0] = 0; ff_cat(prod, sizeof prod, ev); }
+        if (sy_stat(prod, &ps) == 0 && sy_mkdtemp(sy_tmpdir(), "ff-txn-", sh, FF_PATH) == 0) {
+            have_sh = 1;
+            for (i = 0; i < ff_tx_n && have_sh; i++) {
+                const char *rel = ff_tx_rel(&ff_tx[i], root);
+                if (rel && ff_ov_put(root, sh, rel, ff_tx[i].buf, ff_tx[i].n) != 0) have_sh = 0;
+            }
+        }
+    }
+    /* (a) staged .cx and their direct consumers */
+    if (!bad && ncx && !have_sh) und += ncx;
+    if (!bad && ncx && have_sh) {
+        if (max_cons > 0) {
+            ff_cs_root = root;
+            ff_cons_dir(root, 0);
+            ff_cons_sort();
+            for (i = 0; i < ff_cs_n && ncons < max_cons && nj < FF_TX_CC; i++) {
+                jobs[nj].rel = ff_cs[i]; jobs[nj].ent = ff_cs_ent[i]; jobs[nj].kind = 1; jobs[nj].state = FF_J_PEND;
+                nj++; ncons++;
+            }
+        }
+        for (i = 0; i < nj; i++) {
+            jobs[i].logp[0] = 0; ff_cat(jobs[i].logp, FF_PATH, sh); ff_cat(jobs[i].logp, FF_PATH, "."); ff_catn(jobs[i].logp, FF_PATH, i); ff_cat(jobs[i].logp, FF_PATH, ".log");
+            jobs[i].outp[0] = 0; ff_cat(jobs[i].outp, FF_PATH, sh); ff_cat(jobs[i].outp, FF_PATH, "."); ff_catn(jobs[i].outp, FF_PATH, i); ff_cat(jobs[i].outp, FF_PATH, ".o");
+        }
+        ff_cc_wave(prod, sh, jobs, nj, 8);
+        for (i = 0; i < nj; i++) {
+            ff_ccj *j = &jobs[i];
+            const char *res = "ok";
+            if (j->state == FF_J_UNDEC) { und++; res = "undecided"; }
+            else if (j->state == FF_J_FAIL && j->kind == 1) {
+                /* was it broken before this transaction?  the same compile against the root as it is */
+                ff_ccj base = *j;
+                base.state = FF_J_PEND;
+                base.logp[0] = 0; ff_cat(base.logp, FF_PATH, j->logp); ff_cat(base.logp, FF_PATH, ".base");
+                ff_cc_wave(prod, root, &base, 1, 1);
+                sy_unlink(base.logp);
+                if (base.state == FF_J_FAIL) { j->state = FF_J_PREBROKEN; res = "prebroken"; }
+            }
+            if (j->state == FF_J_FAIL) res = "fail";
+            ff_puts(&rep, "TXN_CHECK\tcompile\t"); ff_puts(&rep, j->rel); ff_puts(&rep, "\t"); ff_puts(&rep, res);
+            ff_puts(&rep, j->kind ? "\tkind=consumer\tof=" : "\tkind=written\tnode=");
+            ff_puts(&rep, j->kind ? ff_tx_rel(&ff_tx[j->ent], root) : ff_tx[j->ent].tag); ff_puts(&rep, "\n");
+            if (j->state == FF_J_FAIL) {
+                bad = ff_tx_fail(o, &rep, j->kind ? "ECONSUMER" : "ECOMPILE", ff_tx[j->ent].tag, j->rel,
+                                 j->kind ? "a direct consumer no longer compiles with the staged contents" : "the new content does not compile");
+                ff_tx_log(&rep, j->logp, 20, 2000);
+            }
+        }
+        for (i = 0; i < nj; i++) { sy_unlink(jobs[i].logp); sy_unlink(jobs[i].outp); }
+    }
+    /* (b) the registry pair */
+    if (!bad && reg) {
+        if (!have_sh) bad = ff_tx_fail(o, &rep, "EREGISTRY", "-", "tests/batches.tsv tests/coverage.tsv", "cannot build the view to run tests/run.cx -- --list (no product or no temporary directory)");
+        else {
+            char *argv[6];
+            sy_spawn_t sp;
+            sy_exit_t st;
+            unsigned char *lb = 0;
+            int64_t ln = 0;
+            int fd, r = -1, ok = 0;
+            ff_cat(regl, sizeof regl, sh); ff_cat(regl, sizeof regl, ".reg.log");
+            fd = sy_open_new(regl, 0644);
+            if (fd >= 0) {
+                argv[0] = "sh"; argv[1] = prod; argv[2] = "tests/run.cx"; argv[3] = "--"; argv[4] = "--list"; argv[5] = 0;
+                sy_spawn_init(&sp);
+                sp.argv = argv; sp.cwd = sh; sp.in_fd = SY_STDIO_NULL; sp.out_fd = fd; sp.err_fd = fd; sp.pgroup = -1; sp.deadline_ms = 50000;
+                r = sy_proc_run(&sp, &st);
+                sy_close(fd);
+            }
+            if (fd >= 0 && (sy_read_file(regl, &lb, &ln, 16L << 20) != 0 || !lb)) { lb = 0; ln = 0; }
+            if (r >= 0 && !st.timed_out && st.exited && st.code == 0 && lb)
+                ok = tx_find((const char *)lb, (long)ln, "metadata_valid=1", 16) >= 0;
+            ff_puts(&rep, ok ? "TXN_CHECK\tregistry\tmetadata_valid=1\n" : "TXN_CHECK\tregistry\tmetadata_valid=0\n");
+            if (!ok) {
+                const char *tg = "-";
+                for (i = 0; i < ff_tx_n; i++) {
+                    const char *rel = ff_tx_rel(&ff_tx[i], root);
+                    if (rel && (tx_eqz(rel, "tests/batches.tsv") || tx_eqz(rel, "tests/coverage.tsv"))) tg = ff_tx[i].tag;
+                }
+                bad = ff_tx_fail(o, &rep, "EREGISTRY", tg, "tests/batches.tsv tests/coverage.tsv",
+                                 r < 0 || fd < 0 ? "tests/run.cx -- --list could not run on the staged tables" : st.timed_out ? "tests/run.cx -- --list timed out on the staged tables"
+                                 : "tests/run.cx -- --list does not report metadata_valid=1 on the staged tables");
+                if (lb) {   /* the end of its output: the refusal is the last thing it prints */
+                    long from = (long)ln > 1500 ? (long)ln - 1500 : 0;
+                    ff_put(&rep, (const char *)lb + from, (long)ln - from);
+                    if (ln > 0 && lb[ln - 1] != '\n') ff_puts(&rep, "\n");
+                }
+            }
+            if (lb) mm_free(lb);
+            sy_unlink(regl);
+        }
+    }
+    if (sh[0]) sy_remove_all(sh);
+    for (i = 0; i < ff_cs_n; i++) { mm_free(ff_cs[i]); ff_cs[i] = 0; }
+    if (bad) state = "aborted";
+    /* publish in staging order; a failure restores what was already published */
+    if (!bad) {
+        const char *fa = sy_env("UNISACC_TXN_FAIL_AT");
+        int failat = -1;
+        if (fa && fa[0] >= '0' && fa[0] <= '9') for (failat = 0; *fa >= '0' && *fa <= '9' && failat < 1000; fa++) failat = failat * 10 + (*fa - '0');
+        for (i = 0; i < ff_tx_n; i++) {
+            ff_stg *e = &ff_tx[i];
+            ff_out t;
+            int r;
+            t.rc = 0; t.buf = 0; t.n = 0; t.err[0] = 0; t.why[0] = 0;
+            if (i == failat) r = ff_fail(&t, "EIO", "simulated publish failure (UNISACC_TXN_FAIL_AT)", 0);
+            else r = ff_publish(e->target, e->buf, e->n, e->mode, &t);
+            if (!r) { npub++; continue; }
+            state = "rolled_back";
+            for (k = i - 1; k >= 0; k--) {
+                ff_out u;
+                int rr;
+                u.rc = 0; u.buf = 0; u.n = 0; u.err[0] = 0; u.why[0] = 0;
+                rr = ff_tx[k].exists ? ff_publish(ff_tx[k].target, ff_tx[k].orig ? ff_tx[k].orig : "", ff_tx[k].on, ff_tx[k].mode, &u) : sy_unlink(ff_tx[k].target);
+                if (rr != 0) { state = "rollback_failed"; ff_tx_fail(o, &rep, "EROLLBACK", ff_tx[k].tag, ff_tx[k].target, "could not restore the former content"); }
+            }
+            bad = ff_tx_fail(o, &rep, "EPUBLISH", e->tag, e->target, t.why);
+            break;
+        }
+    }
+    ff_puts(&rep, "FLOW_TXN\t"); ff_puts(&rep, state);
+    ff_puts(&rep, "\tpaths="); ff_putn(&rep, bad ? (state[0] == 'r' ? npub : 0) : ff_tx_n);
+    ff_puts(&rep, "\tcompiled="); ff_putn(&rep, nj);
+    ff_puts(&rep, "\tconsumers="); ff_putn(&rep, ncons);
+    ff_puts(&rep, "\tof="); ff_putn(&rep, ff_cs_total);
+    ff_puts(&rep, "\tundecided="); ff_putn(&rep, und);
+    ff_puts(&rep, "\n");
+    if (!bad) {
+        o->why[0] = 0;
+        ff_cat(o->why, sizeof o->why, "FLOW_TXN committed paths="); ff_catn(o->why, sizeof o->why, ff_tx_n);
+        ff_cat(o->why, sizeof o->why, " compiled="); ff_catn(o->why, sizeof o->why, nj);
+        ff_cat(o->why, sizeof o->why, " consumers="); ff_catn(o->why, sizeof o->why, ncons);
+        ff_cat(o->why, sizeof o->why, " undecided="); ff_catn(o->why, sizeof o->why, und);
+    }
+    o->buf = rep.b; o->n = rep.n;
+    ff_txn_abort();
+    return bad ? 1 : 0;
+}
+
 int ff_run(const char *op, const char *args, ff_out *out) { return ff_run2(op, args, 0, out); }
 
 int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out) {
