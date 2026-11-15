@@ -1,0 +1,105 @@
+/* tools/check-brace-diag.cx -- unbalanced braces in a multi-unit compile are diagnosed in the user's file.
+ *   sh ./unisacc.com tools/check-brace-diag.cx            (cwd = repo root)
+ * Background: the unit framing prepass (exec/parse2/units-result.tsv, net warnunits) counts brace depth per
+ * unit.  It used to send a '}' at depth 0 to DEAD.frame ("reject: not covered: malformed unit frame", no
+ * file, no line) and to let a unit that ends inside a block through, so the next unit's header text was parsed
+ * as block-scope declarations ("errno.h:17:17 ... block-scope extern object ...").  The table now marks such a
+ * unit (register bad) and ends framing after it (COPY.end.bad -> FINAL): the control net then reaches the
+ * stray '}' or the end of that unit and reports it with the unit's file, line and column, as the single-unit
+ * path does.  The other DEAD.frame causes (frame extent, unit count, static declarator scans) are unchanged.
+ * Cases:
+ *   table-*      the three rule groups are present and '}' at depth 0 no longer enters DEAD.frame;
+ *   balanced-*   the same sources with braces balanced compile and run (any product version);
+ *   extra-close  multi-unit source with one '}' too many at file scope: rc != 0, stderr names the file and
+ *                line 3 column 1, and does not say "malformed unit frame";
+ *   stray-block  function head lost, body left at file scope: rc != 0, stderr names the file and line 3;
+ *   missing-close  multi-unit source whose main lacks one '}': rc != 0, stderr names the file and a line
+ *                at its end, and does not mention errno.h.
+ *              A product older than 0.0.69 that still shows the old text is reported UNVERIFIED (its embedded
+ *              net predates the table change), never PASS; from 0.0.69 on the old text is a FAIL.
+ * Prints PASS/FAIL/UNVERIFIED per case and CHECK_BRACE_DIAG<TAB>failed=N<TAB>unverified=M; exit 1 when N > 0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed, unverified;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-brace-diag.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-brace-diag.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-brace-diag: REFUSE %s\n", s); sy_exit(2); }
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 40, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+static int has(const char *out, int cap, const char *want) { return tx_find(out, tx_len(out, cap), want, tx_len(want, 256)) >= 0; }
+
+#define U "#pragma unisa use sys.io\\n"
+#define F "#pragma unisa use sys.fs\\n"
+#define SRC_OK1   U "int main(void){ sy_printf(\"x\\\\n\"); return 0; }\\n"
+#define SRC_EXTRA U "int main(void){ sy_printf(\"x\\\\n\"); return 0; }\\n}\\n"
+#define SRC_STRAY U "static int f(void){ return 1; }\\n    { int ai = f(); sy_printf(\"%%d\\\\n\", ai); }\\n    return 0;\\n}\\n"
+#define SRC_OK2   F U "int main(void){\\n    {\\n    sy_printf(\"x\\\\n\");\\n    }\\n    return 0;\\n}\\n"
+#define SRC_MISS  F U "int main(void){\\n    {\\n    sy_printf(\"x\\\\n\");\\n    return 0;\\n}\\n"
+
+static void probe(const char *dir, const char *name, const char *src, char *out, int cap) {
+    char script[6000];
+    if (cx_fmt(script, sizeof script, "printf '%s' > %s/%s.cx && sh ./unisacc.com %s/%s.cx; echo RC=$?", src, dir, name, dir, name)) die("script");
+    sh(script, out, cap);
+}
+/* located: stderr holds "NAME.cx:LINE:" for one of the given lines, rc is not 0, and none of the old texts. */
+static void bad(const char *dir, const char *name, const char *src, const char *l1, const char *l2, int minor) {
+    char out[4096], w1[80], w2[80];
+    int old, loc;
+    probe(dir, name, src, out, sizeof out);
+    if (cx_fmt(w1, sizeof w1, "%s.cx:%s:", name, l1) || cx_fmt(w2, sizeof w2, "%s.cx:%s:", name, l2)) die("want");
+    old = has(out, sizeof out, "malformed unit frame") || has(out, sizeof out, "errno.h") || has(out, sizeof out, "block-scope extern");
+    loc = (has(out, sizeof out, w1) || has(out, sizeof out, w2)) && has(out, sizeof out, "error:");
+    if (loc && !old && !has(out, sizeof out, "RC=0")) ck(1, name);
+    else if (minor < 69 && old && !has(out, sizeof out, "RC=0")) { unverified++; sy_printf("UNVERIFIED\tcheck-brace-diag.%s\tinstalled=0.0.%d predates the table change\n", name, minor); }
+    else { ck(0, name); sy_printf("%s\n", out); }
+}
+
+int main(void) {
+    char out[4096], dir[512], script[1200];
+    int minor = 0;
+    sh("d=$(mktemp -d \"${TMPDIR:-/tmp}/check-brace-diag-XXXXXX\") && printf '%s' \"$d\"", dir, sizeof dir);
+    if (!dir[0] || dir[0] != '/') die("no temporary directory");
+    /* the probes use sys.io and sys.fs: give the temporary directory this repository's package root (CX-U-7) */
+    if (cx_fmt(script, sizeof script, "cp cxroot.tsv %s/cxroot.tsv && ln -s \"$PWD/cx\" %s/cx && echo ROOT-OK", dir, dir)) die("script");
+    sh(script, out, sizeof out);
+    if (!has(out, sizeof out, "ROOT-OK")) die("package root for the probes");
+
+    sh("T=exec/parse2/units-result.tsv; grep -c '^main2\t$state5\t0\tSCAN.unbalanced\t' $T; grep -c '^main2\tSCAN.unbalanced\t\\*\tSCAN.next\t\\[\\[\"LDI\",\"dep\",0\\],\\[\"LDI\",\"bad\",1\\]\\]$' $T; "
+       "grep -c '^main2\t$state5\t0\tDEAD.frame' $T; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n1\n0\nEND") && tx_len(out, sizeof out) == 10, "table-extra-close-marks-unit");
+    sh("T=exec/parse2/units-result.tsv; grep -c '^main7\tSCAN.end\t\\*\tSCAN.end.depth\t\\[\\[\"CMPI\",\"dep\",0\\]\\]$' $T; grep -c '^main7\tSCAN.end.depth\t2\tSCAN.end.open\t' $T; "
+       "grep -c '^main7\tSCAN.end.open\t\\*\tTRAIL\t\\[\\[\"LDI\",\"bad\",1\\]\\]$' $T; grep -c '^main7\tSCAN.end\t\\*\tTRAIL\t' $T; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n1\n1\n0\nEND") && tx_len(out, sizeof out) == 12, "table-open-at-unit-end-marks-unit");
+    sh("T=exec/parse2/units-result.tsv; grep -c '^main12\tCOPY.end.bad\t1\tFINAL\t' $T; grep -c '^main12\tCOPY.end.bad\t\\*\tFRAME\t' $T; grep -c '\\[\"LDI\",\"bad\",0\\]' $T; "
+       "grep -c '\\[\"CMPI\",\"bad\",1\\]' $T; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-marked-unit-ends-framing");
+
+    sh("sh ./unisacc.com --version", out, sizeof out);
+    {   long at = tx_find(out, tx_len(out, sizeof out), "unisacc 0.0.", 12);
+        if (at < 0) die("product version line");
+        for (at += 12; out[at] >= '0' && out[at] <= '9'; at++) minor = minor * 10 + (out[at] - '0'); }
+
+    probe(dir, "ok1", SRC_OK1, out, sizeof out);
+    ck(has(out, sizeof out, "x\nRC=0") && tx_len(out, sizeof out) == 7, "balanced-one-use-runs");
+    probe(dir, "ok2", SRC_OK2, out, sizeof out);
+    ck(has(out, sizeof out, "x\nRC=0") && tx_len(out, sizeof out) == 7, "balanced-two-uses-nested-block-runs");
+    bad(dir, "extra", SRC_EXTRA, "3", "3", minor);
+    bad(dir, "stray", SRC_STRAY, "3", "3", minor);
+    bad(dir, "miss", SRC_MISS, "7", "8", minor);
+
+    if (!cx_fmt(script, sizeof script, "rm -rf %s", dir)) sh(script, out, sizeof out);
+    sy_printf("CHECK_BRACE_DIAG\tfailed=%d\tunverified=%d\n", failed, unverified);
+    return failed ? 1 : 0;
+}
