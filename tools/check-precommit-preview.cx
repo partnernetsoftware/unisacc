@@ -1,0 +1,131 @@
+/* tools/check-precommit-preview.cx -- tools/precommit-preview.cx against the real gate, in a fixture git repo under sy_tmpdir.
+ *
+ *   sh ./unisacc.com tools/check-precommit-preview.cx
+ *
+ * Per case: (1) run the preview over the named work-tree files (nothing staged), (2) assert the fixture's real
+ * index and object store did not change, (3) git add the same files and run tools/precommit.cx, (4) assert the
+ * preview's blocked= equals the real gate's blocked=, and that the expected GATE row and its repair command
+ * are present.  The fixture's tools/ratchets.cx, tools/cx-lint.cx and tools/check-tlib-frozen.cx are small
+ * stand-ins that emit one red row each: what is under test is that the preview reports what the real gate
+ * decides, not the ratchets or lint rules themselves (those have their own checks).
+ * Prints PASS/FAIL rows and CHECK_PRECOMMIT_PREVIEW<TAB>failed=N. */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char td[320], root[400];
+static void ck(int ok, const char *name, const char *sub) {
+    if (ok) sy_printf("PASS\tcheck-precommit-preview.%s.%s\n", name, sub);
+    else { failed++; sy_printf("FAIL\tcheck-precommit-preview.%s.%s\n", name, sub); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    return rc;
+}
+/* h is always the captured output of a command this check just ran (behavior), never source text */
+static long at_of(const char *h, long hl, const char *n) {
+    long nl = tx_len(n, 400), i;
+    if (hl < 0 || nl < 0) return -1;
+    for (i = 0; i + nl <= hl; i++) if (tx_same(h + i, nl, n, nl)) return i;
+    return -1;
+}
+static int has(const char *h, const char *n) { return at_of(h, tx_len(h, 60000), n) >= 0; }
+static long blocked_of(const char *h, const char *key) {
+    long hl = tx_len(h, 60000), a, b, v = 0, k;
+    if (hl < 0) return -1;
+    a = at_of(h, hl, key); if (a < 0) return -1;
+    b = at_of(h + a, hl - a, "blocked="); if (b < 0) return -1;
+    a += b + 8;
+    for (k = a; k < hl && h[k] >= '0' && h[k] <= '9'; k++) v = v * 10 + (h[k] - '0');
+    return k == a ? -1 : v;
+}
+static int put(const char *rel, const char *text) {
+    char p[800];
+    if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
+    return cx_write(p, text, (size_t)tx_len(text, 4000));
+}
+/* files: space-separated relative paths already written.  want: expected blocked.  row/fix: text the preview must carry. */
+static void one(const char *name, const char *files, long want, const char *row, const char *fix, const char *row2) {
+    char cmd[3000], pv[12000], real[12000], st0[400], st1[400]; long bp, br;
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git diff --cached --name-only | wc -l && find .git/objects -type f | wc -l && git write-tree", td) || sh(cmd, st0, sizeof st0)) { ck(0, name, "state-before"); return; }
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' '%s/tools/precommit-preview.cx' -- --preview --root '%s' --files %s 2>&1", td, root, root, root, files)) { ck(0, name, "cmd"); return; }
+    sh(cmd, pv, sizeof pv);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git diff --cached --name-only | wc -l && find .git/objects -type f | wc -l && git write-tree", td) || sh(cmd, st1, sizeof st1)) { ck(0, name, "state-after"); return; }
+    ck(st0[0] && tx_eqz(st0, st1), name, "preview-leaves-index-and-objects");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A -- %s && sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1", td, files, root, root)) { ck(0, name, "cmd"); return; }
+    sh(cmd, real, sizeof real);
+    bp = blocked_of(pv, "PRECOMMIT_PREVIEW\t"); br = blocked_of(real, "PRECOMMIT\t");
+    if (bp != br || bp != want) sy_printf("NOTE\t%s\tpreview=%d real=%d want=%d\n---preview\n%s---real\n%s", name, (int)bp, (int)br, (int)want, pv, real);
+    ck(bp >= 0 && bp == br, name, "preview-blocked-equals-real-gate");
+    ck(bp == want, name, "blocked-count");
+    ck(has(pv, row), name, "gate-row");
+    ck(!fix[0] || has(pv, fix), name, "fix-command");
+    ck(!row2[0] || has(pv, row2), name, "second-row");
+    if (!cx_fmt(cmd, sizeof cmd, "cd '%s' && git rm -r -q --cached -- %s >/dev/null 2>&1; rm -rf okd lib exec build/freeze.tsv tools/foo.cx", td, files)) sh(cmd, 0, 0);
+}
+
+int main(void) {
+    char cmd[1600];
+    if (sy_cwd(root, sizeof root)) { ck(0, "setup", "cwd"); return 1; }
+    if (cx_fmt(td, sizeof td, "%s/precommit-preview-fx-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(td, 0700)) { ck(0, "setup", "tmpdir"); return 1; }
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && git commit -q --allow-empty -m base && "
+        "mkdir -p tools build && ln -s '%s/unisacc.com' unisacc.com && "
+        "for m in sys text mem core; do ln -s '%s'/cx/$m tools/$m || exit 1; done", td, root, root) || sh(cmd, 0, 0)) { ck(0, "setup", "git-init"); return 1; }
+    /* stand-ins the real gate runs from the fixture cwd (untracked, never staged) */
+    put("tools/ratchets.cx", "#pragma unisa use sys.io\nint main(void) { sy_printf(\"  cxtrunc: lib/r.cx has 1 unbounded call\\n\"); return 1; }\n");
+    put("tools/cx-lint.cx",
+        "#pragma unisa use sys.io\n#pragma unisa use text.text\n"
+        "int main(int argc, char **argv) { int i, strict = 0, red = 0;\n"
+        "  for (i = 1; i < argc; i++) if (tx_eqz(argv[i], \"--strict\")) strict = 1;\n"
+        "  for (i = 1; i < argc; i++) { long l = tx_len(argv[i], 4000);\n"
+        "    if (strict && l > 6 && tx_same(argv[i] + l - 6, 6, \"bad.cx\", 6)) { sy_printf(\"LINT\\tR2-sep\\t%s:1\\tmissing separator\\n\", argv[i]); red = 1; }\n"
+        "    if (!strict && l > 5 && tx_same(argv[i] + l - 5, 5, \"r1.cx\", 5)) sy_printf(\"LINT\\tR1-product\\t%s:1\\tsecond truth\\n\", argv[i]); }\n"
+        "  return red; }\n");
+    put("tools/check-tlib-frozen.cx", "#pragma unisa use sys.io\nint main(void) { sy_printf(\"FROZEN\\tpkgx\\tMISMATCH\\n\"); return 1; }\n");
+    put("build/tlib-packages.tsv", "pkgx\t1\t-\tlib\t-\t-\t-\t-\t0000000000000000000000000000000000000000000000000000000000000000\n");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("okd/ok.cx", "int main(void) { return 0; }\n");
+    one("clean", "okd/ok.cx", 0, "GATE\tall\tPASS", "", "");
+
+    put("tools/foo.cx", "int main(void) { return 0; }\n");
+    one("new-tool", "tools/foo.cx", 1, "GATE\tnew-tool-check\tBLOCK", "tools/register.cx -- ID", "");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("okd/s.cx", "#!/bin/sh\necho x\n");
+    one("shebang", "okd/s.cx", 1, "GATE\tcx-shebang\tBLOCK", "rename the shell entry to .sh", "");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("build/freeze.tsv", "sid1\tbase1\tcdx\t4102444800\texec src seed\n");
+    put("exec/a.tsv", "x\n");
+    one("freeze", "exec/a.tsv", 1, "GATE\tfreeze\tBLOCK", "integrator", "");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("lib/r.cx", "int main(void) { return 0; }\n");
+    one("ratchet-and-tlib", "lib/r.cx", 1, "GATE\tratchet:cxtrunc\tBLOCK", "sh ./unisacc.com tools/ratchets.cx", "GATE\ttlib-frozen\tREPORT");
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("lib/r.cx", "int main(void) { return 0; }\n");
+    one("tlib-fix", "lib/r.cx", 1, "GATE\ttlib-frozen\tREPORT", "tools/layer-api.cx -- --bump pkgx", "");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("okd/bad.cx", "int main(void) { return 0; }\n");
+    put("okd/r1.cx", "int main(void) { return 0; }\n");
+    one("lint", "okd/bad.cx okd/r1.cx", 1, "GATE\tcx-lint:R2-sep\tBLOCK", "tools/cx-lint.cx -- --rules R2,R3,R4 --strict okd/bad.cx okd/r1.cx", "GATE\tcx-lint:R1-product\tREPORT");
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("tools/foo.cx", "int main(void) { return 0; }\n");
+    put("okd/s.cx", "#!/bin/sh\necho x\n");
+    put("okd/bad.cx", "int main(void) { return 0; }\n");
+    one("all-at-once", "tools/foo.cx okd/s.cx okd/bad.cx", 3, "GATE\tnew-tool-check\tBLOCK", "GATE\tcx-shebang\tBLOCK", "GATE\tcx-lint:R2-sep\tBLOCK");
+
+    if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0);
+    sy_printf("CHECK_PRECOMMIT_PREVIEW\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

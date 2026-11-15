@@ -1,0 +1,152 @@
+/* tools/precommit-preview.cx -- commit gate rehearsal: run the real gate over named work-tree files, list every red item once.
+ *
+ *   sh ./unisacc.com tools/precommit-preview.cx -- [--preview] [--root R] --files F...
+ *
+ * Builds a private index (GIT_INDEX_FILE = HEAD tree + the named files as they are in the work tree, the same
+ * index `git commit -- F...` would hand the hook) with a private object directory (GIT_OBJECT_DIRECTORY in
+ * sy_tmpdir, the repository's objects as alternate), then runs tools/precommit.cx ITSELF against it.  No gate
+ * logic is copied here: the verdict and the blocked count come from the real gate's own PRECOMMIT line; this
+ * tool only turns the gate's messages into rows and attaches one repair command to each.  The real index, the
+ * work tree, the refs and the repository's object store are not written; nothing is committed.
+ *
+ *   GATE<TAB>name<TAB>PASS|BLOCK|REPORT<TAB>reason<TAB>fix command
+ *   PRECOMMIT_PREVIEW<TAB>blocked=N        (N = the real gate's blocked=; exit 1 when N > 0, 2 on usage/setup error)
+ *
+ * --root R: where unisacc.com and tools/precommit.cx live (default "."; fixtures pass the real checkout).
+ * A BLOCK the classifier does not know is still printed (gate "other"), and when the number of BLOCK rows
+ * differs from the gate's blocked= an extra "unclassified" row says so: the count is never taken from here. */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define PV_BOUND_S 170   /* the gate bounds each of its own children at 58 s (ratchets, cx-lint, list) */
+static char g_files[8000];
+static int g_rows_block, g_rows;
+
+static void put_clean(const char *s, long n) {   /* TAB/CR inside a field would break the row shape */
+    long i; char c[2]; c[1] = 0;
+    for (i = 0; i < n; i++) { c[0] = (s[i] == '\t' || s[i] == '\r') ? ' ' : s[i]; sy_printf("%s", c); }
+}
+static void emit(const char *gate, long gl, const char *verdict, const char *why, long wl, const char *fix) {
+    sy_printf("GATE\t"); put_clean(gate, gl); sy_printf("\t%s\t", verdict); put_clean(why, wl); sy_printf("\t%s\n", fix);
+    g_rows++;
+    if (tx_eqz(verdict, "BLOCK")) g_rows_block++;
+}
+static int has(const char *s, long n, const char *needle) { return tx_find(s, n, needle, tx_len(needle, 200)) >= 0; }
+
+/* one message line of the real gate -> one row.  m/l is the text after "precommit: ". */
+static void classify(const char *m, long l, const char *next, long nl) {
+    char fix[9000], gate[200]; const char *z = "-";
+    if (tx_prefix(m, l, "blocked:lint:", 13) || tx_prefix(m, l, "lint(report-only):", 18)) {
+        int rep = m[0] == 'l'; long a = tx_find(m, l, "LINT\t", 5), e;
+        if (a < 0) a = 0; else a += 5;
+        e = a; while (e < l && m[e] != '\t') e++;
+        if (cx_fmt(gate, sizeof gate, "cx-lint:%.*s", (int)(e - a > 60 ? 60 : e - a), m + a)) return;
+        if (cx_fmt(fix, sizeof fix, rep ? "sh ./unisacc.com tools/cx-lint.cx -- --rules R1 %s" : "sh ./unisacc.com tools/cx-lint.cx -- --rules R2,R3,R4 --strict %s", g_files)) return;
+        emit(gate, tx_len(gate, 200), rep ? "REPORT" : "BLOCK", m, l, fix); return;
+    }
+    if (tx_prefix(m, l, "blocked:", 8)) {   /* a ratchet row: "blocked: NAME: PATH has ..." */
+        long a = 8, e; while (a < l && m[a] == ' ') a++;
+        e = a; while (e < l && m[e] != ':') e++;
+        if (cx_fmt(gate, sizeof gate, "ratchet:%.*s", (int)(e - a > 60 ? 60 : e - a), m + a)) return;
+        emit(gate, tx_len(gate, 200), "BLOCK", m, l, "sh ./unisacc.com tools/ratchets.cx"); return;
+    }
+    if (has(m, l, "missing check-*.cx")) {
+        emit("new-tool-check", 14, "BLOCK", m, l, "add tools/check-NAME.cx then: sh ./unisacc.com tools/register.cx -- ID tools/check-NAME.cx MARKER \"COVERAGE TEXT\" \"FILES\""); return; }
+    if (has(m, l, "batch registration")) {
+        emit("new-tool-batch", 14, "BLOCK", m, l, "sh ./unisacc.com tools/register.cx -- ID tools/check-NAME.cx MARKER \"COVERAGE TEXT\" \"FILES\" (then add tests/batches.tsv and tests/coverage.tsv to --files)"); return; }
+    if (has(m, l, "TLIB_BUMP_NEEDED")) {
+        long a = tx_find(m, l, "layer-api.cx", 12), e;
+        if (a >= 0) { e = a; while (e < l && m[e] != '(') e++; while (e > a && m[e - 1] == ' ') e--;
+            if (cx_fmt(fix, sizeof fix, "git add PKG-SOURCES && sh ./unisacc.com tools/%.*s", (int)(e - a), m + a)) return; z = fix; }
+        emit("tlib-frozen", 11, "REPORT", m, l, z); return;
+    }
+    if (has(m, l, "freeze.tsv malformed")) { emit("freeze", 6, "BLOCK", m, l, "repair build/freeze.tsv to 5 TAB columns: candidate_sid base_commit owner deadline_epoch_s paths"); return; }
+    if (tx_prefix(m, l, "\xe5\x86\xbb\xe7\xbb\x93\xe4\xb8\xad", 9)) { emit("freeze", 6, "BLOCK", m, l, "hand the path to the integrator as a patch (owner in build/freeze.tsv), or wait for the deadline"); return; }
+    if (has(m, l, "BLOCKED registry unknown-coverage")) {
+        if (next && tx_prefix(next, nl, "commit batches.tsv", 18)) { long a = tx_find(next, nl, "sh ./unisacc.com", 16);
+            if (a >= 0 && !cx_fmt(fix, sizeof fix, "%.*s", (int)(nl - a), next + a)) z = fix; }
+        emit("coverage-pair", 13, "BLOCK", m, l, z); return;
+    }
+    if (tx_prefix(m, l, "commit batches.tsv", 18)) return;   /* the hint line of coverage-pair, already attached */
+    if (has(m, l, "BLOCKED registration manifest") || has(m, l, "BLOCKED reg-manifest")) {
+        emit("reg-manifest", 12, "BLOCK", m, l, "sh ./unisacc.com tools/reg-manifest.cx -- --check --index (stage the manifest's batch, coverage and packages rows together)"); return; }
+    if (has(m, l, "BLOCKED generated registration table") || has(m, l, "BLOCKED tables-gen")) {
+        emit("tables-gen", 10, "BLOCK", m, l, "sh ./unisacc.com tools/tables-gen.cx -- --write (then add the tables to --files)"); return; }
+    if (has(m, l, "BLOCKED ledger")) {
+        emit("ledger", 6, "BLOCK", m, l, "sh ./unisacc.com tools/ledger-add.cx -- --check --baseline build/ledger-format-baseline.tsv"); return; }
+    if (tx_prefix(m, l, "append ledger rows only", 23)) return;
+    if (has(m, l, "metadata_valid!=1")) { emit("registry-list", 13, "BLOCK", m, l, "sh ./unisacc.com tests/run.cx -- --list"); return; }
+    if (has(m, l, "facts-gen --check")) { emit("facts-gen", 9, "BLOCK", m, l, "sh ./unisacc.com tools/facts-gen.cx -- --write . pp-autoinc-gen"); return; }
+    if (has(m, l, "shell \xe8\x96\x84\xe5\x85\xa5\xe5\x8f\xa3")) { emit("cx-shebang", 10, "BLOCK", m, l, "rename the shell entry to .sh, or drop the #! line from the .cx source"); return; }
+    if (has(m, l, "lint: cannot stage") || has(m, l, "cx-lint.cx did not run")) { emit("cx-lint:run", 11, "BLOCK", m, l, "sh ./unisacc.com tools/cx-lint.cx -- --rules R2,R3,R4 --strict FILE"); return; }
+    if (tx_prefix(m, l, "this commit takes cx files", 26)) return;
+    if (has(m, l, "REFUSE") || has(m, l, "row=")) { emit("registry-list", 13, "REPORT", m, l, "sh ./unisacc.com tests/run.cx -- --list"); return; }
+    emit("other", 5, "REPORT", m, l, "sh ./unisacc.com tools/precommit.cx (after git add of the same files)");
+}
+
+static int bad_name(const char *s) { long i; for (i = 0; s[i]; i++) if (s[i] == '\'' || s[i] == '\n') return 1; return s[0] == '-' || !s[0]; }
+
+int main(int argc, char **argv) {
+    char td[1200], cmd[20000], qf[9000]; const char *root = "."; char *o = 0; size_t n = 0;
+    long at, ql = 0, gl = 0, real = -1, rc_gate = -1; int i, nf = 0, infiles = 0, rc, staged_seen = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--preview")) { infiles = 0; continue; }
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) { root = argv[++i]; infiles = 0; continue; }
+        if (tx_eqz(argv[i], "--files")) { infiles = 1; continue; }
+        if (!infiles || bad_name(argv[i]) || bad_name(root)) { sy_eprintf("precommit-preview: usage: -- [--preview] [--root R] --files F... (no quote or leading dash in names): %s\n", argv[i]); return 2; }
+        {   long fl = tx_len(argv[i], 4000);
+            if (fl < 0 || ql + fl + 4 >= (long)sizeof qf || gl + fl + 2 >= (long)sizeof g_files) { sy_eprintf("precommit-preview: file list too long\n"); return 2; }
+            qf[ql++] = ' '; qf[ql++] = '\''; mm_copy(qf + ql, sizeof qf - (size_t)ql, argv[i], (size_t)fl); ql += fl; qf[ql++] = '\'';
+            if (gl) g_files[gl++] = ' ';
+            mm_copy(g_files + gl, sizeof g_files - (size_t)gl, argv[i], (size_t)fl); gl += fl; nf++; }
+    }
+    qf[ql] = 0; g_files[gl] = 0;
+    if (!nf) { sy_eprintf("precommit-preview: usage: -- [--preview] [--root R] --files F...\n"); return 2; }
+    if (cx_fmt(td, sizeof td, "%s/precommit-preview-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(td, 0700)) { sy_eprintf("precommit-preview: scratch dir\n"); return 2; }
+    /* private index + private object dir; `git add -A -- F` takes work-tree content (and deletions) of F only */
+    if (cx_fmt(cmd, sizeof cmd,
+        "O=$(git rev-parse --git-path objects) || exit 90; case \"$O\" in /*) ;; *) O=\"$PWD/$O\";; esac; mkdir -p '%s/obj' || exit 90; "
+        "export GIT_INDEX_FILE='%s/index' GIT_OBJECT_DIRECTORY='%s/obj' GIT_ALTERNATE_OBJECT_DIRECTORIES=\"$O\"; "
+        "if git rev-parse -q --verify HEAD >/dev/null 2>&1; then git read-tree HEAD || exit 91; else git read-tree --empty || exit 91; fi; "
+        "git add -A --%s >&2 || exit 92; "
+        "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1; echo \"PREVIEW_GATE_RC=$?\"",
+        td, td, td, qf, root, root)) { sy_eprintf("precommit-preview: command too long\n"); return 2; }
+    {   char *v[] = {"sh", "-c", cmd, 0}; rc = cx_runv_timeout(v, PV_BOUND_S, &o, &n); }
+    {   char rm[1400]; char *v[] = {"rm", "-rf", "--", td, 0}; (void)rm; cx_runv_timeout(v, 20, 0, 0); }
+    if (rc != 0 || !o) { sy_eprintf("precommit-preview: setup failed rc=%d (90 objects dir, 91 read-tree, 92 git add of the named files; other = gate run bound %d s)\n", rc, PV_BOUND_S); return 2; }
+    for (at = 0; at < (long)n; ) {
+        long e = tx_chr(o + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e; const char *r = o + at;
+        long nat = at + l + 1, nl = 0; const char *nx = 0;
+        if (nat < (long)n) { long ne = tx_chr(o + nat, (long)n - nat, '\n'); nl = ne < 0 ? (long)n - nat : ne; nx = o + nat;
+            if (tx_prefix(nx, nl, "precommit: ", 11)) { nx += 11; nl -= 11; } else nx = 0; }
+        if (tx_prefix(r, l, "PREVIEW_GATE_RC=", 16)) { rc_gate = r[16] - '0'; }
+        else if (tx_prefix(r, l, "PRECOMMIT\t", 10)) {
+            long b = tx_find(r, l, "\tblocked=", 9), k;
+            if (b >= 0) { real = 0; for (k = b + 9; k < l && r[k] >= '0' && r[k] <= '9'; k++) real = real * 10 + (r[k] - '0'); }
+            staged_seen = 1;
+            if (has(r, l, "ratchets=absent")) emit("ratchets", 8, "REPORT", r, l, "sh ./unisacc.com tools/ratchets.cx");
+        }
+        else if (tx_prefix(r, l, "precommit: ", 11)) classify(r + 11, l - 11, nx, nl);
+        else if (tx_prefix(r, l, "TLIB_BUMP_NEEDED\t", 17)) { /* the stderr twin carries the same package: one row */ }
+        else if (l > 0 && !(l > 2 && r[0] == ' ' && r[1] == ' ')) emit("other", 5, "REPORT", r, l, "-");
+        at = nat;
+    }
+    if (real < 0) {   /* the gate ended without its PRECOMMIT line: a hard error is a refused commit */
+        emit("precommit", 9, "BLOCK", "gate ended without a PRECOMMIT line (hard error, commit would be refused)", 74, "sh ./unisacc.com tools/precommit.cx (after git add of the same files)");
+        real = 1;
+    } else if (real != g_rows_block) {
+        char why[200];
+        if (!cx_fmt(why, sizeof why, "gate blocked=%d but %d BLOCK rows classified here; trust the gate count", (int)real, g_rows_block))
+            emit("unclassified", 12, real > g_rows_block ? "BLOCK" : "REPORT", why, tx_len(why, 200), "sh ./unisacc.com tools/precommit.cx (after git add of the same files)");
+    }
+    if (!g_rows && staged_seen) emit("all", 3, "PASS", "no gate message for these files", 31, "-");
+    (void)rc_gate;
+    sy_printf("PRECOMMIT_PREVIEW\tblocked=%d\n", (int)real);
+    return real ? 1 : 0;
+}
