@@ -198,6 +198,26 @@ int main(void) {
        hasl(out, "DERIVE\tbatch-packages-gen\tSKIPPED") && hasl(out, "DERIVE\tlayer-api\tSKIPPED") && hasl(out, "DERIVE\tst-gap\tSKIPPED") &&
        hasl(out, "DERIVE\tlinks\tSKIPPED") && hasl(out, "skipped=8"), "repo-manifest-loads");
     ck(hasl(out, "DERIVE\tcx0-three-source\tSKIPPED"), "repo-manifest-has-cx0-three-source");
+    /* --plan:写模式按读写冲突连边(b 读 a 的输出),检查模式不连边;c 与二者无交,无依赖 */
+    {   char ins[500];
+        cx_fmt(ins, sizeof ins, "%s/a.out", dir);
+        m_begin(); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "ok", 2, "20", ins, 0, 0); m_row("c", "ok", 3, "20", "docs/*", 0, 0); m_end();
+    }
+    rc = runm("--plan --write");
+    ck(rc == 0 && hasl(out, "PLAN\ta\t-\t./tools/bound 20 sh ") && hasl(out, "PLAN\tb\ta\t") && hasl(out, "PLAN\tc\t-\t") && hasl(out, " write ok\t") && file_is("log", 0), "plan-write-conflict-edges");
+    rc = runm("--plan --check");
+    ck(rc == 0 && hasl(out, "PLAN\tb\t-\t") && hasl(out, " check ok\t") && !hasl(out, "DERIVE_SUMMARY"), "plan-check-no-edges");
+    /* --from-run:读 events.tsv 与 out/<id>.out,汇总与串行同格式;无终态记 NOTRUN */
+    {   char p[500];
+        cx_fmt(p, sizeof p, "%s/run", dir); sy_mkdir(p, 0755);
+        cx_fmt(p, sizeof p, "%s/run/out", dir); sy_mkdir(p, 0755);
+        put("run/events.tsv", "EVT\t1\ta\tstart\t0\t0\tx\nEVT\t2\ta\tok\t12\t0\tout=1\nEVT\t3\tb\tfail\t7\t1\tout=1\nEVT\t4\tc\tskip\t0\t-1\tdep=b:fail\n");
+        put("run/out/a.out", "fake a ok\n"); put("run/out/b.out", "DIFF b stale\n");
+        cx_fmt(p, sizeof p, "--check --from-run %s/run", dir);
+        rc = runm(p);
+    }
+    ck(rc == 1 && hasl(out, "DERIVE\ta\tOK\t12\n") && hasl(out, "DERIVE\tb\tDRIFT\t7\trc=1\tDIFF b stale") && hasl(out, "DERIVE\tc\tNOTRUN\t0") &&
+       hasl(out, "DERIVE_SUMMARY\tok=1\tdrift=1\trefused=0\tskipped=1\t"), "from-run-summary");
     sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\n", nok, failed);
     return failed ? 1 : 0;
 }
