@@ -29,7 +29,7 @@ static long events(const char *dir, const char *id, const char *ev) {
 }
 static int sh(char *cmd, np_result *r) { char *v[] = {"sh", "-c", cmd, 0}; char why[256]; return np_run(v, 0, 0, 50, r, why, sizeof why); }
 int main(void) {
-    char dir[] = "/tmp/check-devtask-XXXXXX", why[2048], id[16], id2[16], id3[16], id4[16], cmd[4096]; long now = 1800000000; DtSet s; np_result r = {0}; int rc;
+    char dir[] = "/tmp/check-devtask-XXXXXX", why[2048], id[16], id2[16], id3[16], id4[16], cmd[4096]; long now = 1800000000; DtSet s; np_result r = {0}; int rc; long pt0 = 0;
     if (!mkdtemp(dir)) return 2;
     ck(dt_domain_hit("tools/dev", "docs,tools/devtask.cx", 0, 0) == 1 && dt_domain_hit("tools/a.cx", "tools/b.cx,src", 0, 0) == 0, "domain-prefix-intersection");
     ck(dt_domain_ok("tools/a.cx,src") && !dt_domain_ok("/abs") && !dt_domain_ok("a/../b") && !dt_domain_ok("a,,b"), "domain-validation");
@@ -137,13 +137,44 @@ int main(void) {
         /* parallel: two 30 s acceptance commands inside one 45 s wall, started with --bg then waited */
         ok = !cx_fmt(cmd, sizeof cmd, WT "open --id p1 --title par --write in --accept 'sleep 30' --accept 'sleep 30; echo second' --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && !r.rc;
         ck(ok, "par-open"); np_free(&r);
-        {   long t0 = sy_now_ms(), tb;
+        {   long tb; pt0 = sy_now_ms();
             ok = !cx_fmt(cmd, sizeof cmd, WO "done p1 --bg", dir, dir, now + 4) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "JOB\t");
-            tb = sy_now_ms() - t0;
+            tb = sy_now_ms() - pt0;
             ck(ok && tb < 15000, "bg-returns-immediately-with-job"); np_free(&r);
-            ok = !cx_fmt(cmd, sizeof cmd, WO "done --wait p1", dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tp1\t");
-            ck(ok && sy_now_ms() - t0 < 45000, "par-two-30s-accepts-under-45s-and-bg-done"); np_free(&r);
         }
+    }
+    /* external write directories, --cwd acceptance and work-tree write domains */
+    {   char st[64]; int ok;
+        if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/ext/sub && echo e >%s/ext/sub/e1 && echo q >%s/ext/e2 && cd %s/repo && echo .claude >>.git/info/exclude && git worktree add -q .claude/worktrees/wt -b wtb && echo pre >.claude/worktrees/wt/wpre", dir, dir, dir, dir) && !sh(cmd, &r) && !r.rc;
+        ck(ok, "ext-setup-dir-and-worktree"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id x1 --title ext --write-ext %s/ext --accept 'test -f sub/e1 && test \"$(basename $(pwd))\" = ext' --cwd %s/ext --deadline-min 10 --root %s/repo", dir, now, dir, dir, dir) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "TASK\topen\tx1\t");
+        ck(ok, "ext-open-with-write-ext-only"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo more >>%s/ext/sub/e1 && echo n >%s/ext/new1 && echo y >%s/repo/outx.txt && " WT "status x1", dir, dir, dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out
+            && strstr(r.out, "CHANGED\t") && strstr(r.out, "/ext/sub/e1\n") && strstr(r.out, "/ext/new1\n") && !strstr(r.out, "/ext/e2") && strstr(r.out, "OUTSIDE_WARN\toutx.txt\n") && strstr(r.out, "changed=2\toutside=1");
+        ck(ok, "ext-status-snapshot-sha-in-ext-and-outside-repo-change"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "rm -f %s/repo/outx.txt && " WT "done x1", dir, dir, now + 6) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "DONE\tx1\t");
+        ck(ok, "ext-cwd-accept-runs-in-ext-dir"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id x2 --title wt --write .claude/worktrees/wt --accept 'test -f wmark && test -f wpre' --cwd %s/repo/.claude/worktrees/wt --deadline-min 10 --root %s/repo && echo w >%s/repo/.claude/worktrees/wt/wmark && echo r >%s/repo/.claude/worktrees/wt/wpre && echo o >%s/repo/stray.txt && " WT "status x2",
+                dir, now, dir, dir, dir, dir, dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out
+            && strstr(r.out, "CHANGED\t.claude/worktrees/wt/wmark\n") && strstr(r.out, "CHANGED\t.claude/worktrees/wt/wpre\n") && strstr(r.out, "OUTSIDE_WARN\tstray.txt\n");
+        ck(ok, "worktree-write-prefix-snapshots-dirty-worktree-files"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "rm %s/repo/stray.txt; " WT "done x2", dir, dir, now + 6) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "DONE\tx2\t");
+        ck(ok && events(st, "x2", "task.done") == 1, "worktree-cwd-accept-runs-in-worktree"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "H=$HOME; for d in / \"$H\" \"$(dirname $H)\" \"$(dirname $(dirname $H))\" relative/dir %s/nosuch; do " WT "open --id bad1 --title b --write-ext \"$d\" --accept true --deadline-min 1 --root %s/repo >/dev/null 2>&1; echo rc=$?; done",
+                dir, dir, now, dir) && !sh(cmd, &r) && !r.rc && r.out;
+        if (ok) { int n2 = 0; for (const char *q = r.out; (q = strstr(q, "rc=2")); q += 4) n2++; ok = n2 == 6; }
+        ck(ok, "ext-dangerous-and-bad-paths-refused-rc2"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id bad2 --title b --write in --cwd /tmp --accept true --deadline-min 1 --root %s/repo >/dev/null 2>&1; echo rc=$?; " WT "open --id bad3 --title b --write in --cwd %s/ext --accept true --deadline-min 1 --root %s/repo >/dev/null 2>&1; echo rc=$?; "
+                WT "status bad1 >/dev/null 2>&1; echo rc=$?", dir, now, dir, dir, now, dir, dir, dir, now) && !sh(cmd, &r) && !r.rc && r.out;
+        if (ok) { int n2 = 0; for (const char *q = r.out; (q = strstr(q, "rc=2")); q += 4) n2++; ok = n2 == 3; }
+        ck(ok, "cwd-outside-worktrees-and-ext-refused-and-refused-open-leaves-no-order"); np_free(&r);
+    }
+    /* the two 30 s acceptance commands of p1 ran in the background while the blocks above ran; wait, total wall under 45 s */
+    {   char st[64]; int ok;
+        if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        ok = !cx_fmt(cmd, sizeof cmd, WO "done --wait p1", dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tp1\t");
+        ck(ok && sy_now_ms() - pt0 < 45000, "par-two-30s-accepts-under-45s-and-bg-done"); np_free(&r);
         ck(events(st, "p1", "task.done") == 1, "bg-writes-task-done-event");
     }
     printf("%s\tassertions=%d\tfailed=%d\n", failed ? "CHECK_DEVTASK_FAIL" : "CHECK_DEVTASK", assertions, failed);
