@@ -154,6 +154,42 @@ int main(void) {
         ck(rc == 0 && has("c2-ok") && ms2 < 3000, "second-clone-hits-cache");
         if (ms2 >= 3000) printf("NOTE\tsecond-clone-ms\t%ld\n", ms2);
         {   char *v[] = {"rm", "-rf", fx2, 0}; (void)run(v, 0, 0); } }
+    /* (9) HEAD 里没有服务源(git init 未提交)时退回工作副本:按内容取键缓存在 pinned/wc-<键>/,各根共用;
+     *     第二个根首调用命中(小于 3 s,不新增键);改服务源内容后换键重编 */
+    {   char w1[200], w2[200], c[1600]; long t1, ms; int k0 = -1, k1 = -1, k2 = -1, i; char *q;
+        char *ls[] = {"ls", "-1", pin, 0};
+        F(w1, sizeof w1, "%s-w1", fx); F(w2, sizeof w2, "%s-w2", fx);
+        for (i = 0; i < 2; i++) {
+            char *sv[] = {"sh", "-c", c, 0}; const char *w = i ? w2 : w1;
+            F(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s archive HEAD -- cxroot.tsv cx ext tools/cxlib tools/net tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv"
+                           " | tar -x -C %s && cd %s && git init -q && ln -s %s unisacc.com", w, w, fx, w, w, prod);
+            if (ovf || run(sv, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-wc%d\n", i + 1); return 1; } }
+#define NWC(dst) do { dst = -1; if (run(ls, 0, 0) == 0) for (dst = 0, q = out; (q = strstr(q, "wc-")); q += 3) dst++; } while (0)
+        NWC(k0);
+        t1 = sy_now_ms();
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc1-ok", 0}; rc = run(v, w1, envv); }
+        ms = sy_now_ms() - t1;
+        ck(rc == 0 && has("wc1-ok") && has("using the working copy"), "wc-fallback-first-root-runs");
+        printf("NOTE\twc-first-root-first-call-ms\t%ld\n", ms);
+        NWC(k1);
+        ck(k1 == k0 + 1, "wc-fallback-caches-by-content");
+        {   /* 启动器自身的产品 -run 编译缓存按源路径取键(产品侧,约 6 至 10 s/新根,不在本入口可控范围):先只暖它(无子命令,rc 2),再计时 */
+            char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", 0}; (void)run(v, w2, envv); }
+        t1 = sy_now_ms();
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc2-ok", 0}; rc = run(v, w2, envv); }
+        ms = sy_now_ms() - t1;
+        {   int okr = rc == 0 && has("wc2-ok"); NWC(k2);
+            ck(okr && ms < 3000 && k2 == k1, "wc-fallback-second-root-hits-under-3s"); }
+        printf("NOTE\twc-second-root-first-call-ms\t%ld\n", ms);
+        {   char p[400]; const char *add = "\n/* wc content change */\n"; int fd; F(p, sizeof p, "%s/tools/devsvc-core.cx", w2);
+            fd = ovf ? -1 : open(p, O_WRONLY | O_APPEND);
+            if (fd < 0 || write(fd, add, strlen(add)) != (long)strlen(add)) { printf("FAIL\tdevsvc-core.fixture-wc-change\n"); return 1; }
+            close(fd); }
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc3-ok", 0}; rc = run(v, w2, envv); }
+        {   int okr = rc == 0 && has("wc3-ok"); NWC(k0);
+            ck(okr && k0 == k2 + 1, "wc-fallback-source-change-rebuilds"); }
+#undef NWC
+        {   char *v[] = {"rm", "-rf", w1, w2, 0}; (void)run(v, 0, 0); } }
     /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
     {   char p[400]; const char *junk = "\n@@ this is not valid cx @@\n"; unsigned char *b = 0; int64_t n = 0; unsigned char *nb;
         F(p, sizeof p, "%s/tools/devsvc-core.cx", fx);
