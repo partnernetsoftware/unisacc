@@ -15,6 +15,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
 #pragma unisa use sys.env
+#pragma unisa use text.text
 static char root[4096],why[1700],diff_binary[4400],diff_a[4400],diff_b[4400];static int failures;
 static void die(const char *s){fprintf(stderr,"check-s9: %s %s\n",s,why);exit(2);}
 static void join(char *p,const char *a,const char *b){if(as_join(p,4400,a,b))die("path");}
@@ -65,14 +66,43 @@ static void diff_check(const char *a,const char *b,const char *expected,const ch
  ck(n==strlen(expected)&&!memcmp(s,expected,n),name);free(s);
 }
 static int contains(const char *s,size_t n,const char *needle){size_t k=strlen(needle);for(size_t i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return 1;return 0;}
+static int snapshot_tag(const char *s,size_t n,const char *tag){
+ size_t at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;
+  if(e<n){long off,len,last=-1,lastlen=0;for(int k=0;!tx_field(s+at,e-at,'\t',k,&off,&len);k++){if(k){last=off;lastlen=len;}}
+   if(last>=0&&tx_same(s+at+last,lastlen,tag,strlen(tag)))return 1;}at=e+1;}return 0;
+}
+static const char *schedule_cases="all";
+static int schedule_want(const char *name){return !strcmp(schedule_cases,"all")||!strcmp(schedule_cases,name);}
+static const char *wave_material;
+static void prepared_wave(const char *dst){
+ char receipt[4400],sha[65];size_t n=0,rn=0;long off,len;
+ size_t z=strlen(wave_material);
+ if(z<4||strcmp(wave_material+z-4,".bin")||cx_fmt(receipt,sizeof receipt,"%.*s.rcpt",(int)(z-4),wave_material))die("REFUSED all-waves-tool receipt-path");
+ char *s=cx_read(wave_material,&n),*r=cx_read(receipt,&rn);
+ if(!s||!r||access(wave_material,X_OK))die("REFUSED all-waves-tool missing");
+ cx_sha256_hex(s,n,sha);
+ if(tx_field(r,(long)rn,'\t',2,&off,&len)||len!=74||memcmp(r+off,"artifact=",9)||memcmp(r+off+9,sha,64)||r[off+73]!='\n')die("REFUSED all-waves-tool SHA mismatch");
+ int fd=open(dst,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0700);
+ if(fd<0||write(fd,s,n)!=(ssize_t)n||close(fd))die("REFUSED all-waves-tool copy");
+ free(s);free(r);
+}
 int main(int argc,char **argv){
+ char default_root[4096];char *defaults[]={argv[0],default_root,"schedule",0};
+ if(argc==7&&!strcmp(argv[5],"--wave-executor")){wave_material=argv[6];argc=5;}
+ if(argc==1||(argc==3&&!strcmp(argv[1],"--cases"))){
+  if(argc==3)schedule_cases=argv[2];if(!getcwd(default_root,sizeof default_root))die("cwd");argv=defaults;argc=3;
+ }else if(argc==5&&!strcmp(argv[3],"--cases")){if(strcmp(argv[2],"schedule"))die("--cases requires schedule");schedule_cases=argv[4];argc=3;}
+ if(strcmp(schedule_cases,"all")&&strcmp(schedule_cases,"controls")&&strcmp(schedule_cases,"domains")&&strcmp(schedule_cases,"shared")&&strcmp(schedule_cases,"platform")&&strcmp(schedule_cases,"candidate"))die("schedule --cases all|controls|domains|shared|platform|candidate");
  if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"identity")&&strcmp(argv[2],"identity-sid")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
  char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
  if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
- else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};
-  /* schedule also needs the real wave executor for the shared-worktree control; compile it alongside. */
-  pid_t aw=-1;if(!strcmp(argv[2],"schedule")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
-  if(run(compile,root))die("compile");if(aw>0){int st;if(waitpid(aw,&st,0)!=aw||!WIFEXITED(st)||WEXITSTATUS(st))die("compile-all-waves");}}
+ else{int schedule=!strcmp(argv[2],"schedule"),planner=schedule&&schedule_want("controls");
+  join(product,root,"unisacc.com");join(source,root,planner?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,schedule&&!planner?"all-waves":"native");char *compile[]={"sh",product,source,"-o",binary,0};
+  /* Build only the executors used by this group. The unfiltered path keeps both parallel builds. */
+  pid_t aw=-1;if(planner&&strcmp(schedule_cases,"controls")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
+  if(schedule&&(!strcmp(schedule_cases,"shared")||!strcmp(schedule_cases,"platform"))){
+   if(!wave_material)die("REFUSED all-waves-tool missing");prepared_wave(binary);
+  }else if(run(compile,root))die("compile");if(aw>0){int st;if(waitpid(aw,&st,0)!=aw||!WIFEXITED(st)||WEXITSTATUS(st))die("compile-all-waves");}}
  /* inputs keeps the same per-process deadline the combined phase used; the identity-parent controls are their own phase (own 55s budget). */
  if(!strcmp(argv[2],"inputs")){char dl[80];long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");if(setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");}
  int sidm=!strcmp(argv[2],"identity-sid");   /* identity: missing/corrupt parent refusals; identity-sid: live-parent SID-change refusal (init x2 + wave) */
@@ -120,7 +150,7 @@ int main(int argc,char **argv){
  }
  if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
  if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}
- else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");ck(r.rc==0&&contains(r.out,r.outn,"wt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=1"),"wt-epoch-consumer-refuses-moved-missing-unlisted");
+ else if(!strcmp(argv[2],"schedule")){if(schedule_want("controls")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");ck(r.rc==0&&contains(r.out,r.outn,"wt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=1"),"wt-epoch-consumer-refuses-moved-missing-unlisted");
   /* 0.0.68 launch budget and completion verdict: per-slice declared budget, NO_PROGRESS, FINISHED only at pending 0. */
   ck(r.rc==0&&contains(r.out,r.outn,"slice-budget-is-max-declared-batch-budget\tchecked=1"),"step-slice-budget-from-batch-table");
   ck(r.rc==0&&contains(r.out,r.outn,"step-budget-short-no-launch-no-progress\tchecked=1")&&contains(r.out,r.outn,"S9\tSTEP_NO_PROGRESS\tunstarted=137"),"step-budget-short-no-launch-no-progress");
@@ -135,9 +165,9 @@ int main(int argc,char **argv){
   ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-missing-retry-state-refused\tchecked=1"),"agg-merge-missing-state-refused");
   ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-uncovered-retry-slice-refused\tchecked=1"),"agg-merge-uncovered-slice-refused");
   ck(r.rc==0&&contains(r.out,r.outn,"agg-owner-rule-deterministic-cover-balanced\tchecked=1"),"agg-owner-rule-balanced-not-worse-than-round-robin");
-  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-nonce-mismatch-refused\tchecked=1"),"agg-merge-nonce-mismatch-refused");np_free(&r);
+  ck(r.rc==0&&contains(r.out,r.outn,"agg-merge-nonce-mismatch-refused\tchecked=1"),"agg-merge-nonce-mismatch-refused");np_free(&r);}
   /* Heavy domain: a wave of 6 tlib-family batches never runs more than 2 at once; others unaffected. */
-  {char tab[4400],bad[4400],awb[4400];join(awb,tmp,"all-waves");join(tab,tmp,"domains.tsv");join(bad,tmp,"domains-bad.tsv");
+  if(schedule_want("domains")){char tab[4400],bad[4400],awb[4400];join(awb,tmp,"all-waves");join(tab,tmp,"domains.tsv");join(bad,tmp,"domains-bad.tsv");
    put(tab,"# id\tdomains\treason\tevidence\nh1\theavy\tr\te\nh2\theavy\tr\te\nh3\theavy\tr\te\nh4\theavy\tr\te\nh5\theavy\tr\te\nh6\theavy,wt\tr\te\n");
    {char *v[]={awb,"domain-sim",tab,"8","h1","h2","h3","h4","h5","h6",0};np_result sr2={0};if(np_run(v,root,0,20,&sr2,why,sizeof why))die("domain-sim-transport");
     ck(sr2.rc==0&&contains(sr2.out,sr2.outn,"max_heavy=2\t")&&contains(sr2.out,sr2.outn,"cap=2\t"),"heavy-domain-six-batches-never-more-than-two");np_free(&sr2);}
@@ -150,18 +180,19 @@ int main(int argc,char **argv){
      scans of its own (no run-batch beside this private binary, so it refuses right there). */
   /* The session roots must satisfy cxlib.sessionroot; this batch runs on a fresh clone with no ROOT/out,
      so they live under canonical(tmp)/unisacc-session-* (rule 2) instead of ROOT/out. */
-  char aw[4400],cand[4400],sess[4400],par[4400],ch[4400],dl[80],epoch[4400];join(aw,tmp,"all-waves");join(cand,root,"unisacc.com");join(sess,sy_tmpdir(),"unisacc-session-s9wtshare");join(par,sess,"check-s9-wtshare-parent");join(ch,sess,"check-s9-wtshare-child");join(epoch,tmp,"wt-epoch-1");
-  if(mkdir(sess,0700)&&errno!=EEXIST)die("session-root");
-  {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}
+  char aw[4400],cand[4400],sess[4400],par[4400],ch[4400],dl[80],epoch[4400];join(aw,tmp,"all-waves");join(cand,root,"unisacc.com");
+  if(cx_fmt(sess,sizeof sess,"%s/unisacc-session-s9wtshare-XXXXXX",sy_tmpdir())||!mkdtemp(sess))die("session-root");
+  join(par,sess,"check-s9-wtshare-parent");join(ch,sess,"check-s9-wtshare-child");join(epoch,tmp,"wt-epoch-1");
   if(cx_fmt(dl,sizeof dl,"%.9f",(double)as_now()/1e9+50)||setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");unsetenv("UNISACC_IDENTITY_PARENT");
+  if(schedule_want("shared")){
   {char *v[]={aw,"init",root,par,cand,"-",0};np_result ir={0};if(np_run(v,root,0,25,&ir,why,sizeof why)||ir.rc)die("wtshare-parent-init");np_free(&ir);}
   if(setenv("UNISACC_IDENTITY_PARENT",par,1))die("parent-env");{char *v[]={aw,"init",root,ch,cand,"-",0};np_result ir={0};if(np_run(v,root,0,20,&ir,why,sizeof why)||ir.rc)die("wtshare-child-init");np_free(&ir);}unsetenv("UNISACC_IDENTITY_PARENT");
-  {char *v[]={aw,"wave",root,ch,"--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,20,&wr,why,sizeof why))die("wave-transport");ck(wr.rc==2&&contains(wr.out,wr.outn,"shared-wt-requires-s9-supervised")&&!contains(wr.out,wr.outn,"WT_GATE"),"shared-wt-refused-outside-s9-supervisor");np_free(&wr);}
+  {char *v[]={aw,"wave",root,ch,"--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,20,&wr,why,sizeof why))die("wave-transport");ck(wr.rc==2&&contains(wr.out,wr.outn,"shared-wt-requires-s9-supervised")&&!contains(wr.out,wr.outn,"WT_GATE"),"shared-wt-refused-outside-s9-supervisor");np_free(&wr);}}
   /* A batch registered for another native host (runner-platform is osx/arm64 in tests/batches.tsv) is named
      NOT_APPLICABLE and dropped from the wave: no REFUSE, so it cannot take the rest of a slice down with it. */
-  {char *v[]={aw,"wave",root,ch,"--heavy","runner-platform",0};np_result wr={0};if(np_run(v,root,0,20,&wr,why,sizeof why))die("wave-transport");
-   ck(wr.rc==0&&contains(wr.out,wr.outn,"BATCH\trunner-platform\tNOT_APPLICABLE\tplatform=osx/arm64\t")&&contains(wr.out,wr.outn,"WAVE_SELECTION\tplatform=host\tselected=0")&&!contains(wr.out,wr.outn,"REFUSE"),"other-native-host-batch-not-applicable-not-refused");np_free(&wr);}
-  {char *v[]={aw,"wave",root,ch,"--s9-supervised","--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,25,&wr,why,sizeof why))die("wave-transport");if(wr.outn)fwrite(wr.out,1,wr.outn,stdout);
+  if(schedule_want("platform")){if(!schedule_want("shared")){char *v[]={aw,"init",root,ch,cand,"-",0};np_result ir={0};if(np_run(v,root,0,25,&ir,why,sizeof why)||ir.rc)die("platform-session-init");np_free(&ir);}{char *v[]={aw,"wave",root,ch,"--heavy","runner-platform",0};np_result wr={0};if(np_run(v,root,0,20,&wr,why,sizeof why))die("wave-transport");
+   ck(wr.rc==0&&contains(wr.out,wr.outn,"BATCH\trunner-platform\tNOT_APPLICABLE\tplatform=osx/arm64\t")&&contains(wr.out,wr.outn,"WAVE_SELECTION\tplatform=host\tselected=0")&&!contains(wr.out,wr.outn,"REFUSE"),"other-native-host-batch-not-applicable-not-refused");np_free(&wr);}}
+  if(schedule_want("shared")){char *v[]={aw,"wave",root,ch,"--s9-supervised","--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,25,&wr,why,sizeof why))die("wave-transport");if(wr.outn)fwrite(wr.out,1,wr.outn,stdout);
    char marker[4400];join(marker,ch,"wt-shared");size_t mn=0;char *mk=cx_read(marker,&mn);
    ck(contains(wr.out,wr.outn,"WT_GATE\tbefore\tmode=SHARED\tscans=0\t")&&contains(wr.out,wr.outn,"executor-run-batch-required"),"child-wave-shared-mode-zero-worktree-scans");
    ck(mk&&mn==strlen(epoch)+1&&!memcmp(mk,epoch,strlen(epoch))&&mk[mn-1]=='\n',"child-wave-binds-epoch-marker-before-start");free(mk);np_free(&wr);}
@@ -174,7 +205,7 @@ int main(int argc,char **argv){
       linked ROOT still yields the target's digest.  A link to the real candidate is accepted
       here and the recorded identity must equal the target file's own sha256; a copy that is
       NOT the ROOT candidate is still refused, so the relaxation cannot accept a foreign file. */
-   {char lk[4400],foreign[4400],want[65],lsess[4400],sess_tsv[4400];
+   if(schedule_want("candidate")){char lk[4400],foreign[4400],want[65],lsess[4400],sess_tsv[4400];
     join(lk,tmp,"candidate-link");join(foreign,tmp,"foreign-candidate");join(lsess,sess,"check-s9-wtshare-link");
     {char *rmv[]={"rm","-f","--",lk,foreign,0};run(rmv,root);}
     {char *rmv[]={"rm","-rf","--",lsess,0};run(rmv,root);}
@@ -198,7 +229,7 @@ int main(int argc,char **argv){
         "foreign-candidate-still-refused");np_free(&ir);}
     {char *rmv[]={"rm","-rf","--",lsess,0};run(rmv,root);}
     {char *rmv[]={"rm","-f","--",lk,foreign,0};run(rmv,root);}}
-  {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}}
+  {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}if(rmdir(sess))die("session-root-clean");}
  else{
   char fixture[4400],p[4400],q[4400],target[4400];join(fixture,tmp,"root");if(mkdir(fixture,0700))die("fixture");join(p,fixture,"src");if(mkdir(p,0700))die("src");join(p,fixture,"agentwork");if(mkdir(p,0700))die("agentwork");
   char *git[]={"git","init","-q",fixture,0};if(run(git,tmp))die("git-init");join(p,fixture,"src/input.cx");put(p,"original\n");join(p,fixture,"agentwork/ledger.tsv");put(p,"ledger\n");join(p,fixture,"agentwork/items.tsv");put(p,"items\n");char *add[]={"git","-C",fixture,"add","src/input.cx","agentwork/ledger.tsv","agentwork/items.tsv",0};if(run(add,tmp))die("git-add");
@@ -239,7 +270,7 @@ int main(int argc,char **argv){
   free(a);a=b;an=bn;
   if(unlink(q))die("delete");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"delete-detected");diff_check(a,b,"WT_CHANGED\tpaths=1\n?? src/renamed.cx\n","real-delete-path-once");free(a);a=b;an=bn;
   join(target,tmp,"external-input");put(target,"target-one\n");join(p,fixture,"src/link.cx");if(symlink(target,p))die("symlink");free(a);a=snapshot(binary,fixture,&an);put(target,"target-two\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"external-link-target-change");free(a);free(b);
-  if(unlink(target))die("link-target-remove");a=snapshot(binary,fixture,&an);ck(strstr(a,"\tDANGLING\n")!=0,"dangling-link-recorded");
+  if(unlink(target))die("link-target-remove");a=snapshot(binary,fixture,&an);ck(snapshot_tag(a,an,"DANGLING"),"dangling-link-recorded");
   put(target,"target-restored\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"dangling-target-appears");free(b);
   if(unlink(target))die("link-target-remove");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"link-target-disappears-restores-dangling");free(a);free(b);
   /* S9 wave-level gate (wt-close): one snapshot before the wave, one fresh scan after it. */

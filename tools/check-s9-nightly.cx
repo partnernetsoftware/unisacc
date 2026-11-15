@@ -44,7 +44,13 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
 }
 
 /* 模式: core(顺序/失败停止/档位) | tiers(daily/release 档透传) | limits(max-steps/日期/截断/出口/UNKNOWN) | resume | resume(--resume 4 项);无参两者都跑。各自一个批次,合并在 affected 冷编下超 55s。 */
+static const char *phase_cases="all";
+static int phase_want(const char *name){return !strcmp(phase_cases,"all")||!strcmp(phase_cases,name);}
 int main(int argc, char **argv) {
+    char *defaults[]={argv[0],"phases",0};
+    if(argc==3&&!strcmp(argv[1],"--cases")){phase_cases=argv[2];argv=defaults;argc=2;}
+    else if(argc==4&&!strcmp(argv[2],"--cases")){if(strcmp(argv[1],"phases"))die("--cases requires phases");phase_cases=argv[3];argc=2;}
+    if(strcmp(phase_cases,"all")&&strcmp(phase_cases,"init")&&strcmp(phase_cases,"steps")&&strcmp(phase_cases,"aggregate")&&strcmp(phase_cases,"aggout")&&strcmp(phase_cases,"failures")&&strcmp(phase_cases,"candidate"))die("phases --cases all|init|steps|aggregate|aggout|failures|candidate");
     const char *am = argc == 2 ? argv[1] : "";
     int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases"), mat = !*am || !strcmp(am, "materials");
     int split = !*am || !strcmp(am,"split");
@@ -343,6 +349,7 @@ int main(int argc, char **argv) {
         runv(rmx, dir, 5, buf, sizeof buf, &rc);
         w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = runp; w[6] = "--tier"; w[7] = "commit";
         w[8] = "--date"; w[9] = "2026-11-14"; w[10] = "--phase"; w[11] = "init"; w[12] = "--fake"; w[13] = fake; w[14] = 0;
+        if(phase_want("init")){
         runv(w, dir, 20, buf, sizeof buf, &rc);
         s = cx_read(logp, &n);
         ck(rc == 0 && strstr(buf, "status=PREPARED"), "phase-init-prepared");
@@ -352,10 +359,12 @@ int main(int argc, char **argv) {
         w[11] = "steps";
         runv(w, dir, 20, buf, sizeof buf, &rc);
         ck(rc == 2, "phase-steps-needs-resume");
+        }
         if (cx_write(sess, "resume\n", 7)) die("session-write");
         /* steps:第 1 次 PENDING(3),第 2 次 STEPS_DONE(0);各只走一步;都不碰 aggregate */
         w[5] = "--resume"; w[4] = dir; w[6] = runp; w[7] = "--tier"; w[8] = "commit"; w[9] = "--date"; w[10] = "2026-11-14";
         w[11] = "--phase"; w[12] = "steps"; w[13] = "--fake"; w[14] = fake; w[15] = 0;
+        if(phase_want("steps")){
         runv(rmx, dir, 5, buf, sizeof buf, &rc);
         runv(w, dir, 20, buf, sizeof buf, &rc);
         ck(rc == 3 && strstr(buf, "status=PENDING"), "phase-steps-first-pending");
@@ -368,9 +377,11 @@ int main(int argc, char **argv) {
         s = cx_read(rep, &n);
         ck(s && strstr(s, "status\tSTEPS_DONE"), "phase-steps-report-own-file");
         free(s);
+        }
         /* aggregate: 4 片 + merge;预先放好 1 号片记录则跳过它 */
-        if (cx_write(part1, "x\n", 2)) die("part-write");
         w[12] = "aggregate";
+        if(phase_want("aggregate")){
+        if (cx_write(part1, "x\n", 2)) die("part-write");
         runv(rmx, dir, 5, buf, sizeof buf, &rc);
         runv(w, dir, 20, buf, sizeof buf, &rc);
         s = cx_read(logp, &n);
@@ -378,8 +389,9 @@ int main(int argc, char **argv) {
         ck(s && strstr(s, "aggregate --part 0 4") && strstr(s, "aggregate --part 2 4") && strstr(s, "aggregate --part 3 4") && strstr(s, "aggregate --merge 4"), "phase-aggregate-parts-then-merge");
         ck(s && !strstr(s, "--part 1 4") && !strstr(s, "step"), "phase-aggregate-reuses-existing-part");
         free(s);
+        }
         /* aggregate.out 落盘:merge 的完整 stdout(超 4000 字节缓冲)逐字节写入 RUN/aggregate.out,s9-verdict 读它判定 */
-        {
+        if(phase_want("aggout")){
             char aggf[4400], aggo[4400], tierf[4400], btf[4400], big[9000], *got, *vv[8];
             size_t gn, w2 = 0, k;
             cx_fmt(aggf, sizeof aggf, "%s/agg.fake", dir);
@@ -417,7 +429,7 @@ int main(int argc, char **argv) {
             unsetenv("S9_FAKE_AGG_FILE");
         }
         /* 收据校验 refused 的 reason 具名输出与失败时落盘:片失败、merge 失败两条路径 aggregate.out 都在且含 reason */
-        {
+        if(phase_want("failures")){
             char aggf[4400], aggo[4400], rm2[4400], *got;
             const char *line = "S9_RECEIPT\tREFUSE\tbatch=x\tslice=slice-0-0\treason=receipt-sha-mismatch\n";
             size_t gn;
@@ -471,7 +483,7 @@ int main(int argc, char **argv) {
             }
         }
     }
-    if (ph) {   /* 候选可执行位前置门: 0600 被拒并点名, 0711 通过 */
+    if (ph&&phase_want("candidate")) {   /* 候选可执行位前置门: 0600 被拒并点名, 0711 通过 */
         char cand[4400], *cv[16];
         int i;
         if (cx_fmt(cand, sizeof cand, "%s/%s", dir, "unisacc" ".com")) die("fmt");
