@@ -158,19 +158,56 @@ static void paths(const char *tag, sb *b) {
     const char *s = sb_cstr(b);
     for (const char *p = s; p && *p;) { const char *e = strchr(p, '\n'); if (!e) break; printf("%s\t%.*s\n", tag, (int)(e - p), p); p = e + 1; }
 }
+#define ACC_RULE "--accept CMD must be an executable shell command (run as sh -c CMD in --cwd or the repo root, 55 s; rc 0 = pass), not a prose description\n"
+static int task_help(const char *sub, int rc) {   /* full per-subcommand syntax; rc 0 when asked by --help, rc 2 when shown for bad input */
+    FILE *o = rc ? stderr : stdout;
+    if (!strcmp(sub, "open")) fprintf(o,
+        "usage: devtask task open --id ID --title T --accept CMD [--accept CMD]... --deadline-min N (--write P... | --write-ext ABSDIR...) [--root R] [--cwd DIR] [--dir D]\n"
+        "  required: --id ID (free name), --title T, --accept CMD (one or more), --deadline-min N (1..999999),\n"
+        "            and at least one of --write P... (repo-relative prefixes, or absolute under the repo root) / --write-ext ABSDIR (existing dir outside the repo)\n"
+        "  optional: --root R (default git top level), --cwd DIR (acceptance cwd: absolute or repo-relative, under .claude/worktrees/ or a --write-ext dir), --dir D (store)\n"
+        "  " ACC_RULE
+        "  example: devtask task open --id fix1 --title 'fix x' --write tools/x.cx --accept 'sh ./unisacc.com tools/check-x.cx' --deadline-min 30\n");
+    else if (!strcmp(sub, "amend")) fprintf(o,
+        "usage: devtask task amend ID (--write P,P... | --write-ext ABSDIR...) [--dir D]\n"
+        "  required: ID (first, positional), at least one --write or --write-ext; add only, same validation as open\n"
+        "  example: devtask task amend fix1 --write tools/y.cx\n");
+    else if (!strcmp(sub, "status")) fprintf(o,
+        "usage: devtask task status ID [--dir D]\n"
+        "  required: ID (first, positional). prints used/left seconds, CHANGED (inside write domain), OUTSIDE_WARN\n"
+        "  example: devtask task status fix1\n");
+    else if (!strcmp(sub, "done")) fprintf(o,
+        "usage: devtask task done ID [--bg] [--dir D] | devtask task done --wait ID\n"
+        "  required: ID (first, positional; not --id). runs every acceptance command; all pass and no outside change -> DONE rc 0, else TASK_NOT_DONE rc 1\n"
+        "  optional: --bg (run acceptance in background), --wait ID (wait for a --bg run)\n"
+        "  example: devtask task done fix1\n");
+    else if (!strcmp(sub, "list")) fprintf(o, "usage: devtask task list [--dir D]\n  every work order with state open|overdue|done\n");
+    else fprintf(o,
+        "usage: devtask task open|amend|status|done|list ...   (devtask task SUB --help: full syntax of SUB)\n"
+        "  task open --id ID --title T --accept CMD... --deadline-min N (--write P... | --write-ext ABSDIR...) [--root R] [--cwd DIR]\n"
+        "  task amend ID --write P,P... [--write-ext ABSDIR]... | task status ID | task done ID [--bg] | task list   (all: [--dir D])\n"
+        "  " ACC_RULE);
+    return rc;
+}
 static int task_main(int argc, char **argv, long now) {
     const char *sub = argc > 2 ? argv[2] : "", *id = 0, *title = 0, *dmin = 0, *rootopt = 0, *cwdopt = 0, *acc[DW_ACC + 1]; char extraw[1024] = "", dir[1024], root[1024], why[2048] = ""; int nacc = 0, rc, i = 3;
     int isamend = !strcmp(sub, "amend"), isopen = !strcmp(sub, "open"), islist = !strcmp(sub, "list"), direct = getenv("DEVTASK_ACCEPT_DIRECT") && *getenv("DEVTASK_ACCEPT_DIRECT");
     DwTask t; sb *in, *out, *fo = 0; int nin = 0, nout = 0, nfo = 0;
+    for (int h = 2; h < argc; h++) if (!strcmp(argv[h], "--help") || !strcmp(argv[h], "-h")) return task_help(h > 2 ? sub : "", 0);
     if (!isopen && !islist && !isamend && strcmp(sub, "status") && strcmp(sub, "done")) {
-        fprintf(stderr, "usage: devtask task open --id ID --title T --write P... [--write-ext ABSDIR]... --accept CMD [--accept CMD]... --deadline-min N [--root R] [--cwd DIR]\n"
-                        "       devtask task amend ID --write P,P... [--write-ext ABSDIR]...\n"
-                        "       devtask task status ID | task done ID | task list   (all: [--dir D])\n");
-        return 2;
+        if (sub[0]) fprintf(stderr, "devtask: unknown task subcommand '%s' (expected open|amend|status|done|list)\n", sub);
+        else fprintf(stderr, "devtask: task needs a subcommand: open|amend|status|done|list\n");
+        return task_help("", 2);
     }
     int bg = 0, wmode = !strcmp(sub, "done") && argc > 4 && !strcmp(argv[3], "--wait");
     if (wmode) { id = argv[4]; i = 5; }
-    else if (!isopen && !islist) { if (argc < 4 || !strncmp(argv[3], "--", 2)) return bad("task needs an ID first:", sub); id = argv[i++]; }
+    else if (!isopen && !islist) {
+        if (argc < 4 || !strncmp(argv[3], "--", 2)) {
+            fprintf(stderr, "devtask: task %s needs the work order ID as the first positional argument (got %s); see: devtask task %s --help\n", sub, argc < 4 ? "nothing" : argv[3], sub);
+            return 2;
+        }
+        id = argv[i++];
+    }
     for (; i < argc; i++) {
         const char *a = argv[i], **dst = 0;
         if (!strcmp(a, "--dir")) dst = &ov[O_DIR];
@@ -206,7 +243,13 @@ static int task_main(int argc, char **argv, long now) {
     if (isopen) {
         long min = 0;
         if (!dom[0] && extraw[0]) (void)cx_fmt(dom, sizeof dom, "-");
-        if (!id || !title || !dom[0] || !nacc || !dmin) return bad("task open needs --id --title --write --accept --deadline-min", 0);
+        if (!id || !title || !dom[0] || !nacc || !dmin) {
+            fprintf(stderr, "devtask: task open missing required:%s%s%s%s%s\n", id ? "" : " --id ID", title ? "" : " --title T",
+                    dom[0] ? "" : " --write P...|--write-ext ABSDIR", nacc ? "" : " --accept CMD", dmin ? "" : " --deadline-min N(1..999999)");
+            if (!nacc) fprintf(stderr, "devtask: " ACC_RULE);
+            fprintf(stderr, "devtask: see: devtask task open --help\n");
+            return 2;
+        }
         for (const char *q = dmin; *q; q++) if (*q < '0' || *q > '9') return bad("bad --deadline-min", dmin);
         if (strlen(dmin) > 6 || (min = atol(dmin)) < 1) return bad("bad --deadline-min", dmin);
         if (rootopt) { if (snprintf(root, sizeof root, "%s", rootopt) >= (int)sizeof root) return bad("--root too long", 0); } else if (toplevel(root, sizeof root)) return 2;

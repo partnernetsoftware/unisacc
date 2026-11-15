@@ -1,0 +1,76 @@
+/* tools/check-devtask-help.cx -- devtask task 与 devsvc task/f 的帮助与具名拒绝。
+ *
+ *   sh ./unisacc.com tools/check-devtask-help.cx        (在仓根跑)
+ *
+ * 经 tools/devsvc-core.cx(工作副本,等价 devsvc.cx --dev)与 tools/devtask.cx 直调两条入口,断言:
+ *   (a) devsvc task open 缺必填项 rc 2,逐个点名缺的参数并写明 --accept 须为可执行命令,不回打 devsvc 总用法;
+ *   (b) task open/amend/status/done/list 与 task 各自 --help rc 0,含 required/example 与 --accept 约束;
+ *   (c) task done --id X 具名拒绝(ID 须为首个位置参数);未知子命令具名拒绝 rc 2;
+ *   (d) devsvc f --help rc 0 含 read/write/edit 全语法;
+ *   (e) devsvc task open 全参数在私有 --dir 建单 rc 0(无 DEVSVC_OWNER 也可),task status 回读。
+ * 末行 CHECK_DEVTASK_HELP<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+static int nfail;
+static char out[1 << 15];
+static void ck(int c, const char *name) {
+    printf("%s\tdevtask-help.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+}
+static int run(char **v) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+#define ACC "--accept CMD must be an executable shell command"
+int main(void) {
+    char d[200], c[300]; int rc;
+    const char *subs[] = {"open", "amend", "status", "done", "list", 0};
+    const char *ents[] = {"tools/devsvc-core.cx", "tools/devtask.cx", 0};
+    (void)sy_unsetenv("DEVSVC_OWNER");
+    F(d, sizeof d, "/tmp/dthelp-%d", sy_pid());
+    for (int e = 0; ents[e]; e++) {
+        char nm[120]; const char *en = e ? "devtask" : "devsvc";
+        { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", "open", "--id", "z", "--title", "T", 0}; rc = run(v); }
+        F(nm, sizeof nm, "%s.open-missing-named", en);
+        ck(rc == 2 && has("missing required: --write P...|--write-ext ABSDIR --accept CMD --deadline-min N") && has(ACC) && !has("usage: devsvc flow"), nm);
+        { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", "open", "--id", "z", "--title", "T", "--write", "tools/x.cx", "--deadline-min", "5", 0}; rc = run(v); }
+        F(nm, sizeof nm, "%s.open-missing-accept-only", en);
+        ck(rc == 2 && has("missing required: --accept CMD\n") && has(ACC), nm);
+        for (int s = 0; subs[s]; s++) {
+            { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", (char *)subs[s], "--help", 0}; rc = run(v); }
+            F(c, sizeof c, "usage: devtask task %s", subs[s]);
+            F(nm, sizeof nm, "%s.help-%s", en, subs[s]);
+            ck(rc == 0 && has(c) && (s == 4 || (has("required:") && has("example:"))) && (s || has(ACC)), nm);
+        }
+        { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", "--help", 0}; rc = run(v); }
+        F(nm, sizeof nm, "%s.help-task", en); ck(rc == 0 && has("devtask task SUB --help") && has(ACC), nm);
+        { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", "done", "--id", "z", 0}; rc = run(v); }
+        F(nm, sizeof nm, "%s.done-id-positional", en); ck(rc == 2 && has("task done needs the work order ID as the first positional argument (got --id)"), nm);
+        { char *v[] = {"sh", "./unisacc.com", (char *)ents[e], "--", "task", "bogus", 0}; rc = run(v); }
+        F(nm, sizeof nm, "%s.unknown-sub", en); ck(rc == 2 && has("unknown task subcommand 'bogus'"), nm);
+    }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-core.cx", "--", "f", "--help", 0}; rc = run(v); }
+    ck(rc == 0 && has("devsvc f read PATH") && has("devsvc f write PATH") && has("devsvc f edit PATH --old-file A --new-file B") && has("example:"), "f-help");
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-core.cx", "--", "f", "read", "--help", 0}; rc = run(v); }
+    ck(rc == 0 && has("devsvc f read PATH"), "f-op-help");
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-core.cx", "--", "task", "open", "--id", "z1", "--title", "T", "--write", "tools/x.cx", "--accept", "true", "--deadline-min", "5", "--dir", d, 0}; rc = run(v); }
+    ck(rc == 0 && has("TASK\topen\tz1\tdeadline_s=300\taccept=1"), "devsvc-open-ok-no-owner");
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-core.cx", "--", "task", "status", "z1", "--dir", d, 0}; rc = run(v); }
+    ck(rc == 0 && has("TASK\tz1\tstate=open") && has("ACCEPT\t1\ttrue"), "devsvc-status");
+    F(c, sizeof c, "rm -rf %s", d);
+    { char *v[] = {"sh", "-c", c, 0}; (void)run(v); }
+    printf("CHECK_DEVTASK_HELP\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}
