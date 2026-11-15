@@ -1,0 +1,113 @@
+/* tools/check-constexpr-sizeof.cx -- sizeof without parentheses and offsetof inside E3 constant expressions.
+ *   sh ./unisacc.com tools/check-constexpr-sizeof.cx            (cwd = repo root)
+ * Background: the constant-expression net (exec/parse2/constexpr-result.tsv, section atom) accepted `sizeof`
+ * only when a `(` followed (CE.sizeof.p.b sent every other token to reject2, "not covered: constant
+ * expression"), so `static char g[sizeof one];`, `sizeof tab / sizeof tab[0]` as a file-scope bound, enum
+ * value or static block-scope bound were refused while the parenthesised spelling passed.  offsetof expands
+ * to __builtin_offsetof, an identifier that is no enum constant, so CE.id sent it to reject3 ("not covered:
+ * nonconstant bound") although the control net computes it at compile time (offsetofcontrol, OFF.open).
+ * Both now enter the sub-automata the control net already has, with the registers saved and the emitted text
+ * cut the same way the parenthesised sizeof expression does: CE.sizeof.bare.b -> SZ.id / SZ.expr with
+ * szparen 0, and CE.off -> OFF.open when the identifier is __builtin_offsetof.  Sizes come from the same
+ * type facts as before (data model included); no constant is written here.
+ * Cases:
+ *   table-*      the four table rows above are present once and the old reject row is gone;
+ *   paren-*      the parenthesised spellings run with the product in use (any version; regression guard);
+ *   neg-*        a bound that is not constant (`g[n]`, `g[sizeof n + n]`) is still refused, by name;
+ *   bare-*, offsetof-*   the new spellings compile and print the values a host C compiler prints (LP64).
+ *                A product older than 0.0.69 that still refuses them with a `not covered:` text is reported
+ *                UNVERIFIED (its embedded net predates the rows), never PASS; from 0.0.69 on that is a FAIL.
+ * Not covered here: sizeof(int[4]) (type-name with an array declarator, a later phase).
+ * Prints PASS/FAIL/UNVERIFIED per case and CHECK_CONSTEXPR_SIZEOF<TAB>failed=N<TAB>unverified=M; exit 1 when N > 0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed, unverified;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-constexpr-sizeof.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-constexpr-sizeof.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-constexpr-sizeof: REFUSE %s\n", s); sy_exit(2); }
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 40, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+static int has(const char *out, int cap, const char *want) { return tx_find(out, tx_len(out, cap), want, tx_len(want, 256)) >= 0; }
+
+#define S_STRUCT "struct s { int a; long b; };\n"
+#define S_OFF    "#include <stddef.h>\nstruct t { int a; int b; long c; };\n"
+#define SRC_P1 S_STRUCT "static struct s one;\nstatic char g1[sizeof(one)];\nint main(void) { printf(\"A %d\\n\", (int)sizeof g1); return 0; }"
+#define SRC_P2 "static int tab[] = {1,2,3};\nstatic char g3[sizeof(tab) / sizeof(tab[0])];\nint main(void) { printf(\"B %d\\n\", (int)sizeof g3); return 0; }"
+#define SRC_N1 "static int n = 3;\nstatic char g[n];\nint main(void) { return (int)sizeof g; }"
+#define SRC_N2 "static int n = 3;\nstatic char g[sizeof n + n];\nint main(void) { return (int)sizeof g; }"
+#define SRC_B1 S_STRUCT "static struct s one;\nstatic char g1[sizeof one];\nint main(void) { printf(\"C %d\\n\", (int)sizeof g1); return 0; }"
+#define SRC_B2 "static int tab[] = {1,2,3};\nstatic char g3[sizeof tab / sizeof tab[0]];\nint main(void) { printf(\"D %d\\n\", (int)sizeof g3); return 0; }"
+#define SRC_B3 "static int tab[] = {1,2,3};\nenum { NT = sizeof tab / sizeof tab[0] };\nstatic char g[NT];\nint main(void) { int r = 0; switch (3) { case NT: r = 1; break; default: r = 0; } printf(\"E %d %d\\n\", (int)sizeof g, r); return 0; }"
+#define SRC_B4 S_STRUCT "int main(void) { static struct s one; static char g1[sizeof one]; static int tab[] = {1,2,3}; static char g3[sizeof tab / sizeof tab[0]]; printf(\"F %d %d\\n\", (int)sizeof g1, (int)sizeof g3); return 0; }"
+#define SRC_B5 "static long w;\nstatic char g[sizeof w * 2 + 1];\nint main(void) { printf(\"G %d\\n\", (int)sizeof g); return 0; }"
+#define SRC_O1 S_OFF "_Static_assert(offsetof(struct t, b) == 4, \"off\");\nint main(void) { printf(\"H %d\\n\", (int)offsetof(struct t, b)); return 0; }"
+#define SRC_O2 S_OFF "static char g[offsetof(struct t, c)];\nstatic int v = offsetof(struct t, c);\nint main(void) { printf(\"I %d %d\\n\", (int)sizeof g, v); return 0; }"
+#define SRC_O3 S_OFF "enum { OC = offsetof(struct t, c) + 1 };\nstatic char g[OC];\nint main(void) { printf(\"J %d\\n\", (int)sizeof g); return 0; }"
+
+static void probe(const char *dir, const char *name, const char *src, char *out, int cap) {
+    char script[6000];
+    if (cx_fmt(script, sizeof script, "printf '%%s\\n' '%s' > %s/%s.cx && sh ./unisacc.com %s/%s.cx; echo RC=$?", src, dir, name, dir, name)) die("script");
+    sh(script, out, cap);
+}
+
+int main(void) {
+    char out[4096], dir[512], script[1200];
+    int minor = 0, i;
+    sh("d=$(mktemp -d \"${TMPDIR:-/tmp}/check-constexpr-sizeof-XXXXXX\") && printf '%s' \"$d\"", dir, sizeof dir);
+    if (!dir[0] || dir[0] != '/') die("no temporary directory");
+
+    sh("f=exec/parse2/constexpr-result.tsv; t=$(printf '\\t'); "
+       "grep -c \"^atom${t}CE\\.sizeof\\.p\\.b${t}\\*${t}DEAD${t}\" $f; "
+       "grep -c \"^atom${t}CE\\.sizeof\\.p\\.b${t}\\*${t}CE\\.sizeof\\.bare\\.b${t}\" $f; "
+       "grep -c \"^atom${t}CE\\.sizeof\\.bare\\.b${t}@token3${t}SZ\\.id${t}\" $f; "
+       "grep -c \"^atom${t}CE\\.sizeof\\.bare\\.b${t}\\*${t}SZ\\.expr${t}\" $f; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "0\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-bare-sizeof-enters-the-control-sizeof-rows");
+    sh("f=exec/parse2/constexpr-result.tsv; t=$(printf '\\t'); "
+       "grep -c \"^atom${t}.ce_fresh20${t}1${t}DEAD${t}\" $f; "
+       "grep -c \"^atom${t}.ce_fresh20${t}1${t}CE\\.off${t}\" $f; "
+       "grep -c \"^atom${t}CE\\.off\\.b${t}\\*${t}DEAD${t}.*reject3\" $f; "
+       "grep -c \"^atom${t}CE\\.off\\.open${t}\\*${t}OFF\\.open${t}.*CE\\.sizeof\\.expr\\.done\" $f; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "0\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-offsetof-enters-the-control-offsetof-rows-else-nonconstant");
+
+    sh("sh ./unisacc.com --version", out, sizeof out);
+    {   long at = tx_find(out, tx_len(out, sizeof out), "unisacc 0.0.", 12);
+        if (at < 0) die("product version line");
+        for (at += 12; out[at] >= '0' && out[at] <= '9'; at++) minor = minor * 10 + (out[at] - '0'); }
+
+    probe(dir, "p1", SRC_P1, out, sizeof out);
+    ck(has(out, sizeof out, "A 16\nRC=0"), "paren-sizeof-object-file-scope-bound");
+    probe(dir, "p2", SRC_P2, out, sizeof out);
+    ck(has(out, sizeof out, "B 3\nRC=0"), "paren-sizeof-ratio-file-scope-bound");
+    probe(dir, "n1", SRC_N1, out, sizeof out);
+    ck(has(out, sizeof out, "not covered: nonconstant bound") && !has(out, sizeof out, "RC=0"), "neg-object-value-bound-refused-by-name");
+    probe(dir, "n2", SRC_N2, out, sizeof out);
+    ck(has(out, sizeof out, "not covered: ") && !has(out, sizeof out, "RC=0"), "neg-sizeof-plus-object-value-bound-refused");
+    {   static const char *nm[8] = {"bare-sizeof-object-file-scope-bound", "bare-sizeof-ratio-file-scope-bound", "bare-sizeof-ratio-enum-value-and-case-label",
+                                    "bare-sizeof-static-block-scope-bounds", "bare-sizeof-inside-arithmetic", "offsetof-static-assert",
+                                    "offsetof-file-scope-bound-and-initializer", "offsetof-enum-value"};
+        static const char *want[8] = {"C 16\nRC=0", "D 3\nRC=0", "E 3 1\nRC=0", "F 16 3\nRC=0", "G 17\nRC=0", "H 4\nRC=0", "I 8 8\nRC=0", "J 9\nRC=0"};
+        static const char *src[8] = {SRC_B1, SRC_B2, SRC_B3, SRC_B4, SRC_B5, SRC_O1, SRC_O2, SRC_O3};
+        static const char *leaf[8] = {"b1", "b2", "b3", "b4", "b5", "o1", "o2", "o3"};
+        for (i = 0; i < 8; i++) {
+            probe(dir, leaf[i], src[i], out, sizeof out);
+            if (has(out, sizeof out, want[i])) ck(1, nm[i]);
+            else if (minor < 69 && has(out, sizeof out, "not covered: ")) { unverified++; sy_printf("UNVERIFIED\tcheck-constexpr-sizeof.%s\tinstalled=0.0.%d predates the constexpr rows\n", nm[i], minor); }
+            else ck(0, nm[i]);
+        }
+    }
+    if (!cx_fmt(script, sizeof script, "rm -rf %s", dir)) sh(script, out, sizeof out);
+    sy_printf("CHECK_CONSTEXPR_SIZEOF\tfailed=%d\tunverified=%d\n", failed, unverified);
+    return failed ? 1 : 0;
+}
