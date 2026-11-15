@@ -93,7 +93,9 @@ static int run_step(char **v, const char *cwd, int sec, np_result *r) {
    MAP is that NAME<TAB>/ABS/PATH table for `s9-shards init`; a material nothing
    can produce is reported on stderr and left out, so only the batches that
    declare it become NOT_AVAIL while the rest of their slice still runs. */
-static char mapfile[16384];
+static char mapfile[16384];      /* the map's CONTENT, as the dump printed it */
+static char mappath[4400];       /* the file that content was written to: init takes a path, not content */
+static char s9run[4400];         /* the RUN directory, set once in main: the map file lives beside it */
 static char why4[300];
 static int materials_map(char *map, long cap, char *why, int whycap) {
     char product[4400], tool[4400], *v[8];
@@ -120,6 +122,13 @@ static int materials_map(char *map, long cap, char *why, int whycap) {
     if (s9_map_from_dump(r.out ? r.out : "", (long)r.outn, map, cap, why, whycap)) { np_free(&r); return 1; }
     if (!s9_map_rows()) { cx_fmt(why, whycap, "materials-map-empty refused=%ld", s9_map_refused()); np_free(&r); return 1; }
     np_free(&r);
+    /* `s9-shards init` takes the map as a FILE PATH (all-waves reads argv[5]), not as its content.  The dump used
+       to arrive as a zero-row map and '-', which is why this never showed: with a non-empty map the content went
+       where a path belongs and every init was refused.  The file must live OUTSIDE RUN -- init refuses a session
+       directory that already exists -- so it sits beside it as RUN.materials.tsv and its path is what init gets;
+       a finished run keeps the map it was sealed against. */
+    if (cx_fmt(mappath, sizeof mappath, "%s.materials.tsv", s9run)) { cx_fmt(why, whycap, "map-path"); return 1; }
+    if (cx_write(mappath, map, (size_t)tx_len(map, (long)cap))) { cx_fmt(why, whycap, "map-write %s", mappath); return 1; }
     return 0;
 }
 static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到该路径(不受 out 缓冲截断) */
@@ -285,6 +294,7 @@ int main(int argc, char **argv) {
         resume = 1;
         run = argv[3];
     }
+    if (cx_fmt(s9run, sizeof s9run, "%s", run)) die("run-path", run);
     fake = 0;
     for (i = resume ? 4 : 3; i < argc; i++) {
         if (!strcmp(argv[i], "--tier") && i + 1 < argc) tier = argv[++i];
@@ -354,14 +364,14 @@ int main(int argc, char **argv) {
     pass_n++;
     /* s9-shards init: commit 与 release 透传 --tier; daily 不带 --tier 即 FULL。 */
     if (!strcmp(tier, "commit") || !strcmp(tier, "release")) { xa4 = "--tier"; xa5 = (char *)tier; }
-    mapfile[0] = 0; why4[0] = 0;
+    mapfile[0] = 0; mappath[0] = 0; why4[0] = 0;
     /* --fake 只测编排:临时根里没有真产品,不跑材料准备,按空 MAP 继续。 */
     if (!fake && materials_map(mapfile, (long)sizeof mapfile, why4, (int)sizeof why4)) {
         fail_n++; write_report(report, "FAIL");
         printf("S9_NIGHTLY\tstatus=FAIL\tstep=init-materials\treason=%s\treport=%s\n", why4, report);
         return 1;
     }
-    rc = invoke("init", root, run, mapfile[0] ? mapfile : "-", L_I("s9.cmd"), tmp, sizeof tmp);
+    rc = invoke("init", root, run, mappath[0] ? mappath : "-", L_I("s9.cmd"), tmp, sizeof tmp);
     xa4 = xa5 = 0;
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
@@ -393,6 +403,48 @@ int main(int argc, char **argv) {
             note(preps[pi]);
             pass_n++;
             par_free(&pj[pi]);
+        }
+    }
+    /* 映射里的每个材料也要在会话里登记并装配:s9-shards 的 prepare material NAME 就是这一相。它必须在
+       checker 之后、六个构建 prepare 之前(它要 checker 已就位),所以单独一相、一起起、按序收。材料数不
+       等于批数(一个材料被多条批声明),所以按名字逐个起,不再按 6 个写死。 */
+    if (mappath[0]) {
+        char *names[64]; int nn = 0, k2;
+        long at = 0, mlen = (long)tx_len(mapfile, (long)sizeof mapfile);
+        while (at < mlen && nn < 64) {
+            long e = at;
+            while (e < mlen && mapfile[e] != '\n') e++;
+            mapfile[e] = 0;
+            {   char *tab = strchr(mapfile + at, '\t');
+                if (tab) { *tab = 0; names[nn++] = mapfile + at; } }
+            at = e + 1;
+        }
+        {   ParJob *pj = calloc((size_t)nn, sizeof *pj);
+            if (!pj) die("allocation", 0);
+            for (k2 = 0; k2 < nn; k2++) {
+                if (par_spawn(&pj[k2], "prepare", root, run, "material", names[k2], 0, L_I("s9.cmd"))) {
+                    int q;
+                    for (q = 0; q < k2; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(names[q]); }
+                    free(pj); fail_n++; write_report(report, "FAIL");
+                    printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-material-%s\treason=cannot-start\treport=%s\n", names[k2], report);
+                    return 1;
+                }
+            }
+            for (k2 = 0; k2 < nn; k2++) {
+                int prc = -1, dr = par_drain(&pj[k2], &prc), q;
+                if (dr || prc != 0) {
+                    for (q = k2 + 1; q < nn; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(names[q]); }
+                    par_free(&pj[k2]);
+                    fail_n++; write_report(report, "FAIL");
+                    printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-material-%s\trc=%d\treport=%s\n", names[k2], prc, report);
+                    free(pj);
+                    return 1;
+                }
+                note("prepare-material");
+                pass_n++;
+                par_free(&pj[k2]);
+            }
+            free(pj);
         }
     }
     if (phase == 1) {
