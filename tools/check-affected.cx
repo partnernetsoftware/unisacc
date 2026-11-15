@@ -27,6 +27,7 @@
 #pragma unisa use sysx.poll
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
+#pragma unisa use mem.bytes
 
 /* an unlinked spool file the drained output of a bounded child goes to */
 static int spool_open(void) {
@@ -203,13 +204,20 @@ static long tails(const char *out, const char *pre, long pl, const char *suf, lo
     }
     return c;
 }
-/* lines of OUT that contain both A and B on the same line */
-static long same_line(const char *out, const char *a, long al, const char *b, long bl) {
+/* Count deferred records that carry a platform field, using the output's TSV contract. */
+static long deferred_platform_rows(const char *out) {
     long at = 0, n = tx_len(out, OUTCAP), c = 0;
     while (at < n) {
-        long e = at;
+        long e = at, f;
         while (e < n && out[e] != '\n') e++;
-        if (tx_find(out + at, e - at, a, al) >= 0 && tx_find(out + at, e - at, b, bl) >= 0) c++;
+        if (tx_prefix(out + at, e - at, "DEFERRED_BY_IFACE\t", 18)) {
+            f = at + 18;
+            while (f < e) {
+                long end = f; while (end < e && out[end] != '\t') end++;
+                if (tx_prefix(out + f, end - f, "platform=", 9)) { c++; break; }
+                f = end + 1;
+            }
+        }
         at = e + 1;
     }
     return c;
@@ -225,6 +233,52 @@ static int others(const char *out) {
     return c;
 }
 
+
+/* Index the independent full-dump oracle once. Each family keeps row offsets in original order;
+   queries copy those exact bytes, while the actual CLI --family output is still tested for every key. */
+typedef struct { char name[128]; int head, tail; } MaterialFamily;
+typedef struct { long at, len; int next; } MaterialRow;
+static MaterialFamily mat_family[512];
+static MaterialRow mat_row[8192];
+static int mat_slots[1024], mat_count, mat_rows;
+static int material_index(const char *full, long n) {
+    long at = 0; int k;
+    mat_count = mat_rows = 0;
+    for (k = 0; k < 1024; k++) mat_slots[k] = -1;
+    while (at < n) {
+        long e = at, f = at, g; int tabs = 0, slot, family; unsigned hash = 2166136261u;
+        while (e < n && full[e] != '\n') e++;
+        while (f < e && tabs < 2) if (full[f++] == '\t') tabs++;
+        g = f; while (g < e && full[g] != '\t') { hash = (hash ^ (unsigned char)full[g]) * 16777619u; g++; }
+        if (tabs != 2 || g - f < 1 || g - f >= 128 || e == n || mat_rows == 8192) return -1;
+        slot = (int)(hash & 1023u);
+        while ((family = mat_slots[slot]) >= 0) {
+            if (tx_len(mat_family[family].name, 128) == g - f && tx_prefix(full + f, g - f, mat_family[family].name, g - f)) break;
+            slot = (slot + 1) & 1023;
+        }
+        if (family < 0) {
+            if (mat_count == 512 || tx_copy(mat_family[mat_count].name, 128, full + f, g - f)) return -1;
+            family = mat_count++; mat_slots[slot] = family;
+            mat_family[family].head = mat_family[family].tail = -1;
+        }
+        mat_row[mat_rows].at = at; mat_row[mat_rows].len = e + 1 - at; mat_row[mat_rows].next = -1;
+        if (mat_family[family].tail < 0) mat_family[family].head = mat_rows;
+        else mat_row[mat_family[family].tail].next = mat_rows;
+        mat_family[family].tail = mat_rows++;
+        at = e + 1;
+    }
+    return mat_count;
+}
+static long material_projection(int family, const char *full, char *out, long cap) {
+    long n = 0; int r;
+    for (r = mat_family[family].head; r >= 0; r = mat_row[r].next) {
+        long len = mat_row[r].len;
+        if (len >= cap - n) return -1;
+        if (mm_copy(out + n, cap - n, full + mat_row[r].at, len)) return -1;
+        n += len;
+    }
+    out[n] = 0; return n;
+}
 
 int main(int argc, char **argv) {
     static char o[OUTCAP], p[OUTCAP], q[OUTCAP], q2[OUTCAP];
@@ -357,7 +411,7 @@ int main(int argc, char **argv) {
         {   /* No builds: byte-for-byte repeated default dump, then partition every full row by exact
                material name. Each unique family must equal its ordered full-dump projection; together
                those disjoint projections contain every full row exactly once. */
-            static char names[512][128]; int nn = 0, good = 1, j; long at = 0, total = 0, fulln = tx_len(o, OUTCAP);
+            int nn = 0, good = 1, j; long total = 0, fulln = tx_len(o, OUTCAP);
             rc = tool(a, p, OUTCAP);
             ck(rc == 0 && tx_eqz(o, p), "materials-default-byte-stable");
             {   /* Explicitly enumerate every batch represented in the legacy unfiltered row stream.
@@ -377,35 +431,23 @@ int main(int argc, char **argv) {
                   rc = tool(allids, p, OUTCAP);
                   ck(rc == 0 && tx_eqz(o, p), "materials-default-equals-explicit-all-ids-bytes"); }
             }
-            while (at < fulln) {
-                long e = at, f = at, g, h; int tabs = 0;
-                while (e < fulln && o[e] != '\n') e++;
-                while (f < e && tabs < 2) if (o[f++] == '\t') tabs++;
-                g = f; while (g < e && o[g] != '\t') g++;
-                if (tabs != 2 || g - f < 1 || g - f >= 128) { good = 0; break; }
-                for (j = 0; j < nn; j++) if (tx_len(names[j], 128) == g - f && tx_prefix(o + f, g - f, names[j], g - f)) break;
-                if (j == nn) {
-                    if (nn == 512 || tx_copy(names[nn], 128, o + f, g - f)) { good = 0; break; }
-                    nn++;
+            nn = material_index(o, fulln);
+            if (nn < 0) good = 0;
+            {   char *fa[] = {"--materials-dump", "--family-index", 0}; long pos = 0, actual_n;
+                rc = tool(fa, p, OUTCAP); actual_n = tx_len(p, OUTCAP);
+                if (rc) good = 0;
+                for (j = 0; j < nn && good; j++) {
+                    char tag[160]; long tn, n = material_projection(j, o, q, OUTCAP);
+                    if (n < 0 || cx_fmt(tag, sizeof tag, "INDEX_BEGIN\t%s\n", mat_family[j].name)) { good = 0; break; }
+                    tn = tx_len(tag, sizeof tag);
+                    if (tn > actual_n - pos || memcmp(p + pos, tag, (size_t)tn)) { good = 0; break; } pos += tn;
+                    if (n > actual_n - pos || memcmp(p + pos, q, (size_t)n)) { good = 0; break; } pos += n;
+                    if (cx_fmt(tag, sizeof tag, "INDEX_END\t%s\n", mat_family[j].name)) { good = 0; break; }
+                    tn = tx_len(tag, sizeof tag);
+                    if (tn > actual_n - pos || memcmp(p + pos, tag, (size_t)tn)) { good = 0; break; } pos += tn;
+                    total += n;
                 }
-                at = e + 1;
-            }
-            for (j = 0; j < nn && good; j++) {
-                char *fa[] = {"--materials-dump", "--family", names[j], 0}; long n = 0;
-                at = 0;
-                while (at < fulln) {
-                    long e = at, f = at, g; int tabs = 0;
-                    while (e < fulln && o[e] != '\n') e++;
-                    while (f < e && tabs < 2) if (o[f++] == '\t') tabs++;
-                    g = f; while (g < e && o[g] != '\t') g++;
-                    if (g - f == tx_len(names[j], 128) && tx_prefix(o + f, g - f, names[j], g - f)) {
-                        long h; for (h = at; h <= e; h++) q[n++] = o[h];
-                    }
-                    at = e + 1;
-                }
-                q[n] = 0; rc = tool(fa, p, OUTCAP);
-                if (rc || !tx_eqz(p, q)) good = 0;
-                total += n;
+                if (pos != actual_n) good = 0;
             }
             ck(good && nn > 1 && total == fulln, "materials-family-shards-union-equals-full-bytes");
             { char *ids[] = {"--materials-dump", "--ids", "release-exec", 0};
@@ -573,7 +615,7 @@ int main(int argc, char **argv) {
                本次的 not_applicable 与基线相等——推迟没有把别平台的批算进来,正是 (1) 修的那件事。 */
             ck(nsel + ndef + num(p, "\tnot_applicable=") == full + num(o, "\tnot_applicable="), "iface-same-selected-plus-deferred-is-full");
             ck(num(p, "\tnot_applicable=") == num(o, "\tnot_applicable="), "iface-same-not-applicable-unchanged-by-deferral");
-            ck(same_line(p, "DEFERRED_BY_IFACE\t", 18, "\tplatform=", 10) == 0, "iface-same-deferral-names-no-platform-row");
+            ck(deferred_platform_rows(p) == 0, "iface-same-deferral-names-no-platform-row");
             ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == ndef && lines(p, "AFFECTED\t", 9) == nsel, "iface-same-every-deferral-listed");
             ck(num(p, "\tfull=") == nsel + ndef && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
             ck(tails(p, "AFFECTED\t", 9, "\tvia=use", 8) > 0, "iface-same-keeps-direct-users");

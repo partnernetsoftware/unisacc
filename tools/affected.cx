@@ -1307,6 +1307,33 @@ static int sym_load(const char *syms) {
 
 static int closure_dump;
 static int materials_dump;  /* --materials-dump: report each declared material's resolved source and stop */
+/* --family-index emits every single-family query in one process. The same indexed lookup serves
+   --family NAME; default and repeated-family union dumps retain registry row order byte for byte. */
+static int family_index;
+typedef struct { char *name; Buf rows; } DumpFamily;
+static DumpFamily dump_family[MAXBATCH];
+static int dump_slot[MAXBATCH * 2], dump_n;
+static Buf dump_full;
+static int dump_lookup(const char *name, int create) {
+    unsigned h = 2166136261u; const unsigned char *s = (const unsigned char *)name; int slot, k;
+    while (*s) h = (h ^ *s++) * 16777619u;
+    slot = (int)(h % (MAXBATCH * 2));
+    while ((k = dump_slot[slot]) != 0) {
+        if (tx_eqz(dump_family[k - 1].name, name)) return k - 1;
+        slot = (slot + 1) % (MAXBATCH * 2);
+    }
+    if (!create) return -1;
+    if (dump_n == MAXBATCH) die("material-family-index-bound");
+    k = dump_n++; dump_family[k].name = zkeep(name); dump_slot[slot] = k + 1; return k;
+}
+static void dump_add(const char *name, const char *line) {
+    int k = dump_lookup(name, 1);
+    puts_(&dump_family[k].rows, line); puts_(&dump_full, line);
+}
+static void dump_emit_family(const char *name) {
+    int k = dump_lookup(name, 0);
+    if (k >= 0) fwrite(dump_family[k].rows.p, 1, (size_t)dump_family[k].rows.n, stdout);
+}
 static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
 static void usage(void) {
     fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] [--iface-narrow] [--full] | --users FILE | --closure-dump\n");
@@ -1353,6 +1380,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--family-index")) { family_index = 1; a++; }
         else if (tx_eqz(argv[a], "--family") && a + 1 < argc) {
             if (nmaterial_family == MAXBATCH || !argv[a + 1][0] || tx_prefix(argv[a + 1], tx_len(argv[a + 1], 4096), "--", 2)) usage();
             material_family[nmaterial_family++] = argv[a + 1]; a += 2;
@@ -1392,7 +1420,7 @@ int main(int argc, char **argv) {
                                fields plus the reason on a refusal -- and with --prepare-materials it is the
                                built artifact's absolute cache path instead of a repo-relative source, so a
                                caller can hand it straight to run-batch without knowing the cache layout. */
-        if ((src && src != 100) || mode_run || layer || closure_dump) usage();
+        if ((src && src != 100) || mode_run || layer || closure_dump || (family_index && (nmaterial_family || prep_on))) usage();
         load_registry();
         for (k = 0; k < nfiles; k++) {
             for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
@@ -1425,23 +1453,35 @@ int main(int argc, char **argv) {
             b = sel[k]; at = batch[b].materials;
             if (tx_eqz(at, "-")) continue;
             while ((rc2 = tp_material_next(&at, &d)) > 0) {
-                char src[600], why[200];
-                if (!material_wanted(d.name)) continue;
+                char src[600], why[200], line[5200]; int fmt_rc;
+                /* A single source query and the bulk query share the same complete family index.
+                   Prepared dumps still plan only requested names; multi-family unions keep row order. */
+                if (!material_wanted(d.name) && (prep_on || nmaterial_family != 1)) continue;
                 why[0] = 0;
                 if (prep_on) {
                     int k = prep_find(d.name);
                     if (k < 0) { (void)prep_plan(d.name, d.kind, why, (int)sizeof why); k = prep_find(d.name); }
-                    if (k < 0) printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
-                    else if (prep[k].state != PS_READY) printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, prep[k].why);
-                    else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, prep[k].path);
+                    if (k < 0) fmt_rc = cx_fmt(line, sizeof line, "MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
+                    else if (prep[k].state != PS_READY) fmt_rc = cx_fmt(line, sizeof line, "MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, prep[k].why);
+                    else fmt_rc = cx_fmt(line, sizeof line, "MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, prep[k].path);
                 } else if (prep_source(d.name, d.kind, src, (long)sizeof src, why, (int)sizeof why))
-                    printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
-                else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, src);
+                    fmt_rc = cx_fmt(line, sizeof line, "MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
+                else fmt_rc = cx_fmt(line, sizeof line, "MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, src);
+                if (fmt_rc) die("material-row-bound");
+                dump_add(d.name, line);
             }
         }
+        if (family_index) {
+            for (k = 0; k < dump_n; k++) {
+                printf("INDEX_BEGIN\t%s\n", dump_family[k].name);
+                dump_emit_family(dump_family[k].name);
+                printf("INDEX_END\t%s\n", dump_family[k].name);
+            }
+        } else if (nmaterial_family == 1) dump_emit_family(material_family[0]);
+        else if (dump_full.n) fwrite(dump_full.p, 1, (size_t)dump_full.n, stdout);
         return 0;
     }
-    if (nmaterial_family) usage();
+    if (nmaterial_family || family_index) usage();
     if (closure_dump) {   /* the facts tools/batch-packages-gen.cx builds build/batch-packages.tsv from */
         if (src || mode_run) usage();
         load_registry();
