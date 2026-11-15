@@ -420,3 +420,42 @@ int dw_finish(const char *dir, DwTask *t, long now, char *why, int wl) {
     if (!rc) rc = dt_event(dir, t->id, "task.done", "-", now, why, wl);
     dt_unlock(lk); return rc;
 }
+
+/* ---- acceptance memo (same work order, same input identity) ----
+ * Input identity = sha256 over HEAD id and the (path, sha) of every dirty path inside the write domain.
+ * DIR/work/ID.pass rows: idx TAB identity TAB command. A row is only honoured when identity and command text
+ * both equal the current ones; it records a pass of that very run, never a conclusion for another identity. */
+int dw_ident(const DwTask *t, char *out, int cap, char *why, int wl) {
+    char *v[] = {"git", "-C", (char *)t->root, "rev-parse", "HEAD", 0}; np_result r = {0}; char w2[256]; DwSnap *s = 0; int n = 0; sb *b = sb_new();
+    if (cap < 65 || !b) { sb_free(b); snprintf(why, wl, "ident setup failed"); return 2; }
+    if (np_run(v, 0, 0, 15, &r, w2, sizeof w2) || r.rc) { np_free(&r); sb_free(b); snprintf(why, wl, "git rev-parse HEAD failed under %s", t->root); return 2; }
+    (void)sb_puts(b, "head "); for (size_t i = 0; i < r.outn && r.out[i] != '\n'; i++) { char c[2] = {r.out[i], 0}; (void)sb_puts(b, c); } (void)sb_puts(b, "\n"); np_free(&r);
+    if (dw_dirty(t->root, &s, &n, why, wl)) { sb_free(b); return 2; }
+    for (int i = 0; i < n; i++) if (dw_in(t->write, s[i].path)) { (void)sb_puts(b, s[i].sha); (void)sb_puts(b, " "); (void)sb_puts(b, s[i].path); (void)sb_puts(b, "\n"); }
+    free(s);
+    if (!sb_cstr(b) || sy_sha256_hex(sb_cstr(b), sb_len(b), out)) { sb_free(b); snprintf(why, wl, "ident hash failed"); return 2; }
+    sb_free(b); return 0;
+}
+/* ok[k] = 1 when acceptance k passed earlier at this identity; missing file = none */
+void dw_pass_load(const char *dir, const DwTask *t, const char *ident, int *ok) {
+    char p[2048]; unsigned char *b = 0; int64_t n = 0;
+    for (int k = 0; k < DW_ACC; k++) ok[k] = 0;
+    if (snprintf(p, sizeof p, "%s/work/%s.pass", dir, t->id) >= (int)sizeof p || sy_read_file(p, &b, &n, 1L << 20)) { free(b); return; }
+    for (int64_t s = 0, e; s < n; s = e + 1) {
+        char *l, *c1, *c2; int k;
+        for (e = s; e < n && b[e] != '\n'; e++) {}
+        if (e >= n) break;
+        b[e] = 0; l = (char *)b + s; c1 = strchr(l, '\t'); c2 = c1 ? strchr(c1 + 1, '\t') : 0;
+        if (!c2) continue;
+        *c1 = 0; *c2 = 0; k = atoi(l);
+        if (k >= 0 && k < t->nacc && !strcmp(c1 + 1, ident) && !strcmp(c2 + 1, t->acc[k])) ok[k] = 1;
+    }
+    free(b);
+}
+int dw_pass_save(const char *dir, const DwTask *t, const char *ident, const int *ok) {
+    char p[2048], num[16]; sb *o = sb_new(); int bad = !o, rc;
+    if (snprintf(p, sizeof p, "%s/work/%s.pass", dir, t->id) >= (int)sizeof p) bad = 1;
+    for (int k = 0; k < t->nacc && !bad; k++) if (ok[k]) bad = cx_fmt(num, sizeof num, "%d", k) || sb_puts(o, num) || sb_puts(o, "\t") || sb_puts(o, ident) || sb_puts(o, "\t") || sb_puts(o, t->acc[k]) || sb_puts(o, "\n");
+    rc = bad || !sb_cstr(o) ? 2 : sy_write_atomic(p, sb_cstr(o), sb_len(o), 0600);
+    sb_free(o); return rc ? 2 : 0;
+}

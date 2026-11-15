@@ -88,6 +88,64 @@ static int accept_run(const DwTask *t, int k, int direct) {
     if (!ok) { if (rc) printf("--- runner ---\n%s\n", why); tail("stdout", r.out, (long)r.outn); tail("stderr", r.err, (long)r.errn); }
     np_free(&r); return ok;
 }
+/* escape for a flow node value: everything but [A-Za-z0-9_./-] as %XX */
+static void esc(sb *o, const char *s) { for (; *s; s++) { unsigned char c = (unsigned char)*s; char h[8]; if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || c == '/' || c == '-') { h[0] = (char)c; h[1] = 0; } else (void)cx_fmt(h, sizeof h, "%%%02X", c); (void)sb_puts(o, h); } }
+/* NODE line of flow output for id: state text and ms; returns 1 when found */
+static int node_of(const char *out, long n, const char *id, char *st, int sc, long *rc, long *ms) {
+    char key[40]; (void)cx_fmt(key, sizeof key, "NODE\t%s\t", id);
+    for (long i = 0; i < n;) {
+        long e = i; while (e < n && out[e] != '\n') e++;
+        if (e - i > (long)strlen(key) && !strncmp(out + i, key, strlen(key))) {
+            const char *p = out + i + strlen(key), *q; long k = 0;
+            while (p + k < out + e && p[k] != '\t' && k < sc - 1) { st[k] = p[k]; k++; } st[k] = 0;
+            q = strstr(p, "rc="); *rc = q && q < out + e ? atol(q + 3) : -1;
+            q = strstr(p, "ms="); *ms = q && q < out + e ? atol(q + 3) : 0;
+            return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+static void runfile_tail(const char *run, const char *id, const char *ext, const char *tag) {
+    char p[2048]; unsigned char *b = 0; int64_t n = 0;
+    if (snprintf(p, sizeof p, "%s/out/%s.%s", run, id, ext) < (int)sizeof p && !sy_read_file(p, &b, &n, 1L << 24)) tail(tag, (const char *)b, (long)n);
+    free(b);
+}
+/* run the acceptance commands with todo[k] set as ONE devsvc flow (one exec node each, 55 s bound each, all concurrent);
+ * pass[k] is set for the ones that passed; returns the number that failed, -1 on a runner fault */
+static int accept_flow(const char *dir, const DwTask *t, const int *todo, int *pass, int direct) {
+    char fp[2048], why[512] = ""; sb *o = sb_new(); int nrun = 0, failed = 0; np_result r = {0}; char jobs[16]; char run[1024] = "";
+    (void)direct;
+    if (!o || snprintf(fp, sizeof fp, "%s/work/%s.nodes.tsv", dir, t->id) >= (int)sizeof fp) { sb_free(o); return -1; }
+    for (int k = 0; k < t->nacc; k++) {
+        char id[16], cmd[1200];
+        if (!todo[k]) continue;
+        (void)cx_fmt(id, sizeof id, "a%d", k + 1); (void)cx_fmt(cmd, sizeof cmd, "cd '%s' && { %s\n}", t->root, t->acc[k]);
+        (void)sb_puts(o, id); (void)sb_puts(o, "\texec\t-\ta0=sh;a1=-c;a2="); esc(o, cmd); (void)sb_puts(o, ";timeout_ms=55000\n"); nrun++;
+    }
+    if (!nrun) { sb_free(o); return 0; }
+    if (sy_write_atomic(fp, sb_cstr(o), sb_len(o), 0600)) { sb_free(o); return -1; }
+    sb_free(o); (void)cx_fmt(jobs, sizeof jobs, "%d", nrun);
+    {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "flow", "run", fp, "--jobs", jobs, 0};
+        int rc = np_run(v, 0, 0, 58, &r, why, sizeof why);
+        if (rc && !r.out) { printf("--- runner ---\n%s\n", why); np_free(&r); return -1; }
+    }
+    for (long i = 0; i < (long)r.outn;) {
+        long e = i; const char *q; while (e < (long)r.outn && r.out[e] != '\n') e++;
+        if (e - i > 12 && !strncmp(r.out + i, "DEVSVC_FLOW\t", 12) && (q = strstr(r.out + i, "run=")) && q < r.out + e) { long m = r.out + e - (q + 4); if (m > 0 && m < (long)sizeof run) { if (!mm_copy(run, sizeof run, q + 4, m)) run[m] = 0; else run[0] = 0; } }
+        i = e + 1;
+    }
+    for (int k = 0; k < t->nacc; k++) {
+        char id[16], st[32] = ""; long rc = -1, ms = 0; int found, ok;
+        if (!todo[k]) continue;
+        (void)cx_fmt(id, sizeof id, "a%d", k + 1);
+        found = node_of(r.out, (long)r.outn, id, st, sizeof st, &rc, &ms); ok = found && !strcmp(st, "ok");
+        printf("ACCEPT\t%d\t%s\trc=%ld\tms=%ld\t%s\n", k + 1, ok ? "PASS" : !strcmp(st, "timeout") ? "TIMEOUT" : "FAIL", rc, ms, t->acc[k]);
+        pass[k] = ok;
+        if (!ok) { failed++; if (run[0]) { runfile_tail(run, id, "out", "stdout"); runfile_tail(run, id, "err", "stderr"); } }
+    }
+    np_free(&r); return failed;
+}
 static void paths(const char *tag, sb *b) {
     const char *s = sb_cstr(b);
     for (const char *p = s; p && *p;) { const char *e = strchr(p, '\n'); if (!e) break; printf("%s\t%.*s\n", tag, (int)(e - p), p); p = e + 1; }
@@ -101,10 +159,13 @@ static int task_main(int argc, char **argv, long now) {
                         "       devtask task status ID | task done ID | task list   (all: [--dir D])\n");
         return 2;
     }
-    if (!isopen && !islist) { if (argc < 4 || !strncmp(argv[3], "--", 2)) return bad("task needs an ID first:", sub); id = argv[i++]; }
+    int bg = 0, wmode = !strcmp(sub, "done") && argc > 4 && !strcmp(argv[3], "--wait");
+    if (wmode) { id = argv[4]; i = 5; }
+    else if (!isopen && !islist) { if (argc < 4 || !strncmp(argv[3], "--", 2)) return bad("task needs an ID first:", sub); id = argv[i++]; }
     for (; i < argc; i++) {
         const char *a = argv[i], **dst = 0;
         if (!strcmp(a, "--dir")) dst = &ov[O_DIR];
+        else if (!strcmp(sub, "done") && !strcmp(a, "--bg")) { bg = 1; continue; }
         else if (isopen && !strcmp(a, "--id")) dst = &id;
         else if (isopen && !strcmp(a, "--title")) dst = &title;
         else if (isopen && !strcmp(a, "--deadline-min")) dst = &dmin;
@@ -155,6 +216,29 @@ static int task_main(int argc, char **argv, long now) {
         free(b); printf("DEVTASK_WORK\tcount=%d\n", count);
         return 0;
     }
+    if (wmode || bg) {   /* --wait: devsvc wait on the recorded JOB; --bg: rerun this done under devsvc x --bg and record its JOB */
+        char jp[2048], jb[64] = ""; unsigned char *b = 0; int64_t bn = 0; np_result r2 = {0}; char w3[256] = ""; int rc2;
+        if (!dw_id_ok(id) || snprintf(jp, sizeof jp, "%s/work/%s.job", dir, id) >= (int)sizeof jp) return bad("bad work order id", id);
+        if (wmode) {
+            if (sy_read_file(jp, &b, &bn, 1 << 12) || bn < 2 || bn >= (int64_t)sizeof jb) { free(b); return bad("no background done recorded for", id); }
+            if (mm_copy(jb, sizeof jb, b, bn)) { free(b); return bad("bad job file for", id); } jb[bn] = 0; free(b); for (char *q = jb; *q; q++) if (*q == 10) *q = 0;
+            { char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", jb, "--timeout-ms", "55000", 0};
+              rc2 = np_run(v, 0, 0, 58, &r2, w3, sizeof w3); if (r2.out) fwrite(r2.out, 1, r2.outn, stdout); if (r2.err) fwrite(r2.err, 1, r2.errn, stderr); np_free(&r2); return rc2 ? 2 : (r2.rc ? 1 : 0); }
+        } else {
+            static const char *en[] = {"DEVTASK_NOW", "DEVTASK_EVENTS", "DEVTASK_ACCEPT_DIRECT", "DEVSVC_OWNER", "DEVSVC_REPO_TABLE", 0};
+            char ev[5][1200]; char *v[40]; int n = 0; const char *jl;
+            v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devsvc.cx"; v[n++] = "--"; v[n++] = "x"; v[n++] = "--bg"; v[n++] = "--"; v[n++] = "env";
+            for (int q = 0; en[q]; q++) if (getenv(en[q]) && *getenv(en[q])) { (void)cx_fmt(ev[q], sizeof ev[q], "%s=%s", en[q], getenv(en[q])); v[n++] = ev[q]; }
+            v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devtask.cx"; v[n++] = "--"; v[n++] = "task"; v[n++] = "done"; v[n++] = (char *)id; v[n++] = "--dir"; v[n++] = dir; v[n] = 0;
+            rc2 = np_run(v, 0, 0, 40, &r2, w3, sizeof w3);
+            jl = r2.out ? strstr(r2.out, "JOB\t") : 0;
+            if (rc2 || r2.rc || !jl) { printf("BG_FAIL\n"); if (r2.out) fwrite(r2.out, 1, r2.outn, stdout); np_free(&r2); return 2; }
+            { char jid[64]; long m = 0; const char *q = jl + 4; while (q[m] && q[m] != 9 && q[m] != 10 && m < 62) { jid[m] = q[m]; m++; } jid[m] = 0;
+              if (sy_write_atomic(jp, jid, m, 0600)) { np_free(&r2); return bad("cannot record job id", jid); }
+              printf("JOB\t%s\tdone-bg=%s\n", jid, id); }
+            np_free(&r2); return 0;
+        }
+    }
     if ((rc = dw_load(dir, id, &t, why, sizeof why)) != 0) goto end;
     in = sb_new(); out = sb_new(); fo = sb_new();
     if (!in || !out || !fo) { dw_free(&t); return bad("out of memory", 0); }
@@ -169,7 +253,14 @@ static int task_main(int argc, char **argv, long now) {
         }
     } else {
         int failed = 0; const char *emit = "local";
-        for (int k = 0; k < t.nacc; k++) if (!accept_run(&t, k, direct)) failed++;
+        int todo[DW_ACC], pass[DW_ACC], skipped = 0; char ident[65] = "";
+        if (dw_ident(&t, ident, sizeof ident, why, sizeof why)) { rc = 2; goto fin; }
+        dw_pass_load(dir, &t, ident, pass);
+        for (int k = 0; k < t.nacc; k++) { todo[k] = !pass[k]; if (pass[k]) { skipped++; printf("ACCEPT\t%d\tSKIP_PASSED\tsame_input\t%s\n", k + 1, t.acc[k]); } }
+        failed = accept_flow(dir, &t, todo, pass, direct);
+        (void)dw_pass_save(dir, &t, ident, pass);
+        if (failed < 0) { failed = t.nacc; printf("ACCEPT_RUNNER_FAULT\n"); }
+        (void)skipped;
         rc = dw_diff(&t, in, out, fo, &nin, &nout, &nfo, why, sizeof why);
         if (!rc) {
             paths("OUTSIDE_CHANGED", out); paths("INFO_FOREIGN", fo);
@@ -185,6 +276,7 @@ static int task_main(int argc, char **argv, long now) {
             else if (!rc) { printf("TASK_NOT_DONE\t%s\taccept_failed=%d\toutside=%d\temit_failed=%d\tleft_s=%ld\n", t.id, failed > 0 ? failed : 0, nout, failed < 0, t.deadline - now); rc = 1; }
         }
     }
+fin:
     sb_free(in); sb_free(out); sb_free(fo); dw_free(&t);
     if (rc == 1 && !why[0]) return 1;
 end:
