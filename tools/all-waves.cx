@@ -87,7 +87,8 @@ static void check_identity(const as_manifest *m,as_ident *live){
  if(!tx_eqz(m->root, root))die("session-root-mismatch",m->root);if(as_identity(root,1,live,why,sizeof why))die("live-identity",why);
  const char *d=as_ident_diff(live,&m->ident);if(d){char name[80];{int z=snprintf(name,sizeof name,"session-%s-changed",d);if(z<0||(size_t)z>=sizeof name){fprintf(stderr,"bound-format\n");exit(2);}};die(name,"start-a-new-session");}
  char p[4400],h[65];join(p,sizeof p,session,"materials.tsv");if(as_sha_file(p,0,h,0,why,sizeof why)||!tx_eqz(h, m->map_sha))die("session-materials-map-changed",p);
- if(as_material_bind(session,m,why,sizeof why))die("session-material-binding",why);
+ as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
+ if(as_material_bind_reg(session,m,&reg,why,sizeof why))die("session-material-binding",why);as_registry_free(&reg);
 }
 /* materials.tsv: NAME<TAB>PATH lines; returns the path for NAME or 0 */
 static int map_lookup(const char *map,size_t n,const char *name,char out[4096]){size_t at=0,nl=strlen(name);while(at<n){size_t end=at;while(end<n&&map[end]!='\n')end++;if(end-at>nl+1&&!memcmp(map+at,name,nl)&&map[at+nl]=='\t'){size_t z=end-at-nl-1;if(z>=4096)return 0;{unsigned char *cxb_d=(unsigned char *)(out);const unsigned char *cxb_s=(const unsigned char *)(map+at+nl+1);size_t cxb_n=(size_t)(z),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};out[z]=0;return 1;}at=end+1;}return 0;}
@@ -123,17 +124,26 @@ static int cmd_init(int argc,char **argv){
  printf("INIT\tsession=%s\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\tmaterials_mapped=%d\timplemented_batches=%d\tqualification=NOT_EXECUTED\n",session,id.candidate,id.registry,id.sid,id.harness,nmap,implemented);
  as_registry_free(&reg);return 0;
 }
-static int cmd_material(int argc,char **argv){
- if(argc!=5)die("usage","material ROOT SESSION NAME");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
+/* `material ROOT SESSION NAME` and `materials ROOT SESSION NAME...` share one rule: under the write
+   lock, one live identity check (registry, SID, harness, sealed map binding), then per NAME in order
+   its own fp/content/fp measurement and its own chained block (seq m.seq+1, +2, ...).  A NAME already
+   registered, or repeated in the list, is refused before any block is written. */
+static int material_run(int argc,char **argv,int first){
+ outer_window();canonical_root(argv[2]);existing_session(argv[3]);
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);
- if(as_find_material(&m,argv[4]))die("material-already-registered",argv[4]);char p[4400],path[4096];size_t mn;join(p,sizeof p,session,"materials.tsv");char *map=as_read(p,0,&mn,why,sizeof why);if(!map)die("materials-map",why);if(!map_lookup(map,mn,argv[4],path))die("material-not-in-map",argv[4]);free(map);
- as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int mk=declared_material(&reg,argv[4]);as_registry_free(&reg);if(mk<1)die("material-undeclared",argv[4]);
- char fp1[65],fp2[65],content[65];long entries=0;long long t0=as_now();
- if(as_material_measure(mk,path,0,fp1,0,why,sizeof why))die("material-fingerprint",why);if(as_material_measure(mk,path,1,content,&entries,why,sizeof why))die("material-content",why);if(as_material_measure(mk,path,0,fp2,0,why,sizeof why))die("material-fingerprint",why);if(!tx_eqz(fp1, fp2))die("material-changed-while-hashing",argv[4]);
- np_buf b={0,0,0};np_puts(&b,"MATERIAL\t");np_puts(&b,argv[4]);np_puts(&b,"\t");np_puts(&b,path);np_puts(&b,"\tcontent=");np_puts(&b,content);np_puts(&b,"\tfingerprint=");np_puts(&b,fp1);np_puts(&b,"\tentries=");np_putll(&b,entries);as_material_tag(&b,mk);np_puts(&b,"\n");
- join(p,sizeof p,session,"session.tsv");int fd=open(p,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",p);if(as_append(fd,session,"material",m.seq+1,b.p,b.n,why,sizeof why))die("manifest-append",why);close(fd);free(b.p);
- printf("MATERIAL\t%s\tpath=%s\tcontent=%s\tfingerprint=%s\tentries=%ld\thash_ns=%lld\tstate=PREPARED-identity-only\n",argv[4],path,content,fp1,entries,as_now()-t0);as_free(&m);close(lock);return 0;
+ char p[4400];size_t mn;join(p,sizeof p,session,"materials.tsv");char *map=as_read(p,0,&mn,why,sizeof why);if(!map)die("materials-map",why);
+ as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
+ for(int i=first;i<argc;i++){char path[4096];if(as_find_material(&m,argv[i]))die("material-already-registered",argv[i]);for(int k=first;k<i;k++)if(tx_eqz(argv[k],argv[i]))die("material-already-registered",argv[i]);if(!map_lookup(map,mn,argv[i],path))die("material-not-in-map",argv[i]);if(declared_material(&reg,argv[i])<1)die("material-undeclared",argv[i]);}
+ for(int i=first;i<argc;i++){const char *name=argv[i];char path[4096];if(!map_lookup(map,mn,name,path))die("material-not-in-map",name);int mk=declared_material(&reg,name);if(mk<1)die("material-undeclared",name);
+  char fp1[65],fp2[65],content[65];long entries=0;long long t0=as_now();
+  if(as_material_measure(mk,path,0,fp1,0,why,sizeof why))die("material-fingerprint",why);if(as_material_measure(mk,path,1,content,&entries,why,sizeof why))die("material-content",why);if(as_material_measure(mk,path,0,fp2,0,why,sizeof why))die("material-fingerprint",why);if(!tx_eqz(fp1, fp2))die("material-changed-while-hashing",name);
+  np_buf b={0,0,0};np_puts(&b,"MATERIAL\t");np_puts(&b,name);np_puts(&b,"\t");np_puts(&b,path);np_puts(&b,"\tcontent=");np_puts(&b,content);np_puts(&b,"\tfingerprint=");np_puts(&b,fp1);np_puts(&b,"\tentries=");np_putll(&b,entries);as_material_tag(&b,mk);np_puts(&b,"\n");
+  join(p,sizeof p,session,"session.tsv");int fd=open(p,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",p);if(as_append(fd,session,"material",m.seq+1+(i-first),b.p,b.n,why,sizeof why))die("manifest-append",why);close(fd);free(b.p);
+  printf("MATERIAL\t%s\tpath=%s\tcontent=%s\tfingerprint=%s\tentries=%ld\thash_ns=%lld\tstate=PREPARED-identity-only\n",name,path,content,fp1,entries,as_now()-t0);}
+ as_registry_free(&reg);free(map);as_free(&m);close(lock);return 0;
 }
+static int cmd_material(int argc,char **argv){if(argc!=5)die("usage","material ROOT SESSION NAME");return material_run(argc,argv,4);}
+static int cmd_materials(int argc,char **argv){if(argc<5)die("usage","materials ROOT SESSION NAME...");return material_run(argc,argv,4);}
 static int decided(const as_manifest *m,const char *id){for(int i=0;i<m->nref;i++)if(tx_eqz(m->ref[i].id, id)&&!tx_eqz(m->ref[i].verdict, "UNKNOWN"))return 1;return 0;}
 /* Tier is a caller selection only: the session registry and qualification stay complete. */
 static const char *tier_filter;
@@ -550,7 +560,7 @@ int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("all-waves: NOT_RUN requires Linux/x86_64 (run-batch's single native host)\n",stderr);return 3;
 #endif
- if(argc<2)die("usage","init|material|wave|pending|executor|start|run|finish ...");
+ if(argc<2)die("usage","init|material|materials|wave|pending|executor|start|run|finish ...");
  if(argc==3&&!strcmp(argv[1],"inputs")){canonical_root(argv[2]);np_buf snapshot={0};size_t n;wt_scan(root,&n,&snapshot);if(n&&fwrite(snapshot.p,1,n,stdout)!=n)die("inputs-write",0);free(snapshot.p);return 0;}
  /* Consumer control: compare saved input snapshots with the very same wave gate. */
  if((argc==4||argc==5)&&!strcmp(argv[1],"inputs-diff")){
@@ -575,7 +585,7 @@ int main(int argc,char **argv){
     free(a);free(now.p);free(paths.p);free(r.p);return moved?2:0;
  }
  if(tx_eqz(argv[1], "domain-sim"))return cmd_domain_sim(argc,argv);
- if(tx_eqz(argv[1], "init"))return cmd_init(argc,argv);if(tx_eqz(argv[1], "material"))return cmd_material(argc,argv);if(tx_eqz(argv[1], "wave"))return cmd_wave(argc,argv);if(tx_eqz(argv[1], "pending"))return cmd_pending(argc,argv);
+ if(tx_eqz(argv[1], "init"))return cmd_init(argc,argv);if(tx_eqz(argv[1], "material"))return cmd_material(argc,argv);if(tx_eqz(argv[1], "materials"))return cmd_materials(argc,argv);if(tx_eqz(argv[1], "wave"))return cmd_wave(argc,argv);if(tx_eqz(argv[1], "pending"))return cmd_pending(argc,argv);
  if(tx_eqz(argv[1], "executor"))return cmd_executor(argc,argv);if(tx_eqz(argv[1], "start"))return cmd_start(argc,argv);if(tx_eqz(argv[1], "run"))return cmd_run(argc,argv);if(tx_eqz(argv[1], "finish"))return cmd_finish(argc,argv);
- die("usage","init|material|wave|pending|executor|start|run|finish ...");return 2;
+ die("usage","init|material|materials|wave|pending|executor|start|run|finish ...");return 2;
 }

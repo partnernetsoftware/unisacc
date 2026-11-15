@@ -197,14 +197,27 @@ static void as_on_batch(const tp_batch_view *v,void *ctx){as_registry *r=((as_co
 static void as_on_cov(const tp_coverage_view *v,void *ctx){as_registry *r=((as_collect *)ctx)->r;as_cov *g=realloc(r->c,(size_t)(r->nc+1)*sizeof *r->c);if(!g){r->failed=1;return;}r->c=g;r->c[r->nc].id=as_dup(v->id);r->c[r->nc].impl=as_dup(v->implementation);r->nc++;}
 int as_wave_platform_allowed(const char *platform){return psc_platform_allowed(platform);}
 void as_registry_free(as_registry *r){for(int i=0;i<r->nb;i++){as_batch *b=&r->b[i];free(b->id);free(b->impl);free(b->source);free(b->mode);free(b->platform);free(b->materials);free(b->entry);free(b->coverage);free(b->expect);free(b->headers);}for(int i=0;i<r->nc;i++){free(r->c[i].id);free(r->c[i].impl);}free(r->b);free(r->c);memset(r,0,sizeof *r);}
+static const as_registry *as_sort_reg;
+static int as_cmp_regid(const void *a,const void *b){return strcmp(as_sort_reg->b[*(const int *)a].id,as_sort_reg->b[*(const int *)b].id);}
+/* strcmp order of NUL-terminated ID against the n-byte field S */
+static int as_cmp_field(const char *id,const char *s,size_t n){size_t i=0;for(;i<n&&id[i];i++)if((unsigned char)id[i]!=(unsigned char)s[i])return (unsigned char)id[i]<(unsigned char)s[i]?-1:1;return i<n?-1:id[i]?1:0;}
 int as_registry_load(const char *root,as_registry *r,char *why,size_t cap){
  char bp[4400],cp[4400],tw[1200];size_t bn,cn;memset(r,0,sizeof *r);if(as_join(bp,sizeof bp,root,"tests/batches.tsv")||as_join(cp,sizeof cp,root,"tests/coverage.tsv"))return as_bad(why,cap,"registry-path",root,0);
  char *bt=as_read(bp,0,&bn,why,cap);if(!bt)return -1;char *ct=as_read(cp,0,&cn,why,cap);if(!ct){free(bt);return -1;}
  as_collect col={r};tp_observer ob={as_on_batch,as_on_cov,&col};tp_summary sum;int rc=tp_visit(root,bt,bn,ct,cn,&ob,&sum,tw,sizeof tw);free(ct);
  if(rc||r->failed){free(bt);as_registry_free(r);return as_bad(why,cap,"registry-metadata",rc?tw:"allocation",0);}
- /* registry row SHA: the exact batches.tsv line (without its newline) */
- for(int i=0;i<r->nb;i++){size_t idn=strlen(r->b[i].id),at=0;int found=0;while(at<bn){size_t end=at;while(end<bn&&bt[end]!='\n')end++;if(end-at>idn&&!memcmp(bt+at,r->b[i].id,idn)&&bt[at+idn]=='\t'){cx_sha256_hex(bt+at,end-at,r->b[i].row);found++;}at=end+1;}if(found!=1){free(bt);as_registry_free(r);return as_bad(why,cap,"registry-row",r->b[i].id,0);}}
- free(bt);return 0;
+ /* registry row SHA: the exact batches.tsv line (without its newline).  One pass over the file: a
+    line belongs to batch ID iff it starts with ID then a tab, so its first field is looked up in the
+    id-sorted index; every batch must own exactly one line (same rule as the former per-batch scan). */
+ int *ix=r->nb?malloc((size_t)r->nb*sizeof *ix):0,*hits=r->nb?calloc((size_t)r->nb,sizeof *hits):0;
+ if(r->nb&&(!ix||!hits)){free(ix);free(hits);free(bt);as_registry_free(r);return as_bad(why,cap,"registry-metadata","allocation",0);}
+ for(int i=0;i<r->nb;i++)ix[i]=i;as_sort_reg=r;if(r->nb)qsort(ix,(size_t)r->nb,sizeof *ix,as_cmp_regid);
+ size_t at=0;while(at<bn){size_t end=at,t;while(end<bn&&bt[end]!='\n')end++;t=at;while(t<end&&bt[t]!='\t')t++;
+  if(t<end){int lo=0,hi=r->nb;size_t fn=t-at;while(lo<hi){int mid=(lo+hi)/2;if(as_cmp_field(r->b[ix[mid]].id,bt+at,fn)<0)lo=mid+1;else hi=mid;}
+   for(int k=lo;k<r->nb&&!as_cmp_field(r->b[ix[k]].id,bt+at,fn);k++){cx_sha256_hex(bt+at,end-at,r->b[ix[k]].row);hits[ix[k]]++;}}
+  at=end+1;}
+ for(int i=0;i<r->nb;i++)if(hits[i]!=1){char bad[1600];cx_fmt(bad,sizeof bad,"%s",r->b[i].id);free(ix);free(hits);free(bt);as_registry_free(r);return as_bad(why,cap,"registry-row",bad,0);}
+ free(ix);free(hits);free(bt);return 0;
 }
 const as_batch *as_find_batch(const as_registry *r,const char *id){for(int i=0;i<r->nb;i++)if(!strcmp(r->b[i].id,id))return &r->b[i];return 0;}
 int as_material_kind(const as_registry *r,const char *name){int kind=0;for(int i=0;i<r->nb;i++)if(!strcmp(r->b[i].impl,"IMPLEMENTED")){int k=tp_material_kind(r->b[i].materials,name,strlen(name));if(k<0||(k&&kind&&k!=kind))return -1;if(k)kind=k;}return kind;}
@@ -349,9 +362,10 @@ int as_lock(const char *session,int write_lock,char *why,size_t cap){
 const as_material *as_find_material(const as_manifest *m,const char *name){for(int i=0;i<m->nmaterial;i++)if(!strcmp(m->material[i].name,name))return &m->material[i];return 0;}
 /* Rebind every manifest material to the sealed map and registry type, even when
  * an attacker has recomputed the manifest block chain. No literal is opened. */
-int as_material_bind(const char *session,const as_manifest *m,char *why,size_t cap){
- as_registry reg;if(as_registry_load(m->root,&reg,why,cap))return -1;
- char p[4400],sha[65];size_t n=0;int rc=0;if(as_join(p,sizeof p,session,"materials.tsv")){as_registry_free(&reg);return as_bad(why,cap,"materials-map-path",session,0);}char *map=as_read(p,0,&n,why,cap);if(!map){as_registry_free(&reg);return -1;}cx_sha256_hex(map,n,sha);
+/* Same rebind against a registry the caller already loaded from m->root (one load per command). */
+int as_material_bind_reg(const char *session,const as_manifest *m,const as_registry *regp,char *why,size_t cap){
+ const as_registry reg=*regp;
+ char p[4400],sha[65];size_t n=0;int rc=0;if(as_join(p,sizeof p,session,"materials.tsv"))return as_bad(why,cap,"materials-map-path",session,0);char *map=as_read(p,0,&n,why,cap);if(!map)return -1;cx_sha256_hex(map,n,sha);
  if(strcmp(sha,m->map_sha)||(n&&map[n-1]!='\n')||memchr(map,0,n)||memchr(map,'\r',n)){rc=as_bad(why,cap,"materials-map-identity",p,0);goto done;}
  int matched=0;size_t at=0;while(at<n){size_t end=at;while(end<n&&map[end]!='\n')end++;map[end]=0;char *line=map+at;at=end+1;char *tab=strchr(line,'\t');if(!tab||strchr(tab+1,'\t')){rc=as_bad(why,cap,"materials-map-fields",p,0);break;}*tab++=0;int kind=as_material_kind(&reg,line);if(kind<1||!tp_material_value(kind,tab)){rc=as_bad(why,cap,"materials-map-type",line,0);break;}if(kind==1&&as_material_path(tab,why,cap)){rc=-1;break;}
   /* Earlier names are NUL-terminated in this same buffer. */
@@ -359,7 +373,10 @@ int as_material_bind(const char *session,const as_manifest *m,char *why,size_t c
   const as_material *x=as_find_material(m,line);if(x){matched++;if(x->kind!=kind||strcmp(x->path,tab)){rc=as_bad(why,cap,"material-map-binding",line,0);break;}if(kind==2){char h[65];if(as_material_fp(x,h,why,cap)||strcmp(h,x->content)||strcmp(h,x->fingerprint)||x->entries){rc=as_bad(why,cap,"material-literal-identity",line,0);break;}}}
  }
  if(!rc&&matched!=m->nmaterial)rc=as_bad(why,cap,"material-map-unbound",session,0);
- done:free(map);as_registry_free(&reg);return rc;
+ done:free(map);return rc;
+}
+int as_material_bind(const char *session,const as_manifest *m,char *why,size_t cap){
+ as_registry reg;if(as_registry_load(m->root,&reg,why,cap))return -1;int rc=as_material_bind_reg(session,m,&reg,why,cap);as_registry_free(&reg);return rc;
 }
 /* The entry a batch row executes: ROOT/entry for SOURCE, {material}/suffix for PREPARED. */
 int as_entry(const char *root,const as_batch *b,const as_manifest *m,char out[4400],char *why,size_t cap){
