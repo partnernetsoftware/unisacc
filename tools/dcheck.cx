@@ -2,6 +2,8 @@
  * From the repo root:
  *   sh ./unisacc.com tools/dcheck.cx -- [PATH...] [--owner O] [--tier commit|daily|release] [--only ID,ID]
  *                                        [--par N] [--bg] [--plan]
+ *   sh ./unisacc.com tools/dcheck.cx -- [PATH...] [--owner O] [--tier T] [--only ID,ID] --select-only --out FILE
+ *   sh ./unisacc.com tools/dcheck.cx -- --from FILE [--par N] [--bg]
  * Changed paths: the PATH arguments; without any, the git work tree changes (staged, unstaged and untracked);
  *   with --owner O instead the paths that owner wrote through devsvc (f.write, f.edit, doc.* events carrying path=).
  * Selection: tools/affected.cx --files PATHS --tier T --list-only (T defaults to commit); --only keeps the named ids
@@ -16,6 +18,12 @@
  *   (wall_ms: the flow's wall clock; serial_ms: the sum of the batch nodes).  PASS needs rc 0 and the batch's own
  *   BATCH_RUN status=PASS line; a timeout or a deferral is DEFERRED, a skipped or missing node is NOT_RUN.
  * --bg: starts this same command as a devsvc background job and prints its JOB line at once (devsvc wait JOB).
+ * Two jobs instead of one (the selection cold start is most of a 53 s window): --select-only --out FILE selects only, writes the
+ *   manifest FILE (DCHECK_MANIFEST 1, TIER, CHANGED, one BATCH id budget_seconds materials(0|1) per batch, EXTRA id for --only ids the
+ *   change does not select, END with the counts) and prints DCHECK_SELECT and DCHECK_MANIFEST; --from FILE reads it and only runs the
+ *   batches (own 55 s node each, kit node first, no selection, own 53 s window).  A damaged manifest (header, field, id charset,
+ *   duplicate, count) is rc 2.  --from excludes PATH, --owner, --only, --tier and --select-only.  Without these options one command
+ *   still does both.  A relative FILE with --bg is made absolute against the caller's cwd.
  * --plan: prints the selection and the node table and runs nothing.
  * Fixture hooks (checks only): --root DIR (registry root, default .), --home DIR (checkout holding the tools),
  *   --runner 'CMD with {id}' (replaces the affected runner; rc 0 PASS, rc 3 DEFERRED, else FAIL; no kit node),
@@ -42,6 +50,7 @@ static char *ids[MAXB]; static int nids;
 static char *paths[MAXP]; static int npaths;
 static char *only[MAXB]; static int nonly;
 static char root[4096], home[4096], prod[4400];
+static int mat[MAXB]; static long bud[MAXB]; static char *extra[MAXB]; static int nextra; static char tierbuf[16];
 
 static int bad(const char *m, const char *a) { fprintf(stderr, "dcheck: %s%s%s\n", m, a ? " " : "", a ? a : ""); return 2; }
 static char *dupn(const char *s, long n) { char *p = malloc((size_t)n + 1); if (!p) { fprintf(stderr, "dcheck: out of memory\n"); exit(2); } if (n > 0 && mm_copy(p, n + 1, s, n)) { fprintf(stderr, "dcheck: copy bound\n"); exit(2); } p[n] = 0; return p; }
@@ -139,6 +148,55 @@ static long budget_of(const char *reg, long n, const char *id) {
     }
     return -1;
 }
+static int id_ok(const char *s) {
+    long n = (long)strlen(s);
+    if (n < 1 || n > 120) return 0;
+    for (; *s; s++) if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || *s == '_' || *s == '.' || *s == '-')) return 0;
+    return 1;
+}
+static int dup_id(const char *s) { for (int i = 0; i < nids; i++) if (!strcmp(ids[i], s)) return 1; for (int i = 0; i < nextra; i++) if (!strcmp(extra[i], s)) return 1; return 0; }
+static int all_digits(const char *s) { if (!*s) return 0; for (; *s; s++) if (*s < '0' || *s > '9') return 0; return 1; }
+/* write the selection as a manifest; rc 0 or 2 */
+static int write_manifest(const char *file, const char *tier, int changed) {
+    sb *m = sb_new(); char ln[400]; int rc = 0;
+    if (!m) return bad("out of memory", 0);
+    if (cx_fmt(ln, sizeof ln, "DCHECK_MANIFEST\t1\nTIER\t%s\nCHANGED\t%d\n", tier, changed) || sb_puts(m, ln)) rc = 1;
+    for (int i = 0; !rc && i < nids; i++) if (cx_fmt(ln, sizeof ln, "BATCH\t%s\t%ld\t%d\n", ids[i], bud[i], mat[i]) || sb_puts(m, ln)) rc = 1;
+    for (int i = 0; !rc && i < nextra; i++) if (cx_fmt(ln, sizeof ln, "EXTRA\t%s\n", extra[i]) || sb_puts(m, ln)) rc = 1;
+    if (!rc && (cx_fmt(ln, sizeof ln, "END\tbatches=%d\textra=%d\n", nids, nextra) || sb_puts(m, ln))) rc = 1;
+    if (rc || sy_write_atomic(file, sb_cstr(m), sb_len(m), 0644)) { sb_free(m); return bad("cannot write the manifest", file); }
+    sb_free(m); return 0;
+}
+/* read a manifest into ids/bud/mat/extra, tier into tierbuf, *changed; strict: any deviation is rc 2 */
+static int read_manifest(const char *file, int *changed) {
+    unsigned char *b = 0; int64_t n = 0; int line = 0, sawend = 0, sawtier = 0, sawch = 0, wantn = -1, wante = -1;
+    if (sy_read_file(file, &b, &n, 1L << 22)) return bad("cannot read the manifest", file);
+    if (n < 1 || b[n - 1] != '\n') { free(b); return bad("manifest is truncated or empty (no final newline):", file); }
+    for (long i = 0; i < n;) {
+        long e = i, k; char *ln, *f[5]; int nf = 0;
+        while (b[e] != '\n') e++;
+        ln = dupn((const char *)b + i, e - i); line++;
+        f[nf++] = ln;
+        for (k = 0; ln[k]; k++) if (ln[k] == '\t') { ln[k] = 0; if (nf >= 5) { free(ln); free(b); return bad("manifest line has too many fields, line", file); } f[nf++] = ln + k + 1; }
+        if (sawend) { free(ln); free(b); return bad("manifest has lines after END:", file); }
+        if (line == 1) { if (strcmp(f[0], "DCHECK_MANIFEST") || nf != 2 || strcmp(f[1], "1")) { free(ln); free(b); return bad("not a dcheck manifest (header):", file); } }
+        else if (!strcmp(f[0], "TIER") && nf == 2 && !sawtier && line == 2) {
+            if (strcmp(f[1], "commit") && strcmp(f[1], "daily") && strcmp(f[1], "release")) { free(ln); free(b); return bad("manifest tier is not commit|daily|release:", file); }
+            (void)cx_fmt(tierbuf, sizeof tierbuf, "%s", f[1]); sawtier = 1;
+        }
+        else if (!strcmp(f[0], "CHANGED") && nf == 2 && sawtier && !sawch && line == 3 && all_digits(f[1]) && strlen(f[1]) < 8) { *changed = atoi(f[1]); sawch = 1; }
+        else if (!strcmp(f[0], "BATCH") && nf == 4 && sawch && id_ok(f[1]) && !dup_id(f[1]) && nids < MAXB && (!strcmp(f[2], "-1") || (all_digits(f[2]) && strlen(f[2]) < 8)) && (!strcmp(f[3], "0") || !strcmp(f[3], "1")) && !nextra) {
+            bud[nids] = atol(f[2]); mat[nids] = f[3][0] == '1'; ids[nids++] = dupn(f[1], (long)strlen(f[1]));
+        }
+        else if (!strcmp(f[0], "EXTRA") && nf == 2 && sawch && id_ok(f[1]) && !dup_id(f[1]) && nextra < MAXB) extra[nextra++] = dupn(f[1], (long)strlen(f[1]));
+        else if (!strcmp(f[0], "END") && nf == 3 && sawch && !strncmp(f[1], "batches=", 8) && !strncmp(f[2], "extra=", 6) && all_digits(f[1] + 8) && all_digits(f[2] + 6)) { wantn = atoi(f[1] + 8); wante = atoi(f[2] + 6); sawend = 1; }
+        else { free(ln); free(b); (void)fprintf(stderr, "dcheck: manifest line %d is malformed or out of order\n", line); return bad("damaged manifest:", file); }
+        free(ln); i = e + 1;
+    }
+    free(b);
+    if (!sawend || wantn != nids || wante != nextra) return bad("manifest END counts do not match its lines (truncated or edited):", file);
+    return 0;
+}
 /* escape for a flow node value: everything but [A-Za-z0-9_./-] as %XX */
 static void esc(sb *o, const char *s) { for (; *s; s++) { unsigned char c = (unsigned char)*s; char h[8]; if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || c == '/' || c == '-') { h[0] = (char)c; h[1] = 0; } else (void)cx_fmt(h, sizeof h, "%%%02X", c); (void)sb_puts(o, h); } }
 /* NODE line of flow output for id: state text, rc and ms; returns 1 when found */
@@ -185,16 +243,19 @@ static char *slurp(const char *run, const char *id, const char *ext, long *n) {
 }
 
 int main(int argc, char **argv) {
-    const char *tier = "commit", *owner = 0, *runner = 0, *rootarg = ".", *homearg = 0; int par = 0, bg = 0, plan = 0, onlyset = 0;
+    const char *tier = "commit", *owner = 0, *runner = 0, *rootarg = ".", *homearg = 0, *outfile = 0, *fromfile = 0; int par = 0, bg = 0, plan = 0, onlyset = 0, selonly = 0, changed = 0, tierset = 0;
     long node_ms = DC_NODE_MS, t_start = sy_now_ms(), select_ms, left;
-    int pass = 0, fail = 0, deferred = 0, notrun = 0, nextra = 0; long wall = 0, serial = 0, peak = 0;
+    int pass = 0, fail = 0, deferred = 0, notrun = 0; long wall = 0, serial = 0, peak = 0;
     char fp[2048], run[1024] = "", dv[4400], why[512] = ""; np_result r = {0}; sb *o;
-    char *reg = 0; long regn = 0; char *extra[MAXB];
+    char *reg = 0; long regn = 0;
     for (int a = 1; a < argc; a++) {
         const char *s = argv[a]; int more = a + 1 < argc;
         if (!strcmp(s, "--bg")) bg = 1;
         else if (!strcmp(s, "--plan")) plan = 1;
-        else if (!strcmp(s, "--tier") && more) { tier = argv[++a]; if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) return bad("--tier wants commit|daily|release, got", tier); }
+        else if (!strcmp(s, "--select-only")) selonly = 1;
+        else if (!strcmp(s, "--out") && more) outfile = argv[++a];
+        else if (!strcmp(s, "--from") && more) fromfile = argv[++a];
+        else if (!strcmp(s, "--tier") && more) { tier = argv[++a]; tierset = 1; if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) return bad("--tier wants commit|daily|release, got", tier); }
         else if (!strcmp(s, "--owner") && more) owner = argv[++a];
         else if (!strcmp(s, "--runner") && more) runner = argv[++a];
         else if (!strcmp(s, "--root") && more) rootarg = argv[++a];
@@ -210,6 +271,9 @@ int main(int argc, char **argv) {
         else add_path(s, (long)strlen(s));
     }
     if (owner && npaths) return bad("give PATHs or --owner, not both", 0);
+    if (selonly && !outfile) return bad("--select-only needs --out FILE", 0);
+    if (outfile && !selonly) return bad("--out needs --select-only", 0);
+    if (fromfile && (selonly || npaths || owner || onlyset || tierset)) return bad("--from excludes PATH, --owner, --only, --tier and --select-only", 0);
     if (sy_realpath(rootarg, root, sizeof root) < 0) return bad("cannot resolve --root", rootarg);
     if (sy_realpath(homearg ? homearg : rootarg, home, sizeof home) < 0) return bad("cannot resolve --home", homearg);
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", home) || cx_fmt(dv, sizeof dv, "%s/tools/devsvc.cx", home)) return bad("path too long", 0);
@@ -221,6 +285,11 @@ int main(int argc, char **argv) {
         v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--"; v[n++] = "--root"; v[n++] = root; v[n++] = "--home"; v[n++] = home;
         for (int a = 1; a < argc; a++) {
             if (!strcmp(argv[a], "--bg")) continue;
+            if ((!strcmp(argv[a], "--out") || !strcmp(argv[a], "--from")) && a + 1 < argc && argv[a + 1][0] != '/') {   /* the job runs in another cwd */
+                char cw[2048], ab[4400];
+                if (sy_cwd(cw, sizeof cw) || cx_fmt(ab, sizeof ab, "%s/%s", cw, argv[a + 1])) return bad("cannot make the path absolute:", argv[a + 1]);
+                v[n++] = argv[a]; v[n++] = dupn(ab, (long)strlen(ab)); a++; continue;
+            }
             if ((!strcmp(argv[a], "--root") || !strcmp(argv[a], "--home")) && a + 1 < argc) { a++; continue; }
             v[n++] = argv[a];
         }
@@ -231,8 +300,12 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (fromfile) { int rc = read_manifest(fromfile, &changed); if (rc) return rc; tier = tierbuf; }
+    else {
     if (!npaths) { int rc = owner ? owner_paths(owner) : git_paths(); if (rc) return rc; }
     if (npaths) { int rc = select_batches(tier); if (rc) return rc; }
+    changed = npaths;
+    }
     if (onlyset) {   /* keep the named ids; a named id the change does not select is NOT_RUN */
         int k = 0;
         for (int i = 0; i < nids; i++) { int keep = 0; for (int j = 0; j < nonly; j++) if (!strcmp(ids[i], only[j])) keep = 1; if (keep) ids[k++] = ids[i]; }
@@ -241,12 +314,22 @@ int main(int argc, char **argv) {
     }
     if (!par) par = nids > 32 ? 32 : nids < 1 ? 1 : nids;   /* every batch at once, up to the flow maximum */
     select_ms = sy_now_ms() - t_start;
-    printf("DCHECK_SELECT\tchanged=%d\tbatches=%d\ttier=%s\tselect_ms=%ld\n", npaths, nids, tier, select_ms);
+    if (fromfile) select_ms = 0;
+    printf("DCHECK_SELECT\tchanged=%d\tbatches=%d\ttier=%s\tselect_ms=%ld\n", changed, nids, tier, select_ms);
+    if (nids && !fromfile) {   /* registry facts per selected batch: budget (warned about below) and whether materials are prepared */
+        char rb[4400]; unsigned char *b = 0; int64_t m = 0;
+        if (!cx_fmt(rb, sizeof rb, "%s/tests/batches.tsv", root) && !sy_read_file(rb, &b, &m, 1L << 26)) { reg = (char *)b; regn = (long)m; }
+        for (int i = 0; i < nids; i++) { bud[i] = reg ? budget_of(reg, regn, ids[i]) : -1; mat[i] = reg && has_materials(reg, regn, ids[i]); }
+    }
+    if (selonly) {
+        int rc = write_manifest(outfile, tier, changed);
+        if (rc) return rc;
+        printf("DCHECK_MANIFEST\tfile=%s\tbatches=%d\textra=%d\n", outfile, nids, nextra);
+        return 0;
+    }
 
     o = sb_new(); if (!o) return bad("out of memory", 0);
     if (nids) {
-        char rb[4400]; unsigned char *b = 0; int64_t m = 0;
-        if (!cx_fmt(rb, sizeof rb, "%s/tests/batches.tsv", root) && !sy_read_file(rb, &b, &m, 1L << 26)) { reg = (char *)b; regn = (long)m; }
         if (!runner) {   /* the tlib kit once, in front; a failed kit build is reported by the batches' own fallback */
             char cmd[9000];
             if (cx_fmt(cmd, sizeof cmd, "cd '%s' && { sh '%s' tools/tlib.cx -- kit || echo KIT_FALLBACK\n}", root, prod)) return bad("path too long", 0);
@@ -259,7 +342,7 @@ int main(int argc, char **argv) {
         if (runner) {
             const char *h = strstr(runner, "{id}");
             w = h ? cx_fmt(inner, sizeof inner, "%.*s%s%s", (int)(h - runner), runner, ids[i], h + 4) : cx_fmt(inner, sizeof inner, "%s", runner);
-        } else w = cx_fmt(inner, sizeof inner, "sh '%s' '%s/tools/affected.cx' -- --ids '%s' --run -j 1%s", prod, home, ids[i], reg && has_materials(reg, regn, ids[i]) ? " --prepare-materials" : "");
+        } else w = cx_fmt(inner, sizeof inner, "sh '%s' '%s/tools/affected.cx' -- --ids '%s' --run -j 1%s", prod, home, ids[i], mat[i] ? " --prepare-materials" : "");
         if (w || cx_fmt(cmd, sizeof cmd, "cd '%s' && { %s\n}", root, inner) || cx_fmt(tm, sizeof tm, ";timeout_ms=%ld\n", node_ms)) return bad("command too long for batch", ids[i]);
         (void)sb_puts(o, nid); (void)sb_puts(o, "\texec\t"); (void)sb_puts(o, runner ? "-" : "kit"); (void)sb_puts(o, "\ta0=sh;a1=-c;a2="); esc(o, cmd); (void)sb_puts(o, tm);
     }
@@ -317,7 +400,7 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(status, "PASS")) pass++; else if (!strcmp(status, "FAIL")) fail++; else if (!strcmp(status, "DEFERRED")) deferred++; else notrun++;
         serial += ms;
-        if (reg) { long bs = budget_of(reg, regn, ids[i]); if (bs > DC_NODE_MS / 1000) printf("DCHECK_WARN\tbudget-above-node-cap\tid=%s\tbudget=%ld\n", ids[i], bs); }
+        if (bud[i] > DC_NODE_MS / 1000) printf("DCHECK_WARN\tbudget-above-node-cap\tid=%s\tbudget=%ld\n", ids[i], bud[i]);
         printf("CHECK\t%s\t%s\t%ld\tfirst=%s\n", ids[i], status, ms, first[0] ? first : "-");
         free(ob); free(eb);
     }

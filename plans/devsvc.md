@@ -116,6 +116,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 新建文档:`devsvc doc create FILE 标题`(FILE 须匹配配置表 doc 行,已存在 rc 1 拒绝,内容为一行一级标题,内部取锁 doc:FILE);其后再用 doc append/set。服务空闲巡检另会回收自己的 /tmp/devsvc-flow-* 运行目录(超 2 小时且无进程引用,每次至多 200 个,记 flowdir.gc 事件)。dcheck 遇批次登记预算超过 55 的,在该批 CHECK 行前打 DCHECK_WARN budget-above-node-cap。
 - git commit 参数约定(2026-11-16):`devsvc git commit -m 说明 (--whole 路径... | --keyed 路径 KEY | --registered ID...) [--push] [--bg]` 严格解析。必须有 -m 与至少一个路径来源;出现未知选项或 --help 一律打印用法、rc 2、不提交(HEAD 与索引不变)。说明首行不得为空,不得以 Co-Authored-By: 或 Signed-off-by: 开头,违反 rc 2 并提示"说明首行必须是正文,署名放最后空行后"。检查 check-devsvc 的 gitargs- 用例(夹具仓,环境变量 DEVSVC_GIT_PARSE_ONLY 只过解析)。
 - task open 路径约定(2026-11-16):`--cwd` 可写绝对路径或相对仓根的路径(如 .claude/worktrees/v0.0.68),须落在 .claude/worktrees/ 或某个 --write-ext 目录下,否则 rc 2 并给示例;`--write` 写仓内相对前缀,也接受以仓根为前缀的绝对路径(内部转为相对,登记与输出均为相对),仓外绝对路径 rc 2。检查 check-devtask 的 write-abs- 用例。
+- dcheck 选批与跑批分两作业:先 `dcheck --select-only --out /tmp/m.tsv [路径...] --bg` 选批(devsvc wait 得 DCHECK_SELECT 与 DCHECK_MANIFEST,清单落盘含每批预算),再 `dcheck --from /tmp/m.tsv --par 8 --bg` 只跑批,每批各自 55 s 节点,不共用选批的整窗;不带这两个选项仍一次完成。清单损坏(头、字段、id 字符、重复、计数)rc 2。
 
 
 
