@@ -50,6 +50,21 @@ static char *slurp(char **argv, long *n) {
     return b;
 }
 
+/* 退出码 1 有两种来源:子工具跑完且有红行,或子工具自身编译失败/崩溃(unisacc.com 编译错同样 rc 1)。
+ * 只有看到子工具自己的完成标记行(行首 MARK)才算跑完;否则判 BLOCK,具名原因并附合并输出(含 stderr)的末行。 */
+static int incomplete(const char *rows, long rn, const char *mark, const char *tool) {
+    long at = 0, ml = tx_len(mark, 64), ls = -1, ll = 0;
+    while (at < rn) {
+        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e;
+        if (tx_prefix(rows + at, l, mark, ml)) return 0;
+        if (l > 0) { ls = at; ll = l; }
+        at += l + 1;
+    }
+    sy_eprintf("precommit: blocked:incomplete:%s: no completion line '%.*s' (sub-tool not finished or failed to compile); last output: %.*s\n",
+               tool, (int)(ml > 0 && mark[ml - 1] == '\t' ? ml - 1 : ml), mark, (int)(ls < 0 ? 7 : (ll > 300 ? 300 : ll)), ls < 0 ? "<empty>" : rows + ls);
+    return 1;
+}
+
 static int registered(const char *b, long n, const char *check) {
     long at = 0, cl = tx_len(check, 4600);
     while (b && at < n) {
@@ -217,6 +232,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
     av[k] = 0;
     slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0;
     if (!rows) { sy_eprintf("precommit: tools/check-tlib-frozen.cx --fast did not run\n"); return 0; }
+    if (incomplete(rows, rn, "TLIB_FAST\t", "check-tlib-frozen")) { mm_free(rows); return 1; }
     for (at = 0; at < rn; ) {
         long le = tx_chr(rows + at, rn - at, '\n'), l = le < 0 ? rn - at : le, po, pl;
         if (tx_prefix(rows + at, l, "FROZEN\t", 7) && tx_find(rows + at, l, "\tMISMATCH", 9) >= 0 &&
@@ -270,6 +286,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
             lv[k] = 0;
             slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0;
             if (!rows) { sy_eprintf("precommit: tools/cx-lint.cx did not run\n"); blocked++; continue; }
+            if (incomplete(rows, rn, "CX_LINT\t", "cx-lint")) { blocked++; mm_free(rows); continue; }
             for (at = 0; at < rn; ) {
                 long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, d = tx_find(rows + at, l, dir, tx_len(dir, 1200));
                 if (tx_prefix(rows + at, l, "LINT\t", 5)) {
@@ -544,6 +561,7 @@ int main(void) {
       if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); return blocked ? 1 : 0; } }
     slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
+    blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets");
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
         const char *r = rows + at;

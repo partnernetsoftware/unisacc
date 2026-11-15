@@ -70,6 +70,12 @@ static void one(const char *name, const char *files, long want, const char *row,
     if (!cx_fmt(cmd, sizeof cmd, "cd '%s' && git rm -r -q --cached -- %s >/dev/null 2>&1; rm -rf okd lib exec build/freeze.tsv tools/foo.cx", td, files)) sh(cmd, 0, 0);
 }
 
+/* stand-ins: each prints its red row(s) and then the sub-tool's own completion line, as the real tools do */
+#define RATCHETS_OK "#pragma unisa use sys.io\nint main(void) { sy_printf(\"  cxtrunc: lib/r.cx has 1 unbounded call\\n\"); sy_printf(\"RATCHETS\\tok=12\\tfail=1\\telapsed_ms=1\\n\"); return 1; }\n"
+#define TLIB_OK "#pragma unisa use sys.io\nint main(void) { sy_printf(\"FROZEN\\tpkgx\\tMISMATCH\\n\"); sy_printf(\"TLIB_FAST\\tpkgs=1\\tbad=1\\n\"); return 1; }\n"
+/* negative control: a stand-in that does not compile -> rc 1, no completion line; the gate must block, not pass */
+#define BROKEN "#pragma unisa use sys.io\nint main(void) { this does not compile\n"
+
 int main(void) {
     char cmd[1600];
     if (sy_cwd(root, sizeof root)) { ck(0, "setup", "cwd"); return 1; }
@@ -79,7 +85,7 @@ int main(void) {
         "mkdir -p tools build && ln -s '%s/unisacc.com' unisacc.com && "
         "for m in sys text mem core; do ln -s '%s'/cx/$m tools/$m || exit 1; done", td, root, root) || sh(cmd, 0, 0)) { ck(0, "setup", "git-init"); return 1; }
     /* stand-ins the real gate runs from the fixture cwd (untracked, never staged) */
-    put("tools/ratchets.cx", "#pragma unisa use sys.io\nint main(void) { sy_printf(\"  cxtrunc: lib/r.cx has 1 unbounded call\\n\"); return 1; }\n");
+    put("tools/ratchets.cx", RATCHETS_OK);
     put("tools/cx-lint.cx",
         "#pragma unisa use sys.io\n#pragma unisa use text.text\n"
         "int main(int argc, char **argv) { int i, strict = 0, red = 0;\n"
@@ -87,8 +93,8 @@ int main(void) {
         "  for (i = 1; i < argc; i++) { long l = tx_len(argv[i], 4000);\n"
         "    if (strict && l > 6 && tx_same(argv[i] + l - 6, 6, \"bad.cx\", 6)) { sy_printf(\"LINT\\tR2-sep\\t%s:1\\tmissing separator\\n\", argv[i]); red = 1; }\n"
         "    if (!strict && l > 5 && tx_same(argv[i] + l - 5, 5, \"r1.cx\", 5)) sy_printf(\"LINT\\tR1-product\\t%s:1\\tsecond truth\\n\", argv[i]); }\n"
-        "  return red; }\n");
-    put("tools/check-tlib-frozen.cx", "#pragma unisa use sys.io\nint main(void) { sy_printf(\"FROZEN\\tpkgx\\tMISMATCH\\n\"); return 1; }\n");
+        "  sy_printf(\"CX_LINT\\tfiles=1\\tfindings=%d\\n\", red); return red; }\n");
+    put("tools/check-tlib-frozen.cx", TLIB_OK);
     put("build/tlib-packages.tsv", "pkgx\t1\t-\tlib\t-\t-\t-\t-\t0000000000000000000000000000000000000000000000000000000000000000\n");
 
     if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
@@ -124,6 +130,31 @@ int main(void) {
     put("okd/s.cx", "#!/bin/sh\necho x\n");
     put("okd/bad.cx", "int main(void) { return 0; }\n");
     one("all-at-once", "tools/foo.cx okd/s.cx okd/bad.cx", 3, "GATE\tnew-tool-check\tBLOCK", "GATE\tcx-shebang\tBLOCK", "GATE\tcx-lint:R2-sep\tBLOCK");
+
+    /* negative controls: compile-failing stand-ins (rc 1, no completion line) must be blocked by name */
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("tools/ratchets.cx", BROKEN);
+    put("okd/ok.cx", "int main(void) { return 0; }\n");
+    one("ratchets-compile-fail", "okd/ok.cx", 1, "GATE\tincomplete:ratchets\tBLOCK", "", "");
+    put("tools/ratchets.cx", RATCHETS_OK);
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    if (!cx_fmt(cmd, sizeof cmd, "cp '%s/tools/cx-lint.cx' '%s/cx-lint.keep'", td, td)) sh(cmd, 0, 0);
+    put("tools/cx-lint.cx", BROKEN);
+    put("okd/ok.cx", "int main(void) { return 0; }\n");
+    one("cx-lint-compile-fail", "okd/ok.cx", 2, "GATE\tincomplete:cx-lint\tBLOCK", "", "");
+    if (!cx_fmt(cmd, sizeof cmd, "mv '%s/cx-lint.keep' '%s/tools/cx-lint.cx'", td, td)) sh(cmd, 0, 0);
+
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("tools/check-tlib-frozen.cx", BROKEN);
+    put("lib/r.cx", "int main(void) { return 0; }\n");
+    one("tlib-compile-fail", "lib/r.cx", 2, "GATE\tincomplete:check-tlib-frozen\tBLOCK", "", "GATE\tratchet:cxtrunc\tBLOCK");
+    put("tools/check-tlib-frozen.cx", TLIB_OK);
+
+    /* positive control after restore: the clean case is unchanged */
+    if (!cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/okd' '%s/lib' '%s/exec'", td, td, td)) sh(cmd, 0, 0);
+    put("okd/ok.cx", "int main(void) { return 0; }\n");
+    one("clean-after-restore", "okd/ok.cx", 0, "GATE\tall\tPASS", "", "");
 
     if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0);
     sy_printf("CHECK_PRECOMMIT_PREVIEW\tfailed=%d\n", failed);
