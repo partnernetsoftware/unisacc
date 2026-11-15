@@ -43,6 +43,32 @@ static const char *names[] = {"--dir", "--domain", "--deadline", "--for", "--own
 enum { O_DIR, O_DOMAIN, O_DEADLINE, O_FOR, O_OWNER, O_EVIDENCE, O_WHY, O_TEXT, O_STATE, O_N };
 static const char *ov[O_N];
 static int bad(const char *m, const char *a) { fprintf(stderr, "devtask: %s%s%s\n", m, a ? " " : "", a ? a : ""); return 2; }
+
+/* --accept syntax check at open time (never runs it): first word must be executable syntax:
+ * a path (contains '/'), a VAR=value prefix, a shell builtin/keyword, or an executable found on $PATH.
+ * Returns 0 when acceptable, else writes the offending first word into w. */
+static int accept_shape(const char *cmd, char *w, int wn) {
+    static const char *kw[] = {"sh", "bash", "test", "[", "[[", "true", "false", ":", "cd", "env", "exec", "exit", "!", "(", "{",
+                               "if", "for", "while", "until", "case", "set", "export", "command", "timeout", "echo", "printf", "eval", ".", 0};
+    const char *p = cmd; int n = 0;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' && p[n] != ';' && p[n] != '&' && p[n] != '|' && n < wn - 1) { w[n] = p[n]; n++; }
+    w[n] = 0;
+    if (!n) return 1;
+    for (int k = 0; k < n; k++) if ((unsigned char)w[k] >= 0x80) return 1;
+    if (strchr(w, '/') || strchr(w, '=')) return 0;
+    for (int k = 0; kw[k]; k++) if (!strcmp(w, kw[k])) return 0;
+    {   const char *path = getenv("PATH"), *s = path ? path : "";
+        char f[1024];
+        while (*s) {
+            const char *e = strchr(s, ':'); int l = e ? (int)(e - s) : (int)strlen(s);
+            if (l > 0 && cx_fmt(f, sizeof f, "%.*s/%s", l, s, w) == 0 && access(f, X_OK) == 0) return 0;
+            if (!e) break;
+            s = e + 1;
+        }
+    }
+    return 1;
+}
 /* allowed: bit per option; every option takes one value, --domain takes one or more */
 static int parse(int argc, char **argv, int from, unsigned allowed) {
     for (int i = from; i < argc; i++) {
@@ -251,6 +277,14 @@ static int task_main(int argc, char **argv, long now) {
             return 2;
         }
         for (const char *q = dmin; *q; q++) if (*q < '0' || *q > '9') return bad("bad --deadline-min", dmin);
+        for (int k = 0; k < nacc; k++) {
+            char w0[128];
+            if (accept_shape(acc[k], w0, (int)sizeof w0)) {
+                fprintf(stderr, "devtask: task open refused: --accept #%d is not an executable command (first word '%s' is not a path, builtin or program on PATH): %s\n", k + 1, w0, acc[k]);
+                fprintf(stderr, "devtask: " ACC_RULE);
+                return 2;
+            }
+        }
         if (strlen(dmin) > 6 || (min = atol(dmin)) < 1) return bad("bad --deadline-min", dmin);
         if (rootopt) { if (snprintf(root, sizeof root, "%s", rootopt) >= (int)sizeof root) return bad("--root too long", 0); } else if (toplevel(root, sizeof root)) return 2;
         {   char wn2[1024]; if (strcmp(dom, "-") && dt_domain_ok(dom) == 0 && !strstr(dom, "..") && dw_write_norm(dom, root, wn2, sizeof wn2, why, sizeof why) == 0) (void)cx_fmt(dom, sizeof dom, "%s", wn2); }
