@@ -8,8 +8,9 @@
  *   MATERIAL<TAB>BATCH<TAB>NAME<TAB>SOURCE                 a resolved material
  *   MATERIAL<TAB>BATCH<TAB>NAME<TAB>-<TAB>REFUSED=REASON   a material nothing can produce
  * With --prepare-materials SOURCE is the built artifact's absolute cache path; without it, the
- * repo-relative source.  Only absolute paths are accepted here: a relative source is not something a
- * child process in another directory can use, so handing it on would be a silent wrong-path.
+ * repo-relative source. Absolute paths and strict lowercase 64-hex SHA256 values are transported;
+ * all-waves validates each name against its declared path/sha256 kind before opening the session.
+ * Relative paths remain refused because child processes cannot resolve them across directories.
  *
  *   char map[16384]; char why[300];
  *   int st = s9_map_from_dump(dump, n, map, (long)sizeof map, why, (int)sizeof why);
@@ -30,6 +31,12 @@ long s9_map_rows(void) { return s9_rows; }
 long s9_map_refused(void) { return s9_refused; }
 long s9_map_duplicates(void) { return s9_dup; }
 
+/* Values are transport only; all-waves checks the declared path/sha256 kind. */
+static int s9_map_sha_value(const char *s,long n) {
+    if(n!=64)return 0;
+    for(long i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;
+    return 1;
+}
 int s9_map_from_dump(const char *dump, long n, char *map, long cap, char *why, int whycap) {
     long at = 0, used = 0;
     s9_rows = 0; s9_refused = 0; s9_dup = 0;
@@ -56,7 +63,7 @@ int s9_map_from_dump(const char *dump, long n, char *map, long cap, char *why, i
             if (name_n <= 0) { cx_fmt(why, (size_t)whycap, "dump-name"); return 1; }
             if (src_n == 1 && dump[src_at] == '-') {
                 s9_refused++;                       /* named skip: the reason is the next field */
-            } else if (src_n > 0 && dump[src_at] == '/') {
+            } else if ((src_n > 0 && dump[src_at] == '/') || s9_map_sha_value(dump+src_at,src_n)) {
                 /* One material is declared by many batches, so the dump repeats a NAME once per batch.  The map
                    is keyed by NAME: a second line for a name already present is not a second entry (all-waves
                    refuses a duplicate map), so it is skipped here and counted, not silently rewritten. */
