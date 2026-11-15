@@ -25,9 +25,11 @@ static int equal(const char *a, const char *b) {
     size_t an = 0, bn = 0; char *ap = cx_read(a, &an), *bp = cx_read(b, &bn);
     int ok = ap && bp && an == bn && !memcmp(ap, bp, an); free(ap); free(bp); return ok;
 }
+/* Occurrences of a product diagnostic text in captured child stderr (not a source anchor). */
+static long diag_count(const char *s, size_t n, const char *w, size_t wl) { long c = 0; size_t i; if (!wl) return 0; for (i = 0; i + wl <= n; i++) if (!memcmp(s + i, w, wl)) { c++; i += wl - 1; } return c; }
 static int lexical_reject(const char *err) {
     size_t n = 0; char *s = cx_read(err, &n);
-    int ok = s && np_count(s, n, "reject: unexpected character", 28) > 0;
+    int ok = s && diag_count(s, n, "reject: unexpected character", 28) > 0;
     free(s); return ok;
 }
 struct result { int rc; char out[4096], err[4096], image[4096]; };
@@ -74,7 +76,17 @@ static void run(const char *name, const char *text, const char *inc) { struct re
 static void pair(const char *name, const char *plain, const char *bom, const char *base) {
     int mode; struct result a, b;
     for (mode = 1; mode <= 3; mode++) {
-        char label[160]; invoke(product, bom, mode, 0, &a); invoke(base, plain, mode, 0, &b);
+        char label[160];
+        if (mode == 2 && strcmp(plain, bom)) {   /* the tape carries the full source path in its .unit line: compile both under one path, one after the other */
+            char dp[4096], sp[4096], rp[256]; size_t sn = 0; char *sc;
+            if (cx_fmt(sp, sizeof sp, "%s-tape", name) || cx_fmt(rp, sizeof rp, "%s-tape/%s", name, plain)) die("tape stage");
+            path(dp, dest, sp); if (mkdir(dp, 0700)) die("tape stage dir");
+            path(sp, dest, plain); sc = cx_read(sp, &sn); if (!sc) die("tape stage read plain"); path(dp, dest, rp); if (np_writefile(dp, sc, sn)) die("tape stage write"); free(sc);
+            invoke(base, rp, mode, 0, &b);
+            if (unlink(dp)) die("tape stage unlink");
+            path(sp, dest, bom); sn = 0; sc = cx_read(sp, &sn); if (!sc) die("tape stage read bom"); if (np_writefile(dp, sc, sn)) die("tape stage write"); free(sc);
+            invoke(product, rp, mode, 0, &a);
+        } else { invoke(product, bom, mode, 0, &a); invoke(base, plain, mode, 0, &b); }
         if (cx_fmt(label, sizeof label, "%s/%s/byte-equal", name, mode == 1 ? "e2" : mode == 2 ? "tape" : "image")) die("label");
         note(a.rc == 0 && b.rc == 0 && equal(mode != 1 ? a.image : a.out, mode != 1 ? b.image : b.out), label);
     }
@@ -98,7 +110,7 @@ static int closure(const struct result *r) {
 static int named_scan_reject(const struct result *r, const char *name) {
     size_t n = 0; char *s = cx_read(r->err, &n);
     const char *why = "unisa pragma after first declaration";
-    int ok = r->rc == 1 && s && np_count(s, n, why, strlen(why)) == 1 && np_count(s, n, name, strlen(name)) > 0;
+    int ok = r->rc == 1 && s && diag_count(s, n, why, strlen(why)) == 1 && diag_count(s, n, name, strlen(name)) > 0;
     free(s); return ok;
 }
 static void mirrors(const char *host) {
