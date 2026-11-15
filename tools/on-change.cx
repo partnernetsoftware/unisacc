@@ -17,11 +17,13 @@
  * --hook:从 stdin 的 JSON 里取 "file_path";路径不在当前目录下,或在 .git/、out/ 下,静默 rc 0。否则把摘要包成
  *   {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"ON_CHANGE ..."}} 打到 stdout。
  *   钩子模式任何情况都 rc 0(只告警不阻断);本工具不调用 Edit/Write,派生写入由子进程直接落盘,不会再触发钩子。
+ *   (e) 预热:tlib 包源(build/tlib-packages.tsv 包根)后台有界起一次 affected --prep-only,见 prewarm();摘要加 prewarm=started|skip prewarm_why=。
  * 退出码(非钩子):0 正常;1 有 failed 的派生项;2 用法错。
  * Check: tools/check-on-change.cx. */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
@@ -165,10 +167,63 @@ static void claim_of(const char *path, char *dst, long cap) {
         if (k > s && k - s < cap) { mm_copy(dst, cap, out + s, k - s); dst[k - s] = 0; }
     }
 }
+/* (e) 预热:path 落在 build/tlib-packages.tsv 某包根(第 4 列,';' 分隔,目录或文件)下时,后台起一次
+   tools/affected.cx --files PATH --prep-only(经 ./tools/bound 290,setsid 脱离钩子,不等它)。
+   属主与截止写进锁文件 TMP/unisacc-prewarm-HASH.pid(HASH 取当前目录):PID owner=on-change deadline_ms=T path=P;
+   锁里的 PID 仍活着就不重复起(prewarm=skip why=running)。非 tlib 源、--dry-run 均为 skip。
+   UNISACC_PREWARM_CMD 是测试钩子:给了就用它代替 affected 命令行(仍经同样的锁与后台起法)。 */
+static int tlib_source(const char *path) {
+    size_t tn; char *t = cx_read("build/tlib-packages.tsv", &tn); long at = 0, n = (long)tn, pn = slen(path);
+    if (!t) return 0;
+    while (at < n) {
+        long e = tx_chr(t + at, n - at, '\n'), ln = e < 0 ? n - at : e, k, s = 0; int nf = 0; const char *l = t + at;
+        at += ln + 1;
+        if (!ln || l[0] == '#') continue;
+        for (k = 0; k < ln && nf < 3; k++) if (l[k] == '\t') { nf++; s = k + 1; }
+        if (nf < 3) continue;
+        {   long fe = s; while (fe < ln && l[fe] != '\t') fe++;
+            while (s < fe) {
+                long r = s; while (r < fe && l[r] != ';') r++;
+                if (r > s && pn >= r - s && mm_same(path, l + s, r - s) && (pn == r - s || path[r - s] == '/')) return 1;
+                s = r + 1;
+            }
+        }
+    }
+    return 0;
+}
+static const char *prewarm(const char *path, const char **why) {
+    char cwd[4096], lock[4400], cmd[9000], body[600], proc[64]; unsigned long h = 1469598103UL; int cn, k; size_t bn;
+    const char *hook = getenv("UNISACC_PREWARM_CMD"); char *lb;
+    *why = "not-tlib";
+    if (!tlib_source(path)) return "skip";
+    if (dry) { *why = "dry-run"; return "skip"; }
+    if (tx_chr(path, slen(path), '\'') >= 0) { *why = "quote-in-path"; return "skip"; }
+    cn = sy_realpath(".", cwd, sizeof cwd);
+    for (k = 0; k < cn; k++) h = (h ^ (unsigned char)cwd[k]) * 16777619UL;
+    if (cx_fmt(lock, sizeof lock, "%s/unisacc-prewarm-%lx.pid", sy_tmpdir(), h & 0xffffffffUL)) { *why = "path-too-long"; return "skip"; }
+    lb = cx_read(lock, &bn);
+    if (lb && bn > 0) {
+        long pid = 0; for (k = 0; k < (int)bn && lb[k] >= '0' && lb[k] <= '9'; k++) pid = pid * 10 + (lb[k] - '0');
+        if (pid > 0 && !cx_fmt(proc, sizeof proc, "/proc/%ld", pid) && sy_exists(proc) == 1) { *why = "running"; return "skip"; }
+    }
+    if (hook && *hook) cx_fmt(cmd, sizeof cmd, "setsid sh -c '%s' >/dev/null 2>&1 </dev/null & echo $!", hook);
+    else cx_fmt(cmd, sizeof cmd, "setsid ./tools/bound 290 sh ./unisacc.com tools/affected.cx -- --files '%s' --prep-only >%s.log 2>&1 </dev/null & echo $!", path, lock);
+    {   char *a[] = {"sh", "-c", cmd, 0}; long pid = 0;
+        out[0] = 0;
+        if (sy_run(a, out, sizeof out, 0) != 0) { *why = "spawn-failed"; return "skip"; }
+        for (k = 0; out[k] >= '0' && out[k] <= '9'; k++) pid = pid * 10 + (out[k] - '0');
+        if (pid <= 0) { *why = "spawn-failed"; return "skip"; }
+        cx_fmt(body, sizeof body, "%ld\towner=on-change\tdeadline_ms=%ld\tpath=%s\n", pid, sy_now_ms() + 290000, path);
+        sy_write_file(lock, body, slen(body), 0644);
+    }
+    *why = "-";
+    return "started";
+}
 /* 一个路径的整行摘要写进 line */
 static void one(const char *path, char *line, long cap) {
     static Set autos, pend, wrote, failed, ids;
     char w[1024], p[1024], f[1024], i5[512], claim[80]; int nb, nd; long t0 = sy_now_ms();
+    const char *pwhy, *pw = prewarm(path, &pwhy);
     autos.n = pend.n = wrote.n = failed.n = ids.n = 0;
     if (links) match_derive(path, &autos, &pend);
     run_derive(&autos, &wrote, &failed);
@@ -176,8 +231,8 @@ static void one(const char *path, char *line, long cap) {
     nd = docs_of(path);
     claim_of(path, claim, sizeof claim);
     set_join(&wrote, w, sizeof w); set_join(&pend, p, sizeof p); set_join(&failed, f, sizeof f); set_join(&ids, i5, sizeof i5);
-    cx_fmt(line, cap, "ON_CHANGE path=%s derived=%d batches=%d docs=%d claim=%s wrote=%s pending=%s failed=%s ids=%s%s ms=%ld",
-           path, autos.n + pend.n, nb, nd, claim, w, p, f, i5, links ? "" : " links=missing", sy_now_ms() - t0);
+    cx_fmt(line, cap, "ON_CHANGE path=%s derived=%d batches=%d docs=%d claim=%s wrote=%s pending=%s failed=%s ids=%s%s prewarm=%s prewarm_why=%s ms=%ld",
+           path, autos.n + pend.n, nb, nd, claim, w, p, f, i5, links ? "" : " links=missing", pw, pwhy, sy_now_ms() - t0);
 }
 /* 绝对路径在当前目录下就改成相对;返回 0 表示不在仓内(仅绝对路径会这样) */
 static const char *relative(const char *path, char *buf, long cap) {

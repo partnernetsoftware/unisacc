@@ -798,6 +798,9 @@ static void prep_done(PJob *J, int ok) {
 /* --materials-dump prints only MATERIAL rows: a reader that hands them to run-batch must not have to skip
    PREPARED/PREBUILD lines.  When a dump asked for the build, those reports go to stderr instead. */
 static int prep_quiet;
+/* --prep-only: kit + materials only, no batch loop; the summary the AFFECTED_PREP line reports */
+static int prep_only, pb_materials, pb_hits, pb_built, pb_failed;
+static const char *kit_state = "unknown";
 static void prep_print(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(prep_quiet ? stderr : stdout, fmt, ap); va_end(ap); }
 static void prebuild(const int *sel, int nsel) {
     int b, todo[32], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
@@ -863,6 +866,7 @@ static void prebuild(const int *sel, int nsel) {
         if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
         else prep_print("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
     prep_print("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
+    pb_materials = nprep; pb_hits = hits; pb_built = built; pb_failed = failed + deferred;
 }
 static char prep_val[32][4400];
 /* the material arguments of batch B, or a named reason */
@@ -887,7 +891,11 @@ static void kit_prepare(void) {
     rc = read_all(av, &out);
     for (i = 0; i < out.n; i = e + 1) {
         e = i; while (e < out.n && out.p[e] != '\n') e++;
-        if (tx_prefix(out.p + i, e - i, "PREPARED\ttlib-kit", 17)) { printf("%.*s\n", (int)(e - i), out.p + i); shown = 1; }
+        if (tx_prefix(out.p + i, e - i, "PREPARED\ttlib-kit", 17)) {
+            long r = tx_find(out.p + i, e - i, "rebuilt=", 8);
+            printf("%.*s\n", (int)(e - i), out.p + i); shown = 1;
+            if (r >= 0 && r + 8 < e - i) kit_state = out.p[i + r + 8] == '0' && (r + 9 >= e - i || out.p[i + r + 9] < '0' || out.p[i + r + 9] > '9') ? "hit" : "built";
+        }
     }
     if (!shown) printf("PREPARED\ttlib-kit\trebuilt=UNKNOWN\trc=%d\n", rc);
 }
@@ -918,6 +926,11 @@ static int run(const int *sel, int nsel, int jobs) {
     {   long p0 = sy_now_ms();
         if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once) */
         prep_ms = sy_now_ms() - p0;
+    }
+    if (prep_only) {   /* 只预热:不进批循环,不打 BATCH_RUN/PASS;材料只记 PREPARED */
+        printf("AFFECTED_PREP\tkit=%s\tmaterials=%d\tbuilt=%d\thit=%d\tfailed=%d\tkit_ms=%ld\tprep_ms=%ld\n",
+               kit_state, pb_materials, pb_built, pb_hits, pb_failed, kit_ms, prep_ms);
+        return pb_failed ? 1 : 0;
     }
     t_main = sy_now_ms();   /* 预建结束才起算:prep 已经计入 prep_ms,不再占批次的启动/硬杀窗口 */
     while (next < nsel || nrun) {
@@ -1210,6 +1223,7 @@ int main(int argc, char **argv) {
             if (!known[q]) die("--layer: base|ext|stream|compiler|driver|chain|release|all");
         }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "--prep-only")) { mode_run = 1; prep_only = 1; prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
         else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
         else if (tx_eqz(argv[a], "--symbol-narrow") && a + 1 < argc) { sym_list = argv[a + 1]; a += 2; }
