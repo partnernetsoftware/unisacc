@@ -153,6 +153,9 @@ static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到
  * Each leaf has one total 50s construction bound; no nested two-image build.
  * Receipts bind current inputs AND image bytes, never a test result. */
 static int init_identity(const char *tier, int mapped, char hex[65]);
+/* 只在 init_one 的一次前/后测量窗口复用；绝不跨子相或执行边界。 */
+static int identity_epoch, identity_ready;
+static as_ident identity_live;
 static const char *native_tier;
 /* 原子持久化证据，缺失与内容失配严格区分。 */
 static int evidence_file(const char *p,const char *body,int save) {
@@ -208,6 +211,7 @@ static int native_image(int waves, int build, char bin[4800]) {
     if(r.residue)rc=rc?rc:1;
     np_free(&r);
     if(rc || sy_now_ms()-started>=50000) return rc?rc:124;
+    identity_ready=0;
     if(init_identity(native_tier,0,after)||strcmp(input,after)||as_sha_file(bin,1,hash,0,why,sizeof why)||sy_access(bin,1))return -1;
     if(sy_now_ms()-started>=50000)return 124;
     if(cx_fmt(body,sizeof body,"S9NATIVE-v2\t%s\t%s\t%s\n",s9run,input,hash)||evidence_file(rec,body,1))return -1;
@@ -388,7 +392,8 @@ static int init_left(void) {
 }
 static int init_identity(const char *tier, int mapped, char hex[65]) {
     as_ident id; char own[65], mh[65], fh[65], body[8192];
-    if (fake) {
+    if (identity_epoch && identity_ready) id=identity_live;
+    else if (fake) {
         static const char *trees[] = {"tests", "tools", "cx", "src", "seed"};
         np_buf b = {0}; char p[4400], h[65]; int i;
         memset(&id, 0, sizeof id);
@@ -403,6 +408,7 @@ static int init_identity(const char *tier, int mapped, char hex[65]) {
         if (as_join(p, sizeof p, root, "unisacc.com")) return -1;
         if (sy_exists(p) == 1 && as_sha_file(p, 1, id.candidate, 0, why, sizeof why)) return -1;
     } else if (as_identity(root, 1, &id, why, sizeof why)) return -1;
+    if(identity_epoch&&!identity_ready){identity_live=id;identity_ready=1;}
     { const char *source=sy_env("UNISACC_S9_NIGHTLY_SOURCE");
       if (as_sha_file(source&&*source?source:"tools/s9-nightly.cx",1,own,0,why,sizeof why)) return -1; }
     cx_sha256_hex("", 0, mh); cx_sha256_hex("", 0, fh);
@@ -486,6 +492,7 @@ static int map_families_load(void) {
 }
 /* A family receipt binds both its immutable input identity and exact dump bytes.
  * Sealing reads every declared family, including explicit refusals, before making MAP. */
+static int map_verify_only;
 static int map_family_phase(const char *run,const char *tier,const char *family,int seal) {
     char state[4600],p[4800],rec[4800],identity[65],h[65],want[5000],done[4840],intent[4840];
     int nn=map_families_load(); np_buf all={0};
@@ -552,7 +559,67 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     if(canonical.n>=sizeof mapfile){free(canonical.p);return 1;}
     if(mm_copy(mapfile,sizeof mapfile,canonical.p,canonical.n)){free(canonical.p);return 1;}
     mapfile[canonical.n]=0;free(canonical.p);
+    if(map_verify_only)return evidence_file(mappath,mapfile,0)==1?0:-1;
     return cx_write(mappath,mapfile,strlen(mapfile));
+}
+/* 底层封印必须与实际字节一致；不能把「存在」当成成功。 */
+static int phase_sha(const char *run,const char *leaf,char hash[65]) {
+    char p[4800],hp[4840],want[66];
+    if(as_join(p,sizeof p,run,leaf)||cx_fmt(hp,sizeof hp,"%s.sha256",p)||as_sha_file(p,0,hash,0,why,sizeof why))return -1;
+    if(cx_fmt(want,sizeof want,"%s\n",hash))return -1;
+    return evidence_file(hp,want,0)==1?0:-1;
+}
+static int phase_checker(const char *run,const as_manifest *m,np_buf *wire) {
+    char h[65],source[65],p[4800];size_t z;
+    if(phase_sha(run,"checker",h)||phase_sha(run,"checker.identity",source)||as_join(p,sizeof p,root,"tools/all-waves.cx")||as_sha_file(p,0,source,0,why,sizeof why)||as_join(p,sizeof p,run,"nonce"))return -1;
+    char *nonce=as_read(p,0,&z,why,sizeof why);
+    if(!nonce||z!=65||nonce[64]!='\n'){free(nonce);return -1;}
+    nonce[64]=0;if(!tp_material_value(2,nonce)){free(nonce);return -1;}
+    np_puts(wire,"S9_CHECKER\t");np_puts(wire,root);np_puts(wire,"\t");np_puts(wire,run);np_puts(wire,"\t");np_putll(wire,m->created);np_puts(wire,"\t");np_puts(wire,m->ident.candidate_kind);np_puts(wire,"\t");np_puts(wire,m->ident.candidate);np_puts(wire,"\t");np_puts(wire,m->ident.harness);np_puts(wire,"\t");np_puts(wire,source);np_puts(wire,"\t");np_puts(wire,nonce);np_puts(wire,"\t");np_puts(wire,h);np_puts(wire,"\n");free(nonce);
+    if(as_join(p,sizeof p,run,"checker.identity"))return -1;
+    return evidence_file(p,wire->p,0)==1?0:-1;
+}
+static int phase_owned(int n,const char *run) {
+    if(n==0)return 0; /* phase_outputs 核两份 native intent/identity/SHA。 */
+    if(n==1){if(fake)return -1;map_verify_only=1;int rc=map_family_phase(run,native_tier,0,1);map_verify_only=0;return rc;}
+    if(fake)return -1; /* 假执行不冒充真实底层 provenance。 */
+    as_manifest m;char h[65],p[4800];int rc=-1;
+    if(as_load(run,&m,why,sizeof why))return -1;
+    if(strcmp(root,m.root)||as_ident_diff(&identity_live,&m.ident)||strcmp(identity_live.sid,m.ident.sid))goto done;
+    if(as_join(p,sizeof p,run,"materials.tsv")||as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,m.map_sha)||as_sha_file(mappath,0,h,0,why,sizeof why)||strcmp(h,m.map_sha))goto done;
+    if(n==2){
+        const char *meta[]={"nonce","mode","tier","selection.tsv","inputs"};for(int i=0;i<5;i++)if(phase_sha(run,meta[i],h))goto done;
+        const char *mode=!strcmp(native_tier,"commit")?"COMMIT_ONLY\n":!strcmp(native_tier,"release")?"RELEASE_ONLY\n":"FULL\n";
+        char body[128];if(as_join(p,sizeof p,run,"mode")||evidence_file(p,mode,0)!=1)goto done;
+        if(cx_fmt(body,sizeof body,"%s\n",!strcmp(native_tier,"daily")?"all":native_tier)||as_join(p,sizeof p,run,"tier")||evidence_file(p,body,0)!=1)goto done;
+        if(cx_fmt(body,sizeof body,!strcmp(native_tier,"daily")?"":"--tier\n%s\n",native_tier)||as_join(p,sizeof p,run,"selection.tsv")||evidence_file(p,body,0)!=1)goto done;
+        char bin[4800];if(native_image(1,0,bin))goto done;
+        int left=init_left();if(left<1)goto done;
+        np_result r={0};char *v[]={bin,"inputs",root,0};int rr=run_step(v,root,left,&r);
+        if(as_join(p,sizeof p,run,"inputs")||rr||r.residue||evidence_file(p,r.out?r.out:"",0)!=1){np_free(&r);goto done;}np_free(&r);rc=0;
+    }
+    else if(n==3||n==4){np_buf wire={0};rc=phase_checker(run,&m,&wire);
+        if(!rc&&n==4){np_buf copy={0};np_puts(&copy,"COPY_VERIFIED_SAME_RUN\tcompile_ns=0\n");np_put(&copy,wire.p,wire.n);if(as_join(p,sizeof p,run,"executor/all-waves.copy")||evidence_file(p,copy.p,0)!=1)rc=-1;free(copy.p);}
+        free(wire.p);if(rc)goto done;
+    } else if(n==7)rc=phase_sha(run,"driver",h);
+    else if(n==8)rc=phase_sha(run,"plan.tsv",h);
+    else if(n>=9){
+        size_t z;char *map=as_read(mappath,0,&z,why,sizeof why),*at=map;int row=0;
+        while(at&&*at){char *end=strchr(at,'\n'),*tab=strchr(at,'\t');if(!end||!tab||tab>end)break;
+            if(row++==n-9){*tab=0;*end=0;const as_material *x=as_find_material(&m,at);
+                if(x&&!strcmp(x->path,tab+1)&&!as_material_measure(x->kind,x->path,1,h,0,why,sizeof why)&&!strcmp(h,x->content))rc=0;break;
+            }at=end+1;
+        }free(map);
+    }
+    if(n>=4&&n<=6){rc=0;for(int i=n==5?1:0;i<(n==4?1:2);i++){
+        const char *leaf=i?"executor/run-batch":"executor/all-waves";char record[4840];size_t z;
+        if(as_join(p,sizeof p,run,leaf)||as_sha_file(p,0,h,0,why,sizeof why)||cx_fmt(record,sizeof record,"%s.stage",p)){rc=-1;break;}
+        char *s=as_read(record,0,&z,why,sizeof why);char *f[4];long long ns,created;
+        if(!s||!z||s[z-1]!='\n'){free(s);rc=-1;break;}s[z-1]=0;
+        if(as_split(s,f,4)!=4||strcmp(f[0],h)||as_digits(f[1],&ns)||strcmp(f[2],run)||as_digits(f[3],&created)||created!=m.created||(n==4&&ns!=0)||(n==6&&(!m.has_executor||strcmp(h,i?m.runner_sha:m.exec_sha))))rc=-1;
+        free(s);if(!rc&&n==4){char checker[65];if(phase_sha(run,"checker",checker)||strcmp(checker,h))rc=-1;}if(rc)break;
+    }}
+done:as_free(&m);return rc;
 }
 /* 成功 outputs 在 .done 前落盘；旧产物没有成功证据时绝不补历史。 */
 static int phase_outputs(int n,const char *run,char hex[65]) {
@@ -574,7 +641,7 @@ static int phase_outputs(int n,const char *run,char hex[65]) {
         if(!fake) {
             as_manifest m;as_ident live;
             if(as_load(run,&m,why,sizeof why)) {free(b.p);return -1;}
-            if(as_identity(root,1,&live,why,sizeof why)||as_ident_diff(&live,&m.ident)||strcmp(live.sid,m.ident.sid)||strcmp(root,m.root)){as_free(&m);free(b.p);return -1;}
+            if((identity_epoch&&identity_ready?(live=identity_live,0):as_identity(root,1,&live,why,sizeof why))||as_ident_diff(&live,&m.ident)||strcmp(live.sid,m.ident.sid)||strcmp(root,m.root)){as_free(&m);free(b.p);return -1;}
             np_puts(&b,m.root);np_putll(&b,m.created);np_puts(&b,m.map_sha);
             if(n==6) {if(!m.has_executor){as_free(&m);free(b.p);return -1;}np_puts(&b,m.exec_sha);np_puts(&b,m.runner_sha);}
             if(n>=9) {
@@ -609,6 +676,7 @@ static int phase_evidence(int n,const char *suffix,const char *identity,const ch
 static int init_one(int n, const char *run, const char *tier, int reuse, char *out, int cap) {
     char before[65], after[65], predecessor[65], base[65], inside[4600], outputs[65]; int rc, j;
     init_t0 = sy_now_ms();
+    identity_epoch=1;identity_ready=0;
     if (cx_fmt(init_side, sizeof init_side, "%s.nightly-init", run) ||
         cx_fmt(inside, sizeof inside, "%s/.nightly-init", run) ||
         cx_fmt(mappath, sizeof mappath, "%s.materials.tsv", run)) return -1;
@@ -648,7 +716,11 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
                 if(init_receipt(n,expected,1))return -1;
                 printf("S9_INIT\tphase=%s\tstatus=RECOVERED\n",init_name(n));return 0;
             }
-            cx_fmt(why,sizeof why,"REFUSE phase-success-evidence-missing %s",init_name(n));return -1;
+            if(phase_owned(n,run)){cx_fmt(why,sizeof why,"REFUSE phase-success-evidence-missing %s",init_name(n));return -1;}
+            /* 旧 outputs 缺失，只能由同 RUN 的底层成功封印重新封口。 */
+            identity_ready=0;
+            if(init_identity(tier,n>0,after)||strcmp(expected,after)||phase_outputs(n,run,outputs)||phase_owned(n,run)||phase_evidence(n,"outputs",expected,outputs,1)||init_receipt(n,expected,1))return -1;
+            printf("S9_INIT\tphase=%s\tstatus=RECOVERED\n",init_name(n));return 0;
         }
         if(phase_evidence(n,"intent",before,"-",1))return -1;
     }
@@ -675,6 +747,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
         rc = invoke("prepare", root, run, init_preps[n - 3], init_left(), out, cap);
     }
     note(init_name(n)); if (rc) return rc;
+    identity_ready=0; /* 执行后必须重新完整测量，随后仅复用这个新快照。 */
     if (reuse) {
         if (init_identity(tier, n > 0, after)) return -1;
         if (n != 1 && strcmp(before, after)) { cx_fmt(why, sizeof why, "identity changed during %s", init_name(n)); return -1; }
@@ -820,6 +893,7 @@ int main(int argc, char **argv) {
                 for(int fi=0;fi<nf;fi++)if(map_family_phase(run,tier,map_families[fi],0))die("map-family",map_families[fi]);
             }
             rc = init_one(init_part, run, tier, !(fake && phase == 0), tmp, sizeof tmp);
+            identity_epoch=0;identity_ready=0; /* 此相已结束，不能给下一调用复用。 */
             if (rc) {
                 if (tmp[0]) fprintf(stderr, "s9-nightly: %s\n", tmp);
                 fprintf(stderr, "s9-nightly: %s\n", why);
