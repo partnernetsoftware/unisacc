@@ -1,6 +1,6 @@
 # unisacc 0.0.67 -- 发布说明
 
-状态:公开前记录(Y1),尚未公开。沿用 plans/release-notes-0.0.66.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
+状态:已公开,公开读回后补记(Y2)。沿用 plans/release-notes-0.0.66.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
 
 - 冻结提交(REV):855ce83aa9ed2fbf3823d5054048a851fb14485f;源标签 v0.0.67-src 指向 F:e02a8f8099c1214f028b10efb1ab55f1510ea7de(树取 REV,只差 release/candidate.tsv,父为 fbdc99ca 与 REV);候选表提交(X,仅改 release/candidate.tsv):9e54f512a8b06e3ea890920ce8a9428690767d55。整链所用私有提交:a67e7e2d11(树同 REV)。
 - 候选 APE(unisacc.com)sha256:a99ea71de7edf8b21db804839e65dd130aff430c6d57cfb627a26e84a7b49e8b(7091428 字节)。pkg.bin sha256:c7cb3a8c3a6d88779bafc7aa0686ce6fe413c4477be502db4fbddf2cb092beae(与 0.0.66、0.0.65、0.0.63 的 pkg.bin 相同)。
@@ -8,8 +8,8 @@
 - 本地打包(tools/release-run.cx --pack):步 4 至 9 全 DONE,结果 PACK_OK。tools/release-ape.cx smoke 对打包件:未跑。
 - 同候选 CI:candidate-native.yml run 43672079447,2026-11-15T03:22:36Z 触发,输入 commit 为 X、release_tag 为 v0.0.67;结果:completed success(2026-11-15T03:25:43Z 结束),10 个作业全 success:fetch、ffi-lnx、cell-tools、report,以及 6 个平台候选作业(lnx x86_64、lnx arm64、osx arm64、osx x86_64、win x86_64、win arm64;其中 win arm64 的矩阵标记为 file,其余为 yes)。osx 与 win 的证据范围以该 run 作业为准,不扩大解读。
 - release v0.0.67 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。草稿上传后下载读回,5 件 sha256 与 SHA256SUMS 逐件一致,SHA256SUMS 与本地打包件逐字节相同(sha256 69e46e46f16c6e6300e23a930bce27dd09fece994a5981dc0b5638e271adf4a9)。
-- 公开时间:待填。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0(第 4 步 s9 与第 8 步读回为 UNKNOWN)。本版不宣称 QUALIFIED。
-- 公开后读回:未做(未公开)。本机装机:未做。
+- 公开时间:2026-11-15T04:04:14Z(gh release view 的 publishedAt),Latest。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0,公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
+- 公开后读回:下载 6 件,5 件 sha256 与 SHA256SUMS 逐件一致,unisacc.com sha256 同上;标签 v0.0.67 与 v0.0.67-src 均指 F。本机装机:公开后由主调度做。
 - 速度数字只引 build/speed-baseline.tsv 已有行。0.0.67 的启动、冷编译、生成代码对 0.0.66 的对比:未测,本版不宣称任何速度变化。
 
 ## 是什么
