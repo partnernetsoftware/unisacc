@@ -16,6 +16,9 @@
  *   ROOT RUN --tier T --phase build|map|init-session|prepare-1..6
  *   ROOT RUN --tier T --phase map-register-N       第N个材料登记(六prepare后；N从1起)
  *   ROOT RUN --tier T --phase map --map-family NAME 每材料族独立准备；全部族完成后 --phase map 聚合封口。
+ * map封口在写map.intent前核全体IMPLEMENTED/SOURCE材料族，缺失/陈旧一次列全；未就绪不留map意图。
+ * 已有map.intent但缺映射文件时具名NEW_RUN_REQUIRED，不重建、不猜成功；映射存在仍核原SHA与成功证据。
+ * --map-controls 使用独立临时目录和合成登记/收据验证这些边界，不授产品资格。
  * 恢复协议：执行前 intent，成功后同会话 owned-outputs 证据，最后原子写 done。
  * done 丢失但输入、执行体及本相产物 SHA 全部核对一致时补写并记 RECOVERED；任一失配 REFUSE，不重造覆盖。
  * 旧协议只有产物而无成功证据时不追认；必须保留原拒绝。准备证据不是测试结论。
@@ -498,6 +501,45 @@ static int map_families_load(void) {
 }
 /* A family receipt binds both its immutable input identity and exact dump bytes.
  * Sealing reads every declared family, including explicit refusals, before making MAP. */
+/* Pure read pass: validate every required family before a map intent can be
+ * written. A refused dump is still family evidence, never a batch PASS. */
+static int map_collect_families(const char *run,const char *state,const char *identity,int count,np_buf *all) {
+    np_buf missing={0};int bad=0;
+    for(int i=0;i<count;i++) {
+        char p[4800],receipt[4840],intent[4840],hash[65],want[5000];size_t n=0,rn=0;
+        if(cx_fmt(p,sizeof p,"%s/family-%s.dump",state,map_families[i])||
+           cx_fmt(receipt,sizeof receipt,"%s.sha",p)||cx_fmt(intent,sizeof intent,"%s.intent",p)){free(missing.p);return -1;}
+        char *dump=cx_read(p,&n),*saved=cx_read(receipt,&rn);int valid=0;
+        if(dump&&saved) {
+            cx_sha256_hex(dump,n,hash);
+            if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,hash)){free(dump);free(saved);free(missing.p);return -1;}
+            valid=rn==strlen(want)&&!memcmp(saved,want,rn)&&evidence_file(intent,identity,0)==1;
+        }
+        if(!valid){if(bad++)np_puts(&missing,",");np_puts(&missing,map_families[i]);}
+        else np_put(all,dump,n);
+        free(dump);free(saved);
+    }
+    if(bad) {
+        fprintf(stderr,"s9-nightly: REFUSE map-families-unready count=%d families=%s\n",bad,missing.p);
+        cx_fmt(why,sizeof why,"REFUSE map-families-unready count=%d; see complete family list",bad);
+    }
+    free(missing.p);return bad?-1:0;
+}
+static int map_start_gate(const char *run,const char *identity,int has_intent) {
+    if(has_intent) {
+        struct stat st;errno=0;
+        if(lstat(mappath,&st)) {
+            if(errno==ENOENT)cx_fmt(why,sizeof why,"REFUSE map-recovery-materials-missing action=NEW_RUN_REQUIRED path=%s",mappath);
+            else cx_fmt(why,sizeof why,"REFUSE map-recovery-materials-stat errno=%d action=CHECK_ACCESS",errno);
+            return -1;
+        }
+        if(!S_ISREG(st.st_mode)){cx_fmt(why,sizeof why,"REFUSE map-recovery-materials-kind action=NEW_RUN_REQUIRED");return -1;}
+        return 0;
+    }
+    if(fake||sy_env("UNISACC_S9_MATERIALS_DUMP_SEAM"))return 0;
+    int count=map_families_load();if(count<0)return -1;
+    np_buf all={0};int rc=map_collect_families(run,init_state,identity,count,&all);free(all.p);return rc;
+}
 static int map_verify_only;
 static int map_family_phase(const char *run,const char *tier,const char *family,int seal) {
     char state[4600],p[4800],rec[4800],identity[65],h[65],want[5000],done[4840],intent[4840];
@@ -507,8 +549,9 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     if(sy_exists(inside)==1&&cx_fmt(state,sizeof state,"%s",inside))return 1;
     if(sy_exists(state)!=1&&mkdir(state,0700))return 1;
     if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||init_identity(tier,0,identity))return 1;
-    for(int i=0;i<nn;i++) {
-        if(!seal&&strcmp(family,map_families[i]))continue;
+    if(seal&&map_collect_families(run,state,identity,nn,&all)){free(all.p);return 1;}
+    for(int i=0;!seal&&i<nn;i++) {
+        if(strcmp(family,map_families[i]))continue;
         if(cx_fmt(p,sizeof p,"%s/family-%s.dump",state,map_families[i])||cx_fmt(rec,sizeof rec,"%s.sha",p))return 1;
         if(cx_fmt(done,sizeof done,"%s.done",p)||cx_fmt(intent,sizeof intent,"%s.intent",p))return 1;
         size_t z=0,rz=0;char *b=cx_read(p,&z),*saved=cx_read(rec,&rz);
@@ -698,6 +741,10 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
                 cx_fmt(why, sizeof why, "prerequisite %s", init_name(j)); return -1;
             }
         }
+        if(n==1) {
+            int intent=phase_evidence(n,"intent",before,"-",0);
+            if(intent<0||(intent==1&&map_start_gate(run,before,1)))return -1;
+        }
         if (n == 1 && sy_exists(mappath) == 1) {
             if (init_identity(tier, 1, predecessor)) return -1;
             rc = init_receipt(n, predecessor, 0);
@@ -729,6 +776,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
             if(init_identity(tier,n>0,after)||strcmp(expected,after)||phase_outputs(n,run,outputs)||phase_owned(n,run)||phase_evidence(n,"outputs",expected,outputs,1)||init_receipt(n,expected,1))return -1;
             printf("S9_INIT\tphase=%s\tstatus=RECOVERED\n",init_name(n));return 0;
         }
+        if(n==1&&map_start_gate(run,before,0))return -1;
         if(phase_evidence(n,"intent",before,"-",1))return -1;
     }
     if (init_left() < 1) return 124;
@@ -774,7 +822,77 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
     printf("S9_INIT\tphase=%s\tstatus=DONE\n", init_name(n)); return 0;
 }
 
+static void map_control_check(int yes,const char *name,int *bad){if(!yes)(*bad)++;printf("MAP_CONTROL\t%s\tchecked=%d\n",name,yes);}
+static int map_control_family(const char *run,const char *identity,const char *family,const char *batch,const char *artifact) {
+    char p[4800],rp[4840],dump[5000],hash[65],record[5000];
+    if(cx_fmt(p,sizeof p,"%s/family-%s.dump",init_state,family)||
+       cx_fmt(dump,sizeof dump,"MATERIAL\t%s\t%s\t%s\n",batch,family,artifact))return -1;
+    cx_sha256_hex(dump,strlen(dump),hash);
+    if(cx_fmt(record,sizeof record,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,hash)||
+       cx_write(p,dump,strlen(dump))||cx_fmt(rp,sizeof rp,"%s.sha",p)||cx_write(rp,record,strlen(record))||
+       cx_fmt(rp,sizeof rp,"%s.intent",p)||cx_write(rp,identity,strlen(identity)))return -1;
+    return 0;
+}
+/* Tiny typed registry and family receipts; no product qualification or producer
+ * success is inferred from these deliberately synthetic control artifacts. */
+static int map_controls(void) {
+    char dir[]="/tmp/check-s9-map-XXXXXX",run[4400],artifact[4400],p[4800],intent[4800],identity[65],other[65];int bad=0;
+    if(!mkdtemp(dir)||cx_fmt(root,sizeof root,"%s",dir)||cx_fmt(run,sizeof run,"%s/run",dir)||
+       cx_fmt(s9run,sizeof s9run,"%s",run)||cx_fmt(init_state,sizeof init_state,"%s.nightly-init",run)||
+       cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||mkdir(init_state,0700))return 2;
+    cx_sha256_hex("map-control-input",17,identity);cx_sha256_hex("changed-map-input",17,other);
+    const char *dirs[]={"tests","tools"};for(int i=0;i<2;i++){if(as_join(p,sizeof p,root,dirs[i])||mkdir(p,0700))return 2;}
+    if(as_join(p,sizeof p,root,"tests/case.cx")||cx_write(p,"int main(void){return 0;}\n",strlen("int main(void){return 0;}\n"))||
+       cx_fmt(artifact,sizeof artifact,"%s/artifact",root)||cx_write(artifact,"fixture",7))return 2;
+    const char *registry=
+      "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+      "host-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tSOURCE\tlnx/x86_64\t55\thosttcc:path\ttests/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tdaily\n"
+      "wave-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tSOURCE\tlnx/x86_64\t55\tall-waves-tool:path\ttests/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\trelease\n"
+      "duplicate-family\tIMPLEMENTED\tinterfaces\ttests/case.cx\tSOURCE\tosx/arm64\t55\tall-waves-tool:path\ttests/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tcommit\n"
+      "planned-row\tPLANNED\tinterfaces\ttests/case.cx\tSOURCE\tlnx/x86_64\t55\tplanned-only:path\ttests/case.cx\t-\tmap.fixture\tNOT_READY\tproduct\trelease\n"
+      "prepared-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tPREPARED\tlnx/x86_64\t55\tprepared-only:path\t{prepared-only}/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tdaily\n";
+    const char *coverage="id\tlayer\timplementation\texpected_or_gap\tsource\nmap.fixture\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tmap control\ttests/case.cx\n";
+    if(as_join(p,sizeof p,root,"tests/batches.tsv")||cx_write(p,registry,strlen(registry))||
+       as_join(p,sizeof p,root,"tests/coverage.tsv")||cx_write(p,coverage,strlen(coverage))||
+       cx_fmt(intent,sizeof intent,"%s/map.intent",init_state))return 2;
+    int count=map_families_load();
+    if(count<0){fprintf(stderr,"map-controls: registry refused: %s\n",why);return 2;}
+    map_control_check(count==2&&map_planned_n==2&&!strcmp(map_families[0],"hosttcc")&&!strcmp(map_families[1],"all-waves-tool"),"implemented-source-family-set-deduplicated-all-tiers",&bad);
+    int rc=map_start_gate(run,identity,0);
+    map_control_check(rc!=0&&sy_exists(intent)==0&&sy_exists(mappath)==0,"all-missing-refused-before-map-intent",&bad);
+    if(map_control_family(run,identity,"hosttcc","host-row",artifact))return 2;
+    rc=map_start_gate(run,identity,0);
+    map_control_check(rc!=0&&sy_exists(intent)==0,"remaining-family-refused-without-poisoning-run",&bad);
+    if(map_control_family(run,identity,"all-waves-tool","wave-row",artifact))return 2;
+    rc=map_start_gate(run,identity,0);
+    map_control_check(!rc&&sy_exists(intent)==0,"same-run-ready-after-filling-all-families",&bad);
+    np_buf all={0};char parsed[16384];
+    rc=map_collect_families(run,init_state,identity,count,&all);
+    map_control_check(!rc&&!s9_map_from_dump(all.p,all.n,parsed,sizeof parsed,why,sizeof why)&&s9_map_rows()==2,"ready-families-form-complete-map",&bad);free(all.p);
+    if(cx_fmt(p,sizeof p,"%s/family-hosttcc.dump",init_state)||cx_write(p,"tampered",8))return 2;
+    rc=map_start_gate(run,identity,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-dump-sha-tamper-refused",&bad);
+    if(map_control_family(run,identity,"hosttcc","host-row",artifact))return 2;
+    rc=map_start_gate(run,other,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-input-identity-change-refused",&bad);
+    char foreign[4400];if(cx_fmt(foreign,sizeof foreign,"%s/other-run",dir))return 2;
+    rc=map_start_gate(foreign,identity,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-other-run-receipts-refused",&bad);
+    if(cx_fmt(p,sizeof p,"%s/family-hosttcc.dump.intent",init_state)||cx_write(p,"tampered",8))return 2;
+    rc=map_start_gate(run,identity,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-intent-tamper-refused",&bad);
+    if(map_control_family(run,identity,"hosttcc","host-row",artifact)||
+       cx_fmt(p,sizeof p,"%s/family-all-waves-tool.dump.sha",init_state)||unlink(p))return 2;
+    rc=map_start_gate(run,identity,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-receipt-absent-refused",&bad);
+    if(map_control_family(run,identity,"all-waves-tool","wave-row",artifact)||phase_evidence(1,"intent",identity,"-",1))return 2;
+    rc=map_start_gate(run,identity,1);
+    map_control_check(rc!=0&&strstr(why,"map-recovery-materials-missing")&&strstr(why,"NEW_RUN_REQUIRED")&&!strstr(why,"file-absent")&&phase_evidence(1,"intent",identity,"-",0)==1,"interrupted-map-missing-product-requires-new-run",&bad);
+    if(cx_write(mappath,"fixture",7))return 2;
+    map_control_check(!map_start_gate(run,identity,1),"existing-map-continues-to-original-sha-verification",&bad);
+    if(unlink(mappath)||mkdir(mappath,0700))return 2;
+    map_control_check(map_start_gate(run,identity,1)!=0&&strstr(why,"materials-kind"),"map-product-directory-refused",&bad);
+    if(rmdir(mappath))return 2;
+    if(!bad){char *clean[]={"rm","-rf","--",dir,0};np_result r={0};if(np_run(clean,0,0,5,&r,why,sizeof why)||r.rc)return 2;np_free(&r);}
+    printf("MAP_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
+}
 int main(int argc, char **argv) {
+    if(argc==2&&!strcmp(argv[1],"--map-controls"))return map_controls();
     const char *run = 0, *tier = "commit", *date = 0;
     int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
     char report[4400], tmp[4000], datebuf[32], aggout[4400];
@@ -907,8 +1025,15 @@ int main(int argc, char **argv) {
             if (rc) {
                 if (tmp[0]) fprintf(stderr, "s9-nightly: %s\n", tmp);
                 fprintf(stderr, "s9-nightly: %s\n", why);
+                /* 分相名保留作定位；失败仍须具名到材料准备者，后续未执行者逐条记 NOT_RUN。 */
+                if(init_part>=3&&init_part<9) {
+                    note(init_preps[init_part-3]);
+                    if(phase<4)for(int pending=init_part+1;pending<9;pending++)note_not_run(init_preps[pending-3]);
+                }
                 fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=%s\trc=%d\treport=%s\n", init_name(init_part), rc, report);
+                if(init_part>=3&&init_part<9)
+                    printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\tphase=%s\trc=%d\treport=%s\n",init_preps[init_part-3],init_name(init_part),rc,report);
+                else printf("S9_NIGHTLY\tstatus=FAIL\tstep=%s\trc=%d\treport=%s\n", init_name(init_part), rc, report);
                 return 1;
             }
             pass_n++;

@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
     int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases"), mat = !*am || !strcmp(am, "materials");
     int split = !*am || !strcmp(am,"split");
     int recovery = !strcmp(am,"recovery");
-    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph && !mat && !split && !recovery)) { fprintf(stderr, "usage: [core|materials|tiers|limits|resume|phases|split|recovery]\n"); return 2; }
+    int mapcheck = !*am || !strcmp(am,"map");
+    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph && !mat && !split && !recovery && !mapcheck)) { fprintf(stderr, "usage: [core|materials|tiers|limits|resume|phases|split|recovery|map]\n"); return 2; }
     char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
     char *v[16];
     int rc;
@@ -86,6 +87,15 @@ int main(int argc, char **argv) {
     }
     v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = dir; v[5] = runp;
     v[6] = "--tier"; v[7] = "commit"; v[8] = "--date"; v[9] = "2026-11-10"; v[10] = "--fake"; v[11] = fake; v[12] = 0;
+    if(mapcheck) {
+        char *command[]={(char *)sy_env("S9_NIGHTLY_NATIVE"),"--map-controls",0};np_result r={0};
+        if(np_run(command,root,0,15,&r,why,sizeof why))die("map-controls-transport");
+        ck(r.rc==0&&!r.residue&&has(r.out,"MAP_CONTROLS\tfailed=0"),"map-controls-real-helper");
+        ck(has(r.err,"map-families-unready count=2 families=hosttcc,all-waves-tool"),"map-preflight-lists-all-missing-families-together");
+        const char *names[]={"implemented-source-family-set-deduplicated-all-tiers","all-missing-refused-before-map-intent","remaining-family-refused-without-poisoning-run","same-run-ready-after-filling-all-families","ready-families-form-complete-map","family-dump-sha-tamper-refused","family-input-identity-change-refused","family-other-run-receipts-refused","family-intent-tamper-refused","family-receipt-absent-refused","interrupted-map-missing-product-requires-new-run","existing-map-continues-to-original-sha-verification","map-product-directory-refused"};
+        for(int i=0;i<13;i++){char expected[240];if(cx_fmt(expected,sizeof expected,"MAP_CONTROL\t%s\tchecked=1",names[i]))die("map-control-label");ck(has(r.out,expected),names[i]);}
+        np_free(&r);
+    }
     if (core) {
     runv(v, dir, 20, buf, sizeof buf, &rc);
     ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "order-pass");
@@ -632,6 +642,21 @@ int main(int argc, char **argv) {
                 ck(rc!=0&&!has(buf,"status=RECOVERED"),"checker-identity-tamper-refused");
                 if(cx_write(identity,saved,size))die("checker-identity-restore");free(saved);
                 runv(w,root,20,buf,sizeof buf,&rc);ck(rc==0&&has(buf,"status=RECOVERED"),"checker-identity-restored-recovers");
+            }
+            if(k==1) {
+                char map[4800],intent[4800];size_t mn,in;
+                if(cx_fmt(map,sizeof map,"%s.materials.tsv",splitrun)||cx_fmt(intent,sizeof intent,"%s.nightly-init/map.intent",splitrun))die("map-recovery-path");
+                char *saved_map=cx_read(map,&mn),*saved_intent=cx_read(intent,&in);
+                if(!saved_map||!saved_intent||unlink(map))die("map-recovery-fixture");
+                char *actual[]={(char *)sy_env("S9_NIGHTLY_NATIVE"),dir,splitrun,"--tier","commit","--date","2026-11-15","--fake",fake,"--phase","map",0};np_result mr={0};
+                if(np_run(actual,root,0,20,&mr,why,sizeof why))die("map-recovery-transport");
+                ck(mr.rc!=0&&!mr.residue&&has(mr.err,"map-recovery-materials-missing")&&has(mr.err,"NEW_RUN_REQUIRED")&&!has(mr.err,"file-absent"),"map-intent-with-missing-product-named-refusal");
+                size_t after_n;char *after=cx_read(intent,&after_n);
+                ck(sy_exists(map)==0&&after&&after_n==in&&!memcmp(after,saved_intent,in)&&!has(mr.out,"status=RECOVERED"),"map-missing-product-does-not-reseal-or-alter-intent");
+                free(after);np_free(&mr);
+                if(cx_write(map,saved_map,mn))die("map-product-restore");free(saved_map);free(saved_intent);
+                runv(w,root,20,buf,sizeof buf,&rc);
+                ck(rc==0&&has(buf,"status=SKIP"),"map-original-product-and-proofs-still-resume");
             }
             if(k==0) {
                 /* 只有底层 native 成功封印和 intent，包装 outputs/done 都没有。 */
