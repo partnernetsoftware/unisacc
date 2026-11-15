@@ -1,0 +1,137 @@
+/* tools/check-s9-root.cx -- tools/s9-root.cx must produce a root a s9 run can start from.
+ *
+ *   sh ./unisacc.com tools/check-s9-root.cx
+ *
+ * Every case builds a real root from a real commit of this checkout, because the failure this tool exists for
+ * (all-waves measuring the worktree) is invisible to any fixture:  Ends with CHECK_S9_ROOT\tfailed=N; exit 0
+ * only when N is 0.  Building a root copies no objects (alternates), so each case is cheap; a case that needs a
+ * known commit names HEAD, which is this repository's own.
+ *
+ * Cases
+ *   root-built-and-clean         S9_ROOT status=ok, and `git -C ROOT status --porcelain` is empty
+ *   root-head-is-requested-rev    `git -C ROOT rev-parse HEAD` equals the requested commit
+ *   root-alternates-no-copy      .git/objects/info/alternates names the source object database, and ROOT/.git/objects
+ *                                 holds no pack or loose object of its own
+ *   root-product-present         ROOT/unisacc.com exists and is executable (the candidate gate)
+ *   root-product-not-dirty       the copied product leaves the worktree clean (it is ignored, not indexed)
+ *   root-out-empty               ROOT/out exists and is empty (sessions are created below it)
+ *   root-refuses-nonempty-target an existing target with content is refused by name, and its content survives
+ *   root-refuses-relative-target a relative target is refused by name
+ *   root-rev-unknown             a commit that does not exist is refused by name */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int failed;
+static void die(const char *s) { tool_die("check-s9-root", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\ts9-root.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+/* byte search without strstr: the needle is a run-time path, not source text */
+static int has(const char *s, const char *p) {
+    size_t n, pl, i;
+    if (!s) return 0;
+    n = strlen(s); pl = strlen(p);
+    for (i = 0; pl && i + pl <= n; i++) if (!memcmp(s + i, p, pl)) return 1;
+    return 0;
+}
+/* run a command, return its combined output in OUT (NUL-terminated), its rc in *RC */
+static void run(char **argv, char *out, size_t cap, int *rc) {
+    np_result r = {0};
+    char why[1700] = {0};
+    if (np_run(argv, 0, 0, 60, &r, why, sizeof why)) { fprintf(stderr, "check-s9-root: %s\n", why); die("run"); }
+    if (out && cap) {
+        /* the tool reports failures on stderr, so a negative case needs BOTH streams: stdout first, then
+           stderr, which is also the order a reader sees them.  Copied with mm_copy, whose return says whether
+           it fit -- a bare memcpy would be a silent truncation. */
+        long n = 0, m = 0;
+        if (r.out && r.outn) {
+            n = (long)(r.outn < cap - 1 ? r.outn : cap - 1);
+            if (mm_copy(out, (long)cap, r.out, n)) die("copy");
+        }
+        out[n] = 0;
+        if (r.err && r.errn && n + 1 < (long)cap) {
+            m = (long)(r.errn < (size_t)(cap - n - 1) ? r.errn : (size_t)(cap - n - 1));
+            if (mm_copy(out + n, (long)cap - n, r.err, m)) die("copy");
+            out[n + m] = 0;
+        }
+    }
+    if (rc) *rc = r.rc;
+    np_free(&r);
+}
+
+int main(void) {
+    char base[1024], root[4400], out[8192], rev[80], com[4400];
+    int rc = 0;
+    char tmpl[] = "/tmp/chk-s9-root-XXXXXX";
+    if (!mkdtemp(tmpl)) die("temp");
+    if (cx_fmt(base, sizeof base, "%s", tmpl)) die("copy");
+    {   /* the commit every case builds from: this checkout's HEAD, read through git */
+        char *a[] = {"git", "rev-parse", "HEAD", 0};
+        run(a, out, sizeof out, &rc);
+        if (rc) die("rev");
+        {   size_t i = 0;
+            while (out[i] && out[i] != '\n' && i + 1 < sizeof rev) { rev[i] = out[i]; i++; }
+            rev[i] = 0;
+            if (i < 40) die("rev-wire"); }
+    }
+    /* the positive case: a root built from HEAD, then everything the gate asks of it */
+    if (cx_fmt(root, sizeof root, "%s/root", base)) die("copy");
+    /* The product that runs this check: in the checkout root it is ./unisacc.com (a symlink to the built one).
+       Required and named when missing, so a check started from the wrong directory says so instead of failing
+       inside a child. */
+    if (cx_fmt(com, sizeof com, "%s", "./unisacc" ".com")) die("copy");
+    if (sy_exists(com) != 1) die("product-missing");
+    {   char *a[] = {"sh", com, "tools/s9-root.cx", rev, root, 0};
+        run(a, out, sizeof out, &rc); }
+    ck(rc == 0 && has(out, "status=ok"), "root-built-and-clean");
+    {   char *a[] = {"git", "-C", root, "status", "--porcelain", 0};
+        run(a, out, sizeof out, &rc);
+        ck(rc == 0 && out[0] == 0, "root-worktree-clean"); }
+    {   char *a[] = {"git", "-C", root, "rev-parse", "HEAD", 0};
+        run(a, out, sizeof out, &rc);
+        ck(rc == 0 && !strncmp(out, rev, strlen(rev)), "root-head-is-requested-rev"); }
+    {   char alt[4600];
+        if (cx_fmt(alt, sizeof alt, "%s/.git/objects/info/alternates", root)) die("copy");
+        {   size_t n = 0; char *s = cx_read(alt, &n);
+            ck(s && has(s, "/objects") && n > 0, "root-alternates-points-at-source");
+            free(s); }
+        {   /* `git init` always creates an empty objects/pack; what must not happen is an object landing there,
+               or a loose object appearing beside it.  Count entries instead of asking whether the directory
+               exists (measured: it exists and is empty). */
+            char p[4600], o[4700];
+            if (cx_fmt(p, sizeof p, "%s/.git/objects/pack", root)
+                || cx_fmt(o, sizeof o, "%s/.git/objects", root)) die("copy");
+            {   char *a[] = {"sh", "-c", "set -e; ls -A \"$0\" | wc -l; find \"$1\" -maxdepth 1 -type f | wc -l", p, o, 0};
+                run(a, out, sizeof out, &rc); }
+            ck(rc == 0 && has(out, "0\n0"), "root-borrows-objects-no-copy"); } }
+    {   char prod[4600];
+        if (cx_fmt(prod, sizeof prod, "%s/%s", root, "unisacc" ".com")) die("copy");
+        ck(sy_exists(prod) == 1 && sy_access(prod, 1) == 0, "root-product-executable"); }
+    {   char outdir[4600];
+        if (cx_fmt(outdir, sizeof outdir, "%s/out", root)) die("copy");
+        ck(sy_exists(outdir) == 1 && sy_rmdir(outdir) == 0, "root-out-empty");
+        if (sy_exists(outdir) != 1) { (void)sy_mkdir_all(outdir, 0755); } }
+    /* the negative cases: each is refused by name, and the refusal leaves nothing behind */
+    {   char keep[4600], note[4700];
+        if (cx_fmt(keep, sizeof keep, "%s/keep.txt", base)
+            || cx_fmt(note, sizeof note, "%s\n", "somebody's data")) die("copy");
+        if (cx_write(keep, note, strlen(note))) die("write");
+        {   char *a[] = {"sh", com, "tools/s9-root.cx", rev, base, 0};
+            run(a, out, sizeof out, &rc); }
+        ck(rc == 2 && has(out, "target-not-empty"), "root-refuses-nonempty-target");
+        ck(sy_exists(keep) == 1, "root-refusal-keeps-existing-data"); }
+    {   char *a[] = {"sh", com, "tools/s9-root.cx", rev, "relative/dir", 0};
+        run(a, out, sizeof out, &rc);
+        ck(rc == 2 && has(out, "target-absolute"), "root-refuses-relative-target"); }
+    {   char nowhere[4700];
+        if (cx_fmt(nowhere, sizeof nowhere, "%s/none", base)) die("copy");
+        {   char *a[] = {"sh", com, "tools/s9-root.cx", "0000000000000000000000000000000000000000", nowhere, 0};
+            run(a, out, sizeof out, &rc); }
+        ck(rc == 2 && has(out, "rev-unknown"), "root-rev-unknown-refused"); }
+    printf("CHECK_S9_ROOT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

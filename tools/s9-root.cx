@@ -1,0 +1,132 @@
+/* tools/s9-root.cx -- make a frozen root a s9 run can start from, out of one commit.
+ *
+ *   sh ./unisacc.com tools/s9-root.cx -- REV TARGET
+ *
+ * Why: tools/all-waves.cx measures the worktree (`git -C ROOT ls-files -c -o --exclude-standard`) before it
+ * opens a session, and a bare `git archive` extraction is not a git worktree at all, so init refuses
+ * `worktree-unmeasured`.  A frozen root is therefore a real, tiny repository whose objects are borrowed from
+ * the checkout this tool runs in:
+ *
+ *   TARGET/            created; an existing non-empty TARGET is refused, never overwritten
+ *   TARGET/.git        init, HEAD detached at REV, index = REV's tree, objects via
+ *                      .git/objects/info/alternates -> SOURCE/.git/objects (nothing is copied)
+ *   TARGET/**          exactly REV's tracked files (git archive | tar -x)
+ *   TARGET/out/        created empty: sessions live below it
+ *
+ * Afterwards `git -C TARGET status --porcelain` is empty and `git -C TARGET rev-parse HEAD` is REV.  The source
+ * checkout is only read, never written.  One line per step, then S9_ROOT\tstatus=ok\troot=...\trev=...; a
+ * failing step exits 2 with `s9-root: <step> ...` on stderr.
+ *
+ * Checked by tools/check-s9-root.cx. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static void fail(const char *a, const char *b) { tool_die("s9-root", a, b, 2); }
+
+/* first line of OUT with trailing newlines removed, into DST; -1 when it does not fit or is empty */
+static int first_line(const char *out, size_t n, char *dst, long cap) {
+    long k = 0;
+    size_t i = 0;
+    while (i < n && (out[i] == '\n' || out[i] == '\r')) i++;
+    for (; i < n && out[i] != '\n' && out[i] != '\r'; i++) {
+        if (k + 1 >= cap) return -1;
+        dst[k++] = out[i];
+    }
+    if (!k) return -1;
+    dst[k] = 0;
+    return 0;
+}
+
+/* run one step; the child's own output is the evidence when it fails */
+static void step(const char *name, char **argv, const char *cwd, char *outbuf, long outcap) {
+    np_result r = {0};
+    char why[1700] = {0};
+    if (np_run(argv, cwd, 0, 60, &r, why, sizeof why)) {
+        fprintf(stderr, "s9-root: %s: %s\n", name, why);
+        np_free(&r);
+        fail(name, why);
+    }
+    if (r.rc) {
+        fprintf(stderr, "s9-root: %s rc=%d\n%s%s\n", name, r.rc, r.out ? r.out : "", r.err ? r.err : "");
+        np_free(&r);
+        fail(name, 0);
+    }
+    if (outbuf && outcap > 0) {
+        if (first_line(r.out ? r.out : "", r.outn, outbuf, outcap)) { np_free(&r); fail(name, "no-output"); }
+    }
+    np_free(&r);
+    printf("S9_ROOT\tstep=%s\tok\n", name);
+}
+
+int main(int argc, char **argv) {
+    char rev[80], gitdir[4200], objects[4200], target[4200], alt[4300], head[4300], outdir[4300];
+    char line[4700], headid[80];
+    const char *revarg, *tgt;
+    if (argc != 3) fail("usage", "REV TARGET   (sh ./unisacc.com tools/s9-root.cx -- REV TARGET)");
+    revarg = argv[1];
+    tgt = argv[2];
+    if (tgt[0] != '/') fail("target-absolute", tgt);
+    if (cx_fmt(target, sizeof target, "%s", tgt)) fail("copy", 0);
+    /* an existing target is only usable when it is EMPTY: anything else is somebody's data, and this tool must
+       refuse by name rather than measure it as a worktree, extract over it, or delete it.  sy_rmdir succeeds
+       exactly when the directory is empty, so the check is also the emptiness test. */
+    if (sy_exists(tgt) == 1 && sy_rmdir(tgt)) fail("target-not-empty", tgt);
+    /* the object database is the COMMON one: inside a linked worktree --absolute-git-dir is the worktree's own
+       private directory, which has no objects/ at all (measured: read-tree rc=128 "object directory ... does
+       not exist").  --git-common-dir points at the shared .git whose objects/ the archive and read-tree need. */
+    {   char *a[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
+        step("source-git-dir", a, 0, gitdir, (long)sizeof gitdir); }
+    {   char *a[] = {"git", "-C", gitdir, "rev-parse", "--verify", (char *)revarg, 0};
+        step("rev-unknown", a, 0, rev, (long)sizeof rev); }
+    printf("S9_ROOT\tstep=rev\tresolved=%s\n", rev);
+    if (cx_fmt(objects, sizeof objects, "%s/objects", gitdir)) fail("copy", 0);
+    if (sy_mkdir_all(target, 0755) && sy_exists(target) != 1) fail("target-mkdir", target);
+    {   char *a[] = {"git", "init", "--quiet", target, 0};
+        step("git-init", a, 0, 0, 0); }
+    /* alternates first: read-tree and the later status both need REV's objects readable */
+    if (cx_fmt(alt, sizeof alt, "%s/.git/objects/info", target)) fail("copy", 0);
+    if (sy_mkdir_all(alt, 0755) && sy_exists(alt) != 1) fail("alternates-mkdir", alt);
+    if (cx_fmt(alt, sizeof alt, "%s/.git/objects/info/alternates", target)) fail("copy", 0);
+    if (cx_fmt(line, sizeof line, "%s\n", objects)) fail("copy", 0);
+    if (cx_write(alt, line, (size_t)tx_len(line, (long)sizeof line))) fail("alternates-write", alt);
+    if (cx_fmt(head, sizeof head, "%s/.git/HEAD", target)) fail("copy", 0);
+    if (cx_fmt(line, sizeof line, "%s\n", rev)) fail("copy", 0);
+    if (cx_write(head, line, (size_t)tx_len(line, (long)sizeof line))) fail("head-write", head);
+    {   char *a[] = {"git", "-C", target, "read-tree", rev, 0};
+        step("read-tree", a, 0, 0, 0); }
+    {   char *a[] = {"sh", "-c", "set -e; git -C \"$0\" archive --format=tar \"$1\" | tar -x -C \"$2\"", gitdir, rev, target, 0};
+        step("extract", a, 0, 0, 0); }
+    if (cx_fmt(outdir, sizeof outdir, "%s/out", target)) fail("copy", 0);
+    if (sy_mkdir_all(outdir, 0755) && sy_exists(outdir) != 1) fail("out-mkdir", outdir);
+    /* The product is NOT tracked (a build artefact; .gitignore carries it), so the archive cannot bring it and a
+       root without it fails the candidate gate first.  Copy the executable the source checkout is using.  It stays
+       OUT of the index on purpose: being ignored it is invisible to `ls-files -c -o --exclude-standard` and to
+       `status --porcelain`, which is exactly what leaves the worktree clean while the file exists on disk. */
+    {   char base[4300], prodsrc[4400], proddst[4400];
+        if (cx_fmt(base, sizeof base, "%s", gitdir)) fail("copy", 0);
+        {   char *slash = strrchr(base, '/');
+            if (!slash) fail("product-base", gitdir);
+            *slash = 0; }
+        if (cx_fmt(prodsrc, sizeof prodsrc, "%s/%s", base, "unisacc" ".com")
+            || cx_fmt(proddst, sizeof proddst, "%s/%s", target, "unisacc" ".com")) fail("copy", 0);
+        if (sy_exists(prodsrc) != 1) fail("product-missing", prodsrc);
+        {   char *a[] = {"sh", "-c", "set -e; cp -f \"$0\" \"$1\"; chmod 755 \"$1\"", prodsrc, proddst, 0};
+            step("product-copy", a, 0, 0, 0); }
+    }
+    /* the acceptance this tool exists for: a clean worktree measured the way all-waves measures it */
+    {   char *a[] = {"git", "-C", target, "status", "--porcelain", 0};
+        np_result r = {0};
+        char why[1700] = {0};
+        if (np_run(a, 0, 0, 30, &r, why, sizeof why)) fail("status", why);
+        if (r.rc) { fprintf(stderr, "s9-root: status rc=%d\n%s%s\n", r.rc, r.out ? r.out : "", r.err ? r.err : ""); np_free(&r); fail("status-rc", 0); }
+        if (r.outn) { fprintf(stderr, "s9-root: worktree not clean:\n%.*s\n", (int)r.outn, r.out); np_free(&r); fail("worktree-dirty", target); }
+        np_free(&r); }
+    {   char *a[] = {"git", "-C", target, "rev-parse", "HEAD", 0};
+        step("head-check", a, 0, headid, (long)sizeof headid);
+        if (strncmp(headid, rev, strlen(rev))) fail("head-mismatch", rev); }
+    printf("S9_ROOT\tstatus=ok\troot=%s\trev=%s\n", target, rev);
+    return 0;
+}
