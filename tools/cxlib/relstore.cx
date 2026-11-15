@@ -1,0 +1,343 @@
+/* tools/cxlib/relstore.cx -- where the relation cache lives, how it is invalidated, and how it is updated one
+ * file at a time.
+ *
+ * devsvc iteration two wants a durable copy of the relation edges (tools/cxlib/relload.cx produces them in
+ * memory).  This module owns that copy on disk.  The DIRECTORY is always a parameter -- the caller decides it
+ * (devsvc uses ~/.cache/devsvc/<repo-root-sha>/rel/), and nothing here knows a repository path.
+ *
+ *   DIR/meta        format version and the extractor's sha:  "format\trel-v1\nextractor\t<64 hex>\n"
+ *   DIR/files.tsv   path, sha, size -- one line per file the edges were extracted from, sorted by path
+ *   DIR/edges.tsv   links v1 edges (kind, src, dst, via, attr), clustered by src then by whole line
+ *
+ * The extractor's sha is the identity of the CODE that turns files into edges.  Change it and the cache is
+ * stale: rs_status says so and rs_rebuild is the only way forward -- an incremental update would mix edges from
+ * two extractors into one table, which no reader could interpret.
+ *
+ *   rs_status(DIR, XSHA, why, cap)        0 fresh, 1 stale or absent (rebuild), -1 a real error
+ *   rs_rebuild(DIR, XSHA, FILES, NF, EDGES, EDGEN, why, cap)
+ *                                         writes meta+files.tsv+edges.tsv atomically (each file: .new + rename);
+ *                                         the edges are CLUSTERED here, so byte identity does not depend on the
+ *                                         order the caller happened to collect them in
+ *   rs_incremental(DIR, XSHA, CHANGED, NCHANGED, NEW, NEWN, why, cap)
+ *                                         drops every edge whose src is one of CHANGED, adds NEW, re-clusters and
+ *                                         rewrites; refuses when the cache is stale, because "update" would then be
+ *                                         an update of something that no longer describes the tree
+ *   rs_read_edges / rs_read_files          the stored text, for a caller that wants to compare or serve it
+ *
+ * Every malformed line is refused by name with its line number: a relation table that cannot be read exactly
+ * must not become a smaller graph.  The sort is a total order (src, then the whole line), so an incremental
+ * update leaves the same bytes as a full rebuild of the same edge set -- that is the property the check pins.
+ *
+ * Read/write only under DIR; no caching in memory; no fixed paths.  Checked by tools/check-relstore.cx. */
+#pragma unisa module relstore
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define RS_FORMAT "rel-v1"
+
+
+/* one file the edges were extracted from */
+typedef struct { const char *path; const char *sha; long long size; } rs_file;
+
+static char rs_why[300];
+const char *rs_last_why(void) { return rs_why; }
+static void rs_bad(const char *what, const char *detail, long line) {
+    if (detail && line >= 0) cx_fmt(rs_why, sizeof rs_why, "%s line=%ld %s", what, line, detail);
+    else if (detail) cx_fmt(rs_why, sizeof rs_why, "%s %s", what, detail);
+    else if (line >= 0) cx_fmt(rs_why, sizeof rs_why, "%s line=%ld", what, line);
+    else cx_fmt(rs_why, sizeof rs_why, "%s", what);
+}
+
+/* join DIR/NAME with a single slash */
+static int rs_path(char *out, long cap, const char *dir, const char *name) {
+    return cx_fmt(out, (size_t)cap, "%s/%s", dir, name);
+}
+
+/* atomic replace: NAME.new then rename.  A half-written store is never visible under its own name. */
+static int rs_put(const char *dir, const char *name, const char *body, size_t n) {
+    char path[4400], tmp[4500];
+    if (rs_path(path, (long)sizeof path, dir, name) || rs_path(tmp, (long)sizeof tmp, dir, name)) return -1;
+    if (cx_fmt(tmp, sizeof tmp, "%s/%s.new", dir, name)) return -1;
+    if (cx_write(tmp, body, n)) return -1;
+    if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); return -1; }
+    return 0;
+}
+static int rs_get(const char *dir, const char *name, char **buf, size_t *n) {
+    char path[4400];
+    if (rs_path(path, (long)sizeof path, dir, name)) return -1;
+    if (sy_exists(path) != 1) return 1;
+    *buf = cx_read(path, n);
+    return *buf ? 0 : -1;
+}
+
+/* the extractor sha recorded in DIR/meta, into XOUT; 1 when meta is absent, -1 when it is malformed */
+static int rs_meta(const char *dir, char xout[65]) {
+    char *buf = 0;
+    size_t n = 0;
+    int rc = rs_get(dir, "meta", &buf, &n);
+    long at = 0;
+    int seen_format = 0, seen_extractor = 0;
+    if (rc == 1) return 1;
+    if (rc < 0) { rs_bad("meta-unreadable", dir, -1); return -1; }
+    xout[0] = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && buf[e] != '\n') e++;
+        if (e == (long)n) { free(buf); rs_bad("meta-wire", dir, -1); return -1; }
+        if (e > at) {
+            if (e - at == 6 + 1 + (long)strlen(RS_FORMAT) && !memcmp(buf + at, "format\t", 7)
+                && !memcmp(buf + at + 7, RS_FORMAT, strlen(RS_FORMAT))) seen_format = 1;
+            else if (e - at == 9 + 1 + 64 && !memcmp(buf + at, "extractor\t", 10)) {
+                if (mm_copy(xout, 65, buf + at + 10, 64)) { free(buf); rs_bad("meta-extractor", dir, -1); return -1; }
+                xout[64] = 0;
+                seen_extractor = 1;
+            } else { free(buf); rs_bad("meta-field", dir, -1); return -1; }
+        }
+        at = e + 1;
+    }
+    free(buf);
+    if (!seen_format || !seen_extractor) { rs_bad("meta-incomplete", dir, -1); return -1; }
+    return 0;
+}
+
+/* 0 fresh, 1 stale or absent, -1 error */
+int rs_status(const char *dir, const char *xsha, char *why, int cap) {
+    char have[65];
+    char files[4400], edges[4400];
+    int rc;
+    if (!dir || !xsha) return -1;
+    if (strlen(xsha) != 64) { rs_bad("extractor-sha", xsha, -1); if (why) cx_fmt(why, (size_t)cap, "%s", rs_why); return -1; }
+    rc = rs_meta(dir, have);
+    if (rc < 0) { if (why) cx_fmt(why, (size_t)cap, "%s", rs_why); return -1; }
+    if (rc == 1) { if (why) cx_fmt(why, (size_t)cap, "absent"); return 1; }
+    if (strcmp(have, xsha)) { if (why) cx_fmt(why, (size_t)cap, "extractor-changed"); return 1; }
+    if (rs_path(files, (long)sizeof files, dir, "files.tsv") || rs_path(edges, (long)sizeof edges, dir, "edges.tsv")) return -1;
+    if (sy_exists(files) != 1 || sy_exists(edges) != 1) { if (why) cx_fmt(why, (size_t)cap, "incomplete"); return 1; }
+    if (why) cx_fmt(why, (size_t)cap, "fresh");
+    return 0;
+}
+
+/* The identity a store is keyed by: the extractor's code AND the package-root configuration, hashed
+   together.  A package root decides where a use edge points, so when cxroot.tsv changes the edges it
+   produced are wrong even though every source file is unchanged (omp-cdx via cc, 2026-11-15).
+   Hashing both into one identity makes such a change invalidate the WHOLE store -- the conservative
+   choice: which files are affected cannot be known without re-resolving them.  CFG is the
+   concatenated name and content of every package-root file, in a caller-fixed order. */
+int rs_identity(const char *xsha, const char *cfg, long cfgn, char out[65]) {
+    np_buf b = {0};
+    int rc;
+    if (!xsha || strlen(xsha) != 64 || !out) return -1;
+    np_puts(&b, xsha);
+    np_put(&b, "\n", 1);
+    if (cfg && cfgn > 0) np_put(&b, cfg, (size_t)cfgn);
+    rc = sy_sha256_hex(b.p ? b.p : "", (long)b.n, out);
+    free(b.p);
+    return rc ? -1 : 0;
+}
+
+/* ---- edge clustering: a total order (src, whole line), so byte identity is independent of collection order */
+typedef struct { const char *line; long len; const char *src; long srclen; } rs_row;
+static int rs_cmp(const void *a, const void *b) {
+    const rs_row *x = a, *y = b;
+    long m = x->srclen < y->srclen ? x->srclen : y->srclen;
+    int c = m ? memcmp(x->src, y->src, (size_t)m) : 0;
+    if (c) return c;
+    if (x->srclen != y->srclen) return x->srclen < y->srclen ? -1 : 1;
+    {   long k = x->len < y->len ? x->len : y->len;
+        c = k ? memcmp(x->line, y->line, (size_t)k) : 0;
+        if (c) return c;
+        if (x->len == y->len) return 0;
+        return x->len < y->len ? -1 : 1;
+    }
+}
+
+/* split EDGES into rows (REFUSING a row that is not five TAB fields or has an empty kind/src); returns count
+   through *NROWS, or -1 with rs_last_why naming the line.  The caller's text is not modified. */
+static int rs_rows(const char *edges, long edgen, rs_row **rows_out, long *nrows, const char *what) {
+    long at = 0, line = 0, n = 0, capr = 256;
+    rs_row *rows = malloc((size_t)capr * sizeof *rows);
+    if (!rows) { rs_bad("allocation", what, -1); return -1; }
+    while (at < edgen) {
+        long e = at, tabs = 0, i, f0 = at, f0e = 0, src = 0, srclen = 0, a;
+        while (e < edgen && edges[e] != '\n') e++;
+        line++;
+        if (e == edgen) { free(rows); rs_bad("edges-wire", what, line); return -1; }
+        if (e == at) { at = e + 1; continue; }
+        for (i = at; i < e; i++) if (edges[i] == '\t') tabs++;
+        if (tabs != 4) { free(rows); rs_bad("edges-fields", what, line); return -1; }
+        for (i = at; i < e && edges[i] != '\t'; i++) { }
+        f0e = i;
+        if (f0e == f0) { free(rows); rs_bad("edges-kind", what, line); return -1; }
+        src = f0e + 1;
+        for (a = src; a < e && edges[a] != '\t'; a++) { }
+        srclen = a - src;
+        if (srclen <= 0) { free(rows); rs_bad("edges-src", what, line); return -1; }
+        if (n == capr) {
+            rs_row *g = realloc(rows, (size_t)(capr * 2) * sizeof *rows);
+            if (!g) { free(rows); rs_bad("allocation", what, -1); return -1; }
+            rows = g; capr *= 2;
+        }
+        rows[n].line = edges + at;
+        rows[n].len = e - at;
+        rows[n].src = edges + src;
+        rows[n].srclen = srclen;
+        n++;
+        at = e + 1;
+    }
+    *rows_out = rows;
+    *nrows = n;
+    return 0;
+}
+
+/* write ROWS sorted, one line each, with a trailing newline */
+static int rs_emit(const char *dir, rs_row *rows, long n) {
+    np_buf out = {0};
+    long i;
+    int rc;
+    if (!n) { rc = rs_put(dir, "edges.tsv", "", 0); free(out.p); return rc; }
+    qsort(rows, (size_t)n, sizeof *rows, rs_cmp);
+    for (i = 0; i < n; i++) {
+        np_put(&out, rows[i].line, (size_t)rows[i].len);
+        np_put(&out, "\n", 1);
+    }
+    rc = rs_put(dir, "edges.tsv", out.p ? out.p : "", (size_t)out.n);
+    free(out.p);
+    return rc;
+}
+
+/* strcmp over an array of fixed-size path buffers: RS_CMP compares rs_row, so using it here would walk past
+   the buffer (measured: rc 139 when files.tsv was written). */
+static int rs_cmp_path(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+/* files.tsv body: path, sha, size, sorted by path */
+static int rs_files_body(const rs_file *files, long nf, np_buf *out) {
+    char (*keys)[4096] = 0;
+    long i;
+    if (nf <= 0) return 0;
+    keys = malloc((size_t)nf * sizeof *keys);
+    if (!keys) return -1;
+    for (i = 0; i < nf; i++) {
+        if (cx_fmt(keys[i], 4096, "%s", files[i].path)) { free(keys); return -1; }
+    }
+    qsort(keys, (size_t)nf, sizeof *keys, rs_cmp_path);
+    for (i = 0; i < nf; i++) {
+        long j, hit = -1;
+        for (j = 0; j < nf; j++) if (!strcmp(files[j].path, keys[i])) { hit = j; break; }
+        if (hit < 0) { free(keys); return -1; }
+        np_puts(out, files[hit].path);
+        np_puts(out, "\t");
+        np_puts(out, files[hit].sha);
+        np_puts(out, "\t");
+        {   char num[32];
+            if (cx_fmt(num, sizeof num, "%lld", files[hit].size)) { free(keys); return -1; }
+            np_puts(out, num); }
+        np_puts(out, "\n");
+    }
+    free(keys);
+    return 0;
+}
+
+int rs_rebuild(const char *dir, const char *xsha, const rs_file *files, long nf, const char *edges, long edgen,
+               char *why, int cap) {
+    rs_row *rows = 0;
+    long nrows = 0;
+    np_buf fbody = {0}, mbody = {0};
+    char meta[300];
+    if (!dir || !xsha || !edges || strlen(xsha) != 64) { rs_bad("argument", dir, -1); goto fail; }
+    if (sy_mkdir_all(dir, 0755) && sy_exists(dir) != 1) { rs_bad("mkdir", dir, -1); goto fail; }
+    if (rs_rows(edges, edgen, &rows, &nrows, "rebuild")) goto fail;
+    if (rs_files_body(files, nf, &fbody)) { rs_bad("files-body", dir, -1); free(rows); goto fail; }
+    /* meta LAST: a store whose meta names the new extractor must already have the data it describes */
+    if (rs_put(dir, "files.tsv", fbody.p ? fbody.p : "", (size_t)fbody.n)) { rs_bad("write", "files.tsv", -1); free(rows); free(fbody.p); goto fail; }
+    free(fbody.p);
+    fbody.p = 0; fbody.n = 0; fbody.cap = 0;
+    if (rs_emit(dir, rows, nrows)) { rs_bad("write", "edges.tsv", -1); free(rows); goto fail; }
+    free(rows);
+    if (cx_fmt(meta, sizeof meta, "format\t%s\nextractor\t%s\n", RS_FORMAT, xsha)) { rs_bad("format", dir, -1); goto fail; }
+    if (rs_put(dir, "meta", meta, strlen(meta))) { rs_bad("write", "meta", -1); goto fail; }
+    free(mbody.p);
+    return 0;
+fail:
+    if (why) cx_fmt(why, (size_t)cap, "%s", rs_why);
+    return -1;
+}
+
+/* is SRC one of the CHANGED paths?  CHANGED is newline separated, exact match on the whole line */
+static int rs_in_list(const char *changed, long cn, const char *src, long sl) {
+    long at = 0;
+    while (at < cn) {
+        long e = at;
+        while (e < cn && changed[e] != '\n') e++;
+        if (e - at == sl && !memcmp(changed + at, src, (size_t)sl)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+
+int rs_incremental(const char *dir, const char *xsha, const char *changed, long cn, const char *newe, long newn,
+                   char *why, int cap) {
+    char *old = 0;
+    size_t on = 0;
+    rs_row *keep = 0, *all = 0;
+    long nkeep = 0, nall = 0, i;
+    int st;
+    if (!dir || !xsha || !changed || !newe) { rs_bad("argument", dir, -1); goto fail; }
+    st = rs_status(dir, xsha, 0, 0);
+    if (st != 0) { rs_bad(st == 1 ? "stale" : "status", "incremental-needs-fresh-store", -1); goto fail; }
+    if (rs_get(dir, "edges.tsv", &old, &on)) { rs_bad("read", "edges.tsv", -1); goto fail; }
+    if (rs_rows(old, (long)on, &all, &nall, "incremental-old")) { free(old); goto fail; }
+    keep = malloc((size_t)(nall + 1) * sizeof *keep);
+    if (!keep) { free(old); free(all); rs_bad("allocation", dir, -1); goto fail; }
+    for (i = 0; i < nall; i++) {
+        if (rs_in_list(changed, cn, all[i].src, all[i].srclen)) continue;   /* its out-edges go */
+        keep[nkeep++] = all[i];
+    }
+    free(all);
+    all = 0;
+    /* the new edges go into the same table */
+    {   rs_row *fresh = 0;
+        long nf = 0, k;
+        if (rs_rows(newe, newn, &fresh, &nf, "incremental-new")) { free(keep); free(old); goto fail; }
+        {   rs_row *both = malloc((size_t)(nkeep + nf + 1) * sizeof *both);
+            if (!both) { free(fresh); free(keep); free(old); rs_bad("allocation", dir, -1); goto fail; }
+            for (k = 0; k < nkeep; k++) both[k] = keep[k];
+            for (k = 0; k < nf; k++) both[nkeep + k] = fresh[k];
+            free(fresh);
+            free(keep);
+            keep = both;
+            nkeep += nf;
+        }
+    }
+    /* the surviving rows still point INTO OLD: it must outlive the write, or the store would be built from
+       freed bytes (measured: rc 139 segfault when this free came first) */
+    if (rs_emit(dir, keep, nkeep)) { free(keep); free(old); rs_bad("write", "edges.tsv", -1); goto fail; }
+    free(keep);
+    free(old);
+    return 0;
+fail:
+    if (why) cx_fmt(why, (size_t)cap, "%s", rs_why);
+    return -1;
+}
+
+/* the stored text, NUL-terminated in OUT; 0 / -1 */
+int rs_read_edges(const char *dir, np_buf *out, char *why, int cap) {
+    char *buf = 0;
+    size_t n = 0;
+    if (rs_get(dir, "edges.tsv", &buf, &n)) { rs_bad("read", "edges.tsv", -1); if (why) cx_fmt(why, (size_t)cap, "%s", rs_why); return -1; }
+    np_put(out, buf, n);
+    free(buf);
+    return 0;
+}
+int rs_read_files(const char *dir, np_buf *out, char *why, int cap) {
+    char *buf = 0;
+    size_t n = 0;
+    if (rs_get(dir, "files.tsv", &buf, &n)) { rs_bad("read", "files.tsv", -1); if (why) cx_fmt(why, (size_t)cap, "%s", rs_why); return -1; }
+    np_put(out, buf, n);
+    free(buf);
+    return 0;
+}
