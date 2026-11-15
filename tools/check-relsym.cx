@@ -1,0 +1,116 @@
+/* tools/check-relsym.cx -- tools/rel.cx who-calls (symbol-grain sites, relation DAG G2 first step) must give the
+ * same sites as git grep, and must rescan only files whose content hash changed.
+ *
+ *   sh ./unisacc.com tools/check-relsym.cx      (from the repo root; work dir $TMPDIR/check-relsym-<pid>)
+ *
+ * Fixture cases (a private root with three .cx files and a tracked list, private cache):
+ *   fx-cold        first query indexes every file: rescanned=3, sites a.cx:2 and b.cx:1 (word rule: foo_x and
+ *                  xfoo are not foo; two hits on one line are one site)
+ *   fx-warm        same query again: rescanned=0, same sites
+ *   fx-incremental b.cx edited: rescanned=1, the new site b.cx:3 appears
+ *   fx-none-rc1    unknown symbol: sites=0, rc 1
+ *   refuse-*       a symbol that is not one word, a missing tracked list: rc 2
+ * Real cases (this checkout, fresh private cache): for fl_run, awp_devmeta_read, js_parse the CALL lines equal
+ * `git grep -n -w -F SYM -- '*.cx' ':!archive'` path:line, same order; the timing of the cold and warm runs is
+ * printed as RELSYM_TIMING (reported, not asserted).
+ * Ends with CHECK_RELSYM<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+enum { OCAP = 1 << 21 };
+static int failed;
+static char root[4096], com[4500], tool[4500], wd[1024], fx[1200], cache[1300], rcache[1300], list[1300];
+static char out[OCAP], g[OCAP], a1[OCAP], a2[OCAP];
+
+static void die(const char *s) { fprintf(stderr, "check-relsym: REFUSE %s\n", s); exit(2); }
+static void ck(int ok, const char *n) { printf("%s\tcheck-relsym.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+/* rel output S holds the literal expected text W (W is always a literal of this file) */
+static int has(const char *s, const char *w) { size_t i, n = strlen(w); for (i = 0; s[i]; i++) if (!strncmp(s + i, w, n)) return 1; return 0; }
+static int bounded_run(char **argv, int secs, char *o, int cap) {
+    char *w[64], *b = 0; size_t n = 0, j; int k = 0, i, rc;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -1;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (n > (size_t)cap - 1) n = (size_t)cap - 1;
+    for (j = 0; b && j < n; j++) o[j] = b[j];
+    o[b ? n : 0] = 0;
+    free(b);
+    return rc;
+}
+static int rel(char **args, char *o) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 23; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, o, OCAP); }
+static int shc(const char *cmd, char *o) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return bounded_run(v, 50, o, OCAP); }
+static char *pth(const char *base, const char *name) {
+    static char p[16][1400]; static int k; char *q = p[k++ & 15];
+    if (cx_fmt(q, 1400, "%s/%s", base, name)) die("path");
+    return q;
+}
+static void wf(const char *base, const char *name, const char *text) {
+    if (sy_write_file(pth(base, name), text, (long)strlen(text), 0644)) die("cannot write fixture");
+}
+/* CALL<TAB>path:line lines of rel output -> "path:line\n" */
+static void calls(const char *t, char *o) {
+    long z = 0; const char *p = t;
+    while (*p) { const char *e = strchr(p, '\n'); size_t ln = e ? (size_t)(e - p) : strlen(p);
+        if (ln > 5 && !memcmp(p, "CALL\t", 5)) { if (z + (long)ln + 2 >= OCAP) die("overflow"); if (mm_copy(o + z, OCAP - z, p + 5, (long)(ln - 5))) die("overflow"); z += (long)ln - 5; o[z++] = '\n'; }
+        p += ln; if (*p) p++; }
+    o[z] = 0;
+}
+/* git grep -n lines "path:line:text" -> "path:line\n" */
+static void grepsites(const char *t, char *o) {
+    long z = 0; const char *p = t;
+    while (*p) { const char *e = strchr(p, '\n'); size_t ln = e ? (size_t)(e - p) : strlen(p), c = 0; int colons = 0;
+        while (c < ln && !(p[c] == ':' && ++colons == 2)) c++;
+        if (colons == 2) { if (z + (long)c + 2 >= OCAP) die("overflow"); if (mm_copy(o + z, OCAP - z, p, (long)c)) die("overflow"); z += (long)c; o[z++] = '\n'; }
+        p += ln; if (*p) p++; }
+    o[z] = 0;
+}
+
+int main(void) {
+    char cmd[6000]; int rc; long t0, t1, t2;
+    if (sy_realpath(".", root, sizeof root) < 0) die("no cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/rel.cx", root)) die("path");
+    if (sy_exists(tool) != 1) die("run from the repo root (tools/rel.cx not found)");
+    if (cx_fmt(wd, sizeof wd, "%s/check-relsym-%d", sy_tmpdir(), (int)getpid())) die("path");
+    if (cx_fmt(fx, sizeof fx, "%s/fx", wd) || cx_fmt(cache, sizeof cache, "%s/cache", wd) || cx_fmt(rcache, sizeof rcache, "%s/rcache", wd) || cx_fmt(list, sizeof list, "%s/list.txt", wd)) die("path");
+    if (sy_mkdir_all(fx, 0755) < 0) die("cannot create work dir");
+
+    wf(fx, "a.cx", "int x;\nint y = foo(foo(1));\nfoo_x xfoo;\n");
+    wf(fx, "b.cx", "foo();\n/* none */\n");
+    wf(fx, "c.cx", "int bar;\n");
+    wf(wd, "list.txt", "100644 0 0\ta.cx\n100644 0 0\tb.cx\n100644 0 0\tc.cx\n");
+    { char *v[] = {"who-calls", "foo", "--root", fx, "--tracked", list, "--cache", cache, 0};
+      rc = rel(v, out); ck(rc == 0 && has(out, "rescanned=3") && has(out, "CALL\ta.cx:2\nCALL\tb.cx:1\n") && has(out, "sites=2"), "fx-cold");
+      rc = rel(v, out); ck(rc == 0 && has(out, "rescanned=0") && has(out, "CALL\ta.cx:2\nCALL\tb.cx:1\n") && has(out, "sites=2"), "fx-warm");
+      wf(fx, "b.cx", "foo();\n/* none */\nfoo;\n");
+      rc = rel(v, out); ck(rc == 0 && has(out, "rescanned=1") && has(out, "CALL\ta.cx:2\nCALL\tb.cx:1\nCALL\tb.cx:3\n") && has(out, "sites=3"), "fx-incremental"); }
+    { char *v[] = {"who-calls", "nosuchsym", "--root", fx, "--tracked", list, "--cache", cache, 0};
+      rc = rel(v, out); ck(rc == 1 && has(out, "sites=0"), "fx-none-rc1"); }
+    { char *v[] = {"who-calls", "a-b", "--root", fx, "--tracked", list, "--cache", cache, 0};
+      rc = rel(v, out); ck(rc == 2, "refuse-not-one-word"); }
+    { char *v[] = {"who-calls", "foo", "--root", fx, "--tracked", pth(wd, "nolist"), "--cache", cache, 0};
+      rc = rel(v, out); ck(rc == 2, "refuse-missing-list"); }
+
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' ls-files -s -- '*.cx' > '%s'", root, list)) die("path");
+    if (shc(cmd, out) != 0) die("git ls-files failed");
+    { const char *syms[] = {"fl_run", "awp_devmeta_read", "js_parse"}; int i;
+      for (i = 0; i < 3; i++) {
+        char *v[] = {"who-calls", (char *)syms[i], "--root", root, "--tracked", list, "--cache", rcache, 0};
+        t0 = sy_now_ms(); rc = rel(v, out); t1 = sy_now_ms();
+        if (i == 0) { rc = rel(v, out); t2 = sy_now_ms(); printf("RELSYM_TIMING\tcold_ms=%ld\twarm_ms=%ld\n", t1 - t0, t2 - t1); }
+        calls(out, a1);
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' grep -n -w -F '%s' -- '*.cx' ':!archive'", root, syms[i])) die("path");
+        shc(cmd, g); grepsites(g, a2);
+        { char n[100]; cx_fmt(n, sizeof n, "real-%s-equals-git-grep", syms[i]); ck(rc == 0 && a1[0] && !strcmp(a1, a2), n); }
+      } }
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", wd) == 0) shc(cmd, out);
+    printf("CHECK_RELSYM\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

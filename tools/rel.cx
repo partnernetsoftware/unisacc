@@ -20,7 +20,11 @@
  *           is then older than the registry.
  * --timing  one REL_TIMING line on stderr (read_ms, scan_ms); it changes no result.
  *
- * Not in this version (named, not silently narrowed): who-uses SYM, --depth, --tier, IMPACT table|node rows.
+ *   sh ./unisacc.com tools/rel.cx -- who-calls SYM [--root DIR] [--tracked LIST] [--cache DIR] [--timing]
+ *           CALL<TAB>path:line per word hit of SYM (git grep -n -w rule) in the who-uses file set, then CALLS_SUMMARY;
+ *           per-file identifier index cached by content hash in DIR (default ROOT/.devsvc/relsym, local only),
+ *           only changed files rescanned (relation DAG G2 first step; check tools/check-relsym.cx).
+ * Not in this version (named, not silently narrowed): definition/call told apart from comment/string hits, --depth, --tier, IMPACT table|node rows.
  * LIST and DUMP are snapshots: beyond the registry cross-check above this tool does not check that they still
  * describe the tree (cxlib.relstore, G2, is to own that).
  * rc 0 rows printed, 1 no rows, 2 usage or I/O error.  No repository path is fixed here.  Check: tools/check-rel.cx. */
@@ -219,14 +223,76 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
     return hit || nna ? 0 : 1;
 }
 
+/* who-calls SYM: symbol-grain sites (G2 first step).  Every tracked .cx (same set as who-uses) is read, hashed
+ * (FNV-1a 64 of its working-tree bytes) and its identifier index -- one "IDENT<TAB>LINE" per distinct (ident,line),
+ * idents being maximal [A-Za-z0-9_] runs, the git grep -w word rule -- is kept in CACHE/<hash>.idx (local, not
+ * tracked).  Only files whose content hash has no index are rescanned.  Comments and strings are not told apart
+ * from code: a site is a textual word hit, the set `git grep -n -w -F SYM` gives on the same files. */
+static unsigned long long fnv(const char *s, size_t n) { unsigned long long h = 1469598103934665603ULL; size_t i; for (i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; } return h; }
+static int wch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int idx_build(const char *s, size_t n, const char *out) {
+    size_t cap = n * 2 + 64, z = 0, i = 0, li = 0; long line = 1; char *b = malloc(cap); int r;
+    if (!b) return -1;
+    while (i < n) {
+        size_t a, q; int dup = 0;
+        if (s[i] == '\n') { line++; li = z; i++; continue; }
+        if (!wch((unsigned char)s[i])) { i++; continue; }
+        a = i; while (i < n && wch((unsigned char)s[i])) i++;
+        q = li; while (q < z) { size_t e = q; while (b[e] != '\n') e++;   /* same ident already on this line */
+            if (e - q > i - a && b[q + (i - a)] == '\t' && !memcmp(b + q, s + a, i - a)) { dup = 1; break; } q = e + 1; }
+        if (dup) continue;
+        if (z + (i - a) + 32 > cap) { cap = cap * 2 + (i - a) + 64; b = realloc(b, cap); if (!b) return -1; }
+        if (mm_copy(b + z, (long)(cap - z), s + a, (long)(i - a))) { free(b); return -1; } z += i - a;
+        if (cx_fmt(b + z, (long)(cap - z), "\t%ld\n", line)) { free(b); return -1; } z += strlen(b + z);
+    }
+    r = cx_write(out, b, z); free(b); return r;
+}
+static int who_calls(const char *sym, const char *list, const char *cache) {
+    size_t sz, i, sl = strlen(sym); char *s; int found = 0, scanned = 0, rescanned = 0;
+    long t0 = sy_now_ms();
+    if (!sl || sl > 255) die("who-calls: bad symbol", sym);
+    for (i = 0; i < sl; i++) if (!wch((unsigned char)sym[i])) die("who-calls: symbol is not one word:", sym);
+    if (sy_mkdir_all(cache, 0755) < 0) die("who-calls: cannot create cache", cache);
+    s = cx_read(list, &sz); if (!s) die("cannot read tracked list (git ls-files -s -- '*.cx' > LIST):", list);
+    i = 0;
+    while (i < sz) {
+        size_t e = i, t; while (e < sz && s[e] != '\n') e++;
+        t = i; while (t < e && s[t] != '\t') t++;
+        if (t < e && e - t > 1 && !(t - i >= 6 && !memcmp(s + i, "120000", 6)) && !(e - t - 1 >= 8 && !memcmp(s + t + 1, "archive/", 8))) {
+            char rel[4096], abs[8192], ip[8192], ln[64]; size_t fn, xn, p = 0; char *f, *x;
+            if (e - t - 1 >= sizeof rel) die("path too long in", list);
+            if (mm_copy(rel, (long)sizeof rel, s + t + 1, (long)(e - t - 1))) die("path too long in", list); rel[e - t - 1] = 0;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long", rel);
+            f = cx_read(abs, &fn);
+            if (f) {
+                scanned++;
+                if (cx_fmt(ip, sizeof ip, "%s/%016llx.idx", cache, fnv(f, fn))) die("path too long", cache);
+                if (sy_exists(ip) != 1) { if (idx_build(f, fn, ip)) die("who-calls: cannot write index", ip); rescanned++; }
+                free(f);
+                x = cx_read(ip, &xn); if (!x) die("who-calls: cannot read index", ip);
+                while (p < xn) { size_t q = p; while (q < xn && x[q] != '\n') q++;
+                    if (q - p > sl && q - p - sl - 1 < sizeof ln && x[p + sl] == '\t' && !memcmp(x + p, sym, sl)) {
+                        if (mm_copy(ln, (long)sizeof ln, x + p + sl + 1, (long)(q - p - sl - 1))) die("who-calls: bad index row", ip); ln[q - p - sl - 1] = 0; printf("CALL\t%s:%s\n", rel, ln); found++; }
+                    p = q + 1; }
+                free(x);
+            }
+        }
+        i = e + 1;
+    }
+    printf("CALLS_SUMMARY\tsym=%s\tsites=%d\tscanned=%d\trescanned=%d\n", sym, found, scanned, rescanned);
+    if (timing) fprintf(stderr, "REL_TIMING\ttotal_ms=%ld\trescanned=%d\n", sy_now_ms() - t0, rescanned);
+    return found ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
-    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0; char *files[MAXCH], def[8192], def2[8192]; int nf = 0, a;
+    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0, *cache = 0; char *files[MAXCH], def[8192], def2[8192]; int nf = 0, a;
     if (argc < 3) usage();
     for (a = 2; a < argc; a++) {
         if (!strcmp(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
         else if (!strcmp(argv[a], "--tracked") && a + 1 < argc) tracked = argv[++a];
         else if (!strcmp(argv[a], "--closure") && a + 1 < argc) closure = argv[++a];
         else if (!strcmp(argv[a], "--batches") && a + 1 < argc) table = argv[++a];
+        else if (!strcmp(argv[a], "--cache") && a + 1 < argc) cache = argv[++a];
         else if (!strcmp(argv[a], "--timing")) timing = 1;
         else if (argv[a][0] == '-' && argv[a][1] == '-') usage();
         else if (nf < MAXCH) files[nf++] = argv[a];
@@ -239,6 +305,12 @@ int main(int argc, char **argv) {
         if (nf != 1 || closure || table) usage();
         if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
         return who_uses(files[0], tracked);
+    }
+    if (!strcmp(argv[1], "who-calls")) {
+        if (nf != 1 || closure || table) usage();
+        if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
+        if (!cache) { if (cx_fmt(def2, sizeof def2, "%s/.devsvc/relsym", root)) die("path too long", 0); cache = def2; }
+        return who_calls(files[0], tracked, cache);
     }
     if (!strcmp(argv[1], "impact")) {
         if (tracked) usage();
