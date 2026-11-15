@@ -110,6 +110,35 @@ static void case_keyed(void) {
        tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) < 0, "keyed-A-leaves-AB-row");
 }
 
+/* --registered ID...: three manifests with suffixed batch ids (zzra1..3) and their coverage/packages rows plus a
+   foreign row appended by someone else.  One call selects all nine rows and the three manifests, the foreign row
+   stays out (and stays in the work tree), and reg-manifest --check --index -- the precommit gate's verdict --
+   reports nothing for them.  Then a foreign row whose field equals a new id (zzrb1) is refused, nothing committed. */
+#define CO_MK "mk(){ i=$1; r=\"$i\\tIMPLEMENTED\\tinterfaces\\ttools/check-$i.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-$i.cx\\t-\\tinterfaces.$i\\trc0:X\\tproduct\\tcommit\"; " \
+    "c=\"interfaces.$i\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tfixture\\ttools/check-$i.cx\"; p=\"batch\\t$i\\tall\\t-\\t-\\t-\\t-\\t-\\t-\"; " \
+    "printf \"batch\\t$r\\ncoverage\\t$c\\npackages\\t$p\\n\" > tests/manifests/$i.tsv; printf \"$r\\n\" >> tests/batches.tsv; " \
+    "printf \"$c\\n\" >> tests/coverage.tsv; printf \"$p\\n\" >> build/batch-packages.tsv; }; "
+static void case_registered(void) {
+    char out[8192], script[4096];
+    if (cx_fmt(script, sizeof script,
+        "cd %s/clone && " CO_MK "mk zzra1; mk zzra2; mk zzra3; printf 'zzforeign\\tother\\n' >> tests/batches.tsv; "
+        "./tools/co.native -m reg --registered zzra1 zzra2 zzra3 > reg.out 2>&1; echo RC=$?; grep -c '^REGISTERED' reg.out; "
+        "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c '^zzra'; git show HEAD:tests/coverage.tsv | grep -c '^interfaces.zzra'; "
+        "git show HEAD:build/batch-packages.tsv | grep -c 'zzra'; git ls-tree --name-only HEAD tests/manifests/ | grep -c zzra; "
+        "echo FOREIGN; git show HEAD:tests/batches.tsv | grep -c zzforeign; grep -c zzforeign tests/batches.tsv; "
+        "echo GATE; \"$UNISACC_COMMIT_OWN_NATIVES/reg-manifest\" --check --index | grep -c zzra; echo END", base)) die("script");
+    sh(script, out, sizeof out);
+    {   const char *want = "RC=0\n1\nHEADROWS\n3\n3\n3\n3\nFOREIGN\n0\n1\nGATE\n0\nEND";
+        ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "registered-selects-set-gate-agrees"); }
+    if (cx_fmt(script, sizeof script,
+        "cd %s/clone && " CO_MK "mk zzrb1; printf 'zzother\\tsee\\tzzrb1\\n' >> tests/batches.tsv; "
+        "./tools/co.native -m misfire --registered zzrb1 > mf.out 2>&1; echo RC=$?; grep -c 'not a manifest row' mf.out; "
+        "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c zzrb1; echo END", base)) die("script");
+    sh(script, out, sizeof out);
+    {   const char *want = "RC=1\n1\nHEADROWS\n0\nEND";
+        ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "registered-refuses-foreign-field-match"); }
+}
+
 /* NAME=abs-path arguments, as run-batch supplies declared batch materials; -1 when absent. */
 static int co_material(int argc, char **argv, const char *name) {
     size_t n = strlen(name); int i;
@@ -161,6 +190,8 @@ int main(int argc, char **argv) {
                 if (cx_fmt(img, sizeof img, "%s/%s", natives, leaf) || tq_native(root_local, srcs[mi], img, why, sizeof why)) die(why);
             }
         }
+        /* reg-manifest (the registration gate's verdict) for --registered; not a declared material yet */
+        if (cx_fmt(img, sizeof img, "%s/reg-manifest", natives) || tq_native(root_local, "tools/reg-manifest.cx", img, why, sizeof why)) die(why);
         if (setenv("UNISACC_COMMIT_OWN_NATIVES", natives, 1)) die("natives env");
         if (setenv("UNISACC_ON_CHANGE_NATIVES", natives, 1)) die("natives env");
     }
@@ -169,6 +200,7 @@ int main(int argc, char **argv) {
     case_symlink();
     case_dirlink();
     case_keyed();
+    case_registered();
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
