@@ -1,175 +1,86 @@
-# 发布签名：契约与配置
+# 0.0.68 发布入口与收据合同
 
-> 现状（2026-10-02）：Windows 企业 Authenticode 签名与 Apple 签名、公证都已在发布流程中常规执行（自 0.0.10 起；最近一次 v0.0.20，回执 research/r20-release-acceptance.json）。`signing-policy.json` 为 `required`。操作步骤见已归档的 [RELEASE-PIPELINE.md](../archive/plans/2026-11-01/RELEASE-PIPELINE.md)（只对旧 C 链有效）；本文只保留收据格式、身份配置、检查脚本与 keychain 边界。0.0.9–0.0.10 的“延期 / 资格”叙述已移到 [archive/release/README-0009-0010.md](../archive/release/README-0009-0010.md)。
+本文件说明 0.0.68 的发布顺序与证据归属，不是发布完成声明。当前 `release/candidate.tsv`、`decision.txt`、`evidence.tsv` 仍是上一版记录；冻结与整链确定后由本轮真实产物重写，不改名沿用旧收据。`rollback.txt` 是本版待填草稿，所有待定值统一使用约定的待填占位符；发布前逐项核对，公开后的回执与 Y2 身份只能在实际产生后补记。
 
-## Windows 签名
+主调度 cc 负责集成、冻结、构造、对外发布与装机；cdx 按派工准备本目录文档与证据。所有读写、命令与提交经仓开发服务 `tools/devsvc.cx`，共享检出不切分支，只提交自己的路径。版本文档在 `.claude/worktrees/v0.0.68` 修改，公开前由 cc 集成；不改正在执行的冻结根或其 RUN。
 
-### 本地封存输入契约
+## 六个文件各自记录什么
 
-以下是 qualification 与 company 签名共用的输入契约（示例取自历史 0.0.9 回执，字段不变）；每个版本须用当时冻结的版本与源码重新生成，不能继承上一版回执。
+| 文件 | 本版内容与生成时点 |
+|---|---|
+| `candidate.tsv` | 候选与资产 pins 的唯一来源。打包后计算摘要，X 只提交本表；同候选 CI 实际完成后在 Y1 回填精确 run id。 |
+| `evidence.tsv` | 八步的本版 verdict 与证据入口。Y1 保留尚无公开读回的 UNKNOWN，公开后 Y2 才更新第 8 步。 |
+| `decision.txt` | 对当时候选与证据实跑 `tools/release-decide.cx` 的输出，Y1/Y2 分别生成。任何缺证据步不得猜 PASS。 |
+| `rollback.txt` | 公开前声明撤回到 0.0.67 的动作、保留范围、完整回退摘要及真实 X/CI 身份；公开后补 Y2 与读回回执。 |
+| `freeze.tsv` | 历史三列冻结窗口登记，保留旧行；0.0.68 的真实冻结 REV 定下后再追加。旧消费者已在 `archive/testing-c43-legacy/`，本表不冒充现行冻结门通过证明。 |
+| `README.md` | 本流程、工具接口和证据边界。实际状态以候选表、原始执行回执及裁决为准。 |
 
-先完成候选字节与独立构建证据；**Draft/发布验收以 GitHub CI（含 macos runner / release-check）为准**，不以私有 Darwin 宿主上线为硬依赖。不要为了测试 push。
-源码和工作树必须干净；签名调度只能使用当前 `main`，调度 workflow 的
-`GITHUB_SHA`、checkout、远端 `main`、回执与 CI SHA 必须相同。
+仓内 `release/freeze.tsv` 与准备器状态目录的 `freeze.tsv` 是不同合同。后者由 `tools/cxlib/releaseprepare.cx` 生成，绑定 `BUILD_REV`、`source_sid`、构造子路径和 `constructor_sha256`；不能用其键值格式覆盖仓内的历史三列表。
 
-操作者在已有草稿 Release 上传两个文件（此工作流不创建草稿）：
+## 候选身份与六资产
 
-1. `unisacc-unsigned.zip`：仅含根目录 `unisacc.com`，没有目录、重复成员、
-   符号链接、加密成员或额外文件。
-2. `unsigned-receipt.json`：如下 schema；操作者计算并审核它的完整 SHA256，
-   用作 `receipt_sha256` 调度参数。文件最大 64 KiB，ZIP 最大约 16 MiB。
+`candidate.tsv` 严格为一行表头加一行候选、21 列 TAB 分隔，列序保持:
 
-```json
-{
-  "schema": 1,
-  "kind": "unisacc-owner-local-build",
-  "source_sha": "<40 lowercase hex>",
-  "source_dirty": false,
-  "built_by": "owner-local",
-  "local_gate_complete": true,
-  "product_version": "0.0.9",
-  "local_build": {
-    "host": "<local build host label>",
-    "created_at": "<UTC ISO8601>",
-    "toolchain_sha256": "<64 lowercase hex>"
-  },
-  "upstream": {"run_id": 123, "run_attempt": 1},
-  "archive_sha256": "<SHA256 of exact ZIP>",
-  "assets": {
-    "unisacc.com": {"sha256": "<SHA256 of exact local file>", "bytes": 123456}
-  }
-}
+```text
+repo tag commit version workflow workflow_ref ci_run_id ape ape_sha256 package package_sha256 win_arm64 win_arm64_sha256 record record_sha256 build_alias build_alias_sha256 zip zip_sha256 checksums checksums_sha256
 ```
 
-`local_gate_complete` 是操作者的本地构建/门禁声明字段，必须对应保留的证据；
-工作流验证封存声明和字节一致性，不会重新执行本机门禁。`upstream` 必须是
-本仓库 `.github/workflows/release-check.yml` 在 `main` 上已经成功、与RC源码匹配的精确 attempt，
-以 `windows-signing.yml` 的真实校验为准。另行调度的 `ci.yml` 是源码安全网，不能替代封存候选的六原生pull／执行证据。
-**正式 Draft/发布验收以该 CI 成功 attempt 为准**（含 macos runner）；CI 不是发行二进制的生产者，但**替代**「须等私有 Darwin 宿主上线才开 Draft」的旧口径。
-`product_version` 必须精确等于源码 `src/version.h` 中唯一的 `UNISACC_VERSION`；
-未知版本或仅形状合法但不匹配的版本拒绝。ZIP原始名称必须没有NUL截断，成员只接受
-普通文件和 STORED/DEFLATED 压缩；上游API响应的 run id/attempt、下载前后资产 id、
-实际下载大小也逐项匹配，避免将替换后的资产记成原来的封存id。
-调度参数为 `mode/source_sha/seal_tag/receipt_sha256/upstream_run_id/upstream_attempt`。
-回执绑定草稿 Release id、两个资产 id 和操作者审核的回执 SHA；下载后重新验哈希。
+`repo` 为 `partnernetsoftware/unisacc`，本版 `tag/version` 为 `v0.0.68/0.0.68`。`commit` 绑定发布标签实际指向的完整提交，`workflow/workflow_ref` 绑定实际调度的 `candidate-native.yml` 与分支；`ci_run_id` 来自本轮实际 CI，不复制 0.0.67 的值。源码冻结 REV、整链 BUILD_REV 与发布 F 提交的对应关系须在证据中写清，并实测源身份一致，不能只凭版本号认定等价。CI 的输入 commit X 与候选源码提交分别核对，不混为一个字段。
 
-### 配置：一个仓库一个 Entra 身份
+本版发布六件，不发布 ZIP:
 
-复用公司的 Artifact Signing account/Public Trust profile；**不能复制 minicon
-的 Entra application/service principal 或 AZURE_CLIENT_ID**。unisacc专属无密码
-Entra app/SP及本仓库 `release-signing` Environment 已配置并读回核验，
-绑定GitHub实际返回的immutable repo/environment OIDC `sub`，
-issuer 为 `https://token.actions.githubusercontent.com`，audience 为
-`api://AzureADTokenExchange`，只授予 profile 范围的
-`Artifact Signing Certificate Profile Signer`。
+(1) `unisacc.com`。
+(2) `pkg.bin`。
+(3) `slice-win-arm64`。
+(4) `unisacc.com.build.json`。
+(5) `build.json`，与构建记录别名字节一致。
+(6) `SHA256SUMS`，覆盖前五件；其自身摘要钉在候选表。
 
-已读回核验profile级Signer授权、联邦配置、操作者审核与main-only分支约束，
-并设置身份验证标志；依据为 [PRD微软身份接入记录](../prd.md)。
-正式 OIDC 登录与企业服务签名自 0.0.10 起在每次发布中实际执行，policy 为 required（最近一次 v0.0.20，company run 36933254966）。
-以下配置名称保留供资格核对；检查时只列名称，不输出值：
+`zip` 与 `zip_sha256` 两列为 `-`。所有摘要由实际文件计算；源 SID 不增加为第 22 列，而由整链快照、`sources.tsv`、构建记录中的 `sources_sha256` 和冻结收据交叉核对。`RcCandidate` 加载器继续拒绝多候选、错误表头或列数、非法摘要、不安全或重复资产名。0.0.62 及更早版本的七资产与 ZIP 合同留在兼容工具和检查中，不套用到本版，也不删除旧版覆盖。
 
-| 类型 | 名称 |
-| --- | --- |
-| Environment secrets | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
-| Environment variables | `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE` |
-| Environment variable | `UNISACC_REPO_IDENTITY_VERIFIED=true`，仅在操作者核对独立 Entra 身份、精确 OIDC subject 与 profile RBAC 后设置 |
+## 从冻结到 Y2
 
-`UNISACC_REPO_IDENTITY_VERIFIED` 是部署检查的显式声明，不能证明 Azure 对象已
-存在；正式 Azure 登录与实际签名仍须成功。GitHub 找不到 Environment 时可能自动
-创建空 Environment；空 secrets/variables 会在登录和服务调用前硬失败。
-没有实际配置成功回执时，不声称部署完成。
+(1) cc 集成全部修复并固定 REV，先跑冻结门。历史配方见 `archive/prd_mempalace-2026-11-14.md` 的“起整链的做法”，当前发布门与差距见 `plans/release-gates-0.0.68.md`。核 bootstrap 0.0.59 及配套构建记录、快照与 `cxroot.tsv`、身份 helper、真实在途作业和截止。历史配方要求起链只设 `UNISACC_IDENT_HELPER`，不设 `UNISACC_RUN_CACHE` 或 `UNISACC_CACHE_DIR`，不能把已经实测否定的环境写法重新带入本轮。
+(2) 正规整链产生 `chain-run.identity`、`chain-run.tsv`、`checkpoint.tsv`、固定点收据与最终打包输入。公开硬门要求 compare DONE、最后一次 compare attempt 的 rc=0、residue=0、memo=off，objects/kernels/slices/product 均 same，g2/g3 六目标切片 SHA256 逐项相等。仅有 pack 产物或 PREPARED 不代表门已过。
+(3) 从实际被构造 REV 取得发布源码 F，核 F 与构造输入的源身份，再绑定发布标签和源码标签。`tools/pack-srcdir.cx` 从整链打包收据装配全新输入目录；`tools/release-run.cx -- --pack ROOT TABLE SRC_DIR NEW_OUT --chain-out CHAIN_DIR [--snap SNAP]` 核整链、打包、注入版本、生成布局并回填候选资产摘要。ROOT 必须有匹配的候选表与产品，输出目录必须全新。
+(4) cc 提交 X，只含已核实的 `release/candidate.tsv`，创建草稿并上传六资产。用同一张表核远端草稿身份与资产，调度同候选 CI；记录 X、run id、attempt、输入参数、候选 SHA 与每个作业的实际结论。旧 run、普通源码 CI 或计划输出不能替代本轮同候选 CI。
+(5) cdx 按真实证据准备 Y1:候选表回填 CI id，重写八步 evidence 与 decision，填发布说明和 rollback 中此时已产生的身份。公开读回尚未发生时，第 8 步保持 UNKNOWN。cc 核对公开硬门、同候选 CI、草稿读回、回滚声明和缺口披露后提交并推送 Y1。
+(6) cc 公开并置 Latest，再用全新目录下载六件，核公开状态、标签提交、资产身份、全部摘要、版本、smoke 与 COMM 等原有合同；实际通过才在 Y2 更新第 8 步与裁决，并记录公开时间、实际 Y2 提交和装机回执。发布页正文与说明文件须读回比对，不把上传命令成功当作公开读回成功。
+(7) 公开读回后才装机并做装后检查；保留 0.0.67 回退件及其完整 SHA。清理在装机和基线取数之后，按真实进程与保留条件串行做。本文不授权清理任何正在用的根、RUN 或他人产物。
 
-不要猜 legacy subject；核对本仓库实际 OIDC 格式。使用 immutable claims 的仓库
-subject 含 owner/repository 数字 ID；旧仓库可能仍是 legacy 格式。
-这些标识、provider coordinates、令牌与私钥不进入源码或公开签名回执。
-工作流不读取证书私钥，没有 PFX、client secret 或账号密码回退。
+0.0.67 的分段流水可核对 X `9e54f512a8`、Y1 `f3849c6b94`、Y2 `2b6a9804b5`；它们是结构参考，所有身份、收据和结论在本版重测。
 
-### Canonical inspection scripts（已接入）
+## 八步证据与资格
 
-参考源位于本机技能目录：
+`evidence.tsv` 每行是 `step<TAB>verdict<TAB>path`，verdict 只用 PASS、FAIL、UNKNOWN:
 
-- `~/.claude/skills/sign-windows-artifacts/scripts/inspect-authenticode.ps1`
-- `~/.claude/skills/sign-windows-artifacts/scripts/inspect-authenticode.sh`
-- `~/.claude/skills/sign-windows-artifacts/scripts/fetch-microsoft-trust-bundle.sh`
+| 步 | 名称 | 必须来自 |
+|---|---|---|
+| 1 | freeze-sid | 本轮冻结 REV、实算 SID、构造子摘要及冻结门回执。 |
+| 2 | construct | 同输入正规整链、checkpoint、compare 及 g2/g3 收据。 |
+| 3 | ape-pack | 本轮 pack 状态、输入来源、六资产摘要与构建记录。 |
+| 4 | s9 | 同候选、同登记与源身份绑定的会话聚合及 verdict；不迁移旧产品或不同输入的结论。 |
+| 5 | layout-check | 同表同资产的 `release-layout --check` 与校验和检查。 |
+| 6 | draft-assets | 本轮远端草稿及实际下载资产的身份和完整性检查。 |
+| 7 | ci-qualified | 本轮精确 run/attempt、输入与作业原始结果；仅 pending 不算通过。 |
+| 8 | readback | 公开后实际下载与语义检查；Y1 尚未产生该证据。 |
 
-产品副本已接入 `scripts/` 同名文件，保持
-`pns-authenticode-inspector/v3` 字节一致；实际验签仍须在最终资产上执行。
-Windows调用为：
-`pwsh scripts/inspect-authenticode.ps1 -Path FILE -ExpectedProductName Unisacc
--ExpectedProductVersion VERSION`（同一命令行）。Portable诊断调用为：
-`bash scripts/inspect-authenticode.sh --ca-file PRIVATE_BUNDLE -- FILE`。
-trust bundle fetch helper独立生成私有bundle，shell inspector不自动调用它；
-不要把bundle内容或公司配置写进公开回执。技能中的
-`scripts/check-product-inspectors.sh REPO_ROOT` 检查这三个副本的完整字节一致性。
-三个副本已提交进仓库；最终冻结仍需保留字节一致性及实际验签回执。
+用 `tools/release-decide.cx -- --candidate TABLE --evidence EVIDENCE --assets DIR` 生成 `decision.txt`，保留 stdout、stderr 与退出码。rc=0 本身不表示 QUALIFIED，必须核输出裁决。D1 允许如实披露缺口后公开，不放宽冻结门、整链、公开硬门或同候选 CI，也不把 UNKNOWN/FAIL 改成 PASS；未取得完整资格仍写 NOT_QUALIFIED。
 
-### 私有keychain操作边界
+daily 聚合与 release 的 `RELEASE_ONLY` 是独立结论。F4c 只在显式封存的 daily/no-candidate 会话按定义判不适用，发布说明披露 `S9_NA reason=no-candidate-material n=N` 及批名；有候选的会话缺同一材料不得借此改标。无候选摸底会话不能当作本版候选全批资格。
 
-仅使用调用者明确选定的私有专用keychain；本机实测仅传 `--keychain` 不足以避免
-系统密钥服务等待，需临时将该链前置user searchlist，同时保留原有全部项目。
-操作前保存搜索表，任何成功、失败或超时路径均在finally恢复，并读回核对原表一致；
-限时命令清理所属进程。不得导出既有私钥、修改login钥匙串ACL或输出密码、API key、
-Key ID及公证提交标识；这些只在私有环境处理。一次诊断成功不替代最终载荷的签名
-与信任回执，也不以关闭Gatekeeper或去掉quarantine作为通过条件。
+## 可复用工具与读回边界
 
-## M11：单表候选与只读演练
+`tools/release-oneshot.cx`、`tools/cxlib/releaseprepare.cx` 可准备并封存输入；已有整链只能按其严格 identity/checkpoint/产物合同接入。`release-run --pack` 是本地打包，`release-dispatch --dry-run` 只验计划，不创建草稿、不上传、不公开，也不证明 CI 成功。`release-layout.cx` 与 `release/tools/c47-1-readback.cx` 共用候选表，不另建 pins 表。
 
-`release/candidate.tsv` 是候选身份与资产 pins 的唯一来源，严格为表头加一行候选，
-21 列依次为 `repo, tag, commit, version, workflow, workflow_ref, ci_run_id,
-ape, ape_sha256, package, package_sha256, win_arm64, win_arm64_sha256,
-record, record_sha256, build_alias, build_alias_sha256, zip, zip_sha256,
-checksums, checksums_sha256`（实际文件以 TAB 分隔）。不要另建读回 pins 表，
-也不要在命令或源码中另填版本、候选提交、资产名或摘要。共享 `RcCandidate`
-加载器拒绝多候选、错误表头、列数、摘要及不安全或重复的资产名。
+读回接口为 `ROOT TABLE NEW_OUT OLD_APE true|false`，NEW_OUT 必须绝对且不存在；`true` 要求草稿，`false` 要求非草稿并核标签提交。保留资产 SHA、布局、版本、smoke、COMM 和原有逐命令 stdout/stderr/status(含 rc 与 residue)断言。任何失败具名拒绝，不上传或修改 Release。
 
-布局入口与读回入口使用同一张表：
+当前 `tools/cxlib/releaseexec.cx` 的第 8 步证据取 draft-readback 状态，不能直接将其当作公开读回 PASS；本版按 X/Y1/Y2 分段更新公开证据。准备器或 dry-run 的 PREPARED、已有缓存与计划行都不能缓存为测试 PASS。
 
-```sh
-ROOT=/absolute/path/to/unisacc
-TABLE="$ROOT/release/candidate.tsv"
-SOURCE=/absolute/path/to/four-candidate-assets
-NEW_OUT=/absolute/path/to/absent-layout
-OLD_APE=/absolute/path/to/previous-unisacc.com
-READBACK_OUT=/absolute/path/to/absent-readback
-sh "$ROOT/unisacc.com" "$ROOT/tools/release-layout.cx" -- --candidate "$TABLE" "$SOURCE" "$NEW_OUT"
-sh "$ROOT/unisacc.com" "$ROOT/tools/release-layout.cx" -- --candidate "$TABLE" --check "$NEW_OUT"
-sh "$ROOT/unisacc.com" "$ROOT/release/tools/c47-1-readback.cx" -- "$ROOT" "$TABLE" "$READBACK_OUT" "$OLD_APE" true
-```
+## 旧签名流水与凭据边界
 
-`SOURCE` 四项按表中 APE、package、win_arm64、record 文件名放置；生成先核对
-这四项 SHA256，不改写源目录，再生成其余三项。生成结束及 `--check` 均核对
-全部七项。六项外部 manifest 按角色顺序列出，不包含 manifest 自身。
-ZIP 外部名来自表，内部成员仍严格为 `slice-win-arm64`、`pkg.bin`、`run.cmd`、
-`README-win-arm64.txt`。以上只适用于版本 0.0.62 及更早;0.0.63 起不再发布该 zip,
-候选表 zip 与 zip_sha256 两列写 `-`,发布资产为六件(含 SHA256SUMS,其摘要覆盖五个文件)。
+旧 C 链的签名流水已归档在 `archive/plans/2026-11-01/RELEASE-PIPELINE.md`，历史资格说明在 `archive/release/`。旧“必须签名、公证才可公开”的要求已被后续决定撤销，不能作为本版新增公开门。保留既有签名工具与配置；若本版实际执行签名或公证，须保留最终资产及其真实检查回执，不因配置存在或历史成功便声称本版已签。
 
-读回 CLI 为 `ROOT TABLE NEW_OUT OLD_APE true|false`；`NEW_OUT` 必须绝对且不存在。
-它先绝对化表路径，再从表中仓库与 tag 下载四项，直接以 download 目录作布局源，
-无需 canonical 副本。末参 `true` 要求 Draft，`false` 要求非 Draft 并读回 tag
-对应提交；两者均断言非 prerelease、tag 与目标提交一致。它保留版本、smoke、
-COMM、外部 SHA 与 ZIP 完整成员断言，每个原有子命令保留 `.stdout`、`.stderr`、
-`.status` 回执（含退出码及 residue），失败即拒绝，不上传或修改 Release。
-旧 `c46-3-readback.sh` 仅保留历史用途，不参与此单表接口。
+仍适用的安全合同:不复制其它仓库的 Entra app/SP；不猜 OIDC subject，核实际不可变仓库/环境身份与最小 profile 授权；不导出或写入令牌、私钥、密码、公司坐标和私有 keychain 内容。调度所用精确源码身份、封存资产 id/大小/摘要与 CI attempt 须一致，下载前后核资产身份，不以普通源码 CI 替代封存候选证据。
 
-M11 调度接口仅接受 `--dry-run TABLE ASSETS`：加载同一张表并校验七项后，
-只打印 Draft 创建、七项上传计划、workflow/ref、输入
-`ape_sha256/commit/release_tag/ape_url` 与已有 CI run id。dry-run **不对外执行**：
-不调用 gh/git 网络操作，不创建 Draft、不上传、不发布，也不实际 dispatch；
-打印的计划不代表远端状态或 CI 成功，其他模式必须拒绝。
-
-命令级验收由集成者在私有目录统一执行：上述生成与检查命令都须退出 0，
-读回须输出 `C47_1_READBACK PASS`，并保留每步成功回执；正式非 Draft 读回
-使用新的输出目录和末参 `false`。篡改任一源资产后生成必须失败，篡改输出
-七项中任一项后检查及 dry-run 必须失败；多候选、错误表头或列数、非法摘要、
-重复或不安全资产名必须在共享加载阶段失败。dry-run 成功只验收本地七项与
-计划输出，不能替代真实远端读回或已有 CI 证据。
-
-本轮私有实现已用现有候选七资产实际运行 dry-run；完整 Draft 读回实跑退出0，
-包含四资产 SHA、版本、smoke、COMM、布局生成/检查、外部校验和及 ZIP 成员。
-`tools/check-release-dispatch.cx` 的六个拒绝合同覆盖：坏资产、缺失派生 ZIP、
-多候选、不安全资产名、workflow 禁止的标签及非 dry-run 模式；拒绝时不得输出计划。
-`tools/check-release-layout.cx` 保留八项检查；ZIP 附加字节负控会重钉测试候选的
-全部七项摘要并先证身份匹配，仍须因固定结构不符而拒绝，不能让摘要门遮蔽结构覆盖。
-独立旧布局生成的微型黄金表在 `release/testdata/layout-candidate.tsv`，仅供隔离
-格式检查，不是第二份产品候选 pins。生产工具行数按当前实际计数写基线，不预留。
-
+如需私有 keychain，只操作选定的专用链；操作前保存搜索表，成功、失败或超时都恢复并读回核对，不改 login keychain ACL，不以关闭 Gatekeeper 或去 quarantine 代替验证。检查配置只列名称，不输出秘密值。
