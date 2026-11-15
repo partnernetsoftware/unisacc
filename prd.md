@@ -663,6 +663,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
   (M) harness 契约表 tests/harness-contracts.tsv:缓存键含依赖、材料映射非空、缺材料只延后本批、平台过滤、符号链接根、归档副本执行位六条负控;缓存键算法单源。
   (N) UNISACC_BOUND_DEADLINE_MONO 六个读取点(bound.c:422、all-waves.cx:78/507、s9-shards.cx:43/522、tests/preprocess/suite.cx:104)收进一个帮手并核属主存活;chain-ready 拒残留环境(含 UNISACC_RUN_CACHE、UNISACC_CACHE_DIR)。
   (O) 入库派生表去行数等易变列;依据 main 近 5 提交 4 个为 tool-index 跟随提交(实测)。
+  (Q) s9 commit 档提速与出关键路径(0.0.67 try3 前 60 片 239 批实测):并发硬编码 3(s9-shards.cx:299,16 核平均 2.48);每片固定开销 15.0 s 占片总时 39%;每步空档约 24 s;init 184 s 为六个 prepare 串行;批 p50 9.96 s、最大 55.09 s 两批贴线;top 20 批几乎全是工具自测。Q1 先做:S9_WIDTH 5 -> 10、init prepare 并行、aggregate 分片并行,推算 1600 -> 900 至 1000 s;Q2 贴线批 batch-split 拆分(不动 55 s);Q3 并发读限值表取 6 至 8 加 LPT 分片,推算 600 至 700 s;Q4 差量档 init --since 上次公开 tag 加抽样,未跑记 NOT_RUN,每周全量,前置修材料映射,推算 200 至 400 s;Q5 驻留式批级队列(占槽,Q1 至 Q3 后再定)。流程:commit 档不挡公开,冻结后与整链并行,结果补记 evidence,新增 FAIL 走补丁版;daily 每日跑 main 头;release 资格面只绑每周慢车道候选。
   (P) 共用版本工作目录互扰:一方未提交改动让另一方的 wt-gate-clean、layer-api 批失败(2026-11-15 库包改进 A 实测);对策待定(每任务短窗口串行提交,或放宽 worktree 只许 .claude/worktrees/<版本名> 的规则为 <版本名>-<任务>,后者改项目所有者规则)。
 - cx 生态门(2026-11-15 规划,详见 prd_cx.md 0.9):四环 K 内部/S 标准核心/X 标准扩展/A 外部包;门槛 T1 至 T13;G0 自用试点门推算 0.0.74,G1 公开门不早于 0.0.71 公开后 30 天且其后 3 个公开版。先行不占槽:tools/cxpkg.cx 与检查、stable-eval 接证据、前缀保留表与能力词表。注册中心不入池。
   应停:s9 commit 档作公开前串行门、全量 g3 挡 pack、UNISACC_RUN_CACHE=0 只靠记忆禁用(应由 chain-ready 拒)、build/phase-times.tsv 0.0.47 至 0.0.49 旧行(归档)、drive.sh 手写循环(沉淀进 s9-nightly)、release-sweep 拒 /tmp 根与临时产物放 /tmp 规则冲突。
