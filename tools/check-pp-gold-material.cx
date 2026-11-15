@@ -1,0 +1,81 @@
+/* From repository root: sh ./unisacc.com tools/check-pp-gold-material.cx -- [ROOT]
+ * Product-input admission of tools/pp-gold-material.cx, real child runs only:
+ * (1) ROOT/unisacc.com as a symlink to the regular product is accepted (PREPARED)
+ *     and material.tsv records the sha of the link target's bytes;
+ * (2) ROOT/unisacc.com as a directory is refused bounded-regular-input;
+ * (3) ROOT/unisacc.com as a character device (/dev/null link) is refused bounded-regular-input;
+ * (4) another input (seed/ident.c) as a symlink is still refused (no follow).
+ * Case (1) runs on ROOT itself (the source identity needs the real closure; in a
+ * version worktree ROOT/unisacc.com is the link), else NOT_RUN and counted failed.
+ * Cases (2)-(4) run in private roots under the temp dir: the six non-product inputs
+ * are copied as regular files and refusal happens before the source identity. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+static int failed, passed;
+static char root[4096], self[4096], tool[4400], prodreal[4096], work[4096];
+static const char *deps[] = {"unisacc.com", "tools/pp-gold-material.cx", "weights/gold/pp.tsv", "exec/kernel/body.c", "tools/cxlib/netpack.cx", "seed/ident.c", "tools/bound"};
+static void ck(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (ok) passed++; else failed++; }
+static void die(const char *s) { fprintf(stderr, "check-pp-gold-material: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, const char *a, const char *b) { int n = snprintf(p, 4400, "%s/%s", a, b); if (n < 0 || n >= 4400) die("path-bound"); }
+static void mkparents(const char *base, const char *rel) {
+    char p[4400], r[4400]; if (snprintf(r, sizeof r, "%s", rel) >= (int)sizeof r) die("rel-bound");
+    for (char *s = r; (s = strchr(s, '/')); s++) { *s = 0; path(p, base, r); if (mkdir(p, 0700) && errno != EEXIST) die("mkdir"); *s = '/'; }
+}
+/* private root: product given by `kind` (0 link to product, 1 directory, 2 link to /dev/null), ident linked when link_ident */
+static void make_root(const char *dir, int kind, int link_ident) {
+    if (mkdir(dir, 0700)) die("case-root");
+    for (int i = 1; i < 7; i++) {
+        char src[4400], dst[4400]; path(src, root, deps[i]); path(dst, dir, deps[i]); mkparents(dir, deps[i]);
+        if (i == 5 && link_ident) { char real[4096]; if (!realpath(src, real) || symlink(real, dst)) die("ident-link"); continue; }
+        np_buf b = {0}; if (np_readfile(src, &b) || np_writefile(dst, b.p, b.n)) die("copy-input"); free(b.p);
+        if (i == 6 && chmod(dst, 0755)) die("chmod-bound");
+    }
+    char prod[4400]; path(prod, dir, "unisacc.com");
+    if (kind == 0 && symlink(prodreal, prod)) die("product-link");
+    if (kind == 1 && mkdir(prod, 0700)) die("product-dir");
+    if (kind == 2 && symlink("/dev/null", prod)) die("product-dev");
+}
+static np_result run(const char *dir, const char *mat) {
+    /* the tool runs from ROOT (module paths resolve there); its source bytes equal the case-root copy */
+    char ctool[4400]; path(ctool, root, "tools/pp-gold-material.cx");
+    char *v[] = {"/bin/sh", prodreal, ctool, "--", "prepare", (char *)dir, (char *)mat, 0};
+    np_result r; char why[1024]; if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why); return r;
+}
+static int refused(const np_result *r, const char *what) {
+    char want[200]; if (snprintf(want, sizeof want, "pp-gold-material: REFUSE %s errno=", what) >= (int)sizeof want) die("want-bound");
+    return r->rc && r->errn > strlen(want) && !memcmp(r->err, want, strlen(want));
+}
+int main(int argc, char **argv) {
+    if (argc > 2 || !realpath(argc == 2 ? argv[1] : ".", root)) die("usage-[ROOT]");
+    char p[4400]; path(p, root, "unisacc.com"); if (!realpath(p, prodreal)) die("product-realpath");
+    if (snprintf(work, sizeof work, "%s/check-ppg-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") >= (int)sizeof work) die("work-bound");
+    if (!mkdtemp(work)) die("work");
+    char dir[4400], mat[4400];
+    /* (1) symlinked product accepted, identity = target bytes */
+    /* the source identity needs the real closure, so this case runs on ROOT itself;
+       a version worktree's ROOT/unisacc.com is the link.  Otherwise NOT_RUN (not counted as PASS). */
+    struct stat ls; path(p, root, "unisacc.com"); if (lstat(p, &ls)) die("product-lstat");
+    if (!S_ISLNK(ls.st_mode)) { printf("NOT_RUN\tsymlink-product-prepared\tROOT/unisacc.com-not-a-symlink\n"); failed++; goto rest; }
+    path(mat, work, "link-mat");
+    np_result r = run(root, mat);
+    const char *gold = "PREPARED\tpp-gold-material\tno-test-result\n";
+    ck(!r.rc && r.outn == strlen(gold) && !memcmp(r.out, gold, r.outn), "symlink-product-prepared");
+    if (r.rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    np_buf t = {0}, m = {0}; char h[65], row[100]; path(p, mat, "material.tsv");
+    if (np_readfile(prodreal, &t)) die("product-read"); cx_sha256_hex(t.p, t.n, h); free(t.p);
+    if (snprintf(row, sizeof row, "\nunisacc.com\t%s\n", h) >= (int)sizeof row) die("row-bound");
+    ck(!np_readfile(p, &m) && m.p && strstr(m.p, row) != 0, "symlink-product-identity-is-target-sha"); free(m.p);
+rest:
+    /* (2) directory product refused */
+    path(dir, work, "dir"); make_root(dir, 1, 0); path(mat, work, "dir-mat");
+    r = run(dir, mat); ck(refused(&r, "bounded-regular-input"), "directory-product-refused"); np_free(&r);
+    /* (3) device product (link resolving to /dev/null) refused */
+    path(dir, work, "dev"); make_root(dir, 2, 0); path(mat, work, "dev-mat");
+    r = run(dir, mat); ck(refused(&r, "bounded-regular-input"), "device-product-refused"); np_free(&r);
+    /* (4) non-product symlink still refused */
+    path(dir, work, "ident"); make_root(dir, 0, 1); path(mat, work, "ident-mat");
+    r = run(dir, mat); ck(refused(&r, "bounded-regular-input"), "non-product-symlink-refused"); np_free(&r);
+    printf("CHECK_PP_GOLD_MATERIAL\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
