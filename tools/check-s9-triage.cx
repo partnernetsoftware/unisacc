@@ -1,0 +1,91 @@
+/* tools/check-s9-triage.cx -- tools/s9-triage.cx 的夹具检查:三种模式的输出与全部拒绝路径。
+ *
+ *   sh ./unisacc.com tools/check-s9-triage.cx
+ *
+ * 夹具写在 mktemp 目录(/tmp 下),结束即删;被测工具只读。每个子进程 timeout 55。
+ * 逐条打印 PASS/FAIL,全过末行 CHECK_S9_TRIAGE_OK,否则退出 1。
+ */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char out[1 << 16];
+static char dir[256];
+static int pass_n, fail_n;
+
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};
+    return sy_run(a, out, sizeof out, 0);
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+static void ok(const char *name, int cond) { printf("%s\t%s\n", cond ? "PASS" : "FAIL", name); if (cond) pass_n++; else fail_n++; }
+/* 跑工具,stdout 与 stderr 合并进 out;返回退出码。 */
+static int tool(const char *args) {
+    char cmd[2048];
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && sh \"$OLDPWD\"/unisacc.com \"$OLDPWD\"/tools/s9-triage.cx -- %s 2>&1", dir, args)) return 99;
+    return sh(cmd);
+}
+
+int main(void) {
+    char cmd[4096];
+    int rc;
+    if (sh("mktemp -d /tmp/check-s9-triage-XXXXXX") || tx_len(out, sizeof out) < 10) { printf("FAIL\tmktemp\n"); return 1; }
+    cx_fmt(dir, sizeof dir, "%s", out);
+    for (rc = 0; dir[rc]; rc++) if (dir[rc] == '\n') dir[rc] = 0;
+    cx_fmt(cmd, sizeof cmd,
+        "cd %s && printf 'COVERAGE\\tx\\tSATISFIED\\nBATCH\\tb-pass\\tPASS\\tattempts=1\\treason=batch-pass\\nBATCH\\tb-fail\\tFAIL\\tattempts=1\\treason=\\n"
+        "BATCH\\tb-unk\\tUNKNOWN\\tattempts=1\\treason=watchdog-deadline\\nBATCH\\tb-ref\\tREFUSED\\tattempts=1\\treason=\\n"
+        "BATCH\\tb-na\\tNOT_APPLICABLE\\tplatform=osx/arm64\\nBATCH\\tb-gone\\tPASS\\treason=batch-pass\\nAGGREGATE\\tNOT_QUALIFIED\\n' > old.out && "
+        "printf 'BATCH\\tb-pass\\tFAIL\\tattempts=1\\treason=batch-fail\\nBATCH\\tb-fail\\tPASS\\tattempts=1\\treason=batch-pass\\n"
+        "BATCH\\tb-unk\\tUNKNOWN\\tattempts=1\\treason=watchdog-deadline\\nBATCH\\tb-ref\\tUNKNOWN\\tattempts=1\\treason=\\n"
+        "BATCH\\tb-na\\tNOT_APPLICABLE\\tplatform=osx/arm64\\nBATCH\\tb-new\\tPASS\\treason=batch-pass\\n' > new.out && "
+        "printf 'AGGREGATE\\tNOT_QUALIFIED\\n' > empty.out && printf 'BATCH\\ta\\tPASS\\nBATCH\\ta\\tFAIL\\n' > dup.out && "
+        "printf 'BATCH\\tonlyid\\n' > short.out", dir);
+    ok("fixtures", sh(cmd) == 0);
+
+    rc = tool("old.out");
+    ok("summary rc0", rc == 0);
+    ok("summary status counts", has("STATUS\tPASS\t2\n") && has("STATUS\tFAIL\t1\n") && has("STATUS\tUNKNOWN\t1\n") && has("STATUS\tREFUSED\t1\n") && has("STATUS\tNOT_APPLICABLE\t1\n"));
+    ok("summary reason rows", has("REASON\tUNKNOWN\twatchdog-deadline\t1\n") && has("REASON\tFAIL\t-\t1\n") && !has("REASON\tPASS") && !has("REASON\tNOT_APPLICABLE"));
+    ok("summary last line", has("S9_TRIAGE\tbatches=6\tpass=2\tnonpass=4\tnote=triage-only-not-a-verdict\n"));
+
+    rc = tool("old.out --ids");
+    ok("ids default set", rc == 0 && has("b-fail\nb-ref\nb-unk\n") && !has("b-pass") && !has("b-na") && has("S9_TRIAGE_IDS\tn=3\tof=6\t"));
+    rc = tool("old.out --ids --status PASS,NOT_APPLICABLE --chunk 2");
+    ok("ids status filter and chunk", rc == 0 && has("b-gone b-na\nb-pass\n") && has("S9_TRIAGE_IDS\tn=3\t"));
+    rc = tool("old.out --ids --status NOSUCH");
+    ok("ids empty set", rc == 0 && has("S9_TRIAGE_IDS\tn=0\t") && !has("b-"));
+
+    rc = tool("new.out --diff old.out");
+    ok("diff rc0", rc == 0);
+    ok("diff regress", has("REGRESS\tb-pass\tPASS\tFAIL\tbatch-fail\n"));
+    ok("diff fixed", has("FIXED\tb-fail\tFAIL\tPASS\n"));
+    ok("diff new and gone", has("NEW\tb-new\tPASS\n") && has("GONE\tb-gone\tPASS\n"));
+    ok("diff transitions", has("TRANS\tUNKNOWN\tUNKNOWN\t1\n") && has("TRANS\tREFUSED\tUNKNOWN\t1\n") && has("TRANS\tABSENT\tPASS\t1\n") && has("TRANS\tNOT_APPLICABLE\tNOT_APPLICABLE\t1\n"));
+    ok("diff last line", has("S9_TRIAGE_DIFF\tbatches=6\told_batches=6\tfixed=1\tregress=1\tsame=2\tmoved=1\tnew=1\tgone=1\tnote=triage-only-not-a-verdict\n"));
+    ok("diff never prints a verdict word", !has("QUALIFIED"));
+
+    rc = tool("nosuch.out");
+    ok("refuse unreadable", rc == 2 && has("REFUSE unreadable"));
+    rc = tool("empty.out");
+    ok("refuse no batch rows", rc == 2 && has("REFUSE no-batch-rows") && !has("S9_TRIAGE\t"));
+    rc = tool("dup.out");
+    ok("refuse duplicate batch", rc == 2 && has("REFUSE duplicate-batch a"));
+    rc = tool("short.out");
+    ok("refuse short row", rc == 2 && has("REFUSE batch-row-fields"));
+    rc = tool("old.out --bogus");
+    ok("refuse unknown option", rc == 2 && has("REFUSE unknown-option"));
+    rc = tool("old.out --ids --chunk 0");
+    ok("refuse chunk 0", rc == 2 && has("REFUSE chunk"));
+    rc = tool("old.out --ids --diff new.out");
+    ok("refuse mixed modes", rc == 2 && has("REFUSE usage"));
+    rc = tool("new.out --diff empty.out");
+    ok("refuse old without batch rows", rc == 2 && has("REFUSE no-batch-rows"));
+    rc = tool("");
+    ok("refuse no argument", rc == 2 && has("REFUSE usage"));
+
+    cx_fmt(cmd, sizeof cmd, "rm -f %s/old.out %s/new.out %s/empty.out %s/dup.out %s/short.out && rmdir %s", dir, dir, dir, dir, dir, dir);
+    ok("cleanup", sh(cmd) == 0);
+    if (fail_n) { printf("CHECK_S9_TRIAGE_FAIL pass=%d fail=%d\n", pass_n, fail_n); return 1; }
+    printf("pass=%d\nCHECK_S9_TRIAGE_OK\n", pass_n);
+    return 0;
+}
