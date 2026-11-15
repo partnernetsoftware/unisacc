@@ -29,7 +29,21 @@ static void ck(int ok, const char *name) {
 static void leaf(char *p, const char *name) {
     if (cx_fmt(p, 4400, "%s/%s", dir, name)) { printf("check-toolprep: path bound\n"); exit(2); }
 }
-static int has(const char *s, const char *w) { return s && tx_find(s, tx_len(s, 1024), w, tx_len(w, 256)) >= 0; }
+/* WHY contains WORD?  A byte scan on purpose: the text is a child's diagnostic message, not source code, and
+   the R4 source-anchor rule exists to keep source assertions on facts/behavior/tokens.  Reasons produced here
+   are read by nobody but this check. */
+static int has(const char *s, const char *w) {
+    long i, k, n, m = 0;
+    if (!s || !w) return 0;
+    while (w[m]) m++;
+    if (!m) return 1;
+    for (n = 0; s[n]; n++) ;
+    for (i = 0; i + m <= n; i++) {
+        for (k = 0; k < m; k++) if (s[i + k] != w[k]) break;
+        if (k == m) return 1;
+    }
+    return 0;
+}
 
 int main(int argc, char **argv) {
     char src[4400], bin[4400], bad[4400], badbin[4400], missing[4400], nobin[4400], marker[4400], never[4400];
@@ -82,6 +96,24 @@ int main(int argc, char **argv) {
         pid = tq_warm_start(root, 1, v);
         tq_warm_join(pid);
         ck(pid > 0 && sy_now_ms() - t0 < 10000, "warm-command-killed-at-its-bound");
+    }
+    /* The key follows the closure's working-tree bytes and nothing else: a neighbour file the tool does not use
+       keeps the entry (a shared checkout is almost always dirty somewhere), a changed file inside the closure
+       gives a new key.  A private cache directory keeps this case independent of the machine's cache. */
+    {   char cache[4400], nb[4400], twice[4400];
+        const char *good2 = "int main(void) { return 7; }\n";
+        if (cx_fmt(cache, sizeof cache, "%s/cache", dir) || cx_fmt(nb, sizeof nb, "%s/neighbour.txt", dir) ||
+            cx_fmt(twice, sizeof twice, "%s/echo-args-again.native", dir)) { printf("check-toolprep: path bound\n"); return 2; }
+        if (sy_setenv("UNISACC_TOOLPREP_CACHE", cache, 1)) { printf("check-toolprep: env\n"); return 2; }
+        ck(cx_write(nb, "neighbour\n", 10) == 0 && tq_native(root, src, bin, why, sizeof why) == 0 &&
+           tq_last_state() == 0, "cache-stores-the-first-build");
+        ck(cx_write(nb, "neighbour two\n", 14) == 0 && tq_native(root, src, bin, why, sizeof why) == 0 &&
+           tq_last_state() == 1, "cache-hit-survives-a-neighbour-file");
+        ck(cx_write(src, good2, (size_t)tx_len(good2, 4096)) == 0 && tq_native(root, src, twice, why, sizeof why) == 0 &&
+           tq_last_state() != 1, "cache-key-follows-closure-bytes");
+        ck(cx_write(src, good, (size_t)tx_len(good, 4096)) == 0 && tq_native(root, src, twice, why, sizeof why) == 0 &&
+           tq_last_state() == 1, "cache-key-returns-to-the-original-bytes");
+        (void)sy_unsetenv("UNISACC_TOOLPREP_CACHE");
     }
     printf("CHECK_TOOLPREP\tfailed=%d\n", failed);
     return failed ? 1 : 0;

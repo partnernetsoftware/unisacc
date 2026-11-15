@@ -9,7 +9,11 @@
  * Rows about files not in this commit (other agents' work) do not block it.  No staged .cx: exit 0 at once.
  * Also runs tools/cx-lint.cx over the staged .cx index blobs: R2/R3/R4 findings
  * block (R4-source-anchor cannot be allowed); R1 findings are report-only.
- * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B. */
+ * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B.
+ * -- --plan DIR / -- --from-run DIR: used by tools/precommit-flow.cx to run the gate subprocesses as one
+ * concurrent flow (see gate_slurp).  With no argument (the hook's call) a commit that stages a registry table is
+ * handed to tools/precommit-flow.cx, everything else is judged serially here (see flow_route);
+ * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -23,8 +27,50 @@
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 #define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
+/* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
+ * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
+ * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
+ * --from-run: read DIR/out/<id>.out and the node's rc from DIR/events.tsv instead of spawning; a node that
+ * is missing, timed out or skipped counts as "did not run".  The judgement code stays only here. */
+static const char *cur_gate = 0, *plan_dir = 0, *from_run = 0;
+static char *gate_slurp(char **argv, long *n) {
+    char p[1200], *ev, *b; size_t en = 0, bn = 0; long i = 0; int rc = -1, k; long il = tx_len(cur_gate, 64);
+    *n = 0;
+    if (plan_dir) {
+        sy_printf("PLAN\t%s", cur_gate);
+        for (k = 0; argv[k]; k++) sy_printf("\t%s", argv[k]);
+        sy_printf("\n");
+        b = mm_alloc(1); if (b) b[0] = 0; return b;
+    }
+    if (cx_fmt(p, sizeof p, "%s/events.tsv", from_run)) return 0;
+    ev = (char *)cx_read(p, &en);
+    if (!ev) return 0;
+    while (i < (long)en) {   /* EVT seq id state ms rc summary: the last ok/fail row of this id wins */
+        long e = i, so, sl, io, ilen, ro, rl; while (e < (long)en && ev[e] != '\n') e++;
+        if (!tx_field(ev + i, e - i, '\t', 2, &io, &ilen) && ilen == il && tx_same(ev + i + io, ilen, cur_gate, il) &&
+            !tx_field(ev + i, e - i, '\t', 3, &so, &sl) && !tx_field(ev + i, e - i, '\t', 5, &ro, &rl)) {
+            if ((sl == 2 && tx_same(ev + i + so, 2, "ok", 2)) || (sl == 4 && tx_same(ev + i + so, 4, "fail", 4))) {
+                long v = 0, j; int neg = 0;
+                for (j = 0; j < rl; j++) { if (ev[i + ro + j] == '-') neg = 1; else v = v * 10 + (ev[i + ro + j] - '0'); }
+                rc = neg ? -1 : (int)v;
+            } else if (sl != 5 || !tx_same(ev + i + so, 5, "start", 5)) rc = -1;
+        }
+        i = e + 1;
+    }
+    mm_free(ev);
+    if (rc < 0 || rc > slurp_okrc) { sy_eprintf("precommit: from-run node %s rc=%d\n", cur_gate, rc); return 0; }
+    if (cx_fmt(p, sizeof p, "%s/out/%s.out", from_run, cur_gate)) return 0;
+    b = (char *)cx_read(p, &bn);
+    if (!b) return 0;
+    { char *g = mm_grow(b, bn + 1); if (!g) { mm_free(b); return 0; } b = g; }
+    b[bn] = 0; *n = (long)bn;
+    return b;
+}
+
 static char *slurp(char **argv, long *n) {
-    int ofd, pid; long cap = 1 << 16, r, deadline; char *b = mm_alloc(cap);
+    int ofd, pid; long cap = 1 << 16, r, deadline; char *b;
+    if (cur_gate && (plan_dir || from_run)) return gate_slurp(argv, n);
+    b = mm_alloc(cap);
     *n = 0;
     if (!b) return 0;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
@@ -63,6 +109,109 @@ static int incomplete(const char *rows, long rn, const char *mark, const char *t
     sy_eprintf("precommit: blocked:incomplete:%s: no completion line '%.*s' (sub-tool not finished or failed to compile); last output: %.*s\n",
                tool, (int)(ml > 0 && mark[ml - 1] == '\t' ? ml - 1 : ml), mark, (int)(ls < 0 ? 7 : (ll > 300 ? 300 : ll)), ls < 0 ? "<empty>" : rows + ls);
     return 1;
+}
+
+/* 门读集(plans/devsvc.md 6 S2):每道按暂存路径触发的门在 tests/precommit-gates.tsv 声明它读的路径集合
+ * (列:gate、diff-filter、空格分隔的 pathspec、说明)。暂存路径与读集不相交的门记 NOT_AFFECTED:不跑、不算 PASS,
+ * 只在 PRECOMMIT_GATES 行计数(not_affected=N 与名单);blocked 判定不变。表不在(仅 ENOENT:夹具仓与旧归档)时用
+ * gt_builtin(与表逐行相同,check-precommit-gates 用 --gates 对拍);表在但缺某门的行,该门按失败处理,不放行。 */
+static const char gt_builtin[] =
+    "manifest\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv build/batch-packages.tsv\n"
+    "tables\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tests/tools-compile-sources.tsv\n"
+    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
+    "facts\tACMR\tinclude exec/facts\n"
+    "ledger\tACMR\tagentwork/ledger.tsv\n"
+    "cx\tACMR\t*.cx\n";
+static const char *gt_tab = 0; static long gt_n = 0; static int gt_src = 0, gt_na = 0; static char gt_nal[160];
+static int gt_load(void) {
+    char p[1200]; const char *wt = sy_env("GIT_WORK_TREE"); int ex; size_t n = 0;
+    if (gt_tab) return 0;
+    if (cx_fmt(p, sizeof p, "%s%stests/precommit-gates.tsv", wt ? wt : "", wt ? "/" : "")) return 1;
+    ex = sy_exists(p);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
+    if (ex < 0) { sy_eprintf("precommit: tests/precommit-gates.tsv unreadable (%d)\n", ex); return 1; }
+    if (ex == 0) { gt_tab = gt_builtin; gt_n = (long)sizeof gt_builtin - 1; gt_src = 0; return 0; }
+    gt_tab = (const char *)cx_read(p, &n); gt_n = (long)n; gt_src = 1;
+    if (!gt_tab) { sy_eprintf("precommit: cannot read tests/precommit-gates.tsv\n"); return 1; }
+    return 0;
+}
+static void gt_mark_na(const char *gate) {
+    long l = tx_len(gt_nal, sizeof gt_nal), g = tx_len(gate, 64);
+    gt_na++;
+    if (l + g + 2 < (long)sizeof gt_nal) { if (l) gt_nal[l++] = ','; mm_copy(gt_nal + l, sizeof gt_nal - l, gate, (size_t)g); gt_nal[l + g] = 0; }
+}
+/* the staged paths (NUL separated) inside GATE's declared read set; 0 = could not tell (callers fail closed) */
+static char *gate_diff(const char *gate, long *n) {
+    static char filt[40], specs[1024]; char *av[48], *out; long at = 0, gl = tx_len(gate, 64); int k = 0;
+    *n = 0;
+    if (gt_load()) return 0;
+    while (at < gt_n && !k) {
+        long e = tx_chr(gt_tab + at, gt_n - at, '\n'), l = e < 0 ? gt_n - at : e, o, fl, so, sl, i;
+        if (l > 0 && gt_tab[at] != '#' && !tx_field(gt_tab + at, l, '\t', 0, &o, &fl) && fl == gl && tx_same(gt_tab + at + o, fl, gate, gl) &&
+            !tx_field(gt_tab + at, l, '\t', 1, &o, &fl) && fl > 0 && fl < 20 &&
+            !tx_field(gt_tab + at, l, '\t', 2, &so, &sl) && sl > 0 && sl < (long)sizeof specs) {
+            if (cx_fmt(filt, sizeof filt, "--diff-filter=%.*s", (int)fl, gt_tab + at + o)) return 0;
+            mm_copy(specs, sizeof specs, gt_tab + at + so, (size_t)sl); specs[sl] = 0;
+            av[k++] = "git"; av[k++] = "diff"; av[k++] = "--cached"; av[k++] = "--name-only"; av[k++] = filt; av[k++] = "-z"; av[k++] = "--";
+            for (i = 0; i < sl && k < 46; ) {
+                while (i < sl && specs[i] == ' ') specs[i++] = 0;
+                if (i < sl) { av[k++] = specs + i; while (i < sl && specs[i] != ' ') i++; }
+            }
+        }
+        at += l + 1;
+    }
+    if (k < 8) { sy_eprintf("precommit: gate %s has no read-set row in tests/precommit-gates.tsv\n", gate); return 0; }
+    av[k] = 0;
+    out = slurp(av, n);
+    if (out && *n <= 0) gt_mark_na(gate);
+    return out;
+}
+static void gt_line(void) {
+    if (gt_load()) return;
+    sy_printf("PRECOMMIT_GATES\tnot_affected=%d\tna=%s\tsource=%s\n", gt_na, gt_nal[0] ? gt_nal : "-", gt_src ? "table" : "builtin");
+}
+static int gt_print(void) {   /* -- --gates: the effective read sets, one GATE row each */
+    long at = 0;
+    if (gt_load()) return 1;
+    while (at < gt_n) {
+        long e = tx_chr(gt_tab + at, gt_n - at, '\n'), l = e < 0 ? gt_n - at : e, o, fl, so, sl;
+        if (l > 0 && gt_tab[at] != '#' && !tx_field(gt_tab + at, l, '\t', 1, &o, &fl) && !tx_field(gt_tab + at, l, '\t', 2, &so, &sl))
+            sy_printf("GATE\t%.*s\n", (int)(so + sl), gt_tab + at);
+        at += l + 1;
+    }
+    sy_printf("GATES\tsource=%s\n", gt_src ? "table" : "builtin");
+    return 0;
+}
+
+/* 同一提交内复用(S2):tools/commit-own.cx 在提交前已对同一份私有索引跑过的门,把退出码与输出连同键写进
+ * UNISACC_GATE_REUSE 指的文件;键 = 暂存树 sha(git write-tree)、门名、工具源 blob sha、完整 argv。这里重算键,
+ * 逐字相同才用那份输出,否则照常重跑。文件属于那一次 commit-own 进程,提交结束即删,不跨提交。 */
+static char *gate_reuse(const char *gate, char **argv, long *n) {
+    const char *f = sy_env("UNISACC_GATE_REUSE"), *sv = cur_gate;
+    char key[2048], *b, *o, *t, *h; size_t bn = 0; long kl, tn, hn, e2; int k, rc = 1;
+    char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "hash-object", "--", argv[2], 0};
+    *n = 0;
+    if (!f || !f[0]) return 0;
+    cur_gate = 0; t = slurp(wv, &tn); h = slurp(hv, &hn); cur_gate = sv;
+    if (t && h && tn >= 40 && hn >= 40) {
+        rc = cx_fmt(key, sizeof key, "KEY\ttree=%.*s\tgate=%s\ttool=%.*s\targv=", 40, t, gate, 40, h);
+        for (k = 0; !rc && argv[k]; k++) { kl = tx_len(key, sizeof key); rc = cx_fmt(key + kl, sizeof key - (size_t)kl, "%s%s", k ? " " : "", argv[k]); }
+    }
+    mm_free(t); mm_free(h);
+    if (rc) { sy_eprintf("precommit: gate %s reuse: key not computable, rerun\n", gate); return 0; }
+    kl = tx_len(key, sizeof key);
+    b = (char *)cx_read(f, &bn);
+    if (!b || (long)bn < kl + 6 || !tx_same(b, kl, key, kl) || b[kl] != '\n' || !tx_same(b + kl + 1, 3, "RC\t", 3) ||
+        b[kl + 4] < '0' || b[kl + 4] > '0' + slurp_okrc || b[kl + 5] != '\n') {
+        sy_eprintf("precommit: gate %s reuse: key mismatch, rerun\n", gate); mm_free(b); return 0;
+    }
+    e2 = kl + 6;
+    o = mm_alloc((size_t)((long)bn - e2 + 1));
+    if (!o) { mm_free(b); return 0; }
+    if ((long)bn > e2) mm_copy(o, (size_t)((long)bn - e2 + 1), b + e2, (size_t)((long)bn - e2));
+    o[(long)bn - e2] = 0; *n = (long)bn - e2;
+    mm_free(b);
+    sy_eprintf("precommit: gate %s reused (same staged tree, tool and argv; it ran once in this commit)\n", gate);
+    return o;
 }
 
 static int registered(const char *b, long n, const char *check) {
@@ -230,7 +379,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
     av[k++] = "sh"; av[k++] = cp; av[k++] = fp; av[k++] = "--"; av[k++] = "--fast"; av[k++] = (char *)root;
     for (i = 0; i < npkg; i++) av[k++] = pkgs[i];
     av[k] = 0;
-    slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0;
+    cur_gate = "tlibfrozen"; slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0; cur_gate = 0;
     if (!rows) { sy_eprintf("precommit: tools/check-tlib-frozen.cx --fast did not run\n"); return 0; }
     if (incomplete(rows, rn, "TLIB_FAST\t", "check-tlib-frozen")) { mm_free(rows); return 1; }
     for (at = 0; at < rn; ) {
@@ -257,7 +406,9 @@ static int lint_gate(const char *names, long sn, int *absent) {
     char dir[1200], **paths; long at, np = 0, i; int blocked = 0;
     *absent = 0;
     if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/cx-lint.cx") != 1) { *absent = 1; return 0; }
-    if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    if (plan_dir || from_run) {   /* plan stages the blobs into DIR/lintdir; from-run reuses the same paths */
+        if (cx_fmt(dir, sizeof dir, "%s/lintdir", plan_dir ? plan_dir : from_run) || (sy_mkdir(dir, 0700) && sy_exists(dir) != 1)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    } else if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
     paths = mm_alloc((size_t)(sn + 8) * sizeof *paths);
     if (!paths) return 1;
     for (at = 0; at < sn; ) {
@@ -268,7 +419,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
             blob = slurp(sv, &bn);
             p = mm_alloc((size_t)(tx_len(dir, 1200) + nl + 2));
             if (blob && p && !cx_fmt(p, (size_t)(tx_len(dir, 1200) + nl + 2), "%s/%.*s", dir, (int)nl, names + at) && !mkdirs(p) &&
-                (fd = sy_open_new(p, 0600)) >= 0) {
+                ((plan_dir || from_run) && sy_exists(p) == 1 ? sy_unlink(p) : 0, (fd = sy_open_new(p, 0600)) >= 0)) {
                 if (sy_write_all(fd, blob, bn) == 0) paths[np++] = p; else mm_free(p);
                 sy_close(fd);
             } else { sy_eprintf("precommit: lint: cannot stage %.*s for cx-lint\n", (int)nl, names + at); mm_free(p); blocked++; }
@@ -284,7 +435,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
             lv[k++] = "--rules"; lv[k++] = j ? "R1" : "R2,R3,R4"; if (!j) lv[k++] = "--strict";
             for (i = 0; i < np; i++) lv[k++] = paths[i];
             lv[k] = 0;
-            slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0;
+            cur_gate = j ? "lintr1" : "lint"; slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0; cur_gate = 0;
             if (!rows) { sy_eprintf("precommit: tools/cx-lint.cx did not run\n"); blocked++; continue; }
             if (incomplete(rows, rn, "CX_LINT\t", "cx-lint")) { blocked++; mm_free(rows); continue; }
             for (at = 0; at < rn; ) {
@@ -301,7 +452,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
         }
         mm_free(lv);
     }
-    for (i = 0; i < np; i++) { sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
+    for (i = 0; i < np; i++) { if (!plan_dir) sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
     mm_free(paths);
     return blocked;
 }
@@ -316,41 +467,71 @@ static int cov_blob(const char *rev, const char *path, char **out, long *n) {
     *out = slurp(v, n);
     return *out ? 0 : 1;
 }
-static int cov_link_dir(const char *src, const char *dst, const char *skip1, const char *skip2, const char *skip3) {
+static int cov_link_dir(const char *src, const char *dst, const char *skip1, const char *skip2, const char *skip3, int regs) {
     sy_dir_t d; int rc = sy_dir_open(&d, src);
     if (rc) return rc;
     while (sy_dir_next(&d) == 1) {
         char s[1500], t[1500];
         if (tx_eqz(d.name, skip1) || tx_eqz(d.name, skip2) || tx_eqz(d.name, skip3) || tx_eqz(d.name, ".git")) continue;
         if (cx_fmt(s, sizeof s, "%s/%s", src, d.name) || cx_fmt(t, sizeof t, "%s/%s", dst, d.name)) continue;
+        if (regs) {   /* tests/ 下的普通文件(批次源)须以普通文件出现:tp_visit 用 lstat 拒软链(source-not-regular) */
+            sy_stat_t st;
+            if (!sy_lstat(s, &st) && st.kind == 'f') {
+                if (sy_link(s, t)) { size_t sz = 0; char *c = (char *)cx_read(s, &sz); if (c) { cx_write(t, c, sz); mm_free(c); } }
+                continue;
+            }
+        }
         sy_symlink(s, t);
     }
     sy_dir_close(&d);
     return 0;
 }
+/* the scratch root of one evaluation.  Flow passes (--plan / --from-run) keep the index-side root in the run
+ * dir (DIR/cov-idx) so that the plan pass can build it, the flow node run in it and the judge pass clean it;
+ * everything else (serial path, the HEAD-side evaluation) uses a per-process root under sy_tmpdir. */
+static int cov_flow(const char *tag) { return (plan_dir || from_run) && tx_eqz(tag, "idx"); }
+static int cov_dir(const char *tag, char *dir, size_t cap) {
+    if (cov_flow(tag)) return cx_fmt(dir, cap, "%s/cov-%s", plan_dir ? plan_dir : from_run, tag);
+    return cx_fmt(dir, cap, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag);
+}
 static void cov_clean(const char *tag) {
     sy_dir_t d; char dir[1200], t[1500], u[1500];
-    if (cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
+    if (plan_dir && cov_flow(tag)) return;   /* the coveval flow node still has to run in it */
+    if (cov_dir(tag, dir, sizeof dir) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
     if (!sy_dir_open(&d, t)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", t, d.name)) sy_unlink(u); sy_dir_close(&d); }
     sy_rmdir(t);
     if (!sy_dir_open(&d, dir)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", dir, d.name)) sy_unlink(u); sy_dir_close(&d); }
     sy_rmdir(dir);
 }
-/* 求值一版:返回 0=解析通过或非 unknown-coverage 类拒绝;1=unknown-coverage,*idv 放首个 id;-1=没跑 */
+/* 求值一版:返回 0=解析通过;1=unknown-coverage,*idv 放首个 id;2=其他行首 REFUSE(环境类如 source-not-regular),*idv 放原因;-1=没跑.
+ * cov_gate 对 2 与 -1 一律具名拦截,不静默放行;只有夹具仓(cwd 无 tests/run.cx)跳过并打印 COVGATE skipped=1.
+ * Flow passes: the index-side run.cx --list is the flow node "coveval" (30 s bound set by precommit-flow.cx):
+ * --plan builds the root and prints the PLAN row, --from-run reads the node's output; the parsing below is
+ * shared with the serial path, and the rare HEAD-side evaluation stays in line in the judge pass. */
 static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, long cn, char *idv, int idcap) {
-    char dir[1200], tdir[1300], p[1500], cwd[1100]; long a;
-    if (sy_cwd(cwd, sizeof cwd) || cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag)) return -1;
+    char dir[1200], tdir[1300], p[1500], cwd[1100]; long a, total = 0; char *b = 0;
+    if (sy_cwd(cwd, sizeof cwd) || cov_dir(tag, dir, sizeof dir)) return -1;
+    if (from_run && cov_flow(tag)) {
+        cur_gate = "coveval"; slurp_okrc = 255; b = gate_slurp(0, &total); slurp_okrc = 0; cur_gate = 0;
+        if (!b) return -1;
+    } else {
     if (cx_fmt(tdir, sizeof tdir, "%s/tests", dir) || sy_mkdir(dir, 0700) || sy_mkdir(tdir, 0700)) return -1;
-    cov_link_dir(cwd, dir, "tests", "", "");
-    { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx"); }
+    cov_link_dir(cwd, dir, "tests", "", "", 0);
+    { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx", 1); }
     { size_t sz = 0; char *src; if (cx_fmt(p, sizeof p, "%s/tests/run.cx", cwd)) return -1;
       src = (char *)cx_read(p, &sz); if (!src) return -1;
       if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir) || cx_write(p, src, sz)) return -1; }
     if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", dir) || cx_write(p, reg, (size_t)rn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir) || cx_write(p, cov, (size_t)cn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir)) return -1;
-    { int ofd, pid, ex = 0, code = 0, sig = 0; char *b = mm_alloc(1 << 20); long total = 0, r;
+    if (plan_dir && cov_flow(tag)) {
+        char *gv[] = {"sh", "./unisacc.com", p, "--", "--list", 0}; long gn;
+        cur_gate = "coveval"; mm_free(gate_slurp(gv, &gn)); cur_gate = 0;
+        idv[0] = 0; return 0;
+    }
+    { int ofd, pid, ex = 0, code = 0, sig = 0; long r;
       char *ev[] = {"sh", "-c", "exec sh ./unisacc.com \"$0\" -- --list 2>&1", p, 0};
+      b = mm_alloc(1 << 20);
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
       if (pid < 0) { mm_free(b); return -1; }
@@ -358,21 +539,31 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
         for (;;) { sy_pollfd_t pf; long left = deadline - sy_now_ms(); pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
           if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
           r = sy_read(ofd, b + total, (1 << 20) - 1 - total); if (r <= 0) break; total += r; if (total >= (1 << 20) - 2) break; } }
-      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0;
-      a = tx_find(b, total, "unknown-coverage row=", 21);
+      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0; }
+    }
+    { a = tx_find(b, total, "unknown-coverage row=", 21);
       idv[0] = 0;
       if (a >= 0) { long q = tx_find(b + a, total - a, " id=", 4), k = 0;
         if (q >= 0) { q += a + 4; while (q + k < total && b[q + k] != '\n' && k < idcap - 1) { idv[k] = b[q + k]; k++; } idv[k] = 0; }
         mm_free(b); return 1; }
-      if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0 && tx_find(b, total, "REFUSE", 6) < 0) { mm_free(b); return -1; }
+      { long r = tx_find(b, total, "\nREFUSE\t", 8), k = 0;   /* 其他拒绝(环境类或别的注册表缺陷,行首 REFUSE):返回 2,*idv 放具名原因 */
+        if (r >= 0) r++; else if (total >= 7 && tx_same(b, 7, "REFUSE\t", 7)) r = 0;
+        if (r >= 0) { r += 7; while (r + k < total && b[r + k] != '\n' && k < idcap - 1) { idv[k] = b[r + k] == '\t' ? ' ' : b[r + k]; k++; } idv[k] = 0;
+          mm_free(b); return 2; } }
+      if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0) { mm_free(b); return -1; }
       mm_free(b); return 0; }
 }
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
-    if (sy_exists("tests/run.cx") != 1) return 0;
-    if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) return 0;
+    if (sy_exists("tests/run.cx") != 1) { if (!plan_dir) sy_eprintf("precommit: COVGATE skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
+    if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) {
+        if (plan_dir) return 0;
+        sy_eprintf("precommit: BLOCKED registry gate: cannot read staged tests/batches.tsv or tests/coverage.tsv\n"); return 1; }
     ri = cov_eval("idx", ir, irn, ic, icn, id, sizeof id);
     cov_clean("idx");
+    if (plan_dir) return 0;
+    if (ri == 2) { sy_eprintf("precommit: BLOCKED registry REFUSE: run.cx --list on the staged tables refused: %s\n", id); return 1; }
+    if (ri < 0) { sy_eprintf("precommit: BLOCKED registry gate did not run: run.cx --list on the staged tables gave no verdict (timeout or no output)\n"); return 1; }
     if (ri != 1) return 0;
     if (!cov_blob("HEAD", "tests/batches.tsv", &hr, &hrn) && !cov_blob("HEAD", "tests/coverage.tsv", &hc, &hcn)) {
         rh = cov_eval("head", hr, hrn, hc, hcn, hid, sizeof hid);
@@ -404,10 +595,9 @@ static int cov_gate(void) {
  * 任一列数组超过基线(OVER)即拒。基线取 HEAD 而不是索引:同一提交里放宽基线不能洗白新坏行。
  * cwd 下没有 ./unisacc.com 或 tools/ledger-add.cx,或 HEAD 没有基线文件(夹具仓)时跳过。 */
 static int ledger_gate(void) {
-    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "agentwork/ledger.tsv", 0};
     char lp[1200], bp[1200], *names, *lb = 0, *bb = 0, *ro; long dn, ln = 0, bn = 0, rn2, at = 0; int blocked = 0;
     char *cv[] = {"sh", "./unisacc.com", "tools/ledger-add.cx", "--", "--check", "--ledger", lp, "--baseline", bp, 0};
-    names = slurp(dv, &dn);
+    names = gate_diff("ledger", &dn);
     if (!names) { sy_eprintf("precommit: git diff --cached (ledger) failed\n"); return 1; }
     mm_free(names);
     if (dn <= 0) return 0;
@@ -437,15 +627,63 @@ static int ledger_gate(void) {
     return blocked;
 }
 
-int main(void) {
+/* 提交主路径走 flow(plans/devsvc.md 6 S3 第一阶段):无参数调用(.git/hooks/pre-commit 与 commit-own 的 --dry-run 都是)
+ * 且暂存路径命中登记类门(manifest、tables、runlist 任一读集)时,转交 tools/precommit-flow.cx:各门成为同一 flow 的
+ * 并发节点,判定仍只在本文件的 --from-run 一遍里做,输出与退出码即判定那一遍的。只动 .cx 或文档的提交留在串行路径
+ * (实测 flow 对它们没有收益:ratchets 本身已并发,关键路径是 coreapi 单门)。返回 -1 = 走串行;否则是退出码。
+ * UNISACC_PRECOMMIT_SERIAL=1 强制串行(对拍基准用);flow 基础设施不可用(rc 2、信号、起不来)时打一行并回退串行,
+ * 两条路径跑的是同一批门,不存在少跑的出口。 */
+#define FLOW_ROUTE_MS 120000   /* the whole flow pass (plan, nodes at 60 s each, judge); past it the flow is killed and the gates run serially */
+static int flow_route(void) {
+    static const char *g[3] = {"manifest", "tables", "runlist"};
+    const char *ser = sy_env("UNISACC_PRECOMMIT_SERIAL");
+    char vf[1200], want[40], *vb; size_t vn = 0;
+    char *fv[] = {"/bin/sh", "./unisacc.com", "tools/precommit-flow.cx", "--", "--verdict", vf, 0};
+    int i, hit = 0, pid, ex = 0, code = 0, sig = 0, judged;
+    if (ser && ser[0] && ser[0] != '0') return -1;
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/precommit-flow.cx") != 1 || sy_exists("tools/cxlib/flowexec.cx") != 1 ||
+        sy_exists("ext/sysx/process.cx") != 1) return -1;   /* the flow engine's package roots: a fixture without them stays serial at once */
+    for (i = 0; i < 3; i++) {
+        long n; char *d = gate_diff(g[i], &n);
+        if (!d) { hit = -1; break; }   /* the serial path reports the failure itself */
+        if (n > 0) hit = 1;
+        mm_free(d);
+    }
+    gt_na = 0; gt_nal[0] = 0;   /* probing only: the real pass counts NOT_AFFECTED again */
+    if (hit <= 0) return -1;
+    if (cx_fmt(vf, sizeof vf, "%s/precommit-route-%d.rc", sy_tmpdir(), sy_pid())) return -1;
+    sy_unlink(vf);
+    pid = sy_spawn_inherit(fv, -1);   /* bounded: FLOW_ROUTE_MS deadline below, then killed and counted as no verdict */
+    if (pid < 0) { ex = 0; code = -1; }
+    else {
+        long deadline = sy_now_ms() + FLOW_ROUTE_MS; int w = 0;
+        while ((w = sy_wait_status(pid, 1, &ex, &code, &sig)) == 0 && sy_now_ms() < deadline) sy_sleep_ms(20);
+        if (w == 0) { sy_eprintf("precommit: tools/precommit-flow.cx timed out after %d ms\n", FLOW_ROUTE_MS); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); }
+        if (w != pid) { ex = 0; code = -1; }
+    }
+    /* a verdict counts only when the judge pass ran: precommit-flow.cx then leaves RC<TAB>code in vf, equal to its exit code.
+       Anything else (it did not compile, the flow engine failed, it was killed) is no verdict: run the same gates serially. */
+    vb = (char *)cx_read(vf, &vn); sy_unlink(vf);
+    judged = ex && (code == 0 || code == 1) && vb && !cx_fmt(want, sizeof want, "RC\t%d\n", code) && (long)vn == tx_len(want, 40) && tx_same(vb, (long)vn, want, (long)vn);
+    mm_free(vb);
+    if (!judged) {
+        sy_eprintf("precommit: flow path unusable (tools/precommit-flow.cx rc=%d, no verdict), running the gates serially\n", ex ? code : -1);
+        return -1;
+    }
+    return code;
+}
+
+int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
-    char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
+    if (argc == 3 && tx_eqz(argv[1], "--plan")) plan_dir = argv[2];
+    else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
+    else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();
+    else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates]\n"); return 2; }
+    if (argc == 1) { int fr = flow_route(); if (fr >= 0) return fr; }
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
-    char *fv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "include", "exec/facts", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
-    char *mv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "tests/coverage.tsv", "tests/batches.tsv", 0};
     char *lv[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
-    char *names = slurp(gv, &sn), *rows;
+    char *names = gate_diff("cx", &sn), *rows;
     if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
     for (at = 0; at < sn; ) { long l = tx_len(names + at, sn - at); if (l <= 0) break; staged++; at += l + 1; }
     { long a2;
@@ -473,13 +711,12 @@ int main(void) {
       }
     }
     { /* 清单闸(DSG-REG1):暂存区动了 tests/manifests、三表之一时,按索引核对每份清单的三行俱在(reg-manifest --index) */
-      char *qv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", "--", "tests/manifests", "tests/batches.tsv",
-                    "tests/coverage.tsv", "build/batch-packages.tsv", 0};
-      long qn; char *qn_names = slurp(qv, &qn);
+      long qn; char *qn_names = gate_diff("manifest", &qn);
+      if (!qn_names) { sy_eprintf("precommit: BLOCKED git diff --cached (manifest read set) failed\n"); blocked++; }
       if (qn_names && qn > 0 && sy_exists("tools/reg-manifest.cx") == 1) {
           const char *tool = sy_env("UNISACC_REGM_TOOL"); char *rm[] = {"sh", "./unisacc.com", 0, "--", "--check", "--index", 0}; long rn2; char *ro;
           rm[2] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx");
-          slurp_okrc = 1; ro = slurp(rm, &rn2); slurp_okrc = 0;
+          cur_gate = "manifest"; slurp_okrc = 1; ro = gate_reuse("manifest", rm, &rn2); if (!ro) ro = slurp(rm, &rn2); slurp_okrc = 0; cur_gate = 0;
           if (!ro) { sy_eprintf("precommit: BLOCKED reg-manifest --check --index did not run or hard error\n"); blocked++; }
           else {
               long at3 = 0;
@@ -493,12 +730,11 @@ int main(void) {
       mm_free(qn_names);
     }
     { /* 生成闸(S7):暂存区动了 tests/manifests 或三张登记表之一时,按索引核对清单行与表逐字一致(tables-gen --check --index) */
-      char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", "--", "tests/manifests", "tests/batches.tsv",
-                    "tests/coverage.tsv", "tests/tools-compile-sources.tsv", 0};
-      long gn; char *gn_names = slurp(gv, &gn);
+      long gn; char *gn_names = gate_diff("tables", &gn);
+      if (!gn_names) { sy_eprintf("precommit: BLOCKED git diff --cached (tables read set) failed\n"); blocked++; }
       if (gn_names && gn > 0 && sy_exists("tools/tables-gen.cx") == 1) {
           char *tg[] = {"sh", "./unisacc.com", "tools/tables-gen.cx", "--", "--check", "--index", 0}; long tn2; char *to;
-          slurp_okrc = 1; to = slurp(tg, &tn2); slurp_okrc = 0;
+          cur_gate = "tables"; slurp_okrc = 1; to = slurp(tg, &tn2); slurp_okrc = 0; cur_gate = 0;
           if (!to) { sy_eprintf("precommit: BLOCKED tables-gen --check --index did not run or hard error\n"); blocked++; }
           else {
               long at4 = 0;
@@ -511,13 +747,12 @@ int main(void) {
       }
       mm_free(gn_names);
     }
-    { long msn; char *mnames = slurp(mv, &msn);
+    { long msn; char *mnames = gate_diff("runlist", &msn);
       if (!mnames) { sy_eprintf("precommit: git diff --cached (metadata) failed\n"); return 1; }
       if (msn > 0) {
           char *lout; long ln;
           blocked += cov_gate();
-          lout = slurp(lv, &ln);
-          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
+          cur_gate = "runlist"; lout = slurp(lv, &ln); cur_gate = 0;          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
               long at2 = 0;
               sy_eprintf("precommit: tests/run.cx --list metadata_valid!=1\n");
@@ -535,10 +770,10 @@ int main(void) {
        in sync. The FTRIM/libc anchors are baked into that table from every .h's raw #if lines, so an out-of-
        sync table silently breaks dead-code elimination (see items.tsv FTRIM-ANCHOR). Run facts-gen --check
        and refuse a DIFF; this is what catches a stale facts table before it rides into main. */
-    { long fsn; char *fnames = slurp(fv, &fsn);
+    { long fsn; char *fnames = gate_diff("facts", &fsn);
       if (!fnames) { sy_eprintf("precommit: git diff --cached (facts) failed\n"); return 1; }
       if (fsn > 0) {
-          char *frows = slurp(fgv, &rn);
+          char *frows; cur_gate = "facts"; frows = slurp(fgv, &rn); cur_gate = 0;
           if (!frows) { sy_eprintf("precommit: tools/facts-gen.cx did not run\n"); return 1; }
           if (tx_prefix(frows, rn, "DIFF", 4)) {
               sy_eprintf("precommit: facts-gen --check pp-autoinc-gen DIFF; run tools/facts-gen.cx -- --write ROOT pp-autoinc-gen\n");
@@ -548,6 +783,7 @@ int main(void) {
     }
     blocked += freeze_gate();
     blocked += ledger_gate();
+    if (!plan_dir) gt_line();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();
     blocked += tlib_frozen_gate(names, sn);
@@ -559,7 +795,7 @@ int main(void) {
       ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
       if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
       if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); return blocked ? 1 : 0; } }
-    slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
+    cur_gate = "ratchets"; slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0; cur_gate = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets");
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */

@@ -1,0 +1,144 @@
+/* check-dcheck: tools/dcheck.cx on a private fixture root (a four-row registry and fake checks under the temp
+ * directory; the selection is the real tools/affected.cx, the run is the real devsvc flow).
+ *   sh ./unisacc.com tools/check-dcheck.cx          (from the repo root)
+ * Fixture: batches fx-pass, fx-fail, fx-slow (tier commit) and fx-daily (tier daily); every check source names
+ * tools/fxsrc.cx, none names tools/other.cx.  The fake checks run through --runner: fx-pass sleeps 1 s and exits 0,
+ * fx-fail prints `FAIL fx-fail assertion-7` and exits 1, fx-slow sleeps 30 s against a 2.5 s node bound.
+ * Prints PASS|FAIL<TAB>name per assertion and CHECK_DCHECK<TAB>checks=N<TAB>failed=N; rc 0 only when none failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int checks, failed;
+static char fx[2048], out[1 << 16];
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) printf("--- output ---\n%s\n", out); }
+static int has(const char *s) { return strstr(out, s) != 0; }
+static long num(const char *key) { const char *q = strstr(out, key); return q ? atol(q + strlen(key)) : -1; }
+static int put(const char *rel, const char *text) {
+    char p[2400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return 1;
+    return sy_write_atomic(p, text, (long)strlen(text), 0644) != 0;
+}
+/* argv (0-terminated) in cwd, stdout into out; the exit code, -1 on a runner fault */
+static int runv(char **v, const char *cwd) {
+    np_result r = {0}; char why[256] = ""; int rc = np_run(v, cwd, 0, 50, &r, why, sizeof why); long n = (long)r.outn;
+    if (n > (long)sizeof out - 1) n = (long)sizeof out - 1;
+    if (r.out && n > 0 && mm_copy(out, sizeof out, r.out, n)) n = 0;
+    out[n < 0 ? 0 : n] = 0;
+    if (rc) { np_free(&r); return -1; }
+    rc = r.rc; np_free(&r); return rc;
+}
+/* sh ./unisacc.com tools/dcheck.cx -- --root FX --home . --runner R --node-timeout-ms MS ARGS... */
+static int dcheck(const char *ms, char **args) {
+    char *v[32]; int n = 0;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/dcheck.cx"; v[n++] = "--"; v[n++] = "--root"; v[n++] = fx; v[n++] = "--home"; v[n++] = ".";
+    v[n++] = "--runner"; v[n++] = "sh tools/run-{id}.sh"; v[n++] = "--node-timeout-ms"; v[n++] = (char *)ms;
+    for (int k = 0; args[k] && n < 31; k++) v[n++] = args[k];
+    v[n] = 0;
+    return runv(v, 0);
+}
+
+int main(void) {
+    static const char *bid[] = {"pass", "fail", "slow", "daily", 0};
+    char reg[4096], cov[2048], p[2400]; long rn = 0, cn = 0; int rc; unsigned char *td = 0; int64_t tn = 0; long t0 = sy_now_ms();
+    if (sy_is_reg("tools/dcheck.cx") != 1 || sy_is_reg("exec/pipeline/table-deps.tsv") != 1) { printf("FAIL\trun-from-repo-root\nCHECK_DCHECK\tchecks=1\tfailed=1\n"); return 2; }
+    if (cx_fmt(fx, sizeof fx, "%s/check-dcheck-%d", sy_tmpdir(), sy_pid())) return 2;
+    {   const char *sub[] = {"", "/tests", "/tools", "/exec", "/exec/pipeline", 0};
+        for (int i = 0; sub[i]; i++) { if (cx_fmt(p, sizeof p, "%s%s", fx, sub[i]) || sy_mkdir(p, 0755) < 0) { printf("FAIL\tfixture-mkdir\t%s\nCHECK_DCHECK\tchecks=1\tfailed=1\n", p); return 2; } }
+    }
+    rn = snprintf(reg, sizeof reg, "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n");
+    cn = snprintf(cov, sizeof cov, "id\tlayer\timplementation\texpected_or_gap\tsource\n");
+    rc = 0;
+    for (int i = 0; bid[i]; i++) {
+        char rel[128];
+        rn += snprintf(reg + rn, sizeof reg - (size_t)rn, "fx-%s\tIMPLEMENTED\tcontract\ttools/check-fx%s.cx\tSOURCE\tlnx/x86_64\t%s\t-\ttools/check-fx%s.cx\t-\tfx.%s\trc0:FX\tproduct\t%s\n", bid[i], bid[i], i == 2 ? "70" : "55", bid[i], bid[i], i == 3 ? "daily" : "commit");
+        cn += snprintf(cov + cn, sizeof cov - (size_t)cn, "fx.%s\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttools/check-fx%s.cx\n", bid[i], bid[i]);
+        (void)cx_fmt(rel, sizeof rel, "tools/check-fx%s.cx", bid[i]);
+        rc |= put(rel, "int main(void){ const char *p = \"tools/fxsrc.cx\"; return !p; }\n");
+    }
+    rc |= put("tests/batches.tsv", reg) | put("tests/coverage.tsv", cov) | put("tests/run-batch.cx", "/* fixture: dcheck runs these batches through --runner */\n");
+    rc |= put("tools/fxsrc.cx", "int fx;\n") | put("tools/other.cx", "int other;\n");
+    rc |= put("tools/run-fx-pass.sh", "sleep 1; echo FX ok\n") | put("tools/run-fx-daily.sh", "echo FX ok\n");
+    rc |= put("tools/run-fx-fail.sh", "sleep 1; echo 'FX step one'; echo 'FAIL fx-fail assertion-7'; echo 'FAIL later'; exit 1\n") | put("tools/run-fx-slow.sh", "sleep 30\n");
+    if (sy_read_file("exec/pipeline/table-deps.tsv", &td, &tn, 1L << 24) == 0) {   /* the header line only: no table dependency in the fixture */
+        long e = 0; while (e < (long)tn && td[e] != '\n') e++;
+        td[e] = 0; (void)cx_fmt(p, sizeof p, "%s\n", (char *)td); rc |= put("exec/pipeline/table-deps.tsv", p); free(td);
+    } else rc = 1;
+    if (rc) { printf("FAIL\tfixture-write\nCHECK_DCHECK\tchecks=1\tfailed=1\n"); return 2; }
+
+    {   /* three commit batches selected, run together; the daily one is left out */
+        char *a[] = {"--par", "3", "tools/fxsrc.cx", 0};
+        rc = dcheck("2500", a);
+        ck(has("DCHECK_SELECT\tchanged=1\tbatches=3\ttier=commit\t") && !has("fx-daily"), "select-commit-tier-only");
+        ck(has("CHECK\tfx-pass\tPASS\t"), "pass-batch-pass");
+        ck(has("CHECK\tfx-fail\tFAIL\t") && has("\tfirst=FAIL fx-fail assertion-7\n"), "fail-batch-first-line");
+        ck(has("CHECK\tfx-slow\tDEFERRED\t") && has("first=timeout after ") && !has("CHECK\tfx-slow\tPASS"), "timeout-deferred-not-pass");
+        ck(has("\nDCHECK\ttotal=3\tpass=1\tfail=1\tdeferred=1\tnot_run=0\twall_ms=") && rc == 1, "summary-and-rc1");
+        ck(num("DCHECK_FLOW\tpeak=") > 1, "parallel-peak-above-1");
+        ck(num("\twall_ms=") > 0 && num("\tserial_ms=") >= 4500 && num("\twall_ms=") < num("\tserial_ms="), "wall-below-serial");
+        {   const char *q = strstr(out, "\nDCHECK\t"); ck(q && !strchr(q + 1, '\n')[1], "summary-is-last-line"); }
+    }
+    {   char *a[] = {"--only", "fx-pass,fx-daily", "tools/fxsrc.cx", 0};
+        rc = dcheck("4000", a);
+        ck(rc == 3 && has("CHECK\tfx-pass\tPASS\t") && has("CHECK\tfx-daily\tNOT_RUN\t0\tfirst=not selected") && has("DCHECK\ttotal=2\tpass=1\tfail=0\tdeferred=0\tnot_run=1\t") && !has("fx-fail") && !has("fx-slow"), "only-keeps-named-unselected-not-run");
+    }
+    {   char *a[] = {"--tier", "daily", "--only", "fx-daily", "tools/fxsrc.cx", 0};
+        rc = dcheck("4000", a);
+        ck(rc == 0 && has("batches=1\ttier=daily\t") && has("CHECK\tfx-daily\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\t"), "tier-daily-selects-daily");
+    }
+    {   char *a[] = {"--only", "fx-slow", "tools/fxsrc.cx", 0};
+        rc = dcheck("1000", a);
+        ck(rc == 3 && has("CHECK\tfx-slow\tDEFERRED\t") && has("DCHECK\ttotal=1\tpass=0\tfail=0\tdeferred=1\tnot_run=0\t"), "only-deferred-rc3");
+    }
+    {   char *a[] = {"--only", "fx-slow,fx-pass", "tools/fxsrc.cx", 0}; const char *w, *c;
+        (void)dcheck("1000", a);
+        w = strstr(out, "DCHECK_WARN\tbudget-above-node-cap\tid=fx-slow\tbudget=70\n"); c = strstr(out, "CHECK\tfx-slow\t");
+        ck(w && c && w < c && !has("DCHECK_WARN\tbudget-above-node-cap\tid=fx-pass"), "budget-above-node-cap-warns-before-check-line");
+    }
+    {   char *a[] = {"tools/other.cx", 0};
+        rc = dcheck("4000", a);
+        ck(rc == 0 && has("DCHECK_SELECT\tchanged=1\tbatches=0\t") && !has("\nCHECK\t") && has("DCHECK\ttotal=0\tpass=0\tfail=0\tdeferred=0\tnot_run=0\twall_ms=0\tserial_ms=0\n"), "unused-path-total-0-rc0");
+    }
+    {   /* no path given: the git work tree changes.  A fresh repository with nothing in it has none ... */
+        char *g[] = {"git", "init", "-q", 0}, *a[] = {0}, *b[] = {"--only", "fx-daily", "--tier", "daily", 0};
+        char gi[2400]; (void)cx_fmt(gi, sizeof gi, "%s/.gitignore", fx);
+        rc = runv(g, fx);
+        if (rc == 0) rc = put(".gitignore", "*\n");
+        if (rc == 0) rc = dcheck("4000", a);
+        ck(rc == 0 && has("DCHECK_SELECT\tchanged=0\tbatches=0\t") && has("DCHECK\ttotal=0\tpass=0\tfail=0\tdeferred=0\tnot_run=0\twall_ms=0\tserial_ms=0\n"), "empty-change-total-0-rc0");
+        /* ... and with the fixture files untracked they are the change */
+        (void)sy_unlink(gi);
+        rc = dcheck("4000", b);
+        ck(rc == 0 && num("DCHECK_SELECT\tchanged=") >= 10 && has("CHECK\tfx-daily\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\t"), "git-worktree-changes-are-the-default");
+    }
+    {   char *a[] = {"--plan", "tools/fxsrc.cx", 0};
+        rc = dcheck("4000", a);
+        ck(rc == 0 && has("PLAN\tfx-fail\tb2\n") && has("b3\texec\t-\ta0=sh;a1=-c;a2=") && has(";timeout_ms=4000\n") && !has("\nCHECK\t") && !has("DCHECK\t"), "plan-prints-nodes-runs-nothing");
+    }
+    {   char *a[] = {"--bogus", 0}, *b[] = {"tools/fxsrc.cx", 0}, *c[] = {"--tier", "weekly", "tools/fxsrc.cx", 0};
+        rc = dcheck("4000", a); ck(rc == 2, "unknown-option-rc2");
+        rc = dcheck("55001", b); ck(rc == 2 && !has("\nCHECK\t"), "node-bound-never-widened");
+        rc = dcheck("4000", c); ck(rc == 2, "unknown-tier-rc2");
+    }
+    {   /* --bg hands back a devsvc job at once; devsvc wait shows the same result lines */
+        char *a[] = {"--bg", "--only", "fx-pass", "tools/fxsrc.cx", 0}; char id[128] = ""; const char *q; long b0 = sy_now_ms(), bms;
+        rc = dcheck("4000", a); bms = sy_now_ms() - b0;
+        q = strstr(out, "JOB\t");
+        if (q) { long k = 0; q += 4; while (q[k] && q[k] != '\t' && q[k] != '\n' && k < (long)sizeof id - 1) { id[k] = q[k]; k++; } id[k] = 0; }
+        ck(rc == 0 && id[0] && !has("\nCHECK\t"), "bg-returns-job");
+        (void)bms;
+        if (id[0]) {
+            char *w[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id, "--timeout-ms", "30000", 0};
+            rc = runv(w, 0);
+            ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\tfail=0\tdeferred=0\tnot_run=0\t") && has("JOB_DONE\t"), "bg-wait-shows-result");
+        } else ck(0, "bg-wait-shows-result");
+    }
+    {   char *rm[] = {"rm", "-rf", fx, 0}; (void)runv(rm, 0); }
+    printf("CHECK_DCHECK\tchecks=%d\tfailed=%d\telapsed_ms=%ld\n", checks, failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

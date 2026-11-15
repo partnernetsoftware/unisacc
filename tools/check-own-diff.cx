@@ -81,10 +81,11 @@ static int od(char **args, char *out, long cap) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
-static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 1 << 16), s, tx_len(s, 512)) >= 0; }
+static char o[1 << 16];   /* the captured stdout of the last od() call: the only text has() looks into */
+static int has_o(const char *s) { return tx_find(o, tx_len(o, sizeof o), s, tx_len(s, 512)) >= 0; }
+#define has(buf, s) has_o(s)
 
 int main(void) {
-    static char o[1 << 16];
     char *a1[] = {"--base", "tools/own-diff/base.tsv", "tools/own-diff/work.tsv", "mine-", 0};
     char *a2[] = {"--base", "tools/own-diff/base.tsv", "tools/own-diff/work.tsv", "mine-", "theirs-", 0};
     char *a3[] = {"--base", "tools/own-diff/work.tsv", "tools/own-diff/work.tsv", "mine-", 0};
@@ -106,6 +107,26 @@ int main(void) {
         ck(rc == 1 && has(o, "OWN_DIFF\town=2\tforeign=1\n") && has(o, "FOREIGN\t+\tother added\n") && !has(o, "FOREIGN\t-")
            && e && tx_same(e, (long)en, "a\nrow-x new text KEY\nz\n", 23), "edited-line-replaces-old-and-emit");
         sy_unlink(em); sy_rmdir(td);
+    }
+    {   /* --batch LIST: two entries in one process, each judged as its single call (FOREIGN lines, own-only emit), the
+           OWN_DIFF line of each carrying its FILE: a tracked file equal to HEAD and an untracked one (empty base) */
+        char td[160], lst[200], f2[200], e1[200], e2[200], e3[200], body[900]; size_t n1 = 0, n2 = 0, n3 = 0, wn = 0; char *b1, *b2, *b3, *w;
+        if (cx_fmt(td, sizeof td, "%s/check-own-diff-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(td) || cx_fmt(lst, sizeof lst, "%s/list", td) ||
+            cx_fmt(f2, sizeof f2, "%s/new.tsv", td) || cx_fmt(e1, sizeof e1, "%s/e1", td) || cx_fmt(e2, sizeof e2, "%s/e2", td) || cx_fmt(e3, sizeof e3, "%s/e3", td) ||
+            cx_fmt(body, sizeof body, "%s\ttools/own-diff/work.tsv\tmine-\n%s\t%s\tmine-\tzz-\n", e1, e2, f2)) return 2;
+        if (cx_write(f2, "mine-1\tx\ntheirs-9\ty\n", 20) || cx_write(lst, body, strlen(body))) return 2;
+        {   char *a8[] = {"--emit", e3, "tools/own-diff/work.tsv", "mine-", 0}; rc = od(a8, o, sizeof o); }
+        w = cx_read(e3, &wn); sy_unlink(e3);   /* the single call's emit of the tracked file: what the batch entry must equal */
+        {   char *a5[] = {"--batch", lst, 0}; rc = od(a5, o, sizeof o); }
+        b1 = cx_read(e1, &n1); b2 = cx_read(e2, &n2);
+        ck(rc == 1 && has(o, "OWN_DIFF\town=0\tforeign=0\ttools/own-diff/work.tsv\n") && has(o, "FOREIGN\t+\ttheirs-9\ty\nOWN_DIFF\town=1\tforeign=1\t")
+           && b1 && w && n1 == wn && tx_same(b1, (long)n1, w, (long)wn) && b2 && tx_same(b2, (long)n2, "mine-1\tx\n", 9), "batch-two-entries-one-process");
+        {   char *a6[] = {"--emit", e3, f2, "mine-", "zz-", 0}; rc = od(a6, o, sizeof o); }
+        b3 = cx_read(e3, &n3);
+        ck(rc == 1 && has(o, "OWN_DIFF\town=1\tforeign=1\n") && b2 && b3 && n2 == n3 && tx_same(b2, (long)n2, b3, (long)n3), "batch-emit-equals-single-call");
+        {   char *a7[] = {"--batch", f2, 0}; rc = od(a7, o, sizeof o); }
+        ck(rc == 2, "batch-bad-entry-refused");
+        sy_unlink(e1); sy_unlink(e2); sy_unlink(e3); sy_unlink(f2); sy_unlink(lst); sy_rmdir(td);
     }
     printf("CHECK_OWN_DIFF\tfailed=%d\n", failed);
     return failed ? 1 : 0;

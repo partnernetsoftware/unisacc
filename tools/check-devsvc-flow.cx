@@ -48,12 +48,21 @@ static int cap2(char **v, char *buf, int cap) {
     np_free(&r);
     return rc;
 }
-static int dv(char **args) {
-    char *v[24]; int n = 0, i;
+/* x 与 flow 必须显式 --par:用例未给 --par/--jobs 时,x 在子命令后、flow 在末尾补 --par 8;dvraw 原样 */
+static int dvraw(char **args) {
+    char *v[28]; int n = 0, i;
     v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--";
-    for (i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    for (i = 0; args[i] && n < 27; i++) v[n++] = args[i];
     v[n] = 0;
     return cap2(v, out, sizeof out);
+}
+static int dv(char **args) {
+    char *v[28]; int n = 0, i, given = 0, isx = args[0] && !strcmp(args[0], "x"), isf = args[0] && !strcmp(args[0], "flow");
+    for (i = 0; args[i]; i++) if (!strcmp(args[i], "--par") || !strcmp(args[i], "--jobs")) given = 1;
+    for (i = 0; args[i] && n < 24; i++) { v[n++] = args[i]; if (i == 0 && isx && !given) { v[n++] = "--par"; v[n++] = "8"; } }
+    if (isf && !given) { v[n++] = "--par"; v[n++] = "8"; }
+    v[n] = 0;
+    return dvraw(v);
 }
 static int dv1(char *a, char *b, char *c, char *d, char *e, char *f) { char *v[] = {a, b, c, d, e, f, 0}; return dv(v); }
 static int has(const char *s) { return strstr(out, s) != 0; }
@@ -84,6 +93,32 @@ int main(void) {
     F(inst, sizeof inst, "/tmp/devsvc-flowck-%d", sy_pid()); F(w, sizeof w, "/tmp/devsvc-flowck-%d-w", sy_pid());
     if (setenv(c_env, inst, 1) || setenv("UNISACC_FLOW_ROOT", w, 1) || sy_mkdir_all(w, 0755)) return 2;
 
+    /* --par 强制:x 与 flow 缺省即 rc 2 REFUSE missing --par;x --par 1 单节点可跑 */
+    {   char *v[] = {"x", "--", "true", 0};
+        ck(dvraw(v) == 2 && has("REFUSE missing --par"), "x-missing-par-refused"); }
+    {   char *v[] = {"x", "--par", "1", "--", "echo", "p1", 0};
+        ck(dvraw(v) == 0 && has("p1\n") && has("X\tok\trc=0\t"), "x-par1-runs"); }
+    ck(put("one.tsv", "a\texec\t-\ta0=true\n") == 0, "fixture-one");
+    F(p, sizeof p, "%s/one.tsv", w);
+    {   char *v[] = {"flow", "run", p, 0};
+        ck(dvraw(v) == 2 && has("REFUSE missing --par"), "flow-missing-par-refused"); }
+    /* 选项位置无关:run 前后皆可;x 先 --tail 后 --par;未知选项与多余词具名 */
+    {   char *v[] = {"flow", "--par", "2", "--cat", "run", p, 0};
+        ck(dvraw(v) == 0 && has("DEVSVC_FLOW"), "flow-opts-before-run"); }
+    {   char *v[] = {"flow", "run", p, "--cat", "--par", "2", 0};
+        ck(dvraw(v) == 0 && has("DEVSVC_FLOW"), "flow-opts-after-run"); }
+    {   char *v[] = {"x", "--tail", "3", "--par", "1", "--", "echo", "a", 0};
+        ck(dvraw(v) == 0 && has("a\n"), "x-tail-then-par"); }
+    {   char *v[] = {"x", "--par", "1", "--", "echo", "--par", "x", 0};
+        ck(dvraw(v) == 0 && has("--par x"), "x-after-dashdash-not-parsed"); }
+    {   char *v[] = {"flow", "--par", "1", "--bogus", "run", p, 0};
+        ck(dvraw(v) == 2 && has("REFUSE flow: unknown or incomplete option --bogus") && has("usage: devsvc flow"), "flow-unknown-option-named"); }
+    {   char *v[] = {"flow", "--par", "1", "run", p, "extra", 0};
+        ck(dvraw(v) == 2 && has("REFUSE flow: unexpected word extra") && has("usage: devsvc flow"), "flow-extra-word-named"); }
+    {   char *v[] = {"flow", "--par", "1", "run", 0};
+        ck(dvraw(v) == 2 && has("REFUSE flow: missing FILE"), "flow-missing-file-named"); }
+    {   char *v[] = {"x", "--par", "1", "--bogus", "--", "true", 0};
+        ck(dvraw(v) == 2 && has("REFUSE x: unknown or incomplete option --bogus") && has("usage: devsvc x"), "x-unknown-option-named"); }
     /* 无实例:x 本地执行,退出码与输出即命令自己的 */
     {   char *v[] = {"x", "--", "sh", "-c", "echo hi; echo oops >&2; exit 3", 0};
         ck(dv(v) == 3 && has("hi\n") && has("oops\n") && has("X\tfail\trc=3\t") && has("via=local"), "x-local-rc-and-output"); }
@@ -92,10 +127,10 @@ int main(void) {
     /* flow run:两节点并行墙钟小于串行 */
     ck(put("two.tsv", "# two sleeps\na\texec\t-\ta0=sleep;a1=0.7\nb\texec\t-\ta0=sleep;a1=0.7\n") == 0, "fixture-two");
     F(p, sizeof p, "%s/two.tsv", w);
-    {   char *v[] = {"flow", "run", p, "--jobs", "2", 0};
+    {   char *v[] = {"flow", "run", p, "--par", "8", 0};
         r = dv(v); par = field("wall_ms=");
         ck(r == 0 && has("NODE\ta\tok\trc=0\t") && has("NODE\tb\tok\trc=0\t") && has("DEVSVC_FLOW\tnodes=2\tok=2\tfail=0\t") && has("peak=2") && has("via=service"), "flow-run-two-nodes"); }
-    {   char *v[] = {"flow", "run", p, "--jobs", "1", "--deadline-ms", "20000", 0};
+    {   char *v[] = {"flow", "run", p, "--par", "1", "--deadline-ms", "20000", 0};
         r = dv(v); ser = field("wall_ms=");
         ck(r == 0 && has("peak=1") && par >= 700 && par < 1300 && ser >= 1400 && par < ser, "flow-parallel-faster-than-serial"); }
     ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tflow.node\t") && has("\ta\tstart\t") && has("\tb\tok\t"), "flow-events-in-ring");
@@ -138,7 +173,7 @@ int main(void) {
     /* flow -:stdin 内联节点,读文件与命令并发,--cat 给内容 */
     ck(put("in.tsv", "r1\tfile.read\t-\tpath=a.txt\ne1\texec\t-\ta0=sh;a1=-c;a2=echo inline-ok\nbad\texec\t-\ta0=sh;a1=-c;a2=exit 5\nafter\texec\tbad\ta0=true\n") == 0, "fixture-inline");
     {   char cmd[3000]; char *v[] = {"sh", "-c", cmd, 0};
-        F(cmd, sizeof cmd, "sh '%s' '%s' -- flow - --cat < '%s/in.tsv'", prod, self, w);
+        F(cmd, sizeof cmd, "sh '%s' '%s' -- flow - --par 8 --cat < '%s/in.tsv'", prod, self, w);
         ck(cap2(v, out, sizeof out) == 1 && has("NODE\tr1\tok\trc=0\t") && has("==> r1.out 7 <==\nsecond\n") && has("==> e1.out 10 <==\ninline-ok\n")
            && has("NODE\tbad\tfail\trc=5\t") && has("NODE\tafter\tskip\t") && has("dep=bad:fail") && has("DEVSVC_FLOW\tnodes=4\tok=2\tfail=1\ttimeout=0\tskip=1\t"), "flow-stdin-inline-cat"); }
     ck(put("cyc.tsv", "a\texec\tb\ta0=true\nb\texec\ta\ta0=true\n") == 0, "fixture-cycle");

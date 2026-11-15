@@ -25,6 +25,7 @@
 #pragma unisa use cxlib.awpath
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
@@ -126,6 +127,26 @@ int main(int argc, char **argv) {
         }
         if (awp_kind_at(n) != 0) ok = 0;
         ck(ok, "kind-table-has-no-gap-or-duplicate");
+    }
+
+    /* (7) awp_devmeta_read: new copy first, build/ fallback (rc 4), bad name refused.  Writes only a /tmp dir. */
+    {
+        char dd[1024], fp[4096];
+        int ok_new = 0, ok_fb = 0, ok_dot = 0, ok_bad = 0;
+        if (sy_mkdtemp("/tmp", "awp-devmeta-", dd, (int)sizeof dd) == 0 && sy_setenv("UNISACC_DEVMETA_DIR", dd, 1) == 0) {
+            if (awp_devmeta_read(root, "fx.tsv", out, (long)sizeof out) == 4 &&
+                cx_fmt(expect, sizeof expect, "%s/build/fx.tsv", root) == 0 && !strcmp(out, expect)) ok_fb = 1;
+            if (awp_devmeta_read(".", "fx.tsv", out, (long)sizeof out) == 4 && !strcmp(out, "build/fx.tsv")) ok_dot = 1;
+            if (cx_fmt(fp, sizeof fp, "%s/fx.tsv", dd) == 0 && cx_write(fp, "x\n", 2) == 0 &&
+                awp_devmeta_read(root, "fx.tsv", out, (long)sizeof out) == 0 && !strcmp(out, fp)) ok_new = 1;
+            if (awp_devmeta_read(root, "a/b", out, (long)sizeof out) == 1 && awp_devmeta_read(root, ".x", out, (long)sizeof out) == 1) ok_bad = 1;
+            sy_unlink(fp);
+            sy_rmdir(dd);
+        }
+        ck(ok_new, "devmeta-read-prefers-new-copy");
+        ck(ok_fb, "devmeta-read-falls-back-to-build-rc4");
+        ck(ok_dot, "devmeta-read-dot-root-gives-relative-build-path");
+        ck(ok_bad, "devmeta-read-refuses-bad-name");
     }
 
     sy_printf("CHECK_AWPATH\tfailed=%d\n", failed);

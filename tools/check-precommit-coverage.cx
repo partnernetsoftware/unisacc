@@ -4,6 +4,8 @@
  *
  * (1) 只暂存 batches.tsv 新行、coverage 行缺 -> 拒绝并点名批次 id 与缺行文件;(2) 两张表一起暂存 -> 通过;
  * (3) 只暂存 coverage 行(DECLARED_DEPENDENCY)-> 通过;(4) HEAD 已未覆盖的批次不归咎;(5) 不涉及两张表的提交不受影响。
+ * --src(6)(7)与 --src2(8)(9):(6)(7) 源在 tests/ 下的坏批次行在 flow 与串行两路径都被拦;(8) 好行通过;(9) 源为软链的环境类 REFUSE
+ * (source-not-regular)具名拦截,不静默放行。
  * 求值走夹具内的 tests/run.cx --list(与 s9 init 同一解析器),按索引内容而非工作树。输出 PASS/FAIL 与 CHECK_PRECOMMIT_COVERAGE<TAB>failed=N。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -39,6 +41,7 @@ static int w(const char *rel, const char *body) {
 #define CH "id\tlayer\timplementation\texpected_or_gap\tsource\n"
 #define SRC "tools/check-precommit-freeze.cx"
 #define BROW(id, cov) id "\tIMPLEMENTED\tinterfaces\t" SRC "\tSOURCE\tlnx/x86_64\t55\t-\t" SRC "\t-\t" cov "\trc0:X\tproduct\tdaily\n"
+#define TROW(id, src, cov) id "\tIMPLEMENTED\tinterfaces\t" src "\tSOURCE\tlnx/x86_64\t55\t-\t" src "\t-\t" cov "\trc0:X\tproduct\tdaily\n"
 #define CROW(k) k "\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\texpected\t" SRC "\n"
 #define CDEC(k) k "\tinterfaces\tDECLARED_DEPENDENCY\tgap\t" SRC "\n"
 
@@ -48,15 +51,20 @@ static int pc(char *out, size_t cap) {
     if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/precommit.cx 2>&1", td)) return 99;
     return sh(cmd, out, cap);
 }
+static int pcs(char *out, size_t cap) {   /* 同上,强制串行路径(UNISACC_PRECOMMIT_SERIAL=1) */
+    char cmd[1200];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1", td)) return 99;
+    return sh(cmd, out, cap);
+}
 static int git(const char *args) {
     char cmd[1200]; if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git %s >/dev/null 2>&1", td, args)) return 99;
     return sh(cmd, 0, 0);
 }
 
 int main(int argc, char **argv) {
-    int mode_block = argc > 1 && tx_eqz(argv[1], "--block"), mode_pass = argc > 1 && tx_eqz(argv[1], "--pass");
+    int mode_block = argc > 1 && tx_eqz(argv[1], "--block"), mode_pass = argc > 1 && tx_eqz(argv[1], "--pass"), src2 = argc > 1 && tx_eqz(argv[1], "--src2"), mode_src = src2 || (argc > 1 && tx_eqz(argv[1], "--src"));
     char out[8192], cwd[400]; char *o = 0; size_t n = 0; int rc;
-    if (!mode_block && !mode_pass) { sy_printf("usage: --block | --pass\n"); return 2; }
+    if (!mode_block && !mode_pass && !mode_src) { sy_printf("usage: --block | --pass | --src | --src2\n"); return 2; }
     {   char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
         mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
         mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
@@ -65,6 +73,35 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir tests && "
                    "ln -s '%s/unisacc.com' unisacc.com && ln -s '%s/tools' tools && ln -s '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv && "
                    "ln -s '%s/tests/cases' tests/cases && ln -s '%s/tests/cxlib' tests/cxlib && cp '%s/tests/run.cx' tests/run.cx", td, root, root, root, root, root, root, root) || sh(cmd, 0, 0)) { ck(0, "fixture"); return 1; } }
+    if (mode_src) {
+    /* (6)-(9) 批次源在 tests/ 下(真实仓多数批次如此):求值根里 tests/ 的普通文件须仍是普通文件,否则 run.cx --list
+     * 以 source-not-regular 拒在首行、走不到配对判定。暂存坏行只进索引,工作树还原为 HEAD 版,runlist 门不受影响。 */
+    w("tests/src.cx", "int main(void) { return 0; }\n");
+    { char cmd[600]; if (cx_fmt(cmd, sizeof cmd, "cd '%s' && ln -s src.cx tests/lnk.cx", td) || sh(cmd, 0, 0)) ck(0, "symlink-fixture"); }
+    w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a"));
+    w("tests/coverage.tsv", CH CROW("cov.a"));
+    git("add tests/run.cx tests/src.cx tests/lnk.cx tests/batches.tsv tests/coverage.tsv"); git("commit -q -m base --no-verify");
+    if (!src2) {   /* --src:(6)(7) */
+    w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a") TROW("b", "tests/src.cx", "cov.b"));
+    git("add tests/batches.tsv"); w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a"));
+    rc = pc(out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry unknown-coverage") && has(out, "id=b") && has(out, "cov.b") && !has(out, "source-not-regular"), "tests-src-bad-row-blocked-flow");
+    rc = pcs(out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry unknown-coverage") && has(out, "id=b") && has(out, "blocked=1") && !has(out, "source-not-regular"), "tests-src-bad-row-blocked-serial");
+    } else {   /* --src2:(8)(9),拆开以各自留在 55 s 预算内 */
+    w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a") TROW("b", "tests/src.cx", "cov.a"));
+    git("add tests/batches.tsv"); w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a"));
+    rc = pc(out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0") && !has(out, "BLOCKED registry"), "tests-src-good-row-passes");
+    w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a") TROW("c", "tests/lnk.cx", "cov.a"));
+    git("add tests/batches.tsv"); w("tests/batches.tsv", BH TROW("a", "tests/src.cx", "cov.a"));
+    rc = pcs(out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry REFUSE") && has(out, "source-not-regular") && has(out, "id=c") && has(out, "blocked=1"), "env-refuse-named-not-passed");
+    }
+    {   char cmd[500]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
+    sy_printf("CHECK_PRECOMMIT_COVERAGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+    }
     if (mode_block) {
     /* 基线提交:HEAD 有 A(已覆盖)与 P(未覆盖,既存);run.cx 在夹具内 */
     w("tests/batches.tsv", BH BROW("a", "cov.a") BROW("p", "cov.p"));

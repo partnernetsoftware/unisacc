@@ -1,0 +1,71 @@
+/* tools/check-notcovered-census.cx -- checks tools/notcovered-census.cx.
+ *
+ *   sh ./unisacc.com tools/check-notcovered-census.cx
+ *
+ * (1) on this checkout --check is ok and --print equals tests/notcovered.tsv byte for byte;
+ * (2) on a fixture root (TMP/exec/a.tsv with two "not covered:" texts, one of them twice) whose base table
+ *     lacks one message, --check fails naming it NEW; a base row with fewer sites fails GROWN; a base row the
+ *     census no longer finds fails GONE; after --write, --check is ok and the table has 2 rows, sites 2 and 1;
+ * (3) an unknown option exits 2.
+ * Ends with CHECK_NOTCOVERED_CENSUS<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static char out[1 << 17];
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tnotcovered-census.%s\n", ok ? "PASS" : "FAIL", name); }
+static int has(const char *s) { long n = tx_len(out, sizeof out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(out + i, s, sn)) return 1; return 0; }
+static int run(char *a1, char *a2, char *a3) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/notcovered-census.cx", "--", a1, a2, a3, 0};
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(fd, out + n, (long)sizeof out - 1 - n)) > 0) n += r;
+    out[n] = 0; sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int put(const char *dir, const char *rel, const char *s) { char p[700]; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return -1; return cx_write(p, s, tx_len(s, 1 << 16)); }
+int main(void) {
+    char d[600], p[700], sub[700]; size_t m = 0; char *t; int rc;
+    rc = run("--check", 0, 0);
+    ck(rc == 0 && has("notcovered: ok: rows="), "repo-check-ok");
+    rc = run("--print", 0, 0);
+    t = cx_read("tests/notcovered.tsv", &m);
+    ck(rc == 0 && t && (long)m == tx_len(out, sizeof out) && mm_same(out, t, (long)m), "repo-print-equals-table");
+    if (t) mm_free(t);
+    if (cx_fmt(d, sizeof d, "%s/nccensus-%d", sy_tmpdir(), (int)sy_pid())) return 2;
+    sy_mkdir(d, 0700);
+    cx_fmt(sub, sizeof sub, "%s/exec", d); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/tests", d); sy_mkdir(sub, 0700);
+    put(d, "exec/a.tsv", "x\tnot covered: zeta thing\ny\tnot covered: zeta thing\nz\tnot covered: alpha form\n");
+    put(d, "tests/notcovered.tsv", "message\tclass\tkind\tsites\tnets\tmeasured\trepro\nnot covered: zeta thing\texpr-stmt\tgap\t2\texec/a\tUNMEASURED\t-\n");
+    rc = run("--check", "--root", d);
+    ck(rc == 1 && has("NEW\tnot covered: alpha form\t") && has("notcovered: FAIL: new=1 grown=0 gone=0"), "fixture-new-message-fails");
+    put(d, "tests/notcovered.tsv", "message\tclass\tkind\tsites\tnets\tmeasured\trepro\nnot covered: alpha form\texpr-stmt\tgap\t1\texec/a\tUNMEASURED\t-\nnot covered: zeta thing\texpr-stmt\tgap\t1\texec/a\tUNMEASURED\t-\n");
+    rc = run("--check", "--root", d);
+    ck(rc == 1 && has("GROWN\tnot covered: zeta thing\t") && has("new=0 grown=1"), "fixture-more-sites-fails");
+    put(d, "tests/notcovered.tsv", "message\tclass\tkind\tsites\tnets\tmeasured\trepro\nnot covered: alpha form\texpr-stmt\tgap\t1\texec/a\tUNMEASURED\t-\nnot covered: gone one\texpr-stmt\tgap\t1\texec/a\tUNMEASURED\t-\nnot covered: zeta thing\texpr-stmt\tgap\t2\texec/a\tUNMEASURED\t-\n");
+    rc = run("--check", "--root", d);
+    ck(rc == 1 && has("GONE\tnot covered: gone one") && has("gone=1"), "fixture-gone-message-fails");
+    rc = run("--write", "--root", d);
+    ck(rc == 0 && has("NOTCOVERED_WRITE\trows=2"), "fixture-write");
+    rc = run("--check", "--root", d);
+    ck(rc == 0 && has("notcovered: ok: rows=2 measured=0"), "fixture-check-ok-after-write");
+    cx_fmt(p, sizeof p, "%s/tests/notcovered.tsv", d); t = cx_read(p, &m);
+    ck(t && tx_find(t, (long)m, "not covered: zeta thing\texpr-stmt\tgap\t2\t", 37) >= 0 && tx_find(t, (long)m, "not covered: alpha form\texpr-stmt\tgap\t1\t", 37) >= 0, "fixture-sites-counted");
+    if (t) mm_free(t);
+    sy_unlink(p); cx_fmt(p, sizeof p, "%s/exec/a.tsv", d); sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/exec", d); sy_rmdir(p); cx_fmt(p, sizeof p, "%s/tests", d); sy_rmdir(p); sy_rmdir(d);
+    rc = run("--bogus", 0, 0);
+    ck(rc == 2, "unknown-option-exit-2");
+    printf("CHECK_NOTCOVERED_CENSUS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

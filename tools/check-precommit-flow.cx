@@ -1,0 +1,146 @@
+/* tools/check-precommit-flow.cx -- tools/precommit-flow.cx judges exactly like tools/precommit.cx.
+ *
+ *   sh ./unisacc.com tools/check-precommit-flow.cx          (repo root; four scenarios in parallel)
+ *   sh ./unisacc.com tools/check-precommit-flow.cx -- one S TAG   (one scenario, used by the parent)
+ *
+ * Each scenario builds its own fixture /tmp/pcfck-TAG-S: git archive HEAD, the working copies of
+ * tools/precommit.cx and tools/precommit-flow.cx, a ./unisacc.com symlink to the repo's, git init + one
+ * commit; then appends one line to tools/flowrun.cx and stages it:
+ *   pass   a comment                         expect blocked=0 rc 0
+ *   trunc  a discarded memcpy (cxtrunc)      expect blocked=1 rc 1
+ *   r2     sy_spawn with no bound (R2 lint)  expect blocked=1 rc 1
+ *   r1     a "0.0.99" literal (R1, report)   expect blocked=0 rc 0 and a lint(report-only) line
+ * and runs precommit.cx (no argument) and precommit-flow.cx: the PRECOMMIT line and rc must be equal,
+ * match the expectation, and every "precommit:" line of the original must appear in the flow output.
+ *   sh ./unisacc.com tools/check-precommit-flow.cx -- --cases route   (batch precommit-flow-route): the commit
+ * main path.  A commit that stages a registry table makes the no-argument precommit.cx (what the hook runs) hand
+ * the gates to precommit-flow.cx; it is compared with the forced serial run (UNISACC_PRECOMMIT_SERIAL=1):
+ *   regok   the last tests/coverage.tsv row moved up (a valid no-op; a "# zz" line is a field-count REFUSE that
+ *           the registry gate now blocks) plus a .cx comment     expect blocked=0 rc 0, same line
+ *   regbad  the manifest-owned precommit-flow row dropped from tests/batches.tsv   expect rc 1, the manifest
+ *           and tables gates both BLOCKED ... MISSING, same line
+ * and the hook call must print FLOWPC (it took the flow) while the serial run must not.
+ * Every command is bounded at 55 s.  The fixture path is fixed (/tmp/pcfck-fx-S) and rebuilt at the start
+ * of each run, not removed: the compile cache is keyed by path, so a fresh path costs a cold compile of
+ * every ratchet (about 60 s); two concurrent runs of this check would share it.
+ * Last line CHECK_PRECOMMIT_FLOW<TAB>failed=N; rc 1 when N > 0. */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], fx[200], out[1 << 15];
+
+static int run(char **v, const char *cwd) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int sh(const char *cmd, const char *cwd) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return run(v, cwd); }
+static void ck(int c, const char *s, const char *name) {
+    printf("%s\tprecommit-flow.%s.%s\n", c ? "PASS" : "FAIL", s, name);
+    if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+}
+static void pcline(const char *o, char *dst, int cap) {   /* the PRECOMMIT line, or "" */
+    const char *p = 0; int n = 0; long i;
+    for (i = 0; o[i] && !p; i++) if ((i == 0 || o[i - 1] == '\n') && !strncmp(o + i, "PRECOMMIT\t", 10)) p = o + i;
+    while (p && p[n] && p[n] != '\n' && n < cap - 1) { dst[n] = p[n]; n++; }
+    dst[n] = 0;
+}
+
+static int one(const char *s, const char *tag) {
+    static char o1[1 << 15]; char c[3000], l1[200], l2[200]; const char *add; int r1, r2, missing = 0, exp_b, exp_rc, reg = 0;
+    if (!strcmp(s, "pass")) { add = "/* zz */"; exp_b = 0; }
+    else if (!strcmp(s, "trunc")) { add = "static void zz(char *d, const char *s, int n) { memcpy(d, s, n); }"; exp_b = 1; }
+    else if (!strcmp(s, "r2")) { add = "static void zz2(char **v) { sy_spawn(v); }"; exp_b = 1; }
+    else if (!strcmp(s, "r1")) { add = "static const char *zz3 = \"0.0.99\";"; exp_b = 0; }
+    else if (!strcmp(s, "regok")) { add = "/* zz */"; exp_b = 0; reg = 1; }
+    else if (!strcmp(s, "regbad")) { add = "/* zz */"; exp_b = 1; reg = 2; }
+    else { printf("FAIL\tprecommit-flow.%s.unknown-scenario\n", s); return 1; }
+    exp_rc = exp_b ? 1 : 0;
+    (void)tag;   /* fixed path: the product's compile cache is keyed by path, a fresh path recompiles every ratchet */
+    F(fx, sizeof fx, "/tmp/pcfck-fx-%s", s);
+    if (reg) {   /* route scenarios run in the repo itself (warm compile cache, real tables) on a private index and a private
+                    object directory with the repo's as alternate: nothing in the checkout, its index or its object store changes.
+                    The no-argument precommit.cx (the hook's call) runs side by side with the forced serial run on that index. */
+        char env[900];
+        /* a private bare git dir (HEAD pinned to the repo's current commit, the repo's objects as alternate) with the repo as
+           work tree: other windows committing meanwhile move neither this HEAD nor this index, so both runs see one diff */
+        F(env, sizeof env, "unset GIT_INDEX_FILE; export GIT_DIR=%s.git GIT_WORK_TREE=%s; D=%s.d; ", fx, root, fx);
+        F(c, sizeof c, "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; H=$(git rev-parse HEAD) && rm -rf %s.git %s.d && mkdir -p %s.d && git init -q --bare %s.git"
+                       " && printf '%%s\\n' %s/.git/objects > %s.git/objects/info/alternates && %sgit update-ref HEAD $H && git read-tree HEAD"
+                       " && git show HEAD:tools/flowrun.cx > $D/a && printf '%%s\\n' '%s' >> $D/a && git update-index --cacheinfo 100644,$(git hash-object -w $D/a),tools/flowrun.cx && %s",
+          fx, fx, fx, fx, root, fx, env, add, reg == 1
+            ? "git show HEAD:tests/coverage.tsv > $D/b0 && { head -n 1 $D/b0; tail -n 1 $D/b0; tail -n +2 $D/b0 | head -n -1; } > $D/b && ! cmp -s $D/b0 $D/b && git update-index --cacheinfo 100644,$(git hash-object -w $D/b),tests/coverage.tsv"
+            : "git show HEAD:tests/batches.tsv > $D/b0 && grep -v 'tools/check-precommit-flow.cx.-.interfaces.precommit-flow.rc0' $D/b0 > $D/b && ! cmp -s $D/b0 $D/b && git update-index --cacheinfo 100644,$(git hash-object -w $D/b),tests/batches.tsv");
+        if (ovf || sh(c, root) != 0) { ck(0, s, "fixture-reg"); return 1; }
+        F(c, sizeof c, "%s(sh ./unisacc.com tools/precommit.cx > $D/f.out 2>&1; echo $? > $D/f.rc) & UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx; rc=$?; wait; exit $rc", env);
+        if (ovf) return 1;
+        r1 = sh(c, root);
+        memcpy(o1, out, sizeof o1); pcline(o1, l1, sizeof l1);
+        F(c, sizeof c, "%scat $D/f.out; rc=$(cat $D/f.rc); rm -rf $GIT_DIR $D; exit $rc", env);
+        if (ovf) return 1;
+        r2 = sh(c, root);
+    } else {
+    F(c, sizeof c, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s"
+                   " && cp %s/tools/precommit.cx %s/tools/precommit-flow.cx %s/tools/ratchets.cx %s/tools/ && cd %s && ln -s %s/unisacc.com unisacc.com"
+                   " && git init -q && git add -A && git -c user.name=pcf -c user.email=pcf@example.invalid commit -qm base"
+                   " && printf '%%s\\n' '%s' >> tools/flowrun.cx && git add tools/flowrun.cx",
+      fx, fx, root, fx, root, root, root, fx, fx, root, add);
+    if (ovf || sh(c, 0) != 0) { ck(0, s, "fixture"); return 1; }
+        r1 = sh("unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; UNISACC_PRECOMMIT_SERIAL=1 exec sh ./unisacc.com tools/precommit.cx", fx);
+        memcpy(o1, out, sizeof o1); pcline(o1, l1, sizeof l1);
+        r2 = sh("unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; exec sh ./unisacc.com tools/precommit-flow.cx", fx);
+    }
+    pcline(out, l2, sizeof l2);
+    {   char want[100]; F(want, sizeof want, "PRECOMMIT\tstaged_cx=1\tblocked=%d", exp_b);
+        if (reg == 2) ck(r1 == exp_rc && !strncmp(l1, "PRECOMMIT\tstaged_cx=1\tblocked=", 30) && l1[30] != '0' && strstr(o1, "BLOCKED registration manifest MISSING\ttests/batches.tsv\tprecommit-flow") != 0
+                         && strstr(o1, "BLOCKED generated registration table MISSING\ttests/batches.tsv\tprecommit-flow") != 0, s, "original-expected");
+        else ck(r1 == exp_rc && !strcmp(l1, want), s, "original-expected");
+        ck(r2 == r1 && !strcmp(l1, l2) && l2[0], s, "flow-same-line-and-rc");
+        if (reg) ck(strstr(out, "FLOWPC\tnodes=") != 0 && !strstr(out, "flow path unusable") && !strstr(o1, "FLOWPC"), s, "hook-call-took-flow-serial-did-not"); }
+    {   char *p = o1;   /* every precommit: line of the original appears in the flow output */
+        while ((p = strstr(p, "precommit: "))) {
+            char ln[1200]; int n = 0;
+            while (p[n] && p[n] != '\n' && n < (int)sizeof ln - 1) { ln[n] = p[n]; n++; }
+            ln[n] = 0; if (!strstr(out, ln)) missing++;
+            p += n;
+        }
+        ck(missing == 0, s, "flow-same-messages"); }
+    if (!strcmp(s, "r1")) ck(strstr(o1, "lint(report-only):") != 0, s, "report-only-printed");
+    return nfail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char c[2000], tag[40], p[300]; const char *sc[4] = {"pass", "trunc", "r2", "r1"}; int i, nsc = 4; long t0 = sy_now_ms();
+    if (argc == 4 && !strcmp(argv[1], "one")) { if (sy_cwd(root, sizeof root) < 0) return 2; return one(argv[2], argv[3]); }
+    if (argc == 3 && !strcmp(argv[1], "--cases") && !strcmp(argv[2], "route")) { sc[0] = "regok"; sc[1] = "regbad"; nsc = 2; }
+    else if (argc != 1) { fprintf(stderr, "check-precommit-flow: usage: check-precommit-flow.cx [-- --cases route | -- one S TAG]\n"); return 2; }
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(tag, sizeof tag, "%d", sy_pid());
+    F(c, sizeof c, "for s in %s; do sh ./unisacc.com tools/check-precommit-flow.cx -- one $s %s > /tmp/pcfck-%s-$s.log 2>&1 & done; wait", nsc == 2 ? "regok regbad" : "pass trunc r2 r1", tag, tag);
+    if (ovf) return 2;
+    (void)sh(c, root);
+    for (i = 0; i < nsc; i++) {
+        unsigned char *b = 0; int64_t n = 0; int any = 0; char *q;
+        F(p, sizeof p, "/tmp/pcfck-%s-%s.log", tag, sc[i]);
+        if (ovf || sy_read_file(p, &b, &n, 1 << 20) || !b) { printf("FAIL\tprecommit-flow.%s.no-log\n", sc[i]); nfail++; continue; }
+        {   static char lg[1 << 20]; if (n >= (int64_t)sizeof lg) n = sizeof lg - 1;
+            if (mm_copy(lg, sizeof lg, b, (size_t)n)) n = 0; lg[n] = 0; fwrite(lg, 1, (size_t)n, stdout);
+            for (q = lg; (q = strstr(q, "FAIL\t")); q += 5) nfail++;
+            for (q = lg; (q = strstr(q, "PASS\t")); q += 5) any++; }
+        if (!any) { printf("FAIL\tprecommit-flow.%s.no-pass-line\n", sc[i]); nfail++; }
+        free(b); sy_unlink(p);
+    }
+    printf("CHECK_PRECOMMIT_FLOW\tfailed=%d\twall_ms=%ld\n", nfail, sy_now_ms() - t0);
+    return nfail ? 1 : 0;
+}

@@ -310,10 +310,29 @@ int main(int argc,char **argv) {
     if(root_only)return root_preflight(argc==3?argv[2]:DRIVER);
 
     if(args_only){
-        char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0};
+        char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0,0};
         int rc=run(args,abuf,sizeof abuf);ok(rc==0&&strstr(abuf,"status=REGISTERED"),"explicit two args reach real fixture and marker");size_t n;char *bytes;ok(registry_has(bpath,"\talpha;beta\tinterfaces.cr-args\trc0:REGISTER_FIXTURE_ARGS_OK\tproduct\tcommit\n"),"final registry keeps exact encoded args");
         char hb[65],hc[65],afterb[65],afterc[65];bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,hb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,hc);free(bytes);
-        args[6]="cr-args-empty";args[14]="";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"empty args refuse before mutation");args[6]="cr-args-tab";args[14]="alpha\tbeta";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"control field refuses before mutation");bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,afterb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,afterc);free(bytes);ok(!strcmp(hb,afterb)&&!strcmp(hc,afterc),"refused args preserve private registries");printf("REGISTER_ARGS_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+        args[6]="cr-args-empty";args[14]="";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"empty args refuse before mutation");args[6]="cr-args-tab";args[14]="alpha\tbeta";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"control field refuses before mutation");bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,afterb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,afterc);free(bytes);ok(!strcmp(hb,afterb)&&!strcmp(hc,afterc),"refused args preserve private registries");/* args normalisation: spaces and --opt=value fold into the table's ';' convention */
+        args[15]="--no-run";args[6]="cr-args-sp";args[8]="REGISTER_FIXTURE_OK";args[14]="--cases lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-sp\trc0:"),"--args '--cases lock' is stored as --cases;lock");
+        args[6]="cr-args-eq";args[14]="--cases=lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-eq\trc0:"),"--args '--cases=lock' is stored as --cases;lock");
+        args[6]="cr-args-mix";args[14]="--cases=lock  --x=1 k=v";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock;--x;1;k=v\tinterfaces.cr-args-mix\trc0:"),"mixed spaces and = fold per token, plain k=v is kept");
+        args[6]="cr-args-semi";args[14]="--cases;lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-semi\trc0:"),"an already normalised args field is unchanged");args[15]=0;
+        /* --no-run: rows written, batch not run (marker never printed, so a real run would roll back) */
+        {   char *nr[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-nr-ok",fx,"NEVER_PRINTED","no-run row",fx,"interfaces","--no-run",0};
+            rc=run(nr,abuf,sizeof abuf);
+            ok(rc==0&&strstr(abuf,"status=REGISTERED_NORUN")&&!strstr(abuf,"BATCH_RUN")&&!strstr(abuf,"ROLLED_BACK"),"--no-run writes the rows, does not run the batch, ends REGISTERED_NORUN");
+            ok(strstr(abuf,"NOT done")!=0,"--no-run tells the caller to produce its own evidence");
+            ok(count_lines(bpath,"cr-nr-ok\t")==1&&count_lines(cpath,"interfaces.cr-nr-ok\t")==1,"--no-run rows are in both private tables");
+            ok(registry_has(bpath,"cr-nr-ok\tIMPLEMENTED\t")&&!registry_has(bpath,"cr-nr-ok\tPASS"),"--no-run row is IMPLEMENTED, never PASS");
+        }
+        /* default (no --no-run) still runs the batch and rolls back on failure */
+        {   char *df[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-nr-fail",fx,"NEVER_PRINTED","default failing row",fx,"interfaces",0};
+            rc=run(df,abuf,sizeof abuf);
+            ok(rc==1&&strstr(abuf,"status=ROLLED_BACK")&&strstr(abuf,"rows_removed=2"),"default registration still runs the batch and rolls back a failing one");
+            ok(!count_lines(bpath,"cr-nr-fail\t")&&!count_lines(cpath,"interfaces.cr-nr-fail\t"),"the failed default registration left no row");
+        }
+        printf("REGISTER_ARGS_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;
     }
 
     /* case 1: both concurrent registrations succeed */

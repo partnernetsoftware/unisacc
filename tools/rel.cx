@@ -20,13 +20,24 @@
  *           is then older than the registry.
  * --timing  one REL_TIMING line on stderr (read_ms, scan_ms); it changes no result.
  *
- * Not in this version (named, not silently narrowed): who-uses SYM, --depth, --tier, IMPACT table|node rows.
+ *   sh ./unisacc.com tools/rel.cx -- path A B [--root DIR]
+ *           one shortest use/include chain A -> B: PATH<TAB>step<TAB>file per file then PATH_SUMMARY; NO_PATH rc 1 (G8).
+ *
+ *   sh ./unisacc.com tools/rel.cx -- who-calls SYM [--root DIR] [--tracked LIST] [--cache DIR] [--timing]
+ *           CALL<TAB>path:line per word hit of SYM (git grep -n -w rule) in the who-uses file set, then CALLS_SUMMARY;
+ *           per-file identifier index cached by content hash in DIR (default ROOT/.devsvc/relsym, local only),
+ *           only changed files rescanned (relation DAG G2 first step; check tools/check-relsym.cx).
+ * impact --links PATH   (G6) after the batch rows: IMPACT<TAB>table<TAB>dst<TAB>why=..<TAB>via=NODE and IMPACT<TAB>node<TAB>NODE<TAB>why=..
+ *           for every links-v1 derive row whose src pattern matches a changed file, then IMPACT_TABLES_SUMMARY;
+ *           default ROOT/build/links.tsv (absent -> links=absent).
+ * Not in this version (named, not silently narrowed): definition/call told apart from comment/string hits, --depth.
  * LIST and DUMP are snapshots: beyond the registry cross-check above this tool does not check that they still
  * describe the tree (cxlib.relstore, G2, is to own that).
  * rc 0 rows printed, 1 no rows, 2 usage or I/O error.  No repository path is fixed here.  Check: tools/check-rel.cx. */
 #pragma unisa use cxlib.cxroot
 #pragma unisa use cxlib.platformscope
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -164,8 +175,59 @@ static void bt_load(const char *path) {
     }
 }
 
-static int impact(char **files, int nf, const char *dump, const char *table) {
-    char abs[8192], pf[64], idz[512]; const char *ch[MAXCH]; size_t cl[MAXCH], sz, i = 0; char *s; int k, nb = 0, hit = 0, nna = 0, bv = 0, bw = -1; const char *bid = 0; size_t bn = 0;
+/* G6: tables and flow nodes.  Every `derive` row of the links table (build/links.tsv, links v1: kind src dst via
+ * attr) whose src pattern matches a changed file ('*' matches any run of characters, '/' included) names a table
+ * the change regenerates (dst) and the flow node that does it (via, the exec/facts/derive.tsv generator).
+ *   IMPACT<TAB>table<TAB>dst<TAB>why=FILE<TAB>via=NODE   once per dst, links order, first FILE on a tie
+ *   IMPACT<TAB>node<TAB>NODE<TAB>why=FILE                once per node
+ *   IMPACT_TABLES_SUMMARY<TAB>tables=T<TAB>nodes=N<TAB>links=PATH|absent
+ * An explicit --links that cannot be read is refused; the default one absent (a root without build/) is named
+ * links=absent, not silently an empty result. */
+static const char *links_arg; static char links_def[8192];
+static int glob_m(const char *p, size_t pn, const char *s, size_t sn) {
+    size_t i = 0, j = 0, star = (size_t)-1, mark = 0;
+    while (j < sn) {
+        if (i < pn && p[i] == '*') { star = i++; mark = j; }
+        else if (i < pn && p[i] == s[j]) { i++; j++; }
+        else if (star != (size_t)-1) { i = star + 1; j = ++mark; }
+        else return 0;
+    }
+    while (i < pn && p[i] == '*') i++;
+    return i == pn;
+}
+static int impact_tables(const char **ch, const size_t *cl, int nf) {
+    const char *lp = links_arg ? links_arg : links_def; size_t sz, i = 0; char *s = cx_read(lp, &sz);
+    char tb[256][512], nb[256][128]; int nt = 0, nn2 = 0, k;
+    if (!s) { if (links_arg) die("cannot read links table:", lp); printf("IMPACT_TABLES_SUMMARY\ttables=0\tnodes=0\tlinks=absent\n"); return 0; }
+    while (i < sz) {
+        size_t e = i, f[6]; int n = 0; while (e < sz && s[e] != '\n') e++;
+        if (e - i > 7 && !memcmp(s + i, "derive\t", 7)) {
+            size_t p; f[n++] = i;
+            for (p = i; p < e && n < 6; p++) if (s[p] == '\t') f[n++] = p + 1;
+            if (n < 5) die("malformed links row in", lp);
+            for (k = 0; k < nf; k++) if (glob_m(s + f[1], f[2] - 1 - f[1], ch[k], cl[k])) break;
+            if (k < nf) {   /* copied out first: printf %.*s on a pointer into a large buffer scans past the precision */
+                char dst[512], via[128]; size_t dn = f[3] - 1 - f[2], vn = f[4] - 1 - f[3]; int j;
+                if (dn >= sizeof dst || vn >= sizeof via || mm_copy(dst, (long)sizeof dst, s + f[2], (long)dn) || mm_copy(via, (long)sizeof via, s + f[3], (long)vn)) die("links field too long in", lp);
+                dst[dn] = 0; via[vn] = 0;
+                for (j = 0; j < nt && strcmp(tb[j], dst); j++) {}
+                if (j == nt) { if (nt >= 256) die("too many table hits", 0); cx_fmt(tb[nt++], 512, "%s", dst); printf("IMPACT\ttable\t%s\twhy=%s\tvia=%s\n", dst, ch[k], via); }
+                for (j = 0; j < nn2 && strcmp(nb[j], via); j++) {}
+                if (j == nn2) { if (nn2 >= 256) die("too many node hits", 0); cx_fmt(nb[nn2++], 128, "%s", via); printf("IMPACT\tnode\t%s\twhy=%s\n", via, ch[k]); }
+            }
+        }
+        i = e + 1;
+    }
+    printf("IMPACT_TABLES_SUMMARY\ttables=%d\tnodes=%d\tlinks=%s\n", nt, nn2, lp);
+    free(s);
+    return nt + nn2;
+}
+
+static int tier_rank(const char *s, size_t n) { return n == 6 && !memcmp(s, "commit", 6) ? 1 : n == 5 && !memcmp(s, "daily", 5) ? 2 : n == 7 && !memcmp(s, "release", 7) ? 3 : 0; }
+/* tier: 0 = every batch (affected without --tier); else only batches whose registry tier ranks at most it
+ * (cxlib.testplan tp_tier_includes rule: commit < daily < release, an unknown tier never included). */
+static int impact(char **files, int nf, const char *dump, const char *table, int tier) {
+    char abs[8192], pf[64], idz[512]; const char *ch[MAXCH]; size_t cl[MAXCH], sz, i = 0; char *s; int k, nb = 0, hit = 0, nna = 0, bv = 0, bw = -1, bskip = 0; const char *bid = 0; size_t bn = 0;
     long t0 = sy_now_ms(), t1;
     if (nf > MAXCH) die("too many files", 0);
     for (k = 0; k < nf; k++) {   /* a file that no longer exists still matches by its spelling */
@@ -184,7 +246,7 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
         size_t e = i, f1, f2, f3; int end = i >= sz;
         if (!end) { while (e < sz && s[e] != '\n') e++; }
         if (end || (e - i > 2 && s[i] == 'B' && s[i + 1] == '\t')) {   /* a new batch (or the end) closes the previous one */
-            if (bid && bv) {
+            if (bid && bv && !bskip) {
                 int r = bt_find(bid, bn, 0);
                 if (bt_pfn[r] >= sizeof pf) die("platform too long in", table);
                 if (bn >= sizeof idz) die("batch id too long in", dump);
@@ -196,7 +258,8 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
             }
             if (end) break;
             f1 = i + 2; f2 = f1; while (f2 < e && s[f2] != '\t') f2++;
-            bid = s + f1; bn = f2 - f1; bv = 0; bw = -1; nb++;
+            bid = s + f1; bn = f2 - f1; bv = 0; bw = -1; nb++; bskip = 0;
+            if (tier) { size_t t1 = f2 + 1, t2 = t1; int r; while (t2 < e && s[t2] != '\t') t2++; r = t1 < e ? tier_rank(s + t1, t2 - t1) : 0; bskip = !r || r > tier; }
             if (bt_find(bid, bn, 0) < 0) { char w[300]; cx_fmt(w, sizeof w, "%.*s", bn > 200 ? 200 : (int)bn, bid); die("closure dump names a batch the registry does not hold (dump is stale):", w); }
         } else if (e - i > 2 && (s[i] == 'C' || s[i] == 'D') && s[i + 1] == '\t') {
             int v; size_t pn; f1 = i + 2; while (f1 < e && s[f1] != '\t') f1++;
@@ -216,18 +279,124 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
     }
     printf("IMPACT_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\tnot_applicable=%d\n", nf, hit, nb, nna);
     if (timing) fprintf(stderr, "REL_TIMING\tread_ms=%ld\tscan_ms=%ld\n", t1 - t0, sy_now_ms() - t1);
+    hit += impact_tables(ch, cl, nf);
     return hit || nna ? 0 : 1;
 }
 
+/* who-calls SYM: symbol-grain sites (G2 first step).  Every tracked .cx (same set as who-uses) is read, hashed
+ * (FNV-1a 64 of its working-tree bytes) and its identifier index -- one "IDENT<TAB>LINE" per distinct (ident,line),
+ * idents being maximal [A-Za-z0-9_] runs, the git grep -w word rule -- is kept in CACHE/<hash>.idx (local, not
+ * tracked).  Only files whose content hash has no index are rescanned.  Comments and strings are not told apart
+ * from code: a site is a textual word hit, the set `git grep -n -w -F SYM` gives on the same files. */
+static unsigned long long fnv(const char *s, size_t n) { unsigned long long h = 1469598103934665603ULL; size_t i; for (i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; } return h; }
+static int wch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int idx_build(const char *s, size_t n, const char *out) {
+    size_t cap = n * 2 + 64, z = 0, i = 0, li = 0; long line = 1; char *b = malloc(cap); int r;
+    if (!b) return -1;
+    while (i < n) {
+        size_t a, q; int dup = 0;
+        if (s[i] == '\n') { line++; li = z; i++; continue; }
+        if (!wch((unsigned char)s[i])) { i++; continue; }
+        a = i; while (i < n && wch((unsigned char)s[i])) i++;
+        q = li; while (q < z) { size_t e = q; while (b[e] != '\n') e++;   /* same ident already on this line */
+            if (e - q > i - a && b[q + (i - a)] == '\t' && !memcmp(b + q, s + a, i - a)) { dup = 1; break; } q = e + 1; }
+        if (dup) continue;
+        if (z + (i - a) + 32 > cap) { cap = cap * 2 + (i - a) + 64; b = realloc(b, cap); if (!b) return -1; }
+        if (mm_copy(b + z, (long)(cap - z), s + a, (long)(i - a))) { free(b); return -1; } z += i - a;
+        if (cx_fmt(b + z, (long)(cap - z), "\t%ld\n", line)) { free(b); return -1; } z += strlen(b + z);
+    }
+    r = cx_write(out, b, z); free(b); return r;
+}
+static int who_calls(const char *sym, const char *list, const char *cache) {
+    size_t sz, i, sl = strlen(sym); char *s; int found = 0, scanned = 0, rescanned = 0;
+    long t0 = sy_now_ms();
+    if (!sl || sl > 255) die("who-calls: bad symbol", sym);
+    for (i = 0; i < sl; i++) if (!wch((unsigned char)sym[i])) die("who-calls: symbol is not one word:", sym);
+    if (sy_mkdir_all(cache, 0755) < 0) die("who-calls: cannot create cache", cache);
+    s = cx_read(list, &sz); if (!s) die("cannot read tracked list (git ls-files -s -- '*.cx' > LIST):", list);
+    i = 0;
+    while (i < sz) {
+        size_t e = i, t; while (e < sz && s[e] != '\n') e++;
+        t = i; while (t < e && s[t] != '\t') t++;
+        if (t < e && e - t > 1 && !(t - i >= 6 && !memcmp(s + i, "120000", 6)) && !(e - t - 1 >= 8 && !memcmp(s + t + 1, "archive/", 8))) {
+            char rel[4096], abs[8192], ip[8192], ln[64]; size_t fn, xn, p = 0; char *f, *x;
+            if (e - t - 1 >= sizeof rel) die("path too long in", list);
+            if (mm_copy(rel, (long)sizeof rel, s + t + 1, (long)(e - t - 1))) die("path too long in", list); rel[e - t - 1] = 0;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long", rel);
+            f = cx_read(abs, &fn);
+            if (f) {
+                scanned++;
+                if (cx_fmt(ip, sizeof ip, "%s/%016llx.idx", cache, fnv(f, fn))) die("path too long", cache);
+                if (sy_exists(ip) != 1) { if (idx_build(f, fn, ip)) die("who-calls: cannot write index", ip); rescanned++; }
+                free(f);
+                x = cx_read(ip, &xn); if (!x) die("who-calls: cannot read index", ip);
+                while (p < xn) { size_t q = p; while (q < xn && x[q] != '\n') q++;
+                    if (q - p > sl && q - p - sl - 1 < sizeof ln && x[p + sl] == '\t' && !memcmp(x + p, sym, sl)) {
+                        if (mm_copy(ln, (long)sizeof ln, x + p + sl + 1, (long)(q - p - sl - 1))) die("who-calls: bad index row", ip); ln[q - p - sl - 1] = 0; printf("CALL\t%s:%s\n", rel, ln); found++; }
+                    p = q + 1; }
+                free(x);
+            }
+        }
+        i = e + 1;
+    }
+    printf("CALLS_SUMMARY\tsym=%s\tsites=%d\tscanned=%d\trescanned=%d\n", sym, found, scanned, rescanned);
+    if (timing) fprintf(stderr, "REL_TIMING\ttotal_ms=%ld\trescanned=%d\n", sy_now_ms() - t0, rescanned);
+    return found ? 0 : 1;
+}
+
+/* path A B: one shortest use/include chain from A to B (G8).  Breadth first from A over the edges parse()
+ * finds, files parsed as they are reached (no tracked list needed); the first parent found wins, edges taken in
+ * file order, so the answer is deterministic.  PATH<TAB>step<TAB>file per file, A first, B last, then
+ * PATH_SUMMARY<TAB>from=A<TAB>to=B<TAB>hops=H.  Unreachable: NO_PATH<TAB>from=A<TAB>to=B, rc 1. */
+static int path_of(const char *a, const char *b) {
+    char abs[8192]; int na, nb, *q = 0, nq = 0, cq = 0, h, *par, k, *chain, nc = 0;
+    if ((a[0] == '/' ? cx_fmt(abs, sizeof abs, "%s", a) : cx_fmt(abs, sizeof abs, "%s/%s", root, a))) die("path too long", 0);
+    if (sy_exists(abs) != 1) die("path: no file", a);
+    if ((na = file_node(abs)) < 0) die("path: not below root:", a);
+    if ((b[0] == '/' ? cx_fmt(abs, sizeof abs, "%s", b) : cx_fmt(abs, sizeof abs, "%s/%s", root, b))) die("path too long", 0);
+    if (sy_exists(abs) != 1) die("path: no file", b);
+    if ((nb = file_node(abs)) < 0) die("path: not below root:", b);
+    par = malloc(sizeof(int) * MAXN); chain = malloc(sizeof(int) * MAXN); if (!par || !chain) die("out of memory", 0);
+    for (k = 0; k < MAXN; k++) par[k] = -1;
+    nd[na].seen = 1; push(&q, &nq, &cq, na);
+    for (h = 0; h < nq && !nd[nb].seen; h++) {
+        int j, x = q[h]; if (!nd[x].parsed) parse(x);
+        for (j = 0; j < nd[x].nd; j++) { int y = nd[x].dep[j]; if (!nd[y].seen) { nd[y].seen = 1; par[y] = x; push(&q, &nq, &cq, y); } }
+    }
+    if (!nd[nb].seen) { printf("NO_PATH\tfrom=%s\tto=%s\n", nd[na].rel, nd[nb].rel); return 1; }
+    for (k = nb; k >= 0; k = par[k]) chain[nc++] = k;
+    for (k = nc - 1; k >= 0; k--) printf("PATH\t%d\t%s\n", nc - 1 - k, nd[chain[k]].rel);
+    printf("PATH_SUMMARY\tfrom=%s\tto=%s\thops=%d\n", nd[na].rel, nd[nb].rel, nc - 1);
+    return 0;
+}
+
+/* default inputs live in ROOT/.devsvc/rel (ignored, local only) and are generated there when missing:
+ * tracked.txt from `git ls-files -s -- '*.cx'`, closure[-TIER].tsv from `tools/affected.cx -- --closure-dump
+ * [--tier TIER]`.  A present file is used as is (a snapshot; delete it to refresh). */
+static void ensure_default(char *out, size_t cap, const char *name, const char *cmd) {
+    char dir[8192], full[12000]; char *o = 0; size_t on = 0;
+    const char *env = sy_env("UNISACC_DEVMETA_DIR");
+    if ((env && *env ? cx_fmt(dir, sizeof dir, "%s/rel", env) : cx_fmt(dir, sizeof dir, "%s/.devsvc/rel", root)) || cx_fmt(out, (long)cap, "%s/%s", dir, name)) die("path too long", 0);
+    if (sy_exists(out) == 1) return;
+    if (sy_mkdir_all(dir, 0755) < 0) die("cannot create", dir);
+    /* redirected to a file, not captured: the full dump is about 9 MB */
+    if (cx_fmt(full, sizeof full, "cd '%s' && %s > '%s.part' 2> '%s.err' && mv '%s.part' '%s'", root, cmd, out, out, out, out)) die("path too long", 0);
+    if (cx_run_timeout(full, 55, &o, &on) || sy_exists(out) != 1) { free(o); fprintf(stderr, "rel: generator stderr kept in %s.err\n", out); die("cannot generate default input:", cmd); }
+    free(o);
+}
+
 int main(int argc, char **argv) {
-    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0; char *files[MAXCH], def[8192], def2[8192]; int nf = 0, a;
+    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0, *cache = 0, *tiers = 0; char *files[MAXCH], def[8192], def2[8192], cmd[256], nm[64]; int nf = 0, a, tier = 0;
     if (argc < 3) usage();
     for (a = 2; a < argc; a++) {
         if (!strcmp(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
         else if (!strcmp(argv[a], "--tracked") && a + 1 < argc) tracked = argv[++a];
         else if (!strcmp(argv[a], "--closure") && a + 1 < argc) closure = argv[++a];
         else if (!strcmp(argv[a], "--batches") && a + 1 < argc) table = argv[++a];
+        else if (!strcmp(argv[a], "--cache") && a + 1 < argc) cache = argv[++a];
+        else if (!strcmp(argv[a], "--links") && a + 1 < argc) links_arg = argv[++a];
         else if (!strcmp(argv[a], "--timing")) timing = 1;
+        else if (!strcmp(argv[a], "--tier") && a + 1 < argc) { tiers = argv[++a]; if (!(tier = tier_rank(tiers, strlen(tiers)))) usage(); }
         else if (argv[a][0] == '-' && argv[a][1] == '-') usage();
         else if (nf < MAXCH) files[nf++] = argv[a];
         else die("too many files", 0);
@@ -236,15 +405,29 @@ int main(int argc, char **argv) {
     if (sy_realpath(rootarg, root, sizeof root) < 0) die("no root", rootarg);
     rootn = (long)strlen(root);
     if (!strcmp(argv[1], "who-uses")) {
-        if (nf != 1 || closure || table) usage();
-        if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
+        if (nf != 1 || closure || table || tier) usage();
+        if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
         return who_uses(files[0], tracked);
+    }
+    if (!strcmp(argv[1], "path")) {
+        if (nf != 2 || tracked || closure || table || tier || cache) usage();
+        return path_of(files[0], files[1]);
+    }
+    if (!strcmp(argv[1], "who-calls")) {
+        if (nf != 1 || closure || table || tier) usage();
+        if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
+        if (!cache) { if (cx_fmt(def2, sizeof def2, "%s/.devsvc/relsym", root)) die("path too long", 0); cache = def2; }
+        return who_calls(files[0], tracked, cache);
     }
     if (!strcmp(argv[1], "impact")) {
         if (tracked) usage();
-        if (!closure) { if (cx_fmt(def, sizeof def, "%s/out/rel/closure.tsv", root)) die("path too long", 0); closure = def; }
+        if (!closure) {   /* the commit tier's dump has its own (one literal hop) closure, so its own file */
+            if (cx_fmt(nm, sizeof nm, tier ? "closure-%s.tsv" : "closure.tsv", tiers) || cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/affected.cx -- --closure-dump%s%s", tier ? " --tier " : "", tier ? tiers : "")) die("path too long", 0);
+            ensure_default(def, sizeof def, nm, cmd); closure = def;
+        }
         if (!table) { if (cx_fmt(def2, sizeof def2, "%s/tests/batches.tsv", root)) die("path too long", 0); table = def2; }
-        return impact(files, nf, closure, table);
+        if (cx_fmt(links_def, sizeof links_def, "%s/build/links.tsv", root)) die("path too long", 0);
+        return impact(files, nf, closure, table, tier);
     }
     usage();
     return 2;

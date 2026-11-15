@@ -1,0 +1,336 @@
+/* dcheck: one "changed it, now verify it" entry (plans/devsvc.md P4).  Replaces running tools/check-*.cx by hand.
+ * From the repo root:
+ *   sh ./unisacc.com tools/dcheck.cx -- [PATH...] [--owner O] [--tier commit|daily|release] [--only ID,ID]
+ *                                        [--par N] [--bg] [--plan]
+ * Changed paths: the PATH arguments; without any, the git work tree changes (staged, unstaged and untracked);
+ *   with --owner O instead the paths that owner wrote through devsvc (f.write, f.edit, doc.* events carrying path=).
+ * Selection: tools/affected.cx --files PATHS --tier T --list-only (T defaults to commit); --only keeps the named ids
+ *   (a named id that the change does not select is reported NOT_RUN, never run blind).
+ * Run: one devsvc flow, one exec node per batch (55 s bound each) running `affected.cx --ids ID --run -j 1`
+ *   (plus --prepare-materials when the registry row declares materials); a tlib kit node runs first and every batch
+ *   node depends on it.  The flow gets an explicit parallel degree (--par N, 1..32; default the number of
+ *   batches, at most 32) and a deadline that keeps the whole command under 55 s; batches the deadline leaves unstarted are NOT_RUN.  Nothing is cached.
+ * Output: CHECK<TAB>id<TAB>PASS|FAIL|DEFERRED|NOT_RUN<TAB>ms<TAB>first=LINE per batch (first: the first failing line,
+ *   or the reason), DCHECK_FLOW<TAB>peak=..<TAB>par=..<TAB>select_ms=..<TAB>run=DIR, and last
+ *   DCHECK<TAB>total=N<TAB>pass=N<TAB>fail=N<TAB>deferred=N<TAB>not_run=N<TAB>wall_ms=N<TAB>serial_ms=N
+ *   (wall_ms: the flow's wall clock; serial_ms: the sum of the batch nodes).  PASS needs rc 0 and the batch's own
+ *   BATCH_RUN status=PASS line; a timeout or a deferral is DEFERRED, a skipped or missing node is NOT_RUN.
+ * --bg: starts this same command as a devsvc background job and prints its JOB line at once (devsvc wait JOB).
+ * --plan: prints the selection and the node table and runs nothing.
+ * Fixture hooks (checks only): --root DIR (registry root, default .), --home DIR (checkout holding the tools),
+ *   --runner 'CMD with {id}' (replaces the affected runner; rc 0 PASS, rc 3 DEFERRED, else FAIL; no kit node),
+ *   --node-timeout-ms N (1..55000; can only shorten the bound).
+ * rc: 0 all PASS or nothing selected, 1 any FAIL, 3 no FAIL but DEFERRED or NOT_RUN, 2 usage or runner error. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.build
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+/* the one place the parallel-degree flag of devsvc flow / x is spelled */
+#define DC_PAR_FLAG "--par"
+#define DC_NODE_MS 55000L
+#define DC_TOTAL_MS 53000L
+#define MAXB 512
+#define MAXP 2000
+
+static char *ids[MAXB]; static int nids;
+static char *paths[MAXP]; static int npaths;
+static char *only[MAXB]; static int nonly;
+static char root[4096], home[4096], prod[4400];
+
+static int bad(const char *m, const char *a) { fprintf(stderr, "dcheck: %s%s%s\n", m, a ? " " : "", a ? a : ""); return 2; }
+static char *dupn(const char *s, long n) { char *p = malloc((size_t)n + 1); if (!p) { fprintf(stderr, "dcheck: out of memory\n"); exit(2); } if (n > 0 && mm_copy(p, n + 1, s, n)) { fprintf(stderr, "dcheck: copy bound\n"); exit(2); } p[n] = 0; return p; }
+static void add_path(const char *s, long n) {
+    if (n <= 0) return;
+    for (int i = 0; i < npaths; i++) if ((long)strlen(paths[i]) == n && !strncmp(paths[i], s, (size_t)n)) return;
+    if (npaths >= MAXP) { fprintf(stderr, "dcheck: more than %d changed paths; name the paths\n", MAXP); exit(2); }
+    paths[npaths++] = dupn(s, n);
+}
+static void tail(const char *tag, const char *s, long n) {
+    long i = n, lines = 0;
+    if (!s || n <= 0) return;
+    while (i > 0 && n - i < 2000 && lines < 15) { i--; if (s[i] == '\n' && i != n - 1) lines++; }
+    if (i > 0 && s[i] == '\n') i++;
+    fprintf(stderr, "--- %s tail ---\n%.*s%s", tag, (int)(n - i), s + i, s[n - 1] == '\n' ? "" : "\n");
+}
+/* git work tree changes: staged, unstaged, untracked (every file); a rename counts by its new name */
+static int git_paths(void) {
+    char *v[] = {"git", "status", "--porcelain", "--untracked-files=all", 0}; np_result r = {0}; char why[256] = "";
+    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { tail("git status", r.err, (long)r.errn); np_free(&r); return bad("git status failed; name the paths", why); }
+    for (long i = 0; i < (long)r.outn;) {
+        long e = i, s; while (e < (long)r.outn && r.out[e] != '\n') e++;
+        s = i + 3;
+        if (e > s) {
+            for (long k = s; k + 4 <= e; k++) if (!strncmp(r.out + k, " -> ", 4)) { s = k + 4; break; }
+            if (r.out[s] == '"') fprintf(stderr, "DCHECK_SKIP\tquoted-path\t%.*s\n", (int)(e - s), r.out + s);
+            else add_path(r.out + s, e - s);
+        }
+        i = e + 1;
+    }
+    np_free(&r); return 0;
+}
+/* paths OWNER wrote through devsvc: write events carrying path= */
+static int owner_paths(const char *owner) {
+    char dv[4400], key[300], why[256] = ""; np_result r = {0};
+    if (cx_fmt(dv, sizeof dv, "%s/tools/devsvc.cx", home) || cx_fmt(key, sizeof key, "\towner=%s\t", owner)) return bad("path too long", 0);
+    {   char *v[] = {"sh", prod, dv, "--", "events", "--since", "0", 0};
+        if (np_run(v, home, 0, 20, &r, why, sizeof why) || r.rc) { tail("devsvc events", r.err, (long)r.errn); np_free(&r); return bad("devsvc events failed", why); }
+    }
+    for (long i = 0; i < (long)r.outn;) {
+        long e = i; char *ln, *k, *p; while (e < (long)r.outn && r.out[e] != '\n') e++;
+        ln = dupn(r.out + i, e - i);
+        if (strstr(ln, key) && (p = strstr(ln, "\tpath=")) && ((k = strstr(ln, "\tf.write\t")) || (k = strstr(ln, "\tf.edit\t")) || ((k = strstr(ln, "\tdoc.")) && strncmp(k, "\tdoc.get\t", 9)))) {
+            long m = 0; p += 6; while (p[m] && p[m] != '\t') m++;
+            add_path(p, m);
+        }
+        free(ln); i = e + 1;
+    }
+    np_free(&r); return 0;
+}
+static int select_batches(const char *tier) {
+    char af[4400], why[256] = ""; np_result r = {0}; char **v = malloc(sizeof(char *) * (size_t)(npaths + 12)); int n = 0, rc;
+    if (!v || cx_fmt(af, sizeof af, "%s/tools/affected.cx", home)) return bad("path too long", 0);
+    v[n++] = "sh"; v[n++] = prod; v[n++] = af; v[n++] = "--"; v[n++] = "--files";
+    for (int i = 0; i < npaths; i++) v[n++] = paths[i];
+    v[n++] = "--tier"; v[n++] = (char *)tier; v[n++] = "--list-only"; v[n] = 0;
+    rc = np_run(v, root, 0, 50, &r, why, sizeof why); free(v);
+    if (rc || r.rc) { tail("affected stderr", r.err, (long)r.errn); np_free(&r); return bad("selection by tools/affected.cx failed", why); }
+    for (long i = 0; i < (long)r.outn;) {
+        long e = i; while (e < (long)r.outn && r.out[e] != '\n') e++;
+        if (e - i > 9 && !strncmp(r.out + i, "AFFECTED\t", 9)) {
+            long s = i + 9, m = 0; while (s + m < e && r.out[s + m] != '\t') m++;
+            if (nids >= MAXB) { np_free(&r); return bad("more than 512 batches selected; narrow with --only or name fewer paths", 0); }
+            ids[nids++] = dupn(r.out + s, m);
+        }
+        i = e + 1;
+    }
+    np_free(&r); return 0;
+}
+/* 1 when the registry row of ID declares materials */
+static int has_materials(const char *reg, long n, const char *id) {
+    long il = (long)strlen(id);
+    for (long i = 0; i < n;) {
+        long e = i; while (e < n && reg[e] != '\n') e++;
+        if (e - i > il && !strncmp(reg + i, id, (size_t)il) && reg[i + il] == '\t') {
+            long p = i; int f = 0;
+            for (; p < e && f < 7; p++) if (reg[p] == '\t') f++;
+            return f == 7 && !(p < e && reg[p] == '-' && (p + 1 == e || reg[p + 1] == '\t'));
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+/* registered budget_seconds of ID (field 7), -1 when absent or not a number */
+static long budget_of(const char *reg, long n, const char *id) {
+    long il = (long)strlen(id);
+    for (long i = 0; i < n;) {
+        long e = i; while (e < n && reg[e] != '\n') e++;
+        if (e - i > il && !strncmp(reg + i, id, (size_t)il) && reg[i + il] == '\t') {
+            long p = i; int f = 0;
+            for (; p < e && f < 6; p++) if (reg[p] == '\t') f++;
+            return f == 6 && p < e && reg[p] >= '0' && reg[p] <= '9' ? atol(reg + p) : -1;
+        }
+        i = e + 1;
+    }
+    return -1;
+}
+/* escape for a flow node value: everything but [A-Za-z0-9_./-] as %XX */
+static void esc(sb *o, const char *s) { for (; *s; s++) { unsigned char c = (unsigned char)*s; char h[8]; if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || c == '/' || c == '-') { h[0] = (char)c; h[1] = 0; } else (void)cx_fmt(h, sizeof h, "%%%02X", c); (void)sb_puts(o, h); } }
+/* NODE line of flow output for id: state text, rc and ms; returns 1 when found */
+static int node_of(const char *out, long n, const char *id, char *st, int sc, long *rc, long *ms) {
+    char key[40]; (void)cx_fmt(key, sizeof key, "NODE\t%s\t", id);
+    for (long i = 0; i < n;) {
+        long e = i; while (e < n && out[e] != '\n') e++;
+        if (e - i > (long)strlen(key) && !strncmp(out + i, key, strlen(key))) {
+            char *ln = dupn(out + i + strlen(key), e - i - (long)strlen(key)), *q; long k = 0;
+            while (ln[k] && ln[k] != '\t' && k < sc - 1) { st[k] = ln[k]; k++; } st[k] = 0;
+            q = strstr(ln, "rc="); *rc = q ? atol(q + 3) : -1;
+            q = strstr(ln, "ms="); *ms = q ? atol(q + 3) : 0;
+            free(ln); return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+static long field_num(const char *line, const char *key) { const char *q = line ? strstr(line, key) : 0; return q ? atol(q + strlen(key)) : -1; }
+/* the first line of B holding one of the words (0-terminated list) and not starting with SKIP; 1 when found */
+static int first_with(const char *b, long n, const char **words, const char *skip, char *o, int cap) {
+    for (long i = 0; b && i < n;) {
+        long e = i; char *ln; int hit = 0; while (e < n && b[e] != '\n') e++;
+        ln = dupn(b + i, e - i);
+        for (int w = 0; words[w]; w++) if (strstr(ln, words[w])) hit = 1;
+        if (hit && skip && !strncmp(ln, skip, strlen(skip))) hit = 0;
+        if (hit) { long k = 0; for (; ln[k] && k < cap - 1; k++) o[k] = ln[k] == '\t' ? ' ' : ln[k]; o[k] = 0; free(ln); return 1; }
+        free(ln); i = e + 1;
+    }
+    return 0;
+}
+static int first_nonblank(const char *b, long n, char *o, int cap) {
+    for (long i = 0; b && i < n;) {
+        long e = i, k = 0; while (e < n && b[e] != '\n') e++;
+        if (e > i) { for (; i + k < e && k < cap - 1; k++) o[k] = b[i + k] == '\t' ? ' ' : b[i + k]; o[k] = 0; return 1; }
+        i = e + 1;
+    }
+    return 0;
+}
+static char *slurp(const char *run, const char *id, const char *ext, long *n) {
+    char p[2048]; unsigned char *b = 0; int64_t m = 0; *n = 0;
+    if (!run[0] || snprintf(p, sizeof p, "%s/out/%s.%s", run, id, ext) >= (int)sizeof p || sy_read_file(p, &b, &m, 1L << 24)) return 0;
+    *n = (long)m; return (char *)b;
+}
+
+int main(int argc, char **argv) {
+    const char *tier = "commit", *owner = 0, *runner = 0, *rootarg = ".", *homearg = 0; int par = 0, bg = 0, plan = 0, onlyset = 0;
+    long node_ms = DC_NODE_MS, t_start = sy_now_ms(), select_ms, left;
+    int pass = 0, fail = 0, deferred = 0, notrun = 0, nextra = 0; long wall = 0, serial = 0, peak = 0;
+    char fp[2048], run[1024] = "", dv[4400], why[512] = ""; np_result r = {0}; sb *o;
+    char *reg = 0; long regn = 0; char *extra[MAXB];
+    for (int a = 1; a < argc; a++) {
+        const char *s = argv[a]; int more = a + 1 < argc;
+        if (!strcmp(s, "--bg")) bg = 1;
+        else if (!strcmp(s, "--plan")) plan = 1;
+        else if (!strcmp(s, "--tier") && more) { tier = argv[++a]; if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) return bad("--tier wants commit|daily|release, got", tier); }
+        else if (!strcmp(s, "--owner") && more) owner = argv[++a];
+        else if (!strcmp(s, "--runner") && more) runner = argv[++a];
+        else if (!strcmp(s, "--root") && more) rootarg = argv[++a];
+        else if (!strcmp(s, "--home") && more) homearg = argv[++a];
+        else if (!strcmp(s, "--par") && more) { par = atoi(argv[++a]); if (par < 1 || par > 32) return bad("--par wants 1..32", 0); }
+        else if (!strcmp(s, "--node-timeout-ms") && more) { node_ms = atol(argv[++a]); if (node_ms < 1 || node_ms > DC_NODE_MS) return bad("--node-timeout-ms wants 1..55000 (the bound is never widened)", 0); }
+        else if (!strcmp(s, "--only") && more) {
+            const char *p = argv[++a]; onlyset = 1;
+            while (*p) { long m = 0; while (p[m] && p[m] != ',') m++; if (m) { if (nonly >= MAXB) return bad("too many --only ids", 0); only[nonly++] = dupn(p, m); } p += m; if (*p == ',') p++; }
+            if (!nonly) return bad("--only wants ID[,ID...]", 0);
+        }
+        else if (s[0] == '-' && s[1] == '-') return bad("unexpected argument (usage in the file header)", s);
+        else add_path(s, (long)strlen(s));
+    }
+    if (owner && npaths) return bad("give PATHs or --owner, not both", 0);
+    if (sy_realpath(rootarg, root, sizeof root) < 0) return bad("cannot resolve --root", rootarg);
+    if (sy_realpath(homearg ? homearg : rootarg, home, sizeof home) < 0) return bad("cannot resolve --home", homearg);
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", home) || cx_fmt(dv, sizeof dv, "%s/tools/devsvc.cx", home)) return bad("path too long", 0);
+
+    if (bg) {   /* the same command without --bg, as one devsvc background job */
+        char self[4400]; char **v = malloc(sizeof(char *) * (size_t)(argc + 20)); int n = 0, rc;
+        if (!v || cx_fmt(self, sizeof self, "%s/tools/dcheck.cx", home)) return bad("path too long", 0);
+        v[n++] = "sh"; v[n++] = prod; v[n++] = dv; v[n++] = "--"; v[n++] = "x"; v[n++] = DC_PAR_FLAG; v[n++] = "1"; v[n++] = "--bg"; v[n++] = "--timeout-ms"; v[n++] = "59000"; v[n++] = "--";
+        v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--"; v[n++] = "--root"; v[n++] = root; v[n++] = "--home"; v[n++] = home;
+        for (int a = 1; a < argc; a++) {
+            if (!strcmp(argv[a], "--bg")) continue;
+            if ((!strcmp(argv[a], "--root") || !strcmp(argv[a], "--home")) && a + 1 < argc) { a++; continue; }
+            v[n++] = argv[a];
+        }
+        v[n] = 0;
+        rc = np_run(v, home, 0, 30, &r, why, sizeof why);
+        if (r.out) printf("%.*s", (int)r.outn, r.out);
+        if (rc || r.rc) { tail("devsvc x --bg", r.err, (long)r.errn); return bad("could not start the background job", why); }
+        return 0;
+    }
+
+    if (!npaths) { int rc = owner ? owner_paths(owner) : git_paths(); if (rc) return rc; }
+    if (npaths) { int rc = select_batches(tier); if (rc) return rc; }
+    if (onlyset) {   /* keep the named ids; a named id the change does not select is NOT_RUN */
+        int k = 0;
+        for (int i = 0; i < nids; i++) { int keep = 0; for (int j = 0; j < nonly; j++) if (!strcmp(ids[i], only[j])) keep = 1; if (keep) ids[k++] = ids[i]; }
+        nids = k;
+        for (int j = 0; j < nonly; j++) { int seen = 0; for (int i = 0; i < nids; i++) if (!strcmp(ids[i], only[j])) seen = 1; if (!seen) extra[nextra++] = only[j]; }
+    }
+    if (!par) par = nids > 32 ? 32 : nids < 1 ? 1 : nids;   /* every batch at once, up to the flow maximum */
+    select_ms = sy_now_ms() - t_start;
+    printf("DCHECK_SELECT\tchanged=%d\tbatches=%d\ttier=%s\tselect_ms=%ld\n", npaths, nids, tier, select_ms);
+
+    o = sb_new(); if (!o) return bad("out of memory", 0);
+    if (nids) {
+        char rb[4400]; unsigned char *b = 0; int64_t m = 0;
+        if (!cx_fmt(rb, sizeof rb, "%s/tests/batches.tsv", root) && !sy_read_file(rb, &b, &m, 1L << 26)) { reg = (char *)b; regn = (long)m; }
+        if (!runner) {   /* the tlib kit once, in front; a failed kit build is reported by the batches' own fallback */
+            char cmd[9000];
+            if (cx_fmt(cmd, sizeof cmd, "cd '%s' && { sh '%s' tools/tlib.cx -- kit || echo KIT_FALLBACK\n}", root, prod)) return bad("path too long", 0);
+            (void)sb_puts(o, "kit\texec\t-\ta0=sh;a1=-c;a2="); esc(o, cmd); (void)sb_puts(o, ";timeout_ms=40000\n");
+        }
+    }
+    for (int i = 0; i < nids; i++) {
+        char nid[16], cmd[9000], tm[48], inner[4600]; int w;
+        (void)cx_fmt(nid, sizeof nid, "b%d", i + 1);
+        if (runner) {
+            const char *h = strstr(runner, "{id}");
+            w = h ? cx_fmt(inner, sizeof inner, "%.*s%s%s", (int)(h - runner), runner, ids[i], h + 4) : cx_fmt(inner, sizeof inner, "%s", runner);
+        } else w = cx_fmt(inner, sizeof inner, "sh '%s' '%s/tools/affected.cx' -- --ids '%s' --run -j 1%s", prod, home, ids[i], reg && has_materials(reg, regn, ids[i]) ? " --prepare-materials" : "");
+        if (w || cx_fmt(cmd, sizeof cmd, "cd '%s' && { %s\n}", root, inner) || cx_fmt(tm, sizeof tm, ";timeout_ms=%ld\n", node_ms)) return bad("command too long for batch", ids[i]);
+        (void)sb_puts(o, nid); (void)sb_puts(o, "\texec\t"); (void)sb_puts(o, runner ? "-" : "kit"); (void)sb_puts(o, "\ta0=sh;a1=-c;a2="); esc(o, cmd); (void)sb_puts(o, tm);
+    }
+    if (plan) {
+        for (int i = 0; i < nids; i++) printf("PLAN\t%s\tb%d\n", ids[i], i + 1);
+        printf("%s", sb_cstr(o)); return 0;
+    }
+    left = DC_TOTAL_MS - (sy_now_ms() - t_start) - 1500;
+    if (nids && left < 3000) { fprintf(stderr, "dcheck: selection used the whole window; batches are NOT_RUN\n"); }
+    else if (nids) {
+        char pn[16], dl[24]; int rc;
+        if (cx_fmt(fp, sizeof fp, "%s/dcheck-%d.nodes.tsv", sy_tmpdir(), sy_pid()) || sy_write_atomic(fp, sb_cstr(o), sb_len(o), 0600)) return bad("cannot write the node table", fp);
+        (void)cx_fmt(pn, sizeof pn, "%d", par); (void)cx_fmt(dl, sizeof dl, "%ld", left);
+        {   char *v[] = {"sh", prod, dv, "--", "flow", "run", fp, DC_PAR_FLAG, pn, "--deadline-ms", dl, 0};
+            rc = np_run(v, home, 0, (int)(left / 1000) + 3, &r, why, sizeof why);
+            if (rc && !r.out) fprintf(stderr, "dcheck: flow runner: %s\n", why);
+        }
+        (void)sy_unlink(fp);
+        for (long i = 0; i < (long)r.outn;) {
+            long e = i; while (e < (long)r.outn && r.out[e] != '\n') e++;
+            if (e - i > 12 && !strncmp(r.out + i, "DEVSVC_FLOW\t", 12)) {
+                char *ln = dupn(r.out + i, e - i), *q = strstr(ln, "run=");
+                wall = field_num(ln, "wall_ms="); peak = field_num(ln, "peak=");
+                if (q && strlen(q + 4) < sizeof run && cx_fmt(run, sizeof run, "%s", q + 4)) run[0] = 0;
+                free(ln);
+            }
+            i = e + 1;
+        }
+        if (!run[0]) { tail("flow stdout", r.out, (long)r.outn); tail("flow stderr", r.err, (long)r.errn); }
+    }
+    for (int i = 0; i < nids; i++) {
+        static const char *bad_words[] = {"FAIL", "REFUSE", "error", 0};
+        char nid[16], st[32] = "", first[240] = "", key[300]; long rc = -1, ms = 0, on = 0, en = 0; const char *status; char *ob, *eb;
+        int found;
+        (void)cx_fmt(nid, sizeof nid, "b%d", i + 1);
+        found = node_of(r.out, (long)r.outn, nid, st, sizeof st, &rc, &ms);
+        ob = slurp(run, nid, "out", &on); eb = slurp(run, nid, "err", &en);
+        if (!found) { status = "NOT_RUN"; (void)cx_fmt(first, sizeof first, "no node result (flow did not report this batch)"); }
+        else if (!strcmp(st, "skip")) { status = "NOT_RUN"; (void)cx_fmt(first, sizeof first, "skipped by the flow (deadline or failed dependency)"); }
+        else if (!strcmp(st, "timeout")) { status = "DEFERRED"; (void)cx_fmt(first, sizeof first, "timeout after %ld ms, process group killed", ms); }
+        else if (runner) {
+            status = rc == 0 && !strcmp(st, "ok") ? "PASS" : rc == 3 ? "DEFERRED" : "FAIL";
+        } else {
+            int okline, defer = 0, na = 0; const char *w1[2] = {0, 0};
+            (void)cx_fmt(key, sizeof key, "BATCH_RUN\tid=%s\tstatus=PASS", ids[i]); okline = ob && strstr(ob, key) != 0;
+            (void)cx_fmt(key, sizeof key, "DEFERRED\t%s\t", ids[i]); w1[0] = key; defer = ob && first_with(ob, on, w1, 0, first, sizeof first);
+            if (!defer) { (void)cx_fmt(key, sizeof key, "NOT_APPLICABLE\t%s\t", ids[i]); na = ob && first_with(ob, on, w1, 0, first, sizeof first); }
+            status = defer || rc == 3 ? "DEFERRED" : na ? "NOT_RUN" : rc == 0 && okline ? "PASS" : "FAIL";
+            if (!strcmp(status, "FAIL") && rc == 0) (void)cx_fmt(first, sizeof first, "rc 0 but no BATCH_RUN status=PASS line for this batch");
+        }
+        if (!first[0] && strcmp(status, "PASS")) {
+            if (!first_with(ob, on, bad_words, "BATCH_RUN", first, sizeof first) && !first_with(eb, en, bad_words, 0, first, sizeof first)
+                && !first_with(ob, on, bad_words, 0, first, sizeof first) && !first_nonblank(eb, en, first, sizeof first))
+                (void)cx_fmt(first, sizeof first, "rc=%ld", rc);
+        }
+        if (!strcmp(status, "PASS")) pass++; else if (!strcmp(status, "FAIL")) fail++; else if (!strcmp(status, "DEFERRED")) deferred++; else notrun++;
+        serial += ms;
+        if (reg) { long bs = budget_of(reg, regn, ids[i]); if (bs > DC_NODE_MS / 1000) printf("DCHECK_WARN\tbudget-above-node-cap\tid=%s\tbudget=%ld\n", ids[i], bs); }
+        printf("CHECK\t%s\t%s\t%ld\tfirst=%s\n", ids[i], status, ms, first[0] ? first : "-");
+        free(ob); free(eb);
+    }
+    for (int j = 0; j < nextra; j++) { printf("CHECK\t%s\tNOT_RUN\t0\tfirst=not selected by the change at tier %s\n", extra[j], tier); notrun++; }
+    if (nids) printf("DCHECK_FLOW\tpeak=%ld\tpar=%d\tselect_ms=%ld\trun=%s\n", peak, par, select_ms, run[0] ? run : "-");
+    printf("DCHECK\ttotal=%d\tpass=%d\tfail=%d\tdeferred=%d\tnot_run=%d\twall_ms=%ld\tserial_ms=%ld\n", nids + nextra, pass, fail, deferred, notrun, wall < 0 ? 0 : wall, serial);
+    if (!runner && nids + nextra) {   /* the result as one devsvc event */
+        char txt[400]; np_result er = {0}; char ew[128] = "";
+        if (!cx_fmt(txt, sizeof txt, "total=%d pass=%d fail=%d deferred=%d not_run=%d wall_ms=%ld serial_ms=%ld tier=%s", nids + nextra, pass, fail, deferred, notrun, wall < 0 ? 0 : wall, serial, tier)) {
+            char *v[] = {"sh", prod, dv, "--", "events", "emit", "dcheck.done", txt, 0};
+            (void)np_run(v, home, 0, 10, &er, ew, sizeof ew); np_free(&er);
+        }
+    }
+    np_free(&r);
+    return fail ? 1 : deferred || notrun ? 3 : 0;
+}

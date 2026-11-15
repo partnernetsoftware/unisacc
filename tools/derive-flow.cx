@@ -1,0 +1,103 @@
+/* tools/derive-flow.cx -- derive.cx 的并发版:按 derive --plan 的读写冲突依赖生成 flow TSV,经 cxlib.flowexec fl_run 并发跑,
+ * 再交 derive.cx --from-run 做原有汇总(DERIVE/DERIVE_SUMMARY 行与串行版同格式,汇总代码只在 derive.cx 一份)。
+ * 用法:sh ./unisacc.com tools/derive-flow.cx -- --check|--write [--only ...] [--changed ...] [--index] [--manifest FILE] [--run DIR] [--jobs N]
+ *   当前只并发 --check;--write 直接转调串行 derive.cx --write(保留其失败快照还原)。节点与整体 deadline 均 58000 ms。
+ * 退出码同 derive.cx;flow 装载失败或 --plan 失败为 2。Check: tools/check-derive-flow.cx. */
+#pragma unisa use cxlib.flowexec
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int seq(const char *a, const char *b) { long n = tx_len(a, 4096); return n == tx_len(b, 4096) && mm_same(a, b, n); }
+static char *buf; static long bn, bcap;
+static int put(const char *s, long n) {
+    if (bn + n + 1 >= bcap) { long nc = (bcap ? bcap : 4096); char *nb; while (bn + n + 1 >= nc) nc *= 2; nb = buf ? mm_grow(buf, nc) : mm_alloc(nc); if (!nb) return 1; buf = nb; bcap = nc; }
+    mm_copy(buf + bn, bcap - bn, s, n); bn += n; buf[bn] = 0; return 0;
+}
+static int puts_(const char *s) { return put(s, tx_len(s, 4096)); }
+static int put_esc(const char *s, long n) {   /* flow 参数值:; % TAB 空格 换行 转 %XX */
+    long k; char h[4];
+    for (k = 0; k < n; k++) {
+        unsigned char c = (unsigned char)s[k];
+        if (c == ';' || c == '%' || c == '\t' || c == ' ' || c == '\n') { cx_fmt(h, sizeof h, "%%%02X", c); if (put(h, 3)) return 1; }
+        else if (put(s + k, 1)) return 1;
+    }
+    return 0;
+}
+static char *capture(char **v, long *outn) {   /* 跑 V(58 s 上限),收 stdout;derive 的 0/1/2 都带完整输出 */
+    char *o = 0; size_t n = 0; int rc = cx_runv_timeout(v, 58, &o, &n);
+    if (rc < 0 || rc > 2 || !o) return 0;
+    *outn = (long)n;
+    return o;
+}
+static fl_flow fl; static fl_sum sm;
+
+int main(int argc, char **argv) {
+    char *pv[64], *dv[64], run[600], flow[700], why[1024]; int np = 0, nd = 0, a, mode = 0, jobs = 8, rc;
+    const char *rundir = 0; long n = 0, at = 0; char *plan;
+    pv[np++] = "sh"; pv[np++] = "./unisacc.com"; pv[np++] = "tools/derive.cx"; pv[np++] = "--"; pv[np++] = "--plan";
+    for (a = 1; a < argc && np < 56; a++) {
+        if (seq(argv[a], "--run") && a + 1 < argc) { rundir = argv[++a]; continue; }
+        if (seq(argv[a], "--jobs") && a + 1 < argc) { jobs = 0; { const char *s = argv[++a]; while (*s >= '0' && *s <= '9') jobs = jobs * 10 + (*s++ - '0'); } if (jobs < 1 || jobs > 32) jobs = 8; continue; }
+        if (seq(argv[a], "--check")) mode = 1; else if (seq(argv[a], "--write")) mode = 2;
+        pv[np++] = argv[a];
+    }
+    if (!mode) { sy_printf("usage: derive-flow.cx -- --check|--write [derive.cx 选项...] [--run DIR] [--jobs N]\n"); return 2; }
+    pv[np] = 0;
+    if (mode == 2) {   /* --write 转调串行 derive --write(保留快照还原) */
+        int pid, ex = 0, code = 0, sig = 0;
+        pv[4] = "--write"; pid = sy_spawn_inherit(pv, -1);
+        if (pid < 0) return 2;
+        return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : 2;
+    }
+    if (rundir) cx_fmt(run, sizeof run, "%s", rundir);
+    else cx_fmt(run, sizeof run, "/tmp/derive-flow.%ld", sy_now_ms());
+    sy_mkdir(run, 0755);
+    if (!(plan = capture(pv, &n))) { sy_printf("REFUSE\tderive-flow\tplan-failed\n"); return 2; }
+    while (at < n) {   /* PLAN id deps argv outs */
+        long e = tx_chr(plan + at, n - at, '\n'), ln = e < 0 ? n - at : e, f[6], k, t; int nf = 0, ai = 0; const char *l = plan + at;
+        at += ln + 1;
+        if (ln < 5 || !mm_same(l, "PLAN\t", 5)) continue;
+        f[0] = 0;
+        for (k = 0; k < ln && nf < 4; k++) if (l[k] == '\t') f[++nf] = k + 1;
+        if (nf != 4) { sy_printf("REFUSE\tderive-flow\tbad-plan-line\n"); return 2; }
+        f[5] = ln + 1;
+        put(l + f[1], f[2] - f[1] - 1); puts_("\texec\t"); put(l + f[2], f[3] - f[2] - 1); puts_("\t");
+        /* stderr 并入 stdout(与串行版 sy_spawn_pipe 合流同序):sh -c 'exec "$@" 2>&1' sh ARGV... */
+        puts_("a0=sh;a1=-c;a2="); put_esc("exec \"$@\" 2>&1", 14); puts_(";a3=sh"); ai = 4;
+        k = f[3];
+        while (k < f[4] - 1) {
+            while (k < f[4] - 1 && l[k] == ' ') k++;
+            t = k; while (k < f[4] - 1 && l[k] != ' ') k++;
+            if (k == t) break;
+            { char h[16]; cx_fmt(h, sizeof h, "%sa%d=", ai ? ";" : "", ai); puts_(h); ai++; }
+            put_esc(l + t, k - t);
+        }
+        puts_(";timeout_ms=58000");
+        if (mode == 2) { t = f[4]; k = t; while (k < f[5] - 1 && l[k] != ' ') k++; if (k > t) { puts_(";lock="); put_esc(l + t, k - t); } }
+        puts_("\n");
+    }
+    cx_fmt(flow, sizeof flow, "%s/derive.flow", run);
+    if (!buf || cx_write(flow, buf, bn)) { sy_printf("REFUSE\tderive-flow\tno-nodes-or-unwritable\t%s\n", flow); return 2; }
+    if (fl_load(flow, &fl, why, (int)sizeof why)) { sy_printf("REFUSE\tderive-flow\t%s\n", why); return 2; }
+    cx_fmt(flow, sizeof flow, "%s/run", run);
+    fl_run(&fl, flow, jobs, 58000, 0, &sm);
+    for (a = 0; a < 5; a++) dv[nd++] = pv[a];
+    nd--;   /* 去掉 --plan */
+    dv[nd++] = "--from-run"; dv[nd++] = flow;
+    for (a = 5; a < np; a++) dv[nd++] = pv[a];
+    dv[nd] = 0;
+    {   long on = 0; char *o = capture(dv, &on);
+        if (!o) { sy_printf("REFUSE\tderive-flow\tfrom-run-failed\n"); return 2; }
+        sy_printf("%s", o);
+        rc = 0;
+        if (tx_find(o, on, "\trefused=0\t", 11) < 0) rc = 2;
+        else if (tx_find(o, on, "\tdrift=0\t", 9) < 0) rc = 1;
+    }
+    return rc;
+}

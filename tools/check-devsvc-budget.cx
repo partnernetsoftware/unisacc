@@ -1,0 +1,77 @@
+/* tools/check-devsvc-budget.cx -- 检查 devsvc-budget:固定夹具 events.tsv 的分位、贴限与超时计数断言。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-budget.cx        (在仓根跑)
+ *
+ * 夹具写 /tmp/dvbck-<pid>/events.tsv:git.commit 五条(ms 1000 2000 3000 44000 50000,末条 rc=0);
+ *   flow.node 两条 op=x(ms 55006 rc 124;ms 10 rc 0);f.read 一条 ms=5;lock.acquire 一条无 ms(不计);一行非 EV(不计)。
+ * 断言:(a) rc 0;(b) flow.node.x 行 n=2 p50=10 p90=10 max=55006 near=1 timeout=1 verdict=TIMEOUT;
+ *   (c) git.commit 行 n=5 p50=3000 p90=44000 max=50000 near=2 timeout=0 verdict=NEAR;(d) f.read 行 verdict=OK;
+ *   (e) 行序 flow.node.x 先于 git.commit 先于 f.read;(f) 末行 DEVSVC_BUDGET kinds=3 events=8 near=3 timeout=1 budget_ms=55000;
+ *   (g) --fail-near rc 1;(h) --min-ms 1000 不打印 f.read 而末行不变;(i) --budget-ms 100000 时 near=0 且 git.commit 为 OK;
+ *   (j) 未知参数 rc 2;(k) --events 指向不存在文件 rc 2。末行 CHECK_DEVSVC_BUDGET<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+static int nfail;
+static char out[1 << 15], fx[160];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-budget.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) { printf("NOTE\tlast-output\t%.900s\n", out); nfail++; }
+}
+static int run(char **v) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+int main(void) {
+    char c[400], ev[400], rt[400], miss[400]; int rc; const char *a, *b, *d;
+    F(fx, sizeof fx, "/tmp/dvbck-%d", sy_pid());
+    F(c, sizeof c, "mkdir -p %s", fx);
+    { char *v[] = {"sh", "-c", c, 0}; if (run(v) != 0) { printf("FAIL\tdevsvc-budget.fixture\n"); return 1; } }
+    F(ev, sizeof ev, "%s/events.tsv", fx); F(miss, sizeof miss, "%s/none.tsv", fx);
+    {
+        const char *txt =
+            "EV\t1\t100\tgit.commit\towner=a\tpid=1\trc=0\tms=1000\n"
+            "EV\t2\t101\tgit.commit\towner=a\tpid=2\trc=0\tms=3000\n"
+            "EV\t3\t102\tgit.commit\towner=b\tpid=3\trc=1\tms=2000\n"
+            "EV\t4\t103\tgit.commit\towner=b\tpid=4\trc=0\tms=44000\n"
+            "EV\t5\t104\tgit.commit\towner=b\tpid=5\trc=0\tms=50000\n"
+            "EV\t6\t105\tflow.node\t2\tx\ttimeout\t55006\t124\ttimeout_ms=55000, process group killed out=0 err=0\n"
+            "EV\t7\t106\tflow.node\t1\tx\tok\t10\t0\tdone\n"
+            "EV\t8\t107\tf.read\towner=a\tpid=6\trc=0\tms=5\n"
+            "EV\t9\t108\tlock.acquire\tname=x owner=a\n"
+            "garbage line ms=99999\n";
+        if (sy_write_atomic(ev, (char *)txt, strlen(txt), 0644)) { printf("FAIL\tdevsvc-budget.fixture-write\n"); return 1; }
+    }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--events", ev, 0}; rc = run(v); }
+    ck(rc == 0, "rc0");
+    ck(has("KIND\tflow.node.x\tn=2\tp50=10\tp90=10\tmax=55006\tnear=1\ttimeout=1\tverdict=TIMEOUT\n"), "flow-node-timeout");
+    ck(has("KIND\tgit.commit\tn=5\tp50=3000\tp90=44000\tmax=50000\tnear=2\ttimeout=0\tverdict=NEAR\n"), "git-commit-near");
+    ck(has("KIND\tf.read\tn=1\tp50=5\tp90=5\tmax=5\tnear=0\ttimeout=0\tverdict=OK\n"), "f-read-ok");
+    a = strstr(out, "KIND\tflow.node.x"); b = strstr(out, "KIND\tgit.commit"); d = strstr(out, "KIND\tf.read");
+    ck(a && b && d && a < b && b < d, "order-by-max");
+    ck(!has("lock.acquire") && !has("garbage"), "no-ms-not-counted");
+    ck(has("DEVSVC_BUDGET kinds=3 events=8 near=3 timeout=1 budget_ms=55000\n"), "last-line");
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--events", ev, "--fail-near", 0}; rc = run(v); ck(rc == 1, "fail-near-rc1"); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--events", ev, "--min-ms", "1000", 0}; rc = run(v);
+      ck(rc == 0 && !has("KIND\tf.read") && has("DEVSVC_BUDGET kinds=3 events=8 near=3 timeout=1 budget_ms=55000\n"), "min-ms-filter"); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--events", ev, "--budget-ms", "100000", "--fail-near", 0}; rc = run(v);
+      ck(rc == 1 && has("KIND\tgit.commit\tn=5\tp50=3000\tp90=44000\tmax=50000\tnear=0\ttimeout=0\tverdict=OK\n") && has(" near=0 timeout=1 budget_ms=100000\n"), "budget-override"); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--bogus", 0}; rc = run(v); ck(rc == 2, "bad-arg-rc2"); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-budget.cx", "--", "--events", miss, 0}; rc = run(v); ck(rc == 2, "missing-events-rc2"); }
+    F(rt, sizeof rt, "rm -rf %s", fx);
+    { char *v[] = {"sh", "-c", rt, 0}; (void)run(v); }
+    printf("CHECK_DEVSVC_BUDGET\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}

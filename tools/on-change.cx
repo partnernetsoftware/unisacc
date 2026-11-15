@@ -18,6 +18,9 @@
  *   {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"ON_CHANGE ..."}} 打到 stdout。
  *   钩子模式任何情况都 rc 0(只告警不阻断);本工具不调用 Edit/Write,派生写入由子进程直接落盘,不会再触发钩子。
  *   (e) 预热:tlib 包源(build/tlib-packages.tsv 包根)后台有界起一次 affected --prep-only,见 prewarm();摘要加 prewarm=started|skip prewarm_why=。
+ * --derive-only:只做 (a)(读关系表,不起子进程),(b)(c)(d) 不跑并记 batches=-1 docs=-1 claim=-(未测,不是 0)。
+ *   tools/commit-own.cx 的 pending-derived 提示只读 pending=,用它免去每个路径的 affected、git grep、domain 三次子进程
+ *   (新克隆里实测四个路径 41 秒,其中 affected 冷编超 14 秒上限)。
  * 退出码(非钩子):0 正常;1 有 failed 的派生项;2 用法错。
  * Check: tools/check-on-change.cx. */
 #pragma unisa use sys.io
@@ -29,6 +32,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.awpath
 
 #define MAXN 32
 #define NAMEW 64
@@ -219,6 +223,7 @@ static const char *prewarm(const char *path, const char **why) {
     *why = "-";
     return "started";
 }
+static int derive_only;   /* --derive-only:只做 (a),(b)(c)(d) 不跑,记 batches=-1 docs=-1 claim=-(未测) */
 /* 一个路径的整行摘要写进 line */
 static void one(const char *path, char *line, long cap) {
     static Set autos, pend, wrote, failed, ids;
@@ -227,9 +232,9 @@ static void one(const char *path, char *line, long cap) {
     autos.n = pend.n = wrote.n = failed.n = ids.n = 0;
     if (links) match_derive(path, &autos, &pend);
     run_derive(&autos, &wrote, &failed);
-    nb = batches_of(path, &ids);
-    nd = docs_of(path);
-    claim_of(path, claim, sizeof claim);
+    nb = derive_only ? -1 : batches_of(path, &ids);
+    nd = derive_only ? -1 : docs_of(path);
+    if (derive_only) { claim[0] = '-'; claim[1] = 0; } else claim_of(path, claim, sizeof claim);
     set_join(&wrote, w, sizeof w); set_join(&pend, p, sizeof p); set_join(&failed, f, sizeof f); set_join(&ids, i5, sizeof i5);
     cx_fmt(line, cap, "ON_CHANGE path=%s derived=%d batches=%d docs=%d claim=%s wrote=%s pending=%s failed=%s ids=%s%s prewarm=%s prewarm_why=%s ms=%ld",
            path, autos.n + pend.n, nb, nd, claim, w, p, f, i5, links ? "" : " links=missing", pw, pwhy, sy_now_ms() - t0);
@@ -282,17 +287,18 @@ int main(int argc, char **argv) {
     for (a = 1; a < argc; a++) {
         if (seq(argv[a], "--hook")) hookmode = 1;
         else if (seq(argv[a], "--dry-run")) dry = 1;
+        else if (seq(argv[a], "--derive-only")) derive_only = 1;
         else if (seq(argv[a], "--auto-bound") && a + 1 < argc) { auto_bound = attr_int(argv[a + 1], slen(argv[a + 1]), "", -1); a++; if (auto_bound < 0) { printf("usage: bad --auto-bound\n"); return 2; } }
         else if (argv[a][0] == '-' && argv[a][1] == '-') { printf("usage: on-change.cx -- [--dry-run] [--auto-bound N] PATH... | --hook\n"); return 2; }
         else np++;
     }
-    links = cx_read("build/links.tsv", &ln); links_n = (long)ln;
     oc_natives();
+    { static char lp[4096]; int lr = awp_devmeta_read(".", "links.tsv", lp, (long)sizeof lp); links = (lr == 0 || lr == 4) ? cx_read(lp, &ln) : 0; links_n = links ? (long)ln : 0; }
     if (hookmode) return hook();
     if (!np) { printf("usage: on-change.cx -- [--dry-run] [--auto-bound N] PATH... | --hook\n"); return 2; }
     for (a = 1; a < argc; a++) {
         const char *r;
-        if (seq(argv[a], "--dry-run")) continue;
+        if (seq(argv[a], "--dry-run") || seq(argv[a], "--derive-only")) continue;
         if (seq(argv[a], "--auto-bound")) { a++; continue; }
         r = relative(argv[a], rel, sizeof rel);
         if (!r) { printf("ON_CHANGE path=%s outside=1\n", argv[a]); continue; }

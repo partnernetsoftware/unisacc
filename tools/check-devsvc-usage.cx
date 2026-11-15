@@ -34,7 +34,7 @@ static int has(const char *s) { return strstr(out, s) != 0; }
 static int wfile(const char *rel, const char *txt) { char p[400]; F(p, sizeof p, "%s/%s", fx, rel); return sy_write_atomic(p, (char *)txt, strlen(txt), 0644); }
 #define TU(inp) "{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\"," inp "}]}}\n"
 int main(void) {
-    char c[400], pr[400], ev[400], rt[400]; int rc;
+    char c[400], pr[400], ev[400], rt[400], wp[400]; int rc;
     F(fx, sizeof fx, "/tmp/dvuck-%d", sy_pid());
     F(c, sizeof c, "mkdir -p %s/proj %s/root", fx, fx);
     { char *v[] = {"sh", "-c", c, 0}; if (run(v) != 0) { printf("FAIL\tdevsvc-usage.fixture\n"); return 1; } }
@@ -49,9 +49,25 @@ int main(void) {
           TU("\"name\":\"Bash\",\"input\":{\"command\":\"sh ./unisacc.com tools/x.cx\"}")
           TU("\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\"}")
           "{bad tool_use json\n");
-    F(pr, sizeof pr, "%s/proj", fx); F(ev, sizeof ev, "%s/events.tsv", fx);
-    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--hours", "1", "--proj", pr, "--events", ev, "--root", "/rootfx", 0}; rc = run(v); }
+    wfile("warn.tsv", "T\ts\tgit-write\tgit commit\nT\ts\tsleep-poll\tsleep 5\nT\ts\tgit-write\tgit push\n");
+    F(wp, sizeof wp, "%s/warn.tsv", fx); F(pr, sizeof pr, "%s/proj", fx); F(ev, sizeof ev, "%s/events.tsv", fx);
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--hours", "1", "--proj", pr, "--events", ev, "--root", "/rootfx", "--warn", wp, 0}; rc = run(v); }
+    ck(has("HOOKWARN\tgit-write\t2\n"), "hookwarn-git-write");
+    ck(has("HOOKWARN\tsleep-poll\t1\n"), "hookwarn-sleep-poll");
     ck(rc == 0, "rc0");
+    {   /* HOOKWARN 按 --hours 窗口:--now 1794700000 即 2026-11-14T23:46:40Z,窗口 1 小时;窗口外两行(当日 20:00、前一日)不计 */
+        char w2[400]; int rc2;
+        wfile("warn2.tsv", "2026-11-14T23:30:00.000Z\ts\tgit-write\tgit commit\n2026-11-14T20:00:00.000Z\ts\tgit-write\tgit push\n"
+                           "2026-11-13T23:40:00.000Z\ts\tsleep-poll\tsleep 5\n2026-11-14T22:46:40.000Z\ts\tdirect-cx\tsh x\n"
+                           "2026-11-14T22:46:39.000Z\ts\tdirect-cx\tsh y\n");
+        F(w2, sizeof w2, "%s/warn2.tsv", fx);
+        { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--hours", "1", "--now", "1794700000", "--proj", pr, "--events", ev, "--root", "/rootfx", "--warn", w2, 0}; rc2 = run(v); }
+        ck(rc2 == 0 && has("HOOKWARN\tgit-write\t1\n"), "hookwarn-window-keeps-recent");
+        ck(!has("HOOKWARN\tsleep-poll\t"), "hookwarn-window-drops-old-rule");
+        ck(has("HOOKWARN\tdirect-cx\t1\n"), "hookwarn-window-boundary-inclusive");
+        { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--hours", "48", "--now", "1794700000", "--proj", pr, "--events", ev, "--root", "/rootfx", "--warn", w2, 0}; rc2 = run(v); }
+        ck(rc2 == 0 && has("HOOKWARN\tgit-write\t2\n") && has("HOOKWARN\tsleep-poll\t1\n") && has("HOOKWARN\tdirect-cx\t2\n"), "hookwarn-window-48h-all");
+    }
     ck(has("EVENTS\towner=a\tf=2\tx=1\tflow=0\tdoc=0\tgit=0\tlock=0\trun=0"), "events-owner-a");
     ck(has("EVENTS\towner=-\tf=0\tx=0\tflow=0\tdoc=0\tgit=1\tlock=0\trun=0"), "events-no-owner");
     ck(has("SESSION\ts1\tdevsvc=1\tnative=3\tratio=0.25"), "session-counts");

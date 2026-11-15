@@ -160,6 +160,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |
 | 只提交自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed PATH KEY` | 多人同改文件（prd/batches/coverage） |
 | devsvc 代替原生读写与命令 | `sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM]` / `f write PATH --from SRC [--expect-sha X]` / `f edit PATH --old-file A --new-file B [--expect-sha X] [--all]` / `x [--timeout-ms N] [--cwd D] -- ARGV...` / `flow - [--cat]`(stdin 节点表并发)/ `flow run FILE.tsv [--jobs N] [--deadline-ms N]` | 写节点自动取 devsvc 路径锁,节点事件以 flow.node 入事件环,超时整组杀;无实例时本地照跑;对照表见 `plans/devsvc.md` 5a;批次 `devsvc-flow`(`tools/check-devsvc-flow.cx`) |
+| 速记生成 flow 节点表(免手工转义) | `sh ./unisacc.com tools/flowsh.cx -- sh 'CMD'...` / `read PATH[:A[-B]]...` / `map VALUE... -- ARGV 含 {}`,选项 `--timeout-ms N --after ID --chain --prefix P --cwd D`;接 `\| sh ./unisacc.com tools/devsvc.cx -- flow - --cat` | 只出节点表不执行,值按 %XX 转义;拒绝项 rc 2 且 stdout 为空;吸收自 moltbaby omp-flow 的 sh/read/map 速记;批次 `flowsh`(`tools/check-flowsh.cx`) |
 | 追加账本一行/查6列 | `sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA] [--evidence P] [--role R]`;`-- --check --baseline build/ledger-format-baseline.tsv` | agentwork/ledger.tsv 唯一写入口(原子追加,id 为 commit-own --keyed 键);存量坏行有基线,新增即 rc 1 |
 | 任务图并发推进(已退役) | 归档到 `archive/agentwork-retire-2026-11/tools/dag.cx`、`archive/agentwork-retire-2026-11/tools/check-dag.cx` | agentwork 退役第 3 批；批次 dag 已撤 |
 | Cursor CLI 无头派工(已退役) | 归档到 `archive/agentwork-retire-2026-11/tools/cursor-fleet.cx`、`archive/agentwork-retire-2026-11/tools/cursor-fleet-template.txt`、`archive/agentwork-retire-2026-11/tools/check-cursor-fleet.cx` | agentwork 退役第 3 批；批次 cursor-fleet 已撤 |
@@ -260,6 +261,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | cx 包稳定性判据求值（docs/cx/stability.md S1 至 S13;稳定不靠人判,由本工具求值） | `sh ./unisacc.com tools/stable-eval.cx [-- ROOT [PKG...]]`；检查 `tools/check-stable-eval.cx`（批次 `stable-eval`） | v0 只读表求 S2 S4 S10 S13,其余判据缺列或缺证据一律 UNKNOWN 不记 ok,STABLE-READY 要 13 条全 ok,v0 下不会出现;`std-surface` v2 加列后补 S3 S5 S6 S11 |
 | cx 包稳定缺口清单（stable-eval 的 S2/S4/S10/S13 失败落到具体行） | `sh ./unisacc.com tools/stable-gaps.cx [-- ROOT [PKG...]]`；检查 `tools/check-stable-gaps.cx`（批次 `stable-gaps`） | 只读;输出 `GAP pkg 条款 行名 动作`,末行 `STABLE_GAPS total= s2= s4= s10= s13=`;全树实测 228/115/71/23/19 |
 | 检查的冷编译耗时与 use 闭包量表（0.0.57 T57 方案 B） | `sh ./unisacc.com tools/coldcompile.cx -- OUT.tsv SCRATCH FILE...`；`-- --plan-only FILE...` 只出闭包；数据 `plans/check-coldcompile.tsv`；检查 `tools/check-coldcompile.cx`（批次 `coldcompile`） | 逐文件串行：全新 TMPDIR 下 `PRODUCT FILE -o IMAGE` 的墙钟（tools/bound 40，只编不跑），另记单元数、闭包字节、起测时 load1 与 use 列表。是测量不是测试结论；耗时随机器负载变，跨行比较要看 load1。 |
+
 
 #### 2.3 发布（资格、会话、安装）
 
@@ -640,18 +642,25 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 0.0.66(已公开 2026-11-14,Latest) | 库包源补丁版(sx、r2、rl2、npx 四份),不新增语法 | E4(unix connect 截止、accept_from 等 7 项库缺陷清零);E2 第二条样本 | 四份补丁对当时 main 逐份 `git apply --check`,列冲突 | `sh ./unisacc.com tools/affected.cx -- --files <四份补丁所动文件> --run` 末行 fail=0 |
 | 0.0.67(进行中,分支 v0.0.67) | cx.stream R3:`st_span` 改模块接口,FwmBuf 共享类型(驱动);随行工具小修不进产品,不算第二类:(1) s9-native 缓存键含依赖模块(0.0.66 s9 因此 init 连败两次)(2) candidate-chain 材料接线(未接线连带同片 6 批不执行)(3) surface-doc-gen、dock-audit 两处树内漂移(4) speed-probe rc=1 定因 | E1 前置(流边界归一后 0.0.68 才能按流缓存);E2 | 七个基线源的 `-o` 产物 sha256 表(改前);随行先修 (1)(2)(3) | `git grep -c 'int st_span(' -- src` 合计 5 -> 1;七源 `-o` 产物 sha256 改前改后逐个相同;s9 commit 档 init 不再被旧缓存挡,candidate-chain 三批与同片 6 批实际执行;surface-doc-gen、dock-audit 批次 PASS;speed-probe 单跑 rc=0 |
 | 0.0.68(进行中,分支 v0.0.68) | 驱动与运行缓存二期(闭包结果复用方案 A、前导预制 L5(a)、S1 消费者,视取数加零解码 L4);随行工具不占槽,串行:库包改进 A 派生表一条命令闭环 -> B tools.cxlib 按面拆包 -> D deps 列由 use 边生成 -> C 版本粒度下沉到 faces;加速方案 A 第 4 步公开硬门;瓶颈整改(候选池 I 至 O):N 环境卫生 -> J 提交门预演 -> K affected 续跑编排 -> I 放开 chain-run width=1 互斥(整链验证绑本版)-> M 契约表前三行、4b s9 预演、G 冻结门常驻、L 套件预热与 --prep-only | E1 过 500 ms 门已改判到后续版本(L4 收益不足、lower 前缀命中为 0,见候选池"500 ms 门实测结论";0.0.66 实测 665.1 ms);资格面:s9 daily 与 release 档各跑通一次 | R6-W5 取数:prune 保留集是否只由引用面决定、lower 是否逐函数独立 | `sh ./unisacc.com tools/run-startup-bench.cx` n=5 中位 first 不高于 500 ms 且 load1 低于 2;s9 daily、release 档各一次完整报告 |
-| 0.0.69(计划) | 模型与网类:prune 原样判定前置(R1):原样条件入事实表,命中跳过 prune 流,产物字节不变 | E1(约减 100 ms,与 0.0.68 方案 A 叠加推算约 450 ms) | 恒等率普查工具与条件表 | `tools/run-startup-bench.cx` n=5 中位 first 不高于 500 ms 且 load1 低于 2;七源 -o sha 不变;负控:须裁样本仍走 prune |
-| 0.0.71(建议) | 驱动类:链接单元一期(R2,lnx/x86_64 run 路用户单元单编、预制闭包对象、.cx 最小链接器,整程序路留对照臂) | E1(推算约 300 ms) | 只编用户单元的 object 路由核实,宿主 ld 链 hello.o 跑通 | 链接路与整程序路运行输出逐例相同;链接两次产物 sha 相同;其余目标回落整程序路并有批次 |
-| 0.0.72 | netraw(由 0.0.69 顺延;osx、win 库包与运行库);同类随行库包改进 E:ext.memx/ext.textx 与 cx/mem、cx/text 去重;工具随行:O 入库派生表去易变列(先遍历行数列消费者)、超 55 秒批按相位拆批、M 契约表补齐、方案 B 的 s9 与公开并行;冻结按零修门验收(不超过 10 分) | E4(网络面三平台) | 0.0.68 公开前把首个任务与验收命令写进本表;现为未定 | 未定 |
-| 0.0.70 | cxmod 三源类:内存安全乙期(M2 owns 标注进 cx/cx0/plan.cx 规划期、M6 首条结构性拒绝,经 cx0-extract 投影三源);同类随行 `use m::sym as alias` 与软链模块身份;库包改进 F(cx.os 物理分目录消软链)依赖本版,排其后另占槽;工具随行:方案 C 的 g2 对象内容寻址收养、方案 E 发布编排 |
-| 0.0.73(建议) | 库包源类:标准核心面封口(S 环 new 行清零、破坏性签名一次改完、库包改进 F、win 未核格实跑;超 2 小时拆两版) | E4(生态门 T2,S8 的 30 天起算) | 重算 build/std-surface.tsv S 环 new 行与 unverified 清单 | `tools/check-std-surface.cx` 通过;`tools/stable-eval.cx` 六包 S2、S4 ok |
-| 0.0.74(建议) | cxmod 三源类:D1b 门面重导出、包根表升版与内置标准根、外部包 dock 与层向拒绝 | E4(T4、T5、T7) | 空目录 hello 仓外零配置复现入批次 | `tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-cxpkg.cx` 三条负控 |
-| 0.0.75(建议) | 驱动类:驱动读 cxlock.tsv 规划前校验,包树身份进缓存键 | E4(T6) | 篡改一字节负控夹具 | `tools/check-cxpkg.cx` failed=0 |
-| 0.0.76(建议) | 库包源类:DNS 名字解析与 inflate;自有 json、url、http 三包按外部包形态发布 | E4(T10,生态 G0 门) | 三包仓外建项目 | E4 清单带包栏 3 过 3 |
-| 0.0.77(建议) | 执行器类:吞吐(R3,先剖析恒等样本每字节指令数定上限,再改生成器) | E1、E2、冷编译(吞吐 2 倍推算 hello 约 400 ms、冷编译约减 40%) | stream prune 恒等样本剖析 | check-core-run-diff 通过;全部产物字节不变;coldcompile ABAB n=9 中位降幅超噪声 |
-| 0.0.78(建议) | 驱动与运行缓存类:链接单元二期(cx 模块单元对象入缓存与链接) | E1c(改根一行再跑推算低于 1 s) | 模块单元对象键设计(沿 UNIUC3) | 改根一行再跑 n=9 中位不高于 1000 ms;篡改对象一字节负控被拒 | E4(模块边界与所有权可证) | 按 build/own-escapes.tsv 的 owns=yes 三行在各单元加 `#pragma unisa owns` | `sh ./unisacc.com tools/check-own-escape.cx` 末行 passed=5 failed=0;`tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-own-escapes.cx` failed=0 |
+| 0.0.69(计划,分支 v0.0.69;主调度 2026-11-15 裁定插入,其后各版顺延一号) | 模型与网类:前端覆盖缺口一期(not covered 修复):(1) 多单元下花括号不配平给带文件行列的诊断,units 网 reject2 按原因拆成具名文案 (2) 跨单元函数指针形参含结构体指针的类型等价 (3) 文件作用域 sizeof 对象与 offsetof 作常量表达式 (4) 帧大小回填槽 7 改 10 的收尾与 900000 字节点状拒绝定因;全部走事实表 -> 生成器 -> 网,详见 `plans/notcovered-plan.md` | E4(正常 C 写法不再被拒;拒绝文案可定位) | 第 0 期棘轮工具落地(census 与 check-notcovered 入库并登记批次),随后在 sim 上对 u03、v03 两个最小复现单步定表行 | `tools/check-notcovered.cx` failed=0 且 `tests/notcovered.tsv` 中本期 9 条文案由 REJECT 转 ACCEPT 或被具名文案取代;`tools/check-large-frame.cx` failed=0 unverified=0;`tools/affected.cx --files <所动表与生成器> --run` fail=0;七源 -o sha 变化逐源说明;bootstrap-0.0.59 多单元编译与两代不动点通过;六目标未跑的格标 UNVERIFIED |
+| 0.0.70(计划,由 0.0.69 顺延) | 模型与网类:prune 原样判定前置(R1):原样条件入事实表,命中跳过 prune 流,产物字节不变 | E1(约减 100 ms,与 0.0.68 方案 A 叠加推算约 450 ms) | 恒等率普查工具与条件表 | `tools/run-startup-bench.cx` n=5 中位 first 不高于 500 ms 且 load1 低于 2;七源 -o sha 不变;负控:须裁样本仍走 prune |
+| 0.0.72(建议) | 驱动类:链接单元一期(R2,lnx/x86_64 run 路用户单元单编、预制闭包对象、.cx 最小链接器,整程序路留对照臂) | E1(推算约 300 ms) | 只编用户单元的 object 路由核实,宿主 ld 链 hello.o 跑通 | 链接路与整程序路运行输出逐例相同;链接两次产物 sha 相同;其余目标回落整程序路并有批次 |
+| 0.0.73 | netraw(由 0.0.72 顺延,更早由 0.0.69 顺延;osx、win 库包与运行库);同类随行库包改进 E:ext.memx/ext.textx 与 cx/mem、cx/text 去重;工具随行:O 入库派生表去易变列(先遍历行数列消费者)、超 55 秒批按相位拆批、M 契约表补齐、方案 B 的 s9 与公开并行;冻结按零修门验收(不超过 10 分) | E4(网络面三平台) | 0.0.68 公开前把首个任务与验收命令写进本表;现为未定 | 未定 |
+| 0.0.71 | cxmod 三源类:内存安全乙期(M2 owns 标注进 cx/cx0/plan.cx 规划期、M6 首条结构性拒绝,经 cx0-extract 投影三源);同类随行 `use m::sym as alias` 与软链模块身份;库包改进 F(cx.os 物理分目录消软链)依赖本版,排其后另占槽;工具随行:方案 C 的 g2 对象内容寻址收养、方案 E 发布编排 |
+| 0.0.74(建议) | 库包源类:标准核心面封口(S 环 new 行清零、破坏性签名一次改完、库包改进 F、win 未核格实跑;超 2 小时拆两版) | E4(生态门 T2,S8 的 30 天起算) | 重算 build/std-surface.tsv S 环 new 行与 unverified 清单 | `tools/check-std-surface.cx` 通过;`tools/stable-eval.cx` 六包 S2、S4 ok |
+| 0.0.75(建议) | cxmod 三源类:D1b 门面重导出、包根表升版与内置标准根、外部包 dock 与层向拒绝 | E4(T4、T5、T7) | 空目录 hello 仓外零配置复现入批次 | `tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-cxpkg.cx` 三条负控 |
+| 0.0.76(建议) | 驱动类:驱动读 cxlock.tsv 规划前校验,包树身份进缓存键 | E4(T6) | 篡改一字节负控夹具 | `tools/check-cxpkg.cx` failed=0 |
+| 0.0.77(建议) | 库包源类:DNS 名字解析与 inflate;自有 json、url、http 三包按外部包形态发布 | E4(T10,生态 G0 门) | 三包仓外建项目 | E4 清单带包栏 3 过 3 |
+| 0.0.78(建议) | 执行器类:吞吐(R3,先剖析恒等样本每字节指令数定上限,再改生成器) | E1、E2、冷编译(吞吐 2 倍推算 hello 约 400 ms、冷编译约减 40%) | stream prune 恒等样本剖析 | check-core-run-diff 通过;全部产物字节不变;coldcompile ABAB n=9 中位降幅超噪声 |
+| 0.0.79(建议) | 驱动与运行缓存类:链接单元二期(cx 模块单元对象入缓存与链接) | E1c(改根一行再跑推算低于 1 s) | 模块单元对象键设计(沿 UNIUC3) | 改根一行再跑 n=9 中位不高于 1000 ms;篡改对象一字节负控被拒 | E4(模块边界与所有权可证) | 按 build/own-escapes.tsv 的 owns=yes 三行在各单元加 `#pragma unisa owns` | `sh ./unisacc.com tools/check-own-escape.cx` 末行 passed=5 failed=0;`tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-own-escapes.cx` failed=0 |
 
 候选池(未入 `build/version-seq.tsv`;入序时一行一版、一版一类,先定终点线贡献再排):
+- 编译覆盖缺口(not covered 类产品缺陷):分期与事实见 plans/notcovered-plan.md 与 tests/notcovered.tsv,0.0.69 起修。
+  - 第 0 期(工具,不占槽):`tools/notcovered-census.cx` 与 `tools/check-notcovered.cx` 入库并登记批次,复现源迁入 `tests/notcovered-cases/`,并入 ratchets;拒绝文案只减不增,新文案须带最小复现与缺口登记。
+  - 第一期 = 0.0.69(已入序):单元帧诊断、跨单元函数指针形参类型等价、文件作用域 sizeof 对象与 offsetof 常量表达式、帧槽收尾与 900000 字节点状拒绝定因。
+  - 第二期(模型与网类,待入序):说明符与类型形状,含 `_Noreturn`、函数 typedef 声明函数、`_Alignas`、`_Alignof`、packed、`sizeof(类型[N])`、宿主头结构体嵌套成员;估 6 至 8 小时。
+  - 第三期(模型与网类,待入序):声明符长尾(指向数组的指针的数组、指向数组指针的指针、数组 typedef 形参)、块作用域 extern 先于定义、18 条硬上限改读上限事实表并在文案里带上限值与当前值;估 6 小时。
+  - 随行:每版清 20 至 30 条 UNMEASURED 文案(造最小复现并实跑)。
 
 - devsvc 仓开发服务(智能体伴侣;工具,非产品输入,不占版本槽,在 main 上开发;设计在 [plans/devsvc.md](plans/devsvc.md))。一个仓一个有界常驻实例,CLI 加 unix 域套接字 TSV 行协议;基础版 `tools/devsvc.cx` 已入库(status、命名写窗口锁、run 原生执行体缓存、events 环、config),批次 `devsvc`(`tools/check-devsvc.cx`,47 项)。分层:核心不含仓专有路径,本仓知识集中在配置表 `tools/devsvc-repo.tsv`。下一单:构造放子进程、事件长轮询与落盘、status 标归属、提交与登记工具写共享表前查锁;路线 lint、关系 DAG、记忆宫殿视图、lsp、flow。贡献:减少人工协调与冷编译等待。
 - nn 网化 prune K1 甲(模型与网类;原记在 0.0.67 槽,与 cx.stream R3 不同类,移出;设计在 prd_cx.md 5.2、5.3)。贡献 E1。

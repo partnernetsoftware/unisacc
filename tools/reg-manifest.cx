@@ -32,9 +32,25 @@ static char *rm_read(const char *root, const char *rel, size_t *n) {
     char p[4400];
     *n = 0;
     if (rm_index) {
-        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0};
+        /* one git show per table per run, not per manifest: the index is read-only for the whole check, so the three
+           table blobs are fetched once and every manifest gets its own copy of the same bytes (150 manifests were
+           600 git processes and 10 s; they are 153 now).  Manifests are still read one by one. */
+        static char *tb[3]; static size_t tbn[3]; static int tbok[3];
+        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0}; int t, k = -1;
+        for (t = 0; t < 3; t++) if (!strcmp(rel, RM_TABLE[t])) k = t;
+        if (k >= 0 && tbok[k]) {
+            char *c = (char *)mm_alloc(tbn[k] + 1);
+            if (!c) return 0;
+            if (tbn[k]) mm_copy(c, tbn[k] + 1, tb[k], tbn[k]);
+            c[tbn[k]] = 0; *n = tbn[k];
+            return c;
+        }
         if (cx_fmt(spec, sizeof spec, ":%s", rel)) return 0;
         if (cx_runv_timeout(v, 20, &o, n) != 0) { mm_free(o); *n = 0; return 0; }
+        if (k >= 0 && o) {
+            tb[k] = (char *)mm_alloc(*n + 1);
+            if (tb[k]) { if (*n) mm_copy(tb[k], *n + 1, o, *n); tbn[k] = *n; tbok[k] = 1; }
+        }
         return o;
     }
     if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;

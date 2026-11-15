@@ -10,6 +10,11 @@
  *   impact-dir-literal        a D (directory literal) line matches a file below it, even one that does not exist
  *   impact-not-applicable     a hit batch of another platform is NOT_APPLICABLE and counted, not IMPACT
  *   impact-none-rc1           no batch holds the file: rc 1
+ *   impact-tables-and-node    (G6) --links: a changed m/x matches derive src m/*: two tables and one node, other rows not
+ *   refuse-missing-links, impact-default-links-absent-named   explicit --links unreadable rc 2; default absent named
+ *   real-manifest-hits-tables-gen-two-tables   tests/manifests/x -> tests/batches.tsv and tests/coverage.tsv via tables-gen
+ *   path-two-hops-three-rows  path a c: a -> b -> c, three PATH rows then PATH_SUMMARY hops=2 (G8)
+ *   path-unreachable-rc1      path c a: NO_PATH, rc 1; refuse-path-one-file: one file only, rc 2
  *   refuse-*                  no arguments, unknown option (--tier is not in this version), missing file,
  *                             missing dump, C line before any B line, unknown via, dump batch absent from the
  *                             registry, registry row without a platform column: rc 2 each
@@ -109,8 +114,19 @@ int main(void) {
     { char *a[] = {"impact", "b.cx", "--root", fx, "--closure", dump, "--batches", reg, 0}; rc = rel(a, out);
       ck(rc == 1 && has(out, "IMPACT_SUMMARY\tchanged=1\tbatches=0\tscanned=3\tnot_applicable=0\n"), "impact-none-rc1"); }
 
+    { char *a[] = {"path", "a.cx", "c.cx", "--root", fx, 0}; rc = rel(a, out);
+      ck(rc == 0 && has(out, "PATH\t0\ta.cx\nPATH\t1\tb.cx\nPATH\t2\tc.cx\nPATH_SUMMARY\tfrom=a.cx\tto=c.cx\thops=2\n"), "path-two-hops-three-rows"); }
+    { char *a[] = {"path", "c.cx", "a.cx", "--root", fx, 0}; rc = rel(a, out);
+      ck(rc == 1 && has(out, "NO_PATH\tfrom=c.cx\tto=a.cx\n") && !has(out, "PATH\t0\t") && !has(out, "PATH_SUMMARY"), "path-unreachable-rc1"); }
+    { char *a[] = {"path", "a.cx", "--root", fx, 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-path-one-file"); }
+    { char *lk = wf(wd, "links.tsv", "# links v1\nderive\tm/*\tt/one.tsv\tgen-a\tbound=30\nderive\tm/*\tt/two.tsv\tgen-a\tbound=30\nderive\tg.cx\tt/one.tsv\tgen-a\tbound=30\nbatch\tm/q\tb1\tsource\ttier=commit\nderive\tz/*\tt/three.tsv\tgen-b\tbound=1\n");
+      char *a[] = {"impact", "m/x", "--root", fx, "--closure", dump, "--batches", reg, "--links", lk, 0}; rc = rel(a, out);
+      ck(rc == 0 && has(out, "IMPACT\ttable\tt/one.tsv\twhy=m/x\tvia=gen-a\nIMPACT\tnode\tgen-a\twhy=m/x\nIMPACT\ttable\tt/two.tsv\twhy=m/x\tvia=gen-a\nIMPACT_TABLES_SUMMARY\ttables=2\tnodes=1\t")
+         && !has(out, "three.tsv") && !has(out, "gen-b"), "impact-tables-and-node");
+      { char *b[] = {"impact", "c.cx", "--root", fx, "--closure", dump, "--batches", reg, "--links", pth(wd, "nosuch-links.tsv"), 0}; ck(rel(b, out) == 2 && has(out, "cannot read links table"), "refuse-missing-links"); }
+      { char *b[] = {"impact", "b.cx", "--root", fx, "--closure", dump, "--batches", reg, 0}; rc = rel(b, out); ck(rc == 1 && has(out, "IMPACT_TABLES_SUMMARY\ttables=0\tnodes=0\tlinks=absent\n"), "impact-default-links-absent-named"); } }
     { char *a[] = {"impact", 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-no-arguments"); }
-    { char *a[] = {"impact", "c.cx", "--tier", "commit", "--root", fx, "--closure", dump, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-unknown-option"); }
+    { char *a[] = {"impact", "c.cx", "--bogus", "commit", "--root", fx, "--closure", dump, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-unknown-option"); }
     { char *a[] = {"who-uses", "nosuch.cx", "--root", fx, "--tracked", tracked, 0}; ck(rel(a, out) == 2 && has(out, "no file"), "refuse-missing-file"); }
     { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", pth(wd, "nosuch.tsv"), "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "cannot read closure dump"), "refuse-missing-dump"); }
     bad = wf(wd, "bad1.tsv", "C\tb1\tuse\tc.cx\nB\tb1\tcommit\t-\ta.cx\n");
@@ -141,6 +157,23 @@ int main(void) {
       l1 = l2 = 0; m1 = collect(c1, &l1, out, "NOT_APPLICABLE\t", "N\t"); m2 = collect(c2, &l2, o2, "NOT_APPLICABLE\t", "N\t");
       printf("REAL\timpact\trel=%d\taffected=%d\tnot_applicable_rel=%d\tnot_applicable_affected=%d\n", n1, n2, m1, m2);
       ck(!rc && m1 == m2 && !strcmp(c1, c2), "real-not-applicable-equals-affected"); }
+    /* G6 real: tests/manifests/x regenerates tables-gen's two tables (tests/batches.tsv, tests/coverage.tsv) */
+    { char *a[] = {"impact", "tests/manifests/x", "--root", root, "--closure", pth(wd, "real-closure.tsv"), 0}; int r2 = rel(a, out);
+      ck(r2 == 0 && has(out, "IMPACT\ttable\ttests/batches.tsv\twhy=tests/manifests/x\tvia=tables-gen\n") && has(out, "IMPACT\ttable\ttests/coverage.tsv\twhy=tests/manifests/x\tvia=tables-gen\n")
+         && has(out, "IMPACT\tnode\ttables-gen\twhy=tests/manifests/x\n"), "real-manifest-hits-tables-gen-two-tables"); }
+    /* tier: default inputs generated under $UNISACC_DEVMETA_DIR/rel, result equals affected --list-only --tier commit */
+    { char dd[512]; char *a[] = {"impact", "tools/derive.cx", "--tier", "commit", "--root", root, 0}; int r2, n3;
+      if (sy_mkdtemp("/tmp", "rel-devmeta-", dd, (int)sizeof dd) != 0 || sy_setenv("UNISACC_DEVMETA_DIR", dd, 1) != 0) die("mkdtemp");
+      r2 = rel(a, out);
+      if (cx_fmt(cmd, sizeof cmd, "%s/rel/closure-commit.tsv", dd)) die("cmd");
+      ck(sy_exists(cmd) == 1, "tier-default-generated-in-devmeta-dir");
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --list-only --tier commit --files tools/derive.cx", root)) die("cmd");
+      rc = shc(cmd, o2) || r2;
+      l1 = l2 = 0; n1 = collect(c1, &l1, out, "IMPACT\tbatch\t", "A\t"); n2 = collect(c2, &l2, o2, "AFFECTED\t", "A\t");
+      printf("REAL\ttier-commit\trel=%d\taffected=%d\n", n1, n2);
+      ck(!rc && n1 > 0 && n1 == n2 && !strcmp(c1, c2), "real-impact-tier-commit-equals-affected");
+      n3 = collect(c1, &l1, out, "NOT_APPLICABLE\t", "N\t"); (void)n3; }
     printf("CHECK_REL\tfailed=%d\n", failed);
+
     return failed ? 1 : 0;
 }

@@ -1,0 +1,177 @@
+/* tools/check-flow-txn.cx -- transactional flows (`txn 1`) of cxlib.flowexec / cxlib.flowfile, in process.
+ *
+ *   sh ./unisacc.com tools/check-flow-txn.cx      (fixture root $TMPDIR/check-flow-txn-XXXX/root, removed at the end)
+ *
+ * The fixture root holds a library tools/cxlib/txa.cx, its consumer tools/usea.cx, tools/other.cx,
+ * plain text files and a registry pair tests/batches.tsv + tests/coverage.tsv with a small
+ * tests/run.cx whose --list prints metadata_valid=1 only when both tables have the same row count
+ * (the engine runs ROOT/tests/run.cx in its staged view; the real one is not exercised here).
+ *   load-directives      `txn 1`, `txn_consumers 0` set the flow fields; `txn 2` is refused by name;
+ *                        a node whose id is txn is still a node
+ *   plain-unchanged      without txn: a write lands at once even when a later node fails; fl_sum.txn 0;
+ *                        no TXN event, no TXN.out
+ *   compile-abort        two .cx writes, one does not compile: rc 1, neither file changed (the new one
+ *                        absent), TXN_ABORT reason=ECOMPILE names node and path, FLOW_TXN aborted paths=0,
+ *                        both write nodes re-reported fail rc 125, fl_sum.txn 2
+ *   consumer-abort       the library drops a type its consumer uses (the library alone compiles):
+ *                        reason=ECONSUMER naming tools/usea.cx; library bytes unchanged
+ *   consumer-commit      the same change with the consumer adapted in the same flow: both files land
+ *   registry-abort       one row appended to tests/batches.tsv only: reason=EREGISTRY, table unchanged
+ *   registry-commit      the row pair in one flow: both tables land, TXN_CHECK registry metadata_valid=1
+ *   rollback             UNISACC_TXN_FAIL_AT=2 on three writes: the two already published are restored
+ *                        (the new file removed, the old bytes back), reason=EPUBLISH, FLOW_TXN rolled_back
+ *   staged-view          edit, edit again, read in one flow: the second edit and the read see the staged
+ *                        content; one file lands with the final bytes
+ *   node-fail-abort      a write then a failing exec: reason=ENODE, nothing written
+ *   expect-sha-abort     a write with a stale expect_sha next to a good write: nothing written
+ *   disk-changed-abort   another writer changes a staged file before the commit: reason=ESHA, the other
+ *                        writer's bytes stay
+ *   noncx-commit         two plain files: committed paths=2 compiled=0
+ * Prints PASS/FAIL per case and CHECK_FLOW_TXN<TAB>failed=N. */
+#pragma unisa use cxlib.flowexec
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flow-txn.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flow-txn.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flow-txn: REFUSE %s\n", s); sy_exit(2); }
+static int has(const char *s, const char *w) { return s && tx_find(s, tx_len(s, 1 << 22), w, tx_len(w, 1 << 16)) >= 0; }
+static char wd[1024], root[1100];
+static char *pj(const char *base, const char *name) {
+    static char p[16][1400]; static int k; char *q = p[k++ & 15];
+    if (cx_fmt(q, 1400, "%s/%s", base, name)) die("path");
+    return q;
+}
+static void put(const char *rel, const char *text) { if (sy_write_file(pj(root, rel), text, tx_len(text, 1 << 16), 0644)) die("cannot write fixture file"); }
+static char *slurp(const char *path) { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(path, &b, &n, 1L << 22)) return 0; if (!b) { b = mm_zalloc(1); } return (char *)b; }
+static int holds(const char *rel, const char *text) { char *s = slurp(pj(root, rel)); int r = s && tx_eqz(s, text); if (s) mm_free(s); return r; }
+static int absent(const char *rel) { return sy_exists(pj(root, rel)) != 1; }
+
+static int st[8], nrc[8]; static fl_sum sum; static char *rep, *evs;
+/* load TEXT as flow NAME and run it into WD/NAME; node states into st/nrc, TXN.out into rep, events into evs */
+static int run(const char *name, const char *text) {
+    static fl_flow f; char why[600], fn[200]; int r, i;
+    if (cx_fmt(fn, sizeof fn, "%s.tsv", name)) die("name");
+    if (sy_write_file(pj(wd, fn), text, tx_len(text, 1 << 16), 0644)) die("cannot write flow");
+    if (fl_load(pj(wd, fn), &f, why, (int)sizeof why)) { sy_printf("INFO\t%s load refused: %s\n", name, why); return -99; }
+    r = fl_run(&f, pj(wd, name), 4, 50000, 0, &sum);
+    for (i = 0; i < 8; i++) { st[i] = i < f.count ? f.n[i].state : -1; nrc[i] = i < f.count ? f.n[i].rc : -1; }
+    fl_free(&f);
+    if (rep) mm_free(rep);
+    if (evs) mm_free(evs);
+    rep = slurp(pj(pj(pj(wd, name), "out"), "TXN.out"));   /* the engine's RUN dir, not the repo's */
+    evs = slurp(pj(pj(wd, name), "events.tsv"));
+    if (r != 0 && rep) sy_printf("INFO\t%s rc=%d txn=%d\n", name, r, sum.txn);
+    return r;
+}
+
+#define LIB1 "#pragma unisa module txa\ntypedef struct txa_t { int v; } txa_t;\nint txa_f(int x) { return x + 1; }\n"
+#define LIB2 "#pragma unisa module txa\ntypedef struct txb_t { int v; } txb_t;\nint txa_f(int x) { return x + 1; }\n"
+#define USE1 "#pragma unisa use cxlib.txa\nint main(void) { txa_t *p = 0; return p ? 1 : txa_f(1) - 2; }\n"
+#define USE2 "#pragma unisa use cxlib.txa\nint main(void) { txb_t *p = 0; return p ? 1 : txa_f(1) - 2; }\n"
+#define OTH1 "int other_f(void) { return 1; }\n"
+#define RUNCX "int main(int argc, char **argv) {\n    FILE *a = fopen(\"tests/batches.tsv\", \"r\"), *b = fopen(\"tests/coverage.tsv\", \"r\"); int na = 0, nb = 0, c;\n" \
+              "    if (!a || !b) { printf(\"REFUSE\\tmissing table\\n\"); return 2; }\n    while ((c = fgetc(a)) != EOF) if (c == '\\n') na++;\n" \
+              "    while ((c = fgetc(b)) != EOF) if (c == '\\n') nb++;\n    if (na != nb) { printf(\"REFUSE\\tbatches=%d coverage=%d\\n\", na, nb); return 2; }\n" \
+              "    printf(\"PLAN\\tmetadata_valid=1\\tbatches=%d\\n\", na); return 0;\n}\n"
+
+int main(void) {
+    char prod[1100], t[1100]; fl_flow f; char why[600]; int r;
+    if (sy_mkdtemp(sy_tmpdir(), "check-flow-txn-", t, sizeof t) != 0 || sy_realpath(t, wd, sizeof wd) < 0) { sy_printf("FAIL\tcheck-flow-txn.mkdtemp\nCHECK_FLOW_TXN\tfailed=1\n"); return 1; }
+    if (cx_fmt(root, sizeof root, "%s/root", wd)) die("path");
+    if (sy_mkdir(root, 0755) || sy_mkdir(pj(root, "tools"), 0755) || sy_mkdir(pj(root, "tools/cxlib"), 0755) || sy_mkdir(pj(root, "tests"), 0755)) die("mkdir");
+    if (sy_realpath("unisacc.com", prod, sizeof prod) < 0) die("run from the repo root (no unisacc.com)");
+    sy_setenv("UNISACC_CC_PRODUCT", prod, 1);
+    sy_setenv("UNISACC_FLOW_ROOT", root, 1);
+    sy_setenv("UNISACC_TXN_FAIL_AT", "", 1);
+    sy_setenv("UNISACC_TXN_CONSUMERS", "", 1);
+    put("tools/cxlib/txa.cx", LIB1); put("tools/usea.cx", USE1); put("tools/other.cx", OTH1);
+    put("tests/run.cx", RUNCX); put("tests/batches.tsv", "b1\n"); put("tests/coverage.tsv", "c1\n");
+    put("p1.txt", "old1\n"); put("p2.txt", "old2\n"); put("s.txt", "aaa\n");
+    put("lib2.txt", LIB2); put("use2.txt", USE2); put("bad.txt", "int bad( {\n"); put("oth2.txt", "int other_f(void) { return 2; }\n");
+
+    /* load-directives */
+    sy_write_file(pj(wd, "ld1.tsv"), "txn 1\ntxn_consumers 0\ntxn\texec\t-\ta0=true\n", 40, 0644);
+    r = fl_load(pj(wd, "ld1.tsv"), &f, why, (int)sizeof why);
+    ck(r == 0 && f.txn == 1 && f.txn_consumers == 0 && f.count == 1 && tx_eqz(f.n[0].id, "txn"), "load-directives-set");
+    if (r == 0) fl_free(&f);
+    sy_write_file(pj(wd, "ld2.tsv"), "a\texec\t-\ta0=true\n", 17, 0644);
+    r = fl_load(pj(wd, "ld2.tsv"), &f, why, (int)sizeof why);
+    ck(r == 0 && f.txn == 0 && f.txn_consumers == -1, "load-directives-default-off");
+    if (r == 0) fl_free(&f);
+    sy_write_file(pj(wd, "ld3.tsv"), "txn 2\na\texec\t-\ta0=true\n", 23, 0644);
+    r = fl_load(pj(wd, "ld3.tsv"), &f, why, (int)sizeof why);
+    ck(r == 2 && has(why, "line 1") && has(why, "txn 0|1"), "load-directives-bad-refused");
+
+    /* plain-unchanged: no txn, the first write lands although the flow fails later */
+    r = run("plain", "w1\tfile.write\t-\tpath=p1.txt;content=new1%0A\nx\texec\tw1\ta0=false\n");
+    ck(r == 1 && sum.txn == 0 && holds("p1.txt", "new1\n") && !rep && !has(evs, "\tTXN\t") && st[0] == FL_OK && st[1] == FL_FAIL, "plain-unchanged");
+    put("p1.txt", "old1\n");
+
+    /* compile-abort */
+    r = run("cabort", "txn 1\nwo\tfile.write\t-\tpath=tools/other.cx;from=oth2.txt\nwb\tfile.write\two\tpath=tools/bad.cx;from=bad.txt\n");
+    ck(r == 1 && sum.txn == 2 && holds("tools/other.cx", OTH1) && absent("tools/bad.cx"), "compile-abort-nothing-written");
+    ck(has(rep, "TXN_ABORT\treason=ECOMPILE\tnode=wb\tpath=tools/bad.cx") && has(rep, "FLOW_TXN\taborted\tpaths=0") && has(rep, "TXN_CHECK\tcompile\ttools/other.cx\tok"), "compile-abort-report");
+    ck(st[0] == FL_FAIL && nrc[0] == 125 && st[1] == FL_FAIL && nrc[1] == 125 && sum.fail == 2 && has(evs, "\tTXN\tfail\t") && has(evs, "TXN_ABORT reason=ECOMPILE node=wb"), "compile-abort-nodes-and-event");
+
+    /* consumer-abort: the library alone compiles, its consumer does not */
+    r = run("consab", "txn 1\nwl\tfile.write\t-\tpath=tools/cxlib/txa.cx;from=lib2.txt\n");
+    ck(r == 1 && sum.txn == 2 && holds("tools/cxlib/txa.cx", LIB1), "consumer-abort-nothing-written");
+    ck(has(rep, "TXN_CHECK\tcompile\ttools/cxlib/txa.cx\tok") && has(rep, "TXN_CHECK\tcompile\ttools/usea.cx\tfail\tkind=consumer\tof=tools/cxlib/txa.cx")
+       && has(rep, "TXN_ABORT\treason=ECONSUMER\tnode=wl\tpath=tools/usea.cx") && has(rep, "\tconsumers=1\tof=1\t"), "consumer-abort-report");
+
+    /* consumer-commit: library and consumer in one flow */
+    r = run("conscm", "txn 1\nwl\tfile.write\t-\tpath=tools/cxlib/txa.cx;from=lib2.txt\nwu\tfile.edit\t-\tpath=tools/usea.cx;old=txa_t;new=txb_t\n");
+    ck(r == 0 && sum.txn == 1 && holds("tools/cxlib/txa.cx", LIB2) && holds("tools/usea.cx", USE2), "consumer-commit-both-written");
+    ck(has(rep, "FLOW_TXN\tcommitted\tpaths=2\tcompiled=2\tconsumers=0") && !has(rep, "TXN_ABORT") && st[0] == FL_OK && st[1] == FL_OK && has(evs, "\tTXN\tok\t") && has(evs, "FLOW_TXN committed paths=2"), "consumer-commit-report");
+
+    /* registry-abort / registry-commit */
+    r = run("regab", "txn 1\nwb\tfile.write\t-\tpath=tests/batches.tsv;content=b1%0Ab2%0A\n");
+    ck(r == 1 && sum.txn == 2 && holds("tests/batches.tsv", "b1\n") && holds("tests/coverage.tsv", "c1\n"), "registry-abort-nothing-written");
+    ck(has(rep, "TXN_CHECK\tregistry\tmetadata_valid=0") && has(rep, "TXN_ABORT\treason=EREGISTRY\tnode=wb") && has(rep, "batches=2 coverage=1"), "registry-abort-report");
+    r = run("regcm", "txn 1\nwb\tfile.write\t-\tpath=tests/batches.tsv;content=b1%0Ab2%0A\nwc\tfile.write\t-\tpath=tests/coverage.tsv;content=c1%0Ac2%0A\n");
+    ck(r == 0 && sum.txn == 1 && holds("tests/batches.tsv", "b1\nb2\n") && holds("tests/coverage.tsv", "c1\nc2\n") && has(rep, "TXN_CHECK\tregistry\tmetadata_valid=1") && has(rep, "FLOW_TXN\tcommitted\tpaths=2"), "registry-commit");
+
+    /* rollback: the third publish fails, the first two are undone */
+    sy_setenv("UNISACC_TXN_FAIL_AT", "2", 1);
+    r = run("rollb", "txn 1\nw0\tfile.write\t-\tpath=newf.txt;content=n%0A\nw1\tfile.write\tw0\tpath=p1.txt;content=new1%0A\nw2\tfile.write\tw1\tpath=p2.txt;content=new2%0A\n");
+    sy_setenv("UNISACC_TXN_FAIL_AT", "", 1);
+    ck(r == 1 && sum.txn == 2 && absent("newf.txt") && holds("p1.txt", "old1\n") && holds("p2.txt", "old2\n"), "rollback-restored");
+    ck(has(rep, "TXN_ABORT\treason=EPUBLISH\tnode=w2") && has(rep, "FLOW_TXN\trolled_back\tpaths=2") && !has(rep, "EROLLBACK") && st[0] == FL_FAIL && st[2] == FL_FAIL, "rollback-report");
+
+    /* staged-view */
+    r = run("stage", "txn 1\ne1\tfile.edit\t-\tpath=s.txt;old=aaa;new=bbb\ne2\tfile.edit\te1\tpath=s.txt;old=bbb;new=ccc\nrd\tfile.read\te2\tpath=s.txt\n");
+    {   char *o = slurp(pj(pj(pj(wd, "stage"), "out"), "rd.out"));
+        ck(r == 0 && sum.txn == 1 && holds("s.txt", "ccc\n") && o && tx_eqz(o, "ccc\n") && has(rep, "FLOW_TXN\tcommitted\tpaths=1"), "staged-view");
+        if (o) mm_free(o); }
+
+    /* node-fail-abort */
+    r = run("nodef", "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=new1%0A\nx\texec\tw1\ta0=false\n");
+    ck(r == 1 && sum.txn == 2 && holds("p1.txt", "old1\n") && has(rep, "TXN_ABORT\treason=ENODE\tnode=x") && has(rep, "FLOW_TXN\taborted\tpaths=0") && st[0] == FL_FAIL && nrc[0] == 125, "node-fail-abort");
+
+    /* expect-sha-abort */
+    r = run("shaab", "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=new1%0A\nw2\tfile.write\tw1\tpath=p2.txt;content=new2%0A;expect_sha=0000000000000000000000000000000000000000000000000000000000000000\n");
+    ck(r == 1 && sum.txn == 2 && holds("p1.txt", "old1\n") && holds("p2.txt", "old2\n") && has(rep, "TXN_ABORT\treason=ENODE\tnode=w2"), "expect-sha-abort");
+
+    /* disk-changed-abort: someone else writes p1.txt after this flow staged it */
+    {   char fl[3000];
+        if (cx_fmt(fl, sizeof fl, "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=new1%%0A\nw2\tfile.write\t-\tpath=p2.txt;content=new2%%0A\nx\texec\tw1\ta0=sh;a1=-c;a2=printf 'theirs\\n' > '%s/p1.txt'\n", root)) die("flow text");
+        r = run("diskch", fl);
+        ck(r == 1 && sum.txn == 2 && holds("p1.txt", "theirs\n") && holds("p2.txt", "old2\n") && has(rep, "TXN_ABORT\treason=ESHA\tnode=w1") && has(rep, "FLOW_TXN\taborted\tpaths=0"), "disk-changed-abort");
+        put("p1.txt", "old1\n"); }
+
+    /* noncx-commit */
+    r = run("plaincm", "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=new1%0A\nw2\tfile.write\t-\tpath=sub/p3.txt;content=new3%0A;mkdir=1\n");
+    ck(r == 0 && sum.txn == 1 && holds("p1.txt", "new1\n") && holds("sub/p3.txt", "new3\n") && has(rep, "FLOW_TXN\tcommitted\tpaths=2\tcompiled=0"), "noncx-commit");
+
+    if (!failed) sy_remove_all(wd); else sy_printf("INFO\tfixture kept at %s\n", wd);
+    sy_printf("CHECK_FLOW_TXN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
