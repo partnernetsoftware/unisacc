@@ -1,0 +1,260 @@
+/* lower prefix consumer contract; no replacement lower implementation.
+ * Run from the checkout root:
+ *   sh ./unisacc.com tools/check-lower-prefix.cx -- --case contracts
+ *   sh ./unisacc.com tools/check-lower-prefix.cx -- --case base0
+ * Cases: contracts (default), a2, b, c, base0..base6; each is independently bounded.
+ * --product ABS selects the actual product used for every -S and stream lower.
+ * --fixtures DIR overrides the self-contained .cx.in materials directory.
+ * Each child has a 50-second deadline. Failed material is retained for diagnosis;
+ * successful private trees are removed. Only CX manipulates fixtures; sh is a thin
+ * product/redirection entry point. No product cache implementation is installed.
+ * Baseline cases regenerate tape using the selected product; saved .low files
+ * are never oracles. Exact byte equality includes headers, _start, generated
+ * labels, .unit tags and every spinit/argsave (none are removed/normalised).
+ */
+#pragma unisa use unitcache
+#pragma unisa use runtime.rcident
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char ROOT[4096], PRODUCT[4096], WORK[4096], CACHE[4200], FIXPATH[4096];
+static const char *FIX;
+static const char *CASE = "contracts";
+static char PRODHEX[65], CTXHEX[65];
+static int failed, assertions, serial;
+typedef struct { unsigned char *raw, *low, *tail, *tl, *prefix; long rn, ln, tn, tln, pn; char key[65]; } Sample;
+
+static void ck(int ok, const char *name) {
+    assertions++;
+    printf("%s\tlower-prefix.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static void die(const char *name) { printf("ERROR\tlower-prefix.%s\n", name); exit(2); }
+/* All shell operands are quoted; embedded apostrophes are not accepted. */
+static int safe(const char *s) { return s && !strchr(s, '\'') && !strchr(s, '\n'); }
+static void cleanup(void){
+    char *v[]={"rm","-rf","--",WORK,0};sy_spawn_t o;sy_exit_t st;
+    sy_spawn_init(&o);o.argv=v;o.deadline_ms=10000;o.pgroup=-1;
+    ck(!sy_proc_run(&o,&st)&&!st.timed_out&&sy_exit_code(&st)==0,"private-tree-cleanup");
+}
+static int run(const char *cmd) {
+    char *v[4]; sy_spawn_t o; sy_exit_t st;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    sy_spawn_init(&o); o.argv = v; o.cwd = ROOT; o.pgroup = -1; o.deadline_ms = 50000;
+    if (sy_proc_run(&o, &st)) return -1;
+    return st.timed_out ? 124 : sy_exit_code(&st);
+}
+static unsigned char *load(const char *p, long *n) {
+    unsigned char *b = 0; int64_t k = 0;
+    if (sy_read_file(p, &b, &k, 1L << 27)) die(p);
+    *n = (long)k; return b;
+}
+static int eq(const unsigned char *a, long an, const unsigned char *b, long bn) {
+    return a && b && an == bn && !memcmp(a, b, an);
+}
+static long find(const unsigned char *b, long n, const char *pat) {
+    long i, k = (long)strlen(pat);
+    for (i = 0; i + k <= n; i++) if (!memcmp(b + i, pat, k)) return i;
+    return -1;
+}
+static long count(const unsigned char *b, long n, const char *pat) {
+    long at = 0, k = (long)strlen(pat), c = 0, p;
+    while (at < n && (p = find(b + at, n - at, pat)) >= 0) { c++; at += p + k; }
+    return c;
+}
+static unsigned char *lower(const unsigned char *b, long n, const char *target, long *outn) {
+    char in[4300], out[4300], err[4300], cmd[23000]; int rc;
+    serial++;
+    if (cx_fmt(in, sizeof in, "%s/%d.tape", WORK, serial) ||
+        cx_fmt(out, sizeof out, "%s/%d.low", WORK, serial) ||
+        cx_fmt(err, sizeof err, "%s/%d.err", WORK, serial)) die("path-overflow");
+    if (sy_write_file(in, b, n, 0600)) die("write-tape");
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_E3CACHE='%s' UNISACC_RUN_CACHE=1 sh '%s' stream lower --target '%s' < '%s' > '%s' 2> '%s'", CACHE, PRODUCT, target, in, out, err)) die("command-overflow");
+    rc = run(cmd);
+    printf("STREAM\tserial=%d\ttarget=%s\trc=%d\n", serial, target, rc);
+    if (rc) die("stream-lower");
+    return load(out, outn);
+}
+static void release(Sample *s) {
+    mm_free(s->raw); mm_free(s->low); mm_free(s->tail); mm_free(s->tl); mm_free(s->prefix);
+    memset(s, 0, sizeof *s);
+}
+static int sample(const char *path, Sample *s) {
+    memset(s, 0, sizeof *s);
+    s->raw = load(path, &s->rn);
+    s->low = lower(s->raw, s->rn, "lnx/x86_64", &s->ln);
+    if (!uc_lower_prepare(s->raw, s->rn, &s->tail, &s->tn)) return 0;
+    s->tl = lower(s->tail, s->tn, "lnx/x86_64", &s->tln);
+    if (uc_lower_key(s->raw, s->rn, s->tl, s->tln, PRODHEX, CTXHEX, s->key) ||
+        uc_lower_prefix(s->low, s->ln, &s->prefix, &s->pn)) return 0;
+    return 1;
+}
+static void joined(Sample *s, const unsigned char *p, long pn, const char *name) {
+    unsigned char *j = 0; long jn = 0; int rc;
+    rc = uc_lower_join(p, pn, s->tl, s->tln, s->raw, s->rn, &j, &jn);
+    ck(rc == 0 && eq(j, jn, s->low, s->ln), name);
+    if (!rc && j) {
+        ck(count(j, jn, "spinit ") == count(s->low, s->ln, "spinit "), "startup.spinit-exact-count");
+        ck(count(j, jn, "argsave ") == count(s->low, s->ln, "argsave "), "startup.argsave-exact-count");
+    }
+    mm_free(j);
+}
+static void roundtrip(Sample *s, const char *name) {
+    unsigned char *p = 0; long pn = 0;
+    ck(uc_lower_save(s->key, s->prefix, s->pn) == 1, "cache.save-private");
+    ck(uc_lower_fetch(s->key, &p, &pn) == 1, "cache.fetch-hit");
+    ck(eq(p, pn, s->prefix, s->pn), "cache.payload-exact");
+    if (p) joined(s, p, pn, name);
+    mm_free(p);
+}
+static void miss(const char *key, const char *name) {
+    unsigned char *p = 0; long n = 0;
+    ck(uc_lower_fetch(key, &p, &n) == 0, name);
+    mm_free(p);
+}
+static void fixture(const char *name, Sample *s) {
+    char p[4300],src[4300],tape[4300],cmd[23000];long n;unsigned char *b;
+    if(cx_fmt(p,sizeof p,"%s/%s.cx.in",FIX,name)||cx_fmt(src,sizeof src,"%s/%s.cx",WORK,name)||cx_fmt(tape,sizeof tape,"%s/%s.tape",WORK,name))die("fixture-path");
+    b=load(p,&n);if(sy_write_file(src,b,n,0600))die("fixture-write");mm_free(b);
+    if(cx_fmt(cmd,sizeof cmd,"UNISACC_E3CACHE='%s' UNISACC_RUN_CACHE=1 sh '%s' -S '%s' -o '%s'",CACHE,PRODUCT,src,tape))die("command-overflow");
+    ck(run(cmd)==0,"fixture.generate-tape");ck(sample(tape,s),name);
+    if(!s->prefix)die("fixture-not-reusable");
+}
+/* Rename every generated L/R token by prefixing its numeric suffix with 9.
+ * References and definitions change together, so this remains a valid tape.
+ * This exercises actual compiler-generated names, not a synthetic @label. */
+static unsigned char *renumber(const unsigned char *b, long n, long *nn) {
+    unsigned char *o = mm_alloc(n * 2 + 1); long i = 0, w = 0;
+    if (!o) die("alloc");
+    while (i < n) {
+        if (i + 12 <= n && !memcmp(b + i, "__unisacc_", 10) &&
+            (b[i + 10] == 'L' || b[i + 10] == 'R') && b[i + 11] >= '0' && b[i + 11] <= '9') {
+            if(mm_copy(o+w,n*2+1-w,b+i,11))die("label-copy-bounds");w+=11;i+=11;o[w++]='9';
+        } else o[w++] = b[i++];
+    }
+    o[w] = 0; *nn = w; return o;
+}
+static void fallback(Sample *s, const char *target, int attrs, int pinned, int extras, const char *name) {
+    unsigned char *oracle, *actual; long on, an;
+    int allowed = uc_lower_allowed(target, "prune", attrs, pinned, extras);
+    ck(!allowed, name);
+    oracle = lower(s->raw, s->rn, target, &on);
+    /* Consumer routing: denied inputs must execute the original full stream. */
+    if (allowed) { actual = 0; an = 0; }
+    else actual = lower(s->raw, s->rn, target, &an);
+    ck(eq(actual, an, oracle, on), name);
+    mm_free(oracle); mm_free(actual);
+}
+static void contracts(void) {
+    Sample a, b, c, small; unsigned char *p = 0, *r, *tl, *tail, *j; long pn = 0, rn, tn = 0, tln, jn;
+    char key[65], changed[65]; int ok;
+    fixture("a2", &a); fixture("b", &b); fixture("c", &c); fixture("a", &small);
+    ck(uc_lower_allowed("lnx/x86_64", "prune", 0, 0, 0), "default-route.allowed");
+    unsigned char explicit_zero[13]={1,0,0,0,0,0,0,0,0,0,0,0,0};
+    ck(!uc_lower_context_ok(explicit_zero,13,0),"explicit-zero-attribute-record-is-not-empty");
+    roundtrip(&a, "contract1.full-byte-equality-data-start-labels");
+    ck(find(a.tail, a.tn, "_start:\n") >= 0 && find(a.tail, a.tn, ".bss __argvv ") >= 0,
+       "contract2.prepare-retains-start-and-global-bss");
+    ck(strcmp(a.key, b.key) == 0, "contract3.a2-b-same-bucket-key");
+    ok = uc_lower_fetch(b.key, &p, &pn);
+    ck(ok == 1, "contract3.cross-source-fetch-hit");
+    if (p) joined(&b, p, pn, "contract3.cross-source-unit-tags-exact");
+    ck(!eq(a.low, a.ln, b.low, b.ln), "contract3.distinct-source-oracle");
+    mm_free(p);
+    /* Only a2 was saved: every negative must perform a real disk lookup. */
+    miss(c.key, "contract4.library-closure-fetch-miss");
+    miss(small.key, "contract4.data-length-bucket-fetch-miss");
+    r = renumber(a.raw, a.rn, &rn);
+    ck(rn > a.rn, "contract4.real-generated-labels-mutated");
+    ok = uc_lower_prepare(r, rn, &tail, &tn);
+    ck(ok == 1, "contract4.label-variant-valid-prepare");
+    if (ok) {
+        tl = lower(tail, tn, "lnx/x86_64", &tln);
+        ok = uc_lower_key(r, rn, tl, tln, PRODHEX, CTXHEX, key) == 0;
+        ck(ok, "contract4.label-variant-valid-key");
+        if (ok) miss(key, "contract4.real-label-start-fetch-miss");
+        mm_free(tl);
+    }
+    mm_free(tail); mm_free(r);
+    if(mm_copy(changed,sizeof changed,PRODHEX,65))die("product-copy-bounds");changed[0]=changed[0]=='0'?'1':'0';
+    ok = uc_lower_key(a.raw, a.rn, a.tl, a.tln, changed, CTXHEX, key) == 0;
+    ck(ok, "contract4.changed-product-valid-key");
+    if (ok) miss(key, "contract4.product-identity-fetch-miss");
+    /* A valid noncanonical entry label: full lower remains the only oracle. */
+    r=mm_alloc(a.rn+1);if(!r)die("alloc");if(mm_copy(r,a.rn+1,a.raw,a.rn))die("fixture-copy-bounds");r[a.rn]=0;
+    if (a.rn < 8 || memcmp(r, "_start:\n", 8)) die("canonical-fixture");
+    r[0] = 'x'; tail = 0; tn = 0;
+    ok = uc_lower_prepare(r, a.rn, &tail, &tn);
+    ck(ok == 0, "contract5.noncanonical-start-rejected");
+    tl = lower(r, a.rn, "lnx/x86_64", &tln);
+    j = ok ? 0 : lower(r, a.rn, "lnx/x86_64", &jn);
+    ck(!ok && eq(j, jn, tl, tln), "contract5.noncanonical-original-oracle-exact");
+    mm_free(j); mm_free(tl); mm_free(tail); mm_free(r);
+    fallback(&a, "lnx/x86_64", 1, 0, 0, "contract6.attrs-original-oracle-exact");
+    fallback(&a, "lnx/x86_64", 0, 1, 0, "contract6.pinned-original-oracle-exact");
+    fallback(&a, "lnx/arm64", 0, 0, 0, "contract7.nondefault-target-original-oracle-exact");
+    ck(!uc_lower_allowed("lnx/x86_64", "lower", 0, 0, 0), "route.non-prune-denied");
+    ck(!uc_lower_allowed("lnx/x86_64", "prune", 0, 0, 1), "route.extras-denied");
+    release(&a); release(&b); release(&c); release(&small);
+}
+static void baseline(int k) {
+    const char *srcs[7] = {
+        "g-f0.cx.in", "g-f400.cx.in",
+        "tests/cxcc_one.cx", "tests/all-aggregate.cx", "tests/bound-rc142.cx",
+        "tests/cases/character_prefix.cx", "tests/cases/driver-default-platform.cx"
+    };
+    char src[4300], tape[4300], cmd[23000], name[100]; Sample s;
+    if(k<2){char material[4300];long n;unsigned char *b;
+        if(cx_fmt(material,sizeof material,"%s/%s",FIX,srcs[k])||cx_fmt(src,sizeof src,"%s/base%d.cx",WORK,k))die("baseline-path");
+        b=load(material,&n);if(sy_write_file(src,b,n,0600))die("baseline-write");mm_free(b);
+    }else if(cx_fmt(src,sizeof src,"%s/%s",ROOT,srcs[k]))die("baseline-path");
+    cx_fmt(tape, sizeof tape, "%s/base%d.tape", WORK, k);
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_E3CACHE='%s' UNISACC_RUN_CACHE=1 sh '%s' -S '%s' -o '%s'", CACHE, PRODUCT, src, tape)) die("command-overflow");
+    ck(run(cmd) == 0, "baseline.generate-tape");
+    ck(sample(tape, &s), "baseline.prepare-key-prefix");
+    if (s.prefix) { cx_fmt(name, sizeof name, "baseline%d.full-lower-byte-equality", k); roundtrip(&s, name); }
+    release(&s);
+}
+int main(int argc, char **argv) {
+    int i, selected = 0; const char *tmp;
+    if (!getcwd(ROOT, sizeof ROOT)) die("cwd");
+    cx_fmt(PRODUCT, sizeof PRODUCT, "%s/unisacc.com", ROOT);
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--")) continue;
+        if (!strcmp(argv[i], "--product") && i + 1 < argc) { if (cx_fmt(PRODUCT, sizeof PRODUCT, "%s", argv[++i])) die("product-path"); }
+        else if (!strcmp(argv[i], "--fixtures") && i + 1 < argc) FIX = argv[++i];
+        else if (!strcmp(argv[i], "--case") && i + 1 < argc) CASE = argv[++i];
+        else die("usage: --product ABS --fixtures ABS --case contracts|a2|b|c|base0..base6");
+    }
+    if(!strcmp(CASE,"all"))die("run-independent-cases-within-deadline");
+    if(!FIX){if(cx_fmt(FIXPATH,sizeof FIXPATH,"%s/tests/cases/lower_prefix",ROOT))die("fixture-path");FIX=FIXPATH;}
+    if (PRODUCT[0] != '/' || FIX[0] != '/' || !safe(PRODUCT) || !safe(FIX) || !safe(ROOT)) die("absolute-safe-path-required");
+    tmp = sy_tmpdir();
+    if (cx_fmt(WORK, sizeof WORK, "%s/lower-prefix-XXXXXX", tmp ? tmp : "/tmp") || !mkdtemp(WORK) || !safe(WORK)) die("private-work-directory");
+    cx_fmt(CACHE, sizeof CACHE, "%s/cache", WORK);
+    if (sy_mkdir(CACHE, 0700) || sy_setenv("UNISACC_E3CACHE", CACHE, 1) ||
+        sy_setenv("UNISACC_RUN_CACHE", "1", 1) || sy_setenv("UNISACC_UNIT_CACHE", "1", 1) ||
+        sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "1073741824", 1)) die("private-cache-environment");
+    size_t product_n=0;char *product_bytes=cx_read(PRODUCT,&product_n);
+    if(!product_bytes||sy_sha256_hex(product_bytes,(long)product_n,PRODHEX))die("product-content-identity");mm_free(product_bytes);
+    if (sy_sha256_hex("lower-prefix-check:lnx/x86_64:prune", 35, CTXHEX)) die("context-hash");
+    printf("WORK\t%s\nCACHE\t%s\nPRODUCT\t%s\t%s\n", WORK, CACHE, PRODUCT, PRODHEX);
+    if(!strcmp(CASE,"contracts")){contracts();selected++;}
+    for (i = 0; i < 7; i++) {
+        char name[16]; cx_fmt(name, sizeof name, "base%d", i);
+        if(!strcmp(CASE,name)){baseline(i);selected++;}
+    }
+    if (!strcmp(CASE, "a2") || !strcmp(CASE, "b") || !strcmp(CASE, "c")) {
+        Sample s; fixture(CASE, &s); roundtrip(&s, "fixture.full-lower-byte-equality"); release(&s); selected++;
+    }
+    if (!selected) die("unknown-case");
+    if(!failed)cleanup();
+    printf("LOWER_PREFIX\tcase=%s\tassertions=%d\tfailed=%d\n", CASE, assertions, failed);
+    return failed ? 1 : 0;
+}
