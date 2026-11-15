@@ -401,8 +401,9 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
 
 static int try_connect(long ms) { return sy_unix_connect(sockp, sy_deadline_in(ms)); }
 
+static int jobs_gc(void);
 static int serve(long ttl, long idle) {
-    int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0; char p[PW], line[2048], info[PW + 96];
+    int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0, gc_at = 0; char p[PW], line[2048], info[PW + 96];
     if (ttl <= 0 || ttl > TTL_MAX || idle <= 0) { fprintf(stderr, "devsvc: ttl 1..%d, idle >= 1\n", TTL_MAX); return 2; }
     ls = sy_unix_listen(sockp, 16);
     if (ls == -EADDRINUSE) {
@@ -419,6 +420,7 @@ static int serve(long ttl, long idle) {
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
+        if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
         c = sy_tcp_accept(ls, 200);
         if (c < 0) { if (c != -ETIMEDOUT) sy_sleep_ms(50); continue; }
         {   sy_deadline_t d = sy_deadline_in(2000);
@@ -1175,6 +1177,30 @@ static int cmd_wait(int argc, char **argv) {
         if (b) free(b); }
     printf("JOB_DONE\t%s\trc=%d\tms=%ld\n", argv[0], atoi(t), atol(strchr(t, '\t') ? strchr(t, '\t') + 1 : "0"));
     return atoi(t);
+}
+/* 作业目录清理(服务空闲巡检调用):只动实例目录 jobs/ 下合 okjob 名、已有 rc(已结束)的目录;
+   结束超过 24 小时,或按新到旧数超过 200 的,删除;在途与 lost 不删。返回删除数 */
+#define JOBS_KEEP 200
+#define JOBS_AGE_S 86400
+static int jobs_gc(void) {
+    static char lst[1 << 16]; char jd[PW], *s, *e; int n = 0, del = 0; long now = sy_wall_s();
+    char *v[] = {"ls", "-1t", jd, 0};
+    F(jd, sizeof jd, "%s/jobs", dir);
+    if (sy_exists(jd) != 1 || runcap(v, lst, sizeof lst) < 0) return 0;
+    for (s = lst; *s; s = e) {
+        char d[PW], rp[PW + 8]; sy_stat_t st;
+        e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s);
+        if (!okjob(s)) continue;
+        n++;
+        F(d, sizeof d, "%s/%s", jd, s); F(rp, sizeof rp, "%s/rc", d);
+        if (sy_stat(rp, &st)) continue;
+        if (n > JOBS_KEEP || now - st.mtime > JOBS_AGE_S) {
+            char *rm[] = {"rm", "-rf", "--", d, 0}; char ro[8];
+            if (runcap(rm, ro, sizeof ro) == 0) del++;
+        }
+    }
+    if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, n); ev_add("jobs.gc", m); }
+    return del;
 }
 static int cmd_jobs(void) {
     char jd[PW], lst[1 << 15], *s, *e, t[64], m[4096]; int n = 0;

@@ -92,8 +92,12 @@ static int fixture_repo(const char *src) {
     return 0;
 }
 
-int main(void) {
-    char stray[400]; int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+int main(int argc, char **argv) {
+    char stray[400];
+    /* --cases a:配置/锁/事件/git/status/重启/ttl/idle;--cases b:run 缓存(夹具仓);缺省两组都跑。批次 devsvc 跑 a,devsvc-run 跑 b */
+    int A = 1, B = 1;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|b|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
     if (sy_cwd(root, sizeof root) < 0) return 2;
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
@@ -112,6 +116,7 @@ int main(void) {
     r = fixture_repo(src);
     if (r) { printf("FAIL\tdevsvc.fixture\trc=%d\t%.200s\n", r, out2); return 1; }
 
+    if (A) {
     /* 配置表 */
     {   char want[200]; F(want, sizeof want, "CFG\tproduct\t%s\n", c_product);
         ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(want) && has("CFG\tlock\tregistry\n") && has("CFG\tlock\tderive\n") && has("\nDEVSVC_CONFIG\ttable="), "config-reads-table");
@@ -121,7 +126,25 @@ int main(void) {
 
     if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;   /* 事件落盘轮转阈值调小;命令完成事件的 owner */
     ck(dv1("ping", 0, 0, 0, 0, 0) == 3, "ping-without-instance-rc3");
+    /* 作业目录清理夹具:旧的已结束(rc 回拨 25 小时)、新的已结束、无 rc 的在途,另放一个非作业名目录 */
+    {   const char *names[4] = {"100-1", "200-2", "300-3", "not-a-job"}; int i;
+        for (i = 0; i < 4; i++) {
+            char d[300], p[340]; F(d, sizeof d, "%s/jobs/%s", inst, names[i]); F(p, sizeof p, "%s/rc", d);
+            if (sy_mkdir_all(d, 0700) || (i != 2 && sy_write_atomic(p, "0\t1\n", 4, 0644))) printf("NOTE\tgc-fixture\t%s\n", d);
+            if (i == 0 || i == 3) (void)sy_set_mtime(p, sy_wall_s() - 90000);
+        } }
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
+    sy_sleep_ms(400);
+    {   char d0[300], d1[300], d2[300], d3[300];
+        F(d0, sizeof d0, "%s/jobs/100-1", inst); F(d1, sizeof d1, "%s/jobs/200-2", inst); F(d2, sizeof d2, "%s/jobs/300-3", inst); F(d3, sizeof d3, "%s/jobs/not-a-job", inst);
+        ck(sy_exists(d0) == 0, "jobs-gc-removes-done-over-24h");
+        ck(sy_exists(d1) == 1 && sy_exists(d2) == 1, "jobs-gc-keeps-recent-and-running");
+        ck(sy_exists(d3) == 1, "jobs-gc-ignores-non-job-dirs");
+        ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("jobs.gc\tdeleted=1"), "jobs-gc-event"); }
+    /* x 完成事件取工具名:kind=x.<工具名>,跳过 sh、产品、目录与 .cx 后缀 */
+    {   char *v[] = {"x", "--", "sh", prod, "tools/no-such-tool-xyz.cx", 0}; (void)dv(out, sizeof out, v);
+        char *w[] = {"x", "--", "true", 0}; (void)dv(out, sizeof out, w);
+        ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tx.no-such-tool-xyz\t") && has("\tx.true\t") && !has("\tx.--\t"), "x-event-kind-is-tool-name"); }
     ck(dv1("start", 0, 0, 0, 0, 0) == 0 && has("OK\talready"), "start-twice-already");
     ck(dv1("ping", 0, 0, 0, 0, 0) == 0 && has("OK\tpong"), "ping");
 
@@ -157,7 +180,12 @@ int main(void) {
         F(since, sizeof since, "%ld", s);
         ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=0\t"), "events-since-current-empty"); }
 
-    /* 事件落盘(实例目录 events.tsv,带 owner,超阈值轮转)与只读 git 透传(不取锁) */
+    }
+    if (B && !A) {
+        if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
+        ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "run-group-start"); }
+    if (B) {
+    /* 事件落盘(实例目录 events.tsv,带 owner,超阈值轮转)与只读 git 透传(不取锁)(b 组) */
     {   char ep[200], ep1[200]; unsigned char *b = 0; int64_t n = 0, sz = 0; int i, got;
         F(ep, sizeof ep, "%s/events.tsv", inst); F(ep1, sizeof ep1, "%s/events.tsv.1", inst);
         ck(dv1("git", "log", "-1", "--oneline", 0, 0) == 0 && strlen(out) > 8 && !has("REFUSE"), "git-log-readonly");
@@ -172,9 +200,12 @@ int main(void) {
         ck(sy_exists(ep1) == 1 && sz >= 0 && sz <= 1500 + 200, "events-file-rotates");
     }
 
+    }
+    if (A) {
     /* status */
     ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");
-
+    }
+    if (B) {
     /* run(在私有夹具仓里):经服务与直接运行一致;首次构造,第二次命中缓存,--local 共用缓存 */
     {   char *d[] = {"sh", prod, "echo.cx", "--", "a b", "c", 0}; int rd, rs; char *q;
         rd = cap2(d, fx, out2, sizeof out2);
@@ -215,6 +246,9 @@ int main(void) {
             ck(fx1("run", "--local", "bad.cx", 0, 0, 0) == 1 && has("devsvc: cannot build bad.cx rc=-1") && has("log=/") && has("\nBUILD\t") && has("undeclared_symbol_xyz"), "run-local-build-failure-returns-compiler-stderr");
             ck(sy_unlink(bad) == 0, "run-bad-fixture-removed"); }
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
+    }
+    if (B && !A) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
+    if (A) {
 
     /* stop;锁落盘跨重启 */
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
@@ -233,6 +267,7 @@ int main(void) {
     {   char *v[] = {"start", "--ttl", "99999", 0};
         ck(dv(out, sizeof out, v) == 2, "ttl-over-cap-refused"); }
     (void)t0;
+    }
 
     {   char *rm[] = {"rm", "-rf", inst, fx, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "fixture-cleanup"); }
     ck(ovf == 0, "no-path-overflow");
