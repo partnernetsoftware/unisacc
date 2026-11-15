@@ -170,6 +170,38 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - (6) 判据里的数值(3 个公开版、30 天、提升需 3 个调用单元)参照 CPython 与 Node 的做法按本仓节奏取定,无本仓数据支撑。
 - (7) 三宿主:gcc_cx 与 clang_cx 下 15 个 L0 模块不能编译(第 7 节 A6),本核心面的稳定判据只对 unisacc.com 宿主求值,不声称宿主驱动下可用。
 
+### 0.9 生态分环与外部包(2026-11-15 设计;未实现,不得记 PASS)
+
+- 四环:
+  - K 内部环(cx.base、cx.plan、cx.runtime、cx.compile、cx.driver、tools.cxlib):编译器本体,不对外承诺,应用不得 use(规划期拒绝,待实现)。
+  - S 标准核心(cx.mem、cx.text、cx.sys、cx.os、cx.path、cx.stream):随产品,过 S1 至 S13(tools/stable-eval.cx)升 1.0.0,破坏性改动走弃用三段。
+  - X 标准扩展(ext.*):源随发行、产品层不链,孵化无承诺;提升进 S,或 G1 后把非基础件外置到 A。
+  - A 外部包:独立发布,源码进项目 `cxpkg/owner/name/`。
+- "冻结"只指 S 环的接口承诺;`tests/cx-module-freeze.tsv` 的文件集冻结另算。K 环要为 E1、E2 大改,不冻结;X 环(ext.net、ext.crypto)有修复节奏,不冻结。
+- 外部包最小设计:清单 `cxpkg.tsv`(CXPKG1:N 名 owner.name、V 版本、K lib/app、S 标准包最低版本、D 依赖与来源 `path:`/`git:地址#提交号`、C 能力 net/proc/fs-write/dl/ffi、T 目标、E 入口);身份为名、版本、包树 sha256(复用 CXWORKTREE1);解析用最小版本选择,一包名一版本,主版本不同即不同包名,传递闭包包数有预算;锁 `cxlock.tsv` 入库,驱动规划前校验,不符具名拒绝;获取只有本地目录与钉提交号的 git 地址,编译期不联网,无安装期脚本,不发二进制包;外部包不得 dock、不得 use K 环,能力是规划期 use 边检查,不是沙箱,不得据此宣称内存安全或隔离;解析顺序为单元旁、最近祖先 cxroot.tsv(由 tools/cxpkg.cx 按锁生成)、产品内置标准根。只对 unisacc.com 宿主成立。
+- 取舍:取 Go modules 的最小版本选择与校验和、cargo 的清单锁分离、uv 的锁记哈希离线复现;避开 npm 的嵌套多版本、postinstall 脚本、范围版本漂移、微包与抢注。注册中心门槛前不做,首形态是 git 仓里的索引 TSV,服务化条件为外部包不少于 50 且第三方作者不少于 10(自定值)。
+- 门槛:
+
+| 号 | 条件 | 判定 | 现状(2026-11-15) |
+|---|---|---|---|
+| T1 | S 环六包 STABLE-READY 并升 1.0.0 | `tools/stable-eval.cx` 六包 STABLE-READY | 不满足,19 包全 NOT-READY,S6 至 S9、S12 恒 UNKNOWN |
+| T2 | 面封口:S 环无 new 行、无 unverified 格 | `tools/check-std-surface.cx`、build/std-surface.tsv | 不满足 |
+| T3 | 面静止满 3 个公开版且 30 天(S8) | stable-eval S8(待接) | 不满足 |
+| T4 | 模块语法齐:alias、export use 门面(D1b)、软链模块身份 | `tools/check-cxmod-tri.cx`、tests/cx-namespace.cx 语义断言 | 不满足 |
+| T5 | 已装产品仓外零配置 use 标准包 | 空目录 use sys.fs 的 hello rc=0(批次待建) | 不满足 |
+| T6 | 包身份与锁:树哈希、锁校验、篡改负控、MVS | tools/check-cxpkg.cx(待建) | 不满足 |
+| T7 | 包权限:dock、use K 环、超声明能力三类具名拒绝 | 同上三条负控 | 不满足 |
+| T8 | 六目标同候选证据,S 环面批次带 SURF 行 | release/candidate.tsv 所指 CI | 不满足 |
+| T9 | 发布 QUALIFIED,s9 daily 与 release 档跑通 | release/decision.txt | 不满足 |
+| T10 | 自用证明:json、url、http 三个自有包按 A 环形态仓外建项目、锁定、编译、运行 | E4 能用清单带包栏(待建) | 不满足 |
+| T11 | 包作者指南、清单规范、从零建包例子均实跑 | prd_cx_spec.md 核对方式 | 不满足 |
+| T12 | 带 3 个外部包的 hello 首次启动不高于 E1 当期门 1.5 倍 | tools/run-startup-bench.cx 带包夹具 | UNMEASURED |
+| T13 | 生态文档不宣称内存安全,能力声明写明非沙箱 | 文档 lint(待建) | lint 未建 |
+
+- G0 自用试点门 = T4 至 T7 加 T10,推算 0.0.74;G1 公开门 = T1 至 T13,不早于封口版(0.0.71)公开后 30 天且其后 3 个公开版,推算 0.0.76 或更晚。NOT_QUALIFIED 期间不对外招生态。
+- 不占槽先行项:tools/cxpkg.cx 与 check-cxpkg.cx(本机试点,受软链缺陷限制)、stable-eval 接 S6 至 S9 与 S12 证据、前缀保留表与能力词表、E4 清单加带包栏、0.7 节 C1 与 C8;json、url 两包先仓外按包形态写以暴露库缺口。
+- 风险:S 环升 1.0 后破坏性签名(sy_stat_t 等 11 行)改不动,须在 0.0.71 封口版一次改完,这是全路线风险最大的一版;apps/csih 不宜作首个外部包样例。
+
 ## 1. cx 流：CX0（在 e2 之前）
 
 **定位**：`.cx` 源 -> 模块规划与导出接口 -> 每单元一份「平铺 C + 强制前导头」，再交给 e2。它是七流之外的第 8 个处理步，但**现在不是模型流**：由手写规划器代码执行，没有网、没有路由行。prd.md §3.3 写的「7 + 1」中的 1 即它。
@@ -1471,7 +1503,7 @@ apps、win、run-speed、https 未实跑;引用计数仅按上述口径,tests/ �
 - 机制:解析结果与转译产物缓存、一个二进制内置运行时与打包器、workspace 把仓内包按名字互相链接、`bun build --compile` 出单文件可执行。
 - cx 差距:冷启动每单元重付前导与模型解码(E8);单元产物无跨程序复用(A8 读数 4)。
 - 取:(1) 按内容寻址缓存每单元前端结果(55-7 b 已立项),键含源、强制头、模型、目标;(2) workspace 的「按名字解析、不靠相对路径与软链」即 CX-U-7 包根,已落地,继续淘汰 7 个目录软链(E1)。
-- 不取:自动安装与 lockfile(cx 无外部包源,包版本在 `build/tlib-packages.tsv`);宽松解析(自动补扩展名、目录 index):与「解析唯一、拒绝具名」相反。
+- 不取:自动安装(锁文件改为取,外部包设计见 0.9 节);宽松解析(自动补扩展名、目录 index):与「解析唯一、拒绝具名」相反。
 
 ### 11.3 Python(import 系统)[忆]
 

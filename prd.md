@@ -634,7 +634,11 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 0.0.67(进行中,分支 v0.0.67) | cx.stream R3:`st_span` 改模块接口,FwmBuf 共享类型(驱动);随行工具小修不进产品,不算第二类:(1) s9-native 缓存键含依赖模块(0.0.66 s9 因此 init 连败两次)(2) candidate-chain 材料接线(未接线连带同片 6 批不执行)(3) surface-doc-gen、dock-audit 两处树内漂移(4) speed-probe rc=1 定因 | E1 前置(流边界归一后 0.0.68 才能按流缓存);E2 | 七个基线源的 `-o` 产物 sha256 表(改前);随行先修 (1)(2)(3) | `git grep -c 'int st_span(' -- src` 合计 5 -> 1;七源 `-o` 产物 sha256 改前改后逐个相同;s9 commit 档 init 不再被旧缓存挡,candidate-chain 三批与同片 6 批实际执行;surface-doc-gen、dock-audit 批次 PASS;speed-probe 单跑 rc=0 |
 | 0.0.68(进行中,分支 v0.0.68) | 驱动与运行缓存二期(闭包结果复用方案 A、前导预制 L5(a)、S1 消费者,视取数加零解码 L4);随行工具不占槽,串行:库包改进 A 派生表一条命令闭环 -> B tools.cxlib 按面拆包 -> D deps 列由 use 边生成 -> C 版本粒度下沉到 faces;加速方案 A 第 4 步公开硬门;瓶颈整改(候选池 I 至 O):N 环境卫生 -> J 提交门预演 -> K affected 续跑编排 -> I 放开 chain-run width=1 互斥(整链验证绑本版)-> M 契约表前三行、4b s9 预演、G 冻结门常驻、L 套件预热与 --prep-only | E1 过 500 ms 门(拼算上界约 432 ms,余量小,0.0.66 实测 665.1 ms);资格面:s9 daily 与 release 档各跑通一次 | R6-W5 取数:prune 保留集是否只由引用面决定、lower 是否逐函数独立 | `sh ./unisacc.com tools/run-startup-bench.cx` n=5 中位 first 不高于 500 ms 且 load1 低于 2;s9 daily、release 档各一次完整报告 |
 | 0.0.69 | netraw(osx、win 库包与运行库;候选不早于本版);同类随行库包改进 E:ext.memx/ext.textx 与 cx/mem、cx/text 去重;工具随行:O 入库派生表去易变列(先遍历行数列消费者)、超 55 秒批按相位拆批、M 契约表补齐、方案 B 的 s9 与公开并行;冻结按零修门验收(不超过 10 分) | E4(网络面三平台) | 0.0.68 公开前把首个任务与验收命令写进本表;现为未定 | 未定 |
-| 0.0.70 | cxmod 三源类:内存安全乙期(M2 owns 标注进 cx/cx0/plan.cx 规划期、M6 首条结构性拒绝,经 cx0-extract 投影三源);同类随行 `use m::sym as alias` 与软链模块身份;库包改进 F(cx.os 物理分目录消软链)依赖本版,排其后另占槽;工具随行:方案 C 的 g2 对象内容寻址收养、方案 E 发布编排 | E4(模块边界与所有权可证) | 按 build/own-escapes.tsv 的 owns=yes 三行在各单元加 `#pragma unisa owns` | `sh ./unisacc.com tools/check-own-escape.cx` 末行 passed=5 failed=0;`tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-own-escapes.cx` failed=0 |
+| 0.0.70 | cxmod 三源类:内存安全乙期(M2 owns 标注进 cx/cx0/plan.cx 规划期、M6 首条结构性拒绝,经 cx0-extract 投影三源);同类随行 `use m::sym as alias` 与软链模块身份;库包改进 F(cx.os 物理分目录消软链)依赖本版,排其后另占槽;工具随行:方案 C 的 g2 对象内容寻址收养、方案 E 发布编排 |
+| 0.0.71(建议) | 库包源类:标准核心面封口(S 环 new 行清零、破坏性签名一次改完、库包改进 F、win 未核格实跑;超 2 小时拆两版) | E4(生态门 T2,S8 的 30 天起算) | 重算 build/std-surface.tsv S 环 new 行与 unverified 清单 | `tools/check-std-surface.cx` 通过;`tools/stable-eval.cx` 六包 S2、S4 ok |
+| 0.0.72(建议) | cxmod 三源类:D1b 门面重导出、包根表升版与内置标准根、外部包 dock 与层向拒绝 | E4(T4、T5、T7) | 空目录 hello 仓外零配置复现入批次 | `tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-cxpkg.cx` 三条负控 |
+| 0.0.73(建议) | 驱动类:驱动读 cxlock.tsv 规划前校验,包树身份进缓存键 | E4(T6) | 篡改一字节负控夹具 | `tools/check-cxpkg.cx` failed=0 |
+| 0.0.74(建议) | 库包源类:DNS 名字解析与 inflate;自有 json、url、http 三包按外部包形态发布 | E4(T10,生态 G0 门) | 三包仓外建项目 | E4 清单带包栏 3 过 3 | E4(模块边界与所有权可证) | 按 build/own-escapes.tsv 的 owns=yes 三行在各单元加 `#pragma unisa owns` | `sh ./unisacc.com tools/check-own-escape.cx` 末行 passed=5 failed=0;`tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-own-escapes.cx` failed=0 |
 
 候选池(未入 `build/version-seq.tsv`;入序时一行一版、一版一类,先定终点线贡献再排):
 
@@ -659,6 +663,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
   (N) UNISACC_BOUND_DEADLINE_MONO 六个读取点(bound.c:422、all-waves.cx:78/507、s9-shards.cx:43/522、tests/preprocess/suite.cx:104)收进一个帮手并核属主存活;chain-ready 拒残留环境(含 UNISACC_RUN_CACHE、UNISACC_CACHE_DIR)。
   (O) 入库派生表去行数等易变列;依据 main 近 5 提交 4 个为 tool-index 跟随提交(实测)。
   (P) 共用版本工作目录互扰:一方未提交改动让另一方的 wt-gate-clean、layer-api 批失败(2026-11-15 库包改进 A 实测);对策待定(每任务短窗口串行提交,或放宽 worktree 只许 .claude/worktrees/<版本名> 的规则为 <版本名>-<任务>,后者改项目所有者规则)。
+- cx 生态门(2026-11-15 规划,详见 prd_cx.md 0.9):四环 K 内部/S 标准核心/X 标准扩展/A 外部包;门槛 T1 至 T13;G0 自用试点门推算 0.0.74,G1 公开门不早于 0.0.71 公开后 30 天且其后 3 个公开版。先行不占槽:tools/cxpkg.cx 与检查、stable-eval 接证据、前缀保留表与能力词表。注册中心不入池。
   应停:s9 commit 档作公开前串行门、全量 g3 挡 pack、UNISACC_RUN_CACHE=0 只靠记忆禁用(应由 chain-ready 拒)、build/phase-times.tsv 0.0.47 至 0.0.49 旧行(归档)、drive.sh 手写循环(沉淀进 s9-nightly)、release-sweep 拒 /tmp 根与临时产物放 /tmp 规则冲突。
 - 内存安全乙期(cxmod 三源类,不早于 0.0.69;甲期是工具,不占槽;设计在 prd_cx.md 11.7)。
 - CX0 事实表入库与第 8 流、骨架网落行为(prd_cx.md 第 8 节 B2 的 55-4 至 55-6、B3)。
