@@ -180,6 +180,37 @@ int main(int argc, char **argv) {
         F(since, sizeof since, "%ld", s);
         ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=0\t"), "events-since-current-empty"); }
 
+    /* 输出控制(工作副本,DEVSVC_DEV):x/flow/wait 的 --tail/--head/--grep/--summary、截断标记、OUT 全量路径、默认不变 */
+    if (setenv("DEVSVC_DEV", "1", 1)) return 2;
+    {   char *v[] = {"x", "--tail", "2", "--", "sh", "-c", "seq 1 10; echo e1 >&2", 0}; const char *o; unsigned char *b = 0; int64_t n = 0; char op[300];
+        ck(dv(out, sizeof out, v) == 0 && has("10\ne1\nDEVSVC_TRIMMED\tshown=2\ttotal=11\n") && !has("\n9\n"), "oc-x-tail-trimmed");
+        o = strstr(out, "OUT="); op[0] = 0; if (o) { F(op, sizeof op, "%.*s", (int)strcspn(o + 4, "\n"), o + 4); }
+        ck(op[0] && sy_read_file(op, &b, &n, 1 << 16) == 0 && b && n == 24 && !memcmp(b, "1\n2\n", 4), "oc-x-out-has-full");
+        if (b) free(b); }
+    {   char *v[] = {"x", "--head", "2", "--", "seq", "1", "9", 0};
+        ck(dv(out, sizeof out, v) == 0 && has("1\n2\nDEVSVC_TRIMMED\tshown=2\ttotal=9\n") && !has("\n3\n"), "oc-x-head"); }
+    {   char *v[] = {"x", "--grep", "7", "--grep", "3", "--", "seq", "1", "20", 0};
+        ck(dv(out, sizeof out, v) == 0 && has("3\n7\n13\n17\nDEVSVC_TRIMMED\tshown=4\ttotal=20\n") && has("OUT=/"), "oc-x-grep-multi"); }
+    {   char *v[] = {"x", "--grep", "1", "--", "echo", "1", 0};
+        ck(dv(out, sizeof out, v) == 0 && !has("DEVSVC_TRIMMED") && has("\nOUT=/"), "oc-x-no-trim-no-marker"); }
+    {   char *v[] = {"x", "--summary", "--", "sh", "-c", "echo a; echo bad error here; exit 3", 0};
+        ck(dv(out, sizeof out, v) == 3 && has("SUM\tx\trc=3\tms=") && has("\tlines=2\tfirst=bad error here\n") && !has("\na\n"), "oc-x-summary"); }
+    {   char *v[] = {"x", "--", "seq", "1", "3", 0};
+        ck(dv(out, sizeof out, v) == 0 && has("1\n2\n3\n") && !has("OUT=") && !has("DEVSVC_TRIMMED"), "oc-default-unchanged"); }
+    {   char *v[] = {"x", "--tail", "0", "--", "true", 0}; ck(dv(out, sizeof out, v) == 2, "oc-bad-count-refused"); }
+    {   char fp[300]; const char *ft = "a\texec\t-\ta0=seq;a1=5\nb\texec\ta\ta0=sh;a1=-c;a2=echo REFUSE x\n";
+        F(fp, sizeof fp, "%s/oc.tsv", inst);
+        if (sy_write_atomic(fp, ft, strlen(ft), 0644)) printf("NOTE\toc-flow-fixture\t%s\n", fp);
+        {   char *v[] = {"flow", "run", fp, "--summary", 0};
+            ck(dv(out, sizeof out, v) == 0 && has("SUM\ta\trc=0\t") && has("\tlines=5\tfirst=-\n") && has("SUM\tb\trc=0\t") && has("first=REFUSE x\n") && !has("NODE\t") && has("OUT=/"), "oc-flow-summary"); }
+        {   char *v[] = {"flow", "run", fp, "--tail", "1", 0};
+            ck(dv(out, sizeof out, v) == 0 && has("DEVSVC_FLOW\tnodes=2") && !has("NODE\t") && has("DEVSVC_TRIMMED\tshown=1\ttotal=3\nOUT=/"), "oc-flow-tail"); }
+        {   char *v[] = {"flow", "run", fp, "--bg", "--grep", "NODE", 0}; char job[64] = ""; const char *j;
+            (void)dv(out, sizeof out, v); j = strstr(out, "JOB\t"); if (j) F(job, sizeof job, "%.*s", (int)strcspn(j + 4, "\t\n"), j + 4);
+            {   char *w[] = {"wait", job, "--tail", "1", 0};
+                ck(job[0] && dv(out, sizeof out, w) == 0 && has("DEVSVC_TRIMMED\tshown=1\ttotal=4\nJOB_DONE\t") && has("/out\n") && strstr(out, "OUT=") < strstr(out, "DEVSVC_TRIMMED"), "oc-flow-bg-wait-tail"); } } }
+    if (unsetenv("DEVSVC_DEV")) return 2;
+
     }
     if (B && !A) {
         if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;

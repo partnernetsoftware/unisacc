@@ -22,6 +22,8 @@
  *   sh ./unisacc.com tools/devsvc.cx -- f write PATH --from SRC [--expect-sha X] [--mkdir] [--owner O] [--lock-wait-ms N]
  *   sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]   (--chomp:两文件各去掉末尾一个换行)
  *   sh ./unisacc.com tools/devsvc.cx -- x [--timeout-ms N] [--cwd D] -- ARGV...   单条命令:stdout/stderr 原样转出,结果行 X 到 stderr,退出码即命令的
+ *   x|flow|wait 输出控制:--tail N、--head N、--grep S(固定串,可多次,行级或)、--summary(每节点一行 SUM id rc ms lines first);
+ *     任一给出即合并 stdout/stderr 过滤,全量落 run 目录 full.out(wait 为作业 out),略去行时打 DEVSVC_TRIMMED shown=N total=M,末行 OUT=路径;不给时行为不变
  *   x|flow|git commit|register|derive 加 --bg:立即打印 JOB id run=DIR(实例目录 jobs/<id>/),作业在独立会话跑,deadline 与锁照旧,结束记 job.done
  *   sh ./unisacc.com tools/devsvc.cx -- wait JOB [--timeout-ms N]      等作业(默认 50000,上限 55000):结束打输出尾部(至多 8 KB)与 JOB_DONE,rc 即作业的;超时 WAIT_TIMEOUT rc 124,不杀作业
  *   sh ./unisacc.com tools/devsvc.cx -- jobs                           列在途与最近 30 个作业
@@ -655,9 +657,88 @@ static void err_tail(const char *path, int maxl) {
     while (st < n) { long e = st; while (e < n && b[e] != '\n') e++; fprintf(stderr, "GIT_COMMIT_ERR\t%.*s\n", (int)(e - st), (char *)b + st); st = e + 1; }
     free(b);
 }
+/* ---- 输出控制(x、flow、wait):--tail N、--head N、--grep S(固定串,可多次,行级或)、--summary(每节点一行)。
+   任一出现即:全量输出落 run 目录(x/flow 为 RUN/full.out,wait 为作业 out),先 grep 再 head 再 tail;
+   有行被略去时打 DEVSVC_TRIMMED<TAB>shown=N<TAB>total=M;末行 OUT=路径。都不给时行为不变。 ---- */
+#define OC_GREP 8
+static long numarg(const char *s);
+static struct { long tail, head; int ng, summary, on; const char *grep[OC_GREP]; } oc;
+static AB ocb;
+/* argv[a] 是输出控制选项则吃掉,返回消耗个数;非此类 0;用法错 -1 */
+static int oc_opt(int argc, char **argv, int a) {
+    if (!strcmp(argv[a], "--summary")) { oc.summary = 1; oc.on = 1; return 1; }
+    if (!strcmp(argv[a], "--tail") || !strcmp(argv[a], "--head")) {
+        long n = a + 1 < argc ? numarg(argv[a + 1]) : -1;
+        if (n < 1) return -1;
+        if (argv[a][2] == 't') oc.tail = n; else oc.head = n;
+        oc.on = 1; return 2;
+    }
+    if (!strcmp(argv[a], "--grep")) {
+        if (a + 1 >= argc || !argv[a + 1][0] || oc.ng >= OC_GREP) return -1;
+        oc.grep[oc.ng++] = argv[a + 1]; oc.on = 1; return 2;
+    }
+    return 0;
+}
+static void outs(const char *s, long n) { if (oc.on) ab_add(&ocb, s, n); else if (n > 0) fwrite(s, 1, (size_t)n, stdout); }
+static void outfile(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 1 << 26) || !b) return;
+    outs((char *)b, (long)n); free(b);
+}
+static int oc_hit(const char *s, long n) {
+    int g; long k, gl;
+    if (!oc.ng) return 1;
+    for (g = 0; g < oc.ng; g++) { gl = strlen(oc.grep[g]); for (k = 0; k + gl <= n; k++) if (!memcmp(s + k, oc.grep[g], gl)) return 1; }
+    return 0;
+}
+/* 按 grep/head/tail 打 TXT 的行 */
+static void oc_emit(const char *t, long n) {
+    long i, st, total = 0, m = 0, s, e, *ls = 0, *le = 0, cap = 0;
+    for (st = 0; st < n; ) {
+        long en = st; while (en < n && t[en] != '\n') en++;
+        total++;
+        if (oc_hit(t + st, en - st)) {
+            if (m >= cap) { long c = cap ? cap * 2 : 256; long *a = realloc(ls, c * sizeof *ls), *b2; if (!a) break; ls = a; b2 = realloc(le, c * sizeof *le); if (!b2) break; le = b2; cap = c; }
+            ls[m] = st; le[m] = en; m++;
+        }
+        st = en + 1;
+    }
+    e = oc.head && oc.head < m ? oc.head : m;
+    s = oc.tail && e > oc.tail ? e - oc.tail : 0;
+    for (i = s; i < e; i++) printf("%.*s\n", (int)(le[i] - ls[i]), t + ls[i]);
+    if (e - s < total) printf("DEVSVC_TRIMMED\tshown=%ld\ttotal=%ld\n", e - s, total);
+    free(ls); free(le);
+}
+/* 文件的行数与首个含 FAIL/REFUSE/error 的行(未找到时 first 不变) */
+static long oc_scan(const char *path, char *first, int cap) {
+    unsigned char *b = 0; int64_t n = 0; long st, lines = 0; static const char *pat[] = {"FAIL", "REFUSE", "error", 0};
+    if (sy_read_file(path, &b, &n, 1 << 26) || !b) return 0;
+    for (st = 0; st < n; ) {
+        long en = st, k; int j; while (en < n && b[en] != '\n') en++;
+        lines++;
+        for (j = 0; !first[0] && pat[j]; j++) { long pl = strlen(pat[j]); for (k = st; k + pl <= en; k++) if (!memcmp(b + k, pat[j], pl)) { F(first, cap, "%.*s", (int)(en - st > 300 ? 300 : en - st), (char *)b + st); clean(first); break; } }
+        st = en + 1;
+    }
+    free(b); return lines;
+}
+/* 落全量,打过滤结果;summary 时 SUMS 为已拼好的每节点行 */
+static void oc_finish(const char *full, const char *sums, long shown) {   /* 只过滤前 shown 字节(其后是仅落盘的附录) */
+    if (sy_write_atomic(full, ocb.p ? ocb.p : "", ocb.n, 0644)) fprintf(stderr, "devsvc: cannot write %s\n", full);
+    if (shown > ocb.n) shown = ocb.n;
+    if (oc.summary) fputs(sums ? sums : "", stdout); else oc_emit(ocb.p ? ocb.p : "", shown);
+    printf("OUT=%s\n", full); fflush(stdout);
+}
+/* 每节点一行:SUM id rc ms lines first */
+static void oc_sum(AB *a, const char *rdir, const char *id, int rc, const char *ms) {
+    char p[PW + 300], first[320] = "", ln[800]; long nl;
+    F(p, sizeof p, "%s/out/%s.out", rdir, id); nl = oc_scan(p, first, sizeof first);
+    F(p, sizeof p, "%s/out/%s.err", rdir, id); nl += oc_scan(p, first, sizeof first);
+    F(ln, sizeof ln, "SUM\t%s\trc=%d\tms=%s\tlines=%ld\tfirst=%s\n", id, rc, ms, nl, first[0] ? first : "-");
+    ab_add(a, ln, strlen(ln));
+}
 /* text 非空即内联节点表(写进 RUN/flow.tsv)。xmode:单条 exec,把节点 stdout/stderr 原样转出,返回节点退出码。 */
 static int flow_go(const char *root, const char *file, const char *text, const char *rdir_in, int jobs, long dl, int cat, long wait_ms, int xmode) {
-    static fl_flow f; fl_sum s; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0;
+    static fl_flow f; fl_sum s; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0; AB sums = {0, 0, 0};
     if (rdir_in) F(rdir, sizeof rdir, "%s", rdir_in); else F(rdir, sizeof rdir, "%s/devsvc-flow-%ld-%d", sy_tmpdir(), sy_now_ms(), sy_pid());
     if (ovf || sy_mkdir_all(rdir, 0755)) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable\n", rdir); return 2; }
     if (text) {
@@ -692,7 +773,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     if (r < 0) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable (%d)\n", rdir, r); fl_free(&f); return 2; }
     F(p, sizeof p, "%s/events.tsv", rdir);
     if (sy_read_file(p, &eb, &en, 1 << 24) == 0 && eb) {
-        char *q = (char *)eb, *e, *c[7], sha[80]; int nc, k;
+        char *q = (char *)eb, *e, *c[7], sha[80], ln[1600]; int nc, k;
         for (; (e = memchr(q, '\n', (char *)eb + en - q)); q = e + 1) {
             *e = 0;
             if (strncmp(q, "EVT\t", 4)) continue;
@@ -701,10 +782,21 @@ static int flow_go(const char *root, const char *file, const char *text, const c
             if (nc < 6 || !strcmp(c[3], "start")) continue;
             for (k = 0; k < f.count && strcmp(f.n[k].id, c[2]); k++) ;
             if (xmode) { F(xst, sizeof xst, "%s", c[3]); F(xms, sizeof xms, "%s", c[4]); continue; }
+            if (oc.summary && k < f.count) oc_sum(&sums, rdir, c[2], f.n[k].rc, c[4]);
             sha[0] = 0; if (k < f.count) node_sha(rdir, &f.n[k], sha, sizeof sha);
-            printf("NODE\t%s\t%s\trc=%s\tms=%s\t%s%s\n", c[2], c[3], c[5], c[4], c[6], sha);
+            F(ln, sizeof ln, "NODE\t%s\t%s\trc=%s\tms=%s\t%s%s\n", c[2], c[3], c[5], c[4], c[6], sha);
+            outs(ln, strlen(ln));
         }
         free(eb);
+    }
+    if (xmode && oc.on) {   /* 输出控制:stdout 后接 stderr 合一过滤,X 行照旧走 stderr,末行 OUT= */
+        F(p, sizeof p, "%s/out/%s.out", rdir, f.n[0].id); outfile(p);
+        F(p, sizeof p, "%s/out/%s.err", rdir, f.n[0].id); outfile(p); F(x_last_err, sizeof x_last_err, "%s", p);
+        if (oc.summary) oc_sum(&sums, rdir, f.n[0].id, f.n[0].rc, xms);
+        fprintf(stderr, "X\t%s\trc=%d\tms=%s\tvia=%s\trun=%s\n", xst, f.n[0].rc, xms, svc_on ? "service" : "local", rdir); fflush(stderr);
+        F(p, sizeof p, "%s/full.out", rdir); oc_finish(p, sums.p, ocb.n);
+        r = f.n[0].rc < 0 ? 1 : f.n[0].rc; fl_free(&f); free(sums.p);
+        return r;
     }
     if (xmode) {
         fflush(stdout);
@@ -717,13 +809,25 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     for (i = 0; cat && i < f.count; i++) {
         sy_stat_t st; long on, en2;
         F(p, sizeof p, "%s/out/%s.out", rdir, f.n[i].id); on = sy_stat(p, &st) == 0 ? (long)st.size : 0;
-        if (on > 0) { printf("==> %s.out %ld <==\n", f.n[i].id, on); fflush(stdout); dump(p, stdout); printf("\n"); }
+        char hd[200];
+        if (on > 0) { F(hd, sizeof hd, "==> %s.out %ld <==\n", f.n[i].id, on); outs(hd, strlen(hd)); fflush(stdout); outfile(p); outs("\n", 1); }
         F(p, sizeof p, "%s/out/%s.err", rdir, f.n[i].id); en2 = sy_stat(p, &st) == 0 ? (long)st.size : 0;
-        if (en2 > 0) { printf("==> %s.err %ld <==\n", f.n[i].id, en2); fflush(stdout); dump(p, stdout); printf("\n"); }
+        if (en2 > 0) { F(hd, sizeof hd, "==> %s.err %ld <==\n", f.n[i].id, en2); outs(hd, strlen(hd)); fflush(stdout); outfile(p); outs("\n", 1); }
     }
-    printf("DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\trun=%s\n",
-           f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, rdir);
-    fl_free(&f);
+    {   char ln[PW + 400];
+        F(ln, sizeof ln, "DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\trun=%s\n",
+          f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, rdir);
+        outs(ln, strlen(ln)); }
+    if (oc.on) {   /* --cat 未给时全量仍含各节点输出(附录,只落盘不参与过滤),便于事后查看 */
+        long keep = ocb.n;
+        for (i = 0; !cat && i < f.count; i++) {
+            char hd[200];
+            F(hd, sizeof hd, "==> %s.out <==\n", f.n[i].id); ab_add(&ocb, hd, strlen(hd)); F(p, sizeof p, "%s/out/%s.out", rdir, f.n[i].id); outfile(p);
+            F(hd, sizeof hd, "==> %s.err <==\n", f.n[i].id); ab_add(&ocb, hd, strlen(hd)); F(p, sizeof p, "%s/out/%s.err", rdir, f.n[i].id); outfile(p);
+        }
+        F(p, sizeof p, "%s/full.out", rdir); oc_finish(p, sums.p, keep);
+    }
+    fl_free(&f); free(sums.p);
     return r;
 }
 static long numarg(const char *s) { long n = 0; if (!s || !*s) return -1; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 100000000L) return -1; } return *s ? -1 : n; }
@@ -733,7 +837,7 @@ static void set_owner(int argc, char **argv) {
 }
 
 static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FILE|- 或 flow - */
-    const char *file = 0, *rdir = 0; char *text = 0; int a = 0, jobs = 0, cat = 0; long dl = 0, wait = 0;
+    const char *file = 0, *rdir = 0; char *text = 0; int a = 0, jobs = 0, cat = 0, oa; long dl = 0, wait = 0;
     if (argc > 0 && !strcmp(argv[0], "run")) a = 1;
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "--cat") || !strcmp(argv[a], "--echo")) cat = 1;
@@ -742,6 +846,7 @@ static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FIL
         else if (!strcmp(argv[a], "--lock-wait-ms") && a + 1 < argc) { wait = numarg(argv[++a]); if (wait < 0 || wait > 60000) return 2; }
         else if (!strcmp(argv[a], "--run") && a + 1 < argc) rdir = argv[++a];
         else if (!strcmp(argv[a], "--owner") && a + 1 < argc) a++;
+        else if ((oa = oc_opt(argc, argv, a))) { if (oa < 0) return 2; a += oa - 1; }
         else if (argv[a][0] == '-' && argv[a][1]) return 2;
         else if (!file) file = argv[a];
         else return 2;
@@ -763,6 +868,7 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x [--timeout-ms
         if (!strcmp(argv[a], "--")) { a++; break; }
         else if (!strcmp(argv[a], "--timeout-ms") && a + 1 < argc) { tm = numarg(argv[++a]); if (tm < 1 || tm > FL_NODE_MAX_MS) return 2; }
         else if (!strcmp(argv[a], "--cwd") && a + 1 < argc) cwd = argv[++a];
+        else if ((k = oc_opt(argc, argv, a))) { if (k < 0) return 2; a += k - 1; k = 0; }
         else break;
     }
     if (a >= argc || argc - a > FL_MAX_ARGV) return 2;
@@ -1170,8 +1276,13 @@ static int job_read(const char *jd, const char *name, char *out, long cap) {   /
 static int job_alive(const char *jd) { char t[32], p[64]; if (job_read(jd, "pid", t, sizeof t)) return 0; F(p, sizeof p, "/proc/%ld", atol(t)); return sy_exists(p) == 1; }
 static int cmd_wait(int argc, char **argv) {
     long tm = 50000, t0 = sy_now_ms(); char jd[PW], t[64]; int i;
-    for (i = 1; i < argc; i++) { if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) { tm = numarg(argv[++i]); if (tm < 1 || tm > 55000) break; } else break; }
-    if (argc < 1 || !okjob(argv[0]) || i < argc || tm < 1) { fprintf(stderr, "devsvc: wait JOB [--timeout-ms N] (1..55000, default 50000)\n"); return 2; }
+    for (i = 1; i < argc; i++) {
+        int k;
+        if (!strcmp(argv[i], "--timeout-ms") && i + 1 < argc) { tm = numarg(argv[++i]); if (tm < 1 || tm > 55000) break; }
+        else if ((k = oc_opt(argc, argv, i)) > 0) i += k - 1;
+        else break;
+    }
+    if (argc < 1 || !okjob(argv[0]) || i < argc || tm < 1) { fprintf(stderr, "devsvc: wait JOB [--timeout-ms N] [--tail N] [--head N] [--grep S]... [--summary] (1..55000, default 50000)\n"); return 2; }
     F(jd, sizeof jd, "%s/jobs/%s", dir, argv[0]);
     if (ovf || job_read(jd, "meta", (char *)big, 4096)) { fprintf(stderr, "devsvc: no such job %s\n", argv[0]); return 2; }
     for (;;) {
@@ -1180,15 +1291,24 @@ static int cmd_wait(int argc, char **argv) {
         if (sy_now_ms() - t0 >= tm) { printf("WAIT_TIMEOUT\t%s\tms=%ld\n", argv[0], sy_now_ms() - t0); return 124; }
         sy_sleep_ms(100);
     }
-    {   char p[PW + 16]; unsigned char *b = 0; int64_t n = 0; long cap = 8192;   /* 输出尾部至多 8 KB */
+    {   char p[PW + 16]; unsigned char *b = 0; int64_t n = 0; long cap = 8192;   /* 输出尾部至多 8 KB;有输出控制时按其过滤,全量即作业 out */
         F(p, sizeof p, "%s/out", jd);
-        if (!sy_read_file(p, &b, &n, 1L << 26) && b) {
+        if (oc.on && !sy_read_file(p, &b, &n, 1L << 26) && b) {
+            if (oc.summary) {   /* 作业输出里已有的节点/结果行:SUM、NODE、X、DEVSVC_FLOW */
+                long st, en; for (st = 0; st < n; st = en + 1) { en = st; while (en < n && b[en] != '\n') en++;
+                    static const char *pre[] = {"SUM\t", "NODE\t", "X\t", "DEVSVC_FLOW\t", 0}; int j;
+                    for (j = 0; pre[j]; j++) { long pl = strlen(pre[j]); if (en - st >= pl && !memcmp(b + st, pre[j], pl)) { printf("%.*s\n", (int)(en - st), (char *)b + st); break; } } }
+            } else oc_emit((char *)b, (long)n);
+            free(b); b = 0; n = -1;
+        }
+        if (n >= 0 && !sy_read_file(p, &b, &n, 1L << 26) && b) {
             if (n > cap) printf("DEVSVC_TAIL\tbytes=%ld\tshown=%ld\n", (long)n, cap);
             fwrite(b + (n > cap ? n - cap : 0), 1, (size_t)(n > cap ? cap : n), stdout);
             if (n > 0 && b[n - 1] != '\n') putchar('\n');
         }
         if (b) free(b); }
     printf("JOB_DONE\t%s\trc=%d\tms=%ld\n", argv[0], atoi(t), atol(strchr(t, '\t') ? strchr(t, '\t') + 1 : "0"));
+    if (oc.on) printf("OUT=%s/out\n", jd);
     return atoi(t);
 }
 /* 作业目录清理(服务空闲巡检调用):只动实例目录 jobs/ 下合 okjob 名、已有 rc(已结束)的目录;
@@ -1266,7 +1386,8 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[a], "x")) {   /* x 事件取工具名:跳过 --timeout-ms N、--cwd D、--owner N、--bg 等选项与 --,再跳过 sh 与 unisacc.com,去目录与 .cx 后缀 */
                 while (s < argc && argv[s][0] == '-') {
                     if (!strcmp(argv[s], "--")) { s++; break; }
-                    s += (!strcmp(argv[s], "--timeout-ms") || !strcmp(argv[s], "--cwd") || !strcmp(argv[s], "--owner")) && s + 1 < argc ? 2 : 1;
+                    s += (!strcmp(argv[s], "--timeout-ms") || !strcmp(argv[s], "--cwd") || !strcmp(argv[s], "--owner") || !strcmp(argv[s], "--tail")
+                          || !strcmp(argv[s], "--head") || !strcmp(argv[s], "--grep")) && s + 1 < argc ? 2 : 1;
                 }
                 while (s + 1 < argc && (!strcmp(argv[s], "sh") || strstr(argv[s], "unisacc.com"))) s++;
             }
