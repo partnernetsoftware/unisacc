@@ -124,17 +124,19 @@ int dt_lock(const char *dir) {
 }
 void dt_unlock(int fd) { if (fd >= 0) { sy_flock(fd, 8); sy_close(fd); } }
 /* caller holds the lock; seq continues from the rows already in the file */
-static int dt_event(const char *dir, const char *id, const char *ev, const char *owner, long now, char *why, int wl) {
-    char p[2048], ts[24], row[256]; unsigned char *b = 0; int64_t n = 0; long seq = 1; int rc, w;
+static int dt_event_d(const char *dir, const char *id, const char *ev, const char *owner, const char *detail, long now, char *why, int wl) {
+    char p[2048], ts[24], row[1700]; unsigned char *b = 0; int64_t n = 0; long seq = 1; int rc, w;
     if (snprintf(p, sizeof p, "%s/task-events.tsv", dir) >= (int)sizeof p) { snprintf(why, wl, "directory path too long"); return 2; }
     rc = sy_read_file(p, &b, &n, 1L << 26);
     if (rc && rc != -ENOENT) { (void)cx_fmt(why, wl, "read task-events.tsv rc=%d", rc); return 2; }
     if (!rc) { seq = 0; for (long i = 0; i < n; i++) if (b[i] == '\n') seq++; free(b); if (seq < 1) seq = 1; }
     dt_utc(now, ts, sizeof ts);
-    w = snprintf(row, sizeof row, "%s%ld\t%s\t%s\t%s\t%s\n", rc ? DT_EHDR : "", seq, ts, id, ev, owner);
+    w = detail ? snprintf(row, sizeof row, "%s%ld\t%s\t%s\t%s\t%s\t%s\n", rc ? DT_EHDR : "", seq, ts, id, ev, owner, detail)
+               : snprintf(row, sizeof row, "%s%ld\t%s\t%s\t%s\t%s\n", rc ? DT_EHDR : "", seq, ts, id, ev, owner);
     if (w <= 0 || w >= (int)sizeof row || sy_append_file(p, row, w, 0600)) { snprintf(why, wl, "append task-events.tsv failed"); return 2; }
     return 0;
 }
+static int dt_event(const char *dir, const char *id, const char *ev, const char *owner, long now, char *why, int wl) { return dt_event_d(dir, id, ev, owner, 0, now, why, wl); }
 /* deadline_min 0 means none; owner may be null (unreserved) */
 int dt_add(const char *dir, const char *title, const char *domain, long deadline_min, const char *owner, long now, char *idout, int idcap, char *why, int wl) {
     DtSet s; int lk, rc; long top = 0; DtTask *t;
@@ -479,6 +481,67 @@ int dw_open(const char *dir, const char *id, const char *title, const char *writ
     if (!rc && (snprintf(p, sizeof p, "%s/work/index.tsv", dir) >= (int)sizeof p || sy_append_file(p, row, snprintf(row, sizeof row, "%s\n", id), 0600))) { snprintf(why, wl, "append work index failed"); rc = 2; }
     if (!rc) rc = dt_event(dir, id, "task.open", t.owner, now, why, wl);
     dw_free(&t); dt_unlock(lk); return rc;
+}
+/* 1 when entry (n bytes) is exactly one of the comma-joined entries of list */
+static int dw_has(const char *list, const char *entry, long n) {
+    for (const char *p = list; p && *p;) {
+        const char *e = strchr(p, ','); long m = e ? e - p : (long)strlen(p);
+        if (m == n && !memcmp(p, entry, n)) return 1;
+        p = e ? e + 1 : 0;
+    }
+    return 0;
+}
+/* new entries of src (comma-joined) that list lacks, appended to add (comma-joined); 0 ok, 1 when add overflows */
+static int dw_fresh(const char *src, const char *list, char *add, int cap) {
+    for (const char *p = src; p && *p;) {
+        const char *e = strchr(p, ','); long n = e ? e - p : (long)strlen(p);
+        if (n > 0 && !dw_has(list, p, n) && !dw_has(add, p, n)) { long used = (long)strlen(add); int w = snprintf(add + used, cap - used, "%s%.*s", used ? "," : "", (int)n, p); if (w >= cap - used) return 1; }
+        p = e ? e + 1 : 0;
+    }
+    return 0;
+}
+/* task amend: append write entries (write0, repo-relative or absolute under the root) and external directories (ext0) to an open
+ * order; add only. The new paths are snapshotted at their current content, so changes made before the amend are not reported
+ * as the order's own outside changes. added gets "write=..;ext=.." of what was actually new (empty when nothing: idempotent,
+ * no event). rc 2 for bad input and for a done order. Event task.amend carries the owner and the added items. */
+int dw_amend(const char *dir, const char *id, const char *write0, const char *ext0, long now, char *added, int acap, char *why, int wl) {
+    DwTask t; int lk, rc; char wn[1024] = "", canon[1024] = "", addw[1024] = "", adde[1024] = "", det[1500]; DwSnap *cur = 0; int n = 0; const char *ow;
+    added[0] = 0;
+    if (!dw_id_ok(id)) { snprintf(why, wl, "bad work order id"); return 2; }
+    if ((!write0 || !*write0) && (!ext0 || !*ext0)) { snprintf(why, wl, "task amend needs --write or --write-ext"); return 2; }
+    if ((lk = dt_lock(dir)) < 0) { (void)cx_fmt(why, wl, "cannot lock %s", dir); return 2; }
+    if ((rc = dw_load(dir, id, &t, why, wl))) { dt_unlock(lk); return rc; }
+    if (t.done) { (void)cx_fmt(why, wl, "work order %s is already done; amend refused", id); rc = 2; goto out; }
+    if (write0 && *write0) {
+        if (!dt_text_ok(write0, 1024) || strstr(write0, "..")) { snprintf(why, wl, "bad --write"); rc = 2; goto out; }
+        if (dw_write_norm(write0, t.root, wn, sizeof wn, why, wl)) { rc = 2; goto out; }
+        if (!dt_domain_ok(wn)) { snprintf(why, wl, "bad --write: need comma-joined repo-relative prefixes without blanks or ..; example: --write tools/foo.cx,tools/bar/"); rc = 2; goto out; }
+    }
+    if (ext0 && *ext0 && dw_ext_ok(ext0, canon, sizeof canon, why, wl)) { rc = 2; goto out; }
+    if (dw_fresh(wn, t.write, addw, sizeof addw) || dw_fresh(canon, t.ext, adde, sizeof adde)) { snprintf(why, wl, "oversized amend"); rc = 2; goto out; }
+    if (!addw[0] && !adde[0]) goto out;
+    if (strlen(t.write) + strlen(addw) + 2 > sizeof t.write || strlen(t.ext) + strlen(adde) + 2 > sizeof t.ext) { snprintf(why, wl, "write domain would exceed its size limit"); rc = 2; goto out; }
+    if (cx_fmt(det, sizeof det, "add_write=%s;add_ext=%s", addw[0] ? addw : "-", adde[0] ? adde : "-") || cx_fmt(added, acap, "write=%s;ext=%s", addw[0] ? addw : "-", adde[0] ? adde : "-")) { snprintf(why, wl, "amend text too long"); rc = 2; goto out; }
+    if (addw[0]) { int w = !strcmp(t.write, "-") ? snprintf(t.write, sizeof t.write, "%s", addw) : snprintf(t.write + strlen(t.write), sizeof t.write - strlen(t.write), ",%s", addw); if (w < 0 || w >= (int)sizeof t.write) { snprintf(why, wl, "oversized --write"); rc = 2; goto out; } }
+    if (adde[0]) { int w = snprintf(t.ext + strlen(t.ext), sizeof t.ext - strlen(t.ext), "%s%s", t.ext[0] ? "," : "", adde); if (w < 0 || w >= (int)sizeof t.ext) { snprintf(why, wl, "oversized --write-ext"); rc = 2; goto out; } }
+    rc = dw_scan(t.root, addw, adde, &cur, &n, why, wl);
+    if (rc) goto out;
+    {   DwSnap *m = realloc(t.snap, (size_t)(t.nsnap + n + 1) * sizeof *m);
+        if (!m) { snprintf(why, wl, "out of memory"); rc = 2; goto out; }
+        t.snap = m;
+        for (int i = 0; i < n; i++) {
+            int k, hit = cur[i].path[0] == '/' || (addw[0] && dw_in(addw, cur[i].path));
+            if (!hit) continue;
+            for (k = 0; k < t.nsnap && strcmp(t.snap[k].path, cur[i].path); k++) {}
+            if (k == t.nsnap) t.nsnap++;
+            t.snap[k] = cur[i];
+        }
+    }
+    ow = getenv("DEVSVC_OWNER");
+    rc = dw_save(dir, &t, why, wl);
+    if (!rc) rc = dt_event_d(dir, id, "task.amend", ow && dt_name_ok(ow, 64) ? ow : t.owner, det, now, why, wl);
+out:
+    free(cur); dw_free(&t); dt_unlock(lk); return rc;
 }
 /* devsvc events file: $DEVTASK_EVENTS, else $UNISACC_DEVSVC_DIR/events.tsv, else
  * $HOME/.cache/unisacc/devsvc/<first 16 hex of sha256(absolute git common dir)>/events.tsv (devsvc-core.cx header) */

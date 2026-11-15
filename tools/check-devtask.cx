@@ -124,6 +124,28 @@ int main(int argc, char **argv) {
                 " && printf 'EV\\t9\\t%ld\\tf.write\\towner=me\\tpid=1\\trc=0\\tms=1\\tpath=mine.txt\\tsha=%%s\\n' $(sha256sum <%s/repo/mine.txt | cut -c1-64) >>%s/ev.tsv && " WO "done w5",
                 dir, dir, now, dir, dir, now + 5, dir, dir, dir, dir, now + 7) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "OUTSIDE_CHANGED\tmine.txt\n") && strstr(r.out, "TASK_NOT_DONE\tw5\taccept_failed=0\toutside=1");
         ck(ok && events(st, "w5", "task.done") == 0, "work-owner-own-outside-write-still-blocks"); np_free(&r);
+        /* task amend: add-only write domain growth, snapshot baseline for the new paths, event with owner and added items, idempotence, done and dangerous refusals */
+        ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/ext/sub && echo e >%s/ext/sub/e1 && echo q >%s/ext/e2 && " WT "open --id xd --title doneorder --write in --accept true --deadline-min 10 --root %s/repo && " WT "done xd",
+                dir, dir, dir, dir, now + 8, dir, dir, now + 9) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "DONE\txd\t");
+        ck(ok, "amend-setup-ext-dir-and-done-order"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id a1 --title amend --write in --accept true --deadline-min 10 --root %s/repo && mkdir -p %s/repo/ap && echo p >%s/repo/ap/p.txt && echo q >%s/repo/ap/q.txt && " WT "status a1",
+                dir, now + 10, dir, dir, dir, dir, dir, now + 11) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "OUTSIDE_WARN\tap/p.txt\n") && strstr(r.out, "changed=0\t");
+        ck(ok, "amend-before-paths-outside-write-domain"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WO "amend a1 --write ap --write-ext %s/ext && echo q2 >>%s/repo/ap/p.txt && echo n2 >%s/ext/new2 && " WT "status a1",
+                dir, dir, now + 12, dir, dir, dir, dir, now + 13) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "TASK\tamend\ta1\tadded=write=ap;ext=")
+            && strstr(r.out, "CHANGED\tap/p.txt\n") && strstr(r.out, "/ext/new2\n") && !strstr(r.out, "ap/q.txt") && !strstr(r.out, "/ext/e2") && strstr(r.out, "changed=2\t") && strstr(r.out, "WRITE\tin,ap\n");
+        ck(ok, "amend-adds-domain-baselines-new-paths-and-judges-later-changes"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "grep -c 'a1[[:space:]]task.amend[[:space:]]me[[:space:]]add_write=ap;add_ext=' %s/st/task-events.tsv", dir) && !sh(cmd, &r) && !r.rc && r.out && atoi(r.out) == 1;
+        ck(ok && events(st, "a1", "task.amend") == 1, "amend-event-row-with-owner-and-added-items"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WO "amend a1 --write ap,in --write-ext %s/ext", dir, dir, now + 14, dir) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "added=none");
+        ck(ok && events(st, "a1", "task.amend") == 1, "amend-repeat-is-idempotent-no-new-event"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "amend xd --write ap 2>&1; echo rc=$?", dir, now + 15) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "already done") && strstr(r.out, "rc=2");
+        ck(ok && events(st, "xd", "task.amend") == 0, "amend-done-order-refused-rc2"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "H=$HOME; for d in / \"$H\" \"$(dirname $H)\" \"$(dirname $(dirname $H))\" relative/dir %s/nosuch; do " WT "amend a1 --write-ext \"$d\" >/dev/null 2>&1; echo rc=$?; done; "
+                WT "amend a1 --write ../x >/dev/null 2>&1; echo rc=$?; " WT "amend a1 --write /etc/x >/dev/null 2>&1; echo rc=$?; " WT "amend nosuch --write in >/dev/null 2>&1; echo rc=$?; " WT "amend a1 >/dev/null 2>&1; echo rc=$?",
+                dir, dir, now + 16, dir, now + 16, dir, now + 16, dir, now + 16) && !sh(cmd, &r) && !r.rc && r.out;
+        if (ok) { int n2 = 0; for (const char *q = r.out; (q = strstr(q, "rc=2")); q += 4) n2++; ok = n2 == 10 && events(st, "a1", "task.amend") == 1; }
+        ck(ok, "amend-dangerous-bad-and-missing-refused-rc2-and-leave-order-unchanged"); np_free(&r);
     }
     }
     if (GB) {
