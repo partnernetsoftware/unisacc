@@ -57,42 +57,96 @@
 #define TQ_KIT_SECS 20
 #define TQ_WARM_MAXARGS 24
 
-/* The native image is a build artifact, so it is cached by identity and never as a result.  The key is
-   cxlib.tlibpkg tp_unit_key over the tool's source closure (the tool, every unit it reaches by `use` and
-   every file those #include) with the product's own sha and the flag string "toolprep-v1"; an entry is
-   <KEY>.sha (one line: the sha256 of the image bytes) plus <image sha>.bin (the bytes, named by their own
-   content), both published through a private name and rename(2), so a reader sees a whole entry or none.
-   A hit is re-verified on every use by hashing the bytes again -- nothing about a previous run is
-   remembered and no verdict is ever stored or read back: what comes back is the product's ordinary -o
-   output for the same source.  A missing or mismatched piece is named and the tool compiles as before.
-   UNISACC_TOOLPREP_CACHE names the directory (default: cxlib.tlibpkg tp_cache_dir + /toolprep, so every
-   checkout with the same content shares one); an empty value turns reuse off. */
-static char tq_khex[65], tq_kdir[4400];
+/* The native image is a build artifact, so it is cached by identity and never as a result.
 
-/* 1 when a cache key was formed and TQ_KDIR exists, 0 to build without reuse. */
-static int tq_key(const char *root, const char *product, const char *tool, char *why, size_t wl) {
-    static char psha[65];
+   Identity is what can change an image and nothing else: the product binary's bytes plus the HEAD tree ids of
+   cx, ext and tools/cxlib (the three trees a tool's `use` units live in).  Any uncommitted change under those
+   three, or a git that cannot answer, means no caching for this run: the image is built and used but never
+   stored, because an image built from a dirty tree may not be the image that tree means.  The key is coarse
+   on purpose -- one changed byte anywhere in those trees gives another key, and nothing about a previous run
+   is ever remembered.
+
+   An entry is <KEY>.sha (one line: the sha256 of the image bytes) plus <image sha>.bin (the bytes, named by
+   their own content); both are published through a private name and rename(2), so a reader sees a whole entry
+   or none, and two processes publishing the same key publish the same bytes.  A hit copies the image and
+   re-hashes it on every use; a missing or mismatched piece is named and the tool compiles as before.
+   UNISACC_TOOLPREP_CACHE names the directory (default cxlib.tlibpkg tp_cache_dir + /toolprep, shared by every
+   checkout with the same content); an empty value turns reuse off. */
+static char tq_khex[17], tq_kdir[4400];
+
+/* A bounded copy, kept local on purpose: this module's header records that every module it pulls in is
+   compiled cold by every check that uses it, and text.text would be one more for three copies.  Returns 0 or,
+   when N does not fit, -1 with DST emptied. */
+static int tq_copy(char *dst, size_t cap, const char *src, size_t n) {
+    size_t i;
+    if (!dst || cap == 0) return -1;
+    if (n >= cap) { dst[0] = 0; return -1; }
+    for (i = 0; i < n; i++) dst[i] = src[i];
+    dst[n] = 0;
+    return 0;
+}
+
+/* git A1 A2 -> the trimmed first line in OUT; 0 or -1 */
+static int tq_git(const char *a1, const char *a2, char *out, size_t cap) {
+    char *v[] = {"git", (char *)a1, (char *)a2, 0}, *o = 0;
+    size_t on = 0, n;
+    int rc = cx_runv_timeout(v, 20, &o, &on);
+    out[0] = 0;
+    if (rc == 0 && o && on) {
+        n = on;
+        while (n > 0 && (o[n - 1] == '\n' || o[n - 1] == '\r')) n--;
+        (void)tq_copy(out, cap, o, n);
+    }
+    if (o) free(o);
+    return rc;
+}
+
+/* 1 when a key was formed and TQ_KDIR is usable, 0 to build without reuse. */
+static int tq_key(const char *product) {
+    static char dir[4400];
+    static char text[1024];
     const char *v = getenv("UNISACC_TOOLPREP_CACHE");
-    char *c;
+    char hex[65], *b;
+    size_t n = 0, used;
     tq_khex[0] = 0;
     if (v && !v[0]) return 0;   /* explicitly disabled */
-    if (tp_sha_file(product, psha)) return 0;
-    c = tp_closure(root, product, tool, why, wl);
-    if (!c) return 0;
-    if (tp_unit_key(root, psha, "toolprep-v1", tool, c, tq_khex)) tq_khex[0] = 0;
-    free(c);
-    if (!tq_khex[0]) return 0;
-    if (v && v[0]) { if (cx_fmt(tq_kdir, sizeof tq_kdir, "%s", v)) { tq_khex[0] = 0; return 0; } }
-    else {
-        static char dir[4400];
-        if (tp_cache_dir(dir, sizeof dir) || cx_fmt(tq_kdir, sizeof tq_kdir, "%s/toolprep", dir)) { tq_khex[0] = 0; return 0; }
+    b = (char *)cx_read(product, &n);
+    if (!b || n == 0) { if (b) free(b); return 0; }
+    cx_sha256_hex(b, (long)n, hex);
+    free(b);
+    if (cx_fmt(text, sizeof text, "%s\n", hex)) return 0;
+    used = strlen(text);
+    {   static const char *dirs[3] = {"cx", "ext", "tools/cxlib"};
+        int i;
+        for (i = 0; i < 3; i++) {
+            char spec[64], id[128];
+            size_t need;
+            if (cx_fmt(spec, sizeof spec, "HEAD:%s", dirs[i]) || tq_git("rev-parse", spec, id, sizeof id) || !id[0]) return 0;
+            need = used + strlen(dirs[i]) + strlen(id) + 2;
+            if (need >= sizeof text || cx_fmt(text + used, sizeof text - used, "%s %s\n", dirs[i], id)) return 0;
+            used = need;
+        }
+    }
+    {   /* an uncommitted change under those three trees: build, never store */
+        char *v2[] = {"git", "status", "--porcelain", "--", "cx", "ext", "tools/cxlib", 0}, *o = 0;
+        size_t on = 0;
+        int rc = cx_runv_timeout(v2, 20, &o, &on);
+        if (o) free(o);
+        if (rc != 0 || on > 0) return 0;
+    }
+    cx_sha256_hex(text, (long)used, hex);
+    if (tq_copy(tq_khex, sizeof tq_khex, hex, 16)) return 0;
+    if (v && v[0]) {
+        if (cx_fmt(tq_kdir, sizeof tq_kdir, "%s", v)) { tq_khex[0] = 0; return 0; }
+    } else if (tp_cache_dir(dir, sizeof dir) || cx_fmt(tq_kdir, sizeof tq_kdir, "%s/toolprep", dir)) {
+        tq_khex[0] = 0; return 0;
     }
     if (sy_mkdir_all(tq_kdir, 0755) && sy_exists(tq_kdir) != 1) { tq_khex[0] = 0; return 0; }
     return 1;
 }
 
-/* Copy the image of TQ_KHEX to BIN.  0 only when the entry is there and its bytes hash to the sha the
-   entry names (checked on every hit); 1 otherwise, and the caller builds. */
+/* Copy the image of TQ_KHEX to BIN.  0 only when the entry is there and its bytes hash to the sha the entry
+   names (hashed again on every hit, never remembered); 1 otherwise, and the caller builds. */
 static int tq_take(const char *bin) {
     static char p[4400];
     char want[65], hex[65];
@@ -103,7 +157,8 @@ static int tq_take(const char *bin) {
     b = cx_read(p, &n);
     if (!b) return 1;
     if (n != 65 || b[64] != '\n') { free(b); return 1; }
-    memcpy(want, b, 64); want[64] = 0; free(b);
+    if (tq_copy(want, sizeof want, b, 64)) { free(b); return 1; }
+    free(b);
     if (cx_fmt(p, sizeof p, "%s/%s.bin", tq_kdir, want)) return 1;
     b = cx_read(p, &n);
     if (!b) return 1;
@@ -114,20 +169,21 @@ static int tq_take(const char *bin) {
     return rc ? 1 : 0;
 }
 
-/* Publish the freshly built BIN under TQ_KHEX.  A failure only costs the next run a compile, so it is
-   named and not fatal. */
+/* Publish the freshly built BIN under TQ_KHEX.  A failure only costs the next run a compile, so it is named
+   and not fatal. */
 static void tq_put(const char *bin) {
     static char p[4400], tmp[4464], line[80];
     char hex[65];
     if (tp_sha_file(bin, hex)) return;
     if (cx_fmt(tmp, sizeof tmp, "%s/.tmp-%d", tq_kdir, sy_pid())) return;
-    if (sy_copy(bin, tmp, 0755)) { sy_eprintf("toolprep: cannot stage the cache entry %s\n", tq_khex); sy_unlink(tmp); return; }
+    if (sy_copy(bin, tmp, 0755)) { sy_eprintf("toolprep: cannot stage cache entry %s\n", tq_khex); sy_unlink(tmp); return; }
     if (cx_fmt(p, sizeof p, "%s/%s.bin", tq_kdir, hex) || sy_rename(tmp, p)) { sy_unlink(tmp); return; }
     if (cx_fmt(line, sizeof line, "%s\n", hex) || cx_fmt(tmp, sizeof tmp, "%s/.tmp-%d.sha", tq_kdir, sy_pid()) ||
         cx_fmt(p, sizeof p, "%s/%s.sha", tq_kdir, tq_khex)) return;
     if (cx_write(tmp, line, 65)) { sy_unlink(tmp); return; }
     if (sy_rename(tmp, p)) sy_unlink(tmp);
 }
+
 
 int tq_native(const char *root, const char *tool, const char *bin, char *why, size_t wl) {
     char bound[4400], product[4400], secs[16];
@@ -144,7 +200,7 @@ int tq_native(const char *root, const char *tool, const char *bin, char *why, si
     /* a cached image of this exact source closure: copied, its bytes hashed again, and that is all that is
        trusted.  Anything doubtful falls through to the builds below, which are the ones this function always
        had; the caller cannot tell a hit from a build except by the PREPARED line's via= field. */
-    if (tq_key(root, product, tool, why, wl) && tq_take(bin) == 0) {
+    if (tq_key(product) && tq_take(bin) == 0) {
         sy_printf("PREPARED\ttool-native\tbound_s=0\tno-test-result\tvia=cache\t%s\n", tool);
         return 0;
     }
