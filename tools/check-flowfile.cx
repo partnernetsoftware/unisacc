@@ -204,6 +204,30 @@ int main(void) {
     ff_out_free(&o);
     rc = ff_run("file.write", A("path=both.txt;content=a;from=r.txt"), &o);
     ck(rc != 0 && tx_eqz(o.err, "EARG"), "write-content-and-from-refuse");
+    /* .cx compile guard: the installed product compiles the new content in a shadow tree first */
+    {
+        char prod[2048];
+        ff_out_free(&o);
+        if (sy_realpath("unisacc.com", prod, sizeof prod) >= 0) sy_setenv("UNISACC_CC_PRODUCT", prod, 1);
+        rc = ff_run("file.write", A("path=g.cx;content=int g1(void) { return 1%3B }%0A"), &o);
+        ck(rc == 0 && o.ccnote == 0 && holds("g.cx", "int g1(void) { return 1; }\n"), "cx-write-good-compiles");
+        ff_out_free(&o);
+        rc = ff_run("file.write", A("path=g.cx;content=int g1(void) { return 1 }%0A"), &o);
+        if (!(rc != 0 && tx_eqz(o.err, "ECOMPILE") && o.buf && o.n > 0)) printf("INFO\tcx-write-bad rc=%d err=%s n=%ld why=%s\n", rc, o.err, o.n, o.why);
+        ck(rc != 0 && tx_eqz(o.err, "ECOMPILE") && o.buf && o.n > 0 && holds("g.cx", "int g1(void) { return 1; }\n"), "cx-write-bad-refused-unchanged");
+        ff_out_free(&o);
+        rc = ff_run("file.edit", A("path=g.cx;old=1%3B;new=1"), &o);
+        ck(rc != 0 && tx_eqz(o.err, "ECOMPILE") && holds("g.cx", "int g1(void) { return 1; }\n"), "cx-edit-bad-refused-unchanged");
+        ff_out_free(&o);
+        rc = ff_run("file.edit", A("path=g.cx;old=return 1;new=return 2"), &o);
+        ck(rc == 0 && holds("g.cx", "int g1(void) { return 2; }\n"), "cx-edit-good-compiles");
+        ff_out_free(&o);
+        rc = ff_run("file.write", A("path=g.cx;content=int g1(void) { return 1 }%0A;compile_check=0"), &o);
+        ck(rc == 0 && o.ccnote == 1 && holds("g.cx", "int g1(void) { return 1 }\n"), "cx-write-skip-flag-allows");
+        ff_out_free(&o);
+        rc = ff_run("file.write", A("path=g.txt;content=int g1(void) { return 1 }%0A"), &o);
+        ck(rc == 0 && o.ccnote == 0, "non-cx-not-compiled");
+    }
     ff_out_free(&o);
     rc = ff_run("file.write", A("path=none.txt"), &o);
     ck(rc != 0 && tx_eqz(o.err, "EARG"), "write-no-content-refuse");

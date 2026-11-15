@@ -53,6 +53,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use sys.sha
+#pragma unisa use sys.proc
 #pragma unisa use os.osx
 #pragma unisa use mem.heap
 #pragma unisa use text.text
@@ -66,6 +67,7 @@ typedef struct ff_out {
     char sha[65];      /* read: sha256 of the whole file; write/edit: sha256 of the new file */
     long lines;        /* total lines of the (new) file */
     long count;        /* edit: replacements made */
+    int ccnote;        /* .cx compile guard: 0 checked or n/a, 1 skipped (compile_check=0), 2 undecided (timeout) */
 } ff_out;
 
 #define FF_MAX_FILE (256L * 1024 * 1024)
@@ -514,6 +516,113 @@ static int ff_flag(const char *args, const char *key, int *on, ff_out *o) {
     return 0;
 }
 
+/* ---- compile guard: a .cx write is first compiled in a private shadow tree (the new content at
+   the same relative path, every other entry a symlink into the root) with the installed product
+   (ROOT/unisacc.com -c, 10 s).  Compile failure: ECOMPILE, nothing written, out->why carries the
+   first 20 lines of the compiler output.  Timeout or a spawn failure: allowed (o->ccnote set).
+   Skipped with compile_check=0 or when the target is not a .cx file. */
+static int ff_is_cx(const char *p) {
+    long n = tx_len(p, FF_PATH);
+    return n > 3 && p[n - 3] == '.' && p[n - 2] == 'c' && p[n - 1] == 'x';
+}
+
+/* Mirror DIR (a directory of the root) into SH: symlink every entry except KEEP. */
+static int ff_cc_mirror(const char *dir, const char *sh, const char *keep) {
+    sy_dir_t d;
+    char a[FF_PATH], b[FF_PATH];
+    int r;
+    if (sy_dir_open(&d, dir) != 0) return -1;
+    while ((r = sy_dir_next(&d)) == 1) {
+        if (keep && tx_eqz(d.name, keep)) continue;
+        a[0] = 0; ff_cat(a, sizeof a, dir); ff_cat(a, sizeof a, "/"); ff_cat(a, sizeof a, d.name);
+        b[0] = 0; ff_cat(b, sizeof b, sh); ff_cat(b, sizeof b, "/"); ff_cat(b, sizeof b, d.name);
+        sy_symlink(a, b);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int ff_ccheck(const char *args, const char *root, const char *target, const char *buf, long n, ff_out *o) {
+    char sh[FF_PATH], rd[FF_PATH], sd[FF_PATH], comp[256], prod[FF_PATH], logp[FF_PATH], outp[FF_PATH];
+    const char *rel;
+    long rl = tx_len(root, FF_PATH), i, k;
+    int on = 1, fd, r, bad = 0;
+    sy_spawn_t sp;
+    sy_exit_t st;
+    char *argv[7];
+    o->ccnote = 0;
+    {
+        char *s = 0;
+        int h = ff_arg(args, "compile_check", &s, 0);
+        if (h < 0) return ff_fail(o, "EESCAPE", "bad escape in key", "compile_check");
+        if (h == 1) { on = !tx_eqz(s, "0"); mm_free(s); }
+    }
+    if (!ff_is_cx(target)) return 0;
+    if (!on) { o->ccnote = 1; return 0; }
+    while (rl > 1 && root[rl - 1] == '/') rl--;
+    if (tx_len(target, FF_PATH) <= rl || target[rl] != '/') return 0;
+    rel = target + rl + 1;
+    prod[0] = 0; ff_cat(prod, sizeof prod, root); ff_cat(prod, sizeof prod, "/unisacc.com");
+    {
+        sy_stat_t ps;
+        const char *ev = sy_env("UNISACC_CC_PRODUCT");
+        if (ev && ev[0]) { prod[0] = 0; ff_cat(prod, sizeof prod, ev); }
+        if (sy_stat(prod, &ps) != 0) { o->ccnote = 2; return 0; }   /* no product: undecided, allowed */
+    }
+    if (sy_mkdtemp(sy_tmpdir(), "ff-cc-", sh, FF_PATH) != 0) { o->ccnote = 2; return 0; }
+    /* walk the components of REL: mirror each directory level, keep the next component real */
+    rd[0] = 0; ff_cat(rd, sizeof rd, root);
+    sd[0] = 0; ff_cat(sd, sizeof sd, sh);
+    for (i = 0; ; ) {
+        for (k = 0; rel[i + k] && rel[i + k] != '/' && k < 255; k++) comp[k] = rel[i + k];
+        comp[k] = 0;
+        ff_cc_mirror(rd, sd, comp);
+        ff_cat(rd, sizeof rd, "/"); ff_cat(rd, sizeof rd, comp);
+        ff_cat(sd, sizeof sd, "/"); ff_cat(sd, sizeof sd, comp);
+        if (!rel[i + k]) break;
+        sy_mkdir(sd, 0755);
+        i += k + 1;
+    }
+    fd = sy_open_new(sd, 0644);
+    if (fd < 0) { o->ccnote = 2; goto out; }
+    if (n > 0) sy_write_all(fd, buf, n);
+    sy_close(fd);
+    logp[0] = 0; ff_cat(logp, sizeof logp, sh); ff_cat(logp, sizeof logp, ".log");
+    outp[0] = 0; ff_cat(outp, sizeof outp, sh); ff_cat(outp, sizeof outp, ".o");
+    fd = sy_open_new(logp, 0644);
+    if (fd < 0) { o->ccnote = 2; goto out; }
+    argv[0] = "sh"; argv[1] = prod; argv[2] = "-c"; argv[3] = (char *)rel; argv[4] = "-o"; argv[5] = outp; argv[6] = 0;
+    sy_spawn_init(&sp);
+    sp.argv = argv; sp.cwd = sh; sp.in_fd = SY_STDIO_NULL; sp.out_fd = fd; sp.err_fd = fd;
+    sp.pgroup = -1; sp.deadline_ms = 10000;
+    r = sy_proc_run(&sp, &st);
+    sy_close(fd);
+    if (r < 0 || st.timed_out) { o->ccnote = 2; goto out; }
+    if (!st.exited || st.code != 0) {
+        unsigned char *lb = 0;
+        int64_t ln = 0;
+        char why[2048];
+        long w = 0, lines = 0;
+        sy_read_file(logp, &lb, &ln, 1 << 20);
+        for (i = 0; lb && i < (long)ln && lines < 20 && w < (long)sizeof why - 2; i++) {
+            why[w++] = (char)lb[i];
+            if (lb[i] == '\n') lines++;
+        }
+        why[w] = 0;
+        if (lb) mm_free(lb);
+        ff_fail(o, "ECOMPILE", "refused-compile: the new content does not compile:", rel);
+        if (o->buf) mm_free(o->buf);
+        o->buf = (char *)mm_alloc(w + 1);
+        if (o->buf) { for (i = 0; i < w; i++) o->buf[i] = why[i]; o->buf[w] = 0; o->n = w; }
+        bad = 1;
+    }
+out:
+    sy_remove_all(sh);
+    sy_unlink(logp);
+    sy_unlink(outp);
+    return bad;
+}
+
 static int ff_write(const char *args, const char *root, int haveroot, const char *path, ff_out *o) {
     char full[FF_PATH], target[FF_PATH];
     char *content = 0, *from = 0, *cur = 0;
@@ -539,6 +648,7 @@ static int ff_write(const char *args, const char *root, int haveroot, const char
     if (ff_target(root, full, mkdir, target, o)) goto done;
     if (ff_load(target, &cur, &curn, &mode, &exists, o)) goto done;
     if (ff_expect(args, cur, curn, exists, target, o)) goto done;
+    if (ff_ccheck(args, root, target, content, cn, o)) goto done;
     if (ff_publish(target, content, cn, mode, o)) goto done;
     bad = ff_report(o, content, cn, 0);
 done:
@@ -593,6 +703,7 @@ static int ff_edit(const char *args, const char *root, int haveroot, const char 
         res[w] = 0;
         if (w != rn) { ff_fail(o, "EIO", "internal length mismatch editing", target); goto done; }
     }
+    if (ff_ccheck(args, root, target, res, rn, o)) goto done;
     if (ff_publish(target, res, rn, mode, o)) goto done;
     bad = ff_report(o, res, rn, count);
 done:
@@ -930,7 +1041,7 @@ int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out) {
     int haveroot, rc, kind;
     if (!out) return 1;
     out->rc = 0; out->buf = 0; out->n = 0; out->err[0] = 0; out->why[0] = 0; out->sha[0] = 0;
-    out->lines = 0; out->count = 0;
+    out->lines = 0; out->count = 0; out->ccnote = 0;
     if (!op) return ff_fail(out, "EOP", "no operator", 0);
     if (!args) args = "";
     if (tx_eqz(op, "file.read")) kind = 0;
@@ -957,7 +1068,8 @@ int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out) {
     else rc = ff_edit(args, root, haveroot, path, out);
     mm_free(path);
     if (rc != 0) {
-        if (out->buf) { mm_free(out->buf); out->buf = 0; out->n = 0; }
+        /* ECOMPILE keeps the first 20 compiler lines in out->buf */
+        if (out->buf && !tx_eqz(out->err, "ECOMPILE")) { mm_free(out->buf); out->buf = 0; out->n = 0; }
         out->rc = 1;
         return 1;
     }
