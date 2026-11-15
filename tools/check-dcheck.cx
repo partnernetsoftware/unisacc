@@ -138,6 +138,75 @@ int main(void) {
             ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\tfail=0\tdeferred=0\tnot_run=0\t") && has("JOB_DONE\t"), "bg-wait-shows-result");
         } else ck(0, "bg-wait-shows-result");
     }
+    {   /* selection and run as two jobs: --select-only --out writes the manifest, --from runs only its batches */
+        char m1[2400], m2[2400], m3[2400], bad1[2400]; char *a[8]; unsigned char *mb = 0; int64_t mn = 0; char mt[2048];
+        (void)cx_fmt(m1, sizeof m1, "%s/m1.tsv", fx); (void)cx_fmt(m2, sizeof m2, "%s/m2.tsv", fx); (void)cx_fmt(m3, sizeof m3, "%s/m3.tsv", fx);
+        a[0] = "--select-only"; a[1] = "--out"; a[2] = m1; a[3] = "tools/fxsrc.cx"; a[4] = 0;
+        rc = dcheck("2500", a);
+        ck(rc == 0 && has("DCHECK_SELECT\tchanged=1\tbatches=3\ttier=commit\t") && has("DCHECK_MANIFEST\tfile=") && !has("\nCHECK\t") && !has("\nDCHECK\t") && !has("fx-daily"), "select-only-prints-summary-and-runs-nothing");
+        mt[0] = 0;
+        if (sy_read_file(m1, &mb, &mn, 1 << 16) == 0 && mn < (int64_t)sizeof mt) { mm_copy(mt, sizeof mt, mb, mn); mt[mn] = 0; free(mb); }
+        ck(!strncmp(mt, "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\n", 36) && strstr(mt, "BATCH\tfx-pass\t55\t0\n") && strstr(mt, "BATCH\tfx-fail\t55\t0\n") && strstr(mt, "BATCH\tfx-slow\t70\t0\n") && !strstr(mt, "fx-daily") && strstr(mt, "END\tbatches=3\textra=0\n"), "select-only-manifest-content");
+        a[0] = "--select-only"; a[1] = "--out"; a[2] = m2; a[3] = "--only"; a[4] = "fx-pass,fx-daily"; a[5] = "tools/fxsrc.cx"; a[6] = 0;
+        rc = dcheck("2500", a);
+        mt[0] = 0; mb = 0;
+        if (rc == 0 && sy_read_file(m2, &mb, &mn, 1 << 16) == 0 && mn < (int64_t)sizeof mt) { mm_copy(mt, sizeof mt, mb, mn); mt[mn] = 0; free(mb); }
+        ck(strstr(mt, "BATCH\tfx-pass\t") && !strstr(mt, "fx-fail") && strstr(mt, "EXTRA\tfx-daily\n") && strstr(mt, "END\tbatches=1\textra=1\n"), "select-only-manifest-honours-only-and-extra");
+        a[0] = "--from"; a[1] = m1; a[2] = "--par"; a[3] = "3"; a[4] = 0;
+        rc = dcheck("1500", a);
+        ck(has("DCHECK_SELECT\tchanged=1\tbatches=3\ttier=commit\tselect_ms=0\n") && has("CHECK\tfx-pass\tPASS\t") && has("CHECK\tfx-fail\tFAIL\t") && has("\tfirst=FAIL fx-fail assertion-7\n") && has("CHECK\tfx-slow\tDEFERRED\t")
+            && has("DCHECK_WARN\tbudget-above-node-cap\tid=fx-slow\tbudget=70\n") && has("\nDCHECK\ttotal=3\tpass=1\tfail=1\tdeferred=1\tnot_run=0\twall_ms=") && rc == 1 && num("DCHECK_FLOW\tpeak=") > 1 && !has("DCHECK_MANIFEST"), "from-runs-manifest-batches-without-selection");
+        a[0] = "--from"; a[1] = m2; a[2] = 0;
+        rc = dcheck("4000", a);
+        ck(rc == 3 && has("CHECK\tfx-pass\tPASS\t") && has("CHECK\tfx-daily\tNOT_RUN\t0\tfirst=not selected") && !has("fx-fail") && has("DCHECK\ttotal=2\tpass=1\tfail=0\tdeferred=0\tnot_run=1\t"), "from-reports-extra-as-not-run");
+        (void)put("m3.tsv", "DCHECK_MANIFEST\t1\nTIER\tdaily\nCHANGED\t0\nBATCH\tfx-daily\t-1\t0\nEND\tbatches=1\textra=0\n");
+        a[0] = "--from"; a[1] = m3; a[2] = 0;
+        rc = dcheck("4000", a);
+        ck(rc == 0 && has("DCHECK_SELECT\tchanged=0\tbatches=1\ttier=daily\t") && has("CHECK\tfx-daily\tPASS\t") && !has("fx-pass") && has("DCHECK\ttotal=1\tpass=1\t"), "from-only-listed-batches-no-path-no-git");
+        {   /* damaged manifests: each is rc 2 and runs nothing; the id with shell syntax never reaches a command */
+            static const char *dm[][2] = {
+                {"bad-trunc", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass\t55\t0\n"},
+                {"bad-header", "DCHECK_MANIFEST\t2\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass\t55\t0\nEND\tbatches=1\textra=0\n"},
+                {"bad-count", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass\t55\t0\nEND\tbatches=2\textra=0\n"},
+                {"bad-id", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass';touch\t55\t0\nEND\tbatches=1\textra=0\n"},
+                {"bad-dup", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass\t55\t0\nBATCH\tfx-pass\t55\t0\nEND\tbatches=2\textra=0\n"},
+                {"bad-tier", "DCHECK_MANIFEST\t1\nTIER\tweekly\nCHANGED\t1\nBATCH\tfx-pass\t55\t0\nEND\tbatches=1\textra=0\n"},
+                {"bad-field", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nBATCH\tfx-pass\tx\t0\nEND\tbatches=1\textra=0\n"},
+                {"bad-after-end", "DCHECK_MANIFEST\t1\nTIER\tcommit\nCHANGED\t1\nEND\tbatches=0\textra=0\nBATCH\tfx-pass\t55\t0\n"},
+                {"bad-empty", ""},
+                {0, 0}};
+            int allbad = 1;
+            for (int i = 0; dm[i][0]; i++) {
+                char nm[64]; (void)cx_fmt(nm, sizeof nm, "%s.tsv", dm[i][0]); (void)put(nm, dm[i][1]); (void)cx_fmt(bad1, sizeof bad1, "%s/%s", fx, nm);
+                a[0] = "--from"; a[1] = bad1; a[2] = 0;
+                rc = dcheck("4000", a);
+                if (rc != 2 || has("\nCHECK\t") || has("DCHECK\ttotal=")) { allbad = 0; printf("INFO\tnot refused: %s rc=%d\n", dm[i][0], rc); }
+            }
+            ck(allbad, "from-damaged-manifest-refused-rc2-runs-nothing");
+            (void)cx_fmt(bad1, sizeof bad1, "%s/nosuch.tsv", fx); a[0] = "--from"; a[1] = bad1; a[2] = 0; rc = dcheck("4000", a);
+            ck(rc == 2 && !has("\nCHECK\t"), "from-missing-file-rc2");
+        }
+        {   char *e1[] = {"--select-only", "tools/fxsrc.cx", 0}, *e2[] = {"--out", m1, "tools/fxsrc.cx", 0}, *e3[] = {"--from", m1, "tools/fxsrc.cx", 0}, *e4[] = {"--from", m1, "--only", "fx-pass", 0}, *e5[] = {"--from", m1, "--tier", "daily", 0}, *e6[] = {"--from", m1, "--select-only", "--out", m2, 0};
+            int r1 = dcheck("4000", e1), r2 = dcheck("4000", e2), r3 = dcheck("4000", e3), r4 = dcheck("4000", e4), r5 = dcheck("4000", e5), r6 = dcheck("4000", e6);
+            ck(r1 == 2 && r2 == 2 && r3 == 2 && r4 == 2 && r5 == 2 && r6 == 2, "select-only-out-from-option-conflicts-rc2");
+        }
+        {   /* the two jobs composed as devsvc background jobs: select-only --bg, then --from --bg */
+            char id1[128] = "", id2[128] = ""; const char *q; char *w[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id1, "--timeout-ms", "30000", 0};
+            char mb2[2400]; (void)cx_fmt(mb2, sizeof mb2, "%s/mbg.tsv", fx);
+            a[0] = "--bg"; a[1] = "--select-only"; a[2] = "--out"; a[3] = mb2; a[4] = "--only"; a[5] = "fx-pass"; a[6] = "tools/fxsrc.cx"; a[7] = 0;
+            rc = dcheck("4000", a); q = strstr(out, "JOB\t");
+            if (q) { long k = 0; q += 4; while (q[k] && q[k] != '\t' && q[k] != '\n' && k < (long)sizeof id1 - 1) { id1[k] = q[k]; k++; } id1[k] = 0; }
+            if (rc == 0 && id1[0]) { rc = runv(w, 0); ck(rc == 0 && has("DCHECK_MANIFEST\tfile=") && has("JOB_DONE\t") && sy_is_reg(mb2) == 1, "bg-select-only-writes-manifest"); } else ck(0, "bg-select-only-writes-manifest");
+            a[0] = "--bg"; a[1] = "--from"; a[2] = mb2; a[3] = "--par"; a[4] = "2"; a[5] = 0;
+            rc = dcheck("4000", a); q = strstr(out, "JOB\t");
+            if (q) { long k = 0; q += 4; while (q[k] && q[k] != '\t' && q[k] != '\n' && k < (long)sizeof id2 - 1) { id2[k] = q[k]; k++; } id2[k] = 0; }
+            if (rc == 0 && id2[0]) { char *w2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id2, "--timeout-ms", "30000", 0}; rc = runv(w2, 0); ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\t"), "bg-from-runs-manifest-batches"); } else ck(0, "bg-from-runs-manifest-batches");
+        }
+        {   char *a2[] = {"--only", "fx-pass", "tools/fxsrc.cx", 0};
+            rc = dcheck("4000", a2);
+            ck(rc == 0 && has("DCHECK_SELECT\t") && has("CHECK\tfx-pass\tPASS\t") && has("\nDCHECK\ttotal=1\tpass=1\t") && !has("DCHECK_MANIFEST"), "default-still-selects-and-runs-in-one-command");
+        }
+    }
     {   char *rm[] = {"rm", "-rf", fx, 0}; (void)runv(rm, 0); }
     printf("CHECK_DCHECK\tchecks=%d\tfailed=%d\telapsed_ms=%ld\n", checks, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;

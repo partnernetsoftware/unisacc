@@ -128,10 +128,37 @@ int main(int argc, char **argv) {
         ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(want) && has("CFG\tlock\tregistry\n") && has("CFG\tlock\tderive\n") && has("\nDEVSVC_CONFIG\ttable="), "config-reads-table");
         if (setenv("DEVSVC_REPO_TABLE", "/tmp/devsvc-check-no-such-table.tsv", 1)) return 2;
         ck(dv1("config", 0, 0, 0, 0, 0) == 3 && has("unreadable"), "config-missing-table-rc3");
-        if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2; }
+        if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2;
+        /* derive 路径选择:缺省(--check)用并发版 derive-flow,--write 仍串行 derive 并持锁;并发版缺失回退串行 */
+        if (setenv("DEVSVC_DERIVE_DRY", "1", 1)) return 2;
+        ck(dv1("derive", "--check", "--only", "layer-api", 0, 0) == 0 && has("DEVSVC_DERIVE\tplan=tools/derive-flow.cx\tfallback=tools/derive.cx\n"), "derive-check-default-flow");
+        ck(dv1("derive", "--write", "--only", "layer-api", 0, 0) == 0 && has("DEVSVC_DERIVE\tplan=tools/derive.cx\tlock=derive\n") && !has("derive-flow"), "derive-write-stays-serial");
+        if (unsetenv("DEVSVC_DERIVE_DRY") || setenv("DEVSVC_DERIVE_FLOW", "tools/devsvc-check-no-such-flow.cx", 1)) return 2;
+        ck(dv1("derive", "--check", "--only", "devsvc-check-no-such-item", 0, 0) != 0 && has("DEVSVC_DERIVE\tvia=serial-fallback\tflow=tools/devsvc-check-no-such-flow.cx\n") && !has("via=flow"), "derive-missing-flow-falls-back-serial");
+        if (unsetenv("DEVSVC_DERIVE_FLOW")) return 2; }
 
     if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;   /* 事件落盘轮转阈值调小;命令完成事件的 owner */
     if (A1) {
+        /* git commit 参数严格解析(夹具仓,不进共享检出):--help/未知选项/缺 -m/缺路径来源/空首行/署名首行一律 rc 2,HEAD 与索引不变;合法参数过解析 */
+        {   char h0[128], h1[128], i0[2048], i1[2048]; char *sv[] = {"git", "rev-parse", "HEAD", 0}; char *st[] = {"git", "add", "-A", 0}; char *dd[] = {"git", "diff", "--cached", "--stat", 0};
+            char p2[600]; int okc;
+            F(p2, sizeof p2, "%s/staged.txt", fx);
+            okc = sy_write_atomic(p2, "staged\n", 7, 0644) == 0 && cap2(st, fx, out2, sizeof out2) == 0;
+            okc = okc && cap2(sv, fx, h0, sizeof h0) == 0 && cap2(dd, fx, i0, sizeof i0) == 0 && strstr(i0, "staged.txt");
+            ck(okc, "gitargs-fixture-has-staged-entry");
+            { char *a1[] = {"git", "commit", "--help", 0}, *a2[] = {"git", "commit", "-m", "x", "--whole", "a", "--bogus", 0}, *a3[] = {"git", "commit", "--whole", "staged.txt", 0},
+                   *a4[] = {"git", "commit", "-m", "x", 0}, *a5[] = {"git", "commit", "-m", "", "--whole", "staged.txt", 0}, *a6[] = {"git", "commit", "-m", "Co-Authored-By: A <a@b>", "--whole", "staged.txt", 0},
+                   *a7[] = {"git", "commit", "-m", "  \n\nbody", "--whole", "staged.txt", 0}, *a8[] = {"git", "commit", "-h", 0};
+              char **all[] = {a1, a2, a3, a4, a5, a6, a7, a8}; int k, allrc = 1;
+              for (k = 0; k < 8; k++) if (dvat(fx, out, sizeof out, all[k]) != 2) { allrc = 0; printf("INFO\tgitargs case %d rc mismatch\n", k + 1); }
+              ck(allrc, "gitargs-help-unknown-missing-empty-signature-all-rc2");
+              (void)dvat(fx, out, sizeof out, a6); ck(has("说明首行必须是正文,署名放最后空行后"), "gitargs-signature-first-line-named-hint"); }
+            okc = cap2(sv, fx, h1, sizeof h1) == 0 && cap2(dd, fx, i1, sizeof i1) == 0 && !strcmp(h0, h1) && !strcmp(i0, i1);
+            ck(okc, "gitargs-rejected-leave-head-and-index-unchanged");
+            if (setenv("DEVSVC_GIT_PARSE_ONLY", "1", 1)) return 2;
+            { char *g1[] = {"git", "commit", "-m", "正文首行\n\nCo-Authored-By: C <c@d>", "--whole", "staged.txt", "--push", 0}, *g2[] = {"git", "commit", "-m", "body", "--keyed", "p", "k1,k2", 0};
+              ck(dvat(fx, out, sizeof out, g1) == 0 && has("GIT_ARGS_OK") && dvat(fx, out, sizeof out, g2) == 0 && has("GIT_ARGS_OK"), "gitargs-legal-args-pass-parse"); }
+            (void)unsetenv("DEVSVC_GIT_PARSE_ONLY"); }
     ck(dv1("ping", 0, 0, 0, 0, 0) == 3, "ping-without-instance-rc3");
     /* 作业目录清理夹具:旧的已结束(rc 回拨 25 小时)、新的已结束、无 rc 的在途,另放一个非作业名目录 */
     {   const char *names[4] = {"100-1", "200-2", "300-3", "not-a-job"}; int i;

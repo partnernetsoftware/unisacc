@@ -20,6 +20,9 @@
  *       outside the write domain; all pass -> devsvc event task.done, task-events.tsv row, DONE line, rc 0; otherwise
  *       TASK_NOT_DONE with the failing output tails, rc 1, and the order stays open (done may be retried any time)
  *   task list        every work order with state open|overdue|done
+ *   task amend ID --write P,P... [--write-ext ABSDIR]...   append write entries or external directories to an open order (add only, same
+ *       validation as open; new paths snapshotted at their current content; event task.amend with owner and added items; done order: rc 2;
+ *       adding what is already there is a no-op, rc 0, no event)
  *   $DEVTASK_ACCEPT_DIRECT=1 runs acceptance by sh -c under the root and skips the devsvc event (checks only).
  * Common: --dir D picks the store directory; otherwise $DEVTASK_DIR; otherwise the devsvc instance directory
  * derived from the repo table ($DEVSVC_REPO_TABLE or tools/devsvc-repo.tsv under the git top level).
@@ -157,10 +160,11 @@ static void paths(const char *tag, sb *b) {
 }
 static int task_main(int argc, char **argv, long now) {
     const char *sub = argc > 2 ? argv[2] : "", *id = 0, *title = 0, *dmin = 0, *rootopt = 0, *cwdopt = 0, *acc[DW_ACC + 1]; char extraw[1024] = "", dir[1024], root[1024], why[2048] = ""; int nacc = 0, rc, i = 3;
-    int isopen = !strcmp(sub, "open"), islist = !strcmp(sub, "list"), direct = getenv("DEVTASK_ACCEPT_DIRECT") && *getenv("DEVTASK_ACCEPT_DIRECT");
+    int isamend = !strcmp(sub, "amend"), isopen = !strcmp(sub, "open"), islist = !strcmp(sub, "list"), direct = getenv("DEVTASK_ACCEPT_DIRECT") && *getenv("DEVTASK_ACCEPT_DIRECT");
     DwTask t; sb *in, *out, *fo = 0; int nin = 0, nout = 0, nfo = 0;
-    if (!isopen && !islist && strcmp(sub, "status") && strcmp(sub, "done")) {
+    if (!isopen && !islist && !isamend && strcmp(sub, "status") && strcmp(sub, "done")) {
         fprintf(stderr, "usage: devtask task open --id ID --title T --write P... [--write-ext ABSDIR]... --accept CMD [--accept CMD]... --deadline-min N [--root R] [--cwd DIR]\n"
+                        "       devtask task amend ID --write P,P... [--write-ext ABSDIR]...\n"
                         "       devtask task status ID | task done ID | task list   (all: [--dir D])\n");
         return 2;
     }
@@ -176,7 +180,7 @@ static int task_main(int argc, char **argv, long now) {
         else if (isopen && !strcmp(a, "--deadline-min")) dst = &dmin;
         else if (isopen && !strcmp(a, "--root")) dst = &rootopt;
         else if (isopen && !strcmp(a, "--cwd")) dst = &cwdopt;
-        else if (isopen && !strcmp(a, "--write-ext")) {
+        else if ((isopen || isamend) && !strcmp(a, "--write-ext")) {
             int w;
             if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) return bad("missing value for", a);
             w = snprintf(extraw + strlen(extraw), sizeof extraw - strlen(extraw), "%s%s", extraw[0] ? "," : "", argv[i + 1]);
@@ -184,7 +188,7 @@ static int task_main(int argc, char **argv, long now) {
             i++; continue;
         }
         else if (isopen && !strcmp(a, "--accept")) { if (i + 1 >= argc) return bad("missing value for", a); if (nacc >= DW_ACC) return bad("too many --accept", 0); acc[nacc++] = argv[++i]; continue; }
-        else if (isopen && !strcmp(a, "--write")) {
+        else if ((isopen || isamend) && !strcmp(a, "--write")) {
             long used = (long)strlen(dom);
             if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) return bad("missing value for", a);
             while (i + 1 < argc && strncmp(argv[i + 1], "--", 2)) {
@@ -206,8 +210,15 @@ static int task_main(int argc, char **argv, long now) {
         for (const char *q = dmin; *q; q++) if (*q < '0' || *q > '9') return bad("bad --deadline-min", dmin);
         if (strlen(dmin) > 6 || (min = atol(dmin)) < 1) return bad("bad --deadline-min", dmin);
         if (rootopt) { if (snprintf(root, sizeof root, "%s", rootopt) >= (int)sizeof root) return bad("--root too long", 0); } else if (toplevel(root, sizeof root)) return 2;
+        {   char wn2[1024]; if (strcmp(dom, "-") && dt_domain_ok(dom) == 0 && !strstr(dom, "..") && dw_write_norm(dom, root, wn2, sizeof wn2, why, sizeof why) == 0) (void)cx_fmt(dom, sizeof dom, "%s", wn2); }
         rc = dw_open(dir, id, title, dom, acc, nacc, min, root, extraw, cwdopt, now, why, sizeof why);
         if (!rc) printf("TASK\topen\t%s\tdeadline_s=%ld\taccept=%d\twrite=%s\n", id, min * 60, nacc, dom);
+        goto end;
+    }
+    if (isamend) {
+        char added[2100];
+        rc = dw_amend(dir, id, dom, extraw, now, added, sizeof added, why, sizeof why);
+        if (!rc) printf("TASK\tamend\t%s\tadded=%s\n", id, added[0] ? added : "none");
         goto end;
     }
     if (islist) {
