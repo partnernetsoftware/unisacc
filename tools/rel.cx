@@ -20,6 +20,9 @@
  *           is then older than the registry.
  * --timing  one REL_TIMING line on stderr (read_ms, scan_ms); it changes no result.
  *
+ *   sh ./unisacc.com tools/rel.cx -- path A B [--root DIR]
+ *           one shortest use/include chain A -> B: PATH<TAB>step<TAB>file per file then PATH_SUMMARY; NO_PATH rc 1 (G8).
+ *
  *   sh ./unisacc.com tools/rel.cx -- who-calls SYM [--root DIR] [--tracked LIST] [--cache DIR] [--timing]
  *           CALL<TAB>path:line per word hit of SYM (git grep -n -w rule) in the who-uses file set, then CALLS_SUMMARY;
  *           per-file identifier index cached by content hash in DIR (default ROOT/.devsvc/relsym, local only),
@@ -289,6 +292,32 @@ static int who_calls(const char *sym, const char *list, const char *cache) {
     return found ? 0 : 1;
 }
 
+/* path A B: one shortest use/include chain from A to B (G8).  Breadth first from A over the edges parse()
+ * finds, files parsed as they are reached (no tracked list needed); the first parent found wins, edges taken in
+ * file order, so the answer is deterministic.  PATH<TAB>step<TAB>file per file, A first, B last, then
+ * PATH_SUMMARY<TAB>from=A<TAB>to=B<TAB>hops=H.  Unreachable: NO_PATH<TAB>from=A<TAB>to=B, rc 1. */
+static int path_of(const char *a, const char *b) {
+    char abs[8192]; int na, nb, *q = 0, nq = 0, cq = 0, h, *par, k, *chain, nc = 0;
+    if ((a[0] == '/' ? cx_fmt(abs, sizeof abs, "%s", a) : cx_fmt(abs, sizeof abs, "%s/%s", root, a))) die("path too long", 0);
+    if (sy_exists(abs) != 1) die("path: no file", a);
+    if ((na = file_node(abs)) < 0) die("path: not below root:", a);
+    if ((b[0] == '/' ? cx_fmt(abs, sizeof abs, "%s", b) : cx_fmt(abs, sizeof abs, "%s/%s", root, b))) die("path too long", 0);
+    if (sy_exists(abs) != 1) die("path: no file", b);
+    if ((nb = file_node(abs)) < 0) die("path: not below root:", b);
+    par = malloc(sizeof(int) * MAXN); chain = malloc(sizeof(int) * MAXN); if (!par || !chain) die("out of memory", 0);
+    for (k = 0; k < MAXN; k++) par[k] = -1;
+    nd[na].seen = 1; push(&q, &nq, &cq, na);
+    for (h = 0; h < nq && !nd[nb].seen; h++) {
+        int j, x = q[h]; if (!nd[x].parsed) parse(x);
+        for (j = 0; j < nd[x].nd; j++) { int y = nd[x].dep[j]; if (!nd[y].seen) { nd[y].seen = 1; par[y] = x; push(&q, &nq, &cq, y); } }
+    }
+    if (!nd[nb].seen) { printf("NO_PATH\tfrom=%s\tto=%s\n", nd[na].rel, nd[nb].rel); return 1; }
+    for (k = nb; k >= 0; k = par[k]) chain[nc++] = k;
+    for (k = nc - 1; k >= 0; k--) printf("PATH\t%d\t%s\n", nc - 1 - k, nd[chain[k]].rel);
+    printf("PATH_SUMMARY\tfrom=%s\tto=%s\thops=%d\n", nd[na].rel, nd[nb].rel, nc - 1);
+    return 0;
+}
+
 /* default inputs live in ROOT/.devsvc/rel (ignored, local only) and are generated there when missing:
  * tracked.txt from `git ls-files -s -- '*.cx'`, closure[-TIER].tsv from `tools/affected.cx -- --closure-dump
  * [--tier TIER]`.  A present file is used as is (a snapshot; delete it to refresh). */
@@ -326,6 +355,10 @@ int main(int argc, char **argv) {
         if (nf != 1 || closure || table || tier) usage();
         if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
         return who_uses(files[0], tracked);
+    }
+    if (!strcmp(argv[1], "path")) {
+        if (nf != 2 || tracked || closure || table || tier || cache) usage();
+        return path_of(files[0], files[1]);
     }
     if (!strcmp(argv[1], "who-calls")) {
         if (nf != 1 || closure || table || tier) usage();
