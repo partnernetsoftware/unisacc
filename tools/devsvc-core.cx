@@ -1225,6 +1225,27 @@ static int tool_locked(const char *root, const char *lock, const char *tool, int
     else if (lock) { F(req, sizeof req, "lock-acquire\t%s\t%s\t120", lock, ow); request(root, req, 0); }   /* 长操作后为调用方续租 */
     return rc;
 }
+/* derive:--check(缺省)走并发版 tools/derive-flow.cx(约 14 s);--write 仍转串行 tools/derive.cx(持 derive 锁,保留失败快照还原)。
+ * 并发版 rc 2(flow 装载或 --plan 失败)或缺失时回退串行。首行 DEVSVC_DERIVE via=flow|serial|serial-fallback 说明实际路径;
+ * DEVSVC_DERIVE_DRY=1 只打印所选工具(plan=)不执行,供检查用;DEVSVC_DERIVE_FLOW 覆盖并发版路径(检查回退用)。 */
+static int cmd_derive(const char *root, int argc, char **argv) {
+    const char *dry = getenv("DEVSVC_DERIVE_DRY"), *ft = getenv("DEVSVC_DERIVE_FLOW"); char fp[PW]; int rc;
+    if (!ft || !ft[0]) ft = "tools/derive-flow.cx";
+    if (flag(argc, argv, "--write")) {
+        if (dry && dry[0] == '1') { printf("DEVSVC_DERIVE\tplan=tools/derive.cx\tlock=derive\n"); return 0; }
+        printf("DEVSVC_DERIVE\tvia=serial\n"); fflush(stdout);
+        return tool_locked(root, "derive", "tools/derive.cx", argc, argv);
+    }
+    if (dry && dry[0] == '1') { printf("DEVSVC_DERIVE\tplan=%s\tfallback=tools/derive.cx\n", ft); return 0; }
+    F(fp, sizeof fp, "%s/%s", root, ft);
+    if (access(fp, R_OK) == 0) {
+        printf("DEVSVC_DERIVE\tvia=flow\n"); fflush(stdout);
+        rc = tool_locked(root, 0, ft, argc, argv);
+        if (rc != 2) return rc;
+    }
+    printf("DEVSVC_DERIVE\tvia=serial-fallback\tflow=%s\n", ft); fflush(stdout);
+    return tool_locked(root, 0, "tools/derive.cx", argc, argv);
+}
 static int git_status(const char *root) {
     static char out[1 << 18], ll[1 << 17];   /* 与 resp 同大 */ char *v[] = {"git", "status", "--porcelain", 0}; char *s, *e, *p, *q; int dirty = 0, orphan = 0;
     if (runcap(v, out, sizeof out) != 0) { fprintf(stderr, "devsvc: git status failed or output too large\n"); return 1; }
@@ -1579,7 +1600,7 @@ static int main2(int argc, char **argv) {
     }
     if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 ? usage() : r; }
     if (!strcmp(cmd, "register")) return tool_locked(root, "registry", "tools/register.cx", argc, argv);
-    if (!strcmp(cmd, "derive")) return tool_locked(root, flag(argc, argv, "--write") ? "derive" : 0, "tools/derive.cx", argc, argv);
+    if (!strcmp(cmd, "derive")) return cmd_derive(root, argc, argv);
     if (!strcmp(cmd, "lock") && argc >= 1) {
         const char *ow = opt(argc, argv, "--owner", "");
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
