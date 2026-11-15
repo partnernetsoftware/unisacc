@@ -9,7 +9,9 @@
  * Rows about files not in this commit (other agents' work) do not block it.  No staged .cx: exit 0 at once.
  * Also runs tools/cx-lint.cx over the staged .cx index blobs: R2/R3/R4 findings
  * block (R4-source-anchor cannot be allowed); R1 findings are report-only.
- * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B. */
+ * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B.
+ * -- --plan DIR / -- --from-run DIR: used by tools/precommit-flow.cx to run the gate subprocesses as one
+ * concurrent flow (see gate_slurp); with no argument the behaviour is unchanged. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -23,8 +25,50 @@
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 #define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
+/* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
+ * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
+ * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
+ * --from-run: read DIR/out/<id>.out and the node's rc from DIR/events.tsv instead of spawning; a node that
+ * is missing, timed out or skipped counts as "did not run".  The judgement code stays only here. */
+static const char *cur_gate = 0, *plan_dir = 0, *from_run = 0;
+static char *gate_slurp(char **argv, long *n) {
+    char p[1200], *ev, *b; size_t en = 0, bn = 0; long i = 0; int rc = -1, k; long il = tx_len(cur_gate, 64);
+    *n = 0;
+    if (plan_dir) {
+        sy_printf("PLAN\t%s", cur_gate);
+        for (k = 0; argv[k]; k++) sy_printf("\t%s", argv[k]);
+        sy_printf("\n");
+        b = mm_alloc(1); if (b) b[0] = 0; return b;
+    }
+    if (cx_fmt(p, sizeof p, "%s/events.tsv", from_run)) return 0;
+    ev = (char *)cx_read(p, &en);
+    if (!ev) return 0;
+    while (i < (long)en) {   /* EVT seq id state ms rc summary: the last ok/fail row of this id wins */
+        long e = i, so, sl, io, ilen, ro, rl; while (e < (long)en && ev[e] != '\n') e++;
+        if (!tx_field(ev + i, e - i, '\t', 2, &io, &ilen) && ilen == il && tx_same(ev + i + io, ilen, cur_gate, il) &&
+            !tx_field(ev + i, e - i, '\t', 3, &so, &sl) && !tx_field(ev + i, e - i, '\t', 5, &ro, &rl)) {
+            if ((sl == 2 && tx_same(ev + i + so, 2, "ok", 2)) || (sl == 4 && tx_same(ev + i + so, 4, "fail", 4))) {
+                long v = 0, j; int neg = 0;
+                for (j = 0; j < rl; j++) { if (ev[i + ro + j] == '-') neg = 1; else v = v * 10 + (ev[i + ro + j] - '0'); }
+                rc = neg ? -1 : (int)v;
+            } else if (sl != 5 || !tx_same(ev + i + so, 5, "start", 5)) rc = -1;
+        }
+        i = e + 1;
+    }
+    mm_free(ev);
+    if (rc < 0 || rc > slurp_okrc) { sy_eprintf("precommit: from-run node %s rc=%d\n", cur_gate, rc); return 0; }
+    if (cx_fmt(p, sizeof p, "%s/out/%s.out", from_run, cur_gate)) return 0;
+    b = (char *)cx_read(p, &bn);
+    if (!b) return 0;
+    { char *g = mm_grow(b, bn + 1); if (!g) { mm_free(b); return 0; } b = g; }
+    b[bn] = 0; *n = (long)bn;
+    return b;
+}
+
 static char *slurp(char **argv, long *n) {
-    int ofd, pid; long cap = 1 << 16, r, deadline; char *b = mm_alloc(cap);
+    int ofd, pid; long cap = 1 << 16, r, deadline; char *b;
+    if (cur_gate && (plan_dir || from_run)) return gate_slurp(argv, n);
+    b = mm_alloc(cap);
     *n = 0;
     if (!b) return 0;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
@@ -215,7 +259,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
     av[k++] = "sh"; av[k++] = cp; av[k++] = fp; av[k++] = "--"; av[k++] = "--fast"; av[k++] = (char *)root;
     for (i = 0; i < npkg; i++) av[k++] = pkgs[i];
     av[k] = 0;
-    slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0;
+    cur_gate = "tlibfrozen"; slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0; cur_gate = 0;
     if (!rows) { sy_eprintf("precommit: tools/check-tlib-frozen.cx --fast did not run\n"); return 0; }
     for (at = 0; at < rn; ) {
         long le = tx_chr(rows + at, rn - at, '\n'), l = le < 0 ? rn - at : le, po, pl;
@@ -241,7 +285,9 @@ static int lint_gate(const char *names, long sn, int *absent) {
     char dir[1200], **paths; long at, np = 0, i; int blocked = 0;
     *absent = 0;
     if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/cx-lint.cx") != 1) { *absent = 1; return 0; }
-    if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    if (plan_dir || from_run) {   /* plan stages the blobs into DIR/lintdir; from-run reuses the same paths */
+        if (cx_fmt(dir, sizeof dir, "%s/lintdir", plan_dir ? plan_dir : from_run) || (sy_mkdir(dir, 0700) && sy_exists(dir) != 1)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    } else if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
     paths = mm_alloc((size_t)(sn + 8) * sizeof *paths);
     if (!paths) return 1;
     for (at = 0; at < sn; ) {
@@ -252,7 +298,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
             blob = slurp(sv, &bn);
             p = mm_alloc((size_t)(tx_len(dir, 1200) + nl + 2));
             if (blob && p && !cx_fmt(p, (size_t)(tx_len(dir, 1200) + nl + 2), "%s/%.*s", dir, (int)nl, names + at) && !mkdirs(p) &&
-                (fd = sy_open_new(p, 0600)) >= 0) {
+                ((plan_dir || from_run) && sy_exists(p) == 1 ? sy_unlink(p) : 0, (fd = sy_open_new(p, 0600)) >= 0)) {
                 if (sy_write_all(fd, blob, bn) == 0) paths[np++] = p; else mm_free(p);
                 sy_close(fd);
             } else { sy_eprintf("precommit: lint: cannot stage %.*s for cx-lint\n", (int)nl, names + at); mm_free(p); blocked++; }
@@ -268,7 +314,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
             lv[k++] = "--rules"; lv[k++] = j ? "R1" : "R2,R3,R4"; if (!j) lv[k++] = "--strict";
             for (i = 0; i < np; i++) lv[k++] = paths[i];
             lv[k] = 0;
-            slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0;
+            cur_gate = j ? "lintr1" : "lint"; slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0; cur_gate = 0;
             if (!rows) { sy_eprintf("precommit: tools/cx-lint.cx did not run\n"); blocked++; continue; }
             for (at = 0; at < rn; ) {
                 long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, d = tx_find(rows + at, l, dir, tx_len(dir, 1200));
@@ -284,7 +330,7 @@ static int lint_gate(const char *names, long sn, int *absent) {
         }
         mm_free(lv);
     }
-    for (i = 0; i < np; i++) { sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
+    for (i = 0; i < np; i++) { if (!plan_dir) sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
     mm_free(paths);
     return blocked;
 }
@@ -420,8 +466,11 @@ static int ledger_gate(void) {
     return blocked;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
+    if (argc == 3 && tx_eqz(argv[1], "--plan")) plan_dir = argv[2];
+    else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
+    else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR]\n"); return 2; }
     char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "include", "exec/facts", 0};
@@ -462,7 +511,7 @@ int main(void) {
       if (qn_names && qn > 0 && sy_exists("tools/reg-manifest.cx") == 1) {
           const char *tool = sy_env("UNISACC_REGM_TOOL"); char *rm[] = {"sh", "./unisacc.com", 0, "--", "--check", "--index", 0}; long rn2; char *ro;
           rm[2] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx");
-          slurp_okrc = 1; ro = slurp(rm, &rn2); slurp_okrc = 0;
+          cur_gate = "manifest"; slurp_okrc = 1; ro = slurp(rm, &rn2); slurp_okrc = 0; cur_gate = 0;
           if (!ro) { sy_eprintf("precommit: BLOCKED reg-manifest --check --index did not run or hard error\n"); blocked++; }
           else {
               long at3 = 0;
@@ -481,7 +530,7 @@ int main(void) {
       long gn; char *gn_names = slurp(gv, &gn);
       if (gn_names && gn > 0 && sy_exists("tools/tables-gen.cx") == 1) {
           char *tg[] = {"sh", "./unisacc.com", "tools/tables-gen.cx", "--", "--check", "--index", 0}; long tn2; char *to;
-          slurp_okrc = 1; to = slurp(tg, &tn2); slurp_okrc = 0;
+          cur_gate = "tables"; slurp_okrc = 1; to = slurp(tg, &tn2); slurp_okrc = 0; cur_gate = 0;
           if (!to) { sy_eprintf("precommit: BLOCKED tables-gen --check --index did not run or hard error\n"); blocked++; }
           else {
               long at4 = 0;
@@ -499,8 +548,7 @@ int main(void) {
       if (msn > 0) {
           char *lout; long ln;
           blocked += cov_gate();
-          lout = slurp(lv, &ln);
-          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
+          cur_gate = "runlist"; lout = slurp(lv, &ln); cur_gate = 0;          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
               long at2 = 0;
               sy_eprintf("precommit: tests/run.cx --list metadata_valid!=1\n");
@@ -521,7 +569,7 @@ int main(void) {
     { long fsn; char *fnames = slurp(fv, &fsn);
       if (!fnames) { sy_eprintf("precommit: git diff --cached (facts) failed\n"); return 1; }
       if (fsn > 0) {
-          char *frows = slurp(fgv, &rn);
+          char *frows; cur_gate = "facts"; frows = slurp(fgv, &rn); cur_gate = 0;
           if (!frows) { sy_eprintf("precommit: tools/facts-gen.cx did not run\n"); return 1; }
           if (tx_prefix(frows, rn, "DIFF", 4)) {
               sy_eprintf("precommit: facts-gen --check pp-autoinc-gen DIFF; run tools/facts-gen.cx -- --write ROOT pp-autoinc-gen\n");
@@ -542,7 +590,7 @@ int main(void) {
       ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
       if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
       if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); return blocked ? 1 : 0; } }
-    slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
+    cur_gate = "ratchets"; slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0; cur_gate = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
