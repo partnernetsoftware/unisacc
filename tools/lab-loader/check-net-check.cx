@@ -22,6 +22,8 @@
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
 
 static int ck_failed, ck_asserts;
 static char ck_root[4096];
@@ -73,6 +75,37 @@ int main(int argc, char **argv) {
         if (!realpath(argv[1], ck_root)) ck_die("root");
         if (!realpath(argv[2], work)) ck_die("work directory must exist");
     } else ck_die("usage [ROOT WORKDIR]");
+
+    /* M0：lab-loader 每个入口的模块都能解析（-cx-plan 退出码 0），且目录里不再留包根已覆盖模块的符号链接。
+       0.0.68 的 cx/runtime/model_decode.cx 新增 use modelcache 后，逐文件符号链接清单没有跟上，
+       check-utf8、net-check、decode-once 在计划阶段即被拒（module modelcache: no file）。
+       这些模块现在统一经仓根 cxroot.tsv 解析（cx/spec.md CX-U-7、CX-W-6），不再靠旁边的链接。 */
+    {   static const char *gone[] = {"runtime", "core", "mem", "sys", "cx0", "cxlib"};
+        sy_dir_t d; sy_stat_t st; char dir[4400]; int entries = 0, links = 0;
+        if (snprintf(dir, sizeof dir, "%s/tools/lab-loader", ck_root) >= (int)sizeof dir) ck_die("path");
+        if (sy_dir_open(&d, dir)) ck_die("lab-loader directory");
+        for (;;) {
+            char rel[600], label[400];
+            int rc = sy_dir_next(&d);
+            if (rc == 0) break;
+            if (rc < 0) ck_die("lab-loader directory read");
+            if (d.kind != 'f' || d.name_n < 4 || memcmp(d.name + d.name_n - 3, ".cx", 3)) continue;
+            if (snprintf(rel, sizeof rel, "tools/lab-loader/%s", d.name) >= (int)sizeof rel) ck_die("path");
+            if (snprintf(label, sizeof label, "M0.plan.%s", d.name) >= (int)sizeof label) ck_die("label");
+            {   char *av[] = {"sh", "./unisacc.com", "-cx-plan", rel, 0};
+                ck_sh(ck_root, av, label, 0, &o1, &n1);
+                free(o1);
+            }
+            entries++;
+        }
+        sy_dir_close(&d);
+        ck_ck(entries >= 11, "M0.entries-enumerated");
+        for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++) {
+            if (snprintf(dir, sizeof dir, "%s/tools/lab-loader/%s", ck_root, gone[i]) >= (int)sizeof dir) ck_die("path");
+            if (sy_lstat(dir, &st) != -ENOENT) { fprintf(stderr, "note\troot-covered link directory still present: %s\n", dir); links++; }
+        }
+        ck_ck(links == 0, "M0.no-root-covered-link-directories");
+    }
 
     /* 造料：产品编译三个构造器，再跑 prune 全链。 */
     if (snprintf(p, sizeof p, "%s/seed-gen", work) >= (int)sizeof p) ck_die("path");

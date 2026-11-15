@@ -111,6 +111,9 @@ gate：原 M 记录自替换输出与原包**逐字节相同**；序号与名字
 
 ## 模块符号链接
 
-`cxlib/`、`runtime/`、`core/`、`mem/`、`sys/`、`cx0/`、`extx/` 下的是指向仓内真实模块的符号链接
-（mode 120000，不计 toolsloc）：`#pragma unisa use` 只在用者文件旁解析模块名。
-包根解析已实现于 c3ee8ee247（`cx/spec.md` CX-U-7），产品安装后这些链接可统一删除。
+`cxlib/`、`runtime/`、`core/`、`mem/`、`sys/`、`cx0/` 下的逐文件符号链接已于 2026-11-15 删除：这六个前缀
+都在仓根 `cxroot.tsv` 里，`#pragma unisa use` 在用者文件旁找不到时经包根解析（`cx/spec.md` CX-U-7、CX-W-6）。
+删除的起因是 0.0.68 的 `cx/runtime/model_decode.cx` 新增 `use modelcache`，逐文件链接清单没有跟上，
+`check-utf8`、`net-check`、`decode-once` 在计划阶段即被拒；经包根后真实模块新增同目录 `use` 不再需要补链接。
+只剩 `extx/deflate.cx` 一个链接（指向 `ext/textx/deflate.cx`）：前缀 `extx` 不在包根表里，改名或登记前保留。
+守卫：`check-net-check.cx` 的 M0 对本目录每个 `.cx` 入口跑 `-cx-plan`，并断言上述六个目录不再出现。
