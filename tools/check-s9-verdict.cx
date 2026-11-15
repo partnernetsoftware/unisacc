@@ -37,7 +37,7 @@ int main(void) {
     char o[4096];
     const char *hdr = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
     const char *bA = "a\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\tdaily\n";
-    const char *bB = "b\tIMPLEMENTED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\trelease\n";
+    const char *bB = "b\tIMPLEMENTED\tc\ts\tSOURCE\tlnx/x86_64\t55\t-\te\t-\tx\tr\tp\trelease\n";
     const char *bC = "c\tPLANNED\tc\ts\tSOURCE\tl\t55\t-\te\t-\tx\tr\tp\trelease\n";
     char bt[800];
     if (cx_fmt(bt, sizeof bt, "%s%s%s%s", hdr, bA, bB, bC)) failed++;
@@ -52,7 +52,7 @@ int main(void) {
     ck(has(o, "allpass/aggregate.out"), "evidence-path-is-run-artifact");
     ck(has(o, "reason=all-pass"), "reason-all-pass");
     put_run("relpass", "release\n",
-        "BATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=x\nAGGREGATE\tQUALIFIED\timplemented_batches=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\n");
+        "BATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=x\nS9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n");
     run("relpass", 1, o, sizeof o);
     ck(has(o, "4\tPASS\t"), "release-tier-counts-only-release-rows");
     put_run("fail", "all\n",
@@ -105,6 +105,51 @@ int main(void) {
     put_run("notier", 0, aggP);
     run("notier", 1, o, sizeof o);
     ck(has(o, "4\tUNKNOWN\t"), "tier-file-missing");
+    /* The original daily/all fixtures and exact verdict bytes remain unchanged. */
+    run("allpass",1,o,sizeof o);
+    ck(!strcmp(o,"S9_VERDICT\treason=all-pass\n4\tPASS\t/tmp/s9-verdict-check/allpass/aggregate.out\n"),"daily-pass-verdict-byte-identical-before-f2");
+    run("fail",1,o,sizeof o);
+    ck(!strcmp(o,"S9_VERDICT\treason=fail-present\n4\tFAIL\t/tmp/s9-verdict-check/fail/aggregate.out\n"),"daily-fail-verdict-byte-identical-before-f2");
+    const char *foreign="d\tIMPLEMENTED\tc\ts\tSOURCE\tosx/arm64\t55\t-\te\t-\tx\tr\tp\trelease\n";
+    char extended[1200];if(cx_fmt(extended,sizeof extended,"%s%s%s%s%s",hdr,bA,bB,bC,foreign))failed++;put("batches.tsv",extended);
+    const char *summary="S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n";
+    const char *row="BATCH\tb\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\n";
+    char agg[1800];if(cx_fmt(agg,sizeof agg,"%s%s",row,summary))failed++;
+    put_run("release_scope","release\n",agg);run("release_scope",1,o,sizeof o);
+    ck(has(o,"4\tPASS\t")&&has(o,"reason=release-scope-all-pass"),"release-scope-excludes-planned-daily-foreign");
+    const char *names[]={"fail","unknown","missing","refused","deferred"};
+    const char *states[]={"FAIL","UNKNOWN","MISSING","REFUSED","DEFERRED"};
+    for(int i=0;i<5;i++){
+        if(cx_fmt(agg,sizeof agg,"BATCH\tb\t%s\tattempts=%d\nS9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=0\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tpending=0\tstatus=%s\tqualification=NOT_FULL\n",states[i],i==2?0:1,i==0,i==1,i==2,i==3,i==0?"FAIL":"UNKNOWN"))failed++;
+        put_run(names[i],"release\n",agg);run(names[i],1,o,sizeof o);ck(has(o,i==0?"4\tFAIL\t":"4\tUNKNOWN\t"),names[i]);
+    }
+    const char *badrows[]={"BATCH\tb\tPASS\tattempts=1\nBATCH\tb\tPASS\tattempts=1\n","BATCH\td\tPASS\tattempts=1\n","BATCH\ta\tPASS\tattempts=1\n","BATCH\tz\tPASS\tattempts=1\n","BATCH\tb\tPASS\tattempts=0\n",""};
+    const char *badnames[]={"duplicate-release-batch","foreign-host-batch","daily-batch-in-release","unregistered-batch","pass-without-attempt","missing-release-batch"};
+    for(int i=0;i<6;i++){if(cx_fmt(agg,sizeof agg,"%s%s",badrows[i],summary))failed++;put_run("badrow","release\n",agg);run("badrow",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),badnames[i]);}
+    const char *badsummaries[]={
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=2\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=2\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=osx/arm64\tselected=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=all\thost_scope=lnx/x86_64\tselected=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=1junk\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=0\tstatus=PASS\tqualification=NOT_FULL\n",
+     "S9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\tpending=1\tstatus=UNKNOWN\tqualification=NOT_FULL\n",
+     "AGGREGATE\tQUALIFIED\timplemented_batches=1\tpass=1\tfail=0\tunknown=0\tmissing=0\trefused=0\n",
+     ""};
+    const char *sum_names[]={"forged-selected","forged-pass-count","wrong-host-scope","wrong-tier-scope","nondecimal-counter","duplicate-counter","release-pending","daily-aggregate-is-not-release-proof","release-summary-required"};
+    for(int i=0;i<9;i++){if(cx_fmt(agg,sizeof agg,"%s%s",row,badsummaries[i]))failed++;put_run("badsum","release\n",agg);run("badsum",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),sum_names[i]);}
+    if(cx_fmt(agg,sizeof agg,"%s%s%s",row,summary,summary))failed++;put_run("dupsum","release\n",agg);run("dupsum",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"duplicate-release-summary");
+    if(cx_fmt(agg,sizeof agg,"%s%s%s",row,summary,badsummaries[7]))failed++;put_run("mixedsum","release\n",agg);run("mixedsum",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"release-conclusion-cannot-mix-daily-qualified");
+    if(cx_fmt(agg,sizeof agg,"%s%sS9_NA\treason=no-candidate-material\tn=0\tbatches=-\n",row,summary))failed++;put_run("release_na_zero","release\n",agg);run("release_na_zero",1,o,sizeof o);ck(has(o,"4\tPASS\t"),"release-visible-na-zero");
+    if(cx_fmt(agg,sizeof agg,"%s%sS9_NA\treason=no-candidate-material\tn=1\tbatches=b\n",row,summary))failed++;put_run("release_na_bad","release\n",agg);run("release_na_bad",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"release-cannot-use-daily-material-na");
+    if(cx_fmt(agg,sizeof agg,"%s%sUNKNOWN_TRAILER\n",row,summary))failed++;put_run("release_trailer","release\n",agg);run("release_trailer",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"release-unknown-trailer");
+    if(cx_fmt(agg,sizeof agg,"%s%s",row,summary))failed++;agg[strlen(agg)-1]=0;put_run("release_truncated","release\n",agg);run("release_truncated",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"release-truncated-wire");
+    if(cx_fmt(extended,sizeof extended,"%s%s%s%s%s%s",hdr,bA,bB,bB,bC,foreign))failed++;put("batches.tsv",extended);put_run("dupregistry","release\n",row);run("dupregistry",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"duplicate-release-registry-id");
+    if(cx_fmt(extended,sizeof extended,"%s%s%s%s",hdr,bA,bC,foreign))failed++;put("batches.tsv",extended);put_run("emptyscope","release\n",summary);run("emptyscope",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"empty-native-release-scope");
+    char longid[129];for(int i=0;i<127;i++)longid[i]='b';longid[127]=0;
+    if(cx_fmt(extended,sizeof extended,"%s%s\tIMPLEMENTED\tc\ts\tSOURCE\tlnx/x86_64\t55\t-\te\t-\tx\tr\tp\trelease\n",hdr,longid))failed++;put("batches.tsv",extended);
+    if(cx_fmt(agg,sizeof agg,"BATCH\t%s\tPASS\tattempts=1\n%s",longid,summary))failed++;put_run("maxid","release\n",agg);run("maxid",1,o,sizeof o);ck(has(o,"4\tPASS\t"),"release-full-127-byte-id");
+    longid[127]='b';longid[128]=0;if(cx_fmt(agg,sizeof agg,"BATCH\t%s\tPASS\tattempts=1\n%s",longid,summary))failed++;put_run("overlongid","release\n",agg);run("overlongid",1,o,sizeof o);ck(has(o,"4\tUNKNOWN\t"),"overlong-id-must-not-alias-valid-prefix");
     printf("CHECK_S9_VERDICT\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;
 }

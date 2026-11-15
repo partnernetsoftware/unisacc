@@ -2,12 +2,13 @@
  *   sh ./unisacc.com tools/s9-verdict.cx -- RUN [--batches tests/batches.tsv]
  * 输入: RUN/aggregate.out(`s9-shards aggregate ROOT RUN` 的 stdout 原样落盘;发布流程负责落盘)与 RUN/tier(init 写入:commit|release|all)。
  * 输出一行: 4<TAB>PASS|FAIL|UNKNOWN<TAB>RUN/aggregate.out ,原因写 stderr(S9_VERDICT reason=...)。
- * 规则: 有 BATCH 行为 FAIL 或 AGGREGATE fail>0 -> FAIL;
- *   PASS 仅当 tier 为 release 或 all、AGGREGATE 行存在、全部 BATCH 行为 PASS(无 UNKNOWN/MISSING/REFUSED/DEFERRED 等)、
- *   BATCH 行数 == AGGREGATE implemented_batches == tests/batches.tsv 中该 tier 的 IMPLEMENTED 批数(all=全部 IMPLEMENTED);
- *   其余一切(缺目录、空目录、缺文件、commit 档、批数不符、状态未知)记 UNKNOWN,绝不猜 PASS。 */
+ * all/daily 保留既有规则与输出: FAIL 优先;全体 IMPLEMENTED 批为 PASS 且 AGGREGATE 计数一致才 PASS。
+ * release 只接受独立的 S9 RELEASE_ONLY 行,用与计划器相同的平台谓词独立重建 IMPLEMENTED/release 批名集合,
+ * 每个成员恰好一条真实尝试对应的 BATCH 行,状态和全部计数严格一致才 PASS;混入 daily AGGREGATE 不作证明。
+ * release 的 PASS 只表该范围通过,不是 daily 的 QUALIFIED。缺失、未知、重复、范围外批名或伪计数不记 PASS。 */
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.platformscope
 
 static char *slurp(const char *p, size_t *n) {
     FILE *f = fopen(p, "rb");
@@ -62,6 +63,71 @@ static void setwhy(char *w, const char *s) {
     if (mm_copy(w, 200, s, (long)n)) n = 0;
     w[n] = 0;
 }
+typedef struct {char id[128];int seen;} release_row;
+/* Release uses exactly the planner's existing native-host predicate. Daily retains its historical parser. */
+static int release_scope(const char *bt,release_row **rows){
+ size_t n;char *s=slurp(bt,&n);int count=0,cap=32;*rows=calloc((size_t)cap,sizeof **rows);
+ if(!s||!*rows){free(s);free(*rows);*rows=0;return -1;}
+ char *p=s;int invalid=0;
+ while(*p&&!invalid){char *e=p;while(*e&&*e!='\n')e++;char save=*e;*e=0;
+  char impl[64],tier[64],platform[64],id[129]; /* spare byte detects an overlong ID rather than accepting a truncated prefix */
+  if(p!=s&&p[0]!='#'&&field(p,1,impl,sizeof impl)&&!strcmp(impl,"IMPLEMENTED")&&field(p,13,tier,sizeof tier)&&!strcmp(tier,"release")&&field(p,5,platform,sizeof platform)&&psc_platform_allowed(platform)){
+   if(!field(p,0,id,sizeof id)||!id[0]||strlen(id)>127)invalid=1;
+   for(int i=0;i<count;i++)if(!strcmp((*rows)[i].id,id))invalid=1;
+   if(!invalid){if(count==cap){cap*=2;release_row *b=realloc(*rows,(size_t)cap*sizeof **rows);if(!b){invalid=1;}else *rows=b;}
+    if(!invalid){if(tx_copy((*rows)[count].id,sizeof id-1,id,strlen(id)))invalid=1;(*rows)[count].seen=0;count++;}}
+  }*e=save;p=save?e+1:e;
+ }
+ free(s);if(invalid){free(*rows);*rows=0;return -1;}return count;
+}
+static int release_value(const char *line,const char *key,char *out,int cap){
+ char f[512];size_t k=strlen(key);int found=0;
+ for(int i=1;field(line,i,f,sizeof f);i++)if(!strncmp(f,key,k)&&f[k]=='='){
+  if(found++||strlen(f+k+1)>=(size_t)cap)return 0;if(tx_copy(out,cap,f+k+1,strlen(f+k+1)))return 0;
+ }return found==1;
+}
+static int release_number(const char *line,const char *key,long *out){
+ char v[64];if(!release_value(line,key,v,sizeof v)||!v[0])return 0;long n=0;
+ for(int i=0;v[i];i++){if(v[i]<'0'||v[i]>'9'||n>214748364||(n==214748364&&v[i]>'7'))return 0;n=n*10+v[i]-'0';}*out=n;return 1;
+}
+static const char *judge_release(const char *text,const char *bt,char *why){
+ size_t wire=strlen(text);if(!wire||text[wire-1]!='\n'){setwhy(why,"release-aggregate-wire");return "UNKNOWN";}
+ release_row *rows=0;int count=release_scope(bt,&rows);if(count<=0){free(rows);setwhy(why,"release-registry-unreadable-or-empty");return "UNKNOWN";}
+ size_t n=strlen(text);char *s=malloc(n+1);if(!s){free(rows);setwhy(why,"allocation");return "UNKNOWN";}if(mm_copy(s,n+1,text,n+1)){free(rows);free(s);setwhy(why,"copy-bound");return "UNKNOWN";}
+ long actual[5]={0},declared[7]={0};const char *keys[]={"pass","fail","unknown","missing","refused","selected","pending"};
+ int bad=0,summaries=0,nb=0;char status[64]="";char *p=s;
+ while(*p){char *e=p;while(*e&&*e!='\n')e++;char save=*e;*e=0;char kind[64];
+  if(field(p,0,kind,sizeof kind)&&!strcmp(kind,"BATCH")){
+   char id[129],v[64];int index=-1,vi=-1;long attempts=-1;nb++;
+   if(!field(p,1,id,sizeof id)||!field(p,2,v,sizeof v))bad++;
+   else{for(int i=0;i<count;i++)if(!strcmp(rows[i].id,id))index=i;
+    if(index<0||rows[index].seen)bad++;else rows[index].seen=1;
+    const char *states[]={"PASS","FAIL","UNKNOWN","MISSING","REFUSED"};for(int i=0;i<5;i++)if(!strcmp(v,states[i]))vi=i;
+    if(vi<0)bad++;else actual[vi]++;
+    if(!release_number(p,"attempts",&attempts)||(vi==3?attempts!=0:attempts<1))bad++;
+   }
+  }else if(!strcmp(kind,"S9")){
+   char mode[64],value[64];if(!field(p,1,mode,sizeof mode)||strcmp(mode,"RELEASE_ONLY")||summaries++)bad++;
+   for(int i=0;i<7;i++)if(!release_number(p,keys[i],&declared[i]))bad++;
+   if(!release_value(p,"tier",value,sizeof value)||strcmp(value,"release"))bad++;
+   if(!release_value(p,"host_scope",value,sizeof value)||strcmp(value,psc_host_scope()))bad++;
+   if(!release_value(p,"qualification",value,sizeof value)||strcmp(value,"NOT_FULL"))bad++;
+   if(!release_value(p,"status",status,sizeof status))bad++;
+  }else if(!strcmp(kind,"S9_NA")){long na=-1;if(!release_number(p,"n",&na)||na!=0)bad++;
+  }else if(strcmp(kind,"S9_AGG_PART_WALL"))bad++;
+  *e=save;p=save?e+1:e;
+ }
+ for(int i=0;i<count;i++)if(!rows[i].seen)bad++;
+ for(int i=0;i<5;i++)if(actual[i]!=declared[i])bad++;
+ if(nb!=count||declared[5]!=count||summaries!=1)bad++;
+ const char *want=actual[0]==count&&!declared[6]?"PASS":actual[1]?"FAIL":"UNKNOWN";
+ if(strcmp(status,want))bad++;
+ free(rows);free(s);
+ if(actual[1]){setwhy(why,"fail-present");return "FAIL";}
+ if(bad){setwhy(why,"release-scope-or-counter-mismatch");return "UNKNOWN";}
+ if(actual[0]!=count||declared[6]){setwhy(why,"release-non-pass-state");return "UNKNOWN";}
+ setwhy(why,"release-scope-all-pass");return "PASS";
+}
 static const char *judge(const char *run, const char *bt, char *why) {
     char p[4400], tier[64] = ""; size_t n; char *s, *q; long nb = 0, agg_impl = -1, exp; int fail = 0, bad = 0, has_agg = 0;
     if (cx_fmt(p, sizeof p, "%s/tier", run)) { setwhy(why,"path-too-long"); return "UNKNOWN"; }
@@ -73,6 +139,7 @@ static const char *judge(const char *run, const char *bt, char *why) {
     if (cx_fmt(p, sizeof p, "%s/aggregate.out", run)) { setwhy(why,"path-too-long"); return "UNKNOWN"; }
     s = slurp(p, &n);
     if (!s || !n) { setwhy(why, "aggregate-missing-or-empty"); free(s); return "UNKNOWN"; }
+    if (!strcmp(tier,"release")) { const char *v=judge_release(s,bt,why);free(s);return v; }
     q = s;
     while (*q) {
         char *e = q, k0[32], st[64];

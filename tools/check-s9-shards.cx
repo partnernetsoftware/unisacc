@@ -86,6 +86,26 @@ static void prepared_wave(const char *dst){
  if(fd<0||write(fd,s,n)!=(ssize_t)n||close(fd))die("REFUSED all-waves-tool copy");
  free(s);free(r);
 }
+/* Exact stdout captured from the daily reporting tail before the RELEASE_ONLY branch was added.
+   Both fixtures carry the same session identity, coverage and out-of-host failure data. */
+static void aggregate_cases(const char *binary){
+ const char *before[]={
+  "BATCH\tdaily-a\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\nBATCH\trelease-b\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\nBATCH\tforeign-c\tNOT_APPLICABLE\tplatform=osx/arm64\thost_scope=lnx/x86_64\nCOVERAGE\tfixture-coverage\tSATISFIED\nAGGREGATE\tQUALIFIED\timplemented_batches=2\tpass=2\tfail=0\tunknown=0\tmissing=0\trefused=0\tnot_applicable=1\tcoverage=1\tsatisfied=1\tunsatisfied=0\tunresolved=0\tdeclared=0\tcandidate=fixture-candidate\tregistry=fixture-registry\tsid=fixture-sid\tharness=fixture-harness\twaves=2\tidentity_scope=ape1\nS9_NA\treason=no-candidate-material\tn=0\tbatches=-\n",
+  "BATCH\tdaily-a\tPASS\tattempts=1\tunknown_attempts=0\treason=batch-pass\nBATCH\trelease-b\tFAIL\tattempts=1\tunknown_attempts=0\treason=\nBATCH\tforeign-c\tNOT_APPLICABLE\tplatform=osx/arm64\thost_scope=lnx/x86_64\nCOVERAGE\tfixture-coverage\tUNSATISFIED\tblocking=release-b\nAGGREGATE\tNOT_QUALIFIED\timplemented_batches=2\tpass=1\tfail=1\tunknown=0\tmissing=0\trefused=0\tnot_applicable=1\tcoverage=1\tsatisfied=0\tunsatisfied=1\tunresolved=0\tdeclared=0\tcandidate=fixture-candidate\tregistry=fixture-registry\tsid=fixture-sid\tharness=fixture-harness\twaves=2\tidentity_scope=ape1\nS9_NA\treason=no-candidate-material\tn=0\tbatches=-\n"};
+ for(int i=0;i<2;i++){char *v[]={(char *)binary,"aggregate-controls",i?"daily-fail":"daily-pass",0};np_result r={0};
+  if(np_run(v,root,0,10,&r,why,sizeof why))die("daily-aggregate-transport");
+  int equal=r.rc==i&&!r.errn&&r.outn==strlen(before[i])&&!memcmp(r.out,before[i],r.outn);char oldsha[65],newsha[65];cx_sha256_hex(before[i],strlen(before[i]),oldsha);cx_sha256_hex(r.out,r.outn,newsha);
+  printf("DAILY_EQUIVALENCE\tcase=%s\tbyte_identical=%d\tbefore_sha256=%s\tafter_sha256=%s\n",i?"fail":"pass",equal,oldsha,newsha);ck(equal,i?"daily-fail-aggregate-byte-identical-before-f2":"daily-pass-aggregate-byte-identical-before-f2");np_free(&r);
+ }
+ const char *cases[]={"pass","fail","unknown","missing","refused","pending"};
+ const char *states[]={"PASS","FAIL","UNKNOWN","MISSING","REFUSED","PASS"};
+ for(int i=0;i<6;i++){char kind[64],expected[1200];if(cx_fmt(kind,sizeof kind,"release-%s",cases[i]))die("format");
+  int rc=i==5?3:i?1:0;const char *reason=i==0||i==5?"batch-pass":i==3?"no-receipt-in-session":"";
+  if(cx_fmt(expected,sizeof expected,"BATCH\trelease-b\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\nS9\tRELEASE_ONLY\ttier=release\thost_scope=lnx/x86_64\tselected=1\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tpending=%d\tstatus=%s\tqualification=NOT_FULL\nS9_NA\treason=no-candidate-material\tn=0\tbatches=-\n",states[i],i==3?0:1,i==2?1:0,reason,i==0||i==5,i==1,i==2,i==3,i==4,i==5,i==0?"PASS":i==1?"FAIL":"UNKNOWN"))die("format");
+  char *v[]={(char *)binary,"aggregate-controls",kind,0};np_result r={0};if(np_run(v,root,0,10,&r,why,sizeof why))die("release-aggregate-transport");
+  ck(r.rc==rc&&!r.errn&&r.outn==strlen(expected)&&!memcmp(r.out,expected,r.outn),kind);np_free(&r);
+ }
+}
 int main(int argc,char **argv){
  char default_root[4096];char *defaults[]={argv[0],default_root,"schedule",0};
  if(argc==7&&!strcmp(argv[5],"--wave-executor")){wave_material=argv[6];argc=5;}
@@ -93,20 +113,20 @@ int main(int argc,char **argv){
   if(argc==3)schedule_cases=argv[2];if(!getcwd(default_root,sizeof default_root))die("cwd");argv=defaults;argc=3;
  }else if(argc==5&&!strcmp(argv[3],"--cases")){if(strcmp(argv[2],"schedule"))die("--cases requires schedule");schedule_cases=argv[4];argc=3;}
  if(strcmp(schedule_cases,"all")&&strcmp(schedule_cases,"controls")&&strcmp(schedule_cases,"domains")&&strcmp(schedule_cases,"shared")&&strcmp(schedule_cases,"platform")&&strcmp(schedule_cases,"candidate"))die("schedule --cases all|controls|domains|shared|platform|candidate");
- if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"identity")&&strcmp(argv[2],"identity-sid")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
+ if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"identity")&&strcmp(argv[2],"identity-sid")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence")&&strcmp(argv[2],"aggregate"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
  char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
  if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
- else{int schedule=!strcmp(argv[2],"schedule"),planner=schedule&&schedule_want("controls");
+ else{int schedule=!strcmp(argv[2],"schedule"),planner=!strcmp(argv[2],"aggregate")||(schedule&&schedule_want("controls"));
   join(product,root,"unisacc.com");join(source,root,planner?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,schedule&&!planner?"all-waves":"native");char *compile[]={"sh",product,source,"-o",binary,0};
   /* Build only the executors used by this group. The unfiltered path keeps both parallel builds. */
-  pid_t aw=-1;if(planner&&strcmp(schedule_cases,"controls")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
+  pid_t aw=-1;if(schedule&&planner&&strcmp(schedule_cases,"controls")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
   if(schedule&&(!strcmp(schedule_cases,"shared")||!strcmp(schedule_cases,"platform"))){
    if(!wave_material)die("REFUSED all-waves-tool missing");prepared_wave(binary);
   }else if(run(compile,root))die("compile");if(aw>0){int st;if(waitpid(aw,&st,0)!=aw||!WIFEXITED(st)||WEXITSTATUS(st))die("compile-all-waves");}}
  /* inputs keeps the same per-process deadline the combined phase used; the identity-parent controls are their own phase (own 55s budget). */
  if(!strcmp(argv[2],"inputs")){char dl[80];long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");if(setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");}
  int sidm=!strcmp(argv[2],"identity-sid");   /* identity: missing/corrupt parent refusals; identity-sid: live-parent SID-change refusal (init x2 + wave) */
- if(!strcmp(argv[2],"identity")||sidm){
+ if(!strcmp(argv[2],"aggregate")){aggregate_cases(binary);if(!failures){char *clean[]={"rm","-rf","--",tmp,0};if(run(clean,root))die("private-fixture-clean");}printf("CHECK_S9_SHARDS\tphase=aggregate\tfailed=%d\n",failures);return failures?1:0;}else if(!strcmp(argv[2],"identity")||sidm){
   char dl[80],sess[4400],miss[4400],bad[4400],empty[4400],cand[4400],wire[4400];
   /* All identity-parent controls (incl. the src/runcache.cx touch) run in a private fixture clone of ROOT, never in ROOT itself. */
   char saved_root[4096],fxr[4400],fxc[4400],fxo[4400],fxp[4400];

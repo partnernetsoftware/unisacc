@@ -12,6 +12,7 @@
  * interrupted slices remain UNKNOWN and are never silently re-executed.
  */
 #pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.platformscope
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.limits
@@ -304,11 +305,51 @@ static int step_report(int unstarted,int live,int launched){int v=step_verdict(u
  if(v==S9_STEP_FINISHED){printf("S9\tSTEP_FINISHED\tqualification=NOT_DECIDED_HERE\n");return 3;}
  if(v==S9_STEP_PENDING){printf("S9\tSTEP_PENDING\tunstarted=%d\tlive=%d\tlaunched=%d\tqualification=NOT_DECIDED_HERE\n",unstarted,live,launched);return 3;}
  printf("S9\tSTEP_NO_PROGRESS\tunstarted=%d\treason=budget\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",unstarted);return S9_RC_NO_PROGRESS;}
+/* Shared tail: fixture controls and the real receipt-verifying aggregate use the same reporting path. */
+static int report_release_states(as_state *states,int pending){
+ int selected=0,pass=0,failed=0,unknown=0,missing=0,refused=0;
+ for(int i=0;i<reg.nb;i++)if(release_member(i)){
+  as_state *s=&states[i];const char *v,*reason=s->reason;selected++;
+  if(s->refused){v="REFUSED";refused++;}else if(s->fail){v="FAIL";failed++;}
+  else if(s->last=='P'&&s->attempts){v="PASS";pass++;reason="batch-pass";}
+  else if(s->attempts){v="UNKNOWN";unknown++;}else{v="MISSING";missing++;reason="no-receipt-in-session";}
+  printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",reg.b[i].id,v,s->attempts,s->unknown,reason);
+ }
+ int ok=selected>0&&pass==selected&&!pending;
+ printf("S9\tRELEASE_ONLY\ttier=release\thost_scope=%s\tselected=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tpending=%d\tstatus=%s\tqualification=NOT_FULL\n",psc_host_scope(),selected,pass,failed,unknown,missing,refused,pending,ok?"PASS":failed?"FAIL":"UNKNOWN");
+ return pending?3:ok?0:1;
+}
+static int aggregate_report(as_manifest *parent,as_state *states,int waves,int pending,int regression,int commit,int rel){
+ parent->nwave=waves;int result,selected_bad=0;
+ for(int i=0;i<reg.nb;i++){if(!as_wave_platform_allowed(reg.b[i].platform))continue;if(state_bad(&states[i])||(commit&&commit_member(i)&&!states[i].attempts))selected_bad++;}
+ if(commit){int scope_count=report_commit_scope();printf("S9\tCOMMIT_ONLY\ttier=commit\thost_scope=lnx/x86_64\tselected=%d\tstatus=%s\tfailed_or_unknown=%d\tpending=%d\tqualification=NOT_FULL\n",scope_count,pending?"PENDING":selected_bad?"FAIL":"PASS",selected_bad,pending);result=pending?3:selected_bad?1:0;}else if(rel){result=report_release_states(states,pending);}else if(regression){printf("S9\tREGRESSION_ONLY\tfailed_or_unknown=%d\tpending=%d\tqualification=NOT_QUALIFIED\n",selected_bad,pending);result=pending?3:selected_bad?1:0;}else if(pending){printf("S9\tPENDING\tslices=%d\tqualification=NOT_QUALIFIED\n",pending);result=3;}else result=as_report_states(reg,*parent,states);
+ if(rel||commit||regression||pending)as_f4c_summary(reg,*parent,states);
+ return result;
+}
+/* Controlled session data, never product qualification evidence. */
+static int aggregate_fixture(const char *kind){
+ reg.nb=4;reg.nc=1;reg.b=calloc(4,sizeof *reg.b);reg.c=calloc(1,sizeof *reg.c);if(!reg.b||!reg.c)fail("allocation");
+ const char *ids[]={"daily-a","release-b","foreign-c","planned-d"};
+ for(int i=0;i<4;i++){reg.b[i].id=(char *)ids[i];reg.b[i].impl=i==3?"PLANNED":"IMPLEMENTED";reg.b[i].platform=i==2?"osx/arm64":"lnx/x86_64";reg.b[i].coverage=i==3?"planned-only":"fixture-coverage";tiers[i]=i?2:1;}
+ reg.c[0].id="fixture-coverage";reg.c[0].impl="IMPLEMENTED_SEPARATE_BATCH";
+ as_state states[4]={0};for(int i=0;i<4;i++){states[i].attempts=1;states[i].last='P';}states[2].fail=1;states[3].fail=1;
+ int rel=!strncmp(kind,"release-",8),pending=0;const char *v=kind+(rel?8:6);
+ if(!rel&&strncmp(kind,"daily-",6))fail("aggregate-controls mode");
+ if(!strcmp(v,"fail"))states[1].fail=1;
+ else if(!strcmp(v,"refused"))states[1].refused=1;
+ else if(!strcmp(v,"unknown")){states[1].last='U';states[1].unknown=1;}
+ else if(!strcmp(v,"missing"))memset(&states[1],0,sizeof states[1]);
+ else if(!strcmp(v,"pending"))pending=1;
+ else if(strcmp(v,"pass"))fail("aggregate-controls state");
+ if(rel)states[0].fail=1;
+ as_manifest session={0};if(cx_fmt(session.ident.candidate,sizeof session.ident.candidate,"fixture-candidate")||cx_fmt(session.ident.registry,sizeof session.ident.registry,"fixture-registry")||cx_fmt(session.ident.sid,sizeof session.ident.sid,"fixture-sid")||cx_fmt(session.ident.harness,sizeof session.ident.harness,"fixture-harness")||cx_fmt(session.ident.candidate_kind,sizeof session.ident.candidate_kind,"ape1"))fail("fixture-identity");
+ return aggregate_report(&session,states,2,pending,0,0,rel);
+}
 static int aggregate(int part,int nparts,int merge){
  freeze_check();load_plan();as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");as_state *states=calloc((size_t)reg.nb,sizeof *states);if(!states)fail("allocation");
  char p[4400];size_t nn;path(p,sd,"nonce");char *nonce=as_read(p,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");path(p,sd,"mode");size_t mode_n;char *mode=as_read(p,0,&mode_n,sw,sizeof sw);int regression=mode&&mode_n==16&&!memcmp(mode,"REGRESSION_ONLY\n",16),commit=commit_tier(),rel=release_tier();if(commit){if(!mode||mode_n!=12||memcmp(mode,"COMMIT_ONLY\n",12))fail("mode-tier");}else if(rel){if(!mode||mode_n!=13||memcmp(mode,"RELEASE_ONLY\n",13))fail("mode-tier");}else if(!regression&&(!mode||mode_n!=5||memcmp(mode,"FULL\n",5)))fail("mode");
  if(parent.daily_no_candidate&&(commit||rel||regression))fail("scope-tier");
- int pending=0,waves=0,selected_bad=0;
+ int pending=0,waves=0;
  np_buf pb={0};long long wall_begin=as_now();
  if(nparts&&!merge){agg_assign(nparts);np_puts(&pb,"S9_AGG_PART\tv2\nnonce\t");np_put(&pb,nonce,64);np_puts(&pb,"\ninputs\t");{char ih[65];agg_inputs_sha(ih);np_puts(&pb,ih);}np_puts(&pb,"\npart\t");np_putll(&pb,part);np_puts(&pb,"\t");np_putll(&pb,nparts);np_puts(&pb,"\n");}
  for(int k=0;k<nslices;k++){s9_slice *s=&slices[k];
@@ -337,9 +378,7 @@ static int aggregate(int part,int nparts,int merge){
   np_puts(&pb,"END\n");char pp[4400];agg_part_name(pp,part,nparts);save(pp,pb.p,pb.n);free(pb.p);
   printf("S9_AGG_PART\tpart=%d\tof=%d\tslices=%d\tpending_in_part=%d\trecord=%s\n",part,nparts,agg_part_count(part),pending,pp);free(nonce);free(mode);free(states);as_free(&parent);return 0;}
  if(merge){agg_merge_parts(nparts,states,&waves,nonce);free(pb.p);}
- parent.nwave=waves;int result;/* a batch this host cannot run is out of scope everywhere, including the commit-membership clause below */for(int i=0;i<reg.nb;i++){if(!as_wave_platform_allowed(reg.b[i].platform))continue;if(state_bad(&states[i])||(commit&&commit_member(i)&&!states[i].attempts))selected_bad++;}
- if(commit){int scope_count=report_commit_scope();printf("S9\tCOMMIT_ONLY\ttier=commit\thost_scope=lnx/x86_64\tselected=%d\tstatus=%s\tfailed_or_unknown=%d\tpending=%d\tqualification=NOT_FULL\n",scope_count,pending?"PENDING":selected_bad?"FAIL":"PASS",selected_bad,pending);result=pending?3:selected_bad?1:0;}else if(regression){printf("S9\tREGRESSION_ONLY\tfailed_or_unknown=%d\tpending=%d\tqualification=NOT_QUALIFIED\n",selected_bad,pending);result=pending?3:selected_bad?1:0;}else if(pending){printf("S9\tPENDING\tslices=%d\tqualification=NOT_QUALIFIED\n",pending);result=3;}else result=as_report_states(reg,parent,states);
- if(commit||regression||pending)as_f4c_summary(reg,parent,states);
+ int result=aggregate_report(&parent,states,waves,pending,regression,commit,rel);
  free(nonce);free(mode);free(states);as_free(&parent);return result;
 }
 static int can_launch(int writer,int active,int writer_active){return active<3&&!writer_active&&(!writer||!active);}
@@ -595,7 +634,7 @@ static int operate(int argc,char **argv){
   if(argc!=6||i!=5)fail("daily-no-candidate requires unfiltered daily init, never commit/release");
   daily_no_candidate_request=1;argc--;break;
  }
- op_begin=as_now();width_from_env();bounded();if(argc==2&&!strcmp(argv[1],"controls"))return controls();if(argc<4)fail("usage: init|prepare|step|aggregate|retry ROOT RUN ...");
+ op_begin=as_now();width_from_env();bounded();if(argc==2&&!strcmp(argv[1],"controls"))return controls();if(argc==3&&!strcmp(argv[1],"aggregate-controls"))return aggregate_fixture(argv[2]);if(argc<4)fail("usage: init|prepare|step|aggregate|retry ROOT RUN ...");
  /* Shard arguments are validated before any session is opened, so a malformed shard request is refused by name and never by a side effect. */
  if(!strcmp(argv[1],"aggregate")&&argc>4){long long a,b;int ok=(argc==7&&!strcmp(argv[4],"--part")&&!as_digits(argv[5],&a)&&!as_digits(argv[6],&b)&&b>=1&&b<=64&&a<b)||(argc==6&&!strcmp(argv[4],"--merge")&&!as_digits(argv[5],&b)&&b>=1&&b<=64);if(!ok)fail("aggregate [--part K N | --merge N]");}
  int init=!strcmp(argv[1],"init"),is_child=!strcmp(argv[1],"child");initializing=init;setup(argv[2],argv[3],init);
