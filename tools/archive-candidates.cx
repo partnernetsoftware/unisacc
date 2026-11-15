@@ -1,0 +1,198 @@
+/* tools/archive-candidates.cx -- grade archive candidates (read only, never moves anything).
+ *
+ *   sh ./unisacc.com tools/archive-candidates.cx -- [--days N] [--grade A|B|C] [--tools] [--check]
+ *
+ * Docs mode (default): candidates are tracked files under plans/ docs/ research/ agentwork/, tests/*.md
+ * and root-level *.md/*.txt, minus the protected set (prd.md, prd_*.md, AGENTS.md, CLAUDE.md, README*,
+ * plans/devsvc.md, plans/notcovered-plan.md, plans/release*).  For each: last commit time (one git log
+ * pass), live references by basename (one git grep -o -F pass over the tree minus archive/ and minus the
+ * file itself), whether build/tool-index.tsv or tests/batches.tsv names it, whether prd_mempalace.md does.
+ * Grade: A refs=0 and (age >= N days, default 60, or a date in the name); B refs>0 and (old or dated);
+ * C otherwise or protected.  Output: GRADE<TAB>path<TAB>age_d<TAB>refs<TAB>idx<TAB>mp<TAB>dated, then
+ * ARCHIVE_CANDIDATES A=.. B=.. C=.. total=...
+ * --tools: tools/*.cx (not check-*) whose NAME.cx appears in no file except itself, its check and
+ * build/, counting only caller files (.cx .sh .ts .yml .yaml and tests/manifests/; inventory tables and docs
+ * do not count); prints TOOL_CAND<TAB>path<TAB>batch(0/1), then TOOL_CANDIDATES n=..  (list only).
+ * --check: self-test of the grading and date-detection rules; prints CHECK_ARCHIVE_CANDIDATES ok=.. failed=..
+ * Every child runs under timeout 55 (deadline).  Exit 0 ok, 2 usage/refused.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+
+#define AC_MAX 8192
+#define AC_BUF (24 << 20)
+#define AC_H 16384
+
+typedef struct { char path[512]; const char *base; long ct; int refs, idx, mp, dated, prot, next; } AcC;
+static AcC ac[AC_MAX];
+static int acn;
+static int hb[AC_H];
+static char buf[AC_BUF];
+
+static int run(char **av, char *out, long cap) {
+    char *t[64]; int i = 0, cut = 0, rc;
+    t[0] = "timeout"; t[1] = "55";
+    while (av[i] && i < 60) { t[i + 2] = av[i]; i++; }
+    t[i + 2] = 0;
+    out[0] = 0;
+    rc = sy_run(t, out, cap, &cut);
+    if (cut) { fprintf(stderr, "archive-candidates: output truncated\n"); return 2; }
+    return rc;
+}
+static int has_pre(const char *s, const char *p) { int i = 0; while (p[i]) { if (s[i] != p[i]) return 0; i++; } return 1; }
+static int ends(const char *s, const char *e) { long a = tx_len(s, 4096), b = tx_len(e, 64); return a >= b && tx_eqz(s + a - b, e); }
+static const char *basen(const char *p) { const char *b = p; while (*p) { if (*p == '/') b = p + 1; p++; } return b; }
+static int isd(char c) { return c >= '0' && c <= '9'; }
+/* a date in the name: 20YY-MM or 20YYMMDD */
+static int dated(const char *s) {
+    int i;
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '2' && s[i + 1] == '0' && isd(s[i + 2]) && isd(s[i + 3])) {
+            if (s[i + 4] == '-' && isd(s[i + 5]) && isd(s[i + 6])) return 1;
+            if (isd(s[i + 4]) && isd(s[i + 5]) && isd(s[i + 6]) && isd(s[i + 7])) return 1;
+        }
+    }
+    return 0;
+}
+static int prot(const char *p) {
+    const char *b = basen(p);
+    if (tx_eqz(p, "prd.md") || has_pre(p, "prd_") || tx_eqz(p, "AGENTS.md") || tx_eqz(p, "CLAUDE.md")) return 1;
+    if (has_pre(b, "README") || has_pre(b, "LICENSE")) return 1;
+    if (tx_eqz(p, "plans/devsvc.md") || tx_eqz(p, "plans/notcovered-plan.md") || has_pre(p, "plans/release")) return 1;
+    if (tx_eqz(p, "agentwork/WORKFLOW.md")) return 1;
+    return 0;
+}
+static char grade(int refs, long age, int dt, int pr, int days) {
+    int old = age >= days || dt;
+    if (pr) return 'C';
+    if (refs == 0 && old) return 'A';
+    if (refs > 0 && old) return 'B';
+    return 'C';
+}
+static unsigned hs(const char *s, long n) { unsigned h = 5381; long i; for (i = 0; i < n; i++) h = h * 33 + (unsigned char)s[i]; return h % AC_H; }
+static void add(const char *p) {
+    AcC *c; unsigned h;
+    if (acn >= AC_MAX) return;
+    c = &ac[acn];
+    cx_fmt(c->path, sizeof c->path, "%s", p);
+    c->base = basen(c->path);
+    c->dated = dated(c->base);
+    c->prot = prot(c->path);
+    h = hs(c->base, tx_len(c->base, 512));
+    c->next = hb[h]; hb[h] = acn + 1;
+    acn++;
+}
+static int self_check(void) {
+    int ok = 0, bad = 0;
+#define T(name, cond) do { if (cond) ok++; else { bad++; printf("FAIL\t%s\n", name); } } while (0)
+    T("dated dash", dated("x-2026-11-05.md"));
+    T("dated compact", dated("prd-20261030.md"));
+    T("undated", !dated("devsvc.md"));
+    T("undated year only", !dated("v2026.md"));
+    T("A old no refs", grade(0, 90, 0, 0, 60) == 'A');
+    T("A dated new", grade(0, 1, 1, 0, 60) == 'A');
+    T("B refs old", grade(3, 90, 0, 0, 60) == 'B');
+    T("C new undated", grade(0, 5, 0, 0, 60) == 'C');
+    T("C protected", grade(0, 999, 1, prot("plans/devsvc.md"), 60) == 'C');
+    T("prot prd_", prot("prd_mempalace.md") && prot("plans/release-0.0.43.md") && !prot("plans/x.md"));
+    printf("CHECK_ARCHIVE_CANDIDATES ok=%d failed=%d\n", ok, bad);
+    return bad ? 1 : 0;
+}
+static int lookup(const char *s, long n, int start) {
+    int i = start ? ac[start - 1].next : hb[hs(s, n)];
+    while (i) { AcC *c = &ac[i - 1]; long j = 0; if (tx_len(c->base, 512) == n) { while (j < n && c->base[j] == s[j]) j++; if (j == n) return i; } i = c->next; }
+    return 0;
+}
+static int tools_mode(void) {
+    char *av[16]; long i, n, st; int k, nc = 0; FILE *pf; char pat[64];
+    cx_fmt(pat, sizeof pat, "%s/ac-pat-%d", sy_tmpdir(), (int)getpid());
+    av[0] = "git"; av[1] = "ls-files"; av[2] = "tools/*.cx"; av[3] = 0;
+    if (run(av, buf, AC_BUF)) return 2;
+    n = tx_len(buf, AC_BUF); st = 0;
+    for (i = 0; i < n; i++) if (buf[i] == '\n') { buf[i] = 0; if (!has_pre(buf + st + 6, "check-") && tx_find(buf + st + 6, i - st - 6, "/", 1) < 0) add(buf + st); st = i + 1; }
+    pf = fopen(pat, "w"); if (!pf) return 2;
+    for (k = 0; k < acn; k++) fprintf(pf, "%s\n", ac[k].base);
+    fclose(pf);
+    av[0] = "git"; av[1] = "grep"; av[2] = "-o"; av[3] = "-F"; av[4] = "-f"; av[5] = pat; av[6] = "--"; av[7] = "."; av[8] = ":!archive"; av[9] = ":!build"; av[10] = 0;
+    run(av, buf, AC_BUF);
+    sy_unlink(pat);
+    n = tx_len(buf, AC_BUF); st = 0;
+    for (i = 0; i <= n; i++) if (i == n || buf[i] == '\n') {
+        char *ln = buf + st; long L = i - st, c; buf[i] = 0;
+        c = tx_find(ln, L, ":", 1);
+        if (c > 0) {
+            char *f = ln, *m = ln + c + 1; int h; ln[c] = 0;
+            for (h = lookup(m, L - c - 1, 0); h; h = lookup(m, L - c - 1, h)) {
+                AcC *a = &ac[h - 1]; char chk[600];
+                cx_fmt(chk, sizeof chk, "tools/check-%s", a->base);
+                if (tx_eqz(f, a->path) || tx_eqz(f, chk)) continue;
+                if (tx_eqz(f, "tests/batches.tsv")) a->idx = 1;
+                else if (ends(f, ".cx") || ends(f, ".sh") || ends(f, ".ts") || ends(f, ".yml") || ends(f, ".yaml") || has_pre(f, "tests/manifests/")) a->refs++;
+            }
+        }
+        st = i + 1;
+    }
+    for (k = 0; k < acn; k++) if (ac[k].refs == 0) { printf("TOOL_CAND\t%s\t%d\n", ac[k].path, ac[k].idx); nc++; }
+    printf("TOOL_CANDIDATES n=%d of=%d\n", nc, acn);
+    return 0;
+}
+int main(int argc, char **argv) {
+    char *av[24]; long i, n, st, now = sy_wall_s(); int k, days = 60, tm = 0, na = 0, nb = 0, ncc = 0; char want = 0; FILE *pf; char pat[64];
+    for (k = 1; k < argc; k++) {
+        if (tx_eqz(argv[k], "--check")) return self_check();
+        else if (tx_eqz(argv[k], "--tools")) tm = 1;
+        else if (tx_eqz(argv[k], "--days") && k + 1 < argc) days = atoi(argv[++k]);
+        else if (tx_eqz(argv[k], "--grade") && k + 1 < argc) want = argv[++k][0];
+        else { fprintf(stderr, "usage: archive-candidates [--days N] [--grade A|B|C] [--tools] [--check]\n"); return 2; }
+    }
+    if (tm) return tools_mode();
+    av[0] = "git"; av[1] = "ls-files"; av[2] = "plans"; av[3] = "docs"; av[4] = "research"; av[5] = "agentwork"; av[6] = "tests/*.md"; av[7] = ":(glob)*.md"; av[8] = ":(glob)*.txt"; av[9] = 0;
+    if (run(av, buf, AC_BUF)) return 2;
+    n = tx_len(buf, AC_BUF); st = 0;
+    for (i = 0; i < n; i++) if (buf[i] == '\n') { buf[i] = 0; add(buf + st); st = i + 1; }
+    /* last commit time: first time a path shows up in newest-first log */
+    av[0] = "git"; av[1] = "log"; av[2] = "--format=@%ct"; av[3] = "--name-only"; av[4] = "--"; av[5] = "plans"; av[6] = "docs"; av[7] = "research"; av[8] = "agentwork"; av[9] = "tests/*.md"; av[10] = ":(glob)*.md"; av[11] = ":(glob)*.txt"; av[12] = 0;
+    if (run(av, buf, AC_BUF)) return 2;
+    { long cur = 0; n = tx_len(buf, AC_BUF); st = 0;
+      for (i = 0; i <= n; i++) if (i == n || buf[i] == '\n') {
+          char *ln = buf + st; buf[i] = 0;
+          if (ln[0] == '@') cur = atol(ln + 1);
+          else if (ln[0]) { int h; const char *b = basen(ln);
+              for (h = lookup(b, tx_len(b, 512), 0); h; h = lookup(b, tx_len(b, 512), h)) if (tx_eqz(ac[h - 1].path, ln) && !ac[h - 1].ct) ac[h - 1].ct = cur; }
+          st = i + 1;
+      } }
+    cx_fmt(pat, sizeof pat, "%s/ac-pat-%d", sy_tmpdir(), (int)getpid());
+    pf = fopen(pat, "w"); if (!pf) return 2;
+    for (k = 0; k < acn; k++) fprintf(pf, "%s\n", ac[k].base);
+    fclose(pf);
+    av[0] = "git"; av[1] = "grep"; av[2] = "-o"; av[3] = "-F"; av[4] = "-f"; av[5] = pat; av[6] = "--"; av[7] = "."; av[8] = ":!archive"; av[9] = 0;
+    k = run(av, buf, AC_BUF);
+    sy_unlink(pat);
+    if (k == 2 || k > 1) { fprintf(stderr, "archive-candidates: git grep rc=%d\n", k); return 2; }
+    n = tx_len(buf, AC_BUF); st = 0;
+    for (i = 0; i <= n; i++) if (i == n || buf[i] == '\n') {
+        char *ln = buf + st; long L = i - st, c; buf[i] = 0;
+        c = tx_find(ln, L, ":", 1);
+        if (c > 0) {
+            char *f = ln, *m = ln + c + 1; int h; ln[c] = 0;
+            for (h = lookup(m, L - c - 1, 0); h; h = lookup(m, L - c - 1, h)) {
+                AcC *a = &ac[h - 1];
+                if (tx_eqz(f, a->path)) continue;
+                if (tx_eqz(f, "prd_mempalace.md")) a->mp = 1;
+                if (tx_eqz(f, "build/tool-index.tsv") || tx_eqz(f, "tests/batches.tsv")) a->idx = 1;
+                a->refs++;
+            }
+        }
+        st = i + 1;
+    }
+    for (k = 0; k < acn; k++) {
+        AcC *a = &ac[k]; long age = a->ct ? (now - a->ct) / 86400 : 0; char g = grade(a->refs, age, a->dated, a->prot, days);
+        if (g == 'A') na++; else if (g == 'B') nb++; else ncc++;
+        if (!want || want == g) printf("%c\t%s\t%ld\t%d\t%d\t%d\t%d\n", g, a->path, age, a->refs, a->idx, a->mp, a->dated);
+    }
+    printf("ARCHIVE_CANDIDATES A=%d B=%d C=%d total=%d days=%d\n", na, nb, ncc, acn, days);
+    return 0;
+}

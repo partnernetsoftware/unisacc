@@ -1,0 +1,41 @@
+/* tools/check-archive-candidates.cx -- tools/archive-candidates.cx: rule self-test plus one real read-only run.
+ *
+ *   sh ./unisacc.com tools/check-archive-candidates.cx
+ *
+ * Asserts: --check reports failed=0; the real run ends with an ARCHIVE_CANDIDATES summary line; protected
+ * files (plans/devsvc.md, prd_mempalace.md) are graded C; the run changes nothing in git status for the
+ * scanned trees; --tools ends with a TOOL_CANDIDATES line.  Prints PASS/FAIL per assertion, then
+ * CHECK_ARCHIVE_CANDIDATES_OK or exits 1.  Every child runs under timeout 55 (deadline).
+ */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char out[1 << 22];
+static char before[1 << 16];
+static int pass_n, fail_n;
+
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};
+    return sy_run(a, out, sizeof out, 0);
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+static void ok(const char *name, int cond) { printf("%s\t%s\n", cond ? "PASS" : "FAIL", name); if (cond) pass_n++; else fail_n++; }
+
+int main(void) {
+    const char *st = "git status --porcelain -- plans docs research agentwork archive";
+    sh(st); cx_fmt(before, sizeof before, "%s", out);
+    sh("sh ./unisacc.com tools/archive-candidates.cx -- --check");
+    ok("self-test failed=0", has("CHECK_ARCHIVE_CANDIDATES ok=") && has("failed=0"));
+    sh("sh ./unisacc.com tools/archive-candidates.cx --");
+    ok("summary line", has("ARCHIVE_CANDIDATES A="));
+    ok("plans/devsvc.md graded C", has("\nC\tplans/devsvc.md\t") || has("C\tplans/devsvc.md\t"));
+    ok("prd_mempalace.md graded C", has("C\tprd_mempalace.md\t"));
+    ok("no prd_ file graded A", !has("A\tprd_") && !has("A\tprd.md"));
+    sh("sh ./unisacc.com tools/archive-candidates.cx -- --tools");
+    ok("tools summary", has("TOOL_CANDIDATES n="));
+    sh(st);
+    ok("read only", tx_eqz(before, out));
+    if (fail_n) { printf("CHECK_ARCHIVE_CANDIDATES_FAIL pass=%d fail=%d\n", pass_n, fail_n); return 1; }
+    printf("pass=%d\nCHECK_ARCHIVE_CANDIDATES_OK\n", pass_n);
+    return 0;
+}
