@@ -95,9 +95,13 @@ static void map_kind_controls(void){
     cx_fmt(row,sizeof row,"%s\t/tmp/map-kind-control",sha_name);ck(!map_declared_row(row,(long)strlen(row)),"map-declared-sha-path-substitution-refused");
     const char *unknown="unregistered-map-kind-control\t/tmp/value";ck(!map_declared_row(unknown,(long)strlen(unknown)),"map-undeclared-name-refused");
 }
+static const char *material_cases="all",*given_nightly,*given_shards,*given_waves,*given_dir,*given_affected;
+static int material_want(const char *name){return !strcmp(material_cases,"all")||!strcmp(material_cases,name);}
+static int material_file_sha(const char *p,char h[65]){struct stat st;size_t n;if(lstat(p,&st)||!S_ISREG(st.st_mode)||!(st.st_mode&0111)||st.st_size<=0||st.st_size>16777216)return 0;char *s=cx_read(p,&n);if(!s)return 0;int ok=n==(size_t)st.st_size;if(ok)cx_sha256_hex(s,n,h);free(s);return ok;}
 static const char *phase_cases="all";
 static int phase_want(const char *name){return !strcmp(phase_cases,"all")||!strcmp(phase_cases,name);}
 int main(int argc, char **argv) {
+    {int w=1;for(int r=1;r<argc;r++){const char **slot=0;if(!strcmp(argv[r],"--nightly"))slot=&given_nightly;else if(!strcmp(argv[r],"--shards"))slot=&given_shards;else if(!strcmp(argv[r],"--waves"))slot=&given_waves;else if(!strcmp(argv[r],"--material-dir"))slot=&given_dir;else if(!strcmp(argv[r],"--affected"))slot=&given_affected;if(slot){if(r+1==argc||argv[r+1][0]!='/')die("REFUSED material argument requires absolute path");*slot=argv[++r];}else argv[w++]=argv[r];}argc=w;argv[w]=0;}
     if(argc==2&&!strcmp(argv[1],"ri")){
         char cwd[4096],tool[4400],image[4400],dir[]="/tmp/s9-ri-check-XXXXXX";np_result r={0};
         if(!realpath(".",cwd)||!mkdtemp(dir)||cx_fmt(tool,sizeof tool,"%s/tools/s9-nightly.cx",cwd)||cx_fmt(image,sizeof image,"%s/nightly",dir)||tq_native(cwd,tool,image,why,sizeof why))die(why);
@@ -108,7 +112,9 @@ int main(int argc, char **argv) {
     }
     char *defaults[]={argv[0],"phases",0};
     if(argc==3&&!strcmp(argv[1],"--cases")){phase_cases=argv[2];argv=defaults;argc=2;}
-    else if(argc==4&&!strcmp(argv[2],"--cases")){if(strcmp(argv[1],"phases"))die("--cases requires phases");phase_cases=argv[3];argc=2;}
+    else if(argc==4&&!strcmp(argv[2],"--cases")){if(!strcmp(argv[1],"materials"))material_cases=argv[3];else if(!strcmp(argv[1],"phases"))phase_cases=argv[3];else die("--cases requires phases|materials");argc=2;}
+    if(strcmp(material_cases,"all")&&strcmp(material_cases,"map")&&strcmp(material_cases,"prepare")&&strcmp(material_cases,"negative"))die("materials --cases all|map|prepare|negative");
+    if(strcmp(material_cases,"all")&&strcmp(material_cases,"map")&&(!given_nightly||!given_shards||!given_waves))die("REFUSED prepared nightly/shards/waves materials required");
     if(strcmp(phase_cases,"all")&&strcmp(phase_cases,"init")&&strcmp(phase_cases,"steps")&&strcmp(phase_cases,"aggregate")&&strcmp(phase_cases,"aggout")&&strcmp(phase_cases,"failures")&&strcmp(phase_cases,"candidate"))die("phases --cases all|init|steps|aggregate|aggout|failures|candidate");
     const char *am = argc == 2 ? argv[1] : "";
     int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases"), mat = !*am || !strcmp(am, "materials");
@@ -128,7 +134,7 @@ int main(int argc, char **argv) {
         cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-nightly-fake.cx", root) ||
         cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
         cx_fmt(tool, sizeof tool, "%s/tools/s9-nightly.cx", root)) die("fmt");
-    {
+    if(!mat||material_want("map")){
         char *b[] = {"sh", com, src, "-o", fake, 0};
         runv(b, root, 20, buf, sizeof buf, &rc);
         ck(rc == 0, "fake-compile");
@@ -139,7 +145,8 @@ int main(int argc, char **argv) {
     }
     setenv("S9_FAKE_LOG", logp, 1);
     setenv("UNISACC_S9_NIGHTLY_SOURCE", tool, 1);
-    if(!sy_env("S9_NIGHTLY_NATIVE")) {
+    if(given_nightly&&setenv("S9_NIGHTLY_NATIVE",given_nightly,1))die("native-env");
+    if((!mat||!strcmp(material_cases,"all")||!material_want("map"))&&!sy_env("S9_NIGHTLY_NATIVE")) {
         char prepared[4400];
         if(cx_fmt(prepared,sizeof prepared,"%s/nightly.native",dir)||tq_native(root,tool,prepared,why,sizeof why))die(why);
         if(setenv("S9_NIGHTLY_NATIVE",prepared,1))die("native-env");
@@ -571,10 +578,11 @@ int main(int argc, char **argv) {
         runv(cv, dir, 20, buf, sizeof buf, &rc);
         ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "candidate-0711-passes");
     }
-    if (mat) {   /* 材料映射必须吃真实 affected --materials-dump 的四列输出:0.0.67 的解析按三列写,四列行全被当
+    if (mat&&material_want("map")) {   /* 材料映射必须吃真实 affected --materials-dump 的四列输出:0.0.67 的解析按三列写,四列行全被当
                       REFUSED 跳过,map 到 init 时是 0 行而编排仍报 PASS。这里不手造行,直接跑本仓的 dump,
                       走与 s9-nightly 同一个解析器(tools/cxlib/s9map.cx),断言行数非零,path行绝对路径,sha256行按登记严格校验。 */
         char *dv[] = {"sh", com, "tools/affected.cx", "--", "--materials-dump", "--prepare-materials", 0};
+        if(given_affected){dv[0]=(char *)given_affected;dv[1]="--materials-dump";dv[2]="--prepare-materials";dv[3]=0;}
         char *du = 0; size_t dn = 0; char map[16384], mwhy[300];
         np_result r = {0};
         (void)buf; (void)rc;
@@ -597,26 +605,42 @@ int main(int argc, char **argv) {
             printf("MATERIAL_MAP\tpaths=%ld\tsha256=%ld\tbad=%ld\n",paths,hashes,bad);
         }
         np_free(&r);
+    }
+    if(mat&&(material_want("prepare")||material_want("negative"))){
         /* Real empty-dump rejection: build each actual executor in its own
          * bounded preparation phase, then keep the original 30s negative bound.
          * This private RUN cannot inherit another group's fake receipts. */
         {   char seam[4400],seam_src[4400],emptyrun[4400],bound[4400],before[2][65],after[65];char *neg[16];int q2=0;
             const char *stages[]={"build-shards","build-waves"};
             if(cx_fmt(seam_src,sizeof seam_src,"%s/tests/fixtures/s9-materials-dump-empty.cx",root)||cx_fmt(seam,sizeof seam,"%s/seam.bin",dir)||cx_fmt(emptyrun,sizeof emptyrun,"%s/map-empty-run",dir)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))die("fmt");
-            {char *cc2[]={"sh",com,seam_src,"-o",seam,0};np_result compiled={0};run_result(cc2,root,40,&compiled);ck(compiled.rc==0&&!compiled.residue,"map-empty-dump-seam-compiled");np_free(&compiled);}
+            if(material_want("negative")){char *cc2[]={"sh",com,seam_src,"-o",seam,0};np_result compiled={0};run_result(cc2,root,40,&compiled);ck(compiled.rc==0&&!compiled.residue,"map-empty-dump-seam-compiled");np_free(&compiled);}
             neg[q2++]="sh";neg[q2++]=com;neg[q2++]=tool;neg[q2++]="--";
             neg[q2++]=root;neg[q2++]=emptyrun;neg[q2++]="--tier";neg[q2++]="commit";
             neg[q2++]="--date";neg[q2++]="2026-11-14";neg[q2++]="--phase";neg[q2++]="init";neg[q2]=0;
-            if(setenv("UNISACC_S9_MATERIALS_DUMP_SEAM",seam,1))die("seam-env");
+            if(material_want("negative")&&setenv("UNISACC_S9_MATERIALS_DUMP_SEAM",seam,1))die("seam-env");
+            char bundle[4400];int use_material=given_shards&&given_waves;
+            if(use_material){
+                const char *shared=given_dir?given_dir:sy_env("S9_NIGHTLY_MATERIAL_DIR");
+                if(cx_fmt(bundle,sizeof bundle,shared?"%s":"%s/native-materials",shared?shared:dir))die("material-dir-path");
+                struct stat st;errno=0;int present=!lstat(bundle,&st);if(!present&&errno!=ENOENT)die("REFUSED material directory stat");if(present&&!S_ISDIR(st.st_mode))die("REFUSED real material directory required");
+                if(!present){
+                    if(shared&&!material_want("prepare"))die("REFUSED prepared material directory missing");
+                    char *seal[]={bound,"50",(char *)sy_env("S9_NIGHTLY_NATIVE"),root,emptyrun,"--tier","commit","--native-material-dir",bundle,"--seal-native-materials",(char *)given_shards,(char *)given_waves,0};np_result sealed={0};run_result(seal,dir,55,&sealed);int ok=!sealed.rc&&!sealed.residue&&has(sealed.out,"PREPARED\tnative-material-dir");if(!ok&&sealed.errn)fwrite(sealed.err,1,sealed.errn,stderr);np_free(&sealed);if(!ok)die("REFUSED material directory preparation");
+                }
+                const char *raw[]={given_shards,given_waves},*names[]={"shards","waves"};for(int i=0;i<2;i++){char p[4800],a[65],b[65];if(cx_fmt(p,sizeof p,"%s/%s.bin",bundle,names[i])||!material_file_sha(raw[i],a)||!material_file_sha(p,b)||strcmp(a,b))die("REFUSED native material SHA mismatch");}
+                printf("MATERIAL_DIRECTORY\tpath=%s\tverified=SHA256\tno-test-result\n",bundle);
+                neg[q2++]="--native-material-dir";neg[q2++]=bundle;neg[q2]=0;
+            }
             for(int i=0;i<2;i++){
-                char *prep[]={bound,"50",(char *)sy_env("S9_NIGHTLY_NATIVE"),root,emptyrun,"--tier","commit","--date","2026-11-14","--phase",(char *)stages[i],0};
+                char *prep[16]={bound,"50",(char *)sy_env("S9_NIGHTLY_NATIVE"),root,emptyrun,"--tier","commit","--date","2026-11-14","--phase",(char *)stages[i],0};if(use_material){prep[11]="--native-material-dir";prep[12]=bundle;prep[13]=0;}
                 np_result built={0};long t0=sy_now_ms();run_result(prep,dir,55,&built);
                 int prepared=built.rc==0&&!built.residue&&has(built.out,"status=INIT_PHASE_DONE")&&has(built.out,stages[i]);
-                ck(prepared,i?"map-empty-waves-prepared":"map-empty-shards-prepared");
+                if(material_want("prepare"))ck(prepared,i?"map-empty-waves-prepared":"map-empty-shards-prepared");
                 printf("MATERIAL_PREP\tphase=%s\tstatus=%s\tbound_s=50\twall_ms=%ld\tno-test-result\n",stages[i],prepared?"PREPARED":"REFUSED",sy_now_ms()-t0);
                 if(!prepared&&built.errn)fwrite(built.err,1,built.errn,stderr);np_free(&built);if(!prepared)die("map-empty-executor-preparation");
-                before[i][0]=0;ck(material_native_sha(emptyrun,stages[i],before[i]),i?"map-empty-waves-prepared-sha":"map-empty-shards-prepared-sha");
+                before[i][0]=0;int valid=material_native_sha(emptyrun,stages[i],before[i]);if(material_want("prepare"))ck(valid,i?"map-empty-waves-prepared-sha":"map-empty-shards-prepared-sha");else if(!valid)die("REFUSED prepared executor SHA");
             }
+            if(material_want("negative")){
             np_result rejected={0};long t0=sy_now_ms();run_result(neg,dir,30,&rejected);
             if(unsetenv("UNISACC_S9_MATERIALS_DUMP_SEAM"))die("seam-unset");
             int named=rejected.rc==1&&has(rejected.out,"S9_NIGHTLY\tstatus=FAIL\tstep=map\trc=1\t")&&has(rejected.err,"materials-map-empty refused=2\n");
@@ -628,6 +652,7 @@ int main(int argc, char **argv) {
             for(int i=0;i<2;i++)ck(material_native_sha(emptyrun,stages[i],after)&&!strcmp(before[i],after),i?"map-empty-waves-sha-unchanged":"map-empty-shards-sha-unchanged");
             printf("MATERIAL_NEGATIVE\tbound_s=30\trc=%d\twall_ms=%ld\n",rejected.rc,sy_now_ms()-t0);
             if(!named){if(rejected.outn)fwrite(rejected.out,1,rejected.outn,stderr);if(rejected.errn)fwrite(rejected.err,1,rejected.errn,stderr);}np_free(&rejected);
+            }
         }
     }
     if (split || recovery) {

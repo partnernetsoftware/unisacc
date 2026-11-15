@@ -121,6 +121,7 @@ static char s9run[4400];         /* the RUN directory, set once in main: the map
 static char why4[300];
 static int map_budget;
 static const char *map_family, *material_stage;
+static const char *native_material_dir,*native_material_shards,*native_material_waves;
 static int materials_map(char *map, long cap, char *why, int whycap) {
     char product[4400], tool[4400], *v[10];
     np_result r = {0};
@@ -174,6 +175,34 @@ static int evidence_file(const char *p,const char *body,int save) {
     s=as_read(p,0,&z,why,sizeof why);int ok=s&&z==strlen(body)&&!memcmp(s,body,z);free(s);
     if(!ok){cx_fmt(why,sizeof why,"REFUSE evidence-changed %s",p);return -1;}return 1;
 }
+/* A prepared directory is immutable: exactly two actual native images and a
+ * seal binding their SHA256 values to this ROOT's complete current inputs.
+ * Import creates this RUN's own receipts only after all bytes are verified. */
+static int native_material_check(const char *identity,char hashes[2][65]){
+    struct stat st;char p[5000],body[9000];const char *names[]={"shards.bin","waves.bin"};
+    if(!native_material_dir||native_material_dir[0]!='/'||lstat(native_material_dir,&st)||!S_ISDIR(st.st_mode)){cx_fmt(why,sizeof why,"REFUSE native-material-directory");return -1;}
+    DIR *d=opendir(native_material_dir);if(!d){cx_fmt(why,sizeof why,"REFUSE native-material-open");return -1;}int count=0,bad=0;
+    for(;;){errno=0;struct dirent *e=readdir(d);if(!e){if(errno)bad=1;break;}if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;if(strcmp(e->d_name,names[0])&&strcmp(e->d_name,names[1])&&strcmp(e->d_name,"native-material.tsv"))bad=1;count++;}
+    if(closedir(d))bad=1;if(bad||count!=3){cx_fmt(why,sizeof why,"REFUSE native-material-inventory");return -1;}
+    for(int i=0;i<2;i++)if(cx_fmt(p,sizeof p,"%s/%s",native_material_dir,names[i])||as_sha_file(p,0,hashes[i],0,why,sizeof why)||sy_access(p,1)){cx_fmt(why,sizeof why,"REFUSE native-material-image name=%s",names[i]);return -1;}
+    if(cx_fmt(body,sizeof body,"S9NATIVE-MATERIAL-v1\t%s\t%s\nshards\t%s\nwaves\t%s\n",root,identity,hashes[0],hashes[1])||cx_fmt(p,sizeof p,"%s/native-material.tsv",native_material_dir))return -1;
+    if(evidence_file(p,body,0)!=1){cx_fmt(why,sizeof why,"REFUSE native-material-identity-or-sha");return -1;}return 0;
+}
+static int native_material_seal(const char *tier){
+    char before[65],after[65],hashes[2][65],h[65],p[5000],body[9000];const char *sources[]={native_material_shards,native_material_waves},*names[]={"shards.bin","waves.bin"};
+    identity_epoch=0;identity_ready=0;
+    if(!native_material_dir||native_material_dir[0]!='/'||!sources[0]||!sources[1]||init_identity(tier,0,before))return -1;
+    if(mkdir(native_material_dir,0700)){cx_fmt(why,sizeof why,"REFUSE native-material-new-directory-required");return -1;}
+    for(int i=0;i<2;i++){
+        size_t n;char *s=as_read(sources[i],0,&n,why,sizeof why);if(!s)return -1;
+        if(n<64||memcmp(s,"\177ELF",4)||sy_access(sources[i],1)){free(s);cx_fmt(why,sizeof why,"REFUSE native-material-actual-executable name=%s",names[i]);return -1;}
+        cx_sha256_hex(s,n,hashes[i]);int rc=cx_fmt(p,sizeof p,"%s/%s",native_material_dir,names[i])||cx_write(p,s,n)||chmod(p,0700);free(s);if(rc)return -1;
+        if(as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,hashes[i])||as_sha_file(sources[i],0,h,0,why,sizeof why)||strcmp(h,hashes[i])){cx_fmt(why,sizeof why,"REFUSE native-material-copy-changed");return -1;}
+    }
+    identity_ready=0;if(init_identity(tier,0,after)||strcmp(before,after)){cx_fmt(why,sizeof why,"REFUSE native-material-input-changed");return -1;}
+    if(cx_fmt(body,sizeof body,"S9NATIVE-MATERIAL-v1\t%s\t%s\nshards\t%s\nwaves\t%s\n",root,before,hashes[0],hashes[1])||cx_fmt(p,sizeof p,"%s/native-material.tsv",native_material_dir)||evidence_file(p,body,1)||native_material_check(before,hashes))return -1;
+    printf("PREPARED\tnative-material-dir\tpath=%s\tno-test-result\n",native_material_dir);return 0;
+}
 static int native_image(int waves, int build, char bin[4800]) {
     char state[4600], inside[4600], rec[4840], source[4400], product[4400], done[4840],intent[4840];
     char input[65], after[65], hash[65], body[5000];
@@ -187,9 +216,11 @@ static int native_image(int waves, int build, char bin[4800]) {
     if (cx_fmt(bin,4800,"%s/%s.bin",state,leaf) || cx_fmt(rec,sizeof rec,"%s/%s.native",state,leaf) ||
         init_identity(native_tier,0,input)) return -1;
     if(cx_fmt(done,sizeof done,"%s/%s.done",state,leaf)||cx_fmt(intent,sizeof intent,"%s/%s.intent",state,leaf))return -1;
+    char material_hash[2][65];if(native_material_dir&&!fake&&native_material_check(input,material_hash))return -1;
     if (sy_exists(rec)==1) {
         if(cx_fmt(body,sizeof body,"S9INTENT-v1\t%s\t%s\t%s\n",s9run,leaf,input)||evidence_file(intent,body,0)!=1)return -1;
         if (as_sha_file(bin,1,hash,0,why,sizeof why) || sy_access(bin,1)) return -1;
+        if(native_material_dir&&!fake&&strcmp(hash,material_hash[waves?1:0])){cx_fmt(why,sizeof why,"REFUSE native-material-import-sha");return -1;}
         if (cx_fmt(body,sizeof body,"S9NATIVE-v2\t%s\t%s\t%s\n",s9run,input,hash)) return -1;
         saved=as_read(rec,0,&z,why,sizeof why);
         rc=saved && z==strlen(body) && !memcmp(saved,body,z); free(saved);
@@ -203,7 +234,12 @@ static int native_image(int waves, int build, char bin[4800]) {
     if(sy_exists(bin)==1){cx_fmt(why,sizeof why,"REFUSE native-success-evidence-missing %s",leaf);return -1;}
     if(cx_fmt(body,sizeof body,"S9INTENT-v1\t%s\t%s\t%s\n",s9run,leaf,input)||evidence_file(intent,body,1))return -1;
     np_result r={0};
-    if(fake) {
+    if(native_material_dir&&!fake){
+        char p[5000];if(cx_fmt(p,sizeof p,"%s/%s.bin",native_material_dir,waves?"waves":"shards"))return -1;
+        saved=as_read(p,0,&z,why,sizeof why);if(!saved)return -1;cx_sha256_hex(saved,z,hash);
+        if(strcmp(hash,material_hash[waves?1:0])){free(saved);cx_fmt(why,sizeof why,"REFUSE native-material-read-sha");return -1;}
+        rc=cx_write(bin,saved,z);free(saved);if(!rc)rc=chmod(bin,0700);
+    } else if(fake) {
         char *v[]={(char *)fake,"build",root,s9run,(char *)leaf,0};
         int left=(int)((49000-(sy_now_ms()-started))/1000);
         rc=left>0?run_step(v,root,left,&r):124;
@@ -1050,6 +1086,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
         else if (!strcmp(argv[i], "--map-family") && i + 1 < argc) map_family = argv[++i];
+        else if(!strcmp(argv[i],"--native-material-dir")&&i+1<argc)native_material_dir=argv[++i];
+        else if(!strcmp(argv[i],"--seal-native-materials")&&i+2<argc){native_material_shards=argv[++i];native_material_waves=argv[++i];}
         else if (!strcmp(argv[i], "--material-stage") && i + 1 < argc) material_stage = argv[++i];
         else if (!strcmp(argv[i], "--daily-no-candidate")) daily_no_candidate = 1;
         else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) { step_s = atoi(argv[++i]); step_set = 1; }
@@ -1128,6 +1166,8 @@ int main(int argc, char **argv) {
         }
     }
     native_tier=tier;
+    if(native_material_dir&&fake)die("native-materials","requires real prepared executors");
+    if(native_material_shards){int nr=native_material_seal(tier);if(nr)fprintf(stderr,"s9-nightly: %s\n",why);return nr?2:0;}
     if(phase==100||phase==101) {
         char bin[4800];int nr=native_image(phase==101,1,bin);
         if(nr)fprintf(stderr,"s9-nightly: %s\n",why);
