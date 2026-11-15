@@ -37,6 +37,8 @@
  *   verb:ping、stop、lock-acquire NAME OWNER TTL、lock-release NAME OWNER、lock-list、native ROOT TOOL、emit KIND TEXT、events SINCE。
  * 原生缓存键:工具源 sha256、产品真实路径与大小、ROOT 的 HEAD:cx HEAD:ext HEAD:tools/cxlib 树号、这三处 `git diff HEAD` 的 sha256。
  *   这三处有未跟踪文件或 diff 超 4 MiB 时不缓存(cache=bypass,每次重建),不拿可能过期的执行体冒充。
+ * run 构造失败:应答 `ERR native TOOL rc= ms= log=完整日志路径`(rc -1000-N 即编译器退出码 N),其后 BUILD<TAB> 行是编译输出末段
+ *   (至多 20 行、3000 字节);--local 时同样内容打到 stderr。日志留在缓存目录,下次构造同名工具时覆盖。
  * 已知限制(下一单):服务单线程,native 构造期间(冷最长 50 s)其它请求排队;事件环不落盘;status 不标路径归属;两个 start 同时清理
  *   陈旧 sock 有窄竞态。
  * 退出码:0 OK;1 服务答 ERR(如锁被他人持有);2 用法错;3 连不上实例;run 为工具自己的退出码(超 60 s 为 124)。
@@ -198,11 +200,30 @@ static int lock_find(const char *name) { int i; for (i = 0; i < nlock; i++) if (
 static int okname(const char *s) { long n = s ? (long)strlen(s) : 0; return n > 0 && n < 64 && !strchr(s, ' '); }
 
 /* ---- 原生执行体缓存(服务端与 --local 共用) ---- */
+static char nlog[PW + 32];   /* 最近一次构造失败的完整日志路径;空串即没有 */
+/* 构造失败日志的末段(至多 20 行、3000 字节),每行前缀 BUILD<TAB>,写进 dst;返回长度 */
+static long build_tail(char *dst, long cap) {
+    unsigned char *b = 0; int64_t n = 0; long k = 0, s, i, lines = 0;
+    dst[0] = 0;
+    if (!nlog[0] || sy_read_file(nlog, &b, &n, 1 << 22) || !b) return 0;
+    s = n > 3000 ? (long)n - 3000 : 0;
+    for (i = (long)n - 1; i > s; i--) if (b[i - 1] == '\n' && ++lines >= 20) { s = i; break; }
+    while (s < n) {
+        long e = s; int w;
+        while (e < n && b[e] != '\n') e++;
+        w = snprintf(dst + k, cap - k, "BUILD\t%.*s\n", (int)(e - s), (char *)b + s);
+        if (w < 0 || w >= cap - k) break;
+        k += w; s = e + 1;
+    }
+    dst[k] = 0;
+    free(b);
+    return k;
+}
 static int native_get(const char *root, const char *tool, char *bin, int cap, const char **cache, long *ms) {
     static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], tmp[PW];
     unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc; const char *base; char *dot;
     sy_spawn_t o; sy_exit_t ex;
-    *ms = 0; *cache = "miss";
+    *ms = 0; *cache = "miss"; nlog[0] = 0;
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
     char h0[160], h1[160], h2[160];
     F(h0, sizeof h0, "HEAD:%s", cfg.lib[0]); F(h1, sizeof h1, "HEAD:%s", cfg.lib[1]); F(h2, sizeof h2, "HEAD:%s", cfg.lib[2]);
@@ -228,12 +249,17 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     if (!bypass && sy_exists(bin) == 1) { *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
     if (bypass) *cache = "bypass";
     F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
-    {   char *v[] = {"sh", prod, src, "-o", tmp, 0};
+    F(nlog, sizeof nlog, "%s.build.log", bin);
+    {   char *v[] = {"sh", prod, src, "-o", tmp, 0}; int lf = sy_open(nlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         sy_spawn_init(&o); o.argv = v; o.cwd = root; o.pgroup = -1; o.deadline_ms = 50000;
-        o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_NULL;
-        rc = sy_proc_run(&o, &ex); }
+        o.in_fd = SY_STDIO_NULL; o.out_fd = lf >= 0 ? lf : SY_STDIO_NULL; o.err_fd = lf >= 0 ? lf : SY_STDIO_NULL;
+        rc = sy_proc_run(&o, &ex);
+        if (lf >= 0) sy_close(lf); else nlog[0] = 0; }
     *ms = sy_now_ms() - t0;
+    /* 失败时日志留在原处(下次构造同名工具时覆盖),路径与末段由调用方回传 */
     if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
+    if (nlog[0]) sy_unlink(nlog);
+    nlog[0] = 0;
     if (sy_rename(tmp, bin)) { sy_unlink(tmp); return -EIO; }
     return 0;
 }
@@ -274,7 +300,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     }
     if (!strcmp(f[0], "native")) {
         char bin[PW]; const char *c; long ms; int r = native_get(f[1], f[2], bin, sizeof bin, &c, &ms);
-        if (r) radd("ERR\tnative\t%s\trc=%d\tms=%ld\n", f[2], r, ms);
+        if (r) { char tl[3600]; build_tail(tl, sizeof tl); radd("ERR\tnative\t%s\trc=%d\tms=%ld\tlog=%s\n%s", f[2], r, ms, nlog[0] ? nlog : "-", tl); }
         else radd("OK\tnative\t%s\tcache=%s\tms=%ld\n", bin, c, ms);
         return 0;
     }
@@ -392,7 +418,7 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
             if (e) { *e = 0; F(bin, sizeof bin, "%s", p); cache = strstr(e + 1, "cache=hit") ? "hit" : strstr(e + 1, "cache=bypass") ? "bypass" : "miss"; }
         } else if (rc == 1) { fputs(resp, stderr); return 1; }
     }
-    if (!bin[0]) { local = 1; rc = native_get(root, argv[0], bin, sizeof bin, &cache, &prep); if (rc) { fprintf(stderr, "devsvc: cannot build %s rc=%d\n", argv[0], rc); return 1; } }
+    if (!bin[0]) { local = 1; rc = native_get(root, argv[0], bin, sizeof bin, &cache, &prep); if (rc) { char tl[3600]; build_tail(tl, sizeof tl); fprintf(stderr, "devsvc: cannot build %s rc=%d log=%s\n%s", argv[0], rc, nlog[0] ? nlog : "-", tl); return 1; } }
     t1 = sy_now_ms();
     {   int k = 1, sk = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;   /* 原生执行体不收驱动的 "--",TOOL 后紧跟的一个 "--" 去掉 */
         v[0] = bin; for (i = sk; i < argc; i++) v[k++] = argv[i]; v[k] = 0; }
