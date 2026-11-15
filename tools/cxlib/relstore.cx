@@ -22,6 +22,9 @@
  *                                         drops every edge whose src is one of CHANGED, adds NEW, re-clusters and
  *                                         rewrites; refuses when the cache is stale, because "update" would then be
  *                                         an update of something that no longer describes the tree
+ *   rs_update_file(DIR, XSHA, FILE, NEW, NEWN, why, cap)
+ *                                         one changed file (G9): its files.tsv row replaced/added/dropped (sha 0)
+ *                                         and its out-edges replaced by NEW; same bytes as a full rebuild
  *   rs_read_edges / rs_read_files          the stored text, for a caller that wants to compare or serve it
  *
  * Every malformed line is refused by name with its line number: a relation table that cannot be read exactly
@@ -320,6 +323,62 @@ int rs_incremental(const char *dir, const char *xsha, const char *changed, long 
     free(old);
     return 0;
 fail:
+    if (why) cx_fmt(why, (size_t)cap, "%s", rs_why);
+    return -1;
+}
+
+/* one file changed (G9): its files.tsv row is replaced (added when new; dropped when F->sha is 0, the file is
+ * gone) and every edge whose src is F->path is replaced by NEW.  The result is byte-identical to rs_rebuild of
+ * the updated file list and edge set -- the same sort for both tables.  Refuses on a stale store, as
+ * rs_incremental does; edges are written before files.tsv so a crash between leaves a row describing old bytes,
+ * which the next sha comparison reports as changed again (never a row that claims edges not yet written). */
+int rs_update_file(const char *dir, const char *xsha, const rs_file *f, const char *newe, long newn, char *why, int cap) {
+    char *old = 0, *chg = 0;
+    size_t on = 0;
+    long nr = 0, i = 0, k, pl;
+    rs_file *rows = 0;
+    np_buf body = {0};
+    int found = 0;
+    if (!dir || !xsha || !f || !f->path || !*f->path || !newe) { rs_bad("argument", dir, -1); goto fail; }
+    pl = (long)strlen(f->path);
+    chg = malloc((size_t)pl + 2);
+    if (!chg) { rs_bad("allocation", dir, -1); goto fail; }
+    if (mm_copy(chg, pl + 2, f->path, pl)) { rs_bad("allocation", dir, -1); goto fail; }
+    chg[pl] = '\n'; chg[pl + 1] = 0;
+    if (rs_incremental(dir, xsha, chg, pl + 1, newe, newn, 0, 0)) goto fail;
+    if (rs_get(dir, "files.tsv", &old, &on)) { rs_bad("read", "files.tsv", -1); goto fail; }
+    for (k = 0; k < (long)on; k++) if (old[k] == '\n') nr++;
+    rows = malloc((size_t)(nr + 2) * sizeof *rows);
+    if (!rows) { rs_bad("allocation", dir, -1); goto fail; }
+    nr = 0;
+    {   long at = 0, line = 0;
+        while (at < (long)on) {
+            long e = at, t1, t2;
+            while (e < (long)on && old[e] != '\n') e++;
+            line++;
+            for (t1 = at; t1 < e && old[t1] != '\t'; t1++) { }
+            for (t2 = t1 + 1; t2 < e && old[t2] != '\t'; t2++) { }
+            if (t1 >= e || t2 >= e || t1 == at) { rs_bad("files-fields", "files.tsv", line); goto fail; }
+            old[t1] = 0; old[t2] = 0; if (e < (long)on) old[e] = 0;
+            if (t1 - at == pl && !memcmp(old + at, f->path, (size_t)pl)) {
+                found = 1;
+                if (f->sha) { rows[nr].path = f->path; rows[nr].sha = f->sha; rows[nr].size = f->size; nr++; }
+            } else {
+                long long v = 0; long d;
+                for (d = t2 + 1; d < e; d++) { if (old[d] < '0' || old[d] > '9') { rs_bad("files-size", "files.tsv", line); goto fail; } v = v * 10 + (old[d] - '0'); }
+                rows[nr].path = old + at; rows[nr].sha = old + t1 + 1; rows[nr].size = v; nr++;
+            }
+            at = e + 1;
+        }
+    }
+    if (!found && f->sha) { rows[nr].path = f->path; rows[nr].sha = f->sha; rows[nr].size = f->size; nr++; }
+    if (rs_files_body(rows, nr, &body)) { rs_bad("files-body", dir, -1); goto fail; }
+    if (rs_put(dir, "files.tsv", body.p ? body.p : "", (size_t)body.n)) { rs_bad("write", "files.tsv", -1); goto fail; }
+    (void)i;
+    free(body.p); free(rows); free(old); free(chg);
+    return 0;
+fail:
+    free(body.p); free(rows); free(old); free(chg);
     if (why) cx_fmt(why, (size_t)cap, "%s", rs_why);
     return -1;
 }

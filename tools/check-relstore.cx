@@ -16,6 +16,8 @@
  *   refuse-malformed-edge         a 4-field edge is refused by name (rebuild and incremental)
  *   refuse-empty-src              an edge with an empty src is refused by name
  *   files-sorted-by-path          files.tsv is sorted by path regardless of the order they were passed
+ *   update-file-*                 G9 rs_update_file: one changed file, an added file, a dropped file (sha 0):
+ *                                 edges.tsv and files.tsv each byte-identical to a full rebuild; stale refused
  */
 #pragma unisa use cxlib.relstore
 #pragma unisa use cxlib.relload
@@ -165,6 +167,33 @@ int main(int argc, char **argv) {
             if (rs_rebuild(s4, SEEN_X1, files, 3, e2.p, (long)e2.n, why, (int)sizeof why)) die("rebuild-expect");
             ck(same_file(s1, s4, "edges.tsv"), "incremental-equals-rebuild");
         }
+    }
+
+    /* G9: one file changed (new sha, size, out-edges) -> rs_update_file == a full rebuild of the updated list and
+       edge set, byte for byte in BOTH tables; then a new file added, then a file dropped (sha 0) */
+    {   char s7[1200], s8[1200];
+        const char *newe = "derive\tbuild/links.tsv\tbuild/new-target.tsv\tlinks-gen\tbound=1;write=0\n";
+        rs_file up = {"build/links.tsv", SEEN_X2, 99}, add = {"zeta.tsv", SEEN_X2, 7}, gone = {"alpha.tsv", 0, 0};
+        rs_file f2[4];
+        const char *adde = "derive\tzeta.tsv\tbuild/z.tsv\tlinks-gen\tx=1\n";
+        np_buf e3 = {0};
+        if (fresh(s7, (long)sizeof s7) || fresh(s8, (long)sizeof s8)) die("temp");
+        if (rs_rebuild(s7, SEEN_X1, files, 3, edges.p, (long)edges.n, why, (int)sizeof why)) die("rebuild-g9");
+        f2[0] = up; f2[1] = files[1]; f2[2] = files[2];
+        ck(rs_update_file(s7, SEEN_X1, &up, newe, (long)strlen(newe), why, (int)sizeof why) == 0, "update-file-ok");
+        if (rs_rebuild(s8, SEEN_X1, f2, 3, e2.p, (long)e2.n, why, (int)sizeof why)) die("rebuild-g9-expect");
+        ck(same_file(s7, s8, "edges.tsv") && same_file(s7, s8, "files.tsv"), "update-file-equals-rebuild");
+        np_put(&e3, e2.p, (size_t)e2.n); np_puts(&e3, adde);
+        f2[3] = add;
+        ck(rs_update_file(s7, SEEN_X1, &add, adde, (long)strlen(adde), why, (int)sizeof why) == 0, "update-file-add-ok");
+        if (rs_rebuild(s8, SEEN_X1, f2, 4, e3.p, (long)e3.n, why, (int)sizeof why)) die("rebuild-g9-add");
+        ck(same_file(s7, s8, "edges.tsv") && same_file(s7, s8, "files.tsv"), "update-file-add-equals-rebuild");
+        f2[2] = f2[3];
+        ck(rs_update_file(s7, SEEN_X1, &gone, "", 0, why, (int)sizeof why) == 0, "update-file-drop-ok");
+        if (rs_rebuild(s8, SEEN_X1, f2, 3, e3.p, (long)e3.n, why, (int)sizeof why)) die("rebuild-g9-drop");
+        ck(same_file(s7, s8, "edges.tsv") && same_file(s7, s8, "files.tsv"), "update-file-drop-equals-rebuild");
+        ck(rs_update_file(s7, SEEN_X2, &up, newe, (long)strlen(newe), why, (int)sizeof why) < 0, "update-file-stale-refused");
+        free(e3.p);
     }
 
     /* a 4-field edge is refused by name in both entry points */
