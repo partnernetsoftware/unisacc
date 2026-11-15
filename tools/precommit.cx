@@ -450,13 +450,20 @@ static int cov_blob(const char *rev, const char *path, char **out, long *n) {
     *out = slurp(v, n);
     return *out ? 0 : 1;
 }
-static int cov_link_dir(const char *src, const char *dst, const char *skip1, const char *skip2, const char *skip3) {
+static int cov_link_dir(const char *src, const char *dst, const char *skip1, const char *skip2, const char *skip3, int regs) {
     sy_dir_t d; int rc = sy_dir_open(&d, src);
     if (rc) return rc;
     while (sy_dir_next(&d) == 1) {
         char s[1500], t[1500];
         if (tx_eqz(d.name, skip1) || tx_eqz(d.name, skip2) || tx_eqz(d.name, skip3) || tx_eqz(d.name, ".git")) continue;
         if (cx_fmt(s, sizeof s, "%s/%s", src, d.name) || cx_fmt(t, sizeof t, "%s/%s", dst, d.name)) continue;
+        if (regs) {   /* tests/ 下的普通文件(批次源)须以普通文件出现:tp_visit 用 lstat 拒软链(source-not-regular) */
+            sy_stat_t st;
+            if (!sy_lstat(s, &st) && st.kind == 'f') {
+                if (sy_link(s, t)) { size_t sz = 0; char *c = (char *)cx_read(s, &sz); if (c) { cx_write(t, c, sz); mm_free(c); } }
+                continue;
+            }
+        }
         sy_symlink(s, t);
     }
     sy_dir_close(&d);
@@ -479,7 +486,8 @@ static void cov_clean(const char *tag) {
     if (!sy_dir_open(&d, dir)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", dir, d.name)) sy_unlink(u); sy_dir_close(&d); }
     sy_rmdir(dir);
 }
-/* 求值一版:返回 0=解析通过或非 unknown-coverage 类拒绝;1=unknown-coverage,*idv 放首个 id;-1=没跑.
+/* 求值一版:返回 0=解析通过;1=unknown-coverage,*idv 放首个 id;2=其他行首 REFUSE(环境类如 source-not-regular),*idv 放原因;-1=没跑.
+ * cov_gate 对 2 与 -1 一律具名拦截,不静默放行;只有夹具仓(cwd 无 tests/run.cx)跳过并打印 COVGATE skipped=1.
  * Flow passes: the index-side run.cx --list is the flow node "coveval" (30 s bound set by precommit-flow.cx):
  * --plan builds the root and prints the PLAN row, --from-run reads the node's output; the parsing below is
  * shared with the serial path, and the rare HEAD-side evaluation stays in line in the judge pass. */
@@ -491,8 +499,8 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
         if (!b) return -1;
     } else {
     if (cx_fmt(tdir, sizeof tdir, "%s/tests", dir) || sy_mkdir(dir, 0700) || sy_mkdir(tdir, 0700)) return -1;
-    cov_link_dir(cwd, dir, "tests", "", "");
-    { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx"); }
+    cov_link_dir(cwd, dir, "tests", "", "", 0);
+    { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx", 1); }
     { size_t sz = 0; char *src; if (cx_fmt(p, sizeof p, "%s/tests/run.cx", cwd)) return -1;
       src = (char *)cx_read(p, &sz); if (!src) return -1;
       if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir) || cx_write(p, src, sz)) return -1; }
@@ -521,15 +529,24 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
       if (a >= 0) { long q = tx_find(b + a, total - a, " id=", 4), k = 0;
         if (q >= 0) { q += a + 4; while (q + k < total && b[q + k] != '\n' && k < idcap - 1) { idv[k] = b[q + k]; k++; } idv[k] = 0; }
         mm_free(b); return 1; }
-      if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0 && tx_find(b, total, "REFUSE", 6) < 0) { mm_free(b); return -1; }
+      { long r = tx_find(b, total, "\nREFUSE\t", 8), k = 0;   /* 其他拒绝(环境类或别的注册表缺陷,行首 REFUSE):返回 2,*idv 放具名原因 */
+        if (r >= 0) r++; else if (total >= 7 && tx_same(b, 7, "REFUSE\t", 7)) r = 0;
+        if (r >= 0) { r += 7; while (r + k < total && b[r + k] != '\n' && k < idcap - 1) { idv[k] = b[r + k] == '\t' ? ' ' : b[r + k]; k++; } idv[k] = 0;
+          mm_free(b); return 2; } }
+      if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0) { mm_free(b); return -1; }
       mm_free(b); return 0; }
 }
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
-    if (sy_exists("tests/run.cx") != 1) return 0;
-    if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) return 0;
+    if (sy_exists("tests/run.cx") != 1) { if (!plan_dir) sy_eprintf("precommit: COVGATE skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
+    if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) {
+        if (plan_dir) return 0;
+        sy_eprintf("precommit: BLOCKED registry gate: cannot read staged tests/batches.tsv or tests/coverage.tsv\n"); return 1; }
     ri = cov_eval("idx", ir, irn, ic, icn, id, sizeof id);
     cov_clean("idx");
+    if (plan_dir) return 0;
+    if (ri == 2) { sy_eprintf("precommit: BLOCKED registry REFUSE: run.cx --list on the staged tables refused: %s\n", id); return 1; }
+    if (ri < 0) { sy_eprintf("precommit: BLOCKED registry gate did not run: run.cx --list on the staged tables gave no verdict (timeout or no output)\n"); return 1; }
     if (ri != 1) return 0;
     if (!cov_blob("HEAD", "tests/batches.tsv", &hr, &hrn) && !cov_blob("HEAD", "tests/coverage.tsv", &hc, &hcn)) {
         rh = cov_eval("head", hr, hrn, hc, hcn, hid, sizeof hid);
