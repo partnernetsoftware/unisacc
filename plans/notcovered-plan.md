@@ -187,3 +187,4 @@
 - 版本号顺延只改了 `build/version-seq.tsv` 与 `prd.md` 版本表的行首版本号;`prd.md` 正文其余句子与 `prd_cx.md`(201、440、1604 行等)里的旧版本号未动,需主调度或各节维护者跟进。
 - 工具缺口:`devsvc doc` 的节路径按 `/` 分层,`prd.md` 9.4 节标题自身含 `build/version-seq.tsv`,因而该节无法寻址(ENOSEC),候选池摘要改用 `devsvc f edit` 写入;建议 flowdoc 支持对标题内 `/` 转义或按节号前缀匹配。
 - 记忆宫殿 90、91 行及"8.9 KB 触发 malformed unit frame"的说法需按本文件第 1 节更正(本工单不碰 `prd_mempalace.md`)。
+- (2026-11-15 cc)产品 -run 编译缓存按源路径取键,同内容换路径即冷编(6 至 10 s 起,devsvc 启动器实测 6355 ms 对 187 ms),拖慢所有夹具类检查与新克隆首调用;非 not covered 类,但属 0.0.69 同期应修的产品缺陷,建议并入第一期或单列一包:键改内容(源闭包 sha 加产品 sha),路径不入键(含 __FILE__ 的单元除外)。证据与 devsvc 侧绕法见 plans/devsvc.md 第 6 节。
