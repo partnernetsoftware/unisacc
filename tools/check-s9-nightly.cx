@@ -2,11 +2,13 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.proc
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
 #pragma unisa use cxlib.s9map
+#pragma unisa use cxlib.testplan
 #pragma unisa use cxlib.toolprep
 static int has(const char *s, const char *p) {
     size_t n, pl, i;
@@ -23,8 +25,7 @@ static void ck(int ok, const char *n) {
     printf("%s\tcheck-s9-nightly.%s\n", ok ? "PASS" : "FAIL", n);
     if (!ok) failed++;
 }
-static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc) {
-    np_result r = {0};
+static void run_result(char **v,const char *cwd,int sec,np_result *r) {
     char *native[64],**call=v;
     const char *image=sy_env("S9_NIGHTLY_NATIVE"),*source=sy_env("UNISACC_S9_NIGHTLY_SOURCE");
     if(image&&*image&&source&&v[0]&&v[1]&&v[2]&&v[3]&&!strcmp(v[0],"sh")&&!strcmp(v[2],source)&&!strcmp(v[3],"--")) {
@@ -32,7 +33,10 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
         for(int i=4;v[i];i++){if(k==63)die("native-argv");native[k++]=v[i];}
         native[k]=0;call=native;
     }
-    if (np_run(call, cwd, 0, sec, &r, why, sizeof why)) die(why);
+    if(np_run(call,cwd,0,sec,r,why,sizeof why))die(why);
+}
+static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc) {
+    np_result r = {0};run_result(v,cwd,sec,&r);
     *rc = r.rc;
     if (out && cap > 0) {
         size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
@@ -42,8 +46,55 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
     np_free(&r);
     return 0;
 }
+/* Check the actual executable against both same-RUN producer seals. The
+ * consumer additionally verifies the full current input identity before SKIP. */
+static int material_native_sha(const char *run,const char *leaf,char hash[65]){
+    char p[5000],prefix[4800];struct stat a,b;size_t n,rn,dn;char *image,*receipt,*done;int ok;
+    if(cx_fmt(p,sizeof p,"%s.nightly-init/%s.bin",run,leaf)||lstat(p,&a)||!S_ISREG(a.st_mode)||!(a.st_mode&0111)||a.st_size<=0||a.st_size>16777216)return 0;
+    image=cx_read(p,&n);if(!image)return 0;
+    ok=n==(size_t)a.st_size&&!lstat(p,&b)&&S_ISREG(b.st_mode)&&a.st_dev==b.st_dev&&a.st_ino==b.st_ino&&a.st_size==b.st_size;
+    if(!ok){free(image);return 0;}cx_sha256_hex(image,n,hash);free(image);
+    if(cx_fmt(p,sizeof p,"%s.nightly-init/%s.native",run,leaf)||lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<=0||a.st_size>16384)return 0;
+    receipt=cx_read(p,&rn);if(!receipt)return 0;
+    if(cx_fmt(p,sizeof p,"%s.nightly-init/%s.done",run,leaf)||lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<=0||a.st_size>16384){free(receipt);return 0;}
+    done=cx_read(p,&dn);if(!done){free(receipt);return 0;}
+    if(cx_fmt(prefix,sizeof prefix,"S9NATIVE-v2\t%s\t",run)){free(receipt);free(done);return 0;}
+    size_t k=strlen(prefix);ok=rn==k+130&&dn==rn&&!memcmp(receipt,done,rn)&&!memcmp(receipt,prefix,k)&&receipt[k+64]=='\t'&&receipt[rn-1]=='\n'&&!memcmp(receipt+k+65,hash,64);
+    if(ok)for(int i=0;i<64;i++){char c=receipt[k+(size_t)i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))ok=0;}
+    free(receipt);free(done);return ok;
+}
 
 /* 模式: core(顺序/失败停止/档位) | tiers(daily/release 档透传) | limits(max-steps/日期/截断/出口/UNKNOWN) | resume | resume(--resume 4 项);无参两者都跑。各自一个批次,合并在 affected 冷编下超 55s。 */
+static tp_material_decl map_kinds[256];static int map_nk;
+static void map_kind_batch(const tp_batch_view *v,void *context){
+    (void)context;const char *at=v->materials;tp_material_decl d;int rc;
+    while((rc=tp_material_next(&at,&d))>0){int found=0;for(int i=0;i<map_nk;i++)if(!strcmp(map_kinds[i].name,d.name)){if(map_kinds[i].kind!=d.kind)die("map-kind-conflict");found=1;break;}if(!found){if(map_nk==256)die("map-kind-capacity");map_kinds[map_nk++]=d;}}
+    if(rc<0)die("map-kind-declaration");
+}
+static void map_kind_coverage(const tp_coverage_view *v,void *context){(void)v;(void)context;}
+static void map_kind_load(void){
+    char p[4400];size_t rn,cn;if(cx_fmt(p,sizeof p,"%s/tests/batches.tsv",root))die("map-kind-path");char *registry=cx_read(p,&rn);if(cx_fmt(p,sizeof p,"%s/tests/coverage.tsv",root))die("map-kind-path");char *coverage=cx_read(p,&cn);
+    if(!registry||!coverage)die("map-kind-read");tp_summary sum;tp_observer observer={map_kind_batch,map_kind_coverage,0};map_nk=0;int rc=tp_visit(root,registry,rn,coverage,cn,&observer,&sum,why,sizeof why);free(registry);free(coverage);if(rc)die(why);
+}
+/* Transport shape alone cannot turn a declared path into a SHA256 literal. */
+static int map_declared_row(const char *s,long n){
+    long tab=-1;for(long i=0;i<n;i++){if(s[i]=='\t'){if(tab>=0)return 0;tab=i;}else if(s[i]=='\r'||s[i]=='\n'||!s[i])return 0;}if(tab<=0||tab+1>=n)return 0;
+    int kind=0;for(int i=0;i<map_nk;i++)if(strlen(map_kinds[i].name)==(size_t)tab&&!memcmp(s,map_kinds[i].name,(size_t)tab)){kind=map_kinds[i].kind;break;}
+    if(kind==1)return s[tab+1]=='/'?1:0;if(kind!=2||n-tab-1!=64)return 0;
+    for(long i=tab+1;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 2;
+}
+static void map_kind_controls(void){
+    const char *path_name=0,*sha_name=0;for(int i=0;i<map_nk;i++){if(map_kinds[i].kind==1&&!path_name)path_name=map_kinds[i].name;if(map_kinds[i].kind==2&&!sha_name)sha_name=map_kinds[i].name;}if(!path_name||!sha_name)die("map-kind-control-requires-both-types");
+    char row[512],h[65];cx_sha256_hex("map-kind-control",16,h);
+    cx_fmt(row,sizeof row,"%s\t/tmp/map-kind-control",path_name);ck(map_declared_row(row,(long)strlen(row))==1,"map-declared-path-absolute-accepted");
+    cx_fmt(row,sizeof row,"%s\trelative",path_name);ck(!map_declared_row(row,(long)strlen(row)),"map-declared-path-relative-refused");
+    cx_fmt(row,sizeof row,"%s\t%s",path_name,h);ck(!map_declared_row(row,(long)strlen(row)),"map-declared-path-sha-substitution-refused");
+    cx_fmt(row,sizeof row,"%s\t%s",sha_name,h);ck(map_declared_row(row,(long)strlen(row))==2,"map-declared-sha-lowercase64-accepted");
+    row[strlen(sha_name)+1]='A';ck(!map_declared_row(row,(long)strlen(row)),"map-declared-sha-uppercase-refused");
+    cx_fmt(row,sizeof row,"%s\t%s",sha_name,h);row[strlen(row)-1]=0;ck(!map_declared_row(row,(long)strlen(row)),"map-declared-sha-truncation-refused");
+    cx_fmt(row,sizeof row,"%s\t/tmp/map-kind-control",sha_name);ck(!map_declared_row(row,(long)strlen(row)),"map-declared-sha-path-substitution-refused");
+    const char *unknown="unregistered-map-kind-control\t/tmp/value";ck(!map_declared_row(unknown,(long)strlen(unknown)),"map-undeclared-name-refused");
+}
 static const char *phase_cases="all";
 static int phase_want(const char *name){return !strcmp(phase_cases,"all")||!strcmp(phase_cases,name);}
 int main(int argc, char **argv) {
@@ -522,7 +573,7 @@ int main(int argc, char **argv) {
     }
     if (mat) {   /* 材料映射必须吃真实 affected --materials-dump 的四列输出:0.0.67 的解析按三列写,四列行全被当
                       REFUSED 跳过,map 到 init 时是 0 行而编排仍报 PASS。这里不手造行,直接跑本仓的 dump,
-                      走与 s9-nightly 同一个解析器(tools/cxlib/s9map.cx),断言行数非零且每行都是绝对路径。 */
+                      走与 s9-nightly 同一个解析器(tools/cxlib/s9map.cx),断言行数非零,path行绝对路径,sha256行按登记严格校验。 */
         char *dv[] = {"sh", com, "tools/affected.cx", "--", "--materials-dump", "--prepare-materials", 0};
         char *du = 0; size_t dn = 0; char map[16384], mwhy[300];
         np_result r = {0};
@@ -533,38 +584,50 @@ int main(int argc, char **argv) {
         mwhy[0] = 0;
         ck(s9_map_from_dump(du ? du : "", (long)dn, map, (long)sizeof map, mwhy, (int)sizeof mwhy) == 0, "map-real-dump-parsed");
         ck(s9_map_rows() > 0, "map-real-dump-rows-nonzero");
-        {   long a2 = 0, bad = 0, lines = 0;
-            while (map[a2]) {
-                long e2 = a2; int nl = 0, tab = 0, ap = 0;
-                while (map[e2] && map[e2] != '\n') { if (map[e2] == '\t') { tab = 1; if (map[e2 + 1] == '/') ap = 1; } e2++; }
-                if (!map[e2]) nl = 1;
-                lines++;
-                if (!(tab && ap)) bad++;
-                if (nl) break;
-                a2 = e2 + 1;
+        map_kind_load();map_kind_controls();
+        {   long a2=0,bad=0,lines=0,paths=0,hashes=0;
+            while(map[a2]){
+                long e2=a2;while(map[e2]&&map[e2]!='\n')e2++;int kind=map_declared_row(map+a2,e2-a2);
+                lines++;if(!map[e2]||!kind)bad++;if(kind==1)paths++;if(kind==2)hashes++;
+                if(!map[e2])break;a2=e2+1;
             }
-            ck(lines == s9_map_rows() && bad == 0, "map-real-dump-every-row-name-and-abs-path");
+            /* Preserve absolute-path admission for every declared path. */
+            ck(lines==s9_map_rows()&&bad==0&&paths>0,"map-real-dump-every-row-name-and-abs-path");
+            ck(paths+hashes==lines&&bad==0,"map-real-dump-all-values-match-declared-kind");
+            printf("MATERIAL_MAP\tpaths=%ld\tsha256=%ld\tbad=%ld\n",paths,hashes,bad);
         }
         np_free(&r);
-        /* 负控(实跑):把 dump 换成一个「每行都是 REFUSED」的同格式输出,map 为空时 s9-nightly 必须以
-           init-materials 具名失败,而不是拿着空图继续跑整档。走 UNISACC_S9_MATERIALS_DUMP_SEAM,子进程仍是
-           真实的 tools/s9-nightly.cx,只是那一行命令换成了夹具。 */
-        {   char seam[4400], seam_src[4400]; char *neg[16]; int q2 = 0;
-            if (cx_fmt(seam_src, sizeof seam_src, "%s/tests/fixtures/s9-materials-dump-empty.cx", root)
-                || cx_fmt(seam, sizeof seam, "%s/seam.bin", dir)) die("fmt");
-            {   char *cc2[] = {"sh", com, seam_src, "-o", seam, 0};
-                if (np_run(cc2, root, 0, 40, &r, why, sizeof why)) die("seam-compile"); }
-            neg[q2++] = "sh"; neg[q2++] = com; neg[q2++] = tool; neg[q2++] = "--";
-            neg[q2++] = root; neg[q2++] = runp; neg[q2++] = "--tier"; neg[q2++] = "commit";
-            neg[q2++] = "--date"; neg[q2++] = "2026-11-14"; neg[q2++] = "--phase"; neg[q2++] = "init";
-            neg[q2] = 0;
-            setenv("UNISACC_S9_MATERIALS_DUMP_SEAM", seam, 1);
-            {   char *rmn[] = {"rm", "-rf", "--", runp, 0};   /* 上一次真实 dump 已把 run 目录建出来,这里要重构一份 */
-                runv(rmn, dir, 5, buf, sizeof buf, &rc); }
-            runv(neg, dir, 30, buf, sizeof buf, &rc);
-            unsetenv("UNISACC_S9_MATERIALS_DUMP_SEAM");
-            ck(rc == 1 && strstr(buf, "step=init-materials") && strstr(buf, "materials-map-empty"), "map-empty-dump-refused-by-name");
-            ck(rc == 1 && !strstr(buf, "status=PASS"), "map-empty-dump-not-a-pass");
+        /* Real empty-dump rejection: build each actual executor in its own
+         * bounded preparation phase, then keep the original 30s negative bound.
+         * This private RUN cannot inherit another group's fake receipts. */
+        {   char seam[4400],seam_src[4400],emptyrun[4400],bound[4400],before[2][65],after[65];char *neg[16];int q2=0;
+            const char *stages[]={"build-shards","build-waves"};
+            if(cx_fmt(seam_src,sizeof seam_src,"%s/tests/fixtures/s9-materials-dump-empty.cx",root)||cx_fmt(seam,sizeof seam,"%s/seam.bin",dir)||cx_fmt(emptyrun,sizeof emptyrun,"%s/map-empty-run",dir)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))die("fmt");
+            {char *cc2[]={"sh",com,seam_src,"-o",seam,0};np_result compiled={0};run_result(cc2,root,40,&compiled);ck(compiled.rc==0&&!compiled.residue,"map-empty-dump-seam-compiled");np_free(&compiled);}
+            neg[q2++]="sh";neg[q2++]=com;neg[q2++]=tool;neg[q2++]="--";
+            neg[q2++]=root;neg[q2++]=emptyrun;neg[q2++]="--tier";neg[q2++]="commit";
+            neg[q2++]="--date";neg[q2++]="2026-11-14";neg[q2++]="--phase";neg[q2++]="init";neg[q2]=0;
+            if(setenv("UNISACC_S9_MATERIALS_DUMP_SEAM",seam,1))die("seam-env");
+            for(int i=0;i<2;i++){
+                char *prep[]={bound,"50",(char *)sy_env("S9_NIGHTLY_NATIVE"),root,emptyrun,"--tier","commit","--date","2026-11-14","--phase",(char *)stages[i],0};
+                np_result built={0};long t0=sy_now_ms();run_result(prep,dir,55,&built);
+                int prepared=built.rc==0&&!built.residue&&has(built.out,"status=INIT_PHASE_DONE")&&has(built.out,stages[i]);
+                ck(prepared,i?"map-empty-waves-prepared":"map-empty-shards-prepared");
+                printf("MATERIAL_PREP\tphase=%s\tstatus=%s\tbound_s=50\twall_ms=%ld\tno-test-result\n",stages[i],prepared?"PREPARED":"REFUSED",sy_now_ms()-t0);
+                if(!prepared&&built.errn)fwrite(built.err,1,built.errn,stderr);np_free(&built);if(!prepared)die("map-empty-executor-preparation");
+                before[i][0]=0;ck(material_native_sha(emptyrun,stages[i],before[i]),i?"map-empty-waves-prepared-sha":"map-empty-shards-prepared-sha");
+            }
+            np_result rejected={0};long t0=sy_now_ms();run_result(neg,dir,30,&rejected);
+            if(unsetenv("UNISACC_S9_MATERIALS_DUMP_SEAM"))die("seam-unset");
+            int named=rejected.rc==1&&has(rejected.out,"S9_NIGHTLY\tstatus=FAIL\tstep=map\trc=1\t")&&has(rejected.err,"materials-map-empty refused=2\n");
+            ck(named,"map-empty-dump-refused-by-name");
+            ck(rejected.rc==1&&!has(rejected.out,"status=PASS")&&!has(rejected.err,"status=PASS"),"map-empty-dump-not-a-pass");
+            ck(!rejected.residue&&!rejected.timed_out,"map-empty-dump-clean-children");
+            ck(!has(rejected.out,"PASS")&&!has(rejected.err,"PASS"),"map-empty-dump-no-pass-in-either-stream");
+            ck(has(rejected.out,"S9_INIT\tphase=build-shards\tstatus=SKIP\n")&&has(rejected.out,"S9_INIT\tphase=build-waves\tstatus=SKIP\n"),"map-empty-dump-consumes-prepared-executors");
+            for(int i=0;i<2;i++)ck(material_native_sha(emptyrun,stages[i],after)&&!strcmp(before[i],after),i?"map-empty-waves-sha-unchanged":"map-empty-shards-sha-unchanged");
+            printf("MATERIAL_NEGATIVE\tbound_s=30\trc=%d\twall_ms=%ld\n",rejected.rc,sy_now_ms()-t0);
+            if(!named){if(rejected.outn)fwrite(rejected.out,1,rejected.outn,stderr);if(rejected.errn)fwrite(rejected.err,1,rejected.errn,stderr);}np_free(&rejected);
         }
     }
     if (split || recovery) {
