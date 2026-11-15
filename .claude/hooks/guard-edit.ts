@@ -189,6 +189,18 @@ function check(cmd: string, cwd: string, depth = 0): string | null {
 
 try {
   const input = JSON.parse(await Bun.stdin.text());
+  if (input?.tool_name === "Read") {
+    // DEVSVC-ONLY:仓内文件读取经 devsvc f read 或 flow 的 file.read 节点;应急回退同下方 native-fallback 标记。
+    const fp: string = input?.tool_input?.file_path ?? "";
+    const root = process.env.CLAUDE_PROJECT_DIR ?? "";
+    if (root && fp.startsWith(root + "/") && !fp.startsWith(root + "/out/")) {
+      const fb = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc/native-fallback`;
+      let ok = false;
+      try { const st = await Bun.file(fb).stat(); ok = Date.now() - st.mtimeMs < 30 * 60 * 1000; } catch {}
+      if (!ok) { console.error(`DEVSVC-ONLY 拒绝:仓内文件 ${fp} 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - 的 file.read 节点)。`); process.exit(2); }
+    }
+    process.exit(0);
+  }
   if (input?.tool_name === "Edit" || input?.tool_name === "Write") {
     const agent = process.env.UNISACC_AGENT ?? "";
     const fp: string = input?.tool_input?.file_path ?? "";
