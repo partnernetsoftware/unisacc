@@ -1,0 +1,218 @@
+/* Checks tools/affected-drain.cx: sh ./unisacc.com tools/check-affected-drain.cx   (from the repo root)
+   Every case drives the drain against tests/cases/fake-affected.cx (--affected), whose replies per call are
+   written here into /tmp/check-affected-drain-PID/CASE/ (list, run-1, run-2, ...); the fixture records each
+   run call's argument vector in `calls`, so the ids handed to every round are asserted, not assumed.
+     converge    three rounds: a passes, b is killed once then passes, c waits two rounds; d NOT_APPLICABLE
+     overbudget  a killed in two consecutive rounds: over_budget=1, rc 1, no third call although run-3 would pass
+     late        -j 1: killed twice while behind the first id is NOT over budget; -j is passed every round
+     reorder     a killed batch goes first in the next round; two kills at the front convict it; -j 9 refused
+     maxcalls    always start-deadline with --max-calls 2: two calls, deferred=1, rc 3
+     total       the first call takes 9 s of a 20 s total with --call-ms 12000: no second call fits
+     callkill    a call that outlives --call-ms is killed; the id stays deferred (no-report-call-killed)
+     fail        FAIL and RUN_REFUSED are final after one round: fail=2, rc 1
+     materials   the same prepare-failed reason twice: DRAIN_MATERIALS_FAILED with the reason, no third call
+     refuse      a list call with rc 2, and limits above the caps, are rc 2
+   Prints PASS/FAIL lines and CHECK_AFFECTED_DRAIN<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sysx.poll
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+#define OUTCAP (1L << 18)
+static int failed;
+static char base[4096], cdir[4300];
+static char out[OUTCAP];
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\taffected-drain.%s\n", ok ? "PASS" : "FAIL", name); }
+/* S occurs in the drain's own output of the last drain() call (child behaviour, never file text) */
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1024)) >= 0; }
+
+static void casedir(const char *name) {
+    if (cx_fmt(cdir, sizeof cdir, "%s/%s", base, name) || sy_mkdir(cdir, 0755) < 0) { printf("FAIL\taffected-drain.mkdir.%s\n", name); failed++; }
+    setenv("FAKE_AFF_DIR", cdir, 1);
+}
+static void put(const char *file, const char *text) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", cdir, file) || cx_write(p, text, strlen(text))) { printf("FAIL\taffected-drain.write.%s\n", file); failed++; }
+}
+/* the recorded run calls of the current case ("" when none) */
+static char *calls(void) {
+    static char buf[16384]; char p[4600], *s; size_t n = 0, i;
+    buf[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/calls", cdir) || !(s = cx_read(p, &n))) return buf;
+    if (n >= sizeof buf) n = sizeof buf - 1;
+    for (i = 0; i < n; i++) buf[i] = s[i];
+    buf[n] = 0; free(s);
+    return buf;
+}
+static int nlines(const char *s) { int c = 0; for (; *s; s++) c += *s == '\n'; return c; }
+/* the recorded calls are exactly these lines, in this order (whole-line equality, not a substring search) */
+static int calls_are(const char *c, const char **want) {
+    int k;
+    for (k = 0; want[k]; k++) {
+        const char *w = want[k];
+        while (*w && *c == *w) { c++; w++; }
+        if (*w || *c != '\n') return 0;
+        c++;
+    }
+    return !*c;
+}
+/* sh ./unisacc.com tools/affected-drain.cx -- --affected FAKE ARGS...; stdout into out; exit code or -1.  30 s cap. */
+static int drain(char **args) {
+    char *argv[24]; int i = 0, k, po = -1, pid, ex = 0, code = 0, sig = 0; long n = 0, r, deadline = sy_now_ms() + 30000;
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/affected-drain.cx"; argv[i++] = "--";
+    argv[i++] = "--affected"; argv[i++] = "tests/cases/fake-affected.cx";
+    for (k = 0; args[k] && i < 23; k++) argv[i++] = args[k];
+    argv[i] = 0;
+    out[0] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_ERR_TO_OUT, &po, 0);
+    if (pid < 0) return -1;
+    for (;;) {
+        sy_pollfd_t p; long left = deadline - sy_now_ms();
+        if (left <= 0) { sy_killpg(pid, 9); sy_signal(pid, 9); break; }
+        p.fd = po; p.events = SY_POLLIN; p.revents = 0;
+        if (sy_poll(&p, 1, left > 200 ? 200 : left) < 0) break;
+        if (!p.revents) continue;
+        r = sy_read(po, out + n, OUTCAP - 1 - n);
+        if (r <= 0) break;
+        n += r; out[n] = 0;
+        if (n >= OUTCAP - 1) { sy_killpg(pid, 9); sy_signal(pid, 9); break; }
+    }
+    sy_close(po);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+#define RUNP(id) "BATCH_RUN\tid=" id "\tstatus=PASS\trc=0\ttransport=0\tmarker=M\n"
+#define RUNF(id) "BATCH_RUN\tid=" id "\tstatus=FAIL\trc=1\ttransport=0\tmarker=M\n"
+
+int main(void) {
+    int rc; char *c;
+    if (cx_fmt(base, sizeof base, "/tmp/check-affected-drain-%d", (int)getpid()) || sy_mkdir(base, 0755) < 0) { printf("FAIL\taffected-drain.base\nCHECK_AFFECTED_DRAIN\tfailed=1\n"); return 1; }
+
+    {   char *a[] = {"--files", "x.cx", "-j", "2", 0};
+        const char *w[] = {"--ids a b c --run --prepare-materials -j 2", "--ids b c --run --prepare-materials -j 2", "--ids c --run --prepare-materials -j 2", 0};
+        casedir("converge");
+        put("list", "AFFECTED\ta\twhy=x.cx\tvia=source\nAFFECTED\tb\twhy=x.cx\tvia=use\nNOT_APPLICABLE\td\tplatform=osx/arm64\thost_scope=lnx\nAFFECTED\tc\twhy=x.cx\tvia=use\nAFFECTED_SUMMARY\tchanged=1\tbatches=3\tscanned=9\tnot_applicable=1\n");
+        put("run-1", "3 0\n" RUNP("a") "DEFERRED\tb\tkilled-at-deadline\nDEFERRED\tc\tstart-deadline\nAFFECTED_RUN\tpass=1\tfail=0\tdeferred=2\n");
+        put("run-2", "3 0\n" RUNP("b") "DEFERRED\tc\tstart-deadline\nAFFECTED_RUN\tpass=1\tfail=0\tdeferred=1\n");
+        put("run-3", "0 0\n" RUNP("c") "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\n");
+        rc = drain(a); c = calls();
+        ck(rc == 0, "converge.rc0");
+        ck(has("AFFECTED_DRAIN\tpass=3\tfail=0\tdeferred=0\tnot_applicable=1\tover_budget=0\trounds=3\telapsed_ms="), "converge.last-line");
+        ck(has("DRAIN_STOP\treason=done\n") && has("DRAIN_SET\tbatches=3\tnot_applicable=1\t"), "converge.stop-and-set");
+        ck(calls_are(c, w), "converge.each-round-only-unfinished-ids-and-never-the-not-applicable-one");
+        ck(!has("DRAIN_DEFERRED") && !has("DRAIN_OVER_BUDGET") && !has("DRAIN_FAIL"), "converge.no-leftover-lines");
+    }
+    {   char *a[] = {"--ids", "a", "b", 0};
+        casedir("overbudget");
+        put("list", "SELECTED\ta\nSELECTED\tb\n");
+        put("run-1", "3 0\nDEFERRED\ta\tkilled-at-deadline\n" RUNP("b"));
+        put("run-2", "3 0\nDEFERRED\ta\tkilled-at-deadline\tresidue=1\tsurvived=77\n");
+        put("run-3", "0 0\n" RUNP("a"));
+        rc = drain(a); c = calls();
+        ck(rc == 1, "overbudget.rc1");
+        ck(has("AFFECTED_DRAIN\tpass=1\tfail=0\tdeferred=0\tnot_applicable=0\tover_budget=1\trounds=2\t"), "overbudget.last-line");
+        ck(has("DRAIN_OVER_BUDGET\ta\t"), "overbudget.named");
+        ck(nlines(c) == 2, "overbudget.no-third-call");
+    }
+    {   /* -j 1: only the first id of a round starts as the window opens.  b is killed in rounds 1 and 2 while
+           second in line (a, killed in round 1, goes first again): neither kill counts.  Round 3 has b first
+           and killed (count 1), round 4 passes it: never over budget. */
+        char *a[] = {"--ids", "a", "b", "c", "-j", "1", 0};
+        casedir("late");
+        put("list", "SELECTED\ta\nSELECTED\tb\nSELECTED\tc\n");
+        put("run-1", "3 0\nDEFERRED\ta\tkilled-at-deadline\nDEFERRED\tb\tkilled-at-deadline\nDEFERRED\tc\tstart-deadline\n");
+        put("run-2", "3 0\n" RUNP("a") "DEFERRED\tb\tkilled-at-deadline\nDEFERRED\tc\tstart-deadline\n");
+        put("run-3", "3 0\nDEFERRED\tb\tkilled-at-deadline\nDEFERRED\tc\tstart-deadline\n");
+        put("run-4", "0 0\n" RUNP("b") RUNP("c"));
+        rc = drain(a); c = calls();
+        ck(rc == 0, "late.rc0");
+        ck(has("AFFECTED_DRAIN\tpass=3\tfail=0\tdeferred=0\tnot_applicable=0\tover_budget=0\trounds=4\t") && !has("DRAIN_OVER_BUDGET"), "late.killed-twice-behind-the-front-is-not-over-budget");
+        {   const char *w[] = {"--ids a b c --run --prepare-materials -j 1", "--ids a b c --run --prepare-materials -j 1", "--ids b c --run --prepare-materials -j 1", "--ids b c --run --prepare-materials -j 1", 0};
+            ck(calls_are(c, w), "late.explicit-j-every-round"); }
+    }
+    {   /* the killed batch moves to the front of the next round; with -j 1 a second kill there convicts it */
+        char *a[] = {"--ids", "a", "b", "c", "-j", "1", 0};
+        casedir("reorder");
+        put("list", "SELECTED\ta\nSELECTED\tb\nSELECTED\tc\n");
+        put("run-1", "3 0\n" RUNP("a") "DEFERRED\tb\tstart-deadline\nDEFERRED\tc\tkilled-at-deadline\n");
+        put("run-2", "3 0\nDEFERRED\tc\tkilled-at-deadline\nDEFERRED\tb\tstart-deadline\n");
+        put("run-3", "3 0\nDEFERRED\tc\tkilled-at-deadline\n" RUNP("b"));
+        put("run-4", "0 0\n" RUNP("c"));
+        rc = drain(a); c = calls();
+        {   const char *w[] = {"--ids a b c --run --prepare-materials -j 1", "--ids c b --run --prepare-materials -j 1", "--ids c b --run --prepare-materials -j 1", 0};
+            ck(calls_are(c, w), "reorder.killed-first-next-round"); }
+        ck(rc == 1 && nlines(c) == 3 && has("DRAIN_OVER_BUDGET\tc\t") && has("AFFECTED_DRAIN\tpass=2\tfail=0\tdeferred=0\tnot_applicable=0\tover_budget=1\trounds=3\t"), "reorder.two-front-kills-convict");
+        {   char *e[] = {"--ids", "a", "-j", "9", 0}; ck(drain(e) == 2 && has("REFUSE -j"), "reorder.j-cap"); }
+    }
+    {   char *a[] = {"--ids", "a", "--max-calls", "2", 0};
+        casedir("maxcalls");
+        put("list", "SELECTED\ta\n");
+        put("run-1", "3 0\nDEFERRED\ta\tstart-deadline\n");
+        put("run-2", "3 0\nDEFERRED\ta\tstart-deadline\n");
+        put("run-3", "0 0\n" RUNP("a"));
+        rc = drain(a); c = calls();
+        ck(rc == 3, "maxcalls.rc3");
+        ck(has("AFFECTED_DRAIN\tpass=0\tfail=0\tdeferred=1\tnot_applicable=0\tover_budget=0\trounds=2\t"), "maxcalls.last-line");
+        ck(has("DRAIN_STOP\treason=max-calls\n") && has("DRAIN_DEFERRED\ta\tstart-deadline\n"), "maxcalls.stop-and-named");
+        ck(nlines(c) == 2, "maxcalls.two-calls");
+    }
+    {   char *a[] = {"--ids", "a", "--total-ms", "20000", "--call-ms", "12000", 0};   /* list may take up to 8 s cold; 9 s + 12 s > 20 s */
+        casedir("total");
+        put("list", "SELECTED\ta\n");
+        put("run-1", "3 9000\nDEFERRED\ta\tstart-deadline\n");
+        put("run-2", "0 0\n" RUNP("a"));
+        rc = drain(a); c = calls();
+        ck(rc == 3, "total.rc3");
+        ck(has("AFFECTED_DRAIN\tpass=0\tfail=0\tdeferred=1\tnot_applicable=0\tover_budget=0\trounds=1\t"), "total.last-line");
+        ck(has("DRAIN_STOP\treason=total-deadline\n"), "total.stop-reason");
+        ck(nlines(c) == 1, "total.no-call-past-deadline");
+    }
+    {   char *a[] = {"--ids", "a", "--call-ms", "1500", "--max-calls", "1", 0}; long t = sy_now_ms();
+        casedir("callkill");
+        put("list", "SELECTED\ta\n");
+        put("run-1", "0 9000\n" RUNP("a"));
+        rc = drain(a); t = sy_now_ms() - t;
+        ck(rc == 3, "callkill.rc3");
+        ck(has("\tcall=killed-at-call-ms\n") && has("DRAIN_DEFERRED\ta\tno-report-call-killed\n"), "callkill.named");
+        ck(has("AFFECTED_DRAIN\tpass=0\tfail=0\tdeferred=1\t"), "callkill.pass-not-invented");
+        ck(t < 8000, "callkill.bounded");
+    }
+    {   char *a[] = {"--ids", "a", "b", 0};
+        casedir("fail");
+        put("list", "SELECTED\ta\nSELECTED\tb\n");
+        put("run-1", "1 0\n" RUNF("a") "RUN_REFUSED\tb\trc=2\tlog=x\treason=-\n");
+        put("run-2", "0 0\n" RUNP("a") RUNP("b"));
+        rc = drain(a); c = calls();
+        ck(rc == 1, "fail.rc1");
+        ck(has("AFFECTED_DRAIN\tpass=0\tfail=2\tdeferred=0\tnot_applicable=0\tover_budget=0\trounds=1\t"), "fail.last-line");
+        ck(has("DRAIN_FAIL\ta\t") && has("DRAIN_FAIL\tb\t"), "fail.named");
+        ck(nlines(c) == 1, "fail.not-retried");
+    }
+    {   char *a[] = {"--ids", "a", 0};
+        casedir("materials");
+        put("list", "SELECTED\ta\n");
+        put("run-1", "3 0\nDEFERRED\ta\tprepare-failed=no-producer=zz\n");
+        put("run-2", "3 0\nDEFERRED\ta\tprepare-failed=no-producer=zz\n");
+        put("run-3", "0 0\n" RUNP("a"));
+        rc = drain(a); c = calls();
+        ck(rc == 3, "materials.rc3");
+        ck(has("DRAIN_MATERIALS_FAILED\ta\tprepare-failed=no-producer=zz\n"), "materials.named-with-reason");
+        ck(has("\tdeferred=1\tnot_applicable=0\tover_budget=0\trounds=2\t") && nlines(c) == 2, "materials.no-third-call");
+    }
+    {   char *a[] = {"--ids", "a", 0}, *b[] = {"--ids", "a", "--total-ms", "480001", 0}, *d[] = {"--ids", "a", "--call-ms", "60001", 0}, *e[] = {"--max-calls", "2", 0};
+        casedir("refuse");   /* no `list` file: the fixture answers rc 2 */
+        rc = drain(a);
+        ck(rc == 2 && has("DRAIN_REFUSED\tstep=list\t") && !has("AFFECTED_DRAIN\t"), "refuse.list-rc2");
+        put("list", "SELECTED\ta\n");   /* and no run-1: the run call answers rc 2 */
+        rc = drain(a);
+        ck(rc == 2 && has("DRAIN_REFUSED\tstep=run\tround=1\trc=2\n") && !has("AFFECTED_DRAIN\t"), "refuse.run-rc2-not-retried");
+        ck(drain(b) == 2 && has("REFUSE --total-ms"), "refuse.total-cap");
+        ck(drain(d) == 2 && has("REFUSE --call-ms"), "refuse.call-cap");
+        ck(drain(e) == 2, "refuse.no-selection");
+    }
+    printf("CHECK_AFFECTED_DRAIN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

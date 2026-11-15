@@ -1,0 +1,32 @@
+/* Fixture stand-in for tools/affected.cx, used by tools/check-affected-drain.cx only.
+ * State lives in $FAKE_AFF_DIR:
+ *   with --list-only: prints the file `list`, rc 0 (rc 2 when it is absent);
+ *   otherwise (a --run call): the call number N is the line count of `calls` plus one; the argument vector is
+ *   appended to `calls` as one line; the file `run-N` is read: its first line is "RC SLEEP_MS", the rest is
+ *   printed as it is after sleeping SLEEP_MS; exit RC.  No `run-N`: rc 2. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+int main(int argc, char **argv) {
+    const char *d = getenv("FAKE_AFF_DIR"); char p[4600], *s, *body, *end = 0; size_t n = 0; int a, list = 0, calls = 0; long rc, ms; FILE *f;
+    if (!d) return 2;
+    for (a = 1; a < argc; a++) if (!strcmp(argv[a], "--list-only")) list = 1;
+    if (list) {
+        if (cx_fmt(p, sizeof p, "%s/list", d) || !(s = cx_read(p, &n))) return 2;
+        fwrite(s, 1, n, stdout); free(s);
+        return 0;
+    }
+    if (cx_fmt(p, sizeof p, "%s/calls", d)) return 2;
+    if ((s = cx_read(p, &n))) { size_t i; for (i = 0; i < n; i++) calls += s[i] == '\n'; free(s); }
+    if (!(f = fopen(p, "a"))) return 2;
+    for (a = 1; a < argc; a++) fprintf(f, "%s%s", a > 1 ? " " : "", argv[a]);
+    fprintf(f, "\n"); fclose(f);
+    if (cx_fmt(p, sizeof p, "%s/run-%d", d, calls + 1) || !(s = cx_read(p, &n))) return 2;
+    rc = strtol(s, &end, 10);
+    ms = strtol(end, &end, 10);
+    if (*end != '\n' || rc < 0 || rc > 255 || ms < 0 || ms > 55000) { free(s); return 2; }
+    body = end + 1;
+    if (ms) usleep((unsigned)ms * 1000u);
+    fwrite(body, 1, n - (size_t)(body - s), stdout); free(s);
+    return (int)rc;
+}

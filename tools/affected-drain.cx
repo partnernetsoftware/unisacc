@@ -1,0 +1,284 @@
+/* tools/affected-drain.cx -- run an affected selection to completion as a bounded series of affected calls.
+   From the repo root:
+
+     sh ./unisacc.com tools/affected-drain.cx -- (--files F... | --since REV | --ids ID...) [-j N]
+                                                 [--max-calls N] [--total-ms N] [--call-ms N] [--affected PATH]
+
+   One `affected --run` call has a single 57 s window; a selection that does not fit comes back with batches
+   DEFERRED (start-deadline, killed-at-deadline, needs-materials) and the acceptance is incomplete.  This tool
+   is the outer loop a person would otherwise do by hand:
+     (1) `affected SELECTION --list-only` once: the AFFECTED / SELECTED ids are the whole set, NOT_APPLICABLE
+         ids are counted and never run;
+     (2) round after round `sh ./unisacc.com tools/affected.cx -- --ids <unfinished> --run --prepare-materials`,
+         each a separate child process under affected's own window.  No per-batch or per-call limit is relaxed
+         here: a call is additionally killed (process group) after --call-ms (default and maximum 60000).
+   A batch's verdict comes only from a BATCH_RUN / RUN_REFUSED line printed by a call of THIS invocation:
+   nothing is cached, nothing is read from earlier logs, and a batch with a FAIL is never retried.
+   Per round, per unfinished batch:
+     BATCH_RUN status=PASS             -> pass
+     BATCH_RUN other status, RUN_REFUSED -> fail (final)
+     DEFERRED killed-at-deadline       -> next round, placed FIRST in --ids.  affected kills the whole window
+                                          at once, so a batch that started late is killed without having had
+                                          its budget: a kill counts only when the batch was among the first
+                                          N ids of the round (N = -j, passed explicitly; those start as the
+                                          window opens).  Two counted kills in a row (rounds where it was
+                                          not in the first N, or was not started, neither count nor reset)
+                                          = the batch itself is over budget: DRAIN_OVER_BUDGET<TAB>id, no
+                                          further retry.  (2026-11-15: without the position rule a real
+                                          65-batch drain called 42 batches over budget after two rounds.)
+     DEFERRED start-deadline           -> next round
+     DEFERRED needs-materials / prepare-failed -> next round; the same material reason in two consecutive
+                                          rounds = DRAIN_MATERIALS_FAILED<TAB>id<TAB>reason, no further retry
+                                          (counted in deferred)
+     no line for the id                -> next round (reason no-report)
+   Bounds: at most --max-calls run calls (default 8, 1..16) and a total deadline --total-ms from process start
+   (default and maximum 480000); a round is not started unless a full --call-ms still fits before the total
+   deadline.  A drain that ran longer than 300000 ms prints DRAIN_NOTE decomposed=yes: it is a decomposed
+   execution of calls of at most 60 s each, not one long operation.
+   A list call that fails, a run call with rc 2 (usage/registry/I-O) or one that cannot be spawned stops the
+   drain with DRAIN_REFUSED and rc 2: a broken child is not retried.
+   Prints the children's BATCH_RUN / RUN_REFUSED / DEFERRED lines as they are, one
+     DRAIN_ROUND<TAB>round=N<TAB>ids=K<TAB>rc=R<TAB>pass=..<TAB>fail=..<TAB>deferred=..<TAB>call_ms=..
+   per call, DRAIN_FAIL / DRAIN_OVER_BUDGET / DRAIN_MATERIALS_FAILED / DRAIN_DEFERRED<TAB>id<TAB>reason for every
+   batch without a PASS, DRAIN_STOP<TAB>reason=done|max-calls|total-deadline, and last
+     AFFECTED_DRAIN<TAB>pass=N<TAB>fail=N<TAB>deferred=N<TAB>not_applicable=N<TAB>over_budget=N<TAB>rounds=N<TAB>elapsed_ms=N
+   rc: 0 every batch PASS (or nothing selected), 1 any fail or over_budget, 3 only deferrals left, 2 usage or
+   a refused child.  --affected PATH replaces tools/affected.cx (the check's fixture, tests/cases/fake-affected.cx). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sysx.poll
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+
+#define MAXID 1200
+#define MAXJOBS 8   /* affected's own -j range is 1..8 */
+#define OUTCAP (4L << 20)
+enum { ST_PENDING, ST_PASS, ST_FAIL, ST_OVER, ST_MATFAIL, ST_NA };
+typedef struct { char id[128]; int st, killed, seen, front, lastkilled; char why[240], prev_mat[240]; } Item;
+static Item item[MAXID];
+static int nitem;
+static char outbuf[OUTCAP], errbuf[65536];
+
+static int spool_open(void) {
+    char t[4096];
+    int fd;
+    if (cx_fmt(t, sizeof t, "%s/drain-XXXXXX", sy_tmpdir())) return -1;
+    fd = mkstemp(t);
+    if (fd >= 0) sy_unlink(t);
+    return fd;
+}
+
+/* ARGV with stdout and stderr drained into spool files; past LIMIT_MS its process group is killed.
+   Returns the exit code, 128+signal, or -1 when it could not be spawned; *KILLED says the limit fired. */
+static int call(char **argv, long limit_ms, char *out, long cap, char *err, long ecap, int *killed) {
+    int po = -1, pe = -1, pid, fo, fe, open_o = 1, open_e = 1, ex = 0, code = 0, sig = 0;
+    long deadline = sy_now_ms() + limit_ms, n = 0, r;
+    char chunk[16384];
+    *killed = 0; out[0] = 0; err[0] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &po, &pe);
+    if (pid < 0) return -1;
+    fo = spool_open(); fe = spool_open();
+    if (fo < 0 || fe < 0) { sy_killpg(pid, 9); sy_signal(pid, 9); sy_close(po); sy_close(pe); sy_wait_status(pid, 0, &ex, &code, &sig); return -1; }
+    while (open_o || open_e) {
+        sy_pollfd_t p[2];
+        int np = 0, io = -1, ie = -1;
+        long left = deadline - sy_now_ms(), g;
+        if (left <= 0) {
+            if (*killed) break;
+            sy_killpg(pid, 9); sy_signal(pid, 9); *killed = 1; deadline = sy_now_ms() + 2000;
+            continue;
+        }
+        if (open_o) { io = np; p[np].fd = po; p[np].events = SY_POLLIN; p[np].revents = 0; np++; }
+        if (open_e) { ie = np; p[np].fd = pe; p[np].events = SY_POLLIN; p[np].revents = 0; np++; }
+        if (sy_poll(p, np, left > 200 ? 200 : left) < 0) break;
+        if (io >= 0 && p[io].revents) {
+            g = sy_read(po, chunk, sizeof chunk);
+            if (g > 0) { if (sy_write_all(fo, chunk, g)) break; } else open_o = 0;
+        }
+        if (ie >= 0 && p[ie].revents) {
+            g = sy_read(pe, chunk, sizeof chunk);
+            if (g > 0) { if (sy_write_all(fe, chunk, g)) break; } else open_e = 0;
+        }
+    }
+    if (open_o || open_e) { sy_killpg(pid, 9); sy_signal(pid, 9); }
+    sy_close(po); sy_close(pe);
+    sy_lseek(fo, 0, 0); sy_lseek(fe, 0, 0);
+    while (n < cap - 1 && (r = sy_read(fo, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0; n = 0;
+    while (n < ecap - 1 && (r = sy_read(fe, err + n, ecap - 1 - n)) > 0) n += r;
+    err[n] = 0;
+    sy_close(fo); sy_close(fe);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    return ex ? code : 128 + sig;
+}
+
+static int find(const char *s, long n) {
+    int k;
+    for (k = 0; k < nitem; k++) if (tx_len(item[k].id, sizeof item[k].id) == n && tx_prefix(item[k].id, n, s, n)) return k;
+    return -1;
+}
+static int add(const char *s, long n, int st) {
+    int k = find(s, n);
+    if (k >= 0) return k;
+    if (nitem >= MAXID || n <= 0 || n >= (long)sizeof item[0].id) return -1;
+    if (cx_fmt(item[nitem].id, sizeof item[nitem].id, "%.*s", (int)n, s)) return -1;
+    item[nitem].st = st;
+    return nitem++;
+}
+/* field F (0-based, TAB separated) of the line S[0..N) */
+static const char *field(const char *s, long n, int f, long *fl) {
+    long at = 0, e;
+    while (f > 0) { while (at < n && s[at] != '\t') at++; if (at >= n) { *fl = 0; return 0; } at++; f--; }
+    e = at;
+    while (e < n && s[e] != '\t') e++;
+    *fl = e - at;
+    return s + at;
+}
+static int starts(const char *s, long n, const char *pre) { long pl = tx_len(pre, 64); return n >= pl && tx_prefix(s, n, pre, pl); }
+static void usage(void) {
+    fprintf(stderr, "usage: affected-drain.cx -- (--files F... | --since REV | --ids ID...) [-j 1..8] [--max-calls 1..16] [--total-ms 1..480000] [--call-ms 1..60000] [--affected PATH]\n");
+    exit(2);
+}
+static long numarg(const char *s, long lo, long hi, const char *name) {
+    char *end = 0; long v = strtol(s, &end, 10);
+    if (!*s || *end || v < lo || v > hi) { fprintf(stderr, "affected-drain: REFUSE %s must be %ld..%ld (limits are not relaxed here)\n", name, lo, hi); exit(2); }
+    return v;
+}
+
+int main(int argc, char **argv) {
+    static char *av[MAXID + 24];
+    char *selv[64]; int nselv = 0, a, k, rounds = 0, rc, killed, havesel = 0;
+    const char *aff = "tools/affected.cx", *stop = "done";
+    char jobs[16]; long njobs = 0;
+    long max_calls = 8, total_ms = 480000, call_ms = 60000, t0 = sy_now_ms(), at, n;
+    int pass = 0, fail = 0, deferred = 0, na = 0, over = 0, pending;
+
+    for (a = 1; a < argc; ) {
+        if (tx_eqz(argv[a], "--")) { a++; continue; }
+        if (tx_eqz(argv[a], "--max-calls") && a + 1 < argc) { max_calls = numarg(argv[a + 1], 1, 16, "--max-calls"); a += 2; }
+        else if (tx_eqz(argv[a], "--total-ms") && a + 1 < argc) { total_ms = numarg(argv[a + 1], 1, 480000, "--total-ms"); a += 2; }
+        else if (tx_eqz(argv[a], "--call-ms") && a + 1 < argc) { call_ms = numarg(argv[a + 1], 1, 60000, "--call-ms"); a += 2; }
+        else if (tx_eqz(argv[a], "--affected") && a + 1 < argc) { aff = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { njobs = numarg(argv[a + 1], 1, MAXJOBS, "-j"); a += 2; }
+        else if (tx_eqz(argv[a], "--files") || tx_eqz(argv[a], "--ids") || tx_eqz(argv[a], "--since")) {
+            if (havesel) usage();
+            havesel = 1; selv[nselv++] = argv[a++];
+            while (a < argc && !(argv[a][0] == '-' && argv[a][1] == '-') && !tx_eqz(argv[a], "-j")) { if (nselv >= 60) usage(); selv[nselv++] = argv[a++]; }
+            if (nselv < 2) usage();
+        }
+        else usage();
+    }
+    if (!havesel) usage();
+    if (!njobs) { int c = sy_ncpu(); njobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }   /* affected's own default, made explicit */
+    if (cx_fmt(jobs, sizeof jobs, "%ld", njobs)) usage();
+    printf("DRAIN_PLAN\tmax_calls=%ld\ttotal_ms=%ld\tcall_ms=%ld\tjobs=%ld\tmode=decomposed-bounded-calls\n", max_calls, total_ms, call_ms, njobs);
+
+    /* (1) the whole set, once */
+    k = 0; av[k++] = "sh"; av[k++] = "./unisacc.com"; av[k++] = (char *)aff; av[k++] = "--";
+    for (a = 0; a < nselv; a++) av[k++] = selv[a];
+    av[k++] = "--list-only"; av[k] = 0;
+    rc = call(av, call_ms, outbuf, OUTCAP, errbuf, sizeof errbuf, &killed);
+    if (rc != 0 || killed) {
+        sy_write_all(2, errbuf, tx_len(errbuf, sizeof errbuf));
+        printf("DRAIN_REFUSED\tstep=list\trc=%d\tkilled=%d\n", rc, killed);
+        return 2;
+    }
+    n = tx_len(outbuf, OUTCAP);
+    for (at = 0; at < n; ) {
+        long e = at, fl; const char *f;
+        while (e < n && outbuf[e] != '\n') e++;
+        if (starts(outbuf + at, e - at, "AFFECTED\t") || starts(outbuf + at, e - at, "SELECTED\t")) {
+            f = field(outbuf + at, e - at, 1, &fl);
+            if (!f || add(f, fl, ST_PENDING) < 0) { printf("DRAIN_REFUSED\tstep=list\treason=bad-or-too-many-ids\n"); return 2; }
+        } else if (starts(outbuf + at, e - at, "NOT_APPLICABLE\t")) {
+            f = field(outbuf + at, e - at, 1, &fl);
+            if (!f || add(f, fl, ST_NA) < 0) { printf("DRAIN_REFUSED\tstep=list\treason=bad-or-too-many-ids\n"); return 2; }
+        }
+        at = e + 1;
+    }
+    for (k = 0, pending = 0; k < nitem; k++) pending += item[k].st == ST_PENDING;
+    printf("DRAIN_SET\tbatches=%d\tnot_applicable=%d\tlist_ms=%ld\n", pending, nitem - pending, sy_now_ms() - t0);
+    fflush(stdout);
+
+    /* (2) bounded rounds over what is still unfinished */
+    while (pending) {
+        long r0, rp = 0, rf = 0, rd = 0;
+        int ids = 0;
+        if (rounds >= max_calls) { stop = "max-calls"; break; }
+        if (sy_now_ms() - t0 + call_ms > total_ms) { stop = "total-deadline"; break; }
+        k = 0; av[k++] = "sh"; av[k++] = "./unisacc.com"; av[k++] = (char *)aff; av[k++] = "--"; av[k++] = "--ids";
+        {   int ph;   /* last round's killed batches first: they start as the window opens */
+            for (ph = 1; ph >= 0; ph--)
+                for (a = 0; a < nitem; a++) if (item[a].st == ST_PENDING && item[a].lastkilled == ph) { av[k++] = item[a].id; item[a].seen = 0; item[a].front = ids < njobs; ids++; }
+            for (a = 0; a < nitem; a++) item[a].lastkilled = 0;
+        }
+        av[k++] = "--run"; av[k++] = "--prepare-materials"; av[k++] = "-j"; av[k++] = jobs;
+        av[k] = 0;
+        rounds++;
+        r0 = sy_now_ms();
+        rc = call(av, call_ms, outbuf, OUTCAP, errbuf, sizeof errbuf, &killed);
+        if (rc < 0 || (rc == 2 && !killed)) {
+            sy_write_all(2, errbuf, tx_len(errbuf, sizeof errbuf));
+            printf("DRAIN_REFUSED\tstep=run\tround=%d\trc=%d\n", rounds, rc);
+            return 2;
+        }
+        n = tx_len(outbuf, OUTCAP);
+        for (at = 0; at < n; ) {
+            long e = at, fl, ll; const char *f, *ln = outbuf + at; int b = -1, kind = 0;
+            while (e < n && outbuf[e] != '\n') e++;
+            ll = e - at; at = e + 1;
+            if (starts(ln, ll, "BATCH_RUN\tid=")) { f = field(ln, ll, 1, &fl); b = find(f + 3, fl - 3); kind = 1; }
+            else if (starts(ln, ll, "RUN_REFUSED\t")) { f = field(ln, ll, 1, &fl); b = find(f, fl); kind = 2; }
+            else if (starts(ln, ll, "DEFERRED\t")) { f = field(ln, ll, 1, &fl); b = find(f, fl); kind = 3; }
+            if (!kind) continue;
+            printf("%.*s\n", (int)ll, ln);
+            if (b < 0 || item[b].st != ST_PENDING || item[b].seen) continue;   /* not asked for, or already final */
+            item[b].seen = 1;
+            if (kind == 1) {
+                if (tx_find(ln, ll, "\tstatus=PASS\t", 13) >= 0) { item[b].st = ST_PASS; rp++; }
+                else { item[b].st = ST_FAIL; rf++; cx_fmt(item[b].why, sizeof item[b].why, "round=%d batch-run-not-pass", rounds); }
+            } else if (kind == 2) {
+                item[b].st = ST_FAIL; rf++; cx_fmt(item[b].why, sizeof item[b].why, "round=%d run-refused", rounds);
+            } else {
+                f = field(ln, ll, 2, &fl);
+                if (!f) { f = "-"; fl = 1; }
+                if (fl >= (long)sizeof item[b].why) fl = sizeof item[b].why - 1;
+                cx_fmt(item[b].why, sizeof item[b].why, "%.*s", (int)fl, f);
+                rd++;
+                if (tx_eqz(item[b].why, "killed-at-deadline")) {
+                    item[b].prev_mat[0] = 0; item[b].lastkilled = 1;
+                    if (item[b].front && ++item[b].killed >= 2) item[b].st = ST_OVER;
+                } else if (starts(item[b].why, fl, "needs-materials") || starts(item[b].why, fl, "prepare-failed")) {
+                    item[b].killed = 0;
+                    if (tx_eqz(item[b].prev_mat, item[b].why)) item[b].st = ST_MATFAIL;
+                    else cx_fmt(item[b].prev_mat, sizeof item[b].prev_mat, "%s", item[b].why);
+                } else if (!tx_eqz(item[b].why, "start-deadline")) { item[b].killed = 0; item[b].prev_mat[0] = 0; }
+            }
+        }
+        for (a = 0, pending = 0; a < nitem; a++) {
+            if (item[a].st != ST_PENDING) continue;
+            pending++;
+            if (!item[a].seen) { cx_fmt(item[a].why, sizeof item[a].why, "no-report%s", killed ? "-call-killed" : ""); rd++; }
+        }
+        printf("DRAIN_ROUND\tround=%d\tids=%d\trc=%d\tpass=%ld\tfail=%ld\tdeferred=%ld\tcall_ms=%ld%s\n", rounds, ids, rc, rp, rf, rd, sy_now_ms() - r0, killed ? "\tcall=killed-at-call-ms" : "");
+        fflush(stdout);
+    }
+
+    for (k = 0; k < nitem; k++) {
+        switch (item[k].st) {
+        case ST_PASS: pass++; break;
+        case ST_NA: na++; break;
+        case ST_FAIL: fail++; printf("DRAIN_FAIL\t%s\t%s\n", item[k].id, item[k].why); break;
+        case ST_OVER: over++; printf("DRAIN_OVER_BUDGET\t%s\tkilled-at-deadline twice in a row while among the first -j ids (started as the window opened): the batch itself exceeds the window, not retried\n", item[k].id); break;
+        case ST_MATFAIL: deferred++; printf("DRAIN_MATERIALS_FAILED\t%s\t%s\n", item[k].id, item[k].why); break;
+        default: deferred++; printf("DRAIN_DEFERRED\t%s\t%s\n", item[k].id, item[k].why[0] ? item[k].why : "not-started"); break;
+        }
+    }
+    printf("DRAIN_STOP\treason=%s\n", stop);
+    if (sy_now_ms() - t0 > 300000) printf("DRAIN_NOTE\tdecomposed=yes\tcalls=%d\tcall_ms_max=%ld\tthis is a decomposed execution of bounded calls, not one operation over five minutes\n", rounds, call_ms);
+    printf("AFFECTED_DRAIN\tpass=%d\tfail=%d\tdeferred=%d\tnot_applicable=%d\tover_budget=%d\trounds=%d\telapsed_ms=%ld\n", pass, fail, deferred, na, over, rounds, sy_now_ms() - t0);
+    return fail || over ? 1 : deferred ? 3 : 0;
+}
