@@ -9,8 +9,9 @@
 - 同候选 CI:candidate-native.yml run 43672079447,2026-11-15T03:22:36Z 触发,输入 commit 为 X、release_tag 为 v0.0.67;结果:completed success(2026-11-15T03:25:43Z 结束),10 个作业全 success:fetch、ffi-lnx、cell-tools、report,以及 6 个平台候选作业(lnx x86_64、lnx arm64、osx arm64、osx x86_64、win x86_64、win arm64;其中 win arm64 的矩阵标记为 file,其余为 yes)。osx 与 win 的证据范围以该 run 作业为准,不扩大解读。
 - release v0.0.67 资产 6 件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS;无 zip。草稿上传后下载读回,5 件 sha256 与 SHA256SUMS 逐件一致,SHA256SUMS 与本地打包件逐字节相同(sha256 69e46e46f16c6e6300e23a930bce27dd09fece994a5981dc0b5638e271adf4a9)。
 - 公开时间:2026-11-15T04:04:14Z(gh release view 的 publishedAt),Latest。release/decision.txt 裁决(tools/release-decide.cx 实跑):公开前 NOT_QUALIFIED unknown=2 fail=0,公开读回后 NOT_QUALIFIED unknown=1 fail=0(只剩第 4 步 s9 为 UNKNOWN)。本版不宣称 QUALIFIED。
-- 公开后读回:下载 6 件,5 件 sha256 与 SHA256SUMS 逐件一致,unisacc.com sha256 同上;标签 v0.0.67 与 v0.0.67-src 均指 F。本机装机:公开后由主调度做。
-- 速度数字只引 build/speed-baseline.tsv 已有行。0.0.67 的启动、冷编译、生成代码对 0.0.66 的对比:未测,本版不宣称任何速度变化。
+- 公开后读回:下载 6 件,5 件 sha256 与 SHA256SUMS 逐件一致,unisacc.com sha256 同上;标签 v0.0.67 与 v0.0.67-src 均指 F。本机装机:公开后已装入本机根,--version 输出 unisacc 0.0.67(回执提交 7f64760505)。
+- 速度数字只引 build/speed-baseline.tsv 已有行。0.0.67 的启动、冷编译、生成代码对 0.0.66 的对比:公开时未测;装机后实测(已装 0.0.67 对 0.0.66,两边同走包装根,ABAB 交错 n=9,build/speed-baseline.tsv 2026-11-15 的 0.0.67 行)。测时同机有其他作业,load1 3.00 至 8.35,高于 2,绝对值不可与 0.0.66 那批(load1 0.60 至 1.27)直接比:首次启动中位 717.8 对 677.4 ms(差 +40.4 ms,样本范围 655.5 至 777.2 对 654.4 至 766.6,最小值只差 1.1 ms,不下结论)、重复启动 29.6 对 30.6 ms(run-startup-bench)、冷编译 edit-span 2726 对 2768 ms、ratchets 5120 对 5162 ms(coldcompile),后三项差值在噪声内;gencode 8MB 两边各 2 轮,sha 1023.9、999.5 对 1033.4、1029.6 ms,sort 1120.3、1134.0 对 1115.2、1222.8 ms,memcpy 12.00、12.34 对 11.97、12.14 ms;speed-probe(hello,fresh-o 默认口径,全阶段,各 3 次)wall 中位 660.3 对 647.7 ms。本版不宣称任何速度变化;首次启动一项需在低负载下复测。
+- 装后门实测(已装 0.0.67,APE a99ea71de7edf8b2):tests/cx-namespace.cx checks=18 failed=0 unverified=0;K3 硬模式(UNISACC_REQUIRE_N15C=1,tests/phase-timing-stamps.cx)assertions=76 failed=0;tools/check-export.cx passed=13 failed=0 unverified=0。
 
 ## 是什么
 
@@ -54,8 +55,8 @@
 - fixedpoint-sample、prechain-gate UNKNOWN:55 秒与 49 秒处看门狗超时,0.0.63 至 0.0.66 已有,照旧,未复测。
 - candidate-chain、candidate-chain-objects、candidate-chain-watch UNKNOWN:`S9 NOT_AVAIL material=candidate-chain-tool`,材料映射为空所致,见 (11);0.0.66 已有。本版"缺材料只踢本批"生效:0.0.66 被同片连带的 root-canon、root-independent、ctor-debt、rechunk、sys-reslive、ext-procx-exec 6 项本次在 s9 内为 PASS。
 - 0.0.66 的 surface-doc-gen、dock-audit、release-sweep、report-verify-tool 4 项 FAIL 与 s9-nightly-run-fail UNKNOWN 本次在 s9 内为 PASS。
-(6) release-ape smoke、公开后读回、本机装机:未做。release-decide 已实跑(见文首)。
-(7) first_e2e 500 ms 启动门:本版未测,不宣称启动变化;0.0.66 装机后同口径 startup_first 为 665.1 ms,未过门。
+(6) release-ape smoke:未做。公开后读回、本机装机:已做(见文首)。release-decide 已实跑(见文首)。
+(7) first_e2e 500 ms 启动门:未过门,不宣称启动变化;0.0.67 装机后 startup_first 中位 717.8 ms(load1 3.14 至 7.11,最小 655.5 ms),0.0.66 装机后同口径为 665.1 ms(load1 0.60 至 1.09)。
 (8) 加速方案 A 提速未兑现(见本版内容 (2)(j));整链墙钟仍高于 2400 s 的门。
 (9) sources_sha256 在打包步的核对为 UNVERIFIED(见文首)。
 (10) 0.0.66 发布说明"未达项与已知缺口"与"0.0.65 已知缺口里仍开的项"两节所列各项:本版未修或未验证修复,仍开;其中 s9-native 缓存键与 candidate-chain 材料两项有工具改动(本版内容 (2)(a)(b)),s9 commit 档复跑结果见 (5) 与 (11):缺材料只踢本批已见效,材料映射仍为空;s9-native 缓存键一项未单独验证,UNVERIFIED。
@@ -71,5 +72,5 @@
 
 (1) CI run 43672079447 的结论与各作业结果:已填入文首。
 (2) pkg.bin 与 0.0.66 逐字节相同(sha 同为 c7cb3a8c...)而 APE 不同:差异来自六个平台片与注入版本,公开前核一次各片 sha 与整链收据。
-(3) 公开时间、裁决、读回结果、装机后速度对比:公开流程中补。
+(3) 公开时间、裁决、读回结果、装机后速度对比与装后门:已补(见文首);首次启动对比在高负载下测得,低负载复测未做。
 (4) 本版内容 (2)(g) 的 no-out-snap 细目。
