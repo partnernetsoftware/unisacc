@@ -6,7 +6,7 @@
  *   不设 DV_PIN_DIR(与真仓同键共用 $HOME 固定版本缓存,冷构造约 55 s 仅首次);UNISACC_DEVSVC_DIR 指向 /tmp/dvgit-<pid>-* 临时目录,经固定版本启动器跑夹具 HEAD(冷构造一次后命中缓存)。每次命令 55 秒上限,结束清理夹具。
  * 断言:(a) commit --whole F --push 成功、裸仓收到提交、末行 GIT_COMMIT rc=0;(b) commit 失败后 lock list 无残留;
  *   (c) 两个并发 commit 都完成且无残留锁;(d) x -- git stash list、git -C . stash list、git push --force 均 rc 125 且 stderr 含 REFUSE;
- *   (e) git status 末行 GIT_STATUS 格式。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
+ *   (e) git status 末行 GIT_STATUS 格式;(w) commit --cwd 夹具内版本工作树:落该工作树分支、推 refs/heads/该分支、main HEAD 不变,--cwd 不存在 rc 2。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -105,6 +105,32 @@ int main(int argc, char **argv) {
     ck(rc != 0 && has("GIT_COMMIT_ERR\t"), "failed-commit-prints-err-tail");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
+
+    /* (w) commit --cwd 版本工作树:夹具内 git worktree add .claude/worktrees/dvg-wt(分支 dvg-wt),提交落该分支、
+       推 origin refs/heads/dvg-wt,夹具 main 的 HEAD 不变;--cwd 指向不存在目录 rc 2 不提交;验后 worktree remove */
+    {   char mh[64] = "", wh[64] = "";
+        F(c, sizeof c, "git rev-parse HEAD && git worktree add -q -b dvg-wt .claude/worktrees/dvg-wt HEAD && ln -s %s/unisacc.com .claude/worktrees/dvg-wt/unisacc.com && printf 'w\\n' > .claude/worktrees/dvg-wt/dvg-w.txt", root);
+        ck(!ovf && sh(c, fx) == 0, "wt-fixture-add");
+        if (sscanf(out, "%63s", mh) != 1) mh[0] = 0;
+        rc = dv("git", "commit", "-m", "W", "--cwd", ".claude/worktrees/dvg-wt", "--whole", "dvg-w.txt");
+        ck(rc == 0 && has("GIT_COMMIT\trc=0") && has("\tbranch=dvg-wt\t"), "wt-commit-rc0-branch");
+        F(c, sizeof c, "git rev-parse HEAD && git log -1 --format=%%s dvg-wt | grep -qx W && git cat-file -e dvg-wt:dvg-w.txt && ! git cat-file -e HEAD:dvg-w.txt 2>/dev/null"
+                       " && [ \"$(git -C .claude/worktrees/dvg-wt rev-parse HEAD)\" = \"$(git rev-parse dvg-wt)\" ] && [ -z \"$(git -C .claude/worktrees/dvg-wt status --porcelain -- dvg-w.txt)\" ]");
+        ck(!ovf && sh(c, fx) == 0, "wt-commit-on-branch-index-synced");
+        if (sscanf(out, "%63s", wh) != 1) wh[0] = 0;
+        ck(mh[0] && !strcmp(mh, wh), "wt-commit-main-head-unchanged");
+        F(c, sizeof c, "printf 'w2\\n' > .claude/worktrees/dvg-wt/dvg-w.txt");
+        (void)sh(c, fx);
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", "W2", "--cwd", ".claude/worktrees/dvg-wt", "--push", "--whole", "dvg-w.txt", 0};
+            rc = run(v, fx, envv); }
+        ck(rc == 0 && has("pushed=1"), "wt-commit-push-rc0");
+        F(c, sizeof c, "git -C %s log -1 --format=%%s refs/heads/dvg-wt | grep -qx W2 && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
+        ck(!ovf && sh(c, fx) == 0, "wt-commit-push-to-branch-not-main");
+        rc = dv("git", "commit", "-m", "N", "--cwd", ".claude/worktrees/dvg-nope", "--whole", "dvg-w.txt");
+        ck(rc == 2 && has("REFUSE git commit --cwd"), "wt-commit-missing-cwd-rc2");
+        F(c, sizeof c, "git worktree remove --force .claude/worktrees/dvg-wt");
+        ck(!ovf && sh(c, fx) == 0, "wt-fixture-remove");
+    }
 
     }
     if (B) {
