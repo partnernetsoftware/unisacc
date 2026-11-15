@@ -90,7 +90,7 @@ static char base[CAP];   /* 本次运行的独占样本目录：mkdtemp($TMPDIR)
 
 int main(int argc, char **argv) {
     const char *td = sy_env("TMPDIR");
-    char bigp[4600], smallp[4600], jobsp[4600], outdir[4600], jobs[9600];
+    char bigp[4600], smallp[4600], envp[4600], jobsp[4600], outdir[4600], jobs[14400];
     (void)argc; (void)argv;
     if (!td || !td[0]) td = "/tmp";
     if (snprintf(base, sizeof base, "%s/speed-probe-XXXXXX", td) >= (int)sizeof base) return 2;
@@ -104,15 +104,22 @@ int main(int argc, char **argv) {
     const char *small = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=lower\\trc=0\\tns=100000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=100000000\\n\");return 0;}\n";
     if (cx_write(bigp, big, tx_len(big, 4096))) { ck(0, "write-big"); return 1; }
     if (cx_write(smallp, small, tx_len(small, 4096))) { ck(0, "write-small"); return 1; }
-    if (snprintf(jobs, sizeof jobs, "small\t%s\nbig\t%s\n", smallp, bigp) >= (int)sizeof jobs) return 2;
+    /* envtab: argv separated by TAB (the post-0.0.66 rc=1 case), timing only when the probe passes
+       UNISACC_RR_TIME=1 to the child, and a model inflate decoy line that must not be counted */
+    const char *envj = "#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){const char*t=getenv(\"UNISACC_RR_TIME\");if(c<2)return 3;if(t&&t[0]=='1')fprintf(stderr,\"RR_TIME\\tmodel\\tstage=lower\\tsource=inflate\\tns=9000000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=300000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=0\\nRR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=0\\nRR_TIME\\tartifact_hit=1\\tmode=5\\n\");return 0;}\n";
+    if (snprintf(envp, sizeof envp, "%s/envtab.cx", base) >= (int)sizeof envp) return 2;
+    if (cx_write(envp, envj, tx_len(envj, 4096))) { ck(0, "write-envtab"); return 1; }
+    if (snprintf(jobs, sizeof jobs, "small\t%s\nbig\t%s\nenvtab\t%s\t--\tx\n", smallp, bigp, envp) >= (int)sizeof jobs) return 2;
     if (cx_write(jobsp, jobs, tx_len(jobs, CAP * 2))) { ck(0, "write-jobs"); return 1; }
     char *av[3]; av[0] = jobsp; av[1] = outdir; av[2] = 0;
     int rc = run(av);
     ck(rc == 0, "exit-zero");
     ck(at("small\t200\t100\t100\t0\t0") >= 0, "small-parsed");
     ck(at("big\t4650\t1500\t2400\t750\t0") >= 0, "big-parsed");
-    ck(at("1\tbig") >= 0 && at("1\tbig") < at("2\tsmall"), "ranked-by-total");
+    ck(at("1\tbig") >= 0 && at("1\tbig") < at("2\tenvtab") && at("2\tenvtab") < at("3\tsmall"), "ranked-by-total");
     ck(at("top10\ttotal_ms") >= 0, "top10-header");
-    printf("SPEED_PROBE_CHECKS\tassertions=6\tfailed=%d\n", failed);
+    ck(at("envtab\t300\t300\t0\t0\t0") >= 0, "tab-argv-env-inference-only");
+    ck(at("NOTE\tenvtab\tartifact_hit=1") >= 0 && at("NOTE\tsmall\t") < 0, "artifact-hit-noted");
+    printf("SPEED_PROBE_CHECKS\tassertions=8\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

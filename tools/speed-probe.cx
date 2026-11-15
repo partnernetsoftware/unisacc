@@ -1,7 +1,8 @@
 /* speed-probe: per-object compile timing on the installed product.
  * Usage: sh ./unisacc.com tools/speed-probe.cx -- JOBS.tsv OUTDIR
- * JOBS.tsv: one line per job: NAME<TAB>ARGV... (ARGV executed as
- *   sh ./unisacc.com <ARGV...> with UNISACC_RR_TIME=1, stderr captured).
+ * JOBS.tsv: one line per job: NAME<TAB>ARGV... (ARGV split on spaces or tabs,
+ *   executed as env UNISACC_RR_TIME=1 sh ./unisacc.com <ARGV...>, stderr captured;
+ *   only "RR_TIME<TAB>inference" lines are timed, model inflate lines are not).
  * Writes OUTDIR/<NAME>.rr and OUTDIR/per-object.tsv with
  *   name  total_ms  lower_ms  elf_ms  tapecheck_ms  rc
  * then prints the top 10 by total_ms. No shell, no libc: everything
@@ -83,10 +84,13 @@ static int die(const char *m) { printf("speed-probe: %s\n", m); return 2; }
 static int run_job(const char *name, char *argvline, const char *rrpath) {
     char *argv[64]; int i = 0, k = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0;
     long n = 0, r; char junk[4096];
-    argv[i++] = "sh"; argv[i++] = "./unisacc.com";
+    /* sy_setenv does not reach a child (cx/sys/env.cx), so the timing switch goes through env(1) */
+    argv[i++] = "env"; argv[i++] = "UNISACC_RR_TIME=1"; argv[i++] = "sh"; argv[i++] = "./unisacc.com";
     while (argvline[k] && i < 62) {
+        while (argvline[k] == ' ' || argvline[k] == '\t') k++;
+        if (!argvline[k]) break;
         argv[i++] = argvline + k;
-        while (argvline[k] && argvline[k] != ' ') k++;
+        while (argvline[k] && argvline[k] != ' ' && argvline[k] != '\t') k++;
         if (argvline[k]) argvline[k++] = 0;
     }
     argv[i] = 0;
@@ -103,26 +107,40 @@ static int run_job(const char *name, char *argvline, const char *rrpath) {
 
 /* ns for "RR_TIME<TAB>inference<TAB>stage=KEY<TAB>rc=0<TAB>ns=VALUE"; -1 if absent */
 static long stage_ns(const char *s, const char *stage) {
-    long n = tx_len(s, OUTCAP), at = 0;
+    /* last match wins: a -run job first prints the compile's own lines, then whatever the program emits */
+    long n = tx_len(s, OUTCAP), at = 0, last = -1;
     while (at < n) {
         long e = at;
         while (e < n && s[e] != '\n') e++;
-        if (tx_prefix(s + at, e - at, "RR_TIME\t", 8) && tx_find(s + at, e - at, "\tstage=", 7) >= 0) {
+        /* only inference lines: "RR_TIME<TAB>model<TAB>stage=..." (inflate time) shares the stage key */
+        if (tx_prefix(s + at, e - at, "RR_TIME\tinference\t", 18) && tx_find(s + at, e - at, "\tstage=", 7) >= 0) {
             long p = tx_find(s + at, e - at, "\tstage=", 7) + at + 7;
             long q = p; while (q < e && s[q] != '\t') q++;
             if (tx_len(stage, 64) == q - p && !tx_cmp(s + p, q - p, stage, q - p)) {
                 long v = tx_find(s + at, e - at, "\tns=", 4);
                 if (v >= 0) { v += at + 4; long acc = 0;
                     while (v < e && s[v] >= '0' && s[v] <= '9') acc = acc * 10 + (s[v++] - '0');
-                    return acc; }
+                    last = acc; }
             }
         }
         at = e + 1;
     }
-    return -1;
+    return last;
 }
 
-typedef struct { char name[64]; long total, lower, elf, tchk; int code; } row;
+/* 1 when the last "RR_TIME<TAB>artifact_hit=N" line says the product reused a cached artifact (no stages ran) */
+static int artifact_hit(const char *s) {
+    long n = tx_len(s, OUTCAP), at = 0; int hit = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (tx_prefix(s + at, e - at, "RR_TIME\tartifact_hit=", 21) && e - at > 21) hit = s[at + 21] == '1';
+        at = e + 1;
+    }
+    return hit;
+}
+
+typedef struct { char name[64]; long total, lower, elf, tchk; int code, hit; } row;
 static row rows[256];
 
 int main(int argc, char **argv) {
@@ -150,6 +168,7 @@ int main(int argc, char **argv) {
                 rows[nr].lower = stage_ns(rrtmp, "lower");
                 rows[nr].elf = stage_ns(rrtmp, "elf");
                 rows[nr].tchk = stage_ns(rrtmp, "tapecheck");
+                rows[nr].hit = artifact_hit(rrtmp);
                 if (rows[nr].lower < 0) rows[nr].lower = 0;
                 if (rows[nr].elf < 0) rows[nr].elf = 0;
                 if (rows[nr].tchk < 0) rows[nr].tchk = 0;
@@ -176,6 +195,9 @@ int main(int argc, char **argv) {
                    rows[best].lower / 1000000, rows[best].elf / 1000000, rows[best].tchk / 1000000);
         }
     }
+    for (i = 0; i < nr; i++)
+        if (rows[i].hit)
+            printf("NOTE\t%s\tartifact_hit=1\tstages not run, timings are not a measurement: change -o or set UNISACC_RUN_CACHE=0 for a cold run\n", rows[i].name);
     (void)outdir;
     return 0;
 }
