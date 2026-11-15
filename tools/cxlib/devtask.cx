@@ -308,14 +308,14 @@ int dw_ext_ok(const char *raw, char *canon, int cap, char *why, int wl) {
 /* cwd must be a directory under root/.claude/worktrees/ or under (or equal to) one of the canonical ext directories */
 int dw_cwd_ok(const char *cwd, const char *root, const char *ext, char *canon, int cap, char *why, int wl) {
     char rp[1024], rr[1024], pre[1100]; int ok = 0;
-    if (cwd[0] != '/' || strstr(cwd, "..") || sy_realpath(cwd, rp, sizeof rp) < 0 || !dw_isdir(rp)) { (void)cx_fmt(why, wl, "--cwd is not an existing absolute directory: %s", cwd); return 2; }
+    if (cwd[0] != '/' || strstr(cwd, "..") || sy_realpath(cwd, rp, sizeof rp) < 0 || !dw_isdir(rp)) { (void)cx_fmt(why, wl, "--cwd is not an existing directory (absolute, or relative to the repo root, no ..): %s; example: --cwd .claude/worktrees/v0.0.68", cwd); return 2; }
     if (sy_realpath(root, rr, sizeof rr) >= 0 && snprintf(pre, sizeof pre, "%s/.claude/worktrees/", rr) < (int)sizeof pre && !strncmp(rp, pre, strlen(pre)) && rp[strlen(pre)]) ok = 1;
     for (const char *p = ext; p && *p && !ok;) {
         const char *e = strchr(p, ','); long n = e ? e - p : (long)strlen(p);
         if ((long)strlen(rp) >= n && !memcmp(rp, p, n) && (rp[n] == 0 || rp[n] == '/')) ok = 1;
         p = e ? e + 1 : 0;
     }
-    if (!ok) { (void)cx_fmt(why, wl, "--cwd must be under .claude/worktrees/ or a --write-ext directory: %s", rp); return 2; }
+    if (!ok) { (void)cx_fmt(why, wl, "--cwd must be under .claude/worktrees/ or a --write-ext directory: %s; example: --cwd .claude/worktrees/v0.0.68", rp); return 2; }
     if (snprintf(canon, cap, "%s", rp) >= cap) { snprintf(why, wl, "--cwd too long"); return 2; }
     return 0;
 }
@@ -434,13 +434,31 @@ int dw_load(const char *dir, const char *id, DwTask *t, char *why, int wl) {
     if (!t->owner[0]) (void)cx_fmt(t->owner, sizeof t->owner, "-");   /* orders opened before the owner row */
     return 0;
 }
+/* --write entries: relative prefixes stay; an absolute entry under root/ becomes relative (root itself and outside entries refused) */
+int dw_write_norm(const char *w, const char *root, char *out, int cap, char *why, int wl) {
+    long used = 0, rl = (long)strlen(root);
+    out[0] = 0;
+    for (const char *p = w; p;) {
+        const char *e = strchr(p, ','); long n = e ? e - p : (long)strlen(p); const char *s = p; int w2;
+        if (n > 0 && p[0] == '/') {
+            if (n > rl + 1 && !memcmp(p, root, rl) && p[rl] == '/') { s = p + rl + 1; n -= rl + 1; }
+            else { (void)cx_fmt(why, wl, "bad --write entry: absolute path must be inside the repo root %s; example: --write tools/foo.cx,tools/bar/ or --write %s/tools/foo.cx", root, root); return 2; }
+        }
+        w2 = snprintf(out + used, cap - used, "%s%.*s", used ? "," : "", (int)n, s);
+        if (w2 >= cap - used) { snprintf(why, wl, "oversized --write"); return 2; }
+        used += w2; p = e ? e + 1 : 0;
+    }
+    return 0;
+}
 /* rc 1 when a work order with this id exists and is not done; a done one is replaced */
-int dw_open(const char *dir, const char *id, const char *title, const char *write, const char *const *acc, int nacc, long deadline_min, const char *root, const char *ext, const char *cwd, long now, char *why, int wl) {
-    DwTask t, old; int lk, rc; char p[2048], row[80];
+int dw_open(const char *dir, const char *id, const char *title, const char *write0, const char *const *acc, int nacc, long deadline_min, const char *root, const char *ext, const char *cwd0, long now, char *why, int wl) {
+    DwTask t, old; int lk, rc; char p[2048], row[80], wn[1024], cw[1100]; const char *write = write0, *cwd = cwd0;
     memset(&t, 0, sizeof t);
+    if (strcmp(write0, "-") && dt_text_ok(write0, 1024) && !strstr(write0, "..")) { if (dw_write_norm(write0, root, wn, sizeof wn, why, wl)) return 2; write = wn; }
+    if (cwd0 && cwd0[0] && cwd0[0] != '/' && !strstr(cwd0, "..") && snprintf(cw, sizeof cw, "%s/%s", root, cwd0) < (int)sizeof cw) cwd = cw;
     if (!dw_id_ok(id)) { snprintf(why, wl, "bad --id (no blank, comma, slash or dot, under 64 bytes)"); return 2; }
     if (!dt_text_ok(title, 256)) { snprintf(why, wl, "bad --title"); return 2; }
-    if (strcmp(write, "-") && !dt_domain_ok(write)) { snprintf(why, wl, "bad --write (need relative path prefixes without blanks or ..)"); return 2; }
+    if (strcmp(write, "-") && !dt_domain_ok(write)) { snprintf(why, wl, "bad --write: need comma-joined repo-relative prefixes without blanks or ..; example: --write tools/foo.cx,tools/bar/ (an absolute path under the repo root is also accepted)"); return 2; }
     if (nacc < 1 || nacc > DW_ACC) { (void)cx_fmt(why, wl, "need 1 to %d --accept commands", DW_ACC); return 2; }
     for (int i = 0; i < nacc; i++) if (!dt_text_ok(acc[i], sizeof t.acc[0])) { (void)cx_fmt(why, wl, "bad --accept number %d (empty, too long or control bytes)", i + 1); return 2; }
     if (deadline_min < 1 || deadline_min > 525600) { snprintf(why, wl, "bad --deadline-min"); return 2; }

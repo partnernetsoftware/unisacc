@@ -114,6 +114,8 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 外部根与工作树:`task open` 可加 `--write-ext ABSDIR`(可多次;须已存在的绝对目录,拒绝 / 与 HOME 本身及上两级;目录内文件按内容 sha 做快照,done 时比对,此时 `--write` 可省)和 `--cwd DIR`(验收命令在该目录执行;须在仓内 `.claude/worktrees/` 下或某个 `--write-ext` 目录下,缺省仍是主检出根)。
 - `--write` 里的前缀写成 `.claude/worktrees/v0.0.NN` 时,status 与 done 会另对该工作树做 `git -C` 脏文件快照,路径以 `.claude/worktrees/v0.0.NN/` 开头;验收放在工作树里的检查用 `--cwd 该工作树绝对路径`。检查 `tools/check-devtask.cx` 的 ext-、worktree-、cwd- 开头用例。
 - 新建文档:`devsvc doc create FILE 标题`(FILE 须匹配配置表 doc 行,已存在 rc 1 拒绝,内容为一行一级标题,内部取锁 doc:FILE);其后再用 doc append/set。服务空闲巡检另会回收自己的 /tmp/devsvc-flow-* 运行目录(超 2 小时且无进程引用,每次至多 200 个,记 flowdir.gc 事件)。dcheck 遇批次登记预算超过 55 的,在该批 CHECK 行前打 DCHECK_WARN budget-above-node-cap。
+- git commit 参数约定(2026-11-16):`devsvc git commit -m 说明 (--whole 路径... | --keyed 路径 KEY | --registered ID...) [--push] [--bg]` 严格解析。必须有 -m 与至少一个路径来源;出现未知选项或 --help 一律打印用法、rc 2、不提交(HEAD 与索引不变)。说明首行不得为空,不得以 Co-Authored-By: 或 Signed-off-by: 开头,违反 rc 2 并提示"说明首行必须是正文,署名放最后空行后"。检查 check-devsvc 的 gitargs- 用例(夹具仓,环境变量 DEVSVC_GIT_PARSE_ONLY 只过解析)。
+- task open 路径约定(2026-11-16):`--cwd` 可写绝对路径或相对仓根的路径(如 .claude/worktrees/v0.0.68),须落在 .claude/worktrees/ 或某个 --write-ext 目录下,否则 rc 2 并给示例;`--write` 写仓内相对前缀,也接受以仓根为前缀的绝对路径(内部转为相对,登记与输出均为相对),仓外绝对路径 rc 2。检查 check-devtask 的 write-abs- 用例。
 
 
 

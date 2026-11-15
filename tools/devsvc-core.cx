@@ -1241,6 +1241,30 @@ static int git_status(const char *root) {
     printf("GIT_STATUS\tdirty=%d\torphan=%d\n", dirty, orphan);
     return 0;
 }
+/* git commit 参数严格解析:必须 -m MSG 与至少一个路径来源(--whole/--keyed/--registered);未知选项、--help 一律 rc 2、不提交;
+ * 说明首行不得为空、不得以署名行(Co-Authored-By:、Signed-off-by:)开头。路径与 KEY 是不以 - 开头的位置参数,只在来源选项之后出现。 */
+static int git_ci_prefix(const char *s, const char *pre) {
+    for (; *pre; s++, pre++) { char c = *s; if (c >= 'A' && c <= 'Z') c = (char)(c + 32); if (c != *pre) return 0; }
+    return 1;
+}
+static int git_commit_check(int argc, char **argv) {
+    int i, has_m = 0, has_src = 0; const char *msg = 0;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-m")) { if (i + 1 >= argc) { fprintf(stderr, "devsvc: git commit: -m needs a message\n"); return 2; } msg = argv[++i]; has_m = 1; continue; }
+        if (!strcmp(a, "--push") || !strcmp(a, "--dry-run") || !strcmp(a, "--bg")) continue;
+        if (!strcmp(a, "--whole") || !strcmp(a, "--keyed") || !strcmp(a, "--registered")) { has_src = 1; continue; }
+        if (a[0] == '-' && a[1]) { fprintf(stderr, "devsvc: git commit: unknown option %s (nothing committed)\n", a); return 2; }
+        if (!has_src) { fprintf(stderr, "devsvc: git commit: argument %s before any --whole/--keyed/--registered (nothing committed)\n", a); return 2; }
+    }
+    if (!has_m) { fprintf(stderr, "devsvc: git commit: -m MSG is required (nothing committed)\n"); return 2; }
+    if (!has_src) { fprintf(stderr, "devsvc: git commit: need a path source: --whole PATH... | --keyed PATH KEYS | --registered ID... (nothing committed)\n"); return 2; }
+    {   const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+        if (!*s || *s == '\n') { fprintf(stderr, "devsvc: git commit: empty message (nothing committed)\n"); return 2; }
+        if (git_ci_prefix(s, "co-authored-by:") || git_ci_prefix(s, "signed-off-by:")) {
+            fprintf(stderr, "devsvc: git commit: 说明首行必须是正文,署名放最后空行后 (first line must be the body; put Co-Authored-By after the last blank line)\n"); return 2; } }
+    return 0;
+}
 static int cmd_git(const char *root, int argc, char **argv) {
     long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
     if (argc < 1) return 2;
@@ -1259,6 +1283,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             return rc;
         }
     }
+    if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) return cr; if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\n"); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--push")) { push = 1; continue; }
@@ -1285,7 +1310,10 @@ static int usage(void) {
                     "       devsvc f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp] | x [--timeout-ms N] [--cwd D] -- ARGV...\n");
     fprintf(stderr, "usage: devsvc start|serve [--ttl S] [--idle S] | ping | stop | status [--paths] | config\n"
                     "       devsvc lock acquire NAME --owner O [--ttl S] | lock release NAME --owner O | lock list\n"
-                    "       devsvc run [--local] TOOL.cx [ARGS...] | events [--since N] | events emit KIND TEXT | events on-change PATH...\n");
+                    "       devsvc run [--local] TOOL.cx [ARGS...] | events [--since N] | events emit KIND TEXT | events on-change PATH...\n"
+                    "       devsvc git commit -m MSG (--whole PATH... | --keyed PATH KEYS | --registered ID...) [--push] [--bg]: strict args, unknown option or --help -> rc 2, no commit;\n"
+                    "         MSG first line must be body text (not empty, not a Co-Authored-By:/Signed-off-by: line; trailers go after the last blank line)\n"
+                    "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n");
     return 2;
 }
 
@@ -1522,6 +1550,7 @@ static int main2(int argc, char **argv) {
         return 0;
     }
     if (inst_dir()) { fprintf(stderr, "devsvc: cannot resolve instance directory\n"); return 3; }
+    if (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit") && git_commit_check(argc, argv)) return usage();
     {   int bp; if (bg_strip(cmd, argc, argv, &bp)) return bg_launch(root, cmd, argc + a + 1, argv - (a + 1), argv + bp); }
     if (!strcmp(cmd, "wait")) return cmd_wait(argc, argv);
     if (!strcmp(cmd, "jobs")) return cmd_jobs();
