@@ -12,8 +12,8 @@
  *   2b-ratchets    tools/ratchets.cx last line ok=13 fail=0
  *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
  *   3b-cx0-extract tools/cx0-extract.cx -- --check prints CX0_EXTRACT EXACT
- *   4-p1           every .cx with a `#pragma unisa use` goes through cx0_plan (check-cxmod-tri.cx --cx0, bound 40,
- *                  8 lanes); a new rejection is one whose diagnostic has "bad symbol name", "does not export" or
+ *   4-p1           every .cx with a `#pragma unisa use` goes through cx0_plan (check-cxmod-tri.cx --cx0-batch, 16 files
+ *                  per child, bound 40 per child, 16 lanes, each file judged on its own segment; no file-count cap); a new rejection is one whose diagnostic has "bad symbol name", "does not export" or
  *                  "undeclared function"; must be 0.  --fast: SKIPPED.  Other rejections are reported as a count only.
  *   5-candidate-chain  tools/check-candidate-chain.cx -- TMP/out TMP/cache: rc 0 and no FAIL row
  *   6-affected     tools/affected.cx --files <changed .cx> --run (dirty files, plus --since REV..HEAD); none changed: PASS
@@ -30,6 +30,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.conv
 #pragma unisa use sys.env
+#pragma unisa use sys.poll
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
 #define MAXJ 12
@@ -195,8 +196,10 @@ static void row(const char *item, const char *st, const char *ev, long ms) {
 }
 static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev, ms); }
 
-/* P1: all .cx files holding "#pragma unisa use", 8 lanes of cx0_plan children */
-#define LANES 8
+/* P1: all .cx files holding "#pragma unisa use", LANES lanes of cx0_plan children, BATCH files per child
+ * (check-cxmod-tri --cx0-batch: one "@@FILE\t<path>" segment per file, judged per file exactly as the old single --cx0 child) */
+#define LANES 16
+#define BATCH 16
 /* negative fixtures refused on purpose (check-install-fixes iproto; cxclash "must still be refused"; symindex proto) */
 static int is_negfix(const char *nm) {
     long n = (long)tx_len(nm, 512);
@@ -206,17 +209,27 @@ static int is_negfix(const char *nm) {
 static void run_p1(long *ms_out, char *ev, int cap) {
     long negok = 0, t0 = sy_now_ms(), nfiles = 0, rejected = 0, newrej = 0, failed_start = 0, at = 0;
     char *lb; long ln; int fd, pid, ex = 0, code = 0, sig = 0; char *gv[] = {"./tools/bound", "30", "git", "ls-files", "-z", "--", "*.cx", ":!archive", 0};   /* archive/ is retired legacy, never in a chain build */
-    char *names[1400]; long cnt = 0, next = 0; char first[160]; first[0] = 0;
-    Job lane[LANES]; int i, active = 0;
+    char **names = 0; long ncap = 0, cnt = 0, next = 0; char first[160]; first[0] = 0;
+    Job lane[LANES]; long lfrom[LANES], lnum[LANES]; int ready[LANES], i, active = 0;
     /* gv is ./tools/bound 30 git ls-files: bound-limited */
     pid = sy_spawn_pipe(gv, 0, 0, &fd, 0);
     if (pid <= 0) { put_ev(ev, cap, "cannot start git ls-files"); *ms_out = sy_now_ms() - t0; return; }
     slurp(fd, &lb, &ln); sy_close(fd); sy_wait_status(pid, 0, &ex, &code, &sig);
-    while (at < ln && cnt < 1400) {   /* NUL-separated; keep the ones that hold a use pragma */
+    while (lb && at < ln) {   /* NUL-separated; keep the ones that hold a use pragma; no cap (an old 1400 cap truncated silently) */
         long e = tx_chr(lb + at, ln - at, 0), len = e < 0 ? ln - at : e;
         if (len > 0) {
             size_t sz; char *src; lb[at + len] = 0; src = cx_read(lb + at, &sz);
-            if (src) { if (has(src, (long)sz, "#pragma unisa use")) names[cnt++] = lb + at; mm_free(src); }
+            if (src) {
+                if (has(src, (long)sz, "#pragma unisa use")) {
+                    if (cnt == ncap) {
+                        long nc = ncap ? ncap * 2 : 2048; char **g = names ? mm_grow(names, nc * (long)sizeof *names) : mm_alloc(nc * (long)sizeof *names);
+                        if (!g) { mm_free(src); put_ev(ev, cap, "cannot grow file list"); *ms_out = -(sy_now_ms() - t0); return; }
+                        names = g; ncap = nc;
+                    }
+                    names[cnt++] = lb + at;
+                }
+                mm_free(src);
+            }
         }
         at += len + 1;
     }
@@ -224,26 +237,46 @@ static void run_p1(long *ms_out, char *ev, int cap) {
     while (next < cnt || active > 0) {
         for (i = 0; i < LANES; i++) {
             if (lane[i].state == 0 && next < cnt) {
-                static const char *fixed[] = {"./tools/bound", "40", "sh", UC, "tools/check-cxmod-tri.cx", "--", "--cx0"};
+                static const char *fixed[] = {"./tools/bound", "40", "sh", UC, "tools/check-cxmod-tri.cx", "--", "--cx0-batch"};
                 int k; for (k = 0; k < 7; k++) lane[i].argv[k] = (char *)fixed[k];
-                lane[i].argv[7] = names[next++]; lane[i].argv[8] = 0; lane[i].name = lane[i].argv[7];
-                if (start(&lane[i]) == 0) active++; else { failed_start++; lane[i].state = 0; }
+                lfrom[i] = next;
+                for (k = 0; k < BATCH && next < cnt; k++) lane[i].argv[7 + k] = names[next++];
+                lane[i].argv[7 + k] = 0; lnum[i] = k; lane[i].name = lane[i].argv[7];
+                if (start(&lane[i]) == 0) active++; else { failed_start += lnum[i]; nfiles += lnum[i]; lane[i].state = 0; }
             }
         }
+        {   /* collect a lane whose child closed its pipe (POLLHUP), not lane order: a slow batch must not idle the others */
+            sy_pollfd_t pf[LANES]; int pl[LANES], np = 0, pr;
+            for (i = 0; i < LANES; i++) { ready[i] = 0; if (lane[i].state == 1) { pf[np].fd = lane[i].ofd; pf[np].events = 0; pf[np].revents = 0; pl[np++] = i; } }
+            pr = np ? sy_poll(pf, np, 1000) : 0;
+            if (pr < 0) { for (i = 0; i < np; i++) ready[pl[i]] = 1; }   /* poll failed: fall back to blocking collect */
+            else for (i = 0; i < np; i++) if (pf[i].revents & (SY_POLLHUP | SY_POLLERR | SY_POLLNVAL)) ready[pl[i]] = 1;
+        }
         for (i = 0; i < LANES; i++) {
-            if (lane[i].state == 1) {
+            if (lane[i].state == 1 && ready[i]) {
+                long f, pos = 0;
                 finish(&lane[i]);
-                nfiles++;
-                if (!lane[i].out || lane[i].rc != 0) failed_start++;
-                else {
-                    if (!has(lane[i].out, lane[i].n, "RC=0")) rejected++;
+                for (f = 0; f < lnum[i]; f++) {   /* every file of the batch gets its own segment and verdict */
+                    const char *nm = names[lfrom[i] + f]; char hd[600]; long hs, so, se, sl;
+                    nfiles++;
+                    cx_fmt(hd, sizeof hd, "@@FILE\t%s\n", nm);
+                    hs = lane[i].out ? tx_find(lane[i].out + pos, lane[i].n - pos, hd, (long)tx_len(hd, sizeof hd)) : -1;
+                    if (lane[i].rc != 0 || hs != 0) {   /* child failed or segment missing / out of order: this file failed */
+                        failed_start++; if (!first[0]) cx_fmt(first, sizeof first, "child-failed %.100s", nm);
+                        if (hs < 0) { pos = lane[i].n; continue; }
+                    }
+                    so = pos + hs + (long)tx_len(hd, sizeof hd);
+                    se = tx_find(lane[i].out + so, lane[i].n - so, "@@", 2);
+                    sl = se < 0 ? lane[i].n - so : se; pos = so + sl;
+                    if (lane[i].rc != 0) continue;
+                    if (!has(lane[i].out + so, sl, "RC=0")) rejected++;
                     /* deliberate negative fixtures must stay refused with a new-text diagnostic; one that is accepted is a failure */
-                    if (is_negfix(lane[i].name)) { if (j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "negfix-accepted %.100s", lane[i].name); } else negok++; }
-                    else if (!j_p1file(lane[i].out, lane[i].n)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "%.120s", lane[i].name); }
+                    if (is_negfix(nm)) { if (j_p1file(lane[i].out + so, sl)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "negfix-accepted %.100s", nm); } else negok++; }
+                    else if (!j_p1file(lane[i].out + so, sl)) { newrej++; if (!first[0]) cx_fmt(first, sizeof first, "%.120s", nm); }
                 }
+                if (lane[i].rc == 0 && (!lane[i].out || !has(lane[i].out + pos, lane[i].n - pos, "@@END\t"))) { failed_start++; if (!first[0]) cx_fmt(first, sizeof first, "batch-no-end %.100s", lane[i].name); }
                 if (lane[i].out) mm_free(lane[i].out);
                 lane[i].state = 0; active--;
-                break;   /* refill before the next collect */
             }
         }
     }
