@@ -7,9 +7,10 @@
  *     本地重放:release-layout --check、SHA256SUMS 校验、release-dispatch --dry-run、
  *     release-decide(证据取 OUT_DIR/evidence.tsv,缺则 8xUNKNOWN)。不创建/修改 release,
  *     不触发 CI,不 push。输出与人工逐步执行逐行对照。
- *   sh ./unisacc.com tools/release-run.cx -- --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR
+ *   sh ./unisacc.com tools/release-run.cx -- --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR --chain-out CHAIN_DIR [--snap SNAP]
  *     H8 实跑化(本地重放打包,零网络零 gh):输入=ROOT 内候选表私有副本 + SRC_DIR
  *     候选目录(六片 + P4 + cache-manager 两份 + sources.tsv),自动:
+ *     chain checkpoint、compare 尝试日志与 g2/g3 六片均须有完整同字节证据;UNKNOWN 一律拒绝。
  *       4 ape-pack   release-ape pack --osx-slices --cache-manager-osx 显式输入,
  *                    OUT_DIR/ape/unisacc-next.com 即 unisacc.com;
  *       5 inject     tools/version-inject.cx 对第六片注入表内版本,得 slice-win-arm64;
@@ -52,6 +53,7 @@
 #pragma unisa use cxlib.relsha
 #pragma unisa use cxlib.chainroot
 static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448], snapdir[4096];
+static char chainout[4096];
 static RcCandidate cand;
 
 static void die(const char *s) { sy_eprintf("release-run: REFUSE %s\n", s); sy_exit(2); }
@@ -121,6 +123,72 @@ static void need(const char *dir, const char *name) {
     if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) die("path");
     if (sy_exists(p) != 1) die(name);
 }
+/* chain-run writes ATTEMPT bindings and chain-run-N.stdout in --out.
+ * chain-step emits CHAIN/fixedpoint verdicts; no guessed compare.log is trusted.
+ * The six files below are the pack inputs (Linux entry.elf), not wrapper candidates. */
+static char *pack_chain_text(const char *leaf){
+    char p[4400];sy_stat_t st;size_t n=0;
+    if(!chainout[0]||chainout[0]!='/'||cx_fmt(p,sizeof p,"%s/%s",chainout,leaf))die("UNKNOWN chain output");
+    if(sy_stat(p,&st)||st.kind!='f'||st.size<=0||st.size>(1L<<26))die("UNKNOWN chain evidence missing or invalid");
+    char *b=cx_read(p,&n);
+    if(!b||n!=(size_t)st.size||b[n-1]!='\n'||memchr(b,0,n)||memchr(b,'\r',n)){free(b);die("UNKNOWN chain evidence text");}
+    return b;
+}
+static int pack_fields(char *p,char **f,int cap){
+    int n=0;for(;;){if(n==cap)return -1;f[n++]=p;char *q=strchr(p,'\t');if(!q)return n;*q=0;p=q+1;}
+}
+static long pack_number(const char *p){
+    long n=0;if(!p||!*p)return -1;
+    for(;*p;p++){if(*p<'0'||*p>'9'||n>(2147483647L-(*p-'0'))/10)return -1;n=n*10+*p-'0';}return n;
+}
+static void pack_chain_gate(void){
+    char *b=pack_chain_text("checkpoint.tsv");int done=0;
+    for(char *p=b;*p;){char *e=strchr(p,'\n'),*f[8];*e=0;int n=pack_fields(p,f,8);
+        if(n>=2&&tx_eqz(f[1],"compare")){if(!tx_eqz(f[0],"DONE")){free(b);die("UNKNOWN compare checkpoint");}done=1;}p=e+1;
+    }
+    free(b);if(!done)die("UNKNOWN compare checkpoint not DONE");
+    b=pack_chain_text("chain-run.tsv");long attempt=0;int success=0;
+    for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;
+        if(!strncmp(p,"ATTEMPT\t",8)){
+            char *f[8];int n=pack_fields(p,f,8);
+            if(n!=7){free(b);die("UNKNOWN compare attempt schema");}
+            if(tx_eqz(f[2],"phase=compare")){
+                long id=pack_number(f[1]);if(id<=attempt){free(b);die("UNKNOWN compare attempt identity");}
+                attempt=id;success=tx_eqz(f[3],"rc=0")&&tx_eqz(f[4],"residue=0")&&tx_eqz(f[6],"memo=off")&&
+                    !strncmp(f[5],"bound=",6)&&pack_number(f[5]+6)>0;
+            }
+        }
+        p=e+1;
+    }
+    free(b);if(!attempt||!success)die("UNKNOWN compare attempt not successful and memo-free");
+    char leaf[100];if(cx_fmt(leaf,sizeof leaf,"chain-run-%ld.stdout",attempt))die("compare log path");
+    b=pack_chain_text(leaf);int seen=0;const char *kind[4]={"objects","kernels","slices","product"};
+    for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;
+        if(!strncmp(p,"CHAIN\tfixedpoint\t",17)){
+            char *f[8];int n=pack_fields(p,f,8);if(n<3){free(b);die("UNKNOWN fixedpoint log schema");}
+            for(int k=0;k<4;k++){size_t z=strlen(kind[k]);
+                if(!strncmp(f[2],kind[k],z)&&(f[2][z]=='='||!f[2][z])){
+                    if(strcmp(f[2]+z,"=same")){free(b);die("UNKNOWN fixedpoint verdict");}
+                    if(k==3){if(n!=3){free(b);die("UNKNOWN fixedpoint product proof");}}
+                    else {long count=n==4&&!strncmp(f[3],"count=",6)?pack_number(f[3]+6):-1;
+                        if(count<=0||(k==1&&count!=2)||(k==2&&count!=6)){free(b);die("UNKNOWN fixedpoint count");}}
+                    seen|=1<<k;
+                }
+            }
+        }
+        p=e+1;
+    }
+    free(b);if(seen!=15)die("UNKNOWN fixedpoint four same proofs missing");
+    const char *files[6]={"lnx-x86_64/entry.elf","lnx-arm64/entry.elf","osx-x86_64/slice-osx-x86_64",
+        "osx-arm64/slice-osx-arm64","win-x86_64/slice-win-x86_64","win-arm64/slice-win-arm64"};
+    for(int i=0;i<6;i++){
+        char a[4400],c[4400],ha[65],hc[65];sy_stat_t sa,sc;
+        if(cx_fmt(a,sizeof a,"%s/fixedpoint/g2/%s",chainout,files[i])||cx_fmt(c,sizeof c,"%s/fixedpoint/g3/%s",chainout,files[i]))die("fixedpoint slice path");
+        if(sy_stat(a,&sa)||sy_stat(c,&sc)||sa.kind!='f'||sc.kind!='f'||sa.size<=0||sc.size<=0)die("UNKNOWN fixedpoint slice missing or empty");
+        sha_of(root,a,ha);sha_of(root,c,hc);if(strcmp(ha,hc))die("fixedpoint slice SHA mismatch");
+    }
+    emit("FIXEDPOINT","VERIFIED",chainout);
+}
 /* 步 4:显式 --osx-slices + --cache-manager-osx。不用 BUILT_CURRENT_PRODUCT:
  * 那会拿当前产品重造 manager,产物身份随宿主漂移,重放不再确定。 */
 static void step_ape_pack(void) {
@@ -129,6 +197,7 @@ static void step_ape_pack(void) {
     char *v[20]; int n = 0;
     const char *src[9] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64", "cache-manager-x64", "cache-manager-arm64"};
     int i;
+    pack_chain_gate();
     for (i = 0; i < 9; i++) need(srcdir, src[i]);
     if (cx_fmt(apedir, sizeof apedir, "%s/ape", out)) die("path");
     if (sy_mkdir(apedir, 0755) && sy_exists(apedir) != 1) die("ape dir");
@@ -374,8 +443,8 @@ static void step_commands(void) {
 /* Resume binds all original source bytes and the immutable initial table. */
 static void pack_binding(int create) {
     const char *names[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};
-    np_buf b={0};char p[4400],h[65],row[9000];size_t n;
-    if(cx_fmt(row,sizeof row,"%s\n%s\n%s\n%s\n",root,table,srcdir,snapdir))die("binding");np_puts(&b,row);
+    np_buf b={0};char p[4400],h[65];static char row[22000];size_t n;
+    if(cx_fmt(row,sizeof row,"%s\n%s\n%s\n%s\n%s\n",root,table,srcdir,snapdir,chainout))die("binding");np_puts(&b,row);
     sha_of(root,table,h);np_puts(&b,h);np_puts(&b,"\n");
     for(int i=0;i<10;i++){if(cx_fmt(p,sizeof p,"%s/%s",srcdir,names[i]))die("binding path");sha_of(root,p,h);np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
     if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("binding path");char *old=cx_read(p,&n);
@@ -386,9 +455,10 @@ static int pack_done(int i) {
     for(char *a=s;a&&*a;){char *e=strchr(a,'\n');if(!e)die("checkpoint truncated");if(!strncmp(a,needle,strlen(needle))){char *t=0;for(char *q=a;q<e;q++)if(*q=='\t')t=q;yes=t&&e-t==5&&!strncmp(t,"\tDONE",5);}a=e+1;}free(s);return yes;
 }
 static void pack_continue(void) {
+    int ape_done=pack_done(4);if(ape_done)pack_chain_gate();
     pack_binding(0);require_sources_sid();
     if(cx_fmt(layoutout,sizeof layoutout,"%s/layout",out))die("layout path");
-    if(!pack_done(4))step_ape_pack();if(!pack_done(5))step_inject();
+    if(!ape_done)step_ape_pack();if(!pack_done(5))step_inject();
     if(!pack_done(6))step_layout_gen();if(!pack_done(7))step_backfill();
     step_sums2();char p[4400],why[400];RcCandidate actual;
     if(cx_fmt(p,sizeof p,"%s/candidate.tsv",out)||rcand_load(p,&actual,why,sizeof why)||rcand_verify(&actual,layoutout,7,why,sizeof why))die("resume output identity");
@@ -399,8 +469,8 @@ int main(int argc, char **argv) {
     if(argc==3&&tx_eqz(argv[1],"--resume")) {
         if(sy_realpath(argv[2],out,sizeof out)<0||cx_fmt(statep,sizeof statep,"%s/state.tsv",out))die("resume out");
         char p[4400];size_t n;if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("resume path");char *s=cx_read(p,&n);if(!s)die("resume inputs");
-        char *dest[]={root,table,srcdir,snapdir};size_t caps[]={sizeof root,sizeof table,sizeof srcdir,sizeof snapdir};char *at=s;
-        for(int i=0;i<4;i++){char *e=strchr(at,'\n');if(!e||(size_t)(e-at)>=caps[i])die("resume schema");*e=0;if(cx_fmt(dest[i],caps[i],"%s",at))die("resume capacity");at=e+1;}free(s);
+        char *dest[]={root,table,srcdir,snapdir,chainout};size_t caps[]={sizeof root,sizeof table,sizeof srcdir,sizeof snapdir,sizeof chainout};char *at=s;
+        for(int i=0;i<5;i++){char *e=strchr(at,'\n');if(!e||(size_t)(e-at)>=caps[i])die("resume schema");*e=0;if(cx_fmt(dest[i],caps[i],"%s",at))die("resume capacity");at=e+1;}free(s);
         if(rcand_load(table,&cand,why,sizeof why))die(why);pack_continue();return 0;
     }
     if (argc == 6 && tx_eqz(argv[1], "--dry-run")) {
@@ -419,13 +489,14 @@ int main(int argc, char **argv) {
         emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
         return 0;
     }
-    if ((argc == 6 || argc == 8) && tx_eqz(argv[1], "--pack")) {
-        char root_tsv[4400], vr[24], vt[24];
-        snapdir[0] = 0;
-        if (argc == 8) {
-            if (!tx_eqz(argv[6], "--snap")) die("usage --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR [--snap DIR]");
-            if (sy_realpath(argv[7], snapdir, sizeof snapdir) < 0) die("snap");
+    if ((argc==6||argc==8||argc==10)&&tx_eqz(argv[1],"--pack")) {
+        char root_tsv[4400],vr[24],vt[24];snapdir[0]=0;chainout[0]=0;
+        for(int i=6;i<argc;i+=2){
+            if(tx_eqz(argv[i],"--snap")){if(snapdir[0]||sy_realpath(argv[i+1],snapdir,sizeof snapdir)<0)die("snap");}
+            else if(tx_eqz(argv[i],"--chain-out")){if(chainout[0]||sy_realpath(argv[i+1],chainout,sizeof chainout)<0)die("UNKNOWN chain output");}
+            else die("usage --pack requires --chain-out DIR and optional --snap DIR");
         }
+        if(!chainout[0]||strchr(chainout,'\n')||strchr(chainout,'\r'))die("UNKNOWN chain output --chain-out required");
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
         if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
         if (sy_realpath(argv[4], srcdir, sizeof srcdir) < 0) die("src dir");
@@ -449,6 +520,6 @@ int main(int argc, char **argv) {
         emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
         return 0;
     }
-    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR [--snap DIR]");
+    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR --chain-out DIR [--snap DIR]");
     return 2;
 }

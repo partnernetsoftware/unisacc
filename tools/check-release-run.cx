@@ -6,7 +6,8 @@
  *   R3 决议步在无证据时保持 UNKNOWN(不猜);
  *   R4 dry-run 不产生 git 变更:跑前后 rev-parse HEAD 相同;gh 从未被调用
  *      (环境里注入 GH=never,任何 gh 调用都会失败使测试红)。
- * 负控:布局被改动一字节 -> layout-check 步 REFUSE 非零退出。 */
+ * 负控:布局改字节;pack要求真实chain compare证据与六对非空同字节文件,
+ * 并以实际子进程marker验证拒绝发生在打包前(含ape-pack DONE续跑)。 */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -25,33 +26,72 @@ static void ck(int ok, const char *n) {
 static long tlen(const char *s) { return tx_len(s, 1 << 100); }
 static int run(char **v, const char *cwd, char *out, int cap) {
     np_result r = {0}; char why[512] = {0}; int rc;
+    if (out && cap > 0) out[0] = 0;
     if (np_run(v, cwd, 0, 50, &r, why, sizeof why)) { np_free(&r); return 125; }
     rc = r.rc;
     if (out && r.outn < (size_t)cap) { long i; for (i = 0; i < (long)r.outn; i++) out[i] = r.out[i]; out[r.outn] = 0; }
     if (r.outn) sy_write_all(1, r.out ? r.out : "", r.outn);
     if (r.errn) sy_write_all(2, r.err, r.errn);
+    if (out && r.outn + r.errn < (size_t)cap) {
+        size_t j; for (j = 0; j < r.errn; j++) out[r.outn + j] = r.err[j];
+        out[r.outn + r.errn] = 0;
+    }
     np_free(&r);
     return rc;
 }
 static int has(const char *b, const char *s) { return tx_find(b, tlen(b), s, tlen(s)) >= 0; }
 
+static const char *chain_roles[6] = {"lnx-x86_64/entry.elf", "lnx-arm64/entry.elf",
+    "osx-x86_64/slice-osx-x86_64", "osx-arm64/slice-osx-arm64",
+    "win-x86_64/slice-win-x86_64", "win-arm64/slice-win-arm64"};
+static const char *fp_rows[4] = {"CHAIN\tfixedpoint\tobjects=same\tcount=44\n", "CHAIN\tfixedpoint\tkernels=same\tcount=2\n",
+    "CHAIN\tfixedpoint\tslices=same\tcount=6\n", "CHAIN\tfixedpoint\tproduct=same\n"};
+static int fixture_put(const char *dir, const char *leaf, const char *text) {
+    char p[4800]; return cx_fmt(p, sizeof p, "%s/%s", dir, leaf) || cx_write(p, text, tlen(text));
+}
+/* Private physical g2/g3 files, not just historical comparison claims. */
+static int chain_fixture(const char *chain) {
+    char p[4800], leaf[300]; int g, j;
+    if (sy_mkdir(chain, 0700) && sy_exists(chain) != 1) return 1;
+    if (cx_fmt(p, sizeof p, "%s/fixedpoint", chain)) return 1;
+    if (sy_mkdir(p, 0700) && sy_exists(p) != 1) return 1;
+    for (g = 2; g <= 3; g++) {
+        if (cx_fmt(p, sizeof p, "%s/fixedpoint/g%d", chain, g)) return 1;
+        if (sy_mkdir(p, 0700) && sy_exists(p) != 1) return 1;
+        for (j = 0; j < 6; j++) {
+            const char *slugs[6] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+            if (cx_fmt(p, sizeof p, "%s/fixedpoint/g%d/%s", chain, g, slugs[j])) return 1;
+            if (sy_mkdir(p, 0700) && sy_exists(p) != 1) return 1;
+            if (cx_fmt(leaf, sizeof leaf, "fixedpoint/g%d/%s", g, chain_roles[j]) || fixture_put(chain, leaf, "nonempty identical slice bytes\n")) return 1;
+        }
+    }
+    if (fixture_put(chain, "checkpoint.tsv", "DONE\tcompare\twall_ms=0\tsha=-\n") ||
+        fixture_put(chain, "chain-run.tsv", "ATTEMPT\t1\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=off\n")) return 1;
+    return fixture_put(chain, "chain-run-1.stdout", "CHAIN\tfixedpoint\tobjects=same\tcount=44\nCHAIN\tfixedpoint\tkernels=same\tcount=2\nCHAIN\tfixedpoint\tslices=same\tcount=6\nCHAIN\tfixedpoint\tproduct=same\n");
+}
+
 int main(int argc, char **argv) {
-    char out[65536], layout[4400], cand[4400], odir[4400], state[4600], *b; size_t n;
+    char out[65536], layout[4400], cand[4400], odir[4400], state[4600], chain[4400], *b; size_t n;
     char *v[8]; int rc, i;
-    const char *src = argc > 1 && argv[1][0] ? argv[1] : sy_env("RELEASE_RUN_FIXTURE");
-    if (!src || !src[0]) { sy_eprintf("check-release-run: set RELEASE_RUN_FIXTURE to the 0.0.49 release-layout directory\n"); return 2; }
+    int gate_only=argc==2&&tx_eqz(argv[1],"--gate-only");
+    const char *src=gate_only?0:(argc>1&&argv[1][0]?argv[1]:sy_env("RELEASE_RUN_FIXTURE"));
+    if(!gate_only&&(!src||!src[0])){sy_eprintf("check-release-run: use FIXTURE CANDIDATE or --gate-only\n");return 2;}
     if (sy_cwd(root, sizeof root)) return 2;
     { char t[] = "/tmp/check-release-run-XXXXXX"; if (!mkdtemp(t)) return 2;
       if (cx_fmt(work, sizeof work, "%s", t) || cx_fmt(layout, sizeof layout, "%s/layout", work)) return 2; }
+    if(!gate_only){
     { char *cv[] = {"cp", "-r", (char *)src, layout, 0}; if (run(cv, root, 0, 0)) return 2; }
     if (cx_fmt(cand, sizeof cand, "%s/candidate.tsv", work)) return 2;
     { const char *ct = argc > 2 && argv[2][0] ? argv[2] : sy_env("RELEASE_RUN_CANDIDATE");
       if (!ct || !ct[0]) { sy_eprintf("check-release-run: set RELEASE_RUN_CANDIDATE to the candidate table\n"); return 2; }
       { char *cv[] = {"cp", (char *)ct, cand, 0}; if (run(cv, root, 0, 0)) return 2; } }
+    }
+    if (cx_fmt(chain, sizeof chain, "%s/chain", work) || chain_fixture(chain)) return 2;
     if (cx_fmt(odir, sizeof odir, "%s/out", work)) return 2;
     v[0] = "env"; v[1] = "GH=never"; v[2] = "PATH=/usr/bin:/bin";
     v[3] = "sh"; v[4] = "unisacc.com"; v[5] = "tools/release-run.cx";
     v[6] = "--"; v[7] = 0;
+    if(!gate_only){
     { char *w[12]; int k = 0;
       for (i = 0; i < 7; i++) w[k++] = v[i];
       w[k++] = (char *)"--dry-run"; w[k++] = root; w[k++] = cand; w[k++] = layout; w[k++] = odir; w[k] = 0;
@@ -91,9 +131,10 @@ int main(int argc, char **argv) {
         if (cx_fmt(cand2, sizeof cand2, "%s/cand2.tsv", work)) return 2;
         { char *cv[] = {"cp", (char *)ct2, cand2, 0}; if (run(cv, root, 0, 0)) return 2; }
         if (cx_fmt(podir, sizeof podir, "%s/pack-out", work)) return 2;
-        { char *w[12]; int k = 0;
+        { char *w[16]; int k = 0;
           for (i = 0; i < 7; i++) w[k++] = v[i];
-          w[k++] = (char *)"--pack"; w[k++] = root; w[k++] = cand2; w[k++] = (char *)psrc; w[k++] = podir; w[k] = 0;
+          w[k++] = (char *)"--pack"; w[k++] = root; w[k++] = cand2; w[k++] = (char *)psrc; w[k++] = podir;
+          w[k++] = (char *)"--chain-out"; w[k++] = chain; w[k] = 0;
           rc = run(w, root, out, sizeof out); }
         ck(rc == 0, "P0 pack rc0");
         ck(has(out, "STEP\tape-pack\tDONE"), "P1a ape-pack DONE");
@@ -132,8 +173,9 @@ int main(int argc, char **argv) {
       } else {
         sy_printf("SKIP\tcheck-release-run.pack (set RELEASE_RUN_PACK_SRC)\n");
       } }
+    }
     { char fake[4400], rel[4400], t50[4400], t51[4400], src[4400], od[4400];
-      char *w[12]; int k = 0, i;
+      char *w[16]; int k = 0, i;
       const char *head = "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n";
       const char *row50 = "r\tt\t979b56e4d918894670a71080970149112499d223\t0.0.50\tw\tmain\t0\ta\t0\tp\t0\ts\t0\trd\t0\tb\t0\tz\t0\tc\t0\n";
       const char *row51 = "r\tt\t979b56e4d918894670a71080970149112499d223\t0.0.51\tw\tmain\t0\ta\t0\tp\t0\ts\t0\trd\t0\tb\t0\tz\t0\tc\t0\n";
@@ -145,11 +187,13 @@ int main(int argc, char **argv) {
       if (cx_fmt(src, sizeof src, "%s/src", work) || sy_mkdir(src, 0755)) return 2;
       if (cx_fmt(od, sizeof od, "%s/ver-out", work)) return 2;
       for (i = 0; i < 7; i++) w[k++] = v[i];
-      w[k++] = (char *)"--pack"; w[k++] = fake; w[k++] = t51; w[k++] = src; w[k++] = od; w[k] = 0;
+      w[k++] = (char *)"--pack"; w[k++] = fake; w[k++] = t51; w[k++] = src; w[k++] = od;
+      w[k++] = (char *)"--chain-out"; w[k++] = chain; w[k] = 0;
       rc = run(w, root, out, sizeof out);
       ck(rc == 2, "pack version mismatch refuses"); }
+    ck(has(out, "root-candidate-version-mismatch"), "version negative reaches version guard");
     { char fake[4400], snap[4400], src[4400], od[4400], tsv[4400], hp[4400], sp[4400], rel[4400];
-      char *w[16]; int k = 0, i;
+      char *w[20]; int k = 0, i;
       const char *head = "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n";
       const char *z = "0000000000000000000000000000000000000000000000000000000000000000";
       const char *oldsid = "e764a816aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
@@ -172,11 +216,93 @@ int main(int argc, char **argv) {
           if (cx_fmt(buf, sizeof buf, "%s%s", head, row) || cx_write(t50, buf, tlen(buf))) return 2; } }
       for (i = 0; i < 7; i++) w[k++] = v[i];
       w[k++] = (char *)"--pack"; w[k++] = fake; w[k++] = tsv; w[k++] = src; w[k++] = od;
+      w[k++] = (char *)"--chain-out"; w[k++] = chain;
       w[k++] = (char *)"--snap"; w[k++] = snap; w[k] = 0;
       { char envp[4800]; if (cx_fmt(envp, sizeof envp, "UNISACC_IDENT_HELPER=%s", hp)) return 2;
         char *we[20]; int n = 0; we[n++] = "env"; we[n++] = envp; for (i = 0; i < k; i++) we[n++] = w[i]; we[n] = 0;
         rc = run(we, root, out, sizeof out); }
-      ck(rc == 2, "pack old SID refuses"); }
-    sy_printf("CHECK_RELEASE_RUN\tfailed=%d\n", failed);
+      ck(rc == 2, "pack old SID refuses");
+      ck(has(out, "sources-sid-mismatch"), "SID negative reaches identity guard");
+      /* A real child invocation leaves a marker: all rejected gates must prevent it.
+       * The positive control intentionally stops at that child, before expensive packing. */
+      { char marker[4600], com[4600], script[5200], envp[4800], goodod[4400];
+        const char *inputs[9] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64", "cache-manager-x64", "cache-manager-arm64"};
+        const char *sid = "a811885eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+        if (cx_fmt(marker, sizeof marker, "%s/pack-child.marker", work) ||
+            cx_fmt(com, sizeof com, "%s/unisacc.com", fake) ||
+            cx_fmt(script, sizeof script, "#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\nexit 2\n", marker) ||
+            cx_write(com, script, tlen(script)) || cx_write(sp, sid, 65) ||
+            cx_fmt(envp, sizeof envp, "UNISACC_IDENT_HELPER=%s", hp) ||
+            cx_fmt(goodod, sizeof goodod, "%s/gate-positive", work)) return 2;
+        for (i = 0; i < 9; i++) if (fixture_put(src, inputs[i], "private pack input\n")) return 2;
+        { char *pv[] = {"env", envp, "sh", "unisacc.com", "tools/release-run.cx", "--", "--pack", fake, tsv, src, goodod, "--chain-out", chain, "--snap", snap, 0};
+          rc = run(pv, root, out, sizeof out); }
+        ck(rc == 2 && sy_exists(marker) == 1 && has(out, "release-ape pack"), "gate positive reaches actual pack child");
+        { char *rm[] = {"rm", "-f", marker, 0}; if (run(rm, root, 0, 0)) return 2; }
+        /* Missing/UNKNOWN proofs, latest failure/residue, changed or missing slices,
+         * a completed resume, memo use and chain-directory rebinding must refuse. */
+        static char otherchain[4400];
+        for (int test = 0; test < 30; test++) {
+            char leaf[400], path[4800], label[200]; np_buf log = {0};
+            if (chain_fixture(chain) || cx_fmt(od, sizeof od, "%s/gate-negative-%d", work, test)) return 2;
+            if (test == 1 && fixture_put(chain, "checkpoint.tsv", "UNKNOWN\tcompare\twall_ms=0\tsha=-\n")) return 2;
+            if(test==29&&(cx_fmt(otherchain,sizeof otherchain,"%s/other-chain",work)||chain_fixture(otherchain)))return 2;
+            if (test >= 2 && test <= 9) {
+                int category = (test - 2) % 4;
+                for (int j = 0; j < 4; j++) {
+                    if (j != category) np_puts(&log, fp_rows[j]);
+                    else if (test >= 6) {
+                        const char *unknown[4] = {"CHAIN\tfixedpoint\tobjects=UNKNOWN\tcount=44\n", "CHAIN\tfixedpoint\tkernels=UNKNOWN\tcount=2\n", "CHAIN\tfixedpoint\tslices=UNKNOWN\tcount=6\n", "CHAIN\tfixedpoint\tproduct=UNKNOWN\n"};
+                        np_puts(&log, unknown[j]);
+                    }
+                }
+                if (fixture_put(chain, "chain-run-1.stdout", log.p)) return 2;
+                free(log.p);
+            }
+            if (test == 10 || test == 11) {
+                const char *attempt = test == 10 ?
+                    "ATTEMPT\t1\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=off\nATTEMPT\t2\tphase=compare\trc=1\tresidue=0\tbound=60\tmemo=off\n" :
+                    "ATTEMPT\t1\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=off\nATTEMPT\t2\tphase=compare\trc=0\tresidue=1\tbound=60\tmemo=off\n";
+                if (fixture_put(chain, "chain-run.tsv", attempt)) return 2;
+                for (int j = 0; j < 4; j++) np_puts(&log, fp_rows[j]);
+                if (fixture_put(chain, "chain-run-2.stdout", log.p)) return 2;
+                free(log.p);
+            }
+            if (test == 26) {
+                for (int j = 0; j < 4; j++) np_puts(&log, fp_rows[j]);
+                np_puts(&log, "CHAIN\tfixedpoint\tobjects=UNKNOWN\tcount=44\n");
+                if (fixture_put(chain, "chain-run-1.stdout", log.p)) return 2;
+                free(log.p);
+            }
+            if (test == 27 && fixture_put(chain, "fixedpoint/g3/lnx-x86_64/entry.elf", "")) return 2;
+            if (test == 28 && fixture_put(chain, "chain-run.tsv", "ATTEMPT\t1\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=on\n")) return 2;
+            if ((test == 12 || test == 25) && fixture_put(chain, "fixedpoint/g3/lnx-x86_64/entry.elf", "changed real bytes\n")) return 2;
+            if (test >= 13 && test <= 24) {
+                if (cx_fmt(leaf, sizeof leaf, "fixedpoint/g%d/%s", 2 + (test - 13) / 6, chain_roles[(test - 13) % 6]) ||
+                    cx_fmt(path, sizeof path, "%s/%s", chain, leaf)) return 2;
+                { char *rm[] = {"rm", path, 0}; if (run(rm, root, 0, 0)) return 2; }
+            }
+            if (test == 25) {
+                /* Binding was produced by the positive run, not hand-forged. */
+                if (fixture_put(goodod, "state.tsv", "STEP\t4\tape-pack\tDONE\n")) return 2;
+                char *rv[] = {"env", envp, "sh", "unisacc.com", "tools/release-run.cx", "--", "--resume", goodod, 0};
+                rc = run(rv, root, out, sizeof out);
+            } else {
+                char *pv[18]; int count = 0;
+                pv[count++] = "env"; pv[count++] = envp; pv[count++] = "sh"; pv[count++] = "unisacc.com";
+                pv[count++] = "tools/release-run.cx"; pv[count++] = "--"; pv[count++] = "--pack";
+                pv[count++] = fake; pv[count++] = tsv; pv[count++] = src; pv[count++] = test==29?goodod:od;
+                if (test != 0) { pv[count++] = "--chain-out"; pv[count++] = test==29?otherchain:chain; }
+                pv[count++] = "--snap"; pv[count++] = snap; pv[count] = 0;
+                rc = run(pv, root, out, sizeof out);
+            }
+            if (cx_fmt(label, sizeof label, "gate negative %d rc2 before any packing child", test)) return 2;
+            ck(rc == 2 && sy_exists(marker) != 1 && has(out, "REFUSE") &&
+                !has(out,"sources-sid-mismatch")&&(test==29?has(out,"pack input changed"):!has(out,"pack input changed"))&&
+                !has(out, "sha256sum --check"), label);
+        }
+      }
+    }
+    sy_printf("%s\tfailed=%d\n",gate_only?"CHECK_RELEASE_PACK_GATE":"CHECK_RELEASE_RUN",failed);
     return failed ? 1 : 0;
 }
