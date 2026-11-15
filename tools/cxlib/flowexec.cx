@@ -381,6 +381,13 @@ static void fl_kill_wait(fl_node *nd) {
     for (i = 0; i < 400 && sy_proc_try_wait(&nd->child, &st) == 0; i++) sy_sleep_ms(5);
 }
 
+/* external cancel hook: when set and it returns nonzero, fl_run kills every running node's process
+   group (state timeout, rc 130, note "cancelled") and skips what has not started. */
+static int (*fl_cancel_fn)(void) = 0;
+static int fl_cancelled = 0;
+void fl_set_cancel(int (*fn)(void)) { fl_cancel_fn = fn; fl_cancelled = 0; }
+int fl_was_cancelled(void) { return fl_cancelled; }
+
 int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo, fl_sum *sum) {
     fl_ctx x; char p[2600]; int i, j, running = 0, left = f->count, r; long end;
     if (jobs < 1) jobs = 1;
@@ -398,6 +405,8 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
     sum->ok = sum->fail = sum->timeout = sum->skip = 0; sum->max_running = 0;
     while (left > 0) {
         int progress = 0; long now = sy_now_ms(); int late = now >= end;
+        if (!fl_cancelled && fl_cancel_fn && fl_cancel_fn()) fl_cancelled = 1;
+        if (fl_cancelled) late = 1, end = now;
         /* reap, and enforce node and run bounds */
         for (i = 0; i < f->count; i++) {
             fl_node *nd = &f->n[i]; sy_exit_t st;
@@ -412,9 +421,10 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
             else if (late || now - nd->t0 >= nd->limit_ms) {
                 char note[96];
                 fl_kill_wait(nd);
-                if (late) fl_say(note,sizeof note, "run deadline %ld ms, process group killed", deadline_ms);
+                if (fl_cancelled) fl_say(note,sizeof note, "cancelled, process group killed");
+                else if (late) fl_say(note,sizeof note, "run deadline %ld ms, process group killed", deadline_ms);
                 else fl_say(note,sizeof note, "timeout_ms=%ld, process group killed", nd->limit_ms);
-                fl_finish(&x, nd, FL_TIMEOUT, 124, note);
+                fl_finish(&x, nd, FL_TIMEOUT, fl_cancelled ? 130 : 124, note);
             } else continue;
             running--; left--; progress = 1;
         }
@@ -430,6 +440,7 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
             if (bad >= 0 || late) {
                 char note[200];
                 if (bad >= 0) fl_say(note,sizeof note, "dep=%.100s:%s", f->n[bad].id, fl_state_name[f->n[bad].state]);
+                else if (fl_cancelled) fl_say(note,sizeof note, "cancelled before start");
                 else fl_say(note,sizeof note, "run deadline %ld ms reached before start", deadline_ms);
                 nd->state = FL_SKIP; nd->rc = -1;
                 fl_evt(&x, nd, FL_SKIP, 0, -1, note);

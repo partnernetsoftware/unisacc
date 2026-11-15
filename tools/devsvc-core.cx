@@ -61,6 +61,7 @@
 #pragma unisa use cxlib.flowexec
 #pragma unisa use cxlib.flowfile
 #pragma unisa use cxlib.flowdoc
+#pragma unisa use sys.sigwatch
 
 #define PW 1024
 #define MAXLOCK 64
@@ -601,6 +602,7 @@ static void node_sha(const char *rdir, fl_node *nd, char *dst, int cap) {
         free(b);
     }
 }
+static int cancel_hit(void) { return sy_sig_taken(SIGINT) + sy_sig_taken(SIGTERM) + sy_sig_taken(SIGHUP) > 0; }
 /* text 非空即内联节点表(写进 RUN/flow.tsv)。xmode:单条 exec,把节点 stdout/stderr 原样转出,返回节点退出码。 */
 static int flow_go(const char *root, const char *file, const char *text, const char *rdir_in, int jobs, long dl, int cat, long wait_ms, int xmode) {
     static fl_flow f; fl_sum s; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0;
@@ -624,8 +626,17 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     }
     nl = nheld;
     if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); fl_free(&f); return 2; }
-    r = fl_run(&f, rdir, jobs, dl, 0, &s);
-    lk_drop(root);
+    sy_sig_watch(SIGINT); sy_sig_watch(SIGTERM); sy_sig_watch(SIGHUP);
+    fl_set_cancel(cancel_hit);
+    { long t0c = sy_now_ms();
+      r = fl_run(&f, rdir, jobs, dl, 0, &s);
+      lk_drop(root);
+      if (fl_was_cancelled()) {   /* 客户端被 Ctrl-C/TERM/HUP:进程组已杀、锁已放,记事件后以 130 退出 */
+          char rq[400]; F(rq, sizeof rq, "emit\tx.cancelled\towner=%s ms=%ld nodes=%d run=%s", fl_owner, sy_now_ms() - t0c, f.count, rdir);
+          if (svc_on) request(root, rq, 0);
+          fprintf(stderr, "devsvc: CANCELLED owner=%s ms=%ld run=%s\n", fl_owner, sy_now_ms() - t0c, rdir);
+          fl_free(&f); return 130;
+      } }
     if (r < 0) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable (%d)\n", rdir, r); fl_free(&f); return 2; }
     F(p, sizeof p, "%s/events.tsv", rdir);
     if (sy_read_file(p, &eb, &en, 1 << 24) == 0 && eb) {

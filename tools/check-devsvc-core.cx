@@ -45,14 +45,14 @@ int main(void) {
     if (ovf) return 2;
     /* 夹具:克隆、放入工作副本三件、提交、链接产品 */
     {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-clone\n"); return 1; } }
-    {   const char *names[3] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv"}; int i;
-        for (i = 0; i < 3; i++) {
+    {   const char *names[4] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx"}; int i;
+        for (i = 0; i < 4; i++) {
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-core.fixture-copy\t%s\n", names[i]); if (b) free(b); return 1; }
             free(b);
         } }
-    {   char *v[] = {"git", "add", "tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add\n"); return 1; } }
+    {   char *v[] = {"git", "add", "tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add\n"); return 1; } }
     {   char *v[] = {"git", "-c", "user.name=dvcheck", "-c", "user.email=dvcheck@example.invalid", "commit", "-q", "-m", "fixture", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-commit\n"); return 1; } }
     {   char lk[400]; F(lk, sizeof lk, "%s/unisacc.com", fx); if (ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-product\n"); return 1; } }
     /* (1) 冷构造 */
@@ -66,6 +66,14 @@ int main(void) {
     {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
     ms_hot = sy_now_ms() - t0;
     ck(rc == 0 && has("pinned-ok") && ms_hot < 6000 && ms_hot * 2 < ms_cold + 1000, "hot-call-hits-cache");
+    /* (2b) 客户端被 INT:1 s 后杀客户端,2 s 内节点进程组清空,事件含 x.cancelled */
+    {   const char *sc = "sh ./unisacc.com tools/devsvc.cx -- start >/dev/null 2>&1; sh ./unisacc.com tools/devsvc.cx -- x -- sleep 47 2>cancel.err & C=$!; i=0; K=; S=;"
+            " while [ $i -lt 50 ] && [ -z \"$S\" ]; do sleep 0.1; i=$((i+1)); K=$(pgrep -P $C | head -1); [ -n \"$K\" ] && S=$(pgrep -P $K -x sleep | head -1); done;"
+            " sleep 1; kill -INT $K; sleep 2; if [ -n \"$S\" ] && ! pgrep -g $S >/dev/null; then echo GROUP_GONE; else echo GROUP_LEFT $S; [ -n \"$S\" ] && kill -9 -$S; fi; wait $C; echo CLIENT_RC=$?; cat cancel.err";
+        char *v[] = {"sh", "-c", (char *)sc, 0}; rc = run(v, fx, envv);
+        ck(rc == 0 && has("GROUP_GONE") && has("CLIENT_RC=130") && has("CANCELLED"), "client-int-kills-node-group");
+        {   char *ev[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "events", 0}; rc = run(ev, fx, envv); }
+        ck(has("x.cancelled"), "cancel-event-recorded"); }
     /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
     {   char p[400]; const char *bad = "# broken by check\nzzz-unknown\tfoo\tbar\nlib\tonly-one\n"; unsigned char *b = 0; int64_t n = 0;
         F(p, sizeof p, "%s/tools/devsvc-repo.tsv", fx);
