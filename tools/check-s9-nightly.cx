@@ -467,6 +467,26 @@ int main(int argc, char **argv) {
             ck(lines == s9_map_rows() && bad == 0, "map-real-dump-every-row-name-and-abs-path");
         }
         np_free(&r);
+        /* 负控(实跑):把 dump 换成一个「每行都是 REFUSED」的同格式输出,map 为空时 s9-nightly 必须以
+           init-materials 具名失败,而不是拿着空图继续跑整档。走 UNISACC_S9_MATERIALS_DUMP_SEAM,子进程仍是
+           真实的 tools/s9-nightly.cx,只是那一行命令换成了夹具。 */
+        {   char seam[4400], seam_src[4400]; char *neg[16]; int q2 = 0;
+            if (cx_fmt(seam_src, sizeof seam_src, "%s/tests/fixtures/s9-materials-dump-empty.cx", root)
+                || cx_fmt(seam, sizeof seam, "%s/seam.bin", dir)) die("fmt");
+            {   char *cc2[] = {"sh", com, seam_src, "-o", seam, 0};
+                if (np_run(cc2, root, 0, 40, &r, why, sizeof why)) die("seam-compile"); }
+            neg[q2++] = "sh"; neg[q2++] = com; neg[q2++] = tool; neg[q2++] = "--";
+            neg[q2++] = root; neg[q2++] = runp; neg[q2++] = "--tier"; neg[q2++] = "commit";
+            neg[q2++] = "--date"; neg[q2++] = "2026-11-14"; neg[q2++] = "--phase"; neg[q2++] = "init";
+            neg[q2] = 0;
+            setenv("UNISACC_S9_MATERIALS_DUMP_SEAM", seam, 1);
+            {   char *rmn[] = {"rm", "-rf", "--", runp, 0};   /* 上一次真实 dump 已把 run 目录建出来,这里要重构一份 */
+                runv(rmn, dir, 5, buf, sizeof buf, &rc); }
+            runv(neg, dir, 30, buf, sizeof buf, &rc);
+            unsetenv("UNISACC_S9_MATERIALS_DUMP_SEAM");
+            ck(rc == 1 && strstr(buf, "step=init-materials") && strstr(buf, "materials-map-empty"), "map-empty-dump-refused-by-name");
+            ck(rc == 1 && !strstr(buf, "status=PASS"), "map-empty-dump-not-a-pass");
+        }
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
