@@ -12,6 +12,7 @@
  *
  * 子阶段(0.0.57,每次调用独立有界、可重复,调用方循环到非 PENDING):
  *   ROOT RUN --tier T --phase init                 薄入口依次运行下列同一帮手
+ *   ROOT RUN --tier T --phase build-shards|build-waves 独立构造；build 依序薄入口
  *   ROOT RUN --tier T --phase build|map|init-session|prepare-1..6
  *   ROOT RUN --tier T --phase map-register-N       第N个材料登记(六prepare后；N从1起)
  *   ROOT RUN --tier T --phase map --map-family NAME 每材料族独立准备；全部族完成后 --phase map 聚合封口。
@@ -143,8 +144,64 @@ static int materials_map(char *map, long cap, char *why, int whycap) {
     return 0;
 }
 static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到该路径(不受 out 缓冲截断) */
+/* Native images belong to this session's sidecar, migrated with the init receipts.
+ * Each leaf has one total 50s construction bound; no nested two-image build.
+ * Receipts bind current inputs AND image bytes, never a test result. */
+static int init_identity(const char *tier, int mapped, char hex[65]);
+static const char *native_tier;
+static int native_image(int waves, int build, char bin[4800]) {
+    char state[4600], inside[4600], rec[4840], source[4400], product[4400];
+    char input[65], after[65], hash[65], body[256];
+    const char *leaf = waves ? "build-waves" : "build-shards";
+    size_t z; char *saved; int rc;
+    long started = sy_now_ms();
+    if (cx_fmt(state,sizeof state,"%s.nightly-init",s9run) ||
+        cx_fmt(inside,sizeof inside,"%s/.nightly-init",s9run)) return -1;
+    if (sy_exists(inside)==1 && cx_fmt(state,sizeof state,"%s",inside)) return -1;
+    if (build && sy_exists(state)!=1 && mkdir(state,0700)) return -1;
+    if (cx_fmt(bin,4800,"%s/%s.bin",state,leaf) || cx_fmt(rec,sizeof rec,"%s/%s.native",state,leaf) ||
+        init_identity(native_tier,0,input)) return -1;
+    if (sy_exists(rec)==1) {
+        if (as_sha_file(bin,1,hash,0,why,sizeof why) || sy_access(bin,1)) return -1;
+        if (cx_fmt(body,sizeof body,"S9NATIVE-v1\t%s\t%s\n",input,hash)) return -1;
+        saved=as_read(rec,0,&z,why,sizeof why);
+        rc=saved && z==strlen(body) && !memcmp(saved,body,z); free(saved);
+        if (!rc) { cx_fmt(why,sizeof why,"native-identity-changed %s",leaf); return -1; }
+        if(build) printf("S9_INIT\tphase=%s\tstatus=SKIP\n",leaf);
+        return 0;
+    }
+    if (!build) { cx_fmt(why,sizeof why,"missing-native %s",leaf); return -1; }
+    np_result r={0};
+    if(fake) {
+        char *v[]={(char *)fake,"build",root,s9run,(char *)leaf,0};
+        int left=(int)((49000-(sy_now_ms()-started))/1000);
+        rc=left>0?run_step(v,root,left,&r):124;
+        if(!rc) { saved=as_read(fake,1,&z,why,sizeof why); if(!saved)rc=-1;
+            else {rc=cx_write(bin,saved,z);free(saved);if(!rc)rc=chmod(bin,0700);} }
+    } else {
+        if(cx_fmt(source,sizeof source,"%s/tools/%s.cx",root,waves?"all-waves":"s9-shards") ||
+            cx_fmt(product,sizeof product,"%s/unisacc.com",root)) return -1;
+        char *v[]={"sh",product,source,"-o",bin,0};
+        int left=(int)((49000-(sy_now_ms()-started))/1000);
+        rc=left>0?run_step(v,root,left,&r):124;
+    }
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    if(r.residue)rc=rc?rc:1;
+    np_free(&r);
+    if(rc || sy_now_ms()-started>=50000) return rc?rc:124;
+    if(init_identity(native_tier,0,after)||strcmp(input,after)||as_sha_file(bin,1,hash,0,why,sizeof why)||sy_access(bin,1))return -1;
+    if(sy_now_ms()-started>=50000)return 124;
+    if(cx_fmt(body,sizeof body,"S9NATIVE-v1\t%s\t%s\n",input,hash)||cx_write(rec,body,strlen(body)))return -1;
+    printf("S9_INIT\tphase=%s\tstatus=DONE\n",leaf);return 0;
+}
+static int native_exec(char bin[4800]) {
+    char waves[4800];
+    if(native_image(0,0,bin)||native_image(1,0,waves))return -1;
+    if(sy_setenv("UNISACC_ALL_WAVES_NATIVE",waves,1)||sy_setenv("S9_ALLWAVES_ELF",waves,1))return -1;
+    return 0;
+}
 static int invoke(const char *verb, const char *a1, const char *a2, const char *a3, int sec, char *out, int ocap) {
-    char com[4400], tool[4400];
+    char tool[4800];
     char *v[16];
     int k = 0, rc;
     long t0 = sy_now_ms();
@@ -160,9 +217,8 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         v[k] = 0;
         rc = run_step(v, root, sec, &r);
     } else {
-        if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
-            cx_fmt(tool, sizeof tool, "%s/tools/s9-native.cx", root)) die("path", 0);
-        v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--";
+        if (native_exec(tool)) return -1;
+        v[k++] = tool;
         v[k++] = (char *)verb;
         if (a1) v[k++] = (char *)a1;
         if (a2) v[k++] = (char *)a2;
@@ -193,7 +249,7 @@ static void par_free(ParJob *j) { free(j->out.p); j->out.p = 0; j->out.n = j->ou
 /* DEADLINE_S is the child's own bound, enforced by par_drain (kill its group and rc 124): it is carried here so
    the spawn and the wait agree on one number, and so the spawn block itself names the bound it is under. */
 static int par_spawn(ParJob *j, const char *verb, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, int deadline_s) {
-    char com[4400], tool[4400];
+    char tool[4800];
     char *v[16];
     int k = 0;
     j->pid = 0; j->fd = -1; j->out.p = 0; j->out.n = 0; j->out.cap = 0; j->t0 = sy_now_ms(); j->deadline_s = deadline_s;
@@ -205,9 +261,8 @@ static int par_spawn(ParJob *j, const char *verb, const char *a1, const char *a2
         if (a4) v[k++] = (char *)a4;
         if (a5) v[k++] = (char *)a5;
     } else {
-        if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
-            cx_fmt(tool, sizeof tool, "%s/tools/s9-native.cx", root)) return -1;
-        v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; v[k++] = (char *)verb;
+        if (native_exec(tool)) return -1;
+        v[k++] = tool; v[k++] = (char *)verb;
         if (a1) v[k++] = (char *)a1;
         if (a2) v[k++] = (char *)a2;
         if (a3) v[k++] = (char *)a3;
@@ -293,8 +348,13 @@ static void write_report(const char *path, const char *status) {
  * build -> map -> init-session -> prepare-1..6；每次显式子相只运行一相。
  * RUN 不存在时用 RUN.nightly-init (0700)，init 后原子迁入 RUN/.nightly-init。
  * 每相前后重新读取内容身份；身份不符硬拒绝，不能把旧构造算作成功。 */
-static const char *init_names[73] = {"build", "map", "init-session", "prepare-1", "prepare-2", "prepare-3", "prepare-4", "prepare-5", "prepare-6"};
-static char init_material_names[64][32];
+static const char *init_names[] = {"build", "map", "init-session", "prepare-1", "prepare-2", "prepare-3", "prepare-4", "prepare-5", "prepare-6"};
+static const char *init_name(int n) {
+    static char material[48];
+    if(n<9)return init_names[n];
+    if(cx_fmt(material,sizeof material,"map-register-%d",n-8))die("phase-name",0);
+    return material;
+}
 static const char *init_preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
 static char init_state[4600], init_side[4600];
 static long init_t0;
@@ -331,8 +391,8 @@ static int init_identity(const char *tier, int mapped, char hex[65]) {
 }
 static int init_receipt(int n, const char *identity, int write_it) {
     char p[4800], pending[4840], body[256]; size_t z; char *saved; int ok;
-    if (cx_fmt(p, sizeof p, "%s/%s.done", init_state, init_names[n]) ||
-        cx_fmt(body, sizeof body, "S9INIT-v1\t%s\t%s\n", init_names[n], identity)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/%s.done", init_state, init_name(n)) ||
+        cx_fmt(body, sizeof body, "S9INIT-v1\t%s\t%s\n", init_name(n), identity)) return -1;
     if (write_it) {
         if (cx_fmt(pending, sizeof pending, "%s.pending-%ld", p, (long)getpid()) || cx_write(pending, body, strlen(body))) return -1;
         return rename(pending, p);
@@ -340,7 +400,7 @@ static int init_receipt(int n, const char *identity, int write_it) {
     if (sy_exists(p) != 1) return 0;
     saved = as_read(p, 0, &z, why, sizeof why); if (!saved) return -1;
     ok = z == strlen(body) && !memcmp(saved, body, z); free(saved);
-    if (!ok) { cx_fmt(why, sizeof why, "identity-changed %s", init_names[n]); return -1; }
+    if (!ok) { cx_fmt(why, sizeof why, "identity-changed %s", init_name(n)); return -1; }
     return 1;
 }
 /* 一个材料一相，避免登记持有同一会话写锁的子进程并发。 */
@@ -348,7 +408,7 @@ static int init_material_count(void) {
     size_t z, i; int n = 0; char *s = as_read(mappath, 0, &z, why, sizeof why);
     if (!s) return -1;
     for (i = 0; i < z; i++) if (s[i] == '\n') n++;
-    free(s); return n <= 64 ? n : -1;
+    free(s); return n;
 }
 static int init_materials(int wanted, const char *run, char *out, int cap) {
     size_t z; char *s = as_read(mappath, 0, &z, why, sizeof why), *at;
@@ -433,6 +493,28 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     if(!seal){free(all.p);for(int i=0;i<map_planned_n;i++)if(!strcmp(family,map_planned[i]))return 0;return 2;}
     int rc=s9_map_from_dump(all.p?all.p:"",all.n,mapfile,sizeof mapfile,why,sizeof why);free(all.p);
     if(rc||!s9_map_rows())return 1;
+    /* Keep receipted family dumps byte-for-byte; canonicalize only the sealed
+     * session map. allsession rejects symlinks/non-real paths (e.g. /usr/bin/ar).
+     * Non-path SHA values remain exact and the pure s9map parser stays pure. */
+    np_buf canonical={0}; char *at=mapfile;
+    while(*at) {
+        char *end=strchr(at,'\n'),*tab=strchr(at,'\t'),resolved[4400];
+        if(!end||!tab||tab>end){free(canonical.p);return 1;}
+        *end=0;
+        np_put(&canonical,at,(size_t)(tab-at+1));
+        if(tab[1]=='/') {
+            if(sy_realpath(tab+1,resolved,sizeof resolved)<0) {
+                fprintf(stderr,"s9-nightly: REFUSE material-realpath %s\n",tab+1);
+                cx_fmt(why,sizeof why,"REFUSE material-realpath %s",tab+1);
+                free(canonical.p);return 1;
+            }
+            np_puts(&canonical,resolved);
+        } else np_puts(&canonical,tab+1);
+        np_puts(&canonical,"\n");at=end+1;
+    }
+    if(canonical.n>=sizeof mapfile){free(canonical.p);return 1;}
+    if(mm_copy(mapfile,sizeof mapfile,canonical.p,canonical.n)){free(canonical.p);return 1;}
+    mapfile[canonical.n]=0;free(canonical.p);
     return cx_write(mappath,mapfile,strlen(mapfile));
 }
 static int init_one(int n, const char *run, const char *tier, int reuse, char *out, int cap) {
@@ -449,7 +531,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
         if (n > 0 && init_identity(tier, 0, base)) return -1;
         for (j = 0; j < n; j++) {
             if (init_receipt(j, j == 0 ? base : before, 0) != 1) {
-                cx_fmt(why, sizeof why, "prerequisite %s", init_names[j]); return -1;
+                cx_fmt(why, sizeof why, "prerequisite %s", init_name(j)); return -1;
             }
         }
         if (n == 1 && sy_exists(mappath) == 1) {
@@ -457,10 +539,18 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
             rc = init_receipt(n, predecessor, 0);
         } else rc = init_receipt(n, before, 0);
         if (rc < 0) return -1;
-        if (rc == 1) { note(init_names[n]); printf("S9_INIT\tphase=%s\tstatus=SKIP\n", init_names[n]); return 0; }
+        if (rc == 1) {
+            if(n==0) { char bin[4800];if(native_image(0,0,bin)||native_image(1,0,bin))return -1; }
+            note(init_name(n)); printf("S9_INIT\tphase=%s\tstatus=SKIP\n", init_name(n)); return 0;
+        }
     }
     if (init_left() < 1) return 124;
-    if (n == 0) rc = invoke("build", 0, 0, 0, init_left(), out, cap);
+    if (n == 0 && fake && !reuse) rc=invoke("build",0,0,0,init_left(),out,cap);
+    else if (n == 0) {
+        char bin[4800];
+        rc=native_image(0,1,bin);
+        if(!rc)rc=native_image(1,1,bin);
+    }
     else if (n == 1) {
         if (fake) rc = cx_write(mappath, "", 0);
         else if(sy_env("UNISACC_S9_MATERIALS_DUMP_SEAM")) { map_budget=init_left();rc=materials_map(mapfile,sizeof mapfile,why,sizeof why);map_budget=0; }
@@ -476,10 +566,10 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
     } else {
         rc = invoke("prepare", root, run, init_preps[n - 3], init_left(), out, cap);
     }
-    note(init_names[n]); if (rc) return rc;
+    note(init_name(n)); if (rc) return rc;
     if (reuse) {
         if (init_identity(tier, n > 0, after)) return -1;
-        if (n != 1 && strcmp(before, after)) { cx_fmt(why, sizeof why, "identity changed during %s", init_names[n]); return -1; }
+        if (n != 1 && strcmp(before, after)) { cx_fmt(why, sizeof why, "identity changed during %s", init_name(n)); return -1; }
         if (n == 1) {
             /* 允许本相新建映射，但候选、源码等输入不能随之变化。 */
             if (init_identity(tier, 0, predecessor)) return -1;
@@ -491,7 +581,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
         }
         if (init_receipt(n, after, 1)) return -1;
     }
-    printf("S9_INIT\tphase=%s\tstatus=DONE\n", init_names[n]); return 0;
+    printf("S9_INIT\tphase=%s\tstatus=DONE\n", init_name(n)); return 0;
 }
 
 int main(int argc, char **argv) {
@@ -500,7 +590,7 @@ int main(int argc, char **argv) {
     char report[4400], tmp[4000], datebuf[32], aggout[4400];
     static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate", "-build", "-map", "-init-session", "-prepare-1", "-prepare-2", "-prepare-3", "-prepare-4", "-prepare-5", "-prepare-6"};
     int i, rc, steps, max_steps = 4, step_s = L_I("s9.step.max"), step_done = 0;
-    int init_part;
+    int init_part, material_phase=0;
     if (argc < 3) die("usage", "ROOT RUN --tier commit|daily|release [--date D] [--fake SCRIPT]");
     if (sy_realpath(argv[1], root, sizeof root) < 0) die("root", argv[1]);
     run = argv[2];
@@ -526,6 +616,8 @@ int main(int argc, char **argv) {
             else if (!strcmp(ph, "steps")) phase = 2;
             else if (!strcmp(ph, "aggregate")) phase = 3;
             else if (!strcmp(ph, "build")) phase = 4;
+            else if (!strcmp(ph, "build-shards")) phase = 100;
+            else if (!strcmp(ph, "build-waves")) phase = 101;
             else if (!strcmp(ph, "map")) phase = 5;
             else if (!strcmp(ph, "init-session")) phase = 6;
             else if (!strcmp(ph, "prepare-1")) phase = 7;
@@ -535,9 +627,9 @@ int main(int argc, char **argv) {
             else if (!strcmp(ph, "prepare-5")) phase = 11;
             else if (!strcmp(ph, "prepare-6")) phase = 12;
             else if (!strncmp(ph, "map-register-", 13)) {
-                int mat = atoi(ph + 13); char canonical[32];
-                if (mat < 1 || mat > 64 || cx_fmt(canonical, sizeof canonical, "map-register-%d", mat) || strcmp(canonical, ph)) die("phase", ph);
-                phase = 12 + mat;
+                char *end; long mat=strtol(ph+13,&end,10); char canonical[48];
+                if (*end || mat < 1 || mat > 2147483638L || cx_fmt(canonical, sizeof canonical, "map-register-%ld", mat) || strcmp(canonical, ph)) die("phase", ph);
+                material_phase=(int)mat; phase=13;
             }
             else die("phase", ph);
         }
@@ -565,8 +657,10 @@ int main(int argc, char **argv) {
         size_t rn = sl > 0 ? (size_t)sl : 0;
         if (rn >= sizeof rd) die("report", 0);
         if (rn) { if (mm_copy(rd, (long)sizeof rd, run, (long)rn)) die("report", 0); rd[rn] = 0; } else { rd[0] = '.'; rd[1] = 0; }
-        if (phase >= 13) {
-            if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s-map-register-%d.md", rd, date, tier, phase - 12)) die("report", 0);
+        if (phase == 100 || phase == 101) {
+            if(cx_fmt(report,sizeof report,"%s/s9-nightly-%s-%s-%s.md",rd,date,tier,phase==100?"build-shards":"build-waves"))die("report",0);
+        } else if (phase >= 13) {
+            if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s-map-register-%d.md", rd, date, tier, material_phase)) die("report", 0);
         } else if (cx_fmt(report, sizeof report, "%s/s9-nightly-%s-%s%s.md", rd, date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
     }
     if (resume) {
@@ -586,6 +680,13 @@ int main(int argc, char **argv) {
             }
         }
     }
+    native_tier=tier;
+    if(phase==100||phase==101) {
+        char bin[4800];int nr=native_image(phase==101,1,bin);
+        if(nr)fprintf(stderr,"s9-nightly: %s\n",why);
+        printf("S9_NIGHTLY\tstatus=%s\tstep=%s\trc=%d\n",nr?"FAIL":"INIT_PHASE_DONE",phase==100?"build-shards":"build-waves",nr);
+        return nr?1:0;
+    }
     if(map_family) {
         if(phase!=5||fake)die("map-family","requires real --phase map");
         long t0=sy_now_ms();int mr=map_family_phase(run,tier,map_family,0);
@@ -596,13 +697,14 @@ int main(int argc, char **argv) {
     note(resume ? "resume" : "begin");
     if (!resume) {
         int init_total = 9, mi;
-        for (mi = 0; mi < 64; mi++) {
-            if (cx_fmt(init_material_names[mi], sizeof init_material_names[mi], "map-register-%d", mi + 1)) die("phase", 0);
-            init_names[9 + mi] = init_material_names[mi];
+        if (material_phase) {
+            if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run))die("map-path",0);
+            mi=init_material_count();
+            if(mi<0||material_phase>mi)die("phase-material-missing",why);
+            init_total=9+material_phase;
         }
-        if (phase >= 13) init_total = phase - 3;
         for (init_part = 0; init_part < init_total; init_part++) {
-            if (phase >= 4 && init_part != phase - 4) continue;
+            if (phase >= 4 && init_part != (material_phase ? material_phase+8 : phase-4)) continue;
             tmp[0] = 0; why[0] = 0;
             if(init_part==1&&phase<4&&!fake&&!sy_env("UNISACC_S9_MATERIALS_DUMP_SEAM")) {
                 int nf=map_families_load();if(nf<0)die("map-families",why);
@@ -613,7 +715,7 @@ int main(int argc, char **argv) {
                 if (tmp[0]) fprintf(stderr, "s9-nightly: %s\n", tmp);
                 fprintf(stderr, "s9-nightly: %s\n", why);
                 fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=%s\trc=%d\treport=%s\n", init_names[init_part], rc, report);
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=%s\trc=%d\treport=%s\n", init_name(init_part), rc, report);
                 return 1;
             }
             pass_n++;
