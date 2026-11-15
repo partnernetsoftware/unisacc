@@ -376,33 +376,39 @@ int main(int argc, char **argv) {
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
-    /* 六个 prepare 各自独立编译,互不读写同一个文件:一起起、按序收(Q1)。合同(比串行更严,不是放宽):
-       (1) 任一 prepare 失败,立刻杀掉其余仍在跑的 prepare(各整组);
-       (2) 被杀的不记 PASS、产物不复用,在报告里逐条记 NOT_RUN;
-       (3) prepare 这一相整体失败,init 不进 step/aggregate,rc 非零。 */
-    {   ParJob pj[6]; int pi;
+    /* 六个 prepare 只能串行,不是保守而是 s9-shards 的合同:每个 prepare 都要拿会话的排他写锁
+       (as_lock(sd,1)),并行起时后起的直接 REFUSE run-busy session-busy(实测,证据见提交说明)。
+       想并行得先让 s9-shards 支持每相独立会话,那是它的改动,不在编排里绕。
+       失败合同仍按「失败即停、后面不跑、报告逐条具名」办(与 Q1 前的语义一致)。 */
+    {   int pi;
         for (pi = 0; pi < 6; pi++) {
-            if (par_spawn(&pj[pi], "prepare", root, run, preps[pi], 0, 0, L_I("s9.cmd"))) {
-                int q, bad = pi;
-                for (q = 0; q < bad; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(preps[q]); }
-                fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\treason=cannot-start\treport=%s\n", preps[pi], report);
-                return 1;
-            }
-        }
-        for (pi = 0; pi < 6; pi++) {
-            int prc = -1, dr = par_drain(&pj[pi], &prc), q;
-            if (dr || prc != 0) {
-                note(preps[pi]);   /* the failing one keeps its own line and rc */
-                for (q = pi + 1; q < 6; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(preps[q]); }
-                par_free(&pj[pi]);
-                fail_n++; write_report(report, "FAIL");
-                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[pi], prc, report);
-                return 1;
-            }
+            const char *nm = preps[pi];
+            rc = invoke("prepare", root, run, preps[pi], L_I("s9.cmd"), tmp, sizeof tmp);
             note(preps[pi]);
+            if (rc != 0) {
+                /* 子进程自己的话是唯一能定因的证据:4 KiB 尾部,走 stderr,报告保持报告 */
+                if (tmp[0]) fprintf(stderr, "s9-nightly: %s rc=%d\n%.*s\n", nm, rc, (int)tx_len(tmp, (long)sizeof tmp), tmp);
+                for (pi++; pi < 6; pi++) note_not_run(preps[pi]);
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", nm, rc, report);
+                return 1;
+            }
             pass_n++;
-            par_free(&pj[pi]);
+        }
+    }
+    {   int pi;
+        for (pi = 0; pi < 6; pi++) {
+            rc = invoke("prepare", root, run, preps[pi], L_I("s9.cmd"), tmp, sizeof tmp);
+            note(preps[pi]);
+            if (rc != 0) {
+                /* 子进程自己的话是唯一能定因的证据:4 KiB 尾部,走 stderr,报告保持报告 */
+                if (tmp[0]) fprintf(stderr, "s9-nightly: %s rc=%d\n%.*s\n", preps[pi], rc, (int)tx_len(tmp, (long)sizeof tmp), tmp);
+                for (pi++; pi < 6; pi++) note_not_run(preps[pi]);
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[pi], rc, report);
+                return 1;
+            }
+            pass_n++;
         }
     }
     /* 映射里的每个材料也要在会话里登记并装配:s9-shards 的 prepare material NAME 就是这一相。它必须在
