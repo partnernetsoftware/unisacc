@@ -6,6 +6,7 @@
  *   产品用符号链接指向本检出的产品;固定版本缓存目录与实例目录都在 /tmp/dvcore-<pid>-* 下,不碰真实缓存与实例。
  * 断言:(1)首次调用(冷构造)成功且 stderr 没有"using the working copy";(2)第二次调用命中缓存(远快于冷构造);
  *   (3)把夹具工作副本的核心改成语法错后,普通调用仍成功(用的是 HEAD 版本);(4)--dev 走工作副本,在语法错下失败。
+ * 分组:--cases a(冷构造、缓存、取消、后台作业)|b(配置表、锁租约、坏工作副本)|c(版本工作树、第二克隆)|d(内容键退回);无参数四组顺序全跑。
  * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC_CORE<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
@@ -36,14 +37,15 @@ static int run(char **v, const char *cwd, char *const *env) {
 }
 static int has(const char *s) { return strstr(out, s) != 0; }
 
-int main(void) {
-    char *envv[4]; char e1[220], e2[220]; long t0, ms_cold, ms_hot; int rc;
+/* 分组:a 冷构造与缓存、取消与后台作业;b 配置表、锁租约、坏工作副本;c 版本工作树、第二克隆、内容键退回。各组独立夹具、固定版本缓存与实例目录 */
+static int group(int g) {
+    char *envv[4]; char e1[220], e2[220]; long t0, ms_cold = 0, ms_hot = 0; int rc;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 固定私有副本 ~/.cache/unisacc/check-devsvc-core/<仓根 FNV-1a 64>/:跨次复用夹具与产品 -run 编译缓存;flock 防并跑 */
         const char *home = sy_env("HOME"); unsigned long long hh = 1469598103934665603ULL; long q; char lkp[400]; int lfd;
         if (!home) return 2;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
-        F(dbase, sizeof dbase, "%s/.cache/unisacc/check-devsvc-core/%016llx", home, hh);
+        F(dbase, sizeof dbase, "%s/.cache/unisacc/check-devsvc-core/%016llx-%c", home, hh, g);
         F(fx, sizeof fx, "%s/fx", dbase); F(pin, sizeof pin, "%s/pin", dbase); F(inst, sizeof inst, "%s/inst", dbase);
         F(lkp, sizeof lkp, "%s/.lock", dbase);
         if (ovf) return 2;
@@ -70,6 +72,7 @@ int main(void) {
     {   char *v[] = {"git", "add", "tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx", "tools/cxlib/flowfile.cx", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add\n"); return 1; } }
     {   char *v[] = {"git", "-c", "user.name=dvcheck", "-c", "user.email=dvcheck@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-commit\n"); return 1; } }
     {   char lk[400]; F(lk, sizeof lk, "%s/unisacc.com", fx); unlink(lk); if (ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-product\n"); return 1; } }
+    if (g == 'a') {
     /* (1) 冷构造 */
     t0 = sy_now_ms();
     {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
@@ -100,6 +103,8 @@ int main(void) {
         ck(has("WAIT_RC=0"), "wait-gets-rc");
         ck(has("EVENT_GOT"), "events-wait-job-done");
         ck(has("LOCK_HELD") && has("FLOW_RC=0") && has("LOCK_FREED"), "bg-lock-released"); }
+    }
+    if (g == 'b') {
     /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
     {   char p[400]; const char *bad = "# broken by check\nzzz-unknown\tfoo\tbar\nlib\tonly-one\n"; unsigned char *b = 0; int64_t n = 0;
         F(p, sizeof p, "%s/tools/devsvc-repo.tsv", fx);
@@ -129,6 +134,8 @@ int main(void) {
         rc = run(a4, fx, envv); ck(rc == 0 && has("renewed") && !has("expires_in_s=5\n"), "lock-renew-does-not-shorten");
         rc = run(r3, fx, envv); ck(rc == 0 && has("released"), "lock-release-after-renew-ok");
         (void)run(st, fx, envv); }
+    }
+    if (g == 'c') {
     /* (7) 版本工作树:git worktree 内只有指向产品的符号链接,普通调用可用(按工作树顶层取 HEAD 配置表) */
     {   char wt[200], lk[300]; F(wt, sizeof wt, "%s-wt", fx); F(lk, sizeof lk, "%s/unisacc.com", wt);
         {   char *v[] = {"git", "worktree", "add", "-q", "--detach", wt, 0}; rc = run(v, fx, 0); }
@@ -154,10 +161,13 @@ int main(void) {
         ck(rc == 0 && has("c2-ok") && ms2 < 3000, "second-clone-hits-cache");
         if (ms2 >= 3000) printf("NOTE\tsecond-clone-ms\t%ld\n", ms2);
         {   char *v[] = {"rm", "-rf", fx2, 0}; (void)run(v, 0, 0); } }
+    }
+    if (g == 'd') {
     /* (9) HEAD 里没有服务源(git init 未提交)时退回工作副本:按内容取键缓存在 pinned/wc-<键>/,各根共用;
      *     第二个根首调用命中(小于 3 s,不新增键);改服务源内容后换键重编 */
     {   char w1[200], w2[200], c[1600]; long t1, ms; int k0 = -1, k1 = -1, k2 = -1, i; char *q;
-        char *ls[] = {"ls", "-1", pin, 0};
+        char *ls[] = {"ls", "-1", pin, 0}; char *mk[] = {"mkdir", "-p", pin, 0};
+        if (run(mk, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-pin-dir\n"); return 1; }
         F(w1, sizeof w1, "%s-w1", fx); F(w2, sizeof w2, "%s-w2", fx);
         for (i = 0; i < 2; i++) {
             char *sv[] = {"sh", "-c", c, 0}; const char *w = i ? w2 : w1;
@@ -190,6 +200,8 @@ int main(void) {
             ck(okr && k0 == k2 + 1, "wc-fallback-source-change-rebuilds"); }
 #undef NWC
         {   char *v[] = {"rm", "-rf", w1, w2, 0}; (void)run(v, 0, 0); } }
+    }
+    if (g == 'b') {
     /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
     {   char p[400]; const char *junk = "\n@@ this is not valid cx @@\n"; unsigned char *b = 0; int64_t n = 0; unsigned char *nb;
         F(p, sizeof p, "%s/tools/devsvc-core.cx", fx);
@@ -203,9 +215,29 @@ int main(void) {
     /* (4) --dev 走工作副本,语法错下失败 */
     {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "x", "--par", "1", "--", "echo", "dev-ok", 0}; rc = run(v, fx, envv); }
     ck(rc != 0 && !has("dev-ok"), "dev-flag-uses-working-copy");
+    }
     /* 清理 */
     {   char *v2[] = {"rm", "-rf", pin, 0}; char *v3[] = {"rm", "-rf", inst, 0};   /* 夹具 fx 保留供下次复用 */
         (void)run(v2, 0, 0); (void)run(v3, 0, 0); }
-    printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *sel = "abcd"; const char *p; int rc = 0;
+    {   /* 剥掉调用方环境里的 DEVSVC_*(如 flow 或 shell 里的 DEVSVC_OWNER 与服务句柄),夹具子进程不继承 */
+        extern char **environ; char **e; char nm[80]; int i;
+        for (e = environ; e && *e; ) {
+            if (strncmp(*e, "DEVSVC_", 7) == 0) {
+                for (i = 0; (*e)[i] && (*e)[i] != '=' && i < 78; i++) nm[i] = (*e)[i];
+                nm[i] = 0; unsetenv(nm); e = environ;
+            } else e++;
+        } }
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) sel = argv[2];
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d]\n"); return 2; }
+    for (p = sel; *p; p++) {
+        if (*p != 'a' && *p != 'b' && *p != 'c' && *p != 'd') { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d]\n"); return 2; }
+        { int r = group(*p); if (r > rc) rc = r; }
+    }
+    printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : rc;
 }
