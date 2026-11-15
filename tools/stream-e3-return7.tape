@@ -22,7 +22,7 @@ main:
   .frame 8
   store64 [r7+0], r6
   mov r6, r7
-  .frame      0
+  .frame         0
   imm r0, 7
   .frame 8
   .st [r7+0], r0, 4

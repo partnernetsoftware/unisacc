@@ -4,11 +4,21 @@
  * (ORES frm W) that is back-filled right-aligned with the frame size at function end (OFILL frm t W).  The
  * template has no separator of its own, so the slot must be wider than the widest size it may carry: with W=7 a
  * frame of 1000000..9999999 bytes filled the whole slot and produced ".frame1000000" (tape: unknown opcode;
- * encoder: "an op outside the first encoder slice").  W=10 carries up to 999999999 (below the imm32 limit of
- * the frame instruction); anything larger is refused by the fill itself ("field overflow").
+ * encoder: "an op outside the first encoder slice").  The slot is 10 wide and the fill writes the last 9 columns
+ * only (ALUI add frm,frm,1 then OFILL frm t 9): the first column always stays blank, so a frame up to 999999999
+ * is carried and anything of ten digits or more is refused by the fill itself ("field overflow").  A fill of
+ * the whole 10 columns would let a ten-digit frame (1000000000..2147483647) swallow the separator again.
+ * Second defect: globals are marked in the LOC cell of an identifier by the constant GMARK and locals keep
+ * their frame offset in the same cell; with GMARK = 900000 a local whose frame offset is exactly 900000 was
+ * taken for a global ("not covered: address or target declaration").  GMARK is 2000000000 now, above every
+ * frame the slot can carry; the value is repeated in k2-call.tsv and k2-librarydata.tsv by hand.
  * Cases:
- *   table-*    exec/parse2/control-result.tsv reserves and fills the same slot once each, width 10, and the
- *              prologue text in exec/facts/k2-control.tsv still ends in ".frame" (so the slot supplies the space);
+ *   table-*    exec/parse2/control-result.tsv reserves the slot once (width 10) and fills it once (9 columns
+ *              after one blank); the prologue text in exec/facts/k2-control.tsv still ends in ".frame" (so the
+ *              slot supplies the space); every copy of GMARK is 2000000000 and none is 900000;
+ *   overflow-ten-digit  a 2147483000-byte frame is refused with "field overflow" (any version);
+ *   offset-900000-*     a local at frame offset 900000 (one 900000-byte array; the second of two 450000-byte
+ *              arrays) compiles and runs; UNVERIFIED on a product older than 0.0.69, like large-*;
  *   small      a 17600-byte frame compiles and runs with the product in use (any version);
  *   overflow   a 1000000000-byte frame is refused with "field overflow" (any version);
  *   large-*    a 256x4400 two-dimensional automatic array and a 1000000-byte array compile and run correctly.
@@ -41,6 +51,9 @@ static int has(const char *out, int cap, const char *want) { return tx_find(out,
 #define SRC_2D    "int main(void) { char paths[256][4400]; int i = 255; paths[i][4399] = 9; paths[1][0] = 97; paths[0][0] = 3; printf(\"L %d %d %d\\n\", paths[i][4399], paths[1][0], paths[0][0]); return 0; }"
 #define SRC_1D    "int main(void) { char p[1000000]; p[999999] = 11; p[0] = 13; printf(\"M %d %d\\n\", p[999999], p[0]); return 0; }"
 #define SRC_HUGE  "int main(void) { char p[1000000000]; p[0] = 1; return p[0] != 1; }"
+#define SRC_HUGE2 "int main(void) { char p[2147483000]; p[0] = 1; return p[0] != 1; }"
+#define SRC_MARK1 "int main(void) { char a[900000]; a[0] = 3; printf(\"N %d\\n\", a[0]); return 0; }"
+#define SRC_MARK2 "int main(void) { char b[450000]; char a[450000]; a[0] = 3; b[0] = 5; printf(\"O %d %d\\n\", a[0], b[0]); return 0; }"
 
 static void probe(const char *dir, const char *name, const char *src, char *out, int cap) {
     char script[6000];
@@ -55,8 +68,12 @@ int main(void) {
     if (!dir[0] || dir[0] != '/') die("no temporary directory");
 
     sh("grep -c '\\[\"ORES\",\"frm\",' exec/parse2/control-result.tsv; grep -c '\\[\"ORES\",\"frm\",10\\]' exec/parse2/control-result.tsv; "
-       "grep -c '\\[\"OFILL\",\"frm\",' exec/parse2/control-result.tsv; grep -c '\\[\"OFILL\",\"frm\",\"t\",10\\]' exec/parse2/control-result.tsv; echo END", out, sizeof out);
-    ck(has(out, sizeof out, "1\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-slot-reserved-and-filled-width-10");
+       "grep -c '\\[\"OFILL\",\"frm\",' exec/parse2/control-result.tsv; grep -c '\\[\"ALUI\",\"add\",\"frm\",\"frm\",1\\],\\[\"OFILL\",\"frm\",\"t\",9\\]' exec/parse2/control-result.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-slot-reserved-10-filled-9-after-one-blank");
+    sh("grep -c -E '(GMARK\"?[:\t] ?|E_GMARK\tjson\t)900000([^0-9]|$)' exec/facts/parse-constants.tsv exec/facts/k2-call.tsv exec/facts/k2-librarydata.tsv exec/facts/k2-gen2.tsv; "
+       "grep -c -E '(GMARK\"?[:\t] ?|E_GMARK\tjson\t)2000000000([^0-9]|$)' exec/facts/parse-constants.tsv exec/facts/k2-call.tsv exec/facts/k2-librarydata.tsv exec/facts/k2-gen2.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "parse-constants.tsv:0\nexec/facts/k2-call.tsv:0\nexec/facts/k2-librarydata.tsv:0\nexec/facts/k2-gen2.tsv:0\n"
+                            "exec/facts/parse-constants.tsv:1\nexec/facts/k2-call.tsv:1\nexec/facts/k2-librarydata.tsv:1\nexec/facts/k2-gen2.tsv:2\nEND"), "table-global-mark-above-frame-range-in-every-copy");
     sh("grep -c 'mov r6, r7\\\\n  \\.frame\",\"kind\":\"out\"' exec/facts/k2-control.tsv; echo END", out, sizeof out);
     ck(has(out, sizeof out, "1\nEND") && tx_len(out, sizeof out) == 6, "table-prologue-text-ends-in-frame");
 
@@ -69,10 +86,14 @@ int main(void) {
     ck(has(out, sizeof out, "S 7 5\nRC=0"), "small-frame-runs");
     probe(dir, "huge", SRC_HUGE, out, sizeof out);
     ck(has(out, sizeof out, "field overflow") && !has(out, sizeof out, "RC=0"), "overflow-frame-refused-by-name");
-    {   static const char *nm[2] = {"large-2d-256x4400", "large-1d-1000000"}, *want[2] = {"L 9 97 3\nRC=0", "M 11 13\nRC=0"}, *src[2] = {SRC_2D, SRC_1D};
+    probe(dir, "huge2", SRC_HUGE2, out, sizeof out);
+    ck(has(out, sizeof out, "field overflow") && !has(out, sizeof out, "RC=0"), "overflow-ten-digit-frame-refused-by-name");
+    {   static const char *nm[4] = {"large-2d-256x4400", "large-1d-1000000", "offset-900000-single-array", "offset-900000-second-of-two-arrays"};
+        static const char *want[4] = {"L 9 97 3\nRC=0", "M 11 13\nRC=0", "N 3\nRC=0", "O 3 5\nRC=0"}, *src[4] = {SRC_2D, SRC_1D, SRC_MARK1, SRC_MARK2};
+        static const char *leaf[4] = {"l2", "l1", "m1", "m2"};
         int i;
-        for (i = 0; i < 2; i++) {
-            probe(dir, i ? "l1" : "l2", src[i], out, sizeof out);
+        for (i = 0; i < 4; i++) {
+            probe(dir, leaf[i], src[i], out, sizeof out);
             if (has(out, sizeof out, want[i])) ck(1, nm[i]);
             else if (minor < 69 && has(out, sizeof out, "reject:")) { unverified++; sy_printf("UNVERIFIED\tcheck-large-frame.%s\tinstalled=0.0.%d predates the slot change\n", nm[i], minor); }
             else ck(0, nm[i]);
