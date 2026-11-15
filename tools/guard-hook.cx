@@ -1,0 +1,657 @@
+/* tools/guard-hook.cx -- PreToolUse 钩子(Bash|Edit|Write|Read),取代 .claude/hooks/guard-edit.ts,行为逐条等价。
+ *
+ *   cd "$CLAUDE_PROJECT_DIR" && ./tools/bound 9 sh ./unisacc.com tools/guard-hook.cx     (stdin 收钩子 JSON)
+ *
+ * 规则:
+ *   DEVSVC-ONLY  原生 Read/Edit/Write 的 file_path 除 $HOME/.claude/ 与 /tmp/claude-* 外一律拒绝(rc 2),
+ *                $HOME/.cache/unisacc/devsvc/native-fallback 的 mtime 在 30 分钟内则放行(mtime 精度为秒)。
+ *   写域占用     Edit/Write 且设 UNISACC_AGENT 时,查 $UNISACC_DOMAINS(缺省 $HOME/.cache/unisacc/domains.tsv,
+ *                列 agent 前缀 到期秒 ...),仓内路径被他人未过期前缀占用则拒绝。
+ *   GUARD-EDIT-V1 Bash 命令:写仓库根 out/、git clone/worktree add(版本工作树除外)、mkdir 工作目录、
+ *                git stash/clean/reset --hard/checkout --/restore ./--no-verify/--autostash、python/bun/node/perl/ruby 作命令、
+ *                sed -i、perl -i、awk -i inplace、ex/ed/vi/vim/nvim、tee、重定向写仓内,sh -c 正文递归一层,python -c open 写。
+ *   DEVSVC-WARN  未拒绝时五类告警(git-write direct-cx git-read sleep-poll pipe-trim):stderr 一行加追加
+ *                $HOME/.cache/unisacc/devsvc/hook-warn.tsv(ISO 时间 会话 类 命令前 120 个 UTF-16 单元),rc 0。
+ * 环境:HOME(缺省 /home/devali 用于仓根与安全前缀)、GUARD_REPO(缺省 $HOME/repos/unisacc)、CLAUDE_JOB_DIR。
+ * fail-open:JSON 解析失败或字段类型不符一律 rc 0。正则按原 .ts 的 JS 语义手写匹配(ASCII 空白)。
+ * Check: tools/check-guard-hook.cx. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.json
+
+static const char *HOMEV;   /* process.env.HOME ?? "" */
+static char *HOMED;         /* process.env.HOME ?? "/home/devali" */
+static char *REPO;
+static const char *JOB;
+static char *SAFE3, *SAFE4;
+
+static long sl(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static int eq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+static int sw(const char *s, const char *p) { while (*p) { if (*s != *p) return 0; s++; p++; } return 1; }
+static int has(const char *s, const char *p) { for (; *s; s++) if (sw(s, p)) return 1; return sw(s, p); }
+static int hasc(const char *s, char c) { for (; *s; s++) if (*s == c) return 1; return 0; }
+static int isws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
+static int isal(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int isdg(char c) { return c >= '0' && c <= '9'; }
+static int iswd(char c) { return isal(c) || isdg(c) || c == '_'; }
+static char *dupn(const char *s, long n) { char *d = (char *)mm_alloc(n + 1); if (n > 0) mm_copy(d, n + 1, s, n); d[n] = 0; return d; }
+static char *sdup(const char *s) { return dupn(s, sl(s)); }
+static char *cat2(const char *a, const char *b) {
+    long x = sl(a), y = sl(b); char *d = (char *)mm_alloc(x + y + 1);
+    if (x) mm_copy(d, x + y + 1, a, x); if (y) mm_copy(d + x, y + 1, b, y); d[x + y] = 0; return d;
+}
+static const char *envs(const char *k) { const char *v = sy_env(k); return v ? v : 0; }
+
+/* /^["']|["']$/g */
+static char *strip_q(const char *s) {
+    long n = sl(s), a = 0, b = n;
+    if (n > 0 && (s[0] == '"' || s[0] == '\'')) a = 1;
+    if (b - 1 >= a && (s[b - 1] == '"' || s[b - 1] == '\'')) b--;
+    return dupn(s + a, b - a);
+}
+/* /^\$\{?NAME\}?/ -> VAL */
+static char *repl_var(char *s, const char *name, const char *val) {
+    long j = 1, m = sl(name);
+    if (s[0] != '$') return s;
+    if (s[j] == '{') j++;
+    if (!sw(s + j, name)) return s;
+    j += m;
+    if (s[j] == '}') j++;
+    return cat2(val, s + j);
+}
+static char *repl_home(char *s) {
+    if (s[0] == '~' && (s[1] == '/' || s[1] == 0)) s = cat2(HOMED, s + 1);
+    return repl_var(s, "HOME", HOMED);
+}
+/* path.resolve(base, p) for absolute base or absolute p */
+static char *resolve(const char *base, const char *p) {
+    char *t = p[0] == '/' ? sdup(p) : cat2(cat2(base, "/"), p);
+    long n = sl(t), i = 0, o = 0; char *r = (char *)mm_alloc(n + 2);
+    while (i < n) {
+        long s, e;
+        while (i < n && t[i] == '/') i++;
+        s = i; while (i < n && t[i] != '/') i++; e = i;
+        if (e == s) continue;
+        if (e - s == 1 && t[s] == '.') continue;
+        if (e - s == 2 && t[s] == '.' && t[s + 1] == '.') { while (o > 0 && r[o - 1] != '/') o--; if (o > 0) o--; continue; }
+        r[o++] = '/'; mm_copy(r + o, n + 2 - o, t + s, e - s); o += e - s;
+    }
+    if (o == 0) r[o++] = '/';
+    r[o] = 0;
+    return r;
+}
+static int safe(const char *p) {
+    return sw(p, "/tmp/") || sw(p, "/dev/") || sw(p, SAFE3) || (SAFE4 && sw(p, SAFE4));
+}
+/* inRepo(p, cur, false) when out=0; isRepoOut(p, cur) when out=1 */
+static int repo_path(const char *a, const char *cur, int out) {
+    char *p = repl_home(strip_q(a));
+    if (*JOB) p = repl_var(p, "CLAUDE_JOB_DIR", JOB);
+    if (hasc(p, '$') || hasc(p, '`') || !*p) return 0;
+    if (p[0] != '/') { if (!*cur) return 0; p = resolve(cur, p); } else p = resolve("", p);
+    if (safe(p)) return 0;
+    if (out) { char *o = cat2(REPO, "/out"); return eq(p, o) || sw(p, cat2(o, "/")); }
+    return eq(p, REPO) || sw(p, cat2(REPO, "/"));
+}
+
+static char *strip_bodies(const char *cmd) {
+    long n = sl(cmd), i = 0, o = 0, ls; char *end = 0; char *s = (char *)mm_alloc(n + 2), *r;
+    while (i <= n) {
+        long e = i, j, a, b, q;
+        while (e < n && cmd[e] != '\n') e++;
+        if (end) {
+            a = i; b = e;
+            while (a < b && isws(cmd[a])) a++;
+            while (b > a && isws(cmd[b - 1])) b--;
+            if (b - a == sl(end) && sw(cmd + a, end) ) end = 0;
+            i = e + 1; continue;
+        }
+        if (o > 0) s[o++] = '\n';
+        mm_copy(s + o, n + 2 - o, cmd + i, e - i); o += e - i;
+        for (j = i; j + 1 < e; j++) {
+            long k = j + 2, st;
+            char qc = 0;
+            if (cmd[j] != '<' || cmd[j + 1] != '<') continue;
+            if (k < e && cmd[k] == '-') k++;
+            while (k < e && isws(cmd[k])) k++;
+            q = k;
+            if (k < e && (cmd[k] == '\'' || cmd[k] == '"')) { qc = cmd[k]; k++; }
+            st = k;
+            if (!(k < e && (isal(cmd[k]) || cmd[k] == '_'))) continue;
+            while (k < e && iswd(cmd[k])) k++;
+            if (qc && !(k < e && cmd[k] == qc)) continue;
+            (void)q;
+            end = dupn(cmd + st, k - st);
+            break;
+        }
+        i = e + 1;
+    }
+    s[o] = 0;
+    ls = o; r = (char *)mm_alloc(ls * 2 + 4); o = 0;
+    for (i = 0; i < ls; i++) {
+        char c = s[i];
+        if (c == '\\') { r[o++] = c; if (i + 1 < ls) r[o++] = s[i + 1]; i++; continue; }
+        if (c == '\'') { long j = i + 1; while (j < ls && s[j] != '\'') j++; if (j >= ls) { r[o] = 0; return r; } r[o++] = '\''; r[o++] = '\''; i = j; continue; }
+        if (c == '"') { long j = i + 1; while (j < ls && s[j] != '"') j += s[j] == '\\' ? 2 : 1; r[o++] = '"'; r[o++] = '"'; i = j; continue; }
+        r[o++] = c;
+    }
+    r[o] = 0;
+    return r;
+}
+
+static int inlist(char **a, long from, long n, const char *x) { long m; for (m = from; m < n; m++) if (eq(a[m], x)) return 1; return 0; }
+static const char *git_violation(char **a, long n) {
+    long i = 0, j; const char *sub;
+    for (j = 0; j < n; j++) if (eq(a[j], "--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
+    while (i < n && a[i][0] == '-')
+        i += (eq(a[i], "-C") || eq(a[i], "-c") || eq(a[i], "--git-dir") || eq(a[i], "--work-tree") || eq(a[i], "--namespace")) ? 2 : 1;
+    sub = i < n ? a[i] : "";
+#define REST(x) inlist(a, i + 1, n, x)
+    if (eq(sub, "stash")) return "git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp";
+    if (eq(sub, "clean")) return "git clean:共享 main 上不得 clean";
+    if (eq(sub, "reset") && REST("--hard")) return "git reset --hard:共享 main 上不得 reset";
+    if (eq(sub, "checkout") && (REST("--") || REST("."))) return "git checkout -- / .:不得还原他人路径";
+    if (eq(sub, "restore") && REST(".")) return "git restore .:不得还原他人路径";
+    if (eq(sub, "commit") && REST("--no-verify")) return "git commit --no-verify:不得绕过 precommit";
+    if (eq(sub, "push") && REST("--no-verify")) return "git push --no-verify:不得绕过 precommit";
+#undef REST
+    return 0;
+}
+
+static char *fmt(const char *f, const char *a, const char *b) {
+    long n = sl(f) + sl(a) + (b ? sl(b) : 0) + 16; char *d = (char *)mm_alloc(n);
+    tx_snprintf(d, n, f, a, b ? b : "");
+    return d;
+}
+static int is_opt_letters_with(const char *a, int anyi, const char *set) {
+    /* anyi: /^-[A-Za-z]*i/ ; else /^-[A-Za-z]*[set]$/ */
+    long i = 1;
+    if (a[0] != '-') return 0;
+    if (anyi) { for (; isal(a[i]); i++) if (a[i] == 'i') return 1; return 0; }
+    while (isal(a[i])) i++;
+    return a[i] == 0 && i >= 2 && hasc(set, a[i - 1]);
+}
+
+static char *check(const char *cmd, const char *cwd, int depth);
+
+static char *check_seg(char *t, char **curp) {
+    long n = sl(t), nw = 0, i, k = 0; char **w = (char **)mm_alloc(sizeof(char *) * (n + 2));
+    const char *first; char *cur = *curp;
+    char **oa; long noa = 0;
+    i = 0;
+    if (n == 0) w[nw++] = sdup("");
+    while (i < n) { long s = i; while (i < n && !isws(t[i])) i++; w[nw++] = dupn(t + s, i - s); while (i < n && isws(t[i])) i++; }
+    while (k < nw) {
+        const char *x = w[k]; long j = 1;
+        if (!(isal(x[0]) || x[0] == '_')) break;
+        while (iswd(x[j])) j++;
+        if (x[j] != '=') break;
+        k++;
+    }
+    first = k < nw ? w[k] : "";
+    { const char *p = first, *q; for (q = first; *q; q++) if (*q == '/') p = q + 1; first = p; }
+    if (eq(first, "cd") || eq(first, "pushd")) {
+        char *d = repl_home(strip_q(k + 1 < nw ? w[k + 1] : ""));
+        if (*d && !hasc(d, '$') && !hasc(d, '`')) *curp = d[0] == '/' ? resolve("", d) : (*cur ? resolve(cur, d) : sdup(""));
+        else *curp = sdup("");
+        return 0;
+    }
+    oa = (char **)mm_alloc(sizeof(char *) * (nw + 1));
+    for (i = k + 1; i < nw; i++) if (w[i][0] != '-' && w[i][0]) oa[noa++] = w[i];
+    {
+        const char *hit = 0;
+        if (eq(first, "mkdir") || eq(first, "touch")) { for (i = 0; i < noa; i++) if (repo_path(oa[i], cur, 1)) { hit = oa[i]; break; } }
+        else if ((eq(first, "cp") || eq(first, "mv") || eq(first, "install") || eq(first, "ln") || eq(first, "rsync")) && noa > 1 && repo_path(oa[noa - 1], cur, 1)) hit = oa[noa - 1];
+        if (hit && *hit) return fmt("%s 写仓库根 out/ (%s):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp", first, hit);
+    }
+    if (eq(first, "git") && k + 1 < nw) {
+        int bad = eq(w[k + 1], "clone");
+        if (!bad && eq(w[k + 1], "worktree") && k + 2 < nw && eq(w[k + 2], "add")) {
+            char *tg = sdup(""), *abs; int ok = 0;
+            for (i = k + 3; i < nw; i++) {
+                if (w[i][0] == '-' && (w[i][1] == 'b' || w[i][1] == 'B') && !w[i][2]) { i++; continue; }
+                if (w[i][0] == '-') continue;
+                tg = w[i]; break;
+            }
+            tg = strip_q(tg);
+            if (*tg && !hasc(tg, '$') && !hasc(tg, '`')) {
+                char *pre = cat2(REPO, "/.claude/worktrees/v0.0.");
+                abs = tg[0] == '/' ? resolve("", tg) : (*cur ? resolve(cur, tg) : sdup(""));
+                if (sw(abs, pre)) { const char *q = abs + sl(pre); if (*q) { ok = 1; for (; *q; q++) if (!isdg(*q)) ok = 0; } }
+            }
+            bad = !ok;
+        }
+        if (bad) return sdup("git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作");
+    }
+    if (eq(first, "mkdir")) {
+        for (i = k + 1; i < nw; i++) {
+            const char *a = w[i]; long j, m = sl(a); int hitm = sw(a, "~/work") || has(a, "cc-work");
+            for (j = 0; j < m && !hitm; j++) {
+                if ((j == 0 || a[j - 1] == '/') && sw(a + j, "out/") && a[j + 4]) hitm = 1;
+                if (sw(a + j, "/work") && (a[j + 5] == '/' || a[j + 5] == 0)) hitm = 1;
+            }
+            if (hitm) return sdup("mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录");
+        }
+    }
+    if (eq(first, "git")) { const char *g = git_violation(w + k + 1, nw - k - 1); if (g) return sdup(g); }
+    {
+        int ip = 0;
+        if (sw(first, "python")) { const char *q = first + 6; ip = 1; for (; *q; q++) if (!isdg(*q) && *q != '.') ip = 0; }
+        if (ip || eq(first, "bun") || eq(first, "node") || eq(first, "perl") || eq(first, "ruby")) {
+            const char *a0 = k + 1 < nw ? w[k + 1] : ""; int hook = 0;
+            if (eq(first, "bun")) {
+                long j, m = sl(a0);
+                if (eq(a0, "\"\"") || sw(a0, "$CLAUDE_PROJECT_DIR") || sw(a0, "${CLAUDE_PROJECT_DIR")) hook = 1;
+                for (j = 0; j < m && !hook; j++) if ((j == 0 || a0[j - 1] == '/') && sw(a0 + j, ".claude/hooks/")) hook = 1;
+            }
+            if (!hook) return fmt("%s 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx", first, 0);
+        }
+    }
+    if (eq(first, "git") || eq(first, "gh") || eq(first, "mux")) return 0;
+    {
+        char **args = w + k + 1; long na = nw - k - 1; int any = 0;
+        if (na < 0) na = 0;
+        if (eq(first, "sed")) {
+            for (i = 0; i < na; i++) if (is_opt_letters_with(args[i], 1, 0) || sw(args[i], "--in-place")) any = 1;
+            if (any) {
+                char **ef = (char **)mm_alloc(sizeof(char *) * (na + 1)); long ne = 0, nf = 0, skip1 = 1;
+                for (i = 0; i < na; i++) if (is_opt_letters_with(args[i], 0, "ef")) ef[ne++] = i + 1 < na ? args[i + 1] : 0;
+                if (ne) skip1 = 0;
+                for (i = 0; i < noa; i++) {
+                    long j; int inef = 0;
+                    for (j = 0; j < ne; j++) if (ef[j] && eq(ef[j], oa[i])) inef = 1;
+                    if (ne && inef) continue;
+                    if (!ne && nf++ < skip1) continue;
+                    if (repo_path(oa[i], cur, 0)) return sdup("sed -i 改仓内文件");
+                }
+            }
+        }
+        if (eq(first, "perl")) {
+            any = 0; for (i = 0; i < na; i++) if (is_opt_letters_with(args[i], 1, 0)) any = 1;
+            if (any) for (i = 0; i < noa; i++) if (repo_path(oa[i], cur, 0)) return sdup("perl -i 改仓内文件");
+        }
+        if (eq(first, "awk") || eq(first, "gawk")) {
+            char *j = sdup(""); long q, m; int f = 0;
+            for (i = 0; i < na; i++) j = i ? cat2(cat2(j, " "), args[i]) : sdup(args[i]);
+            m = sl(j);
+            for (q = 0; q + 1 < m && !f; q++) if (j[q] == '-' && j[q + 1] == 'i') { long z = q + 2; if (z < m && isws(j[z])) { while (z < m && isws(j[z])) z++; if (sw(j + z, "inplace")) f = 1; } }
+            if (f) for (i = 0; i < noa; i++) if (repo_path(oa[i], cur, 0)) return sdup("awk -i inplace 改仓内文件");
+        }
+        if (eq(first, "ex") || eq(first, "ed") || eq(first, "vi") || eq(first, "vim") || eq(first, "nvim"))
+            for (i = 0; i < noa; i++) if (repo_path(oa[i], cur, 0)) return fmt("%s 改仓内文件", first, 0);
+        if (eq(first, "tee")) for (i = 0; i < noa; i++) if (repo_path(oa[i], cur, 0)) return sdup("tee 写仓内文件");
+    }
+    /* /(?:^|[^<>&0-9])(?:\d?>>?|&>>?)\s*([^\s;&|<>()]+)/g */
+    {
+        long p = 0;
+        while (p <= n) {
+            int alt, matched = 0; long me = 0, cs = 0, ce = 0;
+            for (alt = 0; alt < 2 && !matched; alt++) {
+                long q = p, q0, c2;
+                if (alt == 0) { if (p != 0) continue; }
+                else { if (p >= n) continue; { char c = t[p]; if (c == '<' || c == '>' || c == '&' || isdg(c)) continue; } q++; }
+                q0 = q;
+                /* operator alternatives with backtracking */
+                {
+                    long cand[4]; int nc = 0, ci;
+                    if (q0 < n && isdg(t[q0]) && q0 + 1 < n && t[q0 + 1] == '>') { if (q0 + 2 < n && t[q0 + 2] == '>') cand[nc++] = q0 + 3; cand[nc++] = q0 + 2; }
+                    if (q0 < n && t[q0] == '>') { if (q0 + 1 < n && t[q0 + 1] == '>') cand[nc++] = q0 + 2; cand[nc++] = q0 + 1; }
+                    if (q0 < n && t[q0] == '&' && q0 + 1 < n && t[q0 + 1] == '>') { if (q0 + 2 < n && t[q0 + 2] == '>') cand[nc++] = q0 + 3; cand[nc++] = q0 + 2; }
+                    for (ci = 0; ci < nc && !matched; ci++) {
+                        c2 = cand[ci];
+                        while (c2 < n && isws(t[c2])) c2++;
+                        cs = c2;
+                        while (c2 < n && !isws(t[c2]) && !hasc(";&|<>()", t[c2])) c2++;
+                        if (c2 > cs) { matched = 1; ce = c2; me = c2; }
+                    }
+                }
+            }
+            if (matched) {
+                char *m1 = dupn(t + cs, ce - cs);
+                if (repo_path(m1, cur, 0) || repo_path(m1, cur, 1)) return fmt("重定向写仓内文件 %s", m1, 0);
+                p = me;
+            } else p++;
+        }
+    }
+    return 0;
+}
+
+/* /\b(?:ba|z|da)?sh\s+-[a-z]*c\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g */
+static char *shc(const char *cmd, const char *cur) {
+    long n = sl(cmd), p = 0;
+    while (p < n) {
+        long q, pre, bs = -1, be = -1, me = -1; int pi;
+        static const char *pres[4] = {"ba", "z", "da", ""};
+        if (p > 0 && iswd(cmd[p - 1])) { p++; continue; }
+        for (pi = 0; pi < 4 && me < 0; pi++) {
+            long ls, le;
+            q = p; pre = sl(pres[pi]);
+            if (pre && !sw(cmd + q, pres[pi])) continue;
+            q += pre;
+            if (!sw(cmd + q, "sh")) continue;
+            q += 2;
+            if (!(q < n && isws(cmd[q]))) continue;
+            while (q < n && isws(cmd[q])) q++;
+            if (cmd[q] != '-') continue;
+            q++; ls = q; while (q < n && cmd[q] >= 'a' && cmd[q] <= 'z') q++; le = q;
+            if (!(le > ls && cmd[le - 1] == 'c')) continue;
+            if (!(q < n && isws(cmd[q]))) continue;
+            while (q < n && isws(cmd[q])) q++;
+            if (cmd[q] == '\'') { long j = q + 1; while (j < n && cmd[j] != '\'') j++; if (j < n) { bs = q + 1; be = j; me = j + 1; } }
+            else if (cmd[q] == '"') { long j = q + 1; while (j < n && cmd[j] != '"') { if (cmd[j] == '\\') { if (j + 1 >= n) { j = n; break; } j += 2; } else j++; } if (j < n) { bs = q + 1; be = j; me = j + 1; } }
+        }
+        if (me >= 0) {
+            char *r = check(dupn(cmd + bs, be - bs), cur, 1);
+            if (r) return cat2("sh -c 内 ", r);
+            p = me;
+        } else p++;
+    }
+    return 0;
+}
+
+static int wb_at(const char *s, long p) { return p == 0 || !iswd(s[p - 1]); }
+
+static int py_c(const char *cmd) {
+    long n = sl(cmd), p;
+    for (p = 0; p < n; p++) {
+        long q = p;
+        if (!wb_at(cmd, p) || !sw(cmd + p, "python")) continue;
+        q += 6;
+        {
+            long opts[2]; int no = 0, oi;
+            if (cmd[q] == '3') opts[no++] = q + 1;
+            opts[no++] = q;
+            for (oi = 0; oi < no; oi++) {
+                long r = opts[oi], r2;
+                if (!(r < n && isws(cmd[r]))) continue;
+                while (r < n && isws(cmd[r])) r++;
+                r2 = r;
+                if (sw(cmd + r, "-I") && r + 2 < n && isws(cmd[r + 2])) { long z = r + 2; while (z < n && isws(cmd[z])) z++; if (sw(cmd + z, "-c") && !iswd(cmd[z + 2])) return 1; }
+                if (sw(cmd + r2, "-c") && !iswd(cmd[r2 + 2])) return 1;
+            }
+        }
+    }
+    return 0;
+}
+static int open_w(const char *cmd) {
+    long n = sl(cmd), p;
+    for (p = 0; p + 5 <= n; p++) {
+        long e, j;
+        if (!sw(cmd + p, "open(")) continue;
+        e = p + 5; while (e < n && cmd[e] != ')') e++;
+        for (j = p + 5; j < e; j++) {
+            long q = j + 1;
+            if (!(cmd[j] == '\'' || cmd[j] == '"')) continue;
+            if (!(q < e && (cmd[q] == 'w' || cmd[q] == 'a'))) continue;
+            q++;
+            {
+                int b, pl;
+                for (b = 1; b >= 0; b--) for (pl = 1; pl >= 0; pl--) {
+                    long z = q;
+                    if (b) { if (z < e && cmd[z] == 'b') z++; else continue; }
+                    if (pl) { if (z < e && cmd[z] == '+') z++; else continue; }
+                    if (z < e && (cmd[z] == '\'' || cmd[z] == '"')) return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+static int bout(const char *cmd) {
+    long n = sl(cmd), p;
+    for (p = 0; p < n; p++) if (sw(cmd + p, "out/") && wb_at(cmd, p)) return 1;
+    return 0;
+}
+
+static char *check(const char *cmd, const char *cwd, int depth) {
+    char *s = strip_bodies(cmd), *cur = sdup(*cwd ? cwd : REPO);
+    long n = sl(s), i = 0, st = 0;
+    while (1) {
+        long sep = 0;
+        if (i >= n) sep = -1;
+        else if (s[i] == ';' || s[i] == '\n' || s[i] == '`') sep = 1;
+        else if ((s[i] == '&' && s[i + 1] == '&') || (s[i] == '|' && s[i + 1] == '|') || (s[i] == '$' && s[i + 1] == '(')) sep = 2;
+        else if (s[i] == '|') sep = 1;
+        if (sep) {
+            long a = st, b = i; char *r;
+            while (a < b && isws(s[a])) a++;
+            while (b > a && isws(s[b - 1])) b--;
+            r = check_seg(dupn(s + a, b - a), &cur);
+            if (r) return r;
+            if (sep < 0) break;
+            i += sep; st = i;
+        } else i++;
+    }
+    if (depth < 1) { char *r = shc(cmd, cur); if (r) return r; }
+    if (py_c(cmd) && open_w(cmd) && !has(cmd, "/tmp/") && !bout(cmd) && !has(cmd, "cc-work") && !has(cmd, "CLAUDE_JOB_DIR"))
+        return sdup("python -c open(...,'w') 写文件");
+    return 0;
+}
+
+static double wall_s(void) { sy_ts_t t; if (sy_wall(&t) != 0) return 0; return (double)t.sec + (double)t.nsec / 1e9; }
+
+/* JS Number(str) for the domain table; NaN -> -1e308 sentinel via ok=0 */
+static double jsnum(const char *s, int *ok) {
+    long a = 0, b = sl(s), i, nd = 0; double v = 0, sg = 1, fr = 0.1; int ex = 0, es = 1;
+    *ok = 1;
+    while (a < b && isws(s[a])) a++;
+    while (b > a && isws(s[b - 1])) b--;
+    if (a == b) return 0;
+    i = a;
+    if (s[i] == '+' || s[i] == '-') { if (s[i] == '-') sg = -1; i++; }
+    while (i < b && isdg(s[i])) { v = v * 10 + (s[i] - '0'); i++; nd++; }
+    if (i < b && s[i] == '.') { i++; while (i < b && isdg(s[i])) { v += (s[i] - '0') * fr; fr /= 10; i++; nd++; } }
+    if (!nd) { *ok = 0; return 0; }
+    if (i < b && (s[i] == 'e' || s[i] == 'E')) {
+        long d0; i++;
+        if (i < b && (s[i] == '+' || s[i] == '-')) { if (s[i] == '-') es = -1; i++; }
+        d0 = i; while (i < b && isdg(s[i])) { if (ex < 400) ex = ex * 10 + (s[i] - '0'); i++; }
+        if (i == d0) { *ok = 0; return 0; }
+        while (ex-- > 0) v = es > 0 ? v * 10 : v / 10;
+    }
+    if (i != b) { *ok = 0; return 0; }
+    return v * sg;
+}
+
+static char *domain_owner(const char *path, const char *agent) {
+    const char *tab = envs("UNISACC_DOMAINS"); unsigned char *txt = 0; int64_t tn = 0;
+    char cw[4096], *p, *other = 0; long i, ls; double now;
+    if (!tab) tab = cat2(HOMED, "/.cache/unisacc/domains.tsv");
+    if (sy_read_file(tab, &txt, &tn, 1 << 26) != 0) return 0;
+    if (path[0] == '/') p = resolve("", path);
+    else { if (sy_cwd(cw, sizeof cw) < 0) return 0; p = resolve(cw, path); }
+    if (!(eq(p, REPO) || sw(p, cat2(REPO, "/")))) return 0;
+    p = p + sl(REPO) + 1;
+    now = wall_s();
+    for (i = 0, ls = 0; i <= (long)tn; i++) {
+        if (i == (long)tn || txt[i] == '\n') {
+            char *line = dupn((char *)txt + ls, i - ls), *f[64]; long nf = 0, j, fs = 0, m = i - ls; int ok; double ex;
+            ls = i + 1;
+            for (j = 0; j <= m && nf < 64; j++) if (j == m || line[j] == '\t') { f[nf++] = dupn(line + fs, j - fs); fs = j + 1; }
+            if (nf < 4) continue;
+            ex = jsnum(f[2], &ok);
+            if (!ok || !(ex > now) || !f[1][0] || !sw(p, f[1])) continue;
+            if (eq(f[0], agent)) return 0;
+            if (!other) { other = fmt("%s (前缀 %s)", f[0], f[1]); }
+        }
+    }
+    return other;
+}
+
+static int fallback_ok(void) {
+    sy_stat_t st; sy_ts_t t; long now;
+    char *fb = cat2(HOMEV, "/.cache/unisacc/devsvc/native-fallback");
+    if (sy_stat(fb, &st) != 0) return 0;
+    if (sy_wall(&t) != 0) return 0;
+    now = t.sec * 1000 + t.nsec / 1000000;
+    return now - st.mtime * 1000 < 30L * 60 * 1000;
+}
+static int host_own(const char *fp) { return sw(fp, cat2(HOMEV, "/.claude/")) || sw(fp, "/tmp/claude-"); }
+
+static void iso_now(char *d, long cap) {
+    sy_ts_t t; long z, era, doe, yoe, y, doy, mp, dd, mm, sec;
+    sy_wall(&t);
+    sec = t.sec % 86400; z = t.sec / 86400 + 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097; doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100); mp = (5 * doy + 2) / 153;
+    dd = doy - (153 * mp + 2) / 5 + 1; mm = mp < 10 ? mp + 3 : mp - 9; if (mm <= 2) y++;
+    tx_snprintf(d, cap, "%04ld-%02ld-%02ldT%02ld:%02ld:%02ld.%03ldZ", y, mm, dd, sec / 3600, sec / 60 % 60, sec % 60, t.nsec / 1000000);
+}
+
+/* cmd.slice(0,120) in UTF-16 units, \t\r\n -> space; a split surrogate pair becomes U+FFFD */
+static char *c120(const char *s) {
+    long n = sl(s), i = 0, u = 0, o = 0; char *d = (char *)mm_alloc(n + 4);
+    while (i < n && u < 120) {
+        unsigned char c = (unsigned char)s[i]; long l = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        if (l == 4) { if (u + 2 > 120) { d[o++] = (char)0xEF; d[o++] = (char)0xBF; d[o++] = (char)0xBD; u++; break; } u += 2; } else u++;
+        for (; l > 0 && i < n; l--) { char ch = s[i++]; d[o++] = (ch == '\t' || ch == '\r' || ch == '\n') ? ' ' : ch; }
+    }
+    d[o] = 0;
+    return d;
+}
+
+static int rx_word_cmd(const char *cmd, const char *w1, const char **subs) {
+    /* /\bW1\s+(SUB1|SUB2..)\b/ */
+    long n = sl(cmd), p, m = sl(w1);
+    for (p = 0; p < n; p++) {
+        long q; int si;
+        if (!wb_at(cmd, p) || !sw(cmd + p, w1)) continue;
+        q = p + m;
+        if (!(q < n && isws(cmd[q]))) continue;
+        while (q < n && isws(cmd[q])) q++;
+        for (si = 0; subs[si]; si++) { long l = sl(subs[si]); if (sw(cmd + q, subs[si]) && !iswd(cmd[q + l])) return 1; }
+    }
+    return 0;
+}
+static int rx_direct_cx(const char *cmd) {
+    long n = sl(cmd), p;
+    for (p = 0; p < n; p++) {
+        long q, e, j;
+        if (!sw(cmd + p, "unisacc.com")) continue;
+        q = p + 11;
+        if (!(q < n && isws(cmd[q]))) continue;
+        while (q < n && isws(cmd[q])) q++;
+        if (!sw(cmd + q, "tools/")) continue;
+        q += 6;
+        if (sw(cmd + q, "devsvc.cx")) continue;
+        e = q; while (e < n && (iswd(cmd[e]) || cmd[e] == '.' || cmd[e] == '-')) e++;
+        for (j = q + 1; j + 3 <= e; j++) if (sw(cmd + j, ".cx")) return 1;
+    }
+    return 0;
+}
+static int rx_sleep(const char *cmd) {
+    long n = sl(cmd), p;
+    for (p = 0; p < n; p++) {
+        long q;
+        if (!wb_at(cmd, p) || !sw(cmd + p, "sleep")) continue;
+        q = p + 5;
+        if (!(q < n && isws(cmd[q]))) continue;
+        while (q < n && isws(cmd[q])) q++;
+        if (isdg(cmd[q])) return 1;
+    }
+    return 0;
+}
+static int rx_pipe(const char *cmd) {
+    long n = sl(cmd), p; static const char *ws[4] = {"head", "tail", "grep", 0};
+    for (p = 0; p < n; p++) {
+        long q = p + 1; int i;
+        if (cmd[p] != '|') continue;
+        while (q < n && isws(cmd[q])) q++;
+        for (i = 0; ws[i]; i++) if (sw(cmd + q, ws[i]) && !iswd(cmd[q + 4])) return 1;
+    }
+    return 0;
+}
+
+static void warn(const char *cmd, const js_val *root) {
+    int viaDev = has(cmd, "tools/devsvc.cx"), nh = 0, i;
+    const char *r[5], *tip[5];
+    static const char *cp[3] = {"commit", "push", 0};
+    static const char *rd[5] = {"status", "log", "diff", "show", 0};
+    if (rx_word_cmd(cmd, "git", cp) && !viaDev) { r[nh] = "git-write"; tip[nh++] = "sh ./unisacc.com tools/devsvc.cx -- git commit -m '说明' --whole 路径 --push"; }
+    if (rx_direct_cx(cmd) && !viaDev) { r[nh] = "direct-cx"; tip[nh++] = "sh ./unisacc.com tools/devsvc.cx -- x --bg -- ... 加 wait,或 x --tail N"; }
+    if (rx_word_cmd(cmd, "git", rd) && !viaDev) { r[nh] = "git-read"; tip[nh++] = "sh ./unisacc.com tools/devsvc.cx -- git log(status/diff/show 同)"; }
+    if (rx_sleep(cmd)) { r[nh] = "sleep-poll"; tip[nh++] = "用 devsvc x --bg 加 wait,不用 sleep 轮询"; }
+    if (rx_pipe(cmd)) { r[nh] = "pipe-trim"; tip[nh++] = "用 devsvc x --tail N 截短输出,不用管道 head/tail/grep"; }
+    if (!nh) return;
+    {
+        char *dir = cat2(HOMEV, "/.cache/unisacc/devsvc"), *path = cat2(dir, "/hook-warn.tsv"), *c = c120(cmd), ts[64];
+        const js_val *sv = js_get(root, "session_id"); const char *sid = "-"; char nb[64];
+        if (js_kind(sv) == JS_STR) sid = js_str(sv);
+        else if (js_kind(sv) == JS_BOOL) sid = js_bool(sv) ? "true" : "false";
+        else if (js_kind(sv) == JS_NUM) { double d = js_num(sv); if (d == (double)(long)d) tx_snprintf(nb, sizeof nb, "%ld", (long)d); else tx_snprintf(nb, sizeof nb, "%.17g", d); sid = nb; }
+        else if (js_kind(sv) == JS_ARR || js_kind(sv) == JS_OBJ) sid = js_kind(sv) == JS_ARR ? "" : "[object Object]";
+        if (sy_mkdir_all(dir, 0755) != 0) return;
+        for (i = 0; i < nh; i++) {
+            long cap = sl(sid) + sl(c) + 128; char *line = (char *)mm_alloc(cap);
+            sy_eprintf("DEVSVC-WARN(%s):建议 %s\n", r[i], tip[i]);
+            iso_now(ts, sizeof ts);
+            tx_snprintf(line, cap, "%s\t%s\t%s\t%s\n", ts, sid, r[i], c);
+            if (sy_append_file(path, line, sl(line), 0644) != 0) return;
+        }
+    }
+}
+
+static long read_all(char **out) {
+    long cap = 1 << 16, n = 0, g; char *b = (char *)mm_alloc(cap + 1);
+    while ((g = sy_read_once(0, b + n, cap - n)) > 0) {
+        n += g;
+        if (n == cap) { char *nb2 = (char *)mm_alloc(cap * 2 + 1); mm_copy(nb2, cap * 2 + 1, b, n); mm_free(b); b = nb2; cap *= 2; }
+    }
+    b[n] = 0; *out = b; return n;
+}
+
+int main(void) {
+    char *in, err[128]; long n = read_all(&in); js_val *root; const js_val *tn, *ti, *v;
+    const char *h = envs("HOME"), *gr = envs("GUARD_REPO"), *tname;
+    HOMEV = h ? h : ""; HOMED = sdup(h ? h : "/home/devali");
+    REPO = gr ? sdup(gr) : cat2(HOMED, "/repos/unisacc");
+    JOB = envs("CLAUDE_JOB_DIR"); if (!JOB) JOB = "";
+    SAFE3 = cat2(HOMED, "/cc-work/"); SAFE4 = *JOB ? cat2(JOB, "/") : 0;
+    root = js_parse(in, n, err, sizeof err);
+    if (!root) return 0;
+    tn = js_get(root, "tool_name"); ti = js_get(root, "tool_input");
+    tname = js_kind(tn) == JS_STR ? js_str(tn) : 0;
+    if (tname && (eq(tname, "Read") || eq(tname, "Edit") || eq(tname, "Write"))) {
+        const char *fp; int rd = eq(tname, "Read");
+        v = js_get(ti, "file_path");
+        if (js_kind(v) == JS_STR) fp = js_str(v);
+        else if (js_kind(v) == JS_NONE || js_kind(v) == JS_NULL) fp = "";
+        else return 0;
+        if (*fp && !host_own(fp) && !fallback_ok()) {
+            if (rd) sy_eprintf("DEVSVC-ONLY 拒绝:仓内文件 %s 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - 的 file.read 节点)。\n", fp);
+            else sy_eprintf("DEVSVC-ONLY 拒绝:仓内文件 %s 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch %s/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n", fp, HOMEV);
+            return 2;
+        }
+        if (!rd) {
+            const char *agent = envs("UNISACC_AGENT");
+            if (agent && *agent && *fp) {
+                char *o = domain_owner(fp, agent);
+                if (o) { sy_eprintf("GUARD-EDIT-V1 拒绝:%s 的写域被 %s 占用,当前代理 %s。先 sh ./unisacc.com tools/domain.cx -- check PATH 查看,或等对方 release/到期。\n", fp, o, agent); return 2; }
+            }
+        }
+        return 0;
+    }
+    {
+        int k = js_kind(tn), truthy = (k == JS_STR && *js_str(tn)) || (k == JS_NUM && js_num(tn) != 0) || (k == JS_BOOL && js_bool(tn)) || k == JS_ARR || k == JS_OBJ;
+        const char *cmd, *cwd = "";
+        if (truthy && !(tname && eq(tname, "Bash"))) return 0;
+        v = js_get(ti, "command");
+        if (js_kind(v) != JS_STR || !*js_str(v)) return 0;
+        cmd = js_str(v);
+        v = js_get(root, "cwd");
+        if (js_kind(v) == JS_STR) cwd = js_str(v);
+        {
+            char *why = check(cmd, cwd, 0);
+            if (!why) { warn(cmd, root); return 0; }
+            sy_eprintf("GUARD-EDIT-V1 拒绝:%s。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n", why);
+            return 2;
+        }
+    }
+}
