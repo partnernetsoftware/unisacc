@@ -31,6 +31,7 @@
 #pragma unisa use cxlib.cxroot
 #pragma unisa use cxlib.platformscope
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -168,8 +169,11 @@ static void bt_load(const char *path) {
     }
 }
 
-static int impact(char **files, int nf, const char *dump, const char *table) {
-    char abs[8192], pf[64], idz[512]; const char *ch[MAXCH]; size_t cl[MAXCH], sz, i = 0; char *s; int k, nb = 0, hit = 0, nna = 0, bv = 0, bw = -1; const char *bid = 0; size_t bn = 0;
+static int tier_rank(const char *s, size_t n) { return n == 6 && !memcmp(s, "commit", 6) ? 1 : n == 5 && !memcmp(s, "daily", 5) ? 2 : n == 7 && !memcmp(s, "release", 7) ? 3 : 0; }
+/* tier: 0 = every batch (affected without --tier); else only batches whose registry tier ranks at most it
+ * (cxlib.testplan tp_tier_includes rule: commit < daily < release, an unknown tier never included). */
+static int impact(char **files, int nf, const char *dump, const char *table, int tier) {
+    char abs[8192], pf[64], idz[512]; const char *ch[MAXCH]; size_t cl[MAXCH], sz, i = 0; char *s; int k, nb = 0, hit = 0, nna = 0, bv = 0, bw = -1, bskip = 0; const char *bid = 0; size_t bn = 0;
     long t0 = sy_now_ms(), t1;
     if (nf > MAXCH) die("too many files", 0);
     for (k = 0; k < nf; k++) {   /* a file that no longer exists still matches by its spelling */
@@ -188,7 +192,7 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
         size_t e = i, f1, f2, f3; int end = i >= sz;
         if (!end) { while (e < sz && s[e] != '\n') e++; }
         if (end || (e - i > 2 && s[i] == 'B' && s[i + 1] == '\t')) {   /* a new batch (or the end) closes the previous one */
-            if (bid && bv) {
+            if (bid && bv && !bskip) {
                 int r = bt_find(bid, bn, 0);
                 if (bt_pfn[r] >= sizeof pf) die("platform too long in", table);
                 if (bn >= sizeof idz) die("batch id too long in", dump);
@@ -200,7 +204,8 @@ static int impact(char **files, int nf, const char *dump, const char *table) {
             }
             if (end) break;
             f1 = i + 2; f2 = f1; while (f2 < e && s[f2] != '\t') f2++;
-            bid = s + f1; bn = f2 - f1; bv = 0; bw = -1; nb++;
+            bid = s + f1; bn = f2 - f1; bv = 0; bw = -1; nb++; bskip = 0;
+            if (tier) { size_t t1 = f2 + 1, t2 = t1; int r; while (t2 < e && s[t2] != '\t') t2++; r = t1 < e ? tier_rank(s + t1, t2 - t1) : 0; bskip = !r || r > tier; }
             if (bt_find(bid, bn, 0) < 0) { char w[300]; cx_fmt(w, sizeof w, "%.*s", bn > 200 ? 200 : (int)bn, bid); die("closure dump names a batch the registry does not hold (dump is stale):", w); }
         } else if (e - i > 2 && (s[i] == 'C' || s[i] == 'D') && s[i + 1] == '\t') {
             int v; size_t pn; f1 = i + 2; while (f1 < e && s[f1] != '\t') f1++;
@@ -284,8 +289,23 @@ static int who_calls(const char *sym, const char *list, const char *cache) {
     return found ? 0 : 1;
 }
 
+/* default inputs live in ROOT/.devsvc/rel (ignored, local only) and are generated there when missing:
+ * tracked.txt from `git ls-files -s -- '*.cx'`, closure[-TIER].tsv from `tools/affected.cx -- --closure-dump
+ * [--tier TIER]`.  A present file is used as is (a snapshot; delete it to refresh). */
+static void ensure_default(char *out, size_t cap, const char *name, const char *cmd) {
+    char dir[8192], full[12000]; char *o = 0; size_t on = 0;
+    const char *env = sy_env("UNISACC_DEVMETA_DIR");
+    if ((env && *env ? cx_fmt(dir, sizeof dir, "%s/rel", env) : cx_fmt(dir, sizeof dir, "%s/.devsvc/rel", root)) || cx_fmt(out, (long)cap, "%s/%s", dir, name)) die("path too long", 0);
+    if (sy_exists(out) == 1) return;
+    if (sy_mkdir_all(dir, 0755) < 0) die("cannot create", dir);
+    /* redirected to a file, not captured: the full dump is about 9 MB */
+    if (cx_fmt(full, sizeof full, "cd '%s' && %s > '%s.part' 2> '%s.err' && mv '%s.part' '%s'", root, cmd, out, out, out, out)) die("path too long", 0);
+    if (cx_run_timeout(full, 55, &o, &on) || sy_exists(out) != 1) { free(o); fprintf(stderr, "rel: generator stderr kept in %s.err\n", out); die("cannot generate default input:", cmd); }
+    free(o);
+}
+
 int main(int argc, char **argv) {
-    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0, *cache = 0; char *files[MAXCH], def[8192], def2[8192]; int nf = 0, a;
+    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0, *cache = 0, *tiers = 0; char *files[MAXCH], def[8192], def2[8192], cmd[256], nm[64]; int nf = 0, a, tier = 0;
     if (argc < 3) usage();
     for (a = 2; a < argc; a++) {
         if (!strcmp(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
@@ -294,6 +314,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[a], "--batches") && a + 1 < argc) table = argv[++a];
         else if (!strcmp(argv[a], "--cache") && a + 1 < argc) cache = argv[++a];
         else if (!strcmp(argv[a], "--timing")) timing = 1;
+        else if (!strcmp(argv[a], "--tier") && a + 1 < argc) { tiers = argv[++a]; if (!(tier = tier_rank(tiers, strlen(tiers)))) usage(); }
         else if (argv[a][0] == '-' && argv[a][1] == '-') usage();
         else if (nf < MAXCH) files[nf++] = argv[a];
         else die("too many files", 0);
@@ -302,21 +323,24 @@ int main(int argc, char **argv) {
     if (sy_realpath(rootarg, root, sizeof root) < 0) die("no root", rootarg);
     rootn = (long)strlen(root);
     if (!strcmp(argv[1], "who-uses")) {
-        if (nf != 1 || closure || table) usage();
-        if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
+        if (nf != 1 || closure || table || tier) usage();
+        if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
         return who_uses(files[0], tracked);
     }
     if (!strcmp(argv[1], "who-calls")) {
-        if (nf != 1 || closure || table) usage();
-        if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
+        if (nf != 1 || closure || table || tier) usage();
+        if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
         if (!cache) { if (cx_fmt(def2, sizeof def2, "%s/.devsvc/relsym", root)) die("path too long", 0); cache = def2; }
         return who_calls(files[0], tracked, cache);
     }
     if (!strcmp(argv[1], "impact")) {
         if (tracked) usage();
-        if (!closure) { if (cx_fmt(def, sizeof def, "%s/out/rel/closure.tsv", root)) die("path too long", 0); closure = def; }
+        if (!closure) {   /* the commit tier's dump has its own (one literal hop) closure, so its own file */
+            if (cx_fmt(nm, sizeof nm, tier ? "closure-%s.tsv" : "closure.tsv", tiers) || cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/affected.cx -- --closure-dump%s%s", tier ? " --tier " : "", tier ? tiers : "")) die("path too long", 0);
+            ensure_default(def, sizeof def, nm, cmd); closure = def;
+        }
         if (!table) { if (cx_fmt(def2, sizeof def2, "%s/tests/batches.tsv", root)) die("path too long", 0); table = def2; }
-        return impact(files, nf, closure, table);
+        return impact(files, nf, closure, table, tier);
     }
     usage();
     return 2;
