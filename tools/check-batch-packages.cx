@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     char dump[4400], copy[4400], none[4400], *t, *d;
     size_t tn = 0, dn = 0;
     int rc;
-    long i, e, nall = 0, kept = 0, shape_bad = 0, nrows = 0;
+    long i, e, nall = 0, kept = 0, shape_bad = 0, nrows = 0, nall_na = 0, ntall = 0;
     if (argc >= 3) { if (tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096)) || cx_fmt(work, sizeof work, "%s", argv[2])) return 2; }
     else if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s/check-batch-packages-%d", sy_tmpdir(), sy_pid())) return 2;
     (void)sy_mkdir(work, 0755);
@@ -115,12 +115,17 @@ int main(int argc, char **argv) {
                 if (!okl || !okp) shape_bad++;
             }
             if (l2 == 3 && tx_prefix(t + i + o2, 3, "all", 3)) {
-                char key[400];
+                char key[400], na[400];
+                ntall++;
+                /* a row the host platform filter skips is NOT_APPLICABLE, never a LAYER line: count it apart */
+                if (!cx_fmt(na, sizeof na, "NOT_APPLICABLE\t%.*s\t", (int)l1, t + i + o1) && last && tx_find(last, (long)lastn, na, tx_len(na, sizeof na)) >= 0) { nall_na++; continue; }
                 nall++;
                 if (!cx_fmt(key, sizeof key, "LAYER\t%.*s\tlayer=all\n", (int)l1, t + i + o1) && last && tx_find(last, (long)lastn, key, tx_len(key, sizeof key)) >= 0) kept++;
             }
         }
         ck(rc == 0 && b > 0 && own > 0 && unk >= 0 && b == own + all + unk && nall > 0 && kept == nall && all == nall, "layer-keeps-all");
+        /* (5b) after the platform filter: every `all` row is either kept or named NOT_APPLICABLE, and NOT_APPLICABLE is never silent */
+        ck(rc == 0 && nall + nall_na == ntall && nall_na <= lines_with(last, (long)lastn, "NOT_APPLICABLE"), "layer-filter-accounted");
         d = last; dn = lastn; last = 0; lastn = 0;
     }
     {   char *v[] = {"sh", prod, "tools/affected.cx", "--", "--layer", "all", "--list-only", 0};
