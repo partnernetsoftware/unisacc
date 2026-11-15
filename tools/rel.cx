@@ -1,0 +1,251 @@
+/* tools/rel.cx -- relation DAG queries (devsvc candidate T, first version): who uses a file, what a change hits.
+ *
+ *   sh ./unisacc.com tools/rel.cx -- who-uses FILE [--root DIR] [--tracked LIST] [--timing]
+ *   sh ./unisacc.com tools/rel.cx -- impact FILE... [--root DIR] [--closure DUMP] [--batches TABLE] [--timing]
+ *
+ * who-uses  every tracked .cx (archive/ and symlinks skipped) whose transitive `#pragma unisa use` /
+ *           `#include "..."` closure holds FILE:  USES<TAB>path  then  USES_SUMMARY<TAB>file=..<TAB>users=N<TAB>scanned=K.
+ *           LIST is the saved output of `git ls-files -s -- '*.cx'` (one "MODE SHA STAGE<TAB>PATH" per line);
+ *           default ROOT/out/rel/tracked.txt.  The use extraction here is a minimal one of its own (a use
+ *           resolves with cxlib.cxroot cxr_path, an include beside the including file); it is to be replaced
+ *           by cxlib.relscan (G1) once that module is in the tree.
+ * impact    IMPACT<TAB>batch<TAB>id<TAB>why=FILE<TAB>via=KIND per batch whose closure holds a FILE (strongest via,
+ *           first FILE on a tie; why/via take the values of affected's AFFECTED line).  A hit batch whose
+ *           platform is not this host's (cxlib.platformscope) prints affected's line instead:
+ *           NOT_APPLICABLE<TAB>id<TAB>platform=..<TAB>host_scope=..  Then
+ *           IMPACT_SUMMARY<TAB>changed=N<TAB>batches=M<TAB>scanned=K<TAB>not_applicable=A.
+ *           DUMP is the saved output of `tools/affected.cx -- --closure-dump` (B/C/D lines); default
+ *           ROOT/out/rel/closure.tsv.  TABLE is the batch registry (id in column 1, platform in column 6);
+ *           default ROOT/tests/batches.tsv.  A dump batch the registry does not hold is refused: the dump
+ *           is then older than the registry.
+ * --timing  one REL_TIMING line on stderr (read_ms, scan_ms); it changes no result.
+ *
+ * Not in this version (named, not silently narrowed): who-uses SYM, --depth, --tier, IMPACT table|node rows.
+ * LIST and DUMP are snapshots: beyond the registry cross-check above this tool does not check that they still
+ * describe the tree (cxlib.relstore, G2, is to own that).
+ * rc 0 rows printed, 1 no rows, 2 usage or I/O error.  No repository path is fixed here.  Check: tools/check-rel.cx. */
+#pragma unisa use cxlib.cxroot
+#pragma unisa use cxlib.platformscope
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+enum { HCAP = 1 << 15, MAXN = 20000, MAXCH = 256, MAXB = 8192 };
+typedef struct { char *rel; int *dep; int nd, cd; int *rev; int nr, cr; int parsed, tracked, seen; } RNode;
+static RNode nd[MAXN]; static int nn, htab[HCAP];
+static char root[4096]; static long rootn;
+static int timing;
+
+static void die(const char *s, const char *t) { fprintf(stderr, "rel: %s%s%s\n", s, t ? " " : "", t ? t : ""); exit(2); }
+static void usage(void) { die("usage: who-uses FILE [--root DIR] [--tracked LIST] [--timing] | impact FILE... [--root DIR] [--closure DUMP] [--batches TABLE] [--timing]", 0); }
+static unsigned long hs(const char *s) { unsigned long h = 1469598103934665603UL; while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211UL; } return h; }
+static int node_of(const char *rel) {
+    unsigned long h = hs(rel) & (HCAP - 1);
+    while (htab[h]) { if (!strcmp(nd[htab[h] - 1].rel, rel)) return htab[h] - 1; h = (h + 1) & (HCAP - 1); }
+    if (nn >= MAXN) die("too many files", 0);
+    nd[nn].rel = strdup(rel); if (!nd[nn].rel) die("out of memory", 0);
+    htab[h] = ++nn; return nn - 1;
+}
+static void push(int **v, int *n, int *c, int x) {
+    if (*n == *c) { *c = *c ? *c * 2 : 8; *v = realloc(*v, (size_t)*c * sizeof(int)); if (!*v) die("out of memory", 0); }
+    (*v)[(*n)++] = x;
+}
+/* absolute spelling -> node of the real file below root; -1 when it is not below root */
+static int file_node(const char *abs) {
+    char real[8192];
+    if (sy_realpath(abs, real, sizeof real) < 0) return -1;
+    if (memcmp(real, root, (size_t)rootn) || real[rootn] != '/') return -1;
+    return node_of(real + rootn + 1);
+}
+static int isname(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.'; }
+static int at(const char *s, size_t p, size_t e, const char *w) { size_t n = strlen(w); return e - p > n && !memcmp(s + p, w, n); }
+static void parse(int ni) {
+    char abs[8192], out[8192]; size_t sz, i = 0; char *s; int d;
+    nd[ni].parsed = 1;
+    if (cx_fmt(abs, sizeof abs, "%s/%s", root, nd[ni].rel)) die("path too long", nd[ni].rel);
+    s = cx_read(abs, &sz); if (!s) return;
+    while (i < sz) {
+        size_t e = i, b; while (e < sz && s[e] != '\n') e++;
+        b = i; while (b < e && (s[b] == ' ' || s[b] == '\t')) b++;
+        if (b < e && s[b] == '#') {
+            size_t p = b + 1, q; int isuse = 0, isinc = 0;
+            while (p < e && (s[p] == ' ' || s[p] == '\t')) p++;
+            if (at(s, p, e, "pragma")) {
+                p += 6; while (p < e && (s[p] == ' ' || s[p] == '\t')) p++;
+                if (at(s, p, e, "unisa")) {
+                    p += 5; while (p < e && (s[p] == ' ' || s[p] == '\t')) p++;
+                    if (at(s, p, e, "use") && (s[p + 3] == ' ' || s[p + 3] == '\t')) { p += 3; isuse = 1; }
+                }
+            } else if (at(s, p, e, "include")) { p += 7; isinc = 1; }
+            while (p < e && (s[p] == ' ' || s[p] == '\t')) p++;
+            if (isuse) {
+                q = p; while (q < e && isname((unsigned char)s[q])) q++;
+                if (q > p && cxr_path(abs, s + p, (long)(q - p), out, (long)sizeof out) == 0 && (d = file_node(out)) >= 0) push(&nd[ni].dep, &nd[ni].nd, &nd[ni].cd, d);
+            } else if (isinc && p < e && s[p] == '"') {
+                long dl = (long)strlen(abs); q = ++p; while (q < e && s[q] != '"') q++;
+                while (dl > 0 && abs[dl - 1] != '/') dl--;
+                if (q < e && q > p && dl + (long)(q - p) + 1 < (long)sizeof out) {
+                    if (mm_copy(out, (long)sizeof out, abs, dl) || mm_copy(out + dl, (long)sizeof out - dl, s + p, (long)(q - p))) die("path too long", nd[ni].rel); out[dl + (long)(q - p)] = 0;
+                    if (sy_exists(out) == 1 && (d = file_node(out)) >= 0) push(&nd[ni].dep, &nd[ni].nd, &nd[ni].cd, d);
+                }
+            }
+        }
+        i = e + 1;
+    }
+    free(s);
+}
+
+static int who_uses(const char *file, const char *list) {
+    char abs[8192]; size_t sz, i = 0; char *s; int target, k, found = 0, scanned = 0, *order = 0, no = 0, co = 0, *q = 0, nq = 0, cq = 0, h;
+    long t0 = sy_now_ms(), t1;
+    if (file[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", file)) die("path too long", 0); }
+    else if (cx_fmt(abs, sizeof abs, "%s/%s", root, file)) die("path too long", 0);
+    if (sy_exists(abs) != 1) die("who-uses: no file", file);
+    if ((target = file_node(abs)) < 0) die("who-uses: not below root:", file);
+    s = cx_read(list, &sz); if (!s) die("cannot read tracked list (git ls-files -s -- '*.cx' > LIST):", list);
+    while (i < sz) {
+        size_t e = i, t; while (e < sz && s[e] != '\n') e++;
+        t = i; while (t < e && s[t] != '\t') t++;
+        if (t < e && e - t > 1 && !(t - i >= 6 && !memcmp(s + i, "120000", 6)) && !(e - t - 1 >= 8 && !memcmp(s + t + 1, "archive/", 8))) {
+            char rel[4096]; int ni;
+            if (e - t - 1 >= sizeof rel) die("path too long in", list);
+            if (mm_copy(rel, (long)sizeof rel, s + t + 1, (long)(e - t - 1))) die("path too long in", list); rel[e - t - 1] = 0;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long", rel);
+            ni = file_node(abs); if (ni < 0) ni = node_of(rel);
+            nd[ni].tracked = 1; push(&order, &no, &co, ni); push(&order, &no, &co, node_of(rel)); scanned++;
+        }
+        i = e + 1;
+    }
+    t1 = sy_now_ms();
+    for (k = 0; k < nn; k++) {   /* nn grows while new files are discovered */
+        int j; if (!nd[k].parsed) parse(k);
+        for (j = 0; j < nd[k].nd; j++) push(&nd[nd[k].dep[j]].rev, &nd[nd[k].dep[j]].nr, &nd[nd[k].dep[j]].cr, k);
+    }
+    nd[target].seen = 1; push(&q, &nq, &cq, target);
+    for (h = 0; h < nq; h++) { int j, x = q[h]; for (j = 0; j < nd[x].nr; j++) if (!nd[nd[x].rev[j]].seen) { nd[nd[x].rev[j]].seen = 1; push(&q, &nq, &cq, nd[x].rev[j]); } }
+    for (k = 0; k < no; k += 2) if (order[k] != target && nd[order[k]].seen) { printf("USES\t%s\n", nd[order[k + 1]].rel); found++; }
+    printf("USES_SUMMARY\tfile=%s\tusers=%d\tscanned=%d\n", nd[target].rel, found, scanned);
+    if (timing) fprintf(stderr, "REL_TIMING\tread_ms=%ld\tscan_ms=%ld\n", t1 - t0, sy_now_ms() - t1);
+    return found ? 0 : 1;
+}
+
+static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard", "table"};
+static size_t via_len[9];
+static int via_of(const char *s, size_t n) { int v; size_t j; if (!via_len[1]) for (v = 1; v < 9; v++) via_len[v] = strlen(via_name[v]); for (v = 1; v < 9; v++) if (via_len[v] == n) { for (j = 0; j < n && via_name[v][j] == s[j]; j++) {} if (j == n) return v; } return 0; }
+
+/* the registry: id (column 1) and platform (column 6) of every row */
+static const char *bt_id[MAXB], *bt_pf[MAXB]; static size_t bt_idn[MAXB], bt_pfn[MAXB]; static int bt_n, bt_h[HCAP];
+static unsigned long hsn(const char *s, size_t n) { unsigned long h = 1469598103934665603UL; while (n--) { h ^= (unsigned char)*s++; h *= 1099511628211UL; } return h; }
+static int bt_find(const char *id, size_t n, int add) {
+    unsigned long h = hsn(id, n) & (HCAP - 1);
+    while (bt_h[h]) { int k = bt_h[h] - 1; if (bt_idn[k] == n && !memcmp(bt_id[k], id, n)) return k; h = (h + 1) & (HCAP - 1); }
+    if (!add) return -1;
+    if (bt_n >= MAXB) die("too many registry rows", 0);
+    bt_id[bt_n] = id; bt_idn[bt_n] = n; bt_h[h] = ++bt_n; return bt_n - 1;
+}
+static void bt_load(const char *path) {
+    size_t sz, i = 0; char *s = cx_read(path, &sz); long line = 0;
+    if (!s) die("cannot read batch registry:", path);
+    while (i < sz) {
+        size_t e = i, f[7]; int nf = 0, k; while (e < sz && s[e] != '\n') e++;
+        line++;
+        if (e > i && s[i] != '#') {
+            size_t p = i; f[nf++] = i;
+            for (; p < e && nf < 7; p++) if (s[p] == '\t') f[nf++] = p + 1;
+            if (nf < 7) { char w[64]; cx_fmt(w, sizeof w, "line %ld", line); die("batch registry row without a platform column:", w); }
+            if (!(line == 1 && f[1] - 1 - f[0] == 2 && !memcmp(s + i, "id", 2))) {
+                k = bt_find(s + f[0], f[1] - 1 - f[0], 1);
+                bt_pf[k] = s + f[5]; bt_pfn[k] = f[6] - 1 - f[5];
+            }
+        }
+        i = e + 1;
+    }
+}
+
+static int impact(char **files, int nf, const char *dump, const char *table) {
+    char abs[8192], pf[64], idz[512]; const char *ch[MAXCH]; size_t cl[MAXCH], sz, i = 0; char *s; int k, nb = 0, hit = 0, nna = 0, bv = 0, bw = -1; const char *bid = 0; size_t bn = 0;
+    long t0 = sy_now_ms(), t1;
+    if (nf > MAXCH) die("too many files", 0);
+    for (k = 0; k < nf; k++) {   /* a file that no longer exists still matches by its spelling */
+        int ni = -1; const char *f = files[k];
+        if (f[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", f)) die("path too long", 0); }
+        else if (cx_fmt(abs, sizeof abs, "%s/%s", root, f)) die("path too long", 0);
+        if (sy_exists(abs) == 1) ni = file_node(abs);
+        if (ni >= 0) ch[k] = nd[ni].rel;
+        else ch[k] = (f[0] == '/' && strlen(f) > (size_t)rootn && !memcmp(f, root, (size_t)rootn) && f[rootn] == '/') ? f + rootn + 1 : f;
+        cl[k] = strlen(ch[k]);
+    }
+    bt_load(table);
+    s = cx_read(dump, &sz); if (!s) die("cannot read closure dump (tools/affected.cx -- --closure-dump > DUMP):", dump);
+    t1 = sy_now_ms();
+    for (;;) {
+        size_t e = i, f1, f2, f3; int end = i >= sz;
+        if (!end) { while (e < sz && s[e] != '\n') e++; }
+        if (end || (e - i > 2 && s[i] == 'B' && s[i + 1] == '\t')) {   /* a new batch (or the end) closes the previous one */
+            if (bid && bv) {
+                int r = bt_find(bid, bn, 0);
+                if (bt_pfn[r] >= sizeof pf) die("platform too long in", table);
+                if (bn >= sizeof idz) die("batch id too long in", dump);
+                if (mm_copy(idz, (long)sizeof idz, bid, (long)bn)) die("batch id too long in", dump); idz[bn] = 0;   /* printf %.*s on a pointer into the 9 MB dump scans far past the precision (measured: 20 s for 1014 rows) */
+                (void)0;
+                if (mm_copy(pf, (long)sizeof pf, bt_pf[r], (long)bt_pfn[r])) die("platform too long in", table); pf[bt_pfn[r]] = 0;
+                if (psc_platform_allowed(pf)) { printf("IMPACT\tbatch\t%s\twhy=%s\tvia=%s\n", idz, ch[bw], via_name[bv]); hit++; }
+                else { printf("NOT_APPLICABLE\t%s\tplatform=%s\thost_scope=%s\n", idz, pf, psc_host_scope()); nna++; }
+            }
+            if (end) break;
+            f1 = i + 2; f2 = f1; while (f2 < e && s[f2] != '\t') f2++;
+            bid = s + f1; bn = f2 - f1; bv = 0; bw = -1; nb++;
+            if (bt_find(bid, bn, 0) < 0) { char w[300]; cx_fmt(w, sizeof w, "%.*s", bn > 200 ? 200 : (int)bn, bid); die("closure dump names a batch the registry does not hold (dump is stale):", w); }
+        } else if (e - i > 2 && (s[i] == 'C' || s[i] == 'D') && s[i + 1] == '\t') {
+            int v; size_t pn; f1 = i + 2; while (f1 < e && s[f1] != '\t') f1++;
+            f2 = f1 + 1; while (f2 < e && s[f2] != '\t') f2++;
+            if (f2 >= e || !bid) die("malformed closure dump line in", dump);
+            f3 = f2 + 1; pn = e - f3;
+            for (k = 0; k < nf; k++) {
+                int m = s[i] == 'C' ? (cl[k] == pn && !memcmp(ch[k], s + f3, pn))
+                                    : (cl[k] > pn && ch[k][pn] == '/' && !memcmp(ch[k], s + f3, pn));
+                if (!m) continue;
+                v = via_of(s + f1 + 1, f2 - f1 - 1); if (!v) die("unknown via in", dump);
+                if (!bv || v < bv || (v == bv && k < bw)) { bv = v; bw = k; }
+            }
+            if (!nf || (pn && !via_of(s + f1 + 1, f2 - f1 - 1))) die("unknown via in", dump);
+        }
+        i = e + 1;
+    }
+    printf("IMPACT_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\tnot_applicable=%d\n", nf, hit, nb, nna);
+    if (timing) fprintf(stderr, "REL_TIMING\tread_ms=%ld\tscan_ms=%ld\n", t1 - t0, sy_now_ms() - t1);
+    return hit || nna ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0; char *files[MAXCH], def[8192], def2[8192]; int nf = 0, a;
+    if (argc < 3) usage();
+    for (a = 2; a < argc; a++) {
+        if (!strcmp(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
+        else if (!strcmp(argv[a], "--tracked") && a + 1 < argc) tracked = argv[++a];
+        else if (!strcmp(argv[a], "--closure") && a + 1 < argc) closure = argv[++a];
+        else if (!strcmp(argv[a], "--batches") && a + 1 < argc) table = argv[++a];
+        else if (!strcmp(argv[a], "--timing")) timing = 1;
+        else if (argv[a][0] == '-' && argv[a][1] == '-') usage();
+        else if (nf < MAXCH) files[nf++] = argv[a];
+        else die("too many files", 0);
+    }
+    if (!nf) usage();
+    if (sy_realpath(rootarg, root, sizeof root) < 0) die("no root", rootarg);
+    rootn = (long)strlen(root);
+    if (!strcmp(argv[1], "who-uses")) {
+        if (nf != 1 || closure || table) usage();
+        if (!tracked) { if (cx_fmt(def, sizeof def, "%s/out/rel/tracked.txt", root)) die("path too long", 0); tracked = def; }
+        return who_uses(files[0], tracked);
+    }
+    if (!strcmp(argv[1], "impact")) {
+        if (tracked) usage();
+        if (!closure) { if (cx_fmt(def, sizeof def, "%s/out/rel/closure.tsv", root)) die("path too long", 0); closure = def; }
+        if (!table) { if (cx_fmt(def2, sizeof def2, "%s/tests/batches.tsv", root)) die("path too long", 0); table = def2; }
+        return impact(files, nf, closure, table);
+    }
+    usage();
+    return 2;
+}
