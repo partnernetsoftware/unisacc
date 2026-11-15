@@ -119,6 +119,27 @@ static long num(const char *out, const char *key) {
 /* AFFECTED lines other than this check's own batches.  The check file names the paths it probes, so
    affected-tool, and now its split batches affected-tiers/list/run, are its own rows and not evidence that
    some other batch writes that path. */
+/* the KEY= field (up to CAP-1 chars, tab-terminated) of the `PREPARED<TAB>NAME<TAB>` line; 1 when found */
+static int prep_field(const char *out, const char *name, const char *key, char *val, int cap) {
+    long i = 0, on = tx_len(out, OUTCAP), kl = tx_len(key, 32), nl = tx_len(name, 128);
+    while (i < on) {   /* TSV rows: field 0 PREPARED, field 1 NAME, then KEY=VALUE fields */
+        long e = i, f, fe, col = 0, hit = 0;
+        while (e < on && out[e] != '\n') e++;
+        for (f = i; f <= e; f = fe + 1) {
+            for (fe = f; fe < e && out[fe] != '\t'; fe++) {}
+            if (col == 0 && !(fe - f == 8 && tx_prefix(out + f, fe - f, "PREPARED", 8))) break;
+            if (col == 1) { if (fe - f != nl || !tx_prefix(out + f, fe - f, name, nl)) break; hit = 1; }
+            if (col >= 2 && hit && tx_prefix(out + f, fe - f, key, kl)) {
+                long m = fe - f - kl; if (m < 1 || m >= cap) return 0;
+                return tx_copy(val, cap, out + f + kl, m) == 0;
+            }
+            col++;
+            if (fe >= e) break;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
 static int own(const char *line, long n) {
     static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", 0};
     int k; char pre[64];
@@ -264,6 +285,31 @@ int main(int argc, char **argv) {
            && has(o, "MATERIAL\trelease-exec\trelease-oneshot-tool\ttools/release-oneshot.cx\n"), "material-falls-back-to-tests-cases");
         ck(rc == 0 && has(o, "MATERIAL\tidentity\tidentity-helper\tseed/ident.c\n"), "identity-helper-has-producer");
         ck(rc == 0 && has(o, "MATERIAL\torigin-package\tsource-origin\t-\tREFUSED=no-producer=source-origin\n"), "unknown-material-still-no-producer");
+        ck(rc == 0 && has(o, "MATERIAL\tcx0-bundle\te2model\tunisacc.com\n") && has(o, "MATERIAL\toptimization-ccdiff\thostcc\t/usr/bin/cc\n")
+           && has(o, "MATERIAL\tnet-controls\tnets\ttools/net-material.cx\n") && has(o, "MATERIAL\tobjects-link\tobjects\ttools/object-material.cx\n")
+           && has(o, "MATERIAL\tstream-lower-independent\tstream-lower-sha\tstreams/streams.json:lower\n")
+           && has(o, "MATERIAL\tadopted-package\tcurrent-source-id\tidentity-helper:ROOT\n"), "f4a-producers-resolve");
+    }
+    {   /* F4a: each new producer class PREPARED with the right identity.  Product = the root's own unisacc.com
+           sha; host oracle = file sha + a version line; material dirs built by their tool; stream-STAGE-sha =
+           streams.json com_sha256 of that stage (from the PREPARED streams material, not the object under test);
+           current-source-id = 64 hex from the PREPARED identity-helper. */
+        char *a[] = {"--prep-only", "--ids", "cx0-bundle,unit-frontcache-equiv0,optimization-ccdiff,net-controls,objects-link,stream-lower-independent,adopted-package", 0};
+        char h[65], want_h[65], sid[17], leaf[4400]; size_t n; char *s;
+        rc = tool(a, o, OUTCAP);
+        s = cx_read("unisacc.com", &n); if (s) { cx_sha256_hex(s, n, want_h); free(s); } else want_h[0] = 0;
+        ck(rc == 0 && prep_field(o, "unitcache-product", "sha256=", h, 65) && want_h[0] && tx_eqz(h, want_h)
+           && prep_field(o, "e2model", "sha256=", h, 65) && tx_eqz(h, want_h), "f4a-product-identity");
+        s = cx_read("/usr/bin/cc", &n); if (s) { cx_sha256_hex(s, n, want_h); free(s); } else want_h[0] = 0;
+        ck(prep_field(o, "hostcc", "sha256=", h, 65) && want_h[0] && tx_eqz(h, want_h) && has(o, "\tpath=/usr/bin/cc\tversion=") && !has(o, "version=\n"), "f4a-host-identity");
+        ck(prep_field(o, "nets", "sha256=", h, 65) && prep_field(o, "objects", "sha256=", h, 65), "f4a-material-dirs-prepared");
+        ck(prep_field(o, "streams", "id=", sid, 17) && prep_field(o, "stream-lower-sha", "sha256=", h, 65)
+           /* the lower stage is unisacc-stream6.com in the streams-material contract; affected itself refuses
+              unless streams.json's com_sha256 equals that file's sha, so equality here is equality with the json */
+           && !cx_fmt(leaf, sizeof leaf, "%s/.cache/unisacc/prep-cache/streams-%s.dir/unisacc-stream6.com", sy_env_or("HOME", "."), sid)
+           && (s = cx_read(leaf, &n)) != 0 && (cx_sha256_hex(s, n, want_h), free(s), 1) && tx_eqz(h, want_h), "f4a-stream-sha-from-streams-json");
+        ck(prep_field(o, "current-source-id", "sha256=", h, 65) && tx_len(h, 65) == 64, "f4a-source-id-from-helper");
+        ck(rc == 0 && num(o, "\tfailed=") == 0, "f4a-prep-no-failure");
     }
     }
     if (want("list2")) {   /* 慢组:guard 3 次 + table 6 次整表扫描(~1.6 秒/次);list 段只留单扫描断言,以免 25 秒预算被吃满 */

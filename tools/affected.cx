@@ -661,11 +661,16 @@ static int finish(Child *C, int ex, int code, int sig) {
 #define PREP_PAR 3
 #define PREP_SECS 90
 #define PREP_BUDGET_MS 38000
-typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65]; long ms; int cached; } Prep;
-enum { PK_TOOL = 1, PK_STREAMS = 2, PK_IDENT = 3 };   /* PK_IDENT: seed/ident.c compiled with cc (closure = ident.c + sha256.h) */   /* PK_STREAMS: a directory of seven shims from tools/streams-material.cx; its artifact sha is that of streams.json */
+typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65], ver[160]; long ms; int cached; } Prep;
+/* PK_PROD: the product under test itself (ROOT/unisacc.com, identity = its sha).  PK_HOST: a declared host
+   oracle (/usr/bin/cc|ld|ar, identity = file sha + first --version line).  PK_MDIR: a directory from a material
+   tool (net/pp-gold/object-material), artifact sha = material.tsv.  PK_SVAL/PK_SID: a sha256 value derived
+   from an already PREPARED material (streams.json com_sha256 of one stage / identity-helper run on ROOT). */
+enum { PK_TOOL = 1, PK_STREAMS = 2, PK_IDENT = 3, PK_PROD = 4, PK_HOST = 5, PK_MDIR = 6, PK_SVAL = 7, PK_SID = 8 };   /* PK_IDENT: seed/ident.c compiled with cc (closure = ident.c + sha256.h) */   /* PK_STREAMS: a directory of seven shims from tools/streams-material.cx; its artifact sha is that of streams.json */
 enum { PS_TODO = 0, PS_READY, PS_FAILED };
 static int prep_on = 0;
-static Prep prep[32];
+#define PREP_MAX 64   /* distinct preparable materials per run (slots, not a time bound) */
+static Prep prep[PREP_MAX];
 static int nprep = 0;
 static char prod_sha[65];
 static char cachedir[4400];
@@ -695,8 +700,8 @@ static int closure_sha(const char *rel, char *out65) {
 static int file_sha(const char *p, char *h) { size_t sz; char *s = cx_read(p, &sz); if (!s) return -1; tp_sha(s, sz, h); free(s); return 0; }   /* same SHA-256; cxlib.tlibpkg tp_sha = kernel AF_ALG with the portable fallback */
 static int prep_art_sha(const Prep *P, char *h) {
     char leaf[4500];
-    if (P->kind != PK_STREAMS) return file_sha(P->path, h);
-    if (cx_fmt(leaf, sizeof leaf, "%s/streams.json", P->path)) return -1;
+    if (P->kind != PK_STREAMS && P->kind != PK_MDIR) return file_sha(P->path, h);
+    if (cx_fmt(leaf, sizeof leaf, "%s/%s", P->path, P->kind == PK_STREAMS ? "streams.json" : "material.tsv")) return -1;
     return file_sha(leaf, h);
 }
 /* 1 when the stored receipt names exactly this identity and the artifact's own sha256 still matches */
@@ -714,10 +719,34 @@ static int prep_verify(Prep *P) {
 /* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
    absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
    resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
+static int prep_kind_of(const char *name, int kind) {
+    long nl = tx_len(name, 256);
+    if (kind == 2) {
+        static const char *st[] = {"lower", "e1", "e2", "e3", "e4", "prune", "elf"}; int i;
+        if (tx_eqz(name, "current-source-id")) return PK_SID;
+        if (nl > 11 && tx_prefix(name, nl, "stream-", 7) && tx_eqz(name + nl - 4, "-sha"))
+            for (i = 0; i < 7; i++) if (nl - 11 == tx_len(st[i], 16) && !memcmp(name + 7, st[i], (size_t)(nl - 11))) return PK_SVAL;
+        return 0;
+    }
+    if (tx_eqz(name, "unitcache-product") || tx_eqz(name, "e2model")) return PK_PROD;
+    if (tx_eqz(name, "hostcc") || tx_eqz(name, "hostld") || tx_eqz(name, "hostar")) return PK_HOST;
+    if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects")) return PK_MDIR;
+    if (tx_eqz(name, "streams")) return PK_STREAMS;
+    if (tx_eqz(name, "identity-helper")) return PK_IDENT;
+    return PK_TOOL;
+}
 static int prep_source(const char *name, int kind, char *src, long cap, char *why, int whycap) {
     long nl = tx_len(name, 256);
     char cand[600];
+    int pk = prep_kind_of(name, kind);
+    if (pk == PK_SVAL) { cx_fmt(src, cap, "streams/streams.json:%.*s", (int)(nl - 11), name + 7); return 0; }
+    if (pk == PK_SID) { cx_fmt(src, cap, "identity-helper:ROOT"); return 0; }
+    if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
+    if (pk == PK_HOST) { cx_fmt(src, cap, "/usr/bin/%s", name + 4); return 0; }
+    if (pk == PK_MDIR) { if (cx_fmt(src, cap, "tools/%s-material.cx", tx_eqz(name, "nets") ? "net" : tx_eqz(name, "objects") ? "object" : "pp-gold")) return -1; }
+    else
     if (kind == 2) { cx_fmt(why, whycap, "unpreparable=sha256-value:%s", name); return -1; }
+    else
     if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) {
         if (cx_fmt(src, cap, "tools/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, whycap, "source-name-too-long=%s", name); return -1; }
         if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) {
@@ -733,12 +762,40 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
 static int prep_plan(const char *name, int kind, char *why, int cap) {
     int k = prep_find(name); Prep *P; char h[65], buf[600];
     if (k >= 0) return k;
-    if (nprep >= 32) { cx_fmt(why, cap, "too-many-materials"); return -1; }
+    if (nprep >= PREP_MAX) { cx_fmt(why, cap, "too-many-materials"); return -1; }
     P = &prep[nprep];
     memset(P, 0, sizeof *P);
     cx_fmt(P->name, sizeof P->name, "%s", name);
-    P->kind = tx_eqz(name, "streams") ? PK_STREAMS : tx_eqz(name, "identity-helper") ? PK_IDENT : PK_TOOL;
+    P->kind = prep_kind_of(name, kind);
     if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
+    if (P->kind == PK_PROD) {   /* the object under test is the root's own product: no build, identity = its sha */
+        if (cx_fmt(P->path, sizeof P->path, "%s/unisacc.com", root)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
+        memcpy(P->sha, prod_sha, 65); memcpy(P->closure, prod_sha, 65); memcpy(P->id, prod_sha, 16); P->id[16] = 0;
+        P->state = PS_READY; P->cached = 1; return nprep++;
+    }
+    if (P->kind == PK_HOST) {   /* declared host oracle: absolute path, file sha, first --version line */
+        char bound[4400], *av[6]; Buf o = {0, 0, 0}; long e = 0;
+        if (cx_fmt(P->path, sizeof P->path, "%s", P->src) || sy_exists(P->path) != 1) { cx_fmt(why, cap, "host-tool-absent=%s", P->src); return -1; }
+        if (file_sha(P->path, P->sha)) { cx_fmt(why, cap, "host-tool-unreadable=%s", P->src); return -1; }
+        if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
+        av[0] = bound; av[1] = "5"; av[2] = P->path; av[3] = "--version"; av[4] = 0;
+        if (read_all(av, &o) != 0 || !o.n) { cx_fmt(why, cap, "host-tool-version=%s", P->src); return -1; }
+        while (e < o.n && o.p[e] != '\n' && o.p[e] != '\t') e++;
+        cx_fmt(P->ver, sizeof P->ver, "%.*s", (int)(e < 150 ? e : 150), o.p);
+        memcpy(P->closure, P->sha, 65); memcpy(P->id, P->sha, 16); P->id[16] = 0;
+        P->state = PS_READY; P->cached = 1; return nprep++;
+    }
+    if (P->kind == PK_SVAL || P->kind == PK_SID) {   /* resolved by prep_derive once its producer is PREPARED */
+        char w2[200];
+        if (prep_plan(P->kind == PK_SVAL ? "streams" : "identity-helper", 1, w2, (int)sizeof w2) < 0) { cx_fmt(why, cap, "producer-refused=%s:%s", name, w2); return -1; }
+        if (nprep >= PREP_MAX) { cx_fmt(why, cap, "too-many-materials"); return -1; }
+        P = &prep[nprep];   /* the recursive plan may have taken the slot: re-seat */
+        memset(P, 0, sizeof *P);
+        cx_fmt(P->name, sizeof P->name, "%s", name);
+        P->kind = prep_kind_of(name, kind);
+        (void)prep_source(name, kind, P->src, (long)sizeof P->src, why, cap);
+        return nprep++;
+    }
     if (P->kind == PK_IDENT) {
         char a[4400], b2[4400], ha[65], hb[65], both[140];
         if (cx_fmt(a, sizeof a, "%s/seed/ident.c", root) || cx_fmt(b2, sizeof b2, "%s/seed/sha256.h", root)
@@ -754,7 +811,7 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     {   char idb[200]; if (cx_fmt(idb, sizeof idb, "%s%s", P->closure, prod_sha)) { cx_fmt(why, cap, "identity=%s", name); return -1; }
         cx_sha256_hex(idb, (size_t)tx_len(idb, sizeof idb), h);
         memcpy(P->id, h, 16); P->id[16] = 0; }
-    if (cx_fmt(P->path, sizeof P->path, "%s/%s-%s.%s", cachedir, name, P->id, P->kind == PK_STREAMS ? "dir" : "bin")
+    if (cx_fmt(P->path, sizeof P->path, "%s/%s-%s.%s", cachedir, name, P->id, P->kind == PK_STREAMS || P->kind == PK_MDIR ? "dir" : "bin")
         || cx_fmt(P->rcpt, sizeof P->rcpt, "%s/%s-%s.rcpt", cachedir, name, P->id)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
     if (prep_verify(P)) { P->state = PS_READY; P->cached = 1; }
     return nprep++;
@@ -777,7 +834,9 @@ static int prep_start(PJob *J, int k) {
         J->secs = left < PREP_SECS ? (int)left : PREP_SECS;
         if (J->secs < 6) return -2;
         if (cx_fmt(s_all, sizeof s_all, "%d", J->secs) || cx_fmt(s_kit, sizeof s_kit, "%d", J->secs < 20 ? J->secs : 20)) return -1;
-        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(P->kind == PK_STREAMS ? sscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
+        static const char *pscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- prepare \"$5\" \"$4\" >/dev/null";   /* pp-gold/object-material prepare ROOT NEW_ABS_MATERIAL */
+        int is_net = P->kind == PK_MDIR && tx_eqz(P->name, "nets");   /* net-material.cx ROOT NEW_OUTDIR: the streams form */
+        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
     }
     av[n] = 0;
     J->job = k; J->t0 = sy_now_ms(); J->out.p = 0; J->out.n = J->out.cap = 0; J->err = J->out;
@@ -795,6 +854,41 @@ static void prep_done(PJob *J, int ok) {
     P->state = PS_FAILED;
     if (!P->why[0]) cx_fmt(P->why, sizeof P->why, "build-failed=%s", P->name);
 }
+/* PK_SVAL / PK_SID: the value comes from the PREPARED producer, never from the object under test and never a
+   literal.  stream-STAGE-sha = streams.json com_sha256 of that stage, cross-checked against the shim file's own
+   sha; current-source-id = the identity-helper's 64-hex output on ROOT.  0 ready, -1 with WHY. */
+static int prep_derive(Prep *P) {
+    int k = prep_find(P->kind == PK_SVAL ? "streams" : "identity-helper"); Prep *Q;
+    P->state = PS_FAILED;
+    if (k < 0 || prep[k].state != PS_READY) { cx_fmt(P->why, sizeof P->why, "producer-not-prepared=%s", P->name); return -1; }
+    Q = &prep[k];
+    if (P->kind == PK_SVAL) {
+        char leaf[4500], pat[64], h[65]; size_t sz; char *s; long nl = tx_len(P->name, 128), a, f, c;
+        if (cx_fmt(leaf, sizeof leaf, "%s/streams.json", Q->path) || cx_fmt(pat, sizeof pat, "\"stream_unit\":\"%.*s\"", (int)(nl - 11), P->name + 7)) return -1;
+        s = cx_read(leaf, &sz);
+        if (!s) { cx_fmt(P->why, sizeof P->why, "streams-json-unreadable=%s", P->name); return -1; }
+        a = tx_find(s, (long)sz, pat, tx_len(pat, sizeof pat));
+        f = a < 0 ? -1 : tx_find(s + a, (long)sz - a, "\"file\":\"", 8);
+        c = a < 0 ? -1 : tx_find(s + a, (long)sz - a, "\"com_sha256\":\"", 14);
+        if (a < 0 || f < 0 || c < 0 || a + c + 14 + 64 > (long)sz) { free(s); cx_fmt(P->why, sizeof P->why, "streams-json-no-stage=%s", P->name); return -1; }
+        memcpy(P->sha, s + a + c + 14, 64); P->sha[64] = 0;
+        {   long fe = a + f + 8, fl = 0; while (fe + fl < (long)sz && s[fe + fl] != '"' && fl < 200) fl++;
+            if (cx_fmt(leaf, sizeof leaf, "%s/%.*s", Q->path, (int)fl, s + fe)) { free(s); return -1; } }
+        free(s);
+        if (file_sha(leaf, h) || !tx_eqz(h, P->sha)) { cx_fmt(P->why, sizeof P->why, "streams-json-sha-mismatch=%s", P->name); return -1; }
+    } else {
+        char bound[4400], *av[5]; Buf o = {0, 0, 0}; int i;
+        if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
+        av[0] = bound; av[1] = "10"; av[2] = Q->path; av[3] = root; av[4] = 0;
+        if (read_all(av, &o) != 0 || o.n != 65 || o.p[64] != '\n') { cx_fmt(P->why, sizeof P->why, "identity-helper-output=%s", P->name); return -1; }
+        for (i = 0; i < 64; i++) if (!((o.p[i] >= '0' && o.p[i] <= '9') || (o.p[i] >= 'a' && o.p[i] <= 'f'))) { cx_fmt(P->why, sizeof P->why, "identity-helper-hex=%s", P->name); return -1; }
+        memcpy(P->sha, o.p, 64); P->sha[64] = 0;
+    }
+    memcpy(P->path, P->sha, 65);   /* the material's value handed to run-batch is the sha itself */
+    memcpy(P->closure, Q->closure, 65); memcpy(P->id, Q->id, 17);
+    P->state = PS_READY;
+    return 0;
+}
 /* --materials-dump prints only MATERIAL rows: a reader that hands them to run-batch must not have to skip
    PREPARED/PREBUILD lines.  When a dump asked for the build, those reports go to stderr instead. */
 static int prep_quiet;
@@ -803,7 +897,7 @@ static int prep_only, pb_materials, pb_hits, pb_built, pb_failed;
 static const char *kit_state = "unknown";
 static void prep_print(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(prep_quiet ? stderr : stdout, fmt, ap); va_end(ap); }
 static void prebuild(const int *sel, int nsel) {
-    int b, todo[32], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
+    int b, todo[PREP_MAX], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
     if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."))) die("path too long");
     {   char od[4400]; long n = tx_len(cachedir, sizeof cachedir), k; int r;   /* the cache directory, parents included */
         for (k = 1; k <= n; k++) if (k == n || cachedir[k] == '/') {
@@ -816,7 +910,7 @@ static void prebuild(const int *sel, int nsel) {
         if (tx_eqz(at, "-")) continue;
         while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; (void)prep_plan(d.name, d.kind, why, sizeof why); }
     }
-    for (k = 0; k < nprep; k++) { if (prep[k].state == PS_READY) hits++; else todo[ntodo++] = k; }
+    for (k = 0; k < nprep; k++) { if (prep[k].state == PS_READY) hits++; else if (prep[k].kind != PK_SVAL && prep[k].kind != PK_SID) todo[ntodo++] = k; }
     while (nextt < ntodo || nact) {
         sy_pollfd_t fds[2 * PREP_PAR]; int who[2 * PREP_PAR], isout[2 * PREP_PAR], nf = 0, m;
         while (nact < PREP_PAR && nextt < ntodo) {
@@ -862,8 +956,10 @@ static void prebuild(const int *sel, int nsel) {
             job[k] = job[nact - 1]; nact--; k--;
         }
     }
+    for (k = 0; k < nprep; k++) if (prep[k].kind == PK_SVAL || prep[k].kind == PK_SID) { if (prep_derive(&prep[k])) failed++; else built++; }
     for (k = 0; k < nprep; k++)
-        if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
+        if (prep[k].state == PS_READY && prep[k].kind == PK_HOST) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\tpath=%s\tversion=%s\n", prep[k].name, prep[k].id, prep[k].sha, "hit", 0L, prep[k].path, prep[k].ver);
+        else if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
         else prep_print("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
     prep_print("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
     pb_materials = nprep; pb_hits = hits; pb_built = built; pb_failed = failed + deferred;
