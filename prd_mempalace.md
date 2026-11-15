@@ -16,7 +16,7 @@
 flowchart LR
   subgraph 版本流水线
     V66["0.0.66 已公开 Latest 已装<br/>release/、plans/release-notes-0.0.66.md"]
-    V67["0.0.67 已冻结 REV 855ce83aa9<br/>整链 real11 在跑<br/>/tmp/unisacc-session-build-lr0060/KEEP-README.txt"]
+    V67["0.0.67 整链 real11 rc=0 3697 s,发布中<br/>REV 855ce83aa9<br/>/tmp/unisacc-session-build-lr0060/chain-real11"]
     V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
     V69["0.0.69 netraw 计划"]
     V70["0.0.70 cxmod 内存安全乙期 计划"]
