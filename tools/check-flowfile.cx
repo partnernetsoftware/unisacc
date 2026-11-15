@@ -1,0 +1,331 @@
+/* tools/check-flowfile.cx -- cxlib.flowfile: file.read / file.write / file.edit contracts.
+   Run: sh ./unisacc.com tools/check-flowfile.cx     (last line CHECK_FLOWFILE failed=N)
+   Works in a fresh temporary directory outside the repository; removes it at the end. */
+#pragma unisa use cxlib.flowfile
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed;
+static char root[2048];
+static char outside[2048];
+static char args[8192];
+
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-flowfile.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static void cat(char *d, long cap, const char *s) {
+    long i = 0, j = 0;
+    while (d[i]) i++;
+    while (s[j] && i + 1 < cap) d[i++] = s[j++];
+    d[i] = 0;
+}
+
+/* args = "root=<root>;" + rest */
+static const char *A(const char *rest) {
+    args[0] = 0;
+    cat(args, sizeof args, "root=");
+    cat(args, sizeof args, root);
+    cat(args, sizeof args, ";");
+    cat(args, sizeof args, rest);
+    return args;
+}
+
+static char pbuf[4096];
+static const char *P(const char *rel) {
+    pbuf[0] = 0;
+    cat(pbuf, sizeof pbuf, root);
+    cat(pbuf, sizeof pbuf, "/");
+    cat(pbuf, sizeof pbuf, rel);
+    return pbuf;
+}
+
+static int put(const char *rel, const char *s) {
+    return sy_write_file(P(rel), s, tx_len(s, 1 << 20), 0644);
+}
+
+/* 1 when the file REL holds exactly S. */
+static int holds(const char *rel, const char *s) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long sn = tx_len(s, 1 << 20), i;
+    int ok;
+    if (sy_read_file(P(rel), &b, &n, 1 << 20) != 0) return 0;
+    ok = n == sn;
+    for (i = 0; ok && i < sn; i++) if ((char)b[i] != s[i]) ok = 0;
+    mm_free(b);
+    return ok;
+}
+
+static int is(const ff_out *o, const char *s) {
+    long sn = tx_len(s, 1 << 20), i;
+    if (!o->buf || o->n != sn) return 0;
+    for (i = 0; i < sn; i++) if (o->buf[i] != s[i]) return 0;
+    return 1;
+}
+
+static void sha_of(const char *s, char hex[65]) { sy_sha256_hex(s, tx_len(s, 1 << 20), hex); }
+
+/* Count directory entries of the root whose name starts with ".ff-tmp-" (leftover temporaries). */
+static int leftovers(void) {
+    sy_dir_t d;
+    int n = 0;
+    if (sy_dir_open(&d, root) != 0) return -1;
+    while (sy_dir_next(&d) == 1) if (tx_find(d.name, tx_len(d.name, 256), ".ff-tmp-", 8) == 0) n++;
+    sy_dir_close(&d);
+    return n;
+}
+
+int main(void) {
+    ff_out o;
+    char hex[65], hex2[65], t[4096], esc[256], back[256];
+    const char *tmp = sy_env("TMPDIR");
+    sy_stat_t st, st2;
+    long n;
+    int rc;
+
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    t[0] = 0;
+    if (sy_mkdtemp(tmp, "check-flowfile-", t, sizeof t) != 0) { printf("FAIL\tcheck-flowfile.mkdtemp\nCHECK_FLOWFILE\tfailed=1\n"); return 1; }
+    if (sy_realpath(t, outside, sizeof outside) < 0) { printf("FAIL\tcheck-flowfile.realpath\nCHECK_FLOWFILE\tfailed=1\n"); return 1; }
+    root[0] = 0; cat(root, sizeof root, outside); cat(root, sizeof root, "/root");
+    ck(sy_mkdir_all(root, 0755) == 0, "setup-root");
+
+    /* escape round trip */
+    {
+        const char *raw = "a;b\tc\nd%e=f";
+        long en = ff_escape(raw, tx_len(raw, 64), esc, sizeof esc), bn, i, same = 1;
+        esc[en > 0 ? en : 0] = 0;
+        ck(en > 0 && tx_eqz(esc, "a%3Bb%09c%0Ad%25e=f"), "escape-text");
+        bn = ff_unescape(esc, en, back, sizeof back);
+        for (i = 0; i < bn; i++) if (back[i] != raw[i]) same = 0;
+        ck(bn == tx_len(raw, 64) && same, "escape-roundtrip");
+        ck(ff_unescape("a%3", 3, back, sizeof back) == -1, "unescape-truncated-refuse");
+        ck(ff_unescape("a%zz", 4, back, sizeof back) == -1, "unescape-nonhex-refuse");
+        ck(ff_unescape("abcd", 4, back, 3) == -1, "unescape-small-dst-refuse");
+    }
+    /* ff_arg */
+    {
+        char *v = 0;
+        long vn = 0;
+        ck(ff_arg("path=x;old=a%3Bb;new=", "old", &v, &vn) == 1 && vn == 3 && tx_eqz(v, "a;b"), "arg-unescaped");
+        if (v) mm_free(v);
+        ck(ff_arg("path=x;old=a", "new", &v, &vn) == 0 && v == 0, "arg-absent");
+        ck(ff_arg("xpath=1;path=2", "path", &v, &vn) == 1 && tx_eqz(v, "2"), "arg-exact-key");
+        if (v) mm_free(v);
+        ck(ff_arg("new=;old=a", "new", &v, &vn) == 1 && vn == 0, "arg-empty-value");
+        if (v) mm_free(v);
+        ck(ff_arg("old=%4", "old", &v, &vn) == -1, "arg-bad-escape");
+    }
+
+    /* file.read */
+    ck(put("r.txt", "one\ntwo\nthree\nfour\n") == 0, "setup-read-file");
+    sha_of("one\ntwo\nthree\nfour\n", hex);
+    rc = ff_run("file.read", A("path=r.txt"), &o);
+    ck(rc == 0 && o.rc == 0 && is(&o, "one\ntwo\nthree\nfour\n") && tx_eqz(o.sha, hex) && o.lines == 4, "read-whole-sha-lines");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=r.txt;offset_line=2;limit_line=2"), &o);
+    ck(rc == 0 && is(&o, "two\nthree\n") && tx_eqz(o.sha, hex) && o.lines == 4, "read-span-keeps-whole-sha");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=r.txt;offset_line=4"), &o);
+    ck(rc == 0 && is(&o, "four\n"), "read-offset-to-end");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=r.txt;limit_line=1"), &o);
+    ck(rc == 0 && is(&o, "one\n"), "read-limit-only");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=r.txt;offset_line=5"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ERANGE_LINE") && o.buf == 0, "read-offset-past-end-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=r.txt;offset_line=0"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "read-offset-zero-refuse");
+    ff_out_free(&o);
+    ck(put("nonl.txt", "a\nb") == 0, "setup-nonl");
+    rc = ff_run("file.read", A("path=nonl.txt;offset_line=2"), &o);
+    ck(rc == 0 && is(&o, "b") && o.lines == 2, "read-last-line-without-newline");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=missing.txt"), &o);
+    ck(rc != 0 && o.rc == 1 && tx_eqz(o.err, "ENOENT") && tx_find(o.why, tx_len(o.why, 512), "ENOENT: ", 8) == 0, "read-enoent-named");
+    ff_out_free(&o);
+    ck(put("secret.txt", "x\n") == 0 && sy_chmod(P("secret.txt"), 0) == 0, "setup-unreadable");
+    rc = ff_run("file.read", A("path=secret.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EACCES"), "read-eacces-not-enoent");
+    ff_out_free(&o);
+    sy_chmod(P("secret.txt"), 0644);
+    rc = ff_run("file.read", A("path=r.txt/x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOTDIR"), "read-enotdir-named");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("path=."), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EISDIR"), "read-directory-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.read", A("offset_line=1"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "read-missing-path-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.nosuch", A("path=r.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOP"), "unknown-op-refuse");
+    ff_out_free(&o);
+
+    /* file.write */
+    rc = ff_run("file.write", A("path=w.txt;content=hello%3B%0Aworld%0A;expect_sha=absent"), &o);
+    sha_of("hello;\nworld\n", hex);
+    ck(rc == 0 && holds("w.txt", "hello;\nworld\n") && tx_eqz(o.sha, hex) && o.lines == 2, "write-new-absent-ok");
+    ck(rc == 0 && o.buf && tx_find(o.buf, o.n, "sha=", 4) == 0 && tx_find(o.buf, o.n, hex, 64) == 4, "write-report-has-sha");
+    ff_out_free(&o);
+    ck(sy_stat(P("w.txt"), &st) == 0 && st.mode == 0644, "write-new-mode-0644");
+    ck(leftovers() == 0, "write-no-temporary-left");
+    rc = ff_run("file.write", A("path=w.txt;content=clobber;expect_sha=absent"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ESHA") && holds("w.txt", "hello;\nworld\n"), "write-absent-but-exists-refuse");
+    ff_out_free(&o);
+    sha_of("something else", hex2);
+    t[0] = 0; cat(t, sizeof t, "path=w.txt;content=clobber;expect_sha="); cat(t, sizeof t, hex2);
+    rc = ff_run("file.write", A(t), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ESHA") && holds("w.txt", "hello;\nworld\n"), "write-expect-sha-mismatch-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=w.txt;content=clobber;expect_sha=abc"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG") && holds("w.txt", "hello;\nworld\n"), "write-expect-sha-malformed-refuse");
+    ff_out_free(&o);
+    ck(sy_chmod(P("w.txt"), 0750) == 0 && sy_stat(P("w.txt"), &st) == 0, "setup-mode-0750");
+    t[0] = 0; cat(t, sizeof t, "path=w.txt;content=v2%0A;expect_sha="); cat(t, sizeof t, hex);
+    rc = ff_run("file.write", A(t), &o);
+    ck(rc == 0 && holds("w.txt", "v2\n"), "write-expect-sha-match-ok");
+    ff_out_free(&o);
+    ck(sy_stat(P("w.txt"), &st2) == 0 && st2.mode == 0750, "write-keeps-permission-bits");
+    ck(st2.ino != st.ino, "write-atomic-new-inode");
+    ck(leftovers() == 0, "write-replace-no-temporary-left");
+    rc = ff_run("file.write", A("path=copy.txt;from=r.txt"), &o);
+    ck(rc == 0 && holds("copy.txt", "one\ntwo\nthree\nfour\n"), "write-from-file");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=copy2.txt;from=missing.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT") && sy_exists(P("copy2.txt")) != 1, "write-from-missing-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=both.txt;content=a;from=r.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "write-content-and-from-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=none.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "write-no-content-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=empty.txt;content="), &o);
+    ck(rc == 0 && holds("empty.txt", "") && o.lines == 0, "write-empty-content");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=sub/deep/n.txt;content=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT"), "write-missing-parent-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=sub/deep/n.txt;content=x;mkdir=1"), &o);
+    ck(rc == 0 && holds("sub/deep/n.txt", "x"), "write-mkdir-parent");
+    ff_out_free(&o);
+    /* a read-only directory: the write fails by name and the old file is untouched */
+    ck(sy_mkdir_all(P("ro"), 0755) == 0 && put("ro/f.txt", "keep\n") == 0 && sy_chmod(P("ro"), 0555) == 0, "setup-readonly-dir");
+    rc = ff_run("file.write", A("path=ro/f.txt;content=lost"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EACCES") && holds("ro/f.txt", "keep\n"), "write-readonly-dir-eacces-untouched");
+    ff_out_free(&o);
+    sy_chmod(P("ro"), 0755);
+
+    /* root containment */
+    t[0] = 0; cat(t, sizeof t, "path="); cat(t, sizeof t, outside); cat(t, sizeof t, "/esc.txt;content=x");
+    rc = ff_run("file.write", A(t), &o);
+    t[0] = 0; cat(t, sizeof t, outside); cat(t, sizeof t, "/esc.txt");
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-absolute-outside-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=../esc.txt;content=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-dotdot-outside-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=sub/../../esc.txt;content=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-nested-dotdot-outside-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.write", A("path=../newdir/esc.txt;content=x;mkdir=1"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "write-mkdir-dotdot-refuse");
+    ff_out_free(&o);
+    ck(sy_symlink(outside, P("link")) == 0, "setup-symlink-dir");
+    rc = ff_run("file.write", A("path=link/esc.txt;content=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-through-symlink-dir-refuse");
+    ff_out_free(&o);
+    ck(sy_write_file(t, "out\n", 4, 0644) == 0 && sy_symlink(t, P("flink")) == 0, "setup-symlink-file");
+    rc = ff_run("file.write", A("path=flink;content=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "write-through-symlink-file-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=flink;old=out;new=in"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "edit-through-symlink-file-refuse");
+    ff_out_free(&o);
+    {
+        unsigned char *b = 0; int64_t bn = 0;
+        ck(sy_read_file(t, &b, &bn, 64) == 0 && bn == 4 && b[0] == 'o', "outside-file-untouched");
+        if (b) mm_free(b);
+    }
+    sy_setenv("UNISACC_FLOW_ROOT", "", 1);
+    rc = ff_run("file.write", "path=/tmp/check-flowfile-noroot.txt;content=x", &o);
+    ck(rc != 0 && tx_eqz(o.err, "EROOT") && sy_exists("/tmp/check-flowfile-noroot.txt") != 1, "write-without-root-refuse");
+    ff_out_free(&o);
+    sy_setenv("UNISACC_FLOW_ROOT", root, 1);
+    rc = ff_run("file.write", "path=env.txt;content=via-env", &o);
+    ck(rc == 0 && holds("env.txt", "via-env"), "write-root-from-environment");
+    ff_out_free(&o);
+    sy_setenv("UNISACC_FLOW_ROOT", "", 1);
+    rc = ff_run("file.write", "root=/no/such/root-dir;path=a.txt;content=x", &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT"), "write-missing-root-named");
+    ff_out_free(&o);
+
+    /* file.edit */
+    ck(put("e.txt", "alpha\nbeta\ngamma\nbeta2\n") == 0 && sy_chmod(P("e.txt"), 0600) == 0, "setup-edit-file");
+    rc = ff_run("file.edit", A("path=e.txt;old=gamma;new=GAMMA%0Adelta"), &o);
+    sha_of("alpha\nbeta\nGAMMA\ndelta\nbeta2\n", hex);
+    ck(rc == 0 && holds("e.txt", "alpha\nbeta\nGAMMA\ndelta\nbeta2\n") && o.count == 1 && tx_eqz(o.sha, hex) && o.lines == 5, "edit-unique-ok");
+    ck(rc == 0 && o.buf && tx_find(o.buf, o.n, "count=1\n", 8) > 0, "edit-report-has-count");
+    ff_out_free(&o);
+    ck(sy_stat(P("e.txt"), &st) == 0 && st.mode == 0600, "edit-keeps-permission-bits");
+    rc = ff_run("file.edit", A("path=e.txt;old=beta;new=B"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EMULTI") && o.count == 2 && holds("e.txt", "alpha\nbeta\nGAMMA\ndelta\nbeta2\n"), "edit-multi-refuse-unwritten");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=nosuch;new=B"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOMATCH") && holds("e.txt", "alpha\nbeta\nGAMMA\ndelta\nbeta2\n"), "edit-zero-match-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=nosuch;new=B;replace_all=1"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOMATCH"), "edit-replace-all-zero-match-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=beta;new=B;replace_all=1"), &o);
+    ck(rc == 0 && o.count == 2 && holds("e.txt", "alpha\nB\nGAMMA\ndelta\nB2\n"), "edit-replace-all");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=B2%0A;new="), &o);
+    ck(rc == 0 && o.count == 1 && holds("e.txt", "alpha\nB\nGAMMA\ndelta\n"), "edit-delete-with-empty-new");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=;new=x"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "edit-empty-old-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=alpha;new=alpha"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ESAME"), "edit-identical-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=alpha"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "edit-missing-new-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=e.txt;old=alpha;new=x;replace_all=yes"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "edit-bad-flag-refuse");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=missing.txt;old=a;new=b"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT"), "edit-enoent-named");
+    ff_out_free(&o);
+    t[0] = 0; cat(t, sizeof t, "path=e.txt;old=alpha;new=A;expect_sha="); cat(t, sizeof t, hex2);
+    rc = ff_run("file.edit", A(t), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ESHA") && holds("e.txt", "alpha\nB\nGAMMA\ndelta\n"), "edit-expect-sha-mismatch-refuse");
+    ff_out_free(&o);
+    sha_of("alpha\nB\nGAMMA\ndelta\n", hex);
+    t[0] = 0; cat(t, sizeof t, "path=e.txt;old=alpha;new=A;expect_sha="); cat(t, sizeof t, hex);
+    rc = ff_run("file.edit", A(t), &o);
+    ck(rc == 0 && holds("e.txt", "A\nB\nGAMMA\ndelta\n"), "edit-expect-sha-match-ok");
+    ff_out_free(&o);
+    ck(put("ov.txt", "aaa") == 0, "setup-overlap");
+    rc = ff_run("file.edit", A("path=ov.txt;old=aa;new=b"), &o);
+    ck(rc == 0 && o.count == 1 && holds("ov.txt", "ba"), "edit-nonoverlapping-count");
+    ff_out_free(&o);
+    rc = ff_run("file.edit", A("path=ov.txt;old=%zz;new=b"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EESCAPE") && holds("ov.txt", "ba"), "edit-bad-escape-refuse");
+    ff_out_free(&o);
+    ck(leftovers() == 0, "edit-no-temporary-left");
+    n = 0; (void)n;
+
+    ck(sy_remove_all(outside) == 0, "cleanup");
+    printf("CHECK_FLOWFILE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
