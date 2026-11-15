@@ -1,0 +1,75 @@
+/* tools/check-devsvc-remain.cx -- 检查 devsvc 启动器的工单时钟输出(plans/devsvc.md 第 6 节 S3):flow 族命令结束后在 stderr 带出
+ *   $DEVSVC_OWNER 名下未完成工单的剩余秒数。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-remain.cx        (在仓根跑)
+ *
+ * 夹具写 /tmp/dvrck-<pid>/work/:index.tsv(a 两次、b、c、d、zz 无文件)与四张工单;经 $UNISACC_DEVSVC_DIR 指向夹具、
+ *   $DEVTASK_NOW=1000 固定时钟。被测命令只用不起服务的用法错路径(f 无参 rc 2)与 config。
+ * 断言:(a) 未过期单 TASK_LEFT left_s=600 used_s=600 且只打一次;(b) 过期单 TASK_OVERDUE over_s=300 used_s=900;
+ *   (c) 已完成单不打;(d) 他人单不打;(e) 属主为前缀名不打;(f) 无 DEVSVC_OWNER 不打;(g) 非 flow 族子命令不打;
+ *   (h) 退出码不变(f 无参仍 rc 2,config 仍 rc 0);(i) 时钟行不进 stdout。末行 CHECK_DEVSVC_REMAIN<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+static int nfail;
+static char out[1 << 15], err[1 << 15], fx[160];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-remain.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) { printf("NOTE\tlast-stdout\t%.500s\nNOTE\tlast-stderr\t%.500s\n", out, err); nfail++; }
+}
+static int run(char **v) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out); memset(err, 0, sizeof err);
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a > (long)sizeof out - 1 || b > (long)sizeof err - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(err, sizeof err, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int sh(const char *cmd) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return run(v); }
+static int has(const char *s) { return strstr(err, s) != 0; }
+static int count(const char *s) { int n = 0; const char *p = err; while ((p = strstr(p, s)) != 0) { n++; p++; } return n; }
+static int wfile(const char *rel, const char *txt) { char p[400]; F(p, sizeof p, "%s/%s", fx, rel); return sy_write_atomic(p, (char *)txt, strlen(txt), 0644); }
+#define WO(id, owner, opened, deadline, done) "id\t" id "\ntitle\tt\nwrite\ttools/x.cx\nroot\t/r\nowner\t" owner "\nopened\t" opened "\ndeadline\t" deadline "\ndone\t" done "\naccept\ttrue\n"
+int main(void) {
+    char c[900], env[400]; int rc;
+    F(fx, sizeof fx, "/tmp/dvrck-%d", sy_pid());
+    F(c, sizeof c, "mkdir -p %s/work", fx);
+    if (sh(c) != 0) { printf("FAIL\tdevsvc-remain.fixture\n"); return 1; }
+    if (wfile("work/index.tsv", "a\nb\nc\nd\nzz\na\n") || wfile("work/a.tsv", WO("a", "me", "400", "1600", "0")) || wfile("work/b.tsv", WO("b", "me", "100", "700", "0"))
+        || wfile("work/c.tsv", WO("c", "me", "100", "1600", "900")) || wfile("work/d.tsv", WO("d", "other", "400", "1600", "0"))) { printf("FAIL\tdevsvc-remain.fixture-write\n"); return 1; }
+    F(env, sizeof env, "UNISACC_DEVSVC_DIR=%s DEVTASK_NOW=1000", fx);
+
+    F(c, sizeof c, "%s DEVSVC_OWNER=me sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    ck(rc == 2, "rc-kept-usage");
+    ck(has("TASK_LEFT\tid=a\tleft_s=600\tused_s=600\n"), "left");
+    ck(count("id=a\t") == 1, "left-once");
+    ck(has("TASK_OVERDUE\tid=b\tover_s=300\tused_s=900\n"), "overdue");
+    ck(!has("id=c\t"), "done-silent");
+    ck(!has("id=d\t"), "other-owner-silent");
+    ck(!has("id=zz"), "missing-file-silent");
+    ck(!strstr(out, "TASK_"), "not-on-stdout");
+
+    F(c, sizeof c, "%s DEVSVC_OWNER=m sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    ck(rc == 2 && !has("TASK_"), "prefix-owner-silent");
+
+    F(c, sizeof c, "%s DEVSVC_OWNER=other sh ./unisacc.com tools/devsvc.cx -- flow", env); rc = sh(c);
+    ck(rc != 0 && has("TASK_LEFT\tid=d\tleft_s=600\tused_s=600\n") && !has("id=a\t"), "flow-other-owner-own-order");
+
+    F(c, sizeof c, "%s env -u DEVSVC_OWNER sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    ck(rc == 2 && !has("TASK_"), "no-owner-silent");
+
+    F(c, sizeof c, "%s DEVSVC_OWNER=me sh ./unisacc.com tools/devsvc.cx -- config", env); rc = sh(c);
+    ck(rc == 0, "rc-kept-config");
+    ck(!has("TASK_") && strstr(out, "DEVSVC_CONFIG") != 0, "non-flow-subcommand-silent");
+
+    F(c, sizeof c, "rm -rf %s", fx); (void)sh(c);
+    printf("CHECK_DEVSVC_REMAIN\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}
