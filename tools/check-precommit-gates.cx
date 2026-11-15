@@ -1,7 +1,8 @@
 /* tools/check-precommit-gates.cx -- tools/precommit.cx gate read sets (tests/precommit-gates.tsv) and the
  * within-one-commit reuse of a gate result (UNISACC_GATE_REUSE, written by tools/commit-own.cx).
  *
- *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse|toolsreg      (three batches, each under 55 s)
+ *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse|toolsreg-a|toolsreg-b|toolsreg-c   (five batches, each measured under 35 s)
+ *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases toolsreg   (toolsreg-a, -b and -c in one run; not a batch)
  *   sh ./unisacc.com tools/check-precommit-gates.cx -- --bench before|after  (a measurement, not a batch)
  *
  * Fixture: a fixed private copy ~/.cache/unisacc/check-precommit-gates/fx-GROUP (git archive HEAD, the working
@@ -132,24 +133,40 @@ static void group_reuse(void) {
  * is still refused (the gate judges the staged tables); a staged delete of a registered tool whose row stays is refused by name,
  * with the row removed it passes.  "Passes" means this gate: a bare new tool is still blocked by the cx gate's
  * new-tool rules (check and batch), which this group does not judge; deletes run no cx gate, so there rc 0. */
-static void group_toolsreg(void) {
-    static char out[16384];
+/* PART: 0 = every case (--cases toolsreg, not a batch), 1 = the unregistered add cases (toolsreg-a), 2 = the
+ * registered add case (toolsreg-b), 3 = the delete cases (toolsreg-c).  toolsreg-b and toolsreg-c first bring the
+ * fixture to the state the earlier steps leave (tools/zzt.cx and its row staged), without running precommit, so
+ * their steps see the same index as in the whole run. */
+static void group_toolsreg(int part) {
+    static char out[16384], sa[2000], sr[1000], sb[2000];
     const char *pc = "sh ./unisacc.com tools/precommit.cx > p.out 2>&1; echo";
+    const char *preb = "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2; printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv;"
+                       " git add tools/zzt.cx tests/tools-compile-sources.tsv;";
     char c[4000];
-    if (cx_fmt(c, sizeof c,
+    if (cx_fmt(sa, sizeof sa,
        "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2;"
        " git add tools/zzt.cx; %s ARC=$?; echo AMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);"
-       " printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);"
-       " git add tests/tools-compile-sources.tsv; %s BRC=$?; echo BMSG=$(grep -c 'BLOCKED tools' p.out); grep '^PRECOMMIT_GATES' p.out | sed 's/^/B_/';"
+       " printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);",
+       pc, pc)) die("script");
+    if (cx_fmt(sr, sizeof sr,
+       " git add tests/tools-compile-sources.tsv; %s BRC=$?; echo BMSG=$(grep -c 'BLOCKED tools' p.out); grep '^PRECOMMIT_GATES' p.out | sed 's/^/B_/';",
+       pc)) die("script");
+    if (cx_fmt(sb, sizeof sb,
        " git commit -qm zzt --no-verify; git rm -q tools/zzt.cx; %s CRC=$?; echo CMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE removed" T "tools/zzt.cx' p.out);"
        " grep -v '^tools/zzt.cx' tests/tools-compile-sources.tsv > tcs.tmp; mv tcs.tmp tests/tools-compile-sources.tsv; git add tests/tools-compile-sources.tsv; %s DRC=$?; echo DMSG=$(grep -c 'BLOCKED tools' p.out)",
-       pc, pc, pc, pc, pc)) die("script");
+       pc, pc)) die("script");
+    if (cx_fmt(c, sizeof c, "%s%s%s", part >= 2 ? preb : sa, part == 0 || part == 2 ? sr : "", part == 0 || part == 3 ? sb : "")) die("script");
     sh(c, out, sizeof out, 1);
-    ck(has(out, "ARC=1\n") && has(out, "AMSG=1\n"), "toolsreg.added-unregistered-refused-by-name");
-    ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
-    ck(has(out, "BRC=") && has(out, "BMSG=0\n") && has(out, "B_PRECOMMIT_GATES") && !has(out, "toolsreg,") && !has(out, ",toolsreg\t"), "toolsreg.added-registered-passes");
-    ck(has(out, "CRC=1\n") && has(out, "CMSG=1\n"), "toolsreg.deleted-still-registered-refused-by-name");
-    ck(has(out, "DRC=0\n") && has(out, "DMSG=0\n"), "toolsreg.deleted-unregistered-passes");
+    if (part == 0 || part == 1) {
+        ck(has(out, "ARC=1\n") && has(out, "AMSG=1\n"), "toolsreg.added-unregistered-refused-by-name");
+        ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
+    }
+    if (part == 0 || part == 2)
+        ck(has(out, "BRC=") && has(out, "BMSG=0\n") && has(out, "B_PRECOMMIT_GATES") && !has(out, "toolsreg,") && !has(out, ",toolsreg\t"), "toolsreg.added-registered-passes");
+    if (part == 0 || part == 3) {
+        ck(has(out, "CRC=1\n") && has(out, "CMSG=1\n"), "toolsreg.deleted-still-registered-refused-by-name");
+        ck(has(out, "DRC=0\n") && has(out, "DMSG=0\n"), "toolsreg.deleted-unregistered-passes");
+    }
     if (failed) sy_printf("%s\n", out);
 }
 
@@ -176,12 +193,17 @@ int main(int argc, char **argv) {
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
-        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg | --bench before|after\n"); return 2; }
+        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c | --bench before|after\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench"); bench(bn); unlock(); return 0; }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg | --bench before|after\n"); return 2; }
+    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c | --bench before|after\n"); return 2; }
     setup(group);
-    if (tx_eqz(group, "na")) group_na(); else if (tx_eqz(group, "toolsreg")) group_toolsreg(); else group_reuse();
+    if (tx_eqz(group, "na")) group_na();
+    else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);
+    else if (tx_eqz(group, "toolsreg-a")) group_toolsreg(1);
+    else if (tx_eqz(group, "toolsreg-b")) group_toolsreg(2);
+    else if (tx_eqz(group, "toolsreg-c")) group_toolsreg(3);
+    else group_reuse();
     unlock();
     sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;
