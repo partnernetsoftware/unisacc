@@ -197,6 +197,38 @@ int main(int argc, char **argv) {
         rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
         ck(rc == 2 && rc2 == 2, "refusals");
     }
+    {   /* A batch registered for another native host is NOT_APPLICABLE: never run here, never a
+           failure, and counted on its own line so a green run still shows what it could not cover. */
+        char *a[] = {"--ids", "osx-lane-scheduler", "--run", 0};
+        rc = tool(a, o, OUTCAP);
+        ck(rc == 0 && has(o, "NOT_APPLICABLE\tosx-lane-scheduler\tplatform=osx/arm64\thost_scope=lnx/x86_64\n")
+           && has(o, "pass=0\tfail=0\tdeferred=0\tnot_applicable=1\t") && !has(o, "BATCH_RUN")
+           && !has(o, "SELECTED\tosx-lane-scheduler"), "foreign-platform-not-applicable");
+    }
+    {   /* An inherited hard deadline that already passed refuses every child before it starts; one
+           named REFUSE replaces a wall of per-batch failures.  Injected through the tool's own
+           environment, so the assertion does not depend on an earlier command having leaked it. */
+        char keep[64] = {0}, v[64]; long n0 = sy_mono_ns();
+        if (n0 < 0) { printf("FAIL\taffected.mono\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+        if (cx_fmt(v, sizeof v, "%.9f", (double)n0 / 1e9 - 5.0)) { printf("FAIL\taffected.fmt\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+        { const char *old = getenv("UNISACC_BOUND_DEADLINE_MONO");
+          if (old) tx_copy(keep, (long)sizeof keep, old, tx_len(old, 64)); }
+        setenv("UNISACC_BOUND_DEADLINE_MONO", v, 1);
+        { char *a[] = {"--ids", "tape-gap-tool", "--run", 0}; rc = tool(a, o, OUTCAP); }
+        if (keep[0]) setenv("UNISACC_BOUND_DEADLINE_MONO", keep, 1); else unsetenv("UNISACC_BOUND_DEADLINE_MONO");
+        ck(rc == 2 && has(o, "REFUSE\tinherited-deadline-expired\t") && !has(o, "BATCH_RUN"), "expired-inherited-deadline-refused");
+    }
+    {   /* ...and a deadline still in the future must not refuse anything. */
+        char keep[64] = {0}, v[64]; long n0 = sy_mono_ns();
+        if (n0 < 0) { printf("FAIL\taffected.mono\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+        if (cx_fmt(v, sizeof v, "%.9f", (double)n0 / 1e9 + 40.0)) { printf("FAIL\taffected.fmt\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+        { const char *old = getenv("UNISACC_BOUND_DEADLINE_MONO");
+          if (old) tx_copy(keep, (long)sizeof keep, old, tx_len(old, 64)); }
+        setenv("UNISACC_BOUND_DEADLINE_MONO", v, 1);
+        { char *a[] = {"--ids", "osx-lane-scheduler", "--run", 0}; rc = tool(a, o, OUTCAP); }
+        if (keep[0]) setenv("UNISACC_BOUND_DEADLINE_MONO", keep, 1); else unsetenv("UNISACC_BOUND_DEADLINE_MONO");
+        ck(rc == 0 && !has(o, "REFUSE\tinherited-deadline-expired") && has(o, "NOT_APPLICABLE\tosx-lane-scheduler"), "fresh-inherited-deadline-not-refused");
+    }
     {   char *a[] = {"--run", "-j", "2", "--ids", "tape-gap-tool", 0};
         rc = tool(a, o, OUTCAP);
         ck(rc == 0 && has(o, "BATCH_RUN\tid=tape-gap-tool\tstatus=PASS\t") && has(o, "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\t"), "real-run");
