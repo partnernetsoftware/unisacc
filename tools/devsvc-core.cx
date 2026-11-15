@@ -262,28 +262,56 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     sy_spawn_t o; sy_exit_t ex;
     *ms = 0; *cache = "miss"; nlog[0] = 0;
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
-    char h0[160], h1[160], h2[160];
-    F(h0, sizeof h0, "HEAD:%s", cfg.lib[0]); F(h1, sizeof h1, "HEAD:%s", cfg.lib[1]); F(h2, sizeof h2, "HEAD:%s", cfg.lib[2]);
+    /* 键 = 产品字节 sha + 被运行工具 use 传递闭包(产品 -cx-plan 解析)每个文件的工作区内容 sha;
+       闭包外的脏文件或未跟踪文件不影响命中;解析或读失败才 bypass */
+    static char cl[1 << 16]; long cn = 0;
+    char phex[65];
     F(src, sizeof src, "%s/%s", root, tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
-    if (sy_read_file(src, &b, &n, 1 << 24) || !b) return -ENOENT;
-    if (sy_sha256_hex(b, n, hex)) { free(b); return -EIO; }
-    free(b);
+    if (sy_exists(src) != 1) return -ENOENT;
     if (sy_realpath(prod, real, sizeof real) < 0) return -ENOENT;
-    {   char *v[] = {"git", "-C", (char *)root, "rev-parse", h0, h1, h2, 0};
-        if (runcap(v, trees, sizeof trees) != 0) bypass = 1; }
-    {   char *v[] = {"git", "-C", (char *)root, "status", "--porcelain", "--", cfg.lib[0], cfg.lib[1], cfg.lib[2], 0};
-        if (runcap(v, st, sizeof st) != 0 || strstr(st, "?? ")) bypass = 1; }
-    {   char *v[] = {"git", "-C", (char *)root, "diff", "HEAD", "--", cfg.lib[0], cfg.lib[1], cfg.lib[2], 0};
-        if (runcap(v, big, sizeof big) != 0 || sy_sha256_hex(big, strlen(big), dhex)) bypass = 1; }
-    {   int64_t psz = 0; if (sy_file_size(real, &psz)) return -ENOENT;
-        F(keysrc, sizeof keysrc, "%s|%s|%s|%ld|%s|%s", root, hex, real, (long)psz, trees, dhex); }
+    if (sy_read_file(real, &b, &n, 1 << 28) || !b) return -ENOENT;
+    if (sy_sha256_hex(b, n, phex)) { free(b); return -EIO; }
+    free(b); b = 0;
+    {   char *v[] = {"sh", prod, "-cx-plan", src, 0};
+        if (runcap(v, big, sizeof big) != 0) bypass = 1; }
+    if (!bypass) {
+        char *p = big;
+        cl[0] = 0;
+        while (*p && !bypass) {
+            char *e = strchr(p, '\n'), *t1, *t2, fp[PW], fh[65];
+            if (!e) e = p + strlen(p);
+            t1 = memchr(p, '\t', e - p); t2 = t1 ? memchr(t1 + 1, '\t', e - t1 - 1) : 0;
+            if (!t2) t2 = e;
+            if (!t1 || t2 - t1 - 1 <= 0 || t2 - t1 - 1 >= (long)sizeof fp) { bypass = 1; break; }
+            if (mm_copy(fp, sizeof fp, t1 + 1, t2 - t1 - 1)) { bypass = 1; break; }
+            fp[t2 - t1 - 1] = 0;
+            if (sy_read_file(fp, &b, &n, 1 << 24) || !b || sy_sha256_hex(b, n, fh)) bypass = 1;
+            free(b); b = 0;
+            if (!bypass) {
+                long fl = (long)strlen(fp);
+                if (cn + fl + 66 >= (long)sizeof cl || mm_copy(cl + cn, sizeof cl - cn, fp, fl)) bypass = 1;
+                else { cn += fl; cl[cn++] = '\t'; if (mm_copy(cl + cn, sizeof cl - cn, fh, 64)) bypass = 1; cn += 64; cl[cn++] = '\n'; }
+            }
+            p = *e ? e + 1 : e;
+        }
+        if (cn == 0 || sy_sha256_hex(cl, cn, dhex)) bypass = 1;
+    }
+    F(keysrc, sizeof keysrc, "v2|%s|%s|%s|%s", root, tool, phex, bypass ? "-" : dhex);
     if (sy_sha256_hex(keysrc, strlen(keysrc), hex)) return -EIO;
     hex[20] = 0;
     base = strrchr(tool, '/'); base = base ? base + 1 : tool;
     F(leaf, sizeof leaf, "%s", base); dot = strrchr(leaf, '.'); if (dot) *dot = 0;
     F(kd, sizeof kd, "%s/native/%s", dir, bypass ? "bypass" : hex);
     if (sy_mkdir_all(kd, 0700) || snprintf(bin, cap, "%s/%s", kd, leaf) >= cap) return -EIO;
-    if (!bypass && sy_exists(bin) == 1) { *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
+    if (!bypass && sy_exists(bin) == 1) {   /* 命中:每次重算执行体字节 sha 与构造时记下的比对,不符即重建 */
+        char sp[PW + 8], want[80] = "", got[65]; unsigned char *sb = 0; int64_t sn = 0;
+        F(sp, sizeof sp, "%s.sha", bin);
+        if (!sy_read_file(sp, &sb, &sn, 128) && sb && sn >= 64) { memcpy(want, sb, 64); want[64] = 0; }
+        free(sb); sb = 0;
+        if (want[0] && !sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got) && !strcmp(got, want)) {
+            free(sb); *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
+        free(sb); sy_unlink(bin);
+    }
     if (bypass) *cache = "bypass";
     F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
     F(nlog, sizeof nlog, "%s.build.log", bin);
@@ -298,6 +326,12 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     if (nlog[0]) sy_unlink(nlog);
     nlog[0] = 0;
     if (sy_rename(tmp, bin)) { sy_unlink(tmp); return -EIO; }
+    if (!bypass) {   /* 记下执行体字节 sha,供命中时校验 */
+        unsigned char *sb = 0; int64_t sn = 0; char got[65], sp[PW + 8];
+        F(sp, sizeof sp, "%s.sha", bin);
+        if (!sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got)) (void)sy_write_atomic(sp, got, 64, 0600);
+        free(sb);
+    }
     return 0;
 }
 

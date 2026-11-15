@@ -188,18 +188,26 @@ int main(void) {
         ck(rs == 7 && strstr(runline(), "via=service") && strstr(runline(), "cache=hit"), "run-second-cache-hit");
         rs = fx1("run", "--local", "echo.cx", "z", 0, 0);
         ck(rs == 7 && has("arg1=z\n") && strstr(runline(), "via=local") && strstr(runline(), "cache=hit"), "run-local-shares-cache");
-        /* 产品语义:库源目录有未跟踪文件时不缓存,连续两次都重建(bypass),不出现 hit;去掉后恢复命中 */
+        /* 产品语义(R2):键 = 产品字节 sha + 工具 use 闭包内容;闭包外的未跟踪/脏文件不影响命中(准备耗时小于 1 s) */
         F(stray, sizeof stray, "%s/%s/stray-untracked.cx", fx, c_lib[2]);
         ck(sy_write_atomic(stray, "/* stray */\n", 12, 0644) == 0, "run-untracked-fixture-written");
         rs = fx1("run", "echo.cx", "u", 0, 0, 0);
-        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "via=service") && strstr(runline(), "cache=bypass") && !strstr(runline(), "cache=hit"), "run-untracked-lib-not-cached");
+        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "via=service") && strstr(runline(), "cache=hit") && strstr(runline(), "prep_ms=") && atol(strstr(runline(), "prep_ms=") + 8) < 1000, "run-untracked-outside-closure-still-hit");
         rs = fx1("run", "echo.cx", "u", 0, 0, 0);
-        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "cache=bypass") && !strstr(runline(), "cache=hit"), "run-untracked-lib-second-still-not-cached");
+        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "cache=hit"), "run-untracked-outside-closure-second-hit");
         rs = fx1("run", "--local", "echo.cx", "u", 0, 0);
-        ck(rs == 7 && strstr(runline(), "via=local") && strstr(runline(), "cache=bypass"), "run-untracked-lib-local-not-cached");
+        ck(rs == 7 && strstr(runline(), "via=local") && strstr(runline(), "cache=hit"), "run-untracked-outside-closure-local-hit");
         ck(sy_unlink(stray) == 0, "run-untracked-fixture-removed");
         rs = fx1("run", "echo.cx", "a b", "c", 0, 0);
         ck(rs == 7 && strstr(runline(), "cache=hit"), "run-clean-again-cache-hit");
+        /* 闭包内改动(工具源本身,未提交)即失效重建,输出跟随新内容;再跑恢复命中 */
+        {   char ep[400]; const char *src2 = "int main(int argc, char **argv) { (void)argv; printf(\"v2 n=%d\\n\", argc); return 7; }\n";
+            F(ep, sizeof ep, "%s/echo.cx", fx);
+            ck(sy_write_atomic(ep, src2, strlen(src2), 0644) == 0, "run-closure-edit-written");
+            rs = fx1("run", "echo.cx", "q", 0, 0, 0);
+            ck(rs == 7 && has("v2 n=2\n") && strstr(runline(), "cache=miss"), "run-closure-edit-rebuilds");
+            rs = fx1("run", "echo.cx", "q", 0, 0, 0);
+            ck(rs == 7 && has("v2 n=2\n") && strstr(runline(), "cache=hit"), "run-closure-edit-then-hit"); }
         /* 构造失败:回包带编译错误文本与完整日志路径(经服务与 --local 都要) */
         {   char bad[400]; F(bad, sizeof bad, "%s/bad.cx", fx);
             ck(sy_write_atomic(bad, "int main(void) { return undeclared_symbol_xyz; }\n", 49, 0644) == 0, "run-bad-fixture-written");
