@@ -1,7 +1,7 @@
 /* tools/check-precommit-gates.cx -- tools/precommit.cx gate read sets (tests/precommit-gates.tsv) and the
  * within-one-commit reuse of a gate result (UNISACC_GATE_REUSE, written by tools/commit-own.cx).
  *
- *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse      (two batches, each under 55 s)
+ *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse|toolsreg      (three batches, each under 55 s)
  *   sh ./unisacc.com tools/check-precommit-gates.cx -- --bench before|after  (a measurement, not a batch)
  *
  * Fixture: a fixed private copy ~/.cache/unisacc/check-precommit-gates/fx-GROUP (git archive HEAD, the working
@@ -9,7 +9,7 @@
  * keyed by path, is reused across runs; a pid lock directory refuses a second concurrent run (rc 2).
  * tools/precommit-base.cx in the fixture is precommit.cx at PCG_BASE (the last version before read sets).
  * na:    --gates rows of the table equal the builtin fallback; a table missing a gate row fails closed;
- *        a staging disjoint from every read set prints not_affected=6, no PASS, and the same PRECOMMIT line
+ *        a staging disjoint from every read set prints not_affected=7, no PASS, and the same PRECOMMIT line
  *        and rc as the base; a staged .cx with an R2 lint finding is blocked exactly as by the base (line, rc,
  *        every "precommit: " message).
  * reuse: a staged manifest is judged as by the base; with a reuse record whose key matches (staged tree, gate,
@@ -61,11 +61,12 @@ static void setup(const char *group) {
     sh(c, out, sizeof out, 0);
     if (!has(out, "LOCK_OK")) { lockd[0] = 0; die("another check-precommit-gates run holds the fixture lock"); }
     if (cx_fmt(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s && cp %s/tools/precommit.cx %s/tools/commit-own.cx %s/tools/"
-                            " && cp %s/tests/precommit-gates.tsv %s/tests/ && git -C %s show " PCG_BASE ":tools/precommit.cx > %s/tools/precommit-base.cx"
+                            " && cp %s/tests/precommit-gates.tsv %s/tests/tools-compile.cx %s/tests/ && git -C %s show " PCG_BASE ":tools/precommit.cx > %s/tools/precommit-base.cx"
                             " && git -C %s show " PCG_BASE_CO ":tools/commit-own.cx > %s/tools/commit-own-base.cx"
                             " && cd %s && ln -s %s/unisacc.com unisacc.com && git init -q && git config user.name pcg && git config user.email pcg@example.invalid"
+                            " && printf 'tools/commit-own-base.cx" T "regular\\ntools/precommit-base.cx" T "regular\\n' >> tests/tools-compile-sources.tsv"
                             " && git add -A && git commit -qm base && echo SETUP_OK",
-               fx, fx, root, fx, root, root, fx, root, fx, root, fx, root, fx, fx, root)) die("script");
+               fx, fx, root, fx, root, root, fx, root, root, fx, root, fx, root, fx, fx, root)) die("script");
     sh(c, out, sizeof out, 0);
     if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup"); }
 }
@@ -78,11 +79,11 @@ static void group_na(void) {
        " sh ./unisacc.com tools/precommit.cx > m.out 2>&1; echo MRC=$?; grep -c 'gate facts has no read-set row' m.out | tr '\\n' ' '; echo norow;"
        " cp gates.keep tests/precommit-gates.tsv;"
        " grep '^GATE" T "' g1.out > g1.rows; grep '^GATE" T "' g2.out > g2.rows; cmp -s g1.rows g2.rows && echo GATES_SAME; echo NROWS=$(grep -c . g1.rows); tail -1 g1.out; tail -1 g2.out", out, sizeof out, 1);
-    ck(has(out, "G1RC=0\n") && has(out, "G2RC=0\n") && has(out, "GATES_SAME\n") && has(out, "NROWS=6\n") && has(out, "GATES\tsource=table\n") && has(out, "GATES\tsource=builtin\n"), "na.table-equals-builtin");
+    ck(has(out, "G1RC=0\n") && has(out, "G2RC=0\n") && has(out, "GATES_SAME\n") && has(out, "NROWS=7\n") && has(out, "GATES\tsource=table\n") && has(out, "GATES\tsource=builtin\n"), "na.table-equals-builtin");
     ck(has(out, "MRC=1\n") && has(out, "1 norow\n"), "na.missing-row-fails-closed");
     sh("sh ./unisacc.com tools/precommit.cx > n.out 2> n.err; echo NRC=$?; sh ./unisacc.com tools/precommit-base.cx > b.out 2> b.err; echo BRC=$?;"
        " echo \"NL=$(grep '^PRECOMMIT" T "' n.out)\"; echo \"BL=$(grep '^PRECOMMIT" T "' b.out)\"; grep '^PRECOMMIT_GATES' n.out; echo PASSCNT=$(cat n.out n.err | grep -c PASS)", out, sizeof out, 1);
-    ck(has(out, "PRECOMMIT_GATES\tnot_affected=6\tna=cx,manifest,tables,runlist,facts,ledger\tsource=table\n") && has(out, "PASSCNT=0\n"), "na.disjoint-not-affected-not-pass");
+    ck(has(out, "PRECOMMIT_GATES\tnot_affected=7\tna=cx,manifest,tables,toolsreg,runlist,facts,ledger\tsource=table\n") && has(out, "PASSCNT=0\n"), "na.disjoint-not-affected-not-pass");
     ck(has(out, "NRC=0\n") && has(out, "BRC=0\n") && has(out, "NL=PRECOMMIT\tstaged_cx=0\tblocked=0\n") && has(out, "BL=PRECOMMIT\tstaged_cx=0\tblocked=0\n"), "na.disjoint-verdict-as-base");
     sh("printf '%s\\n' 'static void zz2(char **v) { sy_spawn(v); }' >> tools/flowrun.cx && git add tools/flowrun.cx;"
        " ( sh ./unisacc.com tools/precommit.cx > n.out 2> n.err; echo $? > n.rc ) & ( sh ./unisacc.com tools/precommit-base.cx > b.out 2> b.err; echo $? > b.rc ) & wait;"
@@ -90,7 +91,7 @@ static void group_na(void) {
        " grep '^precommit: ' n.err | sort > n.msg; grep '^precommit: ' b.err | sort > b.msg; cmp -s n.msg b.msg && echo MSG_SAME; echo NMSG=$(grep -c 'blocked:lint:' b.msg)", out, sizeof out, 1);
     ck(has(out, "NRC=1\n") && has(out, "BRC=1\n") && has(out, "NL=PRECOMMIT\tstaged_cx=1\tblocked=1\n") && has(out, "BL=PRECOMMIT\tstaged_cx=1\tblocked=1\n"), "na.intersecting-verdict-as-base");
     ck(has(out, "MSG_SAME\n") && !has(out, "NMSG=0\n") && has(out, "NMSG="), "na.intersecting-messages-as-base");
-    ck(has(out, "PRECOMMIT_GATES\tnot_affected=5\tna=manifest,tables,runlist,facts,ledger\tsource=table\n"), "na.intersecting-gate-not-counted");
+    ck(has(out, "PRECOMMIT_GATES\tnot_affected=6\tna=manifest,tables,toolsreg,runlist,facts,ledger\tsource=table\n"), "na.intersecting-gate-not-counted");
     if (failed) sy_printf("%s\n", out);
 }
 
@@ -119,12 +120,39 @@ static void group_reuse(void) {
        so the hook's stderr goes to an absolute path in the fixture, not to a cwd-relative hook.err; and the hook's
        gates see only the private index, so the batch's check source is committed with its set (--whole), as a real
        registration must (the runlist gate refuses metadata-schema missing-implemented-source otherwise) */
-    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
-       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 --whole tools/check-zzg1.cx > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
+    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf 'tools/check-zzg1.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
+       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
        " echo HREUSED=$(grep -c 'gate manifest reused' hook.err); echo SUBJ=$(git log -1 --format=%s); ls \"${TMPDIR:-/tmp}\"/commit-own-*.gate 2>/dev/null | wc -l | tr '\\n' ' '; echo leftover", out, sizeof out, 1);
     ck(has(out, "CORC=0\n") && has(out, "SUBJ=zzg1\n") && has(out, "HREUSED=1\n"), "reuse.commit-own-record-reused-by-hook");
     if (failed) sy_printf("%s\n", out);
 }
+
+/* toolsreg: a staged new tools/zzt.cx without its tools-compile-sources.tsv row is refused by name; with the row
+ * staged it passes; the registry row left unstaged
+ * is still refused (the gate judges the staged tables); a staged delete of a registered tool whose row stays is refused by name,
+ * with the row removed it passes.  "Passes" means this gate: a bare new tool is still blocked by the cx gate's
+ * new-tool rules (check and batch), which this group does not judge; deletes run no cx gate, so there rc 0. */
+static void group_toolsreg(void) {
+    static char out[16384];
+    const char *pc = "sh ./unisacc.com tools/precommit.cx > p.out 2>&1; echo";
+    char c[4000];
+    if (cx_fmt(c, sizeof c,
+       "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2;"
+       " git add tools/zzt.cx; %s ARC=$?; echo AMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);"
+       " printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);"
+       " git add tests/tools-compile-sources.tsv; %s BRC=$?; echo BMSG=$(grep -c 'BLOCKED tools' p.out); grep '^PRECOMMIT_GATES' p.out | sed 's/^/B_/';"
+       " git commit -qm zzt --no-verify; git rm -q tools/zzt.cx; %s CRC=$?; echo CMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE removed" T "tools/zzt.cx' p.out);"
+       " grep -v '^tools/zzt.cx' tests/tools-compile-sources.tsv > tcs.tmp; mv tcs.tmp tests/tools-compile-sources.tsv; git add tests/tools-compile-sources.tsv; %s DRC=$?; echo DMSG=$(grep -c 'BLOCKED tools' p.out)",
+       pc, pc, pc, pc, pc)) die("script");
+    sh(c, out, sizeof out, 1);
+    ck(has(out, "ARC=1\n") && has(out, "AMSG=1\n"), "toolsreg.added-unregistered-refused-by-name");
+    ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
+    ck(has(out, "BRC=") && has(out, "BMSG=0\n") && has(out, "B_PRECOMMIT_GATES") && !has(out, "toolsreg,") && !has(out, ",toolsreg\t"), "toolsreg.added-registered-passes");
+    ck(has(out, "CRC=1\n") && has(out, "CMSG=1\n"), "toolsreg.deleted-still-registered-refused-by-name");
+    ck(has(out, "DRC=0\n") && has(out, "DMSG=0\n"), "toolsreg.deleted-unregistered-passes");
+    if (failed) sy_printf("%s\n", out);
+}
+
 
 static void bench(const char *which) {
     static char out[8192], c[6000]; int after = tx_eqz(which, "after"), i; long t0;
@@ -148,12 +176,12 @@ int main(int argc, char **argv) {
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
-        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse | --bench before|after\n"); return 2; }
+        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg | --bench before|after\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench"); bench(bn); unlock(); return 0; }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse | --bench before|after\n"); return 2; }
+    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg | --bench before|after\n"); return 2; }
     setup(group);
-    if (tx_eqz(group, "na")) group_na(); else group_reuse();
+    if (tx_eqz(group, "na")) group_na(); else if (tx_eqz(group, "toolsreg")) group_toolsreg(); else group_reuse();
     unlock();
     sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;

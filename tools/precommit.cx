@@ -118,6 +118,7 @@ static int incomplete(const char *rows, long rn, const char *mark, const char *t
 static const char gt_builtin[] =
     "manifest\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv build/batch-packages.tsv\n"
     "tables\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tests/tools-compile-sources.tsv\n"
+    "toolsreg\tADRT\ttools/*.cx\n"
     "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
     "ledger\tACMR\tagentwork/ledger.tsv\n"
@@ -164,6 +165,13 @@ static char *gate_diff(const char *gate, long *n) {
     out = slurp(av, n);
     if (out && *n <= 0) gt_mark_na(gate);
     return out;
+}
+/* take GATE back out of the NOT_AFFECTED count when it was the last one marked and runs after all (toolsreg
+   also runs when the tables gate is hit: a registry or batches edit alone can break the tools inventory too) */
+static void gt_unmark(const char *gate) {
+    long l = tx_len(gt_nal, sizeof gt_nal), g = tx_len(gate, 64);
+    if (gt_na <= 0 || l < g || !tx_same(gt_nal + l - g, g, gate, g) || (l > g && gt_nal[l - g - 1] != ',')) return;
+    gt_na--; gt_nal[l > g ? l - g - 1 : 0] = 0;
 }
 static void gt_line(void) {
     if (gt_load()) return;
@@ -758,6 +766,40 @@ int main(int argc, char **argv) {
                   at4 += l + 1; }
               mm_free(to);
           }
+      }
+      { /* 工具清单闸(toolsreg):暂存区新增、删除、改名或改类型 tools/**.cx(读集 toolsreg),或 tables 门命中
+           (登记表或批次表被改)时,tests/tools-compile.cx --shards 按索引清单对拍 tests/tools-compile-sources.tsv 与
+           tools-compile 分片批次;任何 REFUSE(漏登记的新工具、删了未除名的工具、片数与批次不符)即拒并逐行具名。
+           夹具仓没有 tests/tools-compile.cx 时不跑。实测 0.2 s(热编译缓存)。 */
+        long tn; char *tnames = gate_diff("toolsreg", &tn);
+        if (!tnames) { sy_eprintf("precommit: BLOCKED git diff --cached (toolsreg read set) failed\n"); blocked++; }
+        else if ((tn > 0 || (gn_names && gn > 0)) && sy_exists("tests/tools-compile.cx") == 1) {
+            /* index-exact: the inventory is the index (GIT_DIR, GIT_INDEX_FILE made absolute), and the registry and
+               batches tables are their staged blobs in a scratch root, so unstaged edits of either never sway the verdict */
+            char *tv[] = {"sh", "-c",
+                "g=$(git rev-parse --absolute-git-dir) || exit 3; t=$(pwd -P)/tests/tools-compile.cx;"
+                " if [ -n \"$GIT_INDEX_FILE\" ]; then GIT_INDEX_FILE=$(cd \"$(dirname \"$GIT_INDEX_FILE\")\" && pwd -P)/$(basename \"$GIT_INDEX_FILE\") || exit 3; export GIT_INDEX_FILE; fi;"
+                " d=$(mktemp -d) || exit 3; mkdir \"$d/tests\" && git show :tests/tools-compile-sources.tsv > \"$d/tests/tools-compile-sources.tsv\""
+                " && git show :tests/batches.tsv > \"$d/tests/batches.tsv\" || { rm -rf \"$d\"; exit 3; };"
+                " GIT_DIR=$g GIT_WORK_TREE=$d sh ./unisacc.com \"$t\" -- --shards \"$d\" 2>&1; r=$?; rm -rf \"$d\"; exit $r", 0}; long rn3; char *ro;
+            if (tn <= 0) gt_unmark("toolsreg");
+            cur_gate = "toolsreg"; slurp_okrc = 2; ro = slurp(tv, &rn3); slurp_okrc = 0; cur_gate = 0;
+            if (!ro) { sy_eprintf("precommit: BLOCKED tools-compile --shards did not run or hard error\n"); blocked++; }
+            else if (!plan_dir) {
+                long at5 = 0; int refused = 0, shards = 0;
+                while (at5 < rn3) { long e = tx_chr(ro + at5, rn3 - at5, '\n'), l = e < 0 ? rn3 - at5 : e, d = 0;
+                    if (tx_find(ro + at5, l, "REFUSE", 6) >= 0) {
+                        sy_eprintf("precommit: BLOCKED tools-compile registry %.*s (run sh ./unisacc.com tests/tools-compile.cx -- --register . NEW, stage tests/tools-compile-sources.tsv and the tools-compile-NNN batches with the tool)\n", (int)l, ro + at5);
+                        refused = 1; }
+                    while (d < l && ro[at5 + d] >= '0' && ro[at5 + d] <= '9') d++;
+                    if (l > 0 && d == l) shards = 1;
+                    at5 += l + 1; }
+                if (!refused && !shards) { sy_eprintf("precommit: BLOCKED tools-compile --shards gave no shard count: %.*s\n", (int)(rn3 > 300 ? 300 : rn3), ro); refused = 1; }
+                blocked += refused;
+            }
+            mm_free(ro);
+        }
+        mm_free(tnames);
       }
       mm_free(gn_names);
     }
