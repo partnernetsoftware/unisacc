@@ -143,6 +143,27 @@ int main(int argc, char **argv) {
             sy_unlink(fb); sy_unlink(fg); sy_unlink(fc); sy_rmdir(d);
         }
     }
+    {   /* --plan prints thirteen nodes; --from-run judges a synthetic flow run with one ratchet above baseline */
+        static const char *nm[13] = {"cxraw", "cxinclude", "cxapis", "cxtrunc", "cxlibc", "cxplatform", "srcshape", "coreapi", "verwriter", "aluiwidth", "outdep", "check-literal", "net-deps"};
+        char d[4096], od[4200], p[4400], ev[1 << 12], line[256], *pl[] = {"--plan", 0}, *fr[] = {"--from-run", d, 0}; long en = 0; int k;
+        rc = run(pl, o, sizeof o);
+        ck(rc == 0 && lines(o) == 13 && has(o, "PLAN\trk-cxraw\t./tools/bound\t55\tsh\t./unisacc.com\ttests/cxraw.cx\t--\t--check\n") && has(o, "PLAN\trk-net-deps\t"), "plan-thirteen-nodes");
+        if (cx_fmt(d, sizeof d, "%s/rk-fixture-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(od, sizeof od, "%s/out", d) || sy_mkdir(d, 0700) < 0 || sy_mkdir(od, 0700) < 0) ck(0, "from-run-fixture-dir");
+        else {
+            for (k = 0; k < 13; k++) {
+                const char *body = k == 0 ? "cxraw: apps/x.cx has 3 raw lines, baseline 1\ncxraw: FAIL: 1 file above baseline\n" : "r: ok: fine\n";
+                cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); cx_write(p, body, tx_len(body, 256));
+                cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k + 1, nm[k], 2 * k + 2, nm[k], k ? "ok" : "fail", k ? 0 : 1);
+                if (en + tx_len(line, 256) < (long)sizeof ev) { long l = tx_len(line, 256); for (long j = 0; j < l; j++) ev[en + j] = line[j]; en += l; }
+            }
+            cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
+            rc = run(fr, o, sizeof o);
+            ck(rc == 1 && has(o, "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 file above baseline\n") && has(o, "  cxraw: apps/x.cx has 3 raw lines, baseline 1\n")
+               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=12\tfail=1\t") && lines(o) == 15, "from-run-over-baseline-fixture");
+            for (k = 0; k < 13; k++) { cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); sy_unlink(p); }
+            cx_fmt(p, sizeof p, "%s/events.tsv", d); sy_unlink(p); sy_rmdir(od); sy_rmdir(d);
+        }
+    }
     if (argc == 2) { printf("CHECK_RATCHETS\tfailed=%d\n", failed); return failed ? 1 : 0; }
 full_run:
     rc = run(full, o, sizeof o);

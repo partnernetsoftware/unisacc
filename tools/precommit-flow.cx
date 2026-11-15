@@ -21,6 +21,7 @@
 #pragma unisa use sysx.process
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 
 enum { PLAN_MS = 60000 };
 
@@ -61,6 +62,7 @@ static int put_val(int fd, const char *s, long n) {   /* flow arg value: %XX for
 
 int main(int argc, char **argv) {
     char dir[1200], fp[1300], why[1024], *plan, *pv[7], *jv[7]; const char *rdir = 0;
+    long nbn = 0; int rkx = 0;
     long pn, at, t0 = sy_now_ms(), t1, t2; int a, jobs = 0, fd, nodes = 0, pid, ex = 0, code = 1, sig = 0, r = 0;
     fl_flow f; fl_sum s;
     for (a = 1; a < argc; a++) {
@@ -78,6 +80,23 @@ int main(int argc, char **argv) {
     sy_unlink(fp);
     fd = sy_open_new(fp, 0600);
     if (fd < 0) { sy_eprintf("precommit-flow: cannot write %s\n", fp); return 2; }
+    {   /* the ratchets gate becomes its thirteen ratchets (tools/ratchets.cx --plan), judged after the run */
+        long rn; char *rp, *nb;
+        if (tx_find(plan, pn, "PLAN\tratchets\t", 14) >= 0) {
+            char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", "--", "--plan", 0};
+            rp = slurp(rv, &rn);
+            if (!rp || tx_find(rp, rn, "PLAN\trk-", 8) < 0) { sy_eprintf("precommit-flow: ratchets --plan did not run\n"); return 1; }
+            nb = mm_alloc(pn + rn + 1);
+            if (!nb) return 2;
+            for (at = 0; at < pn; ) {   /* copy every plan line except the ratchets one, then the ratchet lines */
+                long e = tx_chr(plan + at, pn - at, '\n'), l = e < 0 ? pn - at : e;
+                if (!tx_prefix(plan + at, l, "PLAN\tratchets\t", 14)) { mm_copy(nb + nbn, pn + rn + 1 - nbn, plan + at, l); nbn += l; nb[nbn++] = '\n'; }
+                at += l + 1;
+            }
+            mm_copy(nb + nbn, pn + rn + 1 - nbn, rp, rn); nbn += rn; nb[nbn] = 0;
+            mm_free(plan); mm_free(rp); plan = nb; pn = nbn; rkx = 1;
+        }
+    }
     for (at = 0; at < pn; ) {
         long e = tx_chr(plan + at, pn - at, '\n'), l = e < 0 ? pn - at : e, k, nf;
         const char *ln = plan + at;
@@ -105,6 +124,22 @@ int main(int argc, char **argv) {
         r = fl_run(&f, dir, jobs, 0, 0, &s);
         fl_free(&f);
         if (r < 0) { sy_eprintf("precommit-flow: run dir %s unusable (%d)\n", dir, r); return 2; }
+    }
+    if (rkx) {   /* ratchets --from-run DIR -> DIR/out/ratchets.out and an ok/fail event for the gate */
+        char *xv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", "--", "--from-run", dir, 0}, ev[256]; long xn, tr = sy_now_ms();
+        char *xo = slurp(xv, &xn); int xrc = -1;
+        if (xo && tx_find(xo, xn, "RATCHETS\tok=", 12) >= 0) xrc = tx_find(xo, xn, "\tfail=0\t", 8) >= 0 ? 0 : 1;
+        if (cx_fmt(fp, sizeof fp, "%s/out/ratchets.out", dir) || (xo && cx_write(fp, xo, xn))) { sy_eprintf("precommit-flow: cannot write %s\n", fp); return 2; }
+        if (cx_fmt(fp, sizeof fp, "%s/events.tsv", dir)) return 2;
+        cx_fmt(ev, sizeof ev, "EVT\t%d\tratchets\t%s\t%ld\t%d\tfrom-run\n", 99999, xrc == 0 ? "ok" : "fail", sy_now_ms() - tr, xrc);
+        {   size_t on = 0; char *old = (char *)cx_read(fp, &on); long el = tx_len(ev, 256); char *nv = mm_alloc((long)on + el + 1);
+            if (!nv) return 2;
+            if (old && on) mm_copy(nv, (long)on + el + 1, old, (long)on);
+            mm_copy(nv + on, el + 1, ev, el);
+            if (cx_write(fp, nv, (long)on + el)) { sy_eprintf("precommit-flow: cannot append %s\n", fp); return 2; }
+            if (old) mm_free(old); mm_free(nv);
+        }
+        if (xo) mm_free(xo);
     }
     t2 = sy_now_ms();
     jv[0] = "/bin/sh"; jv[1] = "./unisacc.com"; jv[2] = "tools/precommit.cx"; jv[3] = "--"; jv[4] = "--from-run"; jv[5] = dir; jv[6] = 0;
