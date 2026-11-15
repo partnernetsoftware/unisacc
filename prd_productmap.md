@@ -8,12 +8,12 @@
 ```
 kind	id	parent	function	size_bytes	size_note	sha256	aux	cmd	verified_rev	cold_s	hot_s	last_s
 layer	L0	-	L0 sy/mem/text	251450	source-bytes	-	dirs=cx/sys,cx/mem,cx/text	git ls-files -z -- DIR && stat bytes	354a116990a401abbe58f4853f74926ff9b15e37	UNMEASURED	UNMEASURED	UNMEASURED
-layer	L1	-	L1 core/driver/runtime/compiler	864167	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	90507688c825aae20bba57706368ef005bf4f4a2	UNMEASURED	UNMEASURED	UNMEASURED
+layer	L1	-	L1 core/driver/runtime/compiler	864162	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	90507688c825aae20bba57706368ef005bf4f4a2	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.host	src	host launch	16383	source-bytes	-	file=src/host.cx	stat src/host.cx	44182b4059d51191cb021241c666b521bf34b2ad	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.packmodel	src	pack model	4925	source-bytes	-	file=src/packmodel.cx	stat src/packmodel.cx	1bf6f7e8c3af3205f5bf3127972689e7dc3f0710	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.executor	src	executor	9163	source-bytes	-	file=src/executor.cx	stat src/executor.cx	9a48b091705ad1b6a75bde2967e56b317affc885	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.stages	src	seven flows bind	15018	source-bytes	-	file=src/stages.cx	stat src/stages.cx	9a48b091705ad1b6a75bde2967e56b317affc885	UNMEASURED	UNMEASURED	UNMEASURED
-layer	src.drive	src	drive	39147	source-bytes	-	file=src/drive.cx	stat src/drive.cx	2049e14b8ad3a64f820c1bec76c03a5ec931a449	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.drive	src	drive	39005	source-bytes	-	file=src/drive.cx	stat src/drive.cx	2049e14b8ad3a64f820c1bec76c03a5ec931a449	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.bind	src	bind	205	source-bytes	-	file=src/bind.cx	stat src/bind.cx	d4189306a6e4872dfc274518b062342cb4a2780c	UNMEASURED	UNMEASURED	UNMEASURED
 slice	lnx/x86_64	ape	embedded target image	2157694	target-image-bytes	f2992f753d375c831f34bb9c32b5cf0ccd13437a423eaf76ce3f5760168de38b	format=ELF;unattributed_bytes=2157694;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	f2992f753d375c831f34bb9c32b5cf0ccd13437a423eaf76ce3f5760168de38b	UNMEASURED	UNMEASURED	UNMEASURED
 slice	lnx/arm64	ape	embedded target image	2174030	target-image-bytes	876e55fda9f6f69ebc3b6e5e271a3243d7842b0b0dec606d82c399faaf5be295	format=ELF;unattributed_bytes=2174030;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	876e55fda9f6f69ebc3b6e5e271a3243d7842b0b0dec606d82c399faaf5be295	UNMEASURED	UNMEASURED	UNMEASURED
