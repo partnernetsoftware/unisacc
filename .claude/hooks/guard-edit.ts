@@ -232,6 +232,29 @@ try {
   const cmd: string = input?.tool_input?.command ?? "";
   if (!cmd) process.exit(0);
   const why = check(cmd, input?.cwd ?? "");
+  if (!why) {
+    // DEVSVC-WARN:只告警不拒绝(退出码 0),命中写 hook-warn.tsv;数据稳定后再改拒绝。
+    try {
+      const viaDev = cmd.includes("tools/devsvc.cx");
+      const hits: [string, string][] = [];
+      if (/\bgit\s+(commit|push)\b/.test(cmd) && !viaDev) hits.push(["git-write", "sh ./unisacc.com tools/devsvc.cx -- git commit -m '说明' --whole 路径 --push"]);
+      if (/unisacc\.com\s+tools\/(?!devsvc\.cx)[\w.-]+\.cx/.test(cmd) && !viaDev) hits.push(["direct-cx", "sh ./unisacc.com tools/devsvc.cx -- x --bg -- ... 加 wait,或 x --tail N"]);
+      if (/\bgit\s+(status|log|diff|show)\b/.test(cmd) && !viaDev) hits.push(["git-read", "sh ./unisacc.com tools/devsvc.cx -- git log(status/diff/show 同)"]);
+      if (/\bsleep\s+\d/.test(cmd)) hits.push(["sleep-poll", "用 devsvc x --bg 加 wait,不用 sleep 轮询"]);
+      if (/\|\s*(head|tail|grep)\b/.test(cmd)) hits.push(["pipe-trim", "用 devsvc x --tail N 截短输出,不用管道 head/tail/grep"]);
+      if (hits.length) {
+        const fs = await import("node:fs");
+        const dir = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc`;
+        fs.mkdirSync(dir, { recursive: true });
+        const sid = String(input?.session_id ?? "-");
+        const c120 = cmd.slice(0, 120).replace(/[\t\r\n]/g, " ");
+        for (const [r, tip] of hits) {
+          console.error(`DEVSVC-WARN(${r}):建议 ${tip}`);
+          fs.appendFileSync(`${dir}/hook-warn.tsv`, `${new Date().toISOString()}\t${sid}\t${r}\t${c120}\n`);
+        }
+      }
+    } catch {}
+  }
   if (why) {
     console.error(`GUARD-EDIT-V1 拒绝:${why}。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...`);
     process.exit(2);
