@@ -157,6 +157,7 @@ static int init_identity(const char *tier, int mapped, char hex[65]);
 static int identity_epoch, identity_ready;
 static as_ident identity_live;
 static const char *native_tier;
+static int daily_no_candidate;
 /* 原子持久化证据，缺失与内容失配严格区分。 */
 static int evidence_file(const char *p,const char *body,int save) {
     char tmp[5000];size_t z;char *s;
@@ -421,7 +422,8 @@ static int init_identity(const char *tier, int mapped, char hex[65]) {
     if (cx_fmt(body, sizeof body, "S9INIT-v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
         root, tier, id.candidate_kind, id.candidate, id.legacy_candidate,
         id.registry, id.sid, id.harness, own, mh, fake ? fake : "-", fh)) return -1;
-    cx_sha256_hex(body, strlen(body), hex); return 0;
+    if(daily_no_candidate){np_buf scoped={0};np_puts(&scoped,body);np_puts(&scoped,"scope=daily-no-candidate\n");cx_sha256_hex(scoped.p,scoped.n,hex);free(scoped.p);}
+    else cx_sha256_hex(body, strlen(body), hex); return 0;
 }
 static int init_receipt(int n, const char *identity, int write_it) {
     char p[4800], pending[4840], body[256]; size_t z; char *saved; int ok;
@@ -592,6 +594,7 @@ static int phase_owned(int n,const char *run) {
     if(strcmp(root,m.root)||as_ident_diff(&identity_live,&m.ident)||strcmp(identity_live.sid,m.ident.sid))goto done;
     if(as_join(p,sizeof p,run,"materials.tsv")||as_sha_file(p,0,h,0,why,sizeof why)||strcmp(h,m.map_sha)||as_sha_file(mappath,0,h,0,why,sizeof why)||strcmp(h,m.map_sha))goto done;
     if(n==2){
+        if(m.daily_no_candidate!=daily_no_candidate)goto done;
         const char *meta[]={"nonce","mode","tier","selection.tsv","inputs"};for(int i=0;i<5;i++)if(phase_sha(run,meta[i],h))goto done;
         const char *mode=!strcmp(native_tier,"commit")?"COMMIT_ONLY\n":!strcmp(native_tier,"release")?"RELEASE_ONLY\n":"FULL\n";
         char body[128];if(as_join(p,sizeof p,run,"mode")||evidence_file(p,mode,0)!=1)goto done;
@@ -742,6 +745,7 @@ static int init_one(int n, const char *run, const char *tier, int reuse, char *o
     } else if (n == 2) {
         if (!fake && sy_exists(run) == 1) { cx_fmt(why, sizeof why, "init requires absent RUN"); return -1; }
         if (strcmp(tier, "daily")) { xa4 = "--tier"; xa5 = tier; }
+        else if (daily_no_candidate) xa4 = "--daily-no-candidate";
         rc = invoke("init", root, run, fake ? "-" : mappath, init_left(), out, cap);
         xa4 = xa5 = 0; if (rc == 3) rc = 0;
         if (!rc && fake && sy_exists(run) != 1 && mkdir(run, 0700)) return -1;
@@ -792,6 +796,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
         else if (!strcmp(argv[i], "--map-family") && i + 1 < argc) map_family = argv[++i];
+        else if (!strcmp(argv[i], "--daily-no-candidate")) daily_no_candidate = 1;
         else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) { step_s = atoi(argv[++i]); step_set = 1; }
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) { max_steps = atoi(argv[++i]); max_set = 1; }
         else if (!strcmp(argv[i], "--agg-parts") && i + 1 < argc) agg_parts = atoi(argv[++i]);
@@ -832,6 +837,7 @@ int main(int argc, char **argv) {
     if (agg_parts < 0 || agg_parts > 64) die("agg-parts", "need 0..64");
     if (max_steps < 1) die("max-steps", "need >= 1");
     if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) die("tier", tier);
+    if (daily_no_candidate && strcmp(tier, "daily")) die("scope", "--daily-no-candidate requires --tier daily");
     if (!date) {
         long ws = sy_wall_s();
         if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");

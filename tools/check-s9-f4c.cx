@@ -1,0 +1,118 @@
+/* Explicit daily/no-candidate scope, sealed maps, sticky verdicts and complete-coverage accounting. */
+#pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok,const char *name){printf("%s\tf4c.%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static int row(const char *out,const char *prefix){
+ size_t at=0,n=strlen(out),pn=strlen(prefix);
+ while(at<n){size_t e=at;while(e<n&&out[e]!='\n')e++;if(e-at>=pn&&!memcmp(out+at,prefix,pn))return 1;at=e+1;}return 0;
+}
+static int report(as_registry reg,as_manifest m,as_state *states,char out[65536]){
+ FILE *f=tmpfile();int saved=dup(1),rc;size_t n;
+ if(!f||saved<0)return -1;
+ fflush(stdout);if(dup2(fileno(f),1)<0)return -1;rc=as_report_states(reg,m,states);fflush(stdout);
+ if(dup2(saved,1)<0)return -1;close(saved);rewind(f);n=fread(out,1,65535,f);out[n]=0;fclose(f);return rc;
+}
+static void reports(void){
+ as_batch b[2]={{0}};as_cov c[2]={{0}};as_state st[2]={{0}};as_manifest m={0};as_registry reg={0};static char out[65536];char name[128];int rc;
+ b[0].id="slow";b[0].impl="IMPLEMENTED";b[0].platform="lnx/x86_64";b[0].materials="old-product";b[0].coverage="cov.slow";
+ b[1].id="control";b[1].impl="IMPLEMENTED";b[1].platform="lnx/x86_64";b[1].materials="-";b[1].coverage="cov.control";
+ c[0].id="cov.slow";c[1].id="cov.control";c[0].impl=c[1].impl="IMPLEMENTED_SEPARATE_BATCH";
+ reg.b=b;reg.nb=2;reg.c=c;reg.nc=2;st[1].attempts=1;st[1].last='P';
+ st[0].attempts=1;st[0].unknown=1;st[0].last='U';
+ rc=report(reg,m,st,out);
+ ck(rc==1&&row(out,"BATCH\tslow\tUNKNOWN\t")&&row(out,"S9_NA\treason=no-candidate-material\tn=0\t"),"default-candidate-session-missing-stays-unknown");
+ m.daily_no_candidate=1;memset(&st[0],0,sizeof st[0]);rc=report(reg,m,st,out);
+ ck(rc==0&&row(out,"BATCH\tslow\tNOT_APPLICABLE\treason=no-candidate-material\tmaterial=old-product\t")
+  &&row(out,"COVERAGE\tcov.slow\tNOT_APPLICABLE\t")&&row(out,"S9_NA\treason=no-candidate-material\tn=1\tbatches=slow")
+  &&!row(out,"BATCH\tslow\tPASS\t"),"explicit-daily-missing-is-visible-na-not-pass");
+ const char *names[]={"old-product","new-product","new-models","release-ctor-location","candidate-profile","candidate-profile-extra","release-fixture"};
+ int good=1;for(int i=0;i<7;i++){b[0].materials=(char *)names[i];if(!as_f4c_missing(&b[0],&m,name)||strcmp(name,names[i]))good=0;}
+ ck(good,"only-prd-named-f4c-families");
+ const char *other[]={"hostcc","hosttcc","ref","ri-cli","unknown-chain-artifact","release-ctor","candidate-profil"};
+ good=1;for(int i=0;i<7;i++){b[0].materials=(char *)other[i];if(as_f4c_missing(&b[0],&m,name))good=0;}
+ ck(good,"f4a-f4b-host-and-unlisted-families-stay-in-scope");
+ b[0].materials="old-product";m.scope_map="old-product\t/tmp/unprepared-old-product\n";m.scope_map_n=strlen(m.scope_map);
+ ck(!as_f4c_missing(&b[0],&m,name),"mapped-but-unprepared-is-not-no-candidate-material");
+ m.daily_no_candidate=0;m.scope_map="new-product\t/tmp/real-candidate\n";m.scope_map_n=strlen(m.scope_map);
+ st[0].attempts=1;st[0].last='U';st[0].unknown=1;rc=report(reg,m,st,out);
+ ck(rc==1&&row(out,"BATCH\tslow\tUNKNOWN\t")&&row(out,"S9_NA\treason=no-candidate-material\tn=0\t"),"candidate-present-same-missing-material-stays-unknown");
+ m.scope_map=0;m.scope_map_n=0;m.daily_no_candidate=1;
+ rc=report(reg,m,st,out);ck(rc==1&&row(out,"BATCH\tslow\tUNKNOWN\t"),"interrupted-attempt-not-reclassified");
+ st[0].fail=1;st[0].last='F';rc=report(reg,m,st,out);ck(rc==1&&row(out,"BATCH\tslow\tFAIL\t"),"failure-is-sticky");
+ st[0].refused=1;st[0].last='R';rc=report(reg,m,st,out);ck(rc==1&&row(out,"BATCH\tslow\tREFUSED\t"),"refusal-is-sticky");
+ memset(&st[0],0,sizeof st[0]);b[0].platform="osx/arm64";rc=report(reg,m,st,out);
+ ck(row(out,"BATCH\tslow\tNOT_APPLICABLE\tplatform=osx/arm64\t")&&row(out,"S9_NA\treason=no-candidate-material\tn=0\t"),"platform-na-counted-separately");
+ b[0].platform="lnx/x86_64";reg.nb=reg.nc=1;rc=report(reg,m,st,out);
+ ck(rc==1&&row(out,"AGGREGATE\tNOT_QUALIFIED\timplemented_batches=0\tpass=0\t")&&row(out,"S9_NA\treason=no-candidate-material\tn=1\t"),"empty-applicable-scope-does-not-qualify");
+ m.daily_no_candidate=0;st[0].attempts=1;st[0].last='U';rc=report(reg,m,st,out);
+ ck(rc==1&&row(out,"BATCH\tslow\tUNKNOWN\t"),"release-or-unmarked-session-does-not-infer-scope");
+}
+static size_t manifest(const char *dir,const char *map,const char *scope){
+ char p[4400],mapsha[65],body[2048];const char *zero="0000000000000000000000000000000000000000000000000000000000000000";np_buf h={0};
+ cx_sha256_hex(map,strlen(map),mapsha);
+ if(cx_fmt(p,sizeof p,"%s/materials.tsv",dir)||cx_write(p,map,strlen(map)))return 0;
+ if(cx_fmt(body,sizeof body,"ALLSESSION\tv2\nroot\t%s\ncandidate_sha\t%s\nbatches_sha\t%s\ncoverage_sha\t%s\nregistry_sha\t%s\nsource_sid\t%s\nharness_sha\t%s\nmaterials_map_sha\t%s\ncreated_ns\t1\ncandidate_kind\tape1\n",dir,zero,zero,zero,zero,zero,zero,mapsha))return 0;
+ np_puts(&h,body);if(scope){np_puts(&h,"scope\t");np_puts(&h,scope);np_puts(&h,"\n");}np_puts(&h,"END\t0\n");
+ size_t n=h.n;if(cx_fmt(p,sizeof p,"%s/session.tsv",dir)||cx_write(p,h.p,h.n))n=0;free(h.p);return n;
+}
+static void sealed(void){
+ char dir[]="/tmp/check-s9-f4c-XXXXXX",why[1700],p[4400];as_manifest m={0};int rc;
+ if(!mkdtemp(dir)){ck(0,"fixture-directory");return;}
+ ck(manifest(dir,"","daily-no-candidate")>0&&!as_load(dir,&m,why,sizeof why)&&m.daily_no_candidate,"sealed-explicit-scope-loads");as_free(&m);
+ manifest(dir,"",0);rc=as_load(dir,&m,why,sizeof why);ck(!rc&&!m.daily_no_candidate,"legacy-header-default-is-candidate-scope");as_free(&m);
+ manifest(dir,"","release-no-candidate");ck(as_load(dir,&m,why,sizeof why)!=0,"release-no-candidate-header-refused");
+ manifest(dir,"new-product\t/tmp/candidate\n","daily-no-candidate");ck(as_load(dir,&m,why,sizeof why)!=0,"candidate-map-contradicts-no-candidate-declaration");
+ manifest(dir,"old-product\t/tmp/old\n","daily-no-candidate");rc=as_load(dir,&m,why,sizeof why);
+ ck(!rc&&m.scope_map_n>0,"old-reference-is-not-a-new-candidate");as_free(&m);
+ manifest(dir,"","daily-no-candidate");if(cx_fmt(p,sizeof p,"%s/materials.tsv",dir)||cx_write(p,"old-product\t/tmp/changed\n",25))exit(2);
+ ck(as_load(dir,&m,why,sizeof why)!=0,"scope-map-hash-change-refused");
+ size_t hn=manifest(dir,"",0);char executor[256];const char *zero="0000000000000000000000000000000000000000000000000000000000000000";
+ if(cx_fmt(executor,sizeof executor,"EXECUTOR\tall_waves=%s\trun_batch=%s\tcompile_ns=0\n",zero,zero)||cx_fmt(p,sizeof p,"%s/session.tsv",dir))exit(2);
+ int fd=open(p,O_WRONLY|O_APPEND);rc=fd<0?-1:as_append(fd,dir,"executor",1,executor,strlen(executor),why,sizeof why);if(fd>=0)close(fd);
+ ck(!rc&&!as_load(dir,&m,why,sizeof why),"scope-header-is-chain-anchor");as_free(&m);
+ size_t n;char *saved=cx_read(p,&n);np_buf changed={0};
+ if(!saved||hn<6||n<hn)exit(2);np_put(&changed,saved,hn-6);np_puts(&changed,"scope\tdaily-no-candidate\n");np_put(&changed,saved+hn-6,n-hn+6);free(saved);
+ if(cx_write(p,changed.p,changed.n))exit(2);free(changed.p);ck(as_load(dir,&m,why,sizeof why)!=0,"scope-cannot-change-after-chained-records");
+ sy_unlink(p);if(cx_fmt(p,sizeof p,"%s/materials.tsv",dir))exit(2);sy_unlink(p);rmdir(dir);
+}
+static void cli_scope(void){
+ char root[4096],product[4400],source[4400],run[4400],why[1700];np_result r={0};
+ if(!getcwd(root,sizeof root)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(run,sizeof run,"/tmp/f4c-rejected-%d",getpid()))exit(2);
+ if(cx_fmt(source,sizeof source,"%s/tools/s9-nightly.cx",root))exit(2);
+ char *night[]={"sh",product,source,"--",root,run,"--tier","release","--daily-no-candidate",0};
+ int e=np_run(night,root,0,20,&r,why,sizeof why);
+ int ok=!e&&r.rc==2&&!r.residue&&row(r.err?r.err:"","s9-nightly: scope");
+ ck(ok,"nightly-release-rejects-explicit-daily-scope");if(!ok&&r.errn)fprintf(stderr,"%.*s",(int)r.errn,r.err);np_free(&r);
+ if(cx_fmt(source,sizeof source,"%s/tools/s9-shards.cx",root))exit(2);
+ char *shard[]={"sh",product,source,"--","init",root,run,"-","--tier","release","--daily-no-candidate",0};
+ e=np_run(shard,root,0,20,&r,why,sizeof why);
+ ok=!e&&r.rc==2&&!r.residue&&row(r.err?r.err:"","s9: REFUSE daily-no-candidate requires unfiltered daily init");
+ ck(ok,"shards-release-rejects-explicit-daily-scope");if(!ok&&r.errn)fprintf(stderr,"%.*s",(int)r.errn,r.err);np_free(&r);
+}
+static void init_scope(void){
+ char root[4096],product[4400],canonical[4400],source[4400],parent[4400],child[4400],bound[4400],id[80],why[1700];np_result r={0};as_manifest m={0};
+ if(!getcwd(root,sizeof root)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||!realpath(product,canonical)
+  ||cx_fmt(source,sizeof source,"%s/tools/all-waves.cx",root)||cx_fmt(id,sizeof id,"f4c-parent-%d",getpid())||sr_default(id,parent,sizeof parent)
+  ||cx_fmt(id,sizeof id,"f4c-child-%d",getpid())||sr_default(id,child,sizeof child))exit(2);
+ if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root))exit(2);
+ char *v[]={bound,"40","sh",product,source,"--","init",root,parent,product,"-","--daily-no-candidate",0};
+ int e=np_run(v,root,0,45,&r,why,sizeof why),ok=!e&&!r.rc&&!r.residue&&!as_load(parent,&m,why,sizeof why)&&m.daily_no_candidate;
+ ck(ok,"real-init-seals-explicit-no-candidate");if(!ok){if(r.errn)fprintf(stderr,"%.*s",(int)r.errn,r.err);np_free(&r);return;}np_free(&r);as_free(&m);
+ char inherited[4600];if(cx_fmt(inherited,sizeof inherited,"UNISACC_IDENTITY_PARENT=%s",parent))exit(2);char *env[]={inherited,0};
+ char *cv[]={bound,"25","sh",product,source,"--","init",root,child,product,"-",0};
+ e=np_run(cv,root,env,30,&r,why,sizeof why);ok=!e&&!r.rc&&!r.residue&&!as_load(child,&m,why,sizeof why)&&m.daily_no_candidate;
+ ck(ok,"real-child-inherits-sealed-scope");if(!ok&&r.errn)fprintf(stderr,"%.*s",(int)r.errn,r.err);np_free(&r);as_free(&m);
+ const char *sessions[]={child,parent},*leaves[]={"session.tsv","materials.tsv","lock"};char p[4600];
+ if(ok)for(int k=0;k<2;k++){for(int j=0;j<3;j++){if(cx_fmt(p,sizeof p,"%s/%s",sessions[k],leaves[j]))exit(2);sy_unlink(p);}rmdir(sessions[k]);}
+}
+int main(int argc,char **argv){
+ int unit=argc==1||(argc==2&&!strcmp(argv[1],"unit"));int cli=argc==1||(argc==2&&!strcmp(argv[1],"cli"));int init=argc==2&&!strcmp(argv[1],"init");
+ if(!unit&&!cli&&!init)return 2;if(unit){reports();sealed();}if(cli)cli_scope();if(init)init_scope();
+ printf("CHECK_S9_F4C\tfailed=%d\n",failed);return failed?1:0;
+}

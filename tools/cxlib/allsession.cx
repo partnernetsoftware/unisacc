@@ -54,6 +54,7 @@
 #pragma unisa use testplan
 #pragma unisa use productpkg
 #pragma unisa use kernelsha
+#pragma unisa use mem.bytes
 
 /* candidate is the product identity: the member set under the split layout, the whole file under
    a single-file APE (see cxlib/productpkg).
@@ -69,6 +70,7 @@ typedef struct {
  char root[4096],map_sha[65];as_ident ident;long long created;int seq;int has_executor;int legacy_no_kind;int legacy_kind;char exec_sha[65],runner_sha[65];
  as_material *material;int nmaterial;as_ref *ref;int nref;as_wave *wave;int nwave;
  char *bytes;size_t n;
+ int daily_no_candidate;char *scope_map;size_t scope_map_n;
 } as_manifest;
 typedef struct {char *id,*impl,*source,*mode,*platform,*materials,*entry,*coverage,*expect,*headers;int budget;char row[65];} as_batch;
 typedef struct {char *id,*impl;} as_cov;
@@ -208,7 +210,7 @@ const as_batch *as_find_batch(const as_registry *r,const char *id){for(int i=0;i
 int as_material_kind(const as_registry *r,const char *name){int kind=0;for(int i=0;i<r->nb;i++)if(!strcmp(r->b[i].impl,"IMPLEMENTED")){int k=tp_material_kind(r->b[i].materials,name,strlen(name));if(k<0||(k&&kind&&k!=kind))return -1;if(k)kind=k;}return kind;}
 
 /* ---- manifest -------------------------------------------------------------------------------------- */
-void as_free(as_manifest *m){free(m->material);free(m->ref);free(m->wave);free(m->bytes);memset(m,0,sizeof *m);}
+void as_free(as_manifest *m){free(m->material);free(m->ref);free(m->wave);free(m->bytes);free(m->scope_map);memset(m,0,sizeof *m);}
 int as_split(char *line,char **f,int max){int n=0;f[n++]=line;for(char *p=line;*p;p++)if(*p=='\t'){if(n==max)return -1;*p=0;f[n++]=p+1;}return n;}
 static const char *as_kv(const char *field,const char *key){size_t n=strlen(key);return !strncmp(field,key,n)&&field[n]=='='?field+n+1:0;}
 static int as_wire_material_kind(int nf,int legacy,char **f){if(nf==legacy)return 1;if(nf!=legacy+1)return 0;return !strcmp(f[legacy],"type=sha256")?2:!strcmp(f[legacy],"type=path")?1:0;}
@@ -216,6 +218,34 @@ static int as_hexfield(char out[65],const char *v){if(!v||!as_ishex(v))return -1
 int as_digits(const char *s,long long *v){long long x=0;if(!*s||(s[0]=='0'&&s[1]))return -1;for(;*s;s++){if(*s<'0'||*s>'9'||x>(LLONG_MAX-9)/10)return -1;x=x*10+(*s-'0');}*v=x;return 0;}
 int as_relok(const char *s){size_t n=strlen(s);if(!n||n>=600||s[0]=='/'||strstr(s,".."))return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'||s[i]=='/'))return 0;return 1;}
 int as_inlist(const char *csv,const char *id){size_t n=strlen(id);while(*csv){const char *e=strchr(csv,',');size_t z=e?(size_t)(e-csv):strlen(csv);if(z==n&&!memcmp(csv,id,n))return 1;if(!e)return 0;csv=e+1;}return 0;}
+/* F4c is opt-in scope, never an inference from a missing map entry. Only the PRD's named families
+   qualify. The installed bootstrap product identity does not attest a slow-lane release candidate. */
+int as_f4c_name(const char *name){
+ return !strcmp(name,"old-product")||!strcmp(name,"new-product")||!strcmp(name,"new-models")
+  ||(!strncmp(name,"release-ctor-",13)&&name[13])||!strncmp(name,"candidate-profile",17)||!strcmp(name,"release-fixture");
+}
+int as_f4c_candidate(const char *name){return as_f4c_name(name)&&strcmp(name,"old-product");}
+int as_scope_has_candidate(const as_manifest *m){
+ for(int i=0;i<m->nmaterial;i++)if(as_f4c_candidate(m->material[i].name))return 1;
+ size_t at=0;while(at<m->scope_map_n){size_t e=at,t=at;while(e<m->scope_map_n&&m->scope_map[e]!='\n')e++;while(t<e&&m->scope_map[t]!='\t')t++;char name[128];
+  if(t==e||t-at>=sizeof name)return 1;
+  if(mm_copy(name,sizeof name,m->scope_map+at,(long)(t-at)))return 1;name[t-at]=0;
+  if(as_f4c_candidate(name))return 1;at=e+1;
+ }return 0;
+}
+static int as_scope_mapped(const as_manifest *m,const char *name){
+ size_t n=strlen(name),at=0;
+ while(at<m->scope_map_n){size_t e=at;while(e<m->scope_map_n&&m->scope_map[e]!='\n')e++;
+  if(e-at>n&&m->scope_map[at+n]=='\t'&&!memcmp(m->scope_map+at,name,n))return 1;at=e+1;
+ }for(int i=0;i<m->nmaterial;i++)if(!strcmp(m->material[i].name,name))return 1;return 0;
+}
+int as_f4c_missing(const as_batch *b,const as_manifest *m,char name[128]){
+ if(!m->daily_no_candidate||as_scope_has_candidate(m)||!b->materials||!strcmp(b->materials,"-"))return 0;
+ const char *at=b->materials;tp_material_decl d;int rc;
+ while((rc=tp_material_next(&at,&d))>0)if(d.kind==1&&as_f4c_name(d.name)&&!as_scope_mapped(m,d.name)){
+  if(as_copy(name,128,d.name))return 0;return 1;
+ }return 0;
+}
 int as_load(const char *session,as_manifest *m,char *why,size_t cap){
  static const char *keys[10]={"root","candidate_sha","batches_sha","coverage_sha","registry_sha","source_sid","harness_sha","materials_map_sha","created_ns","candidate_kind"};
  char p[4400];memset(m,0,sizeof *m);if(as_join(p,sizeof p,session,"session.tsv"))return as_bad(why,cap,"manifest-path",session,0);
@@ -238,6 +268,7 @@ int as_load(const char *session,as_manifest *m,char *why,size_t cap){
     }
     hdr=0;
    }
+   else if(line==11&&nf==2&&!strcmp(f[0],"scope")&&!strcmp(f[1],"daily-no-candidate")){m->daily_no_candidate=1;}
    else if(line>10){rc=as_bad(why,cap,"manifest-header","too-many-header-lines",0);break;}
    else{const char *k=keys[line-1];if(nf!=2||strcmp(f[0],k)){rc=as_bad(why,cap,"manifest-header",k,0);}
     else if(line==1){if(f[1][0]!='/'||as_copy(m->root,sizeof m->root,f[1]))rc=as_bad(why,cap,"manifest-header","root",0);}
@@ -295,7 +326,13 @@ int as_load(const char *session,as_manifest *m,char *why,size_t cap){
    as_ref *g=realloc(m->ref,(size_t)(m->nref+1)*sizeof *g);if(!g){rc=as_bad(why,cap,"allocation","receipt",0);break;}m->ref=g;as_ref *r=&g[m->nref++];memset(r,0,sizeof *r);r->wave=w->wave;
    if(as_copy(r->id,sizeof r->id,f[1])||as_copy(r->rel,sizeof r->rel,f[2])||as_hexfield(r->sha,sh)||as_copy(r->verdict,sizeof r->verdict,vd))rc=as_bad(why,cap,"manifest-receipt",s,0);}
  }
- free(t);if(!rc&&(line<11||inblock))rc=as_bad(why,cap,"manifest-truncated",p,0);if(rc){as_free(m);return -1;}return 0;
+ free(t);if(!rc&&(line<11||inblock))rc=as_bad(why,cap,"manifest-truncated",p,0);
+ if(!rc&&m->daily_no_candidate){char mp[4400],hash[65];
+  if(as_join(mp,sizeof mp,session,"materials.tsv")||!(m->scope_map=as_read(mp,0,&m->scope_map_n,why,cap)))rc=-1;
+  else{cx_sha256_hex(m->scope_map,m->scope_map_n,hash);if(strcmp(hash,m->map_sha))rc=as_bad(why,cap,"scope-map-changed",mp,0);
+   else if(as_scope_has_candidate(m))rc=as_bad(why,cap,"scope-has-candidate-material",mp,0);}
+ }
+ if(rc){as_free(m);return -1;}return 0;
 }
 /* Append one chained block through the caller-held descriptor (opened O_APPEND).  BODY is complete lines. */
 int as_append(int fd,const char *session,const char *kind,int seq,const char *body,size_t bn,char *why,size_t cap){
@@ -544,20 +581,33 @@ int as_check_receipt(const char *root,const char *session,const as_manifest *m,c
  const char *why_v;const char *v=as_verdict(&fa,&why_v);int agree=!strcmp(v,rv)&&!strcmp(why_v,rr)&&!strcmp(v,r->verdict);free(saved[0]);free(saved[1]);free(text);
  if(!agree){snprintf(reason,200,"receipt-verdict-not-rederivable");return -1;}*verdict=v;{int z=snprintf(reason,200,"%s",why_v);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return 0;
 }
+/* Never reclassify an attempted batch or a sticky failure/refusal as out of scope. */
+int as_f4c_na(const as_batch *b,const as_manifest *m,const as_state *s,char name[128]){
+ return !s->attempts&&!s->fail&&!s->refused&&!s->pass&&!s->last&&as_f4c_missing(b,m,name);
+}
+void as_f4c_summary(as_registry reg,as_manifest m,as_state *st){
+ int n=0;np_buf ids={0};char name[128];
+ for(int i=0;i<reg.nb;i++)if(!strcmp(reg.b[i].impl,"IMPLEMENTED")&&as_wave_platform_allowed(reg.b[i].platform)&&as_f4c_na(&reg.b[i],&m,&st[i],name)){
+  if(n++)np_puts(&ids,",");np_puts(&ids,reg.b[i].id);
+ }
+ printf("S9_NA\treason=no-candidate-material\tn=%d\tbatches=%s\n",n,ids.n?ids.p:"-");free(ids.p);
+}
 /* Shared complete-coverage predicate, also used by same-run shards. */
 int as_report_states(as_registry reg,as_manifest m,as_state *st){
  int implemented=0,npass=0,nfail=0,nunknown=0,nmissing=0,nrefused=0,nna=0;
- for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];as_state *s=&st[i];/* a batch this host cannot run is not part of the scope: it is named and skipped, so it can neither pass nor go missing */if(!as_wave_platform_allowed(b->platform)){nna++;printf("BATCH\t%s\tNOT_APPLICABLE\tplatform=%s\thost_scope=lnx/x86_64\n",b->id,b->platform);continue;}if(strcmp(b->impl,"IMPLEMENTED"))continue;implemented++;const char *state;
+ for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];as_state *s=&st[i];/* a batch this host cannot run is not part of the scope: it is named and skipped, so it can neither pass nor go missing */if(!as_wave_platform_allowed(b->platform)){nna++;printf("BATCH\t%s\tNOT_APPLICABLE\tplatform=%s\thost_scope=lnx/x86_64\n",b->id,b->platform);continue;}if(strcmp(b->impl,"IMPLEMENTED"))continue;char material[128];if(as_f4c_na(b,&m,s,material)){nna++;printf("BATCH\t%s\tNOT_APPLICABLE\treason=no-candidate-material\tmaterial=%s\tscope=daily-no-candidate\n",b->id,material);continue;}implemented++;const char *state;
   if(s->refused){state="REFUSED";nrefused++;}else if(s->fail){state="FAIL";nfail++;}else if(s->last=='P'){state="PASS";npass++;snprintf(s->reason,sizeof s->reason,"batch-pass");}else if(s->attempts){state="UNKNOWN";nunknown++;}else{state="MISSING";nmissing++;snprintf(s->reason,sizeof s->reason,"no-receipt-in-session");}
   printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",b->id,state,s->attempts,s->unknown,s->reason);}
  int satisfied=0,unsatisfied=0,unresolved=0,declared=0;
- for(int c=0;c<reg.nc;c++){as_cov *cv=&reg.c[c];if(tx_eqz(cv->impl,"DECLARED_DEPENDENCY")){declared++;continue;}int implemented_row=!strcmp(cv->impl,"IMPLEMENTED")||!strcmp(cv->impl,"IMPLEMENTED_SEPARATE_BATCH");np_buf blocking={0,0,0};int planned=0,mapped=0;
-  for(int i=0;i<reg.nb;i++){if(!as_inlist(reg.b[i].coverage,cv->id))continue;if(!as_wave_platform_allowed(reg.b[i].platform))continue;/* out of scope on this host: not a blocker */mapped++;if(strcmp(reg.b[i].impl,"IMPLEMENTED")){planned++;continue;}as_state *s=&st[i];int ok=s->last=='P'&&!s->fail&&!s->refused;if(!ok){if(blocking.n)np_puts(&blocking,",");np_puts(&blocking,reg.b[i].id);}}
+ for(int c=0;c<reg.nc;c++){as_cov *cv=&reg.c[c];if(tx_eqz(cv->impl,"DECLARED_DEPENDENCY")){declared++;continue;}int implemented_row=!strcmp(cv->impl,"IMPLEMENTED")||!strcmp(cv->impl,"IMPLEMENTED_SEPARATE_BATCH");np_buf blocking={0,0,0};int planned=0,mapped=0,material_na=0;
+  for(int i=0;i<reg.nb;i++){if(!as_inlist(reg.b[i].coverage,cv->id))continue;if(!as_wave_platform_allowed(reg.b[i].platform))continue;/* out of scope on this host: not a blocker */char material[128];if(!strcmp(reg.b[i].impl,"IMPLEMENTED")&&as_f4c_na(&reg.b[i],&m,&st[i],material)){material_na++;continue;}mapped++;if(strcmp(reg.b[i].impl,"IMPLEMENTED")){planned++;continue;}as_state *s=&st[i];int ok=s->last=='P'&&!s->fail&&!s->refused;if(!ok){if(blocking.n)np_puts(&blocking,",");np_puts(&blocking,reg.b[i].id);}}
   if(!implemented_row||planned){unresolved++;printf("COVERAGE\t%s\tUNRESOLVED\timplementation=%s\tplanned_batches=%d\n",cv->id,cv->impl,planned);}
+  else if(!mapped&&material_na){printf("COVERAGE\t%s\tNOT_APPLICABLE\treason=no-candidate-material\tbatches=%d\n",cv->id,material_na);}
   else if(blocking.n||!mapped){unsatisfied++;printf("COVERAGE\t%s\tUNSATISFIED\tblocking=%s\n",cv->id,blocking.n?blocking.p:"no-implemented-batch");}
   else{satisfied++;printf("COVERAGE\t%s\tSATISFIED\n",cv->id);}free(blocking.p);}
  int qualified=implemented>0&&npass==implemented&&!unsatisfied&&!unresolved;
  printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tnot_applicable=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,nna,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.legacy_kind?"legacy-split1":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none")));
+ as_f4c_summary(reg,m,st);
  return qualified?0:1;
 }
 /* 0 QUALIFIED, 1 NOT_QUALIFIED (every reason named), 2 session refused. */
