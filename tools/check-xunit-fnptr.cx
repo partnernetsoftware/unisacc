@@ -1,0 +1,142 @@
+/* tools/check-xunit-fnptr.cx -- cross-unit function declarations whose function-pointer parameter carries a struct pointer.
+ *   sh ./unisacc.com tools/check-xunit-fnptr.cx            (cwd = repo root)
+ * Background: in a multi-unit program every unit parses its own copy of a struct definition (its own header
+ * text or the CXIF of a used module), so one struct type has a different struct id in each unit.  When a
+ * function is declared in one unit and defined in another, libraryexports LX.capture compares each parameter
+ * with the earlier declaration; a function-pointer parameter is compared structurally by functiontypes
+ * FS.TYPEEQ, which used to answer "no" for any two different non-signature bases.  Two struct ids of the same
+ * struct therefore gave "not covered: incompatible semantic declaration type" (cx.stream 0.0.58, R3 T4 0.0.67).
+ * FS.TYPEEQ now takes two struct bases (SBB <= base < SBE) as equal when their layout facts agree: size SSZ,
+ * alignment SAL and member count SMN.  Anything else that differs is still refused.  Known remaining leniency:
+ * two different structs with the same size, alignment and member count compare equal inside a function-pointer
+ * parameter (member types and tags are not compared); a direct struct-pointer parameter was never compared.
+ * Cases:
+ *   table-*      the rule rows are present once, the old "struct base -> no" row is gone, the manifest binds the
+ *                four constants, and SSZ/SAL/SMN/SBE in exec/facts/functiontypes.tsv agree with every other
+ *                facts table that states them (SBE = SBB + STRUCT_LIMIT of k2-control);
+ *   same-unit    prototype and definition in one unit run (any product version);
+ *   neg-*        a struct of another layout, and a scalar pointer against a struct pointer, are refused by name
+ *                (any product version);
+ *   xunit-*      typedef struct pointer, tagged struct pointer, const struct pointer with a nested struct (the
+ *                cx.stream stage-callback shape), three units, and a .cx module with its user.  A product older
+ *                than 0.0.69 that still refuses them is reported UNVERIFIED (its embedded net predates the
+ *                rule), never PASS; from 0.0.69 on a refusal is a FAIL.
+ * Prints PASS/FAIL/UNVERIFIED per case and CHECK_XUNIT_FNPTR<TAB>failed=N<TAB>unverified=M; exit 1 when N > 0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed, unverified;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-xunit-fnptr.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-xunit-fnptr.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-xunit-fnptr: REFUSE %s\n", s); sy_exit(2); }
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 40, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+/* a macro, so the search is applied to the caller's buffer, which is always the captured output of a child process */
+#define has(o, cap, want) (tx_find((o), tx_len((o), (cap)), (want), tx_len((want), 256)) >= 0)
+#define MSG "incompatible semantic declaration type"
+
+/* every source is a list of single-quoted shell words, one per line of the file; no single quote inside */
+#define TT   "'typedef struct { int a; } tt;' "
+#define TT2  "'typedef struct { int a; int b; } tt;' "
+#define USER "%s 'int f(int (*fn)(tt *, int), void *c);' 'static int cb(tt *p, int k) { return p->a + k; }' 'int main(void) { printf(\"X %%d\\n\", f(cb, 0)); return 0; }'"
+#define BODY "'typedef struct { int z; } zz;' %s 'int f(int (*fn)(tt *, int), void *c) { tt t; t.a = 4; (void)c; return fn(&t, 1); }'"
+#define SAME "" TT "'int f(int (*fn)(tt *, int), void *c);' 'int f(int (*fn)(tt *, int), void *c) { tt t; t.a = 4; (void)c; return fn(&t, 1); }' 'static int cb(tt *p, int k) { return p->a + k; }' 'int main(void) { printf(\"X %d\\n\", f(cb, 0)); return 0; }'"
+#define NEGS "'typedef struct { int a; } t1;' 'int f(int (*fn)(t1 *, int), void *c);' 'int f(int (*fn)(long *, int), void *c) { (void)c; return fn ? 1 : 5; }' 'int main(void) { return f(0, 0); }'"
+#define TAGA "'struct s { int a; };' 'int f(int (*fn)(struct s *, int), void *c);' 'static int cb(struct s *p, int k) { return p->a + k; }' 'int main(void) { printf(\"X %d\\n\", f(cb, 0)); return 0; }'"
+#define TAGB "'struct q { char c; };' 'struct s { int a; };' 'int f(int (*fn)(struct s *, int), void *c) { struct s t; t.a = 4; (void)c; return fn(&t, 1); }'"
+#define ITEM "'typedef struct { unsigned char *data; long len; long cap; } xbuf;' 'typedef struct { xbuf buf; int shape; int flags; } xitem;' "
+#define STGP "'int xadd(int id, int (*fn)(void *, const xitem *, xitem *, char *, int), void *ctx);' "
+#define STGA "" ITEM STGP "'static int st(void *c, const xitem *in, xitem *out, char *why, int cap) { (void)c; (void)why; out->shape = in->shape + cap; return 0; }' 'int main(void) { printf(\"X %d\\n\", xadd(1, st, 0)); return 0; }'"
+#define STGB "'typedef struct { int pad; } xpad;' " ITEM "'int xadd(int id, int (*fn)(void *, const xitem *, xitem *, char *, int), void *ctx) { xitem a; xitem b; char w[8]; a.shape = 2; b.shape = 0; if (fn(ctx, &a, &b, w, 2)) return -1; return b.shape + id; }'"
+#define U3A  "" TT "'int f(int (*fn)(tt *, int), void *c);' 'int g(void);' 'int main(void) { printf(\"X %d\\n\", g()); return 0; }'"
+#define U3B  "'typedef struct { long w; } ww;' " TT "'int f(int (*fn)(tt *, int), void *c);' 'static int cb(tt *p, int k) { return p->a + k; }' 'int g(void) { return f(cb, 0); }'"
+#define MODM "'#pragma unisa module xfm' " TT "'int xfm_f(int (*fn)(tt *, int), void *c) { tt t; t.a = 4; (void)c; return fn(&t, 1); }'"
+#define MODU "'#pragma unisa use xfm' 'static int cb(tt *p, int k) { return p->a + k; }' 'int main(void) { printf(\"X %d\\n\", xfm_f(cb, 0)); return 0; }'"
+
+static void put(const char *dir, const char *base, const char *ext, const char *words) {
+    char script[6000], out[256];
+    if (cx_fmt(script, sizeof script, "printf '%%s\\n' %s > %s/%s.%s", words, dir, base, ext)) die("script");
+    if (sh(script, out, sizeof out)) die("cannot write a probe source");
+}
+static void run(const char *dir, const char *ext, const char *a, const char *b, const char *c, char *out, int cap) {
+    char script[2000], files[600];
+    if (cx_fmt(files, sizeof files, "%s.%s %s%s%s %s%s%s", a, ext, b ? b : "", b ? "." : "", b ? ext : "", c ? c : "", c ? "." : "", c ? ext : "")) die("files");
+    if (cx_fmt(script, sizeof script, "R=$(pwd) && cd %s && sh \"$R/unisacc.com\" %s; echo RC=$?", dir, files)) die("script");
+    sh(script, out, cap);
+}
+static void xunit(int minor, const char *name, int ok, int refused) {
+    if (ok) ck(1, name);
+    else if (minor < 69 && refused) { unverified++; sy_printf("UNVERIFIED\tcheck-xunit-fnptr.%s\tinstalled=0.0.%d predates the struct-base rule\n", name, minor); }
+    else ck(0, name);
+}
+
+int main(void) {
+    char out[4096], dir[512], script[1600], w[3000];
+    int minor = 0;
+    sh("d=$(mktemp -d \"${TMPDIR:-/tmp}/check-xunit-fnptr-XXXXXX\") && printf '%s' \"$d\"", dir, sizeof dir);
+    if (!dir[0] || dir[0] != '/') die("no temporary directory");
+
+    sh("grep -c '^main\tFS.eq.bounds.hi\t\\*\tFS.eq.struct\t' exec/parse2/functiontypes-result.tsv; grep -c '^main\tFS.eq.bounds.hi\t\\*\tFS.no\t' exec/parse2/functiontypes-result.tsv; "
+       "grep -c '^main\tFS.eq.struct.members.test\t1\tFS.yes\t' exec/parse2/functiontypes-result.tsv; grep -c '^main\tFS.eq.struct[a-z.]*\t\\*\tFS.no\t' exec/parse2/functiontypes-result.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n0\n1\n5\nEND") && tx_len(out, sizeof out) == 12, "table-struct-base-rule-rows");
+    sh("grep -c '^rows\tfunctiontypes\tmain\t.*,SBE=SBE,SSZ=SSZ,SAL=SAL,SMN=SMN\t' exec/parse2/functiontypes-manifest.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\nEND") && tx_len(out, sizeof out) == 6, "table-manifest-binds-constants");
+    /* all consumers: each constant has one value across exec/facts, and it is the one functiontypes.tsv states */
+    sh("for k in SSZ SAL SMN; do v=$(grep \"^=$k\tjson\t\" exec/facts/functiontypes.tsv | cut -f3); "
+       "o=$(grep -oh \"\\\"$k\\\":[0-9][0-9]*\" exec/facts/*.tsv | sort -u); n=$(grep -l \"\\\"$k\\\":[0-9]\" exec/facts/*.tsv | wc -l); "
+       "if [ -n \"$v\" ] && [ \"$o\" = \"\\\"$k\\\":$v\" ] && [ \"$n\" -ge 1 ]; then echo \"$k same\"; else echo \"$k DIFFERS $v / $o\"; fi; done; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "SSZ same\nSAL same\nSMN same\nEND") && !has(out, sizeof out, "DIFFERS"), "table-constants-agree-with-all-facts-tables");
+    sh("e=$(grep '^=SBE\tjson\t' exec/facts/functiontypes.tsv | cut -f3); b=$(grep '^=SBB\tjson\t' exec/facts/functiontypes.tsv | cut -f3); "
+       "l=$(grep -oh '\"STRUCT_LIMIT\":[0-9]*' exec/facts/k2-control.tsv | sort -u | cut -d: -f2); c=$(grep -oh '\"SBB\":[0-9][0-9]*' exec/facts/*.tsv | sort -u); "
+       "if [ -n \"$e\" ] && [ -n \"$l\" ] && [ \"$e\" = \"$((b + l))\" ] && [ \"$c\" = \"\\\"SBB\\\":$b\" ]; then echo BOUND ok; else echo \"BOUND bad $e $b $l $c\"; fi", out, sizeof out);
+    ck(has(out, sizeof out, "BOUND ok"), "table-struct-base-bound-is-sbb-plus-struct-limit");
+
+    sh("sh ./unisacc.com --version", out, sizeof out);
+    {   long at = tx_find(out, tx_len(out, sizeof out), "unisacc 0.0.", 12);
+        if (at < 0) die("product version line");
+        for (at += 12; out[at] >= '0' && out[at] <= '9'; at++) minor = minor * 10 + (out[at] - '0'); }
+
+    put(dir, "same", "c", SAME);
+    run(dir, "c", "same", 0, 0, out, sizeof out);
+    ck(has(out, sizeof out, "X 5\nRC=0"), "same-unit-prototype-and-definition-run");
+    put(dir, "negs", "c", NEGS);
+    run(dir, "c", "negs", 0, 0, out, sizeof out);
+    ck(has(out, sizeof out, MSG) && !has(out, sizeof out, "RC=0"), "neg-scalar-pointer-against-struct-pointer-refused");
+    if (cx_fmt(w, sizeof w, USER, TT)) die("words"); put(dir, "ua", "c", w);
+    if (cx_fmt(w, sizeof w, BODY, TT2)) die("words"); put(dir, "ub2", "c", w);
+    run(dir, "c", "ua", "ub2", 0, out, sizeof out);
+    ck(has(out, sizeof out, MSG) && !has(out, sizeof out, "RC=0"), "neg-cross-unit-struct-of-another-layout-refused");
+
+    if (cx_fmt(w, sizeof w, BODY, TT)) die("words"); put(dir, "ub", "c", w);
+    run(dir, "c", "ua", "ub", 0, out, sizeof out);
+    xunit(minor, "xunit-typedef-struct-pointer", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+    run(dir, "c", "ub", "ua", 0, out, sizeof out);
+    xunit(minor, "xunit-definition-before-prototype", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+    put(dir, "ta", "c", TAGA); put(dir, "tb", "c", TAGB);
+    run(dir, "c", "ta", "tb", 0, out, sizeof out);
+    xunit(minor, "xunit-tagged-struct-pointer", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+    put(dir, "sa", "c", STGA); put(dir, "sb", "c", STGB);
+    run(dir, "c", "sa", "sb", 0, out, sizeof out);
+    xunit(minor, "xunit-stream-stage-callback-shape", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+    put(dir, "u3a", "c", U3A); put(dir, "u3b", "c", U3B);
+    run(dir, "c", "u3a", "u3b", "ub", out, sizeof out);
+    xunit(minor, "xunit-three-units", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+    put(dir, "xfm", "cx", MODM); put(dir, "xfu", "cx", MODU);
+    run(dir, "cx", "xfu", 0, 0, out, sizeof out);
+    xunit(minor, "xunit-cx-module-and-user", has(out, sizeof out, "X 5\nRC=0"), has(out, sizeof out, MSG));
+
+    if (!cx_fmt(script, sizeof script, "rm -rf %s", dir)) sh(script, out, sizeof out);
+    sy_printf("CHECK_XUNIT_FNPTR\tfailed=%d\tunverified=%d\n", failed, unverified);
+    return failed ? 1 : 0;
+}
