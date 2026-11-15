@@ -65,6 +65,46 @@ static int run(char **argv, char *out, long cap) {
     return code;
 }
 
+#define CO_REPLAY 3   /* replays when HEAD moved under the commit and none of its paths changed there */
+/* $0 = the private gate root (TMP/commit-own-PID.root).  The tree of the private index (archive/ left out: 5400
+   files no gate reads) is checked out there; top-level entries git does not track (unisacc.com, out/, archive)
+   are symlinked from the shared checkout (.git too: hooks that keep state under a relative .git/ path still work).  The pre-commit hook git would run (core.hooksPath honoured) then runs
+   with that root as cwd and work tree; an absent hook is a pass and no root is built.  The root is removed. */
+#define CO_GATE_SH \
+    "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; " \
+    "case \"$h\" in /*) ;; *) h=\"$PWD/$h\" ;; esac; " \
+    "case \"$GIT_INDEX_FILE\" in /*) ;; *) GIT_INDEX_FILE=\"$PWD/$GIT_INDEX_FILE\"; export GIT_INDEX_FILE ;; esac; " \
+    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=\"$0\"; " \
+    "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
+    "rm -rf \"$r\"; mkdir -p \"$r\" || { echo 'commit-own: cannot create the private gate root'; exit 1; }; " \
+    "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || { rm -rf \"$r\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
+    "for e in * .[!.]*; do [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
+    "( cd \"$r\" && GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
+static int run(char **argv, char *out, long cap);
+/* the commit itself, after the gates passed on the private tree: write-tree of the private index, commit-tree on
+   BASE, then one compare-and-swap of HEAD (git update-ref HEAD NEW BASE).  No hook runs here and nothing is locked
+   by us; a HEAD that moved meanwhile fails the swap with git's "cannot lock ref 'HEAD'" and the caller replays the
+   whole pass (gates included) on the new HEAD or reports the conflict.  1 with the reason in OUT on failure. */
+static int co_land(const char *msg, const char *basec, char *newfull, char *out, long cap) {
+    char tree[64], btree[64], spec[64];
+    char *wv[] = {"git", "write-tree", 0}, *bv[] = {"git", "rev-parse", spec, 0};
+    newfull[0] = 0;
+    if (tx_snprintf(spec, sizeof spec, "%s^{tree}", basec) >= (int)sizeof spec) return 1;
+    if (run(wv, tree, sizeof tree) != 0 || run(bv, btree, sizeof btree) != 0 || tx_len(tree, sizeof tree) != 40) { tx_snprintf(out, (size_t)cap, "git write-tree failed on the private index"); return 1; }
+    if (tx_eqz(tree, btree)) { tx_snprintf(out, (size_t)cap, "nothing to commit: the selected paths equal HEAD"); return 1; }
+    {   char *cv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit-tree", tree, "-p", (char *)basec, "-m", (char *)msg, 0};
+        if (run(cv, out, cap) != 0 || tx_len(out, cap) != 40) return 1;
+        tx_copy(newfull, 64, out, 40); newfull[40] = 0; }
+    {   char *uv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "update-ref", "-m", "commit (commit-own)", "HEAD", newfull, (char *)basec, 0};
+        return run(uv, out, cap) != 0; }
+}
+/* HEAD moved and PATH differs there from the base this commit was built on: name the path and the commit */
+static void co_conflict(const char *path, const char *basec) {
+    char range[80], by[200]; char *v[] = {"git", "log", "-1", "--format=%h %s", range, "--", (char *)path, 0};
+    by[0] = 0;
+    if (tx_snprintf(range, sizeof range, "%s..HEAD", basec) < (int)sizeof range) run(v, by, sizeof by);
+    fprintf(stderr, "COMMIT_OWN_CONFLICT\tpath=%s\tby=%s\n", path, by[0] ? by : "unknown");
+}
 /* the blob of PATH at TREE ("HEAD") or in the shared index (tree 0), and its mode; "" when absent */
 static void entry(const char *tree, const char *path, char *blob, char *mode) {
     char out[8192];
@@ -347,14 +387,16 @@ int main(int argc, char **argv) {
     }
     t_pend = sy_now_ms() - t0 - t_sel;
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
-    {   char old[CO_MAX][48], newc[64]; int rc;
+    {   char old[CO_MAX][48], newc[64], basec[64], newfull[64] = "", groot[420]; int rc;
+        if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
 again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
-        for (k = 0; k < np; k++) { char m[8]; entry("HEAD", path[k], old[k], m); }
+        {   char *v[] = {"git", "rev-parse", "HEAD", 0}; if (run(v, basec, sizeof basec) != 0 || tx_len(basec, sizeof basec) != 40) co_die("git rev-parse HEAD failed", 0); }
+        for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
         sy_setenv("GIT_INDEX_FILE", idx, 1);
-        {   char *v[] = {"git", "read-tree", "HEAD", 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
+        {   char *v[] = {"git", "read-tree", basec, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
         for (k = 0; k < np; k++) {
             char info[200], hb[48], hm[8];
-            entry("HEAD", path[k], hb, hm);
+            entry(basec, path[k], hb, hm);
             if (del[k]) {
                 char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0};
                 if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index --force-remove failed", path[k]); }
@@ -402,11 +444,21 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         {   /* git's stderr (hook output, "nothing to commit", identity errors) merged into OUT so the refusal names the cause */
             char *v[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
             g_bound_s = 150;   /* the precommit hook alone took 32 s at load 26 (a 30 s bound killed two commits); verdict must not depend on a quiet machine */
+            /* the gates read the private tree, never the shared index or the shared work tree: CO_GATE_SH checks the
+               private index out under groot and runs the hook there (GIT_WORK_TREE=groot, GIT_INDEX_FILE=the private
+               index).  Then co_land: commit-tree on the base and one compare-and-swap of HEAD -- no lock is held while
+               the gates run, so commits of disjoint paths evaluate side by side. */
+            char *gv[] = {"sh", "-c", CO_GATE_SH, groot, 0};
+            (void)v;
             tc0 = sy_now_ms();
             if (dry) {   /* the hook git would run (core.hooksPath honoured), on the private index; absent hook = pass */
                 char *dv[] = {"sh", "-c", "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; exec \"$h\" 2>&1", 0};
-                rc = run(dv, out, sizeof out);
-            } else rc = run(v, out, sizeof out);
+                (void)dv;
+                rc = run(gv, out, sizeof out);
+            } else {
+                rc = run(gv, out, sizeof out);
+                if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
+            }
             t_commit += sy_now_ms() - tc0;
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
@@ -427,10 +479,10 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             sy_printf("COMMIT_OWN_DRY\trc=%d\tpaths=%d\tforeign_kept=%d\tnothing committed, the shared index is untouched\n", rc, np, kept);
             return rc ? 1 : 0;
         }
-        if (rc != 0 && att == 0 && tx_eqz(fcls, "head-moved")) {   /* another agent's commit landed between read-tree and the ref update */
+        if (rc != 0 && att < CO_REPLAY && tx_eqz(fcls, "head-moved")) {   /* another agent's commit landed between read-tree and the ref update */
             int same = 1;
-            for (k = 0; k < np; k++) { char nb[48], nm[8]; entry("HEAD", path[k], nb, nm); if (!tx_eqz(nb, old[k])) same = 0; }
-            if (same) { att = 1; sy_printf("NOTE\tHEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once\n"); goto again; }
+            for (k = 0; k < np; k++) { char nb[48], nm[8]; entry("HEAD", path[k], nb, nm); if (!tx_eqz(nb, old[k])) { same = 0; co_conflict(path[k], basec); } }
+            if (same) { att++; sy_printf("NOTE\tHEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once\n"); goto again; }
         }
         if (rc != 0) {   /* last line: the first non-empty line of git's merged output is the reason */
             char *s = out, *e; while (*s == '\n' || *s == ' ') s++;
@@ -442,7 +494,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (e) *e = 0;
             fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, *s ? s : "(git printed nothing)");
             return 1; }
-        {   char *v[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; if (run(v, newc, sizeof newc) != 0) newc[0] = 0; }
+        {   char *v[] = {"git", "rev-parse", "--short=10", newfull, 0}; if (run(v, newc, sizeof newc) != 0) newc[0] = 0; }
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
             entry(0, path[k], ib, im);

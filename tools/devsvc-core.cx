@@ -1241,17 +1241,14 @@ static int cmd_git(const char *root, int argc, char **argv) {
         if (n >= FL_MAX_ARGV - 8) return 2;
         v[n++] = argv[i];
     }
-    /* 所有 commit 都写同一个索引:先取 git-index 锁串行整段 commit(+push),再按路径取写域锁。
-     * 否则不同写域(或无写域)的 commit 互不阻挡,在服务侧并发执行时会撞 index.lock;
-     * 客户端被外层超时杀掉后服务侧节点仍会跑完,这把锁(租约 120 s)让后来者等待而不是撞索引。 */
-    {   const char *gow = auto_owner(); int gmine;
-        if ((rc = auto_lock(root, "git-index", gow))) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock git-index: %s\n", rn ? resp : "no instance"); return rc == 3 ? 3 : 1; }
-        gmine = !strncmp(resp, "OK\tacquired", 11);
-        x_last_err[0] = 0;
+    /* devsvc 拥有索引,第一阶段:commit 不再取 git-index 锁。commit-own 每个请求用私有索引(HEAD 加本请求路径)建树,
+     * 门在私有树的检出上求值(不读共享索引与共享工作树),只在最后对 HEAD 做一次比较并交换(git update-ref NEW OLD);
+     * HEAD 被他人推进且本请求路径未变则整遍重放,变了则具名报冲突。路径不重叠的 commit 因此真并行;
+     * 写域锁(need)照旧按路径取。提交后只把本请求路径同步进共享索引(撞 index.lock 重试 12 次)。push 在提交之后、不持任何提交锁。 */
+    {   x_last_err[0] = 0;
         rc = tool_locked(root, need, "tools/commit-own.cx", n, v);
         if (rc != 0) err_tail(x_last_err, 20);   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行(调用方常只看末几行) */
-        if (rc == 0 && push) { char *pv[] = {"--par", "1", "--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 7, pv) == 0; if (!pushed) rc = 1; }
-        if (gmine) { char rq[200]; F(rq, sizeof rq, "lock-release\tgit-index\t%s", gow); request(root, rq, 0); } }
+        if (rc == 0 && push) { char *pv[] = {"--par", "1", "--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 7, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
     printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\n", rc, sha, pushed, sy_now_ms() - t0);
     return rc;
