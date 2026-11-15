@@ -89,6 +89,7 @@ struct at_arg { char value[1024]; int literal,line; };
 static int at_expr(struct at_src *a,int lo,int hi,struct at_arg *v){
  while(lo<hi&&at_eq(a,lo,"(")){int e=at_end(a,lo,"(",")");if(e<0||e>=hi)return 0;lo=e+1;}
  if(lo>=hi)return 0;struct at_tok *t=&a->t[lo];v->line=t->line;v->literal=t->string;
+ if(hi==lo+4&&at_eq(a,lo,"st")&&at_eq(a,lo+1,"-")&&at_eq(a,lo+2,">")&&at_eq(a,lo+3,"id")){v->literal=0;return cx_fmt(v->value,sizeof v->value,"%s","phase")?0:1;}
  if(hi!=lo+1){if(!(hi==lo+4&&at_eq(a,lo+1,"[")&&at_eq(a,lo+3,"]")))return 0;}
  if(!t->string&&!at_role(t->s)&&strcmp(t->s,"0"))return 0;
  if(cx_fmt(v->value,sizeof v->value,"%s",t->s))return 0;return 1;
@@ -187,6 +188,25 @@ static void at_check(struct at_src *callee,struct at_arg *v,int n,int whole){
  at_calls++;
 }
 static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,struct at_arg *commands,int capacity);
+/* Table-driven step: argv[0] is the row id `tag` (bound to st->id) inside `case MS_X:`; every
+   g_main_steps row of kind MS_X is one command to check. Same-case rows only; anything else is refused. */
+static int at_step_commands(struct at_src *a,int call,int lo,int hi,struct at_arg *commands,int capacity){
+ while(lo<hi&&at_eq(a,lo,"(")){int e=at_end(a,lo,"(",")");if(e<0||e>=hi)return 0;lo=e+1;}
+ if(hi!=lo+1||!at_eq(a,lo,"tag"))return 0;
+ const char *kind=0;int cs=-1;for(int i=call;i>=1;i--)if(at_eq(a,i-1,"case")&&!strncmp(a->t[i].s,"MS_",3)){kind=a->t[i].s;cs=i;break;}
+ if(!kind)return 0;
+ int bound=0;for(int i=cs;i+3<call;i++)if(at_eq(a,i,"tag")&&at_eq(a,i+1,"=")&&at_eq(a,i+2,"st")&&at_eq(a,i+3,"-")){bound=1;}
+ if(!bound)return 0;
+ int n=0;
+ for(int i=0;i+6<a->n;i++)if(at_eq(a,i,"g_main_steps")&&at_eq(a,i+1,"[")&&at_eq(a,i+2,"]")&&at_eq(a,i+3,"=")&&at_eq(a,i+4,"{")){
+  int end=at_end(a,i+4,"{","}");if(end<0)return 0;
+  for(int j=i+5;j<end;j++)if(at_eq(a,j,"{")){int re=at_end(a,j,"{","}");if(re<0)return 0;
+   if(re>j+5&&a->t[j+1].string&&at_eq(a,j+5,kind)){if(n==capacity||!at_expr(a,j+1,j+2,&commands[n++]))return 0;}
+   j=re;}
+  break;
+ }
+ return n;
+}
 static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  for(int call=0;call<a->n;call++){
  int isstep=at_eq(a,call,"step")||at_eq(a,call,"step_secs");int iswhole=at_eq(a,call,"bound_sh_secs");
@@ -203,7 +223,7 @@ static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  if(at_eq(a,j,"=")&&at_eq(a,j+1,"{")){
  int end=at_end(a,j+1,"{","}");int lo=j+2;for(int z=lo;z<=end;z++)if(at_eq(a,z,",")||z==end){if(lo==z){lo=z+1;continue;}
  if(n==128)unknown=1;
- else if(!at_expr(a,lo,z,&v[n])){if(n==0&&(ncommands=at_queue_commands(a,decl,call,lo,z,commands,32))>0){v[n++]=commands[0];}else unknown=1;}
+ else if(!at_expr(a,lo,z,&v[n])){if(n==0&&(ncommands=at_queue_commands(a,decl,call,lo,z,commands,32))>0){v[n++]=commands[0];}else if(n==0&&(ncommands=at_step_commands(a,call,lo,z,commands,32))>0){v[n++]=commands[0];}else unknown=1;}
  else if(!strcmp(v[n].value,"0"))terminated=1;else n++;lo=z+1;}j=end+1;
  }
  for(;j<call;j++){

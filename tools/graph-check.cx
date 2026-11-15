@@ -343,6 +343,40 @@ static void route_functions(const char *b, long n) {
         vocab(rfn[nrfn].phase); nrfn++;
     }
 }
+/* Table-driven gen1 step runner: a call passing g_mt_target[st->b] runs, inside `case MS_X:`, once per
+   g_main_steps row of kind MS_X, with that row's b as target index (g_mt_slug order). A call that is the
+   `?` arm of a ternary runs only for b < 2 (Mac), the `:` arm only for b >= 2 (Windows). */
+static int step_targets(const char *b, long n, long at, int *tl, int *tb) {
+    static const char *slug4[4] = {"osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+    long c, e, s, ls = 0, q; int cnt = 0, lo = 0, hi = 4; char kind[32];
+    for (c = at; c >= 5; c--) if (tx_same(b + c - 5, 5, "case ", 5) && tx_same(b + c, 3, "MS_", 3)) break;
+    if (c < 5) return 0;
+    for (e = c; e < n && ident(b[e]); e++) ;
+    put_s(kind, 32, b + c, e - c);
+    for (q = at; q > 0 && (b[q - 1] == ' ' || b[q - 1] == '\n'); q--) ;
+    if (q > 0 && b[q - 1] == '?') hi = 2;
+    else if (q > 0 && b[q - 1] == ':') lo = 2;
+    s = tx_find(b, n, "g_main_steps[] = {", 18);
+    if (s < 0) return 0;
+    for (ls = s; ls < n && cnt < 8; ) {
+        long le = ls, kp; while (le < n && b[le] != '\n') le++;
+        if (le - ls >= 2 && b[ls] == '}' && b[ls + 1] == ';') break;
+        kp = tx_find(b + ls, le - ls, kind, tx_len(kind, 32));
+        if (kp >= 0) {
+            long p = ls + kp + tx_len(kind, 32); int a = 0, bb = 0, g;
+            if (b[p] == ',') {
+                p++; while (b[p] == ' ') p++;
+                while (b[p] >= '0' && b[p] <= '9') a = a * 10 + (b[p++] - '0');
+                while (b[p] == ',' || b[p] == ' ') p++;
+                while (b[p] >= '0' && b[p] <= '9') bb = bb * 10 + (b[p++] - '0');
+                if (bb >= lo && bb < hi)
+                    for (g = 0; g < ngo; g++) if (tx_eqz(gorder[g], slug4[bb])) { tl[cnt] = g; tb[cnt] = bb; cnt++; break; }
+            }
+        }
+        ls = le + 1;
+    }
+    return cnt;
+}
 /* every call of a route function that passes one of the six targets as a string literal */
 static void route_calls(const char *b, long n) {
     int f, k;
@@ -352,7 +386,7 @@ static void route_calls(const char *b, long n) {
         if (k < f) continue;
         for (;;) {
             static char arg[12][96];
-            long at = tx_find(b + i, n - i, rfn[f].fn, fl), ls, p, as; int na = 0, depth = 0, q = 0, t = -1, a, g;
+            long at = tx_find(b + i, n - i, rfn[f].fn, fl), ls, p, as; int na = 0, depth = 0, q = 0, t = -1, a, g, tl[8], tb[8], ntl = 0, ti;
             if (at < 0) break;
             at += i; i = at + fl;
             if ((at > 0 && ident(b[at - 1])) || at + fl >= n || b[at + fl] != '(') continue;
@@ -378,12 +412,15 @@ static void route_calls(const char *b, long n) {
                 if (al < 3 || arg[a][0] != '"' || arg[a][al - 1] != '"') continue;
                 for (g = 0; g < ngo; g++) if (tx_same(arg[a] + 1, al - 2, gorder[g], tx_len(gorder[g], 32))) { t = g; break; }
             }
-            if (t < 0) continue;
-            for (k = f; k < nrfn; k++) {
+            if (t >= 0) { ntl = 1; tl[0] = t; tb[0] = -1; }
+            else for (a = 0; a < na; a++) if (tx_eqz(arg[a], "g_mt_target[st->b]")) { ntl = step_targets(b, n, at, tl, tb); break; }
+            if (!ntl) continue;
+            for (ti = 0; ti < ntl; ti++) for (k = f; k < nrfn; k++) {
                 if (!tx_eqz(rfn[k].fn, rfn[f].fn)) continue;
                 if (rfn[k].gen >= 0 && (rfn[k].gen >= na || !tx_eqz(arg[rfn[k].gen], "1"))) continue;
                 if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "0")) continue;
-                route_event(gorder[t], rfn[k].phase, rfn[k].fn, line_of(b, at), at);
+                if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "st->b < 2") && tb[ti] >= 2) continue;
+                route_event(gorder[tl[ti]], rfn[k].phase, rfn[k].fn, line_of(b, at), at);
             }
         }
     }
