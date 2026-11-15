@@ -1,0 +1,49 @@
+/* Producer and affected integration controls. ROOT PREPARED_TOOL --cases producer|mapping.
+ * Each group has its own registry batch and unchanged 55-second outer budget. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+static char root[4096],image[4400],tmp[4400];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"check-libneed-native-material: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int yes,const char *name){checks++;if(!yes)failed++;printf("%s\tlibneed-native.%s\n",yes?"PASS":"FAIL",name);}
+static np_result call(char **v,char **env,int secs){np_result r={0};char why[1000];if(np_run(v,root,env,secs,&r,why,sizeof why))die(why);return r;}
+static void save(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("fixture-create");if(write(fd,s,n)!=(ssize_t)n||close(fd))die("fixture-write");}
+static void path(char *p,const char *leaf){if(snprintf(p,4600,"%s/%s",tmp,leaf)>=4600)die("path-bound");}
+static void producer(void){char p[4600],side[4700],bad[4600],changed[4600];path(p,"native");path(bad,"missing-output");path(changed,"changed-output");
+ char *fp[]={image,"--fingerprint",root,0};np_result r=call(fp,0,10);ck(!r.rc&&!r.errn&&r.outn==65,"fingerprint-complete");char fingerprint[66]={0};if(r.outn==65)mm_copy(fingerprint,sizeof fingerprint,r.out,65);np_free(&r);
+ char *v[]={image,"prepare",root,p,0};r=call(v,0,20);ck(!r.rc&&!r.residue&&strstr(r.out,"PREPARED\tlibneed-native\t")&&!strstr(r.out,"PASS"),"real-hostcc-prepared-not-PASS");np_free(&r);
+ char *verify[]={image,"--verify",root,p,0};r=call(verify,0,10);ck(!r.rc&&strstr(r.out,"VERIFIED\tlibneed-native"),"real-receipt-verified");np_free(&r);
+ r=call(v,0,10);ck(r.rc==2&&strstr(r.err,"fresh-artifact-required"),"existing-artifact-refused");np_free(&r);
+ char envbuf[4700];if(snprintf(envbuf,sizeof envbuf,"CC=%s/absent-hostcc",tmp)>=(int)sizeof envbuf)die("CC-path-bound");char *env[]={envbuf,0};char *absent[]={image,"prepare",root,bad,0};r=call(absent,env,10);struct stat st;errno=0;int no=lstat(bad,&st)&&errno==ENOENT;
+ ck(r.rc==3&&strstr(r.err,"HOST_TOOL_MISSING:hostcc")&&no&&!strstr(r.out,"PASS"),"missing-hostcc-no-artifact");np_free(&r);
+ /* Compiler failure remains REFUSE, never HOST_TOOL_MISSING or a material success. */
+ char *broken[]={"CC=/bin/false",0};absent[3]=changed;r=call(absent,broken,10);errno=0;no=lstat(changed,&st)&&errno==ENOENT;ck(r.rc==2&&!strstr(r.err,"HOST_TOOL_MISSING")&&no,"present-broken-compiler-refused");np_free(&r);
+ if(snprintf(side,sizeof side,"%s.material.tsv",p)>=(int)sizeof side)die("receipt-path-bound");size_t n;char *s=cx_read(side,&n);if(!s)die("receipt-read");char *hit=strstr(s,"fingerprint\t");ck(hit&&fingerprint[0]&&!strncmp(hit+12,fingerprint,64),"receipt-binds-observed-fingerprint");
+ char *artifact=strstr(s,"\nartifact\t");if(!artifact)die("receipt-artifact-field");char original=artifact[10];artifact[10]=original=='0'?'1':'0';if(unlink(side))die("receipt-unlink");save(side,s,n);r=call(verify,0,10);ck(r.rc==2&&strstr(r.err,"receipt-or-artifact-mismatch"),"receipt-tamper-refused");np_free(&r);
+ artifact[10]=original;if(unlink(side))die("restore-receipt");save(side,s,n);free(s);r=call(verify,0,10);ck(!r.rc,"restored-receipt-positive-control-before-ELF-tamper");np_free(&r);
+ int fd=open(p,O_WRONLY|O_APPEND|O_NOFOLLOW);if(fd<0||write(fd,"x",1)!=1||close(fd))die("artifact-tamper");r=call(verify,0,10);ck(r.rc==2&&strstr(r.err,"receipt-or-artifact-mismatch"),"ELF-tail-tamper-refused");np_free(&r);
+ r=call(fp,0,10);ck(!r.rc&&r.outn==65&&!memcmp(r.out,fingerprint,65),"artifact-mutation-does-not-alter-input-identity");np_free(&r);}
+static void mapping(void){char *v[]={image,"--materials-dump","--prepare-materials","--family","libneed-native",0};np_result r=call(v,0,50);
+ const char *prefix="MATERIAL\tlibneed-attributes\tlibneed-native\t";char *p=strstr(r.out?r.out:"",prefix),native[4600]={0};
+ if(p){p+=strlen(prefix);char *e=strchr(p,'\n');if(e&&e-p<4600&&*p=='/')mm_copy(native,sizeof native,p,(long)(e-p));}
+ ck(!r.rc&&native[0]&&!strstr(r.out,"REFUSED="),"affected-real-path-material");ck(strstr(r.err?r.err:"","PREPARED\tlibneed-native\t")&&!strstr(r.out,"BATCH_RUN"),"preparation-is-not-batch-PASS");np_free(&r);
+ if(native[0]){char *test[]={"sh","./unisacc.com","tests/libneed-attributes.cx","--",root,native,tmp,0};
+ /* A new child output leaf is distinct from this already-existing check directory. */
+ char work[4600];path(work,"attributes");test[6]=work;r=call(test,0,20);ck(!r.rc&&strstr(r.out,"LIBNEED_ATTRIBUTES\tassertions=14\tfailed=0"),"all-12-original-plus-2-linkage-assertions");np_free(&r);}
+ char envbuf[4700];if(snprintf(envbuf,sizeof envbuf,"CC=%s/no-cc",tmp)>=(int)sizeof envbuf)die("missing-CC-path-bound");char *env[]={envbuf,0};char *neg[]={image,"--ids","libneed-attributes","--prepare-materials","--run",0};r=call(neg,env,30);
+ ck(r.rc==3&&strstr(r.out,"HOST_TOOL_MISSING:hostcc")&&strstr(r.out,"deferred=1")&&!strstr(r.out,"status=PASS"),"affected-missing-hostcc-DEFERRED");np_free(&r);}
+static void nightly(void){
+ char run[4600],missing_run[4600],envbuf[4700];path(run,"nightly-good");path(missing_run,"nightly-missing");
+ char *v[]={image,root,run,"--tier","daily","--phase","map","--map-family","libneed-native",0};np_result r=call(v,0,40);
+ ck(!r.rc&&strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=PREPARED\t")&&strstr(r.out,"S9_MAP_FAMILY\tname=libneed-native\tstatus=PREPARED"),"nightly-shared-producer-PREPARED");ck(!strstr(r.out,"status=PASS")&&!strstr(r.out,"status=COMPILED"),"nightly-preparation-not-verdict");np_free(&r);
+ if(snprintf(envbuf,sizeof envbuf,"CC=%s/no-nightly-cc",tmp)>=(int)sizeof envbuf)die("nightly-CC-bound");char *env[]={envbuf,0};v[2]=missing_run;r=call(v,env,30);
+ if(r.rc||!r.out||!strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=DEFERRED"))fprintf(stderr,"NIGHTLY_NEGATIVE rc=%d stdout=%s stderr=%s\n",r.rc,r.out?r.out:"",r.err?r.err:"");
+ ck(!r.rc&&strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=DEFERRED\treason=HOST_TOOL_MISSING:hostcc")&&!strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=PREPARED"),"nightly-missing-hostcc-DEFERRED");
+ char dump[4800];if(snprintf(dump,sizeof dump,"%s.nightly-init/family-libneed-native.dump",missing_run)>=(int)sizeof dump)die("dump-path");size_t n;char *wire=cx_read(dump,&n);const char *gold="MATERIAL\tlibneed-attributes\tlibneed-native\t-\tREFUSED=HOST_TOOL_MISSING:hostcc\n";ck(wire&&n==strlen(gold)&&!memcmp(wire,gold,n),"nightly-refusal-map-visible-no-NA");free(wire);np_free(&r);
+}
+int main(int argc,char **argv){
+ if(argc==1){if(!realpath(".",root))die("root");char *v[]={"sh","./unisacc.com","tools/affected.cx","--","--ids","libneed-native-producer,libneed-native-mapping,libneed-native-nightly","--prepare-materials","--run","-j","3",0};np_result r=call(v,0,50);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);return rc;}
+ if(argc!=5||strcmp(argv[3],"--cases")||!realpath(argv[1],root)||!realpath(argv[2],image))die("usage-ROOT-TOOL---cases-producer-or-mapping");
+ char t[]="/tmp/check-libneed-native-XXXXXX";if(!mkdtemp(t))die("mkdtemp");if(cx_fmt(tmp,sizeof tmp,"%s",t))die("temporary-path-bound");
+ if(!strcmp(argv[4],"producer"))producer();else if(!strcmp(argv[4],"mapping"))mapping();else if(!strcmp(argv[4],"nightly"))nightly();else die("unknown-case");
+ printf("CHECK_LIBNEED_NATIVE\tchecks=%d\tfailed=%d\tcase=%s\n",checks,failed,argv[4]);return failed?1:0;}

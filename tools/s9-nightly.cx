@@ -668,6 +668,32 @@ static int map_start_gate(const char *run,const char *identity,int has_intent) {
     np_buf all={0};int rc=map_collect_families(run,init_state,identity,count,&all);free(all.p);return rc;
 }
 static int map_verify_only;
+/* The SOURCE registry already enumerates libneed-native. Its HOSTCC producer
+ * is shared with affected; only verified material bytes enter a prepared map. */
+static int libneed_family_check(np_result *dump) {
+    const char *at=dump->out?dump->out:"";int seen=0;
+    while(*at){const char *end=strchr(at,'\n');if(!end)return 1;
+        if(!strncmp(at,"MATERIAL\t",9)){
+            const char *batch_end=memchr(at+9,'\t',(size_t)(end-at-9));
+            const char *tag="\tlibneed-native\t";size_t tn=strlen(tag);
+            if(!batch_end||end-batch_end<(long)tn||memcmp(batch_end,tag,tn))return 1;
+            const char *value=batch_end+tn;seen++;
+            if(value<end&&*value=='-'){
+                if(end-value<10||memcmp(value,"-\tREFUSED=",10))return 1;
+                printf("S9_MAP_PRODUCER\tname=libneed-native\tstatus=DEFERRED\treason=%.*s\n",(int)(end-value-10),value+10);
+            }else{
+                char native[4600],product[4400],tool[4400];size_t n=(size_t)(end-value);
+                if(!n||value[0]!='/'||n>=sizeof native||memchr(value,'\t',n))return 1;
+                if(mm_copy(native,sizeof native,value,(long)n))return 1;native[n]=0;
+                if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/libneed-native-material.cx",root))return 1;
+                char *v[]={"sh",product,tool,"--","--verify",root,native,0};np_result r={0};int rc=run_step(v,root,15,&r);
+                int ok=!rc&&!r.residue&&r.out&&strstr(r.out,"VERIFIED\tlibneed-native\t");
+                if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)return 1;
+                printf("S9_MAP_PRODUCER\tname=libneed-native\tstatus=PREPARED\tpath=%s\n",native);
+            }
+        }at=end+1;
+    }return seen?0:1;
+}
 static int map_family_phase(const char *run,const char *tier,const char *family,int seal) {
     char state[4600],p[4800],rec[4800],identity[65],h[65],want[5000],done[4840],intent[4840];
     int nn=map_families_load(); np_buf all={0};
@@ -690,15 +716,24 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
             free(b); fprintf(stderr,"s9-nightly: REFUSE family-provenance %s\n",map_families[i]); return 1;
         }
         if(!valid&&!seal) {
-            free(b); b=0; char product[4400],tool[4400],*v[10];np_result r={0};
+            free(b); b=0; char product[4400],tool[4400],*v[16],ccenv[4600];np_result r={0};
             if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/affected.cx",root))return 1;
             v[0]="sh";v[1]=product;v[2]=tool;v[3]="--";v[4]="--materials-dump";v[5]="--prepare-materials";v[6]="--family";v[7]=map_families[i];v[8]=0;
+            if(!strcmp(map_families[i],"libneed-native")){
+                /* Material HOSTCC selection survives a clean infrastructure
+                   compiler environment, including an explicitly missing CC. */
+                const char *cc=getenv("UNISACC_LIBNEED_CC");if(!cc||!*cc)cc=getenv("CC");if(!cc||!*cc)cc="cc";
+                if(cx_fmt(ccenv,sizeof ccenv,"UNISACC_LIBNEED_CC=%s",cc))return 1;
+                char *native[]={"env","-u","CC",ccenv,"sh",product,tool,"--","--materials-dump","--prepare-materials","--family",map_families[i],0};
+                for(int j=0;j<13;j++)v[j]=native[j];
+            }
             if(ri_family(map_families[i])){
                 np_buf wire={0};if(ri_dump(run,identity,map_families[i],&wire)){free(wire.p);return 1;}r.out=wire.p;r.outn=wire.n;
             }
             if(evidence_file(intent,identity,1)){np_free(&r);return 1;}
             int rc=ri_family(map_families[i])?0:run_step(v,root,50,&r);
             if(rc||r.residue){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc?rc:1;}
+            if(!strcmp(map_families[i],"libneed-native")&&libneed_family_check(&r)){np_free(&r);return 1;}
             cx_sha256_hex(r.out?r.out:"",r.outn,h);
             char after[65];if(init_identity(tier,0,after)||strcmp(identity,after)){np_free(&r);return 1;}
             if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,h)||cx_write(p,r.out?r.out:"",r.outn)||evidence_file(rec,want,1)){np_free(&r);return 1;}
@@ -708,6 +743,7 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
         if(!valid){free(b);free(all.p);fprintf(stderr,"s9-nightly: missing or stale family %s\n",map_families[i]);return 1;}
         if(evidence_file(intent,identity,0)!=1){free(b);fprintf(stderr,"s9-nightly: REFUSE family-intent %s\n",map_families[i]);return 1;}
         if(!seal){
+            if(!strcmp(map_families[i],"libneed-native")){np_result current={0};current.out=b;current.outn=z;if(libneed_family_check(&current)){free(b);return 1;}}
             int sealed=evidence_file(done,want,0);if(sealed<0){free(b);return 1;}
             if(!sealed&&evidence_file(done,want,1)){free(b);return 1;}
             free(b);printf("S9_MAP_FAMILY\tname=%s\tstatus=%s\n",map_families[i],sealed?"SKIP":"RECOVERED");return 0;
@@ -1177,6 +1213,16 @@ int main(int argc, char **argv) {
     if(material_stage&&!map_family)die("material-stage","requires --map-family ri-flow-runtime|ri-flow-data");
     if(map_family) {
         if(phase!=5||fake)die("map-family","requires real --phase map");
+        if(!strcmp(map_family,"libneed-native")&&getenv("CC")&&*getenv("CC")){
+            /* A real env/exec boundary is required: the runtime's setenv does
+               not update execvp's environ in every prepared tool layout. */
+            const char *saved=getenv("UNISACC_LIBNEED_CC");if(!saved||!*saved)saved=getenv("CC");
+            char selection[4600],product[4400],source[4400];char **v=calloc((size_t)argc+10,sizeof *v);if(!v)die("hostcc-selection","allocation");
+            if(cx_fmt(selection,sizeof selection,"UNISACC_LIBNEED_CC=%s",saved)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(source,sizeof source,"%s/tools/s9-nightly.cx",root))die("hostcc-selection","path");
+            int n=0;v[n++]="/usr/bin/env";v[n++]="-u";v[n++]="CC";v[n++]=selection;v[n++]="sh";v[n++]=product;v[n++]=source;v[n++]="--";
+            for(int j=1;j<argc;j++)v[n++]=argv[j];v[n]=0;
+            np_result clean={0};int rc=run_step(v,root,50,&clean);if(clean.outn)fwrite(clean.out,1,clean.outn,stdout);if(clean.errn)fwrite(clean.err,1,clean.errn,stderr);np_free(&clean);free(v);return rc;
+        }
         if(material_stage&&!ri_family(map_family))die("material-stage","requires ri-flow-runtime|ri-flow-data");
         long t0=sy_now_ms();int mr=material_stage?ri_stage(run,tier,material_stage):map_family_phase(run,tier,map_family,0);
         if(mr)fprintf(stderr,"s9-nightly: %s\n",why);

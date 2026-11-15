@@ -1,0 +1,51 @@
+/* Short HOSTCC producer for the current, untransformed libneed C reader.
+ * prepare ROOT NEW_EXEC | --verify ROOT EXEC | --fingerprint ROOT.
+ * PREPARED is material evidence, never a test verdict or NI reader admission.
+ * System headers and libc are explicit nonhermetic HOSTCC trust inputs. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+#pragma unisa use text.text
+static char root[4096],compiler[4400],source[4400],self[4400];
+static void die(const char *s){fprintf(stderr,"libneed-native-material: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void missing(void){fputs("libneed-native-material: HOST_TOOL_MISSING:hostcc\n",stderr);exit(3);}
+static void path(char *p,size_t cap,const char *a,const char *b){if(snprintf(p,cap,"%s/%s",a,b)>=(int)cap)die("path-bound");}
+static char *load(const char *p,size_t *n){struct stat a,b;if(lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>268435456)die("regular-input");
+ int fd=open(p,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)die("input-open");if(fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_mode!=b.st_mode||a.st_size!=b.st_size)die("input-identity");
+ *n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input-extent");at+=(size_t)z;}
+ char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=z||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_mode!=b.st_mode||a.st_size!=b.st_size;int closed=close(fd);if(changed||closed)die("input-changed");s[*n]=0;return s;}
+static void hash(const void *p,size_t n,char h[65]){if(ks_sha256_hex(p,n,h))die("sha256-provider");}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);hash(s,n,h);free(s);}
+static void row(np_buf *b,const char *k,const char *v){np_puts(b,k);np_puts(b,"\t");np_puts(b,v);np_puts(b,"\n");}
+static int executable(const char *p){struct stat st;if(stat(p,&st)){if(errno==ENOENT)return 0;die("host-tool-stat");}
+ if(!S_ISREG(st.st_mode))die("host-tool-not-regular");if(access(p,X_OK))die("host-tool-access");return 1;}
+static void resolve_compiler(void){const char *want=getenv("UNISACC_LIBNEED_CC");if(!want||!*want)want=getenv("CC");if(!want||!*want)want="cc";if(strpbrk(want,"\r\n\t "))die("CC-single-executable-required");
+ if(strchr(want,'/')){if(!executable(want))missing();if(!realpath(want,compiler))die("host-tool-realpath");return;}
+ const char *at=getenv("PATH");if(!at)at="/bin:/usr/bin";for(;;){const char *e=strchr(at,':');size_t n=e?(size_t)(e-at):strlen(at);char p[4400];
+ if(snprintf(p,sizeof p,"%.*s/%s",n?(int)n:1,n?at:".",want)>=(int)sizeof p)die("host-tool-path-bound");
+ if(executable(p)){if(!realpath(p,compiler))die("host-tool-realpath");return;}if(!e)break;at=e+1;}missing();}
+static void run(char **v,int secs,np_result *r){char why[1024];if(np_run(v,root,0,secs,r,why,sizeof why))die(why);}
+static np_buf observe(char fingerprint[65]){np_buf b={0};char h[65],p[4400],own[65];np_puts(&b,"libneed-native-input-v1\n");row(&b,"root",root);
+ const char *files[]={"seed/unisa_libneed.c","tools/libneed-native-material.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx"};
+ for(int i=0;i<4;i++){path(p,sizeof p,root,files[i]);digest(p,h);row(&b,files[i],h);if(i==1){digest(self,own);if(strcmp(h,own))die("producer-must-be-root-source");}}
+ row(&b,"compiler",compiler);digest(compiler,h);row(&b,"compiler-sha256",h);
+ char *v[]={"/usr/bin/env","-i","PATH=/usr/bin:/bin","LC_ALL=C",compiler,"--version",0};np_result r={0};run(v,5,&r);if(r.rc||r.residue||!r.outn)die("host-tool-version");hash(r.out,r.outn,h);row(&b,"compiler-version-sha256",h);np_free(&r);
+ row(&b,"argv","env -i PATH=/usr/bin:/bin LC_ALL=C CC -O2 ROOT/seed/unisa_libneed.c -o NEW_EXEC");row(&b,"target","ELF64-little-endian-x86_64");row(&b,"trust","HOSTCC-system-headers-libc-nonhermetic;not-NI-admission");
+ hash(b.p,b.n,fingerprint);return b;}
+static void save(const char *p,const void *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)die("exclusive-output");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("output-write");at+=(size_t)z;}int bad=fsync(fd),closed=close(fd);if(bad||closed)die("output-sync");}
+static np_buf receipt(const char *exec,const np_buf *inputs,const char *fingerprint){size_t n;char *s=load(exec,&n);struct stat st;if(lstat(exec,&st)||!(st.st_mode&0111))die("artifact-not-executable");
+ if(n<64||memcmp(s,"\177ELF",4)||(unsigned char)s[4]!=2||(unsigned char)s[5]!=1||(unsigned char)s[18]!=62||s[19])die("artifact-ELF64-x86_64");char h[65];hash(s,n,h);free(s);
+ np_buf b={0};np_puts(&b,"libneed-native-material-v1\nstatus\tPREPARED\n");row(&b,"fingerprint",fingerprint);row(&b,"artifact",h);np_put(&b,inputs->p,inputs->n);return b;}
+int main(int argc,char **argv){int prep=argc>1&&!strcmp(argv[1],"prepare"),fp=argc>1&&!strcmp(argv[1],"--fingerprint");
+ if((fp?argc!=3:argc!=4)||(!fp&&!prep&&strcmp(argv[1],"--verify"))||!realpath(argv[2],root)||strpbrk(root,"\r\n\t")||!realpath(__FILE__,self))die("usage-prepare-ROOT-NEW_EXEC-or-verify-ROOT-EXEC-or-fingerprint-ROOT");
+ char check[65],expected[65];cx_sha256_hex("abc",3,expected);if(ks_sha256_hex("abc",3,check)||strcmp(check,expected))die("sha256-selfcheck");
+ resolve_compiler();path(source,sizeof source,root,"seed/unisa_libneed.c");char before[65],after[65];np_buf inputs=observe(before);if(fp){puts(before);free(inputs.p);return 0;}
+ const char *exec=argv[3];if(exec[0]!='/'||strpbrk(exec,"\r\n\t"))die("absolute-output-required");char side[4600];if(snprintf(side,sizeof side,"%s.material.tsv",exec)>=(int)sizeof side)die("receipt-path-bound");
+ if(prep){struct stat st;errno=0;if(!lstat(exec,&st)||errno!=ENOENT)die("fresh-artifact-required");errno=0;if(!lstat(side,&st)||errno!=ENOENT)die("fresh-receipt-required");
+ /* Reserve the name before invoking the compiler. No shell command or flags from CC. */
+ int fd=open(exec,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0700);if(fd<0||close(fd))die("artifact-reserve");
+ char *v[]={"/usr/bin/env","-i","PATH=/usr/bin:/bin","LC_ALL=C",compiler,"-O2",source,"-o",(char *)exec,0};np_result r={0};run(v,15,&r);if(r.rc||r.residue){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("host-compile-failed");}np_free(&r);}
+ np_buf expected=receipt(exec,&inputs,before),again=observe(after);if(strcmp(before,after)||inputs.n!=again.n||memcmp(inputs.p,again.p,inputs.n))die("inputs-changed-during-build-or-verify");free(again.p);
+ if(prep)save(side,expected.p,expected.n);size_t n;char *stored=load(side,&n);if(n!=expected.n||memcmp(stored,expected.p,n))die("receipt-or-artifact-mismatch");free(stored);
+ /* A fresh artifact read also catches mutation during receipt generation. */
+ np_buf final=receipt(exec,&inputs,before);if(final.n!=expected.n||memcmp(final.p,expected.p,final.n))die("artifact-changed");
+ free(final.p);free(expected.p);free(inputs.p);printf("%s\tlibneed-native\tfingerprint=%s\tpath=%s\tno-test-result\n",prep?"PREPARED":"VERIFIED",before,exec);return 0;}
