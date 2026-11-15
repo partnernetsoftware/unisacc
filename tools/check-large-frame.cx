@@ -1,0 +1,84 @@
+/* tools/check-large-frame.cx -- the function frame-size slot of the E3 control net and large automatic arrays.
+ *   sh ./unisacc.com tools/check-large-frame.cx            (cwd = repo root)
+ * Background: the function prologue is emitted as "... mov r6, r7\n  .frame" followed by a reserved slot
+ * (ORES frm W) that is back-filled right-aligned with the frame size at function end (OFILL frm t W).  The
+ * template has no separator of its own, so the slot must be wider than the widest size it may carry: with W=7 a
+ * frame of 1000000..9999999 bytes filled the whole slot and produced ".frame1000000" (tape: unknown opcode;
+ * encoder: "an op outside the first encoder slice").  W=10 carries up to 999999999 (below the imm32 limit of
+ * the frame instruction); anything larger is refused by the fill itself ("field overflow").
+ * Cases:
+ *   table-*    exec/parse2/control-result.tsv reserves and fills the same slot once each, width 10, and the
+ *              prologue text in exec/facts/k2-control.tsv still ends in ".frame" (so the slot supplies the space);
+ *   small      a 17600-byte frame compiles and runs with the product in use (any version);
+ *   overflow   a 1000000000-byte frame is refused with "field overflow" (any version);
+ *   large-*    a 256x4400 two-dimensional automatic array and a 1000000-byte array compile and run correctly.
+ *              A product older than 0.0.69 that still refuses them is reported UNVERIFIED (its embedded net
+ *              predates the slot change), never PASS; from 0.0.69 on a refusal is a FAIL.
+ * Prints PASS/FAIL/UNVERIFIED per case and CHECK_LARGE_FRAME<TAB>failed=N<TAB>unverified=M; exit 1 when N > 0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed, unverified;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-large-frame.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-large-frame.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-large-frame: REFUSE %s\n", s); sy_exit(2); }
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 40, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+static int has(const char *out, int cap, const char *want) { return tx_find(out, tx_len(out, cap), want, tx_len(want, 256)) >= 0; }
+
+#define SRC_SMALL "int main(void) { char p[4][4400]; int i = 3; p[i][4399] = 7; p[0][0] = 5; printf(\"S %d %d\\n\", p[i][4399], p[0][0]); return 0; }"
+#define SRC_2D    "int main(void) { char paths[256][4400]; int i = 255; paths[i][4399] = 9; paths[1][0] = 97; paths[0][0] = 3; printf(\"L %d %d %d\\n\", paths[i][4399], paths[1][0], paths[0][0]); return 0; }"
+#define SRC_1D    "int main(void) { char p[1000000]; p[999999] = 11; p[0] = 13; printf(\"M %d %d\\n\", p[999999], p[0]); return 0; }"
+#define SRC_HUGE  "int main(void) { char p[1000000000]; p[0] = 1; return p[0] != 1; }"
+
+static void probe(const char *dir, const char *name, const char *src, char *out, int cap) {
+    char script[6000];
+    if (cx_fmt(script, sizeof script, "printf '%%s\\n' '%s' > %s/%s.cx && sh ./unisacc.com %s/%s.cx; echo RC=$?", src, dir, name, dir, name)) die("script");
+    sh(script, out, cap);
+}
+
+int main(void) {
+    char out[4096], dir[512], script[1200];
+    int minor = 0;
+    sh("d=$(mktemp -d \"${TMPDIR:-/tmp}/check-large-frame-XXXXXX\") && printf '%s' \"$d\"", dir, sizeof dir);
+    if (!dir[0] || dir[0] != '/') die("no temporary directory");
+
+    sh("grep -c '\\[\"ORES\",\"frm\",' exec/parse2/control-result.tsv; grep -c '\\[\"ORES\",\"frm\",10\\]' exec/parse2/control-result.tsv; "
+       "grep -c '\\[\"OFILL\",\"frm\",' exec/parse2/control-result.tsv; grep -c '\\[\"OFILL\",\"frm\",\"t\",10\\]' exec/parse2/control-result.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-slot-reserved-and-filled-width-10");
+    sh("grep -c 'mov r6, r7\\\\n  \\.frame\",\"kind\":\"out\"' exec/facts/k2-control.tsv; echo END", out, sizeof out);
+    ck(has(out, sizeof out, "1\nEND") && tx_len(out, sizeof out) == 6, "table-prologue-text-ends-in-frame");
+
+    sh("sh ./unisacc.com --version", out, sizeof out);
+    {   long at = tx_find(out, tx_len(out, sizeof out), "unisacc 0.0.", 12);
+        if (at < 0) die("product version line");
+        for (at += 12; out[at] >= '0' && out[at] <= '9'; at++) minor = minor * 10 + (out[at] - '0'); }
+
+    probe(dir, "small", SRC_SMALL, out, sizeof out);
+    ck(has(out, sizeof out, "S 7 5\nRC=0"), "small-frame-runs");
+    probe(dir, "huge", SRC_HUGE, out, sizeof out);
+    ck(has(out, sizeof out, "field overflow") && !has(out, sizeof out, "RC=0"), "overflow-frame-refused-by-name");
+    {   static const char *nm[2] = {"large-2d-256x4400", "large-1d-1000000"}, *want[2] = {"L 9 97 3\nRC=0", "M 11 13\nRC=0"}, *src[2] = {SRC_2D, SRC_1D};
+        int i;
+        for (i = 0; i < 2; i++) {
+            probe(dir, i ? "l1" : "l2", src[i], out, sizeof out);
+            if (has(out, sizeof out, want[i])) ck(1, nm[i]);
+            else if (minor < 69 && has(out, sizeof out, "reject:")) { unverified++; sy_printf("UNVERIFIED\tcheck-large-frame.%s\tinstalled=0.0.%d predates the slot change\n", nm[i], minor); }
+            else ck(0, nm[i]);
+        }
+    }
+    if (!cx_fmt(script, sizeof script, "rm -rf %s", dir)) sh(script, out, sizeof out);
+    sy_printf("CHECK_LARGE_FRAME\tfailed=%d\tunverified=%d\n", failed, unverified);
+    return failed ? 1 : 0;
+}
