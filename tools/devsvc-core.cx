@@ -197,11 +197,19 @@ static void locks_load(void) {
     }
     free(b);
 }
+/* 最近过期的锁(名、属主)环:持有者过期后再 release 报 expired 而不是 not-held */
+#define NEXPD 32
+static Lock expd[NEXPD]; static long nexpd;
+static int expd_find(const char *name, const char *owner) {
+    long i; for (i = 0; i < NEXPD && i < nexpd; i++) if (!strcmp(expd[i].name, name) && !strcmp(expd[i].owner, owner)) return (int)i;
+    return -1;
+}
 static void locks_expire(void) {
     long now = sy_wall_s(); int i, ch = 0; char t[200];
     for (i = 0; i < nlock; ) {
         if (locks[i].exp <= now) {
             F(t, sizeof t, "%s\towner=%s", locks[i].name, locks[i].owner); ev_add("lock.expire", t);
+            expd[nexpd % NEXPD] = locks[i]; nexpd++;
             locks[i] = locks[--nlock]; ch = 1;
         } else i++;
     }
@@ -293,13 +301,17 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
             i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", f[2]);
             radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
             F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl); ev_add("lock.acquire", t);
-        } else radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
-        locks[i].exp = now + ttl; locks_save(); return 0;
+            locks[i].exp = now + ttl;
+        } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短 */
+            if (locks[i].exp < now + ttl) locks[i].exp = now + ttl;
+            radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], locks[i].exp - now);
+        }
+        locks_save(); return 0;
     }
     if (!strcmp(f[0], "lock-release")) {
         char t[200];
         i = lock_find(f[1]);
-        if (i < 0) { radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
+        if (i < 0) { if (expd_find(f[1], f[2]) >= 0) radd("ERR\texpired\t%s\towner=%s\n", f[1], f[2]); else radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
         if (strcmp(locks[i].owner, f[2])) { radd("ERR\tnot-owner\t%s\towner=%s\n", f[1], locks[i].owner); return 0; }
         F(t, sizeof t, "%s\towner=%s", f[1], f[2]); ev_add("lock.release", t);
         locks[i] = locks[--nlock]; locks_save(); radd("OK\treleased\t%s\n", f[1]); return 0;
@@ -943,9 +955,12 @@ static int tool_locked(const char *root, const char *lock, const char *tool, int
     F(prod, sizeof prod, "%s/%s", root, cfg.product);
     v[n++] = "--"; v[n++] = "sh"; v[n++] = prod; v[n++] = (char *)tool; v[n++] = "--";
     for (i = 0; i < argc; i++) v[n++] = argv[i];
+    int mine = 0;
     if (lock && (rc = auto_lock(root, lock, ow))) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s: %s\n", lock, rn ? resp : "no instance"); return rc == 3 ? 3 : 1; }
+    if (lock) mine = !strncmp(resp, "OK\tacquired", 11);   /* 应答 renewed 表示调用方已持有($DEVSVC_OWNER),不代放 */
     rc = cmd_x(root, n, v);
-    if (lock) { F(req, sizeof req, "lock-release\t%s\t%s", lock, ow); request(root, req, 0); }
+    if (lock && mine) { F(req, sizeof req, "lock-release\t%s\t%s", lock, ow); request(root, req, 0); }
+    else if (lock) { F(req, sizeof req, "lock-acquire\t%s\t%s\t120", lock, ow); request(root, req, 0); }   /* 长操作后为调用方续租 */
     return rc;
 }
 static int git_status(const char *root) {

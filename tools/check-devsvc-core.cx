@@ -66,6 +66,35 @@ int main(void) {
     {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
     ms_hot = sy_now_ms() - t0;
     ck(rc == 0 && has("pinned-ok") && ms_hot < 6000 && ms_hot * 2 < ms_cold + 1000, "hot-call-hits-cache");
+    /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
+    {   char p[400]; const char *bad = "# broken by check\nzzz-unknown\tfoo\tbar\nlib\tonly-one\n"; unsigned char *b = 0; int64_t n = 0;
+        F(p, sizeof p, "%s/tools/devsvc-repo.tsv", fx);
+        if (ovf || sy_read_file(p, &b, &n, 1 << 20) || !b) { printf("FAIL\tdevsvc-core.fixture-read-table\n"); return 1; }
+        if (sy_write_atomic(p, bad, strlen(bad), 0644)) { printf("FAIL\tdevsvc-core.fixture-break-table\n"); free(b); return 1; }
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "table-ok", 0}; rc = run(v, fx, envv); }
+        ck(rc == 0 && has("table-ok"), "broken-working-table-does-not-block");
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "x", "--", "echo", "table-dev", 0}; rc = run(v, fx, envv); }
+        ck(rc != 0 && !has("table-dev") && has("repo table"), "dev-flag-reads-working-table");
+        if (sy_write_atomic(p, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-core.fixture-restore-table\n"); free(b); return 1; }
+        free(b); }
+    /* (6) 锁租约:租约内 release 必 OK;过期后 release 报 expired 而非 not-held;短 ttl 续期不截短长租约 */
+    {   char *a1[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-a", "--owner", "ck", "--ttl", "30", 0};
+        char *r1[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-a", "--owner", "ck", 0};
+        char *a2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-b", "--owner", "ck", "--ttl", "1", 0};
+        char *r2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-b", "--owner", "ck", 0};
+        char *a3[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-c", "--owner", "ck", "--ttl", "600", 0};
+        char *a4[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-c", "--owner", "ck", "--ttl", "5", 0};
+        char *r3[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-c", "--owner", "ck", 0};
+        char *st[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "stop", 0};
+        rc = run(a1, fx, envv); ck(rc == 0 && has("acquired"), "lock-acquire");
+        rc = run(r1, fx, envv); ck(rc == 0 && has("OK\treleased\tck-a"), "lock-release-within-lease-ok");
+        rc = run(a2, fx, envv); ck(rc == 0 && has("acquired"), "lock-acquire-short");
+        sy_sleep_ms(2300);
+        rc = run(r2, fx, envv); ck(rc != 0 && has("ERR\texpired\tck-b") && !has("not-held"), "lock-release-after-expiry-says-expired");
+        (void)run(a3, fx, envv);
+        rc = run(a4, fx, envv); ck(rc == 0 && has("renewed") && !has("expires_in_s=5\n"), "lock-renew-does-not-shorten");
+        rc = run(r3, fx, envv); ck(rc == 0 && has("released"), "lock-release-after-renew-ok");
+        (void)run(st, fx, envv); }
     /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
     {   char p[400]; const char *junk = "\n@@ this is not valid cx @@\n"; unsigned char *b = 0; int64_t n = 0; unsigned char *nb;
         F(p, sizeof p, "%s/tools/devsvc-core.cx", fx);
