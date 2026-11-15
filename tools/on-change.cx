@@ -33,6 +33,24 @@
 static char out[1 << 18];
 static char *links; static long links_n;
 static int dry, auto_bound = 20, any_failed;
+/* The three tools this one shells out to -- affected (which batches a change selects), derive (which
+   derived tables to rewrite) and domain (who holds a path) -- are normally started as
+   `./tools/bound N sh ./unisacc.com tools/X.cx -- ARGS`, which pays a compile on every call.  A caller
+   that runs many paths in one process can build each once and name them here through the environment:
+   a directory holding `affected`, `derive` and `domain` as native images.  Unset (the interactive and
+   hook cases) or a missing image keeps the old `sh PRODUCT tool.cx` path, so nothing depends on it. */
+static char oc_affected[4400];
+static char oc_derive[4400];
+static char oc_domain[4400];
+static void oc_natives(void) {
+    const char *dir = getenv("UNISACC_ON_CHANGE_NATIVES");
+    char probe[4400];
+    oc_affected[0] = 0; oc_derive[0] = 0; oc_domain[0] = 0;
+    if (!dir || !*dir) return;
+    if (!cx_fmt(probe, sizeof probe, "%s/affected", dir) && sy_exists(probe) == 1) tx_copy(oc_affected, sizeof oc_affected, probe, tx_len(probe, sizeof probe));
+    if (!cx_fmt(probe, sizeof probe, "%s/derive", dir) && sy_exists(probe) == 1) tx_copy(oc_derive, sizeof oc_derive, probe, tx_len(probe, sizeof probe));
+    if (!cx_fmt(probe, sizeof probe, "%s/domain", dir) && sy_exists(probe) == 1) tx_copy(oc_domain, sizeof oc_domain, probe, tx_len(probe, sizeof probe));
+}
 
 static long slen(const char *s) { return tx_len(s, 1 << 16); }
 static int seq(const char *a, const char *b) { long n = slen(a); return n == slen(b) && mm_same(a, b, n); }
@@ -86,8 +104,10 @@ static void match_derive(const char *path, Set *autos, Set *pend) {
 }
 /* 跑一次 derive --write --only,按 DERIVE 行把 autos 分成 wrote 与 failed */
 static void run_derive(Set *autos, Set *wrote, Set *failed) {
-    char only[MAXN * NAMEW]; char *a[] = {"./tools/bound", "13", "sh", "./unisacc.com", "tools/derive.cx", "--", "--write", "--only", only, 0};
-    int i;
+    char only[MAXN * NAMEW]; char *a[12]; int n = 0, i;
+    if (oc_derive[0]) { a[n++] = oc_derive; a[n++] = "--write"; a[n++] = "--only"; a[n++] = only; }
+    else { a[n++] = "./tools/bound"; a[n++] = "13"; a[n++] = "sh"; a[n++] = "./unisacc.com"; a[n++] = "tools/derive.cx"; a[n++] = "--"; a[n++] = "--write"; a[n++] = "--only"; a[n++] = only; }
+    a[n] = 0;
     if (!autos->n) return;
     set_join(autos, only, sizeof only);
     out[0] = 0;
@@ -100,8 +120,10 @@ static void run_derive(Set *autos, Set *wrote, Set *failed) {
     }
 }
 static int batches_of(const char *path, Set *ids) {
-    char *a[] = {"./tools/bound", "14", "sh", "./unisacc.com", "tools/affected.cx", "--", "--files", (char *)path, "--list-only", "--tier", "commit", 0};
-    long at = 0, n; int cnt = 0;
+    char *a[12]; int na = 0; long at = 0, n; int cnt = 0;
+    if (oc_affected[0]) { a[na++] = oc_affected; a[na++] = "--files"; a[na++] = (char *)path; a[na++] = "--list-only"; a[na++] = "--tier"; a[na++] = "commit"; }
+    else { a[na++] = "./tools/bound"; a[na++] = "14"; a[na++] = "sh"; a[na++] = "./unisacc.com"; a[na++] = "tools/affected.cx"; a[na++] = "--"; a[na++] = "--files"; a[na++] = (char *)path; a[na++] = "--list-only"; a[na++] = "--tier"; a[na++] = "commit"; }
+    a[na] = 0;
     out[0] = 0;
     if (sy_run(a, out, sizeof out, 0) != 0) return -1;
     n = slen(out);
@@ -125,10 +147,13 @@ static int docs_of(const char *path) {
     return cnt;
 }
 static void claim_of(const char *path, char *dst, long cap) {
-    char *a[] = {"./tools/bound", "5", "sh", "./unisacc.com", "tools/domain.cx", "--", "check", (char *)path, 0};
+    char *a[12]; int na = 0;
     long n, p;
     dst[0] = '-'; dst[1] = 0;
-    if (sy_is_reg("tools/domain.cx") != 1) return;
+    if (sy_is_reg("tools/domain.cx") != 1 && !oc_domain[0]) return;
+    if (oc_domain[0]) { a[na++] = oc_domain; a[na++] = "check"; a[na++] = (char *)path; }
+    else { a[na++] = "./tools/bound"; a[na++] = "5"; a[na++] = "sh"; a[na++] = "./unisacc.com"; a[na++] = "tools/domain.cx"; a[na++] = "--"; a[na++] = "check"; a[na++] = (char *)path; }
+    a[na] = 0;
     out[0] = 0;
     sy_run(a, out, sizeof out, 0);
     n = slen(out);
@@ -207,6 +232,7 @@ int main(int argc, char **argv) {
         else np++;
     }
     links = cx_read("build/links.tsv", &ln); links_n = (long)ln;
+    oc_natives();
     if (hookmode) return hook();
     if (!np) { printf("usage: on-change.cx -- [--dry-run] [--auto-bound N] PATH... | --hook\n"); return 2; }
     for (a = 1; a < argc; a++) {

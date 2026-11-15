@@ -282,6 +282,44 @@ int main(int argc, char **argv) {
         ck(r5 == 0 && has_field("gx.a", want), "bump-index-only-uses-staged-blob");
         r3 = tool(gx, "--write", "gx.a");
         ck(r3 == 0 && !api_sha("gx.a", sc) && !tx_eqz(sb2, sc), "bump-index-differs-from-worktree-api");
+        /* (10) --bump-pending rewrites the table row itself; a breaking change is refused until confirmed */
+        {
+            char tp[4400], *t1 = 0, *t2 = 0;
+            size_t n1 = 0, n2 = 0;
+            int q = 0, a1, a2, a3, a4, a5, a6;
+            if (cx_fmt(tp, sizeof tp, "%s/build/tlib-packages.tsv", gx)) return 2;
+            q |= gitrun(gx, "add", "-A", 0, 0);
+            a1 = tool(gx, "--bump-pending", 0);
+            ck(!q && a1 == 0 && line3("BUMP", "gx.a", "patch") && line3("BUMP_PENDING", "ok", "bumped=1"), "bump-pending-rewrites-row");
+            a2 = tool(gx, "--check", "gx.a");
+            ck(a2 == 0 && line3("LAYER_API", "gx.a", "ok"), "bump-pending-then-check-ok");
+            a3 = tool(gx, "--bump-pending", 0);
+            ck(a3 == 0 && line3("BUMP", "gx.a", "unchanged") && line3("BUMP_PENDING", "ok", "bumped=0"), "bump-pending-idempotent");
+            /* additive: one command, minor */
+            q = gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(int x) { return x + 1; }\nint ga_b(void) { return 5; }\nint ga_c(void) { return 6; }\nint ga_d(void) { return 7; }\n");
+            /* unstaged change of a package that would be rewritten: still refused */
+            a4 = tool(gx, "--bump-pending", 0);
+            ck(!q && a4 == 0 && line3("BUMP", "gx.a", "unchanged"), "bump-pending-unstaged-leaves-index-state");
+            q |= gitrun(gx, "add", "ga/one.cx", 0, 0);
+            q |= gwrite(gx, "ga/two.cx", "#pragma unisa module two\nint ga_two(void) { return 2; }\n/* dirt */\n");
+            a4 = tool(gx, "--bump-pending", 0);
+            ck(!q && a4 == 2 && line3("REFUSE", "gx.a", "dirty-package-path") && line3("BUMP_PENDING", "REFUSED", "bumped=0"), "bump-pending-dirty-changed-package-refused");
+            q = gitrun(gx, "add", "ga/two.cx", 0, 0);
+            a4 = tool(gx, "--bump-pending", 0);
+            ck(!q && a4 == 0 && line3("BUMP", "gx.a", "minor") && tool(gx, "--check", "gx.a") == 0, "bump-pending-additive-is-minor-one-command");
+            /* breaking: refused, rc 2, table and manifest untouched */
+            q = gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(long x) { return (int)x + 1; }\n") || gitrun(gx, "add", "ga/one.cx", 0, 0);
+            t1 = cx_read(tp, &n1);
+            a5 = tool(gx, "--bump-pending", 0);
+            t2 = cx_read(tp, &n2);
+            ck(!q && a5 == 2 && line3("REFUSE", "gx.a", "major-needs-confirm") && line3("BUMP_PENDING", "REFUSED", "bumped=0") &&
+               t1 && t2 && n1 == n2 && tx_same(t1, (long)n1, t2, (long)n2), "bump-pending-major-refused-table-untouched");
+            a6 = bumpt(gx, "gx.a", 0);
+            ck(a6 == 2 && line3("REFUSE", "gx.a", "major-needs-confirm"), "bump-major-refused-without-confirm");
+            a6 = bumpt(gx, "gx.a", "--allow-major");
+            ck(a6 == 0 && line3("BUMP", "gx.a", "major") && tool(gx, "--check", "gx.a") == 0, "bump-major-written-with-allow-major");
+            mm_free(t1); mm_free(t2);
+        }
     }
 
     mm_free(last);

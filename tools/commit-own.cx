@@ -26,6 +26,22 @@
 #define CO_MAX 64
 
 static void co_die(const char *a, const char *b) { fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+/* The two sibling tools this one shells out to (own-diff for --keyed, on-change for the pending-derived
+   hint) are normally run as `sh ./unisacc.com tools/X.cx -- ARGS`, which pays a compile on every call.
+   A caller that runs many commits in one process -- tools/check-commit-own.cx does eleven -- can build
+   each sibling once and name them here through the environment: a directory holding `own-diff` and
+   `on-change` as native images.  Unset (the interactive case) or a missing image keeps the old
+   `sh PRODUCT tool.cx` path, so nothing depends on the cache existing. */
+static char co_own_diff[4400];
+static char co_on_change[4400];
+static void co_natives(void) {
+    const char *dir = getenv("UNISACC_COMMIT_OWN_NATIVES");
+    char probe[4400];
+    co_own_diff[0] = 0; co_on_change[0] = 0;
+    if (!dir || !*dir) return;
+    if (!cx_fmt(probe, sizeof probe, "%s/own-diff", dir) && sy_exists(probe) == 1) tx_copy(co_own_diff, sizeof co_own_diff, probe, tx_len(probe, sizeof probe));
+    if (!cx_fmt(probe, sizeof probe, "%s/on-change", dir) && sy_exists(probe) == 1) tx_copy(co_on_change, sizeof co_on_change, probe, tx_len(probe, sizeof probe));
+}
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
 static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
@@ -87,6 +103,7 @@ int main(int argc, char **argv) {
     }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
+    co_natives();
     for (k = 0; k < np; k++) {
         char src[4400]; sy_stat_t st;
         link[k] = 0;
@@ -96,7 +113,8 @@ int main(int argc, char **argv) {
             char *ov[64], kc[1024], *p = kc; int n = 0;
             if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
             if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.part", sy_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
-            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
+            if (co_own_diff[0]) { ov[n++] = co_own_diff; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k]; }
+            else { ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k]; }
             while (*p && n < 62) { ov[n++] = p; while (*p && *p != ',') p++; if (*p) *p++ = 0; }
             ov[n] = 0;
             if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);
@@ -120,10 +138,11 @@ int main(int argc, char **argv) {
     {   /* 提示:on-change --dry-run 的 pending= 项(只读,不写、不阻断、不改 rc);失败或超时静默跳过 */
         char *ov[CO_MAX + 8], oc[16384], seen[1024]; int n = 0; long at = 0, no;
         seen[0] = 0;
-        ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run";
+        if (co_on_change[0]) { ov[n++] = co_on_change; ov[n++] = "--dry-run"; }
+        else { ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run"; }
         for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
         ov[n] = 0;
-        if (sy_exists("tools/on-change.cx") && run(ov, oc, sizeof oc) >= 0) {
+        if ((co_on_change[0] || sy_exists("tools/on-change.cx")) && run(ov, oc, sizeof oc) >= 0) {
             no = tx_len(oc, sizeof oc);
             while (at < no) {
                 long e = tx_chr(oc + at, no - at, '\n'), ln = e < 0 ? no - at : e, p = tx_find(oc + at, ln, " pending=", 9);
@@ -140,7 +159,7 @@ int main(int argc, char **argv) {
                             if (tx_snprintf(key, sizeof key, ",%s,", item) < (int)sizeof key && tx_find(seen, tx_len(seen, sizeof seen), key, tx_len(key, 136)) < 0) {
                                 long sl = tx_len(seen, sizeof seen);
                                 if (sl + w + 2 < (long)sizeof seen) tx_snprintf(seen + sl, sizeof seen - sl, "%s", key);
-                                sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s\n", item, item);
+                                sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s (全部派生含库包 bump 一条命令: sh ./unisacc.com tools/derive.cx -- --write;包源先 git add,破坏性接口变更会被拒并给出确认命令)\n", item, item);
                             }
                         }
                         s = c + 1;

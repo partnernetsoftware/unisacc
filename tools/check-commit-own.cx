@@ -17,21 +17,30 @@
 #pragma unisa use sys.sig
 #pragma unisa use mem.heap
 #pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use cxlib.toolprep
 
 static int failed;
 static char base[4096];   /* sy_tmpdir()/check-commit-own-PID: the throwaway clone's parent */
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-commit-own.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-commit-own.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-commit-own: REFUSE %s\n", s); sy_exit(2); }
+/* the native image of tools/commit-own.cx and the directory of its two siblings; built once in main */
+static char co_native[4400];
 
-/* sh -c SCRIPT in the clone; stdout+stderr into OUT */
+/* sh -c SCRIPT in the clone; stdout+stderr into OUT.
+   UNISACC_CHECK_TIMING=1 prints one TIMING line per case on stderr (a measurement, never a verdict);
+   unset -- the normal run -- prints nothing extra, so the check's output contract does not change. */
 static int sh(const char *script, char *out, int cap) {
     char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
     char full[8192];
+    const char *timing = getenv("UNISACC_CHECK_TIMING");
+    long t0 = sy_now_ms();
     if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
     av[2] = full;
     rc = cx_runv_timeout(av, 50, &o, &on);   /* 50 s bound (the check budget is 55 s) */
     if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
     if (o) mm_free(o);
+    if (timing && timing[0] == '1') sy_eprintf("TIMING\tsh_ms=%ld\trc=%d\t%.60s\n", sy_now_ms() - t0, rc, full);
     return rc;
 }
 
@@ -40,7 +49,7 @@ static void case_(const char *name, int lock_s) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'n\\n' > %s.txt && "
         "if [ %d -gt 0 ]; then ( touch .git/index.lock; sleep %d; rm -f .git/index.lock ) & sleep 0.3; fi; "
-        "sh ./unisacc.com tools/commit-own.cx -- -m %s --whole %s.txt 2>&1 | tail -1; wait; "
+        "./tools/co.native -m %s --whole %s.txt 2>&1 | tail -1; wait; "
         "echo STATUS; git status --short -- %s.txt; echo ENTRY; git ls-files -s -- %s.txt | cut -c1-6",
         base, name, lock_s, lock_s, name, name, name, name)) die("script");
     sh(script, out, sizeof out);
@@ -53,7 +62,7 @@ static void case_symlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && ln -sf target.c tools/link.c && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m symlink --whole tools/link.c 2>&1 | tail -1; "
+        "./tools/co.native -m symlink --whole tools/link.c 2>&1 | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/link.c | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/link.c",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
@@ -68,7 +77,7 @@ static void case_dirlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && mkdir -p realdir && ln -sf realdir tools/dlink && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m dirlink --whole tools/dlink 2>&1 | tail -1; "
+        "./tools/co.native -m dirlink --whole tools/dlink 2>&1 | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/dlink | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/dlink",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
@@ -85,7 +94,7 @@ static void case_keyed(void) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'x\\nA\\tsee A-B\\nA-B\\tone\\ny\\n' > k1.tsv && git add k1.tsv && git commit -qm k1 -- k1.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\n' > k1.tsv && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
+        "./tools/co.native -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA\tsee A-B\n", 11) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) >= 0 &&
@@ -94,14 +103,21 @@ static void case_keyed(void) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'x\\nA-B\\tone\\ny\\nz\\n' > k2.tsv && git add k2.tsv && git commit -qm k2 -- k2.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\nz\\nA\\tnew\\n' > k2.tsv && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
+        "./tools/co.native -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA\tnew\n", 7) >= 0 &&
        tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) < 0, "keyed-A-leaves-AB-row");
 }
 
-int main(void) {
+/* NAME=abs-path arguments, as run-batch supplies declared batch materials; -1 when absent. */
+static int co_material(int argc, char **argv, const char *name) {
+    size_t n = strlen(name); int i;
+    for (i = 1; i < argc; i++)
+        if (!strncmp(argv[i], name, n) && argv[i][n] == '=' && argv[i][n + 1] == '/') return i;
+    return -1;
+}
+int main(int argc, char **argv) {
     char out[8192];
     char prep[2048], clone[4400];
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
@@ -118,6 +134,36 @@ int main(void) {
         if (sy_cwd(root, sizeof root) < 0) die("cwd");
         if (pp_copy_product(root, clone)) die("cannot copy the product into the clone");
     }
+    char root_local[4400];
+    if (sy_cwd(root_local, sizeof root_local) < 0) die("cwd");
+    /* The six native images are batch materials when run-batch supplies them (NAME=abs-path on argv), so the
+       build happens outside this batch's 55 s budget and is cached by identity.  Run by hand with no materials,
+       build them here with cxlib.toolprep as before: the assertions and the isolation are the same either way,
+       only who pays for the compile differs.  Each image is copied into the clone because every case runs inside
+       it; the sibling directory is named to both tools so they stop compiling their own children. */
+    {   char natives[4400], img[4400], dst[4400], why[400]; int mi;
+        static const char *names[6] = {"commit-own-tool", "own-diff-tool", "on-change-tool", "affected-tool", "derive-tool", "domain-tool"};
+        if (cx_fmt(natives, sizeof natives, "%s/tools/natives", clone) || sy_mkdir(natives, 0755)) die("natives dir");
+        if (cx_fmt(co_native, sizeof co_native, "%s/tools/co.native", clone)) die("path");
+        why[0] = 0;
+        for (mi = 0; mi < 6; mi++) {
+            int a = co_material(argc, argv, names[mi]);
+            const char *leaf = mi == 0 ? "co.native" : mi == 1 ? "own-diff" : mi == 2 ? "on-change" : mi == 3 ? "affected" : mi == 4 ? "derive" : "domain";
+            if (a > 0) {
+                if (mi == 0) { if (cx_fmt(dst, sizeof dst, "%s", co_native)) die("path"); }
+                else if (cx_fmt(dst, sizeof dst, "%s/%s", natives, leaf)) die("path");
+                {   char *cp[] = {"cp", "-f", argv[a] + strlen(names[mi]) + 1, dst, 0};
+                    if (cx_runv_timeout(cp, 20, 0, 0) != 0) die("material copy"); }
+            } else if (mi == 0) {
+                if (tq_native(root_local, "tools/commit-own.cx", co_native, why, sizeof why)) die(why);
+            } else if (mi == 1 || mi == 2) {
+                static const char *srcs[6] = {"", "tools/own-diff.cx", "tools/on-change.cx"};
+                if (cx_fmt(img, sizeof img, "%s/%s", natives, leaf) || tq_native(root_local, srcs[mi], img, why, sizeof why)) die(why);
+            }
+        }
+        if (setenv("UNISACC_COMMIT_OWN_NATIVES", natives, 1)) die("natives env");
+        if (setenv("UNISACC_ON_CHANGE_NATIVES", natives, 1)) die("natives env");
+    }
     case_("nolock", 0);
     case_("lock", 4);
     case_symlink();
@@ -126,7 +172,7 @@ int main(void) {
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only", base))
+            "./tools/co.native -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only", base))
             die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "cached-foreign", 14) >= 0 &&
@@ -135,13 +181,13 @@ int main(void) {
     {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'int main(void){return 0;}\\n' > tools/zz-pend.cx && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m pend --whole tools/zz-pend.cx 2>&1; echo RC=$?", base)) die("script");
+            "./tools/co.native -m pend --whole tools/zz-pend.cx 2>&1; echo RC=$?", base)) die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=tool-index", 26) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "pending-derived-tool-index");
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'q\\n' > zz-plain.txt && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m plain --whole zz-plain.txt 2>&1; echo RC=$?", base)) die("script");
+            "./tools/co.native -m plain --whole zz-plain.txt 2>&1; echo RC=$?", base)) die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=", 16) < 0 &&
            tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "no-pending-derived-for-unrelated");
