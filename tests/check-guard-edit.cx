@@ -2,7 +2,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use text.text
-/* check-guard-edit.cx -- .claude/hooks/guard-edit.ts (GUARD-EDIT-V1): each Bash command string is fed to
+/* check-guard-edit.cx -- tools/guard-hook.cx (GUARD-EDIT-V1): each Bash command string is fed to
  * the hook as PreToolUse JSON on stdin and the exit code is asserted (2 = refused, 0 = allowed).
  *   sh ./unisacc.com tests/check-guard-edit.cx -- ROOT TMPDIR
  * Every child runs under tools/bound with a 20 second deadline (rc 142 on expiry, which no case expects). */
@@ -138,8 +138,8 @@ static int run_hook(const char *root, const char *cmd) {
     if (cx_path_join(jp, sizeof jp, tmpdir, "guard-in.json")) return -1;
     if (cx_write(jp, json, tx_len(json, sizeof json))) return -1;
     if (cx_path_join(bnd, sizeof bnd, root, "tools/bound")) return -1;
-    if (cx_path_join(hk, sizeof hk, root, ".claude/hooks/guard-edit.ts")) return -1;
-    if (cx_fmt(sh, sizeof sh, "bun %s < %s", hk, jp)) return -1;
+    if (cx_path_join(hk, sizeof hk, root, "tools/guard-hook.cx")) return -1;
+    if (cx_fmt(sh, sizeof sh, "cd %s && HOME=%s/home GUARD_REPO=%s sh ./unisacc.com %s < %s", root, tmpdir, root, hk, jp)) return -1;
     av[0] = bnd; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0;
     return sy_run(av, outbuf, sizeof outbuf, &cut);
 }
@@ -172,12 +172,14 @@ int main(int argc, char **argv) {
         cx_write(tp, row, tx_len(row, sizeof row));
         cx_path_join(jp, sizeof jp, tmpdir, "guard-dom.json");
         cx_path_join(bnd, sizeof bnd, argv[1], "tools/bound");
-        cx_path_join(hk, sizeof hk, argv[1], ".claude/hooks/guard-edit.ts");
+        cx_path_join(hk, sizeof hk, argv[1], "tools/guard-hook.cx");
+        { char fb[4400]; cx_fmt(fb, sizeof fb, "%s/home/.cache/unisacc/devsvc", tmpdir); sy_mkdir_all(fb, 0700);
+          cx_fmt(fb, sizeof fb, "%s/home/.cache/unisacc/devsvc/native-fallback", tmpdir); cx_write(fb, "x", 1); }
         for (d = 0; d < (int)(sizeof dc / sizeof dc[0]); d++) {
             char *av[8]; int cut = 0, rc, ok;
             cx_fmt(json, sizeof json, "{\"tool_name\":\"%s\",\"tool_input\":{\"file_path\":\"%s\"}}", dc[d].tool, dc[d].path);
             cx_write(jp, json, tx_len(json, sizeof json));
-            cx_fmt(sh, sizeof sh, "UNISACC_DOMAINS=%s %s bun %s < %s", tp, dc[d].env, hk, jp);
+            cx_fmt(sh, sizeof sh, "cd %s && UNISACC_DOMAINS=%s HOME=%s/home GUARD_REPO=%s %s sh ./unisacc.com %s < %s", argv[1], tp, tmpdir, argv[1], dc[d].env, hk, jp);
             av[0] = bnd; av[1] = "20"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0;
             rc = sy_run(av, outbuf, sizeof outbuf, &cut);
             ok = rc == dc[d].want; assertions++; if (!ok) failed++;
