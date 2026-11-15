@@ -156,15 +156,33 @@ static int retry_slice(const char *leaf){
   if(!passed){size_t used=strlen(ids);if(cx_fmt(ids+used,sizeof ids-used,"%s%s",used?",":"",reg.b[i].id))fail("ids-bound");}
  }if(loaded)as_free(&m);if(!*ids)fail("retry-already-pass");np_buf next={0};np_puts(&next,s->leaf);np_puts(&next,"-retry\t");np_puts(&next,ids);np_puts(&next,"\n");slice_path(p,s,"retry");save(p,next.p,next.n);free(next.p);close(lock);printf("S9\tPENDING\treason=explicit-unknown-retry\n");return 3;
 }
+/* A slice carries many batches; one batch whose declared material is missing must
+   not take the slice down.  Such a batch is reported NOT_AVAIL and left out of IDS
+   before the wave starts; the remaining batches run and are judged on their own
+   receipts.  A material that IS present but whose frozen fingerprint moved is still
+   a hard fail: the session was sealed against a different artifact. */
 static void child(const char *session,const char *ids){
  char map[4400];path(map,sd,"materials.tsv");if(setenv("UNISACC_IDENTITY_PARENT",sd,1))fail("identity-parent-env");if(aw("init",session,sc,map))exit(2);unsetenv("UNISACC_IDENTITY_PARENT");bind_nonce(session);
  char names[S9_MAX][128];int nn=0;as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");
- for(int i=0;i<reg.nb;i++)if(as_inlist(ids,reg.b[i].id)){const char *q=reg.b[i].materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){int seen=0;for(int k=0;k<nn;k++)if(!strcmp(names[k],d.name))seen=1;if(!seen){const as_material *expected=as_find_material(&parent,d.name);char h[65];if(!expected){printf("S9\tNOT_AVAIL\tmaterial=%s\n",d.name);exit(2);}if(expected->kind!=d.kind||as_material_fp(expected,h,sw,sizeof sw)||strcmp(h,expected->fingerprint))fail("frozen-material-changed");if(nn==S9_MAX||strlen(d.name)>=sizeof names[0])fail("material-bound");if(cx_fmt(names[nn++],sizeof names[0],"%s",d.name))fail("copy-bound");if(aw("material",session,d.name,0))exit(2);}}}as_free(&parent);
+ char keep[1024]={0};int nkeep=0,ndrop=0;
+ for(int i=0;i<reg.nb;i++){if(!as_inlist(ids,reg.b[i].id))continue;int usable=1;const char *q=reg.b[i].materials;tp_material_decl d;
+  while(tp_material_next(&q,&d)>0&&usable){int seen=0;for(int k=0;k<nn;k++)if(!strcmp(names[k],d.name))seen=1;if(seen)continue;
+   const as_material *expected=as_find_material(&parent,d.name);char h[65];
+   if(!expected){printf("S9\tNOT_AVAIL\tbatch=%s\tmaterial=%s\n",reg.b[i].id,d.name);usable=0;break;}
+   if(expected->kind!=d.kind||as_material_fp(expected,h,sw,sizeof sw)||strcmp(h,expected->fingerprint))fail("frozen-material-changed");
+   if(nn==S9_MAX||strlen(d.name)>=sizeof names[0])fail("material-bound");
+   if(cx_fmt(names[nn++],sizeof names[0],"%s",d.name))fail("copy-bound");
+   if(aw("material",session,d.name,0))exit(2);}
+  if(!usable){ndrop++;continue;}
+  {size_t used=strlen(keep);if(cx_fmt(keep+used,sizeof keep-used,"%s%s",used?",":"",reg.b[i].id))fail("ids-bound");nkeep++;}}
+ if(!nkeep){printf("S9\tNOT_AVAIL\tslice=%s\tbatches=%d\treason=no-batch-has-materials\n",session,ndrop);exit(3);}
+ as_free(&parent);
+ (void)ndrop;
  /* The native S9 supervisor owns this whole descendant tree and the inherited
     remaining deadline. Only run-batch, not identity/receipt closure, gets 55 s. */
  /* The step owns the worktree gate for every child it launches (epoch record, see wt_epoch_ok). */
  const char *epoch=getenv("UNISACC_S9_WT_EPOCH");char eprefix[4400];path(eprefix,sd,"wt-epoch-");if(!epoch||strncmp(epoch,eprefix,strlen(eprefix))||strchr(epoch+strlen(eprefix),'/'))fail("wt-epoch-required");
- char copy[1024];if(strlen(ids)>=sizeof copy)fail("ids");if(cx_fmt(copy,sizeof copy,"%s",ids))fail("copy-bound");char *v[32];int n=0;v[n++]=se;v[n++]="wave";v[n++]=sr;v[n++]=(char *)session;v[n++]="--s9-supervised";v[n++]="--shared-wt";v[n++]=(char *)epoch;v[n++]="--heavy";char *q=copy;while(q&&*q){char *e=strchr(q,',');if(e)*e=0;v[n++]=q;q=e?e+1:0;}v[n]=0;char p[4400];path(p,session,"wave.log");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)fail("wave-log");close(fd);execv(se,v);fail("wave-exec");
+ char copy[1024];if(strlen(keep)>=sizeof copy)fail("ids");if(cx_fmt(copy,sizeof copy,"%s",keep))fail("copy-bound");char *v[32];int n=0;v[n++]=se;v[n++]="wave";v[n++]=sr;v[n++]=(char *)session;v[n++]="--s9-supervised";v[n++]="--shared-wt";v[n++]=(char *)epoch;v[n++]="--heavy";char *q=copy;while(q&&*q){char *e=strchr(q,',');if(e)*e=0;v[n++]=q;q=e?e+1:0;}v[n]=0;char p[4400];path(p,session,"wave.log");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)fail("wave-log");close(fd);execv(se,v);fail("wave-exec");
 }
 static int has_bytes(const char *s,size_t n,const char *needle){size_t k=strlen(needle);for(size_t i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return 1;return 0;}
 /* Wave-level worktree gate consumer.  A child session that ran a wave must name the epoch record of
