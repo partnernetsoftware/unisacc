@@ -735,7 +735,7 @@ static int prep_kind_of(const char *name, int kind) {
         return 0;
     }
     if (tx_eqz(name, "unitcache-product") || tx_eqz(name, "e2model")) return PK_PROD;
-    if (tx_eqz(name, "hostcc") || tx_eqz(name, "hostld") || tx_eqz(name, "hostar")) return PK_HOST;
+    if (tx_eqz(name, "hostcc") || tx_eqz(name, "hostld") || tx_eqz(name, "hostar") || tx_eqz(name, "hosttcc")) return PK_HOST;
     if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects")) return PK_MDIR;
     if (tx_eqz(name, "streams")) return PK_STREAMS;
     if (tx_eqz(name, "identity-helper")) return PK_IDENT;
@@ -748,6 +748,34 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_SVAL) { cx_fmt(src, cap, "streams/streams.json:%.*s", (int)(nl - 11), name + 7); return 0; }
     if (pk == PK_SID) { cx_fmt(src, cap, "identity-helper:ROOT"); return 0; }
     if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
+    if (pk == PK_HOST && tx_eqz(name, "hosttcc")) {
+        const char *want = getenv("TCC"), *at = getenv("PATH");
+        if (!want || !*want) want = "tcc";
+        if (strchr(want, '/')) {
+            if (access(want, X_OK) == 0 && sy_realpath(want, src, cap) >= 0) return 0;
+            if (errno == ENOENT) cx_fmt(why, whycap, "HOST_TOOL_MISSING:hosttcc:%s", want);
+            else cx_fmt(why, whycap, "host-tool-access=%s:errno=%d", want, errno);
+            return -1;
+        }
+        if (!at) at = "/bin:/usr/bin";
+        for (;;) {
+            const char *end = strchr(at, ':'); long n = end ? end - at : (long)strlen(at);
+            char path[4400];
+            if (cx_fmt(path, sizeof path, "%.*s/%s", n ? (int)n : 1, n ? at : ".", want)) {
+                cx_fmt(why, whycap, "host-tool-path-too-long=hosttcc"); return -1;
+            }
+            if (access(path, X_OK) == 0) {
+                if (sy_realpath(path, src, cap) >= 0) return 0;
+                cx_fmt(why, whycap, "host-tool-unreadable=%s", path); return -1;
+            }
+            if (errno != ENOENT) {
+                cx_fmt(why, whycap, "host-tool-access=%s:errno=%d", path, errno); return -1;
+            }
+            if (!end) break;
+            at = end + 1;
+        }
+        cx_fmt(why, whycap, "HOST_TOOL_MISSING:hosttcc:%s", want); return -1;
+    }
     if (pk == PK_HOST) { cx_fmt(src, cap, "/usr/bin/%s", name + 4); return 0; }
     if (pk == PK_MDIR) { if (cx_fmt(src, cap, "tools/%s-material.cx", tx_eqz(name, "nets") ? "net" : tx_eqz(name, "objects") ? "object" : "pp-gold")) return -1; }
     else

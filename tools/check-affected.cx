@@ -171,7 +171,7 @@ static int prep_field(const char *out, const char *name, const char *key, char *
     return 0;
 }
 static int own(const char *line, long n) {
-    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", 0};
+    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", "affected-hosttcc", 0};
     int k; char pre[64];
     for (k = 0; mine[k]; k++) {
         int pl = (int)strlen(mine[k]);
@@ -233,15 +233,48 @@ int main(int argc, char **argv) {
         for (k = 1; k < argc; k++) {
             if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
             /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
-            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym") || tx_eqz(argv[k], "materials")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym") || tx_eqz(argv[k], "materials") || tx_eqz(argv[k], "hosttcc")) { part_wanted = argv[k]; continue; }
             if (tx_eqz(argv[k], "--")) continue;
-            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|materials|depth]\n");
+            printf("usage: check-affected.cx [--part all|tiers|list|list2|run|materials|hosttcc|depth]\n");
             return 2;
         }
     }
     if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
-    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym") && !want("materials")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym") && !want("materials") && !want("hosttcc")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (want("hosttcc")) {
+        /* A version-only fixture tests material discovery, never the gcc/tcc differential. */
+        char dir[] = "/tmp/affected-hosttcc-XXXXXX", stub[4400], path[16384];
+        char *keep_tcc = getenv("TCC") ? strdup(getenv("TCC")) : 0;
+        char *keep_path = getenv("PATH") ? strdup(getenv("PATH")) : 0;
+        const char *body = "#!/bin/sh\nprintf 'tcc material fixture 1\\n'\n";
+        int setup = mkdtemp(dir) != 0 && !cx_fmt(stub, sizeof stub, "%s/tcc", dir)
+            && !cx_write(stub, body, strlen(body)) && !chmod(stub, 0700);
+        ck(setup, "hosttcc-fixture");
+        if (setup) {
+            char *prep_args[] = {"--prep-only", "--ids", "random-expr", 0};
+            char *run_args[] = {"--ids", "random-expr", "--prepare-materials", "--run", 0};
+            setenv("TCC", stub, 1);
+            rc = tool(prep_args, o, OUTCAP);
+            ck(rc == 0 && has(o, "PREPARED\thosttcc\t") && has(o, stub)
+                && has(o, "version=tcc material fixture 1") && has(o, "AFFECTED_PREP\t")
+                && !has(o, "BATCH_RUN") && !has(o, "status=PASS"), "hosttcc-env-prepared-only");
+            unsetenv("TCC");
+            if (cx_fmt(path, sizeof path, "%s:%s", dir, keep_path ? keep_path : "/usr/bin:/bin")) return 2;
+            setenv("PATH", path, 1);
+            rc = tool(prep_args, o, OUTCAP);
+            ck(rc == 0 && has(o, "PREPARED\thosttcc\t") && has(o, stub)
+                && !has(o, "BATCH_RUN"), "hosttcc-path-prepared");
+            setenv("TCC", "/nonexistent/affected-hosttcc", 1);
+            rc = tool(run_args, o, OUTCAP);
+            ck(rc == 3 && has(o, "DEFERRED\trandom-expr\tprepare-failed=HOST_TOOL_MISSING:hosttcc:")
+                && has(o, "AFFECTED_RUN\tpass=0\tfail=0\tdeferred=1\t")
+                && !has(o, "BATCH_RUN") && !has(o, "PREPARED\thosttcc\t"), "hosttcc-missing-deferred-no-fallback");
+            sy_unlink(stub); rmdir(dir);
+        }
+        if (keep_tcc) { setenv("TCC", keep_tcc, 1); free(keep_tcc); } else unsetenv("TCC");
+        if (keep_path) { setenv("PATH", keep_path, 1); free(keep_path); } else unsetenv("PATH");
+    }
     if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
