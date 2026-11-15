@@ -1,0 +1,113 @@
+/* tools/check-flowsh.cx -- tools/flowsh.cx (shorthand -> flow node table).
+ *
+ *   sh ./unisacc.com tools/check-flowsh.cx      (from the repo root; work dir $TMPDIR/check-flowsh-<pid>)
+ *
+ * Every case really runs flowsh as a child (bounded 50 s):
+ *   sh-two            two commands: exact node lines, ';' and space escaped, rc 0
+ *   sh-marker         stderr ends with FLOWSH kind=sh nodes=2
+ *   read-span         PATH:A-B, PATH and PATH:A: offset_line/limit_line exactly
+ *   read-colon-path   a suffix that is not a span stays in the path
+ *   map-sub           every {} replaced by the value, values with spaces escaped, timeout_ms carried
+ *   chain-after       --chain --after --prefix: first node depends on --after, the next on its predecessor
+ *   cwd               --cwd lands on exec nodes
+ *   dashdash          after -- an item that starts with -- is an item
+ *   refuse-*          unknown kind, no items, map without {}, map without --, bad timeout, bad span,
+ *                     bad prefix, unknown option, --cwd with read: rc 2, REFUSE on stderr, empty stdout
+ *   run-roundtrip     the table really run by tools/flowrun.cx: the sh node's ';' and TAB reach the
+ *                     child byte for byte, the read node returns exactly lines 2..3, ok=2, rc 0
+ *   run-map           a map table really run: three nodes, each echoes its own value, ok=3
+ *   run-chain-skip    a --chain table really run: the node after the failing one is skip, rc 1
+ * Prints PASS/FAIL per case and CHECK_FLOWSH<TAB>failed=N. */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flowsh.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flowsh.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flowsh: REFUSE %s\n", s); sy_exit(2); }
+static char out[1 << 16], err[8192];   /* child output only: stdout of the last run, stderr of the last refuse */
+static int has(const char *w) { return strstr(out, w) != 0; }
+static int same(const char *a, const char *b) { return !strcmp(a, b); }
+static char wd[1024];
+
+/* sh -c CMD (bounded 50 s), stdout into OUT; the command does its own redirections. */
+static int run(const char *cmd, char *out, int cap) {
+    char *w[4], *b = 0; size_t n = 0, j; int rc;
+    w[0] = "sh"; w[1] = "-c"; w[2] = (char *)cmd; w[3] = 0;
+    rc = cx_runv_timeout(w, 50, &b, &n);
+    if (n > (size_t)cap - 1) n = (size_t)cap - 1;
+    for (j = 0; b && j < n; j++) out[j] = b[j];
+    out[b ? n : 0] = 0;
+    free(b);
+    return rc;
+}
+#define T "sh ./unisacc.com tools/flowsh.cx -- "
+#define R " | sh ./unisacc.com tools/flowrun.cx -- run - --echo 2>&1"
+
+static void refuse(const char *name, const char *args) {
+    static char cmd[2048]; int rc, rc2;
+    if (cx_fmt(cmd, sizeof cmd, T "%s 2>/dev/null", args)) die("cmd");
+    rc = run(cmd, out, sizeof out);
+    if (cx_fmt(cmd, sizeof cmd, T "%s 2>&1 >/dev/null", args)) die("cmd");
+    rc2 = run(cmd, err, sizeof err);
+    ck(rc == 2 && rc2 == 2 && out[0] == 0 && !strncmp(err, "flowsh: REFUSE ", 15), name);
+}
+
+int main(void) {
+    static char cmd[4096], f[1200]; int rc;
+    if (cx_fmt(wd, sizeof wd, "%s/check-flowsh-%d", sy_tmpdir(), (int)getpid())) die("work dir");
+    rc = sy_mkdir(wd, 0755); if (rc < 0 && rc != -EEXIST) die("mkdir");
+
+    rc = run(T "sh 'echo a;b' 'ls -l' 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "s1\texec\t-\ta0=sh;a1=-c;a2=echo%20a%3Bb\ns2\texec\t-\ta0=sh;a1=-c;a2=ls%20-l\n"), "sh-two");
+    rc = run(T "sh 'echo a;b' 'ls -l' 2>&1 >/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "FLOWSH\tkind=sh\tnodes=2\n"), "sh-marker");
+
+    rc = run(T "read 'x.txt:3-5' y.txt 'z:7' 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "r1\tfile.read\t-\tpath=x.txt;offset_line=3;limit_line=3\nr2\tfile.read\t-\tpath=y.txt\nr3\tfile.read\t-\tpath=z;offset_line=7;limit_line=1\n"), "read-span");
+    rc = run(T "read 'a:b' 'c:1x' 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "r1\tfile.read\t-\tpath=a:b\nr2\tfile.read\t-\tpath=c:1x\n"), "read-colon-path");
+
+    rc = run(T "map --timeout-ms 5000 a 'b c' -- echo 'v={}/{}' 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "m1\texec\t-\ta0=echo;a1=v=a/a;timeout_ms=5000\nm2\texec\t-\ta0=echo;a1=v=b%20c/b%20c;timeout_ms=5000\n"), "map-sub");
+
+    rc = run(T "sh --chain --after pre,p2 --prefix k true true true 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "k1\texec\tpre,p2\ta0=sh;a1=-c;a2=true\nk2\texec\tk1\ta0=sh;a1=-c;a2=true\nk3\texec\tk2\ta0=sh;a1=-c;a2=true\n"), "chain-after");
+
+    rc = run(T "sh --cwd '/tmp/a b' pwd 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "s1\texec\t-\ta0=sh;a1=-c;a2=pwd;cwd=/tmp/a%20b\n"), "cwd");
+
+    rc = run(T "sh -- --version 2>/dev/null", out, sizeof out);
+    ck(rc == 0 && same(out, "s1\texec\t-\ta0=sh;a1=-c;a2=--version\n"), "dashdash");
+
+    refuse("refuse-kind", "bash true");
+    refuse("refuse-no-items", "sh --chain");
+    refuse("refuse-map-no-brace", "map a b -- echo x");
+    refuse("refuse-map-no-sep", "map a b");
+    refuse("refuse-timeout", "sh --timeout-ms 300001 true");
+    refuse("refuse-span", "read ok.txt 'x:5-3'");
+    refuse("refuse-span-zero", "read 'x:0'");
+    refuse("refuse-prefix", "sh --prefix 'a/b' true");
+    refuse("refuse-option", "sh --jobs 3 true");
+    refuse("refuse-cwd-read", "read --cwd /tmp x");
+
+    if (cx_fmt(f, sizeof f, "%s/five.txt", wd)) die("path");
+    if (sy_write_file(f, "L1\nL2\nL3\nL4\nL5\n", 15, 0644)) die("cannot write fixture");
+    if (cx_fmt(cmd, sizeof cmd, "{ " T "sh 'printf \"a;b\\tc%%%%d\\n\" 7' 2>/dev/null; " T "read '%s:2-3' 2>/dev/null; }" R, f)) die("cmd");
+    rc = run(cmd, out, sizeof out);
+    ck(rc == 0 && has("\tok=2\tfail=0\t") && has("ECHO\ts1\tbytes=8\na;b\tc%d\n") && has("ECHO\tr1\tbytes=6\nL2\nL3\n"), "run-roundtrip");
+
+    rc = run(T "map x1 'y 2' z3 -- printf 'got[%s]\\n' '{}' 2>/dev/null" R, out, sizeof out);
+    ck(rc == 0 && has("\tok=3\tfail=0\t") && has("got[x1]\n") && has("got[y 2]\n") && has("got[z3]\n"), "run-map");
+
+    rc = run(T "sh --chain true 'exit 3' 'echo never' 2>/dev/null" R, out, sizeof out);
+    ck(rc == 1 && has("\tok=1\tfail=1\ttimeout=0\tskip=1\t") && has("\ts3\tskip\t") && has("dep=s2:fail") && !has("never\n"), "run-chain-skip");
+
+    sy_printf("CHECK_FLOWSH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

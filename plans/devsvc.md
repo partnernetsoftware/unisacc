@@ -172,6 +172,15 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 | G10 | 接入 devsvc 事件与常驻内存索引 | `tools/devsvc.cx` 的 rel 子命令 | 等基础版合入后排窗口 |
 | G11 | `affected.cx` 改问 rel(保留原命令行合同) | `tools/affected.cx` | `check-affected.cx` 全部批次通过;全批次逐行对照无差 |
 | G12 | 登记批次与 prd 能力速查 | 清单、`prd.md` | `tests/run.cx -- --list` 含新批次 |
+吸收自 omp-flow 的候选(2026-11-15,窗口 fable-ompflow;对比依据为 moltbaby 的 omp-workflow/flow-run.ts、flow-cli.ts、flow-deadline.ts、node-flow.ts 只读源码。devsvc flow 已强于 omp-flow 而不需吸收的:写算子与路径锁、就绪即起的调度(omp-flow 按层等齐)、事件落盘与 run 目录、外部取消、后台作业与 wait、输出控制、整流 deadline、stdin_node 管道、compare 与 doc 算子):
+- O1 速记与 map 展开(价值最高,已落第一步):omp-flow 的 `sh c1 c2`、`read a b:3-9`、`map` 一条命令并发 N 个节点,不写图文件;devsvc 侧原先要 printf 拼 TAB 并手工写 %3B。第一步 `tools/flowsh.cx`(批次 flowsh)只生成节点表,接 `devsvc flow - --cat`;第二步在 devsvc-core.cx 加 `flow sh|read|map` 子命令内联生成(省一次进程启动,约 0.3 s),须等事务化 flow 在途单放开 devsvc-core.cx 写域。难度低。
+- O2 并发收益行:omp-flow 首行给 wallMs、serialMs、savedMs。落地:flowexec.cx 的 fl_sum 加 serial_ms(各节点 ms 之和),DEVSVC_FLOW 与 FLOW_RUN 末行加 serial_ms= 与 saved_ms=,agent 据此判断拆并发是否值得。难度低;碰 flowexec.cx 与 devsvc-core.cx,排在途单之后。
+- O3 失败节点自带首条诊断:omp-flow 文本行在失败节点后附 exit= 与首个非空输出行;devsvc 的 NODE 行只有 out= err= 字节数,要再跑一次 --cat 或 --summary 才知原因。落地:flowexec.cx 的 fl_finish 在 fail 与 timeout 时读 RUN/out/ID.err(空则 .out)首个非空行,截 120 字节并进事件摘要。价值:每次失败省一次往返。难度低;只碰 flowexec.cx,与 git.commit 节点单同文件,须先 devsvc git status 确认无他人未提交改动。
+- O4 结构化整图报告:omp-flow 默认输出一份 JSON(每节点 id、tool、status、ms、exitCode、content)。落地:fl_run 结束时在 RUN/report.tsv 落每节点一行(id、op、state、rc、ms、out 字节、err 字节、out sha),devsvc flow 加 --report 打印它;协调者与 API 不再解析 NODE 文本行。难度中;flowexec.cx 加 devsvc-core.cx。与事务化 flow 互补(其回滚与提交结论可作为 report 的附加行),字段须与该单对齐后再做。
+- O5 只读闸门:omp-flow 默认只放行可证只读的节点,--allow-write 才放行写。落地:`flow --ro`,fl_load 拒绝 file.write、file.edit、doc 写算子、stdout_to 与带 lock 的节点(exec 无法证只读,只作声明并记事件 ro=1);只读流不取任何锁。价值:审查与取证子代理可放心满并发,不会误写共享检出。难度低;flowexec.cx 加 devsvc-core.cx 选项,排在途单之后。
+- O6 glob 算子:omp-flow 有进程内 glob 节点(按字典序列文件名);5a 节自认只列文件名仍要用原生工具。落地:flowfile.cx 加 `glob`(pattern=、max=,复用 search 的 glob 匹配器,跳过 .git),flowexec.cx 的 op 白名单加一项。难度低到中;flowfile.cx 不在在途写域。
+- O7 跳过文案指向动作:omp-flow 的 skipped 写明"不是本调用自身的失败,先处理前驱再重发";devsvc 的 skip 摘要只有 dep=ID:state。落地:DEVSVC_FLOW 末行在有 skip 时加 first_fail=ID,让 agent 直接定位根因节点。难度低;devsvc-core.cx,排后。
+- 不吸收:(1) 批内共享预算(flow-deadline.ts),devsvc 已有 --deadline-ms 与节点 timeout_ms;(2) agentbox 节点与模型侧 flow 协议(node-flow.ts、16 项上限),属 omp 宿主机制;(3) JSON 图文件输入,TSV 节点表加 flowsh 已够,cx 无 JSON 库,不为此引入。
 
 ## 8 文档接口 doc(一期,2026-11-15)
 
