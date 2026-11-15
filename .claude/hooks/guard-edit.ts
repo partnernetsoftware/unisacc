@@ -193,7 +193,9 @@ try {
     // DEVSVC-ONLY:仓内文件读取经 devsvc f read 或 flow 的 file.read 节点;应急回退同下方 native-fallback 标记。
     const fp: string = input?.tool_input?.file_path ?? "";
     const root = process.env.CLAUDE_PROJECT_DIR ?? "";
-    if (root && fp.startsWith(root + "/") && !fp.startsWith(root + "/out/")) {
+    // 2026-11-15 收紧:除宿主自身目录($HOME/.claude/、/tmp/claude-*)外,任何路径(含 /tmp 副本、版本工作树)一律经 devsvc。
+    const hostOwn = fp.startsWith(`${process.env.HOME ?? ""}/.claude/`) || fp.startsWith("/tmp/claude-");
+    if (fp && !hostOwn) {
       const fb = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc/native-fallback`;
       let ok = false;
       try { const st = await Bun.file(fb).stat(); ok = Date.now() - st.mtimeMs < 30 * 60 * 1000; } catch {}
@@ -208,7 +210,7 @@ try {
     // 应急回退:devsvc 不可用时 touch $HOME/.cache/unisacc/devsvc/native-fallback(30 分钟内有效),并把原因报给主调度作为 devsvc 缺口。
     {
       const root = process.env.CLAUDE_PROJECT_DIR ?? "";
-      const inRepo = root && fp.startsWith(root + "/") && !fp.startsWith(root + "/out/");
+      const inRepo = !!fp && !(fp.startsWith(`${process.env.HOME ?? ""}/.claude/`) || fp.startsWith("/tmp/claude-")); // 2026-11-15 收紧:含 /tmp 副本
       if (inRepo) {
         const fb = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc/native-fallback`;
         let ok = false;
