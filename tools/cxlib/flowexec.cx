@@ -33,6 +33,9 @@
  * Events (stdout when echo is set, and appended to RUN/events.tsv, seq strictly increasing):
  *   EVT <TAB> seq <TAB> id <TAB> start|ok|fail|timeout|skip <TAB> ms <TAB> rc <TAB> summary
  * A node whose dependency did not end ok is `skip` with summary dep=<id>:<state>; nothing is cached.
+ * The summary of an ended node is `[note ]out=BYTES err=BYTES`; an exec node that ended fail or timeout
+ * appends ` first=TEXT`: the first non-blank line of its stderr (fail only: of its stdout when stderr
+ * is empty), at most 120 bytes, control bytes as spaces.  Absent when there is no such line.
  *
  * API:  fl_load(path, &f, why, cap)  parse + validate (unknown dep, duplicate id, cycle are named refusals)
  *       fl_order(&f, order)          topological order (indices)
@@ -252,10 +255,31 @@ static long fl_size(const char *run, const char *id, const char *ext) {
     return sy_stat(p, &st) == 0 ? (long)st.size : 0;
 }
 
+/* First non-blank line of RUN/out/ID.EXT into DST: at most 120 bytes, cut on a UTF-8 character
+   boundary, bytes below 0x20 as a space (the event line is TSV).  Returns its length, 0 when none. */
+static int fl_first(const char *run, const char *id, const char *ext, char *dst, int cap) {
+    char p[2600]; unsigned char *b = 0; int64_t n = 0; long i = 0, o = 0;
+    dst[0] = 0;
+    if (cap < 2 || fl_path(p, run, id, ext) || sy_read_file(p, &b, &n, 16L << 20) || !b) { if (b) mm_free(b); return 0; }
+    while (i < n && (b[i] == '\n' || b[i] == '\r' || b[i] == ' ' || b[i] == '\t')) i++;
+    for (; i < n && b[i] != '\n' && b[i] != '\r' && o < cap - 1 && o < 120; i++) dst[o++] = b[i] < 0x20 ? ' ' : (char)b[i];
+    if (i < n && b[i] != '\n' && b[i] != '\r') {   /* cut by length: do not leave half a character */
+        while (o > 0 && (b[i] & 0xC0) == 0x80) { i--; o--; }
+    }
+    dst[o] = 0;
+    mm_free(b);
+    return (int)o;
+}
+
 static void fl_finish(fl_ctx *x, fl_node *nd, int st, int rc, const char *note) {
-    char sum[700];
+    char sum[700], first[128]; int k;
     nd->state = st; nd->rc = rc;
-    fl_say(sum, sizeof sum, "%s%sout=%ld err=%ld", note ? note : "", note ? " " : "", fl_size(x->run, nd->id, "out"), fl_size(x->run, nd->id, "err"));
+    k = fl_say(sum, sizeof sum, "%s%sout=%ld err=%ld", note ? note : "", note ? " " : "", fl_size(x->run, nd->id, "out"), fl_size(x->run, nd->id, "err"));
+    /* an exec node that did not end ok names its own reason: the first non-blank line of its stderr
+       (of its stdout when a failed node wrote no stderr), so the caller needs no second read */
+    if ((st == FL_FAIL || st == FL_TIMEOUT) && !strcmp(nd->op, "exec") && k > 0 && k < (int)sizeof sum - 140
+        && (fl_first(x->run, nd->id, "err", first, sizeof first) || (st == FL_FAIL && fl_first(x->run, nd->id, "out", first, sizeof first))))
+        fl_say(sum + k, sizeof sum - (size_t)k, " first=%s", first);
     fl_evt(x, nd, st, sy_now_ms() - nd->t0, rc, sum);
 }
 

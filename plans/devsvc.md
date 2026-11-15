@@ -181,6 +181,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - O6 glob 算子:omp-flow 有进程内 glob 节点(按字典序列文件名);5a 节自认只列文件名仍要用原生工具。落地:flowfile.cx 加 `glob`(pattern=、max=,复用 search 的 glob 匹配器,跳过 .git),flowexec.cx 的 op 白名单加一项。难度低到中;flowfile.cx 不在在途写域。
 - O7 跳过文案指向动作:omp-flow 的 skipped 写明"不是本调用自身的失败,先处理前驱再重发";devsvc 的 skip 摘要只有 dep=ID:state。落地:DEVSVC_FLOW 末行在有 skip 时加 first_fail=ID,让 agent 直接定位根因节点。难度低;devsvc-core.cx,排后。
 - 不吸收:(1) 批内共享预算(flow-deadline.ts),devsvc 已有 --deadline-ms 与节点 timeout_ms;(2) agentbox 节点与模型侧 flow 协议(node-flow.ts、16 项上限),属 omp 宿主机制;(3) JSON 图文件输入,TSV 节点表加 flowsh 已够,cx 无 JSON 库,不为此引入。
+- O3 已落第一步(2026-11-15):flowexec.cx 的 fl_finish 对 fail 或 timeout 的 exec 节点在事件摘要末尾加 ` first=TEXT`(stderr 首个非空行,fail 且 stderr 为空时取 stdout;至多 120 字节,控制字节换空格);devsvc 的 NODE 行直接带出,不必再 --cat。check-flowrun 的 fail-rc-and-stderr 收紧为整行匹配。
 
 ## 8 文档接口 doc(一期,2026-11-15)
 
