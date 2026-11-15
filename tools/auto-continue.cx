@@ -7,7 +7,7 @@
  * 环境变量 UNISACC_AUTOCONT 非空(判断器自身的 claude -p 调用)直接放行,防递归。
  * 目录:$UNISACC_AUTOCONT_DIR,缺省 $HOME/.cache/unisacc/auto-continue/,内有 state.tsv(sid consec hour_start hour_count last_ms)与 log.tsv。
  * 判断器命令:$UNISACC_AUTOCONT_CLAUDE,缺省 claude(检查用假脚本);stdin 喂 prompt,环境设 UNISACC_AUTOCONT=1,30 秒超时杀。
- * JSON 无解析库,按文本扫描取字段(临时文本扫描,待 ext/textx/json.cx 落地后换 js_get;读写 JSON 只经 json_str_after、last_text、emit_block 三处)。任何错误都放行(rc 0)。
+ * JSON 读写经 text.json(js_parse/js_get/js_path/js_esc),仅在 jstr、last_text、emit_block 三处使用。任何错误都放行(rc 0)。
  * Check: tools/check-auto-continue.cx. */
 #pragma unisa use sys.io
 #pragma unisa use os.osx
@@ -20,6 +20,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use text.json
 
 #define MAX_CONSEC 4
 #define MAX_PER_HOUR 20
@@ -50,27 +51,13 @@ static void log_line(const char *sid, const char *verdict, const char *why) {
     }
 }
 
-/* 从 s[0..n) 里 key 之后的 JSON 字符串值解码到 dst(支持 \n \t \" \\ \/ \r \b \f,\u 保留为 ?)。返回长度,未中 -1;*endp 为值之后的偏移。 */
-static long json_str_after(const char *s, long n, long from, const char *key, char *dst, long cap, long *endp) {
-    long k = slen(key), p = tx_find(s + from, n - from, key, k), i, o = 0;
-    if (p < 0) return -1;
-    i = from + p + k;
-    while (i < n && (s[i] == ' ' || s[i] == ':')) i++;
-    if (i >= n || s[i] != '"') return -1;
-    i++;
-    while (i < n && s[i] != '"') {
-        char c = s[i];
-        if (c == '\\' && i + 1 < n) {
-            char d = s[i + 1]; i += 2;
-            if (d == 'n') c = '\n'; else if (d == 't') c = '\t'; else if (d == 'r') c = '\r';
-            else if (d == 'u') { c = '?'; i += 4; }
-            else c = d;
-        } else i++;
-        if (o < cap - 1) dst[o++] = c;
-    }
-    dst[o] = 0;
-    if (endp) *endp = i + 1;
-    return o;
+/* 取对象 v 的字符串成员 key 到 dst,返回长度,缺失或非串 -1。 */
+static long jstr(const js_val *v, const char *key, char *dst, long cap) {
+    const js_val *m = js_get(v, key); long n;
+    if (js_kind(m) != JS_STR) return -1;
+    n = js_str_len(m); if (n > cap - 1) n = cap - 1;
+    mm_copy(dst, cap, js_str(m), n); dst[n] = 0;
+    return n;
 }
 
 /* 最后一条 assistant 行里所有 text 块拼接;无则空串。 */
@@ -88,22 +75,27 @@ static long last_text(const char *path, char *dst, long cap) {
     sy_close(fd);
     e = got;
     while (e > 0) {
-        long b = e, p;
+        long b = e;
         while (b > 0 && buf[b - 1] != '\n') b--;
         ls = b;
         if (e - ls > 0 && tx_find(buf + ls, e - ls, "\"type\":\"assistant\"", 18) >= 0) {
-            long at = ls, t;
-            for (;;) {
-                /* 找 "type":"text" 后的 "text":" */
-                p = tx_find(buf + at, e - at, "\"type\":\"text\"", 13);
-                if (p < 0) break;
-                at += p + 13;
-                {
-                    long ee = 0, m = json_str_after(buf, e, at, "\"text\"", dst + o + (o ? 1 : 0), cap - o - 1, &ee);
-                    if (m < 0) break;
-                    if (o && m > 0) dst[o++] = '\n';
-                    o += m; at = ee;
+            char err[80]; js_val *root = js_parse(buf + ls, e - ls, err, sizeof err);
+            if (root) {
+                long i;
+                for (i = 0;; i++) {
+                    char key[48]; js_val *it; js_val *ty, *tx;
+                    tx_snprintf(key, sizeof key, "message.content.%ld", i);
+                    it = js_path(root, key);
+                    if (!it) break;
+                    ty = js_get(it, "type"); tx = js_get(it, "text");
+                    if (js_kind(ty) == JS_STR && js_str_len(ty) == 4 && mm_same(js_str(ty), "text", 4) && js_kind(tx) == JS_STR) {
+                        long m = js_str_len(tx);
+                        if (o && m > 0 && o < cap - 1) dst[o++] = '\n';
+                        if (m > cap - 1 - o) m = cap - 1 - o;
+                        if (m > 0) { mm_copy(dst + o, cap - o, js_str(tx), m); o += m; }
+                    }
                 }
+                js_free(root);
             }
             if (o > 0) { mm_free(buf); dst[o] = 0; return o; }
         }
@@ -189,14 +181,8 @@ static int judge(const char *text, char *next, long ncap) {
 }
 
 static void emit_block(long consec, const char *next) {
-    static char esc[600]; long o = 0, i;
-    for (i = 0; next[i] && o < 560; i++) {
-        char c = next[i];
-        if (c == '"' || c == '\\') { esc[o++] = '\\'; esc[o++] = c; }
-        else if ((unsigned char)c < 32) esc[o++] = ' ';
-        else esc[o++] = c;
-    }
-    esc[o] = 0;
+    static char esc[800]; long o = 0;
+    js_esc(esc, sizeof esc, next, slen(next), &o);
     printf("{\"decision\":\"block\",\"reason\":\"自动续跑(第 %ld 次,判断器认为上一条回复已写明下一步):%s。按此继续;若实际已无事可做或需要等待,直接一句话结束。\"}\n", consec, esc);
 }
 
@@ -208,9 +194,13 @@ int main(void) {
     d = envs("UNISACC_AUTOCONT_DIR");
     if (d[0]) tx_snprintf(dir, sizeof dir, "%s", d); else tx_snprintf(dir, sizeof dir, "%s/.cache/unisacc/auto-continue", envs("HOME"));
     while (n < (long)sizeof in - 1 && (g = sy_read_once(0, in + n, (long)sizeof in - 1 - n)) > 0) n += g;
-    if (json_str_after(in, n, 0, "\"session_id\"", sid, sizeof sid, &e) < 0) tx_snprintf(sid, sizeof sid, "unknown");
-    tpath[0] = 0; json_str_after(in, n, 0, "\"transcript_path\"", tpath, sizeof tpath, &e);
-    { long p = tx_find(in, n, "\"stop_hook_active\"", 18); if (p >= 0) { long q = p + 18; while (q < n && (in[q] == ' ' || in[q] == ':')) q++; active = (q + 4 <= n && mm_same(in + q, "true", 4)); } }
+    {
+        char perr[80]; js_val *hk = js_parse(in, n, perr, sizeof perr);
+        (void)e;
+        if (!hk || jstr(hk, "session_id", sid, sizeof sid) < 0) tx_snprintf(sid, sizeof sid, "unknown");
+        tpath[0] = 0;
+        if (hk) { jstr(hk, "transcript_path", tpath, sizeof tpath); active = js_bool(js_get(hk, "stop_hook_active")); js_free(hk); }
+    }
     sy_mkdir_all(dir, 0755);
     tx_snprintf(offp, sizeof offp, "%s/OFF", dir);
     if (sy_exists(offp) == 1) { log_line(sid, "SKIP", "off-switch"); return 0; }
