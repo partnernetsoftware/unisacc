@@ -13,6 +13,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.awpath
 
 #define MAXH 128
 #define MAXN 4096
@@ -289,7 +290,15 @@ static void scan_dir(void) {
 static int emit(const char *rel, char *buf, long n, int write_mode) {
     char path[700]; long on = 0; char *old;
     if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
-    if (write_mode) return cx_write(path, buf, n) ? 2 : 0;
+    {
+        /* double write: build/X.tsv and the dev metadata copy (cxlib/awpath awp_devmeta) stay byte-identical */
+        char dm[700]; const char *base = rel; long q;
+        for (q = 0; rel[q]; q++) if (rel[q] == '/') base = rel + q + 1;
+        if (awp_devmeta(root, base, write_mode, dm, sizeof dm)) { sy_printf("DEVMETA_PATH_FAIL\t%s\n", base); return 2; }
+        if (write_mode) return (cx_write(path, buf, n) || cx_write(dm, buf, n)) ? 2 : 0;
+        old = slurp(dm, &on);
+        if (!old || on != n || !mm_same(old, buf, n)) { sy_printf("DEVMETA_DIFF\t%s\t%s\n", rel, dm); return 1; }
+    }
     old = slurp(path, &on);
     if (!old || on != n || !mm_same(old, buf, n)) {
         long k = 0, line = 1;

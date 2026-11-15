@@ -22,6 +22,7 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.awpath
 
 enum { MAXR = 4096, MAXP = 64 };
 static long rn[MAXR], rl[MAXR];      /* per row: name offset/len */
@@ -162,6 +163,18 @@ int main(int argc, char **argv) {
     if (rc) { mm_free(b.b); return rc; }
     for (i = 0; i < (long)b.n; i++) if (b.b[i] == '\n') np++;
     np -= 2;
+    if (tx_eqz(table, "build/iface-hash.tsv")) {
+        /* double write: the dev metadata copy (cxlib/awpath awp_devmeta) stays byte-identical to the default table */
+        char dm[1024]; size_t dn = 0; char *dc;
+        if (awp_devmeta(".", "iface-hash.tsv", write, dm, sizeof dm)) { sy_eprintf("iface-hash: devmeta path\n"); mm_free(b.b); return 2; }
+        if (write) {
+            if (cx_write(dm, b.b, (size_t)b.n)) { sy_eprintf("iface-hash: cannot write %s\n", dm); mm_free(b.b); return 2; }
+        } else {
+            dc = cx_read(dm, &dn);
+            if (!dc || dn != b.n || !mm_same(dc, b.b, (long)dn)) { sy_printf("DIFF\tdevmeta-differs\t%s\n", dm); sy_printf("IFACE_HASH\tFAIL\tpackages=%d\n", np); mm_free(b.b); return 1; }
+            mm_free(dc);
+        }
+    }
     if (write) {
         if (cx_write(table, b.b, (size_t)b.n)) { sy_eprintf("iface-hash: cannot write %s\n", table); mm_free(b.b); return 2; }
         sy_printf("IFACE_HASH\tWROTE\tpackages=%d\n", np);
