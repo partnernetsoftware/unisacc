@@ -61,14 +61,15 @@ static int put_val(int fd, const char *s, long n) {   /* flow arg value: %XX for
 }
 
 int main(int argc, char **argv) {
-    char dir[1200], fp[1300], why[1024], *plan, *pv[7], *jv[7]; const char *rdir = 0;
+    char dir[1200], fp[1300], why[1024], *plan, *pv[7], *jv[7]; const char *rdir = 0, *vfile = 0;
     long nbn = 0; int rkx = 0;
     long pn, at, t0 = sy_now_ms(), t1, t2; int a, jobs = 0, fd, nodes = 0, pid, ex = 0, code = 1, sig = 0, r = 0;
     fl_flow f; fl_sum s;
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--run") && a + 1 < argc) rdir = argv[++a];
         else if (tx_eqz(argv[a], "--jobs") && a + 1 < argc) { const char *q = argv[++a]; jobs = 0; while (*q >= '0' && *q <= '9' && jobs < 100) jobs = jobs * 10 + (*q++ - '0'); if (*q || jobs < 1 || jobs > 32) jobs = 0; }
-        else { sy_eprintf("precommit-flow: usage: precommit-flow.cx [-- --run DIR] [--jobs N]\n"); return 2; }
+        else if (tx_eqz(argv[a], "--verdict") && a + 1 < argc) vfile = argv[++a];   /* written once the judge pass has run: tools/precommit.cx flow_route tells a verdict from a flow that never got there */
+        else { sy_eprintf("precommit-flow: usage: precommit-flow.cx [-- --run DIR] [--jobs N] [--verdict FILE]\n"); return 2; }
     }
     if (rdir) { if (tx_copy(dir, sizeof dir, rdir, tx_len(rdir, 1100))) return 2; }
     else if (cx_fmt(dir, sizeof dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2;
@@ -111,7 +112,8 @@ int main(int argc, char **argv) {
                 if (cx_fmt(key, sizeof key, ";a%ld=", k + 2)) { sy_close(fd); return 2; }
                 put(fd, key, tx_len(key, 16)); put_val(fd, ln + ao, al);
             }
-            put(fd, ";timeout_ms=60000\n", 18);
+            if (il == 7 && tx_same(ln + io, 7, "coveval", 7)) put(fd, ";timeout_ms=30000\n", 18);   /* cov_eval's own 30 s bound */
+            else put(fd, ";timeout_ms=60000\n", 18);
             nodes++;
         }
         at += l + 1;
@@ -146,5 +148,6 @@ int main(int argc, char **argv) {
     pid = sy_spawn_inherit(jv, -1);
     if (pid < 0 || sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) { sy_eprintf("precommit-flow: precommit --from-run did not run\n"); return 1; }
     sy_eprintf("FLOWPC\tnodes=%d\tplan_ms=%ld\tflow_ms=%ld\tjudge_ms=%ld\trun=%s\n", nodes, t1 - t0, t2 - t1, sy_now_ms() - t2, dir);
+    if (vfile) { char vb[40]; if (cx_fmt(vb, sizeof vb, "RC\t%d\n", code) || cx_write(vfile, vb, tx_len(vb, 40))) { sy_eprintf("precommit-flow: cannot write %s\n", vfile); return 2; } }
     return code;
 }

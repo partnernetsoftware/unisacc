@@ -11,7 +11,9 @@
  * block (R4-source-anchor cannot be allowed); R1 findings are report-only.
  * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B.
  * -- --plan DIR / -- --from-run DIR: used by tools/precommit-flow.cx to run the gate subprocesses as one
- * concurrent flow (see gate_slurp); with no argument the behaviour is unchanged. */
+ * concurrent flow (see gate_slurp).  With no argument (the hook's call) a commit that stages a registry table is
+ * handed to tools/precommit-flow.cx, everything else is judged serially here (see flow_route);
+ * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -460,18 +462,34 @@ static int cov_link_dir(const char *src, const char *dst, const char *skip1, con
     sy_dir_close(&d);
     return 0;
 }
+/* the scratch root of one evaluation.  Flow passes (--plan / --from-run) keep the index-side root in the run
+ * dir (DIR/cov-idx) so that the plan pass can build it, the flow node run in it and the judge pass clean it;
+ * everything else (serial path, the HEAD-side evaluation) uses a per-process root under sy_tmpdir. */
+static int cov_flow(const char *tag) { return (plan_dir || from_run) && tx_eqz(tag, "idx"); }
+static int cov_dir(const char *tag, char *dir, size_t cap) {
+    if (cov_flow(tag)) return cx_fmt(dir, cap, "%s/cov-%s", plan_dir ? plan_dir : from_run, tag);
+    return cx_fmt(dir, cap, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag);
+}
 static void cov_clean(const char *tag) {
     sy_dir_t d; char dir[1200], t[1500], u[1500];
-    if (cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
+    if (plan_dir && cov_flow(tag)) return;   /* the coveval flow node still has to run in it */
+    if (cov_dir(tag, dir, sizeof dir) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
     if (!sy_dir_open(&d, t)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", t, d.name)) sy_unlink(u); sy_dir_close(&d); }
     sy_rmdir(t);
     if (!sy_dir_open(&d, dir)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", dir, d.name)) sy_unlink(u); sy_dir_close(&d); }
     sy_rmdir(dir);
 }
-/* 求值一版:返回 0=解析通过或非 unknown-coverage 类拒绝;1=unknown-coverage,*idv 放首个 id;-1=没跑 */
+/* 求值一版:返回 0=解析通过或非 unknown-coverage 类拒绝;1=unknown-coverage,*idv 放首个 id;-1=没跑.
+ * Flow passes: the index-side run.cx --list is the flow node "coveval" (30 s bound set by precommit-flow.cx):
+ * --plan builds the root and prints the PLAN row, --from-run reads the node's output; the parsing below is
+ * shared with the serial path, and the rare HEAD-side evaluation stays in line in the judge pass. */
 static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, long cn, char *idv, int idcap) {
-    char dir[1200], tdir[1300], p[1500], cwd[1100]; long a;
-    if (sy_cwd(cwd, sizeof cwd) || cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag)) return -1;
+    char dir[1200], tdir[1300], p[1500], cwd[1100]; long a, total = 0; char *b = 0;
+    if (sy_cwd(cwd, sizeof cwd) || cov_dir(tag, dir, sizeof dir)) return -1;
+    if (from_run && cov_flow(tag)) {
+        cur_gate = "coveval"; slurp_okrc = 255; b = gate_slurp(0, &total); slurp_okrc = 0; cur_gate = 0;
+        if (!b) return -1;
+    } else {
     if (cx_fmt(tdir, sizeof tdir, "%s/tests", dir) || sy_mkdir(dir, 0700) || sy_mkdir(tdir, 0700)) return -1;
     cov_link_dir(cwd, dir, "tests", "", "");
     { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx"); }
@@ -481,8 +499,14 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
     if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", dir) || cx_write(p, reg, (size_t)rn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir) || cx_write(p, cov, (size_t)cn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir)) return -1;
-    { int ofd, pid, ex = 0, code = 0, sig = 0; char *b = mm_alloc(1 << 20); long total = 0, r;
+    if (plan_dir && cov_flow(tag)) {
+        char *gv[] = {"sh", "./unisacc.com", p, "--", "--list", 0}; long gn;
+        cur_gate = "coveval"; mm_free(gate_slurp(gv, &gn)); cur_gate = 0;
+        idv[0] = 0; return 0;
+    }
+    { int ofd, pid, ex = 0, code = 0, sig = 0; long r;
       char *ev[] = {"sh", "-c", "exec sh ./unisacc.com \"$0\" -- --list 2>&1", p, 0};
+      b = mm_alloc(1 << 20);
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
       if (pid < 0) { mm_free(b); return -1; }
@@ -490,8 +514,9 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
         for (;;) { sy_pollfd_t pf; long left = deadline - sy_now_ms(); pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
           if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
           r = sy_read(ofd, b + total, (1 << 20) - 1 - total); if (r <= 0) break; total += r; if (total >= (1 << 20) - 2) break; } }
-      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0;
-      a = tx_find(b, total, "unknown-coverage row=", 21);
+      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0; }
+    }
+    { a = tx_find(b, total, "unknown-coverage row=", 21);
       idv[0] = 0;
       if (a >= 0) { long q = tx_find(b + a, total - a, " id=", 4), k = 0;
         if (q >= 0) { q += a + 4; while (q + k < total && b[q + k] != '\n' && k < idcap - 1) { idv[k] = b[q + k]; k++; } idv[k] = 0; }
@@ -568,12 +593,59 @@ static int ledger_gate(void) {
     return blocked;
 }
 
+/* 提交主路径走 flow(plans/devsvc.md 6 S3 第一阶段):无参数调用(.git/hooks/pre-commit 与 commit-own 的 --dry-run 都是)
+ * 且暂存路径命中登记类门(manifest、tables、runlist 任一读集)时,转交 tools/precommit-flow.cx:各门成为同一 flow 的
+ * 并发节点,判定仍只在本文件的 --from-run 一遍里做,输出与退出码即判定那一遍的。只动 .cx 或文档的提交留在串行路径
+ * (实测 flow 对它们没有收益:ratchets 本身已并发,关键路径是 coreapi 单门)。返回 -1 = 走串行;否则是退出码。
+ * UNISACC_PRECOMMIT_SERIAL=1 强制串行(对拍基准用);flow 基础设施不可用(rc 2、信号、起不来)时打一行并回退串行,
+ * 两条路径跑的是同一批门,不存在少跑的出口。 */
+#define FLOW_ROUTE_MS 120000   /* the whole flow pass (plan, nodes at 60 s each, judge); past it the flow is killed and the gates run serially */
+static int flow_route(void) {
+    static const char *g[3] = {"manifest", "tables", "runlist"};
+    const char *ser = sy_env("UNISACC_PRECOMMIT_SERIAL");
+    char vf[1200], want[40], *vb; size_t vn = 0;
+    char *fv[] = {"/bin/sh", "./unisacc.com", "tools/precommit-flow.cx", "--", "--verdict", vf, 0};
+    int i, hit = 0, pid, ex = 0, code = 0, sig = 0, judged;
+    if (ser && ser[0] && ser[0] != '0') return -1;
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/precommit-flow.cx") != 1 || sy_exists("tools/cxlib/flowexec.cx") != 1 ||
+        sy_exists("ext/sysx/process.cx") != 1) return -1;   /* the flow engine's package roots: a fixture without them stays serial at once */
+    for (i = 0; i < 3; i++) {
+        long n; char *d = gate_diff(g[i], &n);
+        if (!d) { hit = -1; break; }   /* the serial path reports the failure itself */
+        if (n > 0) hit = 1;
+        mm_free(d);
+    }
+    gt_na = 0; gt_nal[0] = 0;   /* probing only: the real pass counts NOT_AFFECTED again */
+    if (hit <= 0) return -1;
+    if (cx_fmt(vf, sizeof vf, "%s/precommit-route-%d.rc", sy_tmpdir(), sy_pid())) return -1;
+    sy_unlink(vf);
+    pid = sy_spawn_inherit(fv, -1);   /* bounded: FLOW_ROUTE_MS deadline below, then killed and counted as no verdict */
+    if (pid < 0) { ex = 0; code = -1; }
+    else {
+        long deadline = sy_now_ms() + FLOW_ROUTE_MS; int w = 0;
+        while ((w = sy_wait_status(pid, 1, &ex, &code, &sig)) == 0 && sy_now_ms() < deadline) sy_sleep_ms(20);
+        if (w == 0) { sy_eprintf("precommit: tools/precommit-flow.cx timed out after %d ms\n", FLOW_ROUTE_MS); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); }
+        if (w != pid) { ex = 0; code = -1; }
+    }
+    /* a verdict counts only when the judge pass ran: precommit-flow.cx then leaves RC<TAB>code in vf, equal to its exit code.
+       Anything else (it did not compile, the flow engine failed, it was killed) is no verdict: run the same gates serially. */
+    vb = (char *)cx_read(vf, &vn); sy_unlink(vf);
+    judged = ex && (code == 0 || code == 1) && vb && !cx_fmt(want, sizeof want, "RC\t%d\n", code) && (long)vn == tx_len(want, 40) && tx_same(vb, (long)vn, want, (long)vn);
+    mm_free(vb);
+    if (!judged) {
+        sy_eprintf("precommit: flow path unusable (tools/precommit-flow.cx rc=%d, no verdict), running the gates serially\n", ex ? code : -1);
+        return -1;
+    }
+    return code;
+}
+
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     if (argc == 3 && tx_eqz(argv[1], "--plan")) plan_dir = argv[2];
     else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
     else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();
     else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates]\n"); return 2; }
+    if (argc == 1) { int fr = flow_route(); if (fr >= 0) return fr; }
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
     char *lv[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
