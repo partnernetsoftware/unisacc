@@ -1,11 +1,13 @@
-/* tools/ratchets.cx -- run thirteen repo ratchets and show only what is wrong.
+/* tools/ratchets.cx -- run fourteen repo ratchets and show only what is wrong.
  *
  *   sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]
  *
  * Starts tests/cxraw.cx, tests/cxinclude.cx, tests/cxapis.cx, tests/cxtrunc.cx, tests/cxlibc.cx, tests/cxplatform.cx
  * (platform #if branches and raw syscalls outside L0), tests/srcshape.cx (src/ lines, longest block and `if`
  * count only go down), tests/coreapi.cx (the core modules' exported names and signatures only go down),
- * verwriter, aluiwidth, outdep, check-literal and net-deps (gate 14).
+ * verwriter, aluiwidth, outdep, check-literal, net-deps (gate 14) and notcovered (the 14th ratchet:
+ * tools/notcovered-census.cx --check, distinct "not covered:" refusal texts under exec/ only go down,
+ * base tests/notcovered.tsv).
  * Tool line counts are reports, not ratchets.
  * with --check in parallel
  * (each under tools/bound 55) and prints, per ratchet, one line
@@ -23,7 +25,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use sys.env
 
-#define NRK 13
+#define NRK 14
 typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
 
 static void slurp(int fd, char **buf, long *n) {
@@ -50,11 +52,17 @@ static int offending(const char *l, long n, const char *only) {
     return 1;
 }
 
+/* the script of a ratchet: tests/NAME.cx, except notcovered, whose census tool lives in tools/ */
+static const char *rk_script(const char *name, char *buf, long cap) {
+    if (tx_eqz(name, "notcovered")) return "tools/notcovered-census.cx";
+    if (cx_fmt(buf, cap, "tests/%s.cx", name)) return 0;
+    return buf;
+}
 static int judge(Rk *rk, const char *only, int *okp);
 static void from_run(Rk *rk, const char *dir);
 
 int main(int argc, char **argv) {
-    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}};
+    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}};
     const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0;
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
@@ -68,7 +76,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 2 && tx_eqz(argv[1], "--plan")) {   /* PLAN<TAB>rk-NAME<TAB>argv...: the spawn line of each ratchet */
-        for (k = 0; k < NRK; k++) printf("PLAN\trk-%s\t./tools/bound\t55\tsh\t./unisacc.com\ttests/%s.cx\t--\t--check\n", rk[k].name, rk[k].name);
+        for (k = 0; k < NRK; k++) { char sb[64]; printf("PLAN\trk-%s\t./tools/bound\t55\tsh\t./unisacc.com\t%s\t--\t--check\n", rk[k].name, rk_script(rk[k].name, sb, sizeof sb)); }
         return 0;
     }
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--from-run")) {   /* judge a flow run of the --plan nodes */
@@ -91,8 +99,8 @@ int main(int argc, char **argv) {
         } else lsf[0] = 0;
     }
     for (k = 0; k < NRK; k++) {
-        char script[64];
-        if (cx_fmt(script, sizeof script, "tests/%s.cx", rk[k].name)) return 2;
+        char sb[64], *script = (char *)rk_script(rk[k].name, sb, sizeof sb);
+        if (!script) return 2;
         {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", script, "--", "--check", 0};
             rk[k].pid = sy_spawn_pipe(v, 0, 0, &rk[k].ofd, 0);   /* stderr merged: the ratchets print their rows there */
         }

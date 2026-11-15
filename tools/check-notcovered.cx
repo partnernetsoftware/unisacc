@@ -1,0 +1,126 @@
+/* tools/check-notcovered.cx -- re-measure every measured row of tests/notcovered.tsv.
+ *
+ *   sh ./unisacc.com tools/check-notcovered.cx [-- --par N]
+ *
+ * For each row whose measured column is ACCEPT or REJECT, each repro named in its repro column
+ * (tests/notcovered-cases/NAME.cx) is compiled and run once with the installed product, all repros in one
+ * devsvc flow (default --par 8, each node under the flow's own 60 s bound).  A repro agrees with
+ *   REJECT  when the run exits nonzero (not 124/125: a timeout or a refused node is not a rejection) and the
+ *           first stderr line the flow reports (NODE ... first=TEXT) names an error ("error" or "reject");
+ *   ACCEPT  when the run exits 0 and wrote nothing to stderr (NODE ... err=0).
+ * Only the NODE lines are read; the flow's run directory is reported, not opened.
+ * A row passes when all its repros agree.  UNMEASURED rows are counted, never run and never PASS.
+ * Prints PASS|FAIL notcovered.ROW-MESSAGE lines and ends with
+ *   CHECK_NOTCOVERED<TAB>passed=P<TAB>failed=F<TAB>unmeasured=U<TAB>repros=R<TAB>run=DIR<TAB>elapsed_ms=T
+ * exit 0 only when failed=0 and at least one row was measured. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXP 200
+static char *pn[MAXP]; static int prc[MAXP], pdone[MAXP], perr0[MAXP], pfirst_err[MAXP], np;
+static char rundir[1200];
+
+static int field(const char *s, long n, int f, const char **fs, long *fn) {
+    long a = 0, i; int c = 0;
+    for (i = 0; i <= n; i++) if (i == n || s[i] == '\t') { if (c == f) { *fs = s + a; *fn = i - a; return 1; } c++; a = i + 1; }
+    return 0;
+}
+static int repro_ix(const char *s, long n, int add) {
+    int i;
+    for (i = 0; i < np; i++) if ((long)tx_len(pn[i], 200) == n && mm_same(pn[i], s, n)) return i;
+    if (!add || np >= MAXP || n <= 0 || n > 120) return -1;
+    pn[np] = mm_alloc(n + 1); mm_copy(pn[np], n + 1, s, n); pn[np][n] = 0; prc[np] = -1; pdone[np] = 0;
+    return np++;
+}
+static int has(const char *h, long hn, const char *s) {
+    long sn = tx_len(s, 200), i;
+    for (i = 0; i + sn <= hn; i++) if (mm_same(h + i, s, sn)) return 1;
+    return 0;
+}
+/* does repro i agree with want (1 REJECT, 0 ACCEPT)? */
+static int agrees(int i, int want) {
+    if (!pdone[i] || prc[i] < 0) return 0;
+    if (want) return prc[i] != 0 && prc[i] != 124 && prc[i] != 125 && pfirst_err[i];
+    return prc[i] == 0 && perr0[i];
+}
+int main(int argc, char **argv) {
+    size_t m = 0; char *t, *flow, *out; long tn, at, fn_ = 0, fcap = 1 << 16, on = 0, ocap = 1 << 16;
+    const char *par = "8"; long t0 = sy_now_ms(); int pass = 0, fail = 0, unm = 0, i, fd, pid, ex = 0, code = 0, sig = 0;
+    char fpath[600];
+    for (i = 1; i < argc; i++) { if (tx_eqz(argv[i], "--par") && i + 1 < argc) par = argv[++i]; else { fprintf(stderr, "usage: tools/check-notcovered.cx [--par N]\n"); return 2; } }
+    t = cx_read("tests/notcovered.tsv", &m);
+    if (!t) { fprintf(stderr, "check-notcovered: cannot read tests/notcovered.tsv\n"); return 2; }
+    tn = (long)m;
+    flow = mm_alloc(fcap); flow[0] = 0;
+    for (at = 0; at < tn;) {   /* pass 1: distinct repros -> flow nodes */
+        long e = at; const char *ms, *rp; long msn, rpn;
+        while (e < tn && t[e] != '\n') e++;
+        if (at > 0 && field(t + at, e - at, 5, &ms, &msn) && field(t + at, e - at, 6, &rp, &rpn) && !(msn == 10 && mm_same(ms, "UNMEASURED", 10))) {
+            long a = 0, k;
+            for (k = 0; k <= rpn; k++) if (k == rpn || rp[k] == ',') {
+                int before = np, ix = repro_ix(rp + a, k - a, 1);
+                if (ix >= 0 && ix == before) {
+                    char ln[600];
+                    if (cx_fmt(ln, sizeof ln, "%s\texec\t\ta0=sh;a1=./unisacc.com;a2=tests/notcovered-cases/%s.cx\n", pn[ix], pn[ix]) == 0 && fn_ + 600 < fcap) { long l = tx_len(ln, 600); mm_copy(flow + fn_, fcap - fn_, ln, l); fn_ += l; flow[fn_] = 0; }
+                }
+                a = k + 1;
+            }
+        }
+        at = e + 1;
+    }
+    if (np == 0) { printf("CHECK_NOTCOVERED\tpassed=0\tfailed=1\tunmeasured=?\trepros=0\telapsed_ms=%ld\n", sy_now_ms() - t0); return 1; }
+    if (cx_fmt(fpath, sizeof fpath, "%s/check-notcovered-%d.tsv", sy_tmpdir(), sy_pid()) || cx_write(fpath, flow, fn_)) { fprintf(stderr, "check-notcovered: cannot write flow table\n"); return 2; }
+    {   char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/devsvc.cx", "--", "flow", "run", fpath, "--par", (char *)par, 0};   /* whole flow under 58 s */
+        pid = sy_spawn_pipe(v, 0, 0, &fd, 0); }
+    if (pid < 0) { fprintf(stderr, "check-notcovered: cannot start devsvc flow\n"); return 2; }
+    out = mm_alloc(ocap);
+    for (;;) { long r; if (on + 4096 > ocap) { char *nb = mm_alloc(ocap * 2); mm_copy(nb, ocap * 2, out, on); mm_free(out); out = nb; ocap *= 2; } r = sy_read(fd, out + on, ocap - on - 1); if (r <= 0) break; on += r; }
+    out[on] = 0; sy_close(fd);
+    sy_wait_status(pid, 0, &ex, &code, &sig);
+    sy_unlink(fpath);
+    rundir[0] = 0;
+    for (at = 0; at < on;) {   /* NODE<TAB>id<TAB>state<TAB>rc=N ... ; DEVSVC_FLOW ... run=DIR */
+        long e = at; const char *f; long fl;
+        while (e < on && out[e] != '\n') e++;
+        if (e - at > 5 && mm_same(out + at, "NODE\t", 5) && field(out + at, e - at, 1, &f, &fl)) {
+            int ix = repro_ix(f, fl, 0); const char *r; long rl;
+            if (ix >= 0 && field(out + at, e - at, 3, &r, &rl) && rl > 3 && mm_same(r, "rc=", 3)) {
+                long fi = tx_find(out + at, e - at, " first=", 7);
+                pdone[ix] = 1; prc[ix] = (int)tx_atol(r + 3);
+                perr0[ix] = tx_find(out + at, e - at, " err=0", 6) >= 0 || tx_find(out + at, e - at, "\terr=0", 6) >= 0;
+                pfirst_err[ix] = fi >= 0 && (has(out + at + fi, e - at - fi, "error") || has(out + at + fi, e - at - fi, "reject"));
+            }
+        } else if (e - at > 12 && mm_same(out + at, "DEVSVC_FLOW\t", 12)) {
+            long k = tx_find(out + at, e - at, "run=", 4);
+            if (k >= 0) { long l = e - at - k - 4, z; for (z = 0; z < l; z++) if (out[at + k + 4 + z] == '\t') { l = z; break; } if (l > 0 && l < (long)sizeof rundir) { mm_copy(rundir, sizeof rundir, out + at + k + 4, l); rundir[l] = 0; } }
+        }
+        at = e + 1;
+    }
+    if (!rundir[0]) { fwrite(out, 1, (size_t)on, stderr); fprintf(stderr, "check-notcovered: no DEVSVC_FLOW run= line (flow rc=%d)\n", code); return 2; }
+    for (at = 0; at < tn;) {   /* pass 2: judge each row */
+        long e = at; const char *ms, *rp, *mg; long msn, rpn, mgn;
+        while (e < tn && t[e] != '\n') e++;
+        if (at > 0 && field(t + at, e - at, 0, &mg, &mgn) && field(t + at, e - at, 5, &ms, &msn) && field(t + at, e - at, 6, &rp, &rpn)) {
+            if (msn == 10 && mm_same(ms, "UNMEASURED", 10)) unm++;
+            else {
+                int want = msn == 6 && mm_same(ms, "REJECT", 6), known = want || (msn == 6 && mm_same(ms, "ACCEPT", 6)), ok = known; long a = 0, k;
+                for (k = 0; known && k <= rpn; k++) if (k == rpn || rp[k] == ',') { int ix = repro_ix(rp + a, k - a, 0); if (ix < 0 || !agrees(ix, want)) ok = 0; a = k + 1; }
+                if (ok) pass++; else fail++;
+                printf("%s\tnotcovered.%.*s\t%.*s\t%.*s\n", ok ? "PASS" : "FAIL", (int)mgn, mg, (int)msn, ms, (int)rpn, rp);
+            }
+        }
+        at = e + 1;
+    }
+    for (i = 0; i < np; i++) if (!pdone[i]) printf("NOTE\trepro %s has no NODE line\n", pn[i]);
+    printf("CHECK_NOTCOVERED\tpassed=%d\tfailed=%d\tunmeasured=%d\trepros=%d\trun=%s\telapsed_ms=%ld\n", pass, fail, unm, np, rundir, sy_now_ms() - t0);
+    return fail == 0 && pass > 0 ? 0 : 1;
+}
