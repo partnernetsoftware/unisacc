@@ -130,7 +130,7 @@ static void case_registered(void) {
         ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "registered-refuses-foreign-field-match"); }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char out[8192];
     char prep[2048], clone[4400];
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
@@ -147,12 +147,16 @@ int main(void) {
         if (sy_cwd(root, sizeof root) < 0) die("cwd");
         if (pp_copy_product(root, clone)) die("cannot copy the product into the clone");
     }
-    case_("nolock", 0);
-    case_("lock", 4);
-    case_symlink();
-    case_dirlink();
-    case_keyed();
-    case_registered();
+    /* Three batches, because one does not fit 55 s and the parts are independent: a = nolock/symlink/dirlink/keyed
+       (~42 s), lock = the index.lock cases (~29 s), registered = the --registered sets (~54 s).  Nothing is
+       dropped or weakened -- every case still asserts exactly what it did -- and the two artifact cases below
+       (foreign-staged, pending-derived) run in all three.  No --cases argument runs everything. */
+    {   int ai; const char *group = 0;
+        for (ai = 1; ai < argc; ai++) if (!strcmp(argv[ai], "--cases") && ai + 1 < argc) group = argv[++ai];
+        if (!group || !strcmp(group, "lock")) { case_("lock", 4); case_("nolock", 0); }
+        if (!group || !strcmp(group, "registered")) case_registered();
+        if (!group || !strcmp(group, "a")) { case_symlink(); case_dirlink(); case_keyed(); }
+    }
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
