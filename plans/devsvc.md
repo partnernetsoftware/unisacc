@@ -112,6 +112,14 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - P7 按历史耗时预警超预算并建议分片;长命令自动转后台。
 - P8 锁 who/wait 查询。
 - P9 只读 git 已有(4ebf3b6834)但采用率低:宣传、简报模板写明;新建工具前的 git log --all 给专用入口。
+- (2026-11-15 风险评审,证据入口 `sh ./unisacc.com tools/devsvc-budget.cx -- --min-ms 15000` 与 devsvc-core.cx 原生缓存键 261 至 287 行)每条:根因、方案、优先级、验收。
+- R1 公共库改坏连累全员。根因:共享检出只有一份工作树,除 devsvc 启动器固定 HEAD 外,其余工具 -run 直接读工作树中间态;在途的写前试编只编被写文件本身,不编消费者(库接口变了自身能编、调用方编不过),也管不到原生 Edit/Write。方案:(a) f write/edit 落到 tools/cxlib、cx、ext 时,把 HEAD 归档加待写内容铺成临时覆盖层,按 rel 的 use 关系取消费者集并发试编,全过才原子落盘;(b) devsvc run 缺省用 HEAD 固定的库跑工具(同启动器),工作树中间态只影响显式 --dev 的作者;(c) 提交门对库改动强制跑受影响批次。优先级 P0。验收:夹具里把库函数改签名,f edit 被拒并列出编不过的消费者,工作树字节不变;另一窗口同时 run 任一工具 rc 0。
+- R2 检查贴 55 s。实测(三个实例事件 835 条):rc 124 共 12 条、不小于 44 s 共 20 条;job.done p90 41 s,git.commit p50 14.4 s、p90 41.5 s、max 47.4 s。根因:原生缓存键是 cx、ext、tools/cxlib 三棵树的树号加整段 git diff 的摘要,且三处有任一未跟踪文件即 bypass 每次重建;多窗口并行时任何人的未提交改动或新文件都使全员缓存失效,夹具内冷编译因此几乎必不命中。方案:键改为工具源加其 use 传递闭包各文件内容摘要加产品身份(闭包取自 rel 链接表),与工作树其它脏文件无关;夹具经环境变量共用同一内容寻址缓存目录;-run 缓存同键。不缓存测试结论,只缓存执行体。优先级 P0。验收:工作树有无关未跟踪 .cx 时 run 两次第二次 cache=hit;改闭包内任一文件后 miss;check-devsvc-git 热跑 p90 低于 30 s(devsvc-budget 取数)。
+- R3 门迁入 flow 无提速。根因:precommit-flow 各门已是无依赖并发节点,墙钟等于最慢单门加串行前后段(取计划、ratchets --from-run),并发度再加也不动关键路径;且 flow.node 事件只记数字节点号与 op,事件里算不出哪一门最慢(本轮未能逐门实测,记未测)。方案:(a) flow.node 事件带节点名,devsvc-budget 即可按门出分位;(b) 最慢门按文件分片成多节点;(c) 门按输入表与路径声明读集,只跑读集与本次暂存相交的门(选择不是缓存结论,未跑的门标 NOT_AFFECTED 不标 PASS);(d) derive 按读写表建依赖后拓扑并发;(e) R2 的缓存消掉各门冷编译。优先级 P1。验收:同一暂存下 precommit-flow 与原门判定逐行一致,p50 墙钟降到最慢单门分片后的值,事件可见各门 ms。
+- R4 采用率 0.42。根因:P1 事件类型缺陷实测仍在(x.--timeout-ms 46 条、x.-- 14 条),按工具统计失真;`devsvc --` 无参只打一行 usage,子命令表只在 devsvc-core.cx 头注释里,子代理看不到入口;输出无截短筛选所以外面再套 head/tail/grep。方案:devsvc help 分组列子命令与一行例子;x/flow/git 统一 --tail N --grep S --summary;devsvc check 统一入口;devsvc ps;钩子对直跑先告警。优先级 P1。验收:devsvc-usage 比例连续两轮巡检不低于 0.7,原生 head/tail/grep 套用次数减半。
+- R5 子代理 1 至 4 分钟提前收工。根因(判断,未做转录统计):截止只是简报里的文字,子代理没有可查的墙钟与剩余时间,也没有机器判定的完成条件,保守起见提前交。方案:devsvc task open ID --domain 路径 --accept 命令 --deadline-s N 落成作业(实例 tasks/ID/,记开始时刻与输入身份);task status 打已用与剩余秒数;task done 以 flow 跑全部验收命令并核改动不出写域,全过才记 task.done,否则打 TASK_NOT_DONE 加失败项与剩余秒数,rc 1;协调者只认 task.done 事件。不放宽时限,不代记 PASS。优先级 P1。验收:夹具验收命令 rc 1 时 done 被拒且事件无 task.done;写域外有改动被拒;剩余时间输出与开始时刻一致。
+- R6(自查)实例目录下有三份 events.tsv(045c5a383068df3b 673 行、968568b4c968e332 385 行、9837e2ae04f553e0 11 行)。若后两者不是检查夹具而是同仓另起的实例,则锁不互斥,属高风险;待核:status 打印实例键来源并对同一 git 公共目录出现多实例时告警。优先级 P0 待证。
+- R7(已做)devsvc-budget:按事件历史对每类命令与 flow 节点出 n、p50、p90、max、贴限数与 rc 124 数,--fail-near 可作巡检门;P7 第一步。批次 devsvc-budget,检查 tools/check-devsvc-budget.cx 十二例。后续:接入 x/flow 开跑前预警与分片建议。
 
 ## 7 路线
 

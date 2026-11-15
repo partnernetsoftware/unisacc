@@ -1,0 +1,127 @@
+/* tools/devsvc-budget.cx -- 按 devsvc 事件历史找出贴时限的命令与节点(超预算前预警,plans/devsvc.md 第 6 节 P7 第一步)。
+ *
+ *   sh ./unisacc.com tools/devsvc-budget.cx -- [--events FILE] [--budget-ms N] [--near-pct P] [--min-ms N] [--fail-near]
+ *
+ * 读实例事件文件(--events,缺省扫 ~/.cache/unisacc/devsvc/<hash>/events.tsv 与 events.tsv.1)。行格式 EV<TAB>seq<TAB>ts<TAB>kind<TAB>...。
+ *   命令事件取行内 rc=N 与 ms=N;flow.node 为位置列(id op 状态 ms rc 摘要),键记作 flow.node.<op>;无 ms 的事件不计。
+ * 每个键一行(按 max 降序;max 小于 --min-ms,缺省 0,的不打印):
+ *   KIND<TAB>键<TAB>n=<TAB>p50=<TAB>p90=<TAB>max=<TAB>near=<TAB>timeout=<TAB>verdict=OK|NEAR|TIMEOUT
+ *   near:ms 不小于 budget*P/100 的条数(budget 缺省 55000,P 缺省 80);timeout:rc=124 的条数。
+ *   verdict:有 timeout 为 TIMEOUT,否则有 near 为 NEAR,否则 OK。只报告历史,不代替执行,不产生 PASS。
+ * 末行 DEVSVC_BUDGET kinds=N events=N near=N timeout=N budget_ms=N。
+ * 退出码:0;--fail-near 且有 NEAR 或 TIMEOUT 键时 1;参数错 2。Check: tools/check-devsvc-budget.cx(批次 devsvc-budget)。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+#define MAXK 256
+#define MAXS 2048
+typedef struct { char k[80]; int n, near, to; long max; long *ms; } Kind;
+static Kind ks[MAXK]; static int nk, nev, dropped;
+static long budget = 55000, pct = 80, minms;
+
+static long field_num(const char *line, const char *key) {  /* 行内以 TAB 或空格起头的 key=N;没有则 -1 */
+    size_t n = strlen(key); const char *p = line;
+    while ((p = strstr(p, key))) {
+        if ((p == line || p[-1] == '\t' || p[-1] == ' ') && (isdigit((unsigned char)p[n]) || p[n] == '-')) return atol(p + n);
+        p += n;
+    }
+    return -1;
+}
+static void add(const char *k, long ms, long rc) {
+    Kind *x;
+    for (x = ks; x < ks + nk && strcmp(x->k, k); x++) ;
+    if (x == ks + nk) {
+        if (nk >= MAXK) { dropped++; return; }
+        memset(x, 0, sizeof *x); F(x->k, sizeof x->k, "%s", k);
+        x->ms = (long *)calloc(MAXS, sizeof(long)); if (!x->ms) { dropped++; return; }
+        nk++;
+    }
+    if (x->n >= MAXS) { dropped++; return; }
+    x->ms[x->n++] = ms; nev++;
+    if (ms > x->max) x->max = ms;
+    if (ms * 100 >= budget * pct) x->near++;
+    if (rc == 124) x->to++;
+}
+static int scan(const char *path) {
+    void *buf = 0; long n = 0; char *q, *e; int got = 0;
+    if (sy_read_file(path, &buf, &n, 1L << 26) || !buf) return 0;
+    for (q = (char *)buf; q < (char *)buf + n; q = e + 1) {
+        char *t[10], key[80], sv; int i, w; long ms, rc;
+        e = memchr(q, '\n', (char *)buf + n - q); if (!e) e = (char *)buf + n;
+        sv = *e; *e = 0;
+        if (!strncmp(q, "EV\t", 3)) {
+            t[0] = q;
+            for (i = 0; i < 9; i++) { t[i + 1] = t[i] ? strchr(t[i], '\t') : 0; if (t[i + 1]) t[i + 1]++; }
+            if (t[3]) {
+                for (w = 0; t[3][w] && t[3][w] != '\t' && w < 40; w++) key[w] = t[3][w];
+                key[w] = 0;
+                if (!strcmp(key, "flow.node")) {
+                    if (t[5] && t[7] && t[8]) {
+                        key[w++] = '.';
+                        for (i = 0; t[5][i] && t[5][i] != '\t' && w < 78; i++) key[w++] = t[5][i];
+                        key[w] = 0;
+                        add(key, atol(t[7]), atol(t[8])); got++;
+                    }
+                } else if (t[4]) {
+                    ms = field_num(t[4], "ms="); rc = field_num(t[4], "rc=");
+                    if (ms >= 0) { add(key, ms, rc); got++; }
+                }
+            }
+        }
+        *e = sv;
+    }
+    free(buf);
+    return got;
+}
+static void scan_default(void) {
+    char base[700], p[1100]; sy_dir_t d; const char *h = getenv("HOME");
+    F(base, sizeof base, "%s/.cache/unisacc/devsvc", h ? h : "/root");
+    if (sy_dir_open(&d, base)) return;
+    while (sy_dir_next(&d) == 1) if (d.kind == 'd') {
+        F(p, sizeof p, "%s/%s/events.tsv.1", base, d.name); (void)scan(p);
+        F(p, sizeof p, "%s/%s/events.tsv", base, d.name); (void)scan(p);
+    }
+    sy_dir_close(&d);
+}
+static void sort_long(long *a, int n) {
+    int i, j; long v;
+    for (i = 1; i < n; i++) { v = a[i]; for (j = i; j > 0 && a[j - 1] > v; j--) a[j] = a[j - 1]; a[j] = v; }
+}
+int main(int argc, char **argv) {
+    int i, j, fail_near = 0, tn = 0, tt = 0, bad = 0; const char *evf = 0; int ord[MAXK];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--fail-near")) fail_near = 1;
+        else if (i + 1 < argc && !strcmp(argv[i], "--events")) evf = argv[++i];
+        else if (i + 1 < argc && !strcmp(argv[i], "--budget-ms")) budget = atol(argv[++i]);
+        else if (i + 1 < argc && !strcmp(argv[i], "--near-pct")) pct = atol(argv[++i]);
+        else if (i + 1 < argc && !strcmp(argv[i], "--min-ms")) minms = atol(argv[++i]);
+        else { fprintf(stderr, "devsvc-budget: REFUSE unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (budget < 1 || pct < 1 || pct > 100 || minms < 0) { fprintf(stderr, "devsvc-budget: REFUSE bad budget/near-pct/min-ms\n"); return 2; }
+    if (evf) {
+        sy_stat_t st;
+        if (sy_stat(evf, &st)) { fprintf(stderr, "devsvc-budget: REFUSE cannot stat %s\n", evf); return 2; }
+        (void)scan(evf);
+    } else scan_default();
+    for (i = 0; i < nk; i++) ord[i] = i;
+    for (i = 1; i < nk; i++) {   /* 按 max 降序,同值按键名升序 */
+        int v = ord[i];
+        for (j = i; j > 0 && (ks[ord[j - 1]].max < ks[v].max || (ks[ord[j - 1]].max == ks[v].max && strcmp(ks[ord[j - 1]].k, ks[v].k) > 0)); j--) ord[j] = ord[j - 1];
+        ord[j] = v;
+    }
+    for (i = 0; i < nk; i++) {
+        Kind *x = &ks[ord[i]];
+        tn += x->near; tt += x->to;
+        if (x->to || x->near) bad++;
+        if (x->max < minms) continue;
+        sort_long(x->ms, x->n);
+        printf("KIND\t%s\tn=%d\tp50=%ld\tp90=%ld\tmax=%ld\tnear=%d\ttimeout=%d\tverdict=%s\n", x->k, x->n,
+               x->ms[(x->n - 1) / 2], x->ms[(x->n - 1) * 9 / 10], x->max, x->near, x->to, x->to ? "TIMEOUT" : x->near ? "NEAR" : "OK");
+    }
+    if (dropped) printf("NOTE\tdropped=%d\t(超出每键 %d 条或 %d 个键的事件未计)\n", dropped, MAXS, MAXK);
+    printf("DEVSVC_BUDGET kinds=%d events=%d near=%d timeout=%d budget_ms=%ld\n", nk, nev, tn, tt, budget);
+    return fail_near && bad ? 1 : 0;
+}
