@@ -102,6 +102,16 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - (2026-11-15 cc 排期)register 提速(并行与增量,判定强度不降):在途。
 - (2026-11-15 cc 排期)precommit 迁为 flow 节点图并与原门对拍:在途。
 - (2026-11-15 cc 排期)待排:x --cat 上限与 --cwd(限仓内 .claude/worktrees/)、--bg 加 events wait、tools.cxlib bump 经 devsvc git 内部暂存完成、auto-continue 判断收紧、钩子对 Bash 直跑 git commit 与 unisacc.com 先告警后拒绝、关系 DAG G2 至 G12、build/*.tsv 第一批读者切换。
+- (2026-11-15 痛点分析,近 12 小时 44 会话,devsvc 占比 0.42,明细 cc 作业目录 devsvc-pain.tsv)排期按每天浪费排序:
+- P1 缺陷:x 事件类型取成首个参数(x.--timeout-ms 43 条、x.--bg 24 条),统计失真,先修。
+- P2 x/flow 输出摘要:--tail N、--grep S、--summary,全量落 run 目录并给路径(原生 head/tail/grep/cat 超 2600 次)。
+- P3 f read 行段与 who-calls 结果直接跳读(sed -n 244 次、cat 311 次)。
+- P4 devsvc check:按改动选批并行跑(check 直跑 666 次),结果进事件。
+- P5 devsvc ps 与按作业 kill(pgrep/ps/sleep 122 次)。
+- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。
+- P7 按历史耗时预警超预算并建议分片;长命令自动转后台。
+- P8 锁 who/wait 查询。
+- P9 只读 git 已有(4ebf3b6834)但采用率低:宣传、简报模板写明;新建工具前的 git log --all 给专用入口。
 
 ## 7 路线
 
