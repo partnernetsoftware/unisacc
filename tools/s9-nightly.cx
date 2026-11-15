@@ -469,22 +469,27 @@ static int init_materials(int wanted, const char *run, char *out, int cap) {
 static char map_families[256][128];
 static char map_planned[256][128];
 static int map_planned_n;
+static int map_family_admitted(const as_batch *b,const tp_material_decl *d) {
+    if(strcmp(b->impl,"IMPLEMENTED"))return 0;
+    if(!strcmp(b->mode,"SOURCE"))return 1;
+    return !strcmp(b->mode,"PREPARED")&&!strcmp(b->id,"assembler")&&d->kind==1&&!strcmp(d->name,"assembler");
+}
 static int map_families_load(void) {
     as_registry r; int n=0; map_planned_n=0;
     if(as_registry_load(root,&r,why,sizeof why)) return -1;
     for(int i=0;i<r.nb;i++) {
-        if(strcmp(r.b[i].impl,"IMPLEMENTED")||strcmp(r.b[i].mode,"SOURCE"))continue;
         const char *at=r.b[i].materials; tp_material_decl d; int rc;
         while((rc=tp_material_next(&at,&d))>0) {
+            if(!map_family_admitted(&r.b[i],&d))continue;
             int j; for(j=0;j<n&&strcmp(map_families[j],d.name);j++) {}
             if(j==n) { if(n==256||cx_fmt(map_families[n],sizeof map_families[n],"%s",d.name)) {as_registry_free(&r);return -1;} n++; }
         }
         if(rc<0) {as_registry_free(&r);return -1;}
     }
     for(int i=0;i<r.nb;i++) {
-        if(!strcmp(r.b[i].impl,"IMPLEMENTED")&&!strcmp(r.b[i].mode,"SOURCE"))continue;
         const char *at=r.b[i].materials;tp_material_decl d;int rc;
         while((rc=tp_material_next(&at,&d))>0) {
+            if(map_family_admitted(&r.b[i],&d))continue;
             int j;for(j=0;j<n&&strcmp(map_families[j],d.name);j++){}
             if(j<n)continue;
             for(j=0;j<map_planned_n&&strcmp(map_planned[j],d.name);j++){}
@@ -850,25 +855,27 @@ static int map_controls(void) {
       "wave-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tSOURCE\tlnx/x86_64\t55\tall-waves-tool:path\ttests/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\trelease\n"
       "duplicate-family\tIMPLEMENTED\tinterfaces\ttests/case.cx\tSOURCE\tosx/arm64\t55\tall-waves-tool:path\ttests/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tcommit\n"
       "planned-row\tPLANNED\tinterfaces\ttests/case.cx\tSOURCE\tlnx/x86_64\t55\tplanned-only:path\ttests/case.cx\t-\tmap.fixture\tNOT_READY\tproduct\trelease\n"
-      "prepared-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tPREPARED\tlnx/x86_64\t55\tprepared-only:path\t{prepared-only}/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tdaily\n";
+      "prepared-row\tIMPLEMENTED\tinterfaces\ttests/case.cx\tPREPARED\tlnx/x86_64\t55\tprepared-only:path\t{prepared-only}/case.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tdaily\n"
+      "assembler\tIMPLEMENTED\tinterfaces\ttests/case.cx\tPREPARED\tlnx/x86_64\t55\tassembler:path\t{assembler}/contracts.cx\t-\tmap.fixture\trc0:MAP_FIXTURE\tproduct\tdaily\n";
     const char *coverage="id\tlayer\timplementation\texpected_or_gap\tsource\nmap.fixture\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tmap control\ttests/case.cx\n";
     if(as_join(p,sizeof p,root,"tests/batches.tsv")||cx_write(p,registry,strlen(registry))||
        as_join(p,sizeof p,root,"tests/coverage.tsv")||cx_write(p,coverage,strlen(coverage))||
        cx_fmt(intent,sizeof intent,"%s/map.intent",init_state))return 2;
     int count=map_families_load();
     if(count<0){fprintf(stderr,"map-controls: registry refused: %s\n",why);return 2;}
-    map_control_check(count==2&&map_planned_n==2&&!strcmp(map_families[0],"hosttcc")&&!strcmp(map_families[1],"all-waves-tool"),"implemented-source-family-set-deduplicated-all-tiers",&bad);
+    map_control_check(count==3&&map_planned_n==2&&!strcmp(map_families[0],"hosttcc")&&!strcmp(map_families[1],"all-waves-tool")&&!strcmp(map_families[2],"assembler"),"implemented-source-family-set-deduplicated-all-tiers",&bad);
+    map_control_check(!strcmp(map_families[2],"assembler")&&map_planned_n==2,"prepared-assembler-explicitly-admitted-other-prepared-still-excluded",&bad);
     int rc=map_start_gate(run,identity,0);
     map_control_check(rc!=0&&sy_exists(intent)==0&&sy_exists(mappath)==0,"all-missing-refused-before-map-intent",&bad);
     if(map_control_family(run,identity,"hosttcc","host-row",artifact))return 2;
     rc=map_start_gate(run,identity,0);
     map_control_check(rc!=0&&sy_exists(intent)==0,"remaining-family-refused-without-poisoning-run",&bad);
-    if(map_control_family(run,identity,"all-waves-tool","wave-row",artifact))return 2;
+    if(map_control_family(run,identity,"all-waves-tool","wave-row",artifact)||map_control_family(run,identity,"assembler","assembler",artifact))return 2;
     rc=map_start_gate(run,identity,0);
     map_control_check(!rc&&sy_exists(intent)==0,"same-run-ready-after-filling-all-families",&bad);
     np_buf all={0};char parsed[16384];
     rc=map_collect_families(run,init_state,identity,count,&all);
-    map_control_check(!rc&&!s9_map_from_dump(all.p,all.n,parsed,sizeof parsed,why,sizeof why)&&s9_map_rows()==2,"ready-families-form-complete-map",&bad);free(all.p);
+    map_control_check(!rc&&!s9_map_from_dump(all.p,all.n,parsed,sizeof parsed,why,sizeof why)&&s9_map_rows()==3,"ready-families-form-complete-map",&bad);free(all.p);
     if(cx_fmt(p,sizeof p,"%s/family-hosttcc.dump",init_state)||cx_write(p,"tampered",8))return 2;
     rc=map_start_gate(run,identity,0);map_control_check(rc!=0&&sy_exists(intent)==0,"family-dump-sha-tamper-refused",&bad);
     if(map_control_family(run,identity,"hosttcc","host-row",artifact))return 2;
