@@ -1,0 +1,608 @@
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.io
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.mem
+#pragma unisa use model_image
+#pragma unisa use model_lifetime
+#pragma unisa use filemap
+/* cx/runtime/modelcache.cx -- the inflated-model cache (C44-SPEED-01, lever 4).
+
+   Inflating stage models is a fixed cost of every compiler call: measured 78.5 ms for a 26-byte
+   translation unit, and the object route pays it 67 times. Two call sites share this one cache:
+   rt_open (cx/runtime/routestep.cx, the -run/-o whole-program path) and ex_pp (src/executor.cx,
+   the -E preprocess and -funit object path). One implementation, one key, one switch.
+
+   Pure accelerator: a hit and a miss produce the same bytes. The key is the sha256 of the
+   COMPRESSED member -- content addressed, so a different package, stage, model format or compiler
+   misses on its own and nothing has to be invalidated. The file carries its own payload sha, so a
+   truncated or edited cache is a miss. Every failure (no directory, read-only, full disk, corrupt
+   file) falls back to inflating: a cache that can fail a compile is worse than no cache.
+
+   UNISACC_RUN_CACHE=0 disables reads and writes, so a cold measurement stays cold.
+
+   File: "UNIMC1\n" + 64 hex payload sha + "\n" + payload, named mc-<32 hex key>-<len>. Writes go
+   to a ".tmp.<pid>" sibling and are renamed into place, so a concurrent reader sees nothing or a
+   complete file.
+
+   With UNISACC_RR_TIME=1 every lookup prints one line, so hit/miss/corrupt are counted the same
+   way the phase timings are:
+     RR_TIME<TAB>modelcache<TAB>result=hit|miss|corrupt<TAB>bytes=<len> */
+
+#define MC_MAGIC "UNIMC1\n"
+#define MC_HEAD 71
+
+static int mc_off(void) {
+    const char *e;
+    e = sy_env("UNISACC_RUN_CACHE");
+    return e && tx_eq(e, "0", 8) ? 1 : 0;
+}
+
+static void mc_say(const char *result, unsigned long n) {
+    const char *e;
+    e = sy_env("UNISACC_RR_TIME");
+    if (!e || !e[0]) return;
+    sy_eprintf("RR_TIME\tmodelcache\tresult=%s\tbytes=%lu\n", result, n);
+}
+/* Nested load phases have their own category: summing RR_TIME model must not double count them. */
+long long mc_phase_begin(void) {
+    sy_ts_t t;
+    if (!sy_env("UNISACC_RR_TIME") || sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + t.nsec;
+}
+void mc_phase_end(const char *stage, long long begin, int rc) {
+    sy_ts_t t;long long end;
+    if(begin<0||sy_mono(&t))return;
+    end=(long long)t.sec*1000000000LL+t.nsec;
+    if(end>=begin)sy_eprintf("RR_TIME\tmodelphase\tstage=%s\trc=%d\tns=%lld\n",stage,rc,end-begin);
+}
+
+static int mc_cat(char *out, int cap, int *at, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*at + 1 >= cap) return 1;
+        out[(*at)++] = s[i++];
+    }
+    return 0;
+}
+
+static int mc_cat_u(char *out, int cap, int *at, unsigned long long v) {
+    char d[24];
+    int n = 0;
+    do { d[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v > 0);
+    while (n > 0) {
+        if (*at + 1 >= cap) return 1;
+        out[(*at)++] = d[--n];
+    }
+    return 0;
+}
+
+
+/* Decimal bytes, including zero (retain no completed entries). Empty, malformed
+   and overflowing values use the default; RUN_CACHE=0 still disables the cache. */
+static unsigned long long mc_limit(void) {
+    const char *e;
+    unsigned long long n = 0;
+    int i = 0;
+    e = sy_env("UNISACC_E3CACHE_MAX_BYTES");
+    if (!e || !e[0]) return 1073741824ull;
+    while (e[i]) {
+        unsigned d;
+        if (e[i] < '0' || e[i] > '9') return 1073741824ull;
+        d = (unsigned)(e[i++] - '0');
+        if (n > (18446744073709551615ull - d) / 10) return 1073741824ull;
+        n = n * 10 + d;
+    }
+    return n;
+}
+
+static int mc_hexchar(int c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+/* Only the complete names emitted by the model and run caches, never temps. */
+static int mc_entry_name(const char *s) {
+    int i;
+    if (s[0] == 'm' && s[1] == 'c' && s[2] == '-') {
+        i = 3;
+        while (i < 35) { if (!mc_hexchar(s[i])) return 0; i++; }
+        if (s[i++] != '-' || s[i] < '1' || s[i] > '9') return 0;
+        while (s[i] >= '0' && s[i] <= '9') i++;
+        return s[i] == 0;
+    }
+    if(s[0]=='l'&&s[1]=='i'&&s[2]=='-'){
+        for(i=3;i<67;i++)if(!mc_hexchar(s[i]))return 0;
+        return s[67]==0;
+    }
+    if (s[0] == 'u' && s[1] == 'c' && s[2] == '-') { /* unit front-end result, cx/runtime/unitcache.cx */
+        i = 3;
+        while (i < 67) { if (!mc_hexchar(s[i])) return 0; i++; }
+        return s[i] == 0;
+    }
+    i = 0;
+    while (i < 64) { if (!mc_hexchar(s[i])) return 0; i++; }
+    return s[i] == 0 || tx_eqz(s + i, ".host");
+}
+
+typedef struct {
+    const char *name; /* borrowed from the directory buffer until trim finishes */
+    sy_stat_t st;
+} mc_candidate;
+
+/* Seconds-resolution mtime is the existing L0 contract. Equal times are ordered
+   by the complete filename, independent of directory enumeration order. */
+static int mc_older(const mc_candidate *a, const mc_candidate *b) {
+    int i = 0;
+    if (a->st.mtime != b->st.mtime) return a->st.mtime < b->st.mtime;
+    while (a->name[i] && a->name[i] == b->name[i]) i++;
+    return (unsigned char)a->name[i] < (unsigned char)b->name[i];
+}
+
+static void mc_heap_up(mc_candidate *v, long i) {
+    mc_candidate one;
+    long p;
+    one = v[i];
+    while (i > 0) {
+        p = (i - 1) / 2;
+        if (!mc_older(&one, &v[p])) break;
+        v[i] = v[p];
+        i = p;
+    }
+    v[i] = one;
+}
+
+static void mc_heap_pop(mc_candidate *v, long n) {
+    mc_candidate one;
+    long i = 0, c;
+    if (n <= 1) return;
+    one = v[n - 1];
+    n--;
+    while (i < n / 2) {
+        c = i * 2 + 1;
+        if (c + 1 < n && mc_older(&v[c + 1], &v[c])) c++;
+        if (!mc_older(&v[c], &one)) break;
+        v[i] = v[c];
+        i = c;
+    }
+    v[i] = one;
+}
+
+static int mc_same(const sy_stat_t *a, const sy_stat_t *b) {
+    return b->kind == 'f' && a->dev == b->dev && a->ino == b->ino &&
+        a->size == b->size && a->mtime == b->mtime && a->ctime == b->ctime;
+}
+
+/* A reserved filename alone is not enough to claim an unrelated user file.
+   Atomic publication makes these small format/length checks sufficient for
+   eviction; full payload validation remains exclusively in the lookup path. */
+static int mc_complete(const char *path, const char *name, const sy_stat_t *st) {
+    char head[8];
+    sy_stat_t opened;
+    unsigned long long n = 0;
+    int fd, ok, i;
+    if (st->kind != 'f' || st->size < 8 || !mc_entry_name(name)) return 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    ok = sy_fstat(fd, &opened) == 0 && mc_same(st, &opened) &&
+        sy_read_full(fd, head, 8) == 0;
+    sy_close(fd);
+    if (!ok) return 0;
+    if (name[0] == 'u') return st->size >= 160 && tx_same(head, 8, "UNIUC3\n\0", 8);
+    if(name[0]=='l')return st->size>=448&&tx_same(head,8,"UNIMDL1\n",8);
+    if (name[0] != 'm') return st->size >= 88 &&
+        (tx_same(head, 8, "USE33\n\0\0", 8) || tx_same(head, 8, "USE34\n\0\0", 8));
+    if (!tx_same(head, 6, MC_MAGIC, 6)) return 0;
+    i = 36;
+    while (name[i]) {
+        unsigned d = (unsigned)(name[i++] - '0');
+        if (n > (9223372036854775736ull - d) / 10) return 0;
+        n = n * 10 + d;
+    }
+    return (unsigned long long)st->size == n + MC_HEAD;
+}
+/* Create every missing parent of path (0700), not path itself. */
+static void mc_mkparents(char *path) {
+    int i;
+    for (i = 1; path[i]; i++) {
+        if (path[i] != '/') continue;
+        path[i] = 0;
+        sy_mkdir(path, 0700);
+        path[i] = '/';
+    }
+}
+
+/* Root, first match wins: $UNISACC_CACHE_DIR, $UNISACC_E3CACHE (compat),
+   $XDG_CACHE_HOME/unisacc/e3cache, $HOME/.cache/unisacc/e3cache, and only
+   without a home the old $TMPDIR/unisacc-e3cache-<uid>. The default no longer
+   follows TMPDIR or uid paths. Created 0700; 1 on failure. */
+int mc_cache_dir(char *out, int cap) {
+    const char *e, *td;
+    sy_stat_t st;
+    int at = 0, mk;
+    e = sy_env("UNISACC_CACHE_DIR");
+    if (!(e && e[0])) e = sy_env("UNISACC_E3CACHE");
+    if (e && e[0]) {
+        if (mc_cat(out, cap, &at, e)) return 1;
+    } else if ((e = sy_env("XDG_CACHE_HOME")) && e[0] == '/') {
+        if (mc_cat(out, cap, &at, e)) return 1;
+        if (mc_cat(out, cap, &at, "/unisacc/e3cache")) return 1;
+    } else if ((e = sy_env("HOME")) && e[0] == '/') {
+        if (mc_cat(out, cap, &at, e)) return 1;
+        if (mc_cat(out, cap, &at, "/.cache/unisacc/e3cache")) return 1;
+    } else {
+        td = sy_tmpdir();
+        if (mc_cat(out, cap, &at, td)) return 1;
+        if (mc_cat(out, cap, &at, "/unisacc-e3cache-")) return 1;
+        if (mc_cat_u(out, cap, &at, (unsigned long long)sy_uid())) return 1;
+    }
+    out[at] = 0;
+    mc_mkparents(out);
+    mk = sy_mkdir(out, 0700);
+    if (mk == 0) return 0;
+    if (mk != -EEXIST) return 1;
+    if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
+    return 1;
+}
+
+static int mc_join(char *out, int cap, const char *dir, const char *name) {
+    int at = 0;
+    if (mc_cat(out, cap, &at, dir) || mc_cat(out, cap, &at, "/") ||
+        mc_cat(out, cap, &at, name)) return 1;
+    out[at] = 0;
+    return 0;
+}
+
+/* Persistent inode, never unlinked: a crashed process releases its kernel lock.
+   All cooperating publications and touches use this same lock. */
+static int mc_lock_op(const char *dir, int op) {
+    char path[4400];
+    sy_stat_t st, opened;
+    int fd, rc;
+    if (mc_join(path, sizeof path, dir, ".budget.lock")) return -1;
+    fd = sy_open_new(path, 0600);
+    if (fd == -EEXIST) fd = sy_open_read(path);
+    if (fd < 0) return -1;
+    if (sy_lstat(path, &st) || st.kind != 'f' || sy_fstat(fd, &opened) ||
+        !mc_same(&st, &opened)) { sy_close(fd); return -1; }
+    do { rc = sy_flock(fd, op); } while (rc == -EINTR);
+    if (rc) { sy_close(fd); return -1; }
+    return fd;
+}
+
+int mc_cache_lock(const char *dir) { return mc_lock_op(dir, 6); }
+
+/* One directory listing (grown and retried on ENOSPC), O(N) stat/header work,
+   O(N) memory per successful write, O(N log N) heap work only above the limit.
+   Allocation, listing and unlink failures only leave a larger cache. */
+/* Running total of the reserved entries, in DIR/.budget.acct: 8 magic bytes, total (u64 LE),
+   total xor a constant (u64 LE). Read and written only while the caller holds .budget.lock, so
+   a plain overwrite is race free; a crash mid-write leaves a bad check and forces a rescan.
+   0 on a valid account. */
+#define MC_ACCT_MAGIC "UNIBUD1\n"
+static int mc_acct_read(const char *dir, unsigned long long *total) {
+    char path[4400];
+    unsigned char b[24];
+    sy_stat_t st;
+    unsigned long long t = 0, c = 0;
+    int fd, i, ok;
+    if (mc_join(path, sizeof path, dir, ".budget.acct")) return 1;
+    fd = sy_open_read(path);
+    if (fd < 0) return 1;
+    ok = sy_fstat(fd, &st) == 0 && st.kind == 'f' && st.size == 24 && sy_read_full(fd, b, 24) == 0;
+    sy_close(fd);
+    if (!ok || !tx_same((char *)b, 8, MC_ACCT_MAGIC, 8)) return 1;
+    for (i = 7; i >= 0; i--) { t = t << 8 | b[8 + i]; c = c << 8 | b[16 + i]; }
+    if (c != (t ^ 0x5bd1e995a5a5a5a5ull)) return 1;
+    *total = t;
+    return 0;
+}
+static void mc_acct_write(const char *dir, unsigned long long total) {
+    char path[4400];
+    unsigned char b[24];
+    unsigned long long c = total ^ 0x5bd1e995a5a5a5a5ull;
+    int i;
+    if (mc_join(path, sizeof path, dir, ".budget.acct")) return;
+    for (i = 0; i < 8; i++) b[i] = (unsigned char)MC_ACCT_MAGIC[i];
+    for (i = 0; i < 8; i++) { b[8 + i] = (unsigned char)(total >> (8 * i)); b[16 + i] = (unsigned char)(c >> (8 * i)); }
+    sy_write_file(path, b, 24, 0600);
+}
+
+/* FINAL/OK: the total left after trimming (an upper bound when the pass-0 sum was within the
+   limit), valid only when OK is set; allocation, listing and overflow failures leave it clear. */
+static void mc_trim(const char *dir, unsigned long long *final, int *okp) {
+    char *names = 0, *grown;
+    char path[4400];
+    mc_candidate *v = 0;
+    sy_stat_t st;
+    unsigned long long total = 0, limit = mc_limit();
+    long at = 0, used = 0, i;
+    int fd, count, cap = 8192, pass;
+    fd = sy_open_read(dir);
+    if (fd < 0) return;
+    for (;;) {
+        grown = mm_grow(names, cap);
+        if (!grown) { sy_close(fd); mm_free(names); return; }
+        names = grown;
+        count = sy_dir_names(fd, names, cap);
+        if (count != -ENOSPC) break;
+        if (cap > 1073741823) { sy_close(fd); mm_free(names); return; }
+        cap = cap * 2;
+    }
+    sy_close(fd);
+    if (count <= 0) { mm_free(names); return; }
+    if ((long)count > 9223372036854775807L / (long)sizeof(mc_candidate)) {
+        mm_free(names); return;
+    }
+    v = mm_alloc((long)count * (long)sizeof(mc_candidate));
+    if (!v) { mm_free(names); return; }
+    /* Pass 0 only lstats and sums sizes of reserved-name regular files: an upper bound of
+       the validated total. Within the limit nothing can be evicted, so the per-entry
+       open/read of mc_complete is skipped; above it pass 1 validates exactly as before. */
+    for (pass = 0; pass < 2; pass++) {
+    at = 0; used = 0; total = 0;
+    for (i = 0; i < count; i++) {
+        const char *name = names + at;
+        long len = tx_len(name, cap - at);
+        at += len + 1;
+        /* uc-<key>.tmp exists only while its writer holds the budget lock, which this caller
+           holds now: one seen here was left by a crashed writer */
+        if (len == 71 && name[0] == 'u' && name[1] == 'c' && name[2] == '-' && tx_eqz(name + 67, ".tmp") &&
+            !mc_join(path, sizeof path, dir, name)) { sy_unlink(path); continue; }
+        if (len >= 96 || !mc_entry_name(name) || mc_join(path, sizeof path, dir, name)) continue;
+        if (sy_lstat(path, &st)) continue;
+        if (pass == 0) { if (st.kind != 'f' || st.size < 8) continue; }
+        else if (!mc_complete(path, name, &st)) continue;
+        if (total > 18446744073709551615ull - (unsigned long long)st.size) {
+            if (pass == 0) break;
+            goto done;
+        }
+        total += (unsigned long long)st.size;
+        if (pass == 0) continue;
+        v[used].name = name;
+        v[used].st = st;
+        used++;
+    }
+    if (total <= limit) { *final = total; *okp = 1; goto done; }
+    }
+    for (i = 1; i < used; i++) mc_heap_up(v, i);
+    /* Low-water eviction: above the limit, evict (oldest first) down to 90% of it, so the
+       following publishes within the headroom need no scan. Never exceeds the limit. */
+    while (total > limit - limit / 10 && used > 0) {
+        if (!mc_join(path, sizeof path, dir, v[0].name) &&
+            sy_lstat(path, &st) == 0 && mc_same(&v[0].st, &st) && sy_unlink(path) == 0)
+            total -= (unsigned long long)st.size;
+        mc_heap_pop(v, used);
+        used--;
+    }
+    *final = total; *okp = 1;
+done:
+    mm_free(v);
+    mm_free(names);
+}
+
+/* Consume LOCKFD, publishing exactly the caller's already complete temp file.
+   Trimming cannot change publication success or the enclosing program result. */
+int mc_cache_publish(const char *dir, const char *tmp, const char *path, int lockfd) {
+    int rc;
+    sy_stat_t ost, nst;
+    unsigned long long acct = 0, old = 0, limit = mc_limit(), final = 0;
+    int have_old, ok = 0;
+    if (lockfd < 0) return 1;
+    have_old = sy_lstat(path, &ost) == 0 && ost.kind == 'f';
+    if (have_old) old = (unsigned long long)ost.size;
+    rc = sy_rename(tmp, path);
+    if (rc == 0) {
+        /* Amortized budget: an O(1) account update while the running total stays within the
+           limit; a missing or damaged account, or a total above it, takes the full
+           scan-and-evict pass (evicting down to 90% of the limit), which rebuilds the account. Replaced entries and entries removed
+           by others only make the account too high, so the worst case is an early scan. */
+        if (mc_acct_read(dir, &acct) == 0 && sy_lstat(path, &nst) == 0 && nst.kind == 'f') {
+            if (acct < old) acct = 0; else acct -= old;
+            if (acct <= 18446744073709551615ull - (unsigned long long)nst.size) {
+                acct += (unsigned long long)nst.size;
+                if (acct <= limit) { mc_acct_write(dir, acct); ok = 2; }
+            }
+        }
+        if (ok != 2) {
+            mc_trim(dir, &final, &ok);
+            if (ok) mc_acct_write(dir, final);
+        }
+    }
+    sy_close(lockfd);
+    return rc != 0;
+}
+
+void mc_cache_touch(const char *dir, const char *path) {
+    sy_stat_t st;
+    long now;
+    int fd = mc_lock_op(dir, 6);
+    if (fd < 0) return;
+    now = sy_wall_s();
+    if (now >= 0 && sy_lstat(path, &st) == 0 && st.kind == 'f' && now > st.mtime)
+        sy_set_mtime(path, now);
+    sy_close(fd);
+}
+
+/* DIR/mc-KEY32-OLEN[SUFFIX]; 1 on overflow. */
+static int mc_path(char *out, int cap, const char *dir, const char key[65], unsigned long olen, const char *suffix) {
+    int at = 0, i;
+    if (mc_cat(out, cap, &at, dir) || mc_cat(out, cap, &at, "/mc-")) return 1;
+    for (i = 0; i < 32; i++) {
+        if (at + 1 >= cap) return 1;
+        out[at++] = key[i];
+    }
+    if (mc_cat(out, cap, &at, "-") || mc_cat_u(out, cap, &at, (unsigned long long)olen)) return 1;
+    if (suffix && mc_cat(out, cap, &at, suffix)) return 1;
+    out[at] = 0;
+    return 0;
+}
+
+/* 1 when PATH holds exactly OLEN payload bytes whose sha matches the header. */
+static int mc_read(const char *path, unsigned char *out, unsigned long olen) {
+    int fd;
+    char head[MC_HEAD], hex[65], back[65];
+    sy_stat_t st;
+    /* the size is the trailing-byte check: a file of any other length is not one this cache wrote */
+    if (sy_lstat(path, &st) != 0 || st.kind != 'f' || st.size != (long)(MC_HEAD + olen)) return 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    /* tx_same, not tx_eq: the header is a fixed-length span with no NUL inside it */
+    if (sy_read_full(fd, head, MC_HEAD) != 0 || !tx_same(head, 6, MC_MAGIC, 6) ||
+        head[70] != '\n' || sy_read_full(fd, out, (long)olen) != 0) { sy_close(fd); return 0; }
+    sy_close(fd);
+    mm_copy(hex, 64, head + 6, 64);
+    hex[64] = 0;
+    long long verify_begin=mc_phase_begin();
+    int verify_rc=sy_sha256_hex(out,(long)olen,back);
+    if(!verify_rc&&!tx_eqz(back,hex))verify_rc=1;
+    mc_phase_end("verify",verify_begin,verify_rc);
+    if(verify_rc)return 0;
+    return 1;
+}
+
+/* Payload for the compressed member COMP: 1 hit, 0 miss (absent or unusable). */
+int mc_get(const unsigned char *comp, unsigned long clen, unsigned char *out, unsigned long olen) {
+    char hex[65], dir[4096], path[4400];
+    sy_stat_t st;
+    if (mc_off() || !comp || !out || clen == 0 || olen == 0) return 0;
+    long long key_begin=mc_phase_begin();
+    int key_rc=sy_sha256_hex(comp,(long)clen,hex);
+    mc_phase_end("verify",key_begin,key_rc);
+    if(key_rc)return 0;
+    if (mc_cache_dir(dir, (int)sizeof dir)) return 0;
+    if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return 0;
+    if (mc_read(path, out, olen)) { mc_cache_touch(dir, path); mc_say("hit", olen); return 1; }
+    /* present but unusable is worth telling apart from absent: it means a damaged cache */
+    if (sy_lstat(path, &st) == 0) mc_say("corrupt", olen);
+    else mc_say("miss", olen);
+    return 0;
+}
+
+/* Best effort: any failure is a miss next time, never an error. */
+void mc_put(const unsigned char *comp, unsigned long clen, const unsigned char *out, unsigned long olen) {
+    char hex[65], back[65], dir[4096], path[4400], tmp[4400], head[MC_HEAD];
+    int fd, at, lockfd;
+    if (mc_off() || !comp || !out || clen == 0 || olen == 0) return;
+    if (sy_sha256_hex(comp, (long)clen, hex) != 0) return;
+    if (sy_sha256_hex(out, (long)olen, back) != 0) return;
+    if (mc_cache_dir(dir, (int)sizeof dir)) return;
+    if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return;
+    if (mc_path(tmp, (int)sizeof tmp, dir, hex, olen, ".tmp.")) return;
+    /* Publication and temp creation share the budget lock, including writers of
+       the same model key. No process can truncate another writer's temp. */
+    {   static unsigned long long seq;
+        at = (int)tx_len(tmp, sizeof tmp);
+        seq = seq + 1;
+        if (mc_cat_u(tmp, (int)sizeof tmp, &at, seq)) return;
+        tmp[at] = 0;
+    }
+    mm_copy(head, 6, MC_MAGIC, 6);
+    mm_copy(head + 6, 64, back, 64);
+    head[70] = '\n';
+    lockfd = mc_cache_lock(dir);
+    if (lockfd < 0) return;
+    sy_unlink(tmp);
+    fd = sy_open_new(tmp, 0600);
+    if (fd < 0) { sy_close(lockfd); return; }
+    if (sy_write_all(fd, head, MC_HEAD) != 0 || sy_write_all(fd, out, (long)olen) != 0) {
+        sy_close(fd); sy_unlink(tmp); sy_close(lockfd); return;
+    }
+    if (sy_fsync(fd) != 0) { sy_close(fd); sy_unlink(tmp); sy_close(lockfd); return; }
+    if (sy_close(fd) != 0) { sy_unlink(tmp); sy_close(lockfd); return; }
+    if (mc_cache_publish(dir, tmp, path, lockfd)) sy_unlink(tmp);
+}
+
+/* L4: full-file content checksum is the final 64 bytes; all identities and offsets
+ * are covered by that one prefix hash. No native pointers are ever persisted. */
+#define MCI_HEAD 168
+#define MCI_FOOT 64
+static void mci_put64(unsigned char *p,unsigned long long n){for(int i=0;i<8;i++){p[i]=(unsigned char)n;n>>=8;}}
+static unsigned long long mci_get64(const unsigned char *p){unsigned long long n=0;for(int i=7;i>=0;i--)n=(n<<8)|p[i];return n;}
+static void mci_note(const char *result){if(sy_env("UNISACC_RR_TIME"))sy_eprintf("RR_TIME\tmodelimage\tresult=%s\n",result);}
+int mc_image_enabled(void){const char *s=sy_env("UNISACC_MODEL_IMAGE");return !mc_off()&&!(s&&s[0]=='0'&&!s[1]);}
+int mc_product_sha(char out[65]){
+    static char digest[65];static int failed;
+    char path[4400];sy_stat_t st;void *mapped=0;int fd,rc;
+    if(!out||failed)return 1;
+    long long begin=mc_phase_begin();
+    if(!digest[0]){
+        if(sy_self_path(path,sizeof path)<=0||(fd=sy_open_read(path))<0){failed=1;return 1;}
+        rc=sy_fstat(fd,&st);
+        if(!rc&&(st.kind!='f'||st.size<=0||st.size>1073741824L))rc=1;
+        if(!rc)rc=sy_map_file_ro(&mapped,fd,st.size);
+        if(!rc)rc=sy_sha256_hex(mapped,st.size,digest);
+        if(mapped)sy_unmap(mapped,st.size);sy_close(fd);
+        if(rc){digest[0]=0;failed=1;return 1;}
+    }
+    mm_copy(out,65,digest,65);mc_phase_end("verify",begin,0);return 0;
+}
+/* Compiled package metadata is part of the key as well as the compressed model SHA. */
+static int mci_path(const unsigned char *comp,long clen,long raw,unsigned crc,const char *product,
+                    char model[65],char dir[4096],char path[4400]){
+    unsigned char input[152];char key[65],name[68];
+    if(!mc_image_enabled()||!comp||clen<=0||raw<=0||!product)return 1;
+    for(int i=0;i<64;i++)if(!mc_hexchar(product[i]))return 1;
+    if(product[64]||sy_sha256_hex(comp,clen,model)||mc_cache_dir(dir,4096))return 1;
+    mm_copy(input,64,model,64);mm_copy(input+64,64,product,64);
+    mci_put64(input+128,1);mci_put64(input+136,(unsigned long long)raw);mci_put64(input+144,crc);
+    cx_sha256_hex(input,sizeof input,key);
+    name[0]='l';name[1]='i';name[2]='-';mm_copy(name+3,65,key,65);
+    return mc_join(path,4400,dir,name);
+}
+int mc_image_path(const unsigned char *comp,long clen,long raw,unsigned crc,const char *product,char out[4400]){
+    char model[65],dir[4096];return mci_path(comp,clen,raw,crc,product,model,dir,out);
+}
+/* OUT must be an empty model. A rejected entry never changes the original decoder path. */
+int mc_image_get(const unsigned char *comp,long clen,long raw,unsigned crc,const char *product,
+                 void *out,void *(*allocate)(void *,size_t),void (*release)(void *)){
+    char model[65],dir[4096],path[4400],hash[65];sy_stat_t before,opened,after;
+    void *mapped=0;unsigned char *p;int fd=-1,rc=0,hit=0;long long verify=mc_phase_begin();
+    if(!out||!allocate||!release||mci_path(comp,clen,raw,crc,product,model,dir,path))goto done;
+    if(sy_lstat(path,&before)||before.kind!='f'||before.size<448||before.size>1073741824L)goto done;
+    fd=sy_open_read(path);if(fd<0||sy_fstat(fd,&opened)||!mc_same(&before,&opened))goto done;
+    rc=sy_map_file_ro(&mapped,fd,opened.size);
+    if(rc){mci_note(rc==-ENOSYS?"fallback-platform":"map-failed");goto done;}
+    p=mapped;
+    if(!mm_same(p,"UNIMDL1\n",8)||mci_get64(p+8)!=(unsigned long long)opened.size||mci_get64(p+16)!=1||
+       mci_get64(p+24)!=(unsigned long long)raw||mci_get64(p+32)!=crc||
+       !mm_same(p+40,model,64)||!mm_same(p+104,product,64)) {mci_note("identity-miss");goto done;}
+    if(sy_sha256_hex(p,opened.size-MCI_FOOT,hash)||!mm_same(hash,p+opened.size-MCI_FOOT,64)||
+       sy_fstat(fd,&after)||!mc_same(&opened,&after)){mci_note("corrupt");goto done;}
+    mc_phase_end("verify",verify,0);verify=-1;
+    long long layout=mc_phase_begin();
+    rc=cxmi_view(out,p+MCI_HEAD,opened.size-MCI_HEAD-MCI_FOOT,allocate,release);
+    mc_phase_end("layout",layout,rc);
+    if(rc){mci_note("bad-layout");goto done;}
+    CxModel *m=out;m->image_base=mapped;m->image_bytes=opened.size;
+    mapped=0;hit=1;mci_note("hit");mc_cache_touch(dir,path);
+done:
+    if(verify>=0)mc_phase_end("verify",verify,rc);
+    if(mapped)sy_unmap(mapped,opened.size);if(fd>=0)sy_close(fd);return hit;
+}
+void mc_image_put(const unsigned char *comp,long clen,long raw,unsigned crc,const char *product,const void *model){
+    char model_sha[65],dir[4096],path[4400],tmp[4480],hash[65];long size,total;unsigned char *p;int fd,lockfd,bad=0,at;
+    if(!model||mci_path(comp,clen,raw,crc,product,model_sha,dir,path))return;
+    size=cxmi_size(model);if(size<216||size>1073741824L-MCI_HEAD-MCI_FOOT)return;
+    total=size+MCI_HEAD+MCI_FOOT;if((unsigned long long)total>mc_limit())return;
+    p=mm_alloc(total);if(!p)return;
+    mm_fill(p,total,0,total);mm_copy(p,8,"UNIMDL1\n",8);
+    mci_put64(p+8,total);mci_put64(p+16,1);mci_put64(p+24,raw);mci_put64(p+32,crc);
+    mm_copy(p+40,64,model_sha,64);mm_copy(p+104,64,product,64);
+    if(cxmi_pack(model,p+MCI_HEAD,size)||sy_sha256_hex(p,total-MCI_FOOT,hash)){mm_free(p);return;}
+    mm_copy(p+total-MCI_FOOT,64,hash,64);
+    at=0;
+    if(mc_cat(tmp,sizeof tmp,&at,path)||mc_cat(tmp,sizeof tmp,&at,".tmp.")||mc_cat_u(tmp,sizeof tmp,&at,sy_pid())){mm_free(p);return;}
+    tmp[at]=0;lockfd=mc_cache_lock(dir);if(lockfd<0){mm_free(p);return;}
+    sy_unlink(tmp);fd=sy_open_new(tmp,0600);
+    if(fd<0){sy_close(lockfd);mm_free(p);return;}
+    if(sy_write_all(fd,p,total)||sy_fsync(fd))bad=1;
+    if(sy_close(fd))bad=1;mm_free(p);
+    if(bad){sy_unlink(tmp);sy_close(lockfd);return;}
+    if(mc_cache_publish(dir,tmp,path,lockfd))sy_unlink(tmp);
+}

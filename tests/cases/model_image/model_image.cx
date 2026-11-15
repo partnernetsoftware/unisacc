@@ -1,0 +1,170 @@
+#pragma unisa module model_image
+#pragma unisa use model_lifetime
+/* CXMI0001: little-endian LP64 host layout, version 1. Header: magic[8],
+ * version u64, exact total u64, eight nonnegative scalar u64s, sixteen
+ * top-level offsets u64. Pointer tables contain image-relative u64 offsets.
+ * Blocks are canonical, ordered, eight-byte aligned, and never overlap.
+ * A present empty block occupies one zero byte; offset zero means NULL.
+ * Numeric blocks are native int32/int64 on the explicitly checked host ABI.
+ * The caller owns image lifetime; only image_view may be released by view users.
+ */
+static long mi_get(const unsigned char *p) {
+    unsigned long long v = 0;
+    for (int i=0;i<8;i++) v |= (unsigned long long)p[i] << (8*i);
+    if (v > 9223372036854775807ULL) return -1;
+    return (long)v;
+}
+static void mi_put(unsigned char *p, long v) {
+    for (int i=0;i<8;i++) p[i]=(unsigned char)((unsigned long long)v >> (8*i));
+}
+static int mi_abi(void) {
+    int one=1;
+    return sizeof(int)==4 && sizeof(int64_t)==8 && sizeof(long)==8 && sizeof(void *)==8 && *(unsigned char *)&one==1;
+}
+static int mi_shape(const CxModel *m) {
+    if (!m || !mi_abi() || m->ns<0 || m->nq<0 || m->nrg<0 || m->nstr<0 || m->nstr==2147483647 || m->start<0 || m->topmax<0 || m->nqa<0 || (m->isnet!=0 && m->isnet!=1)) return 0;
+    if ((m->ns && m->start>=m->ns) || (!m->ns && m->start)) return 0;
+    if (m->str && !m->strl) return 0;
+    if (m->ns && (!m->smode || !m->rowc)) return 0;
+    for (int s=0;s<m->ns;s++) {
+        if (m->rowc[s]<0 || m->smode[s]<0 || m->smode[s]>2) return 0;
+        if (!m->isnet && m->smode[s]!=1 && m->rowk && m->rowk[s]) return 0;
+    }
+    return 1;
+}
+static void mi_fields(const CxModel *m, const void **p, long *n, int *w) {
+    p[0]=m->str; p[1]=m->strl; p[2]=m->qoff; p[3]=m->qlen; p[4]=m->qa;
+    p[5]=m->smode; p[6]=m->rowc; p[7]=m->rowk; p[8]=m->rown; p[9]=m->rowq;
+    p[10]=m->nlo; p[11]=m->nhi; p[12]=m->bn; p[13]=m->bq; p[14]=m->rets; p[15]=m->retok;
+    for(int i=0;i<16;i++) { n[i]=m->ns; w[i]=4; }
+    n[0]=(long)m->nstr+1; n[1]=n[0]; n[2]=m->nq; n[3]=m->nq; n[4]=m->nqa;
+    w[0]=8; w[4]=8; w[7]=8; w[8]=8; w[9]=8; w[15]=8;
+}
+/* Advances only after checked multiplication, alignment, and addition. */
+static long mi_slot(long *at, long count, int width) {
+    long bytes, off;
+    if (count<0 || width<=0 || count>9223372036854775807L/width || *at>9223372036854775800L) return -1;
+    bytes=count*width; if (!bytes) bytes=1;
+    off=(*at+7)&~7L;
+    if (bytes>9223372036854775807L-off) return -1;
+    *at=off+bytes;
+    return off;
+}
+static long mi_pack(const CxModel *m, unsigned char *out) {
+    const void *p[16]; long n[16], off[16], at=216; int w[16];
+    int mm_copy(void *, long, const void *, long);
+    int mm_fill(void *, long, int, long);
+    if (!mi_shape(m)) return -1;
+    mi_fields(m,p,n,w);
+    for (int i=0;i<16;i++) {
+        off[i]=0;
+        if (p[i]) { off[i]=mi_slot(&at,n[i],w[i]); if(off[i]<0) return -1; }
+        if (out) {
+            mi_put(out+88+8*i,off[i]);
+            if(off[i]) {
+                long bytes=n[i]*w[i];
+                mm_fill(out+off[i],bytes?bytes:1,0,bytes?bytes:1);
+                if(i!=0 && i!=7 && i!=8 && i!=9 && i!=15 && bytes) mm_copy(out+off[i],bytes,p[i],bytes);
+            }
+        }
+    }
+    for(int t=0;t<5;t++) {
+        int f=t==0?0:(t==4?15:t+6);
+        if(!p[f]) continue;
+        for(long s=0;s<n[f];s++) {
+            const void *sub=0; long count; int width;
+            if(!t) { sub=m->str[s]; if(m->strl[s]<0) return -1; count=(long)m->strl[s]+1; width=1; }
+            else if(t==4) { sub=m->retok[s]; count=m->ns; width=1; }
+            else {
+                sub=t==1?(void *)m->rowk[s]:(t==2?(void *)m->rown[s]:(void *)m->rowq[s]);
+                count=(m->isnet || m->smode[s]==1)?m->rowc[s]:257; width=4;
+            }
+            long pos=0;
+            if(sub) { pos=mi_slot(&at,count,width); if(pos<0) return -1; }
+            if(out) {
+                mi_put(out+off[f]+8*s,pos);
+                if(pos) { long bytes=count*width; if(bytes) mm_copy(out+pos,bytes,sub,bytes); else out[pos]=0; }
+            }
+            if(!t && sub && ((const unsigned char *)sub)[count-1]) return -1;
+        }
+    }
+    if(out) {
+        mm_copy(out,8,"CXMI0001",8); mi_put(out+8,1); mi_put(out+16,at);
+        mi_put(out+24,m->ns); mi_put(out+32,m->nq); mi_put(out+40,m->nrg); mi_put(out+48,m->nstr);
+        mi_put(out+56,m->start); mi_put(out+64,m->isnet); mi_put(out+72,m->topmax); mi_put(out+80,m->nqa);
+    }
+    return at;
+}
+long cxmi_size(const void *model) { return mi_pack(model,0); }
+int cxmi_pack(const void *model, unsigned char *out, long size) {
+    long need=mi_pack(model,0);
+    int mm_fill(void *,long,int,long);
+    if(need<0 || !out || size!=need || ((unsigned long)out&7)) return 1;
+    mm_fill(out,size,0,size);
+    return mi_pack(model,out)==size?0:1;
+}
+/* Canonical offsets make aliasing, header references, overlap and gaps invalid. */
+static int mi_span(const unsigned char *image,long size,long offset,long count,int width,long *at) {
+    long end=*at, expected;
+    if(!offset) return 1;
+    if(offset<0) return 0;
+    expected=mi_slot(&end,count,width);
+    if(expected<0 || offset!=expected || end>size) return 0;
+    for(long i=*at;i<offset;i++) if(image[i]) return 0;
+    if(!count && image[offset]) return 0;
+    *at=end;
+    return 1;
+}
+int cxmi_view(void *model,const unsigned char *image,long size,void *(*allocate)(void *,size_t),void (*release)(void *)) {
+    CxModel *dest=model, m;
+    const void *p[16]; long n[16], off[16], at=216, pooln=0; int w[16], sc[8];
+    void **pool=0; long used=0;
+    int mm_fill(void *,long,int,long);
+    int mm_same(const void *,const void *,long);
+    if(!dest) return 1;
+    mm_fill(dest,sizeof *dest,0,sizeof *dest);
+    mm_fill(&m,sizeof m,0,sizeof m);
+    if(!image || size<216 || !allocate || !release || !mi_abi() || ((unsigned long)image&7) || !mm_same(image,"CXMI0001",8) || mi_get(image+8)!=1 || mi_get(image+16)!=size) return 1;
+    for(int i=0;i<8;i++) { long v=mi_get(image+24+8*i); if(v<0 || v>2147483647) return 1; sc[i]=(int)v; }
+    m.ns=sc[0]; m.nq=sc[1]; m.nrg=sc[2]; m.nstr=sc[3]; m.start=sc[4]; m.isnet=sc[5]; m.topmax=sc[6]; m.nqa=sc[7];
+    if(m.nstr==2147483647) return 1;
+    mi_fields(&m,p,n,w);
+    for(int i=0;i<16;i++) {
+        off[i]=mi_get(image+88+8*i);
+        if(!mi_span(image,size,off[i],n[i],w[i],&at)) return 1;
+        p[i]=off[i]?(const void *)(image+off[i]):0;
+        if(i==0 || i==7 || i==8 || i==9 || i==15) {
+            if(off[i]) { long slots=n[i]?n[i]:1; if(pooln>9223372036854775807L-slots) return 1; pooln+=slots; }
+        }
+    }
+    m.strl=(int *)p[1]; m.qoff=(int *)p[2]; m.qlen=(int *)p[3]; m.qa=(int64_t *)p[4];
+    m.smode=(int *)p[5]; m.rowc=(int *)p[6]; m.nlo=(int *)p[10]; m.nhi=(int *)p[11]; m.bn=(int *)p[12]; m.bq=(int *)p[13]; m.rets=(int *)p[14];
+    if(p[0] && !m.strl) return 1;
+    if(!mi_shape(&m) || pooln>9223372036854775807L/8) return 1;
+    /* Even an all-NULL layout has one small, independently owned pool. */
+    pool=allocate(0,(size_t)(pooln?pooln*8:8));
+    if(!pool) return 8;
+    mm_fill(pool,pooln?pooln*8:8,0,pooln?pooln*8:8);
+    for(int t=0;t<5;t++) {
+        int f=t==0?0:(t==4?15:t+6); void **tab;
+        if(!p[f]) continue;
+        tab=pool+used; used+=n[f]?n[f]:1;
+        if(!t) m.str=(char **)tab;
+        else if(t==1) m.rowk=(int **)tab;
+        else if(t==2) m.rown=(int **)tab;
+        else if(t==3) m.rowq=(int **)tab;
+        else m.retok=(unsigned char **)tab;
+        for(long s=0;s<n[f];s++) {
+            long pos=mi_get(image+off[f]+8*s), count; int width;
+            if(!t) { if(m.strl[s]<0) { release(pool); return 1; } count=(long)m.strl[s]+1; width=1; }
+            else if(t==4) { count=m.ns; width=1; }
+            else { count=(m.isnet || m.smode[s]==1)?m.rowc[s]:257; width=4; }
+            if(!mi_span(image,size,pos,count,width,&at) || (t==1 && !m.isnet && m.smode[s]!=1 && pos)) { release(pool); return 1; }
+            tab[s]=pos?(void *)(image+pos):0;
+            if(!t && pos && image[pos+count-1]) { release(pool); return 1; }
+        }
+    }
+    if(at!=size) { release(pool); return 1; }
+    m.image_view=pool; m.loaded=1; *dest=m;
+    return 0;
+}

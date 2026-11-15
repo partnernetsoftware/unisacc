@@ -1,0 +1,135 @@
+/* Run: sh ./unisacc.com tools/check-model-image-cache.cx
+ * Every cache file lives in a fresh 0700 directory, never the default cache.
+ * Identity bytes are the text fixture itself: this API does not decompress them. */
+#pragma unisa use mem.bytes
+#pragma unisa use model_decode
+#pragma unisa use model_image
+#pragma unisa use model_lifetime
+#pragma unisa use modelcache
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+static int failed, fallbacks;
+static const char *text_a="N 1 1 0 1 0 0\nS 41\nQ 1 1 7\nH 3 -1 0 1 0 0 0 1 0 0 0 0\n";
+static const char *text_b="N 1 1 0 1 0 0\nS 42\nQ 1 1 7\nH 3 -1 0 1 0 0 0 1 0 0 0 0\n";
+static void ck(int ok,const char *name) {
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name); if(!ok) failed++;
+}
+static void *heap(void *p,size_t n) { return realloc(p,n); }
+static unsigned crc32(const char *p,long n) {
+    unsigned c=0xffffffffu;
+    for(long i=0;i<n;i++) { c^=(unsigned char)p[i]; for(int j=0;j<8;j++) c=(c>>1)^(0xedb88320u & (0u-(c&1))); }
+    return c^0xffffffffu;
+}
+static int decode(CxDecode *d,const char *text) {
+    memset(d,0,sizeof *d); d->allocate=heap; d->release=free;
+    return cxmd_decode(d,(const unsigned char *)text,(long)strlen(text));
+}
+static int fields(const CxModel *m,int letter) {
+    return m->loaded && m->ns==1 && m->nq==1 && m->nstr==1 && m->isnet==1 &&
+        m->str && m->strl && m->strl[0]==1 && m->str[0] &&
+        m->str[0][0]==letter && !m->str[0][1] && m->qoff && m->qlen &&
+        m->qoff[0]==0 && m->qlen[0]==1 && m->qa && m->nqa==2 &&
+        m->qa[0]==1 && m->qa[1]==7 && m->rowc && m->rowc[0]==1 &&
+        m->rowk && m->rowk[0] && m->rown && m->rown[0] &&
+        m->rowq && m->rowq[0];
+}
+static int same_image(const CxModel *a,const CxModel *b) {
+    long n=cxmi_size(a); int ok=0;
+    unsigned char *x=0,*y=0;
+    if(n<216 || cxmi_size(b)!=n) return 0;
+    x=malloc((size_t)n); y=malloc((size_t)n);
+    if(x && y) ok=!cxmi_pack(a,x,n) && !cxmi_pack(b,y,n) && !memcmp(x,y,(size_t)n);
+    free(x); free(y); return ok;
+}
+static int save(const char *path,const unsigned char *p,long n) {
+    int fd,rc; sy_unlink(path); fd=sy_open_new(path,0600); if(fd<0) return 0;
+    rc=sy_write_all(fd,p,n); if(sy_close(fd)) rc=1; return !rc;
+}
+static void reject_fallback(const char *name,const char *identity,long raw,unsigned crc,
+                            const char *product,const char *original,int letter) {
+    CxDecode d,reference; CxModel empty; int hit,rc=-1,before=fallbacks;
+    memset(&d,0,sizeof d); memset(&empty,0,sizeof empty);
+    hit=mc_image_get((const unsigned char *)identity,(long)strlen(identity),raw,crc,product,&d.model,heap,free);
+    printf("CASE\t%s\thit=%d\n",name,hit);
+    ck(!hit,name);
+    if(!hit) {
+        ck(!memcmp(&d.model,&empty,sizeof empty),"miss-leaves-model-empty");
+        fallbacks++; rc=decode(&d,original);
+    }
+    ck(!hit && fallbacks==before+1 && !rc && !d.model.image_base && fields(&d.model,letter),"miss-calls-original-decoder-and-checks-fields");
+    int rr=decode(&reference,original);
+    ck(!rr && !rc && same_image(&reference.model,&d.model),"fallback-every-persisted-field-matches-original");
+    cxml_release(&reference.model,free); cxml_release(&d.model,free);
+}
+static int rehash(unsigned char *p,long n) {
+    char h[65]; if(sy_sha256_hex(p,n-64,h)) return 0;
+    if(mm_copy(p+n-64,64,h,64))return 0;return 1;
+}
+int main(void) {
+    char dir[4096],path[4400],other[4400],aux[4400],product[65],product_b[65];
+    CxDecode source; CxModel hit; sy_stat_t st;
+    unsigned char *bytes=0,*copy=0; long n=0,raw=(long)strlen(text_a);
+    unsigned crc=crc32(text_a,raw); int fd,rc;
+    memset(&source,0,sizeof source); memset(&hit,0,sizeof hit); path[0]=other[0]=0;
+    rc=sy_mkdtemp(sy_tmpdir(),"model-image-cache-check-",dir,sizeof dir);
+    ck(!rc,"private-temporary-cache-directory"); if(rc) goto done;
+    rc=sy_setenv("UNISACC_CACHE_DIR",dir,1) || sy_setenv("UNISACC_RUN_CACHE","1",1) ||
+        sy_setenv("UNISACC_E3CACHE_MAX_BYTES","1073741824",1);
+    ck(!rc,"cache-environment-isolated"); if(rc) goto cleanup;
+    ck(!sy_lstat(dir,&st) && st.kind=='d' && (st.mode&0777)==0700,"private-cache-mode-0700");
+    rc=sy_sha256_hex("test-product-A",14,product) || sy_sha256_hex("test-product-B",14,product_b);
+    ck(!rc && memcmp(product,product_b,64),"distinct-real-product-sha256"); if(rc) goto cleanup;
+    rc=decode(&source,text_a); ck(!rc && fields(&source.model,'A'),"original-decoder-fixture-fields"); if(rc) goto cleanup;
+    rc=mc_image_path((const unsigned char *)text_a,raw,raw,crc,product,path);
+    ck(!rc,"private-cache-entry-path"); if(rc) goto cleanup;
+    mc_image_put((const unsigned char *)text_a,raw,raw,crc,product,&source.model);
+    rc=mc_image_get((const unsigned char *)text_a,raw,raw,crc,product,&hit,heap,free);
+    ck(rc==1 && hit.image_base && hit.image_view && hit.image_bytes>0,"real-cache-write-then-mapped-hit");
+    ck(rc==1 && fields(&hit,'A') && same_image(&source.model,&hit),"hit-all-model-fields-match-decoder");
+    cxml_release(&hit,free);
+    if(sy_lstat(path,&st) || st.size<448) { ck(0,"read-written-cache"); goto cleanup; }
+    n=st.size; bytes=malloc((size_t)n); copy=malloc((size_t)n);
+    if(!bytes || !copy) { ck(0,"snapshot-allocation"); goto cleanup; }
+    fd=sy_open_read(path); if(fd<0) { ck(0,"open-written-cache"); goto cleanup; }
+    rc=sy_read_full(fd,bytes,n); sy_close(fd); ck(!rc,"snapshot-real-cache-file"); if(rc) goto cleanup;
+    if(mm_copy(copy,n,bytes,n)){ck(0,"snapshot-copy-bounds");goto cleanup;}copy[n-65]^=1;
+    ck(save(path,copy,n),"tamper-real-payload-byte");
+    reject_fallback("payload-tamper-miss",text_a,raw,crc,product,text_a,'A');
+    ck(save(path,bytes,n-1),"truncate-real-cache-file");
+    reject_fallback("truncated-file-miss",text_a,raw,crc,product,text_a,'A');
+    ck(save(path,bytes,n),"restore-valid-cache-file");
+    /* Populate each different key with the old valid file: a miss cannot be
+     * explained merely by the absence of the alternate filename. */
+    for(int k=0;k<4;k++) {
+        const char *identity=k==0?text_b:text_a;
+        const char *prod=k==1?product_b:product;
+        long r=raw+(k==2); unsigned c=crc+(k==3);
+        rc=mc_image_path((const unsigned char *)identity,(long)strlen(identity),r,c,prod,other);
+        ck(!rc && strcmp(path,other),"changed-identity-has-distinct-cache-key");
+        if(!rc && strcmp(path,other)) {
+            ck(save(other,bytes,n),"plant-old-entry-at-new-identity-key");
+            reject_fallback(k==0?"changed-model-identity-miss":k==1?"changed-product-identity-miss":k==2?"changed-raw-length-miss":"changed-crc-miss",identity,r,c,prod,k==0?text_b:text_a,k==0?'B':'A');
+            ck(!sy_unlink(other),"remove-alternate-cache-entry"); other[0]=0;
+        }
+    }
+    /* Recompute the checksum so format/identity checks, not corruption alone,
+     * have to reject each forged header at the original lookup key. */
+    for(int k=0;k<5;k++) {
+        long offset=k==0?16:k==1?24:k==2?32:k==3?40:104;
+        if(mm_copy(copy,n,bytes,n)){ck(0,"header-copy-bounds");break;}copy[offset]^=1;
+        ck(rehash(copy,n) && save(path,copy,n),"write-checksummed-incompatible-header");
+        reject_fallback(k==0?"format-version-miss":k==1?"header-raw-length-miss":k==2?"header-crc-miss":k==3?"header-model-sha-miss":"header-product-sha-miss",text_a,raw,crc,product,text_a,'A');
+    }
+    ck(fallbacks==11,"all-eleven-negative-controls-used-decoder");
+cleanup:
+    free(bytes); free(copy); cxml_release(&source.model,free); cxml_release(&hit,free);
+    if(other[0]) sy_unlink(other);
+    if(path[0]) sy_unlink(path);
+    if(!cx_fmt(aux,sizeof aux,"%s/.budget.acct",dir))sy_unlink(aux);else ck(0,"account-path-bounds");
+    if(!cx_fmt(aux,sizeof aux,"%s/.budget.lock",dir))sy_unlink(aux);else ck(0,"lock-path-bounds");
+    ck(!sy_rmdir(dir),"all-private-cache-artifacts-removed");
+done:
+    printf("MODEL_IMAGE_CACHE_CHECK\tfailed=%d\tfallbacks=%d\n",failed,fallbacks);
+    return failed?1:0;
+}

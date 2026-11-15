@@ -1,0 +1,177 @@
+/* Run: sh ./unisacc.com tools/check-model-image.cx
+ * The image is made genuinely read-only before viewing it. */
+#pragma unisa use mem.bytes
+#pragma unisa use model_image
+#pragma unisa use model_decode
+#pragma unisa use model_lifetime
+static int failed, calls, frees, deny;
+static void *live;
+static void ck(int ok,const char *name) {
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+static void *heap(void *p,size_t n) { return realloc(p,n); }
+static void *pool_alloc(void *p,size_t n) {
+    calls++;
+    if(deny || p || !n || live) return 0;
+    live=malloc(n); return live;
+}
+static void pool_free(void *p) {
+    if(!p || p!=live) { failed++; return; }
+    frees++; free(p); live=0;
+}
+static int zero(const CxModel *m) {
+    CxModel z; memset(&z,0,sizeof z); return !memcmp(m,&z,sizeof z);
+}
+static long getoff(const unsigned char *p) {
+    unsigned long long v=0;
+    for(int i=0;i<8;i++) v|=(unsigned long long)p[i]<<(8*i);
+    return (long)v;
+}
+static void putoff(unsigned char *p,long v) {
+    for(int i=0;i<8;i++) p[i]=(unsigned char)((unsigned long long)v>>(8*i));
+}
+static int eqspan(const void *a,const void *b,long n) {
+    if(!a || !b) return !a && !b;
+    return !n || !memcmp(a,b,(size_t)n);
+}
+static int equal(const CxModel *a,const CxModel *b) {
+    if(a->ns!=b->ns || a->nq!=b->nq || a->nrg!=b->nrg || a->nstr!=b->nstr || a->start!=b->start || a->isnet!=b->isnet || a->topmax!=b->topmax || a->nqa!=b->nqa) return 0;
+    if(!eqspan(a->strl,b->strl,4*((long)a->nstr+1)) || !eqspan(a->qoff,b->qoff,4L*a->nq) || !eqspan(a->qlen,b->qlen,4L*a->nq) || !eqspan(a->qa,b->qa,8L*a->nqa)) return 0;
+    if((!a->str)!=(!b->str) || (!a->rowk)!=(!b->rowk) || (!a->rown)!=(!b->rown) || (!a->rowq)!=(!b->rowq) || (!a->retok)!=(!b->retok)) return 0;
+    if(a->str) for(int i=0;i<=a->nstr;i++) if(!eqspan(a->str[i],b->str[i],(long)a->strl[i]+1)) return 0;
+    if(!eqspan(a->smode,b->smode,4L*a->ns) || !eqspan(a->rowc,b->rowc,4L*a->ns) || !eqspan(a->nlo,b->nlo,4L*a->ns) || !eqspan(a->nhi,b->nhi,4L*a->ns) || !eqspan(a->bn,b->bn,4L*a->ns) || !eqspan(a->bq,b->bq,4L*a->ns) || !eqspan(a->rets,b->rets,4L*a->ns)) return 0;
+    for(int s=0;s<a->ns;s++) {
+        long bytes=4L*((a->isnet || a->smode[s]==1)?a->rowc[s]:257);
+        if(a->rowk && !eqspan(a->rowk[s],b->rowk[s],bytes)) return 0;
+        if(a->rown && !eqspan(a->rown[s],b->rown[s],bytes)) return 0;
+        if(a->rowq && !eqspan(a->rowq[s],b->rowq[s],bytes)) return 0;
+        if(a->retok && !eqspan(a->retok[s],b->retok[s],a->ns)) return 0;
+    }
+    return 1;
+}
+static int rejected(const unsigned char *image,long n) {
+    CxModel v; int rc;
+    memset(&v,0xa5,sizeof v);
+    rc=cxmi_view(&v,image,n,pool_alloc,pool_free);
+    if(!rc) { pool_free(v.image_view); return 0; }
+    return zero(&v) && !live;
+}
+static void exercise(const CxModel *source,const char *name) {
+    void *mmap(void *,size_t,int,int,int,long);
+    int mprotect(void *,size_t,int);
+    int munmap(void *,size_t);
+    long size=cxmi_size(source), rounded;
+    unsigned char *image, *copy, *packed;
+    CxModel v;
+    int before, good, rc;
+    ck(size>=216,name);
+    if(size<216) return;
+    rounded=(size+4095)&~4095L;
+    image=mmap(0,(size_t)rounded,3,34,-1,0);
+    copy=malloc((size_t)size); packed=malloc((size_t)size);
+    if(image==(void *)-1 || !copy || !packed) {
+        ck(0,"image-storage");
+        if(image!=(void *)-1) munmap(image,(size_t)rounded);
+        free(copy); free(packed); return;
+    }
+    rc=cxmi_pack(source,image,size);
+    ck(rc==0,"pack-exact-size");
+    if(rc) { munmap(image,(size_t)rounded); free(copy); free(packed); return; }
+    if(mm_copy(copy,size,image,size)){ck(0,"snapshot-copy-bounds");munmap(image,(size_t)rounded);free(copy);free(packed);return;}
+    ck(cxmi_pack(source,packed,size-1)!=0,"pack-short-buffer");
+    good=mprotect(image,(size_t)rounded,1)==0;
+    ck(good,"image-read-only-protection");
+    if(good) {
+        before=calls;
+        rc=cxmi_view(&v,image,size,pool_alloc,pool_free);
+        ck(!rc && calls==before+1 && v.image_view==live && !v.image_base && !v.image_bytes && v.loaded==1,"single-pool-owned-view");
+        if(!rc) {
+            ck(equal(source,&v),"roundtrip-every-field");
+            ck(cxmi_size(&v)==size && !cxmi_pack(&v,packed,size) && !memcmp(copy,packed,(size_t)size),"repack-identical");
+            ck(!memcmp(copy,image,(size_t)size),"view-keeps-image-unchanged");
+            if(v.qa) ck((const unsigned char *)v.qa>=image && (const unsigned char *)v.qa<image+size,"numeric-array-borrows-image");
+            pool_free(v.image_view);
+        }
+    }
+    deny=1;
+    ck(rejected(image,size),"pool-allocation-failure-clears-model");
+    deny=0;
+    good=1;
+    for(long n=0;n<size;n++) if(!rejected(image,n)) { good=0; break; }
+    ck(good,"all-truncations-rejected");
+    ck(rejected(image+1,size-1),"unaligned-image-rejected");
+    good=1;
+    for(int i=0;i<16;i++) {
+        long saved=getoff(copy+88+8*i);
+        putoff(copy+88+8*i,size+8);
+        if(!rejected(copy,size)) good=0;
+        putoff(copy+88+8*i,saved);
+    }
+    ck(good,"every-top-offset-bounds-checked");
+    good=1;
+    for(int t=0;t<5;t++) {
+        int f=t==0?0:(t==4?15:t+6);
+        long table=getoff(copy+88+8*f);
+        long count=!t?(long)source->nstr+1:source->ns;
+        if(!table) continue;
+        for(long s=0;s<count;s++) {
+            long saved=getoff(copy+table+8*s);
+            putoff(copy+table+8*s,size+8);
+            if(!rejected(copy,size)) good=0;
+            putoff(copy+table+8*s,saved);
+        }
+    }
+    ck(good,"every-child-offset-bounds-checked");
+    {
+        long saved=getoff(copy+88);
+        putoff(copy+88,24);
+        ck(rejected(copy,size),"header-alias-offset-rejected");
+        putoff(copy+88,saved);
+        putoff(copy+88,217);
+        ck(rejected(copy,size),"unaligned-offset-rejected");
+        putoff(copy+88,saved);
+        putoff(copy+88,9223372036854775807L);
+        ck(rejected(copy,size),"offset-addition-overflow-rejected");
+        putoff(copy+88,saved);
+    }
+    putoff(copy+8,2); ck(rejected(copy,size),"version-rejected"); putoff(copy+8,1);
+    copy[0]^=1; ck(rejected(copy,size),"magic-rejected"); copy[0]^=1;
+    putoff(copy+16,size+1); ck(rejected(copy,size),"total-length-rejected"); putoff(copy+16,size);
+    putoff(copy+24,9223372036854775807L); ck(rejected(copy,size),"scalar-overflow-rejected"); putoff(copy+24,source->ns);
+    if(source->ns) {
+        long rowc=getoff(copy+88+6*8);
+        int saved=*(int *)(copy+rowc);
+        *(int *)(copy+rowc)=-1;
+        ck(rejected(copy,size),"negative-row-width-rejected");
+        *(int *)(copy+rowc)=saved;
+    }
+    ck(!live,"no-view-pool-leaks");
+    munmap(image,(size_t)rounded); free(copy); free(packed);
+}
+static void fixture(const char *text,const char *name) {
+    CxDecode d;
+    memset(&d,0,sizeof d); d.allocate=heap; d.release=free;
+    int rc=cxmd_decode(&d,(const unsigned char *)text,(long)strlen(text));
+    ck(!rc,"decode-fixture");
+    if(!rc) exercise(&d.model,name);
+    cxml_release(&d.model,free);
+}
+int main(void) {
+    fixture("N 1 1 0 1 0 0\nS 41\nQ 1 1 7\nH 3 -1 0 1 0 0 0 1 0 0 0 0\n","network-return-image");
+    fixture("N 1 1 0 1 0 0\nS -\nQ 0\nH 0 0 256 0 0 0\n","empty-string-zero-row-image");
+    fixture("T 1 1 0 0 0\nQ 1 29 5\nR 0 1 -1 0 7 0 0\n","dense-257-image");
+    fixture("T 1 1 0 0 0\nQ 0\nR 1 1 -1 0 5 0 0\n","sparse-keyed-image");
+    {
+        CxModel m; int dummy=0; int *rows[1]; unsigned char *ret[1]; char *str[1];
+        memset(&m,0,sizeof m); rows[0]=0; ret[0]=0; str[0]=0;
+        exercise(&m,"all-null-empty-image");
+        m.str=str; m.strl=&dummy; m.qoff=&dummy; m.qlen=&dummy; m.qa=(int64_t *)&dummy;
+        m.rowk=rows; m.rown=rows; m.rowq=rows; m.retok=ret;
+        exercise(&m,"present-zero-length-top-arrays");
+    }
+    ck(!live,"final-no-live-pool");
+    printf("failed=%d\n",failed);
+    if(!failed)printf("MODEL_IMAGE_CHECK\n");
+    return failed?1:0;
+}
