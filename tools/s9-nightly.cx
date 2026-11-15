@@ -19,6 +19,11 @@
  * map封口在写map.intent前核全体IMPLEMENTED/SOURCE材料族，缺失/陈旧一次列全；未就绪不留map意图。
  * 已有map.intent但缺映射文件时具名NEW_RUN_REQUIRED，不重建、不猜成功；映射存在仍核原SHA与成功证据。
  * --map-controls 使用独立临时目录和合成登记/收据验证这些边界，不授产品资格。
+ * RI F4b: 同一 ROOT/RUN/tier 依次调用 --phase map --map-family ri-flow-runtime
+ * --material-stage source、compile、seal,再以 --map-family ri-flow-data
+ * --material-stage data 准备数据。每次独立 50 秒预算,不走 affected 单次预算。
+ * compile 仅记 COMPILED;seal 后才能以无 --material-stage 的对应族调用发布映射。
+ * data 调用 flow-native prepare PRODUCT DATA;收据重放逐叶复核,不缓存 PASS。
  * 恢复协议：执行前 intent，成功后同会话 owned-outputs 证据，最后原子写 done。
  * done 丢失但输入、执行体及本相产物 SHA 全部核对一致时补写并记 RECOVERED；任一失配 REFUSE，不重造覆盖。
  * 旧协议只有产物而无成功证据时不追认；必须保留原拒绝。准备证据不是测试结论。
@@ -115,7 +120,7 @@ static char mappath[4400];       /* the file that content was written to: init t
 static char s9run[4400];         /* the RUN directory, set once in main: the map file lives beside it */
 static char why4[300];
 static int map_budget;
-static const char *map_family;
+static const char *map_family, *material_stage;
 static int materials_map(char *map, long cap, char *why, int whycap) {
     char product[4400], tool[4400], *v[10];
     np_result r = {0};
@@ -466,6 +471,86 @@ static int init_materials(int wanted, const char *run, char *out, int cap) {
     }
     free(s); return rc;
 }
+/* F4b: each invocation executes at most one producer stage. Material paths
+ * stay beside RUN, since init moves its bookkeeping directory into RUN. */
+static const char *ri_names[]={"source","compile","seal","data"};
+static int ri_family(const char *name){return name&&(!strcmp(name,"ri-flow-runtime")||!strcmp(name,"ri-flow-data"));}
+static int ri_paths(const char *run,char base[4600],char mat[4800],char data[4800]){
+ return cx_fmt(base,4600,"%s.ri-flow-materials",run)||cx_fmt(mat,4800,"%s/runtime",base)||cx_fmt(data,4800,"%s/data",base);
+}
+static int ri_exists(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 1;if(errno==ENOENT)return 0;cx_fmt(why,sizeof why,"REFUSE ri-path-stat errno=%d",errno);return -1;}
+static int ri_stage_path(const char *run,int k,const char *suffix,char p[5000]){
+ return cx_fmt(p,5000,"%s.ri-flow-materials/%s.%s",run,ri_names[k],suffix);
+}
+static int ri_outputs(const char *run,int k,char hash[65]){
+ char base[4600],mat[4800],data[4800],p[5000],h[65];np_buf b={0};
+ const char *leaves[]={"runtime.c","material.tsv","flow-native","flow-native.pending.tsv","flow-native.tsv"};int count=k==0?2:k==1?4:5;
+ if(ri_paths(run,base,mat,data))return -1;
+ for(int i=0;i<count;i++){if(cx_fmt(p,sizeof p,"%s/%s",mat,leaves[i])||as_sha_file(p,0,h,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,leaves[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
+ if(k==3){if(as_tree(data,1,h,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,"data\t");np_puts(&b,h);np_puts(&b,"\n");}
+ cx_sha256_hex(b.p,b.n,hash);free(b.p);return 0;
+}
+static const char *ri_inputs[]={"exec/c/run.c","exec/c/core.c","exec/c/core.h","exec/c/codec.h","exec/c/packagefooter.h","exec/c/resourceledger.h","include/unisa_sha256.h","tools/ri-material.cx","tests/cases/ri-flow.cx"};
+static int ri_closure(char hash[65]){
+ np_buf b={0};char p[4800],h[65];
+ for(int i=0;i<9;i++){
+  if(cx_fmt(p,sizeof p,"%s/%s",root,ri_inputs[i])){free(b.p);return -1;}
+  struct stat st;errno=0;if(lstat(p,&st)){if(errno!=ENOENT||cx_fmt(p,sizeof p,"%s/archive/reference-c/%s",root,ri_inputs[i])){free(b.p);return -1;}}
+  if(as_sha_file(p,0,h,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,ri_inputs[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");
+ }
+ cx_sha256_hex(b.p,b.n,hash);free(b.p);return 0;
+}
+static int ri_receipt(const char *run,const char *identity,int k,int write_it){
+ char p[5000],h[65],closure[65],body[6000];if(ri_closure(closure)||ri_outputs(run,k,h)||ri_stage_path(run,k,"done",p)||cx_fmt(body,sizeof body,"S9RI-v1\t%s\t%s\t%s\t%s\t%s\t%s\n",run,identity,ri_names[k],k==1?"COMPILED":"PREPARED",h,closure))return -1;
+ return evidence_file(p,body,write_it);
+}
+static int ri_ready(const char *run,const char *identity,int upto){
+ for(int i=0;i<=upto;i++){char p[5000];if(ri_stage_path(run,i,"intent",p)||evidence_file(p,identity,0)!=1||ri_receipt(run,identity,i,0)!=1){cx_fmt(why,sizeof why,"REFUSE ri-stage-required stage=%s action=RUN_MATERIAL_STAGE",ri_names[i]);return -1;}}
+ return 0;
+}
+static int ri_stage_state(const char *run,const char *identity,int k){
+ char p[5000];if(ri_stage_path(run,k,"intent",p))return -1;int intent=evidence_file(p,identity,0);if(intent<0)return -1;
+ if(intent==1){if(ri_receipt(run,identity,k,0)==1)return 1;cx_fmt(why,sizeof why,"REFUSE ri-stage-interrupted stage=%s action=NEW_RUN_REQUIRED",ri_names[k]);return -1;}
+ if(ri_stage_path(run,k,"done",p))return -1;int present=ri_exists(p);if(present<0)return -1;if(present){cx_fmt(why,sizeof why,"REFUSE ri-stage-orphan-receipt stage=%s action=NEW_RUN_REQUIRED",ri_names[k]);return -1;}return 0;
+}
+static int ri_stage(const char *run,const char *tier,const char *stage){
+ int k=-1;for(int i=0;i<4;i++)if(!strcmp(stage,ri_names[i]))k=i;if(k<0){cx_fmt(why,sizeof why,"REFUSE ri-stage name must be source|compile|seal|data");return 2;}
+ if(!map_family||strcmp(map_family,k==3?"ri-flow-data":"ri-flow-runtime")){cx_fmt(why,sizeof why,"REFUSE ri-stage-family-mismatch");return 2;}
+ char base[4600],mat[4800],data[4800],product[4800],tool[4800],p[5000],identity[65],after[65];
+ init_t0=sy_now_ms();identity_epoch=0;identity_ready=0;
+ char closure_before[65],closure_after[65];
+ if(ri_paths(run,base,mat,data)||init_identity(tier,0,identity)||ri_closure(closure_before))return 1;
+ int exists=ri_exists(base);if(exists<0)return 1;if(!exists&&mkdir(base,0700))return 1;
+ {struct stat st;if(lstat(base,&st)||!S_ISDIR(st.st_mode)){cx_fmt(why,sizeof why,"REFUSE ri-material-base-kind");return 1;}}
+ if(k&&ri_ready(run,identity,k-1))return 1;
+ int state=ri_stage_state(run,identity,k);if(state<0)return 1;
+ if(state==1){printf("S9_RI_STAGE\tstage=%s\tstatus=%s\treuse=verified-material-only\n",stage,k==1?"COMPILED":"PREPARED");return 0;}
+ if(cx_fmt(product,sizeof product,"%s/unisacc.com",root))return 1;
+ if(k==3){char canonical[4800];if(!realpath(product,canonical)||cx_fmt(product,sizeof product,"%s",canonical))return 1;}
+ char *v[12];int n=0;
+ if(k==3){if(cx_fmt(tool,sizeof tool,"%s/flow-native",mat))return 1;v[n++]=tool;v[n++]="prepare";v[n++]=product;v[n++]=data;}
+ else{if(cx_fmt(tool,sizeof tool,"%s/tools/%s",root,k==0?"ri-material.cx":"ri-flow-material.cx"))return 1;v[n++]="sh";v[n++]=product;v[n++]=tool;v[n++]="--";if(k)v[n++]=(char*)stage;v[n++]=root;v[n++]=mat;if(!k)v[n++]="tests/cases/ri-flow.cx";}
+ v[n]=0;
+ if(ri_stage_path(run,k,"intent",p)||evidence_file(p,identity,1))return 1;
+ np_result r={0};int seconds=init_left();if(seconds<1)return 124;int rc=run_step(v,root,seconds,&r);
+ if(ri_stage_path(run,k,"stdout",p)||cx_write(p,r.out?r.out:"",r.outn)||ri_stage_path(run,k,"stderr",p)||cx_write(p,r.err?r.err:"",r.errn)){np_free(&r);return 1;}
+ char result[160];if(cx_fmt(result,sizeof result,"rc\t%d\nresidue\t%d\n",rc,r.residue)||ri_stage_path(run,k,"status",p)||cx_write(p,result,strlen(result))){np_free(&r);return 1;}
+ if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);
+ if(rc||r.residue){np_free(&r);cx_fmt(why,sizeof why,"REFUSE ri-stage-producer stage=%s rc=%d action=NEW_RUN_REQUIRED",stage,rc);return rc?rc:1;}np_free(&r);
+ identity_ready=0;if(init_identity(tier,0,after)||strcmp(identity,after)||ri_closure(closure_after)||strcmp(closure_before,closure_after)){cx_fmt(why,sizeof why,"REFUSE ri-stage-input-changed action=NEW_RUN_REQUIRED");return 1;}
+ if(ri_receipt(run,identity,k,1))return 1;
+ printf("S9_RI_STAGE\tstage=%s\tstatus=%s\treuse=no\n",stage,k==1?"COMPILED":"PREPARED");return 0;
+}
+static int ri_dump(const char *run,const char *identity,const char *family,np_buf *wire){
+ if(ri_ready(run,identity,!strcmp(family,"ri-flow-data")?3:2))return 1;
+ char base[4600],mat[4800],data[4800];if(ri_paths(run,base,mat,data))return 1;const char *value=!strcmp(family,"ri-flow-data")?data:mat;
+ as_registry r;if(as_registry_load(root,&r,why,sizeof why))return 1;int count=0;
+ for(int i=0;i<r.nb;i++){if(strcmp(r.b[i].impl,"IMPLEMENTED")||strcmp(r.b[i].mode,"SOURCE"))continue;const char *at=r.b[i].materials;tp_material_decl d;int next;
+  while((next=tp_material_next(&at,&d))>0)if(!strcmp(d.name,family)){if(d.kind!=1){as_registry_free(&r);return 1;}np_puts(wire,"MATERIAL\t");np_puts(wire,r.b[i].id);np_puts(wire,"\t");np_puts(wire,family);np_puts(wire,"\t");np_puts(wire,value);np_puts(wire,"\n");count++;}
+  if(next<0){as_registry_free(&r);return 1;}
+ }
+ as_registry_free(&r);return count?0:1;
+}
 static char map_families[256][128];
 static char map_planned[256][128];
 static int map_planned_n;
@@ -519,6 +604,7 @@ static int map_collect_families(const char *run,const char *state,const char *id
             cx_sha256_hex(dump,n,hash);
             if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,hash)){free(dump);free(saved);free(missing.p);return -1;}
             valid=rn==strlen(want)&&!memcmp(saved,want,rn)&&evidence_file(intent,identity,0)==1;
+            if(valid&&ri_family(map_families[i])&&ri_ready(run,identity,!strcmp(map_families[i],"ri-flow-data")?3:2))valid=0;
         }
         if(!valid){if(bad++)np_puts(&missing,",");np_puts(&missing,map_families[i]);}
         else np_put(all,dump,n);
@@ -554,6 +640,7 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     if(sy_exists(inside)==1&&cx_fmt(state,sizeof state,"%s",inside))return 1;
     if(sy_exists(state)!=1&&mkdir(state,0700))return 1;
     if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||init_identity(tier,0,identity))return 1;
+    if(!seal&&ri_family(family)&&ri_ready(run,identity,!strcmp(family,"ri-flow-data")?3:2))return 1;
     if(seal&&map_collect_families(run,state,identity,nn,&all)){free(all.p);return 1;}
     for(int i=0;!seal&&i<nn;i++) {
         if(strcmp(family,map_families[i]))continue;
@@ -570,8 +657,11 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
             free(b); b=0; char product[4400],tool[4400],*v[10];np_result r={0};
             if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/affected.cx",root))return 1;
             v[0]="sh";v[1]=product;v[2]=tool;v[3]="--";v[4]="--materials-dump";v[5]="--prepare-materials";v[6]="--family";v[7]=map_families[i];v[8]=0;
-            if(evidence_file(intent,identity,1))return 1;
-            int rc=run_step(v,root,50,&r);
+            if(ri_family(map_families[i])){
+                np_buf wire={0};if(ri_dump(run,identity,map_families[i],&wire)){free(wire.p);return 1;}r.out=wire.p;r.outn=wire.n;
+            }
+            if(evidence_file(intent,identity,1)){np_free(&r);return 1;}
+            int rc=ri_family(map_families[i])?0:run_step(v,root,50,&r);
             if(rc||r.residue){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc?rc:1;}
             cx_sha256_hex(r.out?r.out:"",r.outn,h);
             char after[65];if(init_identity(tier,0,after)||strcmp(identity,after)){np_free(&r);return 1;}
@@ -898,7 +988,46 @@ static int map_controls(void) {
     if(!bad){char *clean[]={"rm","-rf","--",dir,0};np_result r={0};if(np_run(clean,0,0,5,&r,why,sizeof why)||r.rc)return 2;np_free(&r);}
     printf("MAP_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
 }
+static int ri_controls(void){
+ char dir[]="/tmp/check-s9-ri-XXXXXX",run[4400],base[4600],mat[4800],data[4800],p[5000],identity[65],other[65];int bad=0;
+ if(!mkdtemp(dir)||cx_fmt(run,sizeof run,"%s/run",dir)||ri_paths(run,base,mat,data)||mkdir(base,0700)||mkdir(mat,0700))return 2;
+ cx_sha256_hex("ri-control",10,identity);cx_sha256_hex("changed-ri",10,other);
+ if(cx_fmt(root,sizeof root,"%s",dir))return 2;
+ const char *dirs[]={"exec","exec/c","include","tools","tests","tests/cases"};
+ for(int i=0;i<6;i++)if(cx_fmt(p,sizeof p,"%s/%s",root,dirs[i])||mkdir(p,0700))return 2;
+ for(int i=0;i<9;i++)if(cx_fmt(p,sizeof p,"%s/%s",root,ri_inputs[i])||cx_write(p,"closure",7))return 2;
+ map_control_check(ri_ready(run,identity,2)!=0,"ri-unprepared-refused",&bad);
+ const char *leaves[]={"runtime.c","material.tsv","flow-native","flow-native.pending.tsv","flow-native.tsv"};
+ for(int k=0;k<3;k++){
+  int first=k==0?0:k==1?2:4,last=k==0?2:k==1?4:5;
+  for(int j=first;j<last;j++)if(cx_fmt(p,sizeof p,"%s/%s",mat,leaves[j])||cx_write(p,leaves[j],strlen(leaves[j])))return 2;
+  if(ri_stage_path(run,k,"intent",p)||evidence_file(p,identity,1)||ri_receipt(run,identity,k,1))return 2;
+  map_control_check(ri_stage_state(run,identity,k)==1&&ri_ready(run,identity,k)==0,"ri-stage-receipt-verifies-material",&bad);
+  if(k==1){size_t n;if(ri_stage_path(run,k,"done",p))return 2;char *s=as_read(p,0,&n,why,sizeof why);if(!s)return 2;map_control_check(strstr(s,"\tCOMPILED\t")&&!strstr(s,"\tPREPARED\t")&&ri_ready(run,identity,2)!=0,"ri-compiled-not-prepared",&bad);free(s);}
+ }
+ map_control_check(ri_ready(run,identity,2)==0,"ri-sealed-runtime-ready",&bad);
+ map_control_check(ri_ready(run,other,2)!=0,"ri-input-identity-change-refused",&bad);
+ if(cx_fmt(p,sizeof p,"%s/exec/c/core.h",root)||cx_write(p,"changed",7))return 2;
+ map_control_check(ri_ready(run,identity,2)!=0,"ri-C-closure-change-refused",&bad);
+ if(cx_write(p,"closure",7))return 2;
+ char foreign[4400];if(cx_fmt(foreign,sizeof foreign,"%s/foreign",dir))return 2;
+ map_control_check(ri_ready(foreign,identity,2)!=0,"ri-other-run-refused",&bad);
+ if(cx_fmt(p,sizeof p,"%s/runtime.c",mat)||cx_write(p,"tamper",6))return 2;
+ map_control_check(ri_ready(run,identity,2)!=0,"ri-source-output-tamper-refused",&bad);
+ if(cx_write(p,leaves[0],strlen(leaves[0])))return 2;
+ if(cx_fmt(p,sizeof p,"%s/flow-native",mat)||cx_write(p,"tamper",6))return 2;
+ map_control_check(ri_ready(run,identity,2)!=0,"ri-native-output-tamper-refused",&bad);
+ if(cx_write(p,leaves[2],strlen(leaves[2]))||ri_stage_path(run,2,"done",p)||unlink(p))return 2;
+ map_control_check(ri_stage_state(run,identity,2)<0&&strstr(why,"NEW_RUN_REQUIRED"),"ri-interrupted-seal-refused",&bad);
+ if(ri_receipt(run,identity,2,1)||mkdir(data,0700)||cx_fmt(p,sizeof p,"%s/material.tsv",data)||cx_write(p,"fixture",7)||ri_stage_path(run,3,"intent",p)||evidence_file(p,identity,1)||ri_receipt(run,identity,3,1))return 2;
+ map_control_check(!ri_ready(run,identity,3),"ri-data-ready-after-seal",&bad);
+ if(cx_fmt(p,sizeof p,"%s/unrecorded",data)||cx_write(p,"extra",5))return 2;
+ map_control_check(ri_ready(run,identity,3)!=0,"ri-data-inventory-tamper-refused",&bad);
+ if(!bad){char *v[]={"rm","-rf","--",dir,0};np_result r={0};if(np_run(v,0,0,5,&r,why,sizeof why)||r.rc)return 2;np_free(&r);}
+ printf("RI_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
+}
 int main(int argc, char **argv) {
+    if(argc==2&&!strcmp(argv[1],"--ri-controls"))return ri_controls();
     if(argc==2&&!strcmp(argv[1],"--map-controls"))return map_controls();
     const char *run = 0, *tier = "commit", *date = 0;
     int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
@@ -921,6 +1050,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
         else if (!strcmp(argv[i], "--map-family") && i + 1 < argc) map_family = argv[++i];
+        else if (!strcmp(argv[i], "--material-stage") && i + 1 < argc) material_stage = argv[++i];
         else if (!strcmp(argv[i], "--daily-no-candidate")) daily_no_candidate = 1;
         else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) { step_s = atoi(argv[++i]); step_set = 1; }
         else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) { max_steps = atoi(argv[++i]); max_set = 1; }
@@ -1004,9 +1134,12 @@ int main(int argc, char **argv) {
         printf("S9_NIGHTLY\tstatus=%s\tstep=%s\trc=%d\n",nr?"FAIL":"INIT_PHASE_DONE",phase==100?"build-shards":"build-waves",nr);
         return nr?1:0;
     }
+    if(material_stage&&!map_family)die("material-stage","requires --map-family ri-flow-runtime|ri-flow-data");
     if(map_family) {
         if(phase!=5||fake)die("map-family","requires real --phase map");
-        long t0=sy_now_ms();int mr=map_family_phase(run,tier,map_family,0);
+        if(material_stage&&!ri_family(map_family))die("material-stage","requires ri-flow-runtime|ri-flow-data");
+        long t0=sy_now_ms();int mr=material_stage?ri_stage(run,tier,material_stage):map_family_phase(run,tier,map_family,0);
+        if(mr)fprintf(stderr,"s9-nightly: %s\n",why);
         printf("S9_MAP_FAMILY\trc=%d\twall_ms=%ld\n",mr,sy_now_ms()-t0);return mr;
     }
     pass_n = fail_n = 0;
