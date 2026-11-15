@@ -1,0 +1,241 @@
+/* tools/check-relload.cx -- tools/cxlib/relload.cx must turn each published relation table into exactly the
+ * edges that table contains.
+ *
+ *   sh ./unisacc.com tools/check-relload.cx [TABLE_ROOT]
+ *
+ * TABLE_ROOT defaults to the current directory; every path below it is the table's repository-relative path, so
+ * the same check runs against a checkout or a frozen root.  The expected counts are computed HERE, by a second,
+ * deliberately different scan of the same files (count TAB-separated fields / commas directly), so a loader bug
+ * cannot hide behind its own arithmetic.  Ends with CHECK_RELLOAD\tfailed=N and one ROWS line per kind; exit 0
+ * only when N is 0.
+ *
+ * Cases
+ *   links-edges-match-table          every links v1 row becomes one edge, and per-kind counts equal the scan
+ *   links-comment-and-blank-skipped  '#' lines and blank lines contribute nothing
+ *   table-index-table-to-generator   one table-gen edge per row with a generator
+ *   tool-index-check-and-batches     one tool-check per check cell, one tool-batch per comma-separated id
+ *   table-deps-model-to-table        one model-table edge per non-comment row
+ *   phase-inputs-item-to-phase       one phase-input edge per comma-separated input, attr = its prefix
+ *   refuse-truncated-links-row       a 3-field links row is refused by name, with the line number
+ *   refuse-unreadable-table          a missing table is refused by name
+ *   edges-are-five-fields            every emitted line has exactly five TAB fields */
+#pragma unisa use cxlib.relload
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int failed;
+static char *edges;
+static long edgen;
+static char why[300];
+
+static void die(const char *s) { tool_die("check-relload", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\trelload.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+/* join ROOT and REL without a double slash; REL may be absolute (a fixture in /tmp) */
+static void rel_path(char *out, long cap, const char *root, const char *rel) {
+    if (rel[0] == '/') { if (cx_fmt(out, (size_t)cap, "%s", rel)) die("path"); return; }
+    if (cx_fmt(out, (size_t)cap, "%s/%s", root, rel)) die("path");
+}
+
+/* independent count of TAB-separated fields in LINE[0..N); -1 when the line ends with no TAB and no content */
+static int fields(const char *line, long n) {
+    long i;
+    int c = 1;
+    if (n <= 0) return 0;
+    for (i = 0; i < n; i++) if (line[i] == '\t') c++;
+    return c;
+}
+
+/* the number of comma-separated NON-EMPTY items in S[0..N) */
+static long commas(const char *s, long n) {
+    long at = 0, k = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && s[e] != ',') e++;
+        if (e > at) k++;
+        at = e + 1;
+    }
+    return k;
+}
+
+/* scan a table line by line, calling BACK for each data line with its five/six fields; returns data rows seen */
+typedef void (*row_fn)(const char *line, long n, const char **f, long *l, int nf, void *ctx);
+static long scan(const char *path, int skip_header, row_fn back, void *ctx) {
+    size_t n = 0;
+    char *buf = cx_read(path, &n);
+    long at = 0, rows = 0;
+    int first = 1;
+    if (!buf) die("scan-read");
+    while (at < (long)n) {
+        long e = at;
+        const char *f[16];
+        long l[16];
+        int nf, i, c = 0;
+        long p = at;
+        while (e < (long)n && buf[e] != '\n') e++;
+        if (e == at || buf[at] == '#') { at = e + 1; continue; }
+        if (skip_header && first) { first = 0; at = e + 1; continue; }
+        first = 0;
+        for (i = 0; i < 16; i++) { l[i] = 0; f[i] = 0; }
+        nf = fields(buf + at, e - at);
+        for (i = 0; i < nf && i < 16; i++) {
+            long q = p;
+            while (q < e && buf[q] != '\t') q++;
+            f[c] = buf + p;
+            l[c] = q - p;
+            c++;
+            p = q + 1;
+        }
+        back(buf + at, e - at, f, l, nf, ctx);
+        rows++;
+        at = e + 1;
+    }
+    free(buf);
+    return rows;
+}
+
+/* ---- expectation accumulators, one per table ---- */
+static long want_links[8];
+static char want_kind[8][32];
+static int nkind;
+static void on_links(const char *line, long n, const char **f, long *l, int nf, void *ctx) {
+    int i;
+    (void)line; (void)n; (void)ctx;
+    if (nf < 1 || l[0] <= 0 || l[0] >= 32) die("scan-links-kind");
+    for (i = 0; i < nkind; i++) if ((long)strlen(want_kind[i]) == l[0] && !memcmp(want_kind[i], f[0], l[0])) { want_links[i]++; return; }
+    if (nkind >= 8) die("scan-links-kinds");
+    if (mm_copy(want_kind[nkind], 32, f[0], l[0])) die("scan-copy");
+    want_kind[nkind][l[0]] = 0;
+    want_links[nkind++] = 1;
+}
+static long want_table_gen, want_tool_check, want_tool_batch, want_model_table, want_phase_input;
+static void on_table_index(const char *line, long n, const char **f, long *l, int nf, void *ctx) {
+    (void)line; (void)n; (void)ctx;
+    if (nf < 3) die("scan-table-index");
+    if (l[2] > 0 && !(l[2] == 1 && f[2][0] == '-')) want_table_gen++;
+}
+static void on_tool_index(const char *line, long n, const char **f, long *l, int nf, void *ctx) {
+    (void)line; (void)n; (void)ctx;
+    if (nf < 5) die("scan-tool-index");
+    if (l[3] > 0 && !(l[3] == 1 && f[3][0] == '-')) want_tool_check++;
+    if (l[4] > 0 && !(l[4] == 1 && f[4][0] == '-')) want_tool_batch += commas(f[4], l[4]);
+}
+static void on_table_deps(const char *line, long n, const char **f, long *l, int nf, void *ctx) {
+    (void)line; (void)n; (void)f; (void)l; (void)ctx;
+    if (nf < 2) die("scan-table-deps");
+    want_model_table++;
+}
+static void on_phase_inputs(const char *line, long n, const char **f, long *l, int nf, void *ctx) {
+    (void)line; (void)n; (void)ctx;
+    if (nf < 2) die("scan-phase-inputs");
+    if (l[1] > 0 && !(l[1] == 1 && f[1][0] == '-')) want_phase_input += commas(f[1], l[1]);
+}
+
+/* every emitted line has five TAB fields and a non-empty kind */
+static void check_wire(void) {
+    long at = 0, line = 0;
+    int bad = 0;
+    while (at < edgen) {
+        long e = at, i, tabs = 0;
+        while (e < edgen && edges[e] != '\n') e++;
+        line++;
+        if (e == edgen) { bad++; break; }
+        for (i = at; i < e; i++) if (edges[i] == '\t') tabs++;
+        if (tabs != 4 || e == at) bad++;
+        at = e + 1;
+    }
+    ck(bad == 0 && line > 0, "edges-are-five-fields");
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    char path[4400], bad[4400], line[128];
+    np_buf e = {0};
+    long lrows, trows, orows, drows, prows;
+    int i;
+
+    /* the expectation side: a second, independent scan of the same five tables */
+    rel_path(path, (long)sizeof path, root, "build/links.tsv");
+    lrows = scan(path, 0, on_links, 0);
+    rel_path(path, (long)sizeof path, root, "build/table-index.tsv");
+    trows = scan(path, 1, on_table_index, 0);
+    rel_path(path, (long)sizeof path, root, "build/tool-index.tsv");
+    orows = scan(path, 1, on_tool_index, 0);
+    rel_path(path, (long)sizeof path, root, "exec/pipeline/table-deps.tsv");
+    drows = scan(path, 0, on_table_deps, 0);
+    rel_path(path, (long)sizeof path, root, "build/chain-phase-inputs.tsv");
+    prows = scan(path, 0, on_phase_inputs, 0);
+    (void)lrows; (void)trows; (void)orows; (void)drows; (void)prows;
+
+    /* the loader side */
+    rel_path(path, (long)sizeof path, root, "build/links.tsv");
+    if (rl_load(&e, path, rl_fmt_links(), why, (int)sizeof why)) die("links");   /* format selectors are functions: a module #define is not visible here */
+    rel_path(path, (long)sizeof path, root, "build/table-index.tsv");
+    if (rl_load(&e, path, rl_fmt_table_index(), why, (int)sizeof why)) die("table-index");
+    rel_path(path, (long)sizeof path, root, "build/tool-index.tsv");
+    if (rl_load(&e, path, rl_fmt_tool_index(), why, (int)sizeof why)) die("tool-index");
+    rel_path(path, (long)sizeof path, root, "exec/pipeline/table-deps.tsv");
+    if (rl_load(&e, path, rl_fmt_table_deps(), why, (int)sizeof why)) die("table-deps");
+    rel_path(path, (long)sizeof path, root, "build/chain-phase-inputs.tsv");
+    if (rl_load(&e, path, rl_fmt_phase_inputs(), why, (int)sizeof why)) die("phase-inputs");
+
+    edges = e.p;
+    edgen = (long)e.n;
+
+    /* per-KIND equality for links: the loader must not rename or merge what the table says */
+    {   int all = nkind > 0;
+        for (i = 0; i < nkind; i++) if (rl_count(want_kind[i]) != want_links[i]) all = 0;
+        ck(all, "links-edges-match-table");
+    }
+    ck(rl_count("table-gen") == want_table_gen, "table-index-table-to-generator");
+    ck(rl_count("tool-check") == want_tool_check && rl_count("tool-batch") == want_tool_batch, "tool-index-check-and-batches");
+    ck(rl_count("model-table") == want_model_table, "table-deps-model-to-table");
+    ck(rl_count("phase-input") == want_phase_input, "phase-inputs-item-to-phase");
+    check_wire();
+
+    /* links' own comment and blank lines contribute nothing: a file of only those has no edges */
+    {   np_buf c = {0};
+        rel_path(bad, (long)sizeof bad, root, "");
+        {   char tmp[] = "/tmp/chk-relload-XXXXXX";
+            const char *body = "# comment\n\n  \n";
+            if (!mkdtemp(tmp)) die("temp");
+            if (cx_fmt(path, (long)sizeof path, "%s/links.tsv", tmp)) die("path");
+            if (cx_write(path, body, strlen(body))) die("write");
+            why[0] = 0;
+            ck(rl_load(&c, path, rl_fmt_links(), why, (int)sizeof why) == 0 && c.n == 0, "links-comment-and-blank-skipped"); }
+        free(c.p);
+    }
+
+    /* a 3-field links row is refused by name with its line number, not silently dropped */
+    {   np_buf c = {0};
+        char tmp[] = "/tmp/chk-relload-XXXXXX";
+        const char *body = "# x\nderive\ta\tb\n";
+        if (!mkdtemp(tmp)) die("temp");
+        if (cx_fmt(path, (long)sizeof path, "%s/short.tsv", tmp)) die("path");
+        if (cx_write(path, body, strlen(body))) die("write");
+        why[0] = 0;
+        ck(rl_load(&c, path, rl_fmt_links(), why, (int)sizeof why) == 1 && why[0] && memcmp(why, "links-fields", 12) == 0, "refuse-truncated-links-row");
+        ck(rl_load(&c, path, rl_fmt_links(), why, (int)sizeof why) == 1 && memcmp(why, "links-fields line=2", 19) == 0, "refuse-names-the-line");
+        free(c.p);
+    }
+
+    /* a table that is not there is named, not turned into an empty graph */
+    {   np_buf c = {0};
+        if (cx_fmt(path, (long)sizeof path, "%s/nope.tsv", "")) die("path");
+        why[0] = 0;
+        ck(rl_load(&c, "/tmp/chk-relload-missing/none.tsv", rl_fmt_links(), why, (int)sizeof why) == 1 && why[0] != 0, "refuse-unreadable-table");
+        free(c.p);
+    }
+
+    for (i = 0; i < rl_kinds(); i++) printf("ROWS\tkind=%s\tn=%ld\n", rl_kind_at(i), rl_count(rl_kind_at(i)));
+    (void)line;
+    free(e.p);
+    printf("CHECK_RELLOAD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

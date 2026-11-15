@@ -1,0 +1,286 @@
+/* tools/cxlib/relload.cx -- load the repository's existing relation tables into ONE edge set.
+ *
+ * devsvc iteration two wants every relation the repo already publishes in one place, in the edge format
+ * build/links.tsv v1 already uses: `kind  src  dst  via  attr`, TAB separated.  This module is that loader and
+ * nothing else: it reads tables, never writes them, and knows no repository path of its own -- every path is a
+ * parameter, so a caller can point it at a checkout, a frozen root or a fixture.
+ *
+ *   np_buf e = {0}; char why[300]; int i;
+ *   if (rl_load(&e, "build/links.tsv", RL_LINKS, why, sizeof why)) fail(why);
+ *   if (rl_load(&e, "build/table-index.tsv", RL_TABLE_INDEX, why, sizeof why)) fail(why);
+ *   for (i = 0; i < rl_kinds(); i++) printf("ROWS\tkind=%s\tn=%ld\n", rl_kind_at(i), rl_count(rl_kind_at(i)));
+ *
+ * What each format contributes (an absent member is written '-'; ATTR carries where it helps):
+ *
+ *   RL_LINKS         links v1 rows unchanged -- each row names its own kind, so nothing is renamed.
+ *   RL_TABLE_INDEX   table-index.tsv: table, purpose, generator, readers_count
+ *                      table -> generator      kind=table-gen        via=table-index
+ *   RL_TOOL_INDEX    tool-index.tsv: tool, summary, usage, check, batch_ids, lines
+ *                      tool -> check            kind=tool-check       via=tool-index
+ *                      tool -> batch id         kind=tool-batch       via=tool-index  (batch_ids is a list)
+ *   RL_TABLE_DEPS    exec/pipeline/table-deps.tsv: MODEL<TAB>TABLE
+ *                      model -> table           kind=model-table      via=table-deps
+ *   RL_PHASE_INPUTS  build/chain-phase-inputs.tsv: ID<TAB>inputs, inputs comma separated and each prefixed
+ *                    phase: / src: / table: / git-tree
+ *                      item -> ID               kind=phase-input      via=chain-phase-inputs  attr=<prefix>
+ *
+ * A malformed table is refused BY NAME with the line number: a relations table that cannot be read exactly must
+ * not quietly become a smaller graph.  Counts are per kind over the whole session, so a caller can print one
+ * count line per class of edge and hold it against the table it came from.
+ *
+ * Read-only, no caching, no writes, no fixed paths.  Checked by tools/check-relload.cx. */
+#pragma unisa module relload
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define RL_MAX_KINDS 32
+#define RL_MAX_FIELDS 16
+#define RL_KIND_CAP 40
+/* formats accepted by rl_load; each one names the table it reads, not a repository */
+#define RL_LINKS 1         /* links v1: kind src dst via attr */
+#define RL_TABLE_INDEX 2   /* build/table-index.tsv */
+#define RL_TOOL_INDEX 3    /* build/tool-index.tsv */
+#define RL_TABLE_DEPS 4    /* exec/pipeline/table-deps.tsv */
+#define RL_PHASE_INPUTS 5  /* build/chain-phase-inputs.tsv */
+
+static char rl_kname[RL_MAX_KINDS][RL_KIND_CAP];
+static long rl_kn[RL_MAX_KINDS];
+static int rl_nkinds;
+
+/* The format selectors are functions, not macros: a #define in a module is not visible to the modules that use
+   it (measured on this compiler), so a caller told "RL_LINKS" by the header comment would not compile. */
+int rl_fmt_links(void) { return RL_LINKS; }
+int rl_fmt_table_index(void) { return RL_TABLE_INDEX; }
+int rl_fmt_tool_index(void) { return RL_TOOL_INDEX; }
+int rl_fmt_table_deps(void) { return RL_TABLE_DEPS; }
+int rl_fmt_phase_inputs(void) { return RL_PHASE_INPUTS; }
+int rl_kinds(void) { return rl_nkinds; }
+const char *rl_kind_at(int i) { return i >= 0 && i < rl_nkinds ? rl_kname[i] : 0; }
+
+long rl_count(const char *kind) {
+    int i;
+    for (i = 0; i < rl_nkinds; i++) if (!strcmp(rl_kname[i], kind)) return rl_kn[i];
+    return 0;
+}
+
+/* the kind name is copied: it must outlive the row (a row's buffer is reused), and this is the only place a
+   name is stored.  A 33rd kind is not counted; its edges are still emitted. */
+static void rl_tally(const char *kind, long n) {
+    int i;
+    for (i = 0; i < rl_nkinds; i++) if (!strcmp(rl_kname[i], kind)) { rl_kn[i] += n; return; }
+    if (rl_nkinds >= RL_MAX_KINDS) return;
+    if (cx_fmt(rl_kname[rl_nkinds], RL_KIND_CAP, "%s", kind)) return;
+    rl_kn[rl_nkinds] = n;
+    rl_nkinds++;
+}
+
+/* one edge line; SRC/DST/VIA/ATTR may be absent (then '-') */
+static void rl_edge(np_buf *out, const char *kind, const char *src, long sn, const char *dst, long dn,
+                    const char *via, long vn, const char *attr, long an) {
+    np_puts(out, kind);
+    np_put(out, "\t", 1);
+    if (sn > 0) np_put(out, src, (size_t)sn); else np_put(out, "-", 1);
+    np_put(out, "\t", 1);
+    if (dn > 0) np_put(out, dst, (size_t)dn); else np_put(out, "-", 1);
+    np_put(out, "\t", 1);
+    if (vn > 0) np_put(out, via, (size_t)vn); else np_put(out, "-", 1);
+    np_put(out, "\t", 1);
+    if (an > 0) np_put(out, attr, (size_t)an); else np_put(out, "-", 1);
+    np_put(out, "\n", 1);
+}
+
+/* Split LINE[0..N) on TAB; F[i] is field i's start, L[i] its length.  Returns the field count.  A trailing TAB
+   is a field of length 0, which is how these tables spell an absent member. */
+static int rl_split(const char *line, long n, const char **f, long *l, int maxf) {
+    long at = 0;
+    int c = 0;
+    for (;;) {
+        long e = at;
+        while (e < n && line[e] != '\t') e++;
+        if (c < maxf) { f[c] = line + at; l[c] = e - at; }
+        c++;
+        if (e >= n) break;
+        at = e + 1;
+    }
+    return c;
+}
+
+static int rl_present(const char *s, long n) { return n > 0 && !(n == 1 && s[0] == '-'); }
+
+static void rl_refuse(char *why, int cap, const char *what, long line) {
+    cx_fmt(why, (size_t)cap, "%s line=%ld", what, line);
+}
+
+/* a line that is blank, spaces, or a comment contributes nothing: links v1 tolerates all three */
+static int rl_skip(const char *buf, long at, long e) {
+    long i;
+    for (i = at; i < e; i++) if (buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\r') return buf[i] == '#';
+    return 1;
+}
+
+/* links v1: the row already carries its kind, so its five fields go out unchanged */
+static int rl_one_links(np_buf *out, const char *buf, long n, char *why, int cap) {
+    long at = 0, line = 0;
+    while (at < n) {
+        long e = at;
+        const char *f[RL_MAX_FIELDS];
+        long l[RL_MAX_FIELDS];
+        int nf;
+        while (e < n && buf[e] != '\n') e++;
+        line++;
+        if (rl_skip(buf, at, e)) { at = e + 1; continue; }
+        nf = rl_split(buf + at, e - at, f, l, RL_MAX_FIELDS);
+        if (nf < 4) { rl_refuse(why, cap, "links-fields", line); return 1; }
+        {   char kind[RL_KIND_CAP];
+            if (l[0] <= 0 || l[0] >= RL_KIND_CAP) { rl_refuse(why, cap, "links-kind", line); return 1; }
+            if (mm_copy(kind, RL_KIND_CAP, f[0], l[0])) { rl_refuse(why, cap, "links-kind", line); return 1; }
+            kind[l[0]] = 0;
+            rl_edge(out, kind, f[1], l[1], f[2], l[2], f[3], l[3], nf > 4 ? f[4] : 0, nf > 4 ? l[4] : 0);
+            rl_tally(kind, 1);
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+/* table-index.tsv: table, purpose, generator, readers_count -> table -> generator */
+static int rl_one_table_index(np_buf *out, const char *buf, long n, char *why, int cap) {
+    long at = 0, line = 0;
+    int first = 1;
+    while (at < n) {
+        long e = at;
+        const char *f[RL_MAX_FIELDS];
+        long l[RL_MAX_FIELDS];
+        int nf;
+        while (e < n && buf[e] != '\n') e++;
+        line++;
+        if (e == at || buf[at] == '#') { at = e + 1; continue; }
+        nf = rl_split(buf + at, e - at, f, l, RL_MAX_FIELDS);
+        if (first) { first = 0; if (l[0] == 5 && !memcmp(f[0], "table", 5)) { at = e + 1; continue; } }   /* header */
+        if (nf < 3) { rl_refuse(why, cap, "table-index-fields", line); return 1; }
+        if (!rl_present(f[0], l[0])) { rl_refuse(why, cap, "table-index-table", line); return 1; }
+        if (rl_present(f[2], l[2])) {
+            rl_edge(out, "table-gen", f[0], l[0], f[2], l[2], "table-index", 11, 0, 0);
+            rl_tally("table-gen", 1);
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+/* tool-index.tsv: tool, summary, usage, check, batch_ids, lines -> tool -> check, and tool -> each batch id */
+static int rl_one_tool_index(np_buf *out, const char *buf, long n, char *why, int cap) {
+    long at = 0, line = 0;
+    int first = 1;
+    while (at < n) {
+        long e = at;
+        const char *f[RL_MAX_FIELDS];
+        long l[RL_MAX_FIELDS];
+        int nf;
+        while (e < n && buf[e] != '\n') e++;
+        line++;
+        if (e == at || buf[at] == '#') { at = e + 1; continue; }
+        nf = rl_split(buf + at, e - at, f, l, RL_MAX_FIELDS);
+        if (first) { first = 0; if (l[0] == 4 && !memcmp(f[0], "tool", 4)) { at = e + 1; continue; } }
+        if (nf < 5) { rl_refuse(why, cap, "tool-index-fields", line); return 1; }
+        if (!rl_present(f[0], l[0])) { rl_refuse(why, cap, "tool-index-tool", line); return 1; }
+        if (rl_present(f[3], l[3])) {
+            rl_edge(out, "tool-check", f[0], l[0], f[3], l[3], "tool-index", 10, 0, 0);
+            rl_tally("tool-check", 1);
+        }
+        if (rl_present(f[4], l[4])) {   /* BATCH_IDS is a comma-separated list */
+            long b = 0, ed = l[4];
+            while (b < ed) {
+                long c2 = b;
+                while (c2 < ed && f[4][c2] != ',') c2++;
+                if (c2 > b) {
+                    rl_edge(out, "tool-batch", f[0], l[0], f[4] + b, c2 - b, "tool-index", 10, 0, 0);
+                    rl_tally("tool-batch", 1);
+                }
+                b = c2 + 1;
+            }
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+/* exec/pipeline/table-deps.tsv: MODEL<TAB>TABLE -> model -> table */
+static int rl_one_table_deps(np_buf *out, const char *buf, long n, char *why, int cap) {
+    long at = 0, line = 0;
+    while (at < n) {
+        long e = at;
+        const char *f[RL_MAX_FIELDS];
+        long l[RL_MAX_FIELDS];
+        int nf;
+        while (e < n && buf[e] != '\n') e++;
+        line++;
+        if (e == at || buf[at] == '#') { at = e + 1; continue; }
+        nf = rl_split(buf + at, e - at, f, l, RL_MAX_FIELDS);
+        if (nf < 2) { rl_refuse(why, cap, "table-deps-fields", line); return 1; }
+        if (!rl_present(f[0], l[0]) || !rl_present(f[1], l[1])) { rl_refuse(why, cap, "table-deps-empty", line); return 1; }
+        rl_edge(out, "model-table", f[0], l[0], f[1], l[1], "table-deps", 10, 0, 0);
+        rl_tally("model-table", 1);
+        at = e + 1;
+    }
+    return 0;
+}
+
+/* build/chain-phase-inputs.tsv: ID<TAB>inputs -> each input -> ID, ATTR naming the input's prefix */
+static int rl_one_phase_inputs(np_buf *out, const char *buf, long n, char *why, int cap) {
+    long at = 0, line = 0;
+    while (at < n) {
+        long e = at;
+        const char *f[RL_MAX_FIELDS];
+        long l[RL_MAX_FIELDS];
+        int nf;
+        while (e < n && buf[e] != '\n') e++;
+        line++;
+        if (e == at || buf[at] == '#') { at = e + 1; continue; }
+        nf = rl_split(buf + at, e - at, f, l, RL_MAX_FIELDS);
+        if (nf < 2) { rl_refuse(why, cap, "phase-inputs-fields", line); return 1; }
+        if (!rl_present(f[0], l[0])) { rl_refuse(why, cap, "phase-inputs-id", line); return 1; }
+        if (rl_present(f[1], l[1])) {
+            long b = 0, ed = l[1];
+            while (b < ed) {
+                long c2 = b, pre = 0;
+                const char *it;
+                long il;
+                while (c2 < ed && f[1][c2] != ',') c2++;
+                it = f[1] + b;
+                il = c2 - b;
+                if (il > 0) {
+                    if (il >= 5 && !mm_same(it, "phase", 5)) pre = 5;
+                    else if (il >= 4 && !mm_same(it, "src", 3)) pre = 3;
+                    else if (il >= 6 && !mm_same(it, "table", 5)) pre = 5;
+                    else if (il >= 8 && !mm_same(it, "git-tree", 8)) pre = 8;
+                    rl_edge(out, "phase-input", it, il, f[0], l[0], "chain-phase-inputs", 18, it, pre);
+                    rl_tally("phase-input", 1);
+                }
+                b = c2 + 1;
+            }
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+int rl_load(np_buf *out, const char *path, int fmt, char *why, int cap) {
+    size_t n = 0;
+    char *buf;
+    int rc;
+    if (!out || !path) return 1;
+    buf = cx_read(path, &n);
+    if (!buf) { cx_fmt(why, (size_t)cap, "%s: unreadable", path); return 1; }
+    switch (fmt) {
+    case RL_LINKS:        rc = rl_one_links(out, buf, (long)n, why, cap); break;
+    case RL_TABLE_INDEX:  rc = rl_one_table_index(out, buf, (long)n, why, cap); break;
+    case RL_TOOL_INDEX:   rc = rl_one_tool_index(out, buf, (long)n, why, cap); break;
+    case RL_TABLE_DEPS:   rc = rl_one_table_deps(out, buf, (long)n, why, cap); break;
+    case RL_PHASE_INPUTS: rc = rl_one_phase_inputs(out, buf, (long)n, why, cap); break;
+    default:              rc = 1; cx_fmt(why, (size_t)cap, "%s: unsupported format %d", path, fmt); break;
+    }
+    free(buf);
+    return rc;
+}
