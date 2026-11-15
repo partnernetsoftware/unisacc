@@ -2,6 +2,7 @@
  *
  *   sh ./unisacc.com tools/own-diff.cx -- FILE KEY...        (a KEY is a substring of every line you changed)
  *   sh ./unisacc.com tools/own-diff.cx -- --base BASEFILE FILE KEY...   (compare with a saved copy, not HEAD)
+ *   sh ./unisacc.com tools/own-diff.cx -- [--field] --batch LIST        (several files in one process)
  *
  * Compares FILE in the working tree with FILE at HEAD (git show HEAD:FILE; an untracked FILE has an empty
  * base) as multisets of lines: a line is ADDED when the working tree has more copies than the base, REMOVED
@@ -9,7 +10,12 @@
  *   FOREIGN<TAB>+|-<TAB>line
  * and ends with OWN_DIFF<TAB>own=N<TAB>foreign=M; exit 0 when M is 0, 1 when not, 2 on usage or I/O.
  * Use it on tests/batches.tsv, tests/coverage.tsv, prd.md and other files several agents append to: a
- * commit by path takes the whole file, including lines another agent appended a minute ago. */
+ * commit by path takes the whole file, including lines another agent appended a minute ago.
+ * --batch LIST: LIST holds one entry per line, EMIT<TAB>FILE<TAB>KEY[<TAB>KEY...] (EMIT "-" writes nothing);
+ * every entry is judged exactly as a single call would judge it, in order, its FOREIGN lines first and then
+ * OWN_DIFF<TAB>own=N<TAB>foreign=M<TAB>FILE.  Exit 1 when any entry has a foreign line, 2 on usage or I/O
+ * (the first unreadable entry stops the batch).  tools/commit-own.cx uses it so that the tables of one commit
+ * cost one process (and one compile of this tool) instead of one each. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -61,15 +67,10 @@ static int mine(const Ln *l, char **keys, int nk) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    const char *file, *emit = 0; char *base = 0, *work; long bn = 0, i, j, nb, nw; size_t wn; Ln *b, *w; int a = 1, own = 0, foreign = 0, nk;
-    if (argc - a >= 1 && tx_eqz(argv[a], "--field")) { field_mode = 1; a++; }
-    if (argc - a >= 2 && tx_eqz(argv[a], "--emit")) { emit = argv[a + 1]; a += 2; }
-    if (argc - a >= 2 && tx_eqz(argv[a], "--base")) {
-        size_t z; base = cx_read(argv[a + 1], &z); if (!base) od_die("cannot read", argv[a + 1]); bn = (long)z; a += 2;
-    }
-    if (argc - a < 2) od_die("usage", "[--emit OUT] [--base BASEFILE] FILE KEY...");
-    file = argv[a]; nk = argc - a - 1;
+/* one FILE against its base (BASE when given, else HEAD:FILE) with KEYS; FOREIGN lines to stdout, the own-only
+   file to EMIT when given.  The counts through OWN_OUT and FOREIGN_OUT. */
+static void od_one(const char *file, const char *emit, char *base, long bn, char **keys, int nk, int *own_out, int *foreign_out) {
+    char *work; long i, j, nb, nw; size_t wn; Ln *b, *w; int own = 0, foreign = 0;
     work = cx_read(file, &wn); if (!work) od_die("cannot read", file);
     if (!base) {
         char spec[4400]; char *gv[] = {"git", "show", spec, 0};
@@ -95,15 +96,15 @@ int main(int argc, char **argv) {
                                                 beyond the slot's keyed removed lines replace that many unkeyed ones */
         if (j < nb && !b[j].used) continue;
         {   long s0 = last + 1, k2; int added = 0, keyed = 0, surplus;
-            for (i = 0; i < nw; i++) if (pair[i] < 0 && after[i] == last && mine(&w[i], argv + a + 1, nk)) added++;
-            for (k2 = s0; k2 < j; k2++) if (mine(&b[k2], argv + a + 1, nk)) keyed++;
+            for (i = 0; i < nw; i++) if (pair[i] < 0 && after[i] == last && mine(&w[i], keys, nk)) added++;
+            for (k2 = s0; k2 < j; k2++) if (mine(&b[k2], keys, nk)) keyed++;
             surplus = added - keyed;
-            for (k2 = s0; k2 < j && surplus > 0; k2++) if (!mine(&b[k2], argv + a + 1, nk)) { rep[k2] = 1; surplus--; }
+            for (k2 = s0; k2 < j && surplus > 0; k2++) if (!mine(&b[k2], keys, nk)) { rep[k2] = 1; surplus--; }
         }
         last = j;
     }
-    for (i = 0; i < nw; i++) if (!w[i].used) { if (mine(&w[i], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t+\t%.*s\n", (int)w[i].n, w[i].p); } }
-    for (j = 0; j < nb; j++) if (!b[j].used) { if (rep[j] || mine(&b[j], argv + a + 1, nk)) own++; else { foreign++; printf("FOREIGN\t-\t%.*s\n", (int)b[j].n, b[j].p); } }
+    for (i = 0; i < nw; i++) if (!w[i].used) { if (mine(&w[i], keys, nk)) own++; else { foreign++; printf("FOREIGN\t+\t%.*s\n", (int)w[i].n, w[i].p); } }
+    for (j = 0; j < nb; j++) if (!b[j].used) { if (rep[j] || mine(&b[j], keys, nk)) own++; else { foreign++; printf("FOREIGN\t-\t%.*s\n", (int)b[j].n, b[j].p); } }
     if (emit) {
         /* the base with only the own changes: own removed lines (and lines own lines replaced) dropped, foreign
            removed lines kept, own added lines placed after the base line their preceding unchanged work line was
@@ -112,14 +113,58 @@ int main(int argc, char **argv) {
         fd = sy_open_new(emit, 0644);
         if (fd < 0) od_die("cannot write", emit);
         for (i = 0; i < nw; i++)   /* own added lines that come before every unchanged line */
-            if (pair[i] < 0 && after[i] < 0 && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
+            if (pair[i] < 0 && after[i] < 0 && mine(&w[i], keys, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
         for (j = 0; j < nb; j++) {
-            if (b[j].used || (!rep[j] && !mine(&b[j], argv + a + 1, nk))) { sy_write_all(fd, b[j].p, b[j].n); sy_write_all(fd, "\n", 1); }
+            if (b[j].used || (!rep[j] && !mine(&b[j], keys, nk))) { sy_write_all(fd, b[j].p, b[j].n); sy_write_all(fd, "\n", 1); }
             for (i = 0; i < nw; i++)
-                if (pair[i] < 0 && after[i] == j && mine(&w[i], argv + a + 1, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
+                if (pair[i] < 0 && after[i] == j && mine(&w[i], keys, nk)) { sy_write_all(fd, w[i].p, w[i].n); sy_write_all(fd, "\n", 1); }
         }
         sy_close(fd);
     }
+    mm_free(pair); mm_free(after); mm_free(rep); mm_free(b); mm_free(w); mm_free(work); mm_free(base);
+    *own_out = own; *foreign_out = foreign;
+}
+
+#define OD_BKEYS 512
+/* --batch LIST: every line EMIT<TAB>FILE<TAB>KEY[<TAB>KEY...]; 1 when any entry has a foreign line */
+static int od_batch(const char *list) {
+    size_t ln_n = 0; char *l = cx_read(list, &ln_n); long at = 0, n = (long)ln_n; int any = 0, entries = 0;
+    static char *keys[OD_BKEYS];
+    if (!l) od_die("cannot read", list);
+    while (at < n) {
+        long e = tx_chr(l + at, n - at, '\n'), len = e < 0 ? n - at : e, i, s = 0; int f = 0, nk = 0, own = 0, foreign = 0;
+        char *emit = 0, *file = 0;
+        for (i = 0; i <= len && len > 0; i++)
+            if (i == len || l[at + i] == '\t') {
+                l[at + i] = 0;
+                if (f == 0) emit = l + at + s; else if (f == 1) file = l + at + s;
+                else if (i > s) { if (nk == OD_BKEYS) od_die("too many keys in a batch entry", file); keys[nk++] = l + at + s; }
+                f++; s = i + 1;
+            }
+        if (len > 0) {
+            if (!emit || !file || !emit[0] || !file[0] || nk < 1) od_die("bad batch entry (EMIT<TAB>FILE<TAB>KEY...)", list);
+            od_one(file, (emit[0] == '-' && !emit[1]) ? 0 : emit, 0, 0, keys, nk, &own, &foreign);
+            printf("OWN_DIFF\town=%d\tforeign=%d\t%s\n", own, foreign, file);
+            if (foreign) any = 1;
+            entries++;
+        }
+        at += len + 1;
+    }
+    if (!entries) od_die("empty batch", list);
+    return any;
+}
+
+int main(int argc, char **argv) {
+    const char *file, *emit = 0; char *base = 0; long bn = 0; int a = 1, own = 0, foreign = 0, nk;
+    if (argc - a >= 1 && tx_eqz(argv[a], "--field")) { field_mode = 1; a++; }
+    if (argc - a == 2 && tx_eqz(argv[a], "--batch")) return od_batch(argv[a + 1]);
+    if (argc - a >= 2 && tx_eqz(argv[a], "--emit")) { emit = argv[a + 1]; a += 2; }
+    if (argc - a >= 2 && tx_eqz(argv[a], "--base")) {
+        size_t z; base = cx_read(argv[a + 1], &z); if (!base) od_die("cannot read", argv[a + 1]); bn = (long)z; a += 2;
+    }
+    if (argc - a < 2) od_die("usage", "[--field] [--emit OUT] [--base BASEFILE] FILE KEY... | [--field] --batch LIST");
+    file = argv[a]; nk = argc - a - 1;
+    od_one(file, emit, base, bn, argv + a + 1, nk, &own, &foreign);
     printf("OWN_DIFF\town=%d\tforeign=%d\n", own, foreign);
     return foreign ? 1 : 0;
 }

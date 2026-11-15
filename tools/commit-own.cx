@@ -30,6 +30,10 @@
  * tree, so every gate reads the tree being committed, never the shared index or the shared work tree; the commit
  * is then write-tree, commit-tree and one git update-ref HEAD NEW OLD (see CO_GATE_SH and co_land).  Every run prints COMMIT_OWN_PHASE (select/pending/regm/commit ms, attempts); every
  * refusal prints COMMIT_OWN_FAIL<TAB>class=... on stderr one line before its reason.
+ * Cost (2026-11-15, one --registered set in a fresh clone, 54.6 s before): every keyed path goes through one
+ * tools/own-diff.cx --batch process; own-diff, reg-manifest and on-change run through DEVSVC_SELF_BIN run --local
+ * (content-keyed native images) when devsvc launched this tool, because the product's -run cache is keyed by path and
+ * is cold in every new root; the pending hint asks on-change for --derive-only.  See co_tool and co_owndiff.
  * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
  * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage. */
 #pragma unisa use sys.fs
@@ -69,21 +73,92 @@ static int run(char **argv, char *out, long cap) {
     return code;
 }
 
+/* the argv prefix that runs TOOL (v[n..], returns the new n): through the devsvc image that launched this commit
+   (DEVSVC_SELF_BIN run --local --quiet: its content-keyed native cache -- the tool's use closure and the product, by
+   sha) when the launcher handed one down, else the product's own -run.  The product's run cache is keyed by path, so
+   in a fresh root (a clone, a work tree, a check fixture) every `sh ./unisacc.com tool.cx` first compiles for about
+   5 s (measured: own-diff 5.6 s cold, 0.11 s warm, same bytes); the native cache is keyed by content and shared by
+   every root.  A build artifact only: the same source runs with the same arguments and judges for itself every time.
+   UNISACC_COMMIT_OWN_RUN=1 forces -run. */
+static int co_via_devsvc;
+static int co_tool(char **v, int n, const char *tool) {
+    const char *sb = getenv("DEVSVC_SELF_BIN"), *force = getenv("UNISACC_COMMIT_OWN_RUN");
+    co_via_devsvc = sb && sb[0] == '/' && sy_exists(sb) == 1 && !(force && force[0] == '1');
+    if (co_via_devsvc) { v[n++] = (char *)sb; v[n++] = "run"; v[n++] = "--local"; v[n++] = "--quiet"; v[n++] = (char *)tool; v[n++] = "--"; }
+    else { v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = (char *)tool; v[n++] = "--"; }
+    return n;
+}
+/* every keyed path of the commit through ONE own-diff process (--field --batch LIST): the emitted own-only file of
+   path k is co_part[k] and its foreign count co_foreign[k].  A symlink or an absent path gets no entry (the caller
+   commits the link itself, or the deletion, or refuses).  Each table used to be its own process: six for one
+   registered set, and each key list was cut at 1000 bytes and 54 keys; the list file has neither limit. */
+static char co_part[CO_MAX][420]; static int co_foreign[CO_MAX];
+static void co_owndiff(const char **path, const char **keys, int np) {
+    static char lst[CO_MAX * 5200]; char lpath[420], *o = 0, *ov[12]; size_t on = 0; long ln = 0, at = 0; int k, nb = 0, rc, got = 0, n;
+    for (k = 0; k < np; k++) {
+        sy_stat_t st; const char *p; int w;
+        co_part[k][0] = 0; co_foreign[k] = 0;
+        if (!keys[k] || (sy_lstat(path[k], &st) == 0 && st.kind == 'l') || !sy_exists(path[k])) continue;
+        if (tx_snprintf(co_part[k], sizeof co_part[k], "%s/commit-own-%d-%d.part", sy_tmpdir(), sy_pid(), k) >= (int)sizeof co_part[k]) co_die("path", 0);
+        w = tx_snprintf(lst + ln, sizeof lst - (size_t)ln, "%s\t%s", co_part[k], path[k]);
+        if (w < 0 || w >= (int)(sizeof lst - (size_t)ln)) co_die("keys too long", path[k]);
+        ln += w;
+        for (p = keys[k]; *p; ) {
+            const char *e = p;
+            while (*e && *e != ',') e++;
+            if (e > p) {
+                if (ln + (long)(e - p) + 3 >= (long)sizeof lst) co_die("keys too long", path[k]);
+                lst[ln++] = '\t';
+                while (p < e) lst[ln++] = *p++;
+            }
+            p = *e ? e + 1 : e;
+        }
+        if (ln + 2 >= (long)sizeof lst) co_die("keys too long", path[k]);
+        lst[ln++] = '\n'; nb++;
+    }
+    if (!nb) return;
+    if (tx_snprintf(lpath, sizeof lpath, "%s/commit-own-%d.batch", sy_tmpdir(), sy_pid()) >= (int)sizeof lpath || cx_write(lpath, lst, (size_t)ln)) co_die("cannot write the own-diff batch list", 0);
+    n = co_tool(ov, 0, "tools/own-diff.cx"); ov[n++] = "--field"; ov[n++] = "--batch"; ov[n++] = lpath; ov[n] = 0;
+    rc = cx_runv_timeout(ov, 30, &o, &on);   /* 30 s for the whole batch (it was 30 s per table) */
+    sy_unlink(lpath);
+    if (rc != 0 && rc != 1) { if (o) mm_free(o); co_die("own-diff failed", "tools/own-diff.cx --batch"); }
+    k = 0;
+    while (o && at < (long)on) {
+        long e = tx_chr(o + at, (long)on - at, '\n'), l = e < 0 ? (long)on - at : e;
+        if (e >= 0 && tx_prefix(o + at, l, "OWN_DIFF\town=", 13)) {
+            long f = tx_find(o + at, l, "\tforeign=", 9);
+            while (k < np && !co_part[k][0]) k++;
+            if (k < np && f >= 0) { co_foreign[k] = (int)strtol(o + at + f + 9, 0, 10); k++; got++; }
+        }
+        at += l + 1;
+    }
+    if (o) mm_free(o);
+    if (got != nb) co_die("own-diff failed", "the batch did not report every keyed path");
+}
+
 #define CO_REPLAY 3   /* replays when HEAD moved under the commit and none of its paths changed there */
 /* $0 = the private gate root (TMP/commit-own-PID.root).  The tree of the private index (archive/ left out: 5400
    files no gate reads) is checked out there; top-level entries git does not track (unisacc.com, out/, archive)
    are symlinked from the shared checkout (.git too: hooks that keep state under a relative .git/ path still work).  The pre-commit hook git would run (core.hooksPath honoured) then runs
-   with that root as cwd and work tree; an absent hook is a pass and no root is built.  The root is removed. */
+   with that root as cwd and work tree; an absent hook is a pass and no root is built.  The root is removed.
+   The root's path is one of eight slots, TMP/commit-own-s0..7.root, held by flock(1) on TMP/commit-own-sN.lock for
+   the length of the gate run (the kernel drops the lock with the process, so a killed commit leaves no stale slot;
+   the hook does not inherit the descriptor).  The product's -run cache is keyed by path: under the old
+   TMP/commit-own-PID.root every gate tool compiled cold in every commit (measured 31.8 s of gates for one registered
+   set); a slot path makes the second commit warm.  No flock, or all eight slots busy: the PID root as before. */
 #define CO_GATE_SH \
     "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; " \
     "case \"$h\" in /*) ;; *) h=\"$PWD/$h\" ;; esac; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) GIT_INDEX_FILE=\"$PWD/$GIT_INDEX_FILE\"; export GIT_INDEX_FILE ;; esac; " \
-    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=\"$0\"; " \
+    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; " \
+    "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3 4 5 6 7; do c=\"${0%/*}/commit-own-s$s\"; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; break; fi; done; fi; " \
+    "[ -n \"$r\" ] || { exec 9>&-; r=\"$0\"; }; " \
     "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
     "rm -rf \"$r\"; mkdir -p \"$r\" || { echo 'commit-own: cannot create the private gate root'; exit 1; }; " \
     "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || { rm -rf \"$r\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
     "for e in * .[!.]*; do [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
-    "( cd \"$r\" && GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
+    "( cd \"$r\" && GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
 static int run(char **argv, char *out, long cap);
 /* the commit itself, after the gates passed on the private tree: write-tree of the private index, commit-tree on
    BASE, then one compare-and-swap of HEAD (git update-ref HEAD NEW BASE).  No hook runs here and nothing is locked
@@ -329,6 +404,7 @@ int main(int argc, char **argv) {
     }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
+    co_owndiff(path, keys, np);
     for (k = 0; k < np; k++) {
         char src[4400]; sy_stat_t st;
         link[k] = 0;
@@ -341,15 +417,9 @@ int main(int argc, char **argv) {
             sy_printf("DELETE\t%s\n", path[k]);
             continue;
         }
-        if (keys[k]) {   /* own-diff --emit writes the base with only the KEYed changes */
-            char *ov[64], kc[1024], *p = kc; int n = 0;
-            if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
-            if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.part", sy_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
-            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
-            while (*p && n < 62) { ov[n++] = p; while (*p && *p != ',') p++; if (*p) *p++ = 0; }
-            ov[n] = 0;
-            if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);
-            {   long f = 0, at = tx_find(out, tx_len(out, sizeof out), "foreign=", 8); if (at >= 0) f = strtol(out + at + 8, 0, 10); kept += (int)f; }
+        if (keys[k] && co_part[k][0]) {   /* own-diff --batch (co_owndiff) wrote the base with only the KEYed changes */
+            tx_copy(src, sizeof src, co_part[k], tx_len(co_part[k], 400));
+            kept += co_foreign[k];
             if (co_reg_of[k] >= 0) {
                 int changed = 0;
                 refused += co_select(path[k], src, co_reg_of[k], &changed);
@@ -384,7 +454,11 @@ int main(int argc, char **argv) {
     }
     {   /* 提示:on-change --dry-run 的 pending= 项(只读,不写、不阻断、不改 rc);失败或超时静默跳过 */
         char *ov[CO_MAX + 8]; int n = 0;
-        ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run";
+        /* --derive-only: the hint reads pending= alone, so the per-path affected, git grep and domain children stay
+           unrun (41 s for four paths in a fresh clone, where this commit then waited out its 30 s collect bound) */
+        if (np <= 48) n = co_tool(ov, 0, "tools/on-change.cx");
+        else { ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; }
+        ov[n++] = "--dry-run"; ov[n++] = "--derive-only";
         for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
         ov[n] = 0;
         if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
@@ -410,13 +484,13 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
         if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
-            char *rv[8], ro[16384]; int n = 0, bad = 0, rrc; long at = 0, rn;
-            const char *tool = getenv("UNISACC_REGM_TOOL");
+            char *rv[12], ro[16384]; int n = 0, bad = 0, rrc, std = 0; long at = 0, rn;
+            const char *tool = getenv("UNISACC_REGM_TOOL"), *rtool = (tool && tool[0]) ? tool : "tools/reg-manifest.cx";
             char rnat[4400]; rnat[0] = 0;
             {   const char *dir = getenv("UNISACC_COMMIT_OWN_NATIVES");
                 if (dir && *dir && !cx_fmt(rnat, sizeof rnat, "%s/reg-manifest", dir) && sy_exists(rnat) != 1) rnat[0] = 0; }
             if (rnat[0] && !(tool && tool[0])) rv[n++] = rnat;
-            else { rv[n++] = "sh"; rv[n++] = "./unisacc.com"; rv[n++] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx"); rv[n++] = "--"; }
+            else { n = co_tool(rv, n, rtool); std = 1; }
             rv[n++] = "--check"; rv[n++] = "--index"; rv[n] = 0;
             g_bound_s = 60; tc0 = sy_now_ms();
             rrc = run(rv, ro, sizeof ro); if (rrc < 0) bad = -1;
@@ -425,6 +499,9 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             while (bad >= 0 && at < rn) { long e = tx_chr(ro + at, rn - at, '\n'), l = e < 0 ? rn - at : e;
                 if (tx_prefix(ro + at, l, "MISSING\t", 8) || tx_prefix(ro + at, l, "MISMATCH\t", 9)) { sy_printf("GATE\t%.*s\n", (int)l, ro + at); bad++; }
                 at += l + 1; }
+            /* through devsvc run an exit 1 is also "the tool did not build"; reg-manifest's own exit 1 always names a
+               MISSING or MISMATCH line, so an exit 1 without one did not run */
+            if (!bad && std && co_via_devsvc && rrc != 0 && tx_find(ro, rn, "REG_MANIFEST\t", 13) < 0) bad = -1;
             if (bad) {
                 sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx);
                 co_pending_collect();
@@ -432,14 +509,14 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 fprintf(stderr, "commit-own: REFUSE --registered: reg-manifest --check --index %s on the commit's index; nothing committed\n", bad < 0 ? "did not run" : "reports MISSING/MISMATCH");
                 return 1;
             }
-            if (n == 6 && rrc >= 0 && rrc <= 1 && rn < (long)sizeof ro - 2) {
+            if (std && rrc >= 0 && rrc <= 1 && rn < (long)sizeof ro - 2) {
                 /* S2: the hook's precommit runs this same gate on this same index a moment later.  Leave it the exit code and
                    output under a key (staged tree, gate, tool blob, argv -- recomputed in tools/precommit.cx gate_reuse); it
                    reuses them only when its own key is identical and reruns otherwise.  The record dies with this commit. */
-                char tr[64], th[64]; static char rec[20000]; char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "hash-object", "--", rv[2], 0}; int rl = 0;
+                char tr[64], th[64]; static char rec[20000]; char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "hash-object", "--", (char *)rtool, 0}; int rl = 0;
                 if (run(wv, tr, sizeof tr) == 0 && run(hv, th, sizeof th) == 0 && tx_len(tr, 64) == 40 && tx_len(th, 64) == 40 &&
                     tx_snprintf(gatef, sizeof gatef, "%s/commit-own-%d.gate", sy_tmpdir(), sy_pid()) < (int)sizeof gatef &&
-                    (rl = tx_snprintf(rec, sizeof rec, "KEY\ttree=%s\tgate=manifest\ttool=%s\targv=sh ./unisacc.com %s -- --check --index\nRC\t%d\n%s\n", tr, th, rv[2], rrc, ro)) < (int)sizeof rec &&
+                    (rl = tx_snprintf(rec, sizeof rec, "KEY\ttree=%s\tgate=manifest\ttool=%s\targv=sh ./unisacc.com %s -- --check --index\nRC\t%d\n%s\n", tr, th, rtool, rrc, ro)) < (int)sizeof rec &&
                     cx_write(gatef, rec, (size_t)rl) == 0) sy_setenv("UNISACC_GATE_REUSE", gatef, 1);
                 else { sy_unsetenv("UNISACC_GATE_REUSE"); gatef[0] = 0; }
             }
