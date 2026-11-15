@@ -93,6 +93,18 @@ static int tq_copy(char *dst, size_t cap, const char *src, size_t n) {
     dst[n] = 0;
     return 0;
 }
+/* A unit that mentions __FILE__ bakes its own path into the image, so two checkouts with identical bytes still
+   need different images and a shared cache would hand back the wrong one.  The scan is on the bytes we already
+   hash, so it costs nothing extra; refusing the key means "build, never store", which is always correct. */
+static int tq_mentions_file(const char *b, long n) {
+    long i;
+    if (!b) return 0;
+    for (i = 0; i + 8 <= n; i++)
+        if (b[i] == '_' && b[i+1] == '_' && b[i+2] == 'F' && b[i+3] == 'I' && b[i+4] == 'L' && b[i+5] == 'E' &&
+            b[i+6] == '_' && b[i+7] == '_') return 1;
+    return 0;
+}
+
 
 /* APPEND S to DST at *AT, refusing (0) rather than truncating when it would not fit. */
 static int tq_add(char *dst, size_t cap, size_t *at, const char *s) {
@@ -134,18 +146,27 @@ static int tq_key(const char *root, const char *product, const char *tool, char 
             (void)cx_fmt(why, wl, "closure path bound: %s", tool);
             free(c); return 0;
         }
-        /* tp_closure gives ROOT-relative paths for what is inside ROOT and absolute for what is not */
-        if (one[0] == '/') { if (tq_copy(path, sizeof path, one, strlen(one))) { free(c); return 0; } }
-        else if (cx_fmt(path, sizeof path, "%s/%s", root, one)) { free(c); return 0; }
-        fb = (char *)cx_read(path, &sn);
-        if (!fb) { (void)cx_fmt(why, wl, "closure piece unreadable: %s", one); free(c); return 0; }
-        cx_sha256_hex(fb, (long)sn, sh);
-        free(fb);
-        if (!tq_add(text, sizeof text, &at, "unit\t") || !tq_add(text, sizeof text, &at, one) ||
-            !tq_add(text, sizeof text, &at, "\t") || !tq_add(text, sizeof text, &at, sh) ||
-            !tq_add(text, sizeof text, &at, "\n")) {
-            (void)cx_fmt(why, wl, "closure too large for the key: %s", tool);
-            free(c); return 0;
+        /* The key names each piece by its path RELATIVE to ROOT when it is inside ROOT: an absolute path would make
+           the same bytes under two checkouts hash differently, which is exactly the cross-clone miss a shared cache
+           must not have.  Pieces outside ROOT keep their absolute path -- they are not ours to relativise. */
+        {   char rel[4400];
+            long rl = (long)strlen(root);
+            if (one[0] == '/' && !strncmp(one, root, (size_t)rl) && one[rl] == '/') {
+                if (tq_copy(rel, sizeof rel, one + rl + 1, strlen(one + rl + 1))) { free(c); return 0; }
+            } else if (tq_copy(rel, sizeof rel, one, strlen(one))) { free(c); return 0; }
+            if (one[0] == '/') { if (tq_copy(path, sizeof path, one, strlen(one))) { free(c); return 0; } }
+            else if (cx_fmt(path, sizeof path, "%s/%s", root, one)) { free(c); return 0; }
+            fb = (char *)cx_read(path, &sn);
+            if (!fb) { (void)cx_fmt(why, wl, "closure piece unreadable: %s", one); free(c); return 0; }
+            if (tq_mentions_file(fb, (long)sn)) { free(fb); free(c); return 0; }   /* __FILE__: its path is in the image */
+            cx_sha256_hex(fb, (long)sn, sh);
+            free(fb);
+            if (!tq_add(text, sizeof text, &at, "unit\t") || !tq_add(text, sizeof text, &at, rel) ||
+                !tq_add(text, sizeof text, &at, "\t") || !tq_add(text, sizeof text, &at, sh) ||
+                !tq_add(text, sizeof text, &at, "\n")) {
+                (void)cx_fmt(why, wl, "closure too large for the key: %s", tool);
+                free(c); return 0;
+            }
         }
     }
     free(c);
