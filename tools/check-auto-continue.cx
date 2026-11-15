@@ -1,0 +1,69 @@
+/* tools/check-auto-continue.cx -- tools/auto-continue.cx 的四类断言:CONTINUE、STOP、断路器、递归保护。
+ *
+ *   sh ./unisacc.com tools/check-auto-continue.cx
+ *
+ * 在 mktemp 目录里放假 claude 脚本(UNISACC_AUTOCONT_CLAUDE)与固定 transcript 夹具,UNISACC_AUTOCONT_DIR 指向临时状态目录,
+ * 真实 ~/.cache 不碰。断言:(1) 假判断器答 CONTINUE -> stdout 含 decision":"block 与动作句,state.tsv 的 consec=1;
+ * (2) 答 STOP -> stdout 空;(3) 断路器:state 里 consec=4 且 stop_hook_active=true 时放行,min-gap(last=现在)时放行,hour_count=20 时放行,
+ * OFF 文件存在时放行,假判断器不被调用;(4) 环境 UNISACC_AUTOCONT=1 时放行且不写日志。末行 CHECK_AUTO_CONTINUE passed= failed=。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char out[1 << 16];
+static int pass_n, fail_n;
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};
+    return sy_run(a, out, sizeof out, 0);
+}
+static void ok(const char *name, int cond) {
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+    if (!cond) printf("  got: %.600s\n", out);
+    if (cond) pass_n++; else fail_n++;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+static void chomp(char *s, long cap) { long n = tx_len(s, cap); while (n > 0 && s[n - 1] == '\n') s[--n] = 0; }
+
+int main(void) {
+    char t[512], cwd[1024], cmd[4096], run[2048]; int rc;
+    if (sh("pwd") != 0) return 2;
+    tx_snprintf(cwd, sizeof cwd, "%s", out); chomp(cwd, sizeof cwd);
+    if (sh("mktemp -d /tmp/auto-continue-check-XXXXXX") != 0) return 2;
+    tx_snprintf(t, sizeof t, "%s", out); chomp(t, sizeof t);
+    tx_snprintf(cmd, sizeof cmd,
+        "set -e; cd %s; "
+        "printf '#!/bin/sh\\ncat >/dev/null\\necho called >> %s/calls\\nprintf \"CONTINUE\\\\n\\xe6\\x8f\\x90\\xe4\\xba\\xa4 X\\\\n\"\\n' > go; "
+        "printf '#!/bin/sh\\ncat >/dev/null\\necho called >> %s/calls\\nprintf \"STOP\\\\n\"\\n' > stop; chmod +x go stop; "
+        "printf '%%s\\n' '{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}' "
+        "'{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"next I run Y\"}]}}' > tr.jsonl; "
+        "printf '%%s\\n' '{\"session_id\":\"sess0001\",\"transcript_path\":\"%s/tr.jsonl\",\"stop_hook_active\":false}' > in1.json; "
+        "printf '%%s\\n' '{\"session_id\":\"sess0001\",\"transcript_path\":\"%s/tr.jsonl\",\"stop_hook_active\":true}' > in2.json; echo SEEDED",
+        t, t, t, t, t);
+    rc = sh(cmd); ok("fixture seeded", rc == 0 && has("SEEDED"));
+    tx_snprintf(run, sizeof run, "cd %s && UNISACC_AUTOCONT_DIR=%s/d", cwd, t);
+    /* (1) CONTINUE */
+    tx_snprintf(cmd, sizeof cmd, "%s UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in1.json; echo RC=$?; cat %s/d/state.tsv", run, t, t, t);
+    sh(cmd); ok("continue: block json", has("\"decision\":\"block\"") && has("X") && has("RC=0") && has("sess0001\t1\t"));
+    /* (3a) min-gap: 刚判断过 -> 放行,不调用 */
+    tx_snprintf(cmd, sizeof cmd, "%s UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in2.json; echo RC=$?; grep -c called %s/calls", run, t, t, t);
+    sh(cmd); ok("breaker min-gap: silent, no extra call", !has("block") && has("RC=0") && has("\n1\n"));
+    /* (3b) consec-cap:consec=4,last 很久以前,active=true */
+    tx_snprintf(cmd, sizeof cmd, "printf 'sess0001\\t4\\t%s\\t4\\t0\\n' \"$(date +%%s)000\" > %s/d/state.tsv; %s UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in2.json; echo RC=$?; grep -c 'consec-cap' %s/d/log.tsv; grep -c called %s/calls", t, t, run, t, t, t, t);
+    sh(cmd); ok("breaker consec-cap", !has("block") && has("RC=0") && has("\n1\n1\n"));
+    /* (3c) hour-cap */
+    tx_snprintf(cmd, sizeof cmd, "printf 'sess0001\\t0\\t%%s\\t20\\t0\\n' \"$(date +%%s)000\" > %s/d/state.tsv; %s UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in1.json; echo RC=$?; grep -c 'hour-cap' %s/d/log.tsv", t, run, t, t, t);
+    sh(cmd); ok("breaker hour-cap", !has("block") && has("RC=0") && has("\n1\n"));
+    /* (3d) OFF 文件 */
+    tx_snprintf(cmd, sizeof cmd, "rm -f %s/d/state.tsv; touch %s/d/OFF; %s UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in1.json; echo RC=$?; grep -c 'off-switch' %s/d/log.tsv; rm %s/d/OFF", t, t, run, t, t, t, t);
+    sh(cmd); ok("breaker OFF file", !has("block") && has("RC=0") && has("\n1\n"));
+    /* (2) STOP */
+    tx_snprintf(cmd, sizeof cmd, "rm -f %s/d/state.tsv; %s UNISACC_AUTOCONT_CLAUDE=%s/stop sh ./unisacc.com tools/auto-continue.cx < %s/in1.json; echo RC=$?; grep -c judge-stop %s/d/log.tsv", t, run, t, t, t);
+    sh(cmd); ok("stop: silent", !has("block") && has("RC=0") && has("\n1\n"));
+    /* (4) 递归保护 */
+    tx_snprintf(cmd, sizeof cmd, "rm -f %s/d/state.tsv %s/calls %s/d/log.tsv; %s UNISACC_AUTOCONT=1 UNISACC_AUTOCONT_CLAUDE=%s/go sh ./unisacc.com tools/auto-continue.cx < %s/in1.json; echo RC=$?; ls %s/calls %s/d/log.tsv 2>&1 | grep -c 'No such'", t, t, t, run, t, t, t, t);
+    sh(cmd); ok("recursion guard: silent, no call, no log", !has("block") && has("RC=0") && has("\n2\n"));
+    tx_snprintf(cmd, sizeof cmd, "rm -rf %s", t); sh(cmd);
+    printf("CHECK_AUTO_CONTINUE\tpassed=%d\tfailed=%d\n", pass_n, fail_n);
+    return fail_n ? 1 : 0;
+}
