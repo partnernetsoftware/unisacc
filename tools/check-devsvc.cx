@@ -98,10 +98,12 @@ static int fixture_repo(const char *src) {
 int main(int argc, char **argv) {
     char stray[400];
     /* --cases a:配置/锁/事件/git/status/重启/ttl/idle;--cases b:run 缓存(夹具仓);缺省两组都跑。批次 devsvc 跑 a,devsvc-run 跑 b */
-    int A = 1, B = 1;
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|b|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+    int A1 = 1, A2 = 1, A3 = 1, B = 1, A;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strchr(cs, '1') || strchr(cs, '2') || strchr(cs, '3'), ha = strchr(cs, 'a') != 0;
+        A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3")); B = strchr(cs, 'b') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
+    A = A1 || A2 || A3;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     (void)unsetenv("DEVSVC_SELF_BIN");   /* 在 devsvc x 内跑时不继承固定版本执行体:本检查测的是 self 所指的工作副本 */
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
@@ -122,13 +124,14 @@ int main(int argc, char **argv) {
 
     if (A) {
     /* 配置表 */
-    {   char want[200]; F(want, sizeof want, "CFG\tproduct\t%s\n", c_product);
+    if (A1) {   char want[200]; F(want, sizeof want, "CFG\tproduct\t%s\n", c_product);
         ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(want) && has("CFG\tlock\tregistry\n") && has("CFG\tlock\tderive\n") && has("\nDEVSVC_CONFIG\ttable="), "config-reads-table");
         if (setenv("DEVSVC_REPO_TABLE", "/tmp/devsvc-check-no-such-table.tsv", 1)) return 2;
         ck(dv1("config", 0, 0, 0, 0, 0) == 3 && has("unreadable"), "config-missing-table-rc3");
         if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2; }
 
     if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;   /* 事件落盘轮转阈值调小;命令完成事件的 owner */
+    if (A1) {
     ck(dv1("ping", 0, 0, 0, 0, 0) == 3, "ping-without-instance-rc3");
     /* 作业目录清理夹具:旧的已结束(rc 回拨 25 小时)、新的已结束、无 rc 的在途,另放一个非作业名目录 */
     {   const char *names[4] = {"100-1", "200-2", "300-3", "not-a-job"}; int i;
@@ -151,7 +154,7 @@ int main(int argc, char **argv) {
         refup = sy_proc_spawn(&o, &refc) == 0; sy_sleep_ms(200);
         if (setenv("DEVSVC_FLOWDIR_GC_AGE_S", "7100", 1) || setenv("DEVSVC_FLOWDIR_GC_DIR", ptmp, 1)) return 2; }
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
-    (void)unsetenv("DEVSVC_FLOWDIR_GC_DIR");
+    (void)unsetenv("DEVSVC_FLOWDIR_GC_DIR"); (void)unsetenv("DEVSVC_FLOWDIR_GC_AGE_S");
     sy_sleep_ms(400);
     {   char d0[300], d1[300], d2[300], d3[300];
         F(d0, sizeof d0, "%s/jobs/100-1", inst); F(d1, sizeof d1, "%s/jobs/200-2", inst); F(d2, sizeof d2, "%s/jobs/300-3", inst); F(d3, sizeof d3, "%s/jobs/not-a-job", inst);
@@ -185,6 +188,10 @@ int main(int argc, char **argv) {
         ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tx.no-such-tool-xyz\t") && has("\tx.true\t") && !has("\tx.--\t"), "x-event-kind-is-tool-name"); }
     ck(dv1("start", 0, 0, 0, 0, 0) == 0 && has("OK\talready"), "start-twice-already");
     ck(dv1("ping", 0, 0, 0, 0, 0) == 0 && has("OK\tpong"), "ping");
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "a1-stop");
+    }
+    if (A2) {
+    ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a2-start");
 
     /* 锁:互斥、属主、续期、过期 */
     ck(dv1("lock", "acquire", "registry", "--owner", "A", 0) == 0 && has("OK\tacquired\tregistry"), "lock-acquire");
@@ -248,9 +255,27 @@ int main(int argc, char **argv) {
             {   char *w[] = {"wait", job, "--tail", "1", 0};
                 ck(job[0] && dv(out, sizeof out, w) == 0 && has("DEVSVC_TRIMMED\tshown=1\ttotal=4\nJOB_DONE\t") && has("/out\n") && strstr(out, "OUT=") < strstr(out, "DEVSVC_TRIMMED"), "oc-flow-bg-wait-tail"); } } }
     if (unsetenv("DEVSVC_DEV")) return 2;
+    ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");
+    /* stop;锁落盘跨重启(锁 registry owner=B 由本组前面的锁用例留下) */
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
+    sy_sleep_ms(600);
+    ck(sy_exists(sock) == 0 && dv1("ping", 0, 0, 0, 0, 0) == 3, "stop-removes-socket");
 
+    /* ttl 到点自退 */
+    ck(dv1("start", "--ttl", "2", "--idle", "100", 0) == 0 && has("OK\tstarted"), "restart-ttl2");
+    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("LOCK\tregistry\towner=B"), "locks-persist-across-restart");
+    t0 = sy_now_ms(); sy_sleep_ms(2800);
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "ttl-self-exit");
+    /* idle 到点自退 */
+    ck(dv1("start", "--ttl", "100", "--idle", "2", 0) == 0 && has("OK\tstarted"), "restart-idle2");
+    sy_sleep_ms(2800);
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "idle-self-exit");
+    {   char *v[] = {"start", "--ttl", "99999", 0};
+        ck(dv(out, sizeof out, v) == 2, "ttl-over-cap-refused"); }
+    (void)t0;
     }
-    if (B && !A) {
+    }
+    if (B) {
         if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
         ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "run-group-start"); }
     if (B) {
@@ -269,10 +294,6 @@ int main(int argc, char **argv) {
         ck(sy_exists(ep1) == 1 && sz >= 0 && sz <= 1500 + 200, "events-file-rotates");
     }
 
-    }
-    if (A) {
-    /* status */
-    ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");
     }
     if (B) {
     /* run(在私有夹具仓里):经服务与直接运行一致;首次构造,第二次命中缓存,--local 共用缓存 */
@@ -320,8 +341,9 @@ int main(int argc, char **argv) {
             ck(sy_unlink(bad) == 0, "run-bad-fixture-removed"); }
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
     }
-    if (B && !A) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
-    if (A) {
+    if (B) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
+    if (A3) {
+    ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a3-start");
 
     /* 内容键:两个不同路径的克隆共用同内容构造(键不含根);改闭包内文件即失效;用 __FILE__ 的工具键里保留根,输出路径跟随各自克隆 */
     {   char c1[200], c2[200], p[300], *q; const char *ks = "int main(int argc, char **argv) { (void)argv; printf(\"ckey n=%d\\n\", argc); return 7; }\n";
@@ -348,23 +370,7 @@ int main(int argc, char **argv) {
         F(p, sizeof p, "file=%s/fref.cx\n", c2); ck(rs == 7 && has(p) && !strstr(out, c1) && strstr(runline(), "cache=miss"), "ckey-fileref-clone2-rebuilds-own-path");
         { char *rm[] = {"rm", "-rf", c1, c2, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "ckey-clones-cleanup"); } }
 
-    /* stop;锁落盘跨重启 */
-    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
-    sy_sleep_ms(600);
-    ck(sy_exists(sock) == 0 && dv1("ping", 0, 0, 0, 0, 0) == 3, "stop-removes-socket");
-
-    /* ttl 到点自退 */
-    ck(dv1("start", "--ttl", "2", "--idle", "100", 0) == 0 && has("OK\tstarted"), "restart-ttl2");
-    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("LOCK\tregistry\towner=B"), "locks-persist-across-restart");
-    t0 = sy_now_ms(); sy_sleep_ms(2800);
-    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "ttl-self-exit");
-    /* idle 到点自退 */
-    ck(dv1("start", "--ttl", "100", "--idle", "2", 0) == 0 && has("OK\tstarted"), "restart-idle2");
-    sy_sleep_ms(2800);
-    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "idle-self-exit");
-    {   char *v[] = {"start", "--ttl", "99999", 0};
-        ck(dv(out, sizeof out, v) == 2, "ttl-over-cap-refused"); }
-    (void)t0;
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "a3-stop");
     }
 
     {   char *rm[] = {"rm", "-rf", inst, fx, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "fixture-cleanup"); }

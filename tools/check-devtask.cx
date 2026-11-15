@@ -28,9 +28,13 @@ static long events(const char *dir, const char *id, const char *ev) {
     free(b); return count;
 }
 static int sh(char *cmd, np_result *r) { char *v[] = {"sh", "-c", cmd, 0}; char why[256]; return np_run(v, 0, 0, 50, r, why, sizeof why); }
-int main(void) {
+int main(int argc, char **argv) {
+    int GA = 1, GB = 1;   /* --cases a:核心与工作单;--cases b:验收记忆、并行 bg、外部写域;缺省两组都跑 */
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { GA = strchr(argv[2], 'a') != 0; GB = strchr(argv[2], 'b') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devtask.cx [--cases a|b|ab]\n"); return 2; }
     char dir[] = "/tmp/check-devtask-XXXXXX", why[2048], id[16], id2[16], id3[16], id4[16], cmd[4096]; long now = 1800000000; DtSet s; np_result r = {0}; int rc; long pt0 = 0;
     if (!mkdtemp(dir)) return 2;
+    if (GA) {
     ck(dt_domain_hit("tools/dev", "docs,tools/devtask.cx", 0, 0) == 1 && dt_domain_hit("tools/a.cx", "tools/b.cx,src", 0, 0) == 0, "domain-prefix-intersection");
     ck(dt_domain_ok("tools/a.cx,src") && !dt_domain_ok("/abs") && !dt_domain_ok("a/../b") && !dt_domain_ok("a,,b"), "domain-validation");
     ck(!dt_add(dir, "first task", "tools/a.cx,src/x", 10, 0, now, id, sizeof id, why, sizeof why) && !strcmp(id, "T1"), "add-first-id");
@@ -121,6 +125,13 @@ int main(void) {
                 dir, dir, now, dir, dir, now + 5, dir, dir, dir, dir, now + 7) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "OUTSIDE_CHANGED\tmine.txt\n") && strstr(r.out, "TASK_NOT_DONE\tw5\taccept_failed=0\toutside=1");
         ck(ok && events(st, "w5", "task.done") == 0, "work-owner-own-outside-write-still-blocks"); np_free(&r);
     }
+    }
+    if (GB) {
+    {   char st[64]; int ok;
+        if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/repo/in && cd %s/repo && git init -q && echo a >in/a.txt && echo b >other.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm init && echo pre >predirty.txt", dir, dir) && !sh(cmd, &r) && !r.rc;
+        ck(ok, "work-setup-private-repo-b"); np_free(&r);
+    }
     /* acceptance memo: same input identity skips passed commands, a changed write domain reruns them */
     {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
@@ -176,6 +187,7 @@ int main(void) {
         ok = !cx_fmt(cmd, sizeof cmd, WO "done --wait p1", dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tp1\t");
         ck(ok && sy_now_ms() - pt0 < 45000, "par-two-30s-accepts-under-45s-and-bg-done"); np_free(&r);
         ck(events(st, "p1", "task.done") == 1, "bg-writes-task-done-event");
+    }
     }
     printf("%s\tassertions=%d\tfailed=%d\n", failed ? "CHECK_DEVTASK_FAIL" : "CHECK_DEVTASK", assertions, failed);
     return failed ? 1 : 0;
