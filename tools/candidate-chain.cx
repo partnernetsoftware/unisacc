@@ -811,6 +811,63 @@ static int pack_slice(char *buf, long cap, const char *slug) {
     if (ti == 4) return 1;
     return cx_fmt(buf, cap, ti < 2 ? "%s/gen1/%s-b2/image" : "%s/gen1/%s-image/image", chain_work, slug);
 }
+/* pack inputs (speed plan A, step 2): all six product files are taken from fixedpoint/g2
+   (lnx: entry.elf, osx/win: slice-<slug>). Until this step win/osx came from the gen1 work
+   slice (pack_slice) and lnx/x86_64 from g3. The g2 receipt (fixedpoint/g2/phase-N.tsv) records
+   a tree hash only, no per-file hash, so each taken file is hashed here and written to
+   OUT/pack-inputs.tsv together with the receipt's artifact_sha. Equivalence guard: a previous
+   source that exists must have the same bytes, otherwise pack refuses. Order = release-ape argv. */
+static const char *g_pk_slug[6] = {"win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64"};
+static const char *g_pk_target[6] = {"win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/arm64"};
+static const int g_pk_receipt[6] = {4, 0, 1, 2, 3, 5};
+static const int g_pk_required[6] = {1, 1, 0, 1, 0, 0};
+static int pack_file_sha(const char *path, char hash[65]) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    int bad = !b || sy_sha256_hex(b, (long)n, hash);
+    free(b); return bad;
+}
+static void pack_inputs(const char *outdir, char paths[6][4400], int write) {
+    static char rows[60000];
+    long used = 0; int i;
+    for (i = 0; i < 6; i++) {
+        const char *slug = g_pk_slug[i], *lv = "none";
+        char rec[4400], legacy[4400], needle[80], sha[65], lsha[65], art[65];
+        long bytes; int m, lnx = !strncmp(slug, "lnx-", 4);
+        if (lnx ? cx_fmt(paths[i], 4400, "%s/fixedpoint/g2/%s/entry.elf", outdir, slug)
+                : cx_fmt(paths[i], 4400, "%s/fixedpoint/g2/%s/slice-%s", outdir, slug, slug)) die("path", slug);
+        bytes = fsize(paths[i]);
+        if (bytes < 0) {
+            if (g_pk_required[i]) die("pack missing slice", paths[i]);
+            m = snprintf(rows + used, sizeof rows - (size_t)used, "PACK_INPUT\t%s\tgen=g2\tpath=%s\tsha=-\tbytes=-1\treceipt_artifact_sha=-\tprevious=-\n", g_pk_target[i], paths[i]);
+        } else {
+            size_t rn = 0; char *rt, *as;
+            if (pack_file_sha(paths[i], sha)) die("REFUSE pack input unreadable", paths[i]);
+            if (cx_fmt(rec, sizeof rec, "%s/fixedpoint/g2/phase-%d.tsv", outdir, g_pk_receipt[i]) || cx_fmt(needle, sizeof needle, "\ntarget\t%s\n", g_pk_target[i])) die("path", slug);
+            rt = cx_read(rec, &rn);
+            as = rt ? strstr(rt, "\nartifact_sha\t") : 0;
+            if (!rt || !strstr(rt, "\nphase\tg2\n") || !strstr(rt, needle) || !as || strlen(as + 14) < 65 || as[14 + 64] != '\n') { free(rt); die("REFUSE pack input has no g2 receipt for its target", rec); }
+            memcpy(art, as + 14, 64); art[64] = 0; free(rt);
+            legacy[0] = 0;
+            if (i == 1) { if (cx_fmt(legacy, sizeof legacy, "%s/fixedpoint/g3/lnx-x86_64/entry.elf", outdir)) die("path", "l64"); }
+            else if (!lnx && chain_work[0]) { if (pack_slice(legacy, sizeof legacy, slug)) die("path", slug); }
+            if (legacy[0]) {
+                if (fsize(legacy) < 0) lv = "absent";
+                else if (pack_file_sha(legacy, lsha)) die("REFUSE pack previous source unreadable", legacy);
+                else if (strcmp(sha, lsha)) die("REFUSE pack g2 input differs from its previous source (gen1 work slice or g3 entry)", legacy);
+                else lv = "same";
+            }
+            m = snprintf(rows + used, sizeof rows - (size_t)used, "PACK_INPUT\t%s\tgen=g2\tpath=%s\tsha=%s\tbytes=%ld\treceipt_artifact_sha=%s\tprevious=%s\n", g_pk_target[i], paths[i], sha, bytes, art, lv);
+        }
+        if (m < 0 || (size_t)m >= sizeof rows - (size_t)used) die("pack inputs bound", slug);
+        sy_printf("%s", rows + used);
+        used += m;
+    }
+    if (write) {
+        char file[4400], tmp[4500];
+        if (cx_fmt(file, sizeof file, "%s/pack-inputs.tsv", outdir) || cx_fmt(tmp, sizeof tmp, "%s.new", file) ||
+            cx_write(tmp, rows, (size_t)used) || sy_rename(tmp, file)) die("pack inputs evidence", outdir);
+    }
+}
 static int wf_prepare_gen(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
     char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
     char *v[16];
@@ -2545,6 +2602,14 @@ int main(int argc, char **argv) {
             sy_printf("SLICE_PATH\t%s\n", sb);
             return 0;
         }
+        if (tx_eqz(argv[i], "--pack-inputs") && i + 2 < argc) {
+            /* fixture entry: --pack-inputs OUT WORK, resolves and checks the six pack inputs exactly as pack does; writes nothing */
+            static char pin[6][4400];
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            pack_inputs(argv[i + 1], pin, 0);
+            sy_printf("PACK_INPUTS\tcount=6\twritten=0\n");
+            return 0;
+        }
         if (tx_eqz(argv[i], "--prep-path") && i + 3 < argc) {
             /* 夹具入口: --prep-path WORK GEN BASE,打印该代 prepare 目录;gen 越界即拒绝 */
             char pb[4400];
@@ -3116,18 +3181,15 @@ int main(int argc, char **argv) {
     chain_memo_off("reached-pack");
     if (!(resume && ck_done(outdir, "pack"))) {
         long t0 = sy_now_ms();
-        char ape_tool[4400], packed[4400], win64[4400], lnx64[4400], lnxarm[4400], osx64[4400], osxarm[4400], winarm[4400];
+        char ape_tool[4400], packed[4400];
+        static char pin[6][4400];
+        char *win64 = pin[0], *lnx64 = pin[1], *lnxarm = pin[2], *osx64 = pin[3], *osxarm = pin[4], *winarm = pin[5];
         char *v[24];
         int n = 0;
         if (!cm64 || !cmarm || fsize(cm64) <= 0 || fsize(cmarm) <= 0) die("REFUSE pack needs cache-manager X64 ARM64 (explicit --cache-manager-osx or in-chain cache-manager/x64 and arm64)", 0);
         if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
         if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
-        if (pack_slice(win64, sizeof win64, "win-x86_64")) die("path", "w64");
-        if (cx_fmt(lnx64, sizeof lnx64, "%s/fixedpoint/g3/lnx-x86_64/entry.elf", outdir)) die("path", "l64");
-        if (cx_fmt(lnxarm, sizeof lnxarm, "%s/fixedpoint/g2/lnx-arm64/entry.elf", outdir)) die("path", "larm");
-        if (pack_slice(osx64, sizeof osx64, "osx-x86_64")) die("path", "o64");
-        if (pack_slice(osxarm, sizeof osxarm, "osx-arm64")) die("path", "oarm");
-        if (pack_slice(winarm, sizeof winarm, "win-arm64")) die("path", "warm");
+        pack_inputs(outdir, pin, 1);
         if (fsize(win64) < 0 || fsize(lnx64) < 0 || fsize(osx64) < 0) die("pack missing slice", win64);
         sy_mkdir(packed, 0755);
         if (chdir(snap)) die("chdir snap for pack version", snap);

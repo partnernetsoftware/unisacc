@@ -964,6 +964,50 @@ int main(int argc, char **argv) {
         cx_rmtree(w);
     }
     {
+        /* pack inputs: all six from fixedpoint/g2, each hashed and tied to its g2 receipt; a previous
+           source (gen1 work slice, g3 lnx entry) with other bytes, a missing receipt and a missing
+           required file are refused; the fixture entry writes no evidence file. */
+        static const char *slug[6] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+        static const char *target[6] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+        char cmd[4800], w[600], p[1200], body[400], want[1600], hash[65];
+        int i, okset = 1, rows = 1;
+        if (cx_fmt(w, sizeof w, "%s/cc-packin-XXXXXX", argv[1]) || !mkdtemp(w)) { ck(0, "packin-dir"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/o/fixedpoint/g3/lnx-x86_64' '%s/k/gen1/osx-x86_64-b2' '%s/k/gen1/win-x86_64-image'", w, w, w) || sh(cmd, out, sizeof out)) okset = 0;
+        for (i = 0; i < 6 && okset; i++) {
+            if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/o/fixedpoint/g2/%s'", w, slug[i]) || sh(cmd, out, sizeof out)) okset = 0;
+            if (i < 2 ? cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/%s/entry.elf", w, slug[i]) : cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/%s/slice-%s", w, slug[i], slug[i])) okset = 0;
+            if (cx_fmt(body, sizeof body, "bytes-of-%s\n", slug[i]) || cx_write(p, body, strlen(body))) okset = 0;
+            if (cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/phase-%d.tsv", w, i) ||
+                cx_fmt(body, sizeof body, "chain-fixedpoint-v4\nphase\tg2\ntarget\t%s\nartifact_sha\t%064d\nproduct_sha\tx\n", target[i], i + 1) || cx_write(p, body, strlen(body))) okset = 0;
+        }
+        if (cx_fmt(p, sizeof p, "%s/o/fixedpoint/g3/lnx-x86_64/entry.elf", w) || cx_write(p, "bytes-of-lnx-x86_64\n", 20)) okset = 0;
+        if (cx_fmt(p, sizeof p, "%s/k/gen1/osx-x86_64-b2/image", w) || cx_write(p, "bytes-of-osx-x86_64\n", 20)) okset = 0;
+        if (cx_fmt(p, sizeof p, "%s/k/gen1/win-x86_64-image/image", w) || cx_write(p, "bytes-of-win-x86_64\n", 20)) okset = 0;
+        ck(okset, "pack-inputs-setup");
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --pack-inputs '%s/o' '%s/k' 2>&1", native_tool, w, w)) { ck(0, "fmt"); return 1; }
+        i = sh(cmd, out, sizeof out);
+        for (int k = 0; k < 6; k++) {
+            if (cx_fmt(body, sizeof body, "bytes-of-%s\n", slug[k]) || sy_sha256_hex(body, (long)strlen(body), hash) ||
+                (k < 2 ? cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/%s/entry.elf", w, slug[k]) : cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/%s/slice-%s", w, slug[k], slug[k])) ||
+                cx_fmt(want, sizeof want, "PACK_INPUT\t%s\tgen=g2\tpath=%s\tsha=", target[k], p) || strlen(want) > 250 || !has(out, want) ||
+                cx_fmt(want, sizeof want, "\tsha=%s\tbytes=%d\treceipt_artifact_sha=%064d\tprevious=", hash, (int)strlen(body), k + 1) || !has(out, want)) rows = 0;
+        }
+        ck(i == 0 && rows && has(out, "PACK_INPUTS\tcount=6\twritten=0"), "pack-inputs-six-from-g2-hashed-with-receipt");
+        ck(i == 0 && !has(out, "fixedpoint/g3/") && !has(out, "/k/gen1/"), "pack-inputs-no-g3-or-gen1-path-taken");
+        ck(has(out, "PACK_INPUT\tlnx/x86_64\tgen=g2") && has(out, "previous=same") && has(out, "previous=absent") && has(out, "PACK_INPUT\tlnx/arm64\tgen=g2") && has(out, "previous=none"), "pack-inputs-previous-source-same-absent-none");
+        if (cx_fmt(p, sizeof p, "%s/o/pack-inputs.tsv", w)) return 1;
+        ck(sy_exists(p) != 1, "pack-inputs-fixture-writes-no-evidence");
+        if (cx_fmt(p, sizeof p, "%s/k/gen1/win-x86_64-image/image", w) || cx_write(p, "other-bytes\n", 12)) return 1;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack g2 input differs from its previous source"), "pack-inputs-gen1-slice-differs-refused");
+        if (cx_write(p, "bytes-of-win-x86_64\n", 20) || cx_fmt(p, sizeof p, "%s/o/fixedpoint/g3/lnx-x86_64/entry.elf", w) || cx_write(p, "g3-other\n", 9)) return 1;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack g2 input differs from its previous source"), "pack-inputs-g3-entry-differs-refused");
+        if (cx_write(p, "bytes-of-lnx-x86_64\n", 20) || cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/phase-2.tsv", w) || cx_write(p, "chain-fixedpoint-v4\nphase\tg3\ntarget\tosx/x86_64\n", 47)) return 1;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack input has no g2 receipt for its target"), "pack-inputs-wrong-receipt-refused");
+        if (cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/win-x86_64/slice-win-x86_64", w) || sy_unlink(p)) return 1;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "pack missing slice"), "pack-inputs-required-missing-refused");
+        cx_rmtree(w);
+    }
+    {
         char td[500], file[600], cmd[2400];
         const char *bad[] = {"1\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t91\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n1\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\textra\n", "0\tsnap\t-\t90\t-\t-\t1\n"};
         const char *names[] = {"phase-order-refused", "phase-bound-refused", "phase-duplicate-refused", "phase-missing-lf-refused", "phase-extra-field-refused", "phase-seven-column-table-refused"};
