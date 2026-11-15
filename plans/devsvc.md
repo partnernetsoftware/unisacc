@@ -104,6 +104,19 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 记忆宫殿视图:把 `prd_mempalace.md` 的房间解析成可查询的表,经 API 读写单个房间。
 - lsp:符号索引(`symindex`)常驻,提供定义与引用查询。
 - flow:把"改 -> 派生 -> 选批 -> 提交门"串成事件驱动的流。
+关系 DAG 实施单 G1 至 G12(设计 2026-11-15,原只在子代理回报中,cc 补入库;状态:G1 1eef23043a、G2 720b8c2d53、G3 91d5a298e9 已落地,G4/G5 rel who-uses/impact 已有待按验收复核,另 0f54397986 加 who-calls 文本级符号调用点不属本表):
+| G1 | 抽取器(use、include、module),复用 `cxlib.cxroot` 解析;先定因探针段错误 | `tools/cxlib/relscan.cx`、`tools/check-relscan.cx` | 现行 `.cx` 的 use 边数为 5623(口径同探针);边表落盘成功 |
+| G2 | 缓存存取与作废(三个文件、抽取器 sha) | `tools/cxlib/relstore.cx`、其 check | 重建两次字节相同;改抽取器 sha 后整体重建 |
+| G3 | 装入已有表(links、table-index、tool-index、table-deps) | `tools/cxlib/relload.cx`、其 check | batch 边 1110、derive 边 45 |
+| G4 | 反向闭包与 `who-uses FILE` | `tools/rel.cx`、`tools/check-rel.cx` | `cx/sys/fs.cx` 得 976 个使用者,与 `affected.cx --users` 逐行相同 |
+| G5 | `impact`(批次部分) | `tools/rel.cx`、其 check | `cx/sys/fs.cx` 得 978 批,与 `affected --list-only` 逐行相同;commit 档 `tools/derive.cx` 得 4 批 |
+| G6 | `impact` 加表与 flow 节点 | 同上 | `tests/manifests/x` 命中 tables-gen 的两张表 |
+| G7 | 车道表与 `owner` | `exec/facts/lanes.tsv`、`tools/rel.cx` | `apps/csih/tui.cx` 归 csih;未登记路径 `lane=-` |
+| G8 | `path A B` | `tools/rel.cx` | 已知两跳路径给出 3 行;不可达 rc 1 |
+| G9 | 单文件增量更新 | `tools/cxlib/relstore.cx` | 改一个文件后增量结果与全量重建字节相同 |
+| G10 | 接入 devsvc 事件与常驻内存索引 | `tools/devsvc.cx` 的 rel 子命令 | 等基础版合入后排窗口 |
+| G11 | `affected.cx` 改问 rel(保留原命令行合同) | `tools/affected.cx` | `check-affected.cx` 全部批次通过;全批次逐行对照无差 |
+| G12 | 登记批次与 prd 能力速查 | 清单、`prd.md` | `tests/run.cx -- --list` 含新批次 |
 
 ## 8 文档接口 doc(一期,2026-11-15)
 
