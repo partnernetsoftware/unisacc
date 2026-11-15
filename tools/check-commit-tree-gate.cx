@@ -1,0 +1,111 @@
+/* tools/check-commit-tree-gate.cx -- tools/commit-own.cx evaluates the commit gate on a private tree and lands the
+ * commit with one compare-and-swap of HEAD (devsvc owns the index, stage 1; plans/devsvc.md section 6).
+ *
+ *   sh ./unisacc.com tools/check-commit-tree-gate.cx                 (from the repo root)
+ *   sh ./unisacc.com tools/check-commit-tree-gate.cx -- --bench new|old    (3 concurrent disjoint commits, 5 rounds)
+ *
+ * A throwaway repository under sy_tmpdir with a pre-commit gate that sleeps 1 s and refuses a BAD row of
+ * tables/t.tsv both in the tree it runs in and in the index being committed.  Cases:
+ *   foreign-bad-staged   another agent has a BAD row staged in the shared index and in the work tree: a commit of
+ *                        a.txt lands, HEAD:tables/t.tsv is unchanged and the foreign entry stays staged;
+ *   own-bad-blocked      committing the BAD table itself is still refused by the gate (class=precommit), HEAD kept;
+ *   direct-git-blocked   a plain git commit of the shared index is refused by the same gate;
+ *   disjoint-concurrent  three commits of three different files started together all land and the shared index
+ *                        is in sync for the three paths;
+ *   overlap-conflict     two racing commits of the same path: one lands, the other is refused with
+ *                        COMMIT_OWN_CONFLICT path=a.txt and class=head-moved.
+ * --bench prints BENCH rows only (failed commits and wall ms per round).  "old" (commit-own as of e2f1a12d84, the
+ * hook run by git commit in the shared work tree) is refused: that file does not resolve its modules outside tools/.
+ * Prints PASS/FAIL per case and CHECK_COMMIT_TREE_GATE<TAB>failed=N; exit 1 when N > 0, 2 when the fixture
+ * cannot be built. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int failed;
+static char fx[1200], root[1100];
+static void ck(int ok, const char *name, const char *out) {
+    if (ok) sy_printf("PASS\tcheck-commit-tree-gate.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-commit-tree-gate.%s\n%s\n", name, out); } }
+static void die(const char *s) { sy_eprintf("check-commit-tree-gate: REFUSE %s\n", s); sy_exit(2); }
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 16384), s, tx_len(s, 400)) >= 0; }
+
+/* sh -c SCRIPT with R (repo), F (fixture), O (outputs), CO (the commit-own under test); stdout+stderr into OUT */
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc; static char full[12000];
+    if (cx_fmt(full, sizeof full, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; R=%s; F=%s; O=%s.o; CO=\"sh $R/unisacc.com $R/tools/commit-own.cx --\"; OLD=\"sh $R/unisacc.com $O/tools/commit-own.cx --\"; mkdir -p $F $O/tools && cd $F && { %s\n} 2>&1", root, fx, fx, script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 50, &o, &on);   /* 50 s bound (the batch budget is 55 s) */
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); out[m] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+
+#define SETUP \
+    "cd / && rm -rf $F $O && mkdir -p $F/tables $F/hk $O/tools && cd $F && git init -q . && git config user.email t@example.invalid && git config user.name t && " \
+    "printf 'ok\\n' > tables/t.tsv && for f in a b c d; do echo 0 > $f.txt; done && git add tables a.txt b.txt c.txt d.txt && git commit -q -m init && " \
+    "printf '%s\\n' '#!/bin/sh' 'sleep 1' 'if grep -q BAD tables/t.tsv; then echo precommit: BLOCKED bad table row in the gate tree; exit 1; fi' " \
+    "'if git show :tables/t.tsv | grep -q BAD; then echo precommit: BLOCKED bad table row in the index; exit 1; fi' 'exit 0' > hk/pre-commit && " \
+    "chmod +x hk/pre-commit && git config core.hooksPath hk && echo SETUP_OK"
+
+static int bench(const char *which) {
+    static char out[16384]; int r, old = tx_eqz(which, "old");
+    if (!old && !tx_eqz(which, "new")) die("--bench new|old");
+    sh(SETUP, out, sizeof out); if (!has(out, "SETUP_OK")) die("fixture setup failed");
+    if (old) die("the old side is not runnable here: a commit-own.cx copied out of tools/ does not resolve its modules, and a second checkout is not allowed; compare with the devsvc event history instead");
+    for (r = 1; r <= 5; r++) {
+        static char s[4000];
+        if (cx_fmt(s, sizeof s,
+            "rm -f $O/b.rc; for f in b c d; do echo r%d-%s > $f.txt; done; T0=$(date +%%s%%N); "
+            "for f in b c d; do ( %s -m r%d-$f --whole $f.txt > $O/b-$f.out 2>&1; echo $? >> $O/b.rc ) & done; wait; T1=$(date +%%s%%N); "
+            "printf 'BENCH\\t%s\\tround=%d\\tcommits=3\\tfailed=%%s\\tms=%%s\\tclasses=%%s\\n' $(grep -c -v '^0$' $O/b.rc) $(( (T1 - T0) / 1000000 )) "
+            "\"$(cat $O/b-b.out $O/b-c.out $O/b-d.out | grep -o 'class=[a-z-]*' | sort | uniq -c | tr -s ' \\n' '_,')\"",
+            r, which, old ? "$OLD" : "$CO", r, which, r)) die("bench script");
+        sh(s, out, sizeof out);
+        sy_printf("%s", out);
+    }
+    sh("cd / && rm -rf $F $O", out, sizeof out);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    static char out[16384];
+    if (sy_cwd(root, sizeof root)) die("cwd");
+    if (sy_exists("tools/commit-own.cx") != 1 || sy_exists("./unisacc.com") != 1) die("run from the repo root (tools/commit-own.cx and ./unisacc.com)");
+    if (cx_fmt(fx, sizeof fx, "%s/check-commit-tree-gate-%d", sy_tmpdir(), sy_pid())) die("path");
+    if (argc == 3 && tx_eqz(argv[1], "--bench")) return bench(argv[2]);
+    if (argc != 1) die("usage: check-commit-tree-gate.cx [-- --bench new|old]");
+    sh(SETUP, out, sizeof out); if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup failed"); }
+
+    sh("printf 'BAD\\n' >> tables/t.tsv; git add tables/t.tsv; echo 1 > a.txt; $CO -m c1 --whole a.txt > $O/c1.out 2>&1; echo RC=$?; "
+       "git show HEAD:a.txt; git show HEAD:tables/t.tsv; git diff --cached --name-only; git status --short -- a.txt | wc -l; echo END; cat $O/c1.out", out, sizeof out);
+    ck(has(out, "RC=0\n1\nok\ntables/t.tsv\n0\nEND"), "foreign-bad-staged", out);
+
+    sh("H0=$(git rev-parse HEAD); $CO -m c2 --whole tables/t.tsv > $O/c2.out 2>&1; echo RC=$?; grep -c 'COMMIT_OWN_FAIL.class=precommit' $O/c2.out; "
+       "grep -q 'BLOCKED bad table row' $O/c2.out && echo GATED; [ $H0 = $(git rev-parse HEAD) ] && echo SAMEHEAD; echo END; cat $O/c2.out", out, sizeof out);
+    ck(has(out, "RC=1\n1\nGATED\nSAMEHEAD\nEND"), "own-bad-blocked", out);
+
+    sh("H0=$(git rev-parse HEAD); git commit -m direct > $O/c3.out 2>&1; echo RC=$?; grep -q 'BLOCKED bad table row' $O/c3.out && echo GATED; "
+       "[ $H0 = $(git rev-parse HEAD) ] && echo SAMEHEAD; echo END; cat $O/c3.out", out, sizeof out);
+    ck(has(out, "RC=1\nGATED\nSAMEHEAD\nEND"), "direct-git-blocked", out);
+
+    sh("printf 'ok\\n' > tables/t.tsv; git add tables/t.tsv; rm -f $O/p.rc; for f in b c d; do echo par > $f.txt; done; "
+       "for f in b c d; do ( $CO -m par-$f --whole $f.txt > $O/p-$f.out 2>&1; echo RC-$f=$? >> $O/p.rc ) & done; wait; "
+       "sort $O/p.rc | tr '\\n' ' '; git show HEAD:b.txt HEAD:c.txt HEAD:d.txt | tr '\\n' ' '; git log --format=%s -3 | sort | tr '\\n' ' '; "
+       "git status --short -- b.txt c.txt d.txt | wc -l; echo END; cat $O/p-b.out $O/p-c.out $O/p-d.out", out, sizeof out);
+    ck(has(out, "RC-b=0 RC-c=0 RC-d=0 par par par par-b par-c par-d 0\nEND"), "disjoint-concurrent", out);
+
+    sh("echo X > a.txt; ( $CO -m ovA --whole a.txt > $O/oa.out 2>&1; echo RC=$? > $O/oa.rc ) & sleep 0.4; echo Y > a.txt; "
+       "$CO -m ovB --whole a.txt > $O/ob.out 2>&1; echo RC=$? > $O/ob.rc; wait; cat $O/oa.rc $O/ob.rc | sort | tr '\\n' ' '; "
+       "cat $O/oa.out $O/ob.out | grep -c 'COMMIT_OWN_CONFLICT.path=a.txt'; cat $O/oa.out $O/ob.out | grep -c 'COMMIT_OWN_FAIL.class=head-moved'; echo END; cat $O/oa.out $O/ob.out", out, sizeof out);
+    ck(has(out, "RC=0 RC=1 1\n1\nEND"), "overlap-conflict", out);
+
+    sh("cd / && rm -rf $F $O", out, sizeof out);
+    sy_printf("CHECK_COMMIT_TREE_GATE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
