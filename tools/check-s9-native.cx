@@ -96,6 +96,30 @@ int main(void) {
             }
         } else ck(0, "tamper.locate-elf");
     }
+    {
+        char depmain[4400],dep[4400],leaf[4400],oldelf[4400];
+        const char *mainbody="#pragma unisa use dep\nint main(void){printf(\"dep=%d\\n\",dep_value());return 0;}\n";
+        const char *depbody="#pragma unisa module dep\n#pragma unisa use leaf\nint dep_value(void){return leaf_value();}\n";
+        const char *leaf7="#pragma unisa module leaf\nint leaf_value(void){return 7;}\n";
+        const char *leaf8="#pragma unisa module leaf\nint leaf_value(void){return 8;}\n";
+        join(depmain,work,"depmain.cx");join(dep,work,"dep.cx");join(leaf,work,"leaf.cx");oldelf[0]=0;
+        if(cx_write(depmain,mainbody,strlen(mainbody))||cx_write(dep,depbody,strlen(depbody))||cx_write(leaf,leaf7,strlen(leaf7)))die("dependency-fixture");
+        char *v[]={wrap,"--src",depmain,"--cache",cache,"controls",0};
+        r=runv(v,55);
+        ck(!r.rc&&r.out&&strstr(r.out,"hit=0")&&strstr(r.out,"dep=7"),"dependency.cold-build-executes-original");
+        if(r.out){const char *p=strstr(r.out,"elf=");if(p){p+=4;const char *e=strchr(p,'\t');if(e&&e-p<(long)sizeof oldelf&&cx_fmt(oldelf,sizeof oldelf,"%.*s",(int)(e-p),p))die("old-cache-path");}}
+        np_free(&r);
+        r=runv(v,55);
+        ck(!r.rc&&r.out&&strstr(r.out,"hit=1")&&strstr(r.out,"dep=7"),"dependency.unchanged-closure-hits");np_free(&r);
+        if(cx_write(leaf,leaf8,strlen(leaf8)))die("dependency-change");
+        r=runv(v,55);
+        ck(!r.rc&&r.out&&strstr(r.out,"hit=0")&&strstr(r.out,"dep=8"),"dependency.transitive-module-change-misses-and-executes-new-code");np_free(&r);
+        r=runv(v,55);
+        ck(!r.rc&&r.out&&strstr(r.out,"hit=1")&&strstr(r.out,"dep=8"),"dependency.new-closure-hits");np_free(&r);
+        if(oldelf[0]){char *oldv[]={oldelf,0};r=runv(oldv,10);
+            ck(!r.rc&&r.out&&strstr(r.out,"dep=7"),"dependency.old-cache-left-intact");np_free(&r);
+        }else ck(0,"dependency.locate-old-cache");
+    }
     printf("CHECK_S9_NATIVE\tfailed=%d\tstep_ms=UNMEASURED\taggregate_ms=UNMEASURED\n", failed);
     return failed ? 1 : 0;
 }

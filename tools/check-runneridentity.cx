@@ -1,0 +1,26 @@
+/* Check compiler-plan identities with a real transitive use closure.
+ * A module-only byte change must invalidate the key; unchanged inputs must preserve it.
+ * Run in the repository root: sh ./unisacc.com tools/check-runneridentity.cx */
+#pragma unisa use cxlib.runneridentity
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+static int failed;
+static void ck(int ok,const char *name){printf("%s\trunneridentity.%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+int main(void){
+ char root[4400],dir[4400],src[4500],dep[4500],leaf[4500],id1[65],id2[65],id3[65],why[512];int units=0;
+ const char *entry="#pragma unisa use dep\nint main(void){return dep_value();}\n";
+ const char *middle="#pragma unisa module dep\n#pragma unisa use leaf\nint dep_value(void){return leaf_value();}\n";
+ const char *first="#pragma unisa module leaf\nint leaf_value(void){return 7;}\n";
+ const char *second="#pragma unisa module leaf\nint leaf_value(void){return 8;}\n";
+ if(sy_cwd(root,sizeof root)<0||cx_fmt(dir,sizeof dir,"%s/runneridentity-XXXXXX",sy_tmpdir())||!mkdtemp(dir)||
+    cx_fmt(src,sizeof src,"%s/main.cx",dir)||cx_fmt(dep,sizeof dep,"%s/dep.cx",dir)||cx_fmt(leaf,sizeof leaf,"%s/leaf.cx",dir)||
+    cx_write(src,entry,strlen(entry))||cx_write(dep,middle,strlen(middle))||cx_write(leaf,first,strlen(first)))return 2;
+ if(rn_identity(root,src,id1,&units,why,sizeof why)){fprintf(stderr,"%s\n",why);return 2;}
+ ck(units==3,"compiler-plan-covers-entry-and-transitive-modules");
+ ck(!rn_identity(root,src,id2,0,why,sizeof why)&&!strcmp(id1,id2),"same-input-has-stable-identity");
+ if(cx_write(leaf,second,strlen(second)))return 2;
+ ck(!rn_identity(root,src,id3,0,why,sizeof why)&&strcmp(id1,id3),"transitive-module-byte-change-invalidates-identity");
+ if(cx_write(leaf,first,strlen(first)))return 2;
+ ck(!rn_identity(root,src,id2,0,why,sizeof why)&&!strcmp(id1,id2),"restoring-module-bytes-restores-identity");
+ printf("CHECK_RUNNERIDENTITY\tfailed=%d\n",failed);return failed?1:0;
+}
