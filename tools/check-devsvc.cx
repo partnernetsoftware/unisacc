@@ -1,0 +1,211 @@
+/* tools/check-devsvc.cx -- 检查 tools/devsvc.cx(仓开发服务基础版)。批次 devsvc。
+ *
+ *   sh ./unisacc.com tools/check-devsvc.cx        (在仓根或版本工作目录根跑)
+ *
+ * 确定性:不依赖本检出的工作区状态。产品名、服务源、库源目录、实例目录环境变量名都从配置表 tools/devsvc-repo.tsv 读。
+ * 夹具:实例目录 /tmp/devsvc-check-<pid>(经配置表 inst_env 所名环境变量),不碰真实实例;
+ *   run 的缓存断言在私有 git 仓 /tmp/devsvc-check-<pid>-repo 里做(三个库源目录各一个已提交文件、echo.cx、指向本检出产品的符号链接),
+ *   所以他人在本检出库源目录里的未跟踪文件不影响结论;"有未跟踪文件不缓存"的产品语义由夹具仓里主动造未跟踪文件来断言。
+ * 所起实例 ttl 均不超过 120 s,结束时 stop 并清理;即使本检查被杀,实例也会到点自退。
+ * 断言:config 读表、表缺失 rc 3;起实例与重复 start;锁互斥、非属主不能放、续期、过期后可被他人拿到并产生 lock.expire 事件;
+ *   两客户端并发拿同名锁恰一个成功;锁落盘跨实例重启仍在;stop 后 sock 消失;ttl 到点自退;idle 到点自退;status 末行;
+ *   run 经服务与直接运行的输出和退出码一致,首次 miss、第二次 hit、--local 共用缓存;库源目录有未跟踪文件时连续两次都是 bypass,
+ *   去掉后恢复 hit;events since 增量。
+ * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+#define CFG_TABLE "tools/devsvc-repo.tsv"
+static int nok, nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], table[1100], prod[1200], self[1200], inst[128], sock[160], fx[160], out[1 << 16], out2[1 << 16];
+static char c_product[128], c_self[128], c_env[64], c_lib[3][128];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) printf("NOTE\tlast-output\t%.300s\n", out);
+    if (c) nok++; else nfail++;
+}
+/* 配置表里第 nth(从 0 起)个 key 的 value;找不到返回 0 */
+static int cfgval(const char *tb, long n, const char *key, int nth, char *dst, int cap) {
+    const char *s = tb, *end = tb + n, *e, *t, *t2; long kl = strlen(key);
+    for (; s < end; s = e + 1) {
+        e = memchr(s, '\n', end - s); if (!e) break;
+        if (e - s <= kl || memcmp(s, key, kl) || s[kl] != '\t') continue;
+        if (nth-- > 0) continue;
+        t = s + kl + 1; t2 = memchr(t, '\t', e - t); if (!t2) t2 = e;
+        if (t2 - t <= 0 || t2 - t >= cap) return 0;
+        if (mm_copy(dst, cap, t, t2 - t)) return 0;
+        dst[t2 - t] = 0; return 1;
+    }
+    return 0;
+}
+/* 有界跑一条命令(55 秒上限,cwd 为 0 即当前目录):stdout 后接 stderr 收进 buf,返回退出码;起不来或装不下返回 -1 */
+static int cap2(char **v, const char *cwd, char *buf, int cap) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(buf, 0, cap);
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > cap - 1 || (a > 0 && mm_copy(buf, cap, r.out, a)) || (b > 0 && mm_copy(buf + a, cap - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+/* 在 cwd 下跑 devsvc 子命令,返回退出码 */
+static int dvat(const char *cwd, char *buf, int cap, char **args) {
+    char *v[24]; int n = 0, i;
+    v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--";
+    for (i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    v[n] = 0;
+    return cap2(v, cwd, buf, cap);
+}
+static int dv(char *buf, int cap, char **args) { return dvat(0, buf, cap, args); }
+static int dv1(char *a, char *b, char *c, char *d, char *e, char *f) { char *v[] = {a, b, c, d, e, f, 0}; return dv(out, sizeof out, v); }
+/* 在夹具仓里跑 devsvc 子命令 */
+static int fx1(char *a, char *b, char *c, char *d, char *e, char *f) { char *v[] = {a, b, c, d, e, f, 0}; return dvat(fx, out, sizeof out, v); }
+static int has(const char *s) { return strstr(out, s) != 0; }
+static const char *runline(void) { const char *q = strstr(out, "DEVSVC_RUN\t"); return q ? q : ""; }
+static int bg(sy_child_t *ch, char *owner) {
+    static char *v[2][12]; static int k; char **a = v[k++ & 1]; sy_spawn_t o;
+    a[0] = "sh"; a[1] = prod; a[2] = self; a[3] = "--"; a[4] = "lock"; a[5] = "acquire"; a[6] = "race"; a[7] = "--owner"; a[8] = owner; a[9] = 0;
+    sy_spawn_init(&o); o.argv = a; o.deadline_ms = 30000; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+    return sy_proc_spawn(&o, ch);
+}
+/* 私有夹具仓:三个库源目录各一个已提交文件、echo.cx、产品符号链接;全部已提交,库源目录无未跟踪文件 */
+static int fixture_repo(const char *src) {
+    char p[400], d[300]; int i;
+    for (i = 0; i < 3; i++) {
+        F(d, sizeof d, "%s/%s", fx, c_lib[i]); F(p, sizeof p, "%s/keep.txt", d);
+        if (sy_mkdir_all(d, 0755) || sy_write_atomic(p, "keep\n", 5, 0644)) return -1;
+    }
+    F(p, sizeof p, "%s/echo.cx", fx);
+    if (sy_write_atomic(p, src, strlen(src), 0644)) return -1;
+    F(p, sizeof p, "%s/%s", fx, c_product);
+    {   char *v[] = {"ln", "-s", prod, p, 0}; if (cap2(v, 0, out2, sizeof out2) != 0) return -2; }
+    {   char *v[] = {"git", "init", "-q", 0}; if (cap2(v, fx, out2, sizeof out2) != 0) return -3; }
+    {   char *v[] = {"git", "add", "-A", 0}; if (cap2(v, fx, out2, sizeof out2) != 0) return -4; }
+    {   char *v[] = {"git", "-c", "user.name=devsvc-check", "-c", "user.email=devsvc-check@invalid", "-c", "commit.gpgsign=false",
+                     "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "fixture", 0};
+        if (cap2(v, fx, out2, sizeof out2) != 0) return -5; }
+    return 0;
+}
+
+int main(void) {
+    char stray[400]; int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+    static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(table, sizeof table, "%s/%s", root, CFG_TABLE);
+    {   unsigned char *b = 0; int64_t n = 0; int okc;
+        if (sy_read_file(table, &b, &n, 1 << 16) || !b) { printf("FAIL\tdevsvc.config-table-readable\t%s\n", table); return 1; }
+        okc = cfgval((char *)b, n, "product", 0, c_product, sizeof c_product) && cfgval((char *)b, n, "self", 0, c_self, sizeof c_self)
+           && cfgval((char *)b, n, "inst_env", 0, c_env, sizeof c_env) && cfgval((char *)b, n, "lib", 0, c_lib[0], 128)
+           && cfgval((char *)b, n, "lib", 1, c_lib[1], 128) && cfgval((char *)b, n, "lib", 2, c_lib[2], 128);
+        free(b);
+        if (!okc) { printf("FAIL\tdevsvc.config-table-keys\t%s\n", table); return 1; } }
+    F(prod, sizeof prod, "%s/%s", root, c_product); F(self, sizeof self, "%s/%s", root, c_self);
+    F(inst, sizeof inst, "/tmp/devsvc-check-%d", sy_pid()); F(sock, sizeof sock, "%s/sock", inst);
+    F(fx, sizeof fx, "/tmp/devsvc-check-%d-repo", sy_pid());
+    /* 夹具仓里没有配置表:经 DEVSVC_REPO_TABLE 让所有子进程(含实例)读本检出的表 */
+    if (setenv(c_env, inst, 1) || setenv("DEVSVC_REPO_TABLE", table, 1)) return 2;
+    r = fixture_repo(src);
+    if (r) { printf("FAIL\tdevsvc.fixture\trc=%d\t%.200s\n", r, out2); return 1; }
+
+    /* 配置表 */
+    {   char want[200]; F(want, sizeof want, "CFG\tproduct\t%s\n", c_product);
+        ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(want) && has("CFG\tlock\tregistry\n") && has("CFG\tlock\tderive\n") && has("\nDEVSVC_CONFIG\ttable="), "config-reads-table");
+        if (setenv("DEVSVC_REPO_TABLE", "/tmp/devsvc-check-no-such-table.tsv", 1)) return 2;
+        ck(dv1("config", 0, 0, 0, 0, 0) == 3 && has("unreadable"), "config-missing-table-rc3");
+        if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2; }
+
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 3, "ping-without-instance-rc3");
+    ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
+    ck(dv1("start", 0, 0, 0, 0, 0) == 0 && has("OK\talready"), "start-twice-already");
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 0 && has("OK\tpong"), "ping");
+
+    /* 锁:互斥、属主、续期、过期 */
+    ck(dv1("lock", "acquire", "registry", "--owner", "A", 0) == 0 && has("OK\tacquired\tregistry"), "lock-acquire");
+    ck(dv1("lock", "acquire", "registry", "--owner", "B", 0) == 1 && has("ERR\theld\tregistry\towner=A"), "lock-second-owner-refused");
+    ck(dv1("lock", "acquire", "registry", "--owner", "A", 0) == 0 && has("OK\trenewed"), "lock-same-owner-renews");
+    ck(dv1("lock", "release", "registry", "--owner", "B", 0) == 1 && has("ERR\tnot-owner"), "lock-release-not-owner");
+    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("LOCK\tregistry\towner=A"), "lock-list");
+    ck(dv1("lock", "release", "registry", "--owner", "A", 0) == 0 && has("OK\treleased"), "lock-release");
+    ck(dv1("lock", "release", "registry", "--owner", "A", 0) == 1 && has("ERR\tnot-held"), "lock-release-twice-not-held");
+    ck(dv1("lock", "acquire", "registry", "--owner", "B", 0) == 0, "lock-free-after-release");
+    {   char *v[] = {"lock", "acquire", "short", "--owner", "A", "--ttl", "2", 0};
+        ck(dv(out, sizeof out, v) == 0 && has("expires_in_s=2"), "lock-short-ttl"); }
+    ck(dv1("lock", "acquire", "short", "--owner", "B", 0) == 1, "lock-short-held-before-expiry");
+    {   char *v[] = {"lock", "acquire", "x", "--owner", "A", "--ttl", "99999", 0};
+        ck(dv(out, sizeof out, v) == 1 && has("ERR\tusage"), "lock-ttl-over-cap-refused"); }
+    sy_sleep_ms(2600);
+    ck(dv1("lock", "acquire", "short", "--owner", "B", 0) == 0 && has("OK\tacquired"), "lock-expired-then-other-owner");
+    ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("lock.expire\tshort\towner=A") && has("lock.acquire\tregistry\towner=A"), "events-lock-history");
+
+    /* 两客户端并发拿同名锁:恰一个成功 */
+    r = bg(&c1, "C"); r2 = bg(&c2, "D");
+    if (!r) sy_proc_wait(&c1, &e1);
+    if (!r2) sy_proc_wait(&c2, &e2);
+    ck(!r && !r2 && ((sy_exit_code(&e1) == 0 && sy_exit_code(&e2) == 1) || (sy_exit_code(&e1) == 1 && sy_exit_code(&e2) == 0)), "lock-concurrent-exactly-one");
+    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && (has("LOCK\trace\towner=C") != has("LOCK\trace\towner=D")), "lock-concurrent-one-holder-listed");
+
+    /* 事件增量 */
+    ck(dv1("events", "emit", "note", "hello world", 0, 0) == 0 && has("OK\temitted\tseq="), "events-emit");
+    {   char *sq = strstr(out, "seq="); long s = sq ? atol(sq + 4) : 0; char since[32]; F(since, sizeof since, "%ld", s - 1);
+        ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=1\t") && has("\tnote\thello world"), "events-since-incremental");
+        F(since, sizeof since, "%ld", s);
+        ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=0\t"), "events-since-current-empty"); }
+
+    /* status */
+    ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");
+
+    /* run(在私有夹具仓里):经服务与直接运行一致;首次构造,第二次命中缓存,--local 共用缓存 */
+    {   char *d[] = {"sh", prod, "echo.cx", "--", "a b", "c", 0}; int rd, rs; char *q;
+        rd = cap2(d, fx, out2, sizeof out2);
+        rs = fx1("run", "echo.cx", "a b", "c", 0, 0);
+        q = strstr(out, "DEVSVC_RUN\t");
+        ck(q && strstr(q, "via=service") && strstr(q, "cache=miss"), "run-first-builds");
+        if (q) *q = 0;
+        ck(rd == 7 && rs == 7, "run-exit-code-same-as-direct");
+        ck(!strcmp(out, out2) && strstr(out2, "arg1=a b\narg2=c\n"), "run-output-same-as-direct");
+        rs = fx1("run", "echo.cx", "a b", "c", 0, 0);
+        ck(rs == 7 && strstr(runline(), "via=service") && strstr(runline(), "cache=hit"), "run-second-cache-hit");
+        rs = fx1("run", "--local", "echo.cx", "z", 0, 0);
+        ck(rs == 7 && has("arg1=z\n") && strstr(runline(), "via=local") && strstr(runline(), "cache=hit"), "run-local-shares-cache");
+        /* 产品语义:库源目录有未跟踪文件时不缓存,连续两次都重建(bypass),不出现 hit;去掉后恢复命中 */
+        F(stray, sizeof stray, "%s/%s/stray-untracked.cx", fx, c_lib[2]);
+        ck(sy_write_atomic(stray, "/* stray */\n", 12, 0644) == 0, "run-untracked-fixture-written");
+        rs = fx1("run", "echo.cx", "u", 0, 0, 0);
+        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "via=service") && strstr(runline(), "cache=bypass") && !strstr(runline(), "cache=hit"), "run-untracked-lib-not-cached");
+        rs = fx1("run", "echo.cx", "u", 0, 0, 0);
+        ck(rs == 7 && has("arg1=u\n") && strstr(runline(), "cache=bypass") && !strstr(runline(), "cache=hit"), "run-untracked-lib-second-still-not-cached");
+        rs = fx1("run", "--local", "echo.cx", "u", 0, 0);
+        ck(rs == 7 && strstr(runline(), "via=local") && strstr(runline(), "cache=bypass"), "run-untracked-lib-local-not-cached");
+        ck(sy_unlink(stray) == 0, "run-untracked-fixture-removed");
+        rs = fx1("run", "echo.cx", "a b", "c", 0, 0);
+        ck(rs == 7 && strstr(runline(), "cache=hit"), "run-clean-again-cache-hit");
+        ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
+
+    /* stop;锁落盘跨重启 */
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
+    sy_sleep_ms(600);
+    ck(sy_exists(sock) == 0 && dv1("ping", 0, 0, 0, 0, 0) == 3, "stop-removes-socket");
+
+    /* ttl 到点自退 */
+    ck(dv1("start", "--ttl", "2", "--idle", "100", 0) == 0 && has("OK\tstarted"), "restart-ttl2");
+    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("LOCK\tregistry\towner=B"), "locks-persist-across-restart");
+    t0 = sy_now_ms(); sy_sleep_ms(2800);
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "ttl-self-exit");
+    /* idle 到点自退 */
+    ck(dv1("start", "--ttl", "100", "--idle", "2", 0) == 0 && has("OK\tstarted"), "restart-idle2");
+    sy_sleep_ms(2800);
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "idle-self-exit");
+    {   char *v[] = {"start", "--ttl", "99999", 0};
+        ck(dv(out, sizeof out, v) == 2, "ttl-over-cap-refused"); }
+    (void)t0;
+
+    {   char *rm[] = {"rm", "-rf", inst, fx, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "fixture-cleanup"); }
+    ck(ovf == 0, "no-path-overflow");
+    printf("CHECK_DEVSVC\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}
