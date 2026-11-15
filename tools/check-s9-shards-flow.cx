@@ -1,0 +1,112 @@
+/* tools/check-s9-shards-flow.cx -- s9-shards-flow 的合同用例,用夹具假 driver(tests/fixtures/s9-flow-fake-driver.cx),不跑真片。
+ *   sh ./unisacc.com tools/check-s9-shards-flow.cx
+ * 末行 CHECK_S9_SHARDS_FLOW ok=N failed=M;有失败退出 1。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int okn, failed;
+static char why[512];
+static void die(const char *s) { fprintf(stderr, "check-s9-shards-flow: %s %s\n", s, why); exit(2); }
+static void ck(int ok, const char *n) { printf("%s\tcheck-s9-shards-flow.%s\n", ok ? "PASS" : "FAIL", n); if (ok) okn++; else failed++; }
+static int count(const char *s, const char *p) {
+    size_t n, pl, i;
+    int c = 0;
+    if (!s) return 0;
+    n = strlen(s); pl = strlen(p);
+    for (i = 0; pl && i + pl <= n; i++) if (!memcmp(s + i, p, pl)) { c++; i += pl - 1; }
+    return c;
+}
+static int has(const char *s, const char *p) { return count(s, p) > 0; }
+static int runv(char **v, const char *cwd, int sec, char *out, int cap, char *err, int ecap) {
+    np_result r = {0};
+    int rc;
+    if (np_run(v, cwd, 0, sec, &r, why, sizeof why)) die("transport");
+    rc = r.rc;
+    { size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1); if (n && mm_copy(out, cap, r.out, (long)n)) die("copy"); out[n] = 0; }
+    { size_t n = r.errn < (size_t)(ecap - 1) ? r.errn : (size_t)(ecap - 1); if (n && mm_copy(err, ecap, r.err, (long)n)) die("copy"); err[n] = 0; }
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char root[4096], dir[4400], fake[4400], sha[4500], src[4400], com[4400], tool[4400], bin[4400], table[4400];
+    static char out[16000], err[4000];
+    int rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/s9flow-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(fake, sizeof fake, "%s/driver", dir) || cx_fmt(sha, sizeof sha, "%s/driver.sha256", dir) || cx_fmt(bin, sizeof bin, "%s/flow.bin", dir) ||
+        cx_fmt(table, sizeof table, "%s/table.tsv", dir) || cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-flow-fake-driver.cx", root) ||
+        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") || cx_fmt(tool, sizeof tool, "%s/tools/s9-shards-flow.cx", root)) die("fmt");
+    { char *b[] = {"sh", com, src, "-o", fake, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "fake-driver-compile"); }
+    { char *b[] = {"sh", com, tool, "-o", bin, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "tool-compile"); }
+    {   /* driver.sha256:64 位十六进制加换行,与 s9-shards prepare driver 的记录同形 */
+        char *b[] = {"sha256sum", fake, 0};
+        rc = runv(b, dir, 10, out, sizeof out, err, sizeof err);
+        if (rc || strlen(out) < 64) die("sha256sum");
+        out[64] = '\n';
+        if (cx_write(sha, out, 65)) die("sha-write");
+    }
+    /* RUN 目录即 dir:缺省 driver 路径 RUN/driver */
+    {
+        char *v[] = {bin, "emit", root, dir, 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && !strncmp(out, "par 8\n", 6) && count(out, "\texec\t-\t") == 5 && count(out, ";a4=node;") == 5 && count(out, ";timeout_ms=58000\n") == 5, "emit-all-one-exec-node-per-pending-slice-par8-58s");
+        ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, ";a7=slice-0-1;cwd=") && has(err, "S9_FLOW\tpending=5\temitted=5\tclass=all\tpar=8\tgrant_s=55"), "emit-node-argv-and-summary");
+    }
+    {
+        char *v[] = {bin, "emit", root, dir, "--class", "heavy", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && !strncmp(out, "par 2\n", 6) && count(out, "\texec\t-\t") == 2 && has(out, "slice-1-2\t") && has(out, "slice-1-3\t") && has(err, "pending=5\temitted=2"), "emit-heavy-class-par-from-heavy-width");
+    }
+    {
+        char *v[] = {bin, "emit", root, dir, "--class", "alone", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && !strncmp(out, "par 1\n", 6) && count(out, "\texec\t-\t") == 1 && has(out, "slice-0-1\t"), "emit-alone-class-serial");
+    }
+    {
+        char *v[] = {bin, "emit", root, dir, "--class", "light", "--par", "3", "--out", table, 0};
+        size_t n; char *s;
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        s = cx_read(table, &n);
+        ck(rc == 0 && s && !strncmp(s, "par 3\n", 6) && count(s, "\texec\t-\t") == 2 && has(s, "slice-0-0\t") && has(s, "slice-2-4\t") && has(out, "S9_FLOW\tpending=5\temitted=2\tclass=light\tpar=3"), "emit-light-class-par-override-out-file");
+        free(s);
+    }
+    {
+        char *v[] = {bin, "node", root, dir, "slice-0-0", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && has(out, "status=DONE_RECORDED") && has(out, "S9_FLOW_NODE\tslice=slice-0-0\tresult=DONE_RECORDED\tdriver_rc=3"), "node-done-recorded-rc0-driver-output-kept");
+    }
+    {
+        char *v[] = {bin, "node", root, dir, "slice-1-3", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 4 && has(out, "result=NO_PROGRESS\tdriver_rc=4"), "node-no-progress-rc4");
+    }
+    {
+        char *v[] = {bin, "node", root, dir, "slice-2-4", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 1 && has(out, "result=NOT_RECORDED\tdriver_rc=3"), "node-unknown-not-reexecuted-is-not-success");
+    }
+    {
+        char *v[] = {bin, "node", root, dir, "slice-9-9", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 2 && has(out, "result=NOT_RECORDED\tdriver_rc=2"), "node-driver-refusal-kept");
+    }
+    {   /* 身份:driver 与记录的 sha 不符,emit 与 node 都拒绝,不发表、不执行 */
+        char *v[] = {bin, "emit", root, dir, 0};
+        char *w[] = {bin, "node", root, dir, "slice-0-0", 0};
+        char zero[66];
+        memset(zero, '0', 64); zero[64] = '\n'; zero[65] = 0;
+        if (cx_write(sha, zero, 65)) die("sha-write");
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 2 && has(err, "REFUSE driver-sha") && !has(out, "\texec\t"), "emit-driver-sha-mismatch-refused-no-table");
+        rc = runv(w, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 2 && has(err, "REFUSE driver-sha") && !has(out, "STEP_SLICE"), "node-driver-sha-mismatch-refused-no-step");
+    }
+    { char *rm[] = {"rm", "-rf", dir, 0}; runv(rm, root, 10, out, sizeof out, err, sizeof err); }
+    printf("CHECK_S9_SHARDS_FLOW\tok=%d\tfailed=%d\n", okn, failed);
+    return failed ? 1 : 0;
+}

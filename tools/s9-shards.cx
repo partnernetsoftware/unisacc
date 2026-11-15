@@ -4,6 +4,10 @@
  * prepare ROOT RUN material NAME for each mapped material needed by a batch.
  * RUN/driver step ROOT RUN
  * RUN/driver aggregate ROOT RUN
+ * RUN/driver step ROOT RUN --slice LEAF   one slice, for parallel drivers (tools/s9-shards-flow.cx)
+ * RUN/driver pending ROOT RUN             S9_PENDING rows, same predicate as aggregate
+ * Step prints STEP_FINISHED only when no slice is unstarted or live, STEP_PENDING after launching
+ * with work left, and STEP_NO_PROGRESS with exit 4 when slices wait but none fit the remaining time.
  * Step returns 3 PENDING, never PASS, while any slice has no DONE. Started but
  * interrupted slices remain UNKNOWN and are never silently re-executed.
  */
@@ -263,6 +267,21 @@ static void agg_merge_parts(int nparts,as_state *states,int *waves,const char *n
  for(int i=0;i<reg.nb;i++)if(states[i].fail&&states[i].last=='P')states[i].last='U';
  free(covered);free(top);free(got);
 }
+/* Pending is one predicate for aggregate --merge, the `pending` listing and the step verdict:
+   no DONE, and either never started or still live. */
+static int slice_pending(const s9_slice *s){char p[4400];slice_path(p,s,"done");int cp=present(p);slice_path(p,s,"start");int st=present(p);return !cp&&(!st||running(s));}
+/* A slice's declared budget is the largest budget_seconds among its batches (they run in parallel lanes). */
+static int slice_budget(const s9_slice *s){int b=0;for(int i=0;i<reg.nb;i++)if(as_inlist(s->ids,reg.b[i].id)&&reg.b[i].budget>b)b=reg.b[i].budget;return b;}
+/* Budgets and step grants are whole seconds; the sub-second latency between the grant and this test is
+   not charged, so a 55 s grant admits a 55 s slice.  The child still ends at outer_end minus s9.epoch.margin. */
+static int budget_fits(double left,int budget){return budget>0&&left>(double)budget-1.0;}
+#define S9_RC_NO_PROGRESS 4
+enum {S9_STEP_FINISHED,S9_STEP_PENDING,S9_STEP_NO_PROGRESS};
+static int step_verdict(int unstarted,int live,int launched){if(!unstarted&&!live)return S9_STEP_FINISHED;return launched||live?S9_STEP_PENDING:S9_STEP_NO_PROGRESS;}
+static int step_report(int unstarted,int live,int launched){int v=step_verdict(unstarted,live,launched);
+ if(v==S9_STEP_FINISHED){printf("S9\tSTEP_FINISHED\tqualification=NOT_DECIDED_HERE\n");return 3;}
+ if(v==S9_STEP_PENDING){printf("S9\tSTEP_PENDING\tunstarted=%d\tlive=%d\tlaunched=%d\tqualification=NOT_DECIDED_HERE\n",unstarted,live,launched);return 3;}
+ printf("S9\tSTEP_NO_PROGRESS\tunstarted=%d\treason=budget\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",unstarted);return S9_RC_NO_PROGRESS;}
 static int aggregate(int part,int nparts,int merge){
  freeze_check();load_plan();as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");as_state *states=calloc((size_t)reg.nb,sizeof *states);if(!states)fail("allocation");
  char p[4400];size_t nn;path(p,sd,"nonce");char *nonce=as_read(p,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");path(p,sd,"mode");size_t mode_n;char *mode=as_read(p,0,&mode_n,sw,sizeof sw);int regression=mode&&mode_n==16&&!memcmp(mode,"REGRESSION_ONLY\n",16),commit=commit_tier(),rel=release_tier();if(commit){if(!mode||mode_n!=12||memcmp(mode,"COMMIT_ONLY\n",12))fail("mode-tier");}else if(rel){if(!mode||mode_n!=13||memcmp(mode,"RELEASE_ONLY\n",13))fail("mode-tier");}else if(!regression&&(!mode||mode_n!=5||memcmp(mode,"FULL\n",5)))fail("mode");
@@ -272,7 +291,7 @@ static int aggregate(int part,int nparts,int merge){
  for(int k=0;k<nslices;k++){s9_slice *s=&slices[k];
   if(nparts&&!merge&&agg_own[k]!=part)continue;
   if(merge){/* heavy per-slice verification was done by the parts; only the liveness-dependent pending count is recomputed */
-   slice_path(p,s,"done");int cp=present(p);slice_path(p,s,"start");int st=present(p);if(!cp&&(!st||running(s)))pending++;continue;}
+   if(slice_pending(s))pending++;continue;}
   if(nparts){char fp[200];slice_fp(s,fp);np_puts(&pb,"slice\t");np_puts(&pb,s->leaf);np_puts(&pb,"\t");np_puts(&pb,fp);np_puts(&pb,"\n");}
   slice_path(p,s,"done");size_t dn;char *d=as_read(p,0,&dn,sw,sizeof sw);int complete=d!=0;
   char h[65];long long begin=0,end=0,rc=142;int started; slice_path(p,s,"start");started=present(p);int live=started&&running(s);if(!complete&&(!started||live))pending++;
@@ -325,21 +344,36 @@ static int choose_slice(const int *pending,int active,int writer_active,s9_sched
  if(q->reserved>=0)q->quota--;
  q->turn=(slices[chosen].tier+1)%3;return chosen;
 }
-static int step(void){
- freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");int active=0,alone=0;s9_schedule queue={-1,0,0};
- for(int i=0;i<nslices;i++)if(running(&slices[i])){close(lock);printf("S9\tPENDING\treason=live-prior-attempt\n");return 3;}
+static int step(const char *only){
+ freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);
+ /* --slice LEAF: several single-slice steps share one RUN.  The run lock then covers only the claim
+    (fence check plus START record), so wait for it with a bound instead of refusing at once. */
+ for(int tries=0;only&&lock<0&&tries<200;tries++){usleep(50000);lock=as_lock(sd,1,sw,sizeof sw);}
+ if(lock<0)fail("run-busy");int active=0,alone=0,only_k=-1;s9_schedule queue={-1,0,0};
+ if(!only){for(int i=0;i<nslices;i++)if(running(&slices[i])){close(lock);printf("S9\tPENDING\treason=live-prior-attempt\n");return 3;}}
+ else{int others=0,owriter=0,oheavy=0;for(int i=0;i<nslices;i++){if(!strcmp(slices[i].leaf,only))only_k=i;else if(running(&slices[i])){others++;owriter+=slices[i].alone;oheavy+=slices[i].heavy;}}
+  if(only_k<0)fail("step-slice-id");s9_slice *t=&slices[only_k];slice_path(p,t,"start");
+  if(present(p)){slice_path(p,t,"done");int d=present(p);int lv=!d&&running(t);close(lock);printf("S9\tSTEP_SLICE\tslice=%s\tstatus=%s\n",t->leaf,d?"ALREADY_DONE":lv?"LIVE":"UNKNOWN_NOT_REEXECUTED");return 3;}
+  /* Same fences as can_launch/choose_slice, measured across processes: a live writer excludes all,
+     a writer needs an idle run, heavy slices stay under s9.heavy.width.  Width itself is the caller's --par. */
+  int hcap=(int)lm_get("s9.heavy.width",0);
+  if(owriter||(t->alone&&others)||(t->heavy&&hcap>=1&&oheavy>=hcap)){close(lock);printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=%s\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",t->leaf,owriter?"writer-active":t->alone?"writer-needs-idle":"heavy-cap");return S9_RC_NO_PROGRESS;}
+ }
  /* Wave-level worktree gate: freeze_check above just measured the tree equal to the sealed RUN/inputs;
     this step's children skip their own scans and wt-close measures once after all of them ended. */
  char epoch[4400],eleaf[80],edl[64];int launched_any=0;if(cx_fmt(eleaf,sizeof eleaf,"wt-epoch-%lld",as_now()))fail("format-bound");path(epoch,sd,eleaf);if(present(epoch))fail("wt-epoch-exists");
  if(cx_fmt(edl,sizeof edl,"%.9f",outer_end-L_EPOCH_MARGIN()))fail("format-bound");np_buf eslices={0};
  for(;;){
   double left=outer_end-(double)as_now()/1e9;
-  if(left>75){int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p);}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
+  /* Launch gate: a slice is offered only while this step's remaining time covers the slice's own declared
+     budget (max budget_seconds of its batches, tests/batches.tsv), not a fixed constant. */
+  {int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p)&&(only_k<0||i==only_k)&&budget_fits(left,slice_budget(&slices[i]));}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
     slice_path(p,s,"start");
     s->start=as_now();char session[4400];path(session,sd,s->leaf);int gate[2];if(pipe(gate))fail("start-pipe");
     pid_t pid=fork();if(pid<0)fail("fork");if(!pid){close(lock);close(gate[1]);setpgid(0,0);char go;if(read(gate[0],&go,1)!=1)_exit(2);close(gate[0]);char log[4400];slice_path(log,s,"log");int fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)_exit(2);close(fd);if(setenv("UNISACC_S9_WT_EPOCH",epoch,1)||setenv("UNISACC_BOUND_DEADLINE_MONO",edl,1))_exit(2);char *v[]={driver,"child",sr,sd,session,s->ids,0};execv(driver,v);_exit(2);}
     close(gate[0]);setpgid(pid,pid);long long tick=proc_start(pid);if(!tick)fail("child-starttime");char np[4400];size_t nn;path(np,sd,"nonce");char *nonce=as_read(np,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");np_buf start={0};np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,tick);np_puts(&start,"\t");np_put(&start,nonce,64);np_puts(&start,"\t");np_putll(&start,s->start);np_puts(&start,"\n");save(p,start.p,start.n);free(start.p);free(nonce);if(write(gate[1],"G",1)!=1)fail("start-release");close(gate[1]);s->pid=pid;active++;alone=s->alone;launched_any=1;np_puts(&eslices,s->leaf);np_puts(&eslices,"\n");
   }}
+  if(only&&launched_any&&lock>=0){close(lock);lock=-1;}
   if(!active)break;int status;pid_t pid;do{pid=waitpid(-1,&status,0);}while(pid<0&&errno==EINTR);if(pid<0)fail("wait");
   for(int i=0;i<nslices;i++)if(slices[i].pid==pid){s9_slice *s=&slices[i];char session[4400],h[65];path(session,sd,s->leaf);path(p,session,"session.tsv");if(as_sha_file(p,0,h,0,sw,sizeof sw))if(cx_fmt(h,sizeof h,"%s","ABSENT"))fail("copy-bound");np_buf b={0};np_putll(&b,s->start);np_puts(&b,"\t");np_putll(&b,as_now());np_puts(&b,"\t");np_putll(&b,WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status));np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");slice_path(p,s,"done");save(p,b.p,b.n);free(b.p);s->pid=0;active--;alone=0;}
  }
@@ -348,7 +382,12 @@ static int step(void){
   if(cx_fmt(log,sizeof log,"%s.log",epoch))fail("format-bound");int rc=command(v,log,L_WAIT());
   printf("S9_WT\tepoch=%s\tstatus=%s\trc=%d\tslices=%d\tchild_scans=0\n",eleaf,rc==0?"STABLE":rc==2?"CHANGED-REFUSE":"UNMEASURED-REFUSE",rc,n-7);}
  free(eslices.p);
- close(lock);printf("S9\tSTEP_FINISHED\tqualification=NOT_DECIDED_HERE\n");return 3;
+ int unstarted=0,live=0;for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");if(!present(p))unstarted++;else{slice_path(p,&slices[i],"done");if(!present(p)&&running(&slices[i]))live++;}}
+ if(lock>=0)close(lock);
+ if(only){const s9_slice *t=&slices[only_k];
+  if(!launched_any){printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=budget\tbudget=%d\tleft=%.1f\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",t->leaf,slice_budget(t),outer_end-(double)as_now()/1e9);return S9_RC_NO_PROGRESS;}
+  printf("S9\tSTEP_SLICE\tslice=%s\tstatus=DONE_RECORDED\n",t->leaf);}
+ return step_report(unstarted,live,launched_any);
 }
 static void write_plan(void){
  make_plan();np_buf plan={0};char p[4400];for(int i=0;i<nslices;i++){s9_slice *s=&slices[i];np_puts(&plan,s->leaf);np_puts(&plan,"\t");np_putll(&plan,s->tier);np_puts(&plan,"\t");np_putll(&plan,s->alone);np_puts(&plan,"\t");np_puts(&plan,s->ids);np_puts(&plan,"\n");}path(p,sd,"plan.tsv");save(p,plan.p,plan.n);free(plan.p);
@@ -485,6 +524,19 @@ static int controls(void){
  np_buf b={0};np_putll(&b,getpid());np_puts(&b,"\t");np_putll(&b,getpid());np_puts(&b,"\t");np_putll(&b,proc_start(getpid()));np_puts(&b,"\t");np_put(&b,nonce,64);np_puts(&b,"\t1\n");save(p,b.p,b.n);free(b.p);if(!present(p)||!running(&x))bad++;
  /* Resume must not duplicate START; PID reuse must not look in-flight. */
  if(unlink(p))fail("control-unlink");np_buf stale={0};np_putll(&stale,getpid());np_puts(&stale,"\t");np_putll(&stale,getpid());np_puts(&stale,"\t1\t");np_put(&stale,nonce,64);np_puts(&stale,"\t1\n");save(p,stale.p,stale.n);free(stale.p);if(running(&x))bad++;
+ {/* Launch budget and step verdict contracts (0.0.68): the gate reads each slice's declared budget, and
+     FINISHED is reserved for "nothing unstarted, nothing live". */
+  int b0=reg.b[0].budget,b1=reg.b[1].budget,ok;reg.b[0].budget=55;reg.b[1].budget=20;s9_slice bs={0};
+  if(cx_fmt(bs.ids,sizeof bs.ids,"%s,%s",ids[0],ids[1]))fail("copy-bound");int both=slice_budget(&bs);
+  if(cx_fmt(bs.ids,sizeof bs.ids,"%s",ids[1]))fail("copy-bound");int small=slice_budget(&bs);
+  ok=both==55&&small==20;if(!ok)bad++;printf("S9_CONTROL\tslice-budget-is-max-declared-batch-budget\tchecked=%d\n",ok);
+  ok=!budget_fits(30.0,both)&&!budget_fits(53.9,both)&&!budget_fits(18.5,small)&&!budget_fits(240.0,0)&&step_verdict(137,0,0)==S9_STEP_NO_PROGRESS&&step_report(137,0,0)==S9_RC_NO_PROGRESS&&S9_RC_NO_PROGRESS!=3&&S9_RC_NO_PROGRESS!=0;
+  if(!ok)bad++;printf("S9_CONTROL\tstep-budget-short-no-launch-no-progress\tchecked=%d\n",ok);
+  ok=budget_fits(54.6,both)&&budget_fits(55.0,both)&&budget_fits(240.0,both)&&budget_fits(30.0,small)&&!budget_fits(30.0,both)&&step_verdict(136,0,1)==S9_STEP_PENDING&&step_report(136,0,1)==3;
+  if(!ok)bad++;printf("S9_CONTROL\tstep-budget-enough-launches-declared-fit\tchecked=%d\n",ok);
+  ok=step_verdict(0,0,0)==S9_STEP_FINISHED&&step_verdict(0,0,1)==S9_STEP_FINISHED&&step_verdict(1,0,1)!=S9_STEP_FINISHED&&step_verdict(1,0,0)!=S9_STEP_FINISHED&&step_verdict(0,1,0)!=S9_STEP_FINISHED&&step_verdict(0,1,1)!=S9_STEP_FINISHED&&step_verdict(2,1,0)==S9_STEP_PENDING;
+  if(!ok)bad++;printf("S9_CONTROL\tstep-finished-only-when-nothing-unstarted-nothing-live\tchecked=%d\n",ok);
+  reg.b[0].budget=b0;reg.b[1].budget=b1;}
  bad+=wt_epoch_controls();
  bad+=agg_merge_controls();
  if(unlink(p))fail("control-clean");path(p,sd,"nonce");if(unlink(p)||rmdir(sd))fail("control-clean");free(reg.b);printf("S9_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
@@ -512,7 +564,9 @@ static int operate(int argc,char **argv){
   if(argc==7&&!strcmp(argv[4],"--part")&&!as_digits(argv[5],&a)&&!as_digits(argv[6],&b)&&b>=1&&b<=64&&a<b)return aggregate((int)a,(int)b,0);
   if(argc==6&&!strcmp(argv[4],"--merge")&&!as_digits(argv[5],&b)&&b>=1&&b<=64)return aggregate(0,(int)b,1);
   fail("aggregate [--part K N | --merge N]");}
- if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step();if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
+ if(!init&&!strcmp(argv[1],"step")&&argc==6&&!strcmp(argv[4],"--slice"))return step(argv[5]);
+ if(!init&&!strcmp(argv[1],"pending")){if(argc!=4)fail("pending ROOT RUN");load_plan();int n=0;for(int i=0;i<nslices;i++)if(slice_pending(&slices[i])){printf("S9_PENDING\tslice=%s\ttier=%d\talone=%d\theavy=%d\tbudget=%d\n",slices[i].leaf,slices[i].tier,slices[i].alone,slices[i].heavy,slice_budget(&slices[i]));n++;}printf("S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n",n,nslices);return 0;}
+ if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step(0);if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
  if(argc<5)fail("map-required");
  int commit=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"commit");int rel=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"release");for(int i=5;i<argc;i++)if(!strcmp(argv[i],"--tier")&&!commit&&!rel)fail("init --tier commit|release cannot combine selection flags");
  {char awelf[4400];int has=aw_native(awelf,sizeof awelf);if(has){char *v[]={sb,L_CMD(),awelf,"init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}else{char *v[]={sb,L_CMD(),"sh",sc,"tools/all-waves.cx","--","init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}}

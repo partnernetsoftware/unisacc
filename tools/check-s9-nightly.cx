@@ -267,6 +267,39 @@ int main(int argc, char **argv) {
             free(s);
         }
         { char *r2[] = {"rm", "-f", pa, pb, pc, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
+        /* 0.0.68 完成口径:缺 S9_WT 行不等于完成。假 s9 每步无 S9_WT、无 STEP_FINISHED:走满缺省 4 步后 FAIL(step-pending),不进 aggregate。 */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        setenv("S9_FAKE_MODE", "quiet", 1);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        {
+            size_t n; char *s = cx_read(logp, &n); int steps = 0; const char *q = s;
+            while (q && (q = strstr(q, "step\n"))) { steps++; q += 5; }
+            ck(rc == 1 && has(buf, "step-pending") && !has(buf, "status=PASS") && s && steps == 4 && !has(s, "aggregate"), "no-wt-without-finished-signal-not-done");
+            free(s);
+        }
+        /* 有待跑片而本步未发片(STEP_NO_PROGRESS, rc 4):一步即停,状态 NO_PROGRESS、退出码 4,不进 aggregate,不记 PASS。 */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        setenv("S9_FAKE_MODE", "noprog", 1);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        {
+            size_t n; char *s = cx_read(logp, &n); int steps = 0; const char *q = s;
+            while (q && (q = strstr(q, "step\n"))) { steps++; q += 5; }
+            ck(rc == 4 && has(buf, "status=NO_PROGRESS") && !has(buf, "status=PASS") && s && steps == 1 && !has(s, "aggregate"), "no-progress-signal-stops-rc4-not-done");
+            free(s);
+        }
+        /* 子阶段 steps 同口径:NO_PROGRESS 不得报 STEPS_DONE;无完成信号的一步报 PENDING(3) 而非 STEPS_DONE。 */
+        {
+            char *ps[20]; char sess2[4400]; int k = 0;
+            ps[k++] = "sh"; ps[k++] = com; ps[k++] = tool; ps[k++] = "--"; ps[k++] = dir; ps[k++] = "--resume"; ps[k++] = runp;
+            ps[k++] = "--tier"; ps[k++] = "commit"; ps[k++] = "--date"; ps[k++] = "2026-11-12"; ps[k++] = "--phase"; ps[k++] = "steps"; ps[k++] = "--fake"; ps[k++] = fake; ps[k] = 0;
+            if (cx_fmt(sess2, sizeof sess2, "%s/session.tsv", runp) || cx_write(sess2, "resume\n", 7)) die("session-write");
+            runv(ps, dir, 20, buf, sizeof buf, &rc);
+            ck(rc == 4 && has(buf, "status=NO_PROGRESS") && !has(buf, "STEPS_DONE"), "phase-steps-no-progress-not-steps-done");
+            setenv("S9_FAKE_MODE", "quiet", 1);
+            runv(ps, dir, 20, buf, sizeof buf, &rc);
+            ck(rc == 3 && has(buf, "status=PENDING") && !has(buf, "STEPS_DONE"), "phase-steps-no-wt-without-finished-stays-pending");
+            { char *r3[] = {"rm", "-f", sess2, 0}; runv(r3, dir, 5, buf, sizeof buf, &rc); }
+        }
         unsetenv("S9_FAKE_MODE");
     }
     }

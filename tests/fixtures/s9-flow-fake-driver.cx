@@ -1,0 +1,33 @@
+/* tests/fixtures/s9-flow-fake-driver.cx -- 夹具假 driver,供 check-s9-shards-flow;不跑真片。 */
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+int main(int argc, char **argv) {
+    const char *dl = getenv("UNISACC_BOUND_DEADLINE_MONO");
+    char *e = 0;
+    sy_ts_t t;
+    double left;
+    if (argc < 4) return 2;
+    /* 与真 driver 同合同:必须带单调时钟截止,且剩余不超过 55 秒 */
+    if (!dl || sy_mono(&t)) { printf("FAIL supervisor-deadline-required\n"); return 2; }
+    left = strtod(dl, &e) - ((double)t.sec + (double)t.nsec / 1e9);
+    if (!e || *e || left <= 0 || left > 55.0) { printf("FAIL outer-budget-55\n"); return 2; }
+    if (!strcmp(argv[1], "pending") && argc == 4) {
+        printf("S9_PENDING\tslice=slice-0-0\ttier=0\talone=0\theavy=0\tbudget=55\n");
+        printf("S9_PENDING\tslice=slice-0-1\ttier=0\talone=1\theavy=0\tbudget=55\n");
+        printf("S9_PENDING\tslice=slice-1-2\ttier=1\talone=0\theavy=1\tbudget=45\n");
+        printf("S9_PENDING\tslice=slice-1-3\ttier=1\talone=0\theavy=1\tbudget=55\n");
+        printf("S9_PENDING\tslice=slice-2-4\ttier=2\talone=0\theavy=0\tbudget=20\n");
+        printf("S9_PENDING_SUMMARY\tpending=5\tslices=7\n");
+        return 0;
+    }
+    if (!strcmp(argv[1], "step") && argc == 6 && !strcmp(argv[4], "--slice")) {
+        if (!strcmp(argv[5], "slice-0-0")) { printf("S9_WT\tepoch=wt-epoch-1\tstatus=STABLE\trc=0\tslices=1\tchild_scans=0\nS9\tSTEP_SLICE\tslice=slice-0-0\tstatus=DONE_RECORDED\nS9\tSTEP_PENDING\tunstarted=4\tlive=0\tlaunched=1\n"); return 3; }
+        if (!strcmp(argv[5], "slice-1-3")) { printf("S9\tSTEP_NO_PROGRESS\tslice=slice-1-3\treason=heavy-cap\tlaunched=0\n"); return 4; }
+        if (!strcmp(argv[5], "slice-2-4")) { printf("S9\tSTEP_SLICE\tslice=slice-2-4\tstatus=UNKNOWN_NOT_REEXECUTED\n"); return 3; }
+        printf("s9: REFUSE step-slice-id\n");
+        return 2;
+    }
+    return 2;
+}

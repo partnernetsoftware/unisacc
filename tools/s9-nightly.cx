@@ -335,9 +335,13 @@ static int par_drain(ParJob *j, int *rc) {
     *rc = ex ? code : 128 + sig;
     return 0;
 }
-/* 本步是否还有新片在跑/待跑:输出含 S9_WT 行即有片被调度或拒绝,无该行即无新片。 */
-static int has_wt(const char *s) {
-    return s && strstr(s, "S9_WT") != 0;
+/* 步终态只凭 s9-shards step 的显式信号(0.0.68):STEP_FINISHED 行表示没有未发片也没有活片;
+ * STEP_NO_PROGRESS 行或退出码 4 表示仍有待跑片而本步一片未发。输出里有没有 S9_WT 行不再用于判断完成。 */
+static int step_finished(const char *s) {
+    return s && strstr(s, "S9\tSTEP_FINISHED") != 0;
+}
+static int step_no_progress(const char *s, int rc) {
+    return rc == 4 || (s && strstr(s, "S9\tSTEP_NO_PROGRESS") != 0);
 }
 /* 数 RUN 下 *.start 与 *.done;unk 收集有 start 无 done 的片名(最多 64 个)。 */
 static char unk[64][96];
@@ -928,10 +932,12 @@ int main(int argc, char **argv) {
             sn[q] = 0;
             note(sn);
         }
+        /* 仍有待跑片而本步一片未发:不是完成也不是待续,专用状态 NO_PROGRESS、退出码 4,不进 aggregate。 */
+        if (step_no_progress(tmp, rc)) { fail_n++; write_report(report, "NO_PROGRESS"); printf("S9_NIGHTLY\tstatus=NO_PROGRESS\tstep=step\trc=%d\treport=%s\n", rc, report); return 4; }
         if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step\trc=%d\treport=%s\n", rc, report); return 1; }
-        /* 出口仅一条:本步输出无 S9_WT 行(本步没有新发片)。start==done 不是出口(可能仍有未发片),只用于 retry 判断。 */
+        /* 出口仅一条:本步输出带 S9 STEP_FINISHED 行。缺 S9_WT 行不是出口;start==done 也不是出口(可能仍有未发片),只用于 retry 判断。 */
         nu = scan_run(run, &starts, &dones);
-        if (!has_wt(tmp)) finished = 1;
+        if (step_finished(tmp)) finished = 1;
         pass_n++;
         if (finished) { step_done = 1; break; }
         if (steps == max_steps - 1 && phase == 2) {
