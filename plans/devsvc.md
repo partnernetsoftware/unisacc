@@ -105,6 +105,8 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 工单:开工先 task open,收工前 task done;未见 DONE 行不得报完成,TASK_NOT_DONE 时原样贴出失败尾部并继续修,或在截止时如实报未完成。
 ```
 - 输出控制(P2,2026-11-15):x、flow(含 --bg 后的 wait)统一支持 `--tail N`、`--head N`、`--grep S`(固定串,可多次,行级或)、`--summary`(每节点一行 `SUM id rc= ms= lines= first=`,first 为首个含 FAIL/REFUSE/error 的行)。任一给出即合并 stdout 与 stderr 过滤,先 grep 再 head 再 tail;全量落 run 目录 `full.out`(wait 为作业目录 `out`),有行略去时打 `DEVSVC_TRIMMED shown=N total=M`,末行 `OUT=路径`。不给时行为不变。代替 `2>&1 | tail -N` 一类管道截短,例:`devsvc x --tail 20 -- sh ./unisacc.com tools/check-x.cx`、`devsvc flow run F --summary`、`devsvc wait JOB --grep FAIL`。
+- 工单时钟(S3 第一步,2026-11-15,批次 devsvc-remain):开工 `export DEVSVC_OWNER=名字` 并 `task open` 之后,每条 `devsvc flow|f|x|doc|git` 命令结束都会在 stderr 末尾带 `TASK_LEFT id=ID left_s=N used_s=M`(过期为 `TASK_OVERDUE id=ID over_s=N used_s=M`),`task done` 通过后不再出现。代理按这行判断剩余时间,不按工具调用次数估;left_s 还大而验收未过时继续做,不以"到截止"收工。
+
 
 
 
