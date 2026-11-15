@@ -986,6 +986,8 @@ int main(int argc, char **argv) {
                 cx_fmt(body, sizeof body, "chain-fixedpoint-v4\nphase\tg2\ntarget\t%s\nartifact_sha\t%064d\nproduct_sha\tx\n", target[i], i + 1) || cx_write(p, body, strlen(body))) okset = 0;
         }
         if (cx_fmt(p, sizeof p, "%s/o/fixedpoint/g3/lnx-x86_64/entry.elf", w) || cx_write(p, "bytes-of-lnx-x86_64\n", 20)) okset = 0;
+        /* the g3 lnx entry is a previous source only once its phase is DONE */
+        if (cx_fmt(p, sizeof p, "%s/o/checkpoint.tsv", w) || cx_write(p, "DONE\tg3-lnx-x86_64\twall_ms=1\tsha=-\n", 35)) okset = 0;
         if (cx_fmt(p, sizeof p, "%s/k/gen1/osx-x86_64-b2/image", w) || cx_write(p, "bytes-of-osx-x86_64\n", 20)) okset = 0;
         if (cx_fmt(p, sizeof p, "%s/k/gen1/win-x86_64-image/image", w) || cx_write(p, "bytes-of-win-x86_64\n", 20)) okset = 0;
         ck(okset, "pack-inputs-setup");
@@ -1006,6 +1008,36 @@ int main(int argc, char **argv) {
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack g2 input differs from its previous source"), "pack-inputs-gen1-slice-differs-refused");
         if (cx_write(p, "bytes-of-win-x86_64\n", 20) || cx_fmt(p, sizeof p, "%s/o/fixedpoint/g3/lnx-x86_64/entry.elf", w) || cx_write(p, "g3-other\n", 9)) return 1;
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack g2 input differs from its previous source"), "pack-inputs-g3-entry-differs-refused");
+        {   /* g3 still in flight (no DONE row): the same differing entry is not compared, the row says pending-g3 */
+            char cpt[1200], anc[4800], o2[1200]; int rc2;
+            if (cx_fmt(cpt, sizeof cpt, "%s/o/checkpoint.tsv", w) || sy_unlink(cpt)) return 1;
+            rc2 = sh(cmd, out, sizeof out);
+            ck(rc2 == 0 && has(out, "PACK_INPUT\tlnx/x86_64\tgen=g2") && has(out, "previous=pending-g3") && !has(out, "REFUSE"), "pack-inputs-g3-in-flight-not-compared-pending");
+            /* pack path: ancestors from the real table hold g2 and kernels-g2, never g3 or compare; a
+               checkpoint with every ancestor DONE and no g3/compare row satisfies the pack re-check
+               range and leaves the compare range open */
+            if (cx_fmt(o2, sizeof o2, "%s/anc", w) || cx_fmt(anc, sizeof anc, "mkdir -p '%s' && '%s' --pack-ancestors . '%s' 2>&1", o2, native_tool, o2)) return 1;
+            rc2 = sh(anc, out, sizeof out);
+            ck(rc2 == 0 && has(out, "PACK_ANCESTOR\tcache-manager\n") && has(out, "PACK_ANCESTOR\tkernels-g2\n") && has(out, "PACK_ANCESTOR\tg2-lnx-x86_64\n") && has(out, "PACK_ANCESTOR\tg2-lnx-arm64\n") &&
+               has(out, "PACK_ANCESTOR\tg2-osx-x86_64\n") && has(out, "PACK_ANCESTOR\tg2-osx-arm64\n") && has(out, "PACK_ANCESTOR\tg2-win-x86_64\n") && has(out, "PACK_ANCESTOR\tg2-win-arm64\n") && has(out, "PACK_ANCESTOR\tgen1-lnx-x86_64\n"), "pack-ancestors-hold-g2-six-kernels-g2-cache-manager");
+            ck(rc2 == 0 && !has(out, "PACK_ANCESTOR\tg3-") && !has(out, "PACK_ANCESTOR\tkernels-g3") && !has(out, "PACK_ANCESTOR\tcompare") && !has(out, "-g3\n") && !has(out, "PACK_ANCESTOR\tpack\n"), "pack-ancestors-exclude-g3-and-compare");
+            ck(has(out, "PACK_PATH\tuntil=cache-manager\tskip=g3,kernels-g3,compare\n") && has(out, "PACK_PATH\tuntil=pack\tskip=g3,kernels-g3,compare\n") && !has(out, "PACK_PATH\tuntil=compare") && !has(out, "PACK_PATH\tuntil=g"), "pack-path-skips-g3-and-compare-only-for-cache-manager-and-pack");
+            ck(has(out, "RECHECK_RANGE\tuntil=pack\tfirst_unfinished=snap\n") && has(out, "RECHECK_RANGE\tuntil=compare\tfirst_unfinished=snap\n"), "recheck-range-empty-checkpoint-open-at-snap");
+            {   /* checkpoint = exactly the ancestors */
+                static char rows[60000]; long used = 0; char *at = out;
+                while ((at = strstr(at, "PACK_ANCESTOR\t"))) {
+                    char *e = strchr(at, 0x0a); if (!e) break;
+                    int m = snprintf(rows + used, sizeof rows - (size_t)used, "DONE\t%.*s\twall_ms=1\tsha=-\n", (int)(e - at - 14), at + 14);
+                    if (m < 0 || (size_t)m >= sizeof rows - (size_t)used) return 1;
+                    used += m; at = e;
+                }
+                if (cx_fmt(cpt, sizeof cpt, "%s/checkpoint.tsv", o2) || cx_write(cpt, rows, (size_t)used)) return 1;
+                rc2 = sh(anc, out, sizeof out);
+                ck(rc2 == 0 && has(out, "RECHECK_RANGE\tuntil=pack\tfirst_unfinished=-\n"), "pack-recheck-range-is-its-ancestors-only");
+                ck(has(out, "RECHECK_RANGE\tuntil=compare\tfirst_unfinished=") && !has(out, "RECHECK_RANGE\tuntil=compare\tfirst_unfinished=-\n"), "compare-recheck-range-still-every-earlier-phase");
+            }
+            if (cx_fmt(cpt, sizeof cpt, "%s/o/checkpoint.tsv", w) || cx_write(cpt, "DONE\tg3-lnx-x86_64\twall_ms=1\tsha=-\n", 35)) return 1;
+        }
         if (cx_write(p, "bytes-of-lnx-x86_64\n", 20) || cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/phase-2.tsv", w) || cx_write(p, "chain-fixedpoint-v4\nphase\tg3\ntarget\tosx/x86_64\n", 47)) return 1;
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE pack input has no g2 receipt for its target"), "pack-inputs-wrong-receipt-refused");
         if (cx_fmt(p, sizeof p, "%s/o/fixedpoint/g2/win-x86_64/slice-win-x86_64", w) || sy_unlink(p)) return 1;
@@ -1067,8 +1099,13 @@ int main(int argc, char **argv) {
     {   /* in-chain osx cache-manager: phase table order and the explicit-override / in-chain-default wiring */
         size_t pn = 0, cn = 0;
         char *pt = cx_read("build/chain-phases.tsv", &pn), *cc = cx_read("tools/candidate-chain.cx", &cn);
-        ck(pt && has(pt, "\tcache-manager\touter\t90\tcompare\t"), "cm-phase-after-compare-timeout-90");
-        ck(pt && has(pt, "\tpack\touter\t90\tcache-manager\t"), "cm-pack-depends-on-cache-manager");
+        /* 0.0.67: g3 and compare left the pack path. The two labels are kept; the order they assert
+           is now cache-manager after g2-lnx-x86_64 (still listed after compare, still 90 s) and pack
+           after cache-manager plus the six g2 targets and kernels-g2. */
+        ck(pt && has(pt, "\tcache-manager\touter\t90\tg2-lnx-x86_64\t") && strstr(pt, "\tcompare\touter\t") && strstr(pt, "\tcache-manager\touter\t") && strstr(pt, "\tcompare\touter\t") < strstr(pt, "\tcache-manager\touter\t"), "cm-phase-after-compare-timeout-90");
+        ck(pt && has(pt, "\tpack\touter\t90\tcache-manager,g2-lnx-x86_64,g2-lnx-arm64,g2-osx-x86_64,g2-osx-arm64,g2-win-x86_64,g2-win-arm64,kernels-g2\t"), "cm-pack-depends-on-cache-manager");
+        ck(pt && !has(pt, "\tcache-manager\touter\t90\tcompare\t") && !has(pt, "\tpack\touter\t90\tcache-manager\t"), "cm-and-pack-no-longer-wait-for-compare");
+        ck(pt && has(pt, "\tcompare\touter\t90\tgen1-lnx-x86_64,") && has(pt, ",kernels-g2,kernels-g3,") && has(pt, ",g3-win-x86_64,g3-win-arm64\t"), "compare-still-depends-on-g2-g3-and-both-kernels");
         ck(cc && !has(cc, "QQ"), "zz-large-haystack-absent-needle-no-crash");
         ck(cc && has(cc, "if (cm64 && cmarm) sy_printf(\"RESUME\\tcache-manager\\texplicit"), "cm-explicit-args-take-priority");
         ck(cc && has(cc, "cx_fmt(cmx, sizeof cmx, \"%s/cache-manager/x64\"") && has(cc, "cm64 = cmx; cmarm = cma;"), "cm-default-uses-in-chain-products");

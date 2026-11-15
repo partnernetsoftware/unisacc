@@ -852,6 +852,10 @@ static void pack_inputs(const char *outdir, char paths[6][4400], int write) {
             else if (!lnx && chain_work[0]) { if (pack_slice(legacy, sizeof legacy, slug)) die("path", slug); }
             if (legacy[0]) {
                 if (fsize(legacy) < 0) lv = "absent";
+                /* g3 runs beside pack: its lnx entry is compared here only once its phase is DONE;
+                   before that the bytes may be in flight and the g2 == g3 equality belongs to
+                   compare and to the public release gate (release-run fixedpoint gate). */
+                else if (i == 1 && !ck_done(outdir, "g3-lnx-x86_64")) lv = "pending-g3";
                 else if (pack_file_sha(legacy, lsha)) die("REFUSE pack previous source unreadable", legacy);
                 else if (strcmp(sha, lsha)) die("REFUSE pack g2 input differs from its previous source (gen1 work slice or g3 entry)", legacy);
                 else lv = "same";
@@ -937,6 +941,8 @@ static int g_nphases;
 static char g_srcroot[4400]; /* resolved private src root the start gate verified; cache-manager builds from the same tree */
 /* Columns 8..10 of the phase table (facts: build/chain-residue.tsv): 0 no rule, 's' scrub, 'r' refuse. */
 static char g_res_policy[512], g_res_record[512][200], g_res_paths[512][400];
+static char g_pack_anc[512]; /* 1 = transitive dependency of pack, 2 = pack itself */
+static int ck_done(const char *dir, const char *phase);
 static const char *phases_file;
 static int chain_phase_index(const char *id) {
     for (int i = 0; i < g_nphases; i++) if (!strcmp(id, g_phases[i])) return i;
@@ -1105,9 +1111,39 @@ static void load_chain_phases(const char *root) {
         }
         if (!progress) die("REFUSE chain-phases dependency cycle", path);
     }
+    /* Ancestors of pack (transitive deps): the range its T11 re-check must find complete. */
+    {
+        int pk = chain_phase_index("pack"), grew = 1;
+        for (int i = 0; i < 512; i++) g_pack_anc[i] = 0;
+        if (pk >= 0) g_pack_anc[pk] = 2;
+        while (pk >= 0 && grew) {
+            grew = 0;
+            /* high to low: a table lists dependencies first, so one sweep closes the set and the
+               second only confirms it (a low to high sweep took one pass per level, 0.7 s a load) */
+            for (int i = g_nphases - 1; i >= 0; i--) if (g_pack_anc[i] && strcmp(deps[i], "-")) {
+                char *at = deps[i];
+                while (at) {
+                    char *end = strchr(at, ','); if (end) *end = 0;
+                    int d = chain_phase_index(at);
+                    if (d >= 0 && !g_pack_anc[d]) { g_pack_anc[d] = 1; grew = 1; }
+                    if (end) *end++ = ',';
+                    at = end;
+                }
+            }
+        }
+    }
     free(s); if (!g_nphases) die("REFUSE empty chain-phases", path);
 }
 static const char *until_phase;
+/* A bounded call for cache-manager or pack walks only pack's ancestors. */
+static int pack_path_of(const char *until) { return until && (tx_eqz(until, "cache-manager") || tx_eqz(until, "pack")); }
+/* Index of the first phase a --recheck-only before UNTIL finds unfinished, or -1.
+   compare: every earlier phase. pack: its ancestors only (g3 and compare are a lane of their own). */
+static int recheck_unfinished(const char *outdir, const char *until) {
+    int limit = chain_phase_index(until), for_pack = tx_eqz(until, "pack");
+    for (int pi = 0; pi < limit; pi++) if ((!for_pack || g_pack_anc[pi] == 1) && !ck_done(outdir, g_phases[pi])) return pi;
+    return -1;
+}
 static void plan(void) {
     int i;
     sy_printf("CANDIDATE_CHAIN\tplan\tphases=%d\n", g_nphases);
@@ -2628,6 +2664,20 @@ int main(int argc, char **argv) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             return clean_stale_prep(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5], argv[i + 6], argv[i + 7], argv[i + 8], argv[i + 9], argv[i + 10], argv[i + 11]) ? 0 : 3;
         }
+        if (tx_eqz(argv[i], "--pack-ancestors") && i + 2 < argc) {
+            /* fixture entry: --pack-ancestors ROOT OUT, prints pack's ancestors from the phase table, the
+               bounded-call decision for every phase and the first phase each re-check finds unfinished */
+            int open, n = 0;
+            load_chain_phases(argv[i + 1]);
+            for (int pi = 0; pi < g_nphases; pi++) if (g_pack_anc[pi] == 1) { sy_printf("PACK_ANCESTOR\t%s\n", g_phases[pi]); n++; }
+            sy_printf("PACK_ANCESTORS\tcount=%d\n", n);
+            for (int pi = 0; pi < g_nphases; pi++) if (pack_path_of(g_phases[pi])) sy_printf("PACK_PATH\tuntil=%s\tskip=g3,kernels-g3,compare\n", g_phases[pi]);
+            open = recheck_unfinished(argv[i + 2], "pack");
+            sy_printf("RECHECK_RANGE\tuntil=pack\tfirst_unfinished=%s\n", open < 0 ? "-" : g_phases[open]);
+            open = recheck_unfinished(argv[i + 2], "compare");
+            sy_printf("RECHECK_RANGE\tuntil=compare\tfirst_unfinished=%s\n", open < 0 ? "-" : g_phases[open]);
+            return 0;
+        }
         if (tx_eqz(argv[i], "--clean-job") && i + 5 < argc) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             clean_stale_job(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5]);
@@ -2754,7 +2804,9 @@ int main(int argc, char **argv) {
         int limit = until_phase ? chain_phase_index(until_phase) : -1;
         if (!resume || lane_phase || ntouch || !until_phase || (!tx_eqz(until_phase, "compare") && !tx_eqz(until_phase, "pack")) || limit < 0)
             die("REFUSE --recheck-only needs --resume --until compare|pack", until_phase);
-        for (int pi = 0; pi < limit; pi++) if (!ck_done(outdir, g_phases[pi])) die("REFUSE --recheck-only before an unfinished phase", g_phases[pi]);
+        /* compare: every earlier phase. pack: its ancestors only (g3 and compare are a lane of their own). */
+        int open = recheck_unfinished(outdir, until_phase);
+        if (open >= 0) die("REFUSE --recheck-only before an unfinished phase", g_phases[open]);
     }
     /* General dispatch of the residue rule: chain-run retries a phase with --until PHASE, so a
        table row needs no code of its own. The call sites before a step cover a run without --until. */
@@ -3107,8 +3159,13 @@ int main(int argc, char **argv) {
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
+    /* A bounded call for cache-manager or pack walks only pack's ancestors: g3 (lnx pair, kernels,
+       four slices) and compare are a lane of their own and are neither built nor re-checked here.
+       An unbounded call still runs everything in order. */
+    int pack_path = pack_path_of(until_phase);
+    if (pack_path) sy_printf("PACK_PATH\tskip=g3,kernels-g3,compare\tuntil=%s\n", until_phase);
     run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 2, resume);
-    run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 3, resume);
+    if (!pack_path) run_g_lnx_pair(root, outdir, rev, snap, pkg, gen1, fp, helper, 3, resume);
 
     if (!(resume && ck_done(outdir, "kernels-g2"))) {
         long t0 = sy_now_ms();
@@ -3120,7 +3177,8 @@ int main(int argc, char **argv) {
         mark(outdir, "kernels-g2", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g2\n");
 
-    if (!(resume && ck_done(outdir, "kernels-g3"))) {
+    if (pack_path) ;
+    else if (!(resume && ck_done(outdir, "kernels-g3"))) {
         long t0 = sy_now_ms();
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
@@ -3132,7 +3190,7 @@ int main(int argc, char **argv) {
 
     {   /* P2: g2 四个 Mac/Win 目标,再 g3 四个;每目标一个相位,Mac B 在 wf_mac_b 内串行 */
         int pg, pt;
-        for (pg = 2; pg <= 3; pg++)
+        for (pg = 2; pg <= (pack_path ? 2 : 3); pg++)
             for (pt = 0; pt < 4; pt++)
                 gen_slice_phase(root, outdir, helper, rev, snap, pkg, gen1, fp, pg, pt, resume);
     }
@@ -3140,7 +3198,8 @@ int main(int argc, char **argv) {
     /* From here on nothing may rest on the memo: compare and pack are full re-checks. */
     recheck_leave(outdir, "compare");
     if (!sm_enabled() || !until_phase || !tx_eqz(until_phase, "pack")) chain_memo_off("reached-compare");
-    if (!(resume && ck_done(outdir, "compare"))) {
+    if (pack_path) ;
+    else if (!(resume && ck_done(outdir, "compare"))) {
         long t0 = sy_now_ms();
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
