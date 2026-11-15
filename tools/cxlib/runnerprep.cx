@@ -42,103 +42,13 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
-#pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.runneridentity
 #pragma unisa use cxlib.tlibpkg
 #pragma unisa use mem.bytes
 
-#define RN_PLAN_SECS 20
 #define RN_KIT_SECS 20
 #define RN_BUILD_SECS 40
-#define RN_IDCAP (1L << 18)
 
-static int rn_fail(char *why, size_t wl, const char *what, const char *detail) {
-    if (why && wl && cx_fmt(why, wl, "runner-prepare %s%s%.300s", what, detail ? ": " : "", detail ? detail : "")) why[0] = 0;
-    return -1;
-}
-
-/* ARGV in CWD under the watchdog BOUND for SECS seconds (ROOT/tools/bound: the tree is killed at the
-   bound, rc 142), stdout and stderr together in *OUT (NUL terminated, caller frees).  The exit code,
-   128+signal, or -1 when nothing ran or memory ran out. */
-static int rn_run(const char *bound, const char *secs, char **argv, const char *cwd, char **out, long *outn) {
-    char *w[40], *b = 0, chunk[16384];
-    long n = 0, cap = 0, r;
-    int k = 0, i, fd = -1, pid, ex = 0, code = 0, sig = 0, lost = 0;
-    *out = 0; *outn = 0;
-    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
-    w[k++] = (char *)bound; w[k++] = (char *)secs;
-    for (i = 0; argv[i]; i++) { if (k >= 39) return -1; w[k++] = argv[i]; }
-    w[k] = 0;
-    pid = sy_spawn_pipe(w, cwd, 0, &fd, 0);
-    if (pid < 0) return -1;
-    for (;;) {
-        r = sy_read(fd, chunk, sizeof chunk);
-        if (r <= 0) break;
-        if (lost) continue;
-        if (n + r + 1 > cap) {
-            long c = cap ? cap : 65536; char *g;
-            while (c < n + r + 1) c *= 2;
-            g = realloc(b, (size_t)c);
-            if (!g) { lost = 1; continue; }
-            b = g; cap = c;
-        }
-        if (mm_copy(b + n, (size_t)(cap - n), chunk, (size_t)r)) { lost = 1; continue; }
-        n += r;
-    }
-    sy_close(fd);
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || lost) { free(b); return -1; }
-    if (b) b[n] = 0;
-    *out = b; *outn = n;
-    return ex ? code : 128 + sig;
-}
-
-static int rn_file_sha(const char *path, char hex[65]) {
-    size_t n = 0; char *s = cx_read(path, &n);
-    if (!s) return 1;
-    cx_sha256_hex(s, n, hex);
-    free(s);
-    return 0;
-}
-
-int rn_identity(const char *root, const char *source, char id[65], int *units, char *why, size_t wl) {
-    char bound[4400], product[4400], secs[16], pd[65], path[8192], hex[65];
-    char *plan = 0, *t; long pn = 0, at = 0, tn = 0; int rc, nu = 0;
-    if (!root || !source || !id || !root[0] || !source[0]) return rn_fail(why, wl, "arguments", 0);
-    id[0] = 0;
-    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
-        cx_fmt(secs, sizeof secs, "%d", RN_PLAN_SECS)) return rn_fail(why, wl, "path-bound", 0);
-    if (pp_product_digest(root, pd)) return rn_fail(why, wl, "product-identity", root);
-    {   char *v[] = {"sh", product, "-cx-plan", (char *)source, 0};
-        rc = rn_run(bound, secs, v, root, &plan, &pn);
-    }
-    if (rc) { rn_fail(why, wl, rc == 142 ? "plan-timeout" : "plan-failed", plan ? plan : "-"); free(plan); return -1; }
-    t = malloc(RN_IDCAP);
-    if (!t) { free(plan); return rn_fail(why, wl, "allocation", 0); }
-    if (cx_fmt(t, RN_IDCAP, "RUNNERPREP1\nproduct\t%s\ntarget\tlnx/x86_64\n", pd)) { free(t); free(plan); return rn_fail(why, wl, "identity-bound", 0); }
-    tn = (long)strlen(t);
-    while (at < pn) {   /* row: INDEX<TAB>UNIT-PATH[<TAB>...] */
-        long e = at, p = at, q;
-        while (e < pn && plan[e] != '\n') e++;
-        while (p < e && plan[p] >= '0' && plan[p] <= '9') p++;
-        if (p > at && p < e && plan[p] == '\t') {
-            p++; q = p;
-            while (q < e && plan[q] != '\t') q++;
-            if (q == p || q - p >= 4096) { free(t); free(plan); return rn_fail(why, wl, "plan-row", 0); }
-            plan[q] = 0;
-            if (plan[p] == '/' ? cx_fmt(path, sizeof path, "%s", plan + p) : cx_fmt(path, sizeof path, "%s/%s", root, plan + p)) { free(t); free(plan); return rn_fail(why, wl, "path-bound", 0); }
-            if (rn_file_sha(path, hex)) { rn_fail(why, wl, "unit-unreadable", plan + p); free(t); free(plan); return -1; }
-            if (cx_fmt(t + tn, (size_t)(RN_IDCAP - tn), "unit\t%s\t%s\n", plan + p, hex)) { free(t); free(plan); return rn_fail(why, wl, "identity-bound", 0); }
-            tn += (long)strlen(t + tn);
-            nu++;
-        }
-        at = e + 1;
-    }
-    free(plan);
-    if (!nu) { free(t); return rn_fail(why, wl, "plan-empty", source); }
-    cx_sha256_hex(t, (size_t)tn, id);
-    free(t);
-    if (units) *units = nu;
-    return 0;
-}
 
 /* 1 when BIN exists and its sha256 equals the certificate; *REASON says why not otherwise */
 static int rn_certified(const char *bin, const char *cert, const char **reason) {

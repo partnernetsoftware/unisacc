@@ -156,6 +156,39 @@ int main(int argc,char **argv){
    char marker[4400];join(marker,ch,"wt-shared");size_t mn=0;char *mk=cx_read(marker,&mn);
    ck(contains(wr.out,wr.outn,"WT_GATE\tbefore\tmode=SHARED\tscans=0\t")&&contains(wr.out,wr.outn,"executor-run-batch-required"),"child-wave-shared-mode-zero-worktree-scans");
    ck(mk&&mn==strlen(epoch)+1&&!memcmp(mk,epoch,strlen(epoch))&&mk[mn-1]=='\n',"child-wave-binds-epoch-marker-before-start");free(mk);np_free(&wr);}
+   /* Candidate identity through a symlinked ROOT: a version worktree links its
+      unisacc.com to the shared checkout's, and all-waves.cx compares the resolved
+      candidate against its own ROOT-derived spelling.  Accepting the link must not
+      accept a foreign candidate, so both halves are asserted here. */
+   /* Candidate identity through a symlink.  all-waves.cx realpaths both sides (a version
+      worktree links its unisacc.com), and as_identity reads the candidate with follow=1 so a
+      linked ROOT still yields the target's digest.  A link to the real candidate is accepted
+      here and the recorded identity must equal the target file's own sha256; a copy that is
+      NOT the ROOT candidate is still refused, so the relaxation cannot accept a foreign file. */
+   {char lk[4400],foreign[4400],want[65],lsess[4400],sess_tsv[4400];
+    join(lk,tmp,"candidate-link");join(foreign,tmp,"foreign-candidate");join(lsess,sess,"check-s9-wtshare-link");
+    {char *rmv[]={"rm","-f","--",lk,foreign,0};run(rmv,root);}
+    {char *rmv[]={"rm","-rf","--",lsess,0};run(rmv,root);}
+    {char *sl[]={"ln","-sfn",(char *)cand,lk,0};if(run(sl,root))die("link-candidate");}
+    {char *cp[]={"cp","-f",(char *)cand,foreign,0};if(run(cp,root))die("foreign-copy");}
+    {size_t rn=0;char *rb=cx_read(lk,&rn);if(!rb)die("link-read");cx_sha256_hex(rb,rn,want);free(rb);}
+    {char *v[]={aw,"init",root,lsess,lk,"-",0};np_result ir={0};
+     int ok=!np_run(v,root,0,25,&ir,why,sizeof why)&&ir.rc==0;
+     ck(ok,"symlinked-candidate-accepted");
+     if(ok){join(sess_tsv,lsess,"session.tsv");size_t sn=0;char *sb=cx_read(sess_tsv,&sn);int matched=0;
+      if(sb){char *at=sb,*end=sb+sn;
+       while(at<end){char *e=(char *)memchr(at,'\n',(size_t)(end-at));if(!e)break;
+        if((size_t)(e-at)>75&&!memcmp(at,"candidate_sha\t",14)&&!memcmp(at+14,want,64))matched=1;at=e+1;}
+       free(sb);}
+      ck(matched,"symlinked-candidate-identity-equals-target-sha");}
+     np_free(&ir);}
+    {char *rmv[]={"rm","-rf","--",lsess,0};run(rmv,root);}
+    {char *v[]={aw,"init",root,lsess,foreign,"-",0};np_result ir={0};
+     int rc=!np_run(v,root,0,25,&ir,why,sizeof why)?ir.rc:-1;
+     ck(rc==2&&(contains(ir.out,ir.outn,"candidate-must-be-ROOT/unisacc.com")||contains(ir.err,ir.errn,"candidate-must-be-ROOT/unisacc.com")),
+        "foreign-candidate-still-refused");np_free(&ir);}
+    {char *rmv[]={"rm","-rf","--",lsess,0};run(rmv,root);}
+    {char *rmv[]={"rm","-f","--",lk,foreign,0};run(rmv,root);}}
   {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}}
  else{
   char fixture[4400],p[4400],q[4400],target[4400];join(fixture,tmp,"root");if(mkdir(fixture,0700))die("fixture");join(p,fixture,"src");if(mkdir(p,0700))die("src");join(p,fixture,"agentwork");if(mkdir(p,0700))die("agentwork");

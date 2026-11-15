@@ -74,6 +74,62 @@ static int run_step(char **v, const char *cwd, int sec, np_result *r) {
     if (np_run(v, cwd, ev, sec, r, why, sizeof why)) { np_free(r); return 99; }
     return r->rc;
 }
+/* The s9 root is a frozen `git archive` tree (F). A batch material declared as
+   NAME-tool:path is produced by tools/affected.cx --prepare-materials, whose
+   cache lives under $HOME/.cache/unisacc/prep-cache, never in the repo out/.
+   MAP is that NAME<TAB>/ABS/PATH table for `s9-shards init`; a material nothing
+   can produce is reported on stderr and left out, so only the batches that
+   declare it become NOT_AVAIL while the rest of their slice still runs. */
+static char mapfile[16384];
+static char why4[300];
+static int materials_map(char *map, long cap, char *why, int whycap) {
+    char product[4400], tool[4400], *v[8];
+    np_result r = {0};
+    long at, used = 0, rows = 0;
+    int k = 0, rc;
+    if (cx_fmt(product, sizeof product, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tools/affected.cx", root)) { cx_fmt(why, whycap, "path"); return 1; }
+    v[k++] = "sh"; v[k++] = product; v[k++] = tool; v[k++] = "--";
+    v[k++] = "--materials-dump"; v[k++] = "--prepare-materials"; v[k] = 0;
+    rc = run_step(v, root, L_I("s9.cmd"), &r);
+    if (rc) { cx_fmt(why, whycap, "materials-dump rc=%d", rc); np_free(&r); return 1; }
+    map[0] = 0;
+    for (at = 0; r.out && at < r.outn;) {
+        long e = at, t = at;
+        while (e < r.outn && r.out[e] != '\n') e++;
+        if (e == r.outn) { cx_fmt(why, whycap, "dump-wire"); np_free(&r); return 1; }
+        while (t < e && r.out[t] != '\t') t++;
+        if (t >= e) { cx_fmt(why, whycap, "dump-field"); np_free(&r); return 1; }
+        if (tx_prefix(r.out + at, t - at, "MATERIAL", 8)) {
+            const char *f = r.out + t + 1;
+            long fend = e, name_end = t + 1, path_at = t + 1;
+            while (path_at < fend && r.out[path_at] != '\t') path_at++;
+            if (path_at + 1 >= fend) { cx_fmt(why, whycap, "dump-row"); np_free(&r); return 1; }
+            name_end = path_at;
+            {
+                long p = path_at + 1, pend = p;
+                while (pend < fend && r.out[pend] != '\t') pend++;
+                if (pend + 1 < fend) {   /* a REFUSED row: name it, keep going */
+                    rows++;
+                } else if (pend > p && r.out[p] == '/') {
+                    if (used + (pend - p) + (name_end - (t + 1)) + 3 > cap) { cx_fmt(why, whycap, "map-overflow"); np_free(&r); return 1; }
+                    if (mm_copy(map + used, cap - used, r.out + t + 1, name_end - (t + 1))) { cx_fmt(why, whycap, "map-copy"); np_free(&r); return 1; }
+                    used += name_end - (t + 1);
+                    map[used++] = '\t';
+                    if (mm_copy(map + used, cap - used, r.out + p, pend - p)) { cx_fmt(why, whycap, "map-copy"); np_free(&r); return 1; }
+                    used += pend - p;
+                    map[used++] = '\n';
+                    map[used] = 0;
+                    rows++;
+                } else { cx_fmt(why, whycap, "dump-path"); np_free(&r); return 1; }
+                (void)f; (void)fend; (void)rows;
+            }
+        }
+        at = e + 1;
+    }
+    np_free(&r);
+    return 0;
+}
 static const char *save_to; /* 非空时 invoke 把子进程完整 stdout 写到该路径(不受 out 缓冲截断) */
 static int invoke(const char *verb, const char *a1, const char *a2, const char *a3, int sec, char *out, int ocap) {
     char com[4400], tool[4400];
@@ -236,7 +292,14 @@ int main(int argc, char **argv) {
     pass_n++;
     /* s9-shards init: commit 与 release 透传 --tier; daily 不带 --tier 即 FULL。 */
     if (!strcmp(tier, "commit") || !strcmp(tier, "release")) { xa4 = "--tier"; xa5 = (char *)tier; }
-    rc = invoke("init", root, run, "-", L_I("s9.cmd"), tmp, sizeof tmp);
+    mapfile[0] = 0; why4[0] = 0;
+    /* --fake 只测编排:临时根里没有真产品,不跑材料准备,按空 MAP 继续。 */
+    if (!fake && materials_map(mapfile, (long)sizeof mapfile, why4, (int)sizeof why4)) {
+        fail_n++; write_report(report, "FAIL");
+        printf("S9_NIGHTLY\tstatus=FAIL\tstep=init-materials\treason=%s\treport=%s\n", why4, report);
+        return 1;
+    }
+    rc = invoke("init", root, run, mapfile[0] ? mapfile : "-", L_I("s9.cmd"), tmp, sizeof tmp);
     xa4 = xa5 = 0;
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
