@@ -1,5 +1,7 @@
 /* devtask contracts on a private store directory: add, claim, write-domain conflict refusal, done, block/resume,
- * gap, stale, list through the CLI, event rows, and eight concurrent claims of one task (exactly one wins). */
+ * gap, stale, list through the CLI, event rows, and eight concurrent claims of one task (exactly one wins);
+ * job-style work orders (task open/status/done/list): remaining seconds decrease, changes outside the write domain
+ * are warned and block done, a failing acceptance gives rc 1 without a task.done row, all passing gives rc 0 with one. */
 #pragma unisa use cxlib.devtask
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
@@ -24,6 +26,7 @@ static long events(const char *dir, const char *id, const char *ev) {
     for (long i = 0; i + kl <= n; i++) if (!memcmp(b + i, key, kl)) count++;
     free(b); return count;
 }
+static int sh(char *cmd, np_result *r) { char *v[] = {"sh", "-c", cmd, 0}; char why[256]; return np_run(v, 0, 0, 50, r, why, sizeof why); }
 int main(void) {
     char dir[] = "/tmp/check-devtask-XXXXXX", why[2048], id[16], id2[16], id3[16], id4[16], cmd[4096]; long now = 1800000000; DtSet s; np_result r = {0}; int rc;
     if (!mkdtemp(dir)) return 2;
@@ -67,6 +70,43 @@ int main(void) {
         ck(!rc && !r.rc && ok == 1 && refused == 7 && other == 0, "concurrent-claim-exactly-one-rc0");
         np_free(&r);
         ck(state_is(dir, "T4", "claimed", 0) && events(dir, "T4", "claim") == 1, "concurrent-claim-one-event-row");
+    }
+    /* job-style work orders (R5): private git repo under dir, acceptance run directly, clock from DEVTASK_NOW */
+    ck(dw_in("in,tools/x.cx", "in/a.txt") && dw_in("in,tools/x.cx", "tools/x.cx") && !dw_in("in,tools/x.cx", "other.txt") && dw_id_ok("r5-a") && !dw_id_ok("a/b") && !dw_id_ok("a b"), "work-domain-membership-and-id");
+#define WT "DEVTASK_ACCEPT_DIRECT=1 DEVTASK_DIR=%s/st DEVTASK_NOW=%ld sh ./unisacc.com tools/devtask.cx -- task "
+    {   char st[64]; int ok;
+        if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/repo/in && cd %s/repo && git init -q && echo a >in/a.txt && echo b >other.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm init && echo pre >predirty.txt", dir, dir) && !sh(cmd, &r) && !r.rc;
+        ck(ok, "work-setup-private-repo"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id w1 --title 'demo order' --write in --accept 'test -f in/ok' --accept true --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "TASK\topen\tw1\tdeadline_s=600\taccept=2\twrite=in");
+        ck(ok && events(st, "w1", "task.open") == 1, "work-open-records-order"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id w1 --title again --write in --accept true --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && r.rc == 1;
+        ck(ok, "work-open-twice-refused-rc1"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id w2 --title noaccept --write in --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && r.rc == 2;
+        ck(ok, "work-open-without-accept-rc2"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "status w1", dir, now + 10) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "used_s=10\tleft_s=590\t") && strstr(r.out, "TASK_STATUS\tw1\tchanged=0\toutside=0\toverdue=0");
+        ck(ok, "work-status-clean-after-open"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "status w1", dir, now + 100) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "used_s=100\tleft_s=500\t");
+        ck(ok, "work-status-remaining-decreases"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "status w1", dir, now + 700) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "left_s=-100\t") && strstr(r.out, "overdue=1");
+        ck(ok, "work-status-overdue-after-deadline"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo x >>%s/repo/in/a.txt && echo y >>%s/repo/other.txt && " WT "status w1", dir, dir, dir, now + 20) && !sh(cmd, &r) && !r.rc && r.out
+            && strstr(r.out, "CHANGED\tin/a.txt\n") && strstr(r.out, "OUTSIDE_WARN\tother.txt\n") && !strstr(r.out, "predirty.txt") && strstr(r.out, "changed=1\toutside=1");
+        ck(ok, "work-status-warns-outside-write-domain-and-skips-snapshot"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "done w1", dir, now + 30) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tFAIL\trc=1") && strstr(r.out, "ACCEPT\t2\tPASS")
+            && strstr(r.out, "TASK_NOT_DONE\tw1\taccept_failed=1\toutside=1") && !strstr(r.out, "\nDONE\tw1");
+        ck(ok && events(st, "w1", "task.done") == 0, "work-done-failing-accept-rc1-no-event"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo 'echo boom-marker; exit 7' >%s/repo/in/ok && " WT "open --id w3 --title tail --write in --accept 'sh in/ok' --deadline-min 1 --root %s/repo && " WT "done w3", dir, dir, now, dir, dir, now + 1) && !sh(cmd, &r) && r.rc == 1 && r.out
+            && strstr(r.out, "ACCEPT\t1\tFAIL\trc=7") && strstr(r.out, "boom-marker") && strstr(r.out, "TASK_NOT_DONE\tw3");
+        ck(ok && events(st, "w3", "task.done") == 0, "work-done-prints-failing-output-tail"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "done w1", dir, now + 40) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "OUTSIDE_CHANGED\tother.txt\n") && strstr(r.out, "accept_failed=0\toutside=1");
+        ck(ok && events(st, "w1", "task.done") == 0, "work-done-outside-change-rc1-no-event"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo b >%s/repo/other.txt && " WT "done w1", dir, dir, now + 50) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "DONE\tw1\taccept=2\t") && strstr(r.out, "used_s=50\tlate=0") && !strstr(r.out, "TASK_NOT_DONE");
+        ck(ok && events(st, "w1", "task.done") == 1, "work-done-all-pass-rc0-one-event"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "list", dir, now + 60) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "w1\tdone\t50\t0\tin\tdemo order") && strstr(r.out, "w3\topen\t") && strstr(r.out, "DEVTASK_WORK\tcount=2");
+        ck(ok, "work-list-states"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "status nosuch", dir, now) && !sh(cmd, &r) && r.rc == 2;
+        ck(ok, "work-missing-id-rc2"); np_free(&r);
     }
     printf("%s\tassertions=%d\tfailed=%d\n", failed ? "CHECK_DEVTASK_FAIL" : "CHECK_DEVTASK", assertions, failed);
     return failed ? 1 : 0;

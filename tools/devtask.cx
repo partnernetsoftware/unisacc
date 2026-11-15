@@ -7,12 +7,25 @@
  *   gap ID --text T           record a reported gap on a live task
  *   drop ID --why W           live -> dropped
  *   list [--state S] [--owner O] | show ID | stale            stale: live tasks past their deadline
+ * Job-style work orders with executable acceptance (plans/devsvc.md R5; ids are free names, separate from the T-table above):
+ *   task open --id ID --title T --write P... --accept CMD [--accept CMD]... --deadline-min N [--root R]
+ *       records the write domain, the acceptance commands and a snapshot of the dirty paths (with content hashes)
+ *   task status ID   used and remaining seconds, paths changed since open inside the write domain (CHANGED) and
+ *       outside it (OUTSIDE_WARN)
+ *   task done ID     runs every acceptance command (through devsvc x in the root, 55 s each) and requires no change
+ *       outside the write domain; all pass -> devsvc event task.done, task-events.tsv row, DONE line, rc 0; otherwise
+ *       TASK_NOT_DONE with the failing output tails, rc 1, and the order stays open (done may be retried any time)
+ *   task list        every work order with state open|overdue|done
+ *   $DEVTASK_ACCEPT_DIRECT=1 runs acceptance by sh -c under the root and skips the devsvc event (checks only).
  * Common: --dir D picks the store directory; otherwise $DEVTASK_DIR; otherwise the devsvc instance directory
  * derived from the repo table ($DEVSVC_REPO_TABLE or tools/devsvc-repo.tsv under the git top level).
  * $DEVTASK_NOW (epoch seconds) replaces the clock, for checks and demonstrations only.
  * Exit: 0 ok, 1 refused by state or conflict (DEVTASK_REFUSE on stderr), 2 bad input or I/O. Store format in cxlib/devtask.cx. */
 #pragma unisa use cxlib.devtask
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.build
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.env
 #pragma unisa use mem.heap
@@ -51,11 +64,139 @@ static int resolve(char *dir, int cap) {
     if (dt_instdir(root, tb && *tb ? tb : "tools/devsvc-repo.tsv", dir, cap, why, sizeof why)) return bad(why, 0);
     return 0;
 }
+/* ---- task: job-style work orders (plans/devsvc.md R5); the store and diff live in cxlib/devtask.cx ---- */
+static int toplevel(char *root, int cap) {
+    char *v[] = {"git", "rev-parse", "--show-toplevel", 0}; np_result r = {0}; char why[256]; long n;
+    if (np_run(v, 0, 0, 15, &r, why, sizeof why) || r.rc || !r.out || r.outn < 2) { np_free(&r); return bad("not inside a git work tree; give --root", 0); }
+    n = (long)r.outn; while (n > 0 && r.out[n - 1] == '\n') n--;
+    if (n >= cap || mm_copy(root, cap, r.out, n)) { np_free(&r); return bad("git toplevel too long", 0); }
+    root[n] = 0; np_free(&r); return 0;
+}
+static void tail(const char *tag, const char *s, long n) {
+    long i = n, lines = 0;
+    if (!s || n <= 0) return;
+    while (i > 0 && n - i < 3000 && lines < 25) { i--; if (s[i] == '\n' && i != n - 1) lines++; }
+    if (i > 0 && s[i] == '\n') i++;
+    printf("--- %s tail ---\n%.*s%s", tag, (int)(n - i), s + i, s[n - 1] == '\n' ? "" : "\n");
+}
+/* one acceptance command, 55 s bound: through devsvc x, or sh -c directly when $DEVTASK_ACCEPT_DIRECT is set (checks only) */
+static int accept_run(const DwTask *t, int k, int direct) {
+    char *vx[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--timeout-ms", "55000", "--cwd", (char *)t->root, "--", "sh", "-c", (char *)t->acc[k], 0};
+    char *vd[] = {"sh", "-c", (char *)t->acc[k], 0}; np_result r = {0}; char why[512] = ""; long t0 = sy_now_ms();
+    int rc = np_run(direct ? vd : vx, direct ? t->root : 0, 0, direct ? 55 : 58, &r, why, sizeof why), ok = !rc && !r.rc;
+    printf("ACCEPT\t%d\t%s\trc=%d\tms=%ld\t%s\n", k + 1, ok ? "PASS" : r.timed_out ? "TIMEOUT" : "FAIL", rc ? rc : r.rc, sy_now_ms() - t0, t->acc[k]);
+    if (!ok) { if (rc) printf("--- runner ---\n%s\n", why); tail("stdout", r.out, (long)r.outn); tail("stderr", r.err, (long)r.errn); }
+    np_free(&r); return ok;
+}
+static void paths(const char *tag, sb *b) {
+    const char *s = sb_cstr(b);
+    for (const char *p = s; p && *p;) { const char *e = strchr(p, '\n'); if (!e) break; printf("%s\t%.*s\n", tag, (int)(e - p), p); p = e + 1; }
+}
+static int task_main(int argc, char **argv, long now) {
+    const char *sub = argc > 2 ? argv[2] : "", *id = 0, *title = 0, *dmin = 0, *rootopt = 0, *acc[DW_ACC + 1]; char dir[1024], root[1024], why[2048] = ""; int nacc = 0, rc, i = 3;
+    int isopen = !strcmp(sub, "open"), islist = !strcmp(sub, "list"), direct = getenv("DEVTASK_ACCEPT_DIRECT") && *getenv("DEVTASK_ACCEPT_DIRECT");
+    DwTask t; sb *in, *out; int nin = 0, nout = 0;
+    if (!isopen && !islist && strcmp(sub, "status") && strcmp(sub, "done")) {
+        fprintf(stderr, "usage: devtask task open --id ID --title T --write P... --accept CMD [--accept CMD]... --deadline-min N [--root R]\n"
+                        "       devtask task status ID | task done ID | task list   (all: [--dir D])\n");
+        return 2;
+    }
+    if (!isopen && !islist) { if (argc < 4 || !strncmp(argv[3], "--", 2)) return bad("task needs an ID first:", sub); id = argv[i++]; }
+    for (; i < argc; i++) {
+        const char *a = argv[i], **dst = 0;
+        if (!strcmp(a, "--dir")) dst = &ov[O_DIR];
+        else if (isopen && !strcmp(a, "--id")) dst = &id;
+        else if (isopen && !strcmp(a, "--title")) dst = &title;
+        else if (isopen && !strcmp(a, "--deadline-min")) dst = &dmin;
+        else if (isopen && !strcmp(a, "--root")) dst = &rootopt;
+        else if (isopen && !strcmp(a, "--accept")) { if (i + 1 >= argc) return bad("missing value for", a); if (nacc >= DW_ACC) return bad("too many --accept", 0); acc[nacc++] = argv[++i]; continue; }
+        else if (isopen && !strcmp(a, "--write")) {
+            long used = (long)strlen(dom);
+            if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) return bad("missing value for", a);
+            while (i + 1 < argc && strncmp(argv[i + 1], "--", 2)) {
+                int w = snprintf(dom + used, sizeof dom - used, "%s%s", used ? "," : "", argv[++i]);
+                if (w >= (int)(sizeof dom - used)) return bad("oversized --write", 0);
+                used += w;
+            }
+            continue;
+        } else return bad("unexpected argument", a);
+        if (*dst) return bad("repeated option", a);
+        if (i + 1 >= argc) return bad("missing value for", a);
+        *dst = argv[++i];
+    }
+    if (resolve(dir, sizeof dir)) return 2;
+    if (isopen) {
+        long min = 0;
+        if (!id || !title || !dom[0] || !nacc || !dmin) return bad("task open needs --id --title --write --accept --deadline-min", 0);
+        for (const char *q = dmin; *q; q++) if (*q < '0' || *q > '9') return bad("bad --deadline-min", dmin);
+        if (strlen(dmin) > 6 || (min = atol(dmin)) < 1) return bad("bad --deadline-min", dmin);
+        if (rootopt) { if (snprintf(root, sizeof root, "%s", rootopt) >= (int)sizeof root) return bad("--root too long", 0); } else if (toplevel(root, sizeof root)) return 2;
+        rc = dw_open(dir, id, title, dom, acc, nacc, min, root, now, why, sizeof why);
+        if (!rc) printf("TASK\topen\t%s\tdeadline_s=%ld\taccept=%d\twrite=%s\n", id, min * 60, nacc, dom);
+        goto end;
+    }
+    if (islist) {
+        char p[2048]; unsigned char *b = 0; int64_t n = 0; int count = 0;
+        if (snprintf(p, sizeof p, "%s/work/index.tsv", dir) >= (int)sizeof p) return bad("--dir too long", 0);
+        rc = sy_read_file(p, &b, &n, 1L << 22);
+        if (rc && rc != -ENOENT) { fprintf(stderr, "devtask: read work index rc=%d\n", rc); return 2; }
+        printf("id\tstate\tused_s\tleft_s\twrite\ttitle\n");
+        for (long s = 0, e; !rc && s < n; s = e + 1) {
+            int dup = 0;
+            for (e = s; e < n && b[e] != '\n'; e++) {}
+            if (e >= n) break;
+            b[e] = 0;
+            for (long q = e + 1, qe; q < n && !dup; q = qe + 1) { for (qe = q; qe < n && b[qe] != '\n'; qe++) {} dup = qe - q == e - s && !memcmp(b + q, b + s, e - s); }
+            if (dup) continue;   /* a reopened id is listed once, at its last row */
+            if (dw_load(dir, (char *)b + s, &t, why, sizeof why)) { free(b); fprintf(stderr, "devtask: %s\n", why); return 2; }
+            printf("%s\t%s\t%ld\t%ld\t%s\t%s\n", t.id, t.done ? "done" : now > t.deadline ? "overdue" : "open", (t.done ? t.done : now) - t.opened, t.done ? 0 : t.deadline - now, t.write, t.title);
+            count++; dw_free(&t);
+        }
+        free(b); printf("DEVTASK_WORK\tcount=%d\n", count);
+        return 0;
+    }
+    if ((rc = dw_load(dir, id, &t, why, sizeof why)) != 0) goto end;
+    in = sb_new(); out = sb_new();
+    if (!in || !out) { dw_free(&t); return bad("out of memory", 0); }
+    if (!strcmp(sub, "status")) {
+        rc = dw_diff(&t, in, out, &nin, &nout, why, sizeof why);
+        if (!rc) {
+            printf("TASK\t%s\tstate=%s\tused_s=%ld\tleft_s=%ld\ttitle=%s\n", t.id, t.done ? "done" : "open", (t.done ? t.done : now) - t.opened, t.done ? 0 : t.deadline - now, t.title);
+            printf("WRITE\t%s\n", t.write);
+            for (int k = 0; k < t.nacc; k++) printf("ACCEPT\t%d\t%s\n", k + 1, t.acc[k]);
+            paths("CHANGED", in); paths("OUTSIDE_WARN", out);
+            printf("TASK_STATUS\t%s\tchanged=%d\toutside=%d\toverdue=%d\n", t.id, nin, nout, !t.done && now > t.deadline);
+        }
+    } else {
+        int failed = 0; const char *emit = "local";
+        for (int k = 0; k < t.nacc; k++) if (!accept_run(&t, k, direct)) failed++;
+        rc = dw_diff(&t, in, out, &nin, &nout, why, sizeof why);
+        if (!rc) {
+            paths("OUTSIDE_CHANGED", out);
+            if (!failed && !nout && !direct) {   /* the coordinator reads this event; without it the work order stays open */
+                char text[400]; char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "events", "emit", "task.done", text, 0}; np_result r = {0}; char w2[256] = "";
+                (void)cx_fmt(text, sizeof text, "id=%s accept=%d changed=%d used_s=%ld late=%d", t.id, t.nacc, nin, now - t.opened, now > t.deadline);
+                if (np_run(v, 0, 0, 30, &r, w2, sizeof w2) || r.rc) { printf("EMIT_FAIL\ttask.done\trc=%d\t%s\n", r.rc, w2); tail("emit", r.out, (long)r.outn); tail("emit stderr", r.err, (long)r.errn); failed = -1; }
+                else emit = "devsvc";
+                np_free(&r);
+            }
+            if (!failed && !nout) rc = dw_finish(dir, &t, now, why, sizeof why);
+            if (!rc && !failed && !nout) printf("DONE\t%s\taccept=%d\tchanged=%d\tused_s=%ld\tlate=%d\tevent=task.done(%s)\n", t.id, t.nacc, nin, now - t.opened, now > t.deadline, emit);
+            else if (!rc) { printf("TASK_NOT_DONE\t%s\taccept_failed=%d\toutside=%d\temit_failed=%d\tleft_s=%ld\n", t.id, failed > 0 ? failed : 0, nout, failed < 0, t.deadline - now); rc = 1; }
+        }
+    }
+    sb_free(in); sb_free(out); dw_free(&t);
+    if (rc == 1 && !why[0]) return 1;
+end:
+    if (rc == 1) fprintf(stderr, "DEVTASK_REFUSE\t%s\n", why); else if (rc) fprintf(stderr, "devtask: %s\n", why);
+    return rc;
+}
 static void row(const DtTask *t) { printf("%s\t%s\t%s\t%s\t%s\t%s\n", t->id, t->state, t->owner, t->deadline, t->domain, t->title); }
 int main(int argc, char **argv) {
     char dir[1024], why[2048] = "", id[16]; const char *cmd = argc > 1 ? argv[1] : "", *pos = argc > 2 ? argv[2] : 0, *ne = getenv("DEVTASK_NOW");
     long now = ne && *ne ? atol(ne) : sy_wall_s(); int rc, view = !strcmp(cmd, "list") || !strcmp(cmd, "stale"); unsigned allow = 0; DtSet s;
     (void)val;
+    if (!strcmp(cmd, "task")) return task_main(argc, argv, now);
     if (ne && *ne && now <= 0) return bad("bad DEVTASK_NOW", ne);
     if (!strcmp(cmd, "add")) allow = 1u << O_DOMAIN | 1u << O_DEADLINE | 1u << O_FOR;
     else if (!strcmp(cmd, "claim")) allow = 1u << O_OWNER;

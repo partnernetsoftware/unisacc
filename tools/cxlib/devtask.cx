@@ -235,3 +235,142 @@ int dt_instdir(const char *root, const char *table, char *out, int cap, char *wh
     if (snprintf(out, cap, "%s/%s/%s", home, sub, hex) >= cap) { snprintf(why, wl, "instance path too long"); return 2; }
     return 0;
 }
+
+/* ---- job-style work orders with executable acceptance (plans/devsvc.md R5) ----
+ * Store: DIR/work/ID.tsv (key<TAB>value rows: id title write root opened deadline done, accept CMD per row,
+ * snap SHA PATH per row) and DIR/work/index.tsv (one id per row, append only). opened/deadline/done are epoch
+ * seconds; done is 0 until every acceptance command passed. The snapshot is the dirty path set of the work tree
+ * at open time with a sha256 of each file ("-" missing, "?" unreadable); a path counts as changed by the task
+ * when it is dirty now and its (path, sha) pair is not in the snapshot. Inside the write domain means some
+ * write entry is a byte prefix of the path. Running the acceptance commands is the caller's side (tools/devtask.cx). */
+enum { DW_ACC = 16 };
+typedef struct DwSnap { char sha[65], path[512]; } DwSnap;
+typedef struct DwTask { char id[64], title[256], write[1024], root[1024]; long opened, deadline, done; char acc[DW_ACC][1024]; int nacc, nsnap; DwSnap *snap; } DwTask;
+void dw_free(DwTask *t) { free(t->snap); t->snap = 0; t->nsnap = 0; }
+int dw_id_ok(const char *s) {
+    if (!dt_name_ok(s, 64)) return 0;
+    for (; *s; s++) if (*s == '/' || *s == '.') return 0;
+    return 1;
+}
+int dw_in(const char *write, const char *path) {
+    long pl = (long)strlen(path);
+    for (const char *p = write; p;) {
+        const char *e = strchr(p, ','); long n = e ? e - p : (long)strlen(p);
+        if (n <= pl && !memcmp(p, path, n)) return 1;
+        p = e ? e + 1 : 0;
+    }
+    return 0;
+}
+/* dirty paths of the work tree at root, each with the sha256 of its current bytes */
+int dw_dirty(const char *root, DwSnap **out, int *n, char *why, int wl) {
+    char *v[] = {"git", "-C", (char *)root, "status", "--porcelain", "-z", "--untracked-files=all", 0}; np_result r = {0}; char w2[256]; int cnt = 0, k = 0; DwSnap *s;
+    *out = 0; *n = 0;
+    if (np_run(v, 0, 0, 30, &r, w2, sizeof w2) || r.rc) { np_free(&r); (void)cx_fmt(why, wl, "git status failed under %s", root); return 2; }
+    for (size_t i = 0; i < r.outn; i++) if (!r.out[i]) cnt++;
+    s = calloc(cnt + 1, sizeof *s);
+    if (!s) { np_free(&r); snprintf(why, wl, "out of memory"); return 2; }
+    for (size_t i = 0; i < r.outn;) {
+        size_t e = i; int ren, rc; char p[2048]; unsigned char *b = 0; int64_t bn = 0;
+        while (e < r.outn && r.out[e]) e++;
+        if (e - i < 4 || dt_cp(s[k].path, sizeof s[k].path, r.out + i + 3, (long)(e - i - 3)) || !dt_text_ok(s[k].path, sizeof s[k].path)
+            || snprintf(p, sizeof p, "%s/%s", root, s[k].path) >= (int)sizeof p) { free(s); np_free(&r); snprintf(why, wl, "git status entry malformed, or path too long or with control bytes"); return 2; }
+        ren = r.out[i] == 'R' || r.out[i] == 'C';
+        rc = sy_read_file(p, &b, &bn, 1L << 27);
+        if (rc || sy_sha256_hex(b ? (const void *)b : (const void *)"", (long)bn, s[k].sha)) (void)cx_fmt(s[k].sha, sizeof s[k].sha, "%s", rc == -ENOENT ? "-" : "?");   /* one byte into 65 */
+        free(b); k++; i = e + 1;
+        if (ren) { while (i < r.outn && r.out[i]) i++; i++; }
+    }
+    np_free(&r); *out = s; *n = k; return 0;
+}
+static int dw_file(const char *dir, const char *id, char *p, int cap) { return snprintf(p, cap, "%s/work/%s.tsv", dir, id) >= cap; }
+int dw_save(const char *dir, const DwTask *t, char *why, int wl) {
+    char p[2048], d[2048], num[160]; sb *o = sb_new(); int bad;
+    if (!o || dw_file(dir, t->id, p, sizeof p) || snprintf(d, sizeof d, "%s/work", dir) >= (int)sizeof d || sy_mkdir_all(d, 0700)
+        || cx_fmt(num, sizeof num, "opened\t%ld\ndeadline\t%ld\ndone\t%ld\n", t->opened, t->deadline, t->done)) { sb_free(o); snprintf(why, wl, "work order save setup failed"); return 2; }
+    bad = sb_puts(o, "id\t") || sb_puts(o, t->id) || sb_puts(o, "\ntitle\t") || sb_puts(o, t->title) || sb_puts(o, "\nwrite\t") || sb_puts(o, t->write)
+       || sb_puts(o, "\nroot\t") || sb_puts(o, t->root) || sb_puts(o, "\n") || sb_puts(o, num);
+    for (int i = 0; i < t->nacc && !bad; i++) bad = sb_puts(o, "accept\t") || sb_puts(o, t->acc[i]) || sb_puts(o, "\n");
+    for (int i = 0; i < t->nsnap && !bad; i++) bad = sb_puts(o, "snap\t") || sb_puts(o, t->snap[i].sha) || sb_puts(o, "\t") || sb_puts(o, t->snap[i].path) || sb_puts(o, "\n");
+    if (bad || !sb_cstr(o) || sy_write_atomic(p, sb_cstr(o), sb_len(o), 0600)) { sb_free(o); snprintf(why, wl, "write work order failed"); return 2; }
+    sb_free(o); return 0;
+}
+/* rc 2 with "no such work order" when the file is missing */
+int dw_load(const char *dir, const char *id, DwTask *t, char *why, int wl) {
+    char p[2048]; unsigned char *b = 0; int64_t n = 0; long rows = 0; int rc, bad = 0;
+    memset(t, 0, sizeof *t);
+    if (!dw_id_ok(id) || dw_file(dir, id, p, sizeof p)) { snprintf(why, wl, "bad work order id"); return 2; }
+    rc = sy_read_file(p, &b, &n, 1L << 24);
+    if (rc) { if (rc == -ENOENT) (void)cx_fmt(why, wl, "no such work order %s", id); else (void)cx_fmt(why, wl, "read work order %s rc=%d", id, rc); return 2; }
+    for (long i = 0; i < n; i++) if (b[i] == '\n') rows++;
+    t->snap = calloc(rows + 1, sizeof *t->snap);
+    if (!t->snap || !n || b[n - 1] != '\n') bad = 1;
+    for (long i = 0; i < n && !bad;) {
+        long e = i, k = i; const char *val; long vl;
+        while (b[e] != '\n') e++;
+        while (k < e && b[k] != '\t') k++;
+        if (k >= e) { bad = 1; break; }
+        val = (const char *)b + k + 1; vl = e - k - 1; b[k] = 0; b[e] = 0;
+        if (!strcmp((char *)b + i, "id")) bad = dt_cp(t->id, sizeof t->id, val, vl);
+        else if (!strcmp((char *)b + i, "title")) bad = dt_cp(t->title, sizeof t->title, val, vl);
+        else if (!strcmp((char *)b + i, "write")) bad = dt_cp(t->write, sizeof t->write, val, vl);
+        else if (!strcmp((char *)b + i, "root")) bad = dt_cp(t->root, sizeof t->root, val, vl);
+        else if (!strcmp((char *)b + i, "opened")) t->opened = atol(val);
+        else if (!strcmp((char *)b + i, "deadline")) t->deadline = atol(val);
+        else if (!strcmp((char *)b + i, "done")) t->done = atol(val);
+        else if (!strcmp((char *)b + i, "accept")) bad = t->nacc >= DW_ACC || dt_cp(t->acc[t->nacc], sizeof t->acc[0], val, vl) || !++t->nacc;
+        else if (!strcmp((char *)b + i, "snap")) {
+            const char *tab = strchr(val, '\t'); DwSnap *s = &t->snap[t->nsnap];
+            bad = !tab || dt_cp(s->sha, sizeof s->sha, val, tab - val) || dt_cp(s->path, sizeof s->path, tab + 1, vl - (tab - val) - 1) || !++t->nsnap;
+        } else bad = 1;
+        i = e + 1;
+    }
+    free(b);
+    if (bad || strcmp(t->id, id) || !t->write[0] || !t->root[0] || t->opened <= 0 || t->deadline < t->opened || !t->nacc) { dw_free(t); (void)cx_fmt(why, wl, "work order %s: malformed file", id); return 2; }
+    return 0;
+}
+/* rc 1 when a work order with this id exists and is not done; a done one is replaced */
+int dw_open(const char *dir, const char *id, const char *title, const char *write, const char *const *acc, int nacc, long deadline_min, const char *root, long now, char *why, int wl) {
+    DwTask t, old; int lk, rc; char p[2048], row[80];
+    memset(&t, 0, sizeof t);
+    if (!dw_id_ok(id)) { snprintf(why, wl, "bad --id (no blank, comma, slash or dot, under 64 bytes)"); return 2; }
+    if (!dt_text_ok(title, 256)) { snprintf(why, wl, "bad --title"); return 2; }
+    if (!dt_domain_ok(write)) { snprintf(why, wl, "bad --write (need relative path prefixes without blanks or ..)"); return 2; }
+    if (nacc < 1 || nacc > DW_ACC) { (void)cx_fmt(why, wl, "need 1 to %d --accept commands", DW_ACC); return 2; }
+    for (int i = 0; i < nacc; i++) if (!dt_text_ok(acc[i], sizeof t.acc[0])) { (void)cx_fmt(why, wl, "bad --accept number %d (empty, too long or control bytes)", i + 1); return 2; }
+    if (deadline_min < 1 || deadline_min > 525600) { snprintf(why, wl, "bad --deadline-min"); return 2; }
+    if (!dt_text_ok(root, sizeof t.root) || root[0] != '/') { snprintf(why, wl, "bad root"); return 2; }
+    if ((lk = dt_lock(dir)) < 0) { (void)cx_fmt(why, wl, "cannot lock %s", dir); return 2; }
+    rc = dw_load(dir, id, &old, why, wl);
+    if (!rc) { int live = !old.done; dw_free(&old); if (live) { dt_unlock(lk); (void)cx_fmt(why, wl, "work order %s is already open", id); return 1; } }
+    else if (!strstr(why, "no such work order")) { dt_unlock(lk); return 2; }
+    (void)cx_fmt(t.id, sizeof t.id, "%s", id); (void)cx_fmt(t.title, sizeof t.title, "%s", title); (void)cx_fmt(t.write, sizeof t.write, "%s", write); (void)cx_fmt(t.root, sizeof t.root, "%s", root);
+    for (int i = 0; i < nacc; i++) (void)cx_fmt(t.acc[i], sizeof t.acc[0], "%s", acc[i]);
+    t.nacc = nacc; t.opened = now; t.deadline = now + deadline_min * 60;
+    rc = dw_dirty(root, &t.snap, &t.nsnap, why, wl);
+    if (!rc) rc = dw_save(dir, &t, why, wl);
+    if (!rc && (snprintf(p, sizeof p, "%s/work/index.tsv", dir) >= (int)sizeof p || sy_append_file(p, row, snprintf(row, sizeof row, "%s\n", id), 0600))) { snprintf(why, wl, "append work index failed"); rc = 2; }
+    if (!rc) rc = dt_event(dir, id, "task.open", "-", now, why, wl);
+    dw_free(&t); dt_unlock(lk); return rc;
+}
+/* paths changed since open: tab-led rows appended to in (inside the write domain) and out (outside it) */
+int dw_diff(const DwTask *t, sb *in, sb *out, int *nin, int *nout, char *why, int wl) {
+    DwSnap *cur = 0; int n = 0, rc = dw_dirty(t->root, &cur, &n, why, wl);
+    *nin = 0; *nout = 0;
+    if (rc) return rc;
+    for (int i = 0; i < n && !rc; i++) {
+        int same = 0, inside = dw_in(t->write, cur[i].path);
+        for (int k = 0; k < t->nsnap && !same; k++) same = !strcmp(t->snap[k].path, cur[i].path) && !strcmp(t->snap[k].sha, cur[i].sha) && strcmp(cur[i].sha, "?");
+        if (same) continue;
+        if (sb_puts(inside ? in : out, cur[i].path) || sb_puts(inside ? in : out, "\n")) { snprintf(why, wl, "out of memory"); rc = 2; }
+        if (inside) ++*nin; else ++*nout;
+    }
+    free(cur); return rc;
+}
+/* marks the work order done at now and appends the task.done row to task-events.tsv */
+int dw_finish(const char *dir, DwTask *t, long now, char *why, int wl) {
+    int lk = dt_lock(dir), rc;
+    if (lk < 0) { (void)cx_fmt(why, wl, "cannot lock %s", dir); return 2; }
+    t->done = now; rc = dw_save(dir, t, why, wl);
+    if (!rc) rc = dt_event(dir, t->id, "task.done", "-", now, why, wl);
+    dt_unlock(lk); return rc;
+}

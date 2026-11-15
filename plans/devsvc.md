@@ -84,6 +84,28 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - `devsvc events --wait KIND [--since SEQ] [--timeout-ms N]`:阻塞等某类事件,缺省只等新事件,超时 rc 124。
 - 用法:长命令一律 `--bg` 再 `wait`,不写 sleep 轮询;宿主 30/60 s 上限内反复 wait 即可。
 
+### 工单作业化 task(R5,2026-11-15)
+
+子代理与窗口的每一单都开成工单,协调者只认 `task.done` 事件(`devsvc events --wait task.done` 或实例目录 `task-events.tsv` 的 `task.done` 行),不认"已完成"的口头汇报。工单落在 devsvc 实例目录的 `work/`,不入库。
+
+- 开单:`sh ./unisacc.com tools/devtask.cx -- task open --id ID --title T --write 路径前缀... --accept '验收命令' [--accept '...']... --deadline-min N`。记下写域、验收命令和当时工作树脏路径的内容哈希快照;同名工单未完成时再开 rc 1。
+- 看进度:`task status ID`。打印已用秒 `used_s`、剩余秒 `left_s`(过期为负且 `overdue=1`)、写域内已改文件 `CHANGED`、写域外被改文件 `OUTSIDE_WARN`。还有剩余秒就继续干,不得以"到截止"收工。
+- 收工:`task done ID`。逐条实跑验收命令(经 `devsvc x`,在仓根,各 55 s 上限),并核写域外无改动;全过才发 `task.done` 事件、记 `DONE` 行,rc 0;任一不过打 `TASK_NOT_DONE` 与失败命令输出尾部,rc 1,工单保持打开,修完可随时重试。超过 55 s 的验收拆成多条,或先 `devsvc x --bg` 起作业、验收命令写成 `devsvc wait JOB`。
+- 列表:`task list`(open、overdue、done)。
+- 已知边界:共享检出里别的窗口在本单期间改了写域外文件,也会计入 `OUTSIDE_WARN` 并挡住 done(工具分不清是谁改的);此时在汇报里写明路径与归属,由协调者裁决,不绕过。开单时已脏且内容未变的路径不计。
+
+简报模板(固定五段之外加一行):
+
+```
+目标:...
+写域:...(与 task open --write 一致)
+验收命令:...(与 task open --accept 一致,含预期值)
+截止:N 分钟(task open --deadline-min N)
+禁区:...
+工单:开工先 task open,收工前 task done;未见 DONE 行不得报完成,TASK_NOT_DONE 时原样贴出失败尾部并继续修,或在截止时如实报未完成。
+```
+
+
 
 ## 6 已知限制与下一单
 
