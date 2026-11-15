@@ -644,6 +644,17 @@ static void node_sha(const char *rdir, fl_node *nd, char *dst, int cap) {
     }
 }
 static int cancel_hit(void) { return sy_sig_taken(SIGINT) + sy_sig_taken(SIGTERM) + sy_sig_taken(SIGHUP) > 0; }
+static char x_last_err[PW + 300];   /* xmode 最近一次作业的 .err 路径(git commit 失败时回打尾部) */
+/* PATH 的最后 MAXL 行打到 stderr,前缀 GIT_COMMIT_ERR */
+static void err_tail(const char *path, int maxl) {
+    unsigned char *b = 0; int64_t n = 0; long i, st; int lines = 0;
+    if (!path[0] || sy_read_file(path, &b, &n, 1 << 24) || !b) return;
+    while (n > 0 && b[n - 1] == '\n') n--;
+    for (i = n - 1; i >= 0; i--) if (b[i] == '\n' && ++lines >= maxl) break;
+    st = i + 1;
+    while (st < n) { long e = st; while (e < n && b[e] != '\n') e++; fprintf(stderr, "GIT_COMMIT_ERR\t%.*s\n", (int)(e - st), (char *)b + st); st = e + 1; }
+    free(b);
+}
 /* text 非空即内联节点表(写进 RUN/flow.tsv)。xmode:单条 exec,把节点 stdout/stderr 原样转出,返回节点退出码。 */
 static int flow_go(const char *root, const char *file, const char *text, const char *rdir_in, int jobs, long dl, int cat, long wait_ms, int xmode) {
     static fl_flow f; fl_sum s; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0;
@@ -698,7 +709,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     if (xmode) {
         fflush(stdout);
         F(p, sizeof p, "%s/out/%s.out", rdir, f.n[0].id); dump(p, stdout); fflush(stdout);
-        F(p, sizeof p, "%s/out/%s.err", rdir, f.n[0].id); dump(p, stderr);
+        F(p, sizeof p, "%s/out/%s.err", rdir, f.n[0].id); dump(p, stderr); F(x_last_err, sizeof x_last_err, "%s", p);
         fprintf(stderr, "X\t%s\trc=%d\tms=%s\tvia=%s\trun=%s\n", xst, f.n[0].rc, xms, svc_on ? "service" : "local", rdir);
         r = f.n[0].rc < 0 ? 1 : f.n[0].rc; fl_free(&f);
         return r;
@@ -1081,7 +1092,9 @@ static int cmd_git(const char *root, int argc, char **argv) {
     {   const char *gow = auto_owner(); int gmine;
         if ((rc = auto_lock(root, "git-index", gow))) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock git-index: %s\n", rn ? resp : "no instance"); return rc == 3 ? 3 : 1; }
         gmine = !strncmp(resp, "OK\tacquired", 11);
+        x_last_err[0] = 0;
         rc = tool_locked(root, need, "tools/commit-own.cx", n, v);
+        if (rc != 0) err_tail(x_last_err, 20);   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行(调用方常只看末几行) */
         if (rc == 0 && push) { char *pv[] = {"--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 5, pv) == 0; if (!pushed) rc = 1; }
         if (gmine) { char rq[200]; F(rq, sizeof rq, "lock-release\tgit-index\t%s", gow); request(root, rq, 0); } }
     {   char *hv[] = {"git", "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
