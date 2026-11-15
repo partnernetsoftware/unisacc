@@ -71,11 +71,19 @@ static void expectations(void) {
     }
     if(ferror(f)||fclose(f))die("expected table read");
 }
-static int matches(int i,const char *text) {
+/* Compiler diagnostics are behavior output, not source text: search them with an explicit byte bound
+   (up to cap or the first NUL, as strstr did) and return the first hit or 0. */
+static const char *diag_at(const char *hay,size_t cap,const char *needle) {
+    if(!hay||!needle)return 0;
+    size_t hn=0,nn=strlen(needle);while(hn<cap&&hay[hn])hn++;
+    for(size_t j=0;j+nn<=hn;j++)if(!memcmp(hay+j,needle,nn))return hay+j;
+    return 0;
+}
+static int matches(int i,const char *text,size_t textn) {
     char *p=diagnostics[i];
     while(*p) {
         char *end=strchr(p,'|');if(end)*end=0;
-        int found=text&&strstr(text,p)!=0;
+        int found=diag_at(text,textn,p)!=0;
         if(end)*end='|';if(!found)return 0;if(!end)break;p=end+1;
     }
     return 1;
@@ -88,11 +96,11 @@ static void save(const char *p,const char *s,size_t n) {
     if(n&&fwrite(s,1,n,f)!=n)die("write evidence"); if(fclose(f))die("close evidence");
 }
 /* Physical stderr remains untouched; all other original fragments still apply. */
-static int debt_fragments(int i,const char *text,long expected) {
+static int debt_fragments(int i,const char *text,size_t textn,long expected) {
     char physical[100];tx_snprintf(physical,sizeof physical,"tape domain line %ld: unknown opcode",expected);
     char *p=diagnostics[i];int saw=0;
     while(*p){char *end=strchr(p,'|');if(end)*end=0;
-        int skip=!strcmp(p,physical),ok=skip||(text&&strstr(text,p));if(skip)saw++;
+        int skip=!strcmp(p,physical),ok=skip||diag_at(text,textn,p)!=0;if(skip)saw++;
         if(end)*end='|';if(!ok)return 0;if(!end)break;p=end+1;
     }return saw==1;
 }
@@ -113,10 +121,10 @@ static int debt_identity(int i) {
     tx_snprintf(leaf,sizeof leaf,"%04d",i);path(prefix,sizeof prefix,work,leaf);
     tx_snprintf(temp,sizeof temp,"%s.tmp",prefix);tx_snprintf(err,sizeof err,"%s.stderr",prefix);
     size_t en;char *stderr_text=cx_read(err,&en);if(!stderr_text)return 0;
-    char *report=strstr(stderr_text,"\ntape domain line ");long physical=0;
+    const char *report=diag_at(stderr_text,en,"\ntape domain line ");long physical=0;
     if(report){physical=strtol(report+18,&end,10);if(physical<=0||strncmp(end,": unknown opcode\n",17))physical=0;}
     char source_line[4400];tx_snprintf(source_line,sizeof source_line,"\n%s:%ld: ",sources[i],physical);
-    int valid=physical>0&&strstr(stderr_text,source_line)&&debt_fragments(i,stderr_text,expected);free(stderr_text);if(!valid)return 0;
+    int valid=physical>0&&diag_at(stderr_text,en,source_line)&&debt_fragments(i,stderr_text,en,expected);free(stderr_text);if(!valid)return 0;
     char envtmp[4500];tx_snprintf(envtmp,sizeof envtmp,"TMPDIR=%s",temp);char *adds[]={envtmp,"UNISA_JOBS=1",0};
     tx_snprintf(p,sizeof p,"%s.interfaces",prefix);tx_snprintf(q,sizeof q,"%s.interfaces.stderr",prefix);
     char *scan[]={"sh","-c","for f in \"$1\"/ua-cxif-*.h; do test -f \"$f\" && printf '%s\\n' \"$f\"; done","sh",temp,0};
@@ -228,7 +236,7 @@ static int compile(int i) {
     int scanner=known&&!strcmp(category[i],"scanner-input");
     int input_ok=scanner&&!run&&!r.residue&&(ok||(r.rc==1&&!object));
     int deferred=explicit_consumer&&semantic[i]&&!run&&r.rc==1&&!object&&!r.residue;
-    int xfail=!deferred&&known&&!scanner&&!run&&r.rc==1&&!object&&!r.residue&&matches(i,r.err);
+    int xfail=!deferred&&known&&!scanner&&!run&&r.rc==1&&!object&&!r.residue&&matches(i,r.err,r.errn);
     const char *status=scanner?(input_ok?(ok?"INPUT-COMPILED":"INPUT-REJECTED"):"FAIL"):(known?(ok?"XPASS":(xfail?"XFAIL":"FAIL")):(ok?"PASS":"FAIL"));
     FILE *f=fopen(result,"wb");if(!f)die("result evidence");
     fprintf(f,"%s\t%s\tmode=%s\trun=%d\trc=%d\tobject=%d\tresidue=%d\traw_compile_failure=%d\tcategory=%s\treason=%s\tstderr=%s\n",status,sources[i],links[i]?"symlink-follow":"regular",run,r.rc,object,r.residue,r.rc!=0,known?category[i]:"-",known?reason[i]:"-",err);
@@ -355,6 +363,12 @@ int main(int argc,char **argv) {
         char script[4400];path(script,sizeof script,argv[2],"tests/tools-compile-boundaries.py");
         char *av[]={"python3",script,argv[2],argv[3],0};execvp(av[0],av);die("boundary runner exec");
     }
+    /* --register ROOT NEW_REGISTRY --with-untracked: candidate generation only (a new tool not yet staged);
+       the inventory adds git ls-files -o --exclude-standard -- tools .cx files; an untracked symlink or
+       other non-regular file is refused.  Every verification (shards, --shards, the precommit toolsreg
+       gate) stays index-only, so a registry row for an unstaged file is still rejected there. */
+    int with_untracked=argc==5&&!strcmp(argv[1],"--register")&&!strcmp(argv[4],"--with-untracked");
+    if(with_untracked)argc=4;
     int update=argc==4&&!strcmp(argv[1],"--register");
     int listing=argc==3&&!strcmp(argv[1],"--shards");
     explicit_consumer=argc==8&&!strcmp(argv[4],"--compiler")&&!strcmp(argv[6],"--models");
@@ -389,6 +403,39 @@ int main(int argc,char **argv) {
             sources[count]=strdup(p);if(!sources[count])die("allocation");links[count]=!strncmp(s,"120000 ",7);count++;
         }at+=n+1;
     }np_free(&list);
+    if(with_untracked) {
+        char *ov[]={"git","ls-files","-o","--exclude-standard","-z","--","tools",0};
+        if(np_run(ov,root,0,3,&list,why,sizeof why)||list.rc||list.errn)die("git untracked inventory failed");
+        size_t extra=0;for(size_t j=0;j<list.outn;j++)if(!list.out[j])extra++;
+        if(extra) {
+            if(extra>2147483640u-capacity)die("inventory allocation bound");
+            size_t total=capacity+extra;
+            char **ns=realloc(sources,total*sizeof *sources);if(!ns)die("allocation");sources=ns;
+            int *nl=realloc(links,total*sizeof *links);if(!nl)die("allocation");links=nl;
+            char **nc=realloc(category,total*sizeof *category);if(!nc)die("allocation");category=nc;
+            char **nd=realloc(diagnostics,total*sizeof *diagnostics);if(!nd)die("allocation");diagnostics=nd;
+            char **nr=realloc(reason,total*sizeof *reason);if(!nr)die("allocation");reason=nr;
+            for(size_t j=capacity;j<total;j++){sources[j]=0;links[j]=0;category[j]=0;diagnostics[j]=0;reason[j]=0;}
+            void *nsm=realloc(semantic,total*sizeof *semantic);if(!nsm)die("allocation");semantic=nsm;
+            memset(semantic+capacity,0,extra*sizeof *semantic);
+            capacity=total;
+        }
+        at=0;while(at<list.outn){char *p=list.out+at;size_t pn=0;while(pn<list.outn-at&&p[pn])pn++;
+            if(pn==list.outn-at)die("unterminated untracked inventory");
+            if(pn>=3&&!strcmp(p+pn-3,".cx")){
+                char full[4400];struct stat st;path(full,sizeof full,root,p);
+                if(lstat(full,&st))die("untracked source stat");
+                if(!S_ISREG(st.st_mode))die("untracked source must be a regular file");
+                if(strchr(p,'\n')||strchr(p,'\t'))die("source name cannot be represented in TSV");
+                sources[count]=strdup(p);if(!sources[count])die("allocation");links[count]=0;count++;
+            }at+=pn+1;
+        }np_free(&list);
+        /* merge into git index order (byte order of paths), keeping kinds aligned */
+        for(int i=1;i<count;i++){char *s=sources[i];int k=links[i],j=i-1;
+            while(j>=0&&strcmp(sources[j],s)>0){sources[j+1]=sources[j];links[j+1]=links[j];j--;}
+            sources[j+1]=s;links[j+1]=k;}
+        for(int i=1;i<count;i++)if(!strcmp(sources[i-1],sources[i]))die("duplicate source");
+    }
     if(!count)die("empty source inventory");
     if(update){registry(1,argv[3]);return 0;}
     registry(0,0);
