@@ -1,0 +1,57 @@
+/* Checks cx/sys/netpoll.cx: sy_sock_poll and sy_sock_optnum; Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-cx-sys-netpoll.cx
+   Prints PASS/FAIL lines and CX_SYS_NETPOLL<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tsysnetpoll.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tsysnetpoll.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+int main(void) {
+    unsigned char sa[SY_SA_MAX], lo[4] = {127, 0, 0, 1};
+    char buf[8];
+    int ls, cs, as, n, len = SY_SA_MAX;
+    ls = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_STREAM));
+    ck(ls >= 0, "open");
+    n = sy_sa_inet4(sa, (int)sizeof sa, lo, 0);
+    ckv(sy_sock_bind(ls, sa, n), 0, "bind");
+    ckv(sy_sock_listen(ls, 4), 0, "listen");
+    ckv(sy_sock_name(ls, sa, &len), 0, "name");
+    n = sy_sa_port(sa, len);
+    ck(n > 0, "port");
+    ckv(sy_sock_poll(ls, SY_POLLIN, 0), 0, "idle-listener-0ms");
+    ckv(sy_sock_poll(ls, SY_POLLIN, 30), 0, "idle-listener-30ms-timeout");
+    cs = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_STREAM));
+    sy_sa_inet4(sa, (int)sizeof sa, lo, n);
+    ckv(sy_sock_connect(cs, sa, 16), 0, "connect");
+    ckv(sy_sock_poll(ls, SY_POLLIN, 1000), SY_POLLIN, "listener-readable");
+    as = sy_sock_accept(ls, 0, 0);
+    ck(as >= 0, "accept");
+    ckv(sy_sock_poll(cs, SY_POLLOUT, 0), SY_POLLOUT, "writable");
+    ckv(sy_sock_poll(as, SY_POLLIN, 20), 0, "no-data-timeout");
+    ckv(sy_sock_send(cs, "xy", 2), 2, "send");
+    ckv(sy_sock_poll(as, SY_POLLIN, 1000), SY_POLLIN, "data-readable");
+    ckv(sy_sock_poll(as, SY_POLLIN | SY_POLLOUT, 0), SY_POLLIN | SY_POLLOUT, "both-bits");
+    ckv(sy_sock_recv(as, buf, 8), 2, "recv");
+    sy_close(cs);
+    ck((sy_sock_poll(as, SY_POLLIN, 1000) & (SY_POLLIN | SY_POLLHUP)) != 0, "peer-close-readable");
+    ckv(sy_sock_recv(as, buf, 8), 0, "recv-eof");
+    ckv(sy_sock_poll(-1, 0, 20), 0, "negative-fd-sleeps");
+    ckv(sy_sock_poll(-1, 0, 0), 0, "negative-fd-0ms");
+    sy_close(as);
+    ckv(sy_sock_poll(as, SY_POLLIN, 0), -EBADF, "closed-fd-ebadf");
+    ckv(sy_sock_poll(999, SY_POLLIN, 0), -EBADF, "unopened-fd-ebadf");
+    ckv(sy_sock_poll(ls, 0x4000, 0), -EINVAL, "bad-events-einval");
+    ck(sy_sock_optnum(SY_SP_TCP_NODELAY) > 0, "optnum-nodelay");
+    ck(sy_sock_optnum(SY_SP_IPPROTO_TCP) > 0, "optnum-tcp");
+    ckv(sy_sock_optnum(99), -EINVAL, "optnum-unknown");
+    sy_close(ls);
+    printf("CX_SYS_NETPOLL\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

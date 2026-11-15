@@ -1,0 +1,182 @@
+/* tests/stream/route-equiv.cx -- object and link routes before vs after the route-upstream change
+ * (0.0.59 candidate: fwdmark/fwdsig/tapelink/routepipe, tl_dce).
+ *
+ *   sh ./unisacc.com tests/stream/route-equiv.cx -- OUT BASE CAND
+ *
+ * OUT   scratch directory (OUT/route-equiv, overwritten).
+ * BASE  the command of the 0.0.58 product, e.g. "sh /path/unisacc.com".
+ * CAND  the command of the 0.0.59 candidate, e.g. /path/_b1/lnx-x86_64/candidate.
+ * Both are run with UNISA_JOBS=1 and without UNISA_CONTAINER. Without CAND the check refuses
+ * (rc 2): it needs the candidate, so its batch row stays PLANNED until the candidate is installed.
+ *
+ * Per target of six (-c -b T -funit, then link; images of non-native targets are never run):
+ *   E  full.c, a.c+b.c (no missing extern): objects and linked images byte-identical (cmp), rc 0.
+ *   P  dead.c (dead() calls zz_missing, nothing calls dead): BASE refuses with exactly
+ *      "link: undefined reference to zz_missing\n" rc 1; CAND links rc 0 (design of tl_dce); on
+ *      lnx/x86_64 the CAND image prints "live 3\n".
+ *   N  reach.c (main calls zz_missing) and usr.c (main calls user): a reachable missing extern is
+ *      refused by both with the same exact stderr, rc 1, no image.
+ * Prints PASS/FAIL per assertion and ROUTE_EQUIV_SUMMARY; a last line ROUTE_EQUIV only when nothing
+ * failed; rc 1 on any FAIL. */
+#pragma unisa use cxlib.netpack
+
+static const char *re_targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+static char re_dir[4400];
+static char re_base[2000];
+static char re_cand[2000];
+static int re_passed, re_failed;
+
+static void re_die(const char *s) { fprintf(stderr, "route-equiv: %s\n", s); exit(2); }
+static void re_ck(int ok, const char *label, const char *tgt) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", label, tgt);
+    if (ok) re_passed++; else re_failed++;
+}
+/* One shell line in the scratch directory, 30 s bound: rc, or -1 on transport; stderr and stdout handed over. */
+static int re_sh(const char *cmd, char **err, size_t *errn, char **out, size_t *outn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int rc;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    if (np_run(av, re_dir, 0, 30, &r, why, sizeof why)) { np_free(&r); return -1; }
+    if (err) { *err = r.err; *errn = r.errn; r.err = 0; }
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+static void re_put(const char *name, const char *text) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", re_dir, name) || cx_write(p, text, strlen(text))) re_die("fixture write");
+}
+/* Run PRODUCT with ARGS in the scratch directory. */
+static int re_cc(const char *prod, const char *args, char **err, size_t *errn) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "exec env -u UNISA_CONTAINER UNISA_JOBS=1 %s %s", prod, args)) re_die("cmd");
+    return re_sh(cmd, err, errn, 0, 0);
+}
+static int re_same(const char *a, const char *b) {
+    char cmd[1000];
+    if (cx_fmt(cmd, sizeof cmd, "cmp -s %s %s", a, b)) re_die("cmd");
+    return re_sh(cmd, 0, 0, 0, 0) == 0;
+}
+static int re_exists(const char *f) {
+    char cmd[600];
+    if (cx_fmt(cmd, sizeof cmd, "test -f %s", f)) re_die("cmd");
+    return re_sh(cmd, 0, 0, 0, 0) == 0;
+}
+static int re_is(const char *b, size_t n, const char *want) { return b && n == strlen(want) && !memcmp(b, want, n); }
+
+/* Compile the five sources of side S (b or c) for target T, tag TG. */
+static void re_compile(const char *prod, const char *s, const char *t, const char *tg) {
+    static const char *src[] = {"full", "dead", "reach", "usr", "a", "b"};
+    char a[600], lab[200];
+    int i, rc;
+    for (i = 0; i < 6; i++) {
+        if (cx_fmt(a, sizeof a, "-c -b %s -funit %s.c -o %s-%s-%s.o", t, src[i], s, tg, src[i])) re_die("args");
+        rc = re_cc(prod, a, 0, 0);
+        if (cx_fmt(lab, sizeof lab, "compile %s %s.c rc0 (%s)", t, src[i], s)) re_die("lab");
+        re_ck(rc == 0, lab, t);
+    }
+}
+static int re_link(const char *prod, const char *s, const char *tg, const char *objs, const char *img, char **err, size_t *errn) {
+    char a[1200], o[1000];
+    const char *p = objs;
+    size_t n = 0;
+    /* objs is a blank-separated list of source stems */
+    o[0] = 0;
+    while (*p) {
+        size_t k = 0;
+        char st[40];
+        while (p[k] && p[k] != ' ') k++;
+        if (k >= sizeof st) re_die("stem");
+        { size_t j; for (j = 0; j < k; j++) st[j] = p[j]; st[k] = 0; }
+        if (cx_fmt(o + n, sizeof o - n, "%s-%s-%s.o ", s, tg, st)) re_die("objs");
+        n = strlen(o);
+        p += k; while (*p == ' ') p++;
+    }
+    if (cx_fmt(a, sizeof a, "%s-o %s-%s-%s.img", o, s, tg, img)) re_die("args");
+    return re_cc(prod, a, err, errn);
+}
+
+static void re_target(const char *t) {
+    char tg[40], a[400], b[400], lab[200], *eb, *ec;
+    size_t nb, nc, i;
+    int rb, rc;
+    static const char *src[] = {"full", "dead", "reach", "usr", "a", "b"};
+    if (cx_fmt(tg, sizeof tg, "%s", t)) re_die("tag");
+    for (i = 0; tg[i]; i++) if (tg[i] == '/') tg[i] = '-';
+    re_compile(re_base, "b", t, tg);
+    re_compile(re_cand, "c", t, tg);
+    for (i = 0; i < 6; i++) {
+        if (cx_fmt(a, sizeof a, "b-%s-%s.o", tg, src[i]) || cx_fmt(b, sizeof b, "c-%s-%s.o", tg, src[i])) re_die("name");
+        if (cx_fmt(lab, sizeof lab, "E.object %s.c byte-identical", src[i])) re_die("lab");
+        re_ck(re_same(a, b), lab, t);
+    }
+    /* E: no missing extern */
+    rb = re_link(re_base, "b", tg, "full", "full", 0, 0);
+    rc = re_link(re_cand, "c", tg, "full", "full", 0, 0);
+    if (cx_fmt(a, sizeof a, "b-%s-full.img", tg) || cx_fmt(b, sizeof b, "c-%s-full.img", tg)) re_die("name");
+    re_ck(rb == 0 && rc == 0 && re_same(a, b), "E.link full.c image byte-identical, rc0 both", t);
+    rb = re_link(re_base, "b", tg, "a b", "ab", 0, 0);
+    rc = re_link(re_cand, "c", tg, "a b", "ab", 0, 0);
+    if (cx_fmt(a, sizeof a, "b-%s-ab.img", tg) || cx_fmt(b, sizeof b, "c-%s-ab.img", tg)) re_die("name");
+    re_ck(rb == 0 && rc == 0 && re_same(a, b), "E.link a.c+b.c image byte-identical, rc0 both", t);
+    /* P: dead function with a missing name */
+    eb = 0;
+    rb = re_link(re_base, "b", tg, "dead", "dead", &eb, &nb);
+    rc = re_link(re_cand, "c", tg, "dead", "dead", 0, 0);
+    if (cx_fmt(a, sizeof a, "b-%s-dead.img", tg) || cx_fmt(b, sizeof b, "c-%s-dead.img", tg)) re_die("name");
+    re_ck(rb == 1 && re_is(eb, nb, "link: undefined reference to zz_missing\n") && !re_exists(a), "P.base refuses the dead missing extern (before)", t);
+    re_ck(rc == 0 && re_exists(b), "P.candidate links it, rc0 and an image (tl_dce)", t);
+    free(eb);
+    if (!strcmp(t, "lnx/x86_64")) {
+        char *o = 0;
+        size_t on = 0;
+        if (cx_fmt(a, sizeof a, "./c-%s-dead.img", tg)) re_die("name");
+        rc = re_sh(a, 0, 0, &o, &on);
+        re_ck(rc == 0 && re_is(o, on, "live 3\n"), "P.candidate image runs and prints live 3", t);
+        free(o);
+    }
+    /* N: reachable missing extern, same refusal */
+    for (i = 2; i < 4; i++) {
+        const char *want = i == 2 ? "link: undefined reference to zz_missing\n" : "link: undefined reference to user\n";
+        eb = ec = 0;
+        rb = re_link(re_base, "b", tg, src[i], src[i], &eb, &nb);
+        rc = re_link(re_cand, "c", tg, src[i], src[i], &ec, &nc);
+        if (cx_fmt(a, sizeof a, "c-%s-%s.img", tg, src[i])) re_die("name");
+        if (cx_fmt(lab, sizeof lab, "N.%s.c refused the same way: rc1, exact stderr, no image", src[i])) re_die("lab");
+        re_ck(rb == 1 && rc == 1 && re_is(eb, nb, want) && re_is(ec, nc, want) && !re_exists(a), lab, t);
+        free(eb); free(ec);
+    }
+}
+
+int main(int argc, char **argv) {
+    char cmd[4800];
+    int shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0, t;
+    if (argc < 4 + shift) re_die("usage: route-equiv.cx -- OUT BASE CAND (the candidate is required)");
+    if (cx_fmt(re_dir, sizeof re_dir, "%s/route-equiv", argv[1 + shift]) || cx_fmt(re_base, sizeof re_base, "%s", argv[2 + shift]) ||
+        cx_fmt(re_cand, sizeof re_cand, "%s", argv[3 + shift])) re_die("args");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s' && mkdir -p '%s'", re_dir, re_dir)) re_die("cmd");
+    {
+        char *av[4];
+        np_result r = {0};
+        char why[1024] = {0};
+        av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+        if (np_run(av, 0, 0, 20, &r, why, sizeof why) || r.rc) re_die("scratch");
+        np_free(&r);
+    }
+    if (!realpath(re_dir, cmd)) re_die("scratch path");
+    if (cx_fmt(re_dir, sizeof re_dir, "%s", cmd)) re_die("scratch path");
+    re_put("dead.c", "#include <stdio.h>\nint zz_missing(int);\nint dead(int x){return zz_missing(x)+1;}\nint live(int x){return x+2;}\nint main(void){printf(\"live %d\\n\",live(1));return 0;}\n");
+    re_put("full.c", "#include <stdio.h>\nint spare(int x){return x+9;}\nint live(int x){return x+2;}\nint main(void){printf(\"live %d\\n\",live(1));return 0;}\n");
+    re_put("reach.c", "int zz_missing(int);\nint main(void){return zz_missing(1);}\n");
+    re_put("usr.c", "int user(int);\nint main(void){return user(1);}\n");
+    re_put("a.c", "#include <stdio.h>\nint f(int);\nint main(void){printf(\"f %d\\n\",f(2));return 0;}\n");
+    re_put("b.c", "int f(int x){return x*3;}\n");
+    for (t = 0; t < 6; t++) re_target(re_targets[t]);
+    printf("ROUTE_EQUIV_SUMMARY\tpass=%d\tfailed=%d\n", re_passed, re_failed);
+    if (re_failed) return 1;
+    puts("ROUTE_EQUIV");
+    return 0;
+}

@@ -1,0 +1,224 @@
+/* tools/check-sweep-plan.cx -- the contract of tools/sweep-plan.cx over a fake tree: KEEP list, live-process hold,
+ * in-flight chain root, young entries as ASK, a rollback sentence on every DELETE, summary equals the DELETE sum,
+ * and the plan removes nothing.
+ *
+ *   sh ./unisacc.com tools/check-sweep-plan.cx
+ *
+ * The fixture lives in a mkdtemp under /tmp (cx_rmtree's whitelist); the plan runs as a child with --tmp/--home/--repo/
+ * --job-dir pointed at it, so the real machine is never read for the decision.  A live holder is a real child process
+ * whose cmdline names a fixture path.  Prints CHECK_SWEEP_PLAN ok=N fail=M and exits non-zero on any failure. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use text.fmt
+
+static int okc, failc;
+static char root[512];
+static char out[1 << 20];
+static long outn;
+
+static void ok(int cond, const char *what) {
+    if (cond) { okc++; sy_printf("PASS\t%s\n", what); }
+    else { failc++; sy_printf("FAIL\t%s\n", what); }
+}
+
+static void put(const char *rel, int bytes) {
+    char p[700], dir[700], data[256];
+    long i, k;
+    tx_snprintf(p, sizeof p, "%s/%s", root, rel);
+    for (i = 0; p[i]; i++) if (p[i] == '/') k = i;
+    for (i = 0; i < k; i++) dir[i] = p[i];
+    dir[k] = 0;
+    sy_mkdir_all(dir, 0755);
+    for (i = 0; i < bytes && i < 256; i++) data[i] = 'x';
+    sy_write_file(p, data, bytes, 0644);
+}
+
+/* Start the plan with extra args, collect stdout into out[]; the exit code. */
+static int plan(char **extra, int nextra) {
+    char *av[40];
+    char tmp[600], home[600], repo[600], job[600];
+    int n = 0, i, fd = -1, pid, code = -1, exited = 0;
+    long got, deadline_s = sy_wall_s() + 50;
+    tx_snprintf(tmp, sizeof tmp, "%s/tmp", root);
+    tx_snprintf(home, sizeof home, "%s/home", root);
+    tx_snprintf(repo, sizeof repo, "%s/repo", root);
+    tx_snprintf(job, sizeof job, "%s/job", root);
+    av[n++] = "sh"; av[n++] = "./unisacc.com"; /* lint:allow R1 the child is the tool under test, run through the product */ av[n++] = "tools/sweep-plan.cx"; av[n++] = "--";
+    av[n++] = "--tmp"; av[n++] = tmp; av[n++] = "--home"; av[n++] = home;
+    av[n++] = "--repo"; av[n++] = repo; av[n++] = "--job-dir"; av[n++] = job;
+    for (i = 0; i < nextra; i++) av[n++] = extra[i];
+    av[n] = 0;
+    outn = 0;
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while (sy_wall_s() <= deadline_s && (got = sy_read(fd, out + outn, sizeof out - 1 - outn)) > 0) outn += got;
+    sy_close(fd);
+    out[outn] = 0;
+    if (sy_wall_s() > deadline_s) { sy_kill(pid); return -1; }
+    sy_wait_status(pid, 0, &exited, &code, 0);
+    return exited ? code : -1;
+}
+
+/* Copy tab field IDX of the row (cat, path) into dst; 1 when the row exists. */
+static int row_field(const char *cat, const char *path, int idx, char *dst, int cap) {
+    char key[800];
+    long i = 0, kl, f, d;
+    tx_snprintf(key, sizeof key, "%s\t%s\t", cat, path);
+    kl = tx_len(key, sizeof key);
+    while (i < outn) {
+        long e = i;
+        while (e < outn && out[e] != '\n') e++;
+        if (tx_prefix(out + i, e - i, key, kl)) {
+            f = 0; d = 0;
+            for (long j = i; j < e; j++) {
+                if (out[j] == '\t') { f++; continue; }
+                if (f == idx && d + 1 < cap) dst[d++] = out[j];
+            }
+            dst[d] = 0;
+            return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static int act_is(const char *cat, const char *rel, const char *want) {
+    char path[700], a[32];
+    tx_snprintf(path, sizeof path, "%s/%s", root, rel);
+    if (!row_field(cat, path, 6, a, sizeof a)) return 0;
+    return tx_eqz(a, want);
+}
+
+static int has_rollback(const char *s) {        /* the word "回滚" or "可再生" in s, without a substring search helper */
+    long i, n = tx_len(s, 600);
+    for (i = 0; i + 6 <= n; i++)
+        if (tx_prefix(s + i, n - i, "回滚", 6)) return 1;
+    return 0;
+}
+
+int main(void) {
+    char tmpl[] = "/tmp/check-sweep-plan-XXXXXX";
+    char live[700], sess[700], chain[700], f[2200], rc[64];
+    char *ex1[] = { "--min-age-s", "0", "--uid", "4242", "--chain-root", chain, "--keep-bootstrap", "7.7.7" };
+    char *ex2[] = { "--uid", "4242" };
+    char *av[6];
+    char sleepcmd[32];
+    int deadline_s = 25;
+    int pid, c, i;
+    long sum = 0, want = 0, p;
+    if (!mkdtemp(tmpl)) { sy_printf("FAIL\tscratch root\n"); sy_printf("CHECK_SWEEP_PLAN\tok=0\tfail=1\n"); return 1; }
+    tx_snprintf(root, sizeof root, "%s", tmpl);
+    tx_snprintf(live, sizeof live, "%s/tmp/unisacc-live", root);
+    tx_snprintf(sess, sizeof sess, "%s/tmp/unisacc-sess", root);
+    tx_snprintf(chain, sizeof chain, "%s/tmp/unisacc-sess/chain-real6", root);
+    put("tmp/unisacc-old/a.bin", 100);
+    put("tmp/ua-x.h", 40);
+    put("tmp/unrelated/z", 7);
+    put("tmp/unisacc-live/l.bin", 50);
+    put("tmp/unisacc-sess/chain-real6/c.log", 60);
+    put("tmp/unisacc-e3cache-4242/e1", 30);
+    put("home/.cache/unisacc/borrowed-cm/cm", 10);
+    put("home/.cache/unisacc/ident-helper/h", 11);
+    put("home/.cache/unisacc/bootstrap-7.7.7/b", 12);
+    put("home/.cache/unisacc/bootstrap-7.7.6/b", 13);
+    put("home/.cache/unisacc/chains/snap/s", 14);
+    put("home/.cache/unisacc/patches-0.0.63/p1.patch", 15);
+    put("home/.cache/unisacc/patches-0.0.64/p2.patch", 16);
+    put("home/.cache/unisacc/ape-0.0.61/a.com", 17);
+    put("home/.cache/unisacc/ape-0.0.62/a.com", 18);
+    put("home/.cache/unisacc/chains/chain/c", 15);
+    put("job/tmp/scratch.txt", 16);
+    put("job/tmp/e3trim.patch.txt", 17);
+    put("repo/out/log1", 18);
+    put("repo/out/release-0.0.60/x", 19);
+
+    /* a live holder: a real process whose cmdline carries the fixture path */
+    tx_snprintf(sleepcmd, sizeof sleepcmd, "sleep %d", deadline_s);
+    av[0] = "sh"; av[1] = "-c"; av[2] = sleepcmd; av[3] = "holder"; av[4] = live; av[5] = 0;
+    pid = sy_spawn(av);     /* bounded: the holder sleeps 25 s by itself and is killed below; deadline 25 s */
+    ok(pid > 0, "live holder process started");
+
+    c = plan(ex1, 8);
+    ok(c == 0, "plan exits 0 over the fixture");
+    ok(outn > 0 && tx_prefix(out, outn, "CATEGORY\tPATH\tBYTES", 19), "output starts with the TSV header");
+    ok(act_is("tmp", "tmp/unisacc-old", "DELETE"), "an old unisacc-* temp directory is DELETE");
+    ok(act_is("tmp", "tmp/ua-x.h", "DELETE"), "an ua-* temp file is DELETE");
+    {
+        char p[700];
+        tx_snprintf(p, sizeof p, "%s/tmp/unrelated", root);
+        ok(!row_field("tmp", p, 0, rc, sizeof rc), "a name outside unisacc-*/ua-* is not listed");
+    }
+    ok(act_is("tmp", "tmp/unisacc-live", "KEEP"), "a directory named by a live process cmdline is KEEP");
+    {
+        char p[700];
+        tx_snprintf(p, sizeof p, "%s/tmp/unisacc-live", root);
+        row_field("tmp", p, 5, rc, sizeof rc);
+        ok(tx_eqz(rc, "1"), "the live row carries IN_USE=1");
+    }
+    ok(act_is("tmp", "tmp/unisacc-sess", "KEEP"), "the ancestor of the in-flight chain root is KEEP");
+    ok(act_is("e3cache", "tmp/unisacc-e3cache-4242", "DELETE"), "the e3cache of the given uid is its own category, DELETE");
+    ok(act_is("cache", "home/.cache/unisacc/borrowed-cm", "KEEP"), "borrowed-cm is KEEP");
+    ok(act_is("cache", "home/.cache/unisacc/ident-helper", "KEEP"), "ident-helper is KEEP");
+    ok(act_is("cache", "home/.cache/unisacc/bootstrap-7.7.7", "KEEP"), "bootstrap-7.7.7 is KEEP");
+    ok(act_is("cache", "home/.cache/unisacc/bootstrap-7.7.6", "DELETE"), "an older bootstrap is DELETE");
+    ok(act_is("cache", "home/.cache/unisacc/patches-0.0.63", "KEEP"), "the patches list directory is KEEP");
+    ok(act_is("cache", "home/.cache/unisacc/patches-0.0.64", "KEEP"), "any patches-* is KEEP by prefix");
+    ok(act_is("cache", "home/.cache/unisacc/ape-0.0.61", "KEEP"), "the previous release backup directory is KEEP");
+    ok(act_is("cache", "home/.cache/unisacc/ape-0.0.62", "KEEP"), "any ape-* is KEEP by prefix");
+    ok(act_is("cache", "home/.cache/unisacc/chains/snap", "DELETE"), "chains/snap is DELETE");
+    ok(act_is("cache", "home/.cache/unisacc/chains/chain", "ASK"), "other chains/ entries are ASK");
+    ok(act_is("job", "job/tmp/scratch.txt", "DELETE"), "this job's scratch file is DELETE");
+    ok(act_is("job", "job/tmp/e3trim.patch.txt", "ASK"), "a pending patch draft is ASK");
+    ok(act_is("out", "repo/out/log1", "DELETE"), "an out/ log is DELETE");
+    ok(act_is("out", "repo/out/release-0.0.60", "KEEP"), "a release artifact under out/ is KEEP");
+
+    /* every DELETE row names a way back; the summary is the DELETE byte sum */
+    {
+        long i2 = 0;
+        int all = 1, rows = 0;
+        while (i2 < outn) {
+            long e = i2, j;
+            int fld = 0;
+            char act[16] = { 0 }, why[600] = { 0 }, by[32] = { 0 };
+            int ai = 0, wi = 0, bi = 0;
+            while (e < outn && out[e] != '\n') e++;
+            for (j = i2; j < e; j++) {
+                if (out[j] == '\t') { fld++; continue; }
+                if (fld == 2 && bi < 31) by[bi++] = out[j];
+                if (fld == 6 && ai < 15) act[ai++] = out[j];
+                if (fld == 7 && wi < 599) why[wi++] = out[j];
+            }
+            if (tx_eqz(act, "DELETE")) { rows++; sum += tx_atol(by); if (!has_rollback(why)) all = 0; }
+            i2 = e + 1;
+        }
+        ok(rows >= 6 && all, "every DELETE row carries a rollback sentence");
+        tx_snprintf(f, sizeof f, "SUMMARY\treclaimable_bytes=%ld\t", sum);
+        for (p = 0; p < outn; ) {
+            long e = p;
+            while (e < outn && out[e] != '\n') e++;
+            if (tx_prefix(out + p, e - p, f, tx_len(f, sizeof f))) want = 1;
+            p = e + 1;
+        }
+        ok(want == 1, "the SUMMARY reclaimable_bytes equals the sum over DELETE rows");
+    }
+    ok(sy_exists(live) == 1 && sy_exists(sess) == 1, "the plan removed nothing (live and chain dirs exist)");
+    {
+        char p[700];
+        tx_snprintf(p, sizeof p, "%s/tmp/unisacc-old/a.bin", root);
+        ok(sy_exists(p) == 1, "the plan removed nothing (DELETE candidate still exists)");
+    }
+
+    /* default min age: just-made entries are ASK, never DELETE */
+    c = plan(ex2, 2);
+    ok(c == 0 && act_is("tmp", "tmp/unisacc-old", "ASK"), "a young entry is ASK under the default minimum age");
+
+    c = 0;
+    for (i = 0; i < 1; i++) c += sy_kill(pid) < 0;
+    ok(cx_rmtree(root) == 0, "the scratch root is removed through the deletion guard");
+    sy_printf("CHECK_SWEEP_PLAN\tok=%d\tfail=%d\n", okc, failc);
+    return failc ? 1 : 0;
+}

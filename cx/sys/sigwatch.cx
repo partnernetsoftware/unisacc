@@ -1,0 +1,35 @@
+#pragma unisa module sigwatch
+#pragma unisa dock
+#pragma unisa use sys.sig
+/* L0 sys/sigwatch: flag-style signal watching on top of sy_sig_handle.
+   sy_sig_watch(sig) installs a handler that only counts; sy_sig_taken(sig) returns the number of
+   arrivals since the last call and clears it. No user callback runs. Where sy_sig_handle cannot
+   enter handlers (osx, win) sy_sig_watch returns its -ENOSYS unchanged. */
+
+#define SGW_NSIG 65
+
+static volatile int sgw_cnt[SGW_NSIG];
+static unsigned char sgw_on[SGW_NSIG];
+
+static void sgw_hit(int sig) {
+    if (sig > 0 && sig < SGW_NSIG) sgw_cnt[sig] = sgw_cnt[sig] + 1;
+}
+
+/* 0, or -errno: -EINVAL for a bad number, SIGKILL or SIGSTOP; -ENOSYS where handlers cannot run. */
+int sy_sig_watch(int sig) {
+    int rc;
+    if (sig <= 0 || sig >= SGW_NSIG) return -EINVAL;
+    rc = sy_sig_handle(sig, sgw_hit);
+    if (rc == 0) sgw_on[sig] = 1;
+    return rc;
+}
+
+/* Arrivals of SIG since the last call (then cleared); 0 when never watched; -EINVAL for a bad number. */
+int sy_sig_taken(int sig) {
+    int n;
+    if (sig <= 0 || sig >= SGW_NSIG) return -EINVAL;
+    if (!sgw_on[sig]) return 0;
+    n = sgw_cnt[sig];
+    sgw_cnt[sig] = 0;
+    return n;
+}

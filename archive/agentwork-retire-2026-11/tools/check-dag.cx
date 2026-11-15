@@ -1,0 +1,319 @@
+/* tools/check-dag.cx -- tools/dag.cx on this checkout's graph and on private fixture graphs.
+ *
+ *   sh ./unisacc.com tools/check-dag.cx [-- ROOT OUT]
+ *
+ * (1) real: ROOT/agentwork/dag.tsv passes `check` and `plan` runs on it. When ROOT is not a git
+ *     checkout the commit lookup is skipped and said so (a NOTE line, not a PASS for that part);
+ * (2) a well-formed fixture passes; `ready` lists exactly the nodes whose deps are DONE;
+ * (3) a cycle is refused, by check and by plan;
+ * (4) a dep that is not a node is refused;
+ * (5) DONE without a commit is refused; DONE with a commit git does not have is refused, and
+ *     accepted only under --no-git; a short row, an unknown status and RUNNING before its deps
+ *     are refused;
+ * (6) disjoint domains: every ready node is started, and --max caps the selection in table order;
+ * (7) overlapping domains are never started together: directory against file, wildcard against
+ *     file, trailing-slash directory, and a RUNNING node holds its domain; "*" does not cross "/";
+ * (8) shared tables: while the gate is open two nodes writing different shared tables are held
+ *     apart; with the gate DONE they start together;
+ * (9) mark: refused marks leave the table byte-identical; accepted marks change exactly that
+ *     row's status and commit; a finished dep makes the dependant ready;
+ * (10) bad usage is rc 2.
+ * The fixture commit lives in a private git repository made under OUT. tools/dag.cx is built once
+ * (tq_native, a PREPARED line, not a result). */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define HD "id\ttitle\tstatus\tdeps\twrite_domain\towner\tacceptance\tcommit\n"
+#define NOSHA "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+static int failed;
+static char root[4096], work[4400], fx[4400], bin[4400], tab[4400], sha[64];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) {
+        failed++;
+        if (last) sy_printf("%s", last);
+    }
+    sy_printf("%s\tdag.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* dag.native --root R [--table tab] A0 [A1 [A2 [A3]]] */
+static int run(const char *r, int fixture, const char *a0, const char *a1, const char *a2, const char *a3) {
+    char *v[12];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin;
+    v[k++] = "--root";
+    v[k++] = (char *)r;
+    if (fixture) { v[k++] = "--table"; v[k++] = tab; }
+    if (a0) v[k++] = (char *)a0;
+    if (a1) v[k++] = (char *)a1;
+    if (a2) v[k++] = (char *)a2;
+    if (a3) v[k++] = (char *)a3;
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+static int tool(const char *a0, const char *a1, const char *a2, const char *a3) { return run(fx, 1, a0, a1, a2, a3); }
+
+/* Lines of the last output whose leading fields equal the given ones (a null field ends the list). */
+static int lines(const char *f0, const char *f1, const char *f2, const char *f3) {
+    const char *want[4];
+    long i = 0, e, o, l;
+    int n = 0, k;
+    want[0] = f0; want[1] = f1; want[2] = f2; want[3] = f3;
+    while (last && i < (long)lastn) {
+        int ok = 1;
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        for (k = 0; k < 4 && want[k] && ok; k++)
+            ok = !tx_field(last + i, e - i, '\t', k, &o, &l) && tx_same(last + i + o, l, want[k], tx_len(want[k], 256));
+        if (ok && e > i) n++;
+        i = e + 1;
+    }
+    return n;
+}
+
+static int put(const char *text) { return cx_write(tab, text, (size_t)tx_len(text, TX_ZCAP)); }
+
+static int same_file(const char *text) {
+    size_t n = 0;
+    char *b = cx_read(tab, &n);
+    long tl = tx_len(text, TX_ZCAP);
+    int ok = b && (long)n == tl && mm_same(b, text, tl);
+    mm_free(b);
+    return ok;
+}
+
+static int git(char **v, char **out, size_t *n) { return cx_runv_timeout(v, 20, out, n); }
+
+/* A private repository with one empty commit; its sha into SHA. */
+static int make_repo(void) {
+    char *init[] = {"git", "-C", fx, "init", "-q", 0};
+    char *commit[] = {"git", "-C", fx, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                      "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture", 0};
+    char *head[] = {"git", "-C", fx, "rev-parse", "HEAD", 0};
+    char *o = 0;
+    size_t n = 0;
+    int rc;
+    if (git(init, &o, &n)) { mm_free(o); return -1; }
+    mm_free(o);
+    o = 0;
+    if (git(commit, &o, &n)) { mm_free(o); return -1; }
+    mm_free(o);
+    o = 0;
+    rc = git(head, &o, &n);
+    if (!rc && o && n >= 40) rc = tx_copy(sha, sizeof sha, o, 40);
+    else rc = -1;
+    mm_free(o);
+    return rc;
+}
+
+static int is_checkout(void) {
+    char *v[] = {"git", "-C", root, "rev-parse", "--git-dir", 0};
+    char *o = 0;
+    size_t n = 0;
+    int rc = git(v, &o, &n);
+    mm_free(o);
+    return rc == 0;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], t[4096], t2[4096];
+    int rc, rc2, prep;
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/dag-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s", sy_tmpdir()) || cx_fmt(work, sizeof work, "%s/check-dag-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/dag.cx", root) || cx_fmt(bin, sizeof bin, "%s/dag.native", work) ||
+        cx_fmt(fx, sizeof fx, "%s/fx", work) || cx_fmt(tab, sizeof tab, "%s/dag.tsv", fx)) return 2;
+    if (tq_native(root, src, bin, why, sizeof why)) {
+        sy_printf("FAIL\tdag.build-native\t%s\n", why);
+        return 1;
+    }
+    if (sy_mkdir(fx, 0755) || make_repo()) { sy_printf("FAIL\tdag.fixture-prepare\n"); return 1; }
+
+    /* (1) this checkout */
+    if (is_checkout()) rc = run(root, 0, "check", 0, 0, 0);
+    else {
+        rc = run(root, 0, "check", "--no-git", 0, 0);
+        sy_printf("NOTE\tdag.real-graph commit lookup UNMEASURED: ROOT is not a git checkout\n");
+    }
+    ck(rc == 0 && lines("DAG_CHECK", "ok", 0, 0) == 1 && lines("ERR", 0, 0, 0) == 0, "real-graph-check");
+    rc = run(root, 0, "plan", "--max", "6", 0);
+    ck(rc == 0 && lines("DAG_PLAN", "max=6", 0, 0) == 1, "real-graph-plan-runs");
+
+    /* (2) well-formed fixture */
+    prep = cx_fmt(t, sizeof t,
+                  "# a comment\n#shared\tG\tt/batches.tsv;t/coverage.tsv\n" HD
+                  "G\tgate\tTODO\t-\tg/**\to\tcmd g\t-\n"
+                  "A\tfirst\tDONE\t-\ta/**\to\tcmd a\t%s\n"
+                  "B\tsecond\tREADY\tA\tb/x.cx\to\tcmd b\t-\n"
+                  "C\tthird\tTODO\tA,B\tc/*\to\tcmd c\t-\n"
+                  "D\tfourth\tBLOCKED\t-\td/x\to\tcmd d\t-\n", sha) || put(t);
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 0 && lines("DAG_CHECK", "ok", "nodes=5", "errors=0") == 1, "fixture-check-ok");
+    rc = tool("ready", 0, 0, 0);
+    ck(rc == 0 && lines("READY", 0, 0, 0) == 3 && lines("READY", "G", "TODO", 0) == 1 && lines("READY", "B", "READY", 0) == 1 &&
+       lines("READY", "D", "BLOCKED", 0) == 1 && lines("DAG_READY", "count=3", 0, 0) == 1, "ready-lists-nodes-with-done-deps");
+    rc = tool("plan", "--max", "6", 0);
+    ck(rc == 0 && lines("PLAN", "START", 0, 0) == 2 && lines("PLAN", "START", "G", 0) == 1 && lines("PLAN", "START", "B", 0) == 1 &&
+       lines("PLAN", "WAIT", "C", "B") == 1 && lines("PLAN", "HOLD", "D", "blocked") == 1, "plan-waits-on-deps-and-holds-blocked");
+
+    /* (3) cycle */
+    prep = put(HD "X\tx\tTODO\tZ\tx/1\to\tcmd\t-\n" "Y\ty\tTODO\tX\ty/1\to\tcmd\t-\n" "Z\tz\tTODO\tY\tz/1\to\tcmd\t-\n" "W\tw\tTODO\t-\tw/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "cycle", 0, 0) == 1 && lines("DAG_CHECK", "FAIL", 0, 0) == 1, "cycle-refused");
+    rc = tool("plan", "--max", "6", 0);
+    rc2 = lines("PLAN", 0, 0, 0);
+    ck(rc == 1 && rc2 == 0 && lines("ERR", "cycle", 0, 0) == 1, "cycle-refused-by-plan");
+    prep = put(HD "X\tx\tTODO\tX\tx/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "cycle", "X", 0) == 1, "self-dependency-refused");
+
+    /* (4) missing dep */
+    prep = put(HD "A\ta\tTODO\t-\ta/1\to\tcmd\t-\n" "B\tb\tTODO\tA,NOPE\tb/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "missing-dep", "B", "NOPE") == 1 && lines("ERR", 0, 0, 0) == 1, "missing-dep-refused");
+
+    /* (5) DONE and row shape */
+    prep = put(HD "A\ta\tDONE\t-\ta/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "done-without-sha", "A", 0) == 1, "done-without-sha-refused");
+    prep = put(HD "A\ta\tDONE\t-\ta/1\to\tcmd\t" NOSHA "\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "sha-not-in-git", "A", NOSHA) == 1, "done-sha-not-in-git-refused");
+    rc = tool("check", "--no-git", 0, 0);
+    ck(rc == 0 && lines("DAG_CHECK", "ok", "nodes=1", "errors=0") == 1, "no-git-skips-only-the-commit-lookup");
+    prep = put(HD "A\ta\tDONE\t-\ta/1\to\tcmd\tnot-a-sha\n");
+    rc = tool("check", "--no-git", 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "schema-commit", "A", 0) == 1, "malformed-commit-refused");
+    prep = put(HD "A\ta\tTODO\t-\ta/1\to\tcmd\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "schema-fields", 0, 0) == 1, "short-row-refused");
+    prep = put(HD "A\ta\tSOON\t-\ta/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "schema-status", "A", "SOON") == 1, "unknown-status-refused");
+    prep = put("id\ttitle\tstatus\tdeps\n" "A\ta\tTODO\t-\ta/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "schema-header", 0, 0) == 1, "wrong-header-refused");
+    prep = put(HD "A\ta\tTODO\t-\ta/1\to\tcmd\t-\n" "A\tagain\tTODO\t-\tb/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "duplicate-id", "A", 0) == 1, "duplicate-id-refused");
+    prep = put(HD "A\ta\tTODO\t-\ta/1\to\tcmd\t-\n" "B\tb\tRUNNING\tA\tb/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "status-before-deps", "B", "A") == 1, "running-before-deps-refused");
+    prep = put(HD "A\ta\tTODO\t-\t../a\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "schema-write-domain", "A", 0) == 1, "domain-leaving-the-tree-refused");
+
+    /* (6) disjoint domains */
+    prep = put(HD "P1\tp\tTODO\t-\ta/**;k/one.cx\to\tcmd\t-\n" "P2\tp\tTODO\t-\tb/x.cx;k/two.cx\to\tcmd\t-\n" "P3\tp\tREADY\t-\tc/*.cx\to\tcmd\t-\n");
+    rc = tool("plan", "--max", "6", 0);
+    ck(!prep && rc == 0 && lines("PLAN", "START", 0, 0) == 3 && lines("PLAN", "HOLD", 0, 0) == 0 &&
+       lines("PLAN", "START", "P1", 0) == 1 && lines("PLAN", "START", "P2", 0) == 1 && lines("PLAN", "START", "P3", 0) == 1,
+       "disjoint-domains-all-started");
+    rc = tool("plan", "--max", "2", 0);
+    ck(rc == 0 && lines("PLAN", "START", 0, 0) == 2 && lines("PLAN", "START", "P1", 0) == 1 && lines("PLAN", "START", "P2", 0) == 1 &&
+       lines("PLAN", "HOLD", "P3", "max") == 1, "max-caps-selection-in-table-order");
+
+    /* (7) overlapping domains */
+    prep = put(HD
+               "R\tr\tRUNNING\t-\tf/*.cx\to\tcmd\t-\n"
+               "Q1\tq\tTODO\t-\ta/**;z/1\to\tcmd\t-\n"
+               "Q2\tq\tTODO\t-\tz/2;a/b.cx\to\tcmd\t-\n"
+               "Q3\tq\tTODO\t-\td/y.cx\to\tcmd\t-\n"
+               "Q4\tq\tTODO\t-\td/*.cx\to\tcmd\t-\n"
+               "Q5\tq\tTODO\t-\te/\to\tcmd\t-\n"
+               "Q6\tq\tTODO\t-\te/deep/z.cx\to\tcmd\t-\n"
+               "Q7\tq\tTODO\t-\tf/k.cx\to\tcmd\t-\n"
+               "Q8\tq\tTODO\t-\tf/sub/k.cx\to\tcmd\t-\n"
+               "Q9\tq\tTODO\t-\tz/1\to\tcmd\t-\n");
+    rc = tool("plan", "--max", "12", 0);
+    ck(!prep && rc == 0 && lines("PLAN", "KEEP", "R", 0) == 1 && lines("PLAN", "START", 0, 0) == 4 &&
+       lines("PLAN", "START", "Q1", 0) == 1 && lines("PLAN", "START", "Q3", 0) == 1 && lines("PLAN", "START", "Q5", 0) == 1 &&
+       lines("PLAN", "START", "Q8", 0) == 1, "overlap-selection-starts-only-disjoint-nodes");
+    ck(lines("PLAN", "HOLD", "Q2", "domain") == 1 && lines("PLAN", "HOLD", "Q4", "domain") == 1 && lines("PLAN", "HOLD", "Q6", "domain") == 1 &&
+       lines("PLAN", "HOLD", "Q7", "domain") == 1 && lines("PLAN", "HOLD", "Q9", "domain") == 1 && lines("PLAN", "HOLD", 0, 0) == 5,
+       "overlapping-domains-held-with-reason");
+    ck(lines("PLAN", "START", "Q2", 0) + lines("PLAN", "START", "Q4", 0) + lines("PLAN", "START", "Q6", 0) + lines("PLAN", "START", "Q7", 0) +
+       lines("PLAN", "START", "Q9", 0) == 0, "overlapping-domains-never-co-scheduled");
+    prep = put(HD "R1\tr\tRUNNING\t-\ta/**\to\tcmd\t-\n" "R2\tr\tRUNNING\t-\ta/x.cx\to\tcmd\t-\n");
+    rc = tool("plan", 0, 0, 0);
+    ck(!prep && rc == 0 && lines("PLAN", "OVERLAP", "R1", "R2") == 1 && lines("PLAN", "KEEP", 0, 0) == 2, "running-overlap-reported");
+
+    /* (8) shared tables */
+    prep = cx_fmt(t, sizeof t,
+                  "#shared\tG\tt/batches.tsv;t/coverage.tsv\n" HD
+                  "G\tgate\tTODO\t-\tg/**\to\tcmd\t-\n"
+                  "U1\tu\tTODO\t-\tt/batches.tsv;u/1.cx\to\tcmd\t-\n"
+                  "U2\tu\tTODO\t-\tt/coverage.tsv;u/2.cx\to\tcmd\t-\n"
+                  "U3\tu\tTODO\t-\tu/3.cx\to\tcmd\t-\n") || put(t);
+    rc = tool("plan", "--max", "6", 0);
+    ck(!prep && rc == 0 && lines("PLAN", "START", "U1", 0) == 1 && lines("PLAN", "HOLD", "U2", "shared") == 1 &&
+       lines("PLAN", "START", "U3", 0) == 1 && lines("PLAN", "START", "U2", 0) == 0, "shared-tables-one-domain-while-gate-open");
+    prep = cx_fmt(t, sizeof t,
+                  "#shared\tG\tt/batches.tsv;t/coverage.tsv\n" HD
+                  "G\tgate\tDONE\t-\tg/**\to\tcmd\t%s\n"
+                  "U1\tu\tTODO\t-\tt/batches.tsv;u/1.cx\to\tcmd\t-\n"
+                  "U2\tu\tTODO\t-\tt/coverage.tsv;u/2.cx\to\tcmd\t-\n"
+                  "U3\tu\tTODO\t-\tu/2.cx\to\tcmd\t-\n", sha) || put(t);
+    rc = tool("plan", "--max", "6", 0);
+    ck(!prep && rc == 0 && lines("PLAN", "START", "U1", 0) == 1 && lines("PLAN", "START", "U2", 0) == 1 &&
+       lines("PLAN", "HOLD", "U3", "domain") == 1, "gate-done-frees-shared-tables-only");
+    prep = put("#shared\tNOGATE\tt/batches.tsv\n" HD "A\ta\tTODO\t-\ta/1\to\tcmd\t-\n");
+    rc = tool("check", 0, 0, 0);
+    ck(!prep && rc == 1 && lines("ERR", "missing-shared-gate", "NOGATE", 0) == 1, "shared-gate-must-be-a-node");
+
+    /* (9) mark */
+    prep = cx_fmt(t, sizeof t, "# top\n" HD "A\tfirst node\tTODO\t-\ta/x\tme\tcmd a --flag\t-\n" "B\tsecond\tTODO\tA\tb/x\tyou\tcmd b\t-\n") || put(t);
+    rc = tool("mark", "B", "RUNNING", 0);
+    ck(!prep && rc == 1 && lines("ERR", "status-before-deps", "B", "A") == 1 && same_file(t), "mark-running-before-deps-refused-table-unchanged");
+    rc = tool("mark", "A", "DONE", 0);
+    ck(rc == 1 && lines("ERR", "done-without-sha", "A", 0) == 1 && same_file(t), "mark-done-without-sha-refused-table-unchanged");
+    rc = tool("mark", "A", "DONE", NOSHA);
+    ck(rc == 1 && lines("ERR", "sha-not-in-git", "A", 0) == 1 && same_file(t), "mark-done-unknown-sha-refused-table-unchanged");
+    rc = tool("mark", "NOPE", "RUNNING", 0);
+    ck(rc == 1 && lines("ERR", "unknown-node", "NOPE", 0) == 1 && same_file(t), "mark-unknown-node-refused");
+    rc = tool("mark", "A", "RUNNING", 0);
+    prep = cx_fmt(t2, sizeof t2, "# top\n" HD "A\tfirst node\tRUNNING\t-\ta/x\tme\tcmd a --flag\t-\n" "B\tsecond\tTODO\tA\tb/x\tyou\tcmd b\t-\n");
+    ck(!prep && rc == 0 && lines("DAG_MARK", "A", "ok", 0) == 1 && same_file(t2), "mark-running-changes-only-that-row");
+    rc = tool("mark", "A", "DONE", sha);
+    prep = cx_fmt(t2, sizeof t2, "# top\n" HD "A\tfirst node\tDONE\t-\ta/x\tme\tcmd a --flag\t%s\n" "B\tsecond\tTODO\tA\tb/x\tyou\tcmd b\t-\n", sha);
+    ck(!prep && rc == 0 && same_file(t2), "mark-done-records-the-commit");
+    rc = tool("check", 0, 0, 0);
+    rc2 = tool("ready", 0, 0, 0);
+    ck(rc == 0 && rc2 == 0 && lines("READY", 0, 0, 0) == 1 && lines("READY", "B", "TODO", 0) == 1, "done-dep-makes-dependant-ready");
+    rc = tool("mark", "A", "TODO", 0);
+    ck(rc == 0 && same_file(t), "mark-back-to-todo-clears-the-commit");
+
+    /* (10) usage */
+    rc = tool(0, 0, 0, 0);
+    rc2 = tool("mark", "A", "LATER", 0);
+    prep = tool("plan", "--max", "0", 0);
+    ck(rc == 2 && rc2 == 2 && prep == 2 && tool("mark", "A", "RUNNING", sha) == 2 && tool("frobnicate", 0, 0, 0) == 2 && same_file(t), "usage-rc2");
+
+    mm_free(last);
+    last = 0;
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_DAG\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

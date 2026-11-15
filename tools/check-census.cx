@@ -42,7 +42,28 @@ static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-census.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-census.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-census: REFUSE %s\n", s); sy_exit(2); }
-static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 4096), w, tx_len(w, 128)) >= 0; }
+/* structural row assertion: some line of O has the tab-separated fields of S (a leading/trailing tab in S only marks
+   a field boundary) as consecutive whole fields; no substring search */
+static int has(const char *o, const char *s) {
+    const char *seg[16]; long sl[16], p = 0, n = tx_len(o, 1 << 20), t = tx_len(s, 1024), q = 0; int ns = 0;
+    if (t > 0 && s[0] == '\t') q = 1;
+    while (q <= t && ns < 16) {
+        long e = q; while (e < t && s[e] != '\t') e++;
+        if (e == t && e == q) break;
+        seg[ns] = s + q; sl[ns] = e - q; ns++; q = e + 1;
+    }
+    while (p < n) {
+        long e = p, f = p, fs[256], fe[256]; int nf = 0, st, k;
+        while (e < n && o[e] != '\n') e++;
+        while (f <= e && nf < 256) { long g = f; while (g < e && o[g] != '\t') g++; fs[nf] = f; fe[nf] = g; nf++; f = g + 1; }
+        for (st = 0; st + ns <= nf; st++) {
+            for (k = 0; k < ns; k++) if (fe[st + k] - fs[st + k] != sl[k] || !tx_prefix(o + fs[st + k], sl[k], seg[k], sl[k])) break;
+            if (k == ns) return 1;
+        }
+        p = e + 1;
+    }
+    return 0;
+}
 static int elf(const char *p) { size_t n = 0; char *s = cx_read(p, &n); int r = 0; if (s && n >= 4 && !memcmp(s, "\177ELF", 4)) r = 1; mm_free(s); return r; }
 /* Start the product the way it is shipped: a bare ELF runs itself, a shell-headed
  * artifact needs sh.  Hardcoding "sh" would break the moment the product is an ELF. */
@@ -58,7 +79,7 @@ static int lines(const char *path) { size_t n; char *t = sy_exists(path) == 1 ? 
 
 int main(void) {
     char root[4096], com[4500], tool[4500], od[4500], res[4600], out[4096]; int cut, rc;
-    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/census.cx", root) || cx_fmt(od, sizeof od, "%s/out/check-census", root) || cx_fmt(res, sizeof res, "%s/results.tsv", od)) die("paths");
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/census.cx", root) || cx_fmt(od, sizeof od, "%s/unisacc-affected-census-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(res, sizeof res, "%s/results.tsv", od)) die("paths");
     if (sy_exists(od) == 1 && cx_rmtree(od)) die("old work");
     {   char *o[] = {"--only", "cx-bounded", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut);
         ck(rc == 0 && has(out, "ran=1\tpass=1") && lines(res) == 1, "first-run-records-one-pass"); }

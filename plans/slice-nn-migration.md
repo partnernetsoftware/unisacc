@@ -2,7 +2,7 @@
 
 生成物:`sh ./unisacc.com tools/slice-migration-gen.cx -- --write`;校验 `--check`。输入 `plans/unit-text.tsv`(.text 估量,切片 lnx/x86_64)+ `plans/slice-units.tsv`(源文件、use 依赖、堆/递归事实、显式覆盖)。手改本文件会被 `--check` 拒绝;改事实表再生成。
 
-方向(主人 2026-11-07):六个 ISA 切片全部保留;切片内逻辑迁为 NN(事实表→生成器→网/执行器字节码);切片只留 FFI/dl/host syscall/ABI 薄层。体积下降是结果不是手段。
+方向(项目所有者 2026-11-07):六个 ISA 切片全部保留;切片内逻辑迁为 NN(事实表→生成器→网/执行器字节码);切片只留 FFI/dl/host syscall/ABI 薄层。体积下降是结果不是手段。
 
 规则(由 `slice-migration-gen.cx` 固化):薄层 = kind host | 源在 cx/sys、cx/mem、cx/text | cx/driver/{input,output} | 显式覆盖「留切片」。其余:UNBOUNDED→迁VM字节码;FINITE/TRANSFORM→迁表;MIXED/SYS-IO→先拆分后迁。批次:迁表 1(≤10KB 且无 sys use)否则 2;先拆分后迁 2(<10KB、无 sys use、无堆)否则 3;VM 4。风险:无界结构(UNBOUNDED 或堆分配)/递归(自调用)/IO(sys use、SYS-IO 或 host)。
 

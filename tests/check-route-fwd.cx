@@ -1,0 +1,270 @@
+/* check-route-fwd.cx -- host forwards through separately compiled unit objects.
+ *
+ *   sh ./unisacc.com tests/check-route-fwd.cx -- WORK              # product ./unisacc.com
+ *   sh ./unisacc.com tests/check-route-fwd.cx -- WORK PRODUCT      # another candidate
+ *
+ * WORK is a new directory (created here, refused when it exists). The product is run there
+ * with UNISA_JOBS=1. Everything asserted is product behaviour: exit codes, exact stderr,
+ * program output, and the forward mark line inside the object the product wrote.
+ *
+ *   A  pre.c (calls pread, declared by <unistd.h>): -c gives an object with one forward
+ *      mark for pread; the object links alone; on the native target the image runs and
+ *      reads its own source ("4\n", rc 0). The same at -O1.
+ *   B  two objects: m.c calls twice() (declared by "my.h", defined in t.c) and pread; the
+ *      link resolves twice from t.o and pread from the stub; the image prints "8 4\n".
+ *   C  usr.c prototypes user() itself and never defines it: no mark, and the link is
+ *      refused with exactly "link: undefined reference to user\n", rc 1, no output file.
+ *   D  the link is deterministic: two links of the same object are the same bytes.
+ *   E  other targets (-c -b T -funit, then link): lnx/arm64, osx/x86_64, osx/arm64 carry
+ *      the pread mark and link rc 0; win/x86_64 and win/arm64 define pread in the header,
+ *      carry no pread mark and link rc 0. Images of non-native targets are NOT_RUN.
+ * 0.0.59 state (rf_marks_on 0): the marks are deferred to 0.0.60. A, B and E then assert the
+ * absence of every mark and the exact 0.0.58 refusal "link: undefined reference to pread\n"
+ * (rc 1, no image) where a host function is needed; the mark, stub-link, run and D assertions
+ * above are printed NOT_RUN with that reason. C and the win targets are asserted unchanged.
+ * Prints PASS/FAIL per assertion and a last line CHECK_ROUTE_FWD failed=N; rc 1 on any FAIL.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.hostid
+
+static int rf_failed;
+static char rf_prod[4400];
+static char rf_dir[4400];
+static char *rf_env[] = {"UNISA_JOBS=1", 0};
+
+static void rf_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) rf_failed++;
+}
+static void rf_die(const char *s) { fprintf(stderr, "check-route-fwd: %s errno=%d\n", s, errno); exit(2); }
+static void rf_path(char *o, size_t cap, const char *rel) {
+    if (cx_fmt(o, cap, "%s/%s", rf_dir, rel)) rf_die("path");
+}
+static void rf_put(const char *rel, const char *s) {
+    char p[4400];
+    rf_path(p, sizeof p, rel);
+    if (cx_write(p, s, strlen(s))) rf_die(rel);
+}
+/* One shell line in WORK, 30 s bound. The rc (or -1 on transport); stdout and stderr are
+   handed over when asked. */
+static int rf_sh(const char *cmd, char **out, size_t *outn, char **err, size_t *errn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    t = np_run(av, rf_dir, rf_env, 30, &r, why, sizeof why);
+    if (t) { fprintf(stderr, "check-route-fwd: transport %s: %s\n", why, cmd); np_free(&r); return -1; }
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    if (err) { *err = r.err; *errn = r.errn; r.err = 0; }
+    np_free(&r);
+    return r.rc;
+}
+/* PRODUCT ARGS: rc, and stderr when asked. */
+static int rf_cc(const char *args, char **err, size_t *errn) {
+    char cmd[9000];
+    /* this tool's own launcher exports a relative UNISA_CONTAINER; the product under test
+       must find its own package */
+    if (cx_fmt(cmd, sizeof cmd, "exec env -u UNISA_CONTAINER %s %s", rf_prod, args)) rf_die("cmd");
+    return rf_sh(cmd, 0, 0, err, errn);
+}
+static int rf_is(const char *b, size_t n, const char *want) { return b && n == strlen(want) && !memcmp(b, want, n); }
+/* Forward mark lines for NAME in the object file REL: lines that open with the mark
+   directive and close with _NAME and the size 1. */
+static int rf_marks(const char *rel, const char *name) {
+    static const char pre[] = "\n.bss __unisa_fw1_";
+    char p[4400], tail[300];
+    size_t n, i, e, pn = sizeof pre - 1, tn;
+    char *b;
+    int hits = 0;
+    rf_path(p, sizeof p, rel);
+    if (cx_fmt(tail, sizeof tail, "_%s 1", name)) rf_die("tail");
+    tn = strlen(tail);
+    b = cx_read(p, &n);
+    if (!b) return -1;
+    for (i = 0; i + pn < n; i++) {
+        if (memcmp(b + i, pre, pn)) continue;
+        e = i + 1;
+        while (e < n && b[e] != '\n') e++;
+        if (e - (i + pn) > tn && !memcmp(b + e - tn, tail, tn) && !memchr(b + i + pn, '_', e - tn - (i + pn))) hits++;
+    }
+    free(b);
+    return hits;
+}
+static int rf_same(const char *a, const char *b) {
+    char pa[4400], pb[4400];
+    size_t na, nb;
+    char *ba, *bb;
+    int same;
+    rf_path(pa, sizeof pa, a);
+    rf_path(pb, sizeof pb, b);
+    ba = cx_read(pa, &na);
+    bb = cx_read(pb, &nb);
+    same = ba && bb && na > 0 && na == nb && !memcmp(ba, bb, na);
+    free(ba);
+    free(bb);
+    return same;
+}
+static int rf_absent(const char *rel) {
+    char p[4400];
+    struct stat st;
+    rf_path(p, sizeof p, rel);
+    errno = 0;
+    if (!lstat(p, &st)) return 0;
+    if (errno != ENOENT) rf_die("existence");
+    return 1;
+}
+/* Run an image of the native target: exact stdout and rc. */
+static void rf_run(const char *img, const char *want, const char *label) {
+    char cmd[600];
+    char *out = 0;
+    size_t outn = 0;
+    int rc;
+    if (cx_fmt(cmd, sizeof cmd, "chmod 700 %s && exec ./%s", img, img)) rf_die("run");
+    rc = rf_sh(cmd, &out, &outn, 0, 0);
+    rf_ck(rc == 0 && rf_is(out, outn, want), label);
+    free(out);
+}
+
+/* 0: unit objects carry no forward mark (0.0.59: the object route's run-forward pass is
+   deferred to 0.0.60, because e3 under run-forward rejects a called undefined function with a
+   by-value struct in its signature). Then every mark is asserted absent, a link that needs a
+   host function is asserted refused with the exact 0.0.58 line, and the stub assertions are
+   printed NOT_RUN. 1: the marks are back and the original assertions run. */
+static int rf_marks_on = 0;
+static const char *rf_deferred = "unit-object forward marks are deferred to 0.0.60";
+
+/* Without marks: the link is refused exactly as 0.0.58 refuses it, no image. */
+static void rf_refused(const char *args, const char *img, const char *label) {
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    rc = rf_cc(args, &err, &errn);
+    rf_ck(rc == 1 && rf_is(err, errn, "link: undefined reference to pread\n") && rf_absent(img), label);
+    free(err);
+}
+
+static void rf_native(const char *level, const char *tag) {
+    char a[600], lab[200], obj[64], img[64];
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    if (cx_fmt(obj, sizeof obj, "pre%s.o", tag) || cx_fmt(img, sizeof img, "pre%s.img", tag)) rf_die("name");
+    if (cx_fmt(a, sizeof a, "%s -c pre.c -o %s", level, obj)) rf_die("args");
+    rc = rf_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "A.compile%s rc0 quiet", tag);
+    rf_ck(rc == 0 && errn == 0, lab);
+    free(err); err = 0;
+    if (cx_fmt(a, sizeof a, "%s %s -o %s", level, obj, img)) rf_die("args");
+    if (!rf_marks_on) {
+        cx_fmt(lab, sizeof lab, "A.mark%s no pread mark (deferred)", tag);
+        rf_ck(rf_marks(obj, "pread") == 0, lab);
+        cx_fmt(lab, sizeof lab, "A.link%s refused, exact 0.0.58 line, no output (deferred)", tag);
+        rf_refused(a, img, lab);
+        printf("NOT_RUN\tA.mark%s one pread mark; A.link%s rc0 quiet; A.run%s reads 4 bytes\t%s\n", tag, tag, tag, rf_deferred);
+        return;
+    }
+    cx_fmt(lab, sizeof lab, "A.mark%s one pread mark", tag);
+    rf_ck(rf_marks(obj, "pread") == 1, lab);
+    rc = rf_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "A.link%s rc0 quiet", tag);
+    rf_ck(rc == 0 && errn == 0, lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err);
+    cx_fmt(lab, sizeof lab, "A.run%s reads 4 bytes", tag);
+    if (rc == 0) rf_run(img, "4\n", lab);
+    else rf_ck(0, lab);
+}
+
+static void rf_cross(const char *tgt, const char *tag, int marked) {
+    char a[600], lab[200], obj[64], img[64];
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    if (cx_fmt(obj, sizeof obj, "pre-%s.o", tag) || cx_fmt(img, sizeof img, "pre-%s.img", tag)) rf_die("name");
+    if (cx_fmt(a, sizeof a, "-c -b %s -funit pre.c -o %s", tgt, obj)) rf_die("args");
+    rc = rf_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "E.compile %s rc0", tgt);
+    rf_ck(rc == 0, lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err); err = 0;
+    if (cx_fmt(a, sizeof a, "%s -o %s", obj, img)) rf_die("args");
+    if (!rf_marks_on && marked) {
+        cx_fmt(lab, sizeof lab, "E.mark %s no pread mark (deferred)", tgt);
+        rf_ck(rf_marks(obj, "pread") == 0, lab);
+        cx_fmt(lab, sizeof lab, "E.link %s refused, exact 0.0.58 line, no output (deferred)", tgt);
+        rf_refused(a, img, lab);
+        printf("NOT_RUN\tE.mark %s pread marks == 1; E.link %s rc0\t%s\n", tgt, tgt, rf_deferred);
+        printf("NOT_RUN\tE.run %s\timage of a non-native target\n", tgt);
+        return;
+    }
+    cx_fmt(lab, sizeof lab, "E.mark %s pread marks == %d", tgt, marked);
+    rf_ck(rf_marks(obj, "pread") == marked, lab);
+    rc = rf_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "E.link %s rc0", tgt);
+    rf_ck(rc == 0 && !rf_absent(img), lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err);
+    printf("NOT_RUN\tE.run %s\timage of a non-native target\n", tgt);
+}
+
+int main(int argc, char **argv) {
+    char *err = 0;
+    size_t errn = 0;
+    int rc, native;
+    if (argc < 2) { fprintf(stderr, "usage: check-route-fwd WORK [PRODUCT]\n"); return 2; }
+    if (cx_fmt(rf_dir, sizeof rf_dir, "%s", argv[1])) rf_die("work");
+    if (argc > 2) { if (cx_fmt(rf_prod, sizeof rf_prod, "%s", argv[2])) rf_die("product"); }
+    else {
+        char cwd[4096];
+        if (!getcwd(cwd, sizeof cwd) || cx_fmt(rf_prod, sizeof rf_prod, "sh %s/unisacc.com", cwd)) rf_die("product");
+    }
+    if (mkdir(rf_dir, 0700)) rf_die("WORK must be a new directory");
+    native = tn_self() && !strcmp(tn_self(), "lnx/x86_64");
+    rf_put("pre.c", "#include <unistd.h>\n#include <fcntl.h>\n#include <stdio.h>\nint main(void){char b[8];int fd=open(\"pre.c\",0);long n=pread(fd,b,4,0);printf(\"%ld\\n\",n);return n==4?0:1;}\n");
+    rf_put("my.h", "int twice(int);\n");
+    rf_put("m.c", "#include <unistd.h>\n#include <fcntl.h>\n#include <stdio.h>\n#include \"my.h\"\nint main(void){char b[8];int fd=open(\"m.c\",0);long n=pread(fd,b,4,0);printf(\"%d %ld\\n\",twice(4),n);return n==4?0:1;}\n");
+    rf_put("t.c", "int twice(int x){return x+x;}\n");
+    rf_put("usr.c", "int user(int);\nint main(void){return user(1);}\n");
+    if (!native) {
+        printf("NOT_RUN\tA,B,C,D\thost target is not lnx/x86_64\n");
+    } else {
+        rf_native("", "");
+        rf_native("-O1", "1");
+        /* B */
+        rc = rf_cc("-c m.c -o m.o", 0, 0) || rf_cc("-c t.c -o t.o", 0, 0);
+        rf_ck(rc == 0, "B.compile two units rc0");
+        if (!rf_marks_on) {
+            rf_ck(rf_marks("m.o", "pread") == 0 && rf_marks("m.o", "twice") == 0 && rf_marks("t.o", "twice") == 0, "B.mark no mark in either object (deferred)");
+            rf_refused("m.o t.o -o mt.img", "mt.img", "B.link twice resolved from t.o, pread refused, exact 0.0.58 line, no output (deferred)");
+            printf("NOT_RUN\tB.mark header-declared names are marked, the definer is not; B.link rc0 quiet; B.run twice from t.o, pread from the stub\t%s\n", rf_deferred);
+        } else {
+            rf_ck(rf_marks("m.o", "pread") == 1 && rf_marks("m.o", "twice") == 1 && rf_marks("t.o", "twice") == 0, "B.mark header-declared names are marked, the definer is not");
+            rc = rf_cc("m.o t.o -o mt.img", &err, &errn);
+            rf_ck(rc == 0 && errn == 0, "B.link rc0 quiet");
+            if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+            free(err); err = 0;
+            if (rc == 0) rf_run("mt.img", "8 4\n", "B.run twice from t.o, pread from the stub");
+            else rf_ck(0, "B.run twice from t.o, pread from the stub");
+        }
+        /* C */
+        rc = rf_cc("-c usr.c -o usr.o", 0, 0);
+        rf_ck(rc == 0 && rf_marks("usr.o", "user") == 0, "C.compile own prototype is not marked");
+        rc = rf_cc("usr.o -o usr.img", &err, &errn);
+        rf_ck(rc == 1 && rf_is(err, errn, "link: undefined reference to user\n") && rf_absent("usr.img"), "C.link unmarked extern refused, exact line, no output");
+        free(err); err = 0;
+        /* D */
+        if (!rf_marks_on) printf("NOT_RUN\tD.relink same bytes\t%s\n", rf_deferred);
+        else {
+            rc = rf_cc("pre.o -o pre2.img", 0, 0);
+            rf_ck(rc == 0 && rf_same("pre.img", "pre2.img"), "D.relink same bytes");
+        }
+    }
+    rf_cross("lnx/arm64", "la", 1);
+    rf_cross("osx/x86_64", "ox", 1);
+    rf_cross("osx/arm64", "oa", 1);
+    rf_cross("win/x86_64", "wx", 0);
+    rf_cross("win/arm64", "wa", 0);
+    printf("CHECK_ROUTE_FWD failed=%d\n", rf_failed);
+    return rf_failed ? 1 : 0;
+}

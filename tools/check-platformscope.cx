@@ -1,0 +1,70 @@
+/* tools/check-platformscope.cx -- cxlib.platformscope against the real registry.
+ *
+ *   sh ./unisacc.com tools/check-platformscope.cx       (from the repository root)
+ *
+ * The decision this module carries is which batch platforms the host may run.  The
+ * assertion that matters is not "it returns 1 for lnx/x86_64" -- it is that the answer
+ * agrees with tests/batches.tsv: every row the module refuses must really name a non-host
+ * platform, and every row it accepts must name exactly the host scope, so a table edit
+ * cannot silently turn a green batch into NOT_APPLICABLE.  The table is read here directly,
+ * not through cxlib.allsession, so this check does not depend on the module it guards. */
+#pragma unisa use cxlib.platformscope
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tpss.%s\n", ok ? "PASS" : "FAIL", name); }
+
+int main(void) {
+    unsigned char *t = 0; int64_t n = 0;
+    long at = 0, rows = 0, host_rows = 0, foreign_rows = 0, disagree = 0, unparsable = 0;
+    char first_foreign[64] = {0};
+    ck(psc_platform_allowed("lnx/x86_64") == 1, "host-platform-allowed");
+    ck(psc_platform_allowed("osx/arm64") == 0, "foreign-platform-refused");
+    ck(psc_platform_allowed("win/x86_64") == 0, "win-platform-refused");
+    ck(!strcmp(psc_host_scope(), "lnx/x86_64"), "host-scope-named");
+    if (sy_read_file("tests/batches.tsv", &t, &n, 0) < 0 || !t || n <= 0) {
+        ck(0, "batches-readable");
+        printf("CHECK_PLATFORMSCOPE\tfailed=%d\n", failed);
+        return 1;
+    }
+    while (at < (long)n) {
+        long e = at, c, cs, col = 0, ps = -1, pe = -1;
+        char platform[64];
+        while (e < (long)n && t[e] != '\n') e++;
+        if (e > at && t[at] != '#' && memcmp(t + at, "id\t", 3)) {
+            cs = at;
+            for (c = at; c <= e; c++) {
+                if (c == e || t[c] == '\t') {
+                    if (col == 5) { ps = cs; pe = c; break; }
+                    col++;
+                    cs = c + 1;
+                }
+            }
+            if (ps < 0) unparsable++;
+            else {
+                long pl = pe - ps;
+                if (pl <= 0 || pl >= (long)sizeof platform) pl = 0;
+                if (pl) { tx_copy(platform, (long)sizeof platform, (const char *)t + ps, pl); } else platform[0] = 0;
+                rows++;
+                if (psc_platform_allowed(platform)) {
+                    host_rows++;
+                    if (strcmp(platform, psc_host_scope())) disagree++;
+                } else {
+                    foreign_rows++;
+                    if (!first_foreign[0] && pl) tx_copy(first_foreign, (long)sizeof first_foreign, platform, tx_len(platform, (long)sizeof first_foreign));
+                }
+            }
+        }
+        at = e + 1;
+    }
+    free(t);
+    ck(rows > 0, "batches-have-rows");
+    ck(host_rows > 0, "batches-have-host-rows");
+    ck(foreign_rows > 0, "batches-have-foreign-rows");
+    ck(unparsable == 0, "every-row-has-a-platform-column");
+    ck(disagree == 0, "accepted-platform-equals-host-scope");
+    printf("CHECK_PLATFORMSCOPE\tfailed=%d\trows=%ld\thost_rows=%ld\tforeign_rows=%ld\tfirst_foreign=%s\n",
+           failed, rows, host_rows, foreign_rows, first_foreign[0] ? first_foreign : "-");
+    return failed ? 1 : 0;
+}

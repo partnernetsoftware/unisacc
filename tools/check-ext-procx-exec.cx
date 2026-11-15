@@ -1,0 +1,127 @@
+/* Checks ext/sysx/exec.cx np_exec (prd_cx.md 10.8); Linux only (real children, /proc).
+     sh ./unisacc.com tools/check-ext-procx-exec.cx
+   Prints PASS/FAIL lines and EXT_PROCX_EXEC<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL.
+   osx/win named refusals: UNVERIFIED here (no probe distinguishes the target from inside a Linux run). */
+#pragma unisa use sysx.exec
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use mem.grow
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\texec.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\texec.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+static int nfds(void) {
+    sy_dir_t d; int n = 0;
+    if (sy_dir_open(&d, "/proc/self/fd") != 0) return -1;
+    while (sy_dir_next(&d) == 1) n++;
+    sy_dir_close(&d);
+    return n;
+}
+static int nochild(void) {   /* no unreaped child left */
+    /* /proc/PID/task/PID/children lists live and zombie children; empty means none left */
+    char p[64]; unsigned char *d = 0; int64_t n = 0; int pid = sy_pid(), k = 0, i, nd = 0; char dg[16];
+    const char *a = "/proc/", *b = "/task/", *c = "/children";
+    while (pid > 0) { dg[nd++] = (char)('0' + pid % 10); pid /= 10; }
+    for (i = 0; a[i]; i++) p[k++] = a[i];
+    for (i = nd; i > 0; i--) p[k++] = dg[i - 1];
+    for (i = 0; b[i]; i++) p[k++] = b[i];
+    for (i = nd; i > 0; i--) p[k++] = dg[i - 1];
+    for (i = 0; c[i]; i++) p[k++] = c[i];
+    p[k] = 0;
+    if (sy_read_file(p, &d, &n, 4096) != 0) return 0;
+    return n == 0 || (n == 1 && d[0] == ' ');
+}
+static int run(const char *script, mg_buf *o, mg_buf *e, long cap, long dl, sy_exit_t *st) {
+    char *v[4]; sy_spawn_t sp;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)script; v[3] = 0;
+    sy_spawn_init(&sp); sp.argv = v; sp.deadline_ms = dl;
+    return np_exec(&sp, o, e, cap, st);
+}
+
+int main(void) {
+    mg_buf o, e; sy_exit_t st; int f0, r; long t0;
+    f0 = nfds();
+    ck(f0 > 0, "fd-count-probe");
+
+    mg_init(&o); mg_init(&e);
+    r = run("printf abc; printf XY >&2; exit 3", &o, &e, 1024, 0, &st);
+    ckv(r, 0, "split-rc");
+    ck(o.len == 3 && !memcmp(o.data, "abc", 3), "split-stdout");
+    ck(e.len == 2 && !memcmp(e.data, "XY", 2), "split-stderr");
+    ck(st.exited && st.code == 3 && !st.timed_out, "split-status");
+    mg_free(&o); mg_free(&e);
+
+    mg_init(&o);
+    r = run("printf out; printf err >&2", &o, 0, 1024, 0, &st);
+    ckv(r, 0, "merged-rc");
+    ck(o.len == 6, "merged-both-in-out");
+    mg_free(&o);
+
+    mg_init(&o); mg_init(&e);
+    r = run("exit 0", &o, &e, 1024, 0, &st);
+    ck(r == 0 && o.len == 0 && e.len == 0 && st.exited && st.code == 0, "zero-bytes");
+    mg_free(&o); mg_free(&e);
+
+    mg_init(&o); mg_init(&e);
+    r = run("head -c 100000 /dev/zero", &o, &e, 1000, 0, &st);
+    ckv(r, -EMSGSIZE, "over-cap-rc");
+    ckv(o.len, 1000, "over-cap-exact-len");
+    ck(e.len == 0, "over-cap-other-stream-empty");
+    mg_free(&o); mg_free(&e);
+
+    mg_init(&o);
+    r = run("printf 12345", &o, 0, 5, 0, &st);
+    ck(r == 0 && o.len == 5, "exactly-cap-ok");
+    mg_free(&o);
+
+    mg_init(&o); mg_init(&e); t0 = sy_now_ms();
+    r = run("sleep 30", &o, &e, 1024, 300, &st);
+    ck(r == 0 && st.timed_out == 1, "timeout-flag");
+    ck(sy_now_ms() - t0 < 1300, "timeout-prompt");
+    ckv(sy_exit_code(&st), 124, "timeout-code-124");
+    mg_free(&o); mg_free(&e);
+
+    mg_init(&o); mg_init(&e); t0 = sy_now_ms();
+    r = run("trap '' TERM; while :; do sleep 1; done", &o, &e, 1024, 200, &st);
+    ck(r == 0 && st.timed_out == 1 && st.sig == 9, "term-ignored-killed");
+    ck(sy_now_ms() - t0 < 1800, "term-ignored-bounded");
+    mg_free(&o); mg_free(&e);
+
+    mg_init(&o); mg_init(&e);
+    r = run("exec /no/such/prog-npx", &o, &e, 1024, 0, &st);
+    ck(r == 0 && st.exited && st.code == 127, "shell-missing-127");
+    mg_free(&o); mg_free(&e);
+    {   char *v[2]; sy_spawn_t sp; mg_init(&o);
+        v[0] = "/no/such/prog-npx"; v[1] = 0; sy_spawn_init(&sp); sp.argv = v;
+        ckv(np_exec(&sp, &o, 0, 1024, &st), -ENOENT, "bad-command-enoent");
+        sp.in_fd = SY_STDIO_PIPE; v[0] = "cat";
+        ckv(np_exec(&sp, &o, 0, 1024, &st), -EINVAL, "in-pipe-einval");
+        sp.in_fd = SY_STDIO_INHERIT;
+        ckv(np_exec(&sp, &o, 0, -1, &st), -EINVAL, "negative-cap-einval");
+        ckv(np_exec(&sp, 0, 0, 1, &st), -EINVAL, "null-out-einval");
+        mg_free(&o); }
+
+    /* Known edge (10.8): a grandchild holding the write end keeps an untimed call waiting for EOF;
+       with a deadline the call still returns, timed out, and reaps the direct child. */
+    mg_init(&o); t0 = sy_now_ms();
+    r = run("sleep 3 & exit 0", &o, 0, 1024, 0, &st);
+    ck(r == 0 && st.exited && sy_now_ms() - t0 >= 2500, "grandchild-holds-pipe-waits-for-eof");
+    mg_free(&o);
+    mg_init(&o); t0 = sy_now_ms();
+    r = run("sleep 5 & exit 0", &o, 0, 1024, 300, &st);
+    ck(r == 0 && st.timed_out == 1 && sy_now_ms() - t0 < 2000, "grandchild-with-deadline-returns");
+    mg_free(&o);
+
+    ck(nochild(), "no-zombie-left");
+    ckv(nfds(), f0, "fd-count-unchanged");
+    printf("NOTE\texec.osx-win-refusal\tUNVERIFIED (no target probe on lnx)\n");
+    printf("EXT_PROCX_EXEC\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

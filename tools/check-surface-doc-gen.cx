@@ -1,0 +1,50 @@
+/* check-surface-doc-gen: tools/surface-doc-gen.cx contract.
+ *   sh ./unisacc.com tools/check-surface-doc-gen.cx [-- WORK]
+ * WORK defaults to sy_tmpdir(). Compiles the generator once, then:
+ *   check-tree rc 0; fixture write then check rc 0 with pkgs=2; hand edit rc 1 DIFF; short row rc 2. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+static int failed, checks;
+static char fix[2600], tbl[2700], doc[2800], cmd[6000], outb[4000], native[2800];
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tsurface-doc-gen.%s\n", ok ? "PASS" : "FAIL", n); }
+static int sh(const char *c, char *out, int cap) {
+    char *v[] = {"sh", "-c", (char *)c, 0}, *text = 0; size_t n = 0, i; int rc = cx_runv_timeout(v, 40, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static const char *HEAD = "# std-surface v2\n# pkg\tname\n";
+static const char *ROWS = "a.x\tf\tint f(void)\tg\t-errno\timpl\timpl\timpl\texists\tn\tstable\t0.1.0\town\tt\n"
+                          "b.y\th\tint h(void)\tg\t-errno\timpl\timpl\trefuse:x\tnew\tn\tstable\t0.1.0\town\tt\n";
+int main(int argc, char **argv) {
+    char root[2048], why[256], body[2048];
+    const char *work = argc >= 2 && argv[1][0] != '-' ? argv[1] : sy_tmpdir();
+    if (argc > 2 || strlen(work) > 2400 || strchr(work, '\'')) { fprintf(stderr, "check-surface-doc-gen: usage [WORK]\n"); return 2; }
+    if (!getcwd(root, sizeof root)) return 2;
+    if (cx_fmt(fix, sizeof fix, "%s/surface-doc-gen-fixture-%d", work, sy_pid())
+        || cx_fmt(tbl, sizeof tbl, "%s/build/std-surface.tsv", fix)
+        || cx_fmt(doc, sizeof doc, "%s/docs/cx/api/a.x.md", fix)
+        || cx_fmt(native, sizeof native, "%s/surface-doc-gen-native", work)) return 2;
+    if (tq_native(root, "tools/surface-doc-gen.cx", native, why, sizeof why)) { fprintf(stderr, "check-surface-doc-gen: %s\n", why); return 2; }
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/build' '%s/docs/cx/api'", fix, fix) || sh(cmd, outb, sizeof outb) != 0) { printf("FAIL\tfixture\n"); return 2; }
+    if (cx_fmt(cmd, sizeof cmd, "'%s' --check '%s' 2>&1", native, root)) return 2;
+    ck(sh(cmd, outb, sizeof outb) == 0 && strstr(outb, "status=CHECK"), "check-tree");
+    if (cx_fmt(body, sizeof body, "%s%s", HEAD, ROWS) || cx_write(tbl, body, strlen(body))) { printf("FAIL\twrite-table\n"); return 2; }
+    if (cx_fmt(cmd, sizeof cmd, "'%s' --write '%s' 2>&1", native, fix)) return 2;
+    ck(sh(cmd, outb, sizeof outb) == 0 && strstr(outb, "pkgs=2"), "write");
+    if (cx_fmt(cmd, sizeof cmd, "'%s' --check '%s' 2>&1", native, fix)) return 2;
+    ck(sh(cmd, outb, sizeof outb) == 0 && strstr(outb, "diff=0"), "check-fixture");
+    { size_t n = 0; char *s = cx_read(doc, &n);
+      if (s && n > 10) { s[n - 3] = s[n - 3] == 'x' ? 'y' : 'x'; ck(!cx_write(doc, s, n) && sh(cmd, outb, sizeof outb) == 1 && strstr(outb, "DIFF"), "neg-drift"); }
+      else ck(0, "neg-drift");
+      free(s); }
+    if (cx_fmt(body, sizeof body, "%sa.x\tf\tonly\n", HEAD) || cx_write(tbl, body, strlen(body))) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "'%s' --write '%s' 2>&1", native, fix)) return 2;
+    ck(sh(cmd, outb, sizeof outb) == 2 && strstr(outb, "REFUSE columns"), "neg-columns");
+    printf("CHECK_SURFACE_DOC_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

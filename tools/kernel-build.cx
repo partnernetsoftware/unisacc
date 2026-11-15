@@ -9,7 +9,8 @@ static const char *units[]={"transition","arith","buffer","memory","intern","byt
 static char root[4096],out[4096],watchdog[4400],product[4400],identity_tool[4400];
 static void die(const char *s){fprintf(stderr,"kernel-build: REFUSE %s\n",s);exit(2);}
 static void path(char *p,size_t cap,const char *a,const char *b){int n=snprintf(p,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path length");}
-static void call(char **v){np_result r;char why[1024];if(np_run(v,root,0,45,&r,why,sizeof why))die(why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc)exit(rc<0?128-rc:rc);}
+static void timeout_exit(const char *why){fprintf(stderr,"kernel-build: TIMEOUT %s\n",why);exit(124);} /* 124 is the retryable timeout code of chain-run */
+static void call(char **v){np_result r;char why[1024];if(np_run(v,root,0,45,&r,why,sizeof why)){if(r.timed_out)timeout_exit(why);die(why);}if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);if(rc==142)exit(124);if(rc)exit(rc<0?128-rc:rc);} /* 142: tools/bound watchdog timeout */
 static char *read_regular(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>16777216)die("bounded regular input required");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die(p);return s;}
 static void save(const char *name,const char *s,size_t n){char p[4400];path(p,sizeof p,out,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive receipt create");size_t at=0;while(at<n){ssize_t k=write(fd,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("receipt write; partial retained");at+=(size_t)k;}if(fsync(fd)||close(fd))die("receipt close");}
 static void digest(const char *p,char *sha){size_t n;char *s=read_regular(p,&n);cx_sha256_hex(s,n,sha);free(s);}
@@ -21,7 +22,7 @@ static void source_id(char *sha,int native){
   int ok=size==64&&!memcmp(expected,h,64);free(expected);if(!ok)die("identity helper changed; use a new output directory");
   v[n++]=identity_tool;v[n++]=root;
  }else{path(ident,sizeof ident,root,"seed/ident.c");v[n++]="sh";v[n++]=product;v[n++]=ident;v[n++]="--";v[n++]=root;}
- v[n]=0;np_result r;if(np_run(v,root,0,25,&r,why,sizeof why))die(why);
+ v[n]=0;np_result r;if(np_run(v,root,0,25,&r,why,sizeof why)){if(r.timed_out)timeout_exit(why);die(why);}
  if(r.rc||r.errn||r.outn!=65||r.out[64]!='\n'){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("source identity failed");}
  memcpy(sha,r.out,64);sha[64]=0;np_free(&r);
 }

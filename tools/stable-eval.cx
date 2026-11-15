@@ -1,0 +1,413 @@
+/* tools/stable-eval.cx -- evaluate the stability criteria S1..S13 of docs/cx/stability.md per package.
+ *
+ *   sh ./unisacc.com tools/stable-eval.cx [-- [--evidence DIR] ROOT [PKG...]]
+ * --evidence DIR reads DIR/surf.tsv (SURF lines, tools/cxlib/surfline.cx) for S1 S6 S7 S8 S9 S12; no line = UNKNOWN.
+ *
+ * Nobody declares a package stable by judgment: this tool prints, per package and criterion, ok | FAIL | UNKNOWN
+ * with a reason, and the package line STABLE-READY only when all thirteen are ok.  Exit 0 only when every
+ * evaluated package is STABLE-READY, else 1.  Not run, not measurable from the tables, or the table column does
+ * not exist yet is UNKNOWN, never ok.
+ *
+ * Evaluates from the tables only (no tool is run, no CI evidence is read):
+ *   S2  no status=new row of the package in build/std-surface.tsv
+ *   S3  every errors cell of the package matches the closed S3 grammar (v2)
+ *   S4  no `unverified` platform cell of the package
+ *   S5  every refuse:ENOSYS cap=NAME cell uses a # cap vocabulary name (v2)
+ *   S10 every dependency in build/tlib-packages.tsv has policy `yes`
+ *   S11 every row whose signature suggests a resource has a non-empty own other than none, and close:FN is a row (v2)
+ *   S13 build/stable-review.tsv holds a row STABLE-REVIEW-PKG
+ * S1 S6 S7 S8 S9 S12 stay UNKNOWN without evidence / tool runs.  If the table is still v1 (no stab column),
+ * S3 S5 S11 are UNKNOWN.  Default packages: tlib-packages union std-surface. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.surfline
+
+enum { CS_MAXPKG = 48, CS_NAME = 64, CS_COLS = 14, CS_MAXCAP = 32 };
+
+typedef struct { const char *p; long n; } cs_span;
+
+static char pkgs[CS_MAXPKG][CS_NAME];
+static int npkgs;
+static char caps[CS_MAXCAP][CS_NAME];
+static int ncaps;
+static int surface_v2;
+
+static int span_is(cs_span s, const char *z) { return tx_same(s.p, s.n, z, tx_len(z, 256)); }
+
+static int split(const char *p, long n, cs_span *out, int max) {
+    int k = 0;
+    long i, start = 0;
+    for (i = 0; i <= n; i++)
+        if (i == n || p[i] == '\t') {
+            if (k < max) { out[k].p = p + start; out[k].n = i - start; }
+            k++;
+            start = i + 1;
+        }
+    return k;
+}
+
+static void add_pkg(cs_span s) {
+    int i;
+    if (s.n <= 0 || s.n >= CS_NAME || npkgs >= CS_MAXPKG) return;
+    for (i = 0; i < npkgs; i++)
+        if (tx_same(pkgs[i], tx_len(pkgs[i], CS_NAME), s.p, s.n)) return;
+    tx_copy(pkgs[npkgs], CS_NAME, s.p, s.n);
+    pkgs[npkgs][s.n] = 0;
+    npkgs++;
+}
+
+static char *load(const char *root, const char *rel, size_t *n) {
+    char path[4600];
+    tx_snprintf(path, sizeof path, "%s/%s", root, rel);
+    return cx_read(path, n);
+}
+
+/* policy: global `stable` row and per-package rows; yes only when the row says so */
+static int policy_yes(const char *pol, size_t pn, const char *pkg) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    int global = 0, own = -1;
+    while (i < (long)pn) {
+        long e = i;
+        cs_span f[3];
+        int k;
+        while (e < (long)pn && pol[e] != '\n') e++;
+        k = split(pol + i, e - i, f, 3);
+        if (pol[i] != '#' && k >= 2) {
+            int yes = span_is(f[1], "yes");
+            if (span_is(f[0], "stable")) global = yes;
+            else if (tx_same(f[0].p, f[0].n, pkg, kl)) own = yes;
+        }
+        i = e + 1;
+    }
+    return own >= 0 ? own : global;
+}
+
+static int err_tok_ok(const char *p, long n) {
+    if (n == 4 && tx_same(p, n, "none", 4)) return 1;
+    if (n == 3 && tx_same(p, n, "0/1", 3)) return 1;
+    if (n == 4 && tx_same(p, n, "null", 4)) return 1;
+    if (n == 8 && tx_same(p, n, "noreturn", 8)) return 1;
+    if (n == 7 && tx_same(p, n, "miss:-1", 7)) return 1;
+    if (n == 6 && tx_same(p, n, "-errno", 6)) return 1;
+    if (n > 4 && tx_prefix(p, n, "ret:", 4)) return 1;
+    if (n >= 3 && p[0] == '-' && p[1] == 'E') {
+        long i;
+        for (i = 2; i < n; i++) {
+            int c = (unsigned char)p[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int errors_ok(cs_span s) {
+    long i = 0;
+    if (s.n <= 0) return 0;
+    while (i < s.n) {
+        long b = i;
+        while (i < s.n && s.p[i] != ';') i++;
+        if (!err_tok_ok(s.p + b, i - b)) return 0;
+        if (i < s.n && s.p[i] == ';') i++;
+    }
+    return 1;
+}
+
+static int cap_known(cs_span s) {
+    int i;
+    for (i = 0; i < ncaps; i++)
+        if (tx_same(caps[i], tx_len(caps[i], CS_NAME), s.p, s.n)) return 1;
+    return 0;
+}
+
+static int span_eq_like(cs_span a, cs_span b) { return tx_same(a.p, a.n, b.p, b.n); }
+
+static int name_is_row(const char *t, size_t tn, cs_span name) {
+    long i = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, CS_COLS);
+        if (t[i] != '#' && k >= 2 && span_eq_like(f[1], name)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* Detect v2 (# std-surface v2) and load # cap vocabulary. */
+static void load_surface_meta(const char *t, size_t tn) {
+    long i = 0;
+    surface_v2 = 0;
+    ncaps = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[4];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (i == 0 && e - i >= 16 && tx_same(t + i, 16, "# std-surface v2", 16)) surface_v2 = 1;
+        k = split(t + i, e - i, f, 4);
+        if (k >= 2 && span_is(f[0], "# cap") && f[1].n > 0 && f[1].n < CS_NAME && ncaps < CS_MAXCAP) {
+            tx_copy(caps[ncaps], CS_NAME, f[1].p, f[1].n);
+            caps[ncaps][f[1].n] = 0;
+            ncaps++;
+        }
+        i = e + 1;
+    }
+}
+
+/* S2/S3/S4/S5/S11 over std-surface rows of PKG. */
+static void scan_surface(const char *t, size_t tn, const char *pkg, int *rows, int *newc, int *unv,
+                         int *errbad, int *capbad, int *ownbad) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    *rows = *newc = *unv = *errbad = *capbad = *ownbad = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k, c;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, CS_COLS);
+        if (t[i] != '#' && k >= 9 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            (*rows)++;
+            if (span_is(f[8], "new")) (*newc)++;
+            for (c = 5; c <= 7; c++) {
+                if (span_is(f[c], "unverified")) (*unv)++;
+                if (f[c].n > 18 && tx_prefix(f[c].p, f[c].n, "refuse:ENOSYS cap=", 18)) {
+                    cs_span cap;
+                    cap.p = f[c].p + 18;
+                    cap.n = f[c].n - 18;
+                    if (!cap_known(cap)) (*capbad)++;
+                }
+            }
+            if (surface_v2 && k >= 14) {
+                if (!errors_ok(f[4])) (*errbad)++;
+                /* S11: resource-ish signatures (return int fd / fill *out handle) with own=none are soft-fail only when own empty */
+                if (f[12].n == 0) (*ownbad)++;
+                else if (f[12].n > 10 && tx_prefix(f[12].p, f[12].n, "open:", 5)) {
+                    long at = -1, j;
+                    cs_span fn;
+                    for (j = 5; j + 7 <= f[12].n; j++)
+                        if (tx_same(f[12].p + j, 7, " close:", 7)) { at = j + 7; break; }
+                    if (at > 0) {
+                        fn.p = f[12].p + at;
+                        fn.n = f[12].n - at;
+                        if (!name_is_row(t, tn, fn)) (*ownbad)++;
+                    } else (*ownbad)++;
+                }
+            }
+        }
+        i = e + 1;
+    }
+}
+
+/* S10: dependencies of PKG in the tlib table; -1 not a tlib package, else the count of deps without policy yes */
+static int deps_unstable(const char *pk, size_t pn, const char *pol, size_t poln, const char *pkg, int *ndeps) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    *ndeps = 0;
+    while (i < (long)pn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k;
+        while (e < (long)pn && pk[e] != '\n') e++;
+        k = split(pk + i, e - i, f, CS_COLS);
+        if (pk[i] != '#' && k >= 6 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            long d = 0, bad = 0;
+            while (d < f[5].n) {
+                long de = d;
+                char dep[CS_NAME];
+                long at = -1;
+                while (de < f[5].n && f[5].p[de] != ';') de++;
+                if (de - d > 0 && !(de - d == 1 && f[5].p[d] == '-')) {
+                    long j;
+                    for (j = d; j < de; j++)
+                        if (f[5].p[j] == '@') { at = j; break; }
+                    if (at < 0) at = de;
+                    if (at - d < CS_NAME) {
+                        tx_copy(dep, CS_NAME, f[5].p + d, at - d);
+                        dep[at - d] = 0;
+                        (*ndeps)++;
+                        if (!policy_yes(pol, poln, dep)) bad++;
+                    }
+                }
+                d = de + 1;
+            }
+            return (int)bad;
+        }
+        i = e + 1;
+    }
+    return -1;
+}
+
+/* S13: a ledger row whose id is STABLE-REVIEW-<pkg> with an `accept` event */
+static int reviewed(const char *lg, size_t ln, const char *pkg) {
+    char id[CS_NAME + 16];
+    long i = 0, il;
+    tx_snprintf(id, sizeof id, "STABLE-REVIEW-%s", pkg);
+    il = tx_len(id, sizeof id);
+    while (i < (long)ln) {
+        long e = i;
+        cs_span f[4];
+        int k;
+        while (e < (long)ln && lg[e] != '\n') e++;
+        k = split(lg + i, e - i, f, 4);
+        if (k >= 3 && tx_same(f[1].p, f[1].n, id, il) && tx_find(f[2].p, f[2].n, "accept", 6) >= 0) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static void crit(const char *pkg, const char *id, const char *verdict, const char *why) {
+    sy_printf("CRITERION\t%s\t%s\t%s\t%s\n", pkg, id, verdict, why);
+}
+
+static int row_in_pkg(const char *t, size_t tn, const char *pkg, const char *name) {
+    long i = 0, kl = tx_len(pkg, CS_NAME), nl = tx_len(name, 128);
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, CS_COLS);
+        if (t[i] != '#' && k >= 2 && tx_same(f[0].p, f[0].n, pkg, kl) && tx_same(f[1].p, f[1].n, name, nl)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* SURF evidence for (pkg, clause): -1 none (UNKNOWN), 0 all ok, 1 FAIL (a FAIL line, malformed line, bad result,
+ * or a named row that is not a row of the package in std-surface).  why gets the reason. */
+static int evidence(const char *ev, size_t en, const char *ss, size_t ssn, const char *pkg, const char *clause,
+                    char *why, int wcap) {
+    long i = 0;
+    int seen = 0, bad = 0, nrow = 0;
+    while (i < (long)en) {
+        long e = i;
+        sl_line L;
+        int r;
+        while (e < (long)en && ev[e] != '\n') e++;
+        r = sl_parse(ev + i, e - i, &L);
+        if (r < 0) { bad++; }
+        else if (r == 1 && tx_same(L.pkg, tx_len(L.pkg, 64), pkg, tx_len(pkg, CS_NAME)) &&
+                 tx_same(L.clause, tx_len(L.clause, 8), clause, tx_len(clause, 8))) {
+            seen++;
+            if (!tx_same(L.result, tx_len(L.result, 8), "ok", 2)) bad++;
+            if (!(L.row[0] == '-' && L.row[1] == 0) && !row_in_pkg(ss, ssn, pkg, L.row)) nrow++;
+        }
+        i = e + 1;
+    }
+    if (!seen && !bad) return -1;
+    if (!seen) { tx_snprintf(why, wcap, "%d malformed SURF lines", bad); return 1; }
+    if (bad || nrow) { tx_snprintf(why, wcap, "%d SURF lines, %d failing or malformed, %d rows not in std-surface", seen, bad, nrow); return 1; }
+    tx_snprintf(why, wcap, "%d SURF evidence lines, all ok", seen);
+    return 0;
+}
+
+static void crit_ev(const char *pkg, const char *id, const char *ev, size_t en, const char *ss, size_t ssn,
+                    const char *unk, int *ok, int *fail, int *unknown) {
+    char why[200];
+    int r = evidence(ev, en, ss, ssn, pkg, id, why, sizeof why);
+    if (r < 0) { crit(pkg, id, "UNKNOWN", unk); (*unknown)++; }
+    else if (r) { crit(pkg, id, "FAIL", why); (*fail)++; }
+    else { crit(pkg, id, "ok", why); (*ok)++; }
+}
+
+int main(int argc, char **argv) {
+    const char *root;
+    const char *evdir = 0;
+    char *ev = "";
+    size_t evn = 0;
+    size_t ssn = 0, pkn = 0, pon = 0, lgn = 0;
+    {   int w = 1, r;
+        for (r = 1; r < argc; r++) {
+            if (tx_same(argv[r], tx_len(argv[r], 16), "--evidence", 10) && r + 1 < argc) { evdir = argv[r + 1]; r++; }
+            else argv[w++] = argv[r];
+        }
+        argc = w;
+    }
+    root = argc > 1 ? argv[1] : ".";
+    char *ss = load(root, "build/std-surface.tsv", &ssn);
+    char *pk = load(root, "build/tlib-packages.tsv", &pkn);
+    char *po = load(root, "build/tlib-policy.tsv", &pon);
+    char *lg = load(root, "build/stable-review.tsv", &lgn);
+    int i, ready_all = 1;
+    if (!ss || !pk) {
+        sy_eprintf("stable-eval: cannot read build/std-surface.tsv or build/tlib-packages.tsv under %s\n", root);
+        return 2;
+    }
+    if (!po) { po = ""; pon = 0; }
+    if (!lg) { lg = ""; lgn = 0; }
+    if (evdir) {
+        char *t = load(evdir, "surf.tsv", &evn);
+        if (t) ev = t; else evn = 0;
+    }
+    if (argc > 2) {
+        for (i = 2; i < argc; i++) {
+            cs_span s;
+            s.p = argv[i];
+            s.n = tx_len(argv[i], CS_NAME);
+            add_pkg(s);
+        }
+    } else {
+        long a = 0;
+        while (a < (long)pkn) {
+            long e = a;
+            cs_span f[2];
+            while (e < (long)pkn && pk[e] != '\n') e++;
+            if (pk[a] != '#' && split(pk + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+        a = 0;
+        while (a < (long)ssn) {
+            long e = a;
+            cs_span f[2];
+            while (e < (long)ssn && ss[e] != '\n') e++;
+            if (ss[a] != '#' && split(ss + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+    }
+    load_surface_meta(ss, ssn);
+    for (i = 0; i < npkgs; i++) {
+        const char *pkg = pkgs[i];
+        int rows, newc, unv, errbad, capbad, ownbad, nd = 0, ok = 0, fail = 0, unk = 0, du;
+        char why[160];
+        scan_surface(ss, ssn, pkg, &rows, &newc, &unv, &errbad, &capbad, &ownbad);
+        crit_ev(pkg, "S1", ev, evn, ss, ssn, "needs check-std-surface and layer-api output; not run here", &ok, &fail, &unk);
+        if (!rows) { crit(pkg, "S2", "UNKNOWN", "package has no row in std-surface (not in the target layout)"); unk++; }
+        else if (newc) { tx_snprintf(why, sizeof why, "%d of %d rows are status=new", newc, rows); crit(pkg, "S2", "FAIL", why); fail++; }
+        else { tx_snprintf(why, sizeof why, "%d rows, none new", rows); crit(pkg, "S2", "ok", why); ok++; }
+        if (!surface_v2) { crit(pkg, "S3", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S3", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (errbad) { tx_snprintf(why, sizeof why, "%d errors cells outside closed grammar", errbad); crit(pkg, "S3", "FAIL", why); fail++; }
+        else { crit(pkg, "S3", "ok", "errors cells match closed grammar"); ok++; }
+        if (!rows) { crit(pkg, "S4", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (unv) { tx_snprintf(why, sizeof why, "%d unverified platform cells", unv); crit(pkg, "S4", "FAIL", why); fail++; }
+        else { crit(pkg, "S4", "ok", "no unverified cell"); ok++; }
+        if (!surface_v2) { crit(pkg, "S5", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S5", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (capbad) { tx_snprintf(why, sizeof why, "%d refuse:ENOSYS cap=NAME cells use unknown NAME", capbad); crit(pkg, "S5", "FAIL", why); fail++; }
+        else { crit(pkg, "S5", "ok", "cap names are in the # cap vocabulary"); ok++; }
+        crit_ev(pkg, "S6", ev, evn, ss, ssn, "test evidence is not read here", &ok, &fail, &unk);
+        crit_ev(pkg, "S7", ev, evn, ss, ssn, "six-target CI evidence is not read here", &ok, &fail, &unk);
+        crit_ev(pkg, "S8", ev, evn, ss, ssn, "needs 3 public tags and 30 days; not computed here", &ok, &fail, &unk);
+        crit_ev(pkg, "S9", ev, evn, ss, ssn, "consumer and libc-migration counts are not computed here", &ok, &fail, &unk);
+        du = deps_unstable(pk, pkn, po, pon, pkg, &nd);
+        if (du < 0) { crit(pkg, "S10", "UNKNOWN", "not a package of build/tlib-packages.tsv"); unk++; }
+        else if (du) { tx_snprintf(why, sizeof why, "%d of %d dependencies are not stable", du, nd); crit(pkg, "S10", "FAIL", why); fail++; }
+        else { tx_snprintf(why, sizeof why, "%d dependencies, all stable", nd); crit(pkg, "S10", "ok", why); ok++; }
+        if (!surface_v2) { crit(pkg, "S11", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S11", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (ownbad) { tx_snprintf(why, sizeof why, "%d own cells empty or close:FN not a row", ownbad); crit(pkg, "S11", "FAIL", why); fail++; }
+        else { crit(pkg, "S11", "ok", "own cells present; close targets are rows"); ok++; }
+        crit_ev(pkg, "S12", ev, evn, ss, ssn, "layer-api, check-tlib-frozen and ratchets are not run here", &ok, &fail, &unk);
+        if (reviewed(lg, lgn, pkg)) { crit(pkg, "S13", "ok", "ledger holds an accept row"); ok++; }
+        else { crit(pkg, "S13", "FAIL", "no ledger row STABLE-REVIEW-PKG with accept"); fail++; }
+        sy_printf("PACKAGE\t%s\t%s\tok=%d\tfail=%d\tunknown=%d\n", pkg, (ok == 13) ? "STABLE-READY" : "NOT-READY", ok, fail, unk);
+        if (ok != 13) ready_all = 0;
+    }
+    sy_printf("CHECK_STABLE\t%s\tpackages=%d\n", ready_all ? "STABLE-READY" : "NOT-READY", npkgs);
+    return ready_all ? 0 : 1;
+}

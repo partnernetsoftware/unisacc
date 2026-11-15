@@ -1,0 +1,312 @@
+/* tools/derive.cx -- 派生物总闸:按 exec/facts/derive.tsv 清单对各生成器跑 --check(同 order 并发)或 --write(串行,失败还原)。
+ *
+ *   sh ./unisacc.com tools/derive.cx -- --check|--write [--only NAME,...] [--changed PATH...] [--index] [--manifest FILE]
+ *
+ * 清单列(8 列,制表符分隔,# 行为注释):name generator check_argv write_argv outputs inputs_glob order bound_s。
+ *   check_argv/write_argv 以空格分词,write_argv 为 - 表示不自动写(如 layer-api:只报接口变了需 bump);
+ *   outputs 以空格分隔,末尾带 / 的是目录(只管其下一层文件);inputs_glob 以空格分隔,* 匹配任意字符(含 /);
+ *   bound_s 为 - 时取 30。每个子进程都经 ./tools/bound bound_s 启动。
+ * --check   只读。order 相同的行并发(最多 4 路),order 小的先跑。生成器 rc 0 记 OK,1 记 DRIFT,142(bound 超时)记 TIMEOUT,其它记 REFUSED。
+ * --write   按 order 串行。先快照该行登记的 outputs,生成器非 0 就把本轮已写的全部还原(原本不存在的文件删掉)并 rc 2,其后的行记 NOTRUN;
+ *           write_argv 为 - 的行改跑 check_argv,有漂移记 NEEDS_BUMP。只碰清单登记的 outputs。
+ * --only    只跑列出的名字;--changed 只跑 inputs_glob 命中任一 PATH 的行;--index 额外选中 tool-index 行。未选中的记 SKIPPED,不记 OK。
+ * 输出:每行一条 DERIVE<TAB>name<TAB>status<TAB>ms[<TAB>rc=N<TAB>生成器末行],末行
+ *   DERIVE_SUMMARY<TAB>ok=<TAB>drift=<TAB>refused=<TAB>skipped=<TAB>elapsed_ms=
+ * 退出码:0 全清;1 有漂移(--check 的 DRIFT,或 --write 后仍有 NEEDS_BUMP);2 生成器拒绝或超时(DERIVE 行指名)、清单坏行(REFUSE<TAB>清单<TAB>line=N<TAB>原因)或用法错。
+ * precommit 对接(设计说明,本工具不改 tools/precommit.cx):提交前由 precommit 以暂存路径调用
+ *   derive.cx -- --check --changed <暂存路径...>,只跑输入被改到的生成器;rc 1 提示先 derive --write --only NAME 再提交,rc 2 直接拦下;
+ *   新增或删除 tools/ 下文件时加 --index。全量 --check 留给慢车道与 CI。
+ * Check: tools/check-derive.cx. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.poll
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXR 64
+#define MAXTOK 40
+#define MAXSNAP 512
+enum { ST_SKIPPED, ST_OK, ST_DRIFT, ST_REFUSED, ST_TIMEOUT, ST_WROTE, ST_NEEDS_BUMP, ST_NOTRUN };
+static const char *stname[] = {"SKIPPED", "OK", "DRIFT", "REFUSED", "TIMEOUT", "WROTE", "NEEDS_BUMP", "NOTRUN"};
+typedef struct {
+    char name[64], gen[200], chk[500], wr[500], outs[700], ins[700];
+    int order, bound, sel, pid, fd, rc, status, done;
+    char *out; long n, cap, t0, ms;
+} Row;
+static Row rows[MAXR]; static int nr, ord[MAXR];
+typedef struct { char path[700]; char *data; long n; int existed; } Snap;
+static Snap snaps[MAXSNAP]; static int nsnap;
+static char *snapdirs[MAXR * 4]; static int nsnapdir;
+
+static int seq(const char *a, const char *b) { long n = tx_len(a, 4096); return n == tx_len(b, 4096) && mm_same(a, b, n); }
+static int glob(const char *g, long gn, const char *s, long sn) {
+    while (gn > 0) {
+        if (g[0] == '*') { long k; for (k = 0; k <= sn; k++) if (glob(g + 1, gn - 1, s + k, sn - k)) return 1; return 0; }
+        if (sn <= 0 || g[0] != s[0]) return 0;
+        g++; gn--; s++; sn--;
+    }
+    return sn == 0;
+}
+static int copy_field(char *dst, long cap, const char *s, long n) {
+    if (n <= 0 || n >= cap) return 1;
+    mm_copy(dst, cap, s, n); dst[n] = 0;
+    return 0;
+}
+static int to_int(const char *s, long n, int *v) {
+    long k; int x = 0;
+    if (n <= 0 || n > 6) return 1;
+    for (k = 0; k < n; k++) { if (s[k] < '0' || s[k] > '9') return 1; x = x * 10 + (s[k] - '0'); }
+    *v = x;
+    return 0;
+}
+static int refuse(const char *mf, int line, const char *why) { sy_printf("REFUSE\t%s\tline=%d\t%s\n", mf, line, why); return 2; }
+
+static int load(const char *mf) {
+    size_t n = 0; char *b = cx_read(mf, &n); long at = 0; int line = 0, i;
+    if (!b) { sy_printf("REFUSE\t%s\tline=0\tunreadable\n", mf); return 2; }
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, fs[9], k; int nf = 0; Row *r;
+        const char *l = b + at;
+        at += ln + 1; line++;
+        if (ln == 0 || l[0] == '#') continue;
+        fs[0] = 0;
+        for (k = 0; k < ln; k++) if (l[k] == '\t') { if (nf >= 7) return refuse(mf, line, "field-count"); fs[++nf] = k + 1; }
+        if (nf != 7) return refuse(mf, line, "field-count");
+        fs[8] = ln + 1;
+        if (nr >= MAXR) return refuse(mf, line, "too-many-rows");
+        r = &rows[nr];
+        if (copy_field(r->name, sizeof r->name, l + fs[0], fs[1] - fs[0] - 1) || copy_field(r->gen, sizeof r->gen, l + fs[1], fs[2] - fs[1] - 1) ||
+            copy_field(r->chk, sizeof r->chk, l + fs[2], fs[3] - fs[2] - 1) || copy_field(r->wr, sizeof r->wr, l + fs[3], fs[4] - fs[3] - 1) ||
+            copy_field(r->outs, sizeof r->outs, l + fs[4], fs[5] - fs[4] - 1) || copy_field(r->ins, sizeof r->ins, l + fs[5], fs[6] - fs[5] - 1))
+            return refuse(mf, line, "empty-or-long-field");
+        for (k = 0; r->name[k]; k++) if (!((r->name[k] >= 'a' && r->name[k] <= 'z') || (r->name[k] >= '0' && r->name[k] <= '9') || r->name[k] == '-')) return refuse(mf, line, "bad-name");
+        for (i = 0; i < nr; i++) if (seq(rows[i].name, r->name)) return refuse(mf, line, "duplicate-name");
+        if (to_int(l + fs[6], fs[7] - fs[6] - 1, &r->order) || r->order < 1 || r->order > 99) return refuse(mf, line, "bad-order");
+        if (fs[8] - fs[7] - 1 == 1 && l[fs[7]] == '-') r->bound = 30;
+        else if (to_int(l + fs[7], fs[8] - fs[7] - 1, &r->bound) || r->bound < 1 || r->bound > 300) return refuse(mf, line, "bad-bound");
+        if (seq(r->chk, "-")) return refuse(mf, line, "no-check-argv");
+        nr++;
+    }
+    if (!nr) return refuse(mf, line, "no-rows");
+    for (i = 0; i < nr; i++) ord[i] = i;
+    for (i = 1; i < nr; i++) {   /* 稳定插入排序:order 升序,同 order 保持清单行序 */
+        int k = ord[i], j;
+        for (j = i - 1; j >= 0 && rows[ord[j]].order > rows[k].order; j--) ord[j + 1] = ord[j];
+        ord[j + 1] = k;
+    }
+    return 0;
+}
+
+static int start(Row *r, const char *argv_s) {
+    static char buf[600], num[16]; char *v[MAXTOK + 4]; int c = 0; long k = 0, n = tx_len(argv_s, 500);
+    mm_copy(buf, sizeof buf, argv_s, n); buf[n] = 0;
+    cx_fmt(num, sizeof num, "%d", r->bound);
+    v[c++] = "./tools/bound"; v[c++] = num;
+    while (k < n && c < MAXTOK + 2) {
+        while (k < n && buf[k] == ' ') k++;
+        if (k >= n) break;
+        v[c++] = buf + k;
+        while (k < n && buf[k] != ' ') k++;
+        if (k < n) buf[k++] = 0;
+    }
+    v[c] = 0;
+    r->cap = 1 << 14; r->out = mm_alloc(r->cap); r->n = 0; r->done = 0; r->rc = -1;
+    r->t0 = sy_now_ms();
+    r->pid = sy_spawn_pipe(v, 0, 0, &r->fd, 0);
+    if (r->pid < 0 || !r->out) { r->done = 1; r->rc = 127; r->ms = 0; return 1; }
+    return 0;
+}
+/* 读到 EOF 后收尸;返回 1 表示该行结束 */
+static int pump(Row *r) {
+    long g;
+    if (r->n + 4096 >= r->cap) { char *nb = mm_grow(r->out, r->cap * 2); if (nb) { r->out = nb; r->cap *= 2; } else r->n = 0; }
+    g = sy_read_once(r->fd, r->out + r->n, r->cap - 1 - r->n);
+    if (g > 0) { r->n += g; return 0; }
+    {   int ex = 0, code = 0, sig = 0;
+        sy_close(r->fd);
+        r->rc = sy_wait_status(r->pid, 0, &ex, &code, &sig) == r->pid && ex ? code : 128;
+        r->ms = sy_now_ms() - r->t0; r->done = 1; r->out[r->n] = 0;
+    }
+    return 1;
+}
+static void run_group(Row **g, int ng) {
+    sy_pollfd_t pf[4]; int i, live = 0;
+    for (i = 0; i < ng; i++) if (!start(g[i], g[i]->status == ST_WROTE ? g[i]->wr : g[i]->chk)) live++;
+    while (live > 0) {
+        int np = 0, map[4];
+        for (i = 0; i < ng; i++) if (!g[i]->done) { pf[np].fd = g[i]->fd; pf[np].events = 1; pf[np].revents = 0; map[np++] = i; }
+        if (sy_poll(pf, np, 1000) < 0) { for (i = 0; i < np; i++) pf[i].revents = 1; }
+        for (i = 0; i < np; i++) if (pf[i].revents && pump(g[map[i]])) live--;
+    }
+}
+static void report(Row *r) {
+    long e = r->n, s;
+    if (r->status == ST_SKIPPED || r->status == ST_NOTRUN) { sy_printf("DERIVE\t%s\t%s\t0\n", r->name, stname[r->status]); return; }
+    if (r->status == ST_OK || r->status == ST_WROTE) { sy_printf("DERIVE\t%s\t%s\t%ld\n", r->name, stname[r->status], r->ms); return; }
+    while (e > 0 && (r->out[e - 1] == '\n' || r->out[e - 1] == ' ')) e--;
+    s = e;
+    while (s > 0 && r->out[s - 1] != '\n') s--;
+    { long k; for (k = s; k < e; k++) if (r->out[k] == '\t') r->out[k] = ' '; }
+    if (e - s > 300) e = s + 300;
+    sy_printf("DERIVE\t%s\t%s\t%ld\trc=%d\t%.*s%s\n", r->name, stname[r->status], r->ms, r->rc, (int)(e - s), r->out ? r->out + s : "",
+              r->status == ST_NEEDS_BUMP || (r->status == ST_DRIFT && seq(r->wr, "-")) ? "\tnote=interface-changed-needs-bump" : "");
+}
+static int classify(int rc) { return rc == 0 ? ST_OK : rc == 1 ? ST_DRIFT : rc == 142 ? ST_TIMEOUT : ST_REFUSED; }
+
+static int snap_file(const char *path) {
+    Snap *s; int rg = sy_is_reg(path); size_t n = 0;
+    if (nsnap >= MAXSNAP || tx_len(path, 700) >= 699) return 1;
+    s = &snaps[nsnap];
+    mm_copy(s->path, sizeof s->path, path, tx_len(path, 700) + 1);
+    if (rg == -ENOENT) { s->existed = 0; s->data = 0; s->n = 0; nsnap++; return 0; }
+    if (rg != 1) return 1;
+    s->data = cx_read(path, &n);
+    if (!s->data) return 1;
+    s->n = (long)n; s->existed = 1; nsnap++;
+    return 0;
+}
+static int snapped(const char *path) { int i; for (i = 0; i < nsnap; i++) if (seq(snaps[i].path, path)) return 1; return 0; }
+static int snap_outputs(Row *r) {
+    long k = 0, n = tx_len(r->outs, 700);
+    while (k < n) {
+        long s; char p[700];
+        while (k < n && r->outs[k] == ' ') k++;
+        s = k;
+        while (k < n && r->outs[k] != ' ') k++;
+        if (k == s) break;
+        mm_copy(p, sizeof p, r->outs + s, k - s); p[k - s] = 0;
+        if (p[k - s - 1] == '/') {
+            sy_dir_t d; char *keep;
+            p[k - s - 1] = 0;
+            keep = mm_alloc(k - s);
+            if (!keep) return 1;
+            mm_copy(keep, k - s, p, k - s); snapdirs[nsnapdir++] = keep;
+            if (sy_dir_open(&d, p)) continue;   /* 目录不存在:还原时也无新文件可删 */
+            while (sy_dir_next(&d) == 1) {
+                char f[700];
+                if (d.kind != 'f') continue;
+                if (cx_fmt(f, sizeof f, "%s/%s", p, d.name) || snap_file(f)) { sy_dir_close(&d); return 1; }
+            }
+            sy_dir_close(&d);
+        } else if (!snapped(p) && snap_file(p)) return 1;
+    }
+    return 0;
+}
+static void restore(void) {
+    int i;
+    for (i = 0; i < nsnapdir; i++) {   /* 目录型 outputs 下本轮新出现的文件删掉 */
+        sy_dir_t d;
+        if (sy_dir_open(&d, snapdirs[i])) continue;
+        while (sy_dir_next(&d) == 1) {
+            char f[700];
+            if (d.kind != 'f' || cx_fmt(f, sizeof f, "%s/%s", snapdirs[i], d.name)) continue;
+            if (!snapped(f)) { sy_unlink(f); sy_printf("DERIVE_RESTORED\t%s\tremoved\n", f); }
+        }
+        sy_dir_close(&d);
+    }
+    for (i = 0; i < nsnap; i++) {
+        Snap *s = &snaps[i];
+        if (!s->existed) { if (sy_is_reg(s->path) == 1) { sy_unlink(s->path); sy_printf("DERIVE_RESTORED\t%s\tremoved\n", s->path); } continue; }
+        {   size_t n = 0; char *now = cx_read(s->path, &n);
+            if (now && (long)n == s->n && mm_same(now, s->data, s->n)) continue;
+            if (cx_write(s->path, s->data, s->n)) sy_printf("DERIVE_RESTORE_FAILED\t%s\n", s->path);
+            else sy_printf("DERIVE_RESTORED\t%s\trewritten\n", s->path);
+        }
+    }
+}
+
+static int usage(void) { sy_printf("usage: derive.cx -- --check|--write [--only NAME,...] [--changed PATH...] [--index] [--manifest FILE]\n"); return 2; }
+
+int main(int argc, char **argv) {
+    const char *mf = "exec/facts/derive.tsv", *only = 0; char **changed = 0; int nchanged = 0, has_changed = 0, index = 0, mode = 0;
+    int a, i, ok = 0, drift = 0, refused = 0, skipped = 0, rc; long t0 = sy_now_ms();
+    for (a = 1; a < argc; a++) {
+        if (seq(argv[a], "--check")) mode = 1;
+        else if (seq(argv[a], "--write")) mode = 2;
+        else if (seq(argv[a], "--index")) index = 1;
+        else if (seq(argv[a], "--only") && a + 1 < argc) only = argv[++a];
+        else if (seq(argv[a], "--manifest") && a + 1 < argc) mf = argv[++a];
+        else if (seq(argv[a], "--changed")) {
+            has_changed = 1; changed = argv + a + 1;
+            while (a + 1 < argc && !(argv[a + 1][0] == '-' && argv[a + 1][1] == '-')) { a++; nchanged++; }
+        } else return usage();
+    }
+    if (!mode) return usage();
+    if ((rc = load(mf)) != 0) return rc;
+    if (only) {   /* --only 的每个名字都必须在清单里 */
+        long k = 0, n = tx_len(only, 4096);
+        while (k <= n) {
+            long s = k; int hit = 0;
+            while (k < n && only[k] != ',') k++;
+            for (i = 0; i < nr; i++) if (tx_len(rows[i].name, 64) == k - s && mm_same(rows[i].name, only + s, k - s)) hit = 1;
+            if (!hit) { sy_printf("REFUSE\tonly\tunknown-name\t%.*s\n", (int)(k - s), only + s); return 2; }
+            k++;
+        }
+    }
+    for (i = 0; i < nr; i++) {
+        Row *r = &rows[i]; int sel = 1;
+        if (only) {
+            long k = 0, n = tx_len(only, 4096), nn = tx_len(r->name, 64);
+            sel = 0;
+            while (k <= n) { long s = k; while (k < n && only[k] != ',') k++; if (k - s == nn && mm_same(only + s, r->name, nn)) sel = 1; k++; }
+        }
+        if (sel && has_changed) {
+            long k = 0, n = tx_len(r->ins, 700); int c;
+            sel = 0;
+            while (k < n && !sel) {
+                long s;
+                while (k < n && r->ins[k] == ' ') k++;
+                s = k;
+                while (k < n && r->ins[k] != ' ') k++;
+                for (c = 0; c < nchanged && !sel; c++) if (k > s && glob(r->ins + s, k - s, changed[c], tx_len(changed[c], 4096))) sel = 1;
+            }
+        }
+        if (index && seq(r->name, "tool-index")) sel = 1;
+        r->sel = sel; r->status = ST_SKIPPED;
+    }
+    if (mode == 1) {
+        i = 0;
+        while (i < nr) {
+            Row *g[4]; int ng = 0, j = i, o = rows[ord[i]].order, first = i;
+            while (j < nr && rows[ord[j]].order == o && ng < 4) { if (rows[ord[j]].sel) g[ng++] = &rows[ord[j]]; j++; }
+            run_group(g, ng);
+            for (a = 0; a < ng; a++) g[a]->status = classify(g[a]->rc);
+            for (a = first; a < j; a++) report(&rows[ord[a]]);
+            i = j;
+        }
+    } else {
+        int failed_at = -1;
+        for (i = 0; i < nr; i++) {
+            Row *r = &rows[ord[i]], *g[1];
+            if (!r->sel) { report(r); continue; }
+            if (failed_at >= 0) { r->status = ST_NOTRUN; report(r); continue; }
+            g[0] = r;
+            if (seq(r->wr, "-")) {
+                run_group(g, 1);
+                r->status = classify(r->rc);
+                if (r->status == ST_DRIFT) r->status = ST_NEEDS_BUMP;
+            } else {
+                if (snap_outputs(r)) { r->status = ST_REFUSED; r->rc = 2; r->out = mm_alloc(64); r->n = 0; if (r->out) { cx_fmt(r->out, 64, "snapshot-failed"); r->n = 15; } report(r); failed_at = i; restore(); continue; }
+                r->status = ST_WROTE;
+                run_group(g, 1);
+                if (r->rc != 0) { r->status = r->rc == 142 ? ST_TIMEOUT : ST_REFUSED; failed_at = i; }
+            }
+            report(r);
+            if (failed_at >= 0) restore();
+        }
+    }
+    for (i = 0; i < nr; i++) {
+        int s = rows[i].status;
+        if (s == ST_OK || s == ST_WROTE) ok++;
+        else if (s == ST_DRIFT || s == ST_NEEDS_BUMP) drift++;
+        else if (s == ST_REFUSED || s == ST_TIMEOUT) refused++;
+        else skipped++;
+    }
+    sy_printf("DERIVE_SUMMARY\tok=%d\tdrift=%d\trefused=%d\tskipped=%d\telapsed_ms=%ld\n", ok, drift, refused, skipped, sy_now_ms() - t0);
+    return refused ? 2 : drift ? 1 : 0;
+}

@@ -13,6 +13,13 @@
  * exclude  ';' list of PATH=REASON, or '-'. An excluded unit is never packed; a link whose closure
  *          needs it is refused.
  * deps     ';' list of PKG@X.Y.Z (the minimum provider version), or '-'.
+ * frozen   ninth field, '-' or a sha256 (see tp_load). faces: optional tenth field, ';' list of
+ *          FACE=UNIT: independent parts of one package; every UNIT must belong to the package.
+ *
+ * Faces of this file (names are by responsibility; the code stays one unit until export lands):
+ *   table     tp_load, tp_names, tp_find_*, tp_member_name, tp_face_of, tp_ver_*, tp_dep_ok, tp_deps_check
+ *   identity  tp_put*, tp_sha*, tp_unit_key, tp_kit_*, tp_cache_dir, tp_closure, tp_api, tp_ar_*, tp_rc_get
+ *   frozen    the `frozen` field of TpPkg and layer-api's set_row (freshness checks live in tlib.cx)
  * api_sha  sha256 of ROOT/build/layer-api/PKG.tsv at this version: an interface change shows up as
  *          a table edit next to the version it belongs to.
  *
@@ -32,11 +39,12 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
+#pragma unisa use sys.hostid
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-enum { TP_MAXU = 160, TP_MAXX = 16, TP_MAXD = 8, TP_NAME = 128, TP_SIGSHOW = 400 };
+enum { TP_MAXU = 160, TP_MAXX = 16, TP_MAXD = 8, TP_NAME = 128, TP_SIGSHOW = 400, TP_MAXF = 8 };
 
 typedef struct {
     char pkg[64];
@@ -53,6 +61,10 @@ typedef struct {
     int ndep;
     char dep_pkg[TP_MAXD][64];
     char dep_ver[TP_MAXD][32];
+    int nface;         /* optional tenth field: independent faces of one package, FACE=UNIT items */
+    char face[TP_MAXF * 4][16];
+    char face_unit[TP_MAXF * 4][TP_NAME];
+    char frozen[65];   /* '-' or a sha256: a frozen package's input key and freshness do not name the product */
 } TpPkg;
 
 typedef struct { char *b; long n; long cap; int bad; } TpBuf;
@@ -248,6 +260,42 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
                             p->nopq++;
                         }
                 }
+                /* optional ninth field: '-' or a sha256 (frozen); parse only, absent means '-' */
+                p->frozen[0] = '-'; p->frozen[1] = 0;
+                {
+                    long zo = 0, zl = 0;
+                    if (!tx_field(b + i, e - i, '\t', 8, &zo, &zl) && zl > 0 &&
+                        !(zl == 1 && b[i + zo] == '-')) {
+                        long h;
+                        int hex = zl == 64;
+                        for (h = 0; hex && h < zl; h++) {
+                            char c = b[i + zo + h];
+                            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) hex = 0;
+                        }
+                        if (!hex || tx_copy(p->frozen, sizeof p->frozen, b + i + zo, zl)) {
+                            mm_free(b);
+                            return tp_fail(why, wl, "bad frozen field for ", pkg);
+                        }
+                    }
+                }
+                /* optional tenth field: FACE=UNIT items; parse only, absent or '-' means no faces */
+                {
+                    long fo2 = 0, fl2 = 0;
+                    if (!tx_field(b + i, e - i, '\t', 9, &fo2, &fl2))
+                        for (k = 0;; k++) {
+                            long eq;
+                            int r = tp_item(b + i + fo2, fl2, k, item, sizeof item);
+                            if (r > 0) break;
+                            eq = r ? -1 : tx_chr(item, tx_len(item, sizeof item), '=');
+                            if (r < 0 || eq <= 0 || p->nface >= TP_MAXF * 4 ||
+                                tx_copy(p->face[p->nface], 16, item, eq) ||
+                                tx_copy(p->face_unit[p->nface], TP_NAME, item + eq + 1, tx_len(item + eq + 1, 512))) {
+                                mm_free(b);
+                                return tp_fail(why, wl, "bad faces list for ", pkg);
+                            }
+                            p->nface++;
+                        }
+                }
                 for (k = 0;; k++) {
                     long at;
                     int v[3];
@@ -289,6 +337,41 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
         long u;
         for (u = 0; u < p->nunit && !tx_eqz(p->unit[u], p->opq[k]); u++) {}
         if (u == p->nunit) return tp_fail(why, wl, "opaque unit is not a unit of the package: ", p->opq[k]);
+    }
+    for (k = 0; k < p->nface; k++) {
+        long u, j;
+        for (u = 0; u < p->nunit && !tx_eqz(p->unit[u], p->face_unit[k]); u++) {}
+        if (u == p->nunit) return tp_fail(why, wl, "face unit is not a unit of the package: ", p->face_unit[k]);
+        for (j = 0; j < k; j++)
+            if (tx_eqz(p->face_unit[j], p->face_unit[k])) return tp_fail(why, wl, "unit in two faces: ", p->face_unit[k]);
+    }
+    return 0;
+}
+
+/* The face name of unit REL, or 0 when the package declares no face for it. */
+const char *tp_face_of(const TpPkg *p, const char *rel) {
+    int k;
+    for (k = 0; k < p->nface; k++) if (tx_eqz(p->face_unit[k], rel)) return p->face[k];
+    return 0;
+}
+
+/* 1 when PROVIDER satisfies the minimum version MIN (same major, (minor,patch) not older). A
+   dependency minimum is a floor: the provider moving past it is normal, not drift. */
+int tp_dep_ok(const char *provider, const char *min) {
+    return tp_ver_compat(provider, min) == 0;
+}
+
+/* Every dependency of P is a package of the table whose current version satisfies the recorded
+   minimum. 0, or -1 with WHY naming the first dependency that does not. */
+int tp_deps_check(const char *root, const TpPkg *p, char *why, long wl) {
+    int k;
+    for (k = 0; k < p->ndep; k++) {
+        TpPkg *d = mm_alloc(sizeof *d);
+        int ok;
+        if (!d) return tp_fail(why, wl, "out of memory", 0);
+        ok = tp_load(root, p->dep_pkg[k], d, why, wl) == 0 && tp_dep_ok(d->version, p->dep_ver[k]);
+        mm_free(d);
+        if (!ok) return tp_fail(why, wl, "dependency not satisfied by the current version: ", p->dep_pkg[k]);
     }
     return 0;
 }
@@ -622,4 +705,158 @@ int tp_rc_get(const char *r, long n, const char *key, int nth, int field, char *
         i = e + 1;
     }
     return 1;
+}
+
+/* 1 when package P is frozen (its table row carries a sha256 in the ninth field). */
+int tp_is_frozen(const TpPkg *p) { return p->frozen[0] && !(p->frozen[0] == '-' && !p->frozen[1]); }
+
+/* The tlib cache root: UNISACC_TLIB_CACHE, else ~/.cache/unisacc/tlib. 0, or -1 when too long. */
+int tp_cache_dir(char *dst, long cap) {
+    const char *v = sy_env("UNISACC_TLIB_CACHE");
+    if (v && v[0]) return cx_fmt(dst, (size_t)cap, "%s", v) ? -1 : 0;
+    return cx_fmt(dst, (size_t)cap, "%s/.cache/unisacc/tlib", sy_env_or("HOME", ".")) ? -1 : 0;
+}
+
+/* One key line for ROOT/REL (`unit` at depth 0, `inc` below): its path and the sha of its bytes, or
+   `absent`; then the same for every file it names by #include "NAME", looked up next to the
+   including file and, when not there, from ROOT. Returns 1 when the file is absent, else 0. */
+static int tp_key_file(TpBuf *t, const char *root, const char *rel, int depth) {
+    char path[4400], hex[65], inc[2 * TP_NAME + 8];
+    size_t n = 0;
+    char *b;
+    long i, e, s, q, dl = 0, k;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) { t->bad = 1; return 0; }
+    b = cx_read(path, &n);
+    tp_puts(t, depth ? "inc\t" : "unit\t"); tp_puts(t, rel); tp_puts(t, "\t");
+    if (!b) { tp_puts(t, "absent\n"); return 1; }
+    tp_sha(b, n, hex);
+    tp_puts(t, hex); tp_puts(t, "\n");
+    for (k = 0; rel[k]; k++) if (rel[k] == '/') dl = k + 1;
+    for (i = 0; depth < 8 && i < (long)n; i = e + 1) {
+        e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        s = i;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (s >= e || b[s] != '#') continue;
+        s++;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (e - s < 9 || !mm_same(b + s, "include", 7)) continue;
+        s += 7;
+        while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+        if (s >= e || b[s] != '"') continue;
+        s++;
+        q = s;
+        while (q < e && b[q] != '"') q++;
+        if (q >= e || q == s) continue;
+        if (dl + (q - s) + 1 > (long)sizeof inc || tx_copy(inc, sizeof inc, rel, dl) || tx_copy(inc + dl, (long)sizeof inc - dl, b + s, q - s)) { t->bad = 1; break; }
+        if (tp_key_file(t, root, inc, depth + 1) && dl > 0 && !tx_copy(inc, sizeof inc, b + s, q - s)) (void)tp_key_file(t, root, inc, depth + 1);
+    }
+    mm_free(b);
+    return 0;
+}
+
+/* The content identity of one unit's object, as `tools/tlib.cx build` caches it under
+   CACHE/unit: sha256 over the target, the compile FLAGS, PRODUCT_SHA, the path text UNIT the
+   product is given (object bytes depend on it) and, for every file of CLOSURE (the lines of
+   tp_closure: the unit first, then every unit it reaches by `use`; ROOT-relative, or absolute
+   when outside ROOT), its path and source sha with the files it #includes (tp_key_file). Nothing
+   of ROOT's own path enters, so checkouts with the same content share the object; one changed
+   byte in the unit, in a unit it uses or in a file any of them #includes gives another key.
+   0, or -1 on a bad argument or no memory. */
+int tp_unit_key(const char *root, const char *product_sha, const char *flags, const char *unit, const char *closure, char hex[65]) {
+    char one[4400];
+    long n, i = 0, e;
+    TpBuf t;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    if (hex) hex[0] = 0;
+    if (!root || !product_sha || !product_sha[0] || !flags || !unit || !unit[0] || !closure || !closure[0] || !hex) return -1;
+    n = tx_len(closure, TX_ZCAP);
+    tp_puts(&t, "unitkey\t1\ntarget\t"); tp_puts(&t, tn_self());
+    tp_puts(&t, "\nflags\t"); tp_puts(&t, flags);
+    tp_puts(&t, "\nproduct_sha\t"); tp_puts(&t, product_sha);
+    tp_puts(&t, "\npath\t"); tp_puts(&t, unit); tp_puts(&t, "\n");
+    while (i < n) {
+        e = i;
+        while (e < n && closure[e] != '\n') e++;
+        if (e > i) {
+            if (tx_copy(one, sizeof one, closure + i, e - i)) { t.bad = 1; break; }
+            if (one[0] == '/') (void)tp_key_file(&t, "", one + 1, 0);
+            else (void)tp_key_file(&t, root, one, 0);
+        }
+        i = e + 1;
+    }
+    if (t.bad || !t.b) { mm_free(t.b); return -1; }
+    tp_sha(t.b, (size_t)t.n, hex);
+    mm_free(t.b);
+    return 0;
+}
+
+static TpPkg tp_keypkg;
+
+/* The content identity of the kit that `tools/tlib.cx kit` builds from the checkout at absolute
+   ROOT with PRODUCT: sha256 over the target, the product's sha, the package table's sha, the sha
+   of tools/tlib.cx (the prep image's root unit, which also carries the compile flags) and, for
+   every package of the table in table order, its name, version, api_sha and frozen field, the sha
+   of its build/layer-api manifest, its exclusions and every unit's path and source sha with the
+   files it #includes. Nothing of ROOT's own path enters, so two checkouts with the same content
+   share one key; one changed byte in any of the above gives another. 0, or -1 when the product
+   or the table cannot be read. */
+int tp_kit_key(const char *root, const char *product, char hex[65]) {
+    char path[4400], one[65], why[256], pkg[64];
+    char *names;
+    long nn = 0, i = 0, e;
+    int u;
+    TpBuf t;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    hex[0] = 0;
+    if (tp_sha_file(product, one)) return -1;
+    tp_puts(&t, "kitkey\t1\ntarget\t"); tp_puts(&t, tn_self());
+    tp_puts(&t, "\nproduct_sha\t"); tp_puts(&t, one);
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", root) || tp_sha_file(path, one)) { mm_free(t.b); return -1; }
+    tp_puts(&t, "\ntable\t"); tp_puts(&t, one); tp_puts(&t, "\n");
+    (void)tp_key_file(&t, root, "tools/tlib.cx", 0);
+    names = tp_names(root, &nn);
+    if (!names) { mm_free(t.b); return -1; }
+    while (i < nn) {
+        e = i;
+        while (e < nn && names[e] != '\n') e++;
+        if (e > i && !tx_copy(pkg, sizeof pkg, names + i, e - i)) {
+            if (tp_load(root, pkg, &tp_keypkg, why, sizeof why)) {
+                tp_puts(&t, "unloadable\t"); tp_puts(&t, pkg); tp_puts(&t, "\n");
+            } else {
+                const TpPkg *p = &tp_keypkg;
+                tp_puts(&t, "pkg\t"); tp_puts(&t, p->pkg); tp_puts(&t, "\t"); tp_puts(&t, p->version); tp_puts(&t, "\t");
+                tp_puts(&t, p->api_sha); tp_puts(&t, "\t"); tp_puts(&t, p->frozen); tp_puts(&t, "\nmanifest\t");
+                if (cx_fmt(path, sizeof path, "%s/build/layer-api/%s.tsv", root, p->pkg) || tp_sha_file(path, one)) tp_puts(&t, "absent");
+                else tp_puts(&t, one);
+                tp_puts(&t, "\n");
+                for (u = 0; u < p->nexcl; u++) { tp_puts(&t, "excluded\t"); tp_puts(&t, p->excl[u]); tp_puts(&t, "\n"); }
+                for (u = 0; u < p->nunit; u++) (void)tp_key_file(&t, root, p->unit[u], 0);
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(names);
+    if (t.bad || !t.b) { mm_free(t.b); return -1; }
+    tp_sha(t.b, (size_t)t.n, hex);
+    mm_free(t.b);
+    return 0;
+}
+
+/* The kit directory for the checkout at absolute ROOT built by PRODUCT: CACHE/kit/<tp_kit_key>.
+   The key is content, not the checkout path: every checkout with the same product, table and
+   sources reads and publishes the same directory. 0, or -1. */
+int tp_kit_dir_for(const char *root, const char *product, char *dst, long cap) {
+    char c[4096], hex[65];
+    if (tp_cache_dir(c, sizeof c) || tp_kit_key(root, product, hex)) return -1;
+    return cx_fmt(dst, (size_t)cap, "%s/kit/%s", c, hex) ? -1 : 0;
+}
+
+/* tp_kit_dir_for with ROOT/unisacc.com as the product: what every consumer that does not name a
+   product asks (tests/run-batch.cx, tools/affected.cx, cxlib.toolprep, cxlib.runnerprep,
+   tools/tlib-admit.cx, tools/check-tlib-prep.cx). 0, or -1. */
+int tp_kit_dir(const char *root, char *dst, long cap) {
+    char product[4400];
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return -1;
+    return tp_kit_dir_for(root, product, dst, cap);
 }

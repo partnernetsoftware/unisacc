@@ -606,6 +606,28 @@ static void make_replays(void) {
 /* --fake-curl ARGS: stands in for curl on PATH.  FAKE_CURL_DIR/route lines
    "URL<TAB>STATUS<TAB>REDIRECT<TAB>BODYFILE|-<TAB>EXIT" give the answer; each call is logged to
    FAKE_CURL_DIR/call-N as "URL<TAB>q proto=https max-redirs=0<TAB>auth<TAB>cfgmode<TAB>argvtoken<TAB>CFGPATH". */
+/* structural token tests, no substring search.  piece_starts: some word of S (a maximal run of [A-Za-z0-9_]) starts with PAT.
+   line_is: some newline-delimited line of the N bytes at B equals PAT exactly. */
+static int piece_starts(const char *s, const char *pat) {
+    long n = tx_len(s, 1L << 16), pl = tx_len(pat, 256), i = 0;
+    while (i < n) {
+        long j = i;
+        while (j < n && (s[j] == '_' || (s[j] >= '0' && s[j] <= '9') || (s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z'))) j++;
+        if (j > i && j - i >= pl && tx_prefix(s + i, j - i, pat, pl)) return 1;
+        i = j > i ? j : i + 1;
+    }
+    return 0;
+}
+static int line_is(const char *b, long n, const char *pat) {
+    long pl = tx_len(pat, 1024), p = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && b[e] != '\n') e++;
+        if (e - p == pl && tx_prefix(b + p, e - p, pat, pl)) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
 static int fake_curl(int argc, char **argv) {
     const char *dir = sy_env("FAKE_CURL_DIR"), *cfg = 0, *url = argv[argc - 1];
     char *route, *cfgtext = 0, logl[8192], st_line[2600];
@@ -615,7 +637,7 @@ static int fake_curl(int argc, char **argv) {
     sy_stat_t st;
     if (!dir) return 99;
     for (i = 2; i < argc - 1; i++) {
-        if (tx_find(argv[i], tx_len(argv[i], 1L << 16), "ghs_FAKE", 8) >= 0) tokargv = 1;
+        if (piece_starts(argv[i], "ghs_FAKE")) tokargv = 1;
         if (tx_eqz(argv[i], "--config") && i + 1 < argc - 1) cfg = argv[i + 1];
         if (tx_eqz(argv[i], "--proto") && i + 1 < argc - 1 && !tx_eqz(argv[i + 1], "=https")) safe = 0;
         if (tx_eqz(argv[i], "--max-redirs") && i + 1 < argc - 1 && !tx_eqz(argv[i + 1], "0")) safe = 0;
@@ -624,8 +646,8 @@ static int fake_curl(int argc, char **argv) {
     if (cfg) {
         if (sy_stat(cfg, &st) == 0) mode = st.mode & 0777;
         cfgtext = cx_read(cfg, &cn);
-        {   static const char want[] = "header = \"Authorization: Bearer " TOKEN "\"\n";
-            auth = cfgtext && tx_find(cfgtext, (long)cn, want, (long)sizeof want - 1) >= 0;
+        {   static const char want[] = "header = \"Authorization: Bearer " TOKEN "\"";
+            auth = cfgtext && line_is(cfgtext, (long)cn, want);
         }
     }
     cx_fmt(logl, sizeof logl, "%s\t%s\t%d\t%o\t%d\t%s\n", url, safe ? "safe" : "UNSAFE", auth, mode, tokargv, cfg ? cfg : "-");
@@ -870,16 +892,17 @@ static char *subst(const char *s, const char *from, const char *to) {
 }
 
 int main(int argc, char **argv) {
-    char *out, **args;
+    char *out, **args, basebuf[4400];
     long on, k;
     int rc, i;
-    const char *base = argc > 1 ? argv[1] : "out/capsule-zips";
+    /* 不给 OUTDIR 时落到调用者私有临时目录:仓根 out/ 是残留,全新克隆上没有,而本检查不读任何既有产物。 */
+    const char *base = argc > 1 ? argv[1] : 0;
     ar = ar_new(1L << 32);
     if (!ar || sy_cwd(cwd, sizeof cwd) != 0) return 2;
     if (argc > 1 && tx_eqz(argv[1], "--fake-curl")) return fake_curl(argc, argv);
     zb = mem(16 * MIB);
+    if (!base) { if (cx_fmt(basebuf, sizeof basebuf, "%s/capsule-zips-%d", sy_tmpdir(), sy_pid())) return 2; base = basebuf; }
     if (tx_copy(root, sizeof root, base, tx_len(base, 4000)) != 0) return 2;
-    sy_mkdir("out", 0755);
     if (sy_mkdir(root, 0755) != 0 && sy_exists(root) != 1) { fprintf(stderr, "check-capsule-zip: cannot make %s\n", root); return 2; }
     if (sy_mkdir(fmt("%s/zip", root, 0), 0755) != 0 || sy_mkdir(fmt("%s/replay", root, 0), 0755) != 0) {
         fprintf(stderr, "check-capsule-zip: %s/zip or %s/replay already there (use a fresh OUTDIR)\n", root, root);

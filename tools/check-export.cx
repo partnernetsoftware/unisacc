@@ -1,0 +1,67 @@
+#!/usr/bin/env -S unisacc.com -run
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+/* check-export.cx -- fixtures for prd_cx.md 10.7 (export, X1..X11 + 2 positives) under tests/export/.
+ * usage: ROOT PRODUCT [OUT] [--tolerate-unverified]
+ * Two kinds of assertion per fixture:
+ *   current : the installed product predates export, so planning the fixture must be refused with
+ *             "unknown unisa pragma export" (rc 1).  Counted as passed/failed.
+ *   expected: the fixture's own `expect` file (RC TAB substring) holds only for a product that implements
+ *             export.  When the product still refuses with the current text this is printed
+ *             UNVERIFIED needs-new-product and is never counted as PASS.
+ * Last line CHECK_EXPORT passed=P failed=F unverified=U.  rc 0 only when failed=0 and unverified=0;
+ * --tolerate-unverified makes unverified-only runs rc 0 (registry use), it never turns an UNVERIFIED into PASS. */
+static int passed, failed, unverified;
+static char bound[4400];
+static long bytes_at(const char *h, long hn, const char *w, long n) {
+    long i;
+    for (i = 0; i + n <= hn; i++) if (!memcmp(h + i, w, (size_t)n)) return i;
+    return -1;
+}
+static int has(const char *out, const char *w) { return bytes_at(out, tx_len(out, 1 << 20), w, tx_len(w, 512)) >= 0; }
+static void note(int ok, const char *kind, const char *name) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", kind, name); if (ok) passed++; else failed++;
+}
+static const char *names[] = {
+    "x01-no-name", "x02-bad-name", "x03-outside-module", "x04-twice", "x05-over-limit", "x06-undefined",
+    "x07-static", "x08-not-function", "x09-cxpack-differs", "x10-use-unexported", "x11-call-private",
+    "p1-with-cxpack", "p2-no-cxpack" };
+int main(int argc, char **argv) {
+    char root[4096], product[4096], out[8192], fx[4096], mainp[4096], expp[4096], exp[1024];
+    int i, tol = 0, rc, cut, n;
+    if (argc < 3 || !realpath(argv[1], root) || !realpath(argv[2], product)) { fputs("usage: ROOT PRODUCT [OUT] [--tolerate-unverified]\n", stderr); return 2; }
+    for (i = 3; i < argc; i++) if (!strcmp(argv[i], "--tolerate-unverified")) tol = 1;
+    if (cx_path_join(bound, sizeof bound, root, "tools/bound")) return 2;
+    for (i = 0; i < 13; i++) {
+        char *av[8]; char rel[256]; long len; char *tab; int want, ok;
+        if (cx_path_join(rel, sizeof rel, "tests/export", names[i])) return 2;
+        if (cx_path_join(fx, sizeof fx, root, rel) || cx_path_join(mainp, sizeof mainp, fx, "main.cx") || cx_path_join(expp, sizeof expp, fx, "expect")) return 2;
+        { size_t sz = 0; char *b = cx_read(expp, &sz); len = 0;
+          if (b && sz > 0 && sz < sizeof exp) { mm_copy(exp, sizeof exp, b, sz); len = (long)sz; }
+          if (b) free(b); }
+        if (len <= 0) { note(0, "fixture-expect", names[i]); continue; }
+        exp[len] = 0;
+        tab = exp; while (*tab && *tab != '\t') tab++;
+        if (*tab != '\t') { note(0, "fixture-expect", names[i]); continue; }
+        *tab++ = 0; { char *e = tab; while (*e && *e != '\n') e++; *e = 0; }
+        want = exp[0] - '0';
+        cut = 0;
+        av[0] = bound; av[1] = "20"; av[2] = "sh"; av[3] = product; av[4] = "-cx-plan"; av[5] = mainp; av[6] = 0;
+        out[0] = 0;
+        rc = sy_run(av, out, sizeof out, &cut);
+        n = has(out, "unknown unisa pragma export");
+        /* current-state assertion: old product refuses export by name; a new one must not */
+        if (n) note(rc == 1, "current-refused-by-name", names[i]);
+        else printf("INFO\tcurrent-state-gone\t%s\n", names[i]);
+        /* expected-state assertion */
+        if (n) { printf("UNVERIFIED\t%s\tneeds-new-product\n", names[i]); unverified++; }
+        else note(rc == want && (!tab[0] || has(out, tab)), "expected", names[i]);
+        (void)ok;
+    }
+    printf("CHECK_EXPORT\tpassed=%d failed=%d unverified=%d\n", passed, failed, unverified);
+    if (failed) return 1;
+    if (unverified && !tol) return 1;
+    return 0;
+}

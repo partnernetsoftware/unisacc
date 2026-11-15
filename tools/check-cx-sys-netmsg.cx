@@ -1,0 +1,52 @@
+/* Checks cx/sys/netmsg.cx: sy_snm_sendto/recvfrom over loopback UDP; Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-cx-sys-netmsg.cx
+   Prints PASS/FAIL lines and CX_SYS_NETMSG<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netmsg
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tsysnetmsg.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tsysnetmsg.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+int main(void) {
+    unsigned char sa[SY_SA_MAX], from[SY_SA_MAX], lo[4] = {127, 0, 0, 1};
+    char buf[16];
+    int a, b, n, len = SY_SA_MAX, port, flen, flags;
+    a = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_DGRAM));
+    b = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_DGRAM));
+    ck(a >= 0 && b >= 0, "open");
+    n = sy_sa_inet4(sa, (int)sizeof sa, lo, 0);
+    ckv(sy_sock_bind(a, sa, n), 0, "bind-a");
+    ckv(sy_sock_bind(b, sa, n), 0, "bind-b");
+    ckv(sy_sock_name(a, sa, &len), 0, "name-a");
+    port = sy_sa_port(sa, len);
+    ck(port > 0, "port-a");
+    ckv(sy_sock_name(b, from, &len), 0, "name-b");
+    n = sy_sa_port(from, len);
+    sy_sa_inet4(sa, (int)sizeof sa, lo, n);
+    ckv(sy_snm_sendto(a, "ping", 4, sa, 16), 4, "sendto-4");
+    flen = SY_SA_MAX; flags = -1;
+    ckv(sy_snm_recvfrom(b, buf, 16, from, &flen, &flags), 4, "recvfrom-4");
+    ck(buf[0] == 'p' && buf[3] == 'g', "payload");
+    ckv(flen, 16, "namelen-16");
+    ckv(sy_sa_family(from, flen), sy_sock_num(SY_SN_AF_INET4), "family");
+    ckv(sy_sa_port(from, flen), port, "port-equal");
+    ckv(flags & SY_SNM_MSG_TRUNC, 0, "no-trunc");
+    ckv(sy_snm_sendto(a, "abcdefgh", 8, sa, 16), 8, "sendto-8");
+    flen = SY_SA_MAX; flags = 0;
+    ckv(sy_snm_recvfrom(b, buf, 4, from, &flen, &flags), 4, "recvfrom-short");
+    ckv(flags & SY_SNM_MSG_TRUNC, SY_SNM_MSG_TRUNC, "msg-trunc");
+    ckv(sy_snm_sendto(a, "z", 1, sa, 16), 1, "sendto-1");
+    ckv(sy_snm_recvfrom(b, buf, 16, 0, 0, 0), 1, "recvfrom-no-addr");
+    ckv(sy_snm_sendto(-1, "x", 1, sa, 16), -EBADF, "sendto-badfd");
+    ckv(sy_snm_recvfrom(-1, buf, 4, from, &flen, 0), -EBADF, "recvfrom-badfd");
+    ckv(sy_snm_sendto(a, 0, 1, sa, 16), -EINVAL, "sendto-null");
+    sy_close(a); sy_close(b);
+    printf("CX_SYS_NETMSG\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,69 @@
+/* tools/check-elf-secdiff.cx -- elf-secdiff 逐节对拍:同源两次 -c 编出的 .o 全同(diff=0),
+ * 把其中一份 .text 首字节翻转后只有 .text 差异(diff=1,firstdiff 0),截断的文件拒绝(rc 2)。
+ * 夹具在 /tmp/check-elf-secdiff-MS 内;.o 的 .text 固定在文件偏移 0x40(ELF64 头之后)。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-elf-secdiff.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-elf-secdiff.%s\n", n); }
+}
+static int has(const char *buf, size_t n, const char *needle) {
+    return buf && tx_find(buf, (long)n, needle, tx_len(needle, 300)) >= 0;
+}
+static char com[500], tool[500], dir[200], src[300], oa[300], ob[300], oc[300];
+
+static int build(const char *out) {
+    char *v[8], *o = 0; size_t n = 0; int rc, k = 0;
+    v[k++] = (char *)"sh"; v[k++] = com; v[k++] = src; v[k++] = (char *)"-c"; v[k++] = (char *)"-o"; v[k++] = (char *)out; v[k] = 0;
+    rc = cx_runv_timeout(v, 50, &o, &n); free(o); return rc;
+}
+static int diffrun(const char *a, const char *b, char **out, size_t *n) {
+    char *v[10]; int k = 0;
+    v[k++] = (char *)"sh"; v[k++] = com; v[k++] = tool; v[k++] = (char *)"--"; v[k++] = (char *)a; v[k++] = (char *)b; v[k] = 0;
+    return cx_runv_timeout(v, 50, out, n);
+}
+
+int main(void) {
+    char cwd[400], *o = 0, *b;
+    size_t n = 0, bn = 0;
+    int rc;
+    { char *v[] = {"pwd", 0};
+      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; free(o); o = 0;
+      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
+    }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/elf-secdiff.cx", cwd)
+        || cx_fmt(dir, sizeof dir, "/tmp/check-elf-secdiff-%ld", sy_now_ms())
+        || cx_fmt(src, sizeof src, "%s/t.cx", dir) || cx_fmt(oa, sizeof oa, "%s/a.o", dir)
+        || cx_fmt(ob, sizeof ob, "%s/b.o", dir) || cx_fmt(oc, sizeof oc, "%s/c.o", dir)) { ck(0, "path"); return 1; }
+    cx_rmtree(dir);
+    if (sy_mkdir(dir, 0755)) { ck(0, "mkdir"); return 1; }
+    { const char *s = "int main(void){return 3;}\n"; if (cx_write(src, s, tx_len(s, 200))) { ck(0, "write-src"); return 1; } }
+    ck(build(oa) == 0 && build(ob) == 0, "build-twice");
+
+    rc = diffrun(oa, ob, &o, &n);
+    ck(rc == 0 && has(o, n, "ELF_SECDIFF secs=") && has(o, n, " diff=0\n") && has(o, n, "SEC\t.text\t"), "same-pair");
+    free(o); o = 0;
+
+    b = cx_read(ob, &bn);
+    if (!b || bn < 0x80) { ck(0, "read-b"); return 1; }
+    b[0x40] ^= 1;
+    if (cx_write(oc, b, bn)) { ck(0, "write-c"); return 1; }
+    rc = diffrun(oa, oc, &o, &n);
+    ck(rc == 1 && has(o, n, " diff=1\n"), "onebyte-count");
+    ck(has(o, n, "SEC\t.text\t") && has(o, n, "\tdiff\t0\t") && !has(o, n, "SEC\t.data\t0\t0\tdiff"), "onebyte-names-text");
+    free(o); o = 0;
+
+    if (cx_write(oc, b, 100)) { ck(0, "write-trunc"); return 1; }
+    rc = diffrun(oa, oc, &o, &n); ck(rc == 2, "truncated-rc2"); free(o); o = 0;
+    cx_rmtree(dir);
+    sy_printf("check-elf-secdiff failed=%d\n", failed);
+    if (!failed) sy_printf("CHECK_ELF_SECDIFF\n");
+    return failed ? 1 : 0;
+}

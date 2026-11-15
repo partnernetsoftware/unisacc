@@ -3,8 +3,11 @@
  *   sh ./unisacc.com tools/s9-native.cx -- [--src FILE] build
  *   sh ./unisacc.com tools/s9-native.cx -- init|prepare|step|aggregate|retry|controls ...
  *
- * Cache key is sha256 of the source bytes. ROOT/out/s9-native/<key>/<leaf> plus
- * <leaf>.sha256. Hit re-hashes source and ELF; mismatch REFUSE cache-identity-mismatch.
+ * Cache key is runnerprep's compiler-plan identity: product digest, lnx/x86_64 target,
+ * and every transitive use unit's path and content sha256 (including the entry source).
+ * $HOME/.cache/unisacc/s9-native/<key>/<leaf> plus <leaf>.sha256. Hits recheck the
+ * input identity and ELF; mismatch REFUSE cache-identity-mismatch. Explicit include files
+ * and environment are outside rn_identity's contract; packaged headers belong to the product.
  * Never caches a test verdict. Sets S9_ALLWAVES_ELF to the cached all-waves ELF
  * so s9-shards init/inputs skip sh ./unisacc.com tools/all-waves.cx.
  */
@@ -14,6 +17,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.kernelsha
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.runneridentity
 
 static char root[4096], srcp[4400], why[1000], cachedir[4400];
 static void die(const char *s) { fprintf(stderr, "s9-native: REFUSE %s\n", s); exit(2); }
@@ -27,10 +31,6 @@ static int file_sha(const char *p, char h[65]) {
     return 0;
 }
 
-static int src_sha_path(const char *p, char h[65]) {
-    if (file_sha(p, h)) die("read-source");
-    return 0;
-}
 
 static int cache_paths(const char *key, const char *leaf, char dir[4400], char elf[4400], char rec[4400]) {
     if (sy_exists(cachedir) != 1 && sy_mkdir(cachedir, 0700)) die("cache-parent");
@@ -50,13 +50,13 @@ static int verify_hit(const char *key, const char *src, const char *elf, const c
     want[64] = 0;
     free(s);
     if (file_sha(elf, got) || strcmp(want, got)) return 0;
-    if (src_sha_path(src, srcsha) || strcmp(srcsha, key)) return 0;
+    if (rn_identity(root, src, srcsha, 0, why, sizeof why) || strcmp(srcsha, key)) return 0;
     return 1;
 }
 
 static void build_one(const char *src, const char *leaf, char elf_out[4400], int *hit, long *compile_ms) {
     char key[65], dir[4400], rec[4400], product[4400];
-    src_sha_path(src, key);
+    if (rn_identity(root, src, key, 0, why, sizeof why)) { fprintf(stderr, "%s\n", why); die("source-identity"); }
     cache_paths(key, leaf, dir, elf_out, rec);
     *compile_ms = -1;
     if (sy_exists(elf_out) == 1 || sy_exists(rec) == 1) {
@@ -80,6 +80,9 @@ static void build_one(const char *src, const char *leaf, char elf_out[4400], int
         *compile_ms = sy_now_ms() - t0;
         np_free(&r);
     }
+    /* Do not certify an image against inputs that changed during construction. */
+    { char current[65];
+      if (rn_identity(root, src, current, 0, why, sizeof why) || strcmp(current, key)) die("build-input-changed"); }
     {
         char h[65], line[80];
         if (file_sha(elf_out, h)) die("elf-sha");
@@ -97,7 +100,15 @@ int main(int argc, char **argv) {
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     join(srcp, sizeof srcp, root, "tools/s9-shards.cx");
     join(awsrc, sizeof awsrc, root, "tools/all-waves.cx");
-    join(cachedir, sizeof cachedir, root, "out/s9-native");
+    {   const char *home = sy_env("HOME");
+        char d1[4400];
+        if (!home || !home[0]) die("home");
+        if (cx_fmt(d1, sizeof d1, "%s/.cache", home)) die("cache");
+        if (sy_exists(d1) != 1) (void)sy_mkdir(d1, 0700);
+        if (cx_fmt(d1, sizeof d1, "%s/.cache/unisacc", home)) die("cache");
+        if (sy_exists(d1) != 1) (void)sy_mkdir(d1, 0700);
+        if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/s9-native", home)) die("cache");
+    }
     if (argc < 2) die("usage: [--src FILE] [--cache DIR] build|init|...");
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--src") && i + 1 < argc) {

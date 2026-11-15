@@ -11,7 +11,9 @@
  * (5) a rewritten manifest with the old table api_sha is refused until the table carries the new sha;
  * (6) a unit that uses a module outside the package is refused as outer;
  * (7) a unit that uses a unit the package excludes is refused;
- * (8) bad usage is rc 2.
+ * (8) bad usage is rc 2;
+ * (9) --bump in a private git repo: unrelated dirt is ignored, a dirty package path is refused (rc 2,
+ *     REFUSE names it), and --index-only computes api_sha from the staged blob, not the work tree.
  * tools/layer-api.cx is built once (tq_native, a PREPARED line, not a result). */
 #pragma unisa use cxlib.toolprep
 #pragma unisa use sys.fs
@@ -22,7 +24,7 @@
 #pragma unisa use mem.heap
 
 static int failed;
-static char root[4096], work[4400], fx[4400], bin[4400];
+static char root[4096], work[4400], fx[4400], bin[4400], bin_product[4400];
 static char *last;
 static size_t lastn;
 
@@ -115,6 +117,48 @@ static int table(const char *sha_a, const char *sha_b) {
     return put("build/tlib-packages.tsv", t);
 }
 
+/* git -C DIR A B C D (unused tail args 0). */
+static int gitrun(const char *d, const char *a, const char *b, const char *c, const char *e) {
+    char *v[16], *o = 0;
+    size_t n = 0;
+    int k = 0, rc;
+    v[k++] = "git"; v[k++] = "-c"; v[k++] = "user.name=t"; v[k++] = "-c"; v[k++] = "user.email=t@t";
+    v[k++] = "-C"; v[k++] = (char *)d; v[k++] = (char *)a;
+    if (b) v[k++] = (char *)b;
+    if (c) v[k++] = (char *)c;
+    if (e) v[k++] = (char *)e;
+    v[k] = 0;
+    rc = cx_runv_timeout(v, 20, &o, &n);
+    mm_free(o);
+    return rc;
+}
+
+static int gwrite(const char *d, const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", d, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int gput(const char *d, const char *rel, int unused) {
+    char p[4400];
+    (void)unused;
+    if (cx_fmt(p, sizeof p, "%s/%s", d, rel)) return -1;
+    return sy_symlink(bin_product, p);
+}
+
+/* layer-api --bump PKG --root R [FLAG]: rc, output in last. */
+static int bumpt(const char *r, const char *pkg, const char *flag) {
+    char *v[10];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin; v[k++] = "--bump"; v[k++] = (char *)pkg; v[k++] = "--root"; v[k++] = (char *)r;
+    if (flag) v[k++] = (char *)flag;
+    v[k] = 0;
+    return cx_runv_timeout(v, 40, &last, &lastn);
+}
+
 int main(int argc, char **argv) {
     char src[4400], why[256], product[4400], sa[65], sb[65], sa2[65];
     int rc, prep = 0;
@@ -132,6 +176,7 @@ int main(int argc, char **argv) {
     if (sy_realpath(work, work, sizeof work) < 0) return 2;
     if (cx_fmt(src, sizeof src, "%s/tools/layer-api.cx", root) || cx_fmt(bin, sizeof bin, "%s/layer-api.native", work) ||
         cx_fmt(fx, sizeof fx, "%s/fx", work) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 2;
+    tx_copy(bin_product, sizeof bin_product, product, tx_len(product, TX_ZCAP));
     if (tq_native(root, src, bin, why, sizeof why)) {
         sy_printf("FAIL\tlayer-api.build-native\t%s\n", why);
         return 1;
@@ -203,7 +248,47 @@ int main(int argc, char **argv) {
         ck(rc == 2 && rc2 == 2, "usage-and-unknown-package-rc2");
     }
 
+    /* (9) --bump reads the git index: a private git repo gx with one package gx.a */
+    {
+        char gx[4400], ga[4400], sb2[65], sc[65], want[100];
+        int p2 = 0, r1, r2, r3, r4, r5;
+        if (cx_fmt(gx, sizeof gx, "%s/gx", work) || cx_fmt(ga, sizeof ga, "%s/gx/ga/one.cx", work)) return 2;
+        p2 |= sy_mkdir(gx, 0755);
+        { char d[4400]; p2 |= cx_fmt(d, sizeof d, "%s/build", gx) || sy_mkdir(d, 0755); p2 |= cx_fmt(d, sizeof d, "%s/ga", gx) || sy_mkdir(d, 0755); }
+        p2 |= gput(gx, "unisacc.com", 0);
+        p2 |= gwrite(gx, "build/tlib-packages.tsv", "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\ngx.a\t0.1.0\tPENDING\tga\t-\t-\tfixture\n");
+        p2 |= gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(int x) { return x + 1; }\n");
+        p2 |= gitrun(gx, "init", "-q", 0, 0) || gitrun(gx, "add", "-A", 0, 0) || gitrun(gx, "commit", "-q", "-m", "fx");
+        ck(!p2, "bump-fixture-prepare");
+        /* clean package path, unrelated untracked file: not refused */
+        p2 = gwrite(gx, "zz.txt", "unrelated\n");
+        r1 = bumpt(gx, "gx.a", 0);
+        ck(!p2 && r1 == 0 && line3("BUMP", "gx.a", "adopt"), "bump-clean-tree-ignores-unrelated-dirt");
+        /* an untracked unit of the package refuses, rc 2, naming the path */
+        p2 = gwrite(gx, "ga/two.cx", "#pragma unisa module two\nint ga_two(void) { return 2; }\n");
+        r2 = bumpt(gx, "gx.a", 0);
+        ck(!p2 && r2 == 2 && line3("REFUSE", "gx.a", "dirty-package-path") && has_field("gx.a", "ga/two.cx"), "bump-dirty-package-refused-rc2-names-path");
+        p2 = gitrun(gx, "add", "ga/two.cx", 0, 0) || gitrun(gx, "commit", "-q", "-m", "two");
+        /* staged B, then the work tree moves on to C: --index-only uses B, the default refuses */
+        p2 |= gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(int x) { return x + 1; }\nint ga_b(void) { return 5; }\n");
+        r3 = tool(gx, "--write", "gx.a");
+        p2 |= r3 || api_sha("gx.a", sb2);
+        p2 |= gitrun(gx, "add", "ga/one.cx", 0, 0);
+        p2 |= gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(int x) { return x + 1; }\nint ga_b(void) { return 5; }\nint ga_c(void) { return 6; }\n");
+        r4 = bumpt(gx, "gx.a", 0);
+        ck(!p2 && r4 == 2 && line3("REFUSE", "gx.a", "dirty-package-path") && has_field("gx.a", "ga/one.cx"), "bump-unstaged-edit-refused-by-default");
+        r5 = bumpt(gx, "gx.a", "--index-only");
+        if (cx_fmt(want, sizeof want, "api_sha=%s", sb2)) return 2;
+        ck(r5 == 0 && has_field("gx.a", want), "bump-index-only-uses-staged-blob");
+        r3 = tool(gx, "--write", "gx.a");
+        ck(r3 == 0 && !api_sha("gx.a", sc) && !tx_eqz(sb2, sc), "bump-index-differs-from-worktree-api");
+    }
+
     mm_free(last);
+    {   /* the delete guard refuses a tree holding a .git entry: move the fixture's one aside first */
+        char g1[4400], g2[4400];
+        if (!cx_fmt(g1, sizeof g1, "%s/gx/.git", work) && !cx_fmt(g2, sizeof g2, "%s/gitdir", work)) (void)sy_rename(g1, g2);
+    }
     if (argc < 3) cx_rmtree(work);
     sy_printf("CHECK_LAYER_API\tfailed=%d\n", failed);
     return failed ? 1 : 0;

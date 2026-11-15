@@ -1,0 +1,960 @@
+From fa401b85158d2c72786f3ccdee63ddb1d2ab6615 Mon Sep 17 00:00:00 2001
+From: b1 <b1@local>
+Date: Fri, 13 Nov 2026 06:10:28 +0800
+Subject: [PATCH] B1 freeze recipe
+
+---
+ cx/compiler/fwdmark.cx   | 250 +++++++++++++++++++++++++++++++++++++++
+ cx/compiler/fwdsig.cx    |   2 +
+ cx/compiler/routepipe.cx | 201 +++++++++++++++++++++++++++++++
+ cx/compiler/tapelink.cx  | 247 +++++++++++++++++++++++++++++++++++++-
+ src/drive.cx             |  26 ++--
+ src/drivelink.cx         |  50 ++++----
+ 6 files changed, 731 insertions(+), 45 deletions(-)
+ create mode 100644 cx/compiler/fwdmark.cx
+ create mode 100644 cx/compiler/routepipe.cx
+
+diff --git a/cx/compiler/fwdmark.cx b/cx/compiler/fwdmark.cx
+new file mode 100644
+index 0000000000..e1ac97ec20
+--- /dev/null
++++ b/cx/compiler/fwdmark.cx
+@@ -0,0 +1,250 @@
++#pragma unisa module fwdmark
++#pragma unisa use compiler.fwdsig
++/* Forward marks: the forwardable signature of a host function, carried through a unit
++   object so a separate link can build the same stub the one-step image route builds.
++   No libc and no include.
++   Compile side (fk_mark): an e3 output made under \0cli/run-forward is the USLFW1
++   side-car: the tape without its function `.extern` lines, then one (name, USLSIG3) slot
++   per undefined function. fk_mark gives back the unit tape: every slot's `.extern NAME`
++   line where e3 would have put it (before `.extern __init`), and before those one inert
++       .bss __unisa_fw1_<sig>_<name> 1
++   line per slot that may be forwarded. <sig> is v|f (variadic or not), then the result as
++   isvoid, kind, width, unsigned (one hex digit each), then kind and width per argument.
++   A slot is not marked when its signature does not decode, passes a struct by value or a
++   callback, or when the unit's own source prototypes the name (that name belongs to
++   another unit; unresolved, it stays a link error). With mark 0 no slot is marked: a .cx
++   unit's undefined names are its imports, which other unit objects define.
++   Link side (fk_stub): the marks tapelink noted whose names no unit defines become stub
++   text through fwd_emit, the same text the image route writes. */
++
++static int fk_hex(int v) { return v < 10 ? 48 + v : 87 + v; }
++static int fk_val(int c) {
++    if (c >= 48 && c <= 57) return c - 48;
++    if (c >= 97 && c <= 102) return c - 87;
++    return -1;
++}
++static void fk_put(unsigned char *o, long *at, const char *s, long n) {
++    long k;
++    for (k = 0; k < n; k++) o[*at + k] = (unsigned char)s[k];
++    *at = *at + n;
++}
++static int fk_tail(const unsigned char *t, long n, const char *lit, long ln) {
++    long k;
++    if (n < ln) return 0;
++    for (k = 0; k < ln; k++) if (t[n - ln + k] != (unsigned char)lit[k]) return 0;
++    return 1;
++}
++/* The unit's source text, or 0 (stdin, unreadable, larger than 1 MiB): no text, no
++   prototype seen. */
++static char *fk_text(const char *src, long *n) {
++    int sy_open_read(const char *);
++    long sy_reg_size(int);
++    int sy_read_full(int, void *, long);
++    int sy_close(int);
++    void *mm_alloc(long);
++    void mm_free(void *);
++    char *text;
++    long sz;
++    int fd;
++    *n = 0;
++    if (!src || !src[0] || (src[0] == '-' && src[1] == 0)) return 0;
++    fd = sy_open_read(src);
++    if (fd < 0) return 0;
++    sz = sy_reg_size(fd);
++    if (sz < 0 || sz > 1048576L) { sy_close(fd); return 0; }
++    text = (char *)mm_alloc(sz + 1);
++    if (!text) { sy_close(fd); return 0; }
++    if (sz > 0 && sy_read_full(fd, text, sz)) { sy_close(fd); mm_free(text); return 0; }
++    sy_close(fd);
++    text[sz] = 0;
++    *n = sz;
++    return text;
++}
++/* One slot at *at: its name, and the mark signature in sig (0 length: do not mark).
++   1 = malformed side-car. */
++static int fk_slot(const unsigned char *b, unsigned long long n, unsigned long long *at,
++                   const char *text, long tn, const char **nm, int *nl, char *sig, int *sn) {
++    USForwardSig s;
++    unsigned long long l, sl;
++    int bad, k, ok;
++    if (us_fw_u64(b, n, at, &l) || l == 0 || l > 1024 || l > n - *at) return 1;
++    *nm = (const char *)b + *at;
++    *nl = (int)l;
++    *at = *at + l;
++    if (us_fw_u64(b, n, at, &sl) || sl > n - *at) return 1;
++    bad = us_forward_sig_decode(b + *at, sl, *nm, l, &s);
++    *at = *at + sl;
++    *sn = 0;
++    if (fw_undef(bad, s.structbyval, s.ret.structbyval, s.n)) return 0;
++    ok = s.ret.kind >= 0 && s.ret.kind < 16 && s.ret.width >= 0 && s.ret.width < 16;
++    for (k = 0; k < s.n; k++)
++        if (s.args[k].callback || s.args[k].kind < 0 || s.args[k].kind > 15 || s.args[k].width < 0 || s.args[k].width > 15) ok = 0;
++    if (!ok || (text && uu_role_of(text, tn, *nm, *nl) == 1)) return 0;
++    sig[0] = s.variadic ? 'v' : 'f';
++    sig[1] = s.ret.isvoid ? '1' : '0';
++    sig[2] = (char)fk_hex(s.ret.kind);
++    sig[3] = (char)fk_hex(s.ret.width);
++    sig[4] = s.ret.uns ? '1' : '0';
++    for (k = 0; k < s.n; k++) {
++        sig[5 + 2 * k] = (char)fk_hex(s.args[k].kind);
++        sig[6 + 2 * k] = (char)fk_hex(s.args[k].width);
++    }
++    *sn = 5 + 2 * s.n;
++    return 0;
++}
++
++/* 0 and the unit tape in *out (mm_alloc; the caller frees), 1 no side-car head,
++   2 malformed side-car, 4 out of memory. */
++int fk_mark(const unsigned char *b, long bn, const char *src, int mark, unsigned char **out, long *outn) {
++    void *mm_alloc(long);
++    void mm_free(void *);
++    unsigned long long n, at, tl, cnt, ccwc, r, slots;
++    unsigned char *o;
++    char *text;
++    char sig[80];
++    const char *nm;
++    long tn, oat, ins, cap;
++    int nl, sn, pass;
++    if (!out || !outn || bn < 0) return 2;
++    *out = 0;
++    *outn = 0;
++    n = (unsigned long long)bn;
++    if (fw_side_head(b, n)) return 1;
++    at = 7;
++    if (us_fw_u64(b, n, &at, &tl) || us_fw_u64(b, n, &at, &cnt) || us_fw_u64(b, n, &at, &ccwc) ||
++        fw_side_bad(ccwc, tl, n, at) || tl > 2147483647ULL || cnt > 65536) return 2;
++    slots = at + tl;
++    /* every slot adds at most `.extern NAME\n` and one mark line */
++    cap = (long)tl + (long)cnt * (9 + 17 + 80 + 4) + 1;
++    r = 0;
++    at = slots;
++    text = 0;
++    tn = 0;
++    while (r < cnt) {
++        if (fk_slot(b, n, &at, 0, 0, &nm, &nl, sig, &sn)) return 2;
++        cap = cap + 2 * (long)nl;
++        r = r + 1;
++    }
++    o = (unsigned char *)mm_alloc(cap);
++    if (!o) return 4;
++    if (cnt && mark) text = fk_text(src, &tn);
++    ins = (long)tl;
++    if (fk_tail(b + (slots - tl), (long)tl, ".extern __init\n.end\n", 20)) ins = (long)tl - 20;
++    else if (fk_tail(b + (slots - tl), (long)tl, ".end\n", 5)) ins = (long)tl - 5;
++    oat = 0;
++    fk_put(o, &oat, (const char *)b + (slots - tl), ins);
++    for (pass = 0; pass < 2; pass++) {
++        r = 0;
++        at = slots;
++        while (r < cnt) {
++            (void)fk_slot(b, n, &at, text, tn, &nm, &nl, sig, &sn);
++            if (pass == 0 && sn > 0 && mark) {
++                fk_put(o, &oat, ".bss __unisa_fw1_", 17);
++                fk_put(o, &oat, sig, sn);
++                fk_put(o, &oat, "_", 1);
++                fk_put(o, &oat, nm, nl);
++                fk_put(o, &oat, " 1\n", 3);
++            }
++            if (pass == 1) {
++                fk_put(o, &oat, ".extern ", 8);
++                fk_put(o, &oat, nm, nl);
++                fk_put(o, &oat, "\n", 1);
++            }
++            r = r + 1;
++        }
++    }
++    fk_put(o, &oat, (const char *)b + (slots - tl) + ins, (long)tl - ins);
++    if (text) mm_free(text);
++    *out = o;
++    *outn = oat;
++    return 0;
++}
++
++/* One mark text (after `.bss `) into a stub. 0 emitted, 1 malformed, 2 fwd_emit declined. */
++static int fk_emit(char *m, int ml) {
++    int fwd_emit(char *, int, int, int *, int *, int *, int, int, int, int);
++    int fwd_emit_var(char *, int, int, int *, int *, int, int, int, int);
++    int fwd_pclear(void);
++    int kk[33];
++    int ww[33];
++    int uu[33];
++    int e, k, np, made;
++    e = 12;
++    while (e < ml && m[e] != 95) e = e + 1;
++    if (e >= ml - 1 || e < 17 || ((e - 17) & 1) || (e - 17) / 2 > 32 || (m[12] != 'v' && m[12] != 'f')) return 1;
++    for (k = 13; k < e; k++) if (fk_val(m[k]) < 0) return 1;
++    np = (e - 17) / 2;
++    for (k = 0; k < np; k++) {
++        kk[k] = fk_val(m[17 + 2 * k]);
++        ww[k] = fk_val(m[18 + 2 * k]);
++        uu[k] = 0;
++    }
++    if (m[12] == 'v')
++        made = fwd_emit_var(m + e + 1, ml - e - 1, np, kk, ww, fk_val(m[13]), fk_val(m[14]), fk_val(m[15]), fk_val(m[16]));
++    else
++        made = fwd_emit(m + e + 1, ml - e - 1, np, kk, ww, uu, fk_val(m[13]), fk_val(m[14]), fk_val(m[15]), fk_val(m[16]));
++    fwd_pclear();
++    return made ? 0 : 2;
++}
++static int fk_same_name(char *a, int an, char *b, int bn) {
++    int i, j, k;
++    i = 12;
++    while (i < an && a[i] != 95) i = i + 1;
++    j = 12;
++    while (j < bn && b[j] != 95) j = j + 1;
++    if (an - i != bn - j) return 0;
++    for (k = 0; k < an - i; k++) if (a[i + k] != b[j + k]) return 0;
++    return 1;
++}
++
++/* Stub text for every noted mark whose name is still undefined. The count of stubs and
++   the text in *out (mm_alloc; the caller frees); 0 when there is none; -1 a malformed mark,
++   -2 a signature fwd_emit does not forward, -4 out of memory. tgt is the fact-table target. */
++int fk_stub(const char *tgt, unsigned char **out, long *outn) {
++    int tl_fwd(int, char **);
++    void fwd_reset(void);
++    void fwd_set_ccw(int);
++    void fwd_set_target(const char *);
++    int fwd_count(void);
++    char *fwd_text(void);
++    int fwd_emit_libs(void);
++    void *mm_alloc(long);
++    char *m;
++    char *p;
++    char *t;
++    int i, j, ml, pl, dup, made, rc, n, k;
++    if (!out || !outn) return -1;
++    *out = 0;
++    *outn = 0;
++    made = 0;
++    i = 0;
++    while ((ml = tl_fwd(i, &m)) >= 0) {
++        i = i + 1;
++        if (ml == 0) continue;
++        dup = 0;
++        for (j = 0; j < i - 1 && !dup; j++) {
++            pl = tl_fwd(j, &p);
++            if (pl > 0 && fk_same_name(m, ml, p, pl)) dup = 1;
++        }
++        if (dup) continue;
++        if (!made) {
++            fwd_reset();
++            fwd_set_ccw(0);
++            fwd_set_target(tgt);
++        }
++        rc = fk_emit(m, ml);
++        if (rc) return 0 - rc;
++        made = made + 1;
++    }
++    if (!made) return 0;
++    fwd_emit_libs();
++    n = fwd_count();
++    t = fwd_text();
++    p = (char *)mm_alloc((long)n + 1);
++    if (!p) return -4;
++    for (k = 0; k < n; k++) p[k] = t[k];
++    p[n] = 0;
++    *out = (unsigned char *)p;
++    *outn = (long)n;
++    return made;
++}
+diff --git a/cx/compiler/fwdsig.cx b/cx/compiler/fwdsig.cx
+index 685b2449fa..d4cbc8c56e 100644
+--- a/cx/compiler/fwdsig.cx
++++ b/cx/compiler/fwdsig.cx
+@@ -368,6 +368,8 @@ static int uu_role(const char *s, long n, const char *name, int nl) {
+     if (proto) return 1;
+     return 0;
+ }
++/* The role of NAME in one source text: 0 not declared there, 1 prototype only, 2 defined. */
++int uu_role_of(const char *text, long n, const char *name, int nl) { return uu_role(text, n, name, nl); }
+ static void uu_say(const char *name, int nl) {
+     char msg[1200];
+     const char *pre;
+diff --git a/cx/compiler/routepipe.cx b/cx/compiler/routepipe.cx
+new file mode 100644
+index 0000000000..ba3805ca15
+--- /dev/null
++++ b/cx/compiler/routepipe.cx
+@@ -0,0 +1,201 @@
++#pragma unisa module routepipe
++#pragma unisa use stream.item
++#pragma unisa use stream.pipe
++#pragma unisa use compiler.fwdmark
++/* The object route and the link route as cx.stream pipelines. No libc and no include.
++   The package span, the resource stack and the linker's reopen are injected by the
++   driver; this module only orders the stages. Stage ids:
++     1 front      the route's span up to e3 (under \0cli/run-forward on the object route)
++     2 fwdsig     the forwardable signatures: on the object route the e3 side-car becomes
++                  the unit tape with its forward marks (fk_mark); on the link route the
++                  marks no unit resolved become a stub unit that joins the linked tape
++     3 back       the route's span from the stage after the tape to its end
++     4 tapecheck  the linked tape's check
++   Object:  source -1-> side-car -2-> unit tape -3-> object
++   Link:    linked tape -2-> linked tape -4-> checked tape [-3-> image]
++   Shapes: 1 source, 2 side-car, 3 tape, 4 final bytes, 5 checked tape.
++   Result codes are the span's own (1-4), passed through unchanged by xs_run; the
++   output block is the caller's on 0. One route at a time. */
++
++typedef struct { const char *route; const char *first; const char *last; const char *extra; int extran; } RqSpan;
++static int (*rq_spanf)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
++static int (*rq_putf)(const char *, int, const unsigned char *, int);
++static int (*rq_popf)(void);
++static int (*rq_moref)(unsigned char **, long *, char *, long);
++static const char *rq_tgt;
++static const char *rq_src;
++static int rq_cx;
++static RqSpan rq_st[3];
++static unsigned char rq_one = 1;
++static char rq_objroute[96];
++
++static void rq_why(char *why, int cap, const char *s) {
++    int k;
++    if (!why || cap <= 0) return;
++    for (k = 0; s[k] && k < cap - 1; k++) why[k] = s[k];
++    why[k] = 0;
++}
++static void rq_set(RqSpan *c, const char *route, const char *first, const char *last, const char *extra, int extran) {
++    c->route = route; c->first = first; c->last = last; c->extra = extra; c->extran = extran;
++}
++static int rq_pass(xs_item *in, void *vout) {
++    *(xs_item *)vout = *in;
++    xs_item_init(in);
++    return 0;
++}
++
++/* A span of the package route. The span takes the input block. */
++static int rq_span(void *ctx, void *vin, void *vout, char *why, int cap) {
++    void mm_free(void *);
++    RqSpan *c = ctx;
++    xs_item *in = vin;
++    unsigned char *b = in->buf.data;
++    unsigned char *out = 0;
++    long n = in->buf.len;
++    long outn = 0;
++    int rc;
++    xs_item_init(in);
++    if (c->extra && rq_putf(c->extra, c->extran, &rq_one, 1)) {
++        mm_free(b);
++        rq_why(why, cap, "cli");
++        return 1;
++    }
++    rc = rq_spanf(c->route, rq_tgt, rq_src, rq_cx, 0, c->first, c->last, b, n, &out, &outn, why, cap);
++    if (c->extra) (void)rq_popf();
++    return rc ? rc : xs_item_set(vout, 1, out, outn, outn);
++}
++
++/* fwdsig on the object route: side-car in, marked unit tape out. */
++static int rq_mark(void *ctx, void *vin, void *vout, char *why, int cap) {
++    xs_item *in = vin;
++    unsigned char *out = 0;
++    long outn = 0;
++    int rc;
++    (void)ctx;
++    rc = fk_mark(in->buf.data, in->buf.len, rq_src, !rq_cx, &out, &outn);
++    if (rc) {
++        rq_why(why, cap, rc == 1 ? "forwarding side-car missing" : rc == 4 ? "out of memory" : "forwarding side-car malformed");
++        return 1;
++    }
++    return xs_item_set(vout, 1, out, outn, outn);
++}
++
++/* fwdsig on the link route: no unresolved mark, the tape passes; otherwise the stub text
++   is compiled as one more unit object tape and the linker takes it. */
++static int rq_stub(void *ctx, void *vin, void *vout, char *why, int cap) {
++    void mm_free(void *);
++    RqSpan *c = ctx;
++    xs_item *in = vin;
++    unsigned char *text = 0;
++    unsigned char *unit = 0;
++    unsigned char *b;
++    long tn = 0;
++    long un = 0;
++    long n;
++    int k, rc;
++    k = fk_stub(rq_tgt, &text, &tn);
++    if (k == 0) return rq_pass(in, vout);
++    if (k < 0) {
++        rq_why(why, cap, k == -4 ? "out of memory" : "forwarding stub");
++        return 1;
++    }
++    if (rq_putf("\0cli/object", 11, &rq_one, 1)) {
++        mm_free(text);
++        rq_why(why, cap, "cli");
++        return 1;
++    }
++    if (rq_putf("\0cli/funit", 10, &rq_one, 1)) {
++        (void)rq_popf();
++        mm_free(text);
++        rq_why(why, cap, "cli");
++        return 1;
++    }
++    rc = rq_spanf(c->route, rq_tgt, "unisacc-forward-entry.c", 0, 0, c->first, c->last, text, tn, &unit, &un, why, cap);
++    (void)rq_popf();
++    (void)rq_popf();
++    if (rc) return rc;
++    if (un < 0 || un > 2147483647L) {
++        mm_free(unit);
++        rq_why(why, cap, "forwarding stub");
++        return 1;
++    }
++    b = in->buf.data;
++    n = in->buf.len;
++    xs_item_init(in);
++    rc = rq_moref(&b, &n, (char *)unit, un);
++    mm_free(unit);
++    if (rc) {
++        mm_free(b);
++        rq_why(why, cap, "forwarding stub");
++        return 1;
++    }
++    return xs_item_set(vout, 1, b, n, n);
++}
++
++static int rq_go(int h, int pr, int shape, unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
++    void mm_free(void *);
++    xs_item it, ot;
++    int rc;
++    xs_item_init(&it);
++    xs_item_init(&ot);
++    if (pr) {
++        mm_free(in);
++        (void)xs_close(h);
++        rq_why(why, cap, "pipeline");
++        return 1;
++    }
++    rc = xs_item_set(&it, shape, in, inn, inn);
++    if (!rc) rc = xs_run(h, &it, &ot, why, cap);
++    (void)xs_close(h);
++    if (rc) return rc;
++    *out = ot.buf.data;
++    *outn = ot.buf.len;
++    return 0;
++}
++
++/* A unit object from one source: front under run-forward, fwdsig, back. */
++int rq_object(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int),
++              int (*put)(const char *, int, const unsigned char *, int), int (*pop)(void),
++              const char *route, const char *tgt, const char *src, int cx,
++              unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
++    void mm_free(void *);
++    int h = 0;
++    int pr;
++    if (!out || !outn) { mm_free(in); return 4; }
++    *out = 0;
++    *outn = 0;
++    rq_spanf = span; rq_putf = put; rq_popf = pop; rq_moref = 0;
++    rq_tgt = tgt; rq_src = src; rq_cx = cx;
++    rq_set(&rq_st[0], route, 0, "e3", "\0cli/run-forward", 16);
++    rq_set(&rq_st[1], route, "tapecheck", 0, 0, 0);
++    pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 1, 1, 2, rq_span, &rq_st[0]) ||
++         xs_add(h, 2, 2, 3, rq_mark, 0) || xs_add(h, 3, 3, 4, rq_span, &rq_st[1]);
++    return rq_go(h, pr, 1, in, inn, out, outn, why, cap);
++}
++
++/* A linked tape (or a tape source) to its end: fwdsig, tapecheck, then from FROM to the
++   route's end when FROM is given. more reopens the finished link for one more unit. */
++int rq_link(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int),
++            int (*put)(const char *, int, const unsigned char *, int), int (*pop)(void),
++            int (*more)(unsigned char **, long *, char *, long),
++            const char *route, const char *tgt, const char *src, int cx, const char *from,
++            unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
++    void mm_free(void *);
++    const char *tail = "/object/O0";
++    int h = 0;
++    int pr, k, j;
++    if (!out || !outn) { mm_free(in); return 4; }
++    *out = 0;
++    *outn = 0;
++    rq_spanf = span; rq_putf = put; rq_popf = pop; rq_moref = more;
++    rq_tgt = tgt; rq_src = src; rq_cx = cx;
++    for (k = 0; tgt && tgt[k] && k < 80; k++) rq_objroute[k] = tgt[k];
++    for (j = 0; tail[j]; j++) rq_objroute[k + j] = tail[j];
++    rq_objroute[k + j] = 0;
++    rq_set(&rq_st[0], rq_objroute, 0, "e3", 0, 0);
++    rq_set(&rq_st[1], route, "tapecheck", "tapecheck", 0, 0);
++    rq_set(&rq_st[2], route, from, 0, 0, 0);
++    pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 2, 3, 3, rq_stub, &rq_st[0]) ||
++         xs_add(h, 4, 3, from ? 5 : 4, rq_span, &rq_st[1]) || (from && xs_add(h, 3, 5, 4, rq_span, &rq_st[2]));
++    return rq_go(h, pr, 3, in, inn, out, outn, why, cap);
++}
+diff --git a/cx/compiler/tapelink.cx b/cx/compiler/tapelink.cx
+index cad545ba92..d5c812ff63 100644
+--- a/cx/compiler/tapelink.cx
++++ b/cx/compiler/tapelink.cx
+@@ -170,8 +170,10 @@ int tl_unitver(char *t, int n) {
+     }
+     tl_fail("reject: tape truncated\n"); return 1;
+ }
++static int tl_loose;                        /* some unit had an instruction before its first label */
+ int tl_unit(char *t, int n, int u) {
+-    int i; int e; int j; int q; int pass; int first; int located;
++    int i; int e; int j; int q; int pass; int first; int located; int lab;
++    lab = 0;
+     i = 0; while (i < 128) { tl_source_map[i] = -1; i++; }
+     /* Prefix semantics belong to the first real local TU, if one exists.
+        Reserve its mapping early, without inheriting its later filename. */
+@@ -247,6 +249,7 @@ int tl_unit(char *t, int n, int u) {
+             } else {
+                 if (tl_unlocated(t, i, e, first, &located)) return 1;
+                 if (t[i] == 32 || t[i] == 9) {
++                if (!lab) tl_loose = 1;
+                 j = i; while (j < e && (t[j] == 32 || t[j] == 9)) j = j + 1;
+                 q = j; while (q < e && t[q] != 32 && t[q] != 9) q = q + 1;   /* the op, as it is */
+                 /* `.sys NAME, ...`: NAME is a system call, never a unit's name
+@@ -259,6 +262,7 @@ int tl_unit(char *t, int n, int u) {
+                 tl_operands(t, q, e, u);
+             } else {
+                 if (t[e - 1] == 58) {
++                    lab = 1;
+                     if (tl_is(t + i, e - 1 - i, "__init_u")) tl_inits = tl_inits | 0;
+                     /* R19-8: an exported name defined by two units (two `main`s) */
+                     if (tl_kind(t + i, e - 1 - i) == 2 && e - 1 - i < 250 && !tl_is(t + i, e - 1 - i, "__init_u")) {
+@@ -306,6 +310,14 @@ static char *tl_npool; static int tl_nend;
+ static int *tl_def_at; static int *tl_def_len; static int tl_ndef;
+ static int *tl_ext_at; static int *tl_ext_len; static int tl_next;
+ static int tl_has_entry;
++/* forward marks: `.bss __unisa_fw1_<sig>_<name> 1` says <name> is a host function the
++   link may supply a stub for. <sig> holds no underscore, so the name follows the first one. */
++static int *tl_fw_at; static int *tl_fw_len; static int tl_nfw;
++static int tl_fw_name(int i) {
++    int k; k = 12;
++    while (k < tl_fw_len[i] && tl_npool[tl_fw_at[i] + k] != 95) k = k + 1;
++    return k + 1;
++}
+ int tl_inset(int *at, int *ln, int cnt, char *s, int n) {
+     int i; i = 0; while (i < cnt) { if (tl_same(tl_npool + at[i], ln[i], s, n)) return 1; i = i + 1; } return 0;
+ }
+@@ -327,10 +339,44 @@ int tl_note_links(char *t, long n) {
+         if (tl_islink(t, i, e, ".global ")) tl_addname(tl_def_at, tl_def_len, &tl_ndef, t + i + 8, (int)(e - i - 8));
+         if (tl_islink(t, i, e, ".extern ")) tl_addname(tl_ext_at, tl_ext_len, &tl_next, t + i + 8, (int)(e - i - 8));
+         if (tl_is(t + i, (int)(e - i), "_start:")) tl_has_entry = 1;
++        if (tl_islink(t, i, e, ".bss __unisa_fw1_")) {
++            long q; q = i + 5; while (q < e && t[q] != 32) q = q + 1;
++            tl_addname(tl_fw_at, tl_fw_len, &tl_nfw, t + i + 5, (int)(q - i - 5));
++        }
+         i = e + 1;
+     }
+     return 0;
+ }
++int tl_defined(char *s, int n) { return tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n); }
++static int tl_fw_has(char *s, int n) {
++    int i; int k; i = 0;
++    while (i < tl_nfw) {
++        k = tl_fw_name(i);
++        if (k < tl_fw_len[i] && tl_same(tl_npool + tl_fw_at[i] + k, tl_fw_len[i] - k, s, n)) return 1;
++        i = i + 1;
++    }
++    return 0;
++}
++/* Forward mark i: its text and length when no unit defines the name, 0 when one does,
++   -1 past the last mark. */
++int tl_fwd(int i, char **s) {
++    int k;
++    if (i < 0 || i >= tl_nfw || !s) return -1;
++    k = tl_fw_name(i);
++    if (k < tl_fw_len[i] && tl_defined(tl_npool + tl_fw_at[i] + k, tl_fw_len[i] - k)) return 0;
++    *s = tl_npool + tl_fw_at[i];
++    return tl_fw_len[i];
++}
++/* The link trailer: __init calls every unit's initialiser, then the tape ends. */
++int tl_finish(int u) {
++    int k;
++    tl_os("__init:\n", 8);
++    k = 0;
++    while (k < u) { tl_os("  call __init_u", 15); tl_num(k); tl_os("\n", 1); k = k + 1; }
++    tl_os("  ret\n", 6);
++    tl_os(".end\n", 5);
++    return 0;
++}
+ int tl_needs(char *t, long n) {                              /* defines something still undefined? */
+     long i; long e; int l;
+     i = 0;
+@@ -346,12 +392,16 @@ int tl_needs(char *t, long n) {                              /* defines somethin
+ }
+ /* Reject unresolved data and function externs before emitting an image.
+    __init alone is synthesized below after this check. */
++static int tl_miss(int i) {                 /* extern i: no unit defines it and no forward mark covers it */
++    char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
++    return n > 0 && !tl_is(s, n, "__init") && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n) && !tl_fw_has(s, n);
++}
+ int tl_check_undef(void) {
+     int i; int k; char msg[320]; char *pre;
+     i = 0;
+     while (i < tl_next) {
+         char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
+-        if (n > 0 && !tl_is(s, n, "__init") && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n)) {
++        if (tl_miss(i)) {
+             pre = "link: undefined reference to "; k = 0;
+             while (pre[k]) { msg[k] = pre[k]; k = k + 1; }
+             if (n > 2 && s[0] == 103 && s[1] == 95) { n = n - 2; s = s + 2; }
+@@ -363,6 +413,193 @@ int tl_check_undef(void) {
+     }
+     return 0;
+ }
++/* ---- dead function removal ----
++   tl_dce runs on the linked text before tl_check_undef, and only when an extern is still
++   missing: a link with nothing missing keeps its bytes. The text is cut into groups at every
++   label that is not a compiler-local one ([__uN_]__unisacc_L<n> / R<n>); every label, local
++   or not, maps to its group. Alive: the text before the first label, the group of _start,
++   every __init_u*, every group whose address is taken anywhere (a label named by an
++   instruction that is not call / jump / jumpz, .lea for one), whatever an alive group or a
++   column-0 directive line names, and both neighbours across a group end that is not
++   ret / jump / .exit. A missing name some alive group names stays missing and
++   tl_check_undef reports it. Otherwise the dead groups lose their labels and instructions
++   (column-0 directive lines stay: .bss, .str, .unit), the missing names only they named are
++   forgotten, and the exported names they defined stop counting as defined. Declined, with
++   the text untouched: a unit with an instruction before its first label, a label that is
++   not one identifier or occurs twice, no memory. */
++static int *tl_dh; static int *tl_dg; static int tl_dmask; static char *tl_db;   /* label -> offset+1, group */
++static int *tl_dat; static char *tl_dst; static int *tl_dstk; static int tl_dsp; /* group start, 1 alive 2 falls, work stack */
++static int *tl_dum; static char *tl_dus; static int tl_dnu;                      /* missing externs, and which an alive group names */
++static int tl_dn; static int tl_dcut;
++int tl_dce_cut(void) { return tl_dcut; }
++static int tl_loc(char *s, int n) {
++    int k; k = 0;
++    if (n > 4 && s[0] == 95 && s[1] == 95 && s[2] == 117 && s[3] >= 48 && s[3] <= 57) {
++        k = 3; while (k < n && s[k] >= 48 && s[k] <= 57) k = k + 1;
++        if (k >= n || s[k] != 95) return 0;
++        k = k + 1;
++    }
++    if (n - k < 12 || !tl_same(s + k, 10, "__unisacc_", 10) || (s[k + 10] != 76 && s[k + 10] != 82)) return 0;
++    k = k + 11; while (k < n) { if (s[k] < 48 || s[k] > 57) return 0; k = k + 1; }
++    return 1;
++}
++static int tl_dslot(char *s, int n) {
++    unsigned long h; int k; int a;
++    h = 5381; k = 0;
++    while (k < n) { h = (h * 33 + (s[k] & 255)) & 4294967295; k = k + 1; }
++    k = (int)(h & (unsigned long)tl_dmask);
++    while (tl_dh[k]) {
++        a = tl_dh[k] - 1;
++        if (tl_same(tl_db + a, tl_word(tl_db, a, a + n + 1) - a, s, n)) return k;
++        k = (k + 1) & tl_dmask;
++    }
++    return k;
++}
++static void tl_dlive(int g) {
++    if (tl_dst[g] & 1) return;
++    tl_dst[g] = tl_dst[g] | 1; tl_dstk[tl_dsp] = g; tl_dsp = tl_dsp + 1;
++}
++/* Every name on the line: its group lives, a missing extern is seen. With addr set the line
++   counts only when its op is not call / jump / jumpz (it takes an address), and a missing
++   extern is not noted. */
++static void tl_dscan(long i, long e, int addr) {
++    char *b; long p; long q; int k; int j; int m;
++    b = tl_db; p = i;
++    if (b[p] == 32 || b[p] == 9) {
++        while (p < e && (b[p] == 32 || b[p] == 9)) p = p + 1;
++        q = p; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;
++        m = (int)(q - p);
++        if (addr && (tl_same(b + p, m, "call", 4) || tl_same(b + p, m, "jump", 4) || tl_same(b + p, m, "jumpz", 5))) return;
++        if (tl_same(b + p, m, ".sys", 4) || tl_same(b + p, m, ".sys6", 5)) { while (q < e && b[q] != 44) q = q + 1; }
++        p = q;
++    }
++    while (p < e) {
++        if (b[p] == 34) {
++            q = p + 1;
++            while (q < e && b[q] != 34) { if (b[q] == 92) q = q + 1; q = q + 1; }
++            p = q + 1; continue;
++        }
++        if (tl_isid(b[p] & 255) && (b[p] < 48 || b[p] > 57) && b[p] != 46 && b[p] != 36) {
++            q = p; while (q < e && tl_isid(b[q] & 255)) q = q + 1;
++            m = (int)(q - p);
++            k = tl_dslot(b + p, m);
++            if (tl_dh[k]) tl_dlive(tl_dg[k]);
++            else if (!addr) {
++                j = 0;
++                while (j < tl_dnu) {
++                    if (tl_same(tl_npool + tl_ext_at[tl_dum[j]], tl_ext_len[tl_dum[j]], b + p, m)) tl_dus[j] = 1;
++                    j = j + 1;
++                }
++            }
++            p = q; continue;
++        }
++        if (tl_isid(b[p] & 255)) { while (p < e && tl_isid(b[p] & 255)) p = p + 1; continue; }
++        p = p + 1;
++    }
++}
++long tl_dce(char *b, long n) {
++    void *mm_zalloc(long); void mm_free(void *);
++    long i; long e; long w; long j; long q; int k; int g; int ng; int nl; int t; int c; int bad; int hsz;
++    tl_dn = 0; tl_dcut = 0;
++    if (!b || n <= 0 || n > 1073741824 || tl_loose) return n;
++    tl_dnu = 0; k = 0;
++    while (k < tl_next) { if (tl_miss(k)) tl_dnu = tl_dnu + 1; k = k + 1; }
++    if (!tl_dnu) return n;
++    nl = 0; ng = 0; i = 0;
++    while (i < n) {
++        e = i; while (e < n && b[e] != 10) e = e + 1;
++        if (e > i && b[i] != 32 && b[i] != 9 && b[i] != 46 && b[e - 1] == 58) {
++            nl = nl + 1; if (!tl_loc(b + i, (int)(e - 1 - i))) ng = ng + 1;
++        }
++        i = e + 1;
++    }
++    hsz = 1024; while (hsz < 2 * nl + 2 && hsz < 67108864) hsz = hsz * 2;
++    if (hsz < 2 * nl + 2) return n;
++    tl_dh = mm_zalloc((long)hsz * (long)sizeof(int)); tl_dg = mm_zalloc((long)hsz * (long)sizeof(int));
++    tl_dat = mm_zalloc((long)(ng + 2) * (long)sizeof(int)); tl_dst = mm_zalloc((long)ng + 2);
++    tl_dstk = mm_zalloc((long)(ng + 2) * (long)sizeof(int));
++    tl_dum = mm_zalloc((long)tl_dnu * (long)sizeof(int)); tl_dus = mm_zalloc((long)tl_dnu);
++    w = n;
++    if (!tl_dh || !tl_dg || !tl_dat || !tl_dst || !tl_dstk || !tl_dum || !tl_dus) goto out;
++    c = 0; k = 0;
++    while (k < tl_next) { if (tl_miss(k)) { tl_dum[c] = k; c = c + 1; } k = k + 1; }
++    tl_db = b; tl_dmask = hsz - 1; tl_dsp = 0; bad = 0;
++    g = 0; t = 2; tl_dat[0] = 0; tl_dlive(0);
++    i = 0;
++    while (i < n && !bad) {
++        e = i; while (e < n && b[e] != 10) e = e + 1;
++        if (e > i && (b[i] == 32 || b[i] == 9)) {
++            j = i; while (j < e && (b[j] == 32 || b[j] == 9)) j = j + 1;
++            q = j; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;
++            c = (int)(q - j);
++            t = (tl_same(b + j, c, "ret", 3) || tl_same(b + j, c, "jump", 4) || tl_same(b + j, c, ".exit", 5)) ? 2 : 1;
++        } else if (e > i && b[i] != 46 && b[e - 1] == 58) {
++            c = (int)(e - 1 - i);
++            if (c <= 0 || b[i] == 36 || (b[i] >= 48 && b[i] <= 57) || tl_word(b, (int)i, (int)(e - 1)) != (int)(e - 1)) bad = 1;
++            else {
++                if (!tl_loc(b + i, c)) {
++                    if (t == 1) tl_dst[g] = tl_dst[g] | 2;
++                    g = g + 1; tl_dat[g] = (int)i; t = 1;
++                }
++                k = tl_dslot(b + i, c);
++                if (tl_dh[k]) bad = 1;
++                else { tl_dh[k] = (int)i + 1; tl_dg[k] = g; }
++                if (tl_is(b + i, c, "_start") || (c >= 8 && tl_same(b + i, 8, "__init_u", 8))) tl_dlive(g);
++            }
++        }
++        i = e + 1;
++    }
++    if (bad) goto out;
++    tl_dat[g + 1] = (int)n;
++    i = 0;
++    while (i < n) {                           /* column-0 lines that are not labels stay, so what they name lives */
++        e = i; while (e < n && b[e] != 10) e = e + 1;
++        if (e > i && b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58)) tl_dscan(i, e, 0);
++        if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 1);   /* an address taken anywhere is a root */
++        i = e + 1;
++    }
++    while (tl_dsp > 0) {
++        tl_dsp = tl_dsp - 1; g = tl_dstk[tl_dsp];
++        if ((tl_dst[g] & 2) && g < ng) tl_dlive(g + 1);
++        if (g > 0 && (tl_dst[g - 1] & 2)) tl_dlive(g - 1);
++        i = tl_dat[g];
++        while (i < tl_dat[g + 1]) {
++            e = i; while (e < n && b[e] != 10) e = e + 1;
++            if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 0);
++            i = e + 1;
++        }
++    }
++    c = 0; k = 0;
++    while (k < tl_dnu) { if (tl_dus[k]) c = 1; else tl_ext_len[tl_dum[k]] = -1; k = k + 1; }
++    if (c) goto out;                          /* an alive group names a missing extern: tl_check_undef reports it */
++    w = 0; g = 0; i = 0;
++    while (i < n) {
++        e = i; while (e < n && b[e] != 10) e = e + 1;
++        while (g < ng && i >= tl_dat[g + 1]) g = g + 1;
++        if ((tl_dst[g] & 1) || e == i || (b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58))) {
++            j = i; while (j < e) { b[w] = b[j]; w = w + 1; j = j + 1; }
++            if (e < n) { b[w] = 10; w = w + 1; }
++        } else if (b[i] != 32 && b[i] != 9 && !tl_loc(b + i, (int)(e - 1 - i))) {  /* a dropped function: its exported name is no longer defined */
++            k = 0;
++            while (k < tl_ndef) {
++                if (tl_same(tl_npool + tl_def_at[k], tl_def_len[k], b + i, (int)(e - 1 - i))) tl_def_len[k] = -1;
++                k = k + 1;
++            }
++            k = 0;                             /* and only dropped functions wanted it */
++            while (k < tl_next) {
++                if (tl_same(tl_npool + tl_ext_at[k], tl_ext_len[k], b + i, (int)(e - 1 - i))) tl_ext_len[k] = -1;
++                k = k + 1;
++            }
++        }
++        i = e + 1;
++    }
++    tl_dn = ng; k = 1;
++    while (k <= ng) { if (!(tl_dst[k] & 1)) tl_dcut = tl_dcut + 1; k = k + 1; }
++out:
++    mm_free(tl_dh); mm_free(tl_dg); mm_free(tl_dat); mm_free(tl_dst); mm_free(tl_dstk); mm_free(tl_dum); mm_free(tl_dus);
++    tl_dh = 0; tl_dg = 0; tl_dat = 0; tl_dst = 0; tl_dstk = 0; tl_dum = 0; tl_dus = 0;
++    return w;
++}
+ int isarchive(char *p) { int n; n = 0; while (p[n]) n = n + 1; return n >= 2 && p[n - 2] == 46 && p[n - 1] == 97; }
+ 
+ /* the tape a unit object carries, or 0; its target goes to tl_target */
+@@ -493,6 +730,9 @@ static int tl_tables(void) {
+     tl_def_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+     tl_ext_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+     tl_ext_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
++    tl_fw_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
++    tl_fw_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
++    if (!tl_fw_at || !tl_fw_len) return 1;
+     if (!tl_hat || !tl_hlen || !tl_hkind || !tl_gpool || !tl_gat || !tl_glen ||
+         !tl_gdef_at || !tl_gdef_len || !tl_npool || !tl_def_at || !tl_def_len || !tl_ext_at || !tl_ext_len)
+         return 1;
+@@ -503,7 +743,8 @@ static int tl_tables(void) {
+ int tl_begin(void) {
+     if (tl_tables()) { tl_fail("link: out of memory\n"); return 1; }
+     tl_source_next = 0;
+-    tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0;
++    tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0; tl_nfw = 0;
++    tl_loose = 0; tl_dn = 0; tl_dcut = 0;
+     return 0;
+ }
+ void tl_adopt_first(void) {
+diff --git a/src/drive.cx b/src/drive.cx
+index 77e45bdfcb..6cb9a80358 100644
+--- a/src/drive.cx
++++ b/src/drive.cx
+@@ -5,6 +5,7 @@
+ #pragma unisa use sys.env
+ #pragma unisa use runtime.holdframe
+ #pragma unisa use compiler.tapebin
++#pragma unisa use compiler.routepipe
+ #pragma unisa use drivelink
+ #pragma unisa use drivetapebin
+ #pragma unisa use driveargs
+@@ -435,7 +436,7 @@ extern int cxp_object_path(const char *); extern const char *tl_first_text(void)
+ extern int bx_diag_opt(const char *, int, int, int, int); extern int hb_target_id(const char *); extern int bx_diag_run(const char *, int);
+ extern int cxt_text(const char *, int, int, int, int, char *, long, char *, long); extern int cxd_default_target(const char *, char *, long, char *, long); extern long long hs_ns(void);
+ extern int bd_touch(void); extern int st_touch(void); extern int hs_read(const char *, unsigned char **, long *, char *, int); extern int st_gap(int, int, char *, int); extern int st_attr_reset(void);
+-extern int st_extra_reset(void); extern int st_extra_put(const char *, int, const unsigned char *, int);
++extern int st_extra_reset(void); extern int st_extra_pop(void); extern int st_extra_put(const char *, int, const unsigned char *, int);
+ extern int st_dirs(const unsigned char *, int, const unsigned char *, int, const unsigned char *, int); int st_includebase(const unsigned char *, int); int cxm_on_now(void);
+ extern int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+ extern int ex_ri_hit(const unsigned char *, long, char **); extern int rc_open(const char *, int, char **, const char **, int, const char *, int, int, int, int, int);
+@@ -741,23 +742,14 @@ dv_replay:
+                                     dv_srcv, gotb, gotn, &body, &bodyn, preason, 128, &execf, mode2 != 3);
+             }
+             else if (as_tape || cxp_tape_path(src)) {
+-                unsigned char *mid;
+-                long midn;
+-                const char *from;
+-                mid = 0, midn = 0;
+-                /* -run's argv binds here: the cache branch above skips tapes */
++                /* -run's argv binds here: the cache branch above skips tapes. The tape goes
++                   through the link pipeline: fwdsig, tapecheck, then the route's rest. */
+                 pr = (mode2 == 3 && dv_bind_args(argc, argv, argstart, src, dv_argc_b, dv_argv_b, &dv_runargs))
+-                     ? (tx_copy(preason, 128, "argv", 5), 1) : st_span(route, tgt, src, dv_cx(src), 0, "tapecheck", "tapecheck", gotb, gotn, &mid, &midn, preason, 128);
+-                if (!pr && mode2 != 2) {
+-                    from = opts.level > 0 ? "e4" : "prune";
+-                    pr = st_span(route, tgt, src, dv_cx(src), 0, from, 0,
+-                                 mid, midn, &body, &bodyn, preason, 128);
+-                } else if (!pr) {
+-                    body = mid;
+-                    bodyn = midn;
+-                }
+-            } else
+-                pr = st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
++                     ? (tx_copy(preason, 128, "argv", 5), 1) : rq_link(st_span, st_extra_put, st_extra_pop, dv_link_more, route, tgt, src, dv_cx(src),
++                                                                       mode2 == 2 ? 0 : opts.level > 0 ? "e4" : "prune", gotb, gotn, &body, &bodyn, preason, 128);
++            } else   /* a unit object goes through the object pipeline: front, fwdsig, back */
++                pr = obj && opts.funit && !asmw && nsrc == 1 ? rq_object(st_span, st_extra_put, st_extra_pop, route, tgt, src, dv_cx(src), gotb, gotn, &body, &bodyn, preason, 128)
++                     : st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
+             if (lowered && !pr && dv_fwd_replay() && hf_phase_b() && !hf_stub_present(dv_fwd_file())) {
+                 gotb = 0; gotn = 0;
+                 pr = dv_fwd_restore(&gotb, &gotn, preason, 128);
+diff --git a/src/drivelink.cx b/src/drivelink.cx
+index cb2b3eecf0..8ec44fc8f3 100644
+--- a/src/drivelink.cx
++++ b/src/drivelink.cx
+@@ -13,6 +13,7 @@
+ static unsigned char *dv_linkb;
+ static long dv_linkn;
+ static long dv_linkcap;
++static long dv_link_tail; static int dv_link_units;   /* where the trailer starts, and the units before it */
+ 
+ static int dv_link_emit(int c) {
+     unsigned char *nb;
+@@ -176,26 +177,16 @@ int dv_link_objects(int n, const char **srcs, unsigned char **out, long *outn) {
+     int tl_begin(void);
+     char *tl_tape(char *, long, long *);
+     int tl_needs(char *, long);
+-    int tl_check_undef(void);
++    int tl_check_undef(void); long tl_dce(char *, long);
+     int tl_entry_missing(void);
+-    int tl_os(char *, int);
+-    int tl_num(int);
++    int tl_finish(int);
+     int cxr_member(char *, long, int, char *, long, char **, long *, char *, long);
+     int cxp_archive_path(const char *);
+     const char *bx_read_die(int);
+-    int p;
+-    int u;
+-    int k;
+-    int i;
+-    int rc;
+-    int changed;
+-    long bn;
+-    long tl;
+-    long ml;
++    int p, u, i, rc, changed;
++    long bn, tl, ml;
+     unsigned char *b;
+-    char *t;
+-    char *m;
+-    char *used;
++    char *t, *m, *used;
+     char nm[256];
+     char why[128];
+     dv_linkn = 0;
+@@ -276,21 +267,15 @@ int dv_link_objects(int n, const char **srcs, unsigned char **out, long *outn) {
+         fprintf(stderr, "link: no input unit selected from %s\n", srcs[0]);
+         return 1;
+     }
++    dv_linkn = tl_dce((char *)dv_linkb, dv_linkn);   /* only when an extern is missing: functions nothing reaches go, with what only they name */
+     if (tl_check_undef()) return 1;
+     if (tl_entry_missing()) {
+         fprintf(stderr, "link: missing _start entry in %s\n", srcs[0]);
+         return 1;
+     }
+-    tl_os("__init:\n", 8);
+-    k = 0;
+-    while (k < u) {
+-        tl_os("  call __init_u", 15);
+-        tl_num(k);
+-        tl_os("\n", 1);
+-        k = k + 1;
+-    }
+-    tl_os("  ret\n", 6);
+-    tl_os(".end\n", 5);
++    dv_link_tail = dv_linkn;
++    dv_link_units = u;
++    tl_finish(u);
+     *out = dv_linkb;
+     *outn = dv_linkn;
+     dv_linkb = 0;
+@@ -298,3 +283,18 @@ int dv_link_objects(int n, const char **srcs, unsigned char **out, long *outn) {
+     dv_linkcap = 0;
+     return 0;
+ }
++
++/* Reopen the finished link at its trailer for one more unit tape (the forwarding stub
++   unit of the fwdsig stage), check the externs again, and close it. *b is the linked
++   tape handed out above; it comes back with the unit joined. */
++int dv_link_more(unsigned char **b, long *n, char *t, long tl) {
++    int tl_unitver(char *, int); int tl_unit(char *, int, int); int tl_note_links(char *, long);
++    int tl_check_undef(void); int tl_finish(int);
++    dv_linkb = *b; dv_linkcap = *n; dv_linkn = dv_link_tail;
++    tl_unitver(t, (int)tl); tl_unit(t, (int)tl, dv_link_units); tl_note_links(t, tl);
++    (void)tl_check_undef();   /* a miss leaves through dv_link_die */
++    tl_finish(dv_link_units + 1);
++    *b = dv_linkb; *n = dv_linkn;
++    dv_linkb = 0; dv_linkn = 0; dv_linkcap = 0;
++    return 0;
++}
+-- 
+2.34.1
+

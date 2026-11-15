@@ -1,0 +1,126 @@
+/* Checks ext/net/sock.cx: sy_sock_local/peer, sy_shutdown, sy_sockopt_set/get, sy_tcp_accept,
+   sy_wait_port over loopback; Linux x86_64/arm64.
+     sh ./unisacc.com tools/check-ext-net-sock.cx
+   Prints PASS/FAIL lines and EXT_NET_SOCK<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use net.sock
+#pragma unisa use net.tcp
+#pragma unisa use net.addr
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.fs
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tnetsock.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tnetsock.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+int main(void) {
+    sy_addr_t a, b;
+    char buf[8];
+    long v = -1;
+    int ls, cs, as, port, port2;
+
+    ls = sy_tcp_listen(0, 8);
+    ck(ls >= 0, "listen");
+    port = sy_tcp_port(ls);
+    ckv(sy_tcp_accept(ls, 0), -ETIMEDOUT, "accept-0ms-timeout");
+    ckv(sy_tcp_accept(ls, 40), -ETIMEDOUT, "accept-40ms-timeout");
+    ckv(sy_tcp_accept(-1, 10), -EBADF, "accept-badfd");
+    ckv(sy_wait_port(port, 100), 0, "wait-port-open");
+    as = sy_tcp_accept(ls, 1000);
+    ck(as >= 0, "accept-queued-probe");
+    sy_close(as);
+    cs = sy_tcp_connect(port);
+    ck(cs >= 0, "connect");
+    as = sy_tcp_accept(ls, 1000);
+    ck(as >= 0, "accept-ready");
+
+    ckv(sy_sock_local(ls, &a), 0, "local-listener");
+    ckv(a.family, SY_AF_INET4, "local-family");
+    ckv(a.port, port, "local-port");
+    ck(a.ip[0] == 127 && a.ip[1] == 0 && a.ip[2] == 0 && a.ip[3] == 1, "local-ip");
+    ckv(sy_sock_peer(cs, &b), 0, "peer-client");
+    ckv(b.port, port, "peer-port-is-server");
+    ck(b.ip[0] == 127 && b.ip[3] == 1, "peer-ip");
+    ckv(sy_sock_local(cs, &a), 0, "local-client");
+    port2 = a.port;
+    ck(port2 > 0 && port2 != port, "local-client-ephemeral");
+    ckv(sy_sock_peer(as, &b), 0, "peer-accepted");
+    ckv(b.port, port2, "peer-accepted-port");
+    ckv(sy_sock_peer(ls, &b), -ENOTCONN, "peer-listener-enotconn");
+    ckv(sy_sock_local(-1, &a), -EBADF, "local-badfd");
+    ckv(sy_sock_peer(-1, &b), -EBADF, "peer-badfd");
+    ckv(sy_sock_local(cs, 0), -EINVAL, "local-null");
+    ckv(sy_sock_peer(cs, 0), -EINVAL, "peer-null");
+
+    ckv(sy_sockopt_get(cs, SY_SO_NODELAY, &v), 0, "nodelay-get");
+    ckv(v, 0, "nodelay-default-0");
+    ckv(sy_sockopt_set(cs, SY_SO_NODELAY, 1), 0, "nodelay-set");
+    ckv(sy_sockopt_get(cs, SY_SO_NODELAY, &v), 0, "nodelay-get2");
+    ck(v != 0, "nodelay-on");
+    ckv(sy_sockopt_set(cs, SY_SO_KEEPALIVE, 1), 0, "keepalive-set");
+    ckv(sy_sockopt_get(cs, SY_SO_KEEPALIVE, &v), 0, "keepalive-get");
+    ck(v != 0, "keepalive-on");
+    ckv(sy_sockopt_set(cs, SY_SO_RCVBUF, 65536), 0, "rcvbuf-set");
+    ckv(sy_sockopt_get(cs, SY_SO_RCVBUF, &v), 0, "rcvbuf-get");
+    ck(v >= 65536, "rcvbuf-doubled-by-kernel");
+    ckv(sy_sockopt_get(ls, SY_SO_REUSEADDR, &v), 0, "reuseaddr-get");
+    ck(v != 0, "reuseaddr-on-listener");
+    ckv(sy_sockopt_get(cs, SY_SO_ERROR, &v), 0, "so-error-get");
+    ckv(v, 0, "so-error-zero");
+    ckv(sy_sockopt_set(cs, SY_SO_ERROR, 1), -ENOPROTOOPT, "so-error-set-refused");
+    ckv(sy_sockopt_set(cs, SY_SO_LINGER_S, 1), -ENOPROTOOPT, "linger-enoprotoopt");
+    ckv(sy_sockopt_get(cs, SY_SO_RCVTIMEO_MS, &v), -ENOPROTOOPT, "rcvtimeo-enoprotoopt");
+    ckv(sy_sockopt_set(cs, 999, 1), -ENOPROTOOPT, "unknown-opt");
+    ckv(sy_sockopt_set(-1, SY_SO_NODELAY, 1), -EBADF, "set-badfd");
+    ckv(sy_sockopt_get(-1, SY_SO_NODELAY, &v), -EBADF, "get-badfd");
+    ckv(sy_sockopt_get(cs, SY_SO_NODELAY, 0), -EINVAL, "get-null");
+
+    ckv(sy_shutdown(cs, 99), -EINVAL, "shutdown-bad-how");
+    ckv(sy_shutdown(cs, SY_SHUT_WR), 0, "shutdown-wr");
+    ckv(sy_recv(as, buf, 8), 0, "peer-sees-eof");
+    ckv(sy_send(cs, "x", 1), -EPIPE, "send-after-shutdown-wr");
+    ckv(sy_send_all(as, "ok", 2), 0, "other-direction-still-works");
+    ckv(sy_recv(cs, buf, 8), 2, "recv-after-shutdown-wr");
+    ckv(sy_shutdown(cs, SY_SHUT_RDWR), 0, "shutdown-rdwr");
+    ckv(sy_shutdown(-1, SY_SHUT_RD), -EBADF, "shutdown-badfd");
+    ckv(sy_shutdown(ls, SY_SHUT_RD) == 0 || sy_shutdown(ls, SY_SHUT_RD) == -ENOTCONN, 1, "shutdown-listener-defined");
+    sy_close(as); sy_close(cs); sy_close(ls);
+
+    ckv(sy_wait_port(port, 50), -ETIMEDOUT, "wait-port-closed-timeout");
+    ckv(sy_wait_port(port, 0), -ETIMEDOUT, "wait-port-0ms");
+    ckv(sy_wait_port(-3, 50), -EINVAL, "wait-port-bad-port");
+
+    {
+        sy_addr_t s6;
+        int l6, l6b, c4;
+        long vo = -1;
+        sy_addr_loopback(&s6, SY_AF_INET6, 0);
+        l6 = sy_tcp_listen_at(&s6, 4, SY_LISTEN_V6ONLY);
+        if (l6 >= 0) {
+            ckv(sy_sockopt_get(l6, SY_SO_V6ONLY, &vo), 0, "v6only-get");
+            ckv(vo, 1, "v6only-listen-flag-sets-1");
+            ckv(sy_sockopt_set(l6, SY_SO_V6ONLY, 0), -EINVAL, "v6only-set-after-bind-rejected");
+            sy_close(l6);
+        } else ckv(l6, -EAFNOSUPPORT, "v6only-listen-no-ipv6-host");
+        sy_addr_loopback(&s6, SY_AF_INET6, 0);
+        l6b = sy_tcp_listen_at(&s6, 4, 0);
+        if (l6b >= 0) {
+            ckv(sy_sockopt_get(l6b, SY_SO_V6ONLY, &vo), 0, "v6only-default-get");
+            ck(vo == 0 || vo == 1, "v6only-default-boolean");
+            ckv(sy_sockopt_set(l6b, SY_SO_V6ONLY, 1) <= 0, 1, "v6only-set-defined");
+            sy_close(l6b);
+        } else ckv(l6b, -EAFNOSUPPORT, "v6-listen-no-ipv6-host");
+        sy_addr_loopback(&s6, SY_AF_INET4, 0);
+        ckv(sy_tcp_listen_at(&s6, 4, SY_LISTEN_V6ONLY), -EINVAL, "v6only-on-v4-einval");
+        c4 = sy_sockopt_set(-1, SY_SO_V6ONLY, 1);
+        ckv(c4, -EBADF, "v6only-badfd");
+        ckv(sy_sockopt_get(-1, SY_SO_V6ONLY, &vo), -EBADF, "v6only-get-badfd");
+    }
+
+    printf("EXT_NET_SOCK\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,207 @@
+/* tools/limits-audit.cx -- per-phase-class cross audit of build/chain-phases.tsv phase limits against the sub-limits
+ * of the tools those phases run (ITER-8). Read-only: nothing is written, no PASS is granted.
+ *
+ *   sh ./unisacc.com tools/limits-audit.cx -- --report            class table + findings, always rc 0
+ *   sh ./unisacc.com tools/limits-audit.cx -- --check             rc 1 on a finding not in the baseline or expired
+ *   sh ./unisacc.com tools/limits-audit.cx -- --emit-baseline     findings as baseline rows
+ *   sh ./unisacc.com tools/limits-audit.cx -- --file F... --phase N   fixture mode: scan F against phase limit N, no baseline
+ *
+ * Per class: phase limit (timeout_s of its phases in build/chain-phases.tsv, min over the class), the tools the class
+ * runs, the smallest literal seconds handed to np_run/pr_run/eb_run in those tools (non-literal limits derive from
+ * the phase bound and are not counted), the margin ratio min_sub/phase, and whether any sub-limit is tighter than the
+ * phase bound (literal < phase limit - 5: it can fire before the phase limit, the class that stopped 0.0.59 chain
+ * starts). TIGHT = that case. RC2 = a timed_out branch ending in die() (rc 2, deterministic) instead of 124 (retryable).
+ * The class -> tool map is the table below (phase id prefix, longest match). Baseline: build/limits-audit-baseline.tsv
+ * (file rule snippet expires reason); new or expired -> --check rc 1; unmatched rows listed as STALE.
+ * Scanner is a reduced re-implementation of tools/prechain-gate.cx (which has no importable exports). */
+#pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+enum { MAXF = 256, SN = 80, MAXP = 600, MAXC = 16 };
+static const struct { const char *prefix, *tools; } cmap[] = {
+    {"jobs", "tools/source-job-wave.cx tools/chain-step.cx"},
+    {"g2-", "tools/kernel-build.cx tools/chain-step.cx"}, {"g3-", "tools/kernel-build.cx tools/chain-step.cx"},
+    {"gen1-", "tools/kernel-build.cx tools/chain-step.cx"}, {"kernels", "tools/kernel-build.cx tools/chain-step.cx"},
+    {"final-net", "tools/candidate-chain.cx tools/chain-step.cx"}, {"p3-", "tools/candidate-chain.cx tools/chain-step.cx"},
+    {"wf", "tools/whole-front.cx tools/chain-step.cx"},
+    {"", "tools/entry-build.cx tools/chain-step.cx"}};
+static char cname[MAXC][16]; static int cphases[MAXC], cn;
+static double cphase[MAXC];
+static const char *ctools[MAXC];
+static double phase_def = 90, phase_max = 120;
+
+typedef struct { char file[96], rule[8], snip[SN + 1]; int line; double lit; } finding;
+static finding fd[MAXF]; static int nf;
+static void die2(const char *m) { fprintf(stderr, "limits-audit: REFUSE %s\n", m); exit(2); }
+static int all_digits(const char *s) { if (!*s) return 0; for (; *s; s++) if (!isdigit((unsigned char)*s)) return 0; return 1; }
+static void add(const char *file, const char *rule, const char *snip, int line, double lit) {
+    for (int i = 0; i < nf; i++) if (!strcmp(fd[i].file, file) && !strcmp(fd[i].rule, rule) && !strncmp(fd[i].snip, snip, SN)) return;
+    if (nf >= MAXF || strlen(file) >= sizeof fd[0].file) die2("too many findings");
+    finding *f = &fd[nf++]; mm_copy(f->file, sizeof f->file, file, strlen(file) + 1); mm_copy(f->rule, sizeof f->rule, rule, strlen(rule) + 1);
+    size_t sl = strlen(snip); if (sl > SN) sl = SN;
+    mm_copy(f->snip, sizeof f->snip, snip, sl); f->snip[sl] = 0;
+    for (char *c = f->snip; *c; c++) if (*c == '\t') *c = ' ';
+    f->line = line; f->lit = lit;
+}
+static int call_arg(const char *open, const char *end, int idx, char *out, size_t cap) {
+    int depth = 0, k = 0; const char *a = open + 1;
+    for (const char *p = open + 1; p < end; p++) {
+        int last = 0;
+        if (*p == '(' || *p == '[' || *p == '{') { depth++; continue; }
+        if (*p == ')' || *p == ']' || *p == '}') { if (depth > 0) { depth--; continue; } last = 1; }
+        else if (!(*p == ',' && depth == 0)) continue;
+        if (k == idx) {
+            const char *q = p; while (*a == ' ') a++; while (q > a && q[-1] == ' ') q--;
+            if ((size_t)(q - a) >= cap) return 0;
+            mm_copy(out, cap, a, (size_t)(q - a)); out[q - a] = 0; return 1;
+        }
+        if (last) return 0;
+        k++; a = p + 1;
+    }
+    return 0;
+}
+/* Scans one file against a phase limit; returns smallest literal sub-limit (or -1), adds TIGHT/RC2 findings. */
+static double scan_file(const char *file, double plim, int *rc2) {
+    size_t n; char *s = cx_read(file, &n); double mn = -1;
+    if (!s) { fprintf(stderr, "limits-audit: REFUSE cannot read %s\n", file); exit(2); }
+    static const struct { const char *fn; int idx; } calls[] = {{"np_run(", 3}, {"pr_run(", 4}, {"eb_run(", 2}};
+    const char *p = s; int ln = 0;
+    while (p < s + n) {
+        const char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        ln++;
+        char *line = malloc((size_t)(e - p) + 1); mm_copy(line, (size_t)(e - p) + 1, p, (size_t)(e - p)); line[e - p] = 0;
+        const char *tr = line; while (*tr == ' ') tr++;
+        if (strncmp(tr, "/*", 2) && strncmp(tr, "*", 1) && strncmp(tr, "//", 2)) {
+            for (int c = 0; c < 3; c++) {
+                const char *q = line;
+                while ((q = strstr(q, calls[c].fn)) != 0) {
+                    const char *open = q + strlen(calls[c].fn) - 1; char arg[64];
+                    if (call_arg(open, line + strlen(line), calls[c].idx, arg, sizeof arg) && all_digits(arg)) {
+                        double v = atof(arg);
+                        if (mn < 0 || v < mn) mn = v;
+                        if (v < plim - 5) add(file, "TIGHT", q, ln, v);
+                    }
+                    q = open;
+                }
+            }
+            const char *t = strstr(line, "timed_out");
+            if (t && strstr(t, "die(") && !strstr(line, "124") && !strstr(line, "timeout_exit")) { add(file, "RC2", tr, ln, -1); (*rc2)++; }
+        }
+        free(line); p = e + 1;
+    }
+    free(s); return mn;
+}
+static int cls_of(const char *id) {
+    int best = -1; size_t bl = 0;
+    for (size_t i = 0; i < sizeof cmap / sizeof *cmap; i++) {
+        size_t l = strlen(cmap[i].prefix);
+        if (!strncmp(id, cmap[i].prefix, l) && (best < 0 || l > bl)) { best = (int)i; bl = l; }
+    }
+    return best;
+}
+static void load_phases(void) {
+    size_t n; char *s = cx_read("build/chain-phases.tsv", &n);
+    if (!s) die2("cannot read build/chain-phases.tsv");
+    for (char *p = s; p < s + n;) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && e > p) {
+            char *f[5]; int k = 0; char *a = p;
+            for (char *c = p; c <= e && k < 5; c++) if (c == e || *c == '\t') { f[k++] = a; a = c + 1; }
+            if (k < 4) die2("bad chain-phases row");
+            char id[96]; size_t il = (size_t)(f[2] - f[1] - 1); if (il >= sizeof id) die2("id too long");
+            mm_copy(id, sizeof id, f[1], il); id[il] = 0;
+            double tm = atof(f[3]); int c = cls_of(id);
+            const char *pf = cmap[c].prefix; char nm[16]; mm_copy(nm, sizeof nm, *pf ? pf : "other", strlen(*pf ? pf : "other") + 1);
+            int ci = -1; for (int i = 0; i < cn; i++) if (!strcmp(cname[i], nm)) ci = i;
+            if (ci < 0) { if (cn >= MAXC) die2("too many classes"); ci = cn++; mm_copy(cname[ci], 16, nm, strlen(nm) + 1); cphase[ci] = tm; ctools[ci] = cmap[c].tools; }
+            cphases[ci]++; if (tm < cphase[ci]) cphase[ci] = tm;
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+static void load_limits(void) {
+    size_t n; char *s = cx_read("build/limits.tsv", &n);
+    if (!s) die2("cannot read build/limits.tsv");
+    for (char *p = s; p < s + n;) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (!strncmp(p, "phase.bound\t", 12)) {   /* id unit default max scope: default row has scope * */
+            char *f[5]; int k = 0; char *a = p;
+            for (char *c = p; c <= e && k < 5; c++) if (c == e || *c == '\t') { f[k++] = a; a = c + 1; }
+            if (k >= 5 && f[4][0] == '*') { phase_def = atof(f[2]); phase_max = atof(f[3]); }
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+typedef struct { char file[96], rule[8], snip[SN + 1], exp[16]; int used; } brow;
+static brow bl[MAXF]; static int nb;
+static void load_baseline(void) {
+    size_t n; char *s = cx_read("build/limits-audit-baseline.tsv", &n);
+    if (!s) die2("cannot read build/limits-audit-baseline.tsv");
+    for (char *p = s; p < s + n;) {
+        char *e = memchr(p, '\n', (size_t)(s + n - p)); if (!e) e = s + n;
+        if (*p != '#' && e > p) {
+            char *f[5]; int k = 0; char *a = p;
+            for (char *c = p; c <= e && k < 5; c++) if (c == e || *c == '\t') { f[k++] = a; a = c + 1; }
+            if (k < 5 || nb >= MAXF) die2("bad baseline row");
+            brow *b = &bl[nb++]; size_t l0 = (size_t)(f[1] - f[0] - 1), l1 = (size_t)(f[2] - f[1] - 1), l2 = (size_t)(f[3] - f[2] - 1), l3 = (size_t)(f[4] - f[3] - 1);
+            if (l0 >= sizeof b->file || l1 >= sizeof b->rule || l2 > SN || l3 >= sizeof b->exp) die2("baseline field too long");
+            mm_copy(b->file, sizeof b->file, f[0], l0); b->file[l0] = 0; mm_copy(b->rule, sizeof b->rule, f[1], l1); b->rule[l1] = 0;
+            mm_copy(b->snip, sizeof b->snip, f[2], l2); b->snip[l2] = 0; mm_copy(b->exp, sizeof b->exp, f[3], l3); b->exp[l3] = 0;
+        }
+        p = e + 1;
+    }
+    free(s);
+}
+int main(int argc, char **argv) {
+    int check = 0, emit = 0, fx = 0; double fxp = 90;
+    const char *files[32]; int nfiles = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--report")) check = 0;
+        else if (!strcmp(argv[i], "--emit-baseline")) emit = 1;
+        else if (!strcmp(argv[i], "--phase") && i + 1 < argc) fxp = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--file")) { fx = 1; for (i++; i < argc && strncmp(argv[i], "--", 2) && nfiles < 32; i++) files[nfiles++] = argv[i]; i--; }
+        else { fprintf(stderr, "usage: limits-audit [--report|--check|--emit-baseline | --file F... --phase N]\n"); return 2; }
+    }
+    if (fx) {
+        int rc2 = 0;
+        for (int i = 0; i < nfiles; i++) { double m = scan_file(files[i], fxp, &rc2); printf("FILE\t%s\tmin_sub=%.0f\tphase=%.0f\n", files[i], m, fxp); }
+        for (int i = 0; i < nf; i++) printf("FINDING\t%s:%d\t%s\t%s\n", fd[i].file, fd[i].line, fd[i].rule, fd[i].snip);
+        printf("LIMITS_AUDIT_RESULT\tfindings=%d\n", nf);
+        return nf && check ? 1 : 0;
+    }
+    load_limits(); load_phases();
+    printf("LIMITS_AUDIT\tstatic cross audit: phase limit (chain-phases.tsv) vs sub-limits in the tools the class runs; no PASS granted\n");
+    printf("limits.tsv phase.bound default=%.0f max=%.0f\n", phase_def, phase_max);
+    for (int c = 0; c < cn; c++) if (cphase[c] > phase_max) { char sn[SN]; cx_fmt(sn, sizeof sn, "class %s phase %.0f > max %.0f", cname[c], cphase[c], phase_max); add("build/chain-phases.tsv", "OVERMAX", sn, 0, -1); }
+    printf("class\tphases\tphase_s\ttools\tmin_sub_s\tratio\ttight\trc2\n");
+    for (int c = 0; c < cn; c++) {
+        char tl[256]; mm_copy(tl, sizeof tl, ctools[c], strlen(ctools[c]) + 1);
+        double mn = -1; int rc2 = 0, before = nf, tight = 0;
+        for (char *t = strtok(tl, " "); t; t = strtok(0, " ")) { double m = scan_file(t, cphase[c], &rc2); if (m >= 0 && (mn < 0 || m < mn)) mn = m; }
+        for (int i = before; i < nf; i++) if (!strcmp(fd[i].rule, "TIGHT")) tight++;
+        for (int i = 0; i < nf; i++) if (!strcmp(fd[i].rule, "TIGHT") && i < before && fd[i].lit >= 0 && fd[i].lit < cphase[c] - 5 && strstr(ctools[c], fd[i].file)) tight++;
+        char r[16] = "-", m[16] = "derived"; if (mn >= 0) { cx_fmt(m, sizeof m, "%.0f", mn); cx_fmt(r, sizeof r, "%.2f", mn / cphase[c]); }
+        printf("%s\t%d\t%.0f\t%s\t%s\t%s\t%s\t%d\n", cname[c], cphases[c], cphase[c], ctools[c], m, r, tight ? "YES" : "no", rc2);
+    }
+    if (emit) {
+        for (int i = 0; i < nf; i++) printf("%s\t%s\t%s\t2026-12-13\t已知违规,账本 C3-SUBBOUND-RESOLVE/C3-RETRY-CLASS;DSG-LIM3 清零后删除\n", fd[i].file, fd[i].rule, fd[i].snip);
+        return 0;
+    }
+    char today[16];{long z=sy_wall_s()/86400+719468,era=z/146097,doe=z-era*146097,yoe=(doe-doe/1460+doe/36524-doe/146096)/365,y=yoe+era*400,doy=doe-(365*yoe+yoe/4-yoe/100),mp=(5*doy+2)/153,d=doy-(153*mp+2)/5+1,m=mp<10?mp+3:mp-9;if(m<=2)y++;if(cx_fmt(today,sizeof today,"%04ld-%02ld-%02ld",y,m,d))return 2;}
+    load_baseline();
+    int fresh = 0, known = 0, expired = 0, stale = 0;
+    printf("status\tfile:line\trule\tsnippet\n");
+    for (int i = 0; i < nf; i++) {
+        const char *st = "NEW"; brow *hit = 0;
+        for (int j = 0; j < nb && !hit; j++) if (!strcmp(bl[j].file, fd[i].file) && !strcmp(bl[j].rule, fd[i].rule) && !strcmp(bl[j].snip, fd[i].snip)) hit = &bl[j];
+        if (hit) { hit->used = 1; if (strcmp(hit->exp, today) < 0) { st = "EXPIRED"; expired++; } else { st = "BASELINE"; known++; } } else fresh++;
+        printf("%s\t%s:%d\t%s\t%s\n", st, fd[i].file, fd[i].line, fd[i].rule, fd[i].snip);
+    }
+    for (int j = 0; j < nb; j++) if (!bl[j].used) { stale++; printf("STALE\t%s\t%s\t%s\n", bl[j].file, bl[j].rule, bl[j].snip); }
+    printf("LIMITS_AUDIT_RESULT\tnew=%d\tbaselined=%d\texpired=%d\tstale=%d\n", fresh, known, expired, stale);
+    return check && (fresh || expired) ? 1 : 0;
+}

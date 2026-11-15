@@ -42,7 +42,7 @@
 | 3 | 以上两例为同一缺陷的两次返工 | F-v2 移走版本串时只改了打包注入方，没有一次搜全所有 `PRODUCT_VERSION` 读取方 | 移走任何「第二真相源」时先 `refactor.cx sites`/`cx-lint --rules R1-version` 列全读取方，一次迁完；`build/hardwire.tsv` 登记模式 | 提交 `c66fa850e6`（F-v2）、`84df77f4b2`（hardwire.tsv）、`87016b122d`（cx-lint R1-version） |
 | 4 | 提交 X 后共享检出未快进，后续补丁的集成门基线过期 | 集成者在私有克隆推了 X，共享检出仍在旧 HEAD | 发布提交 X/Y 推送后立即在共享检出 `git merge --ff-only origin/main` 并检查返回码（§6 已有规则，本版再犯） | 账本 2026-11-10 `C49-TOOLS-READY-CDX HANDOFF`（baseline 以 35cfdd1e 重算）；具体返工次数未测 |
 | 5 | Win 分相 worker 静默 rc=2 | worker 模板选错：span 相必须用 `whole-win-span` 模板，不是 `whole-front` | 分相模板按相位名选，`whole-front.cx` 对模板/相位不匹配应具名拒绝 | 提交 `ba945f3238`（模板 whole-front/whole-win-span）；具体失败日志在 `out/c49-slow-cdx-979b56e4/`（本文未逐条核，未测） |
-| 6 | P3 相位贴 60s（计划 §1b 记 P3 59s）、gen1 osx/x86_64 首次超时 76.558s | 每相位重复 freeze 拷贝 6.5MB 已装 APE（`release-build` 冻结 16.827s 为其中一例） | 冻结一次、各相位复用同一快照；0.0.50 G0 持久检查点 + `--resume` | `agentwork/phase-times.tsv` 第 39、54 行；计划 §1b；「每相位拷 6.5MB」的逐相位耗时未单测 |
+| 6 | P3 相位贴 60s（计划 §1b 记 P3 59s）、gen1 osx/x86_64 首次超时 76.558s | 每相位重复 freeze 拷贝 6.5MB 已装 APE（`release-build` 冻结 16.827s 为其中一例） | 冻结一次、各相位复用同一快照；0.0.50 G0 持久检查点 + `--resume` | `build/phase-times.tsv` 第 39、54 行；计划 §1b；「每相位拷 6.5MB」的逐相位耗时未单测 |
 | 7 | G0 在不同物理根复现：Linux 片 SHA 相同，Mac 合并帧差 6643B | 帧/收据依赖物理根（疑 `#line` 路径），产品产物不依赖 | cmp 判据分层：帧/收据允许依赖根，切片/内核/P4/APE 绝不允许；`build/graph.tsv` 增 `root_dependent` 列，新增 `check-root-independent` | 计划 [archive/docs-2026-11b/plans/v0.0.50-unisacc.md](archive/docs-2026-11b/plans/v0.0.50-unisacc.md) §1b |
 | 8 | 与 0.0.48 镜像结构对照 28 处差异 | 源码不同，跨版本结构对照无判别力 | 等价证据只用同源小规模 oracle（中等程序默认 vs 分相镜像 cmp0）+ 两代不动点 + CI；跨版本对照只作信息记录 | 发布说明「已知限制」；计划 §1 |
 | 9 | 冻结 -> 公开十余小时，计算之和约 31 分钟 | 相位间人工/代理间隙、临时设计 Mac/Win 分相方案 X、工具缺陷返工 | 0.0.50 §0：一条命令到草稿 release ≤20 分钟 | 发布说明「已知限制」；计划 §0 |
@@ -89,7 +89,7 @@
 | Mac A+B | 97–100 s（A 51–57 s） | 贴 60 s 线 |
 | 候选构造总计 | 约 2 小时 | 0.0.49 目标压缩 |
 
-0.0.49 实测（`agentwork/phase-times.tsv`，提交 `022caf53b1`；120 秒例外已撤销，单子进程 ≤60s、分相子相 ≤45s）：
+0.0.49 实测（`build/phase-times.tsv`，提交 `022caf53b1`；120 秒例外已撤销，单子进程 ≤60s、分相子相 ≤45s）：
 
 | 项 | 实测 | 出处 |
 |---|---|---|
@@ -112,12 +112,14 @@
 
 ## 7. 往期发布
 
+现行发布说明全文:[plans/release-notes-0.0.59.md](plans/release-notes-0.0.59.md)、[plans/release-notes-0.0.61.md](plans/release-notes-0.0.61.md)(0.0.48/0.0.57/0.0.58 的身份摘要与已知缺口并入 [prd_hist.md 往期发布](prd_hist.md))。
+
 | 版本 | 状态 | 入口 |
 |---|---|---|
 | 0.0.43 | 历史 | [plans/release-0.0.43.md](plans/release-0.0.43.md) |
-| 0.0.45 | 公开预发布 | [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) |
+| 0.0.45 | 公开预发布 | GitHub Release 页 v0.0.45(发布说明文件已不在 plans/) |
 | 0.0.47 | 已发布 | [archive/docs-2026-11b/plans/release-notes-0.0.47.md](archive/docs-2026-11b/plans/release-notes-0.0.47.md) |
-| 0.0.48 | 正式版，CI 42/0（运行 42545543777），APE sha256 `559705097427cf8f…` | [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md) |
-| 0.0.48.1 | macOS 签名/公证草稿（v0.0.48.1-osx-launch-rc1，CI 42555350465 42/0，DMG 6e25e7c9…）；未作为正式版公开 | [plans/release-notes-0.0.48.1.md](plans/release-notes-0.0.48.1.md)、[prd_hist.md](prd_hist.md)「0.0.49 收尾」 |
-| 0.0.50 | 正式版（2026-11-10，tag `v0.0.50` 指向提交 Y `31c5886469`），CI 42/0（运行 42767415154，提交 X `114ef751be`），APE sha256 `76ed4200aaaf71b2…`；后备候选：产品字节同 0.0.49 源 `979b56e4` 六片只换版本串，Y-0 因 setpgid 回归留 0.0.51；s9 三档未跑 | [plans/release-notes-0.0.50.md](plans/release-notes-0.0.50.md) |
-| 0.0.49 | 正式版（2026-11-10，tag 指向 `35cfdd1e`），CI 42/0（运行 42661106290），APE sha256 `2d3852a8404e1ba3…`，s9 仅提交档 96/96 | [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md) |
+| 0.0.48 | 正式版，CI 42/0（运行 42545543777），APE sha256 `559705097427cf8f…` | [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md);摘要见 [prd_hist.md 往期发布](prd_hist.md) |
+| 0.0.48.1 | macOS 签名/公证草稿（v0.0.48.1-osx-launch-rc1，CI 42555350465 42/0，DMG 6e25e7c9…）；未作为正式版公开 | 发布说明已不在 plans/、[prd_hist.md](prd_hist.md)「0.0.49 收尾」 |
+| 0.0.50 | 正式版（2026-11-10，tag `v0.0.50` 指向提交 Y `31c5886469`），CI 42/0（运行 42767415154，提交 X `114ef751be`），APE sha256 `76ed4200aaaf71b2…`；后备候选：产品字节同 0.0.49 源 `979b56e4` 六片只换版本串，Y-0 因 setpgid 回归留 0.0.51；s9 三档未跑 | GitHub Release 页 v0.0.50(发布说明文件已不在 plans/) |
+| 0.0.49 | 正式版（2026-11-10，tag 指向 `35cfdd1e`），CI 42/0（运行 42661106290），APE sha256 `2d3852a8404e1ba3…`，s9 仅提交档 96/96 | GitHub Release 页 v0.0.49(发布说明文件已不在 plans/) |

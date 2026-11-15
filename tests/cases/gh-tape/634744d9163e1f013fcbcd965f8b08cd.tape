@@ -1,0 +1,23 @@
+GHTAPE1
+day=20770
+rc=0
+ghver=gh version 2.45.0 (2024-03-04)
+argc=16
+a=run
+a=list
+a=-R
+a=partnernetsoftware/unisacc
+a=--workflow
+a=candidate-native.yml
+a=--branch
+a=main
+a=--event
+a=workflow_dispatch
+a=--limit
+a=1
+a=--json
+a=databaseId
+a=--jq
+a=.[0].databaseId
+len=12
+43379357079

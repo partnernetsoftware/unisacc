@@ -15,7 +15,7 @@ description: 写脚本、自动化、批处理、文本与文件处理、TSV 表
 |---|---|
 | 一次性文本/TSV 处理、文件改写、测试夹具生成、构建胶水、子进程编排、哈希/校验、小 CLI | **cx**（本文） |
 | 要 numpy/pandas/浏览器/ORM/HTTP 框架、或要 JSON/正则/哈希表且今天就要 | 先查 `cx/ ext/ tools/cxlib/`；没有 → 回落原语言，并在 `agentwork/items.tsv` 立 DRAFT 缺口条目 |
-| 另一个车道的文件（`apps/csih/`、`ujs/`） | 不动，发信封给主人 |
+| 另一个车道的文件（`apps/csih/`、`ujs/`） | 不动，发信封给其维护者 |
 
 为什么是 cx：不用装运行时（一个文件 `unisacc.com` 就是编译器和解释器）；输出可写成六目标可执行文件；模块边界、带界 API 和运行期所有权检查由产品和棘轮一起守着；工具沉淀到 `tools/` 后别的代理能复用。
 
@@ -185,7 +185,7 @@ cleaned dir=0
 - 源码所有权检查：`sh ./unisacc.com tools/cx-own.cx -- FILE...`（函数内局部 owner 的 DOUBLE-FREE / USE-AFTER-FREE / LEAK，保守）。
 - 层向检查：`tools/check-cx-layers.cx`（L0–L3 向上越层即红）；core 导出面棘轮 `tests/coreapi.cx`。
 
-**方向（主人定；未实现，不要说成已有）**
+**方向（项目所有者定；未实现，不要说成已有）**
 
 - 编译期所有权/借用检查（CX-W-4，0.0.45 路线 C）。今天的句柄检查是**过期句柄隔离**：句柄是可复制整数，猜中就能访问；不是线性类型，不是机密性。
 - `export`（`pub use`，CX-W-3）、层感知前导（CX-W-5）、`-c -funit` 每模块一只对象（CX-W-1）。

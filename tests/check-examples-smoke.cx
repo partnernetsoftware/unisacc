@@ -1,0 +1,61 @@
+/* tests/check-examples-smoke.cx -- 根下 9 个 C99 示例的冒烟:已装产品默认 -run 逐个跑。
+ *
+ *   sh ./unisacc.com tests/check-examples-smoke.cx     (在仓库根运行)
+ *
+ * 每个示例先拷进 mkdtemp 目录再跑(示例不得改写已跟踪文件、不得在 examples/ 留产物);
+ * 单个 20 秒上限。断言 rc==0 与标准输出逐字。共 9 个示例各 2 条断言(rc、输出),外加
+ * 一条"examples/*.c 工作区无改动"断言。缺示例文件为具名失败而非跳过。
+ * 末行 EXAMPLES_SMOKE<TAB>assertions=N<TAB>failed=K;任何 FAIL 退出码 1。
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int failed, assertions;
+
+static void ck(int ok, const char *name) {
+    assertions++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+
+static const char *names[9] = {"do", "fact", "fib", "hello", "host", "indirect6", "ptr", "struct", "switch"};
+static const char *wants[9] = {"3\n", "120\n", "55\n", "from hello.c\n", "host: linux\n", "15\n16\n", "7\n", "9\n", "6\n"};
+
+int main(void) {
+    char tmpl[512], cmd[1200], label[96], src[256], dst[640];
+    char *out, *body; size_t n; int i, rc;
+    if (sy_mkdtemp(sy_tmpdir(), "examples-smoke-", tmpl, sizeof tmpl) != 0) {
+        printf("check-examples-smoke: mkdtemp failed\n");
+        return 2;
+    }
+
+    for (i = 0; i < 9; i++) {
+        if (cx_fmt(src, sizeof src, "examples/%s.c", names[i]) || cx_fmt(dst, sizeof dst, "%s/%s.c", tmpl, names[i])) return 2;
+        body = cx_read(src, &n);
+        if (!body || cx_write(dst, body, n) != 0) {
+            if (cx_fmt(label, sizeof label, "%s: example source copied", names[i])) return 2;
+            ck(0, label);
+            continue;
+        }
+        free(body);
+        if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com %s 2>&1", dst)) return 2;
+        out = 0; n = 0;
+        rc = cx_run_timeout(cmd, 20, &out, &n);
+        if (cx_fmt(label, sizeof label, "%s: rc == 0 (got %d)", names[i], rc)) return 2;
+        ck(rc == 0, label);
+        if (cx_fmt(label, sizeof label, "%s: stdout exact", names[i])) return 2;
+        ck(out != 0 && strcmp(out, wants[i]) == 0, label);
+        if (out && strcmp(out, wants[i]) != 0) printf("  got: %s", out);
+        free(out);
+    }
+
+    out = 0; n = 0;
+    rc = cx_run_timeout("git status --porcelain -- 'examples/*.c' 2>&1", 20, &out, &n);
+    ck(rc == 0 && out != 0 && out[0] == 0, "examples/*.c worktree untouched");
+    free(out);
+
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", tmpl) == 0) (void)cx_run_timeout(cmd, 20, &out, &n);
+    printf("EXAMPLES_SMOKE\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

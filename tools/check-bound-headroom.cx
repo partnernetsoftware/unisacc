@@ -1,0 +1,74 @@
+/* tools/check-bound-headroom.cx -- tools/bound-headroom.cx 的检查(夹具写入 sy_tmpdir 下)。
+ * 四例: 余量足(10 秒/90,rc 0)、恰 0.8(72 秒/90,TIGHT,rc 1)、超 1(100 秒/90,比值 1.111,TIGHT)、无记录(total=0,rc 0);
+ * 另验 --report 恒 0、kernels-* 前缀覆盖限时 120。输出 PASS/FAIL 与 CHECK_BOUND_HEADROOM<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char dir[320];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-bound-headroom.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-bound-headroom.%s\n", name); }
+}
+static int has(const char *hay, const char *needle) {
+    long nl = tx_len(hay, 100000);
+    size_t n = nl < 0 ? 100000 : (size_t)nl, m = tx_len(needle, 200); /* 负值=超 cap,只在已证非 NUL 的 cap 内查 */
+    for (size_t i = 0; i + m <= n; i++) if (tx_cmp(hay + i, m, needle, m) == 0) return 1;
+    return 0;
+}
+static void put(const char *name, const char *body) {
+    char path[400];
+    cx_fmt(path, sizeof path, "%s/%s", dir, name);
+    cx_write(path, body, tx_len(body, 100000));
+}
+static int run(const char *args, char *out, size_t cap) {
+    char cmd[1500]; char *o = 0; size_t n = 0;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bound-headroom.cx -- --limits '%s/lim.tsv' %s 2>&1", dir, args);
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+static void mk(const char *sub, const char *ph, long ms) {
+    char p[400], body[400];
+    cx_fmt(p, sizeof p, "%s/%s", dir, sub); mkdir(p, 0700);
+    cx_fmt(body, sizeof body, "SEGMENT\t1\tn=1\nATTEMPT_TIME\tphase=%s\twall_ms=%ld\n", ph, ms);
+    char f[420]; cx_fmt(f, sizeof f, "%s/chain-run.tsv", p);
+    cx_write(f, body, tx_len(body, 400));
+}
+int main(void) {
+    char out[8192], a[900];
+    if (cx_fmt(dir, sizeof dir, "%s/bound-headroom-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    put("lim.tsv", "phase.bound\ts\t90\t120\t*\t-\t-\nphase.bound\ts\t120\t120\tkernels-*\tX\t2099-01-01\n");
+    mk("ok", "p-ok", 10000); mk("edge", "p-edge", 72000); mk("over", "p-over", 100000); mk("kern", "kernels-g2", 100000);
+    /* 无记录例: 空目录 */
+    char empty[400]; cx_fmt(empty, sizeof empty, "%s/empty", dir); mkdir(empty, 0700);
+    cx_fmt(a, sizeof a, "%s/ok", dir);
+    int rc = run(a, out, sizeof out);
+    ck(rc == 0 && has(out, "p-ok\t10.0\t90\t0.111") && has(out, "HEADROOM\ttotal=1\ttight=0"), "headroom-ok");
+    cx_fmt(a, sizeof a, "%s/edge", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 1 && has(out, "p-edge\t72.0\t90\t0.800") && has(out, "TIGHT") && has(out, "tight=1"), "exact-0.8-tight");
+    cx_fmt(a, sizeof a, "%s/over", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 1 && has(out, "1.111") && has(out, "TIGHT"), "over-1-tight");
+    cx_fmt(a, sizeof a, "--report %s/over", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 0 && has(out, "tight=1"), "report-always-0");
+    cx_fmt(a, sizeof a, "--threshold 0.81 %s/edge", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 0 && has(out, "tight=0"), "threshold-adjustable");
+    cx_fmt(a, sizeof a, "%s/kern", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 1 && has(out, "kernels-g2\t100.0\t120\t0.833"), "kernels-override-limit");
+    cx_fmt(a, sizeof a, "%s/empty", dir);
+    rc = run(a, out, sizeof out);
+    ck(rc == 0 && has(out, "HEADROOM\ttotal=0\ttight=0"), "no-records");
+    sy_printf("CHECK_BOUND_HEADROOM\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

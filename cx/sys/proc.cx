@@ -1,12 +1,34 @@
 #pragma unisa module proc
 #pragma unisa dock
 #pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
 /* L0 sys/proc: child processes (plans/cx-layers.md). Exit status as one int:
    0..255 an exit code, 128+N killed by signal N, -errno when it could not run
    or be waited for. No #include: fork/pipe/exec/waitpid/kill come with the
    implicit prelude. A run with a time limit is cx_runv_timeout until that
    moves here. An APE (unisacc.com) cannot be exec'd directly: run it as
    {"sh", path, ...}. */
+
+/* Pre-spawn hooks: a layer above (stdio) registers a function that runs, in
+   registration order, before every fork this module does. Plain function
+   pointers, no platform branch. Returns 0, or -EINVAL for NULL, -ENOSPC when
+   full; registering the same function twice is a no-op. */
+#define SY_ATSPAWN_MAX 8
+static void (*sy_atspawn_fn[SY_ATSPAWN_MAX])(void);
+static int sy_atspawn_n;
+int sy_atspawn(void (*fn)(void)) {
+    int i;
+    if (!fn) return -EINVAL;
+    for (i = 0; i < sy_atspawn_n; i++) if (sy_atspawn_fn[i] == fn) return 0;
+    if (sy_atspawn_n >= SY_ATSPAWN_MAX) return -ENOSPC;
+    sy_atspawn_fn[sy_atspawn_n++] = fn;
+    return 0;
+}
+static void sy_prespawn(void) {
+    int i;
+    for (i = 0; i < sy_atspawn_n; i++) sy_atspawn_fn[i]();
+}
 
 static int sy_status(int st) {
     if (WIFEXITED(st)) return WEXITSTATUS(st);
@@ -24,6 +46,7 @@ int sy_run(char **argv, char *out, int cap, int *cut) {
     if (cut) *cut = 0;
     if (!argv || !argv[0]) return -EINVAL;
     if (pipe(p) != 0) return -errno;
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { int e = errno; close(p[0]); close(p[1]); return -e; }
     if (pid == 0) {
@@ -56,6 +79,7 @@ int sy_run(char **argv, char *out, int cap, int *cut) {
 int sy_spawn(char **argv) {
     pid_t pid;
     if (!argv || !argv[0]) return -EINVAL;
+    sy_prespawn();
     pid = fork();
     if (pid < 0) return -errno;
     if (pid == 0) {
@@ -84,6 +108,7 @@ int sy_spawn_inherit(char **argv, int keep) {
     if (fcntl(p[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(p[1], F_SETFD, FD_CLOEXEC) != 0) {
         e = errno; close(p[0]); close(p[1]); return -e;
     }
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { e = errno; close(p[0]); close(p[1]); return -e; }
     if (pid == 0) {
@@ -114,6 +139,7 @@ int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
     if (!fn || !fds) return -EINVAL;
     if (pipe(po) != 0) return -errno;
     if (pipe(pe) != 0) { e = errno; close(po[0]); close(po[1]); return -e; }
+    sy_prespawn();
     pid = fork();
     if (pid < 0) { e = errno; close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return -e; }
     if (pid == 0) {
@@ -155,6 +181,242 @@ int sy_pipe(int fds[2]) {
     return 0;
 }
 
+/* ---- the one spawn-options struct (build/std-surface.tsv area process) ---- */
+
+enum {
+    SY_STDIO_INHERIT = -1,        /* keep the caller's descriptor */
+    SY_STDIO_NULL = -2,           /* /dev/null */
+    SY_STDIO_PIPE = -3,           /* a pipe; the parent's end comes back in sy_child_t */
+    SY_SPAWN_ERR_TO_OUT = 8       /* stderr is stdout's descriptor (after the stdout setup) */
+};
+
+typedef struct {
+    char **argv;          /* argv[0] found on PATH unless SY_SPAWN_NO_PATH */
+    char **env;           /* 0: inherit; else the whole environment, NULL-terminated */
+    const char *cwd;      /* 0: the caller's */
+    int in_fd, out_fd, err_fd;   /* an fd, or SY_STDIO_INHERIT/NULL/PIPE */
+    int flags;            /* SY_SPAWN_NO_PATH, SY_SPAWN_ERR_TO_OUT */
+    int pgroup;           /* 0 inherit, -1 a new group, >0 join that group */
+    long deadline_ms;     /* 0: none; else the wait kills the child after this long */
+} sy_spawn_t;
+
+typedef struct {
+    int pid;
+    int in_fd, out_fd, err_fd;   /* parent ends of PIPE stdio, else -1 */
+    long deadline_at_ms;         /* sy_now_ms() at expiry, 0 none */
+    int h;                       /* process group to signal (0: the pid alone) */
+} sy_child_t;
+
+typedef struct { int exited; int code; int sig; int timed_out; int raw; } sy_exit_t;
+
+/* All inherit, no deadline. */
+void sy_spawn_init(sy_spawn_t *o) {
+    if (!o) return;
+    o->argv = 0; o->env = 0; o->cwd = 0;
+    o->in_fd = o->out_fd = o->err_fd = SY_STDIO_INHERIT;
+    o->flags = 0; o->pgroup = 0; o->deadline_ms = 0;
+}
+
+/* A wait status taken apart. 0, or -EINVAL when neither exited nor signalled. */
+int sy_exit_decode(int raw, sy_exit_t *st) {
+    if (!st) return -EINVAL;
+    st->exited = 0; st->code = 0; st->sig = 0; st->timed_out = 0; st->raw = raw;
+    if (WIFEXITED(raw)) { st->exited = 1; st->code = WEXITSTATUS(raw); return 0; }
+    if (WIFSIGNALED(raw)) { st->sig = WTERMSIG(raw); return 0; }
+    return -EINVAL;
+}
+
+/* The shell's view: the code, 128+sig for a signal, 124 for a timeout. */
+int sy_exit_code(const sy_exit_t *st) {
+    if (!st) return -EINVAL;
+    if (st->timed_out) return 124;
+    if (st->exited) return st->code;
+    return 128 + st->sig;
+}
+
+static void syp_dup_null(int fd, int mode) {
+    int dn = open("/dev/null", mode);
+    if (dn >= 0) { dup2(dn, fd); close(dn); }
+}
+
+static void syp_child_exec(const sy_spawn_t *o, int *pi, int *po, int *pe, int ps1) {
+    int e;
+    char **argv = o->argv;
+    if (o->pgroup < 0) sy_setpgid(0, 0);
+    else if (o->pgroup > 0) sy_setpgid(0, o->pgroup);
+    if (o->in_fd == SY_STDIO_NULL) syp_dup_null(0, O_RDONLY);
+    else if (o->in_fd == SY_STDIO_PIPE) dup2(pi[0], 0);
+    else if (o->in_fd >= 0) dup2(o->in_fd, 0);
+    if (o->out_fd == SY_STDIO_NULL) syp_dup_null(1, O_WRONLY);
+    else if (o->out_fd == SY_STDIO_PIPE) dup2(po[1], 1);
+    else if (o->out_fd >= 0) dup2(o->out_fd, 1);
+    if (o->flags & SY_SPAWN_ERR_TO_OUT) dup2(1, 2);
+    else if (o->err_fd == SY_STDIO_NULL) syp_dup_null(2, O_WRONLY);
+    else if (o->err_fd == SY_STDIO_PIPE) dup2(pe[1], 2);
+    else if (o->err_fd >= 0) dup2(o->err_fd, 2);
+    if (o->cwd && chdir(o->cwd) != 0) e = errno;
+    else if (o->env) {
+        const char *path = sy_env("PATH");
+        char buf[4096];
+        const char *a0 = argv[0];
+        int has_slash = 0, al = 0;
+        while (a0[al]) { if (a0[al] == '/') has_slash = 1; al++; }
+        e = ENOENT;
+        if ((o->flags & SY_SPAWN_NO_PATH) || has_slash || !path) { execve(a0, argv, o->env); e = errno; }
+        else {
+            while (*path) {
+                int n = 0, k;
+                while (path[n] && path[n] != ':') n++;
+                if (n + 1 + al + 1 <= (int)sizeof buf) {
+                    for (k = 0; k < n; k++) buf[k] = path[k];
+                    if (n == 0) { buf[0] = '.'; n = 1; }
+                    buf[n] = '/';
+                    for (k = 0; k <= al; k++) buf[n + 1 + k] = a0[k];
+                    execve(buf, argv, o->env);
+                    if (errno != ENOENT && errno != ENOTDIR) e = errno;
+                }
+                path += n;
+                if (*path == ':') path++;
+            }
+        }
+    } else {
+        if (o->flags & SY_SPAWN_NO_PATH) execv(argv[0], argv); else execvp(argv[0], argv);
+        e = errno;
+    }
+    write(ps1, &e, sizeof e);
+    _exit(127);
+}
+
+/* Start a child as O describes. 0 and *C filled, or -errno (-ENOENT no such program,
+   -EINVAL empty argv); a failed chdir or exec comes back as its errno over a close-on-exec
+   pipe, with nothing left open and the child reaped. */
+int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) {
+    int pi[2] = {-1, -1}, po[2] = {-1, -1}, pe[2] = {-1, -1}, ps[2] = {-1, -1}, e = 0, st, i;
+    long k;
+    pid_t pid = -1;
+    if (!o || !c || !o->argv || !o->argv[0]) return -EINVAL;
+    c->pid = 0; c->in_fd = c->out_fd = c->err_fd = -1; c->deadline_at_ms = 0; c->h = 0;
+    if (pipe(ps) != 0) return -errno;
+    if (fcntl(ps[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(ps[1], F_SETFD, FD_CLOEXEC) != 0) e = errno;
+    if (!e && o->in_fd == SY_STDIO_PIPE && pipe(pi) != 0) e = errno;
+    if (!e && o->out_fd == SY_STDIO_PIPE && pipe(po) != 0) e = errno;
+    if (!e && o->err_fd == SY_STDIO_PIPE && !(o->flags & SY_SPAWN_ERR_TO_OUT) && pipe(pe) != 0) e = errno;
+    if (!e) { sy_prespawn(); pid = fork(); if (pid < 0) e = errno; }
+    if (e) {
+        int *all[4];
+        all[0] = ps; all[1] = pi; all[2] = po; all[3] = pe;
+        for (i = 0; i < 4; i++) { if (all[i][0] >= 0) close(all[i][0]); if (all[i][1] >= 0) close(all[i][1]); }
+        return -e;
+    }
+    if (pid == 0) {
+        close(ps[0]);
+        if (pi[1] >= 0) close(pi[1]);
+        if (po[0] >= 0) close(po[0]);
+        if (pe[0] >= 0) close(pe[0]);
+        syp_child_exec(o, pi, po, pe, ps[1]);
+    }
+    close(ps[1]);
+    if (pi[0] >= 0) close(pi[0]);
+    if (po[1] >= 0) close(po[1]);
+    if (pe[1] >= 0) close(pe[1]);
+    do k = read(ps[0], &e, sizeof e); while (k < 0 && errno == EINTR);
+    close(ps[0]);
+    if (k == (long)sizeof e) {
+        if (pi[1] >= 0) close(pi[1]);
+        if (po[0] >= 0) close(po[0]);
+        if (pe[0] >= 0) close(pe[0]);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        return e ? -e : -EIO;
+    }
+    if (pi[1] >= 0) fcntl(pi[1], F_SETFD, FD_CLOEXEC);
+    if (po[0] >= 0) fcntl(po[0], F_SETFD, FD_CLOEXEC);
+    if (pe[0] >= 0) fcntl(pe[0], F_SETFD, FD_CLOEXEC);
+    c->pid = (int)pid; c->in_fd = pi[1]; c->out_fd = po[0]; c->err_fd = pe[0];
+    if (o->deadline_ms > 0) {
+        long now = sy_now_ms();
+        c->deadline_at_ms = (now < 0 ? 0 : now) + o->deadline_ms;
+        if (c->deadline_at_ms == 0) c->deadline_at_ms = 1;
+    }
+    c->h = o->pgroup < 0 ? (int)pid : o->pgroup;
+    return 0;
+}
+
+/* Signal the child (its whole group when it has one). 0, or -errno (-ESRCH once gone). */
+int sy_proc_kill(sy_child_t *c, int sig) {
+    if (!c || c->pid <= 0) return -EINVAL;
+    errno = 0;
+    if (c->h > 0) { if (kill(-(pid_t)c->h, sig) == 0) return 0; if (errno != ESRCH) return -errno; }
+    errno = 0;
+    return kill((pid_t)c->pid, sig) == 0 ? 0 : (errno ? -errno : -EIO);
+}
+
+static int syp_reap(sy_child_t *c, int nohang, sy_exit_t *st) {
+    int raw;
+    pid_t w;
+    for (;;) {
+        w = waitpid((pid_t)c->pid, &raw, nohang ? WNOHANG : 0);
+        if (w == (pid_t)c->pid) break;
+        if (w == 0) return 0;
+        if (errno != EINTR) return -errno;
+    }
+    if (st) sy_exit_decode(raw, st);
+    return 1;
+}
+
+/* 1 reaped (*ST filled), 0 still running, -errno. */
+int sy_proc_try_wait(sy_child_t *c, sy_exit_t *st) {
+    if (!c || c->pid <= 0) return -EINVAL;
+    return syp_reap(c, 1, st);
+}
+
+/* Wait to the end; past the deadline the child (its group) is killed with SIGKILL first and
+   st->timed_out is 1. 0 with *ST filled, or -errno. */
+int sy_proc_wait(sy_child_t *c, sy_exit_t *st) {
+    int r, timed = 0;
+    if (!c || c->pid <= 0) return -EINVAL;
+    if (c->deadline_at_ms > 0) {
+        for (;;) {
+            long now = sy_now_ms();
+            r = syp_reap(c, 1, st);
+            if (r != 0) break;
+            if (now >= c->deadline_at_ms) { sy_proc_kill(c, SIGKILL); timed = 1; break; }
+            sy_sleep_ms(now + 5 > c->deadline_at_ms ? c->deadline_at_ms - now : 5);
+        }
+        if (r == 1) return 0;
+        if (r < 0) return r;
+    }
+    r = syp_reap(c, 0, st);
+    if (r < 0) return r;
+    if (st && timed) st->timed_out = 1;
+    return 0;
+}
+
+/* Close the parent ends of the pipes; neither kills nor waits. */
+int sy_proc_close(sy_child_t *c) {
+    if (!c) return -EINVAL;
+    if (c->in_fd >= 0) close(c->in_fd);
+    if (c->out_fd >= 0) close(c->out_fd);
+    if (c->err_fd >= 0) close(c->err_fd);
+    c->in_fd = c->out_fd = c->err_fd = -1;
+    return 0;
+}
+
+/* spawn + wait + close. PIPE stdio is refused (-EINVAL): nothing would drain it. */
+int sy_proc_run(const sy_spawn_t *o, sy_exit_t *st) {
+    sy_child_t c;
+    int r;
+    if (!o || !st) return -EINVAL;
+    if (o->in_fd == SY_STDIO_PIPE || o->out_fd == SY_STDIO_PIPE || o->err_fd == SY_STDIO_PIPE) return -EINVAL;
+    r = sy_proc_spawn(o, &c);
+    if (r < 0) return r;
+    r = sy_proc_wait(&c, st);
+    sy_proc_close(&c);
+    return r;
+}
+
+/* The parent's pid. */
+int sy_ppid(void) { return (int)getppid(); }
+
 /* Start ARGV in its own process group (sy_kill/sy_killpg take its children too), in directory
    CWD (0: the caller's), stdin from /dev/null, stdout and stderr merged into one pipe whose read
    end is *OUT_FD (close-on-exec in the parent).  FLAGS: SY_SPAWN_STDERR_SPLIT puts stderr into
@@ -162,57 +424,21 @@ int sy_pipe(int fds[2]) {
    execv.  Its pid, or -errno; a failed chdir or exec comes back as its errno (over a close-on-exec
    pipe), with no read end left open and the child reaped. */
 int sy_spawn_pipe(char **argv, const char *cwd, int flags, int *out_fd, int *err_fd) {
-    int po[2], pe[2] = {-1, -1}, ps[2], e = 0, st, split = flags & SY_SPAWN_STDERR_SPLIT;
-    long k;
-    pid_t pid;
+    sy_spawn_t o;
+    sy_child_t c;
+    int split = flags & SY_SPAWN_STDERR_SPLIT, r;
     if (!argv || !argv[0] || !out_fd || (split && !err_fd)) return -EINVAL;
-    if (pipe(ps) != 0) return -errno;
-    if (pipe(po) != 0) { e = errno; close(ps[0]); close(ps[1]); return -e; }
-    if (split && pipe(pe) != 0) { e = errno; close(ps[0]); close(ps[1]); close(po[0]); close(po[1]); return -e; }
-    if (fcntl(ps[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(ps[1], F_SETFD, FD_CLOEXEC) != 0) e = errno;
-    if (!e) {
-        pid = fork();
-        if (pid < 0) e = errno;
-    }
-    if (e) {
-        close(ps[0]); close(ps[1]); close(po[0]); close(po[1]);
-        if (split) { close(pe[0]); close(pe[1]); }
-        return -e;
-    }
-    if (pid == 0) {
-        sy_setpgid(0, 0);   /* The raw syscall, not the prelude's libc forward. */
-        close(ps[0]); close(po[0]);
-        if (split) close(pe[0]);
-        if (!(flags & SY_SPAWN_STDIN_INHERIT)) {
-            int dn = open("/dev/null", O_RDONLY);
-            if (dn >= 0) { dup2(dn, 0); close(dn); }
-        }
-        dup2(po[1], 1);
-        dup2(split ? pe[1] : po[1], 2);
-        close(po[1]);
-        if (split) close(pe[1]);
-        if (cwd && chdir(cwd) != 0) e = errno;
-        else {
-            if (flags & SY_SPAWN_NO_PATH) execv(argv[0], argv); else execvp(argv[0], argv);
-            e = errno;
-        }
-        write(ps[1], &e, sizeof e);
-        _exit(127);
-    }
-    close(ps[1]); close(po[1]);
-    if (split) close(pe[1]);
-    do k = read(ps[0], &e, sizeof e); while (k < 0 && errno == EINTR);
-    close(ps[0]);
-    if (k == (long)sizeof e) {
-        close(po[0]);
-        if (split) close(pe[0]);
-        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-        return e ? -e : -EIO;
-    }
-    fcntl(po[0], F_SETFD, FD_CLOEXEC);
-    *out_fd = po[0];
-    if (split) { fcntl(pe[0], F_SETFD, FD_CLOEXEC); *err_fd = pe[0]; }
-    return (int)pid;
+    sy_spawn_init(&o);
+    o.argv = argv; o.cwd = cwd; o.pgroup = -1;
+    o.flags = flags & SY_SPAWN_NO_PATH;
+    o.in_fd = (flags & SY_SPAWN_STDIN_INHERIT) ? SY_STDIO_INHERIT : SY_STDIO_NULL;
+    o.out_fd = SY_STDIO_PIPE;
+    if (split) o.err_fd = SY_STDIO_PIPE; else o.flags |= SY_SPAWN_ERR_TO_OUT;
+    r = sy_proc_spawn(&o, &c);
+    if (r < 0) return r;
+    *out_fd = c.out_fd;
+    if (split) *err_fd = c.err_fd;
+    return c.pid;
 }
 
 /* Wait for PID with the status taken apart: *EXITED 1 and *CODE the exit code, or *EXITED 0 and

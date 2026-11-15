@@ -87,11 +87,66 @@ static int _u_st_slot(FILE *__u_f) {
     return __u_i;
 }
 #endif
+/* SPEED-17: stdout is buffered through its slot (fd 1 is a slot like any fopen stream).  Mode, once
+   probed: 1 = full (stdout not a terminal), 2 = line (a terminal: flushed at each newline and
+   before stdin is read), 3 = unbuffered (setvbuf _IONBF).  stderr stays unbuffered, but a write
+   to it first flushes stdout, so a 2>&1 capture keeps the order the unbuffered library gave.
+   exit / return from main flush (_u_st_flushall); fork, exec, system, popen and posix_spawn
+   flush first, so a child neither repeats nor overtakes the parent's pending output.  abort and a
+   fatal signal do not flush (C99 7.20.4.1).  Direct write(1,...) bypasses the buffer, as in glibc. */
+_U_SHARED int _u_so_mode _U_ZERO;
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_probe
+static int _u_so_probe(void) {
+#ifdef _WIN32
+    return 2;
+#else
+    unsigned char __u_t[128]; __u_word __u_r;
+#ifdef __APPLE__
+    __u_r = __ioctl(1, 0x40487413L, (char *)__u_t);
+#else
+    __u_r = __ioctl(1, 0x5401L, (char *)__u_t);
+#endif
+    return __u_r < 0 ? 1 : 2;
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_flush
+static void _u_so_flush(void) {
+    int __u_j; __u_j = 0;
+    while (__u_j < _u_st_n) {
+        if (_u_st_fd[__u_j] == 1) { _u_st_wflush(__u_j); return; }
+        __u_j = __u_j + 1;
+    }
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__u_so_put
+static __u_word _u_so_put(FILE *__u_f, const char *__u_p, __u_word __u_n) {
+    int __u_i; __u_word __u_k;
+    if (_u_so_mode == 0) _u_so_mode = _u_so_probe();
+    if (_u_so_mode == 3) return _u_st_raw(1, __u_p, __u_n);
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return _u_st_raw(1, __u_p, __u_n);
+    if (_u_st_wlen[__u_i] + __u_n > _U_BUFSZ) { if (_u_st_wflush(__u_i) != 0) return 0; }
+    if (__u_n >= _U_BUFSZ) return _u_st_raw(1, __u_p, __u_n);
+    _u_st_copy(_u_st_buf + __u_i * _U_BUFSZ + _u_st_wlen[__u_i], __u_p, __u_n);
+    _u_st_wlen[__u_i] = _u_st_wlen[__u_i] + (int)__u_n;
+    if (_u_so_mode == 2) {
+        __u_k = 0;
+        while (__u_k < __u_n) {
+            if (__u_p[__u_k] == 10) { if (_u_st_wflush(__u_i) != 0) return 0; break; }
+            __u_k = __u_k + 1;
+        }
+    }
+    return __u_n;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
 static __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
     if (__u_n <= 0) return 0;
+    if (__u_fd == 1 && (__u_word)__u_f >= _UNISA_STDIO_BASE) return _u_so_put(__u_f, __u_p, __u_n);
+    if (__u_fd == 2 && (__u_word)__u_f >= _UNISA_STDIO_BASE) _u_so_flush();
     if ((__u_word)__u_f >= _UNISA_STDIO_BASE || __u_fd <= 2) return _u_st_raw(__u_fd, __u_p, __u_n);
     __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return _u_st_raw(__u_fd, __u_p, __u_n);
@@ -144,8 +199,7 @@ static int fputs(const char *__u_s, FILE *__u_f) {
 #if !__UNISA_FTRIM_LIBC || __UN_puts
 static int puts(const char *__u_s) {
     if (fputs(__u_s, stdout) < 0) return 0 - 1;
-    _unisa_ch = 10;
-    if (__write(1, &_unisa_ch, 1) != 1) { _u_st_serr[1] = 1; return 0 - 1; }
+    if (fputc(10, stdout) < 0) { _u_st_serr[1] = 1; return 0 - 1; }   /* SPEED-17: through the buffer, so puts keeps its order with printf */
     return 0;
 }
 #endif
@@ -233,6 +287,12 @@ static int ungetc(int __u_c, FILE *__u_f) {
 #if !__UNISA_FTRIM_LIBC || __UN_setvbuf
 static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, __u_word __u_size) {
     if (__u_f == NULL) return 0 - 1;
+    if (_unisa_fd(__u_f) == 1 && (__u_word)__u_f >= _UNISA_STDIO_BASE) {
+        _u_so_flush();
+        if (__u_mode == _IONBF) _u_so_mode = 3;
+        else if (__u_mode == _IOLBF) _u_so_mode = 2;
+        else if (__u_mode == _IOFBF) _u_so_mode = 1;
+    }
     return 0;
 }
 #endif
@@ -263,6 +323,7 @@ static __u_word fread(void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f)
     }
     __u_got = 0;
     if (__u_want > __u_pre) {
+        if (_u_so_mode == 2 && _unisa_fd(__u_f) == 0) _u_so_flush();   /* a prompt without newline shows before the read */
         if (__u_i >= 0 && __u_want - __u_pre < _U_BUFSZ) {
             __u_got = __read(_unisa_fd(__u_f), _u_st_buf + __u_i * _U_BUFSZ, _U_BUFSZ);
             _u_st_bpos[__u_i] = 0; _u_st_blen[__u_i] = __u_got > 0 ? (int)__u_got : 0;
@@ -652,6 +713,7 @@ static int fflush(FILE *__u_f) {
     if (__u_f == NULL) { _u_st_flushall(); return 0; }
     if ((__u_word)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) {
         __u_fd = _unisa_fd(__u_f);
+        if (__u_fd == 1) _u_so_flush();
         if (__u_fd >= 0 && __u_fd <= 2 && _u_st_serr[__u_fd]) return 0 - 1;
         return 0;
     }

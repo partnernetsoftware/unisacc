@@ -193,9 +193,11 @@ static pid_t getpid(void) {
 #if !__UNISA_FTRIM_LIBC || __UN_getppid
 static pid_t getppid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getppid), 0, 0, 0, 0, 0); }
 #endif
+#include <sys/_exit.h>   /* _u_st_flushall: fork and execve write pending stdout first */
 #if !__UNISA_FTRIM_LIBC || __UN_fork
 static pid_t fork(void) {
     __u_word __u_r;
+    _u_st_flushall();   /* SPEED-17: buffered stdout is written once, before the split */
 #ifdef __APPLE__
     long __u_me; __u_me = getpid();
     __u_r = __syscall6(_UNISA_SC(_UNISA_NR_fork), 0, 0, 0, 0, 0);
@@ -210,6 +212,7 @@ static pid_t fork(void) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execve
 static int execve(const char *__u_path, char *const __u_argv[], char *const __u_envp[]) {
+    _u_st_flushall();   /* the image is replaced: pending stdout would be lost */
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (__u_word)__u_path, (__u_word)__u_argv, (__u_word)__u_envp, 0, 0));
 }
 #endif

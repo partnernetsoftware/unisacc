@@ -11,10 +11,13 @@
  * skip-goto has a leak inside a function with goto: no finding, one SKIPPED-GOTO line.
  * The summary line must count the markers, cx-own must exit 1 on the whole set and 0 on the ok-* files.
  * Prints FAIL lines and, last, CHECK_CX_OWN<TAB>assertions=N<TAB>failed=M; rc 1 when M > 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
-#define DIR "out/check-cx-own"
+/* 夹具目录落在 TMPDIR 下、带 PID:不读仓内 out/,两个进程同时跑也不互撞。 */
+static char dir[4400];
 
 typedef struct { const char *name, *text; } Fx;
 static const Fx fx[] = {
@@ -224,23 +227,26 @@ static int count_path(const char *out, long n, const char *path) {
 }
 
 int main(void) {
-    char *out = 0, *out2 = 0, path[128], want[256];
+    char *out = 0, *out2 = 0, path[128], want[256], cmd[4800], wx[256];
     size_t on = 0, on2 = 0;
     int k, rc, rc2, ndf = 0, nuaf = 0, nleak = 0, nfiles = 0;
-    if (cx_run_timeout("mkdir -p " DIR, 50, 0, 0) != 0) { fprintf(stderr, "check-cx-own: cannot make %s\n", DIR); return 2; }
+    if (cx_fmt(dir, sizeof dir, "%s/check-cx-own-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s", dir) || cx_run_timeout(cmd, 50, 0, 0) != 0) { fprintf(stderr, "check-cx-own: cannot make %s\n", dir); return 2; }
     for (k = 0; fx[k].name; k++) {
-        if (cx_fmt(path, sizeof path, DIR "/%s.cx", fx[k].name)) return 2;
+        if (cx_fmt(path, sizeof path, "%s/%s.cx", dir, fx[k].name)) return 2;
         if (cx_write(path, fx[k].text, (size_t)tx_len(fx[k].text, 1 << 16)) != 0) { fprintf(stderr, "check-cx-own: cannot write %s\n", path); return 2; }
         nfiles++;
     }
-    rc = cx_run_timeout("sh ./unisacc.com tools/cx-own.cx -- --skips " DIR "/*.cx", 50, &out, &on);
-    rc2 = cx_run_timeout("sh ./unisacc.com tools/cx-own.cx -- " DIR "/ok-*.cx", 50, &out2, &on2);
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --skips %s/*.cx", dir)) return 2;
+    rc = cx_run_timeout(cmd, 50, &out, &on);
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- %s/ok-*.cx", dir)) return 2;
+    rc2 = cx_run_timeout(cmd, 50, &out2, &on2);
     if (!out || !out2) { fprintf(stderr, "check-cx-own: cx-own produced no output\n"); return 2; }
     for (k = 0; fx[k].name; k++) {
         const char *t = fx[k].text;
         long tn = tx_len(t, 1 << 16), at = 0;
         int line = 1, marks = 0;
-        if (cx_fmt(path, sizeof path, DIR "/%s.cx", fx[k].name)) return 2;
+        if (cx_fmt(path, sizeof path, "%s/%s.cx", dir, fx[k].name)) return 2;
         while (at < tn) {
             long e = tx_chr(t + at, tn - at, '\n'), ln = e < 0 ? tn - at : e, m = tx_find(t + at, ln, "/*!", 3);
             if (m >= 0) {
@@ -260,7 +266,8 @@ int main(void) {
         }
         ck(count_path(out, (long)on, path) == marks, fx[k].name, "exactly the marked findings");
     }
-    ck(has(out, (long)on, "SKIPPED-GOTO\t" DIR "/skip-goto.cx:"), "skip-goto", "a SKIPPED-GOTO line");
+    if (cx_fmt(wx, sizeof wx, "SKIPPED-GOTO\t%s/skip-goto.cx:", dir)) return 2;
+    ck(has(out, (long)on, wx), "skip-goto", "a SKIPPED-GOTO line");
     if (cx_fmt(want, sizeof want, "CX_OWN\tfiles=%d\t", nfiles)) return 2;
     ck(has(out, (long)on, want), "summary", want);
     if (cx_fmt(want, sizeof want, "\tskipped=1\tdouble_free=%d\tuse_after_free=%d\tleak=%d\n", ndf, nuaf, nleak)) return 2;

@@ -87,44 +87,38 @@ static int wr(const char *path, const char *s) {
 }
 
 int main(int argc, char **argv) {
-    char root[4096], com[4400], work[4400], sa[4400], sf[4400], ss[4400], df[4400], pout[4400];
+    char root[4096], com[4400], work[4400], sa[4400], sf[4400], ss[4400], df[4400];
     char *v[8];
-    char *e[1];
+    char *e[2];
     char why[512];
     np_result r;
     int i;
-    if (argc < 2) die("usage: check-errno.cx ROOT");
-    if (cx_fmt(root, sizeof root, "%s", argv[1])) die("root");
+    if (argc >= 2 && argv[1][0]) { if (cx_fmt(root, sizeof root, "%s", argv[1])) die("root"); }
+    else if (sy_cwd(root, sizeof root) < 0) die("cwd");
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
-    if (cx_fmt(work, sizeof work, "%s/out/check-errno", root)) die("work");
+    if (sy_mkdtemp(sy_tmpdir(), "cer-", work, (int)sizeof work)) die("work");
     if (cx_fmt(sa, sizeof sa, "%s/alloc.cx", work)) die("src");
     if (cx_fmt(sf, sizeof sf, "%s/fopen.cx", work)) die("src");
     if (cx_fmt(ss, sizeof ss, "%s/strerror.cx", work)) die("src");
     if (cx_fmt(df, sizeof df, "%s/data.txt", work)) die("data");
-    { struct stat st;
-      if (sy_stat(work, &st) != 0) {
-          if (cx_fmt(pout, sizeof pout, "%s/out", root)) die("out");
-          if (sy_mkdir(pout, 0755) != 0 && sy_stat(pout, &st) != 0) die("mkdir out");
-          if (sy_mkdir(work, 0755) != 0) die("mkdir");
-      } }
     if (wr(sa, src_alloc) || wr(sf, src_fopen) || wr(ss, src_strerror) || wr(df, src_data)) die("write src");
 
     /* the allocator must name ENOMEM, and a success must leave errno alone */
-    i = 0; v[i++] = com; v[i++] = sa; v[i] = 0;
-    e[0] = "UNISACC_RUN_CACHE=0";
+    i = 0; v[i++] = "sh"; v[i++] = com; v[i++] = sa; v[i] = 0;
+    e[0] = "UNISACC_RUN_CACHE=0"; e[1] = 0;
     if (np_run(v, root, e, 60, &r, why, sizeof why)) die(why);
     ck(r.rc == 0 && has(r.out, (long)r.outn, "OK alloc-failure-errno"), "alloc-failure-errno");
     if (r.rc != 0) sy_printf("NOTE\talloc\texit\t%d\t%.*s", r.rc, (int)(r.outn > 200 ? 200 : r.outn), r.out ? r.out : "");
     np_free(&r);
 
     /* control: fopen already agreed with glibc before the fix */
-    i = 0; v[i++] = com; v[i++] = sf; v[i++] = df; v[i] = 0;
+    i = 0; v[i++] = "sh"; v[i++] = com; v[i++] = sf; v[i++] = "--"; v[i++] = df; v[i] = 0;
     if (np_run(v, root, e, 60, &r, why, sizeof why)) die(why);
     ck(r.rc == 0 && has(r.out, (long)r.outn, "OK fopen-errno"), "fopen-errno");
     np_free(&r);
 
     /* control: strerror text */
-    i = 0; v[i++] = com; v[i++] = ss; v[i] = 0;
+    i = 0; v[i++] = "sh"; v[i++] = com; v[i++] = ss; v[i] = 0;
     if (np_run(v, root, e, 60, &r, why, sizeof why)) die(why);
     ck(r.rc == 0 && has(r.out, (long)r.outn, "OK strerror-text"), "strerror-text");
     np_free(&r);

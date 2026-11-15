@@ -1,0 +1,140 @@
+/* tools/check-batch-packages.cx -- build/batch-packages.tsv and `tools/affected.cx --layer`.
+ *
+ *   sh ./unisacc.com tools/check-batch-packages.cx [-- ROOT OUT]
+ *
+ * (1) closure-dump: `affected --closure-dump` ends with CLOSURE_SUMMARY and names every batch once;
+ * (2) table-fresh: `batch-packages-gen --check` on that dump is rc 0 (the checked-in table equals the facts);
+ * (3) tamper-refused: a copy of the table with one batch moved to another layer is rc 1 with DIFF lines;
+ * (4) missing-refused: a table path that does not exist is rc 1 (table-missing);
+ * (5) layer-keeps-all: `affected --layer base --list-only` selects own + all + unknown = batches, own > 0,
+ *     and every batch of layer `all` in the table is in the selection (nothing uncertain is dropped);
+ * (6) layer-all-subset: `--layer all` selects exactly the `all` rows, a subset of (5);
+ * (7) layer-unknown-name: `--layer nosuch` is rc 2;
+ * (8) table-shape: every batch row has nine fields, a known layer and a known ptier.
+ * Run from the repo root. A listing is not a test result; nothing here records a PASS for another batch. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400], prod[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tbatch-packages.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int run(char **v, int secs) {
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    return cx_runv_timeout(v, secs, &last, &lastn);
+}
+/* the number of lines of B whose first field is KEY */
+static long lines_with(const char *b, long n, const char *key) {
+    long i = 0, e, c = 0, kl = tx_len(key, 64);
+    while (i < n) {
+        e = i;
+        while (e < n && b[e] != '\n') e++;
+        if (e - i > kl && tx_prefix(b + i, e - i, key, kl) && b[i + kl] == '\t') c++;
+        i = e + 1;
+    }
+    return c;
+}
+/* the value of "name=" on the last line of the last output that starts with KEY, or -1 */
+static long field(const char *key, const char *name) {
+    long i = 0, e, kl = tx_len(key, 64), nl = tx_len(name, 64), v = -1;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (e - i > kl && tx_prefix(last + i, e - i, key, kl)) {
+            long at = tx_find(last + i, e - i, name, nl);
+            if (at >= 0) { long p = i + at + nl; v = 0; while (p < e && last[p] >= '0' && last[p] <= '9') v = v * 10 + (last[p++] - '0'); }
+        }
+        i = e + 1;
+    }
+    return v;
+}
+
+int main(int argc, char **argv) {
+    char dump[4400], copy[4400], none[4400], *t, *d;
+    size_t tn = 0, dn = 0;
+    int rc;
+    long i, e, nall = 0, kept = 0, shape_bad = 0, nrows = 0;
+    if (argc >= 3) { if (tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096)) || cx_fmt(work, sizeof work, "%s", argv[2])) return 2; }
+    else if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s/check-batch-packages-%d", sy_tmpdir(), sy_pid())) return 2;
+    (void)sy_mkdir(work, 0755);
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || cx_fmt(dump, sizeof dump, "%s/closure.txt", work) ||
+        cx_fmt(copy, sizeof copy, "%s/tampered.tsv", work) || cx_fmt(none, sizeof none, "%s/absent.tsv", work)) return 2;
+
+    {   char *v[] = {"sh", prod, "tools/affected.cx", "--", "--closure-dump", 0};
+        rc = run(v, 45);
+        ck(rc == 0 && last && field("CLOSURE_SUMMARY", "batches=") > 0 &&
+           field("CLOSURE_SUMMARY", "batches=") == lines_with(last, (long)lastn, "B") && !cx_write(dump, last, lastn), "closure-dump");
+    }
+    {   char *v[] = {"sh", prod, "tools/batch-packages-gen.cx", "--", "--check", "--dump", dump, 0};
+        rc = run(v, 30);
+        if (rc && last) sy_printf("%s", last);
+        ck(rc == 0 && field("BATCH_PACKAGES\tok", "batches=") > 0, "table-fresh");
+    }
+    t = cx_read("build/batch-packages.tsv", &tn);
+    if (!t) { sy_printf("FAIL\tbatch-packages.table-readable\n"); sy_printf("CHECK_BATCH_PACKAGES\tfailed=%d\n", failed + 1); return 1; }
+    {   long at = tx_find(t, (long)tn, "\tall\t", 5);   /* one batch out of layer all */
+        char *v[] = {"sh", prod, "tools/batch-packages-gen.cx", "--", "--check", "--dump", dump, "--table", copy, 0};
+        int w = -1;
+        if (at >= 0) { t[at + 1] = 'x'; w = cx_write(copy, t, tn); t[at + 1] = 'a'; }
+        rc = run(v, 30);
+        ck(at >= 0 && !w && rc == 1 && last && tx_find(last, (long)lastn, "DIFF\ttable=", 11) >= 0 && field("BATCH_PACKAGES\tFAIL", "batches=") > 0, "tamper-refused");
+    }
+    {   char *v[] = {"sh", prod, "tools/batch-packages-gen.cx", "--", "--check", "--dump", dump, "--table", none, 0};
+        rc = run(v, 30);
+        ck(rc == 1 && last && tx_find(last, (long)lastn, "DIFF\ttable-missing", 18) >= 0, "missing-refused");
+    }
+    {   char *v[] = {"sh", prod, "tools/affected.cx", "--", "--layer", "base", "--list-only", 0};
+        long b, own, all, unk;
+        rc = run(v, 30);
+        b = field("LAYER_SUMMARY", "batches="); own = field("LAYER_SUMMARY", "own="); all = field("LAYER_SUMMARY", "all="); unk = field("LAYER_SUMMARY", "unknown=");
+        /* every `all` batch row of the table must be a LAYER line of the selection */
+        for (i = 0; i < (long)tn; i = e + 1) {
+            long o1, l1, o2, l2;
+            e = i;
+            while (e < (long)tn && t[e] != '\n') e++;
+            if (e - i < 6 || !tx_prefix(t + i, e - i, "batch\t", 6)) continue;
+            nrows++;
+            if (tx_fields(t + i, e - i, '\t') != 9 || tx_field(t + i, e - i, '\t', 1, &o1, &l1) || tx_field(t + i, e - i, '\t', 2, &o2, &l2)) { shape_bad++; continue; }
+            {   static const char *lay[] = {"base", "ext", "stream", "compiler", "driver", "chain", "release", "all", 0};
+                static const char *pt[] = {"-", "conformance", "integration", "chain", 0};   /* "-": the coarse round leaves ptier unfilled */
+                long o5, l5; int q, okl = 0, okp = 0;
+                for (q = 0; lay[q]; q++) if (tx_same(t + i + o2, l2, lay[q], tx_len(lay[q], 32))) okl = 1;
+                if (!tx_field(t + i, e - i, '\t', 5, &o5, &l5)) for (q = 0; pt[q]; q++) if (tx_same(t + i + o5, l5, pt[q], tx_len(pt[q], 32))) okp = 1;
+                if (!okl || !okp) shape_bad++;
+            }
+            if (l2 == 3 && tx_prefix(t + i + o2, 3, "all", 3)) {
+                char key[400];
+                nall++;
+                if (!cx_fmt(key, sizeof key, "LAYER\t%.*s\tlayer=all\n", (int)l1, t + i + o1) && last && tx_find(last, (long)lastn, key, tx_len(key, sizeof key)) >= 0) kept++;
+            }
+        }
+        ck(rc == 0 && b > 0 && own > 0 && unk >= 0 && b == own + all + unk && nall > 0 && kept == nall && all == nall, "layer-keeps-all");
+        d = last; dn = lastn; last = 0; lastn = 0;
+    }
+    {   char *v[] = {"sh", prod, "tools/affected.cx", "--", "--layer", "all", "--list-only", 0};
+        long b;
+        rc = run(v, 30);
+        b = field("LAYER_SUMMARY", "batches=");
+        ck(rc == 0 && b == nall + field("LAYER_SUMMARY", "unknown=") && field("LAYER_SUMMARY", "own=") == 0 && d && lines_with(d, (long)dn, "LAYER") >= b, "layer-all-subset");
+    }
+    {   char *v[] = {"sh", prod, "tools/affected.cx", "--", "--layer", "nosuch", "--list-only", 0};
+        rc = run(v, 30);
+        ck(rc == 2, "layer-unknown-name");
+    }
+    ck(nrows > 0 && shape_bad == 0, "table-shape");
+    mm_free(d); mm_free(t); mm_free(last);
+    sy_printf("CHECK_BATCH_PACKAGES\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -19,6 +19,7 @@
 #pragma unisa use text.text
 
 static int failed;
+static char base[4096];   /* sy_tmpdir()/check-commit-own-PID: the throwaway clone's parent */
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-commit-own.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-commit-own.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-commit-own: REFUSE %s\n", s); sy_exit(2); }
 
@@ -37,11 +38,11 @@ static int sh(const char *script, char *out, int cap) {
 static void case_(const char *name, int lock_s) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
-        "cd out/check-commit-own/clone && printf 'n\\n' > %s.txt && "
+        "cd %s/clone && printf 'n\\n' > %s.txt && "
         "if [ %d -gt 0 ]; then ( touch .git/index.lock; sleep %d; rm -f .git/index.lock ) & sleep 0.3; fi; "
         "sh ./unisacc.com tools/commit-own.cx -- -m %s --whole %s.txt 2>&1 | tail -1; wait; "
         "echo STATUS; git status --short -- %s.txt; echo ENTRY; git ls-files -s -- %s.txt | cut -c1-6",
-        name, lock_s, lock_s, name, name, name, name)) die("script");
+        base, name, lock_s, lock_s, name, name, name, name)) die("script");
     sh(script, out, sizeof out);
     {   const char *a = "index_unsynced=0", *b = "STATUS\nENTRY\n100644";
         ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 && tx_find(out, tx_len(out, sizeof out), b, tx_len(b, 64)) >= 0, name); }
@@ -51,10 +52,10 @@ static void case_(const char *name, int lock_s) {
 static void case_symlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
-        "cd out/check-commit-own/clone && ln -sf target.c tools/link.c && "
+        "cd %s/clone && ln -sf target.c tools/link.c && "
         "sh ./unisacc.com tools/commit-own.cx -- -m symlink --whole tools/link.c 2>&1 | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/link.c | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/link.c",
-        0, 0, 0, 0, 0)) die("script");
+        base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     {   const char *a = "index_unsynced=0", *m = "MODE\n120000", *t = "TARGET\ntarget.c";
         ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 &&
@@ -66,10 +67,10 @@ static void case_symlink(void) {
 static void case_dirlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
-        "cd out/check-commit-own/clone && mkdir -p realdir && ln -sf realdir tools/dlink && "
+        "cd %s/clone && mkdir -p realdir && ln -sf realdir tools/dlink && "
         "sh ./unisacc.com tools/commit-own.cx -- -m dirlink --whole tools/dlink 2>&1 | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/dlink | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/dlink",
-        0, 0, 0, 0, 0)) die("script");
+        base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     {   const char *a = "index_unsynced=0", *m = "MODE\n120000", *t = "TARGET\nrealdir";
         ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 &&
@@ -82,19 +83,19 @@ static void case_keyed(void) {
     char out[8192], script[4096];
     /* (1) --keyed A-B: A's row is removed in the work tree by someone else and A-B is edited; A must stay in the commit. */
     if (cx_fmt(script, sizeof script,
-        "cd out/check-commit-own/clone && printf 'x\\nA\\tsee A-B\\nA-B\\tone\\ny\\n' > k1.tsv && git add k1.tsv && git commit -qm k1 -- k1.tsv && "
+        "cd %s/clone && printf 'x\\nA\\tsee A-B\\nA-B\\tone\\ny\\n' > k1.tsv && git add k1.tsv && git commit -qm k1 -- k1.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\n' > k1.tsv && "
         "sh ./unisacc.com tools/commit-own.cx -- -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
-        0, 0, 0, 0, 0)) die("script");
+        base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA\tsee A-B\n", 11) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) >= 0 &&
        tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) < 0, "keyed-AB-keeps-A-row");
     /* (2) --keyed A: A-B is edited by someone else; only the new A row is added. */
     if (cx_fmt(script, sizeof script,
-        "cd out/check-commit-own/clone && printf 'x\\nA-B\\tone\\ny\\nz\\n' > k2.tsv && git add k2.tsv && git commit -qm k2 -- k2.tsv && "
+        "cd %s/clone && printf 'x\\nA-B\\tone\\ny\\nz\\n' > k2.tsv && git add k2.tsv && git commit -qm k2 -- k2.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\nz\\nA\\tnew\\n' > k2.tsv && "
         "sh ./unisacc.com tools/commit-own.cx -- -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
-        0, 0, 0, 0, 0)) die("script");
+        base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA\tnew\n", 7) >= 0 &&
        tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) < 0, "keyed-A-leaves-AB-row");
@@ -102,9 +103,12 @@ static void case_keyed(void) {
 
 int main(void) {
     char out[8192];
-    if (sh("rm -rf out/check-commit-own && mkdir -p out/check-commit-own && git clone -q --local . out/check-commit-own/clone && "
-           "cp tools/commit-own.cx tools/own-diff.cx out/check-commit-own/clone/tools/ && "
-           "mkdir -p out/check-commit-own/clone/out && cd out/check-commit-own/clone && git config user.email t@t && git config user.name t", out, sizeof out) != 0)
+    char prep[2048], clone[4400];
+    if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
+    if (cx_fmt(prep, sizeof prep, "rm -rf %s && mkdir -p %s && git clone -q --local . %s && "
+           "cp tools/commit-own.cx tools/own-diff.cx tools/on-change.cx %s/tools/ && "
+           "cd %s && git config user.email t@t && git config user.name t", base, base, clone, clone, clone)) die("path");
+    if (sh(prep, out, sizeof out) != 0)
         die("cannot prepare the clone");
     /* The product into the clone: which files make up "the product" is a layout question, so ask
        productpkg rather than naming unisacc.com.dev here. A hardcoded `cp -r unisacc.com.dev`
@@ -112,7 +116,7 @@ int main(void) {
        PE-only. */
     {   char root[4400];
         if (sy_cwd(root, sizeof root) < 0) die("cwd");
-        if (pp_copy_product(root, "out/check-commit-own/clone")) die("cannot copy the product into the clone");
+        if (pp_copy_product(root, clone)) die("cannot copy the product into the clone");
     }
     case_("nolock", 0);
     case_("lock", 4);
@@ -121,13 +125,28 @@ int main(void) {
     case_keyed();
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
-            "cd out/check-commit-own/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only"))
+            "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
+            "sh ./unisacc.com tools/commit-own.cx -- -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only", base))
             die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "cached-foreign", 14) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "CACHED\nforeign.txt", 18) >= 0, "foreign-staged-kept");
     }
+    {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */
+        if (cx_fmt(script, sizeof script,
+            "cd %s/clone && printf 'int main(void){return 0;}\\n' > tools/zz-pend.cx && "
+            "sh ./unisacc.com tools/commit-own.cx -- -m pend --whole tools/zz-pend.cx 2>&1; echo RC=$?", base)) die("script");
+        sh(script, out, sizeof out);
+        ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=tool-index", 26) >= 0 &&
+           tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "pending-derived-tool-index");
+        if (cx_fmt(script, sizeof script,
+            "cd %s/clone && printf 'q\\n' > zz-plain.txt && "
+            "sh ./unisacc.com tools/commit-own.cx -- -m plain --whole zz-plain.txt 2>&1; echo RC=$?", base)) die("script");
+        sh(script, out, sizeof out);
+        ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=", 16) < 0 &&
+           tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "no-pending-derived-for-unrelated");
+    }
+    {   char rm[4500]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", base)) sh(rm, out, sizeof out); }
     sy_printf("CHECK_COMMIT_OWN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

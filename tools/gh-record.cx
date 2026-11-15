@@ -1,0 +1,160 @@
+/* tools/gh-record.cx -- record read-only gh calls as a tape, replay them for fixtures.  No network of its own:
+ * record runs only the gh command prefix it is given (--gh CMD; the first version is used with an injected fake gh).
+ *
+ *   gh-record.cx -- record --tape DIR --gh CMD [--day N] -- GH_ARGV...
+ *   gh-record.cx -- replay --tape DIR [--max-age-days N] [--today N] -- GH_ARGV...
+ *
+ * record: refuses (rc 2, nothing run, nothing written) every call that is not on the read-only allowlist:
+ *   release view|list, run view|list, workflow view|list, repo view, auth status, --version, and api without a
+ *   write marker.  api is a write when -X/--method (also -XPOST, --method=POST) names anything but GET, or when
+ *   -f -F --field --raw-field --input is present (gh turns those into POST).  Everything else (release
+ *   create/upload/edit/delete, pr/issue/repo mutations, unknown subcommands) is refused.  Otherwise it runs
+ *   "CMD --version" once for the gh version line, runs CMD GH_ARGV, and stores argv, rc, stdout, version and the
+ *   recording day (days since 1970-01-01, --day overrides for tests) in DIR/<sha256 of argv>.tape.  Exit 0 when
+ *   recorded, whatever rc gh had (the rc is part of the tape).
+ * replay: argv match is EXACT: same count, same bytes, same order, no normalisation (the key is the sha256 of the
+ *   argv joined with 0x1f and the stored argv is compared again).  A tape older than --max-age-days (default 30)
+ *   prints "GH_TAPE STALE" on stderr and exits 1; no tape prints "GH_TAPE NO_TAPE" on stderr and exits 2;
+ *   otherwise stdout is the recorded stdout and the exit is the recorded rc.  A write-class argv is refused rc 2
+ *   here too. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sysx.poll
+#pragma unisa use sys.posix
+
+static void cp(char *d, const char *s, size_t n) { while (n--) *d++ = *s++; }
+
+static int strcasecmp(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) { int x = *a | 32, y = *b | 32; if (x != y) return x - y; }
+    return *a - *b;
+}
+
+static int is_write_class(int n, char **a) {
+    int i;
+    if (n < 1) return 1;
+    if (n == 1) return strcmp(a[0], "--version") != 0;
+    if (!strcmp(a[0], "release") || !strcmp(a[0], "run") || !strcmp(a[0], "workflow"))
+        return strcmp(a[1], "view") && strcmp(a[1], "list");
+    if (!strcmp(a[0], "repo")) return strcmp(a[1], "view") != 0;
+    if (!strcmp(a[0], "auth")) return strcmp(a[1], "status") != 0;
+    if (!strcmp(a[0], "api")) {
+        for (i = 1; i < n; i++) {
+            const char *s = a[i];
+            if (!strcmp(s, "-X") || !strcmp(s, "--method")) { if (i + 1 >= n || strcasecmp(a[i + 1], "GET")) return 1; }
+            else if (!strncmp(s, "-X", 2)) { if (strcasecmp(s + 2, "GET")) return 1; }
+            else if (!strncmp(s, "--method=", 9)) { if (strcasecmp(s + 9, "GET")) return 1; }
+            else if (!strcmp(s, "-f") || !strcmp(s, "-F") || !strcmp(s, "--field") || !strcmp(s, "--raw-field") || !strcmp(s, "--input")) return 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static void tape_path(char *p, size_t cap, const char *dir, int n, char **a) {
+    char key[16384]; size_t k = 0; int i; char hex[65];
+    for (i = 0; i < n; i++) { size_t l = strlen(a[i]); if (k + l + 1 >= sizeof key) exit(2); cp(key + k, a[i], l); k += l; key[k++] = 0x1f; }
+    cx_sha256_hex(key, k, hex);
+    if (cx_fmt(p, cap, "%s/%.32s.tape", dir, hex)) exit(2);
+}
+
+/* run argv, drain stdout into a malloc buffer, 50 s deadline (process group killed past it) */
+static int run_capture(char **argv, char **out, size_t *olen) {
+    int po = -1, pid, ex = 0, code = 0, sig = 0, open_o = 1;
+    long deadline = sy_now_ms() + 50000;
+    size_t cap = 4096, n = 0; char *buf = malloc(cap), chunk[8192];
+    pid = sy_spawn_pipe(argv, 0, 0, &po, 0);
+    if (pid < 0 || !buf) return -1;
+    while (open_o) {
+        sy_pollfd_t p[1]; long left = deadline - sy_now_ms(); int r;
+        if (left <= 0) { sy_killpg(pid, 9); sy_signal(pid, 9); break; }
+        p[0].fd = po; p[0].events = SY_POLLIN; p[0].revents = 0;
+        r = sy_poll(p, 1, left > 200 ? 200 : left);
+        if (r < 0) break;
+        if (p[0].revents) {
+            long g = sy_read(po, chunk, sizeof chunk);
+            if (g > 0) { if (n + g + 1 > cap) { cap = (n + g + 1) * 2; buf = realloc(buf, cap); if (!buf) return -1; } cp(buf + n, chunk, g); n += g; }
+            else open_o = 0;
+        }
+    }
+    sy_close(po);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    buf[n] = 0; *out = buf; *olen = n;
+    return ex ? code : 128 + sig;
+}
+
+static const char *opt(int argc, char **argv, const char *name, int *stop) {
+    int i; for (i = 0; i < *stop; i++) if (!strcmp(argv[i], name) && i + 1 < *stop) return argv[i + 1];
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int sep = argc, i, n; char **ga; const char *tape, *gh, *day;
+    char p[4400];
+    if (argc < 2) { fprintf(stderr, "usage: record|replay --tape DIR ... -- GH_ARGV\n"); return 2; }
+    for (i = 2; i < argc; i++) if (!strcmp(argv[i], "--")) { sep = i; break; }
+    ga = argv + sep + 1; n = sep < argc ? argc - sep - 1 : 0;
+    tape = opt(argc, argv, "--tape", &sep);
+    if (!tape) { fprintf(stderr, "gh-record: --tape DIR required\n"); return 2; }
+    for (i = 0; i < n; i++) if (strchr(ga[i], '\n')) { fprintf(stderr, "gh-record: newline in argv refused\n"); return 2; }
+    if (is_write_class(n, ga)) { fprintf(stderr, "gh-record: REFUSE write-class or unlisted gh call\n"); return 2; }
+    tape_path(p, sizeof p, tape, n, ga);
+    day = opt(argc, argv, "--day", &sep);
+    if (!strcmp(argv[1], "record")) {
+        const char *gc = opt(argc, argv, "--gh", &sep);
+        char *av[64], *vo = 0, *o = 0, ver[256]; size_t vl, ol; int rc, k = 0, vrc;
+        char *w, line[16400]; char *gcopy; char hdr[512]; long d;
+        char *buf; size_t bl, hl; (void)bl;
+        if (!gc || n > 40) { fprintf(stderr, "gh-record: --gh CMD required\n"); return 2; }
+        gcopy = strdup(gc);
+        for (w = gcopy; *w && k < 8;) {
+            while (*w == ' ') w++;
+            if (!*w) break;
+            av[k++] = w;
+            while (*w && *w != ' ') w++;
+            if (*w) *w++ = 0;
+        }
+        { int base = k; av[k++] = "--version"; av[k] = 0;
+          vrc = run_capture(av, &vo, &vl); if (vrc < 0) { fprintf(stderr, "gh-record: gh --version failed to run\n"); return 2; }
+          { char *e = strchr(vo, '\n'); if (e) *e = 0; } cx_fmt(ver, sizeof ver, "%s", vo);
+          k = base; for (i = 0; i < n; i++) av[k++] = ga[i]; av[k] = 0; }
+        rc = run_capture(av, &o, &ol);
+        if (rc < 0) { fprintf(stderr, "gh-record: gh failed to run\n"); return 2; }
+        d = day ? atol(day) : sy_wall_s() / 86400;
+        sy_mkdir(tape, 0755);
+        hl = 0; buf = malloc(ol + 20000);
+        hl += cx_fmt(hdr, sizeof hdr, "GHTAPE1\nday=%ld\nrc=%d\nghver=%s\nargc=%d\n", d, rc, ver, n) ? 0 : strlen(hdr);
+        cp(buf, hdr, hl);
+        for (i = 0; i < n; i++) { cx_fmt(line, sizeof line, "a=%s\n", ga[i]); cp(buf + hl, line, strlen(line)); hl += strlen(line); }
+        cx_fmt(line, sizeof line, "len=%lu\n", (unsigned long)ol); cp(buf + hl, line, strlen(line)); hl += strlen(line);
+        cp(buf + hl, o, ol); hl += ol;
+        if (cx_write(p, buf, hl)) { fprintf(stderr, "gh-record: write %s failed\n", p); return 2; }
+        printf("GH_TAPE RECORDED rc=%d day=%ld %s\n", rc, d, p);
+        return 0;
+    }
+    if (!strcmp(argv[1], "replay")) {
+        const char *ma = opt(argc, argv, "--max-age-days", &sep), *td = opt(argc, argv, "--today", &sep);
+        size_t len = 0; char *s = cx_read(p, &len), *q, *e; long d, today, rc, ol; int ac;
+        if (!s) { fprintf(stderr, "GH_TAPE NO_TAPE\n"); return 2; }
+        q = s;
+#define NEXT(pfx) do { e = memchr(q, '\n', len - (q - s)); if (!e || strncmp(q, pfx, strlen(pfx))) goto bad; *e = 0; q += 0; } while (0)
+        NEXT("GHTAPE1"); q = e + 1;
+        NEXT("day="); d = atol(q + 4); q = e + 1;
+        NEXT("rc="); rc = atol(q + 3); q = e + 1;
+        NEXT("ghver="); q = e + 1;
+        NEXT("argc="); ac = atoi(q + 5); q = e + 1;
+        if (ac != n) goto bad;
+        for (i = 0; i < n; i++) { NEXT("a="); if (strcmp(q + 2, ga[i])) goto bad; q = e + 1; }
+        NEXT("len="); ol = atol(q + 4); q = e + 1;
+        if (ol < 0 || (size_t)(q - s) + ol > len) goto bad;
+        today = td ? atol(td) : sy_wall_s() / 86400;
+        if (today - d > (ma ? atol(ma) : 30)) { fprintf(stderr, "GH_TAPE STALE age_days=%ld\n", today - d); return 1; }
+        fwrite(q, 1, ol, stdout); fflush(stdout);
+        return (int)rc;
+bad:    fprintf(stderr, "GH_TAPE CORRUPT %s\n", p); return 2;
+    }
+    fprintf(stderr, "gh-record: unknown subcommand %s\n", argv[1]);
+    return 2;
+}

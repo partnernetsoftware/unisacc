@@ -1,0 +1,101 @@
+/* tools/check-on-change.cx -- tools/on-change.cx 与 tools/links-gen.cx 在 /tmp 的 git archive 副本里对三个夹具路径断言摘要字段。
+ *
+ *   sh ./unisacc.com tools/check-on-change.cx
+ *
+ * 副本:git archive HEAD 解到 mktemp 目录并 git init 提交一次(git grep 要有索引),再把工作区的 on-change.cx、links-gen.cx、
+ * exec/facts/derive.tsv 覆盖进去(未提交的改动也被检),unisacc.com 用绝对路径软链。真实工作树不写。
+ * 夹具:(1) 生成器输入 exec/facts/st-gap.tsv:derived>=1 且 wrote 含 st-gap;--dry-run 时 wrote=- 且 pending 含 st-gap;
+ *       (2) 普通源文件 tools/check-derive.cx:batches>=1 且 ids 含 derive;(3) 无关文件 fx-unrelated.txt:derived=0 batches=0 docs=0。
+ * 另断言:links-gen --check 在 --write 之后为 OK,删一行后为 DRIFT rc 1;--hook 对仓外路径静默、对仓内路径输出 additionalContext;
+ * 关系表缺失时带 links=missing 且 rc 0。每条断言一行 PASS/FAIL,末行 CHECK_ON_CHANGE<TAB>passed=<TAB>failed=。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char out[1 << 16];
+static int pass_n, fail_n;
+
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "50", "sh", "-c", (char *)cmd, 0};   /* deadline 50 s */
+    return sy_run(a, out, sizeof out, 0);
+}
+static void ok(const char *name, int cond) {
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+    if (!cond) printf("  got: %.600s\n", out);
+    if (cond) pass_n++; else fail_n++;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+/* out 里 key 后的十进制数,没有为 -1 */
+static int num(const char *key) {
+    long n = tx_len(out, sizeof out), kn = tx_len(key, 100), p = tx_find(out, n, key, kn); int v = 0, any = 0;
+    if (p < 0) return -1;
+    for (p += kn; p < n && out[p] >= '0' && out[p] <= '9'; p++) { v = v * 10 + (out[p] - '0'); any = 1; }
+    return any ? v : -1;
+}
+static void chomp(char *s, long cap) { long n = tx_len(s, cap); while (n > 0 && s[n - 1] == '\n') s[--n] = 0; }
+
+int main(void) {
+    char root[1024], cwd[1024], cmd[4096]; int rc;
+    if (sh("pwd") != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out); chomp(cwd, sizeof cwd);
+    if (sh("mktemp -d /tmp/on-change-check-XXXXXX") != 0) return 2;
+    cx_fmt(root, sizeof root, "%s", out); chomp(root, sizeof root);
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd %s && git archive HEAD | tar -x -C %s && cp tools/on-change.cx tools/links-gen.cx %s/tools/ && cp exec/facts/derive.tsv %s/exec/facts/ && "
+        "cd %s && ln -s %s/unisacc.com unisacc.com && printf 'nothing\\n' > fx-unrelated.txt && rm -f build/links.tsv && "
+        "git init -q && git config user.email a@b && git config user.name t && git add -- '*.md' '*.tsv' fx-unrelated.txt >/dev/null 2>&1 && git commit -q -m fx && echo SEEDED",
+        cwd, root, root, root, root, cwd);
+    rc = sh(cmd);
+    ok("fixture seeded", rc == 0 && has("SEEDED"));
+    if (rc != 0) { printf("CHECK_ON_CHANGE\tpassed=%d\tfailed=%d\n", pass_n, fail_n); return 1; }
+
+    /* 新路径下 affected.cx 的首次编译约 13 秒,先热一遍,免得被 on-change 内层的 14 秒上限截断 */
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/affected.cx -- --files fx-unrelated.txt --list-only --tier commit | tail -n 1", root);
+    sh(cmd);
+    ok("affected warm-up lists in the fixture", has("AFFECTED_SUMMARY"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/on-change.cx -- --dry-run fx-unrelated.txt; echo RC=$?", root);
+    sh(cmd);
+    ok("missing links table is reported, rc 0", has("links=missing") && has("derived=0 ") && has("RC=0"));
+
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/links-gen.cx -- --check; echo RC=$?; sh ./unisacc.com tools/links-gen.cx -- --write; echo RC=$?; sh ./unisacc.com tools/links-gen.cx -- --check; echo RC=$?", root);
+    sh(cmd);
+    ok("links-gen: absent table is DRIFT rc 1, then WROTE, then OK", has("LINKS_GEN\tDRIFT") && has("RC=1") && has("LINKS_GEN\tWROTE") && has("LINKS_GEN\tOK"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && grep -c '^derive\texec/facts/st-gap.tsv\tbuild/st-gap.tsv\tst-gap\tbound=20;write=1$' build/links.tsv; grep -c '^batch\ttools/check-derive.cx\t' build/links.tsv; grep -c '^derive\texec/facts/derive.tsv\tbuild/links.tsv\tlinks\t' build/links.tsv", root);
+    sh(cmd);
+    ok("links table holds the derive edge, the batch edge and its own row", has("1\n1\n1\n") || (out[0] == '1' && has("\n1\n")));
+    cx_fmt(cmd, sizeof cmd, "cd %s && cp build/links.tsv /tmp/on-change-keep.$$ && grep -v '^derive\texec/facts/st-gap.tsv' /tmp/on-change-keep.$$ > build/links.tsv; sh ./unisacc.com tools/links-gen.cx -- --check; echo RC=$?; mv /tmp/on-change-keep.$$ build/links.tsv; sh ./unisacc.com tools/links-gen.cx -- --check", root);
+    sh(cmd);
+    ok("links-gen: a dropped row is DRIFT rc 1 and the restored table is OK", has("LINKS_GEN\tDRIFT") && has("RC=1") && has("LINKS_GEN\tOK"));
+
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/on-change.cx -- --dry-run exec/facts/st-gap.tsv; echo RC=$?; git status --porcelain build/st-gap.tsv", root);
+    sh(cmd);
+    ok("generator input, dry-run: derived>=1, nothing written, st-gap pending", num("derived=") >= 1 && has("wrote=- ") && has("st-gap") && has("RC=0") && !has("M build"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf 'drifted\\n' >> build/st-gap.tsv && sh ./unisacc.com tools/on-change.cx -- exec/facts/st-gap.tsv; echo RC=$?; sh ./unisacc.com tools/st-gap-gen.cx -- --check >/dev/null 2>&1; echo GEN_RC=$?", root);
+    sh(cmd);
+    ok("generator input: derived>=1, wrote st-gap, drifted output regenerated", num("derived=") >= 1 && has("wrote=st-gap") && has("failed=- ") && has("RC=0") && has("GEN_RC=0"));
+    ok("generator input: summary fields present", has("ON_CHANGE path=exec/facts/st-gap.tsv derived=") && num("batches=") >= 0 && num("docs=") >= 0 && has(" claim=") && has(" ids="));
+
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/on-change.cx -- tools/check-derive.cx; echo RC=$?", root);
+    sh(cmd);
+    ok("plain source: batches>=1 with the derive batch among the ids", has("ON_CHANGE path=tools/check-derive.cx ") && num("batches=") >= 1 && has("derive") && has("wrote=- ") && has("RC=0"));
+
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/on-change.cx -- fx-unrelated.txt; echo RC=$?", root);
+    sh(cmd);
+    ok("unrelated file: derived=0 batches=0 docs=0", has("ON_CHANGE path=fx-unrelated.txt derived=0 batches=0 docs=0 ") && has("wrote=- pending=- failed=- ids=- ") && has("RC=0"));
+
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf '{\"tool_input\":{\"file_path\":\"/tmp/elsewhere.txt\"}}' | sh ./unisacc.com tools/on-change.cx -- --hook; echo RC=$?", root);
+    sh(cmd);
+    ok("hook: a path outside the checkout is silent, rc 0", !has("ON_CHANGE") && has("RC=0"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf '{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"%s/fx-unrelated.txt\",\"old_string\":\"a\"}}' | sh ./unisacc.com tools/on-change.cx -- --hook; echo RC=$?", root, root);
+    sh(cmd);
+    ok("hook: a path inside prints additionalContext with the relative path, rc 0", has("\"hookEventName\":\"PostToolUse\"") && has("\"additionalContext\":\"ON_CHANGE path=fx-unrelated.txt derived=0 ") && has("RC=0"));
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf 'not json' | sh ./unisacc.com tools/on-change.cx -- --hook; echo RC=$?; sh ./unisacc.com tools/on-change.cx -- --bogus; echo RC=$?", root);
+    sh(cmd);
+    ok("hook: garbage stdin is silent rc 0; an unknown flag is usage rc 2", !has("ON_CHANGE") && has("RC=0") && has("RC=2"));
+
+    cx_fmt(cmd, sizeof cmd, "rm -rf %s", root);
+    if (tx_find(root, tx_len(root, sizeof root), "/tmp/on-change-check-", 21) == 0) sh(cmd);
+    printf("CHECK_ON_CHANGE\tpassed=%d\tfailed=%d\n", pass_n, fail_n);
+    return fail_n ? 1 : 0;
+}

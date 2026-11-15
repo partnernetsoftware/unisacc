@@ -1,0 +1,46 @@
+/* tools/check-links-gen.cx -- 本检出的 build/links.tsv 成形、tools/links-gen.cx 的裁决成形(只读;一致性归 derive --check 的 links 项)。
+ *
+ *   sh ./unisacc.com tools/check-links-gen.cx
+ *
+ * 断言:links-gen --check 给出 OK rc 0 或 DRIFT rc 1 且 derive、batch 边数都不为 0;表首行是 # links v1 注释,其余每行恰五列、
+ * kind 只有 derive 与 batch;用法错 rc 2。漂移与删行的负控在 tools/check-on-change.cx 的 /tmp 副本里做。
+ * 每条断言一行 PASS/FAIL,末行 CHECK_LINKS_GEN<TAB>passed=<TAB>failed=。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static char out[1 << 14];
+static int pass_n, fail_n;
+static void ok(const char *name, int cond) {
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+    if (cond) pass_n++; else fail_n++;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 1000)) >= 0; }
+
+int main(void) {
+    char *chk[] = {"./tools/bound", "20", "sh", "./unisacc.com", "tools/links-gen.cx", "--", "--check", 0};
+    char *bad[] = {"./tools/bound", "20", "sh", "./unisacc.com", "tools/links-gen.cx", "--", "--bogus", 0};
+    size_t n = 0; char *b; long at = 0; int rc, lines = 0, shape = 1, nd = 0, nb = 0;
+    rc = sy_run(chk, out, sizeof out, 0);
+    /* 一致性由 derive --check 的 links 项把关;这里只认生成器给出成形的裁决(登记新批次的瞬间表必然先漂移) */
+    ok("links-gen --check gives a well-formed verdict (OK rc 0 or DRIFT rc 1)", (rc == 0 && has("LINKS_GEN\tOK\t")) || (rc == 1 && has("LINKS_GEN\tDRIFT\t")));
+    ok("both edge kinds are counted", !has("derive=0\t") && !has("batch=0\t") && has("derive=") && has("batch="));
+    rc = sy_run(bad, out, sizeof out, 0);
+    ok("unknown flag is usage rc 2", rc == 2 && has("usage"));
+    b = cx_read("build/links.tsv", &n);
+    ok("table readable with the v1 header", b && n > 12 && mm_same(b, "# links v1: ", 12));
+    while (b && at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, k; int tabs = 0; const char *l = b + at;
+        at += ln + 1; lines++;
+        if (lines == 1) continue;
+        for (k = 0; k < ln; k++) if (l[k] == '\t') tabs++;
+        if (tabs != 4) shape = 0;
+        if (ln > 7 && mm_same(l, "derive\t", 7)) nd++;
+        else if (ln > 6 && mm_same(l, "batch\t", 6)) nb++;
+        else shape = 0;
+    }
+    ok("every row has five fields and a known kind", shape && nd > 0 && nb > 0);
+    printf("CHECK_LINKS_GEN\tpassed=%d\tfailed=%d\n", pass_n, fail_n);
+    return fail_n ? 1 : 0;
+}

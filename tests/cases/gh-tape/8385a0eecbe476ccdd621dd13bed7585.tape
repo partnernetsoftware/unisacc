@@ -1,0 +1,32 @@
+GHTAPE1
+day=20770
+rc=0
+ghver=gh version 2.45.0 (2024-03-04)
+argc=9
+a=release
+a=view
+a=v0.0.59
+a=-R
+a=partnernetsoftware/unisacc
+a=--json
+a=isDraft,tagName,targetCommitish,assets
+a=--jq
+a=.isDraft, .tagName, .targetCommitish, .assets[].name
+len=303
+false
+v0.0.59
+fbdc99ca8921514fca927781a85ec93fbb5a82ec
+build.json
+pkg.bin
+SHA256SUMS
+slice-win-arm64
+standalone-sha256.tsv
+unisacc-0.0.59-win-arm64.zip
+unisacc-lnx64-arm
+unisacc-lnx64-x86
+unisacc-osx64-arm
+unisacc-osx64-x86
+unisacc-win64-arm.exe
+unisacc-win64-x86.exe
+unisacc.com
+unisacc.com.build.json

@@ -1,0 +1,69 @@
+/* tools/check-stable-gaps.cx -- contract check for tools/stable-gaps.cx.
+ *   sh ./unisacc.com tools/check-stable-gaps.cx -- ABS_WORK
+ * Small fixture tables under WORK/stable-gaps-fixture-PID cover S2 S4 S10 S13; the real tree is only
+ * checked for the summary line shape.  Output PASS/FAIL and CHECK_STABLE_GAPS; exit 0 iff failed==0. */
+#pragma unisa use cxlib.toolprep
+#define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "check-stable-gaps: format error\n"); exit(2); } } while (0)
+static int failed, checks;
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tstable-gaps.%s\n", ok ? "PASS" : "FAIL", n); }
+static int sh(const char *cmd, char *out, int cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}, *text = 0;
+    size_t n = 0, i;
+    int rc = cx_runv_timeout(v, 50, &text, &n);
+    for (i = 0; text && i < n && (int)i < cap - 1; i++) out[i] = text[i];
+    out[text && (int)n < cap - 1 ? n : (size_t)(text ? cap - 1 : 0)] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static char fix[2600], cmd[6000], native[2800], out[200000];
+static int put(const char *path, const char *text) { return cx_write(path, text, strlen(text)); }
+static int has(const char *o, const char *s) { return strstr(o, s) != 0; }
+int main(int argc, char **argv) {
+    char root[2048], why[256], p[2900];
+    int rc;
+    const char *ss =
+        "# std-surface v2\n"
+        "fx.a\tf_one\tint f_one(void)\tx\tnone\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\t-\n"
+        "fx.a\tf_two\tint f_two(void)\tx\tnone\timpl\tunverified\timpl\tnew\t-\tpre\t0.1.0\tnone\t-\n";
+    if (argc != 2 || argv[1][0] != '/' || strlen(argv[1]) > 2400 || strchr(argv[1], '\'')) {
+        fprintf(stderr, "check-stable-gaps: usage ABS_WORK_DIR\n"); return 2;
+    }
+    if (!getcwd(root, sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
+    if (mkdir(argv[1], 0700) && errno != EEXIST) { fprintf(stderr, "check-stable-gaps: prepare directory\n"); return 2; }
+    SP(fix, sizeof fix, "%s/stable-gaps-fixture-%ld", argv[1], (long)getpid());
+    SP(native, sizeof native, "%s/stable-gaps-native", argv[1]);
+    if (tq_native(root, "tools/stable-gaps.cx", native, why, sizeof why)) { fprintf(stderr, "check-stable-gaps: %s\n", why); return 2; }
+    SP(cmd, sizeof cmd, "mkdir -p '%s/build' '%s/agentwork'", fix, fix);
+    if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
+    SP(p, sizeof p, "%s/build/std-surface.tsv", fix); put(p, ss);
+    SP(p, sizeof p, "%s/build/tlib-packages.tsv", fix); put(p, "# fx\nfx.a\t0.1.0\taa\tcx/fx\t-\tfx.dep@0.1.0\tn\nfx.dep\t0.1.0\tbb\tcx/dep\t-\t-\tn\n");
+    SP(p, sizeof p, "%s/build/tlib-policy.tsv", fix); put(p, "stable\tno\n");
+    SP(p, sizeof p, "%s/build/stable-review.tsv", fix); put(p, "# fx\n");
+
+    SP(cmd, sizeof cmd, "'%s' '%s' fx.a 2>&1", native, fix);
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0, "rc0");
+    ck(has(out, "GAP\tfx.a\tS2\tf_two\t") && !has(out, "\tS2\tf_one\t"), "s2-new-row");
+    ck(has(out, "GAP\tfx.a\tS4\tf_two@osx\t") && !has(out, "@lnx") && !has(out, "@win"), "s4-unverified-cell");
+    ck(has(out, "GAP\tfx.a\tS10\tfx.dep\t"), "s10-dep-unstable");
+    ck(has(out, "GAP\tfx.a\tS13\tSTABLE-REVIEW-fx.a\t"), "s13-no-review");
+    ck(has(out, "STABLE_GAPS total=4 s2=1 s4=1 s10=1 s13=1\n"), "summary");
+
+    SP(p, sizeof p, "%s/build/tlib-policy.tsv", fix); put(p, "stable\tno\nfx.dep\tyes\n");
+    SP(p, sizeof p, "%s/build/stable-review.tsv", fix);
+    put(p, "# fx\n2026-11-13\tSTABLE-REVIEW-fx.a\treview accept\t-\t-\tr\n");
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0 && !has(out, "\tS10\t") && !has(out, "\tS13\t") && has(out, "STABLE_GAPS total=2 s2=1 s4=1 s10=0 s13=0\n"), "s10-s13-cleared");
+
+    SP(cmd, sizeof cmd, "'%s' '%s' 2>&1", native, root);
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0 && has(out, "STABLE_GAPS total="), "real-tree-summary");
+
+    SP(cmd, sizeof cmd, "'%s' '%s/none' 2>&1", native, fix);
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 2, "missing-table-rc2");
+
+    printf("CHECK_STABLE_GAPS\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

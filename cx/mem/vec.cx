@@ -1,0 +1,105 @@
+#pragma unisa module vec
+#pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* L0 mem/vec: typed-width growable vector, counted alloc and byte search.  The caller owns the
+   mm_vec struct; its data block comes from mem.heap and is released only by mm_vec_free (exactly once
+   per live block; a second free is a no-op).  Elements are copied in by value.  Failure is a negative
+   code and leaves the vector unchanged.  Single-threaded.
+     mm_alloc_n(count, size)  zeroed count*size block, or 0 (count<=0, size<=0, overflow, no memory);
+                              the caller frees it with mm_free
+     mm_find(h, hn, needle, nn)  offset of the first needle in h, 0 for an empty needle, -1 when
+                              missing or on bad arguments (negative length, null with length > 0)
+     mm_vec_init(v, elem)     empty vector of elem-byte elements (elem < 1 is stored as 0 and every
+                              later growth op refuses with -EINVAL)
+     mm_vec_reserve(v, n)     capacity >= n elements; 0, -EINVAL, -EOVERFLOW (n*elem), -ENOMEM
+     mm_vec_push(v, item)     append a copy of *item; 0, -EINVAL, -ENOMEM
+     mm_vec_pop(v, item)      remove the last element into *item (item may be 0 to discard);
+                              1 got, 0 empty, -EINVAL
+     mm_vec_at(v, i)          pointer to element i, or 0 out of range; invalid after the next push/reserve
+     mm_vec_truncate(v, n)    shorten to n elements (0 <= n <= len, no shrink); 0, -EINVAL
+     mm_vec_free(v)          free the block, zero data/len/cap (elem is kept so the vector is reusable) */
+
+typedef struct { void *data; long len; long cap; long elem; } mm_vec;
+
+void *mm_alloc_n(long count, long size) {
+    if (count <= 0 || size <= 0) return 0;
+    if (count > 0x7fffffffffffffffL / size) return 0;
+    return mm_zalloc(count * size);
+}
+
+long mm_find(const void *h, long hn, const void *needle, long nn) {
+    const unsigned char *a = (const unsigned char *)h;
+    const unsigned char *b = (const unsigned char *)needle;
+    long i;
+    if (hn < 0 || nn < 0) return -1;
+    if (nn == 0) return 0;
+    if (!a || !b || nn > hn) return -1;
+    for (i = 0; i + nn <= hn; i++) {
+        if (a[i] == b[0] && mm_same(a + i, b, nn)) return i;
+    }
+    return -1;
+}
+
+void mm_vec_init(mm_vec *v, long elem) {
+    if (!v) return;
+    v->data = 0; v->len = 0; v->cap = 0;
+    v->elem = elem > 0 ? elem : 0;
+}
+
+int mm_vec_reserve(mm_vec *v, long n) {
+    long cap;
+    void *p;
+    if (!v || n < 0 || v->elem < 1) return -EINVAL;
+    if (n <= v->cap) return 0;
+    cap = v->cap ? v->cap : 4;
+    while (cap < n) {
+        if (cap > 0x3fffffffffffffffL) return -EOVERFLOW;
+        cap = cap * 2;
+    }
+    if (cap > 0x7fffffffffffffffL / v->elem) return -EOVERFLOW;
+    p = mm_grow(v->data, cap * v->elem);
+    if (!p) return -ENOMEM;
+    v->data = p;
+    v->cap = cap;
+    return 0;
+}
+
+int mm_vec_push(mm_vec *v, const void *item) {
+    int r;
+    if (!v || !item || v->elem < 1) return -EINVAL;
+    if (v->len >= v->cap) {
+        r = mm_vec_reserve(v, v->len + 1);
+        if (r == -EOVERFLOW) return -ENOMEM;
+        if (r) return r;
+    }
+    r = mm_copy((unsigned char *)v->data + v->len * v->elem, v->elem, item, v->elem);
+    if (r) return -EINVAL;
+    v->len = v->len + 1;
+    return 0;
+}
+
+int mm_vec_pop(mm_vec *v, void *item) {
+    if (!v || v->elem < 1) return -EINVAL;
+    if (v->len == 0) return 0;
+    if (item && mm_copy(item, v->elem, (unsigned char *)v->data + (v->len - 1) * v->elem, v->elem)) return -EINVAL;
+    v->len = v->len - 1;
+    return 1;
+}
+
+void *mm_vec_at(const mm_vec *v, long i) {
+    if (!v || i < 0 || i >= v->len) return 0;
+    return (unsigned char *)v->data + i * v->elem;
+}
+
+int mm_vec_truncate(mm_vec *v, long n) {
+    if (!v || n < 0 || n > v->len) return -EINVAL;
+    v->len = n;
+    return 0;
+}
+
+void mm_vec_free(mm_vec *v) {
+    if (!v) return;
+    mm_free(v->data);
+    v->data = 0; v->len = 0; v->cap = 0;
+}

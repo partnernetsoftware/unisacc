@@ -589,12 +589,21 @@ static void st_read(St *s, int v, int line) {
     int o = s->b[v];
     if (o && s->o[o - 1] == OB_FREED) rep(R_UAF, line, v, 0);
 }
+/* --escapes: blocks a return hands to the caller (owned at the return, from the allocator names above) */
+static int g_inret, nesc;
+static int esc_line[128], esc_var[128];
+static void esc_note(int line, int v) {
+    int i;
+    for (i = 0; i < nesc; i++) if (esc_line[i] == line && esc_var[i] == v) return;
+    if (nesc == 128) return;
+    esc_line[nesc] = line; esc_var[nesc] = v; nesc++;
+}
 static void st_escape(St *s, int v, int line) {
     int o = s->b[v];
     if (!o) return;
     o--;
     if (s->o[o] == OB_FREED) rep(R_UAF, line, v, 0);
-    else if (live(s->o[o])) s->o[o] = OB_ESC;
+    else if (live(s->o[o])) { if (g_inret) esc_note(line, v); s->o[o] = OB_ESC; }
 }
 static void st_free(St *s, int v, int line) {
     int o = s->b[v];
@@ -1400,7 +1409,10 @@ static int exec(int p, Set *S) {
         if (e > p + 1) {
             int n = parse_range(p + 1, e, 1);
             if (n < 0) return g_rb;
-            esc(S, ev(n, S), line);
+            u64 rv = ev(n, S);
+            g_inret = 1;
+            esc(S, rv, line);
+            g_inret = 0;
         }
         leak_exit(S, line);
         S->n = 0;
@@ -1436,7 +1448,8 @@ static int exec(int p, Set *S) {
 }
 
 /* ---------------- one function ---------------- */
-static int show_skips;
+static int show_skips, show_esc;
+static long n_esc, n_esc_fn;
 static long n_files, n_fns, n_analyzed, n_trivial, n_owners, n_bad, n_df, n_uaf, n_leak, n_skip[SK_N];
 static const char *g_path;
 
@@ -1474,7 +1487,7 @@ static void analyze(const Fn *f) {
     }
     if (!has) { n_analyzed++; n_trivial++; return; }
     g_skip = why; g_skipline = wline;
-    g_lb = f->lb; g_rb = f->rb; nv = 0; no = 0; nrep = 0; nnd = 0; nctx = 0; nsc = 0;
+    g_lb = f->lb; g_rb = f->rb; nv = 0; no = 0; nrep = 0; nesc = 0; g_inret = 0; nnd = 0; nctx = 0; nsc = 0;
     g_main = nm[tk[f->name].c].len == 4 && tx_same(src + nm[tk[f->name].c].off, 4, "main", 4);
     pcache = 0;
     s_init(&S);
@@ -1507,6 +1520,21 @@ static void analyze(const Fn *f) {
         return;
     }
     n_analyzed++; n_owners++;
+    if (show_esc && nesc) {
+        int pub = 1, q = f->name - 1;
+        for (; q >= 0 && !isp(q, ';') && !isp(q, '}'); q--) if (cls_at(q) == K_STATIC) pub = 0;
+        if (pub) {
+            for (k = 0; k < nesc; k++) {
+                printf("ESCAPE\t%s:%d\t", g_path, esc_line[k]);
+                put_name(tk[f->name].c);
+                printf("\t");
+                put_name(vname[esc_var[k]]);
+                printf("\n");
+                n_esc++;
+            }
+            n_esc_fn++;
+        }
+    }
     for (k = 1; k < nrep; k++) {   /* by line */
         Rep x = reps[k];
         int j = k - 1;
@@ -1573,7 +1601,11 @@ int main(int argc, char **argv) {
     char **paths = 0, *list = 0;
     size_t ln = 0;
     for (k = 0; kws[k].s; k++) kwlen[k] = (int)tx_len(kws[k].s, 64);
-    if (a < argc && tx_eqz(argv[a], "--skips")) { show_skips = 1; a++; }
+    for (; a < argc; ) {
+        if (tx_eqz(argv[a], "--skips")) { show_skips = 1; a++; }
+        else if (tx_eqz(argv[a], "--escapes")) { show_esc = 1; a++; }
+        else break;
+    }
     if (a < argc && tx_eqz(argv[a], "--tracked")) {
         char *rec, *end;
         int cap = 0;
@@ -1619,5 +1651,6 @@ int main(int argc, char **argv) {
         printf("CX_OWN\tfiles=%ld\tfunctions=%ld\tanalyzed=%ld\tskipped=%ld\tdouble_free=%ld\tuse_after_free=%ld\tleak=%ld\n",
                n_files, n_fns, n_analyzed, sk, n_df, n_uaf, n_leak);
     }
+    if (show_esc) printf("CX_OWN_ESCAPES\tfiles=%ld\tescapes=%ld\tfunctions=%ld\n", n_files, n_esc, n_esc_fn);
     return n_df + n_uaf + n_leak ? 1 : 0;
 }

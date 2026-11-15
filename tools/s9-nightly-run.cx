@@ -2,7 +2,11 @@
  *
  *   sh ./unisacc.com tools/s9-nightly-run.cx -- --clone DIR --evidence DIR --tier commit|daily [--max-steps N] [--load-max L] [--fake BIN]
  *
- * 退出码: 0 通过; 1 s9-nightly 失败; 2 拒绝/用法; 4 负载超阈值(SKIPPED_LOAD)。
+ * --load-max L: load1 超过 L 时不拒跑,而是降档照常运行(判定只取决于批次本身,不取决于机器是否安静):
+ *   子进程加 nice -n 10,打印 S9_LOAD_THROTTLE load1=.. max=.. nice=10 width=.. reason=load-above-max。
+ *   并发宽度 S9_WIDTH(5)是 s9-shards.cx 的编译期常量(S9F-2 写域),本入口不能改;width 如实打印 5 并注明
+ *   尚无运行时降宽参数,降档目前只靠 nice(含义保留,降宽待 s9-shards 提供参数)。
+ * 退出码: 0 通过; 1 s9-nightly 失败; 2 拒绝/用法。(原 4 SKIPPED_LOAD 已移除)
  * DIR 必须是专用仓外克隆(拒绝共享检出),并自带 unisacc.com。--fake 只给检查用。 */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -12,9 +16,11 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.limits
 
 static char why[512];
 static void die(const char *a, const char *b) { tool_die("s9-nightly-run", a, b, 2); }
+static int L_I(const char *id) { double v = lm_get(id, 0); if (v < 0) die("limit-unknown", id); return (int)v; }
 static int run(char **v, const char *cwd, int sec, char *out, int cap) {
     np_result r = {0};
     int rc;
@@ -40,7 +46,7 @@ int main(int argc, char **argv) {
     long t0 = sy_now_ms(), ws;
     size_t n;
     char *la;
-    int rc, k = 0;
+    int rc, k = 0, throttle = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--clone") && i + 1 < argc) clone = argv[++i];
         else if (!strcmp(argv[i], "--evidence") && i + 1 < argc) evid = argv[++i];
@@ -57,7 +63,10 @@ int main(int argc, char **argv) {
     la = cx_read("/proc/loadavg", &n);
     if (!la || sscanf(la, "%lf", &load) != 1) die("loadavg", 0);
     free(la);
-    if (load > load_max) { printf("S9_NIGHTLY_RUN status=SKIPPED_LOAD load=%.2f max=%.2f\n", load, load_max); return 4; }
+    if (load > load_max) {
+        throttle = 1;
+        printf("S9_LOAD_THROTTLE load1=%.2f max=%.2f nice=10 width=5 reason=load-above-max\n", load, load_max);
+    }
     /* (2) 克隆校验与同步 */
     if (sy_realpath(clone, dir, sizeof dir) < 0) die("clone-missing", clone);
     {
@@ -74,7 +83,7 @@ int main(int argc, char **argv) {
         char *r[] = {"git", "-C", dir, "reset", "-q", "--hard", "origin/main", 0};
         char *h[] = {"git", "-C", dir, "rev-parse", "HEAD", 0};
         if (run(f, dir, 120, buf, sizeof buf)) die("git-fetch", why);
-        if (run(r, dir, 60, buf, sizeof buf)) die("git-reset", buf);
+        if (run(r, dir, L_I("s9run.git"), buf, sizeof buf)) die("git-reset", buf);
         if (run(h, dir, 10, sha, sizeof sha)) die("git-rev-parse", 0);
         trim(sha);
     }
@@ -83,17 +92,24 @@ int main(int argc, char **argv) {
     ws = sy_wall_s();
     if (ws <= 86400 || sy_local_fmt(date, sizeof date, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable");
     /* s9 init requires a fresh, absent run directory (session-must-be-absent): one per invocation, never pre-created */
-    if (cx_fmt(runp, sizeof runp, "%s/out/s9-nightly-run-%s-%ld", dir, date, ws)) die("path", 0);
-    { char o[4400]; if (cx_fmt(o, sizeof o, "%s/out", dir)) die("path", 0); sy_mkdir(o, 0755); }
-    if (sy_exists(runp)) die("run-dir-exists", runp);
+    /* session root: canonical(tmp)/unisacc-session-nightly-DATE-WS (sessionroot rule 2), run dir and report below it; no ROOT/out */
+    {
+        char tc[4096], sd[4400];
+        if (!sy_tmpdir() || sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0) die("tmpdir", 0);
+        if (cx_fmt(sd, sizeof sd, "%s/unisacc-session-nightly-%s-%ld", tc, date, ws)) die("path", 0);
+        if (sy_exists(sd)) die("run-dir-exists", sd);
+        if (sy_mkdir(sd, 0700) < 0) die("mkdir-session", sd);
+        if (cx_fmt(runp, sizeof runp, "%s/run", sd)) die("path", 0);
+    }
     (void)datebuf;
     cx_fmt(steps, sizeof steps, "%d", max_steps);
+    if (throttle) { v[k++] = "nice"; v[k++] = "-n"; v[k++] = "10"; }
     v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; v[k++] = dir; v[k++] = runp;
     v[k++] = "--tier"; v[k++] = (char *)tier; v[k++] = "--date"; v[k++] = date;
     v[k++] = "--max-steps"; v[k++] = steps;
     if (fake) { v[k++] = "--fake"; v[k++] = (char *)fake; }
     v[k] = 0;
-    rc = run(v, dir, 1700, buf, sizeof buf);
+    rc = run(v, dir, L_I("s9run.run"), buf, sizeof buf);
     printf("%s", buf);
     {
         const char *s = strstr(buf, "status=");

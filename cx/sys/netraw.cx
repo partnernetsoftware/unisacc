@@ -1,0 +1,245 @@
+#pragma unisa module netraw
+#pragma unisa dock
+#pragma unisa use sys.sysnums
+/* L0 sys/netraw: the socket system calls themselves, with no C library in between.
+   No #include: __syscall6 is the compiler's intrinsic and _UNISA_SC the prelude's syscall-class
+   macro. Numbers and constants come from exec/facts/sys-syscalls.tsv (rows snr_*) through the
+   generated cx/sys/sysnums.cx.
+   0 or a value on success, -errno on failure, as everywhere in cx/sys.
+   Targets: Linux x86_64 and arm64. On macOS and Windows every call is -ENOSYS and every
+   sy_sock_num() is 0: stated, not emulated (the table rows are 0 there).
+   Socket addresses are plain byte buffers in the Linux layout, built and read by the sy_sa_*
+   functions; no struct sockaddr is named here. Descriptors are closed with sys.fs/sys.fd as any
+   other fd. */
+
+static long sy_snr_os(int lx, int la, int fb) {
+#if defined(__linux__) && defined(__aarch64__)
+    (void)lx; (void)fb;
+    return la;
+#elif defined(__linux__) && defined(__x86_64__)
+    (void)la; (void)fb;
+    return lx;
+#else
+    (void)lx; (void)la;
+    return fb;
+#endif
+}
+#define SNR_NUM(name) sy_snr_os(sn_lnx_x86_64_##name##_hi * 65536 + sn_lnx_x86_64_##name##_lo, \
+                                sn_lnx_arm64_##name##_hi * 65536 + sn_lnx_arm64_##name##_lo, \
+                                sn_fallback_##name##_hi * 65536 + sn_fallback_##name##_lo)
+
+/* __syscall6 returns -errno on failure. -ENOSYS where the table has no socket calls. */
+static long sy_snr_call_os(long n, long a, long b, long c, long d, long e, long f) {
+#if defined(_WIN32)
+    (void)n; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+    return -ENOSYS;
+#else
+    /* The intrinsic carries the number and five arguments. Every call here that has a sixth
+       (sendto's and recvfrom's address length) passes a null address in the fifth, and the kernel
+       reads the sixth only when the fifth is not null; a caller with a real sixth is refused. */
+    if (!SNR_NUM(snr_ok) || !n) return -ENOSYS;
+    if (f) return -ENOSYS;
+    return __syscall6(_UNISA_SC(n), a, b, c, d, e);
+#endif
+}
+
+/* Names for sy_sock_num. */
+enum {
+    SY_SN_AF_UNIX = 1, SY_SN_AF_INET4 = 2, SY_SN_AF_INET6 = 3,
+    SY_SN_SOCK_STREAM = 4, SY_SN_SOCK_DGRAM = 5,
+    SY_SN_SOL_SOCKET = 6, SY_SN_SO_REUSEADDR = 7, SY_SN_SO_ERROR = 8,
+    SY_SN_SHUT_RD = 9, SY_SN_SHUT_WR = 10, SY_SN_SHUT_RDWR = 11
+};
+/* Byte sizes of the three address layouts, and the room a caller should give sy_sock_name. */
+enum { SY_SA_INET4_LEN = 16, SY_SA_INET6_LEN = 28, SY_SA_UNIX_MAX = 110, SY_SA_MAX = 128 };
+
+/* The target's own value of constant WHICH (SY_SN_*), for the af/type/level/opt/how arguments
+   below. -EINVAL for an unknown name; 0 for every address-family, type, level and option name on a
+   target without socket calls. */
+long sy_sock_num(int which) {
+    switch (which) {
+    case SY_SN_AF_UNIX: return SNR_NUM(snr_af_unix);
+    case SY_SN_AF_INET4: return SNR_NUM(snr_af_inet);
+    case SY_SN_AF_INET6: return SNR_NUM(snr_af_inet6);
+    case SY_SN_SOCK_STREAM: return SNR_NUM(snr_sock_stream);
+    case SY_SN_SOCK_DGRAM: return SNR_NUM(snr_sock_dgram);
+    case SY_SN_SOL_SOCKET: return SNR_NUM(snr_sol_socket);
+    case SY_SN_SO_REUSEADDR: return SNR_NUM(snr_so_reuseaddr);
+    case SY_SN_SO_ERROR: return SNR_NUM(snr_so_error);
+    case SY_SN_SHUT_RD: return 0;
+    case SY_SN_SHUT_WR: return 1;
+    case SY_SN_SHUT_RDWR: return 2;
+    }
+    return -EINVAL;
+}
+
+/* 1 when this target has the socket calls, 0 when every call below is -ENOSYS. */
+int sy_sock_have(void) { return SNR_NUM(snr_ok) ? 1 : 0; }
+
+static void sy_sa_zero(unsigned char *sa, int n) { int i; for (i = 0; i < n; i++) sa[i] = 0; }
+
+/* Write the IPv4 socket address IP[4]:PORT into SA (CAP bytes). Its length (16), or -EINVAL for
+   a null pointer or a port outside 0..65535, -ERANGE when CAP is under 16, -ENOSYS without sockets. */
+int sy_sa_inet4(unsigned char *sa, int cap, const unsigned char *ip, int port) {
+    long af = SNR_NUM(snr_af_inet);
+    if (!sa || !ip || port < 0 || port > 65535) return -EINVAL;
+    if (!af) return -ENOSYS;
+    if (cap < SY_SA_INET4_LEN) return -ERANGE;
+    sy_sa_zero(sa, SY_SA_INET4_LEN);
+    sa[0] = (unsigned char)(af & 255); sa[1] = (unsigned char)((af >> 8) & 255);
+    sa[2] = (unsigned char)(port >> 8); sa[3] = (unsigned char)(port & 255);
+    sa[4] = ip[0]; sa[5] = ip[1]; sa[6] = ip[2]; sa[7] = ip[3];
+    return SY_SA_INET4_LEN;
+}
+
+/* Write the IPv6 socket address [IP[16]%SCOPE]:PORT into SA. Its length (28), or -EINVAL,
+   -ERANGE when CAP is under 28, -ENOSYS without sockets. */
+int sy_sa_inet6(unsigned char *sa, int cap, const unsigned char *ip, int port, unsigned scope) {
+    long af = SNR_NUM(snr_af_inet6);
+    int i;
+    if (!sa || !ip || port < 0 || port > 65535) return -EINVAL;
+    if (!af) return -ENOSYS;
+    if (cap < SY_SA_INET6_LEN) return -ERANGE;
+    sy_sa_zero(sa, SY_SA_INET6_LEN);
+    sa[0] = (unsigned char)(af & 255); sa[1] = (unsigned char)((af >> 8) & 255);
+    sa[2] = (unsigned char)(port >> 8); sa[3] = (unsigned char)(port & 255);
+    for (i = 0; i < 16; i++) sa[8 + i] = ip[i];
+    sa[24] = (unsigned char)(scope & 255); sa[25] = (unsigned char)((scope >> 8) & 255);
+    sa[26] = (unsigned char)((scope >> 16) & 255); sa[27] = (unsigned char)((scope >> 24) & 255);
+    return SY_SA_INET6_LEN;
+}
+
+/* Write the AF_UNIX socket address of file PATH into SA. Its length (2 + the path + its NUL), or
+   -EINVAL for a null or empty path, -ENAMETOOLONG for a path over 107 bytes, -ERANGE when CAP is
+   too small, -ENOSYS without sockets. The Linux abstract namespace is not offered. */
+int sy_sa_unix(unsigned char *sa, int cap, const char *path) {
+    long af = SNR_NUM(snr_af_unix);
+    int n = 0, i;
+    if (!sa || !path || !path[0]) return -EINVAL;
+    if (!af) return -ENOSYS;
+    while (path[n]) { n++; if (n > 107) return -ENAMETOOLONG; }
+    if (cap < 2 + n + 1) return -ERANGE;
+    sa[0] = (unsigned char)(af & 255); sa[1] = (unsigned char)((af >> 8) & 255);
+    for (i = 0; i < n; i++) sa[2 + i] = (unsigned char)path[i];
+    sa[2 + n] = 0;
+    return 2 + n + 1;
+}
+
+/* The address family stored in SA (the target's own number, compare with sy_sock_num), or -EINVAL
+   when LEN is under 2. */
+int sy_sa_family(const unsigned char *sa, int len) {
+    if (!sa || len < 2) return -EINVAL;
+    return sa[0] | (sa[1] << 8);
+}
+
+/* The port of an IPv4 or IPv6 socket address, or -EINVAL for a short buffer, -EAFNOSUPPORT for
+   any other family. */
+int sy_sa_port(const unsigned char *sa, int len) {
+    int f = sy_sa_family(sa, len);
+    if (f < 0) return f;
+    if (f == 0 || (f != SNR_NUM(snr_af_inet) && f != SNR_NUM(snr_af_inet6))) return -EAFNOSUPPORT;
+    if (len < 4) return -EINVAL;
+    return (sa[2] << 8) | sa[3];
+}
+
+/* Copy the IP bytes of SA into IP (CAP bytes): 4 for IPv4, 16 for IPv6. The count, or -EINVAL for
+   a short buffer, -ERANGE when CAP is too small, -EAFNOSUPPORT for any other family. */
+int sy_sa_ip(const unsigned char *sa, int len, unsigned char *ip, int cap) {
+    int f = sy_sa_family(sa, len), i;
+    if (f < 0) return f;
+    if (!ip) return -EINVAL;
+    if (f != 0 && f == SNR_NUM(snr_af_inet)) {
+        if (len < SY_SA_INET4_LEN) return -EINVAL;
+        if (cap < 4) return -ERANGE;
+        for (i = 0; i < 4; i++) ip[i] = sa[4 + i];
+        return 4;
+    }
+    if (f != 0 && f == SNR_NUM(snr_af_inet6)) {
+        if (len < SY_SA_INET6_LEN) return -EINVAL;
+        if (cap < 16) return -ERANGE;
+        for (i = 0; i < 16; i++) ip[i] = sa[8 + i];
+        return 16;
+    }
+    return -EAFNOSUPPORT;
+}
+
+/* A new close-on-exec socket of family AF and type TYPE (both from sy_sock_num), default
+   protocol. The fd, or -errno (-EAFNOSUPPORT, -EMFILE, ...). */
+int sy_sock_open(int af, int type) {
+    return (int)sy_snr_call_os(SNR_NUM(snr_socket), af, type | SNR_NUM(snr_sock_cloexec), 0, 0, 0, 0);
+}
+
+/* Bind FD to the socket address SA of LEN bytes. 0, or -errno (-EADDRINUSE, -EBADF, ...). */
+int sy_sock_bind(int fd, const unsigned char *sa, int len) {
+    if (!sa || len < 2) return -EINVAL;
+    return (int)sy_snr_call_os(SNR_NUM(snr_bind), fd, (long)sa, len, 0, 0, 0);
+}
+
+/* Start accepting on bound FD with a queue of BACKLOG. 0, or -errno. */
+int sy_sock_listen(int fd, int backlog) {
+    return (int)sy_snr_call_os(SNR_NUM(snr_listen), fd, backlog, 0, 0, 0, 0);
+}
+
+/* Take one connection from listening FD; blocks unless FD is non-blocking. When SA is not null,
+   *LEN (its room on entry) receives the peer address length. The new close-on-exec fd, or -errno
+   (-EAGAIN, -EBADF, -EINVAL for a socket that is not listening, ...). */
+int sy_sock_accept(int fd, unsigned char *sa, int *len) {
+    if (sa && (!len || *len < 0)) return -EINVAL;
+    return (int)sy_snr_call_os(SNR_NUM(snr_accept4), fd, (long)sa, sa ? (long)len : 0,
+                               SNR_NUM(snr_sock_cloexec), 0, 0);
+}
+
+/* Connect FD to SA. 0, or -errno (-ECONNREFUSED, -EINPROGRESS on a non-blocking fd, ...). */
+int sy_sock_connect(int fd, const unsigned char *sa, int len) {
+    if (!sa || len < 2) return -EINVAL;
+    return (int)sy_snr_call_os(SNR_NUM(snr_connect), fd, (long)sa, len, 0, 0, 0);
+}
+
+/* Send up to N bytes on connected FD; never raises SIGPIPE. The count sent (may be short), or
+   -errno (-EPIPE when the peer is gone, -ENOTCONN, -EBADF, ...). */
+long sy_sock_send(int fd, const void *buf, long n) {
+    if (!buf || n < 0) return -EINVAL;
+    return sy_snr_call_os(SNR_NUM(snr_sendto), fd, (long)buf, n, SNR_NUM(snr_msg_nosignal), 0, 0);
+}
+
+/* Receive up to N bytes from FD. The count, 0 when the peer closed, or -errno. */
+long sy_sock_recv(int fd, void *buf, long n) {
+    if (!buf || n < 0) return -EINVAL;
+    return sy_snr_call_os(SNR_NUM(snr_recvfrom), fd, (long)buf, n, 0, 0, 0);
+}
+
+/* The local address of FD into SA; *LEN is the room on entry and the address length on return
+   (larger than the room when it was truncated). 0, or -errno. */
+int sy_sock_name(int fd, unsigned char *sa, int *len) {
+    if (!sa || !len || *len < 0) return -EINVAL;
+    return (int)sy_snr_call_os(SNR_NUM(snr_getsockname), fd, (long)sa, (long)len, 0, 0, 0);
+}
+
+/* The peer address of connected FD, as sy_sock_name. 0, or -errno (-ENOTCONN). */
+int sy_sock_peername(int fd, unsigned char *sa, int *len) {
+    if (!sa || !len || *len < 0) return -EINVAL;
+    return (int)sy_snr_call_os(SNR_NUM(snr_getpeername), fd, (long)sa, (long)len, 0, 0, 0);
+}
+
+/* Set integer option OPT at LEVEL (both from sy_sock_num) to VAL. 0, or -errno (-ENOPROTOOPT). */
+int sy_sock_setopt(int fd, int level, int opt, int val) {
+    int v = val;
+    return (int)sy_snr_call_os(SNR_NUM(snr_setsockopt), fd, level, opt, (long)&v, 4, 0);
+}
+
+/* Read integer option OPT at LEVEL into *VAL. 0, or -errno. */
+int sy_sock_getopt(int fd, int level, int opt, int *val) {
+    int v = 0, n = 4;
+    long r;
+    if (!val) return -EINVAL;
+    r = sy_snr_call_os(SNR_NUM(snr_getsockopt), fd, level, opt, (long)&v, (long)&n, 0);
+    if (r < 0) return (int)r;
+    *val = v;
+    return 0;
+}
+
+/* Close one or both directions of connected FD; HOW is sy_sock_num(SY_SN_SHUT_*). 0, or -errno
+   (-ENOTCONN, -EINVAL for an unknown HOW). */
+int sy_sock_shutdown(int fd, int how) {
+    return (int)sy_snr_call_os(SNR_NUM(snr_shutdown), fd, how, 0, 0, 0, 0);
+}

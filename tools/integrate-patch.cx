@@ -238,14 +238,15 @@ static void ratchets_pair(void){
   * 同键命中且通过ratchet_valid则只跑head侧;未命中或INTEGRATE_NO_RATCHET_CACHE=1走完整双扫并回填。 */
  char cpath[4700]="",cdir[4700];int hit=0;
  if(!getenv("INTEGRATE_NO_RATCHET_CACHE")){char bt[65];np_result tr=git("baseline-tree",baseline,"rev-parse","HEAD^{tree}",0,0,0);text(&tr,bt,sizeof bt);
-  char name[300];if(cx_fmt(name,sizeof name,"out/integrate-ratchet-cache/%s-%s.base.stdout",bt,product)||cx_fmt(cdir,sizeof cdir,"%s/out/integrate-ratchet-cache",root)||cx_fmt(cpath,sizeof cpath,"%s/%s",root,name))die("ratchet-cache-path");
+  const char *hm=sy_env("HOME");if(!hm||!hm[0])die("ratchet-cache-home");
+  if(cx_fmt(cdir,sizeof cdir,"%s/.cache/unisacc/integrate-ratchet-cache",hm)||cx_fmt(cpath,sizeof cpath,"%s/%s-%s.base.stdout",cdir,bt,product))die("ratchet-cache-path");
   /* INTEGRATE_RATCHET_CACHE_DIR: 显式缓存目录(检查夹具用);未设时保持默认位置 */
   {const char *ce=getenv("INTEGRATE_RATCHET_CACHE_DIR");if(ce&&ce[0]&&(cx_fmt(cdir,sizeof cdir,"%s",ce)||cx_fmt(cpath,sizeof cpath,"%s/%s-%s.base.stdout",ce,bt,product)))die("ratchet-cache-path");}
   if(sy_exists(cpath)==1){size_t cn;char *cs=load(cpath,&cn);if(ratchet_valid(cs,cn)){char bp[5000];path(bp,sizeof bp,dir,"base.stdout");put(bp,cs,cn);hit=1;}free(cs);}}
  const char *headonly="(cd \"$2\" && exec sh ./unisacc.com tools/ratchets.cx) >\"$3/head.stdout\" 2>\"$3/head.stderr\"; rb=$?\nprintf '%s\\n' \"$rb\" >\"$3/head.status\"\n[ \"$rb\" -le 1 ]";
  char *v[]={"sh","-c",(char*)(hit?headonly:script),"ratchets-pair",baseline,candidate,dir,0};np_result r=call("ratchets-pair",v,0,0,55);int rc=r.rc;np_free(&r);if(rc)die("ratchets-pair-not-completed");
  for(int i=0;i<2;i++){char p[5000];size_t n;path(p,sizeof p,dir,i?"head.stdout":"base.stdout");char *s=load(p,&n);if(!ratchet_valid(s,n)){free(s);die("ratchets-error-or-incomplete");}material(phasefiles[i+1],s,n);
-  if(!i&&!hit&&cpath[0]){char tmp[4800];char od[4700];if(!cx_fmt(od,sizeof od,"%s/out",root))sy_mkdir(od,0700);sy_mkdir(cdir,0700);if(!cx_fmt(tmp,sizeof tmp,"%s.tmp%d",cpath,(int)sy_now_ms()&0xffff)&&!cx_write(tmp,s,n)&&sy_rename(tmp,cpath))die("ratchet-cache-store");}
+  if(!i&&!hit&&cpath[0]){char tmp[4800];char od[4700];if(!cx_fmt(od,sizeof od,"%s/.cache",sy_env("HOME")))sy_mkdir(od,0700);if(!cx_fmt(od,sizeof od,"%s/.cache/unisacc",sy_env("HOME")))sy_mkdir(od,0700);sy_mkdir(cdir,0700);if(!cx_fmt(tmp,sizeof tmp,"%s.tmp%d",cpath,(int)sy_now_ms()&0xffff)&&!cx_write(tmp,s,n)&&sy_rename(tmp,cpath))die("ratchet-cache-store");}
   free(s);}
  if(hit)puts("INTEGRATE_PATCH\tratchets-base=CACHE_HIT");
  if(ratchet_delta()){puts("INTEGRATE_PATCH\tstatus=NEW_RATCHET_RED\tqualification=NOT_QUALIFIED");exit(1);}
@@ -294,11 +295,13 @@ static int aff_loop(char (*ids)[80],int ni){
  for(int i=0;i<ni;i++){
   if(aff_done(ids[i])){printf("INTEGRATE_AFFECTED_SKIP\tid=%s\n",ids[i]);continue;}
   if(fmax){if(fruns>=atoi(fmax)){pending();return 1;}fruns++;if(flog){size_t ln=0;char *old=sy_exists(flog)==1?cx_read(flog,&ln):0;np_buf lb={0};if(old){np_put(&lb,old,ln);free(old);}np_puts(&lb,ids[i]);np_puts(&lb,"\n");if(cx_write(flog,lb.p,lb.n))die("fake-log");free(lb.p);}aff_mark(ids[i],"PASS","fake");continue;}
-  char *bv[]={"sh","./unisacc.com","tools/affected.cx","--","--ids",ids[i],"--run",0};
+  /* materials are prepared before the batch loop (bounded, cached by identity, never a PASS); INTEGRATE_NO_PREPARE=1 turns it off */
+  char *bv[]={"sh","./unisacc.com","tools/affected.cx","--","--ids",ids[i],"--run","--prepare-materials",0};
+  {const char *np_off=getenv("INTEGRATE_NO_PREPARE");if(np_off&&np_off[0]=='1')bv[7]=0;}
   np_result br=call("affected-run",bv,candidate,0,55);int rc=br.rc;int red=br.out&&strstr(br.out,"fail=")&&!strstr(br.out,"fail=0");const char *st="PASS";
   if(red&&br.out&&strstr(br.out,"RUN_REFUSED\t")&&strstr(br.out,"requires another native host")&&!strstr(br.out,"status=FAIL")){printf("INTEGRATE_DEFERRED\tid=%s\treason=another-native-host\n",ids[i]);red=0;st="DEFERRED";if(rc==1)rc=0;}
   /* affected rc 3 with only a materials deferral is a stable DEFERRED, not a resumable pending */
-  if(rc==3&&!red&&br.out&&strstr(br.out,"DEFERRED\t")&&strstr(br.out,"needs-materials=")&&strstr(br.out,"pass=0\tfail=0\t")){printf("INTEGRATE_DEFERRED\tid=%s\treason=needs-materials\n",ids[i]);st="DEFERRED";rc=0;}
+  if(rc==3&&!red&&br.out&&strstr(br.out,"DEFERRED\t")&&(strstr(br.out,"needs-materials=")||(strstr(br.out,"prepare-failed=")&&!strstr(br.out,"prebuild-budget")&&!strstr(br.out,"start-deadline")&&!strstr(br.out,"killed-at-deadline")))&&strstr(br.out,"pass=0\tfail=0\t")){printf("INTEGRATE_DEFERRED\tid=%s\treason=needs-materials\n",ids[i]);st="DEFERRED";rc=0;}
   if(rc||red)printf("INTEGRATE_RED\tid=%s\trc=%d\n",ids[i],rc);
   np_free(&br);if(rc==3){pending();return 1;}if(rc||red){puts("INTEGRATE_PATCH\tstatus=AFFECTED_RED\tqualification=NOT_QUALIFIED");exit(1);}
   {char ev[100];if(cx_fmt(ev,sizeof ev,"%03d-affected-run.stdout",serial))die("aff-ev");aff_mark(ids[i],st,ev);}

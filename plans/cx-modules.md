@@ -4,7 +4,7 @@
 
 §1 与 §4–§132（10-23 至 10-29 的逐刀记录）已原样移到 [archive/plans/cx-modules-history-20261030.md](../archive/plans/cx-modules-history-20261030.md)；节号不变，新节接着编号。
 
-> 提出：2026-10-23（主人重申，强制要求，逐步实现）· 执行：cc · 依据：`docs/cx-spec-draft.md` v0.3、9df1417c（`.cx` 内置 prelude 已落地）
+> 提出：2026-10-23（项目所有者重申，强制要求，逐步实现）· 执行：cc · 依据：`docs/cx-spec-draft.md` v0.3、9df1417c（`.cx` 内置 prelude 已落地）
 
 ## 产品面（2026-10-30）
 

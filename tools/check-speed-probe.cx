@@ -1,6 +1,6 @@
-/* check-speed-probe: samples for tools/speed-probe.cx
- * Two synthetic jobs emit RR_TIME lines; the probe must parse ns -> ms and
- * rank by total. Samples live in a mkdtemp directory under $TMPDIR, never in the tree. */
+/* check-speed-probe: controlled RR_TIME traces plus real child execution.
+ * Raw evidence and independent reference parsing verify phase sums, model separation,
+ * missing versus zero observations, and wall-time ranking. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.proc
@@ -63,8 +63,8 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 }
 
 #define CAP (1L << 18)
-static int failed;
-static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tspeed-probe.%s\n", ok ? "PASS" : "FAIL", n); }
+static int assertions,failed;
+static void ck(int ok,const char *n){assertions++;if(!ok)failed++;printf("%s\tspeed-probe.%s\n",ok?"PASS":"FAIL",n);}
 static char out[CAP];
 
 static int run(char **av) {
@@ -87,10 +87,40 @@ static int has(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(
 static long at(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 256)); }
 
 static char base[CAP];   /* 本次运行的独占样本目录：mkdtemp($TMPDIR)，不写仓内 out/ */
+static long field(const char *table,const char *name,int column){
+    if(!table)return -2;const char *p=table;
+    while(*p){const char *end=strchr(p,'\n');if(!end)end=p+strlen(p);const char *tab=strchr(p,'\t');
+        if(tab&&tab<end&&(long)strlen(name)==tab-p&&!memcmp(p,name,(size_t)(tab-p))){
+            for(int i=0;i<column;i++){tab=strchr(p,'\t');if(!tab||tab>=end)return -2;p=tab+1;}
+            tab=strchr(p,'\t');if(!tab||tab>end)tab=end;
+            if(tab-p==10&&!memcmp(p,"UNMEASURED",10))return -1;
+            char *tail=0;long n=strtol(p,&tail,10);return tail==tab?n:-2;
+        }p=*end?end+1:end;
+    }return -2;
+}
+/* Independent scanf reference; it does not reuse the probe's token parser. */
+static long reference(const char *path,const char *category,const char *key){
+    FILE *f=fopen(path,"rb");if(!f)return -2;char line[512],stage[64],source[64];long ns,sum=0;int rc,seen=0;
+    while(fgets(line,sizeof line,f)){
+        int matched=!strcmp(category,"model")?
+            sscanf(line,"RR_TIME\tmodel\tstage=%63[^\t]\tsource=%63[^\t]\tns=%ld",stage,source,&ns)==3:
+            sscanf(line,"RR_TIME\tinference\tstage=%63[^\t]\trc=%d\tns=%ld",stage,&rc,&ns)==3;
+        if(matched&&(!key||!strcmp(stage,key))){sum+=ns;seen=1;}
+    }fclose(f);return seen?sum:-1;
+}
+static int ranking(const char *table){
+    const char *p=strstr(out,"\ntop10\t");if(!p)return 0;p=strchr(p+1,'\n');if(!p)return 0;p++;
+    long previous=LONG_MAX;
+    for(int i=1;i<=3;i++){
+        char name[64];int rank;long total;
+        if(sscanf(p,"%d\t%63[^\t]\t%ld",&rank,name,&total)!=3||rank!=i||total>previous||field(table,name,1)!=total)return 0;
+        previous=total;p=strchr(p,'\n');if(!p)return 0;p++;
+    }return 1;
+}
 
 int main(int argc, char **argv) {
     const char *td = sy_env("TMPDIR");
-    char bigp[4600], smallp[4600], jobsp[4600], outdir[4600], jobs[9600];
+    char bigp[4600], smallp[4600], envp[4600], jobsp[4600], outdir[4600], jobs[14400];
     (void)argc; (void)argv;
     if (!td || !td[0]) td = "/tmp";
     if (snprintf(base, sizeof base, "%s/speed-probe-XXXXXX", td) >= (int)sizeof base) return 2;
@@ -99,20 +129,42 @@ int main(int argc, char **argv) {
         snprintf(smallp, sizeof smallp, "%s/small.cx", base) >= (int)sizeof smallp ||
         snprintf(jobsp, sizeof jobsp, "%s/jobs.tsv", base) >= (int)sizeof jobsp ||
         snprintf(outdir, sizeof outdir, "%s/out", base) >= (int)sizeof outdir) return 2;
-    /* big: lower 1500 elf 2400; small: lower 100 elf 100 */
-    const char *big = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=750000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=1500000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=2400000000\\n\");return 0;}\n";
+    /* Synthetic inference exceeds the bounded run, so it cannot masquerade as total wall time. */
+    const char *big = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=75000000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=150000000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=240000000000\\nRR_TIME\\tinference\\tstage=e1\\trc=0\\tns=11000001\\nRR_TIME\\tinference\\tstage=e2\\trc=0\\tns=22000002\\nRR_TIME\\tinference\\tstage=e2\\trc=0\\tns=11000003\\nRR_TIME\\tinference\\tstage=e3\\trc=0\\tns=33000003\\nRR_TIME\\tinference\\tstage=units\\trc=0\\tns=44000004\\nRR_TIME\\tinference\\tstage=prune\\trc=0\\tns=55000005\\n\");return 0;}\n";
     const char *small = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=lower\\trc=0\\tns=100000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=100000000\\n\");return 0;}\n";
     if (cx_write(bigp, big, tx_len(big, 4096))) { ck(0, "write-big"); return 1; }
     if (cx_write(smallp, small, tx_len(small, 4096))) { ck(0, "write-small"); return 1; }
-    if (snprintf(jobs, sizeof jobs, "small\t%s\nbig\t%s\n", smallp, bigp) >= (int)sizeof jobs) return 2;
+    /* envtab: argv separated by TAB (the post-0.0.66 rc=1 case), timing only when the probe passes
+       UNISACC_RR_TIME=1 to the child, and a model inflate decoy line that must not be counted */
+    const char *envj = "#include <stdio.h>\n#include <stdlib.h>\nint main(int c,char**v){const char*t=getenv(\"UNISACC_RR_TIME\");if(c<2)return 3;if(t&&t[0]=='1')fprintf(stderr,\"RR_TIME\\tmodel\\tstage=lower\\tsource=inflate\\tns=9000000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=300000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=0\\nRR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=0\\nRR_TIME\\tartifact_hit=1\\tmode=5\\n\");return 0;}\n";
+    if (snprintf(envp, sizeof envp, "%s/envtab.cx", base) >= (int)sizeof envp) return 2;
+    if (cx_write(envp, envj, tx_len(envj, 4096))) { ck(0, "write-envtab"); return 1; }
+    if (snprintf(jobs, sizeof jobs, "small\t%s\nbig\t%s\nenvtab\t%s\t--\tx\n", smallp, bigp, envp) >= (int)sizeof jobs) return 2;
     if (cx_write(jobsp, jobs, tx_len(jobs, CAP * 2))) { ck(0, "write-jobs"); return 1; }
     char *av[3]; av[0] = jobsp; av[1] = outdir; av[2] = 0;
     int rc = run(av);
     ck(rc == 0, "exit-zero");
-    ck(at("small\t200\t100\t100\t0\t0") >= 0, "small-parsed");
-    ck(at("big\t4650\t1500\t2400\t750\t0") >= 0, "big-parsed");
-    ck(at("1\tbig") >= 0 && at("1\tbig") < at("2\tsmall"), "ranked-by-total");
+    char tablepath[4600],rawpath[4600];size_t bytes=0;
+    if(cx_fmt(tablepath,sizeof tablepath,"%s/per-object.tsv",outdir))return 2;
+    char *table=cx_read(tablepath,&bytes);
+    ck(table&&field(table,"small",1)==field(table,"small",16)/1000000&&field(table,"big",1)==field(table,"big",16)/1000000&&field(table,"envtab",1)==field(table,"envtab",16)/1000000,"persisted-phase-table");
+    if(!table)return 2;
+    if(cx_fmt(rawpath,sizeof rawpath,"%s/small.rr",outdir))return 2;
+    ck(field(table,"small",2)==reference(rawpath,"inference","lower")/1000000&&field(table,"small",3)==reference(rawpath,"inference","elf")/1000000&&field(table,"small",5)==0,"small-parsed");
+    ck(field(table,"small",4)==-1&&field(table,"small",9)==-1,"unreported-phases-are-unmeasured-not-zero");
+    if(cx_fmt(rawpath,sizeof rawpath,"%s/big.rr",outdir))return 2;
+    ck(field(table,"big",11)==reference(rawpath,"inference","lower")&&field(table,"big",12)==reference(rawpath,"inference","elf")&&field(table,"big",13)==reference(rawpath,"inference","tapecheck")&&field(table,"big",5)==0,"big-parsed");
+    const char *phases[]={"e1","e2","e3","units","prune"};int phases_ok=1;
+    for(int i=0;i<5;i++)if(field(table,"big",6+i)!=reference(rawpath,"inference",phases[i]))phases_ok=0;
+    ck(phases_ok,"all-front-end-phases-and-repeated-invocations-aggregated");
+    ck(field(table,"big",15)==reference(rawpath,"inference",0)&&field(table,"big",16)<field(table,"big",15)&&field(table,"big",1)==field(table,"big",16)/1000000,"total-is-wall-not-inference-sum");
+    ck(ranking(table),"ranked-by-total");
     ck(at("top10\ttotal_ms") >= 0, "top10-header");
-    printf("SPEED_PROBE_CHECKS\tassertions=6\tfailed=%d\n", failed);
+    if(cx_fmt(rawpath,sizeof rawpath,"%s/envtab.rr",outdir))return 2;
+    ck(field(table,"envtab",5)==0&&field(table,"envtab",11)==reference(rawpath,"inference","lower")&&field(table,"envtab",14)==reference(rawpath,"model",0),"tab-argv-env-inference-only");
+    ck(field(table,"envtab",13)==0,"observed-zero-distinguished-from-unmeasured");
+    free(table);
+    ck(at("NOTE\tenvtab\tartifact_hit=1") >= 0 && at("NOTE\tsmall\t") < 0, "artifact-hit-noted");
+    printf("SPEED_PROBE_CHECKS\tassertions=%d\tfailed=%d\n",assertions,failed);
     return failed ? 1 : 0;
 }
