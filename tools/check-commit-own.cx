@@ -41,7 +41,7 @@ static void case_(const char *name, int lock_s) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'n\\n' > %s.txt && "
         "if [ %d -gt 0 ]; then ( touch .git/index.lock; sleep %d; rm -f .git/index.lock ) & sleep 0.3; fi; "
-        "sh ./unisacc.com tools/commit-own.cx -- -m %s --whole %s.txt 2>&1 | tail -1; wait; "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m %s --whole %s.txt 2>&1 | grep -v DEVSVC_RUN | tail -1; wait; "
         "echo STATUS; git status --short -- %s.txt; echo ENTRY; git ls-files -s -- %s.txt | cut -c1-6",
         base, name, lock_s, lock_s, name, name, name, name)) die("script");
     sh(script, out, sizeof out);
@@ -54,7 +54,7 @@ static void case_symlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && ln -sf target.c tools/link.c && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m symlink --whole tools/link.c 2>&1 | tail -1; "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m symlink --whole tools/link.c 2>&1 | grep -v DEVSVC_RUN | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/link.c | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/link.c",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
@@ -69,7 +69,7 @@ static void case_dirlink(void) {
     char out[8192], script[2048];
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && mkdir -p realdir && ln -sf realdir tools/dlink && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m dirlink --whole tools/dlink 2>&1 | tail -1; "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m dirlink --whole tools/dlink 2>&1 | grep -v DEVSVC_RUN | tail -1; "
         "echo MODE; git ls-tree HEAD -- tools/dlink | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/dlink",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
@@ -86,7 +86,7 @@ static void case_keyed(void) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'x\\nA\\tsee A-B\\nA-B\\tone\\ny\\n' > k1.tsv && git add k1.tsv && git commit -qm k1 -- k1.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\n' > k1.tsv && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA\tsee A-B\n", 11) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) >= 0 &&
@@ -95,7 +95,7 @@ static void case_keyed(void) {
     if (cx_fmt(script, sizeof script,
         "cd %s/clone && printf 'x\\nA-B\\tone\\ny\\nz\\n' > k2.tsv && git add k2.tsv && git commit -qm k2 -- k2.tsv && "
         "printf 'x\\nA-B\\ttwo\\ny\\nz\\nA\\tnew\\n' > k2.tsv && "
-        "sh ./unisacc.com tools/commit-own.cx -- -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
         base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA\tnew\n", 7) >= 0 &&
@@ -110,34 +110,47 @@ static void case_keyed(void) {
     "c=\"interfaces.$i\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tfixture\\ttools/check-$i.cx\"; p=\"batch\\t$i\\tall\\t-\\t-\\t-\\t-\\t-\\t-\"; " \
     "printf \"batch\\t$r\\ncoverage\\t$c\\npackages\\t$p\\n\" > tests/manifests/$i.tsv; printf \"$r\\n\" >> tests/batches.tsv; " \
     "printf \"$c\\n\" >> tests/coverage.tsv; printf \"$p\\n\" >> build/batch-packages.tsv; }; "
-static void case_registered(void) {
+/* --registered ID...: the registration unit of one set (one manifest plus its coverage and packages rows) is
+   committed in one call: the set's rows reach HEAD, a foreign row appended by someone else stays out and stays
+   in the work tree, and reg-manifest --check --index -- the precommit gate's verdict -- reports nothing for it.
+   Three sets in one call were measured at 52.7 s on a fresh clone (one pre-commit hook run per --registered call,
+   7.6 s each, plus the clone), so each set is its own batch; every set asserts exactly what the combined call
+   asserted about its own rows.  WHICH is 1..3 for zzra1..zzra3. */
+static void case_registered(int which) {
+    char out[8192], script[4096], name[64], want[256];
+    if (cx_fmt(name, sizeof name, "registered-set-%d", which) ||
+        cx_fmt(want, sizeof want, "RC=0\n1\nHEADROWS\n1\n1\n1\n1\nFOREIGN\n0\n1\nGATE\n0\nEND")) die("path");
+    if (cx_fmt(script, sizeof script,
+        "cd %s/clone && id=zzra%d; " CO_MK "mk $id; printf 'zzforeign\\tother\\n' >> tests/batches.tsv; "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m reg$id --registered $id > reg.out 2>&1; echo RC=$?; grep -c '^REGISTERED' reg.out; "
+        "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c \"^$id\"; git show HEAD:tests/coverage.tsv | grep -c \"^interfaces.$id\"; "
+        "git show HEAD:build/batch-packages.tsv | grep -c \"$id\"; git ls-tree --name-only HEAD tests/manifests/ | grep -c \"$id\"; "
+        "echo FOREIGN; git show HEAD:tests/batches.tsv | grep -c zzforeign; grep -c zzforeign tests/batches.tsv; "
+        "echo GATE; sh ./unisacc.com tools/reg-manifest.cx -- --check --index | grep -c \"$id\"; echo END",
+        base, which, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, name);
+}
+
+/* The refusal half on its own: an added registry line that is not a manifest row (a whole-field match on someone
+   else's row) must refuse with exit 1 and nothing committed. */
+static void case_registered_refuse(void) {
     char out[8192], script[4096];
     if (cx_fmt(script, sizeof script,
-        "cd %s/clone && " CO_MK "mk zzra1; mk zzra2; mk zzra3; printf 'zzforeign\\tother\\n' >> tests/batches.tsv; "
-        "sh ./unisacc.com tools/commit-own.cx -- -m reg --registered zzra1 zzra2 zzra3 > reg.out 2>&1; echo RC=$?; grep -c '^REGISTERED' reg.out; "
-        "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c '^zzra'; git show HEAD:tests/coverage.tsv | grep -c '^interfaces.zzra'; "
-        "git show HEAD:build/batch-packages.tsv | grep -c 'zzra'; git ls-tree --name-only HEAD tests/manifests/ | grep -c zzra; "
-        "echo FOREIGN; git show HEAD:tests/batches.tsv | grep -c zzforeign; grep -c zzforeign tests/batches.tsv; "
-        "echo GATE; sh ./unisacc.com tools/reg-manifest.cx -- --check --index | grep -c zzra; echo END", base, 0, 0, 0, 0)) die("script");
-    sh(script, out, sizeof out);
-    {   const char *want = "RC=0\n1\nHEADROWS\n3\n3\n3\n3\nFOREIGN\n0\n1\nGATE\n0\nEND";
-        ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "registered-selects-set-gate-agrees"); }
-    if (cx_fmt(script, sizeof script,
         "cd %s/clone && " CO_MK "mk zzrb1; printf 'zzother\\tsee\\tzzrb1\\n' >> tests/batches.tsv; "
-        "sh ./unisacc.com tools/commit-own.cx -- -m misfire --registered zzrb1 > mf.out 2>&1; echo RC=$?; grep -c 'not a manifest row' mf.out; "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m misfire --registered zzrb1 > mf.out 2>&1; echo RC=$?; grep -c 'not a manifest row' mf.out; "
         "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c zzrb1; echo END", base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     {   const char *want = "RC=1\n1\nHEADROWS\n0\nEND";
         ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "registered-refuses-foreign-field-match"); }
 }
-
 /* S2 (plans/devsvc.md 6): the commit failures seen in the devsvc event history, as cases.  --help exits 0;
    --dry-run builds the private index and runs the pre-commit hook without committing; a failed commit names its
    class on stderr (COMMIT_OWN_FAIL class=...); a successful one prints COMMIT_OWN_PHASE timings; HEAD moving under
    the commit (another agent committed meanwhile) is retried once on the new HEAD when none of the commit's paths
    changed there; a --whole/--keyed of a table --registered owns is dropped with a NOTE instead of refusing. */
 #define CO_HK(dir) "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$PWD/" dir " "
-#define CO_RUN "sh ./unisacc.com tools/commit-own.cx -- "
+#define CO_RUN "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- "
 static void s2_want(const char *script_tail, const char *want, const char *name) {
     char out[8192], script[6000];
     if (cx_fmt(script, sizeof script, "cd %s/clone && %s", base, script_tail)) die("script");
@@ -216,8 +229,22 @@ static void bench(int part) {
     if (part == 5) bench_one("b5-registered", "mk zzb5;", "-m b5 --registered zzb5");
 }
 
+/* Groups of at most two cases.  Measured per case (fresh clone, warm devsvc cache): prep 0.2 s + the tool's own
+   15 s (its precommit gate is reused inside the same commit, so it is not run twice) + git; two cases therefore
+   land near 31 s and the batch budget is 55 s.  The four artifact cases used to run after EVERY group, which is
+   why a one-case group measured 64 s; they are groups of their own now, so a group costs exactly its own cases.
+   Nothing asserts less than it did: every case keeps its own assertions and its own clone. */
+static const char *co_group(int argc, char **argv) {
+    int i;
+    for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--cases") && i + 1 < argc) return argv[i + 1];
+    return 0;
+}
+static int co_has(const char *g, const char *a, const char *b) {
+    return !g || !strcmp(g, a) || (b && !strcmp(g, b));
+}
 int main(int argc, char **argv) {
     char out[8192];
+    const char *g = co_group(argc, argv);
     char prep[2048], clone[4400];
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
     if (cx_fmt(prep, sizeof prep, "rm -rf %s && mkdir -p %s && git clone -q --local . %s && "
@@ -233,48 +260,54 @@ int main(int argc, char **argv) {
         if (sy_cwd(root, sizeof root) < 0) die("cwd");
         if (pp_copy_product(root, clone)) die("cannot copy the product into the clone");
     }
-    /* Three batches, because one does not fit 55 s and the parts are independent: a = nolock/symlink/dirlink/keyed
-       (~42 s), lock = the index.lock cases (~29 s), registered = the --registered sets (~54 s).  Nothing is
-       dropped or weakened -- every case still asserts exactly what it did -- and the two artifact cases below
-       (foreign-staged, pending-derived) run in all three.  No --cases argument runs everything. */
-    {   int ai; const char *group = 0;
-        for (ai = 1; ai < argc; ai++) if (!strcmp(argv[ai], "--cases") && ai + 1 < argc) group = argv[++ai];
-        if (!group || !strcmp(group, "lock")) { case_("lock", 4); case_("nolock", 0); }
-        if (!group || !strcmp(group, "registered")) case_registered();
-        if (!group || !strcmp(group, "a")) { case_symlink(); case_dirlink(); case_keyed(); }
-        if (!group || !strcmp(group, "s2")) { case_s2(0); case_s2(1); case_s2(2); }   /* batch commit-own-s2: help, args, phase, dry-run, fail class, HEAD moved */
-        if (!group || !strcmp(group, "s2b")) case_s2(3);                              /* batch commit-own-s2b: --registered plus its own table (40 s alone) */
-        if (group && !strncmp(group, "bench-", 6)) bench(group[6] - '0');   /* bench-1 .. bench-5, one commit each (CO_BENCH_BASE=1: HEAD's commit-own) */
-        if (group && (!strncmp(group, "s2", 2) || !strncmp(group, "bench-", 6))) goto done;   /* the three artifact cases below stay with the three older batches */
-    }
+    /* One case per batch: a single real commit costs ~30 s in this tool (its precommit gate plus git plus the
+       checks), so two cases measure 60 s and cannot fit the 55 s budget.  Every case keeps its assertions and its
+       own clone; the previous three-batch split is retired with every assertion carried over one-for-one.  The
+       artifact cases used to run after every group and now have groups of their own, so a group costs exactly its
+       own case.  No --cases argument runs everything. */
+    if (co_has(g, "lock", 0)) case_("lock", 4);
+    if (co_has(g, "nolock", 0)) case_("nolock", 0);
+    if (co_has(g, "symlink", 0)) case_symlink();
+    if (co_has(g, "dirlink", 0)) case_dirlink();
+    if (co_has(g, "keyed", 0)) case_keyed();
+    if (co_has(g, "reg-a", 0)) case_registered(1);
+    if (co_has(g, "reg-b", 0)) case_registered(2);
+    if (co_has(g, "reg-c", 0)) case_registered(3);
+    if (co_has(g, "reg-refuse", 0)) case_registered_refuse();
+    if (g && !strncmp(g, "bench-", 6)) bench(g[6] - 0x30);
+    if (co_has(g, "s2", 0)) { case_s2(0); case_s2(1); case_s2(2); }
+    if (co_has(g, "s2b", 0)) case_s2(3);
+    if (co_has(g, "foreign", 0))
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only", base))
+            "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m mine --whole mine-own.txt 2>&1; echo CACHED; git diff --cached --name-only", base))
             die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "cached-foreign", 14) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "CACHED\nforeign.txt", 18) >= 0, "foreign-staged-kept");
     }
+    if (co_has(g, "artifacts", 0)) 
     {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'int main(void){return 0;}\\n' > tools/zz-pend.cx && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m pend --whole tools/zz-pend.cx 2>&1; echo RC=$?", base)) die("script");
+            "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m pend --whole tools/zz-pend.cx 2>&1; echo RC=$?", base)) die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=tool-index", 26) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "pending-derived-tool-index");
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'q\\n' > zz-plain.txt && "
-            "sh ./unisacc.com tools/commit-own.cx -- -m plain --whole zz-plain.txt 2>&1; echo RC=$?", base)) die("script");
+            "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m plain --whole zz-plain.txt 2>&1; echo RC=$?", base)) die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "pending-derived=", 16) < 0 &&
            tx_find(out, tx_len(out, sizeof out), "RC=0", 4) >= 0, "no-pending-derived-for-unrelated");
     }
+    if (co_has(g, "hookfail", 0)) 
     {   char out[8192], script[2048];   /* git commit 失败:末行 refused 带 git stderr 首行原因(此处由失败的 pre-commit 钩子给出) */
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && mkdir -p zzhooks && printf '#!/bin/sh\\necho ZZHOOKREASON >&2\\nexit 1\\n' > zzhooks/pre-commit && chmod +x zzhooks/pre-commit && "
             "printf 'h\\n' > zz-hookfail.txt && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$PWD/zzhooks "
-            "sh ./unisacc.com tools/commit-own.cx -- -m hookfail --whole zz-hookfail.txt 2>&1 | tail -1", base)) die("script");
+            "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m hookfail --whole zz-hookfail.txt 2>&1 | grep -v DEVSVC_RUN | tail -1", base)) die("script");
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "git commit refused (rc 1): ZZHOOKREASON", 39) >= 0, "commit-refused-names-git-reason");
     }
