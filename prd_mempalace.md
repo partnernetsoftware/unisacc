@@ -18,10 +18,13 @@ flowchart LR
     V66["0.0.66 已公开,备份 ~/.cache/unisacc/ape-0.0.66"]
     V67["0.0.67 已公开 Latest 已装(APE a99ea71d)<br/>release/、plans/release-notes-0.0.67.md"]
     V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
-    V69["0.0.69 netraw 计划"]
-    V70["0.0.70 cxmod 内存安全乙期 计划"]
-    ECO["0.0.71 至 0.0.74 生态门路线(建议)<br/>G0 推算 0.0.74,G1 不早于 0.0.76<br/>prd_cx.md 0.9"]
-    V66 --> V67 --> V68 --> V69 --> V70 --> ECO
+    V69["0.0.69 prune 原样判定前置(性能 R1)"]
+    V70["0.0.70 cxmod 内存安全乙期"]
+    V71["0.0.71 链接单元一期(性能 R2)"]
+    V72["0.0.72 netraw"]
+    ECO["0.0.73 至 0.0.76 生态门路线(建议)<br/>G0 推算 0.0.76<br/>prd_cx.md 0.9"]
+    PERF["0.0.77 执行器吞吐、0.0.78 链接单元二期<br/>prd.md 候选池 性能新方向"]
+    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> ECO --> PERF
   end
   subgraph 发布
     REL["发布 12 步与回滚<br/>release/rollback.txt、archive 起链配方节"]
