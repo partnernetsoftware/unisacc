@@ -1,0 +1,127 @@
+/* tools/check-flowdoc.cx -- cxlib.flowdoc: section location, Chinese headings, set/append/remove,
+   expect_sha conflict refusal, mermaid node rewrite and edge add/remove, root escape refusal.
+   Run: sh ./unisacc.com tools/check-flowdoc.cx     (last line CHECK_FLOWDOC<TAB>failed=N)
+   Works in a temporary directory under /tmp; removes its files at the end. */
+#pragma unisa use cxlib.flowdoc
+#pragma unisa use cxlib.flowfile
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define SF(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) failed++; } while (0)
+
+static int failed;
+static ff_out *cur_o;
+static char root[512];
+static char args[8192];
+
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-flowdoc.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+    if (!ok && cur_o) printf("  why=%s\n", cur_o->why);
+}
+
+static const char *A(const char *rest) {
+    SF(args, sizeof args, "root=%s;path=d.md;%s", root, rest);
+    return args;
+}
+
+static const char *DOC =
+    "# 标题\n\nintro\n\n## 候选池\n\n### T\n\nt1\nt2\n\n### U\n\nu1\n\n## 图\n\n```mermaid\nflowchart LR\n  A[旧名] --> B\n  B --> C\n```\n\n## 尾\n\n```\n# 不是标题\n```\nend\n";
+
+static void reset(void) {
+    char p[600];
+    SF(p, sizeof p, "%s/d.md", root);
+    FILE *f = fopen(p, "w");
+    fputs(DOC, f);
+    fclose(f);
+}
+
+static int has(ff_out *o, const char *s) { return o->buf && tx_find(o->buf, o->n, s, (long)strlen(s)) >= 0; }
+
+static void whole(ff_out *o) { ff_out_free(o); fd_run("doc.get", A(""), o); }
+
+int main(void) {
+    ff_out o;
+    cur_o = &o;
+    SF(root, sizeof root, "/tmp/check-flowdoc-%d", (int)getpid());
+    mkdir(root, 0755);
+    reset();
+
+    ck(fd_run("doc.get", A("section=候选池/T"), &o) == 0 && has(&o, "### T\n\nt1\nt2\n\n") && !has(&o, "u1"), "get_nested_chinese");
+    ck(strlen(o.sha) == 64, "get_sha");
+    ff_out_free(&o);
+    ck(fd_run("doc.get", A("section=T"), &o) == 0 && has(&o, "t1"), "get_short_path");
+    ff_out_free(&o);
+    ck(fd_run("doc.get", A("section=不存在"), &o) == 1 && !strcmp(o.err, "ENOSEC"), "get_missing");
+    ff_out_free(&o);
+    ck(fd_run("doc.get", A("section=不是标题"), &o) == 1, "fenced_heading_ignored");
+    ff_out_free(&o);
+    ck(fd_run("doc.list", A(""), &o) == 0 && has(&o, "3\t标题/候选池/T\n") && has(&o, "2\t标题/图\n") && !has(&o, "不是标题"), "list_tree");
+    ff_out_free(&o);
+    ck(fd_run("doc.list", A("section=候选池"), &o) == 0 && has(&o, "3\tU\n"), "list_sub");
+    ff_out_free(&o);
+
+    ck(fd_run("doc.append", A("section=候选池/T;line=t3 决定"), &o) == 0, "append_ok");
+    whole(&o);
+    ck(has(&o, "t2\nt3 决定\n\n### U"), "append_place");
+    ff_out_free(&o);
+    ck(fd_run("doc.remove", A("section=候选池/T;match=t3"), &o) == 0, "remove_ok");
+    whole(&o);
+    ck(has(&o, "t2\n\n### U") && !has(&o, "t3"), "remove_place");
+    ff_out_free(&o);
+    ck(fd_run("doc.remove", A("section=候选池/T;match=t"), &o) == 1 && !strcmp(o.err, "EMULTI"), "remove_multi");
+    ff_out_free(&o);
+    ck(fd_run("doc.remove", A("section=候选池/T;match=u1"), &o) == 1 && !strcmp(o.err, "ENOMATCH"), "remove_outside_section");
+    ff_out_free(&o);
+
+    ck(fd_run("doc.set", A("section=候选池/U;content=新内容%0A"), &o) == 0, "set_ok");
+    whole(&o);
+    ck(has(&o, "### U\nnew") == 0 && has(&o, "### U\n新内容\n\n## 图"), "set_place");
+    ff_out_free(&o);
+
+    /* concurrency: read sha, another writer changes the file, write with old sha is refused */
+    fd_run("doc.get", A("section=候选池/T"), &o);
+    char old[65];
+    for (int i = 0; i < 65; i++) old[i] = o.sha[i];
+    ff_out_free(&o);
+    fd_run("doc.append", A("section=尾;line=别人写的"), &o);
+    ff_out_free(&o);
+    char rest[200];
+    SF(rest, sizeof rest, "section=候选池/T;line=x;expect_sha=%s", old);
+    ck(fd_run("doc.append", A(rest), &o) == 1 && !strcmp(o.err, "ESHA"), "expect_sha_conflict");
+    ff_out_free(&o);
+    whole(&o);
+    ck(!has(&o, "\nx\n") && has(&o, "别人写的"), "conflict_nothing_written");
+    ff_out_free(&o);
+
+    ck(fd_run("doc.mermaid", A("section=图;old=旧名;new=新名"), &o) == 0, "mermaid_node_ok");
+    whole(&o);
+    ck(has(&o, "A[新名] --> B") && !has(&o, "旧名"), "mermaid_node_place");
+    ff_out_free(&o);
+    ck(fd_run("doc.mermaid", A("section=图;new=  C --> D"), &o) == 0, "mermaid_edge_add");
+    whole(&o);
+    ck(has(&o, "B --> C\n  C --> D\n```"), "mermaid_edge_add_place");
+    ff_out_free(&o);
+    ck(fd_run("doc.mermaid", A("section=图;old=B --> C;new="), &o) == 0, "mermaid_edge_remove");
+    whole(&o);
+    ck(!has(&o, "B --> C") && has(&o, "C --> D"), "mermaid_edge_remove_place");
+    ff_out_free(&o);
+    ck(fd_run("doc.mermaid", A("section=候选池;old=t1;new=z"), &o) == 1 && !strcmp(o.err, "ENOMATCH"), "mermaid_only_in_block");
+    ff_out_free(&o);
+
+    SF(args, sizeof args, "root=%s;path=../outside.md;section=a;line=x", root);
+    ck(fd_run("doc.append", args, &o) == 1, "outside_root_refused");
+    ff_out_free(&o);
+    SF(args, sizeof args, "root=%s;path=d.md;section=T;line=x", root);
+    ck(fd_run("doc.bogus", args, &o) == 1 && !strcmp(o.err, "EOP"), "bad_op");
+    ff_out_free(&o);
+
+    char p[600];
+    SF(p, sizeof p, "%s/d.md", root);
+    unlink(p);
+    rmdir(root);
+    printf("CHECK_FLOWDOC\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

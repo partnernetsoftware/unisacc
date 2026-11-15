@@ -1,0 +1,304 @@
+/* tools/cxlib/flowdoc.cx -- devsvc document operators over Markdown sections: doc.get, doc.set,
+   doc.append, doc.remove, doc.list, doc.mermaid.
+
+   Interface (use cxlib.flowdoc):
+     int fd_run(const char *op, const char *args, ff_out *out);   0 on success, else out->rc (1)
+   args are "k=v;k=v" as in cxlib.flowfile (same escaping, key@=PATH reads a file).
+
+   Keys: path (the document), section ("A/B/C": heading titles, trimmed, each one nested under the
+   previous; "" or absent = whole document for get/list), root (else UNISACC_FLOW_ROOT).
+     doc.get      out->buf = the section (heading line included); sha = sha256 of the whole file
+     doc.set      content [expect_sha]   replace the section body (heading kept); content without a
+                  final newline gets one
+     doc.append   line [expect_sha]      add one line at the end of the section body (before the
+                  trailing blank lines)
+     doc.remove   match [expect_sha]     delete the one section line containing match (ENOMATCH/EMULTI)
+     doc.list     out->buf = "LEVEL<TAB>PATH" per heading under the section
+     doc.mermaid  old new [expect_sha]   inside the ```mermaid blocks of the section: old must occur
+                  exactly once and is replaced by new (node text change); old empty = append line new
+                  as a new line before the closing fence of the first block (add an edge); new empty =
+                  delete the line containing old (remove an edge)
+   Writes go through file.write of cxlib.flowfile: atomic, root bound (EOUTSIDE), expect_sha checked
+   against the file as read (ESHA when someone else wrote in between).  Locking (doc:<path>) is the
+   caller's job (devsvc flow / CLI take the lock); the sha check stays as the last guard.
+   Headings inside ``` fences are ignored.  Failure names: those of flowfile plus ENOSEC (section not
+   found), EMULTISEC (ambiguous section). */
+#pragma unisa module flowdoc
+#pragma unisa use cxlib.flowfile
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+/* checked formatting: a truncated result is cut at the bound (diagnostic text only) */
+#define FD_FMT(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); (void)f_; } while (0)
+
+static void fd_cp(char *d, const char *s, long n) {
+    for (long i = 0; i < n; i++) d[i] = s[i];
+}
+
+static void fd_fail(ff_out *o, const char *err, const char *why) {
+    long i = 0;
+    o->rc = 1;
+    while (err[i] && i < 23) { o->err[i] = err[i]; i++; }
+    o->err[i] = 0;
+    FD_FMT(o->why, sizeof o->why, "%s: %s", err, why);
+}
+
+/* heading level of line [s,e) or 0 */
+static int fd_level(const char *s, long n) {
+    int l = 0;
+    while (l < n && s[l] == '#') l++;
+    if (l == 0 || l > 6 || l >= n || s[l] != ' ') return 0;
+    return l;
+}
+
+/* compare trimmed title of heading line with component c[0..cn) */
+static int fd_title_eq(const char *s, long n, int lv, const char *c, long cn) {
+    long a = lv, b = n;
+    while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '#')) b--;
+    while (b > a && (s[b - 1] == ' ')) b--;
+    if (b - a != cn) return 0;
+    for (long i = 0; i < cn; i++) if (s[a + i] != c[i]) return 0;
+    return 1;
+}
+
+typedef struct { long off, end; int lv; } fd_line;
+
+/* index lines: off/end per line, lv = heading level (0 also inside fences) */
+static long fd_lines(const char *b, long n, fd_line **out) {
+    long cnt = 0, i, k = 0;
+    for (i = 0; i < n; i++) if (b[i] == '\n') cnt++;
+    cnt++;
+    fd_line *L = (fd_line *)mm_alloc(sizeof(fd_line) * (cnt + 1));
+    if (!L) return -1;
+    int fence = 0;
+    long s = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || b[i] == '\n') {
+            if (i == n && s == n) break;
+            L[k].off = s; L[k].end = i;
+            long ln = i - s;
+            if (ln >= 3 && b[s] == '`' && b[s + 1] == '`' && b[s + 2] == '`') { fence = !fence; L[k].lv = 0; }
+            else L[k].lv = fence ? 0 : fd_level(b + s, ln);
+            k++;
+            s = i + 1;
+        }
+    }
+    *out = L;
+    return k;
+}
+
+/* locate section: *h = heading line index (-1 whole doc), *e = first line after the section */
+static int fd_find(const char *b, fd_line *L, long nl, const char *sec, long *h, long *e, ff_out *o) {
+    long lo = 0, hi = nl, head = -1;
+    int plv = 0;
+    const char *p = sec ? sec : "";
+    while (*p) {
+        const char *q = p;
+        while (*q && *q != '/') q++;
+        long cn = q - p, hit = -1, hits = 0;
+        for (long i = lo; i < hi; i++)
+            if (L[i].lv > plv && fd_title_eq(b + L[i].off, L[i].end - L[i].off, L[i].lv, p, cn)) { if (hit < 0) hit = i; hits++; }
+        if (hits == 0) { fd_fail(o, "ENOSEC", sec); return -1; }
+        if (hits > 1) { fd_fail(o, "EMULTISEC", sec); return -1; }
+        head = hit; plv = L[hit].lv; lo = hit + 1;
+        long j = lo;
+        while (j < hi && !(L[j].lv && L[j].lv <= plv)) j++;
+        hi = j;
+        p = *q ? q + 1 : q;
+    }
+    *h = head; *e = hi;
+    return 0;
+}
+
+static int fd_load(const char *args, char **buf, long *n, char *sha, ff_out *o) {
+    ff_out r;
+    memset(&r, 0, sizeof r);
+    if (ff_run("file.read", args, &r)) { *o = r; return -1; }
+    *buf = r.buf; *n = r.n;
+    fd_cp(sha, r.sha, 65);
+    return 0;
+}
+
+/* write head[0..hn) + mid + tail via file.write with expect_sha = sha of what was read */
+static int fd_store(const char *args, const char *b, long cut0, const char *mid, long mn, long cut1, long n, const char *sha, ff_out *o) {
+    long tot = cut0 + mn + (n - cut1);
+    char *nb = (char *)mm_alloc(tot + 1);
+    if (!nb) { fd_fail(o, "ENOMEM", "buffer"); return -1; }
+    fd_cp(nb, b, cut0);
+    fd_cp(nb + cut0, mid, mn);
+    fd_cp(nb + cut0 + mn, b + cut1, n - cut1);
+    char *esc = (char *)mm_alloc(tot * 3 + 1);
+    long en = esc ? ff_escape(nb, tot, esc, tot * 3 + 1) : -1;
+    mm_free(nb);
+    if (en < 0) { if (esc) mm_free(esc); fd_fail(o, "ENOMEM", "escape"); return -1; }
+    esc[en] = 0;   /* ff_escape does not terminate */
+    long an = (long)strlen(args) + en + 200;
+    char *a2 = (char *)mm_alloc(an);
+    if (!a2) { mm_free(esc); fd_fail(o, "ENOMEM", "args"); return -1; }
+    char *ex = 0; long exn = 0;
+    int have = ff_arg(args, "expect_sha", &ex, &exn);
+    if (have == 1 && strcmp(ex, sha) != 0) {
+        mm_free(ex); mm_free(esc); mm_free(a2);
+        fd_fail(o, "ESHA", "expect_sha differs from the current file");
+        return -1;
+    }
+    if (have == 1) mm_free(ex);
+    /* only root and path pass through: file.write takes the first value of a key */
+    long w = 0;
+    a2[0] = 0;
+    char *kv = 0; long kn = 0;
+    if (ff_arg(args, "root", &kv, &kn) == 1) {
+        w += snprintf(a2 + w, an - w, "root=");
+        long r = ff_escape(kv, kn, a2 + w, an - w);
+        mm_free(kv);
+        if (r > 0) w += r;
+        w += snprintf(a2 + w, an - w, ";");
+    }
+    if (ff_arg(args, "path", &kv, &kn) == 1) {
+        w += snprintf(a2 + w, an - w, "path=");
+        long r = ff_escape(kv, kn, a2 + w, an - w);
+        mm_free(kv);
+        if (r > 0) w += r;
+        w += snprintf(a2 + w, an - w, ";");
+    }
+    FD_FMT(a2 + w, an - w, "expect_sha=%s;content=%s", sha, esc);
+    mm_free(esc);
+    int rc = ff_run("file.write", a2, o);
+    mm_free(a2);
+    return rc ? -1 : 0;
+}
+
+static int fd_need(const char *args, const char *k, char **v, ff_out *o) {
+    long n = 0;
+    int r = ff_arg(args, k, v, &n);
+    if (r == 1) return 0;
+    fd_fail(o, r == 0 ? "EARG" : "EESCAPE", k);
+    return -1;
+}
+
+int fd_run(const char *op, const char *args, ff_out *o) {
+    memset(o, 0, sizeof *o);
+    char *b = 0, *sec = 0; long n = 0, sn = 0;
+    char sha[65];
+    if (fd_load(args, &b, &n, sha, o)) return o->rc;
+    int hs = ff_arg(args, "section", &sec, &sn);
+    if (hs < 0) { mm_free(b); fd_fail(o, "EESCAPE", "section"); return 1; }
+    fd_line *L = 0;
+    long nl = fd_lines(b, n, &L), h = -1, e = 0;
+    int rc = 0;
+    if (nl < 0) { fd_fail(o, "ENOMEM", "lines"); rc = 1; goto done; }
+    if (fd_find(b, L, nl, hs == 1 ? sec : "", &h, &e, o)) { rc = 1; goto done; }
+    long s0 = h < 0 ? 0 : L[h].off;
+    long body = h < 0 ? 0 : (h + 1 < nl ? L[h + 1].off : n);
+    long send = e < nl ? L[e].off : n;
+    if (!strcmp(op, "doc.get")) {
+        o->buf = (char *)mm_alloc(send - s0 + 1);
+        fd_cp(o->buf, b + s0, send - s0); o->buf[send - s0] = 0; o->n = send - s0;
+        fd_cp(o->sha, sha, 65);
+    } else if (!strcmp(op, "doc.list")) {
+        long cap = 64, w = 0;
+        for (long i = h + 1; i < e; i++) cap += L[i].end - L[i].off + 16;
+        o->buf = (char *)mm_alloc(cap);
+        char stack[7][512];
+        int top = 0;
+        for (long i = h + 1; i < e; i++) if (L[i].lv) {
+            long a = L[i].off + L[i].lv + 1, z = L[i].end;
+            while (z > a && (b[z - 1] == ' ' || b[z - 1] == '\r')) z--;
+            int lv = L[i].lv;
+            long tl = z - a; if (tl > 500) tl = 500;
+            fd_cp(stack[lv], b + a, tl); stack[lv][tl] = 0;
+            for (int k = lv + 1; k < 7; k++) stack[k][0] = 0;
+            top = lv;
+            w += snprintf(o->buf + w, cap - w, "%d\t", lv);
+            int first = 1;
+            int base = h < 0 ? 0 : L[h].lv;
+            for (int k = base + 1; k <= top; k++) if (stack[k][0]) {
+                w += snprintf(o->buf + w, cap - w, "%s%s", first ? "" : "/", stack[k]); first = 0;
+            }
+            w += snprintf(o->buf + w, cap - w, "\n");
+        }
+        o->n = w;
+        fd_cp(o->sha, sha, 65);
+    } else if (!strcmp(op, "doc.set")) {
+        char *c = 0;
+        if (h < 0) { fd_fail(o, "EARG", "doc.set needs a section"); rc = 1; goto done; }
+        if (fd_need(args, "content", &c, o)) { rc = 1; goto done; }
+        long cn = (long)strlen(c);
+        char *m = (char *)mm_alloc(cn + 3);
+        fd_cp(m, c, cn);
+        if (cn == 0 || m[cn - 1] != '\n') m[cn++] = '\n';
+        if (e < nl) m[cn++] = '\n';
+        mm_free(c);
+        if (fd_store(args, b, body, m, cn, send, n, sha, o)) rc = 1;
+        mm_free(m);
+    } else if (!strcmp(op, "doc.append")) {
+        char *c = 0;
+        if (fd_need(args, "line", &c, o)) { rc = 1; goto done; }
+        long at = e;
+        while (at - 1 > h && L[at - 1].end == L[at - 1].off) at--;
+        long cut = at < nl ? L[at].off : n;
+        long cn = (long)strlen(c);
+        char *m = (char *)mm_alloc(cn + 3);
+        long mn = 0;
+        if (cut == n && n > 0 && b[n - 1] != '\n') m[mn++] = '\n';
+        fd_cp(m + mn, c, cn); mn += cn; m[mn++] = '\n';
+        mm_free(c);
+        if (fd_store(args, b, cut, m, mn, cut, n, sha, o)) rc = 1;
+        mm_free(m);
+    } else if (!strcmp(op, "doc.remove")) {
+        char *c = 0;
+        if (fd_need(args, "match", &c, o)) { rc = 1; goto done; }
+        long hit = -1, hits = 0;
+        for (long i = h + 1; i < e; i++) {
+            long ln = L[i].end - L[i].off;
+            if (tx_find(b + L[i].off, ln, c, (long)strlen(c)) >= 0) { hit = i; hits++; }
+        }
+        mm_free(c);
+        if (hits != 1) { fd_fail(o, hits ? "EMULTI" : "ENOMATCH", "match"); rc = 1; goto done; }
+        long c1 = hit + 1 < nl ? L[hit + 1].off : n;
+        if (fd_store(args, b, L[hit].off, "", 0, c1, n, sha, o)) rc = 1;
+    } else if (!strcmp(op, "doc.mermaid")) {
+        char *ol = 0, *nw = 0; long oln = 0, nwn = 0;
+        if (ff_arg(args, "old", &ol, &oln) < 0 || ff_arg(args, "new", &nw, &nwn) < 0) { fd_fail(o, "EESCAPE", "old/new"); rc = 1; goto done; }
+        oln = ol ? (long)strlen(ol) : 0; nwn = nw ? (long)strlen(nw) : 0;
+        long hitline = -1, hitoff = -1, hits = 0, close1 = -1;
+        int in = 0;
+        for (long i = h + 1; i < e; i++) {
+            long ln = L[i].end - L[i].off;
+            const char *s = b + L[i].off;
+            if (ln >= 3 && s[0] == '`' && s[1] == '`' && s[2] == '`') {
+                if (in) { if (close1 < 0) close1 = i; in = 0; }
+                else if (ln >= 10 && !memcmp(s + 3, "mermaid", 7)) in = 1;
+                continue;
+            }
+            if (in && oln) {
+                long at = 0, f;
+                while ((f = tx_find(s + at, ln - at, ol, oln)) >= 0) { hits++; hitline = i; hitoff = L[i].off + at + f; at += f + oln; }
+            }
+        }
+        if (!oln && !nwn) { fd_fail(o, "EARG", "old or new"); rc = 1; }
+        else if (!oln) {
+            if (close1 < 0) { fd_fail(o, "ENOMATCH", "no mermaid block"); rc = 1; }
+            else {
+                char *m = (char *)mm_alloc(nwn + 2);
+                fd_cp(m, nw, nwn); m[nwn] = '\n';
+                if (fd_store(args, b, L[close1].off, m, nwn + 1, L[close1].off, n, sha, o)) rc = 1;
+                mm_free(m);
+            }
+        } else if (hits != 1) { fd_fail(o, hits ? "EMULTI" : "ENOMATCH", "old in mermaid"); rc = 1; }
+        else if (!nwn) {
+            long c1 = hitline + 1 < nl ? L[hitline + 1].off : n;
+            if (fd_store(args, b, L[hitline].off, "", 0, c1, n, sha, o)) rc = 1;
+        } else if (fd_store(args, b, hitoff, nw, nwn, hitoff + oln, n, sha, o)) rc = 1;
+        if (ol) mm_free(ol);
+        if (nw) mm_free(nw);
+    } else { fd_fail(o, "EOP", op); rc = 1; }
+done:
+    if (L) mm_free(L);
+    if (sec) mm_free(sec);
+    mm_free(b);
+    if (rc) o->rc = 1;
+    return rc;
+}
