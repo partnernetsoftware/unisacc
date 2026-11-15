@@ -16,6 +16,13 @@
  *   (6) neg-row-drop      the last row removed: --check rc 1 with DIFF
  *   (7) neg-missing       no table at all: --check rc 1 with DIFF
  *   (8) neg-usage         no mode / unknown mode: rc 2
+ *   (9) fallthrough-*     the fall-through sidecar build/chain-phase-fallthrough.tsv: written bytes equal
+ *                         the tree's, rows match the phase table, every outer row's set contains its deps
+ *                         closure and every lane row is "-", the pack path holds no g3/kernels-g3/compare,
+ *                         compare holds every earlier row, and a drifted sidecar fails --check.
+ *       Not checked here: the sidecar against the main-flow phase order of tools/candidate-chain.cx.
+ *       That comparison moves to the second ticket, where candidate-chain prints a read-only main-flow
+ *       step table (the same table its real execution walks) and the check compares against that output.
  * Prints PASS/FAIL<TAB>chain-phases-gen.NAME and CHECK_CHAIN_PHASES_GEN<TAB>checks=N<TAB>failed=M;
  * exit 0 iff failed==0.
  */
@@ -81,6 +88,81 @@ static const char *inputs_lint(const char *in_text) {
         p = e + 1;
     }
     return row == nid ? 0 : "row count";
+}
+
+/* Fall-through sidecar (build/chain-phase-fallthrough.tsv). The phase table and the sidecar are parsed
+ * into parallel arrays; a set is the listed ids closed under deps. */
+static char ft_ids[600][80], *ft_deps[600], *ft_lane[600], *ft_list[600];
+static int ft_rows;
+static int ft_index(const char *s, size_t n) {
+    for (int i = 0; i < ft_rows; i++) if (strlen(ft_ids[i]) == n && !memcmp(ft_ids[i], s, n)) return i;
+    return -1;
+}
+static char *ft_dup(const char *s, size_t n) { char *r = malloc(n + 1); if (!r) exit(2); for (size_t i = 0; i < n; i++) r[i] = s[i]; r[n] = 0; return r; }
+/* Returns 0 ok, else a short reason. */
+static const char *ft_load(const char *tbl_text, const char *side) {
+    int row = 0; ft_rows = 0;
+    for (const char *p = tbl_text; *p;) {
+        const char *e = strchr(p, '\n'), *c[7]; int k = 0; if (!e) return "table unterminated";
+        if (*p != '#') {
+            for (const char *q = p; q < e && k < 7; q++) if (*q == '\t') c[k++] = q;
+            if (k < 6 || ft_rows == 600 || c[1] - c[0] - 1 >= 80) return "table row";
+            for (size_t i = 0; i < (size_t)(c[1] - c[0] - 1); i++) ft_ids[ft_rows][i] = c[0][1 + i];
+            ft_ids[ft_rows][c[1] - c[0] - 1] = 0;
+            ft_deps[ft_rows] = ft_dup(c[3] + 1, (size_t)(c[4] - c[3] - 1));
+            ft_lane[ft_rows] = ft_dup(c[4] + 1, (size_t)(c[5] - c[4] - 1));
+            ft_rows++;
+        }
+        p = e + 1;
+    }
+    for (const char *p = side; *p;) {
+        const char *e = strchr(p, '\n'); if (!e) return "sidecar unterminated";
+        if (*p != '#') {
+            const char *t = memchr(p, '\t', (size_t)(e - p));
+            if (!t || row >= ft_rows) return "sidecar row count";
+            if ((size_t)(t - p) != strlen(ft_ids[row]) || memcmp(p, ft_ids[row], (size_t)(t - p))) return "sidecar row id";
+            if (t + 1 == e) return "sidecar empty list";
+            ft_list[row++] = ft_dup(t + 1, (size_t)(e - t - 1));
+        }
+        p = e + 1;
+    }
+    return row == ft_rows ? 0 : "sidecar row count";
+}
+/* set[i]=1 for every id of the comma list and, transitively, of their deps; -1 on an unknown or forward id */
+static int ft_close(const char *list, int self, char *set) {
+    int stack[600], sp = 0;
+    if (!strcmp(list, "-")) return 0;
+    for (const char *s = list;;) {
+        const char *c = strchr(s, ','); size_t n = c ? (size_t)(c - s) : strlen(s);
+        int i = ft_index(s, n); if (i < 0 || i >= self) return -1;
+        if (!set[i]) { set[i] = 1; stack[sp++] = i; }
+        if (!c) break;
+        s = c + 1;
+    }
+    while (sp) {
+        int at = stack[--sp];
+        if (!strcmp(ft_deps[at], "-")) continue;
+        for (const char *s = ft_deps[at];;) {
+            const char *c = strchr(s, ','); size_t n = c ? (size_t)(c - s) : strlen(s);
+            int i = ft_index(s, n); if (i < 0 || i >= at) return -1;
+            if (!set[i]) { set[i] = 1; stack[sp++] = i; }
+            if (!c) break;
+            s = c + 1;
+        }
+    }
+    return 0;
+}
+/* The comparison of the sidecar with the main-flow phase order of tools/candidate-chain.cx is not made
+ * here: a check may not anchor on source text (cx-lint R4). It belongs to the second ticket (the
+ * chain-run scheduling change): candidate-chain prints a read-only main-flow step table, the same
+ * table its real execution walks, and the check compares the sidecar with that output. */
+static int ft_has(const char *list, const char *prefix_or_id, int prefix) {
+    for (const char *s = list;;) {
+        const char *c = strchr(s, ','); size_t n = c ? (size_t)(c - s) : strlen(s), m = strlen(prefix_or_id);
+        if (prefix ? (n >= m && !memcmp(s, prefix_or_id, m)) : (n == m && !memcmp(s, prefix_or_id, m))) return 1;
+        if (!c) return 0;
+        s = c + 1;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -281,6 +363,55 @@ int main(int argc, char **argv) {
         char cmpcmd[6000]; SP(cmpcmd, sizeof cmpcmd, "cmp -s '%s/build/chain-phase-inputs.tsv' build/chain-phase-inputs.tsv", fix);
         ck(nonempty && side && sh(cmpcmd, out, sizeof out) == 0, "inputs-write-equals-tree");
         free(side);
+    }
+    /* Fall-through sidecar: what an outer "--resume --until X" call walks through, joined by id. */
+    {   size_t fn2 = 0; char *fside = cx_read("build/chain-phase-fallthrough.tsv", &fn2);
+        const char *lw = fside && tree ? ft_load(tree, fside) : "read";
+        static const char *outer5[5] = {"kernels-g2", "kernels-g3", "compare", "cache-manager", "pack"};
+        static char set[600], dset[600];
+        char cmpcmd[6000]; SP(cmpcmd, sizeof cmpcmd, "cmp -s '%s/build/chain-phase-fallthrough.tsv' build/chain-phase-fallthrough.tsv", fix);
+        ck(fside && sh(cmpcmd, out, sizeof out) == 0, "fallthrough-write-equals-tree");
+        if (lw) printf("NOTE\tfallthrough load: %s\n", lw);
+        ck(!lw && fside && strstr(fside, "# id\tfallthrough\n# generated by tools/chain-phases-gen.cx --write; do not edit\n") == fside, "fallthrough-rows-match-table");
+        /* every outer row: its set contains the whole deps closure; every lane row: "-" */
+        {   int ok = !lw, outers = 0, lanes = 0;
+            for (int i = 0; ok && i < ft_rows; i++) {
+                if (strcmp(ft_lane[i], "-")) { lanes++; if (strcmp(ft_list[i], "-")) ok = 0; continue; }
+                outers++;
+                memset(set, 0, sizeof set); memset(dset, 0, sizeof dset);
+                if (ft_close(ft_list[i], i, set) || ft_close(ft_deps[i], i, dset)) { ok = 0; break; }
+                for (int j = 0; j < ft_rows; j++) if (dset[j] && !set[j]) { ok = 0; printf("NOTE\tfallthrough of %s lacks %s\n", ft_ids[i], ft_ids[j]); break; }
+            }
+            ck(ok && outers > 5 && lanes > 5, "fallthrough-contains-deps-closure");
+        }
+        /* pack path (cache-manager, pack): no g3 row, no kernels-g3, no compare, neither listed nor in the closure */
+        {   int ok = !lw;
+            for (int t = 3; ok && t < 5; t++) {
+                int i = ft_index(outer5[t], strlen(outer5[t])); if (i < 0) { ok = 0; break; }
+                if (ft_has(ft_list[i], "g3-", 1) || ft_has(ft_list[i], "wf-prep-g3", 0) || ft_has(ft_list[i], "wf-span-prep-g3", 0) || ft_has(ft_list[i], "kernels-g3", 0) || ft_has(ft_list[i], "compare", 0)) ok = 0;
+                memset(set, 0, sizeof set);
+                if (ft_close(ft_list[i], i, set)) { ok = 0; break; }
+                for (int j = 0; j < ft_rows; j++) if (set[j] && (!strncmp(ft_ids[j], "g3-", 3) || !strcmp(ft_ids[j], "wf-prep-g3") || !strcmp(ft_ids[j], "wf-span-prep-g3") || !strcmp(ft_ids[j], "kernels-g3") || !strcmp(ft_ids[j], "compare"))) ok = 0;
+                if (!ft_has(ft_list[i], "kernels-g2", 0) || !ft_has(ft_list[i], "g2-win-arm64", 0) || !ft_has(ft_list[i], "gen1-win-arm64", 0)) ok = 0;
+            }
+            ck(ok, "fallthrough-pack-path-without-g3-and-compare");
+        }
+        /* compare: every earlier row (the legacy g2-lnx-*-obj-N rows carry no dependency edge and are the only exception) */
+        {   int i = lw ? -1 : ft_index("compare", 7), ok = i > 0, covered = 0;
+            memset(set, 0, sizeof set);
+            if (ok && ft_close(ft_list[i], i, set)) ok = 0;
+            for (int j = 0; ok && j < i; j++) { if (set[j]) covered++; else if (!(strstr(ft_ids[j], "-obj-") && !strncmp(ft_ids[j], "g2-lnx-", 7))) { ok = 0; printf("NOTE\tcompare fallthrough lacks %s\n", ft_ids[j]); } }
+            ck(ok && covered == i - 2 * cf_root_count(), "fallthrough-compare-contains-all");
+        }
+        /* --check sees a drifted sidecar in the fixture */
+        {   char fpath[3000]; size_t z = 0; char *cur;
+            SP(fpath, sizeof fpath, "%s/build/chain-phase-fallthrough.tsv", fix); cur = cx_read(fpath, &z);
+            SP(cmd, sizeof cmd, "cd '%s' && %s --write >/dev/null 2>&1 && printf 'x\\t-\\n' >> build/chain-phase-fallthrough.tsv && %s --check 2>&1", fix, gen, gen);
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && strstr(out, "chain-phases-gen: DIFF fallthrough") && !strstr(out, "status=CHECK"), "neg-fallthrough-drift");
+            free(cur);
+        }
+        free(fside);
     }
     free(tree); free(a); free(b); free(m);
     printf("EVIDENCE\t%s\n",fix);
