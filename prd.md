@@ -256,6 +256,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | cx 包稳定缺口清单（stable-eval 的 S2/S4/S10/S13 失败落到具体行） | `sh ./unisacc.com tools/stable-gaps.cx [-- ROOT [PKG...]]`；检查 `tools/check-stable-gaps.cx`（批次 `stable-gaps`） | 只读;输出 `GAP pkg 条款 行名 动作`,末行 `STABLE_GAPS total= s2= s4= s10= s13=`;全树实测 228/115/71/23/19 |
 | 检查的冷编译耗时与 use 闭包量表（0.0.57 T57 方案 B） | `sh ./unisacc.com tools/coldcompile.cx -- OUT.tsv SCRATCH FILE...`；`-- --plan-only FILE...` 只出闭包；数据 `plans/check-coldcompile.tsv`；检查 `tools/check-coldcompile.cx`（批次 `coldcompile`） | 逐文件串行：全新 TMPDIR 下 `PRODUCT FILE -o IMAGE` 的墙钟（tools/bound 40，只编不跑），另记单元数、闭包字节、起测时 load1 与 use 列表。是测量不是测试结论；耗时随机器负载变，跨行比较要看 load1。 |
 
+
 #### 2.3 发布（资格、会话、安装）
 
 | 动作 | 现成用法 | 说明 |
@@ -648,7 +649,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 0.0.79(建议) | 驱动与运行缓存类:链接单元二期(cx 模块单元对象入缓存与链接) | E1c(改根一行再跑推算低于 1 s) | 模块单元对象键设计(沿 UNIUC3) | 改根一行再跑 n=9 中位不高于 1000 ms;篡改对象一字节负控被拒 | E4(模块边界与所有权可证) | 按 build/own-escapes.tsv 的 owns=yes 三行在各单元加 `#pragma unisa owns` | `sh ./unisacc.com tools/check-own-escape.cx` 末行 passed=5 failed=0;`tools/check-cxmod-tri.cx` failed=0 gaps=0;`tools/check-own-escapes.cx` failed=0 |
 
 候选池(未入 `build/version-seq.tsv`;入序时一行一版、一版一类,先定终点线贡献再排):
-- 编译覆盖缺口(not covered 类产品缺陷,2026-11-15 普查:exec 网表共 267 条不同拒绝文案,gap 159、diag 61、frame 29、cap 18;实跑确认被拒 17 条、已接受 16 条、未实测 234 条;底表 `tests/notcovered.tsv`,详见 `plans/notcovered-plan.md`):
+- 编译覆盖缺口(not covered 类产品缺陷):分期与事实见 plans/notcovered-plan.md 与 tests/notcovered.tsv,0.0.69 起修。
   - 第 0 期(工具,不占槽):`tools/notcovered-census.cx` 与 `tools/check-notcovered.cx` 入库并登记批次,复现源迁入 `tests/notcovered-cases/`,并入 ratchets;拒绝文案只减不增,新文案须带最小复现与缺口登记。
   - 第一期 = 0.0.69(已入序):单元帧诊断、跨单元函数指针形参类型等价、文件作用域 sizeof 对象与 offsetof 常量表达式、帧槽收尾与 900000 字节点状拒绝定因。
   - 第二期(模型与网类,待入序):说明符与类型形状,含 `_Noreturn`、函数 typedef 声明函数、`_Alignas`、`_Alignof`、packed、`sizeof(类型[N])`、宿主头结构体嵌套成员;估 6 至 8 小时。
