@@ -3,9 +3,11 @@
  *   --node-bin: 节点直接跑预先编好的本工具执行体(sh ./unisacc.com tools/s9-shards-flow.cx -o BIN),免去每节点一次即编。
  *   sh ./unisacc.com tools/s9-shards-flow.cx -- node ROOT RUN LEAF [--driver BIN]
  * emit: 核 driver 与其 .sha256 一致后调 `driver pending ROOT RUN`(与 aggregate 同一 pending 判定),每个待跑片出一行
- *   exec 节点(无依赖);表首行 `par N`:light 与 all 缺省 8,heavy 取 limits 的 s9.heavy.width,alone 为 1。
- *   末行 S9_FLOW pending= emitted= class= par=(给了 --out 时打到 stdout,否则打到 stderr,stdout 只有节点表)。
- *   用法: emit --out T.tsv 后 `devsvc flow run T.tsv --par N --bg` 再 wait;先 light,再 heavy,再 alone,每轮后重发表。
+ *   exec 节点(无依赖);表首行 `par N`:light 与 all 缺省取 limits 的 s9.flow.par(现为 4),heavy 取 s9.heavy.width,alone 为 1。
+ *   par 推荐 3 到 4:0.0.68 daily 首跑按 8 路并发时每片 55 秒命令内固定开销 15 到 37 秒,身份测量等互相争抢超时,
+ *   造成大批 UNKNOWN 与 REFUSE;限时与授予窗口不变,只降并发。--par 显式给出时照用(上限 32)。
+ *   末行 S9_FLOW pending= emitted= class= par= ... par_recommended=(给了 --out 时打到 stdout,否则打到 stderr,stdout 只有节点表)。
+ *   用法: emit --out T.tsv 后 `devsvc flow run T.tsv --par N --bg` 再 wait,N 取末行 par_recommended;先 light,再 heavy,再 alone,每轮后重发表。
  * node: 给 driver --grant 秒(emit 按片预算加启动与收口余量算出)的 UNISACC_BOUND_DEADLINE_MONO,跑 `driver step ROOT RUN --slice LEAF`,输出原样带回。
  *   片的 DONE 已落盘(DONE_RECORDED 或 ALREADY_DONE)退出 0;STEP_NO_PROGRESS 退出 4;其余按 driver 退出码,0 与 3 以外原样,否则 1。
  *   退出 0 只表示该片已执行并留下收据,通过与否只由 `driver aggregate` 判定;写栅栏、heavy 上限、身份与冻结核验都在 driver 内,本工具不绕过。
@@ -114,11 +116,10 @@ static int emit(int argc, char **argv) {
     }
     np_free(&r);
     if (summary != nrows) refuse("pending-summary-mismatch", 0);
-    if (par <= 0) {
-        if (!strcmp(cls, "alone")) par = 1;
-        else if (!strcmp(cls, "heavy")) { par = (int)lm_get("s9.heavy.width", 0); if (par < 1) par = 1; }
-        else par = 8;
-    }
+    int rec = 1;   /* 本类的推荐并行度,与 --par 是否显式给出无关 */
+    if (!strcmp(cls, "heavy")) { rec = (int)lm_get("s9.heavy.width", 0); if (rec < 1) rec = 1; }
+    else if (strcmp(cls, "alone")) { rec = (int)lm_get("s9.flow.par", 0); if (rec < 1) rec = 1; }
+    if (par <= 0) par = rec;
     if (par > 32) refuse("par", 0);
     { char ln[64]; if (cx_fmt(ln, sizeof ln, "par %d\n", par)) refuse("format-bound", 0); np_puts(&t, ln); }
     for (int i = 0; i < nrows; i++) {
@@ -144,7 +145,7 @@ static int emit(int argc, char **argv) {
     }
     if (out) { if (cx_write(out, t.p, (long)t.n)) refuse("table-write", out); }
     else if (t.n) fwrite(t.p, 1, t.n, stdout);
-    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tstartup_s=%d\tepoch_s=%d\tclose_s=%d\ttable=%s\n", nrows, emitted, cls, par, sf_lim("s9.slice.startup"), sf_lim("s9.epoch.margin"), sf_lim("s9.slice.close"), out ? out : "-");
+    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tstartup_s=%d\tepoch_s=%d\tclose_s=%d\ttable=%s\tpar_recommended=%d\n", nrows, emitted, cls, par, sf_lim("s9.slice.startup"), sf_lim("s9.epoch.margin"), sf_lim("s9.slice.close"), out ? out : "-", rec);
     free(t.p);
     return 0;
 }

@@ -58,9 +58,16 @@ int main(void) {
     /* RUN 目录即 dir:缺省 driver 路径 RUN/driver */
     {
         char *v[] = {bin, "emit", root, dir, 0};
+        int fpar = (int)lm_get("s9.flow.par", 0);
+        char parl[32], sumw[96], recw[48];
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
-        ck(rc == 0 && !strncmp(out, "par 8\n", 6) && count(out, "\texec\t-\t") == 5 && count(out, "=node;") == 5 && count(out, ";timeout_ms=") == 5, "emit-all-one-exec-node-per-pending-slice-par8");
-        ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, "=slice-0-1;") && has(err, "S9_FLOW\tpending=5\temitted=5\tclass=all\tpar=8\t"), "emit-node-argv-and-summary");
+        if (cx_fmt(parl, sizeof parl, "par %d\n", fpar) || cx_fmt(sumw, sizeof sumw, "S9_FLOW\tpending=5\temitted=5\tclass=all\tpar=%d\t", fpar)
+            || cx_fmt(recw, sizeof recw, "\tpar_recommended=%d\n", fpar)) die("fmt");
+        /* 0.0.68 daily 首跑:8 路并发使片内固定开销 15 到 37 秒、身份测量互相争抢超时;缺省并行度须在 3 到 4 */
+        ck(fpar >= 3 && fpar <= 4, "flow-par-default-from-limits-is-3-to-4");
+        ck(rc == 0 && !strncmp(out, parl, strlen(parl)) && count(out, "\texec\t-\t") == 5 && count(out, "=node;") == 5 && count(out, ";timeout_ms=") == 5, "emit-all-one-exec-node-per-pending-slice-par-from-limits");
+        ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, "=slice-0-1;") && has(err, sumw), "emit-node-argv-and-summary");
+        ck(rc == 0 && has(err, recw), "emit-summary-last-field-par-recommended");
         /* 授予 = 片声明预算 + 启动余量 + 收口余量;启动耗时记在授予里,片预算不动;节点时限 = 授予 + 收尾余量 */
         if (cx_fmt(want, sizeof want, "=slice-1-2;a%d=--grant;a%d=%s;cwd=", 8, 9, g45)) die("fmt");
         ck(has(out, want), "emit-grant-is-budget-plus-startup-plus-epoch-margin-45");
@@ -74,7 +81,7 @@ int main(void) {
     {
         char *v[] = {bin, "emit", root, dir, "--class", "heavy", 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
-        ck(rc == 0 && !strncmp(out, "par 2\n", 6) && count(out, "\texec\t-\t") == 2 && has(out, "slice-1-2\t") && has(out, "slice-1-3\t") && has(err, "pending=5\temitted=2"), "emit-heavy-class-par-from-heavy-width");
+        ck(rc == 0 && !strncmp(out, "par 2\n", 6) && count(out, "\texec\t-\t") == 2 && has(out, "slice-1-2\t") && has(out, "slice-1-3\t") && has(err, "pending=5\temitted=2") && has(err, "\tpar_recommended=2\n"), "emit-heavy-class-par-from-heavy-width");
     }
     {
         char *v[] = {bin, "emit", root, dir, "--class", "alone", 0};
@@ -87,6 +94,9 @@ int main(void) {
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         s = cx_read(table, &n);
         ck(rc == 0 && s && !strncmp(s, "par 3\n", 6) && count(s, "\texec\t-\t") == 2 && has(s, "slice-0-0\t") && has(s, "slice-2-4\t") && has(out, "S9_FLOW\tpending=5\temitted=2\tclass=light\tpar=3"), "emit-light-class-par-override-out-file");
+        {   char rw[48];
+            if (cx_fmt(rw, sizeof rw, "\tpar_recommended=%d\n", (int)lm_get("s9.flow.par", 0))) die("fmt");
+            ck(rc == 0 && has(out, rw), "emit-override-still-reports-recommended-par"); }
         if (cx_fmt(want, sizeof want, "slice-0-0\texec\t-\ta0=%s;a1=node;", bin)) die("fmt");
         ck(s && has(s, want) && !has(s, "a0=sh;"), "emit-node-bin-runs-prebuilt-node-without-per-node-compile");
         free(s);
