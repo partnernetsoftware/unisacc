@@ -233,6 +233,128 @@ static void call_plan_cases(const char *candidate, const char *phases, const cha
     }
 }
 
+/* Main-flow step table (candidate-chain --main-steps, the table its outer walk executes) against the
+   fall-through sidecar build/chain-phase-fallthrough.tsv. Behaviour only: the printed sequence, the
+   phase table and the sidecar; no source text. */
+static char ms_ids[600][80], ms_deps[600][1200], ms_lane[600][80], ms_list[600][1600];
+static int ms_rows;
+static int ms_cut(char *dst, size_t cap, const char *s, const char *e) {
+    size_t n = (size_t)(e - s); if (n >= cap) return 1;
+    for (size_t i = 0; i < n; i++) dst[i] = s[i];
+    dst[n] = 0; return 0;
+}
+static int ms_index(const char *s, size_t n) {
+    for (int i = 0; i < ms_rows; i++) if (strlen(ms_ids[i]) == n && !memcmp(ms_ids[i], s, n)) return i;
+    return -1;
+}
+static int ms_load(const char *tbl, const char *side) {
+    int row = 0; ms_rows = 0;
+    for (const char *p = tbl; *p;) {
+        const char *e = strchr(p, '\n'), *c[7]; int k = 0; if (!e) return 1;
+        if (*p != '#') {
+            for (const char *q = p; q < e && k < 7; q++) if (*q == '\t') c[k++] = q;
+            if (k < 6 || ms_rows == 600) return 1;
+            if (ms_cut(ms_ids[ms_rows], 80, c[0] + 1, c[1]) || ms_cut(ms_deps[ms_rows], 1200, c[3] + 1, c[4]) || ms_cut(ms_lane[ms_rows], 80, c[4] + 1, c[5])) return 1;
+            ms_rows++;
+        }
+        p = e + 1;
+    }
+    for (const char *p = side; *p;) {
+        const char *e = strchr(p, '\n'); if (!e) return 1;
+        if (*p != '#') {
+            const char *t = memchr(p, '\t', (size_t)(e - p));
+            if (!t || row >= ms_rows || (size_t)(t - p) != strlen(ms_ids[row]) || memcmp(p, ms_ids[row], (size_t)(t - p))) return 1;
+            if (ms_cut(ms_list[row], 1600, t + 1, e) || !ms_list[row][0]) return 1;
+            row++;
+        }
+        p = e + 1;
+    }
+    return row != ms_rows;
+}
+/* set[i] = 1 for every id of the comma list and, transitively, of their deps */
+static int ms_close(const char *list, char *set) {
+    static int stack[600]; int sp = 0;
+    if (!strcmp(list, "-")) return 0;
+    for (const char *s = list;;) {
+        const char *c = strchr(s, ','); size_t n = c ? (size_t)(c - s) : strlen(s);
+        int i = ms_index(s, n); if (i < 0) return 1;
+        if (!set[i]) { set[i] = 1; stack[sp++] = i; }
+        if (!c) break;
+        s = c + 1;
+    }
+    while (sp) {
+        int at = stack[--sp];
+        if (!strcmp(ms_deps[at], "-")) continue;
+        for (const char *s = ms_deps[at];;) {
+            const char *c = strchr(s, ','); size_t n = c ? (size_t)(c - s) : strlen(s);
+            int i = ms_index(s, n); if (i < 0) return 1;
+            if (!set[i]) { set[i] = 1; stack[sp++] = i; }
+            if (!c) break;
+            s = c + 1;
+        }
+    }
+    return 0;
+}
+static int ms_seq(const char *out, char seq[][80], int cap) {
+    int n = 0;
+    for (const char *p = out; *p;) {
+        const char *e = strchr(p, '\n'); if (!e) return -1;
+        if (!strncmp(p, "MAIN_STEP\t", 10)) { if (n == cap || ms_cut(seq[n], 80, p + 10, e)) return -1; n++; }
+        p = e + 1;
+    }
+    return n;
+}
+static int ms_pos(char seq[][80], int n, const char *s, size_t len) {
+    for (int i = 0; i < n; i++) if (strlen(seq[i]) == len && !memcmp(seq[i], s, len)) return i;
+    return -1;
+}
+/* For every outer phase X that is a main-flow step: (1) each step the walk passes before X is in
+   the closure of X's fall-through list, (2) each listed id that is a main-flow step is passed before
+   X. cache-manager and pack are judged on the pack-path walk, every other phase on the full walk.
+   Returns 0 when they agree; *compared counts the outer phases judged. */
+static int ms_compare(char full[][80], int nf, char pack[][80], int np, int *compared) {
+    static char set[600];
+    *compared = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        char (*seq)[80] = pass ? pack : full; int n = pass ? np : nf;
+        for (int k = 0; k < n; k++) {
+            int on_pack = !strcmp(seq[k], "cache-manager") || !strcmp(seq[k], "pack");
+            int i = ms_index(seq[k], strlen(seq[k]));
+            if (i < 0) { sy_printf("NOTE\tmain step %s is not a phase table row\n", seq[k]); return 1; }
+            if (on_pack != pass || strcmp(ms_lane[i], "-")) continue;
+            memset(set, 0, sizeof set);
+            if (ms_close(ms_list[i], set)) { sy_printf("NOTE\tfallthrough of %s names an unknown id\n", seq[k]); return 1; }
+            for (int j = 0; j < k; j++) {
+                int q = ms_index(seq[j], strlen(seq[j]));
+                if (q < 0 || !set[q]) { sy_printf("NOTE\twalk to %s passes %s, absent from its fallthrough closure\n", seq[k], seq[j]); return 1; }
+            }
+            if (strcmp(ms_list[i], "-")) for (const char *s = ms_list[i];;) {
+                const char *c = strchr(s, ','); size_t len = c ? (size_t)(c - s) : strlen(s);
+                int at = ms_pos(seq, n, s, len);
+                if ((ms_pos(full, nf, s, len) >= 0 || at >= 0) && (at < 0 || at >= k)) { sy_printf("NOTE\tfallthrough of %s lists %.*s, not passed before it\n", seq[k], (int)len, s); return 1; }
+                if (!c) break;
+                s = c + 1;
+            }
+            (*compared)++;
+        }
+    }
+    return 0;
+}
+/* A copy of the sidecar whose row ID has its list replaced (repl) or extended (suffix). */
+static char *ms_variant(const char *fall_text, const char *id, const char *repl, const char *suffix) {
+    size_t sl = strlen(fall_text), il = strlen(id); const char *list = 0, *eol = 0;
+    for (const char *p = fall_text; *p && !list;) {   /* the table row whose first field is ID */
+        const char *e = strchr(p, '\n'); if (!e) return 0;
+        if ((size_t)(e - p) > il && !memcmp(p, id, il) && p[il] == '\t') { list = p + il + 1; eol = e; }
+        p = e + 1;
+    }
+    if (!list) return 0;
+    size_t cap = sl + 200; char *m = malloc(cap); if (!m) return 0;
+    int head = (int)(list - fall_text), body = (int)(eol - list);
+    int w = repl ? snprintf(m, cap, "%.*s%s%s", head, fall_text, repl, eol) : snprintf(m, cap, "%.*s%.*s%s%s", head, fall_text, body, list, suffix, eol);
+    if (w < 0 || (size_t)w >= cap) { free(m); return 0; }
+    return m;
+}
 int main(int argc, char **argv) {
     char cwd[400], out[65536], *o = 0;
     char native_tool[4400], native_generator[4400];
@@ -1121,6 +1243,40 @@ int main(int argc, char **argv) {
         ck(cc && has(cc, "REFUSE cache-manager source differs from the gate-verified src"), "cm-source-assertion");
         ck(cc && has(cc, "cm_left") && has(cc, "shared 90s budget"), "cm-single-90s-budget");
         free(pt); free(cc);
+    }
+    {   /* main-flow step table (--main-steps: the rows main walks) against the fall-through sidecar */
+        static char o1[8000], o2[8000], o3[8000], o4[8000], fullq[64][80], packq[64][80], cmpq[64][80], badq[64][80];
+        char mc[9000]; size_t pn = 0, sn = 0; int nf, np, nc, r1, r2, r3, r4, compared = 0, ok;
+        char *pt = cx_read("build/chain-phases.tsv", &pn), *sd = cx_read("build/chain-phase-fallthrough.tsv", &sn);
+        if (cx_fmt(mc, sizeof mc, "'%s' --main-steps 2>&1", native_tool)) return 2;
+        r1 = sh(mc, o1, sizeof o1); nf = ms_seq(o1, fullq, 64);
+        if (cx_fmt(mc, sizeof mc, "'%s' --main-steps --until pack 2>&1", native_tool)) return 2;
+        r2 = sh(mc, o2, sizeof o2); np = ms_seq(o2, packq, 64);
+        if (cx_fmt(mc, sizeof mc, "'%s' --main-steps --until compare 2>&1", native_tool)) return 2;
+        r3 = sh(mc, o3, sizeof o3); nc = ms_seq(o3, cmpq, 64);
+        if (cx_fmt(mc, sizeof mc, "'%s' --main-steps --until jobs-tool-0-start 2>&1", native_tool)) return 2;
+        r4 = sh(mc, o4, sizeof o4);
+        ck(r1 == 0 && nf > 30 && has(o1, "\tuntil=-\tstop=end\n") && r2 == 0 && np > 20 && has(o2, "\tuntil=pack\tstop=step\n")
+           && r3 == 0 && nc > 30 && has(o3, "\tuntil=compare\tstop=step\n") && r4 == 0 && has(o4, "\tuntil=jobs-tool-0-start\tstop=inner\n"), "main-steps-printed-read-only");
+        ok = nf > 0 && np > 0 && nc > 0 && nc <= nf && !strcmp(cmpq[nc - 1], "compare") && !strcmp(packq[np - 1], "pack") && !strcmp(fullq[nf - 1], "pack");
+        for (int i = 0; ok && i < nc; i++) if (strcmp(cmpq[i], fullq[i])) ok = 0;
+        for (int i = 0, at = 0; ok && i < np; i++) { while (at < nf && strcmp(fullq[at], packq[i])) at++; if (at++ >= nf) ok = 0; }
+        for (int i = 0; ok && i < np; i++) if (!strncmp(packq[i], "g3-", 3) || !strcmp(packq[i], "kernels-g3") || !strcmp(packq[i], "compare")) ok = 0;
+        ck(ok, "main-steps-until-is-prefix-and-pack-path-skips-g3-compare");
+        ok = pt && sd && nf > 0 && np > 0 && !ms_load(pt, sd) && !ms_compare(fullq, nf, packq, np, &compared);
+        sy_printf("NOTE\tmain-steps full=%d pack=%d outer_compared=%d\n", nf, np, compared);
+        ck(ok && compared >= 20, "main-steps-match-fallthrough-sidecar");
+        {   /* negative controls: a sidecar that disagrees with the walk, and a walk that disagrees with the sidecar */
+            char *m1 = sd ? ms_variant(sd, "pack", 0, ",compare") : 0, *m2 = sd ? ms_variant(sd, "compare", "p3", 0) : 0;
+            int at = nf > 0 ? ms_pos(fullq, nf, "compare", 7) : -1;
+            ck(pt && m1 && !ms_load(pt, m1) && ms_compare(fullq, nf, packq, np, &compared), "neg-main-steps-sidecar-pack-lists-compare");
+            ck(pt && m2 && !ms_load(pt, m2) && ms_compare(fullq, nf, packq, np, &compared), "neg-main-steps-sidecar-compare-list-cut");
+            for (int i = 0; i < nf && i < 64; i++) memcpy(badq[i], fullq[i], 80);
+            if (at > 0) { memcpy(badq[at], fullq[at - 1], 80); memcpy(badq[at - 1], fullq[at], 80); }
+            ck(pt && sd && at > 0 && !ms_load(pt, sd) && ms_compare(badq, nf, packq, np, &compared), "neg-main-steps-walk-order-swapped");
+            free(m1); free(m2);
+        }
+        free(pt); free(sd);
     }
     /* 起链环境白名单(build/chain-env.tsv):在任何构造之前拒绝 */
     { char cmd[2400], pre[700];

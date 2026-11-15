@@ -78,6 +78,7 @@ static int phase_bound, parallel=4, segment_cap;
 static int ceiling, clean, widens, widen_need, widen_max;
 typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
+static char *plan_fall[2048]; /* fall-through list of plan[i], "-" for a lane row or an empty set */
 static int probing; static char pending[256];
 #define RC_SEGMENT 75
 static long seg_end_ms; static int segment_s, segments, max_segments, owed;
@@ -114,6 +115,25 @@ static void validate_plan(void) {
         }
         if(!progress)die("phase dependency cycle");
     }
+    /* Fall-through sidecar (build/chain-phase-fallthrough.tsv, generated beside the phase table): one
+       row per phase in table order. Missing, short, misnamed or naming an unknown phase refuses. */
+    size_t fn=0;char *fb=cx_read("build/chain-phase-fallthrough.tsv",&fn);if(!fb)die("fallthrough table missing");
+    int row=0;
+    for(char *s=fb;*s;) {
+        char *e=strchr(s,'\n');if(!e)die("fallthrough table invalid");*e=0;
+        if(*s!='#') {
+            char *list=strchr(s,'\t');if(!list||row>=plan_count)die("fallthrough table invalid");*list++=0;
+            if(strcmp(s,plan[row].id)||!*list||strchr(list,'\t')||strlen(list)>=4400)die("fallthrough table invalid");
+            if(strcmp(plan[row].lane,"-")&&strcmp(list,"-"))die("fallthrough table invalid");
+            if(strcmp(list,"-")) {
+                char ids[4400];if(tx_copy(ids,sizeof ids,list,strlen(list)))die("fallthrough bound");char *q=ids;
+                while(q){char *c=strchr(q,',');if(c)*c++=0;int d=lookup(q);if(d<0||d==row)die("fallthrough table invalid");q=c;}
+            }
+            plan_fall[row++]=list; /* points into fb, kept for the life of the process */
+        }
+        s=e+1;
+    }
+    if(row!=plan_count)die("fallthrough table invalid");
 }
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
@@ -137,7 +157,13 @@ static int plan_semantics_hex(char hex[65]) {
         if(field==3||field>=7) continue;
         s[k++]=c;
     }
-    int rc=sy_sha256_hex(s,(long)k,hex); free(s); free(b); return rc;
+    /* The fall-through sidecar decides when an outer phase may start beside lanes, so its bytes are
+       part of the plan's semantics: a missing sidecar is no identity, a changed one is another run. */
+    size_t fn=0; char *fb=cx_read("build/chain-phase-fallthrough.tsv",&fn); if(!fb) { free(s); free(b); return -1; }
+    char *all=malloc(k+fn+1); if(!all) { free(fb); free(s); free(b); return -1; }
+    for(size_t i=0;i<k;i++) all[i]=s[i];
+    for(size_t i=0;i<fn;i++) all[k+i]=fb[i];
+    int rc=sy_sha256_hex(all,(long)(k+fn),hex); free(all); free(fb); free(s); free(b); return rc;
 }
 /* sha256 of build/limits.tsv bytes, or "-" when the file does not exist. */
 static void limits_hex(char hex[65]) {
@@ -439,7 +465,27 @@ static int fronts(const char *outer,const char *rev,char **v,int target) {
 static int ready(task *t) {
     char deps[4400];if(tx_copy(deps,sizeof deps,t->deps,strlen(t->deps)))die("dependency bound");char *s=deps;
     if(strcmp(s,"-"))while(s){char *e=strchr(s,',');if(e)*e++=0;if(!done(s))return 0;s=e;}
-    for(int i=0;i<plan_count;i++)if(plan[i].pid&&((strcmp(t->domain,"-")&&!strcmp(t->domain,plan[i].domain))||(strcmp(t->lane,"-")&&!strcmp(t->lane,plan[i].lane))||t->width==1||plan[i].width==1))return 0;
+    /* An outer phase (lane "-") is "candidate --resume --until X": the main flow walks from the top
+       and rebuilds inline whatever on the way has no checkpoint. The sidecar lists what that walk
+       passes; once all of it is complete the walk only resumes past it and writes nothing a lane
+       outside the set owns, so the outer phase may run beside such lanes. Until then it does not start. */
+    int outer=!strcmp(t->lane,"-");
+    if(outer) {
+        const char *list=plan_fall[t-plan];if(!list)die("fallthrough table missing");
+        if(strcmp(list,"-")) {
+            char ids[4400];if(tx_copy(ids,sizeof ids,list,strlen(list)))die("fallthrough bound");s=ids;
+            while(s){char *e=strchr(s,',');if(e)*e++=0;if(!done(s))return 0;s=e;}
+        }
+    }
+    for(int i=0;i<plan_count;i++)if(plan[i].pid) {
+        int other_outer=!strcmp(plan[i].lane,"-");
+        /* Shared state stays exclusive: one exclusive directory, one lane, and outer phases among themselves. */
+        if(strcmp(t->domain,"-")&&!strcmp(t->domain,plan[i].domain))return 0;
+        if(strcmp(t->lane,"-")&&!strcmp(t->lane,plan[i].lane))return 0;
+        if(outer&&other_outer&&(t->width==1||plan[i].width==1))return 0;
+        /* A width-1 row that is not an outer phase keeps the old rule: alone. */
+        if((!outer&&t->width==1)||(!other_outer&&plan[i].width==1))return 0;
+    }
     return 1;
 }
 /* One finished attempt. The assertions are the ones the scheduler always made; a recheck
@@ -466,7 +512,8 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
         int remaining=0;held=0;
         for(int i=0;i<plan_count;i++) {
             task *t=&plan[i];if(t->state==2)continue;remaining++;
-            if(t->pid||stop||retrying||active>=parallel||active>=t->width||!ready(t))continue;
+            /* The width column caps a lane row; an outer row's width 1 means "one outer at a time" (ready()), not "nothing else running". */
+            if(t->pid||stop||retrying||active>=parallel||(strcmp(t->lane,"-")&&active>=t->width)||!ready(t))continue;
             if(done(t->id)){t->state=2;continue;}
             pending[0]=0;probing=1;int fr=rehearse?0:fronts(t->id,rev,v,target);probing=0;
             if(fr&&fr!=-100){stop=fr;continue;}

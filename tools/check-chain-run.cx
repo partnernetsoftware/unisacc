@@ -25,15 +25,23 @@ static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s)))exit(2
 /* Callers explicitly choose the phase-table grammar; paths never select behavior. */
 static void put_plan(const char *p,const char *s) {
         FILE *f=fopen(p,"wb");if(!f)exit(2);char prev[256]="-";
+        /* The fall-through sidecar is written beside every fixture plan (chain-run refuses a plan
+           without it): an outer row (lane "-") waits for what it depends on, a lane row has "-".
+           A case that needs another set overwrites it with put_fall. */
+        char side[4400];const char *leaf=strrchr(p,'/');if(!leaf||cx_fmt(side,sizeof side,"%.*s/chain-phase-fallthrough.tsv",(int)(leaf-p),p))exit(2);
+        FILE *g=fopen(side,"wb");if(!g)exit(2);
         while(*s){const char *e=strchr(s,'\n');if(!e)exit(2);char line[14000];size_t n=e-s;if(tx_copy(line,sizeof line,s,n))exit(2);
-            int order,bound;char id[256],domain[4400];
+            int order,bound;char id[256],domain[4400],deps[4400],lane[256];
             if(*line=='#')fprintf(f,"%s\n",line);
             else { int tabs=0;for(char *q=line;*q;q++)if(*q=='\t')tabs++;
-                if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\t-\t-\t-\n",order,id,domain,bound,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
-                else if(tabs==6)fprintf(f,"%s\t-\t-\t-\n",line); /* seven semantic columns: no residue rule */
-                else fprintf(f,"%s\n",line);
+                if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\t-\t-\t-\n",order,id,domain,bound,prev);fprintf(g,"%s\t%s\n",id,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
+                else {
+                    if(tabs==6)fprintf(f,"%s\t-\t-\t-\n",line); /* seven semantic columns: no residue rule */
+                    else fprintf(f,"%s\n",line);
+                    if(sscanf(line,"%d %255s %4399s %d %4399s %255s",&order,id,domain,&bound,deps,lane)==6)fprintf(g,"%s\t%s\n",id,strcmp(lane,"-")?"-":deps);
+                }
             }s=e+1;
-        }if(fclose(f))exit(2);
+        }if(fclose(f)||fclose(g))exit(2);
 }
 static void join(char *p,const char *a,const char *b) { if(cx_fmt(p,4400,"%s/%s",a,b)) exit(2); }
 static int protocol_word(int c) { return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'; }
@@ -179,6 +187,12 @@ static int call(const char *name,const char *mode,const char *deadline,const cha
     if(!strcmp(mode,"dirty")){char *ev[28]={"env","UNISACC_CHAINRUN_FAULT=unconfirmed",0};for(int j=0;j<=k;j++)ev[j+2]=v[j];rc=cx_runv_timeout(ev,12,&o,&n);}
     else rc=cx_runv_timeout(v,12,&o,&n);
     char p[4400];join(p,dir,"check.stdout"); if(o) { if(cx_write(p,o,n)) exit(2);free(o); } return rc;
+}
+/* Time of the first KIND row of phase ID in an events file, or -1. */
+static long ev_time(const char *file,const char *kind,const char *id) {
+    char line[600],k[20],i[256];long when,found=-1;FILE *f=fopen(file,"rb");if(!f)return -1;
+    while(found<0&&fgets(line,sizeof line,f))if(sscanf(line,"%19s %255s %ld",k,i,&when)==3&&!strcmp(k,kind)&&!strcmp(i,id))found=when;
+    fclose(f);return found;
 }
 static int events(const char *name,int serial,int retry) {
     char p[4400],dir[4400],line[600],kind[20],id[256];join(dir,base,name);join(p,dir,"events");FILE *f=fopen(p,"rb");if(!f)return 0;
@@ -665,9 +679,11 @@ int main(int argc,char **argv) {
         ck(call("oldbudget","ok","30","3",0)==2,"old-budget-format-refused");
         join(ld,base,"oldbudget/calls");ck(!sy_exists(ld),"old-budget-format-before-child");
         /* the residue columns are not run identity: a changed residue row continues the same dir; changed deps do not */
-        put(plan,"0\tsnap\t-\t3\t-\t-\t1\t-\t-\t-\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
+        /* put_plan passes ten-column rows through unchanged and writes their fall-through sidecar; the
+           two malformed tables below stay raw and keep that sidecar, so only their columns refuse them */
+        put_plan(plan,"0\tsnap\t-\t3\t-\t-\t1\t-\t-\t-\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
         ck(call("residcol","ok","30","3",0)==0,"residue-column-base-run");
-        put(plan,"0\tsnap\t-\t3\t-\t-\t1\tscrub\tstage/snap.done\tstage/snap-work,stage/s-*.tmp\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
+        put_plan(plan,"0\tsnap\t-\t3\t-\t-\t1\tscrub\tstage/snap.done\tstage/snap-work,stage/s-*.tmp\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
         ck(call("residcol","ok","30","3",0)==0,"residue-column-not-run-identity");
         put(plan,"0\tsnap\t-\t3\t-\t-\t1\t-\t-\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
         ck(call("residcol","ok","30","3",0)==2,"nine-column-row-refused");
@@ -698,6 +714,39 @@ int main(int argc,char **argv) {
     ck(budget&&sscanf(budget,"%ld %d %d %d %d %d",&deadline,&attempt,&resume,&ma,&mr,&width)==6&&width==3&&resume==0&&budget_of("parallel-timeout").kills==1,"restart-load-cannot-rise");free(budget);
     put_plan(plan,"0\tsnap\t-\t3\tunknown\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
     ck(call("unknown-dep","ok","30","3",0)==2,"unknown-dependency-rejected");join(p,base,"unknown-dep/calls");ck(!sy_exists(p),"unknown-dependency-before-child");
+    {   /* Outer phases beside lanes, decided by the fall-through sidecar. Lane a is one row, lane b three
+           (b1, b2, b), each attempt 150 ms. z, x, y are outer phases of one exclusive directory that all
+           depend on a only. x and y fall through a; z falls through a and b. */
+        char fall[4400],ev[4400],idf[4400];join(fall,base,"../build/chain-phase-fallthrough.tsv");
+        put_plan(plan,"0\tsnap\troot\t3\t-\t-\t4\n1\ta\ta\t3\tsnap\ta\t4\n2\tb1\tb\t3\tsnap\tb\t4\n3\tb2\tb\t3\tb1\tb\t4\n4\tb\tb\t3\tb2\tb\t4\n"
+            "5\tz\touter\t3\ta\t-\t1\n6\tx\touter\t3\ta\t-\t1\n7\ty\touter\t3\ta\t-\t1\n8\tpack\tfinal\t3\ta,b,z,x,y\t-\t4\n");
+        put(fall,"# id\tfallthrough\nsnap\t-\na\t-\nb1\t-\nb2\t-\nb\t-\nz\ta,b\nx\ta\ny\ta\npack\ta,b,z,x,y\n");
+        ck(call("fall","parallel","30","3",0)==0,"fallthrough-plan-completes");
+        join(ev,base,"fall/events");
+        long xs=ev_time(ev,"START","x"),xe=ev_time(ev,"END","x"),ys=ev_time(ev,"START","y"),ye=ev_time(ev,"END","y"),zs=ev_time(ev,"START","z"),ze=ev_time(ev,"END","z");
+        long ae=ev_time(ev,"END","a"),be=ev_time(ev,"END","b"),b2s=ev_time(ev,"START","b2"),b2e=ev_time(ev,"END","b2"),bs=ev_time(ev,"START","b");
+        int all=xs>0&&xe>0&&ys>0&&ye>0&&zs>0&&ze>0&&ae>0&&be>0&&b2s>0&&b2e>0&&bs>0;
+        /* (1) its set (a) complete: the outer phase x runs while lane b, outside the set, is still running */
+        ck(all&&xs>=ae&&xs<be&&((xs<b2e&&b2s<xe)||(xs<be&&bs<xe)),"outer-runs-beside-lane-outside-its-fallthrough-set");
+        /* (2) outer phases of one exclusive directory never overlap, although all three had their deps at the same moment */
+        ck(all&&(xe<=ys||ye<=xs)&&(xe<=zs||ze<=xs)&&(ye<=zs||ze<=ys),"same-domain-outer-phases-stay-exclusive");
+        /* (3) z is first in table order and its deps (a) are complete, but lane b of its set is not: it waits for b */
+        ck(all&&zs>=be&&xs<zs,"outer-waits-for-unfinished-lane-in-its-fallthrough-set");
+        /* the sidecar is part of the run identity: another set for the same output dir is another run */
+        put(fall,"# id\tfallthrough\nsnap\t-\na\t-\nb1\t-\nb2\t-\nb\t-\nz\ta\nx\ta\ny\ta\npack\ta,b,z,x,y\n");
+        ck(call("fall","parallel","30","3",0)==2,"fallthrough-change-is-another-run-identity");
+        /* a lane row with a set, an unknown id, a short sidecar and a missing one are refused before any child */
+        put(fall,"# id\tfallthrough\nsnap\t-\na\tsnap\nb1\t-\nb2\t-\nb\t-\nz\ta,b\nx\ta\ny\ta\npack\ta,b,z,x,y\n");
+        ck(call("fall-lane","parallel","30","3",0)==2,"fallthrough-lane-row-with-set-refused");
+        put(fall,"# id\tfallthrough\nsnap\t-\na\t-\nb1\t-\nb2\t-\nb\t-\nz\ta,nope\nx\ta\ny\ta\npack\ta,b,z,x,y\n");
+        ck(call("fall-unknown","parallel","30","3",0)==2,"fallthrough-unknown-id-refused");
+        put(fall,"# id\tfallthrough\nsnap\t-\na\t-\n");
+        ck(call("fall-short","parallel","30","3",0)==2,"fallthrough-short-table-refused");
+        if(sy_unlink(fall))return 2;
+        ck(call("fall-missing","parallel","30","3",0)==2,"fallthrough-missing-refused");
+        join(idf,base,"fall-lane/calls");ck(!sy_exists(idf),"fallthrough-refusals-before-child");
+        join(idf,base,"fall-missing/calls");ck(!sy_exists(idf),"fallthrough-missing-before-child");
+    }
     put_plan(plan,"0\tsnap\t-\t3\tpack\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
     ck(call("cycle","ok","30","3",0)==2,"cycle-dependency-rejected");join(p,base,"cycle/calls");ck(!sy_exists(p),"cycle-before-child");
     put_plan(plan,"0\tsnap\t-\t55\n1\tjobs-tool-0-start\t-\t55\n2\tjobs-tool-0-finish\t-\t55\n3\tjobs-tool\t-\t55\n4\tpack\t-\t55\n");
