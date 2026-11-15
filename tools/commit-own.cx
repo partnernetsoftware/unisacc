@@ -20,6 +20,12 @@
  * byte-for-byte a manifest row (a whole-field match on someone else's row) refuses with exit 1, nothing committed.
  * Before the commit, tools/reg-manifest.cx --check --index runs against the private index -- the same verdict the
  * precommit registration-manifest gate takes -- and any MISSING/MISMATCH line refuses with exit 1.
+ * --dry-run: everything up to and including the pre-commit hook on the private index, no commit, the shared index
+ * untouched; prints COMMIT_OWN_DRY<TAB>rc=N.  --help: the usage, exit 0.  A --whole/--keyed of a table that
+ * --registered owns is dropped with a NOTE (the set's keyed rows are taken).  When git reports that HEAD moved
+ * under the commit and none of the commit's paths changed in the new HEAD, the private index is rebuilt there and
+ * the commit retried once.  Every run prints COMMIT_OWN_PHASE (select/pending/regm/commit ms, attempts); every
+ * refusal prints COMMIT_OWN_FAIL<TAB>class=... on stderr one line before its reason.
  * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
  * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage. */
 #pragma unisa use sys.fs
@@ -27,13 +33,21 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.io
+#pragma unisa use sys.poll
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 
 #define CO_MAX 64
 
-static void co_die(const char *a, const char *b) { fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+/* every refusal names its class on stderr (COMMIT_OWN_FAIL<TAB>class=...) one line before the reason, so the
+   devsvc event history can be classified without reading prose: args, setup, registered-foreign-row,
+   reg-manifest, precommit, head-moved, index-lock, nothing-to-commit, git-or-hook */
+static void co_die(const char *a, const char *b) {
+    fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", (tx_eqz(a, "usage") || tx_eqz(a, "no such file") || tx_eqz(a, "no registration manifest")) ? "args" : "setup");
+    fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+#define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--dry-run]"
+#define CO_PHASE "COMMIT_OWN_PHASE\tselect_ms=%ld\tpending_ms=%ld\tregm_ms=%ld\tcommit_ms=%ld\tattempts=%d\n"
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
 static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
@@ -181,14 +195,61 @@ static int co_select(const char *path, const char *src, int t, int *changed) {
     return bad;
 }
 
+/* the pending-derived hint: tools/on-change.cx --dry-run is started before the commit and read when the commit is
+   over (run in line it was 5.2 s of a 19 s commit).  Read-only; never blocks, never changes the exit code; a
+   failed start or a 30 s overrun is skipped silently (the child is killed and reaped). */
+static int co_pend_pid = -1, co_pend_fd = -1;
+static void co_pending_collect(void) {
+    static char oc[16384]; char seen[1024]; long no = 0, at = 0, r, deadline = sy_now_ms() + 30000; int ex = 0, code = 0, sig = 0;
+    if (co_pend_pid < 0) return;
+    for (;;) {
+        sy_pollfd_t pf; long left = deadline - sy_now_ms();
+        pf.fd = co_pend_fd; pf.events = SY_POLLIN; pf.revents = 0;
+        if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(co_pend_fd); sy_kill(co_pend_pid); sy_wait_status(co_pend_pid, 0, &ex, &code, &sig); co_pend_pid = -1; return; }
+        r = sy_read(co_pend_fd, oc + no, (long)sizeof oc - 1 - no);
+        if (r <= 0) break;
+        no += r;
+        if (no + 1 >= (long)sizeof oc) break;
+    }
+    sy_close(co_pend_fd);
+    sy_wait_status(co_pend_pid, 0, &ex, &code, &sig); co_pend_pid = -1;
+    oc[no] = 0; seen[0] = 0;
+    while (at < no) {
+        long e = tx_chr(oc + at, no - at, '\n'), ln = e < 0 ? no - at : e, p = tx_find(oc + at, ln, " pending=", 9);
+        if (p >= 0) {
+            long s = at + p + 9, q = s;
+            while (q < at + ln && oc[q] != ' ') q++;
+            while (s < q) {
+                long c = s, w; char item[128];
+                while (c < q && oc[c] != ',') c++;
+                w = c - s;
+                if (w > 0 && !(w == 1 && oc[s] == '-') && w < (long)sizeof item) {
+                    char key[136];
+                    tx_copy(item, sizeof item, oc + s, w); item[w] = 0;
+                    if (tx_snprintf(key, sizeof key, ",%s,", item) < (int)sizeof key && tx_find(seen, tx_len(seen, sizeof seen), key, tx_len(key, 136)) < 0) {
+                        long sl = tx_len(seen, sizeof seen);
+                        if (sl + w + 2 < (long)sizeof seen) tx_snprintf(seen + sl, sizeof seen - sl, "%s", key);
+                        sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s\n", item, item);
+                    }
+                }
+                s = c + 1;
+            }
+        }
+        at += ln + (e >= 0);
+    }
+}
+
 int main(int argc, char **argv) {
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
+    int dry = 0, att = 0; long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
     char idx[400], blob[CO_MAX][64], out[8192], root[4096];
     char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
     char skip[CO_MAX];   /* 1 when a --registered derived table yields no change: left out of the commit */
     for (k = 0; k < CO_MAX; k++) { co_reg_of[k] = -1; skip[k] = 0; }
     while (a < argc) {
-        if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
+        if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
+        else if (tx_eqz(argv[a], "--dry-run")) { dry = 1; a++; }   /* everything up to and including the pre-commit hook, on the private index; no commit */
+        else if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--registered")) {
             a++;
             while (a < argc && argv[a][0] != '-') {
@@ -203,13 +264,20 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
             if (np == CO_MAX) co_die("too many paths", 0);
             path[np] = argv[a + 1]; keys[np] = argv[a + 2]; np++; a += 3;
-        } else co_die("usage", "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...]");
+        } else co_die("usage", CO_USAGE);
     }
     if (nreg) {
         int t;
         for (t = 0; t < CO_REGT; t++) {
             if (!co_regkeys[t][0] || sy_exists(CO_REG_TABLE[t]) != 1) continue;
-            for (k = 0; k < np; k++) if (tx_eqz(path[k], CO_REG_TABLE[t])) co_die("--registered owns this table; drop its --keyed/--whole", path[k]);
+            /* a --whole/--keyed of a table this set owns is dropped, not refused (5 of the 20 failed devsvc commits
+               were this refusal): the set's keyed rows are the narrower selection, other rows stay in the work tree */
+            for (k = 0; k < np; k++) if (tx_eqz(path[k], CO_REG_TABLE[t])) {
+                int j;
+                sy_printf("NOTE\t%s\t--registered owns this table; its --keyed/--whole is dropped (only the registered set's rows are taken)\n", path[k]);
+                for (j = k; j + 1 < np; j++) { path[j] = path[j + 1]; keys[j] = keys[j + 1]; co_reg_of[j] = co_reg_of[j + 1]; }
+                np--; co_reg_of[np] = -1; k--;
+            }
             if (np == CO_MAX) co_die("too many paths", 0);
             path[np] = CO_REG_TABLE[t]; keys[np] = co_regkeys[t]; co_reg_of[np] = t; np++;
         }
@@ -251,6 +319,8 @@ int main(int argc, char **argv) {
         }
         if (keys[k] || link[k]) sy_unlink(src);
     }
+    t_sel = sy_now_ms() - t0;
+    if (refused) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=registered-foreign-row\n");
     if (refused) { fprintf(stderr, "commit-own: REFUSE --registered: %d selected line(s) are not manifest rows (a whole-field key matched someone else's row); nothing committed\n", refused); return 1; }
     if (nreg) {   /* drop the tables with nothing of this set */
         int w = 0;
@@ -261,40 +331,16 @@ int main(int argc, char **argv) {
         np = w;
     }
     {   /* 提示:on-change --dry-run 的 pending= 项(只读,不写、不阻断、不改 rc);失败或超时静默跳过 */
-        char *ov[CO_MAX + 8], oc[16384], seen[1024]; int n = 0; long at = 0, no;
-        seen[0] = 0;
+        char *ov[CO_MAX + 8]; int n = 0;
         ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run";
         for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
         ov[n] = 0;
-        if (sy_exists("tools/on-change.cx") && run(ov, oc, sizeof oc) >= 0) {
-            no = tx_len(oc, sizeof oc);
-            while (at < no) {
-                long e = tx_chr(oc + at, no - at, '\n'), ln = e < 0 ? no - at : e, p = tx_find(oc + at, ln, " pending=", 9);
-                if (p >= 0) {
-                    long s = at + p + 9, q = s;
-                    while (q < at + ln && oc[q] != ' ') q++;
-                    while (s < q) {
-                        long c = s, w; char item[128];
-                        while (c < q && oc[c] != ',') c++;
-                        w = c - s;
-                        if (w > 0 && !(w == 1 && oc[s] == '-') && w < (long)sizeof item) {
-                            char key[136];
-                            tx_copy(item, sizeof item, oc + s, w); item[w] = 0;
-                            if (tx_snprintf(key, sizeof key, ",%s,", item) < (int)sizeof key && tx_find(seen, tx_len(seen, sizeof seen), key, tx_len(key, 136)) < 0) {
-                                long sl = tx_len(seen, sizeof seen);
-                                if (sl + w + 2 < (long)sizeof seen) tx_snprintf(seen + sl, sizeof seen - sl, "%s", key);
-                                sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s\n", item, item);
-                            }
-                        }
-                        s = c + 1;
-                    }
-                }
-                at += ln + (e >= 0);
-            }
-        }
+        if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
     }
+    t_pend = sy_now_ms() - t0 - t_sel;
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64]; int rc;
+again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
         for (k = 0; k < np; k++) { char m[8]; entry("HEAD", path[k], old[k], m); }
         sy_setenv("GIT_INDEX_FILE", idx, 1);
         {   char *v[] = {"git", "read-tree", "HEAD", 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
@@ -313,15 +359,17 @@ int main(int argc, char **argv) {
             if (rnat[0] && !(tool && tool[0])) rv[n++] = rnat;
             else { rv[n++] = "sh"; rv[n++] = "./unisacc.com"; rv[n++] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx"); rv[n++] = "--"; }
             rv[n++] = "--check"; rv[n++] = "--index"; rv[n] = 0;
-            g_bound_s = 60;
+            g_bound_s = 60; tc0 = sy_now_ms();
             if (run(rv, ro, sizeof ro) < 0) bad = -1;
-            g_bound_s = 30;
+            g_bound_s = 30; t_regm += sy_now_ms() - tc0;
             rn = tx_len(ro, sizeof ro);
             while (bad >= 0 && at < rn) { long e = tx_chr(ro + at, rn - at, '\n'), l = e < 0 ? rn - at : e;
                 if (tx_prefix(ro + at, l, "MISSING\t", 8) || tx_prefix(ro + at, l, "MISMATCH\t", 9)) { sy_printf("GATE\t%.*s\n", (int)l, ro + at); bad++; }
                 at += l + 1; }
             if (bad) {
                 sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx);
+                co_pending_collect();
+                fprintf(stderr, "COMMIT_OWN_FAIL\tclass=reg-manifest\n");
                 fprintf(stderr, "commit-own: REFUSE --registered: reg-manifest --check --index %s on the commit's index; nothing committed\n", bad < 0 ? "did not run" : "reports MISSING/MISMATCH");
                 return 1;
             }
@@ -330,12 +378,40 @@ int main(int argc, char **argv) {
         {   /* git's stderr (hook output, "nothing to commit", identity errors) merged into OUT so the refusal names the cause */
             char *v[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
             g_bound_s = 150;   /* the precommit hook alone took 32 s at load 26 (a 30 s bound killed two commits); verdict must not depend on a quiet machine */
-            rc = run(v, out, sizeof out);
+            tc0 = sy_now_ms();
+            if (dry) {   /* the hook git would run (core.hooksPath honoured), on the private index; absent hook = pass */
+                char *dv[] = {"sh", "-c", "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; exec \"$h\" 2>&1", 0};
+                rc = run(dv, out, sizeof out);
+            } else rc = run(v, out, sizeof out);
+            t_commit += sy_now_ms() - tc0;
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
+        {   long on = tx_len(out, sizeof out);
+            if (dry) fcls = tx_find(out, on, "precommit", 9) >= 0 ? "precommit" : "git-or-hook";
+            else if (tx_find(out, on, "cannot lock ref 'HEAD'", 22) >= 0) fcls = "head-moved";
+            else if (tx_find(out, on, "index.lock", 10) >= 0) fcls = "index-lock";
+            else if (tx_find(out, on, "nothing to commit", 17) >= 0 || tx_find(out, on, "nothing added to commit", 23) >= 0) fcls = "nothing-to-commit";
+            else if (tx_find(out, on, "precommit", 9) >= 0 || tx_find(out, on, "PRECOMMIT", 9) >= 0) fcls = "precommit";
+            else fcls = "git-or-hook"; }
+        if (dry) {
+            co_pending_collect();
+            if (out[0]) fprintf(stderr, "%s\n", out);
+            if (rc != 0) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", fcls);
+            sy_printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
+            sy_printf("COMMIT_OWN_DRY\trc=%d\tpaths=%d\tforeign_kept=%d\tnothing committed, the shared index is untouched\n", rc, np, kept);
+            return rc ? 1 : 0;
+        }
+        if (rc != 0 && att == 0 && tx_eqz(fcls, "head-moved")) {   /* another agent's commit landed between read-tree and the ref update */
+            int same = 1;
+            for (k = 0; k < np; k++) { char nb[48], nm[8]; entry("HEAD", path[k], nb, nm); if (!tx_eqz(nb, old[k])) same = 0; }
+            if (same) { att = 1; sy_printf("NOTE\tHEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once\n"); goto again; }
+        }
         if (rc != 0) {   /* last line: the first non-empty line of git's merged output is the reason */
             char *s = out, *e; while (*s == '\n' || *s == ' ') s++;
+            co_pending_collect();
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", fcls);
+            fprintf(stderr, CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
             e = strchr(s, '\n');
             if (e && e[1]) fprintf(stderr, "%s\n", out);
             if (e) *e = 0;
@@ -378,6 +454,8 @@ int main(int argc, char **argv) {
                 }
             }
         }
+        co_pending_collect();
+        printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
         printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
         if (lost) return 1;   /* committed, but the shared index still shows these paths as staged deletions */
     }
