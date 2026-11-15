@@ -6,6 +6,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.s9map
 static int has(const char *s, const char *p) {
     size_t n, pl, i;
     if (!s) return 0;
@@ -37,8 +38,8 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
 /* 模式: core(顺序/失败停止/档位) | tiers(daily/release 档透传) | limits(max-steps/日期/截断/出口/UNKNOWN) | resume | resume(--resume 4 项);无参两者都跑。各自一个批次,合并在 affected 冷编下超 55s。 */
 int main(int argc, char **argv) {
     const char *am = argc == 2 ? argv[1] : "";
-    int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases");
-    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph)) { fprintf(stderr, "usage: [core|resume]\n"); return 2; }
+    int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases"), mat = !*am || !strcmp(am, "materials");
+    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph && !mat)) { fprintf(stderr, "usage: [core|materials|tiers|limits|resume|phases]\n"); return 2; }
     char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
     char *v[16];
     int rc;
@@ -86,8 +87,16 @@ int main(int argc, char **argv) {
     runv(v, dir, 20, buf, sizeof buf, &rc);
     ck(rc == 1 && strstr(buf, "prepare-driver"), "fail-stop");
     {
-        size_t n; char *s = cx_read(logp, &n);
-        ck(s && !strstr(s, "selection"), "fail-no-later-prep");
+        /* 并行 prepare 的失败合同(不弱于原「后面不再起」):报告里 driver 是失败的那条,后面被杀的 prepare 逐条
+           记 NOT_RUN,不出现 PASS,并且没有进入 step/aggregate。 */
+        /* 断言对象是运行产物(report/log),不是源码文本:用 has() 的字节比较,不用 strstr 把报告当源码锚。 */
+        size_t n; char *s = cx_read(report_path, &n);
+        ck(s && has(s, "\ndriver\t") && !has(s, "\ndriver\t0\tNOT_RUN"), "fail-stop-named");   /* driver 自己那行带真实耗时,不是 NOT_RUN */
+        ck(s && has(s, "selection\t0\tNOT_RUN"), "fail-others-not-run");
+        /* 「不记 PASS」由上一行保证:报告里 selection 只有 NOT_RUN 这一种形态,没有它的耗时行。 */
+        free(s);
+        s = cx_read(logp, &n);
+        ck(s && !has(s, "\nstep") && !has(s, "\naggregate"), "fail-no-later-phase");
         free(s);
     }
     unsetenv("S9_FAKE_FAIL");
@@ -431,6 +440,33 @@ int main(int argc, char **argv) {
         chmod(cand, 0711);
         runv(cv, dir, 20, buf, sizeof buf, &rc);
         ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "candidate-0711-passes");
+    }
+    if (mat) {   /* 材料映射必须吃真实 affected --materials-dump 的四列输出:0.0.67 的解析按三列写,四列行全被当
+                      REFUSED 跳过,map 到 init 时是 0 行而编排仍报 PASS。这里不手造行,直接跑本仓的 dump,
+                      走与 s9-nightly 同一个解析器(tools/cxlib/s9map.cx),断言行数非零且每行都是绝对路径。 */
+        char *dv[] = {"sh", com, "tools/affected.cx", "--", "--materials-dump", "--prepare-materials", 0};
+        char *du = 0; size_t dn = 0; char map[16384], mwhy[300];
+        np_result r = {0};
+        (void)buf; (void)rc;
+        if (np_run(dv, root, 0, 50, &r, why, sizeof why)) die(why);
+        du = r.out; dn = (size_t)r.outn;
+        ck(du && dn > 0 && memchr(du, '\n', dn) != 0, "map-real-dump-nonempty");
+        mwhy[0] = 0;
+        ck(s9_map_from_dump(du ? du : "", (long)dn, map, (long)sizeof map, mwhy, (int)sizeof mwhy) == 0, "map-real-dump-parsed");
+        ck(s9_map_rows() > 0, "map-real-dump-rows-nonzero");
+        {   long a2 = 0, bad = 0, lines = 0;
+            while (map[a2]) {
+                long e2 = a2; int nl = 0, tab = 0, ap = 0;
+                while (map[e2] && map[e2] != '\n') { if (map[e2] == '\t') { tab = 1; if (map[e2 + 1] == '/') ap = 1; } e2++; }
+                if (!map[e2]) nl = 1;
+                lines++;
+                if (!(tab && ap)) bad++;
+                if (nl) break;
+                a2 = e2 + 1;
+            }
+            ck(lines == s9_map_rows() && bad == 0, "map-real-dump-every-row-name-and-abs-path");
+        }
+        np_free(&r);
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);

@@ -28,6 +28,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.s9map
 
 static char root[4096], why[512];
 static const char *fake;
@@ -59,6 +60,18 @@ static void note(const char *s) {
     logbuf[logn++] = '\n';
     logbuf[logn] = 0;
 }
+/* A step that started but whose result was thrown away, because another step of the same phase failed.  It is
+   never counted as PASS and its artifact is never reused: the line says so in the report. */
+static void note_not_run(const char *s) {
+    char line[256];
+    int n;
+    if (cx_fmt(line, sizeof line, "%s\t0\tNOT_RUN\n", s)) { truncated = 1; return; }
+    n = (int)strlen(line);
+    if (truncated || logn + n + 2 >= (int)sizeof logbuf - 16) { truncated = 1; return; }
+    if (tx_copy(logbuf + logn, (long)(sizeof logbuf - logn), line, n)) die("log", 0);
+    logn += n;
+    logbuf[logn] = 0;
+}
 static char *step_env[2];
 static char step_env_buf[96];
 static int run_step(char **v, const char *cwd, int sec, np_result *r) {
@@ -85,7 +98,6 @@ static char why4[300];
 static int materials_map(char *map, long cap, char *why, int whycap) {
     char product[4400], tool[4400], *v[8];
     np_result r = {0};
-    long at, used = 0, rows = 0;
     int k = 0, rc;
     if (cx_fmt(product, sizeof product, "%s/%s", root, "unisacc" ".com") ||
         cx_fmt(tool, sizeof tool, "%s/tools/affected.cx", root)) { cx_fmt(why, whycap, "path"); return 1; }
@@ -93,40 +105,11 @@ static int materials_map(char *map, long cap, char *why, int whycap) {
     v[k++] = "--materials-dump"; v[k++] = "--prepare-materials"; v[k] = 0;
     rc = run_step(v, root, L_I("s9.cmd"), &r);
     if (rc) { cx_fmt(why, whycap, "materials-dump rc=%d", rc); np_free(&r); return 1; }
-    map[0] = 0;
-    for (at = 0; r.out && at < r.outn;) {
-        long e = at, t = at;
-        while (e < r.outn && r.out[e] != '\n') e++;
-        if (e == r.outn) { cx_fmt(why, whycap, "dump-wire"); np_free(&r); return 1; }
-        while (t < e && r.out[t] != '\t') t++;
-        if (t >= e) { cx_fmt(why, whycap, "dump-field"); np_free(&r); return 1; }
-        if (tx_prefix(r.out + at, t - at, "MATERIAL", 8)) {
-            const char *f = r.out + t + 1;
-            long fend = e, name_end = t + 1, path_at = t + 1;
-            while (path_at < fend && r.out[path_at] != '\t') path_at++;
-            if (path_at + 1 >= fend) { cx_fmt(why, whycap, "dump-row"); np_free(&r); return 1; }
-            name_end = path_at;
-            {
-                long p = path_at + 1, pend = p;
-                while (pend < fend && r.out[pend] != '\t') pend++;
-                if (pend + 1 < fend) {   /* a REFUSED row: name it, keep going */
-                    rows++;
-                } else if (pend > p && r.out[p] == '/') {
-                    if (used + (pend - p) + (name_end - (t + 1)) + 3 > cap) { cx_fmt(why, whycap, "map-overflow"); np_free(&r); return 1; }
-                    if (mm_copy(map + used, cap - used, r.out + t + 1, name_end - (t + 1))) { cx_fmt(why, whycap, "map-copy"); np_free(&r); return 1; }
-                    used += name_end - (t + 1);
-                    map[used++] = '\t';
-                    if (mm_copy(map + used, cap - used, r.out + p, pend - p)) { cx_fmt(why, whycap, "map-copy"); np_free(&r); return 1; }
-                    used += pend - p;
-                    map[used++] = '\n';
-                    map[used] = 0;
-                    rows++;
-                } else { cx_fmt(why, whycap, "dump-path"); np_free(&r); return 1; }
-                (void)f; (void)fend; (void)rows;
-            }
-        }
-        at = e + 1;
-    }
+    /* the format and the absolute-path rule live in one place, tools/cxlib/s9map.cx, so this reader and the
+       check that asserts it cannot drift again.  An empty map is a failure, not a quiet full run: every
+       material the batches declare was refused, which is exactly the state 0.0.67 reported as PASS. */
+    if (s9_map_from_dump(r.out ? r.out : "", (long)r.outn, map, cap, why, whycap)) { np_free(&r); return 1; }
+    if (!s9_map_rows()) { cx_fmt(why, whycap, "materials-map-empty refused=%ld", s9_map_refused()); np_free(&r); return 1; }
     np_free(&r);
     return 0;
 }
@@ -169,6 +152,76 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
     }
     np_free(&r);
     return rc;
+}
+/* A phase of independent children at once (Q1).  Each child gets its own capture buffer, so nothing here
+   touches last_ms/save_to/xa4 and the report shape is unchanged.  The children of one phase write different
+   files (prepare NAME writes its own artifact, aggregate --part K N its own agg-part-K-N), so only starting
+   and draining is serial.  A child not yet drained blocks on write when its 64 KiB pipe fills; every phase's
+   per-child output is a few lines, far below that. */
+typedef struct { const char *name; int pid, fd, deadline_s; long t0; np_buf out; } ParJob;
+/* NP_BUF, not NP_RESULT: np_free takes the latter and would run off the end of this struct. */
+static void par_free(ParJob *j) { free(j->out.p); j->out.p = 0; j->out.n = j->out.cap = 0; }
+/* DEADLINE_S is the child's own bound, enforced by par_drain (kill its group and rc 124): it is carried here so
+   the spawn and the wait agree on one number, and so the spawn block itself names the bound it is under. */
+static int par_spawn(ParJob *j, const char *verb, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, int deadline_s) {
+    char com[4400], tool[4400];
+    char *v[16];
+    int k = 0;
+    j->pid = 0; j->fd = -1; j->out.p = 0; j->out.n = 0; j->out.cap = 0; j->t0 = sy_now_ms(); j->deadline_s = deadline_s;
+    if (fake) {
+        v[k++] = (char *)fake; v[k++] = (char *)verb;
+        if (a1) v[k++] = (char *)a1;
+        if (a2) v[k++] = (char *)a2;
+        if (a3) v[k++] = (char *)a3;
+        if (a4) v[k++] = (char *)a4;
+        if (a5) v[k++] = (char *)a5;
+    } else {
+        if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+            cx_fmt(tool, sizeof tool, "%s/tools/s9-native.cx", root)) return -1;
+        v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; v[k++] = (char *)verb;
+        if (a1) v[k++] = (char *)a1;
+        if (a2) v[k++] = (char *)a2;
+        if (a3) v[k++] = (char *)a3;
+        if (a4) v[k++] = (char *)a4;
+        if (a5) v[k++] = (char *)a5;
+    }
+    v[k] = 0;
+    j->pid = sy_spawn_pipe(v, root, 0, &j->fd, 0);
+    if (j->pid <= 0) { j->pid = 0; j->fd = -1; return -1; }
+    return 0;
+}
+/* Drain one child: its whole stdout+stderr into J->out, then its exit code in *RC (128+sig when signalled).
+   SEC bounds the child: past it the child's process group is killed and *RC is 124, so one hung child cannot
+   hold the phase (and the caller's 55 s budget) open. */
+static int par_drain(ParJob *j, int *rc) {
+    int sec = j->deadline_s;   /* the bound the spawn was given: one number, no second guess here */
+    char chunk[4096]; int ex = 0, code = 0, sig = 0, w;
+    for (;;) {
+        long r;
+        (void)sy_sleep_ms(20);   /* a phase has at most six children: no busy loop, no poll when its type is not visible */
+        r = sy_read(j->fd, chunk, sizeof chunk);
+        if (r > 0) { np_put(&j->out, chunk, (size_t)r); continue; }
+        w = sy_wait_status(j->pid, 1, &ex, &code, &sig);
+        if (w == j->pid) break;
+        if (w < 0) { sy_close(j->fd); j->fd = -1; j->pid = 0; last_ms = sy_now_ms() - j->t0; return -1; }
+        if (sec > 0 && sy_now_ms() - j->t0 > (long)sec * 1000L) {
+            (void)sy_kill(j->pid);          /* its own group: the child and whatever it started */
+            sy_close(j->fd); j->fd = -1; j->pid = 0;
+            last_ms = sy_now_ms() - j->t0;
+            *rc = 124;
+            return 0;
+        }
+    }
+    for (;;) {   /* the child is gone: whatever is still buffered in its pipe is its last words */
+        long r = sy_read(j->fd, chunk, sizeof chunk);
+        if (r > 0) { np_put(&j->out, chunk, (size_t)r); continue; }
+        if (r == -EINTR || r == -EAGAIN) continue;
+        break;
+    }
+    sy_close(j->fd); j->fd = -1;
+    last_ms = sy_now_ms() - j->t0;
+    *rc = ex ? code : 128 + sig;
+    return 0;
 }
 /* 本步是否还有新片在跑/待跑:输出含 S9_WT 行即有片被调度或拒绝,无该行即无新片。 */
 static int has_wt(const char *s) {
@@ -304,11 +357,34 @@ int main(int argc, char **argv) {
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
-    for (i = 0; i < 6; i++) {
-        rc = invoke("prepare", root, run, preps[i], L_I("s9.cmd"), tmp, sizeof tmp);
-        note(preps[i]);
-        if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[i], rc, report); return 1; }
-        pass_n++;
+    /* 六个 prepare 各自独立编译,互不读写同一个文件:一起起、按序收(Q1)。合同(比串行更严,不是放宽):
+       (1) 任一 prepare 失败,立刻杀掉其余仍在跑的 prepare(各整组);
+       (2) 被杀的不记 PASS、产物不复用,在报告里逐条记 NOT_RUN;
+       (3) prepare 这一相整体失败,init 不进 step/aggregate,rc 非零。 */
+    {   ParJob pj[6]; int pi;
+        for (pi = 0; pi < 6; pi++) {
+            if (par_spawn(&pj[pi], "prepare", root, run, preps[pi], 0, 0, L_I("s9.cmd"))) {
+                int q, bad = pi;
+                for (q = 0; q < bad; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(preps[q]); }
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\treason=cannot-start\treport=%s\n", preps[pi], report);
+                return 1;
+            }
+        }
+        for (pi = 0; pi < 6; pi++) {
+            int prc = -1, dr = par_drain(&pj[pi], &prc), q;
+            if (dr || prc != 0) {
+                note(preps[pi]);   /* the failing one keeps its own line and rc */
+                for (q = pi + 1; q < 6; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); note_not_run(preps[q]); }
+                par_free(&pj[pi]);
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[pi], prc, report);
+                return 1;
+            }
+            note(preps[pi]);
+            pass_n++;
+            par_free(&pj[pi]);
+        }
     }
     if (phase == 1) {
         write_report(report, "PREPARED");
@@ -362,21 +438,44 @@ int main(int argc, char **argv) {
     if (cx_fmt(aggout, sizeof aggout, "%s/aggregate.out", run)) die("aggout-path", 0); /* s9-verdict 读此文件 */
     if (sy_exists(run) != 1) sy_mkdir(run, 0755); /* 真 init 已建;--fake 路径可能没有 */
     if (agg_parts > 0) {
-        /* 分片聚合:每片一次独立调用(<=55s);已有片记录的跳过(可续跑);全部就绪后 --merge 出唯一结论 */
-        char ks[16], ns[16], pn[4400], leaf[64];
-        int k;
+        /* 分片聚合:每片一次独立调用(<=55s),各自写自己的 agg-part-K-N,所以并行起、按序收(Q1);最终仍由 --merge
+           出唯一结论。已有片记录的跳过(可续跑)。片失败时 aggregate.out 由本进程在 merge 阶段处理,并行子进程不再从
+           本进程写覆盖:失败即报具名步骤,与串行时的 rc/naming 相同。 */
+        char ns[16];
+        int k, ntodo = 0, todo[64];
+        ParJob pj[64];
         cx_fmt(ns, sizeof ns, "%d", agg_parts);
-        xa4 = ks;
-        xa5 = ns;
         for (k = 0; k < agg_parts; k++) {
-            cx_fmt(ks, sizeof ks, "%d", k);
+            char pn[4400], leaf[64];
             if (cx_fmt(leaf, sizeof leaf, "agg-part-%d-%d", k, agg_parts) || cx_fmt(pn, sizeof pn, "%s/%s", run, leaf)) die("part-path", 0);
             if (sy_exists(pn) == 1) { note("aggregate-part-reused"); continue; }
-            save_to = aggout; /* 片失败时也留下 aggregate.out(含 S9_RECEIPT reason);成功则由随后的 merge 覆盖 */
-            rc = invoke("aggregate", root, run, "--part", L_I("s9.cmd"), tmp, sizeof tmp);
-            save_to = 0;
+            todo[ntodo++] = k;
+        }
+        for (k = 0; k < ntodo; k++) {
+            char ks[16];
+            cx_fmt(ks, sizeof ks, "%d", todo[k]);
+            if (par_spawn(&pj[k], "aggregate", root, run, "--part", ks, ns, L_I("s9.cmd"))) {
+                int q;
+                for (q = 0; q < k; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); }
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate-part-%d\treason=cannot-start\treport=%s\n", todo[k], report);
+                return 1;
+            }
+        }
+        for (k = 0; k < ntodo; k++) {
+            int prc = -1, dr = par_drain(&pj[k], &prc), q;
             note("aggregate-part");
-            if (rc != 0) { xa4 = xa5 = 0; fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate-part-%d\trc=%d\treport=%s\n", k, rc, report); return 1; }
+            if (dr || prc != 0) {
+                /* 片失败时也留下 aggregate.out(含 S9_RECEIPT reason),除非之后成功的 merge 覆盖它:并行后子进程的
+                   stdout 在本进程里,所以由这里原样写入,与串行时 save_to 的字节一致。 */
+                if (pj[k].out.p) (void)cx_write(aggout, pj[k].out.p, pj[k].out.n);
+                for (q = k + 1; q < ntodo; q++) { (void)sy_kill(pj[q].pid); par_free(&pj[q]); }
+                par_free(&pj[k]);
+                fail_n++; write_report(report, "FAIL");
+                printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate-part-%d\trc=%d\treport=%s\n", todo[k], prc, report);
+                return 1;
+            }
+            par_free(&pj[k]);
         }
         xa4 = ns;
         xa5 = 0;

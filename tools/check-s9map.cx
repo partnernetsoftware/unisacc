@@ -1,0 +1,80 @@
+/* tools/check-s9map.cx -- the one parser for `tools/affected.cx -- --materials-dump`.
+ *
+ *   sh ./unisacc.com tools/check-s9map.cx
+ *
+ * Ends with CHECK_S9MAP\tfailed=N; exit 0 only when N is 0.  Every case is a literal dump text, because the
+ * point of the module is the wire format: a row that is one byte off must be refused by name, never silently
+ * skipped the way 0.0.67 skipped every four-field row as "refused". */
+#pragma unisa use cxlib.s9map
+#pragma unisa use cxlib.die
+static int failed;
+static void die(const char *s) { tool_die("check-s9map", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\ts9map.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+/* The needle here is a reason word produced by the module at run time, not source text: compare bytes with
+   memcmp instead of strstr so the lint does not have to judge an origin it cannot see. */
+static int has(const char *s, const char *p) {
+    size_t n, pl, i;
+    if (!s) return 0;
+    n = strlen(s); pl = strlen(p);
+    for (i = 0; pl && i + pl <= n; i++) if (!memcmp(s + i, p, pl)) return 1;
+    return 0;
+}
+
+int main(void) {
+    char map[16384], why[300];
+
+    /* one resolved material: NAME<TAB>/abs/path in the map, one row, no refusal */
+    {   const char *d = "MATERIAL\tb1\tstreams\t/cache/streams-1.dir\n";   /* one resolved material row */
+        why[0] = 0;
+        ck(s9_map_from_dump(d, (long)strlen(d), map, (long)sizeof map, why, (int)sizeof why) == 0
+           && s9_map_rows() == 1 && s9_map_refused() == 0 && !strcmp(map, "streams\t/cache/streams-1.dir\n"), "resolved-row-becomes-map-entry");
+    }
+
+    /* a refused row is counted and left out; it is not a fatal row */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\tx\t-\tREFUSED=no-producer=x\n", 38, map, (long)sizeof map, why, (int)sizeof why) == 0
+       && s9_map_rows() == 0 && s9_map_refused() == 1 && map[0] == 0, "refused-row-counted-not-mapped");
+
+    /* a relative source is not something a child in another directory can use */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\tstreams\ttools/streams-material.cx\n", 47, map, (long)sizeof map, why, (int)sizeof why) == 1
+       && has(why, "dump-path"), "relative-path-refused-by-name");
+
+    /* three fields: the shape 0.0.67 wrote its reader against -- must not be accepted as a row */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\tstreams\n", 20, map, (long)sizeof map, why, (int)sizeof why) == 1
+       && has(why, "dump-row"), "three-field-row-refused");
+
+    /* no trailing newline: the last row cannot be trusted, so the whole dump is refused */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\tstreams\t/x\nMATERIAL\tb2", 32, map, (long)sizeof map, why, (int)sizeof why) == 1
+       && has(why, "dump-wire"), "unterminated-last-row-refused");
+
+    /* an empty NAME has nothing to key the map on */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\t\t/x\n", 18, map, (long)sizeof map, why, (int)sizeof why) == 1
+       && has(why, "dump-name"), "empty-name-refused");
+
+    /* two usable rows keep their order and both land */
+    {   const char *d = "MATERIAL\tb1\ta\t/a\nMATERIAL\tb2\tb\t/b\n";
+        why[0] = 0;
+        ck(s9_map_from_dump(d, (long)strlen(d), map, (long)sizeof map, why, (int)sizeof why) == 0
+           && s9_map_rows() == 2 && !strcmp(map, "a\t/a\nb\t/b\n"), "two-rows-in-order");
+    }
+
+    /* a buffer too small for the row is a named refusal, never a truncated entry */
+    why[0] = 0;
+    ck(s9_map_from_dump("MATERIAL\tb1\tstreams\t/cache/streams-1.dir\n", 45, map, 8, why, (int)sizeof why) == 1
+       && has(why, "map-overflow"), "overflow-refused-not-truncated");
+
+    /* an empty dump parses to an empty map without a refusal: whether that is acceptable is the caller's
+       call (tools/s9-nightly.cx fails it there, because an empty map there means every material was refused) */
+    why[0] = 0;
+    ck(s9_map_from_dump("", 0, map, (long)sizeof map, why, (int)sizeof why) == 0 && s9_map_rows() == 0 && s9_map_refused() == 0, "empty-dump-is-empty-map");
+
+    printf("CHECK_S9MAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

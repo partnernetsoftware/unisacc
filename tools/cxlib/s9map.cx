@@ -1,0 +1,72 @@
+/* The one parser for tools/affected.cx -- --materials-dump, shared by tools/s9-nightly.cx (which hands the
+ * table to s9-shards init) and tools/check-s9-nightly.cx (which asserts it against the real dump, not a
+ * hand-written one).  Two readers of the same wire format drift silently -- the 0.0.67 s9 run proved it:
+ * the dump was read as three fields, every four-field row was skipped as malformed, and the map reached
+ * init with zero rows while the harness still reported PASS.
+ *
+ * The wire format, as tools/affected.cx prints it:
+ *   MATERIAL<TAB>BATCH<TAB>NAME<TAB>SOURCE                 a resolved material
+ *   MATERIAL<TAB>BATCH<TAB>NAME<TAB>-<TAB>REFUSED=REASON   a material nothing can produce
+ * With --prepare-materials SOURCE is the built artifact's absolute cache path; without it, the
+ * repo-relative source.  Only absolute paths are accepted here: a relative source is not something a
+ * child process in another directory can use, so handing it on would be a silent wrong-path.
+ *
+ *   char map[16384]; char why[300];
+ *   int st = s9_map_from_dump(dump, n, map, (long)sizeof map, why, (int)sizeof why);
+ *   st == 0  MAP holds NAME<TAB>/ABS/PATH lines, one per usable material; refused rows are counted only
+ *   st == 1  the dump does not have the shape above; WHY names the first offending line kind
+ *
+ * No allocation, no writes, no caching: the buffer is the caller's. */
+#pragma unisa module s9map
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+long s9_map_rows(void);        /* usable rows written by the last call */
+long s9_map_refused(void);     /* refused rows seen by the last call */
+static long s9_rows, s9_refused;
+
+long s9_map_rows(void) { return s9_rows; }
+long s9_map_refused(void) { return s9_refused; }
+
+int s9_map_from_dump(const char *dump, long n, char *map, long cap, char *why, int whycap) {
+    long at = 0, used = 0;
+    s9_rows = 0; s9_refused = 0;
+    if (map && cap > 0) map[0] = 0;
+    while (dump && at < n) {
+        long e = at, f[8], nf = 0, p;
+        while (e < n && dump[e] != '\n') e++;
+        if (e == n) { cx_fmt(why, (size_t)whycap, "dump-wire"); return 1; }
+        p = at; f[nf++] = p;                       /* F[I] = where field I starts */
+        while (p < e) {
+            if (dump[p] == '\t') {
+                if (nf >= 8) { cx_fmt(why, (size_t)whycap, "dump-fields"); return 1; }
+                f[nf++] = ++p;
+            } else p++;
+        }
+        /* a row is MATERIAL<TAB>BATCH<TAB>NAME<TAB>SOURCE, so the first field is exactly 8 bytes and there
+           are at least four of them; the refused form is that plus a fifth */
+        if (nf < 4 || f[1] - f[0] - 1 != 8 || !tx_prefix(dump + f[0], 8, "MATERIAL", 8)) {
+            cx_fmt(why, (size_t)whycap, "dump-row");
+            return 1;
+        }
+        {   long name_at = f[2], name_n = f[3] - 1 - name_at;
+            long src_at = f[3], src_n = (nf > 4 ? f[4] - 1 : e) - src_at;
+            if (name_n <= 0) { cx_fmt(why, (size_t)whycap, "dump-name"); return 1; }
+            if (src_n == 1 && dump[src_at] == '-') {
+                s9_refused++;                       /* named skip: the reason is the next field */
+            } else if (src_n > 0 && dump[src_at] == '/') {
+                if (used + name_n + src_n + 3 > cap) { cx_fmt(why, (size_t)whycap, "map-overflow"); return 1; }
+                if (mm_copy(map + used, cap - used, dump + name_at, name_n)) { cx_fmt(why, (size_t)whycap, "map-copy"); return 1; }
+                used += name_n;
+                map[used++] = '\t';
+                if (mm_copy(map + used, cap - used, dump + src_at, src_n)) { cx_fmt(why, (size_t)whycap, "map-copy"); return 1; }
+                used += src_n;
+                map[used++] = '\n';
+                map[used] = 0;
+                s9_rows++;
+            } else { cx_fmt(why, (size_t)whycap, "dump-path"); return 1; }
+        }
+        at = e + 1;
+    }
+    return 0;
+}

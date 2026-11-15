@@ -152,6 +152,17 @@ static long tails(const char *out, const char *pre, long pl, const char *suf, lo
     }
     return c;
 }
+/* lines of OUT that contain both A and B on the same line */
+static long same_line(const char *out, const char *a, long al, const char *b, long bl) {
+    long at = 0, n = tx_len(out, OUTCAP), c = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && out[e] != '\n') e++;
+        if (tx_find(out + at, e - at, a, al) >= 0 && tx_find(out + at, e - at, b, bl) >= 0) c++;
+        at = e + 1;
+    }
+    return c;
+}
 static int others(const char *out) {
     long at = 0, n = tx_len(out, OUTCAP); int c = 0;
     while (at < n) {
@@ -316,10 +327,12 @@ int main(int argc, char **argv) {
             rc = tool(cc, p, OUTCAP); int nc = num(p, "batches=");
             rc |= tool(cd2, q, OUTCAP); int nd = num(q, "\tbatches=");
             rc |= tool(cr, q2, OUTCAP); int nr = num(q2, "batches=");
-            /* check-affected 自己的每个分段批都字面量点名 tools/ape-pack.cx,所以 commit 档至少包含它们:
-               分段数(affected-tool/tiers/list/list2/run 共 5)+ 不外扩。上限随分段数走,守的是「不被整链拖住」
-               这个性质(失控时是 37 批),不是某个硬编码数字。 */
-            ck(rc == 0 && nc >= 1 && nc <= 5, "literal-depth-commit-capped");
+            /* commit 档只跟一层:选中的是点名 ape-pack 的分段批加两个字面量消费者,不多拉整链。上限给一个
+               小的绝对界(登记表里 ape-pack 的引用在源文件正文,不在行文本,不能从表里硬算),同时断言「比
+               不限层的档严格少」且「不含 chain 批」——失控时(历史实测 37 批)三条都会红。 */
+            ck(rc == 0 && nc >= 1 && nc <= 10, "literal-depth-commit-capped");
+            ck(nd > nc && nr > nc, "literal-depth-commit-fewer-than-unbounded");
+            ck(!has(p, "AFFECTED\tcandidate-chain\t") && !has(p, "AFFECTED\tchain-run\t"), "literal-depth-commit-excludes-chain");
             ck(nd >= nc && nr >= nc && has(q, "AFFECTED\tcandidate-chain\t") && has(q2, "AFFECTED\tchain-run\t")
                && !has(p, "AFFECTED\tcandidate-chain\t"), "literal-depth-daily-release-unbounded");
             }
@@ -369,11 +382,14 @@ int main(int argc, char **argv) {
             ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-same-narrows");
             ck(nsel > 0 && nsel < full, "iface-same-selects-fewer");
             ck(ndef > 0, "iface-same-defers-some");
-            /* deferral happens before the platform filter, so DEFERRED_BY_IFACE may name batches of other
-               platforms while the selected count excludes them: conserve over the whole reached set. */
+            /* 平台过滤现在在推迟之前:非本机平台的批在两边都被算进 not_applicable,既不会出现在 AFFECTED 也不会
+               出现在 DEFERRED_BY_IFACE 里。所以守恒式两侧用同一基数(full + 基线 not_applicable),并额外断言
+               本次的 not_applicable 与基线相等——推迟没有把别平台的批算进来,正是 (1) 修的那件事。 */
             ck(nsel + ndef + num(p, "\tnot_applicable=") == full + num(o, "\tnot_applicable="), "iface-same-selected-plus-deferred-is-full");
+            ck(num(p, "\tnot_applicable=") == num(o, "\tnot_applicable="), "iface-same-not-applicable-unchanged-by-deferral");
+            ck(same_line(p, "DEFERRED_BY_IFACE\t", 18, "\tplatform=", 10) == 0, "iface-same-deferral-names-no-platform-row");
             ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == ndef && lines(p, "AFFECTED\t", 9) == nsel, "iface-same-every-deferral-listed");
-            ck(num(p, "\tfull=") == nsel + ndef && num(p, "\tfull=") == full + num(o, "\tnot_applicable=") - num(p, "\tnot_applicable=") && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
+            ck(num(p, "\tfull=") == nsel + ndef && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
             ck(tails(p, "AFFECTED\t", 9, "\tvia=use", 8) > 0, "iface-same-keeps-direct-users");
             ck(!has(p, "\tvia=source\treason=") && !has(p, "\tvia=literal\treason=") && !has(p, "\tvia=arg\treason=") && !has(p, "\tvia=table\treason=") && !has(p, "\tvia=guard\treason="), "iface-same-defers-use-edges-only");
         }

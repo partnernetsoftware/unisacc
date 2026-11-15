@@ -795,6 +795,10 @@ static void prep_done(PJob *J, int ok) {
     P->state = PS_FAILED;
     if (!P->why[0]) cx_fmt(P->why, sizeof P->why, "build-failed=%s", P->name);
 }
+/* --materials-dump prints only MATERIAL rows: a reader that hands them to run-batch must not have to skip
+   PREPARED/PREBUILD lines.  When a dump asked for the build, those reports go to stderr instead. */
+static int prep_quiet;
+static void prep_print(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(prep_quiet ? stderr : stdout, fmt, ap); va_end(ap); }
 static void prebuild(const int *sel, int nsel) {
     int b, todo[32], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
     if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."))) die("path too long");
@@ -856,9 +860,9 @@ static void prebuild(const int *sel, int nsel) {
         }
     }
     for (k = 0; k < nprep; k++)
-        if (prep[k].state == PS_READY) printf("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
-        else printf("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
-    printf("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
+        if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
+        else prep_print("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
+    prep_print("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
 }
 static char prep_val[32][4400];
 /* the material arguments of batch B, or a named reason */
@@ -1174,10 +1178,25 @@ int main(int argc, char **argv) {
     while (a < argc) {
         if (tx_eqz(argv[a], "--since") && a + 1 < argc) { since = argv[a + 1]; a += 2; src++; }
         else if (tx_eqz(argv[a], "--files") || tx_eqz(argv[a], "--ids")) {
-            int ids = tx_eqz(argv[a], "--ids");
+            int ids = tx_eqz(argv[a], "--ids"), q2;
             files = argv + a + 1; nfiles = 0; a++;
             while (a < argc && !tx_prefix(argv[a], tx_len(argv[a], 4096), "--", 2)) { a++; nfiles++; }
             if (!nfiles) usage();
+            if (ids) {   /* --ids also takes a comma-separated list, so a caller that joins DEFERRED names
+                            (tools/affected-drain.cx does) needs no change.  The pieces go into a static array:
+                            ARGV belongs to the caller, and inserting into it would walk over the next option. */
+                static char *idsplit[MAXBATCH]; int nn = 0;
+                for (q2 = 0; q2 < nfiles; q2++) {
+                    char *s = files[q2];
+                    while (*s && nn < MAXBATCH) {
+                        idsplit[nn++] = s;
+                        while (*s && *s != ',') s++;
+                        if (*s == ',') *s++ = 0;
+                    }
+                }
+                files = idsplit; nfiles = nn;
+                if (!nfiles) usage();
+            }
             src += ids ? 100 : 1;
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
@@ -1213,15 +1232,34 @@ int main(int argc, char **argv) {
         }
         else usage();
     }
-    if (materials_dump) {   /* the source each declared material resolves to, and nothing built */
+    if (materials_dump) {   /* the source each declared material resolves to.  The row is
+                               MATERIAL<TAB>BATCH<TAB>NAME<TAB>SOURCE-or-'-'[<TAB>REFUSED=why] -- four
+                               fields plus the reason on a refusal -- and with --prepare-materials it is the
+                               built artifact's absolute cache path instead of a repo-relative source, so a
+                               caller can hand it straight to run-batch without knowing the cache layout. */
         if (src || mode_run) usage();
         load_registry();
+        if (prep_on) {   /* build first: the row must be what run-batch will be handed, not a plan; the
+                            build reports go to stderr so this output stays one row per material. */
+            int sel[MAXBATCH], nsel = 0;
+            for (b = 0; b < nbatch; b++) if (!tx_eqz(batch[b].materials, "-")) sel[nsel++] = b;
+            prep_quiet = 1;
+            prebuild(sel, nsel);
+            prep_quiet = 0;
+        }
         for (b = 0; b < nbatch; b++) {
             const char *at = batch[b].materials; tp_material_decl d; int rc2;
             if (tx_eqz(at, "-")) continue;
             while ((rc2 = tp_material_next(&at, &d)) > 0) {
                 char src[600], why[200];
-                if (prep_source(d.name, d.kind, src, (long)sizeof src, why, (int)sizeof why))
+                why[0] = 0;
+                if (prep_on) {
+                    int k = prep_find(d.name);
+                    if (k < 0) { (void)prep_plan(d.name, d.kind, why, (int)sizeof why); k = prep_find(d.name); }
+                    if (k < 0) printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
+                    else if (prep[k].state != PS_READY) printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, prep[k].why);
+                    else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, prep[k].path);
+                } else if (prep_source(d.name, d.kind, src, (long)sizeof src, why, (int)sizeof why))
                     printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
                 else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, src);
             }
@@ -1331,6 +1369,9 @@ int main(int argc, char **argv) {
                 if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; }
             }
             if (v == V_NONE) continue;
+            /* 平台过滤在推迟之前:一台机器跑不了的批既不能被算进 selected,也不能被算进 DEFERRED/full=,否则
+               「推迟」与「选不出」会互相掩盖。nna 记这些批,守恒式以它为两侧的同一基数。 */
+            if (!host_allows(b)) continue;   /* host_allows 自己记 nna 并打印 NOT_APPLICABLE,这里不再加 */
             if (iface_narrow && (v == V_USE || v == V_LITUSE || v == V_ARGUSE) && !batch_has_guard(batch[b].id)
                 && !iface_direct(batch[b].source, why)
                 && (tx_chr(batch[b].entry, tx_len(batch[b].entry, 4096), '{') >= 0 || !iface_direct(batch[b].entry, why))) {
@@ -1341,7 +1382,7 @@ int main(int argc, char **argv) {
                 printf("DEFERRED_BY_SYMBOL\t%s\twhy=%s\tvia=%s\treason=symbol-unreferenced\n", batch[b].id, display(why), via_name[v]);
                 nsymdefer++; continue;
             }
-            if (!host_allows(b)) continue;
+            /* 平台过滤已在上方做完(先过滤后推迟):这里不再重复,否则 nna 会双计。 */
             printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
         }
