@@ -98,3 +98,19 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 记忆宫殿视图:把 `prd_mempalace.md` 的房间解析成可查询的表,经 API 读写单个房间。
 - lsp:符号索引(`symindex`)常驻,提供定义与引用查询。
 - flow:把"改 -> 派生 -> 选批 -> 提交门"串成事件驱动的流。
+
+## 8 文档接口 doc(一期,2026-11-15)
+
+目标:agent 不再直接改 prd*.md、plans/*.md,只经 doc 接口表达意图(取哪节、替换哪节、追加哪行),取锁、原子写、并发校验由服务做。
+
+- 库 `tools/cxlib/flowdoc.cx`(`fd_run(op, args, ff_out*)`):节路径 `A/B/C` 按 Markdown 标题逐层嵌套匹配(标题去首尾空白,代码块内 `#` 行不算标题),找不到 ENOSEC,歧义 EMULTISEC。
+  - doc.get 取节(含标题行,sha 为全文件摘要);doc.list 列节树 `层级<TAB>路径`。
+  - doc.set 整节正文替换(标题保留);doc.append 节尾(尾随空行之前)追加一行;doc.remove 按唯一子串删节内一行。
+  - doc.mermaid 在节内 mermaid 块里:old 唯一则替换为 new(改节点文字);old 空则在首块闭合前加一行 new(加连线);new 空则删含 old 的行(删连线)。
+  - 写入一律经 file.write:原子写、根越界 EOUTSIDE;带读入时的 sha 写,期间他人改过即 ESHA;调用者给的 expect_sha 不符同样 ESHA。
+- 锁:库不取锁,只做 sha 兜底;flow 的 doc.* 写节点默认 lock=doc:<path>(同文件串行,不同文件并行);CLI 写操作内部取 devsvc 锁 doc:<文件>。调用者不感知。
+- CLI:`devsvc doc get|set|append|remove|list|mermaid FILE SECTION [k=v | k@=PATH ...] [--from F] [--expect-sha X]`;set 的 --from 为 content,其余为 line。
+- 允许范围:只作用于 `tools/devsvc-repo.tsv` 的 doc 行(glob,* 不跨 /):prd.md、prd_*.md、plans/*.md;核心不写死路径。cfg_load 对不认识的行类型只告警一次不判坏表(向前兼容旧执行体)。
+- 检查:`tools/check-flowdoc.cx`(批次 flowdoc,26 项)。
+- 未做:CLI 与 flow doc 节点各自的专项检查项;入口按 HEAD 固定核心,doc 子命令在新核心入库后才对 `devsvc.cx` 生效。
+

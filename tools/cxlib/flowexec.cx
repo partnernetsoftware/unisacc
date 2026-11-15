@@ -45,6 +45,7 @@
  * CLI: tools/flowrun.cx.  Check: tools/check-flowrun.cx. */
 #pragma unisa module flowexec
 #pragma unisa use cxlib.flowfile
+#pragma unisa use cxlib.flowdoc
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -170,7 +171,7 @@ int fl_load(const char *path, fl_flow *f, char *why, int cap) {
         if (f->count == FL_MAX_NODES) { fl_say(why,(size_t)cap, "more than %d nodes", FL_MAX_NODES); goto refuse; }
         if (!c[0][0] || strlen(c[0]) > 200 || strchr(c[0], '/') || strchr(c[0], ',')) { fl_say(why,(size_t)cap, "line %d: bad node id '%s'", line, c[0]); goto refuse; }
         if (fl_find(f, c[0], (long)strlen(c[0])) >= 0) { fl_say(why,(size_t)cap, "line %d: duplicate node id '%s'", line, c[0]); goto refuse; }
-        if (strcmp(c[1], "exec") && strcmp(c[1], "file.read") && strcmp(c[1], "file.write") && strcmp(c[1], "file.edit")
+        if (strcmp(c[1], "exec") && strcmp(c[1], "file.read") && strcmp(c[1], "file.write") && strcmp(c[1], "file.edit") && strncmp(c[1], "doc.", 4)
             && strcmp(c[1], "compare") && strcmp(c[1], "search")) {
             fl_say(why,(size_t)cap, "line %d: node '%s' has unknown op '%s'", line, c[0], c[1]); goto refuse; }
         nd = &f->n[f->count]; nd->id = c[0]; nd->op = c[1]; nd->args = c[3]; deps[f->count] = c[2]; f->count++;
@@ -206,6 +207,11 @@ int fl_load(const char *path, fl_flow *f, char *why, int cap) {
         }
         r = fl_arg(nd->args, "lock", 0, nd->lock, sizeof nd->lock);
         if (r < 0 && (!strcmp(nd->op, "file.write") || !strcmp(nd->op, "file.edit"))) r = fl_arg(nd->args, "path", 0, nd->lock, sizeof nd->lock);
+        if (r < 0 && !strncmp(nd->op, "doc.", 4) && strcmp(nd->op, "doc.get") && strcmp(nd->op, "doc.list")) {   /* same document: serial */
+            char dp[200];
+            r = fl_arg(nd->args, "path", 0, dp, sizeof dp);
+            if (r >= 0 && cx_fmt(nd->lock, sizeof nd->lock, "doc:%s", dp)) r = -2;
+        }
         if (r == -2) { fl_say(why,(size_t)cap, "node '%s' lock or path too long", nd->id); goto refuse; }
         if (r < 0) nd->lock[0] = 0;
     }
@@ -361,7 +367,7 @@ static void fl_file(fl_ctx *x, fl_node *nd) {
     nd->t0 = sy_now_ms();
     fl_evt(x, nd, FL_RUNNING, 0, 0, nd->op);
     memset(&o, 0, sizeof o);
-    r = cx_fmt(p, sizeof p, "%s/out", x->run) ? 1 : ff_run2(nd->op, nd->args, p, &o);
+    r = cx_fmt(p, sizeof p, "%s/out", x->run) ? 1 : !strncmp(nd->op, "doc.", 4) ? fd_run(nd->op, nd->args, &o) : ff_run2(nd->op, nd->args, p, &o);
     w = fl_path(p, x->run, nd->id, "out") ? -ENAMETOOLONG : sy_write_file(p, o.buf ? o.buf : "", o.buf ? o.n : 0, 0644);
     if (w == 0) w = fl_path(p, x->run, nd->id, "err") ? -ENAMETOOLONG : sy_write_file(p, o.why, (int64_t)strlen(o.why), 0644);
     ff_out_free(&o);

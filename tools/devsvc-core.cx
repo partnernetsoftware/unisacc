@@ -57,6 +57,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.flowexec
 #pragma unisa use cxlib.flowfile
+#pragma unisa use cxlib.flowdoc
 
 #define PW 1024
 #define MAXLOCK 64
@@ -80,6 +81,7 @@ typedef struct {
     char inst_env[64];        /* 指定实例目录的环境变量名 */
     char lockname[CFG_LOCKS][64]; int nlockname;   /* 约定锁名(协作约定,不强制) */
     char lockpfx[CFG_LOCKS][512];                  /* lock 行第三列:逗号分隔的写域,以 / 结尾为目录前缀,否则精确路径;- 或空为无 */
+    char docpat[CFG_LOCKS][128]; int ndoc;         /* doc 行:devsvc doc 允许作用的文档(glob,* 不跨 /) */
     char table[1024];
 } RepoCfg;
 static RepoCfg cfg;
@@ -106,6 +108,7 @@ static int cfg_load(const char *root) {
         kl = t - s; vl = t2 - t - 1;
         if (kl == 3 && !memcmp(s, "key", 3)) continue;   /* 表头 */
         if (kl == 3 && !memcmp(s, "lib", 3)) { if (nlib >= 3 || !cfg_set(cfg.lib[nlib], sizeof cfg.lib[0], t + 1, vl)) bad++; else nlib++; continue; }
+        if (kl == 3 && !memcmp(s, "doc", 3)) { if (cfg.ndoc >= CFG_LOCKS || !cfg_set(cfg.docpat[cfg.ndoc], sizeof cfg.docpat[0], t + 1, vl)) bad++; else cfg.ndoc++; continue; }
         if (kl == 4 && !memcmp(s, "lock", 4)) {
             char *t3 = t2 < e ? memchr(t2 + 1, '\t', e - t2 - 1) : 0; long pl = t2 < e ? (t3 ? t3 : e) - t2 - 1 : 0;
             if (cfg.nlockname >= CFG_LOCKS || !cfg_set(cfg.lockname[cfg.nlockname], 64, t + 1, vl)) { bad++; continue; }
@@ -114,7 +117,8 @@ static int cfg_load(const char *root) {
             continue;
         }
         for (k = 0; k < 7; k++) if ((long)strlen(keys[k]) == kl && !memcmp(s, keys[k], kl)) break;
-        if (k == 7 || (seen & (1 << k)) || !cfg_set(dst[k], cap[k], t + 1, vl)) { bad++; continue; }
+        if (k == 7) { static int warned; if (!warned++) fprintf(stderr, "devsvc: WARN repo table: unknown row kind %.*s ignored (newer table?)\n", (int)kl, s); continue; }
+        if ((seen & (1 << k)) || !cfg_set(dst[k], cap[k], t + 1, vl)) { bad++; continue; }
         seen |= 1 << k;
     }
     free(b);
@@ -834,6 +838,76 @@ static int cmd_f(const char *root, int argc, char **argv) {
     return 0;
 }
 
+/* ---- doc:按 Markdown 标题节操作配置表 doc 行声明的文档(cxlib.flowdoc)。写操作内部取锁 doc:<文件>,调用者不感知;
+   库内 expect_sha 兜底。doc OP FILE SECTION [k=v | k@=PATH ...] [--from F](set 的 content) [--expect-sha X] ---- */
+static int doc_glob(const char *g, const char *s) {
+    if (!*g) return !*s;
+    if (*g == '*') { for (;;) { if (doc_glob(g + 1, s)) return 1; if (!*s || *s == '/') return 0; s++; } }
+    return *s && *g == *s && doc_glob(g + 1, s + 1);
+}
+static int cmd_doc(const char *root, int argc, char **argv) {
+    AB b = {0, 0, 0}; ff_out o; char fop[24], nm[64]; const char *op, *path, *xs, *src; int r, i, ok = 0, wr;
+    if (argc < 2) return 2;
+    op = argv[0]; path = argv[1];
+    if (strcmp(op, "get") && strcmp(op, "set") && strcmp(op, "append") && strcmp(op, "remove") && strcmp(op, "list") && strcmp(op, "mermaid")) return 2;
+    for (i = 0; i < cfg.ndoc; i++) if (doc_glob(cfg.docpat[i], path)) ok = 1;
+    if (!ok || strstr(path, "..")) { fprintf(stderr, "DOC\t%s\trefused\tEDOC: %s is not a doc of the repo table\n", op, path); return 1; }
+    wr = strcmp(op, "get") && strcmp(op, "list");
+    F(fop, sizeof fop, "doc.%s", op);
+    ab_kv(&b, "path", path, strlen(path));
+    if (argc >= 3 && argv[2][0] != '-') ab_kv(&b, "section", argv[2], strlen(argv[2]));
+    for (i = 3; i < argc; i++) {
+        const char *eq = strchr(argv[i], '=');
+        if (argv[i][0] == '-') { if (i + 1 < argc && strcmp(argv[i], "--all")) i++; continue; }
+        if (!eq || eq == argv[i]) return 2;
+        if (eq[-1] == '@') {
+            char k[64]; unsigned char *t = 0; int64_t tn = 0;
+            if (eq - argv[i] - 1 >= (long)sizeof k) return 2;
+            for (r = 0; r < eq - argv[i] - 1; r++) k[r] = argv[i][r];
+            k[r] = 0;
+            if (sy_read_file(eq + 1, &t, &tn, 1 << 26)) { fprintf(stderr, "DOC\t%s\tfail\tEARG: cannot read %s\n", op, eq + 1); return 1; }
+            ab_kv(&b, k, t ? (char *)t : "", (long)tn);
+            if (t) free(t);
+        } else {
+            char k[64];
+            if (eq - argv[i] >= (long)sizeof k) return 2;
+            for (r = 0; r < eq - argv[i]; r++) k[r] = argv[i][r];
+            k[r] = 0;
+            ab_kv(&b, k, eq + 1, strlen(eq + 1));
+        }
+    }
+    src = opt(argc, argv, "--from", "");
+    if (*src) {
+        unsigned char *t = 0; int64_t tn = 0;
+        if (sy_read_file(src, &t, &tn, 1 << 26)) { fprintf(stderr, "DOC\t%s\tfail\tEARG: cannot read %s\n", op, src); return 1; }
+        ab_kv(&b, !strcmp(op, "set") ? "content" : "line", t ? (char *)t : "", (long)tn);
+        if (t) free(t);
+    }
+    xs = opt(argc, argv, "--expect-sha", "");
+    if (*xs) ab_kv(&b, "expect_sha", xs, strlen(xs));
+    if (ovf || !b.p) return 2;
+    set_owner(argc, argv);
+    svc_on = request(root, "ping", 0) == 0;
+    if (wr && svc_on) {
+        F(nm, sizeof nm, "doc:%s", path);
+        r = lk_take(root, nm, 60, 30000);
+        if (r == 3) svc_on = 0;
+        else if (r) { chomp(resp); fprintf(stderr, "DOC\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
+    }
+    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    memset(&o, 0, sizeof o);
+    r = fd_run(fop, b.p, &o);
+    lk_drop(root);
+    if (r) { fprintf(stderr, "DOC\t%s\tfail\t%s\n", op, o.why); ff_out_free(&o); return 1; }
+    if (!wr) {
+        if (o.buf && o.n > 0) fwrite(o.buf, 1, (size_t)o.n, stdout);
+        fflush(stdout);
+        fprintf(stderr, "DOC\t%s\tok\tsha=%s\n", op, o.sha);
+    } else printf("DOC\t%s\tok\tsha=%s\tlines=%ld\n", op, o.sha, o.lines);
+    ff_out_free(&o);
+    return 0;
+}
+
 /* ---- git 整合与自动取锁包装:调用方不需要显式取锁。服务按路径判定要取的锁,排队等待(至多 50 s),成败都放锁。
    属主取自 $DEVSVC_OWNER,缺省 auto-<pid>。写域到锁名的映射取自配置表 lock 行第三列(lock_for);devtask 单的写域未接。 ---- */
 static const char *auto_owner(void) {
@@ -955,6 +1029,11 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "ping") || !strcmp(cmd, "stop")) return say(request(root, cmd, 0));
     if (!strcmp(cmd, "status")) return cmd_status(root, argc > 0 && !strcmp(argv[0], "--paths"));
     if (!strcmp(cmd, "run")) { int r = cmd_run(root, argc, argv); return r == 2 && argc < 1 ? usage() : r; }
+    if (!strcmp(cmd, "doc")) {
+        int r = cmd_doc(root, argc, argv);
+        if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad doc arguments: doc get|set|append|remove|list|mermaid FILE SECTION [k=v|k@=PATH ...] [--from F] [--expect-sha X]\n");
+        return r;
+    }
     if (!strcmp(cmd, "flow") || !strcmp(cmd, "x") || !strcmp(cmd, "f")) {
         int r = cmd[0] == 'x' ? cmd_x(root, argc, argv) : cmd[1] ? cmd_flow(root, argc, argv) : cmd_f(root, argc, argv);
         if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad %s arguments (see usage in the file header)\n", cmd);
