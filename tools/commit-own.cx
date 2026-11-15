@@ -242,7 +242,7 @@ static void co_pending_collect(void) {
 int main(int argc, char **argv) {
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
     int dry = 0, att = 0; long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
-    char idx[400], blob[CO_MAX][64], out[8192], root[4096];
+    char gatef[400] = "", idx[400], blob[CO_MAX][64], out[8192], root[4096];
     char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
     char skip[CO_MAX];   /* 1 when a --registered derived table yields no change: left out of the commit */
     char del[CO_MAX];    /* 1 when --whole PATH is in HEAD but gone from the work tree (git rm): commit the deletion */
@@ -364,7 +364,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
         if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
-            char *rv[8], ro[16384]; int n = 0, bad = 0; long at = 0, rn;
+            char *rv[8], ro[16384]; int n = 0, bad = 0, rrc; long at = 0, rn;
             const char *tool = getenv("UNISACC_REGM_TOOL");
             char rnat[4400]; rnat[0] = 0;
             {   const char *dir = getenv("UNISACC_COMMIT_OWN_NATIVES");
@@ -373,7 +373,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             else { rv[n++] = "sh"; rv[n++] = "./unisacc.com"; rv[n++] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx"); rv[n++] = "--"; }
             rv[n++] = "--check"; rv[n++] = "--index"; rv[n] = 0;
             g_bound_s = 60; tc0 = sy_now_ms();
-            if (run(rv, ro, sizeof ro) < 0) bad = -1;
+            rrc = run(rv, ro, sizeof ro); if (rrc < 0) bad = -1;
             g_bound_s = 30; t_regm += sy_now_ms() - tc0;
             rn = tx_len(ro, sizeof ro);
             while (bad >= 0 && at < rn) { long e = tx_chr(ro + at, rn - at, '\n'), l = e < 0 ? rn - at : e;
@@ -385,6 +385,17 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 fprintf(stderr, "COMMIT_OWN_FAIL\tclass=reg-manifest\n");
                 fprintf(stderr, "commit-own: REFUSE --registered: reg-manifest --check --index %s on the commit's index; nothing committed\n", bad < 0 ? "did not run" : "reports MISSING/MISMATCH");
                 return 1;
+            }
+            if (n == 6 && rrc >= 0 && rrc <= 1 && rn < (long)sizeof ro - 2) {
+                /* S2: the hook's precommit runs this same gate on this same index a moment later.  Leave it the exit code and
+                   output under a key (staged tree, gate, tool blob, argv -- recomputed in tools/precommit.cx gate_reuse); it
+                   reuses them only when its own key is identical and reruns otherwise.  The record dies with this commit. */
+                char tr[64], th[64]; static char rec[20000]; char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "hash-object", "--", rv[2], 0}; int rl = 0;
+                if (run(wv, tr, sizeof tr) == 0 && run(hv, th, sizeof th) == 0 && tx_len(tr, 64) == 40 && tx_len(th, 64) == 40 &&
+                    tx_snprintf(gatef, sizeof gatef, "%s/commit-own-%d.gate", sy_tmpdir(), sy_pid()) < (int)sizeof gatef &&
+                    (rl = tx_snprintf(rec, sizeof rec, "KEY\ttree=%s\tgate=manifest\ttool=%s\targv=sh ./unisacc.com %s -- --check --index\nRC\t%d\n%s\n", tr, th, rv[2], rrc, ro)) < (int)sizeof rec &&
+                    cx_write(gatef, rec, (size_t)rl) == 0) sy_setenv("UNISACC_GATE_REUSE", gatef, 1);
+                else { sy_unsetenv("UNISACC_GATE_REUSE"); gatef[0] = 0; }
             }
             sy_printf("REGISTERED\tsets=%d\tgate=reg-manifest-ok\n", nreg);
         }
@@ -400,6 +411,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
+        if (gatef[0]) { sy_unsetenv("UNISACC_GATE_REUSE"); sy_unlink(gatef); gatef[0] = 0; }
         {   long on = tx_len(out, sizeof out);
             if (dry) fcls = tx_find(out, on, "precommit", 9) >= 0 ? "precommit" : "git-or-hook";
             else if (tx_find(out, on, "cannot lock ref 'HEAD'", 22) >= 0) fcls = "head-moved";
