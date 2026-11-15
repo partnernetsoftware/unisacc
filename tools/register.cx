@@ -189,6 +189,27 @@ static int take_out(const char *path, const char *line) {
 /* run ARGV, the LAST cap-1 bytes of stdout+stderr into OUT (terminated): the summaries come last; exit code or -1.
    Every child is started under ./tools/bound SECONDS (argv[0], argv[1]): that is its time bound, and an argv
    without it is not run. */
+/* run_start spawns (the bound rule as in run), run_collect drains and reaps: between them the caller may
+   do independent work while the child runs (the batch-packages runner prepare overlaps the trial run). */
+static int run_start(char **argv, int *ofd) {
+    if (!argv[0] || !tx_eqz(argv[0], "./tools/bound") || !argv[1]) return -1;
+    return sy_spawn_pipe(argv, 0, 0, ofd, 0);
+}
+static int run_collect(int pid, int ofd, char *out, long cap) {
+    int ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
+    out[0] = 0;
+    if (pid < 0) return -1;
+    for (;;) {
+        if (n == cap - 1) { for (k = 0; k < n - half; k++) out[k] = out[k + half]; n -= half; }
+        r = sy_read(ofd, out + n, cap - 1 - n);
+        if (r <= 0) break;
+        n += r;
+    }
+    out[n] = 0;
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
 static int run(char **argv, char *out, long cap) {
     int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
     out[0] = 0;
@@ -222,7 +243,7 @@ int main(int argc, char **argv) {
     if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (id %s)\n", id); return 2; }
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
-    char cache[4400], listbin[4400], batchbin[4400], why[512]; int reused;
+    char cache[4400], listbin[4400], batchbin[4400], bpbin[4400], why[512]; int reused, bpok = 0;
     if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir())) rg_die("prepare path", 0);
     if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
     if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
@@ -254,7 +275,13 @@ int main(int argc, char **argv) {
             || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory register-%s-%d under %s (is the temp directory writable?)\n", id, sy_pid(), sy_tmpdir()); parent[0] = 0; }
         else {
             char *v[] = {"./tools/bound", "58", batchbin, root, parent, (char *)id, 0};
-            rc = run(v, buf, sizeof buf);
+            int bofd = -1, bpid = run_start(v, &bofd);
+            /* while the trial run executes: prepare the batch-packages-gen native image (preparation only;
+               --write itself still runs after PASS, below).  A prepare failure is not a verdict: the
+               regeneration then falls back to sh ./unisacc.com. */
+            if (bpid >= 0 && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")))
+                bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
+            rc = run_collect(bpid, bofd, buf, sizeof buf);
             at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
             if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
             okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
@@ -285,7 +312,8 @@ int main(int argc, char **argv) {
        UNISACC_TABLES set must not rewrite the checked-in build table). */
     if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
         char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--write", 0};
-        rc = run(v, buf, sizeof buf);
+        char *vn[] = {"./tools/bound", "58", bpbin, "--write", 0};
+        rc = run(bpok ? vn : v, buf, sizeof buf);
         if (rc != 0) {
             fprintf(stderr, "register: batch registered but build/batch-packages.tsv NOT regenerated (rc=%d); run tools/batch-packages-gen.cx -- --write\n", rc);
             printf("REGISTER\tid=%s\tbatch_packages=STALE\n", id);
