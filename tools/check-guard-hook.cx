@@ -1,0 +1,295 @@
+/* tools/check-guard-hook.cx -- tools/guard-hook.cx(PreToolUse 钩子)对拍检查。
+ *
+ *   sh ./unisacc.com tools/check-guard-hook.cx                逐例跑 guard-hook.cx,比退出码与 stderr(期望值来自原 .claude/hooks/guard-edit.ts)
+ *   sh ./unisacc.com tools/check-guard-hook.cx -- --gen CMD...  用 CMD 跑全部夹具,打印 EXP 数组(曾以 bun guard-edit.ts 生成期望值)
+ *
+ * 夹具环境:HOME=$HOME/.cache/unisacc/check-guard-hook/home(夹具与期望里写作 @H@)、GUARD_REPO=/r/repo、CLAUDE_JOB_DIR=/j/job、
+ * UNISACC_DOMAINS=@H@/domains.tsv(alice src/、bob exp/ 已过期、guardme mine/、alice mine/)、fb 列控制 native-fallback 标记、agent 列设 UNISACC_AGENT。
+ * 另核 DEVSVC-WARN 行数等于 hook-warn.tsv 新增行数。末行 CHECK_GUARD_HOOK cases=N failed=M,rc 0 当且仅当 M=0。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+typedef struct { const char *name; int fb; const char *agent; const char *json; } fx_t;
+typedef struct { int rc; const char *err; } ex_t;
+
+#define B(c) "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"" c "\"},\"cwd\":\"/r/repo\"}"
+static const fx_t FX[] = {
+    {"read-repo", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/r/repo/a.c\"}}"},
+    {"read-hostclaude", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"@H@/.claude/x.md\"}}"},
+    {"read-tmpclaude", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/claude-1001/x\"}}"},
+    {"read-tmpcopy", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/x.c\"}}"},
+    {"read-fallback", 1, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/r/repo/a.c\"}}"},
+    {"read-nopath", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{}}"},
+    {"read-nonstr", 0, "", "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":5}}"},
+    {"edit-repo", 0, "", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/a.c\"}}"},
+    {"write-repo", 0, "zed", "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/r/repo/src/a.c\"}}"},
+    {"edit-hostclaude", 0, "", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"@H@/.claude/s.json\"}}"},
+    {"edit-fallback", 1, "", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/a.c\"}}"},
+    {"edit-domain-other", 1, "zed", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/src/a.c\"}}"},
+    {"edit-domain-mine", 1, "guardme", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/mine/a.c\"}}"},
+    {"edit-domain-first", 1, "zed", "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/r/repo/mine/../mine/a.c\"}}"},
+    {"edit-domain-expired", 1, "zed", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/exp/a.c\"}}"},
+    {"edit-domain-outside", 1, "zed", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/x/src/a.c\"}}"},
+    {"edit-domain-alice", 1, "alice", "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/mine/a.c\"}}"},
+    {"other-tool", 0, "", "{\"tool_name\":\"Glob\",\"tool_input\":{\"command\":\"sed -i s/a/b/ x.c\"}}"},
+    {"bad-json", 0, "", "{\"tool_name\":"},
+    {"no-toolname", 0, "", "{\"tool_input\":{\"command\":\"sed -i s/a/b/ x.c\"},\"cwd\":\"/r/repo\"}"},
+    {"empty-cmd", 0, "", B("")},
+    {"sed-i", 0, "", B("sed -i s/a/b/ x.c")},
+    {"sed-i-e", 0, "", B("sed -i -e s/a/b/ x.c")},
+    {"sed-i-tmp", 0, "", B("sed -i s/a/b/ /tmp/x.c")},
+    {"sed-noi", 0, "", B("sed s/a/b/ x.c")},
+    {"sed-i-after-cd", 0, "", B("cd /tmp && sed -i s/a/b/ x.c")},
+    {"sed-inplace-long", 0, "", B("sed --in-place=.bak 's/a/b/' x.c")},
+    {"sed-i-nocwd", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sed -i s/a/b/ x.c\"}}"},
+    {"python", 0, "", B("python3 x.py")},
+    {"python-path-env", 0, "", B("FOO=1 /usr/bin/python3.11 x.py")},
+    {"bun-hook", 0, "", B("bun .claude/hooks/guard-edit.ts")},
+    {"bun-hook-var", 0, "", B("bun \\\"$CLAUDE_PROJECT_DIR/x.ts\\\"")},
+    {"bun-run", 0, "", B("bun run x.ts")},
+    {"node-e", 0, "", B("ls && node -e 1")},
+    {"perl-pi", 0, "", B("perl -pi -e s/a/b/ x.c")},
+    {"ruby", 0, "", B("echo $(ruby x.rb)")},
+    {"awk-inplace", 0, "", B("awk -i inplace '{print}' f.txt")},
+    {"gawk-inplace-tmp", 0, "", B("gawk -i inplace x /tmp/f")},
+    {"vim", 0, "", B("vim a.c")},
+    {"ed-tmp", 0, "", B("ed /tmp/a.c")},
+    {"tee", 0, "", B("ls | tee -a list.txt")},
+    {"tee-job", 0, "", B("ls | tee $CLAUDE_JOB_DIR/l.txt")},
+    {"redir", 0, "", B("echo hi > a.txt")},
+    {"redir-append-abs", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo hi>>/r/repo/b/c.txt\"},\"cwd\":\"/tmp\"}"},
+    {"redir-tmp", 0, "", B("echo hi > /tmp/a")},
+    {"redir-2and1", 0, "", B("make 2>&1")},
+    {"redir-quoted", 0, "", B("echo 'a > b' \\\"c > d\\\"")},
+    {"redir-heredoc", 0, "", B("cat <<'EOF' > /tmp/x\\nfoo > a.txt\\n  EOF\\necho ok")},
+    {"redir-after-heredoc", 0, "", B("cat <<EOF > /tmp/x\\nfoo\\nEOF\\necho x > z.txt")},
+    {"redir-tilde", 0, "", B("echo x &> ~/f")},
+    {"redir-dotdot", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > ../../r/repo/q\"},\"cwd\":\"/r/other\"}"},
+    {"mkdir-out", 0, "", B("mkdir -p out/x")},
+    {"mkdir-outroot", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"mkdir /r/repo/out\"},\"cwd\":\"/\"}"},
+    {"touch-out", 0, "", B("touch out/a")},
+    {"cp-out", 0, "", B("cp a b /r/repo/out/")},
+    {"cp-ok", 0, "", B("cp a b")},
+    {"redir-out", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo x > /r/repo/out/log\"},\"cwd\":\"/\"}"},
+    {"mkdir-work", 0, "", B("mkdir ~/work/x")},
+    {"mkdir-ccwork", 0, "", B("mkdir /var/cc-work-1")},
+    {"mkdir-ok", 0, "", B("mkdir -p /var/foo")},
+    {"cd-out-touch", 0, "", B("cd out; touch a")},
+    {"cd-var-touch", 0, "", B("cd $X; touch out/a")},
+    {"git-clone", 0, "", B("git clone https://x/y")},
+    {"wt-ok-abs", 0, "", B("git worktree add /r/repo/.claude/worktrees/v0.0.61")},
+    {"wt-ok-rel", 0, "", B("git worktree add -b v0.0.61 .claude/worktrees/v0.0.61 main")},
+    {"wt-bad", 0, "", B("git worktree add ../x")},
+    {"git-stash", 0, "", B("git stash pop")},
+    {"git-C-clean", 0, "", B("git -C /r/repo clean -fd")},
+    {"git-reset-hard", 0, "", B("git reset --hard HEAD")},
+    {"git-reset-soft", 0, "", B("git reset --soft HEAD~1")},
+    {"git-checkout-dd", 0, "", B("git checkout -- a.c")},
+    {"git-checkout-br", 0, "", B("git checkout main")},
+    {"git-restore-dot", 0, "", B("git restore .")},
+    {"git-commit-nv", 0, "", B("git commit --no-verify -m x")},
+    {"git-push-nv", 0, "", B("git push --no-verify")},
+    {"git-autostash", 0, "", B("git pull --rebase --autostash")},
+    {"sh-c-sed", 0, "", B("sh -c 'sed -i s/x/y/ a.c'")},
+    {"bash-c-redir", 0, "", B("bash -lc \\\"echo x > a.txt\\\"")},
+    {"sh-c-ok", 0, "", B("sh -c 'echo x > /tmp/a'")},
+    {"python-c-open", 0, "", B("time python3 -c \\\"open('a','w')\\\"")},
+    {"python-c-open-tmp", 0, "", B("time python3 -c \\\"open('/tmp/a','wb')\\\"")},
+    {"warn-git-write", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git commit -m x\"},\"cwd\":\"/r/repo\",\"session_id\":\"s1\"}"},
+    {"warn-direct-cx", 0, "", B("sh ./unisacc.com tools/status.cx")},
+    {"warn-read-pipe", 0, "", "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git status | head -3\\tx\"},\"cwd\":\"/r/repo\",\"session_id\":7}"},
+    {"warn-sleep", 0, "", B("sleep 5")},
+    {"warn-viadev", 0, "", B("sh ./unisacc.com tools/devsvc.cx -- git log")},
+    {"warn-grep-long", 0, "", B("ls | grep a # 中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文")},
+    {"nowarn-plain", 0, "", B("ls -la")},
+    {"nowarn-gitlogx", 0, "", B("git logx; sleepy 3; x|heads")},
+};
+#define NFX ((long)(sizeof FX / sizeof FX[0]))
+
+static const ex_t EXP[] = {
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /r/repo/a.c 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - --par N 的 file.read 节点)。\n"},  /* read-repo */
+    {0, ""},  /* read-hostclaude */
+    {0, ""},  /* read-tmpclaude */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /tmp/x.c 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - --par N 的 file.read 节点)。\n"},  /* read-tmpcopy */
+    {0, ""},  /* read-fallback */
+    {0, ""},  /* read-nopath */
+    {0, ""},  /* read-nonstr */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /r/repo/a.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* edit-repo */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /r/repo/src/a.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* write-repo */
+    {0, ""},  /* edit-hostclaude */
+    {0, ""},  /* edit-fallback */
+    {2, "GUARD-EDIT-V1 拒绝:/r/repo/src/a.c 的写域被 alice (前缀 src/) 占用,当前代理 zed。先 sh ./unisacc.com tools/domain.cx -- check PATH 查看,或等对方 release/到期。\n"},  /* edit-domain-other */
+    {0, ""},  /* edit-domain-mine */
+    {2, "GUARD-EDIT-V1 拒绝:/r/repo/mine/../mine/a.c 的写域被 guardme (前缀 mine/) 占用,当前代理 zed。先 sh ./unisacc.com tools/domain.cx -- check PATH 查看,或等对方 release/到期。\n"},  /* edit-domain-first */
+    {0, ""},  /* edit-domain-expired */
+    {0, ""},  /* edit-domain-outside */
+    {0, ""},  /* edit-domain-alice */
+    {0, ""},  /* other-tool */
+    {0, ""},  /* bad-json */
+    {2, "GUARD-EDIT-V1 拒绝:sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* no-toolname */
+    {0, ""},  /* empty-cmd */
+    {2, "GUARD-EDIT-V1 拒绝:sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* sed-i */
+    {2, "GUARD-EDIT-V1 拒绝:sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* sed-i-e */
+    {0, ""},  /* sed-i-tmp */
+    {0, ""},  /* sed-noi */
+    {0, ""},  /* sed-i-after-cd */
+    {2, "GUARD-EDIT-V1 拒绝:sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* sed-inplace-long */
+    {2, "GUARD-EDIT-V1 拒绝:sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* sed-i-nocwd */
+    {2, "GUARD-EDIT-V1 拒绝:python3 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* python */
+    {2, "GUARD-EDIT-V1 拒绝:python3.11 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* python-path-env */
+    {0, ""},  /* bun-hook */
+    {0, ""},  /* bun-hook-var */
+    {2, "GUARD-EDIT-V1 拒绝:bun 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* bun-run */
+    {2, "GUARD-EDIT-V1 拒绝:node 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* node-e */
+    {2, "GUARD-EDIT-V1 拒绝:perl 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* perl-pi */
+    {2, "GUARD-EDIT-V1 拒绝:ruby 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* ruby */
+    {2, "GUARD-EDIT-V1 拒绝:awk -i inplace 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* awk-inplace */
+    {2, "GUARD-EDIT-V1 拒绝:awk -i inplace 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* gawk-inplace-tmp */
+    {2, "GUARD-EDIT-V1 拒绝:vim 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* vim */
+    {0, ""},  /* ed-tmp */
+    {2, "GUARD-EDIT-V1 拒绝:tee 写仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* tee */
+    {0, ""},  /* tee-job */
+    {2, "GUARD-EDIT-V1 拒绝:重定向写仓内文件 a.txt。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* redir */
+    {2, "GUARD-EDIT-V1 拒绝:重定向写仓内文件 /r/repo/b/c.txt。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* redir-append-abs */
+    {0, ""},  /* redir-tmp */
+    {0, ""},  /* redir-2and1 */
+    {0, ""},  /* redir-quoted */
+    {0, ""},  /* redir-heredoc */
+    {2, "GUARD-EDIT-V1 拒绝:重定向写仓内文件 z.txt。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* redir-after-heredoc */
+    {0, ""},  /* redir-tilde */
+    {2, "GUARD-EDIT-V1 拒绝:重定向写仓内文件 ../../r/repo/q。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* redir-dotdot */
+    {2, "GUARD-EDIT-V1 拒绝:mkdir 写仓库根 out/ (out/x):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* mkdir-out */
+    {2, "GUARD-EDIT-V1 拒绝:mkdir 写仓库根 out/ (/r/repo/out):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* mkdir-outroot */
+    {2, "GUARD-EDIT-V1 拒绝:touch 写仓库根 out/ (out/a):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* touch-out */
+    {2, "GUARD-EDIT-V1 拒绝:cp 写仓库根 out/ (/r/repo/out/):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* cp-out */
+    {0, ""},  /* cp-ok */
+    {2, "GUARD-EDIT-V1 拒绝:重定向写仓内文件 /r/repo/out/log。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* redir-out */
+    {2, "GUARD-EDIT-V1 拒绝:mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* mkdir-work */
+    {2, "GUARD-EDIT-V1 拒绝:mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* mkdir-ccwork */
+    {0, ""},  /* mkdir-ok */
+    {2, "GUARD-EDIT-V1 拒绝:touch 写仓库根 out/ (a):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* cd-out-touch */
+    {0, ""},  /* cd-var-touch */
+    {2, "GUARD-EDIT-V1 拒绝:git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-clone */
+    {0, ""},  /* wt-ok-abs */
+    {0, ""},  /* wt-ok-rel */
+    {2, "GUARD-EDIT-V1 拒绝:git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* wt-bad */
+    {2, "GUARD-EDIT-V1 拒绝:git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-stash */
+    {2, "GUARD-EDIT-V1 拒绝:git clean:共享 main 上不得 clean。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-C-clean */
+    {2, "GUARD-EDIT-V1 拒绝:git reset --hard:共享 main 上不得 reset。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-reset-hard */
+    {0, ""},  /* git-reset-soft */
+    {2, "GUARD-EDIT-V1 拒绝:git checkout -- / .:不得还原他人路径。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-checkout-dd */
+    {0, ""},  /* git-checkout-br */
+    {2, "GUARD-EDIT-V1 拒绝:git restore .:不得还原他人路径。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-restore-dot */
+    {2, "GUARD-EDIT-V1 拒绝:git commit --no-verify:不得绕过 precommit。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-commit-nv */
+    {2, "GUARD-EDIT-V1 拒绝:git push --no-verify:不得绕过 precommit。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-push-nv */
+    {2, "GUARD-EDIT-V1 拒绝:git --autostash 含 stash:共享 main 上不得 stash。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* git-autostash */
+    {2, "GUARD-EDIT-V1 拒绝:sh -c 内 sed -i 改仓内文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* sh-c-sed */
+    {2, "GUARD-EDIT-V1 拒绝:sh -c 内 重定向写仓内文件 a.txt。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* bash-c-redir */
+    {0, ""},  /* sh-c-ok */
+    {2, "GUARD-EDIT-V1 拒绝:python -c open(...,'w') 写文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* python-c-open */
+    {0, ""},  /* python-c-open-tmp */
+    {0, "DEVSVC-WARN(git-write):建议 sh ./unisacc.com tools/devsvc.cx -- git commit -m '说明' --whole 路径 --push\n"},  /* warn-git-write */
+    {0, "DEVSVC-WARN(direct-cx):建议 sh ./unisacc.com tools/devsvc.cx -- x --par 1 --bg -- ... 加 wait,或 x --par 1 --tail N\n"},  /* warn-direct-cx */
+    {0, "DEVSVC-WARN(git-read):建议 sh ./unisacc.com tools/devsvc.cx -- git log(status/diff/show 同)\nDEVSVC-WARN(pipe-trim):建议 用 devsvc x --par 1 --tail N 截短输出,不用管道 head/tail/grep\n"},  /* warn-read-pipe */
+    {0, "DEVSVC-WARN(sleep-poll):建议 用 devsvc x --par 1 --bg 加 wait,不用 sleep 轮询\n"},  /* warn-sleep */
+    {0, ""},  /* warn-viadev */
+    {0, "DEVSVC-WARN(pipe-trim):建议 用 devsvc x --par 1 --tail N 截短输出,不用管道 head/tail/grep\n"},  /* warn-grep-long */
+    {0, ""},  /* nowarn-plain */
+    {0, ""},  /* nowarn-gitlogx */
+};
+
+static long sl(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static int sw(const char *s, const char *p) { while (*p) { if (*s != *p) return 0; s++; p++; } return 1; }
+static char H[1024];
+
+/* every FROM in S replaced by TO (heap) */
+static char *subst(const char *s, const char *from, const char *to) {
+    long n = sl(s), fl = sl(from), tl = sl(to), o = 0, i, cap = n * (tl + 1) + 1; char *d = (char *)mm_alloc(cap);
+    for (i = 0; i < n;) {
+        if (fl && sw(s + i, from)) { if (tl) mm_copy(d + o, cap - o, to, tl); o += tl; i += fl; }
+        else d[o++] = s[i++];
+    }
+    d[o] = 0; return d;
+}
+static long count_lines(const char *path) {
+    unsigned char *b = 0; int64_t n = 0, i; long c = 0;
+    if (sy_read_file(path, &b, &n, 1 << 26) != 0) return 0;
+    for (i = 0; i < n; i++) if (b[i] == '\n') c++;
+    mm_free(b); return c;
+}
+static long count_sub(const char *s, const char *p) { long c = 0; for (; *s; s++) if (sw(s, p)) c++; return c; }
+
+static int run_case(char **argv, long i, const char *dir, int *rc, char **err) {
+    char pin[1200], perr[1200], fb[1200], *json; sy_spawn_t o; sy_exit_t st; int fi, fe; unsigned char *b = 0; int64_t n = 0;
+    tx_snprintf(fb, sizeof fb, "%s/.cache/unisacc/devsvc/native-fallback", H);
+    if (FX[i].fb) sy_write_file(fb, "", 0, 0644); else sy_unlink(fb);
+    sy_setenv("UNISACC_AGENT", FX[i].agent, 1);
+    json = subst(FX[i].json, "@H@", H);
+    tx_snprintf(pin, sizeof pin, "%s/in.json", dir);
+    tx_snprintf(perr, sizeof perr, "%s/err.txt", dir);
+    sy_write_file(pin, json, sl(json), 0644);
+    sy_unlink(perr);
+    fi = sy_open_read(pin); fe = sy_open_new(perr, 0644);
+    if (fi < 0 || fe < 0) return -1;
+    sy_spawn_init(&o); o.argv = (const char **)argv; o.in_fd = fi; o.out_fd = SY_STDIO_NULL; o.err_fd = fe; o.pgroup = -1; o.deadline_ms = 20000;
+    if (sy_proc_run(&o, &st) != 0) { sy_close(fi); sy_close(fe); return -1; }
+    sy_close(fi); sy_close(fe);
+    *rc = st.exited ? st.code : 128 + st.sig;
+    if (sy_read_file(perr, &b, &n, 1 << 20) != 0) { *err = (char *)""; return 0; }
+    { char *s = (char *)mm_alloc(n + 1); if (n) mm_copy(s, n + 1, b, n); s[n] = 0; *err = subst(s, H, "@H@"); }
+    return 0;
+}
+
+static void cesc(const char *s) {
+    sy_printf("\"");
+    for (; *s; s++) {
+        if (*s == '\\') sy_printf("\\\\"); else if (*s == '"') sy_printf("\\\""); else if (*s == '\n') sy_printf("\\n");
+        else if (*s == '\t') sy_printf("\\t"); else if (*s == '?') sy_printf("\\?"); else sy_printf("%c", *s);
+    }
+    sy_printf("\"");
+}
+
+int main(int argc, char **argv) {
+    char dir[1200], tab[1300], warnf[1300], *def[4]; char **cmd; long i, failed = 0;
+    int gen = argc > 1 && sw(argv[1], "--gen") && argv[1][5] == 0;
+    const char *home = sy_env("HOME"); long now = sy_wall_s();
+    def[0] = (char *)"sh"; def[1] = (char *)"./unisacc.com"; def[2] = (char *)"tools/guard-hook.cx"; def[3] = 0;
+    cmd = gen ? argv + 2 : def;
+    if (gen && argc < 3) { sy_eprintf("usage: --gen CMD...\n"); return 2; }
+    tx_snprintf(H, sizeof H, "%s/.cache/unisacc/check-guard-hook/home", home ? home : ".");
+    tx_snprintf(dir, sizeof dir, "%s/.cache/unisacc/devsvc", H);
+    sy_mkdir_all(dir, 0755);
+    tx_snprintf(dir, sizeof dir, "%s/work", H);
+    sy_mkdir_all(dir, 0755);
+    tx_snprintf(tab, sizeof tab, "%s/domains.tsv", H);
+    {
+        char buf[600];
+        tx_snprintf(buf, sizeof buf, "alice\tsrc/\t%ld\tx\nbob\texp/\t1\tx\nguardme\tmine/\t%ld\tx\nalice\tmine/\t%ld.5\tx\nshort\tsrc/\n", now + 3600, now + 3600, now + 3600);
+        sy_write_file(tab, buf, sl(buf), 0644);
+    }
+    tx_snprintf(warnf, sizeof warnf, "%s/.cache/unisacc/devsvc/hook-warn.tsv", H);
+    sy_setenv("HOME", H, 1); sy_setenv("GUARD_REPO", "/r/repo", 1); sy_setenv("CLAUDE_JOB_DIR", "/j/job", 1);
+    sy_setenv("UNISACC_DOMAINS", tab, 1); sy_setenv("CLAUDE_PROJECT_DIR", "/r/repo", 1);
+    if (!gen && (long)(sizeof EXP / sizeof EXP[0]) != NFX) { sy_printf("FAIL\tfixture-count\tFX=%ld EXP=%ld\n", NFX, (long)(sizeof EXP / sizeof EXP[0])); return 1; }
+    if (gen) sy_printf("static const ex_t EXP[] = {\n");
+    for (i = 0; i < NFX; i++) {
+        int rc = -1; char *err = (char *)""; long w0 = count_lines(warnf), w1;
+        if (run_case(cmd, i, dir, &rc, &err) != 0) { sy_printf("FAIL\t%s\tspawn\n", FX[i].name); failed++; continue; }
+        w1 = count_lines(warnf);
+        if (gen) { sy_printf("    {%d, ", rc); cesc(err); sy_printf("},  /* %s */\n", FX[i].name); continue; }
+        if (rc != EXP[i].rc || sl(err) != sl(EXP[i].err) || !sw(err, EXP[i].err)) {
+            sy_printf("FAIL\t%s\trc=%d want=%d\n  got:  %s  want: %s\n", FX[i].name, rc, EXP[i].rc, err, EXP[i].err); failed++;
+        } else if (w1 - w0 != count_sub(err, "DEVSVC-WARN(")) {
+            sy_printf("FAIL\t%s\twarn-lines=%ld want=%ld\n", FX[i].name, w1 - w0, count_sub(err, "DEVSVC-WARN(")); failed++;
+        } else sy_printf("ok\t%s\trc=%d\n", FX[i].name, rc);
+    }
+    if (gen) { sy_printf("};\n"); return failed ? 1 : 0; }
+    sy_printf("CHECK_GUARD_HOOK\tcases=%ld failed=%ld\n", NFX, failed);
+    return failed ? 1 : 0;
+}

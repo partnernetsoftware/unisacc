@@ -38,7 +38,7 @@ static int dv(const char *a1, const char *a2, const char *a3, const char *a4, co
     char *v[24]; int n = 0; const char *xs[8]; int i;
     v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devsvc.cx"; v[n++] = "--";
     xs[0] = a1; xs[1] = a2; xs[2] = a3; xs[3] = a4; xs[4] = a5; xs[5] = a6; xs[6] = a7; xs[7] = a8;
-    for (i = 0; i < 8 && xs[i]; i++) v[n++] = (char *)xs[i];
+    for (i = 0; i < 8 && xs[i]; i++) { v[n++] = (char *)xs[i]; if (i == 0 && !strcmp(xs[0], "x")) { v[n++] = "--par"; v[n++] = "1"; } }   /* x 必须显式 --par */
     v[n] = 0;
     return run(v, fx, envv);
 }
@@ -65,15 +65,15 @@ int main(void) {
     envv[0] = e2; envv[1] = 0; (void)e1;
     if (ovf) return 2;
     {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-clone\n"); cleanup(); return 1; } }
-    {   const char *names[4] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx"}; int i;
-        for (i = 0; i < 4; i++) {
+    {   const char *names[5] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx", "tools/cxlib/flowexec.cx"}; int i;
+        for (i = 0; i < 5; i++) {
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-git.fixture-copy\t%s\n", names[i]); cleanup(); return 1; }
             free(b);
         } }
     F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     /* (a) commit --whole --push */
@@ -82,6 +82,14 @@ int main(void) {
     ck(rc == 0 && has("GIT_COMMIT\trc=0"), "commit-push-rc0");
     F(c, sizeof c, "[ \"$(git -C %s rev-parse main)\" = \"$(git rev-parse HEAD)\" ] && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
     ck(sh(c, fx) == 0, "bare-origin-received-commit");
+
+    /* (a2) 已 git rm 的删除可提交:HEAD 有、工作区无的 --whole 路径 */
+    F(c, sizeof c, "git rm -q dvg-a.txt");
+    ck(!ovf && sh(c, fx) == 0, "fixture-git-rm");
+    rc = dv("git", "commit", "-m", "D", "--whole", "dvg-a.txt", 0, 0);
+    ck(rc == 0 && has("GIT_COMMIT\trc=0") && has("DELETE\tdvg-a.txt"), "commit-deletion-rc0");
+    F(c, sizeof c, "[ -z \"$(git ls-tree HEAD -- dvg-a.txt)\" ] && [ -z \"$(git ls-files -s -- dvg-a.txt)\" ] && git log -1 --format=%%s | grep -qx D");
+    ck(!ovf && sh(c, fx) == 0, "commit-deletion-gone-from-head-and-index");
 
     /* (b) 失败的 commit 后无残留锁(登记路径会取 registry 锁) */
     rc = dv("git", "commit", "-m", "Y", "--whole", "tests/manifests/dvg-nonexistent.tsv", 0, 0);

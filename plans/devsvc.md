@@ -84,6 +84,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - `devsvc events --wait KIND [--since SEQ] [--timeout-ms N]`:阻塞等某类事件,缺省只等新事件,超时 rc 124。
 - 用法:长命令一律 `--bg` 再 `wait`,不写 sleep 轮询;宿主 30/60 s 上限内反复 wait 即可。
 
+- 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
 ### 工单作业化 task(R5,2026-11-15)
 
 子代理与窗口的每一单都开成工单,协调者只认 `task.done` 事件(`devsvc events --wait task.done` 或实例目录 `task-events.tsv` 的 `task.done` 行),不认"已完成"的口头汇报。工单落在 devsvc 实例目录的 `work/`,不入库。

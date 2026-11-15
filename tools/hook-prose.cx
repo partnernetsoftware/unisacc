@@ -1,0 +1,136 @@
+/* tools/hook-prose.cx -- Stop 钩子:最后一条回复的自由文本(去掉代码块、表格、列表、标题行后)超过 CC_PROSE_LIMIT(缺省 400,按 UTF-16 单元计)时退回一次。
+ * 等价于用户级 ~/.claude/hooks/decision-output.ts。用法:钩子从 stdin 读 JSON;调试可给一个文件路径代替 stdin。
+ * stop_hook_active 为真则放行。先取 last_assistant_message,无则从 transcript_path 末条 assistant 取 text 块。 */
+#pragma unisa use text.json
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+/* JS \s 的单个空白字符在 s[i..n) 处的字节长度,不是空白返回 0 */
+static int ws_at(const unsigned char *s, long i, long n) {
+    unsigned char c = s[i];
+    if (c == ' ' || (c >= 9 && c <= 13)) return 1;
+    if (c == 0xC2 && i + 1 < n && s[i + 1] == 0xA0) return 2;
+    if (c == 0xE1 && i + 2 < n && s[i + 1] == 0x9A && s[i + 2] == 0x80) return 3;
+    if (c == 0xE2 && i + 2 < n) {
+        unsigned char d = s[i + 1], e = s[i + 2];
+        if (d == 0x80 && ((e >= 0x80 && e <= 0x8A) || e == 0xA8 || e == 0xA9 || e == 0xAF)) return 3;
+        if (d == 0x81 && e == 0x9F) return 3;
+    }
+    if (c == 0xE3 && i + 2 < n && s[i + 1] == 0x80 && s[i + 2] == 0x80) return 3;
+    if (c == 0xEF && i + 2 < n && s[i + 1] == 0xBB && s[i + 2] == 0xBF) return 3;
+    return 0;
+}
+static int is_digit(int c) { return c >= '0' && c <= '9'; }
+/* 行 [a,b) 是否被过滤:^\s*(\||[-*]\s|\d+\.\s|#) */
+static int filtered(const unsigned char *s, long a, long b) {
+    long i = a; int w;
+    while (i < b && (w = ws_at(s, i, b)) > 0) i += w;
+    if (i >= b) return 0;
+    if (s[i] == '|' || s[i] == '#') return 1;
+    if ((s[i] == '-' || s[i] == '*') && i + 1 < b && ws_at(s, i + 1, b) > 0) return 1;
+    if (is_digit(s[i])) {
+        while (i < b && is_digit(s[i])) i++;
+        if (i + 1 < b && s[i] == '.' && ws_at(s, i + 1, b) > 0) return 1;
+    }
+    return 0;
+}
+static long prose_len(const unsigned char *t, long n) {
+    unsigned char *c = mm_alloc(n + 1); long m = 0, i = 0, total = 0, ls;
+    while (i < n) {
+        if (i + 2 < n && t[i] == '`' && t[i + 1] == '`' && t[i + 2] == '`') {
+            long j = i + 3; int found = 0;
+            while (j + 2 < n) { if (t[j] == '`' && t[j + 1] == '`' && t[j + 2] == '`') { found = 1; break; } j++; }
+            if (found) { i = j + 3; continue; }
+        }
+        c[m++] = t[i++];
+    }
+    ls = 0;
+    for (i = 0; i <= m; i++) {
+        if (i == m || c[i] == '\n') {
+            if (!filtered(c, ls, i)) {
+                long k = ls; int w;
+                while (k < i) {
+                    if ((w = ws_at(c, k, i)) > 0) { k += w; continue; }
+                    if (c[k] >= 0xF0) { total += 2; k += 4; }
+                    else if (c[k] >= 0xE0) { total += 1; k += 3; }
+                    else if (c[k] >= 0xC0) { total += 1; k += 2; }
+                    else { total += 1; k += 1; }
+                }
+            }
+            ls = i + 1;
+        }
+    }
+    mm_free(c);
+    return total;
+}
+static int truthy(js_val *v) {
+    int k = js_kind(v);
+    if (k == JS_BOOL) return js_bool(v);
+    if (k == JS_NUM) return js_num(v) != 0;
+    if (k == JS_STR) return js_str(v) && js_str(v)[0];
+    return k == JS_ARR || k == JS_OBJ;
+}
+static unsigned char *read_all(int fd, long *out) {
+    long cap = 1 << 16, n = 0, r; unsigned char *b = mm_alloc(cap);
+    while ((r = sy_read(fd, b + n, cap - n - 1)) > 0) {
+        n += r;
+        if (cap - n < 4096) { cap *= 2; b = mm_grow(b, cap); }
+    }
+    b[n] = 0; *out = n; return b;
+}
+int main(int argc, char **argv) {
+    unsigned char *in; long n = 0, limit = 400; js_val *v; char err[96], *lim; const char *txt = 0;
+    unsigned char *tbuf = 0; long tn = 0;
+    if (argc > 1) { void *bb = 0; if (sy_read_file(argv[1], &bb, &n, 1L << 28)) return 2; in = bb; }
+    else in = read_all(0, &n);
+    lim = sy_env("CC_PROSE_LIMIT");
+    if (lim && lim[0]) { char *e; long x = strtol(lim, &e, 10); if (*e == 0 && x > 0) limit = x; }
+    v = js_parse((const char *)in, n, err, sizeof err);
+    if (!v) return 1;
+    if (truthy(js_get(v, "stop_hook_active"))) return 0;
+    if (js_kind(js_get(v, "last_assistant_message")) == JS_STR) txt = js_str(js_get(v, "last_assistant_message"));
+    if (!txt || !txt[0]) {
+        const char *tp = js_str(js_get(v, "transcript_path"));
+        txt = 0;
+        if (tp && tp[0]) {
+            void *bb = 0; long fn = 0;
+            if (sy_read_file(tp, &bb, &fn, 1L << 28) != 0) return 1;  /* 原 .ts 读不到即抛错退出 1 */
+            if (bb) {
+                char *f = bb; long e = fn, s, found = 0;
+                while (e > 0 && (f[e - 1] == ' ' || (f[e - 1] >= 9 && f[e - 1] <= 13))) e--;
+                while (e > 0 && !found) {
+                    js_val *r, *c; long i, nt = 0;
+                    s = e; while (s > 0 && f[s - 1] != '\n') s--;
+                    r = js_parse(f + s, e - s, err, sizeof err);
+                    e = s > 0 ? s - 1 : 0;
+                    if (!r) continue;
+                    c = js_path(r, "message.content");
+                    if (js_kind(js_path(r, "message.role")) == JS_STR && !strcmp(js_str(js_path(r, "message.role")), "assistant") && js_kind(c) == JS_ARR) {
+                        tbuf = mm_alloc(fn + 8); tn = 0;
+                        for (i = 0; i < js_len(c); i++) {
+                            js_val *it = js_at(c, i); const char *ty = js_str(js_get(it, "type")), *tx = js_str(js_get(it, "text"));
+                            if (ty && !strcmp(ty, "text") && tx) {
+                                if (nt++ > 0) tbuf[tn++] = '\n';
+                                mm_copy(tbuf + tn, fn + 8 - tn, tx, (long)strlen(tx)); tn += (long)strlen(tx);
+                            }
+                        }
+                        tbuf[tn] = 0;
+                        /* 原逻辑:filter 后 join("\n");只含 text 块,首块前不加分隔 */
+                        if (tn > 0) { found = 1; txt = (const char *)tbuf; }
+                        else mm_free(tbuf);
+                    }
+                    js_free(r);
+                }
+            }
+        }
+    }
+    if (txt) {
+        long len = prose_len((const unsigned char *)txt, (long)strlen(txt));
+        if (len > limit)
+            printf("{\"decision\":\"block\",\"reason\":\"回复的段落文字 %ld 字,超过 %ld。重写:结论一句,其余用短列表或表格,只留决策、结果、风险,不复述过程。\"}\n", len, limit);
+    }
+    return 0;
+}

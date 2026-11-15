@@ -1,0 +1,94 @@
+/* tools/hook-nopkill.cx -- PreToolUse(Bash) 钩子:命令(去掉 heredoc 后)含 pkill/killall 且带 -f 类选项则输出 deny JSON。
+ * 等价于用户级 ~/.claude/hooks/no-pkill-f.ts。用法:钩子从 stdin 读 JSON;调试可给一个文件路径代替 stdin。 */
+#pragma unisa use text.json
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int is_word(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int is_alnum(int c) { return is_word(c) && c != '_'; }
+static int ws_at(const unsigned char *s, long i, long n) {
+    unsigned char c = s[i];
+    if (c == ' ' || (c >= 9 && c <= 13)) return 1;
+    if (c == 0xC2 && i + 1 < n && s[i + 1] == 0xA0) return 2;
+    if (c == 0xE1 && i + 2 < n && s[i + 1] == 0x9A && s[i + 2] == 0x80) return 3;
+    if (c == 0xE2 && i + 2 < n) {
+        unsigned char d = s[i + 1], e = s[i + 2];
+        if (d == 0x80 && ((e >= 0x80 && e <= 0x8A) || e == 0xA8 || e == 0xA9 || e == 0xAF)) return 3;
+        if (d == 0x81 && e == 0x9F) return 3;
+    }
+    if (c == 0xE3 && i + 2 < n && s[i + 1] == 0x80 && s[i + 2] == 0x80) return 3;
+    if (c == 0xEF && i + 2 < n && s[i + 1] == 0xBB && s[i + 2] == 0xBF) return 3;
+    return 0;
+}
+/* 在 s[i] 处匹配 <<-?\s*["']?(\w+)["']?[\s\S]*?\n\s*\1\b,成功返回匹配末尾下标,否则 -1 */
+static long heredoc_end(const unsigned char *s, long i, long n) {
+    long p = i, ts, te, q, w;
+    if (!(i + 1 < n && s[i] == '<' && s[i + 1] == '<')) return -1;
+    p += 2;
+    if (p < n && s[p] == '-') p++;
+    while (p < n && (w = ws_at(s, p, n)) > 0) p += w;
+    if (p < n && (s[p] == '"' || s[p] == '\'')) p++;
+    ts = p;
+    while (p < n && is_word(s[p])) p++;
+    te = p;
+    if (te == ts) return -1;
+    if (p < n && (s[p] == '"' || s[p] == '\'')) p++;
+    for (q = p; q < n; q++) {
+        if (s[q] == '\n') {
+            long k = q + 1;
+            while (k < n && (w = ws_at(s, k, n)) > 0) k += w;
+            if (k + (te - ts) <= n && memcmp(s + k, s + ts, te - ts) == 0 && (k + (te - ts) == n || !is_word(s[k + (te - ts)])))
+                return k + (te - ts);
+        }
+    }
+    return -1;
+}
+/* \b(pkill|killall)\b[^|;&\n]*\s-[a-zA-Z0-9]*f */
+static int has_pkill_f(const unsigned char *s, long n) {
+    long i;
+    for (i = 0; i < n; i++) {
+        long wl = 0, p, t, q, w;
+        if (i > 0 && is_word(s[i - 1])) continue;
+        if (i + 5 <= n && memcmp(s + i, "pkill", 5) == 0) wl = 5;
+        else if (i + 7 <= n && memcmp(s + i, "killall", 7) == 0) wl = 7;
+        if (!wl || (i + wl < n && is_word(s[i + wl]))) continue;
+        p = i + wl;
+        t = p; while (t < n && s[t] != '|' && s[t] != ';' && s[t] != '&' && s[t] != '\n') t++;
+        for (q = p; q <= t && q < n; q++) {
+            if ((w = ws_at(s, q, n)) > 0 && q + w < n && s[q + w] == '-') {
+                long k = q + w + 1;
+                while (k < n && is_alnum(s[k])) { if (s[k] == 'f') return 1; k++; }
+            }
+        }
+    }
+    return 0;
+}
+static unsigned char *read_all(int fd, long *out) {
+    long cap = 1 << 16, n = 0, r; unsigned char *b = mm_alloc(cap);
+    while ((r = sy_read(fd, b + n, cap - n - 1)) > 0) {
+        n += r;
+        if (cap - n < 4096) { cap *= 2; b = mm_grow(b, cap); }
+    }
+    b[n] = 0; *out = n; return b;
+}
+int main(int argc, char **argv) {
+    unsigned char *in, *c; long n = 0, m = 0, i; js_val *v; char err[96]; const char *cmd;
+    if (argc > 1) { void *bb = 0; if (sy_read_file(argv[1], &bb, &n, 1L << 28)) return 2; in = bb; }
+    else in = read_all(0, &n);
+    v = js_parse((const char *)in, n, err, sizeof err);
+    if (!v) return 1;
+    cmd = js_str(js_path(v, "tool_input.command"));
+    if (!cmd) cmd = "";
+    n = (long)strlen(cmd);
+    c = mm_alloc(n + 1);
+    for (i = 0; i < n; ) {
+        long e = heredoc_end((const unsigned char *)cmd, i, n);
+        if (e >= 0) { i = e; continue; }
+        c[m++] = (unsigned char)cmd[i++];
+    }
+    if (has_pkill_f(c, m))
+        printf("{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"pkill -f 会匹配执行它的 shell。先单独用 pgrep -af 查出 PID,核对后再 kill PID。\"}}\n");
+    return 0;
+}

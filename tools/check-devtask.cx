@@ -5,6 +5,7 @@
 #pragma unisa use cxlib.devtask
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 #pragma unisa use sys.env
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -119,6 +120,31 @@ int main(void) {
                 " && printf 'EV\\t9\\t%ld\\tf.write\\towner=me\\tpid=1\\trc=0\\tms=1\\tpath=mine.txt\\tsha=%%s\\n' $(sha256sum <%s/repo/mine.txt | cut -c1-64) >>%s/ev.tsv && " WO "done w5",
                 dir, dir, now, dir, dir, now + 5, dir, dir, dir, dir, now + 7) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "OUTSIDE_CHANGED\tmine.txt\n") && strstr(r.out, "TASK_NOT_DONE\tw5\taccept_failed=0\toutside=1");
         ck(ok && events(st, "w5", "task.done") == 0, "work-owner-own-outside-write-still-blocks"); np_free(&r);
+    }
+    /* acceptance memo: same input identity skips passed commands, a changed write domain reruns them */
+    {   char st[64]; int ok;
+        if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id m1 --title memo --write in --accept 'echo x >>%s/cnt' --accept 'test -f in/ok2' --deadline-min 10 --root %s/repo", dir, now, dir, dir) && !sh(cmd, &r) && !r.rc;
+        ck(ok, "memo-open"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "done m1", dir, now + 1) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tFAIL");
+        ck(ok, "memo-first-done-runs-both"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WT "done m1", dir, now + 2) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tSKIP_PASSED") && strstr(r.out, "ACCEPT\t2\tFAIL");
+        ck(ok, "memo-unchanged-input-skips-passed"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "wc -l <%s/cnt", dir) && !sh(cmd, &r) && r.out && atoi(r.out) == 1;
+        ck(ok, "memo-skipped-command-not-executed"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo ok >%s/repo/in/ok2 && " WT "done m1", dir, dir, now + 3) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tm1\t");
+        ck(ok, "memo-changed-input-reruns-all"); np_free(&r);
+        /* parallel: two 30 s acceptance commands inside one 45 s wall, started with --bg then waited */
+        ok = !cx_fmt(cmd, sizeof cmd, WT "open --id p1 --title par --write in --accept 'sleep 30' --accept 'sleep 30; echo second' --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && !r.rc;
+        ck(ok, "par-open"); np_free(&r);
+        {   long t0 = sy_now_ms(), tb;
+            ok = !cx_fmt(cmd, sizeof cmd, WO "done p1 --bg", dir, dir, now + 4) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "JOB\t");
+            tb = sy_now_ms() - t0;
+            ck(ok && tb < 15000, "bg-returns-immediately-with-job"); np_free(&r);
+            ok = !cx_fmt(cmd, sizeof cmd, WO "done --wait p1", dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tp1\t");
+            ck(ok && sy_now_ms() - t0 < 45000, "par-two-30s-accepts-under-45s-and-bg-done"); np_free(&r);
+        }
+        ck(events(st, "p1", "task.done") == 1, "bg-writes-task-done-event");
     }
     printf("%s\tassertions=%d\tfailed=%d\n", failed ? "CHECK_DEVTASK_FAIL" : "CHECK_DEVTASK", assertions, failed);
     return failed ? 1 : 0;

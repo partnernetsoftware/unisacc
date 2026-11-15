@@ -56,7 +56,15 @@ static long pos(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 <<
 static int has(const char *s, const char *w) { return pos(s, w) >= 0; }
 static long numafter(const char *s, const char *key) { long p = pos(s, key), v = 0; if (p < 0) return -1; p += tx_len(key, 128); while (s[p] >= '0' && s[p] <= '9') v = v * 10 + (s[p++] - '0'); return v; }
 static char root[4096], com[4500], tool[4500], wd[1024];
-static int run(char **args, char *out, int cap) { char *v[20]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 19; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, out, cap); }
+/* run: --par is mandatory, so add `--par 8` when the case gives neither --par nor --jobs; run_raw adds nothing */
+static int run_raw(char **args, char *out, int cap) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 21; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, out, cap); }
+static int run(char **args, char *out, int cap) {
+    char *v[24]; int k = 0, i, given = 0;
+    for (i = 0; args[i] && k < 21; i++) { v[k++] = args[i]; if (tx_eqz(args[i], "--par") || tx_eqz(args[i], "--jobs")) given = 1; }
+    if (!given) { v[k++] = "--par"; v[k++] = "8"; }
+    v[k] = 0;
+    return run_raw(v, out, cap);
+}
 static char *rd(const char *name) {
     static char p[8][1200]; static int k; char *q = p[k++ & 7];
     if (cx_fmt(q, 1200, "%s/%s", wd, name)) die("path");
@@ -118,6 +126,31 @@ int main(void) {
         cx_fmt(buf, sizeof buf, "%s/par/out/c.out", wd); t = slurp(buf);
         ck(t && tx_eqz(t, "joined\n"), "node-output-file");
         if (t) mm_free(t);
+    }
+    {   /* --par is mandatory: missing refused rc 2, a `par N` line or --par 1 for one node runs, --par 8 overlaps */
+        char *a[] = {"run", wf("one.tsv", "a\texec\t-\ta0=true\n"), "--run", rd("nopar"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 2 && has(out, "flowrun: REFUSE missing --par"), "missing-par-refused");
+    }
+    {   char *a[] = {"run", rd("one.tsv"), "--par", "1", "--run", rd("par1"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 0 && has(out, "FLOW_RUN\tnodes=1\tok=1\t") && has(out, "\tjobs=1\t"), "par1-single-node");
+    }
+    {   char *a[] = {"run", wf("pline.tsv", "par 3\na\texec\t-\ta0=true\n"), "--run", rd("pline"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 0 && has(out, "\tjobs=3\t"), "par-line-declares");
+    }
+    {   char *a[] = {"run", rd("pline.tsv"), "--par", "2", "--run", rd("pline2"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 0 && has(out, "\tjobs=2\t"), "par-cli-wins-over-line");
+    }
+    {   char *a[] = {"run", rd("one.tsv"), "--par", "33", "--run", rd("par33"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 2 && has(out, "REFUSE --par wants a number 1..32"), "par-over-32-refused");
+    }
+    {   char *a[] = {"run", wf("p8.tsv", "a\texec\t-\ta0=sleep;a1=0.5\nb\texec\t-\ta0=sleep;a1=0.5\nc\texec\t-\ta0=sleep;a1=0.5\n"), "--par", "8", "--run", rd("par8"), 0};
+        rc = run_raw(a, out, cap);
+        ck(rc == 0 && numafter(out, "\tpeak=") > 1, "par8-peak-above-1");
     }
     {   /* failure propagates as skip; skipped nodes do not execute */
         char text[4096], *a[] = {"run", 0, "--run", rd("fail"), 0};
@@ -208,7 +241,13 @@ int main(void) {
         ck(rc == 2 && has(out, "duplicate node id 'a'") && !has(out, "EVT\t"), "dup-id"); }
     {   char *a[] = {"run", rd("par.tsv"), "--bogus", 0};
         rc = run(a, out, cap);
-        ck(rc == 2 && has(out, "REFUSE unknown option"), "bad-option"); }
+        ck(rc == 2 && has(out, "REFUSE unknown or incomplete option --bogus") && has(out, "usage: run"), "bad-option"); }
+    {   char *a[] = {"--par", "2", "--dry", "run", rd("par.tsv"), 0};
+        rc = run(a, out, cap);
+        ck(rc == 0 && has(out, "FLOW_DRY"), "opts-before-run"); }
+    {   char *a[] = {"run", rd("par.tsv"), "extra", "--par", "1", 0};
+        rc = run(a, out, cap);
+        ck(rc == 2 && has(out, "REFUSE unexpected word extra"), "extra-word-named"); }
     {   char *a[] = {"run", rd("par.tsv"), "--dry", "--run", rd("dry"), 0};
         rc = run(a, out, cap);
         ck(rc == 0 && pos(out, "ORDER\t1\ta\texec\t-\n") == 0 && has(out, "ORDER\t2\tb\texec\t-\n") && has(out, "ORDER\t3\tc\texec\ta,b\n") && has(out, "FLOW_DRY\tnodes=3")
