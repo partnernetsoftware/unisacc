@@ -41,6 +41,9 @@
  *       fl_order(&f, order)          topological order (indices)
  *       fl_run(&f, run_dir, jobs, deadline_ms, echo, &sum)   0 all ok, 1 some node not ok, <0 -errno
  *
+ * Parallelism: a line `par N` (1..32) declares it in fl_flow.par; the CLIs (flowrun, devsvc flow/x)
+ * refuse a run with neither --par nor such a line (`REFUSE missing --par`); the command line wins.
+ *
  * Transaction: a line `txn 1` (or the caller setting f.txn) makes the flow all-or-nothing for its
  * file.write / file.edit / doc.* / stdout_to writes: while the nodes run nothing is written (each
  * write is staged; later nodes of the flow read the staged content, exec nodes still see the disk),
@@ -82,7 +85,8 @@ typedef struct fl_node {
 } fl_node;
 
 /* txn: 1 = transactional flow (see fl_run); txn_consumers: consumer compile cap, -1 = default */
-typedef struct fl_flow { fl_node *n; int count; char *text; int txn, txn_consumers; } fl_flow;
+/* par: `par N` line (1..32), 0 = not declared; callers require it or an explicit --par */
+typedef struct fl_flow { fl_node *n; int count; char *text; int txn, txn_consumers, par; } fl_flow;
 /* txn: 0 not a transaction, 1 committed, 2 nothing written (aborted or rolled back) */
 typedef struct fl_sum { int ok, fail, timeout, skip; long wall_ms; int max_running; int txn; } fl_sum;
 
@@ -167,7 +171,7 @@ void fl_free(fl_flow *f) { if (f->n) mm_free(f->n); if (f->text) mm_free(f->text
 /* Parse and validate PATH. 0, or 2 with WHY naming the refusal. */
 int fl_load(const char *path, fl_flow *f, char *why, int cap) {
     unsigned char *t = 0; int64_t tn = 0; char *p, **deps; int i, r, line = 0, *ord;
-    f->n = 0; f->count = 0; f->text = 0; f->txn = 0; f->txn_consumers = -1;
+    f->n = 0; f->count = 0; f->text = 0; f->txn = 0; f->txn_consumers = -1; f->par = 0;
     r = sy_read_file(path, &t, &tn, 16L << 20);
     if (r) { fl_say(why,(size_t)cap, "cannot read flow file %s (%d)", path, r); return 2; }
     f->text = (char *)t;
@@ -179,6 +183,12 @@ int fl_load(const char *path, fl_flow *f, char *why, int cap) {
         while (*e && *e != '\n') e++;
         line++;
         if (e == p || *p == '#') { p = *e ? e + 1 : e; continue; }
+        if (!strncmp(p, "par", 3) && (p[3] == ' ' || p[3] == '\t') && !memchr(p + 4, '\t', (size_t)(e - p - 4))) {   /* `par N`: declared parallelism */
+            const char *q = p + 4; long val = 0;
+            while (q < e && *q >= '0' && *q <= '9' && val < 1000) val = val * 10 + (*q++ - '0');
+            if (q == p + 4 || q != e || val < 1 || val > 32) { fl_say(why,(size_t)cap, "line %d: want `par 1..32`", line); goto refuse; }
+            f->par = (int)val; p = *e ? e + 1 : e; continue;
+        }
         {   /* directive lines (no further TAB): `txn 0|1`, `txn_consumers N` */
             int isc = !strncmp(p, "txn_consumers", 13), kl = isc ? 13 : 3;
             if ((isc || !strncmp(p, "txn", 3)) && (p[kl] == ' ' || p[kl] == '\t') && !memchr(p + kl + 1, '\t', (size_t)(e - p - kl - 1))) {

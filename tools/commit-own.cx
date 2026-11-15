@@ -245,7 +245,8 @@ int main(int argc, char **argv) {
     char idx[400], blob[CO_MAX][64], out[8192], root[4096];
     char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
     char skip[CO_MAX];   /* 1 when a --registered derived table yields no change: left out of the commit */
-    for (k = 0; k < CO_MAX; k++) { co_reg_of[k] = -1; skip[k] = 0; }
+    char del[CO_MAX];    /* 1 when --whole PATH is in HEAD but gone from the work tree (git rm): commit the deletion */
+    for (k = 0; k < CO_MAX; k++) { co_reg_of[k] = -1; skip[k] = 0; del[k] = 0; }
     while (a < argc) {
         if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
         else if (tx_eqz(argv[a], "--dry-run")) { dry = 1; a++; }   /* everything up to and including the pre-commit hook, on the private index; no commit */
@@ -288,7 +289,14 @@ int main(int argc, char **argv) {
         char src[4400]; sy_stat_t st;
         link[k] = 0;
         if (sy_lstat(path[k], &st) == 0 && st.kind == 'l') link[k] = 1;
-        if (!sy_exists(path[k])) co_die("no such file", path[k]);
+        if (!sy_exists(path[k]) && !link[k]) {   /* HEAD has it, the work tree does not: a deletion (whole only) */
+            char hb[48], hm[8];
+            entry("HEAD", path[k], hb, hm);
+            if (!hb[0] || keys[k]) co_die("no such file", path[k]);
+            del[k] = 1; blob[k][0] = 0;
+            sy_printf("DELETE\t%s\n", path[k]);
+            continue;
+        }
         if (keys[k]) {   /* own-diff --emit writes the base with only the KEYed changes */
             char *ov[64], kc[1024], *p = kc; int n = 0;
             if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
@@ -325,7 +333,7 @@ int main(int argc, char **argv) {
     if (nreg) {   /* drop the tables with nothing of this set */
         int w = 0;
         for (k = 0; k < np; k++) if (!skip[k]) {
-            path[w] = path[k]; keys[w] = keys[k]; link[w] = link[k]; co_reg_of[w] = co_reg_of[k];
+            path[w] = path[k]; keys[w] = keys[k]; link[w] = link[k]; del[w] = del[k]; co_reg_of[w] = co_reg_of[k];
             tx_copy(blob[w], sizeof blob[w], blob[k], 40); blob[w][40] = 0; w++;
         }
         np = w;
@@ -347,6 +355,11 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         for (k = 0; k < np; k++) {
             char info[200], hb[48], hm[8];
             entry("HEAD", path[k], hb, hm);
+            if (del[k]) {
+                char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0};
+                if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index --force-remove failed", path[k]); }
+                continue;
+            }
             if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
@@ -421,6 +434,11 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
             entry(0, path[k], ib, im);
+            if (del[k]) {   /* a deletion: drop the shared entry only when it still held the old HEAD blob */
+                if (ib[0] && tx_eqz(ib, old[k])) { char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0}; if (run(v, out, sizeof out) != 0) { sy_printf("NOTE\t%s\tthe shared index entry could not be removed; run: git rm --cached %s\n", path[k], path[k]); lost++; } }
+                else if (ib[0]) printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+                continue;
+            }
             if (ib[0] && tx_eqz(ib, blob[k])) continue;   /* already the committed blob */
             if (!ib[0] || tx_eqz(ib, old[k]) || committed_before(path[k], ib)) {
                 if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (im[0] ? im : "100644"), blob[k], path[k]) >= (int)sizeof info) continue;

@@ -16,7 +16,7 @@
  *   sh ./unisacc.com tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
  *   sh ./unisacc.com tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
  *   sh ./unisacc.com tools/devsvc.cx -- serve [--ttl S] [--idle S]     前台跑服务循环(start 即后台起它)
- *   sh ./unisacc.com tools/devsvc.cx -- flow run FILE.tsv|- [--jobs N] [--deadline-ms N] [--cat] [--run DIR] [--owner O] [--lock-wait-ms N]
+ *   sh ./unisacc.com tools/devsvc.cx -- flow run FILE.tsv|- --par N [--deadline-ms N] [--cat] [--run DIR] [--owner O] [--lock-wait-ms N]
  *   sh ./unisacc.com tools/devsvc.cx -- flow - [同上选项]             从 stdin 读节点表(格式见 tools/cxlib/flowexec.cx 头注:id op deps args)
  *   flow 加 --txn(或节点表里一行 `txn 1`):事务化,全部 file.*、doc.* 写节点先暂存不落盘,锁按名排序一次取齐(含写路径所属共享表锁),
  *     整组试编(被写 .cx 加直接消费者,`txn_consumers N` 设上限)、登记表成对校验、磁盘未被他人改动全过才逐文件原子落盘,否则整组不落盘;
@@ -24,7 +24,8 @@
  *   sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM]          内容到 stdout,结果行 F read ok sha= lines= bytes= 到 stderr
  *   sh ./unisacc.com tools/devsvc.cx -- f write PATH --from SRC [--expect-sha X] [--mkdir] [--owner O] [--lock-wait-ms N]
  *   sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]   (--chomp:两文件各去掉末尾一个换行)
- *   sh ./unisacc.com tools/devsvc.cx -- x [--timeout-ms N] [--cwd D] -- ARGV...   单条命令:stdout/stderr 原样转出,结果行 X 到 stderr,退出码即命令的
+ *   flow 与 x 必须显式 --par N(1..32,单节点也写;flow 可在节点表写一行 `par N`,命令行优先),缺省 rc 2 REFUSE missing --par
+ *   sh ./unisacc.com tools/devsvc.cx -- x --par N [--timeout-ms N] [--cwd D] -- ARGV...   单条命令:stdout/stderr 原样转出,结果行 X 到 stderr,退出码即命令的
  *   x|flow|wait 输出控制:--tail N、--head N、--grep S(固定串,可多次,行级或)、--summary(每节点一行 SUM id rc ms lines first);
  *     任一给出即合并 stdout/stderr 过滤,全量落 run 目录 full.out(wait 为作业 out),略去行时打 DEVSVC_TRIMMED shown=N total=M,末行 OUT=路径;不给时行为不变
  *   x|flow|git commit|register|derive 加 --bg:立即打印 JOB id run=DIR(实例目录 jobs/<id>/),作业在独立会话跑,deadline 与锁照旧,结束记 job.done
@@ -752,7 +753,8 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         file = p;
     }
     if (fl_load(file, &f, why, (int)sizeof why)) { fprintf(stderr, "devsvc: REFUSE %s\n", why); return 2; }
-    if (jobs < 1) { jobs = sy_ncpu(); if (jobs < 1) jobs = 4; }
+    if (jobs < 1) jobs = f.par;   /* 命令行 --par 优先,其次节点表 par 行;都没有即拒绝(单节点也要写) */
+    if (jobs < 1) { fprintf(stderr, "devsvc: REFUSE missing --par (give --par N, 1..32, or a flow line `par N`; one node too)\n"); fl_free(&f); return 2; }
     if (jobs > FL_MAX_JOBS) jobs = FL_MAX_JOBS;
     if (dl < 1) dl = FL_RUN_MS;
     if (flow_txn) f.txn = 1;
@@ -864,7 +866,7 @@ static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FIL
     if (argc > 0 && !strcmp(argv[0], "run")) a = 1;
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "--cat") || !strcmp(argv[a], "--echo")) cat = 1;
-        else if (!strcmp(argv[a], "--jobs") && a + 1 < argc) { jobs = (int)numarg(argv[++a]); if (jobs < 1) return 2; }
+        else if ((!strcmp(argv[a], "--par") || !strcmp(argv[a], "--jobs")) && a + 1 < argc) { long v = numarg(argv[++a]); if (v < 1 || v > 32) { fprintf(stderr, "devsvc: REFUSE --par wants 1..32\n"); return 2; } jobs = (int)v; }
         else if (!strcmp(argv[a], "--deadline-ms") && a + 1 < argc) { dl = numarg(argv[++a]); if (dl < 1 || dl > 3600000L) return 2; }
         else if (!strcmp(argv[a], "--lock-wait-ms") && a + 1 < argc) { wait = numarg(argv[++a]); if (wait < 0 || wait > 60000) return 2; }
         else if (!strcmp(argv[a], "--run") && a + 1 < argc) rdir = argv[++a];
@@ -886,16 +888,18 @@ static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FIL
     return flow_go(root, file, text, rdir, jobs, dl, cat, wait, 0);
 }
 
-static int cmd_x(const char *root, int argc, char **argv) {   /* x [--timeout-ms N] [--cwd D] -- ARGV... */
-    AB b = {0, 0, 0}; int a = 0, k = 0; long tm = FL_NODE_MS; const char *cwd = 0; char key[16], num[32];
+static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--timeout-ms N] [--cwd D] -- ARGV... */
+    AB b = {0, 0, 0}; int a = 0, k = 0, par = 0; long tm = FL_NODE_MS; const char *cwd = 0; char key[16], num[32];
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "--")) { a++; break; }
+        else if (!strcmp(argv[a], "--par") && a + 1 < argc) { long v = numarg(argv[++a]); if (v < 1 || v > 32) { fprintf(stderr, "devsvc: REFUSE --par wants 1..32\n"); return 2; } par = (int)v; }
         else if (!strcmp(argv[a], "--timeout-ms") && a + 1 < argc) { tm = numarg(argv[++a]); if (tm < 1 || tm > FL_NODE_MAX_MS) return 2; }
         else if (!strcmp(argv[a], "--cwd") && a + 1 < argc) cwd = argv[++a];
         else if ((k = oc_opt(argc, argv, a))) { if (k < 0) return 2; a += k - 1; k = 0; }
         else break;
     }
     if (a >= argc || argc - a > FL_MAX_ARGV) return 2;
+    if (!par) { fprintf(stderr, "devsvc: REFUSE missing --par (x needs --par N, 1..32; one command is --par 1)\n"); return 2; }
     if (!strcmp(argv[a], "git") && a + 1 < argc) {   /* 危险 git 子命令具名拒绝(rc 125);DEVSVC_ALLOW_DANGEROUS=1 放行并记事件。先跳过 -C X、-c X、--git-dir= 等前置选项再取子命令词 */
         static const char *bad[] = {"stash", "reset", "clean", "checkout", "restore", "rebase", 0};
         static const char *withval[] = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", 0};
@@ -916,7 +920,7 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x [--timeout-ms
     ab_add(&b, "\n", 1);
     if (ovf) return 2;
     F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
-    return flow_go(root, 0, b.p, 0, 1, tm + 5000, 0, 0, 1);
+    return flow_go(root, 0, b.p, 0, par, tm + 5000, 0, 0, 1);
 }
 
 /* ---- stdin 原文入口(f write/edit/edits --stdin):免先用原生工具备 old/new 文件 ---- */
@@ -1163,9 +1167,9 @@ static int auto_lock(const char *root, const char *name, const char *ow) {
 }
 static int tool_locked(const char *root, const char *lock, const char *tool, int argc, char **argv) {
     char prod[PW], req[200]; char *v[FL_MAX_ARGV + 8]; int n = 0, i, rc; const char *ow = auto_owner();
-    if (argc + 6 > FL_MAX_ARGV) return 2;
+    if (argc + 8 > FL_MAX_ARGV) return 2;
     F(prod, sizeof prod, "%s/%s", root, cfg.product);
-    v[n++] = "--"; v[n++] = "sh"; v[n++] = prod; v[n++] = (char *)tool; v[n++] = "--";
+    v[n++] = "--par"; v[n++] = "1"; v[n++] = "--"; v[n++] = "sh"; v[n++] = prod; v[n++] = (char *)tool; v[n++] = "--";
     for (i = 0; i < argc; i++) v[n++] = argv[i];
     int mine = 0;
     if (lock && (rc = auto_lock(root, lock, ow))) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s: %s\n", lock, rn ? resp : "no instance"); return rc == 3 ? 3 : 1; }
@@ -1225,7 +1229,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         x_last_err[0] = 0;
         rc = tool_locked(root, need, "tools/commit-own.cx", n, v);
         if (rc != 0) err_tail(x_last_err, 20);   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行(调用方常只看末几行) */
-        if (rc == 0 && push) { char *pv[] = {"--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 5, pv) == 0; if (!pushed) rc = 1; }
+        if (rc == 0 && push) { char *pv[] = {"--par", "1", "--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 7, pv) == 0; if (!pushed) rc = 1; }
         if (gmine) { char rq[200]; F(rq, sizeof rq, "lock-release\tgit-index\t%s", gow); request(root, rq, 0); } }
     {   char *hv[] = {"git", "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
     printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\n", rc, sha, pushed, sy_now_ms() - t0);
@@ -1410,7 +1414,7 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[a], "x")) {   /* x 事件取工具名:跳过 --timeout-ms N、--cwd D、--owner N、--bg 等选项与 --,再跳过 sh 与 unisacc.com,去目录与 .cx 后缀 */
                 while (s < argc && argv[s][0] == '-') {
                     if (!strcmp(argv[s], "--")) { s++; break; }
-                    s += (!strcmp(argv[s], "--timeout-ms") || !strcmp(argv[s], "--cwd") || !strcmp(argv[s], "--owner") || !strcmp(argv[s], "--tail")
+                    s += (!strcmp(argv[s], "--timeout-ms") || !strcmp(argv[s], "--cwd") || !strcmp(argv[s], "--par") || !strcmp(argv[s], "--owner") || !strcmp(argv[s], "--tail")
                           || !strcmp(argv[s], "--head") || !strcmp(argv[s], "--grep")) && s + 1 < argc ? 2 : 1;
                 }
                 while (s + 1 < argc && (!strcmp(argv[s], "sh") || strstr(argv[s], "unisacc.com"))) s++;

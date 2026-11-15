@@ -95,7 +95,7 @@ cx 架构是 unisacc 成功的核心理念之一(其余如 nn 以网换逻辑、
 
 ## 协作、提交和卫生
 
-- 工作目录与提交(项目所有者 2026-11-12):只在 `~/repos/unisacc` 上工作,不建外部 `~/*-work`、`~/work` 目录,不 `git clone`;`git worktree add` 只允许建在仓内 `.claude/worktrees/<版本分支名>`(见下条"版本分支",项目所有者 2026-11-14),不在 `out/` 下建任何工作子目录或克隆(钩子 `.claude/hooks/guard-edit.ts` 已强制拦截);检查一过立即提交推送,不把交付物留在 `out/`、补丁文件或暂存区。临时日志与产物写 `$CLAUDE_JOB_DIR/tmp` 或 `/tmp`;多人同改靠只提交自己路径(`git commit -m ... -- 明确路径`)加 `git pull --rebase`,不靠克隆隔离。
+- 工作目录与提交(项目所有者 2026-11-12):只在 `~/repos/unisacc` 上工作,不建外部 `~/*-work`、`~/work` 目录,不 `git clone`;`git worktree add` 只允许建在仓内 `.claude/worktrees/<版本分支名>`(见下条"版本分支",项目所有者 2026-11-14),不在 `out/` 下建任何工作子目录或克隆(钩子 `tools/guard-hook.cx` 已强制拦截);检查一过立即提交推送,不把交付物留在 `out/`、补丁文件或暂存区。临时日志与产物写 `$CLAUDE_JOB_DIR/tmp` 或 `/tmp`;多人同改靠只提交自己路径(`git commit -m ... -- 明确路径`)加 `git pull --rebase`,不靠克隆隔离。
 - 并发推进:按 `prd_mempalace.md` 的下一动作派发,写域互不相交的任务同时进行。
 - 轻量辅助 `cc-lite`(`~/bin/cc-lite`,源在 moltbaby `bin/cc-lite`):`cc-lite [haiku|sonnet] "指令" [文件...]` 或经 stdin,只读无工具,用于日志定因、状态摘要、提交说明草稿,省下主代理与子代理的上下文;它不改文件、不做裁决,结论仍由调用者核实。
 - 主刀每轮先拆独立文件域，明确各代理的目标、读写路径、依赖和验收证据；可独立推进的任务立即并行派发，不等重构造结束再开工。
