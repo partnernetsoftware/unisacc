@@ -243,6 +243,11 @@
 | 0.0.68 rollback.txt、decision、evidence 重写 | 未做 | cc(步 12) | 挡 |
 | U5 sid 测量 8 秒窗争抢 | 降并发 21f95007be 后待第二次真跑验证 | s9 子代理 | 视结果 |
 
+补充核实(00:20 至 00:22,只读):
+(1) F4c"无候选材料报 NOT_APPLICABLE"未实现:tools/s9-shards.cx:139-140 与 tests/cxlib/allsession.cx:550 只按登记 platform 判 NOT_APPLICABLE,没有按材料缺失判的分支。上表 F4c 一行由"未核实"改为"已核未实现"。
+(2) slice-migration-gen 与 streams-material 自 v0.0.67 以来无修复提交(git log 对 tools/slice-migration-gen.cx、tests/check-streams-material.cx 为空);check-streams-material.cx:1 仍声明工作目录 out/streams-material-PID。
+
+
 
 
 
