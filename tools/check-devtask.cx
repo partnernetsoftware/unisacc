@@ -73,7 +73,8 @@ int main(void) {
     }
     /* job-style work orders (R5): private git repo under dir, acceptance run directly, clock from DEVTASK_NOW */
     ck(dw_in("in,tools/x.cx", "in/a.txt") && dw_in("in,tools/x.cx", "tools/x.cx") && !dw_in("in,tools/x.cx", "other.txt") && dw_id_ok("r5-a") && !dw_id_ok("a/b") && !dw_id_ok("a b"), "work-domain-membership-and-id");
-#define WT "DEVTASK_ACCEPT_DIRECT=1 DEVTASK_DIR=%s/st DEVTASK_NOW=%ld sh ./unisacc.com tools/devtask.cx -- task "
+#define WT "DEVSVC_OWNER= DEVTASK_ACCEPT_DIRECT=1 DEVTASK_DIR=%s/st DEVTASK_NOW=%ld sh ./unisacc.com tools/devtask.cx -- task "
+#define WO "DEVSVC_OWNER=me DEVTASK_EVENTS=%s/ev.tsv DEVTASK_ACCEPT_DIRECT=1 DEVTASK_DIR=%s/st DEVTASK_NOW=%ld sh ./unisacc.com tools/devtask.cx -- task "
     {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
         ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/repo/in && cd %s/repo && git init -q && echo a >in/a.txt && echo b >other.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm init && echo pre >predirty.txt", dir, dir) && !sh(cmd, &r) && !r.rc;
@@ -107,6 +108,17 @@ int main(void) {
         ck(ok, "work-list-states"); np_free(&r);
         ok = !cx_fmt(cmd, sizeof cmd, WT "status nosuch", dir, now) && !sh(cmd, &r) && r.rc == 2;
         ck(ok, "work-missing-id-rc2"); np_free(&r);
+        /* owner attribution: another window's commit is not reported, another window's dirty path is INFO_FOREIGN and does not block done */
+        ok = !cx_fmt(cmd, sizeof cmd, ": >%s/ev.tsv && " WO "open --id w4 --title owned --write in --accept true --deadline-min 10 --root %s/repo && cd %s/repo && echo f >foreign.txt && echo z >>other.txt && git add other.txt"
+                " && git -c user.name=o -c user.email=o@o commit -qm other && cd - >/dev/null && " WO "status w4", dir, dir, dir, now, dir, dir, dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out
+            && strstr(r.out, "INFO_FOREIGN\tforeign.txt\n") && !strstr(r.out, "other.txt") && strstr(r.out, "outside=0\toverdue=0\tforeign=1\towner=me");
+        ck(ok, "work-owner-foreign-dirty-is-info-and-foreign-commit-unreported"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WO "done w4", dir, dir, now + 6) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "INFO_FOREIGN\tforeign.txt\n") && !strstr(r.out, "OUTSIDE_CHANGED") && strstr(r.out, "DONE\tw4\t");
+        ck(ok && events(st, "w4", "task.done") == 1, "work-owner-foreign-does-not-block-done"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, WO "open --id w5 --title mine --write in --accept true --deadline-min 10 --root %s/repo && echo m >%s/repo/mine.txt"
+                " && printf 'EV\\t9\\t%ld\\tf.write\\towner=me\\tpid=1\\trc=0\\tms=1\\tpath=mine.txt\\tsha=%%s\\n' $(sha256sum <%s/repo/mine.txt | cut -c1-64) >>%s/ev.tsv && " WO "done w5",
+                dir, dir, now, dir, dir, now + 5, dir, dir, dir, dir, now + 7) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "OUTSIDE_CHANGED\tmine.txt\n") && strstr(r.out, "TASK_NOT_DONE\tw5\taccept_failed=0\toutside=1");
+        ck(ok && events(st, "w5", "task.done") == 0, "work-owner-own-outside-write-still-blocks"); np_free(&r);
     }
     printf("%s\tassertions=%d\tfailed=%d\n", failed ? "CHECK_DEVTASK_FAIL" : "CHECK_DEVTASK", assertions, failed);
     return failed ? 1 : 0;

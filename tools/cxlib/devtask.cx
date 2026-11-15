@@ -245,7 +245,7 @@ int dt_instdir(const char *root, const char *table, char *out, int cap, char *wh
  * write entry is a byte prefix of the path. Running the acceptance commands is the caller's side (tools/devtask.cx). */
 enum { DW_ACC = 16 };
 typedef struct DwSnap { char sha[65], path[512]; } DwSnap;
-typedef struct DwTask { char id[64], title[256], write[1024], root[1024]; long opened, deadline, done; char acc[DW_ACC][1024]; int nacc, nsnap; DwSnap *snap; } DwTask;
+typedef struct DwTask { char id[64], title[256], write[1024], root[1024], owner[64]; long opened, deadline, done; char acc[DW_ACC][1024]; int nacc, nsnap; DwSnap *snap; } DwTask;
 void dw_free(DwTask *t) { free(t->snap); t->snap = 0; t->nsnap = 0; }
 int dw_id_ok(const char *s) {
     if (!dt_name_ok(s, 64)) return 0;
@@ -288,7 +288,7 @@ int dw_save(const char *dir, const DwTask *t, char *why, int wl) {
     if (!o || dw_file(dir, t->id, p, sizeof p) || snprintf(d, sizeof d, "%s/work", dir) >= (int)sizeof d || sy_mkdir_all(d, 0700)
         || cx_fmt(num, sizeof num, "opened\t%ld\ndeadline\t%ld\ndone\t%ld\n", t->opened, t->deadline, t->done)) { sb_free(o); snprintf(why, wl, "work order save setup failed"); return 2; }
     bad = sb_puts(o, "id\t") || sb_puts(o, t->id) || sb_puts(o, "\ntitle\t") || sb_puts(o, t->title) || sb_puts(o, "\nwrite\t") || sb_puts(o, t->write)
-       || sb_puts(o, "\nroot\t") || sb_puts(o, t->root) || sb_puts(o, "\n") || sb_puts(o, num);
+       || sb_puts(o, "\nroot\t") || sb_puts(o, t->root) || sb_puts(o, "\nowner\t") || sb_puts(o, t->owner[0] ? t->owner : "-") || sb_puts(o, "\n") || sb_puts(o, num);
     for (int i = 0; i < t->nacc && !bad; i++) bad = sb_puts(o, "accept\t") || sb_puts(o, t->acc[i]) || sb_puts(o, "\n");
     for (int i = 0; i < t->nsnap && !bad; i++) bad = sb_puts(o, "snap\t") || sb_puts(o, t->snap[i].sha) || sb_puts(o, "\t") || sb_puts(o, t->snap[i].path) || sb_puts(o, "\n");
     if (bad || !sb_cstr(o) || sy_write_atomic(p, sb_cstr(o), sb_len(o), 0600)) { sb_free(o); snprintf(why, wl, "write work order failed"); return 2; }
@@ -314,6 +314,7 @@ int dw_load(const char *dir, const char *id, DwTask *t, char *why, int wl) {
         else if (!strcmp((char *)b + i, "title")) bad = dt_cp(t->title, sizeof t->title, val, vl);
         else if (!strcmp((char *)b + i, "write")) bad = dt_cp(t->write, sizeof t->write, val, vl);
         else if (!strcmp((char *)b + i, "root")) bad = dt_cp(t->root, sizeof t->root, val, vl);
+        else if (!strcmp((char *)b + i, "owner")) bad = dt_cp(t->owner, sizeof t->owner, val, vl);
         else if (!strcmp((char *)b + i, "opened")) t->opened = atol(val);
         else if (!strcmp((char *)b + i, "deadline")) t->deadline = atol(val);
         else if (!strcmp((char *)b + i, "done")) t->done = atol(val);
@@ -326,6 +327,7 @@ int dw_load(const char *dir, const char *id, DwTask *t, char *why, int wl) {
     }
     free(b);
     if (bad || strcmp(t->id, id) || !t->write[0] || !t->root[0] || t->opened <= 0 || t->deadline < t->opened || !t->nacc) { dw_free(t); (void)cx_fmt(why, wl, "work order %s: malformed file", id); return 2; }
+    if (!t->owner[0]) (void)cx_fmt(t->owner, sizeof t->owner, "-");   /* orders opened before the owner row */
     return 0;
 }
 /* rc 1 when a work order with this id exists and is not done; a done one is replaced */
@@ -346,25 +348,69 @@ int dw_open(const char *dir, const char *id, const char *title, const char *writ
     (void)cx_fmt(t.id, sizeof t.id, "%s", id); (void)cx_fmt(t.title, sizeof t.title, "%s", title); (void)cx_fmt(t.write, sizeof t.write, "%s", write); (void)cx_fmt(t.root, sizeof t.root, "%s", root);
     for (int i = 0; i < nacc; i++) (void)cx_fmt(t.acc[i], sizeof t.acc[0], "%s", acc[i]);
     t.nacc = nacc; t.opened = now; t.deadline = now + deadline_min * 60;
+    {   const char *ow = getenv("DEVSVC_OWNER"); (void)cx_fmt(t.owner, sizeof t.owner, "%s", ow && dt_name_ok(ow, 64) ? ow : "-");   }
     rc = dw_dirty(root, &t.snap, &t.nsnap, why, wl);
     if (!rc) rc = dw_save(dir, &t, why, wl);
     if (!rc && (snprintf(p, sizeof p, "%s/work/index.tsv", dir) >= (int)sizeof p || sy_append_file(p, row, snprintf(row, sizeof row, "%s\n", id), 0600))) { snprintf(why, wl, "append work index failed"); rc = 2; }
-    if (!rc) rc = dt_event(dir, id, "task.open", "-", now, why, wl);
+    if (!rc) rc = dt_event(dir, id, "task.open", t.owner, now, why, wl);
     dw_free(&t); dt_unlock(lk); return rc;
 }
-/* paths changed since open: tab-led rows appended to in (inside the write domain) and out (outside it) */
-int dw_diff(const DwTask *t, sb *in, sb *out, int *nin, int *nout, char *why, int wl) {
-    DwSnap *cur = 0; int n = 0, rc = dw_dirty(t->root, &cur, &n, why, wl);
-    *nin = 0; *nout = 0;
+/* devsvc events file: $DEVTASK_EVENTS, else $UNISACC_DEVSVC_DIR/events.tsv, else
+ * $HOME/.cache/unisacc/devsvc/<first 16 hex of sha256(absolute git common dir)>/events.tsv (devsvc-core.cx header) */
+static int dw_evpath(const char *root, char *p, int cap) {
+    const char *e = getenv("DEVTASK_EVENTS"), *d = getenv("UNISACC_DEVSVC_DIR"), *home = getenv("HOME");
+    char *v[] = {"git", "-C", (char *)root, "rev-parse", "--path-format=absolute", "--git-common-dir", 0}; np_result r = {0}; char w2[256], hx[65]; long n;
+    if (e && *e) return snprintf(p, cap, "%s", e) >= cap;
+    if (d && *d) return snprintf(p, cap, "%s/events.tsv", d) >= cap;
+    if (!home || np_run(v, 0, 0, 15, &r, w2, sizeof w2) || r.rc || !r.out) { np_free(&r); return 1; }
+    n = (long)r.outn; while (n > 0 && (r.out[n - 1] == '\n' || r.out[n - 1] == '\r')) n--;
+    if (sy_sha256_hex(r.out, n, hx)) { np_free(&r); return 1; }
+    np_free(&r); hx[16] = 0;
+    return snprintf(p, cap, "%s/.cache/unisacc/devsvc/%s/events.tsv", home, hx) >= cap;
+}
+/* 1 when the events file holds an f.edit/f.write row at or after since, by owner, for path, whose post-write sha is sha */
+static int dw_ownwrite(const unsigned char *ev, long n, long since, const char *owner, const char *path, const char *sha) {
+    char ko[96], kp[600], ks[80];
+    if (snprintf(ko, sizeof ko, "\towner=%s\t", owner) >= (int)sizeof ko || snprintf(kp, sizeof kp, "\tpath=%s\t", path) >= (int)sizeof kp || snprintf(ks, sizeof ks, "\tsha=%s", sha) >= (int)sizeof ks) return 0;
+    for (long s = 0, e; s < n; s = e + 1) {
+        char row[2048]; long ts; const char *q;
+        for (e = s; e < n && ev[e] != '\n'; e++) {}
+        if (e - s >= (long)sizeof row || e - s < 4) continue;
+        mm_copy(row, sizeof row, ev + s, e - s); row[e - s] = 0;
+        if (strncmp(row, "EV\t", 3) || !(q = strchr(row + 3, '\t'))) continue;
+        ts = atol(q + 1);
+        if (ts < since || (!strstr(row, "\tf.edit\t") && !strstr(row, "\tf.write\t"))) continue;
+        if (strstr(row, ko) && strstr(row, kp) && (q = strstr(row, ks)) && (q[strlen(ks)] == 0 || q[strlen(ks)] == '\t')) return 1;
+    }
+    return 0;
+}
+/* 1 when the work tree bytes of path equal the HEAD blob (dirty only by mode or index state) */
+static int dw_eqhead(const char *root, const char *path) {
+    char obj[600], *v[] = {"git", "-C", (char *)root, "diff", "--quiet", "HEAD", "--", (char *)path, 0}, *e[] = {"git", "-C", (char *)root, "cat-file", "-e", obj, 0}; np_result r = {0}; char w2[256]; int same;
+    if (snprintf(obj, sizeof obj, "HEAD:%s", path) >= (int)sizeof obj) return 0;
+    same = !np_run(e, 0, 0, 15, &r, w2, sizeof w2) && r.rc == 0; np_free(&r);   /* untracked paths are not in HEAD; git diff alone says quiet for them */
+    if (same) { same = !np_run(v, 0, 0, 15, &r, w2, sizeof w2) && r.rc == 0; np_free(&r); }
+    return same;
+}
+/* paths changed since open: rows appended to in (inside the write domain), out (outside it, produced by this
+ * order's owner) and foreign (outside it, not attributable to the owner: INFO only, does not block done).
+ * Outside paths whose bytes equal HEAD are skipped. With owner "-" every outside change counts as the owner's.
+ * The owner's outside change is one with a devsvc f.edit/f.write event since open, by the owner, whose sha is the current one. */
+int dw_diff(const DwTask *t, sb *in, sb *out, sb *foreign, int *nin, int *nout, int *nfor, char *why, int wl) {
+    DwSnap *cur = 0; int n = 0, rc = dw_dirty(t->root, &cur, &n, why, wl), known = t->owner[0] && strcmp(t->owner, "-"); unsigned char *ev = 0; int64_t evn = 0; char evp[2048];
+    *nin = 0; *nout = 0; *nfor = 0;
     if (rc) return rc;
+    if (known && !dw_evpath(t->root, evp, sizeof evp)) { int er = sy_read_file(evp, &ev, &evn, 1L << 26); if (er) { free(ev); ev = 0; evn = 0; } }
     for (int i = 0; i < n && !rc; i++) {
-        int same = 0, inside = dw_in(t->write, cur[i].path);
+        int same = 0, inside = dw_in(t->write, cur[i].path); sb *dst;
         for (int k = 0; k < t->nsnap && !same; k++) same = !strcmp(t->snap[k].path, cur[i].path) && !strcmp(t->snap[k].sha, cur[i].sha) && strcmp(cur[i].sha, "?");
         if (same) continue;
-        if (sb_puts(inside ? in : out, cur[i].path) || sb_puts(inside ? in : out, "\n")) { snprintf(why, wl, "out of memory"); rc = 2; }
-        if (inside) ++*nin; else ++*nout;
+        if (!inside && dw_eqhead(t->root, cur[i].path)) continue;
+        dst = inside ? in : !known || dw_ownwrite(ev, (long)evn, t->opened, t->owner, cur[i].path, cur[i].sha) ? out : foreign;
+        if (sb_puts(dst, cur[i].path) || sb_puts(dst, "\n")) { snprintf(why, wl, "out of memory"); rc = 2; }
+        if (dst == in) ++*nin; else if (dst == out) ++*nout; else ++*nfor;
     }
-    free(cur); return rc;
+    free(ev); free(cur); return rc;
 }
 /* marks the work order done at now and appends the task.done row to task-events.tsv */
 int dw_finish(const char *dir, DwTask *t, long now, char *why, int wl) {

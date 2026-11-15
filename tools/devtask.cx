@@ -95,7 +95,7 @@ static void paths(const char *tag, sb *b) {
 static int task_main(int argc, char **argv, long now) {
     const char *sub = argc > 2 ? argv[2] : "", *id = 0, *title = 0, *dmin = 0, *rootopt = 0, *acc[DW_ACC + 1]; char dir[1024], root[1024], why[2048] = ""; int nacc = 0, rc, i = 3;
     int isopen = !strcmp(sub, "open"), islist = !strcmp(sub, "list"), direct = getenv("DEVTASK_ACCEPT_DIRECT") && *getenv("DEVTASK_ACCEPT_DIRECT");
-    DwTask t; sb *in, *out; int nin = 0, nout = 0;
+    DwTask t; sb *in, *out, *fo = 0; int nin = 0, nout = 0, nfo = 0;
     if (!isopen && !islist && strcmp(sub, "status") && strcmp(sub, "done")) {
         fprintf(stderr, "usage: devtask task open --id ID --title T --write P... --accept CMD [--accept CMD]... --deadline-min N [--root R]\n"
                         "       devtask task status ID | task done ID | task list   (all: [--dir D])\n");
@@ -156,23 +156,23 @@ static int task_main(int argc, char **argv, long now) {
         return 0;
     }
     if ((rc = dw_load(dir, id, &t, why, sizeof why)) != 0) goto end;
-    in = sb_new(); out = sb_new();
-    if (!in || !out) { dw_free(&t); return bad("out of memory", 0); }
+    in = sb_new(); out = sb_new(); fo = sb_new();
+    if (!in || !out || !fo) { dw_free(&t); return bad("out of memory", 0); }
     if (!strcmp(sub, "status")) {
-        rc = dw_diff(&t, in, out, &nin, &nout, why, sizeof why);
+        rc = dw_diff(&t, in, out, fo, &nin, &nout, &nfo, why, sizeof why);
         if (!rc) {
             printf("TASK\t%s\tstate=%s\tused_s=%ld\tleft_s=%ld\ttitle=%s\n", t.id, t.done ? "done" : "open", (t.done ? t.done : now) - t.opened, t.done ? 0 : t.deadline - now, t.title);
             printf("WRITE\t%s\n", t.write);
             for (int k = 0; k < t.nacc; k++) printf("ACCEPT\t%d\t%s\n", k + 1, t.acc[k]);
-            paths("CHANGED", in); paths("OUTSIDE_WARN", out);
-            printf("TASK_STATUS\t%s\tchanged=%d\toutside=%d\toverdue=%d\n", t.id, nin, nout, !t.done && now > t.deadline);
+            paths("CHANGED", in); paths("OUTSIDE_WARN", out); paths("INFO_FOREIGN", fo);
+            printf("TASK_STATUS\t%s\tchanged=%d\toutside=%d\toverdue=%d\tforeign=%d\towner=%s\n", t.id, nin, nout, !t.done && now > t.deadline, nfo, t.owner);
         }
     } else {
         int failed = 0; const char *emit = "local";
         for (int k = 0; k < t.nacc; k++) if (!accept_run(&t, k, direct)) failed++;
-        rc = dw_diff(&t, in, out, &nin, &nout, why, sizeof why);
+        rc = dw_diff(&t, in, out, fo, &nin, &nout, &nfo, why, sizeof why);
         if (!rc) {
-            paths("OUTSIDE_CHANGED", out);
+            paths("OUTSIDE_CHANGED", out); paths("INFO_FOREIGN", fo);
             if (!failed && !nout && !direct) {   /* the coordinator reads this event; without it the work order stays open */
                 char text[400]; char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "events", "emit", "task.done", text, 0}; np_result r = {0}; char w2[256] = "";
                 (void)cx_fmt(text, sizeof text, "id=%s accept=%d changed=%d used_s=%ld late=%d", t.id, t.nacc, nin, now - t.opened, now > t.deadline);
@@ -185,7 +185,7 @@ static int task_main(int argc, char **argv, long now) {
             else if (!rc) { printf("TASK_NOT_DONE\t%s\taccept_failed=%d\toutside=%d\temit_failed=%d\tleft_s=%ld\n", t.id, failed > 0 ? failed : 0, nout, failed < 0, t.deadline - now); rc = 1; }
         }
     }
-    sb_free(in); sb_free(out); dw_free(&t);
+    sb_free(in); sb_free(out); sb_free(fo); dw_free(&t);
     if (rc == 1 && !why[0]) return 1;
 end:
     if (rc == 1) fprintf(stderr, "DEVTASK_REFUSE\t%s\n", why); else if (rc) fprintf(stderr, "devtask: %s\n", why);
