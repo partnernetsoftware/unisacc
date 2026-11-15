@@ -3,6 +3,7 @@
  *   sh ./unisacc.com tools/check-state-gen.cx -- ROOT TMPDIR */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 static int failed, assertions;
@@ -70,8 +71,21 @@ int main(int argc, char **argv) {
             cx_fmt(rp, sizeof rp, "%s", argv[1]);
             cx_fmt(sh, sizeof sh, "cd %s && sh ./unisacc.com %s -- --emit versions", rp, sc);
             av[0] = bnd; av[1] = "30"; av[2] = "sh"; av[3] = "-c"; av[4] = sh; av[5] = 0; out[0] = 0;
-            rc = sy_run(av, out, sizeof out, &cut);
-            ok = rc == 0 && strstr(out, "versions rows=6") && !strstr(out, "VERSION\t2\t0.0.64");
+            {   /* expected row count comes from the table itself: non-empty lines after the header */
+                char tp[4400], want[64], *body = 0, *s; int64_t bn = 0; int nl = 0, rows = 0, nv = 0, lstart = 1;
+                cx_fmt(tp, sizeof tp, "%s/build/version-seq.tsv", argv[1]);
+                if (sy_read_file(tp, &body, &bn, 0) != 0 || !body) { fprintf(stderr, "check-state-gen: cannot read %s\n", tp); return 2; }
+                for (s = body; s < body + bn; s++) {
+                    if (lstart && *s != '\n' && nl > 0) rows++;
+                    lstart = *s == '\n'; if (lstart) nl++;
+                }
+                mm_free(body);
+                rc = sy_run(av, out, sizeof out, &cut);
+                for (s = out; (s = strstr(s, "VERSION\t")) != 0; s++) if (s == out || s[-1] == '\n') nv++;
+                cx_fmt(want, sizeof want, "versions rows=%d\n", rows);
+                ok = rc == 0 && rows > 0 && nv == rows && strstr(out, want) && !strstr(out, "VERSION\t2\t0.0.64");
+                printf("NOTE\tversions-real\ttable_rows=%d\tversion_lines=%d\n", rows, nv);
+            }
             assertions++; if (!ok) failed++;
             printf("%s\tversions-real\twant=0\tgot=%d\n", ok ? "PASS" : "FAIL", rc);
         }

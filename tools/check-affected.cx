@@ -300,7 +300,10 @@ int main(int argc, char **argv) {
                闭包只跟一层时这里只选出 chain-fresh-out 一批(实测改前 batches=1)。 */
             char *c[] = {"--files", "tools/ape-pack.cx", "--list-only", 0};
             rc = tool(c, p, OUTCAP);
-            ck(rc == 0 && has(p, "AFFECTED\trelease-ape-replacements\twhy=tools/ape-pack.cx\tvia=literal")
+            /* release-ape-replacements is an osx/arm64 batch: on another host it is reached but named
+               NOT_APPLICABLE instead of AFFECTED; either way the transitive literal edge found it. */
+            ck(rc == 0 && (has(p, "AFFECTED\trelease-ape-replacements\twhy=tools/ape-pack.cx\tvia=literal")
+                           || (has(p, "NOT_APPLICABLE\trelease-ape-replacements\tplatform=") && num(p, "\tnot_applicable=") >= 1))
                && num(p, "\tbatches=") > 1, "spawn-literal-transitive");
         }
         {   /* 深度随档位:commit 只多跟一层(上限 4 批,防拖慢提交),daily 与 release 无限传递并去环,
@@ -366,9 +369,11 @@ int main(int argc, char **argv) {
             ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-same-narrows");
             ck(nsel > 0 && nsel < full, "iface-same-selects-fewer");
             ck(ndef > 0, "iface-same-defers-some");
-            ck(nsel + ndef == full, "iface-same-selected-plus-deferred-is-full");
+            /* deferral happens before the platform filter, so DEFERRED_BY_IFACE may name batches of other
+               platforms while the selected count excludes them: conserve over the whole reached set. */
+            ck(nsel + ndef + num(p, "\tnot_applicable=") == full + num(o, "\tnot_applicable="), "iface-same-selected-plus-deferred-is-full");
             ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == ndef && lines(p, "AFFECTED\t", 9) == nsel, "iface-same-every-deferral-listed");
-            ck(num(p, "\tfull=") == full && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
+            ck(num(p, "\tfull=") == nsel + ndef && num(p, "\tfull=") == full + num(o, "\tnot_applicable=") - num(p, "\tnot_applicable=") && has(p, "\trerun=--full\n"), "iface-same-summary-names-full");
             ck(tails(p, "AFFECTED\t", 9, "\tvia=use", 8) > 0, "iface-same-keeps-direct-users");
             ck(!has(p, "\tvia=source\treason=") && !has(p, "\tvia=literal\treason=") && !has(p, "\tvia=arg\treason=") && !has(p, "\tvia=table\treason=") && !has(p, "\tvia=guard\treason="), "iface-same-defers-use-edges-only");
         }
@@ -400,7 +405,7 @@ int main(int argc, char **argv) {
         }
         {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "commit", 0}, *b[] = {"--files", "cx/sys/sha.cx", "--list-only", "--tier", "commit", "--iface-narrow", "--iface-verdict", "same", 0};
             rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP);
-            ck(rc == 0 && rc2 == 0 && num(q2, "\tbatches=") + num(q2, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=") == num(q, "\tbatches="), "iface-commit-tier-conserves");
+            ck(rc == 0 && rc2 == 0 && num(q2, "\tbatches=") + num(q2, "DEFERRED_BY_IFACE_SUMMARY\tdeferred=") + num(q2, "\tnot_applicable=") == num(q, "\tbatches=") + num(q, "\tnot_applicable="), "iface-commit-tier-conserves");
         }
         {   char *a[] = {"--files", "ext/net/addr.cx", "--run", "--start-deadline-ms", "0", 0}, *b[] = {"--files", "ext/net/addr.cx", "--run", "--start-deadline-ms", "0", "--full", 0};   /* --run: no switch == --full */
             rc = tool(a, q, OUTCAP); rc2 = tool(b, q2, OUTCAP); r1 = lines(q, "DEFERRED\t", 9); r2 = lines(q2, "DEFERRED\t", 9);
@@ -418,9 +423,9 @@ int main(int argc, char **argv) {
         }
     }
     if (want("iface2")) {   /* per-package narrowing: another package's stale table must not turn narrowing off; --iface-stale PKG is the test hook */
-        long fullt, fulls, sel, def;
+        long fullt, fulls, sel, def, fulltna;
         {   char *a[] = {"--files", "cx/text/text.cx", "--list-only", 0};
-            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches=");
+            rc = tool(a, o, OUTCAP); fullt = num(o, "\tbatches="); fulltna = num(o, "\tnot_applicable=");
             ck(rc == 0 && fullt >= 100, "iface-pkg-baseline-text");
         }
         {   char *a[] = {"--files", "cx/sys/sha.cx", "--list-only", 0};
@@ -432,7 +437,7 @@ int main(int argc, char **argv) {
             ck(rc == 0 && has(p, "IFACE_NARROW\tstate=on\treason=same\n"), "iface-pkg-other-stale-stays-on");
             ck(def > 0, "iface-pkg-other-stale-defers-some");
             ck(sel > 0 && sel < fullt, "iface-pkg-other-stale-selects-fewer");
-            ck(sel + def == fullt, "iface-pkg-other-stale-conserves");
+            ck(sel + def + num(p, "\tnot_applicable=") == fullt + fulltna, "iface-pkg-other-stale-conserves");
             ck(lines(p, "DEFERRED_BY_IFACE\t", 18) == def, "iface-pkg-other-stale-lists-every-deferral");
             ck(!has(p, "pkg=cx.sys"), "iface-pkg-other-stale-reason-not-A");
         }
