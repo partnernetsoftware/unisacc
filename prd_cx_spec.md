@@ -209,6 +209,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 | `cs_sha256_init`、`cs_sha256_update`、`cs_sha256_final`、`cs_sha256_hex`、`cs_hmac_sha256_hex` | crypto.sha256 | 流式摘要与 HMAC | ext.crypto |
 | `tx_hex_encode`、`tx_b64_encode` | text.codec | 十六进制与 base64 | cx.text |
 | `dz_crc32` | text.deflate | crc32;另有 deflate、gzip 压缩 | ext.textx |
+| `js_parse`、`js_free`、`js_get`、`js_at`、`js_len`、`js_kind`、`js_str`、`js_num`、`js_bool`、`js_path`、`js_esc` | text.json | 严格 RFC 8259 JSON 解析为树(代理对转 UTF-8、深度 128、错误带偏移),点路径取值,转义输出带截断返回 | ext.textx |
 
 ### 4.5 内存与 arena
 
