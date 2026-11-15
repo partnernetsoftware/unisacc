@@ -11,6 +11,7 @@
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.boundenv
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
@@ -40,7 +41,7 @@ static double L_OUTER(void){return L_("s9.outer");}
 static double L_EPOCH_MARGIN(void){return L_("s9.epoch.margin");}
 static void path(char *p,const char *a,const char *b){if(as_join(p,4400,a,b))fail("path");}
 static void save(const char *p,const char *s,size_t n){if(as_save_new(p,s,n,sw,sizeof sw))fail("exclusive-write");}
-static void bounded(void){const char *s=getenv("UNISACC_BOUND_DEADLINE_MONO");char *e=0;if(!s)fail("supervisor-deadline-required");outer_end=strtod(s,&e);double left=outer_end-(double)as_now()/1e9;if(!e||*e||left<=0||left>L_OUTER())fail("outer-budget-300");}
+static void bounded(void){double at=0;const char *why=0;int st=be_deadline(&at,&why);if(st==0)fail("supervisor-deadline-required");if(st!=1)fail(why);outer_end=at;double left=be_left(at);if(left<=0||left>L_OUTER())fail(why);}
 static int present(const char *p){struct stat st;if(!lstat(p,&st))return 1;if(errno==ENOENT)return 0;fail("stat");return 0;}
 static int aw_native(char *elf,size_t cap){const char *e=getenv("S9_ALLWAVES_ELF");if(!e||!e[0]||!present(e))return 0;if(cx_fmt(elf,(int)cap,"%s",e))fail("allwaves-elf");return 1;}
 static void visit_batch(const tp_batch_view *v,void *ctx){(void)ctx;for(int i=0;i<reg.nb;i++)if(!strcmp(v->id,reg.b[i].id))tiers[i]=!strcmp(v->tier,"commit")?0:!strcmp(v->tier,"daily")?1:2;}
@@ -519,7 +520,7 @@ int main(int argc,char **argv){
  /* The internal supervisor is independent of tools/bound. It freezes and
     kills this operation's whole descendant tree, not another live step. */
  int seconds=argc>1&&(!strcmp(argv[1],"init")||!strcmp(argv[1],"prepare"))?60:300;
- long long begin=as_now();double deadline=(double)begin/1e9+seconds-2;const char *outer=getenv("UNISACC_BOUND_DEADLINE_MONO");if(outer){char *e=0;double inherited=strtod(outer,&e);if(!e||*e||!(inherited>(double)begin/1e9))fail("outer-deadline");if(inherited-2<deadline)deadline=inherited-2;}if(rp_subreaper())fail("subreaper");fflush(0);pid_t worker=fork();if(worker<0)fail("supervisor-fork");
+ long long begin=as_now();double deadline=(double)begin/1e9+seconds-2;{double at=0;const char *why=0;int st=be_deadline(&at,&why);if(st<0)fail(why);if(st==1&&at-2<deadline)deadline=at-2;}if(rp_subreaper())fail("subreaper");fflush(0);pid_t worker=fork();if(worker<0)fail("supervisor-fork");
  if(!worker){setpgid(0,0);char d[80];if(cx_fmt(d,sizeof d,"%.9f",deadline-1))fail("deadline-bound");if(setenv("UNISACC_BOUND_DEADLINE_MONO",d,1))fail("deadline-env");exit(operate(argc,argv));}
  setpgid(worker,worker);int status;
  for(;;){long long exited=proc_number(worker,52,1,0);if(exited>=0&&!interrupted){status=(int)exited;char residue[4096];int survived=rp_kill_tree(worker,1500,0,0,residue,sizeof residue);if(survived){printf("S9\tUNKNOWN\treason=descendant-residue\tresidue=%d\n",survived);return 3;}return WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status);}

@@ -1,0 +1,111 @@
+/* tools/check-boundenv.cx -- cxlib.boundenv is the only reader of the inherited deadline.
+ *
+ *   sh ./unisacc.com tools/check-boundenv.cx        (from the repository root)
+ *
+ * Two things are asserted.  First the states the helper reports, driven through the real environment
+ * of this process: absent, a usable future instant, an expired one, text that is not a number and a
+ * negative number.  Second that no .cx file still spells getenv("UNISACC_BOUND_DEADLINE_MONO") outside
+ * the helper and its named exceptions -- tools/affected.cx and tools/dev-run.cx keep their own
+ * judgement by design, a check may own the variable (set it, save it, restore it), and a fixture in
+ * tests/fixtures/ asserts what a child process must see.
+ *
+ * tools/bound.c is host C and still reads the variable itself; the helper's header names it as the
+ * known remainder.  This check reads .cx only, so that one is not asserted here.
+ *
+ * Prints PASS/FAIL per case and CHECK_BOUNDENV<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.boundenv
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tboundenv.%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* The exceptions, with the reason each keeps its own read. */
+static int excepted(const char *p) {
+    long n = tx_len(p, 4096);
+    if (tx_eqz(p, "tools/cxlib/boundenv.cx")) return 1;           /* the helper: the one spelling */
+    if (tx_eqz(p, "tools/affected.cx")) return 1;                 /* refuses an expired deadline its own way */
+    if (tx_eqz(p, "tools/dev-run.cx")) return 1;                  /* strips it from a child environment */
+    if (tx_prefix(p, n, "tools/check-", 12)) return 1;            /* a check owns it: set, save, restore */
+    if (tx_prefix(p, n, "tests/fixtures/", 15)) return 1;         /* a fixture asserts what a child sees */
+    if (tx_prefix(p, n, "archive/", 8)) return 1;                /* retired material: not built, not shipped */
+    return 0;
+}
+
+int main(void) {
+    const char *why = 0;
+    double at = 0;
+    char keep[64] = {0};
+    int goto_scan = 0;
+    {   const char *old = getenv("UNISACC_BOUND_DEADLINE_MONO");
+        if (old) tx_copy(keep, sizeof keep, old, tx_len(old, 64)); }
+
+    unsetenv("UNISACC_BOUND_DEADLINE_MONO");
+    ck(be_deadline(&at, &why) == 0 && tx_eqz(why, "inherited-deadline-absent"), "absent-reported");
+    ck(tx_eqz(be_name(), "UNISACC_BOUND_DEADLINE_MONO"), "name-spelled-once");
+    ck(be_left(be_now() + 10.0) > 8.0, "left-counts-down");
+
+    {   char v[64];
+        if (cx_fmt(v, sizeof v, "%.9f", be_now() + 60.0)) { ck(0, "future-reported"); goto_scan = 1; }
+        else {
+            setenv("UNISACC_BOUND_DEADLINE_MONO", v, 1);
+            ck(be_deadline(&at, &why) == 1 && tx_eqz(why, "inherited-deadline-ok") && at > 0.0, "future-reported");
+            ck(be_left(at) > 30.0 && be_left(at) <= 60.0, "left-is-positive-and-short");
+        }
+    }
+    if (!goto_scan) {
+        char v[64];
+        if (cx_fmt(v, sizeof v, "%.9f", be_now() - 5.0)) { ck(0, "expired-reported"); goto_scan = 1; }
+        else {
+            setenv("UNISACC_BOUND_DEADLINE_MONO", v, 1);
+            ck(be_deadline(&at, &why) == -1 && tx_eqz(why, "inherited-deadline-expired"), "expired-reported");
+        }
+    }
+    if (!goto_scan) {
+        setenv("UNISACC_BOUND_DEADLINE_MONO", "", 1);
+        ck(be_deadline(&at, &why) == 0, "empty-is-absent");
+        setenv("UNISACC_BOUND_DEADLINE_MONO", "abc", 1);
+        ck(be_deadline(&at, &why) == -1 && tx_eqz(why, "inherited-deadline-not-a-number"), "text-is-not-a-number");
+        setenv("UNISACC_BOUND_DEADLINE_MONO", "-1", 1);
+        ck(be_deadline(&at, &why) == -1 && tx_eqz(why, "inherited-deadline-not-a-number"), "negative-is-not-a-number");
+    }
+
+    /* The sweep: no .cx outside the helper and its exceptions spells the variable through getenv. */
+    {   char *v[] = {"git", "ls-files", "-z", "--", "*.cx", 0};
+        np_result r = {0}; char reason[400] = {0};
+        int t = np_run(v, ".", 0, 25, &r, reason, sizeof reason);
+        long at2 = 0, hits = 0, scanned = 0; char first[400] = {0};
+        static const char needle[] = "getenv(\"UNISACC_BOUND_DEADLINE_MONO\")";
+        if (t || r.rc) ck(0, "git-ls-files");
+        else {
+            while (at2 < (long)r.outn) {
+                long e = at2; size_t n; char path[1024]; unsigned char *body = 0; int64_t bn = 0;
+                char abs[4400];
+                while (e < (long)r.outn && r.out[e]) e++;
+                n = (size_t)(e - at2);
+                if (n > 0 && n < sizeof path) {
+                    tx_copy(path, sizeof path, r.out + at2, (long)n);
+                    if (!excepted(path) && !cx_fmt(abs, sizeof abs, "./%s", path)
+                        && sy_read_file(abs, &body, &bn, 0) == 0 && body) {
+                        scanned++;
+                        if (tx_find((const char *)body, (long)bn, needle, (long)sizeof needle - 1) >= 0) {
+                            if (!first[0]) tx_copy(first, sizeof first, path, (long)n);
+                            hits++;
+                        }
+                        free(body);
+                    }
+                }
+                at2 = e + 1;
+            }
+            if (hits) printf("FAIL\tboundenv.bare-read-outside-helper first=%s files=%ld\n", first, hits);
+            ck(hits == 0 && scanned > 100, "no-bare-read-outside-helper");
+        }
+        np_free(&r);
+    }
+
+    if (keep[0]) setenv("UNISACC_BOUND_DEADLINE_MONO", keep, 1); else unsetenv("UNISACC_BOUND_DEADLINE_MONO");
+    printf("CHECK_BOUNDENV\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

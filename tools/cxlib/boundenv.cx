@@ -1,0 +1,63 @@
+/* Tools that run under tools/bound inherit one hard deadline as a single environment variable: the
+ * monotonic-clock instant (seconds, 9 decimals) by which the whole chain must be finished.  Every .cx
+ * reader -- tools/all-waves.cx (two sites), tools/s9-shards.cx (two), tests/preprocess/suite.cx,
+ * tools/chain-ready.cx -- asks this module, which is the one parse and the one vocabulary for one rule.
+ * The host's tools/bound.c sets the value and keeps its own parse; it is the known remainder, listed in
+ * prd_mempalace.md with this file, and tests/cxlib never depends on it.
+ *
+ *   double at; const char *why = 0;
+ *   int st = be_deadline(&at, &why);
+ *   st == 1   a usable future instant; *at is it, why is "inherited-deadline-ok"
+ *   st == 0   the variable is unset or empty; there is no inherited deadline
+ *   st == -1  it is set but unusable (not a positive number, or already past); why says which
+ *
+ * The three codes are part of the contract, not an implementation detail: check-boundenv asserts them.
+ * be_left() is the seconds remaining before an instant be_deadline accepted, negative once past, so a
+ * caller can compare it with its own maximum window without parsing again.  Nothing here writes and
+ * nothing is cached across calls: a child may shorten the value between two reads. */
+#pragma unisa module boundenv
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.num
+
+/* The one place the variable name is spelled. */
+const char *be_name(void) { return "UNISACC_BOUND_DEADLINE_MONO"; }
+
+/* Now on the clock tools/bound exports its deadline in.  -1 when the clock cannot be read. */
+double be_now(void) {
+    sy_ts_t t;
+    if (sy_mono(&t)) return -1.0;
+    return (double)t.sec + (double)t.nsec / 1e9;
+}
+
+/* The refusal text for a state be_deadline returned; every reader prints this instead of its own words. */
+const char *be_reason(int state) {
+    if (state == 0) return "inherited-deadline-absent";
+    if (state == 1) return "inherited-deadline-ok";
+    return "inherited-deadline-unusable";
+}
+
+/* The state of the inherited deadline: 1 usable and in the future, 0 absent, -1 present but unusable.
+ * On -1 WHY says whether the text was not a positive number or the instant has already passed. */
+int be_deadline(double *at, const char **why) {
+    const char *v = sy_env(be_name());
+    char *end = 0;
+    double d, now;
+    if (at) *at = 0.0;
+    if (why) *why = be_reason(0);
+    if (!v || !*v) return 0;
+    d = tx_strtod(v, &end);
+    if (end == v || (end && *end) || !(d > 0.0)) { if (why) *why = "inherited-deadline-not-a-number"; return -1; }
+    now = be_now();
+    if (now < 0.0) { if (why) *why = "inherited-deadline-clock-unreadable"; return -1; }
+    if (d <= now) { if (at) *at = d; if (why) *why = "inherited-deadline-expired"; return -1; }
+    if (at) *at = d;
+    if (why) *why = be_reason(1);
+    return 1;
+}
+
+/* Seconds left before AT, negative once passed; AT is a value be_deadline answered 1 for. */
+double be_left(double at) {
+    double now = be_now();
+    return now < 0.0 ? -1.0 : at - now;
+}

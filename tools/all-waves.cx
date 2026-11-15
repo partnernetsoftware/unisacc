@@ -52,6 +52,7 @@
 #pragma unisa use cxlib.testplan
 #pragma unisa use cxlib.limits
 #pragma unisa use text.text
+#pragma unisa use cxlib.boundenv
 #pragma unisa use mem.bytes
 /* Concurrency ceiling and fallback live in exec/facts/limits.tsv, so the number exists once.
    Core count comes from `nproc` through the same capture helper every other probe uses; when it is
@@ -75,7 +76,7 @@ static double deadline;
 static void die(const char *name,const char *detail){printf("REFUSE\t%s\t%s\n",name,detail?detail:"-");fprintf(stderr,"all-waves: REFUSE %s %s\n",name,detail?detail:"-");exit(2);}
 static void join(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound",b);}
 static double now_s(void){long long t=as_now();if(t<0)die("monotonic-clock",0);return (double)t/1e9;}
-static void outer_window_limit(double maximum){const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","supervisor deadline required");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>maximum)die("outer-window-range",d);}
+static void outer_window_limit(double maximum){double at=0;const char *why=0;int st=be_deadline(&at,&why);if(st==0)die("outer-bound-required","supervisor deadline required");if(st!=1)die(why,be_name());double left=be_left(at);if(left<=0||left>maximum)die(why,be_name());deadline=at;}
 static void outer_window(void){outer_window_limit(57.5);}
 static void canonical_root(const char *arg){if(arg[0]!='/'||!realpath(arg,root)||!tx_eqz(root, arg))die("canonical-root",arg);join(candidate,sizeof candidate,root,"unisacc.com");join(bound,sizeof bound,root,"tools/bound");join(runner,sizeof runner,root,"tests/run-batch.cx");}
 /* Session root: canonical(ROOT/out) or a temp session root; one rule, cxlib.sessionroot sr_ok. */
@@ -504,7 +505,7 @@ static int cmd_start(int argc,char **argv){
 /* Native executor only.  The bound rc recorded here is the one this process observed with waitpid(). */
 static int cmd_run(int argc,char **argv){
  if(argc!=5)die("usage","run ROOT SESSION ID");const char *id=argv[4];
- {const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","run under tools/bound 58");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>60.5)die("outer-bound-58-max-required",d);}
+ {double at=0;const char *why=0;int st=be_deadline(&at,&why);if(st==0)die("outer-bound-required","run under tools/bound 58");if(st!=1)die(why,be_name());double left=be_left(at);if(left<=0||left>60.5)die(why,be_name());deadline=at;}
  double left_at_entry=deadline-now_s();canonical_root(argv[2]);existing_session(argv[3]);
  char self[4096],want[4400],rb[4400],h[65];join(want,sizeof want,session,"executor/all-waves");join(rb,sizeof rb,session,"executor/run-batch");if(!realpath("/proc/self/exe",self)||!tx_eqz(self, want))die("run-requires-the-session-native-executor",want);
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);if(!tx_eqz(m.root, root))die("session-root-mismatch",m.root);
