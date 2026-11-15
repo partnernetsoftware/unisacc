@@ -74,6 +74,17 @@ int main(void) {
         ck(rc == 0 && has("GROUP_GONE") && has("CLIENT_RC=130") && has("CANCELLED"), "client-int-kills-node-group");
         {   char *ev[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "events", 0}; rc = run(ev, fx, envv); }
         ck(has("x.cancelled"), "cancel-event-recorded"); }
+    /* (2c) 后台作业:x --bg 立即返回;wait 短超时 rc 124 且作业仍在;jobs 列出;wait 得 rc 0;events --wait job.done 收到;--bg 作业的锁结束后释放 */
+    {   const char *sc = "D='sh ./unisacc.com tools/devsvc.cx --'; $D start >/dev/null 2>&1; t0=$(date +%s%N); J=$($D x --bg -- sleep 3); echo \"BGMS=$((($(date +%s%N)-t0)/1000000))\"; I=$(echo \"$J\" | cut -f2);"
+            " echo \"$J\" | grep -q '^JOB\t' && echo JOBLINE; $D wait $I --timeout-ms 500; echo SHORT_RC=$?; $D jobs | grep -q \"^JOB\t$I\trunning\" && echo LISTED_RUNNING;"
+            " $D wait $I >/dev/null; echo WAIT_RC=$?; $D events --wait job.done --since 0 --timeout-ms 5000 | grep -q \"id=$I\" && echo EVENT_GOT;"
+            " K=$(printf 'n1\\texec\\t-\\tlock=bgtest;a0=sleep;a1=2\\n' | $D flow - --bg | cut -f2); sleep 1; $D lock list | grep -q bgtest && echo LOCK_HELD; $D wait $K >/dev/null; echo FLOW_RC=$?; $D lock list | grep -q bgtest || echo LOCK_FREED";
+        char *v[] = {"sh", "-c", (char *)sc, 0}; char *q; rc = run(v, fx, envv);
+        q = strstr(out, "BGMS="); ck(rc == 0 && has("JOBLINE") && q && atol(q + 5) < 2500, "bg-returns-immediately");
+        ck(has("SHORT_RC=124") && has("LISTED_RUNNING"), "wait-timeout-124-job-alive");
+        ck(has("WAIT_RC=0"), "wait-gets-rc");
+        ck(has("EVENT_GOT"), "events-wait-job-done");
+        ck(has("LOCK_HELD") && has("FLOW_RC=0") && has("LOCK_FREED"), "bg-lock-released"); }
     /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
     {   char p[400]; const char *bad = "# broken by check\nzzz-unknown\tfoo\tbar\nlib\tonly-one\n"; unsigned char *b = 0; int64_t n = 0;
         F(p, sizeof p, "%s/tools/devsvc-repo.tsv", fx);

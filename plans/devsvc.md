@@ -78,6 +78,12 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - (5) file.* 节点在引擎进程里内联执行,彼此串行;并发收益来自 exec 节点。大量文件读写想并发就拆成多个客户端调用。
 - (6) 版本工作目录里先按规则放 `unisacc.com` 符号链接;写根缺省为当前目录,跨目录写须设 `UNISACC_FLOW_ROOT`。
 - 只读 git 用 `devsvc git log|diff|show|status ARGS|blame|ls-files ...` 代替原生 git(不取锁,stdout 上限 1 MB,超出打 DEVSVC_TRUNCATED);事件同时落盘实例目录 events.tsv(超 4 MB 轮转 events.tsv.1,$DEVSVC_EV_ROTATE 可调),每条命令记 <命令>.<子命令> owner=($DEVSVC_OWNER,缺省 auto-<pid>) rc ms,供 tools/devsvc-usage.cx 计数;请设 DEVSVC_OWNER=<窗口名>。
+后台作业(--bg,2026-11-15):x|flow|git commit|register|derive 加 --bg 立即返回 `JOB<TAB>id<TAB>run=DIR`,作业在独立会话(setsid)里跑,各自 deadline 与锁照旧,锁在作业结束时释放;元数据在实例目录 jobs/<id>/(pid、meta、stdin、out、rc),结束记事件 job.done(id、rc、ms、owner)。
+- `devsvc wait JOB [--timeout-ms N]`:默认 50000,上限 55000;结束打输出尾部(至多 8 KB)与 `JOB_DONE id rc= ms=`,rc 即作业的;超时打 WAIT_TIMEOUT 并 rc 124,不杀作业,可重复 wait;作业进程消失又无 rc 文件打 JOB_LOST rc 125。
+- `devsvc jobs`:列最近 30 个作业(running|done|lost)。
+- `devsvc events --wait KIND [--since SEQ] [--timeout-ms N]`:阻塞等某类事件,缺省只等新事件,超时 rc 124。
+- 用法:长命令一律 `--bg` 再 `wait`,不写 sleep 轮询;宿主 30/60 s 上限内反复 wait 即可。
+
 
 ## 6 已知限制与下一单
 
