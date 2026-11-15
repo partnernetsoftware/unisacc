@@ -327,13 +327,20 @@ int main(int argc, char **argv) {
             }
             sy_printf("REGISTERED\tsets=%d\tgate=reg-manifest-ok\n", nreg);
         }
-        {   char *v[] = {"git", "commit", "-q", "-m", (char *)msg, 0};
+        {   /* git's stderr (hook output, "nothing to commit", identity errors) merged into OUT so the refusal names the cause */
+            char *v[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
             g_bound_s = 150;   /* the precommit hook alone took 32 s at load 26 (a 30 s bound killed two commits); verdict must not depend on a quiet machine */
             rc = run(v, out, sizeof out);
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
-        if (rc != 0) { fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, out); return 1; }
+        if (rc != 0) {   /* last line: the first non-empty line of git's merged output is the reason */
+            char *s = out, *e; while (*s == '\n' || *s == ' ') s++;
+            e = strchr(s, '\n');
+            if (e && e[1]) fprintf(stderr, "%s\n", out);
+            if (e) *e = 0;
+            fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, *s ? s : "(git printed nothing)");
+            return 1; }
         {   char *v[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; if (run(v, newc, sizeof newc) != 0) newc[0] = 0; }
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
