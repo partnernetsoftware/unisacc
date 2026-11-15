@@ -232,7 +232,28 @@ int main(int argc, char **argv) {
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";
-    if(argc>=3&&tx_eqz(argv[argc-2],"--args")){arguments=argv[argc-1];argc-=2;if(!*arguments||!clean(arguments))rg_die("empty args, TAB or newline in args",0);}
+    static char normargs[8192];
+    int norun = 0;
+    {   int w = 1, r;   /* --no-run may stand anywhere: strip it and keep the rest in order */
+        for (r = 1; r < argc; r++) { if (tx_eqz(argv[r], "--no-run")) norun = 1; else argv[w++] = argv[r]; }
+        argc = w; argv[argc] = 0;
+    }
+    if(argc>=3&&tx_eqz(argv[argc-2],"--args")){arguments=argv[argc-1];argc-=2;if(!*arguments||!clean(arguments))rg_die("empty args, TAB or newline in args",0);
+        /* table convention: words of one args field are joined by ';' ("--cases;lock"); spaces and the
+           "--opt=value" form are folded into it */
+        {   int tok0 = 1, dashed = 0, eqdone = 0; size_t o = 0; const char *p = arguments;
+            for (; *p; p++) {
+                if (o + 2 >= sizeof normargs) rg_die("args too long", 0);
+                if (*p == ' ') { if (o && normargs[o - 1] != ';') { while (p[1] == ' ') p++; if (p[1]) normargs[o++] = ';'; } tok0 = 1; dashed = 0; eqdone = 0; continue; }
+                if (tok0) { dashed = p[0] == '-' && p[1] == '-'; tok0 = 0; }
+                if (dashed && !eqdone && *p == '=') { normargs[o++] = ';'; eqdone = 1; continue; }
+                if (*p == ';') eqdone = 1;
+                normargs[o++] = *p;
+            }
+            normargs[o] = 0; if (!o) rg_die("empty args, TAB or newline in args",0);
+            arguments = normargs;
+        }
+    }
     int rc, okrun, lk; long at;
     if (argc < 6 || argc > 8) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER] [HEADERS] [--args ARGS]");
     id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc >= 7 ? argv[6] : "interfaces";
@@ -265,7 +286,11 @@ int main(int argc, char **argv) {
             { size_t bn = tx_len(buf, sizeof buf); if (bn) { fwrite(buf, 1, bn, stderr); if (buf[bn - 1] != '\n') fputc('\n', stderr); } }
         }
     }
-    if (okrun) {
+    if (okrun && norun) {
+        /* --no-run: the rows stay as IMPLEMENTED, nothing is run or recorded as PASS here */
+        rg_unlock(lk); lk = -1; parent[0] = 0;
+        fprintf(stderr, "register: --no-run: the trial batch run was NOT done; the caller must produce batch evidence for %s itself (tests/run-batch.cx) and remove the rows if it fails\n", id);
+    } else if (okrun) {
         /* The batch run is outside the lock: run.cx/run-batch only read the row, while a check that itself
            registers (tools/check-register.cx) would otherwise wait on a lock its own parent holds. */
         rg_unlock(lk); lk = -1;
@@ -306,7 +331,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (lk >= 0) rg_unlock(lk);
-    printf("REGISTER\tid=%s\tstatus=REGISTERED\n", id);
+    printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
     /* build/batch-packages.tsv is generated from the registry: a new batch makes the committed copy stale
        (check-batch-packages table-fresh).  Regenerate it here, only for the real tables (a fixture run with
        UNISACC_TABLES set must not rewrite the checked-in build table). */
