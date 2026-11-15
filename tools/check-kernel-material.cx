@@ -1,0 +1,39 @@
+/* Complete kernels material controls. ROOT MATERIAL TOOL --cases verify|kernels|assembler|adapter|nightly.
+ * Each case is a separately registered <=55-second batch; material construction is external. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+static char root[4096],material[4600],tool[4600],work[4600];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"check-kernel-material: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int yes,const char *s){checks++;if(!yes)failed++;printf("%s\tkernel-material.%s\n",yes?"PASS":"FAIL",s);}
+static np_result call(char **v,char **env,int sec){np_result r={0};char why[1000];if(np_run(v,root,env,sec,&r,why,sizeof why))die(why);return r;}
+static void path(char *p,size_t cap,const char *base,const char *leaf){if(cx_fmt(p,(long)cap,"%s/%s",base,leaf))die("path-bound");}
+static void digest(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)die("digest-read");cx_sha256_hex(s,n,h);free(s);}
+static np_result verify(const char *dir,const char *op){char *v[]={tool,root,(char*)dir,(char*)op,0};return call(v,0,25);}
+static unsigned char flip(const char *p){int fd=open(p,O_RDWR|O_NOFOLLOW|O_CLOEXEC);unsigned char b;if(fd<0||lseek(fd,-1,SEEK_END)<0||read(fd,&b,1)!=1||lseek(fd,-1,SEEK_END)<0)die("flip-open");unsigned char changed=b^1;if(write(fd,&changed,1)!=1||close(fd))die("flip-write");return b;}
+static void restore(const char *p,unsigned char b){int fd=open(p,O_WRONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0||lseek(fd,-1,SEEK_END)<0||write(fd,&b,1)!=1||close(fd))die("restore");}
+static void copy(char dir[4800]){path(dir,4800,work,"copy");char *v[]={"cp","-a","--",material,dir,0};np_result r=call(v,0,10);if(r.rc)die("copy-private-material");np_free(&r);}
+static void controls(const char *which){
+ char dir[4800],p[5000],a[5000],b[5000];copy(dir);np_result r;
+ if(!strcmp(which,"verify")){path(p,sizeof p,dir,"material.tsv");char before[65],after[65];digest(p,before);r=verify(dir,"--verify");ck(!r.rc&&strstr(r.out,"VERIFIED\tkernels\t"),"complete-directory-verified");ck(!strstr(r.out,"PASS")&&!strstr(r.out,"COMPILED"),"material-is-not-test-result");np_free(&r);digest(p,after);ck(!strcmp(before,after),"verify-does-not-rewrite-seal");return;}
+ if(!strcmp(which,"kernels")){
+ path(p,sizeof p,dir,"x86_64.kernel");unsigned char old=flip(p);r=verify(dir,"--verify");ck(r.rc==2&&strstr(r.err,"kernel digest receipt changed"),"kernel-byte-tamper-refused");np_free(&r);restore(p,old);r=verify(dir,"--verify");ck(!r.rc,"restored-kernel-positive-control");np_free(&r);
+ path(p,sizeof p,dir,"material.tsv");path(a,sizeof a,work,"saved-material.tsv");if(rename(p,a))die("move-seal");path(p,sizeof p,dir,"arm64-objects.tsv");path(b,sizeof b,work,"saved-objects.tsv");if(rename(p,b))die("move-phase");
+ r=verify(dir,"--seal");struct stat st;char seal[5000];path(seal,sizeof seal,dir,"material.tsv");errno=0;int absent=lstat(seal,&st)&&errno==ENOENT;ck(r.rc==2&&absent,"missing-phase-cannot-seal-PREPARED");np_free(&r);
+ if(rename(b,p))die("restore-phase");r=verify(dir,"--seal");ck(!r.rc&&strstr(r.out,"PREPARED\tkernels\t"),"all-phases-restored-can-seal");np_free(&r);return;
+ }
+ path(p,sizeof p,dir,"assembler-native");unsigned char old=flip(p);r=verify(dir,"--verify");ck(r.rc==2&&strstr(r.err,"assembler cache source/artifact/context changed"),"assembler-byte-tamper-refused");np_free(&r);restore(p,old);
+ path(p,sizeof p,dir,"unowned");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0||write(fd,"x",1)!=1||close(fd))die("extra-leaf");r=verify(dir,"--verify");ck(r.rc==2&&strstr(r.err,"unknown or nonregular kernel material leaf"),"extra-inventory-leaf-refused");np_free(&r);if(unlink(p))die("remove-extra");r=verify(dir,"--verify");ck(!r.rc,"restored-assembler-and-inventory-positive-control");np_free(&r);
+}
+static void adapter(void){
+ char envbuf[5000];if(cx_fmt(envbuf,sizeof envbuf,"UNISACC_KERNELS_MATERIAL_DIR=%s",material))die("environment-bound");char *env[]={envbuf,0};char *v[]={tool,"--materials-dump","--prepare-materials","--family","kernels",0};np_result r=call(v,env,35);
+ ck(!r.rc&&strstr(r.out,"MATERIAL\tassembler-cache\tkernels\t/")&&!strstr(r.out,"REFUSED="),"affected-complete-directory-mapped");ck(!strstr(r.out,"BATCH_RUN"),"adapter-does-not-cache-PASS");np_free(&r);
+ char *empty[]={"UNISACC_KERNELS_MATERIAL_DIR=",0};char *no[]={tool,"--ids","assembler-cache","--prepare-materials","--run",0};r=call(no,empty,15);ck(r.rc==3&&strstr(r.out,"MULTIPHASE_REQUIRED:kernels")&&strstr(r.out,"deferred=1")&&!strstr(r.out,"status=PASS"),"missing-directory-DEFERRED-no-single-budget-build");np_free(&r);
+}
+static void nightly(void){
+ char run[4800],intent[5000];path(run,sizeof run,work,"run");char *v[]={tool,root,run,"--tier","daily","--phase","map","--map-family","kernels",0};np_result r=call(v,0,20);ck(r.rc==1&&strstr(r.err,"kernel-stage-required stage=bootstrap"),"nightly-refuses-incomplete-nine-stages");ck(!strstr(r.out,"name=kernels\tstatus=PREPARED"),"incomplete-kernels-not-PREPARED");np_free(&r);
+ path(intent,sizeof intent,work,"run.nightly-init/family-kernels.dump.intent");struct stat st;errno=0;ck(lstat(intent,&st)&&errno==ENOENT,"refusal-before-family-intent");char *bad[]={tool,root,run,"--tier","daily","--phase","map","--map-family","kernels","--material-stage","unknown",0};r=call(bad,0,10);ck(r.rc==2,"unknown-kernel-stage-refused");np_free(&r);
+}
+int main(int argc,char **argv){if(argc!=6||strcmp(argv[4],"--cases")||!realpath(argv[1],root)||!realpath(argv[2],material)||!realpath(argv[3],tool))die("usage-ROOT-MATERIAL-TOOL---cases-MODE");char tmp[]="/tmp/check-kernel-material-XXXXXX";if(!mkdtemp(tmp)||cx_fmt(work,sizeof work,"%s",tmp))die("private-directory");
+ if(!strcmp(argv[5],"adapter"))adapter();else if(!strcmp(argv[5],"nightly"))nightly();else if(!strcmp(argv[5],"verify")||!strcmp(argv[5],"kernels")||!strcmp(argv[5],"assembler"))controls(argv[5]);else die("unknown-case");
+ printf("CHECK_KERNEL_MATERIAL\tcase=%s\tchecks=%d\tfailed=%d\n",argv[5],checks,failed);return failed?1:0;}

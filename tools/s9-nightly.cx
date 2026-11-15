@@ -49,6 +49,7 @@
 #pragma unisa use cxlib.s9map
 #pragma unisa use cxlib.testplan
 #pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.kernelinputs
 
 static char root[4096], why[512];
 static const char *fake;
@@ -587,6 +588,75 @@ static int ri_dump(const char *run,const char *identity,const char *family,np_bu
  }
  as_registry_free(&r);return count?0:1;
 }
+/* kernels F4b: nine bounded producer calls, then a validation-only seal. */
+static const char *km_names[]={"bootstrap","prepare","prepare-assembler","preprocess-x86_64","preprocess-arm64","assemble-x86_64","assemble-arm64","link-x86_64","link-arm64"};
+static const char *km_units[]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
+static int km_paths(const char *run,char base[4600],char mat[4800]){return cx_fmt(base,4600,"%s.kernels-materials",run)||cx_fmt(mat,4800,"%s/build",base);}
+static int km_path(const char *run,int k,const char *suffix,char p[5000]){return cx_fmt(p,5000,"%s.kernels-materials/%s.%s",run,km_names[k],suffix);}
+static int km_closure(char h[65]){
+ np_buf b={0};char p[4800],sha[65],canonical[4800];const char *ctor=getenv("UNISACC_CTOR");
+ for(int i=0;i<ki_kernel_source_count()+ki_context_count();i++){const char *name=i<ki_kernel_source_count()?ki_kernel_source(i):ki_context_file(i-ki_kernel_source_count());
+ if(cx_fmt(p,sizeof p,"%s/%s",root,name)||as_sha_file(p,0,sha,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,name);np_puts(&b,"\t");np_puts(&b,sha);np_puts(&b,"\n");}
+ const char *support[]={"tools/cxlib/kernelinputs.cx","seed/ident.c","seed/sha256.h"};
+ for(int i=0;i<3;i++){if(cx_fmt(p,sizeof p,"%s/%s",root,support[i])||as_sha_file(p,0,sha,0,why,sizeof why)){free(b.p);return -1;}np_puts(&b,support[i]);np_puts(&b,"\t");np_puts(&b,sha);np_puts(&b,"\n");}
+ if(cx_fmt(p,sizeof p,"%s/unisacc.com",root)||!realpath(ctor&&*ctor?ctor:p,canonical)||as_sha_file(canonical,0,sha,0,why,sizeof why)){free(b.p);return -1;}
+ np_puts(&b,"constructor\t");np_puts(&b,canonical);np_puts(&b,"\t");np_puts(&b,sha);np_puts(&b,"\n");cx_sha256_hex(b.p,b.n,h);free(b.p);return 0;
+}
+static int km_leaf(np_buf *b,const char *mat,const char *leaf){
+ char p[5000],h[65];struct stat st;if(cx_fmt(p,sizeof p,"%s/%s",mat,leaf)||lstat(p,&st)||!S_ISREG(st.st_mode)||as_sha_file(p,0,h,0,why,sizeof why))return -1;
+ np_puts(b,leaf);np_puts(b,"\t");np_putll(b,st.st_mode&07777);np_puts(b,"\t");np_puts(b,h);np_puts(b,"\n");return 0;
+}
+static int km_outputs(const char *run,int k,char hash[65]){
+ char base[4600],mat[4800],leaf[200];np_buf b={0};if(km_paths(run,base,mat))return -1;
+ const char *fixed[]={"constructor.tsv","context.sha256","identity-helper","identity-helper.sha256","assembler/assembler.cx","assembler/contracts.cx","assembler/material.tsv","assembler-native","assembler-native.tsv"};
+ if(k<3){int first=k==0?0:k==1?4:7,last=k==0?4:k==1?7:9;for(int i=first;i<last;i++)if(km_leaf(&b,mat,fixed[i])){free(b.p);return -1;}}
+ else{const char *arch=k==3||k==5||k==7?"x86_64":"arm64";if(k<7){const char *ext=k<5?"s":"o";for(int i=0;i<11;i++){if(cx_fmt(leaf,sizeof leaf,"%s/%s.%s",arch,km_units[i],ext)||km_leaf(&b,mat,leaf)){free(b.p);return -1;}}
+ if(cx_fmt(leaf,sizeof leaf,"%s-%s.tsv",arch,k<5?"sources":"objects")||km_leaf(&b,mat,leaf)){free(b.p);return -1;}}
+ else{if(cx_fmt(leaf,sizeof leaf,"%s.kernel",arch)||km_leaf(&b,mat,leaf)||cx_fmt(leaf,sizeof leaf,"%s-kernel.sha256",arch)||km_leaf(&b,mat,leaf)){free(b.p);return -1;}}}
+ cx_sha256_hex(b.p,b.n,hash);free(b.p);return 0;
+}
+static int km_receipt(const char *run,const char *identity,int k,int write_it){
+ char output[65],closure[65],body[6000],p[5000];if(km_outputs(run,k,output)||km_closure(closure)||km_path(run,k,"done",p)||cx_fmt(body,sizeof body,"S9KERNEL-v1\t%s\t%s\t%s\tPREPARED\t%s\t%s\n",run,identity,km_names[k],output,closure))return -1;return evidence_file(p,body,write_it);
+}
+static int km_ready(const char *run,const char *identity,int stage){
+ for(int i=0;i<9;i++){int need=stage==9||(i<3&&i<stage)||(stage>=5&&stage<7&&i==stage-2)||(stage>=7&&(i==stage-2||i==stage-4));
+ if(!need)continue;char p[5000];if(km_path(run,i,"intent",p)||evidence_file(p,identity,0)!=1||km_receipt(run,identity,i,0)!=1){cx_fmt(why,sizeof why,"REFUSE kernel-stage-required stage=%s action=RUN_MATERIAL_STAGE",km_names[i]);return -1;}}
+ return 0;
+}
+static int km_stage(const char *run,const char *tier,const char *stage){
+ int k=-1;for(int i=0;i<9;i++)if(!strcmp(stage,km_names[i]))k=i;if(k<0){cx_fmt(why,sizeof why,"REFUSE kernel-stage-unknown");return 2;}
+ char base[4600],mat[4800],identity[65],after[65],closure[65],next[65],p[5000],tool[4800],product[4800];init_t0=sy_now_ms();identity_ready=0;identity_epoch=0;
+ if(km_paths(run,base,mat)||init_identity(tier,0,identity)||km_closure(closure))return 1;
+ int exists=ri_exists(base);if(exists<0||(!exists&&mkdir(base,0700)))return 1;
+ struct stat st;if(lstat(base,&st)||!S_ISDIR(st.st_mode)){cx_fmt(why,sizeof why,"REFUSE kernel-base-kind");return 1;}
+ if(km_ready(run,identity,k)||km_path(run,k,"intent",p))return 1;int intent=evidence_file(p,identity,0);if(intent<0)return 1;
+ if(intent==1){if(km_receipt(run,identity,k,0)!=1){cx_fmt(why,sizeof why,"REFUSE kernel-stage-interrupted stage=%s action=NEW_RUN_REQUIRED",stage);return 1;}printf("S9_KERNEL_STAGE\tstage=%s\tstatus=PREPARED\treuse=verified-material-only\n",stage);return 0;}
+ if(km_path(run,k,"done",p)||ri_exists(p)!=0){cx_fmt(why,sizeof why,"REFUSE kernel-stage-orphan-receipt");return 1;}
+ if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/kernel-build.cx",root)||km_path(run,k,"intent",p)||evidence_file(p,identity,1))return 1;
+ char *v[]={"sh",product,tool,"--",root,mat,(char*)stage,0};np_result r={0};int seconds=init_left();if(seconds<1)return 124;int rc=run_step(v,root,seconds,&r);
+ if(km_path(run,k,"stdout",p)||cx_write(p,r.out?r.out:"",r.outn)||km_path(run,k,"stderr",p)||cx_write(p,r.err?r.err:"",r.errn)){np_free(&r);return 1;}
+ if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);
+ if(rc||r.residue){np_free(&r);cx_fmt(why,sizeof why,"REFUSE kernel-stage-producer stage=%s rc=%d action=NEW_RUN_REQUIRED",stage,rc);return rc?rc:1;}np_free(&r);
+ identity_ready=0;if(init_identity(tier,0,after)||strcmp(identity,after)||km_closure(next)||strcmp(closure,next)){cx_fmt(why,sizeof why,"REFUSE kernel-stage-input-changed");return 1;}
+ if(km_receipt(run,identity,k,1))return 1;printf("S9_KERNEL_STAGE\tstage=%s\tstatus=PREPARED\treuse=no\n",stage);return 0;
+}
+static int km_sealed(const char *run,const char *identity,int publish){
+ char base[4600],mat[4800],p[5000],tree[65],closure[65],body[6000];if(km_paths(run,base,mat)||km_ready(run,identity,9)||km_closure(closure))return 1;
+ if(cx_fmt(p,sizeof p,"%s/sealed.done",base))return 1;int done=ri_exists(p);if(done<0)return 1;
+ if(!done){if(!publish){cx_fmt(why,sizeof why,"REFUSE kernels-unsealed action=MAP_FAMILY_KERNELS");return 1;}
+ if(cx_fmt(p,sizeof p,"%s/sealed.intent",base)||ri_exists(p)!=0){cx_fmt(why,sizeof why,"REFUSE kernel-seal-interrupted action=NEW_RUN_REQUIRED");return 1;}
+ if(evidence_file(p,identity,1))return 1;char product[4800],tool[4800];if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/kernel-build.cx",root))return 1;
+ char *v[]={"sh",product,tool,"--",root,mat,"--seal",0};np_result r={0};int rc=run_step(v,root,40,&r);if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);int ok=!rc&&!r.residue;np_free(&r);if(!ok)return 1;}
+ if(as_tree(mat,1,tree,0,why,sizeof why)||cx_fmt(body,sizeof body,"S9KERNEL-SEAL-v1\t%s\t%s\t%s\t%s\n",run,identity,closure,tree)||cx_fmt(p,sizeof p,"%s/sealed.done",base))return 1;
+ int recorded=evidence_file(p,body,!done);if(done?recorded!=1:recorded!=0){cx_fmt(why,sizeof why,"REFUSE kernels-seal-content-changed");return 1;}
+ if(cx_fmt(p,sizeof p,"%s/sealed.intent",base)||evidence_file(p,identity,0)!=1)return 1;return 0;
+}
+static int km_dump(const char *run,const char *identity,np_buf *wire){
+ if(km_sealed(run,identity,1))return 1;char base[4600],mat[4800];if(km_paths(run,base,mat))return 1;as_registry r;if(as_registry_load(root,&r,why,sizeof why))return 1;int count=0;
+ for(int i=0;i<r.nb;i++){if(strcmp(r.b[i].impl,"IMPLEMENTED")||strcmp(r.b[i].mode,"SOURCE"))continue;const char *at=r.b[i].materials;tp_material_decl d;int rc;
+ while((rc=tp_material_next(&at,&d))>0)if(!strcmp(d.name,"kernels")){if(d.kind!=1){as_registry_free(&r);return 1;}np_puts(wire,"MATERIAL\t");np_puts(wire,r.b[i].id);np_puts(wire,"\tkernels\t");np_puts(wire,mat);np_puts(wire,"\n");count++;}if(rc<0){as_registry_free(&r);return 1;}}
+ as_registry_free(&r);return count?0:1;
+}
 static char map_families[256][128];
 static char map_planned[256][128];
 static int map_planned_n;
@@ -641,6 +711,7 @@ static int map_collect_families(const char *run,const char *state,const char *id
             if(cx_fmt(want,sizeof want,"S9FAMILY-v2\t%s\t%s\t%s\n",run,identity,hash)){free(dump);free(saved);free(missing.p);return -1;}
             valid=rn==strlen(want)&&!memcmp(saved,want,rn)&&evidence_file(intent,identity,0)==1;
             if(valid&&ri_family(map_families[i])&&ri_ready(run,identity,!strcmp(map_families[i],"ri-flow-data")?3:2))valid=0;
+            if(valid&&!strcmp(map_families[i],"kernels")&&km_sealed(run,identity,0))valid=0;
         }
         if(!valid){if(bad++)np_puts(&missing,",");np_puts(&missing,map_families[i]);}
         else np_put(all,dump,n);
@@ -703,6 +774,7 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
     if(sy_exists(state)!=1&&mkdir(state,0700))return 1;
     if(cx_fmt(mappath,sizeof mappath,"%s.materials.tsv",run)||init_identity(tier,0,identity))return 1;
     if(!seal&&ri_family(family)&&ri_ready(run,identity,!strcmp(family,"ri-flow-data")?3:2))return 1;
+    if(!seal&&!strcmp(family,"kernels")&&km_ready(run,identity,9))return 1;
     if(seal&&map_collect_families(run,state,identity,nn,&all)){free(all.p);return 1;}
     for(int i=0;!seal&&i<nn;i++) {
         if(strcmp(family,map_families[i]))continue;
@@ -730,8 +802,9 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
             if(ri_family(map_families[i])){
                 np_buf wire={0};if(ri_dump(run,identity,map_families[i],&wire)){free(wire.p);return 1;}r.out=wire.p;r.outn=wire.n;
             }
+            if(!strcmp(map_families[i],"kernels")){np_buf wire={0};if(km_dump(run,identity,&wire)){free(wire.p);return 1;}r.out=wire.p;r.outn=wire.n;}
             if(evidence_file(intent,identity,1)){np_free(&r);return 1;}
-            int rc=ri_family(map_families[i])?0:run_step(v,root,50,&r);
+            int rc=ri_family(map_families[i])||!strcmp(map_families[i],"kernels")?0:run_step(v,root,50,&r);
             if(rc||r.residue){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc?rc:1;}
             if(!strcmp(map_families[i],"libneed-native")&&libneed_family_check(&r)){np_free(&r);return 1;}
             cx_sha256_hex(r.out?r.out:"",r.outn,h);
@@ -743,6 +816,7 @@ static int map_family_phase(const char *run,const char *tier,const char *family,
         if(!valid){free(b);free(all.p);fprintf(stderr,"s9-nightly: missing or stale family %s\n",map_families[i]);return 1;}
         if(evidence_file(intent,identity,0)!=1){free(b);fprintf(stderr,"s9-nightly: REFUSE family-intent %s\n",map_families[i]);return 1;}
         if(!seal){
+            if(!strcmp(map_families[i],"kernels")&&km_sealed(run,identity,0)){free(b);return 1;}
             if(!strcmp(map_families[i],"libneed-native")){np_result current={0};current.out=b;current.outn=z;if(libneed_family_check(&current)){free(b);return 1;}}
             int sealed=evidence_file(done,want,0);if(sealed<0){free(b);return 1;}
             if(!sealed&&evidence_file(done,want,1)){free(b);return 1;}
@@ -1223,8 +1297,8 @@ int main(int argc, char **argv) {
             for(int j=1;j<argc;j++)v[n++]=argv[j];v[n]=0;
             np_result clean={0};int rc=run_step(v,root,50,&clean);if(clean.outn)fwrite(clean.out,1,clean.outn,stdout);if(clean.errn)fwrite(clean.err,1,clean.errn,stderr);np_free(&clean);free(v);return rc;
         }
-        if(material_stage&&!ri_family(map_family))die("material-stage","requires ri-flow-runtime|ri-flow-data");
-        long t0=sy_now_ms();int mr=material_stage?ri_stage(run,tier,material_stage):map_family_phase(run,tier,map_family,0);
+        if(material_stage&&!ri_family(map_family)&&strcmp(map_family,"kernels"))die("material-stage","requires ri-flow-runtime|ri-flow-data|kernels");
+        long t0=sy_now_ms();int mr=material_stage?(!strcmp(map_family,"kernels")?km_stage(run,tier,material_stage):ri_stage(run,tier,material_stage)):map_family_phase(run,tier,map_family,0);
         if(mr)fprintf(stderr,"s9-nightly: %s\n",why);
         printf("S9_MAP_FAMILY\trc=%d\twall_ms=%ld\n",mr,sy_now_ms()-t0);return mr;
     }
