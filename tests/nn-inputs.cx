@@ -12,6 +12,7 @@
 #pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.nninputs
+#pragma unisa use cxlib.mixedprofiles
 #pragma unisa use text.text
 static int nit_assertions,nit_failures;
 static const char *nit_table="aea1293b96da78c6a0cfaf0354e47e840d414de41bdea735bead30d736c8c853";
@@ -126,10 +127,75 @@ static int nit_cache_lane(char **argv){
  const char *required[]={"identity-schema\t","current-necessary-source-inputs-sha256\t","origin-necessary-source-inputs-sha256\t","execution-key-sha256\t"};for(int i=0;i<4;i++){char *a=strstr(valid.p,required[i]),*end=a?strchr(a,'\n'):0;if(!a||!end)nit_die("cache-schema-field-required");np_buf missing={0};np_put(&missing,valid.p,(size_t)(a-valid.p));np_put(&missing,end+1,valid.n-(size_t)(end+1-valid.p));nit_cache_write(profile,missing.p,missing.n,0600);free(missing.p);rc=ni_compare(root,origin,reader,&result,why,sizeof why);nit_part(rc==-1&&strstr(why,"code-profile-unique-field"),"cache-v2.missing-field-refused-by-real-consumer",required[i]);if(unlink(profile))nit_die("cache-fixture-unlink");}
  nit_cache_write(profile,valid.p,valid.n,0600);rc=ni_compare(root,origin,reader,&result,why,sizeof why);nit_check(!rc&&result.native_source_kind==2&&result.native_table_calls==2&&nit_hex(result.native_profile),"cache-v2.rebuilt-profile-adopted-by-real-consumer");free(valid.p);if(unlink(profile)||unlink(reader)||rmdir(dir))nit_die("cache-fixture-cleanup");printf("NN_CACHE_V2\tassertions=%d\tfailed=%d\n",nit_assertions,nit_failures);return nit_failures?1:0;
 }
+/* Synthetic closed input roots exercise the real complete reader twice.
+ * They are unit fixtures, not fresh source-SID/origin-DAG/NN qualification. */
+static void nic_path(char out[4600],const char *base,const char *leaf){if(cx_fmt(out,4600,"%s/%s",base,leaf))nit_die("current-fixture-path");}
+static void nic_save(const char *p,const char *text){nit_cache_write(p,text,strlen(text),0600);}
+static void nic_copy(const char *source,const char *dest,int mode){size_t n;char *s=nit_load(source,&n);nit_cache_write(dest,s,n,mode);free(s);}
+static void nic_dir(const char *base,const char *leaf){char p[4600];nic_path(p,base,leaf);if(mkdir(p,0700))nit_die("current-fixture-directory");}
+static const char *nic_a="static int helper(void) { return 1; }\nstatic void exit(int n) { helper(); }\nstatic int printf(const char *fmt, ...) { return 0; }\n";
+static const char *nic_b="__UNISA_LIBC_LINKAGE void _unisa_environ_init(void) { helper(); }\n";
+static const char *nic_ob="__UNISA_LIBC_LINKAGE void _unisa_environ_init(void) { helper(); /* origin */ }\n";
+static const char *nic_gen="#include \"json.h\"\n#include \"facts.h\"\n";
+static const char *nic_gold="NAMES _unisa_environ_init exit helper printf\nKEY _unisa_environ_init _unisa_environ_init helper\nKEY exit exit helper\nKEY helper helper\nKEY printf printf\nROOTS_CLOSURE _unisa_environ_init exit helper\n";
+static void nic_fixture(const char *actual,const char *dir,int origin){
+ if(mkdir(dir,0700))nit_die("new-current-fixture");
+ const char *dirs[]={"tools","tools/cxlib","seed","exec","exec/facts","exec/c","src","weights","include"};for(int i=0;i<9;i++)nic_dir(dir,dirs[i]);
+ char p[4600],s[4600];const char *support[]={"tools/cxlib/nninputs.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/unisa_libneed.c","tools/libneed-native-profile.cx"};
+ for(int i=0;i<7;i++){nic_path(s,actual,support[i]);nic_path(p,dir,support[i]);nic_copy(s,p,i==3?0700:0600);}
+ const char *deps[]={"seed/gen.c","seed/json.h","seed/facts.h","seed/tbl.c","seed/net.c","exec/c/core.h","seed/compilerpack.c","seed/sha256.h","include/unisa_safedel.h","seed/pack.c"};
+ const char *texts[]={nic_gen,"/* json leaf */\n","/* facts leaf */\n","#include \"json.h\"\n","#include \"../exec/c/core.h\"\n","/* core leaf */\n","#include \"json.h\"\n#include \"sha256.h\"\n#include \"../include/unisa_safedel.h\"\n","/* sha leaf */\n","/* safedel leaf */\n","/* pack leaf */\n"};
+ for(int i=0;i<10;i++){nic_path(p,dir,deps[i]);nic_save(p,texts[i]);}
+ nic_path(p,dir,"exec/facts/pp-autoinc.tsv");nic_save(p,"# value\na.h\nb.h\n");nic_path(p,dir,"src/model.txt");nic_save(p,"closed synthetic source bytes\n");nic_path(p,dir,"weights/model.txt");nic_save(p,"closed synthetic weight bytes\n");
+ nic_path(p,dir,"include/a.h");nic_save(p,nic_a);nic_path(p,dir,"include/b.h");nic_save(p,origin?nic_ob:nic_b);
+}
+static ni_result nic_positive(const char *root,const char *origin,const char *reader,const char *label){
+ ni_result r={0};char why[1400],gold[65];int rc=ni_compare(root,origin,reader,&r,why,sizeof why);nit_part(!rc,label,"actual-full-compare");if(rc)nit_die(why);
+ cx_sha256_hex(nic_gold,strlen(nic_gold),gold);nit_part(!strcmp(r.libneed,gold),label,"independent-complete-table-gold");
+ nit_part(r.native_source_kind==3&&!strcmp(r.reader_identity,"current-a4-v3"),label,"actual-current-source-ELF-pair");
+ nit_part(r.native_table_calls==2&&r.native_internal_reads==-1&&r.ctor_files==10&&r.ordered_headers==2,label,"full-domains-and-two-real-native-calls");
+ nit_part(r.current_reads==r.origin_reads&&r.current_reads>0&&!(r.current_reads%2)&&r.support_reads>0,label,"mirrored-before-after-physical-reads");
+ nit_part(strcmp(r.current_include,r.origin_include)&&r.full_triggers>r.facts_triggers&&r.facts_triggers>0,label,"body-difference-and-printf-projections-preserved");
+ return r;
+}
+static void nic_refuse(const char *root,const char *origin,const char *reader,const char *reason,const char *name){
+ ni_result r;memset(&r,0xa5,sizeof r);char why[1400];int rc=ni_compare(root,origin,reader,&r,why,sizeof why);nit_check(rc==-1&&strstr(why,reason)&&nit_bytes(&r,sizeof r,0),name);
+}
+static np_result nic_run(char **v){np_result r={0};char why[1400];if(np_run(v,0,0,20,&r,why,sizeof why))nit_die(why);return r;}
+static int nic_unit(char **argv){
+ char actual[4096],reader[4096],writer[4096];if(!realpath(argv[2],actual)||!realpath(argv[3],reader)||!realpath(argv[4],writer))nit_die("current-unit-realpaths");
+ char temp[]="/tmp/ni-current-unit-XXXXXX";if(!mkdtemp(temp))nit_die("current-unit-mkdtemp");char root[4600],origin[4600],p[4600],other[4600];nic_path(root,temp,"current");nic_path(origin,temp,"origin");nic_fixture(actual,root,0);nic_fixture(actual,origin,1);
+ const char *which=argv[5];ni_result before=nic_positive(root,origin,reader,"current-before");
+ if(!strcmp(which,"identity")){
+ ni_reader_descriptor legacy={0},current={0},unknown={0};nit_check(ni_reader_profile("legacy-5f-v2",&legacy)&&legacy.host_kind==1&&legacy.cx_kind==2&&legacy.cx_registered,"legacy-descriptor-retained");
+ nit_check(ni_reader_profile("current-a4-v3",&current)&&current.host_kind==3&&!current.cx_registered&&!current.cx_sha&&strcmp(current.source_sha,legacy.source_sha)&&strcmp(current.host_sha,legacy.host_sha),"current-descriptor-distinct-no-placeholder-CX-hash");
+ memset(&unknown,0xa5,sizeof unknown);nit_check(!ni_reader_profile("caller-hash",&unknown)&&nit_bytes(&unknown,sizeof unknown,0),"unknown-descriptor-zero-refused");
+ mp_reader_material role={0};mp_profile full={0};nit_check(mp_reader_material_get("ni-current-a4-material-v1",&role)&&!strcmp(role.reader_identity,current.id)&&!role.source_package_admission&&!mp_get(role.id,&full),"current-reader-role-does-not-grant-mixed-model-admission");
+ char *v[]={reader,"table",0,0};nic_path(p,root,"include");v[2]=p;np_result t=nic_run(v);nit_check(!t.rc&&!t.errn&&t.outn==strlen(nic_gold)&&!memcmp(t.out,nic_gold,t.outn),"HOSTREF-independent-entire-table-literal-gold");np_free(&t);
+ char unknown_path[4600];nic_path(unknown_path,temp,"unknown-reader");size_t bytes;char *unknown_elf=nit_load(reader,&bytes);unknown_elf[bytes]=(char)0xa5;nit_cache_write(unknown_path,unknown_elf,bytes+1,0400);free(unknown_elf);nic_refuse(root,origin,unknown_path,"trusted-libneed-native-artifact-mismatch","valid-ELF-prefix-with-unknown-full-SHA-refused-before-execution");
+ }else if(!strcmp(which,"closure")){
+ nic_path(p,root,"seed/json.h");if(unlink(p))nit_die("leaf-remove");nic_save(p,"#include \"undeclared-leaf.h\"\n");nic_refuse(root,origin,reader,"constructor-transitive-quote-set-changed","changed-leaf-quote-refused");if(unlink(p))nit_die("leaf-restore");nic_save(p,"/* json leaf */\n");
+ nic_path(p,root,"seed/gen.c");if(unlink(p))nit_die("gen-remove");nic_save(p,"#include HEADER\n");nic_refuse(root,origin,reader,"constructor-macro-or-nonliteral-include","macro-include-refused");if(unlink(p))nit_die("gen-restore");nic_save(p,nic_gen);
+ nic_path(p,root,"seed/sha256.h");nic_path(other,temp,"saved-sha.h");if(rename(p,other))nit_die("dependency-remove");nic_refuse(root,origin,reader,"bounded-regular-file","missing-transitive-dependency-refused");if(rename(other,p))nit_die("dependency-restore");
+ }else if(!strcmp(which,"includes")){
+ nic_path(p,origin,"include/b.h");if(unlink(p)||symlink("a.h",p))nit_die("symlink-fixture");nic_refuse(root,origin,reader,"include-symlink-unsupported","include-symlink-refused");if(unlink(p))nit_die("symlink-restore");nic_save(p,nic_ob);
+ nic_path(p,origin,"src/model.txt");if(unlink(p))nit_die("data-remove");nic_save(p,"changed synthetic source bytes\n");nic_refuse(root,origin,reader,"necessary-data-tree-mismatch","full-source-tree-difference-refused");if(unlink(p))nit_die("data-restore");nic_save(p,"closed synthetic source bytes\n");
+ nic_path(p,origin,"include/a.h");if(chmod(p,0400))nit_die("mode-change");nic_refuse(root,origin,reader,"include-inventory-or-mode-mismatch","header-mode-difference-refused");if(chmod(p,0600))nit_die("mode-restore");
+ }else if(!strcmp(which,"profiles")){
+ nic_path(p,temp,"fast");size_t bytes;char *elf=nit_load(reader,&bytes);nit_cache_write(p,elf,bytes,0400);free(elf);
+ char mat[4600],profile[4800];nic_path(mat,temp,"material");if(mkdir(mat,0700))nit_die("material-fixture");if(cx_fmt(profile,sizeof profile,"%s.source-packages-v3.cache.tsv",p))nit_die("profile-path");
+ char *v[]={writer,"--create-current",root,origin,mat,p,reader,profile,0};np_result t=nic_run(v);struct stat st;errno=0;int absent=lstat(profile,&st)&&errno==ENOENT;nit_check(t.rc==2&&strstr(t.err,"BLOCKED=no-original-record")&&absent&&!strstr(t.out,"PROFILE_CREATED"),"current-create-blocked-without-original-record-no-output");np_free(&t);
+ if(cx_fmt(profile,sizeof profile,"%s.source-packages-v2.cache.tsv",p))nit_die("wrong-profile-path");t=nic_run(v);nit_check(t.rc==2&&strstr(t.err,"profile-must-be-FAST_ELF.source-packages-v3.cache.tsv"),"current-entry-cannot-write-legacy-profile-path");np_free(&t);
+ v[1]="--create";if(cx_fmt(profile,sizeof profile,"%s.source-packages-v2.cache.tsv",p))nit_die("legacy-profile-path");t=nic_run(v);errno=0;absent=lstat(profile,&st)&&errno==ENOENT;nit_check(t.rc==2&&strstr(t.err,"actual-legacy-reference-role-required")&&absent,"current-reference-cannot-create-legacy-profile");np_free(&t);
+ }else nit_die("unknown-current-case");
+ ni_result after=nic_positive(root,origin,reader,"current-recovery");nit_check(!strcmp(before.witness,after.witness),"same-input-recovery-witness-stable");
+ printf("NI_CURRENT_UNIT\tcase=%s\tassertions=%d\tfailed=%d\tscope=synthetic-full-input-scans-not-source-SID-DAG-or-NN-admission\n",which,nit_assertions,nit_failures);return nit_failures?1:0;
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
     fputs("NOT_RUN nn-inputs requires Linux/x86_64-LP64\n",stderr);return 3;
 #else
+    if(argc==6&&!strcmp(argv[1],"--current-unit"))return nic_unit(argv);
     if(argc==7&&tx_eqz(argv[1],"--cache-v2"))return nit_cache_lane(argv);
     if(argc!=4||sizeof(long)!=8||sizeof(void *)!=8)nit_die("usage ROOT SNAPSHOT_ROOT TRUSTED_READER");
     char root_arg[4096],origin[4096],reader[4096],wrong[4400],missing[4400],module[4400],reader_sha[65],module_sha[65],unknown[4400],unknown_sha[65];

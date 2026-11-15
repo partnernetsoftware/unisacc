@@ -43,8 +43,9 @@ typedef struct {
  char witness[65],data[65],ctor_cdeps[65],current_include[65],origin_include[65];
  char libneed[65],autoinc_full[65],autoinc_facts[65],native_artifact[65],native_C_source[65];
  char verifier[65],netpack[65],kernelsha[65],runtime_support[65];
+ char reader_identity[64];
  char native_profile[65],compiled_include[65],compiled_material[65],derived_source[65],compiler_artifact[65],compiler_record[65];
- int native_source_kind; /* 1 legacy HOSTCC C; 2 own CX compiled code cache */
+ int native_source_kind; /* 1/2 legacy HOSTCC/CX; 3 current HOSTCC; 4 reserved current CX (unregistered). */
  int data_files,data_dirs,data_symlinks,ctor_files,ordered_headers,full_triggers,facts_triggers;
  int physical_reads,current_reads,origin_reads,support_reads,native_table_calls,native_internal_reads;
  long long setup_ns,support_before_ns,support_after_ns,support_ns,order_ns;
@@ -152,6 +153,20 @@ static const char *ni_material_hashes[]={
  "6b48be6e30e5ca88e9f236c0f11ad2c0560d43e8a7dbb5cc0dfd5575aac0a5bf",
  "53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857",
  "21704e50abc28930d9a0792fdb9f895aee49b13cd163dc783451784d3bb73ef5"};
+/* Finite execution identities. Legacy cache material remains immutable.
+ * Current HOSTCC was actually built from the current original C. A current
+ * CX artifact/material set is deliberately unregistered without the original
+ * saved-bootstrap record; no zero hash or caller hash can stand in for it. */
+typedef struct {
+ const char *id,*source_sha,*host_sha,*cx_sha,*cache_schema,*cache_suffix;
+ int host_kind,cx_kind,cx_registered;
+} ni_reader_descriptor;
+int ni_reader_profile(const char *id,ni_reader_descriptor *out){
+ if(!out)return 0;memset(out,0,sizeof *out);if(!id)return 0;
+ if(!strcmp(id,"legacy-5f-v2")){ni_reader_descriptor d={"legacy-5f-v2",ni_native_c,ni_native_elf,ni_fast_elf,"libneed-native-code-cache-v2",".source-packages-v2.cache.tsv",1,2,1};*out=d;return 1;}
+ if(!strcmp(id,"current-a4-v3")){ni_reader_descriptor d={"current-a4-v3","a4e8c349fe16bd37036a7f136ffdb2d264cacc5f01f1716966c78e8b0ee1f5b8","6c36d868a0519653cb2a3d36d9d04ce1cb3b7fb692e7e30a5aa39cf18ffb29b7",0,"libneed-native-code-cache-v3",".source-packages-v3.cache.tsv",3,4,0};*out=d;return 1;}
+ return 0;
+}
 static int ni_hex64(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
 static int ni_profile_field(NiContext *c,const np_buf *b,const char *key,char out[4400]){if(!b->n||b->n>32768||b->p[b->n-1]!='\n'||memchr(b->p,0,b->n)||memchr(b->p,'\r',b->n))return ni_bad(c,"code-profile-or-material-wire",key);char tag[160];int n=snprintf(tag,sizeof tag,"\n%s\t",key);if(n<0||n>=sizeof tag)return ni_bad(c,"code-profile-key-bound",key);char *p=strstr(b->p,tag);if(!p||strstr(p+1,tag))return ni_bad(c,"code-profile-unique-field",key);p+=(size_t)n;char *end=strchr(p,'\n');if(!end||end==p||end-p>=4400||memchr(p,'\t',(size_t)(end-p)))return ni_bad(c,"code-profile-field-bound",key);memcpy(out,p,(size_t)(end-p));out[end-p]=0;return 0;}
 static int ni_pinned_bytes(NiContext *c,const char *path,const char *expected,np_buf *out,np_buf *profile,const char *role){size_t n;unsigned mode;char *s=ni_read(c,path,&n,&mode);if(!s)return -1;char h[65];if(ni_hash(c,s,n,h)){free(s);return -1;}if(expected&&strcmp(h,expected)){free(s);return ni_bad(c,"code-profile-pinned-input-mismatch",path);}if(out)np_put(out,s,n);free(s);if(profile){np_puts(profile,"input\t");np_puts(profile,role);np_puts(profile,"\t");np_putll(profile,mode);np_puts(profile,"\t");np_putll(profile,(long long)n);np_puts(profile,"\t");np_puts(profile,h);np_puts(profile,"\n");}return 0;}
@@ -201,7 +216,21 @@ static int ni_profile_check(NiContext *c,np_buf *support,ni_result *r){char p[44
 done:free(actual.p);free(expected.p);return rc;
 }
 static int ni_current_compiled_include(NiContext *c,const NiEndpoint *current,const ni_result *r){if(r->native_source_kind!=2)return 0;char h[65];if(ni_hash(c,current->include.p,current->include.n,h))return -1;return strcmp(h,r->compiled_include)?ni_bad(c,"current-before-include-does-not-match-CX-code-profile",0):0;}
-static int ni_support(NiContext *c,np_buf *b,ni_result *r){c->role=2;np_puts(b,"ni-runtime-support-v2-reader-code-profile\nprovider\tni-hybrid-sha256-provider-v1-threshold1024-AF_ALG-no-fallback\n");const char *files[]={"tools/cxlib/nninputs.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/unisa_libneed.c"};for(int i=0;i<6;i++){char h[65];if(ni_ancestors(c,c->root,files[i])||ni_digest_file(c,c->root,files[i],h))return -1;ni_row(b,files[i],h);if(i==0)strcpy(r->verifier,h);if(i==1)strcpy(r->netpack,h);if(i==2)strcpy(r->kernelsha,h);if(i==5){if(strcmp(h,ni_native_c))return ni_bad(c,"trusted-libneed-C-source-mismatch",files[i]);strcpy(r->native_C_source,h);}}char h[65];size_t n;char *s=ni_read(c,c->native,&n,0);if(!s)return -1;int rc=ni_hash(c,s,n,h);int elf=n>=64&&!memcmp(s,"\177ELF",4)&&(unsigned char)s[4]==2&&(unsigned char)s[5]==1&&(unsigned char)s[18]==62&&s[19]==0;free(s);if(rc)return -1;if(!elf)return ni_bad(c,"trusted-libneed-native-ELF64-mismatch",c->native);strcpy(r->native_artifact,h);ni_row(b,"trusted-native-path",c->native);ni_row(b,"trusted-native-artifact",h);if(!strcmp(h,ni_native_elf)){r->native_source_kind=1;ni_row(b,"native-source-kind","legacy-HOSTCC-C-reference-explicit-nonhermetic-trust");}else if(!strcmp(h,ni_fast_elf)){r->native_source_kind=2;if(ni_profile_check(c,b,r))return -1;}else return ni_bad(c,"trusted-libneed-native-artifact-mismatch",c->native);return ni_hash(c,b->p,b->n,r->runtime_support);}
+static int ni_support(NiContext *c,np_buf *b,ni_result *r){
+ c->role=2;np_puts(b,"ni-runtime-support-v2-reader-code-profile\nprovider\tni-hybrid-sha256-provider-v1-threshold1024-AF_ALG-no-fallback\n");
+ const char *files[]={"tools/cxlib/nninputs.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/unisa_libneed.c"};
+ for(int i=0;i<6;i++){char h[65];if(ni_ancestors(c,c->root,files[i])||ni_digest_file(c,c->root,files[i],h))return -1;ni_row(b,files[i],h);if(i==0)strcpy(r->verifier,h);if(i==1)strcpy(r->netpack,h);if(i==2)strcpy(r->kernelsha,h);if(i==5)strcpy(r->native_C_source,h);}
+ ni_reader_descriptor legacy={0},current={0};if(!ni_reader_profile("legacy-5f-v2",&legacy)||!ni_reader_profile("current-a4-v3",&current))return ni_bad(c,"reader-descriptor-internal",0);
+ const ni_reader_descriptor *d=!strcmp(r->native_C_source,legacy.source_sha)?&legacy:!strcmp(r->native_C_source,current.source_sha)?&current:0;
+ if(!d)return ni_bad(c,"trusted-libneed-C-source-mismatch",files[5]);
+ char h[65];size_t n;char *s=ni_read(c,c->native,&n,0);if(!s)return -1;int rc=ni_hash(c,s,n,h);int elf=n>=64&&!memcmp(s,"\177ELF",4)&&(unsigned char)s[4]==2&&(unsigned char)s[5]==1&&(unsigned char)s[18]==62&&s[19]==0;free(s);if(rc)return -1;
+ if(!elf)return ni_bad(c,"trusted-libneed-native-ELF64-mismatch",c->native);strcpy(r->native_artifact,h);ni_row(b,"trusted-native-path",c->native);ni_row(b,"trusted-native-artifact",h);
+ if(cx_fmt(r->reader_identity,sizeof r->reader_identity,"%s",d->id))return ni_bad(c,"reader-identity-bound",0);ni_row(b,"reader-identity",d->id);
+ if(!strcmp(h,d->host_sha)){r->native_source_kind=d->host_kind;ni_row(b,"native-source-kind",d->host_kind==1?"legacy-HOSTCC-C-reference-explicit-nonhermetic-trust":"current-HOSTCC-C-reference-explicit-nonhermetic-trust");}
+ else if(d->cx_registered&&d->cx_sha&&!strcmp(h,d->cx_sha)){r->native_source_kind=d->cx_kind;if(ni_profile_check(c,b,r))return -1;}
+ else return ni_bad(c,"trusted-libneed-native-artifact-mismatch",c->native);
+ return ni_hash(c,b->p,b->n,r->runtime_support);
+}
 static int ni_table(NiContext *c,const char *base,np_buf *out){char dir[4400];if(ni_path(c,dir,base,"include"))return -1;char *v[]={c->bound,"12",c->native,"table",dir,0};char *env[]={"UNISACC_BOUND_CLEANUP_TRACE=","UNISACC_TIME_SCALE=1",0};np_result r;char why[1000];if(np_run(v,c->root,env,15,&r,why,sizeof why))return ni_bad(c,why,dir);int ok=!r.rc&&!r.errn&&r.outn>=24&&r.outn<=8388608&&r.out[r.outn-1]=='\n'&&!memchr(r.out,0,r.outn)&&!memchr(r.out,'\r',r.outn)&&!strncmp(r.out,"NAMES ",6)&&strstr(r.out,"\nROOTS_CLOSURE ");if(!ok){char why2[180];{ if (cx_fmt(why2,sizeof why2,"trusted-native-libneed-table-rc=%d stderr-bytes=%lu",r.rc,(unsigned long)r.errn)) { fprintf(stderr, "nninputs: text too long for why2\n"); exit(2); } }np_free(&r);return ni_bad(c,why2,dir);}np_put(out,r.out,r.outn);np_free(&r);return 0;}
 static void ni_endpoint_free(NiEndpoint *r){free(r->data.p);free(r->include.p);free(r->include_shape.p);free(r->cdeps.p);free(r->full.p);free(r->facts.p);}
 static int ni_impl(const char *current,const char *origin,const char *native,ni_result *out,char *why,size_t cap){
@@ -239,7 +268,7 @@ static int ni_platform_compare(const char *current_root,const char *origin_snaps
  if(!out||!why||!cap||!current_root||!origin_snapshot_root||!trusted_native||current_root[0]!='/'||origin_snapshot_root[0]!='/'||trusted_native[0]!='/'||strpbrk(current_root,"\r\n\t")||strpbrk(origin_snapshot_root,"\r\n\t")||strpbrk(trusted_native,"\r\n\t")||sizeof(long)!=8){if(why&&cap)snprintf(why,cap,"nn-inputs-arguments");return -1;}
  int channel[2];if(pipe(channel)){snprintf(why,cap,"nn-inputs-result-pipe errno=%d",errno);return -1;}if(fcntl(channel[1],F_SETFD,FD_CLOEXEC)<0){int e=errno;close(channel[0]);close(channel[1]);snprintf(why,cap,"nn-inputs-result-pipe-cloexec errno=%d",e);return -1;}pid_t pid=fork();if(pid<0){close(channel[0]);close(channel[1]);snprintf(why,cap,"nn-inputs-fork errno=%d",errno);return -1;}
  if(!pid){close(channel[0]);if(dup2(channel[1],1)<0||dup2(channel[1],2)<0)_exit(2);NiPacket packet={0};packet.rc=ni_impl(current_root,origin_snapshot_root,trusted_native,&packet.result,packet.why,sizeof packet.why);size_t at=0;while(at<sizeof packet){ssize_t n=write(channel[1],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<=0)_exit(2);at+=(size_t)n;}close(channel[1]);_exit(0);}
- close(channel[1]);NiPacket packet={0};size_t at=0;int read_bad=0;while(at<sizeof packet){ssize_t n=read(channel[0],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<0){read_bad=1;break;}if(!n)break;at+=(size_t)n;}int closed=close(channel[0]),status=0;pid_t got;do{got=waitpid(pid,&status,0);}while(got<0&&errno==EINTR);if(read_bad||closed||at!=sizeof packet||got!=pid||!WIFEXITED(status)||WEXITSTATUS(status)){snprintf(why,cap,"nn-inputs-reader-failed packet-bytes=%lu status=%d errno=%d",(unsigned long)at,status,errno);return -1;}if(packet.rc){snprintf(why,cap,"%s",packet.why[0]?packet.why:"nn-inputs-reader-refused");return -1;}if(packet.result.native_table_calls!=2||packet.result.native_internal_reads!=-1||!packet.result.witness[0]||(packet.result.native_source_kind!=1&&packet.result.native_source_kind!=2)||(packet.result.native_source_kind==2&&(!packet.result.native_profile[0]||!packet.result.compiled_include[0]))){snprintf(why,cap,"nn-inputs-result-shape");return -1;}*out=packet.result;return 0;
+ close(channel[1]);NiPacket packet={0};size_t at=0;int read_bad=0;while(at<sizeof packet){ssize_t n=read(channel[0],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<0){read_bad=1;break;}if(!n)break;at+=(size_t)n;}int closed=close(channel[0]),status=0;pid_t got;do{got=waitpid(pid,&status,0);}while(got<0&&errno==EINTR);if(read_bad||closed||at!=sizeof packet||got!=pid||!WIFEXITED(status)||WEXITSTATUS(status)){snprintf(why,cap,"nn-inputs-reader-failed packet-bytes=%lu status=%d errno=%d",(unsigned long)at,status,errno);return -1;}if(packet.rc){snprintf(why,cap,"%s",packet.why[0]?packet.why:"nn-inputs-reader-refused");return -1;}if(packet.result.native_table_calls!=2||packet.result.native_internal_reads!=-1||!packet.result.witness[0]||!packet.result.reader_identity[0]||(packet.result.native_source_kind!=1&&packet.result.native_source_kind!=2&&packet.result.native_source_kind!=3)||(packet.result.native_source_kind==2&&(!packet.result.native_profile[0]||!packet.result.compiled_include[0]))){snprintf(why,cap,"nn-inputs-result-shape");return -1;}*out=packet.result;return 0;
 }
 
 /* Exported items must be unconditional for the current CX module scanner. */
