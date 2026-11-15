@@ -1,0 +1,116 @@
+/* tools/check-devsvc-core.cx -- 检查 tools/devsvc.cx 的固定版本启动器(按 git HEAD 构造执行体,不受工作副本影响)。批次 devsvc-core。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-core.cx        (在仓根跑)
+ *
+ * 夹具:`git clone --local` 本仓到 /tmp/dvcore-<pid>,把工作副本的 devsvc.cx、devsvc-core.cx、devsvc-repo.tsv 提交进夹具的 HEAD,
+ *   产品用符号链接指向本检出的产品;固定版本缓存目录与实例目录都在 /tmp/dvcore-<pid>-* 下,不碰真实缓存与实例。
+ * 断言:(1)首次调用(冷构造)成功且 stderr 没有"using the working copy";(2)第二次调用命中缓存(远快于冷构造);
+ *   (3)把夹具工作副本的核心改成语法错后,普通调用仍成功(用的是 HEAD 版本);(4)--dev 走工作副本,在语法错下失败。
+ * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC_CORE<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nok, nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], fx[160], pin[160], inst[160], prod[1300], out[1 << 15];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-core.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) printf("NOTE\tlast-output\t%.600s\n", out);
+    if (c) nok++; else nfail++;
+}
+/* 有界跑一条命令(55 秒上限):stdout 后接 stderr 收进 out,返回退出码;起不来或装不下返回 -1 */
+static int run(char **v, const char *cwd, char *const *env) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, env, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+
+int main(void) {
+    char *envv[4]; char e1[220], e2[220]; long t0, ms_cold, ms_hot; int rc;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(fx, sizeof fx, "/tmp/dvcore-%d", sy_pid()); F(pin, sizeof pin, "/tmp/dvcore-%d-pin", sy_pid()); F(inst, sizeof inst, "/tmp/dvcore-%d-inst", sy_pid());
+    F(prod, sizeof prod, "%s/unisacc.com", root);
+    F(e1, sizeof e1, "DV_PIN_DIR=%s", pin); F(e2, sizeof e2, "UNISACC_DEVSVC_DIR=%s", inst);
+    envv[0] = e1; envv[1] = e2; envv[2] = 0;
+    if (ovf) return 2;
+    /* 夹具:克隆、放入工作副本三件、提交、链接产品 */
+    {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-clone\n"); return 1; } }
+    {   const char *names[3] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv"}; int i;
+        for (i = 0; i < 3; i++) {
+            char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
+            F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
+            if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-core.fixture-copy\t%s\n", names[i]); if (b) free(b); return 1; }
+            free(b);
+        } }
+    {   char *v[] = {"git", "add", "tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add\n"); return 1; } }
+    {   char *v[] = {"git", "-c", "user.name=dvcheck", "-c", "user.email=dvcheck@example.invalid", "commit", "-q", "-m", "fixture", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-commit\n"); return 1; } }
+    {   char lk[400]; F(lk, sizeof lk, "%s/unisacc.com", fx); if (ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-product\n"); return 1; } }
+    /* (1) 冷构造 */
+    t0 = sy_now_ms();
+    {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
+    ms_cold = sy_now_ms() - t0;
+    ck(rc == 0 && has("pinned-ok"), "cold-build-runs");
+    ck(!has("using the working copy"), "cold-build-uses-head");
+    /* (2) 热调用 */
+    t0 = sy_now_ms();
+    {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
+    ms_hot = sy_now_ms() - t0;
+    ck(rc == 0 && has("pinned-ok") && ms_hot < 6000 && ms_hot * 2 < ms_cold + 1000, "hot-call-hits-cache");
+    /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
+    {   char p[400]; const char *bad = "# broken by check\nzzz-unknown\tfoo\tbar\nlib\tonly-one\n"; unsigned char *b = 0; int64_t n = 0;
+        F(p, sizeof p, "%s/tools/devsvc-repo.tsv", fx);
+        if (ovf || sy_read_file(p, &b, &n, 1 << 20) || !b) { printf("FAIL\tdevsvc-core.fixture-read-table\n"); return 1; }
+        if (sy_write_atomic(p, bad, strlen(bad), 0644)) { printf("FAIL\tdevsvc-core.fixture-break-table\n"); free(b); return 1; }
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "table-ok", 0}; rc = run(v, fx, envv); }
+        ck(rc == 0 && has("table-ok"), "broken-working-table-does-not-block");
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "x", "--", "echo", "table-dev", 0}; rc = run(v, fx, envv); }
+        ck(rc != 0 && !has("table-dev") && has("repo table"), "dev-flag-reads-working-table");
+        if (sy_write_atomic(p, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-core.fixture-restore-table\n"); free(b); return 1; }
+        free(b); }
+    /* (6) 锁租约:租约内 release 必 OK;过期后 release 报 expired 而非 not-held;短 ttl 续期不截短长租约 */
+    {   char *a1[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-a", "--owner", "ck", "--ttl", "30", 0};
+        char *r1[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-a", "--owner", "ck", 0};
+        char *a2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-b", "--owner", "ck", "--ttl", "1", 0};
+        char *r2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-b", "--owner", "ck", 0};
+        char *a3[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-c", "--owner", "ck", "--ttl", "600", 0};
+        char *a4[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "acquire", "ck-c", "--owner", "ck", "--ttl", "5", 0};
+        char *r3[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "lock", "release", "ck-c", "--owner", "ck", 0};
+        char *st[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "stop", 0};
+        rc = run(a1, fx, envv); ck(rc == 0 && has("acquired"), "lock-acquire");
+        rc = run(r1, fx, envv); ck(rc == 0 && has("OK\treleased\tck-a"), "lock-release-within-lease-ok");
+        rc = run(a2, fx, envv); ck(rc == 0 && has("acquired"), "lock-acquire-short");
+        sy_sleep_ms(2300);
+        rc = run(r2, fx, envv); ck(rc != 0 && has("ERR\texpired\tck-b") && !has("not-held"), "lock-release-after-expiry-says-expired");
+        (void)run(a3, fx, envv);
+        rc = run(a4, fx, envv); ck(rc == 0 && has("renewed") && !has("expires_in_s=5\n"), "lock-renew-does-not-shorten");
+        rc = run(r3, fx, envv); ck(rc == 0 && has("released"), "lock-release-after-renew-ok");
+        (void)run(st, fx, envv); }
+    /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
+    {   char p[400]; const char *junk = "\n@@ this is not valid cx @@\n"; unsigned char *b = 0; int64_t n = 0; unsigned char *nb;
+        F(p, sizeof p, "%s/tools/devsvc-core.cx", fx);
+        if (ovf || sy_read_file(p, &b, &n, 1 << 22) || !b) { printf("FAIL\tdevsvc-core.fixture-read-core\n"); return 1; }
+        nb = (unsigned char *)malloc((size_t)n + strlen(junk) + 1);
+        if (!nb || mm_copy(nb, (size_t)n + strlen(junk) + 1, b, n) || mm_copy(nb + n, strlen(junk) + 1, junk, strlen(junk))) { printf("FAIL\tdevsvc-core.fixture-break-core\n"); return 1; }
+        if (sy_write_atomic(p, (char *)nb, (size_t)n + strlen(junk), 0644)) { printf("FAIL\tdevsvc-core.fixture-write-core\n"); return 1; }
+        free(b); free(nb); }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--", "echo", "still-ok", 0}; rc = run(v, fx, envv); }
+    ck(rc == 0 && has("still-ok"), "broken-working-copy-does-not-block");
+    /* (4) --dev 走工作副本,语法错下失败 */
+    {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "x", "--", "echo", "dev-ok", 0}; rc = run(v, fx, envv); }
+    ck(rc != 0 && !has("dev-ok"), "dev-flag-uses-working-copy");
+    /* 清理 */
+    {   char *v1[] = {"rm", "-rf", fx, 0}; char *v2[] = {"rm", "-rf", pin, 0}; char *v3[] = {"rm", "-rf", inst, 0};
+        (void)run(v1, 0, 0); (void)run(v2, 0, 0); (void)run(v3, 0, 0); }
+    printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

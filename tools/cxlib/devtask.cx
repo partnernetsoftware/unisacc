@@ -1,0 +1,237 @@
+#pragma unisa module devtask
+/* devtask: work orders (实施单) and dispatch state for a multi-agent repo, first cut on plain TSV.
+ * Store: DIR/tasks.tsv (DT_HDR columns), DIR/task-events.tsv (seq time id event owner), DIR/tasks.lock.
+ * Every mutation takes an exclusive flock on tasks.lock, reloads, validates, writes tasks.tsv by atomic rename
+ * and appends one event row; two concurrent claims therefore serialize and the second sees state=claimed.
+ * The core knows no repo path: DIR is given by the caller; dt_instdir derives it from a devsvc repo table
+ * (keys cache_sub, inst_env) so it lands beside the devsvc instance directory.
+ * Write domains are comma-joined path prefixes; two domains intersect when one prefix is a byte prefix of
+ * the other (conservative: tools/dev intersects tools/devtask.cx).
+ * Return codes: 0 ok, 1 refused by state or domain conflict, 2 bad input or I/O. Empty column is "-".
+ * Times are UTC, YYYY-MM-DDTHH:MM:SSZ, compared as strings. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.build
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define DT_MAX 4096
+#define DT_HDR "id\ttitle\towner\tstate\twrite_domain\tdeadline\tevidence\tgap\tupdated\n"
+#define DT_EHDR "seq\ttime\tid\tevent\towner\n"
+typedef struct DtTask { char id[16], title[256], owner[64], state[12], domain[1024], deadline[24], evidence[512], gap[1024], updated[24]; } DtTask;
+typedef struct DtSet { DtTask *t; int n; } DtSet;
+
+void dt_utc(long s, char *out, int cap) {
+    long d = s / 86400, r = s % 86400, z = d + 719468, era = z / 146097, doe = z - era * 146097;
+    long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, y = yoe + era * 400;
+    long doy = doe - (365 * yoe + yoe / 4 - yoe / 100), mp = (5 * doy + 2) / 153, dd = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9;
+    if (m <= 2) y++;
+    (void)cx_fmt(out, cap, "%04ld-%02ld-%02ldT%02ld:%02ld:%02ldZ", y, m, dd, r / 3600, r % 3600 / 60, r % 60);
+}
+/* one TSV cell: non-empty, shorter than cap, no control bytes, not the empty marker */
+int dt_text_ok(const char *s, long cap) {
+    long n = 0;
+    if (!s || !*s || !strcmp(s, "-")) return 0;
+    for (; s[n]; n++) if ((unsigned char)s[n] < 0x20 || s[n] == 0x7f) return 0;
+    return n < cap;
+}
+int dt_name_ok(const char *s, long cap) {
+    if (!dt_text_ok(s, cap)) return 0;
+    for (; *s; s++) if (*s == ' ' || *s == ',') return 0;
+    return 1;
+}
+/* comma-joined relative path prefixes: no empty entry, blank, absolute path or .. */
+int dt_domain_ok(const char *d) {
+    const char *p = d;
+    if (!dt_text_ok(d, 1024) || strstr(d, "..")) return 0;
+    for (;;) {
+        const char *e = strchr(p, ',');
+        long n = e ? e - p : (long)strlen(p);
+        if (n <= 0 || p[0] == '/') return 0;
+        for (long i = 0; i < n; i++) if (p[i] == ' ') return 0;
+        if (!e) return 1;
+        p = e + 1;
+    }
+}
+/* 1 when some prefix of a and some prefix of b overlap; the first overlapping pair is written to hit */
+int dt_domain_hit(const char *a, const char *b, char *hit, int cap) {
+    for (const char *p = a; p;) {
+        const char *pe = strchr(p, ','); long pn = pe ? pe - p : (long)strlen(p);
+        for (const char *q = b; q;) {
+            const char *qe = strchr(q, ','); long qn = qe ? qe - q : (long)strlen(q);
+            if (!memcmp(p, q, pn < qn ? pn : qn)) { if (hit) (void)cx_fmt(hit, cap, "%.*s~%.*s", (int)pn, p, (int)qn, q); return 1; }
+            q = qe ? qe + 1 : 0;
+        }
+        p = pe ? pe + 1 : 0;
+    }
+    return 0;
+}
+static int dt_cp(char *d, int cap, const char *s, long n) { if (n <= 0 || n >= cap || mm_copy(d, cap, s, n)) return 1; d[n] = 0; return 0; }
+static int dt_state_ok(const char *s) { return !strcmp(s, "open") || !strcmp(s, "claimed") || !strcmp(s, "blocked") || !strcmp(s, "done") || !strcmp(s, "dropped"); }
+int dt_live(const DtTask *t) { return !strcmp(t->state, "open") || !strcmp(t->state, "claimed") || !strcmp(t->state, "blocked"); }
+int dt_stale(const DtTask *t, long now) {
+    char ts[24]; dt_utc(now, ts, sizeof ts);
+    return dt_live(t) && strcmp(t->deadline, "-") && strcmp(t->deadline, ts) < 0;
+}
+void dt_free(DtSet *s) { free(s->t); s->t = 0; s->n = 0; }
+/* a missing tasks.tsv is an empty set; any other read failure or malformed row refuses */
+int dt_load(const char *dir, DtSet *s, char *why, int wl) {
+    char p[2048]; unsigned char *b = 0; int64_t n = 0; long hl = (long)strlen(DT_HDR), rows = 0, line = 1; int rc;
+    s->t = 0; s->n = 0;
+    if (snprintf(p, sizeof p, "%s/tasks.tsv", dir) >= (int)sizeof p) { snprintf(why, wl, "directory path too long"); return 2; }
+    rc = sy_read_file(p, &b, &n, 1L << 24);
+    if (rc == -ENOENT) { s->t = calloc(1, sizeof(DtTask)); if (!s->t) { snprintf(why, wl, "out of memory"); return 2; } return 0; }
+    if (rc) { (void)cx_fmt(why, wl, "read tasks.tsv rc=%d", rc); return 2; }
+    if (n < hl || memcmp(b, DT_HDR, hl) || b[n - 1] != '\n') { free(b); snprintf(why, wl, "tasks.tsv: bad header or unterminated last row"); return 2; }
+    for (long i = hl; i < n; i++) if (b[i] == '\n') rows++;
+    if (rows > DT_MAX) { free(b); (void)cx_fmt(why, wl, "tasks.tsv: more than %d rows", DT_MAX); return 2; }
+    s->t = calloc(rows + 1, sizeof(DtTask));
+    if (!s->t) { free(b); snprintf(why, wl, "out of memory"); return 2; }
+    for (long i = hl; i < n;) {
+        long e = i, f = 0, fs = i; DtTask *t = &s->t[s->n]; int bad = 0;
+        char *dst[] = {t->id, t->title, t->owner, t->state, t->domain, t->deadline, t->evidence, t->gap, t->updated};
+        int cap[] = {sizeof t->id, sizeof t->title, sizeof t->owner, sizeof t->state, sizeof t->domain, sizeof t->deadline, sizeof t->evidence, sizeof t->gap, sizeof t->updated};
+        line++;
+        while (b[e] != '\n') e++;
+        for (long k = i; k <= e; k++) if (k == e || b[k] == '\t') { if (f >= 9 || dt_cp(dst[f], cap[f], (const char *)b + fs, k - fs)) bad = 1; f++; fs = k + 1; }
+        if (bad || f != 9 || !dt_state_ok(t->state)) { free(b); dt_free(s); (void)cx_fmt(why, wl, "tasks.tsv line %ld: malformed row", line); return 2; }
+        s->n++; i = e + 1;
+    }
+    free(b); return 0;
+}
+static int dt_save(const char *dir, const DtSet *s, char *why, int wl) {
+    char p[2048]; sb *o = sb_new(); int bad;
+    if (!o || snprintf(p, sizeof p, "%s/tasks.tsv", dir) >= (int)sizeof p) { snprintf(why, wl, "save setup"); return 2; }
+    bad = sb_puts(o, DT_HDR);
+    for (int i = 0; i < s->n && !bad; i++) {
+        const DtTask *t = &s->t[i]; const char *c[] = {t->id, t->title, t->owner, t->state, t->domain, t->deadline, t->evidence, t->gap, t->updated};
+        for (int k = 0; k < 9 && !bad; k++) bad = sb_puts(o, c[k]) || sb_puts(o, k == 8 ? "\n" : "\t");
+    }
+    if (bad || !sb_cstr(o) || sy_write_atomic(p, sb_cstr(o), sb_len(o), 0600)) { sb_free(o); snprintf(why, wl, "write tasks.tsv failed"); return 2; }
+    sb_free(o); return 0;
+}
+/* exclusive lock for one mutation; the holder only reloads, validates and renames, so the wait is short */
+int dt_lock(const char *dir) {
+    char p[2048]; int fd;
+    if (snprintf(p, sizeof p, "%s/tasks.lock", dir) >= (int)sizeof p || sy_mkdir_all(dir, 0700)) return -1;
+    fd = sy_open(p, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return -1;
+    if (sy_flock(fd, 2)) { sy_close(fd); return -1; }
+    return fd;
+}
+void dt_unlock(int fd) { if (fd >= 0) { sy_flock(fd, 8); sy_close(fd); } }
+/* caller holds the lock; seq continues from the rows already in the file */
+static int dt_event(const char *dir, const char *id, const char *ev, const char *owner, long now, char *why, int wl) {
+    char p[2048], ts[24], row[256]; unsigned char *b = 0; int64_t n = 0; long seq = 1; int rc, w;
+    if (snprintf(p, sizeof p, "%s/task-events.tsv", dir) >= (int)sizeof p) { snprintf(why, wl, "directory path too long"); return 2; }
+    rc = sy_read_file(p, &b, &n, 1L << 26);
+    if (rc && rc != -ENOENT) { (void)cx_fmt(why, wl, "read task-events.tsv rc=%d", rc); return 2; }
+    if (!rc) { seq = 0; for (long i = 0; i < n; i++) if (b[i] == '\n') seq++; free(b); if (seq < 1) seq = 1; }
+    dt_utc(now, ts, sizeof ts);
+    w = snprintf(row, sizeof row, "%s%ld\t%s\t%s\t%s\t%s\n", rc ? DT_EHDR : "", seq, ts, id, ev, owner);
+    if (w <= 0 || w >= (int)sizeof row || sy_append_file(p, row, w, 0600)) { snprintf(why, wl, "append task-events.tsv failed"); return 2; }
+    return 0;
+}
+/* deadline_min 0 means none; owner may be null (unreserved) */
+int dt_add(const char *dir, const char *title, const char *domain, long deadline_min, const char *owner, long now, char *idout, int idcap, char *why, int wl) {
+    DtSet s; int lk, rc; long top = 0; DtTask *t;
+    if (!dt_text_ok(title, 256)) { snprintf(why, wl, "bad title (empty, too long or control bytes)"); return 2; }
+    if (!dt_domain_ok(domain)) { snprintf(why, wl, "bad write domain (need relative path prefixes without blanks or ..)"); return 2; }
+    if (owner && !dt_name_ok(owner, 64)) { snprintf(why, wl, "bad owner"); return 2; }
+    if (deadline_min < 0 || deadline_min > 525600) { snprintf(why, wl, "bad deadline minutes"); return 2; }
+    if ((lk = dt_lock(dir)) < 0) { (void)cx_fmt(why, wl, "cannot lock %s", dir); return 2; }
+    rc = dt_load(dir, &s, why, wl);
+    if (rc) { dt_unlock(lk); return rc; }
+    if (s.n >= DT_MAX) { dt_free(&s); dt_unlock(lk); snprintf(why, wl, "task table full"); return 2; }
+    for (int i = 0; i < s.n; i++) { long v = atol(s.t[i].id + 1); if (v > top) top = v; }
+    t = &s.t[s.n++];
+    /* every input below was validated above against these field sizes (title<256, owner<64, domain<1024), so cx_fmt cannot truncate */
+    (void)cx_fmt(t->id, sizeof t->id, "T%ld", top + 1); (void)cx_fmt(t->title, sizeof t->title, "%s", title);
+    (void)cx_fmt(t->owner, sizeof t->owner, "%s", owner ? owner : "-"); (void)cx_fmt(t->state, sizeof t->state, "open");
+    (void)cx_fmt(t->domain, sizeof t->domain, "%s", domain);
+    if (deadline_min) dt_utc(now + deadline_min * 60, t->deadline, sizeof t->deadline); else snprintf(t->deadline, sizeof t->deadline, "-");
+    snprintf(t->evidence, sizeof t->evidence, "-"); snprintf(t->gap, sizeof t->gap, "-"); dt_utc(now, t->updated, sizeof t->updated);
+    if (idout && cx_fmt(idout, idcap, "%s", t->id)) { dt_free(&s); dt_unlock(lk); snprintf(why, wl, "id buffer too small"); return 2; }
+    rc = dt_save(dir, &s, why, wl);
+    if (!rc) rc = dt_event(dir, t->id, "add", t->owner, now, why, wl);
+    dt_free(&s); dt_unlock(lk); return rc;
+}
+static int dt_note(DtTask *t, const char *tag, const char *text, char *why, int wl) {
+    char g[1024]; int w = snprintf(g, sizeof g, "%s%s%s%s", strcmp(t->gap, "-") ? t->gap : "", strcmp(t->gap, "-") ? " | " : "", tag, text);
+    if (w >= (int)sizeof g) { (void)cx_fmt(why, wl, "gap column full for %s", t->id); return 2; }
+    if (mm_copy(t->gap, sizeof t->gap, g, w + 1)) { (void)cx_fmt(why, wl, "gap copy failed for %s", t->id); return 2; } return 0;
+}
+/* op: claim (owner) | done (text = evidence) | block (text = why) | gap (text) | drop (text = why) */
+int dt_change(const char *dir, const char *op, const char *id, const char *owner, const char *text, long now, char *why, int wl) {
+    DtSet s; int lk, rc, k = -1, isclaim = !strcmp(op, "claim"); DtTask *t;
+    if (strcmp(op, "claim") && strcmp(op, "done") && strcmp(op, "block") && strcmp(op, "gap") && strcmp(op, "drop")) { (void)cx_fmt(why, wl, "unknown operation %s", op); return 2; }
+    if (!dt_name_ok(id, 16)) { snprintf(why, wl, "bad task id"); return 2; }
+    if (isclaim && !dt_name_ok(owner, 64)) { snprintf(why, wl, "bad owner"); return 2; }
+    if (!isclaim && !dt_text_ok(text, 480)) { snprintf(why, wl, "bad text (empty, too long or control bytes)"); return 2; }
+    if ((lk = dt_lock(dir)) < 0) { (void)cx_fmt(why, wl, "cannot lock %s", dir); return 2; }
+    rc = dt_load(dir, &s, why, wl);
+    if (rc) { dt_unlock(lk); return rc; }
+    for (int i = 0; i < s.n; i++) if (!strcmp(s.t[i].id, id)) k = i;
+    if (k < 0) { (void)cx_fmt(why, wl, "no such task %s", id); rc = 2; goto out; }
+    t = &s.t[k]; rc = 1;
+    if (isclaim) {
+        int resume = !strcmp(t->state, "blocked") && !strcmp(t->owner, owner), used = 0, hits = 0;
+        if (strcmp(t->state, "open") && !resume) { (void)cx_fmt(why, wl, "%s is %s (owner %s), not claimable", id, t->state, t->owner); goto out; }
+        if (!resume && strcmp(t->owner, "-") && strcmp(t->owner, owner)) { (void)cx_fmt(why, wl, "%s is reserved for %s", id, t->owner); goto out; }
+        for (int i = 0; i < s.n; i++) { char hit[512];
+            if (i == k || strcmp(s.t[i].state, "claimed") || !dt_domain_hit(t->domain, s.t[i].domain, hit, sizeof hit)) continue;
+            if (!hits++) used = snprintf(why, wl, "write domain of %s intersects claimed:", id);
+            if (used > 0 && used < wl) used += snprintf(why + used, wl - used, " %s(owner=%s,%s)", s.t[i].id, s.t[i].owner, hit);
+        }
+        if (hits) goto out;
+        (void)cx_fmt(t->owner, sizeof t->owner, "%s", owner); (void)cx_fmt(t->state, sizeof t->state, "claimed");   /* owner validated < 64 */
+    } else if (!strcmp(op, "done")) {
+        if (strcmp(t->state, "claimed")) { (void)cx_fmt(why, wl, "%s is %s, only a claimed task can be done", id, t->state); goto out; }
+        (void)cx_fmt(t->evidence, sizeof t->evidence, "%s", text); (void)cx_fmt(t->state, sizeof t->state, "done");   /* text validated < 480 */
+    } else {
+        int isgap = !strcmp(op, "gap"), isblock = !strcmp(op, "block");
+        if (!dt_live(t) || (isblock && !strcmp(t->state, "blocked"))) { (void)cx_fmt(why, wl, "%s is %s, cannot %s", id, t->state, op); goto out; }
+        if ((rc = dt_note(t, isgap ? "" : isblock ? "blocked: " : "dropped: ", text, why, wl)) != 0) goto out;
+        if (!isgap) (void)cx_fmt(t->state, sizeof t->state, "%s", isblock ? "blocked" : "dropped");
+    }
+    dt_utc(now, t->updated, sizeof t->updated);
+    rc = dt_save(dir, &s, why, wl);
+    if (!rc) rc = dt_event(dir, id, op, t->owner, now, why, wl);
+out:
+    dt_free(&s); dt_unlock(lk); return rc;
+}
+/* instance directory by the devsvc convention: the env var named by inst_env, else
+   HOME/<cache_sub>/<first 16 hex of sha256(absolute git common dir of root)>; both keys come from the repo table */
+int dt_instdir(const char *root, const char *table, char *out, int cap, char *why, int wl) {
+    char p[2048], sub[128] = "", envn[64] = "", home[1024], hex[65], common[1024]; unsigned char *b = 0; int64_t n = 0; int rc; const char *e;
+    if (snprintf(p, sizeof p, "%s%s%s", table[0] == '/' ? "" : root, table[0] == '/' ? "" : "/", table) >= (int)sizeof p) { snprintf(why, wl, "table path too long"); return 2; }
+    rc = sy_read_file(p, &b, &n, 1L << 20);
+    if (rc) { (void)cx_fmt(why, wl, "read repo table %s rc=%d", p, rc); return 2; }
+    for (long i = 0; i < n;) {
+        long le = i, t1, t2;
+        while (le < n && b[le] != '\n') le++;
+        for (t1 = i; t1 < le && b[t1] != '\t'; t1++) {}
+        for (t2 = t1 + 1; t2 < le && b[t2] != '\t'; t2++) {}
+        if (t1 < le && t1 - i == 9 && !memcmp(b + i, "cache_sub", 9)) dt_cp(sub, sizeof sub, (const char *)b + t1 + 1, t2 - t1 - 1);
+        if (t1 < le && t1 - i == 8 && !memcmp(b + i, "inst_env", 8)) dt_cp(envn, sizeof envn, (const char *)b + t1 + 1, t2 - t1 - 1);
+        i = le + 1;
+    }
+    free(b);
+    if (!sub[0] || !envn[0]) { (void)cx_fmt(why, wl, "repo table %s lacks cache_sub or inst_env", p); return 2; }
+    e = getenv(envn);
+    if (e && *e) { if (snprintf(out, cap, "%s", e) >= cap) { snprintf(why, wl, "instance path too long"); return 2; } return 0; }
+    {   char *v[] = {"git", "-C", (char *)root, "rev-parse", "--path-format=absolute", "--git-common-dir", 0}; np_result r = {0}; char w2[256]; long cn;
+        rc = np_run(v, 0, 0, 15, &r, w2, sizeof w2);
+        if (rc || r.rc || !r.out || r.outn < 2 || r.outn >= sizeof common) { np_free(&r); snprintf(why, wl, "git common dir query failed"); return 2; }
+        cn = (long)r.outn; while (cn > 0 && (r.out[cn - 1] == '\n' || r.out[cn - 1] == '\r')) cn--;
+        if (cn >= (long)sizeof common || mm_copy(common, sizeof common, r.out, cn)) { np_free(&r); (void)cx_fmt(why, wl, "git common dir too long"); return 2; } common[cn] = 0; np_free(&r);
+    }
+    e = getenv("HOME");
+    if (!common[0] || !e || !*e || snprintf(home, sizeof home, "%s", e) >= (int)sizeof home || sy_sha256_hex(common, strlen(common), hex)) { snprintf(why, wl, "cannot derive instance directory"); return 2; }
+    hex[16] = 0;
+    if (snprintf(out, cap, "%s/%s/%s", home, sub, hex) >= cap) { snprintf(why, wl, "instance path too long"); return 2; }
+    return 0;
+}

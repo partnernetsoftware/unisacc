@@ -189,9 +189,36 @@ function check(cmd: string, cwd: string, depth = 0): string | null {
 
 try {
   const input = JSON.parse(await Bun.stdin.text());
+  if (input?.tool_name === "Read") {
+    // DEVSVC-ONLY:仓内文件读取经 devsvc f read 或 flow 的 file.read 节点;应急回退同下方 native-fallback 标记。
+    const fp: string = input?.tool_input?.file_path ?? "";
+    const root = process.env.CLAUDE_PROJECT_DIR ?? "";
+    if (root && fp.startsWith(root + "/") && !fp.startsWith(root + "/out/")) {
+      const fb = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc/native-fallback`;
+      let ok = false;
+      try { const st = await Bun.file(fb).stat(); ok = Date.now() - st.mtimeMs < 30 * 60 * 1000; } catch {}
+      if (!ok) { console.error(`DEVSVC-ONLY 拒绝:仓内文件 ${fp} 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - 的 file.read 节点)。`); process.exit(2); }
+    }
+    process.exit(0);
+  }
   if (input?.tool_name === "Edit" || input?.tool_name === "Write") {
     const agent = process.env.UNISACC_AGENT ?? "";
     const fp: string = input?.tool_input?.file_path ?? "";
+    // DEVSVC-ONLY(项目所有者 2026-11-15):仓内文件一律经 devsvc 的 f edit / f write 修改,原生 Edit/Write 拒绝。
+    // 应急回退:devsvc 不可用时 touch $HOME/.cache/unisacc/devsvc/native-fallback(30 分钟内有效),并把原因报给主调度作为 devsvc 缺口。
+    {
+      const root = process.env.CLAUDE_PROJECT_DIR ?? "";
+      const inRepo = root && fp.startsWith(root + "/") && !fp.startsWith(root + "/out/");
+      if (inRepo) {
+        const fb = `${process.env.HOME ?? ""}/.cache/unisacc/devsvc/native-fallback`;
+        let ok = false;
+        try { const st = await Bun.file(fb).stat(); ok = Date.now() - st.mtimeMs < 30 * 60 * 1000; } catch {}
+        if (!ok) {
+          console.error(`DEVSVC-ONLY 拒绝:仓内文件 ${fp} 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch ${fb}(30 分钟有效)并把原因报主调度。`);
+          process.exit(2);
+        }
+      }
+    }
     if (agent && fp) {
       const o = domainOwner(fp, agent);
       if (o) {

@@ -1,0 +1,288 @@
+/* tools/check-flow-gen.cx -- tools/flow-gen.cx (derive manifest -> flow node table).
+ *
+ *   sh ./unisacc.com tools/check-flow-gen.cx      (from the repo root; work dir $TMPDIR/check-flow-gen-<pid>)
+ *
+ * Every case really runs flow-gen (and flowrun where named) as a child, bounded 50 s:
+ *   real-check-gen        --mode check on exec/facts/derive.tsv: rc 0, FLOW_GEN nodes = manifest rows, edges=0
+ *   real-all-generators   every manifest row is a node whose argv is its check_argv word for word
+ *                         and whose timeout_ms is bound_s * 1000; no extra node
+ *   real-nine             the manifest still names the nine generators this table was built for
+ *   real-check-dry        flowrun --dry parses the check table: rc 0, FLOW_DRY nodes=N, and the ORDER
+ *                         sequence never goes from a higher derive order to a lower one
+ *   real-write-dry        flowrun --dry parses the write table; every dependency has a strictly lower
+ *                         derive order than its dependant and comes earlier in ORDER
+ *   real-write-argv       write table: write_argv where there is one; a row with write_argv "-" keeps
+ *                         its check_argv and no node depends on it
+ *   real-write-edge       tool-index depends on tables-gen (tests/batches.tsv feeds tools/tool-index.cx)
+ *   real-locks            rows of the real manifest that share an output carry one lock, others none
+ *   fix-lock-same         fixture: same output path -> same lock; directory output holding another
+ *                         row's file -> same lock (transitive: one group of three); unrelated row no lock
+ *   fix-lock-dry          the fixture table with locks is accepted by flowrun --dry
+ *   fix-deps              fixture write mode: edge only from lower order, only on output/input match,
+ *                         never out of a write "-" row; check mode has no edge at all
+ *   fix-run-verdicts      the fixture check table really run by flowrun: true -> ok, false -> fail rc 1,
+ *                         and the node after the failing one still runs (no skip in check mode); rc 1
+ *   fix-run-lock-serial   the two locked nodes of that run never overlap: peak below the node count
+ *   fix-encoding          an argv word holding ';' and '%' reaches the child byte for byte
+ *   refuse-*              field count, duplicate name, bad order, bad bound, missing manifest,
+ *                         bad mode, missing --out: rc 2 and no output file written
+ * Prints PASS/FAIL per case and CHECK_FLOW_GEN<TAB>failed=N. */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+/* ARGV under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr merged into OUT. */
+static int bounded_run(char **argv, int secs, char *out, int cap) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (n > (size_t)cap - 1) n = (size_t)cap - 1;
+    for (j = 0; b && j < n; j++) out[j] = b[j];
+    out[b ? n : 0] = 0;
+    free(b);
+    return rc;
+}
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flow-gen.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flow-gen.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flow-gen: REFUSE %s\n", s); sy_exit(2); }
+static long pos(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 1 << 16)); }
+static int has(const char *s, const char *w) { return pos(s, w) >= 0; }
+static long numafter(const char *s, const char *key) { long p = pos(s, key), v = 0; if (p < 0) return -1; p += tx_len(key, 128); while (s[p] >= '0' && s[p] <= '9') v = v * 10 + (s[p++] - '0'); return v; }
+static char root[4096], com[4500], gen[4500], frun[4500], wd[1024];
+static int runtool(char *tool, char **args, char *out, int cap) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 23; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, out, cap); }
+static char *rd(const char *name) {
+    static char p[16][1200]; static int k; char *q = p[k++ & 15];
+    if (cx_fmt(q, 1200, "%s/%s", wd, name)) die("path");
+    return q;
+}
+static char *wf(const char *name, const char *text) {
+    char *q = rd(name);
+    if (sy_write_file(q, text, tx_len(text, 1 << 16), 0644)) die("cannot write fixture");
+    return q;
+}
+static char *slurp(const char *path) { unsigned char *b = 0; int64_t n = 0; return sy_read_file(path, &b, &n, 1L << 20) ? 0 : (char *)b; }
+
+/* --- small TSV reader over a NUL terminated text: non-comment lines, TAB fields --- */
+typedef struct { const char *f[8]; long n[8]; int nf; } Line;
+static int next_line(const char **at, Line *l) {
+    const char *p = *at;
+    while (*p) {
+        const char *e = p, *s; int nf = 0;
+        while (*e && *e != '\n') e++;
+        if (e > p && *p != '#') {
+            for (s = p; ; s++) if (s == e || *s == '\t') { if (nf < 8) { l->f[nf] = p; l->n[nf] = s - p; nf++; } p = s + 1; if (s == e) break; }
+            l->nf = nf; *at = *e ? e + 1 : e;
+            return 1;
+        }
+        p = *e ? e + 1 : e;
+    }
+    *at = p;
+    return 0;
+}
+static int feq(const Line *l, int i, const char *s) { long n = tx_len(s, 4096); return i < l->nf && l->n[i] == n && !strncmp(l->f[i], s, (size_t)n); }
+static int fsame(const Line *a, int i, const Line *b, int j) { return a->n[i] == b->n[j] && !strncmp(a->f[i], b->f[j], (size_t)a->n[i]); }
+static long fnum(const Line *l, int i) { long v = 0, k; for (k = 0; k < l->n[i]; k++) v = v * 10 + (l->f[i][k] - '0'); return v; }
+/* the line of TEXT whose first field is NAME[0..N) */
+static int find_row(const char *text, const char *name, long n, Line *out) {
+    const char *at = text;
+    while (next_line(&at, out)) if (out->n[0] == n && !strncmp(out->f[0], name, (size_t)n)) return 1;
+    return 0;
+}
+/* args field of a flow line rebuilt as "w0 w1 ..." (a0..aN joined by spaces) into DST; other keys ignored */
+static void argv_of(const Line *l, char *dst, long cap) {
+    const char *p = l->f[3], *e = p + l->n[3]; long o = 0; int k = 0;
+    while (p < e) {
+        const char *q = p; char key[16]; long kl;
+        while (q < e && *q != ';') q++;
+        cx_fmt(key, sizeof key, "a%d=", k); kl = tx_len(key, 16);
+        if (q - p >= kl && !strncmp(p, key, (size_t)kl)) {
+            if (k && o < cap - 1) dst[o++] = ' ';
+            for (p += kl; p < q && o < cap - 1; p++) dst[o++] = *p;
+            k++;
+        }
+        p = q < e ? q + 1 : q;
+    }
+    dst[o] = 0;
+}
+/* value of KEY= in the args field, "" when absent */
+static void arg_of(const Line *l, const char *key, char *dst, long cap) {
+    const char *p = l->f[3], *e = p + l->n[3]; long kl = tx_len(key, 64), o = 0;
+    dst[0] = 0;
+    while (p < e) {
+        const char *q = p;
+        while (q < e && *q != ';') q++;
+        if (q - p > kl && !strncmp(p, key, (size_t)kl) && p[kl] == '=') { for (p += kl + 1; p < q && o < cap - 1; p++) dst[o++] = *p; dst[o] = 0; return; }
+        p = q < e ? q + 1 : q;
+    }
+}
+/* 1 when comma list field I of L names ID[0..N) */
+static int dep_has(const Line *l, const char *id, long n) {
+    const char *p = l->f[2], *e = p + l->n[2];
+    while (p < e) { const char *q = p; while (q < e && *q != ',') q++; if (q - p == n && !strncmp(p, id, (size_t)n)) return 1; p = q < e ? q + 1 : q; }
+    return 0;
+}
+/* 1-based position of ID in the ORDER lines of a --dry output, 0 when absent */
+static long order_pos(const char *dry, const char *id, long n) {
+    const char *at = dry; Line l;
+    while (next_line(&at, &l)) if (feq(&l, 0, "ORDER") && l.nf >= 3 && l.n[2] == n && !strncmp(l.f[2], id, (size_t)n)) return fnum(&l, 1);
+    return 0;
+}
+
+static const char *FIX =
+    "# fixture manifest\n"
+    "alpha\ttools/a.cx\ttrue\ttrue\tshared/out.tsv\tsrc/a\t1\t5\n"
+    "beta\ttools/b.cx\tfalse\tfalse\tshared/out.tsv other/b.tsv\tsrc/b\t2\t5\n"
+    "gamma\ttools/c.cx\ttrue\ttrue\tother/\tshared/*\t3\t-\n"
+    "delta\ttools/d.cx\techo a;b%\t-\tlone/d.tsv\tsrc/d\t2\t5\n"
+    "eps\ttools/e.cx\ttrue\ttrue\tlone/e.tsv\tlone/d.tsv other/b.tsv shared/out.tsv\t4\t7\n"
+    "zeta\ttools/z.cx\ttrue\ttrue\tlone/z.tsv\tlone/e.tsv\t4\t5\n";
+
+int main(void) {
+    static char o[1 << 16], dry[1 << 16], a1[1024], a2[1024];
+    char *derive, *t, *chk, *wr; const char *at; Line l, m, d;
+    int rc, n, ok, ok2, ok3, rows = 0;
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(gen, sizeof gen, "%s/tools/flow-gen.cx", root) ||
+        cx_fmt(frun, sizeof frun, "%s/tools/flowrun.cx", root)) die("root too long");
+    if (cx_fmt(wd, sizeof wd, "%s/check-flow-gen-%d", sy_tmpdir(), (int)getpid())) die("tmp too long");
+    if (sy_mkdir(wd, 0755)) die("cannot make the work dir");
+    derive = slurp("exec/facts/derive.tsv");
+    if (!derive) die("exec/facts/derive.tsv unreadable");
+    for (at = derive; next_line(&at, &l); ) rows++;
+
+    /* ---- the real manifest, check mode ---- */
+    chk = rd("check.tsv");
+    { char *v[] = {"--mode", "check", "--out", chk, 0}; rc = runtool(gen, v, o, sizeof o); }
+    ck(rc == 0 && rows > 0 && numafter(o, "nodes=") == rows && numafter(o, "edges=") == 0 && has(o, "FLOW_GEN\tmode=check\t"), "real-check-gen");
+    t = slurp(chk);
+    if (!t) die("check table not written");
+    ok = 1; n = 0;
+    for (at = derive; next_line(&at, &d); ) {
+        if (!find_row(t, d.f[0], d.n[0], &l) || l.nf != 4 || !feq(&l, 1, "exec") || !feq(&l, 2, "-")) { ok = 0; continue; }
+        argv_of(&l, a1, sizeof a1); cx_fmt(a2, sizeof a2, "%.*s", (int)d.n[2], d.f[2]);
+        if (!tx_eqz(a1, a2)) ok = 0;
+        arg_of(&l, "timeout_ms", a1, sizeof a1); cx_fmt(a2, sizeof a2, "%ld", (feq(&d, 7, "-") ? 30 : fnum(&d, 7)) * 1000);
+        if (!tx_eqz(a1, a2)) ok = 0;
+    }
+    for (at = t; next_line(&at, &l); ) n++;
+    ck(ok && n == rows, "real-all-generators");
+    { static const char *nine[] = {"tables-gen", "layer-api", "iface-hash", "batch-packages-gen", "product-map", "tool-index", "cx0-three-source", "st-gap", "links"}; int i;
+      ok = 1; for (i = 0; i < 9; i++) if (!find_row(t, nine[i], tx_len(nine[i], 64), &l)) ok = 0;
+      ck(ok, "real-nine"); }
+    { char *v[] = {"run", chk, "--dry", 0}; rc = runtool(frun, v, dry, sizeof dry); }
+    { long prev = -1, cnt = 0; ok = rc == 0 && numafter(dry, "FLOW_DRY\tnodes=") == rows;
+      for (at = dry; next_line(&at, &l); ) if (feq(&l, 0, "ORDER")) {
+          long od; if (!find_row(derive, l.f[2], l.n[2], &d)) { ok = 0; continue; }
+          od = fnum(&d, 6); if (od < prev) ok = 0; prev = od; cnt++;
+      }
+      ck(ok && cnt == rows, "real-check-dry"); }
+    /* real locks: two manifest rows share a lock exactly when an output word is the same */
+    ok = 1;
+    for (at = derive; next_line(&at, &d); ) {
+        const char *bt = derive; Line e; int meets = 0;
+        while (next_line(&bt, &e)) if (!fsame(&d, 0, &e, 0)) {
+            const char *p = d.f[4], *pe = p + d.n[4];
+            while (p < pe) { const char *q = p, *r = e.f[4], *re = r + e.n[4]; while (q < pe && *q != ' ') q++;
+                while (r < re) { const char *s = r; while (s < re && *s != ' ') s++; if (s - r == q - p && q > p && !strncmp(p, r, (size_t)(q - p))) meets = 1; r = s < re ? s + 1 : s; }
+                p = q < pe ? q + 1 : q; }
+        }
+        if (!find_row(t, d.f[0], d.n[0], &l)) { ok = 0; continue; }
+        arg_of(&l, "lock", a1, sizeof a1);
+        if (meets ? !a1[0] : a1[0] != 0) ok = 0;
+    }
+    ck(ok, "real-locks");
+
+    /* ---- the real manifest, write mode (generated and dry-parsed only; never run) ---- */
+    wr = rd("write.tsv");
+    { char *v[] = {"--mode", "write", "--out", wr, 0}; rc = runtool(gen, v, o, sizeof o); }
+    t = slurp(wr);
+    if (rc || !t) die("write table not generated");
+    { char *v[] = {"run", wr, "--dry", 0}; rc = runtool(frun, v, dry, sizeof dry); }
+    ok = rc == 0 && numafter(dry, "FLOW_DRY\tnodes=") == rows; ok2 = 1; ok3 = 0;
+    for (at = t; next_line(&at, &l); ) {
+        const char *bt = t; long od, my = order_pos(dry, l.f[0], l.n[0]);
+        if (!find_row(derive, l.f[0], l.n[0], &d) || !my) { ok = 0; continue; }
+        od = fnum(&d, 6);
+        argv_of(&l, a1, sizeof a1);
+        if (feq(&d, 3, "-")) cx_fmt(a2, sizeof a2, "%.*s", (int)d.n[2], d.f[2]); else cx_fmt(a2, sizeof a2, "%.*s", (int)d.n[3], d.f[3]);
+        if (!tx_eqz(a1, a2)) ok2 = 0;
+        while (next_line(&bt, &m)) if (dep_has(&l, m.f[0], m.n[0])) {      /* m is a dependency of l */
+            Line dm; long p = order_pos(dry, m.f[0], m.n[0]);
+            if (!find_row(derive, m.f[0], m.n[0], &dm) || fnum(&dm, 6) >= od || !p || p >= my) ok = 0;
+            if (feq(&dm, 3, "-")) ok2 = 0;
+            if (feq(&l, 0, "tool-index") && feq(&m, 0, "tables-gen")) ok3 = 1;
+        }
+    }
+    ck(ok, "real-write-dry");
+    ck(ok2, "real-write-argv");
+    ck(ok3, "real-write-edge");
+
+    /* ---- fixture manifest ---- */
+    { char *fx = wf("fix.tsv", FIX), *fc = rd("fix-check.tsv"), *fw = rd("fix-write.tsv"); char la[128], lb[128], lg[128];
+      { char *v[] = {"--mode", "check", "--out", fc, "--derive", fx, 0}; rc = runtool(gen, v, o, sizeof o); }
+      t = slurp(fc);
+      if (rc || !t) die("fixture check table not generated");
+      ok = find_row(t, "alpha", 5, &l); arg_of(&l, "lock", la, sizeof la);
+      ok = ok && find_row(t, "beta", 4, &l); arg_of(&l, "lock", lb, sizeof lb);
+      ok = ok && find_row(t, "gamma", 5, &l); arg_of(&l, "lock", lg, sizeof lg);
+      ok = ok && la[0] && tx_eqz(la, lb) && tx_eqz(la, lg) && tx_eqz(la, "derive-out-alpha") && numafter(o, "locked=") == 3;
+      ok = ok && find_row(t, "delta", 5, &l); arg_of(&l, "lock", a1, sizeof a1); ok = ok && !a1[0];
+      ok = ok && find_row(t, "zeta", 4, &l); arg_of(&l, "lock", a1, sizeof a1); ok = ok && !a1[0];
+      arg_of(&l, "timeout_ms", a1, sizeof a1); ok = ok && tx_eqz(a1, "5000");
+      ok = ok && find_row(t, "gamma", 5, &l); arg_of(&l, "timeout_ms", a1, sizeof a1); ok = ok && tx_eqz(a1, "30000");
+      ck(ok, "fix-lock-same");
+      { char *v[] = {"run", fc, "--dry", 0}; rc = runtool(frun, v, dry, sizeof dry); }
+      ck(rc == 0 && numafter(dry, "FLOW_DRY\tnodes=") == 6, "fix-lock-dry");
+      ok = 1; for (at = t; next_line(&at, &l); ) if (!feq(&l, 2, "-")) ok = 0;
+      { char *v[] = {"--mode", "write", "--out", fw, "--derive", fx, 0}; rc = runtool(gen, v, o, sizeof o); }
+      t = slurp(fw);
+      if (rc || !t) die("fixture write table not generated");
+      /* gamma(3) reads shared/*: alpha(1), beta(2).  eps(4) reads lone/d.tsv (delta writes nothing: "-"),
+         other/b.tsv (beta; gamma's directory other/ holds it), shared/out.tsv (alpha, beta).
+         zeta(4) reads lone/e.tsv but eps has the same order: no edge. */
+      ok = ok && find_row(t, "alpha", 5, &l) && feq(&l, 2, "-") && find_row(t, "beta", 4, &l) && feq(&l, 2, "-");
+      ok = ok && find_row(t, "gamma", 5, &l) && feq(&l, 2, "alpha,beta");
+      ok = ok && find_row(t, "delta", 5, &l) && feq(&l, 2, "-");
+      ok = ok && find_row(t, "eps", 3, &l) && feq(&l, 2, "alpha,beta,gamma");
+      ok = ok && find_row(t, "zeta", 4, &l) && feq(&l, 2, "-") && numafter(o, "edges=") == 5;
+      ck(ok, "fix-deps");
+      /* really run the fixture check table */
+      { char *run = rd("run");
+        char *v[] = {"run", fc, "--run", run, "--echo", 0}; rc = runtool(frun, v, o, sizeof o);
+        ck(rc == 1 && has(o, "\talpha\tok\t") && has(o, "\tbeta\tfail\t") && numafter(o, "\tok=") == 5 && numafter(o, "\tfail=") == 1 &&
+           numafter(o, "\tskip=") == 0 && has(o, "\tgamma\tok\t") && has(o, "\teps\tok\t"), "fix-run-verdicts");
+        { long pb = pos(o, "\tbeta\tfail\t"), r = -1; if (pb >= 0) { const char *q = o + pb + 11; while (*q && *q != '\t') q++; r = *q ? numafter(q, "\t") : -1; } ck(r == 1, "fix-run-fail-rc"); }
+        ck(numafter(o, "\tpeak=") >= 1 && numafter(o, "\tpeak=") <= 4, "fix-run-lock-serial");
+        ck(has(o, "ECHO\tdelta\tbytes=5\na;b%\n"), "fix-encoding"); }
+    }
+
+    /* ---- refusals ---- */
+    { struct { const char *name, *text, *why; } bad[] = {
+          {"refuse-field-count", "a\ttools/a.cx\ttrue\ttrue\to\ti\t1\n", "field-count"},
+          {"refuse-duplicate-name", "a\tg\ttrue\ttrue\to\ti\t1\t5\na\tg\ttrue\ttrue\tp\ti\t2\t5\n", "duplicate-name"},
+          {"refuse-bad-order", "a\tg\ttrue\ttrue\to\ti\tx\t5\n", "bad-order"},
+          {"refuse-bad-bound", "a\tg\ttrue\ttrue\to\ti\t1\t0\n", "bad-bound"} };
+      int i; char *outp = rd("never.tsv");
+      for (i = 0; i < 4; i++) {
+          char *fx = wf("bad.tsv", bad[i].text); char *v[] = {"--mode", "check", "--out", outp, "--derive", fx, 0};
+          rc = runtool(gen, v, o, sizeof o);
+          ck(rc == 2 && has(o, "REFUSE\t") && has(o, bad[i].why) && !slurp(outp), bad[i].name);
+      }
+      { char *v[] = {"--mode", "check", "--out", outp, "--derive", rd("absent.tsv"), 0}; rc = runtool(gen, v, o, sizeof o); ck(rc == 2 && has(o, "unreadable") && !slurp(outp), "refuse-missing-manifest"); }
+      { char *v[] = {"--mode", "both", "--out", outp, 0}; rc = runtool(gen, v, o, sizeof o); ck(rc == 2 && has(o, "REFUSE\tusage") && !slurp(outp), "refuse-bad-mode"); }
+      { char *v[] = {"--mode", "check", 0}; rc = runtool(gen, v, o, sizeof o); ck(rc == 2 && has(o, "REFUSE\tusage"), "refuse-no-out"); }
+    }
+    sy_printf("CHECK_FLOW_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

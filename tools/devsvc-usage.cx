@@ -1,0 +1,157 @@
+/* tools/devsvc-usage.cx -- 度量"所有 agent 只用 devsvc"的达成度,让缺口可见。
+ *
+ *   sh ./unisacc.com tools/devsvc-usage.cx -- [--hours N] [--proj DIR] [--events FILE] [--root DIR]
+ *
+ * (a) 事件侧:读实例事件文件(--events,缺省扫 ~/.cache/unisacc/devsvc/<hash>/events.tsv;不存在则输出 EVENTS none)。
+ *     行格式 EV<TAB>seq<TAB>ts<TAB>kind<TAB>...;kind 取首段(f/x/flow/doc/git/lock/run),owner 取行内 owner=NAME(无则 -)。
+ *     输出 EVENTS owner=O f=n x=n flow=n doc=n git=n lock=n run=n。
+ * (b) 转录侧:DIR(缺省 ~/.claude/projects/-home-devali-repos-unisacc)下 *.jsonl 及 <sid>/subagents/*.jsonl,mtime 在最近 N 小时(缺省 6)。
+ *     工具调用分类:Read/Edit/Write/NotebookEdit 的 file_path 在 ROOT(缺省当前目录)内 -> 原生;
+ *     Bash 命令含 devsvc.cx -> devsvc;否则含 git 词或 unisacc.com -> 原生;其它 Bash 不计。
+ * (c) 每会话一行 SESSION<TAB>名<TAB>devsvc=n<TAB>native=n<TAB>ratio=0.xx<TAB>前 3 个原生样例;
+ *     末行 DEVSVC_USAGE sessions=N devsvc=N native=N ratio=0.xx。 */
+#pragma unisa use text.json
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+typedef struct { char name[120]; int dv, nat, ns; char smp[3][96]; } Sess;
+static Sess ss[512]; static int nss;
+static char root[1024], home[512];
+static int tot_dv, tot_nat;
+
+static int word_at(const char *s, const char *w) {  /* s 中有以非字母数字边界包住的单词 w(git) */
+    size_t n = strlen(w); const char *p = s;
+    while ((p = strstr(p, w))) {
+        int l = (p == s) || !(isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '-' || p[-1] == '.' || p[-1] == '/');
+        int r = p[n] == ' ' || p[n] == 0 || p[n] == '\n';
+        if (l && r) return 1;
+        p += n;
+    }
+    return 0;
+}
+static void sample(Sess *s, const char *tool, const char *txt) {
+    char b[96]; int i;
+    if (s->ns >= 3) return;
+    F(b, sizeof b, "%s:%.80s", tool, txt);
+    for (i = 0; b[i]; i++) if (b[i] == '\t' || b[i] == '\n' || b[i] == '\r') b[i] = ' ';
+    memcpy(s->smp[s->ns++], b, sizeof b);
+}
+static void classify(Sess *s, const char *tool, js_val *in) {
+    const char *fp, *cmd;
+    if (!strcmp(tool, "Read") || !strcmp(tool, "Edit") || !strcmp(tool, "Write") || !strcmp(tool, "NotebookEdit")) {
+        fp = js_str(js_get(in, "file_path")); if (!fp) fp = js_str(js_get(in, "notebook_path"));
+        if (fp && !strncmp(fp, root, strlen(root))) { s->nat++; sample(s, tool, fp); }
+    } else if (!strcmp(tool, "Bash")) {
+        cmd = js_str(js_get(in, "command")); if (!cmd) return;
+        if (strstr(cmd, "devsvc.cx")) s->dv++;
+        else if (word_at(cmd, "git") || strstr(cmd, "unisacc.com")) { s->nat++; sample(s, "Bash", cmd); }
+    }
+}
+static void scan_file(const char *path, const char *label, long since) {
+    sy_stat_t st; void *buf = 0; long n = 0; char *q, *e, err[96]; Sess *s;
+    if (sy_stat(path, &st) || st.mtime < since) return;
+    if (sy_read_file(path, &buf, &n, 1L << 28) || !buf) return;
+    if (nss >= 512) { free(buf); return; }
+    s = &ss[nss]; memset(s, 0, sizeof *s); F(s->name, sizeof s->name, "%s", label);
+    for (q = (char *)buf; q < (char *)buf + n; q = e + 1) {
+        js_val *v, *c; long i;
+        e = memchr(q, '\n', (char *)buf + n - q); if (!e) e = (char *)buf + n;
+        if (e - q < 20) continue;
+        { char sv = *e; int has; *e = 0; has = strstr(q, "\"tool_use\"") != 0; *e = sv; if (!has) continue; }
+        v = js_parse(q, e - q, err, sizeof err); if (!v) continue;
+        c = js_path(v, "message.content");
+        for (i = 0; c && js_kind(c) == JS_ARR && i < js_len(c); i++) {
+            js_val *it = js_at(c, i); const char *ty = js_str(js_get(it, "type")), *nm = js_str(js_get(it, "name"));
+            if (ty && nm && !strcmp(ty, "tool_use")) classify(s, nm, js_get(it, "input"));
+        }
+        js_free(v);
+    }
+    free(buf);
+    if (s->dv || s->nat) { nss++; tot_dv += s->dv; tot_nat += s->nat; }
+}
+static void scan_dir(const char *dir, const char *prefix, long since) {
+    sy_dir_t d; char p[1400], lab[200], sub[1400];
+    if (sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        int nl = (int)d.name_n;
+        F(p, sizeof p, "%s/%s", dir, d.name);
+        if (d.kind == 'f' && nl > 6 && !strcmp(d.name + nl - 6, ".jsonl")) {
+            F(lab, sizeof lab, "%s%.*s", prefix, nl - 6, d.name); scan_file(p, lab, since);
+        } else if (d.kind == 'd' && !prefix[0] && strcmp(d.name, "memory") && strcmp(d.name, "tool-results")) {
+            F(sub, sizeof sub, "%s/subagents", p); F(lab, sizeof lab, "sub:%.8s/", d.name);
+            scan_dir(sub, lab, since);
+        }
+    }
+    sy_dir_close(&d);
+}
+/* 事件侧 */
+typedef struct { char o[64]; int c[7]; } Own;
+static Own ow[64]; static int now_;
+static const char *kinds[7] = {"f", "x", "flow", "doc", "git", "lock", "run"};
+static int scan_events(const char *path) {
+    void *buf = 0; long n = 0; char *q, *e; int got = 0;
+    if (sy_read_file(path, &buf, &n, 1L << 26) || !buf) return 0;
+    for (q = (char *)buf; q < (char *)buf + n; q = e + 1) {
+        char kind[32], o[64]; char *t[5]; int k, i, w; Own *x;
+        e = memchr(q, '\n', (char *)buf + n - q); if (!e) e = (char *)buf + n;
+        { char sv = *e; *e = 0;
+          if (!strncmp(q, "EV\t", 3)) {
+            t[0] = q;
+            for (i = 0; i < 4 && t[i]; i++) { t[i + 1] = strchr(t[i], '\t'); if (t[i + 1]) t[i + 1]++; }
+            if (t[3]) {
+                char *a = strstr(t[3], "owner="); w = 0;
+                for (i = 0; t[3][i] && t[3][i] != '\t' && t[3][i] != '.' && i < 31; i++) kind[w++] = t[3][i];
+                kind[w] = 0;
+                if (a) { for (i = 0, a += 6; a[i] && a[i] != '\t' && a[i] != ' ' && i < 63; i++) o[i] = a[i]; o[i] = 0; } else F(o, sizeof o, "-");
+                for (k = 0; k < 7 && strcmp(kind, kinds[k]); k++) ;
+                if (k < 7) {
+                    for (x = ow; x < ow + now_ && strcmp(x->o, o); x++) ;
+                    if (x == ow + now_ && now_ < 64) { memset(x, 0, sizeof *x); F(x->o, sizeof x->o, "%s", o); now_++; }
+                    if (x < ow + now_) { x->c[k]++; got++; }
+                }
+            }
+          }
+          *e = sv; }
+    }
+    free(buf);
+    return got;
+}
+static void scan_events_default(void) {
+    char base[700], p[1100]; sy_dir_t d; int got = 0;
+    F(base, sizeof base, "%s/.cache/unisacc/devsvc", home);
+    if (sy_dir_open(&d, base)) return;
+    while (sy_dir_next(&d) == 1) if (d.kind == 'd') { F(p, sizeof p, "%s/%s/events.tsv", base, d.name); got += scan_events(p); }
+    sy_dir_close(&d);
+}
+int main(int argc, char **argv) {
+    long hours = 6, since; int i; char proj[1100]; const char *evf = 0, *h;
+    h = getenv("HOME"); F(home, sizeof home, "%s", h ? h : "/root");
+    if (!sy_cwd(root, sizeof root)) {} else root[0] = 0;
+    F(proj, sizeof proj, "%s/.claude/projects/-home-devali-repos-unisacc", home);
+    for (i = 1; i + 1 < argc; i += 2) {
+        if (!strcmp(argv[i], "--hours")) hours = atol(argv[i + 1]);
+        else if (!strcmp(argv[i], "--proj")) F(proj, sizeof proj, "%s", argv[i + 1]);
+        else if (!strcmp(argv[i], "--events")) evf = argv[i + 1];
+        else if (!strcmp(argv[i], "--root")) F(root, sizeof root, "%s", argv[i + 1]);
+        else { fprintf(stderr, "devsvc-usage: REFUSE unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (hours < 1 || !root[0]) { fprintf(stderr, "devsvc-usage: REFUSE bad hours/root\n"); return 2; }
+    since = sy_now_ms() / 1000 - hours * 3600;
+    if (evf) scan_events(evf); else scan_events_default();
+    if (!now_) printf("EVENTS\tnone\n");
+    for (i = 0; i < now_; i++)
+        printf("EVENTS\towner=%s\tf=%d\tx=%d\tflow=%d\tdoc=%d\tgit=%d\tlock=%d\trun=%d\n", ow[i].o, ow[i].c[0], ow[i].c[1], ow[i].c[2], ow[i].c[3], ow[i].c[4], ow[i].c[5], ow[i].c[6]);
+    scan_dir(proj, "", since);
+    for (i = 0; i < nss; i++) {
+        Sess *s = &ss[i]; int t = s->dv + s->nat;
+        printf("SESSION\t%s\tdevsvc=%d\tnative=%d\tratio=%.2f", s->name, s->dv, s->nat, t ? (double)s->dv / t : 0.0);
+        for (int k = 0; k < 3; k++) printf("\t%s", k < s->ns ? s->smp[k] : "-");
+        printf("\n");
+    }
+    printf("DEVSVC_USAGE sessions=%d devsvc=%d native=%d ratio=%.2f\n", nss, tot_dv, tot_nat, tot_dv + tot_nat ? (double)tot_dv / (tot_dv + tot_nat) : 0.0);
+    return 0;
+}

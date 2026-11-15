@@ -1,0 +1,146 @@
+/* tools/check-rel.cx -- tools/rel.cx must answer who-uses and impact exactly as tools/affected.cx does.
+ *
+ *   sh ./unisacc.com tools/check-rel.cx      (from the repo root; work dir $TMPDIR/check-rel-<pid>)
+ *
+ * Fixture cases (a private root with five .cx files, a tracked list, a closure dump and a registry):
+ *   who-uses-transitive       a uses b, b includes c: who-uses c is a and b, in list order, scanned=4
+ *   who-uses-skips            a symlink entry and an archive/ entry of the list are neither scanned nor users
+ *   who-uses-none-rc1         a file nobody uses: users=0, rc 1
+ *   impact-strongest-via      per batch the strongest via; two files: first file on a tie, why names the file
+ *   impact-dir-literal        a D (directory literal) line matches a file below it, even one that does not exist
+ *   impact-not-applicable     a hit batch of another platform is NOT_APPLICABLE and counted, not IMPACT
+ *   impact-none-rc1           no batch holds the file: rc 1
+ *   refuse-*                  no arguments, unknown option (--tier is not in this version), missing file,
+ *                             missing dump, C line before any B line, unknown via, dump batch absent from the
+ *                             registry, registry row without a platform column: rc 2 each
+ * Real cases (this checkout, cx/sys/fs.cx):
+ *   real-who-uses-equals-affected-users   USES lines == affected --users USER lines, same order
+ *   real-impact-equals-affected           IMPACT batch / NOT_APPLICABLE lines == affected --files AFFECTED /
+ *                                         NOT_APPLICABLE lines (id, why, via, platform), same order
+ * Ends with CHECK_REL<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+enum { OCAP = 1 << 21 };
+static int failed;
+static char root[4096], com[4500], tool[4500], wd[1024], fx[1200];
+static char out[OCAP], o2[OCAP], c1[OCAP], c2[OCAP];
+
+static void die(const char *s) { fprintf(stderr, "check-rel: REFUSE %s\n", s); exit(2); }
+static void ck(int ok, const char *n) { printf("%s\tcheck-rel.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, OCAP), w, tx_len(w, 1 << 16)) >= 0; }
+static int bounded_run(char **argv, int secs, char *out, int cap) {
+    char *w[64], *b = 0; size_t n = 0, j; int k = 0, i, rc;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -1;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (n > (size_t)cap - 1) n = (size_t)cap - 1;
+    for (j = 0; b && j < n; j++) out[j] = b[j];
+    out[b ? n : 0] = 0;
+    free(b);
+    return rc;
+}
+static int rel(char **args, char *out) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 23; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, out, OCAP); }
+static int shc(const char *cmd, char *out) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return bounded_run(v, 50, out, OCAP); }
+static char *pth(const char *base, const char *name) {
+    static char p[16][1400]; static int k; char *q = p[k++ & 15];
+    if (cx_fmt(q, 1400, "%s/%s", base, name)) die("path");
+    return q;
+}
+static char *wf(const char *base, const char *name, const char *text) {
+    char *q = pth(base, name);
+    if (sy_write_file(q, text, (long)strlen(text), 0644)) die("cannot write fixture");
+    return q;
+}
+/* every line of TEXT that starts with PREFIX, as TAG + the rest of the line, into OUT; the number of lines */
+static int collect(char *out, long *on, const char *text, const char *prefix, const char *tag) {
+    size_t pn = strlen(prefix), tn = strlen(tag); int n = 0; const char *p = text;
+    while (*p) {
+        const char *e = strchr(p, '\n'); size_t ln = e ? (size_t)(e - p) : strlen(p);
+        if (ln >= pn && !memcmp(p, prefix, pn)) {
+            if (*on + (long)(tn + ln - pn) + 2 >= OCAP) die("collect overflow");
+            if (mm_copy(out + *on, OCAP - *on, tag, (long)tn)) die("collect overflow"); *on += (long)tn; if (mm_copy(out + *on, OCAP - *on, p + pn, (long)(ln - pn))) die("collect overflow"); *on += (long)(ln - pn); out[(*on)++] = '\n'; n++;
+        }
+        p += ln + (e ? 1 : 0);
+    }
+    out[*on] = 0;
+    return n;
+}
+
+int main(void) {
+    char *tracked, *dump, *reg, *bad, cmd[12000]; int rc, n1, n2; long l1, l2;
+    if (sy_cwd(root, (int)sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/rel.cx", root)) die("no root");
+    if (sy_exists(com) != 1) die("run from a root that holds unisacc.com");
+    if (cx_fmt(wd, sizeof wd, "%s/check-rel-%d", sy_tmpdir(), (int)getpid()) || cx_fmt(fx, sizeof fx, "%s/root", wd)) die("work dir");
+    if (sy_mkdir(wd, 0755) || sy_mkdir(fx, 0755) || sy_mkdir(pth(fx, "archive"), 0755)) die("cannot make work dir");
+    wf(fx, "a.cx", "#pragma unisa use b\nint a;\n");
+    wf(fx, "b.cx", "  #include \"c.cx\"\nint b;\n");
+    wf(fx, "c.cx", "int c;\n");
+    wf(fx, "e.cx", "/* #pragma unisa use c */\nint e;\n");
+    wf(fx, "archive/x.cx", "#include \"../c.cx\"\n");
+    tracked = wf(wd, "tracked.txt", "100644 aa 0\ta.cx\n100644 aa 0\tarchive/x.cx\n100644 aa 0\tb.cx\n100644 aa 0\tc.cx\n120000 aa 0\tlink.cx\n100644 aa 0\te.cx\n");
+    dump = wf(wd, "closure.tsv",
+        "B\tb1\tcommit\t-\ta.cx\nC\tb1\tsource\ta.cx\nC\tb1\tuse\tc.cx\n"
+        "B\tb2\tdaily\t-\te.cx\nC\tb2\tsource\te.cx\nC\tb2\tliteral\tc.cx\nD\tb2\tliteral\tdata/sub\n"
+        "B\tb3\tdaily\t-\tb.cx\nC\tb3\tuse\tc.cx\nCLOSURE_SUMMARY\tfiles=3\n");
+    reg = wf(wd, "batches.tsv",
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\n"
+        "b1\tIMPLEMENTED\tinterfaces\ta.cx\tSOURCE\tlnx/x86_64\t55\n"
+        "b2\tIMPLEMENTED\tinterfaces\te.cx\tSOURCE\tlnx/x86_64\t55\n"
+        "b3\tIMPLEMENTED\tinterfaces\tb.cx\tSOURCE\tosx/arm64\t55\n");
+
+    { char *a[] = {"who-uses", "c.cx", "--root", fx, "--tracked", tracked, 0}; rc = rel(a, out);
+      ck(rc == 0 && has(out, "USES\ta.cx\nUSES\tb.cx\nUSES_SUMMARY\tfile=c.cx\tusers=2\tscanned=4\n"), "who-uses-transitive");
+      ck(rc == 0 && !has(out, "archive/") && !has(out, "link.cx") && !has(out, "USES\te.cx"), "who-uses-skips"); }
+    { char *a[] = {"who-uses", "e.cx", "--root", fx, "--tracked", tracked, 0}; rc = rel(a, out);
+      ck(rc == 1 && has(out, "USES_SUMMARY\tfile=e.cx\tusers=0\tscanned=4\n") && !has(out, "USES\t"), "who-uses-none-rc1"); }
+    { char *a[] = {"impact", "e.cx", "c.cx", "--root", fx, "--closure", dump, "--batches", reg, 0}; rc = rel(a, out);
+      ck(rc == 0 && has(out, "IMPACT\tbatch\tb1\twhy=c.cx\tvia=use\nIMPACT\tbatch\tb2\twhy=e.cx\tvia=source\n"), "impact-strongest-via");
+      ck(rc == 0 && has(out, "NOT_APPLICABLE\tb3\tplatform=osx/arm64\thost_scope=lnx/x86_64\nIMPACT_SUMMARY\tchanged=2\tbatches=2\tscanned=3\tnot_applicable=1\n") && !has(out, "IMPACT\tbatch\tb3"), "impact-not-applicable"); }
+    { char *a[] = {"impact", "data/sub/gone.tsv", "--root", fx, "--closure", dump, "--batches", reg, 0}; rc = rel(a, out);
+      ck(rc == 0 && has(out, "IMPACT\tbatch\tb2\twhy=data/sub/gone.tsv\tvia=literal\nIMPACT_SUMMARY\tchanged=1\tbatches=1\tscanned=3\tnot_applicable=0\n"), "impact-dir-literal"); }
+    { char *a[] = {"impact", "b.cx", "--root", fx, "--closure", dump, "--batches", reg, 0}; rc = rel(a, out);
+      ck(rc == 1 && has(out, "IMPACT_SUMMARY\tchanged=1\tbatches=0\tscanned=3\tnot_applicable=0\n"), "impact-none-rc1"); }
+
+    { char *a[] = {"impact", 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-no-arguments"); }
+    { char *a[] = {"impact", "c.cx", "--tier", "commit", "--root", fx, "--closure", dump, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "rel: usage"), "refuse-unknown-option"); }
+    { char *a[] = {"who-uses", "nosuch.cx", "--root", fx, "--tracked", tracked, 0}; ck(rel(a, out) == 2 && has(out, "no file"), "refuse-missing-file"); }
+    { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", pth(wd, "nosuch.tsv"), "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "cannot read closure dump"), "refuse-missing-dump"); }
+    bad = wf(wd, "bad1.tsv", "C\tb1\tuse\tc.cx\nB\tb1\tcommit\t-\ta.cx\n");
+    { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", bad, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "malformed closure dump line"), "refuse-c-before-b"); }
+    bad = wf(wd, "bad2.tsv", "B\tb1\tcommit\t-\ta.cx\nC\tb1\tbogus\tc.cx\n");
+    { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", bad, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "unknown via"), "refuse-unknown-via"); }
+    bad = wf(wd, "bad3.tsv", "B\tb9\tcommit\t-\ta.cx\nC\tb9\tuse\tc.cx\n");
+    { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", bad, "--batches", reg, 0}; ck(rel(a, out) == 2 && has(out, "registry does not hold") && has(out, "b9"), "refuse-stale-dump-batch"); }
+    bad = wf(wd, "bad4.tsv", "id\timplementation\nb1\tIMPLEMENTED\n");
+    { char *a[] = {"impact", "c.cx", "--root", fx, "--closure", dump, "--batches", bad, 0}; ck(rel(a, out) == 2 && has(out, "without a platform column"), "refuse-registry-short-row"); }
+
+    /* real: this checkout */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git ls-files -s -- '*.cx' > '%s/real-tracked.txt'", root, wd)) die("cmd");
+    rc = shc(cmd, out);
+    { char *a[] = {"who-uses", "cx/sys/fs.cx", "--root", root, "--tracked", pth(wd, "real-tracked.txt"), 0}; int r2 = rel(a, out);
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --users cx/sys/fs.cx", root)) die("cmd");
+      rc = rc || shc(cmd, o2) || r2;
+      l1 = l2 = 0; n1 = collect(c1, &l1, out, "USES\t", ""); n2 = collect(c2, &l2, o2, "USER\t", "");
+      printf("REAL\twho-uses\trel=%d\taffected=%d\n", n1, n2);
+      ck(!rc && n1 > 0 && n1 == n2 && !strcmp(c1, c2), "real-who-uses-equals-affected-users"); }
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --closure-dump > '%s/real-closure.tsv' 2>/dev/null", root, wd)) die("cmd");
+    rc = shc(cmd, out);
+    { char *a[] = {"impact", "cx/sys/fs.cx", "--root", root, "--closure", pth(wd, "real-closure.tsv"), 0}; int r2 = rel(a, out), m1, m2;
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --files cx/sys/fs.cx --list-only", root)) die("cmd");
+      rc = rc || shc(cmd, o2) || r2;
+      l1 = l2 = 0; n1 = collect(c1, &l1, out, "IMPACT\tbatch\t", "A\t"); n2 = collect(c2, &l2, o2, "AFFECTED\t", "A\t");
+      ck(!rc && n1 > 0 && n1 == n2 && !strcmp(c1, c2), "real-impact-equals-affected");
+      l1 = l2 = 0; m1 = collect(c1, &l1, out, "NOT_APPLICABLE\t", "N\t"); m2 = collect(c2, &l2, o2, "NOT_APPLICABLE\t", "N\t");
+      printf("REAL\timpact\trel=%d\taffected=%d\tnot_applicable_rel=%d\tnot_applicable_affected=%d\n", n1, n2, m1, m2);
+      ck(!rc && m1 == m2 && !strcmp(c1, c2), "real-not-applicable-equals-affected"); }
+    printf("CHECK_REL\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,93 @@
+/* Checks ext.textx json.cx: parse/accessors/path/escape, strict rejects, surrogates, depth, truncation, speed. */
+#pragma unisa use text.json
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+static int bad, total;
+static void ok(int c, const char *name) { total++; printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad++; }
+static int rej(const char *s, const char *name) {
+    char e[96]; js_val *v = js_parse(s, (long)strlen(s), e, sizeof e);
+    ok(v == 0 && memcmp(e, "offset ", 7) == 0, name);
+    js_free(v);
+    return v == 0;
+}
+static int acc(const char *s, const char *name) {
+    char e[96]; js_val *v = js_parse(s, (long)strlen(s), e, sizeof e);
+    ok(v != 0, name);
+    js_free(v);
+    return v != 0;
+}
+int main(void) {
+    char e[96], buf[256]; long ol = 0; js_val *v; int i;
+    const char *t = "{\"message\":{\"role\":\"user\",\"content\":\"hi\\n\\\"x\\\"\"},\"n\":-12.5e1,\"ok\":true,\"z\":null,\"a\":[1,[2,3],{\"k\":\"v\"}]}";
+    v = js_parse(t, (long)strlen(t), e, sizeof e);
+    ok(v && js_kind(v) == JS_OBJ && js_len(v) == 5, "obj-parse");
+    ok(js_str(js_path(v, "message.content")) && strcmp(js_str(js_path(v, "message.content")), "hi\n\"x\"") == 0, "path-content-unescaped");
+    ok(js_num(js_get(v, "n")) == -125.0, "num-exp");
+    ok(js_kind(js_get(v, "ok")) == JS_BOOL && js_bool(js_get(v, "ok")) == 1, "bool");
+    ok(js_kind(js_get(v, "z")) == JS_NULL, "null");
+    ok(js_len(js_get(v, "a")) == 3 && js_num(js_at(js_at(js_get(v, "a"), 1), 1)) == 3.0, "arr-at");
+    ok(strcmp(js_str(js_path(v, "a.2.k")), "v") == 0, "path-array-index");
+    ok(js_path(v, "a.9") == 0 && js_path(v, "message.nope") == 0 && js_get(v, "missing") == 0, "path-miss");
+    ok(js_at(0, 0) == 0 && js_kind(0) == JS_NONE && js_str(js_get(v, "n")) == 0, "null-safe");
+    js_free(v);
+    acc(" [ ] ", "ws-empty-arr");
+    acc("\"\"", "empty-str-scalar");
+    acc("0", "zero");
+    acc("-0.0e-0", "neg-zero-exp");
+    acc("{\"a\":{}}", "nested-empty-obj");
+    rej("", "rej-empty");
+    rej("{\"a\":1} x", "rej-trailing");
+    rej("[1,]", "rej-trailing-comma");
+    rej("01", "rej-leading-zero");
+    rej("1.", "rej-frac-no-digit");
+    rej(".5", "rej-dot-start");
+    rej("+1", "rej-plus");
+    rej("1e", "rej-exp-no-digit");
+    rej("-", "rej-minus-only");
+    rej("\"a\tb\"", "rej-raw-control");
+    rej("\"\\x\"", "rej-bad-escape");
+    rej("\"abc", "rej-unterminated");
+    rej("{a:1}", "rej-unquoted-key");
+    rej("tru", "rej-bad-literal");
+    rej("NaN", "rej-nan");
+    v = js_parse("[1, 2 x]", 8, e, sizeof e);
+    ok(v == 0 && memcmp(e, "offset 6:", 9) == 0, "err-offset-6");
+    v = js_parse("\"\\ud83d\\ude00\\u00e9\\u4e2d\"", 26, e, sizeof e);
+    ok(v && js_str_len(v) == 9 && memcmp(js_str(v), "\xf0\x9f\x98\x80\xc3\xa9\xe4\xb8\xad", 9) == 0, "surrogate-pair-utf8");
+    js_free(v);
+    rej("\"\\ud83d\"", "rej-lone-high");
+    rej("\"\\ude00\"", "rej-lone-low");
+    rej("\"\\ud83d\\u0041\"", "rej-high-then-nonlow");
+    rej("\"\\u12g4\"", "rej-bad-hex");
+    {
+        char d[400]; int k;
+        for (k = 0; k < 128; k++) d[k] = '['; for (k = 0; k < 128; k++) d[128 + k] = ']';
+        v = js_parse(d, 256, e, sizeof e); ok(v != 0, "depth-128-ok"); js_free(v);
+        for (k = 0; k < 129; k++) d[k] = '['; for (k = 0; k < 129; k++) d[129 + k] = ']';
+        v = js_parse(d, 258, e, sizeof e); ok(v == 0 && strstr(e, "depth") != 0, "depth-129-rejected");
+    }
+    i = js_esc(buf, sizeof buf, "a\"b\\\n\x01", 6, &ol);
+    ok(i == 1 && strcmp(buf, "a\\\"b\\\\\\n\\u0001") == 0 && ol == 14, "esc-full");
+    i = js_esc(buf, 4, "ab\"cd", 5, &ol);
+    ok(i == 0 && strcmp(buf, "ab") == 0 && ol == 2, "esc-truncated-whole-escape");
+    ok(js_esc(buf, 1, "", 0, &ol) == 1 && buf[0] == 0, "esc-empty");
+    ok(js_esc(0, 4, "a", 1, &ol) == -1, "esc-bad-args");
+    {
+        static char big[420000]; long n = 0, lines = 0, okc = 0, t0, t1; const char *row = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello \\u4e2d world\"}]},\"n\":12345}\n";
+        long rl = (long)strlen(row), st = 0, k;
+        while (n + rl < (long)sizeof big - 1) { mm_copy(big + n, (long)sizeof big - n, row, rl); n += rl; lines++; }
+        t0 = sy_now_ms();
+        for (k = 0; k < n; k++) if (big[k] == '\n') {
+            js_val *x = js_parse(big + st, k - st, e, sizeof e);
+            if (x && js_str(js_path(x, "message.content.0.text"))) okc++;
+            js_free(x); st = k + 1;
+        }
+        t1 = sy_now_ms();
+        printf("perf\tbytes=%ld\tlines=%ld\tms=%ld\n", n, lines, (t1 - t0));
+        ok(okc == lines, "perf-all-lines-parsed");
+        ok((t1 - t0) < 200, "perf-400kb-under-200ms");
+    }
+    printf("total=%d failed=%d\n", total, bad);
+    printf("%s\n", bad ? "JSON_CHECK FAIL" : "JSON_CHECK");
+    return bad;
+}

@@ -1,74 +1,89 @@
 # 记忆宫殿(地图)
 
-本文件是地图,不是账本。每个房间只放一句现状和证据入口;过程、取证、采样、重跑记录不进来,放在提交说明、链日志目录或 archive/。2026-11-14 之前的全文在 archive/prd_mempalace-2026-11-14.md(按节名查)。
+本文件是一张图加少量规则,不是账本。主体是下面的流程图:节点是房间(现状一句),连线是依赖与去向,入口写在节点里;过程、取证、重跑记录不进来,放提交说明、链日志目录或 archive/。2026-11-14 之前的全文在 archive/prd_mempalace-2026-11-14.md。
 
 ## 写法规则
 
-- 一个房间不超过 3 行:现状一句,入口(路径、命令、提交号),下一步一句。
-- 只写三类:别人必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
-- 子代理不提交本文件,结论放回报;主调度只在里程碑(整链结束、公开、装机完成)改一次。
-- 版本序只在 build/version-seq.tsv 定义,本文件不手写版本对照。
+- 改图只改节点文字或连线,一个节点一句现状加一个入口;过程不入图。
+- 只记三类:别人必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
+- 子代理不提交本文件;主调度只在里程碑(整链结束、公开、装机完成)改一次。
+- 版本序在 build/version-seq.tsv,版本内容与验收在 prd.md 版本表,未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 供 tools/observe-agents.cx 读取。
 
-## 当前位置
+## 地图
 
-- 版本:0.0.65 已公开(2026-11-14T18:02:31Z,Latest,已装,APE sha 889dfe853837d80b)。冻结 REV b7520b8e81,F=c43ba16b01(v0.0.65 与 v0.0.65-src),X=cb1421d99f,Y1=ecd4201d42,Y2=7c219edbc3;整链 real8 一次跑通 rc=0 3694 s;CI run 43620762916 十作业全 success;裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。证据 $CLAUDE_JOB_DIR/tmp/rel65y/。回滚:release/rollback.txt;0.0.63 备份 ~/.cache/unisacc/ape-0.0.63(sha 04b85e6e)。内容:cxmod 三源统一、D1a export、链工具三项(环境白名单、g2 金丝雀、看门狗)。
-- 0.0.66 已公开(2026-11-14T23:12:18Z,Latest,已装,APE sha 75c4e940):整链 real9 rc=0 3676 s(REV 24bfc44c70);F=e96881d77d(v0.0.66 与 v0.0.66-src),X=9722945843,Y1=176e10114f,Y2=7870a5256e;CI run 43648734577 十作业全 success;s9 329 批 310/7/12,无产品回归;裁决 NOT_QUALIFIED unknown=1。回滚 release/rollback.txt,备份 ~/.cache/unisacc/ape-0.0.65。证据 $CLAUDE_JOB_DIR/tmp/rel66/、/tmp/s966/。待修(下一版分支):surface-doc-gen 与 dock-audit 树内漂移、s9-native 缓存键不含依赖模块、candidate-chain 材料未接线连带同片 6 批不执行。会话根 /tmp/unisacc-session-build-lr0060 曾于 11-15 02:14 至 05:20 被未查明者整删,已按配方重建。
-- 上一版 0.0.63:2026-11-14T14:12:06Z 公开,F=9f3d367e44,APE sha 04b85e6e;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62。
-- 0.0.67(分支 v0.0.67,领先 main 14 提交,8ac1789b39):R3 与随行小修全部入库(s9-native 缓存键、candidate-chain 材料、两处漂移、speed-probe 落盘、release-sweep、s9-shards 符号链接根、no-out-snap、affected 平台过滤)、加速方案 A 第 1 至 3 步;下一步:冻结合入 main、chain-ready、起整链(依赖已变,用新输出目录)。未验:R3 的 9 败只凭文案判定、commit-own 批 UNKNOWN、加速待放开 chain-run width=1 互斥。
-- 0.0.68(分支 v0.0.68,进行中):L4 零解码实现中(omp-cdx;首步实测布局段 36.8 ms);库包改进 A 派生表一条命令闭环(子代理);check-lower-fnreuse 已入 4423d9bccf。随行顺序与验收见 prd.md 版本表。
-- 编排:omp-go、omp-cdx 两窗口经 bin/mux envelope 派工,子代理至多 2 个;写域互不相交,版本工作目录根放 unisacc.com 符号链接。
-- 0.0.65 已知缺口(发布说明已写):s9 325 批 309/12/4,7 项为 s9 根内候选缺可执行位的准备失误(单跑通过);tlib-prep-refuse 为看门狗提交引入的工具依赖缺陷;candidate-chain 批超 55 s 预算待拆批;看门狗未给基线致 44 次误判;已装编译器对大型二维自动数组报 not covered(最小复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
+```mermaid
+flowchart LR
+  subgraph 版本流水线
+    V66["0.0.66 已公开,备份 ~/.cache/unisacc/ape-0.0.66"]
+    V67["0.0.67 已公开 Latest 已装(APE a99ea71d)<br/>release/、plans/release-notes-0.0.67.md"]
+    V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
+    V69["0.0.69 prune 原样判定前置(性能 R1)"]
+    V70["0.0.70 cxmod 内存安全乙期"]
+    V71["0.0.71 链接单元一期(性能 R2)"]
+    V72["0.0.72 netraw"]
+    ECO["0.0.73 至 0.0.76 生态门路线(建议)<br/>G0 推算 0.0.76<br/>prd_cx.md 0.9"]
+    PERF["0.0.77 执行器吞吐、0.0.78 链接单元二期<br/>prd.md 候选池 性能新方向"]
+    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> ECO --> PERF
+  end
+  subgraph 发布
+    REL["发布 12 步与回滚<br/>release/rollback.txt、archive 起链配方节"]
+    Q["裁决恒 NOT_QUALIFIED unknown=1<br/>s9 daily/release 未跑通<br/>release/decision.txt"]
+  end
+  subgraph 质量门
+    GATE["棘轮 13、derive 9、chain-ready 9 项<br/>tools/ratchets.cx、tools/derive.cx、tools/chain-ready.cx"]
+    TEST["测试入口 tests/run.cx<br/>tests/batches.tsv、tests/coverage.tsv"]
+    UV["仍未验证 12 条<br/>build/state-unverified.tsv"]
+  end
+  subgraph 设计与规划
+    PRD["结构与路线、候选池(加速 A 至 P)<br/>prd.md"]
+    CX["cx 设计与库包审视<br/>prd_cx.md 0.2 节"]
+    SPEC["cx 使用规范与库包一览<br/>prd_cx_spec.md 3.4a"]
+    SPEED["速度只认四工具<br/>build/speed-baseline.tsv"]
+  end
+  subgraph 编排
+    ORCH["主调度 cc;窗口 omp-go、omp-cdx 经 bin/mux envelope;子代理至多 2"]
+    WT["版本工作目录 .claude/worktrees/v0.0.NN"]
+  end
+  V67 --> REL --> Q
+  V68 --> GATE
+  GATE --> V67
+  TEST --> GATE
+  UV --> Q
+  PRD --> V68
+  CX --> V70
+  SPEC --> CX
+  SPEED --> V68
+  ORCH --> WT --> V68
+```
 
 ## 决定(别人必须遵守)
 
-- 版本号跳过 0.0.64:0.0.63 之后是 0.0.65。入口:build/version-seq.tsv。
-- 起整链的环境只设 UNISACC_IDENT_HELPER,不设 UNISACC_RUN_CACHE 与 UNISACC_CACHE_DIR(RUN_CACHE=0 经 cx/runtime/modelcache.cx mc_off() 关掉模型缓存,real7 因此在 g2 两次超 90 s)。
-- 起链配方与 0.0.62 发布 12 步:见 archive/prd_mempalace-2026-11-14.md 的"起整链的做法"与"0.0.62 发布实际做法"两节;发布说明占位由 tools/notes-fill.cx 填。
-- own-leak 补丁不与 cxmod 同候选,顺延 0.0.68;s2 补丁先过 F11 预演再入 main。
-- 继承截止只有一个读取帮手(2026-11-15,瓶颈整改 N):.cx 侧一律调 `tools/cxlib/boundenv.cx` 的 `be_deadline(&at,&why)`,三码合约 1 可用未来值 / 0 未设或空 / -1 设了但非正数或已过期或读不钟;`be_name` 是变量名唯一拼写处。新写任何 .cx 不得裸读 `UNISACC_BOUND_DEADLINE_MONO`,`tools/check-boundenv.cx` 扫全仓裸读并把帮手自身、`tools/affected.cx`、`tools/dev-run.cx`(已有自身判定)、`tools/check-*`、`tests/fixtures/`、`archive/` 列为豁免。`tools/bound.c:422` 是设值方且属宿主 C,为已知遗留(文件头注与本条具名),清它要动宿主 C,另立条目。chain-ready 第 10 项 `10-envhygiene` 把继承截止已过期或非数、或 UNISACC_RUN_CACHE/UNISACC_CACHE_DIR 已设判具名 FAIL 且 READY=no;bound 窗口内的可用未来值 PASS。
-- 版本分支(项目所有者 2026-11-14 试行):main 只做集成与发布;开发中版本各一条分支 v0.0.NN,工作目录 .claude/worktrees/v0.0.NN;一条分支只放一类大改,冻结时合入 main。0.0.65(cxmod 三源类)分支在建。规则全文见 AGENTS.md"版本分支"条。
-- 整链会话根 /tmp/unisacc-session-build-lr0060 在链运行与发布期间勿删(11-15 曾被未查明者整删);清理只由主调度在公开后做,再犯即上钩子拦截。
-- 子代理用 sed -i、printf >> 等写仓内文件属违例;guard-edit.ts 已补 `cd 目录 && sed -i` 与 `sh -c` 漏洞。
-
-## 阻塞发布
-
-- 0.0.63 已公开;s9 commit 档 321 批 313 PASS、6 FAIL、2 UNKNOWN(derive、tlib-frozen 已在 main 41a15ffc7f 修;release-usage 待单跑;其余三个为冻结根环境造成),发布说明已如实写。
-- s9 commit 档按设计恒为 UNKNOWN,裁决预计 NOT_QUALIFIED unknown=1;daily 与 release 档未跑。入口:release/decision.txt。
+- 版本号跳过 0.0.64。入口 build/version-seq.tsv。
+- 起整链的环境只设 UNISACC_IDENT_HELPER,不设 UNISACC_RUN_CACHE 与 UNISACC_CACHE_DIR。
+- 版本分支:main 只做集成与发布,一分支一类大改。全文 AGENTS.md。
+- 整链会话根在链运行与发布期间勿删,清理只由主调度在公开后做。
+- 改产品源的验收必须含引导编译器(bootstrap-0.0.59)多单元编译,不只已装产品 -c。
+- 写仓内文件只用 Edit/Write 或 .cx 工具。
+- devsvc 主能力已可用(2026-11-15):基础版 1b1b4c4b94、flow 引擎 cbfbb3bd66(flowrun、flowexec、flowfile),omp-go 已持 registry 锁完成登记协同(54eaf4b064)。
+- 仓开发服务 devsvc 为当前最高优先的工具线(项目所有者 2026-11-15):基础版落地后所有 agent 改用其写窗口锁与 run,不再靠信封排窗口;路线见 prd.md 候选池 T;成熟后独立成"智能体伴侣"产品并可替代 moltbaby 的 mapp,devsvc 为暂定名;核心不写死本仓路径。
+- 仓内的门(precommit、register、derive、ratchets、affected、tlib bump)逐步迁入 devsvc 成为增量并发的 flow 节点,判定强度不降,先对拍再切换(prd.md 候选池 T)。
+- build/ 只留构建 unisacc.com 用的表;仓开发元数据改由 devsvc 维护与查询,flow 与关系 DAG 稳定后逐表迁出(先等价对拍再切读者再移除),见 prd.md 候选池 T 决定。
+- devsvc 开发只由主调度 cc 及其子代理负责(项目所有者 2026-11-15);omp-go、omp-cdx 专做 unisacc.com 产品与版本线,只作为 devsvc 使用者提缺口,不改 devsvc 源码。
+- prd*.md 与 plans/*.md 由 devsvc 文档接口接管(项目所有者 2026-11-15):devsvc doc 子命令与 flow 的 doc.* 算子落地后,所有 agent 只经接口改,不再直接编辑。
+- 自 0.0.68 起 s9 commit 档不挡公开:冻结后与整链并行跑,结果补记 release/evidence.tsv,新增 FAIL 走补丁版(prd.md 候选池 Q)。
 
 ### 仍未验证(缺什么 / 清零动作)
 
-- 新产品验证:cx-namespace 三缺口具名拒绝,需新产品复跑 tests/cx-namespace.cx。
 - check-stdio-buffer:不覆盖 --link-only 与子集编译的缓存一致性,tty 路径未测。
-- 速度基线:冻结候选与装机后产品的同口径重测未做;装机后各跑一次入表。
-- 整链耗时:real7 三段累计,与 real6 的 3752 s 不可直接比。
 - osx cache-manager:借用副本来源未证实,候选上首次 osx 实跑核来源。
 - tsv-lint 不稳:同日三次实跑 PASS、FAIL、PASS,未定因。
 - wt-gate-probe 为 PLANNED:链路超 55 s 批次上限,6 条断言未验证。
 - slice-migration-gen:source-missing cx/compiler/frames.cx 旧记述,待复核。
 - affected-iface2 批次未取得实跑结果:待跑。
-- -c 对象复用:装机产品上 UNISACC_REQUIRE_N15C=1 硬模式断言未跑。
 - 已入库工具中 tools/status.cx 的测试夹具曾被 sed -i 改过,内容未重审。
-- cx 模块语法缺口:`use m::sym as alias`,先修别名(cxmod 三源产品输入)。
-- cx 模块身份缺口:软链 tools/cxlib/sys -> cx/sys 被当两个模块,排在别名修复之后。
-- 仓库根 out/:逐项迁移到 sy_tmpdir 并出信封,清单见归档同名条。
-- 候选审查 cxmod 三源:checkcalls 误拒等 5 项,补丁验证后并入 0.0.65。
-- 候选审查 cx/sys+ext:unix connect 截止、accept_from unix 等 7 项,补丁见 patches-0.0.66。
-
-## 房间索引
-
-| 房间 | 现状 | 入口 |
-|---|---|---|
-| 发布 | 0.0.66 公开为 Latest;0.0.67 在分支 v0.0.67 | release/、plans/release-notes-0.0.63.md、prd_release.md |
-| 版本序 | 0.0.66(已公开)-> 0.0.67 -> 0.0.68 -> 0.0.69 | build/version-seq.tsv |
-| 起链与发布做法 | 配方 5 条、发布 12 步 | archive/prd_mempalace-2026-11-14.md 对应节 |
-| 规划 | R6、R7 与第五轮规划、流程精简方案 | archive/prd_mempalace-2026-11-14.md 的"下一动作总表 R6"与"流程精简"节 |
-| 补丁 | 仓外补丁按版本分目录 | ~/.cache/unisacc/patches-0.0.63 至 0.0.67 |
-| 速度 | 只认四个工具的实测 | build/speed-baseline.tsv |
-| 未验证表 | 与上节逐条对拍 | build/state-unverified.tsv、tools/state-gen.cx |
-| cx 设计 | 模块、内存安全、nn | prd_cx.md |
-| 结构总表 | 五层、六片、流、网、事实表、构造链 | prd.md |
-| 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | tests/batches.tsv、tests/coverage.tsv |
-| 棘轮与派生物 | 13 项棘轮;derive 9 项 | tools/ratchets.cx、tools/derive.cx |
-| 产品全景 | 生成块 | prd_productmap.md |
-| 历史 | 往期发布与归档 | prd_hist.md、archive/ |
+- cx 模块语法缺口:use as alias,排 0.0.70。
+- cx 模块身份缺口:软链被当两个模块,排 0.0.70。
+- 仓库根 out/:逐项迁移到 sy_tmpdir,清单见归档同名条。
+- 多单元函数指针形参:跨单元函数指针形参含结构体指针被拒,R3 去强转待补。
+- 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。

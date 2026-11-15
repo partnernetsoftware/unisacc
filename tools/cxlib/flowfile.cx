@@ -1,0 +1,965 @@
+/* tools/cxlib/flowfile.cx -- devsvc flow file operators: file.read, file.write, file.edit.
+
+   Interface for the flow engine (use cxlib.flowfile):
+     int  ff_run(const char *op, const char *args, ff_out *out);   0 on success, else out->rc (1)
+     void ff_out_free(ff_out *out);
+     long ff_unescape(const char *src, long n, char *dst, long cap);   %XX -> byte; length or -1
+     long ff_escape(const char *src, long n, char *dst, long cap);     ; TAB LF CR % -> %XX; length or -1
+     int  ff_arg(const char *args, const char *key, char **val, long *n);
+          1 found (*val is mm_alloc'd, unescaped, 0-terminated; mm_free it), 0 absent, -1 bad escape or no memory
+
+   args is "k=v;k=v": values escape ';' as %3B, TAB %09, LF %0A, '%' %25 (any %XX is decoded).
+
+   file.read   path [offset_line] [limit_line] [root]
+               out->buf/n = the file or the line range; sha = sha256 of the WHOLE file; lines = total lines.
+   file.write  path content|from [expect_sha=<64 hex>|absent] [mkdir=1] [root]
+               atomic (sibling temporary + rename), keeps the old permission bits (0644 for a new file).
+   file.edit   path old new [replace_all=1] [expect_sha] [root]
+               old must occur exactly once (at least once with replace_all); count = replacements.
+   write and edit put "sha=<hex>\ncount=<n>\nlines=<n>\n" in out->buf.
+
+   Root: the "root" key, else environment UNISACC_FLOW_ROOT.  write and edit refuse without a root and
+   refuse a target that resolves outside it (EOUTSIDE).  A relative path is taken under the root when
+   one is set.  read does not require a root.
+
+   key@=PATH (any key): the value is the whole file PATH (as given, relative to the cwd; no escaping
+   needed inside the file), e.g. file.write content@=, file.edit old@= / new@=.  An unreadable PATH
+   is reported like a bad escape (EESCAPE).
+
+   compare     a b [mode=bytes|lines|set] [fail_on_diff=0|1]      (default mode bytes, fail_on_diff 1)
+               a and b are paths, or node:ID = the out of flow node ID (ff_run2 with a nodes dir).
+               out->buf = "same=0|1\ndiffs=N\nmode=M\n" then the first 20 differences:
+                 bytes  "@OFFSET a=XX b=YY" (-- past the end); diffs = differing byte positions
+                 lines  "-N:text" / "+N:text" per differing line number N (a final newline or its
+                        absence is not a difference); diffs = differing line numbers
+                 set    "-text" only in a, "+text" only in b (order and repeats ignored)
+               Differing with fail_on_diff=1: rc 1, err EDIFF, and out->buf still holds the report.
+   search      pattern [paths] [max] [root]     replaces grep / git grep for fixed strings
+               pattern is a FIXED string (regex=1 is refused with EARG: cx has no regex library).
+               paths = space separated files, directories (walked, .git and links skipped) or globs
+               (? * and ** as in ff_glob; matched against the whole path); default ".".  Relative
+               paths are under the root when one is set.  out->buf = "path:line:text" lines (text cut
+               at 400 bytes, files in directory order, binary files and files over 16 MB skipped);
+               after max (default 1000) matches a last line "SEARCH_TRUNC<TAB>max=N".  No match is
+               success with empty output; a named path that does not exist is ENOENT.
+   int ff_run2(op, args, nodes_dir, out): ff_run with the directory holding <ID>.out (0: no nodes).
+
+   Failure: out->rc = 1, out->err = a name (ENOENT, EACCES, EISDIR, ..., or EARG, EOP, EESCAPE, EROOT,
+   EOUTSIDE, ESHA, ENOMATCH, EMULTI, ESAME, ERANGE_LINE), out->why = "NAME: detail".  Nothing is written on
+   failure. */
+#pragma unisa module flowfile
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use os.osx
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+typedef struct ff_out {
+    int rc;            /* 0 ok, 1 failed */
+    char *buf;         /* result bytes (mm_alloc; one 0 byte follows), or 0 */
+    long n;            /* bytes in buf */
+    char err[24];      /* failure name, "" on success */
+    char why[512];     /* "NAME: detail", "" on success */
+    char sha[65];      /* read: sha256 of the whole file; write/edit: sha256 of the new file */
+    long lines;        /* total lines of the (new) file */
+    long count;        /* edit: replacements made */
+} ff_out;
+
+#define FF_MAX_FILE (256L * 1024 * 1024)
+#define FF_PATH 4096
+
+void ff_out_free(ff_out *o) {
+    if (!o) return;
+    if (o->buf) mm_free(o->buf);
+    o->buf = 0;
+    o->n = 0;
+}
+
+static int ff_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+long ff_unescape(const char *src, long n, char *dst, long cap) {
+    long i = 0, j = 0;
+    if (!src || !dst || n < 0) return -1;
+    while (i < n) {
+        char c = src[i];
+        if (c == '%') {
+            int a, b;
+            if (i + 2 >= n) return -1;
+            a = ff_hex(src[i + 1]);
+            b = ff_hex(src[i + 2]);
+            if (a < 0 || b < 0) return -1;
+            c = (char)(a * 16 + b);
+            i += 3;
+        } else i++;
+        if (j >= cap) return -1;
+        dst[j++] = c;
+    }
+    return j;
+}
+
+long ff_escape(const char *src, long n, char *dst, long cap) {
+    static const char hx[] = "0123456789ABCDEF";
+    long i, j = 0;
+    if (!src || !dst || n < 0) return -1;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == ';' || c == '\t' || c == '\n' || c == '\r' || c == '%' || c == 0) {
+            if (j + 3 > cap) return -1;
+            dst[j++] = '%';
+            dst[j++] = hx[c >> 4];
+            dst[j++] = hx[c & 15];
+        } else {
+            if (j + 1 > cap) return -1;
+            dst[j++] = (char)c;
+        }
+    }
+    return j;
+}
+
+int ff_arg(const char *args, const char *key, char **val, long *n) {
+    long i = 0, kl, an;
+    if (val) *val = 0;
+    if (n) *n = 0;
+    if (!args || !key || !val) return -1;
+    kl = 0; while (key[kl]) kl++;
+    an = 0; while (args[an]) an++;
+    while (i < an) {
+        long e = i, k;
+        while (e < an && args[e] != ';') e++;
+        for (k = 0; k < kl && i + k < e && args[i + k] == key[k]; k++) { }
+        if (k == kl && i + kl + 1 < e && args[i + kl] == '@' && args[i + kl + 1] == '=') {
+            /* key@=PATH: the value is the whole file PATH (taken as given, relative to the cwd) */
+            long vs = i + kl + 2, vn = e - vs, got;
+            unsigned char *b = 0;
+            int64_t bn = 0;
+            char *v = (char *)mm_alloc(vn + 1);
+            if (!v) return -1;
+            got = ff_unescape(args + vs, vn, v, vn);
+            if (got < 0) { mm_free(v); return -1; }
+            v[got] = 0;
+            if (sy_read_file(v, &b, &bn, FF_MAX_FILE) != 0) { mm_free(v); return -1; }
+            mm_free(v);
+            if (!b) { b = (unsigned char *)mm_alloc(1); if (!b) return -1; b[0] = 0; bn = 0; }
+            *val = (char *)b;
+            if (n) *n = (long)bn;
+            return 1;
+        }
+        if (k == kl && i + kl < e && args[i + kl] == '=') {
+            long vs = i + kl + 1, vn = e - vs, got;
+            char *v = (char *)mm_alloc(vn + 1);
+            if (!v) return -1;
+            got = ff_unescape(args + vs, vn, v, vn);
+            if (got < 0) { mm_free(v); return -1; }
+            v[got] = 0;
+            *val = v;
+            if (n) *n = got;
+            return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static void ff_cat(char *dst, long cap, const char *s) {
+    long i = 0, j = 0;
+    while (dst[i]) i++;
+    while (s && s[j] && i + 1 < cap) dst[i++] = s[j++];
+    dst[i] = 0;
+}
+
+static void ff_catn(char *dst, long cap, long v) {
+    char t[24];
+    int k = 0, neg = v < 0;
+    unsigned long u = neg ? (unsigned long)(-v) : (unsigned long)v;
+    char r[24];
+    int m = 0;
+    do { t[k++] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (neg) r[m++] = '-';
+    while (k) r[m++] = t[--k];
+    r[m] = 0;
+    ff_cat(dst, cap, r);
+}
+
+static int ff_fail(ff_out *o, const char *name, const char *detail, const char *path) {
+    o->rc = 1;
+    o->err[0] = 0;
+    ff_cat(o->err, sizeof o->err, name);
+    o->why[0] = 0;
+    ff_cat(o->why, sizeof o->why, name);
+    ff_cat(o->why, sizeof o->why, ": ");
+    ff_cat(o->why, sizeof o->why, detail);
+    if (path) { ff_cat(o->why, sizeof o->why, " "); ff_cat(o->why, sizeof o->why, path); }
+    return 1;
+}
+
+static const char *ff_errname(int e) {
+    if (e < 0) e = -e;
+    if (e == ENOENT) return "ENOENT";
+    if (e == EACCES) return "EACCES";
+    if (e == EPERM) return "EPERM";
+    if (e == EISDIR) return "EISDIR";
+    if (e == ENOTDIR) return "ENOTDIR";
+    if (e == EEXIST) return "EEXIST";
+    if (e == EFBIG) return "EFBIG";
+    if (e == ENOMEM) return "ENOMEM";
+    if (e == EINVAL) return "EINVAL";
+    if (e == ENAMETOOLONG) return "ENAMETOOLONG";
+    if (e == ELOOP) return "ELOOP";
+    if (e == EROFS) return "EROFS";
+    if (e == ENOSPC) return "ENOSPC";
+    if (e == EXDEV) return "EXDEV";
+    if (e == EBUSY) return "EBUSY";
+    if (e == EMFILE) return "EMFILE";
+    if (e == ENFILE) return "ENFILE";
+    if (e == EIO) return "EIO";
+    if (e == ERANGE) return "ERANGE";
+    return 0;
+}
+
+/* An OS failure: the errno by name (or ERRNO<n>), the action and the path. */
+static int ff_os(ff_out *o, int e, const char *what, const char *path) {
+    const char *nm = ff_errname(e);
+    char name[24], detail[160];
+    name[0] = 0;
+    if (nm) ff_cat(name, sizeof name, nm);
+    else { ff_cat(name, sizeof name, "ERRNO"); ff_catn(name, sizeof name, e < 0 ? -(long)e : (long)e); }
+    detail[0] = 0;
+    ff_cat(detail, sizeof detail, what);
+    ff_cat(detail, sizeof detail, " (");
+    ff_cat(detail, sizeof detail, sy_strerror(e));
+    ff_cat(detail, sizeof detail, ")");
+    return ff_fail(o, name, detail, path);
+}
+
+static long ff_count_lines(const char *b, long n) {
+    long i, c = 0;
+    for (i = 0; i < n; i++) if (b[i] == '\n') c++;
+    if (n > 0 && b[n - 1] != '\n') c++;
+    return c;
+}
+
+static int ff_is_abs(const char *p) { return p && p[0] == '/'; }
+
+/* The root: args key "root", else UNISACC_FLOW_ROOT, canonical.  1 set, 0 unset, -1 failed (o filled). */
+static int ff_root(const char *args, char *root, ff_out *o) {
+    char *v = 0;
+    const char *r;
+    int rc = ff_arg(args, "root", &v, 0), n;
+    root[0] = 0;
+    if (rc < 0) { ff_fail(o, "EESCAPE", "bad escape in key", "root"); return -1; }
+    r = rc == 1 ? v : sy_env("UNISACC_FLOW_ROOT");
+    if (!r || !r[0]) { if (v) mm_free(v); return 0; }
+    n = sy_realpath(r, root, FF_PATH);
+    if (n < 0) { ff_os(o, n, "root", r); if (v) mm_free(v); root[0] = 0; return -1; }
+    if (v) mm_free(v);
+    return 1;
+}
+
+/* PATH as given, or under ROOT when relative and a root is set. */
+static int ff_place(const char *root, const char *path, char *full, ff_out *o) {
+    full[0] = 0;
+    if (!ff_is_abs(path) && root[0]) { ff_cat(full, FF_PATH, root); ff_cat(full, FF_PATH, "/"); }
+    ff_cat(full, FF_PATH, path);
+    if (tx_len(full, FF_PATH) >= FF_PATH - 1) return ff_fail(o, "ENAMETOOLONG", "path too long", path);
+    return 0;
+}
+
+static int ff_under(const char *root, const char *p) {
+    long i = 0;
+    while (root[i] && p[i] == root[i]) i++;
+    if (root[i]) return 0;
+    if (i > 0 && root[i - 1] == '/') return 1;      /* root is "/" */
+    return p[i] == '/';                             /* strictly below the root */
+}
+
+static int ff_has_dotdot(const char *p) {
+    long i = 0;
+    while (p[i]) {
+        long s = i;
+        while (p[i] && p[i] != '/') i++;
+        if (i - s == 2 && p[s] == '.' && p[s + 1] == '.') return 1;
+        if (p[i]) i++;
+    }
+    return 0;
+}
+
+/* Resolve the write target FULL to its canonical path TARGET and require it below ROOT.
+   MKDIR makes missing parent directories (only after the deepest existing ancestor is proved below
+   the root, and only when the path has no ".." component). */
+static int ff_target(const char *root, const char *full, int mkdir, char *target, ff_out *o) {
+    char dir[FF_PATH], rdir[FF_PATH], base[FF_PATH];
+    long n = tx_len(full, FF_PATH), cut = n, i;
+    int rc;
+    sy_stat_t st;
+    while (cut > 0 && full[cut - 1] != '/') cut--;
+    if (cut == n || n == 0) return ff_fail(o, "EARG", "path names no file", full);
+    for (i = 0; i < n - cut; i++) base[i] = full[cut + i];
+    base[n - cut] = 0;
+    if ((base[0] == '.' && !base[1]) || (base[0] == '.' && base[1] == '.' && !base[2]))
+        return ff_fail(o, "EARG", "path names no file", full);
+    if (cut == 0) { dir[0] = '.'; dir[1] = 0; }
+    else { long dn = cut > 1 ? cut - 1 : 1; for (i = 0; i < dn; i++) dir[i] = full[i]; dir[dn] = 0; }
+    rc = sy_realpath(dir, rdir, FF_PATH);
+    if (rc == -ENOENT && mkdir) {
+        char anc[FF_PATH], ranc[FF_PATH];
+        long an;
+        if (ff_has_dotdot(dir)) return ff_fail(o, "EOUTSIDE", "mkdir refuses a path with ..", full);
+        for (i = 0; dir[i]; i++) anc[i] = dir[i];
+        anc[i] = 0;
+        an = i;
+        for (;;) {
+            while (an > 1 && anc[an - 1] != '/') an--;
+            if (an <= 1) { anc[0] = '/'; anc[1] = 0; }
+            else anc[an - 1] = 0, an--;
+            rc = sy_realpath(anc, ranc, FF_PATH);
+            if (rc >= 0) break;
+            if (rc != -ENOENT || an <= 1) return ff_os(o, rc, "resolve parent", anc);
+        }
+        if (!ff_under(root, ranc) && !tx_eqz(root, ranc)) return ff_fail(o, "EOUTSIDE", "path is outside the root", full);
+        rc = sy_mkdir_all(dir, 0755);
+        if (rc != 0) return ff_os(o, rc, "mkdir", dir);
+        rc = sy_realpath(dir, rdir, FF_PATH);
+    }
+    if (rc < 0) return ff_os(o, rc, "resolve parent", dir);
+    target[0] = 0;
+    ff_cat(target, FF_PATH, rdir);
+    if (!(rdir[0] == '/' && !rdir[1])) ff_cat(target, FF_PATH, "/");
+    ff_cat(target, FF_PATH, base);
+    if (tx_len(target, FF_PATH) >= FF_PATH - 1) return ff_fail(o, "ENAMETOOLONG", "path too long", full);
+    /* An existing target that is a link is followed, so the file really written is the one checked. */
+    rc = sy_lstat(target, &st);
+    if (rc == 0 && st.kind == 'l') {
+        char real[FF_PATH];
+        rc = sy_realpath(target, real, FF_PATH);
+        if (rc < 0) return ff_os(o, rc, "resolve link", target);
+        target[0] = 0;
+        ff_cat(target, FF_PATH, real);
+    } else if (rc != 0 && rc != -ENOENT) return ff_os(o, rc, "stat", target);
+    if (!ff_under(root, target)) return ff_fail(o, "EOUTSIDE", "path is outside the root", target);
+    return 0;
+}
+
+/* Read the current file for write/edit.  *EXISTS 0 only on ENOENT. */
+static int ff_load(const char *target, char **buf, long *n, int *mode, int *exists, ff_out *o) {
+    sy_stat_t st;
+    unsigned char *b = 0;
+    int64_t bn = 0;
+    int rc = sy_stat(target, &st);
+    *buf = 0; *n = 0; *mode = 0644; *exists = 0;
+    if (rc == -ENOENT) return 0;
+    if (rc != 0) return ff_os(o, rc, "stat", target);
+    if (st.kind == 'd') return ff_fail(o, "EISDIR", "is a directory", target);
+    if (st.kind != 'f') return ff_fail(o, "EINVAL", "not a regular file", target);
+    rc = sy_read_file(target, &b, &bn, FF_MAX_FILE);
+    if (rc != 0) return ff_os(o, rc, "read", target);
+    *buf = (char *)b; *n = (long)bn; *mode = st.mode & 07777; *exists = 1;
+    return 0;
+}
+
+static int ff_sha_ok(const char *s) {
+    long i;
+    for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return s[64] == 0;
+}
+
+/* expect_sha against the current file.  0 passes. */
+static int ff_expect(const char *args, const char *cur, long curn, int exists, const char *target, ff_out *o) {
+    char *want = 0, have[65];
+    int rc = ff_arg(args, "expect_sha", &want, 0), bad = 0;
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", "expect_sha");
+    if (rc == 0) return 0;
+    if (tx_eqz(want, "absent")) {
+        if (exists) bad = ff_fail(o, "ESHA", "expect_sha=absent but the file exists", target);
+    } else if (!ff_sha_ok(want)) {
+        bad = ff_fail(o, "EARG", "expect_sha must be 64 lowercase hex or absent", target);
+    } else if (!exists) {
+        bad = ff_fail(o, "ESHA", "expect_sha given but the file is absent", target);
+    } else {
+        sy_sha256_hex(cur ? cur : "", curn, have);
+        if (!tx_eqz(want, have)) {
+            ff_fail(o, "ESHA", "expect_sha mismatch, file has", have);
+            ff_cat(o->why, sizeof o->why, " ");
+            ff_cat(o->why, sizeof o->why, target);
+            bad = 1;
+        }
+    }
+    mm_free(want);
+    return bad;
+}
+
+/* Publish N bytes at TARGET: sibling temporary, mode set before the rename, fsync, rename. */
+static int ff_publish(const char *target, const char *buf, long n, int mode, ff_out *o) {
+    char dir[FF_PATH], tmp[FF_PATH];
+    long tn = tx_len(target, FF_PATH), cut = tn, i;
+    int fd, rc;
+    while (cut > 0 && target[cut - 1] != '/') cut--;
+    if (cut <= 1) { dir[0] = cut ? '/' : '.'; dir[1] = 0; }
+    else { for (i = 0; i < cut - 1; i++) dir[i] = target[i]; dir[cut - 1] = 0; }
+    fd = sy_mkstemp(dir, ".ff-tmp-", tmp, FF_PATH);
+    if (fd < 0) return ff_os(o, fd, "create temporary in", dir);
+    rc = n > 0 ? sy_write_all(fd, buf, n) : 0;
+    if (rc == 0) rc = sy_fsync(fd);
+    if (sy_close(fd) != 0 && rc == 0) rc = -EIO;
+    if (rc == 0) rc = sy_chmod(tmp, mode);
+    if (rc == 0) rc = sy_rename(tmp, target);
+    if (rc != 0) { sy_unlink(tmp); return ff_os(o, rc, "write", target); }
+    return 0;
+}
+
+static int ff_report(ff_out *o, const char *buf, long n, long count) {
+    char t[160];
+    long tn;
+    sy_sha256_hex(buf ? buf : "", n, o->sha);
+    o->lines = ff_count_lines(buf, n);
+    o->count = count;
+    t[0] = 0;
+    ff_cat(t, sizeof t, "sha=");
+    ff_cat(t, sizeof t, o->sha);
+    ff_cat(t, sizeof t, "\ncount=");
+    ff_catn(t, sizeof t, count);
+    ff_cat(t, sizeof t, "\nlines=");
+    ff_catn(t, sizeof t, o->lines);
+    ff_cat(t, sizeof t, "\n");
+    tn = tx_len(t, sizeof t);
+    o->buf = (char *)mm_alloc(tn + 1);
+    if (!o->buf) return ff_fail(o, "ENOMEM", "no memory for the report", 0);
+    for (o->n = 0; o->n < tn; o->n++) o->buf[o->n] = t[o->n];
+    o->buf[tn] = 0;
+    return 0;
+}
+
+/* An optional non-negative integer key.  0 ok (*SET says whether present). */
+static int ff_num(const char *args, const char *key, long *v, int *set, ff_out *o) {
+    char *s = 0;
+    long n = 0, i, x = 0;
+    int rc = ff_arg(args, key, &s, &n);
+    *set = 0; *v = 0;
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", key);
+    if (rc == 0) return 0;
+    if (n < 1 || n > 12) { mm_free(s); return ff_fail(o, "EARG", "not a non-negative integer:", key); }
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') { mm_free(s); return ff_fail(o, "EARG", "not a non-negative integer:", key); }
+        x = x * 10 + (s[i] - '0');
+    }
+    mm_free(s);
+    *v = x; *set = 1;
+    return 0;
+}
+
+static int ff_read(const char *args, const char *root, const char *path, ff_out *o) {
+    char full[FF_PATH];
+    unsigned char *b = 0;
+    int64_t bn = 0;
+    long off = 0, lim = 0, n, s, e, line, i;
+    int hoff = 0, hlim = 0, rc;
+    sy_stat_t st;
+    if (ff_place(root, path, full, o)) return 1;
+    if (ff_num(args, "offset_line", &off, &hoff, o)) return 1;
+    if (ff_num(args, "limit_line", &lim, &hlim, o)) return 1;
+    if (hoff && off < 1) return ff_fail(o, "EARG", "offset_line starts at 1", full);
+    rc = sy_stat(full, &st);
+    if (rc != 0) return ff_os(o, rc, "stat", full);
+    if (st.kind == 'd') return ff_fail(o, "EISDIR", "is a directory", full);
+    rc = sy_read_file(full, &b, &bn, FF_MAX_FILE);
+    if (rc != 0) return ff_os(o, rc, "read", full);
+    n = (long)bn;
+    sy_sha256_hex(b, n, o->sha);
+    o->lines = ff_count_lines((const char *)b, n);
+    if (!hoff && !hlim) { o->buf = (char *)b; o->n = n; return 0; }
+    if (!hoff) off = 1;
+    if (off > o->lines && !(off == 1 && o->lines == 0)) {
+        mm_free(b);
+        ff_fail(o, "ERANGE_LINE", "offset_line is past the last line of", full);
+        return 1;
+    }
+    s = 0; line = 1;
+    for (i = 0; i < n && line < off; i++) if (b[i] == '\n') { line++; s = i + 1; }
+    e = n;
+    if (hlim) {
+        long took = 0;
+        e = s;
+        while (e < n && took < lim) { if (b[e] == '\n') took++; e++; }
+    }
+    o->buf = (char *)mm_alloc(e - s + 1);
+    if (!o->buf) { mm_free(b); return ff_fail(o, "ENOMEM", "no memory for", full); }
+    for (i = 0; i < e - s; i++) o->buf[i] = (char)b[s + i];
+    o->buf[e - s] = 0;
+    o->n = e - s;
+    mm_free(b);
+    return 0;
+}
+
+static int ff_need_root(int have, ff_out *o) {
+    if (have == 1) return 0;
+    return ff_fail(o, "EROOT", "no root: give root= or set UNISACC_FLOW_ROOT", 0);
+}
+
+static int ff_flag(const char *args, const char *key, int *on, ff_out *o) {
+    char *s = 0;
+    int rc = ff_arg(args, key, &s, 0);
+    *on = 0;
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", key);
+    if (rc == 0) return 0;
+    if (tx_eqz(s, "1")) *on = 1;
+    else if (!tx_eqz(s, "0")) { mm_free(s); return ff_fail(o, "EARG", "must be 0 or 1:", key); }
+    mm_free(s);
+    return 0;
+}
+
+static int ff_write(const char *args, const char *root, int haveroot, const char *path, ff_out *o) {
+    char full[FF_PATH], target[FF_PATH];
+    char *content = 0, *from = 0, *cur = 0;
+    long cn = 0, curn = 0;
+    int hc, hf, mode, exists, mkdir, bad = 1;
+    if (ff_need_root(haveroot, o)) return 1;
+    if (ff_flag(args, "mkdir", &mkdir, o)) return 1;
+    hc = ff_arg(args, "content", &content, &cn);
+    hf = ff_arg(args, "from", &from, 0);
+    if (hc < 0 || hf < 0) { ff_fail(o, "EESCAPE", "bad escape in key", hc < 0 ? "content" : "from"); goto done; }
+    if (hc + hf != 1) { ff_fail(o, "EARG", "give exactly one of content, from", 0); goto done; }
+    if (hf) {
+        char src[FF_PATH];
+        unsigned char *b = 0;
+        int64_t bn = 0;
+        int rc;
+        if (ff_place(root, from, src, o)) goto done;
+        rc = sy_read_file(src, &b, &bn, FF_MAX_FILE);
+        if (rc != 0) { ff_os(o, rc, "read from", src); goto done; }
+        content = (char *)b; cn = (long)bn;
+    }
+    if (ff_place(root, path, full, o)) goto done;
+    if (ff_target(root, full, mkdir, target, o)) goto done;
+    if (ff_load(target, &cur, &curn, &mode, &exists, o)) goto done;
+    if (ff_expect(args, cur, curn, exists, target, o)) goto done;
+    if (ff_publish(target, content, cn, mode, o)) goto done;
+    bad = ff_report(o, content, cn, 0);
+done:
+    if (content) mm_free(content);
+    if (from) mm_free(from);
+    if (cur) mm_free(cur);
+    return bad;
+}
+
+static int ff_edit(const char *args, const char *root, int haveroot, const char *path, ff_out *o) {
+    char full[FF_PATH], target[FF_PATH];
+    char *old = 0, *neu = 0, *cur = 0, *res = 0;
+    long on = 0, nn = 0, curn = 0, count = 0, i, j, rn;
+    int ho, hn, all, mode, exists, bad = 1;
+    if (ff_need_root(haveroot, o)) return 1;
+    if (ff_flag(args, "replace_all", &all, o)) return 1;
+    ho = ff_arg(args, "old", &old, &on);
+    hn = ff_arg(args, "new", &neu, &nn);
+    if (ho < 0 || hn < 0) { ff_fail(o, "EESCAPE", "bad escape in key", ho < 0 ? "old" : "new"); goto done; }
+    if (ho != 1 || hn != 1) { ff_fail(o, "EARG", "missing key", ho != 1 ? "old" : "new"); goto done; }
+    if (on == 0) { ff_fail(o, "EARG", "old is empty", 0); goto done; }
+    if (on == nn) {
+        for (i = 0; i < on && old[i] == neu[i]; i++) { }
+        if (i == on) { ff_fail(o, "ESAME", "old and new are identical", 0); goto done; }
+    }
+    if (ff_place(root, path, full, o)) goto done;
+    if (ff_target(root, full, 0, target, o)) goto done;
+    if (ff_load(target, &cur, &curn, &mode, &exists, o)) goto done;
+    if (!exists) { ff_fail(o, "ENOENT", "no such file", target); goto done; }
+    if (ff_expect(args, cur, curn, exists, target, o)) goto done;
+    for (i = 0; i + on <= curn; ) {
+        for (j = 0; j < on && cur[i + j] == old[j]; j++) { }
+        if (j == on) { count++; i += on; } else i++;
+    }
+    if (count == 0) { ff_fail(o, "ENOMATCH", "old does not occur in", target); goto done; }
+    if (count > 1 && !all) {
+        ff_fail(o, "EMULTI", "old occurs more than once (give replace_all=1 or a longer old) in", target);
+        o->count = count;
+        goto done;
+    }
+    rn = curn + count * (nn - on);
+    res = (char *)mm_alloc(rn + 1);
+    if (!res) { ff_fail(o, "ENOMEM", "no memory for", target); goto done; }
+    {
+        long w = 0;
+        for (i = 0; i < curn; ) {
+            j = 0;
+            if (i + on <= curn) for (; j < on && cur[i + j] == old[j]; j++) { }
+            if (j == on) { for (j = 0; j < nn; j++) res[w++] = neu[j]; i += on; }
+            else res[w++] = cur[i++];
+        }
+        res[w] = 0;
+        if (w != rn) { ff_fail(o, "EIO", "internal length mismatch editing", target); goto done; }
+    }
+    if (ff_publish(target, res, rn, mode, o)) goto done;
+    bad = ff_report(o, res, rn, count);
+done:
+    if (old) mm_free(old);
+    if (neu) mm_free(neu);
+    if (cur) mm_free(cur);
+    if (res) mm_free(res);
+    return bad;
+}
+
+/* ---- compare and search ---- */
+typedef struct ff_ln { const char *p; long n; } ff_ln;
+typedef struct ff_sb { char *b; long n, cap; int bad; } ff_sb;
+
+static void ff_put(ff_sb *s, const char *p, long n) {
+    long i;
+    if (s->bad) return;
+    if (s->n + n + 1 > s->cap) {
+        long c = (s->n + n + 1) * 2 + 256;
+        char *nb = (char *)mm_alloc(c);
+        if (!nb) { s->bad = 1; return; }
+        for (i = 0; i < s->n; i++) nb[i] = s->b[i];
+        if (s->b) mm_free(s->b);
+        s->b = nb; s->cap = c;
+    }
+    for (i = 0; i < n; i++) s->b[s->n++] = p[i];
+    s->b[s->n] = 0;
+}
+static void ff_puts(ff_sb *s, const char *z) { ff_put(s, z, tx_len(z, 1 << 20)); }
+static void ff_putn(ff_sb *s, long v) { char t[32]; t[0] = 0; ff_catn(t, sizeof t, v); ff_puts(s, t); }
+static void ff_puthex(ff_sb *s, const char *p, long i, long n) {
+    static const char hx[] = "0123456789abcdef";
+    char t[3];
+    if (i >= n) { ff_puts(s, "--"); return; }
+    t[0] = hx[((unsigned char)p[i]) >> 4]; t[1] = hx[((unsigned char)p[i]) & 15]; t[2] = 0;
+    ff_put(s, t, 2);
+}
+
+static ff_ln *ff_lines(const char *b, long n, long *cnt) {
+    long c = ff_count_lines(b, n), i = 0, k = 0;
+    ff_ln *v = (ff_ln *)mm_alloc((c + 1) * (long)sizeof(ff_ln));
+    *cnt = 0;
+    if (!v) return 0;
+    while (i < n) {
+        long s = i;
+        while (i < n && b[i] != '\n') i++;
+        v[k].p = b + s; v[k].n = i - s; k++;
+        if (i < n) i++;
+    }
+    *cnt = k;
+    return v;
+}
+
+static int ff_lcmp(const ff_ln *x, const ff_ln *y) {
+    long i, m = x->n < y->n ? x->n : y->n;
+    for (i = 0; i < m; i++) if (x->p[i] != y->p[i]) return (unsigned char)x->p[i] < (unsigned char)y->p[i] ? -1 : 1;
+    return x->n == y->n ? 0 : x->n < y->n ? -1 : 1;
+}
+
+static void ff_sift(ff_ln *v, long i, long n) {
+    for (;;) {
+        long c = 2 * i + 1;
+        ff_ln t;
+        if (c >= n) return;
+        if (c + 1 < n && ff_lcmp(&v[c], &v[c + 1]) < 0) c++;
+        if (ff_lcmp(&v[i], &v[c]) >= 0) return;
+        t = v[i]; v[i] = v[c]; v[c] = t;
+        i = c;
+    }
+}
+static void ff_sort(ff_ln *v, long n) {
+    long i;
+    ff_ln t;
+    for (i = n / 2 - 1; i >= 0; i--) ff_sift(v, i, n);
+    for (i = n - 1; i > 0; i--) { t = v[0]; v[0] = v[i]; v[i] = t; ff_sift(v, 0, i); }
+}
+
+/* One difference line: TAG, the 1-based line number when NUM > 0, at most 200 bytes of the line. */
+static void ff_dline(ff_sb *s, const char *tag, long num, const ff_ln *l) {
+    ff_puts(s, tag);
+    if (num > 0) { ff_putn(s, num); ff_puts(s, ":"); }
+    ff_put(s, l->p, l->n > 200 ? 200 : l->n);
+    ff_puts(s, "\n");
+}
+
+/* The bytes of compare side KEY: a path (under the root when relative and a root is set) or
+   node:ID = NODES/ID.out. */
+static int ff_side(const char *args, const char *key, const char *root, const char *nodes, char **buf, long *n, ff_out *o) {
+    char *v = 0, full[FF_PATH];
+    unsigned char *b = 0;
+    int64_t bn = 0;
+    int rc = ff_arg(args, key, &v, 0);
+    *buf = 0; *n = 0;
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", key);
+    if (rc == 0 || !v[0]) { if (v) mm_free(v); return ff_fail(o, "EARG", "missing key", key); }
+    full[0] = 0;
+    if (v[0] == 'n' && v[1] == 'o' && v[2] == 'd' && v[3] == 'e' && v[4] == ':') {
+        long i;
+        for (i = 5; v[i] && v[i] != '/'; i++) { }
+        if (!nodes || !nodes[0] || v[i] || i == 5) { mm_free(v); return ff_fail(o, "EARG", "node:ID needs a flow run and a plain node id, key", key); }
+        ff_cat(full, FF_PATH, nodes); ff_cat(full, FF_PATH, "/"); ff_cat(full, FF_PATH, v + 5); ff_cat(full, FF_PATH, ".out");
+    } else if (ff_place(root, v, full, o)) { mm_free(v); return 1; }
+    mm_free(v);
+    rc = sy_read_file(full, &b, &bn, FF_MAX_FILE);
+    if (rc != 0) return ff_os(o, rc, "read", full);
+    *buf = (char *)b; *n = b ? (long)bn : 0;
+    return 0;
+}
+
+static int ff_compare(const char *args, const char *root, const char *nodes, ff_out *o) {
+    char *a = 0, *b = 0, *mode = 0, num[32];
+    long an = 0, bn = 0, diffs = 0, shown = 0, i, j, mx, fv = 0, ca = 0, cb = 0;
+    int set = 0, fod = 1, m = 0, bad = 1, rc;
+    ff_sb s, d;
+    ff_ln *la = 0, *lb = 0;
+    s.b = 0; s.n = 0; s.cap = 0; s.bad = 0;
+    d = s;
+    if (ff_num(args, "fail_on_diff", &fv, &set, o)) return 1;
+    if (set && fv > 1) return ff_fail(o, "EARG", "must be 0 or 1:", "fail_on_diff");
+    if (set) fod = (int)fv;
+    rc = ff_arg(args, "mode", &mode, 0);
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", "mode");
+    if (rc == 1) {
+        if (tx_eqz(mode, "bytes")) m = 0;
+        else if (tx_eqz(mode, "lines")) m = 1;
+        else if (tx_eqz(mode, "set")) m = 2;
+        else { ff_fail(o, "EARG", "mode must be bytes, lines or set, got", mode); goto done; }
+    }
+    if (ff_side(args, "a", root, nodes, &a, &an, o)) goto done;
+    if (ff_side(args, "b", root, nodes, &b, &bn, o)) goto done;
+    if (m == 0) {
+        mx = an > bn ? an : bn;
+        for (i = 0; i < mx; i++) {
+            if (i < an && i < bn && a[i] == b[i]) continue;
+            diffs++;
+            if (shown < 20) {
+                shown++;
+                ff_puts(&d, "@"); ff_putn(&d, i); ff_puts(&d, " a="); ff_puthex(&d, a, i, an);
+                ff_puts(&d, " b="); ff_puthex(&d, b, i, bn); ff_puts(&d, "\n");
+            }
+        }
+    } else {
+        la = ff_lines(a, an, &ca);
+        lb = ff_lines(b, bn, &cb);
+        if (!la || !lb) { ff_fail(o, "ENOMEM", "no memory for the line tables", 0); goto done; }
+        if (m == 1) {
+            mx = ca > cb ? ca : cb;
+            for (i = 0; i < mx; i++) {
+                if (i < ca && i < cb && ff_lcmp(&la[i], &lb[i]) == 0) continue;
+                diffs++;
+                if (shown < 20) {
+                    shown++;
+                    if (i < ca) ff_dline(&d, "-", i + 1, &la[i]);
+                    if (i < cb) ff_dline(&d, "+", i + 1, &lb[i]);
+                }
+            }
+        } else {
+            ff_sort(la, ca);
+            ff_sort(lb, cb);
+            i = 0; j = 0;
+            while (i < ca || j < cb) {
+                int c = i >= ca ? 1 : j >= cb ? -1 : ff_lcmp(&la[i], &lb[j]);
+                if (c != 0) {
+                    diffs++;
+                    if (shown < 20) { shown++; if (c < 0) ff_dline(&d, "-", 0, &la[i]); else ff_dline(&d, "+", 0, &lb[j]); }
+                }
+                if (c <= 0) { long k = i; while (i < ca && ff_lcmp(&la[i], &la[k]) == 0) i++; }
+                if (c >= 0) { long k = j; while (j < cb && ff_lcmp(&lb[j], &lb[k]) == 0) j++; }
+            }
+        }
+    }
+    ff_puts(&s, "same="); ff_puts(&s, diffs ? "0" : "1");
+    ff_puts(&s, "\ndiffs="); ff_putn(&s, diffs);
+    ff_puts(&s, "\nmode="); ff_puts(&s, m == 0 ? "bytes" : m == 1 ? "lines" : "set");
+    ff_puts(&s, "\n");
+    if (d.n) ff_put(&s, d.b, d.n);
+    if (s.bad || d.bad) { ff_fail(o, "ENOMEM", "no memory for the report", 0); goto done; }
+    o->buf = s.b; o->n = s.n; o->count = diffs; s.b = 0;
+    bad = 0;
+    if (diffs && fod) {
+        num[0] = 0; ff_catn(num, sizeof num, diffs);
+        ff_fail(o, "EDIFF", "a and b differ, differences:", num);
+        bad = 1;
+    }
+done:
+    if (a) mm_free(a);
+    if (b) mm_free(b);
+    if (mode) mm_free(mode);
+    if (la) mm_free(la);
+    if (lb) mm_free(lb);
+    if (s.b) mm_free(s.b);
+    if (d.b) mm_free(d.b);
+    return bad;
+}
+
+/* Glob: '?' one byte except '/', '*' any run without '/', '**' any run, a "**" followed by '/' also
+   matches no directory at all. */
+static int ff_glob(const char *g, const char *s) {
+    for (;;) {
+        if (*g == '*') {
+            int deep = g[1] == '*';
+            g += deep ? 2 : 1;
+            if (deep && *g == '/' && ff_glob(g + 1, s)) return 1;
+            for (;; s++) {
+                if (ff_glob(g, s)) return 1;
+                if (!*s || (!deep && *s == '/')) return 0;
+            }
+        }
+        if (!*g) return !*s;
+        if (*g == '?') { if (!*s || *s == '/') return 0; }
+        else if (*g != *s) return 0;
+        g++; s++;
+    }
+}
+
+typedef struct ff_srch { const char *pat, *glob; long pn, max, hits, skip; int trunc; ff_sb out; } ff_srch;
+
+static void ff_search_file(ff_srch *q, const char *path) {
+    unsigned char *b = 0;
+    int64_t bn = 0;
+    long n, i, k, ls = 0, line = 1;
+    sy_stat_t st;
+    if (q->trunc) return;
+    if (sy_stat(path, &st) != 0 || st.kind != 'f' || (long)st.size > (16L << 20)) return;
+    if (sy_read_file(path, &b, &bn, 16L << 20) != 0 || !b) return;
+    n = (long)bn;
+    for (i = 0; i < n && i < 4096; i++) if (!b[i]) { mm_free(b); return; }      /* binary: skipped */
+    while (ls < n) {
+        long le = ls;
+        int hit = 0;
+        while (le < n && b[le] != '\n') le++;
+        for (i = ls; i + q->pn <= le && !hit; i++) {
+            for (k = 0; k < q->pn && b[i + k] == (unsigned char)q->pat[k]; k++) { }
+            if (k == q->pn) hit = 1;
+        }
+        if (hit) {
+            if (q->hits >= q->max) { q->trunc = 1; break; }
+            q->hits++;
+            ff_puts(&q->out, path + q->skip); ff_puts(&q->out, ":"); ff_putn(&q->out, line); ff_puts(&q->out, ":");
+            ff_put(&q->out, (const char *)b + ls, le - ls > 400 ? 400 : le - ls);
+            ff_puts(&q->out, "\n");
+        }
+        line++;
+        ls = le + 1;
+    }
+    mm_free(b);
+}
+
+static void ff_search_dir(ff_srch *q, const char *dir, int depth) {
+    sy_dir_t d;
+    char child[FF_PATH];
+    if (depth > 24 || q->trunc) return;
+    if (sy_dir_open(&d, dir) != 0) return;
+    while (!q->trunc && sy_dir_next(&d) == 1) {
+        if (d.kind == 'd' && tx_eqz(d.name, ".git")) continue;
+        child[0] = 0;
+        ff_cat(child, FF_PATH, dir); ff_cat(child, FF_PATH, "/"); ff_cat(child, FF_PATH, d.name);
+        if (d.kind == 'd') ff_search_dir(q, child, depth + 1);
+        else if (d.kind == 'f' && (!q->glob || ff_glob(q->glob, child))) ff_search_file(q, child);
+    }
+    sy_dir_close(&d);
+}
+
+static int ff_search(const char *args, const char *root, ff_out *o) {
+    char *pat = 0, *paths = 0, *rx = 0, full[FF_PATH], base[FF_PATH], tok[FF_PATH];
+    long pn = 0, mx = 0, i, at = 0;
+    int set = 0, rc, bad = 1;
+    ff_srch q;
+    q.out.b = 0; q.out.n = 0; q.out.cap = 0; q.out.bad = 0;
+    q.hits = 0; q.trunc = 0; q.glob = 0; q.skip = 0;
+    rc = ff_arg(args, "regex", &rx, 0);
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", "regex");
+    if (rc == 1 && !tx_eqz(rx, "0")) { mm_free(rx); return ff_fail(o, "EARG", "regex is not supported (cx has no regex library): fixed string only", 0); }
+    if (rx) mm_free(rx);
+    if (ff_num(args, "max", &mx, &set, o)) return 1;
+    if (!set) mx = 1000;
+    if (mx < 1 || mx > 100000) return ff_fail(o, "EARG", "max outside 1..100000", 0);
+    rc = ff_arg(args, "pattern", &pat, &pn);
+    if (rc < 0) return ff_fail(o, "EESCAPE", "bad escape in key", "pattern");
+    if (rc == 0 || pn == 0) { ff_fail(o, "EARG", "missing key", "pattern"); goto done; }
+    for (i = 0; i < pn; i++) if (pat[i] == '\n') { ff_fail(o, "EARG", "pattern holds a newline", 0); goto done; }
+    rc = ff_arg(args, "paths", &paths, 0);
+    if (rc < 0) { ff_fail(o, "EESCAPE", "bad escape in key", "paths"); goto done; }
+    q.pat = pat; q.pn = pn; q.max = mx;
+    for (;;) {
+        const char *src = paths && paths[0] ? paths : ".";
+        long tn = 0, w = -1, cut = -1;
+        sy_stat_t st;
+        while (src[at] == ' ') at++;
+        if (!src[at]) break;
+        while (src[at] && src[at] != ' ') { if (tn + 1 >= FF_PATH) { ff_fail(o, "ENAMETOOLONG", "path too long in", "paths"); goto done; } tok[tn++] = src[at++]; }
+        tok[tn] = 0;
+        if (ff_place(root, tok, full, o)) goto done;
+        q.skip = (!ff_is_abs(tok) && root[0]) ? tx_len(root, FF_PATH) + 1 : 0;
+        for (i = 0; full[i]; i++) { if (full[i] == '*' || full[i] == '?') { w = i; break; } if (full[i] == '/') cut = i; }
+        if (w < 0) {
+            rc = sy_stat(full, &st);
+            if (rc != 0) { ff_os(o, rc, "stat", full); goto done; }
+            q.glob = 0;
+            if (st.kind == 'd') ff_search_dir(&q, full, 0);
+            else ff_search_file(&q, full);
+        } else {
+            if (cut < 0) {          /* a bare relative glob: walk "." and match against "./GLOB" */
+                base[0] = '.'; base[1] = '/'; base[2] = 0;
+                ff_cat(base, FF_PATH, full);
+                full[0] = 0; ff_cat(full, FF_PATH, base);
+                base[1] = 0;
+            } else {
+                for (i = 0; i < cut; i++) base[i] = full[i];
+                base[cut] = 0;
+                if (cut == 0) { base[0] = '/'; base[1] = 0; }
+            }
+            q.glob = full;
+            ff_search_dir(&q, base, 0);
+        }
+        if (q.trunc) break;
+    }
+    if (q.trunc) { ff_puts(&q.out, "SEARCH_TRUNC\tmax="); ff_putn(&q.out, mx); ff_puts(&q.out, "\n"); }
+    if (q.out.bad) { ff_fail(o, "ENOMEM", "no memory for the matches", 0); goto done; }
+    o->buf = q.out.b; o->n = q.out.n; o->count = q.hits; o->lines = q.hits; q.out.b = 0;
+    bad = 0;
+done:
+    if (pat) mm_free(pat);
+    if (paths) mm_free(paths);
+    if (q.out.b) mm_free(q.out.b);
+    return bad;
+}
+
+int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out);
+int ff_run(const char *op, const char *args, ff_out *out) { return ff_run2(op, args, 0, out); }
+
+int ff_run2(const char *op, const char *args, const char *nodes, ff_out *out) {
+    char root[FF_PATH];
+    char *path = 0;
+    int haveroot, rc, kind;
+    if (!out) return 1;
+    out->rc = 0; out->buf = 0; out->n = 0; out->err[0] = 0; out->why[0] = 0; out->sha[0] = 0;
+    out->lines = 0; out->count = 0;
+    if (!op) return ff_fail(out, "EOP", "no operator", 0);
+    if (!args) args = "";
+    if (tx_eqz(op, "file.read")) kind = 0;
+    else if (tx_eqz(op, "file.write")) kind = 1;
+    else if (tx_eqz(op, "file.edit")) kind = 2;
+    else if (tx_eqz(op, "compare")) kind = 3;
+    else if (tx_eqz(op, "search")) kind = 4;
+    else return ff_fail(out, "EOP", "unknown operator", op);
+    haveroot = ff_root(args, root, out);
+    if (haveroot < 0) return 1;
+    if (kind >= 3) {
+        rc = kind == 3 ? ff_compare(args, root, nodes, out) : ff_search(args, root, out);
+        if (rc == 0) return 0;
+        /* EDIFF keeps its report in out->buf: the differences are the result */
+        if (out->buf && !tx_eqz(out->err, "EDIFF")) { mm_free(out->buf); out->buf = 0; out->n = 0; }
+        out->rc = 1;
+        return 1;
+    }
+    rc = ff_arg(args, "path", &path, 0);
+    if (rc < 0) return ff_fail(out, "EESCAPE", "bad escape in key", "path");
+    if (rc == 0 || !path[0]) { if (path) mm_free(path); return ff_fail(out, "EARG", "missing key", "path"); }
+    if (kind == 0) rc = ff_read(args, root, path, out);
+    else if (kind == 1) rc = ff_write(args, root, haveroot, path, out);
+    else rc = ff_edit(args, root, haveroot, path, out);
+    mm_free(path);
+    if (rc != 0) {
+        if (out->buf) { mm_free(out->buf); out->buf = 0; out->n = 0; }
+        out->rc = 1;
+        return 1;
+    }
+    return 0;
+}

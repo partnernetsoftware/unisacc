@@ -1,0 +1,229 @@
+/* tools/auto-continue.cx -- Stop 钩子:轮末由 haiku 判断是否自动续跑(取代 .claude/hooks/auto-continue.ts)。
+ *
+ *   sh ./unisacc.com tools/auto-continue.cx          (stdin 收钩子 JSON:session_id、transcript_path、stop_hook_active)
+ *
+ * 只在"上一条回复明确说出了我自己现在就能做的下一步"时输出 decision=block 让会话继续,否则静默 rc 0。
+ * 断路器:连续 4 次、每会话每小时 20 次、两次判断间隔 >= 20 秒;OFF 文件或环境变量 UNISACC_AUTOCONT_OFF 停用;
+ * 环境变量 UNISACC_AUTOCONT 非空(判断器自身的 claude -p 调用)直接放行,防递归。
+ * 目录:$UNISACC_AUTOCONT_DIR,缺省 $HOME/.cache/unisacc/auto-continue/,内有 state.tsv(sid consec hour_start hour_count last_ms)与 log.tsv。
+ * 判断器命令:$UNISACC_AUTOCONT_CLAUDE,缺省 claude(检查用假脚本);stdin 喂 prompt,环境设 UNISACC_AUTOCONT=1,30 秒超时杀。
+ * JSON 读写经 text.json(js_parse/js_get/js_path/js_esc),仅在 jstr、last_text、emit_block 三处使用。任何错误都放行(rc 0)。
+ * Check: tools/check-auto-continue.cx. */
+#pragma unisa use sys.io
+#pragma unisa use os.osx
+#pragma unisa use text.conv
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.json
+
+#define MAX_CONSEC 4
+#define MAX_PER_HOUR 20
+#define MIN_GAP_MS 20000
+#define TAIL 400000
+#define SLOTS 64
+
+static char dir[1024];
+static char in[1 << 16];
+
+static long slen(const char *s) { return tx_len(s, 1 << 20); }
+static const char *envs(const char *k) { const char *v = sy_env(k); return v ? v : ""; }
+
+static void log_line(const char *sid, const char *verdict, const char *why) {
+    char path[1100], line[400], *old = 0; long on = 0, n, i;
+    tx_snprintf(path, sizeof path, "%s/log.tsv", dir);
+    tx_snprintf(line, sizeof line, "%ld\t%.8s\t%s\t%.200s\n", sy_now_ms() / 1000, sid, verdict, why);
+    n = slen(line);
+    sy_read_file(path, &old, &on, 1 << 20);
+    {
+        char *nb = (char *)mm_alloc(on + n + 1);
+        if (!nb) { if (old) mm_free(old); return; }
+        if (on > 65536) { old += on - 65536; on = 65536; }
+        if (on > 0) mm_copy(nb, on + n + 1, old, on);
+        mm_copy(nb + on, n + 1, line, n);
+        sy_write_atomic(path, nb, on + n, 0644);
+        mm_free(nb);
+    }
+}
+
+/* 取对象 v 的字符串成员 key 到 dst,返回长度,缺失或非串 -1。 */
+static long jstr(const js_val *v, const char *key, char *dst, long cap) {
+    const js_val *m = js_get(v, key); long n;
+    if (js_kind(m) != JS_STR) return -1;
+    n = js_str_len(m); if (n > cap - 1) n = cap - 1;
+    mm_copy(dst, cap, js_str(m), n); dst[n] = 0;
+    return n;
+}
+
+/* 最后一条 assistant 行里所有 text 块拼接;无则空串。 */
+static long last_text(const char *path, char *dst, long cap) {
+    int fd = sy_open_read(path); int64_t sz = 0; long off, n, got = 0, e, ls;
+    char *buf; long o = 0;
+    dst[0] = 0;
+    if (fd < 0) return 0;
+    sy_file_size(path, &sz);
+    off = sz > TAIL ? (long)(sz - TAIL) : 0;
+    buf = (char *)mm_alloc(TAIL + 2);
+    if (!buf) { sy_close(fd); return 0; }
+    sy_lseek(fd, off, 0);
+    while (got < TAIL && (n = sy_read_once(fd, buf + got, TAIL - got)) > 0) got += n;
+    sy_close(fd);
+    e = got;
+    while (e > 0) {
+        long b = e;
+        while (b > 0 && buf[b - 1] != '\n') b--;
+        ls = b;
+        if (e - ls > 0 && tx_find(buf + ls, e - ls, "\"type\":\"assistant\"", 18) >= 0) {
+            char err[80]; js_val *root = js_parse(buf + ls, e - ls, err, sizeof err);
+            if (root) {
+                long i;
+                for (i = 0;; i++) {
+                    char key[48]; js_val *it; js_val *ty, *tx;
+                    tx_snprintf(key, sizeof key, "message.content.%ld", i);
+                    it = js_path(root, key);
+                    if (!it) break;
+                    ty = js_get(it, "type"); tx = js_get(it, "text");
+                    if (js_kind(ty) == JS_STR && js_str_len(ty) == 4 && mm_same(js_str(ty), "text", 4) && js_kind(tx) == JS_STR) {
+                        long m = js_str_len(tx);
+                        if (o && m > 0 && o < cap - 1) dst[o++] = '\n';
+                        if (m > cap - 1 - o) m = cap - 1 - o;
+                        if (m > 0) { mm_copy(dst + o, cap - o, js_str(tx), m); o += m; }
+                    }
+                }
+                js_free(root);
+            }
+            if (o > 0) { mm_free(buf); dst[o] = 0; return o; }
+        }
+        e = ls > 0 ? ls - 1 : 0;
+    }
+    mm_free(buf);
+    return 0;
+}
+
+typedef struct { char sid[96]; long consec, hour_start, hour_count, last; } Row;
+static Row rows[SLOTS]; static int nrows;
+
+static void state_load(void) {
+    char path[1100], *b = 0; long n = 0, i = 0; int f;
+    tx_snprintf(path, sizeof path, "%s/state.tsv", dir);
+    if (sy_read_file(path, &b, &n, 1 << 20) != 0) return;
+    while (i < n && nrows < SLOTS) {
+        long ls = i, fs[5], k = 0, j;
+        while (i < n && b[i] != '\n') i++;
+        fs[0] = ls;
+        for (j = ls; j < i && k < 4; j++) if (b[j] == '\t') fs[++k] = j + 1;
+        if (k == 4) {
+            Row *r = &rows[nrows]; long v[4];
+            long sl = fs[1] - 1 - fs[0];
+            if (sl > 95) sl = 95;
+            mm_copy(r->sid, 96, b + fs[0], sl); r->sid[sl] = 0;
+            for (f = 0; f < 4; f++) {
+                long e2 = (f == 3) ? i : fs[f + 2] - 1;
+                tx_to_i64(b + fs[f + 1], e2 - fs[f + 1], 10, &v[f]);
+            }
+            r->consec = v[0]; r->hour_start = v[1]; r->hour_count = v[2]; r->last = v[3]; nrows++;
+        }
+        i++;
+    }
+    mm_free(b);
+}
+static void state_save(void) {
+    char path[1100]; static char out[SLOTS * 200]; long at = 0; int i;
+    for (i = 0; i < nrows; i++)
+        at += tx_snprintf(out + at, sizeof out - at, "%s\t%ld\t%ld\t%ld\t%ld\n", rows[i].sid, rows[i].consec, rows[i].hour_start, rows[i].hour_count, rows[i].last);
+    tx_snprintf(path, sizeof path, "%s/state.tsv", dir);
+    sy_write_atomic(path, out, at, 0644);
+}
+
+/* 返回 1 表示 CONTINUE,next 为动作句。 */
+static int judge(const char *text, char *next, long ncap) {
+    static char prompt[16000], reply[4096]; char pin[1100], pout[1100], *argv[8]; long tl = slen(text), at = 0;
+    sy_spawn_t o; sy_exit_t st; int fi, fo, r; long n = 0;
+    const char *head = "你是\"是否自动续跑\"的判断器。下面是智能体上一轮结束时对用户的最后一条回复。\n只在同时满足以下三条时回答 CONTINUE:\n(1) 回复里明确写出了智能体自己接下来要做的具体动作(例如\"我接下来提交 X\"\"下一步我跑 Y\");\n(2) 这个动作现在就能做,不依赖用户回复、不依赖后台作业或监视器的通知、不依赖等待某个时间;\n(3) 回复不是在向用户提问或请求裁定。\n否则回答 STOP(包括:在等用户反馈、等后台通知、只是汇报结果且没有明确下一步、已全部完成)。\n输出格式严格两行:第一行只写 CONTINUE 或 STOP;第二行(仅 CONTINUE 时)用一句中文写出接下来要做的动作,不超过 60 字。\n----- 回复开始 -----\n";
+    next[0] = 0;
+    if (tl > 6000) { text += tl - 6000; tl = 6000; }
+    at = tx_snprintf(prompt, sizeof prompt, "%s%s\n----- 回复结束 -----\n", head, text);
+    tx_snprintf(pin, sizeof pin, "%s/judge-in.%ld", dir, (long)sy_now_ms());
+    tx_snprintf(pout, sizeof pout, "%s/judge-out.%ld", dir, (long)sy_now_ms());
+    if (sy_write_file(pin, prompt, at, 0600) != 0) return 0;
+    fi = sy_open_read(pin);
+    fo = sy_open_new(pout, 0600);
+    if (fi < 0 || fo < 0) { if (fi >= 0) sy_close(fi); if (fo >= 0) sy_close(fo); sy_unlink(pin); return 0; }
+    argv[0] = (char *)envs("UNISACC_AUTOCONT_CLAUDE"); if (!argv[0][0]) argv[0] = "claude";
+    argv[1] = "-p"; argv[2] = "--model"; argv[3] = "haiku"; argv[4] = "--allowedTools"; argv[5] = ""; argv[6] = 0;
+    sy_setenv("UNISACC_AUTOCONT", "1", 1);
+    sy_spawn_init(&o); o.argv = argv; o.in_fd = fi; o.out_fd = fo; o.err_fd = SY_STDIO_NULL; o.pgroup = -1; o.deadline_ms = 30000;
+    r = sy_proc_run(&o, &st);
+    sy_close(fi); sy_close(fo);
+    sy_unlink(pin);
+    if (r == 0 && !st.timed_out) {
+        char *b = 0;
+        if (sy_read_file(pout, &b, &n, sizeof reply - 1) == 0) { mm_copy(reply, sizeof reply, b, n); mm_free(b); } else n = 0;
+    }
+    sy_unlink(pout);
+    reply[n] = 0;
+    {
+        long i = 0, k;
+        while (i < n && (reply[i] == ' ' || reply[i] == '\n' || reply[i] == '\r')) i++;
+        if (n - i < 8 || !mm_same(reply + i, "CONTINUE", 8)) return 0;
+        i += 8;
+        while (i < n && (reply[i] == ' ' || reply[i] == '\n' || reply[i] == '\r')) i++;
+        for (k = 0; i < n && reply[i] != '\n' && k < ncap - 1 && k < 120; i++) next[k++] = reply[i];
+        while (k > 0 && (next[k - 1] == ' ' || next[k - 1] == '\r')) k--;
+        next[k] = 0;
+        return k > 0;
+    }
+}
+
+static void emit_block(long consec, const char *next) {
+    static char esc[800]; long o = 0;
+    js_esc(esc, sizeof esc, next, slen(next), &o);
+    printf("{\"decision\":\"block\",\"reason\":\"自动续跑(第 %ld 次,判断器认为上一条回复已写明下一步):%s。按此继续;若实际已无事可做或需要等待,直接一句话结束。\"}\n", consec, esc);
+}
+
+int main(void) {
+    static char sid[128], tpath[2048], text[8000], next[160], offp[1100];
+    long n = 0, g, now, e; int active = 0, i, ri = -1; char path[1100];
+    const char *d;
+    if (envs("UNISACC_AUTOCONT")[0] || envs("UNISACC_AUTOCONT_OFF")[0]) return 0;
+    d = envs("UNISACC_AUTOCONT_DIR");
+    if (d[0]) tx_snprintf(dir, sizeof dir, "%s", d); else tx_snprintf(dir, sizeof dir, "%s/.cache/unisacc/auto-continue", envs("HOME"));
+    while (n < (long)sizeof in - 1 && (g = sy_read_once(0, in + n, (long)sizeof in - 1 - n)) > 0) n += g;
+    {
+        char perr[80]; js_val *hk = js_parse(in, n, perr, sizeof perr);
+        (void)e;
+        if (!hk || jstr(hk, "session_id", sid, sizeof sid) < 0) tx_snprintf(sid, sizeof sid, "unknown");
+        tpath[0] = 0;
+        if (hk) { jstr(hk, "transcript_path", tpath, sizeof tpath); active = js_bool(js_get(hk, "stop_hook_active")); js_free(hk); }
+    }
+    sy_mkdir_all(dir, 0755);
+    tx_snprintf(offp, sizeof offp, "%s/OFF", dir);
+    if (sy_exists(offp) == 1) { log_line(sid, "SKIP", "off-switch"); return 0; }
+    state_load();
+    for (i = 0; i < nrows; i++) if (slen(rows[i].sid) == slen(sid) && mm_same(rows[i].sid, sid, slen(sid))) ri = i;
+    now = sy_now_ms();
+    if (ri < 0) {
+        if (nrows >= SLOTS) { mm_copy(rows, sizeof rows - sizeof(Row), rows + 1, sizeof(Row) * (SLOTS - 1)); nrows--; }
+        ri = nrows++; tx_snprintf(rows[ri].sid, sizeof rows[ri].sid, "%s", sid);
+        rows[ri].consec = 0; rows[ri].hour_start = now; rows[ri].hour_count = 0; rows[ri].last = 0;
+    }
+    Row *s = &rows[ri];
+    (void)path;
+    if (!active) s->consec = 0;
+    if (now - s->hour_start > 3600000) { s->hour_start = now; s->hour_count = 0; }
+    if (s->consec >= MAX_CONSEC) { char w[64]; tx_snprintf(w, sizeof w, "consec-cap %ld", s->consec); log_line(sid, "STOP", w); s->consec = 0; state_save(); return 0; }
+    if (s->hour_count >= MAX_PER_HOUR) { log_line(sid, "STOP", "hour-cap"); state_save(); return 0; }
+    if (now - s->last < MIN_GAP_MS) { log_line(sid, "STOP", "min-gap"); state_save(); return 0; }
+    if (last_text(tpath, text, sizeof text) <= 0) { log_line(sid, "STOP", "no-text"); state_save(); return 0; }
+    s->last = now;
+    if (!judge(text, next, sizeof next)) { log_line(sid, "STOP", "judge-stop"); state_save(); return 0; }
+    s->consec++; s->hour_count++; state_save();
+    log_line(sid, "CONTINUE", next);
+    emit_block(s->consec, next);
+    return 0;
+}

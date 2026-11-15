@@ -45,6 +45,29 @@ static int child_cx0(const char *file) {
     printf("RC=%d\n%s\n", r.status, r.diagnostic ? r.diagnostic : "");
     cx0_release(&r); return 0;
 }
+/* --cx0-batch FILE...: same per-file plan as --cx0, each segment headed "@@FILE\t<path>"; chain-ready 4-p1 judges every segment separately */
+static int child_cx0_batch(int n, char **files) {
+    int i;
+    for (i = 0; i < n; i++) { printf("@@FILE\t%s\n", files[i]); child_cx0(files[i]); fflush(stdout); }
+    printf("@@END\t%d\n", n);
+    return 0;
+}
+/* batch output segment for full path p must equal the single --cx0 output byte for byte */
+static void batch_case(const char *f1, const char *f2) {
+    char p1[400], p2[400], o1[4096], o2[4096], hd[512]; char *av[9]; np_result r = {0}; char why[256]; int ok = 0;
+    tx_snprintf(p1, sizeof p1, "%s/%s", dir, f1); tx_snprintf(p2, sizeof p2, "%s/%s", dir, f2);
+    run_src("--cx0", f1, o1, sizeof o1); run_src("--cx0", f2, o2, sizeof o2);
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/check-cxmod-tri.cx"; av[3] = "--"; av[4] = "--cx0-batch"; av[5] = p1; av[6] = p2; av[7] = 0; /* lint:allow R1 tool re-runs itself as child under the installed product, same as tools/ratchets.cx */
+    if (!np_run(av, ".", 0, 20, &r, why, sizeof why) && r.out) {
+        char want[9000]; long wn;
+        tx_snprintf(want, sizeof want, "@@FILE\t%s\n%s@@FILE\t%s\n%s@@END\t2\n", p1, o1, p2, o2);
+        wn = (long)strlen(want);
+        ok = r.outn == wn && !memcmp(r.out, want, (size_t)wn);
+    }
+    np_free(&r);
+    tx_snprintf(hd, sizeof hd, "batch-equals-single-%s-%s", f1, f2);
+    if (ok) { pass++; printf("PASS\t%s\n", hd); } else { failed++; printf("FAIL\t%s\n", hd); }
+}
 static int child_prod(const char *file) {
     char *v[1]; int rc; v[0] = (char *)file;
     if (cxm_bind(cb_rd, cb_wr, cb_say, cb_sha, dir)) return 2;
@@ -211,6 +234,7 @@ int main(int argc, char **argv) {
     char *ex[] ={"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
     np_result r = {0}; char why[512]; int rc, extract_ok;
     if (argc == 3 && !strcmp(argv[1], "--cx0")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0(argv[2]); }
+    if (argc >= 3 && !strcmp(argv[1], "--cx0-batch")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_batch(argc - 2, argv + 2); }
     if (argc == 3 && !strcmp(argv[1], "--cx0-if")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_if(argv[2]); }
     if (argc == 3 && !strcmp(argv[1], "--prod")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_prod(argv[2]); }
     rc = np_run(ex, ".", 0, 50, &r, why, sizeof why);
@@ -248,6 +272,8 @@ int main(int argc, char **argv) {
     one_case("symbol-not-exported-refused", "g1.cx", 1, "does not export nosuch", 0);
     one_case("symbol-import-plans", "g3.cx", 0, "", 0);
     one_case("unimported-symbol-call-refused", "g2.cx", 1, "call to undeclared function clash", 0);
+    batch_case("c1.cx", "plain.cx");
+    batch_case("g3.cx", "c5.cx");
     maxu_case(97, 0, 0);
     maxu_case(129, 1, 1);
     printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d\n", pass, failed, gaps);

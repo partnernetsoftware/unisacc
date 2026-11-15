@@ -1,0 +1,102 @@
+/* devtask: work orders and dispatch (实施单与派工), replaces envelope dispatch and manual tracking.
+ * Usage (prefix: sh ./unisacc.com tools/devtask.cx --):
+ *   add TITLE --domain P... [--deadline MIN] [--for OWNER]   new open task; prints TASK add ID
+ *   claim ID --owner O        open -> claimed; refused (rc 1) naming every claimed task whose write domain intersects
+ *   done ID --evidence E      claimed -> done; evidence is a commit id or log path
+ *   block ID --why W          open|claimed -> blocked (the owner may claim again to resume)
+ *   gap ID --text T           record a reported gap on a live task
+ *   drop ID --why W           live -> dropped
+ *   list [--state S] [--owner O] | show ID | stale            stale: live tasks past their deadline
+ * Common: --dir D picks the store directory; otherwise $DEVTASK_DIR; otherwise the devsvc instance directory
+ * derived from the repo table ($DEVSVC_REPO_TABLE or tools/devsvc-repo.tsv under the git top level).
+ * $DEVTASK_NOW (epoch seconds) replaces the clock, for checks and demonstrations only.
+ * Exit: 0 ok, 1 refused by state or conflict (DEVTASK_REFUSE on stderr), 2 bad input or I/O. Store format in cxlib/devtask.cx. */
+#pragma unisa use cxlib.devtask
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *val[8]; static char dom[1024];
+static const char *names[] = {"--dir", "--domain", "--deadline", "--for", "--owner", "--evidence", "--why", "--text", "--state"};
+enum { O_DIR, O_DOMAIN, O_DEADLINE, O_FOR, O_OWNER, O_EVIDENCE, O_WHY, O_TEXT, O_STATE, O_N };
+static const char *ov[O_N];
+static int bad(const char *m, const char *a) { fprintf(stderr, "devtask: %s%s%s\n", m, a ? " " : "", a ? a : ""); return 2; }
+/* allowed: bit per option; every option takes one value, --domain takes one or more */
+static int parse(int argc, char **argv, int from, unsigned allowed) {
+    for (int i = from; i < argc; i++) {
+        int k = -1;
+        for (int j = 0; j < O_N; j++) if (!strcmp(argv[i], names[j])) k = j;
+        if (k < 0 || !((allowed | 1u << O_DIR) >> k & 1)) return bad("unexpected argument", argv[i]);
+        if (ov[k]) return bad("repeated option", argv[i]);
+        if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2)) return bad("missing value for", argv[i]);
+        if (k != O_DOMAIN) { ov[k] = argv[++i]; continue; }
+        for (long used = 0; i + 1 < argc && strncmp(argv[i + 1], "--", 2);) {
+            int w = snprintf(dom + used, sizeof dom - used, "%s%s", used ? "," : "", argv[++i]);
+            if (strchr(argv[i], ',') || w >= (int)(sizeof dom - used)) return bad("bad or oversized --domain entry", argv[i]);
+            used += w;
+        }
+        ov[k] = dom;
+    }
+    return 0;
+}
+static int resolve(char *dir, int cap) {
+    const char *e = ov[O_DIR] ? ov[O_DIR] : getenv("DEVTASK_DIR"), *tb = getenv("DEVSVC_REPO_TABLE"); char why[512], root[1024];
+    char *v[] = {"git", "rev-parse", "--show-toplevel", 0}; np_result r = {0}; long n;
+    if (e && *e) return snprintf(dir, cap, "%s", e) >= cap ? bad("--dir too long", 0) : 0;
+    if (np_run(v, 0, 0, 15, &r, why, sizeof why) || r.rc || !r.out || r.outn < 2 || r.outn >= sizeof root) { np_free(&r); return bad("not inside a git work tree; give --dir", 0); }
+    n = (long)r.outn; while (n > 0 && r.out[n - 1] == '\n') n--;
+    if (n >= (long)sizeof root || mm_copy(root, sizeof root, r.out, n)) { np_free(&r); return bad("git toplevel too long", 0); } root[n] = 0; np_free(&r);
+    if (dt_instdir(root, tb && *tb ? tb : "tools/devsvc-repo.tsv", dir, cap, why, sizeof why)) return bad(why, 0);
+    return 0;
+}
+static void row(const DtTask *t) { printf("%s\t%s\t%s\t%s\t%s\t%s\n", t->id, t->state, t->owner, t->deadline, t->domain, t->title); }
+int main(int argc, char **argv) {
+    char dir[1024], why[2048] = "", id[16]; const char *cmd = argc > 1 ? argv[1] : "", *pos = argc > 2 ? argv[2] : 0, *ne = getenv("DEVTASK_NOW");
+    long now = ne && *ne ? atol(ne) : sy_wall_s(); int rc, view = !strcmp(cmd, "list") || !strcmp(cmd, "stale"); unsigned allow = 0; DtSet s;
+    (void)val;
+    if (ne && *ne && now <= 0) return bad("bad DEVTASK_NOW", ne);
+    if (!strcmp(cmd, "add")) allow = 1u << O_DOMAIN | 1u << O_DEADLINE | 1u << O_FOR;
+    else if (!strcmp(cmd, "claim")) allow = 1u << O_OWNER;
+    else if (!strcmp(cmd, "done")) allow = 1u << O_EVIDENCE;
+    else if (!strcmp(cmd, "block") || !strcmp(cmd, "drop")) allow = 1u << O_WHY;
+    else if (!strcmp(cmd, "gap")) allow = 1u << O_TEXT;
+    else if (!strcmp(cmd, "list")) allow = 1u << O_STATE | 1u << O_OWNER;
+    else if (strcmp(cmd, "show") && strcmp(cmd, "stale")) {
+        fprintf(stderr, "usage: devtask add TITLE --domain P... [--deadline MIN] [--for OWNER] | claim ID --owner O | done ID --evidence E\n"
+                        "       devtask block ID --why W | gap ID --text T | drop ID --why W | list [--state S] [--owner O] | show ID | stale   (all: [--dir D])\n");
+        return 2;
+    }
+    if (!view && (!pos || !strncmp(pos, "--", 2))) return bad(cmd, "needs a TITLE or ID first");
+    if (parse(argc, argv, view ? 2 : 3, allow) || resolve(dir, sizeof dir)) return 2;
+    if (!strcmp(cmd, "add")) {
+        long min = 0; const char *d = ov[O_DEADLINE];
+        if (!ov[O_DOMAIN]) return bad("add needs --domain", 0);
+        if (d) { for (const char *q = d; *q; q++) if (*q < '0' || *q > '9') return bad("bad --deadline", d); min = atol(d); if (min < 1 || strlen(d) > 6) return bad("bad --deadline", d); }
+        rc = dt_add(dir, pos, ov[O_DOMAIN], min, ov[O_FOR], now, id, sizeof id, why, sizeof why);
+        if (!rc) printf("TASK\tadd\t%s\topen\n", id);
+    } else if (!view && strcmp(cmd, "show")) {
+        const char *text = ov[O_EVIDENCE] ? ov[O_EVIDENCE] : ov[O_WHY] ? ov[O_WHY] : ov[O_TEXT];
+        if (!strcmp(cmd, "claim") ? !ov[O_OWNER] : !text) return bad(cmd, "lacks its required option");
+        rc = dt_change(dir, cmd, pos, ov[O_OWNER], text, now, why, sizeof why);
+        if (!rc) printf("TASK\t%s\t%s\tok\n", cmd, pos);
+    } else {
+        int count = 0, found = 0;
+        if (ov[O_STATE] && strcmp(ov[O_STATE], "open") && strcmp(ov[O_STATE], "claimed") && strcmp(ov[O_STATE], "blocked") && strcmp(ov[O_STATE], "done") && strcmp(ov[O_STATE], "dropped")) return bad("bad --state", ov[O_STATE]);
+        rc = dt_load(dir, &s, why, sizeof why);
+        if (!rc) {
+            if (view) printf("id\tstate\towner\tdeadline\twrite_domain\ttitle\n");
+            for (int i = 0; i < s.n; i++) { const DtTask *t = &s.t[i];
+                if (!view) { if (strcmp(t->id, pos)) continue; found = 1;
+                    printf("id\t%s\ntitle\t%s\nowner\t%s\nstate\t%s\nwrite_domain\t%s\ndeadline\t%s\nevidence\t%s\ngap\t%s\nupdated\t%s\nstale\t%d\n", t->id, t->title, t->owner, t->state, t->domain, t->deadline, t->evidence, t->gap, t->updated, dt_stale(t, now));
+                } else if (!strcmp(cmd, "stale") ? dt_stale(t, now) : (!ov[O_STATE] || !strcmp(ov[O_STATE], t->state)) && (!ov[O_OWNER] || !strcmp(ov[O_OWNER], t->owner))) { row(t); count++; }
+            }
+            if (view) printf("%s\tcount=%d\ttotal=%d\n", !strcmp(cmd, "stale") ? "DEVTASK_STALE" : "DEVTASK_LIST", count, s.n);
+            else if (!found) { (void)cx_fmt(why, sizeof why, "no such task %s", pos); rc = 2; }
+            dt_free(&s);
+        }
+    }
+    if (rc == 1) fprintf(stderr, "DEVTASK_REFUSE\t%s\n", why); else if (rc) fprintf(stderr, "devtask: %s\n", why);
+    return rc;
+}

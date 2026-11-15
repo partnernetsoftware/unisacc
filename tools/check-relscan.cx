@@ -1,0 +1,87 @@
+/* relscan contracts; --scan ROOT EDGES or --list ROOT LIST EDGES emits real links-v1 data. */
+#pragma unisa use cxlib.relscan
+#pragma unisa use text.iter
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.build
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+static int failed,assertions;
+static void ck(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static int call(char **v,const char *cwd){np_result r={0};char why[256];int rc=np_run(v,cwd,0,15,&r,why,sizeof why);int ok=!rc&&!r.rc&&!r.residue;np_free(&r);return ok;}
+static int check_path(const char *root,const char *rel,char *out,long cap){return cx_fmt(out,cap,"%s/%s",root,rel);}
+static int put(const char *root,const char *rel,const char *s){char p[8192];return check_path(root,rel,p,sizeof p)||sy_write_file(p,s,(long)strlen(s),0600);}
+static long raw_uses(const char *b,long n){long total=0;for(long i=0;i<n;){long e=i;while(e<n&&b[e]!='\n')e++;if(e-i>=18&&!memcmp(b+i,"#pragma unisa use ",18))total++;i=e<n?e+1:e;}return total;}
+static int scan(const char *root,const char *list,const char *dest){
+    char canonical[4096],why[512];sb *paths=sb_new(),*edges=sb_new();RlsStats st={0};long count=0,raw=0,apps=0;
+    if(!paths||!edges||sy_realpath(root,canonical,sizeof canonical)<0)return 2;
+    if(list){size_t n=0;char *p=cx_read(list,&n);if(!p||sb_putn(paths,p,(long)n)){mm_free(p);return 2;}mm_free(p);}
+    else if(rls_inventory(canonical,paths,why,sizeof why)){fprintf(stderr,"relscan: %s\n",why);return 2;}
+    if(sb_puts(edges,"# links v1: kind src dst via attr\n"))return 2;
+    const char *p=sb_cstr(paths);tx_iter_t it;tx_iter_init(&it,p,sb_len(paths));
+    while(tx_line_next(&it)==1){char rel[4096],path[8192];unsigned char *b=0;int64_t n=0;
+        if(it.len<=0||it.len>=sizeof rel||mm_copy(rel,sizeof rel,p+it.off,it.len)){fprintf(stderr,"relscan: inventory path\n");return 2;}rel[it.len]=0;
+        count++;if(!strncmp(rel,"apps/",5))apps++;
+        if(check_path(canonical,rel,path,sizeof path))return 2;
+        int rc=sy_read_file(path,&b,&n,1L<<26);
+        if(rc==-ENOENT){fprintf(stderr,"RELSCAN_MISSING\t%s\n",rel);st.missing++;continue;}if(rc){fprintf(stderr,"relscan: read %s rc=%d\n",rel,rc);return 2;}
+        raw+=raw_uses((const char *)b,(long)n);
+        rc=rls_extract(canonical,rel,(const char *)b,(long)n,edges,&st,why,sizeof why);mm_free(b);
+        if(rc){fprintf(stderr,"relscan: %s: %s\n",rel,why);return 2;}
+    }
+    const char *out=sb_cstr(edges);long bytes=sb_len(edges);
+    if(!out||sy_write_atomic(dest,out,bytes,0600))return 2;
+    printf("RELSCAN\tinventory=%ld\tfiles=%ld\tmissing=%ld\tapps=%ld\traw_use=%ld\tuse_seen=%ld\tuse_edges=%ld\tstd_uses=%ld\tinclude_edges=%ld\tmodule_decls=%ld\tunresolved=%ld\tmalformed=%ld\tbytes=%ld\n",count,st.files,st.missing,apps,raw,st.use_seen,st.use_edges,st.std_uses,st.include_edges,st.module_decls,st.unresolved,st.malformed,bytes);
+    sb_free(paths);sb_free(edges);return 0;
+}
+int main(int argc,char **argv){
+    if(argc==4&&!strcmp(argv[1],"--scan"))return scan(argv[2],0,argv[3]);
+    if(argc==5&&!strcmp(argv[1],"--list"))return scan(argv[2],argv[3],argv[4]);
+    char root[]="/tmp/check-relscan-XXXXXX",p[8192],why[512];
+    if(!mkdtemp(root))return 2;
+    const char *dirs[]={"lib","libdeep","sub","include","apps","archive"};
+    for(int i=0;i<6;i++){if(check_path(root,dirs[i],p,sizeof p)||sy_mkdir(p,0700))return 2;}
+    if(put(root,"cxroot.tsv","CXROOT1\nR\tx\tlib\nR\tx.deep\tlibdeep\n")||put(root,"lib/base.cx","")||put(root,"libdeep/model.cx","")||put(root,"include/own.h",""))return 2;
+    const char *source="/*\n#pragma unisa use fake.comment\n*/\n # pragma unisa module demo\n\t# pragma unisa use x.base\n#pragma unisa use x.deep.model\n#pragma unisa use std.io\n#include \"../include/own.h\"\n#include <ignored.h>\nconst char *s=\"#pragma unisa use fake.string\";\n#pragma unisa use x.absent\n";
+    sb *edges=sb_new();RlsStats st={0};if(!edges)return 2;
+    ck(!rls_extract(root,"sub/user.cx",source,strlen(source),edges,&st,why,sizeof why),"extract-real-directives");
+    const char *text=sb_cstr(edges);
+    ck(st.use_seen==4&&st.use_edges==3&&st.std_uses==1,"use-and-builtin-accounting");
+    ck(st.include_edges==1&&st.module_decls==1&&st.unresolved==1,"include-module-and-missing-accounting");
+    ck(text&&strstr(text,"use\tsub/user.cx\tlib/base.cx\tcxroot\tline=5;exists=1\n"),"root-mapped-dependency");
+    ck(text&&strstr(text,"\tlibdeep/model.cx\tcxroot\tline=6;exists=1\n"),"longest-package-prefix");
+    ck(text&&strstr(text,"include\tsub/user.cx\tinclude/own.h\tquote\tline=8;exists=1\n"),"quoted-parent-include-normalized");
+    ck(text&&strstr(text,"module\tsub/user.cx\tdemo\tpragma\tline=4\n"),"module-declaration-node");
+    ck(text&&strstr(text,"\tlib/absent.cx\tcxroot\tline=11;exists=0\n"),"missing-target-retains-fact");
+    ck(text&&!strstr(text,"fake.comment")&&!strstr(text,"fake.string")&&!strstr(text,"ignored.h"),"comments-strings-angle-includes-excluded");
+    if(check_path(root,"sub/x",p,sizeof p)||sy_mkdir(p,0700)||put(root,"sub/x/base.cx",""))return 2;
+    sb *local=sb_new();RlsStats ls={0};const char *one="#pragma unisa use x.base\n";
+    ck(local&&!rls_extract(root,"sub/local.cx",one,strlen(one),local,&ls,why,sizeof why)&&strstr(sb_cstr(local),"\tsub/x/base.cx\t"),"beside-file-overrides-root-map");
+    long keep=sb_len(edges);long prior=st.files;
+    ck(rls_extract("","source.cx",one,strlen(one),edges,&st,why,sizeof why)!=0&&sb_len(edges)==keep,"empty-root-refuses-without-read-past-string");
+    RlsStats partial={0};const char *unfinished="char *x=\"unfinished";
+    ck(!rls_extract(root,"sub/partial.cx",unfinished,strlen(unfinished),local,&partial,why,sizeof why)&&partial.malformed==1,"unterminated-source-is-marked-partial");
+    ck(rls_extract(root,"../escape.cx",one,strlen(one),edges,&st,why,sizeof why)!=0&&sb_len(edges)==keep&&st.files==prior,"invalid-source-path-transactional");
+    const char *broken="#pragma unisa module fine\n#include \"../include/own.h/child.h\"\n";
+    ck(rls_extract(root,"sub/error.cx",broken,strlen(broken),edges,&st,why,sizeof why)!=0&&sb_len(edges)==keep&&st.files==prior,"ENOTDIR-not-absence-and-no-partial-row");
+    if(put(root,"cxroot.tsv","BROKEN\n"))return 2;
+    ck(rls_extract(root,"sub/config.cx","#pragma unisa use x.unknown\n",27,edges,&st,why,sizeof why)!=0&&sb_len(edges)==keep,"malformed-root-map-refuses-transactionally");
+    if(put(root,"cxroot.tsv","CXROOT1\nR\tx\tlib\nR\tx.deep\tlibdeep\n")||put(root,"sub/user.cx",source)||put(root,"apps/tool.cx",one)||put(root,"archive/old.cx",one)||put(root,"new.cx",one)||put(root,"gone.cx",one))return 2;
+    char *init[]={"git","-C",root,"init","-q",0};char *link[]={"ln","-s","lib/base.cx","alias.cx",0};
+    char *add[]={"git","-C",root,"add","lib/base.cx","libdeep/model.cx","sub/user.cx","apps/tool.cx","archive/old.cx","alias.cx","gone.cx",0};
+    ck(call(init,root)&&call(link,root)&&call(add,root),"controlled-tracked-inventory");
+    if(check_path(root,"gone.cx",p,sizeof p)||sy_unlink(p))return 2;
+    sb *paths=sb_new();ck(paths&&!rls_inventory(root,paths,why,sizeof why),"inventory-query");const char *names=sb_cstr(paths);
+    ck(names&&strstr(names,"apps/tool.cx\n")&&strstr(names,"gone.cx\n")&&!strstr(names,"alias.cx")&&!strstr(names,"archive/")&&!strstr(names,"new.cx"),"affected-set-includes-apps-excludes-symlinks-untracked-archive");
+    RlsStats missing={0};ck(!rls_file(root,"gone.cx",local,&missing,why,sizeof why)&&missing.missing==1,"tracked-worktree-deletion-is-ENOENT");
+    if(check_path(root,"edges.tsv",p,sizeof p))return 2;text=sb_cstr(edges);long en=sb_len(edges);
+    ck(text&&!sy_write_atomic(p,text,en,0600),"actual-edge-table-write");size_t readn=0;char *readback=cx_read(p,&readn);
+    ck(readback&&readn==(size_t)en&&!memcmp(readback,text,readn),"edge-table-readback-exact");mm_free(readback);
+    sb *growth=sb_new();int ok=growth!=0;
+    for(int i=0;i<20000&&ok;i++)ok=!sb_puts(growth,"use\ta.cx\tb.cx\tcxroot\tline=1\n");
+    ck(ok&&sb_len(growth)==560000&&sb_cstr(growth),"owned-pointer-builder-survives-multiple-growths");
+    sb_free(growth);sb_free(paths);sb_free(local);sb_free(edges);
+    char *rm[]={"rm","-rf","--",root,0};ck(call(rm,"/tmp"),"private-fixture-cleanup");
+    printf("CHECK_RELSCAN\tassertions=%d\tfailed=%d\n",assertions,failed);return failed?1:0;
+}

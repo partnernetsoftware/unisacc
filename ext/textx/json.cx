@@ -1,0 +1,336 @@
+#pragma unisa module json
+#pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.num
+/* ext.textx json: strict RFC 8259 parser to a tree, plus string escaping.
+   js_parse(text, len, err, errcap): the root value, or 0 with "offset N: reason" in ERR
+   (ERR may be 0). Rejects trailing garbage, bad numbers (leading zeros, "1.", ".5", "+1"),
+   control chars in strings, lone surrogates, depth over JS_MAXDEPTH. \uXXXX (with
+   surrogate pairs) is decoded to UTF-8; strings are NUL-terminated copies (js_str_len
+   gives the byte length, which may include embedded NUL from \u0000).
+   Ownership: the caller owns the root and frees it once with js_free; children belong to
+   the root. Accessors take 0 safely and return 0 / JS_NONE on a miss. */
+enum { JS_NONE = 0, JS_NULL = 1, JS_BOOL = 2, JS_NUM = 3, JS_STR = 4, JS_ARR = 5, JS_OBJ = 6, JS_MAXDEPTH = 128 };
+typedef struct js_val {
+    int kind;
+    int b;
+    double num;
+    char *s;
+    long slen;
+    long n;
+    long cap;
+    struct js_val **items;
+    char **keys;
+    long *klens;
+} js_val;
+typedef struct { const char *p; long n; long i; int depth; char *err; long errcap; int failed; } js_ps;
+
+static void js_seterr(js_ps *ps, long off, const char *msg) {
+    char num[24]; int k = 0; long w = 0, v = off; const char *pre = "offset ";
+    if (ps->failed) return;
+    ps->failed = 1;
+    if (!ps->err || ps->errcap <= 0) return;
+    if (v < 0) v = 0;
+    do { num[k++] = (char)('0' + v % 10); v /= 10; } while (v && k < 23);
+    while (*pre && w < ps->errcap - 1) ps->err[w++] = *pre++;
+    while (k > 0 && w < ps->errcap - 1) ps->err[w++] = num[--k];
+    if (w < ps->errcap - 1) ps->err[w++] = ':';
+    if (w < ps->errcap - 1) ps->err[w++] = ' ';
+    while (*msg && w < ps->errcap - 1) ps->err[w++] = *msg++;
+    ps->err[w] = 0;
+}
+static void js_ws(js_ps *ps) {
+    while (ps->i < ps->n) {
+        char c = ps->p[ps->i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ps->i++; else break;
+    }
+}
+static js_val *js_node(js_ps *ps, int kind) {
+    js_val *v = (js_val *)mm_zalloc((long)sizeof(js_val));
+    if (!v) { js_seterr(ps, ps->i, "out of memory"); return 0; }
+    v->kind = kind;
+    return v;
+}
+void js_free(js_val *v) {
+    long i;
+    if (!v) return;
+    for (i = 0; i < v->n; i++) {
+        if (v->items) js_free(v->items[i]);
+        if (v->keys) mm_free(v->keys[i]);
+    }
+    mm_free(v->items); mm_free(v->keys); mm_free(v->klens); mm_free(v->s);
+    mm_free(v);
+}
+static int js_hex4(js_ps *ps, long at, unsigned *out) {
+    unsigned u = 0; int k;
+    if (at + 4 > ps->n) return -1;
+    for (k = 0; k < 4; k++) {
+        char c = ps->p[at + k];
+        u <<= 4;
+        if (c >= '0' && c <= '9') u |= (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') u |= (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') u |= (unsigned)(c - 'A' + 10);
+        else return -1;
+    }
+    *out = u;
+    return 0;
+}
+static long js_put8(char *d, unsigned cp) {
+    if (cp < 0x80) { d[0] = (char)cp; return 1; }
+    if (cp < 0x800) { d[0] = (char)(0xC0 | (cp >> 6)); d[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) { d[0] = (char)(0xE0 | (cp >> 12)); d[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); d[2] = (char)(0x80 | (cp & 0x3F)); return 3; }
+    d[0] = (char)(0xF0 | (cp >> 18)); d[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    d[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); d[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+/* ps->i at the opening quote. Decoded bytes never exceed the raw span, so one
+   allocation of (raw length + 1) suffices. */
+static char *js_string(js_ps *ps, long *olen) {
+    long st = ps->i + 1, e = st, w = 0;
+    char *d;
+    int esc = 0;
+    while (e < ps->n && ps->p[e] != '"') {
+        unsigned char c = (unsigned char)ps->p[e];
+        if (c < 0x20) { js_seterr(ps, e, "control character in string"); return 0; }
+        if (c == '\\') { esc = 1; e += 2; } else e++;
+    }
+    if (e >= ps->n) { js_seterr(ps, ps->i, "unterminated string"); return 0; }
+    d = (char *)mm_alloc(e - st + 1);
+    if (!d) { js_seterr(ps, st, "out of memory"); return 0; }
+    if (!esc) {
+        mm_copy(d, e - st + 1, ps->p + st, e - st);
+        w = e - st;
+    } else {
+        long i = st;
+        while (i < e) {
+            char c = ps->p[i];
+            if (c != '\\') { d[w++] = c; i++; continue; }
+            c = ps->p[i + 1];
+            if (c == '"' || c == '\\' || c == '/') { d[w++] = c; i += 2; }
+            else if (c == 'b') { d[w++] = '\b'; i += 2; }
+            else if (c == 'f') { d[w++] = '\f'; i += 2; }
+            else if (c == 'n') { d[w++] = '\n'; i += 2; }
+            else if (c == 'r') { d[w++] = '\r'; i += 2; }
+            else if (c == 't') { d[w++] = '\t'; i += 2; }
+            else if (c == 'u') {
+                unsigned u, lo;
+                if (js_hex4(ps, i + 2, &u) || i + 6 > e) { js_seterr(ps, i, "bad \\u escape"); mm_free(d); return 0; }
+                i += 6;
+                if (u >= 0xDC00 && u <= 0xDFFF) { js_seterr(ps, i - 6, "lone low surrogate"); mm_free(d); return 0; }
+                if (u >= 0xD800 && u <= 0xDBFF) {
+                    if (i + 6 > e || ps->p[i] != '\\' || ps->p[i + 1] != 'u' || js_hex4(ps, i + 2, &lo) || lo < 0xDC00 || lo > 0xDFFF) {
+                        js_seterr(ps, i - 6, "lone high surrogate"); mm_free(d); return 0;
+                    }
+                    i += 6;
+                    u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+                }
+                w += js_put8(d + w, u);
+            } else { js_seterr(ps, i, "bad escape"); mm_free(d); return 0; }
+        }
+    }
+    d[w] = 0;
+    *olen = w;
+    ps->i = e + 1;
+    return d;
+}
+static js_val *js_number(js_ps *ps) {
+    long st = ps->i, i = ps->i;
+    char buf[64]; char *tmp = buf; js_val *v;
+    if (i < ps->n && ps->p[i] == '-') i++;
+    if (i >= ps->n) { js_seterr(ps, st, "bad number"); return 0; }
+    if (ps->p[i] == '0') { i++; if (i < ps->n && ps->p[i] >= '0' && ps->p[i] <= '9') { js_seterr(ps, st, "leading zero"); return 0; } }
+    else if (ps->p[i] >= '1' && ps->p[i] <= '9') { while (i < ps->n && ps->p[i] >= '0' && ps->p[i] <= '9') i++; }
+    else { js_seterr(ps, st, "bad number"); return 0; }
+    if (i < ps->n && ps->p[i] == '.') {
+        i++;
+        if (i >= ps->n || ps->p[i] < '0' || ps->p[i] > '9') { js_seterr(ps, st, "bad fraction"); return 0; }
+        while (i < ps->n && ps->p[i] >= '0' && ps->p[i] <= '9') i++;
+    }
+    if (i < ps->n && (ps->p[i] == 'e' || ps->p[i] == 'E')) {
+        i++;
+        if (i < ps->n && (ps->p[i] == '+' || ps->p[i] == '-')) i++;
+        if (i >= ps->n || ps->p[i] < '0' || ps->p[i] > '9') { js_seterr(ps, st, "bad exponent"); return 0; }
+        while (i < ps->n && ps->p[i] >= '0' && ps->p[i] <= '9') i++;
+    }
+    v = js_node(ps, JS_NUM);
+    if (!v) return 0;
+    if (i - st >= (long)sizeof(buf)) { tmp = (char *)mm_alloc(i - st + 1); if (!tmp) { mm_free(v); js_seterr(ps, st, "out of memory"); return 0; } }
+    mm_copy(tmp, i - st + 1, ps->p + st, i - st);
+    tmp[i - st] = 0;
+    v->num = tx_strtod(tmp, 0);
+    if (tmp != buf) mm_free(tmp);
+    ps->i = i;
+    return v;
+}
+static int js_push(js_ps *ps, js_val *c, js_val *x, char *key, long klen) {
+    if (c->n == c->cap) {
+        long nc = c->cap ? c->cap * 2 : 4;
+        js_val **ni = (js_val **)mm_grow(c->items, nc * (long)sizeof(js_val *));
+        if (!ni) { js_seterr(ps, ps->i, "out of memory"); return -1; }
+        c->items = ni;
+        if (c->kind == JS_OBJ) {
+            char **nk = (char **)mm_grow(c->keys, nc * (long)sizeof(char *));
+            long *nl;
+            if (!nk) { js_seterr(ps, ps->i, "out of memory"); return -1; }
+            c->keys = nk;
+            nl = (long *)mm_grow(c->klens, nc * (long)sizeof(long));
+            if (!nl) { js_seterr(ps, ps->i, "out of memory"); return -1; }
+            c->klens = nl;
+        }
+        c->cap = nc;
+    }
+    c->items[c->n] = x;
+    if (c->kind == JS_OBJ) { c->keys[c->n] = key; c->klens[c->n] = klen; }
+    c->n++;
+    return 0;
+}
+static int js_lit(js_ps *ps, const char *w) {
+    long k = 0;
+    while (w[k]) { if (ps->i + k >= ps->n || ps->p[ps->i + k] != w[k]) return 0; k++; }
+    ps->i += k;
+    return 1;
+}
+static js_val *js_value(js_ps *ps) {
+    char c; js_val *v;
+    js_ws(ps);
+    if (ps->i >= ps->n) { js_seterr(ps, ps->i, "unexpected end"); return 0; }
+    c = ps->p[ps->i];
+    if (c == '{' || c == '[') {
+        int obj = c == '{';
+        char close = obj ? '}' : ']';
+        if (++ps->depth > JS_MAXDEPTH) { js_seterr(ps, ps->i, "depth limit 128"); return 0; }
+        v = js_node(ps, obj ? JS_OBJ : JS_ARR);
+        if (!v) return 0;
+        ps->i++;
+        js_ws(ps);
+        if (ps->i < ps->n && ps->p[ps->i] == close) { ps->i++; ps->depth--; return v; }
+        for (;;) {
+            char *key = 0; long klen = 0; js_val *x;
+            js_ws(ps);
+            if (obj) {
+                if (ps->i >= ps->n || ps->p[ps->i] != '"') { js_seterr(ps, ps->i, "expected key string"); js_free(v); return 0; }
+                key = js_string(ps, &klen);
+                if (!key) { js_free(v); return 0; }
+                js_ws(ps);
+                if (ps->i >= ps->n || ps->p[ps->i] != ':') { js_seterr(ps, ps->i, "expected ':'"); mm_free(key); js_free(v); return 0; }
+                ps->i++;
+            }
+            x = js_value(ps);
+            if (!x) { mm_free(key); js_free(v); return 0; }
+            if (js_push(ps, v, x, key, klen)) { mm_free(key); js_free(x); js_free(v); return 0; }
+            js_ws(ps);
+            if (ps->i < ps->n && ps->p[ps->i] == ',') { ps->i++; continue; }
+            if (ps->i < ps->n && ps->p[ps->i] == close) { ps->i++; break; }
+            js_seterr(ps, ps->i, obj ? "expected ',' or '}'" : "expected ',' or ']'");
+            js_free(v);
+            return 0;
+        }
+        ps->depth--;
+        return v;
+    }
+    if (c == '"') {
+        long l = 0; char *s = js_string(ps, &l);
+        if (!s) return 0;
+        v = js_node(ps, JS_STR);
+        if (!v) { mm_free(s); return 0; }
+        v->s = s; v->slen = l;
+        return v;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) return js_number(ps);
+    if (js_lit(ps, "true")) { v = js_node(ps, JS_BOOL); if (v) v->b = 1; return v; }
+    if (js_lit(ps, "false")) return js_node(ps, JS_BOOL);
+    if (js_lit(ps, "null")) return js_node(ps, JS_NULL);
+    js_seterr(ps, ps->i, "unexpected character");
+    return 0;
+}
+js_val *js_parse(const char *text, long len, char *err, long errcap) {
+    js_ps ps; js_val *v;
+    ps.p = text; ps.n = len; ps.i = 0; ps.depth = 0; ps.err = err; ps.errcap = errcap; ps.failed = 0;
+    if (err && errcap > 0) err[0] = 0;
+    if (!text || len < 0) { js_seterr(&ps, 0, "bad arguments"); return 0; }
+    v = js_value(&ps);
+    if (!v) return 0;
+    js_ws(&ps);
+    if (ps.i != ps.n) { js_seterr(&ps, ps.i, "trailing garbage"); js_free(v); return 0; }
+    return v;
+}
+int js_kind(const js_val *v) { return v ? v->kind : JS_NONE; }
+long js_len(const js_val *v) {
+    if (!v) return 0;
+    if (v->kind == JS_ARR || v->kind == JS_OBJ) return v->n;
+    if (v->kind == JS_STR) return v->slen;
+    return 0;
+}
+js_val *js_at(const js_val *v, long i) {
+    if (!v || (v->kind != JS_ARR && v->kind != JS_OBJ) || i < 0 || i >= v->n) return 0;
+    return v->items[i];
+}
+/* Key of member I of an object, or 0. */
+const char *js_key(const js_val *v, long i) {
+    if (!v || v->kind != JS_OBJ || i < 0 || i >= v->n) return 0;
+    return v->keys[i];
+}
+/* Member KEY (first KN bytes) of object V; the last duplicate wins. */
+js_val *js_getn(const js_val *v, const char *key, long kn) {
+    long i;
+    if (!v || v->kind != JS_OBJ || !key) return 0;
+    for (i = v->n - 1; i >= 0; i--)
+        if (v->klens[i] == kn && mm_same(v->keys[i], key, kn)) return v->items[i];
+    return 0;
+}
+js_val *js_get(const js_val *v, const char *key) {
+    long k = 0;
+    if (!key) return 0;
+    while (key[k]) k++;
+    return js_getn(v, key, k);
+}
+const char *js_str(const js_val *v) { return v && v->kind == JS_STR ? v->s : 0; }
+long js_str_len(const js_val *v) { return v && v->kind == JS_STR ? v->slen : 0; }
+double js_num(const js_val *v) { return v && v->kind == JS_NUM ? v->num : 0.0; }
+int js_bool(const js_val *v) { return v && v->kind == JS_BOOL ? v->b : 0; }
+/* Dotted path: "a.b.0.c". A segment of only digits indexes an array; on an object it is a key. */
+js_val *js_path(const js_val *v, const char *path) {
+    const js_val *cur = v; long st = 0, i = 0;
+    if (!v || !path) return 0;
+    for (;;) {
+        if (path[i] == '.' || path[i] == 0) {
+            long sl = i - st, k, idx = 0; int dig = sl > 0;
+            for (k = 0; k < sl; k++) { char c = path[st + k]; if (c < '0' || c > '9') { dig = 0; break; } idx = idx * 10 + (c - '0'); }
+            if (!cur) return 0;
+            if (cur->kind == JS_ARR) { if (!dig) return 0; cur = js_at(cur, idx); }
+            else if (cur->kind == JS_OBJ) cur = js_getn(cur, path + st, sl);
+            else return 0;
+            if (!cur) return 0;
+            if (path[i] == 0) return (js_val *)cur;
+            st = i + 1;
+        }
+        i++;
+    }
+}
+/* Writes S (N bytes) as a JSON string body (no surrounding quotes) to DST, NUL-terminated.
+   Returns 1 when everything fit, 0 when truncated (DST holds the longest whole-escape
+   prefix), -1 on bad arguments. *OUTLEN (may be 0) gets the bytes written. */
+int js_esc(char *dst, long cap, const char *s, long n, long *outlen) {
+    static const char hx[] = "0123456789abcdef";
+    long i, w = 0; int fit = 1;
+    if (outlen) *outlen = 0;
+    if (!dst || cap <= 0 || (!s && n)) return -1;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        char t[6]; int tl = 0, k;
+        if (c == '"' || c == '\\') { t[0] = '\\'; t[1] = (char)c; tl = 2; }
+        else if (c == '\n') { t[0] = '\\'; t[1] = 'n'; tl = 2; }
+        else if (c == '\r') { t[0] = '\\'; t[1] = 'r'; tl = 2; }
+        else if (c == '\t') { t[0] = '\\'; t[1] = 't'; tl = 2; }
+        else if (c == '\b') { t[0] = '\\'; t[1] = 'b'; tl = 2; }
+        else if (c == '\f') { t[0] = '\\'; t[1] = 'f'; tl = 2; }
+        else if (c < 0x20) { t[0] = '\\'; t[1] = 'u'; t[2] = '0'; t[3] = '0'; t[4] = hx[c >> 4]; t[5] = hx[c & 15]; tl = 6; }
+        else { t[0] = (char)c; tl = 1; }
+        if (w + tl > cap - 1) { fit = 0; break; }
+        for (k = 0; k < tl; k++) dst[w++] = t[k];
+    }
+    dst[w] = 0;
+    if (outlen) *outlen = w;
+    return fit;
+}

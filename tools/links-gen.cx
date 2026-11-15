@@ -16,6 +16,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.awpath
 
 #define OUTCAP (4 << 20)
 static char *ob; static long on; static int rows_derive, rows_batch;
@@ -104,6 +105,14 @@ int main(int argc, char **argv) {
     if ((rc = gen_batch("tests/batches.tsv")) != 0) return rc;
     cur = cx_read(outp, &cn);
     same = cur && (long)cn == on && mm_same(cur, ob, on);
+    {
+        /* double write: the dev metadata copy (cxlib/awpath awp_devmeta) stays byte-identical to build/links.tsv */
+        char dm[1024]; size_t dn = 0; char *dc;
+        if (awp_devmeta(".", "links.tsv", mode == 2, dm, sizeof dm)) { printf("REFUSE\tdevmeta-path\n"); return 2; }
+        dc = cx_read(dm, &dn);
+        if (mode == 1 && (!dc || (long)dn != on || !mm_same(dc, ob, on))) { printf("DEVMETA_DIFF\t%s\n", dm); same = 0; }
+        if (mode == 2 && (!dc || (long)dn != on || !mm_same(dc, ob, on)) && cx_write(dm, ob, on)) { printf("REFUSE\t%s\twrite-failed\n", dm); return 2; }
+    }
     if (mode == 1) {
         printf("LINKS_GEN\t%s\tderive=%d\tbatch=%d\t%s\n", same ? "OK" : "DRIFT", rows_derive, rows_batch, outp);
         return same ? 0 : 1;

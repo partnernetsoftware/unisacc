@@ -1,0 +1,154 @@
+#pragma unisa module relscan
+/* File-level links-v1 extraction. The caller owns builders and cache policy.
+ * Inventory is affected --users' tracked .cx set: no archive/ or index symlinks.
+ * extract accepts an immutable byte snapshot; file also accepts untracked files.
+ * Missing destinations remain facts with exists=0. std uses are built-ins, not files.
+ * cxroot.tsv changes/creation must invalidate the caller's path-resolution cache. */
+#pragma unisa use cxlib.cxroot
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.build
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+typedef struct RlsStats {
+    long files,bytes,lines,use_seen,use_edges,include_seen,include_edges,module_decls;
+    long std_uses,unresolved,missing,malformed;
+} RlsStats;
+
+static int rls_bad(char *why,long cap,const char *s){if(why&&cap>0)cx_fmt(why,cap,"%s",s);return 1;}
+static int rls_text(const char *p){if(!p)return 0;for(;*p;p++)if((unsigned char)*p<32||*p==127)return 0;return 1;}
+static int rls_root(const char *p){long n=p?tx_len(p,4096):-1;return n>0&&n<4096&&p[0]=='/'&&(n==1||p[n-1]!='/')&&rls_text(p);}
+static int rls_rel(const char *p){
+    if(!p||!*p||*p=='/'||!rls_text(p))return 0;
+    for(long i=0;p[i];){long a=i;while(p[i]&&p[i]!='/')i++;long n=i-a;
+        if(!n||(n==1&&p[a]=='.')||(n==2&&p[a]=='.'&&p[a+1]=='.'))return 0;
+        if(p[i]){i++;if(!p[i])return 0;}
+    }return 1;
+}
+static int rls_norm(const char *p,char *out,long cap){
+    long z=1;if(!p||*p!='/'||cap<2)return 1;out[0]='/';
+    for(long i=1;p[i];){while(p[i]=='/')i++;long a=i;while(p[i]&&p[i]!='/')i++;long n=i-a;
+        if(!n||(n==1&&p[a]=='.'))continue;
+        if(n==2&&p[a]=='.'&&p[a+1]=='.'){while(z>1&&out[z-1]!='/')z--;if(z>1)z--;continue;}
+        if(z+(z>1)+n>=cap)return 1;if(z>1)out[z++]='/';
+        if(mm_copy(out+z,cap-z,p+a,n))return 1;z+=n;
+    }out[z]=0;return 0;
+}
+static int rls_join(const char *root,const char *rel,char *out,long cap){
+    return cx_fmt(out,cap,"%s%s%s",root,root[1]?"/":"",rel);
+}
+static int rls_path(const char *root,const char *path,char *out,long cap,int *exists,char *why,long wc){
+    char norm[8192],real[8192];long rn=tx_len(root,4096);int e=sy_exists(path);
+    if(e<0)return rls_bad(why,wc,"destination lookup failed (not ENOENT)");
+    *exists=e==1;
+    if(e==1){if(sy_realpath(path,real,sizeof real)<0)return rls_bad(why,wc,"destination realpath failed");}
+    else if(rls_norm(path,real,sizeof real))return rls_bad(why,wc,"destination path too long");
+    if(rls_norm(real,norm,sizeof norm)||!rls_text(norm))return rls_bad(why,wc,"destination is not representable in links v1");
+    const char *p=norm;
+    if(rn==1&&root[0]=='/')p=norm+1;
+    else if(!strncmp(norm,root,(size_t)rn)&&norm[rn]=='/')p=norm+rn+1;
+    if(cx_fmt(out,cap,"%s",p))return rls_bad(why,wc,"destination path capacity");return 0;
+}
+static int rls_row(sb *out,const char *kind,const char *src,const char *dst,const char *via,long line,int exists){
+    char attr[100];
+    if(exists<0){if(cx_fmt(attr,sizeof attr,"line=%ld",line))return 1;}
+    else if(cx_fmt(attr,sizeof attr,"line=%ld;exists=%d",line,exists))return 1;
+    return sb_puts(out,kind)||sb_putc(out,'\t')||sb_puts(out,src)||sb_putc(out,'\t')||
+        sb_puts(out,dst)||sb_putc(out,'\t')||sb_puts(out,via)||sb_putc(out,'\t')||sb_puts(out,attr)||sb_putc(out,'\n');
+}
+static long rls_blank(const char *b,long i,long n){while(i<n&&(b[i]==' '||b[i]=='\t'||b[i]=='\r'||b[i]=='\f'))i++;return i;}
+static long rls_word(const char *b,long i,long n,const char *w){
+    long z=tx_len(w,64);if(i+z>n||!mm_same(b+i,w,z))return -1;
+    if(i+z<n&&((b[i+z]>='a'&&b[i+z]<='z')||(b[i+z]>='A'&&b[i+z]<='Z')||(b[i+z]>='0'&&b[i+z]<='9')||b[i+z]=='_'))return -1;
+    return i+z;
+}
+static int rls_namechar(int c){return(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='.';}
+static int rls_directive(const char *root,const char *rel,const char *abs,const char *b,long i,long n,long line,sb *out,RlsStats *st,char *why,long wc){
+    char token[4096],dest[8192],resolved[8192];long j,a,z;int module=0,exists=0;
+    i=rls_blank(b,i+1,n);
+    if((j=rls_word(b,i,n,"pragma"))>=0){
+        i=rls_blank(b,j,n);j=rls_word(b,i,n,"unisa");if(j<0)return 0;
+        i=rls_blank(b,j,n);j=rls_word(b,i,n,"use");
+        if(j<0){j=rls_word(b,i,n,"module");if(j<0)return 0;module=1;}
+        if(!module)st->use_seen++;
+        i=rls_blank(b,j,n);a=i;while(i<n&&rls_namechar((unsigned char)b[i]))i++;z=i-a;
+        if(z<=0||z>200){st->malformed++;return 0;}
+        if(mm_copy(token,sizeof token,b+a,z))return rls_bad(why,wc,"module name capacity");token[z]=0;
+        if(module){if(rls_row(out,"module",rel,token,"pragma",line,-1))return rls_bad(why,wc,"builder append failed");st->module_decls++;return 0;}
+        if(tx_eqz(token,"std")||tx_eqz(token,"std.cx")||!strncmp(token,"std.",4)){st->std_uses++;return 0;}
+        if(cxr_path(abs,token,z,dest,sizeof dest))return rls_bad(why,wc,"cxroot resolution refused");
+        if(rls_path(root,dest,resolved,sizeof resolved,&exists,why,wc))return 1;
+        if(rls_row(out,"use",rel,resolved,"cxroot",line,exists))return rls_bad(why,wc,"builder append failed");
+        st->use_edges++;if(!exists)st->unresolved++;return 0;
+    }
+    j=rls_word(b,i,n,"include");if(j<0)return 0;i=rls_blank(b,j,n);
+    if(i>=n||b[i]!='"')return 0;st->include_seen++;a=++i;while(i<n&&b[i]!='"'&&b[i]!='\n')i++;z=i-a;
+    if(i>=n||b[i]!='"'||z<=0||z>4095){st->malformed++;return 0;}
+    if(mm_copy(token,sizeof token,b+a,z))return rls_bad(why,wc,"include capacity");token[z]=0;
+    if(!rls_text(token)){st->malformed++;return 0;}
+    long dl=tx_len(abs,8192);while(dl>0&&abs[dl-1]!='/')dl--;
+    if(token[0]=='/'){if(cx_fmt(dest,sizeof dest,"%s",token))return rls_bad(why,wc,"include path capacity");}
+    else if(cx_fmt(dest,sizeof dest,"%.*s%s",(int)dl,abs,token))return rls_bad(why,wc,"include path capacity");
+    if(rls_path(root,dest,resolved,sizeof resolved,&exists,why,wc))return 1;
+    if(rls_row(out,"include",rel,resolved,"quote",line,exists))return rls_bad(why,wc,"builder append failed");
+    st->include_edges++;if(!exists)st->unresolved++;return 0;
+}
+static void rls_add(RlsStats *a,const RlsStats *b){
+    if(!a)return;a->files+=b->files;a->bytes+=b->bytes;a->lines+=b->lines;a->use_seen+=b->use_seen;a->use_edges+=b->use_edges;
+    a->include_seen+=b->include_seen;a->include_edges+=b->include_edges;a->module_decls+=b->module_decls;
+    a->std_uses+=b->std_uses;a->unresolved+=b->unresolved;a->missing+=b->missing;a->malformed+=b->malformed;
+}
+int rls_extract(const char *root,const char *rel,const char *b,long n,sb *out,RlsStats *stats,char *why,long wc){
+    char abs[8192];RlsStats st={0};long i=0,line=1,start;int ls=1;
+    if(why&&wc>0)why[0]=0;
+    if(!rls_root(root)||!rls_rel(rel)||!out||n<0||(!b&&n)||n>(1L<<26)||rls_join(root,rel,abs,sizeof abs))return rls_bad(why,wc,"invalid extraction arguments");
+    if(n&&memchr(b,0,(size_t)n))return rls_bad(why,wc,"source contains NUL");
+    start=sb_len(out);st.files=1;st.bytes=n;st.lines=n?1:0;
+    for(long k=0;k<n;k++)if(b[k]=='\n'&&k+1<n)st.lines++;
+    while(i<n){char c=b[i];
+        if(c=='\n'){line++;ls=1;i++;continue;}
+        if(c==' '||c=='\t'||c=='\r'||c=='\f'){i++;continue;}
+        if(c=='/'&&i+1<n&&b[i+1]=='*'){
+            i+=2;while(i<n&&!(b[i]=='*'&&i+1<n&&b[i+1]=='/')){if(b[i]=='\n'){line++;ls=1;}i++;}
+            if(i<n)i+=2;else st.malformed++;continue;
+        }
+        if(c=='/'&&i+1<n&&b[i+1]=='/'){while(i<n&&b[i]!='\n')i++;continue;}
+        if(c=='#'&&ls){long e=i;while(e<n&&b[e]!='\n')e++;
+            if(rls_directive(root,rel,abs,b,i,e,line,out,&st,why,wc)){sb_truncate(out,start);return 1;}i=e;ls=0;continue;
+        }
+        ls=0;
+        if(c=='"'||c=='\''){char q=c;i++;while(i<n&&b[i]!=q){
+                if(b[i]=='\\'&&i+1<n){if(b[i+1]=='\n')line++;i+=2;continue;}
+                if(b[i]=='\n'){st.malformed++;break;}i++;
+            }if(i<n&&b[i]==q)i++;else if(i==n)st.malformed++;continue;
+        }i++;
+    }
+    rls_add(stats,&st);return 0;
+}
+int rls_file(const char *root,const char *rel,sb *out,RlsStats *stats,char *why,long wc){
+    char path[8192];unsigned char *b=0;int64_t n=0;
+    if(!rls_root(root)||!rls_rel(rel)||rls_join(root,rel,path,sizeof path))return rls_bad(why,wc,"invalid file arguments");
+    int rc=sy_read_file(path,&b,&n,1L<<26);
+    if(rc==-ENOENT){if(stats)stats->missing++;return 0;}
+    if(rc)return rls_bad(why,wc,"source read failed (not ENOENT)");
+    rc=rls_extract(root,rel,(const char *)b,(long)n,out,stats,why,wc);mm_free(b);return rc;
+}
+int rls_inventory(const char *root,sb *paths,char *why,long wc){
+    char *v[]={"git","-C",(char *)root,"ls-files","-s","-z","--","*.cx",0};np_result r={0};char err[512];
+    if(!rls_root(root)||!paths)return rls_bad(why,wc,"invalid inventory arguments");
+    long start=sb_len(paths);
+    if(np_run(v,root,0,20,&r,err,sizeof err)||r.rc||r.residue){np_free(&r);return rls_bad(why,wc,"tracked inventory command failed");}
+    for(size_t i=0;i<r.outn;){size_t e=i;while(e<r.outn&&r.out[e])e++;
+        if(e==r.outn||e-i<10){np_free(&r);sb_truncate(paths,start);return rls_bad(why,wc,"tracked inventory framing");}
+        size_t tab=i;while(tab<e&&r.out[tab]!='\t')tab++;
+        if(tab==e){np_free(&r);sb_truncate(paths,start);return rls_bad(why,wc,"tracked inventory schema");}
+        if(memcmp(r.out+i,"120000",6)&&!(e-tab-1>=8&&!memcmp(r.out+tab+1,"archive/",8))){
+            const char *p=r.out+tab+1;long n=(long)(e-tab-1);
+            if(memchr(p,'\n',(size_t)n)||memchr(p,'\t',(size_t)n)||memchr(p,'\r',(size_t)n)||sb_putn(paths,p,n)||sb_putc(paths,'\n')){
+                np_free(&r);sb_truncate(paths,start);return rls_bad(why,wc,"inventory path or builder capacity");
+            }
+        }i=e+1;
+    }np_free(&r);return 0;
+}

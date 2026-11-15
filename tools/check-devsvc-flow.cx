@@ -1,0 +1,166 @@
+/* tools/check-devsvc-flow.cx -- 检查 tools/devsvc.cx 的 flow、f、x 子命令。批次 devsvc-flow。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-flow.cx        (在仓根或版本工作目录根跑)
+ *
+ * 夹具:实例目录 /tmp/devsvc-flowck-<pid>(经配置表 inst_env 所名环境变量),不碰真实实例;文件夹具在
+ *   /tmp/devsvc-flowck-<pid>-w,经 UNISACC_FLOW_ROOT 作为写根,不写本检出。所起实例 ttl 120 s,结束时 stop 并清理。
+ * 断言:无实例时 x 本地执行(via=local)且退出码即命令自己的;flow run 两个 sleep 节点 --jobs 2 的墙钟小于 --jobs 1;
+ *   节点事件以 flow.node 进事件环;flow - 从 stdin 读节点并 --cat 给出内容;f write/read/edit 往返,read 的 sha 与 write 的一致;
+ *   expect_sha 不符拒绝且文件不变,相符通过;路径锁被他人持有时 f write 与 flow 的写节点都被拒且文件不变,--lock-wait-ms 到点仍拒,
+ *   放锁后通过且事后不留锁;x 超时返回 124 并杀掉整个进程组(后台孙进程不存活)。
+ * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC_FLOW<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+#define CFG_TABLE "tools/devsvc-repo.tsv"
+static int nok, nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], table[1100], prod[1200], self[1200], inst[128], w[128], out[1 << 16], out2[1 << 16];
+static char c_product[128], c_self[128], c_env[64];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-flow.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) printf("NOTE\tlast-output\t%.400s\n", out);
+    if (c) nok++; else nfail++;
+}
+static int cfgval(const char *tb, long n, const char *key, char *dst, int cap) {
+    const char *s = tb, *end = tb + n, *e, *t, *t2; long kl = strlen(key);
+    for (; s < end; s = e + 1) {
+        e = memchr(s, '\n', end - s); if (!e) break;
+        if (e - s <= kl || memcmp(s, key, kl) || s[kl] != '\t') continue;
+        t = s + kl + 1; t2 = memchr(t, '\t', e - t); if (!t2) t2 = e;
+        if (t2 - t <= 0 || t2 - t >= cap) return 0;
+        if (mm_copy(dst, cap, t, t2 - t)) return 0;
+        dst[t2 - t] = 0; return 1;
+    }
+    return 0;
+}
+/* 有界跑一条命令(55 秒上限):stdout 后接 stderr 收进 buf,返回退出码;起不来或装不下返回 -1 */
+static int cap2(char **v, char *buf, int cap) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(buf, 0, cap);
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > cap - 1 || (a > 0 && mm_copy(buf, cap, r.out, a)) || (b > 0 && mm_copy(buf + a, cap - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int dv(char **args) {
+    char *v[24]; int n = 0, i;
+    v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--";
+    for (i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    v[n] = 0;
+    return cap2(v, out, sizeof out);
+}
+static int dv1(char *a, char *b, char *c, char *d, char *e, char *f) { char *v[] = {a, b, c, d, e, f, 0}; return dv(v); }
+static int has(const char *s) { return strstr(out, s) != 0; }
+static long field(const char *key) { const char *q = strstr(out, key); return q ? atol(q + strlen(key)) : -1; }
+static int put(const char *name, const char *text) { char p[300]; F(p, sizeof p, "%s/%s", w, name); return sy_write_atomic(p, text, strlen(text), 0644); }
+/* 夹具文件内容是否恰为 text */
+static int is(const char *name, const char *text) {
+    char p[300]; unsigned char *b = 0; int64_t n = 0; int r;
+    F(p, sizeof p, "%s/%s", w, name);
+    if (sy_read_file(p, &b, &n, 1 << 16)) return 0;
+    r = n == (int64_t)strlen(text) && (n == 0 || !memcmp(b, text, n));
+    if (b) free(b);
+    return r;
+}
+static void sha_of(char *dst) { const char *q = strstr(out, "sha="); dst[0] = 0; if (q && strlen(q + 4) >= 64) { memcpy(dst, q + 4, 64); dst[64] = 0; } }
+
+int main(void) {
+    char p[400], p2[400], sha[80], sha2[80]; int r; long par, ser;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(table, sizeof table, "%s/%s", root, CFG_TABLE);
+    {   unsigned char *b = 0; int64_t n = 0; int okc;
+        if (sy_read_file(table, &b, &n, 1 << 16) || !b) { printf("FAIL\tdevsvc-flow.config-table-readable\t%s\n", table); return 1; }
+        okc = cfgval((char *)b, n, "product", c_product, sizeof c_product) && cfgval((char *)b, n, "self", c_self, sizeof c_self)
+           && cfgval((char *)b, n, "inst_env", c_env, sizeof c_env);
+        free(b);
+        if (!okc) { printf("FAIL\tdevsvc-flow.config-table-keys\t%s\n", table); return 1; } }
+    F(prod, sizeof prod, "%s/%s", root, c_product); F(self, sizeof self, "%s/%s", root, c_self);
+    F(inst, sizeof inst, "/tmp/devsvc-flowck-%d", sy_pid()); F(w, sizeof w, "/tmp/devsvc-flowck-%d-w", sy_pid());
+    if (setenv(c_env, inst, 1) || setenv("UNISACC_FLOW_ROOT", w, 1) || sy_mkdir_all(w, 0755)) return 2;
+
+    /* 无实例:x 本地执行,退出码与输出即命令自己的 */
+    {   char *v[] = {"x", "--", "sh", "-c", "echo hi; echo oops >&2; exit 3", 0};
+        ck(dv(v) == 3 && has("hi\n") && has("oops\n") && has("X\tfail\trc=3\t") && has("via=local"), "x-local-rc-and-output"); }
+    ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
+
+    /* flow run:两节点并行墙钟小于串行 */
+    ck(put("two.tsv", "# two sleeps\na\texec\t-\ta0=sleep;a1=0.7\nb\texec\t-\ta0=sleep;a1=0.7\n") == 0, "fixture-two");
+    F(p, sizeof p, "%s/two.tsv", w);
+    {   char *v[] = {"flow", "run", p, "--jobs", "2", 0};
+        r = dv(v); par = field("wall_ms=");
+        ck(r == 0 && has("NODE\ta\tok\trc=0\t") && has("NODE\tb\tok\trc=0\t") && has("DEVSVC_FLOW\tnodes=2\tok=2\tfail=0\t") && has("peak=2") && has("via=service"), "flow-run-two-nodes"); }
+    {   char *v[] = {"flow", "run", p, "--jobs", "1", "--deadline-ms", "20000", 0};
+        r = dv(v); ser = field("wall_ms=");
+        ck(r == 0 && has("peak=1") && par >= 700 && par < 1300 && ser >= 1400 && par < ser, "flow-parallel-faster-than-serial"); }
+    ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tflow.node\t") && has("\ta\tstart\t") && has("\tb\tok\t"), "flow-events-in-ring");
+
+    /* f write / read / edit 往返 */
+    ck(put("src.txt", "alpha\nbeta\ngamma\n") == 0 && put("old.txt", "beta\n") == 0 && put("new.txt", "BETA;\t%25\n") == 0, "fixture-files");
+    F(p, sizeof p, "%s/src.txt", w);
+    ck(dv1("f", "write", "a.txt", "--from", p, 0) == 0 && has("F\twrite\tok\tsha=") && is("a.txt", "alpha\nbeta\ngamma\n"), "f-write");
+    sha_of(sha);
+    r = dv1("f", "read", "a.txt", 0, 0, 0); sha_of(sha2);
+    ck(r == 0 && strstr(out, "alpha\nbeta\ngamma\nF\tread\tok\tsha=") == out && has("lines=3") && sha[0] && !strcmp(sha, sha2), "f-read-roundtrip-same-sha");
+    ck(dv1("f", "read", "a.txt", "2", "1", 0) == 0 && strstr(out, "beta\nF\tread\tok\t") == out, "f-read-line-range");
+    F(p, sizeof p, "%s/old.txt", w); F(p2, sizeof p2, "%s/new.txt", w);
+    {   char *v[] = {"f", "edit", "a.txt", "--old-file", p, "--new-file", p2, "--expect-sha", sha, 0};
+        ck(dv(v) == 0 && has("F\tedit\tok\tsha=") && has("count=1") && is("a.txt", "alpha\nBETA;\t%25\ngamma\n"), "f-edit-from-files"); }
+    sha_of(sha);
+    {   char *v[] = {"f", "edit", "a.txt", "--old-file", p, "--new-file", p2, 0};
+        ck(dv(v) == 1 && has("ENOMATCH") && is("a.txt", "alpha\nBETA;\t%25\ngamma\n"), "f-edit-no-match-refused"); }
+    F(p, sizeof p, "%s/src.txt", w);
+    {   char *v[] = {"f", "write", "a.txt", "--from", p, "--expect-sha", "0000000000000000000000000000000000000000000000000000000000000000", 0};
+        ck(dv(v) == 1 && has("ESHA") && is("a.txt", "alpha\nBETA;\t%25\ngamma\n"), "f-write-expect-sha-mismatch-refused"); }
+    {   char *v[] = {"f", "write", "a.txt", "--from", p, "--expect-sha", sha, 0};
+        ck(dv(v) == 0 && is("a.txt", "alpha\nbeta\ngamma\n"), "f-write-expect-sha-match"); }
+    ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tflow.node\t0\tf.write\tok\t") && has("\tf.write\tfail\t") && has("\tf.edit\tok\t"), "f-events-in-ring");
+
+    /* 路径锁:他人持有时写被拒,文件不变;放锁后通过,事后不留锁 */
+    ck(put("src2.txt", "second\n") == 0 && put("wr.tsv", "w1\tfile.write\t-\tpath=a.txt;content=from-flow%0A\n") == 0, "fixture-lock");
+    ck(dv1("lock", "acquire", "a.txt", "--owner", "other", 0) == 0, "lock-held-by-other");
+    F(p, sizeof p, "%s/src2.txt", w); F(p2, sizeof p2, "%s/wr.tsv", w);
+    ck(dv1("f", "write", "a.txt", "--from", p, 0) == 1 && has("F\twrite\trefused\tlock=a.txt") && has("owner=other") && is("a.txt", "alpha\nbeta\ngamma\n"), "f-write-refused-while-locked");
+    {   char *v[] = {"f", "write", "a.txt", "--from", p, "--lock-wait-ms", "300", 0}; long t0 = sy_now_ms();
+        ck(dv(v) == 1 && has("refused") && sy_now_ms() - t0 >= 300 && is("a.txt", "alpha\nbeta\ngamma\n"), "f-write-lock-wait-then-refused"); }
+    ck(dv1("flow", "run", p2, 0, 0, 0) == 1 && has("REFUSE lock a.txt for node w1") && is("a.txt", "alpha\nbeta\ngamma\n"), "flow-write-node-refused-while-locked");
+    ck(dv1("f", "read", "a.txt", 0, 0, 0) == 0 && has("lines=3"), "f-read-not-blocked-by-lock");
+    ck(dv1("lock", "release", "a.txt", "--owner", "other", 0) == 0, "lock-released");
+    ck(dv1("flow", "run", p2, 0, 0, 0) == 0 && has("NODE\tw1\tok\trc=0\t") && has("\tsha=") && has("locks=1") && is("a.txt", "from-flow\n"), "flow-write-node-after-release");
+    ck(dv1("f", "write", "a.txt", "--from", p, 0) == 0 && is("a.txt", "second\n"), "f-write-after-release");
+    ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("OK\tlocks\tn=0"), "no-lock-left-behind");
+
+    /* flow -:stdin 内联节点,读文件与命令并发,--cat 给内容 */
+    ck(put("in.tsv", "r1\tfile.read\t-\tpath=a.txt\ne1\texec\t-\ta0=sh;a1=-c;a2=echo inline-ok\nbad\texec\t-\ta0=sh;a1=-c;a2=exit 5\nafter\texec\tbad\ta0=true\n") == 0, "fixture-inline");
+    {   char cmd[3000]; char *v[] = {"sh", "-c", cmd, 0};
+        F(cmd, sizeof cmd, "sh '%s' '%s' -- flow - --cat < '%s/in.tsv'", prod, self, w);
+        ck(cap2(v, out, sizeof out) == 1 && has("NODE\tr1\tok\trc=0\t") && has("==> r1.out 7 <==\nsecond\n") && has("==> e1.out 10 <==\ninline-ok\n")
+           && has("NODE\tbad\tfail\trc=5\t") && has("NODE\tafter\tskip\t") && has("dep=bad:fail") && has("DEVSVC_FLOW\tnodes=4\tok=2\tfail=1\ttimeout=0\tskip=1\t"), "flow-stdin-inline-cat"); }
+    ck(put("cyc.tsv", "a\texec\tb\ta0=true\nb\texec\ta\ta0=true\n") == 0, "fixture-cycle");
+    F(p, sizeof p, "%s/cyc.tsv", w);
+    ck(dv1("flow", "run", p, 0, 0, 0) == 2 && has("REFUSE dependency cycle"), "flow-cycle-refused-rc2");
+
+    /* x:超时组杀 */
+    {   char sh[400], pidf[300], kc[400]; char *v[] = {"x", "--timeout-ms", "400", "--cwd", w, "--", "sh", "-c", sh, 0}; char *k[] = {"sh", "-c", kc, 0}; long t0 = sy_now_ms();
+        F(pidf, sizeof pidf, "%s/pid", w);
+        F(sh, sizeof sh, "sleep 40 & echo $! > pid; echo started; wait");
+        r = dv(v);
+        ck(r == 124 && has("started\n") && has("X\ttimeout\trc=124\t") && sy_now_ms() - t0 < 8000, "x-timeout-rc124");
+        /* 孙进程已不存活:pid 不存在,或已被杀成僵尸(批次执行器是子收割者时,孤儿要等它收尸,kill -0 对僵尸仍成功) */
+        F(kc, sizeof kc, "p=$(cat '%s'); test -n \"$p\" || exit 3; kill -0 $p 2>/dev/null || exit 0; grep '^State:' /proc/$p/status; grep -q '^State:[[:space:]]*Z' /proc/$p/status", pidf);
+        sy_sleep_ms(100);
+        ck(cap2(k, out, sizeof out) == 0, "x-timeout-kills-process-group"); }
+    {   char *v[] = {"x", "--cwd", w, "--", "cat", "a.txt", 0};
+        ck(dv(v) == 0 && strstr(out, "second\nX\tok\trc=0\t") == out && has("via=service"), "x-ok-via-service"); }
+
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
+    {   char *rm[] = {"rm", "-rf", inst, w, 0}; ck(cap2(rm, out2, sizeof out2) == 0, "fixture-cleanup"); }
+    ck(ovf == 0, "no-path-overflow");
+    printf("CHECK_DEVSVC_FLOW\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

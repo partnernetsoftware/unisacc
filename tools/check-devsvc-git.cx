@@ -1,0 +1,114 @@
+/* tools/check-devsvc-git.cx -- 检查 devsvc 的 git 子命令(commit/status)与危险命令具名拒绝。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-git.cx        (在仓根跑)
+ *
+ * 夹具:`git clone --local` 本仓到 /tmp/dvgit-<pid>,另建裸仓 /tmp/dvgit-<pid>-bare 作 origin,夹具内放入工作副本的 devsvc 三件并提交;
+ *   不设 DV_PIN_DIR(与真仓同键共用 $HOME 固定版本缓存,冷构造约 55 s 仅首次);UNISACC_DEVSVC_DIR 指向 /tmp/dvgit-<pid>-* 临时目录,经固定版本启动器跑夹具 HEAD(冷构造一次后命中缓存)。每次命令 55 秒上限,结束清理夹具。
+ * 断言:(a) commit --whole F --push 成功、裸仓收到提交、末行 GIT_COMMIT rc=0;(b) commit 失败后 lock list 无残留;
+ *   (c) 两个并发 commit 都完成且无残留锁;(d) x -- git stash list、git -C . stash list、git push --force 均 rc 125 且 stderr 含 REFUSE;
+ *   (e) git status 末行 GIT_STATUS 格式。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nfail, ovf; static long t_start;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], fx[160], bare[160], pin[160], inst[160], out[1 << 15];
+static char *envv[4];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-git.%s\tt_ms=%ld\n", c ? "PASS" : "FAIL", name, sy_now_ms() - t_start);
+    if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+}
+static int run(char **v, const char *cwd, char *const *env) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, env, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+/* 在夹具里跑 devsvc(--dev):参数以 0 结尾 */
+static int dv(const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, const char *a6, const char *a7, const char *a8) {
+    char *v[24]; int n = 0; const char *xs[8]; int i;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devsvc.cx"; v[n++] = "--";
+    xs[0] = a1; xs[1] = a2; xs[2] = a3; xs[3] = a4; xs[4] = a5; xs[5] = a6; xs[6] = a7; xs[7] = a8;
+    for (i = 0; i < 8 && xs[i]; i++) v[n++] = (char *)xs[i];
+    v[n] = 0;
+    return run(v, fx, envv);
+}
+static int sh(const char *cmd, const char *cwd) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return run(v, cwd, 0); }
+static int wfile(const char *rel, const char *txt) { char p[400]; F(p, sizeof p, "%s/%s", fx, rel); return ovf || sy_write_atomic(p, (char *)txt, strlen(txt), 0644); }
+static void cleanup(void) {
+    char c[700]; F(c, sizeof c, "rm -rf %s %s %s %s", fx, bare, pin, inst); if (!ovf) (void)sh(c, 0);
+}
+
+int main(void) {
+    char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(fx, sizeof fx, "/tmp/dvgit-%d", sy_pid()); F(bare, sizeof bare, "/tmp/dvgit-%d-bare", sy_pid());
+    F(pin, sizeof pin, "/tmp/dvgit-%d-pin", sy_pid()); F(inst, sizeof inst, "/tmp/dvgit-%d-inst", sy_pid());
+    F(e1, sizeof e1, "DV_PIN_DIR=%s", pin); F(e2, sizeof e2, "UNISACC_DEVSVC_DIR=%s", inst);
+    envv[0] = e2; envv[1] = 0; (void)e1;
+    if (ovf) return 2;
+    {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-clone\n"); cleanup(); return 1; } }
+    {   const char *names[4] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx"}; int i;
+        for (i = 0; i < 4; i++) {
+            char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
+            F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
+            if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-git.fixture-copy\t%s\n", names[i]); cleanup(); return 1; }
+            free(b);
+        } }
+    F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+    if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
+
+    /* (a) commit --whole --push */
+    if (wfile("dvg-a.txt", "a\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
+    rc = dv("git", "commit", "-m", "X", "--whole", "dvg-a.txt", "--push", 0);
+    ck(rc == 0 && has("GIT_COMMIT\trc=0"), "commit-push-rc0");
+    F(c, sizeof c, "[ \"$(git -C %s rev-parse main)\" = \"$(git rev-parse HEAD)\" ] && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
+    ck(sh(c, fx) == 0, "bare-origin-received-commit");
+
+    /* (b) 失败的 commit 后无残留锁(登记路径会取 registry 锁) */
+    rc = dv("git", "commit", "-m", "Y", "--whole", "tests/manifests/dvg-nonexistent.tsv", 0, 0);
+    ck(rc != 0 && has("GIT_COMMIT\trc="), "failed-commit-reports-nonzero");
+    rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
+    ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
+
+    /* (c) 两个并发 commit 串行完成,无残留锁 */
+    if (wfile("tests/manifests/dvg-c1.tsv", "c1\n") || wfile("tests/manifests/dvg-c2.tsv", "c2\n")) { printf("FAIL\tdevsvc-git.fixture-write-c\n"); cleanup(); return 1; }
+    F(c, sizeof c, "sh ./unisacc.com tools/devsvc.cx -- git commit -m C1 --whole tests/manifests/dvg-c1.tsv >/tmp/dvgit-%d-c1 2>&1 & "
+                   "sh ./unisacc.com tools/devsvc.cx -- git commit -m C2 --whole tests/manifests/dvg-c2.tsv >/tmp/dvgit-%d-c2 2>&1 & wait; cat /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2; rm -f /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2",
+      sy_pid(), sy_pid(), sy_pid(), sy_pid(), sy_pid(), sy_pid());
+    (void)ovf; rc = -1;
+    {   char *v[] = {"sh", "-c", c, 0}; rc = run(v, fx, envv); }
+    { int n1 = 0; char *p = out; while ((p = strstr(p, "GIT_COMMIT\trc=0"))) { n1++; p++; } k = n1; }
+    ck(rc == 0 && k == 2, "concurrent-commits-both-rc0");
+    rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
+    ck(rc == 0 && !has("registry") && !has("auto-"), "concurrent-commits-leave-no-lock");
+
+    /* (d) 危险命令具名拒绝 */
+    rc = dv("x", "--", "git", "stash", "list", 0, 0, 0);
+    ck(rc == 125 && has("REFUSE"), "refuse-git-stash");
+    rc = dv("x", "--", "git", "-C", ".", "stash", "list", 0, 0);
+    ck(rc == 125 && has("REFUSE"), "refuse-git-C-stash");
+    rc = dv("x", "--", "git", "push", "--force", 0, 0, 0);
+    ck(rc == 125 && has("REFUSE"), "refuse-push-force");
+
+    /* (e) git status 末行格式 */
+    rc = dv("git", "status", 0, 0, 0, 0, 0, 0);
+    {   char *p = strstr(out, "GIT_STATUS\tdirty="); int d = -1, o = -1;
+        ck(rc == 0 && p && sscanf(p, "GIT_STATUS\tdirty=%d\torphan=%d", &d, &o) == 2 && d >= 0 && o >= 0 && o <= d, "status-last-line-format"); }
+
+    (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
+    cleanup();
+    printf("NOTE\twall_ms\t%ld\n", sy_now_ms() - t0);
+    printf("CHECK_DEVSVC_GIT\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}

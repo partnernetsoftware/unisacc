@@ -1,0 +1,337 @@
+/* tools/check-flowexec.cx -- the module API of tools/cxlib/flowexec.cx called in process.
+ *
+ *   sh ./unisacc.com tools/check-flowexec.cx      (work dir $TMPDIR/check-flowexec-<pid>)
+ *
+ * tools/check-flowrun.cx drives the command line; this one imports cxlib.flowexec and asserts on
+ * what fl_load, fl_order, fl_run and fl_arg_get return and leave in fl_flow / fl_sum:
+ *   load-bad-line     a 3 column line: rc 2, the line number and column count are named
+ *   load-bad-op, load-dup-id, load-unknown-dep, load-bad-id, load-timeout-range, load-missing-file
+ *                     each rc 2 with its own reason
+ *   load-ok-fields    comments and empty lines skipped; deps resolved to indices; timeout_ms and the
+ *                     default bound; lock taken from lock= and, for file.write, from path=
+ *   load-cycle        rc 2, the nodes on the cycle are named and the one outside is not;
+ *                     fl_order on that flow places only the node outside the cycle
+ *   order-topo        a diamond written dependents first: all four placed, every node after its deps
+ *   arg-decode        %XX decoding, nth occurrence, absent -1, too small -2
+ *   run-all-ok        rc 0, every state ok, sum counts, events.tsv seq 1..2N, out files hold stdout
+ *   run-fail-skip     exit 7 node is fail rc 7; its dependents (two levels) are skip and never ran
+ *                     (no marker file); the independent node is ok; rc 1
+ *   run-timeout-kill  timeout_ms=300 on a node with a background sleep 30: state timeout rc 124,
+ *                     the grandchild no longer runs (absent from /proc, or an unreaped zombie when
+ *                     a subreaper such as tools/bound adopted it), output before the kill is kept,
+ *                     the dependent is skip, the run ends long before 30 s
+ *   run-deadline      deadline_ms=300, jobs=1: the running node is timeout, its dependent is skip
+ *                     (dep=a:timeout) and the ready node that never got a slot is skip (deadline)
+ *   run-lock-serial   two nodes with one lock: the second starts after the first ended, wall >= the
+ *                     sum; an unlocked node runs beside them (peak 2, never 3)
+ *   run-parallel      the same two nodes without a lock overlap (peak 2)
+ *   run-bad-dir       a run dir under a missing parent: negative errno, no node started
+ * Prints PASS/FAIL per case and CHECK_FLOWEXEC<TAB>failed=N. */
+#pragma unisa use cxlib.flowexec
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flowexec.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flowexec.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flowexec: REFUSE %s\n", s); sy_exit(2); }
+static long pos(const char *s, const char *w) { return s ? tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 1 << 16)) : -1; }
+static int has(const char *s, const char *w) { return pos(s, w) >= 0; }
+static char wd[1024];
+static char *rd(const char *name) {
+    static char p[8][1200]; static int k; char *q = p[k++ & 7];
+    if (cx_fmt(q, 1200, "%s/%s", wd, name)) die("path");
+    return q;
+}
+static char *wf(const char *name, const char *text) {
+    char *q = rd(name);
+    if (sy_write_file(q, text, tx_len(text, 1 << 16), 0644)) die("cannot write flow file");
+    return q;
+}
+static char *slurp(const char *path) { unsigned char *b = 0; int64_t n = 0; return sy_read_file(path, &b, &n, 1L << 20) ? 0 : (char *)b; }
+static char *slurp3(const char *run, const char *rel) { char p[1400]; if (cx_fmt(p, sizeof p, "%s/%s/%s", wd, run, rel)) die("path"); return slurp(p); }
+/* a node's stream file in the run directory: WD/RUN/out/NAME (the engine's RUN/out, not the repo's out/) */
+static char *slurp_node(const char *run, const char *name) { char p[1400]; if (cx_fmt(p, sizeof p, "%s/%s/out/%s", wd, run, name)) die("path"); return slurp(p); }
+
+/* 1 when PID no longer runs: no /proc entry, or a killed process nobody has reaped yet (state Z or X
+   in /proc/PID/stat).  Under tools/bound (a child subreaper, the batch runner's wrapper) the orphaned
+   grandchild is adopted by bound and stays a zombie until bound ends, so "absent from /proc" alone
+   would call a dead process alive. */
+static int proc_dead(long pid) {
+    char p[64], *t; long i, close = -1; int z;
+    cx_fmt(p, sizeof p, "/proc/%ld", pid);
+    if (sy_exists(p) == 0) return 1;
+    cx_fmt(p, sizeof p, "/proc/%ld/stat", pid);
+    t = slurp(p);
+    if (!t) return 0;
+    for (i = 0; t[i]; i++) if (t[i] == ')') close = i;
+    z = close >= 0 && t[close + 1] == ' ' && (t[close + 2] == 'Z' || t[close + 2] == 'X');
+    mm_free(t);
+    return z;
+}
+
+/* fl_load on TEXT must refuse (rc 2) and WHY must contain WANT. */
+static void refuse(const char *name, const char *text, const char *want) {
+    fl_flow f; char why[1024]; int r;
+    why[0] = 0;
+    r = fl_load(wf("refuse.tsv", text), &f, why, (int)sizeof why);
+    ck(r == 2 && has(why, want), name);
+    if (r != 2 || !has(why, want)) sy_printf("NOTE\t%s\trc=%d\twhy=%s\n", name, r, why);
+    fl_free(&f);
+}
+
+static int node(fl_flow *f, const char *id) { int i; for (i = 0; i < f->count; i++) if (tx_eqz(f->n[i].id, id)) return i; return -1; }
+
+/* events.tsv of RUN: N lines, each "EVT<TAB>seq<TAB>" with seq 1..N in order. */
+static int seq_ok(const char *ev, int n) {
+    char w[32]; long at = 0, p; int i;
+    if (!ev) return 0;
+    for (i = 1; i <= n; i++) {
+        cx_fmt(w, sizeof w, "EVT\t%d\t", i);
+        p = pos(ev + at, w);
+        if (p != 0) return 0;
+        p = pos(ev + at, "\n");
+        if (p < 0) return 0;
+        at += p + 1;
+    }
+    return ev[at] == 0;
+}
+
+int main(void) {
+    fl_flow f; fl_sum s; char why[1024], text[4096], buf[1400], *ev, *t; int r, ord[16], i, rc;
+    if (cx_fmt(wd, sizeof wd, "%s/check-flowexec-%d", sy_tmpdir(), (int)getpid())) die("work dir");
+    rc = sy_mkdir(wd, 0755);
+    if (rc < 0 && rc != -EEXIST) die("cannot make work dir");
+
+    /* ---- fl_load refusals ---- */
+    refuse("load-bad-line", "a\texec\t-\ta0=true\nb\texec\ta0=true\n", "line 2: want 4 TAB columns id op deps args, got 3");
+    refuse("load-bad-op", "a\tshell\t-\ta0=true\n", "line 1: node 'a' has unknown op 'shell'");
+    refuse("load-dup-id", "a\texec\t-\ta0=true\n# c\na\texec\t-\ta0=true\n", "line 3: duplicate node id 'a'");
+    refuse("load-unknown-dep", "a\texec\tb,zz\ta0=true\nb\texec\t-\ta0=true\n", "node 'a' depends on unknown node 'zz'");
+    refuse("load-bad-id", "a/b\texec\t-\ta0=true\n", "line 1: bad node id 'a/b'");
+    refuse("load-timeout-range", "a\texec\t-\ta0=true;timeout_ms=300001\n", "node 'a' timeout_ms 300001 outside 1..300000");
+    refuse("load-timeout-range-zero", "a\texec\t-\ta0=true;timeout_ms=0\n", "node 'a' timeout_ms 0 outside 1..300000");
+    why[0] = 0; r = fl_load(rd("no-such-flow.tsv"), &f, why, (int)sizeof why);
+    ck(r == 2 && has(why, "cannot read flow file") && f.count == 0, "load-missing-file");
+    fl_free(&f);
+
+    /* ---- fl_load fields ---- */
+    r = fl_load(wf("ok.tsv", "# comment\n\na\texec\t-\ta0=true;timeout_ms=1234;lock=L 1\nb\tfile.write\ta\tpath=/x/y%3Bz;text=t\nc\texec\ta,b\ta0=true\n"), &f, why, (int)sizeof why);
+    ck(r == 0 && f.count == 3 && tx_eqz(f.n[0].id, "a") && tx_eqz(f.n[1].op, "file.write")
+       && f.n[0].ndeps == 0 && f.n[1].ndeps == 1 && f.n[1].deps[0] == 0 && f.n[2].ndeps == 2 && f.n[2].deps[0] == 0 && f.n[2].deps[1] == 1
+       && f.n[0].limit_ms == 1234 && f.n[2].limit_ms == FL_NODE_MS
+       && tx_eqz(f.n[0].lock, "L 1") && tx_eqz(f.n[1].lock, "/x/y;z") && f.n[2].lock[0] == 0
+       && f.n[0].state == FL_PENDING && f.n[2].state == FL_PENDING, "load-ok-fields");
+    fl_free(&f);
+    ck(f.n == 0 && f.count == 0, "free-clears");
+
+    /* ---- cycle ---- */
+    why[0] = 0;
+    r = fl_load(wf("cyc.tsv", "a\texec\tb\ta0=true\nb\texec\ta\ta0=true\nc\texec\t-\ta0=true\n"), &f, why, (int)sizeof why);
+    ck(r == 2 && tx_eqz(why, "dependency cycle among nodes: a b"), "load-cycle");
+    ord[0] = -1; r = fl_order(&f, ord);
+    ck(f.count == 3 && r == 1 && ord[0] == 2, "order-cycle-partial");
+    fl_free(&f);
+    refuse("load-self-cycle", "a\texec\ta\ta0=true\n", "dependency cycle among nodes: a");
+
+    /* ---- topological order ---- */
+    r = fl_load(wf("topo.tsv", "d\texec\tb,c\ta0=true\nb\texec\ta\ta0=true\nc\texec\ta\ta0=true\na\texec\t-\ta0=true\n"), &f, why, (int)sizeof why);
+    {   int at[4] = {-1, -1, -1, -1}, n, good;
+        n = r == 0 ? fl_order(&f, ord) : -1;
+        for (i = 0; i < n && i < 4; i++) if (ord[i] >= 0 && ord[i] < 4) at[ord[i]] = i;
+        good = n == 4 && at[0] >= 0 && at[1] >= 0 && at[2] >= 0 && at[3] >= 0;
+        for (i = 0; good && i < f.count; i++) { int j; for (j = 0; j < f.n[i].ndeps; j++) if (at[f.n[i].deps[j]] >= at[i]) good = 0; }
+        ck(good && ord[0] == 3 && ord[3] == 0, "order-topo");
+    }
+    fl_free(&f);
+
+    /* ---- argument decoding ---- */
+    {   char v[64], tiny[3];
+        const char *a = "a0=sh;env=A=1;a1=x%3By%09z%25;env=B=2;keyx=no;key=yes%zz";
+        ck(fl_arg_get(a, "a1", 0, v, sizeof v) == 6 && tx_eqz(v, "x;y\tz%")
+           && fl_arg_get(a, "env", 0, v, sizeof v) == 3 && tx_eqz(v, "A=1")
+           && fl_arg_get(a, "env", 1, v, sizeof v) == 3 && tx_eqz(v, "B=2")
+           && fl_arg_get(a, "env", 2, v, sizeof v) == -1
+           && fl_arg_get(a, "key", 0, v, sizeof v) == 6 && tx_eqz(v, "yes%zz")
+           && fl_arg_get(a, "a", 0, v, sizeof v) == -1
+           && fl_arg_get(a, "a1", 0, tiny, sizeof tiny) == -2, "arg-decode");
+    }
+
+    /* ---- run: all ok ---- */
+    r = fl_load(wf("ok3.tsv", "a\texec\t-\ta0=echo;a1=one  two\nb\texec\t-\ta0=sh;a1=-c;a2=echo B%3B echo E >&2\nc\texec\ta,b\ta0=true\n"), &f, why, (int)sizeof why);
+    if (r) die("ok3 flow did not load");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("ok3"), 4, 20000, 0, &s);
+    ev = slurp3("ok3", "events.tsv"); t = slurp_node("ok3", "a.out");
+    ck(r == 0 && s.ok == 3 && s.fail == 0 && s.timeout == 0 && s.skip == 0 && s.max_running == 2
+       && f.n[0].state == FL_OK && f.n[1].state == FL_OK && f.n[2].state == FL_OK && f.n[2].rc == 0, "run-all-ok");
+    ck(seq_ok(ev, 6) && pos(ev, "\tb\tok\t") < pos(ev, "\tc\tstart\t") && pos(ev, "\ta\tok\t") < pos(ev, "\tc\tstart\t") && pos(ev, "\ta\tok\t") >= 0, "run-events-seq");
+    ck(t && tx_eqz(t, "one  two\n"), "run-out-file");
+    if (t) mm_free(t);
+    t = slurp_node("ok3", "b.err");
+    ck(t && tx_eqz(t, "E\n"), "run-err-file");
+    if (t) mm_free(t);
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
+    /* ---- run: failure skips the dependents ---- */
+    cx_fmt(text, sizeof text,
+        "a\texec\t-\ta0=sh;a1=-c;a2=exit 7\n"
+        "b\texec\ta\ta0=sh;a1=-c;a2=echo ran > %s/fs-b.marker\n"
+        "c\texec\tb\ta0=sh;a1=-c;a2=echo ran > %s/fs-c.marker\n"
+        "d\texec\t-\ta0=sh;a1=-c;a2=echo ran > %s/fs-d.marker\n", wd, wd, wd);
+    r = fl_load(wf("fs.tsv", text), &f, why, (int)sizeof why);
+    if (r) die("fail-skip flow did not load");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("fs"), 4, 20000, 0, &s);
+    ev = slurp3("fs", "events.tsv");
+    ck(r == 1 && s.ok == 1 && s.fail == 1 && s.skip == 2 && s.timeout == 0
+       && f.n[0].state == FL_FAIL && f.n[0].rc == 7 && f.n[1].state == FL_SKIP && f.n[2].state == FL_SKIP && f.n[3].state == FL_OK, "run-fail-skip");
+    ck(sy_exists(rd("fs-b.marker")) == 0 && sy_exists(rd("fs-c.marker")) == 0 && sy_exists(rd("fs-d.marker")) != 0
+       && !has(ev, "\tb\tstart\t") && !has(ev, "\tc\tstart\t"), "run-skip-not-executed");
+    ck(has(ev, "\tb\tskip\t0\t-1\tdep=a:fail\n") && has(ev, "\tc\tskip\t0\t-1\tdep=b:skip\n") && has(ev, "\ta\tfail\t") && seq_ok(ev, 6), "run-skip-reason");
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
+    /* ---- run: node timeout kills the process group ---- */
+    {   long pid = 0, w0; int gone = 0, alive = 0;
+        cx_fmt(text, sizeof text,
+            "t\texec\t-\ttimeout_ms=300;a0=sh;a1=-c;a2=echo before%%3B sleep 30 & echo $! > %s/to.pid%%3B wait\n"
+            "u\texec\tt\ta0=sh;a1=-c;a2=echo ran > %s/to-u.marker\n", wd, wd);
+        r = fl_load(wf("to.tsv", text), &f, why, (int)sizeof why);
+        if (r) die("timeout flow did not load");
+        memset(&s, 0, sizeof s);
+        w0 = sy_now_ms();
+        r = fl_run(&f, rd("to"), 4, 20000, 0, &s);
+        w0 = sy_now_ms() - w0;
+        ck(r == 1 && s.timeout == 1 && s.skip == 1 && s.ok == 0 && s.fail == 0
+           && f.n[0].state == FL_TIMEOUT && f.n[0].rc == 124 && f.n[1].state == FL_SKIP, "run-timeout-state");
+        ck(w0 >= 300 && w0 < 10000 && s.wall_ms >= 300 && s.wall_ms < 10000, "run-timeout-bounded");
+        t = slurp(rd("to.pid"));
+        if (t) { for (i = 0; t[i] >= '0' && t[i] <= '9'; i++) pid = pid * 10 + (t[i] - '0'); alive = pid > 1; mm_free(t); }
+        if (pid > 1) for (i = 0; i < 200 && !gone; i++) {   /* bounded wait 2 s */
+            if (proc_dead(pid)) gone = 1; else sy_sleep_ms(10);
+        }
+        ck(alive && gone, "run-timeout-kill-group");
+        t = slurp_node("to", "t.out"); ev = slurp3("to", "events.tsv");
+        ck(t && tx_eqz(t, "before\n"), "run-timeout-keeps-output");
+        ck(has(ev, "\tt\ttimeout\t") && has(ev, "\t124\ttimeout_ms=300, process group killed out=7 err=0\n")
+           && has(ev, "\tu\tskip\t0\t-1\tdep=t:timeout\n") && sy_exists(rd("to-u.marker")) == 0, "run-timeout-event");
+        if (t) mm_free(t);
+        if (ev) mm_free(ev);
+        fl_free(&f);
+    }
+
+    /* ---- run: whole-run deadline ---- */
+    r = fl_load(wf("dl.tsv", "a\texec\t-\ta0=sleep;a1=30\nb\texec\ta\ta0=true\nc\texec\t-\ta0=true\n"), &f, why, (int)sizeof why);
+    if (r) die("deadline flow did not load");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("dl"), 1, 300, 0, &s);   /* jobs=1: c is ready but never gets a slot */
+    ev = slurp3("dl", "events.tsv");
+    ck(r == 1 && s.timeout == 1 && s.skip == 2 && s.ok == 0 && f.n[0].state == FL_TIMEOUT && f.n[0].rc == 124
+       && f.n[1].state == FL_SKIP && f.n[2].state == FL_SKIP && s.wall_ms >= 300 && s.wall_ms < 10000
+       && has(ev, "\t124\trun deadline 300 ms, process group killed out=0 err=0\n") && has(ev, "\tb\tskip\t0\t-1\tdep=a:timeout\n")
+       && has(ev, "\tc\tskip\t0\t-1\trun deadline 300 ms reached before start\n") && !has(ev, "\tc\tstart\t"), "run-deadline");
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
+    /* ---- run: one lock, never together ---- */
+    r = fl_load(wf("lk.tsv", "x1\texec\t-\tlock=L;a0=sleep;a1=0.4\nx2\texec\t-\tlock=L;a0=sleep;a1=0.4\nfree\texec\t-\ta0=sleep;a1=0.4\n"), &f, why, (int)sizeof why);
+    if (r) die("lock flow did not load");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("lk"), 8, 20000, 0, &s);
+    ev = slurp3("lk", "events.tsv");
+    ck(r == 0 && s.ok == 3 && s.max_running == 2 && s.wall_ms >= 800
+       && pos(ev, "\tx1\tok\t") >= 0 && pos(ev, "\tx1\tok\t") < pos(ev, "\tx2\tstart\t")
+       && pos(ev, "\tfree\tstart\t") >= 0 && pos(ev, "\tfree\tstart\t") < pos(ev, "\tx1\tok\t"), "run-lock-serial");
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
+    /* ---- run: the same pair without a lock overlaps; jobs=1 serialises it again ---- */
+    r = fl_load(wf("par.tsv", "x1\texec\t-\ta0=sleep;a1=0.4\nx2\texec\t-\ta0=sleep;a1=0.4\n"), &f, why, (int)sizeof why);
+    if (r) die("parallel flow did not load");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("par"), 8, 20000, 0, &s);
+    ev = slurp3("par", "events.tsv");
+    ck(r == 0 && s.ok == 2 && s.max_running == 2 && pos(ev, "\tx2\tstart\t") >= 0 && pos(ev, "\tx2\tstart\t") < pos(ev, "\tx1\tok\t"), "run-parallel");
+    if (ev) mm_free(ev);
+    fl_free(&f);
+    r = fl_load(rd("par.tsv"), &f, why, (int)sizeof why);
+    if (r) die("parallel flow did not load twice");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("par1"), 1, 20000, 0, &s);
+    ck(r == 0 && s.ok == 2 && s.max_running == 1 && s.wall_ms >= 800, "run-jobs-one");
+    fl_free(&f);
+
+    /* ---- run: unusable run dir ---- */
+    r = fl_load(rd("par.tsv"), &f, why, (int)sizeof why);
+    if (r) die("parallel flow did not load a third time");
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("missing-parent/run"), 2, 20000, 0, &s);
+    ck(r < 0 && f.n[0].state == FL_PENDING && f.n[1].state == FL_PENDING && sy_exists(rd("missing-parent")) == 0, "run-bad-dir");
+    fl_free(&f);
+
+    /* ---- round 2: stdin_node / stdin_from / stdout_to, k@=PATH, compare and search nodes ---- */
+    refuse("load-stdin-node-not-dep", "a\texec\t-\ta0=true\nb\texec\t-\tstdin_node=a;a0=cat\n", "node 'b' stdin_node 'a' is not one of its deps");
+    refuse("load-stdin-two-sources", "a\texec\t-\ta0=true\nb\texec\ta\tstdin_node=a;stdin_from=/dev/null;a0=cat\n", "more than one of stdin, stdin_from, stdin_node");
+    refuse("load-compare-node-not-dep", "a\texec\t-\ta0=true\nc\tcompare\t-\ta=node:a;b=/dev/null\n", "compare a=node:a is not one of its deps");
+    if (sy_write_file(rd("val.txt"), "x;y\t%z\n", 7, 0644)) die("cannot write val.txt");
+    rc = sy_mkdir(rd("sub"), 0755);
+    if (rc < 0 && rc != -EEXIST) die("cannot make sub");
+    if (cx_fmt(text, sizeof text,
+        "p\texec\t-\ta0=printf;a1=b\\na\\n;stdout_to=%s/saved.txt;root=%s\n"
+        "c\texec\tp\tstdin_node=p;a0=sort\n"
+        "d\texec\tp\tstdin_from=%s/saved.txt;a0=cat\n"
+        "v\texec\t-\ta0=printf;a1=%%25s;a2@=%s/val.txt\n"
+        "m\texec\t-\ta0=printf;a1=%%25s;a2@=%s/no-such-file\n"
+        "o\texec\t-\ta0=echo;a1=hi;stdout_to=%s/escape.txt;root=%s/sub\n"
+        "q\texec\to\ta0=true\n"
+        "k1\tcompare\tp,c\ta=node:p;b=node:c;mode=set\n"
+        "k2\tcompare\tp,c\ta=node:p;b=node:c;mode=lines\n"
+        "k3\tcompare\tp,c\ta=node:p;b=node:c;mode=lines;fail_on_diff=0\n"
+        "s\tsearch\tp\tpattern=a;paths=%s/saved.txt\n", wd, wd, wd, wd, wd, wd, wd, wd)) die("round 2 flow text");
+    r = fl_load(wf("r2.tsv", text), &f, why, (int)sizeof why);
+    if (r) { sy_printf("NOTE\tr2\t%s\n", why); die("round 2 flow did not load"); }
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("r2"), 4, 30000, 0, &s);
+    ev = slurp3("r2", "events.tsv");
+    ck(r == 1 && s.ok == 7 && s.fail == 3 && s.skip == 1 && s.timeout == 0, "r2-summary");
+    t = slurp(rd("saved.txt"));
+    ck(f.n[node(&f, "p")].state == FL_OK && t && tx_eqz(t, "b\na\n"), "exec-stdout-to-copy");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "c.out");
+    ck(t && tx_eqz(t, "a\nb\n"), "exec-stdin-node-pipe");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "d.out");
+    ck(t && tx_eqz(t, "b\na\n"), "exec-stdin-from");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "v.out");
+    ck(t && tx_eqz(t, "x;y\t%z\n"), "exec-arg-atfile-verbatim");
+    if (t) mm_free(t);
+    ck(f.n[node(&f, "m")].state == FL_FAIL && f.n[node(&f, "m")].rc == 2 && has(ev, "a2@= is unreadable"), "exec-arg-atfile-missing-fails");
+    ck(f.n[node(&f, "o")].state == FL_FAIL && f.n[node(&f, "o")].rc == 125 && has(ev, "stdout_to: EOUTSIDE") && sy_exists(rd("escape.txt")) == 0
+       && f.n[node(&f, "q")].state == FL_SKIP, "exec-stdout-to-outside-root-refused");
+    t = slurp_node("r2", "k1.out");
+    ck(f.n[node(&f, "k1")].state == FL_OK && t && tx_eqz(t, "same=1\ndiffs=0\nmode=set\n"), "compare-node-set-same");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "k2.out");
+    ck(f.n[node(&f, "k2")].state == FL_FAIL && f.n[node(&f, "k2")].rc == 1 && has(ev, "EDIFF") && t && tx_eqz(t, "same=0\ndiffs=2\nmode=lines\n-1:b\n+1:a\n-2:a\n+2:b\n"), "compare-node-lines-diff-rc1");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "k3.out");
+    ck(f.n[node(&f, "k3")].state == FL_OK && t && pos(t, "same=0\ndiffs=2\n") == 0, "compare-node-fail-on-diff-off");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "s.out");
+    cx_fmt(buf, sizeof buf, "%s/saved.txt:2:a\n", wd);
+    ck(f.n[node(&f, "s")].state == FL_OK && t && tx_eqz(t, buf), "search-node");
+    if (t) mm_free(t);
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
+    sy_printf("CHECK_FLOWEXEC\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -7,6 +7,13 @@
 
 # unisacc 工作规则
 
+## 开发一律经仓开发服务 devsvc(项目所有者 2026-11-15)
+
+- 所有 agent(Claude Code 及其它 harness 的窗口)与子代理,逐步改为只经 `tools/devsvc.cx`(一个仓一个有界常驻实例,CLI 加 API)做开发协同:查状态、拿写窗口锁、跑工具、订阅事件、查代码关系。服务已提供的能力必须经服务用,不再各自直调或靠信封排窗口;服务尚未提供的,照旧用现有工具,同时把缺口提给主调度排进 devsvc 迭代。
+- 遇到协作或工具问题,优先以改进 devsvc 的方式解决(加服务、加 flow 节点、加关系查询、加检查),而不是在各窗口各自打补丁。路线与现状见 prd.md 候选池 T 与 prd_mempalace.md。
+- devsvc 本身守全部铁律:常驻有截止与自退、不缓存测试结论冒充执行、写共享表须持锁。
+- devsvc 在 main 上开发(项目所有者 2026-11-15,是"版本分支"规则的例外):它是跨版本的开发基础设施,不属于某一版的大改;其源码(tools/devsvc.cx、tools/flow.cx、tools/cxlib/flow*.cx、tools/cxlib/rel*.cx 及其 check、配置表、plans/devsvc.md)直接在共享检出 ~/repos/unisacc 的 main 上改与提交,只提交自己的路径;版本分支经合入 main 获得。
+
 ## 脚本与自动化一律用 unisacc + cx(项目所有者 2026-11-14,最高优先的工作方式)
 
 cx 架构是 unisacc 成功的核心理念之一(其余如 nn 以网换逻辑、事实表 -> 生成器 -> 表)。凡是需要写脚本、做分析、批量改文件、起子进程、算摘要、处理 TSV/文本、拼装报告的场景,**只用 unisacc + cx**,不用 python、bun、nodejs、perl、awk/sed 脚本或写在 shell 里的算法。

@@ -1,0 +1,65 @@
+/* tools/check-devsvc-usage.cx -- 检查 devsvc-usage:固定夹具 events.tsv 与 jsonl 的计数断言。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-usage.cx        (在仓根跑)
+ *
+ * 夹具写 /tmp/dvuck-<pid>/:events.tsv(owner=a 的 f 两条、x 一条;无 owner 的 git 一条;未知 kind 一条不计)
+ *   与 proj/s1.jsonl(仓内 Read、仓外 Read、经 devsvc 的 Bash、直接 git、直接 sh ./unisacc.com、无关 ls、一行坏 JSON)。
+ * 断言:(a) 事件计数;(b) 会话 devsvc=1 native=3 ratio=0.25;(c) 末行 DEVSVC_USAGE sessions=1 devsvc=1 native=3 ratio=0.25;
+ *   (d) 样例列含 Read 路径;(e) 未知参数 rc 2。末行 CHECK_DEVSVC_USAGE<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
+static int nfail;
+static char out[1 << 15], fx[160];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-usage.%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+}
+static int run(char **v) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+static int wfile(const char *rel, const char *txt) { char p[400]; F(p, sizeof p, "%s/%s", fx, rel); return sy_write_atomic(p, (char *)txt, strlen(txt), 0644); }
+#define TU(inp) "{\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\"," inp "}]}}\n"
+int main(void) {
+    char c[400], pr[400], ev[400], rt[400]; int rc;
+    F(fx, sizeof fx, "/tmp/dvuck-%d", sy_pid());
+    F(c, sizeof c, "mkdir -p %s/proj %s/root", fx, fx);
+    { char *v[] = {"sh", "-c", c, 0}; if (run(v) != 0) { printf("FAIL\tdevsvc-usage.fixture\n"); return 1; } }
+    wfile("events.tsv",
+          "EV\t1\t100\tf.write\towner=a ok\nEV\t2\t101\tf.edit\towner=a ok\nEV\t3\t102\tx.run\towner=a\n"
+          "EV\t4\t103\tgit.commit\tok\nEV\t5\t104\tzzz.other\towner=a\n");
+    wfile("proj/s1.jsonl",
+          TU("\"name\":\"Read\",\"input\":{\"file_path\":\"/rootfx/a.cx\"}")
+          TU("\"name\":\"Read\",\"input\":{\"file_path\":\"/elsewhere/b.cx\"}")
+          TU("\"name\":\"Bash\",\"input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f read a\"}")
+          TU("\"name\":\"Bash\",\"input\":{\"command\":\"cd /rootfx && git status\"}")
+          TU("\"name\":\"Bash\",\"input\":{\"command\":\"sh ./unisacc.com tools/x.cx\"}")
+          TU("\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\"}")
+          "{bad tool_use json\n");
+    F(pr, sizeof pr, "%s/proj", fx); F(ev, sizeof ev, "%s/events.tsv", fx);
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--hours", "1", "--proj", pr, "--events", ev, "--root", "/rootfx", 0}; rc = run(v); }
+    ck(rc == 0, "rc0");
+    ck(has("EVENTS\towner=a\tf=2\tx=1\tflow=0\tdoc=0\tgit=0\tlock=0\trun=0"), "events-owner-a");
+    ck(has("EVENTS\towner=-\tf=0\tx=0\tflow=0\tdoc=0\tgit=1\tlock=0\trun=0"), "events-no-owner");
+    ck(has("SESSION\ts1\tdevsvc=1\tnative=3\tratio=0.25"), "session-counts");
+    ck(has("\tRead:/rootfx/a.cx"), "sample-read");
+    ck(has("DEVSVC_USAGE sessions=1 devsvc=1 native=3 ratio=0.25\n"), "last-line");
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--bogus", "1", 0}; rc = run(v); ck(rc == 2, "bad-arg-rc2"); }
+    F(rt, sizeof rt, "rm -rf %s", fx);
+    { char *v[] = {"sh", "-c", rt, 0}; (void)run(v); }
+    printf("CHECK_DEVSVC_USAGE\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}

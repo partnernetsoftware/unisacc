@@ -1,0 +1,458 @@
+/* flowexec.cx -- flow engine and its exec operator (devsvc flow; no repo paths inside).
+ *
+ * Flow file: TSV, one node per line:  id <TAB> op <TAB> deps <TAB> args
+ *   deps  comma separated node ids, or -
+ *   args  k=v pairs separated by ';'. In a value %XX is a hex byte (%3B ';', %09 TAB, %0A newline,
+ *         %20 space, %25 '%').  Lines starting with '#' and empty lines are skipped.
+ *         k@=PATH (any key of any op): the value is the whole file PATH (as given, relative to the
+ *         engine's cwd), so large or awkward content needs no escaping: a2@=, content@=, old@=, new@=.
+ *   op    exec | file.read | file.write | file.edit | compare | search
+ *         compare (a=, b= each a path or node:ID which must be a dep; mode=bytes|lines|set;
+ *         fail_on_diff=0 keeps a differing node ok) and search (pattern=, paths=, max=; fixed string)
+ *         are documented in cxlib.flowfile.
+ *
+ * exec args (argv is given as independent keys a0,a1,a2...; contiguous from a0, no shell unless
+ * argv says sh -c):
+ *   a0..aN        argv
+ *   cwd           working directory
+ *   env           K=V appended to the inherited environment; the key may repeat
+ *   timeout_ms    per node bound, default FL_NODE_MS (60000), max FL_NODE_MAX_MS
+ *   stdin         file fed to fd 0 (default /dev/null); stdin_from=PATH is the same key by another name
+ *   stdin_node    ID of one of this node's deps: its RUN/out/<ID>.out is fed to fd 0 (a pipe between
+ *                 nodes without a shell).  At most one of stdin, stdin_from, stdin_node.
+ *   stdout_to     PATH that also receives the node's stdout once the child has exited (any exit
+ *                 code; not after a timeout).  Written by file.write, so it needs a root (root key or
+ *                 UNISACC_FLOW_ROOT) and a PATH inside it; a refused copy makes the node fail rc 125.
+ * any op: lock=NAME  nodes with the same lock never run at the same time; file.write and file.edit
+ *   take their path as the lock when none is given.
+ *
+ * Each exec child gets its own process group, stdout -> RUN/out/<id>.out, stderr -> RUN/out/<id>.err.
+ * At the node bound or the run deadline the whole group gets SIGKILL and the node is `timeout`
+ * (rc 124); what it wrote before stays in the .out/.err files.
+ *
+ * Events (stdout when echo is set, and appended to RUN/events.tsv, seq strictly increasing):
+ *   EVT <TAB> seq <TAB> id <TAB> start|ok|fail|timeout|skip <TAB> ms <TAB> rc <TAB> summary
+ * A node whose dependency did not end ok is `skip` with summary dep=<id>:<state>; nothing is cached.
+ *
+ * API:  fl_load(path, &f, why, cap)  parse + validate (unknown dep, duplicate id, cycle are named refusals)
+ *       fl_order(&f, order)          topological order (indices)
+ *       fl_run(&f, run_dir, jobs, deadline_ms, echo, &sum)   0 all ok, 1 some node not ok, <0 -errno
+ *
+ * file.* nodes call cxlib.flowfile ff_run(op, args, &out) (args and refusals: its header; write and
+ * edit need a root).  They run inline in the engine process (no threads in cx), so they are serial
+ * by construction; the lock rule still applies against running exec nodes.  out->buf goes to
+ * RUN/out/<id>.out, out->why to RUN/out/<id>.err and into the fail event summary.
+ * CLI: tools/flowrun.cx.  Check: tools/check-flowrun.cx. */
+#pragma unisa module flowexec
+#pragma unisa use cxlib.flowfile
+#pragma unisa use cxlib.flowdoc
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+enum { FL_MAX_NODES = 1024, FL_MAX_DEPS = 32, FL_MAX_ARGV = 64, FL_MAX_JOBS = 32,
+       FL_NODE_MS = 60000, FL_NODE_MAX_MS = 300000, FL_RUN_MS = 300000 };
+
+enum { FL_PENDING = 0, FL_RUNNING, FL_OK, FL_FAIL, FL_TIMEOUT, FL_SKIP };
+
+typedef struct fl_node {
+    char *id, *op, *args;
+    int deps[FL_MAX_DEPS], ndeps;
+    int state, rc;
+    long t0, limit_ms;
+    char lock[512];
+    sy_child_t child;
+} fl_node;
+
+typedef struct fl_flow { fl_node *n; int count; char *text; } fl_flow;
+typedef struct fl_sum { int ok, fail, timeout, skip; long wall_ms; int max_running; } fl_sum;
+
+/* Diagnostic text into DST: what does not fit is cut and the cut is marked with "..." (a message,
+   never a path).  Returns the length written. */
+static int fl_say(char *dst, size_t cap, const char *fmt, ...) {
+    va_list ap; int n;
+    if (!dst || cap < 4) return 0;
+    va_start(ap, fmt);
+    n = vsnprintf(dst, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0) { dst[0] = 0; return 0; }
+    if ((size_t)n >= cap) { dst[cap - 4] = '.'; dst[cap - 3] = '.'; dst[cap - 2] = '.'; dst[cap - 1] = 0; return (int)cap - 1; }
+    return n;
+}
+
+/* RUN/out/ID.EXT into P (2600 bytes): fl_load bounds the id and fl_run the run dir, so it fits;
+   0, or -1 with P empty. */
+static int fl_path(char *p, const char *run, const char *id, const char *ext) { return cx_fmt(p, 2600, "%s/out/%s.%s", run, id, ext); }
+
+static int fl_hex(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+
+/* The NTH (0-based) value of KEY in ARGS, %XX decoded into DST (NUL terminated).
+   Returns its length, -1 when absent, -2 when it does not fit. */
+static int fl_arg(const char *args, const char *key, int nth, char *dst, long cap) {
+    const char *p = args; long kl = (long)strlen(key), o;
+    while (p && *p) {
+        const char *e = p; while (*e && *e != ';') e++;
+        if (e - p > kl && !strncmp(p, key, (size_t)kl) && (p[kl] == '=' || (p[kl] == '@' && p[kl + 1] == '=')) && nth-- == 0) {
+            int at = p[kl] == '@'; const char *v = p + kl + 1 + at;
+            for (o = 0; v < e; v++) {
+                int c = (unsigned char)*v;
+                if (c == '%' && v + 2 < e && fl_hex(v[1]) >= 0 && fl_hex(v[2]) >= 0) { c = fl_hex(v[1]) * 16 + fl_hex(v[2]); v += 2; }
+                if (o + 1 >= cap) return -2;
+                dst[o++] = (char)c;
+            }
+            dst[o] = 0;
+            if (at) {   /* key@=PATH: the value is the whole file */
+                unsigned char *b = 0; int64_t bn = 0;
+                if (sy_read_file(dst, &b, &bn, 16L << 20) || bn + 1 > cap) { if (b) mm_free(b); return -2; }
+                if (b && bn && mm_copy(dst, cap, b, (long)bn)) { mm_free(b); return -2; }
+                if (!b) bn = 0;
+                dst[bn] = 0;
+                if (b) mm_free(b);
+                return (int)bn;
+            }
+            return (int)o;
+        }
+        p = *e ? e + 1 : e;
+    }
+    return -1;
+}
+int fl_arg_get(const char *args, const char *key, int nth, char *dst, long cap) { return fl_arg(args, key, nth, dst, cap); }
+
+static int fl_find(fl_flow *f, const char *id, long n) {
+    int i; for (i = 0; i < f->count; i++) if ((long)strlen(f->n[i].id) == n && !strncmp(f->n[i].id, id, (size_t)n)) return i;
+    return -1;
+}
+
+static const char *fl_stdin_keys[] = {"stdin", "stdin_from", "stdin_node"};
+static int fl_isdep(fl_flow *f, fl_node *nd, const char *id) { int j; for (j = 0; j < nd->ndeps; j++) if (!strcmp(f->n[nd->deps[j]].id, id)) return 1; return 0; }
+
+/* Topological order into ORDER (count entries). Returns the number placed; < count means a cycle. */
+int fl_order(fl_flow *f, int *order) {
+    int placed = 0, i, j, k, moved = 1; char *done = mm_zalloc(f->count + 1);
+    if (!done) return -1;
+    while (moved) {
+        moved = 0;
+        for (i = 0; i < f->count; i++) {
+            if (done[i]) continue;
+            for (j = 0, k = 1; j < f->n[i].ndeps; j++) if (done[f->n[i].deps[j]] != 1) k = 0;
+            if (k) { done[i] = 2; order[placed++] = i; moved = 1; }
+        }
+        for (i = 0; i < f->count; i++) if (done[i] == 2) done[i] = 1;
+    }
+    mm_free(done);
+    return placed;
+}
+
+void fl_free(fl_flow *f) { if (f->n) mm_free(f->n); if (f->text) mm_free(f->text); f->n = 0; f->text = 0; f->count = 0; }
+
+/* Parse and validate PATH. 0, or 2 with WHY naming the refusal. */
+int fl_load(const char *path, fl_flow *f, char *why, int cap) {
+    unsigned char *t = 0; int64_t tn = 0; char *p, **deps; int i, r, line = 0, *ord;
+    f->n = 0; f->count = 0; f->text = 0;
+    r = sy_read_file(path, &t, &tn, 16L << 20);
+    if (r) { fl_say(why,(size_t)cap, "cannot read flow file %s (%d)", path, r); return 2; }
+    f->text = (char *)t;
+    f->n = mm_zalloc((long)FL_MAX_NODES * (long)sizeof(fl_node));
+    deps = mm_zalloc((long)FL_MAX_NODES * (long)sizeof(char *));
+    if (!f->n || !deps) { fl_say(why,(size_t)cap, "out of memory"); return 2; }
+    for (p = f->text; *p; ) {
+        char *e = p, *c[4]; int nc = 0; fl_node *nd;
+        while (*e && *e != '\n') e++;
+        line++;
+        if (e == p || *p == '#') { p = *e ? e + 1 : e; continue; }
+        {   char *q = p; c[nc++] = q;
+            for (; q < e; q++) if (*q == '\t' && nc < 4) { *q = 0; c[nc++] = q + 1; }
+        }
+        if (*e) { *e = 0; e++; }
+        if (nc != 4) { fl_say(why,(size_t)cap, "line %d: want 4 TAB columns id op deps args, got %d", line, nc); goto refuse; }
+        if (f->count == FL_MAX_NODES) { fl_say(why,(size_t)cap, "more than %d nodes", FL_MAX_NODES); goto refuse; }
+        if (!c[0][0] || strlen(c[0]) > 200 || strchr(c[0], '/') || strchr(c[0], ',')) { fl_say(why,(size_t)cap, "line %d: bad node id '%s'", line, c[0]); goto refuse; }
+        if (fl_find(f, c[0], (long)strlen(c[0])) >= 0) { fl_say(why,(size_t)cap, "line %d: duplicate node id '%s'", line, c[0]); goto refuse; }
+        if (strcmp(c[1], "exec") && strcmp(c[1], "file.read") && strcmp(c[1], "file.write") && strcmp(c[1], "file.edit") && strncmp(c[1], "doc.", 4)
+            && strcmp(c[1], "compare") && strcmp(c[1], "search")) {
+            fl_say(why,(size_t)cap, "line %d: node '%s' has unknown op '%s'", line, c[0], c[1]); goto refuse; }
+        nd = &f->n[f->count]; nd->id = c[0]; nd->op = c[1]; nd->args = c[3]; deps[f->count] = c[2]; f->count++;
+        p = e;
+    }
+    for (i = 0; i < f->count; i++) {
+        char *d = deps[i]; fl_node *nd = &f->n[i]; long tm; char num[32];
+        if (strcmp(d, "-") && *d) for (;;) {
+            char *e = d; int k; while (*e && *e != ',') e++;
+            k = fl_find(f, d, (long)(e - d));
+            if (k < 0) { fl_say(why,(size_t)cap, "node '%s' depends on unknown node '%.*s'", nd->id, (int)(e - d), d); goto refuse; }
+            if (nd->ndeps == FL_MAX_DEPS) { fl_say(why,(size_t)cap, "node '%s' has more than %d deps", nd->id, FL_MAX_DEPS); goto refuse; }
+            nd->deps[nd->ndeps++] = k;
+            if (!*e) break;
+            d = e + 1;
+        }
+        {   /* node references must name a declared dependency, so the referenced out exists first */
+            char ref[256]; int q, nin = 0;
+            for (q = 0; q < 3; q++) if (fl_arg(nd->args, fl_stdin_keys[q], 0, ref, sizeof ref) != -1) nin++;
+            if (nin > 1) { fl_say(why,(size_t)cap, "node '%s' gives more than one of stdin, stdin_from, stdin_node", nd->id); goto refuse; }
+            r = fl_arg(nd->args, "stdin_node", 0, ref, sizeof ref);
+            if (r != -1 && (r < 1 || !fl_isdep(f, nd, ref))) { fl_say(why,(size_t)cap, "node '%s' stdin_node '%s' is not one of its deps", nd->id, r < 1 ? "" : ref); goto refuse; }
+            for (q = 0; q < 2 && !strcmp(nd->op, "compare"); q++) {
+                r = fl_arg(nd->args, q ? "b" : "a", 0, ref, sizeof ref);
+                if (r > 5 && !strncmp(ref, "node:", 5) && !fl_isdep(f, nd, ref + 5)) { fl_say(why,(size_t)cap, "node '%s' compare %s=%s is not one of its deps", nd->id, q ? "b" : "a", ref); goto refuse; }
+            }
+        }
+        nd->limit_ms = FL_NODE_MS;
+        if (fl_arg(nd->args, "timeout_ms", 0, num, sizeof num) > 0) {
+            tm = atol(num);
+            if (tm < 1 || tm > FL_NODE_MAX_MS) { fl_say(why,(size_t)cap, "node '%s' timeout_ms %s outside 1..%ld", nd->id, num, (long)FL_NODE_MAX_MS); goto refuse; }
+            nd->limit_ms = tm;
+        }
+        r = fl_arg(nd->args, "lock", 0, nd->lock, sizeof nd->lock);
+        if (r < 0 && (!strcmp(nd->op, "file.write") || !strcmp(nd->op, "file.edit"))) r = fl_arg(nd->args, "path", 0, nd->lock, sizeof nd->lock);
+        if (r < 0 && !strncmp(nd->op, "doc.", 4) && strcmp(nd->op, "doc.get") && strcmp(nd->op, "doc.list")) {   /* same document: serial */
+            char dp[200];
+            r = fl_arg(nd->args, "path", 0, dp, sizeof dp);
+            if (r >= 0 && cx_fmt(nd->lock, sizeof nd->lock, "doc:%s", dp)) r = -2;
+        }
+        if (r == -2) { fl_say(why,(size_t)cap, "node '%s' lock or path too long", nd->id); goto refuse; }
+        if (r < 0) nd->lock[0] = 0;
+    }
+    mm_free(deps); deps = 0;
+    ord = mm_alloc((long)(f->count + 1) * (long)sizeof(int));
+    if (!ord) { fl_say(why,(size_t)cap, "out of memory"); return 2; }
+    r = fl_order(f, ord);
+    if (r < f->count) {
+        char *in = mm_zalloc(f->count + 1); int off;
+        for (i = 0; in && i < r; i++) in[ord[i]] = 1;
+        off = fl_say(why,(size_t)cap, "dependency cycle among nodes:");
+        for (i = 0; in && i < f->count && off < cap - 64; i++) if (!in[i]) off += snprintf(why + off, (size_t)(cap - off), " %.40s", f->n[i].id);
+        if (in) mm_free(in);
+        mm_free(ord); return 2;
+    }
+    mm_free(ord);
+    return 0;
+refuse:
+    if (deps) mm_free(deps);
+    return 2;
+}
+
+/* ---- run ---- */
+typedef struct fl_ctx { fl_flow *f; char run[2048]; int evfd, echo, seq; long t0; } fl_ctx;
+static const char *fl_state_name[] = {"pending", "start", "ok", "fail", "timeout", "skip"};
+
+static void fl_evt(fl_ctx *x, fl_node *nd, int st, long ms, int rc, const char *sum) {
+    char line[1024]; int n;
+    n = snprintf(line, sizeof line, "EVT\t%d\t%s\t%s\t%ld\t%d\t%.600s\n", ++x->seq, nd->id, fl_state_name[st], ms, rc, sum);
+    if (n >= (int)sizeof line) n = (int)sizeof line - 1;
+    if (x->evfd >= 0) sy_write_all(x->evfd, line, n);
+    if (x->echo) { fwrite(line, 1, (size_t)n, stdout); fflush(stdout); }
+}
+
+static long fl_size(const char *run, const char *id, const char *ext) {
+    char p[2600]; sy_stat_t st;
+    if (fl_path(p, run, id, ext)) return 0;
+    return sy_stat(p, &st) == 0 ? (long)st.size : 0;
+}
+
+static void fl_finish(fl_ctx *x, fl_node *nd, int st, int rc, const char *note) {
+    char sum[700];
+    nd->state = st; nd->rc = rc;
+    fl_say(sum, sizeof sum, "%s%sout=%ld err=%ld", note ? note : "", note ? " " : "", fl_size(x->run, nd->id, "out"), fl_size(x->run, nd->id, "err"));
+    fl_evt(x, nd, st, sy_now_ms() - nd->t0, rc, sum);
+}
+
+/* exec operator: start ND's child in its own process group. 0 started, else node failed (event written). */
+static int fx_start(fl_ctx *x, fl_node *nd) {
+    static char buf[1 << 17];
+    char *argv[FL_MAX_ARGV + 1], key[16], cwd[1024], sin[2600], sn[256], po[2600], pe[2600], **env = 0, why[300];
+    long off = 0; int na = 0, r, ne = 0, i, base = 0, ofd = -1, efd = -1, ifd = -1;
+    sy_spawn_t o;
+    why[0] = 0;
+    for (na = 0; na < FL_MAX_ARGV; na++) {
+        fl_say(key, sizeof key, "a%d", na);
+        r = fl_arg(nd->args, key, 0, buf + off, (long)sizeof buf - off);
+        if (r == -1) break;
+        if (r == -2) { fl_say(why,sizeof why, "argv too long, or the file of %s@= is unreadable", key); goto bad; }
+        argv[na] = buf + off; off += r + 1;
+    }
+    argv[na] = 0;
+    if (na == 0) { fl_say(why,sizeof why, "exec needs a0"); goto bad; }
+    while (fl_arg(nd->args, "env", ne, buf + off, (long)sizeof buf - off) >= 0) ne++;
+    if (ne) {
+        char **cur = sy_env_vec();
+        while (cur && cur[base]) base++;
+        env = mm_alloc((long)(base + ne + 1) * (long)sizeof(char *));
+        if (!env) { fl_say(why,sizeof why, "out of memory"); goto bad; }
+        for (i = 0; i < base; i++) env[i] = cur[i];
+        for (i = 0; i < ne; i++) {
+            r = fl_arg(nd->args, "env", i, buf + off, (long)sizeof buf - off);
+            if (r < 0 || !strchr(buf + off, '=')) { fl_say(why,sizeof why, "env entry %d is not K=V or too long", i); goto bad; }
+            {   /* a later K=V replaces an inherited K */
+                long kl = (long)(strchr(buf + off, '=') - (buf + off)) + 1; int j, hit = 0;
+                for (j = 0; j < base; j++) if (!strncmp(env[j], buf + off, (size_t)kl)) { env[j] = buf + off; hit = 1; }
+                if (!hit) env[base++] = buf + off;
+            }
+            off += r + 1;
+        }
+        env[base] = 0;
+    }
+    if (fl_path(po, x->run, nd->id, "out") || fl_path(pe, x->run, nd->id, "err")) { fl_say(why, sizeof why, "output path too long"); goto bad; }
+    ofd = sy_open(po, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    efd = sy_open(pe, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ofd < 0 || efd < 0) { fl_say(why,sizeof why, "cannot open output files under %.200s/out", x->run); goto bad; }
+    sy_spawn_init(&o);
+    o.argv = argv; o.env = env; o.pgroup = -1; o.out_fd = ofd; o.err_fd = efd; o.in_fd = SY_STDIO_NULL;
+    if (fl_arg(nd->args, "cwd", 0, cwd, sizeof cwd) > 0) o.cwd = cwd;
+    r = fl_arg(nd->args, "stdin", 0, sin, sizeof sin);
+    if (r == -1) r = fl_arg(nd->args, "stdin_from", 0, sin, sizeof sin);
+    if (r == -1 && fl_arg(nd->args, "stdin_node", 0, sn, sizeof sn) > 0) {   /* fl_load proved it is a dep */
+        if (fl_path(sin, x->run, sn, "out")) { fl_say(why, sizeof why, "stdin_node path too long"); goto bad; }
+        r = 1;
+    }
+    if (r == -2) { fl_say(why, sizeof why, "stdin path too long"); goto bad; }
+    if (r > 0) {
+        ifd = sy_open_read(sin);
+        if (ifd < 0) { fl_say(why,sizeof why, "cannot open stdin %.200s (%d)", sin, ifd); goto bad; }
+        o.in_fd = ifd;
+    }
+    nd->t0 = sy_now_ms();
+    fl_evt(x, nd, FL_RUNNING, 0, 0, argv[0]);
+    r = sy_proc_spawn(&o, &nd->child);
+    sy_close(ofd); sy_close(efd); if (ifd >= 0) sy_close(ifd);
+    if (env) mm_free(env);
+    if (r < 0) { fl_say(why,sizeof why, "spawn %.200s failed (%d)", argv[0], r); fl_finish(x, nd, FL_FAIL, 127, why); return 1; }
+    nd->state = FL_RUNNING;
+    return 0;
+bad:
+    if (ofd >= 0) sy_close(ofd);
+    if (efd >= 0) sy_close(efd);
+    if (ifd >= 0) sy_close(ifd);
+    if (env) mm_free(env);
+    nd->t0 = sy_now_ms();
+    fl_evt(x, nd, FL_RUNNING, 0, 0, "exec");
+    fl_finish(x, nd, FL_FAIL, 2, why);
+    return 1;
+}
+
+/* stdout_to=PATH: publish a copy of the ended node's stdout through file.write, so the root rule
+   (root key or UNISACC_FLOW_ROOT, EOUTSIDE) is the one of cxlib.flowfile.  0, or 1 with WHY. */
+static int fx_save(fl_ctx *x, fl_node *nd, char *why, size_t cap) {
+    static char to[4200], rootv[4200], a[32000];
+    char po[2600], rp[4200]; ff_out o; int r; long n, k;
+    r = fl_arg(nd->args, "stdout_to", 0, to, sizeof to);
+    if (r == -1) return 0;
+    if (r <= 0) { fl_say(why, cap, "stdout_to empty or too long"); return 1; }
+    if (fl_path(po, x->run, nd->id, "out") || sy_realpath(po, rp, (int)sizeof rp) < 0) { fl_say(why, cap, "stdout_to: cannot resolve the node output"); return 1; }
+    memcpy(a, "path=", 5); n = 5;
+    k = ff_escape(to, (long)strlen(to), a + n, 13000); if (k < 0) { fl_say(why, cap, "stdout_to too long"); return 1; }
+    n += k; memcpy(a + n, ";from=", 6); n += 6;
+    k = ff_escape(rp, (long)strlen(rp), a + n, 9000); if (k < 0) { fl_say(why, cap, "stdout_to: node output path too long"); return 1; }
+    n += k;
+    r = fl_arg(nd->args, "root", 0, rootv, sizeof rootv);
+    if (r == -2) { fl_say(why, cap, "stdout_to: root too long"); return 1; }
+    if (r > 0) {
+        memcpy(a + n, ";root=", 6); n += 6;
+        k = ff_escape(rootv, (long)strlen(rootv), a + n, 9000); if (k < 0) { fl_say(why, cap, "stdout_to: root too long"); return 1; }
+        n += k;
+    }
+    a[n] = 0;
+    memset(&o, 0, sizeof o);
+    r = ff_run("file.write", a, &o);
+    if (r) fl_say(why, cap, "stdout_to: %.300s", o.why);
+    ff_out_free(&o);
+    return r ? 1 : 0;
+}
+
+/* file.*, compare and search nodes, inline. */
+static void fl_file(fl_ctx *x, fl_node *nd) {
+    ff_out o; char p[2600]; int r, w;
+    nd->t0 = sy_now_ms();
+    fl_evt(x, nd, FL_RUNNING, 0, 0, nd->op);
+    memset(&o, 0, sizeof o);
+    r = cx_fmt(p, sizeof p, "%s/out", x->run) ? 1 : !strncmp(nd->op, "doc.", 4) ? fd_run(nd->op, nd->args, &o) : ff_run2(nd->op, nd->args, p, &o);
+    w = fl_path(p, x->run, nd->id, "out") ? -ENAMETOOLONG : sy_write_file(p, o.buf ? o.buf : "", o.buf ? o.n : 0, 0644);
+    if (w == 0) w = fl_path(p, x->run, nd->id, "err") ? -ENAMETOOLONG : sy_write_file(p, o.why, (int64_t)strlen(o.why), 0644);
+    ff_out_free(&o);
+    if (r == 0 && w != 0) fl_finish(x, nd, FL_FAIL, 125, "cannot store node output in the run dir");   /* the op ran; its record did not land */
+    else fl_finish(x, nd, r == 0 ? FL_OK : FL_FAIL, r == 0 ? 0 : (o.rc ? o.rc : r), r == 0 ? 0 : o.why);
+}
+
+static void fl_kill_wait(fl_node *nd) {
+    sy_exit_t st; int i;
+    sy_proc_kill(&nd->child, SIGKILL);
+    for (i = 0; i < 400 && sy_proc_try_wait(&nd->child, &st) == 0; i++) sy_sleep_ms(5);
+}
+
+int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo, fl_sum *sum) {
+    fl_ctx x; char p[2600]; int i, j, running = 0, left = f->count, r; long end;
+    if (jobs < 1) jobs = 1;
+    if (jobs > FL_MAX_JOBS) jobs = FL_MAX_JOBS;
+    if (deadline_ms < 1) deadline_ms = FL_RUN_MS;
+    if (strlen(run_dir) >= sizeof x.run) return -ENAMETOOLONG;
+    x.f = f; x.echo = echo; x.seq = 0; x.t0 = sy_now_ms(); end = x.t0 + deadline_ms;
+    if (cx_fmt(x.run, sizeof x.run, "%s", run_dir)) return -ENAMETOOLONG;
+    r = sy_mkdir(x.run, 0755); if (r < 0 && r != -EEXIST) return r;
+    if (cx_fmt(p, sizeof p, "%s/out", x.run)) return -ENAMETOOLONG;
+    r = sy_mkdir(p, 0755); if (r < 0 && r != -EEXIST) return r;
+    if (cx_fmt(p, sizeof p, "%s/events.tsv", x.run)) return -ENAMETOOLONG;
+    x.evfd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (x.evfd < 0) return x.evfd;
+    sum->ok = sum->fail = sum->timeout = sum->skip = 0; sum->max_running = 0;
+    while (left > 0) {
+        int progress = 0; long now = sy_now_ms(); int late = now >= end;
+        /* reap, and enforce node and run bounds */
+        for (i = 0; i < f->count; i++) {
+            fl_node *nd = &f->n[i]; sy_exit_t st;
+            if (nd->state != FL_RUNNING) continue;
+            r = sy_proc_try_wait(&nd->child, &st);
+            if (r == 1) {
+                int c = sy_exit_code(&st); char note[400];
+                if (fx_save(&x, nd, note, sizeof note)) fl_finish(&x, nd, FL_FAIL, 125, note);
+                else fl_finish(&x, nd, c == 0 ? FL_OK : FL_FAIL, c, 0);
+            }
+            else if (r < 0) fl_finish(&x, nd, FL_FAIL, 126, "wait failed");
+            else if (late || now - nd->t0 >= nd->limit_ms) {
+                char note[96];
+                fl_kill_wait(nd);
+                if (late) fl_say(note,sizeof note, "run deadline %ld ms, process group killed", deadline_ms);
+                else fl_say(note,sizeof note, "timeout_ms=%ld, process group killed", nd->limit_ms);
+                fl_finish(&x, nd, FL_TIMEOUT, 124, note);
+            } else continue;
+            running--; left--; progress = 1;
+        }
+        /* start what is ready */
+        for (i = 0; i < f->count; i++) {
+            fl_node *nd = &f->n[i]; int ready = 1, bad = -1;
+            if (nd->state != FL_PENDING) continue;
+            for (j = 0; j < nd->ndeps; j++) {
+                int s = f->n[nd->deps[j]].state;
+                if (s == FL_FAIL || s == FL_TIMEOUT || s == FL_SKIP) { bad = nd->deps[j]; break; }
+                if (s != FL_OK) ready = 0;
+            }
+            if (bad >= 0 || late) {
+                char note[200];
+                if (bad >= 0) fl_say(note,sizeof note, "dep=%.100s:%s", f->n[bad].id, fl_state_name[f->n[bad].state]);
+                else fl_say(note,sizeof note, "run deadline %ld ms reached before start", deadline_ms);
+                nd->state = FL_SKIP; nd->rc = -1;
+                fl_evt(&x, nd, FL_SKIP, 0, -1, note);
+                left--; progress = 1; continue;
+            }
+            if (!ready || running >= jobs) continue;
+            if (nd->lock[0]) {
+                for (j = 0; j < f->count; j++) if (f->n[j].state == FL_RUNNING && !strcmp(f->n[j].lock, nd->lock)) break;
+                if (j < f->count) continue;
+            }
+            progress = 1;
+            if (!strcmp(nd->op, "exec")) {
+                if (fx_start(&x, nd) == 0) { running++; if (running > sum->max_running) sum->max_running = running; }
+                else left--;
+            } else { fl_file(&x, nd); left--; }
+        }
+        if (!progress) sy_sleep_ms(2);
+    }
+    sy_close(x.evfd);
+    for (i = 0; i < f->count; i++) {
+        int s = f->n[i].state;
+        if (s == FL_OK) sum->ok++; else if (s == FL_FAIL) sum->fail++; else if (s == FL_TIMEOUT) sum->timeout++; else sum->skip++;
+    }
+    sum->wall_ms = sy_now_ms() - x.t0;
+    return sum->ok == f->count ? 0 : 1;
+}
