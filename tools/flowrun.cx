@@ -11,6 +11,10 @@
  *   --deadline-ms N  whole-run bound (default 300000, max 3600000): at the bound every running
  *                    node's process group is killed (timeout) and the rest are skip
  *   --dry            print ORDER lines (topological order) and FLOW_DRY, run nothing
+ *   --echo           after FLOW_RUN print each node's out: `ECHO<TAB>id<TAB>bytes=N` then the bytes
+ *   --echo-max N     at most N bytes of each node's out are echoed (default 65536); a cut node is
+ *                    followed by `ECHO_TRUNC<TAB>id<TAB>shown=N<TAB>total=M` (the file keeps it all)
+ *   FLOW may be - : the node table is read from stdin.
  * Output: one EVT line per node event, then
  *   FLOW_RUN<TAB>nodes=N<TAB>ok=N<TAB>fail=N<TAB>timeout=N<TAB>skip=N<TAB>wall_ms=N<TAB>peak=N<TAB>jobs=N<TAB>run=DIR
  * rc 0 every node ok, 1 some node not ok, 2 refused (unknown dep, cycle, bad line, bad option:
@@ -33,11 +37,12 @@ static long f_num(const char *s) { long n = 0; if (!*s) return -1; while (*s >= 
 
 int main(int argc, char **argv) {
     fl_flow f; fl_sum s; char why[1024], dir[2048]; const char *file = 0, *rdir = 0;
-    int a, jobs = 0, dry = 0, echo = 0, r, *ord, i, j; long dl = 0;
+    int a, jobs = 0, dry = 0, echo = 0, r, *ord, i, j; long dl = 0, emax = 65536;
     if (argc < 2 || !tx_eqz(argv[1], "run")) die("usage: run FLOW.tsv [--jobs N] [--run DIR] [--deadline-ms N] [--dry]");
     for (a = 2; a < argc; a++) {
         if (tx_eqz(argv[a], "--dry")) dry = 1;
         else if (tx_eqz(argv[a], "--echo")) echo = 1;
+        else if (tx_eqz(argv[a], "--echo-max") && a + 1 < argc) { emax = f_num(argv[++a]); if (emax < 0) die("--echo-max wants a byte count 0..100000000"); }
         else if (tx_eqz(argv[a], "--jobs") && a + 1 < argc) { long v = f_num(argv[++a]); if (v < 1) die("--jobs wants a number >= 1"); jobs = v > 32 ? 32 : (int)v; }
         else if (tx_eqz(argv[a], "--run") && a + 1 < argc) rdir = argv[++a];
         else if (tx_eqz(argv[a], "--deadline-ms") && a + 1 < argc) { dl = f_num(argv[++a]); if (dl < 1 || dl > 3600000L) die("--deadline-ms outside 1..3600000"); }
@@ -75,7 +80,12 @@ int main(int argc, char **argv) {
     if (echo) for (i = 0; i < f.count; i++) {
         char ea[2400]; ff_out eo;
         if (cx_fmt(ea, sizeof ea, "path=%s/out/%s.out", rdir, f.n[i].id)) continue;
-        if (ff_run("file.read", ea, &eo) == 0) { sy_printf("ECHO\t%s\tbytes=%ld\n", f.n[i].id, eo.n); if (eo.n) sy_printf("%.*s%s", (int)eo.n, eo.buf, eo.buf[eo.n - 1] == '\n' ? "" : "\n"); }
+        if (ff_run("file.read", ea, &eo) == 0) {
+            long show = eo.n > emax ? emax : eo.n;
+            sy_printf("ECHO\t%s\tbytes=%ld\n", f.n[i].id, eo.n);
+            if (show) sy_printf("%.*s%s", (int)show, eo.buf, eo.buf[show - 1] == '\n' ? "" : "\n");
+            if (show < eo.n) sy_printf("ECHO_TRUNC\t%s\tshown=%ld\ttotal=%ld\n", f.n[i].id, show, eo.n);
+        }
         else sy_printf("ECHO\t%s\tbytes=-\n", f.n[i].id);
         ff_out_free(&eo);
     }

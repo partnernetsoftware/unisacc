@@ -276,6 +276,62 @@ int main(void) {
     ck(r < 0 && f.n[0].state == FL_PENDING && f.n[1].state == FL_PENDING && sy_exists(rd("missing-parent")) == 0, "run-bad-dir");
     fl_free(&f);
 
+    /* ---- round 2: stdin_node / stdin_from / stdout_to, k@=PATH, compare and search nodes ---- */
+    refuse("load-stdin-node-not-dep", "a\texec\t-\ta0=true\nb\texec\t-\tstdin_node=a;a0=cat\n", "node 'b' stdin_node 'a' is not one of its deps");
+    refuse("load-stdin-two-sources", "a\texec\t-\ta0=true\nb\texec\ta\tstdin_node=a;stdin_from=/dev/null;a0=cat\n", "more than one of stdin, stdin_from, stdin_node");
+    refuse("load-compare-node-not-dep", "a\texec\t-\ta0=true\nc\tcompare\t-\ta=node:a;b=/dev/null\n", "compare a=node:a is not one of its deps");
+    if (sy_write_file(rd("val.txt"), "x;y\t%z\n", 7, 0644)) die("cannot write val.txt");
+    rc = sy_mkdir(rd("sub"), 0755);
+    if (rc < 0 && rc != -EEXIST) die("cannot make sub");
+    if (cx_fmt(text, sizeof text,
+        "p\texec\t-\ta0=printf;a1=b\\na\\n;stdout_to=%s/saved.txt;root=%s\n"
+        "c\texec\tp\tstdin_node=p;a0=sort\n"
+        "d\texec\tp\tstdin_from=%s/saved.txt;a0=cat\n"
+        "v\texec\t-\ta0=printf;a1=%%25s;a2@=%s/val.txt\n"
+        "m\texec\t-\ta0=printf;a1=%%25s;a2@=%s/no-such-file\n"
+        "o\texec\t-\ta0=echo;a1=hi;stdout_to=%s/escape.txt;root=%s/sub\n"
+        "q\texec\to\ta0=true\n"
+        "k1\tcompare\tp,c\ta=node:p;b=node:c;mode=set\n"
+        "k2\tcompare\tp,c\ta=node:p;b=node:c;mode=lines\n"
+        "k3\tcompare\tp,c\ta=node:p;b=node:c;mode=lines;fail_on_diff=0\n"
+        "s\tsearch\tp\tpattern=a;paths=%s/saved.txt\n", wd, wd, wd, wd, wd, wd, wd, wd)) die("round 2 flow text");
+    r = fl_load(wf("r2.tsv", text), &f, why, (int)sizeof why);
+    if (r) { sy_printf("NOTE\tr2\t%s\n", why); die("round 2 flow did not load"); }
+    memset(&s, 0, sizeof s);
+    r = fl_run(&f, rd("r2"), 4, 30000, 0, &s);
+    ev = slurp3("r2", "events.tsv");
+    ck(r == 1 && s.ok == 7 && s.fail == 3 && s.skip == 1 && s.timeout == 0, "r2-summary");
+    t = slurp(rd("saved.txt"));
+    ck(f.n[node(&f, "p")].state == FL_OK && t && tx_eqz(t, "b\na\n"), "exec-stdout-to-copy");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "c.out");
+    ck(t && tx_eqz(t, "a\nb\n"), "exec-stdin-node-pipe");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "d.out");
+    ck(t && tx_eqz(t, "b\na\n"), "exec-stdin-from");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "v.out");
+    ck(t && tx_eqz(t, "x;y\t%z\n"), "exec-arg-atfile-verbatim");
+    if (t) mm_free(t);
+    ck(f.n[node(&f, "m")].state == FL_FAIL && f.n[node(&f, "m")].rc == 2 && has(ev, "a2@= is unreadable"), "exec-arg-atfile-missing-fails");
+    ck(f.n[node(&f, "o")].state == FL_FAIL && f.n[node(&f, "o")].rc == 125 && has(ev, "stdout_to: EOUTSIDE") && sy_exists(rd("escape.txt")) == 0
+       && f.n[node(&f, "q")].state == FL_SKIP, "exec-stdout-to-outside-root-refused");
+    t = slurp_node("r2", "k1.out");
+    ck(f.n[node(&f, "k1")].state == FL_OK && t && tx_eqz(t, "same=1\ndiffs=0\nmode=set\n"), "compare-node-set-same");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "k2.out");
+    ck(f.n[node(&f, "k2")].state == FL_FAIL && f.n[node(&f, "k2")].rc == 1 && has(ev, "EDIFF") && t && tx_eqz(t, "same=0\ndiffs=2\nmode=lines\n-1:b\n+1:a\n-2:a\n+2:b\n"), "compare-node-lines-diff-rc1");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "k3.out");
+    ck(f.n[node(&f, "k3")].state == FL_OK && t && pos(t, "same=0\ndiffs=2\n") == 0, "compare-node-fail-on-diff-off");
+    if (t) mm_free(t);
+    t = slurp_node("r2", "s.out");
+    cx_fmt(buf, sizeof buf, "%s/saved.txt:2:a\n", wd);
+    ck(f.n[node(&f, "s")].state == FL_OK && t && tx_eqz(t, buf), "search-node");
+    if (t) mm_free(t);
+    if (ev) mm_free(ev);
+    fl_free(&f);
+
     sy_printf("CHECK_FLOWEXEC\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

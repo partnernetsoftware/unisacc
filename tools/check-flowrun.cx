@@ -223,6 +223,48 @@ int main(void) {
         ck(rc == 0 && t && tx_eqz(t, "/\nv 1|b|inherited\n# two\ntwo  words; $(x)\n"), "exec-args");
         if (t) mm_free(t);
     }
+    {   /* --echo-max: a long out is cut and marked, a short one is whole; the node file keeps everything */
+        char *a[] = {"run", wf("emax.tsv", "big\texec\t-\ta0=printf;a1=0123456789abcdef\nsmall\texec\t-\ta0=echo;a1=hi\n"), "--run", rd("emax"), "--echo", "--echo-max", "10", 0};
+        rc = run(a, out, cap);
+        cx_fmt(buf, sizeof buf, "%s/emax/out/big.out", wd); t = slurp(buf);
+        ck(rc == 0 && has(out, "ECHO\tbig\tbytes=16\n0123456789\nECHO_TRUNC\tbig\tshown=10\ttotal=16\n") && has(out, "ECHO\tsmall\tbytes=3\nhi\n")
+           && !has(out, "ECHO_TRUNC\tsmall") && t && tx_eqz(t, "0123456789abcdef"), "echo-max-trunc");
+        if (t) mm_free(t);
+    }
+    {   char *a[] = {"run", rd("emax.tsv"), "--run", rd("emax2"), "--echo", 0};
+        rc = run(a, out, cap);
+        ck(rc == 0 && has(out, "ECHO\tbig\tbytes=16\n0123456789abcdef\n") && !has(out, "ECHO_TRUNC"), "echo-default-max-whole"); }
+    {   char *a[] = {"run", rd("emax.tsv"), "--run", rd("emax3"), "--echo", "--echo-max", "x", 0};
+        rc = run(a, out, cap);
+        ck(rc == 2 && has(out, "REFUSE --echo-max") && !has(out, "EVT\t"), "echo-max-bad-value"); }
+    {   /* one flow: search a symbol, cross-check against grep (compare set), pipe the matches to wc
+           (stdin_node); a differing compare is fail rc 1 and its dependent is skip */
+        char text[4096], *a[] = {"run", 0, "--run", rd("demo"), 0};
+        cx_fmt(buf, sizeof buf, "%s/src", wd);
+        rc = sy_mkdir(buf, 0755);
+        if (rc < 0 && rc != -EEXIST) die("cannot make src");
+        wf("src/a.c", "int sym_one;\nint other;\nsym_one = 2;\n");
+        cx_fmt(text, sizeof text,
+            "s\tsearch\t-\tpattern=sym_one;paths=%s/src\n"
+            "g\texec\t-\ta0=grep;a1=-rnF;a2=sym_one;a3=%s/src\n"
+            "n\texec\ts\tstdin_node=s;a0=wc;a1=-l\n"
+            "c\tcompare\ts,g\ta=node:s;b=node:g;mode=set\n"
+            "h\texec\t-\ta0=echo;a1=nothing\n"
+            "d\tcompare\ts,h\ta=node:s;b=node:h;mode=lines\n"
+            "z\texec\td\ta0=touch;a1=%s/z-ran\n", wd, wd, wd);
+        a[1] = wf("demo.tsv", text);
+        rc = run(a, out, cap);
+        cx_fmt(buf, sizeof buf, "%s/demo/out/c.out", wd); t = slurp(buf);
+        ck(rc == 1 && has(out, "\tc\tok\t") && t && tx_eqz(t, "same=1\ndiffs=0\nmode=set\n"), "search-compare-agree-with-grep");
+        if (t) mm_free(t);
+        cx_fmt(buf, sizeof buf, "%s/demo/out/n.out", wd); t = slurp(buf);
+        ck(t && numafter(t, "") == 2, "stdin-node-pipe");
+        if (t) mm_free(t);
+        ck(has(out, "\td\tfail\t") && has(out, "\t1\tEDIFF") && has(out, "\tz\tskip\t0\t-1\tdep=d:fail") && sy_exists(rd("z-ran")) == 0, "compare-diff-fail-skip");
+    }
+    {   char *a[] = {"run", wf("sn.tsv", "a\texec\t-\ta0=true\nb\texec\t-\tstdin_node=a;a0=cat\n"), "--run", rd("sn"), 0};
+        rc = run(a, out, cap);
+        ck(rc == 2 && has(out, "REFUSE node 'b' stdin_node 'a' is not one of its deps") && !has(out, "EVT\t") && sy_exists(rd("sn")) == 0, "stdin-node-not-dep"); }
     sy_printf("CHECK_FLOWRUN\tfailed=%d\n", failed);
     mm_free(out);
     return failed ? 1 : 0;

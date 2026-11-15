@@ -325,6 +325,102 @@ int main(void) {
     ck(leftovers() == 0, "edit-no-temporary-left");
     n = 0; (void)n;
 
+    /* ---- round 2: key@=PATH ---- */
+    ck(put("big.txt", "one;two\t%41\nthree\n") == 0 && put("old.txt", "two\t%41") == 0 && put("new.txt", "2;") == 0, "setup-atfile");
+    t[0] = 0; cat(t, sizeof t, "path=at.txt;content@="); cat(t, sizeof t, P("big.txt"));
+    rc = ff_run("file.write", A(t), &o);
+    ck(rc == 0 && holds("at.txt", "one;two\t%41\nthree\n"), "write-content-atfile-verbatim");
+    ff_out_free(&o);
+    t[0] = 0; cat(t, sizeof t, "path=at.txt;old@="); cat(t, sizeof t, P("old.txt")); cat(t, sizeof t, ";new@="); cat(t, sizeof t, P("new.txt"));
+    rc = ff_run("file.edit", A(t), &o);
+    ck(rc == 0 && o.count == 1 && holds("at.txt", "one;2;\nthree\n"), "edit-old-new-atfile");
+    ff_out_free(&o);
+    t[0] = 0; cat(t, sizeof t, "path=at.txt;content@="); cat(t, sizeof t, P("no-such.txt"));
+    rc = ff_run("file.write", A(t), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EESCAPE") && holds("at.txt", "one;2;\nthree\n"), "write-atfile-missing-refuse");
+    ff_out_free(&o);
+
+    /* ---- round 2: compare ---- */
+    ck(put("ca.txt", "a\nb\nc\n") == 0 && put("cb.txt", "c\nb\na\n") == 0 && put("cc.txt", "a\nb\nc") == 0 && put("cd.txt", "b\nz\nb\n") == 0
+       && put("n1.out", "a\nb\nc\n") == 0 && put("empty.txt", "") == 0, "setup-compare");
+    rc = ff_run("compare", A("a=ca.txt;b=ca.txt"), &o);
+    ck(rc == 0 && is(&o, "same=1\ndiffs=0\nmode=bytes\n"), "compare-bytes-same");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cb.txt;mode=bytes"), &o);
+    ck(rc != 0 && o.rc == 1 && tx_eqz(o.err, "EDIFF") && o.count == 2 && is(&o, "same=0\ndiffs=2\nmode=bytes\n@0 a=61 b=63\n@4 a=63 b=61\n"), "compare-bytes-diff-fails-with-report");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cc.txt;mode=bytes;fail_on_diff=0"), &o);
+    ck(rc == 0 && is(&o, "same=0\ndiffs=1\nmode=bytes\n@5 a=0a b=--\n"), "compare-bytes-length-fail-off");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cc.txt;mode=lines"), &o);
+    ck(rc == 0 && is(&o, "same=1\ndiffs=0\nmode=lines\n"), "compare-lines-final-newline-same");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cb.txt;mode=lines"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EDIFF") && o.count == 2 && is(&o, "same=0\ndiffs=2\nmode=lines\n-1:a\n+1:c\n-3:c\n+3:a\n"), "compare-lines-diff");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cb.txt;mode=set"), &o);
+    ck(rc == 0 && is(&o, "same=1\ndiffs=0\nmode=set\n"), "compare-set-order-ignored");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=cd.txt;mode=set"), &o);
+    ck(rc != 0 && o.count == 3 && is(&o, "same=0\ndiffs=3\nmode=set\n-a\n-c\n+z\n"), "compare-set-diff-repeats-ignored");
+    ff_out_free(&o);
+    {   /* 30 differing lines: all counted, the first 20 listed */
+        char big[256]; long k, nl = 0; int d;
+        big[0] = 0;
+        for (d = 10; d < 40; d++) { char w[4]; w[0] = (char)('0' + d / 10); w[1] = (char)('0' + d % 10); w[2] = '\n'; w[3] = 0; cat(big, sizeof big, w); }
+        ck(put("c30.txt", big) == 0, "setup-compare-30");
+        rc = ff_run("compare", A("a=c30.txt;b=empty.txt;mode=lines"), &o);
+        for (k = 0; o.buf && k < o.n; k++) if (o.buf[k] == '\n') nl++;
+        ck(rc != 0 && o.count == 30 && nl == 23 && tx_find(o.buf, o.n, "-20:29\n", 7) >= 0 && tx_find(o.buf, o.n, "-21:", 4) < 0, "compare-first-20-listed");
+        ff_out_free(&o);
+    }
+    rc = ff_run("compare", A("a=ca.txt;b=cb.txt;mode=words"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG") && !o.buf, "compare-bad-mode-refuse");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt;b=no-such.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT"), "compare-missing-side-refuse");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=ca.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "compare-missing-key-refuse");
+    ff_out_free(&o);
+    rc = ff_run("compare", A("a=node:n1;b=ca.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "compare-node-without-run-refuse");
+    ff_out_free(&o);
+    rc = ff_run2("compare", A("a=node:n1;b=ca.txt"), root, &o);
+    ck(rc == 0 && is(&o, "same=1\ndiffs=0\nmode=bytes\n"), "compare-node-side");
+    ff_out_free(&o);
+
+    /* ---- round 2: search ---- */
+    ck(sy_mkdir_all(P("sd/.git"), 0755) == 0, "setup-search-dirs");
+    ck(put("sd/x.cx", "int alpha;\nint beta;\nalpha();\n") == 0 && put("sd/y.txt", "alpha\n") == 0 && put("sd/.git/z.cx", "alpha\n") == 0, "setup-search");
+    rc = ff_run("search", A("pattern=alpha;paths=sd/x.cx"), &o);
+    ck(rc == 0 && o.count == 2 && is(&o, "sd/x.cx:1:int alpha;\nsd/x.cx:3:alpha();\n"), "search-file-path-line-text");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=alpha;paths=sd/*.txt"), &o);
+    ck(rc == 0 && is(&o, "sd/y.txt:1:alpha\n"), "search-glob");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=alpha;paths=sd"), &o);
+    ck(rc == 0 && o.count == 3 && tx_find(o.buf, o.n, ".git", 4) < 0 && tx_find(o.buf, o.n, "sd/y.txt:1:alpha\n", 17) >= 0, "search-dir-skips-git");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=alpha;paths=sd/x.cx sd/y.txt;max=2"), &o);
+    ck(rc == 0 && o.count == 2 && is(&o, "sd/x.cx:1:int alpha;\nsd/x.cx:3:alpha();\nSEARCH_TRUNC\tmax=2\n"), "search-max-trunc-marked");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=int beta%3B;paths=sd"), &o);
+    ck(rc == 0 && is(&o, "sd/x.cx:2:int beta;\n"), "search-escaped-pattern");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=a.pha;paths=sd"), &o);
+    ck(rc == 0 && o.n == 0 && o.count == 0, "search-fixed-string-no-match-ok");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=alpha;regex=1;paths=sd"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "search-regex-refused");
+    ff_out_free(&o);
+    rc = ff_run("search", A("pattern=alpha;paths=sd/none.txt"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "ENOENT"), "search-missing-path-refuse");
+    ff_out_free(&o);
+    rc = ff_run("search", A("paths=sd"), &o);
+    ck(rc != 0 && tx_eqz(o.err, "EARG"), "search-missing-pattern-refuse");
+    ff_out_free(&o);
+
     ck(sy_remove_all(outside) == 0, "cleanup");
     printf("CHECK_FLOWFILE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
