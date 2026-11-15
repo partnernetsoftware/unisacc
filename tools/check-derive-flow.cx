@@ -17,6 +17,18 @@ static void ck(int ok, const char *name) {
 }
 static char *lines[64]; static int nl;
 static int scmp(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return (unsigned char)*a - (unsigned char)*b; }
+/* 期望 DERIVE 行数 = exec/facts/derive.tsv 非空非注释行数(清单增减不再改本检查字面量);读不到返回 -1,断言随之失败 */
+static int want_rows(void) {
+    size_t n = 0; long at = 0; int c = 0; char *t = cx_read("exec/facts/derive.tsv", &n);
+    if (!t) return -1;
+    while (at < (long)n) {
+        long e = tx_chr(t + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
+        if (ln > 0 && t[at] != '#') c++;
+        at += ln + 1;
+    }
+    return c;
+}
+
 /* 把 DERIVE 行去掉第 4 列(ms)收进 lines,排序;SUMMARY 截到 elapsed_ms 前写进 sum */
 static int norm(const char *o, long n, char ***res, char *sum, long scap) {
     long at = 0; int i, j; nl = 0; sum[0] = 0;
@@ -52,10 +64,10 @@ int main(void) {
         if (!home || sy_cwd(cwd, sizeof cwd)) { ck(0, "home-cwd"); return 1; }
         for (q = 0; cwd[q]; q++) { hh ^= (unsigned char)cwd[q]; hh *= 1099511628211ULL; }
         cx_fmt(d, sizeof d, "%s/.cache/unisacc/check-derive-flow/%016llx", home, hh);
-        cx_fmt(cmd, sizeof cmd, "R=$PWD; H=$(git rev-parse HEAD) && mkdir -p %s/w && exec 9> %s/.lock && { flock -n 9 || { echo LOCKED; exit 3; }; } && "
+        cx_fmt(cmd, sizeof cmd, "R=$PWD; H=$(git rev-parse HEAD) && G=$(cd \"$(git rev-parse --git-common-dir)\" && pwd) && I=$(cd \"$(git rev-parse --git-dir)\" && pwd)/index && mkdir -p %s/w && exec 9> %s/.lock && { flock -n 9 || { echo LOCKED; exit 3; }; } && "
                "rm -f %s/s.out %s/f.out %s/s.rc %s/f.rc && git ls-files -co --exclude-standard -z | xargs -0 cp -pP --remove-destination --parents -t %s/w 2>/dev/null; "
-               "cd %s/w && ln -sfn \"$R/unisacc.com\" unisacc.com && { [ -d .git ] || git init -q; } && echo \"$R/.git/objects\" > .git/objects/info/alternates && "
-               "git update-ref HEAD $H && cp \"$R/.git/index\" .git/index && "
+               "cd %s/w && ln -sfn \"$R/unisacc.com\" unisacc.com && { [ -d .git ] || git init -q; } && echo \"$G/objects\" > .git/objects/info/alternates && "
+               "git update-ref HEAD $H && cp \"$I\" .git/index && "
                "sh ./unisacc.com tools/derive.cx -- --plan > /dev/null && { sh ./unisacc.com tools/derive-flow.cx -- --bogus > /dev/null; true; } && "
                "{ (sh ./unisacc.com tools/derive.cx -- --check > %s/s.out; echo $? > %s/s.rc) & "
                "(sh ./unisacc.com tools/derive-flow.cx -- --check > %s/f.out; echo $? > %s/f.rc) & wait; }", d, d, d, d, d, d, d, d, d, d, d, d);
@@ -70,7 +82,7 @@ int main(void) {
     if (!so || !fo) { sy_printf("DERIVE_FLOW_CHECK\tok=%d\tfailed=%d\n", nok, failed); return 1; }
     norm(so, (long)sn, &r, ss, sizeof ss); ns = nl; for (i = 0; i < ns; i++) sl[i] = lines[i];
     norm(fo, (long)fn, &r, fs, sizeof fs);
-    same = ns == nl && ns == 9;
+    same = ns == nl && ns > 0 && ns == want_rows();
     for (i = 0; same && i < ns; i++) if (scmp(sl[i], lines[i]) != 0) same = 0;
     ck(same, "derive-lines-sorted-equal");
     ck(ss[0] && scmp(ss, fs) == 0, "summary-counts-equal");
