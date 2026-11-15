@@ -1,7 +1,7 @@
 /* tools/check-precommit-gates.cx -- tools/precommit.cx gate read sets (tests/precommit-gates.tsv) and the
  * within-one-commit reuse of a gate result (UNISACC_GATE_REUSE, written by tools/commit-own.cx).
  *
- *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse|toolsreg-a|toolsreg-b|toolsreg-c   (five batches, each measured under 35 s)
+ *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases na|reuse|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d   (six batches, each measured under 35 s)
  *   sh ./unisacc.com tools/check-precommit-gates.cx -- --cases toolsreg   (toolsreg-a, -b and -c in one run; not a batch)
  *   sh ./unisacc.com tools/check-precommit-gates.cx -- --bench before|after  (a measurement, not a batch)
  *
@@ -170,6 +170,21 @@ static void group_toolsreg(int part) {
     if (failed) sy_printf("%s\n", out);
 }
 
+/* toolsreg-d: the gate judges the work-tree root, not the cwd.  A fixture repo (GIT_DIR/GIT_WORK_TREE at a scratch
+ * repo with no tests/tools-compile.cx, hook run from this fixture whose cwd has one) with an unregistered new
+ * tools/x.cx is not judged by toolsreg (TOOLSREG skipped=1, no BLOCKED tools-compile); the same unregistered add in
+ * this fixture (its root has tests/tools-compile.cx) is still refused by name. */
+static void group_toolsreg_d(void) {
+    static char out[16384];
+    sh("n=$(mktemp -d) && git -C \"$n\" init -q && mkdir \"$n/tools\" && printf 'int main(void) { return 0; }\\n' > \"$n/tools/x.cx\" && git -C \"$n\" add tools/x.cx;"
+       " GIT_DIR=\"$n/.git\" GIT_WORK_TREE=\"$n\" sh ./unisacc.com tools/precommit.cx > p.out 2>&1; echo NRC=$?; rm -rf \"$n\";"
+       " echo NSKIP=$(grep -c 'TOOLSREG skipped=1' p.out); echo NHARD=$(grep -c 'BLOCKED tools-compile' p.out);"
+       " printf 'int main(void) { return 0; }\\n' > tools/x.cx; git add tools/x.cx; sh ./unisacc.com tools/precommit.cx > p.out 2>&1; echo RRC=$?;"
+       " echo RMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/x.cx' p.out); echo RSKIP=$(grep -c 'TOOLSREG skipped' p.out)", out, sizeof out, 1);
+    ck(has(out, "NSKIP=1\n") && has(out, "NHARD=0\n"), "toolsreg.fixture-repo-unregistered-add-not-judged");
+    ck(has(out, "RRC=1\n") && has(out, "RMSG=1\n") && has(out, "RSKIP=0\n"), "toolsreg.real-repo-unregistered-add-still-refused");
+    if (failed) sy_printf("%s\n", out);
+}
 
 static void bench(const char *which) {
     static char out[8192], c[6000]; int after = tx_eqz(which, "after"), i; long t0;
@@ -193,16 +208,17 @@ int main(int argc, char **argv) {
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
-        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c | --bench before|after\n"); return 2; }
+        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d | --bench before|after\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench"); bench(bn); unlock(); return 0; }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c | --bench before|after\n"); return 2; }
+    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d | --bench before|after\n"); return 2; }
     setup(group);
     if (tx_eqz(group, "na")) group_na();
     else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);
     else if (tx_eqz(group, "toolsreg-a")) group_toolsreg(1);
     else if (tx_eqz(group, "toolsreg-b")) group_toolsreg(2);
     else if (tx_eqz(group, "toolsreg-c")) group_toolsreg(3);
+    else if (tx_eqz(group, "toolsreg-d")) group_toolsreg_d();
     else group_reuse();
     unlock();
     sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
