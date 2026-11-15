@@ -247,6 +247,1003 @@
 (1) F4c"无候选材料报 NOT_APPLICABLE"未实现:tools/s9-shards.cx:139-140 与 tests/cxlib/allsession.cx:550 只按登记 platform 判 NOT_APPLICABLE,没有按材料缺失判的分支。上表 F4c 一行由"未核实"改为"已核未实现"。
 (2) slice-migration-gen 与 streams-material 自 v0.0.67 以来无修复提交(git log 对 tools/slice-migration-gen.cx、tests/check-streams-material.cx 为空);check-streams-material.cx:1 仍声明工作目录 out/streams-material-PID。
 
+## 逐批归类表
+
+cdx只读分诊，2026-11-16。旧根5a071a43df，聚合为 /tmp/v68-s9-daily-5a071a43df/out/daily/aggregate.out。main的s9-triage实跑复核:1159批，PASS202、FAIL124、UNKNOWN743、REFUSED49、NOT_APPLICABLE41。本表逐一覆盖916个FAIL/UNKNOWN/REFUSED；41个NOT_APPLICABLE为范围外，不算失败。旧flow全文现不可读，未以其缺失冒充内容；根内聚合、137片计划、片日志、会话与收据仍可读。未执行旧根批次，未改冻结输入、代码或表。优先插单只在版本树申报tools/pins.tsv两行，并独立提交43378d1a91，不改变本次分诊输入。
+
+修复身份核对基准:main 84d3a23d3f8d20773ae748b4b1b3083c528ffe25，版本分支43378d1a91cba3df920ea6ba69d943f0ec04f027(含426171e5c2补三工具清单及c7795c4171的F2)。合并尚在进行，以下提交以git可见内容和说明核实，不声称已进入尚未生成的新根。
+
+类别互斥:具名修复列已修待复核，旧因保留；其余按材料F4a/b/c、时间窗、真缺陷分类。候选池S未明确列举的材料单列材料待归类。直接超时文案与测量失败是事实，争抢因果、静默移出因果及新根转绿均标推测。full-* OPEN按设计未闭合，放在真缺陷类表示真实未通过，不等于产品回归。没有新根收据的行均不记PASS。
+
+固定输入SHA-256:aggregate.out=6db4725c852b24c8cf821cd98e25fca49f148630a5ba6558735f61fe270410c0；plan.tsv=3ca32c3cd9c50d508bae149f0c644c918f954d9375472b10a10e953c1812f206；materials.tsv=f7c495ad50db14315582c86952d75493ddba01f5f5489ad62fdddc112b42377a。可用main入口复核状态计数:sh ./unisacc.com tools/s9-triage.cx -- /tmp/v68-s9-daily-5a071a43df/out/daily/aggregate.out。--help当前返回unknown-option；实际用法已读工具文件头，未绕开入口。
+
+| 类别 | 批数 |
+|---|---|
+| 时间窗 | 559 |
+| 材料 F4a | 16 |
+| 材料 F4b | 82 |
+| 材料 F4c | 60 |
+| 材料待归类 | 30 |
+| 真缺陷 | 17 |
+| 已修待复核 | 152 |
+| 合计 | 916 |
+
+证据审计:读1232份文件、697份具名receipt，全部697份与session.tsv所记receipt SHA匹配；这是既有产物整理，不重授资格。相对路径均相对旧RUN；日志因果不足的行保守注明推测。
+
+已修待复核不表示该行旧时间窗已消失:若旧因为超时/REFUSED，具名提交只解决该批已知清单、入口或检查缺陷；时间窗仍需新根验证。REFUSED优先按波/收据复核拒绝归类，另缺材料只作第二阻塞保留，不用F4c追溯改标。
+
+与fable汇总的口径差异:本节材料类188批均找到本批具名NOT_AVAIL，直接缺映射优先于同片后来出现的cx-plan/异平台/窗口错误；已实测其中8批缺loader6且同片又有异平台拒绝。本节同时读片.log与片/wave.log，不沿用旧U9的静默假设，也不凭两表差额倒推其它原因；旧119+56=175的汇总原位保留。本表是当前证据重算并按具名修复去重，不把数字变化当新根通过或修复收益。
+
+7f0ca7c7db确实修复materials分组索引性能(提交实跑13.197秒)，但旧affected-tool登记跑的是list、预算25秒，旧证据是窗口不足，不能据此标已修；故它仍列时间窗。该性能修复不补任何材料生产者。
+
+修复索引:e43b97ecbf补清单，4d7c7a48a9同步删旧链接，54a62b656a修130片边界，426171e5c2再补check-s9-f4c/check-s9-triage/s9-triage三个工具(1038源，仍130片)；1c52ddf1aa排异平台；6929ca4d91修模块入口和壳头文案(须重打包产品)；61e730f9d8修pins/argv/graph/frames漂移，43378d1a91补F4c两处占位申报；66505c70d7修watch/prune/BOM及缺tcc诊断；7cf4705e22登记hosttcc；21f95007be补伴随记录并降推荐并发(不证明波窗已消失)；a4990c8a7e仅显式daily无候选且白名单缺映射时NA；d729fae9af、b997444202拆schedule/phases；c7795c4171只增release聚合，不消灭OPEN。
+
+| 批次 | 旧态 | 类别 | 旧因与证据 | 已核修复提交 | 新根预期状态(无实跑不授PASS) |
+|---|---|---|---|---|---|
+| abab-bench | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| adopted-package | UNKNOWN | 材料待归类 | slice-2-127.log/wave.log:缺映射 adopted-package(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| adoption-capture-path | UNKNOWN | 时间窗 | slice-0-31/wave-1/adoption-capture-path.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-drain | UNKNOWN | 时间窗 | slice-0-47/wave-1/affected-drain.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-iface | UNKNOWN | 时间窗 | slice-0-42/wave-1/affected-iface.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-iface2 | UNKNOWN | 时间窗 | slice-0-42/wave-1/affected-iface2.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-list | UNKNOWN | 时间窗 | slice-0-37/wave-1/affected-list.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-list2 | UNKNOWN | 时间窗 | slice-0-37/wave-1/affected-list2.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-run | UNKNOWN | 时间窗 | slice-0-37/wave-1/affected-run.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-tiers | UNKNOWN | 时间窗 | slice-0-37/wave-1/affected-tiers.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| affected-tool | UNKNOWN | 时间窗 | slice-1-72.log/wave.log: insufficient-wave-window；slice-1-72.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| alloc-errno | UNKNOWN | 时间窗 | slice-0-31/wave-1/alloc-errno.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| appendmerge | UNKNOWN | 已修待复核 | slice-1-116/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| archive-mv | UNKNOWN | 时间窗 | slice-0-45/wave-1/archive-mv.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| archive-refs | UNKNOWN | 时间窗 | slice-1-82/wave-1/archive-refs.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| arity-controls | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| arm-encoder-osx-dynamic-bundle | FAIL | 时间窗 | slice-1-107/wave-1/arm-encoder-osx-dynamic-bundle.receipt reason=batch-fail; child_seconds=12; 收据SHA=匹配 | 无专门修复；21f95007be仅缓解 | encoder单跑PASS是旧摸底证据；争抢因果推测，另一批及新根均待复核 |
+| arm-encoder-record-origin | REFUSED | 时间窗 | slice-1-104/wave-1/arm-encoder-record-origin.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| assembler | UNKNOWN | 材料待归类 | slice-1-55.log/wave.log:缺映射 assembler(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| assembler-cache | UNKNOWN | 材料待归类 | slice-1-55.log/wave.log:缺映射 kernels(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| auto-continue | UNKNOWN | 时间窗 | slice-0-50/wave-1/auto-continue.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| autoscan-decl | UNKNOWN | 时间窗 | slice-0-31/wave-1/autoscan-decl.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| bad-package | UNKNOWN | 时间窗 | slice-1-87/wave-1/bad-package.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| batch-cost | UNKNOWN | 时间窗 | slice-0-40/wave-1/batch-cost.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| batch-packages | UNKNOWN | 时间窗 | slice-0-24/wave-1/batch-packages.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| bg-candidate | UNKNOWN | 时间窗 | slice-0-24/wave-1/bg-candidate.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| boot-head-check | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| bound-headroom | UNKNOWN | 时间窗 | slice-0-38/wave-1/bound-headroom.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| bound-rc142 | UNKNOWN | 时间窗 | slice-1-76/wave-1/bound-rc142.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| boundenv-tool | UNKNOWN | 时间窗 | slice-0-47/wave-1/boundenv-tool.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| c-negative | UNKNOWN | 时间窗 | slice-1-68/wave-2/c-negative.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cache-manager-determinism | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| callback-wrapper-index | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-chain | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-chain-lanes | UNKNOWN | 时间窗 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-chain-objects | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-chain-watch | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-identity-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-130.log/wave.log:缺映射 candidate-profile(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| candidate-profile | UNKNOWN | 时间窗 | slice-0-32/wave-1/candidate-profile.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| candidate-qualify | UNKNOWN | 时间窗 | slice-1-87/wave-1/candidate-qualify.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cap-gen | UNKNOWN | 时间窗 | slice-0-40/wave-1/cap-gen.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| capsule-export | FAIL | 已修待复核 | slice-1-71/wave-1/capsule-export.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | 6929ca4d91 | 提交记录该批单跑PASS；新根仍须复核模块入口和产物 |
+| census | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-argv-check | FAIL | 已修待复核 | slice-0-19/wave-1/chain-argv-check.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | 61e730f9d8 | 已修检查/路径漂移，提交称相关批单跑过；新候选资格仍待新根实跑 |
+| chain-argv-check-b | FAIL | 已修待复核 | slice-0-19/wave-1/chain-argv-check-b.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | 61e730f9d8 | 已修检查/路径漂移，提交称相关批单跑过；新候选资格仍待新根实跑 |
+| chain-batchkeys | UNKNOWN | 时间窗 | slice-0-17/wave-1/chain-batchkeys.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-facts | UNKNOWN | 时间窗 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-fixed-point | UNKNOWN | 材料待归类 | slice-2-130.log/wave.log:缺映射 chain-gen1(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| chain-fresh-out | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-pace | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-partition | UNKNOWN | 时间窗 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-phases-gen | UNKNOWN | 时间窗 | slice-0-17/wave-1/chain-phases-gen.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-precheck | UNKNOWN | 时间窗 | slice-1-91/wave-1/chain-precheck.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-ready | UNKNOWN | 时间窗 | slice-0-44/wave-1/chain-ready.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-run | UNKNOWN | 时间窗 | slice-0-18/wave-1/chain-run.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-run-segments | UNKNOWN | 时间窗 | slice-0-19/wave-1/chain-run-segments.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-run-supervise | UNKNOWN | 时间窗 | slice-0-19/wave-1/chain-run-supervise.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-smoke | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-tool-pin | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chain-watch | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chainargv | UNKNOWN | 时间窗 | slice-0-19/wave-1/chainargv.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chainresume | UNKNOWN | 时间窗 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| chainroot | UNKNOWN | 时间窗 | slice-0-41/wave-1/chainroot.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| check-decide | UNKNOWN | 时间窗 | slice-1-85/wave-1/check-decide.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| check-edit-span | UNKNOWN | 时间窗 | slice-1-52/wave-1/check-edit-span.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| check-export | UNKNOWN | 时间窗 | slice-0-44/wave-1/check-export.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| check-limits | UNKNOWN | 时间窗 | slice-0-9/wave-1/check-limits.receipt reason=watchdog-deadline; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| check-win-ffi | UNKNOWN | 时间窗 | slice-0-31/wave-1/check-win-ffi.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ci-collect | UNKNOWN | 时间窗 | slice-0-44/wave-1/ci-collect.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| clock-targets | UNKNOWN | 时间窗 | slice-1-91/wave-1/clock-targets.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| com-tree | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| commit-own | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| commit-own-nolock | UNKNOWN | 时间窗 | slice-1-126.log/wave.log: hard deadline；slice-1-126.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| compile-as-limit | UNKNOWN | 已修待复核 | slice-1-76/wave-1/compile-as-limit.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 6929ca4d91(壳头源码) | 只换源不换a99ea71d产品仍FAIL；须用新ape-pack实际重打包，不能预测PASS |
+| cpu-meter | UNKNOWN | 时间窗 | slice-0-39/wave-1/cpu-meter.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cross-targets-lnx | REFUSED | 时间窗 | slice-1-88/wave-1/cross-targets-lnx.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| cross-targets-osx | REFUSED | 时间窗 | slice-1-88/wave-1/cross-targets-osx.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| cross-targets-win | REFUSED | 时间窗 | slice-1-88/wave-1/cross-targets-win.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| ctestsuite | UNKNOWN | 时间窗 | slice-1-93/wave-1/ctestsuite.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ctor-debt | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-base-external | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| cx-bench-gencode | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| cx-booter-ape | UNKNOWN | 材料待归类 | slice-2-130.log/wave.log:缺映射 booter-raw-elf(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-bounded | UNKNOWN | 时间窗 | slice-0-1.log/wave.log: insufficient-wave-window；slice-0-1.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-codec | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-core-interface | UNKNOWN | 时间窗 | slice-1-70/wave-1/cx-core-interface.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-core-run-diff | UNKNOWN | 材料待归类 | slice-1-70.log/wave.log:缺映射 kernels(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-driver-route | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-e2stream | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-e2stream.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-elf-text | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-elf-text.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-ffi-bytes | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-ffi-bytes.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-funit-host | UNKNOWN | 时间窗 | slice-1-74/wave-1/cx-funit-host.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-host-run | UNKNOWN | 时间窗 | slice-1-74/wave-1/cx-host-run.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-crypto-tls13 | UNKNOWN | 时间窗 | slice-1-74/wave-1/cx-l0-crypto-tls13.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-crypto-x25519 | UNKNOWN | 时间窗 | slice-1-74/wave-1/cx-l0-crypto-x25519.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-fmt | UNKNOWN | 时间窗 | slice-1-71/wave-1/cx-l0-fmt.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-sys | UNKNOWN | 时间窗 | slice-1-71/wave-1/cx-l0-sys.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-sys-net | UNKNOWN | 时间窗 | slice-1-71/wave-1/cx-l0-sys-net.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-sys-new | UNKNOWN | 时间窗 | slice-0-41/wave-1/cx-l0-sys-new.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-sys-sig | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-l0-text-fmt | UNKNOWN | 时间窗 | slice-0-40/wave-1/cx-l0-text-fmt.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-layers | UNKNOWN | 时间窗 | slice-1-74/wave-1/cx-layers.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-library-cache | UNKNOWN | 材料待归类 | slice-1-70.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-library-payload | UNKNOWN | 时间窗 | slice-1-70/wave-1/cx-library-payload.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-lint | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-manifest | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| cx-model-decode | UNKNOWN | 材料待归类 | slice-1-70.log/wave.log:缺映射 p3model-material(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-namespace | UNKNOWN | 时间窗 | slice-0-32/wave-1/cx-namespace.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-npfault | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-npfault.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-os-new | UNKNOWN | 时间窗 | slice-0-41/wave-1/cx-os-new.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-own-check | UNKNOWN | 时间窗 | slice-0-9/wave-1/cx-own-check.receipt reason=watchdog-deadline; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-own-escapes | UNKNOWN | 时间窗 | slice-0-45/wave-1/cx-own-escapes.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-p3-extract | UNKNOWN | 材料待归类 | slice-1-70.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-p3-roundtrip | UNKNOWN | 时间窗 | slice-1-82/wave-1/cx-p3-roundtrip.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-packagefooter | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-procguard | UNKNOWN | 时间窗 | slice-1-78/wave-1/cx-procguard.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-register | UNKNOWN | 材料 F4a | slice-1-80.log/wave.log:缺映射 regprep-dir(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx-resolver | UNKNOWN | 时间窗 | slice-1-83/wave-1/cx-resolver.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-root-identity | FAIL | 已修待复核 | slice-1-81/wave-1/cx-root-identity.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | 21f95007be | 新根须带真实产品build.json并核内容；旧缺伴随文件断言预期恢复(推测)，须实跑 |
+| cx-sbload | UNKNOWN | 时间窗 | slice-0-9/wave-1/cx-sbload.receipt reason=watchdog-deadline; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-stage-lower | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| cx-streamapi | UNKNOWN | 时间窗 | slice-0-41/wave-1/cx-streamapi.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-streamown | UNKNOWN | 时间窗 | slice-0-44/wave-1/cx-streamown.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-streampack | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-streampack.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-sys-netnb | UNKNOWN | 时间窗 | slice-0-44/wave-1/cx-sys-netnb.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-sys-netraw | UNKNOWN | 时间窗 | slice-0-41/wave-1/cx-sys-netraw.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-sys-sigwatch | UNKNOWN | 时间窗 | slice-0-44/wave-1/cx-sys-sigwatch.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-toolsloc | UNKNOWN | 时间窗 | slice-1-81/wave-1/cx-toolsloc.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-unit-graph | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx-unitkey | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx0-bundle | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx0-diff | UNKNOWN | 时间窗 | slice-0-43/wave-1/cx0-diff.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cx0-e2 | UNKNOWN | 材料待归类 | slice-1-53.log/wave.log:缺映射 e2reader(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| cx0-unit | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cxmod-tri | UNKNOWN | 时间窗 | slice-0-43/wave-1/cxmod-tri.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| cxraw-dock | UNKNOWN | 时间窗 | slice-1-85/wave-1/cxraw-dock.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| decode-sbout | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| delta-loader | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| dep-split-probe | UNKNOWN | 已修待复核 | slice-0-11/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| derive | UNKNOWN | 时间窗 | slice-0-43/wave-1/derive.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| dev-product | UNKNOWN | 时间窗 | slice-1-87/wave-1/dev-product.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devsvc | UNKNOWN | 时间窗 | slice-0-49/wave-1/devsvc.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devsvc-core | UNKNOWN | 时间窗 | slice-0-50/wave-1/devsvc-core.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devsvc-flow | UNKNOWN | 时间窗 | slice-0-49/wave-1/devsvc-flow.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devsvc-git | UNKNOWN | 时间窗 | slice-0-50/wave-1/devsvc-git.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devsvc-usage | UNKNOWN | 时间窗 | slice-0-51/wave-1/devsvc-usage.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| devtask | UNKNOWN | 时间窗 | slice-0-50/wave-1/devtask.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| die-lib | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| doc-links-tool | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| doc-pair | UNKNOWN | 时间窗 | slice-0-37/wave-1/doc-pair.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| dock-audit | UNKNOWN | 时间窗 | slice-0-43/wave-1/dock-audit.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| dock-map | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| domain | UNKNOWN | 时间窗 | slice-0-45/wave-1/domain.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| driver-diagnostics | UNKNOWN | 时间窗 | slice-0-2/wave-1/driver-diagnostics.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| driver-token-target | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| e2-input-binding | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| e3-warnings | UNKNOWN | 时间窗 | slice-1-76/wave-1/e3-warnings.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| elf-secdiff | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| elf-x86-image | UNKNOWN | 时间窗 | slice-1-76/wave-1/elf-x86-image.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| encoder-osx-bundle | FAIL | 时间窗 | slice-1-107/wave-1/encoder-osx-bundle.receipt reason=batch-fail; child_seconds=12; 收据SHA=匹配 | 无专门修复；21f95007be仅缓解 | encoder单跑PASS是旧摸底证据；争抢因果推测，另一批及新根均待复核 |
+| encoder-record-origin | REFUSED | 时间窗 | slice-1-103/wave-1/encoder-record-origin.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| encoder-record-osx | REFUSED | 时间窗 | slice-1-104/wave-1/encoder-record-osx.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| enosys-sites | UNKNOWN | 时间窗 | slice-0-42/wave-1/enosys-sites.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| entry-receipt-head | UNKNOWN | 时间窗 | slice-0-17/wave-1/entry-receipt-head.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| evidence-cover | UNKNOWN | 时间窗 | slice-0-39/wave-1/evidence-cover.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| examples-smoke | UNKNOWN | 时间窗 | slice-0-45/wave-1/examples-smoke.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| exitclass | UNKNOWN | 时间窗 | slice-0-38/wave-1/exitclass.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| exitclass-gen | UNKNOWN | 时间窗 | slice-0-38/wave-1/exitclass-gen.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ext-net-tcp | UNKNOWN | 时间窗 | slice-0-41/wave-1/ext-net-tcp.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ext-net-unix | UNKNOWN | 时间窗 | slice-0-43/wave-1/ext-net-unix.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ext-procx-exec | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| facts-current | UNKNOWN | 时间窗 | slice-1-87/wave-1/facts-current.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| fake-gh-contract | UNKNOWN | 时间窗 | slice-0-40/wave-1/fake-gh-contract.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| fixedpoint-sample | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| fixedpoint-sample-v4 | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flow-gen | UNKNOWN | 时间窗 | slice-0-50/wave-1/flow-gen.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flow-tool | UNKNOWN | 时间窗 | slice-1-76/wave-1/flow-tool.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flowdoc | UNKNOWN | 时间窗 | slice-0-50/wave-1/flowdoc.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flowexec | UNKNOWN | 时间窗 | slice-0-49/wave-1/flowexec.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flowfile | UNKNOWN | 时间窗 | slice-0-49/wave-1/flowfile.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| flowrun | UNKNOWN | 时间窗 | slice-0-49/wave-1/flowrun.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats | UNKNOWN | 时间窗 | slice-2-127/wave-2/formats.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats-archive-ar | UNKNOWN | 时间窗 | slice-2-130/wave-3/formats-archive-ar.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats-elf-ape | UNKNOWN | 时间窗 | slice-2-127/wave-2/formats-elf-ape.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats-macho-pe | UNKNOWN | 时间窗 | slice-2-130/wave-3/formats-macho-pe.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats-object-ld | UNKNOWN | 时间窗 | slice-2-130/wave-3/formats-object-ld.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| formats-objects | UNKNOWN | 时间窗 | slice-2-127/wave-2/formats-objects.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| freeze-gate | UNKNOWN | 时间窗 | slice-0-49/wave-1/freeze-gate.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| freeze-plan | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| full-bootstrap | FAIL | 真缺陷 | slice-2-129/wave-1/full-bootstrap.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-candidate | UNKNOWN | 时间窗 | slice-2-130/wave-3/full-candidate.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| full-domain-check | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| full-formats | FAIL | 真缺陷 | slice-2-129/wave-1/full-formats.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-hosts | FAIL | 真缺陷 | slice-2-129/wave-1/full-hosts.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-interfaces | FAIL | 真缺陷 | slice-2-129/wave-1/full-interfaces.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-library | FAIL | 真缺陷 | slice-2-129/wave-1/full-library.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-negative | FAIL | 真缺陷 | slice-2-129/wave-1/full-negative.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-optimization | FAIL | 真缺陷 | slice-2-129/wave-1/full-optimization.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-phase-timing | UNKNOWN | 时间窗 | slice-2-130/wave-3/full-phase-timing.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| full-properties | FAIL | 真缺陷 | slice-2-129/wave-1/full-properties.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-resources | FAIL | 真缺陷 | slice-2-129/wave-1/full-resources.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-ri | FAIL | 真缺陷 | slice-2-129/wave-1/full-ri.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-e1 | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-e1.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-e2 | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-e2.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-e3 | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-e3.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-e4 | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-e4.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-elf | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-elf.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-lower | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-lower.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| full-stream-prune | FAIL | 真缺陷 | slice-2-128/wave-1/full-stream-prune.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | c7795c4171仅修release聚合，未修OPEN | 域闭合OPEN仍FAIL；release独立RELEASE_ONLY不得改成daily QUALIFIED |
+| func-callgraph | UNKNOWN | 时间窗 | slice-1-107/wave-1/func-callgraph.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| g2-budget-gen | UNKNOWN | 时间窗 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| gate-prepare | UNKNOWN | 时间窗 | slice-0-24/wave-1/gate-prepare.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| gh-record | UNKNOWN | 时间窗 | slice-0-39/wave-1/gh-record.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| graph-anchor-route | FAIL | 已修待复核 | slice-0-20/wave-1/graph-anchor-route.receipt reason=batch-fail; child_seconds=14; 收据SHA=匹配 | 61e730f9d8 | 已修检查/路径漂移，提交称相关批单跑过；新候选资格仍待新根实跑 |
+| graph-anchor-structure | FAIL | 已修待复核 | slice-0-20/wave-1/graph-anchor-structure.receipt reason=batch-fail; child_seconds=14; 收据SHA=匹配 | 61e730f9d8 | 已修检查/路径漂移，提交称相关批单跑过；新候选资格仍待新根实跑 |
+| graph-check | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| guard-edit | UNKNOWN | 时间窗 | slice-0-43/wave-1/guard-edit.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| harness-contracts | UNKNOWN | 时间窗 | slice-0-49/wave-1/harness-contracts.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| host-cell | REFUSED | 时间窗 | slice-1-88/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射candidate-sha，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| host-cell-binding | UNKNOWN | 已修待复核 | slice-0-11/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| hosts-same-candidate-lnx-x86_64 | UNKNOWN | 材料待归类 | slice-2-128.log/wave.log:缺映射 hosts-domain-matrix(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| identity | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| identity-derive | REFUSED | 时间窗 | slice-1-92/wave-1/identity-derive.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| iface-gap | UNKNOWN | 时间窗 | slice-0-31/wave-1/iface-gap.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| iface-hash | UNKNOWN | 时间窗 | slice-0-42/wave-1/iface-hash.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| illegal-action | REFUSED | 时间窗 | slice-1-88/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射illegal-action-package，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| image-contrib | UNKNOWN | 时间窗 | slice-1-91/wave-1/image-contrib.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| inc-abspath | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| include-shadow | UNKNOWN | 时间窗 | slice-0-30/wave-1/include-shadow.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| input-refuse | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| install-ape | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| install-fixes | UNKNOWN | 时间窗 | slice-0-30/wave-1/install-fixes.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-patch | UNKNOWN | 时间窗 | slice-1-117/wave-1/integrate-patch.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-patch-affected | UNKNOWN | 时间窗 | slice-1-119/wave-1/integrate-patch-affected.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-patch-land | REFUSED | 时间窗 | slice-1-118/wave-1/integrate-patch-land.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| integrate-patch-preflight-resume | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-patch-preflight-resume.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-patch-preflight-stop | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-patch-preflight-stop.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-patch-prepare-resume | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-patch-prepare-resume.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-cold | UNKNOWN | 时间窗 | slice-1-119/wave-1/integrate-ratchet-cold.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-corrupt | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-ratchet-corrupt.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-hit | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-ratchet-hit.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-input | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-ratchet-input.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-prepare | UNKNOWN | 时间窗 | slice-1-119/wave-1/integrate-ratchet-prepare.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-product | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-ratchet-product.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| integrate-ratchet-tool | UNKNOWN | 时间窗 | slice-1-120/wave-1/integrate-ratchet-tool.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| interface-digest | UNKNOWN | 时间窗 | slice-1-107/wave-1/interface-digest.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| interfaces-lnx-x86_64 | UNKNOWN | 时间窗 | slice-1-53.log/wave.log: insufficient-wave-window；slice-1-53.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| kernel-base | UNKNOWN | 时间窗 | slice-1-87/wave-1/kernel-base.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| kernel-route-coverage | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-encoding | UNKNOWN | 材料 F4a | slice-1-85.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-encoding-arm | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-encoding-x86 | UNKNOWN | 材料 F4a | slice-1-85.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-encoding-x86-a | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-encoding-x86-b | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-object | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-pin-mutation | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-pins | UNKNOWN | 材料 F4a | slice-1-87.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-refusal | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-relocation | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-route-recovery | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| kernel-route-route-refusal | UNKNOWN | 材料 F4a | slice-1-86.log/wave.log:缺映射 kernel-route(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| layer-api | UNKNOWN | 时间窗 | slice-0-20/wave-1/layer-api.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ledger-add | UNKNOWN | 时间窗 | slice-0-40/wave-1/ledger-add.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ledger-parser-compare | UNKNOWN | 时间窗 | slice-0-3/wave-1/ledger-parser-compare.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| libc-decl-scan | UNKNOWN | 时间窗 | slice-0-42/wave-1/libc-decl-scan.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| libc-probes | UNKNOWN | 时间窗 | slice-0-31/wave-1/libc-probes.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| libc99posix | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| libneed-attributes | UNKNOWN | 材料待归类 | slice-1-54.log/wave.log:缺映射 libneed-native(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| library-cells | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| limits-gen | UNKNOWN | 时间窗 | slice-0-30/wave-1/limits-gen.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| link-edge-cases | UNKNOWN | 时间窗 | slice-1-68/wave-2/link-edge-cases.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| link-malformed-input | UNKNOWN | 时间窗 | slice-1-68/wave-2/link-malformed-input.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| link-sourceless-tu | UNKNOWN | 材料待归类 | slice-1-114.log/wave.log:缺映射 sourceless-product(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| link-undefined-function | UNKNOWN | 时间窗 | slice-1-68/wave-2/link-undefined-function.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| links-gen | UNKNOWN | 时间窗 | slice-0-45/wave-1/links-gen.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lit-const | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| loader-common-models | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| loader-common-o2 | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-common-tapecheck | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-common-tokens-lex | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-common-tokens-pp | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-common-units | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-common-warn | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-deployment-binding | UNKNOWN | 已修待复核 | slice-0-11/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| loader-faults | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| loader-isa-start | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| loader-net-replacement | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| loader-special | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| loader-target-image-lnx-arm64 | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-image-osx-arm64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-image-osx-x86_64 | UNKNOWN | 材料 F4b | slice-1-112.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-image-win-arm64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-image-win-x86_64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-models | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| loader-target-object-lnx-arm64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-object-lnx-x86_64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-object-osx-arm64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-object-osx-x86_64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-object-win-arm64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| loader-target-object-win-x86_64 | UNKNOWN | 材料 F4b | slice-1-113.log/wave.log:缺映射 loader6(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| logic-distribution | UNKNOWN | 时间窗 | slice-1-102/wave-1/logic-distribution.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-arm-episodes | REFUSED | 时间窗 | slice-1-104/wave-1/lower-arm-episodes.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| lower-fnreuse | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix | UNKNOWN | 时间窗 | slice-0-47/wave-1/lower-prefix.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-b | UNKNOWN | 时间窗 | slice-0-47/wave-1/lower-prefix-b.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base0 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base0.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base1 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base1.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base2 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base2.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base3 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base3.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base4 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base4.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base5 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base5.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-base6 | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-base6.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-prefix-c | UNKNOWN | 时间窗 | slice-0-48/wave-1/lower-prefix-c.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-row-bundle | UNKNOWN | 时间窗 | slice-1-106/wave-1/lower-row-bundle.receipt reason=watchdog-deadline; child_seconds=15; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| lower-row-episodes | REFUSED | 时间窗 | slice-1-103/wave-1/lower-row-episodes.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| lower-row-origin | REFUSED | 时间窗 | slice-1-103/wave-1/lower-row-origin.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| materials-prepare-controls | UNKNOWN | 已修待复核 | slice-1-112/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| matrix-stale | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| matrix-waive | UNKNOWN | 时间窗 | slice-1-74/wave-1/matrix-waive.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| mem-recovery | UNKNOWN | 时间窗 | slice-1-76/wave-1/mem-recovery.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| model-decode-sha | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| model-image | UNKNOWN | 时间窗 | slice-0-47/wave-1/model-image.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| model-image-cache | UNKNOWN | 时间窗 | slice-0-47/wave-1/model-image-cache.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| model-program-census | UNKNOWN | 时间窗 | slice-1-102/wave-1/model-program-census.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| modelcache-budget-concurrent | UNKNOWN | 时间窗 | slice-1-52/wave-1/modelcache-budget-concurrent.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| modelcache-budget-lru | UNKNOWN | 时间窗 | slice-1-52/wave-1/modelcache-budget-lru.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| modroot-lib | REFUSED | 时间窗 | slice-1-118/wave-1/modroot-lib.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| module-byte-map | REFUSED | 时间窗 | slice-1-103/wave-1/module-byte-map.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| module-byte-map-arm | REFUSED | 时间窗 | slice-1-104/wave-1/module-byte-map-arm.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| module-units | UNKNOWN | 时间窗 | slice-1-85/wave-1/module-units.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| negative-diagnostics | UNKNOWN | 时间窗 | slice-1-62/wave-2/negative-diagnostics.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| negative-hostile | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| negative-model-loader | UNKNOWN | 时间窗 | slice-1-62/wave-2/negative-model-loader.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| negative-model-loader-terminal | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-build-profile | UNKNOWN | 时间窗 | slice-1-108/wave-1/net-build-profile.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-check | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| net-controls | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-deps | UNKNOWN | 时间窗 | slice-1-106/wave-1/net-deps.receipt reason=watchdog-deadline; child_seconds=15; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-deps-ratchet | UNKNOWN | 时间窗 | slice-1-108/wave-1/net-deps-ratchet.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-digest | UNKNOWN | 时间窗 | slice-1-108/wave-1/net-digest.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-dump | UNKNOWN | 时间窗 | slice-1-85/wave-1/net-dump.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| net-incremental-rehearsal | UNKNOWN | 时间窗 | slice-1-108/wave-1/net-incremental-rehearsal.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| netregen-boundary-lnx-arm64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-boundary-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-boundary-osx-arm64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-boundary-osx-x86_64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-boundary-win-arm64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-boundary-win-x86_64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-lnx-arm64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-osx-arm64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-osx-x86_64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-win-arm64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-module-win-x86_64 | UNKNOWN | 材料 F4c | slice-2-133.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-lnx-arm64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-osx-arm64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-osx-x86_64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-win-arm64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-multi-win-x86_64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-lnx-arm64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-osx-arm64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-osx-x86_64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-win-arm64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-nested-win-x86_64 | UNKNOWN | 材料 F4c | slice-2-132.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-lnx-arm64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-lnx-x86_64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-osx-arm64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-osx-x86_64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-win-arm64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| netregen-small-win-x86_64 | UNKNOWN | 材料 F4c | slice-2-131.log/wave.log:缺映射 old-product(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| nets | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| newcx-check | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| nn-inputs | UNKNOWN | 材料待归类 | slice-1-54.log/wave.log:缺映射 source-origin(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| nn-nf-c-byte-report | UNKNOWN | 材料待归类 | slice-2-130.log/wave.log:缺映射 nnc-nets(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| no-out-snap | FAIL | 已修待复核 | slice-1-119/wave-1/no-out-snap.receipt reason=batch-fail; child_seconds=18; 收据SHA=匹配 | 21f95007be | 新根须带真实产品build.json并核内容；旧缺伴随文件断言预期恢复(推测)，须实跑 |
+| notes-fill | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| object-route-directory | UNKNOWN | 已修待复核 | slice-0-12/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| object-source-replay | REFUSED | 时间窗 | slice-1-103/wave-1/object-source-replay.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| object-source-replay-arm64 | REFUSED | 时间窗 | slice-1-103/wave-1/object-source-replay-arm64.receipt reason=identity-changed-during-wave; child_seconds=13; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| object-source-replay-arm64-bounds | REFUSED | 时间窗 | slice-1-104/wave-1/object-source-replay-arm64-bounds.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| object-source-replay-arm64-identity | REFUSED | 时间窗 | slice-1-104/wave-1/object-source-replay-arm64-identity.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| object-source-replay-bounds | REFUSED | 时间窗 | slice-1-104/wave-1/object-source-replay-bounds.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| object-source-replay-identity | REFUSED | 时间窗 | slice-1-104/wave-1/object-source-replay-identity.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| objects-duplicate-definition | UNKNOWN | 时间窗 | slice-1-62/wave-2/objects-duplicate-definition.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-link | UNKNOWN | 时间窗 | slice-2-127/wave-2/objects-link.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-missing-definition | UNKNOWN | 时间窗 | slice-1-62/wave-2/objects-missing-definition.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-mixed-target | UNKNOWN | 时间窗 | slice-1-61/wave-2/objects-mixed-target.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-old-unit-version | UNKNOWN | 时间窗 | slice-1-62/wave-2/objects-old-unit-version.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-unsupported-win-arm64 | UNKNOWN | 时间窗 | slice-1-62/wave-2/objects-unsupported-win-arm64.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| objects-unsupported-win-x86_64 | UNKNOWN | 时间窗 | slice-1-62/wave-2/objects-unsupported-win-x86_64.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| observe-agents | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| on-change | UNKNOWN | 时间窗 | slice-0-45/wave-1/on-change.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| opt-frame4-o1-negative-end | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o1-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o1-negative-eof | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o1-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o1-negative-label | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o1-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o1-positive | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o1-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o2-negative-end | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o2-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o2-negative-eof | UNKNOWN | 材料 F4b | slice-1-115.log/wave.log:缺映射 o2-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o2-negative-label | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o2-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| opt-frame4-o2-positive | UNKNOWN | 材料 F4b | slice-1-114.log/wave.log:缺映射 o2-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-ccdiff | UNKNOWN | 时间窗 | slice-1-68/wave-2/optimization-ccdiff.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-ccdiff-2 | UNKNOWN | 时间窗 | slice-1-68/wave-2/optimization-ccdiff-2.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-ccdiff-3 | UNKNOWN | 时间窗 | slice-1-68/wave-2/optimization-ccdiff-3.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-ccdiff-4 | UNKNOWN | 时间窗 | slice-1-68/wave-2/optimization-ccdiff-4.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-cli | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-closure | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-0 | UNKNOWN | 材料 F4b | slice-1-65.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-1 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-2 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-3 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-4 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-5 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-6 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-7 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-8 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-corpus-9 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| optimization-native | UNKNOWN | 时间窗 | slice-1-61/wave-2/optimization-native.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-run | UNKNOWN | 时间窗 | slice-1-61/wave-2/optimization-run.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| optimization-tape | UNKNOWN | 时间窗 | slice-1-61/wave-2/optimization-tape.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| origin-package | UNKNOWN | 材料待归类 | slice-2-127.log/wave.log:缺映射 source-origin(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| out-gc | UNKNOWN | 时间窗 | slice-1-74/wave-1/out-gc.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| out-writers | UNKNOWN | 时间窗 | slice-0-45/wave-1/out-writers.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| own-diff-tool | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| own-escapes | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| p3-library-api | UNKNOWN | 材料待归类 | slice-1-62.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-library-members | UNKNOWN | 材料待归类 | slice-1-62.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-library-members-cxcodec | UNKNOWN | 材料待归类 | slice-1-62.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-library-members-cxruntime | UNKNOWN | 材料待归类 | slice-1-69.log/wave.log:缺映射 p3-pack-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-member-consume | UNKNOWN | 材料待归类 | slice-2-128.log/wave.log:缺映射 p3-source-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-nn-asm-provenance | UNKNOWN | 材料待归类 | slice-2-128.log/wave.log:缺映射 p3-source-ctx(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| p3-swap | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| pack-srcdir | UNKNOWN | 时间窗 | slice-0-44/wave-1/pack-srcdir.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| package-controls | UNKNOWN | 材料待归类 | slice-1-85.log/wave.log:缺映射 baseline(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| phase-graph | UNKNOWN | 时间窗 | slice-0-42/wave-1/phase-graph.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| phase-times-calc | UNKNOWN | 时间窗 | slice-0-35/wave-1/phase-times-calc.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| phase-timing-external | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| phase-timing-stamps | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pins | FAIL | 已修待复核 | slice-1-81/wave-1/pins.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | 61e730f9d8；43378d1a91(新增F4c占位) | 旧三处及新增F4c两处均申报；pins已实跑failed=0 stale=29，新根仍须复核 |
+| pkg-compile | UNKNOWN | 时间窗 | slice-0-25.log/wave.log: operation-deadline；slice-0-25.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pkg-driver | UNKNOWN | 时间窗 | slice-0-25.log/wave.log: operation-deadline；slice-0-25.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pkg-plan | UNKNOWN | 时间窗 | slice-0-25.log/wave.log: operation-deadline；slice-0-25.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pkg-runtime | UNKNOWN | 时间窗 | slice-0-25.log/wave.log: operation-deadline；slice-0-25.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pkg-stream | UNKNOWN | 时间窗 | slice-0-23/wave-1/pkg-stream.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-cli-includes | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-cli-macros | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-cli-targets | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-differential | UNKNOWN | 时间窗 | slice-1-68/wave-2/pp-differential.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-gold-controls | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-gold-material | UNKNOWN | 时间窗 | slice-0-49/wave-1/pp-gold-material.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-header-locations | UNKNOWN | 时间窗 | slice-1-54.log/wave.log: operation-deadline；slice-1-54.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-negative | UNKNOWN | 时间窗 | slice-1-68/wave-2/pp-negative.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| pp-source-constructed | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| prechain-gate | UNKNOWN | 时间窗 | slice-0-37/wave-1/prechain-gate.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-coverage-block | UNKNOWN | 时间窗 | slice-0-37/wave-1/precommit-coverage-block.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-coverage-pass | UNKNOWN | 时间窗 | slice-0-37/wave-1/precommit-coverage-pass.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-lint-r1-report | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-lint-r2-sep | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-lint-r3-die | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-preview | UNKNOWN | 时间窗 | slice-0-47/wave-1/precommit-preview.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc | UNKNOWN | 时间窗 | slice-1-52/wave-1/precommit-toolsloc.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-baseline-launder | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-broken-baseline | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-indexed-repair | UNKNOWN | 时间窗 | slice-1-108/wave-1/precommit-toolsloc-indexed-repair.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-missing-baseline | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-new-601 | UNKNOWN | 时间窗 | slice-1-108/wave-1/precommit-toolsloc-new-601.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-new-check | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-per-file | UNKNOWN | 时间窗 | slice-1-108/wave-1/precommit-toolsloc-per-file.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source | UNKNOWN | 时间窗 | slice-1-52/wave-1/precommit-toolsloc-source.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-bash | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-entry-registration | UNKNOWN | 时间窗 | slice-1-110/wave-1/precommit-toolsloc-source-entry-registration.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-new-cli | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-shebang | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-source-registration | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-working-batches | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-source-working-check | UNKNOWN | 时间窗 | slice-1-109.log/wave.log: insufficient-wave-window；slice-1-109.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-symlink | UNKNOWN | 时间窗 | slice-1-52/wave-1/precommit-toolsloc-symlink.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-symlink-new-regular | UNKNOWN | 时间窗 | slice-1-110/wave-1/precommit-toolsloc-symlink-new-regular.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| precommit-toolsloc-total-report | UNKNOWN | 时间窗 | slice-1-108/wave-1/precommit-toolsloc-total-report.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| preflight-tool | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| procrun-tool | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| product-map | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| product-map-fx-input | REFUSED | 时间窗 | slice-1-118/wave-1/product-map-fx-input.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| product-map-fx-prd-red | REFUSED | 时间窗 | slice-1-118/wave-1/product-map-fx-prd-red.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| product-map-fx-prd-restore | REFUSED | 时间窗 | slice-1-118/wave-1/product-map-fx-prd-restore.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| product-map-fx-unrelated | REFUSED | 时间窗 | slice-1-118/wave-1/product-map-fx-unrelated.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| productpkg-dir-identity | UNKNOWN | 时间窗 | slice-0-24/wave-1/productpkg-dir-identity.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| properties | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| properties-cases-bound | UNKNOWN | 时间窗 | slice-1-65/wave-2/properties-cases-bound.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| properties-cases-det | UNKNOWN | 时间窗 | slice-1-65/wave-2/properties-cases-det.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| properties-cases-layout-len12 | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-0 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-1 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-2 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-3 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-4 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-layout-len3-5 | UNKNOWN | 材料 F4b | slice-1-67.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-lower | UNKNOWN | 材料 F4b | slice-1-65.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-meta | UNKNOWN | 时间窗 | slice-1-65/wave-2/properties-cases-meta.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| properties-cases-random | UNKNOWN | 材料 F4b | slice-1-66.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| properties-cases-tu | UNKNOWN | 时间窗 | slice-1-65/wave-2/properties-cases-tu.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| prune-identity | UNKNOWN | 时间窗 | slice-0-48/wave-1/prune-identity.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| qsort-intro | UNKNOWN | 时间窗 | slice-0-41/wave-1/qsort-intro.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| random-expr | UNKNOWN | 已修待复核 | slice-1-93/wave-1/random-expr.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 66505c70d7 + 7cf4705e22 | 无tcc则材料准备HOST_TOOL_MISSING/DEFERRED；s9未备材料仍UNKNOWN；不得NA或替换gcc/clang |
+| ratchet-read-audit | UNKNOWN | 时间窗 | slice-1-120/wave-1/ratchet-read-audit.receipt reason=watchdog-deadline; child_seconds=9; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ratchets-tool | UNKNOWN | 时间窗 | slice-1-71/wave-1/ratchets-tool.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| rb-opguard | UNKNOWN | 时间窗 | slice-0-45/wave-1/rb-opguard.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| real-input-check | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| rechunk | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| refactor-inject | UNKNOWN | 时间窗 | slice-1-85/wave-1/refactor-inject.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| refusals-gen | UNKNOWN | 时间窗 | slice-0-42/wave-1/refusals-gen.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| reg-manifest | UNKNOWN | 时间窗 | slice-0-40/wave-1/reg-manifest.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| register-args | UNKNOWN | 时间窗 | slice-1-106/wave-1/register-args.receipt reason=watchdog-deadline; child_seconds=15; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| register-metadata-rollback | UNKNOWN | 已修待复核 | slice-0-11/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| register-root-preflight | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| reject-locate | UNKNOWN | 时间窗 | slice-1-85/wave-1/reject-locate.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| rel | UNKNOWN | 时间窗 | slice-0-50/wave-1/rel.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-assetguard | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-assetguard-export | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-assetguard-export-missing | UNKNOWN | 时间窗 | slice-1-126.log/wave.log: hard deadline；slice-1-126.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-assetguard-refuse | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-assetguard-resume | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-ctor | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-ctor-invalid | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-ctor-missing | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-ctor-positive | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-duplicate-init | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-binding | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-binding-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-checker | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-epoch | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-guard-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-models | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-models-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-resources | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-missing-resources-proof | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-nets-alias | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-out-alias | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-root-alias | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-run-alias | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-source-changed | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-binding | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-binding-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-checker | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-epoch | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-guard-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-models | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-models-proof | UNKNOWN | 材料 F4c | slice-2-135.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-resources | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-ctor-tamper-resources-proof | UNKNOWN | 材料 F4c | slice-2-136.log/wave.log:缺映射 release-ctor-location(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-decide | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-dispatch | UNKNOWN | 时间窗 | slice-0-30/wave-1/release-dispatch.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-exec | UNKNOWN | 时间窗 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-exec-ystep | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-layout | REFUSED | 时间窗 | slice-1-92/wave-1/release-layout.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| release-oneshot | UNKNOWN | 时间窗 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-prepare | UNKNOWN | 时间窗 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-run | UNKNOWN | 材料 F4c | slice-2-134.log/wave.log:缺映射 release-fixture(具名NOT_AVAIL) | a4990c8a7e(条件处理) | 有效封存daily-no-candidate声明和材料表、无候选且白名单材料未映射才NA；有候选/release/缺表仍UNKNOWN或REFUSED |
+| release-sweep | UNKNOWN | 时间窗 | slice-0-20/wave-1/release-sweep.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-usage | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-version | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| release-version-pack | UNKNOWN | 时间窗 | slice-1-117/wave-1/release-version-pack.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| releaseversion | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| relload | UNKNOWN | 时间窗 | slice-0-49/wave-1/relload.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| relscan | UNKNOWN | 时间窗 | slice-0-50/wave-1/relscan.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| relsha-lib | REFUSED | 时间窗 | slice-1-118/wave-1/relsha-lib.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| relstore | UNKNOWN | 时间窗 | slice-0-50/wave-1/relstore.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| report-verify-tool | UNKNOWN | 已修待复核 | slice-0-11/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| resources | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| resources-limits | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ri-capture | UNKNOWN | 材料待归类 | slice-1-58.log/wave.log:缺映射 ri-capture(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-fiforeceipt | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-missingnet | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-nnflip | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-receiptflip | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-symlinknet | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-tableflip | UNKNOWN | 材料 F4b | slice-1-61.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-chain-valid | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-chain(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-consumers | UNKNOWN | 材料待归类 | slice-1-58.log/wave.log:缺映射 ri-consumers(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-data-declared-empty-remove | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-data-extra-empty | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-e3-absent | UNKNOWN | 材料 F4b | slice-1-58.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-e3-empty | UNKNOWN | 材料 F4b | slice-1-58.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-e3-missing | UNKNOWN | 材料 F4b | slice-1-58.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-e3-to-lower | UNKNOWN | 材料 F4b | slice-1-58.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-closure-field | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-elf-flip | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-final-flip | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-old-v1 | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-pending-flip | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-recompile | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-reseal | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-unsealed | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-flow-profile-valid | UNKNOWN | 材料 F4b | slice-1-59.log/wave.log:缺映射 ri-flow-runtime(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-image-multi | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ri-image-single | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ri-material-control-valid | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-corrupt-flags-receipt | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-corrupt-runtime | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-fifo-receipt | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-missing-native-receipt | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-native-byte-flip | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-native-missing-include | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-material-symlink-native | UNKNOWN | 材料 F4b | slice-1-60.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-multi | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ri-standalone | UNKNOWN | 材料 F4b | slice-1-58.log/wave.log:缺映射 ri-cli(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| ri-trace | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| ri-trace-output | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| rollup-open | UNKNOWN | 时间窗 | slice-1-87/wave-1/rollup-open.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| root-canon | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| root-independent | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| route-chains | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| rt-linkage | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| run-comm | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射run-comm-new，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| run-reserve | FAIL | 已修待复核 | slice-1-76/wave-1/run-reserve.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | 6929ca4d91(壳头源码) | 只换源不换a99ea71d产品仍FAIL；须用新ape-pack实际重打包，不能预测PASS |
+| run-startup-bench | UNKNOWN | 时间窗 | slice-0-45/wave-1/run-startup-bench.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| run-tape | UNKNOWN | 时间窗 | slice-0-31/wave-1/run-tape.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| run-tmpfile | REFUSED | 时间窗 | slice-1-88/wave-1/run-tmpfile.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| runner-faults | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| runneridentity | UNKNOWN | 时间窗 | slice-0-47/wave-1/runneridentity.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| runnerprep | UNKNOWN | 时间窗 | slice-0-18/wave-1/runnerprep.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s8c-bind | REFUSED | 时间窗 | slice-1-92/wave-1/s8c-bind.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| s9-agg-parts | UNKNOWN | 时间窗 | slice-0-18/wave-1/s9-agg-parts.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-native | UNKNOWN | 时间窗 | slice-0-15.log/wave.log: operation-deadline；slice-0-15.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-limits | UNKNOWN | 时间窗 | slice-0-17/wave-1/s9-nightly-limits.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-materials | UNKNOWN | 时间窗 | slice-0-47/wave-1/s9-nightly-materials.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-phases | UNKNOWN | 已修待复核 | slice-0-18/wave-1/s9-nightly-phases.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | d729fae9af + b997444202 | 11组注册实跑最长33.863秒；shared/platform须真实all-waves-tool材料及SHA，缺失拒绝 |
+| s9-nightly-resume | UNKNOWN | 时间窗 | slice-0-18/wave-1/s9-nightly-resume.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-run | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-run-fail | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-run-pass | UNKNOWN | 时间窗 | slice-0-18/wave-1/s9-nightly-run-pass.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-nightly-tiers | UNKNOWN | 时间窗 | slice-0-17/wave-1/s9-nightly-tiers.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-profile | UNKNOWN | 时间窗 | slice-0-39/wave-1/s9-profile.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-release-tier | UNKNOWN | 时间窗 | slice-1-119/wave-1/s9-release-tier.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-root | UNKNOWN | 时间窗 | slice-0-49/wave-1/s9-root.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-shards-flow | UNKNOWN | 时间窗 | slice-0-51/wave-1/s9-shards-flow.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-shards-identity | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-shards-identity-sid | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-shards-inputs | UNKNOWN | 已修待复核 | slice-0-12/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| s9-shards-schedule | UNKNOWN | 已修待复核 | slice-1-117/wave-1/s9-shards-schedule.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | d729fae9af + b997444202 | 11组注册实跑最长33.863秒；shared/platform须真实all-waves-tool材料及SHA，缺失拒绝 |
+| s9-verdict | UNKNOWN | 时间窗 | slice-0-44/wave-1/s9-verdict.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| s9-worker-smoke | UNKNOWN | 时间窗 | slice-1-119/wave-1/s9-worker-smoke.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| safedel-chains | UNKNOWN | 时间窗 | slice-0-41/wave-1/safedel-chains.receipt reason=watchdog-deadline; child_seconds=20; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sessionroot | UNKNOWN | 时间窗 | slice-0-40/wave-1/sessionroot.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sha-memo-chain | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| shared-frames | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| signal-targets | UNKNOWN | 时间窗 | slice-1-91/wave-1/signal-targets.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sim-state-frame-edges | REFUSED | 时间窗 | slice-1-104/wave-1/sim-state-frame-edges.receipt reason=identity-changed-during-wave; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| sizeof-postfix-positive | UNKNOWN | 时间窗 | slice-0-32/wave-1/sizeof-postfix-positive.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sizeof-postfix-refusal | UNKNOWN | 时间窗 | slice-0-32/wave-1/sizeof-postfix-refusal.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| skill-cx | REFUSED | 时间窗 | slice-1-88/wave-1/skill-cx.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-freeze-tool | UNKNOWN | 材料 F4a | slice-1-90.log/wave.log:缺映射 regprep-dir(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| slice-inventory | UNKNOWN | 材料 F4a | slice-1-91.log/wave.log:缺映射 regprep-dir(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| slice-inventory-identity | REFUSED | 时间窗 | slice-1-103/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射regprep-dir，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-inventory-mapping | REFUSED | 时间窗 | slice-1-103/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射regprep-dir，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-inventory-root | REFUSED | 时间窗 | slice-1-104/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射regprep-dir，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-inventory-source | REFUSED | 时间窗 | slice-1-103/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射regprep-dir，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-inventory-target | REFUSED | 时间窗 | slice-1-103/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射regprep-dir，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| slice-migration-gen | UNKNOWN | 已修待复核 | slice-1-93/wave-1/slice-migration-gen.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 61e730f9d8 | 已修检查/路径漂移，提交称相关批单跑过；新候选资格仍待新根实跑 |
+| snap-residue | UNKNOWN | 时间窗 | slice-0-38/wave-1/snap-residue.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| snap-tool-drift | UNKNOWN | 时间窗 | slice-0-38/wave-1/snap-tool-drift.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| snapshot-run-tool | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| snapshots | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| snapshots-cx | UNKNOWN | 时间窗 | slice-1-52/wave-1/snapshots-cx.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-anchor-controls | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-anchor-legacy-g2 | UNKNOWN | 时间窗 | slice-1-125.log/wave.log: hard deadline；slice-1-125.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-bom | UNKNOWN | 已修待复核 | slice-1-91/wave-1/source-bom.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 66505c70d7 | 已修自重入/归档路径/tape同路径对比；新根须实跑 |
+| source-ident-helper | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-ident-helper-missing | UNKNOWN | 时间窗 | slice-0-17/wave-1/source-ident-helper-missing.receipt reason=watchdog-deadline; child_seconds=44; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-job-count | UNKNOWN | 时间窗 | slice-0-30/wave-1/source-job-count.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-job-union | UNKNOWN | 材料待归类 | slice-2-127.log/wave.log:缺映射 source-job-context(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| source-package-mixed-profiles | UNKNOWN | 时间窗 | slice-0-32/wave-1/source-package-mixed-profiles.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| source-recorded-jobs | UNKNOWN | 材料待归类 | slice-2-127.log/wave.log:缺映射 source-job-context(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| speed-probe | UNKNOWN | 时间窗 | slice-1-81/wave-1/speed-probe.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| st-gap-gen | UNKNOWN | 时间窗 | slice-0-44/wave-1/st-gap-gen.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stable-eval | UNKNOWN | 时间窗 | slice-0-31/wave-1/stable-eval.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stable-gaps | UNKNOWN | 时间窗 | slice-0-38/wave-1/stable-gaps.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stages | UNKNOWN | 时间窗 | slice-1-87/wave-1/stages.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stale-tool | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| state-gen | UNKNOWN | 时间窗 | slice-0-45/wave-1/state-gen.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| status | UNKNOWN | 时间窗 | slice-0-43/wave-1/status.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| std-surface-v2 | UNKNOWN | 时间窗 | slice-0-32/wave-1/std-surface-v2.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stdio | UNKNOWN | 时间窗 | slice-1-77/wave-1/stdio.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stdio-buffer | UNKNOWN | 时间窗 | slice-0-41/wave-1/stdio-buffer.receipt reason=watchdog-deadline; child_seconds=21; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stdio-crossunit | UNKNOWN | 时间窗 | slice-1-87/wave-1/stdio-crossunit.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| step-budget | UNKNOWN | 时间窗 | slice-0-31/wave-1/step-budget.receipt reason=watchdog-deadline; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-cells | REFUSED | 时间窗 | slice-1-88/wave-1/stream-cells.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| stream-e1-independent | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e1-lex-bytes | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e1-lex-refusals | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e1-lex-tokens | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e2-domain-positive | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e2-domain-refusal | UNKNOWN | 时间窗 | slice-1-63.log/wave.log: insufficient-wave-window；slice-1-63.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e2-independent | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e2-pp-gold-linux | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-gold | UNKNOWN | 时间窗 | slice-1-74/wave-1/stream-e3-gold.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-independent | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-pos | UNKNOWN | 时间窗 | slice-1-74/wave-1/stream-e3-pos.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-ref | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-scope | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e3-unmap | UNKNOWN | 时间窗 | slice-1-75.log/wave.log: insufficient-wave-window；slice-1-75.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-independent | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-io | UNKNOWN | 时间窗 | slice-1-69/wave-2/stream-e4-io.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-io-cc | UNKNOWN | 材料 F4b | slice-1-69.log/wave.log:缺映射 streams-cc(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| stream-e4-o1 | UNKNOWN | 材料待归类 | slice-1-69.log/wave.log:缺映射 streams-o1(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| stream-e4-o2 | UNKNOWN | 材料 F4b | slice-1-65.log/wave.log:缺映射 ref(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| stream-e4-opinfo-0 | UNKNOWN | 时间窗 | slice-1-65/wave-2/stream-e4-opinfo-0.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-opinfo-1 | UNKNOWN | 时间窗 | slice-1-65/wave-2/stream-e4-opinfo-1.receipt reason=watchdog-deadline; child_seconds=11; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-0 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-1 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-2 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-3 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-4 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-5 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-6 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-peep-7 | UNKNOWN | 时间窗 | slice-1-64.log/wave.log: insufficient-wave-window；slice-1-64.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-e4-semantics | UNKNOWN | 时间窗 | slice-1-69/wave-2/stream-e4-semantics.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-elf-independent | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-domain-format | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-domain-input | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-domain-layout-plain | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-domain-layout-redef | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-domain-refusals | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-independent | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-target-lnx-arm64 | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-target-osx-arm64 | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-target-osx-x86_64 | UNKNOWN | 时间窗 | slice-1-56.log/wave.log: insufficient-wave-window；slice-1-56.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-target-win-arm64 | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-lower-target-win-x86_64 | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-model-identity | UNKNOWN | 时间窗 | slice-1-67/wave-2/stream-model-identity.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-pipe | UNKNOWN | 时间窗 | slice-1-87/wave-1/stream-pipe.receipt reason=watchdog-deadline; child_seconds=18; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-prune-cases | FAIL | 已修待复核 | slice-1-65/wave-2/stream-prune-cases.receipt reason=batch-fail; child_seconds=11; 收据SHA=匹配 | 66505c70d7 | 已修自重入/归档路径/tape同路径对比；新根须实跑 |
+| stream-prune-independent | UNKNOWN | 时间窗 | slice-1-57.log/wave.log: insufficient-wave-window；slice-1-57.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-prune-io | UNKNOWN | 时间窗 | slice-1-69/wave-2/stream-prune-io.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-prune-io-cc | UNKNOWN | 材料 F4b | slice-1-69.log/wave.log:缺映射 streams-cc(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| stream-prune-library | UNKNOWN | 材料待归类 | slice-1-69.log/wave.log:缺映射 streams-cc2(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| stream-prune-route | UNKNOWN | 时间窗 | slice-0-2/wave-1/stream-prune-route.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-prune-semantics | UNKNOWN | 时间窗 | slice-1-69/wave-2/stream-prune-semantics.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| stream-target | UNKNOWN | 时间窗 | slice-1-91/wave-1/stream-target.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| streams | UNKNOWN | 时间窗 | slice-1-55.log/wave.log: bound timeout；slice-1-55.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| streams-material | REFUSED | 时间窗 | slice-1-88/wave-1/streams-material.receipt reason=identity-changed-during-wave; child_seconds=19; 收据SHA=匹配 | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| submit-patch | UNKNOWN | 时间窗 | slice-0-16.log/wave.log: after-measurement-failed sid-measurement；测量失败实测，争抢/超时因果推测；slice-0-16.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| surface-doc-gen | UNKNOWN | 时间窗 | slice-0-38/wave-1/surface-doc-gen.receipt reason=watchdog-deadline; child_seconds=17; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sweep-plan | UNKNOWN | 时间窗 | slice-0-44/wave-1/sweep-plan.receipt reason=watchdog-deadline; child_seconds=10; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sy-tmpdir | UNKNOWN | 时间窗 | slice-1-90.log/wave.log: insufficient-wave-window；slice-1-90.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| symindex-tool | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| sys-reslive | UNKNOWN | 时间窗 | slice-0-46.log/wave.log: insufficient-wave-window；slice-0-46.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tables-gen | UNKNOWN | 时间窗 | slice-0-40/wave-1/tables-gen.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tape-neg | UNKNOWN | 时间窗 | slice-1-73.log/wave.log: bound timeout；slice-1-73.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tapebin-consumer | UNKNOWN | 材料 F4b | slice-2-134.log/wave.log:缺映射 before-checker(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| tbin-wiring | UNKNOWN | 时间窗 | slice-1-77/wave-1/tbin-wiring.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| test-loader-com | REFUSED | 时间窗 | slice-1-92/wave.log:after-measurement-failed sid-measurement；本批无收据，波级拒绝连带；另缺映射loader6，不能覆盖旧REFUSED | 21f95007be(仅缓解) | 旧REFUSED不追溯改标；测量失败因果与新根终态待复核，降并发收益为推测 |
+| testplan-controls | UNKNOWN | 时间窗 | slice-0-32/wave-1/testplan-controls.receipt reason=watchdog-deadline; child_seconds=23; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-assert-bag | UNKNOWN | 时间窗 | slice-0-33/wave-1/tlib-assert-bag.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-base | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-batch | UNKNOWN | 时间窗 | slice-0-27/wave-1/tlib-batch.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-ext-memx | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-ext-sysx | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-ext-textx | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-frozen | UNKNOWN | 时间窗 | slice-0-29/wave-1/tlib-frozen.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-kit | UNKNOWN | 时间窗 | slice-0-25.log/wave.log: operation-deadline；slice-0-25.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlib-prep | UNKNOWN | 时间窗 | slice-0-21.log/wave.log: operation-deadline；slice-0-21.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tlibpkg | UNKNOWN | 时间窗 | slice-0-20/wave-1/tlibpkg.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tool-index | UNKNOWN | 时间窗 | slice-0-42/wave-1/tool-index.receipt reason=watchdog-deadline; child_seconds=28; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tool-inventory | UNKNOWN | 时间窗 | slice-1-108/wave-1/tool-inventory.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tools-compile-000 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-000.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-001 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-001.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-002 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-002.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-003 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-003.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-004 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-004.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-005 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-005.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-006 | UNKNOWN | 已修待复核 | slice-1-93/wave-1/tools-compile-006.receipt reason=watchdog-deadline; child_seconds=12; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-007 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-007.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-008 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-008.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-009 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-009.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-010 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-010.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-011 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-011.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-012 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-012.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-013 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-013.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-014 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-014.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-015 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-015.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-016 | FAIL | 已修待复核 | slice-1-94/wave-1/tools-compile-016.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-017 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-017.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-018 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-018.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-019 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-019.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-020 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-020.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-021 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-021.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-022 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-022.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-023 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-023.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-024 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-024.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-025 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-025.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-026 | FAIL | 已修待复核 | slice-1-95/wave-1/tools-compile-026.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-027 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-027.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-028 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-028.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-029 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-029.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-030 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-030.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-031 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-031.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-032 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-032.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-033 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-033.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-034 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-034.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-035 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-035.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-036 | FAIL | 已修待复核 | slice-1-96/wave-1/tools-compile-036.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-037 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-037.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-038 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-038.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-039 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-039.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-040 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-040.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-041 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-041.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-042 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-042.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-043 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-043.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-044 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-044.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-045 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-045.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-046 | FAIL | 已修待复核 | slice-1-97/wave-1/tools-compile-046.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-047 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-047.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-048 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-048.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-049 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-049.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-050 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-050.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-051 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-051.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-052 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-052.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-053 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-053.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-054 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-054.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-055 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-055.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-056 | FAIL | 已修待复核 | slice-1-98/wave-1/tools-compile-056.receipt reason=batch-fail; child_seconds=23; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-057 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-057.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-058 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-058.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-059 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-059.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-060 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-060.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-061 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-061.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-062 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-062.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-063 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-063.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-064 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-064.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-065 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-065.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-066 | FAIL | 已修待复核 | slice-1-99/wave-1/tools-compile-066.receipt reason=batch-fail; child_seconds=24; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-067 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-067.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-068 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-068.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-069 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-069.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-070 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-070.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-071 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-071.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-072 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-072.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-073 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-073.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-074 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-074.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-075 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-075.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-076 | FAIL | 已修待复核 | slice-1-100/wave-1/tools-compile-076.receipt reason=batch-fail; child_seconds=21; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-077 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-077.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-078 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-078.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-079 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-079.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-080 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-080.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-081 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-081.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-082 | FAIL | 已修待复核 | slice-1-101/wave-1/tools-compile-082.receipt reason=batch-fail; child_seconds=22; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-083 | FAIL | 已修待复核 | slice-1-117/wave-1/tools-compile-083.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-084 | FAIL | 已修待复核 | slice-1-117/wave-1/tools-compile-084.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-085 | FAIL | 已修待复核 | slice-1-117/wave-1/tools-compile-085.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-086 | FAIL | 已修待复核 | slice-1-117/wave-1/tools-compile-086.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-087 | FAIL | 已修待复核 | slice-1-117/wave-1/tools-compile-087.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-088 | REFUSED | 已修待复核 | slice-1-118/wave-1/tools-compile-088.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-089 | REFUSED | 已修待复核 | slice-1-118/wave-1/tools-compile-089.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-090 | REFUSED | 已修待复核 | slice-1-118/wave-1/tools-compile-090.receipt reason=identity-changed-during-wave; child_seconds=10; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-091 | FAIL | 已修待复核 | slice-1-119/wave-1/tools-compile-091.receipt reason=batch-fail; child_seconds=18; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-092 | FAIL | 已修待复核 | slice-1-120/wave-1/tools-compile-092.receipt reason=batch-fail; child_seconds=9; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-093 | FAIL | 已修待复核 | slice-1-121/wave-2/tools-compile-093.receipt reason=batch-fail; child_seconds=5; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-094 | UNKNOWN | 已修待复核 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-095 | UNKNOWN | 已修待复核 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-096 | UNKNOWN | 已修待复核 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-097 | UNKNOWN | 已修待复核 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-098 | UNKNOWN | 已修待复核 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-099 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-099.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-100 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-100.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-101 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-101.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-102 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-102.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-103 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-103.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-104 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-104.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-105 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-105.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-106 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-106.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-107 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-107.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-108 | FAIL | 已修待复核 | slice-1-123/wave-1/tools-compile-108.receipt reason=batch-fail; child_seconds=25; 收据SHA=匹配 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-109 | UNKNOWN | 已修待复核 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-110 | UNKNOWN | 已修待复核 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-111 | UNKNOWN | 已修待复核 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-112 | UNKNOWN | 已修待复核 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-compile-113 | UNKNOWN | 已修待复核 | slice-1-124.log/wave.log: operation-deadline；slice-1-124.done rc=3 | e43b97ecbf + 4d7c7a48a9 + 54a62b656a + 426171e5c2 | 清单补齐至1038源、130片边界对齐；须逐片重跑，不能把三片样本外推全绿 |
+| tools-default-regression | UNKNOWN | 材料 F4b | slice-1-115.log/wave.log:缺映射 old-checker(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| tools-inventory-boundaries | UNKNOWN | 时间窗 | slice-1-101/wave-1/tools-inventory-boundaries.receipt reason=watchdog-deadline; child_seconds=22; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tsv-lint | UNKNOWN | 时间窗 | slice-1-91/wave-1/tsv-lint.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| tsvx-merge3 | UNKNOWN | 已修待复核 | slice-0-12/wave.log:异平台批拒绝连带本批 | 1c52ddf1aa | 本机批不再受该异平台批拖累(推测)，仍须实跑；异平台独立NOT_APPLICABLE |
+| ucn-identities | UNKNOWN | 时间窗 | slice-0-0/wave-1/ucn-identities.receipt reason=watchdog-deadline; child_seconds=16; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| uninit-scan | UNKNOWN | 时间窗 | slice-1-91/wave-1/uninit-scan.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unipp2-reference | UNKNOWN | 材料待归类 | slice-1-114.log/wave.log:缺映射 newpp-run(具名NOT_AVAIL) | 未核到对应修复 | 若新映射仍缺此材料则UNKNOWN；生产者和实际准备须逐族确认，不能记PASS |
+| unit-boundary | UNKNOWN | 时间窗 | slice-1-85/wave-1/unit-boundary.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-budget | UNKNOWN | 时间窗 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-concurrent | UNKNOWN | 时间窗 | slice-1-122.log/wave.log: bound timeout；slice-1-122.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-equiv0 | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-equiv0.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-equiv1 | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-equiv1.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-equiv2 | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-equiv2.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-equiv3 | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-equiv3.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-equiv4 | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-equiv4.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-neg | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-neg.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-race | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-race.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-stderr | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-stderr.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| unit-frontcache-switch | UNKNOWN | 时间窗 | slice-1-121/wave-2/unit-frontcache-switch.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| use-path | UNKNOWN | 时间窗 | slice-1-74/wave-1/use-path.receipt reason=watchdog-deadline; child_seconds=8; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| user-malloc-null | UNKNOWN | 时间窗 | slice-0-33/wave-1/user-malloc-null.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| utf8-net | UNKNOWN | 已修待复核 | slice-1-84/wave.log:cx-plan拒check-utf8.cx，连带本批 | 6929ca4d91 | 旧utf8模块入口阻塞已修，仍须新根实跑，非现成PASS |
+| version-inject | UNKNOWN | 时间窗 | slice-0-14.log/wave.log: sid-measurement；slice-0-14.done rc=2 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| version-metrics | UNKNOWN | 时间窗 | slice-0-19/wave-1/version-metrics.receipt reason=watchdog-deadline; child_seconds=24; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| watch-bundle | FAIL | 已修待复核 | slice-1-106/wave-1/watch-bundle.receipt reason=batch-fail; child_seconds=15; 收据SHA=匹配 | 66505c70d7 | 已修自重入/归档路径/tape同路径对比；新根须实跑 |
+| whole-front | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| whole-front-wiring | UNKNOWN | 时间窗 | slice-0-20/wave-1/whole-front-wiring.receipt reason=watchdog-deadline; child_seconds=14; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| whole-o-deadline | UNKNOWN | 已修待复核 | slice-1-108/wave-1/whole-o-deadline.receipt reason=watchdog-deadline; child_seconds=5; 收据SHA=匹配 | 21f95007be | 新根须带真实产品build.json并核内容；旧缺伴随文件断言预期恢复(推测)，须实跑 |
+| wholefrontmerge | UNKNOWN | 时间窗 | slice-0-13.log/wave.log: operation-deadline；slice-0-13.done rc=3 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| win-argv | UNKNOWN | 时间窗 | slice-1-91/wave-1/win-argv.receipt reason=watchdog-deadline; child_seconds=6; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| win-arm64-fixedpoint-controls | UNKNOWN | 时间窗 | slice-2-130/wave-3/win-arm64-fixedpoint-controls.receipt reason=watchdog-deadline; child_seconds=3; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| workspace-plan | UNKNOWN | 时间窗 | slice-0-33/wave-1/workspace-plan.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| wt-gate-clean | UNKNOWN | 时间窗 | slice-1-89/wave-1/wt-gate-clean.receipt reason=watchdog-deadline; child_seconds=26; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+| y-oracle | UNKNOWN | 时间窗 | slice-1-117/wave-1/y-oracle.receipt reason=watchdog-deadline; child_seconds=25; 收据SHA=匹配 | 21f95007be(仅缓解) | 降并发可能改善(推测)，没有整轮证据；仍可能UNKNOWN/REFUSED或暴露FAIL |
+
+范围外41批另列，不计入916个未通过项；新根继续按平台判NOT_APPLICABLE，不冒充PASS。1c52ddf1aa补的是计划和波选择，避免再拖垮同片本机批。
+
+| 批次 | 旧态 | 登记平台 | 新根预期 |
+|---|---|---|---|
+| ape-cache-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| ape-cache-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| arm64-cx-sys-netmsg | NOT_APPLICABLE | lnx/arm64 | NOT_APPLICABLE，仍非PASS |
+| arm64-cx-sys-netnb | NOT_APPLICABLE | lnx/arm64 | NOT_APPLICABLE，仍非PASS |
+| arm64-cx-sys-sigwatch | NOT_APPLICABLE | lnx/arm64 | NOT_APPLICABLE，仍非PASS |
+| arm64-ext-net-unix | NOT_APPLICABLE | lnx/arm64 | NOT_APPLICABLE，仍非PASS |
+| driver-default-tape-osx | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| driver-default-tape-osx-multi | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| macos-signing-interface | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-osx-arm64-mixed-target | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-osx-arm64-old-unit-version | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-osx-x86_64-mixed-target | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-osx-x86_64-old-unit-version | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-unsupported-osx-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| objects-unsupported-osx-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-chain-interface | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-lane-interface | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-lane-queue | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-lane-scheduler | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-launch-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-launch-profile-interface | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-launch-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-baseline-red | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-bisect | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-execution | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-forged-wait | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-prepare | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| osx-sentinel-unknown | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-bare-osx | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-lnx-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-lnx-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-osx-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-osx-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-win-arm64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-object-external-win-x86_64 | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| prune-route-placement-oracle | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| release-ape-replacements | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| release-members-interface | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| runner-platform | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| tool-self-path | NOT_APPLICABLE | osx/arm64 | NOT_APPLICABLE，仍非PASS |
+| wt-gate-clean-win | NOT_APPLICABLE | win/x86_64 | NOT_APPLICABLE，仍非PASS |
+
+
 
 
 
