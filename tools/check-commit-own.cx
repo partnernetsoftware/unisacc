@@ -3,11 +3,16 @@
  * and a NEW file showed up as `D  path` plus `?? path` right after the commit (penoff, macbyt).
  *
  *   sh ./unisacc.com tools/check-commit-own.cx            (from the repo root; works in out/check-commit-own/)
+ *   sh ./unisacc.com tools/check-commit-own.cx -- --cases a|b
  *
  * In a throwaway local clone with a copy of the working-tree commit-own.cx and the installed unisacc.com:
  *   lock    a new file is committed while .git/index.lock is held for 4 s: COMMIT_OWN says index_unsynced=0, the
  *           file's index entry is the committed blob and git status shows nothing for it;
  *   nolock  the same without a lock, as a control.
+ * --cases splits the set in two, because one batch has 55 s and the whole set costs ~69 s of git work on top of
+ * the native builds: a = nolock/symlink/dirlink/keyed, b = lock/registered.  Both halves keep every assertion the
+ * whole run made, and the artifact cases (foreign-staged, pending-derived) run in both; that is why there are two
+ * registry entries for this check.  No --cases argument runs everything, which is what a hand run wants.
  * Prints PASS/FAIL per case and CHECK_COMMIT_OWN<TAB>failed=N; exit 1 when N > 0. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -195,12 +200,17 @@ int main(int argc, char **argv) {
         if (setenv("UNISACC_COMMIT_OWN_NATIVES", natives, 1)) die("natives env");
         if (setenv("UNISACC_ON_CHANGE_NATIVES", natives, 1)) die("natives env");
     }
-    case_("nolock", 0);
-    case_("lock", 4);
-    case_symlink();
-    case_dirlink();
-    case_keyed();
-    case_registered();
+    /* A batch has 55 s and the whole set is ~69 s of git work on top of the native builds (measured: prep 1.0 s,
+       nolock 19.1 s, lock 15.6 s, registered 20.3 s, the seven small cases ~12 s), so the cases are
+       PARTITIONED, never weakened: a = nolock/symlink/dirlink/keyed, b = lock/registered.  Both halves assert
+       exactly what the whole run asserted, and the two artifact cases below run in both (they are cheap and
+       belong to neither half's contract).  No --cases argument runs everything, which is what a hand run wants.
+       Hence two registry entries for this check, commit-own (b) and commit-own-nolock (a). */
+    {   int ai; const char *group = 0;
+        for (ai = 1; ai < argc; ai++) if (!strcmp(argv[ai], "--cases") && ai + 1 < argc) group = argv[++ai];
+        if (!group || group[0] == 'b') { case_("lock", 4); case_registered(); }
+        if (!group || group[0] == 'a') { case_("nolock", 0); case_symlink(); case_dirlink(); case_keyed(); }
+    }
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "
