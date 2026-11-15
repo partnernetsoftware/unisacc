@@ -113,6 +113,8 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 简报模板加一行:`检查:改完跑 sh ./unisacc.com tools/dcheck.cx -- 改动路径(或 --owner 自己),按 CHECK 行处理 FAIL 与 DEFERRED,不直跑 check-*.cx。`
 - 外部根与工作树:`task open` 可加 `--write-ext ABSDIR`(可多次;须已存在的绝对目录,拒绝 / 与 HOME 本身及上两级;目录内文件按内容 sha 做快照,done 时比对,此时 `--write` 可省)和 `--cwd DIR`(验收命令在该目录执行;须在仓内 `.claude/worktrees/` 下或某个 `--write-ext` 目录下,缺省仍是主检出根)。
 - `--write` 里的前缀写成 `.claude/worktrees/v0.0.NN` 时,status 与 done 会另对该工作树做 `git -C` 脏文件快照,路径以 `.claude/worktrees/v0.0.NN/` 开头;验收放在工作树里的检查用 `--cwd 该工作树绝对路径`。检查 `tools/check-devtask.cx` 的 ext-、worktree-、cwd- 开头用例。
+- 新建文档:`devsvc doc create FILE 标题`(FILE 须匹配配置表 doc 行,已存在 rc 1 拒绝,内容为一行一级标题,内部取锁 doc:FILE);其后再用 doc append/set。服务空闲巡检另会回收自己的 /tmp/devsvc-flow-* 运行目录(超 2 小时且无进程引用,每次至多 200 个,记 flowdir.gc 事件)。dcheck 遇批次登记预算超过 55 的,在该批 CHECK 行前打 DCHECK_WARN budget-above-node-cap。
+
 
 
 

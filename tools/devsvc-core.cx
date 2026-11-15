@@ -418,6 +418,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
 static int try_connect(long ms) { return sy_unix_connect(sockp, sy_deadline_in(ms)); }
 
 static int jobs_gc(void);
+static int flowdir_gc(void);
 static int serve(long ttl, long idle) {
     int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0, gc_at = 0; char p[PW], line[2048], info[PW + 96];
     if (ttl <= 0 || ttl > TTL_MAX || idle <= 0) { fprintf(stderr, "devsvc: ttl 1..%d, idle >= 1\n", TTL_MAX); return 2; }
@@ -436,7 +437,7 @@ static int serve(long ttl, long idle) {
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
-        if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
+        if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
         c = sy_tcp_accept(ls, 200);
         if (c < 0) { if (c != -ETIMEDOUT) sy_sleep_ms(50); continue; }
         {   sy_deadline_t d = sy_deadline_in(2000);
@@ -1098,6 +1099,30 @@ static int cmd_doc(const char *root, int argc, char **argv) {
     AB b = {0, 0, 0}; ff_out o; char fop[24], nm[64]; const char *op, *path, *xs, *src; int r, i, ok = 0, wr;
     if (argc < 2) return 2;
     op = argv[0]; path = argv[1];
+    if (!strcmp(op, "create")) {   /* doc create FILE TITLE:新建,已存在拒绝;内容为一行一级标题;取锁 doc:<文件> */
+        char full[PW], body[1024], lk[64]; int ex, got = 0; unsigned char *dummy = 0; (void)dummy;
+        for (i = 0; i < cfg.ndoc; i++) if (doc_glob(cfg.docpat[i], path)) ok = 1;
+        if (argc < 3 || !argv[2][0]) return 2;
+        if (!ok || strstr(path, "..") || path[0] == '/') { fprintf(stderr, "DOC\tcreate\trefused\tEDOC: %s is not a doc of the repo table\n", path); return 1; }
+        set_owner(argc, argv);
+        svc_on = request(root, "ping", 0) == 0;
+        if (svc_on) {
+            F(lk, sizeof lk, "doc:%s", path);
+            r = lk_take(root, lk, 60, 30000);
+            if (r == 3) svc_on = 0;
+            else if (r) { chomp(resp); fprintf(stderr, "DOC\tcreate\trefused\tlock=%s\t%s\n", lk, resp); return 1; }
+            else got = 1;
+        }
+        F(full, sizeof full, "%s/%s", root, path);
+        ex = sy_exists(full);
+        if (ex != 0) { fprintf(stderr, "DOC\tcreate\trefused\tEEXIST: %s %s\n", path, ex == 1 ? "already exists" : "cannot be checked"); if (got) lk_drop(root); return 1; }
+        F(body, sizeof body, "# %s\n", argv[2]);
+        r = sy_write_atomic(full, body, (int64_t)strlen(body), 0644);
+        if (got) lk_drop(root);
+        if (r) { fprintf(stderr, "DOC\tcreate\tfail\twrite rc=%d\n", r); return 1; }
+        printf("DOC\tcreate\tok\tlines=1\n");
+        return 0;
+    }
     if (strcmp(op, "get") && strcmp(op, "set") && strcmp(op, "append") && strcmp(op, "remove") && strcmp(op, "list") && strcmp(op, "mermaid")) return 2;
     for (i = 0; i < cfg.ndoc; i++) if (doc_glob(cfg.docpat[i], path)) ok = 1;
     if (!ok || strstr(path, "..")) { fprintf(stderr, "DOC\t%s\trefused\tEDOC: %s is not a doc of the repo table\n", op, path); return 1; }
@@ -1379,6 +1404,29 @@ static int jobs_gc(void) {
         }
     }
     if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, n); ev_add("jobs.gc", m); }
+    return del;
+}
+/* flow 运行目录回收(同一空闲巡检):只删 TMPDIR 下名为 devsvc-flow- 前缀、是目录(不跟符号链接)、owner 是当前用户、
+   mtime 超过 $DEVSVC_FLOWDIR_GC_AGE_S(缺省 7200 s)且 pgrep 命令行不含该路径的目录;每次最多 200 个,记 flowdir.gc 事件 */
+#define FLOWDIR_GC_MAX 200
+static int flowdir_gc(void) {
+    static char lst[1 << 18]; char *s, *e; int del = 0, seen = 0; long now = sy_wall_s(), age = 7200; const char *ae = getenv("DEVSVC_FLOWDIR_GC_AGE_S");
+    char tmp[PW]; char *v[] = {"find", tmp, "-maxdepth", "1", "-name", "devsvc-flow-*", "-type", "d", 0};
+    if (ae && *ae && atol(ae) >= 0) age = atol(ae);
+    { const char *gd = getenv("DEVSVC_FLOWDIR_GC_DIR"); F(tmp, sizeof tmp, "%s", gd && *gd ? gd : sy_tmpdir()); }   /* 覆盖目录仅供检查用 */
+    if (runcap(v, lst, sizeof lst) < 0) return 0;
+    for (s = lst; *s && del < FLOWDIR_GC_MAX; s = e) {
+        sy_stat_t st; char *pg[] = {"pgrep", "-f", "--", s, 0}; char po[64]; const char *base;
+        e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s);
+        base = strrchr(s, '/'); base = base ? base + 1 : s;
+        if (strncmp(base, "devsvc-flow-", 12) || strstr(s, "..")) continue;
+        seen++;
+        if (sy_lstat(s, &st) || st.kind != 'd' || st.uid != (long)sy_uid() || now - st.mtime < age) continue;
+        if (runcap(pg, po, sizeof po) == 0) continue;   /* 有进程引用 */
+        {   char *rm[] = {"rm", "-rf", "--", s, 0}; char ro[8];
+            if (runcap(rm, ro, sizeof ro) == 0) del++; }
+    }
+    if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, seen); ev_add("flowdir.gc", m); }
     return del;
 }
 static int cmd_jobs(void) {

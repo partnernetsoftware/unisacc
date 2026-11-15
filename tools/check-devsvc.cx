@@ -103,6 +103,7 @@ int main(int argc, char **argv) {
     else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|b|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
     if (sy_cwd(root, sizeof root) < 0) return 2;
+    (void)unsetenv("DEVSVC_SELF_BIN");   /* 在 devsvc x 内跑时不继承固定版本执行体:本检查测的是 self 所指的工作副本 */
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
     {   unsigned char *b = 0; int64_t n = 0; int okc;
         if (sy_read_file(table, &b, &n, 1 << 16) || !b) { printf("FAIL\tdevsvc.config-table-readable\t%s\n", table); return 1; }
@@ -136,7 +137,21 @@ int main(int argc, char **argv) {
             if (sy_mkdir_all(d, 0700) || (i != 2 && sy_write_atomic(p, "0\t1\n", 4, 0644))) printf("NOTE\tgc-fixture\t%s\n", d);
             if (i == 0 || i == 3) (void)sy_set_mtime(p, sy_wall_s() - 90000);
         } }
+    /* flow 运行目录回收夹具:老目录(无进程引用)、老目录(有进程在命令行引用)、新目录、老的非目录同名文件;年龄阈值调到 7100 s */
+    char fo[300], fr[300], fn[300], ff[300], ptmp[260]; sy_child_t refc; int refup = 0;
+    F(ptmp, sizeof ptmp, "/tmp/devsvc-check-%d-tmp", sy_pid()); (void)sy_mkdir_all(ptmp, 0700);   /* 私有 TMPDIR:真实 /tmp 里旧目录多,每次 200 个的上限会先耗尽 */
+    F(fo, sizeof fo, "%s/devsvc-flow-chk-old", ptmp); F(fr, sizeof fr, "%s/devsvc-flow-chk-ref", ptmp);
+    F(fn, sizeof fn, "%s/devsvc-flow-chk-new", ptmp); F(ff, sizeof ff, "%s/devsvc-flow-chk-file", ptmp);
+    {   char sc[400]; static char *rv[4]; sy_spawn_t o;
+        if (sy_mkdir_all(fo, 0700) || sy_mkdir_all(fr, 0700) || sy_mkdir_all(fn, 0700) || sy_write_atomic(ff, "x\n", 2, 0644)) printf("NOTE\tflowdir-fixture\n");
+        (void)sy_set_mtime(fo, sy_wall_s() - 8000); (void)sy_set_mtime(fr, sy_wall_s() - 8000); (void)sy_set_mtime(ff, sy_wall_s() - 8000);
+        F(sc, sizeof sc, "sleep 25 # %s", fr);
+        rv[0] = "sh"; rv[1] = "-c"; rv[2] = sc; rv[3] = 0;
+        sy_spawn_init(&o); o.argv = rv; o.deadline_ms = 25000; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+        refup = sy_proc_spawn(&o, &refc) == 0; sy_sleep_ms(200);
+        if (setenv("DEVSVC_FLOWDIR_GC_AGE_S", "7100", 1) || setenv("DEVSVC_FLOWDIR_GC_DIR", ptmp, 1)) return 2; }
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
+    (void)unsetenv("DEVSVC_FLOWDIR_GC_DIR");
     sy_sleep_ms(400);
     {   char d0[300], d1[300], d2[300], d3[300];
         F(d0, sizeof d0, "%s/jobs/100-1", inst); F(d1, sizeof d1, "%s/jobs/200-2", inst); F(d2, sizeof d2, "%s/jobs/300-3", inst); F(d3, sizeof d3, "%s/jobs/not-a-job", inst);
@@ -144,6 +159,26 @@ int main(int argc, char **argv) {
         ck(sy_exists(d1) == 1 && sy_exists(d2) == 1, "jobs-gc-keeps-recent-and-running");
         ck(sy_exists(d3) == 1, "jobs-gc-ignores-non-job-dirs");
         ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("jobs.gc\tdeleted=1"), "jobs-gc-event"); }
+    ck(sy_exists(fo) == 0, "flowdir-gc-removes-old-unreferenced");
+    ck(sy_exists(fr) == 1, "flowdir-gc-keeps-process-referenced");
+    ck(sy_exists(fn) == 1 && sy_exists(ff) == 1, "flowdir-gc-keeps-new-and-non-dir");
+    ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("flowdir.gc\tdeleted="), "flowdir-gc-event");
+    if (refup) { (void)sy_proc_kill(&refc, 9); (void)sy_proc_close(&refc); }
+    { char *rm[] = {"rm", "-rf", "--", ptmp, 0}; (void)cap2(rm, 0, out2, sizeof out2); }
+    /* doc create:新建、已存在拒绝、路径不在 doc 行拒绝(夹具仓无配置表,走 DEVSVC_REPO_TABLE 读本检出的 doc 行;写到夹具仓根下) */
+    {   char dp[300];
+        F(dp, sizeof dp, "%s/plans/dvchk.md", fx);
+
+        {   char pd[300]; F(pd, sizeof pd, "%s/plans", fx); (void)sy_mkdir_all(pd, 0755); }
+        {   char *v[] = {"doc", "create", "plans/dvchk.md", "标题 一", 0}; int rr = dvat(fx, out, sizeof out, v);
+            unsigned char *b = 0; int64_t n = 0; int okb = !sy_read_file(dp, &b, &n, 1 << 12) && b && n == (int64_t)strlen("# 标题 一\n") && !memcmp(b, "# 标题 一\n", n);
+            if (b) free(b);
+            ck(rr == 0 && has("DOC\tcreate\tok") && okb, "doc-create-ok"); }
+        {   char *v[] = {"doc", "create", "plans/dvchk.md", "另一个", 0}; int rr = dvat(fx, out, sizeof out, v);
+            ck(rr == 1 && has("refused") && has("EEXIST"), "doc-create-existing-refused"); }
+        {   char *v[] = {"doc", "create", "notdoc/x.txt", "T", 0}; int rr = dvat(fx, out, sizeof out, v); char np[300];
+            F(np, sizeof np, "%s/notdoc/x.txt", fx);
+            ck(rr == 1 && has("EDOC") && sy_exists(np) == 0, "doc-create-non-doc-path-refused"); } }
     /* x 完成事件取工具名:kind=x.<工具名>,跳过 sh、产品、目录与 .cx 后缀 */
     {   char *v[] = {"x", "--", "sh", prod, "tools/no-such-tool-xyz.cx", 0}; (void)dv(out, sizeof out, v);
         char *w[] = {"x", "--", "true", 0}; (void)dv(out, sizeof out, w);
