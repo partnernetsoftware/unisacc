@@ -36,15 +36,19 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, char *er
 
 int main(void) {
     char root[4096], dir[4400], fake[4400], sha[4500], src[4400], com[4400], tool[4400], bin[4400], table[4400];
-    char g55[16], g45[16], g20[16], want[200];
+    char g55[16], g45[16], g20[16], n90[16], n108[16], want[200];
     static char out[16000], err[4000];
-    int rc, startup = (int)(lm_get("s9.slice.startup", 0) + 0.999), epoch = (int)(lm_get("s9.epoch.margin", 0) + 0.999), closing = (int)(lm_get("s9.slice.close", 0) + 0.999);
+    int rc, startup = (int)(lm_get("s9.slice.startup", 0) + 0.999), epoch = (int)(lm_get("s9.epoch.margin", 0) + 0.999), closing = (int)(lm_get("s9.slice.close", 0) + 0.999), shave = (int)(lm_get("s9.sup.shave", 0) + 0.999);
+    /* 夹具线值 need: slice-0-0/0-1 为 90,slice-1-2 为 98,slice-1-3 为 108,slice-2-4 为 55;授予 = need + startup + shave + epoch */
+    int over = startup + shave + epoch;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     if (cx_fmt(dir, sizeof dir, "%s/s9flow-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
     if (cx_fmt(fake, sizeof fake, "%s/driver", dir) || cx_fmt(sha, sizeof sha, "%s/driver.sha256", dir) || cx_fmt(bin, sizeof bin, "%s/flow.bin", dir) ||
         cx_fmt(table, sizeof table, "%s/table.tsv", dir) || cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-flow-fake-driver.cx", root) ||
         cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") || cx_fmt(tool, sizeof tool, "%s/tools/s9-shards-flow.cx", root) ||
-        cx_fmt(g55, sizeof g55, "%d", 55 + startup + epoch) || cx_fmt(g45, sizeof g45, "%d", 45 + startup + epoch) || cx_fmt(g20, sizeof g20, "%d", 20 + startup + epoch)) die("fmt");
+        cx_fmt(g55, sizeof g55, "%d", 55 + startup + epoch) || cx_fmt(g45, sizeof g45, "%d", 98 + over) || cx_fmt(g20, sizeof g20, "%d", 55 + over) ||
+        cx_fmt(n90, sizeof n90, "a9=%d;", 90 + over) || cx_fmt(n108, sizeof n108, "a9=%d;", 108 + over)) die("fmt");
+    ck(shave == 3, "limits-sup-shave-equals-supervisor-at-minus-2-plus-deadline-minus-1");
     ck(startup >= 1 && epoch >= 1 && closing >= 1, "limits-declare-startup-epoch-close-margins");
     { char *b[] = {"sh", com, src, "-o", fake, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "fake-driver-compile"); }
     { char *b[] = {"sh", com, tool, "-o", bin, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "tool-compile"); }
@@ -68,15 +72,30 @@ int main(void) {
         ck(rc == 0 && !strncmp(out, parl, strlen(parl)) && count(out, "\texec\t-\t") == 5 && count(out, "=node;") == 5 && count(out, ";timeout_ms=") == 5, "emit-all-one-exec-node-per-pending-slice-par-from-limits");
         ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, "=slice-0-1;") && has(err, sumw), "emit-node-argv-and-summary");
         ck(rc == 0 && has(err, recw), "emit-summary-last-field-par-recommended");
-        /* 授予 = 片声明预算 + 启动余量 + 收口余量;启动耗时记在授予里,片预算不动;节点时限 = 授予 + 收尾余量 */
+        /* 授予 = 片 need(driver 线值) + 启动余量 + 监督削减 + 收口余量;片内批次预算不动;节点时限 = 授予 + 收尾余量 */
         if (cx_fmt(want, sizeof want, "=slice-1-2;a%d=--grant;a%d=%s;cwd=", 8, 9, g45)) die("fmt");
-        ck(has(out, want), "emit-grant-is-budget-plus-startup-plus-epoch-margin-45");
+        ck(has(out, want), "emit-grant-is-need-plus-startup-shave-epoch-margin-98");
         if (cx_fmt(want, sizeof want, "=slice-2-4;a%d=--grant;a%d=%s;cwd=", 8, 9, g20)) die("fmt");
-        ck(has(out, want) && count(out, g55) >= 3, "emit-grant-follows-each-slice-budget-20-and-55");
-        if (cx_fmt(want, sizeof want, ";timeout_ms=%d\n", (20 + startup + epoch + closing) * 1000)) die("fmt");
+        ck(has(out, want) && count(out, n90) == 2 && count(out, n108) == 1, "emit-grant-follows-each-slice-need-55-90-108");
+        if (cx_fmt(want, sizeof want, ";timeout_ms=%d\n", (55 + over + closing) * 1000)) die("fmt");
         ck(count(out, want) == 1, "emit-node-timeout-is-grant-plus-close-margin");
-        if (cx_fmt(want, sizeof want, "startup_s=%d\tepoch_s=%d\tclose_s=%d", startup, epoch, closing)) die("fmt");
+        if (cx_fmt(want, sizeof want, "startup_s=%d\tepoch_s=%d\tclose_s=%d\tpre_s=%d\tmaterial_s=%d\treserve_s=%d\tshave_s=%d", startup, epoch, closing,
+                   (int)(lm_get("s9.child.pre", 0) + 0.999), (int)(lm_get("s9.child.material", 0) + 0.999), (int)(lm_get("s9.wave.reserve", 0) + 0.999), shave)) die("fmt");
         ck(has(err, want), "emit-summary-names-margins-from-limits-table");
+        {   /* 旧线格式(缺 need)必须拒绝,不回退旧公式 */
+            static char o2[4000], e2[1000];
+            setenv("S9_FAKE_OLD_WIRE", "1", 1);
+            rc = runv(v, root, 20, o2, sizeof o2, e2, sizeof e2);
+            unsetenv("S9_FAKE_OLD_WIRE");
+            ck(rc == 2 && has(e2, "REFUSE pending-wire") && !has(o2, "\texec\t"), "emit-pending-without-need-refused-no-fallback");
+        }
+        /* 全部夹具片:授予扣去启动、监督削减与收口余量后不小于该片预算 */
+        {
+            static const int bud[5] = {55, 55, 45, 55, 20}, nd[5] = {90, 90, 98, 108, 55};
+            int all = 1;
+            for (int i = 0; i < 5; i++) if (nd[i] + over - startup - shave - epoch < bud[i]) all = 0;
+            ck(all, "emit-every-slice-grant-minus-overheads-not-below-budget");
+        }
     }
     {
         char *v[] = {bin, "emit", root, dir, "--class", "heavy", 0};

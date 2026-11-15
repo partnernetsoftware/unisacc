@@ -298,6 +298,10 @@ static int slice_budget(const s9_slice *s){int b=0;for(int i=0;i<reg.nb;i++)if(a
 /* Budgets and step grants are whole seconds; the sub-second latency between the grant and this test is
    not charged, so a 55 s grant admits a 55 s slice.  The child still ends at outer_end minus s9.epoch.margin. */
 static int budget_fits(double left,int budget){return budget>0&&left>(double)budget-1.0;}
+/* Slice window need: budget plus measured child overheads (driver/wave pre, one material command per distinct
+   declared material, all-waves after-measurement reserve 12 s, supervisor shave at-2 and deadline-1). */
+static int slice_nmat(const s9_slice *s){char seen[S9_MAX][128];int n=0;for(int i=0;i<reg.nb;i++)if(as_inlist(s->ids,reg.b[i].id)){const char *q=reg.b[i].materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){int dup=0;for(int k=0;k<n;k++)if(!strcmp(seen[k],d.name))dup=1;if(!dup&&n<S9_MAX&&!cx_fmt(seen[n],sizeof seen[0],"%s",d.name))n++;}}return n;}
+static int slice_need(const s9_slice *s){int b=slice_budget(s);if(b<=0)return b;return b+(int)L_("s9.child.pre")+slice_nmat(s)*(int)L_("s9.child.material")+(int)L_("s9.wave.reserve")+(int)L_("s9.sup.shave");}
 #define S9_RC_NO_PROGRESS 4
 enum {S9_STEP_FINISHED,S9_STEP_PENDING,S9_STEP_NO_PROGRESS};
 static int step_verdict(int unstarted,int live,int launched){if(!unstarted&&!live)return S9_STEP_FINISHED;return launched||live?S9_STEP_PENDING:S9_STEP_NO_PROGRESS;}
@@ -433,7 +437,7 @@ static int step(const char *only,int probe){
   double left=outer_end-(double)as_now()/1e9;
   /* Launch gate: a slice is offered only while this step's remaining time covers the slice's own declared
      budget (max budget_seconds of its batches, tests/batches.tsv), not a fixed constant. */
-  {int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p)&&(only_k<0||i==only_k)&&budget_fits(left,slice_budget(&slices[i]));}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
+  {int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p)&&(only_k<0||i==only_k)&&budget_fits(left-L_EPOCH_MARGIN(),slice_need(&slices[i]));}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
     slice_path(p,s,"start");
     s->start=as_now();char session[4400];path(session,sd,s->leaf);int gate[2];if(pipe(gate))fail("start-pipe");
     pid_t pid=fork();if(pid<0)fail("fork");if(!pid){close(lock);close(gate[1]);setpgid(0,0);char go;if(read(gate[0],&go,1)!=1)_exit(2);close(gate[0]);char log[4400];slice_path(log,s,"log");int fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)_exit(2);close(fd);if(setenv("UNISACC_S9_WT_EPOCH",epoch,1)||setenv("UNISACC_BOUND_DEADLINE_MONO",edl,1))_exit(2);char *v[]={driver,"child",sr,sd,session,s->ids,0};execv(driver,v);_exit(2);}
@@ -451,7 +455,7 @@ static int step(const char *only,int probe){
  int unstarted=0,live=0;for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");if(!present(p))unstarted++;else{slice_path(p,&slices[i],"done");if(!present(p)&&running(&slices[i]))live++;}}
  if(lock>=0)close(lock);
  if(only){const s9_slice *t=&slices[only_k];
-  if(!launched_any){printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=budget\tbudget=%d\tleft=%.1f\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",t->leaf,slice_budget(t),outer_end-(double)as_now()/1e9);return S9_RC_NO_PROGRESS;}
+  if(!launched_any){printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=budget\tbudget=%d\tneed=%d\tleft=%.1f\tlaunched=0\tqualification=NOT_DECIDED_HERE\n",t->leaf,slice_budget(t),slice_need(t),outer_end-(double)as_now()/1e9);return S9_RC_NO_PROGRESS;}
   printf("S9\tSTEP_SLICE\tslice=%s\tstatus=DONE_RECORDED\n",t->leaf);}
  return step_report(unstarted,live,launched_any);
 }
@@ -624,6 +628,19 @@ static int controls(void){
   ok=step_verdict(0,0,0)==S9_STEP_FINISHED&&step_verdict(0,0,1)==S9_STEP_FINISHED&&step_verdict(1,0,1)!=S9_STEP_FINISHED&&step_verdict(1,0,0)!=S9_STEP_FINISHED&&step_verdict(0,1,0)!=S9_STEP_FINISHED&&step_verdict(0,1,1)!=S9_STEP_FINISHED&&step_verdict(2,1,0)==S9_STEP_PENDING;
   if(!ok)bad++;printf("S9_CONTROL\tstep-finished-only-when-nothing-unstarted-nothing-live\tchecked=%d\n",ok);
   reg.b[0].budget=b0;reg.b[1].budget=b1;}
+ {/* Slice window need (0.0.68 fix A): every registered batch as a one-batch slice; the flow grant minus startup,
+     supervisor shave and epoch margin, minus the child overheads, gives back exactly the declared budget. */
+  int pre=(int)L_("s9.child.pre"),mat=(int)L_("s9.child.material"),res=(int)L_("s9.wave.reserve"),sh=(int)L_("s9.sup.shave"),st=(int)L_("s9.slice.startup"),ep=(int)L_("s9.epoch.margin"),ok=1,n=0;
+  /* the control registry is a fixture without budgets: each batch gets a probe budget 20..55 for the duration of the check */
+  for(int i=0;i<reg.nb;i++){int keep=reg.b[i].budget;if(keep<=0)reg.b[i].budget=20+(i%8)*5;s9_slice one={0};if(cx_fmt(one.ids,sizeof one.ids,"%s",reg.b[i].id))fail("copy-bound");
+   int need=slice_need(&one),nm=slice_nmat(&one),g=need+st+sh+ep;n++;if(g-st-sh-ep<slice_budget(&one)||g-st-sh-ep-pre-nm*mat-res-sh!=slice_budget(&one))ok=0;reg.b[i].budget=keep;}
+  if(!n)ok=0;if(!ok)bad++;printf("S9_CONTROL\tslice-need-grant-minus-overheads-equals-budget-all-batches\tchecked=%d\tbatches=%d\n",ok,n);
+  /* slice-1-68 shape: budget 55, two distinct materials -> grant 131 with the default table */
+  ok=55+pre+2*mat+res+sh+st+sh+ep==131;if(!ok)bad++;printf("S9_CONTROL\tslice-1-68-budget55-n2-grant-131\tchecked=%d\n",ok);
+  /* literals kept in code must equal the table: all-waves after-measurement reserve, supervisor at-2 plus deadline-1 */
+  size_t an=0,sn=0;char *aw=as_read("tools/all-waves.cx",0,&an,sw,sizeof sw),*me=as_read("tools/s9-shards.cx",0,&sn,sw,sizeof sw);
+  ok=aw&&me&&strstr(aw,"deadline-now_s()-12.0)")&&strstr(aw,"reserve=12\\t")&&res==12&&strstr(me,"if(st==1&&at-2<dead" "line)deadline=at-2;")&&strstr(me,"\"%.9f\",deadline-1)")&&2+1==sh;
+  if(!ok)bad++;printf("S9_CONTROL\tsource-literals-match-limits-reserve-shave\tchecked=%d\n",ok);free(aw);free(me);}
  bad+=wt_epoch_controls();
  bad+=agg_merge_controls();
  bad+=f4c_plan_controls();
@@ -658,7 +675,7 @@ static int operate(int argc,char **argv){
   fail("aggregate [--part K N | --merge N]");}
  if(!init&&!strcmp(argv[1],"step")&&argc==6&&!strcmp(argv[4],"--slice"))return step(argv[5],0);
  if(!init&&!strcmp(argv[1],"step")&&argc==7&&!strcmp(argv[4],"--slice")&&(!strcmp(argv[6],"--probe")||!strcmp(argv[6],"--probe-full")))return step(argv[5],!strcmp(argv[6],"--probe")?1:2);
- if(!init&&!strcmp(argv[1],"pending")){if(argc!=4)fail("pending ROOT RUN");load_plan();int n=0;for(int i=0;i<nslices;i++)if(slice_pending(&slices[i])){printf("S9_PENDING\tslice=%s\ttier=%d\talone=%d\theavy=%d\tbudget=%d\n",slices[i].leaf,slices[i].tier,slices[i].alone,slices[i].heavy,slice_budget(&slices[i]));n++;}printf("S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n",n,nslices);return 0;}
+ if(!init&&!strcmp(argv[1],"pending")){if(argc!=4)fail("pending ROOT RUN");load_plan();int n=0;for(int i=0;i<nslices;i++)if(slice_pending(&slices[i])){printf("S9_PENDING\tslice=%s\ttier=%d\talone=%d\theavy=%d\tbudget=%d\tmaterials=%d\tneed=%d\n",slices[i].leaf,slices[i].tier,slices[i].alone,slices[i].heavy,slice_budget(&slices[i]),slice_nmat(&slices[i]),slice_need(&slices[i]));n++;}printf("S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n",n,nslices);return 0;}
  if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step(0,0);if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
  if(argc<5)fail("map-required");
  int commit=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"commit");int rel=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"release");for(int i=5;i<argc;i++)if(!strcmp(argv[i],"--tier")&&!commit&&!rel)fail("init --tier commit|release cannot combine selection flags");

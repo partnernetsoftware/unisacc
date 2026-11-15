@@ -23,13 +23,14 @@
 
 #define SF_MAX 2048
 #define SF_LIST_S 55
-/* 授予 = 片声明预算 + 启动余量(s9.slice.startup,实测 driver 启动 p95 上取整) + 收口余量(s9.epoch.margin:driver 给子进程的截止是外层减它)。
-   启动耗时记在授予里,片内批次仍按声明预算计时;driver 的发片门(剩余时间对片预算)不变。节点 timeout_ms = 授予 + s9.slice.close。 */
+/* 授予 = 片 need + 启动余量(s9.slice.startup,实测 driver 启动 p95 上取整) + 监督削减(s9.sup.shave) + 收口余量(s9.epoch.margin:driver 给子进程的截止是外层减它)。
+   need 由 driver 的 pending 线下发: need = budget + s9.child.pre + N*s9.child.material + s9.wave.reserve + s9.sup.shave(N 为片内去重材料数),
+   driver 的发片门为 left - s9.epoch.margin > need - 1。片内批次仍按声明预算计时。节点 timeout_ms = 授予 + s9.slice.close。 */
 static void refuse(const char *s, const char *d);
 static int sf_lim(const char *id) { double v = lm_get(id, 0); if (v < 0) refuse("limit", id); return (int)(v + 0.999); }
-static int sf_grant(int budget) { return budget + sf_lim("s9.slice.startup") + sf_lim("s9.epoch.margin"); }
+static int sf_grant(int need) { return need + sf_lim("s9.slice.startup") + sf_lim("s9.sup.shave") + sf_lim("s9.epoch.margin"); }
 static void sf_arg(np_buf *t, int *k, const char *v) { char key[24]; if (cx_fmt(key, sizeof key, "%sa%d=", *k ? ";" : "", *k)) refuse("format-bound", 0); np_puts(t, key); np_puts(t, v); (*k)++; }
-typedef struct { char leaf[80]; int alone, heavy, budget; } sf_row;
+typedef struct { char leaf[80]; int alone, heavy, budget, need; } sf_row;
 static sf_row rows[SF_MAX];
 static int nrows;
 static char why[512];
@@ -108,8 +109,9 @@ static int emit(int argc, char **argv) {
                 x = &rows[nrows++];
                 while (q[z] && q[z] != '\t' && z + 1 < sizeof x->leaf) { char c = q[z]; if (c == ';' || c == '=' || c == '/' || c == ' ') refuse("slice-name", line); x->leaf[z] = c; z++; }
                 x->leaf[z] = 0;
-                x->alone = field_int(line, "\talone="); x->heavy = field_int(line, "\theavy="); x->budget = field_int(line, "\tbudget=");
-                if (!z || x->alone < 0 || x->heavy < 0 || x->budget < 0) refuse("pending-wire", line);
+                x->alone = field_int(line, "\talone="); x->heavy = field_int(line, "\theavy="); x->budget = field_int(line, "\tbudget="); x->need = field_int(line, "\tneed=");
+                /* 缺 need 字段即旧 driver 线格式: 拒绝,不回退旧公式 */
+                if (!z || x->alone < 0 || x->heavy < 0 || x->budget < 0 || x->need < x->budget) refuse("pending-wire", line);
             } else if (!strncmp(line, "S9_PENDING_SUMMARY\tpending=", 27)) summary = atoi(line + 27);
         }
         at = e + 1;
@@ -127,7 +129,7 @@ static int emit(int argc, char **argv) {
         int k = x->alone ? 2 : x->heavy ? 1 : 0;
         if ((!strcmp(cls, "light") && k != 0) || (!strcmp(cls, "heavy") && k != 1) || (!strcmp(cls, "alone") && k != 2)) continue;
         {
-            int g = sf_grant(x->budget), a = 0;
+            int g = sf_grant(x->need), a = 0;
             char num[40];
             if (g + sf_lim("s9.slice.close") > (int)lm_get("s9.outer", 0)) refuse("grant-over-outer", x->leaf);
             np_puts(&t, x->leaf); np_puts(&t, "\texec\t-\t");
@@ -145,7 +147,7 @@ static int emit(int argc, char **argv) {
     }
     if (out) { if (cx_write(out, t.p, (long)t.n)) refuse("table-write", out); }
     else if (t.n) fwrite(t.p, 1, t.n, stdout);
-    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tstartup_s=%d\tepoch_s=%d\tclose_s=%d\ttable=%s\tpar_recommended=%d\n", nrows, emitted, cls, par, sf_lim("s9.slice.startup"), sf_lim("s9.epoch.margin"), sf_lim("s9.slice.close"), out ? out : "-", rec);
+    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tstartup_s=%d\tepoch_s=%d\tclose_s=%d\tpre_s=%d\tmaterial_s=%d\treserve_s=%d\tshave_s=%d\ttable=%s\tpar_recommended=%d\n", nrows, emitted, cls, par, sf_lim("s9.slice.startup"), sf_lim("s9.epoch.margin"), sf_lim("s9.slice.close"), sf_lim("s9.child.pre"), sf_lim("s9.child.material"), sf_lim("s9.wave.reserve"), sf_lim("s9.sup.shave"), out ? out : "-", rec);
     free(t.p);
     return 0;
 }
