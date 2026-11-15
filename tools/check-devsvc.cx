@@ -119,6 +119,7 @@ int main(void) {
         ck(dv1("config", 0, 0, 0, 0, 0) == 3 && has("unreadable"), "config-missing-table-rc3");
         if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2; }
 
+    if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;   /* 事件落盘轮转阈值调小;命令完成事件的 owner */
     ck(dv1("ping", 0, 0, 0, 0, 0) == 3, "ping-without-instance-rc3");
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
     ck(dv1("start", 0, 0, 0, 0, 0) == 0 && has("OK\talready"), "start-twice-already");
@@ -155,6 +156,21 @@ int main(void) {
         ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=1\t") && has("\tnote\thello world"), "events-since-incremental");
         F(since, sizeof since, "%ld", s);
         ck(dv1("events", "--since", since, 0, 0, 0) == 0 && has("\tn=0\t"), "events-since-current-empty"); }
+
+    /* 事件落盘(实例目录 events.tsv,带 owner,超阈值轮转)与只读 git 透传(不取锁) */
+    {   char ep[200], ep1[200]; unsigned char *b = 0; int64_t n = 0, sz = 0; int i, got;
+        F(ep, sizeof ep, "%s/events.tsv", inst); F(ep1, sizeof ep1, "%s/events.tsv.1", inst);
+        ck(dv1("git", "log", "-1", "--oneline", 0, 0) == 0 && strlen(out) > 8 && !has("REFUSE"), "git-log-readonly");
+        ck(dv1("git", "diff", "--stat", "HEAD", 0, 0) == 0 && !has("REFUSE"), "git-diff-stat-readonly");
+        ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("OK\tlocks") && !has("owner=chk-owner"), "git-readonly-takes-no-lock");
+        ck(dv1("git", "stash", 0, 0, 0, 0) == 125, "git-write-subcommand-still-refused");
+        got = 0; if (sy_read_file(ep, &b, &n, 1 << 22) == 0 && b) { F(out, sizeof out, "%.*s", (int)n, (char *)b); got = has("\tgit.log\towner=chk-owner\t") && has("\trc=0\tms="); }
+        if (b) { free(b); b = 0; }
+        ck(got, "events-persisted-with-owner");
+        for (i = 0; i < 40; i++) dv1("events", "emit", "fill", "0123456789012345678901234567890123456789", 0, 0);
+        if (sy_read_file(ep, &b, &sz, 1 << 22) == 0 && b) free(b); else sz = -1;
+        ck(sy_exists(ep1) == 1 && sz >= 0 && sz <= 1500 + 200, "events-file-rotates");
+    }
 
     /* status */
     ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");

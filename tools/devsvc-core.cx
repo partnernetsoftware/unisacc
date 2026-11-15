@@ -10,6 +10,9 @@
  *   sh ./unisacc.com tools/devsvc.cx -- run [--local] TOOL.cx [ARGS...]   用缓存的原生执行体跑已有工具;stdout/rc 即工具自己的
  *   sh ./unisacc.com tools/devsvc.cx -- events [--since N]             事件环(容量 256);N 为上次见到的 seq
  *   sh ./unisacc.com tools/devsvc.cx -- events emit KIND TEXT
+ *   事件同时追加到实例目录 events.tsv(EV seq ts kind text;超 $DEVSVC_EV_ROTATE 字节,缺省 4 MB,轮转为 events.tsv.1);
+ *   f/x/flow/doc/git/run/register/derive 命令结束各记一条 <命令>.<子命令> owner=($DEVSVC_OWNER 或 auto-<pid>) pid rc ms。
+ *   sh ./unisacc.com tools/devsvc.cx -- git log|diff|show|status ARGS|blame|ls-files ...   只读透传,不取锁,stdout 上限 1 MB 超出打 DEVSVC_TRUNCATED
  *   sh ./unisacc.com tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
  *   sh ./unisacc.com tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
  *   sh ./unisacc.com tools/devsvc.cx -- serve [--ttl S] [--idle S]     前台跑服务循环(start 即后台起它)
@@ -166,12 +169,21 @@ static int inst_dir(void) {
 }
 
 /* ---- 事件环 ---- */
+static long ev_rotate_bytes(void) { const char *e = getenv("DEVSVC_EV_ROTATE"); long v = e ? atol(e) : 0; return v > 0 ? v : 4L << 20; }   /* 缺省 4 MB;检查用环境变量调小 */
+#define EV_ROTATE ev_rotate_bytes()
 static void ev_add(const char *kind, const char *text) {
     char *e = ring[seq % RING];
     int w = snprintf(e, EVW, "%s\t%s", kind, text);   /* 事件正文超出 EVW 即截断并标记,这是环的定长合同 */
     if (w >= EVW) { e[EVW - 2] = '~'; e[EVW - 1] = 0; }
     ring_wall[seq % RING] = sy_wall_s();
     seq++;
+    {   /* 持久化:追加到实例目录 events.tsv(行格式与 tools/devsvc-usage.cx 对齐);超过 EV_ROTATE 字节轮转为 events.tsv.1(只留一份) */
+        char p[PW], p1[PW], ln[EVW + 64]; int64_t sz = 0; int w;
+        if (snprintf(p, sizeof p, "%s/events.tsv", dir) >= (int)sizeof p || snprintf(p1, sizeof p1, "%s/events.tsv.1", dir) >= (int)sizeof p1) return;
+        if (sy_file_size(p, &sz) == 0 && sz > EV_ROTATE) sy_rename(p, p1);
+        w = snprintf(ln, sizeof ln, "EV\t%ld\t%ld\t%s\n", seq, ring_wall[(seq - 1) % RING], e);
+        if (w > 0 && w < (int)sizeof ln) sy_append_file(p, ln, w, 0600);
+    }
 }
 
 /* ---- 锁 ---- */
@@ -982,8 +994,22 @@ static int git_status(const char *root) {
 static int cmd_git(const char *root, int argc, char **argv) {
     long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
     if (argc < 1) return 2;
-    if (!strcmp(argv[0], "status")) return git_status(root);
-    if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and status are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
+    if (!strcmp(argv[0], "status") && argc == 1) return git_status(root);
+    {   /* 只读子命令透传:不取锁,stdout 上限 GIT_RO_CAP 字节,超出打截断标记 */
+        static const char *ro[] = {"log", "diff", "show", "status", "blame", "ls-files", 0};
+        int j; for (j = 0; ro[j]; j++) if (!strcmp(argv[0], ro[j])) {
+            np_result r; char why[200]; long cap = 1 << 20, k;
+            if (argc + 2 > FL_MAX_ARGV) return 2;
+            v[n++] = "git"; v[n++] = "--no-pager"; for (k = 0; k < argc; k++) v[n++] = argv[k]; v[n] = 0;
+            if (np_run(v, 0, 0, 55, &r, why, sizeof why)) { fprintf(stderr, "devsvc: git %s failed to start: %s\n", argv[0], why); return 1; }
+            rc = r.rc;
+            if ((long)r.outn > cap) { fwrite(r.out, 1, cap, stdout); printf("\nDEVSVC_TRUNCATED\tgit %s\tbytes=%ld\tcap=%ld\n", argv[0], (long)r.outn, cap); }
+            else if (r.outn > 0) fwrite(r.out, 1, r.outn, stdout);
+            np_free(&r);
+            return rc;
+        }
+    }
+    if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--push")) { push = 1; continue; }
         if (!strcmp(argv[i], "--registered")) need = "registry"; else if ((lf = lock_for(argv[i]))) need = lf;
@@ -1009,7 +1035,16 @@ static int usage(void) {
 
 static int main2(int argc, char **argv);
 int main(int argc, char **argv) {
-    int r = main2(argc, argv);
+    long t0 = sy_now_ms(); int r = main2(argc, argv), a = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;
+    if (!ovf && dir[0] && argc > a) {   /* 命令完成事件:kind=<命令>.<子命令>,带 owner、rc、ms;实例不在则不记(不为记事件拉起实例) */
+        static const char *ev[] = {"f", "x", "flow", "doc", "git", "run", "register", "derive", 0};
+        int j; char root[PW], rq[600];
+        for (j = 0; ev[j]; j++) if (!strcmp(argv[a], ev[j])) break;
+        if (ev[j] && sy_cwd(root, sizeof root) >= 0) {
+            char sub[48] = "-"; if (argc > a + 1) { int q; for (q = 0; q < 47 && argv[a + 1][q]; q++) sub[q] = argv[a + 1][q]; sub[q] = 0; clean(sub); }   /* 子命令词超 47 字节只取前缀 */
+            if (snprintf(rq, sizeof rq, "emit\t%s.%s\towner=%s\tpid=%d\trc=%d\tms=%ld", argv[a], sub, auto_owner(), sy_pid(), r, sy_now_ms() - t0) < (int)sizeof rq) request(root, rq, 0);
+        }
+    }
     if (ovf) { fprintf(stderr, "devsvc: a path or argument did not fit its buffer (%d)\n", ovf); return 2; }
     return r;
 }
