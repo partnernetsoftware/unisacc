@@ -861,9 +861,11 @@ static void set_owner(int argc, char **argv) {
     if (okname(o)) F(fl_owner, sizeof fl_owner, "%s", o); else F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
 }
 
+#define FLOW_USE "usage: devsvc flow [run] FILE|- --par N [--bg] [--txn] [--cat] [--deadline-ms N] [--run DIR]  (options may sit before or after run FILE)"
+#define X_USE "usage: devsvc x --par N [--tail N] [--timeout-ms N] [--cwd D] -- ARGV...  (options before --; after -- all is the command)"
 static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FILE|- 或 flow - */
     const char *file = 0, *rdir = 0; char *text = 0; int a = 0, jobs = 0, cat = 0, oa; long dl = 0, wait = 0;
-    if (argc > 0 && !strcmp(argv[0], "run")) a = 1;
+    int seen = 0;
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "--cat") || !strcmp(argv[a], "--echo")) cat = 1;
         else if ((!strcmp(argv[a], "--par") || !strcmp(argv[a], "--jobs")) && a + 1 < argc) { long v = numarg(argv[++a]); if (v < 1 || v > 32) { fprintf(stderr, "devsvc: REFUSE --par wants 1..32\n"); return 2; } jobs = (int)v; }
@@ -873,11 +875,12 @@ static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FIL
         else if (!strcmp(argv[a], "--txn")) flow_txn = 1;
         else if (!strcmp(argv[a], "--owner") && a + 1 < argc) a++;
         else if ((oa = oc_opt(argc, argv, a))) { if (oa < 0) return 2; a += oa - 1; }
-        else if (argv[a][0] == '-' && argv[a][1]) return 2;
+        else if (argv[a][0] == '-' && argv[a][1]) { fprintf(stderr, "devsvc: REFUSE flow: unknown or incomplete option %s\n%s\n", argv[a], FLOW_USE); return 2; }
+        else if (!seen && !file && !strcmp(argv[a], "run")) seen = 1;
         else if (!file) file = argv[a];
-        else return 2;
+        else { fprintf(stderr, "devsvc: REFUSE flow: unexpected word %s%s\n%s\n", argv[a], seen ? " after run FILE" : " (one FILE only)", FLOW_USE); return 2; }
     }
-    if (!file) return 2;
+    if (!file) { fprintf(stderr, "devsvc: REFUSE flow: missing FILE\n%s\n", FLOW_USE); return 2; }
     set_owner(argc, argv);
     if (!strcmp(file, "-")) {
         AB b = {0, 0, 0}; char chunk[65536]; size_t k;
@@ -896,10 +899,11 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--ti
         else if (!strcmp(argv[a], "--timeout-ms") && a + 1 < argc) { tm = numarg(argv[++a]); if (tm < 1 || tm > FL_NODE_MAX_MS) return 2; }
         else if (!strcmp(argv[a], "--cwd") && a + 1 < argc) cwd = argv[++a];
         else if ((k = oc_opt(argc, argv, a))) { if (k < 0) return 2; a += k - 1; k = 0; }
+        else if (argv[a][0] == '-' && argv[a][1]) { fprintf(stderr, "devsvc: REFUSE x: unknown or incomplete option %s\n%s\n", argv[a], X_USE); return 2; }
         else break;
     }
-    if (a >= argc || argc - a > FL_MAX_ARGV) return 2;
-    if (!par) { fprintf(stderr, "devsvc: REFUSE missing --par (x needs --par N, 1..32; one command is --par 1)\n"); return 2; }
+    if (a >= argc || argc - a > FL_MAX_ARGV) { fprintf(stderr, "devsvc: REFUSE x: %s\n%s\n", a >= argc ? "missing command after --" : "too many command words", X_USE); return 2; }
+    if (!par) { fprintf(stderr, "devsvc: REFUSE missing --par (x needs --par N, 1..32; one command is --par 1)\n%s\n", X_USE); return 2; }
     if (!strcmp(argv[a], "git") && a + 1 < argc) {   /* 危险 git 子命令具名拒绝(rc 125);DEVSVC_ALLOW_DANGEROUS=1 放行并记事件。先跳过 -C X、-c X、--git-dir= 等前置选项再取子命令词 */
         static const char *bad[] = {"stash", "reset", "clean", "checkout", "restore", "rebase", 0};
         static const char *withval[] = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", 0};
