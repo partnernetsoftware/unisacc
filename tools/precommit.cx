@@ -487,13 +487,27 @@ static void cov_clean(const char *tag) {
     sy_rmdir(dir);
 }
 /* 求值一版:返回 0=解析通过;1=unknown-coverage,*idv 放首个 id;2=其他行首 REFUSE(环境类如 source-not-regular),*idv 放原因;-1=没跑.
- * cov_gate 对 2 与 -1 一律具名拦截,不静默放行;只有夹具仓(cwd 无 tests/run.cx)跳过并打印 COVGATE skipped=1.
+ * cov_gate 对 2 与 -1 一律具名拦截,不静默放行;只有夹具仓(工作树根无 tests/run.cx)跳过并打印 COVGATE skipped=1.
  * Flow passes: the index-side run.cx --list is the flow node "coveval" (30 s bound set by precommit-flow.cx):
  * --plan builds the root and prints the PLAN row, --from-run reads the node's output; the parsing below is
  * shared with the serial path, and the rare HEAD-side evaluation stays in line in the judge pass. */
+/* 工作树根(git rev-parse --show-toplevel,随 GIT_DIR/GIT_WORK_TREE)是否有 tests/run.cx:夹具仓判定以工作树根为准,
+ * 不以当前目录为准(夹具在真实仓目录下跑钩子时,当前目录的 run.cx 是真实仓的)。git 失败时退回当前目录。结果缓存。 */
+static char wt_top[1100];
+static int wt_state = -2;
+static int wt_runcx(void) {
+    char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *o, *sg = cur_gate; long n = 0, k = 0; char p[1300];
+    if (wt_state != -2) return wt_state;
+    cur_gate = 0; o = slurp(gv, &n); cur_gate = sg;
+    if (o) { while (k < n && o[k] != '\n' && k < (long)sizeof wt_top - 1) { wt_top[k] = o[k]; k++; } wt_top[k] = 0; mm_free(o); }
+    if (!k && sy_cwd(wt_top, sizeof wt_top)) { wt_top[0] = 0; wt_state = 0; return 0; }
+    if (cx_fmt(p, sizeof p, "%s/tests/run.cx", wt_top)) { wt_state = 0; return 0; }
+    wt_state = sy_exists(p) == 1;
+    return wt_state;
+}
 static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, long cn, char *idv, int idcap) {
     char dir[1200], tdir[1300], p[1500], cwd[1100]; long a, total = 0; char *b = 0;
-    if (sy_cwd(cwd, sizeof cwd) || cov_dir(tag, dir, sizeof dir)) return -1;
+    if (wt_runcx() != 1 || cx_fmt(cwd, sizeof cwd, "%s", wt_top) || cov_dir(tag, dir, sizeof dir)) return -1;
     if (from_run && cov_flow(tag)) {
         cur_gate = "coveval"; slurp_okrc = 255; b = gate_slurp(0, &total); slurp_okrc = 0; cur_gate = 0;
         if (!b) return -1;
@@ -538,7 +552,7 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
 }
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
-    if (sy_exists("tests/run.cx") != 1) { if (!plan_dir) sy_eprintf("precommit: COVGATE skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
+    if (wt_runcx() != 1) { if (!plan_dir) sy_eprintf("precommit: COVGATE skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
     if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) {
         if (plan_dir) return 0;
         sy_eprintf("precommit: BLOCKED registry gate: cannot read staged tests/batches.tsv or tests/coverage.tsv\n"); return 1; }
@@ -732,7 +746,9 @@ int main(int argc, char **argv) {
     }
     { long msn; char *mnames = gate_diff("runlist", &msn);
       if (!mnames) { sy_eprintf("precommit: git diff --cached (metadata) failed\n"); return 1; }
-      if (msn > 0) {
+      if (msn > 0 && wt_runcx() != 1) {
+          if (!plan_dir) sy_eprintf("precommit: RUNLIST skipped=1 reason=no-tests/run.cx at work tree root (fixture repo)\n");
+      } else if (msn > 0) {
           char *lout; long ln;
           blocked += cov_gate();
           cur_gate = "runlist"; lout = slurp(lv, &ln); cur_gate = 0;          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
