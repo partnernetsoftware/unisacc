@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
     /* 与真 driver 同合同:必须带单调时钟截止,且剩余不超过 55 秒 */
     if (!dl || sy_mono(&t)) { printf("FAIL supervisor-deadline-required\n"); return 2; }
     left = strtod(dl, &e) - ((double)t.sec + (double)t.nsec / 1e9);
-    if (!e || *e || left <= 0 || left > 55.0) { printf("FAIL outer-budget-55\n"); return 2; }
+    if (!e || *e || left <= 0 || left > 300.5) { printf("FAIL outer-budget-300\n"); return 2; }
     if (!strcmp(argv[1], "pending") && argc == 4) {
         printf("S9_PENDING\tslice=slice-0-0\ttier=0\talone=0\theavy=0\tbudget=55\n");
         printf("S9_PENDING\tslice=slice-0-1\ttier=0\talone=1\theavy=0\tbudget=55\n");
@@ -23,7 +23,18 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[1], "step") && argc == 6 && !strcmp(argv[4], "--slice")) {
-        if (!strcmp(argv[5], "slice-0-0")) { printf("S9_WT\tepoch=wt-epoch-1\tstatus=STABLE\trc=0\tslices=1\tchild_scans=0\nS9\tSTEP_SLICE\tslice=slice-0-0\tstatus=DONE_RECORDED\nS9\tSTEP_PENDING\tunstarted=4\tlive=0\tlaunched=1\n"); return 3; }
+        if (!strcmp(argv[5], "slice-0-0") || !strncmp(argv[5], "slice-ok-", 9)) {
+            /* 与真 driver 同一道发片门:启动耗时(S9_FAKE_STARTUP_MS)过后再量剩余时间,按整秒不小于片预算才发片 */
+            const char *st = getenv("S9_FAKE_STARTUP_MS"), *bd = getenv("S9_FAKE_BUDGET");
+            int budget = bd && bd[0] ? atoi(bd) : 55;
+            if (st && st[0]) sy_sleep_ms(atoi(st));
+            if (sy_mono(&t)) return 2;
+            left = strtod(dl, &e) - ((double)t.sec + (double)t.nsec / 1e9);
+            if (!(left > (double)budget - 1.0)) { printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=budget\tbudget=%d\tleft=%.1f\tlaunched=0\n", argv[5], budget, left); return 4; }
+            printf("S9_FAKE_LAUNCH\tslice=%s\tbudget=%d\tleft_ge_budget=%d\n", argv[5], budget, left >= (double)budget);
+            printf("S9_WT\tepoch=wt-epoch-1\tstatus=STABLE\trc=0\tslices=1\tchild_scans=0\nS9\tSTEP_SLICE\tslice=%s\tstatus=DONE_RECORDED\nS9\tSTEP_PENDING\tunstarted=4\tlive=0\tlaunched=1\n", argv[5]);
+            return 3;
+        }
         if (!strcmp(argv[5], "slice-1-3")) { printf("S9\tSTEP_NO_PROGRESS\tslice=slice-1-3\treason=heavy-cap\tlaunched=0\n"); return 4; }
         if (!strcmp(argv[5], "slice-2-4")) { printf("S9\tSTEP_SLICE\tslice=slice-2-4\tstatus=UNKNOWN_NOT_REEXECUTED\n"); return 3; }
         printf("s9: REFUSE step-slice-id\n");

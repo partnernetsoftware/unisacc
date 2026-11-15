@@ -4,9 +4,11 @@
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.limits
 
 static int okn, failed;
 static char why[512];
@@ -34,13 +36,16 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, char *er
 
 int main(void) {
     char root[4096], dir[4400], fake[4400], sha[4500], src[4400], com[4400], tool[4400], bin[4400], table[4400];
+    char g55[16], g45[16], g20[16], want[200];
     static char out[16000], err[4000];
-    int rc;
+    int rc, startup = (int)(lm_get("s9.slice.startup", 0) + 0.999), epoch = (int)(lm_get("s9.epoch.margin", 0) + 0.999), closing = (int)(lm_get("s9.slice.close", 0) + 0.999);
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     if (cx_fmt(dir, sizeof dir, "%s/s9flow-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
     if (cx_fmt(fake, sizeof fake, "%s/driver", dir) || cx_fmt(sha, sizeof sha, "%s/driver.sha256", dir) || cx_fmt(bin, sizeof bin, "%s/flow.bin", dir) ||
         cx_fmt(table, sizeof table, "%s/table.tsv", dir) || cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-flow-fake-driver.cx", root) ||
-        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") || cx_fmt(tool, sizeof tool, "%s/tools/s9-shards-flow.cx", root)) die("fmt");
+        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") || cx_fmt(tool, sizeof tool, "%s/tools/s9-shards-flow.cx", root) ||
+        cx_fmt(g55, sizeof g55, "%d", 55 + startup + epoch) || cx_fmt(g45, sizeof g45, "%d", 45 + startup + epoch) || cx_fmt(g20, sizeof g20, "%d", 20 + startup + epoch)) die("fmt");
+    ck(startup >= 1 && epoch >= 1 && closing >= 1, "limits-declare-startup-epoch-close-margins");
     { char *b[] = {"sh", com, src, "-o", fake, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "fake-driver-compile"); }
     { char *b[] = {"sh", com, tool, "-o", bin, 0}; rc = runv(b, root, 25, out, sizeof out, err, sizeof err); ck(rc == 0, "tool-compile"); }
     {   /* driver.sha256:64 位十六进制加换行,与 s9-shards prepare driver 的记录同形 */
@@ -54,8 +59,17 @@ int main(void) {
     {
         char *v[] = {bin, "emit", root, dir, 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
-        ck(rc == 0 && !strncmp(out, "par 8\n", 6) && count(out, "\texec\t-\t") == 5 && count(out, ";a4=node;") == 5 && count(out, ";timeout_ms=58000\n") == 5, "emit-all-one-exec-node-per-pending-slice-par8-58s");
-        ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, ";a7=slice-0-1;cwd=") && has(err, "S9_FLOW\tpending=5\temitted=5\tclass=all\tpar=8\tgrant_s=55"), "emit-node-argv-and-summary");
+        ck(rc == 0 && !strncmp(out, "par 8\n", 6) && count(out, "\texec\t-\t") == 5 && count(out, "=node;") == 5 && count(out, ";timeout_ms=") == 5, "emit-all-one-exec-node-per-pending-slice-par8");
+        ck(rc == 0 && has(out, "slice-0-1\texec\t-\ta0=sh;a1=") && has(out, "=slice-0-1;") && has(err, "S9_FLOW\tpending=5\temitted=5\tclass=all\tpar=8\t"), "emit-node-argv-and-summary");
+        /* 授予 = 片声明预算 + 启动余量 + 收口余量;启动耗时记在授予里,片预算不动;节点时限 = 授予 + 收尾余量 */
+        if (cx_fmt(want, sizeof want, "=slice-1-2;a%d=--grant;a%d=%s;cwd=", 8, 9, g45)) die("fmt");
+        ck(has(out, want), "emit-grant-is-budget-plus-startup-plus-epoch-margin-45");
+        if (cx_fmt(want, sizeof want, "=slice-2-4;a%d=--grant;a%d=%s;cwd=", 8, 9, g20)) die("fmt");
+        ck(has(out, want) && count(out, g55) >= 3, "emit-grant-follows-each-slice-budget-20-and-55");
+        if (cx_fmt(want, sizeof want, ";timeout_ms=%d\n", (20 + startup + epoch + closing) * 1000)) die("fmt");
+        ck(count(out, want) == 1, "emit-node-timeout-is-grant-plus-close-margin");
+        if (cx_fmt(want, sizeof want, "startup_s=%d\tepoch_s=%d\tclose_s=%d", startup, epoch, closing)) die("fmt");
+        ck(has(err, want), "emit-summary-names-margins-from-limits-table");
     }
     {
         char *v[] = {bin, "emit", root, dir, "--class", "heavy", 0};
@@ -68,36 +82,82 @@ int main(void) {
         ck(rc == 0 && !strncmp(out, "par 1\n", 6) && count(out, "\texec\t-\t") == 1 && has(out, "slice-0-1\t"), "emit-alone-class-serial");
     }
     {
-        char *v[] = {bin, "emit", root, dir, "--class", "light", "--par", "3", "--out", table, 0};
+        char *v[] = {bin, "emit", root, dir, "--class", "light", "--par", "3", "--out", table, "--node-bin", bin, 0};
         size_t n; char *s;
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         s = cx_read(table, &n);
         ck(rc == 0 && s && !strncmp(s, "par 3\n", 6) && count(s, "\texec\t-\t") == 2 && has(s, "slice-0-0\t") && has(s, "slice-2-4\t") && has(out, "S9_FLOW\tpending=5\temitted=2\tclass=light\tpar=3"), "emit-light-class-par-override-out-file");
+        if (cx_fmt(want, sizeof want, "slice-0-0\texec\t-\ta0=%s;a1=node;", bin)) die("fmt");
+        ck(s && has(s, want) && !has(s, "a0=sh;"), "emit-node-bin-runs-prebuilt-node-without-per-node-compile");
         free(s);
     }
     {
-        char *v[] = {bin, "node", root, dir, "slice-0-0", 0};
+        char *v[] = {bin, "node", root, dir, "slice-0-0", "--grant", g55, 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         ck(rc == 0 && has(out, "status=DONE_RECORDED") && has(out, "S9_FLOW_NODE\tslice=slice-0-0\tresult=DONE_RECORDED\tdriver_rc=3"), "node-done-recorded-rc0-driver-output-kept");
     }
     {
-        char *v[] = {bin, "node", root, dir, "slice-1-3", 0};
+        char *v[] = {bin, "node", root, dir, "slice-1-3", "--grant", g55, 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         ck(rc == 4 && has(out, "result=NO_PROGRESS\tdriver_rc=4"), "node-no-progress-rc4");
     }
     {
-        char *v[] = {bin, "node", root, dir, "slice-2-4", 0};
+        char *v[] = {bin, "node", root, dir, "slice-2-4", "--grant", g55, 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         ck(rc == 1 && has(out, "result=NOT_RECORDED\tdriver_rc=3"), "node-unknown-not-reexecuted-is-not-success");
     }
     {
-        char *v[] = {bin, "node", root, dir, "slice-9-9", 0};
+        char *v[] = {bin, "node", root, dir, "slice-9-9", "--grant", g55, 0};
         rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
         ck(rc == 2 && has(out, "result=NOT_RECORDED\tdriver_rc=2"), "node-driver-refusal-kept");
     }
+    {
+        char *v[] = {bin, "node", root, dir, "slice-0-0", 0};
+        rc = runv(v, root, 20, out, sizeof out, err, sizeof err);
+        ck(rc == 2 && has(err, "REFUSE node-grant") && !has(out, "STEP_SLICE"), "node-without-grant-refused");
+    }
+    {   /* 并发 8 路,假 driver 启动耗 2 秒:授予含启动余量时 8 片全部发出,且发片时刻的剩余时间不小于片预算 55 */
+        pid_t kid[8]; int good = 0;
+        char st[16];
+        if (cx_fmt(st, sizeof st, "%d", (startup > 2 ? 2 : 1) * 1000)) die("fmt");
+        setenv("S9_FAKE_STARTUP_MS", st, 1);
+        for (int i = 0; i < 8; i++) {
+            kid[i] = fork();
+            if (kid[i] < 0) die("fork");
+            if (!kid[i]) {
+                static char o[4000], e[1000];
+                char leaf[32];
+                if (cx_fmt(leaf, sizeof leaf, "slice-ok-%d", i)) _exit(9);
+                { char *v[] = {bin, "node", root, dir, leaf, "--grant", g55, 0};
+                  int r = runv(v, root, 30, o, sizeof o, e, sizeof e);
+                  _exit(r == 0 && has(o, "status=DONE_RECORDED") && has(o, "budget=55\tleft_ge_budget=1") ? 0 : 1); }
+            }
+        }
+        for (int i = 0; i < 8; i++) { int s; if (waitpid(kid[i], &s, 0) == kid[i] && WIFEXITED(s) && !WEXITSTATUS(s)) good++; }
+        ck(good == 8, "par8-grant-with-startup-margin-all-launch-budget-intact");
+        /* 同样 2 秒启动,授予只给片预算 55、不含启动余量:发片时剩余 53 秒,小于 55 的整秒门槛,8 路全部 NO_PROGRESS 退出 4 */
+        good = 0;
+        if (cx_fmt(st, sizeof st, "%d", 2000)) die("fmt");
+        setenv("S9_FAKE_STARTUP_MS", st, 1);
+        for (int i = 0; i < 8; i++) {
+            kid[i] = fork();
+            if (kid[i] < 0) die("fork");
+            if (!kid[i]) {
+                static char o[4000], e[1000];
+                char leaf[32];
+                if (cx_fmt(leaf, sizeof leaf, "slice-ok-%d", i)) _exit(9);
+                { char *v[] = {bin, "node", root, dir, leaf, "--grant", "55", 0};
+                  int r = runv(v, root, 30, o, sizeof o, e, sizeof e);
+                  _exit(r == 4 && has(o, "S9\tSTEP_NO_PROGRESS") && has(o, "reason=budget\tbudget=55") && !has(o, "DONE_RECORDED") ? 0 : 1); }
+            }
+        }
+        for (int i = 0; i < 8; i++) { int s; if (waitpid(kid[i], &s, 0) == kid[i] && WIFEXITED(s) && !WEXITSTATUS(s)) good++; }
+        ck(good == 8, "par8-grant-without-startup-margin-all-no-progress");
+        unsetenv("S9_FAKE_STARTUP_MS");
+    }
     {   /* 身份:driver 与记录的 sha 不符,emit 与 node 都拒绝,不发表、不执行 */
         char *v[] = {bin, "emit", root, dir, 0};
-        char *w[] = {bin, "node", root, dir, "slice-0-0", 0};
+        char *w[] = {bin, "node", root, dir, "slice-0-0", "--grant", g55, 0};
         char zero[66];
         memset(zero, '0', 64); zero[64] = '\n'; zero[65] = 0;
         if (cx_write(sha, zero, 65)) die("sha-write");

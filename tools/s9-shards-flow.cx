@@ -1,11 +1,12 @@
 /* tools/s9-shards-flow.cx -- 把 s9 待跑片交给 devsvc flow 并行驱动;本工具只发表与跑单片节点,不做裁决。
- *   sh ./unisacc.com tools/s9-shards-flow.cx -- emit ROOT RUN [--class light|heavy|alone|all] [--par N] [--out FILE] [--driver BIN]
+ *   sh ./unisacc.com tools/s9-shards-flow.cx -- emit ROOT RUN [--class light|heavy|alone|all] [--par N] [--out FILE] [--driver BIN] [--node-bin BIN]
+ *   --node-bin: 节点直接跑预先编好的本工具执行体(sh ./unisacc.com tools/s9-shards-flow.cx -o BIN),免去每节点一次即编。
  *   sh ./unisacc.com tools/s9-shards-flow.cx -- node ROOT RUN LEAF [--driver BIN]
  * emit: 核 driver 与其 .sha256 一致后调 `driver pending ROOT RUN`(与 aggregate 同一 pending 判定),每个待跑片出一行
  *   exec 节点(无依赖);表首行 `par N`:light 与 all 缺省 8,heavy 取 limits 的 s9.heavy.width,alone 为 1。
  *   末行 S9_FLOW pending= emitted= class= par=(给了 --out 时打到 stdout,否则打到 stderr,stdout 只有节点表)。
  *   用法: emit --out T.tsv 后 `devsvc flow run T.tsv --par N --bg` 再 wait;先 light,再 heavy,再 alone,每轮后重发表。
- * node: 给 driver 55 秒的 UNISACC_BOUND_DEADLINE_MONO,跑 `driver step ROOT RUN --slice LEAF`,输出原样带回。
+ * node: 给 driver --grant 秒(emit 按片预算加启动与收口余量算出)的 UNISACC_BOUND_DEADLINE_MONO,跑 `driver step ROOT RUN --slice LEAF`,输出原样带回。
  *   片的 DONE 已落盘(DONE_RECORDED 或 ALREADY_DONE)退出 0;STEP_NO_PROGRESS 退出 4;其余按 driver 退出码,0 与 3 以外原样,否则 1。
  *   退出 0 只表示该片已执行并留下收据,通过与否只由 `driver aggregate` 判定;写栅栏、heavy 上限、身份与冻结核验都在 driver 内,本工具不绕过。
  */
@@ -19,7 +20,13 @@
 #pragma unisa use cxlib.limits
 
 #define SF_MAX 2048
-#define SF_GRANT_S 55
+#define SF_LIST_S 55
+/* 授予 = 片声明预算 + 启动余量(s9.slice.startup,实测 driver 启动 p95 上取整) + 收口余量(s9.epoch.margin:driver 给子进程的截止是外层减它)。
+   启动耗时记在授予里,片内批次仍按声明预算计时;driver 的发片门(剩余时间对片预算)不变。节点 timeout_ms = 授予 + s9.slice.close。 */
+static void refuse(const char *s, const char *d);
+static int sf_lim(const char *id) { double v = lm_get(id, 0); if (v < 0) refuse("limit", id); return (int)(v + 0.999); }
+static int sf_grant(int budget) { return budget + sf_lim("s9.slice.startup") + sf_lim("s9.epoch.margin"); }
+static void sf_arg(np_buf *t, int *k, const char *v) { char key[24]; if (cx_fmt(key, sizeof key, "%sa%d=", *k ? ";" : "", *k)) refuse("format-bound", 0); np_puts(t, key); np_puts(t, v); (*k)++; }
 typedef struct { char leaf[80]; int alone, heavy, budget; } sf_row;
 static sf_row rows[SF_MAX];
 static int nrows;
@@ -38,13 +45,13 @@ static void driver_identity(const char *driver) {
     free(want);
 }
 
-static int run_driver(char **v, const char *root, np_result *r) {
+static int run_driver(char **v, const char *root, np_result *r, int grant) {
     char env[96];
     char *envadd[2];
     sy_ts_t t;
-    if (sy_mono(&t) || cx_fmt(env, sizeof env, "UNISACC_BOUND_DEADLINE_MONO=%.9f", (double)t.sec + (double)t.nsec / 1e9 + SF_GRANT_S)) refuse("deadline-env", 0);
+    if (sy_mono(&t) || cx_fmt(env, sizeof env, "UNISACC_BOUND_DEADLINE_MONO=%.9f", (double)t.sec + (double)t.nsec / 1e9 + grant)) refuse("deadline-env", 0);
     envadd[0] = env; envadd[1] = 0;
-    if (np_run(v, root, envadd, SF_GRANT_S + 2, r, why, sizeof why)) refuse("driver-transport", why);
+    if (np_run(v, root, envadd, grant + 2, r, why, sizeof why)) refuse("driver-transport", why);
     return r->rc;
 }
 
@@ -61,7 +68,7 @@ static int contains(const char *s, size_t n, const char *needle) {
 }
 
 static int emit(int argc, char **argv) {
-    const char *root = argv[2], *run = argv[3], *cls = "all", *out = 0, *driver_opt = 0;
+    const char *root = argv[2], *run = argv[3], *cls = "all", *out = 0, *driver_opt = 0, *node_bin = 0;
     char driver[4400], self[4400], com[4400];
     int par = 0, summary = -1, emitted = 0;
     np_result r = {0};
@@ -71,6 +78,7 @@ static int emit(int argc, char **argv) {
         else if (!strcmp(argv[i], "--par") && i + 1 < argc) par = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--driver") && i + 1 < argc) driver_opt = argv[++i];
+        else if (!strcmp(argv[i], "--node-bin") && i + 1 < argc) node_bin = argv[++i];
         else refuse("emit-argument", argv[i]);
     }
     if (strcmp(cls, "all") && strcmp(cls, "light") && strcmp(cls, "heavy") && strcmp(cls, "alone")) refuse("class", cls);
@@ -80,7 +88,7 @@ static int emit(int argc, char **argv) {
     driver_identity(driver);
     {
         char *v[] = {driver, "pending", (char *)root, (char *)run, 0};
-        int rc = run_driver(v, root, &r);
+        int rc = run_driver(v, root, &r, SF_LIST_S);
         if (rc) { if (r.outn) fwrite(r.out, 1, r.outn, stderr); if (r.errn) fwrite(r.err, 1, r.errn, stderr); fprintf(stderr, "s9-shards-flow: REFUSE pending-listing rc=%d\n", rc); return 2; }
     }
     for (size_t at = 0; at < r.outn;) {
@@ -117,15 +125,26 @@ static int emit(int argc, char **argv) {
         const sf_row *x = &rows[i];
         int k = x->alone ? 2 : x->heavy ? 1 : 0;
         if ((!strcmp(cls, "light") && k != 0) || (!strcmp(cls, "heavy") && k != 1) || (!strcmp(cls, "alone") && k != 2)) continue;
-        np_puts(&t, x->leaf); np_puts(&t, "\texec\t-\ta0=sh;a1="); np_puts(&t, com); np_puts(&t, ";a2="); np_puts(&t, self);
-        np_puts(&t, ";a3=--;a4=node;a5="); np_puts(&t, root); np_puts(&t, ";a6="); np_puts(&t, run); np_puts(&t, ";a7="); np_puts(&t, x->leaf);
-        if (driver_opt) { np_puts(&t, ";a8=--driver;a9="); np_puts(&t, driver_opt); }
-        np_puts(&t, ";cwd="); np_puts(&t, root); np_puts(&t, ";timeout_ms=58000\n");
+        {
+            int g = sf_grant(x->budget), a = 0;
+            char num[40];
+            if (g + sf_lim("s9.slice.close") > (int)lm_get("s9.outer", 0)) refuse("grant-over-outer", x->leaf);
+            np_puts(&t, x->leaf); np_puts(&t, "\texec\t-\t");
+            if (node_bin) sf_arg(&t, &a, node_bin);
+            else { sf_arg(&t, &a, "sh"); sf_arg(&t, &a, com); sf_arg(&t, &a, self); sf_arg(&t, &a, "--"); }
+            sf_arg(&t, &a, "node"); sf_arg(&t, &a, root); sf_arg(&t, &a, run); sf_arg(&t, &a, x->leaf);
+            if (cx_fmt(num, sizeof num, "%d", g)) refuse("format-bound", 0);
+            sf_arg(&t, &a, "--grant"); sf_arg(&t, &a, num);
+            if (driver_opt) { sf_arg(&t, &a, "--driver"); sf_arg(&t, &a, driver_opt); }
+            np_puts(&t, ";cwd="); np_puts(&t, root);
+            if (cx_fmt(num, sizeof num, ";timeout_ms=%d\n", (g + sf_lim("s9.slice.close")) * 1000)) refuse("format-bound", 0);
+            np_puts(&t, num);
+        }
         emitted++;
     }
     if (out) { if (cx_write(out, t.p, (long)t.n)) refuse("table-write", out); }
     else if (t.n) fwrite(t.p, 1, t.n, stdout);
-    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tgrant_s=%d\ttable=%s\n", nrows, emitted, cls, par, SF_GRANT_S, out ? out : "-");
+    fprintf(out ? stdout : stderr, "S9_FLOW\tpending=%d\temitted=%d\tclass=%s\tpar=%d\tstartup_s=%d\tepoch_s=%d\tclose_s=%d\ttable=%s\n", nrows, emitted, cls, par, sf_lim("s9.slice.startup"), sf_lim("s9.epoch.margin"), sf_lim("s9.slice.close"), out ? out : "-");
     free(t.p);
     return 0;
 }
@@ -136,14 +155,19 @@ static int node(int argc, char **argv) {
     np_result r = {0};
     long t0 = sy_now_ms();
     int rc, result;
-    if (argc == 7 && !strcmp(argv[5], "--driver")) driver_opt = argv[6];
-    else if (argc != 5) refuse("node ROOT RUN LEAF [--driver BIN]", 0);
+    int grant = 0;
+    for (int i = 5; i < argc; i++) {
+        if (!strcmp(argv[i], "--driver") && i + 1 < argc) driver_opt = argv[++i];
+        else if (!strcmp(argv[i], "--grant") && i + 1 < argc) grant = atoi(argv[++i]);
+        else refuse("node ROOT RUN LEAF --grant S [--driver BIN]", argv[i]);
+    }
+    if (grant < 1 || grant > (int)lm_get("s9.outer", 0)) refuse("node-grant", "need --grant 1..s9.outer");
     if (root[0] != '/' || run[0] != '/') refuse("absolute-root-and-run", 0);
     if (cx_fmt(driver, sizeof driver, "%s%s", driver_opt ? driver_opt : run, driver_opt ? "" : "/driver")) refuse("path-bound", 0);
     driver_identity(driver);
     {
         char *v[] = {driver, "step", (char *)root, (char *)run, "--slice", (char *)leaf, 0};
-        rc = run_driver(v, root, &r);
+        rc = run_driver(v, root, &r, grant);
     }
     if (r.outn) fwrite(r.out, 1, r.outn, stdout);
     if (r.errn) fwrite(r.err, 1, r.errn, stderr);

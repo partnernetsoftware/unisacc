@@ -37,7 +37,7 @@ static s9_slice slices[S9_MAX];static int nslices;
 static int initializing;
 static volatile sig_atomic_t interrupted;
 static void stop_requested(int signal_number){interrupted=signal_number;}
-static double outer_end;
+static double outer_end;static long long op_begin;
 static void fail(const char *s){fprintf(stderr,"s9: REFUSE %s %s\n",s,sw);exit(2);}
 static double L_(const char *id){double v=lm_get(id,0);if(v<0)fail(id);return v;}
 static char *L_CMD(void){static char b[16];if(cx_fmt(b,sizeof b,"%d",(int)L_("s9.cmd")))fail("format-bound");return b;}
@@ -81,6 +81,17 @@ static void freeze_check(void){
  if(m.has_executor){path(p,sd,"executor/all-waves");if(as_sha_file(p,0,h,0,sw,sizeof sw)||strcmp(h,m.exec_sha))fail("executor-changed");path(p,sd,"executor/run-batch");if(as_sha_file(p,0,h,0,sw,sizeof sw)||strcmp(h,m.runner_sha))fail("runner-changed");}
  const char *sealed[]={"driver","plan.tsv","mode","tier","nonce","selection.tsv","inputs","checker.identity"};for(size_t i=0;i<sizeof sealed/sizeof sealed[0];i++){path(p,sd,sealed[i]);if(!present(p))continue;char hp[4400];int z=snprintf(hp,sizeof hp,"%s.sha256",p);if(z<0||(size_t)z>=sizeof hp)fail("hash-path");size_t hn;char *want=as_read(hp,0,&hn,sw,sizeof sw);if(!want||hn!=65||as_sha_file(p,0,h,0,sw,sizeof sw)||memcmp(want,h,64))fail("sealed-artifact-changed");free(want);}
  path(p,sd,"inputs");size_t a,b;char *old=as_read(p,0,&a,sw,sizeof sw),*now=input_snapshot(&b);if(!old||a!=b||memcmp(old,now,a))fail("frozen-input-changed");free(old);free(now);as_free(&m);
+}
+/* Same-input identity for one slice of a parallel drive (step --slice).  The manifest identity, the map, both executors
+   and every sealed artifact are re-read and compared on each call; nothing is cached.  What is left out are the scans
+   that the same slice repeats anyway: the child fingerprints each material its batches use, wt-close measures the
+   worktree against RUN/inputs after the child, and aggregate verifies all of it again. */
+static void freeze_check_slice(void){
+ as_manifest m;as_ident live;if(as_load(sd,&m,sw,sizeof sw)||as_identity(sr,0,&live,sw,sizeof sw)||as_ident_diff(&live,&m.ident))fail("frozen-input-changed");
+ char p[4400],h[65];path(p,sd,"materials.tsv");if(as_sha_file(p,0,h,0,sw,sizeof sw)||strcmp(h,m.map_sha))fail("map-changed");
+ if(m.has_executor){path(p,sd,"executor/all-waves");if(as_sha_file(p,0,h,0,sw,sizeof sw)||strcmp(h,m.exec_sha))fail("executor-changed");path(p,sd,"executor/run-batch");if(as_sha_file(p,0,h,0,sw,sizeof sw)||strcmp(h,m.runner_sha))fail("runner-changed");}
+ const char *sealed[]={"driver","plan.tsv","mode","tier","nonce","selection.tsv","inputs","checker.identity"};for(size_t i=0;i<sizeof sealed/sizeof sealed[0];i++){path(p,sd,sealed[i]);if(!present(p))continue;char hp[4400];if(cx_fmt(hp,sizeof hp,"%s.sha256",p))fail("hash-path");size_t hn;char *want=as_read(hp,0,&hn,sw,sizeof sw);if(!want||hn!=65||as_sha_file(p,0,h,0,sw,sizeof sw)||memcmp(want,h,64))fail("sealed-artifact-changed");free(want);}
+ as_free(&m);
 }
 static int copy_checker_executor(const char *checker){
  int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");as_manifest m;as_ident live;if(as_load(sd,&m,sw,sizeof sw)||m.has_executor||as_identity(sr,0,&live,sw,sizeof sw)||as_ident_diff(&live,&m.ident))fail("checker-copy-parent");char hash[65],p[4400],dest[4400],record[4400];if(as_sha_file(checker,0,hash,0,sw,sizeof sw))fail("checker-copy-sha");np_buf expected={0};checker_provenance(&m,hash,&expected);path(p,sd,"checker.identity");size_t n;char *wire=as_read(p,0,&n,sw,sizeof sw);if(!wire||!checker_matches(&expected,wire,n))fail("checker-copy-provenance");free(wire);
@@ -344,8 +355,9 @@ static int choose_slice(const int *pending,int active,int writer_active,s9_sched
  if(q->reserved>=0)q->quota--;
  q->turn=(slices[chosen].tier+1)%3;return chosen;
 }
-static int step(const char *only){
- freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);
+static int step(const char *only,int probe){
+ /* probe: 0 run, 1 measure startup with the same-input check, 2 measure it with the full check; a probe never launches. */
+ if(only&&probe!=2)freeze_check_slice();else freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);
  /* --slice LEAF: several single-slice steps share one RUN.  The run lock then covers only the claim
     (fence check plus START record), so wait for it with a bound instead of refusing at once. */
  for(int tries=0;only&&lock<0&&tries<200;tries++){usleep(50000);lock=as_lock(sd,1,sw,sizeof sw);}
@@ -361,6 +373,8 @@ static int step(const char *only){
  }
  /* Wave-level worktree gate: freeze_check above just measured the tree equal to the sealed RUN/inputs;
     this step's children skip their own scans and wt-close measures once after all of them ended. */
+ /* Startup is everything between process start and the launch gate; the caller grants it on top of the slice budget. */
+ if(only){printf("S9_SLICE_STARTUP\tslice=%s\tms=%lld\tleft=%.1f\tcheck=%s\n",only,(as_now()-op_begin)/1000000,outer_end-(double)as_now()/1e9,probe==2?"full":"same-input");if(probe){close(lock);printf("S9\tSTEP_PROBE\tslice=%s\tlaunched=0\n",only);return 3;}}
  char epoch[4400],eleaf[80],edl[64];int launched_any=0;if(cx_fmt(eleaf,sizeof eleaf,"wt-epoch-%lld",as_now()))fail("format-bound");path(epoch,sd,eleaf);if(present(epoch))fail("wt-epoch-exists");
  if(cx_fmt(edl,sizeof edl,"%.9f",outer_end-L_EPOCH_MARGIN()))fail("format-bound");np_buf eslices={0};
  for(;;){
@@ -542,7 +556,7 @@ static int controls(void){
  if(unlink(p))fail("control-clean");path(p,sd,"nonce");if(unlink(p)||rmdir(sd))fail("control-clean");free(reg.b);printf("S9_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
 }
 static int operate(int argc,char **argv){
- width_from_env();bounded();if(argc==2&&!strcmp(argv[1],"controls"))return controls();if(argc<4)fail("usage: init|prepare|step|aggregate|retry ROOT RUN ...");
+ op_begin=as_now();width_from_env();bounded();if(argc==2&&!strcmp(argv[1],"controls"))return controls();if(argc<4)fail("usage: init|prepare|step|aggregate|retry ROOT RUN ...");
  /* Shard arguments are validated before any session is opened, so a malformed shard request is refused by name and never by a side effect. */
  if(!strcmp(argv[1],"aggregate")&&argc>4){long long a,b;int ok=(argc==7&&!strcmp(argv[4],"--part")&&!as_digits(argv[5],&a)&&!as_digits(argv[6],&b)&&b>=1&&b<=64&&a<b)||(argc==6&&!strcmp(argv[4],"--merge")&&!as_digits(argv[5],&b)&&b>=1&&b<=64);if(!ok)fail("aggregate [--part K N | --merge N]");}
  int init=!strcmp(argv[1],"init"),is_child=!strcmp(argv[1],"child");initializing=init;setup(argv[2],argv[3],init);
@@ -564,9 +578,10 @@ static int operate(int argc,char **argv){
   if(argc==7&&!strcmp(argv[4],"--part")&&!as_digits(argv[5],&a)&&!as_digits(argv[6],&b)&&b>=1&&b<=64&&a<b)return aggregate((int)a,(int)b,0);
   if(argc==6&&!strcmp(argv[4],"--merge")&&!as_digits(argv[5],&b)&&b>=1&&b<=64)return aggregate(0,(int)b,1);
   fail("aggregate [--part K N | --merge N]");}
- if(!init&&!strcmp(argv[1],"step")&&argc==6&&!strcmp(argv[4],"--slice"))return step(argv[5]);
+ if(!init&&!strcmp(argv[1],"step")&&argc==6&&!strcmp(argv[4],"--slice"))return step(argv[5],0);
+ if(!init&&!strcmp(argv[1],"step")&&argc==7&&!strcmp(argv[4],"--slice")&&(!strcmp(argv[6],"--probe")||!strcmp(argv[6],"--probe-full")))return step(argv[5],!strcmp(argv[6],"--probe")?1:2);
  if(!init&&!strcmp(argv[1],"pending")){if(argc!=4)fail("pending ROOT RUN");load_plan();int n=0;for(int i=0;i<nslices;i++)if(slice_pending(&slices[i])){printf("S9_PENDING\tslice=%s\ttier=%d\talone=%d\theavy=%d\tbudget=%d\n",slices[i].leaf,slices[i].tier,slices[i].alone,slices[i].heavy,slice_budget(&slices[i]));n++;}printf("S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n",n,nslices);return 0;}
- if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step(0);if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
+ if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step(0,0);if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
  if(argc<5)fail("map-required");
  int commit=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"commit");int rel=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"release");for(int i=5;i<argc;i++)if(!strcmp(argv[i],"--tier")&&!commit&&!rel)fail("init --tier commit|release cannot combine selection flags");
  {char awelf[4400];int has=aw_native(awelf,sizeof awelf);if(has){char *v[]={sb,L_CMD(),awelf,"init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}else{char *v[]={sb,L_CMD(),"sh",sc,"tools/all-waves.cx","--","init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}}
