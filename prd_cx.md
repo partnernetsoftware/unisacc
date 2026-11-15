@@ -46,7 +46,8 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 
 对项目所有者假设「按 QuickJS 把 sys + os + net 做完整即够」的裁定:成立一半。系统调用高度的面确实可以很小;但 QuickJS 没有套接字,且它不需要 path、text、mem、stream 是因为 JS 自带,所以核心是 sys + os 加四个补位层,net 另从 Rust 与 Node 推导并先孵化。
 
-tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `cx.base`(连同 `cx/core`、`cx/owned.cx`);`cx.stream` 依赖 `ext.memx`。拆包与并入是稳定声明的前置。
+分工:给写 `.cx` 的人选包用的库包一览在 [prd_cx_spec.md](prd_cx_spec.md) 3.4a 节;本节只放设计取舍、现状核对与改进路线,不重复包清单。
+tlib 侧现状(2026-11-15 核,真源 `build/tlib-packages.tsv` 与 `build/layer-api/PKG.tsv`,本表只是面向用户的分层,包清单以真源为准):CXS-C4 拆包已完成,`cx.mem`、`cx.text`、`cx.sys`、`cx.os` 已从 `cx.base` 拆出,`cx.base` 只剩 `cx/core` 执行器与 `cx/owned.cx`;tlib 共 18 包,上表之外还有内部环 `cx.base`、`cx.plan`、`cx.runtime`、`cx.compile`、`cx.driver`,扩展 `ext.sysx`,工具侧 `tools.cxlib`;上表的 `ext.procx` 不是独立 tlib 包。`cx.stream` 仍依赖 `ext.memx`(未并入)。包边界与版本派生表审视(2026-11-15,1855 个 .cx 6255 条 use 实测,脚本 $CLAUDE_JOB_DIR/tmp/cxpkg/usegraph.cx):包间无环、无未声明边;deps 列 13 条声明未用(cx.compile 5 条途径未查);tools.cxlib 独大(netpack 一单元占扇入 49%,只 6 单元触 cx.runtime 却整包依赖);cx.sys/cx.os 同目录按文件拆包加 17 条软链;ext.memx/ext.textx 与 cx/mem、cx/text 同名文件待比对;一次接口变更约 6 条命令加 1 处手改、7 个以上文件。改进排序(均工具类不占槽,除注明):(A) 派生表一条命令闭环(layer-api --bump 回写 tlib-packages,derive 一次跑完,major 拒写)先做,落 v0.0.68;(B) tools.cxlib 按面拆约 4 包只改 roots;(C) 版本粒度下沉到 faces(cx.compile 部分待 R3 收尾);(D) deps 列由 use 边生成并核对;(E) ext.memx/textx 去重(库包源类,候选池);(F) cx.os 物理分目录消软链(依赖 D1b 与 0.0.70,排其后)。
 
 ### 0.3 各区面与现状
 

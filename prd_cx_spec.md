@@ -84,6 +84,30 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 - 错误码只走返回值:L0 失败返回 `-errno`,不靠全局 `errno` 跨模块传递(CX-Y-4)。
 - 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build 写 `use text.build`。
 
+### 3.4a 库包一览(怎么选包)
+
+真源 `build/tlib-packages.tsv`(版本、依赖、包根)与 `build/layer-api/PKG.tsv`(公开接口);本表是给写 `.cx` 的人选包用的摘要,数字为 2026-11-15 main 的接口数,以真源为准。设计取舍、审视结论与路线在 [prd_cx.md](prd_cx.md) 0.2 节。
+
+| 包 | use 写法 | 用途 | 接口数 | 谁可用 |
+|---|---|---|---|---|
+| cx.mem | `mem.heap`、`mem.bytes`、`mem.arena`、`mem.vec`、`mem.map` | 堆、带界字节、arena、vec、map | 61 | 全部 |
+| cx.text | `text.text`、`text.fmt`、`text.num`、`text.utf8`、`text.codec` | 带界文本、格式化、数字、UTF-8、编码 | 44 | 全部 |
+| cx.sys | `sys.io`、`sys.mem`、`sys.sha`、`sys.dl`、`sys.netmsg` 等 | fd 读写、映射、摘要、动态库、网络底层 | 88 | 全部 |
+| cx.os | `sys.fs`、`sys.proc`、`sys.env`、`sys.time`、`os.utc` | 文件系统、进程、环境、时间与截止 | 135 | 全部 |
+| cx.path | `path.path` | 纯词法路径,posix 与 win | 27 | 全部 |
+| cx.stream | `stream.item`、`stream.pipe`、`stream.rw` | 带回执的有界字节管道与读写句柄 | 32 | 全部 |
+| ext.memx、ext.textx | `mem.arena`、`text.build`、`text.deflate`、`text.num` | arena、字符串构造、deflate | 5、27 | 工具、测试、应用 |
+| ext.sysx | `sysx.process`、`sysx.poll`、`sysx.tty` 等 | 进程树、回收、poll、tty、跟踪 | 32 | 工具、测试、应用 |
+| ext.net | `net.addr`、`net.tcp`、`net.udp`、`net.unix`、`net.resolve`、`net.sock` | 地址、TCP、UDP、Unix 域,带截止收发 | 37 | 工具、测试、应用 |
+| ext.crypto | `crypto.sha256`、`crypto.gcm`、`crypto.x25519` 等 | 纯 cx 密码学与 TLS 1.3 记录层 | 132 | 工具、测试、应用 |
+| ext.tsvx | `tsvx.merge3`、`tsvx.read` | TSV 三方合并 | 11 | 工具、测试、应用 |
+| tools.cxlib | `cxlib.NAME` | 工具侧库:发布、构造、进程运行、身份、测试计划 | 467 | 只给 tools、tests |
+| cx.base、cx.plan、cx.runtime、cx.compile、cx.driver | `core.*`、`cx0.*`、`runtime.*`、`compiler.*`、`driver.*` | 执行器、模块规划、运行库、编译器、驱动(产品内部环) | 93、14、349、524、34 | 产品与其工具;应用不要 use |
+
+- 选包顺序:先 cx 核心六包,不够再 ext;产品层(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)不得 use ext 与 tools.cxlib。
+- 只导入需要的符号用 `use NAME::sym`,避免整模块带入无关依赖(实例:整模块 use cxlib.runnerprep 曾把 tlibpkg 拖进 s9-native)。
+- 编译器要求直接 use 拥有该符号的模块,不经中间模块转手。
+
 ### 3.5 计划中语法(未实现,不可用)
 
 本节只是规格草案与拒绝合同,设计全文在 [prd_cx.md](prd_cx.md) 第 10 节;export 的事实来源是 10.7(D1 设计)。下列写法在当前产品上**全部未实现、不可用**;写了会在规划期被具名拒绝(rc=1),不会被静默接受。下表"计划中的拒绝"列的文案同为设计(未实现,以 10.7 的 X1 至 X13 为准),不是现产品输出。计划版本 0.0.64,以届时的候选为准。

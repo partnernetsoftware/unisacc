@@ -60,6 +60,7 @@
 #pragma unisa use cxlib.cxroot
 #pragma unisa use sys.env
 #pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.platformscope
 #pragma unisa use cxlib.tlibpkg
 
 /* an unlinked spool file the drained output of a bounded child goes to */
@@ -486,8 +487,31 @@ static void mark_guards(const char *id) {
 }
 
 /* ---------- registry ---------- */
-typedef struct { char *id, *source, *entry, *args, *materials, *tier; int budget; } Batch;
+typedef struct { char *id, *source, *entry, *args, *materials, *tier, *platform; int budget; } Batch;
 static Batch batch[MAXBATCH];
+/* A batch registered for another native host cannot run here.  It is reported as
+   NOT_APPLICABLE, counted separately, and never as a failure: before this, an osx row
+   selected by a change was handed to run-batch, refused there, and became a red batch. */
+static int nna;
+static int host_allows(int b) {
+    if (psc_platform_allowed(batch[b].platform)) return 1;
+    printf("NOT_APPLICABLE\t%s\tplatform=%s\thost_scope=%s\n", batch[b].id, batch[b].platform, psc_host_scope());
+    nna++;
+    return 0;
+}
+/* An inherited hard deadline that has already passed refuses every child before it starts, so
+   one named REFUSE here replaces a wall of per-batch failures the caller would have to read. */
+static void refuse_expired_inherited_deadline(void) {
+    const char *v = getenv("UNISACC_BOUND_DEADLINE_MONO");
+    if (!v || !*v) return;
+    { char *end = 0; double d = strtod(v, &end); sy_ts_t t;
+      if (end == v || (end && *end) || !(d > 0)) return;
+      if (sy_mono(&t)) return;
+      if (d <= (double)t.sec + (double)t.nsec / 1e9) {
+          printf("REFUSE\tinherited-deadline-expired\tUNISACC_BOUND_DEADLINE_MONO=%s\n", v);
+          exit(2);
+      } }
+}
 static int nbatch;
 static const char *selected_tier;
 static void on_batch(const tp_batch_view *v, void *ctx) {
@@ -496,6 +520,7 @@ static void on_batch(const tp_batch_view *v, void *ctx) {
     if (nbatch == MAXBATCH) die("too many batches");
     batch[nbatch].id = zkeep(v->id); batch[nbatch].source = zkeep(v->source); batch[nbatch].entry = zkeep(v->entry);
     batch[nbatch].args = zkeep(v->args); batch[nbatch].materials = zkeep(v->materials);
+    batch[nbatch].platform = zkeep(v->platform);
     batch[nbatch].tier = zkeep(v->tier); batch[nbatch].budget = atoi(v->budget);
     nbatch++;
 }
@@ -867,6 +892,7 @@ static void kit_prepare(void) {
    窗口不够就如实 DEFERRED,注册预算本身不动。--hard-deadline-ms 是测试钩子,给了就按给的数。 */
 static long window_end;
 static int run(const int *sel, int nsel, int jobs) {
+    refuse_expired_inherited_deadline();
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
     long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0;
@@ -958,8 +984,8 @@ static int run(const int *sel, int nsel, int jobs) {
             ch[k] = ch[nrun - 1]; nrun--; k--;
         }
     }
-    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\n",
-           pass, fail, deferred, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms);
+    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\tnot_applicable=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\n",
+           pass, fail, deferred, nna, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms);
     return fail ? 1 : deferred ? 3 : 0;
 }
 
@@ -1230,6 +1256,7 @@ int main(int argc, char **argv) {
             else if (ll == 3 && tx_prefix(lay, 3, "all", 3)) all++;
             else if (ll == tx_len(layer, 64) && tx_prefix(lay, ll, layer, ll)) own++;
             else continue;
+            if (!host_allows(b)) continue;
             printf("LAYER\t%s\tlayer=%.*s\n", batch[b].id, at < 0 ? 7 : (int)ll, at < 0 ? "unknown" : lay);
             sel[nsel++] = b;
         }
@@ -1245,6 +1272,7 @@ int main(int argc, char **argv) {
             for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
             if (b == nbatch) { fprintf(stderr, "affected: REFUSE id %s is not an IMPLEMENTED SOURCE batch\n", files[k]); return 2; }
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
+            if (!host_allows(b)) continue;
             sel[nsel++] = b;
             printf("SELECTED\t%s\n", batch[b].id);
         }
@@ -1313,6 +1341,7 @@ int main(int argc, char **argv) {
                 printf("DEFERRED_BY_SYMBOL\t%s\twhy=%s\tvia=%s\treason=symbol-unreferenced\n", batch[b].id, display(why), via_name[v]);
                 nsymdefer++; continue;
             }
+            if (!host_allows(b)) continue;
             printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
         }
@@ -1323,6 +1352,6 @@ int main(int argc, char **argv) {
     }
     if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel + nsymdefer, ndefer + nsel + nsymdefer);
     if (sym_on) printf("DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", nsymdefer, nsel, ndefer + nsymdefer + nsel);
-    printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
+    printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\tnot_applicable=%d\n", nch, nsel, nbatch, nna);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }

@@ -15,7 +15,9 @@
 - 版本:0.0.65 已公开(2026-11-14T18:02:31Z,Latest,已装,APE sha 889dfe853837d80b)。冻结 REV b7520b8e81,F=c43ba16b01(v0.0.65 与 v0.0.65-src),X=cb1421d99f,Y1=ecd4201d42,Y2=7c219edbc3;整链 real8 一次跑通 rc=0 3694 s;CI run 43620762916 十作业全 success;裁决 NOT_QUALIFIED unknown=1(s9 commit 档按设计)。证据 $CLAUDE_JOB_DIR/tmp/rel65y/。回滚:release/rollback.txt;0.0.63 备份 ~/.cache/unisacc/ape-0.0.63(sha 04b85e6e)。内容:cxmod 三源统一、D1a export、链工具三项(环境白名单、g2 金丝雀、看门狗)。
 - 0.0.66 已公开(2026-11-14T23:12:18Z,Latest,已装,APE sha 75c4e940):整链 real9 rc=0 3676 s(REV 24bfc44c70);F=e96881d77d(v0.0.66 与 v0.0.66-src),X=9722945843,Y1=176e10114f,Y2=7870a5256e;CI run 43648734577 十作业全 success;s9 329 批 310/7/12,无产品回归;裁决 NOT_QUALIFIED unknown=1。回滚 release/rollback.txt,备份 ~/.cache/unisacc/ape-0.0.65。证据 $CLAUDE_JOB_DIR/tmp/rel66/、/tmp/s966/。待修(下一版分支):surface-doc-gen 与 dock-audit 树内漂移、s9-native 缓存键不含依赖模块、candidate-chain 材料未接线连带同片 6 批不执行。会话根 /tmp/unisacc-session-build-lr0060 曾于 11-15 02:14 至 05:20 被未查明者整删,已按配方重建。
 - 上一版 0.0.63:2026-11-14T14:12:06Z 公开,F=9f3d367e44,APE sha 04b85e6e;0.0.62 备份 ~/.cache/unisacc/ape-0.0.62。
-- 下一步:0.0.67 在分支 v0.0.67(随行小修四项、cx.stream R3);加速方案 A 至 E 见 prd.md 候选池,先做 A(g3 移出关键路径)与 B(s9 不挡公开)。
+- 0.0.67(分支 v0.0.67,领先 main 14 提交,8ac1789b39):R3 与随行小修全部入库(s9-native 缓存键、candidate-chain 材料、两处漂移、speed-probe 落盘、release-sweep、s9-shards 符号链接根、no-out-snap、affected 平台过滤)、加速方案 A 第 1 至 3 步;下一步:冻结合入 main、chain-ready、起整链(依赖已变,用新输出目录)。未验:R3 的 9 败只凭文案判定、commit-own 批 UNKNOWN、加速待放开 chain-run width=1 互斥。
+- 0.0.68(分支 v0.0.68,进行中):L4 零解码实现中(omp-cdx;首步实测布局段 36.8 ms);库包改进 A 派生表一条命令闭环(子代理);check-lower-fnreuse 已入 4423d9bccf。随行顺序与验收见 prd.md 版本表。
+- 编排:omp-go、omp-cdx 两窗口经 bin/mux envelope 派工,子代理至多 2 个;写域互不相交,版本工作目录根放 unisacc.com 符号链接。
 - 0.0.65 已知缺口(发布说明已写):s9 325 批 309/12/4,7 项为 s9 根内候选缺可执行位的准备失误(单跑通过);tlib-prep-refuse 为看门狗提交引入的工具依赖缺陷;candidate-chain 批超 55 s 预算待拆批;看门狗未给基线致 44 次误判;已装编译器对大型二维自动数组报 not covered(最小复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 
 ## 决定(别人必须遵守)

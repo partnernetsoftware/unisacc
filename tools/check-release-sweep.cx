@@ -1,6 +1,7 @@
 /* tools/check-release-sweep.cx -- 0.0.58 T8 release-sweep 正控与负控检查。
  *
  *   sh ./unisacc.com tools/check-release-sweep.cx [-- ROOT OUT]
+ * 所有模式的私有夹具放在 HOME/.cache/unisacc/chains 下，独立于 ROOT/OUT；退出时清理。
  *
  * 覆盖：
  * (1) native 预编译 tools/release-sweep.cx（tq_native，准备步不计 PASS）；
@@ -27,6 +28,10 @@
 
 static int failed;
 static char root[4096], work[4096], bin[4400], bound[4400];
+
+static void cleanup_work(void) {
+    if(work[0]&&cx_rmtree(work))fprintf(stderr,"release-sweep-check: private workspace cleanup failed: %s\n",work);
+}
 
 static void ck(int ok, const char *name) {
     if (!ok) failed++;
@@ -63,25 +68,23 @@ int main(int argc, char **argv) {
     int rc;
 
     if (sy_realpath(".", root, sizeof root) < 0) return 2;
-    if (argc >= 3 && argv[1][0] && argv[2][0]) {
-        if (sy_realpath(argv[1], root, sizeof root) < 0) return 2;
-        /* the tool refuses a trash under /tmp (a guard, kept): the workdir must not follow OUT, which a
-           batch runner may place under /tmp; use a unique non-/tmp dir, removed at the end */
-        /* ROOT/.trash is ignored, not under /tmp, and a root the deletion guard lets cx_rmtree empty */
-        char dtrash[4400];
-        if (cx_fmt(dtrash, sizeof dtrash, "%s/.trash", root) ||
-            cx_fmt(work, sizeof work, "%s/sweep-check-%d-%ld", dtrash, sy_pid(), sy_now_ms())) return 2;
-        (void)sy_mkdir(dtrash, 0755);
-    } else if (argc == 2 && argv[1][0]) {
-        if (cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", argv[1], sy_pid(), sy_now_ms())) return 2;
-        (void)sy_mkdir(argv[1], 0755);
-    } else {
-        char dot_trash[4400];
-        if (cx_fmt(dot_trash, sizeof dot_trash, "%s/.trash", root) ||
-            cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", dot_trash, sy_pid(), sy_now_ms())) return 2;
-        (void)sy_mkdir(dot_trash, 0755);
+    if (argc >= 3 && argv[1][0] && argv[2][0] && sy_realpath(argv[1], root, sizeof root) < 0) return 2;
+    {
+        const char *h=sy_env("HOME");char home[4400],cache[4400],resolved[4400];
+        if(!h||!h[0]||sy_realpath(h,home,sizeof home)<0){fprintf(stderr,"release-sweep-check: REFUSE non-tmp HOME required\n");return 2;}
+        const char *dirs[]={".cache",".cache/unisacc",".cache/unisacc/chains"};
+        for(int i=0;i<3;i++){
+            if(cx_fmt(cache,sizeof cache,"%s/%s",home,dirs[i]))return 2;
+            int r=sy_mkdir(cache,0700);if(r&&r!=-EEXIST){fprintf(stderr,"release-sweep-check: cache mkdir failed rc=%d: %s\n",r,cache);return 2;}
+        }
+        /* This exact, non-symlinked parent is already whitelisted by cx_rmtree. */
+        if(sy_realpath(cache,resolved,sizeof resolved)<0||strcmp(cache,resolved)||
+           !strcmp(resolved,"/tmp")||!strncmp(resolved,"/tmp/",5)){
+            fprintf(stderr,"release-sweep-check: REFUSE private cache must resolve outside /tmp without symlinks\n");return 2;
+        }
+        if(cx_fmt(work,sizeof work,"%s/release-sweep-check-XXXXXX",cache)||!mkdtemp(work))return 2;
+        if(atexit(cleanup_work)){cleanup_work();return 2;}
     }
-    if (sy_mkdir(work, 0700)) return 2;
 
     if (cx_fmt(tool_src, sizeof tool_src, "%s/tools/release-sweep.cx", root) ||
         cx_fmt(bin, sizeof bin, "%s/release-sweep.native", work) ||
@@ -554,7 +557,9 @@ int main(int argc, char **argv) {
         }
         cx_rmtree(base);
     }
-    cx_rmtree(work);
+    int cleaned=cx_rmtree(work);
+    ck(cleaned==0&&sy_exists(work)==0,"private-workspace-cleaned");
+    if(!cleaned)work[0]=0;
 
     sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
     return failed ? 1 : 0;
