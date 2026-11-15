@@ -79,6 +79,7 @@ typedef struct {
     char cache_sub[128];      /* $HOME 下实例目录前缀 */
     char inst_env[64];        /* 指定实例目录的环境变量名 */
     char lockname[CFG_LOCKS][64]; int nlockname;   /* 约定锁名(协作约定,不强制) */
+    char lockpfx[CFG_LOCKS][512];                  /* lock 行第三列:逗号分隔的写域,以 / 结尾为目录前缀,否则精确路径;- 或空为无 */
     char table[1024];
 } RepoCfg;
 static RepoCfg cfg;
@@ -105,7 +106,13 @@ static int cfg_load(const char *root) {
         kl = t - s; vl = t2 - t - 1;
         if (kl == 3 && !memcmp(s, "key", 3)) continue;   /* 表头 */
         if (kl == 3 && !memcmp(s, "lib", 3)) { if (nlib >= 3 || !cfg_set(cfg.lib[nlib], sizeof cfg.lib[0], t + 1, vl)) bad++; else nlib++; continue; }
-        if (kl == 4 && !memcmp(s, "lock", 4)) { if (cfg.nlockname >= CFG_LOCKS || !cfg_set(cfg.lockname[cfg.nlockname], 64, t + 1, vl)) bad++; else cfg.nlockname++; continue; }
+        if (kl == 4 && !memcmp(s, "lock", 4)) {
+            char *t3 = t2 < e ? memchr(t2 + 1, '\t', e - t2 - 1) : 0; long pl = t2 < e ? (t3 ? t3 : e) - t2 - 1 : 0;
+            if (cfg.nlockname >= CFG_LOCKS || !cfg_set(cfg.lockname[cfg.nlockname], 64, t + 1, vl)) { bad++; continue; }
+            cfg.lockpfx[cfg.nlockname][0] = 0;
+            if (pl > 0 && !(pl == 1 && t2[1] == '-') && !cfg_set(cfg.lockpfx[cfg.nlockname], sizeof cfg.lockpfx[0], t2 + 1, pl)) bad++; else cfg.nlockname++;
+            continue;
+        }
         for (k = 0; k < 7; k++) if ((long)strlen(keys[k]) == kl && !memcmp(s, keys[k], kl)) break;
         if (k == 7 || (seen & (1 << k)) || !cfg_set(dst[k], cap[k], t + 1, vl)) { bad++; continue; }
         seen |= 1 << k;
@@ -588,10 +595,10 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         if (r) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s for node %s: %s\n", nm, f.n[i].id, resp); lk_drop(root); fl_free(&f); return 1; }
     }
     nl = nheld;
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); fl_free(&f); return 2; }
     r = fl_run(&f, rdir, jobs, dl, 0, &s);
     lk_drop(root);
-    if (r < 0) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable (%d)\n", rdir, r); return 2; }
+    if (r < 0) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable (%d)\n", rdir, r); fl_free(&f); return 2; }
     F(p, sizeof p, "%s/events.tsv", rdir);
     if (sy_read_file(p, &eb, &en, 1 << 24) == 0 && eb) {
         char *q = (char *)eb, *e, *c[7], sha[80]; int nc, k;
@@ -613,7 +620,8 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         F(p, sizeof p, "%s/out/%s.out", rdir, f.n[0].id); dump(p, stdout); fflush(stdout);
         F(p, sizeof p, "%s/out/%s.err", rdir, f.n[0].id); dump(p, stderr);
         fprintf(stderr, "X\t%s\trc=%d\tms=%s\tvia=%s\trun=%s\n", xst, f.n[0].rc, xms, svc_on ? "service" : "local", rdir);
-        return f.n[0].rc < 0 ? 1 : f.n[0].rc;
+        r = f.n[0].rc < 0 ? 1 : f.n[0].rc; fl_free(&f);
+        return r;
     }
     for (i = 0; cat && i < f.count; i++) {
         sy_stat_t st; long on, en2;
@@ -667,6 +675,19 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x [--timeout-ms
         else break;
     }
     if (a >= argc || argc - a > FL_MAX_ARGV) return 2;
+    if (!strcmp(argv[a], "git") && a + 1 < argc) {   /* 危险 git 子命令具名拒绝(rc 125);DEVSVC_ALLOW_DANGEROUS=1 放行并记事件。先跳过 -C X、-c X、--git-dir= 等前置选项再取子命令词 */
+        static const char *bad[] = {"stash", "reset", "clean", "checkout", "restore", "rebase", 0};
+        static const char *withval[] = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", 0};
+        const char *hit = 0, *al = getenv("DEVSVC_ALLOW_DANGEROUS"); int j, g = a + 1;
+        while (g < argc && argv[g][0] == '-') {
+            int v = 0; for (j = 0; withval[j]; j++) if (!strcmp(argv[g], withval[j])) v = 1;
+            g += (v && g + 1 < argc) ? 2 : 1;
+        }
+        if (g < argc) for (j = 0; bad[j]; j++) if (!strcmp(argv[g], bad[j])) hit = bad[j];
+        if (g < argc && !strcmp(argv[g], "push")) for (j = g + 1; j < argc; j++) if (!strcmp(argv[j], "--force") || !strcmp(argv[j], "-f") || !strncmp(argv[j], "--force-with-lease", 18)) hit = "push --force";
+        if (hit && (!al || strcmp(al, "1"))) { fprintf(stderr, "devsvc: REFUSE x git %s: dangerous on a shared checkout (set DEVSVC_ALLOW_DANGEROUS=1 to override)\n", hit); return 125; }
+        if (hit) { char rq[200]; F(rq, sizeof rq, "emit\tx.dangerous\tgit %s pid=%d", hit, sy_pid()); request(root, rq, 0); }
+    }
     ab_add(&b, "x\texec\t-\t", 9);
     F(num, sizeof num, "%ld", tm); ab_kv(&b, "timeout_ms", num, strlen(num));
     if (cwd) ab_kv(&b, "cwd", cwd, strlen(cwd));
@@ -813,6 +834,80 @@ static int cmd_f(const char *root, int argc, char **argv) {
     return 0;
 }
 
+/* ---- git 整合与自动取锁包装:调用方不需要显式取锁。服务按路径判定要取的锁,排队等待(至多 50 s),成败都放锁。
+   属主取自 $DEVSVC_OWNER,缺省 auto-<pid>。写域到锁名的映射取自配置表 lock 行第三列(lock_for);devtask 单的写域未接。 ---- */
+static const char *auto_owner(void) {
+    static char o[64]; const char *e = getenv("DEVSVC_OWNER");
+    if (e && okname(e)) F(o, sizeof o, "%s", e); else F(o, sizeof o, "auto-%d", sy_pid());
+    return o;
+}
+static const char *lock_for(const char *p) {   /* 路径 -> 锁名;无匹配返回 0 */
+    int i; long pn = (long)strlen(p);
+    for (i = 0; i < cfg.nlockname; i++) {
+        const char *s = cfg.lockpfx[i];
+        while (*s) {
+            const char *c = strchr(s, ','); long l = c ? c - s : (long)strlen(s);
+            if (l > 0 && (s[l - 1] == '/' ? !strncmp(p, s, l) : (pn == l && !strncmp(p, s, l)))) return cfg.lockname[i];
+            s += l; if (*s) s++;
+        }
+    }
+    return 0;
+}
+static int auto_lock(const char *root, const char *name, const char *ow) {
+    char req[256]; long end = sy_now_ms() + 50000; int rc;
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t120", name, ow);
+    for (;;) {
+        rc = request(root, req, 1);
+        if (rc == 0) return 0;
+        if (rc != 1 || strncmp(resp, "ERR\theld", 8) || sy_now_ms() >= end) return rc;
+        sy_sleep_ms(100);
+    }
+}
+static int tool_locked(const char *root, const char *lock, const char *tool, int argc, char **argv) {
+    char prod[PW], req[200]; char *v[FL_MAX_ARGV + 8]; int n = 0, i, rc; const char *ow = auto_owner();
+    if (argc + 6 > FL_MAX_ARGV) return 2;
+    F(prod, sizeof prod, "%s/%s", root, cfg.product);
+    v[n++] = "--"; v[n++] = "sh"; v[n++] = prod; v[n++] = (char *)tool; v[n++] = "--";
+    for (i = 0; i < argc; i++) v[n++] = argv[i];
+    if (lock && (rc = auto_lock(root, lock, ow))) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s: %s\n", lock, rn ? resp : "no instance"); return rc == 3 ? 3 : 1; }
+    rc = cmd_x(root, n, v);
+    if (lock) { F(req, sizeof req, "lock-release\t%s\t%s", lock, ow); request(root, req, 0); }
+    return rc;
+}
+static int git_status(const char *root) {
+    static char out[1 << 18], ll[1 << 17];   /* 与 resp 同大 */ char *v[] = {"git", "status", "--porcelain", 0}; char *s, *e, *p, *q; int dirty = 0, orphan = 0;
+    if (runcap(v, out, sizeof out) != 0) { fprintf(stderr, "devsvc: git status failed or output too large\n"); return 1; }
+    ll[0] = 0; if (request(root, "lock-list", 0) == 0) F(ll, sizeof ll, "%s", resp);
+    for (s = out; (e = strchr(s, '\n')); s = e + 1) {
+        char nm[64], ow[64], own[64] = ""; const char *lf;
+        *e = 0; if (e - s < 4) continue;
+        p = s + 3; if ((q = strstr(p, " -> "))) p = q + 4;
+        for (q = strchr(ll, '\n'); q && q[1]; q = strchr(q + 1, '\n'))
+            if (sscanf(q + 1, "%63[^\t\n]\t%63[^\t\n]", nm, ow) == 2 && (!strcmp(nm, p) || ((lf = lock_for(p)) && !strcmp(nm, lf)))) F(own, sizeof own, "%s", ow);
+        dirty++; if (!own[0]) orphan++;
+        printf("PATH\t%.2s\t%s\t%s\n", s, own[0] ? own : "orphan", p);
+    }
+    printf("GIT_STATUS\tdirty=%d\torphan=%d\n", dirty, orphan);
+    return 0;
+}
+static int cmd_git(const char *root, int argc, char **argv) {
+    long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
+    if (argc < 1) return 2;
+    if (!strcmp(argv[0], "status")) return git_status(root);
+    if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and status are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--push")) { push = 1; continue; }
+        if (!strcmp(argv[i], "--registered")) need = "registry"; else if ((lf = lock_for(argv[i]))) need = lf;
+        if (n >= FL_MAX_ARGV - 8) return 2;
+        v[n++] = argv[i];
+    }
+    rc = tool_locked(root, need, "tools/commit-own.cx", n, v);
+    if (rc == 0 && push) { char *pv[] = {"--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 5, pv) == 0; if (!pushed) rc = 1; }
+    {   char *hv[] = {"git", "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\n", rc, sha, pushed, sy_now_ms() - t0);
+    return rc;
+}
+
 static int usage(void) {
     fprintf(stderr, "usage: devsvc flow run FILE.tsv|- [--jobs N] [--deadline-ms N] [--cat] [--run DIR] [--owner O] [--lock-wait-ms N] | flow - ...\n"
                     "       devsvc f read PATH [OFF LIM] | f write PATH --from SRC [--expect-sha X] [--mkdir]\n"
@@ -865,6 +960,9 @@ static int main2(int argc, char **argv) {
         if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad %s arguments (see usage in the file header)\n", cmd);
         return r;
     }
+    if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 ? usage() : r; }
+    if (!strcmp(cmd, "register")) return tool_locked(root, "registry", "tools/register.cx", argc, argv);
+    if (!strcmp(cmd, "derive")) return tool_locked(root, flag(argc, argv, "--write") ? "derive" : 0, "tools/derive.cx", argc, argv);
     if (!strcmp(cmd, "lock") && argc >= 1) {
         const char *ow = opt(argc, argv, "--owner", "");
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
