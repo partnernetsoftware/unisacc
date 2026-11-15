@@ -288,6 +288,31 @@ int main(int argc, char **argv) {
     if (B && !A) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
     if (A) {
 
+    /* 内容键:两个不同路径的克隆共用同内容构造(键不含根);改闭包内文件即失效;用 __FILE__ 的工具键里保留根,输出路径跟随各自克隆 */
+    {   char c1[200], c2[200], p[300], *q; const char *ks = "int main(int argc, char **argv) { (void)argv; printf(\"ckey n=%d\\n\", argc); return 7; }\n";
+        const char *ks2 = "int main(int argc, char **argv) { (void)argv; printf(\"ckey2 n=%d\\n\", argc); return 7; }\n";
+        const char *fs = "int main(void) { printf(\"file=%s\\n\", __FILE__); return 7; }\n"; int i, rs; long pm;
+        F(c1, sizeof c1, "/tmp/devsvc-check-%d-ckey1", sy_pid()); F(c2, sizeof c2, "/tmp/devsvc-check-%d-ckey2", sy_pid());
+        for (i = 0; i < 2; i++) {
+            char *d = i ? c2 : c1; char *v[] = {"git", "clone", "-q", fx, d, 0};
+            ck(cap2(v, 0, out2, sizeof out2) == 0, i ? "ckey-clone2" : "ckey-clone1");
+            F(p, sizeof p, "%s/%s", d, c_product); { char *l[] = {"ln", "-sf", prod, p, 0}; (void)cap2(l, 0, out2, sizeof out2); }
+            F(p, sizeof p, "%s/ckey.cx", d); ck(sy_write_atomic(p, ks, strlen(ks), 0644) == 0, "ckey-tool-written");
+            F(p, sizeof p, "%s/fref.cx", d); ck(sy_write_atomic(p, fs, strlen(fs), 0644) == 0, "ckey-fref-written"); }
+        { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c1, out, sizeof out, v); }
+        ck(rs == 7 && has("ckey n=2\n") && strstr(runline(), "cache=miss"), "ckey-clone1-first-builds");
+        { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c2, out, sizeof out, v); }
+        q = strstr(runline(), "prep_ms="); pm = q ? atol(q + 8) : 99999;
+        ck(rs == 7 && has("ckey n=2\n") && strstr(runline(), "cache=hit") && pm < 1000, "ckey-clone2-first-hit-under-1s");
+        F(p, sizeof p, "%s/ckey.cx", c2); ck(sy_write_atomic(p, ks2, strlen(ks2), 0644) == 0, "ckey-closure-edit-written");
+        { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c2, out, sizeof out, v); }
+        ck(rs == 7 && has("ckey2 n=2\n") && strstr(runline(), "cache=miss"), "ckey-closure-edit-misses");
+        { char *v[] = {"run", "--local", "fref.cx", 0}; rs = dvat(c1, out, sizeof out, v); }
+        F(p, sizeof p, "file=%s/fref.cx\n", c1); ck(rs == 7 && has(p), "ckey-fileref-clone1-own-path");
+        { char *v[] = {"run", "--local", "fref.cx", 0}; rs = dvat(c2, out, sizeof out, v); }
+        F(p, sizeof p, "file=%s/fref.cx\n", c2); ck(rs == 7 && has(p) && !strstr(out, c1) && strstr(runline(), "cache=miss"), "ckey-fileref-clone2-rebuilds-own-path");
+        { char *rm[] = {"rm", "-rf", c1, c2, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "ckey-clones-cleanup"); } }
+
     /* stop;锁落盘跨重启 */
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
     sy_sleep_ms(600);

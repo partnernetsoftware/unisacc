@@ -271,7 +271,10 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     /* 键 = 产品字节 sha + 被运行工具 use 传递闭包(产品 -cx-plan 解析)每个文件的工作区内容 sha;
        闭包外的脏文件或未跟踪文件不影响命中;解析或读失败才 bypass */
     static char cl[1 << 16]; long cn = 0;
-    char phex[65];
+    char phex[65]; long rl = (long)strlen(root); int fileref = 0;
+    /* 内容键(v3):键里不含实例根;闭包文件按仓内相对路径记。闭包里出现 __FILE__ 的工具会把源绝对路径编进执行体,
+       这类工具键里保留根,只在同一根复用。缓存目录:DEVSVC_NATIVE_DIR,否则测试实例(inst_env 已设)用实例目录,
+       否则 $HOME 下各实例共用的 native 目录,使不同克隆或工作树共享同内容构造 */
     F(src, sizeof src, "%s/%s", root, tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
     if (sy_exists(src) != 1) return -ENOENT;
     if (sy_realpath(prod, real, sizeof real) < 0) return -ENOENT;
@@ -292,22 +295,29 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
             if (mm_copy(fp, sizeof fp, t1 + 1, t2 - t1 - 1)) { bypass = 1; break; }
             fp[t2 - t1 - 1] = 0;
             if (sy_read_file(fp, &b, &n, 1 << 24) || !b || sy_sha256_hex(b, n, fh)) bypass = 1;
+            if (!bypass && !fileref) { int64_t k; for (k = 0; k + 8 <= n; k++) if (b[k] == '_' && !memcmp(b + k, "__FILE__", 8)) { fileref = 1; break; } }
             free(b); b = 0;
             if (!bypass) {
-                long fl = (long)strlen(fp);
-                if (cn + fl + 66 >= (long)sizeof cl || mm_copy(cl + cn, sizeof cl - cn, fp, fl)) bypass = 1;
+                const char *rp = fp; long fl;
+                if (rl > 0 && !strncmp(fp, root, rl) && fp[rl] == '/') rp = fp + rl + 1;   /* 仓内文件记相对路径 */
+                fl = (long)strlen(rp);
+                if (cn + fl + 66 >= (long)sizeof cl || mm_copy(cl + cn, sizeof cl - cn, rp, fl)) bypass = 1;
                 else { cn += fl; cl[cn++] = '\t'; if (mm_copy(cl + cn, sizeof cl - cn, fh, 64)) bypass = 1; cn += 64; cl[cn++] = '\n'; }
             }
             p = *e ? e + 1 : e;
         }
         if (cn == 0 || sy_sha256_hex(cl, cn, dhex)) bypass = 1;
     }
-    F(keysrc, sizeof keysrc, "v2|%s|%s|%s|%s", root, tool, phex, bypass ? "-" : dhex);
+    F(keysrc, sizeof keysrc, "v3|%s|%s|%s|%s", fileref ? root : "-", tool, phex, bypass ? "-" : dhex);
     if (sy_sha256_hex(keysrc, strlen(keysrc), hex)) return -EIO;
     hex[20] = 0;
     base = strrchr(tool, '/'); base = base ? base + 1 : tool;
     F(leaf, sizeof leaf, "%s", base); dot = strrchr(leaf, '.'); if (dot) *dot = 0;
-    F(kd, sizeof kd, "%s/native/%s", dir, bypass ? "bypass" : hex);
+    {   const char *nd = getenv("DEVSVC_NATIVE_DIR"), *ie = getenv(cfg.inst_env); char home[PW];
+        if (bypass) F(kd, sizeof kd, "%s/native/bypass", dir);   /* bypass 不共享 */
+        else if (nd && *nd) F(kd, sizeof kd, "%s/%s", nd, hex);
+        else if ((ie && *ie) || sy_homedir(home, sizeof home) < 0) F(kd, sizeof kd, "%s/native/%s", dir, hex);
+        else F(kd, sizeof kd, "%s/%s/native/%s", home, cfg.cache_sub, hex); }
     if (sy_mkdir_all(kd, 0700) || snprintf(bin, cap, "%s/%s", kd, leaf) >= cap) return -EIO;
     if (!bypass && sy_exists(bin) == 1) {   /* 命中:每次重算执行体字节 sha 与构造时记下的比对,不符即重建 */
         char sp[PW + 8], want[80] = "", got[65]; unsigned char *sb = 0; int64_t sn = 0;
