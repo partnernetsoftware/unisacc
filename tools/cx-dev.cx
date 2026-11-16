@@ -234,10 +234,43 @@ static int step(char **av, const char *cwd, int secs, const char *log) {
 }
 static void copyfile(const char *from, const char *to, int mode) { size_t n; char *b = cx_read(from, &n); if (!b) refuse("read", from); wr(to, b, n, mode); free(b); }
 
+/* The allocator of TREE/include/stdlib.h as text: from the _UNISA_MAP gate macros to the end of realloc.  The headers
+   are embedded in the installed product, so a genp compiled by it would run the installed allocator whatever the
+   tree says; the genp wrapper pastes this segment under private names and maps malloc/free/calloc/realloc of
+   seed/gen.c onto it.  Block headers are those of the installed allocator, so a block may cross between the two
+   (the runtime's own stdio buffers stay on the installed one).  NULL when the header is unreadable or laid out
+   differently: genp then keeps the installed allocator, as before.  The text is part of the constructor key. */
+static char *genp_alloc(const char *tree, size_t *n) {
+    char p[PW], *s, *a, *e, *o; size_t sn;
+    *n = 0; pj(p, tree, "include/stdlib.h");
+    if (!(s = cx_read(p, &sn))) return 0;
+    a = strstr(s, "#ifdef _WIN32\n#define _UNISA_MAP("); e = a ? strstr(a, "#if !__UNISA_FTRIM_LIBC || __UN_abs") : 0;
+    if (!a || !e || !(o = malloc((size_t)(e - a) + 1))) { free(s); return 0; }
+    *n = (size_t)(e - a); cpy(o, *n + 1, a, *n); o[*n] = 0; free(s); return o;
+}
+/* The segment is taken once, at --build, from the checkout the bundle is built from and kept in the bundle
+   (src/genp-alloc.h): the genp of every tree (worktree, base-tree, a copy without include/) uses that one, and a
+   reload computes the constructor key without needing the header. */
+static char *genp_alloc_kept(size_t *n) {
+    char p[PW], *s; pj(p, sess, "src/genp-alloc.h"); s = cx_read(p, n);
+    if (s && !*n) { free(s); s = 0; }
+    if (!s) *n = 0;
+    return s;
+}
+static void genp_alloc_wrap(np_buf *w) {
+    size_t n; char *s = genp_alloc_kept(&n);
+    if (!s) return;
+    np_puts(w, "#undef _UNISA_MAP\n#undef _UNISA_REMAP\n#undef _UNISA_CHUNK\n#undef _UNISA_LBINS\n#undef _UNISA_LMAX\n#undef _UNISA_LCAP\n#undef __UNISA_FTRIM_LIBC\n#define __UNISA_FTRIM_LIBC 0\n");
+    np_puts(w, "#define _unisa_freel cxdev_a_freel\n#define _unisa_cur cxdev_a_cur\n#define _unisa_left cxdev_a_left\n#define _unisa_lbin cxdev_a_lbin\n#define _unisa_lheld cxdev_a_lheld\n#define _unisa_lev cxdev_a_lev\n#define _unisa_map cxdev_a_map\n");
+    np_puts(w, "#define malloc cxdev_a_malloc\n#define free cxdev_a_free\n#define calloc cxdev_a_calloc\n#define realloc cxdev_a_realloc\n#define abort cxdev_a_abort\n");   /* abort sits between free and calloc in the header */
+    np_put(w, s, n); np_puts(w, "\n"); free(s);
+}
+
 /* constructors for TREE/seed, cached by content under CDIR/ctor/KEY; 0 ok, else WHY set */
 static int ensure_ctor(const char *tree, char dir[PW], char key[65], char *why, size_t wl) {
     static const char *T[3] = {"genp", "tbl", "net"}; FList l = {0}; np_buf b = {0}; char p[PW], rel[PW], shared[PW]; int i, bad = 0; pid_t pid[3];
     fl_walk(&l, tree, "seed"); fl_sort(&l); np_puts(&b, A.sha);
+    { size_t an; char *as = genp_alloc_kept(&an); if (as) { np_puts(&b, "genp-alloc"); np_put(&b, "", 1); np_put(&b, as, an); free(as); } }
     for (i = 0; i < l.n; i++) { size_t n; char *s; pj(p, tree, l.v[i].rel); if (!(s = cx_read(p, &n))) { { if (cx_fmt(why, wl, "seed-unreadable")) refuse("text-too-long", 0); } return 1; } np_puts(&b, l.v[i].rel); np_put(&b, "", 1); np_put(&b, s, n); free(s); }
     if (!l.n) { { if (cx_fmt(why, wl, "seed-missing")) refuse("text-too-long", 0); } return 1; }
     hash(b.p, b.n, key); free(b.p); key[16] = 0;
@@ -262,7 +295,9 @@ static int ensure_ctor(const char *tree, char dir[PW], char key[65], char *why, 
                    a fixed sequence with O_TRUNC, so two gen processes at once shared one temporary table.  The wrapper
                    names the file by pid (unique among live processes) and leaves gen.c itself untouched. */
                 np_buf w = {0}; char wsrc[PW];
-                np_puts(&w, "#include <stdio.h>\n#include <unistd.h>\nstatic FILE *cxdev_tmpfile(void) { static int q; char p[64]; FILE *f; int t; for (t = 0; t < 16; t++) { sprintf(p, \"/tmp/cxdev-gen-%d-%d.tmp\", (int)getpid(), q++); f = fopen(p, \"w+\"); if (f) { remove(p); return f; } } return NULL; }\n#define tmpfile cxdev_tmpfile\n#include \"");
+                np_puts(&w, "#include <errno.h>\n#include <ctype.h>\n#include <limits.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\nstatic FILE *cxdev_tmpfile(void) { static int q; char p[64]; FILE *f; int t; for (t = 0; t < 16; t++) { sprintf(p, \"/tmp/cxdev-gen-%d-%d.tmp\", (int)getpid(), q++); f = fopen(p, \"w+\"); if (f) { remove(p); return f; } } return NULL; }\n#define tmpfile cxdev_tmpfile\n");
+                genp_alloc_wrap(&w);   /* after every header gen.c includes, so only gen.c's own text is renamed */
+                np_puts(&w, "#include \"");
                 np_puts(&w, src); np_puts(&w, "\"\n");
                 if (strchr(src, 34) || strchr(src, 92) || cx_fmt(wsrc, PW, "%s.src%d.c", p, (int)getpid()) || cx_write(wsrc, w.p, w.n)) exit(1);
                 free(w.p); cpy(src, PW, wsrc, strlen(wsrc) + 1);
@@ -731,12 +766,16 @@ static int do_build(void) {
     pj(p, sess, "ape.id"); unlink(p); pj(p, sess, "state.tsv"); unlink(p);
     ape_id_load_or_open();
     pj(p, root, "tools/cxlib/sourcepackage.cx"); pj(q, sess, "src/sourcepackage.cx"); copyfile(p, q, 0600);
+    { size_t an; char *as = genp_alloc(root, &an); pj(q, sess, "src/genp-alloc.h"); if (as) { wr(q, as, an, 0600); free(as); } else unlink(q); }
     pj(p, root, "tools/p3-member-consume.cx"); pj(q, sess, "src/p3-member-consume.cx"); if (isfile(p)) copyfile(p, q, 0600);
     if (cx_fmt(line, sizeof line, "root\t%s\nwt\t%s\n", root, wt)) refuse("path-too-long", 0);
     pj(p, sess, "origin.tsv"); wr(p, line, strlen(line), 0600);
     for (i = 0; i < 3; i++) { pj(p, sess, OUT[i]); pid[i] = spawn_compile(SRC[i], p); }
     why[0] = 0;
     if (ensure_ctor(wt, cd, ck, why, sizeof why)) { fprintf(stderr, "cx-dev: constructors: %s\n", why); bad = 1; }
+    /* a worktree whose seed differs from the installed revision needs the baseline constructors too (reload builds
+       the baseline nets with them and cannot compile); same seed -> same key, already there */
+    { char bt[PW], bd[PW], bk[65]; pj(bt, sess, "base-tree"); if (!bad && ensure_ctor(bt, bd, bk, why, sizeof why)) { fprintf(stderr, "cx-dev: baseline constructors: %s\n", why); bad = 1; } }
     for (i = 0; i < 3; i++) { int stv = 0; if (waitpid(pid[i], &stv, 0) < 0 || !WIFEXITED(stv) || WEXITSTATUS(stv)) { fprintf(stderr, "cx-dev: construct %s: %s\n", OUT[i], WIFEXITED(stv) && WEXITSTATUS(stv) == 2 ? "DEFERRED over the step bound" : "failed"); bad = 1; } }
     if (!bad) { no_diff = 1; { if (cx_fmt(fp, sizeof fp, "not-compared-yet")) refuse("text-too-long", 0); } reload(fp, 0); }   /* the installed package as it is; the first run compares the worktree */
     pj(p, sess, "cx-dev");
@@ -747,14 +786,55 @@ static int do_build(void) {
 /* cx-dev --watch: bounded resident prebuilder.  It only fills the same content-keyed caches and swaps the same
    package a plain call would (reload() in a child, under reload.lock), so a later call finds state.tsv current
    and starts at once; nothing it does is a verdict.  Trigger: growth of the devsvc event log named by
-   CXDEV_EVENTS (every f write, f edit and git commit appends there), plus a fingerprint poll every
+   CXDEV_EVENTS, filtered by path (see ev_line_input: only events naming a path under the fingerprinted
+   directories make a comparison; devsvc starts this watcher by itself on such a write), plus a fingerprint poll every
    CXDEV_WATCH_POLL_MS (default 2000) for writes that bypass devsvc.  Bounds: CXDEV_WATCH_TTL_S (default 1800, at
    most 14400) total, CXDEV_WATCH_IDLE_S (default 600) without a rebuild; one instance per bundle (watch.lock);
    no rebuild is started while load1 is at or above CXDEV_WATCH_LOAD (default 10); a rebuild already under way
    (reload.lock) is never started twice. */
 static int env_int(const char *name, int dflt, int lo, int hi) { const char *e = getenv(name); int v = e && e[0] ? atoi(e) : dflt; return v < lo ? lo : v > hi ? hi : v; }
+/* Event filter of --watch.  A devsvc event line (EV seq ts kind text...) counts as an input event when one of its
+   tab- or space-separated words, after an optional `path=` and an optional worktree prefix, is a path under one of
+   the fingerprinted directories (TOPS: exec seed src cx kernel weights/gold), or when its kind is git.merge (a
+   merge rewrites the worktree without naming paths).  Everything else (x, flow, lock, job, read events, writes to
+   other paths) is counted and ignored: no fingerprint comparison is made for it.  The poll stays as the backstop. */
+static int ev_word_input(const char *w, size_t n) {
+    size_t wl = strlen(wt); int t;
+    if (n > 5 && !strncmp(w, "path=", 5)) { w += 5; n -= 5; }
+    if (wl && n > wl + 1 && !strncmp(w, wt, wl) && w[wl] == '/') { w += wl + 1; n -= wl + 1; }
+    while (n > 2 && w[0] == '.' && w[1] == '/') { w += 2; n -= 2; }
+    for (t = 0; t < 6; t++) { size_t tl = strlen(TOPS[t]); if (n > tl + 1 && !strncmp(w, TOPS[t], tl) && w[tl] == '/') return 1; }
+    return 0;
+}
+static int ev_line_input(const char *s, size_t n) {
+    size_t i = 0, a; int f = 0;
+    while (i <= n) {
+        for (a = i; i < n && s[i] != '\t' && s[i] != ' '; i++) ;
+        if (f == 3 && i - a == 9 && !strncmp(s + a, "git.merge", 9)) return 1;
+        if (f >= 4 && ev_word_input(s + a, i - a)) return 1;
+        if (i < n && s[i] == '\t' && f < 4) f++; else if (f < 4 && i < n) f = 4;
+        i++;
+    }
+    return 0;
+}
+/* the complete lines of EVP in [*off, z): counts input and ignored events; *off moves past the last complete line.
+   More than 1 MiB at once is not scanned and counts as one input event. */
+static int ev_scan(const char *evp, int64_t *off, int64_t z, int *nin, int *nign) {
+    int64_t len = z - *off; char *b; int fd, hit = 0; ssize_t got; size_t i, a, last = 0;
+    if (len <= 0) return 0;
+    if (len > (1 << 20)) { *off = z; (*nin)++; return 1; }
+    if (!(b = malloc((size_t)len + 1))) return 0;
+    fd = open(evp, O_RDONLY);
+    got = fd >= 0 ? pread(fd, b, (size_t)len, (off_t)*off) : -1;
+    if (fd >= 0) close(fd);
+    if (got <= 0) { free(b); return 0; }
+    for (i = 0, a = 0; i < (size_t)got; i++) if (b[i] == '\n') { if (ev_line_input(b + a, i - a)) { hit = 1; (*nin)++; } else (*nign)++; a = i + 1; last = a; }
+    *off += (int64_t)last;
+    free(b);
+    return hit;
+}
 static int do_watch(void) {
-    char lock[PW], pidtxt[32]; const char *evp = getenv("CXDEV_EVENTS"), *why = "ttl"; int fd, n = 0, skipped = 0;
+    char lock[PW], pidtxt[32]; const char *evp = getenv("CXDEV_EVENTS"), *why = "ttl"; int fd, n = 0, skipped = 0, nin = 0, nign = 0, ncmp = 0;
     int ttl = env_int("CXDEV_WATCH_TTL_S", 1800, 1, 14400), idle = env_int("CXDEV_WATCH_IDLE_S", 600, 1, 14400), poll = env_int("CXDEV_WATCH_POLL_MS", 2000, 100, 60000), maxload = env_int("CXDEV_WATCH_LOAD", 10, 1, 1024);
     long t0 = ms_now(), tact = t0, tpoll = 0; int64_t evsz = -1, z = 0;
     pj(lock, sess, "watch.lock");
@@ -774,11 +854,17 @@ static int do_watch(void) {
         if (now - tact >= 1000L * idle) { why = "idle"; break; }
         if (!isdir(wt)) { why = "worktree-gone"; break; }
         { size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0; free(ls); if (owner != (int)getpid()) { why = "lock-lost"; break; } }
-        { struct stat est; if (evp && evp[0] && !stat(evp, &est)) { z = (int64_t)est.st_size; if (z != evsz) { if (evsz >= 0) { trig = 1; src = "event"; } evsz = z; } } }
+        {   struct stat est;
+            if (evp && evp[0] && !stat(evp, &est)) {
+                z = (int64_t)est.st_size;
+                if (evsz < 0) evsz = z;                 /* events from before the start are not replayed: the first poll compares anyway */
+                else if (z < evsz) evsz = 0;            /* rotated (devsvc renames the log to events.tsv.1): the new file is all new */
+                if (z > evsz && ev_scan(evp, &evsz, z, &nin, &nign)) { trig = 1; src = "event"; }
+            } }
         if (!trig && now - tpoll >= poll) trig = 1;
         if (trig) {
             int st = 0, rc; pid_t pid; size_t ln; char *la; double l1;
-            tpoll = now; fflush(stdout); fflush(stderr);
+            tpoll = now; ncmp++; fflush(stdout); fflush(stderr);
             la = cx_read("/proc/loadavg", &ln); l1 = la ? atof(la) : 0; free(la);
             /* the comparison and the rebuild run in a child: the watcher itself keeps no tables and no lists */
             if (!(pid = fork())) {
@@ -797,7 +883,7 @@ static int do_watch(void) {
         sy_sleep_ms(50);
     }
     unlink(lock);
-    printf("CXDEV_WATCH\texit\treason=%s\tprebuilds=%d\tlived_ms=%ld\n", why, n, ms_now() - t0);
+    printf("CXDEV_WATCH\texit\treason=%s\tprebuilds=%d\tlived_ms=%ld\tevents_input=%d\tevents_ignored=%d\tcompares=%d\n", why, n, ms_now() - t0, nin, nign, ncmp);
     return 0;
 }
 int main(int argc, char **argv) {

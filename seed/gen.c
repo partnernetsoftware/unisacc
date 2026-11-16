@@ -2434,8 +2434,15 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             fprintf(stderr, "template graph edit kind: %s\n", field[0]);
             die_at(input_location, "template graph edit kind is not yet covered");
         }
-        free(g->state_index); g->state_index = NULL; g->index_cap = 0;
-        state_index_grow(g); free(s);
+        /* only edits that move, drop or add states behind graph_state() leave the name index stale; the others
+           keep it exact (graph_state inserts as it creates), so rebuilding it after every edit row was pure rework */
+        if (!strcmp(field[0], "drop-state") || !strcmp(field[0], "move-state") || !strcmp(field[0], "move") ||
+            !strcmp(field[0], "copy-replace") || !strcmp(field[0], "clone-push") ||
+            !strcmp(field[0], "copy-state") || !strcmp(field[0], "copy")) {
+            free(g->state_index); g->state_index = NULL; g->index_cap = 0;
+            state_index_grow(g);
+        }
+        free(s);
     }
     if (np) {
         if (getenv("UNISACC_SEED_TRACE")) fprintf(stderr, "companion %lu rules %lu states %lu seqs\n", (unsigned long)np, (unsigned long)g->n, (unsigned long)g->ns);

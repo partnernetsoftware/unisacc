@@ -12,6 +12,8 @@
  *   sh ./unisacc.com tools/devsvc.cx -- events emit KIND TEXT
  *   事件同时追加到实例目录 events.tsv(EV seq ts kind text;超 $DEVSVC_EV_ROTATE 字节,缺省 4 MB,轮转为 events.tsv.1);
  *   f/x/flow/doc/git/run/register/derive 命令结束各记一条 <命令>.<子命令> owner=($DEVSVC_OWNER 或 auto-<pid>) pid rc ms。
+ *   f write|edit|edits 的这条事件另带 path= 与写后 sha=。成功的 f 写入或 git commit 涉及 exec/、seed/ 下的路径,且本检出已构造过
+ *   cx-dev bundle 而没有在跑的 `cx-dev --watch` 时,后台拉起一个事件预建进程(不阻塞本命令;记事件 cxdev.watch;$DEVSVC_CXDEV_WATCH=0 关闭;见 cxdev_kick)。
  *   sh ./unisacc.com tools/devsvc.cx -- git log|diff|show|status ARGS|blame|ls-files ...   只读透传,不取锁,stdout 上限 1 MB 超出打 DEVSVC_TRUNCATED
  *   sh ./unisacc.com tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
  *   sh ./unisacc.com tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
@@ -1787,6 +1789,52 @@ static int events_wait(const char *root, const char *kind, long since, long tm) 
     }
 }
 
+/* ---- cx-dev 事件预建的自动拉起:写入落到 cx-dev 的表输入(exec/、seed/)且本检出已构造过 cx-dev bundle、又没有在跑的
+   `cx-dev --watch` 时,在独立会话里后台起一个(CXDEV_EVENTS 指向本实例 events.tsv),不等它、不读它的输出。
+   bundle 目录规则与 tools/cx-dev.cx --build 相同:$CXDEV_HOME(绝对路径),否则 ${TMPDIR:-/tmp}/cx-dev-<uid>/wt<检出根>。
+   "已构造" = bundle 里有 cx-dev 与 ape.id;"在跑" = watch.lock 里的 pid 仍在 /proc。两个写入同时到达可能各起一个,
+   第二个由 cx-dev 自己的 watch.lock(O_EXCL)拒绝并立即退出。有界性全在 cx-dev --watch(总寿命、空闲自退、负载门),
+   本处不常驻。输出追加到 bundle/watch.log(超 1 MB 先清空)。$DEVSVC_CXDEV_WATCH=0 关闭。拉起成功记事件 cxdev.watch。 ---- */
+typedef struct { char exe[PW], log[PW], ev[PW], cwd[PW]; } CxKick;
+static int cxk_child(void *ud) {
+    CxKick *k = (CxKick *)ud; int fd; char *av[] = {k->exe, "--watch", 0};
+    fd = sy_open(k->log, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return 126;
+    sy_dup2(fd, 1); sy_dup2(fd, 2); sy_close(fd);
+    if (k->ev[0] && setenv("CXDEV_EVENTS", k->ev, 1)) return 126;
+    execv(k->exe, av);
+    return 127;
+}
+static int cxk_input(const char *root, const char *path, char *rel, int cap) {   /* 路径是否 cx-dev 的表输入;rel 得仓内相对路径 */
+    long rl = (long)strlen(root); const char *p = path;
+    if (!p || !*p) return 0;
+    if (p[0] == '/') { if (strncmp(p, root, rl) || p[rl] != '/') return 0; p += rl + 1; }
+    while (p[0] == '.' && p[1] == '/') p += 2;
+    if (strstr(p, "..") || snprintf(rel, cap, "%s", p) >= cap) return 0;
+    return !strncmp(p, "exec/", 5) || !strncmp(p, "seed/", 5);
+}
+static int cxdev_kick(const char *root, const char *path) {   /* 返回 1:路径是表输入(拉起与否另论);0:不是或已关闭 */
+    static CxKick k; char b[PW], p[PW + 16], rel[PW], t[32], rq[PW + 200]; const char *e = getenv("DEVSVC_CXDEV_WATCH"); int fds[2], pid; int64_t sz = 0;
+    if ((e && !strcmp(e, "0")) || !cxk_input(root, path, rel, sizeof rel)) return 0;
+    e = getenv("CXDEV_HOME");
+    if (e && e[0] == '/') { if (snprintf(b, sizeof b, "%s", e) >= (int)sizeof b) return 1; }
+    else { e = getenv("TMPDIR"); if (snprintf(b, sizeof b, "%s/cx-dev-%d/wt%s", e && e[0] ? e : "/tmp", (int)sy_uid(), root) >= (int)sizeof b) return 1; }
+    if (snprintf(k.exe, sizeof k.exe, "%s/cx-dev", b) >= (int)sizeof k.exe || snprintf(k.log, sizeof k.log, "%s/watch.log", b) >= (int)sizeof k.log) return 1;
+    if (snprintf(p, sizeof p, "%s/ape.id", b) >= (int)sizeof p || sy_exists(k.exe) != 1 || sy_exists(p) != 1) return 1;   /* 没构造过 bundle:不拉起 */
+    if (!job_read(b, "watch.lock", t, sizeof t) && atol(t) > 0) {   /* 已有在跑的(/proc/PID/stat 可读且状态不是 Z:被杀后未回收的僵尸不算在跑) */
+        char pp[64], st[512], *q; F(pp, sizeof pp, "/proc/%ld", atol(t));
+        if (!job_read(pp, "stat", st, sizeof st) && (q = strrchr(st, ')')) && q[1] == ' ' && q[2] != 'Z' && q[2] != 'X') return 1;
+    }
+    k.ev[0] = 0; if (dir[0] && snprintf(k.ev, sizeof k.ev, "%s/events.tsv", dir) >= (int)sizeof k.ev) k.ev[0] = 0;
+    if (sy_file_size(k.log, &sz) == 0 && sz > (1L << 20)) sy_unlink(k.log);
+    fflush(stdout); fflush(stderr);
+    pid = sy_fork_session(cxk_child, &k, fds);
+    if (pid < 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (dir[0] && snprintf(rq, sizeof rq, "emit\tcxdev.watch\tstarted\tpid=%d\ttrigger=%.300s\tbundle=%.400s", pid, rel, b) < (int)sizeof rq) request(root, rq, 0);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms(); int r = main2(argc, argv), a = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;
     if (!ovf && dir[0] && argc > a) {   /* 命令完成事件:kind=<命令>.<子命令>,带 owner、rc、ms;实例不在则不记(不为记事件拉起实例) */
@@ -1811,12 +1859,19 @@ int main(int argc, char **argv) {
                 clean(sub);
             }   /* 子命令词超 47 字节只取前缀 */
             char fx[700] = "";   /* f.edit/f.write 带 path 与写后 sha,供 devtask 按 owner 归属写域外改动 */
-            if (!strcmp(argv[a], "f") && (!strcmp(sub, "edit") || !strcmp(sub, "write")) && argc > a + 2 && !strchr(argv[a + 2], '\t') && !strchr(argv[a + 2], '\n')) {
+            if (!strcmp(argv[a], "f") && (!strcmp(sub, "edit") || !strcmp(sub, "write") || !strcmp(sub, "edits")) && argc > a + 2 && !strchr(argv[a + 2], '\t') && !strchr(argv[a + 2], '\n')) {
                 unsigned char *fb = 0; int64_t fn = 0; char hx[65] = "-";
                 if (!sy_read_file(argv[a + 2], &fb, &fn, 1L << 27)) (void)sy_sha256_hex(fb ? (const void *)fb : (const void *)"", (long)fn, hx);
                 free(fb); F(fx, sizeof fx, "\tpath=%.512s\tsha=%s", argv[a + 2], hx);
             }
             if (snprintf(rq, sizeof rq, "emit\t%s.%s\towner=%s\tpid=%d\trc=%d\tms=%ld%s", argv[a], sub, auto_owner(), sy_pid(), r, sy_now_ms() - t0, fx) < (int)sizeof rq) request(root, rq, 0);
+        }
+    }
+    if (!ovf && r == 0 && argc > a + 2) {   /* 写入或提交涉及 cx-dev 的表输入:确保有一个事件预建进程在(见 cxdev_kick;实例不在也拉起,那时只靠它自己的指纹轮询) */
+        char root[PW]; int i;
+        if (sy_cwd(root, sizeof root) >= 0) {
+            if (!strcmp(argv[a], "f") && (!strcmp(argv[a + 1], "edit") || !strcmp(argv[a + 1], "write") || !strcmp(argv[a + 1], "edits"))) cxdev_kick(root, argv[a + 2]);
+            else if (!strcmp(argv[a], "git") && !strcmp(argv[a + 1], "commit") && !flag(argc, argv, "--cwd") && !getenv("DEVSVC_GIT_PARSE_ONLY")) { for (i = a + 2; i < argc; i++) if (cxdev_kick(root, argv[i])) break; }
         }
     }
     if (ovf) { fprintf(stderr, "devsvc: a path or argument did not fit its buffer (%d)\n", ovf); return 2; }

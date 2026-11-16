@@ -199,11 +199,34 @@ static void group_e(void) {
     np_result a = {0}; char tpl[PW], tag[64], neu[96], x[PW];
     ensure_bundle(0); stage("e", 0); sources();
     pj(tpl, fx, "exec/lex/gen-template.tsv"); pj(x, work, "e.img");
+
     { if (cx_fmt(tag, sizeof tag, "CXDEVE%d", (int)getpid())) die("text too long"); } { if (cx_fmt(neu, sizeof neu, "unexpected character %s", tag)) die("text too long"); }
     edit(tpl, "unexpected character", neu);
     { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", 0}; cxd(c, v, &a);
       ck(a.rc == 2 && has(&a, 1, "CXDEV_RECIPE\tshared-e1\trecipe-not-located") && has(&a, 1, "LOCAL_FAIL") && has(&a, 1, "CXDEV_RECIPE\twarnlex\tbuilt"), "e.recipe-not-located-refused-by-name"); }
     { char *c[] = {"at.c", "-o", x, 0}; cxd(c, 0, &a); ck(a.rc == 1 && has(&a, 1, "CXDEV_STALE\trecipe=shared-e1\treason=recipe-not-located") && has(&a, 1, tag), "e.not-located-recipe-reported-on-every-run"); }
+    /* --watch event filter: while a bounded watcher runs (ttl 9 s, poll far away so only the start makes a poll
+       comparison), five event lines are appended to its event log: two name no input path, three do (relative
+       path= under exec, absolute path under the worktree's seed in a flow.node line, kind git.merge).  The exit line
+       must count them so, and the comparisons made must be the starting poll plus one per appended input batch. */
+    {   char ev[PW], cmd[8 * PW], *q; char evenv[PW + 20]; char *c[] = {"sh", "-c", cmd, 0}; char *env[] = {envwt, evenv, "CXDEV_WATCH_TTL_S=9", "CXDEV_WATCH_POLL_MS=60000", "CXDEV_PAR=4", 0}; int nin = -1, nign = -1, ncmp = -1; long t0 = sy_now_ms();
+        pj(ev, work, "e-events.tsv"); if (cx_fmt(evenv, sizeof evenv, "CXDEV_EVENTS=%s", ev)) die("path");
+        put("e-events.tsv", "EV\t1\t1\tf.edit\towner=o\tpid=1\trc=0\tms=1\tpath=exec/lex/before-start.tsv\tsha=-\n");
+        if (cx_fmt(cmd, sizeof cmd,
+                   "( sleep 3; printf 'EV\\t2\\t1\\tx.status\\towner=o\\tpid=1\\trc=0\\tms=1\\nEV\\t3\\t1\\tf.edit\\towner=o\\tpid=1\\trc=0\\tms=1\\tpath=tools/exec/not-input.cx\\tsha=-\\n' >> '%s';"
+                   " sleep 2; printf 'EV\\t4\\t1\\tf.edit\\towner=o\\tpid=1\\trc=0\\tms=1\\tpath=exec/lex/gen-template.tsv\\tsha=-\\nEV\\t5\\t1\\tflow.node\\t0\\tf.write\\tok\\t1\\t0\\t%s/seed/x.c abc\\nEV\\t6\\t1\\tgit.merge\\towner=o\\tpid=1\\trc=0\\tms=1\\n' >> '%s' ) & '%s' --watch; wait",
+                   ev, fx, ev, loader)) die("path");
+        run(c, work, env, 30, &a, 1);
+        if ((q = a.out ? strstr(a.out, "\tevents_input=") : 0)) nin = atoi(q + 14);
+        if ((q = a.out ? strstr(a.out, "\tevents_ignored=") : 0)) nign = atoi(q + 16);
+        if ((q = a.out ? strstr(a.out, "\tcompares=") : 0)) ncmp = atoi(q + 10);
+        printf("CXDEV_TIMING\twatch_filter_ms=%ld\tload1=%.2f\tevents_input=%d\tevents_ignored=%d\tcompares=%d\n", sy_now_ms() - t0, load1(), nin, nign, ncmp);
+        ck(a.rc == 0 && has(&a, 0, "CXDEV_WATCH\tstart\t") && has(&a, 0, "CXDEV_WATCH\texit\treason=ttl"), "e.watch-bounded-exit-by-ttl");
+        ck(nin == 3, "e.watch-input-events-counted-by-path");
+        ck(nign == 2, "e.watch-other-events-ignored");
+        ck(ncmp == 2, "e.watch-compares-only-at-start-and-on-input-event");
+        { char lk[PW]; pj(lk, bundle, "watch.lock"); ck(access(lk, 0) != 0, "e.watch-lock-removed-on-exit"); }
+    }
     np_free(&a);
 }
 int main(int argc, char **argv) {

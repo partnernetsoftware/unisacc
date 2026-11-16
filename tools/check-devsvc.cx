@@ -10,7 +10,8 @@
  * 断言:config 读表、表缺失 rc 3;起实例与重复 start;锁互斥、非属主不能放、续期、过期后可被他人拿到并产生 lock.expire 事件;
  *   两客户端并发拿同名锁恰一个成功;锁落盘跨实例重启仍在;stop 后 sock 消失;ttl 到点自退;idle 到点自退;status 末行;
  *   run 经服务与直接运行的输出和退出码一致,首次 miss、第二次 hit、--local 共用缓存;库源目录有未跟踪文件时连续两次都是 bypass,
- *   去掉后恢复 hit;events since 增量。
+ *   去掉后恢复 hit;events since 增量;b3 组:f write 落到 exec/、seed/ 且夹具 bundle 已构造时拉起一个 cx-dev --watch(替身脚本),
+ *   带 CXDEV_EVENTS,在跑时不重复拉起,写其它路径或 bundle 未构造或开关关闭时不拉起,进程没了之后重新拉起。
  * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
@@ -99,16 +100,17 @@ int main(int argc, char **argv) {
     char stray[400];
     /* --cases a:配置/锁/事件/git/status/重启/ttl/idle;--cases b:run 缓存(夹具仓);缺省两组都跑。批次 devsvc 跑 a,devsvc-run 跑 b */
     /* b 拆两组(各自起停实例):b1 事件落盘与只读 git;b2 run 原生缓存。--cases b 等于 b1+b2 */
-    int A1 = 1, A2 = 1, A3 = 1, B1 = 1, B2 = 1, A;
+    int A1 = 1, A2 = 1, A3 = 1, B1 = 1, B2 = 1, B3 = 1, A;   /* b3:cx-dev 事件预建的自动拉起(批次 devsvc-cxdev-kick) */
     if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strstr(cs, "a1") || strstr(cs, "a2") || strstr(cs, "a3"), ha = strchr(cs, 'a') != 0;
-        int db = strstr(cs, "b1") || strstr(cs, "b2"), hb = strchr(cs, 'b') != 0;
+        int db = strstr(cs, "b1") || strstr(cs, "b2") || strstr(cs, "b3"), hb = strchr(cs, 'b') != 0;
         A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3"));
-        B1 = hb && (!db || strstr(cs, "b1")); B2 = hb && (!db || strstr(cs, "b2")); }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|b1|b2|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+        B1 = hb && (!db || strstr(cs, "b1")); B2 = hb && (!db || strstr(cs, "b2")); B3 = hb && (!db || strstr(cs, "b3")); }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|b1|b2|b3|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
     A = A1 || A2 || A3;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     (void)unsetenv("DEVSVC_SELF_BIN");   /* 在 devsvc x 内跑时不继承固定版本执行体:本检查测的是 self 所指的工作副本 */
+    (void)unsetenv("UNISACC_FLOW_ROOT"); /* 同理不继承 devsvc x 注入的写根:否则夹具仓里的 f write 会按该写根落到真实检出 */
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
     {   unsigned char *b = 0; int64_t n = 0; int okc;
         if (sy_read_file(table, &b, &n, 1 << 16) || !b) { printf("FAIL\tdevsvc.config-table-readable\t%s\n", table); return 1; }
@@ -310,7 +312,7 @@ int main(int argc, char **argv) {
     (void)t0;
     }
     }
-    if (B1 || B2) {
+    if (B1 || B2 || B3) {
         if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
         ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "run-group-start"); }
     if (B1) {
@@ -327,6 +329,56 @@ int main(int argc, char **argv) {
         for (i = 0; i < 40; i++) dv1("events", "emit", "fill", "0123456789012345678901234567890123456789", 0, 0);
         if (sy_read_file(ep, &b, &sz, 1 << 22) == 0 && b) free(b); else sz = -1;
         ck(sy_exists(ep1) == 1 && sz >= 0 && sz <= 1500 + 200, "events-file-rotates");
+    }
+    }
+    if (B3) {
+    /* cx-dev 事件预建的自动拉起(cxdev_kick):夹具 bundle 里的 cx-dev 是个替身脚本(写 watch.lock、把参数与 CXDEV_EVENTS 记进 launches、
+       exec sleep 25 后自然结束),所以这里断言的是 devsvc 一侧:何时拉起、带什么、不重复拉起;真 cx-dev 的事件过滤在 check-cx-dev 里。 */
+    {   char bd[200], p[300], src[300], want[300]; unsigned char *b = 0; int64_t n = 0; int i, lines; long wpid = 0;
+        static const char *fake = "#!/bin/sh\nd=$(dirname \"$0\")\necho $$ > \"$d/watch.lock\"\necho \"launch $* ev=$CXDEV_EVENTS\" >> \"$d/launches\"\nexec sleep 25\n";
+        F(bd, sizeof bd, "/tmp/devsvc-check-%d-bundle", sy_pid()); F(src, sizeof src, "%s/src.txt", bd);
+        F(p, sizeof p, "%s/cx-dev", bd);
+        ck(sy_mkdir_all(bd, 0700) == 0 && sy_write_atomic(p, fake, strlen(fake), 0700) == 0 && sy_write_atomic(src, "k\tv\n", 4, 0600) == 0, "cxdev-kick-fixture-bundle");
+        if (setenv("CXDEV_HOME", bd, 1)) return 2;
+        F(p, sizeof p, "%s/launches", bd);
+        /* bundle 没构造完(缺 ape.id):写 exec 表不拉起 */
+        ck(fx1("f", "write", "exec/t0.tsv", "--from", src, "--mkdir") == 0 && has("F\twrite\tok"), "cxdev-kick-exec-write-ok-without-bundle");
+        sy_sleep_ms(400);
+        ck(sy_exists(p) == 0, "cxdev-kick-not-started-without-built-bundle");
+        {   char ap[300]; F(ap, sizeof ap, "%s/ape.id", bd); ck(sy_write_atomic(ap, "x\n", 2, 0600) == 0, "cxdev-kick-fixture-ape-id"); }
+        /* 写非表输入:不拉起 */
+        ck(fx1("f", "write", "notes/a.txt", "--from", src, "--mkdir") == 0 && has("F\twrite\tok"), "cxdev-kick-other-write-ok");
+        sy_sleep_ms(400);
+        ck(sy_exists(p) == 0, "cxdev-kick-not-started-by-non-input-write");
+        /* 写 exec 表:拉起一个,参数 --watch,CXDEV_EVENTS 指向本实例 events.tsv */
+        ck(fx1("f", "write", "exec/t.tsv", "--from", src, "--mkdir") == 0 && has("F\twrite\tok"), "cxdev-kick-exec-write-ok");
+        for (i = 0; i < 60 && sy_exists(p) != 1; i++) sy_sleep_ms(50);
+        F(want, sizeof want, "launch --watch ev=%s/events.tsv\n", inst);
+        lines = 0; if (sy_read_file(p, &b, &n, 1 << 16) == 0 && b) { F(out, sizeof out, "%.*s", (int)n, (char *)b); for (i = 0; i < n; i++) lines += b[i] == '\n'; free(b); b = 0; } else out[0] = 0;
+        ck(lines == 1 && !strcmp(out, want), "cxdev-kick-started-once-with-watch-and-events");
+        {   char lp[300]; F(lp, sizeof lp, "%s/watch.lock", bd); if (sy_read_file(lp, &b, &n, 64) == 0 && b) { wpid = atol((char *)b); free(b); b = 0; } }
+        ck(dv1("events", 0, 0, 0, 0, 0) == 0 && has("\tcxdev.watch\tstarted\tpid=") && has("\ttrigger=exec/t.tsv\t"), "cxdev-kick-event-recorded");
+        /* 已有在跑的:再写两次(write 与 edits 路径同一出口)不重复拉起 */
+        ck(fx1("f", "write", "exec/t.tsv", "--from", src, 0) == 0 && fx1("f", "write", "seed/s.tsv", "--from", src, "--mkdir") == 0, "cxdev-kick-second-writes-ok");
+        sy_sleep_ms(400);
+        lines = 0; if (sy_read_file(p, &b, &n, 1 << 16) == 0 && b) { for (i = 0; i < n; i++) lines += b[i] == '\n'; free(b); b = 0; }
+        ck(wpid > 1 && lines == 1, "cxdev-kick-not-started-twice-while-running");
+        /* 关闭开关生效;那个进程没了之后,下一次表写入重新拉起 */
+        if (wpid > 1) { char ks[32]; F(ks, sizeof ks, "%ld", wpid); char *kv[] = {"kill", "-9", ks, 0}; (void)cap2(kv, 0, out2, sizeof out2); }
+        {   char pp[64]; F(pp, sizeof pp, "/proc/%ld", wpid); for (i = 0; i < 60 && sy_exists(pp) == 1; i++) sy_sleep_ms(50); }
+        if (setenv("DEVSVC_CXDEV_WATCH", "0", 1)) return 2;
+        ck(fx1("f", "write", "exec/t.tsv", "--from", src, 0) == 0, "cxdev-kick-switch-off-write-ok");
+        sy_sleep_ms(400);
+        lines = 0; if (sy_read_file(p, &b, &n, 1 << 16) == 0 && b) { for (i = 0; i < n; i++) lines += b[i] == '\n'; free(b); b = 0; }
+        ck(lines == 1, "cxdev-kick-switch-off-not-started");
+        if (unsetenv("DEVSVC_CXDEV_WATCH")) return 2;
+        ck(fx1("f", "write", "exec/t.tsv", "--from", src, 0) == 0, "cxdev-kick-after-exit-write-ok");
+        for (i = 0; i < 60; i++) { lines = 0; if (sy_read_file(p, &b, &n, 1 << 16) == 0 && b) { int j; for (j = 0; j < n; j++) lines += b[j] == '\n'; free(b); b = 0; } if (lines >= 2) break; sy_sleep_ms(50); }
+        ck(lines == 2, "cxdev-kick-restarted-after-watcher-gone");
+        {   char lp[300]; long np = 0; F(lp, sizeof lp, "%s/watch.lock", bd); if (sy_read_file(lp, &b, &n, 64) == 0 && b) { np = atol((char *)b); free(b); b = 0; }
+            if (np > 1 && np != wpid) { char ks[32]; F(ks, sizeof ks, "%ld", np); char *kv[] = {"kill", "-9", ks, 0}; (void)cap2(kv, 0, out2, sizeof out2); } }
+        if (unsetenv("CXDEV_HOME")) return 2;
+        { char *rm[] = {"rm", "-rf", bd, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "cxdev-kick-fixture-cleanup"); }
     }
 
     }
@@ -376,7 +428,7 @@ int main(int argc, char **argv) {
             ck(sy_unlink(bad) == 0, "run-bad-fixture-removed"); }
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
     }
-    if (B1 || B2) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
+    if (B1 || B2 || B3) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
     if (A3) {
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a3-start");
 
