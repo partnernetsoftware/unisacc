@@ -240,3 +240,39 @@ A 批(第 2、3、4、5 项)只动 lower 与编码,对所有优化档生效;B �
 已有证据(LOCAL):移位探针(shl、shr、sar 在 64、32、16、8 位,N 取 0、1、7、31、32、33、63,变量 0 至 63 全扫,移位量寄存器被改写、条件赋值、标号回跳的回落情形)gcc -O0、已装、cx-dev 默认档与 -O2 档输出全同;越界与负数常量移位量(64、65、127、-1、-63、4294967303、256、1000)已装与 cx-dev 两档输出相同;假根 check-bench-gencode 3 8 末行 valid=6 noisy=2 invalid=0 failed=0;8MB sha 与 sort 校验值四个变体相同;假根 check-random-expr 3 批 status=PASS(本机无 tcc,tcc 位用 gcc 顶替,实为两方比对);facts-gen --check rc 0;gold-table --check PASS 20 stages;ratchets ok=15 fail=0(字面量经清单常量引用,check-literal 总数 3028 降回 3020)。
 
 未验证:osx、win 的 x86_64 编码格 UNVERIFIED(同一张表,未跑);arm64 不适用;慢车道(SID、PC、两代 GEN)未跑;tools/affected.cx --run 在 60 秒内未跑完且报 tools.cxlib 的 tlib STALE(非本项路径),受影响批次未实跑;编码层没有新增穷举夹具(各寄存器组合、租约各分支);七源 -o sha 未比。
+
+## 10 A 批第 2 项落地记录:掩码与改零扩展搬运,不删掩码 imm(2026-11-16,LOCAL)
+
+落点同第 9 节,在 x86 编码网,复用掩码槽 km,只动 exec/enc/x86-emit-result.tsv(alias 段)与 exec/enc/gen-manifest.tsv(两个 alias 实例的状态名与常量);没有动 x86-line-result.tsv、lower 与 tape。本轮只做"不删 imm"的版本。
+
+机制:alias 段在两地址选择之前加一段判定(状态 m0 至 m6、z32、z16、z8,原入口改名 gr)。
+- 掩码槽续租:km 在租约内且本行算术类目的不是 km 的寄存器时续到下一行,所以 `imm M; and A,A,M; and B,B,M` 两条都能命中;目的就是 M 时不续。imm、push、pop 及其它操作仍不续(小于 64 的 imm 仍把 km 作废),标号清槽。第 9 节移位量槽对 km 的判定语义不变(M 仍持有 km 的值)。
+- 命中条件:操作为 and(清单常量 maskop,mul 实例取不可达值 256),km 在租约内,两个源之一是 km 的寄存器,km 的值恰为 4294967295、65535 或 255。
+- 发射:32 位档 `REX(W=0) 89 /r`(mov 目的 32 位, 源 32 位);16 位档 `REX 0F B7 /r`(movzwl);8 位档 `REX 0F B6 /r`(movzbl,REX 恒发,sil、dil 可作字节源)。其余掩码值与未命中情形走原路径。
+- 回滚:还原这两张表。
+
+实测(本机 lnx/x86_64;cx-dev 每次运行报 CXDEV_STALE recipe=* reason=reload-in-progress 与 scope=LOCAL-PARTIAL local_members=6,另有窗口同时在改 include 与运行库;计时期间 load1 为 7.7 至 9.2,偏高,只能看方向):
+
+| 项 | 已装 0.0.67 | 第 3、4 项(上一轮产物 /tmp/x3s/bg.dev) | 本轮 cx-dev(第 2、3、4 项) |
+|---|---|---|---|
+| 8MB sha 默认档,三次取 min,毫秒(第一场) | 1000.9 | - | 915.2 |
+| 8MB sha -O2 档(第一场) | 781.1 | - | 617.3 |
+| 8MB sort 默认档(第一场) | 1089.3 | - | 1071.9 |
+| 8MB sort -O2 档(第一场) | 687.6 | - | 676.1 |
+| 8MB sha 默认档(第二场,同场交错) | - | 873.4 | 898.9 |
+| 8MB sha -O2 档(第二场,同场交错) | - | 624.2 | 595.5 |
+| bench-gencode.c 对象指令数,默认档 | 21318 | 19889 | 19889 |
+| 同上 -O2 档 | 12731 | 11620 | 11553 |
+| 同上 64 位寄存器 and 条数(默认档,-O2 档) | 376,376 | 未数 | 40,30 |
+| 同上零扩展形式条数(-O2 档) | 0 | 0 | mov 32 位 329,movzwl 2,movzbl 15 |
+
+结论:不删 imm 的版本收益小。默认档里掩码几乎全是目的等于源,and 换成同寄存器 32 位 mov 条数不变,计时在噪声内(第二场还慢 3%,不能判为收益);-O2 档少 67 条指令,sha 同场快约 4.6%(624.2 到 595.5,高负载下取得,需在 load1 低于 2 时复测)。第 5.1 节估的 -19% 要靠删掉掩码 imm 才拿得到。
+
+下一步建议(未做):在编码网做"掩码 imm 延迟落地"。遇到值为三档掩码的 imm 先不发,记待发槽;后续行是命中的掩码 and 时只发零扩展;遇到任何别的行(含标号、跳转、调用、返回,或操作数等于该寄存器)先把 imm 补发成独立一项再处理该行;同一寄存器被新的 imm 覆盖或被命中的 and 写为目的时丢弃待发项。这样不需要死后扫描,收益来自 e3 每组掩码都重新发一条 imm 这一事实。它要动 x86-line-result.tsv 的逐行分派(补发须在标号与跳转项之前自成一项,不能并进跳转项的字节),风险高于本轮,应单独一轮并配穷举夹具。
+
+已有证据(LOCAL):掩码探针 /tmp/x3m/mp.c(8、16、32 位掩码,目的与源相同与不同,掩码寄存器随后重用、被改写、自掩、目的即掩码,非三档掩码值 0xfffffffe、0x1ffffffff、0xfffe、0x1ff、0x7f、48 位,有符号与无符号 8、16、32 位截断与回扩,乘法与移位混用,分支与循环内掩码)gcc -O0、已装默认档与 -O2 档、cx-dev 默认档与 -O2 档输出全同(c8268aa28ce3915c);探针对象里三档形式均出现;移位探针 /tmp/x3s/probe.c 同样五方全同;假根 check-bench-gencode 3 8 末行 valid=6 noisy=4 invalid=0 failed=0;8MB sha 与 sort 校验值各变体相同;gold-table --check PASS 20 stages;ratchets ok=15 fail=0(check-literal total=3020 未升)。
+
+facts-gen --check:HEAD 归档副本加本项两张表 rc 0 全 SAME;共享工作区上 rc 1,报 DIFF k2-gen2 与 DIFF pp-autoinc-gen,对应他人窗口已暂存未提交的 exec/facts/k2-gen2.tsv 与 exec/facts/pp-autoinc-gen.tsv,不在本项写域。假根 check-random-expr 3 批 status=PASS(本机无 tcc,两个编译器位都用 gcc,实为两方比对)。
+
+未验证:osx、win 的 x86_64 编码格 UNVERIFIED;arm64 未做对应融合;慢车道未跑;affected --run 未跑;编码层没有穷举夹具(各寄存器组合含 r8 以上、三档宽度、租约各分支);七源 -o sha 未比;低负载下的计时未取。
+
