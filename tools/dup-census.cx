@@ -36,7 +36,7 @@ static const char *root = ".";
 static char *fname[MAXF]; static char *fbuf[MAXF]; static long flen[MAXF]; static int nf;
 static int e_file[MAXE], e_lines[MAXE]; static long e_s[MAXE], e_e[MAXE], e_ns[MAXE], e_nl[MAXE];
 static unsigned long e_h[MAXE]; static int ne, idx[MAXE];
-static int g_rep[MAXG], g_copies[MAXG], g_lines[MAXG]; static int ng;
+static int g_rep[MAXG], g_copies[MAXG], g_lines[MAXG], g_i0[MAXG]; static int ng;
 
 static const char *frag[][2] = {
     {"path.fmt-join", "\"%s/%s\""}, {"tsv.hand-tabchr", "'\\t'"}, {"fmt.snprintf", "snprintf("},
@@ -141,7 +141,7 @@ static void census(void) {
             int m = k + 1;
             while (m < j && same_body(idx[k], idx[m])) m++;
             if (m - k >= 2 && ng < MAXG) {
-                g_rep[ng] = idx[k]; g_copies[ng] = m - k; g_lines[ng] = e_lines[idx[k]]; ng++;
+                g_rep[ng] = idx[k]; g_i0[ng] = k; g_copies[ng] = m - k; g_lines[ng] = e_lines[idx[k]]; ng++;
                 s_vdefs += m - k; s_vlines += (long)(m - k) * e_lines[idx[k]]; s_vred += (long)(m - k - 1) * e_lines[idx[k]];
             }
             k = m;
@@ -176,18 +176,27 @@ static long base_total(const char *t, long tn, const char *key) {
 }
 
 int main(int argc, char **argv) {
-    int mode = 0, a, g, h; char bpath[1300];
+    int mode = 0, a, g, h; char bpath[1300]; const char *where = 0;
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--print")) mode = 0;
         else if (tx_eqz(argv[a], "--check")) mode = 1;
         else if (tx_eqz(argv[a], "--write")) mode = 2;
+        else if (tx_eqz(argv[a], "--where") && a + 1 < argc) { mode = 3; where = argv[++a]; }
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
-        else { fprintf(stderr, "usage: tools/dup-census.cx [--print | --check | --write] [--root DIR]\n"); return 2; }
+        else { fprintf(stderr, "usage: tools/dup-census.cx [--print | --check | --write | --where NAME] [--root DIR]\n"); return 2; }
     }
     if (list_dir("tools")) { fprintf(stderr, "dup-census: cannot list %s/tools\n", root); return 2; }
     list_dir("tools/cxlib");   /* optional */
     census();
     if (cx_fmt(bpath, sizeof bpath, "%s/build/dup-census-baseline.tsv", root)) return 2;
+    if (mode == 3) {   /* --where NAME: the files of every verbatim group of that name, one row per copy */
+        for (g = 0; g < ng; g++) {
+            const char *s; long l; int t; gname(g, &s, &l);
+            if (l != tx_len(where, 256) || !mm_same(s, where, l)) continue;
+            for (t = 0; t < g_copies[g]; t++) printf("WHERE\t%s\t%d\t%s\n", where, g, fname[e_file[idx[g_i0[g] + t]]]);
+        }
+        return 0;
+    }
     if (mode == 0) {
         for (g = 0; g < ng; g++) { const char *s; long l; gname(g, &s, &l); printf("GROUP\t%.*s\t%d\t%d\t%ld\t%ld\n", (int)l, s, g_copies[g], g_lines[g], (long)g_copies[g] * g_lines[g], (long)(g_copies[g] - 1) * g_lines[g]); }
         for (a = 0; a < NFRAG; a++) printf("FRAG\t%s\t%ld\t%d\n", frag[a][0], fr_occ[a], fr_files[a]);

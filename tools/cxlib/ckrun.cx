@@ -1,0 +1,40 @@
+/* ckrun.cx -- shell runs and output probes shared by the compiler-probe checks (tools/check-*.cx).
+ * Use it with `#pragma unisa use cxlib.ckrun` from a tool in tools/.  Every name starts with ckk_.
+ *   ckk_sh(TAG, SCRIPT, OUT, CAP)        runs `sh -c '{ SCRIPT\n} 2>&1'` with a 40 second limit, copies at most
+ *                                        CAP-1 bytes of the merged output into OUT (NUL ended; nothing copied when
+ *                                        CAP <= 0) and returns the run's rc; a script over 8 KiB prints
+ *                                        "TAG: REFUSE script too long" on stderr and exits 2
+ *   ckk_has(OUT, CAP, WANT)              1 when WANT (at most 256 bytes) occurs in the first tx_len(OUT, CAP) bytes
+ *   ckk_probe(TAG, DIR, NAME, SRC, OUT, CAP)
+ *                                        writes SRC plus a newline to DIR/NAME.cx, compiles and runs it with
+ *                                        `sh ./unisacc.com` (cwd = repo root) and appends "RC=<rc>"; output as
+ *                                        ckk_sh; a script over 6000 bytes prints "TAG: REFUSE script" and exits 2
+ * No exported objects or macros (CXIF v0). */
+#pragma unisa module ckrun
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static void ckk_die(const char *tag, const char *s) { sy_eprintf("%s: REFUSE %s\n", tag, s); sy_exit(2); }
+
+int ckk_sh(const char *tag, const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) ckk_die(tag, "script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 40, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+
+int ckk_has(const char *out, int cap, const char *want) { return tx_find(out, tx_len(out, cap), want, tx_len(want, 256)) >= 0; }
+
+void ckk_probe(const char *tag, const char *dir, const char *name, const char *src, char *out, int cap) {
+    char script[6000];
+    if (cx_fmt(script, sizeof script, "printf '%%s\\n' '%s' > %s/%s.cx && sh ./unisacc.com %s/%s.cx; echo RC=$?", src, dir, name, dir, name)) ckk_die(tag, "script");
+    ckk_sh(tag, script, out, cap);
+}

@@ -1,0 +1,28 @@
+/* tools/check-ckrun.cx -- contract check of cxlib.ckrun (ckk_sh, ckk_has, ckk_probe): the shell-run and output-probe helpers
+ * that tools/check-large-frame.cx, check-constexpr-sizeof.cx, check-xunit-fnptr.cx and check-brace-diag.cx share.
+ * last line CHECK_CKRUN\tfailed=N, rc 0 when N is 0. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tckrun.%s\n", name); else { failed++; sy_printf("FAIL\tckrun.%s\n", name); } }
+
+int main(void) {
+    char out[512], small[8];
+    int rc;
+    rc = ckk_sh("check-ckrun", "echo hello; echo err >&2", out, sizeof out);
+    ck(rc == 0 && ckk_has(out, sizeof out, "hello") && ckk_has(out, sizeof out, "err"), "sh-merges-stdout-and-stderr");
+    rc = ckk_sh("check-ckrun", "exit 3", out, sizeof out);
+    ck(rc == 3, "sh-returns-exit-code");
+    rc = ckk_sh("check-ckrun", "echo 0123456789abcdef", small, sizeof small);
+    ck(rc == 0 && tx_len(small, sizeof small) == 7, "sh-truncates-to-cap-minus-one-and-terminates");
+    ck(!ckk_has(out, sizeof out, "absent-needle"), "has-absent");
+    { char t[8] = "abc"; ck(ckk_has(t, sizeof t, "bc"), "has-found-inside-cap"); ck(!ckk_has(t, 2, "bc"), "has-ignores-bytes-past-cap"); }
+    ckk_probe("check-ckrun", "/tmp", "ckrun-probe", "int main(void) { return 0; }", out, sizeof out);
+    ck(ckk_has(out, sizeof out, "RC=0"), "probe-compiles-runs-and-appends-rc");
+    rc = ckk_sh("check-ckrun", "sleep 0; true", out, 0);
+    ck(rc == 0, "sh-cap-zero-copies-nothing");
+    sy_printf("CHECK_CKRUN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
