@@ -369,6 +369,12 @@ static int build(Job *j) {
         lr = (waitpid(lp, &st, 0) == lp && WIFEXITED(st)) ? WEXITSTATUS(st) : 1;
         if ((ms = cx_read(lms, &mn))) { j->ms[1] = atol(ms); free(ms); }
         unlink(lms);
+        /* The delta loader of table-lint (tools/cxlib/delta.cx) refused the delta itself: lint cannot judge this net
+           (seen: exec/librarycontract and exec/librarypartition name a terminal DONE that seed/tbl.c resolves like
+           HALT, while the loader synthesizes HALT only).  The refusal becomes one ERROR line of the lint record, so
+           the relative gate decides: the same refusal on the installed tables lets the net through (reported as
+           CXDEV_LINT_NA), a refusal the installed tables do not have stops the swap like any new ERROR. */
+        if (lr == 1 && !rc) { char *lg; size_t ln; if ((lg = cx_read(llog, &ln))) { if (ln > 7 && !strncmp(lg, "delta: ", 7)) { np_buf b = {0}; char *e = memchr(lg, 10, ln); size_t l = e ? (size_t)(e - lg) : ln; if (l > 300) l = 300; np_puts(&b, "ERROR\tlint-not-loadable\t"); np_put(&b, lg, l); np_put(&b, "\n", 1); if (!cx_write(lo, b.p, b.n)) lr = 0; free(b.p); } free(lg); } }
         if (lr && !rc) { rc = lr; { if (cx_fmt(j->status, sizeof j->status, "%s:lint", lr == 2 ? "DEFERRED" : "build-failed")) refuse("text-too-long", 0); } { char *lg; size_t ln; if ((lg = cx_read(llog, &ln))) { cx_write(log, lg, ln); free(lg); } } }
         unlink(llog);
     }
@@ -660,6 +666,7 @@ static void reload(const char *fp, int report) {
                 for (hp = 0; !found && hp + ll <= bn; ) { char *he = memchr(bs + hp, 10, bn - hp); if (!he) break; if ((size_t)(he - (bs + hp)) + 1 == ll && !memcmp(bs + hp, s, ll)) found = 1; hp = (size_t)(he - bs) + 1; }
                 if (!found) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-error:new-ERROR-not-in-installed-tables")) refuse("text-too-long", 0); } if (report) { fputs("CXDEV_LINT\t", stderr); fwrite(s, 1, ll, stderr); } break; }
             }
+            if (!r->why[0] && report && wn > 24 && !strncmp(ws, "ERROR\tlint-not-loadable\t", 24)) { char *e = memchr(ws, 10, wn); fprintf(stderr, "CXDEV_LINT_NA\trecipe=%s\tmodel=local\tsame-on-installed-tables\treason=", r->id); fwrite(ws + 24, 1, e ? (size_t)(e - ws) - 24 : 0, stderr); fputc(10, stderr); }
             free(ws); free(bs);
             if (r->why[0]) { free(m); continue; }
             r->m = m; r->mn = mn;
