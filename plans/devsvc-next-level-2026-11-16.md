@@ -246,3 +246,38 @@ H2、H5 在阶段 1 与阶段 3 之后才有值,这本身是阶段验收的一�
 ## 远期:数据库式表达(项目所有者直觉,2026-11-16)
 
 devsvc 的状态散在几十张 TSV 里,查询多为全表扫(affected 每次遍历约 1300 个批次约 3 秒)。待 cx 的 ext 层有 sqlite 库包后,可获得:(1) 事务:多表原子写入,替代锁加重试;(2) 索引:关系 DAG 的依赖与影响查询毫秒级;(3) 增量物化视图:派生表在写事件上增量更新,即"事件预制缓存"的通用形式,derive 不再全量重算;(4) 历史回溯:事件与状态按时间查询。与"build/*.tsv 迁出"路线合流;前置是 ext 层 sqlite 库包(先绑定 C 实现还是 cx 自写存储引擎待定)。
+
+## 下一轮跟进 文档接口与 CLI 诊断缺陷
+
+以下是文档整理中确认的接口问题，交后续 devsvc 维护者修正；本节不修改源码、不增加当前版本发布门。误用 Pages 技能、扩展用户任务是调用方错误，不归因于 devsvc。当前 tools/devsvc-core.cx 与 tools/check-devsvc.cx 有其他窗口在途改动，实施前须重核最新 HEAD 与工作区是否已修复。
+
+### DCLI1 doc append 重复追加末尾换行
+
+状态：实跑确认，待修。合法调用 `devsvc doc append prd.md '10. 子文档与归档索引（树）' line@=/tmp/unisacc-paradigm-index.txt` 返回成功；输入文件本身以 LF 结束，结果在 EOF 多出一个空行，`git diff --check -- prd.md` 报 new blank line at EOF。记录时入口所在 HEAD 为 8b170d26eb，输入文件与复现输出在本机 /tmp；持久依据是 tools/cxlib/flowdoc.cx 的 doc.append 分支：完整复制 strlen(c) 字节后无条件再追加 LF。
+
+影响：常见的 `--from` 与 `line@=` 文件输入会产生额外空行，多次追加会保留或累积多余分隔；后续代理可能把格式检查失败误认为文档正文错误。当前文档已用 doc.set 写入规范正文绕行。
+
+建议：定义 append 的末尾换行合同并统一 literal、line@= 与 --from 入口；建议已有末尾 LF 时不再增加，同时保留正文内部换行和原章节尾部分隔，不以全文件格式化修复局部操作。
+
+验收：同一内容的无 LF 与单个末尾 LF 两种输入输出逐字节相同；覆盖 --from、line@=、直接参数、空正文、非末节与 EOF、已有章节尾部空行、多次追加及 expect_sha 冲突拒绝。相应夹具 diff --check 无新增空白错误，其他章节字节不变。
+
+### DCLI2 git 子命令 rc 2 被误判为 devsvc 用法错误
+
+状态：实跑确认，待修。执行 `sh ./unisacc.com tools/devsvc.cx -- git diff --check -- prd_paradigm.md prd.md`，git 已明确输出 `prd.md:735: new blank line at EOF.`，随后包装层又打印整段 devsvc usage，最终 rc 2。定位 tools/devsvc-core.cx 的 main2 中 git 分派：`return r == 2 ? usage() : r;` 无法区分 cmd_git 参数解析失败与实际 git 子进程返回 2。
+
+影响：真实的检查失败被附加成 CLI 参数错误，增加误诊和无效重试；其他允许返回 2 的 git 操作也需遍历核对。
+
+建议：将参数解析状态与子进程退出码分开，仿 x_ran 的语义只对尚未执行命令的参数错误打印 usage；不更改 git 原始退出码和诊断。
+
+验收：有效 git 命令的 rc 0、1、2 均保留且不打印 devsvc usage；diff --check 的夹具同时确认原诊断和 rc；真正缺参数、未知子命令仍具名拒绝且没有 git 副作用。覆盖 main2、cmd_git、后台作业和回执消费者，不只测一条 diff 命令。
+
+### DCLI3 config 输出未覆盖已加载的文档规则与锁写域
+
+状态：实跑与源码确认，待修。devsvc config 显示产品入口、库目录和两个锁名，但未输出配置表中已有的 doc prd.md、doc prd_*.md、doc plans/*.md，也未输出 lock 行的写域。tools/devsvc-core.cx 的 config 分支仅遍历 nlockname，未输出 docpat 与 lockpfx；tools/devsvc-repo.tsv 已声明这些字段。
+
+影响：调用者无法通过配置查询完整发现文档允许范围和共享表写域，被迫再读配置表或源码；doc 命令实际可用，本项是可发现性与诊断缺口。
+
+建议：config 输出增加完整 doc 与 lock 写域记录，并保留实际读取的 pinned 配置表路径，区分当前 HEAD 配置与未提交配置。新增字段保持既有消费者兼容。
+
+验收：配置夹具中的每条 doc 规则和锁写域均能从 config 输出还原；分别覆盖 pinned 与 --dev 所读配置身份、无 doc 行、多个 doc 行、缺表和重复键拒绝；盘点全部 config 输出消费者后更新断言。
+

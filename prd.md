@@ -707,6 +707,8 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 ## 10. 子文档与归档索引（树）
 
+[prd_paradigm.md](prd_paradigm.md) 记录思维方式与工作范式：结果优先、时间折叠、事实表与以网换逻辑、cx 与显式边界、cx-dev、devsvc、契约先行与模型级联。
+
 ```
 prd.md                 当前状态（本文件，只写当前事实；结构点唯一定义在 §3）
 ├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
