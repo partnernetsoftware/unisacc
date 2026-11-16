@@ -1,0 +1,245 @@
+/* check-x86-enc-fuse.cx -- x86 encoder net fixture for the X3 fusions (shift immediate, mask to zero extension,
+ * deferred mask imm).  Hand-written target text (the form after lower, before encoding) goes straight into
+ * `stream elf`; the code bytes are then executed by a host harness and compared with a small C interpreter of
+ * the same instruction list (independent oracle: it knows nothing about the encoder).
+ *
+ *   sh ./unisacc.com tools/check-x86-enc-fuse.cx -- [--launch "CMD"] [--cc CC] [--dir DIR] [--expect-fuse] [--chunk N]
+ *
+ * --launch: the compiler command (default "sh ./unisacc.com"; for the private encoder net pass the cx-dev path).
+ * --expect-fuse: also require that the zero-extension, immediate shift and r8+ re-emission forms occur in the bytes
+ *   (only true for a product that carries the three fusions).
+ * Families: F1 mask and (3 masks x M 15 regs x S 15 x D 15), F2 swapped sources, F3 lines between the imm and the
+ * and (hold lines, flush lines, overwrite, second pending, both sources), F4 constant shifts (3 ops x 4 counts x
+ * K 15 regs x 5 x 5), F5 excluded registers (rsp as mask register).
+ * Not covered here: .lea, float, host bridge, win rows, osx/win cells.
+ * Last line: X86_ENC_FUSE<TAB>cases=N<TAB>recs=N<TAB>failed=N ; rc 0 only when failed=0 and every step ran. */
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+static const char *RN[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
+enum { O_END, O_LOADV, O_IMM, O_AND, O_ADD, O_MOV, O_SHL, O_SHR, O_LSHR, O_PUSH, O_POP, O_REC, O_NOP, O_UDIV, O_MUL, O_CASE, O_OR };
+static FILE *low, *tab;
+static char dir[2048];
+static int unit, slot, incase, chunk = 800, ncase, lab, base, used;
+static long nrec;
+
+static void die(const char *s) { fprintf(stderr, "check-x86-enc-fuse: %s\n", s); exit(2); }
+static void row(int op, int a, int b, int c, unsigned long long v) { fprintf(tab, "%d %d %d %d %llu\n", op, a, b, c, v); }
+static void open_unit(void) {
+    char p[2200];
+    if (cx_fmt(p, sizeof p, "%s/u%d.low", dir, unit)) die("path");
+    low = fopen(p, "wb"); if (!low) die("cannot create unit text");
+    fwrite("USLATTRT\004\000\000\000\000\000\000\000", 1, 16, low);
+    fprintf(low, "@target lnx/x86_64\n@data -\n@data_len 0\n@bss 0\n@relocs -\n_start:\n");
+    fprintf(low, "push rbx\npush rbp\npush r12\npush r13\npush r14\npush r15\npush rdi\n");
+    slot = 2; incase = 0;
+}
+static void close_unit(void) {
+    fprintf(low, "pop rdi\npop r15\npop r14\npop r13\npop r12\npop rbp\npop rbx\nret form=x86\nHLP:\nret form=x86\n.end\n");
+    if (fclose(low)) die("unit text write"); low = 0;
+    row(O_END, 0, 0, 0, 0); unit++;
+}
+/* a case starts by reloading the buffer base into a register the case does not use */
+static void begin(int r0, int r1, int r2, int r3) {
+    static const int cand[5] = {12, 13, 14, 5, 15};
+    if (low && incase >= chunk) close_unit();
+    if (!low) open_unit();
+    used = (1 << r0) | (1 << r1) | (1 << r2) | (1 << r3);
+    base = -1;
+    for (int i = 0; i < 5; i++) if (!(used >> cand[i] & 1)) { base = cand[i]; break; }
+    if (base < 0) die("no base register");
+    fprintf(low, "load64 %s, rsp, 0 form=x86\n", RN[base]);
+    row(O_CASE, ncase, 0, 0, 0); ncase++; incase++;
+}
+static void chk(int r) { if (r == base) die("case uses its base register"); }
+static void loadv(int r) { chk(r); fprintf(low, "load64 %s, %s, 0 form=x86\n", RN[r], RN[base]); row(O_LOADV, r, 0, 0, 0); }
+static void imm(int r, unsigned long long v) { chk(r); fprintf(low, "imm %s, %llu\n", RN[r], v); row(O_IMM, r, 0, 0, v); }
+static void op3(int op, const char *name, int d, int a, int b) { chk(d); chk(a); chk(b); fprintf(low, "%s %s, %s, %s form=x86\n", name, RN[d], RN[a], RN[b]); row(op, d, a, b, 0); }
+static void and3(int d, int a, int b) { op3(O_AND, "and64", d, a, b); }
+static void mov(int d, int s) { chk(d); chk(s); fprintf(low, "mov %s, %s\n", RN[d], RN[s]); row(O_MOV, d, s, 0, 0); }
+static void push(int r) { chk(r); fprintf(low, "push %s\n", RN[r]); row(O_PUSH, r, 0, 0, 0); }
+static void pop(int r) { chk(r); fprintf(low, "pop %s\n", RN[r]); row(O_POP, r, 0, 0, 0); }
+static void rec(int r) { chk(r); fprintf(low, "store64 %s, %d, %s form=x86\n", RN[base], slot * 8, RN[r]); row(O_REC, r, slot, 0, 0); slot++; nrec++; }
+static void label(void) { fprintf(low, "L%d:\n", lab++); row(O_NOP, 0, 0, 0, 0); }
+static void jump(void) { fprintf(low, "jump L%d form=x86 reloc=rel32\nL%d:\n", lab, lab); lab++; row(O_NOP, 0, 0, 0, 0); }
+static void jumpz(int r) { chk(r); fprintf(low, "jumpz %s, L%d form=x86 reloc=rel32\nL%d:\n", RN[r], lab, lab); lab++; row(O_NOP, 0, 0, 0, 0); }
+static void call(void) { fprintf(low, "call HLP form=x86 reloc=rel32\n"); row(O_NOP, 0, 0, 0, 0); }
+/* a register that is none of a, b, c and not rsp */
+static int other(int a, int b, int c, int skip) {
+    static const int pool[8] = {2, 6, 9, 15, 0, 8, 1, 7};
+    for (int i = 0; i < 8; i++) { int r = pool[i]; if (r != a && r != b && r != c && skip-- <= 0) return r; }
+    die("no free register"); return 0;
+}
+static const unsigned long long MASK[3] = {255ULL, 65535ULL, 4294967295ULL};
+static const int RED[7] = {0, 1, 7, 8, 10, 12, 15};
+/* rbx and r11 are the encoder's own scratch registers: lower never emits them as operands, so they are outside
+   the encoding contract and stay out of every operand matrix here (feeding them made the installed 0.0.67 fail
+   2475 cases that no compiled program can produce).  That the fused net lands `imm r11|rbx, MASK` at once instead
+   of deferring it was seen in a disassembly sample only; a fixture case for it needs --expect-fuse (not yet). */
+static int scratch(int r) { return r == 3 || r == 11; }
+
+static void f1(void) {
+    for (int k = 0; k < 3; k++) for (int m = 0; m < 16; m++) for (int s = 0; s < 16; s++) for (int d = 0; d < 16; d++) {
+        if (m == 4 || s == 4 || d == 4 || scratch(m) || scratch(s) || scratch(d)) continue;
+        begin(m, s, d, d); loadv(s); imm(m, MASK[k]); and3(d, s, m); rec(d); rec(m);
+    }
+}
+static void f2(void) {
+    for (int k = 0; k < 3; k++) for (int m = 0; m < 16; m++) for (int si = 0; si < 7; si++) for (int di = 0; di < 7; di++) {
+        int s = RED[si], d = RED[di];
+        if (m == 4 || scratch(m)) continue;
+        begin(m, s, d, d); loadv(s); imm(m, MASK[k]); and3(d, m, s); rec(d); rec(m);
+    }
+}
+static void f3(void) {
+    for (int k = 0; k < 3; k++) for (int m = 0; m < 16; m++) for (int same = 0; same < 2; same++) for (int v = 0; v < 22; v++) {
+        if (m == 4 || scratch(m)) continue;
+        int s = other(m, m, m, 0), d = same ? s : other(m, s, s, 0), x = other(m, s, d, 0), y = other(m, s, d, 1);
+        unsigned long long M = MASK[k];
+        begin(m, s, d, x); if (y == base) y = other(m, s, d, 2);
+        if (y == base || x == base) die("f3 base clash");
+        loadv(s); imm(x, 77); imm(m, M);
+        if (v == 0) { and3(d, s, m); rec(d); continue; }
+        if (v == 1) { push(x); pop(x); }
+        if (v == 2) mov(x, s);
+        if (v == 3) op3(O_ADD, "add64", x, s, s);
+        if (v == 4) label();
+        if (v == 5) jump();
+        if (v == 6) jumpz(s);
+        if (v == 7) call();
+        if (v == 8) mov(x, m);
+        if (v == 9) op3(O_ADD, "add64", x, m, s);
+        if (v == 10) imm(m, 7);
+        if (v == 11) imm(m, MASK[(k + 1) % 3]);
+        if (v == 12) imm(x, 65535);
+        if (v == 13) { push(m); pop(m); }
+        if (v == 14) { imm(x, 3); op3(O_SHL, "shl64", x, s, x); }
+        if (v == 15) op3(O_MUL, "mul64", x, s, s);
+        if (v == 16) and3(x, s, m);
+        if (v == 17) { and3(d, m, m); rec(d); rec(m); rec(x); continue; }
+        if (v == 18) rec(s);
+        if (v == 19) loadv(x);
+        if (v == 20) { push(s); pop(x); op3(O_OR, "or64", x, x, m); }
+        if (v == 21) jumpz(m);
+        and3(d, s, m); rec(d); rec(m); rec(x); rec(s);
+    }
+}
+static void f4(void) {
+    static const int cnt[4] = {1, 31, 32, 63};
+    static const int R5[5] = {0, 1, 7, 8, 15};
+    static const char *nm[3] = {"shl64", "shr64", "lshr64"};
+    for (int o = 0; o < 3; o++) for (int c = 0; c < 4; c++) for (int kr = 0; kr < 16; kr++) for (int si = 0; si < 5; si++) for (int di = 0; di < 5; di++) {
+        int s = R5[si], d = R5[di];
+        if (kr == 4 || scratch(kr) || scratch(s) || scratch(d)) continue;
+        begin(kr, s, d, d); loadv(s); imm(kr, (unsigned long long)cnt[c]); op3(O_SHL + o, nm[o], d, s, kr); rec(d); rec(kr);
+    }
+    /* shift count pending together with a deferred mask on the shifted value */
+    for (int o = 0; o < 3; o++) for (int k = 0; k < 3; k++) for (int kr = 0; kr < 16; kr++) for (int m = 0; m < 16; m++) {
+        if (kr == 4 || m == 4 || m == kr || scratch(kr) || scratch(m)) continue;
+        int s = other(kr, m, m, 0), d = other(kr, m, s, 0);
+        begin(kr, m, s, d); loadv(s); imm(kr, 5); imm(m, MASK[k]); and3(s, s, m); op3(O_SHL + o, nm[o], d, s, kr); rec(d); rec(s); rec(m); rec(kr);
+    }
+}
+/* rsp as the mask register: the imm must land at once; rcx keeps the real stack pointer meanwhile */
+static void f5(void) {
+    for (int k = 0; k < 3; k++) for (int v = 0; v < 3; v++) {
+        begin(1, 0, 7, 2); loadv(7); mov(1, 4); imm(4, MASK[k]);
+        if (v == 1) label();
+        if (v == 2) mov(2, 7);
+        and3(0, 7, 4); mov(2, 4); mov(4, 1); rec(0); rec(2);
+    }
+}
+
+static const char *HARNESS =
+"#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/mman.h>\n"
+"typedef unsigned long long u64;\n"
+"static unsigned char *rd(const char *p,long *n){FILE *f=fopen(p,\"rb\");if(!f)return 0;fseek(f,0,SEEK_END);*n=ftell(f);fseek(f,0,SEEK_SET);unsigned char *b=malloc(*n+1);if(fread(b,1,*n,f)!=(size_t)*n)return 0;fclose(f);return b;}\n"
+"int main(int argc,char **argv){if(argc<3)return 2;const char *dir=argv[1];int units=atoi(argv[2]);char p[4096];long tn;\n"
+" snprintf(p,sizeof p,\"%s/cases.txt\",dir);FILE *t=fopen(p,\"r\");if(!t){puts(\"HARNESS_ERROR no table\");return 2;}\n"
+" long cap=1<<20,n=0;long long (*T)[5]=malloc(cap*sizeof *T);\n"
+" while(fscanf(t,\"%lld %lld %lld %lld %llu\",&T[n][0],&T[n][1],&T[n][2],&T[n][3],(u64*)&T[n][4])==5){if(++n==cap){cap*=2;T=realloc(T,cap*sizeof *T);}}\n"
+" static const u64 V[3]={0xFEDCBA9876543210ULL,0x8000000180018081ULL,0x0123456789ABCDEFULL};long failed=0,recs=0,cases=0;\n"
+" for(int vi=0;vi<3;vi++){long at=0;for(int u=0;u<units;u++){\n"
+"  snprintf(p,sizeof p,\"%s/u%d.o\",dir,u);unsigned char *f=rd(p,&tn);if(!f||tn<16+120||memcmp(f+16,\"\\177ELF\",4)){printf(\"HARNESS_ERROR unit %d image\\n\",u);return 2;}\n"
+"  unsigned char *e=f+16;u64 entry,off,va,fsz;memcpy(&entry,e+24,8);u64 ph;memcpy(&ph,e+32,8);memcpy(&off,e+ph+8,8);memcpy(&va,e+ph+16,8);memcpy(&fsz,e+ph+32,8);\n"
+"  if(entry<va||entry-va>=fsz||off+fsz>(u64)tn-16){printf(\"HARNESS_ERROR unit %d extent\\n\",u);return 2;}\n"
+"  long cn=(long)(fsz-(entry-va));unsigned char *code=mmap(0,cn,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);if(code==MAP_FAILED)return 2;memcpy(code,e+off+(entry-va),cn);\n"
+"  u64 *buf=calloc(1<<16,8);buf[0]=V[vi];((void(*)(u64*))code)(buf);\n"
+"  u64 r[16]={0},st[64];int sp=0;long cid=-1;int bad=0;\n"
+"  for(;at<n;at++){long long *q=T[at];int op=(int)q[0];u64 im=(u64)q[4];if(op==0){at++;break;}\n"
+"   switch(op){case 1:r[q[1]]=V[vi];break;case 2:r[q[1]]=im;break;case 3:r[q[1]]=r[q[2]]&r[q[3]];break;case 4:r[q[1]]=r[q[2]]+r[q[3]];break;\n"
+"   case 5:r[q[1]]=r[q[2]];break;case 6:r[q[1]]=r[q[2]]<<(r[q[3]]&63);break;case 7:r[q[1]]=(u64)((long long)r[q[2]]>>(r[q[3]]&63));break;\n"
+"   case 8:r[q[1]]=r[q[2]]>>(r[q[3]]&63);break;case 9:st[sp++]=r[q[1]];break;case 10:r[q[1]]=st[--sp];break;\n"
+"   case 11:recs++;if(buf[q[2]]!=r[q[1]]){if(!bad){failed++;bad=1;if(failed<=25)printf(\"MISMATCH v=%d unit=%d case=%ld slot=%lld reg=%lld got=%llx want=%llx\\n\",vi,u,cid,q[2],q[1],buf[q[2]],r[q[1]]);}}break;\n"
+"   case 12:break;case 13:r[q[1]]=r[q[3]]?r[q[2]]/r[q[3]]:0;break;case 14:r[q[1]]=r[q[2]]*r[q[3]];break;case 15:cid=q[1];cases++;bad=0;break;case 16:r[q[1]]=r[q[2]]|r[q[3]];break;}}\n"
+"  munmap(code,cn);free(buf);free(f);}}\n"
+" printf(\"HARNESS cases=%ld recs=%ld failed=%ld\\n\",cases/3,recs/3,failed);return failed?1:0;}\n";
+
+static int sh(const char *cmd, int secs, np_result *r) {
+    char why[512]; char *av[] = {"sh", "-c", (char *)cmd, 0};
+    r->rc = -1;
+    if (np_run(av, 0, 0, secs, r, why, sizeof why)) { fprintf(stderr, "check-x86-enc-fuse: run failed: %s\n", why); return -1; }
+    return r->rc;
+}
+static long count(const char *pat) {
+    char cmd[6000]; long total = 0;
+    for (int u = 0; u < unit; u++) {
+        np_result r = {0};
+        if (cx_fmt(cmd, sizeof cmd, "tail -c +17 %s/u%d.o > %s/u.elf && objdump -D -b binary -mi386:x86-64 %s/u.elf | grep -c -E '%s'", dir, u, dir, dir, pat)) die("cmd");
+        sh(cmd, 50, &r); /* lint:allow grep -c exits 1 on a zero count; the number is read from stdout */
+        if (r.outn) total += atol(r.out);
+        np_free(&r);
+    }
+    return total;
+}
+
+int main(int argc, char **argv) {
+    const char *launch = "sh ./unisacc.com", *cc = "gcc"; int expect = 0, keep = 0; char cmd[6000], tmpl[] = "/tmp/x86-enc-fuse-XXXXXX";
+    dir[0] = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--launch") && i + 1 < argc) launch = argv[++i];
+        else if (!strcmp(argv[i], "--cc") && i + 1 < argc) cc = argv[++i];
+        else if (!strcmp(argv[i], "--dir") && i + 1 < argc) { if (cx_fmt(dir, sizeof dir, "%s", argv[++i])) die("dir"); keep = 1; }
+        else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) chunk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--expect-fuse")) expect = 1;
+        else die("usage: [--launch CMD] [--cc CC] [--dir DIR] [--expect-fuse] [--chunk N]");
+    }
+    if (chunk < 1 || chunk > 4000) die("--chunk 1..4000");
+    if (!dir[0]) { if (!mkdtemp(tmpl) || cx_fmt(dir, sizeof dir, "%s", tmpl)) die("scratch"); }
+    if (cx_fmt(cmd, sizeof cmd, "%s/cases.txt", dir)) die("path");
+    tab = fopen(cmd, "w"); if (!tab) die("cannot create table");
+    f1(); f2(); f3(); f4(); f5();
+    if (low) close_unit();
+    if (fclose(tab)) die("table write");
+    if (cx_fmt(cmd, sizeof cmd, "%s/h.c", dir)) die("path");
+    FILE *h = fopen(cmd, "w"); if (!h) die("harness"); fputs(HARNESS, h); if (fclose(h)) die("harness write");
+    int failed = 0;
+    for (int u = 0; u < unit; u++) {
+        np_result r = {0};
+        if (cx_fmt(cmd, sizeof cmd, "%s stream elf --target lnx/x86_64 < %s/u%d.low > %s/u%d.o", launch, dir, u, dir, u)) die("cmd");
+        int rc = sh(cmd, 55, &r);
+        if (rc) { failed++; printf("FAIL\tencode\tunit=%d\trc=%d\t%.*s\n", u, rc, (int)(r.errn > 300 ? 300 : r.errn), r.err ? r.err : ""); }
+        np_free(&r);
+    }
+    printf("ENCODED\tunits=%d\tcases=%d\tencode_failed=%d\n", unit, ncase, failed);
+    long hf = -1;
+    if (!failed) {
+        np_result r = {0};
+        if (cx_fmt(cmd, sizeof cmd, "%s -O1 -o %s/h %s/h.c && %s/h %s %d", cc, dir, dir, dir, dir, unit)) die("cmd");
+        int rc = sh(cmd, 55, &r);
+        if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+        const char *s = r.outn ? strstr(r.out, "HARNESS cases=") : 0;
+        const char *fz = s ? strstr(s, "failed=") : 0;
+        if (fz) hf = atol(fz + 7);
+        if (rc || hf != 0) failed++;
+        np_free(&r);
+        long zb = count("movzbl +%[a-z0-9]+,%"), zw = count("movzwl +%[a-z0-9]+,%"), si = count("(shl|shr|sar) +\\$0x[0-9a-f]+,%r"), hi = count("mov +\\$0x(ff|ffff|ffffffff),%r(8|9|1[0-5])d");
+        printf("FORMS\tmovzbl=%ld\tmovzwl=%ld\tshift_imm=%ld\thigh_mask_imm=%ld\texpect=%d\n", zb, zw, si, hi, expect);
+        if (expect && (zb <= 0 || zw <= 0 || si <= 0 || hi <= 0)) { failed++; printf("FAIL\tforms\tfusion forms absent\n"); }
+    }
+    if (!keep) { if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", dir)) die("cmd"); np_result r = {0}; sh(cmd, 20, &r); np_free(&r); }
+    printf("X86_ENC_FUSE\tcases=%d\trecs=%ld\tfailed=%d\n", ncase, nrec, failed);
+    return failed ? 1 : 0;
+}
