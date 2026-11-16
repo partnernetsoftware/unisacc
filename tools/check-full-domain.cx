@@ -8,57 +8,32 @@
  *                  open=4, exit 1
  *   waived         a required=no cell with state MISSING is not counted: PASS
  *   absent         a domain with no matrix: exit 2
- * Prints PASS/FAIL per case and CHECK_FULL_DOMAIN<TAB>failed=N. An L3 tool: no #include, no direct libc call. */
-#pragma unisa use sys.fs
-#pragma unisa use sys.proc
+ * Prints PASS/FAIL per case and CHECK_FULL_DOMAIN<TAB>failed=N. An L3 tool: no #include, no direct libc call.
+ * Assertions, the bounded child (stdout and stderr merged, 50 s) and the fixture root go through testx.check;
+ * the fixture root is a tk_scratch directory that tk_end removes. */
 #pragma unisa use sys.io
+#pragma unisa use sys.proc
 #pragma unisa use sys.sig
 #pragma unisa use text.text
+#pragma unisa use testx.check
 
-/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
-   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
-static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
-    char *w[64], *b = 0;
-    size_t n = 0, j;
-    int k = 0, i, rc;
-    if (cut) *cut = 0;
-    if (!argv) return -EINVAL;
-    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
-    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
-    if (argv[i]) return -E2BIG;
-    w[k] = 0;
-    rc = cx_runv_timeout(w, secs, &b, &n);
-    if (cap > 0) {
-        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
-        for (j = 0; b && j < n; j++) out[j] = b[j];
-        out[b ? n : 0] = 0;
-    }
-    free(b);
-    return rc;
+static char fx[2048];   /* 本次运行的夹具根：/tmp 下的 tk_scratch，不写仓内 out/ */
+static void put(const char *name, const char *text) { char rel[256]; if (cx_fmt(rel, sizeof rel, "tests/%s-domain-matrix.tsv", name) || tk_write(fx, rel, text)) { sy_eprintf("check-full-domain: cannot write %s/%s\n", fx, rel); sy_exit(2); } }
+static int run(const char *domain) {
+    char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", fx, (char *)domain, 0};
+    return tk_runm(av, 0, 50000);
 }
-
-static int failed;
-static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-full-domain.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-full-domain.%s\n", name); } }
-static char fx[2048];   /* 本次运行的夹具根：/tmp 的 mkdtemp，不写仓内 out/ */
-static void put(const char *name, const char *text) { char p[2560]; if (cx_fmt(p, sizeof p, "%s/tests/%s-domain-matrix.tsv", fx, name) || cx_write(p, text, (size_t)tx_len(text, 8192))) { sy_eprintf("check-full-domain: cannot write %s\n", p); sy_exit(2); } }
-static int run(const char *domain, char *out, int cap) {
-    char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", fx, (char *)domain, 0}; int cut;
-    return bounded_run(av, 50, out, cap, &cut);
-}
-static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 4096), s, tx_len(s, 256)) >= 0; }
 
 int main(void) {
-    char out[4096], cmd[2200]; int rc;
-    if (cx_fmt(fx, sizeof fx, "/tmp/check-full-domain-XXXXXX") || !mkdtemp(fx)) return 2;
-    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s/tests", fx)) return 2;
-    { char *av[] = {"sh", "-c", cmd, 0}; int cut; if (bounded_run(av, 50, out, sizeof out, &cut)) return 2; }
+    int rc;
+    tk_begin("check-full-domain.");
+    if (tk_scratch("check-full-domain", fx, sizeof fx)) return 2;
     put("fx-all", "# fixture\nlnx/x86_64\ta\tyes\tCOVERED_LOCAL\te\tr\nosx/arm64\tb\tyes\tOBSERVED\te\tr\nlnx/x86_64\tc\tyes\tDECLARED_DEPENDENCY\te\tr\n");
-    rc = run("fx-all", out, sizeof out); ck(rc == 0 && has(out, "required=3\tsatisfied=3\topen=0\tPASS") && !has(out, "OPEN\t"), "all-satisfied");
+    rc = run("fx-all"); tk_ok(rc == 0 && tk_has(tk_out(), "required=3\tsatisfied=3\topen=0\tPASS") && !tk_has(tk_out(), "OPEN\t"), "all-satisfied");
     put("fx-open", "lnx/x86_64\ta\tyes\tMISSING\te\tneeds a thing\nosx/arm64\tb\tyes\tNEEDS_FOREIGN_HOST\te\tr\nlnx/x86_64\tc\tyes\tNEEDS_PRODUCT_CHANGE\te\tr\nlnx/x86_64\td\tyes\tBLOCKED:owner-ruling\te\tr\nlnx/x86_64\te\tyes\tCOVERED_LOCAL\te\tr\n");
-    rc = run("fx-open", out, sizeof out); ck(rc == 1 && has(out, "open=4\tOPEN") && has(out, "OPEN\tlnx/x86_64\ta\tMISSING\tneeds a thing") && has(out, "BLOCKED:owner-ruling"), "open-states");
+    rc = run("fx-open"); tk_ok(rc == 1 && tk_has(tk_out(), "open=4\tOPEN") && tk_has(tk_out(), "OPEN\tlnx/x86_64\ta\tMISSING\tneeds a thing") && tk_has(tk_out(), "BLOCKED:owner-ruling"), "open-states");
     put("fx-waived", "lnx/x86_64\ta\tno\tMISSING\te\tr [waived R1: x]\nlnx/x86_64\tb\tyes\tCOVERED_LOCAL\te\tr\n");
-    rc = run("fx-waived", out, sizeof out); ck(rc == 0 && has(out, "required=1\tsatisfied=1\topen=0\tPASS"), "waived");
-    rc = run("fx-absent", out, sizeof out); ck(rc == 2, "absent");
-    sy_printf("CHECK_FULL_DOMAIN\tfailed=%d\n", failed);
-    return failed ? 1 : 0;
+    rc = run("fx-waived"); tk_ok(rc == 0 && tk_has(tk_out(), "required=1\tsatisfied=1\topen=0\tPASS"), "waived");
+    rc = run("fx-absent"); tk_ok(rc == 2, "absent");
+    return tk_end("CHECK_FULL_DOMAIN", 0);
 }
