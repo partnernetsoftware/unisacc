@@ -49,10 +49,10 @@ static void cleanup(void) {
 }
 
 int main(int argc, char **argv) {
-    int A = 1, B = 1, C = 0;   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
+    int A = 1, B = 1, C = 0, D = 0;   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
                                  c:commit 回执取回、x --bg 作业 deadline 自退与进程组清理、git merge 无冲突与冲突报告、git add 拒绝路径;缺省跑 a 与 b,各组独立夹具 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|ab]\n"); return 2; }
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|ab]\n"); return 2; }
     char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 剥掉调用方 shell 里的 DEVSVC_* 环境变量(如 DEVSVC_OWNER),夹具子进程不继承 */
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
             } else e++;
         } }
     {   /* 夹具路径按仓根哈希与组固定(不含 pid):使启动器自身按源路径取键的产品 -run 编译缓存跨次命中;开头与收尾都清空 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : "c"; char c0[700];
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : "d"; char c0[700];
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
@@ -79,9 +79,13 @@ int main(int argc, char **argv) {
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-git.fixture-copy\t%s\n", names[i]); cleanup(); return 1; }
             free(b);
-        } }
+        }
+        {   /* flowexec 工作副本若已 use 新模块(如 cxlib.flowadmit)而它尚未入 HEAD,一并带进夹具,否则固定版本构造失败回落旧执行体 */
+            char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
+            F(src, sizeof src, "%s/tools/cxlib/flowadmit.cx", root); F(dst, sizeof dst, "%s/tools/cxlib/flowadmit.cx", fx);
+            if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); } } }
     F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     if (A) {
@@ -207,6 +211,40 @@ int main(int argc, char **argv) {
     ck(sh("[ -z \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-refused-adds-nothing");
     rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
     ck(rc == 0 && has("GIT_ADD\trc=0\tn=1") && sh("[ -n \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-syncs-index");
+    }
+    if (D) {
+    /* (d) git merge 派生表冲突自动解决:夹具 exec/facts/derive.tsv 只留一行小生成器 dvd(两个输入表拼成 build/dvd.tsv),
+       两侧各改一个输入并各自重算 -> 只有 build/dvd.tsv 冲突 -> 自动取本侧、derive --write/--check --only dvd、完成合并;
+       另一分支同时改输入表 dvd-2.tsv(非派生)冲突 -> MERGE_CONFLICT 清单、MERGE_HINT non-derived-conflict、rc 1、留在合并中不自动 abort */
+    static const char gen[] =
+        "#pragma unisa use sys.fs\n#pragma unisa use mem.heap\n#pragma unisa use mem.bytes\n"
+        "int main(int c, char **v) { unsigned char *a = 0, *b = 0, *o = 0; int64_t na = 0, nb = 0, no = 0; static char w[8192]; int n;\n"
+        "  if (sy_read_file(\"exec/facts/dvd-1.tsv\", &a, &na, 4096) || sy_read_file(\"exec/facts/dvd-2.tsv\", &b, &nb, 4096)) return 2;\n"
+        "  n = snprintf(w, sizeof w, \"# n=%d\\n%.*s%.*s\", (int)(na + nb), (int)na, (char *)a, (int)nb, (char *)b);\n"
+        "  if (c > 1 && !strcmp(v[1], \"--write\")) return sy_write_atomic(\"build/dvd.tsv\", w, n, 0644) ? 2 : 0;\n"
+        "  if (sy_read_file(\"build/dvd.tsv\", &o, &no, 8192) || !o) return 1;\n"
+        "  return (no == n && !memcmp(o, w, n)) ? 0 : 1; }\n";
+    static const char man[] =
+        "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+        "dvd\ttools/dvd-gen.cx\tsh ./unisacc.com tools/dvd-gen.cx -- --check\tsh ./unisacc.com tools/dvd-gen.cx -- --write\tbuild/dvd.tsv\texec/facts/dvd-*\t1\t30\n";
+    ck(wfile("tools/dvd-gen.cx", gen) == 0 && wfile("exec/facts/derive.tsv", man) == 0 && wfile("exec/facts/dvd-1.tsv", "one\n") == 0
+       && wfile("exec/facts/dvd-2.tsv", "two\n") == 0 && wfile("build/dvd.tsv", "# n=8\none\ntwo\n") == 0, "derived-fixture-write");
+    F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git add -f tools/dvd-gen.cx exec/facts/derive.tsv exec/facts/dvd-1.tsv exec/facts/dvd-2.tsv build/dvd.tsv && git commit -q -m DV0"
+                   " && git checkout -q -b dvd-b && printf 'one\\nbb1\\n' > exec/facts/dvd-1.tsv && printf '# n=12\\none\\nbb1\\ntwo\\n' > build/dvd.tsv && git commit -q -am DB"
+                   " && git checkout -q -b dvd-c HEAD~1 && printf 'two\\nc2\\n' > exec/facts/dvd-2.tsv && printf '# n=11\\none\\ntwo\\nc2\\n' > build/dvd.tsv && git commit -q -am DC"
+                   " && git checkout -q \"$M\" && printf 'two\\nm2\\n' > exec/facts/dvd-2.tsv && printf '# n=11\\none\\ntwo\\nm2\\n' > build/dvd.tsv && git commit -q -am DM"
+                   " && sh ./unisacc.com tools/dvd-gen.cx -- --check");
+    ck(!ovf && sh(c, fx) == 0, "derived-fixture-branches");
+    rc = dv("git", "merge", "dvd-b", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("MERGE_AUTO\tbuild/dvd.tsv\n") && has("GIT_MERGE\trc=0\tcommit=") && has("\tauto_resolved=1\tderive=dvd"), "derived-conflict-auto-resolved-rc0");
+    F(c, sizeof c, "[ \"$(cat build/dvd.tsv)\" = \"$(printf '# n=15\\none\\nbb1\\ntwo\\nm2')\" ] && [ -z \"$(git status --porcelain -uno)\" ] && ! test -e .git/MERGE_HEAD"
+                   " && git rev-parse -q --verify HEAD^2 >/dev/null && git log -1 --format=%%B | grep -q '自动解决派生表冲突: build/dvd.tsv'");
+    ck(!ovf && sh(c, fx) == 0, "derived-merge-regenerated-committed-message");
+    ck(sh("sh ./unisacc.com tools/derive.cx -- --check --only dvd", fx) == 0, "derived-merge-derive-check-clean");
+    rc = dv("git", "merge", "dvd-c", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("MERGE_CONFLICT\texec/facts/dvd-2.tsv\n") && has("MERGE_CONFLICT\tbuild/dvd.tsv\n") && has("MERGE_HINT\tnon-derived-conflict\t")
+       && has("merge --abort") && has("GIT_MERGE\trc=1\tconflicts=2") && !has("MERGE_AUTO"), "mixed-conflict-stops-lists-rc1");
+    ck(sh("test -e .git/MERGE_HEAD && git merge --abort", fx) == 0, "mixed-conflict-left-in-merge-not-aborted");
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();

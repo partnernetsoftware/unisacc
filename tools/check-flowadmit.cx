@@ -1,0 +1,192 @@
+/* tools/check-flowadmit.cx -- machine admission tokens: tools/cxlib/flowadmit.cx and its use in cxlib.flowexec.
+ *
+ *   sh ./unisacc.com tools/check-flowadmit.cx -- [--cases a|b|ab]   (repo root; work dir $TMPDIR/check-flowadmit-<pid>)
+ *
+ * Every case uses its own slot directory (DEVSVC_SLOTS_DIR) and the test seams DEVSVC_NCPU,
+ * DEVSVC_MEMINFO, DEVSVC_LOADAVG, so the machine's real pool is never touched.
+ * a (in process):
+ *   cap-*            capacity = min(cores, MemAvailable / 2 GB), halved above load 2 x cores, 0 when memory is short
+ *   dead-owner       a lease of a pid that does not exist is reclaimed, no reap file left
+ *   pid-reuse        a lease of a live pid with a different start time is reclaimed
+ *   live-owner       a lease of a live owner is respected (all or none acquire refused), budget counts it
+ *   mem-queue        memory for one node: three ready nodes queue (peak_tokens 1, admit_wait_ms > 0), all ok,
+ *                    the dependent node still starts after its dependency
+ *   full-low-load    plenty of memory and low load: 8 nodes at once (peak_tokens 8)
+ *   weight           w=3 and w=2 on 4 tokens never run together; w above capacity takes the whole pool
+ *   admission-timeout  pool held by a live owner, or no memory: waiting node skipped at the deadline with
+ *                    `REFUSE admission-timeout`, never run
+ *   off              DEVSVC_ADMISSION=off: no tokens taken, par alone bounds the run
+ *   no-residue       the slot directory is empty after every run
+ * b (processes): two flowrun --par 16 at the same time on one 4 token pool: every node logs its
+ *   start and end, the runs overlap, at no instant do both flows together run more than 4 nodes,
+ *   both runs all ok, pool empty afterwards.
+ * Prints PASS/FAIL per case and CHECK_FLOWADMIT<TAB>failed=N. */
+#pragma unisa use cxlib.flowadmit
+#pragma unisa use cxlib.flowexec
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char wd[1024], root[4096];
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flowadmit.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flowadmit.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flowadmit: REFUSE %s\n", s); sy_exit(2); }
+static char *pj(const char *name) { static char p[8][1200]; static int k; char *q = p[k++ & 7]; if (cx_fmt(q, 1200, "%s/%s", wd, name)) die("path"); return q; }
+static void wf(const char *name, const char *text) { if (sy_write_file(pj(name), text, tx_len(text, 1 << 16), 0644)) die("cannot write file"); }
+static char *slurp(const char *path) { unsigned char *b = 0; int64_t n = 0; char *t; if (sy_read_file(path, &b, &n, 1L << 20) || !b) return 0; t = realloc(b, (size_t)n + 1); if (!t) { free(b); return 0; } t[n] = 0; return t; }
+static int has(const char *s, const char *w) { return s && tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 1 << 16)) >= 0; }
+static long numafter(const char *s, const char *key) { long p, v = 0; if (!s) return -1; p = tx_find(s, tx_len(s, 1 << 20), key, tx_len(key, 128)); if (p < 0) return -1; p += tx_len(key, 128); while (s[p] >= '0' && s[p] <= '9') v = v * 10 + (s[p++] - '0'); return v; }
+
+static int slotn;
+/* fresh slot dir and seams; mem in kB, load as text */
+static void pool(int ncpu, long memkb, const char *load) {
+    char d[64], t[128];
+    if (cx_fmt(d, sizeof d, "slots%d", ++slotn)) die("name");
+    if (sy_mkdir(pj(d), 0755)) die("slot dir");
+    sy_setenv("DEVSVC_SLOTS_DIR", pj(d), 1);
+    if (cx_fmt(t, sizeof t, "MemAvailable:   %ld kB\n", memkb)) die("mem"); wf("meminfo", t);
+    if (cx_fmt(t, sizeof t, "%s 1.0 1.0 1/100 99\n", load)) die("load"); wf("loadavg", t);
+    if (cx_fmt(t, sizeof t, "%d", ncpu)) die("ncpu");
+    sy_setenv("DEVSVC_NCPU", t, 1); sy_setenv("DEVSVC_MEMINFO", pj("meminfo"), 1); sy_setenv("DEVSVC_LOADAVG", pj("loadavg"), 1);
+    sy_unsetenv("DEVSVC_ADMISSION");
+}
+static char *slotdir(void) { return getenv("DEVSVC_SLOTS_DIR"); }
+/* entries in the current slot directory (no residue means 0) */
+static int entries(void) {
+    char p[1300]; int k, n = 0; long j;
+    for (k = 0; k < 140; k++) { if (cx_fmt(p, sizeof p, "%s/slot.%d", slotdir(), k)) die("p"); if (sy_exists(p) == 1) n++; }
+    {   char *r = 0; size_t rn = 0; char *v[] = {"ls", "-A", slotdir(), 0};
+        n = 0;   /* every entry counts, reap leftovers too */
+        if (cx_runv_timeout(v, 10, &r, &rn) == 0) for (j = 0; j < (long)rn; j++) if (r[j] == '\n') n++;
+        free(r); }
+    return n;
+}
+static int run_flow(const char *name, const char *text, int par, long dl, fl_sum *s, char **ev) {
+    static fl_flow f; char why[512], fn[200], rn[200]; int r;
+    if (cx_fmt(fn, sizeof fn, "%s.tsv", name) || cx_fmt(rn, sizeof rn, "run-%s", name)) die("name");
+    wf(fn, text);
+    if (fl_load(pj(fn), &f, why, (int)sizeof why)) { sy_printf("INFO\t%s load refused: %s\n", name, why); return -99; }
+    r = fl_run(&f, pj(rn), par, dl, 0, s);
+    if (ev) { char e[1300]; if (cx_fmt(e, sizeof e, "%s/events.tsv", pj(rn))) die("ev"); *ev = slurp(e); }
+    sy_printf("INFO\t%s ok=%d fail=%d timeout=%d skip=%d wall_ms=%ld peak=%d peak_tokens=%d admit_wait_ms=%ld\n", name, s->ok, s->fail, s->timeout, s->skip, s->wall_ms, s->max_running, s->peak_tokens, s->admit_wait_ms);
+    return r;
+}
+static void sleeps(char *b, int cap, int n, const char *secs, const char *extra) {
+    int i, o = 0;
+    for (i = 0; i < n; i++) if (cx_fmt(b + o, (size_t)(cap - o), "s%d\texec\t-\ta0=sleep;a1=%s%s\n", i, secs, extra)) die("flow"); else o += (int)tx_len(b + o, cap);
+}
+
+static void group_a(void) {
+    char b[4096], *ev = 0, ln[200]; fl_sum s; int sl[32], n, r;
+    /* capacity */
+    pool(8, 64L << 20, "0.5"); ck(fa_cap() == 8, "cap-cores");
+    pool(8, 5L << 20, "0.5"); ck(fa_cap() == 2, "cap-memory");
+    pool(8, 64L << 20, "40"); ck(fa_cap() == 4, "cap-load-halves");
+    pool(8, 1L << 20, "0.5"); ck(fa_cap() == 0, "cap-no-memory");
+    /* leases */
+    pool(1, 64L << 20, "0.5"); ck(fa_enabled() == 1, "enabled");
+    {   long pid; char pm[64], *t = slurp("/proc/sys/kernel/pid_max"); pid = t ? atol(t) - 1 : 4194303; free(t);
+        for (; pid > 1000; pid--) { if (cx_fmt(pm, sizeof pm, "/proc/%ld", pid)) die("pm"); if (sy_exists(pm) == 0) break; }
+        if (cx_fmt(ln, sizeof ln, "%ld 12345\n", pid)) die("ln");
+        if (cx_fmt(pm, sizeof pm, "%s/slot.0", slotdir()) || sy_write_file(pm, ln, tx_len(ln, 200), 0644)) die("lease");
+        n = fa_acquire(1, sl, 32);
+        ck(n == 1 && sl[0] == 0 && entries() == 1, "dead-owner");
+        fa_release(sl, n); ck(entries() == 0, "dead-owner-no-residue");
+        if (cx_fmt(ln, sizeof ln, "%d 1\n", sy_pid()) || sy_write_file(pm, ln, tx_len(ln, 200), 0644)) die("lease");
+        n = fa_acquire(1, sl, 32);
+        ck(n == 1 && entries() == 1, "pid-reuse");
+        fa_release(sl, n); }
+    pool(3, 64L << 20, "0.5");
+    n = fa_acquire(2, sl, 32);
+    ck(n == 2 && fa_budget() == 1, "live-owner-budget");
+    {   int s2[32]; ck(fa_acquire(2, s2, 32) == 0 && entries() == 2, "live-owner-all-or-none"); }
+    fa_release(sl, n); ck(fa_budget() == 3 && entries() == 0, "budget-free");
+    /* memory for one node: queue */
+    pool(8, 2200000, "0.5");
+    if (cx_fmt(b, sizeof b, "a\texec\t-\ta0=sleep;a1=0.2\nb\texec\t-\ta0=sleep;a1=0.2\nc\texec\ta\ta0=sleep;a1=0.2\n")) die("f");
+    r = run_flow("memq", b, 3, 20000, &s, &ev);
+    ck(r == 0 && s.ok == 3 && s.peak_tokens == 1 && s.max_running == 1 && s.admit_wait_ms > 0 && s.wall_ms >= 550, "mem-queue");
+    {   long ea = -1, sc = -1; char *p = ev; long i = 0;   /* dependency order kept: c starts after a ended */
+        for (; p && p[i]; i++) if (i == 0 || p[i - 1] == '\n') { if (!strncmp(p + i, "EVT", 3)) { if (has(p + i, "\ta\tok\t") && strchr(p + i, '\n') > strstr(p + i, "\ta\tok\t")) ea = ea < 0 ? i : ea; if (!strncmp(strchr(p + i + 4, '\t') + 1, "c\tstart", 7)) sc = i; } }
+        ck(ea >= 0 && sc > ea, "mem-queue-dep-order"); }
+    free(ev); ev = 0; ck(entries() == 0, "mem-queue-no-residue");
+    /* full use when the machine is idle */
+    pool(8, 64L << 20, "0.5"); sleeps(b, sizeof b, 8, "0.4", "");
+    r = run_flow("full", b, 8, 20000, &s, 0);
+    ck(r == 0 && s.ok == 8 && s.peak_tokens == 8 && s.max_running == 8 && s.admit_wait_ms == 0, "full-low-load");
+    /* weights */
+    pool(4, 64L << 20, "0.5");
+    if (cx_fmt(b, sizeof b, "h3\texec\t-\ta0=sleep;a1=0.3;w=3\nh2\texec\t-\ta0=sleep;a1=0.3;w=2\nbig\texec\th3,h2\ta0=true;w=99\n")) die("f");
+    r = run_flow("weight", b, 4, 20000, &s, 0);
+    ck(r == 0 && s.ok == 3 && s.max_running == 1 && s.peak_tokens == 4, "weight");
+    ck(entries() == 0, "weight-no-residue");
+    /* admission timeout: pool held by a live owner (this process) */
+    pool(2, 64L << 20, "0.5"); n = fa_acquire(2, sl, 32);
+    if (cx_fmt(b, sizeof b, "x\texec\t-\ta0=touch;a1=%s\n", pj("held-ran"))) die("f");   /* absolute: a wrong start must not land in the repo */
+    r = run_flow("held", b, 2, 600, &s, &ev);
+    ck(n == 2 && r == 1 && s.skip == 1 && has(ev, "REFUSE admission-timeout waited_ms=") && sy_exists(pj("held-ran")) == 0 && s.admit_wait_ms >= 500, "admission-timeout-held");
+    free(ev); ev = 0; fa_release(sl, n);
+    pool(8, 1L << 20, "0.5");
+    r = run_flow("nomem", "x\texec\t-\ta0=true\n", 2, 400, &s, &ev);
+    ck(r == 1 && s.skip == 1 && has(ev, "REFUSE admission-timeout"), "admission-timeout-no-memory");
+    free(ev); ev = 0;
+    /* off */
+    pool(1, 1L << 20, "0.5"); sy_setenv("DEVSVC_ADMISSION", "off", 1); sleeps(b, sizeof b, 4, "0.2", "");
+    r = run_flow("off", b, 4, 20000, &s, 0);
+    ck(r == 0 && s.ok == 4 && s.peak_tokens == 0 && s.max_running == 4 && entries() == 0, "off");
+    sy_unsetenv("DEVSVC_ADMISSION");
+}
+
+static void group_b(void) {
+    char b[4096], cmd[8000], *ra, *rb, com[4500], tool[4500]; char *out = 0; size_t on = 0; int rc; long pa, pb;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/flowrun.cx", root)) die("paths");
+    pool(4, 64L << 20, "0.5");
+    {   int i, o, k; const char *tag[2] = {"A", "B"}, *fn[2] = {"pa.tsv", "pb.tsv"};
+        for (k = 0; k < 2; k++) {   /* each node logs "TAG START_NS END_NS" around its sleep */
+            for (i = 0, o = 0; i < 10; i++) {
+                if (cx_fmt(b + o, sizeof b - (size_t)o, "s%d\texec\t-\ta0=sh;a1=-c;a2=t=$(date +%%s%%N)%%3B sleep 0.8%%3B echo %s $t $(date +%%s%%N) >> '%s'\n", i, tag[k], pj("occ"))) die("flow");
+                o += (int)tx_len(b + o, (int)sizeof b);
+            }
+            wf(fn[k], b);
+        } }
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- '%s' --par 16 --run '%s' > '%s' 2>&1 & sh '%s' '%s' -- '%s' --par 16 --run '%s' > '%s' 2>&1 & wait",
+               com, tool, pj("pa.tsv"), pj("run-pa"), pj("oa"), com, tool, pj("pb.tsv"), pj("run-pb"), pj("ob"))) die("cmd");
+    {   char *v[] = {"sh", "-c", cmd, 0}; rc = cx_runv_timeout(v, 50, &out, &on); free(out); }
+    ra = slurp(pj("oa")); rb = slurp(pj("ob")); pa = numafter(ra, "\tpeak="); pb = numafter(rb, "\tpeak=");
+    sy_printf("INFO\ttwo-flows rc=%d peak_a=%ld peak_b=%ld wall_a=%ld wall_b=%ld\n", rc, pa, pb, numafter(ra, "wall_ms="), numafter(rb, "wall_ms="));
+    ck(rc == 0 && has(ra, "ok=10\t") && has(rb, "ok=10\t"), "two-flows-ok");
+    {   /* tokens held at once across both flows = most node intervals covering one instant */
+        static long st[64], en[64]; static char tg[64]; int m = 0, i, j, peak = 0, overlap = 0; char *occ = slurp(pj("occ")), *p = occ;
+        while (p && *p && m < 64) {
+            tg[m] = *p; st[m] = atol(p + 2); { char *q = strchr(p + 2, ' '); en[m] = q ? atol(q + 1) : 0; }
+            m++; p = strchr(p, '\n'); if (p) p++;
+        }
+        for (i = 0; i < m; i++) { int c = 0; for (j = 0; j < m; j++) { if (st[j] <= st[i] && st[i] < en[j]) c++; if (tg[i] != tg[j] && st[j] < en[i] && st[i] < en[j]) overlap = 1; } if (c > peak) peak = c; }
+        sy_printf("INFO\ttwo-flows intervals=%d joint_peak=%d overlap=%d\n", m, peak, overlap);
+        ck(m == 20 && overlap && peak >= 1 && peak <= 4, "two-flows-joint-tokens-within-pool");
+        free(occ); }
+    ck(pa >= 1 && pb >= 1 && pa <= 4 && pb <= 4, "two-flows-each-within-pool");
+    ck(entries() == 0, "two-flows-no-residue");
+    free(ra); free(rb);
+}
+
+int main(int argc, char **argv) {
+    int GA = 1, GB = 1;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { GA = strchr(argv[2], 'a') != 0; GB = strchr(argv[2], 'b') != 0; }
+    else if (argc > 1) { sy_eprintf("usage: check-flowadmit.cx [--cases a|b|ab]\n"); return 2; }
+    if (sy_cwd(root, (int)sizeof root) < 0) die("cwd");
+    if (cx_fmt(wd, sizeof wd, "%s/check-flowadmit-%d", sy_tmpdir(), sy_pid())) die("work dir");
+    {   char *v[] = {"rm", "-rf", wd, 0}; char *o = 0; size_t n = 0; (void)cx_runv_timeout(v, 20, &o, &n); free(o); }
+    if (sy_mkdir(wd, 0755)) die("mkdir work dir");
+    if (GA) group_a();
+    if (GB) group_b();
+    {   char *v[] = {"rm", "-rf", wd, 0}; char *o = 0; size_t n = 0; (void)cx_runv_timeout(v, 20, &o, &n); free(o); }
+    sy_printf("CHECK_FLOWADMIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
