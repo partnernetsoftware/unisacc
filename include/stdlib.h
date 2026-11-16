@@ -39,6 +39,14 @@
 #else
 #ifdef __linux__
 #define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 3, 0x22, 0 - 1, 0)
+/* mremap with MREMAP_MAYMOVE: the kernel resizes a large block's own mapping,
+ * moving its pages (not copying them) when it cannot grow in place.  Only
+ * Linux has it; where _UNISA_REMAP is not defined realloc copies. */
+#ifdef __x86_64__
+#define _UNISA_REMAP(__u_a, __u_o, __u_n) __syscall6(25, (long)(__u_a), (__u_o), (__u_n), 1, 0)
+#else
+#define _UNISA_REMAP(__u_a, __u_o, __u_n) __syscall6(216, (long)(__u_a), (__u_o), (__u_n), 1, 0)
+#endif
 #else
 #define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 3, 0x1002, 0 - 1, 0)
 #endif
@@ -178,17 +186,37 @@ static void *calloc(__u_word __u_n, __u_word __u_sz) {
 
 #if !__UNISA_FTRIM_LIBC || __UN_realloc
 static void *realloc(void *__u_old, __u_word __u_n) {
-    __u_word *__u_p; __u_word *__u_o; __u_word __u_i; __u_word __u_cap;
+    __u_word *__u_p; __u_word *__u_o; __u_word __u_i; __u_word __u_cap; __u_word __u_sz;
     if (__u_old == NULL) return malloc(__u_n);
     if (__u_n < 0) { errno = ENOMEM; return NULL; }
     __u_cap = *(__u_word *)((char *)__u_old - 16) - 16;
     if (__u_n <= __u_cap && (__u_cap <= 65536 || __u_n > __u_cap / 2)) return __u_old;
+#ifdef _UNISA_REMAP
+    /* large to large (both sides mapped on their own, the same test malloc
+     * makes): resize the mapping instead of malloc + copy + free.  The header
+     * travels with the pages; only its size word changes.  A request malloc
+     * would refuse is left to malloc below, and so is a refused remap, in
+     * which case the old block has not been touched. */
+    if (__u_cap > 65536 && __u_n > 65520 && __u_n <= 0x100000000000) {
+        __u_sz = (__u_n + 16 + 65535) & ~65535;
+        __u_i = (__u_word)_UNISA_REMAP((char *)__u_old - 16, __u_cap + 16, __u_sz);
+        if (__u_i > 0) { *(__u_word *)__u_i = __u_sz; return (char *)__u_i + 16; }
+    }
+#endif
     __u_p = (__u_word *)malloc(__u_n);
     if (__u_p == NULL) return NULL;
     if (__u_n < __u_cap) __u_cap = __u_n;
     __u_cap = (__u_cap + 7) / 8;
     __u_o = (__u_word *)__u_old;
     __u_i = 0;
+    /* eight words a step, then the tail: a payload is whole words on both sides */
+    while (__u_i + 8 <= __u_cap) {
+        __u_p[__u_i] = __u_o[__u_i]; __u_p[__u_i + 1] = __u_o[__u_i + 1];
+        __u_p[__u_i + 2] = __u_o[__u_i + 2]; __u_p[__u_i + 3] = __u_o[__u_i + 3];
+        __u_p[__u_i + 4] = __u_o[__u_i + 4]; __u_p[__u_i + 5] = __u_o[__u_i + 5];
+        __u_p[__u_i + 6] = __u_o[__u_i + 6]; __u_p[__u_i + 7] = __u_o[__u_i + 7];
+        __u_i = __u_i + 8;
+    }
     while (__u_i < __u_cap) { __u_p[__u_i] = __u_o[__u_i]; __u_i = __u_i + 1; }
     free(__u_old);
     return __u_p;
