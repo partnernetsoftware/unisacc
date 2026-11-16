@@ -48,6 +48,8 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 
 分工:给写 `.cx` 的人选包用的库包一览在 [prd_cx_spec.md](prd_cx_spec.md) 3.4a 节;本节只放设计取舍、现状核对与改进路线,不重复包清单。
 tlib 侧现状(2026-11-15 核,真源 `build/tlib-packages.tsv` 与 `build/layer-api/PKG.tsv`,本表只是面向用户的分层,包清单以真源为准):CXS-C4 拆包已完成,`cx.mem`、`cx.text`、`cx.sys`、`cx.os` 已从 `cx.base` 拆出,`cx.base` 只剩 `cx/core` 执行器与 `cx/owned.cx`;tlib 共 18 包,上表之外还有内部环 `cx.base`、`cx.plan`、`cx.runtime`、`cx.compile`、`cx.driver`,扩展 `ext.sysx`,工具侧 `tools.cxlib`;上表的 `ext.procx` 不是独立 tlib 包。`cx.stream` 仍依赖 `ext.memx`(未并入)。包边界与版本派生表审视(2026-11-15,1855 个 .cx 6255 条 use 实测,脚本 $CLAUDE_JOB_DIR/tmp/cxpkg/usegraph.cx):包间无环、无未声明边;deps 列 13 条声明未用(cx.compile 5 条途径未查);tools.cxlib 独大(netpack 一单元占扇入 49%,只 6 单元触 cx.runtime 却整包依赖);cx.sys/cx.os 同目录按文件拆包加 17 条软链;ext.memx/ext.textx 与 cx/mem、cx/text 同名文件待比对;一次接口变更约 6 条命令加 1 处手改、7 个以上文件。改进排序(均工具类不占槽,除注明):(A) 派生表一条命令闭环(layer-api --bump 回写 tlib-packages,derive 一次跑完,major 拒写)先做,落 v0.0.68;(B) tools.cxlib 按面拆约 4 包只改 roots;(C) 版本粒度下沉到 faces(cx.compile 部分待 R3 收尾);(D) deps 列由 use 边生成并核对;(E) ext.memx/textx 去重(库包源类,候选池);(F) cx.os 物理分目录消软链(依赖 D1b 与 0.0.70,排其后)。
+最小核心的收敛原则(2026-11-16):语言核心只承担模块身份、显式依赖、接口可见性与宿主对接边界;内存基础区分字节表示、借用视图、拥有与分配,不把这些职责并为一个隐式运行时。共享缓冲表示放在 mem.buftype,mem.slice 只依赖该表示,mem.grow 依赖该表示与分配/字节原语。借用视图不得因读取缓冲字段而引入分配器。缓冲布局、公开函数签名、返回码和借用生命周期保持原合同;此拆分不提供编译期所有权。文件、进程、网络、缓存、模型执行与工具编排均属建立在核心之上的能力,不因当前一起链接而成为语言最小核心。首个落地切片为 mem.slice 去除对 mem.grow 的依赖,以 check-cx-slice 的栈缓冲消费者、模块计划、现有内存合同批次与引导编译器多单元编译验证。完整候选与跨平台资格独立记录,不由局部结果推导。
+
 
 ### 0.3 各区面与现状
 
