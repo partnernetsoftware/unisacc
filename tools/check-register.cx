@@ -249,6 +249,93 @@ static int root_preflight(const char *driver) {
     return failed ? 1 : 0;
 }
 
+/* --tool-check: tools/register.cx --tool in a private git root (git init in a temp directory; cx, ext,
+   cxroot.tsv and unisacc.com are links to this checkout, tools/bound and tests/tools-compile.cx are copies).
+   Seven tracked tools, one shard row plus one stale row past the range.  Asserted: the two new tools land at
+   their C byte order places ('-' before letters, zz last), the shard rows follow the count both ways (001
+   added right after 000, the stale 005 taken out), new files are staged, tools-compile --shards accepts the
+   result, a second call changes no byte, a 64-hex literal is reported and with --pin-owner registered once,
+   and a refused or failed call leaves tables and index as they were. */
+static void put_file(const char *dir, const char *rel, const char *text) {
+    char p[4400]; FILE *f; pjoin(p, sizeof p, dir, rel);
+    f = fopen(p, "wb"); if (!f || fputs(text, f) == EOF || fclose(f)) die("write", p);
+}
+static int tool_check(void) {
+    static char out[1 << 15], src[4096]; char hold[4400], a[4400], b[4400], sp[4400], bp[4400], pp[4400], hs[65], hb[65], hp[65], h[65], hex[65], pinrow[400];
+    const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
+    const char *old[] = { "ta", "tb", "tc", "td", "te", "tf", "tg" };
+    int i, rc;
+    char *gi[] = {"git", "init", "-q", ".", 0}, *ga[] = {"git", "add", "--", "tools/ta.cx", "tools/tb.cx", "tools/tc.cx", "tools/td.cx", "tools/te.cx", "tools/tf.cx", "tools/tg.cx", 0};
+    char *r1[] = {prepared_driver, "--tool", "tools/tzz.cx", "--tool", "tools/t-new.cx", 0};
+    char *r2[] = {prepared_driver, "--tool", "tools/tzz.cx", "--tool", "tools/t-new.cx", "--pin-owner", "fx", 0};
+    char *rm[] = {prepared_driver, "--tool", "tools/absent.cx", 0};
+    char *rq[] = {prepared_driver, "--tool", "tools/tq.cx", 0};
+    char *gs[] = {"git", "add", "--", "tools/stray.cx", 0}, *gq[] = {"git", "ls-files", "--error-unmatch", "--", "tools/tq.cx", 0};
+    char *gn[] = {"git", "ls-files", "--error-unmatch", "--", "tools/t-new.cx", "tools/tzz.cx", 0};
+    char *sh[] = {"sh", "./unisacc.com", "tests/tools-compile.cx", "--", "--shards", ".", 0};
+    if (cx_fmt(hold, sizeof hold, "%s/check-register-tool-XXXXXX", output) || !mkdtemp(hold)) die("mkdtemp", "tool");
+    pjoin(a, sizeof a, hold, "tools"); if (sy_mkdir(a, 0700)) die("mkdir", a);
+    pjoin(a, sizeof a, hold, "tests"); if (sy_mkdir(a, 0700)) die("mkdir", a);
+    for (i = 0; i < 4; i++) { pjoin(a, sizeof a, root, links[i]); pjoin(b, sizeof b, hold, links[i]); if (symlink(a, b)) die("symlink", b); }
+    for (i = 0; i < 3; i++) { pjoin(a, sizeof a, root, copies[i]); pjoin(b, sizeof b, hold, copies[i]); if (copy_file(a, b)) die("copy", b); }
+    pjoin(a, sizeof a, hold, "tools/bound"); if (chmod(a, 0755)) die("chmod", a);
+    src[0] = 0;
+    for (i = 0; i < 7; i++) {
+        char rel[64]; size_t n = strlen(src);
+        if (cx_fmt(rel, sizeof rel, "tools/%s.cx", old[i]) || cx_fmt(src + n, sizeof src - n, "%s\tregular\n", rel)) die("bound", "fixture");
+        put_file(hold, rel, "int main(void){return 0;}\n");
+    }
+    put_file(hold, "tests/tools-compile-sources.tsv", src);
+#define TC_ROW(N3, N) "tools-compile-" N3 "\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};" N "\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+    put_file(hold, "tests/batches.tsv", "x-before\tx\n" TC_ROW("000", "0") "x-after\tx\n" TC_ROW("005", "5") "x-last\tx\n");
+    put_file(hold, "tools/pins.tsv", "path\tkind\ttarget\tvalue\towner\tstatus\n");
+    memset(hex, 'a', 64); hex[64] = 0;   /* built here: a 64-hex literal in this source would itself need a pins row */
+    if (cx_fmt(src, sizeof src, "static const char *k = \"%s\";\nint main(void){return !k;}\n", hex)) die("bound", "hex");
+    put_file(hold, "tools/t-new.cx", src); put_file(hold, "tools/tzz.cx", "int main(void){return 0;}\n");
+    pjoin(sp, sizeof sp, hold, "tests/tools-compile-sources.tsv"); pjoin(bp, sizeof bp, hold, "tests/batches.tsv"); pjoin(pp, sizeof pp, hold, "tools/pins.tsv");
+    if (run_in(hold, gi, out, sizeof out) || run_in(hold, ga, out, sizeof out)) die("git fixture", out);
+    /* refused before anything is written */
+    sha_of(sp, hs); sha_of(bp, hb);
+    rc = run_in(hold, rm, out, sizeof out);
+    ok(rc == 2 && strstr(out, "no such file") && strstr(out, "tools/absent.cx"), "--tool with a missing file is refused by name, exit 2");
+    sha_of(sp, h); ok(!strcmp(h, hs), "the refused --tool wrote no sources row"); sha_of(bp, h); ok(!strcmp(h, hb), "the refused --tool wrote no batches row");
+    /* first registration */
+    rc = run_in(hold, r1, out, sizeof out);
+    ok(rc == 0 && strstr(out, "REGISTER_TOOL\tstatus=REGISTERED"), "--tool with two new tools ends REGISTERED");
+    ok(strstr(out, "sources_added=2\tinventory=9\tshards=2\tshard_rows_added=1\tshard_rows_removed=1"), "two sources added, nine sources are two shards, one shard row added and the stale one removed");
+    {   size_t n = 0; char *t = cx_read(sp, &n);
+        const char *want = "tools/t-new.cx\tregular\ntools/ta.cx\tregular\ntools/tb.cx\tregular\ntools/tc.cx\tregular\ntools/td.cx\tregular\ntools/te.cx\tregular\ntools/tf.cx\tregular\ntools/tg.cx\tregular\ntools/tzz.cx\tregular\n";
+        ok(t && n == strlen(want) && !memcmp(t, want, n), "the new tools stand at their C byte order places (t-new before ta, tzz last)"); free(t);
+    }
+    ok(count_lines(bp, "tools-compile-") == 2 && count_lines(bp, "tools-compile-000\t") == 1 && count_lines(bp, "tools-compile-001\t") == 1, "the shard rows are exactly 000 and 001");
+    ok(registry_has(bp, "x-before\tx\n" TC_ROW("000", "0") TC_ROW("001", "1") "x-after\tx\nx-last\tx\n") && count_all(bp) == 5, "001 is inserted right after 000 in the contract format, 005 is gone, other rows untouched");
+    ok(run_in(hold, gn, out, sizeof out) == 0, "both new tools are staged in the index");
+    rc = run_in(hold, sh, out, sizeof out);
+    ok(rc == 0 && strstr(out, "2\n") && !strstr(out, "REFUSE"), "tests/tools-compile.cx --shards accepts the registered state and prints 2");
+    rc = run_in(hold, r1, out, sizeof out);   /* the literal is still undeclared: reported again, nothing written */
+    ok(strstr(out, "PIN_NEEDED\ttools/t-new.cx:1\t") && strstr(out, "pins_needed=1") && count_all(pp) == 1, "a 64-hex literal without a pins row is reported as PIN_NEEDED with its line, pins.tsv untouched");
+    sha_of(sp, hs); sha_of(bp, hb);
+    ok(rc == 0 && strstr(out, "REGISTER_TOOL\tstatus=UNCHANGED") && strstr(out, "sources_added=0") && strstr(out, "shard_rows_added=0\tshard_rows_removed=0"), "a second identical --tool call ends UNCHANGED");
+    /* --pin-owner registers the literal once */
+    rc = run_in(hold, r2, out, sizeof out);
+    if (cx_fmt(pinrow, sizeof pinrow, "tools/t-new.cx#%s\tliteral\t-\t%s\tfx\tok\n", hex, hex)) die("bound", "pinrow");
+    ok(rc == 0 && strstr(out, "pins_added=1\tpins_needed=0") && registry_has(pp, pinrow) && count_all(pp) == 2, "--pin-owner appends the literal row in the pins.tsv format");
+    sha_of(pp, hp);
+    rc = run_in(hold, r2, out, sizeof out);
+    ok(rc == 0 && strstr(out, "REGISTER_TOOL\tstatus=UNCHANGED") && strstr(out, "pins_added=0\tpins_needed=0"), "repeating with --pin-owner ends UNCHANGED");
+    sha_of(sp, h); ok(!strcmp(h, hs), "repeat calls left tools-compile-sources.tsv byte-identical");
+    sha_of(bp, h); ok(!strcmp(h, hb), "repeat calls left batches.tsv byte-identical");
+    sha_of(pp, h); ok(!strcmp(h, hp), "repeat calls left pins.tsv byte-identical");
+    /* a failing verification (a tracked tool that is in no registry row) is rolled back completely */
+    put_file(hold, "tools/stray.cx", "int main(void){return 0;}\n"); put_file(hold, "tools/tq.cx", "int main(void){return 0;}\n");
+    if (run_in(hold, gs, out, sizeof out)) die("git add stray", out);
+    rc = run_in(hold, rq, out, sizeof out);
+    ok(rc == 1 && strstr(out, "REGISTER_TOOL\tstatus=ROLLED_BACK\tfailed_step=tests/tools-compile.cx --shards") && strstr(out, "REFUSE added\ttools/stray.cx"), "a failed verification is ROLLED_BACK with the step and the tools-compile refusal named");
+    sha_of(sp, h); ok(!strcmp(h, hs), "the rollback restored tools-compile-sources.tsv"); sha_of(bp, h); ok(!strcmp(h, hb), "the rollback restored batches.tsv");
+    ok(run_in(hold, gq, out, sizeof out) == 1, "the rollback unstaged the tool this call had staged");
+    printf("CX_REGISTER_TOOL\tchecks=%d\tfailed=%d\tretained=%s\n", checks, failed, hold);
+    return failed ? 1 : 0;
+}
 int main(int argc,char **argv) {
     int prepare = argc == 3 && !strcmp(argv[1], "--prepare");
     if (prepare || (argc >= 3 && !strcmp(argv[1], "--out"))) {
@@ -258,7 +345,8 @@ int main(int argc,char **argv) {
     int args_only=argc==2&&!strcmp(argv[1],"--args-check");
     int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
     int root_only=(argc==2||argc==3)&&!strcmp(argv[1],"--root-preflight");
-    if(argc!=1&&!args_only&&!metadata_only&&!root_only)return 2;
+    int tool_only=argc==2&&!strcmp(argv[1],"--tool-check");
+    if(argc!=1&&!args_only&&!metadata_only&&!root_only&&!tool_only)return 2;
     static char abuf[1 << 15], bbuf[1 << 15];
     char *av0[16], *av1[16], *v[2] = { av0, av1 };
     const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
@@ -308,6 +396,7 @@ int main(int argc,char **argv) {
 
     if(metadata_only)return metadata_rollback(argc==3?argv[2]:DRIVER);
     if(root_only)return root_preflight(argc==3?argv[2]:DRIVER);
+    if(tool_only)return tool_check();
 
     if(args_only){
         char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0,0};

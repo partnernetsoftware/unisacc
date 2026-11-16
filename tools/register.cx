@@ -251,7 +251,228 @@ static int run(char **argv, char *out, long cap) {
     return code;
 }
 
+/* ---- --tool mode: one command for the inventory side of "a new tools/NAME.cx" ----
+ *
+ *   sh ./unisacc.com tools/register.cx -- --tool tools/NAME.cx [--tool tools/OTHER.cx ...] [--pin-owner OWNER]
+ *
+ * (a) inserts "tools/NAME.cx<TAB>regular" (symlink for a symlink) into tests/tools-compile-sources.tsv at its
+ *     C byte order place (unsigned byte compare, the order of LC_ALL=C sort and of the git index);
+ * (b) makes the tools-compile-NNN rows of batches.tsv exactly 000..ceil(rows/8)-1: missing rows are added
+ *     after the last existing shard row, rows past the range are taken out;
+ * (c) every 64-hex literal of the tool that has no tools/pins.tsv row is printed as PIN_NEEDED with the row
+ *     to add; with --pin-owner OWNER the row "FILE#HEX literal - HEX OWNER ok" is appended instead;
+ * (d) git add of each tool that is not tracked yet (a tracked file is left alone: its staging is the caller's).
+ * Then tests/tools-compile.cx --shards . must print the computed count.  Everything is validated before the
+ * first write; when a later step or the verification fails the three tables are written back from the bytes
+ * read at the start and the files this call staged are unstaged again (git rm --cached), exit 1 with the
+ * step named.  A second identical call changes nothing and ends status=UNCHANGED.  Nothing is compiled and
+ * no PASS is recorded here: the shard batches themselves still have to be run. */
+#define RG_TOOLS_MAX 64
+#define RG_SOURCES "tests/tools-compile-sources.tsv"
+#define RG_PINS "tools/pins.tsv"
+static int rg_bcmp(const char *a, long al, const char *b, long bl) {
+    long i, m = al < bl ? al : bl;
+    for (i = 0; i < m; i++) if ((unsigned char)a[i] != (unsigned char)b[i]) return (unsigned char)a[i] < (unsigned char)b[i] ? -1 : 1;
+    return al < bl ? -1 : al > bl;
+}
+static int rg_ishex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
+/* shard index of a "tools-compile-NNN<TAB>" line, -1 for any other line */
+static long rg_shard_of(const char *l, long ln) {
+    long i = 14, v = 0;
+    if (ln < 16 || memcmp(l, "tools-compile-", 14)) return -1;
+    while (i < ln && l[i] >= '0' && l[i] <= '9' && v < 100000) v = v * 10 + (l[i++] - '0');
+    return i > 14 && i < ln && l[i] == '\t' ? v : -1;
+}
+/* 1 when pins.tsv (PB, PN) has a row for TOOL (path "TOOL#..." or "TOOL:...") whose value field is HEX */
+static int rg_pin_has(const char *pb, long pn, const char *tool, const char *hex) {
+    long at = 0, tl = (long)strlen(tool);
+    while (at < pn) {
+        long e = at, f = 0, k;
+        while (e < pn && pb[e] != '\n') e++;
+        if (e - at > tl && !memcmp(pb + at, tool, (size_t)tl) && (pb[at + tl] == '#' || pb[at + tl] == ':'))
+            for (k = at; k < e; k++) if (pb[k] == '\t' && ++f == 3) { if (e - k - 1 >= 65 && !memcmp(pb + k + 1, hex, 64) && pb[k + 65] == '\t') return 1; break; }
+        at = e + 1;
+    }
+    return 0;
+}
+static int rg_tool_restore(const char *path, const char *b, size_t n, int changed) {
+    if (!changed) return 0;
+    if (cx_write(path, b, n)) { fprintf(stderr, "register: --tool rollback could NOT restore %s\n", path); return 1; }
+    return 0;
+}
+static int rg_tool_mode(int argc, char **argv) {
+    static char buf[1 << 15];
+    const char *tools[RG_TOOLS_MAX], *kinds[RG_TOOLS_MAX], *owner = 0; int staged[RG_TOOLS_MAX], have[RG_TOOLS_MAX], nt = 0, i, j, rc, lk;
+    char *sb, *bb, *pb = 0, *ns, *nb, *np = 0; size_t sn = 0, bn = 0, pn = 0, nsn = 0, nbn = 0, npn = 0;
+    long at, rows = 0, shards, added_src = 0, added_sh = 0, removed_sh = 0, added_pin = 0, need_pin = 0, ins, *seen;
+    int ch_s, ch_b, ch_p = 0, dirty = 0, did = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--tool") && i + 1 < argc) {
+            const char *t = argv[++i]; size_t tl = strlen(t); struct stat st; int dup = 0;
+            if (tl < 10 || tl > 240 || memcmp(t, "tools/", 6) || strcmp(t + tl - 3, ".cx") || !clean(t) || strstr(t, "..") || strstr(t, "//")) rg_die("--tool wants tools/NAME.cx", t);
+            if (lstat(t, &st)) rg_die("--tool: no such file", t);
+            if (!S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode)) rg_die("--tool: not a regular file or symlink", t);
+            for (j = 0; j < nt; j++) if (!strcmp(tools[j], t)) dup = 1;
+            if (dup) continue;
+            if (nt == RG_TOOLS_MAX) rg_die("too many --tool", t);
+            tools[nt] = t; kinds[nt] = S_ISLNK(st.st_mode) ? "symlink" : "regular"; staged[nt] = 0; nt++;
+        } else if (tx_eqz(argv[i], "--pin-owner") && i + 1 < argc) {
+            owner = argv[++i]; if (!*owner || !clean(owner)) rg_die("--pin-owner wants a plain name", owner);
+        } else rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER]");
+    }
+    if (!nt) rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER]");
+    for (i = 1; i < nt; i++) {   /* byte order, so one merge pass places them all */
+        const char *t = tools[i], *k = kinds[i];
+        for (j = i - 1; j >= 0 && rg_bcmp(tools[j], (long)strlen(tools[j]), t, (long)strlen(t)) > 0; j--) { tools[j + 1] = tools[j]; kinds[j + 1] = kinds[j]; }
+        tools[j + 1] = t; kinds[j + 1] = k;
+    }
+    if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (--tool)\n"); return 2; }
+    if (sy_exists("tools/bound") != 1) rg_die("--tool: no ./tools/bound in this root", 0);
+    if (sy_exists("tests/tools-compile.cx") != 1) rg_die("--tool: no tests/tools-compile.cx in this root", 0);
+    lk = rg_lock();
+    sb = cx_read(RG_SOURCES, &sn); bb = cx_read(rg_bpath(), &bn);
+    if (!sb) rg_die("cannot read", RG_SOURCES);
+    if (!bb) rg_die("cannot read", rg_bpath());
+    if ((sn && sb[sn - 1] != '\n') || (bn && bb[bn - 1] != '\n')) rg_die("--tool: table does not end in a newline", sn && sb[sn - 1] != '\n' ? RG_SOURCES : rg_bpath());
+    /* (a) merge the tools into the sources table.  Presence is decided over the whole table first: the
+       reviewed table is compared as a set by tools-compile and is not guaranteed to be in order everywhere,
+       so a row that stands out of order must still count as registered and never be inserted twice. */
+    ns = malloc(sn + (size_t)nt * 260 + 1);
+    if (!ns) rg_die("allocation", 0);
+    for (j = 0; j < nt; j++) have[j] = 0;
+    for (at = 0; at < (long)sn;) {
+        long e = at, pl = 0;
+        while (e < (long)sn && sb[e] != '\n') e++;
+        while (pl < e - at && sb[at + pl] != '\t') pl++;
+        for (j = 0; j < nt; j++) if (!rg_bcmp(tools[j], (long)strlen(tools[j]), sb + at, pl)) have[j] = 1;
+        at = e + 1;
+    }
+    for (at = 0, j = 0; at < (long)sn;) {
+        long e = at, pl = 0;
+        while (e < (long)sn && sb[e] != '\n') e++;
+        while (pl < e - at && sb[at + pl] != '\t') pl++;
+        for (;; j++) {
+            if (j < nt && have[j]) continue;
+            if (j >= nt || rg_bcmp(tools[j], (long)strlen(tools[j]), sb + at, pl) > 0) break;
+            nsn += (size_t)tx_snprintf(ns + nsn, 260, "%s\t%s\n", tools[j], kinds[j]); added_src++; rows++;
+        }
+        if (mm_copy(ns + nsn, (long)(sn + (size_t)nt * 260 + 1 - nsn), sb + at, (long)(e + 1 - at))) rg_die("sources copy bound", 0); nsn += (size_t)(e + 1 - at); rows++;
+        at = e + 1;
+    }
+    for (; j < nt; j++) if (!have[j]) { nsn += (size_t)tx_snprintf(ns + nsn, 260, "%s\t%s\n", tools[j], kinds[j]); added_src++; rows++; }
+    shards = rows / 8 + (rows % 8 != 0);
+    /* (b) the shard rows: exactly 0..shards-1 */
+    seen = calloc((size_t)shards + 1, sizeof *seen); nb = malloc(bn + (size_t)shards * 256 + 1);
+    if (!seen || !nb) rg_die("allocation", 0);
+    for (at = 0, ins = -1; at < (long)bn;) {
+        long e = at, s;
+        while (e < (long)bn && bb[e] != '\n') e++;
+        s = rg_shard_of(bb + at, e - at);
+        if (s >= 0 && s < shards) { seen[s] = 1; ins = e + 1; }
+        at = e + 1;
+    }
+    if (ins < 0) ins = (long)bn;
+    for (at = 0;;) {
+        if (at == ins) for (j = 0; j < shards; j++) if (!seen[j]) {
+            nbn += (size_t)tx_snprintf(nb + nbn, 256, "tools-compile-%03d\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%d\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n", j, j);
+            added_sh++;
+        }
+        if (at >= (long)bn) break;
+        {   long e = at;
+            while (e < (long)bn && bb[e] != '\n') e++;
+            if (rg_shard_of(bb + at, e - at) >= shards) removed_sh++;
+            else { if (mm_copy(nb + nbn, (long)(bn + (size_t)shards * 256 + 1 - nbn), bb + at, (long)(e + 1 - at))) rg_die("batches copy bound", 0); nbn += (size_t)(e + 1 - at); }
+            at = e + 1;
+        }
+    }
+    /* (c) 64-hex literals without a pins row */
+    if (sy_exists(RG_PINS) == 1) { pb = cx_read(RG_PINS, &pn); if (!pb) rg_die("cannot read", RG_PINS); }
+    np = malloc(pn + 1); if (!np) rg_die("allocation", 0);
+    if (pn && mm_copy(np, (long)pn + 1, pb, (long)pn)) rg_die("pins copy bound", 0);
+    npn = pn;
+    for (i = 0; i < nt; i++) {
+        size_t tn = 0, k = 0; char *tb = cx_read(tools[i], &tn), hex[65]; long line = 1;
+        if (!tb) rg_die("cannot read", tools[i]);
+        while (k < tn) {
+            size_t r = k;
+            if (tb[k] == '\n') { line++; k++; continue; }
+            if (!rg_ishex(tb[k])) { k++; continue; }
+            while (r < tn && rg_ishex(tb[r])) r++;
+            if (r - k == 64 && !(k && ((tb[k - 1] >= 'g' && tb[k - 1] <= 'z') || (tb[k - 1] >= 'A' && tb[k - 1] <= 'Z') || tb[k - 1] == '_'))) {
+                if (mm_copy(hex, 65, tb + k, 64)) rg_die("hex copy bound", 0); hex[64] = 0;
+                if (!rg_pin_has(np, (long)npn, tools[i], hex)) {
+                    if (owner && pb) {
+                        char *g = realloc(np, npn + 600); if (!g) rg_die("allocation", 0);
+                        np = g; if (npn && np[npn - 1] != '\n') np[npn++] = '\n';
+                        npn += (size_t)tx_snprintf(np + npn, 590, "%s#%s\tliteral\t-\t%s\t%s\tok\n", tools[i], hex, hex, owner); added_pin++;
+                    } else { need_pin++; printf("REGISTER_TOOL\tPIN_NEEDED\t%s:%ld\trow=%s#%s<TAB>literal<TAB>-<TAB>%s<TAB>OWNER<TAB>ok\thint=rerun with --pin-owner OWNER or add the row to %s\n", tools[i], line, tools[i], hex, hex, RG_PINS); }
+                }
+            }
+            k = r;
+        }
+        free(tb);
+    }
+    ch_s = nsn != sn || memcmp(ns, sb, sn); ch_b = nbn != bn || memcmp(nb, bb, bn); ch_p = added_pin > 0;
+    /* (d) stage what is not tracked yet, then write, then verify; any failure from here on is undone */
+    {   const char *step = 0;
+        for (i = 0; i < nt && !step; i++) {
+            char *q[] = {"./tools/bound", "20", "git", "ls-files", "--error-unmatch", "--", (char *)tools[i], 0};
+            char *a[] = {"./tools/bound", "20", "git", "add", "--", (char *)tools[i], 0};
+            rc = run(q, buf, sizeof buf);
+            if (rc == 0) continue;
+            if (rc != 1) { step = "git ls-files"; fprintf(stderr, "register: --tool: git ls-files %s failed rc=%d (is this root a git work tree?): %s\n", tools[i], rc, buf); break; }
+            rc = run(a, buf, sizeof buf);
+            if (rc != 0) { step = "git add"; fprintf(stderr, "register: --tool: git add %s failed rc=%d: %s\n", tools[i], rc, buf); }
+            else { staged[i] = 1; did = 1; }
+        }
+        if (!step && ch_s) { dirty |= 1; if (cx_write(RG_SOURCES, ns, nsn)) step = "write " RG_SOURCES; }
+        if (!step && ch_b) { dirty |= 2; if (cx_write(rg_bpath(), nb, nbn)) step = "write batches.tsv"; }
+        if (!step && ch_p) { dirty |= 4; if (cx_write(RG_PINS, np, npn)) step = "write " RG_PINS; }
+        if (!step) {
+            char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/tools-compile.cx", "--", "--shards", ".", 0};
+            char want[32]; long bl;
+            /* tools-compile reads ROOT/tests/batches.tsv: with UNISACC_TABLES the private batches table is
+               not the one it sees, so only the inventory half can be verified there */
+            rc = run(v, buf, sizeof buf); bl = (long)strlen(buf);
+            tx_snprintf(want, sizeof want, "%ld\n", shards);
+            if (rc != 0 || bl < (long)strlen(want) || strcmp(buf + bl - strlen(want), want) || (bl > (long)strlen(want) && buf[bl - strlen(want) - 1] != '\n')) {
+                step = "tests/tools-compile.cx --shards";
+                fprintf(stderr, "register: --tool: verification failed rc=%d want=%ld got:\n%s%s", rc, shards, buf, bl && buf[bl - 1] == '\n' ? "" : "\n");
+            }
+        }
+        if (step) {
+            int bad = 0;
+            bad |= rg_tool_restore(RG_PINS, pb, pn, dirty & 4);
+            bad |= rg_tool_restore(rg_bpath(), bb, bn, dirty & 2);
+            bad |= rg_tool_restore(RG_SOURCES, sb, sn, dirty & 1);
+            for (i = 0; i < nt; i++) if (staged[i]) {
+                char *u[] = {"./tools/bound", "20", "git", "rm", "--cached", "-q", "--", (char *)tools[i], 0};
+                if (run(u, buf, sizeof buf) != 0) { bad = 1; fprintf(stderr, "register: --tool rollback could NOT unstage %s\n", tools[i]); }
+            }
+            rg_unlock(lk);
+            printf("REGISTER_TOOL\tstatus=%s\tfailed_step=%s\n", bad ? "DIRTY" : "ROLLED_BACK", step);
+            return bad ? 3 : 1;
+        }
+    }
+    rg_unlock(lk);
+    for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "ADDED" : "TRACKED");
+    printf("REGISTER_TOOL\tsources_added=%ld\tinventory=%ld\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\tpins_added=%ld\tpins_needed=%ld\n", added_src, rows, shards, added_sh, removed_sh, added_pin, need_pin);
+    /* new or removed shard batches make the generated build/batch-packages.tsv stale (real tables only) */
+    if ((added_sh || removed_sh) && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) && sy_exists("tools/batch-packages-gen.cx") == 1) {
+        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--write", 0};
+        rc = run(v, buf, sizeof buf);
+        if (rc != 0) {
+            fprintf(stderr, "register: tool registered but build/batch-packages.tsv NOT regenerated (rc=%d); run tools/batch-packages-gen.cx -- --write\n", rc);
+            printf("REGISTER_TOOL\tbatch_packages=STALE\n"); return 4;
+        }
+        printf("REGISTER_TOOL\tbatch_packages=REGENERATED\n");
+    }
+    printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p || did ? "REGISTERED" : "UNCHANGED");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && (tx_eqz(argv[1], "--tool") || tx_eqz(argv[1], "--pin-owner"))) return rg_tool_mode(argc, argv);
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";
