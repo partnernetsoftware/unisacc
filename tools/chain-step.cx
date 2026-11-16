@@ -1090,6 +1090,123 @@ static int cs_fp_closure_key(const char *object) {
     if (object[k] != '.' || object[k + 1] != 'o' || object[k + 2]) cs_die("REFUSE closure object key", object);
     return 1;
 }
+/* Shared entry-build call for several keys of one --objects invocation.
+ * entry-build pays its input seal and the 44-root closure plan once per call
+ * (about 3.5 of the 4.4 seconds of a one-key call), so the pending keys of a
+ * batch are compiled by one call into a private stage directory beside OUT.
+ * Nothing in the phase tree changes during that call. Every key is then
+ * committed exactly as before, one at a time: its own journal, its own
+ * .chain-steps row, its own phase record. Committing a key moves its object
+ * and cache from the stage and appends the receipt rows a one-key call would
+ * have appended. A killed call leaves at most one journalled key plus a stage
+ * directory, which is discarded and rebuilt; staged objects are never trusted
+ * across processes. */
+#define CS_FP_STAGE_MAX 8
+static char **cs_fp_bkeys; static int cs_fp_bn;
+static char cs_fp_stage[4400], cs_fp_stage_sub[4400], cs_fp_stage_id[3][65];
+static const char *cs_fp_stage_key[CS_FP_STAGE_MAX]; static char *cs_fp_stage_line[CS_FP_STAGE_MAX];
+static char *cs_fp_stage_pre, *cs_fp_stage_post; static int cs_fp_stage_n; static long cs_fp_stage_share;
+static int cs_fp_key_kind(const char *key) {
+    long k;
+    if (!key[0]) return -1;
+    for (k = 0; key[k]; k++) if (!(key[k] == '.' || key[k] == '_' || (key[k] >= 'a' && key[k] <= 'z') || (key[k] >= '0' && key[k] <= '9'))) return -1;
+    if (key[0] != 'm' || key[1] < '0' || key[1] > '9') {
+        for (k = 0; k < cf_root_count(); k++) if (!strcmp(key, cf_root_key((int)k))) return 0;
+        return -1;
+    }
+    if (key[1] == '0' && key[2] != '.') return -1;
+    k = 1; while (key[k] >= '0' && key[k] <= '9') k++;
+    return (key[k] == '.' && key[k + 1] == 'o' && !key[k + 2]) ? 1 : -1;
+}
+static void cs_fp_stage_drop(void) {
+    int k;
+    for (k = 0; k < cs_fp_stage_n; k++) { free(cs_fp_stage_line[k]); cs_fp_stage_line[k] = 0; }
+    free(cs_fp_stage_pre); free(cs_fp_stage_post); cs_fp_stage_pre = cs_fp_stage_post = 0; cs_fp_stage_n = 0;
+    if (cs_fp_stage[0] && sy_exists(cs_fp_stage) == 1 && cx_rmtree(cs_fp_stage)) cs_die("batch stage cleanup", cs_fp_stage);
+}
+static int cs_fp_stage_find(const char *sub, const char *object) {
+    int k;
+    if (!cs_fp_stage_n || strcmp(sub, cs_fp_stage_sub)) return -1;
+    for (k = 0; k < cs_fp_stage_n; k++) if (!strcmp(object, cs_fp_stage_key[k])) return k;
+    return -1;
+}
+static char *cs_fp_stage_text(const char *b, long n) {
+    char *t = malloc(n + 1); long at = 0;
+    if (!t) cs_die("alloc", "batch stage"); t[0] = 0; cs_put(t, n + 1, &at, b, n); return t;
+}
+/* Returns the number of staged keys (0: fewer than two pending, use the one-key call). */
+static int cs_fp_stage_build(const char *rev, const char *s, const char *pkg, const char *out, const char *sub,
+                             int g, int target, const char *object, int closure, long *spent) {
+    const char *want[CS_FP_STAGE_MAX]; char *a[8 + 2 * CS_FP_STAGE_MAX], path[4400], *prev, *text;
+    int n = 0, from = -1, k, an = 0, seen = 0; long pn = 0, tn = 0, t0, first = -1, last = -1;
+    for (k = 0; k < cs_fp_bn && n < CS_FP_STAGE_MAX; k++) {
+        int kind;
+        if (from < 0) { if (strcmp(cs_fp_bkeys[k], object)) continue; from = k; }
+        kind = cs_fp_key_kind(cs_fp_bkeys[k]);
+        if (kind < 0) break;                       /* the one-key path refuses it in its own turn */
+        if (kind != closure) continue;
+        if (k != from && cs_fp_step(sub, cs_fp_bkeys[k], 0, 0)) continue;
+        want[n++] = cs_fp_bkeys[k];
+    }
+    if (n < 2) return 0;
+    if (cx_fmt(cs_fp_stage, sizeof cs_fp_stage, "%s.batch-g%d-%d", out, g, target)) cs_die("batch stage path", out);
+    cs_fp_stage_drop();
+    if (sy_mkdir(cs_fp_stage, 0755)) cs_die("batch stage mkdir", cs_fp_stage);
+    if (cx_fmt(path, sizeof path, "%s/receipt.txt", sub)) cs_die("path", sub);
+    prev = cs_load(path, &pn);
+    if (!prev) { if (errno != ENOENT) cs_die("batch receipt read", path); pn = 0; }
+    if (cx_fmt(path, sizeof path, "%s/receipt.txt", cs_fp_stage)) cs_die("path", cs_fp_stage);
+    if (prev) cs_save(path, prev, pn);
+    a[an++] = (char *)"slice"; a[an++] = (char *)"."; a[an++] = (char *)pkg; a[an++] = cs_fp_stage;
+    a[an++] = (char *)"--target"; a[an++] = (char *)cs_fp_targets[target];
+    for (k = 0; k < n; k++) { a[an++] = (char *)(closure ? "--closure-only" : "--only"); a[an++] = (char *)want[k]; }
+    a[an] = 0;
+    if (an > 25) cs_die("REFUSE batch stage argument capacity", sub);
+    t0 = sy_now_ms();
+    cs_release(rev, s, an, a, "slice");
+    *spent = sy_now_ms() - t0;
+    text = cs_load(path, &tn);
+    if (!text || tn <= pn || (pn && memcmp(text, prev, pn)) || text[tn - 1] != '\n' || memchr(text, 0, tn)) cs_die("REFUSE batch stage receipt", path);
+    free(prev);
+    /* rows of this call: [head on a fresh receipt] KEY rows in completion order, trailer */
+    for (long p = pn; p < tn;) {
+        char *e = memchr(text + p, '\n', tn - p); long len = e - (text + p) + 1; int hit = -1;
+        for (k = 0; k < n; k++) { long kn = strlen(want[k]); if (len > kn && !memcmp(text + p, want[k], kn) && text[p + kn] == '\t') hit = k; }
+        if (hit >= 0) {
+            if (cs_fp_stage_line[hit] || (last >= 0 && last != p)) cs_die("REFUSE batch stage receipt rows", path);
+            cs_fp_stage_line[hit] = cs_fp_stage_text(text + p, len); seen++;
+            if (first < 0) first = p;
+            last = p + len;
+        }
+        p += len;
+    }
+    if (seen != n || first < 0 || last >= tn) cs_die("REFUSE batch stage receipt rows", path);
+    cs_fp_stage_pre = cs_fp_stage_text(text + pn, first - pn);
+    cs_fp_stage_post = cs_fp_stage_text(text + last, tn - last);
+    free(text);
+    for (k = 0; k < n; k++) cs_fp_stage_key[k] = want[k];
+    if (cx_fmt(cs_fp_stage_sub, sizeof cs_fp_stage_sub, "%s", sub)) cs_die("path", sub);
+    cs_fp_stage_n = n; cs_fp_stage_share = *spent / n;
+    return n;
+}
+static void cs_fp_stage_adopt(const char *sub, int k) {
+    const char *key = cs_fp_stage_key[k]; const char *suffix[] = {"", ".cache", ".rr"};
+    char from[4400], to[4400], *old, *text; long on = 0, cap, at = 0; int j;
+    for (j = 0; j < 3; j++) {
+        if (cx_fmt(from, sizeof from, "%s/%s%s", cs_fp_stage, key, suffix[j]) || cx_fmt(to, sizeof to, "%s/%s%s", sub, key, suffix[j])) cs_die("batch stage path", sub);
+        if (sy_exists(from) == 1) { if (sy_rename(from, to)) cs_die("batch stage publish", to); }
+        else if (j < 2) cs_die("REFUSE batch stage object missing", from);
+        else if (unlink(to) && errno != ENOENT) cs_die("batch stage publish", to);
+    }
+    if (cx_fmt(to, sizeof to, "%s/receipt.txt", sub)) cs_die("path", sub);
+    old = cs_load(to, &on);
+    if (!old) { if (errno != ENOENT) cs_die("batch receipt read", to); on = 0; }
+    cap = on + strlen(cs_fp_stage_pre) + strlen(cs_fp_stage_line[k]) + strlen(cs_fp_stage_post) + 1;
+    text = malloc(cap); if (!text) cs_die("alloc", sub); text[0] = 0;
+    if (on) cs_put(text, cap, &at, old, on); else cs_puts(text, cap, &at, cs_fp_stage_pre);
+    cs_puts(text, cap, &at, cs_fp_stage_line[k]); cs_puts(text, cap, &at, cs_fp_stage_post);
+    cs_save(to, text, at); free(old); free(text);
+}
 /* Resume receipts are material provenance, never a cached comparison/PASS. */
 static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
                          const char *target, const char *phase, int resume, const char *object, int link) {
@@ -1191,8 +1308,26 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
                 if (object) { a[an++] = closure ? "--closure-only" : "--only"; a[an++] = (char *)object; }
                 if (link) a[an++] = "--link-only";
                 a[an] = 0;
+                int staged = object ? cs_fp_stage_find(sub, object) : -1; long spent = 0;
                 if (sy_setenv("UNISACC_CTOR", ctor, 1)) cs_die("env", ctor);
-                if (cs_slice(rev, s, an, a)) return 2;
+                if (object && !cs_fp_stage_n) {        /* a stage left by a killed call is never reused */
+                    if (cx_fmt(cs_fp_stage, sizeof cs_fp_stage, "%s.batch-g%d-%d", out, g, i)) cs_die("batch stage path", out);
+                    cs_fp_stage_drop();
+                }
+                if (object && staged < 0 && cs_fp_bn > 1) {
+                    if (cs_fp_stage_build(rev, s, pkg, out, sub, g, i, object, closure, &spent)) {
+                        if (cx_fmt(cs_fp_stage_id[0], 65, "%s", before_source) || cx_fmt(cs_fp_stage_id[1], 65, "%s", before_pkg) || cx_fmt(cs_fp_stage_id[2], 65, "%s", before_ctor)) cs_die("identity", sub);
+                        staged = cs_fp_stage_find(sub, object);
+                        if (staged < 0) cs_die("REFUSE batch stage key", object);
+                        start += spent;            /* the shared call is charged in equal shares below */
+                    }
+                }
+                if (staged >= 0) {
+                    if (strcmp(cs_fp_stage_id[0], before_source) || strcmp(cs_fp_stage_id[1], before_pkg) || strcmp(cs_fp_stage_id[2], before_ctor)) cs_die("REFUSE batch stage inputs changed", sub);
+                    cs_fp_stage_adopt(sub, staged);
+                    start -= cs_fp_stage_share;
+                }
+                else if (cs_slice(rev, s, an, a)) return 2;
                 if (i >= 2) {
                     char recp[4400]; long sz = 0; char *rb, *b; long nbytes = 0;
                     if (cx_fmt(recp, sizeof recp, "%s/receipt.txt", sub)) cs_die("path", sub);
@@ -1821,10 +1956,12 @@ int main(int argc, char **argv) {
                     if (!keys[nk - 1][0]) cs_die("REFUSE objects list (empty key or over 256)", objects);
                 }
                 for (j = 0; j < nk; j++) for (k2 = 0; k2 < j; k2++) if (!strcmp(keys[j], keys[k2])) cs_die("REFUSE duplicate object key", keys[j]);
+                cs_fp_bkeys = keys; cs_fp_bn = nk;
                 for (j = 0; j < nk; j++) {
                     rc = cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target, phase, resume || j > 0, keys[j], 0);
                     if (rc) return rc;
                 }
+                cs_fp_stage_drop();
                 return 0;
             }
             return cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target, phase, resume, object, link);
