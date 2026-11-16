@@ -1445,21 +1445,26 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
    Always re-enter chain-step on resume: it verifies provenance and completed
    object bytes before adopting them. --until truncates the batch, not coverage. */
 static int fp_pending_limit(const char *root, long *warm_ms) {
-    char path[4400],line[256];long values[4];int row=0;
-    const char *names[]={"budget_ms","cold_key_ms","warm_key_ms","pending_keys"};
+    char path[4400],line[256];long values[6];int row=0;
+    const char *names[]={"budget_ms","cold_key_ms","fixed_call_ms","marginal_key_ms","stage_max_keys","pending_keys"};
     if(cx_fmt(path,sizeof path,"%s/build/g2-budget.tsv",root))die("budget path",root);
     FILE *f=fopen(path,"rb");if(!f)die("budget open",path);
     while(fgets(line,sizeof line,f)){
-        if(line[0]=='#')continue;if(row>=4)die("budget rows",path);
+        if(line[0]=='#')continue;if(row>=6)die("budget rows",path);
         char *p=strchr(line,'\t');if(!p)die("budget field",path);*p++=0;
         if(strcmp(line,names[row]))die("budget field",path);
         long n=0;if(*p<'0'||*p>'9')die("budget number",path);
         while(*p>='0'&&*p<='9'){if(n>1000000)die("budget bound",path);n=n*10+*p++-'0';}
         if(strcmp(p,"\n")||n<1)die("budget number",path);values[row++]=n;
     }
-    if(ferror(f)||fclose(f)||row!=4||values[0]!=55000||values[1]>=values[0]||values[3]!=1+(values[0]-values[1]-1)/values[2])die("REFUSE derived budget",path);
-    *warm_ms=values[2];
-    return values[3];
+    /* Same derivation as tools/g2-budget-gen.cx: a batch is one call (fixed cost) plus its keys
+       (marginal cost each), beside a cold key, strictly below the deadline, at most one stage. */
+    long room=0,want=0;
+    if(row==6){room=values[0]-values[1]-values[2]-1;want=room<0?1:1+room/values[3];if(want>values[4])want=values[4];}
+    if(ferror(f)||fclose(f)||row!=6||values[0]!=55000||values[1]>=values[0]||values[4]>256||values[5]!=want)die("REFUSE derived budget",path);
+    /* A warm one-key call costs the fixed part plus one key; the canary compares against it. */
+    *warm_ms=values[2]+values[3];
+    return values[5];
 }
 static void fp_call(const char *root,const char *rev,const char *snap,const char *pkg,
                     const char *gen1,const char *fp,const char *helper,

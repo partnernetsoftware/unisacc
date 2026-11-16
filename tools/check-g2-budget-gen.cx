@@ -6,24 +6,49 @@
 #pragma unisa use cxlib.procrun
 static void fail(const char *s){fprintf(stderr,"check-g2-budget-gen: %s\n",s);exit(1);}
 static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))fail(p);}
+/* First line of TEXT that starts with KEY (KEY carries its leading newline); 0 when there is none. */
+static char *row_at(char *text,const char *key){size_t k=strlen(key);for(char *p=text;*p;p++)if(!strncmp(p,key,k))return p;return 0;}
 static int run(char **v){pr_result r;int z=pr_run(v[0],v,0,0,45,&r);pr_echo(&r);int rc=z?2:r.rc;if(r.residue)rc=2;pr_free(&r);return rc;}
 int main(int argc,char **argv){
     if(argc!=4)return 2;const char *root=argv[1],*out=argv[2],*compiler=argv[3];
     if(sy_mkdir(out,0755)&&errno!=EEXIST)fail("mkdir");
+    /* The probes are compiled from OUT, which the batch entry places outside the repo: link the package
+       root table and module trees there so `#pragma unisa use` resolves (nearest ancestor cxroot.tsv). */
+    { static const char *mods[4]={"cxroot.tsv","cx","ext","tools"};char mf[4700],mt[4700];
+      for(int mi=0;mi<4;mi++){ if(cx_fmt(mf,sizeof mf,"%s/%s",root,mods[mi])||cx_fmt(mt,sizeof mt,"%s/%s",out,mods[mi]))fail("module link path");
+        if(sy_symlink(mf,mt)&&errno!=EEXIST)fail("module link"); } }
+
     char gen[4400],facts[4400],table[4400],probe[4400],exe[4400],source[4400];
     if(cx_fmt(gen,sizeof gen,"%s/tools/g2-budget-gen.cx",root)||cx_fmt(facts,sizeof facts,"%s/facts.tsv",out)||cx_fmt(table,sizeof table,"%s/table.tsv",out)||cx_fmt(probe,sizeof probe,"%s/probe.cx",out)||cx_fmt(exe,sizeof exe,"%s/probe",out)||cx_fmt(source,sizeof source,"%s/tools/chain-step.cx",root))fail("path");
     char *g[]={"sh",(char *)compiler,gen,"--","--write",facts,table,0};
-    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t8116\tfixture\n");if(run(g))fail("derive measured");
-    size_t n;char *b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t2\n"))fail("measured boundary");free(b);
-    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t10600\tfixture\n");g[4]="--check";if(run(g)!=1)fail("measurement drift accepted");g[4]="--write";if(run(g))fail("strict boundary derive");
+    /* Fixture facts: BUDGET COLD FIXED MARGINAL STAGE_MAX. One batch = cold key + one call's fixed cost + keys. */
+#define G2_FACTS(c,f,m) "budget_ms\t55000\tfixture\ncold_key_ms\t" c "\tfixture\nfixed_call_ms\t" f "\tfixture\nmarginal_key_ms\t" m "\tfixture\nstage_max_keys\t8\tfixture\n"
+    put(facts,G2_FACTS("44400","3298","1536"));if(run(g))fail("derive measured");
+    size_t n;char *b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t5\n"))fail("measured boundary");free(b);
+    /* 44400 + 3298 + 7302 is exactly the deadline: the second key must not fit. One millisecond less and it does. */
+    put(facts,G2_FACTS("44400","3298","7302"));g[4]="--check";if(run(g)!=1)fail("measurement drift accepted");g[4]="--write";if(run(g))fail("strict boundary derive");
     b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t1\n"))fail("exact deadline must split");free(b);
-    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t55000\tfixture\nwarm_key_ms\t8116\tfixture\n");if(run(g)!=2)fail("cold deadline accepted");
-    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t0\tfixture\n");if(run(g)!=2)fail("zero measurement accepted");
+    put(facts,G2_FACTS("44400","3298","7301"));if(run(g))fail("below deadline derive");
+    b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t2\n"))fail("one millisecond below the deadline must batch two");free(b);
+    put(facts,G2_FACTS("44400","3298","1"));if(run(g))fail("clamp derive");
+    b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t8\n"))fail("stage bound must clamp");free(b);
+    put(facts,G2_FACTS("54000","3298","1536"));if(run(g))fail("fixed past deadline derive");
+    b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t1\n"))fail("cold plus fixed past the deadline must leave one key");free(b);
+    put(facts,G2_FACTS("55000","3298","1536"));if(run(g)!=2)fail("cold deadline accepted");
+    put(facts,G2_FACTS("44400","3298","0"));if(run(g)!=2)fail("zero measurement accepted");
+    put(facts,G2_FACTS("44400","0","1536"));if(run(g)!=2)fail("zero fixed measurement accepted");
+    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t8116\tfixture\n");if(run(g)!=2)fail("retired warm_key_ms facts accepted");
     char *prod[]={"sh",(char *)compiler,gen,"--","--check",0};if(run(prod))fail("production generation drift");
-    b=cx_read(source,&n);if(!b)fail("source");char *main=strstr(b,"int main(int argc, char **argv) {");if(!main)fail("source main");*main=0;
+    {   /* One source for the stage bound: the generated table and CS_FP_STAGE_MAX in chain-step must agree. */
+        char tp[4400];if(cx_fmt(tp,sizeof tp,"%s/build/g2-budget.tsv",root))fail("path");
+        char *tb=cx_read(tp,&n),*sb=cx_read(source,&n);if(!tb||!sb)fail("stage bound sources");
+        char *tr=row_at(tb,"\nstage_max_keys\t"),*sd=row_at(sb,"\n#define CS_FP_STAGE_MAX ");
+        if(!tr||!sd||atoi(tr+16)<1||atoi(tr+16)!=atoi(sd+25))fail("stage_max_keys differs from CS_FP_STAGE_MAX");free(tb);free(sb);
+    }
+    b=cx_read(source,&n);if(!b)fail("source");char *main=row_at(b,"int main(int argc, char **argv) {");if(!main)fail("source main");*main=0;
     /* Kill inside the real recovery loop after its first atomic restore.
      * This instrumentation exists only in the generated private probe. */
-    char *recover=strstr(b,"static int cs_fp_jrecover("),*cut=recover?strstr(recover,"free(b);\n    }"):0;if(!cut)fail("recovery injection site");
+    char *recover=row_at(b,"static int cs_fp_jrecover("),*cut=recover?row_at(recover,"free(b);\n    }"):0;if(!cut)fail("recovery injection site");
     const char *injection="if(sy_env(\"G2_FIXTURE_RECOVERY_KILL\")&&i==0)kill(getpid(),SIGKILL);";
     size_t pre=cut-b,ins=strlen(injection),oldlen=strlen(b);char *instrumented=malloc(oldlen+ins+1);if(!instrumented)fail("injection allocation");if(mm_copy(instrumented,oldlen+ins+1,b,pre)||mm_copy(instrumented+pre,oldlen+ins+1-pre,injection,ins)||mm_copy(instrumented+pre+ins,oldlen+1-pre,cut,oldlen-pre+1))fail("injection copy");free(b);b=instrumented;
     const char *tail=
@@ -38,11 +63,16 @@ int main(int argc,char **argv){
     char *build[]={"sh",(char *)compiler,probe,"-o",exe,0};if(run(build))fail("probe compile");
     char *v[]={exe,(char *)out,(char *)root,0};if(run(v))fail("kill resume");
     if(cx_fmt(source,sizeof source,"%s/tools/candidate-chain.cx",root)||cx_fmt(probe,sizeof probe,"%s/batch-probe.cx",out)||cx_fmt(exe,sizeof exe,"%s/batch-probe",out))fail("batch path");
-    b=cx_read(source,&n);if(!b)fail("batch source");char *start=strstr(b,"static int fp_pending_limit("),*stop=strstr(b,"static void g2_closures(");if(!start||!stop||stop<=start)fail("batch functions");*stop=0;
-    const char *head="#pragma unisa use sys.fs\nstatic int calls;static void die(const char *a,const char *b){fprintf(stderr,\"%s %s\\n\",a,b);exit(2);}\nstatic int step(const char *root,char **a){const char *keys=0;for(int i=0;a[i];i++)if(!strcmp(a[i],\"--objects\"))keys=a[i+1];const char *want[]={\"drive.o\",\"m1.o,m2.o\",\"m3.o\"};if(calls>2||!keys||strcmp(keys,want[calls]))return 1;calls++;return 0;}\n";
-    tail="\nint main(int argc,char **argv){if(argc!=3)return 2;fp_batch(argv[1],\"rev\",\"snap\",\"pkg\",\"ctor\",argv[2],\"helper\",\"lnx/x86_64\",\"g2\",\"drive.o,host.o,m0.o,m1.o,m2.o,m3.o\",1);if(calls!=3)return 1;printf(\"BATCH_PENDING completed=3 pending=3 calls=3\\n\");return 0;}\n";
+    b=cx_read(source,&n);if(!b)fail("batch source");char *start=row_at(b,"static int fp_pending_limit("),*stop=row_at(b,"static void g2_closures(");if(!start||!stop||stop<=start)fail("batch functions");*stop=0;
+    /* The extracted span uses the attempt clock and the yield hook defined earlier in candidate-chain;
+       the probe supplies an attempt with no end (never yields) and a yield stub that fails the probe.
+       Expected calls: the isolated first key, a one-key canary, then every batch is the smaller of the
+       table's pending_keys and the keys still pending. The limit is read from the table, not written here. */
+    char cap[32];{char tp[4400];if(cx_fmt(tp,sizeof tp,"%s/build/g2-budget.tsv",root))fail("batch table path");char *tb=cx_read(tp,&n);char *tr=tb?strstr(tb,"\npending_keys\t"):0;if(!tr||atoi(tr+14)<1||atoi(tr+14)>256||cx_fmt(cap,sizeof cap,"%d",atoi(tr+14)))fail("batch table limit");free(tb);}
+    const char *head="#pragma unisa use sys.fs\n#pragma unisa use sys.time\nstatic int calls,done,cap;static long attempt_end;static void die(const char *a,const char *b){fprintf(stderr,\"%s %s\\n\",a,b);exit(2);}\nstatic void phase_yield(const char *why,long last_ms,long need_ms){fprintf(stderr,\"unexpected yield %s\\n\",why);exit(3);}\n#define PENDING 12\nstatic const char *pend[PENDING]={\"m1.o\",\"m2.o\",\"m3.o\",\"m4.o\",\"m5.o\",\"m6.o\",\"m7.o\",\"m8.o\",\"m9.o\",\"m10.o\",\"m11.o\",\"m12.o\"};\nstatic int step(const char *root,char **a){const char *keys=0;for(int i=0;a[i];i++)if(!strcmp(a[i],\"--objects\"))keys=a[i+1];if(!keys)return 1;if(!calls){if(strcmp(keys,\"drive.o\"))return 1;calls++;return 0;}int left=PENDING-done,cnt=calls==1?1:(cap<left?cap:left);if(left<1)return 1;char want[512];int used=0;for(int i=0;i<cnt;i++){int z=snprintf(want+used,sizeof want-used,\"%s%s\",i?\",\":\"\",pend[done+i]);if(z<0||z>=(int)(sizeof want-used))return 1;used+=z;}if(strcmp(keys,want)){fprintf(stderr,\"batch %d got %s want %s\\n\",calls,keys,want);return 1;}done+=cnt;calls++;return 0;}\n";
+    tail="\nint main(int argc,char **argv){if(argc!=4)return 2;cap=atoi(argv[3]);if(cap<1)return 2;fp_batch(argv[1],\"rev\",\"snap\",\"pkg\",\"ctor\",argv[2],\"helper\",\"lnx/x86_64\",\"g2\",\"drive.o,host.o,m0.o,m1.o,m2.o,m3.o,m4.o,m5.o,m6.o,m7.o,m8.o,m9.o,m10.o,m11.o,m12.o\",1);int want=2+(PENDING-1+cap-1)/cap;if(done!=PENDING||calls!=want)return 1;printf(\"BATCH_PENDING completed=3 pending=%d calls=%d limit=%d\\n\",PENDING,calls,cap);return 0;}\n";
     size_t hn=strlen(head);bn=strlen(start);tn=strlen(tail);all=malloc(hn+bn+tn+1);if(!all)fail("batch allocation");if(mm_copy(all,hn+bn+tn+1,head,hn)||mm_copy(all+hn,bn+tn+1,start,bn)||mm_copy(all+hn+bn,tn+1,tail,tn+1)||cx_write(probe,all,hn+bn+tn))fail("batch write");free(b);free(all);
     char dir[4400],mark[4400];if(cx_fmt(dir,sizeof dir,"%s/g2",out))fail("batch dir");sy_mkdir(dir,0755);if(cx_fmt(dir,sizeof dir,"%s/g2/lnx-x86_64",out))fail("batch dir");sy_mkdir(dir,0755);if(cx_fmt(mark,sizeof mark,"%s/.chain-steps",dir))fail("batch mark");put(mark,"\ndrive.o\t1\n\nhost.o\t1\n\nm0.o\t1\n");
-    if(run(build))fail("batch compile");v[1]=(char *)root;v[2]=(char *)out;if(run(v))fail("batch pending accounting");
+    if(run(build))fail("batch compile");char *bv[]={exe,(char *)root,(char *)out,cap,0};if(run(bv))fail("batch pending accounting");
     printf("CHECK_G2_BUDGET_GEN\tboundary=PASS drift=PASS kill_resume=PASS foreign_identity=PASS\n");return 0;
 }

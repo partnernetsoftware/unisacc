@@ -746,6 +746,16 @@ int main(int argc, char **argv) {
            cx_fmt(dir,sizeof dir,"%s/tools/entry-build.cx",td))return 2;
         size_t entry_n=0;char *entry=cx_read("tools/entry-build.cx",&entry_n);
         if(!entry||cx_write(dir,entry,entry_n))return 2;free(entry);
+        /* The pin copies the whole module closure of entry-build, so this fixture root must resolve
+           the modules too (same reason as the lane-split fixture). */
+        {
+            static const char *mods3[4] = {"cxroot.tsv", "cx", "ext", "tools/cxlib"};
+            char here3[4400], mfrom3[4700], mto3[4700];
+            if (sy_cwd(here3, sizeof here3)) return 2;
+            for (int mi = 0; mi < 4; mi++)
+                if (cx_fmt(mfrom3, sizeof mfrom3, "%s/%s", here3, mods3[mi]) || cx_fmt(mto3, sizeof mto3, "%s/%s", td, mods3[mi]) || sy_symlink(mfrom3, mto3)) return 2;
+        }
+
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g2-batch-objects-until");
         size_t zn; char *z = cx_read(trace, &zn);
@@ -788,10 +798,11 @@ int main(int argc, char **argv) {
         int closure_seen=0;bounded=1;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;}
         for(int i=0;i<257;i++){char key[48];if(cx_fmt(key,sizeof key,"m%d.o",i))return 2;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10,*end=strchr(q,'\t');for(const char *at=q;end&&at<end;){const char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==strlen(key)&&!memcmp(at,key,e-at)){closure_seen++;break;}at=e+1;}}}
         ck(z&&bounded&&closure_seen==257&&has(z,"--objects\tm256.o\t")&&!has(z,"--link-only"),"dynamic-257-closures-measured-budget-full-coverage");free(z);
-        /* A private budget makes a 30 ms launcher colder than twice warm_key_ms (2 ms).
+        /* A private budget makes a 30 ms launcher colder than twice a warm one-key call
+           (fixed_call_ms + marginal_key_ms, 4 ms).
            Exercise the real scheduler, without a 48 second production cold build. */
         char slow[8192];
-        const char *cold_budget="budget_ms\t55000\ncold_key_ms\t54998\nwarm_key_ms\t1\npending_keys\t2\n";
+        const char *cold_budget="budget_ms\t55000\ncold_key_ms\t54997\nfixed_call_ms\t1\nmarginal_key_ms\t1\nstage_max_keys\t8\npending_keys\t2\n";
         if(cx_fmt(slow,sizeof slow,"#!/bin/sh\nsleep 0.03\n%s",script)||cx_write(fake,slow,strlen(slow))||
            cx_write(budget,cold_budget,strlen(cold_budget))||cx_fmt(dir,sizeof dir,"%s/g2/lnx-x86_64/.chain-steps",fp)||
            cx_write(dir,"",0)||cx_write(trace,"",0)||sy_setenv("BATCH_CLOSURES","3",1))return 2;
