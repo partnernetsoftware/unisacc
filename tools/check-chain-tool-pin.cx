@@ -43,6 +43,13 @@ static int copyfile_fixture(const char *from, const char *to) {
     int rc = cx_write(to, b, n); free(b);
     return rc || sy_chmod(to, 0755);
 }
+static int mkparents(const char *path) {
+    char d[4400]; size_t i;
+    if (cx_fmt(d, sizeof d, "%s", path)) return 1;
+    for (i = 1; d[i]; i++) if (d[i] == '/') { d[i] = 0; if (sy_mkdir(d, 0755) && sy_access(d, 0)) return 1; d[i] = '/'; }
+    return 0;
+}
+static int putfile(const char *path, const char *text) { return mkparents(path) || cx_write(path, text, strlen(text)); }
 static int pinrun(const char *cc, const char *root, const char *out, const char *tool, char **log) {
     char *v[] = {(char *)cc, "--tool-pin-fixture", (char *)root, (char *)out, (char *)tool, 0};
     return run(v, 50, log);
@@ -119,8 +126,8 @@ int main(int argc, char **argv) {
         char eroot[4400], etools[4400], esrc[4400], eo1[4400], eo2[4400], ecp[4400], epin[4400], ecp2[4400], epin2[4400];
         if (cx_fmt(eroot, sizeof eroot, "%s/eroot", od) || cx_fmt(etools, sizeof etools, "%s/eroot/tools", od) ||
             cx_fmt(esrc, sizeof esrc, "%s/eroot/tools/entry-build.cx", od) || cx_fmt(eo1, sizeof eo1, "%s/eout1", od) ||
-            cx_fmt(eo2, sizeof eo2, "%s/eout2", od) || cx_fmt(ecp, sizeof ecp, "%s/entry-build.pin.cx", eo1) ||
-            cx_fmt(epin, sizeof epin, "%s/entry-build.pin", eo1) || cx_fmt(ecp2, sizeof ecp2, "%s/entry-build.pin.cx", eo2) ||
+            cx_fmt(eo2, sizeof eo2, "%s/eout2", od) || cx_fmt(ecp, sizeof ecp, "%s/entry-build.pin.d/tools/entry-build.cx", eo1) ||
+            cx_fmt(epin, sizeof epin, "%s/entry-build.pin", eo1) || cx_fmt(ecp2, sizeof ecp2, "%s/entry-build.pin.d/tools/entry-build.cx", eo2) ||
             cx_fmt(epin2, sizeof epin2, "%s/entry-build.pin", eo2)) return 2;
         sy_mkdir(eroot, 0755); sy_mkdir(etools, 0755); sy_mkdir(eo1, 0755); sy_mkdir(eo2, 0755);
         char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
@@ -148,7 +155,7 @@ int main(int argc, char **argv) {
         ck(rc == 0, "entry-build-restored-input-reused");
         free(l);
         /* changed-dir:pin 与副本拷到别的输出目录 */
-        if (cx_write(ecp2, v1, strlen(v1)) || cx_write(epin2, pb, pn)) return 2;
+        if (mkparents(ecp2) || cx_write(ecp2, v1, strlen(v1)) || cx_write(epin2, pb, pn)) return 2;
         char *ev2[] = {(char *)cc, "--eb-pin-fixture", eroot, eo2, 0};
         l = 0; rc = run(ev2, 50, &l);
         ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), "entry-build-changed-dir-refused");
@@ -162,8 +169,8 @@ int main(int argc, char **argv) {
             char kroot[4400], ktools[4400], ksrc[4400], ko1[4400], ko2[4400], kcp[4400], kcp2[4400], kpin[4400], kpin2[4400], lab[200];
             if (cx_fmt(kroot, sizeof kroot, "%s/kroot-%s", od, nm) || cx_fmt(ktools, sizeof ktools, "%s/tools", kroot) ||
                 cx_fmt(ksrc, sizeof ksrc, "%s/tools/%s.cx", kroot, nm) || cx_fmt(ko1, sizeof ko1, "%s/kout1-%s", od, nm) ||
-                cx_fmt(ko2, sizeof ko2, "%s/kout2-%s", od, nm) || cx_fmt(kcp, sizeof kcp, "%s/%s.pin.cx", ko1, nm) ||
-                cx_fmt(kcp2, sizeof kcp2, "%s/%s.pin.cx", ko2, nm) || cx_fmt(kpin, sizeof kpin, "%s/%s.pin", ko1, nm) ||
+                cx_fmt(ko2, sizeof ko2, "%s/kout2-%s", od, nm) || cx_fmt(kcp, sizeof kcp, "%s/%s.pin.d/tools/%s.cx", ko1, nm, nm) ||
+                cx_fmt(kcp2, sizeof kcp2, "%s/%s.pin.d/tools/%s.cx", ko2, nm, nm) || cx_fmt(kpin, sizeof kpin, "%s/%s.pin", ko1, nm) ||
                 cx_fmt(kpin2, sizeof kpin2, "%s/%s.pin", ko2, nm)) return 2;
             sy_mkdir(kroot, 0755); sy_mkdir(ktools, 0755); sy_mkdir(ko1, 0755); sy_mkdir(ko2, 0755);
             char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
@@ -192,7 +199,7 @@ int main(int argc, char **argv) {
             cx_fmt(lab, sizeof lab, "%s-restored-input-reused", nm);
             ck(rc == 0, lab);
             free(l);
-            if (cx_write(kcp2, v1, strlen(v1)) || cx_write(kpin2, pb, pn)) return 2;
+            if (mkparents(kcp2) || cx_write(kcp2, v1, strlen(v1)) || cx_write(kpin2, pb, pn)) return 2;
             char *ev2[] = {(char *)cc, "--src-pin-fixture", kroot, ko2, (char *)nm, 0};
             l = 0; rc = run(ev2, 50, &l);
             cx_fmt(lab, sizeof lab, "%s-changed-dir-refused", nm);
@@ -216,6 +223,72 @@ int main(int argc, char **argv) {
         ck(rc == 0 && l && has_sub(l, "PIN_FALLBACK"), "kr-pin-missing-source-fixture-fallback");
         free(l);
         sy_unsetenv("UNISACC_PIN_FIXTURE");
+    }
+    /* 模块闭包钉(2026-11-16,首次真实整链 routes 相 "module cxlib.netpack: no file OUT/cxlib/netpack.cx" 的回归):
+       钉一个 use 了模块的小工具(模块经 cxroot.tsv 解析,且模块自己再 use 一层),钉出的副本必须能直接运行;
+       检出内模块之后再改不影响;闭包副本被改或被删拒绝;use 解析不到拒绝。不需要重材料。 */
+    {
+        char ur[4400], uo[4400], uo3[4400], f1[4400], f2[4400], f3[4400], f4[4400], cp[4400], cm[4400], cs[4400], pin[4400], launcher[4400];
+        if (cx_fmt(ur, sizeof ur, "%s/uroot", od) || cx_fmt(uo, sizeof uo, "%s/uout", od) || cx_fmt(uo3, sizeof uo3, "%s/uout3", od) ||
+            cx_fmt(f1, sizeof f1, "%s/tools/kernel-route.cx", ur) || cx_fmt(f2, sizeof f2, "%s/tools/cxlib/pinmod.cx", ur) ||
+            cx_fmt(f3, sizeof f3, "%s/lib/pinx/pinsub.cx", ur) || cx_fmt(f4, sizeof f4, "%s/cxroot.tsv", ur) ||
+            cx_fmt(cp, sizeof cp, "%s/kernel-route.pin.d/tools/kernel-route.cx", uo) || cx_fmt(cm, sizeof cm, "%s/kernel-route.pin.d/tools/cxlib/pinmod.cx", uo) ||
+            cx_fmt(cs, sizeof cs, "%s/kernel-route.pin.d/lib/pinx/pinsub.cx", uo) || cx_fmt(pin, sizeof pin, "%s/kernel-route.pin", uo) ||
+            cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", cwd)) return 2;
+        const char *t1 = "#pragma unisa use cxlib.pinmod\nint main(void){ printf(\"PIN_USE_RUN\\t%d\\n\", pinmod_val()); return 0; }\n";
+        const char *t2 = "#pragma unisa module pinmod\n#pragma unisa use pinx.pinsub\nint pinmod_val(void){ return pinsub_val() + 1; }\n";
+        const char *t2b = "#pragma unisa module pinmod\n#pragma unisa use pinx.pinsub\nint pinmod_val(void){ return pinsub_val() + 2; }\n";
+        const char *t3 = "#pragma unisa module pinsub\nint pinsub_val(void){ return 41; }\n";
+        const char *t3b = "#pragma unisa module pinsub\nint pinsub_val(void){ return 50; }\n";
+        const char *t4 = "CXROOT1\nR\tcxlib\ttools/cxlib\nR\tpinx\tlib/pinx\n";
+        sy_mkdir(uo, 0755); sy_mkdir(uo3, 0755);
+        if (putfile(f1, t1) || putfile(f2, t2) || putfile(f3, t3) || putfile(f4, t4)) return 2;
+        char *ev[] = {(char *)cc, "--src-pin-fixture", ur, uo, "kernel-route", 0};
+        char *rv[] = {"sh", launcher, cp, 0};
+        char *l = 0;
+        int rc = run(ev, 50, &l);
+        size_t pn = 0; char *pb = cx_read(pin, &pn);
+        ck(rc == 0 && pb && has_sub(pb, "\nfile=tools/kernel-route.cx\t") && has_sub(pb, "\nfile=cxroot.tsv\t") &&
+           has_sub(pb, "\nfile=tools/cxlib/pinmod.cx\t") && has_sub(pb, "\nfile=lib/pinx/pinsub.cx\t"), "use-closure-first-pin-records-every-module");
+        if (rc && l) fwrite(l, 1, strlen(l), stdout);
+        free(l); l = 0;
+        rc = run(rv, 50, &l);
+        ck(rc == 0 && l && has_sub(l, "PIN_USE_RUN\t42\n"), "use-closure-pinned-copy-runs");
+        if (rc && l) fwrite(l, 1, strlen(l), stdout);
+        free(l); l = 0;
+        /* 检出内模块改动不影响钉住的树 */
+        if (putfile(f2, t2b)) return 2;
+        rc = run(ev, 50, &l); free(l); l = 0;
+        int rc2 = run(rv, 50, &l);
+        ck(rc == 0 && rc2 == 0 && l && has_sub(l, "PIN_USE_RUN\t42\n"), "use-closure-checkout-module-edit-keeps-pin");
+        free(l); l = 0;
+        /* 闭包副本(第二层模块)被改:拒绝;还原后复用 */
+        if (cx_write(cs, t3b, strlen(t3b))) return 2;
+        rc = run(ev, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), "use-closure-changed-module-copy-refused");
+        free(l); l = 0;
+        if (cx_write(cs, t3, strlen(t3))) return 2;
+        rc = run(ev, 50, &l);
+        ck(rc == 0, "use-closure-restored-module-copy-reused");
+        free(l); l = 0;
+        /* 闭包副本被删:拒绝;还原后复用 */
+        if (sy_unlink(cm)) return 2;
+        rc = run(ev, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), "use-closure-missing-module-copy-refused");
+        free(l); l = 0;
+        if (cx_write(cm, t2, strlen(t2))) return 2;
+        rc = run(ev, 50, &l);
+        ck(rc == 0, "use-closure-restored-missing-copy-reused");
+        free(l); l = 0;
+        /* use 解析不到:拒绝且不留 pin */
+        const char *t1x = "#pragma unisa use cxlib.nosuch\nint main(void){ return 0; }\n";
+        if (putfile(f1, t1x)) return 2;
+        char *ev3[] = {(char *)cc, "--src-pin-fixture", ur, uo3, "kernel-route", 0};
+        char pin3[4400];
+        if (cx_fmt(pin3, sizeof pin3, "%s/kernel-route.pin", uo3)) return 2;
+        rc = run(ev3, 50, &l);
+        ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin module unresolved") && sy_access(pin3, 0) != 0, "use-closure-unresolved-module-refused");
+        free(l); free(pb);
     }
     printf("CHECK_CHAIN_TOOL_PIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;

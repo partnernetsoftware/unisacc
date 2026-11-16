@@ -373,33 +373,146 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
     return name;
 }
 /* entry-build 按输出目录钉 HEAD(DSG-DRV1 第 1 片,与 tool_pinned 同一 pin 格式与拒绝文案):
-   entry-build 经 constructor 以源码方式运行(不是原生体),所以钉的是源码副本:OUT/entry-build.pin.cx
+   entry-build 经 constructor 以源码方式运行(不是原生体),所以钉的是源码副本树:OUT/entry-build.pin.d/tools/entry-build.cx(连同模块闭包,见 src_pinned 前注释)
    首次从 ROOT/tools/entry-build.cx 拷入,OUT/entry-build.pin 记工具名、输出目录与 src_sha;之后每次核对
    副本字节与输出目录,变了拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录拒绝
    "REFUSE chain-tool pin dir mismatch"。检出内 entry-build.cx 之后再改不影响本输出。 */
+/* 模块闭包一并钉(2026-11-16 修:首次真实整链 routes 相 rc 2,"module cxlib.netpack: no file OUT/cxlib/netpack.cx"):
+   模块按使用单元所在位置解析(同目录优先,再找最近祖先目录的 cxroot.tsv),只拷单个源文件到 OUT 时
+   `#pragma unisa use` 的模块无处可找。现在钉的是一棵自足的小树 OUT/NAME.pin.d/:
+     cxroot.tsv(有则拷)、tools/NAME.cx、以及从它出发经 use 传递可达的全部模块文件,按原相对路径存放;
+   运行用 OUT/NAME.pin.d/tools/NAME.cx。OUT/NAME.pin 在原四行之后逐文件记 "file=REL<TAB>SHA";之后每次
+   逐文件核对,任一文件字节变了或缺失都拒绝 "REFUSE chain-tool pin mismatch";输出目录不符照旧拒绝
+   "REFUSE chain-tool pin dir mismatch";use 解析不到拒绝 "REFUSE chain-tool pin module unresolved"。
+   解析规则与 cx/compiler/cxmod.cx 同:先找使用单元同目录的 NAME('.' 换 '/').cx,再按 ROOT/cxroot.tsv
+   最长 PREFIX 行映射(本仓只有根上一份 cxroot.tsv)。 */
+#define SP_MAX 400
+#define SP_W 240
+static char sp_rel[SP_MAX][SP_W];
+static int sp_n;
+static void sp_add(const char *rel) {
+    for (int i = 0; i < sp_n; i++) if (!strcmp(sp_rel[i], rel)) return;
+    if (sp_n >= SP_MAX || cx_fmt(sp_rel[sp_n], SP_W, "%s", rel)) die("REFUSE chain-tool pin closure too large", rel);
+    sp_n++;
+}
+static void sp_mkparents(const char *path, size_t from) {
+    char d[4400]; size_t i;
+    if (cx_fmt(d, sizeof d, "%s", path)) die("path", "pin tree");
+    for (i = from; d[i]; i++) if (d[i] == '/') { d[i] = 0; if (sy_mkdir(d, 0755) && fsize(d) < 0) die("mkdir pin tree", d); d[i] = '/'; }
+}
+/* use NAME 于单元 unit(相对 ROOT)解析成相对 ROOT 的模块文件路径 */
+static void sp_resolve(const char *root, const char *unit, const char *name, const char *croot, size_t cn, char *out, size_t cap) {
+    char dir[SP_W], sub[SP_W], abs[4400];
+    size_t i, dl = strlen(unit);
+    while (dl > 0 && unit[dl - 1] != '/') dl--;
+    if (dl >= sizeof dir || strlen(name) >= sizeof sub) die("path", "pin module");
+    if (mm_copy(dir, (long)sizeof dir, unit, (long)dl)) die("path", "pin module");
+    dir[dl] = 0;
+    for (i = 0; name[i]; i++) sub[i] = name[i] == '.' ? '/' : name[i];
+    sub[i] = 0;
+    if (cx_fmt(out, cap, "%s%s.cx", dir, sub) || cx_fmt(abs, sizeof abs, "%s/%s", root, out)) die("path", "pin module");
+    if (fsize(abs) >= 0) return;
+    size_t best = 0, bdb = 0, bde = 0, p = 0; int found = 0;
+    while (croot && p < cn) {
+        size_t ls = p, le; while (p < cn && croot[p] != '\n') p++;
+        le = p; if (p < cn) p++;
+        if (le - ls < 5 || croot[ls] != 'R' || croot[ls + 1] != '\t') continue;
+        size_t pb = ls + 2, pe = pb; while (pe < le && croot[pe] != '\t') pe++;
+        if (pe >= le) continue;
+        size_t pl = pe - pb;
+        if (strlen(name) > pl && name[pl] == '.' && !memcmp(name, croot + pb, pl) && (!found || pl > best)) { found = 1; best = pl; bdb = pe + 1; bde = le; }
+    }
+    if (!found) die("REFUSE chain-tool pin module unresolved", name);
+    if (cx_fmt(out, cap, "%.*s/%s.cx", (int)(bde - bdb), croot + bdb, sub + best + 1) || cx_fmt(abs, sizeof abs, "%s/%s", root, out)) die("path", "pin module");
+    if (fsize(abs) < 0) die("REFUSE chain-tool pin module unresolved", name);
+}
+/* 扫一个单元的 `#pragma unisa use NAME` 行,把解析到的模块文件加入闭包 */
+static void sp_scan(const char *root, const char *unit, const char *b, size_t n, const char *croot, size_t cn) {
+    size_t p = 0;
+    while (p < n) {
+        size_t ls = p, le; while (p < n && b[p] != '\n') p++;
+        le = p; if (p < n) p++;
+        size_t a = ls;
+        static const char *words[3] = {"pragma", "unisa", "use"};
+        int k, ok = 1;
+        while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+        if (a >= le || b[a] != '#') continue;
+        a++;
+        for (k = 0; k < 3 && ok; k++) {
+            size_t wl = strlen(words[k]);
+            while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+            if (a + wl > le || memcmp(b + a, words[k], wl)) ok = 0; else a += wl;
+        }
+        if (!ok || a >= le || (b[a] != ' ' && b[a] != '\t')) continue;
+        while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+        size_t mb = a;
+        while (a < le && (b[a] == '.' || b[a] == '_' || (b[a] >= '0' && b[a] <= '9') || (b[a] >= 'a' && b[a] <= 'z') || (b[a] >= 'A' && b[a] <= 'Z'))) a++;
+        char name[SP_W], rel[SP_W];
+        if (a == mb || a - mb >= sizeof name) die("REFUSE chain-tool pin module unresolved", unit);
+        if (mm_copy(name, (long)sizeof name, b + mb, (long)(a - mb))) die("path", "pin module");
+        name[a - mb] = 0;
+        sp_resolve(root, unit, name, croot, cn, rel, sizeof rel);
+        sp_add(rel);
+    }
+}
 static const char *src_pinned(const char *root, const char *outdir, const char *name, char *copy, size_t cap) {
-    char src[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], text[9000];
-    if (cx_fmt(src, sizeof src, "%s/tools/%s.cx", root, name) || cx_fmt(copy, cap, "%s/%s.pin.cx", outdir, name) ||
-        cx_fmt(pin, sizeof pin, "%s/%s.pin", outdir, name) || cx_fmt(tmp, sizeof tmp, "%s.new", copy) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
-    int lock = candidate_lock(copy, "pin");
+    char tree[4400], pin[4400], pintmp[4400], hash[65], path[4400], rel0[SP_W];
+    if (cx_fmt(tree, sizeof tree, "%s/%s.pin.d", outdir, name) || cx_fmt(rel0, sizeof rel0, "tools/%s.cx", name) || cx_fmt(copy, cap, "%s/%s", tree, rel0) ||
+        cx_fmt(pin, sizeof pin, "%s/%s.pin", outdir, name) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
+    if (sy_mkdir(tree, 0755) && fsize(tree) < 0) die("mkdir pin tree", tree);
+    int lock = candidate_lock(tree, "pin");
     size_t n = 0; char *old = cx_read(pin, &n);
     if (old) {
         char *o = strstr(old, "\nout=");
         char outl[4500];
         if (cx_fmt(outl, sizeof outl, "\nout=%s\n", outdir) || !o || memcmp(o, outl, strlen(outl))) die("REFUSE chain-tool pin dir mismatch", pin);
+        if (fsize(copy) < 0) die("REFUSE chain-tool pin mismatch", pin);
         step_hash(copy, hash);
         char nl2[200];
         if (cx_fmt(nl2, sizeof nl2, "\nsrc_sha=%s\n", hash) || !strstr(old, nl2)) die("REFUSE chain-tool pin mismatch", pin);
+        /* 逐文件核对闭包:每条 "file=REL<TAB>SHA" */
+        int files = 0;
+        for (char *q = strstr(old, "\nfile="); q; q = strstr(q + 1, "\nfile=")) {
+            char *r = q + 6, *t = r, *e;
+            while (*t && *t != '\t' && *t != '\n') t++;
+            if (*t != '\t') die("REFUSE chain-tool pin mismatch", pin);
+            e = t + 1; while (*e && *e != '\n') e++;
+            if (e - (t + 1) != 64 || cx_fmt(path, sizeof path, "%s/%.*s", tree, (int)(t - r), r)) die("REFUSE chain-tool pin mismatch", pin);
+            if (fsize(path) < 0) die("REFUSE chain-tool pin mismatch", path);
+            step_hash(path, hash);
+            if (memcmp(hash, t + 1, 64)) die("REFUSE chain-tool pin mismatch", path);
+            files++;
+        }
+        if (!files) die("REFUSE chain-tool pin mismatch", pin);
         free(old);
     } else {
-        size_t sn = 0; char *sb = cx_read(src, &sn);
-        if (!sb) die("eb pin source unreadable", src);
-        if (cx_write(tmp, sb, sn) || sy_rename(tmp, copy)) die("publish eb pin copy", copy);
-        free(sb);
+        char cr[4400]; size_t cn = 0, tn = 0, tcap = 200000;
+        char *text = malloc(tcap), line[700];
+        if (!text || cx_fmt(cr, sizeof cr, "%s/cxroot.tsv", root)) die("eb pin record", pin);
+        char *croot = cx_read(cr, &cn);
+        sp_n = 0; sp_add(rel0);
+        if (croot) sp_add("cxroot.tsv");
+        for (int i = 0; i < sp_n; i++) {
+            char from[4400], rel[SP_W];
+            if (cx_fmt(rel, sizeof rel, "%s", sp_rel[i]) || cx_fmt(from, sizeof from, "%s/%s", root, rel) || cx_fmt(path, sizeof path, "%s/%s", tree, rel)) die("path", "eb pin");
+            size_t sn = 0; char *sb = cx_read(from, &sn);
+            if (!sb) die("eb pin source unreadable", from);
+            sp_mkparents(path, strlen(tree) + 1);
+            if (cx_write(path, sb, sn)) die("publish eb pin copy", path);
+            if (strcmp(rel, "cxroot.tsv")) sp_scan(root, rel, sb, sn, croot, cn);
+            free(sb);
+            step_hash(path, hash);
+            if (!i && cx_fmt(text, tcap, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=-\n", name, outdir, hash)) die("eb pin record", pin);
+            if (!i) tn = strlen(text);
+            if (cx_fmt(line, sizeof line, "file=%s\t%s\n", rel, hash) || tn + strlen(line) + 1 > tcap) die("eb pin record", pin);
+            if (mm_copy(text + tn, (long)(tcap - tn), line, (long)strlen(line) + 1)) die("eb pin record", pin);
+            tn += strlen(line);
+        }
+        free(croot);
+        if (cx_write(pintmp, text, tn) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
         step_hash(copy, hash);
-        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=-\n", name, outdir, hash)) die("eb pin record", pin);
-        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
-        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, copy, hash);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\tfiles=%d\n", name, copy, hash, sp_n);
+        free(text);
     }
     if (sy_close(lock)) die("candidate unlock", copy);
     return copy;
