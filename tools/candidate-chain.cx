@@ -2205,10 +2205,17 @@ static int snap_ok(const char *dir, const char *rev, const char *helper) {
     if (json_quoted(j, jn, "sources_sha256", sid, 64)) { free(j); die("REFUSE snap receipt SID", js); }
     if (json_quoted(j, jn, "product_digest", dig, 64)) { free(j); die("REFUSE snap receipt digest", js); }
     free(j);
-    a = cx_read(ape, &an);
-    if (!a) die("REFUSE snap product", ape);
-    if (sy_sha256_hex(a, (long)an, h)) { free(a); die("sha", ape); }
-    free(a);
+    {   /* Same contract as every other memo=on phase: the digest is reused only on an unchanged
+           stat identity (sm_sha), otherwise and with the memo off every byte is read and hashed. */
+        struct stat pst;
+        if (sm_enabled() && !sm_sha(ape, h) && !lstat(ape, &pst) && S_ISREG(pst.st_mode)) an = (size_t)pst.st_size;
+        else {
+            a = cx_read(ape, &an);
+            if (!a) die("REFUSE snap product", ape);
+            if (sy_sha256_hex(a, (long)an, h)) { free(a); die("sha", ape); }
+            free(a);
+        }
+    }
     if (!tx_eqz(h, dig)) die("REFUSE snap product SHA mismatch", ape);
     if (!tx_eqz(commit, rev)) {
         if (!git_is_ancestor(commit, rev)) die("REFUSE snap receipt commit not ancestor", commit);

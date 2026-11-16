@@ -1,0 +1,148 @@
+/* entry-build 闭包计划落盘复用(UNISACC_EB_PLAN_MEMO)的检查。真实 entry-build、真实构造器,
+ * 夹具根是四棵封签树加 cxroot.tsv 与 tools/bound 的私有副本,可改字节而不动仓。
+ * 分段跑(每段子进程各 55 秒封顶,后段依赖前段留在 OUT 的状态):
+ *   1 建夹具;首次 --only rescache.o:计划由子进程算出并落盘
+ *   2 清空私有 TMPDIR 的接口文件后换输出目录再跑:复用;对象与缓存侧文件逐字节同首次;
+ *     接口文件数少于首次(44 根的计划子进程没有起)
+ *   3 截断计划文件:重算并重写
+ *   4 闭包源改一个字节:重算;原样再跑:复用
+ *   5 根源改一个字节:重算
+ *   6 篡改计划正文一个字节(长度不变):重算;换 TMPDIR:不复用
+ * sh ./unisacc.com tools/check-entry-plan-memo.cx -- OUT PART
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+static int bad;
+static char root[1024], out[1024], fx[1100], memo[1100], tmpd[1100];
+static void ck(int yes, const char *s) { printf("%s\t%s\n", yes ? "PASS" : "FAIL", s); if (!yes) bad++; }
+static int sh(const char *cmd) { return system(cmd); }
+/* whole-file equality with an exact expected text */
+static int file_is(const char *path, const char *want) {
+    size_t n; char *t = cx_read(path, &n);
+    int ok = t && n == strlen(want) && !memcmp(t, want, n);
+    free(t);
+    return ok;
+}
+static int stat_is(const char *how) {
+    char p[1200], want[64];
+    if (cx_fmt(p, sizeof p, "%s.stat", memo) || cx_fmt(want, sizeof want, "plan\t%s\n", how)) return 0;
+    return file_is(p, want);
+}
+static int same_file(const char *a, const char *b) {
+    size_t an, bn; char *x = cx_read(a, &an), *y = cx_read(b, &bn);
+    int ok = x && y && an == bn && an > 0 && !memcmp(x, y, an);
+    free(x); free(y);
+    return ok;
+}
+static int cxif_count(const char *dir) {
+    DIR *d = opendir(dir); struct dirent *e; int n = 0;
+    if (!d) return -1;
+    while ((e = readdir(d))) if (!strncmp(e->d_name, "ua-cxif-", 8)) n++;
+    closedir(d);
+    return n;
+}
+static int append_byte(const char *rel) {
+    char p[1300]; FILE *f;
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return 1;
+    f = fopen(p, "ab");
+    if (!f) return 1;
+    if (fputc('\n', f) == EOF) { fclose(f); return 1; }
+    return fclose(f) ? 1 : 0;
+}
+/* entry-build over the fixture root; MODE is the flag tail, O the output directory leaf */
+static int eb(const char *o, const char *mode, const char *tmp) {
+    char cmd[8192];
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && TMPDIR=%s UNISACC_EB_PLAN_MEMO=%s timeout 55 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s/%s %s/unisacc.com %s >%s/%s.stdout 2>%s/%s.stderr",
+               root, tmp, memo, root, root, fx, root, out, o, root, mode, out, o, out, o)) return 2;
+    return sh(cmd);
+}
+static int counter(const char *name, int set, int value) {
+    char p[1200]; FILE *f; int v = -1;
+    if (cx_fmt(p, sizeof p, "%s/%s.count", out, name)) return -1;
+    if (set) { f = fopen(p, "wb"); if (!f) return -1; fprintf(f, "%d\n", value); return fclose(f) ? -1 : value; }
+    {
+        size_t n, k; char *t = cx_read(p, &n);
+        if (!t) return -1;
+        for (k = 0, v = 0; k < n && t[k] >= '0' && t[k] <= '9' && v < 100000; k++) v = v * 10 + (t[k] - '0');
+        if (!k) v = -1;
+        free(t);
+    }
+    return v;
+}
+static int run_part(char **argv, int part) {
+    char cmd[8192], a[1300], b[1300];
+    if (!realpath(".", root)) return 2;
+    if (part == 1) {
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s/fx/tools %s/tmp1 %s/tmp2", argv[1], argv[1], argv[1]) || sh(cmd)) return 2;
+    }
+    if (!realpath(argv[1], out)) return 2;
+    if (cx_fmt(fx, sizeof fx, "%s/fx", out) || cx_fmt(memo, sizeof memo, "%s/plan.memo", out) || cx_fmt(tmpd, sizeof tmpd, "%s/tmp1", out)) return 2;
+    if (part == 1) {
+        if (cx_fmt(cmd, sizeof cmd, "cp -R %s/include %s/src %s/cx %s/ext %s/cxroot.tsv %s/ && cp %s/tools/bound %s/tools/bound.c %s/tools/", root, root, root, root, root, fx, root, root, fx) || sh(cmd)) return 2;
+        ck(eb("oa", "--only rescache.o", tmpd) == 0, "first call rc 0");
+        ck(stat_is("spawned-stored"), "first call planned by subprocesses and stored");
+        ck(counter("cxif-first", 1, cxif_count(tmpd)) > 0, "first call wrote interface files");
+    }
+    if (part == 2) {
+        int first = counter("cxif-first", 0, 0), second;
+        if (cx_fmt(cmd, sizeof cmd, "rm -f %s/tmp1/ua-cxif-*", out) || sh(cmd)) return 2;
+        ck(cxif_count(tmpd) == 0, "interface files cleared");
+        ck(eb("ob", "--only rescache.o", tmpd) == 0, "second call rc 0");
+        ck(stat_is("reused"), "second call reused the stored plan");
+        second = cxif_count(tmpd);
+        printf("INFO\tcxif first=%d second=%d\n", first, second);
+        ck(second > 0 && first > 0 && second < first, "second call started no plan subprocess (fewer interface files than the 44-root plan writes)");
+        if (cx_fmt(a, sizeof a, "%s/oa/rescache.o", out) || cx_fmt(b, sizeof b, "%s/ob/rescache.o", out)) return 2;
+        ck(same_file(a, b), "object byte-identical");
+        if (cx_fmt(a, sizeof a, "%s/oa/rescache.o.cache", out) || cx_fmt(b, sizeof b, "%s/ob/rescache.o.cache", out)) return 2;
+        ck(same_file(a, b), "cache side file (carries the plan identity) byte-identical");
+    }
+    if (part == 3) {
+        size_t n; char *t = cx_read(memo, &n); FILE *f;
+        if (!t || n < 400) return 2;
+        f = fopen(memo, "wb"); if (!f || fwrite(t, 1, n / 2, f) != n / 2 || fclose(f)) return 2;
+        ck(eb("oc", "--closure-list", tmpd) == 0, "truncated memo call rc 0");
+        ck(stat_is("spawned-stored"), "truncated memo recomputed");
+        if (cx_fmt(a, sizeof a, "%s/plan.memo.good", out)) return 2;
+        f = fopen(a, "wb"); if (!f || fwrite(t, 1, n, f) != n || fclose(f)) return 2;
+        ck(same_file(a, memo), "memo rewritten to the same bytes");
+        free(t);
+    }
+    if (part == 4) {
+        if (append_byte("cx/mem/heap.cx")) return 2;
+        ck(eb("od", "--closure-list", tmpd) == 0, "closure source change call rc 0");
+        ck(stat_is("spawned-stored"), "closure source byte change recomputed");
+        ck(eb("od", "--closure-list", tmpd) == 0, "unchanged repeat rc 0");
+        ck(stat_is("reused"), "unchanged repeat reused");
+    }
+    if (part == 5) {
+        if (append_byte("src/runtime/rescache.cx")) return 2;
+        ck(eb("oe", "--closure-list", tmpd) == 0, "root source change call rc 0");
+        ck(stat_is("spawned-stored"), "root source byte change recomputed");
+    }
+    if (part == 6) {
+        size_t n; char *t = cx_read(memo, &n); FILE *f; char tmp2[1100];
+        if (!t || n < 400) return 2;
+        t[n - 2] = t[n - 2] == 'h' ? 'x' : 'h';
+        f = fopen(memo, "wb"); if (!f || fwrite(t, 1, n, f) != n || fclose(f)) return 2;
+        free(t);
+        ck(eb("of", "--closure-list", tmpd) == 0, "tampered memo call rc 0");
+        ck(stat_is("spawned-stored"), "tampered memo recomputed, not adopted");
+        if (cx_fmt(tmp2, sizeof tmp2, "%s/tmp2", out)) return 2;
+        ck(eb("of", "--closure-list", tmp2) == 0, "other TMPDIR call rc 0");
+        ck(stat_is("spawned-stored"), "other TMPDIR not reused");
+    }
+    printf("ENTRY_PLAN_MEMO_PART\tpart=%d\tbad=%d\n", part, bad);
+    return bad ? 1 : 0;
+}
+/* PARTS is one or more digits 1..6 run in the given order against the same OUT (a batch has 55 s:
+   the six parts are registered as two batches, "123" and "1456"; every later part needs part 1). */
+int main(int argc, char **argv) {
+    int rc = 0;
+    if (argc != 3 || !argv[2][0]) { fputs("usage: OUT PARTS(digits 1..6)\n", stderr); return 2; }
+    for (const char *p = argv[2]; *p; p++) if (*p < '1' || *p > '6') { fputs("usage: OUT PARTS(digits 1..6)\n", stderr); return 2; }
+    for (const char *p = argv[2]; *p; p++) { int r = run_part(argv, *p - '0'); if (r == 2) return 2; if (r) rc = 1; }
+    printf("CHECK_ENTRY_PLAN_MEMO\tparts=%s\tbad=%d\n", argv[2], bad);
+    return rc;
+}
