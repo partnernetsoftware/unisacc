@@ -49,9 +49,10 @@ static void cleanup(void) {
 }
 
 int main(int argc, char **argv) {
-    int A = 1, B = 1;   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;缺省两组都跑,各组独立夹具 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|ab]\n"); return 2; }
+    int A = 1, B = 1, C = 0;   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
+                                 c:commit 回执取回、x --bg 作业 deadline 自退与进程组清理、git merge 无冲突与冲突报告、git add 拒绝路径;缺省跑 a 与 b,各组独立夹具 */
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|ab]\n"); return 2; }
     char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 剥掉调用方 shell 里的 DEVSVC_* 环境变量(如 DEVSVC_OWNER),夹具子进程不继承 */
@@ -63,7 +64,7 @@ int main(int argc, char **argv) {
             } else e++;
         } }
     {   /* 夹具路径按仓根哈希与组固定(不含 pid):使启动器自身按源路径取键的产品 -run 编译缓存跨次命中;开头与收尾都清空 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : "b"; char c0[700];
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : "c"; char c0[700];
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
@@ -159,6 +160,53 @@ int main(int argc, char **argv) {
     {   char *p = strstr(out, "GIT_STATUS\tdirty="); int d = -1, o = -1;
         ck(rc == 0 && p && sscanf(p, "GIT_STATUS\tdirty=%d\torphan=%d", &d, &o) == 2 && d >= 0 && o >= 0 && o <= d, "status-last-line-format"); }
 
+    }
+    if (C) {
+    /* (r) 前台 commit 在作业里跑:输出含 JOB id,git commit --status JOB 取回 rc 与 commit 号 */
+    {   char id[48] = "", hd[64] = "", *p;
+        ck(wfile("dvg-r.txt", "r\n") == 0, "receipt-fixture");
+        rc = dv("git", "commit", "-m", "R", "--whole", "dvg-r.txt", 0, 0);
+        ck(rc == 0 && has("GIT_COMMIT\trc=0") && (p = strstr(out, "JOB\t")) && sscanf(p, "JOB\t%47s", id) == 1, "receipt-commit-runs-as-job");
+        ck(sh("git rev-parse HEAD", fx) == 0 && sscanf(out, "%63s", hd) == 1, "receipt-head");
+        rc = dv("git", "commit", "--status", id, 0, 0, 0, 0);
+        {   char want[200]; F(want, sizeof want, "GIT_COMMIT\trc=0\tcommit=%s", hd);
+            ck(rc == 0 && id[0] && has("COMMIT_RECEIPT\t") && has("\tdone\trc=0\t") && has(want) && has("dvg-r.txt"), "receipt-status-returns-rc-and-commit"); }
+        rc = dv("git", "commit", "--status", "123-456", 0, 0, 0, 0);
+        ck(rc == 2 && has("COMMIT_RECEIPTS\tn=0"), "receipt-status-unknown-job-rc2");
+        rc = dv("git", "commit", "--status", "bad-id", 0, 0, 0, 0);
+        ck(rc == 2 && has("bad job id"), "receipt-status-bad-id-rc2");
+    }
+    /* (j) x --bg:立即返回 JOB;作业 --timeout-ms 到点自退 rc 124,整个进程组被清理;wait 返回终态 */
+    {   char id[48] = "", c2[300], *p; long t1 = sy_now_ms();
+        F(c2, sizeof c2, "sleep 30 & echo $! > %s/bgpid; wait", fx);
+        rc = dv("x", "--bg", "--timeout-ms", "1500", "--", "sh", "-c", c2);
+        ck(rc == 0 && (p = strstr(out, "JOB\t")) && sscanf(p, "JOB\t%47s", id) == 1 && sy_now_ms() - t1 < 15000, "bg-returns-job-id");
+        rc = dv("wait", id, "--timeout-ms", "20000", 0, 0, 0, 0);
+        ck(rc == 124 && has("JOB_DONE\t") && has("rc=124"), "bg-deadline-self-exit-rc124");
+        F(c2, sizeof c2, "! kill -0 $(cat bgpid) 2>/dev/null");
+        ck(sh(c2, fx) == 0, "bg-deadline-kills-process-group");
+    }
+    /* (m) git merge:无冲突合入当前分支;冲突报文件清单 rc 1、不自动解决 */
+    F(c, sizeof c, "git checkout -q -b dvm-a && printf 'a\\n' > dvm-a.txt && git add dvm-a.txt && git commit -q -m MA && git checkout -q - "
+                   "&& git checkout -q -b dvm-b && printf 'b\\n' > dvm.txt && git add dvm.txt && git commit -q -m MB && git checkout -q - "
+                   "&& printf 'main\\n' > dvm.txt && git add dvm.txt && git commit -q -m MM");
+    ck(!ovf && sh(c, fx) == 0, "merge-fixture");
+    rc = dv("git", "merge", "dvm-a", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && sh("git cat-file -e HEAD:dvm-a.txt", fx) == 0, "merge-clean-rc0");
+    rc = dv("git", "merge", "dvm-b", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("MERGE_CONFLICT\tdvm.txt\n") && has("GIT_MERGE\trc=1\tconflicts=1"), "merge-conflict-lists-files-rc1");
+    ck(sh("git merge --abort", fx) == 0, "merge-conflict-left-for-caller");
+    rc = dv("git", "merge", 0, 0, 0, 0, 0, 0);
+    ck(rc == 2, "merge-missing-branch-rc2");
+    /* (g) git add:out/、..、绝对、忽略路径拒绝 rc 2;普通路径同步进 index */
+    ck(wfile("dvg-ign.log", "i\n") == 0 && sh("echo dvg-ign.log >> .git/info/exclude && printf 'g\\n' > dvg-add.txt", fx) == 0, "add-fixture");
+    rc = dv("git", "add", "out", 0, 0, 0, 0, 0); ck(rc == 2 && has("REFUSE git add out:"), "add-refuse-out");
+    rc = dv("git", "add", "../x", 0, 0, 0, 0, 0); ck(rc == 2 && has("REFUSE"), "add-refuse-dotdot");
+    rc = dv("git", "add", "/etc/passwd", 0, 0, 0, 0, 0); ck(rc == 2 && has("REFUSE"), "add-refuse-absolute");
+    rc = dv("git", "add", "dvg-add.txt", "dvg-ign.log", 0, 0, 0, 0); ck(rc == 2 && has("ignored path"), "add-refuse-ignored-nothing-added");
+    ck(sh("[ -z \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-refused-adds-nothing");
+    rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_ADD\trc=0\tn=1") && sh("[ -n \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-syncs-index");
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();

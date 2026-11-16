@@ -79,8 +79,12 @@ static int is(const char *name, const char *text) {
 }
 static void sha_of(char *dst) { const char *q = strstr(out, "sha="); dst[0] = 0; if (q && strlen(q + 4) >= 64) { memcpy(dst, q + 4, 64); dst[64] = 0; } }
 
-int main(void) {
+int main(int argc, char **argv) {
     char p[400], p2[400], sha[80], sha2[80]; int r; long par, ser;
+    /* --cases m:原全集(批次 devsvc-flow);--cases p:P7 写需实例(批次 devsvc-flow-p);缺省两组都跑 */
+    int M = 1, P = 1;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { M = strchr(argv[2], 'm') != 0; P = strchr(argv[2], 'p') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-flow.cx [--cases m|p|mp]\n"); return 2; }
     if (sy_cwd(root, sizeof root) < 0) return 2;
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
     {   unsigned char *b = 0; int64_t n = 0; int okc;
@@ -93,6 +97,7 @@ int main(void) {
     F(inst, sizeof inst, "/tmp/devsvc-flowck-%d", sy_pid()); F(w, sizeof w, "/tmp/devsvc-flowck-%d-w", sy_pid());
     if (setenv(c_env, inst, 1) || setenv("UNISACC_FLOW_ROOT", w, 1) || sy_mkdir_all(w, 0755)) return 2;
 
+    if (!M) goto p7;
     /* --par 强制:x 与 flow 缺省即 rc 2 REFUSE missing --par;x --par 1 单节点可跑 */
     {   char *v[] = {"x", "--", "true", 0};
         ck(dvraw(v) == 2 && has("REFUSE missing --par"), "x-missing-par-refused"); }
@@ -122,6 +127,29 @@ int main(void) {
     /* 无实例:x 本地执行,退出码与输出即命令自己的 */
     {   char *v[] = {"x", "--", "sh", "-c", "echo hi; echo oops >&2; exit 3", 0};
         ck(dv(v) == 3 && has("hi\n") && has("oops\n") && has("X\tfail\trc=3\t") && has("via=local"), "x-local-rc-and-output"); }
+p7:
+    if (!P) goto mrest;
+    /* P7:写命令不静默转本地无锁写。拉起失败(以 /bin/false 冒充服务执行体)即 REFUSE writes-need-service 且不写;
+       能拉起时无实例的 f write 自动拉起并持锁写,结果行 via=svc locks=1 */
+    ck(put("p7src.txt", "p7\n") == 0, "fixture-p7");
+    F(p, sizeof p, "%s/p7src.txt", w);
+    if (setenv("DEVSVC_SELF_BIN", "/bin/false", 1)) return 2;
+    {   long t0 = sy_now_ms(); char q[300]; int64_t sz = 0; unsigned char *bb = 0; int absent;
+        r = dv1("f", "write", "p7.txt", "--from", p, 0);
+        F(q, sizeof q, "%s/p7.txt", w);
+        absent = sy_read_file(q, &bb, &sz, 64) != 0; if (bb) free(bb);
+        ck(r == 1 && has("REFUSE writes-need-service") && absent && sy_now_ms() - t0 < 20000, "p7-write-refused-when-autostart-fails"); }
+    {   char *v[] = {"flow", "-", "--par", "1", 0}; char *e[] = {"sh", "-c", 0, 0}; char cmd[1600];
+        F(cmd, sizeof cmd, "printf 'w1\\tfile.write\\t-\\tpath=p7.txt;content=x\\n' | sh '%s' '%s' -- flow - --par 1", prod, self); e[2] = cmd; (void)v;
+        ck(cap2(e, out, sizeof out) == 1 && has("REFUSE writes-need-service") && !is("p7.txt", "x"), "p7-flow-write-node-refused-when-autostart-fails"); }
+    if (unsetenv("DEVSVC_SELF_BIN")) return 2;
+    {   char *v[] = {"x", "--", "true", 0}; ck(dv(v) == 0 && has("via=local"), "p7-readonly-x-still-local"); }
+    ck(dv1("f", "write", "p7.txt", "--from", p, 0) == 0 && has("via=svc\tlocks=1") && is("p7.txt", "p7\n"), "p7-write-autostarts-instance-and-locks");
+    ck(dv1("ping", 0, 0, 0, 0, 0) == 0 && has("OK\tpong"), "p7-instance-up-after-write");
+    ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "p7-stop");
+    sy_sleep_ms(300);
+mrest:
+    if (!M) goto fin;
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "start");
 
     /* flow run:两节点并行墙钟小于串行 */
@@ -178,7 +206,11 @@ int main(void) {
            && has("NODE\tbad\tfail\trc=5\t") && has("NODE\tafter\tskip\t") && has("dep=bad:fail") && has("DEVSVC_FLOW\tnodes=4\tok=2\tfail=1\ttimeout=0\tskip=1\t"), "flow-stdin-inline-cat"); }
     ck(put("cyc.tsv", "a\texec\tb\ta0=true\nb\texec\ta\ta0=true\n") == 0, "fixture-cycle");
     F(p, sizeof p, "%s/cyc.tsv", w);
-    ck(dv1("flow", "run", p, 0, 0, 0) == 2 && has("REFUSE dependency cycle"), "flow-cycle-refused-rc2");
+    ck(dv1("flow", "run", p, 0, 0, 0) == 2 && has("REFUSE dependency cycle") && !has("bad flow arguments"), "flow-cycle-refused-rc2");
+    /* 节点 rc 2 不是 flow 参数错:入口不得再报 bad flow arguments(同 x 的 16045f8009 修法) */
+    ck(put("rc2.tsv", "n2\texec\t-\ta0=sh;a1=-c;a2=exit 2\n") == 0, "fixture-node-rc2");
+    F(p, sizeof p, "%s/rc2.tsv", w);
+    ck(dv1("flow", "run", p, 0, 0, 0) != 0 && has("NODE\tn2\tfail\trc=2\t") && !has("bad flow arguments"), "flow-node-rc2-not-bad-arguments");
 
     /* x:超时组杀 */
     {   char sh[400], pidf[300], kc[400]; char *v[] = {"x", "--timeout-ms", "400", "--cwd", w, "--", "sh", "-c", sh, 0}; char *k[] = {"sh", "-c", kc, 0}; long t0 = sy_now_ms();
@@ -194,6 +226,7 @@ int main(void) {
         ck(dv(v) == 0 && strstr(out, "second\nX\tok\trc=0\t") == out && has("via=service"), "x-ok-via-service"); }
 
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
+fin:
     {   char *rm[] = {"rm", "-rf", inst, w, 0}; ck(cap2(rm, out2, sizeof out2) == 0, "fixture-cleanup"); }
     ck(ovf == 0, "no-path-overflow");
     printf("CHECK_DEVSVC_FLOW\tok=%d\tfailed=%d\n", nok, nfail);

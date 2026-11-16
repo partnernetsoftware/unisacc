@@ -1,0 +1,375 @@
+/* tools/daily-ready.cx -- static readiness gate before a frozen root is built (plans/devsvc-speedup-2026-11-16.md P4).
+ *
+ *   sh ./unisacc.com tools/daily-ready.cx [-- [--root DIR] [--par N] [--deadline-ms MS]]
+ *   sh ./unisacc.com tools/daily-ready.cx -- --item NAME [--root DIR]
+ *
+ * Default (run from this repo's root): runs tools/flows/daily-ready.tsv through `devsvc flow run` with cwd=DIR
+ * (default .), every node bounded on its own, read only, nothing cached; prints one line per node and a last line
+ *   READY_ITEM <id> ok|fail <reason>
+ *   DAILY_READY=yes|no failed=<ids> nodes=<n> wall_ms=<ms> note=static-only-not-a-verdict
+ * rc 0 when yes, 1 when any item fails.  The flow table holds the static items below (--item) plus the
+ * verify-tree nodes (derive, ratchets, tools-compile shards, pins, layer-api).
+ *
+ * --item NAME, each a pure read of the tree at DIR:
+ *   families   every material family of an IMPLEMENTED SOURCE batch (the map_families_load admission of
+ *              tools/s9-nightly.cx) has a producer under the tools/affected.cx prep_source rules, or is an
+ *              F4c session-scope name; a missing producer is named.  Families only of non-IMPLEMENTED
+ *              batches are DEFERRED/BLOCKED declarations and only counted.
+ *   limits     build/limits.tsv invariants: every IMPLEMENTED batch budget <= s9.cmd (the 55 s commit rule);
+ *              s9.cmd <= 55; slice grant after deductions (s9.step - child.pre - wave.reserve - sup.shave)
+ *              >= s9.cmd; worst slice need (s9.cmd + pre + max materials * child.material + reserve + shave)
+ *              <= s9.slice - s9.epoch.margin; every "s9.x" key read in tools/s9-shards*.cx and
+ *              tools/s9-nightly.cx exists in limits.tsv.
+ *   companions files the frozen root needs: each IMPLEMENTED batch source and entry, the s9/affected/allsession tools.
+ *   f4c        the F4c declaration (as_f4c_name in tools/cxlib/allsession.cx, tools/check-s9-f4c.cx) exists.
+ *   dupmat     no batch lists the same material name twice.
+ */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+
+#define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
+
+static const char *root = ".";
+static char why[4096];
+static int nwhy;
+
+static void addwhy(const char *s) {
+    long l = tx_len(s, 400);
+    if (nwhy + l + 2 >= (long)sizeof why) return;
+    if (nwhy) why[nwhy++] = ',';
+    if (mm_copy(why + nwhy, sizeof why - (size_t)nwhy, s, (size_t)l)) return;
+    nwhy += (int)l; why[nwhy] = 0;
+}
+static int exists(const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
+    return sy_exists(p) == 1;
+}
+static char *readrel(const char *rel, size_t *n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
+    return cx_read(p, n);
+}
+
+/* ---- batches.tsv ---- */
+#define MAXB 4096
+typedef struct { char *f[14]; } Row;
+static Row rows[MAXB];
+static int nrows, loaded;
+static char *bt;
+
+static int load_batches(void) {
+    size_t n = 0;
+    if (loaded) return 0;
+    bt = readrel("tests/batches.tsv", &n);
+    if (!bt) { addwhy("batches-unreadable"); return -1; }
+    char *p = bt, *end = bt + n;
+    int first = 1;
+    while (p < end) {
+        char *e = p; while (e < end && *e != '\n') e++;
+        *e = 0;
+        if (*p && *p != '#' && !first && nrows < MAXB) {
+            Row *r = &rows[nrows]; int k = 0; char *q = p;
+            r->f[k++] = q;
+            for (; *q && k < 14; q++) if (*q == '\t') { *q = 0; r->f[k++] = q + 1; }
+            while (k < 14) r->f[k++] = "";
+            nrows++;
+        }
+        first = 0; p = e + 1;
+    }
+    loaded = 1;
+    return 0;
+}
+
+/* split a materials field into names; kind 2 when ":sha256" suffix.  Returns count. */
+typedef struct { char name[128]; int kind; } Mat;
+static int mats_of(const char *f, Mat *m, int cap) {
+    int n = 0;
+    if (!f || !*f || tx_eqz(f, "-")) return 0;
+    const char *p = f;
+    while (*p && n < cap) {
+        const char *e = p; while (*e && *e != ';' && *e != ',') e++;
+        const char *c = p; while (c < e && *c != ':') c++;
+        long l = c - p;
+        if (l > 0 && l < 128) {
+            if (mm_copy(m[n].name, sizeof m[n].name, p, (size_t)l)) return n;
+            m[n].name[l] = 0;
+            m[n].kind = (c < e && e - c == 7 && !memcmp(c, ":sha256", 7)) ? 2 : 1;
+            n++;
+        }
+        p = *e ? e + 1 : e;
+    }
+    return n;
+}
+static int f4c_name(const char *s) {
+    return tx_eqz(s, "old-product") || tx_eqz(s, "new-product") || tx_eqz(s, "new-models") ||
+           (!strncmp(s, "release-ctor-", 13) && s[13]) || !strncmp(s, "candidate-profile", 17) || tx_eqz(s, "release-fixture");
+}
+static int admitted(Row *r, Mat *d) {
+    if (!tx_eqz(r->f[1], "IMPLEMENTED")) return 0;
+    if (tx_eqz(r->f[4], "SOURCE")) return 1;
+    return tx_eqz(r->f[4], "PREPARED") && tx_eqz(r->f[0], "assembler") && d->kind == 1 && tx_eqz(d->name, "assembler");
+}
+/* families: the authority is tools/affected.cx --materials-dump (read only, no --prepare-materials), the
+   same resolution the s9 map family phase dumps per family.  A family is ready when the dump has a row for
+   it (resolved, or an explicit REFUSED row: a refused dump is family evidence, never a batch PASS), or it is
+   produced by an s9-nightly material stage (ri-flow-runtime, ri-flow-data, kernels) whose producer sources
+   exist.  An admitted family with no row at all, or a stage family without its producer, is named. */
+static char *dump; static long dumpn;
+static int dump_row(const char *name, int *refused) {
+    char q[160]; long l;
+    if (cx_fmt(q, sizeof q, "\t%s\t", name)) return 0;
+    l = tx_len(q, 160);
+    for (const char *p = dump; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        long ll = nl ? nl - p : (long)tx_len(p, 1 << 20);
+        if (!strncmp(p, "MATERIAL\t", 9)) {
+            const char *t = strchr(p + 9, '\t');               /* skip batch id */
+            if (t && t - p < ll && !strncmp(t, q, (size_t)l)) { *refused = tx_find(p, ll, "REFUSED=", 8) >= 0; return 1; }
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    return 0;
+}
+static int stage_family(const char *s, char *w, int cap) {
+    const char *need[3] = {0, 0, 0};
+    if (tx_eqz(s, "ri-flow-runtime") || tx_eqz(s, "ri-flow-data")) { need[0] = "tools/ri-material.cx"; need[1] = "tools/ri-flow-material.cx"; need[2] = "tests/cases/ri-flow.cx"; }
+    else if (tx_eqz(s, "kernels")) need[0] = "tools/kernel-build.cx";
+    else return 0;
+    for (int i = 0; i < 3; i++) if (need[i] && !exists(need[i])) { cx_fmt(w, cap, "stage-producer-absent=%s:%s", s, need[i]); return -1; }
+    return 1;
+}
+static int load_dump(void) {
+    /* test seam (check-daily-ready.cx fixtures): a file standing in for the dump output; unset in real runs */
+    const char *seam = sy_env("UNISACC_DAILY_READY_DUMP_SEAM");
+    if (seam && *seam) { size_t n = 0; dump = cx_read(seam, &n); dumpn = (long)n; if (!dump) { addwhy("dump-seam-unreadable"); return -1; } return 0; }
+    char *av[] = {"./tools/bound", "50", "sh", UC, "tools/affected.cx", "--", "--materials-dump", 0};   /* 50 s bound, root's own tools/bound */
+    int fd = -1, pid = sy_spawn_pipe(av, root, 0, &fd, 0), ex = 0, code = 0, sig = 0;
+    if (pid <= 0) { addwhy("materials-dump-spawn"); return -1; }
+    long cap = 1 << 16, r; dump = mm_alloc((size_t)cap); dumpn = 0;
+    while (dump && (r = sy_read(fd, dump + dumpn, cap - 1 - dumpn)) > 0) { dumpn += r; if (dumpn + 1 >= cap) { cap *= 2; dump = mm_grow(dump, (size_t)cap); } }
+    if (dump) dump[dumpn] = 0;
+    sy_close(fd);
+    sy_wait_status(pid, 0, &ex, &code, &sig);
+    if (!ex || code || !dump) { char w[80]; cx_fmt(w, sizeof w, "materials-dump-rc=%d", ex ? code : -1); addwhy(w); return -1; }
+    return 0;
+}
+
+static int item_families(void) {
+    static char seen[512][128]; int ns = 0, impl = 0, planned = 0, bad = 0, refusedn = 0;
+    if (load_batches() || load_dump()) return 1;
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < nrows; i++) {
+            Mat m[64]; int k = mats_of(rows[i].f[7], m, 64);
+            for (int j = 0; j < k; j++) {
+                if (admitted(&rows[i], &m[j]) != !pass) continue;
+                int t; for (t = 0; t < ns && strcmp(seen[t], m[j].name); t++) {}
+                if (t < ns) continue;
+                if (ns < 512) cx_fmt(seen[ns++], 128, "%s", m[j].name);
+                if (pass) { planned++; continue; }
+                impl++;
+                char w[300]; int st = stage_family(m[j].name, w, sizeof w), refused = 0;
+                if (st < 0) { bad++; addwhy(w); continue; }
+                if (st > 0) continue;
+                if (!dump_row(m[j].name, &refused)) { cx_fmt(w, sizeof w, "no-dump-row=%s", m[j].name); bad++; addwhy(w); }
+                else refusedn += refused;
+            }
+        }
+    char tail[160]; cx_fmt(tail, sizeof tail, "implemented=%d refused-dump=%d deferred=%d", impl, refusedn, planned);
+    addwhy(tail);
+    return bad ? 1 : 0;
+}
+
+/* ---- limits ---- */
+static char *lim; static size_t limn;
+static int lim_get(const char *key, double *v) {
+    long kl = tx_len(key, 100); const char *p = lim, *end = lim + limn;
+    while (p < end) {
+        const char *e = p; while (e < end && *e != '\n') e++;
+        if (e - p > kl && !memcmp(p, key, (size_t)kl) && p[kl] == '\t') {
+            const char *c = p + kl + 1; while (c < e && *c != '\t') c++;   /* skip unit column */
+            if (c < e) { *v = strtod(c + 1, 0); return 0; }
+        }
+        p = e + 1;
+    }
+    return -1;
+}
+static void scan_reads(const char *rel, int *bad) {
+    size_t n = 0; char *s = readrel(rel, &n);
+    if (!s) return;
+    for (size_t i = 1; i + 4 < n; i++) {
+        if (s[i] != '"' || memcmp(s + i + 1, "s9.", 3) || s[i - 1] != '(') continue;
+        size_t e = i + 1; while (e < n && s[e] != '"' && e - i < 60) e++;
+        char key[64]; double v;
+        if (e >= n || e - i - 1 >= sizeof key) continue;
+        if (mm_copy(key, sizeof key, s + i + 1, e - i - 1)) continue;
+        key[e - i - 1] = 0;
+        if (lim_get(key, &v)) { char w[160]; cx_fmt(w, sizeof w, "limit-unknown=%s:%s", rel, key); addwhy(w); (*bad)++; }
+    }
+    mm_free(s);
+}
+static int item_limits(void) {
+    int bad = 0; double cmd, step, pre, mat, res, shave, slice, margin;
+    lim = readrel("build/limits.tsv", &limn);
+    if (!lim) { addwhy("limits-unreadable"); return 1; }
+    const char *keys[] = {"s9.cmd", "s9.step", "s9.child.pre", "s9.child.material", "s9.wave.reserve", "s9.sup.shave", "s9.slice", "s9.epoch.margin"};
+    double *vals[] = {&cmd, &step, &pre, &mat, &res, &shave, &slice, &margin};
+    for (int i = 0; i < 8; i++) if (lim_get(keys[i], vals[i])) { char w[100]; cx_fmt(w, sizeof w, "limit-missing=%s", keys[i]); addwhy(w); bad++; *vals[i] = 0; }
+    if (bad) return 1;
+    if (cmd > 55) { char w[80]; cx_fmt(w, sizeof w, "s9.cmd=%g>55", cmd); addwhy(w); bad++; }
+    double grant = step - pre - res - shave;
+    if (grant < cmd) { char w[120]; cx_fmt(w, sizeof w, "slice-grant=%g<budget=%g", grant, cmd); addwhy(w); bad++; }
+    if (load_batches()) return 1;
+    int maxm = 0, over = 0;
+    for (int i = 0; i < nrows; i++) {
+        Mat m[64]; int k = mats_of(rows[i].f[7], m, 64);
+        if (!tx_eqz(rows[i].f[1], "IMPLEMENTED")) continue;
+        if (k > maxm) maxm = k;
+        double b = strtod(rows[i].f[6], 0);
+        if (b > cmd) { char w[160]; cx_fmt(w, sizeof w, "budget-over-cmd=%s:%g", rows[i].f[0], b); if (over++ < 12) addwhy(w); bad++; }
+    }
+    double need = cmd + pre + maxm * mat + res + shave;
+    if (need > slice - margin) { char w[160]; cx_fmt(w, sizeof w, "slice-need=%g>slice-margin=%g(materials=%d)", need, slice - margin, maxm); addwhy(w); bad++; }
+    scan_reads("tools/s9-shards.cx", &bad);
+    scan_reads("tools/s9-nightly.cx", &bad);
+    scan_reads("tools/s9-shards-flow.cx", &bad);
+    if (!bad) { char w[160]; cx_fmt(w, sizeof w, "grant=%g need=%g<=%g", grant, need, slice - margin); addwhy(w); }
+    return bad ? 1 : 0;
+}
+
+static int item_companions(void) {
+    int bad = 0;
+    const char *need[] = {"tools/s9-nightly.cx", "tools/s9-shards.cx", "tools/affected.cx", "tools/cxlib/allsession.cx",
+                          "build/limits.tsv", "tests/batches.tsv", "tests/tools-compile.cx", "tests/run.cx"};
+    for (int i = 0; i < 8; i++) if (!exists(need[i])) { char w[200]; cx_fmt(w, sizeof w, "missing=%s", need[i]); addwhy(w); bad++; }
+    if (load_batches()) return 1;
+    for (int i = 0; i < nrows; i++) {
+        if (!tx_eqz(rows[i].f[1], "IMPLEMENTED")) continue;
+        for (int c = 3; c <= 8; c += 5) {     /* source, entry; "{x}/..." entries name materials, skipped */
+            const char *f = rows[i].f[c];
+            if (!*f || tx_eqz(f, "-") || *f == '{' || *f == '/') continue;
+            if (!exists(f)) { char w[700]; cx_fmt(w, sizeof w, "missing=%s:%s", rows[i].f[0], f); if (bad < 12) addwhy(w); bad++; }
+        }
+    }
+    return bad ? 1 : 0;
+}
+static int item_f4c(void) {
+    size_t n = 0; char *s = readrel("tools/cxlib/allsession.cx", &n); int bad = 0;
+    if (!s || tx_find(s, (long)n, "int as_f4c_name(", 16) < 0) { addwhy("f4c-decl-missing=tools/cxlib/allsession.cx:as_f4c_name"); bad++; }
+    if (s) mm_free(s);
+    if (!exists("tools/check-s9-f4c.cx")) { addwhy("f4c-check-missing=tools/check-s9-f4c.cx"); bad++; }
+    return bad ? 1 : 0;
+}
+static int item_dupmat(void) {
+    int bad = 0;
+    if (load_batches()) return 1;
+    for (int i = 0; i < nrows; i++) {
+        Mat m[64]; int k = mats_of(rows[i].f[7], m, 64);
+        for (int a = 0; a < k; a++) for (int b = a + 1; b < k; b++)
+            if (tx_eqz(m[a].name, m[b].name)) { char w[300]; cx_fmt(w, sizeof w, "dup-material=%s:%s", rows[i].f[0], m[a].name); addwhy(w); bad++; }
+    }
+    return bad ? 1 : 0;
+}
+
+static int run_item(const char *name) {
+    int rc;
+    if (tx_eqz(name, "families")) rc = item_families();
+    else if (tx_eqz(name, "limits")) rc = item_limits();
+    else if (tx_eqz(name, "companions")) rc = item_companions();
+    else if (tx_eqz(name, "f4c")) rc = item_f4c();
+    else if (tx_eqz(name, "dupmat")) rc = item_dupmat();
+    else { printf("READY_ITEM\t%s\tfail\tunknown-item\n", name); return 2; }
+    printf("READY_ITEM\t%s\t%s\t%s\n", name, rc ? "fail" : "ok", nwhy ? why : "-");
+    return rc;
+}
+
+/* ---- summarizer over devsvc flow run ---- */
+static void slurp(int fd, char **out) {
+    long cap = 1 << 16, n = 0, r; char *b = mm_alloc((size_t)cap);
+    while (b && (r = sy_read(fd, b + n, cap - 1 - n)) > 0) { n += r; if (n + 1 >= cap) { cap *= 2; b = mm_grow(b, (size_t)cap); } }
+    if (b) b[n] = 0;
+    *out = b;
+}
+/* last non-empty line of S into DST, tabs flattened */
+static void last_line(const char *s, char *dst, int cap) {
+    const char *last = 0; int i = 0;
+    for (const char *q = s; q && *q;) { if (*q != '\n') last = q; const char *nl = strchr(q, '\n'); q = nl ? nl + 1 : 0; }
+    if (last) while (*last && *last != '\n' && i < cap - 1) { dst[i++] = *last == '\t' ? ' ' : *last; last++; }
+    dst[i] = 0;
+}
+
+int main(int argc, char **argv) {
+    const char *item = 0, *par = "6", *deadline = "280000";
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--item") && i + 1 < argc) item = argv[++i];
+        else if (tx_eqz(argv[i], "--par") && i + 1 < argc) par = argv[++i];
+        else if (tx_eqz(argv[i], "--deadline-ms") && i + 1 < argc) deadline = argv[++i];
+        else if (tx_eqz(argv[i], "--")) {}
+        else { fprintf(stderr, "daily-ready: usage [--root DIR] [--par N] [--deadline-ms MS] | --item NAME [--root DIR]\n"); return 2; }
+    }
+    if (item) return run_item(item);
+
+    long t0 = sy_now_ms();
+    char me[4400], self[4400], flow[4400], tmp[4400];
+    if (sy_realpath(".", me, sizeof me) < 0) return 2;
+    if (cx_fmt(self, sizeof self, "%s/tools/daily-ready.cx", me) || cx_fmt(flow, sizeof flow, "%s/tools/flows/daily-ready.tsv", me)) return 2;
+    if (sy_exists(self) != 1 || sy_exists(flow) != 1) { printf("DAILY_READY=no\tfailed=setup\treason=run-from-repo-root\n"); return 1; }
+    /* the flow table names this tool by repo path; for another root it is rewritten to this repo's absolute path */
+    size_t fn = 0; char *ft = cx_read(flow, &fn);
+    if (!ft) return 2;
+    if (cx_fmt(tmp, sizeof tmp, "%s/daily-ready-%ld.tsv", sy_tmpdir(), t0)) return 2;
+    {
+        const char *pat = "a2=tools/daily-ready.cx"; long pl = tx_len(pat, 64), sl = tx_len(self, 4400);
+        size_t cap = fn * 8 + 4400 * 16; char *o = mm_alloc(cap); long on = 0;
+        if (!o) return 2;
+        for (size_t i = 0; i < fn;) {
+            if (i + (size_t)pl <= fn && !memcmp(ft + i, pat, (size_t)pl)) { if (mm_copy(o + on, cap - (size_t)on, "a2=", 3)) return 2; on += 3; if (mm_copy(o + on, cap - (size_t)on, self, (size_t)sl)) return 2; on += sl; i += (size_t)pl; }
+            else o[on++] = ft[i++];
+        }
+        if (cx_write(tmp, o, (size_t)on)) return 2;
+        mm_free(o); mm_free(ft);
+    }
+    char *av[] = {"sh", UC, "tools/devsvc.cx", "--", "flow", "run", tmp, "--par", (char *)par, "--deadline-ms", (char *)deadline, 0};
+    int fd = -1, pid = sy_spawn_pipe(av, root, 0, &fd, 0);
+    if (pid <= 0) { printf("DAILY_READY=no\tfailed=spawn\n"); return 1; }
+    char *out = 0; slurp(fd, &out); sy_close(fd);
+    int ex = 0, code = 0, sig = 0; sy_wait_status(pid, 0, &ex, &code, &sig);
+    sy_unlink(tmp);
+    char rundir[4400] = "";
+    const char *run = out ? strstr(out, "run=") : 0;
+    if (run) { int i = 0; run += 4; while (run[i] && run[i] != '\n' && run[i] != '\t' && i < 4399) { rundir[i] = run[i]; i++; } rundir[i] = 0; }
+    char failed[2048] = ""; int nf = 0, nodes = 0;
+    for (const char *p = out; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        char id[128], st[32], rc[40] = "";
+        if (!strncmp(p, "NODE\t", 5) && sscanf(p, "NODE\t%127[^\t]\t%31[^\t]\t%39[^\t]", id, st, rc) >= 2) {
+            nodes++;
+            char path[4600], reason[600] = "";
+            size_t on = 0; char *ob = 0;
+            if (*rundir && !cx_fmt(path, sizeof path, "%s/out/%s.out", rundir, id)) ob = cx_read(path, &on);
+            const char *ri = ob ? strstr(ob, "READY_ITEM\t") : 0;
+            if (ri) { const char *e = strchr(ri, '\n'); printf("%.*s\n", (int)(e ? e - ri : (long)tx_len(ri, 4096)), ri); }
+            else if (tx_eqz(st, "ok")) printf("READY_ITEM\t%s\tok\t-\n", id);
+            else {
+                last_line(ob, reason, sizeof reason);
+                if (!*reason && *rundir && !cx_fmt(path, sizeof path, "%s/out/%s.err", rundir, id)) {
+                    size_t en = 0; char *eb = cx_read(path, &en); last_line(eb, reason, sizeof reason); if (eb) mm_free(eb);
+                }
+                printf("READY_ITEM\t%s\tfail\t%s %s %s\n", id, st, rc, *reason ? reason : "-");
+            }
+            if (!tx_eqz(st, "ok")) { if (nf++) strncat(failed, ",", sizeof failed - strlen(failed) - 1); strncat(failed, id, sizeof failed - strlen(failed) - 1); }
+            if (ob) mm_free(ob);
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    if (!nodes) { nf++; cx_fmt(failed, sizeof failed, "flow-no-nodes"); }
+    printf("DAILY_READY=%s\tfailed=%s\tnodes=%d\twall_ms=%ld\tnote=static-only-not-a-verdict\n", nf ? "no" : "yes", nf ? failed : "-", nodes, sy_now_ms() - t0);
+    if (out) mm_free(out);
+    return nf ? 1 : 0;
+}

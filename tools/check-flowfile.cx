@@ -4,6 +4,7 @@
 #pragma unisa use cxlib.flowfile
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use sys.sha
 #pragma unisa use sys.posix
 #pragma unisa use mem.heap
@@ -81,6 +82,7 @@ static int leftovers(void) {
     return n;
 }
 
+static void cat3(char *d, long cap, const char *a, const char *b, const char *c) { d[0] = 0; cat(d, cap, a); cat(d, cap, b); cat(d, cap, c); }
 int main(void) {
     ff_out o;
     char hex[65], hex2[65], t[4096], esc[256], back[256];
@@ -267,6 +269,41 @@ int main(void) {
     rc = ff_run("file.write", A("path=link/esc.txt;content=x"), &o);
     ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-through-symlink-dir-refuse");
     ff_out_free(&o);
+    /* run directories besides the root: /tmp/devsvc-* and /tmp/flow-* (inside), $CLAUDE_JOB_DIR/tmp; escapes still refused */
+    {   char rd[256], a[600], f[600]; int ok; const char *bn = outside + tx_len(outside, 4096);
+        while (bn > outside && bn[-1] != '/') bn--;
+        cat3(rd, sizeof rd, "/tmp/devsvc-ffchk-", bn, "");
+        ok = sy_mkdir_all(rd, 0755) == 0;
+        cat3(a, sizeof a, "path=", rd, "/run.txt;content=r"); cat3(f, sizeof f, rd, "/run.txt", "");
+        rc = ff_run("file.write", A(a), &o);
+        ck(ok && rc == 0 && sy_exists(f) == 1, "write-tmp-devsvc-rundir-allowed");
+        ff_out_free(&o);
+        cat3(a, sizeof a, "path=", rd, "-top.txt;content=r");
+        rc = ff_run("file.write", A(a), &o);
+        ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "write-tmp-devsvc-file-not-dir-refuse");
+        ff_out_free(&o);
+        cat3(f, sizeof f, rd, "/lnk", "");
+        ck(sy_symlink(outside, f) == 0, "setup-rundir-symlink");
+        cat3(a, sizeof a, "path=", rd, "/lnk/esc.txt;content=x");
+        rc = ff_run("file.write", A(a), &o);
+        ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists(t) != 1, "write-rundir-symlink-escape-refuse");
+        ff_out_free(&o);
+        cat3(a, sizeof a, "path=", rd, "/../esc-dd.txt;content=x");
+        rc = ff_run("file.write", A(a), &o);
+        ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE") && sy_exists("/tmp/esc-dd.txt") != 1, "write-rundir-dotdot-refuse");
+        ff_out_free(&o);
+        cat3(f, sizeof f, outside, "/tmp", "");
+        ok = sy_mkdir_all(f, 0755) == 0 && setenv("CLAUDE_JOB_DIR", outside, 1) == 0;
+        cat3(a, sizeof a, "path=", outside, "/tmp/j.txt;content=j"); cat3(f, sizeof f, outside, "/tmp/j.txt", "");
+        rc = ff_run("file.write", A(a), &o);
+        ck(ok && rc == 0 && sy_exists(f) == 1, "write-job-dir-tmp-allowed");
+        ff_out_free(&o);
+        cat3(a, sizeof a, "path=", outside, "/j2.txt;content=j");
+        rc = ff_run("file.write", A(a), &o);
+        ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "write-job-dir-outside-tmp-refuse");
+        ff_out_free(&o);
+        unsetenv("CLAUDE_JOB_DIR");
+        cat3(a, sizeof a, "rm -rf ", rd, ""); (void)system(a); }
     ck(sy_write_file(t, "out\n", 4, 0644) == 0 && sy_symlink(t, P("flink")) == 0, "setup-symlink-file");
     rc = ff_run("file.write", A("path=flink;content=x"), &o);
     ck(rc != 0 && tx_eqz(o.err, "EOUTSIDE"), "write-through-symlink-file-refuse");

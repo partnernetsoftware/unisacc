@@ -5,6 +5,8 @@
  *
  * 夹具环境:HOME=$HOME/.cache/unisacc/check-guard-hook/home(夹具与期望里写作 @H@)、GUARD_REPO=/r/repo、CLAUDE_JOB_DIR=/j/job、
  * UNISACC_DOMAINS=@H@/domains.tsv(alice src/、bob exp/ 已过期、guardme mine/、alice mine/)、fb 列控制 native-fallback 标记、agent 列设 UNISACC_AGENT。
+ * 路径判定夹具(2026-11-16):/tmp/check-guard-hook.d(夹具与期望里写作 @T@)每次重建 lnk -> /r/repo、lnk2 -> lnk、etc -> /etc,
+ * 核仓外 /tmp、$CLAUDE_JOB_DIR、~/.cache 放行,指向仓内的符号链接与 .. 逃逸按仓内拒绝,/etc、~/.ssh 等仍拒绝。
  * 另核 DEVSVC-WARN 行数等于 hook-warn.tsv 新增行数。末行 CHECK_GUARD_HOOK cases=N failed=M,rc 0 当且仅当 M=0。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
@@ -109,6 +111,21 @@ static const fx_t FX[] = {
     {"warn-grep-long", 0, "", B("ls | grep a # 中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文")},
     {"nowarn-plain", 0, "", B("ls -la")},
     {"nowarn-gitlogx", 0, "", B("git logx; sleepy 3; x|heads")},
+#define F(t, p) "{\"tool_name\":\"" t "\",\"tool_input\":{\"file_path\":\"" p "\"}}"
+    {"write-tmp-own", 0, "", F("Write", "/tmp/mydir/p.patch")},
+    {"edit-jobtmp", 0, "", F("Edit", "/j/job/tmp/s.cx")},
+    {"write-cache", 0, "", F("Write", "@H@/.cache/x/y.txt")},
+    {"read-tmp-link-repo", 0, "", F("Read", "@T@/lnk/a.c")},
+    {"write-tmp-link-repo", 0, "", F("Write", "@T@/lnk/new/b.c")},
+    {"write-tmp-link-chain", 0, "", F("Write", "@T@/lnk2/c.c")},
+    {"edit-tmp-dotdot-repo", 0, "", F("Edit", "/tmp/" "../r/repo/a.c")},   /* split: pure input string, not a checkout path (outdep) */
+    {"edit-job-dotdot-repo", 0, "", F("Edit", "/j/job/tmp/../../../r/repo/x")},
+    {"read-tmp-dotdot-etc", 0, "", F("Read", "/tmp/" "../etc/shadow")},
+    {"read-etc", 0, "", F("Read", "/etc/passwd")},
+    {"write-ssh", 0, "", F("Write", "@H@/.ssh/config")},
+    {"edit-worktree", 0, "", F("Edit", "/r/repo/.claude/worktrees/v0.0.68/a.c")},
+    {"write-relative", 0, "", F("Write", "a.c")},
+    {"write-tmp-link-etc", 0, "", F("Write", "@T@/etc/hosts")},
 };
 #define NFX ((long)(sizeof FX / sizeof FX[0]))
 
@@ -116,7 +133,7 @@ static const ex_t EXP[] = {
     {2, "DEVSVC-ONLY 拒绝:仓内文件 /r/repo/a.c 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - --par N 的 file.read 节点)。\n"},  /* read-repo */
     {0, ""},  /* read-hostclaude */
     {0, ""},  /* read-tmpclaude */
-    {2, "DEVSVC-ONLY 拒绝:仓内文件 /tmp/x.c 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - --par N 的 file.read 节点)。\n"},  /* read-tmpcopy */
+    {0, ""},  /* read-tmpcopy */
     {0, ""},  /* read-fallback */
     {0, ""},  /* read-nopath */
     {0, ""},  /* read-nonstr */
@@ -194,7 +211,7 @@ static const ex_t EXP[] = {
     {0, ""},  /* sh-c-ok */
     {2, "GUARD-EDIT-V1 拒绝:python -c open(...,'w') 写文件。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...\n"},  /* python-c-open */
     {0, ""},  /* python-c-open-tmp */
-    {0, "DEVSVC-WARN(git-write):建议 sh ./unisacc.com tools/devsvc.cx -- git commit -m '说明' --whole 路径 --push\n"},  /* warn-git-write */
+    {0, "DEVSVC-WARN(git-write):建议 用 devsvc git commit/merge/add:sh ./unisacc.com tools/devsvc.cx -- git commit -m '说明' --whole 路径 --push\n"},  /* warn-git-write */
     {0, "DEVSVC-WARN(direct-cx):建议 sh ./unisacc.com tools/devsvc.cx -- x --par 1 --bg -- ... 加 wait,或 x --par 1 --tail N\n"},  /* warn-direct-cx */
     {0, "DEVSVC-WARN(git-read):建议 sh ./unisacc.com tools/devsvc.cx -- git log(status/diff/show 同)\nDEVSVC-WARN(pipe-trim):建议 用 devsvc x --par 1 --tail N 截短输出,不用管道 head/tail/grep\n"},  /* warn-read-pipe */
     {0, "DEVSVC-WARN(sleep-poll):建议 用 devsvc x --par 1 --bg 加 wait,不用 sleep 轮询\n"},  /* warn-sleep */
@@ -202,11 +219,27 @@ static const ex_t EXP[] = {
     {0, "DEVSVC-WARN(pipe-trim):建议 用 devsvc x --par 1 --tail N 截短输出,不用管道 head/tail/grep\n"},  /* warn-grep-long */
     {0, ""},  /* nowarn-plain */
     {0, ""},  /* nowarn-gitlogx */
+    {0, ""},  /* write-tmp-own */
+    {0, ""},  /* edit-jobtmp */
+    {0, ""},  /* write-cache */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 @T@/lnk/a.c 须经 devsvc 读取:sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM](或 flow - --par N 的 file.read 节点)。\n"},  /* read-tmp-link-repo */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 @T@/lnk/new/b.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* write-tmp-link-repo */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 @T@/lnk2/c.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* write-tmp-link-chain */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /tmp/../r/repo/a.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* edit-tmp-dotdot-repo */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /j/job/tmp/../../../r/repo/x 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* edit-job-dotdot-repo */
+    {2, "DEVSVC-ONLY 拒绝:/tmp/../etc/shadow 不在仓内也不在仓外放行区(/tmp、$CLAUDE_JOB_DIR、~/.cache、~/.claude)。仓外放行区内的临时文件可直接 Read/Edit/Write;其余路径不经原生工具改。\n"},  /* read-tmp-dotdot-etc */
+    {2, "DEVSVC-ONLY 拒绝:/etc/passwd 不在仓内也不在仓外放行区(/tmp、$CLAUDE_JOB_DIR、~/.cache、~/.claude)。仓外放行区内的临时文件可直接 Read/Edit/Write;其余路径不经原生工具改。\n"},  /* read-etc */
+    {2, "DEVSVC-ONLY 拒绝:@H@/.ssh/config 不在仓内也不在仓外放行区(/tmp、$CLAUDE_JOB_DIR、~/.cache、~/.claude)。仓外放行区内的临时文件可直接 Read/Edit/Write;其余路径不经原生工具改。\n"},  /* write-ssh */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 /r/repo/.claude/worktrees/v0.0.68/a.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* edit-worktree */
+    {2, "DEVSVC-ONLY 拒绝:仓内文件 a.c 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch @H@/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n"},  /* write-relative */
+    {2, "DEVSVC-ONLY 拒绝:@T@/etc/hosts 不在仓内也不在仓外放行区(/tmp、$CLAUDE_JOB_DIR、~/.cache、~/.claude)。仓外放行区内的临时文件可直接 Read/Edit/Write;其余路径不经原生工具改。\n"},  /* write-tmp-link-etc */
 };
 
 static long sl(const char *s) { long n = 0; while (s[n]) n++; return n; }
 static int sw(const char *s, const char *p) { while (*p) { if (*s != *p) return 0; s++; p++; } return 1; }
 static char H[1024];
+/* /tmp fixture dir: lnk -> /r/repo (dangling, still repo), lnk2 -> lnk (chain), etc -> /etc */
+static const char T[] = "/tmp/check-guard-hook.d";
 
 /* every FROM in S replaced by TO (heap) */
 static char *subst(const char *s, const char *from, const char *to) {
@@ -230,7 +263,7 @@ static int run_case(char **argv, long i, const char *dir, int *rc, char **err) {
     tx_snprintf(fb, sizeof fb, "%s/.cache/unisacc/devsvc/native-fallback", H);
     if (FX[i].fb) sy_write_file(fb, "", 0, 0644); else sy_unlink(fb);
     sy_setenv("UNISACC_AGENT", FX[i].agent, 1);
-    json = subst(FX[i].json, "@H@", H);
+    json = subst(subst(FX[i].json, "@H@", H), "@T@", T);
     tx_snprintf(pin, sizeof pin, "%s/in.json", dir);
     tx_snprintf(perr, sizeof perr, "%s/err.txt", dir);
     sy_write_file(pin, json, sl(json), 0644);
@@ -242,7 +275,7 @@ static int run_case(char **argv, long i, const char *dir, int *rc, char **err) {
     sy_close(fi); sy_close(fe);
     *rc = st.exited ? st.code : 128 + st.sig;
     if (sy_read_file(perr, &b, &n, 1 << 20) != 0) { *err = (char *)""; return 0; }
-    { char *s = (char *)mm_alloc(n + 1); if (n) mm_copy(s, n + 1, b, n); s[n] = 0; *err = subst(s, H, "@H@"); }
+    { char *s = (char *)mm_alloc(n + 1); if (n) mm_copy(s, n + 1, b, n); s[n] = 0; *err = subst(subst(s, H, "@H@"), T, "@T@"); }
     return 0;
 }
 
@@ -267,6 +300,13 @@ int main(int argc, char **argv) {
     sy_mkdir_all(dir, 0755);
     tx_snprintf(dir, sizeof dir, "%s/work", H);
     sy_mkdir_all(dir, 0755);
+    {
+        char l[1300];
+        sy_mkdir_all(T, 0755);
+        tx_snprintf(l, sizeof l, "%s/lnk", T); sy_unlink(l); sy_symlink("/r/repo", l);
+        tx_snprintf(l, sizeof l, "%s/lnk2", T); sy_unlink(l); sy_symlink("lnk", l);
+        tx_snprintf(l, sizeof l, "%s/etc", T); sy_unlink(l); sy_symlink("/etc", l);
+    }
     tx_snprintf(tab, sizeof tab, "%s/domains.tsv", H);
     {
         char buf[600];

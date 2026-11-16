@@ -102,6 +102,35 @@ static void case_keyed(void) {
        tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) < 0, "keyed-A-leaves-AB-row");
 }
 
+/* --keyed PATH given twice for one PATH (KEY1, then KEY2,KEY1 -- a repeated key): one entry with the union, so
+   both own rows land; the two rows someone else changed (one edited, one appended) stay out of HEAD and stay in
+   the work tree.  Before the fix each --keyed was its own entry and the private index kept the last blob only:
+   the KEY1 row was lost.  Then a key no line of the file carries refuses with exit 2, named, nothing committed. */
+static void case_multikey(void) {
+    char out[8192], script[4096];
+    if (cx_fmt(script, sizeof script,
+        "cd %s/clone && printf 'h\\nF1\\told\\nM1\\told\\nM2\\told\\ny\\n' > mk.tsv && git add mk.tsv && git commit -qm mk -- mk.tsv && "
+        "printf 'h\\nF1\\tnew\\nM1\\tnew\\nM2\\tnew\\ny\\nF2\\tadd\\n' > mk.tsv && "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m mk2 --keyed mk.tsv M1 --keyed mk.tsv M2,M1 > mk.out 2>&1; echo RC=$?; "
+        "echo SHOW; git show HEAD:mk.tsv; echo WORK; grep -c '^F' mk.tsv; echo END",
+        base, 0, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    {   long n = tx_len(out, sizeof out); int ok;   /* own-diff --emit decides where the kept foreign F1 line sits */
+        ok = tx_find(out, n, "RC=0\nSHOW\nh\n", 12) >= 0 && tx_find(out, n, "\nM1\tnew\n", 8) >= 0 && tx_find(out, n, "\nM2\tnew\n", 8) >= 0 &&
+             tx_find(out, n, "\nF1\told\n", 8) >= 0 && tx_find(out, n, "F1\tnew", 6) < 0 && tx_find(out, n, "F2\tadd", 6) < 0 &&
+             tx_find(out, n, "\nM1\told", 7) < 0 && tx_find(out, n, "\nWORK\n2\nEND", 11) >= 0;
+        if (!ok) sy_printf("DETAIL\t%s\n", out);
+        ck(ok, "multikey-same-path-union-dedup-foreign-kept"); }
+    if (cx_fmt(script, sizeof script,
+        "cd %s/clone && H0=$(git rev-parse HEAD) && printf 'M3\\tx\\n' >> mk.tsv && "
+        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m mk3 --keyed mk.tsv M3 --keyed mk.tsv ZZNOKEY > mk3.out 2>&1; echo RC=$?; "
+        "grep -c 'COMMIT_OWN_MISSING_KEY.path=mk.tsv.key=ZZNOKEY' mk3.out; grep -c 'COMMIT_OWN_FAIL.class=args' mk3.out; "
+        "[ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
+        base, 0, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    ck(tx_find(out, tx_len(out, sizeof out), "RC=2\n1\n1\nSAMEHEAD\nEND", 21) >= 0, "multikey-missing-key-refused-named");
+}
+
 /* --registered ID...: three manifests with suffixed batch ids (zzra1..3) and their coverage/packages rows plus a
    foreign row appended by someone else.  One call selects all nine rows and the three manifests, the foreign row
    stays out (and stays in the work tree), and reg-manifest --check --index -- the precommit gate's verdict --
@@ -270,6 +299,7 @@ int main(int argc, char **argv) {
     if (co_has(g, "symlink", 0)) case_symlink();
     if (co_has(g, "dirlink", 0)) case_dirlink();
     if (co_has(g, "keyed", 0)) case_keyed();
+    if (co_has(g, "multikey", 0)) case_multikey();
     if (co_has(g, "reg-a", 0)) case_registered(1);
     if (co_has(g, "reg-b", 0)) case_registered(2);
     if (co_has(g, "reg-c", 0)) case_registered(3);

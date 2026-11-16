@@ -283,6 +283,27 @@ static int ff_under(const char *root, const char *p) {
     return p[i] == '/';                             /* strictly below the root */
 }
 
+/* Run directories allowed besides the root (canonical paths only; P is already realpath'd, so a
+   link that escapes resolves elsewhere and is refused): /tmp/devsvc-* and /tmp/flow-* run dirs
+   (a file strictly inside the first component), and anything strictly below realpath($CLAUDE_JOB_DIR)/tmp. */
+static int ff_rundir_ok(const char *p) {
+    static const char *pre[] = {"/tmp/devsvc-", "/tmp/flow-", 0};
+    const char *jd = getenv("CLAUDE_JOB_DIR");
+    int k;
+    for (k = 0; pre[k]; k++) {
+        long n = tx_len(pre[k], 64), i;
+        if (strncmp(p, pre[k], (size_t)n)) continue;
+        for (i = n; p[i] && p[i] != '/'; i++) if (p[i] == '.' && p[i + 1] == '.') return 0;
+        if (i > n && p[i] == '/' && p[i + 1]) return 1;
+    }
+    if (jd && jd[0] == '/') {
+        char t[FF_PATH], rt[FF_PATH];
+        t[0] = 0; ff_cat(t, FF_PATH, jd); ff_cat(t, FF_PATH, "/tmp");
+        if (sy_realpath(t, rt, FF_PATH) >= 0 && ff_under(rt, p)) return 1;
+    }
+    return 0;
+}
+
 static int ff_has_dotdot(const char *p) {
     long i = 0;
     while (p[i]) {
@@ -326,7 +347,7 @@ static int ff_target(const char *root, const char *full, int mkdir, char *target
             if (rc >= 0) break;
             if (rc != -ENOENT || an <= 1) return ff_os(o, rc, "resolve parent", anc);
         }
-        if (!ff_under(root, ranc) && !tx_eqz(root, ranc)) return ff_fail(o, "EOUTSIDE", "path is outside the root", full);
+        if (!ff_under(root, ranc) && !tx_eqz(root, ranc) && !ff_rundir_ok(ranc)) return ff_fail(o, "EOUTSIDE", "path is outside the root", full);
         rc = sy_mkdir_all(dir, 0755);
         if (rc != 0) return ff_os(o, rc, "mkdir", dir);
         rc = sy_realpath(dir, rdir, FF_PATH);
@@ -346,7 +367,7 @@ static int ff_target(const char *root, const char *full, int mkdir, char *target
         target[0] = 0;
         ff_cat(target, FF_PATH, real);
     } else if (rc != 0 && rc != -ENOENT) return ff_os(o, rc, "stat", target);
-    if (!ff_under(root, target)) return ff_fail(o, "EOUTSIDE", "path is outside the root", target);
+    if (!ff_under(root, target) && !ff_rundir_ok(target)) return ff_fail(o, "EOUTSIDE", "path is outside the root", target);
     return 0;
 }
 

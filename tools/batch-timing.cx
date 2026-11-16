@@ -1,0 +1,242 @@
+/* tools/batch-timing.cx -- 批次实测耗时表的只读报告与种子导入(plans/devsvc-speedup-2026-11-16.md P9).
+ *
+ * 表: 默认 $HOME/.cache/unisacc/batch-times.tsv,环境变量 UNISACC_BATCH_TIMES 覆盖(值 off 表示不记).
+ *     tests/run-batch.cx 每次实跑一个批次后追加一行; 只记观测,不记结论,任何门不得读它判通过或跳过执行.
+ *     行: ts_s id status total_ms run_ms kit load1 src   ('#' 开头为注释)
+ *
+ *   sh ./unisacc.com tools/batch-timing.cx -- report [--table P] [--near-ms N] [--target-ms N]
+ *       每个有实测的批一行 BT_ROW; 中位或最大 > near(默认 40000)另打 BT_NEAR 与 BT_SPLIT(建议份数
+ *       = ceil(max/target),target 默认 25000); 实测最大超过预算列打 BT_OVER_BUDGET; 末行 BT_SUMMARY.
+ *   sh ./unisacc.com tools/batch-timing.cx -- split ID [--table P] [--near-ms N] [--target-ms N]
+ *       列出与 ID 同一检查源的全部批(各 --cases 分组)及其实测,对 ID 给出拆分建议; 只输出,不改表.
+ *   sh ./unisacc.com tools/batch-timing.cx -- max ID [--table P]
+ *       BT_MAX id= n= max_ms=;超过 45000 另打与 register 同文的 WARN 行(登记贴线告警的同一判据).
+ *   sh ./unisacc.com tools/batch-timing.cx -- import [--table P] FILE...
+ *       导入 affected 的输出(经 devsvc wait 落盘的文本): 单批调用记该次 run_ms(src=import-single);
+ *       多批调用无逐批耗时,按 run_ms*jobs/批数 记均摊(src=import-share,只作参考);
+ *       DEFERRED ... killed-at-deadline 记 status=KILLED, total_ms 取 max(run_ms,54000)(下界).
+ * 批次登记表读 UNISACC_TABLES(默认 tests)下的 batches.tsv. rc: 0 正常, 2 用法或读表失败. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXROW 20000
+#define MAXID 4096
+#define WARN_MS 45000
+
+typedef struct { char id[128]; long ms[512]; int n, killed, budget, have_budget; char source[512], args[512]; } agg_t;
+static agg_t *ag;
+static int nag;
+static char table[4400];
+static long near_ms = 40000, target_ms = 25000;
+
+static int die2(const char *m) { sy_eprintf("batch-timing: REFUSE %s\n", m); return 2; }
+
+static void table_default(void) {
+    const char *e = sy_env("UNISACC_BATCH_TIMES"), *h = sy_env("HOME");
+    if (e && *e) { if (cx_fmt(table, sizeof table, "%s", e)) table[0] = 0; return; }
+    if (cx_fmt(table, sizeof table, "%s/.cache/unisacc/batch-times.tsv", h && *h ? h : "/tmp")) table[0] = 0;
+}
+
+static long num(const char *s, long n) {
+    long v = 0, i = 0; int d = 0;
+    if (n <= 0) return -1;
+    for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) { v = v * 10 + (s[i] - '0'); d = 1; }
+    return d && i == n ? v : -1;
+}
+
+static agg_t *find(const char *id, long idn, int make) {
+    int i;
+    for (i = 0; i < nag; i++) if (tx_len(ag[i].id, 128) == idn && mm_same(ag[i].id, id, idn)) return &ag[i];
+    if (!make || nag >= MAXID || idn <= 0 || idn >= 128) return 0;
+    mm_copy(ag[nag].id, 128, id, idn); ag[nag].id[idn] = 0;
+    return &ag[nag++];
+}
+
+/* 读耗时表; 缺表等于空表 */
+static int load_table(void) {
+    size_t n = 0; char *s; long at = 0, rows = 0;
+    s = cx_read(table, &n);
+    if (!s) return 0;
+    while (at < (long)n) {
+        long e = at, off, len, ioff, ilen, toff, tlen, soff, slen;
+        while (e < (long)n && s[e] != '\n') e++;
+        if (e > at && s[at] != '#' && tx_fields(s + at, e - at, '\t') >= 7 &&
+            !tx_field(s + at, e - at, '\t', 1, &ioff, &ilen) && !tx_field(s + at, e - at, '\t', 2, &soff, &slen) &&
+            !tx_field(s + at, e - at, '\t', 3, &toff, &tlen)) {
+            long ms = num(s + at + toff, tlen);
+            agg_t *a = ms >= 0 ? find(s + at + ioff, ilen, 1) : 0;
+            if (a) {
+                if (a->n < 512) a->ms[a->n++] = ms;
+                if (slen == 6 && mm_same(s + at + soff, "KILLED", 6)) a->killed++;
+                rows++;
+            }
+            (void)off; (void)len;
+        }
+        at = e + 1;
+    }
+    mm_free(s);
+    return (int)rows;
+}
+
+/* 批次登记表: 预算、源、参数 */
+static void load_batches(void) {
+    const char *td = sy_env("UNISACC_TABLES"); char p[4400]; size_t n = 0; char *s; long at = 0;
+    if (cx_fmt(p, sizeof p, "%s/batches.tsv", td && *td ? td : "tests")) return;
+    s = cx_read(p, &n);
+    if (!s) return;
+    while (at < (long)n) {
+        long e = at, ioff, ilen, boff, blen, soff, slen, aoff, alen;
+        while (e < (long)n && s[e] != '\n') e++;
+        if (e > at && !tx_field(s + at, e - at, '\t', 0, &ioff, &ilen) && !tx_field(s + at, e - at, '\t', 3, &soff, &slen) &&
+            !tx_field(s + at, e - at, '\t', 6, &boff, &blen) && !tx_field(s + at, e - at, '\t', 9, &aoff, &alen)) {
+            agg_t *a = find(s + at + ioff, ilen, 1);
+            long b = num(s + at + boff, blen);
+            if (a && b >= 0) {
+                a->budget = (int)b; a->have_budget = 1;
+                if (slen < 511) { mm_copy(a->source, 512, s + at + soff, slen); a->source[slen] = 0; }
+                if (alen < 511) { mm_copy(a->args, 512, s + at + aoff, alen); a->args[alen] = 0; }
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(s);
+}
+
+static void sortl(long *v, int n) { int i, j; for (i = 1; i < n; i++) { long x = v[i]; for (j = i; j > 0 && v[j - 1] > x; j--) v[j] = v[j - 1]; v[j] = x; } }
+static long med(agg_t *a) { long t[512]; int i; if (!a->n) return -1; for (i = 0; i < a->n; i++) t[i] = a->ms[i]; sortl(t, a->n); return t[a->n / 2]; }
+static long mx(agg_t *a) { long m = -1; int i; for (i = 0; i < a->n; i++) if (a->ms[i] > m) m = a->ms[i]; return m; }
+static int parts(long m) { int k = (int)((m + target_ms - 1) / target_ms); return k < 2 ? 2 : k; }
+
+static void row(const char *tag, agg_t *a) {
+    sy_printf("%s\tid=%s\tn=%d\tmed_ms=%ld\tmax_ms=%ld\tkilled=%d\tbudget_s=", tag, a->id, a->n, med(a), mx(a), a->killed);
+    if (a->have_budget) sy_printf("%d\n", a->budget); else sy_printf("UNREGISTERED\n");
+}
+
+static int report(void) {
+    int i, rows = load_table(), ids = 0, near = 0, over = 0;
+    load_batches();
+    for (i = 0; i < nag; i++) {
+        agg_t *a = &ag[i]; long m, d;
+        if (!a->n) continue;
+        ids++; m = mx(a); d = med(a);
+        row("BT_ROW", a);
+        if (a->have_budget && m > (long)a->budget * 1000) { over++; sy_printf("BT_OVER_BUDGET\tid=%s\tbudget_s=%d\tmax_ms=%ld\tover_ms=%ld\n", a->id, a->budget, m, m - (long)a->budget * 1000); }
+        if (m > near_ms || d > near_ms) {
+            near++; row("BT_NEAR", a);
+            sy_printf("BT_SPLIT\tid=%s\tsuggest_parts=%d\ttarget_ms=%ld\thint=tools/batch-timing.cx split %s\n", a->id, parts(m), target_ms, a->id);
+        }
+    }
+    sy_printf("BT_SUMMARY\trows=%d\tids=%d\tnear=%d\tover_budget=%d\tnear_ms=%ld\ttable=%s\tscope=observation-only-no-verdict\n", rows, ids, near, over, near_ms, table);
+    return 0;
+}
+
+static int split(const char *id) {
+    agg_t *t; int i, groups = 0;
+    load_table(); load_batches();
+    t = find(id, tx_len(id, 128), 0);
+    if (!t || !t->have_budget) { sy_printf("BT_SPLIT_UNKNOWN\tid=%s\treason=not-registered\n", id); return 2; }
+    for (i = 0; i < nag; i++) {
+        agg_t *a = &ag[i];
+        if (!a->have_budget || !tx_eqz(a->source, t->source)) continue;
+        groups++;
+        sy_printf("BT_GROUP\tid=%s\targs=%s\tn=%d\tmed_ms=%ld\tmax_ms=%ld\tkilled=%d\tbudget_s=%d\n", a->id, a->args, a->n, med(a), mx(a), a->killed, a->budget);
+    }
+    if (!t->n) { sy_printf("BT_SPLIT_PLAN\tid=%s\tverdict=UNMEASURED\tgroups=%d\n", id, groups); return 0; }
+    if (mx(t) <= near_ms && med(t) <= near_ms) { sy_printf("BT_SPLIT_PLAN\tid=%s\tverdict=NO_SPLIT\tmax_ms=%ld\tgroups=%d\n", id, mx(t), groups); return 0; }
+    sy_printf("BT_SPLIT_PLAN\tid=%s\tverdict=SPLIT\tparts=%d\tmax_ms=%ld\ttarget_ms=%ld\tsource=%s\targs=%s\tgroups=%d\tper_case_ms=UNMEASURED\n",
+              id, parts(mx(t)), mx(t), target_ms, t->source, t->args, groups);
+    for (i = 1; i <= parts(mx(t)); i++)
+        sy_printf("BT_SPLIT_DRAFT\t%s-p%d\tsource=%s\targs=%s 的用例子集 %d/%d(由检查的分组表按用例实测装箱,不自动改表)\n", id, i, t->source, t->args, i, parts(mx(t)));
+    return 0;
+}
+
+static int maxcmd(const char *id) {
+    agg_t *a; long m;
+    load_table();
+    a = find(id, tx_len(id, 128), 0);
+    m = a ? mx(a) : -1;
+    sy_printf("BT_MAX\tid=%s\tn=%d\tmax_ms=%ld\n", id, a ? a->n : 0, m);
+    if (m > WARN_MS) sy_printf("REGISTER\tid=%s\tWARN=near-limit\tmax_ms=%ld\tthreshold_ms=%d\thint=tools/batch-timing.cx split %s\n", id, m, WARN_MS, id);
+    return 0;
+}
+
+static int append(const char *id, long idn, const char *st, long stn, long ms, long run, const char *src) {
+    char line[512]; int k;
+    k = cx_fmt(line, sizeof line, "%ld\t%.*s\t%.*s\t%ld\t%ld\t-\t-\t%s\n", sy_wall_s(), (int)idn, id, (int)stn, st, ms, run, src);
+    if (k) return -1;
+    return sy_append_file(table, line, tx_len(line, 512), 0644);
+}
+
+static long kv(const char *s, long n, const char *key) {
+    long kn = tx_len(key, 64), i = tx_find(s, n, key, kn), v = 0; int d = 0;
+    if (i < 0) return -1;
+    for (i += kn; i < n && s[i] >= '0' && s[i] <= '9'; i++) { v = v * 10 + (s[i] - '0'); d = 1; }
+    return d ? v : -1;
+}
+
+static int import1(const char *path) {
+    size_t n = 0; char *s = cx_read(path, &n); long at, run, jobs, nb = 0, wrote = 0;
+    if (!s) { sy_eprintf("batch-timing: cannot read %s\n", path); return -1; }
+    run = kv(s, (long)n, "\trun_ms=");
+    jobs = kv(s, (long)n, "\tjobs=");
+    if (jobs < 1) jobs = 1;
+    for (at = 0; at < (long)n;) {
+        long e = at; while (e < (long)n && s[e] != '\n') e++;
+        if (tx_prefix(s + at, e - at, "BATCH_RUN\t", 10) || (tx_prefix(s + at, e - at, "DEFERRED\t", 9) && tx_find(s + at, e - at, "killed-at-deadline", 18) >= 0)) nb++;
+        at = e + 1;
+    }
+    if (run < 0 || !nb) { mm_free(s); sy_printf("BT_IMPORT\tfile=%s\tbatches=%ld\trows=0\treason=no-run_ms-or-no-batch\n", path, nb); return 0; }
+    for (at = 0; at < (long)n;) {
+        long e = at, L; const char *l = s + at;
+        while (e < (long)n && s[e] != '\n') e++;
+        L = e - at;
+        if (tx_prefix(l, L, "BATCH_RUN\tid=", 13)) {
+            long i0 = 13, i1 = i0, s0, s1;
+            while (i1 < L && l[i1] != '\t') i1++;
+            s0 = tx_find(l, L, "\tstatus=", 8); s1 = s0 < 0 ? -1 : s0 + 8;
+            if (s1 > 0) { long s2 = s1; while (s2 < L && l[s2] != '\t') s2++;
+                if (!append(l + i0, i1 - i0, l + s1, s2 - s1, nb == 1 ? run : run * jobs / nb, run, nb == 1 ? "import-single" : "import-share")) wrote++; }
+        } else if (tx_prefix(l, L, "DEFERRED\t", 9) && tx_find(l, L, "killed-at-deadline", 18) >= 0) {
+            long i0 = 9, i1 = i0; while (i1 < L && l[i1] != '\t') i1++;
+            if (!append(l + i0, i1 - i0, "KILLED", 6, run > 54000 ? run : 54000, run, nb == 1 ? "import-single" : "import-share")) wrote++;
+        }
+        at = e + 1;
+    }
+    mm_free(s);
+    sy_printf("BT_IMPORT\tfile=%s\tbatches=%ld\trows=%ld\tjobs=%ld\trun_ms=%ld\n", path, nb, wrote, jobs, run);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int i, w = 1; const char *cmd;
+    table_default();
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--table") || tx_eqz(argv[i], "--near-ms") || tx_eqz(argv[i], "--target-ms")) {
+            if (i + 1 >= argc) return die2("option needs a value");
+            if (tx_eqz(argv[i], "--table")) { if (cx_fmt(table, sizeof table, "%s", argv[i + 1])) return die2("table path"); }
+            else { long v = num(argv[i + 1], tx_len(argv[i + 1], 32)); if (v <= 0) return die2("bad ms value"); if (argv[i][2] == 'n') near_ms = v; else target_ms = v; }
+            i++; continue;
+        }
+        argv[w++] = argv[i];
+    }
+    argc = w;
+    if (!table[0]) return die2("table path");
+    if (argc < 2) return die2("usage: report|split ID|max ID|import FILE...");
+    ag = mm_zalloc(sizeof(agg_t) * MAXID);
+    if (!ag) return die2("oom");
+    cmd = argv[1];
+    if (tx_eqz(cmd, "report")) return report();
+    if (tx_eqz(cmd, "split") && argc == 3) return split(argv[2]);
+    if (tx_eqz(cmd, "max") && argc == 3) return maxcmd(argv[2]);
+    if (tx_eqz(cmd, "import") && argc >= 3) {
+        if (tx_eqz(table, "off")) return die2("table is off");
+        { int rc = 0; for (i = 2; i < argc; i++) if (import1(argv[i])) rc = 2; return rc; }
+    }
+    return die2("usage: report|split ID|max ID|import FILE...");
+}
