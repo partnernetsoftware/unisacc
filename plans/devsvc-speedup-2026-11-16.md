@@ -238,3 +238,26 @@ A4、A5、A6、A7 的方案分别并入 P1(提交即派生)、P9(实测耗时表
 (6) 宿主钩子输入是否带子代理标识没有核实,P11 第 (4) 步以此为条件。
 (7) 本轮的一次性分析脚本在 /tmp/rv(ev.cx、hw.cx、te.cx、bt.cx、b55.cx),未入库;写的时候没有遇到缺库能力(用了隐式运行库的 fopen、fgets、strtol、strstr)。
 (8) 新工具名 daily-ready、daily-flow、release-flow、batch-split 动手前须按规则先跑 `git log --all --oneline -- tools/名字` 核历史;本轮只核了当前树里不存在。
+
+## 10 每次调用固定开销的分段实测与启动桩原型(2026-11-16 追加,未入库代码)
+
+口径:本机 load1 2.5 至 3.5,每项 10 至 12 次,毫秒,写作 中位/最小。
+
+(1) 现状(HEAD 0dc640707a 的 tools/devsvc.cx):f read README.md 1 1 为 178/172;x --par 1 -- true 为 187/183;git status 为 210/199。
+(2) 分段:sh 加 unisacc.com 自身启动 5;固定执行体直调 f read 5、x 11、git status 38(其中 git 自身 32);
+    启动器自身逻辑(fastgit、备忘、产品 sha 备忘、执行体 1.2 MB 整读加 sha、写配置表)约 14(strace 时间线),其中执行体 sha 约 4 至 7,配置表每次原子写含一次 fsync。
+    其余约 120 全在产品即编即跑命中路:启动器 main 开始之前,产品把 use 闭包(time、fs、posix、proc、env、sha、osx、sysx.process、bytes、heap 加被带入的 sysnums、reaper)全部源文件读三遍、CXIF 读两遍,再装载 52 万字节缓存映像。
+(3) 闭包大小与命中开销(空 main,中位):无 use 为 7;sys.env 为 9;sys.sha 为 9;sys.fs 为 22;sys.posix 为 64(带入 29 KB 的 sysnums);sys.proc 为 91;启动器现有十条 use 为 120。
+    结论:最大的一段不是 git 调用、不是与服务通信,而是启动器自己的 use 闭包在产品命中路上的重复扫描;候选 (1)(2)(4) 在启动器内已基本做完(fastgit、备忘),剩余可减不足 10。
+(4) 启动桩原型(/tmp/dvx/devsvc-stub-prototype.cx,未入库):只 use time、fs、env、sha、bytes、heap;只走命中路(fastgit 读出提交号、备忘命中、产品 sha 备忘、执行体 sha 相符),
+    键算法与现行逐字相同(同一段源码按行段拼入);任何不命中(--dev、DEVSVC_DEV、DEVSVC_REPO_TABLE、备忘缺、执行体缺或 sha 不符、非常规 git 布局)一律 exec 完整启动器,不自己起 git、不自己构造。
+    配置表内容相同时不重写(省一次 fsync)。子进程用 fork、execv、waitpid 轮询,保留 3700 秒总上限与工单时钟。
+    实测同机同负载:f read 62/60;x 70/68;git status 94/90。即三项各减约 115。
+    已实跑的行为对照:退出码透传(x 内 exit 7 得 rc 7;f read 不存在路径 rc 1)、--dev 回退、DV_PIN_DIR 指向空目录时回退并由完整启动器冷构造,输出与现行一致。
+(5) 没做完、因此没提交的部分:
+    (a) 落库需要把现行完整启动器改名为新文件(暂名 tools/devsvc-launch.cx,动手前按规则核名字历史)、tools/devsvc.cx 换成桩,并让 check-devsvc 各组与 tools-compile 清单跟上;18 个 devsvc 批次每个上限 55 秒、并发 2,本轮时限内跑不完,未实跑不记 PASS。
+    (b) tools/devsvc.cx 按工作副本即编即跑,在共享检出里改它立即影响所有窗口,必须一次原子换入并先在 /tmp 副本上把全部批次跑绿。
+    (c) 原型在 fastgit 失败(环境带 GIT_DIR 等、reftable)时以 cwd 当根找完整启动器,从子目录调用会找不到;落库前要补一次有界的 git rev-parse --show-toplevel。
+    (d) 原型的等待是轮询(前 20 毫秒每 0.1 毫秒,之后 2 毫秒,2 秒后 20 毫秒),超时只杀直接子进程;现行 sy_proc_run 的超时清理范围要对齐后才能替换。
+    (e) 桩直接用隐式运行库的 fork、execv、waitpid、usleep、kill,落库前须过 ratchets(cxlibc、cxraw)。
+(6) 150 以下的目标桩已达到(62 至 94);要再往下只能改产品:即编即跑命中路对闭包的三遍读与缓存映像装载属 src/ 与 cx/driver(X1),不在 devsvc 写域,建议排进产品迭代:命中判定只读一遍闭包或按 (dev, ino, size, mtime, ctime) 走备忘,届时所有 .cx 工具同时受益(十条 use 的工具每次约省 100)。

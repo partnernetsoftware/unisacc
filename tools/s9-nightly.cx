@@ -50,6 +50,7 @@
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.s9map
 #pragma unisa use cxlib.s9families
+#pragma unisa use cxlib.s9sched
 #pragma unisa use cxlib.testplan
 #pragma unisa use cxlib.allsession
 #pragma unisa use cxlib.kernelinputs
@@ -320,7 +321,7 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
    files (prepare NAME writes its own artifact, aggregate --part K N its own agg-part-K-N), so only starting
    and draining is serial.  A child not yet drained blocks on write when its 64 KiB pipe fills; every phase's
    per-child output is a few lines, far below that. */
-typedef struct { const char *name; int pid, fd, deadline_s; long t0; np_buf out; } ParJob;
+/* ParJob 的定义在 cxlib.s9sched(调度层与本层共用的子进程句柄)。 */
 /* NP_BUF, not NP_RESULT: np_free takes the latter and would run off the end of this struct. */
 static void par_free(ParJob *j) { free(j->out.p); j->out.p = 0; j->out.n = j->out.cap = 0; }
 /* DEADLINE_S is the child's own bound, enforced by par_drain (kill its group and rc 124): it is carried here so
@@ -1252,132 +1253,32 @@ static int ri_controls(void){
  if(!bad){char *v[]={"rm","-rf","--",dir,0};np_result r={0};if(np_run(v,0,0,5,&r,why,sizeof why)||r.rc)return 2;np_free(&r);}
  printf("RI_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
 }
-/* 并发步(--phase steps --par N):一个进程内维持至多 N 个 `driver step ROOT RUN --slice LEAF` 子进程。
-   冲突域:会话级共享写只有认领(写栅栏核对加 START 记录),由 driver 在 RUN/lock 下串行完成;此后每片只写自己的
-   slice-K 目录与 .start/.done/.log,互不相交,所以片间可并行。写栅栏(alone 片须独占)、heavy 上限、身份与冻结核验
-   仍在 driver 内逐次执行,本池只是不去发注定被拒的片;被拒(STEP_NO_PROGRESS,rc 4)的片未被认领,可重发,每片至多 3 次。
-   每片授予 = need + s9.slice.startup + s9.sup.shave + s9.epoch.margin(与 s9-shards-flow 同式),超过授予加 s9.slice.close 即杀其进程组记 rc 124。
-   总墙钟上限 = max-steps 乘 step-s:剩余不足一片授予时不再发片,返回 PENDING。完成结论不在这里下:池空后仍由串行 step 的 STEP_FINISHED 行作唯一出口。 */
-#define PS_MAX 2048
-typedef struct { char leaf[80]; int alone, heavy, need, state, tries; ParJob j; } PsRow; /* state: 0 待发 1 在跑 2 DONE 已记 3 未记 4 放弃 */
-static PsRow ps_rows[PS_MAX];
-static int ps_n, steps_par_n;
-static char ps_buf[262144];
-static int ps_field(const char *line, const char *key) { const char *q = strstr(line, key); return q ? atoi(q + strlen(key)) : -1; }
-static int ps_has(const char *s, size_t n, const char *needle) {
-    size_t z = strlen(needle), i;
-    if (!s) return 0;
-    for (i = 0; i + z <= n; i++) if (!strncmp(s + i, needle, z)) return 1;
-    return 0;
-}
-/* 待跑片清单:与 aggregate 同一 pending 判定(driver pending)。行数与汇总行不符即拒。 */
-static int ps_list(const char *run) {
-    int rc, summary = -1;
-    char *s, *e;
-    ps_n = 0;
+/* 并发步(--phase steps --par N):调度(发片顺序、并发度、授予、重发、打印)在 tools/cxlib/s9sched.cx,不进镜像身份。
+   判定层只给它两个回调与四个限值:列待跑片(driver pending)与起片(par_spawn)都先经 native_exec 逐次核镜像身份,
+   所以调度层改了也绕不开身份核验;完成结论不在调度层下,池空后仍由下方串行 step 的 STEP_FINISHED 行作唯一出口。
+   sched_sha 是调度层源的内容摘要,只留痕(S9_STEPS_PAR 行末),不参与任何收据与身份比对。 */
+static int steps_par_n;
+static int sched_list(const char *run, char *buf, int cap) {
+    int rc;
     step_s_cur = L_I("s9.cmd");
-    rc = invoke("pending", root, run, 0, L_I("s9.cmd") + 5, ps_buf, sizeof ps_buf);
+    rc = invoke("pending", root, run, 0, L_I("s9.cmd") + 5, buf, cap);
     step_s_cur = 0;
-    if (rc) return -1;
-    for (s = ps_buf; *s; s = e) {
-        e = strchr(s, '\n');
-        if (e) *e++ = 0; else e = s + strlen(s);
-        if (!strncmp(s, "S9_PENDING\tslice=", 17)) {
-            PsRow *x;
-            size_t z = 0;
-            const char *q = s + 17;
-            if (ps_n == PS_MAX) return -1;
-            x = &ps_rows[ps_n];
-            while (q[z] && q[z] != '\t' && z + 1 < sizeof x->leaf) { x->leaf[z] = q[z]; z++; }
-            x->leaf[z] = 0;
-            if (!z || q[z] != '\t') return -1;
-            x->alone = ps_field(q, "\talone="); x->heavy = ps_field(q, "\theavy="); x->need = ps_field(q, "\tneed=");
-            x->state = 0; x->tries = 0;
-            if (x->alone < 0 || x->heavy < 0 || x->need < 1) return -1;
-            ps_n++;
-        } else if (!strncmp(s, "S9_PENDING_SUMMARY\tpending=", 27)) summary = atoi(s + 27);
-    }
-    return summary == ps_n ? ps_n : -1;
+    return rc;
 }
-/* 0 仍在跑;1 已结束(*rc 为退出码,超时 124,等待出错 -1),输出在 j->out。只在子进程结束后读管道:每片输出只有几行。 */
-static int ps_poll(ParJob *j, int *rc) {
-    char chunk[4096];
-    int ex = 0, code = 0, sig = 0, w = sy_wait_status(j->pid, 1, &ex, &code, &sig);
-    if (w == 0) {
-        if (sy_now_ms() - j->t0 <= (long)j->deadline_s * 1000L) return 0;
-        (void)sy_kill(j->pid);
-        sy_close(j->fd); j->fd = -1; j->pid = 0;
-        *rc = 124;
-        return 1;
-    }
-    if (w < 0) { sy_close(j->fd); j->fd = -1; j->pid = 0; *rc = -1; return 1; }
-    for (;;) {
-        long r = sy_read(j->fd, chunk, sizeof chunk);
-        if (r > 0) { np_put(&j->out, chunk, (size_t)r); continue; }
-        if (r == -EINTR || r == -EAGAIN) continue;
-        break;
-    }
-    sy_close(j->fd); j->fd = -1;
-    *rc = ex ? code : 128 + sig;
-    return 1;
+static int sched_spawn(ParJob *j, const char *run, const char *leaf, int deadline_s) {
+    return par_spawn(j, "step", root, run, "--slice", leaf, 0, deadline_s);
 }
-/* 返回 0 池已空(待串行 step 确认完成);1 失败;3 墙钟用完仍有待发片;4 有片发不出去。 */
 static int steps_par(const char *run, int par, long wall_ms) {
-    long t0 = sy_now_ms(), t_end = t0 + wall_ms;
-    int hcap = (int)lm_get("s9.heavy.width", 0), extra = (int)lm_get("s9.slice.startup", 1) + L_I("s9.sup.shave") + L_I("s9.epoch.margin");
-    int closes = L_I("s9.slice.close"), outer = L_I("s9.outer");
-    int n = ps_list(run), active = 0, hact = 0, wact = 0, launched = 0, done = 0, noprog = 0, unrec = 0, bad = 0, late = 0, peak = 0, i;
-    if (n < 0) { fprintf(stderr, "s9-nightly: pending listing refused\n"); last_ms = sy_now_ms() - t0; return 1; }
-    for (;;) {
-        late = 0;
-        for (i = 0; i < n && !bad; i++) {
-            PsRow *x = &ps_rows[i];
-            char env[96];
-            sy_ts_t t;
-            int grant;
-            if (x->state) continue;
-            if (active >= par || wact) break;
-            if (x->alone && active) continue;
-            if (x->heavy && hcap >= 1 && hact >= hcap) continue;
-            grant = x->need + extra;
-            if (grant + closes > outer) { x->state = 4; noprog++; printf("S9_STEP_PAR\tslice=%s\tresult=GRANT_OVER_OUTER\tgrant=%d\n", x->leaf, grant); continue; }
-            if (sy_now_ms() + (long)(grant + closes) * 1000L > t_end) { late++; continue; }
-            if (sy_mono(&t) || cx_fmt(env, sizeof env, "%.9f", (double)t.sec + (double)t.nsec / 1e9 + grant) || sy_setenv("UNISACC_BOUND_DEADLINE_MONO", env, 1)) die("deadline-env", 0);
-            if (par_spawn(&x->j, "step", root, run, "--slice", x->leaf, 0, grant + closes)) { bad++; printf("S9_STEP_PAR\tslice=%s\tresult=CANNOT_START\n", x->leaf); break; }
-            x->state = 1; x->tries++; active++; hact += x->heavy; wact += x->alone; launched++;
-            if (active > peak) peak = active;
-        }
-        if (!active) break;
-        (void)sy_sleep_ms(50);
-        for (i = 0; i < n; i++) {
-            PsRow *x = &ps_rows[i];
-            char mark[200];
-            const char *res;
-            int rc = 0;
-            if (x->state != 1 || !ps_poll(&x->j, &rc)) continue;
-            active--; hact -= x->heavy; wact -= x->alone;
-            if (cx_fmt(mark, sizeof mark, "S9\tSTEP_SLICE\tslice=%s\tstatus=", x->leaf)) die("format-bound", 0);
-            {
-                size_t mz = strlen(mark), on = x->j.out.n, k;
-                const char *o = x->j.out.p;
-                int rec = 0;
-                for (k = 0; o && k + mz <= on; k++) if (!strncmp(o + k, mark, mz) && (ps_has(o + k + mz, on - k - mz < 14 ? on - k - mz : 14, "DONE_RECORDED\n") || ps_has(o + k + mz, on - k - mz < 13 ? on - k - mz : 13, "ALREADY_DONE\n"))) rec = 1;
-                if (rec) { x->state = 2; done++; res = "DONE_RECORDED"; }
-                else if (rc == 4 || ps_has(o, on, "S9\tSTEP_NO_PROGRESS")) {
-                    if (x->tries < 3) { x->state = 0; res = "NO_PROGRESS_REQUEUED"; }
-                    else { x->state = 4; noprog++; res = "NO_PROGRESS"; }
-                }
-                else if (rc == 0 || rc == 3) { x->state = 3; unrec++; res = "NOT_RECORDED"; }
-                else { x->state = 3; bad++; res = "FAIL"; if (o && on) fwrite(o, 1, on, stderr); }
-            }
-            printf("S9_STEP_PAR\tslice=%s\tresult=%s\trc=%d\tms=%ld\ttry=%d\n", x->leaf, res, rc, sy_now_ms() - x->j.t0, x->tries);
-            par_free(&x->j);
-        }
-    }
-    (void)sy_unsetenv("UNISACC_BOUND_DEADLINE_MONO");
-    last_ms = sy_now_ms() - t0;
-    printf("S9_STEPS_PAR\tpar=%d\tpeak=%d\tpending_at_start=%d\tlaunched=%d\tdone=%d\tno_progress=%d\tnot_recorded=%d\tfailed=%d\tnot_launched=%d\twall_ms=%ld\n", par, peak, n, launched, done, noprog, unrec, bad, late, last_ms);
-    return bad ? 1 : noprog ? 4 : late ? 3 : 0;
+    ss_ops o; char sha[65], w2[256]; long ms = 0; int rc;
+    const char *sp = sy_env("UNISACC_S9_SCHED_SOURCE");
+    if (as_sha_file(sp && *sp ? sp : "tools/cxlib/s9sched.cx", 1, sha, 0, w2, sizeof w2) && cx_fmt(sha, sizeof sha, "-")) die("sched-sha", 0);
+    o.hcap = (int)lm_get("s9.heavy.width", 0);
+    o.extra = (int)lm_get("s9.slice.startup", 1) + L_I("s9.sup.shave") + L_I("s9.epoch.margin");
+    o.closes = L_I("s9.slice.close"); o.outer = L_I("s9.outer");
+    o.list = sched_list; o.spawn = sched_spawn; o.sched_sha = sha;
+    rc = ss_steps_par(&o, run, par, wall_ms, &ms);
+    last_ms = ms;
+    return rc;
 }
 int main(int argc, char **argv) {
     if(argc==2&&!strcmp(argv[1],"--ri-controls"))return ri_controls();

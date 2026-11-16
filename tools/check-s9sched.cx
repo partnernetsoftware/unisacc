@@ -1,0 +1,53 @@
+/* tools/check-s9sched.cx -- checks of tools/cxlib/s9sched.cx, the scheduling layer of s9-nightly steps --par
+ * (not in the frozen-root identity; see tools/s9-nightly.cx).
+ *
+ *   sh ./unisacc.com tools/check-s9sched.cx
+ *   last line: CHECK_S9SCHED<TAB>failed=N
+ *
+ * The module has no command line of its own: it is driven through tools/s9-nightly.cx --phase steps --par N.
+ * This check runs that tool's `limits` group (fake driver, no real s9 run) and requires every steps-par
+ * assertion to PASS, the steps-par line to carry sched_sha (the layer is recorded, not hashed into the
+ * identity), and the split group's layer assertions (edit to the scheduling layer keeps an old session,
+ * edit to the judging layer is refused, the scheduling source holds no identity/receipt/verdict names and
+ * the same scan hits the judging source) to PASS. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed; static char root[4096];
+static void ck(int ok, const char *name) { sy_printf("%s\tcheck-s9sched.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static int line_pass(const np_result *r, const char *name) {
+    char want[200]; if (cx_fmt(want, sizeof want, "PASS\tcheck-s9-nightly.%s\n", name)) return 0;
+    return r->out && strstr(r->out, want) != 0;
+}
+static void group(const char *g, np_result *r) {
+    char *v[] = {"sh", "./unisacc.com", "tools/s9-nightly.cx", 0}; char why[256]; (void)v;
+    { char *a[] = {"sh", "./unisacc.com", "tools/check-s9-nightly.cx", "--", (char *)g, 0}; np_run(a, root, 0, 58, r, why, sizeof why); }
+}
+
+int main(void) {
+    np_result r = {0}; size_t n;
+    if (sy_cwd(root, sizeof root)) return 2;
+    ck(cx_read("tools/cxlib/s9sched.cx", &n) != 0 && n > 0, "module-present");
+    group("limits", &r);
+    ck(r.rc == 0, "limits-group-rc0");
+    ck(line_pass(&r, "steps-par-all-slices-recorded"), "steps-par-all-slices-recorded");
+    ck(line_pass(&r, "steps-par-wall-below-serial"), "steps-par-wall-below-serial");
+    ck(line_pass(&r, "steps-par-records-sched-sha"), "steps-par-records-sched-sha");
+    ck(line_pass(&r, "steps-par-no-progress-bounded-requeue-rc4"), "steps-par-bounded-requeue");
+    ck(line_pass(&r, "steps-par-slice-failure-rc1"), "steps-par-slice-failure");
+    np_free(&r);
+    group("split", &r);
+    ck(r.rc == 0, "split-group-rc0");
+    ck(line_pass(&r, "sched-layer-edit-keeps-old-session"), "sched-layer-edit-keeps-old-session");
+    ck(line_pass(&r, "judge-layer-edit-refused-no-child"), "judge-layer-edit-refused");
+    ck(line_pass(&r, "sched-layer-has-no-judgement-names"), "sched-layer-has-no-judgement-names");
+    ck(line_pass(&r, "sched-layer-scan-negative-control"), "sched-layer-scan-negative-control");
+    np_free(&r);
+    sy_printf("CHECK_S9SCHED\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

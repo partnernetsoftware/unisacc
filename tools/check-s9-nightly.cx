@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
     }
     setenv("S9_FAKE_LOG", logp, 1);
     setenv("UNISACC_S9_NIGHTLY_SOURCE", tool, 1);
+    { char sched_src[4400]; if (cx_fmt(sched_src, sizeof sched_src, "%s/tools/cxlib/s9sched.cx", root) || setenv("UNISACC_S9_SCHED_SOURCE", sched_src, 1)) die("sched-env"); }
     if(given_nightly&&setenv("S9_NIGHTLY_NATIVE",given_nightly,1))die("native-env");
     if((!mat||!strcmp(material_cases,"all")||!material_want("map"))&&!sy_env("S9_NIGHTLY_NATIVE")) {
         char prepared[4400];
@@ -388,6 +389,8 @@ int main(int argc, char **argv) {
                 while (q && (q = strstr(q, "step --slice p"))) { sl++; q += 14; }
                 ck(rc == 0 && has(buf, "status=STEPS_DONE") && has(buf, "\tpeak=4\tpending_at_start=6\tlaunched=6\tdone=6\tno_progress=0\tnot_recorded=0\tfailed=0\tnot_launched=0\t"), "steps-par-all-slices-recorded");
                 ck(wm && atoi(wm + 9) > 0 && atoi(wm + 9) < 5000, "steps-par-wall-below-serial");
+                { const char *sh = strstr(buf, "\tsched_sha="); int hx = 0; if (sh) { sh += 11; while ((sh[hx] >= '0' && sh[hx] <= '9') || (sh[hx] >= 'a' && sh[hx] <= 'f')) hx++; }
+                  ck(sh && hx == 64 && sh[64] == '\n', "steps-par-records-sched-sha"); }
                 ck(s && sl == 6 && has(s, "pending\n") && has(s, "\nstep\n"), "steps-par-lists-pending-then-serial-step-confirms");
                 free(s);
             }
@@ -746,6 +749,44 @@ int main(int argc, char **argv) {
             ck(rc!=0&&!s,leaf?"build-shards-receipt-tamper-refused":"build-waves-receipt-tamper-refused");free(s);
             if(cx_write(receipt,record,rz))die("receipt-restore");
             free(original);free(record);
+        }
+        /* A1 身份分层(2026-11-16):镜像身份只绑判定层源(tools/s9-nightly.cx),调度层源(tools/cxlib/s9sched.cx)不进身份。
+           两叶收据都在的旧会话上:调度层源多一个字节,镜像收据仍被接受(SKIP,不起子进程);判定层源多一个字节,被拒且不起子进程
+           (负控);判定层源还原后再次被接受,证明拒绝只因那一个字节。另守边界:调度层源里不得出现算身份、写收据或证据、
+           判通过的名字;同一扫描在判定层源上必须全部命中(扫描器本身的负控)。 */
+        if(split) {
+            char jcopy[4500],scopy[4500],sched[4400];size_t jz,sz;
+            if(cx_fmt(jcopy,sizeof jcopy,"%s/judge-edit.cx",dir)||cx_fmt(scopy,sizeof scopy,"%s/sched-edit.cx",dir)||cx_fmt(sched,sizeof sched,"%s/tools/cxlib/s9sched.cx",root))die("layer-path");
+            char *js=cx_read(tool,&jz),*ss=cx_read(sched,&sz);
+            if(!js||!ss)die("layer-read");
+            char *je=malloc(jz+1),*se=malloc(sz+1);
+            if(!je||!se)die("layer-alloc");
+            if(mm_copy(je,(long)jz+1,js,(long)jz)||mm_copy(se,(long)sz+1,ss,(long)sz))die("layer-copy");je[jz]='\n';se[sz]='\n';
+            if(cx_write(jcopy,je,jz+1)||cx_write(scopy,se,sz+1))die("layer-write");
+            free(je);free(se);
+            {char *rm[]={"rm","-f",logp,0};runv(rm,dir,5,buf,sizeof buf,&rc);}
+            runv(w,root,20,buf,sizeof buf,&rc);s=cx_read(logp,&n);
+            ck(rc==0&&has(buf,"status=SKIP")&&!s,"layer-baseline-old-session-accepted");free(s);
+            setenv("UNISACC_S9_SCHED_SOURCE",scopy,1);
+            runv(w,root,20,buf,sizeof buf,&rc);s=cx_read(logp,&n);
+            ck(rc==0&&has(buf,"status=SKIP")&&!s,"sched-layer-edit-keeps-old-session");free(s);
+            setenv("UNISACC_S9_SCHED_SOURCE",sched,1);
+            /* run_result 只在 argv[2] 等于 UNISACC_S9_NIGHTLY_SOURCE 时换用预编镜像,两处同步指向改过的副本。 */
+            setenv("UNISACC_S9_NIGHTLY_SOURCE",jcopy,1);w[2]=jcopy;
+            runv(w,root,20,buf,sizeof buf,&rc);s=cx_read(logp,&n);
+            ck(rc!=0&&!has(buf,"status=SKIP")&&!has(buf,"status=DONE")&&!s,"judge-layer-edit-refused-no-child");free(s);
+            setenv("UNISACC_S9_NIGHTLY_SOURCE",tool,1);w[2]=tool;
+            runv(w,root,20,buf,sizeof buf,&rc);s=cx_read(logp,&n);
+            ck(rc==0&&has(buf,"status=SKIP")&&!s,"judge-layer-restored-accepted");free(s);
+            {
+                const char *names[]={"init_identity","init_receipt","evidence_file","native_image","native_exec","as_sha_file","as_identity","cx_write","status=PASS"};
+                int in_sched=0,in_judge=0,total=(int)(sizeof names/sizeof names[0]);
+                for(int i=0;i<total;i++){if(has(ss,names[i]))in_sched++;if(has(js,names[i]))in_judge++;}
+                ck(in_sched==0,"sched-layer-has-no-judgement-names");
+                ck(in_judge==total,"sched-layer-scan-negative-control");
+                ck(has(js,"ss_steps_par(")&&has(ss,"int ss_steps_par(")&&!has(js,"NO_PROGRESS_REQUEUED")&&has(ss,"NO_PROGRESS_REQUEUED"),"sched-loop-lives-in-sched-layer");
+            }
+            free(js);free(ss);
         }
         for (int k=0;k<9;k++) {
             w[13]=(char *)parts[k];
