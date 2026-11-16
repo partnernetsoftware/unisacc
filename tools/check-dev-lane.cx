@@ -19,17 +19,16 @@
 #define PW 2048
 static int checks, failed;
 static char F[PW], o[1 << 15], root[PW];
-/* every format is checked: an overflow ends the check as a failure; every cp call site checks the capacity first */
+/* every format is checked: an overflow ends the check as a failure; copies go through mm_copy with the destination capacity */
 #define FM(d, cap, ...) do { int f_ = snprintf(d, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) { printf("FAIL\tfmt-overflow\nCHECK_DEV_LANE\tchecks=%d\tfailed=%d\n", checks, failed + 1); exit(1); } } while (0)
-static void cp(char *d, const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) d[i] = s[i]; }
 static void ck(const char *name, int ok) { checks++; if (!ok) { failed++; printf("FAIL\t%s\n%s\n", name, o); } else printf("ok\t%s\n", name); }
 /* sh -c script with $1 = fixture, $2 = tree root; stdout then stderr into o; returns rc (-1 transport) */
 static int sh(const char *script) {
     np_result r = {0}; char why[512]; char *av[] = {"env", "-u", "DEV_LANE", "sh", "-c", (char *)script, "sh", F, root, 0};   /* the check itself may run under a lane (gates export DEV_LANE=off to descendants); fixtures start clean */ size_t n = 0; int rc;
     why[0] = 0; o[0] = 0;
     if (np_run(av, root, 0, 50, &r, why, sizeof why)) { FM(o, sizeof o, "transport: %s", why); return -1; }
-    if (r.out && r.outn && r.outn < sizeof o - 1) { cp(o, r.out, r.outn); n = r.outn; }
-    if (r.err && r.errn && n + r.errn < sizeof o - 1) { cp(o + n, r.err, r.errn); n += r.errn; }
+    if (r.out && r.outn && r.outn < sizeof o - 1 && !mm_copy(o, (long)sizeof o, r.out, (long)r.outn)) n = r.outn;
+    if (r.err && r.errn && n + r.errn < sizeof o - 1 && !mm_copy(o + n, (long)(sizeof o - n), r.err, (long)r.errn)) n += r.errn;
     o[n] = 0; rc = r.rc; np_free(&r); return rc;
 }
 static int has(const char *s) { return strstr(o, s) != 0; }
@@ -55,7 +54,7 @@ int main(void) {
     rc = sh("mktemp -d /tmp/check-dev-lane-XXXXXX");
     n = strlen(o); while (n && o[n - 1] == '\n') o[--n] = 0;
     if (rc || o[0] != '/' || n >= sizeof F) { printf("FAIL\tmktemp\t%s\n", o); return 1; }
-    cp(F, o, n + 1);
+    if (mm_copy(F, (long)sizeof F, o, (long)n + 1)) { printf("FAIL\tmktemp\t%s\n", o); return 1; }
     rc = sh("set -e; unset GIT_DIR GIT_WORK_TREE; mkdir -p \"$1/repo/tools\" \"$1/repo/tests\" \"$1/repo/docs\" \"$1/prod\"; cd \"$1/repo\";"
             " for d in include src cx exec seed; do mkdir $d; echo 1 > $d/f; done; echo d > docs/f;"
             " printf '#!/bin/sh\\necho \"INSTALLED lane=${DEV_LANE:-unset} local=${UNISACC_LOCAL:-unset} cwd=$(pwd -P) $*\"\\n' > unisacc.com;"

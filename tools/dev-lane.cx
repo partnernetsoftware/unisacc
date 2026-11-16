@@ -52,11 +52,8 @@ static const char *GATES =
     "tools/dev-lane.cx|*/tools/dev-lane.cx|tools/devsvc.cx|*/tools/devsvc.cx|tools/devsvc-core.cx|*/tools/devsvc-core.cx";
 
 static void die(const char *why, const char *arg) { fprintf(stderr, "dev-lane: REFUSE %s%s%s\n", why, arg ? " " : "", arg ? arg : ""); exit(2); }
-static void pj(char *o, const char *a, const char *b) { if (cx_fmt(o, PW, "%s/%s", a, b)) die("path-too-long", b); }
-/* every call site checks the destination capacity first */
-static void cp(char *d, const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) d[i] = s[i]; }
-static int file_sha(const char *p, char h[65]) { size_t n; char *b = cx_read(p, &n); if (!b) return 1; cx_sha256_hex(b, n, h); free(b); return 0; }
-static void put(const char *p, const char *s) { char t[PW + 16]; if (cx_fmt(t, sizeof t, "%s.tmp", p) || cx_write(t, s, strlen(s)) || rename(t, p)) die("write", p); }
+/* paths, bounded copies, file hashes and atomic writes go through ext/fsx and cx/mem: no private copies here */
+static void pj(char *o, const char *a, const char *b) { if (fsx_join(o, PW, a, b) < 0) die("path-too-long", b); }
 /* column col (0 = first after the key) of the receipt line starting with key<TAB>; "" when absent */
 static void rget(const char *b, const char *key, int col, char *o, size_t cap) {
     size_t kl = strlen(key), i = 0; const char *s = b;
@@ -80,7 +77,8 @@ static void ids_at(const char *repo, const char *c, char *o, size_t cap) {
     while (*d) {
         const char *e = strchr(d, ' '); size_t l = e ? (size_t)(e - d) : strlen(d); char one[160];
         if (cx_fmt(one, sizeof one, "%s'%s:%.*s'", k ? " " : "", c, (int)l, d) || k + strlen(one) + 1 > sizeof spec) die("fmt", 0);
-        cp(spec + k, one, strlen(one) + 1); k += strlen(one);
+        if (mm_copy(spec + k, (long)(sizeof spec - k), one, (long)strlen(one) + 1)) die("fmt", 0);
+        k += strlen(one);
         d += l; if (*d == ' ') d++;
     }
     no_quote(c);
@@ -89,13 +87,15 @@ static void ids_at(const char *repo, const char *c, char *o, size_t cap) {
     if (np_run(av, repo, 0, 20, &r, why, sizeof why) || r.rc || !r.outn) die("base-not-resolvable (git rev-parse of product input trees)", c);
     n = r.outn; while (n && r.out[n - 1] == '\n') n--;
     if (n + 1 > cap) die("fmt", 0);
-    cp(o, r.out, n); o[n] = 0; np_free(&r);
+    if (mm_copy(o, (long)cap, r.out, (long)n)) die("fmt", 0);
+    o[n] = 0; np_free(&r);
 }
 static void forward_only(const char *lane, const char *repo) {
     char p[PW], buf[PW * 2 + 400];
     no_quote(repo);
     if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# dev-lane-v1 state=off (tools/dev-lane.cx); generated, do not edit\n# repo\t%s\nR='%s'\nexport DEV_LANE=off\n[ \"$(pwd -P)\" = \"$(cd \"$(dirname \"$0\")\" && pwd -P)\" ] && cd \"$R\"\nexec sh \"$R/unisacc.com\" \"$@\"\n", repo, repo)) die("path-too-long", 0);
-    pj(p, lane, "unisacc.com"); put(p, buf); if (chmod(p, 0755)) die("chmod", p);
+    pj(p, lane, "unisacc.com"); if (fsx_write(p, buf, (long)strlen(buf), 0755)) die("write", p);
+    if (chmod(p, 0755)) die("chmod", p);
 }
 
 int main(int argc, char **argv) {
@@ -129,7 +129,8 @@ int main(int argc, char **argv) {
         char st[16];
         if (!(b = cx_read(p, &n))) die("not-a-lane (no router)", p);
         if (n >= sizeof buf) die("router-too-large", p);
-        cp(buf, b, n); buf[n] = 0; free(b);
+        if (mm_copy(buf, (long)sizeof buf, b, (long)n)) die("router-too-large", p);
+        buf[n] = 0; free(b);
         if (!strstr(buf, "dev-lane-v1")) die("not-a-lane (router is not dev-lane-v1)", p);
         rget(buf, "# repo", 0, repo, PW); if (repo[0] != '/') die("router-without-repo", p);
         if (off) { forward_only(lane, repo); printf("DEV_LANE\tstate=off\tlane=%s\trepo=%s\n", lane, repo); return 0; }
@@ -155,14 +156,15 @@ int main(int argc, char **argv) {
     pj(p, out, "receipt.tsv");
     if (!(b = cx_read(p, &n))) die("receipt-missing", p);
     if (n >= sizeof rc) die("receipt-too-large", p);
-    cp(rc, b, n); rc[n] = 0; free(b);
+    if (mm_copy(rc, (long)sizeof rc, b, (long)n)) die("receipt-too-large", p);
+    rc[n] = 0; free(b);
     if (strncmp(rc, "NOT_RELEASE\tdev-product-v1\n", 27)) die("receipt-not-dev-product-v1", p);
     rget(rc, "scope", 0, v, PW); if (strcmp(v, "LOCAL")) die("receipt-scope-not-LOCAL", p);
     rget(rc, "entry", 0, e2, PW); rget(rc, "entry", 1, w2, sizeof w2);
     rget(rc, "pkg", 0, e3, PW); rget(rc, "pkg", 1, w3, sizeof w3);
     rget(rc, "product", 0, prod, PW); rget(rc, "product", 1, wf, sizeof wf);
-    if (file_sha(e2, h2) || strcmp(h2, w2)) die("entry-sha-mismatch", e2);
-    if (file_sha(e3, h3) || strcmp(h3, w3)) die("pkg-sha-mismatch", e3);
+    if (fsx_sha256(e2, h2) || strcmp(h2, w2)) die("entry-sha-mismatch", e2);
+    if (fsx_sha256(e3, h3) || strcmp(h3, w3)) die("pkg-sha-mismatch", e3);
     if (cx_fmt(buf, sizeof buf, "%s\n%s\n", h2, h3)) die("fmt", 0);
     cx_sha256_hex(buf, strlen(buf), fin);
     if (strcmp(fin, wf)) die("product-id-mismatch", p);
@@ -199,7 +201,8 @@ int main(int argc, char **argv) {
         "fi\n"
         "exec sh \"$P\" \"$@\"\n",
         repo, prod, fin, base, ids, repo, prod, ids, GATES, base)) die("path-too-long", 0);
-    pj(p, lane, "unisacc.com"); put(p, buf); if (chmod(p, 0755)) die("chmod", p);
+    pj(p, lane, "unisacc.com"); if (fsx_write(p, buf, (long)strlen(buf), 0755)) die("write", p);
+    if (chmod(p, 0755)) die("chmod", p);
     printf("DEV_LANE\tstate=on\tlane=%s\tproduct=%s\tsha=%s\tbase=%s\tscope=LOCAL\n", lane, prod, fin, base);
     return 0;
 }
