@@ -1,0 +1,57 @@
+/* Explicit family blockers are facts, never inferred from missing material. */
+#pragma unisa module s9families
+#pragma unisa use cxlib.testplan
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+
+typedef struct {char family[128],reason[512],evidence[1024],rollback[512];} sf_row;
+typedef struct {sf_row row[64];int n;} sf_facts;
+
+static int sf_bad(char *why,size_t cap,const char *reason){if(why&&cap&&cx_fmt(why,cap,"family-status-%s",reason))why[0]=0;return -1;}
+static char *sf_read(const char *path,int optional,size_t *n,char *why,size_t cap){
+ int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0){int e=errno;if(optional&&e==ENOENT){*n=(size_t)-1;return 0;}if(why&&cap&&cx_fmt(why,cap,"family-status-read errno=%d",e))why[0]=0;return 0;}
+ struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>4194304){close(fd);sf_bad(why,cap,"file-kind-or-size");return 0;}
+ size_t z=(size_t)st.st_size,at=0;char *s=malloc(z+1);if(!s){close(fd);sf_bad(why,cap,"allocation");return 0;}
+ while(at<z){ssize_t k=read(fd,s+at,z-at);if(k<0&&errno==EINTR)continue;if(k<=0){free(s);close(fd);sf_bad(why,cap,"read-short");return 0;}at+=(size_t)k;}
+ char extra;ssize_t k;do{k=read(fd,&extra,1);}while(k<0&&errno==EINTR);int ce=close(fd);if(k!=0||ce){free(s);sf_bad(why,cap,"read-changed");return 0;}
+ s[z]=0;*n=z;return s;
+}
+static int sf_wire(const char *s,size_t n){if(!n||s[n-1]!='\n')return 0;for(size_t i=0;i<n;i++){unsigned char c=(unsigned char)s[i];if(c==127||(c<32&&c!='\n'&&c!='\t'))return 0;}return 1;}
+static int sf_fields(char *s,char **f,int want){int n=1;f[0]=s;for(char *p=s;*p;p++)if(*p=='\t'){*p=0;if(n==want)return -1;f[n++]=p+1;}if(n!=want)return -1;for(int i=0;i<n;i++)if(!*f[i])return -1;return 0;}
+static int sf_copy(char *out,size_t cap,const char *s){size_t n=strlen(s);if(!n||n>=cap)return -1;return mm_copy(out,cap,s,n+1);}
+const sf_row *sf_find(const sf_facts *facts,const char *family){if(!facts||!family||facts->n<0||facts->n>64)return 0;for(int i=0;i<facts->n;i++)if(!strcmp(facts->row[i].family,family))return &facts->row[i];return 0;}
+int sf_batch(const sf_facts *facts,const char *materials,const sf_row **out){
+ if(out)*out=0;if(!facts||!materials||!out||facts->n<0||facts->n>64||!*materials)return -1;
+ if(!strcmp(materials,"-"))return 0;
+ const char *at=materials;tp_material_decl seen[32],d;const sf_row *hit=0;int n=0,rc;
+ while((rc=tp_material_next(&at,&d))>0){if(n==32)return -1;for(int i=0;i<n;i++)if(!strcmp(seen[i].name,d.name))return -1;seen[n++]=d;const sf_row *r=sf_find(facts,d.name);if(r){if(hit)return -1;hit=r;}}
+ if(rc<0||*at)return -1;*out=hit;return hit?1:0;
+}
+static int sf_registered(const char *root,const sf_facts *facts,char *why,size_t cap){
+ char p[4400];if(cx_fmt(p,sizeof p,"%s/tests/batches.tsv",root))return sf_bad(why,cap,"path");size_t n=0;char *s=sf_read(p,0,&n,why,cap);if(!s)return -1;
+ if(!sf_wire(s,n)){free(s);return sf_bad(why,cap,"registry-wire");}
+ char *at=strchr(s,'\n');if(!at){free(s);return sf_bad(why,cap,"registry-header");}*at=0;
+ char *head[14];if(sf_fields(s,head,14)||strcmp(head[0],"id")||strcmp(head[7],"materials")){free(s);return sf_bad(why,cap,"registry-header");}
+ int found[64]={0};at++;
+ while(*at){char *end=strchr(at,'\n');*end=0;char *f[14];if(sf_fields(at,f,14)){free(s);return sf_bad(why,cap,"registry-fields");}
+  const char *q=f[7];tp_material_decl d;int rc;if(!*q){free(s);return sf_bad(why,cap,"registry-materials");}
+  if(strcmp(q,"-")){while((rc=tp_material_next(&q,&d))>0)for(int i=0;i<facts->n;i++)if(!strcmp(d.name,facts->row[i].family))found[i]=1;if(rc<0||*q){free(s);return sf_bad(why,cap,"registry-materials");}}
+  at=end+1;
+ }
+ free(s);for(int i=0;i<facts->n;i++)if(!found[i])return sf_bad(why,cap,"unregistered-family");return 0;
+}
+int sf_load(const char *root,sf_facts *facts,char *why,size_t cap){
+ char local_why[128];if(!why||!cap){why=local_why;cap=sizeof local_why;}
+ if(why&&cap)why[0]=0;if(!facts)return sf_bad(why,cap,"arguments");memset(facts,0,sizeof *facts);if(!root||!*root)return sf_bad(why,cap,"arguments");
+ char p[4400];if(cx_fmt(p,sizeof p,"%s/tests/s9-family-status.tsv",root))return sf_bad(why,cap,"path");
+ size_t n=0;char *s=sf_read(p,1,&n,why,cap);if(!s)return n==(size_t)-1?0:-1;
+ const char *header="# family\tstatus\treason\tevidence\trollback\n";size_t hn=strlen(header);int rc=0;
+ if(!sf_wire(s,n)||n<hn||memcmp(s,header,hn)){free(s);return sf_bad(why,cap,"wire-or-header");}
+ char *at=s+hn;while(*at){char *end=strchr(at,'\n');*end=0;char *f[5];tp_material_decl d;
+  if(facts->n==64||sf_fields(at,f,5)||strcmp(f[1],"BLOCKED")||tp_material_decode(f[0],strlen(f[0]),&d)||strcmp(d.name,f[0])||sf_find(facts,f[0])){rc=sf_bad(why,cap,"row");break;}
+  sf_row *r=&facts->row[facts->n];if(sf_copy(r->family,sizeof r->family,f[0])||sf_copy(r->reason,sizeof r->reason,f[2])||sf_copy(r->evidence,sizeof r->evidence,f[3])||sf_copy(r->rollback,sizeof r->rollback,f[4])){rc=sf_bad(why,cap,"field-bound");break;}
+  facts->n++;at=end+1;
+ }
+ free(s);if(!rc&&facts->n)rc=sf_registered(root,facts,why,cap);if(rc)memset(facts,0,sizeof *facts);return rc;
+}

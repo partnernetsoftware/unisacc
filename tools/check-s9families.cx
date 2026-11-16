@@ -1,0 +1,66 @@
+/* Private fixtures exercise facts without executing or qualifying batches. */
+#pragma unisa use cxlib.s9families
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+
+static int assertions,failed;
+static const char *header="# family\tstatus\treason\tevidence\trollback\n";
+static char root[4400],table[4600],batches[4600];
+static void ck(int ok,const char *name){assertions++;if(!ok){failed++;printf("FAIL\ts9families.%s\n",name);}}
+static int put(const char *p,const char *s){FILE *f=fopen(p,"wb");if(!f)return -1;size_t n=strlen(s);int ok=fwrite(s,1,n,f)==n;int rc=fclose(f);return ok&&!rc?0:-1;}
+static int fixture(const char *body){char all[16384];if(cx_fmt(all,sizeof all,"%s%s",header,body))return -1;return put(table,all);}
+static void load_case(const char *body,int expected,const char *name){sf_facts f;char why[300];if(fixture(body)){ck(0,"fixture-write");return;}int rc=sf_load(root,&f,why,sizeof why);ck(rc==expected&&(rc==0||f.n==0),name);}
+int main(void){
+ char tmp[]="/tmp/check-s9families-XXXXXX",dir[4600],why[300];sf_facts f;const sf_row *row=0;
+ if(!mkdtemp(tmp)||cx_fmt(root,sizeof root,"%s",tmp)||cx_fmt(dir,sizeof dir,"%s/tests",root)||mkdir(dir,0700)||cx_fmt(table,sizeof table,"%s/s9-family-status.tsv",dir)||cx_fmt(batches,sizeof batches,"%s/batches.tsv",dir)){fprintf(stderr,"fixture-create\n");return 2;}
+ const char *registry="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+ "a\tIMPLEMENTED\tinterfaces\ttests/a.cx\tSOURCE\tlnx/x86_64\t55\tri-flow-runtime,ri-flow-data:path\ttests/a.cx\t-\tcov.a\trc0:A\tproduct\tdaily\n"
+ "b\tIMPLEMENTED\tinterfaces\ttests/b.cx\tSOURCE\tlnx/x86_64\t55\tother:sha256\ttests/b.cx\t-\tcov.b\trc0:B\tproduct\trelease\n";
+ if(put(batches,registry))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==0&&f.n==0,"absent-means-zero-declarations");
+ load_case("",0,"header-only-zero-declarations");
+ const char *valid="ri-flow-data\tBLOCKED\tproduction-gap\tlogs/data.stderr\tremove-row-after-production-fix\n";
+ load_case(valid,0,"registered-blocked-family");
+ ck(sf_load(root,&f,why,sizeof why)==0&&f.n==1,"facts-count");row=sf_find(&f,"ri-flow-data");
+ ck(row&&!strcmp(row->reason,"production-gap")&&!strcmp(row->evidence,"logs/data.stderr")&&!strcmp(row->rollback,"remove-row-after-production-fix"),"facts-fields-preserved");
+ ck(!sf_find(&f,"unknown"),"unlisted-family-not-blocked");
+ ck(sf_batch(&f,"ri-flow-runtime,ri-flow-data:path",&row)==1&&row&&!strcmp(row->family,"ri-flow-data"),"batch-detects-typed-blocker");
+ ck(sf_batch(&f,"ri-flow-runtime",&row)==0&&!row,"unblocked-materials");
+ ck(sf_batch(&f,"-",&row)==0&&!row,"no-materials");
+ const char *bad[]={"","a,","a,,b","ri-flow-data:unknown","ri-flow-data,ri-flow-data:path","root","ri-flow-data,-"};
+ for(int i=0;i<7;i++)ck(sf_batch(&f,bad[i],&row)==-1&&!row,"bad-materials-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\te\tr\nri-flow-data\tBLOCKED\tx\te\tr\n",-1,"duplicate-family-rejected");
+ load_case("ri-flow-data\tPREPARED\tx\te\tr\n",-1,"unknown-status-rejected");
+ load_case("ri-flow-data\tBLOCKED\t\te\tr\n",-1,"empty-reason-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\t\tr\n",-1,"empty-evidence-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\te\t\n",-1,"empty-rollback-rejected");
+ load_case("unregistered\tBLOCKED\tx\te\tr\n",-1,"unregistered-family-rejected");
+ load_case("BadName\tBLOCKED\tx\te\tr\n",-1,"invalid-family-name-rejected");
+ load_case("ri-flow-data:path\tBLOCKED\tx\te\tr\n",-1,"typed-family-key-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\te\tr",-1,"unterminated-fact-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\te\tr\textra\n",-1,"extra-field-rejected");
+ if(put(table,"family\tstatus\treason\tevidence\trollback\n"))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==-1,"wrong-header-rejected");
+ load_case("ri-flow-data\tBLOCKED\tx\te\tr\nother\tBLOCKED\tx\te\tr\n",0,"multiple-registered-families");
+ ck(sf_load(root,&f,why,sizeof why)==0&&f.n==2,"multiple-fact-count");
+ ck(sf_batch(&f,"ri-flow-data,other:sha256",&row)==-1&&!row,"multiple-blockers-not-silently-discarded");
+ if(chmod(table,0000))return 2;
+ int denied=sf_load(root,&f,why,sizeof why);
+ ck(denied==-1&&strstr(why,"errno=13"),"eacces-is-not-absent");
+ if(chmod(table,0600))return 2;
+ if(unlink(table)||mkdir(table,0700))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==-1&&f.n==0,"directory-is-not-absent");
+ if(rmdir(table)||symlink("/no-such-s9family-target",table))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==-1,"symlink-is-not-absent");
+ if(unlink(table))return 2;
+ char notdir[4600],blockedroot[4800];if(cx_fmt(notdir,sizeof notdir,"%s/notdir",root)||put(notdir,"x")||cx_fmt(blockedroot,sizeof blockedroot,"%s/child",notdir))return 2;
+ ck(sf_load(blockedroot,&f,why,sizeof why)==-1,"enotdir-is-not-absent");
+ if(fixture(valid)||put(batches,"id\tbroken\n"))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==-1,"malformed-registry-rejected");
+ if(put(batches,registry)||unlink(batches))return 2;
+ ck(sf_load(root,&f,why,sizeof why)==-1,"declared-family-needs-registry");
+ ck(sf_load(root,&f,0,0)==-1,"errors-do-not-depend-on-reason-buffer");
+ if(unlink(table)||unlink(notdir)||rmdir(dir)||rmdir(root))return 2;
+ printf("CHECK_S9FAMILIES\tassertions=%d\tfailed=%d\n",assertions,failed);return failed?1:0;
+}

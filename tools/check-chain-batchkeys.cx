@@ -40,9 +40,25 @@ static int fp(const char *extra1, const char *extra2, const char *extra3, const 
     ck(ok, name);
     return rc;
 }
-int main(void) {
+/* --cases G[,G...]: 只跑所列分组(a: dup/empty, b: object/bad-char, c: existing/snapshot, d: link-only);
+   不给则全跑。夹具与公共断言(snap-path-from-chainroot、no-out-dir-in-checkout)每组都跑。 */
+static const char *cases;
+static int want(const char *g) {
+    const char *p = cases; size_t n = strlen(g);
+    if (!cases) return 1;
+    while (*p) {
+        const char *e = strchr(p, ','); size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l == n && !strncmp(p, g, n)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+int main(int argc, char **argv) {
     char snap[4400],out[4400],gen[4400],sub[4400],helper[4400],marker[4400],record[4400];
     int rc;
+    if (argc == 3 && !strcmp(argv[1], "--cases")) cases = argv[2];
+    else if (argc != 1) die("usage: check-chain-batchkeys.cx [--cases a,b,c,d]");
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     {
         char fh[4400], ft[4400], ftc[4400], cbase[4600];
@@ -55,14 +71,22 @@ int main(void) {
         ck(!strncmp(fx_snap, cbase, bn) && !strncmp(fx_snap + bn, "/snap/deadbeefde-", 17), "snap-path-from-chainroot");
         if (cx_fmt(fx_out, sizeof fx_out, "%s/chain-batchkeys-fp", ftc) || cx_fmt(fx_helper, sizeof fx_helper, "%s/chain-batchkeys-helper.sh", ftc)) die("fixture path");
     }
+    if (want("a")) {
     fp("--objects", "m1.o,m2.o,m1.o", 0, "REFUSE duplicate object key", "dup-key");
     fp("--objects", "m1.o,,m2.o", 0, "REFUSE objects list", "empty-key");
+    }
+    if (want("b")) {
     fp("--objects", "m1.o,m2.o", "--object", "REFUSE unknown/duplicate option", "object-after-missing-arg");
     fp("--objects", "A.o,m2.o", 0, "REFUSE object key", "bad-char-key");
+    }
+    if (want("d")) {
     fp("--objects", "m1.o", "--link-only", "REFUSE --objects with --object/--link-only", "with-link-only");
+    }
+    struct stat st;
+    if (want("c")) {
     /* 假快照 + 已存在未记录的 slice 目录: 首键必须拒绝, 且不写 phase-0.tsv */
     if(cx_fmt(snap,sizeof snap,"%s",fx_snap)||cx_fmt(out,sizeof out,"%s",fx_out)||cx_fmt(gen,sizeof gen,"%s/g2",out)||cx_fmt(sub,sizeof sub,"%s/lnx-x86_64",gen)||cx_fmt(helper,sizeof helper,"%s",fx_helper)||cx_fmt(marker,sizeof marker,"%s/.release-rev",snap)||cx_fmt(record,sizeof record,"%s/phase-0.tsv",gen))die("fixture path");
-    struct stat st;const char *owned[]={snap,out,helper};for(int i=0;i<3;i++){if(!lstat(owned[i],&st)||errno!=ENOENT)die("REFUSE existing/nonprivate fixture");}
+    const char *owned[]={snap,out,helper};for(int i=0;i<3;i++){if(!lstat(owned[i],&st)||errno!=ENOENT)die("REFUSE existing/nonprivate fixture");}
     const char *body="#!/bin/sh\nprintf '0000000000000000000000000000000000000000000000000000000000000000\\n'\n";
     if(sy_mkdir(snap,0755)||sy_mkdir(out,0755)||sy_mkdir(gen,0755)||sy_mkdir(sub,0755)||cx_write(marker,REV,40)||cx_write(helper,body,strlen(body))||chmod(helper,0700))die("fixture");
     rc = fp("--objects", "m1.o,m2.o", 0, "REFUSE unrecorded/existing phase", "existing-unrecorded");
@@ -76,12 +100,13 @@ int main(void) {
         fp("--objects", "m1.o,m2.o", 0, "REFUSE release snapshot path", "snapshot-not-at-chainroot-refused");
         if (rmdir(other)) die("fixture cleanup");
     }
+    /* Remove only the exact files and empty directories owned by this run. */
+    if(unlink(marker)||unlink(helper)||rmdir(sub)||rmdir(gen)||rmdir(out)||rmdir(snap))die("fixture cleanup");
+    }
     {
         char o2[4400];
         ck(!cx_fmt(o2, sizeof o2, "%s/out", root) && lstat(o2, &st) && errno == ENOENT, "no-out-dir-in-checkout");
     }
-    /* Remove only the exact files and empty directories owned by this run. */
-    if(unlink(marker)||unlink(helper)||rmdir(sub)||rmdir(gen)||rmdir(out)||rmdir(snap))die("fixture cleanup");
     {
         /* 夹具根(home、tmp、链基目录)整体收掉;路径是本进程 mkdir 出来的唯一目录 */
         char *rm[] = {"rm", "-rf", fx_base, 0};
