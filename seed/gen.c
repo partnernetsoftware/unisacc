@@ -3538,6 +3538,11 @@ static void construct_opt(Graph *g, int o2) {
             bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
             install_plain(g, "exec/opt/scans-byte.tsv", 'b', bindings, empty);
             install_plain(g, "exec/opt/scans-result.tsv", 'r', bindings, empty);
+        } else if (!strcmp(field[0], "rows") && !o2 && !strcmp(field[1], "local")) {
+            /* O1 carries the frame-load fold only; its DEADQ is the section-1 keep-imm stub. */
+            Value *facts = load_facts_expr(field[4]); Value *bindings = NULL;
+            install_opt_rows(g, field[1], field[2], opts, facts, field[7], empty, &bindings);
+            extra++;
         } else if (!strcmp(field[0], "rows") && o2 &&
                    (!strcmp(field[1], "analysis") || !strcmp(field[1], "local") ||
                     !strcmp(field[1], "parsers") || !strcmp(field[1], "stfuse") ||
@@ -3581,7 +3586,7 @@ static void construct_opt(Graph *g, int o2) {
     }
     if (ferror(f) || close_in(f)) die_at(input_location, "opt manifest read failed");
     if (prn != 1 || numout != o2 || scans != 1 || maps != 1 || setup != 1 ||
-        answer > o2 || extra != (o2 ? 6 : 0) || roundlet != 1 || common != 1 || level != 1)
+        answer > o2 || extra != (o2 ? 6 : 1) || roundlet != 1 || common != 1 || level != 1)
         die_at(input_location, "incomplete opt manifest");
     finish(g);
 }
