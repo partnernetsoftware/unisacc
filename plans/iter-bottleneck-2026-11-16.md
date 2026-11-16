@@ -159,3 +159,11 @@
 - 第 2.4 节两项的改前改后重建计时与 pkg.bin 逐字节比对。
 - check-cx-dev 五组:第 1 项之后实跑失败 0(43 项断言);第 2 项之后再实跑失败 0(43 项断言),各组 32、11、52、6、28 秒(load1 约 12,共享缓存首次写入);把 mkq 里的裸 memcpy 换成带界帮手(cxtrunc 棘轮)后第三次实跑失败 0,各组 33、10、24、6、21 秒(load1 约 5.6,基线已在共享缓存)。ratchets 实跑 ok=15 fail=0。
 - 未跑:s9 任一相位、ratchets、derive、affected、parse2 类重建、仓内真实工作树的整套重建。
+
+## 6 s9 并发步(--par)真实 driver 实测(2026-11-16 追加)
+
+- 冻结根的原生镜像身份绑定编排源 tools/s9-nightly.cx 的内容:改了源,旧根的 pending 与 step 立刻被拒(pending listing refused),所以调试编排源每次都要起新冻结根(约 35 分钟)。不要在冻结根上边改源边调。
+- driver 的 step --slice 在启动阶段持 RUN/lock,每片约 5 到 8 秒;并发子进程排队,而 --par 路径的授予截止从起进程时算,排队时间吃掉窗口,于是被判 STEP_NO_PROGRESS rc=4(5 路并发,全部在约 40 秒时同时返回)。
+- 单片带同样截止(need 加 48 秒授予)单跑成功(left=131,DONE_RECORDED);5 路直接起 driver 不设截止也全部 DONE_RECORDED。
+- 修法候选(需新根验证):授予窗口再加 (par-1) 乘 10 秒的排队余量,或错开起步直到前一片输出 STEP_SLICE 起步行再起下一片。
+- 本轮绕过:用 flow 直接并发 driver step --slice(不设截止环境,每次自带 294 秒窗口),按 pending 的 alone/heavy 标记分三层(普通 par 5、重 par 2、独占 par 1)。每片节点 35 到 43 秒,5 路稳定后约每 40 秒出 5 片;负载升到 12.5,超过 10 的新增线,所以不再加并发。
