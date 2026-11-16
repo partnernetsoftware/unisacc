@@ -45,7 +45,7 @@ typedef struct {
  char verifier[65],netpack[65],kernelsha[65],runtime_support[65];
  char reader_identity[64];
  char native_profile[65],compiled_include[65],compiled_material[65],derived_source[65],compiler_artifact[65],compiler_record[65];
- int native_source_kind; /* 1/2 legacy HOSTCC/CX; 3 current HOSTCC; 4 reserved current CX (unregistered). */
+ int native_source_kind; /* 1/2 legacy HOSTCC/CX; 3 current HOSTCC; 4 current CX bound only to reconstructed record and historical include. */
  int data_files,data_dirs,data_symlinks,ctor_files,ordered_headers,full_triggers,facts_triggers;
  int physical_reads,current_reads,origin_reads,support_reads,native_table_calls,native_internal_reads;
  long long setup_ns,support_before_ns,support_after_ns,support_ns,order_ns;
@@ -157,6 +157,8 @@ static const char *ni_material_hashes[]={
  * Current HOSTCC was actually built from the current original C. A current
  * CX artifact/material set is deliberately unregistered without the original
  * saved-bootstrap record; no zero hash or caller hash can stand in for it. */
+static const char *ni_current_fast_elf="5540abcb9282361223a5d38adec7921b78c152c0d2e2d816a5d0bfb068b7e064";
+static const char *ni_current_material_hashes[6]={"46845c78498d7d28531fb4a76faf9b14cbe0534bf62b498c40d6a2cfc2b4be57","4583250bc473a3917caef9cb4c2ea0bbfb3b1bc190c6bb7017ae2459d01e9674","a4e8c349fe16bd37036a7f136ffdb2d264cacc5f01f1716966c78e8b0ee1f5b8","3f182fcb71c3dac9939be47458b827f5a0e64752b7a7d1eb80e5d3a6af4c0343","53e2cd1f669c92fda2c16dd93a9021cd4db97f05c57ab2d1acf9a835cbac9857","206f50b31c6ad0f88b23888b098750509475faff72d74066dd0e4330ec64d7d4"};
 typedef struct {
  const char *id,*source_sha,*host_sha,*cx_sha,*cache_schema,*cache_suffix;
  int host_kind,cx_kind,cx_registered;
@@ -164,7 +166,7 @@ typedef struct {
 int ni_reader_profile(const char *id,ni_reader_descriptor *out){
  if(!out)return 0;memset(out,0,sizeof *out);if(!id)return 0;
  if(!strcmp(id,"legacy-5f-v2")){ni_reader_descriptor d={"legacy-5f-v2",ni_native_c,ni_native_elf,ni_fast_elf,"libneed-native-code-cache-v2",".source-packages-v2.cache.tsv",1,2,1};*out=d;return 1;}
- if(!strcmp(id,"current-a4-v3")){ni_reader_descriptor d={"current-a4-v3","a4e8c349fe16bd37036a7f136ffdb2d264cacc5f01f1716966c78e8b0ee1f5b8","6c36d868a0519653cb2a3d36d9d04ce1cb3b7fb692e7e30a5aa39cf18ffb29b7",0,"libneed-native-code-cache-v3",".source-packages-v3.cache.tsv",3,4,0};*out=d;return 1;}
+ if(!strcmp(id,"current-a4-v3")){ni_reader_descriptor d={"current-a4-v3","a4e8c349fe16bd37036a7f136ffdb2d264cacc5f01f1716966c78e8b0ee1f5b8","6c36d868a0519653cb2a3d36d9d04ce1cb3b7fb692e7e30a5aa39cf18ffb29b7",ni_current_fast_elf,"libneed-native-code-cache-v3-reconstructed",".source-packages-v3.cache.tsv",3,4,ni_current_fast_elf!=0};*out=d;return 1;}
  return 0;
 }
 static int ni_hex64(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
@@ -206,6 +208,60 @@ static int ni_profile_build(NiContext *c,const char *material,const char *refere
  strcpy(r->compiled_include,include_sha);strcpy(r->compiled_material,ni_material_hashes[0]);strcpy(r->derived_source,ni_material_hashes[3]);strcpy(r->compiler_artifact,ni_material_hashes[4]);strcpy(r->compiler_record,ni_material_hashes[5]);*out=profile;memset(&profile,0,sizeof profile);rc=0;
 done:for(int i=0;i<6;i++)free(files[i].p);free(profile.p);return rc;
 }
+
+
+static int ni_reconstructed_headers(NiContext *c,const np_buf *receipt,np_buf *profile){
+ char hr[4400],want[4400],commit[4400],sid[4400];NiEndpoint observed={0};np_buf inv={0};int rc=-1;
+ if(ni_profile_field(c,receipt,"compiler-include-root",hr)||ni_profile_field(c,receipt,"compiler-include-inventory-sha256",want)||ni_profile_field(c,receipt,"compiler-include-source-commit",commit)||ni_profile_field(c,receipt,"compiler-include-source-SID",sid))goto done;
+ if(strcmp(commit,"589db6c39f0d8e0f6fc764d979b8f2eadc9898c3")||strcmp(sid,"447f794aeb8683492d73c520c163b45bac1d62e88dea2435b682a09772736bce")){ni_bad(c,"historical-compiler-include-provenance",hr);goto done;}
+ if(ni_tree(c,hr,1,&observed))goto done;np_puts(&inv,"compiler-historical-include-inventory-v1\n");
+ for(int i=0;i<c->entries_count;i++){NiEntry *v=&c->entries[i];np_puts(&inv,v->kind==2?"directory\t":"header-input\t");np_puts(&inv,v->name);np_puts(&inv,"\t");np_putll(&inv,v->mode);if(v->kind!=2){np_puts(&inv,"\t");np_putll(&inv,(long long)v->bytes);np_puts(&inv,"\t");np_puts(&inv,v->sha);}np_puts(&inv,"\n");}
+ char h[65];if(ni_hash(c,inv.p,inv.n,h))goto done;if(strcmp(h,want)){ni_bad(c,"historical-compiler-include-inventory-mismatch",hr);goto done;}
+ ni_row(profile,"compiler-include-root",hr);ni_row(profile,"compiler-include-source-commit",commit);ni_row(profile,"compiler-include-source-SID",sid);ni_row(profile,"compiler-include-inventory-sha256",h);np_puts(profile,"flags\t-I ");np_puts(profile,hr);np_puts(profile,"/include -O2 -b lnx/x86_64\n");rc=0;
+done:ni_endpoint_free(&observed);free(inv.p);return rc;
+}
+
+/* Current cache has a distinct reconstructed-record trust domain. */
+static int ni_current_profile_build(NiContext *c,const char *material,const char *reference,const char *include_sha,np_buf *out,ni_result *r){
+ np_buf f[6]={{0}},p={0};char mr[4096],ref[4096],path[4400],field[4400],producer[4400];int rc=-1;
+ ni_reader_descriptor d={0};ni_reader_profile("current-a4-v3",&d);
+ if(!d.cx_registered||!d.cx_sha||!ni_hex64(include_sha)||!realpath(material,mr)||!realpath(reference,ref)){ni_bad(c,"current-reconstructed-profile-arguments",material);goto done;}
+ np_puts(&p,"libneed-native-code-cache-v3-reconstructed\nstatus\tCODE_CACHE\nscope\tonly-for-reconstructed-record-not-original-record-or-NN-qualification\n");
+ ni_row(&p,"identity-schema","current-a4-v3-reconstructed");ni_row(&p,"root",c->root);ni_row(&p,"origin-snapshot-root",c->origin);ni_row(&p,"material",mr);ni_row(&p,"artifact-path",c->native);ni_row(&p,"current-reference-path",ref);ni_row(&p,"observed-current-include-canonical-v2",include_sha);
+ char ci[65],oi[65];if(ni_profile_inputs(c,c->root,ci)||ni_profile_inputs(c,c->origin,oi))goto done;ni_row(&p,"current-necessary-source-inputs-sha256",ci);ni_row(&p,"origin-necessary-source-inputs-sha256",oi);
+ for(int i=0;i<6;i++){if(!ni_current_material_hashes[i]||ni_ancestors(c,mr,ni_material_files[i])||ni_path(c,path,mr,ni_material_files[i])||ni_pinned_bytes(c,path,ni_current_material_hashes[i],&f[i],&p,ni_material_files[i]))goto done;}
+ const char *schema="libneed-CX-reconstructed-code-material-v1\n";
+ if(f[0].n<strlen(schema)||memcmp(f[0].p,schema,strlen(schema))){ni_bad(c,"current-material-reconstructed-schema-required",mr);goto done;}
+ if(ni_profile_field(c,&f[0],"root",field)||strcmp(field,c->root)){ni_bad(c,"current-material-root-mismatch",mr);goto done;}
+ if(ni_profile_field(c,&f[0],"saved-bootstrap-path",field)||field[0]!='/'){ni_bad(c,"current-bootstrap-path",mr);goto done;}
+ ni_row(&p,"reconstructed-saved-bootstrap-path",field);if(ni_pinned_bytes(c,field,ni_current_material_hashes[4],0,&p,"reconstructed-bootstrap-artifact"))goto done;
+ if(cx_fmt(path,sizeof path,"%s.build.json",field)){ni_bad(c,"current-record-path-bound",field);goto done;}
+ if(ni_pinned_bytes(c,path,ni_current_material_hashes[5],0,&p,"reconstructed-bootstrap-record"))goto done;
+ if(ni_profile_field(c,&f[0],"producer",producer))goto done;
+ const char *support[]={"seed/unisa_libneed.c","tools/libneed-material.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/cxlib/nninputs.cx","tools/libneed-native-profile.cx"};
+ const char *expected[]={d.source_sha,producer,0,0,0,0};
+ for(int i=0;i<6;i++){if(ni_ancestors(c,c->root,support[i])||ni_path(c,path,c->root,support[i])||ni_pinned_bytes(c,path,expected[i],0,&p,support[i]))goto done;}
+ if(ni_path(c,path,c->root,"tools/cxlib/libneedheaders.cx")||ni_pinned_bytes(c,path,"926a6814eeb5ae453d1516bd1cb95e77c59e5afd19e6ddc26692f329feecf8d9",0,&p,"compiler-header-inventory-codec"))goto done;
+ if(ni_profile_elf(c,c->native,d.cx_sha,&p,"current-CX-reader-ELF64-x86_64")||ni_profile_elf(c,ref,d.host_sha,&p,"current-HOSTREF-ELF64-x86_64")||ni_material_headers(c,&f[1],include_sha)||ni_reconstructed_headers(c,&f[0],&p))goto done;
+ ni_row(&p,"record-kind","reconstructed-from-provenance");ni_row(&p,"compiler-artifact-sha256",ni_current_material_hashes[4]);ni_row(&p,"compiler-reconstructed-record-sha256",ni_current_material_hashes[5]);ni_row(&p,"derived-CX-sha256",ni_current_material_hashes[3]);ni_row(&p,"base-C-sha256",d.source_sha);ni_row(&p,"native-artifact-sha256",d.cx_sha);
+ ni_row(&p,"include-roles","current-include-is-NI-association-only;compiled-include-is-historical-589db6c39f");
+ char key[65];if(ni_hash(c,p.p,p.n,key))goto done;ni_row(&p,"execution-key-sha256",key);
+ memcpy(r->compiled_include,include_sha,65);memcpy(r->compiled_material,ni_current_material_hashes[0],65);memcpy(r->derived_source,ni_current_material_hashes[3],65);memcpy(r->compiler_artifact,ni_current_material_hashes[4],65);memcpy(r->compiler_record,ni_current_material_hashes[5],65);*out=p;memset(&p,0,sizeof p);rc=0;
+done:for(int i=0;i<6;i++)free(f[i].p);free(p.p);return rc;
+}
+static int ni_current_profile_check(NiContext *c,np_buf *support,ni_result *r){
+ char path[4400];if(cx_fmt(path,sizeof path,"%s.source-packages-v3.cache.tsv",c->native))return ni_bad(c,"current-profile-path-bound",0);
+ size_t n;char *s=ni_read(c,path,&n,0);if(!s)return -1;np_buf actual={0},expected={0};np_put(&actual,s,n);free(s);
+ char mr[4400],ref[4400],include[4400],root[4400],origin[4400],artifact[4400];int rc=-1;
+ const char *schema="libneed-native-code-cache-v3-reconstructed\n";
+ if(actual.n<strlen(schema)||memcmp(actual.p,schema,strlen(schema))){ni_bad(c,"current-reconstructed-code-cache-schema-required",path);goto done;}
+ if(ni_profile_field(c,&actual,"root",root)||ni_profile_field(c,&actual,"origin-snapshot-root",origin)||ni_profile_field(c,&actual,"artifact-path",artifact)||ni_profile_field(c,&actual,"material",mr)||ni_profile_field(c,&actual,"current-reference-path",ref)||ni_profile_field(c,&actual,"observed-current-include-canonical-v2",include))goto done;
+ if(strcmp(root,c->root)||strcmp(origin,c->origin)||strcmp(artifact,c->native)){ni_bad(c,"current-code-cache-role-path-mismatch",path);goto done;}
+ if(ni_current_profile_build(c,mr,ref,include,&expected,r)||ni_equal(c,&actual,&expected,"current-code-cache-canonical-bytes-mismatch")||ni_hash(c,actual.p,actual.n,r->native_profile))goto done;
+ ni_row(support,"current-reconstructed-code-cache-profile-sha256",r->native_profile);ni_row(support,"native-source-kind","current-CX-only-for-reconstructed-record");rc=0;
+done:free(actual.p);free(expected.p);return rc;
+}
+
 static int ni_profile_check(NiContext *c,np_buf *support,ni_result *r){char p[4400];int n=snprintf(p,sizeof p,"%s.source-packages-v2.cache.tsv",c->native);if(n<0||n>=sizeof p)return ni_bad(c,"fast-code-profile-path-bound",c->native);size_t bytes;unsigned mode;char *s=ni_read(c,p,&bytes,&mode);if(!s)return -1;np_buf actual={0},expected={0};np_put(&actual,s,bytes);free(s);char root_field[4400],origin_field[4400],artifact_field[4400],material_field[4400],reference_field[4400],include_field[4400];int rc=-1;
  if(actual.n<strlen("libneed-native-code-cache-v2\n")||memcmp(actual.p,"libneed-native-code-cache-v2\n",strlen("libneed-native-code-cache-v2\n"))){ni_bad(c,"legacy-or-wrong-code-cache-schema-refused",p);goto done;}
  char required[4400];const char *keys[]={"identity-schema","current-necessary-source-inputs-sha256","origin-necessary-source-inputs-sha256","execution-key-sha256"};for(int i=0;i<4;i++){if(ni_profile_field(c,&actual,keys[i],required))goto done;if(i?!ni_hex64(required):strcmp(required,"source-packages-v2")){ni_bad(c,"code-cache-v2-required-identity-field",keys[i]);goto done;}}
@@ -215,7 +271,7 @@ static int ni_profile_check(NiContext *c,np_buf *support,ni_result *r){char p[44
  ni_row(support,"fast-code-cache-profile-path",p);ni_row(support,"fast-code-cache-profile-sha256",r->native_profile);np_puts(support,"fast-code-cache-profile-mode\t");np_putll(support,mode);np_puts(support,"\n");ni_row(support,"native-source-kind","own-CX-code-cache-with-original-C-reference-and-unsigned-input-profile");rc=0;
 done:free(actual.p);free(expected.p);return rc;
 }
-static int ni_current_compiled_include(NiContext *c,const NiEndpoint *current,const ni_result *r){if(r->native_source_kind!=2)return 0;char h[65];if(ni_hash(c,current->include.p,current->include.n,h))return -1;return strcmp(h,r->compiled_include)?ni_bad(c,"current-before-include-does-not-match-CX-code-profile",0):0;}
+static int ni_current_compiled_include(NiContext *c,const NiEndpoint *current,const ni_result *r){if(r->native_source_kind!=2&&r->native_source_kind!=4)return 0;char h[65];if(ni_hash(c,current->include.p,current->include.n,h))return -1;return strcmp(h,r->compiled_include)?ni_bad(c,"current-before-include-does-not-match-CX-code-profile",0):0;}
 static int ni_support(NiContext *c,np_buf *b,ni_result *r){
  c->role=2;np_puts(b,"ni-runtime-support-v2-reader-code-profile\nprovider\tni-hybrid-sha256-provider-v1-threshold1024-AF_ALG-no-fallback\n");
  const char *files[]={"tools/cxlib/nninputs.cx","tools/cxlib/netpack.cx","tools/cxlib/kernelsha.cx","tools/bound","tools/bound.c","seed/unisa_libneed.c"};
@@ -227,7 +283,7 @@ static int ni_support(NiContext *c,np_buf *b,ni_result *r){
  if(!elf)return ni_bad(c,"trusted-libneed-native-ELF64-mismatch",c->native);strcpy(r->native_artifact,h);ni_row(b,"trusted-native-path",c->native);ni_row(b,"trusted-native-artifact",h);
  if(cx_fmt(r->reader_identity,sizeof r->reader_identity,"%s",d->id))return ni_bad(c,"reader-identity-bound",0);ni_row(b,"reader-identity",d->id);
  if(!strcmp(h,d->host_sha)){r->native_source_kind=d->host_kind;ni_row(b,"native-source-kind",d->host_kind==1?"legacy-HOSTCC-C-reference-explicit-nonhermetic-trust":"current-HOSTCC-C-reference-explicit-nonhermetic-trust");}
- else if(d->cx_registered&&d->cx_sha&&!strcmp(h,d->cx_sha)){r->native_source_kind=d->cx_kind;if(ni_profile_check(c,b,r))return -1;}
+ else if(d->cx_registered&&d->cx_sha&&!strcmp(h,d->cx_sha)){r->native_source_kind=d->cx_kind;if(d->cx_kind==4?ni_current_profile_check(c,b,r):ni_profile_check(c,b,r))return -1;}
  else return ni_bad(c,"trusted-libneed-native-artifact-mismatch",c->native);
  return ni_hash(c,b->p,b->n,r->runtime_support);
 }
@@ -268,7 +324,7 @@ static int ni_platform_compare(const char *current_root,const char *origin_snaps
  if(!out||!why||!cap||!current_root||!origin_snapshot_root||!trusted_native||current_root[0]!='/'||origin_snapshot_root[0]!='/'||trusted_native[0]!='/'||strpbrk(current_root,"\r\n\t")||strpbrk(origin_snapshot_root,"\r\n\t")||strpbrk(trusted_native,"\r\n\t")||sizeof(long)!=8){if(why&&cap)snprintf(why,cap,"nn-inputs-arguments");return -1;}
  int channel[2];if(pipe(channel)){snprintf(why,cap,"nn-inputs-result-pipe errno=%d",errno);return -1;}if(fcntl(channel[1],F_SETFD,FD_CLOEXEC)<0){int e=errno;close(channel[0]);close(channel[1]);snprintf(why,cap,"nn-inputs-result-pipe-cloexec errno=%d",e);return -1;}pid_t pid=fork();if(pid<0){close(channel[0]);close(channel[1]);snprintf(why,cap,"nn-inputs-fork errno=%d",errno);return -1;}
  if(!pid){close(channel[0]);if(dup2(channel[1],1)<0||dup2(channel[1],2)<0)_exit(2);NiPacket packet={0};packet.rc=ni_impl(current_root,origin_snapshot_root,trusted_native,&packet.result,packet.why,sizeof packet.why);size_t at=0;while(at<sizeof packet){ssize_t n=write(channel[1],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<=0)_exit(2);at+=(size_t)n;}close(channel[1]);_exit(0);}
- close(channel[1]);NiPacket packet={0};size_t at=0;int read_bad=0;while(at<sizeof packet){ssize_t n=read(channel[0],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<0){read_bad=1;break;}if(!n)break;at+=(size_t)n;}int closed=close(channel[0]),status=0;pid_t got;do{got=waitpid(pid,&status,0);}while(got<0&&errno==EINTR);if(read_bad||closed||at!=sizeof packet||got!=pid||!WIFEXITED(status)||WEXITSTATUS(status)){snprintf(why,cap,"nn-inputs-reader-failed packet-bytes=%lu status=%d errno=%d",(unsigned long)at,status,errno);return -1;}if(packet.rc){snprintf(why,cap,"%s",packet.why[0]?packet.why:"nn-inputs-reader-refused");return -1;}if(packet.result.native_table_calls!=2||packet.result.native_internal_reads!=-1||!packet.result.witness[0]||!packet.result.reader_identity[0]||(packet.result.native_source_kind!=1&&packet.result.native_source_kind!=2&&packet.result.native_source_kind!=3)||(packet.result.native_source_kind==2&&(!packet.result.native_profile[0]||!packet.result.compiled_include[0]))){snprintf(why,cap,"nn-inputs-result-shape");return -1;}*out=packet.result;return 0;
+ close(channel[1]);NiPacket packet={0};size_t at=0;int read_bad=0;while(at<sizeof packet){ssize_t n=read(channel[0],(char *)&packet+at,sizeof packet-at);if(n<0&&errno==EINTR)continue;if(n<0){read_bad=1;break;}if(!n)break;at+=(size_t)n;}int closed=close(channel[0]),status=0;pid_t got;do{got=waitpid(pid,&status,0);}while(got<0&&errno==EINTR);if(read_bad||closed||at!=sizeof packet||got!=pid||!WIFEXITED(status)||WEXITSTATUS(status)){snprintf(why,cap,"nn-inputs-reader-failed packet-bytes=%lu status=%d errno=%d",(unsigned long)at,status,errno);return -1;}if(packet.rc){snprintf(why,cap,"%s",packet.why[0]?packet.why:"nn-inputs-reader-refused");return -1;}if(packet.result.native_table_calls!=2||packet.result.native_internal_reads!=-1||!packet.result.witness[0]||!packet.result.reader_identity[0]||(packet.result.native_source_kind!=1&&packet.result.native_source_kind!=2&&packet.result.native_source_kind!=3&&packet.result.native_source_kind!=4)||((packet.result.native_source_kind==2||packet.result.native_source_kind==4)&&(!packet.result.native_profile[0]||!packet.result.compiled_include[0]))){snprintf(why,cap,"nn-inputs-result-shape");return -1;}*out=packet.result;return 0;
 }
 
 /* Exported items must be unconditional for the current CX module scanner. */
@@ -278,9 +334,10 @@ int ni_compare(const char *current_root,const char *origin_snapshot_root,const c
  * write a profile, execute readers or turn a supplied digest into proof;
  * tools/libneed-native-profile.cx first calls actual legacy ni_compare.
  * Every material/compiler/reference/header input is physically read here. */
-static int ni_profile_text_impl(const char *root,const char *origin,const char *material,const char *fast,const char *reference,const char *include_sha,np_buf *out,char *why,size_t cap){
+static int ni_profile_text_impl(const char *root,const char *origin,const char *material,const char *fast,const char *reference,const char *include_sha,np_buf *out,char *why,size_t cap,int current){
  if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;if(!root||!origin||!material||!fast||!reference||!include_sha||!out||!why||!cap||root[0]!='/'||origin[0]!='/'||material[0]!='/'||fast[0]!='/'||reference[0]!='/'||strpbrk(root,"\r\n\t")||strpbrk(origin,"\r\n\t")||strpbrk(material,"\r\n\t")||strpbrk(fast,"\r\n\t")||strpbrk(reference,"\r\n\t")){if(why&&cap)snprintf(why,cap,"fast-profile-text-arguments");return -1;}
- NiContext c={0};np_buf profile={0};ni_result metadata={0};int rc=-1;if(!realpath(root,c.root)||!realpath(origin,c.origin)||!realpath(fast,c.native)||!strcmp(c.root,c.origin)){ni_bad(&c,"fast-profile-text-realpaths",0);goto done;}c.role=2;c.entries=calloc(16384,sizeof *c.entries);if(!c.entries){ni_bad(&c,"allocation",0);goto done;}if(ni_profile_build(&c,material,reference,include_sha,&profile,&metadata))goto done;*out=profile;memset(&profile,0,sizeof profile);rc=0;
+ NiContext c={0};np_buf profile={0};ni_result metadata={0};int rc=-1;if(!realpath(root,c.root)||!realpath(origin,c.origin)||!realpath(fast,c.native)||!strcmp(c.root,c.origin)){ni_bad(&c,"fast-profile-text-realpaths",0);goto done;}c.role=2;c.entries=calloc(16384,sizeof *c.entries);if(!c.entries){ni_bad(&c,"allocation",0);goto done;}if(current?ni_current_profile_build(&c,material,reference,include_sha,&profile,&metadata):ni_profile_build(&c,material,reference,include_sha,&profile,&metadata))goto done;*out=profile;memset(&profile,0,sizeof profile);rc=0;
 done:if(rc)snprintf(why,cap,"%s",c.why[0]?c.why:"fast-profile-text-refused");ni_clear_entries(&c);free(c.entries);free(profile.p);return rc;
 }
-int ni_fast_profile_text(const char *root,const char *origin,const char *material,const char *fast,const char *reference,const char *include_sha,np_buf *out,char *why,size_t cap){return ni_profile_text_impl(root,origin,material,fast,reference,include_sha,out,why,cap);}
+int ni_current_profile_text(const char *root,const char *origin,const char *material,const char *fast,const char *reference,const char *include_sha,np_buf *out,char *why,size_t cap){return ni_profile_text_impl(root,origin,material,fast,reference,include_sha,out,why,cap,1);}
+int ni_fast_profile_text(const char *root,const char *origin,const char *material,const char *fast,const char *reference,const char *include_sha,np_buf *out,char *why,size_t cap){return ni_profile_text_impl(root,origin,material,fast,reference,include_sha,out,why,cap,0);}
