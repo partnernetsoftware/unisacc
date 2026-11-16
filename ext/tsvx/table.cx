@@ -1,0 +1,347 @@
+/* TSV table loader: one load, header by name, key index, duplicate-key refusal, atomic append.
+ * Format rules match tests/*.tsv: TAB separated, LF lines (a CR before LF is dropped), empty lines
+ * and lines starting with '#' are not rows, no quoting or escaping, last line may lack LF.
+ * Header modes: TT_HEADER_ROW (default when no mode bit is given): the first row is the header;
+ * TT_HEADER_COMMENT: the last '#' line before the first row is the header ("# a<TAB>b", one
+ * optional space after '#'); TT_NO_HEADER: tt_col is -ENOENT.  TT_STRICT_COLS: every row must have
+ * the header's (or the first row's) column count.
+ * Ownership: module-private slots; a handle owns one copy of the text and its row index; spans from
+ * tt_get are borrowed until tt_close.  A closed or stale handle is -EBADF (generation checked).
+ * Errors are negative errno; tt_err() gives the last error text (column name, line numbers).
+ * Rows are walked cursor-style by index: for (r = 0; r < tt_rows(t); r++).
+ */
+#pragma unisa module table
+#pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.iter
+#pragma unisa use tsvx.read
+
+enum { TT_HEADER_ROW = 1, TT_HEADER_COMMENT = 2, TT_NO_HEADER = 4, TT_STRICT_COLS = 8 };
+enum { TT_SLOTS = 64, TT_KEYMAX = 8 };
+
+typedef struct {
+    int used, gen, flags, cols, hcols, nkey, have_ix;
+    char *buf;
+    long n, nrows, hoff, hlen, dup_row, dup_first;
+    long *roff, *rlen, *rline, *ix;
+    int key[TT_KEYMAX];
+} tt_tab_t;
+
+static tt_tab_t tt_tabs[TT_SLOTS];
+static char tt_errbuf[512];
+
+static void tt_seterr(const char *what, const char *name, long nn, long a, long b) {
+    long k = 0, i;
+    const char *p;
+    for (p = what; *p && k < 300; p++) tt_errbuf[k++] = *p;
+    if (name) { for (i = 0; i < nn && k < 480; i++) tt_errbuf[k++] = name[i]; }
+    tt_errbuf[k] = 0;
+    if (a > 0) k += snprintf(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " line %ld", a);
+    if (b > 0 && k < 500) k += snprintf(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " (first at line %ld)", b);
+}
+
+const char *tt_err(void) { return tt_errbuf; }
+
+static tt_tab_t *tt_at(int t) {
+    int s = t & 63;
+    if (t <= 0 || !tt_tabs[s].used || (t >> 6) != tt_tabs[s].gen) return 0;
+    return &tt_tabs[s];
+}
+
+static void tt_free_tab(tt_tab_t *p) {
+    mm_free(p->buf); mm_free(p->roff); mm_free(p->rlen); mm_free(p->rline); mm_free(p->ix);
+    p->buf = 0; p->roff = p->rlen = p->rline = p->ix = 0; p->used = 0; p->have_ix = 0;
+}
+
+static int tt_span_field(const char *s, long off, long len, int idx, long *fo, long *fl) {
+    tx_iter_t it;
+    tx_iter_init(&it, s, off + len);
+    it.off = off; it.len = len;
+    return tv_field(&it, idx, fo, fl);
+}
+
+static int tt_count(const char *s, long n) { int c = 1; long i; for (i = 0; i < n; i++) if (s[i] == '\t') c++; return c; }
+
+/* Takes ownership of BUF (N bytes, one spare byte after). */
+static int tt_build(int *out, char *buf, long n, int flags) {
+    int s, mode = flags & (TT_HEADER_ROW | TT_HEADER_COMMENT | TT_NO_HEADER);
+    long pos = 0, line = 0, cap = 64, lastc_off = -1, lastc_len = 0, i;
+    tt_tab_t *p;
+    if (!mode) mode = TT_HEADER_ROW;
+    if (mode != TT_HEADER_ROW && mode != TT_HEADER_COMMENT && mode != TT_NO_HEADER) { mm_free(buf); tt_seterr("bad header flags", 0, 0, 0, 0); return -EINVAL; }
+    for (s = 0; s < TT_SLOTS; s++) if (!tt_tabs[s].used) break;
+    if (s == TT_SLOTS) { mm_free(buf); tt_seterr("too many open tables", 0, 0, 0, 0); return -EMFILE; }
+    p = &tt_tabs[s];
+    p->buf = buf; p->n = n; p->flags = flags; p->cols = 0; p->hcols = 0; p->nrows = 0;
+    p->hoff = -1; p->hlen = 0; p->nkey = 0; p->have_ix = 0; p->dup_row = p->dup_first = -1; p->ix = 0;
+    p->roff = (long *)mm_alloc(cap * (long)sizeof(long));
+    p->rlen = (long *)mm_alloc(cap * (long)sizeof(long));
+    p->rline = (long *)mm_alloc(cap * (long)sizeof(long));
+    if (!p->roff || !p->rlen || !p->rline) { tt_free_tab(p); return -ENOMEM; }
+    while (pos < n) {
+        long st = pos, len, e;
+        for (e = pos; e < n && buf[e] != '\n'; e++) {}
+        line++;
+        pos = e < n ? e + 1 : n;
+        len = e - st;
+        if (len > 0 && buf[st + len - 1] == '\r') len--;
+        if (len == 0) continue;
+        if (buf[st] == '#') { lastc_off = st; lastc_len = len; continue; }
+        for (i = 0; i < len; i++) if (buf[st + i] == 0) { tt_free_tab(p); tt_seterr("NUL byte in row", 0, 0, line, 0); return -EINVAL; }
+        if (p->hoff < 0 && mode == TT_HEADER_COMMENT) {
+            if (lastc_off < 0) { tt_free_tab(p); tt_seterr("no comment header before first row", 0, 0, line, 0); return -EINVAL; }
+            p->hoff = lastc_off + 1; p->hlen = lastc_len - 1;
+            if (p->hlen > 0 && buf[p->hoff] == ' ') { p->hoff++; p->hlen--; }
+            p->hcols = tt_count(buf + p->hoff, p->hlen);
+        }
+        if (p->hoff < 0 && mode == TT_HEADER_ROW) {
+            p->hoff = st; p->hlen = len; p->hcols = tt_count(buf + st, len);
+            continue;
+        }
+        if (!p->cols) p->cols = p->hcols ? p->hcols : tt_count(buf + st, len);
+        if ((flags & TT_STRICT_COLS) && tt_count(buf + st, len) != p->cols) {
+            tt_free_tab(p); tt_seterr("column count differs from header at", 0, 0, line, 0); return -EINVAL;
+        }
+        if (p->nrows == cap) {
+            long *a, *b, *c; cap *= 2;
+            a = (long *)mm_grow(p->roff, cap * (long)sizeof(long)); if (a) p->roff = a;
+            b = (long *)mm_grow(p->rlen, cap * (long)sizeof(long)); if (b) p->rlen = b;
+            c = (long *)mm_grow(p->rline, cap * (long)sizeof(long)); if (c) p->rline = c;
+            if (!a || !b || !c) { tt_free_tab(p); return -ENOMEM; }
+        }
+        p->roff[p->nrows] = st; p->rlen[p->nrows] = len; p->rline[p->nrows] = line; p->nrows++;
+    }
+    if (!p->cols) p->cols = p->hcols;
+    p->used = 1; p->gen = (p->gen + 1) & 0xffffff; if (!p->gen) p->gen = 1;
+    *out = (p->gen << 6) | s;
+    tt_errbuf[0] = 0;
+    return 0;
+}
+
+int tt_parse(int *t, const char *text, long n, int flags) {
+    char *b;
+    if (!t || n < 0 || (!text && n > 0)) return -EINVAL;
+    *t = 0;
+    b = (char *)mm_alloc(n + 1);
+    if (!b) return -ENOMEM;
+    if (n && mm_copy(b, n + 1, text, n)) { mm_free(b); return -EIO; }
+    b[n] = 0;
+    return tt_build(t, b, n, flags);
+}
+
+int tt_load(int *t, const char *path, long max, int flags) {
+    unsigned char *b = 0; int64_t n = 0; int r;
+    if (!t || !path) return -EINVAL;
+    *t = 0;
+    r = sy_read_file(path, &b, &n, max);
+    if (r) { tt_seterr("cannot read ", path, (long)strlen(path), 0, 0); return r; }
+    return tt_build(t, (char *)b, (long)n, flags);
+}
+
+int tt_close(int t) { tt_tab_t *p = tt_at(t); if (!p) return -EBADF; tt_free_tab(p); return 0; }
+long tt_rows(int t) { tt_tab_t *p = tt_at(t); return p ? p->nrows : -EBADF; }
+int tt_cols(int t) { tt_tab_t *p = tt_at(t); return p ? p->cols : -EBADF; }
+long tt_line(int t, long row) {
+    tt_tab_t *p = tt_at(t);
+    if (!p) return -EBADF;
+    if (row < 0 || row >= p->nrows) return -ERANGE;
+    return p->rline[row];
+}
+
+int tt_col(int t, const char *name) {
+    tt_tab_t *p = tt_at(t);
+    long nn, fo, fl; int i;
+    if (!p) return -EBADF;
+    if (!name) return -EINVAL;
+    nn = (long)strlen(name);
+    if (p->hoff >= 0)
+        for (i = 0; tt_span_field(p->buf, p->hoff, p->hlen, i, &fo, &fl) == 0; i++)
+            if (fl == nn && memcmp(p->buf + fo, name, (size_t)nn) == 0) return i;
+    tt_seterr("missing column: ", name, nn, 0, 0);
+    return -ENOENT;
+}
+
+/* All N names must exist; their indexes go to IDX.  -ENOENT names the first missing one in tt_err. */
+int tt_need(int t, const char *const *names, int n, int *idx) {
+    int i, c;
+    if (!tt_at(t)) return -EBADF;
+    if (!names || !idx || n < 0) return -EINVAL;
+    for (i = 0; i < n; i++) { c = tt_col(t, names[i]); if (c < 0) return c; idx[i] = c; }
+    return 0;
+}
+
+int tt_get(int t, long row, int col, const char **s, long *n) {
+    tt_tab_t *p = tt_at(t);
+    long fo, fl; int r;
+    if (!p) return -EBADF;
+    if (!s || !n) return -EINVAL;
+    if (row < 0 || row >= p->nrows || col < 0) return -ERANGE;
+    r = tt_span_field(p->buf, p->roff[row], p->rlen[row], col, &fo, &fl);
+    if (r) return r;
+    *s = p->buf + fo; *n = fl;
+    return 0;
+}
+
+int tt_getz(int t, long row, int col, char *dst, long cap) {
+    const char *s; long n; int r = tt_get(t, row, col, &s, &n);
+    if (r) return r;
+    if (!dst || cap <= 0) return -EINVAL;
+    if (n + 1 > cap) return -ERANGE;
+    if (n && mm_copy(dst, cap, s, n)) return -EIO;
+    dst[n] = 0;
+    return 0;
+}
+
+/* -1, 0, 1 comparing the index key of rows A and B. */
+static int tt_keycmp(tt_tab_t *p, long a, long b) {
+    int k; long ao, al, bo, bl, m; int c;
+    for (k = 0; k < p->nkey; k++) {
+        if (tt_span_field(p->buf, p->roff[a], p->rlen[a], p->key[k], &ao, &al)) al = -1;
+        if (tt_span_field(p->buf, p->roff[b], p->rlen[b], p->key[k], &bo, &bl)) bl = -1;
+        if (al < 0 || bl < 0) { if (al != bl) return al < bl ? -1 : 1; continue; }
+        m = al < bl ? al : bl;
+        c = m ? memcmp(p->buf + ao, p->buf + bo, (size_t)m) : 0;
+        if (c) return c < 0 ? -1 : 1;
+        if (al != bl) return al < bl ? -1 : 1;
+    }
+    return 0;
+}
+
+static void tt_msort(tt_tab_t *p, long *a, long *tmp, long n) {
+    long h, i, j, k;
+    if (n < 2) return;
+    h = n / 2;
+    tt_msort(p, a, tmp, h); tt_msort(p, a + h, tmp, n - h);
+    for (i = 0, j = h, k = 0; i < h || j < n;)
+        tmp[k++] = (j >= n || (i < h && tt_keycmp(p, a[i], a[j]) <= 0)) ? a[i++] : a[j++];
+    for (i = 0; i < n; i++) a[i] = tmp[i];
+}
+
+/* Index rows on the composite key COLS[0..N-1].  -EEXIST on a duplicate key: tt_dup gives both rows
+ * and tt_err the source lines.  A row missing a key column is -ERANGE. */
+int tt_index_cols(int t, const int *cols, int n) {
+    tt_tab_t *p = tt_at(t);
+    long *tmp, r, fo, fl; int k;
+    if (!p) return -EBADF;
+    if (!cols || n < 1 || n > TT_KEYMAX) return -EINVAL;
+    for (k = 0; k < n; k++) if (cols[k] < 0) return -ERANGE;
+    for (r = 0; r < p->nrows; r++) for (k = 0; k < n; k++)
+        if (tt_span_field(p->buf, p->roff[r], p->rlen[r], cols[k], &fo, &fl)) { tt_seterr("key column missing at", 0, 0, p->rline[r], 0); return -ERANGE; }
+    mm_free(p->ix); p->ix = 0; p->have_ix = 0; p->dup_row = p->dup_first = -1;
+    p->nkey = n; for (k = 0; k < n; k++) p->key[k] = cols[k];
+    p->ix = (long *)mm_alloc((p->nrows + 1) * (long)sizeof(long));
+    tmp = (long *)mm_alloc((p->nrows + 1) * (long)sizeof(long));
+    if (!p->ix || !tmp) { mm_free(tmp); mm_free(p->ix); p->ix = 0; return -ENOMEM; }
+    for (r = 0; r < p->nrows; r++) p->ix[r] = r;
+    tt_msort(p, p->ix, tmp, p->nrows);
+    mm_free(tmp);
+    for (r = 1; r < p->nrows; r++)
+        if (tt_keycmp(p, p->ix[r - 1], p->ix[r]) == 0) {
+            long a = p->ix[r - 1], b = p->ix[r];
+            p->dup_first = a < b ? a : b; p->dup_row = a < b ? b : a;
+            tt_seterr("duplicate key at", 0, 0, p->rline[p->dup_row], p->rline[p->dup_first]);
+            mm_free(p->ix); p->ix = 0;
+            return -EEXIST;
+        }
+    p->have_ix = 1;
+    return 0;
+}
+
+int tt_index(int t, int col) { return tt_index_cols(t, &col, 1); }
+
+/* Rows of the last duplicate found by tt_index*: later row in *ROW, earlier in *FIRST.  -ENOENT if none. */
+int tt_dup(int t, long *row, long *first) {
+    tt_tab_t *p = tt_at(t);
+    if (!p) return -EBADF;
+    if (p->dup_row < 0) return -ENOENT;
+    if (row) *row = p->dup_row;
+    if (first) *first = p->dup_first;
+    return 0;
+}
+
+static int tt_cmpkeys(tt_tab_t *p, long r, const char *const *keys, const long *kns) {
+    int k; long fo, fl, m; int c;
+    for (k = 0; k < p->nkey; k++) {
+        tt_span_field(p->buf, p->roff[r], p->rlen[r], p->key[k], &fo, &fl);
+        m = fl < kns[k] ? fl : kns[k];
+        c = m ? memcmp(p->buf + fo, keys[k], (size_t)m) : 0;
+        if (c) return c < 0 ? -1 : 1;
+        if (fl != kns[k]) return fl < kns[k] ? -1 : 1;
+    }
+    return 0;
+}
+
+/* Row with the composite key KEYS (lengths KNS) on the current index; -ENOENT absent, -EINVAL no index. */
+long tt_find_keys(int t, const char *const *keys, const long *kns) {
+    tt_tab_t *p = tt_at(t);
+    long lo = 0, hi, mid; int c, k;
+    if (!p) return -EBADF;
+    if (!p->have_ix || !keys || !kns) return -EINVAL;
+    for (k = 0; k < p->nkey; k++) if (!keys[k] || kns[k] < 0) return -EINVAL;
+    hi = p->nrows;
+    while (lo < hi) {
+        mid = lo + (hi - lo) / 2;
+        c = tt_cmpkeys(p, p->ix[mid], keys, kns);
+        if (c == 0) return p->ix[mid];
+        if (c < 0) lo = mid + 1; else hi = mid;
+    }
+    return -ENOENT;
+}
+
+/* Row whose column COL equals KEY: binary search when the index is on COL alone, else a scan. */
+long tt_find(int t, int col, const char *key, long kn) {
+    tt_tab_t *p = tt_at(t);
+    long r, fo, fl;
+    if (!p) return -EBADF;
+    if (!key || kn < 0 || col < 0) return -EINVAL;
+    if (p->have_ix && p->nkey == 1 && p->key[0] == col) return tt_find_keys(t, &key, &kn);
+    for (r = 0; r < p->nrows; r++)
+        if (tt_span_field(p->buf, p->roff[r], p->rlen[r], col, &fo, &fl) == 0 && fl == kn && (kn == 0 || memcmp(p->buf + fo, key, (size_t)kn) == 0)) return r;
+    return -ENOENT;
+}
+
+/* Append one row of N fields to PATH (created 0644).  EXPECT_COLS > 0 must equal N.  Fields may not
+ * hold TAB, CR or LF.  The row goes out in one write under an exclusive flock on an O_APPEND fd; a
+ * missing final LF in the file is supplied first; a failed write truncates back, so no half row stays.
+ * On refusal the file bytes are unchanged. */
+int tt_append_row(const char *path, const char *const *fields, int n, int expect_cols) {
+    long need = 1, k, size;
+    int i, fd, r, locked;
+    char *line, last = '\n';
+    if (!path || !fields || n < 1) return -EINVAL;
+    if (expect_cols > 0 && n != expect_cols) { tt_seterr("append column count differs", 0, 0, 0, 0); return -EINVAL; }
+    for (i = 0; i < n; i++) {
+        const char *f = fields[i];
+        if (!f) return -EINVAL;
+        for (; *f; f++) { if (*f == '\t' || *f == '\n' || *f == '\r') { tt_seterr("append field holds TAB/CR/LF", 0, 0, 0, 0); return -EINVAL; } need++; }
+        need++;
+    }
+    line = (char *)mm_alloc(need + 1);
+    if (!line) return -ENOMEM;
+    fd = sy_open(path, O_RDWR | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) { mm_free(line); return fd; }
+    locked = sy_flock(fd, 2) == 0;
+    size = sy_lseek(fd, 0, SEEK_END);
+    if (size < 0) { r = (int)size; goto out; }
+    if (size > 0) {
+        if (sy_lseek(fd, size - 1, SEEK_SET) < 0 || sy_read(fd, &last, 1) != 1) { r = -EIO; goto out; }
+    }
+    k = 0;
+    if (last != '\n') line[k++] = '\n';
+    for (i = 0; i < n; i++) {
+        const char *f = fields[i];
+        if (i) line[k++] = '\t';
+        while (*f) line[k++] = *f++;
+    }
+    line[k++] = '\n';
+    r = sy_write_all(fd, line, k);
+    if (r) sy_truncate(fd, size);
+out:
+    if (locked) sy_flock(fd, 8);
+    sy_close(fd);
+    mm_free(line);
+    return r;
+}

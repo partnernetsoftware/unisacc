@@ -1,0 +1,123 @@
+/* Checks ext.tsvx table.cx (tt_*): header by name, missing column named, duplicate key with line
+ * numbers, composite key, comments and blank lines, strict columns, NUL refusal, CRLF, size bound,
+ * closed handle, atomic append (refusal leaves bytes unchanged, missing LF supplied, 2x100 concurrent
+ * appends without interleaving), long rows and non-UTF-8 bytes kept as is. */
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.process
+#pragma unisa use tsvx.table
+static int bad, total;
+static void ok(int c, const char *name) { total++; printf("%s\ttsvx-table:%s\n", c ? "PASS" : "FAIL", name); if (!c) bad++; }
+static int eq(int t, long row, int col, const char *want) {
+    const char *s; long n;
+    if (tt_get(t, row, col, &s, &n)) return 0;
+    return n == (long)strlen(want) && memcmp(s, want, (size_t)n) == 0;
+}
+static int has(const char *hay, const char *needle) {
+    long i, j, hn = (long)strlen(hay), nn = (long)strlen(needle);
+    for (i = 0; i + nn <= hn; i++) { for (j = 0; j < nn && hay[i + j] == needle[j]; j++) {} if (j == nn) return 1; }
+    return 0;
+}
+static long file_bytes(const char *p, char *dst, long cap) {
+    unsigned char *b; int64_t n; long i;
+    if (sy_read_file(p, &b, &n, 0)) return -1;
+    for (i = 0; i < n && i < cap - 1; i++) dst[i] = (char)b[i];
+    dst[i] = 0; mm_free(b); return (long)n;
+}
+int main(void) {
+    int t = 0, t2 = 0, c, idx[3]; long row, first; char buf[256], dir[128], path[200];
+    const char *txt = "# note\nid\tname\tval\n\n# mid\na\tx\t1\nb\t\t2\r\nc\tz\t3";
+    ok(tt_parse(&t, txt, (long)strlen(txt), TT_HEADER_ROW) == 0, "parse");
+    ok(tt_rows(t) == 3 && tt_cols(t) == 3, "rows-cols-skip-comment-blank-header");
+    ok(tt_col(t, "val") == 2 && tt_col(t, "id") == 0, "col-by-name");
+    ok(tt_col(t, "nope") == -ENOENT && has(tt_err(), "missing column: nope"), "missing-col-named");
+    { const char *nm[3] = {"id", "zzz", "val"}; ok(tt_need(t, nm, 3, idx) == -ENOENT && has(tt_err(), "zzz"), "need-missing-named"); }
+    { const char *nm[2] = {"val", "id"}; ok(tt_need(t, nm, 2, idx) == 0 && idx[0] == 2 && idx[1] == 0, "need-ok"); }
+    ok(eq(t, 0, 1, "x") && eq(t, 1, 1, "") && eq(t, 1, 2, "2") && eq(t, 2, 2, "3"), "get-empty-crlf-nolf");
+    ok(tt_line(t, 0) == 5 && tt_line(t, 2) == 7 && tt_line(t, 3) == -ERANGE, "source-line");
+    { const char *s; long n; ok(tt_get(t, 0, 3, &s, &n) == -ERANGE && tt_get(t, 3, 0, &s, &n) == -ERANGE && tt_get(t, -1, 0, &s, &n) == -ERANGE, "get-bounds"); }
+    ok(tt_getz(t, 0, 1, buf, 2) == 0 && buf[0] == 'x' && tt_getz(t, 0, 1, buf, 1) == -ERANGE, "getz-cap");
+    ok(tt_index(t, 0) == 0 && tt_find(t, 0, "b", 1) == 1 && tt_find(t, 0, "q", 1) == -ENOENT, "index-find");
+    ok(tt_find(t, 1, "z", 1) == 2, "find-scan-unindexed");
+    ok(tt_close(t) == 0 && tt_rows(t) == -EBADF && tt_close(t) == -EBADF, "closed-ebadf");
+    { const char *s; long n; ok(tt_get(t, 0, 0, &s, &n) == -EBADF, "closed-get-ebadf"); }
+    {
+        const char *d = "k\tv\na\t1\nb\t2\n#c\na\t3\n";
+        ok(tt_parse(&t, d, (long)strlen(d), 0) == 0, "dup-parse");
+        ok(tt_index(t, 0) == -EEXIST && tt_dup(t, &row, &first) == 0 && row == 2 && first == 0, "dup-rows");
+        ok(has(tt_err(), "line 5") && has(tt_err(), "first at line 2"), "dup-lines-reported");
+        ok(tt_find_keys(t, 0, 0) == -EINVAL, "no-index-after-dup");
+        { int cc[2] = {0, 1}; ok(tt_index_cols(t, cc, 2) == 0, "composite-unique"); }
+        { const char *k[2] = {"a", "3"}; long kn[2] = {1, 1}; ok(tt_find_keys(t, k, kn) == 2, "composite-find"); }
+        { const char *k[2] = {"a", "2"}; long kn[2] = {1, 1}; ok(tt_find_keys(t, k, kn) == -ENOENT, "composite-miss"); }
+        tt_close(t);
+        d = "k\tv\na\t1\na\t1\n";
+        tt_parse(&t, d, (long)strlen(d), 0);
+        { int cc[2] = {0, 1}; ok(tt_index_cols(t, cc, 2) == -EEXIST && has(tt_err(), "line 3"), "composite-dup"); }
+        tt_close(t);
+    }
+    {
+        const char *d = "# x\n# a\tb\n1\t2\n3\t4\n";
+        ok(tt_parse(&t, d, (long)strlen(d), TT_HEADER_COMMENT) == 0 && tt_rows(t) == 2 && tt_col(t, "b") == 1 && eq(t, 0, 0, "1"), "comment-header");
+        tt_close(t);
+        ok(tt_parse(&t, "1\t2\n", 4, TT_HEADER_COMMENT) == -EINVAL, "comment-header-absent");
+        ok(tt_parse(&t, d, (long)strlen(d), TT_NO_HEADER) == 0 && tt_rows(t) == 2 && tt_col(t, "a") == -ENOENT, "no-header");
+        tt_close(t);
+    }
+    {
+        const char *d = "a\tb\n1\t2\n3\n4\t5\n";
+        ok(tt_parse(&t, d, (long)strlen(d), TT_STRICT_COLS) == -EINVAL && has(tt_err(), "line 3"), "strict-short-row-line");
+        d = "a\tb\n1\t2\t3\n";
+        ok(tt_parse(&t, d, (long)strlen(d), TT_STRICT_COLS) == -EINVAL && has(tt_err(), "line 2"), "strict-long-row");
+        ok(tt_parse(&t, d, (long)strlen(d), 0) == 0 && tt_rows(t) == 1, "lax-long-row");
+        tt_close(t);
+        ok(tt_parse(&t, "a\tb\n1\0\t2\n", 9, 0) == -EINVAL && has(tt_err(), "NUL"), "nul-refused");
+        ok(tt_parse(&t, "", 0, 0) == 0 && tt_rows(t) == 0 && tt_col(t, "a") == -ENOENT, "empty");
+        tt_close(t);
+    }
+    {
+        static char big[200000]; long i, n = 0;
+        big[n++] = 'a'; big[n++] = '\t'; big[n++] = 'b'; big[n++] = '\n';
+        for (i = 0; i < 150000; i++) big[n++] = 'y';
+        big[n++] = '\t'; big[n++] = (char)0xff; big[n++] = (char)0xc3; big[n++] = '\n';
+        ok(tt_parse(&t, big, n, TT_STRICT_COLS) == 0, "long-row");
+        { const char *s; long l; ok(tt_get(t, 0, 0, &s, &l) == 0 && l == 150000 && tt_get(t, 0, 1, &s, &l) == 0 && l == 2 && (unsigned char)s[0] == 0xff && (unsigned char)s[1] == 0xc3, "non-utf8-bytes-kept"); }
+        tt_close(t);
+    }
+    ok(tt_parse(0, "", 0, 0) == -EINVAL && tt_parse(&t, 0, 3, 0) == -EINVAL && tt_parse(&t, "a", 1, 3) == -EINVAL, "bad-args");
+    if (snprintf(dir, sizeof dir, "/tmp/check-tsvx-table.%d", (int)getpid()) <= 0) return 2;
+    sy_mkdir(dir, 0755);
+    if (snprintf(path, sizeof path, "%s/t.tsv", dir) <= 0) return 2;
+    sy_write_file(path, "k\tv\nx\t1", 7, 0644);
+    ok(tt_load(&t, path, 0, 0) == 0 && tt_rows(t) == 1 && eq(t, 0, 1, "1"), "load");
+    tt_close(t);
+    ok(tt_load(&t, path, 3, 0) == -EFBIG, "load-efbig");
+    { char p2[220]; if (snprintf(p2, sizeof p2, "%s/none.tsv", dir) <= 0) return 2; ok(tt_load(&t, p2, 0, 0) == -ENOENT && has(tt_err(), "none.tsv"), "load-enoent-named"); }
+    {
+        const char *f3[3] = {"y", "2", "z"}, *f2[2] = {"y", "2"}, *ft[2] = {"y\tq", "2"};
+        ok(tt_append_row(path, f3, 3, 2) == -EINVAL && file_bytes(path, buf, sizeof buf) == 7, "append-cols-refused-unchanged");
+        ok(tt_append_row(path, ft, 2, 2) == -EINVAL && file_bytes(path, buf, sizeof buf) == 7, "append-tab-refused-unchanged");
+        ok(tt_append_row(path, f2, 2, 2) == 0 && file_bytes(path, buf, sizeof buf) == 12 && strcmp(buf, "k\tv\nx\t1\ny\t2\n") == 0, "append-supplies-lf");
+    }
+    {
+        int pid[2], k, st; long rows;
+        for (k = 0; k < 2; k++) {
+            pid[k] = fork();
+            if (pid[k] == 0) {
+                int i; char a[32]; const char *f[2];
+                for (i = 0; i < 100; i++) { if (snprintf(a, sizeof a, "p%d-%d", k, i) <= 0) _exit(1); f[0] = a; f[1] = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"; if (tt_append_row(path, f, 2, 2)) _exit(1); }
+                _exit(0);
+            }
+        }
+        c = 0;
+        for (k = 0; k < 2; k++) { st = 0; waitpid(pid[k], &st, 0); if (st) c = 1; }
+        ok(c == 0 && tt_load(&t, path, 0, TT_STRICT_COLS) == 0, "concurrent-append-strict-load");
+        rows = tt_rows(t);
+        ok(rows == 202 && tt_index(t, 0) == 0 && tt_find(t, 0, "p1-99", 5) >= 0 && tt_find(t, 0, "p0-0", 4) >= 0, "concurrent-200-no-interleave");
+        tt_close(t);
+    }
+    sy_unlink(path); sy_rmdir(dir);
+    ok(tt_parse(&t2, "a\n", 2, 0) == 0 && tt_close(t2) == 0, "reuse-slot");
+    printf("TSVX_TABLE failed=%d total=%d\n", bad, total);
+    return bad;
+}
