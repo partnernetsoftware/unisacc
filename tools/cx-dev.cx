@@ -283,7 +283,14 @@ static int ctor_lock(int take) {
     return 1;
 }
 /* one net build: gen -> table-lint -> tbl -> net, in a child */
-typedef struct { int rec, base; char tree[PW], ctor[PW], dir[PW], cache[PW]; pid_t pid; char status[96]; long ms[4]; int cached; } Job;
+/* directory without refusing: 0 when P exists (made if needed) and is writable */
+static int mkq(const char *p) {
+    char b[PW]; size_t i, n = strlen(p);
+    if (n >= PW) return 1;
+    for (i = 1; i <= n; i++) if (p[i] == '/' || !p[i]) { cpy(b, PW, p, i); b[i] = 0; if (mkdir(b, 0700) && errno != EEXIST) return 1; }
+    return access(p, 7) ? 1 : 0;
+}
+typedef struct { int rec, base; char tree[PW], ctor[PW], dir[PW], cache[PW], shared[PW]; pid_t pid; char status[96]; long ms[4]; int cached; } Job;
 static int build(Job *j) {
     static const char *names[4] = {"gen", "lint", "tbl", "net"};
     Rec *r = &recs[j->rec]; char g[PW], t[PW], n[PW], json[PW], tbl[PW], net[PW], lint[PW], log[PW], res[PW], lo[PW], lc[PW + 8], line[400]; char *av[12]; int k = 0, i, rc = 0, at = 0; long t0;
@@ -411,7 +418,7 @@ static char rdig[MAXR][65];   /* per-recipe digest of the changed files that rea
 /* report: 0 quiet, 1 print CXDEV_RELOAD lines to stderr */
 static void reload(const char *fp, int report) {
     FList wl = {0}, bl = {0}, ch = {0}; char base[PW], p[PW], q[PW], lock[PW], idxp[PW], rel[PW], cdig[65]; int t, i, k, naff = 0, seedch = 0, execch = 0, nj = 0, par = 2, fd, nbuilt = 0; long t0 = ms_now(), sum[4] = {0, 0, 0, 0}, swap_ms = 0; const char *e;
-    char wctor[PW], bctor[PW], wkey[65], bkey[65], why[96]; Job *jobs; Pkg inst, cur; char *ib, *nb; size_t ibn; np_buf nbody = {0}; State old = S;
+    char wctor[PW], bctor[PW], wkey[65], bkey[65], why[96], shm[PW]; int nshared = 0; Job *jobs; Pkg inst, cur; char *ib, *nb; size_t ibn; np_buf nbody = {0}; State old = S;
     pj(lock, sess, "reload.lock");
     if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) {
         size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0;
@@ -517,6 +524,12 @@ static void reload(const char *fp, int report) {
     }
     jobs = calloc((size_t)(2 * MAXR), sizeof(Job)); if (!jobs) refuse("allocation", 0);
     pj(p, cdir, "m"); mkp(p);
+    {   const char *hm = getenv("HOME"), *cc = getenv("CXDEV_CACHE");
+        shm[0] = 0;
+        if (cc && cc[0]) { if (cc[0] != 47 || cx_fmt(shm, PW, "%s/m", cc)) shm[0] = 0; }
+        else if (!hm || hm[0] != 47 || cx_fmt(shm, PW, "%s/.cache/unisacc/cx-dev/m", hm)) shm[0] = 0;
+        if (shm[0] && mkq(shm)) shm[0] = 0;
+    }
     if (naff > 0) for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) {
         int b;
         for (b = 0; b < 2; b++) {
@@ -531,15 +544,25 @@ static void reload(const char *fp, int report) {
             pj(j->dir, sess, rel);
             { if (cx_fmt(j->tree, PW, "%s", b ? base : wt)) refuse("text-too-long", 0); } { if (cx_fmt(j->ctor, PW, "%s", b ? bctor : wctor)) refuse("text-too-long", 0); }
             { char lcp[PW + 8]; if (cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) || !isfile(lcp)) unlink(j->cache); }
+            /* baseline nets (installed revision's tree: the key fixes every input) are shared between bundles and
+               survive --close, like the constructors; worktree nets stay in the bundle.  CXDEV_CACHE=- turns it off. */
+            j->shared[0] = 0;
+            if (b && shm[0] && !cx_fmt(rel, PW, "%s.net", kh)) {
+                char sl[PW + 8], lcp[PW + 8];
+                pj(j->shared, shm, rel);
+                if (!isfile(j->cache) && !cx_fmt(sl, sizeof sl, "%s.lint", j->shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) && isfile(j->shared) && isfile(sl)) { copyfile(sl, lcp, 0600); copyfile(j->shared, j->cache, 0600); j->shared[0] = 0; nshared++; }
+            }
             if (isfile(j->cache)) { j->cached = 1; { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } for (f = 0; f < 4; f++) j->ms[f] = 0; }
         }
     }
+    if (report && nshared) fprintf(stderr, "CXDEV_SHARED\tbaseline_nets=%d\n", nshared);
     run_jobs(jobs, nj, par);
     /* locate, then collect the new M records */
     for (i = 0; i < nj; i++) {
         Rec *r = &recs[jobs[i].rec]; char *net, *m; size_t nn, mn; long x;
         for (t = 0; t < 4; t++) if (jobs[i].ms[t] > 0) sum[t] += jobs[i].ms[t];
         if (!jobs[i].cached) nbuilt++;
+        if (!jobs[i].cached && jobs[i].shared[0] && !strcmp(jobs[i].status, "ok")) { char sl[PW + 8], lcp[PW + 8]; if (!cx_fmt(sl, sizeof sl, "%s.lint", jobs[i].shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", jobs[i].cache)) { copyfile(lcp, sl, 0600); copyfile(jobs[i].cache, jobs[i].shared, 0600); } }
         if (strcmp(jobs[i].status, "ok")) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "%s%s", jobs[i].base ? "baseline-" : "", jobs[i].status)) refuse("text-too-long", 0); } continue; }
         if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
         free(net);
