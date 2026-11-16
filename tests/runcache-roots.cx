@@ -8,7 +8,10 @@
    UNISACC_RUN_CACHE=0 arm.
    Controls: (1) B after A hits; (2) one source byte changed misses; (3) one
    used-module byte changed misses and the new value shows; (4) another
-   compiler identity (a copy of CANDIDATE, new inode) misses; (5) a changed
+   compiler identity (a copy of CANDIDATE, new inode) misses; when CANDIDATE
+   is a forwarding shell (tools/dev-product.cx shape) the body it execs and
+   the container are copied instead, a shell copy naming the same body must
+   still hit, and a new body with the same container must miss; (5) a changed
    -D option misses and the new value shows; (6) a unit naming __FILE__ run
    by absolute path prints its own root in A and in B and B does not hit.
    rc 0 all PASS, 1 some FAIL, 2 usage or setup trouble. */
@@ -37,10 +40,13 @@ static int has(const char *out, const char *needle) { return tx_find(out, outn, 
 
 /* run CAND inside DIR on ARG1 [ARG2]; stdout and stderr merged into *outp */
 static int run(const char *cand, const char *dir, int cache_on, const char *a1, const char *a2, char **outp) {
-    char envc[2300], *v[24], *out = 0;
+    char envc[2300], envd[2300], *v[24], *out = 0;
     size_t n = 0;
     int k = 0, rc;
     if (cx_fmt(envc, sizeof envc, "UNISACC_E3CACHE=%s", cache)) die("env");
+    /* a forwarding shell sets UNISACC_CACHE_DIR, which wins over UNISACC_E3CACHE;
+       its default is overridden through DEV_PRODUCT_CACHE so the cache stays private */
+    if (cx_fmt(envd, sizeof envd, "DEV_PRODUCT_CACHE=%s", cache)) die("env");
     v[k++] = "env";
     /* the parent -run exports its own container path (relative to the parent cwd) and capture switches */
     v[k++] = "-u";
@@ -52,6 +58,7 @@ static int run(const char *cand, const char *dir, int cache_on, const char *a1, 
     v[k++] = "-C";
     v[k++] = (char *)dir;
     v[k++] = envc;
+    v[k++] = envd;
     v[k++] = "UNISACC_RR_TIME=1";
     v[k++] = cache_on ? "UNISACC_RUN_CACHE=1" : "UNISACC_RUN_CACHE=0";
     v[k++] = "sh";
@@ -75,6 +82,48 @@ static void arm(const char *cand, const char *dir, const char *a1, const char *a
     int rc = run(cand, dir, 0, a1, a2, &out);
     if (cx_fmt(label, sizeof label, "%s-cache-off-arm", name)) die("fmt");
     ck(rc == 0 && has(out, want), label);
+}
+
+/* forwarding-shell candidate (tools/dev-product.cx): a #! text whose exec line reads
+   UNISA_CONTAINER='PKG' ... UNISACC_CACHE_DIR="${DEV_PRODUCT_CACHE:-DIR}" 'BODY' "$@"
+   Read by its quoting: exactly four single quotes, the first pair holds the
+   container path, the second pair the compiler body path. */
+static char sh_pkg[2200], sh_body[2200];
+static long sh_q[4];
+static int lit_at(const char *s, long n, long at, const char *lit) {
+    long i, m = tx_len(lit, 64);
+    if (at < 0 || at + m > n) return 0;
+    for (i = 0; i < m; i++) if (s[at + i] != lit[i]) return 0;
+    return 1;
+}
+static int shell_parse(const char *s, long n) {
+    static const char key[] = "UNISA_CONTAINER=", own[] = "\"${DEV_PRODUCT_CACHE:-", tail[] = " \"$@\"";
+    long i, nq = 0, dq = -1;
+    if (n < 2 || s[0] != '#' || s[1] != '!') return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] != '\'') continue;
+        if (nq == 4) die("forwarding shell: more than two quoted paths");
+        sh_q[nq++] = i;
+    }
+    if (nq != 4) die("forwarding shell: expected two quoted paths");
+    if (!lit_at(s, n, sh_q[0] - tx_len(key, 64), key)) die("forwarding shell: first quoted path is not UNISA_CONTAINER");
+    if (!lit_at(s, n, sh_q[3] + 1, tail)) die("forwarding shell: second quoted path is not the exec target");
+    for (i = sh_q[1]; i < sh_q[2] && dq < 0; i++) if (s[i] == '"') dq = i;
+    if (!lit_at(s, n, dq, own)) die("forwarding shell: no DEV_PRODUCT_CACHE override, private cache impossible");
+    if (cx_fmt(sh_pkg, sizeof sh_pkg, "%.*s", (int)(sh_q[1] - sh_q[0] - 1), s + sh_q[0] + 1) || !sh_pkg[0]) die("forwarding shell: container path");
+    if (cx_fmt(sh_body, sizeof sh_body, "%.*s", (int)(sh_q[3] - sh_q[2] - 1), s + sh_q[2] + 1) || !sh_body[0]) die("forwarding shell: body path");
+    return 1;
+}
+/* DST = the parsed shell S with its container path and its body path replaced */
+static long shell_make(const char *s, long n, const char *pkg, const char *body, char *dst, size_t cap) {
+    if (cx_fmt(dst, cap, "%.*s%s%.*s%s%.*s", (int)(sh_q[0] + 1), s, pkg, (int)(sh_q[2] + 1 - sh_q[1]), s + sh_q[1], body,
+               (int)(n - sh_q[3]), s + sh_q[3])) die("forwarding shell: too long");
+    return tx_len(dst, (long)cap);
+}
+static void copy_file(const char *src, const char *dst, int mode) {
+    size_t n = 0;
+    char *b = cx_read(src, &n);
+    if (!b || cx_write(dst, b, n) || sy_chmod(dst, mode)) die("copy");
 }
 
 int main(int argc, char **argv) {
@@ -126,9 +175,39 @@ int main(int argc, char **argv) {
     /* (4) another compiler identity: a copy of the candidate (new inode) */
     if (cx_fmt(cand2, sizeof cand2, "%s/candidate-copy", work)) die("path");
     body = cx_read(cand, &bn);
-    if (!body || cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("copy candidate");
-    rc = run(cand2, ra, 1, "t.cx", 0, &out);
-    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+    if (!body) die("read candidate");
+    if (!shell_parse(body, (long)bn)) {
+        /* single file: the file is compiler body and container at once */
+        if (cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("copy candidate");
+        rc = run(cand2, ra, 1, "t.cx", 0, &out);
+        ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+        printf("NA\truncache-roots.body-only-miss\tsingle-file candidate: body and container are one file, not run\n");
+    } else {
+        /* split shape: copying the shell alone changes nothing the key reads */
+        static char s1[8192], s2[8192];
+        char b1[2200], b2[2200], p2[2200], c1[2200], c3[2200];
+        long n1, n2; /* s1: new body, same container; s2: new body and new container */
+        if (cx_fmt(b1, sizeof b1, "%s/body-copy-1", work) || cx_fmt(b2, sizeof b2, "%s/body-copy-2", work)) die("path");
+        if (cx_fmt(p2, sizeof p2, "%s/pkg-copy-2", work) || cx_fmt(c1, sizeof c1, "%s/shell-same-body", work)) die("path");
+        if (cx_fmt(c3, sizeof c3, "%s/shell-body-only", work)) die("path");
+        /* control: a shell copy naming the same body and container still hits */
+        if (cx_write(c1, body, bn) || sy_chmod(c1, 0755)) die("copy shell");
+        rc = run(c1, ra, 1, "t.cx", 0, &out);
+        ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "shell-copy-same-body-hit");
+        /* another compiler body (new inode), same container: miss */
+        copy_file(sh_body, b1, 0755);
+        n1 = shell_make(body, (long)bn, sh_pkg, b1, s1, sizeof s1);
+        if (cx_write(c3, s1, (size_t)n1) || sy_chmod(c3, 0755)) die("write shell");
+        rc = run(c3, ra, 1, "t.cx", 0, &out);
+        ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "body-only-miss");
+        /* another body and another container: miss */
+        copy_file(sh_body, b2, 0755);
+        copy_file(sh_pkg, p2, 0600);
+        n2 = shell_make(body, (long)bn, p2, b2, s2, sizeof s2);
+        if (cx_write(cand2, s2, (size_t)n2) || sy_chmod(cand2, 0755)) die("write shell");
+        rc = run(cand2, ra, 1, "t.cx", 0, &out);
+        ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+    }
     /* (5) an output-affecting option: -DK=2 misses and shows k=2; repeated it hits */
     rc = run(cand, ra, 1, "t.cx", "-DK=2", &out);
     ck(rc == 0 && has(out, "v=7 k=2") && miss(out), "option-miss");
