@@ -44,3 +44,12 @@
 
 ### 集成者验收清单
 (1) git apply plans/patches/x1-runcache-key-v2.patch;(2) sh ./unisacc.com tests/srcshape.cx -- --check,预期 ok 且 runcache.cx 608 行,随后 --write 收紧基线;(3) sh ./unisacc.com tools/ratchets.cx,预期全过(重点 cxlibc、cxapis、cxinclude、coreapi);(4) cx-layers 与 module-units 批次,预期 PASS;(5) tools/derive.cx --check,按提示 --write 重算 layer-api 与 slice-units;(6) entry-build 出候选后跑 tests/runcache-roots.cx(17/0)、tests/runcache.cx(24/0)、tests/runcache-units.cx(6/0)与 unitcache 批次;(7) 用 bootstrap-0.0.59 做多单元编译,确认旧产品能编新的 rcident.cx 与 runcache.cx;(8) 登记 runcache-roots 批次(tools/register.cx);(9) 真实工具两根计时(仓根与冻结根,UNISACC_RR_TIME=1,看 lookup_hit=2);(10) 慢车道:两代 GEN 不动点、六目标、全批。回滚:git revert 合入提交,键版本回到 12。
+
+### v2 实测:换路径首跑(2026-11-16,同一小程序两个路径,各产品私有 UNISACC_RUN_CACHE)
+
+| 产品 | 冷启动 | 同路径热 | 换路径首跑 | 换路径第二次 |
+|---|---|---|---|---|
+| 已装 0.0.67 | 635 毫秒 | 9 | 632(键含路径,失效重编) | 10 |
+| 候选 8d48e018(含 X1 v2) | 644 毫秒 | 6 | 7(命中) | 6 |
+
+换路径首跑约 90 倍。此前 check-pins 的 515 对 4132 毫秒(仓根第二次对冻结根首次)同向。每个新冻结根里数百个不同工具的首次编译因此可免。口径:单个小程序;大工具的绝对节省更大,未逐个测。

@@ -93,3 +93,5 @@ flowchart LR
 - 仓库根 out/:逐项迁移到 sy_tmpdir,清单见归档同名条。
 - 多单元函数指针形参:跨单元函数指针形参含结构体指针被拒,R3 去强转待补。
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
+- ctor-debt 批次 D2 失败:tools/kernel-build.cx 在 v0.0.68 kernels 九相重写后 REFUSE 文案由 UNISACC_CTOR resolution 改为 constructor resolution(行为更严,不是回归),检查器按旧文案失败;整个 tools/check-ctor-debt.cx 靠源码锚点断言,动它即触发 lint R4(不可豁免),须整体重写为行为断言(真跑负路径)再提交,不得只改一行文案。
+- compile-as-limit 批次:已装 0.0.67 上 c 与 S 的低限额具名拒绝两项失败,待候选核对是否属已知待落地合同。
