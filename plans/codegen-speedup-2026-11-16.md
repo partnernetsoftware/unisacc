@@ -323,3 +323,26 @@ facts-gen --check:HEAD 归档副本加本项两张表 rc 0 全 SAME;共享工作
 - 8MB 计时(同场交错三轮取 min,load1 3.56 升到 5.56,偏高):sha 默认档已装 968.3、cx-dev 853.1;-O2 档 754.4 对 517.8;sort 默认档 1066.5 对 1043.2;-O2 档 671.1 对 680.5。与第 11 节同量级,本项不计收益。
 
 未验证:e4 常量折叠(CFOLD)未落地,bench 剩余 20 条 %cl 移位未变;osx、win 的 x86_64 编码格 UNVERIFIED;arm64 不适用;慢车道与 affected --run 未跑;七源 -o sha 未比;编译产物里"mov 的目的恰是移位量寄存器"的回落只由夹具覆盖,探针未专门构造。
+
+## 13 B 批:e4 窥孔常量折叠 CFOLD(2026-11-16,LOCAL)
+
+落点:exec/opt/peep-result.tsv,在 `PP.sf -> STFUSE` 未命中之后、进入关系判定(PP.a)之前串新过程 CFOLD;不动 weights/gold/peep.tsv 的 1632 键决策表。只在 -O2 档生效(peep 行的 when 为 o2)。
+
+机制:
+- 匹配连续三行:pi 行 `imm rA, a`、pi+1 行 `imm rB, b`(A 不等于 B)、pi+2 行为 add64、sub64、and64、or64、xor64、mul64 之一,目的为 rB,两个源恰为 rA 与 rB(两种顺序都认,按源顺序取值,所以 sub64 的被减数与减数不会颠倒)。任一行是标号或别的操作即不命中。
+- 操作码由新字节过程 CFOP 识别(exec/opt/parsers-byte.tsv,从行首逐字节比对,给出 1 至 6 的代码);两个 imm 复用 PIMM(im_k、im_v),三寄存器复用 PTHREE。
+- 求值用 A64(64 位回绕,与运行期一致)。结果右移 59 位不为 0 就不折:imm 解析最多 18 位十进制数字,2 的 59 次方以下必然不超 18 位,同时避开 NUMOUT 对 2 的 63 次方以上值的打印。所以负数结果(如 7 - 32)与回绕成大数的结果保持原三行。移位不折。
+- 发射:原样保留 `imm rA, a`,再发 `imm rB, 值`,三行变两行;rA 若随后死亡由现有 a_dead 规则在后续轮次删掉。输出经 COPYL、PRN、NUMOUT,元数据经 METACOPY。
+- 登记:新标号 CF_r107 至 CF_r130 追加在 exec/facts/opt-peep-names.tsv 末尾;六个常量(操作行偏移、消耗行数、三个分派支点代码、位数上限)写在 exec/facts/opt-gen-constants.tsv,经 exec/opt/gen-manifest.tsv 的 peep 行绑定;exec/facts/opt-gen.tsv 由 facts-gen --write 重生成(只变输入摘要一行)。
+
+实跑(本机 lnx/x86_64,cx-dev 私有网,scope=LOCAL-PARTIAL base_stale=13,含第 12 节的编码层改动):
+- bench-gencode.c 对象 -O2 档:指令 11310 降到 11215,%cl 移位 20 降到 10,立即数移位 27 升到 37;默认档不变(19650 条,%cl 20)。
+- 折叠专用探针 /tmp/x3f/fp.c(`32 - n` 循环移位宏、常量与变量混合、加减与或异或乘各一、乘法回绕成 0 与回绕成 2 的 64 次方减 1、负数结果、2 的 59 次方上下各一、18 位与 19 位十进制数、2 的 63 次方):gcc -O0、cx-dev 默认档、cx-dev -O2 档输出与退出码全同。对象对照(-O2 档,已装对 cx-dev):指令 7838 对 6799,%cl 移位 39 对 9,立即数移位 0 对 30;20000(100 乘 200)与 2 的 59 次方减 1 的折叠值只在 cx-dev 对象里出现;10 的 9 次方的装载条数两边相同(9 对 9),即 10 的 18 次方没有被折。
+- 探针 /tmp/x3s/probe.c、/tmp/x3m/mp.c、/tmp/x3d/dp.c、/tmp/x3r/hi.c:gcc -O0 与 cx-dev 两档输出全同。
+- 假根 check-bench-gencode 3 8:valid=6 noisy=1 invalid=0 failed=0;假根 check-random-expr 3 批 status=PASS(无 tcc,gcc 两方)。
+- check-x86-enc-fuse:cx-dev 带 --expect-fuse cases=18339 failed=0(%cl 1248 等于必须回落 1248);已装 0.0.67 cases=18339 failed=0。
+- facts-gen --check rc 0(38 张 SAME);gold-table --check PASS 20 stages;check-literal total=3020 未升。
+- ratchets ok=14 fail=1:失败项是 coreapi(导出符号 238 对基线 237,新增 1)。本节与第 12 节都不碰 cx/;当时共享检出里有他人已暂存未提交的 cx/runtime/rcident.cx(加 344 行)、cx/compiler/cxmod.cx、cx/cx0/proj/tail.cx,第 12 节提交前同一命令是 ok=15。归因依据仅此,未逐符号核对。
+- 8MB 计时(同场交错三轮取 min,load1 4.47 降到 3.90,偏高):sha 默认档已装 975.7、cx-dev 828.9;sha -O2 档已装 756.7、cx-dev 432.6(第 12 节那一场 cx-dev 为 517.8,不同场次,约 -16%);sort 默认档 1102.7 对 1055.9;sort -O2 档 693.8 对 657.8。
+
+未验证:bench 剩余 10 条 %cl 移位未逐条定因(变量移位与折叠点后跟其它行形的份额未分);CFOLD 没有入库的夹具(探针在 /tmp,未登记批次);只认"两个 imm 紧邻运算"的三行形态,中间隔行、一元取负、移位、除法、比较都不折;结果不小于 2 的 59 次方一律不折;默认档不经 peep,没有收益;osx、win、arm64 目标未跑(e4 与目标无关,但未实测);慢车道与 affected --run 未跑;七源 -o sha 未比;sort -O2 档相对第 11 节的回退未重新定因。
