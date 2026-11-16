@@ -164,14 +164,24 @@ static int runcap(char **argv, char *out, int cap) {
 }
 static void chomp(char *s) { long n = strlen(s); while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) s[--n] = 0; }
 
+/* 一个 git 公共目录一个实例(同仓多个工作树共享);锁名由客户端加工作树前缀互不串:
+   主工作树(公共目录 = 顶层/.git)不加前缀,其它工作树加 w<顶层摘要前 8 位>:,见 request() */
+static char lkpfx[16];
 static int inst_dir(void) {
     const char *e = getenv(cfg.inst_env);
-    char common[PW], home[PW], hex[65];
+    char out[2 * PW], common[PW], top[PW], home[PW], hex[65];
+    char *v[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel", 0};
+    int grc = runcap(v, out, sizeof out); char *nl;
+    common[0] = top[0] = 0; lkpfx[0] = 0;
+    if (grc == 0 && (nl = strchr(out, '\n'))) {
+        *nl = 0; F(common, sizeof common, "%s", out); F(top, sizeof top, "%s", nl + 1); chomp(top);
+        { char mainp[PW]; F(mainp, sizeof mainp, "%s/.git", top);
+          if (top[0] && strcmp(mainp, common) && !sy_sha256_hex(top, strlen(top), hex)) { hex[8] = 0; F(lkpfx, sizeof lkpfx, "w%s:", hex); } }
+    }
     if (e && *e) { if (snprintf(dir, sizeof dir, "%s", e) >= (int)sizeof dir) return -1; }
     else {
-        char *v[] = {"git", "rev-parse", "--path-format=absolute", "--show-toplevel", 0};   /* 一个工作树一个实例 */
-        if (runcap(v, common, sizeof common) != 0) return -1;
-        chomp(common);
+        long cl = (long)strlen(common);
+        if (cl > 5 && !strcmp(common + cl - 5, "/.git")) common[cl - 5] = 0;   /* 键取主工作树顶层:与旧实例目录一致 */
         if (!common[0] || sy_homedir(home, sizeof home) < 0 || sy_sha256_hex(common, strlen(common), hex)) return -1;
         hex[16] = 0;
         if (snprintf(dir, sizeof dir, "%s/%s/%s", home, cfg.cache_sub, hex) >= (int)sizeof dir) return -1;
@@ -473,8 +483,10 @@ static int spawn_server(const char *root, const char *ttl, const char *idle) {
         o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
         if (sy_proc_spawn(&o, &ch)) return -1; }
     for (i = 0; i < 400; i++) {   /* 总上限 40 s(含服务自身一次编译),不无界等 */
+        sy_exit_t st;
         c = try_connect(200);
         if (c >= 0) return c;
+        if (sy_proc_try_wait(&ch, &st) == 1) { c = try_connect(200); return c >= 0 ? c : -1; }   /* 拉起进程已退:不再空等 */
         sy_sleep_ms(100);
     }
     return -1;
@@ -488,6 +500,9 @@ static int request(const char *root, const char *line, int autostart) {
     }
     rn = 0; resp[0] = 0;
     if (c < 0) return 3;
+    if (lkpfx[0] && (!strncmp(line, "lock-acquire\t", 13) || !strncmp(line, "lock-release\t", 13))) {   /* 非主工作树:锁名加工作树前缀 */
+        static char pl[1024]; F(pl, sizeof pl, "%.13s%s%s", line, lkpfx, line + 13); line = pl;
+    }
     d = sy_deadline_in(58000);
     if (sy_send_all_until(c, line, strlen(line), d) || sy_send_all_until(c, "\n", 1, d)) { sy_close(c); return 3; }
     while (rn < (long)sizeof resp - 1) { r = sy_recv_until(c, resp + rn, sizeof resp - 1 - rn, d); if (r <= 0) break; rn += r; }
@@ -591,8 +606,17 @@ static int cmd_status(const char *root, int paths) {
     return 0;
 }
 
-/* ---- flow:引擎在客户端进程里跑(服务单线程,不让长流堵住别的请求);服务给的是锁与事件环。无实例时照跑,不取锁、不入环(via=local)。 ---- */
-static char fl_owner[64], held[MAXLOCK][64]; static int held_mine[MAXLOCK], nheld, svc_on;
+/* ---- flow:引擎在客户端进程里跑(服务单线程,不让长流堵住别的请求);服务给的是锁与事件环。无实例时只读流照跑,不取锁、不入环(via=local);
+   含写节点的流先拉起实例,拉不起即 REFUSE writes-need-service(rc 1,不写)。 ---- */
+static char fl_owner[64], held[MAXLOCK][64]; static int held_mine[MAXLOCK], nheld, svc_on, flow_needw;
+static int local_writes_ok(void) { const char *e = getenv("DEVSVC_LOCAL_WRITES"); return e && !strcmp(e, "1"); }   /* 仅检查用:允许本地无锁写 */
+/* 写命令的实例探测:wr 时无实例先拉起(上限 40 s),拉不起打 REFUSE writes-need-service 返回 -1;否则 1 有实例、0 无(只读) */
+static int wr_svc(const char *root, int wr) {
+    int need = wr && !local_writes_ok();
+    if (request(root, "ping", need) == 0) return 1;
+    if (need) { fprintf(stderr, "devsvc: REFUSE writes-need-service: no instance at %s and autostart failed; nothing written\n", sockp); return -1; }
+    return 0;
+}
 typedef struct { char *p; long n, cap; } AB;
 static void ab_add(AB *a, const char *s, long n) {
     if (a->n + n + 1 > a->cap) { long c = (a->n + n + 1) * 2; char *q = realloc(a->p, c); if (!q) { ovf++; return; } a->p = q; a->cap = c; }
@@ -776,7 +800,12 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     if (jobs > FL_MAX_JOBS) jobs = FL_MAX_JOBS;
     if (dl < 1) dl = FL_RUN_MS;
     if (flow_txn) f.txn = 1;
-    svc_on = request(root, "ping", 0) == 0;
+    {   /* 写节点(file.write/edit、doc 写、stdout_to、lock 键、事务)必须持锁:无实例先拉起,拉不起具名拒绝,不静默转本地无锁写 */
+        int needw = f.txn; char tb[8];
+        for (i = 0; !needw && i < f.count; i++) if (f.n[i].lock[0] || fl_arg_get(f.n[i].args, "stdout_to", 0, tb, sizeof tb) != -1) needw = 1;
+        flow_needw = needw && !local_writes_ok();
+        if ((svc_on = wr_svc(root, needw)) < 0) { fl_free(&f); return 1; }
+    }
     if (svc_on && f.txn) {   /* 事务:节点锁加写路径所属共享表锁(配置表 lock 行),去重排序后按固定顺序一次取齐 */
         static char nms[FL_MAX_NODES * 2][64]; static char pth[PW]; int nn = 0, a, b; const char *lf; long rl = strlen(root);
         for (i = 0; i < f.count; i++) if (f.n[i].lock[0]) {
@@ -790,6 +819,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         for (a = 0; a < nn; a++) {
             if (a && !strcmp(nms[a], nms[a - 1])) continue;
             r = lk_take(root, nms[a], dl / 1000 + 10, wait_ms);
+            if (r == 3 && flow_needw) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost while taking %s; nothing written\n", nms[a]); lk_drop(root); fl_free(&f); return 1; }
             if (r == 3) { svc_on = 0; nheld = 0; break; }
             if (r) { chomp(resp); fprintf(stderr, "devsvc: REFUSE txn lock %s: %s\n", nms[a], resp); lk_drop(root); fl_free(&f); return 1; }
         }
@@ -797,6 +827,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     for (i = 0; svc_on && i < f.count; i++) if (f.n[i].lock[0]) {
         lk_name(root, f.n[i].lock, nm);
         r = lk_take(root, nm, dl / 1000 + 10, wait_ms);
+        if (r == 3 && flow_needw) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost while taking %s; nothing written\n", nm); lk_drop(root); fl_free(&f); return 1; }
         if (r == 3) { svc_on = 0; nheld = 0; break; }
         if (r) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s for node %s: %s\n", nm, f.n[i].id, resp); lk_drop(root); fl_free(&f); return 1; }
     }
@@ -1062,11 +1093,12 @@ static int cmd_f(const char *root, int argc, char **argv) {
     if (ovf || !b.p) return 2;
     set_owner(argc, argv);
     wait = numarg(opt(argc, argv, "--lock-wait-ms", "0")); if (wait < 0 || wait > 60000) return 2;
-    svc_on = request(root, "ping", 0) == 0;
+    if ((svc_on = wr_svc(root, wr)) < 0) return 1;
     if (wr && svc_on) {
         lk_name(root, path, nm);
         r = lk_take(root, nm, 30 + wait / 1000, wait);
-        if (r == 3) svc_on = 0;
+        if (r == 3 && local_writes_ok()) svc_on = 0;
+        else if (r == 3) { fprintf(stderr, "F\t%s\trefused\tREFUSE writes-need-service: instance lost; nothing written\n", op); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "F\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
     if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
@@ -1086,7 +1118,7 @@ static int cmd_f(const char *root, int argc, char **argv) {
         if (o.buf && o.n > 0) fwrite(o.buf, 1, (size_t)o.n, stdout);
         fflush(stdout);
         fprintf(stderr, "F\tread\tok\tsha=%s\tlines=%ld\tbytes=%ld\n", o.sha, o.lines, o.n);
-    } else printf("F\t%s\tok\tsha=%s\tlines=%ld\tcount=%ld\n", op, o.sha, o.lines, nedit ? (long)nedit : o.count);
+    } else printf("F\t%s\tok\tsha=%s\tlines=%ld\tcount=%ld\tvia=%s\tlocks=%d\n", op, o.sha, o.lines, nedit ? (long)nedit : o.count, svc_on ? "svc" : "local", svc_on ? 1 : 0);
     ff_out_free(&o);
     return 0;
 }
@@ -1108,11 +1140,12 @@ static int cmd_doc(const char *root, int argc, char **argv) {
         if (argc < 3 || !argv[2][0]) return 2;
         if (!ok || strstr(path, "..") || path[0] == '/') { fprintf(stderr, "DOC\tcreate\trefused\tEDOC: %s is not a doc of the repo table\n", path); return 1; }
         set_owner(argc, argv);
-        svc_on = request(root, "ping", 0) == 0;
+        if ((svc_on = wr_svc(root, 1)) < 0) return 1;
         if (svc_on) {
             F(lk, sizeof lk, "doc:%s", path);
             r = lk_take(root, lk, 60, 30000);
-            if (r == 3) svc_on = 0;
+            if (r == 3 && local_writes_ok()) svc_on = 0;
+            else if (r == 3) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost; nothing written\n"); return 1; }
             else if (r) { chomp(resp); fprintf(stderr, "DOC\tcreate\trefused\tlock=%s\t%s\n", lk, resp); return 1; }
             else got = 1;
         }
@@ -1164,11 +1197,12 @@ static int cmd_doc(const char *root, int argc, char **argv) {
     if (*xs) ab_kv(&b, "expect_sha", xs, strlen(xs));
     if (ovf || !b.p) return 2;
     set_owner(argc, argv);
-    svc_on = request(root, "ping", 0) == 0;
+    if ((svc_on = wr_svc(root, wr)) < 0) return 1;
     if (wr && svc_on) {
         F(nm, sizeof nm, "doc:%s", path);
         r = lk_take(root, nm, 60, 30000);
-        if (r == 3) svc_on = 0;
+        if (r == 3 && local_writes_ok()) svc_on = 0;
+        else if (r == 3) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost; nothing written\n"); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "DOC\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
     if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
