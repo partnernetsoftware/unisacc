@@ -1,0 +1,133 @@
+/* From repository root: sh ./unisacc.com tools/check-ext-sysx-run.cx
+ * Real children only: sysx.run px_run (deadline + whole-tree kill incl. a setsid grandchild,
+ * per-stream caps, named errors, stdin file, env additions, merged stderr, no fd leak) and
+ * px_spawn_spool.  Last line failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use sysx.run
+
+static int failed, passed;
+static void ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    printf("%s\tsysx-run.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int eq(const char *b, long n, const char *want) { return b && tx_same(b, n, want, tx_len(want, 1 << 20)); }
+static int go(char **av, px_opts *o, px_result *r) { o->argv = av; return px_run(o, r); }
+
+int main(void) {
+    px_opts o; px_result r; int rc, i, fd0, fd1, gpid, alive;
+    char td[4096], inp[4096];
+    if (sy_mkdtemp(sy_tmpdir(), "check-sysx-run-", td, (int)sizeof td) < 0 || cx_fmt(inp, sizeof inp, "%s/in", td)) return 2;
+    if (cx_write(inp, "line1\nline2\n", 12)) return 2;
+    {   char *av[] = { "sh", "-c", "echo out; echo err >&2; exit 3", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 3 && !r.timed_out && eq(r.out, r.outn, "out\n") && eq(r.err, r.errn, "err\n") && r.truncated == 0, "split-streams-and-code");
+        px_result_free(&r); }
+    {   char *av[] = { "true", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 0 && r.out && r.outn == 0 && r.err && r.errn == 0, "empty-output-buffers");
+        px_result_free(&r); ck(r.out == 0 && r.err == 0, "free-clears"); }
+    {   char *av[] = { "sh", "-c", "setsid sleep 30 & echo $!; sleep 30", 0 };
+        long t0 = sy_now_ms();
+        px_opts_init(&o); o.deadline_ms = 800; rc = go(av, &o, &r);
+        gpid = 0;
+        for (i = 0; rc == 0 && r.out && i < r.outn && r.out[i] >= '0' && r.out[i] <= '9'; i++) gpid = gpid * 10 + (r.out[i] - '0');
+        ck(rc == 0 && r.timed_out && r.code == 124 && sy_now_ms() - t0 < 5000, "timeout-124");
+        alive = 1;
+        for (i = 0; i < 100 && gpid > 0 && alive; i++) {
+            char p[64], st[256]; long n; int fd;
+            cx_fmt(p, sizeof p, "/proc/%d/stat", gpid);
+            fd = sy_open_read(p);
+            if (fd < 0) { alive = 0; break; }
+            n = sy_read(fd, st, (long)sizeof st - 1); sy_close(fd);
+            if (n > 0) { long q; st[n] = 0; q = tx_find(st, n, ") ", 2); if (q >= 0 && st[q + 2] == 'Z') { alive = 0; break; } }
+            sy_sleep_ms(20);
+        }
+        ck(gpid > 0 && !alive, "timeout-kills-setsid-grandchild");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "head -c 100000 /dev/zero; echo e >&2", 0 };
+        px_opts_init(&o); o.out_cap = 1000; rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 0 && r.outn == 1000 && r.out_total == 100000 && r.truncated == PX_TRUNC_OUT && eq(r.err, r.errn, "e\n"), "out-cap-truncates");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "head -c 5000 /dev/zero >&2", 0 };
+        px_opts_init(&o); o.err_cap = 10; rc = go(av, &o, &r);
+        ck(rc == 0 && r.errn == 10 && r.err_total == 5000 && r.truncated == PX_TRUNC_ERR, "err-cap-truncates");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2", 0 };
+        px_opts_init(&o); o.deadline_ms = 20000; rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 0 && r.outn == 300000 && r.errn == 300000, "both-streams-large-no-deadlock");
+        px_result_free(&r); }
+    {   char *av[] = { "/nonexistent/px-no-such-cmd", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == -ENOENT, "missing-command-enoent"); }
+    {   char *av[] = { "px-no-such-cmd-on-path", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == -ENOENT, "missing-path-command-enoent"); }
+    {   char *av[] = { "true", 0 };
+        px_opts_init(&o); o.cwd = "/nonexistent/px-dir"; rc = go(av, &o, &r);
+        ck(rc == -ENOENT, "missing-cwd-enoent"); }
+    {   char *av[] = { "pwd", 0 };
+        px_opts_init(&o); o.cwd = "/"; rc = go(av, &o, &r);
+        ck(rc == 0 && eq(r.out, r.outn, "/\n"), "cwd-applied");
+        px_result_free(&r); }
+    {   char *av[] = { "cat", 0 };
+        px_opts_init(&o); o.stdin_path = inp; rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 0 && eq(r.out, r.outn, "line1\nline2\n"), "stdin-file");
+        px_result_free(&r); }
+    {   char *av[] = { "cat", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == 0 && r.code == 0 && r.outn == 0, "stdin-default-devnull");
+        px_result_free(&r); }
+    {   char *av[] = { "cat", 0 };
+        px_opts_init(&o); o.stdin_path = "/nonexistent/px-in"; rc = go(av, &o, &r);
+        ck(rc == -ENOENT, "missing-stdin-enoent"); }
+    {   char *av[] = { "sh", "-c", "echo $PX_A:$HOME", 0 };
+        char *add[] = { "PX_A=hello", "HOME=/px-home", 0 };
+        px_opts_init(&o); o.env_add = add; rc = go(av, &o, &r);
+        ck(rc == 0 && eq(r.out, r.outn, "hello:/px-home\n"), "env-add-and-override");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "echo $PX_A", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == 0 && eq(r.out, r.outn, "\n") && sy_env("PX_A") == 0, "env-add-not-leaked-to-parent");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "echo a; echo b >&2", 0 };
+        px_opts_init(&o); o.merge_err = 1; rc = go(av, &o, &r);
+        ck(rc == 0 && eq(r.out, r.outn, "a\nb\n") && r.errn == 0, "merge-err");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "-c", "kill -9 $$", 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == 0 && r.sig == 9 && r.code == 137 && !r.timed_out, "signal-code-137");
+        px_result_free(&r); }
+    {   char *av[] = { 0 };
+        px_opts_init(&o); rc = go(av, &o, &r);
+        ck(rc == -EINVAL, "empty-argv-einval");
+        px_opts_init(&o); o.deadline_ms = 0; av[0] = "true"; rc = px_run(&o, &r);
+        ck(rc == -EINVAL, "zero-deadline-einval"); }
+    {   char *av1[] = { "true", 0 }, *av2[] = { "/nonexistent/px", 0 }, *av3[] = { "sleep", "5", 0 };
+        fd0 = sy_open_read("/dev/null"); sy_close(fd0);
+        for (i = 0; i < 20; i++) {
+            px_opts_init(&o); go(av1, &o, &r); px_result_free(&r);
+            px_opts_init(&o); go(av2, &o, &r);
+            px_opts_init(&o); o.stdin_path = inp; go(av1, &o, &r); px_result_free(&r);
+        }
+        px_opts_init(&o); o.deadline_ms = 100; go(av3, &o, &r); px_result_free(&r);
+        fd1 = sy_open_read("/dev/null"); sy_close(fd1);
+        ck(fd0 >= 0 && fd0 == fd1, "no-fd-leak"); }
+    {   char *av[] = { "sh", "-c", "echo spool; echo e2 >&2; exit 4", 0 };
+        int ofd = -1, efd = -1, pid, ex = 0, code = 0, sig = 0; char b[64]; long n, m;
+        pid = px_spawn_spool(av, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+        n = pid > 0 ? sy_read(ofd, b, 63) : -1; if (n >= 0) b[n] = 0;
+        ck(pid > 0 && n == 6 && eq(b, n, "spool\n"), "spool-stdout");
+        m = pid > 0 ? sy_read(efd, b, 63) : -1;
+        ck(m == 3, "spool-stderr");
+        ck(pid > 0 && sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex && code == 4, "spool-unreaped-status");
+        if (ofd >= 0) sy_close(ofd);
+        if (efd >= 0) sy_close(efd); }
+    sy_unlink(inp); sy_rmdir(td);
+    printf("CHECK_EXT_SYSX_RUN\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
