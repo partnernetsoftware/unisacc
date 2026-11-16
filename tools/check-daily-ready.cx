@@ -1,0 +1,97 @@
+/* tools/check-daily-ready.cx -- fixtures for tools/daily-ready.cx --item (static readiness gate, P4).
+ *
+ *   sh ./unisacc.com tools/check-daily-ready.cx [-- --group items|neg]
+ *
+ * items: a well-formed fixture tree passes families, limits, companions, f4c, dupmat.
+ * neg:   each known defect class is named: a family with no producer row, limits literal s9.cmd raised past
+ *        55 and a batch budget 90, s9.child.pre raised so the slice grant falls under the budget, an L_ key
+ *        missing from limits.tsv, a missing batch source, a missing F4c declaration, a duplicate material.
+ * Prints CHECK_DAILY_READY failed=N; rc 1 when any assertion fails.  Fixtures live under the system temp dir. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define UC "./unisacc.com" /* lint:allow R1 check runs the tool under the installed product */
+
+static int failed;
+static char base[4400];
+
+static void put(const char *rel, const char *body) {
+    char p[4600], d[4600];
+    cx_fmt(p, sizeof p, "%s/%s", base, rel);
+    cx_fmt(d, sizeof d, "%s", p);
+    for (char *s = d + tx_len(base, 4400) + 1; *s; s++) if (*s == '/') { *s = 0; sy_mkdir(d, 0700); *s = '/'; }
+    if (cx_write(p, body, tx_len(body, 1 << 20))) { printf("FAIL\tfixture-write\t%s\n", rel); failed++; }
+}
+static void tree(const char *batches, const char *limits, int f4c, const char *s9src) {
+    char cmd[4800]; cx_fmt(cmd, sizeof cmd, "%s/t", base);
+    char *rm[] = {"./tools/bound", "10", "rm", "-rf", cmd, 0}; char out[256]; int cut; sy_run(rm, out, sizeof out, &cut);
+    char save[4400]; cx_fmt(save, sizeof save, "%s", base); cx_fmt(base, sizeof base, "%s/t", save);
+    sy_mkdir(base, 0700);
+    put("tests/batches.tsv", batches);
+    put("build/limits.tsv", limits);
+    put("tools/s9-nightly.cx", "x\n"); put("tools/s9-shards.cx", s9src); put("tools/affected.cx", "x\n");
+    put("tools/cxlib/allsession.cx", f4c ? "int as_f4c_name(const char *n){return 0;}\n" : "/* none */\n");
+    if (f4c) put("tools/check-s9-f4c.cx", "x\n");
+    put("tests/tools-compile.cx", "x\n"); put("tests/run.cx", "x\n"); put("tests/a.cx", "x\n");
+    put("tools/kernel-build.cx", "x\n");
+    put("dump.txt", "MATERIAL\tb1\tstreams\ttools/streams-material.cx\nMATERIAL\tb1\tloader6\t-\tREFUSED=no-producer=loader6\n");
+    cx_fmt(base, sizeof base, "%s", save);
+}
+static void expect(const char *item, int want_rc, const char *want) {
+    char root[4600], seam[4700], out[8192]; int cut = 0;
+    cx_fmt(root, sizeof root, "%s/t", base); cx_fmt(seam, sizeof seam, "%s/dump.txt", root);
+    sy_setenv("UNISACC_DAILY_READY_DUMP_SEAM", seam, 1);
+    char *av[] = {"./tools/bound", "20", "sh", UC, "tools/daily-ready.cx", "--", "--item", (char *)item, "--root", root, 0};
+    int rc = sy_run(av, out, sizeof out, &cut);
+    int ok = rc == want_rc && strstr(out, want) != 0;
+    printf("%s\t%s\twant_rc=%d rc=%d want=%s\n", ok ? "PASS" : "FAIL", item, want_rc, rc, want);
+    if (!ok) { failed++; printf("%s", out); }
+}
+
+#define HDR "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+#define GOOD HDR "b1\tIMPLEMENTED\tc\ttests/a.cx\tSOURCE\tlnx/x86_64\t55\tstreams,loader6,kernels\ttests/a.cx\t-\tc\trc0\t-\tdaily\n" \
+                 "b2\tPLANNED\tc\ttests/gone.cx\tSOURCE\tlnx/x86_64\t90\tlater-fam\t-\t-\tc\trc0\t-\tdaily\n"
+#define LIM "s9.cmd\ts\t55\t55\t*\t-\t-\ns9.step\ts\t240\t240\t*\t-\t-\ns9.slice\ts\t300\t300\t*\t-\t-\ns9.epoch.margin\ts\t15\t15\t*\t-\t-\n" \
+            "s9.sup.shave\ts\t3\t3\t*\t-\t-\ns9.wave.reserve\ts\t12\t12\t*\t-\t-\ns9.child.material\ts\t9\t20\t*\t-\t-\n"
+#define PRE "s9.child.pre\ts\t20\t45\t*\t-\t-\n"
+#define S9OK "x=L_(\"s9.cmd\");\n"
+
+int main(int argc, char **argv) {
+    const char *group = "all";
+    for (int i = 1; i < argc; i++) if (tx_eqz(argv[i], "--group") && i + 1 < argc) group = argv[++i];
+    if (sy_mkdtemp(sy_tmpdir(), "daily-ready-check-", base, sizeof base) != 0) { printf("CHECK_DAILY_READY\tfailed=1\tmkdtemp\n"); return 1; }
+    int all = tx_eqz(group, "all");
+    if (all || tx_eqz(group, "items")) {
+        tree(GOOD, LIM PRE, 1, S9OK);
+        expect("families", 0, "implemented=3 refused-dump=1 deferred=1");
+        expect("limits", 0, "grant=205");
+        expect("companions", 0, "ok");
+        expect("f4c", 0, "ok");
+        expect("dupmat", 0, "ok");
+    }
+    if (all || tx_eqz(group, "neg")) {
+        tree(HDR "b1\tIMPLEMENTED\tc\ttests/a.cx\tSOURCE\tlnx/x86_64\t55\tstreams,cdx-fam\ttests/a.cx\t-\tc\trc0\t-\tdaily\n", LIM PRE, 1, S9OK);
+        expect("families", 1, "no-dump-row=cdx-fam");
+        tree(GOOD "b3\tIMPLEMENTED\tc\ttests/a.cx\tSOURCE\tlnx/x86_64\t90\t-\ttests/a.cx\t-\tc\trc0\t-\tdaily\n",
+             "s9.cmd\ts\t90\t90\t*\t-\t-\n" LIM PRE, 1, S9OK);
+        expect("limits", 1, "s9.cmd=90>55");
+        tree(GOOD "b3\tIMPLEMENTED\tc\ttests/a.cx\tSOURCE\tlnx/x86_64\t90\t-\ttests/a.cx\t-\tc\trc0\t-\tdaily\n", LIM PRE, 1, S9OK);
+        expect("limits", 1, "budget-over-cmd=b3:90");
+        tree(GOOD, LIM "s9.child.pre\ts\t200\t200\t*\t-\t-\n", 1, S9OK);
+        expect("limits", 1, "slice-grant=25<budget=55");
+        tree(GOOD, LIM PRE, 1, S9OK "y=L_(\"s9.gone\");\n");
+        expect("limits", 1, "limit-unknown=tools/s9-shards.cx:s9.gone");
+        tree(HDR "b1\tIMPLEMENTED\tc\ttests/missing.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/a.cx\t-\tc\trc0\t-\tdaily\n", LIM PRE, 1, S9OK);
+        expect("companions", 1, "missing=b1:tests/missing.cx");
+        tree(GOOD, LIM PRE, 0, S9OK);
+        expect("f4c", 1, "f4c-decl-missing");
+        tree(HDR "b1\tIMPLEMENTED\tc\ttests/a.cx\tSOURCE\tlnx/x86_64\t55\tstreams,streams\ttests/a.cx\t-\tc\trc0\t-\tdaily\n", LIM PRE, 1, S9OK);
+        expect("dupmat", 1, "dup-material=b1:streams");
+    }
+    char *rm[] = {"./tools/bound", "10", "rm", "-rf", base, 0}; char out[64]; int cut; sy_run(rm, out, sizeof out, &cut);
+    printf("CHECK_DAILY_READY\tgroup=%s\tfailed=%d\n", group, failed);
+    return failed ? 1 : 0;
+}
