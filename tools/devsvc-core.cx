@@ -1,7 +1,7 @@
 /* tools/devsvc.cx -- 仓开发服务(基础版):一个仓一个实例的有界常驻服务,加同一文件里的 CLI 客户端。
  * 批次 devsvc(tools/check-devsvc.cx)。设计稿 plans/devsvc.md。本仓配置表 tools/devsvc-repo.tsv(或 $DEVSVC_REPO_TABLE)。
  *
- *   sh ./unisacc.com tools/devsvc.cx -- config                         打印所读配置表(CFG 行,末行 DEVSVC_CONFIG);表缺失或缺键 rc 3
+ *   sh ./unisacc.com tools/devsvc.cx -- config                         打印所读配置表(CFG 行含 lock、lockdomain 写域、doc 规则、table 身份,末行 DEVSVC_CONFIG);表缺失或缺键 rc 3
  *   sh ./unisacc.com tools/devsvc.cx -- start [--ttl S] [--idle S]     起实例(已在则报 already);默认 ttl 1800 s、idle 300 s
  *   sh ./unisacc.com tools/devsvc.cx -- ping | stop
  *   sh ./unisacc.com tools/devsvc.cx -- lock acquire NAME --owner O [--ttl S]   (默认 600 s,上限 3600 s;同属主再拿即续期)
@@ -100,6 +100,9 @@ typedef struct {
     char lockpfx[CFG_LOCKS][512];                  /* lock 行第三列:逗号分隔的写域,以 / 结尾为目录前缀,否则精确路径;- 或空为无 */
     char docpat[CFG_LOCKS][128]; int ndoc;         /* doc 行:devsvc doc 允许作用的文档(glob,* 不跨 /) */
     char table[1024];
+    char tabsha[65];          /* 所读配置表全文的 sha256(config 输出的配置身份) */
+    char tabsrc[16];          /* pinned(入口从 git 提交取出并交来的表)、env($DEVSVC_REPO_TABLE 所指)、worktree(ROOT 下工作区表) */
+    char tabrev[48];          /* pinned 时为入口钉死的修订(提交号,读不出时为 HEAD);否则为 - */
 } RepoCfg;
 static RepoCfg cfg;
 static int ovf;
@@ -115,6 +118,13 @@ static int cfg_load(const char *root) {
     if (ov && *ov) { if (snprintf(cfg.table, sizeof cfg.table, "%s", ov) >= (int)sizeof cfg.table) return -1; }
     else if (snprintf(cfg.table, sizeof cfg.table, "%s/%s", root, CFG_TABLE) >= (int)sizeof cfg.table) return -1;
     if (sy_read_file(cfg.table, &b, &n, 1 << 16) || !b) return -1;
+    /* 配置身份:内容 sha256 加来源。入口(tools/devsvc.cx)从 git 提交取表时经 DEVSVC_REPO_TABLE_PIN=<修订>:<表路径> 说明;
+       只有其中路径与实际所读的表一致才认作 pinned,继承来的过期标记不冒充。 */
+    {   const char *pin = getenv("DEVSVC_REPO_TABLE_PIN"), *c = pin ? strchr(pin, ':') : 0;
+        if (sy_sha256_hex(b, n, cfg.tabsha)) { free(b); return -1; }
+        F(cfg.tabsrc, sizeof cfg.tabsrc, "%s", ov && *ov ? "env" : "worktree"); F(cfg.tabrev, sizeof cfg.tabrev, "-");
+        if (ov && *ov && c && c > pin && c - pin < (long)sizeof cfg.tabrev && !strcmp(c + 1, cfg.table)) {
+            F(cfg.tabsrc, sizeof cfg.tabsrc, "pinned"); F(cfg.tabrev, sizeof cfg.tabrev, "%.*s", (int)(c - pin), pin); } }
     for (s = (char *)b, end = s + n; s < end; s = e + 1) {
         long kl, vl; int k; char *dst[] = {cfg.product, cfg.self, cfg.onchange, cfg.onchange_tag, cfg.proc_pat, cfg.cache_sub, cfg.inst_env};
         int cap[] = {sizeof cfg.product, sizeof cfg.self, sizeof cfg.onchange, sizeof cfg.onchange_tag, sizeof cfg.proc_pat, sizeof cfg.cache_sub, sizeof cfg.inst_env};
@@ -1439,14 +1449,16 @@ static int merge_conflicts(const char *root, const char *rd, const char *br, con
 /* git merge BRANCH [--cwd WORKTREE]:在工作树(缺省共享检出)当前分支上 git merge --no-edit BRANCH。
    冲突见上 merge_conflicts:全为派生表时自动解决并完成合并,否则 MERGE_CONFLICT 清单、MERGE_HINT、rc 1。
    无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
+static int git_argerr;   /* cmd_git 及其子命令在参数解析处退出(尚未启动任何 git 动作)时置 1;入口只在此时贴 usage。
+                            git 子进程、commit-own 的真实 rc 2 与具名 REFUSE 的 rc 2 原样返回,不贴 usage(仿 x_ran) */
 static int git_merge(const char *root, int argc, char **argv) {
     const char *br = 0, *d = root; char rd[PW], top[PW], cur[200], buf[1 << 15], sha[128]; int i, rc;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
-        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: unexpected %s\n", argv[i]); return 2; }
+        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
         else br = argv[i];
     }
-    if (!br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: missing BRANCH\n"); return 2; }
+    if (!br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: missing BRANCH\n"); git_argerr = 1; return 2; }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git merge --cwd %s: no such directory\n", d); return 2; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
@@ -1462,7 +1474,7 @@ static int git_merge(const char *root, int argc, char **argv) {
    绝对路径、含 ..、以 - 开头、out/ 下、被 .gitignore 忽略的路径。成功 GIT_ADD rc=0 n=N。 */
 static int git_add(const char *root, int argc, char **argv) {
     char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc;
-    if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); return 2; }
+    if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
     for (i = 1; i < argc; i++) {
         const char *p = argv[i];
         if (!*p || p[0] == '/' || p[0] == '-' || strstr(p, "..") || !strncmp(p, "out/", 4) || !strcmp(p, "out")) { fprintf(stderr, "devsvc: REFUSE git add %s: absolute, .., option-like or out/ path (nothing added)\n", p); return 2; }
@@ -1478,13 +1490,14 @@ static int git_add(const char *root, int argc, char **argv) {
 }
 static int cmd_git(const char *root, int argc, char **argv) {
     long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
-    if (argc < 1) return 2;
+    git_argerr = 0;
+    if (argc < 1) { git_argerr = 1; return 2; }
     if (!strcmp(argv[0], "status") && argc == 1) return git_status(root);
     {   /* 只读子命令透传:不取锁,stdout 上限 GIT_RO_CAP 字节,超出打截断标记 */
         static const char *ro[] = {"log", "diff", "show", "status", "blame", "ls-files", 0};
         int j; for (j = 0; ro[j]; j++) if (!strcmp(argv[0], ro[j])) {
             np_result r; char why[200]; long cap = 1 << 20, k;
-            if (argc + 2 > FL_MAX_ARGV) return 2;
+            if (argc + 2 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git %s: too many arguments (max %d)\n", argv[0], FL_MAX_ARGV - 2); git_argerr = 1; return 2; }
             v[n++] = "git"; v[n++] = "--no-pager"; for (k = 0; k < argc; k++) v[n++] = argv[k]; v[n] = 0;
             if (np_run(v, 0, 0, 55, &r, why, sizeof why)) { fprintf(stderr, "devsvc: git %s failed to start: %s\n", argv[0], why); return 1; }
             rc = r.rc;
@@ -1496,7 +1509,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
     }
     if (!strcmp(argv[0], "merge")) return git_merge(root, argc, argv);
     if (!strcmp(argv[0], "add")) return git_add(root, argc, argv);
-    if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) return cr; if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\n"); return 0; } }
+    if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\n"); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
     /* --cwd D:在版本工作树 D(.claude/worktrees/v0.0.NN 等)里提交。commit-own 以 D 为 cwd 跑:基线是 D 的 HEAD、
      * 私有索引从 D 的 HEAD 建、同步 D 自己的索引,门在 D 的树上求值(读 D 的 tests/precommit-gates.tsv),
@@ -1522,7 +1535,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         if (!strcmp(argv[i], "--push")) { push = 1; continue; }
         if (!strcmp(argv[i], "--cwd")) { i++; continue; }
         if (!strcmp(argv[i], "--registered")) need = "registry"; else if ((lf = lock_for(argv[i]))) need = lf;
-        if (n >= FL_MAX_ARGV - 8) return 2;
+        if (n >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
         v[n++] = argv[i];
     }
     /* devsvc 拥有索引,第一阶段:commit 不再取 git-index 锁。commit-own 每个请求用私有索引(HEAD 加本请求路径)建树,
@@ -1891,7 +1904,11 @@ static int main2(int argc, char **argv) {
         for (i = 0; i < 3; i++) printf("CFG\tlib\t%s\n", cfg.lib[i]);
         printf("CFG\tonchange\t%s\nCFG\tonchange_tag\t%s\nCFG\tproc_pat\t%s\nCFG\tcache_sub\t%s\nCFG\tinst_env\t%s\n", cfg.onchange, cfg.onchange_tag, cfg.proc_pat, cfg.cache_sub, cfg.inst_env);
         for (i = 0; i < cfg.nlockname; i++) printf("CFG\tlock\t%s\n", cfg.lockname[i]);
-        printf("DEVSVC_CONFIG\ttable=%s\tlocks=%d\n", cfg.table, cfg.nlockname);
+        /* 以下为后加的行种;CFG lock 行与末行前两个字段保持原样,旧消费者不受影响 */
+        for (i = 0; i < cfg.nlockname; i++) printf("CFG\tlockdomain\t%s\t%s\n", cfg.lockname[i], cfg.lockpfx[i][0] ? cfg.lockpfx[i] : "-");
+        for (i = 0; i < cfg.ndoc; i++) printf("CFG\tdoc\t%s\n", cfg.docpat[i]);
+        printf("CFG\ttable\t%s\tsource=%s\trev=%s\tsha256=%s\n", cfg.table, cfg.tabsrc, cfg.tabrev, cfg.tabsha);
+        printf("DEVSVC_CONFIG\ttable=%s\tlocks=%d\tdocs=%d\tsource=%s\trev=%s\tsha256=%s\n", cfg.table, cfg.nlockname, cfg.ndoc, cfg.tabsrc, cfg.tabrev, cfg.tabsha);
         return 0;
     }
     if (inst_dir()) { fprintf(stderr, "devsvc: cannot resolve instance directory\n"); return 3; }
@@ -1947,7 +1964,7 @@ static int main2(int argc, char **argv) {
         if (r == 2 && !ovf && !x_ran) fprintf(stderr, "devsvc: bad %s arguments (see usage in the file header)\n", cmd);
         return r;
     }
-    if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 ? usage() : r; }
+    if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 && git_argerr ? usage() : r; }   /* 只有参数解析错才贴 usage;已启动的 git 动作保留真实 rc 与诊断 */
     if (!strcmp(cmd, "register")) return tool_locked(root, "registry", "tools/register.cx", argc, argv);
     if (!strcmp(cmd, "derive")) return cmd_derive(root, argc, argv);
     if (!strcmp(cmd, "lock") && argc >= 1) {

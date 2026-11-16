@@ -17,6 +17,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 
@@ -134,6 +135,64 @@ int main(int argc, char **argv) {
         if (setenv("DEVSVC_REPO_TABLE", "/tmp/devsvc-check-no-such-table.tsv", 1)) return 2;
         ck(dv1("config", 0, 0, 0, 0, 0) == 3 && has("unreadable"), "config-missing-table-rc3");
         if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2;
+        /* DCLI3:config 完整展示 doc 规则、每个锁的写域、所读表的路径与身份(来源、修订、内容 sha256);原有 CFG lock 行与末行前缀不变 */
+        {   char ft[600], pin[800], w[900], hex[65]; int k, okc;
+            static const char *base = "key\tvalue\tnote\nproduct\tunisacc.com\tn\nself\ttools/devsvc-core.cx\tn\nlib\tcx\tn\nlib\text\tn\nlib\ttools/cxlib\tn\n"
+                "onchange\ttools/on-change.cx\tn\nonchange_tag\tON_CHANGE\tn\nproc_pat\tunisacc.com\tn\ncache_sub\t.cache/unisacc/devsvc\tn\ninst_env\tUNISACC_DEVSVC_DIR\tn\n";
+            static const char *tail[3] = {
+                "lock\talpha\ta/one.tsv,b/dir/\tn\nlock\tbeta\t-\tn\nlock\tgamma\n",                                   /* 无 doc 行;写域三种写法 */
+                "lock\talpha\ta/one.tsv,b/dir/\tn\ndoc\tnotes.md\tn\ndoc\tnotes_*.md\tn\ndoc\tsub/*.md\tn\ndoc\tdeep/x/*.txt\tn\n",   /* 多个 doc 行 */
+                "lock\talpha\t-\tn\ndoc\tnotes.md\tn\nproduct\tother.com\tn\n" };                                    /* 重复键 */
+            static char body[3][1200];
+            /* 本仓表(经 DEVSVC_REPO_TABLE):表里每条 doc 与 lock 行都要能从输出还原;身份行的 sha256 等于表文件内容 sha256 */
+            {   unsigned char *b = 0; int64_t n = 0; char *s, *e, *end; int nd = 0, nl = 0, miss = 0; char last[900];
+                r = dv1("config", 0, 0, 0, 0, 0);
+                okc = r == 0 && !sy_read_file(table, &b, &n, 1 << 16) && b && !sy_sha256_hex(b, n, hex);
+                for (s = (char *)b, end = s + (okc ? n : 0); okc && s < end; s = e + 1) {
+                    char *t, *t2, *t3; e = memchr(s, '\n', end - s); if (!e) break;
+                    t = memchr(s, '\t', e - s); if (!t) continue;
+                    t2 = memchr(t + 1, '\t', e - t - 1); if (!t2) t2 = e;
+                    if (t - s == 3 && !memcmp(s, "doc", 3)) { F(w, sizeof w, "CFG\tdoc\t%.*s\n", (int)(t2 - t - 1), t + 1); nd++; if (!has(w)) miss++; }
+                    if (t - s == 4 && !memcmp(s, "lock", 4)) {
+                        t3 = t2 < e ? memchr(t2 + 1, '\t', e - t2 - 1) : 0; if (!t3) t3 = e;
+                        if (t2 < e && t3 > t2 + 1) F(w, sizeof w, "CFG\tlockdomain\t%.*s\t%.*s\n", (int)(t2 - t - 1), t + 1, (int)(t3 - t2 - 1), t2 + 1);
+                        else F(w, sizeof w, "CFG\tlockdomain\t%.*s\t-\n", (int)(t2 - t - 1), t + 1);
+                        nl++; if (!has(w)) miss++;
+                        F(w, sizeof w, "CFG\tlock\t%.*s\n", (int)(t2 - t - 1), t + 1); if (!has(w)) miss++; }
+                }
+                free(b);
+                ck(okc && nd >= 3 && nl >= 2 && miss == 0, "config-every-doc-and-lock-domain-row");
+                ck(okc && has("CFG\tdoc\tprd.md\n") && has("CFG\tdoc\tprd_*.md\n") && has("CFG\tdoc\tplans/*.md\n")
+                   && has("CFG\tlockdomain\tregistry\ttests/batches.tsv,tests/coverage.tsv,build/batch-packages.tsv,tests/manifests/\n") && has("CFG\tlockdomain\tderive\t-\n"), "config-repo-doc-rules-and-registry-domain");
+                F(w, sizeof w, "CFG\ttable\t%s\tsource=env\trev=-\tsha256=%s\n", table, okc ? hex : "?");
+                F(last, sizeof last, "\nDEVSVC_CONFIG\ttable=%s\tlocks=%d\tdocs=%d\tsource=env\trev=-\tsha256=%s\n", table, nl, nd, okc ? hex : "?");
+                ck(okc && has(w) && has(last) && !strcmp(strstr(out, last) ? strstr(out, last) : "", last), "config-identity-env-sha-and-last-line");
+                /* pinned:入口交来的修订标记只在其路径与所读表一致时生效;路径不符的过期标记不冒充 */
+                F(pin, sizeof pin, "0123456789abcdef0123456789abcdef01234567:%s", table);
+                if (setenv("DEVSVC_REPO_TABLE_PIN", pin, 1)) return 2;
+                F(w, sizeof w, "CFG\ttable\t%s\tsource=pinned\trev=0123456789abcdef0123456789abcdef01234567\tsha256=%s\n", table, okc ? hex : "?");
+                ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(w) && has("\tsource=pinned\trev=0123456789abcdef0123456789abcdef01234567\tsha256=") && !has("source=env"), "config-identity-pinned");
+                if (setenv("DEVSVC_REPO_TABLE_PIN", "0123456789abcdef0123456789abcdef01234567:/tmp/devsvc-check-other-table.tsv", 1)) return 2;
+                ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has("\tsource=env\trev=-\tsha256=") && !has("source=pinned"), "config-stale-pin-not-trusted");
+                /* 不经环境变量(--dev 入口与直调的读法):读 ROOT 下工作区表,来源 worktree;带着过期标记也不算 pinned */
+                if (unsetenv("DEVSVC_REPO_TABLE")) return 2;
+                F(w, sizeof w, "CFG\ttable\t%s\tsource=worktree\trev=-\tsha256=%s\n", table, okc ? hex : "?");
+                ck(dv1("config", 0, 0, 0, 0, 0) == 0 && has(w) && !has("source=pinned") && !has("source=env"), "config-identity-worktree");
+                if (unsetenv("DEVSVC_REPO_TABLE_PIN")) return 2;
+            }
+            F(ft, sizeof ft, "/tmp/devsvc-check-%d-cfg.tsv", sy_pid());
+            for (k = 0; k < 3; k++) F(body[k], sizeof body[k], "%s%s", base, tail[k]);
+            okc = sy_write_atomic(ft, body[0], strlen(body[0]), 0644) == 0 && setenv("DEVSVC_REPO_TABLE", ft, 1) == 0;
+            ck(okc && dv1("config", 0, 0, 0, 0, 0) == 0 && !has("CFG\tdoc\t") && has("\tlocks=3\tdocs=0\tsource=env\t")
+               && has("CFG\tlockdomain\talpha\ta/one.tsv,b/dir/\n") && has("CFG\tlockdomain\tbeta\t-\n") && has("CFG\tlockdomain\tgamma\t-\n")
+               && has("CFG\tlock\talpha\n") && has("CFG\tlock\tbeta\n") && has("CFG\tlock\tgamma\n"), "config-no-doc-rows");
+            okc = sy_write_atomic(ft, body[1], strlen(body[1]), 0644) == 0 && sy_sha256_hex(body[1], strlen(body[1]), hex) == 0;
+            F(w, sizeof w, "CFG\tdoc\tnotes.md\nCFG\tdoc\tnotes_*.md\nCFG\tdoc\tsub/*.md\nCFG\tdoc\tdeep/x/*.txt\nCFG\ttable\t%s\tsource=env\trev=-\tsha256=%s\n", ft, okc ? hex : "?");
+            ck(okc && dv1("config", 0, 0, 0, 0, 0) == 0 && has(w) && has("\tlocks=1\tdocs=4\tsource=env\t"), "config-many-doc-rows-in-table-order");
+            okc = sy_write_atomic(ft, body[2], strlen(body[2]), 0644) == 0;
+            ck(okc && dv1("config", 0, 0, 0, 0, 0) == 3 && has("malformed") && !has("DEVSVC_CONFIG") && !has("CFG\t"), "config-duplicate-key-rc3-no-output");
+            (void)sy_unlink(ft);
+            if (setenv("DEVSVC_REPO_TABLE", table, 1)) return 2; }
         /* derive 路径选择:缺省(--check)用并发版 derive-flow,--write 仍串行 derive 并持锁;并发版缺失回退串行 */
         if (setenv("DEVSVC_DERIVE_DRY", "1", 1)) return 2;
         ck(dv1("derive", "--check", "--only", "layer-api", 0, 0) == 0 && has("DEVSVC_DERIVE\tplan=tools/derive-flow.cx\tfallback=tools/derive.cx\n"), "derive-check-default-flow");

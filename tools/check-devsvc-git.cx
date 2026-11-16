@@ -159,6 +159,40 @@ int main(int argc, char **argv) {
     rc = dv("x", "--", "git", "push", "--force", 0, 0, 0);
     ck(rc == 125 && has("REFUSE"), "refuse-push-force");
 
+    /* (d2) DCLI2:已启动的 git 动作保留真实 rc 与诊断,不贴 devsvc usage;只有参数解析错才贴 usage */
+    ck(sh("printf 'ws \\n' > dvg-ws.txt && git add dvg-ws.txt", fx) == 0, "rc2-fixture");
+    rc = dv("git", "diff", "--cached", "--check", 0, 0, 0, 0);
+    ck(rc == 2 && has("dvg-ws.txt:1: trailing whitespace") && !has("usage: devsvc"), "diff-check-rc2-keeps-diag-no-usage");
+    rc = dv("git", "diff", "--cached", "--exit-code", "--stat", 0, 0, 0);
+    ck(rc == 1 && has("dvg-ws.txt") && !has("usage: devsvc"), "diff-exit-code-rc1-no-usage");
+    rc = dv("git", "diff", "--cached", "--stat", 0, 0, 0, 0);
+    ck(rc == 0 && has("dvg-ws.txt") && !has("usage: devsvc"), "diff-rc0-no-usage");
+    rc = dv("git", "log", "--no-such-option-dvg", 0, 0, 0, 0, 0);
+    ck(rc != 0 && rc != 2 && !has("usage: devsvc"), "log-git-own-error-rc-kept-no-usage");
+    ck(sh("git rm -q --cached dvg-ws.txt && rm -f dvg-ws.txt", fx) == 0, "rc2-fixture-cleanup");
+    rc = dv("git", "add", "out", 0, 0, 0, 0, 0);
+    ck(rc == 2 && has("REFUSE git add out:") && !has("usage: devsvc"), "add-refuse-rc2-named-no-usage");
+    rc = dv("git", "commit", "-m", "X", "--whole", "dvg-b1.txt", "--cwd", "dvg-no-such-dir");
+    ck(rc == 2 && has("REFUSE git commit --cwd") && !has("usage: devsvc"), "commit-cwd-refuse-rc2-via-receipt-no-usage");
+    {   char h0[64], h1[64];
+        (void)sh("git rev-parse HEAD", fx); F(h0, sizeof h0, "%.60s", out);
+        rc = dv("git", 0, 0, 0, 0, 0, 0, 0);
+        ck(rc == 2 && has("usage: devsvc"), "git-no-subcommand-rc2-usage");
+        rc = dv("git", "merge", 0, 0, 0, 0, 0, 0);
+        ck(rc == 2 && has("missing BRANCH") && has("usage: devsvc"), "merge-missing-branch-rc2-usage");
+        rc = dv("git", "merge", "--frob", 0, 0, 0, 0, 0);
+        ck(rc == 2 && has("unexpected --frob") && has("usage: devsvc"), "merge-bad-option-rc2-usage");
+        rc = dv("git", "add", 0, 0, 0, 0, 0, 0);
+        ck(rc == 2 && has("need 1..") && has("usage: devsvc"), "add-no-path-rc2-usage");
+        rc = dv("git", "commit", "--whole", "dvg-b1.txt", 0, 0, 0, 0);
+        ck(rc == 2 && has("-m MSG is required") && has("usage: devsvc"), "commit-missing-m-rc2-usage");
+        rc = dv("git", "commit", "-m", "X", "--frob", 0, 0, 0);
+        ck(rc == 2 && has("unknown option --frob") && has("usage: devsvc"), "commit-bad-option-rc2-usage");
+        rc = dv("git", "frobnicate", 0, 0, 0, 0, 0, 0);
+        ck(rc == 125 && has("REFUSE git frobnicate") && !has("usage: devsvc"), "unknown-subcommand-named-refuse-rc125");
+        (void)sh("git rev-parse HEAD", fx); F(h1, sizeof h1, "%.60s", out);
+        ck(!ovf && h0[0] && !strcmp(h0, h1) && sh("[ -z \"$(git diff --cached --name-only)\" ]", fx) == 0, "bad-args-no-git-side-effect"); }
+
     /* (e) git status 末行格式 */
     rc = dv("git", "status", 0, 0, 0, 0, 0, 0);
     {   char *p = strstr(out, "GIT_STATUS\tdirty="); int d = -1, o = -1;
