@@ -11,7 +11,7 @@
  * Run: one devsvc flow, one exec node per batch (55 s bound each) running `affected.cx --ids ID --run -j 1`
  *   (plus --prepare-materials when the registry row declares materials); a tlib kit node runs first and every batch
  *   node depends on it.  The flow gets an explicit parallel degree (--par N, 1..32; default the number of
- *   batches, at most 32) and a deadline that keeps the whole command under 55 s; batches the deadline leaves unstarted are NOT_RUN.  Nothing is cached.
+ *   batches, at most the free machine admission tokens of cxlib.flowadmit fa_budget and 32) and a deadline that keeps the whole command under 55 s; batches the deadline leaves unstarted are NOT_RUN.  Nothing is cached.
  * Output: CHECK<TAB>id<TAB>PASS|FAIL|DEFERRED|NOT_RUN<TAB>ms<TAB>first=LINE per batch (first: the first failing line,
  *   or the reason), DCHECK_FLOW<TAB>peak=..<TAB>par=..<TAB>select_ms=..<TAB>run=DIR, and last
  *   DCHECK<TAB>total=N<TAB>pass=N<TAB>fail=N<TAB>deferred=N<TAB>not_run=N<TAB>wall_ms=N<TAB>serial_ms=N
@@ -38,6 +38,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.flowadmit
 
 /* the one place the parallel-degree flag of devsvc flow / x is spelled */
 #define DC_PAR_FLAG "--par"
@@ -312,7 +313,7 @@ int main(int argc, char **argv) {
         nids = k;
         for (int j = 0; j < nonly; j++) { int seen = 0; for (int i = 0; i < nids; i++) if (!strcmp(ids[i], only[j])) seen = 1; if (!seen) extra[nextra++] = only[j]; }
     }
-    if (!par) par = nids > 32 ? 32 : nids < 1 ? 1 : nids;   /* every batch at once, up to the flow maximum */
+    if (!par) { int bud = fa_budget(); if (bud > 32) bud = 32; par = nids > bud ? bud : nids < 1 ? 1 : nids; }   /* every batch at once, up to the free machine tokens */
     select_ms = sy_now_ms() - t_start;
     if (fromfile) select_ms = 0;
     printf("DCHECK_SELECT\tchanged=%d\tbatches=%d\ttier=%s\tselect_ms=%ld\n", changed, nids, tier, select_ms);

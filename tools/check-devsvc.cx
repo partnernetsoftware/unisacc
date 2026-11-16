@@ -98,10 +98,13 @@ static int fixture_repo(const char *src) {
 int main(int argc, char **argv) {
     char stray[400];
     /* --cases a:配置/锁/事件/git/status/重启/ttl/idle;--cases b:run 缓存(夹具仓);缺省两组都跑。批次 devsvc 跑 a,devsvc-run 跑 b */
-    int A1 = 1, A2 = 1, A3 = 1, B = 1, A;
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strchr(cs, '1') || strchr(cs, '2') || strchr(cs, '3'), ha = strchr(cs, 'a') != 0;
-        A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3")); B = strchr(cs, 'b') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+    /* b 拆两组(各自起停实例):b1 事件落盘与只读 git;b2 run 原生缓存。--cases b 等于 b1+b2 */
+    int A1 = 1, A2 = 1, A3 = 1, B1 = 1, B2 = 1, A;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strstr(cs, "a1") || strstr(cs, "a2") || strstr(cs, "a3"), ha = strchr(cs, 'a') != 0;
+        int db = strstr(cs, "b1") || strstr(cs, "b2"), hb = strchr(cs, 'b') != 0;
+        A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3"));
+        B1 = hb && (!db || strstr(cs, "b1")); B2 = hb && (!db || strstr(cs, "b2")); }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|b1|b2|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
     A = A1 || A2 || A3;
     if (sy_cwd(root, sizeof root) < 0) return 2;
@@ -307,10 +310,10 @@ int main(int argc, char **argv) {
     (void)t0;
     }
     }
-    if (B) {
+    if (B1 || B2) {
         if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
         ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "run-group-start"); }
-    if (B) {
+    if (B1) {
     /* 事件落盘(实例目录 events.tsv,带 owner,超阈值轮转)与只读 git 透传(不取锁)(b 组) */
     {   char ep[200], ep1[200]; unsigned char *b = 0; int64_t n = 0, sz = 0; int i, got;
         F(ep, sizeof ep, "%s/events.tsv", inst); F(ep1, sizeof ep1, "%s/events.tsv.1", inst);
@@ -327,7 +330,7 @@ int main(int argc, char **argv) {
     }
 
     }
-    if (B) {
+    if (B2) {
     /* run(在私有夹具仓里):经服务与直接运行一致;首次构造,第二次命中缓存,--local 共用缓存 */
     {   char *d[] = {"sh", prod, "echo.cx", "--", "a b", "c", 0}; int rd, rs; char *q;
         rd = cap2(d, fx, out2, sizeof out2);
@@ -373,7 +376,7 @@ int main(int argc, char **argv) {
             ck(sy_unlink(bad) == 0, "run-bad-fixture-removed"); }
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
     }
-    if (B) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
+    if (B1 || B2) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
     if (A3) {
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a3-start");
 

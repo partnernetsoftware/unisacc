@@ -1,0 +1,114 @@
+/* From repository root: sh ./unisacc.com tools/check-ext-testx.cx [-- --cases a;b]
+ * testx.check (tk_) against real children: a probe check built from the package is run through the
+ * product, so the counting, the named PASS/FAIL lines, the summary line and the rc are observed as a
+ * batch runner sees them.
+ *   a  failed count and rc on a failing probe, byte-exact output, all-pass rc 0, extra summary field,
+ *      tk_has/tk_line incl. 0 haystack
+ *   b  scratch directories removed by tk_end, a cleanup that fails is a named FAIL and rc 1,
+ *      tk_write makes parents, --cases parsing (';' and ','), tk_run code/out/err/merge, deadline 124
+ * Prints PASS/FAIL per case and CHECK_EXT_TESTX<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use testx.check
+
+static const char *probe_src =
+    "#pragma unisa use testx.check\n"
+    "#pragma unisa use sys.io\n"
+    "#pragma unisa use sys.fs\n"
+    "int main(int argc, char **argv) {\n"
+    "    char d[4096];\n"
+    "    tk_begin(\"pr.\");\n"
+    "    tk_cases_init(argc, argv);\n"
+    "    if (tk_case(\"one\")) { tk_ok(1, \"a\"); tk_ok(argc > 99, \"b\"); tk_ok(tk_has(\"xyz\", \"y\"), \"c\"); }\n"
+    "    if (tk_case(\"two\")) tk_ok(1, \"two\");\n"
+    "    if (tk_case(\"three\")) tk_ok(1, \"three\");\n"
+    "    if (tk_case(\"keep\")) { if (tk_scratch(\"tkprobe\", d, sizeof d) == 0) { tk_write(d, \"x/y/z.txt\", \"hi\"); sy_printf(\"DIR\\t%s\\n\", d); } }\n"
+    "    if (tk_case(\"lock\")) { if (tk_scratch(\"tkprobe\", d, sizeof d) == 0) { tk_write(d, \"sub/f\", \"q\"); sy_printf(\"DIR\\t%s\\n\", d); sy_chmod(d, 0500); } }\n"
+    "    return tk_end(\"CHECK_PROBE\", argc > 3 ? \"extra=1\" : 0);\n"
+    "}\n";
+
+static char work[4096], com[4400], probe[4400];
+
+static int go(const char *cases, const char *extra) {
+    char *av[] = {"sh", com, probe, "--", "--cases", (char *)cases, (char *)extra, 0};
+    if (!extra) av[6] = 0;
+    return tk_run(av, 0, 50000);
+}
+
+static int dir_of(const char *out, char *d, long cap) {
+    long p = 0, i = 0;
+    while (out[p] && !(out[p] == 'D' && out[p + 1] == 'I' && out[p + 2] == 'R' && out[p + 3] == '\t')) p++;
+    if (!out[p]) return -1;
+    p += 4;
+    while (out[p + i] && out[p + i] != '\n' && i + 1 < cap) { d[i] = out[p + i]; i++; }
+    d[i] = 0;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], d[4096], f[4400]; int rc;
+    tk_begin("ext-testx.");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (tk_scratch("check-ext-testx", work, sizeof work) || cx_fmt(probe, sizeof probe, "%s/probe.cx", work)) return 2;
+    if (tk_write(work, "probe.cx", probe_src)) return 2;
+    /* the probe resolves packages through a cxroot.tsv beside it whose rows point into a link to this
+       root (DIR may not be absolute or climb), so it builds against the package under test */
+    {   char lk[4400], *src, *dst; size_t n, i, k = 0; int bol = 1;
+        if (cx_fmt(lk, sizeof lk, "%s/r", work) || sy_symlink(root, lk)) return 2;
+        src = cx_read("cxroot.tsv", &n);
+        if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 2;
+        for (i = 0; i < n; i++) {
+            dst[k++] = src[i];
+            if (bol && src[i] == 'R' && i + 1 < n && src[i + 1] == '\t') {
+                size_t j = i + 2;
+                dst[k++] = src[++i];
+                while (j < n && src[j] != '\t' && src[j] != '\n') dst[k++] = src[j++];
+                i = j - 1;
+                if (j < n && src[j] == '\t') { dst[k++] = '\t'; dst[k++] = 'r'; dst[k++] = '/'; i = j; }
+            }
+            bol = src[i] == '\n';
+        }
+        dst[k] = 0;
+        if (tk_write(work, "cxroot.tsv", dst)) return 2; }
+    if (tk_case("a")) {
+        rc = go("one", 0);
+        tk_ok(rc == 1 && tk_line(tk_out(), "CHECK_PROBE\tfailed=1"), "fail-rc1");
+        tk_ok(tx_same(tk_out(), tx_len(tk_out(), 1 << 16), "PASS\tpr.a\nFAIL\tpr.b\nPASS\tpr.c\nCHECK_PROBE\tfailed=1\n", 51), "fail-output-bytes");
+        rc = go("two;three", 0);
+        tk_ok(rc == 0 && tk_line(tk_out(), "CHECK_PROBE\tfailed=0") && tk_line(tk_out(), "PASS\tpr.two") && tk_line(tk_out(), "PASS\tpr.three"), "pass-rc0-semicolon-cases");
+        rc = go("two,one", "x");
+        tk_ok(rc == 1 && tk_line(tk_out(), "CHECK_PROBE\tfailed=1\textra=1") && tk_line(tk_out(), "PASS\tpr.two") && !tk_has(tk_out(), "three"), "comma-cases-extra-field");
+        rc = go("nomatch", 0);
+        tk_ok(rc == 0 && tx_same(tk_out(), tx_len(tk_out(), 1 << 16), "CHECK_PROBE\tfailed=0\n", 21), "unselected-runs-nothing");
+        tk_ok(tk_has("abc", "bc") && !tk_has("abc", "cd") && !tk_has(0, "a") && !tk_has("a", 0), "has-substring-and-null");
+        tk_ok(tk_line("x\nfoo\ny", "foo") && !tk_line("x\nfoobar\n", "foo") && tk_line("foo", "foo") && tk_line("a\n\nb", "") && !tk_line(0, "a"), "line-whole-line");
+    }
+    if (tk_case("b")) {
+        rc = go("keep", 0);
+        tk_ok(rc == 0 && dir_of(tk_out(), d, sizeof d) == 0 && d[0] == '/', "scratch-reported");
+        tk_ok(d[0] == '/' && sy_exists(d) != 1, "scratch-removed-by-end");
+        rc = go("lock", 0);
+        tk_ok(rc == 1 && dir_of(tk_out(), d, sizeof d) == 0 && tk_has(tk_out(), "FAIL\tpr.scratch-cleanup\t") && tk_line(tk_out(), "CHECK_PROBE\tfailed=1"), "cleanup-failure-named-rc1");
+        if (d[0] == '/') { sy_chmod(d, 0700); cx_rmtree(d); }
+        tk_ok(tk_write(work, "p/q/r.txt", "zz") == 0 && cx_fmt(f, sizeof f, "%s/p/q/r.txt", work) == 0 && sy_exists(f) == 1, "write-makes-parents");
+        {   char *av[] = {"sh", "-c", "echo o; echo e >&2; exit 5", 0};
+            rc = tk_run(av, 0, 20000);
+            tk_ok(rc == 5 && tk_rc() == 5 && tk_line(tk_out(), "o") && tk_line(tk_err(), "e") && !tk_has(tk_out(), "e\n"), "run-split-streams");
+            rc = tk_runm(av, 0, 20000);
+            tk_ok(rc == 5 && tk_has(tk_out(), "o\n") && tk_has(tk_out(), "e\n"), "runm-merged"); }
+        {   char *av[] = {"pwd", 0};
+            rc = tk_run(av, work, 20000);
+            tk_ok(rc == 0 && tk_has(tk_out(), work), "run-cwd"); }
+        {   char *av[] = {"sleep", "30", 0}; long t0 = sy_now_ms();
+            rc = tk_run(av, 0, 500);
+            tk_ok(rc == 124 && tk_timed_out() && sy_now_ms() - t0 < 5000, "run-deadline-124"); }
+        {   char *av[] = {"no-such-tk-cmd-xyz", 0};
+            rc = tk_run(av, 0, 5000);
+            tk_ok(rc < 0 && tk_rc() == rc && tk_out()[0] == 0, "run-missing-named-errno"); }
+    }
+    return tk_end("CHECK_EXT_TESTX", 0);
+}

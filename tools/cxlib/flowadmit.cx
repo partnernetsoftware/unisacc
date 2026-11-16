@@ -1,0 +1,166 @@
+/* flowadmit.cx -- machine-level admission tokens shared by every flow on this machine (devsvc P2/K5).
+ *
+ * Slot directory $DEVSVC_SLOTS_DIR, default $HOME/.cache/unisacc/devsvc/slots (outside every instance
+ * directory, shared across instances and work trees).  A token is a file slot.K (K < capacity)
+ * created with O_EXCL holding "PID STARTTIME"; a lease whose owner is gone (no /proc/PID, or the
+ * /proc/PID/stat start time differs: pid reuse) is reclaimed by rename-then-unlink, so no stale
+ * lease outlives its owner.
+ *
+ * Capacity = min(cores, MemAvailable GB / DEVSVC_NODE_GB (default 2)), halved when load1 exceeds
+ * 2 x cores, at most FA_MAX.  Test seams: DEVSVC_MEMINFO (meminfo path), DEVSVC_LOADAVG (loadavg
+ * path), DEVSVC_NCPU.  DEVSVC_ADMISSION=off disables admission (for checks only).
+ *
+ * API:  fa_enabled()                 1 when admission applies (prepares the slot directory)
+ *       fa_cap()                     capacity now; 0 means memory too low for any node
+ *       fa_acquire(w, slots, max)    take min(w, cap, max) tokens all or none: count taken, 0 = refused
+ *       fa_release(slots, n)         give the tokens back
+ *       fa_budget()                  free tokens now (capacity minus live leases), at least 1;
+ *                                    callers size their default parallelism by it
+ * Admission only delays starts; it never changes what a caller runs or in which order.
+ */
+#pragma unisa module flowadmit
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+enum { FA_MAX = 128 };
+static char fa_dir[1024];
+
+int fa_enabled(void) {
+    const char *e = getenv("DEVSVC_ADMISSION"), *d = getenv("DEVSVC_SLOTS_DIR"), *h = getenv("HOME");
+    char p[1024]; int r;
+    if (e && !strcmp(e, "off")) return 0;
+    if (d && *d) { if (cx_fmt(fa_dir, sizeof fa_dir, "%s", d)) return 0; }
+    else {
+        if (!h || !*h || cx_fmt(fa_dir, sizeof fa_dir, "%s/.cache/unisacc/devsvc/slots", h)) return 0;
+        if (!cx_fmt(p, sizeof p, "%s/.cache", h)) (void)sy_mkdir(p, 0755);
+        if (!cx_fmt(p, sizeof p, "%s/.cache/unisacc", h)) (void)sy_mkdir(p, 0755);
+        if (!cx_fmt(p, sizeof p, "%s/.cache/unisacc/devsvc", h)) (void)sy_mkdir(p, 0755);
+    }
+    r = sy_mkdir(fa_dir, 0755);
+    return r < 0 && r != -EEXIST ? 0 : 1;
+}
+
+static long fa_envl(const char *k, long dflt) { const char *e = getenv(k); long v = e ? atol(e) : 0; return v > 0 ? v : dflt; }
+
+/* whole small file as a NUL terminated heap string, 0 on failure */
+static char *fa_slurp(const char *path, long cap) {
+    unsigned char *b = 0; int64_t n = 0; char *t;
+    if (sy_read_file(path, &b, &n, cap) || !b) { free(b); return 0; }
+    t = realloc(b, (size_t)n + 1);
+    if (!t) { free(b); return 0; }
+    t[n] = 0; return t;
+}
+
+static long fa_meminfo_kb(void) {
+    const char *p = getenv("DEVSVC_MEMINFO"); char *b = fa_slurp(p && *p ? p : "/proc/meminfo", 1L << 20), *s; long v = -1;
+    if (!b) return -1;
+    s = strstr(b, "MemAvailable:");
+    if (s) v = atol(s + 13);
+    free(b); return v;
+}
+
+static double fa_load1(void) {
+    const char *p = getenv("DEVSVC_LOADAVG"); char *b = fa_slurp(p && *p ? p : "/proc/loadavg", 4096); double v;
+    if (!b) return 0;
+    v = atof(b); free(b); return v;
+}
+
+/* online cpus: cpuN lines of /proc/stat (sysx.process sy_ncpu is not used: its np_buf clashes with cxlib.netpack in callers) */
+static long fa_ncpu(void) {
+    char *b = fa_slurp("/proc/stat", 1L << 20), *p; long n = 0;
+    for (p = b; p && *p; p++) if ((p == b || p[-1] == 10) && p[0] == 99 && p[1] == 112 && p[2] == 117 && p[3] >= 48 && p[3] <= 57) n++;
+    free(b); return n;
+}
+
+int fa_cap(void) {
+    long n = fa_ncpu(), ncpu = fa_envl("DEVSVC_NCPU", n > 0 ? n : 1), gb = fa_envl("DEVSVC_NODE_GB", 2), kb = fa_meminfo_kb(), cap = ncpu;
+    if (kb >= 0 && kb / (gb * 1048576L) < cap) cap = kb / (gb * 1048576L);
+    if (fa_load1() > 2.0 * (double)ncpu) cap /= 2;
+    if (cap > FA_MAX) cap = FA_MAX;
+    return cap < 0 ? 0 : (int)cap;
+}
+
+static long fa_start_time(long pid) {
+    char p[64], *b, *s; long v = -1; int f = 2;
+    if (cx_fmt(p, sizeof p, "/proc/%ld/stat", pid)) return -1;
+    b = fa_slurp(p, 8192);
+    if (!b) return -1;
+    s = strrchr(b, 41);   /* the closing parenthesis after comm */
+    for (; s && *s; s++) if (*s == 32 && ++f == 22) { v = atol(s + 1); break; }
+    free(b); return v;
+}
+
+static int fa_alive(long pid, long st) {
+    char p[64];
+    if (pid <= 0) return 0;
+    if (cx_fmt(p, sizeof p, "/proc/%ld", pid) || sy_exists(p) == 0) return 0;
+    if (st > 0) { long now = fa_start_time(pid); if (now >= 0 && now != st) return 0; }
+    return 1;
+}
+
+/* owner of a lease file: 1 parsed, 0 empty or unreadable */
+static int fa_owner(const char *path, long *pid, long *st) {
+    char *b = fa_slurp(path, 256), *sp;
+    *pid = 0; *st = 0;
+    if (!b) return 0;
+    if (!*b) { free(b); return 0; }
+    *pid = atol(b); sp = strchr(b, 32); *st = sp ? atol(sp + 1) : 0;
+    free(b); return 1;
+}
+
+/* 1 = slot K is ours now; a dead owner's lease is reclaimed first */
+static int fa_take(int k) {
+    char p[1100], q[1200], ln[64]; int tries;
+    if (cx_fmt(p, sizeof p, "%s/slot.%d", fa_dir, k)) return 0;
+    for (tries = 0; tries < 2; tries++) {
+        long pid, st; int fd = sy_open(p, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd >= 0) {
+            long me = (long)sy_pid();
+            int ok = !cx_fmt(ln, sizeof ln, "%ld %ld\n", me, fa_start_time(me)) && sy_write_all(fd, ln, (long)strlen(ln)) == 0;
+            sy_close(fd);
+            if (!ok) { (void)sy_unlink(p); return 0; }
+            return 1;
+        }
+        if (fd != -EEXIST) return 0;
+        if (!fa_owner(p, &pid, &st)) {   /* creator may still be writing: look once more, never reap an unread lease */
+            sy_sleep_ms(1);
+            if (!fa_owner(p, &pid, &st)) { if (sy_exists(p) == 0) continue; return 0; }
+        }
+        if (fa_alive(pid, st)) return 0;
+        if (cx_fmt(q, sizeof q, "%s/slot.%d.reap.%ld.%ld", fa_dir, k, (long)sy_pid(), (long)sy_now_ms()) || sy_rename(p, q)) continue;
+        (void)sy_unlink(q);
+    }
+    return 0;
+}
+
+void fa_release(int *slots, int n) {
+    char p[1100]; int i;
+    for (i = 0; i < n; i++) if (!cx_fmt(p, sizeof p, "%s/slot.%d", fa_dir, slots[i])) (void)sy_unlink(p);
+}
+
+int fa_acquire(int w, int *slots, int max) {
+    int cap = fa_cap(), k, n = 0;
+    if (!fa_enabled()) return 0;   /* (re)reads the slot directory from the environment */
+    if (w > cap) w = cap;
+    if (w > max) w = max;
+    if (w < 1) return 0;
+    for (k = 0; k < cap && n < w; k++) if (fa_take(k)) slots[n++] = k;
+    if (n < w) { fa_release(slots, n); return 0; }
+    return n;
+}
+
+int fa_budget(void) {
+    int cap = fa_cap(), used = 0, k;
+    if (!fa_enabled()) return cap > 0 ? cap : 1;
+    for (k = 0; k < cap; k++) {
+        char p[1100]; long pid, st;
+        if (cx_fmt(p, sizeof p, "%s/slot.%d", fa_dir, k)) break;
+        if (fa_owner(p, &pid, &st) && fa_alive(pid, st)) used++;
+    }
+    return cap - used > 1 ? cap - used : 1;
+}

@@ -4,31 +4,19 @@
    later (ENOENT), which is not the cap.
    History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128
    (src/driveargs.cx:58), so this check now measures the real boundary instead of an interior
-   point that would stay green no matter how the cap moved. */
-#pragma unisa use sysx.process
+   point that would stay green no matter how the cap moved.
+   Assertions and the bounded child (50 s, stderr kept apart) go through testx.check. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
-#pragma unisa use sys.sig
 #pragma unisa use text.text
-#pragma unisa use mem.heap
-
-static int g_fail;
-static void ck(int ok, const char *name) {
-    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
-    if (!ok) g_fail = g_fail + 1;
-}
-static int has(const char *s, const char *w) {
-    if (!s) return 0;
-    return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 128)) >= 0;
-}
+#pragma unisa use testx.check
 
 int main(int argc, char **argv) {
     char root[4096], com[4400], bound[4400];
     char *v[140];   /* 129 fake paths + 7 leading args + terminator */
-    char why[512];
-    np_result r;
-    int i;
+    int i, rc;
+    tk_begin("");
     root[0] = 0;
     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
     else {
@@ -43,29 +31,27 @@ int main(int argc, char **argv) {
     v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-127";
     { int k = 0; while (k < 127) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
     v[i] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t127-run\n"); return 2; }
+    if (tk_run(v, root, 50000) < 0) { printf("FAIL\t127-run\n"); return 2; }
     /* The installed product may still carry the old 96 walk (rebuilt products carry 128).
        Either it passes the walk, or it refuses at the OLD cap -- both are reported, and the
        one that is true is named, so a stale product cannot look like a passing new one. */
-    if (has(r.err, "too many sources")) {
+    if (tk_has(tk_err(), "too many sources")) {
         printf("SKIP\t127-sources-pass-walk\tproduct-walk-still-96\n");
     } else {
-        ck(1, "127-sources-pass-walk");
+        tk_ok(1, "127-sources-pass-walk");
     }
-    np_free(&r);
     /* 129 sources: the walk refuses, and the sentence carries the limit. */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
     v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-129";
     { int k = 0; while (k < 129) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
     v[i] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t129-run\n"); return 2; }
-    ck(r.rc == 1 && has(r.err, "too many sources"), "129-sources-refused-named");
+    rc = tk_run(v, root, 50000);
+    if (rc < 0) { printf("FAIL\t129-run\n"); return 2; }
+    tk_ok(rc == 1 && tk_has(tk_err(), "too many sources"), "129-sources-refused-named");
     /* Old products say the bare sentence; only rebuilt ones carry the limit. */
-    if (!has(r.err, "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
-    else if (!has(r.err, "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
-    else ck(1, "129-refusal-names-the-limit");
-    np_free(&r);
-    printf("CHECK_LINK_CAP\tfailed=%d\n", g_fail);
-    return g_fail ? 1 : 0;
+    if (!tk_has(tk_err(), "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
+    else if (!tk_has(tk_err(), "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
+    else tk_ok(1, "129-refusal-names-the-limit");
+    return tk_end("CHECK_LINK_CAP", 0);
 }

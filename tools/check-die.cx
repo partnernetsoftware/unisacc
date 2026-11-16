@@ -8,18 +8,18 @@
  * with detail 0 it is exactly "TOOL: WHAT"; in both the statement after tool_die never runs (its
  * stdout marker and its marker file are absent, and the exit code is not main's 0) while the statement
  * before it did.  The probe uses stdio for its markers: a module-less temp directory resolves only
- * what the cxlib link provides.  Prints PASS/FAIL per case and CHECK_DIE<TAB>failed=N; exit 0 only when 0. */
-#pragma unisa use cxlib.procrun
+ * what the cxlib link provides.  Prints PASS/FAIL per case and CHECK_DIE<TAB>failed=N; exit 0 only when 0.
+ * Assertions, the bounded child (50 s) and the temp directory go through testx.check; tk_end removes the
+ * directory and names a removal that fails. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use testx.check
 
-static int failed;
 static char work[4400];
 
 static void die(const char *s) { fprintf(stderr, "check-die: %s\n", s); exit(2); }
-static void ck(int ok, const char *name) { printf("%s\tcheck-die.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
-static int has(const char *s, const char *t) { return s && strstr(s, t) != 0; }
+static int is(const char *s, const char *want) { return tx_same(s, tx_len(s, 1 << 20), want, tx_len(want, 4096)); }
 
 static const char *probe_src =
     "#pragma unisa use cxlib.die\n"
@@ -35,37 +35,31 @@ static const char *probe_src =
     "}\n";
 
 int main(void) {
-    pr_result r;
     char root[4400], com[4400], libs[4400], link[4400], probe[4400], before[4400], after[4400];
-    int t;
+    int rc;
+    tk_begin("check-die.");
     if (sy_realpath(".", root, sizeof root) < 0) die("root");
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(libs, sizeof libs, "%s/tools/cxlib", root)) die("root paths");
-    if (cx_fmt(work, sizeof work, "%s/check-die-%d", sy_tmpdir(), (int)getpid())) die("work");
-    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
-    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (tk_scratch("check-die", work, sizeof work)) die("work");
     if (cx_fmt(link, sizeof link, "%s/cxlib", work) || cx_fmt(probe, sizeof probe, "%s/probe.cx", work) ||
         cx_fmt(before, sizeof before, "%s/before", work) || cx_fmt(after, sizeof after, "%s/after", work)) die("path");
     if (sy_symlink(libs, link)) die("cxlib link");
-    if (cx_write(probe, probe_src, strlen(probe_src))) die("probe write");
+    if (tk_write(work, "probe.cx", probe_src)) die("probe write");
 
     {   char *av[] = {"sh", com, probe, "--", before, after, "line 7", 0};
-        t = pr_run("die-detail", av, work, 0, 50, &r);
-        ck(t == 0 && r.rc == 7, "detail.exit-code-is-rc-argument");
-        ck(t == 0 && r.err && !strcmp(r.err, "die-probe: bad input: line 7\n"), "detail.stderr-tool-what-detail");
-        ck(t == 0 && has(r.out, "BEFORE-DIE") && sy_exists(before) == 1, "detail.statement-before-ran");
-        ck(t == 0 && !has(r.out, "AFTER-DIE") && sy_exists(after) != 1, "detail.statement-after-not-run");
-        if (t == 0) pr_free(&r);
+        rc = tk_run(av, work, 50000);
+        tk_ok(rc == 7, "detail.exit-code-is-rc-argument");
+        tk_ok(rc >= 0 && is(tk_err(), "die-probe: bad input: line 7\n"), "detail.stderr-tool-what-detail");
+        tk_ok(rc >= 0 && tk_has(tk_out(), "BEFORE-DIE") && sy_exists(before) == 1, "detail.statement-before-ran");
+        tk_ok(rc >= 0 && !tk_has(tk_out(), "AFTER-DIE") && sy_exists(after) != 1, "detail.statement-after-not-run");
     }
     if (sy_exists(before) == 1 && sy_unlink(before)) die("reset marker");
     {   char *av[] = {"sh", com, probe, "--", before, after, 0};
-        t = pr_run("die-nodetail", av, work, 0, 50, &r);
-        ck(t == 0 && r.rc == 3, "nodetail.exit-code-is-rc-argument");
-        ck(t == 0 && r.err && !strcmp(r.err, "die-probe: bad input\n"), "nodetail.stderr-tool-what-only");
-        ck(t == 0 && has(r.out, "BEFORE-DIE") && sy_exists(before) == 1, "nodetail.statement-before-ran");
-        ck(t == 0 && !has(r.out, "AFTER-DIE") && sy_exists(after) != 1, "nodetail.statement-after-not-run");
-        if (t == 0) pr_free(&r);
+        rc = tk_run(av, work, 50000);
+        tk_ok(rc == 3, "nodetail.exit-code-is-rc-argument");
+        tk_ok(rc >= 0 && is(tk_err(), "die-probe: bad input\n"), "nodetail.stderr-tool-what-only");
+        tk_ok(rc >= 0 && tk_has(tk_out(), "BEFORE-DIE") && sy_exists(before) == 1, "nodetail.statement-before-ran");
+        tk_ok(rc >= 0 && !tk_has(tk_out(), "AFTER-DIE") && sy_exists(after) != 1, "nodetail.statement-after-not-run");
     }
-    if (cx_rmtree(work)) die("cleanup");
-    printf("CHECK_DIE\tfailed=%d\n", failed);
-    return failed ? 1 : 0;
+    return tk_end("CHECK_DIE", 0);
 }

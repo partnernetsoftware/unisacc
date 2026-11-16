@@ -332,7 +332,7 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     if (!bypass && sy_exists(bin) == 1) {   /* 命中:每次重算执行体字节 sha 与构造时记下的比对,不符即重建 */
         char sp[PW + 8], want[80] = "", got[65]; unsigned char *sb = 0; int64_t sn = 0;
         F(sp, sizeof sp, "%s.sha", bin);
-        if (!sy_read_file(sp, &sb, &sn, 128) && sb && sn >= 64) { memcpy(want, sb, 64); want[64] = 0; }
+        if (!sy_read_file(sp, &sb, &sn, 128) && sb && sn >= 64) { mm_copy(want, sizeof want, sb, 64); want[64] = 0; }
         free(sb); sb = 0;
         if (want[0] && !sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got) && !strcmp(got, want)) {
             free(sb); *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
@@ -889,8 +889,8 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         if (en2 > 0) { F(hd, sizeof hd, "==> %s.err %ld <==\n", f.n[i].id, en2); outs(hd, strlen(hd)); fflush(stdout); outfile(p); outs("\n", 1); }
     }
     {   char ln[PW + 400];
-        F(ln, sizeof ln, "DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\trun=%s\n",
-          f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, rdir);
+        F(ln, sizeof ln, "DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\tpeak_tokens=%d\tadmit_wait_ms=%ld\trun=%s\n",
+          f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, s.peak_tokens, s.admit_wait_ms, rdir);
         outs(ln, strlen(ln)); }
     if (oc.on) {   /* --cat 未给时全量仍含各节点输出(附录,只落盘不参与过滤),便于事后查看 */
         long keep = ocb.n;
@@ -1329,11 +1329,116 @@ static int git_commit_check(int argc, char **argv) {
             fprintf(stderr, "devsvc: git commit: 说明首行必须是正文,署名放最后空行后 (first line must be the body; put Co-Authored-By after the last blank line)\n"); return 2; } }
     return 0;
 }
+/* 合并冲突处理。冲突文件全部是 exec/facts/derive.tsv 登记的 outputs(派生表;末尾带 / 的目录只管其下一层)时自动解决:
+   逐个取本侧(checkout --ours),derive --write --only 受影响名,再 derive --check --only 同名须无漂移,git add -A 这些行的
+   outputs 后提交合并(说明第二段写明自动解决了哪些表与 derive 名),末行 GIT_MERGE rc=0 ... auto_resolved=N derive=名,...。
+   混有非派生文件冲突、derive 拒绝、需 bump(layer-api 的 NEEDS_BUMP)或 check 仍漂移时停下:逐行 MERGE_CONFLICT<TAB>文件,
+   MERGE_HINT<TAB>原因<TAB>具名提示,末行 GIT_MERGE rc=1 conflicts=N,rc 1。不自己 merge --abort:abort 遇他人未提交改动
+   会报 Entry not uptodate 失败,由调用方核过后自行处理。 */
+#define MG_MAX 64
+/* path 落在清单某行 outputs 里:name 填该行名,outs 填该行 outputs 字段,返回 1 */
+static int mg_row_for(const char *man, const char *path, char *name, int ncap, char *outs, int ocap) {
+    const char *s = man, *e;
+    for (; *s; s = *e ? e + 1 : e) {
+        const char *f[6]; int k = 0; const char *p;
+        e = strchr(s, '\n'); if (!e) e = s + strlen(s);
+        if (*s == '#' || e == s) continue;
+        f[0] = s; for (p = s; p < e && k < 5; p++) if (*p == '\t') f[++k] = p + 1;
+        if (k < 5) continue;
+        {   const char *o = f[4], *oe = memchr(o, '\t', e - o) ? (const char *)memchr(o, '\t', e - o) : e, *t = o;
+            while (t < oe) {
+                const char *te = t; long tl, pl = (long)strlen(path);
+                while (te < oe && *te != ' ') te++;
+                tl = te - t;
+                if (tl > 0 && ((tl == pl && !strncmp(t, path, tl)) || (t[tl - 1] == '/' && pl > tl && !strncmp(t, path, tl) && !strchr(path + tl, '/')))) {
+                    long nl = f[1] - f[0] - 1, ol = oe - o;
+                    if (nl <= 0 || nl >= ncap || ol >= ocap) return 0;
+                    mm_copy(name, (size_t)ncap, f[0], nl); name[nl] = 0; mm_copy(outs, (size_t)ocap, o, ol); outs[ol] = 0;
+                    return 1;
+                }
+                t = te; while (t < oe && *t == ' ') t++;
+            } }
+    }
+    return 0;
+}
+static void mg_stop(char **fl, int nf, const char *rd, const char *cur, const char *why, const char *hint) {
+    int i;
+    for (i = 0; i < nf; i++) printf("MERGE_CONFLICT\t%s\n", fl[i]);
+    printf("MERGE_HINT\t%s\t%s;工作树停在合并中,核过他人未提交改动后自行 git -C %s merge --abort(abort 报 Entry not uptodate 表示有未提交改动挡路,先由其所有者提交或移开;本服务不自动 abort)\n", why, hint, rd);
+    printf("GIT_MERGE\trc=1\tconflicts=%d\tbranch=%s\tcwd=%s\n", nf, cur, rd);
+}
+/* 在 rd 里跑 derive(经仓根 unisacc.com),输出末 600 字节放 tail */
+static int mg_derive(const char *root, const char *rd, const char *mode, const char *names, char *tail, int tcap) {
+    char com[PW + 16]; np_result r; char why[200]; int rc; long n, off;
+    F(com, sizeof com, "%s/unisacc.com", root);
+    {   char *v[] = {"sh", com, "tools/derive.cx", "--", (char *)mode, "--only", (char *)names, 0};
+        tail[0] = 0; if (np_run(v, rd, 0, 55, &r, why, sizeof why)) { F(tail, tcap, "start failed: %s", why); return -1; } }
+    rc = r.rc; n = (long)r.outn; off = n > tcap - 1 ? n - (tcap - 1) : 0;
+    if (n - off > 0) { mm_copy(tail, (size_t)tcap, r.out + off, n - off); tail[n - off] = 0; }
+    np_free(&r); clean(tail);
+    return rc;
+}
+static int merge_conflicts(const char *root, const char *rd, const char *br, const char *cur) {
+    static char lst[1 << 15], buf[1 << 15], names[1024], outs[MG_MAX][700], tail[700], mp[PW + 64], msg[4096], tabs[2048], sha[128];
+    char *fl[MG_MAX]; int nf = 0, nd = 0, i, j, rc; unsigned char *mb = 0; int64_t mn = 0; char *man = 0;
+    {   char *uv[] = {"git", "-C", (char *)rd, "diff", "--name-only", "--diff-filter=U", 0}; char *s, *e;
+        if (runcap(uv, lst, sizeof lst) != 0) lst[0] = 0;   /* fl 指进 lst;buf 之后被 runcap 反复清空,不能共用 */
+        for (s = lst; *s; s = e) { e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s); if (*s && nf < MG_MAX) fl[nf++] = s; } }
+    F(mp, sizeof mp, "%s/exec/facts/derive.tsv", rd);
+    if (!sy_read_file(mp, &mb, &mn, 1 << 20) && mb && (man = malloc((size_t)mn + 1))) { mm_copy(man, (size_t)mn + 1, mb, (size_t)mn); man[mn] = 0; }
+    free(mb);
+    names[0] = 0; tabs[0] = 0;
+    for (i = 0; i < nf && man; i++) {
+        char nm[64];
+        if (!mg_row_for(man, fl[i], nm, sizeof nm, outs[nd], sizeof outs[nd])) continue;
+        for (j = 0; j < nd; j++) if (!strcmp(outs[j], outs[nd])) break;
+        if (j == nd) { char t[1024]; F(t, sizeof t, "%s%s%s", names, names[0] ? "," : "", nm); F(names, sizeof names, "%s", t); }
+        {   char t[2048]; F(t, sizeof t, "%s%s%s", tabs, tabs[0] ? " " : "", fl[i]); F(tabs, sizeof tabs, "%s", t); }
+        nd++;
+    }
+    free(man);
+    if (nf == 0 || nd != nf || ovf) { mg_stop(fl, nf, rd, cur, nf == 0 ? "merge-failed-no-conflict-files" : "non-derived-conflict", "冲突里有非派生文件,须人工解决"); return 1; }
+    for (i = 0; i < nf; i++) {
+        char *cv[] = {"git", "-C", (char *)rd, "checkout", "--ours", "--", fl[i], 0};
+        if (runcap(cv, buf, sizeof buf) != 0) { mg_stop(fl, nf, rd, cur, "checkout-ours-failed", fl[i]); return 1; }
+    }
+    rc = mg_derive(root, rd, "--write", names, tail, sizeof tail);
+    if (rc != 0) {
+        char h[1200];
+        if (strstr(tail, "NEEDS_BUMP")) F(h, sizeof h, "layer-api 接口变了:先 sh ./unisacc.com tools/layer-api.cx -- --bump PKG(PKG 取 derive 输出所指包)再 derive --write --only %s;derive 末行 %s", names, tail);
+        else F(h, sizeof h, "derive --write --only %s rc=%d;末行 %s", names, rc, tail);
+        mg_stop(fl, nf, rd, cur, strstr(tail, "NEEDS_BUMP") ? "needs-bump" : "derive-write-failed", h); return 1;
+    }
+    rc = mg_derive(root, rd, "--check", names, tail, sizeof tail);
+    if (rc != 0) { char h[1200]; F(h, sizeof h, "derive --check --only %s rc=%d;末行 %s", names, rc, tail); mg_stop(fl, nf, rd, cur, "derive-check-drift", h); return 1; }
+    {   char *av[FL_MAX_ARGV]; int n = 0, k; char ob[MG_MAX][700];
+        av[n++] = "git"; av[n++] = "-C"; av[n++] = (char *)rd; av[n++] = "add"; av[n++] = "-A"; av[n++] = "--";
+        for (k = 0; k < nd; k++) {
+            char *t = ob[k];
+            for (j = 0; j < k; j++) if (!strcmp(outs[j], outs[k])) break;
+            if (j < k) continue;
+            F(ob[k], sizeof ob[k], "%s", outs[k]);
+            while (*t && n < FL_MAX_ARGV - 1) {
+                while (*t == ' ') *t++ = 0;
+                if (!*t) break;
+                av[n++] = t; while (*t && *t != ' ') t++;
+            }
+        }
+        av[n] = 0;
+        if (runcap(av, buf, sizeof buf) != 0) { mg_stop(fl, nf, rd, cur, "git-add-failed", tabs); return 1; } }
+    F(msg, sizeof msg, "Merge branch '%s' into %s\n\n自动解决派生表冲突: %s(取本侧后 derive --write --only %s,derive --check 无漂移)", br, cur, tabs, names);
+    {   char *mv[] = {"git", "-C", (char *)rd, "commit", "-q", "--no-verify", "-m", msg, 0};
+        if (ovf || runcap(mv, buf, sizeof buf) != 0) { mg_stop(fl, nf, rd, cur, "merge-commit-failed", tabs); return 1; } }
+    {   char *hv[] = {"git", "-C", (char *)rd, "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    for (i = 0; i < nf; i++) printf("MERGE_AUTO\t%s\n", fl[i]);
+    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tauto_resolved=%d\tderive=%s\n", sha, cur, rd, nf, names);
+    return 0;
+}
 /* git merge BRANCH [--cwd WORKTREE]:在工作树(缺省共享检出)当前分支上 git merge --no-edit BRANCH。
-   冲突不自动解决:逐行 MERGE_CONFLICT<TAB>文件,末行 GIT_MERGE rc=1 conflicts=N,工作树留在合并中状态由调用方处理。
+   冲突见上 merge_conflicts:全为派生表时自动解决并完成合并,否则 MERGE_CONFLICT 清单、MERGE_HINT、rc 1。
    无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
 static int git_merge(const char *root, int argc, char **argv) {
-    const char *br = 0, *d = root; char rd[PW], top[PW], cur[200], buf[1 << 15], sha[128]; int i, rc, nc = 0;
+    const char *br = 0, *d = root; char rd[PW], top[PW], cur[200], buf[1 << 15], sha[128]; int i, rc;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
         else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: unexpected %s\n", argv[i]); return 2; }
@@ -1346,13 +1451,7 @@ static int git_merge(const char *root, int argc, char **argv) {
         if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git merge: %s is not on a branch\n", rd); return 2; }
         chomp(cur); }
     {   char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "--", (char *)br, 0}; rc = runcap(mv, buf, sizeof buf); }
-    if (rc != 0) {
-        char *uv[] = {"git", "-C", rd, "diff", "--name-only", "--diff-filter=U", 0}; char *s, *e;
-        if (runcap(uv, buf, sizeof buf) != 0) buf[0] = 0;
-        for (s = buf; *s; s = e) { e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s); if (*s) { printf("MERGE_CONFLICT\t%s\n", s); nc++; } }
-        printf("GIT_MERGE\trc=1\tconflicts=%d\tbranch=%s\tcwd=%s\n", nc, cur, rd);
-        return 1;
-    }
+    if (rc != 0) return merge_conflicts(root, rd, br, cur);
     {   char *hv[] = {"git", "-C", rd, "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", sha, cur, rd);
     return 0;

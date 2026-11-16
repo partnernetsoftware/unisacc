@@ -46,24 +46,13 @@ static int cfg_take(char *dst, int cap, const char *v, long n) {
 /* 只取本入口要用的键;0 成功 */
 static int runcap(char **argv, const char *cwd, char *out, int cap);
 static char headtab[1 << 16]; static long headtab_n;   /* HEAD 版配置表(固定版本模式下的唯一配置来源) */
-/* 配置来源:$DEVSVC_REPO_TABLE 优先;--dev 读工作区表;否则只读 git HEAD 里的表,工作区改表不影响普通调用 */
-static int cfg_load(const char *root, int dev, int *from_head) {
-    char table[PW + 64]; unsigned char *b = 0; int64_t n = 0; char *s, *e, *end, *t, *t2; int nlib = 0, seen = 0; const char *ov = getenv("DEVSVC_REPO_TABLE");
-    *from_head = 0;
-    if (!(ov && *ov) && !dev) {
-        char spec[160]; char *v[] = {"git", "show", spec, 0};
-        F(spec, sizeof spec, "HEAD:%s", CFG_TABLE);
-        if (!ovf && runcap(v, root, headtab, sizeof headtab) == 0 && headtab[0]) {
-            headtab_n = (long)strlen(headtab); n = headtab_n;
-            b = malloc((size_t)n + 1); if (!b) return -1;
-            mm_copy(b, n + 1, headtab, n); *from_head = 1;
-        }
-    }
-    if (!b) {
-        if (ov && *ov) F(table, sizeof table, "%s", ov); else F(table, sizeof table, "%s/%s", root, CFG_TABLE);
-        if (ovf || sy_read_file(table, &b, &n, 1 << 16) || !b) return -1;
-    }
-    for (s = (char *)b, end = s + n; s < end; s = e + 1) {
+/* 钉死用的修订:能不起 git 读出 HEAD 提交号时为该提交号(本次全部 git 读与构造都钉在同一提交上,不受中途 HEAD 移动影响),否则为 HEAD */
+static char hd[48] = "HEAD";
+/* 解析配置表文本(只读 b[0,n));0 成功 */
+static int cfg_parse(const char *b, long n) {
+    const char *s, *e, *end, *t, *t2; int nlib = 0, seen = 0;
+    c_instenv[0] = 0;
+    for (s = b, end = s + n; s < end; s = e + 1) {
         long kl, vl;
         e = memchr(s, '\n', end - s); if (!e) break;
         t = memchr(s, '\t', e - s); if (!t || *s == '#') continue;
@@ -75,8 +64,26 @@ static int cfg_load(const char *root, int dev, int *from_head) {
         else if (kl == 3 && !memcmp(s, "lib", 3) && nlib < 3 && cfg_take(c_lib[nlib], sizeof c_lib[0], t + 1, vl)) nlib++;
         else if (kl == 8 && !memcmp(s, "inst_env", 8)) (void)cfg_take(c_instenv, sizeof c_instenv, t + 1, vl);
     }
-    free(b);
     return seen == 7 && nlib == 3 ? 0 : -1;
+}
+/* 配置来源:$DEVSVC_REPO_TABLE 优先;--dev 读工作区表;否则只读 git HEAD 里的表,工作区改表不影响普通调用 */
+static int cfg_load(const char *root, int dev, int *from_head) {
+    char table[PW + 64]; unsigned char *b = 0; int64_t n = 0; const char *ov = getenv("DEVSVC_REPO_TABLE");
+    *from_head = 0;
+    if (!(ov && *ov) && !dev) {
+        char spec[160]; char *v[] = {"git", "show", spec, 0};
+        F(spec, sizeof spec, "%s:%s", hd, CFG_TABLE);
+        if (!ovf && runcap(v, root, headtab, sizeof headtab) == 0 && headtab[0]) {
+            headtab_n = (long)strlen(headtab); n = headtab_n;
+            b = malloc((size_t)n + 1); if (!b) return -1;
+            mm_copy(b, n + 1, headtab, n); *from_head = 1;
+        }
+    }
+    if (!b) {
+        if (ov && *ov) F(table, sizeof table, "%s", ov); else F(table, sizeof table, "%s/%s", root, CFG_TABLE);
+        if (ovf || sy_read_file(table, &b, &n, 1 << 16) || !b) return -1;
+    }
+    {   int r = cfg_parse((const char *)b, (long)n); free(b); return r; }
 }
 /* 有界跑一条命令(55 s),stdout 收进 out;返回退出码,起不来或装不下为负 */
 static int runcap(char **argv, const char *cwd, char *out, int cap) {
@@ -89,16 +96,17 @@ static int runcap(char **argv, const char *cwd, char *out, int cap) {
     return rc;
 }
 /* 扫 self 的 `#pragma unisa use X.Y`:X 在 self 同目录下有目录的,记为同级模块目录(进身份、进归档)。
- * wc 为 0 读 HEAD 版并只认已提交目录;wc 为 1 读工作副本并认磁盘上的目录(工作副本退回的内容键用)。 */
+ * wc 为 0 读钉死修订版并只认已提交目录(全部候选一次 git ls-tree 判定);wc 为 1 读工作副本并认磁盘上的目录(工作副本退回的内容键用)。 */
+#define MAXCAND 32
 static void siblings(const char *root, int wc) {
-    static char srcb[1 << 20]; char spec[192], dirp[160], one[96], *s, *e, *sl; int i;
+    static char srcb[1 << 20], cand[MAXCAND][192]; char spec[192], dirp[160], *s, *e, *sl; int i, nc = 0;
     nsib = 0;
     if (wc) {
         unsigned char *b = 0; int64_t n = 0; char p[PW + 200];
         F(p, sizeof p, "%s/%s", root, c_self);
         if (sy_read_file(p, &b, &n, (1 << 20) - 1) || !b) { if (b) free(b); return; }
         mm_copy(srcb, sizeof srcb, b, n); srcb[n] = 0; free(b);
-    } else {   char *v[] = {"git", "show", spec, 0}; F(spec, sizeof spec, "HEAD:%s", c_self); if (runcap(v, root, srcb, sizeof srcb) != 0) return; }
+    } else {   char *v[] = {"git", "show", spec, 0}; F(spec, sizeof spec, "%s:%s", hd, c_self); if (runcap(v, root, srcb, sizeof srcb) != 0) return; }
     F(dirp, sizeof dirp, "%s", c_self); sl = strrchr(dirp, '/'); if (sl) *sl = 0; else dirp[0] = 0;
     for (s = srcb; *s; s = e + 1) {
         long k = 0; const char *p;
@@ -107,12 +115,27 @@ static void siblings(const char *root, int wc) {
         for (p = s + 18; p < e && *p != '.' && *p != ' ' && *p != '\r' && k < 63; p++) k++;
         if (k <= 0 || k >= 63 || *p != '.') continue;
         F(spec, sizeof spec, "%s%s%.*s", dirp, dirp[0] ? "/" : "", (int)k, s + 18);
-        for (i = 0; i < nsib; i++) if (!strcmp(sib[i], spec)) break;
-        if (i < nsib || nsib >= MAXSIB) continue;
-        if (wc) { char dp[PW + 200]; sy_stat_t st; F(dp, sizeof dp, "%s/%s", root, spec); if (sy_stat(dp, &st) == 0 && st.kind == 'd') { F(sib[nsib], sizeof sib[0], "%s", spec); nsib++; } continue; }
-        {   char hs[200]; char *v[] = {"git", "rev-parse", "-q", "--verify", hs, 0};
-            F(hs, sizeof hs, "HEAD:%s", spec);
-            if (runcap(v, root, one, sizeof one) == 0) { F(sib[nsib], sizeof sib[0], "%s", spec); nsib++; } }
+        for (i = 0; i < nc; i++) if (!strcmp(cand[i], spec)) break;
+        if (i < nc || nc >= MAXCAND) continue;
+        F(cand[nc], sizeof cand[0], "%s", spec); nc++;
+    }
+    if (ovf) return;
+    if (wc) {
+        for (i = 0; i < nc && nsib < MAXSIB; i++) { char dp[PW + 200]; sy_stat_t st; F(dp, sizeof dp, "%s/%s", root, cand[i]); if (sy_stat(dp, &st) == 0 && st.kind == 'd') { F(sib[nsib], sizeof sib[0], "%s", cand[i]); nsib++; } }
+        return;
+    }
+    if (nc == 0) return;
+    {   /* 一次 ls-tree 判定全部候选是否已提交(取代逐个 rev-parse --verify) */
+        static char lt[1 << 14]; char *g[6 + MAXCAND]; int k = 0, j;
+        g[k++] = "git"; g[k++] = "ls-tree"; g[k++] = "--name-only"; g[k++] = hd; g[k++] = "--";
+        for (j = 0; j < nc; j++) g[k++] = cand[j];
+        g[k] = 0;
+        if (runcap(g, root, lt, sizeof lt) != 0) return;
+        for (j = 0; j < nc && nsib < MAXSIB; j++) {
+            long cl = (long)strlen(cand[j]); const char *q = lt;
+            for (; *q; q = strchr(q, '\n'), q = q ? q + 1 : "")
+                if (!strncmp(q, cand[j], cl) && (q[cl] == '\n' || q[cl] == 0)) { F(sib[nsib], sizeof sib[0], "%s", cand[j]); nsib++; break; }
+        }
     }
 }
 static int run_through(char **v, long deadline_ms) {
@@ -207,7 +230,7 @@ static int build(const char *root, const char *prod, const char *bin, const char
     F(tmp, sizeof tmp, "/tmp/dv-pin-%d", sy_pid()); F(src, sizeof src, "%s/%s", tmp, c_self);
     if (ovf || sy_mkdir_all(tmp, 0700)) return -1;
     {   char *v[24]; int k = 0, i;
-        v[k++] = "sh"; v[k++] = "-c"; v[k++] = "d=$1; shift; git archive HEAD -- cxroot.tsv \"$@\" | tar -x -C \"$d\""; v[k++] = "sh"; v[k++] = tmp;
+        v[k++] = "sh"; v[k++] = "-c"; v[k++] = "d=$1; h=$2; shift 2; git archive \"$h\" -- cxroot.tsv \"$@\" | tar -x -C \"$d\""; v[k++] = "sh"; v[k++] = tmp; v[k++] = hd;
         v[k++] = c_self; v[k++] = c_lib[0]; v[k++] = c_lib[1]; v[k++] = c_lib[2];
         for (i = 0; i < nsib; i++) v[k++] = sib[i];
         v[k] = 0;
@@ -216,6 +239,154 @@ static int build(const char *root, const char *prod, const char *bin, const char
     if (rc == 0) rc = compile_to(prod, src, tmp, bin, logp);
     {   char *v[] = {"rm", "-rf", tmp, 0}; runcap(v, 0, scratch, sizeof scratch); }
     return rc;
+}
+
+/* 命中路免 git(plans/runtime-speedup-lessons-2026-11-16.md N1):
+ * fastgit 不起子进程,从 cwd 向上找 .git(目录或 gitdir: 文件),读 commondir、HEAD、loose ref 或 packed-refs,得顶层、公共 git 目录与 HEAD 提交号。
+ *   只认常规布局:环境里有 GIT_DIR 等变量、cwd 在 .git 内、reftable、HEAD 指向 refs/heads/ 以外、ref 是符号引用或读不出 40 位十六进制时,
+ *   一律返回非 0,交回原来逐个问 git 的路径(结论不变,只是慢)。
+ * 备忘:按提交号存上次经 git 算得的身份原料(同级模块目录、rev-parse 的树/块号行、HEAD 版配置表),路径 <DV_PIN_DIR 或 $HOME/.cache/devsvc-launch>/memo/head-<提交号>。
+ *   提交号相同则 <提交号>:<路径> 全部相同,所以复用不放松"从 HEAD 钉死、内容键缓存";HEAD 一动提交号即变,备忘自然不命中并重新钉死。
+ *   产品身份(真实路径、大小、内容 sha)与执行体字节 sha 每次照旧现算,不进备忘。 */
+static char fg_top[PW], fg_git[PW], fg_common[PW], fg_commit[48];
+static int fg_join(char *dst, int cap, const char *base, const char *p) {   /* p 为绝对路径时照抄,否则接在 base 后;装不下 -1 */
+    int k = p[0] == '/' ? snprintf(dst, cap, "%s", p) : snprintf(dst, cap, "%s/%s", base, p);
+    return k < 0 || k >= cap ? -1 : 0;
+}
+static int fg_small(const char *p, char *out, int cap) {   /* 读小文件并去掉尾部空白;返回长度,读不到或装不下 -1 */
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(p, &b, &n, cap - 1) || !b || n >= cap || (n > 0 && mm_copy(out, cap, b, n))) { if (b) free(b); return -1; }
+    free(b); out[n] = 0;
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ')) out[--n] = 0;
+    return (int)n;
+}
+static int fg_hex40(const char *s) { int i; for (i = 0; i < 40; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0; return 1; }
+/* 0:顶层、公共 git 目录与提交号都读出;1:只读出顶层(及可能的公共目录);-1:不确定,全交给 git */
+static int fastgit(void) {
+    static char cur[PW], p[2 * PW], q[2 * PW], t[PW + 64], v[128];
+    static const char *envs[] = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", 0};
+    char *sl; int r, depth; long cl; sy_stat_t st;
+    fg_top[0] = fg_git[0] = fg_common[0] = fg_commit[0] = 0;
+    for (r = 0; envs[r]; r++) { const char *e = getenv(envs[r]); if (e && *e) return -1; }
+    if (sy_cwd(cur, sizeof cur) < 0 || cur[0] != '/' || strstr(cur, "/.git/")) return -1;
+    cl = (long)strlen(cur); if (cl >= 5 && !strcmp(cur + cl - 5, "/.git")) return -1;
+    for (depth = 0; ; depth++) {
+        if (depth > 256 || fg_join(p, sizeof p, cur, ".git")) return -1;
+        r = sy_exists(p);
+        if (r == 1) break;
+        if (r != 0) return -1;   /* 只把 ENOENT 当不存在 */
+        if (!strcmp(cur, "/")) return -1;
+        sl = strrchr(cur, '/'); if (sl == cur) cur[1] = 0; else *sl = 0;
+    }
+    if (sy_stat(p, &st)) return -1;
+    if (st.kind == 'd') { if (fg_join(fg_git, sizeof fg_git, "", p)) return -1; }
+    else if (st.kind == 'f') { if (fg_small(p, t, sizeof t) < 9 || strncmp(t, "gitdir: ", 8) || fg_join(fg_git, sizeof fg_git, cur, t + 8)) return -1; }
+    else return -1;
+    if (fg_join(q, sizeof q, fg_git, "HEAD") || sy_exists(q) != 1) return -1;   /* 不像仓的 .git:git 会继续往上找,交给 git */
+    if (fg_join(fg_top, sizeof fg_top, "", cur)) return -1;
+    if (fg_join(q, sizeof q, fg_git, "commondir")) return 1;
+    r = sy_exists(q);
+    if (r == 1) { if (fg_small(q, t, sizeof t) <= 0 || fg_join(p, sizeof p, fg_git, t)) return 1; }
+    else if (r == 0) { if (fg_join(p, sizeof p, "", fg_git)) return 1; }
+    else return 1;
+    if (sy_realpath(p, fg_common, sizeof fg_common) < 0) { fg_common[0] = 0; return 1; }
+    if (fg_join(q, sizeof q, fg_common, "reftable") || sy_exists(q) != 0) return 1;
+    if (fg_join(q, sizeof q, fg_git, "HEAD")) return 1;
+    r = fg_small(q, t, sizeof t);
+    if (r == 40 && fg_hex40(t)) { mm_copy(fg_commit, sizeof fg_commit, t, 41); return 0; }   /* 分离 HEAD */
+    if (r < 17 || strncmp(t, "ref: refs/heads/", 16)) return 1;
+    if (fg_join(q, sizeof q, fg_common, t + 5)) return 1;
+    r = sy_exists(q);
+    if (r == 1) { if (fg_small(q, v, sizeof v) == 40 && fg_hex40(v)) { mm_copy(fg_commit, sizeof fg_commit, v, 41); return 0; } return 1; }
+    if (r != 0) return 1;
+    {   /* loose ref 不存在才查 packed-refs(loose 优先,与 git 一致) */
+        unsigned char *b = 0; int64_t n = 0; const char *s, *e, *end, *ref = t + 5; long rl = (long)strlen(ref); int got = 0;
+        if (fg_join(q, sizeof q, fg_common, "packed-refs") || sy_read_file(q, &b, &n, 1LL << 28) || !b) { if (b) free(b); return 1; }
+        for (s = (const char *)b, end = s + n; s < end; s = e + 1) {
+            e = memchr(s, '\n', end - s); if (!e) e = end;
+            if (e - s == 41 + rl && s[40] == ' ' && !memcmp(s + 41, ref, rl) && fg_hex40(s)) { mm_copy(fg_commit, sizeof fg_commit, s, 40); fg_commit[40] = 0; got = 1; break; }
+        }
+        free(b);
+        return got ? 0 : 1;
+    }
+}
+static int memo_path(char *p, int cap, int dir_only) {
+    const char *d = getenv("DV_PIN_DIR"); char home[PW]; int k;
+    if (d && *d) k = dir_only ? snprintf(p, cap, "%s/memo", d) : snprintf(p, cap, "%s/memo/head-%s", d, hd);
+    else { if (sy_homedir(home, sizeof home) < 0) return -1; k = dir_only ? snprintf(p, cap, "%s/.cache/devsvc-launch/memo", home) : snprintf(p, cap, "%s/.cache/devsvc-launch/memo/head-%s", home, hd); }
+    return k < 0 || k >= cap ? -1 : 0;
+}
+/* 备忘格式:"dvmemo1<TAB><提交号>\n" 后接若干 "sib<TAB>路径\n",再 "trees<TAB>长度\n"+字节,"tab<TAB>长度\n"+字节,恰到文件尾。任何不符即不命中 */
+static int memo_load(char *trees, int tcap) {
+    char p[2 * PW], hdr[80]; unsigned char *b = 0; int64_t n = 0; const char *s, *end, *e; long ln, tln = -1; int ok = 0;
+    if (memo_path(p, sizeof p, 0) || sy_read_file(p, &b, &n, 1 << 20) || !b) { if (b) free(b); return -1; }
+    s = (const char *)b; end = s + n; nsib = 0;
+    if (snprintf(hdr, sizeof hdr, "dvmemo1\t%s\n", hd) >= (int)sizeof hdr) { free(b); return -1; }
+    if (n > (int64_t)strlen(hdr) && !memcmp(s, hdr, strlen(hdr))) {
+        s += strlen(hdr);
+        while (end - s > 4 && !memcmp(s, "sib\t", 4) && nsib < MAXSIB) {
+            e = memchr(s, '\n', end - s); if (!e || e - s - 4 <= 0 || e - s - 4 >= (long)sizeof sib[0]) break;
+            mm_copy(sib[nsib], sizeof sib[0], s + 4, e - s - 4); sib[nsib][e - s - 4] = 0; nsib++; s = e + 1;
+        }
+        if (end - s > 6 && !memcmp(s, "trees\t", 6)) {
+            ln = atol(s + 6); e = memchr(s, '\n', end - s);
+            if (e && ln > 0 && ln < tcap && end - (e + 1) >= ln) {
+                mm_copy(trees, tcap, e + 1, ln); trees[ln] = 0; tln = ln; s = e + 1 + ln;
+                if (end - s > 4 && !memcmp(s, "tab\t", 4)) {
+                    ln = atol(s + 4); e = memchr(s, '\n', end - s);
+                    if (e && ln > 0 && ln < (long)sizeof headtab && end - (e + 1) == ln) {
+                        mm_copy(headtab, sizeof headtab, e + 1, ln); headtab[ln] = 0; headtab_n = ln;
+                        ok = (long)strlen(headtab) == ln && (long)strlen(trees) == tln && cfg_parse(headtab, headtab_n) == 0;
+                    }
+                }
+            }
+        }
+    }
+    free(b);
+    if (!ok) { nsib = 0; headtab_n = 0; headtab[0] = 0; }
+    return ok ? 0 : -1;
+}
+static void memo_save(const char *trees) {
+    static char mb[(1 << 16) + 8192]; char p[2 * PW], d[2 * PW]; long k, tl = (long)strlen(trees); int i, r;
+    if (memo_path(d, sizeof d, 1) || memo_path(p, sizeof p, 0) || tl <= 0 || headtab_n <= 0) return;
+    k = snprintf(mb, sizeof mb, "dvmemo1\t%s\n", hd);
+    for (i = 0; i < nsib && k > 0 && k < (long)sizeof mb; i++) k += snprintf(mb + k, sizeof mb - k, "sib\t%s\n", sib[i]);
+    if (k <= 0 || k >= (long)sizeof mb) return;
+    r = snprintf(mb + k, sizeof mb - k, "trees\t%ld\n", tl); if (r < 0 || k + r + tl >= (long)sizeof mb) return;
+    k += r; mm_copy(mb + k, sizeof mb - (size_t)k, trees, tl); k += tl;
+    r = snprintf(mb + k, sizeof mb - k, "tab\t%ld\n", headtab_n); if (r < 0 || k + r + headtab_n > (long)sizeof mb) return;
+    k += r; mm_copy(mb + k, sizeof mb - (size_t)k, headtab, headtab_n); k += headtab_n;
+    if (sy_mkdir_all(d, 0700)) return;
+    (void)sy_write_atomic(p, mb, k, 0600);
+}
+/* 产品内容 sha(进固定版本键)的备忘:按 (真实路径, 大小, dev, ino, mtime, ctime) 记上次算得的 sha,路径 <备忘目录>/prod-<sha256(真实路径)前 16 位>。
+ *   只信"记录时刻比文件 ctime 至少晚 2 s"的条目(同 git 索引的 racy 规则:ctime 只到秒,记录后任何改写都会把 ctime 推到记录时刻之后,
+ *   因而与所记不同);否则照旧整文件读并算 sha。键仍是产品内容 sha,不是路径或时间。0 成功 */
+static int prod_sha(const char *real, char ph[65]) {
+    char d[2 * PW], p[2 * PW + 64], rh[65], line[2 * PW + 256], want[2 * PW + 200]; sy_stat_t st; unsigned char *b = 0; int64_t n = 0; long now; int k, wl;
+    int have = !memo_path(d, sizeof d, 1) && !sy_sha256_hex(real, (long)strlen(real), rh) && !sy_stat(real, &st);
+    if (have) { rh[16] = 0; k = snprintf(p, sizeof p, "%s/prod-%s", d, rh); have = k > 0 && k < (int)sizeof p; }
+    if (have) {
+        wl = snprintf(want, sizeof want, "dvprod1\t%s\t%ld\t%lu\t%ld\t%ld\t%ld\t", real, st.size, st.dev, st.ino, st.mtime, st.ctime);
+        if (wl > 0 && wl < (int)sizeof want && fg_small(p, line, sizeof line) == wl + 64 + 12 && !memcmp(line, want, wl)) {
+            /* 行尾:<sha 64 位><TAB>r<记录时刻 10 位> */
+            if (line[wl + 64] == '\t' && line[wl + 65] == 'r' && fg_hex40(line + wl) && fg_hex40(line + wl + 24)) {
+                long rec = atol(line + wl + 66);
+                if (rec >= st.ctime + 2 && rec >= st.mtime + 2) { mm_copy(ph, 65, line + wl, 64); ph[64] = 0; return 0; }
+            }
+        }
+    }
+    if (sy_read_file(real, &b, &n, 1LL << 30) || !b || sy_sha256_hex(b, (long)n, ph)) { if (b) free(b); return -1; }
+    free(b);
+    now = sy_wall_s();
+    if (have && wl > 0 && wl < (int)sizeof want && now >= st.ctime + 2 && now >= st.mtime + 2) {
+        sy_stat_t s2;   /* 读的过程中文件被改则不记 */
+        if (!sy_stat(real, &s2) && s2.size == st.size && s2.ino == st.ino && s2.dev == st.dev && s2.mtime == st.mtime && s2.ctime == st.ctime) {
+            k = snprintf(line, sizeof line, "%s%s\tr%010ld", want, ph, now);
+            if (k > 0 && k < (int)sizeof line && !sy_mkdir_all(d, 0700)) (void)sy_write_atomic(p, line, k, 0600);
+        }
+    }
+    return 0;
 }
 
 /* Work-order clock carried by flow-family output (plans/devsvc.md section 6, S3): after flow/f/x/doc/git, when $DEVSVC_OWNER
@@ -237,7 +408,10 @@ static void task_left(const char *root, const char *sub) {
     ol = (long)strlen(ow);
     e = c_instenv[0] ? getenv(c_instenv) : 0;
     if (e && *e) F(dir, sizeof dir, "%s", e);
-    else {
+    else if (fg_common[0]) {   /* 免 git:fastgit 已读出(并 realpath)公共 git 目录,与 rev-parse --path-format=absolute 同值 */
+        if (!home || !*home || sy_sha256_hex(fg_common, (long)strlen(fg_common), hex)) return;
+        hex[16] = 0; F(dir, sizeof dir, "%s/%s/%s", home, c_cache, hex);
+    } else {
         char *gv[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0}; long cn;
         if (!home || !*home || runcap(gv, root, common, sizeof common) != 0) return;
         cn = (long)strlen(common); while (cn > 0 && (common[cn - 1] == '\n' || common[cn - 1] == '\r')) common[--cn] = 0;
@@ -279,25 +453,35 @@ int main(int argc, char **argv) {
     if (argc > a && !strcmp(argv[a], "--dev")) { dev = 1; a++; }
     if (de && *de) dev = 1;
     if (argc <= a || argc - a > 250) { fprintf(stderr, "usage: devsvc [--dev] <subcommand...>   (pinned to git HEAD unless --dev; subcommands: see tools/devsvc-core.cx header)\n"); return 2; }
-    {   /* 按当前 git 顶层取根(版本工作树一个树一个实例);不在 git 内时退回 cwd */
-        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl;
+    int fromhead = 0, wcfb = 0, memo = 0;
+    {   /* 按当前 git 顶层取根(版本工作树一个树一个实例);能不起 git 读出顶层就直接用(fastgit),否则问 git;不在 git 内时退回 cwd */
+        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl; int fr = fastgit(); const char *ovt = getenv("DEVSVC_REPO_TABLE");
         if (sy_cwd(root, sizeof root) < 0) return 3;
-        if (runcap(gv, root, real, sizeof real) == 0 && real[0] == '/') { nl = strchr(real, '\n'); if (nl) *nl = 0; F(root, sizeof root, "%s", real); }
-        real[0] = 0; }
+        if (fr >= 0) F(root, sizeof root, "%s", fg_top);
+        else if (runcap(gv, root, real, sizeof real) == 0 && real[0] == '/') { nl = strchr(real, '\n'); if (nl) *nl = 0; F(root, sizeof root, "%s", real); }
+        real[0] = 0;
+        if (fr == 0 && !dev) {   /* 提交号已知:本次一律钉在该提交上;配置表未被环境覆盖时先查备忘 */
+            F(hd, sizeof hd, "%s", fg_commit);
+            if (!(ovt && *ovt) && memo_load(trees, sizeof trees) == 0) { memo = 1; fromhead = 1; }
+        } }
 
-    int fromhead = 0, wcfb = 0;
-    if (cfg_load(root, dev, &fromhead)) { fprintf(stderr, "devsvc: repo table unreadable or missing product/self/cache_sub/lib\n"); return 3; }
+    if (!memo && cfg_load(root, dev, &fromhead)) { fprintf(stderr, "devsvc: repo table unreadable or missing product/self/cache_sub/lib\n"); return 3; }
     F(prod, sizeof prod, "%s/%s", root, c_product); F(selfp, sizeof selfp, "%s/%s", root, c_self);
     if (!dev) {
-        char *g[9 + MAXSIB]; int k = 0;
-        siblings(root, 0);
-        g[k++] = "git"; g[k++] = "rev-parse";
-        F(h[0], sizeof h[0], "HEAD:%s", c_self); g[k++] = h[0];
-        for (i = 0; i < 3; i++) { F(h[i + 1], sizeof h[0], "HEAD:%s", c_lib[i]); g[k++] = h[i + 1]; }
-        for (i = 0; i < nsib; i++) { F(h[i + 4], sizeof h[0], "HEAD:%s", sib[i]); g[k++] = h[i + 4]; }
-        {   static char ht[200]; F(ht, sizeof ht, "HEAD:%s", CFG_TABLE); g[k++] = ht; }   /* 配置表进身份 */
-        g[k] = 0;
-        if (ovf || runcap(g, root, trees, sizeof trees) != 0 || sy_realpath(prod, real, sizeof real) < 0 || sy_file_size(real, &psz)) {
+        int got = memo;
+        if (!got) {
+            char *g[9 + MAXSIB]; int k = 0;
+            siblings(root, 0);
+            g[k++] = "git"; g[k++] = "rev-parse";
+            F(h[0], sizeof h[0], "%s:%s", hd, c_self); g[k++] = h[0];
+            for (i = 0; i < 3; i++) { F(h[i + 1], sizeof h[0], "%s:%s", hd, c_lib[i]); g[k++] = h[i + 1]; }
+            for (i = 0; i < nsib; i++) { F(h[i + 4], sizeof h[0], "%s:%s", hd, sib[i]); g[k++] = h[i + 4]; }
+            {   static char ht[200]; F(ht, sizeof ht, "%s:%s", hd, CFG_TABLE); g[k++] = ht; }   /* 配置表进身份 */
+            g[k] = 0;
+            got = !ovf && runcap(g, root, trees, sizeof trees) == 0;
+            if (got && fromhead && fg_commit[0] && !strcmp(hd, fg_commit)) memo_save(trees);   /* 只在全程钉在已知提交号上时记备忘 */
+        }
+        if (!got || sy_realpath(prod, real, sizeof real) < 0 || sy_file_size(real, &psz)) {
             fprintf(stderr, "dv: no committed %s at HEAD here, using the working copy\n", c_self); dev = 1; wcfb = 1; }
     }
     if (dev && wcfb) {   /* 工作副本退回:按工作副本内容取键,缓存在各根共用的 pinned/wc-<键>/;构造失败才即编即跑 */
@@ -314,9 +498,8 @@ int main(int argc, char **argv) {
     }
     if (!dev && !wcfb) {
         {   /* 产品身份按内容哈希(不含仓路径,跨克隆/工作树共享缓存) */
-            unsigned char *pb = 0; int64_t pn = 0; char ph[65];
-            if (sy_read_file(real, &pb, &pn, 1LL << 30) || !pb || sy_sha256_hex(pb, (long)pn, ph)) { if (pb) free(pb); return 3; }
-            free(pb);
+            char ph[65];
+            if (prod_sha(real, ph)) return 3;
             F(keysrc, sizeof keysrc, "%s|%s|%ld|%ld", trees, ph, (long)psz, headtab_n); }
 
         if (sy_sha256_hex(keysrc, strlen(keysrc), hex)) return 3;

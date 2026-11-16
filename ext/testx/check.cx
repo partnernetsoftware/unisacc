@@ -1,0 +1,158 @@
+/* testx.check: the shared skeleton of check programs (prefix tk_).
+ *
+ * Output contract, byte-compatible with the hand-written ck() most checks carried:
+ *   tk_ok(cond, NAME)   prints "PASS\t<prefix>NAME" or "FAIL\t<prefix>NAME" and counts it
+ *   tk_end(MARKER, X)   removes every scratch directory (a removal that fails is its own named
+ *                       "FAIL\t<prefix>scratch-cleanup\tDIR" line and counts), then prints
+ *                       "MARKER\tfailed=N" (plus "\tX" when X is not 0) and returns 1 when N > 0, else 0
+ * tk_has / tk_line are substring / whole-line tests that treat a 0 haystack as "absent".
+ * tk_run / tk_runm run an argv (no shell) through sysx.run px_run with a deadline in milliseconds
+ * (the whole tree is killed past it, code 124); the output stays here, NUL-terminated, borrowed by
+ * tk_out()/tk_err() until the next run.  tk_scratch makes a unique directory under the temp root
+ * that tk_end deletes; tk_write writes a file below it, making parent directories.
+ * tk_cases_init/tk_case: "--cases NAME;NAME" (',' also separates) selects groups; without the
+ * option every group runs.  A name not matching any tk_case call is not detected here.
+ *
+ * Ownership: module-private state (counters, last run, scratch list) lives for the process; a check
+ * is a process, so nothing is handed out.  Only L0 sy_/tx_/mm_ interfaces and the implicit runtime
+ * (cx_write, cx_rmtree, cx_fmt) are used: no #include, no libc call, no platform #if. */
+#pragma unisa module check
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use sysx.run
+
+enum { TK_MAXSCRATCH = 16, TK_PATH = 4096 };
+
+static const char *tk_prefix = "";
+static int tk_nfail, tk_npass;
+static px_result tk_last;
+static int tk_have_last, tk_last_rc;
+static char tk_dirs[TK_MAXSCRATCH][TK_PATH];
+static int tk_ndirs;
+static const char *tk_sel;
+
+void tk_begin(const char *prefix) { tk_prefix = prefix ? prefix : ""; tk_nfail = 0; tk_npass = 0; }
+
+int tk_ok(int cond, const char *name) {
+    if (cond) tk_npass++; else tk_nfail++;
+    sy_printf("%s\t%s%s\n", cond ? "PASS" : "FAIL", tk_prefix, name ? name : "");
+    return cond != 0;
+}
+
+int tk_failed(void) { return tk_nfail; }
+int tk_passed(void) { return tk_npass; }
+
+int tk_has(const char *hay, const char *needle) {
+    if (!hay || !needle) return 0;
+    return tx_find(hay, tx_len(hay, 1L << 30), needle, tx_len(needle, 1L << 20)) >= 0;
+}
+
+int tk_line(const char *hay, const char *line) {
+    long n, ln, i = 0, j;
+    if (!hay || !line) return 0;
+    n = tx_len(hay, 1L << 30); ln = tx_len(line, 1L << 20);
+    while (i <= n) {
+        j = i;
+        while (j < n && hay[j] != '\n') j++;
+        if (j - i == ln && tx_same(hay + i, ln, line, ln)) return 1;
+        if (j >= n) break;
+        i = j + 1;
+    }
+    return 0;
+}
+
+static int tk_run_opt(char **argv, const char *cwd, long deadline_ms, int merge) {
+    px_opts o;
+    int rc;
+    if (tk_have_last) { px_result_free(&tk_last); tk_have_last = 0; }
+    px_opts_init(&o);
+    o.argv = argv; o.cwd = cwd; o.deadline_ms = deadline_ms; o.merge_err = merge;
+    rc = px_run(&o, &tk_last);
+    if (rc < 0) { tk_last_rc = rc; return rc; }
+    tk_have_last = 1;
+    tk_last_rc = tk_last.code;
+    return tk_last.code;
+}
+
+/* exit code (128+sig, 124 past the deadline), or -errno when the child could not run */
+int tk_run(char **argv, const char *cwd, long deadline_ms) { return tk_run_opt(argv, cwd, deadline_ms, 0); }
+/* the same with stderr merged into tk_out() */
+int tk_runm(char **argv, const char *cwd, long deadline_ms) { return tk_run_opt(argv, cwd, deadline_ms, 1); }
+
+int tk_rc(void) { return tk_last_rc; }
+const char *tk_out(void) { return tk_have_last ? tk_last.out : ""; }
+const char *tk_err(void) { return tk_have_last ? tk_last.err : ""; }
+int tk_timed_out(void) { return tk_have_last && tk_last.timed_out; }
+int tk_truncated(void) { return tk_have_last ? tk_last.truncated : 0; }
+
+/* a new empty directory sy_tmpdir()/TAG-XXXXXX into DIR; 0 or -errno */
+int tk_scratch(const char *tag, char *dir, long cap) {
+    char pre[256];
+    int rc;
+    long n;
+    if (!dir || cap <= 0 || tk_ndirs >= TK_MAXSCRATCH) return -ENOSPC;
+    if (cx_fmt(pre, sizeof pre, "%s-", tag && tag[0] ? tag : "tk")) return -ENAMETOOLONG;
+    rc = sy_mkdtemp(sy_tmpdir(), pre, tk_dirs[tk_ndirs], TK_PATH);
+    if (rc < 0) return rc;
+    n = tx_len(tk_dirs[tk_ndirs], TK_PATH);
+    if (n + 1 > cap) { cx_rmtree(tk_dirs[tk_ndirs]); return -ENAMETOOLONG; }
+    { long i; for (i = 0; i <= n; i++) dir[i] = tk_dirs[tk_ndirs][i]; }
+    tk_ndirs++;
+    return 0;
+}
+
+/* DIR/REL := TEXT, parent directories made; 0 or -errno */
+int tk_write(const char *dir, const char *rel, const char *text) {
+    char p[TK_PATH];
+    long n, i;
+    int rc;
+    if (!dir || !rel || !text) return -EINVAL;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return -ENAMETOOLONG;
+    n = tx_len(p, TK_PATH);
+    for (i = n - 1; i > 0 && p[i] != '/'; i--) {}
+    if (i > 0) { p[i] = 0; rc = sy_mkdir_all(p, 0755); p[i] = '/'; if (rc < 0) return rc; }
+    return cx_write(p, text, (size_t)tx_len(text, 1L << 30)) ? -EIO : 0;
+}
+
+void tk_cases_init(int argc, char **argv) {
+    int i;
+    tk_sel = 0;
+    for (i = 1; i + 1 < argc; i++) if (tx_same(argv[i], tx_len(argv[i], 16), "--cases", 7)) tk_sel = argv[i + 1];
+}
+
+int tk_case(const char *name) {
+    long n, i = 0, j, sl;
+    if (!tk_sel) return 1;
+    if (!name) return 0;
+    n = tx_len(name, 256); sl = tx_len(tk_sel, 1 << 16);
+    while (i <= sl) {
+        j = i;
+        while (j < sl && tk_sel[j] != ';' && tk_sel[j] != ',') j++;
+        if (j - i == n && tx_same(tk_sel + i, n, name, n)) return 1;
+        i = j + 1;
+    }
+    return 0;
+}
+
+/* remove every scratch directory; each failure is a named FAIL line and counts; returns failures */
+int tk_cleanup(void) {
+    int i, bad = 0;
+    for (i = 0; i < tk_ndirs; i++) {
+        if (cx_rmtree(tk_dirs[i]) || sy_exists(tk_dirs[i]) == 1) {
+            bad++; tk_nfail++;
+            sy_printf("FAIL\t%sscratch-cleanup\t%s\n", tk_prefix, tk_dirs[i]);
+        }
+    }
+    tk_ndirs = 0;
+    if (tk_have_last) { px_result_free(&tk_last); tk_have_last = 0; }
+    return bad;
+}
+
+int tk_end(const char *marker, const char *extra) {
+    tk_cleanup();
+    if (extra) sy_printf("%s\tfailed=%d\t%s\n", marker, tk_nfail, extra);
+    else sy_printf("%s\tfailed=%d\n", marker, tk_nfail);
+    return tk_nfail ? 1 : 0;
+}
