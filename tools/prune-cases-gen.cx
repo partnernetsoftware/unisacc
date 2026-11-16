@@ -116,6 +116,10 @@ static const Case cases[] = {
       { { "_start", "_start:\n  call main\n  ret\n" }, { "main", "main:\n" PRO "  callm r5, 8\n  ret\n" }, { "dead", "dead:\n" PRO "  ret\n" } }, { { "_start", "main" } }, { 0 } },
     { "indirect-call-preserved", "callr-in-reachable-callee", 1,
       { { "_start", "_start:\n  call main\n  ret\n" }, { "main", "main:\n" PRO "  call f\n  ret\n" }, { "f", "f:\n" PRO "  callr r1\n  ret\n" }, { "dead", "dead:\n" PRO "  ret\n" } }, { { "_start", "main" }, { "main", "f" } }, { 0 } },
+    { "indirect-call-preserved", "callr-in-dead-net-conservative", 2,
+      { { "_start", "_start:\n  call main\n  ret\n" }, { "main", "main:\n" PRO "  ret\n" }, { "dead", "dead:\n" PRO "  callr r1\n  ret\n" } }, { { "_start", "main" } }, { 0 } },
+    { "indirect-call-preserved", "callm-in-dead-net-conservative", 2,
+      { { "_start", "_start:\n  call main\n  ret\n" }, { "main", "main:\n" PRO "  ret\n" }, { "dead", "dead:\n" PRO "  callm r5, 8\n  ret\n" } }, { { "_start", "main" } }, { 0 } },
     { "host-abi-preserved", "hostcall", 1,
       { { "_start", "_start:\n  call main\n  ret\n" }, { "main", "main:\n" PRO "  .hostcall r0, r1\n  ret\n" }, { "dead", "dead:\n" PRO "  ret\n" } }, { { "_start", "main" } }, { 0 } },
     { "host-abi-preserved", "hostaddr", 1,
@@ -141,7 +145,7 @@ static void build(const Case *c, char *in, size_t incap, char *want, size_t wcap
     for (int k = 0; k < 4 && c->lea[k]; k++) alive[uidx(c, c->lea[k])] = 1;
     for (int changed = 1; changed;) { changed = 0; for (int k = 0; k < UMAX && c->e[k].from; k++) { int f = uidx(c, c->e[k].from), t = uidx(c, c->e[k].to); if (alive[f] && !alive[t]) { alive[t] = 1; changed = 1; } } }
     for (int i = 0; i < n; i++) { size_t l = strlen(in); if (l + strlen(c->u[i].text) + 1 > incap) die("input bound"); if (cx_fmt(in + l, incap - l, "%s", c->u[i].text)) die("input bound"); }
-    if (c->whole) { if (strlen(in) + 1 > wcap) die("want bound"); if (cx_fmt(want, wcap, "%s", in)) die("want bound"); return; }
+    if (c->whole == 1) { if (strlen(in) + 1 > wcap) die("want bound"); if (cx_fmt(want, wcap, "%s", in)) die("want bound"); return; }
     for (int i = 0; i < n; i++) if (c->u[i].data || alive[i]) { { size_t wl = strlen(want); if (cx_fmt(want + wl, wcap - wl, "%s", c->u[i].text)) die("want bound"); } }
 }
 
@@ -159,9 +163,11 @@ static void judge(FILE *res, const char *key, const char *in, size_t inn, const 
     if (!classic_ok) { nsplit++; fprintf(res, "ORACLE_SPLIT\t%s\tclassic=%zu want=%zu bytes\n", key, rc.outn, wantn); np_free(&rc); return; }
     if (run_stream(sin, &rs, why, sizeof why)) { nnotrun++; fprintf(res, "NOT_RUN\t%s\tstream %s\n", key, why); np_free(&rc); return; }
     saved(sp, rs.out, rs.outn);
-    int ok = !rs.rc && !rs.errn && rs.outn == rc.outn + 5 && !memcmp(rs.out, rc.out, rc.outn) && !memcmp(rs.out + rc.outn, ".end\n", 5);
+    /* whole == 2: the network is deliberately more conservative than the classic reference (indirect call anywhere in the tape -> output the input unchanged); classic still must equal the closure oracle */
+    const char *sw = whole == 2 ? in : rc.out; size_t swn = whole == 2 ? inn : rc.outn;
+    int ok = !rs.rc && !rs.errn && rs.outn == swn + 5 && !memcmp(rs.out, sw, swn) && !memcmp(rs.out + swn, ".end\n", 5);
     if (ok) npass++; else nfail++;
-    fprintf(res, "%s\t%s\tin=%zu out=%zu rc=%d err=%zu %s\n", ok ? "PASS" : "FAIL", key, inn, rs.outn, rs.rc, rs.errn, whole ? "whole-preserved" : "pruned");
+    fprintf(res, "%s\t%s\tin=%zu out=%zu rc=%d err=%zu %s\n", ok ? "PASS" : "FAIL", key, inn, rs.outn, rs.rc, rs.errn, whole == 2 ? "net-conservative" : whole ? "whole-preserved" : "pruned");
     np_free(&rc); np_free(&rs);
 }
 
