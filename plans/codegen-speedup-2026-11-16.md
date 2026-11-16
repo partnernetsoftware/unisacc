@@ -305,3 +305,21 @@ facts-gen --check:HEAD 归档副本加本项两张表 rc 0 全 SAME;共享工作
 已有证据(LOCAL):延迟落地探针 /tmp/x3d/dp.c(掩码后跟循环标号、while 回跳、if 与 switch 及 goto 跳转、调用实参与返回值、直接返回掩码常量、掩码常量直接用于六种比较、三个掩码变量交错并互相做 and、or、xor、减、乘、移位、除、取模、存入数组、条件选择掩码、取负取反后掩码)gcc -O0、已装两档、cx-dev 两档输出全同(88cdecfe 开头的同一摘要对应输出 2729658c1f2272d9);掩码探针 /tmp/x3m/mp.c 与移位探针 /tmp/x3s/probe.c 同样五方全同;假根 /tmp/x3d-root check-bench-gencode 3 8 末行 valid=6 noisy=1 invalid=0 failed=0;8MB sha 与 sort 校验值各变体相同;假根 check-random-expr 3 批 status=PASS(本机无 tcc,两个编译器位都用 gcc,实为两方比对);facts-gen --check rc 0 全 SAME;gold-table --check PASS 20 stages;ratchets ok=15 fail=0,check-literal total=3020 未升。
 
 未验证:编码层穷举夹具未做(没有找到可直接向编码网喂 tape 文本的现成入口,未在时限内造出);探针与基准里待发寄存器只出现 rax、rsi、rdi,r8 以上的补发分支(41 前缀)与 r11、第二暂存、栈指针的排除分支没有被任何实跑覆盖;osx、win 的 x86_64 编码格 UNVERIFIED;arm64 未做;慢车道与 affected --run 未跑;七源 -o sha 未比;sort -O2 档回退未定因。
+
+## 12 B 批前置:移位量槽跨 mov 续期(2026-11-16,LOCAL)
+
+动机:bench 的 -O2 tape 里 `32 - n` 折叠点抽样 20 处,10 处其后紧跟 `mov r1, r3`;第 9 节的移位量槽遇 mov 不续期,所以即使 e4 把常量折出来,移位仍走 %cl 序列。本节先放开编码层,常量折叠(e4 窥孔 CFOLD)另行落地。
+
+机制(exec/enc/x86-emit-result.tsv 的 E.mov 入口,标号登记在 exec/enc/gen-manifest.tsv):mov 行先看移位量槽 ks 是否在租约内;在租约内且 mov 的目的不是 ks 的寄存器,则续到下一行;目的就是 ks 的寄存器则不续(回落 %cl 序列,包括 `mov K, K`);mov 的源是 ks 的寄存器照常续期(值不变,不把槽转给目的)。掩码槽 km 与待发槽 pd 的规则不动;标号仍清槽。
+
+夹具(tools/check-x86-enc-fuse.cx 加 F6 族,2808 例):3 种移位、4 个移位量、13 个移位量寄存器、目的与被移数相同或不同、9 种行形(一条 mov、多条 mov、目的是移位量寄存器、源是移位量寄存器、续期后再被改写、读两次后再 mov、自己写自己、mov 与 push 和 pop 混排、mov 后跟标号)。另加 %cl 条数断言:带 --expect-fuse 时全部单元里寄存器形式移位的条数必须恰好等于"必须回落"的用例数。
+
+实跑(本机 lnx/x86_64,cx-dev 私有编码网,scope=LOCAL-PARTIAL base_stale=9):
+- 夹具 cx-dev 带 --expect-fuse:cases=18339 recs=51108 failed=0,立即数移位 6942 条(上一轮 5382),%cl 移位 1248 条等于必须回落的 1248 例;已装 0.0.67 不带期望:cases=18339 failed=0(无融合形式,%cl 移位 8190 条,对照有效)。
+- 探针 /tmp/x3s/probe.c、/tmp/x3m/mp.c、/tmp/x3d/dp.c、/tmp/x3r/hi.c:gcc -O0、cx-dev 默认档、cx-dev -O2 档输出与退出码全同。
+- 假根 check-bench-gencode 3 8:valid=6 noisy=0 invalid=0 failed=0;假根 check-random-expr 3 批 status=PASS(无 tcc,两个编译器位都是 gcc,实为两方比对)。
+- facts-gen --check rc 0(38 张 SAME);gold-table --check PASS 20 stages;ratchets ok=15 fail=0,check-literal total=3020 未升;cx-lint --strict 夹具 findings=0。
+- bench-gencode.c 对象:默认档 19650 条、-O2 档 11310 条,%cl 移位 20 条、立即数移位 27 条,与上一轮完全相同。本项单独没有收益,符合预期:`32 - n` 仍是运行期 sub64,要等 CFOLD。
+- 8MB 计时(同场交错三轮取 min,load1 3.56 升到 5.56,偏高):sha 默认档已装 968.3、cx-dev 853.1;-O2 档 754.4 对 517.8;sort 默认档 1066.5 对 1043.2;-O2 档 671.1 对 680.5。与第 11 节同量级,本项不计收益。
+
+未验证:e4 常量折叠(CFOLD)未落地,bench 剩余 20 条 %cl 移位未变;osx、win 的 x86_64 编码格 UNVERIFIED;arm64 不适用;慢车道与 affected --run 未跑;七源 -o sha 未比;编译产物里"mov 的目的恰是移位量寄存器"的回落只由夹具覆盖,探针未专门构造。

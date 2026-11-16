@@ -10,7 +10,8 @@
  *   (only true for a product that carries the three fusions).
  * Families: F1 mask and (3 masks x M 15 regs x S 15 x D 15), F2 swapped sources, F3 lines between the imm and the
  * and (hold lines, flush lines, overwrite, second pending, both sources), F4 constant shifts (3 ops x 4 counts x
- * K 15 regs x 5 x 5), F5 excluded registers (rsp as mask register).
+ * K 15 regs x 5 x 5), F5 excluded registers (rsp as mask register), F6 shift count slot across mov lines (3 ops x
+ * 4 counts x K 13 regs x 2 x 9 line patterns; with --expect-fuse the %cl shifts must equal the fall-back cases).
  * Not covered here: .lea, float, host bridge, win rows, osx/win cells.
  * Last line: X86_ENC_FUSE<TAB>cases=N<TAB>recs=N<TAB>failed=N ; rc 0 only when failed=0 and every step ran. */
 #pragma unisa use sys.fs
@@ -151,6 +152,32 @@ static void f5(void) {
     }
 }
 
+/* F6: the shift count slot across mov lines.  A mov whose destination is not the count register keeps the slot
+   (immediate form expected); a mov that writes the count register must fall back to the %cl sequence; a mov that
+   only reads the count register keeps it.  nfall counts the cases whose shift must stay in register form. */
+static int nfall;
+static void f6(void) {
+    static const int cnt[4] = {1, 31, 32, 63};
+    static const char *nm[3] = {"shl64", "shr64", "lshr64"};
+    for (int o = 0; o < 3; o++) for (int c = 0; c < 4; c++) for (int kr = 0; kr < 16; kr++) for (int same = 0; same < 2; same++) for (int v = 0; v < 9; v++) {
+        if (kr == 4 || scratch(kr)) continue;
+        int s = other(kr, kr, kr, 0), d = same ? s : other(kr, s, s, 0), x = other(kr, s, d, 0), y = other(kr, s, d, 1);
+        begin(kr, s, d, x); if (y == base) y = other(kr, s, d, 2);
+        if (y == base || x == base) die("f6 base clash");
+        loadv(s); imm(x, 77); imm(y, 78); imm(kr, (unsigned long long)cnt[c]);
+        if (v == 0) mov(x, s);                               /* one mov, other destination */
+        if (v == 1) { mov(x, s); mov(y, x); mov(x, y); }     /* several movs */
+        if (v == 2) { mov(kr, s); nfall++; }                 /* destination is the count register */
+        if (v == 3) mov(x, kr);                              /* source is the count register */
+        if (v == 4) { mov(x, s); mov(kr, x); nfall++; }      /* kept, then overwritten */
+        if (v == 5) { mov(x, kr); mov(y, kr); mov(x, s); }   /* read twice, then another mov */
+        if (v == 6) { mov(kr, kr); nfall++; }                /* writes the count register with itself */
+        if (v == 7) { mov(x, s); push(x); pop(y); mov(x, y); } /* mov mixed with push and pop */
+        if (v == 8) { mov(x, s); label(); nfall++; }         /* a label after the mov still clears the slot */
+        op3(O_SHL + o, nm[o], d, s, kr); rec(d); rec(kr); rec(x); rec(y); rec(s);
+    }
+}
+
 static const char *HARNESS =
 "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/mman.h>\n"
 "typedef unsigned long long u64;\n"
@@ -209,7 +236,7 @@ int main(int argc, char **argv) {
     if (!dir[0]) { if (!mkdtemp(tmpl) || cx_fmt(dir, sizeof dir, "%s", tmpl)) die("scratch"); }
     if (cx_fmt(cmd, sizeof cmd, "%s/cases.txt", dir)) die("path");
     tab = fopen(cmd, "w"); if (!tab) die("cannot create table");
-    f1(); f2(); f3(); f4(); f5();
+    f1(); f2(); f3(); f4(); f5(); f6();
     if (low) close_unit();
     if (fclose(tab)) die("table write");
     if (cx_fmt(cmd, sizeof cmd, "%s/h.c", dir)) die("path");
@@ -238,6 +265,9 @@ int main(int argc, char **argv) {
         long zb = count("movzbl +%[a-z0-9]+,%"), zw = count("movzwl +%[a-z0-9]+,%"), si = count("(shl|shr|sar) +\\$0x[0-9a-f]+,%r"), hi = count("mov +\\$0x(ff|ffff|ffffffff),%r(8|9|1[0-5])d");
         printf("FORMS\tmovzbl=%ld\tmovzwl=%ld\tshift_imm=%ld\thigh_mask_imm=%ld\texpect=%d\n", zb, zw, si, hi, expect);
         if (expect && (zb <= 0 || zw <= 0 || si <= 0 || hi <= 0)) { failed++; printf("FAIL\tforms\tfusion forms absent\n"); }
+        long cl = count("(shl|shr|sar) +%cl,%r");
+        printf("SHIFT_CL\tcount=%ld\tmust_fall_back=%d\texpect=%d\n", cl, nfall, expect);
+        if (expect && cl != nfall) { failed++; printf("FAIL\tshift-cl\tregister-form shifts differ from the cases that must fall back\n"); }
     }
     if (!keep) { if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", dir)) die("cmd"); np_result r = {0}; sh(cmd, 20, &r); np_free(&r); }
     printf("X86_ENC_FUSE\tcases=%d\trecs=%ld\tfailed=%d\n", ncase, nrec, failed);
