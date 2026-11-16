@@ -346,3 +346,34 @@ facts-gen --check:HEAD 归档副本加本项两张表 rc 0 全 SAME;共享工作
 - 8MB 计时(同场交错三轮取 min,load1 4.47 降到 3.90,偏高):sha 默认档已装 975.7、cx-dev 828.9;sha -O2 档已装 756.7、cx-dev 432.6(第 12 节那一场 cx-dev 为 517.8,不同场次,约 -16%);sort 默认档 1102.7 对 1055.9;sort -O2 档 693.8 对 657.8。
 
 未验证:bench 剩余 10 条 %cl 移位未逐条定因(变量移位与折叠点后跟其它行形的份额未分);CFOLD 没有入库的夹具(探针在 /tmp,未登记批次);只认"两个 imm 紧邻运算"的三行形态,中间隔行、一元取负、移位、除法、比较都不折;结果不小于 2 的 59 次方一律不折;默认档不经 peep,没有收益;osx、win、arm64 目标未跑(e4 与目标无关,但未实测);慢车道与 affected --run 未跑;七源 -o sha 未比;sort -O2 档相对第 11 节的回退未重新定因。
+
+## 14 默认档启用 e4 的评估(2026-11-16,LOCAL-PARTIAL,未落地)
+
+选路现状:
+- 级别来源:cx/driver/cli.cx 第 538 至 542 行,不带 -O 时 level 为 0;-O、-O1、-Os 为 1;-O2、-O3 为 2。
+- 包内路由:exec/c/compiler-routes.tsv 三列(后缀、末段、优化器),image/O0、run/O0、tape/O0 的优化器列为 none;seed/compilerpack.c 第 154、155 行据此在 O0 路由里跳过 e4 行,O1 路由把 e4 的模型换成 o1 网(shared-o1),O2 用 e4 网(shared-e4)。
+- 驱动续接:src/driveroute.cx 第 267、430 行与 src/drive.cx 第 751 行写死 `level ? "e4" : "prune"`,level 为 0 时 st_span 从 prune 段起跑;路由名由 src/drivestream.cx 第 200 行按 level 拼成 image/O0、O1、O2。
+- e4 两个网的差别在 exec/opt/gen-manifest.tsv 的 when 列:analysis、local、parsers、stfuse、peep、peepdecide 全是 o2;o1 网只有 scans、setup、rounds(level 1)。所以 CFOLD、STFUSE、local 的帧装载折叠都只在 -O2。
+
+结论:只改路由事实表不能让默认档走 e4。把 image/O0 的优化器列改成 O1 或 O2 只会让包里 O0 路由多一行 e4,驱动在 level 为 0 时仍从 prune 起跑;要生效必须改 src/(三处续接)或 cx/driver/cli.cx 的默认级别,都在本任务写域之外,按约定不落地。
+
+实测(cx-dev 私有包,工作树含他人未提交的 seed/gen.c 改动,librarycontract 与 librarypartition 两个配方 lint 失败沿用已装模型,范围 LOCAL-PARTIAL;load1 4.2 至 5.0,偏高;-O1、-O2 即"默认档改走 o1 网或 e4 网"的等价代理):
+
+| 项 | 默认档 | -O1 | -O2 |
+|---|---|---|---|
+| 8MB sha,三轮交错取 min,毫秒 | 847.9 | 705.2(-17%) | 437.4(-48%) |
+| 8MB sort,同上 | 1090.3 | 920.6(-16%) | 680.9(-38%) |
+| 编译 tools/bench-gencode.c,三次取 min,毫秒(每次源不同,避开缓存) | 980 | 1039(+6%) | 1803(+84%) |
+| 编译 tools/affected.cx(106 KB),单次,毫秒 | 21104 | 17542 | 36619(+74%) |
+| 编译 tools/refactor.cx(51 KB),单次 | 6915 | 6669 | 13535(+96%) |
+| 编译 tools/status.cx(21 KB),单次 | 6423 | 6370 | 13096(+104%) |
+| bench-gencode 产物字节 | 61756 | 65852 | 45372 |
+
+三档 sha 与 sort 校验值相同。cx 工具三项各只跑一次(同源同档再跑会命中缓存),-O1 与默认档的差在噪声内。
+
+建议:
+(1) 默认档改走 -O1 路由:编译代价在噪声到 6% 之间,sha 快 17%、sort 快 16%,收益明显大于代价。改法二选一:cli.cx 默认 level 置 1(-O0 仍可显式取回原路由),或 src 三处续接加 compiler-routes.tsv 的 O0 行改 O1。属产品输入变更,全部默认档产物字节会变,须走补丁给集成者核、七源与两代不动点。
+(2) 默认档不宜直接走 -O2:生成码再快约 38%(sha)与 26%(sort),但编译墙钟近乎翻倍,-run 首次调用与工具冷编译都受影响。先定位 e4 的 o2 网为何让整段编译翻倍(analysis、local、peep 各自占多少,UNMEASURED),降到 20% 以内再议。
+(3) 中间方案(未实测):在 gen-manifest.tsv 里把便宜的子集(stfuse、peep 的 CFOLD)放进 o1 网,需要先拆出它们对 analysis 的依赖,并单独量编译代价。
+
+未验证:-O1 产物比默认档大 4096 字节的原因未查;-O1 的收益来自 scans 与 rounds 的哪一步未拆分;探针五件、check-bench-gencode、check-x86-enc-fuse、random-expr、facts-gen、gold-table、ratchets 因未落地均未跑;load1 低于 2 的复测未做;osx、win、arm64 未测。
