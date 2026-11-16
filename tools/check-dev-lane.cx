@@ -1,0 +1,135 @@
+/* tools/check-dev-lane.cx -- check of tools/dev-lane.cx on a fixture (no real product needed, a few seconds).
+ * usage: sh ./unisacc.com tools/check-dev-lane.cx      (cwd = tree root)
+ * Fixture (mktemp -d under /tmp, left in place): a git repository with the five product input directories and a
+ * fake installed unisacc.com that prints INSTALLED with DEV_LANE, UNISACC_LOCAL and its cwd; a fake product
+ * directory with a real receipt (hashes computed here) whose unisacc.com prints LOCAL.
+ * Asserted: --use on, tool goes local (lane cwd and absolute router from the repo), every gate class goes
+ * installed with DEV_LANE=off, the local variables dropped and cwd moved to the repo, non-.cx first argument
+ * and DEV_LANE=off go installed, a commit outside the input directories keeps the lane fresh, a commit inside
+ * them gives STALE on stderr plus the installed product and --status exit 3, --off gives installed and
+ * --status exit 4, and four refusals (relative lane, scope not LOCAL, entry hash mismatch, missing receipt).
+ * Last line: CHECK_DEV_LANE<TAB>checks=N<TAB>failed=M; exit 0 iff failed is 0.
+ * Not exercised: a real dev-product directory, devsvc x through the router. */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+#define PW 2048
+static int checks, failed;
+static char F[PW], o[1 << 15], root[PW];
+/* every format is checked: an overflow ends the check as a failure; every cp call site checks the capacity first */
+#define FM(d, cap, ...) do { int f_ = snprintf(d, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) { printf("FAIL\tfmt-overflow\nCHECK_DEV_LANE\tchecks=%d\tfailed=%d\n", checks, failed + 1); exit(1); } } while (0)
+static void cp(char *d, const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) d[i] = s[i]; }
+static void ck(const char *name, int ok) { checks++; if (!ok) { failed++; printf("FAIL\t%s\n%s\n", name, o); } else printf("ok\t%s\n", name); }
+/* sh -c script with $1 = fixture, $2 = tree root; stdout then stderr into o; returns rc (-1 transport) */
+static int sh(const char *script) {
+    np_result r = {0}; char why[512]; char *av[] = {"sh", "-c", (char *)script, "sh", F, root, 0}; size_t n = 0; int rc;
+    why[0] = 0; o[0] = 0;
+    if (np_run(av, root, 0, 50, &r, why, sizeof why)) { FM(o, sizeof o, "transport: %s", why); return -1; }
+    if (r.out && r.outn && r.outn < sizeof o - 1) { cp(o, r.out, r.outn); n = r.outn; }
+    if (r.err && r.errn && n + r.errn < sizeof o - 1) { cp(o + n, r.err, r.errn); n += r.errn; }
+    o[n] = 0; rc = r.rc; np_free(&r); return rc;
+}
+static int has(const char *s) { return strstr(o, s) != 0; }
+static void sha_of(const char *rel, char h[65]) { char p[PW]; size_t n; char *b; FM(p, sizeof p, "%s/%s", F, rel); b = cx_read(p, &n); if (!b) { printf("FAIL\tfixture-read\t%s\n", p); exit(1); } cx_sha256_hex(b, n, h); free(b); }
+static void receipt(const char *scope, const char *entry_sha, const char *pkg_sha) {
+    char p[PW], b[PW * 4], t[200], fin[65];
+    FM(t, sizeof t, "%s\n%s\n", entry_sha, pkg_sha); cx_sha256_hex(t, strlen(t), fin);
+    FM(b, sizeof b, "NOT_RELEASE\tdev-product-v1\ntree\t%s/tree\ntree_fp\t0\nentry\t%s/prod/entry.bin\t%s\npkg\t%s/prod/pkg.bin\t%s\nnets_pkg\t%s/prod/pkg.bin\t%s\nproduct\t%s/prod/unisacc.com\t%s\nscope\t%s\n", F, F, entry_sha, F, pkg_sha, F, pkg_sha, F, fin, scope);
+    FM(p, sizeof p, "%s/prod/receipt.tsv", F);
+    if (cx_write(p, b, strlen(b))) { printf("FAIL\tfixture-write\t%s\n", p); exit(1); }
+}
+#define DL "sh \"$2/unisacc.com\" \"$2/tools/dev-lane.cx\" -- "
+#define GIT "git -c user.name=t -c user.email=t@example.invalid "
+
+int main(void) {
+    char he[65], hp[65], want[PW]; int rc; size_t n;
+    static const char *gates[] = {"tests/run.cx", "tests/run-batch.cx", "tests/tools-compile.cx", "tools/affected.cx", "tools/precommit.cx", "tools/precommit-flow.cx",
+        "tools/ratchets.cx", "tools/derive.cx", "tools/commit-own.cx", "tools/register.cx", "tools/candidate-chain.cx", "tools/chain-ready.cx",
+        "tools/release-build.cx", "tools/dev-product.cx", "tools/cx-dev.cx", "tools/dev-lane.cx", "tools/devsvc.cx", 0};
+    int g;
+    if (!getcwd(root, sizeof root)) { printf("FAIL\tcwd\n"); return 1; }
+    F[0] = 0; FM(F, sizeof F, "-");
+    rc = sh("mktemp -d /tmp/check-dev-lane-XXXXXX");
+    n = strlen(o); while (n && o[n - 1] == '\n') o[--n] = 0;
+    if (rc || o[0] != '/' || n >= sizeof F) { printf("FAIL\tmktemp\t%s\n", o); return 1; }
+    cp(F, o, n + 1);
+    rc = sh("set -e; unset GIT_DIR GIT_WORK_TREE; mkdir -p \"$1/repo/tools\" \"$1/repo/tests\" \"$1/repo/docs\" \"$1/prod\"; cd \"$1/repo\";"
+            " for d in include src cx exec seed; do mkdir $d; echo 1 > $d/f; done; echo d > docs/f;"
+            " printf '#!/bin/sh\\necho \"INSTALLED lane=${DEV_LANE:-unset} local=${UNISACC_LOCAL:-unset} cwd=$(pwd -P) $*\"\\n' > unisacc.com;"
+            " git init -q .; git add include src cx exec seed docs; " GIT "commit -qm base;"
+            " echo e > \"$1/prod/entry.bin\"; echo p > \"$1/prod/pkg.bin\"; : > \"$1/prod/NOT_RELEASE\";"
+            " printf '#!/bin/sh\\necho \"LOCAL $*\"\\n' > \"$1/prod/unisacc.com\"");
+    ck("fixture", rc == 0);
+    if (rc) { printf("CHECK_DEV_LANE\tchecks=%d\tfailed=%d\n", checks, failed); return 1; }
+    sha_of("prod/entry.bin", he); sha_of("prod/pkg.bin", hp);
+
+    /* refusals: nothing written */
+    rc = sh(DL "--use \"$1/prod\" --lane \"$1/lane\" --repo \"$1/repo\"; r=$?; [ -e \"$1/lane\" ] && echo LANE_EXISTS; exit $r");
+    ck("refuse-receipt-missing", rc == 2 && has("REFUSE receipt-missing") && !has("LANE_EXISTS"));
+    receipt("CANDIDATE", he, hp);
+    rc = sh(DL "--use \"$1/prod\" --lane \"$1/lane\" --repo \"$1/repo\"; r=$?; [ -e \"$1/lane\" ] && echo LANE_EXISTS; exit $r");
+    ck("refuse-scope-not-LOCAL", rc == 2 && has("REFUSE receipt-scope-not-LOCAL") && !has("LANE_EXISTS"));
+    receipt("LOCAL", hp, hp);
+    rc = sh(DL "--use \"$1/prod\" --lane \"$1/lane\" --repo \"$1/repo\"; r=$?; [ -e \"$1/lane\" ] && echo LANE_EXISTS; exit $r");
+    ck("refuse-entry-sha-mismatch", rc == 2 && has("REFUSE entry-sha-mismatch") && !has("LANE_EXISTS"));
+    receipt("LOCAL", he, hp);
+    rc = sh(DL "--use \"$1/prod\" --lane rel/lane --repo \"$1/repo\"");
+    ck("refuse-relative-lane", rc == 2 && has("REFUSE usage"));
+
+    rc = sh(DL "--use \"$1/prod\" --lane \"$1/lane\" --repo \"$1/repo\"");
+    ck("use-on", rc == 0 && has("DEV_LANE\tstate=on") && has("scope=LOCAL"));
+    rc = sh("[ -L \"$1/lane/src\" ] && [ ! -e \"$1/lane/.git\" ] && [ -f \"$1/lane/unisacc.com\" ] && [ ! -L \"$1/lane/unisacc.com\" ] && echo SHAPE_OK");
+    ck("lane-shape", rc == 0 && has("SHAPE_OK"));
+    rc = sh(DL "--status --lane \"$1/lane\"");
+    ck("status-on", rc == 0 && has("DEV_LANE\tstate=on") && has("scope=LOCAL"));
+
+    rc = sh("cd \"$1/lane\" && sh ./unisacc.com tools/x.cx -- --check");
+    ck("tool-local-from-lane", rc == 0 && has("LOCAL tools/x.cx -- --check") && !has("INSTALLED"));
+    rc = sh("cd \"$1/repo\" && sh \"$1/lane/unisacc.com\" tools/check-y.cx");
+    ck("tool-local-from-repo", rc == 0 && has("LOCAL tools/check-y.cx") && !has("INSTALLED"));
+    rc = sh("cd \"$1/lane\" && sh ./unisacc.com /somewhere/else/probe.cx");
+    ck("foreign-cx-local", rc == 0 && has("LOCAL /somewhere/else/probe.cx"));
+    rc = sh("cd \"$1/lane\" && sh ./unisacc.com tests/cxtrunc.cx -- tools/x.cx");
+    ck("single-ratchet-scanner-local", rc == 0 && has("LOCAL tests/cxtrunc.cx -- tools/x.cx") && !has("INSTALLED"));
+
+    FM(want, sizeof want, "INSTALLED lane=off local=unset cwd=%s/repo ", F);
+    for (g = 0; gates[g]; g++) {
+        char s[PW], name[200];
+        FM(s, sizeof s, "cd \"$1/lane\" && UNISACC_LOCAL=1 UNISA_CONTAINER=x sh ./unisacc.com %s -- --run", gates[g]);
+        rc = sh(s); FM(name, sizeof name, "gate-installed %s", gates[g]);
+        ck(name, rc == 0 && has(want) && !has("LOCAL "));
+        FM(s, sizeof s, "cd \"$1/repo\" && sh \"$1/lane/unisacc.com\" \"$1/repo/%s\"", gates[g]);
+        rc = sh(s); FM(name, sizeof name, "gate-installed-abs %s", gates[g]);
+        ck(name, rc == 0 && has("INSTALLED lane=off") && !has("LOCAL "));
+    }
+    rc = sh("cd \"$1/lane\" && sh ./unisacc.com -c a.c -o a.o");
+    ck("non-cx-installed", rc == 0 && has(want) && !has("LOCAL "));
+    rc = sh("cd \"$1/lane\" && sh ./unisacc.com");
+    ck("no-args-installed", rc == 0 && has(want));
+    rc = sh("cd \"$1/lane\" && DEV_LANE=off sh ./unisacc.com tools/x.cx");
+    ck("env-off-installed", rc == 0 && has(want) && !has("LOCAL "));
+
+    rc = sh("unset GIT_DIR GIT_WORK_TREE; cd \"$1/repo\" && echo 2 > docs/f && " GIT "commit -qm docs -- docs && cd \"$1/lane\" && sh ./unisacc.com tools/x.cx");
+    ck("docs-commit-stays-fresh", rc == 0 && has("LOCAL tools/x.cx") && !has("STALE"));
+    rc = sh("unset GIT_DIR GIT_WORK_TREE; cd \"$1/repo\" && echo 2 > src/f && " GIT "commit -qm src -- src && cd \"$1/lane\" && sh ./unisacc.com tools/x.cx");
+    ck("input-commit-stale-falls-back", rc == 0 && has("dev-lane: STALE") && has(want) && !has("LOCAL "));
+    rc = sh(DL "--status --lane \"$1/lane\"");
+    ck("status-stale", rc == 3 && has("DEV_LANE\tstate=stale") && has("DEV_LANE_NEXT"));
+    rc = sh(DL "--use \"$1/prod\" --lane \"$1/lane\" --repo \"$1/repo\" && cd \"$1/lane\" && sh ./unisacc.com tools/x.cx");
+    ck("re-use-fresh-again", rc == 0 && has("LOCAL tools/x.cx") && !has("STALE"));
+
+    rc = sh(DL "--off --lane \"$1/lane\" && cd \"$1/lane\" && sh ./unisacc.com tools/x.cx");
+    ck("off-installed", rc == 0 && has("DEV_LANE\tstate=off") && has(want) && !has("LOCAL "));
+    rc = sh(DL "--status --lane \"$1/lane\"");
+    ck("status-off", rc == 4 && has("DEV_LANE\tstate=off"));
+    rc = sh(DL "--status --lane \"$1/repo\"");
+    ck("refuse-status-not-a-lane", rc == 2 && has("REFUSE not-a-lane"));
+    rc = sh(DL "--policy");
+    ck("policy-lists-gates", rc == 0 && has("installed\ttests/run*") && has("installed\ttests/tools-compile*") && has("installed\ttools/precommit*") && has("local\tany other *.cx"));
+
+    printf("CHECK_DEV_LANE\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

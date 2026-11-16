@@ -1,0 +1,205 @@
+/* tools/dev-lane.cx -- development lane: run tool-type commands with a local development product
+ * (tools/dev-product.cx, NOT_RELEASE, scope LOCAL) without changing how the commands are written.
+ *
+ *   sh ./unisacc.com tools/dev-lane.cx -- --use ABS_OUT --lane ABS_DIR [--base COMMIT] [--repo ABS_REPO]
+ *   sh ./unisacc.com tools/dev-lane.cx -- --off --lane ABS_DIR
+ *   sh ./unisacc.com tools/dev-lane.cx -- --status --lane ABS_DIR
+ *   sh ./unisacc.com tools/dev-lane.cx -- --policy
+ *
+ * --use writes ABS_DIR as a lane root: every top-level entry of the repository is a symlink into it (not
+ * unisacc.com, out, .git, .claude) and ABS_DIR/unisacc.com is a generated sh router.  Two ways to use it, the
+ * command text stays `sh ./unisacc.com tools/X.cx -- ARGS`:
+ *   cd ABS_DIR && sh ./unisacc.com tools/X.cx -- ARGS          (no .git there: tools that call git need the next form)
+ *   sh ABS_DIR/unisacc.com tools/X.cx -- ARGS                  (cwd stays the real checkout; devsvc x likewise)
+ * The router decides per call, in this order:
+ *   (1) DEV_LANE=off in the environment                              -> installed product
+ *   (2) first argument is not a *.cx path                            -> installed product (compile/link/flags)
+ *   (3) first argument matches the gate table (--policy prints it)   -> installed product
+ *   (4) product input trees of HEAD differ from the recorded base    -> one STALE line on stderr, installed product
+ *   (5) otherwise                                                    -> local product
+ * Every installed route exports DEV_LANE=off (descendants stay on the installed product), drops the local
+ * product's variables (UNISA_CONTAINER, UNISACC_LOCAL, UNISACC_CACHE_DIR) when UNISACC_LOCAL is set, and moves
+ * the working directory from the lane root to the real checkout, so a batch or gate started from the lane root
+ * runs exactly as from the checkout and its BATCH_RUN candidate= is the installed product.
+ * Evidence: anything the local route prints is LOCAL evidence only; batch verdicts, the commit gate and the
+ * freeze/chain/release tools are never routed to the local product.
+ * Freshness identity: `git rev-parse C:include C:src C:cx C:exec C:seed` (the directories dev-product
+ * fingerprints).  --base (default HEAD) is the commit the product tree was archived from; it is declared by the
+ * caller, the receipt does not carry it (dev-product's tree_fp is a stat fingerprint).  Uncommitted edits to
+ * those directories are not seen.
+ * --use verifies the receipt: NOT_RELEASE first line, scope LOCAL, entry and pkg files hash to the receipt
+ * values and the product id equals sha256("entry\npkg\n").  Refusals are named, exit 2, nothing written.
+ * --status: DEV_LANE<TAB>state=on|stale|off<TAB>product=..<TAB>sha=..<TAB>base=..<TAB>scope=LOCAL; exit 0 on, 3 stale, 4 off.
+ * Check: tools/check-dev-lane.cx */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+#define PW 4400
+#define IDS "include src cx exec seed"
+static const char *GATES =
+    "tests/run*|*/tests/run*|tests/tools-compile*|*/tests/tools-compile*|tools/affected.cx|*/tools/affected.cx|tools/precommit*|*/tools/precommit*|"
+    "tools/ratchets.cx|*/tools/ratchets.cx|tools/derive.cx|*/tools/derive.cx|"
+    "tools/commit-own.cx|*/tools/commit-own.cx|tools/register.cx|*/tools/register.cx|"
+    "tools/candidate-chain*|*/tools/candidate-chain*|tools/chain-*|*/tools/chain-*|"
+    "tools/release-*|*/tools/release-*|tools/freeze*|*/tools/freeze*|tools/install*|*/tools/install*|"
+    "tools/selfhost*|*/tools/selfhost*|tools/product-build*|*/tools/product-build*|"
+    "tools/kernel-build*|*/tools/kernel-build*|tools/source-job-wave*|*/tools/source-job-wave*|"
+    "tools/pc-wave*|*/tools/pc-wave*|tools/entry-build*|*/tools/entry-build*|"
+    "tools/dev-product.cx|*/tools/dev-product.cx|tools/cx-dev.cx|*/tools/cx-dev.cx|"
+    "tools/dev-lane.cx|*/tools/dev-lane.cx|tools/devsvc.cx|*/tools/devsvc.cx|tools/devsvc-core.cx|*/tools/devsvc-core.cx";
+
+static void die(const char *why, const char *arg) { fprintf(stderr, "dev-lane: REFUSE %s%s%s\n", why, arg ? " " : "", arg ? arg : ""); exit(2); }
+static void pj(char *o, const char *a, const char *b) { if (cx_fmt(o, PW, "%s/%s", a, b)) die("path-too-long", b); }
+/* every call site checks the destination capacity first */
+static void cp(char *d, const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) d[i] = s[i]; }
+static int file_sha(const char *p, char h[65]) { size_t n; char *b = cx_read(p, &n); if (!b) return 1; cx_sha256_hex(b, n, h); free(b); return 0; }
+static void put(const char *p, const char *s) { char t[PW + 16]; if (cx_fmt(t, sizeof t, "%s.tmp", p) || cx_write(t, s, strlen(s)) || rename(t, p)) die("write", p); }
+/* column col (0 = first after the key) of the receipt line starting with key<TAB>; "" when absent */
+static void rget(const char *b, const char *key, int col, char *o, size_t cap) {
+    size_t kl = strlen(key), i = 0; const char *s = b;
+    o[0] = 0;
+    while (s && *s) {
+        if (!strncmp(s, key, kl) && s[kl] == '\t') {
+            s += kl + 1;
+            while (col-- > 0) { while (*s && *s != '\t' && *s != '\n') s++; if (*s != '\t') return; s++; }
+            while (*s && *s != '\t' && *s != '\n' && i + 1 < cap) o[i++] = *s++;
+            o[i] = 0; return;
+        }
+        s = strchr(s, '\n'); if (s) s++;
+    }
+}
+static void no_quote(const char *p) { if (strchr(p, '\'') || strchr(p, '\n')) die("path-has-quote-or-newline", p); }
+/* tree ids of the product input directories at commit c; out is the raw rev-parse text without trailing newlines */
+static void ids_at(const char *repo, const char *c, char *o, size_t cap) {
+    np_result r = {0}; char why[512], cmd[1024]; char *av[] = {"sh", "-c", cmd, 0}; size_t n;
+    const char *d = IDS; char spec[512]; size_t k = 0;
+    spec[0] = 0;
+    while (*d) {
+        const char *e = strchr(d, ' '); size_t l = e ? (size_t)(e - d) : strlen(d); char one[160];
+        if (cx_fmt(one, sizeof one, "%s'%s:%.*s'", k ? " " : "", c, (int)l, d) || k + strlen(one) + 1 > sizeof spec) die("fmt", 0);
+        cp(spec + k, one, strlen(one) + 1); k += strlen(one);
+        d += l; if (*d == ' ') d++;
+    }
+    no_quote(c);
+    if (cx_fmt(cmd, sizeof cmd, "git rev-parse %s", spec)) die("fmt", 0);
+    why[0] = 0;
+    if (np_run(av, repo, 0, 20, &r, why, sizeof why) || r.rc || !r.outn) die("base-not-resolvable (git rev-parse of product input trees)", c);
+    n = r.outn; while (n && r.out[n - 1] == '\n') n--;
+    if (n + 1 > cap) die("fmt", 0);
+    cp(o, r.out, n); o[n] = 0; np_free(&r);
+}
+static void forward_only(const char *lane, const char *repo) {
+    char p[PW], buf[PW * 2 + 400];
+    no_quote(repo);
+    if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# dev-lane-v1 state=off (tools/dev-lane.cx); generated, do not edit\n# repo\t%s\nR='%s'\nexport DEV_LANE=off\n[ \"$(pwd -P)\" = \"$(cd \"$(dirname \"$0\")\" && pwd -P)\" ] && cd \"$R\"\nexec sh \"$R/unisacc.com\" \"$@\"\n", repo, repo)) die("path-too-long", 0);
+    pj(p, lane, "unisacc.com"); put(p, buf); if (chmod(p, 0755)) die("chmod", p);
+}
+
+int main(int argc, char **argv) {
+    static char out[PW], lane[PW], repo[PW], base[80] = "HEAD", p[PW], rc[1 << 14], ids[1024], now[1024];
+    static char buf[1 << 16], prod[PW], fin[65], h2[65], h3[65], e2[PW], e3[PW], w2[80], w3[80], wf[80], v[PW];
+    int i, use = 0, off = 0, status = 0; size_t n; char *b;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--")) continue;
+        else if (!strcmp(argv[i], "--use") && i + 1 < argc) { use = 1; if (cx_fmt(out, PW, "%s", argv[++i])) die("path-too-long", 0); }
+        else if (!strcmp(argv[i], "--lane") && i + 1 < argc) { if (cx_fmt(lane, PW, "%s", argv[++i])) die("path-too-long", 0); }
+        else if (!strcmp(argv[i], "--repo") && i + 1 < argc) { if (cx_fmt(repo, PW, "%s", argv[++i])) die("path-too-long", 0); }
+        else if (!strcmp(argv[i], "--base") && i + 1 < argc) { if (cx_fmt(base, sizeof base, "%s", argv[++i])) die("base-too-long", 0); }
+        else if (!strcmp(argv[i], "--off")) off = 1;
+        else if (!strcmp(argv[i], "--status")) status = 1;
+        else if (!strcmp(argv[i], "--policy")) {
+            const char *s = GATES;
+            printf("DEV_LANE_POLICY\tinstalled\tDEV_LANE=off\n");
+            printf("DEV_LANE_POLICY\tinstalled\tfirst argument not *.cx\n");
+            while (*s) { const char *e = strchr(s, '|'); size_t l = e ? (size_t)(e - s) : strlen(s); if (*s != '*') printf("DEV_LANE_POLICY\tinstalled\t%.*s\n", (int)l, s); s += l; if (*s == '|') s++; }
+            printf("DEV_LANE_POLICY\tinstalled\tstale (HEAD trees of %s differ from base)\n", IDS);
+            printf("DEV_LANE_POLICY\tlocal\tany other *.cx (LOCAL evidence only)\n");
+            return 0;
+        }
+        else die("usage --use ABS_OUT --lane ABS_DIR [--base COMMIT] [--repo ABS_REPO] | --off --lane ABS_DIR | --status --lane ABS_DIR | --policy", 0);
+    }
+    if (use + off + status != 1 || lane[0] != '/') die("usage --use ABS_OUT --lane ABS_DIR [--base COMMIT] [--repo ABS_REPO] | --off --lane ABS_DIR | --status --lane ABS_DIR | --policy", 0);
+    no_quote(lane);
+    pj(p, lane, "unisacc.com");
+
+    if (off || status) {
+        char st[16];
+        if (!(b = cx_read(p, &n))) die("not-a-lane (no router)", p);
+        if (n >= sizeof buf) die("router-too-large", p);
+        cp(buf, b, n); buf[n] = 0; free(b);
+        if (!strstr(buf, "dev-lane-v1")) die("not-a-lane (router is not dev-lane-v1)", p);
+        rget(buf, "# repo", 0, repo, PW); if (repo[0] != '/') die("router-without-repo", p);
+        if (off) { forward_only(lane, repo); printf("DEV_LANE\tstate=off\tlane=%s\trepo=%s\n", lane, repo); return 0; }
+        if (strstr(buf, "state=off")) { printf("DEV_LANE\tstate=off\tlane=%s\trepo=%s\n", lane, repo); return 4; }
+        rget(buf, "# product", 0, prod, PW); rget(buf, "# product", 1, fin, sizeof fin); rget(buf, "# base", 0, base, sizeof base);
+        rget(buf, "# ids", 0, v, PW);
+        ids_at(repo, "HEAD", now, sizeof now);
+        for (i = 0; now[i]; i++) if (now[i] == '\n') now[i] = ' ';
+        if (cx_fmt(st, sizeof st, "%s", strcmp(now, v) ? "stale" : "on")) die("fmt", 0);
+        if (fsx_is_file(prod) <= 0) die("product-missing", prod);
+        printf("DEV_LANE\tstate=%s\tproduct=%s\tsha=%s\tbase=%s\tscope=LOCAL\n", st, prod, fin, base);
+        if (!strcmp(st, "stale")) { printf("DEV_LANE_NEXT\trebuild: sh ./unisacc.com tools/dev-product.cx -- --tree ABS_TREE --out ABS_OUT --git %s --until-done, then --use again\n", repo); return 3; }
+        return 0;
+    }
+
+    /* --use */
+    if (out[0] != '/') die("--use ABS_OUT", out);
+    if (!repo[0] && !getcwd(repo, PW)) die("cwd", 0);
+    if (repo[0] != '/') die("--repo ABS_REPO", repo);
+    no_quote(out); no_quote(repo);
+    pj(p, repo, "unisacc.com"); if (fsx_is_file(p) <= 0) die("repo-without-installed-product", p);
+    if (!strcmp(lane, repo)) die("lane-is-the-repo", lane);
+    pj(p, out, "receipt.tsv");
+    if (!(b = cx_read(p, &n))) die("receipt-missing", p);
+    if (n >= sizeof rc) die("receipt-too-large", p);
+    cp(rc, b, n); rc[n] = 0; free(b);
+    if (strncmp(rc, "NOT_RELEASE\tdev-product-v1\n", 27)) die("receipt-not-dev-product-v1", p);
+    rget(rc, "scope", 0, v, PW); if (strcmp(v, "LOCAL")) die("receipt-scope-not-LOCAL", p);
+    rget(rc, "entry", 0, e2, PW); rget(rc, "entry", 1, w2, sizeof w2);
+    rget(rc, "pkg", 0, e3, PW); rget(rc, "pkg", 1, w3, sizeof w3);
+    rget(rc, "product", 0, prod, PW); rget(rc, "product", 1, wf, sizeof wf);
+    if (file_sha(e2, h2) || strcmp(h2, w2)) die("entry-sha-mismatch", e2);
+    if (file_sha(e3, h3) || strcmp(h3, w3)) die("pkg-sha-mismatch", e3);
+    if (cx_fmt(buf, sizeof buf, "%s\n%s\n", h2, h3)) die("fmt", 0);
+    cx_sha256_hex(buf, strlen(buf), fin);
+    if (strcmp(fin, wf)) die("product-id-mismatch", p);
+    if (fsx_is_file(prod) <= 0) die("product-missing", prod);
+    no_quote(prod);
+    pj(p, out, "NOT_RELEASE"); if (fsx_is_file(p) <= 0) die("NOT_RELEASE-marker-missing", p);
+    ids_at(repo, base, ids, sizeof ids);
+    for (i = 0; ids[i]; i++) if (ids[i] == '\n') ids[i] = ' ';
+
+    if (mkdir(lane, 0700) && errno != EEXIST) die("mkdir", lane);
+    {   np_result r = {0}; char why[512];
+        char *av[] = {"sh", "-c", "for e in \"$1\"/* \"$1\"/.[!.]*; do [ -e \"$e\" ] || continue; n=${e##*/}; case $n in unisacc.com|out|.git|.claude) continue;; esac; ln -sfn \"$e\" \"$2/$n\" || exit 1; done", "sh", repo, lane, 0};
+        why[0] = 0; if (np_run(av, repo, 0, 30, &r, why, sizeof why) || r.rc) die("link-top-level", why);
+        np_free(&r);
+    }
+    if (cx_fmt(buf, sizeof buf,
+        "#!/bin/sh\n"
+        "# NOT_RELEASE dev-lane-v1 state=on scope=LOCAL (tools/dev-lane.cx); generated, do not edit\n"
+        "# repo\t%s\n# product\t%s\t%s\n# base\t%s\n# ids\t%s\n"
+        "R='%s'; P='%s'; W='%s'\n"
+        "inst() {\n"
+        "  export DEV_LANE=off\n"
+        "  [ \"$(pwd -P)\" = \"$(cd \"$(dirname \"$0\")\" && pwd -P)\" ] && cd \"$R\"\n"
+        "  [ -n \"${UNISACC_LOCAL:-}\" ] && exec env -u UNISA_CONTAINER -u UNISACC_LOCAL -u UNISACC_CACHE_DIR sh \"$R/unisacc.com\" \"$@\"\n"
+        "  exec sh \"$R/unisacc.com\" \"$@\"\n"
+        "}\n"
+        "[ \"${DEV_LANE:-on}\" = off ] && inst \"$@\"\n"
+        "case \"${1:-}\" in *.cx) ;; *) inst \"$@\";; esac\n"
+        "case \"$1\" in %s) inst \"$@\";; esac\n"
+        "H=$(git -C \"$R\" rev-parse HEAD:include HEAD:src HEAD:cx HEAD:exec HEAD:seed 2>/dev/null | tr '\\n' ' ')\n"
+        "if [ \"$H\" != \"$W \" ]; then\n"
+        "  echo \"dev-lane: STALE local product (base %s; product input trees of HEAD changed); using the installed product; rebuild with tools/dev-product.cx then tools/dev-lane.cx --use\" >&2\n"
+        "  inst \"$@\"\n"
+        "fi\n"
+        "exec sh \"$P\" \"$@\"\n",
+        repo, prod, fin, base, ids, repo, prod, ids, GATES, base)) die("path-too-long", 0);
+    pj(p, lane, "unisacc.com"); put(p, buf); if (chmod(p, 0755)) die("chmod", p);
+    printf("DEV_LANE\tstate=on\tlane=%s\tproduct=%s\tsha=%s\tbase=%s\tscope=LOCAL\n", lane, prod, fin, base);
+    return 0;
+}
