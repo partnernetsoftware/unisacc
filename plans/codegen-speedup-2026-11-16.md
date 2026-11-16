@@ -209,3 +209,34 @@ A 批(第 2、3、4、5 项)只动 lower 与编码,对所有优化档生效;B �
 - 输出:/tmp/x3/cls_O0.txt、cls_O1.txt、cls_O2.txt、cls_g0.txt、cls_g2.txt;bench1.out 至 bench5.out;各变体的 v_*.s 与 v_*.log(每个变体的循环条数与各改写命中数)。
 - tape:/tmp/x3/p.3(e3 加 sidecar 后)、p.e4_O1、p.e4_O2、p.low(lower 输出)。
 - 既有依据:build/speed-baseline.tsv 末尾 N3 七行;/tmp/n3;plans/perf-bottlenecks-2026-10-30.md 第四节;plans/runtime-speedup-lessons-2026-11-16.md 的 X3、X4 与 5.4 节。
+
+## 9 A 批第 3 项落地记录:常数移位立即数形式(2026-11-16,LOCAL)
+
+落点改在编码层,不走 lower 回扫方案。理由:(1) lower 方案要新目标操作、enc-literals 加 codeword、重算 lower-code 并重建 lower 网,波及面大;编码网本来逐行顺序处理,加几个状态字就能认出同一形态,只动 exec/enc 三张表,重建只有编码网(实测约 9 秒);(2) 覆盖的形态与回扫方案相同(imm 之后隔 pop、另一个 imm、对它的掩码 and、对别的寄存器的算术);(3) 不删 imm、不改 tape 与 lower 文本,回滚即还原三张表。
+
+机制(exec/enc/x86-emit-result.tsv,常量在 exec/enc/gen-manifest.tsv 的 with 段):编码网记两个槽,移位量槽 ks(寄存器、值、租约行号)与掩码槽 km。租约按指令行号 lnum 逐行续期,不续即失效。
+- imm 值小于 64:写入 ks,km 作废;imm 值不小于 64:写入 km(只在紧邻的下一行有效),写的是 ks 的寄存器则 ks 作废,否则 ks 续期。
+- push、pop:操作数不是 ks 的寄存器则续期。
+- 算术类(add、sub、and、or、xor、mul):目的不是 ks 的寄存器则续期;目的是 ks 的寄存器时,只有"and ks 与紧邻上一行 imm 定义的掩码,且掩码低 6 位全 1"才续期。
+- 其它任何操作(跳转、调用、装载、存储、mov、除法、门等)不续期;标号把两个槽清零(exec/enc/x86-line-result.tsv 的 LAB.s)。
+- 移位行:ks 在租约内、移位量寄存器等于 ks 的寄存器、值右移 6 位为 0,则发 `mov 目的, 被移数`(两者相同时省掉)加 `REX.W C1 /ext ib`;否则走原 7 条序列。
+
+实测(本机 lnx/x86_64,cx-dev 私有编码网对已装 0.0.67;cx-dev 报 BASE_STALE paths=9 scope=LOCAL-PARTIAL;已装产品不含第 4 项两地址,所以下表的差是第 3、4 两项合计,第 3 项单独的同场增量未测 UNMEASURED):
+
+| 项 | 已装 0.0.67 | cx-dev(第 3、4 项) |
+|---|---|---|
+| 8MB sha 默认档,三次取 min,毫秒 | 965.2 | 860.4 |
+| 8MB sha -O2 档 | 790.0 | 632.9 |
+| 8MB sort 默认档 | 1071.9 | 1098.4(噪声内) |
+| 8MB sort -O2 档 | 697.7 | 671.4 |
+| bench-gencode.c 对象指令数,默认档 | 21318 | 19889 |
+| 同上 -O2 档 | 12731 | 11620 |
+| 同上 %cl 移位条数 | 47 | 20(另 27 条立即数形式) |
+| 移位探针对象指令数,默认档 | 14224 | 12968 |
+| 移位探针 %cl 移位条数 | 81 | 13(另 68 条立即数形式) |
+
+计时时 load1 为 3.97 至 4.06,偏高;上一轮只含第 4 项时 -O2 档 sha 为 662.6(不同场次,仅供参照)。bench 里剩下的 20 条 %cl 移位是变量移位与 `32 - n` 这类运行期算出的移位量,要等 B 批常量折叠。
+
+已有证据(LOCAL):移位探针(shl、shr、sar 在 64、32、16、8 位,N 取 0、1、7、31、32、33、63,变量 0 至 63 全扫,移位量寄存器被改写、条件赋值、标号回跳的回落情形)gcc -O0、已装、cx-dev 默认档与 -O2 档输出全同;越界与负数常量移位量(64、65、127、-1、-63、4294967303、256、1000)已装与 cx-dev 两档输出相同;假根 check-bench-gencode 3 8 末行 valid=6 noisy=2 invalid=0 failed=0;8MB sha 与 sort 校验值四个变体相同;假根 check-random-expr 3 批 status=PASS(本机无 tcc,tcc 位用 gcc 顶替,实为两方比对);facts-gen --check rc 0;gold-table --check PASS 20 stages;ratchets ok=15 fail=0(字面量经清单常量引用,check-literal 总数 3028 降回 3020)。
+
+未验证:osx、win 的 x86_64 编码格 UNVERIFIED(同一张表,未跑);arm64 不适用;慢车道(SID、PC、两代 GEN)未跑;tools/affected.cx --run 在 60 秒内未跑完且报 tools.cxlib 的 tlib STALE(非本项路径),受影响批次未实跑;编码层没有新增穷举夹具(各寄存器组合、租约各分支);七源 -o sha 未比。
