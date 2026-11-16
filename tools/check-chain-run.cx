@@ -250,6 +250,12 @@ static int before_in(const char *file,const char *first,const char *then) {
     size_t n=0;char *b=cx_read(file,&n);if(!b)return 0;
     char *x=strstr(b,first),*y=strstr(b,then);int yes=x&&y&&x<y;free(b);return yes;
 }
+/* every occurrence of EACH in FILE lies before the first occurrence of THEN (both must occur) */
+static int all_before_in(const char *file,const char *each,const char *then) {
+    size_t n=0;char *b=cx_read(file,&n);if(!b)return 0;
+    char *y=strstr(b,then),*last=0;for(char *s=b;(s=strstr(s,each));s+=strlen(each))last=s;
+    int yes=last&&y&&last<y;free(b);return yes;
+}
 static void put_widen(const char *name,const char *text) { char p[4400];file_of(p,name,"chain-run.widen");put(p,text); }
 static int limits_cases(const char *plan);
 static int segment_cases(const char *plan) {
@@ -396,6 +402,27 @@ static int tail_calls_ok(const char *file,int per_job) {
    starts the group; with 100 the group runs at once. No call is refused in any of them. */
 static void tail_cases(const char *plan) {
     char p[4400],q[4400],name[40],env[80];
+    {   /* Measured need: 20 s of the segment left, a plain phase with a 90 s bound. Without a measured
+           value it is held (need 90); with a measured 8 s it starts in the same segment under a
+           call bound of what is left, not above it, and nothing is held. */
+        char needp[4400];join(needp,base,"../build/chain-phase-need.tsv");
+        const char *sup2[]={"--supervise","--runner",runner,"--segment-s","270","--max-segments","9",0};
+        char env2[80];if(cx_fmt(env2,sizeof env2,"UNISACC_CHAINRUN_SEGMENT_SPENT_MS=%d",(270-20)*1000-600))exit(2);
+        const char *envv2[]={env2,0};
+        put_plan(plan,"0\tsnap\t-\t5\n1\tctx\t-\t5\n2\twarmup\t-\t90\n3\tcompare\t-\t5\n4\tpack\t-\t5\n");
+        put(needp,"# id\tneed_s\tsource\n");
+        int rc=runv("needless","tail","600",sup2,envv2,40);file_of(p,"needless","chain-run.tsv");
+        ck(rc==0&&has(p,"PREPARED\tpack")&&count(p,"HOLD\t")==1&&has(p,"\tphase=warmup\tneed=90\t")&&count(p,"\texpired\t")==1,"need-unmeasured-phase-held-at-its-bound");
+        put(needp,"# id\tneed_s\tsource\nwarmup\t8\tfixture\n");
+        rc=runv("needfits","tail","600",sup2,envv2,40);file_of(p,"needfits","chain-run.tsv");
+        long nb=row_number(p,"ATTEMPT\t3\tphase=warmup\t","bound=");
+        ck(rc==0&&has(p,"PREPARED\tpack")&&count(p,"HOLD\t")==0&&count(p,"\texpired\t")==0&&count(p,"SUPERVISE\t")==1,"need-measured-8-fits-20-left-no-hold");
+        ck(nb>=8&&nb<=20,"need-measured-call-bound-is-segment-left-not-above");
+        { char tc[4400];file_of(tc,"needfits","tail-calls");ck(count(tc,"REFUSE")==0&&!has(p,"BLOCKER"),"need-measured-call-accepted-by-validator"); }
+        put(needp,"# id\tneed_s\tsource\nwarmup\t91\tfixture\n");
+        ck(runv("needbad","tail","600",sup2,envv2,12)==2,"need-above-phase-bound-refused");
+        put(needp,"# id\tneed_s\tsource\n");
+    }
     put_plan(plan,"0\tsnap\t-\t5\n1\tctx\t-\t5\n2\tbuild\t-\t5\n3\twarmup\t-\t5\n4\tkernels-g1\t-\t5\n"
         "5\tjobs-tool-0-start\t-\t90\n6\tjobs-tool-0-finish\t-\t90\n7\tjobs-tool-1-start\t-\t90\n8\tjobs-tool-1-finish\t-\t90\n"
         "9\tjobs-tool-2-start\t-\t90\n10\tjobs-tool-2-finish\t-\t90\n11\tjobs-tool-3-start\t-\t90\n12\tjobs-tool-3-finish\t-\t90\n13\tjobs-tool\t-\t90\n"
@@ -585,6 +612,19 @@ int main(int argc,char **argv) {
     char hb[300];cx_fmt(hb,sizeof hb,"%ld\tsnap\t%d\t%ld\tstart\n",sy_wall_s(),sy_pid(),sy_getpgid(0));put(p,hb);
     ck(call("live","ok","30","3",0)==2,"live-heartbeat-refused");
     char plan[4400];join(plan,base,"../build/chain-phases.tsv");
+    {   /* Pick order. (1) One lane free at a time: the row with the longer path to the sink (cr -> cr2 ->
+           pack) is taken before the leaf that precedes it in the table. (2) ctx yields twice; zb, which
+           shares its exclusive directory, is higher and earlier in the table, and becomes ready while
+           ctx is in flight: the yielded ctx is taken again before zb. */
+        put_plan(plan,"0\tsnap\t-\t5\t-\t-\t1\n1\tla\tla\t5\tsnap\tla\t4\n2\tcr\tcr\t5\tsnap\tcr\t4\n3\tcr2\tcr2\t5\tcr\tcr2\t4\n4\tpack\t-\t5\tla,cr2\t-\t1\n");
+        ck(call("pickheight","parallel-one","60","3",0)==0,"pick-order-run-completes");
+        join(p,base,"pickheight/calls");ck(count(p,"la\n")==1&&count(p,"cr\n")==1&&before_in(p,"cr\n","la\n"),"critical-path-phase-picked-before-leaf");
+        put_plan(plan,"0\tsnap\t-\t5\t-\t-\t1\n1\twa\twa\t5\tsnap\twa\t4\n2\tzb\tdd\t5\twa\tzb\t4\n3\tzc\tzc\t5\tzb\tzc\t4\n4\tctx\tdd\t5\tsnap\tctx\t4\n5\tpack\t-\t5\tzc,ctx\t-\t1\n");
+        ck(call("pickyield","yield","120","3",0)==0,"pick-yield-run-completes");
+        join(p,base,"pickyield/calls");
+        ck(count(p,"ctx\n")==3&&count(p,"zb\n")==1&&all_before_in(p,"ctx\n","zb\n"),"yielded-phase-picked-before-other-ready-phase");
+        join(p,base,"pickyield/chain-run.tsv");ck(count(p,"YIELD\t")==2&&has(p,"PREPARED\tpack")&&!has(p,"BLOCKER"),"pick-yield-no-blocker");
+    }
     put_plan(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
     ck(call("budget","ok","30","3",0)==0,"phase-budget-accepted");
     join(p,base,"budget/chain-run.tsv");ck(has(p,"bound=3")&&has(p,"bound=4")&&has(p,"bound=5"),"phase-budget-read-not-fixed-90");

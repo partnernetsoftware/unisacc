@@ -76,8 +76,13 @@ static long end_ms;
 static int attempts, resumes, kills, max_attempts, max_resumes;
 static int phase_bound, parallel=4, segment_cap;
 static int ceiling, clean, widens, widen_need, widen_max;
-typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
+typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck,height,yielded,need; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
+/* Pick order of ready work (order only, never what runs): plan indices by height descending
+   (height: edges on the longest dependency path from the row to a sink, so the critical path goes
+   before leaves), table order among equals. A row that yielded (rc 77, or a YIELD row of an
+   earlier segment of this output) goes before every row that did not. */
+static int pick[2048];
 static char *plan_fall[2048]; /* fall-through list of plan[i], "-" for a lane row or an empty set */
 static int probing; static char pending[256];
 #define RC_SEGMENT 75
@@ -134,6 +139,39 @@ static void validate_plan(void) {
         s=e+1;
     }
     if(row!=plan_count)die("fallthrough table invalid");
+    /* Heights: relax until stable (the plan is acyclic, checked above). */
+    for(int changed=1;changed;) {
+        changed=0;
+        for(int i=0;i<plan_count;i++) {
+            char deps[4400];if(tx_copy(deps,sizeof deps,plan[i].deps,strlen(plan[i].deps)))die("dependency bound");char *s=deps;
+            if(strcmp(s,"-"))while(s){char *e=strchr(s,',');if(e)*e++=0;int d=lookup(s);if(plan[d].height<plan[i].height+1){plan[d].height=plan[i].height+1;changed=1;}s=e;}
+        }
+    }
+    for(int i=0;i<plan_count;i++) {
+        int k=i;
+        while(k>0&&plan[pick[k-1]].height<plan[i].height){pick[k]=pick[k-1];k--;}
+        pick[k]=i;
+    }
+    /* Measured need (build/chain-phase-need.tsv, optional): "id TAB need_s TAB source", the measured
+       upper bound of a plain phase's wall time. It only decides whether the phase may still start
+       in what is left of a segment; the phase bound itself is the table's. A phase without a row
+       needs its whole bound, as before. An unknown id, a need below 1 or above the phase bound, or a
+       repeated id refuses. */
+    for(int i=0;i<plan_count;i++)plan[i].need=plan[i].bound;
+    if(sy_exists("build/chain-phase-need.tsv")) {
+        size_t nn=0;char *nb=cx_read("build/chain-phase-need.tsv",&nn);if(!nb)die("need table invalid");
+        static char seen[2048];
+        for(char *s=nb;*s;) {
+            char *e=strchr(s,'\n');if(!e)die("need table invalid");*e=0;
+            if(*s!='#') {
+                char id[256],extra;int need,d;
+                if(sscanf(s,"%255[^\t]\t%d\t%c",id,&need,&extra)!=3||(d=lookup(id))<0||seen[d]||need<1||need>plan[d].bound)die("need table invalid");
+                seen[d]=1;plan[d].need=need;
+            }
+            s=e+1;
+        }
+        free(nb);
+    }
 }
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
@@ -494,7 +532,7 @@ static void settle(task *t,outcome r,int *stop,int *retrying) {
     int pre=t->recheck==1; t->recheck=0;
     if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
     else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;clean_attempt();if(!*stop)*stop=RC_SEGMENT;}
-    else if(r.rc==77&&!pre){t->state=0;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);clean_attempt();}
+    else if(r.rc==77&&!pre){t->state=0;t->yielded=1;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);clean_attempt();}
     else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
     else if(r.retry){if(r.retry!=2)*retrying=1;else if(!*retrying)*retrying=2;t->state=0;}
     else if(pre){t->recheck=2;t->state=0;clean_attempt();}
@@ -508,10 +546,25 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
         if(!strncmp(t->id,"g2-lnx-x86_64-obj-",18)||!strncmp(t->id,"g2-lnx-arm64-obj-",17))t->state=2;
         if(rehearse&&strcmp(t->id,"snap")&&strcmp(t->id,"build-objects")&&strcmp(t->id,"build-front")&&strcmp(t->id,"build")&&strcmp(t->id,"wave-objects")&&strcmp(t->id,"wave-runner")&&strcmp(t->id,"ctx"))t->state=2;
     }
+    {   /* A yield of an earlier segment of this output keeps its place in front. */
+        char yp[4400];path(yp,"chain-run.tsv");size_t yn=0;char *yb=cx_read(yp,&yn);
+        for(char *s=yb;s&&*s;) {
+            char *e=strchr(s,'\n');if(!e)break;
+            if(!strncmp(s,"YIELD\t",6)) {
+                char id[256];char *q=strstr(s,"\tphase=");
+                if(q&&q<e&&sscanf(q+7,"%255[^\t\n]",id)==1){int d=lookup(id);if(d>=0&&plan[d].state!=2)plan[d].yielded=1;}
+            }
+            s=e+1;
+        }
+        free(yb);
+    }
     for(;;) {
         int remaining=0;held=0;
-        for(int i=0;i<plan_count;i++) {
-            task *t=&plan[i];if(t->state==2)continue;remaining++;
+        /* Two passes over the pick order: yielded rows first, then the rest. */
+        for(int k=0;k<2*plan_count;k++) {
+            task *t=&plan[pick[k%plan_count]];if(t->state==2)continue;
+            if(k<plan_count)remaining++;
+            if((k<plan_count)!=(t->yielded!=0))continue;
             /* The width column caps a lane row; an outer row's width 1 means "one outer at a time" (ready()), not "nothing else running". */
             if(t->pid||stop||retrying||active>=parallel||(strcmp(t->lane,"-")&&active>=t->width)||!ready(t))continue;
             if(done(t->id)){t->state=2;continue;}
@@ -529,20 +582,24 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
                held, never started and killed, and never issued for the candidate to refuse; the
                segment ends cleanly (rc 75) and the next one starts it. Work that would not fit a
                whole new segment either is short of the total deadline, not of the segment. */
-            ccp_plan call;char group_seconds[16];
-            if(ccp_call_plan(&call_limits,group!=0,t->bound,seg_left(),left,&call)==CCP_YIELD) {
+            /* Measured need: a plain phase whose bound does not fit what is left of the segment still
+               starts when its measured need does; its call bound is then what is left of the segment
+               (shorter than the table bound, never longer), so no child crosses the segment end. */
+            ccp_plan call;char group_seconds[16];long sl=seg_left();int fit=t->bound,need=group?ccp_need(&call_limits,1,t->bound):t->need;
+            if(!group&&sl>=0&&sl<t->bound&&t->need<=sl)fit=(int)sl;
+            if(ccp_call_plan(&call_limits,group!=0,fit,sl,left,&call)==CCP_YIELD) {
                 ccp_plan fresh;
-                if(ccp_call_plan(&call_limits,group!=0,t->bound,segment_s?(long)segment_s:-1,left,&fresh)==CCP_YIELD){stop=blocker(t->phase,"deadline",3);continue;}
+                if(ccp_call_plan(&call_limits,group!=0,segment_s&&!group&&segment_s<t->bound&&t->need<=segment_s?segment_s:t->bound,segment_s?(long)segment_s:-1,left,&fresh)==CCP_YIELD){stop=blocker(t->phase,"deadline",3);continue;}
                 if(!held)held=t->id;
                 if(!hold_row) {
                     char row[500];hold_row=1;
-                    if(!cx_fmt(row,sizeof row,"HOLD\t%ld\tphase=%s\tneed=%d\tsegment_left=%ld\n",sy_wall_s(),t->phase,ccp_need(&call_limits,group!=0,t->bound),seg_left()))append("chain-run.tsv",row);
+                    if(!cx_fmt(row,sizeof row,"HOLD\t%ld\tphase=%s\tneed=%d\tsegment_left=%ld\n",sy_wall_s(),t->phase,need,sl))append("chain-run.tsv",row);
                 }
                 continue;
             }
             int bound=call.bound;
             if(group&&cx_fmt(group_seconds,sizeof group_seconds,"%d",call.group_s))die("group seconds bound");
-            t->attempt=++attempts;save();t->state=1;
+            t->attempt=++attempts;save();t->state=1;t->yielded=0;
             int pre=needs_recheck(t->phase)&&t->recheck!=2,end=tail;
             t->recheck=pre?1:0;
             if(cx_fmt(t->label,sizeof t->label,pre?"%s-recheck":"%s",t->phase))die("label bound");
