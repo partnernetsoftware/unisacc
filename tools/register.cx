@@ -149,6 +149,29 @@ static int rg_row_ok(const char *row, const char *marker) {
 }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
+/* P9 登记贴线告警(只告警,不拦): 读 tests/run-batch.cx 追加的实测耗时表(UNISACC_BATCH_TIMES 或
+   $HOME/.cache/unisacc/batch-times.tsv),该批已有实测最大值超过 45000 毫秒时打一行具名 WARN.
+   判据与文案同 tools/batch-timing.cx max;表只是观测,不改登记结果与退出码。 */
+#define RG_WARN_MS 45000
+static void rg_timing_warn(const char *id) {
+    const char *bt = sy_env("UNISACC_BATCH_TIMES"), *home = sy_env("HOME"); char tp[4400]; size_t n = 0; char *s; long at = 0, best = -1, idn = tx_len(id, 512);
+    if (bt && *bt) { if (tx_eqz(bt, "off") || cx_fmt(tp, sizeof tp, "%s", bt)) return; }
+    else if (!home || !*home || cx_fmt(tp, sizeof tp, "%s/.cache/unisacc/batch-times.tsv", home)) return;
+    s = cx_read(tp, &n);
+    if (!s) return;
+    while (at < (long)n) {
+        long e = at, ioff, ilen, toff, tlen, v = 0, i; int d = 0;
+        while (e < (long)n && s[e] != '\n') e++;
+        if (e > at && s[at] != '#' && !tx_field(s + at, e - at, '\t', 1, &ioff, &ilen) && !tx_field(s + at, e - at, '\t', 3, &toff, &tlen) &&
+            ilen == idn && mm_same(s + at + ioff, id, idn)) {
+            for (i = 0; i < tlen && s[at + toff + i] >= '0' && s[at + toff + i] <= '9'; i++) { v = v * 10 + (s[at + toff + i] - '0'); d = 1; }
+            if (d && i == tlen && v > best) best = v;
+        }
+        at = e + 1;
+    }
+    mm_free(s);
+    if (best > RG_WARN_MS) printf("REGISTER\tid=%s\tWARN=near-limit\tmax_ms=%ld\tthreshold_ms=%d\thint=tools/batch-timing.cx split %s\n", id, best, RG_WARN_MS, id);
+}
 
 /* 1 when a line of the file starts with KEY followed by a TAB */
 static int has_key(const char *path, const char *key) {
@@ -332,6 +355,7 @@ int main(int argc, char **argv) {
     }
     if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
+    rg_timing_warn(id);
     /* build/batch-packages.tsv is generated from the registry: a new batch makes the committed copy stale
        (check-batch-packages table-fresh).  Regenerate it here, only for the real tables (a fixture run with
        UNISACC_TABLES set must not rewrite the checked-in build table). */

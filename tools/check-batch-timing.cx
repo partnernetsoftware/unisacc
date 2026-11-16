@@ -1,0 +1,166 @@
+/* tools/check-batch-timing.cx -- tools/batch-timing.cx 的夹具检查(P9 批次实测耗时表).
+ * 自造批次登记表(UNISACC_TABLES)与耗时表(--table),覆盖: 读表与坏行容错、缺表为空、贴线阈值边界
+ * (40000 不算、40001 算)、预算偏离、拆分建议、max 的登记告警文案与阈值(45000 不告、45001 告)、
+ * 与 register.cx / run-batch.cx 源码同文同阈值、import 单批/均摊/截止被杀三种.
+ *   sh ./unisacc.com tools/check-batch-timing.cx [-- ROOT OUT]
+ * 分组(--cases): report | max | import | src; 不给即全跑. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096], work[4400], bin[4400], tdir[4400], tab[4400];
+static char *last;
+static size_t lastn;
+
+static int hasin(const char *s, size_t n, const char *needle) {
+    long nl = tx_len(needle, 512);
+    for (long i = 0; s && i + nl <= (long)n; i++) if (mm_same(s + i, needle, nl)) return 1;
+    return 0;
+}
+static int has(const char *needle) { return hasin(last, lastn, needle); }
+
+static void ck(int ok, const char *name) {
+    if (!ok) { failed++; if (last) sy_printf("%s", last); }
+    sy_printf("%s\tbatch-timing.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run(const char *a1, const char *a2, const char *a3, const char *a4) {
+    char *v[10]; int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    v[k++] = bin;
+    if (a1) v[k++] = (char *)a1;
+    if (a2) v[k++] = (char *)a2;
+    if (a3) v[k++] = (char *)a3;
+    if (a4) v[k++] = (char *)a4;
+    v[k++] = "--table"; v[k++] = tab; v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+static int put(const char *p, const char *text) { return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP)); }
+
+static int want(const char *cases, const char *g) {
+    long gl = tx_len(g, 32), cl, i = 0;
+    if (!cases) return 1;
+    cl = tx_len(cases, 256);
+    while (i < cl) {
+        long e = i; while (e < cl && cases[e] != ',') e++;
+        if (e - i == gl && mm_same(cases + i, g, gl)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], dot[4400], bp[4400], f1[4400], f2[4400], f3[4400];
+    const char *cases = 0; int rc, own = 0, i, w = 1;
+    for (i = 1; i < argc; i++) { if (tx_eqz(argv[i], "--cases") && i + 1 < argc) { cases = argv[++i]; continue; } argv[w++] = argv[i]; }
+    argc = w;
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) { (void)sy_mkdir(argv[2], 0755); if (cx_fmt(work, sizeof work, "%s/batch-timing-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2; }
+    else {
+        if (cx_fmt(dot, sizeof dot, "%s", sy_tmpdir()) || cx_fmt(work, sizeof work, "%s/check-batch-timing-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        own = 1;
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/batch-timing.cx", root) || cx_fmt(bin, sizeof bin, "%s/batch-timing.native", work) ||
+        cx_fmt(tdir, sizeof tdir, "%s/tables", work) || cx_fmt(tab, sizeof tab, "%s/times.tsv", work) || cx_fmt(bp, sizeof bp, "%s/batches.tsv", tdir) ||
+        cx_fmt(f1, sizeof f1, "%s/single.txt", work) || cx_fmt(f2, sizeof f2, "%s/group.txt", work) || cx_fmt(f3, sizeof f3, "%s/killed.txt", work)) return 2;
+    if (sy_mkdir(tdir, 0755)) return 2;
+    if (sy_setenv("UNISACC_TABLES", tdir, 1)) return 2;
+    { char why[256]; if (tq_native(root, src, bin, why, sizeof why)) { sy_printf("FAIL\tbatch-timing.build-native\t%s\n", why); return 1; } }
+    put(bp, "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+            "slow-a\tIMPLEMENTED\tinterfaces\ttools/check-x.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-x.cx\t--cases;a\ti.a\trc0:X\tproduct\tcommit\n"
+            "slow-b\tIMPLEMENTED\tinterfaces\ttools/check-x.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-x.cx\t--cases;b\ti.b\trc0:X\tproduct\tcommit\n"
+            "edge\tIMPLEMENTED\tinterfaces\ttools/check-y.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/check-y.cx\t-\ti.e\trc0:Y\tproduct\tcommit\n"
+            "fast\tIMPLEMENTED\tinterfaces\ttools/check-z.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-z.cx\t-\ti.f\trc0:Z\tproduct\tcommit\n");
+
+    if (want(cases, "report")) {
+        rc = run("report", 0, 0, 0);
+        ck(rc == 0 && has("BT_SUMMARY\trows=0\tids=0\tnear=0\tover_budget=0"), "missing-table-is-empty");
+        put(tab, "# comment\n"
+                 "1\tslow-a\tPASS\t52000\t50000\thot\t2.1\trun-batch\n"
+                 "2\tslow-a\tPASS\t30000\t28000\thot\t2.1\trun-batch\n"
+                 "3\tslow-a\tKILLED\t56000\t54000\t-\t-\timport-single\n"
+                 "4\tedge\tPASS\t40000\t39000\thot\t1.0\trun-batch\n"
+                 "5\tfast\tPASS\t3000\t2000\thot\t1.0\trun-batch\n"
+                 "bad line without tabs\n"
+                 "6\tfast\tPASS\tnotanumber\t1\thot\t1\trun-batch\n"
+                 "\t\t\n");
+        rc = run("report", 0, 0, 0);
+        ck(rc == 0, "report-rc0");
+        ck(has("BT_ROW\tid=slow-a\tn=3\tmed_ms=52000\tmax_ms=56000\tkilled=1\tbudget_s=55\n"), "row-median-max-killed");
+        ck(has("BT_ROW\tid=fast\tn=1\tmed_ms=3000\tmax_ms=3000\tkilled=0\tbudget_s=55\n"), "bad-rows-tolerated");
+        ck(has("BT_NEAR\tid=slow-a\t"), "near-over-40000");
+        ck(!has("BT_NEAR\tid=edge\t") && !has("BT_NEAR\tid=fast\t"), "near-boundary-40000-not-near");
+        ck(has("BT_OVER_BUDGET\tid=slow-a\tbudget_s=55\tmax_ms=56000\tover_ms=1000\n"), "over-budget");
+        ck(has("BT_OVER_BUDGET\tid=edge\tbudget_s=30\tmax_ms=40000\tover_ms=10000\n"), "over-budget-small");
+        ck(has("BT_SPLIT\tid=slow-a\tsuggest_parts=3\ttarget_ms=25000\t"), "split-suggest-parts");
+        ck(has("BT_SUMMARY\trows=5\tids=3\tnear=1\tover_budget=2\tnear_ms=40000\t") && has("scope=observation-only-no-verdict"), "summary");
+        rc = run("report", "--near-ms", "39999", 0);
+        ck(rc == 0 && has("BT_NEAR\tid=edge\t"), "near-ms-option");
+        rc = run("split", "slow-a", 0, 0);
+        ck(rc == 0 && has("BT_GROUP\tid=slow-a\targs=--cases;a\tn=3\t") && has("BT_GROUP\tid=slow-b\targs=--cases;b\tn=0\t") && !has("BT_GROUP\tid=edge"), "split-lists-same-source-groups");
+        ck(has("BT_SPLIT_PLAN\tid=slow-a\tverdict=SPLIT\tparts=3\tmax_ms=56000\t") && has("BT_SPLIT_DRAFT\tslow-a-p3\t") && !has("slow-a-p4"), "split-plan");
+        rc = run("split", "fast", 0, 0);
+        ck(rc == 0 && has("BT_SPLIT_PLAN\tid=fast\tverdict=NO_SPLIT\t"), "split-no-split");
+        rc = run("split", "slow-b", 0, 0);
+        ck(rc == 0 && has("BT_SPLIT_PLAN\tid=slow-b\tverdict=UNMEASURED\t"), "split-unmeasured");
+        rc = run("split", "nosuch", 0, 0);
+        ck(rc == 2 && has("BT_SPLIT_UNKNOWN\tid=nosuch\treason=not-registered"), "split-unknown-rc2");
+        rc = run("report", "--near-ms", 0, 0);
+        ck(rc == 2, "option-needs-value-rc2");
+    }
+    if (want(cases, "max")) {
+        put(tab, "1\tw45\tPASS\t45000\t1\thot\t1\trun-batch\n1\tw46\tPASS\t45001\t1\thot\t1\trun-batch\n1\tw46\tPASS\t2000\t1\thot\t1\trun-batch\n");
+        rc = run("max", "w45", 0, 0);
+        ck(rc == 0 && has("BT_MAX\tid=w45\tn=1\tmax_ms=45000\n") && !has("WARN"), "warn-boundary-45000-silent");
+        rc = run("max", "w46", 0, 0);
+        ck(rc == 0 && has("REGISTER\tid=w46\tWARN=near-limit\tmax_ms=45001\tthreshold_ms=45000\thint=tools/batch-timing.cx split w46\n"), "warn-text-over-45000");
+        rc = run("max", "none", 0, 0);
+        ck(rc == 0 && has("BT_MAX\tid=none\tn=0\tmax_ms=-1\n") && !has("WARN"), "warn-unmeasured-silent");
+    }
+    if (want(cases, "src")) {
+        char p[4400]; size_t n = 0; char *s;
+        if (!cx_fmt(p, sizeof p, "%s/tools/register.cx", root) && (s = cx_read(p, &n)) != 0) {
+            ck(hasin(s, n, "#define RG_WARN_MS 45000") && hasin(s, n, "\"REGISTER\\tid=%s\\tWARN=near-limit\\tmax_ms=%ld\\tthreshold_ms=%d\\thint=tools/batch-timing.cx split %s\\n\"") &&
+               hasin(s, n, "rg_timing_warn(id);"), "register-same-text-and-threshold");
+            mm_free(s);
+        } else ck(0, "register-readable");
+        if (!cx_fmt(p, sizeof p, "%s/tests/run-batch.cx", root) && (s = cx_read(p, &n)) != 0) {
+            ck(hasin(s, n, "batch-times.tsv") && hasin(s, n, "UNISACC_BATCH_TIMES") && hasin(s, n, "sy_append_file(tp,ln,") && hasin(s, n, "\\trun-batch\\n\""), "run-batch-appends-row");
+            mm_free(s);
+        } else ck(0, "run-batch-readable");
+        if (!cx_fmt(p, sizeof p, "%s/tools/affected.cx", root) && (s = cx_read(p, &n)) != 0) {
+            ck(hasin(s, n, "bt_killed(batch[ch[k].bi].id, sy_now_ms() - ch[k].t_spawn);") && hasin(s, n, "\\tKILLED\\t%ld\\t-1\\t-\\t-\\taffected-kill\\n"), "affected-appends-killed-row");
+            mm_free(s);
+        } else ck(0, "affected-readable");
+    }
+    if (want(cases, "import")) {
+        (void)sy_unlink(tab);
+        put(f1, "RUN_DIR\t/tmp/x\tjobs=1\nBATCH_RUN\tid=fast\tstatus=PASS\trc=0\nAFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\tnot_applicable=0\telapsed_ms=9000\tkit_ms=1000\tprep_ms=0\trun_ms=8000\n");
+        put(f2, "RUN_DIR\t/tmp/x\tjobs=2\nBATCH_RUN\tid=slow-a\tstatus=PASS\trc=0\nBATCH_RUN\tid=slow-b\tstatus=FAIL\trc=1\nDEFERRED\tedge\tneeds-materials=m\nAFFECTED_RUN\tpass=1\tfail=1\tdeferred=1\tnot_applicable=0\telapsed_ms=31000\tkit_ms=1000\tprep_ms=0\trun_ms=30000\n");
+        put(f3, "RUN_DIR\t/tmp/x\tjobs=1\nDEFERRED\tedge\tkilled-at-deadline\nAFFECTED_RUN\tpass=0\tfail=0\tdeferred=1\tnot_applicable=0\telapsed_ms=55000\tkit_ms=1000\tprep_ms=0\trun_ms=53000\n");
+        rc = run("import", f1, f2, f3);
+        ck(rc == 0 && has("BT_IMPORT\tfile=") && has("\tbatches=2\trows=2\tjobs=2\trun_ms=30000\n"), "import-rc0");
+        rc = run("report", 0, 0, 0);
+        ck(has("BT_ROW\tid=fast\tn=1\tmed_ms=8000\tmax_ms=8000\tkilled=0\t"), "import-single-run_ms");
+        ck(has("BT_ROW\tid=slow-a\tn=1\tmed_ms=30000\t") && has("BT_ROW\tid=slow-b\tn=1\tmed_ms=30000\t"), "import-share-run_ms-times-jobs-over-n");
+        ck(has("BT_ROW\tid=edge\tn=1\tmed_ms=54000\tmax_ms=54000\tkilled=1\t"), "import-killed-lower-bound");
+        { size_t n = 0; char *s = cx_read(tab, &n);
+          ck(s && hasin(s, n, "\tfast\tPASS\t8000\t8000\t-\t-\timport-single\n") && hasin(s, n, "\tslow-b\tFAIL\t30000\t30000\t-\t-\timport-share\n") && hasin(s, n, "\tedge\tKILLED\t54000\t53000\t-\t-\timport-single\n"), "import-row-shape");
+          mm_free(s); }
+        rc = run("import", "/nonexistent/x", 0, 0);
+        ck(rc == 2, "import-missing-file-rc2");
+    }
+    if (own) cx_rmtree(work);
+    sy_printf("CHECK_BATCH_TIMING\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

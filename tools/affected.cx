@@ -613,7 +613,16 @@ static int kill_tree(int pid, const int *keep, int nkeep, char *rep, int repcap)
     return sv;
 }
 
-typedef struct { int pid, ofd, efd, bi; long deadline; Buf out, err; } Child;
+typedef struct { int pid, ofd, efd, bi; long deadline, t_spawn; Buf out, err; } Child;
+/* P9 实测耗时事实表: run-batch 自己在跑完时追加一行; 被本工具在截止时杀掉的批 run-batch 写不了,
+   在这里补一行 status=KILLED、total_ms=实际已跑毫秒(下界)。只记观测,不判通过,不用于跳过执行。
+   路径与开关同 tests/run-batch.cx(UNISACC_BATCH_TIMES,off 不记;UNISACC_TABLES 已设时不写真表)。 */
+static void bt_killed(const char *id, long ms) {
+    const char *bt = sy_env("UNISACC_BATCH_TIMES"), *tt = sy_env("UNISACC_TABLES"), *home = sy_env("HOME"); char tp[4400], ln[512];
+    if (bt && *bt) { if (tx_eqz(bt, "off") || cx_fmt(tp, sizeof tp, "%s", bt)) return; }
+    else if ((tt && *tt) || !home || !*home || cx_fmt(tp, sizeof tp, "%s/.cache/unisacc/batch-times.tsv", home)) return;
+    if (!cx_fmt(ln, sizeof ln, "%ld\t%s\tKILLED\t%ld\t-1\t-\t-\taffected-kill\n", sy_wall_s(), id, ms)) (void)sy_append_file(tp, ln, tx_len(ln, 512), 0644);
+}
 static char outparent[4400];
 static long t_main, start_deadline = 45000, hard_deadline = 54000;
 static int deadline_hook;   /* --start/--hard-deadline-ms 是测试钩子:给了就按给的数,不再按注册预算推导 */
@@ -931,6 +940,7 @@ static int run(const int *sel, int nsel, int jobs) {
             C->bi = sel[next]; C->out.p = 0; C->out.n = C->out.cap = 0; C->err = C->out;
             C->deadline = sy_now_ms() + (B->budget > 0 ? B->budget : 55) * 1000L + 2000;
             if (C->deadline > window_end) C->deadline = window_end;
+            C->t_spawn = sy_now_ms();
             C->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &C->ofd, &C->efd);
             next++;
             if (C->pid < 0) { printf("RUN_REFUSED\t%s\tspawn=%d\n", B->id, C->pid); fail++; continue; }
@@ -952,6 +962,7 @@ static int run(const int *sel, int nsel, int jobs) {
                         if (ch[k].efd >= 0) sy_close(ch[k].efd);
                         if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
                         else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
+                        bt_killed(batch[ch[k].bi].id, sy_now_ms() - ch[k].t_spawn);
                         deferred++;
                     }
                     ch[k] = ch[nrun - 1]; nrun--; k--;
