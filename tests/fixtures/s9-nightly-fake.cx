@@ -31,6 +31,19 @@ int main(int argc, char **argv) {
         printf("PREP\n");
         return 0;
     }
+    if (!strcmp(verb, "pending") && argc > 3) {   /* S9_FAKE_PAR_N 片 p0..;没有 LEAF.start 的算待跑;S9_FAKE_PAR_ALONE=K 时 pK 为独占片 */
+        const char *pn = getenv("S9_FAKE_PAR_N"), *al = getenv("S9_FAKE_PAR_ALONE");
+        int total = pn && pn[0] ? atoi(pn) : 0, alone = al && al[0] ? atoi(al) : -1, k, cnt = 0;
+        for (k = 0; k < total; k++) {
+            char p[4400];
+            if (cx_fmt(p, sizeof p, "%s/p%d.start", argv[3], k)) die("path");
+            if (sy_exists(p) == 1) continue;
+            printf("S9_PENDING\tslice=p%d\ttier=0\talone=%d\theavy=0\tbudget=1\tmaterials=0\tneed=2\n", k, k == alone);
+            cnt++;
+        }
+        printf("S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n", cnt, total);
+        return 0;
+    }
     if (!strcmp(verb, "step")) {
         size_t n; char *s;
         /* 与真 s9-shards 同合同:必须带 UNISACC_BOUND_DEADLINE_MONO,且剩余在 (0,300.5] 内(单调时钟) */
@@ -44,6 +57,22 @@ int main(int argc, char **argv) {
             if (!e || *e || sy_mono(&t)) { printf("FAIL deadline-parse\n"); return 2; }
             left = end - ((double)t.sec + (double)t.nsec / 1e9);
             if (left <= 0 || left > 300.5) { printf("FAIL outer-budget-300\n"); return 2; }
+        }
+        /* 并发步夹具:step ROOT RUN --slice LEAF 睡 S9_FAKE_PAR_MS 毫秒后在 RUN 下留 LEAF.start 与 LEAF.done;
+           S9_FAKE_PAR_NOPROG=LEAF 时该片恒报 STEP_NO_PROGRESS 且不留记录;S9_FAKE_PAR_BAD=LEAF 时该片 rc 2。 */
+        if (argc > 5 && !strcmp(argv[4], "--slice")) {
+            const char *np = getenv("S9_FAKE_PAR_NOPROG"), *bd = getenv("S9_FAKE_PAR_BAD"), *ms = getenv("S9_FAKE_PAR_MS");
+            char p[4400];
+            FILE *f;
+            if (np && !strcmp(np, argv[5])) { printf("S9\tSTEP_NO_PROGRESS\tslice=%s\treason=budget\tlaunched=0\n", argv[5]); return 4; }
+            if (bd && !strcmp(bd, argv[5])) { printf("FAIL fake-bad-slice\n"); return 2; }
+            if (cx_fmt(p, sizeof p, "%s/%s.start", argv[3], argv[5])) die("path");
+            f = fopen(p, "w"); if (!f) die("start"); fputs("x\n", f); fclose(f);
+            sy_sleep_ms(ms && ms[0] ? atoi(ms) : 300);
+            if (cx_fmt(p, sizeof p, "%s/%s.done", argv[3], argv[5])) die("path");
+            f = fopen(p, "w"); if (!f) die("done"); fputs("x\n", f); fclose(f);
+            printf("S9\tSTEP_SLICE\tslice=%s\tstatus=DONE_RECORDED\nS9\tSTEP_PENDING\tunstarted=1\tlive=1\tlaunched=1\n", argv[5]);
+            return 3;
         }
         if (slp && slp[0] == '3') sy_sleep_ms(8000);
         {

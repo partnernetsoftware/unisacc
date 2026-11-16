@@ -365,6 +365,48 @@ int main(int argc, char **argv) {
             ck(rc == 1 && has(buf, "step-pending") && !has(buf, "status=PASS") && s && steps == 4 && !has(s, "aggregate"), "no-wt-without-finished-signal-not-done");
             free(s);
         }
+        /* 并发步(--phase steps --par N):6 片每片 1 秒、p2 为独占片,4 路并发须全部记 DONE、峰值并发 4、墙钟小于串行的 6 秒,
+           池空后仍跑一次串行 step 才记 STEPS_DONE;某片恒 NO_PROGRESS 时重发至多 3 次后状态 NO_PROGRESS 退出 4,不记 STEPS_DONE;
+           某片 rc 2 时状态 FAIL 退出 1;--par 配非 steps 相位拒绝。 */
+        {
+            char *pw[24], sess[4400], pclean[4500];
+            int k = 0, made = 0;
+            char *shc[] = {"sh", "-c", pclean, 0};
+            cx_fmt(sess, sizeof sess, "%s/session.tsv", runp);
+            cx_fmt(pclean, sizeof pclean, "rm -f '%s'/p[0-9].start '%s'/p[0-9].done '%s'", runp, runp, logp);
+            { char *mk[] = {"mkdir", "-p", runp, 0}; runv(mk, dir, 5, buf, sizeof buf, &rc); }
+            if (sy_exists(sess) != 1) { FILE *f = fopen(sess, "w"); if (f) { fclose(f); made = 1; } }
+            pw[k++] = "sh"; pw[k++] = com; pw[k++] = tool; pw[k++] = "--"; pw[k++] = dir; pw[k++] = "--resume"; pw[k++] = runp;
+            pw[k++] = "--tier"; pw[k++] = "commit"; pw[k++] = "--date"; pw[k++] = "2026-11-16"; pw[k++] = "--fake"; pw[k++] = fake;
+            pw[k++] = "--phase"; pw[k++] = "steps"; pw[k++] = "--par"; pw[k++] = "4"; pw[k] = 0;
+            setenv("S9_FAKE_MODE", "nowt", 1);
+            setenv("S9_FAKE_PAR_N", "6", 1); setenv("S9_FAKE_PAR_MS", "1000", 1); setenv("S9_FAKE_PAR_ALONE", "2", 1);
+            runv(shc, dir, 5, buf, sizeof buf, &rc);
+            runv(pw, dir, 30, buf, sizeof buf, &rc);
+            {
+                size_t n; char *s = cx_read(logp, &n); int sl = 0; const char *q = s, *wm = strstr(buf, "\twall_ms=");
+                while (q && (q = strstr(q, "step --slice p"))) { sl++; q += 14; }
+                ck(rc == 0 && has(buf, "status=STEPS_DONE") && has(buf, "\tpeak=4\tpending_at_start=6\tlaunched=6\tdone=6\tno_progress=0\tnot_recorded=0\tfailed=0\tnot_launched=0\t"), "steps-par-all-slices-recorded");
+                ck(wm && atoi(wm + 9) > 0 && atoi(wm + 9) < 5000, "steps-par-wall-below-serial");
+                ck(s && sl == 6 && has(s, "pending\n") && has(s, "\nstep\n"), "steps-par-lists-pending-then-serial-step-confirms");
+                free(s);
+            }
+            runv(shc, dir, 5, buf, sizeof buf, &rc);
+            setenv("S9_FAKE_PAR_N", "3", 1); setenv("S9_FAKE_PAR_MS", "200", 1); unsetenv("S9_FAKE_PAR_ALONE"); setenv("S9_FAKE_PAR_NOPROG", "p1", 1);
+            runv(pw, dir, 30, buf, sizeof buf, &rc);
+            ck(rc == 4 && has(buf, "status=NO_PROGRESS\tstep=steps-par") && !has(buf, "STEPS_DONE") && has(buf, "slice=p1\tresult=NO_PROGRESS\trc=4") && has(buf, "\ttry=3\n") && has(buf, "\tdone=2\tno_progress=1\t"), "steps-par-no-progress-bounded-requeue-rc4");
+            runv(shc, dir, 5, buf, sizeof buf, &rc);
+            unsetenv("S9_FAKE_PAR_NOPROG"); setenv("S9_FAKE_PAR_BAD", "p0", 1);
+            runv(pw, dir, 30, buf, sizeof buf, &rc);
+            ck(rc == 1 && has(buf, "status=FAIL\tstep=steps-par") && !has(buf, "STEPS_DONE") && has(buf, "slice=p0\tresult=FAIL\trc=2"), "steps-par-slice-failure-rc1");
+            unsetenv("S9_FAKE_PAR_BAD");
+            pw[14] = "aggregate";
+            runv(pw, dir, 30, buf, sizeof buf, &rc);
+            ck(rc == 2 && !has(buf, "status=PASS"), "steps-par-refused-outside-steps");
+            runv(shc, dir, 5, buf, sizeof buf, &rc);
+            unsetenv("S9_FAKE_PAR_N"); unsetenv("S9_FAKE_PAR_MS");
+            if (made) { char *rs[] = {"rm", "-f", sess, 0}; runv(rs, dir, 5, buf, sizeof buf, &rc); }
+        }
         /* 有待跑片而本步未发片(STEP_NO_PROGRESS, rc 4):一步即停,状态 NO_PROGRESS、退出码 4,不进 aggregate,不记 PASS。 */
         runv(rmx, dir, 5, buf, sizeof buf, &rc);
         setenv("S9_FAKE_MODE", "noprog", 1);
