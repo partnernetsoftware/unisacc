@@ -1,0 +1,168 @@
+/* From repository root: sh ./unisacc.com tools/check-ext-argx.cx [-- --cases a|b]
+ * argx.args option tables: (a) in-process ax_parse/ax_usage contracts and named refusals
+ * (missing required named one by one, unknown option with suggestions, integer range, enum,
+ * duplicate non-repeatable, position independence, "--" ends options, --opt=value, stale
+ * handles); (b) ax_main through a real child: --help rc 0 and stdout byte-equal to ax_usage,
+ * refusal rc 2 with reasons and usage on stderr.  Last line failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sysx.run
+#pragma unisa use argx.args
+#pragma unisa use testx.check
+
+static int failed, passed;
+static void ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    printf("%s\targx.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static const ax_opt spec[] = {
+    { "--tag", "-t", AX_STR, AX_REQ, "T", "release tag", 0, -1, 0 },
+    { "--notes", 0, AX_STR, AX_REQ, "FILE", "notes file", 0, -1, 0 },
+    { "--jobs", "-j", AX_INT, 0, 0, "parallel jobs", 1, 16, 0 },
+    { "--mode", 0, AX_ENUM, 0, 0, "run mode", 0, -1, "check|write" },
+    { "--file", 0, AX_STR, AX_MULTI, "PATH", "input file", 0, -1, 0 },
+    { "--quiet", 0, AX_FLAG, 0, 0, "less output", 0, -1, 0 },
+    { "ROOT", 0, AX_STR, AX_REQ, 0, "product tree", 0, -1, 0 },
+    { "EXTRA", 0, AX_STR, AX_MULTI, 0, "more arguments", 0, -1, 0 },
+    { 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+};
+
+static int P(int *h, int n, char **v) { return ax_parse(h, spec, n, v); }
+
+static void cases_a(void) {
+    int h, rc, n;
+    const char *s;
+    const char **rest;
+    {   char *v[] = { "t", "--tag", "v1", "--notes", "n.md", "/r", 0 };
+        rc = P(&h, 6, v);
+        ck(rc == 0 && tx_eqz(ax_str(h, "--tag"), "v1") && tx_eqz(ax_str(h, "--notes"), "n.md") && tx_eqz(ax_str(h, "ROOT"), "/r") && ax_why(h)[0] == 0, "basic");
+        ck(ax_int(h, "--jobs", 7) == 7 && ax_str(h, "--mode") == 0 && ax_flag(h, "--quiet") == 0, "absent-defaults");
+        ck(ax_close(h) == 0 && ax_close(h) == -EBADF && tx_eqz(ax_why(h), "bad handle") && ax_str(h, "--tag") == 0, "stale-handle-refused"); }
+    {   char *v[] = { "t", "/r", "--quiet", "-t", "v2", "x", "--notes=n", "y", "-j", "16", 0 };
+        rc = P(&h, 10, v);
+        n = ax_rest(h, &rest);
+        ck(rc == 0 && tx_eqz(ax_str(h, "--tag"), "v2") && tx_eqz(ax_str(h, "--notes"), "n") && ax_flag(h, "--quiet") == 1 && ax_int(h, "--jobs", 0) == 16, "position-independent-alias-eq");
+        ck(n == 3 && tx_eqz(rest[0], "/r") && tx_eqz(rest[2], "y") && tx_eqz(ax_str(h, "ROOT"), "/r") && ax_flag(h, "EXTRA") == 2 && ax_multi(h, "EXTRA", 1, &s) == 0 && tx_eqz(s, "y"), "positionals-in-order");
+        ax_close(h); }
+    {   char *v[] = { "t", "/r", 0 };
+        rc = P(&h, 2, v);
+        s = ax_why(h);
+        ck(rc == -EINVAL && tk_has(s, "missing required --tag (expected --tag T)") && tk_has(s, "missing required --notes (expected --notes FILE)"), "missing-required-each-named");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", 0 };
+        rc = P(&h, 5, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "missing required argument ROOT"), "missing-positional-named");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tagg", "a", "--notes", "b", "/r", 0 };
+        rc = P(&h, 6, v);
+        s = ax_why(h);
+        ck(rc == -EINVAL && tk_has(s, "unknown option --tagg (did you mean --tag?)"), "unknown-option-suggests");
+        ax_close(h); }
+    {   char *v[] = { "t", "--zzzzzzzz", "--tag", "a", "--notes", "b", "/r", 0 };
+        rc = P(&h, 7, v);
+        ck(rc == -EINVAL && tk_has(ax_why(h), "unknown option --zzzzzzzz") && !tk_has(ax_why(h), "did you mean"), "unknown-option-no-near");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "/r", "--jobs", "17", 0 };
+        rc = P(&h, 8, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "--jobs 17 out of range 1..16"), "int-out-of-range");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "/r", "--jobs=0", 0 };
+        rc = P(&h, 7, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "--jobs 0 out of range 1..16"), "int-below-range-eq-form");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "/r", "--jobs", "3x", 0 };
+        rc = P(&h, 8, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "--jobs 3x is not an integer"), "int-not-integer");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "/r", "--mode", "dry", 0 };
+        rc = P(&h, 8, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "--mode dry not one of check|write"), "enum-refused");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "/r", "--mode", "write", 0 };
+        rc = P(&h, 8, v);
+        ck(rc == 0 && tx_eqz(ax_str(h, "--mode"), "write"), "enum-accepted");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "-t", "b", "--notes", "b", "/r", 0 };
+        rc = P(&h, 8, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "duplicate --tag (not repeatable)"), "duplicate-non-repeatable");
+        ax_close(h); }
+    {   char *v[] = { "t", "--file", "a", "--tag", "a", "--file=b", "--notes", "b", "/r", "--file", "c", 0 };
+        rc = P(&h, 11, v);
+        ck(rc == 0 && ax_flag(h, "--file") == 3 && ax_multi(h, "--file", 2, &s) == 0 && tx_eqz(s, "c") && ax_multi(h, "--file", 3, &s) == -ENOENT, "repeatable-collects");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", "a", "--notes", "b", "--", "--quiet", "--jobs", "99", "-t", 0 };
+        rc = P(&h, 10, v);
+        n = ax_rest(h, &rest);
+        ck(rc == 0 && ax_flag(h, "--quiet") == 0 && n == 4 && tx_eqz(ax_str(h, "ROOT"), "--quiet") && tx_eqz(rest[3], "-t") && ax_flag(h, "EXTRA") == 3, "dashdash-rest-positional");
+        ax_close(h); }
+    {   char *v[] = { "t", "--tag", 0 };
+        rc = P(&h, 2, v);
+        s = ax_why(h);
+        ck(rc == -EINVAL && tk_has(s, "missing value for --tag (expected --tag T)") && tk_has(s, "missing required argument ROOT"), "missing-value-named");
+        ax_close(h); }
+    {   char *v[] = { "t", "--quiet=1", "--tag", "a", "--notes", "b", "/r", 0 };
+        rc = P(&h, 7, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "--quiet takes no value"), "flag-with-value");
+        ax_close(h); }
+    {   char *v[] = { "t", "/r", "--help", 0 };
+        rc = P(&h, 3, v);
+        ck(rc == AX_HELP, "help-wins-over-missing");
+        ax_close(h); }
+    {   static const ax_opt one[] = { { "--x", 0, AX_FLAG, 0, 0, "x", 0, -1, 0 }, { 0, 0, 0, 0, 0, 0, 0, 0, 0 } };
+        char *v[] = { "t", "stray", 0 };
+        rc = ax_parse(&h, one, 2, v);
+        ck(rc == -EINVAL && tx_eqz(ax_why(h), "unexpected argument stray"), "unexpected-positional");
+        ax_close(h); }
+    {   int hs[9], i, okk = 1;
+        char *v[] = { "t", 0 };
+        static const ax_opt none[] = { { 0, 0, 0, 0, 0, 0, 0, 0, 0 } };
+        for (i = 0; i < 8; i++) okk &= ax_parse(&hs[i], none, 1, v) == 0;
+        okk &= ax_parse(&hs[8], none, 1, v) == -ENOSPC;
+        for (i = 0; i < 8; i++) okk &= ax_close(hs[i]) == 0;
+        ck(okk, "slots-bounded"); }
+    {   char u[4096], u2[4096];
+        int a = ax_usage(spec, "demo", u, sizeof u), b = ax_usage(spec, "demo", u2, sizeof u2);
+        ck(a > 0 && a == b && tx_same(u, a, u2, b) && tx_prefixz(u, "usage: demo --tag T --notes FILE [--jobs N] [--mode check|write] [--file PATH...] [--quiet] ROOT [EXTRA...]\n", 96), "usage-synopsis");
+        ck(tk_has(u, "  --jobs N                 parallel jobs (1..16; alias -j)\n") && tk_has(u, "  --tag T                  release tag (required; alias -t)\n")
+           && tk_has(u, "  --mode check|write       run mode (one of check|write)\n") && tk_has(u, "  ROOT                     product tree (required)\n")
+           && tk_has(u, "  --help                   print this text\n"), "usage-lines");
+        ck(ax_usage(spec, "demo", u, 40) == -EMSGSIZE, "usage-small-buffer"); }
+}
+
+/* (b) ax_main in a real child: the fixture tests/cases/argx/demo.cx run by ./unisacc.com */
+static void cases_b(void) {
+    char *prog = "tests/cases/argx/demo.cx";
+    px_opts o;
+    px_result r, ru;
+    int rc;
+    {   char *av[] = { "sh", "./unisacc.com", prog, "--", "U", "--tag", "x", 0 };
+        px_opts_init(&o); o.argv = av; o.deadline_ms = 50000; rc = px_run(&o, &ru);
+        ck(rc == 0 && ru.code == 0 && ru.outn > 0, "b-usage-direct"); }
+    {   char *av[] = { "sh", "./unisacc.com", prog, "--", "--help", 0 };
+        px_opts_init(&o); o.argv = av; o.deadline_ms = 50000; rc = px_run(&o, &r);
+        ck(rc == 0 && r.code == 0 && r.errn == 0 && tx_same(r.out, r.outn, ru.out, ru.outn), "b-help-rc0-equals-usage");
+        ck(rc == 0 && tk_has(r.out, "usage: demo --tag T [--jobs N] [FILE...]\n"), "b-help-synopsis");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "./unisacc.com", prog, "--", "a", "--jobs", "9", "--tg", "x", 0 };
+        px_opts_init(&o); o.argv = av; o.deadline_ms = 50000; rc = px_run(&o, &r);
+        ck(rc == 0 && r.code == 2 && r.outn == 0 && tk_has(r.err, "demo: --jobs 9 out of range 1..4; unknown option --tg (did you mean --tag?); missing required --tag (expected --tag T)\n") && tk_has(r.err, "usage: demo"), "b-refusal-rc2-named");
+        px_result_free(&r); }
+    {   char *av[] = { "sh", "./unisacc.com", prog, "--", "a", "--tag", "v", "b", "--jobs=3", 0 };
+        px_opts_init(&o); o.argv = av; o.deadline_ms = 50000; rc = px_run(&o, &r);
+        ck(rc == 0 && r.code == 0 && tk_has(r.out, "tag=v jobs=3 files=2\n"), "b-ok-run");
+        px_result_free(&r); }
+    px_result_free(&ru);
+}
+
+int main(int argc, char **argv) {
+    const char *which = "ab";
+    if (argc == 3 && tx_eqz(argv[1], "--cases")) which = argv[2];
+    else if (argc != 1) { fprintf(stderr, "check-ext-argx: usage [--cases a|b|ab]\n"); return 2; }
+    if (tk_has(which, "a")) cases_a();
+    if (tk_has(which, "b")) cases_b();
+    printf("CHECK_EXT_ARGX\tpassed=%d\tfailed=%d\n", passed, failed);
+    printf("failed=%d\n", failed);
+    return failed ? 1 : 0;
+}
