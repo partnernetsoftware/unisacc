@@ -1,0 +1,691 @@
+/* tools/cx-dev.cx -- cx-dev: the fast local iteration lane, as its own loader.  NOT_RELEASE; results are LOCAL,
+ * never candidate evidence.
+ *
+ * Construction (the only time the installed product is used; like building any other tool):
+ *   sh ./unisacc.com tools/cx-dev.cx -- --build
+ * makes a self-contained bundle directory ($CXDEV_HOME, default $TMPDIR/cx-dev-UID/wt<checkout path>):
+ *   cx-dev          this file compiled: the loader executable
+ *   manifest.tsv    first line NOT_RELEASE<TAB>cx-dev-v1, then name kind arch sha256 size order origin trust
+ *   base.bin        the lnx/x86_64 slice of the installed APE, taken by the launcher's own rule (the
+ *                   `Linuxx86_64) o= n= k=` line: gzip member at 1-based offset o, length n, unpacked by the launcher
+ *                   to ~/.cache/unisacc/unisacc-K; checked against the member's CRC32/ISIZE and k = sha256 prefix)
+ *   pkg.bin         the private package (installed package body by the UNIPKG1 footer, with local M records swapped in)
+ *   pkg.installed, base-tree/ (git archive of the installed COMMIT from unisacc.com.build.json, whose
+ *                   product_digest must equal the APE sha256), tools/ (native table-lint and net-deps),
+ *                   cache/ctor/KEY/{gen,tbl,net} (constructors, gen at -O2), src/ (recipe table sources), ecache/
+ * Run time (no unisacc.com and no installed APE in the process tree):
+ *   cx-dev FILE.cx -- ARGS...        same arguments and behaviour as `sh ./unisacc.com FILE.cx -- ARGS...`
+ *   cx-dev --reload | --status | --close      optional; a plain call does everything by itself
+ * A plain call follows tools/lab-loader/CONTRACT.md: (1) this executable is the lnx/x86_64 loader; (2) it reads
+ * manifest.tsv beside itself; (3) it checks sha256 and size of the base and of every trust=verified member and refuses
+ * by name on a mismatch (trust=local members, built from the worktree, are recorded, not compared); (4) it execs the
+ * slice with argv passed through, UNISA_CONTAINER = pkg.bin, UNISACC_LOCAL=1 and the bundle's own 0700 run cache.
+ * Before that, when the worktree (recorded at --build, or $CXDEV_WT) is present and its stat fingerprint changed, it
+ * compares exec seed src cx kernel weights/gold with base-tree (uncommitted edits included), rebuilds only the
+ * affected native recipes (stage directory rule plus net-deps --touch): gen -> table-lint -> tbl -> net ->
+ * UNINETB1 -> M record, each step bounded to 55 s, and writes a new pkg.bin (new file, then rename) and manifest.
+ * A recipe's M index is the one whose installed M record is byte-identical to the record built from base-tree;
+ * otherwise recipe-not-located.  The lint gate is relative: an ERROR line the installed tables do not have stops
+ * the swap.  A bundle copied elsewhere runs as it is.
+ *
+ * Never silent: a recipe that could not be rebuilt (DEFERRED past the bound, new lint ERROR, build failure, not
+ * located, constructors missing after a seed change) keeps its installed model and every call prints
+ * CXDEV_STALE<TAB>recipe=..<TAB>reason=..<TAB>model=installed on stderr.  BASE_STALE (worktree differs from the
+ * installed revision under src, cx, exec/c, kernel, weights/gold: the slice is older than those sources) is printed
+ * when a reload detects it and makes the scope LOCAL-PARTIAL; no bypass.  CXDEV_VERBOSE=1 (or a stale bundle)
+ * prints after the run:
+ *   CXDEV_RUN<TAB>scope=..<TAB>manifest=..<TAB>base=..<TAB>pkg=..<TAB>local_members=N<TAB>rc=N<TAB>ms=N
+ * Cached: constructors, nets, the recipe index.  Never cached: any run verdict.  Only lnx/x86_64 is executed;
+ * recipes of other targets are NOT_CLAIMED, recipes without a distinct M in the shipped package NOT_DEPLOYED.
+ * Environment: CXDEV_HOME, CXDEV_ROOT and CXDEV_WT (at --build), CXDEV_WT (run time override), CXDEV_PAR (parallel
+ * builds, default 2, at most 6), CXDEV_STEP_S (step bound, 1..55, default 55), CXDEV_ABSENT (NOT_DEPLOYED list).
+ * Exit: the program's own; 2 with `cx-dev: REFUSE reason` when the bundle cannot be used.
+ * Check: tools/check-cx-dev.cx.  Notes: plans/cx-dev.md. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.netwire
+#pragma unisa use text.deflate
+#pragma unisa use mem.bytes
+
+#define PW 4400
+#define MAXM 256
+#define MAXR 64
+static char root[PW], wt[PW], ape[PW], sess[PW], cdir[PW];
+static int step_s = 55, verbose, can_build, no_diff;
+
+static void refuse(const char *why, const char *arg) { fprintf(stderr, "cx-dev: REFUSE %s%s%s\n", why, arg ? " " : "", arg ? arg : ""); exit(2); }
+static void cpy(void *d, size_t cap, const void *s, size_t n) { if (n > cap || mm_copy(d, (long)cap, s, (long)n)) refuse("copy-bound", 0); }
+static void pj(char *o, const char *a, const char *b) { if (cx_fmt(o, PW, "%s/%s", a, b)) refuse("path-too-long", b); }
+static void hash(const void *b, size_t n, char h[65]) { if (sy_sha256_hex(b, (long)n, h) && cx_sha256_hex(b, n, h)) refuse("sha256", 0); }
+static void wr(const char *p, const char *s, size_t n, int mode) {
+    char t[PW + 40];
+    if (cx_fmt(t, sizeof t, "%s.tmp%d", p, (int)getpid()) || cx_write(t, s, n) || chmod(t, mode) || rename(t, p)) { unlink(t); refuse("write", p); }
+}
+static void mkp(const char *p) {
+    char b[PW]; size_t i, n = strlen(p);
+    if (n >= PW) refuse("path-too-long", p);
+    for (i = 1; i <= n; i++) if (p[i] == '/' || !p[i]) { cpy(b, PW, p, i); b[i] = 0; if (mkdir(b, 0700) && errno != EEXIST) refuse("mkdir", b); }
+}
+static int isdir(const char *p) { struct stat st; return !stat(p, &st) && S_ISDIR(st.st_mode); }
+static int isfile(const char *p) { struct stat st; return !stat(p, &st) && S_ISREG(st.st_mode); }
+static void rmtree(const char *p) {
+    struct stat st; DIR *d; struct dirent *e; char c[PW];
+    if (!sess[0] || strncmp(p, sess, strlen(sess)) || lstat(p, &st)) return;
+    if (!S_ISDIR(st.st_mode)) { unlink(p); return; }
+    if ((d = opendir(p))) { while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue; pj(c, p, e->d_name); rmtree(c); } closedir(d); }
+    rmdir(p);
+}
+
+/* ---- file lists ---- */
+typedef struct { char *rel; long size, mt; } FEnt;
+typedef struct { FEnt *v; int n, cap; } FList;
+static void fl_add(FList *l, const char *rel, long size, long mt) {
+    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 512; l->v = realloc(l->v, (size_t)l->cap * sizeof(FEnt)); if (!l->v) refuse("allocation", 0); }
+    l->v[l->n].rel = strdup(rel); l->v[l->n].size = size; l->v[l->n].mt = mt; if (!l->v[l->n].rel) refuse("allocation", 0); l->n++;
+}
+static void fl_walk(FList *l, const char *base, const char *rel) {
+    char p[PW], r[PW]; DIR *d; struct dirent *e; struct stat st;
+    pj(p, base, rel);
+    if (!(d = opendir(p))) return;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        pj(r, rel, e->d_name); pj(p, base, r);
+        if (lstat(p, &st)) continue;
+        if (S_ISDIR(st.st_mode)) fl_walk(l, base, r);
+        else if (S_ISLNK(st.st_mode)) fl_add(l, r, -2, (long)st.st_mtime * 1000000000L + (long)st.st_mtime_nsec);
+        else if (S_ISREG(st.st_mode)) fl_add(l, r, (long)st.st_size, (long)st.st_mtime * 1000000000L + (long)st.st_mtime_nsec + (long)st.st_ctime_nsec);
+    }
+    closedir(d);
+}
+static void fl_sort(FList *l) {
+    int gap, i, j;
+    for (gap = l->n / 2; gap > 0; gap /= 2) for (i = gap; i < l->n; i++) { FEnt t = l->v[i]; for (j = i; j >= gap && strcmp(l->v[j - gap].rel, t.rel) > 0; j -= gap) l->v[j] = l->v[j - gap]; l->v[j] = t; }
+}
+static const char *TOPS[] = {"exec", "seed", "src", "cx", "kernel", "weights/gold"};
+static int base_input(const char *rel) { return !strncmp(rel, "src/", 4) || !strncmp(rel, "cx/", 3) || !strncmp(rel, "exec/c/", 7) || !strncmp(rel, "kernel/", 7) || !strncmp(rel, "weights/gold/", 13); }
+static int sourcey(const char *rel) {
+    const char *d = strrchr(rel, '.');
+    return d && (!strcmp(d, ".tsv") || !strcmp(d, ".c") || !strcmp(d, ".h") || !strcmp(d, ".cx") || !strcmp(d, ".json"));
+}
+
+/* ---- session state ---- */
+typedef struct { char sha[65], commit[65], key[32], slice[PW], basesha[65], instpkg[65]; } ApeId;
+static ApeId A;
+typedef struct {
+    char fp[40], scope[24], pkgsha[65], mansha[65], stale_first[PW];
+    int local, nstale, base_stale;
+    char stale_id[MAXR][64], stale_why[MAXR][96];
+} State;
+static State S;
+static void state_save(void) {
+    np_buf b = {0}; char t[PW + 300], p[PW]; int i;
+    if (cx_fmt(t, sizeof t, "fp\t%s\nscope\t%s\nlocal\t%d\npkgsha\t%s\nmanifest\t%s\nbase_stale\t%d\t%s\n", S.fp, S.scope, S.local, S.pkgsha, S.mansha, S.base_stale, S.stale_first[0] ? S.stale_first : "-")) refuse("state", 0);
+    np_puts(&b, t);
+    for (i = 0; i < S.nstale; i++) { if (cx_fmt(t, sizeof t, "stale\t%s\t%s\n", S.stale_id[i], S.stale_why[i])) refuse("state", 0); np_puts(&b, t); }
+    pj(p, sess, "state.tsv"); wr(p, b.p, b.n, 0600); free(b.p);
+}
+static int state_load(void) {
+    char p[PW], *s, *e, *q; size_t n;
+    memset(&S, 0, sizeof S); pj(p, sess, "state.tsv");
+    if (!(s = cx_read(p, &n))) return -1;
+    for (q = s; (e = strchr(q, '\n')); q = e + 1) {
+        *e = 0;
+        if (!strncmp(q, "fp\t", 3)) { if (cx_fmt(S.fp, sizeof S.fp, "%s", q + 3)) refuse("text-too-long", 0); }
+        else if (!strncmp(q, "scope\t", 6)) { if (cx_fmt(S.scope, sizeof S.scope, "%s", q + 6)) refuse("text-too-long", 0); }
+        else if (!strncmp(q, "local\t", 6)) S.local = atoi(q + 6);
+        else if (!strncmp(q, "pkgsha\t", 7)) { if (cx_fmt(S.pkgsha, sizeof S.pkgsha, "%s", q + 7)) refuse("text-too-long", 0); }
+        else if (!strncmp(q, "manifest\t", 9)) { if (cx_fmt(S.mansha, sizeof S.mansha, "%s", q + 9)) refuse("text-too-long", 0); }
+        else if (!strncmp(q, "base_stale\t", 11)) { char *t = strchr(q + 11, '\t'); S.base_stale = atoi(q + 11); if (t) { if (cx_fmt(S.stale_first, sizeof S.stale_first, "%s", t + 1)) refuse("text-too-long", 0); } }
+        else if (!strncmp(q, "stale\t", 6) && S.nstale < MAXR) { char *t = strchr(q + 6, '\t'); if (t) { *t = 0; { if (cx_fmt(S.stale_id[S.nstale], 64, "%s", q + 6)) refuse("text-too-long", 0); } { if (cx_fmt(S.stale_why[S.nstale], 96, "%s", t + 1)) refuse("text-too-long", 0); } S.nstale++; } }
+    }
+    free(s); return S.fp[0] ? 0 : -1;
+}
+
+/* ---- package ---- */
+typedef struct { char *body; size_t n; long nm, at[MAXM], len[MAXM]; } Pkg;
+static void pkg_parse(Pkg *p, char *f, size_t fn) {
+    long ver, nm, ns, nr, i; size_t at = 0; unsigned long long ext = 0; char *e;
+    if (fn < 16 || memcmp(f + fn - 16, "UNIPKG1\n", 8)) refuse("package-footer", 0);
+    for (i = 7; i >= 0; i--) ext = (ext << 8) | (unsigned char)f[fn - 8 + i];
+    if (!ext || ext > fn - 16) refuse("package-footer-extent", 0);
+    p->body = f + fn - 16 - (size_t)ext; p->n = (size_t)ext;
+    if (sscanf(p->body, "P %ld %ld %ld %ld", &ver, &nm, &ns, &nr) != 4 || (ver != 3 && ver != 4) || nm <= 0 || nm > MAXM || ns <= 0) refuse("package-header", 0);
+    for (i = 0; i <= ns; i++) { e = memchr(p->body + at, '\n', p->n - at); if (!e) refuse("package-routes", 0); at = (size_t)(e - p->body) + 1; }
+    p->nm = nm;
+    for (i = 0; i < nm; i++) {
+        long cl, raw, codec; unsigned long crc;
+        e = memchr(p->body + at, '\n', p->n - at);
+        if (!e || sscanf(p->body + at, "M %ld %ld %ld %lu", &cl, &raw, &codec, &crc) != 4 || cl <= 0 || codec != 1) refuse("package-model-row", 0);
+        p->at[i] = (long)at; p->len[i] = (long)(e - (p->body + at)) + 1 + cl;
+        if ((size_t)(p->at[i] + p->len[i]) > p->n) refuse("package-model-extent", 0);
+        at += (size_t)p->len[i];
+    }
+}
+/* text net -> the compressed M record exactly as release packs it (netwire + dz_deflate + CRC32) */
+static char *mrec(const char *net, size_t nn, size_t *on) {
+    char why[200], line[96], *raw, *blob, *out; size_t rawn = 0, ln; long cap, cn;
+    why[0] = 0;
+    if (!(raw = nw_binary_net(net, nn, &rawn, why, sizeof why))) return 0;
+    cap = dz_bound((long)rawn); blob = malloc((size_t)(cap > 0 ? cap : 1)); if (!blob) refuse("allocation", 0);
+    cn = dz_deflate((const unsigned char *)raw, (long)rawn, (unsigned char *)blob, cap);
+    if (cn <= 0 || cx_fmt(line, sizeof line, "M %lu %lu 1 %lu\n", (unsigned long)cn, (unsigned long)rawn, dz_crc32(0, (const unsigned char *)raw, (long)rawn))) { free(raw); free(blob); return 0; }
+    ln = strlen(line); out = malloc(ln + (size_t)cn); if (!out) refuse("allocation", 0);
+    cpy(out, ln + (size_t)cn, line, ln); cpy(out + ln, (size_t)cn, blob, (size_t)cn); *on = ln + (size_t)cn; free(raw); free(blob); return out;
+}
+
+/* ---- recipes (single source: tools/cxlib/sourcepackage.cx recipes[]) ---- */
+typedef struct { char id[64], stage[64], flags[4][32]; int nf, native, absent, affected, idx; char *m; size_t mn; char why[96]; } Rec;
+static Rec recs[MAXR]; static int nrec;
+static void load_recipes(void) {
+    char p[PW], *s, *a; size_t n;
+    pj(p, sess, "src/sourcepackage.cx");
+    if (!(s = cx_read(p, &n)) || !(a = strstr(s, "recipes[]={"))) refuse("recipes-unreadable", p);
+    a += 11;
+    for (;;) {
+        Rec *r; int k = 0;
+        while (*a == ' ' || *a == ',' || *a == '\n' || *a == '\t' || *a == '\r') a++;
+        if (*a != '{' || nrec == MAXR) break;
+        r = &recs[nrec]; memset(r, 0, sizeof *r); r->idx = -1; a++;
+        while (*a && *a != '}') {
+            if (*a == '"') {
+                char *e = strchr(a + 1, '"'), *dst = k == 0 ? r->id : k == 1 ? r->stage : r->nf < 4 ? r->flags[r->nf] : 0; size_t l, cap = k < 2 ? 64 : 32;
+                if (!e) refuse("recipes-syntax", 0);
+                l = (size_t)(e - a - 1);
+                if (!dst || l >= cap) refuse("recipes-bound", 0);
+                cpy(dst, cap, a + 1, l); dst[l] = 0; if (k >= 2) r->nf++; k++; a = e + 1;
+            } else a++;
+        }
+        if (*a == '}') a++;
+        while (*a == ' ') a++;
+        if (*a == '}') a++;
+        if (k < 2) refuse("recipes-syntax", 0);
+        r->native = !(strstr(r->id, "arm64") || strstr(r->id, "osx") || strstr(r->id, "win-") || strstr(r->stage, "enc/arm") || strstr(r->stage, "unitcontainer"));
+        nrec++;
+    }
+    free(s);
+    if (nrec < 20) refuse("recipes-too-few", 0);
+    /* recipes with no distinct M record in the shipped package (they are built by the chain but not deployed):
+       the list is the DEDUPE line of tools/p3-member-consume.cx; CXDEV_ABSENT overrides it ("-" for none). */
+    {   const char *ov = getenv("CXDEV_ABSENT"); char *t = 0, *a2 = 0; int k;
+        if (ov && ov[0]) a2 = (char *)ov;
+        else { pj(p, sess, "src/p3-member-consume.cx"); if ((t = cx_read(p, &n)) && (a2 = strstr(t, "absent-distinct-M="))) { char *q2; a2 += 18; if ((q2 = strchr(a2, 34))) *q2 = 0; } }
+        for (k = 0; a2 && k < nrec; k++) { size_t l = strlen(recs[k].id); char *h = a2; while ((h = strstr(h, recs[k].id))) { if ((h == a2 || h[-1] == 44) && (!h[l] || h[l] == 44)) { recs[k].absent = 1; recs[k].native = 0; break; } h += l; } }
+        free(t);
+    }
+}
+
+/* ---- bounded steps ---- */
+static long ms_now(void) { return sy_now_ms(); }
+/* 0 ok, 1 failed, 2 over the bound */
+static const char *step_out;   /* when set: the next step stores its stdout there and an exit code of 1 is not a failure */
+static int step(char **av, const char *cwd, int secs, const char *log) {
+    np_result r = {0}; char why[1024]; int rc; const char *so = step_out;
+    why[0] = 0; step_out = 0;
+    if (np_run(av, cwd, 0, secs, &r, why, sizeof why)) { if (log) cx_write(log, why, strlen(why)); return strstr(why, "TimeoutExpired") ? 2 : 1; }
+    rc = r.rc; if (so && (rc == 0 || rc == 1)) { rc = cx_write(so, r.out, r.outn) ? 3 : 0; }
+    if (rc && log) { np_buf b = {0}; np_put(&b, r.out, r.outn); np_put(&b, r.err, r.errn); cx_write(log, b.p, b.n); free(b.p); }
+    np_free(&r); return rc ? 1 : 0;
+}
+static void copyfile(const char *from, const char *to, int mode) { size_t n; char *b = cx_read(from, &n); if (!b) refuse("read", from); wr(to, b, n, mode); free(b); }
+
+/* constructors for TREE/seed, cached by content under CDIR/ctor/KEY; 0 ok, else WHY set */
+static int ensure_ctor(const char *tree, char dir[PW], char key[65], char *why, size_t wl) {
+    static const char *T[3] = {"gen", "tbl", "net"}; FList l = {0}; np_buf b = {0}; char p[PW], rel[PW], shared[PW]; int i, bad = 0; pid_t pid[3];
+    fl_walk(&l, tree, "seed"); fl_sort(&l); np_puts(&b, A.sha);
+    for (i = 0; i < l.n; i++) { size_t n; char *s; pj(p, tree, l.v[i].rel); if (!(s = cx_read(p, &n))) { { if (cx_fmt(why, wl, "seed-unreadable")) refuse("text-too-long", 0); } return 1; } np_puts(&b, l.v[i].rel); np_put(&b, "", 1); np_put(&b, s, n); free(s); }
+    if (!l.n) { { if (cx_fmt(why, wl, "seed-missing")) refuse("text-too-long", 0); } return 1; }
+    hash(b.p, b.n, key); free(b.p); key[16] = 0;
+    if (cx_fmt(rel, PW, "ctor/%s", key)) refuse("path-too-long", 0);
+    pj(dir, cdir, rel); mkp(dir);
+    {   const char *hm = getenv("HOME"), *cc = getenv("CXDEV_CACHE");
+        shared[0] = 0;
+        if (can_build && ((cc && cc[0] == 47 && !cx_fmt(shared, PW, "%s/ctor/%s", cc, key)) || (hm && hm[0] == 47 && !cx_fmt(shared, PW, "%s/.cache/unisacc/cx-dev/ctor/%s", hm, key)))) mkp(shared); else shared[0] = 0;
+    }
+    fflush(stdout); fflush(stderr);
+    for (i = 0; i < 3; i++) {
+        pid[i] = 0; pj(p, dir, T[i]);
+        if (!isfile(p) && can_build && shared[0]) { char sp[PW]; pj(sp, shared, T[i]); if (isfile(sp)) copyfile(sp, p, 0700); }   /* content-keyed, shared between bundles */
+        if (isfile(p)) continue;
+        if (!can_build) { { if (cx_fmt(why, wl, "constructor-missing:seed-changed-rebuild-with---build")) refuse("text-too-long", 0); } return 1; }
+        if (!(pid[i] = fork())) {
+            char src[PW], tmp[PW + 40], log[PW + 40]; char *av[8]; int n = 0, rc;
+            if (cx_fmt(rel, PW, "seed/%s.c", T[i])) exit(1);
+            pj(src, tree, rel);
+            if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", p, (int)getpid()) || cx_fmt(log, sizeof log, "%s.log", p)) exit(1);
+            av[n++] = "sh"; av[n++] = ape; if (!i) av[n++] = "-O2"; av[n++] = src; av[n++] = "-o"; av[n++] = tmp; av[n] = 0;
+            rc = step(av, tree, step_s, log);
+            if (!rc && (chmod(tmp, 0700) || rename(tmp, p))) rc = 1;
+            if (rc) unlink(tmp);
+            exit(rc);
+        }
+        if (pid[i] < 0) refuse("fork", 0);
+    }
+    for (i = 0; i < 3; i++) if (pid[i] > 0) { int st = 0; if (waitpid(pid[i], &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st)) { bad = 1; { if (cx_fmt(why, wl, "%s", WIFEXITED(st) && WEXITSTATUS(st) == 2 ? "DEFERRED:constructor-over-bound" : "constructor-build-failed")) refuse("text-too-long", 0); } } }
+    if (!bad && can_build && shared[0]) for (i = 0; i < 3; i++) if (pid[i] > 0) { char sp[PW]; pj(p, dir, T[i]); pj(sp, shared, T[i]); copyfile(p, sp, 0700); }
+    return bad;
+}
+
+/* Product-built programs share tmpfile names: the runtime tmpfile() (include/cx-flat.h) opens /tmp/unNNN.tmp from a
+   fixed sequence with no pid and no O_EXCL, so two constructors running at once read each other's temporary tables
+   (seen: "delta table column count", and silently different nets).  Until that is fixed in the product the
+   constructor steps of all cx-dev instances of this user run one at a time, under this lock (bounded wait). */
+static int ctor_lock(int take) {
+    char p[96]; int i, fd;
+    { if (cx_fmt(p, sizeof p, "/tmp/cx-dev-ctor-%d.lock", (int)getuid())) refuse("text-too-long", 0); }
+    if (!take) { unlink(p); return 0; }
+    for (i = 0; i < 6000; i++) {
+        if ((fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600)) >= 0) { char t[32]; { if (cx_fmt(t, sizeof t, "%d\n", (int)getpid())) refuse("text-too-long", 0); } if (write(fd, t, strlen(t)) < 0) { close(fd); unlink(p); return 1; } close(fd); return 0; }
+        if (i % 50 == 49) { size_t n; char *s = cx_read(p, &n); int owner = s ? atoi(s) : 0; free(s); if (owner > 0 && kill(owner, 0)) unlink(p); }
+        sy_sleep_ms(10);
+    }
+    return 1;
+}
+/* one net build: gen -> table-lint -> tbl -> net, in a child */
+typedef struct { int rec, base; char tree[PW], ctor[PW], dir[PW], cache[PW]; pid_t pid; char status[96]; long ms[4]; int cached; } Job;
+static int build(Job *j) {
+    static const char *names[4] = {"gen", "lint", "tbl", "net"};
+    Rec *r = &recs[j->rec]; char g[PW], t[PW], n[PW], json[PW], tbl[PW], net[PW], lint[PW], log[PW], res[PW], lo[PW], lc[PW + 8], line[400]; char *av[12]; int k = 0, i, rc = 0, at = 0; long t0;
+    mkp(j->dir); pj(g, j->ctor, "gen"); pj(t, j->ctor, "tbl"); pj(n, j->ctor, "net"); pj(json, j->dir, "d.json"); pj(tbl, j->dir, "d.tbl"); pj(net, j->dir, "d.net"); pj(lint, sess, "tools/table-lint"); pj(log, j->dir, "fail.log"); pj(res, j->dir, "result"); pj(lo, j->dir, "lint.out");
+    if (cx_fmt(lc, sizeof lc, "%s.lint", j->cache)) return 1;
+    unlink(res); unlink(net); unlink(log);
+    for (i = 0; i < 4; i++) j->ms[i] = -1;
+    for (at = 0; at < 4 && !rc; at++) {
+        k = 0;
+        if (at == 0) { av[k++] = g; av[k++] = r->stage; av[k++] = json; for (i = 0; i < r->nf; i++) av[k++] = r->flags[i]; }
+        else if (at == 1) { step_out = lo; av[k++] = lint; av[k++] = json; }
+        else if (at == 2) { av[k++] = t; av[k++] = json; av[k++] = tbl; }
+        else { av[k++] = n; av[k++] = tbl; av[k++] = net; }
+        av[k] = 0;
+        if (at != 1 && ctor_lock(1)) { { if (cx_fmt(j->status, sizeof j->status, "DEFERRED:constructor-lock")) refuse("text-too-long", 0); } rc = 2; break; }
+        t0 = ms_now(); rc = step(av, j->tree, step_s, log); j->ms[at] = ms_now() - t0;
+        if (at != 1) ctor_lock(0);
+        if (rc) { { if (cx_fmt(j->status, sizeof j->status, "%s:%s", rc == 2 ? "DEFERRED" : "build-failed", names[at])) refuse("text-too-long", 0); } break; }
+    }
+    unlink(json); unlink(tbl);
+    if (!rc) { copyfile(lo, lc, 0600); copyfile(net, j->cache, 0600); { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } }
+    if (cx_fmt(line, sizeof line, "%s\t%ld\t%ld\t%ld\t%ld\n", j->status, j->ms[0], j->ms[1], j->ms[2], j->ms[3])) return 1;
+    cx_write(res, line, strlen(line));
+    return rc ? 1 : 0;
+}
+static void run_jobs(Job *j, int n, int par) {
+    int started = 0, running = 0, finished = 0, i;
+    fflush(stdout); fflush(stderr);
+    while (finished < n) {
+        int st; pid_t p;
+        while (running < par && started < n) {
+            if (j[started].cached) { started++; finished++; continue; }
+            if (!(p = fork())) exit(build(&j[started]));
+            if (p < 0) refuse("fork", 0);
+            j[started].pid = p; started++; running++;
+        }
+        if (!running) continue;
+        p = waitpid(-1, &st, 0); if (p < 0) break;
+        for (i = 0; i < n; i++) if (j[i].pid == p) {
+            char res[PW], *s; size_t sn;
+            pj(res, j[i].dir, "result"); { if (cx_fmt(j[i].status, sizeof j[i].status, "build-failed:worker")) refuse("text-too-long", 0); }
+            if ((s = cx_read(res, &sn))) { char *e = strchr(s, '\t'); if (e) { *e = 0; { if (cx_fmt(j[i].status, sizeof j[i].status, "%s", s)) refuse("text-too-long", 0); } sscanf(e + 1, "%ld\t%ld\t%ld\t%ld", &j[i].ms[0], &j[i].ms[1], &j[i].ms[2], &j[i].ms[3]); } free(s); }
+            running--; finished++;
+        }
+    }
+}
+
+/* ---- open ---- */
+static void ape_id_load_or_open(void) {
+    char p[PW], *s; size_t n;
+    pj(p, sess, "ape.id");
+    if ((s = cx_read(p, &n))) {
+        if (sscanf(s, "%64s\t%64s\t%31s\t%4399s\t%64s\t%64s", A.sha, A.commit, A.key, A.slice, A.basesha, A.instpkg) == 6) { free(s); return; }
+        free(s);
+    }
+    {   char *a, *bj, *q, *sl, bjp[PW + 40], dig[65], cache[PW], line[2 * PW], tree[PW], cmd[4 * PW]; size_t an, bn, sn; long o = 0, len = 0; unsigned long crc, isz; Pkg pk; np_buf out = {0}; const char *home = getenv("HOME"), *xdg = getenv("XDG_CACHE_HOME");
+        mkp(sess); if (chmod(sess, 0700)) refuse("session-dir", sess);
+        if (!(a = cx_read(ape, &an))) refuse("installed-ape-unreadable", ape);
+        hash(a, an, A.sha);
+        if (cx_fmt(bjp, sizeof bjp, "%s.build.json", ape) || !(bj = cx_read(bjp, &bn))) refuse("installed-build-record-missing", ape);
+        if (!(q = strstr(bj, "\"product_digest\"")) || !(q = strchr(q + 16, ':')) || !(q = strchr(q, '"'))) refuse("installed-build-record-digest", 0);
+        memcpy(dig, q + 1, 64); dig[64] = 0;
+        if (strcmp(dig, A.sha)) refuse("installed-build-record-does-not-match-ape", A.sha);
+        if (!(q = strstr(bj, "\"commit\"")) || !(q = strchr(q + 8, ':')) || !(q = strchr(q, '"')) || strlen(q) < 42) refuse("installed-build-record-commit", 0);
+        memcpy(A.commit, q + 1, 40); A.commit[40] = 0; free(bj);
+        /* the launcher's own rule */
+        {   size_t hn = an < 8192 ? an : 8192; char *h = malloc(hn + 1), *l = 0; size_t i;
+            if (!h) refuse("allocation", 0);
+            cpy(h, hn + 1, a, hn); h[hn] = 0; for (i = 0; i < hn; i++) if (!h[i]) h[i] = ' ';
+            if (!(l = strstr(h, "Linuxx86_64) o=")) || sscanf(l, "Linuxx86_64) o=%ld n=%ld k=%16[0-9a-f]", &o, &len, A.key) != 3 || o < 1 || len < 18 || (size_t)(o - 1 + len) > an) refuse("launcher-slice-row lnx/x86_64", 0);
+            free(h);
+        }
+        q = a + o - 1;
+        if ((unsigned char)q[0] != 0x1f || (unsigned char)q[1] != 0x8b) refuse("slice-not-gzip-member", 0);
+        crc = (unsigned char)q[len - 8] | (unsigned long)(unsigned char)q[len - 7] << 8 | (unsigned long)(unsigned char)q[len - 6] << 16 | (unsigned long)(unsigned char)q[len - 5] << 24;
+        isz = (unsigned char)q[len - 4] | (unsigned long)(unsigned char)q[len - 3] << 8 | (unsigned long)(unsigned char)q[len - 2] << 16 | (unsigned long)(unsigned char)q[len - 1] << 24;
+        if (xdg && xdg[0]) { if (cx_fmt(cache, PW, "%s/unisacc/unisacc-%s", xdg, A.key)) refuse("path-too-long", 0); }
+        else if (!home || cx_fmt(cache, PW, "%s/.cache/unisacc/unisacc-%s", home, A.key)) refuse("home-unset", 0);
+        if (!isfile(cache)) { char *av[] = {"sh", ape, "--version", 0}; step(av, 0, 20, 0); }   /* let the launcher unpack it */
+        if (!(sl = cx_read(cache, &sn))) refuse("slice-not-unpacked", cache);
+        hash(sl, sn, A.basesha);
+        if ((unsigned long)sn != isz || dz_crc32(0, (const unsigned char *)sl, (long)sn) != crc || strncmp(A.basesha, A.key, 16)) refuse("slice-identity-mismatch", cache);
+        { if (cx_fmt(A.slice, sizeof A.slice, "%s", cache)) refuse("text-too-long", 0); }
+        pj(p, sess, "base.bin"); wr(p, sl, sn, 0700); free(sl);
+        pkg_parse(&pk, a, an);
+        np_put(&out, pk.body, pk.n); np_put(&out, a + an - 16, 16); hash(out.p, out.n, A.instpkg);
+        pj(p, sess, "pkg.installed"); wr(p, out.p, out.n, 0600); free(out.p); free(a);
+        pj(tree, sess, "base-tree"); mkp(tree);
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' archive %s exec seed src cx kernel weights/gold | tar -x -C '%s'", root, A.commit, tree)) refuse("path-too-long", 0);
+        { char *av[] = {"sh", "-c", cmd, 0}; char t2[PW]; pj(t2, tree, "exec"); if (step(av, 0, 50, 0) || !isdir(t2)) refuse("installed-revision-tree-unavailable", A.commit); }
+        pj(p, sess, "ecache"); mkp(p); chmod(p, 0700);
+        if (cx_fmt(line, sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\n", A.sha, A.commit, A.key, A.slice, A.basesha, A.instpkg)) refuse("path-too-long", 0);
+        pj(p, sess, "ape.id"); wr(p, line, strlen(line), 0600);
+    }
+}
+
+/* ---- reload ---- */
+static void fingerprint(char fp[40]) {
+    FList l = {0}; unsigned long long h1 = 1469598103934665603ULL, h2 = 88172645463325252ULL; int i, t; const char *c;
+    for (t = 0; t < 6; t++) fl_walk(&l, wt, TOPS[t]);
+    for (i = 0; i < l.n; i++) {
+        unsigned long long v[2]; int k;
+        v[0] = (unsigned long long)l.v[i].size; v[1] = (unsigned long long)l.v[i].mt;
+        for (c = l.v[i].rel; *c; c++) { h1 = (h1 ^ (unsigned char)*c) * 1099511628211ULL; h2 = h2 * 6364136223846793005ULL + (unsigned char)*c; }
+        for (k = 0; k < 2; k++) { h1 = (h1 ^ v[k]) * 1099511628211ULL; h2 = (h2 + v[k]) * 6364136223846793005ULL + 1442695040888963407ULL; }
+    }
+    { if (cx_fmt(fp, 40, "%016llx%016llx", h1, h2)) refuse("text-too-long", 0); }
+}
+static void add_stale(const char *id, const char *why) { if (S.nstale < MAXR) { { if (cx_fmt(S.stale_id[S.nstale], 64, "%s", id)) refuse("text-too-long", 0); } { if (cx_fmt(S.stale_why[S.nstale], 96, "%s", why)) refuse("text-too-long", 0); } S.nstale++; } }
+static void write_manifest(Pkg *cur, Pkg *inst) {
+    np_buf b = {0}; char line[600], h[65], p[PW]; long i; struct stat bst;
+    pj(p, sess, "base.bin"); if (stat(p, &bst)) refuse("missing base.bin", p);
+    np_puts(&b, "NOT_RELEASE\tcx-dev-v1\n");
+    if (cx_fmt(line, sizeof line, "base.bin\tbase\tlnx/x86_64\t%s\t%ld\t0\tinstalled\tverified\n", A.basesha, (long)bst.st_size)) refuse("manifest", 0);
+    np_puts(&b, line);
+    for (i = 0; i < cur->nm; i++) {
+        int same = cur->len[i] == inst->len[i] && !memcmp(cur->body + cur->at[i], inst->body + inst->at[i], (size_t)cur->len[i]);
+        hash(cur->body + cur->at[i], (size_t)cur->len[i], h);
+        if (cx_fmt(line, sizeof line, "pkg.bin#M%ld\tstage\tany\t%s\t%ld\t%ld\t%s\t%s\n", i, h, cur->len[i], i + 1, same ? "installed" : "built", same ? "verified" : "local")) refuse("manifest", 0);
+        np_puts(&b, line);
+    }
+    hash(b.p, b.n, S.mansha); pj(p, sess, "manifest.tsv"); wr(p, b.p, b.n, 0600); free(b.p);
+}
+/* report: 0 quiet, 1 print CXDEV_RELOAD lines to stderr */
+static void reload(const char *fp, int report) {
+    FList wl = {0}, bl = {0}, ch = {0}; char base[PW], p[PW], q[PW], lock[PW], idxp[PW], rel[PW], cdig[65]; int t, i, k, naff = 0, seedch = 0, execch = 0, nj = 0, par = 2, fd, nbuilt = 0; long t0 = ms_now(), sum[4] = {0, 0, 0, 0}, swap_ms = 0; const char *e;
+    char wctor[PW], bctor[PW], wkey[65], bkey[65], why[96]; Job *jobs; Pkg inst, cur; char *ib, *nb; size_t ibn; np_buf nbody = {0}; State old = S;
+    pj(lock, sess, "reload.lock");
+    if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) {
+        size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0;
+        free(ls);
+        if (owner > 0 && !kill(owner, 0)) { S = old; add_stale("*", "reload-in-progress"); return; }
+        unlink(lock);   /* the owner is gone */
+        if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) { S = old; add_stale("*", "reload-in-progress"); return; }
+    }
+    { char pidtxt[32]; { if (cx_fmt(pidtxt, sizeof pidtxt, "%d\n", (int)getpid())) refuse("text-too-long", 0); } if (write(fd, pidtxt, strlen(pidtxt)) < 0) refuse("lock-write", lock); }
+    close(fd);
+    memset(&S, 0, sizeof S); { if (cx_fmt(S.fp, sizeof S.fp, "%s", fp)) refuse("text-too-long", 0); }
+    pj(base, sess, "base-tree");
+    for (t = 0; t < 6 && !no_diff; t++) { pj(p, wt, TOPS[t]); if (!isdir(p)) continue; fl_walk(&wl, wt, TOPS[t]); fl_walk(&bl, base, TOPS[t]); }
+    for (i = 0; i < wl.n; i++) {
+        struct stat st; int diff = 0;
+        pj(p, base, wl.v[i].rel); pj(q, wt, wl.v[i].rel);
+        if (wl.v[i].size == -2) { char la[PW], lb[PW]; long na = (long)readlink(p, la, sizeof la - 1), nb2 = (long)readlink(q, lb, sizeof lb - 1); diff = na < 0 || na != nb2 || memcmp(la, lb, (size_t)na); }
+        else if (lstat(p, &st)) diff = sourcey(wl.v[i].rel);
+        else if (!S_ISREG(st.st_mode)) diff = 1;
+        else if ((long)st.st_size != wl.v[i].size) diff = 1;
+        else { size_t an, bn; char *a = cx_read(p, &an), *b = cx_read(q, &bn); diff = !a || !b || an != bn || memcmp(a, b, an); free(a); free(b); }
+        if (diff) fl_add(&ch, wl.v[i].rel, 0, 0);
+    }
+    for (i = 0; i < bl.n; i++) { struct stat st; pj(q, wt, bl.v[i].rel); if (lstat(q, &st)) fl_add(&ch, bl.v[i].rel, 0, 0); }
+    fl_sort(&ch);
+    {   np_buf d = {0};
+        for (i = 0; i < ch.n; i++) {
+            size_t n; char *s; const char *r = ch.v[i].rel;
+            if (base_input(r)) { if (!S.base_stale) { if (cx_fmt(S.stale_first, sizeof S.stale_first, "%s", r)) refuse("text-too-long", 0); } S.base_stale++; continue; }
+            if (!strncmp(r, "seed/", 5)) seedch = 1; else execch = 1;
+            pj(q, wt, r); s = cx_read(q, &n); np_puts(&d, r); np_put(&d, "", 1); if (s) np_put(&d, s, n); else np_puts(&d, "<deleted>"); np_put(&d, "", 1); free(s);
+        }
+        np_puts(&d, A.commit); hash(d.p, d.n, cdig); free(d.p);
+    }
+    load_recipes();
+    for (i = 0; i < ch.n; i++) {
+        const char *r = ch.v[i].rel;
+        if (base_input(r) || strncmp(r, "exec/", 5)) continue;
+        for (k = 0; k < nrec; k++) { size_t l = strlen(recs[k].stage); if (!strncmp(r + 5, recs[k].stage, l) && r[5 + l] == '/') recs[k].affected = 1; }
+    }
+    if (seedch) for (k = 0; k < nrec; k++) recs[k].affected = 1;
+    else if (execch) {
+        char **av = calloc((size_t)ch.n + 10, sizeof(char *)), tool[PW], whyb[512]; np_result r = {0}; int n = 0;
+        if (!av) refuse("allocation", 0);
+        pj(tool, sess, "tools/net-deps");
+        av[n++] = tool; av[n++] = "--root"; av[n++] = wt; av[n++] = "--touch";
+        for (i = 0; i < ch.n; i++) if (!base_input(ch.v[i].rel)) av[n++] = ch.v[i].rel;
+        av[n] = 0;
+        if (np_run(av, wt, 0, 30, &r, whyb, sizeof whyb) || r.rc > 1) add_stale("*", "net-deps-unavailable:stage-directory-rule-only");
+        else { char *s = r.out, *l; for (; s && (l = strstr(s, "AFFECTED\t")); s = l + 9) { char id[64]; if ((l == r.out || l[-1] == '\n') && sscanf(l + 9, "%63[^\t\n]", id) == 1) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) recs[k].affected = 1; } }
+        np_free(&r); free(av);
+    }
+    for (k = 0; k < nrec; k++) if (recs[k].affected) { if (recs[k].native) naff++; else if (report) fprintf(stderr, "CXDEV_RECIPE\t%s\t%s\n", recs[k].id, recs[k].absent ? "NOT_DEPLOYED" : "NOT_CLAIMED"); }
+    pj(p, sess, "pkg.installed"); if (!(ib = cx_read(p, &ibn))) refuse("session-package-missing", p);
+    pkg_parse(&inst, ib, ibn);
+    e = getenv("CXDEV_PAR"); if (e && atoi(e) >= 1 && atoi(e) <= 6) par = atoi(e);
+    if (naff) {
+        char *ix; size_t ixn;
+        why[0] = 0;
+        if (ensure_ctor(wt, wctor, wkey, why, sizeof why)) { for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) { { if (cx_fmt(recs[k].why, 96, "%s", why)) refuse("text-too-long", 0); } } naff = -1; }
+        else if (!seedch) { cpy(bctor, PW, wctor, PW); cpy(bkey, 65, wkey, 65); }
+        else if (ensure_ctor(base, bctor, bkey, why, sizeof why)) { for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) { if (cx_fmt(recs[k].why, 96, "baseline-%s", why)) refuse("text-too-long", 0); } naff = -1; }
+        if (cx_fmt(rel, PW, "idx-%.16s.tsv", A.sha)) refuse("path-too-long", 0);
+        pj(idxp, cdir, rel);
+        if ((ix = cx_read(idxp, &ixn))) { char *s = ix, *l; while ((l = strchr(s, '\n'))) { char id[64]; int v; *l = 0; if (sscanf(s, "%63[^\t]\t%d", id, &v) == 2) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) recs[k].idx = v; s = l + 1; } free(ix); }
+    }
+    jobs = calloc((size_t)(2 * MAXR), sizeof(Job)); if (!jobs) refuse("allocation", 0);
+    pj(p, cdir, "m"); mkp(p);
+    if (naff > 0) for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) {
+        int b;
+        for (b = 0; b < 2; b++) {
+            Job *j; np_buf kb = {0}; char kh[65]; int f;
+            j = &jobs[nj++]; j->rec = k; j->base = b;
+            np_puts(&kb, recs[k].id); for (f = 0; f < recs[k].nf; f++) { np_puts(&kb, "|"); np_puts(&kb, recs[k].flags[f]); }
+            np_puts(&kb, "|"); np_puts(&kb, b ? bkey : wkey); np_puts(&kb, "|"); np_puts(&kb, b ? A.commit : cdig); np_puts(&kb, b ? "|base" : "|wt");
+            hash(kb.p, kb.n, kh); free(kb.p);
+            if (cx_fmt(rel, PW, "m/%s.net", kh)) refuse("path-too-long", 0);
+            pj(j->cache, cdir, rel);
+            if (cx_fmt(rel, PW, "work/%s-%s", recs[k].id, b ? "base" : "wt")) refuse("path-too-long", 0);
+            pj(j->dir, sess, rel);
+            { if (cx_fmt(j->tree, PW, "%s", b ? base : wt)) refuse("text-too-long", 0); } { if (cx_fmt(j->ctor, PW, "%s", b ? bctor : wctor)) refuse("text-too-long", 0); }
+            { char lcp[PW + 8]; if (cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) || !isfile(lcp)) unlink(j->cache); }
+            if (isfile(j->cache)) { j->cached = 1; { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } for (f = 0; f < 4; f++) j->ms[f] = 0; }
+        }
+    }
+    run_jobs(jobs, nj, par);
+    /* locate, then collect the new M records */
+    for (i = 0; i < nj; i++) {
+        Rec *r = &recs[jobs[i].rec]; char *net, *m; size_t nn, mn; long x;
+        for (t = 0; t < 4; t++) if (jobs[i].ms[t] > 0) sum[t] += jobs[i].ms[t];
+        if (!jobs[i].cached) nbuilt++;
+        if (strcmp(jobs[i].status, "ok")) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "%s%s", jobs[i].base ? "baseline-" : "", jobs[i].status)) refuse("text-too-long", 0); } continue; }
+        if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
+        free(net);
+        if (jobs[i].base) {
+            for (x = 0; x < inst.nm; x++) if ((size_t)inst.len[x] == mn && !memcmp(inst.body + inst.at[x], m, mn)) break;
+            if (x < inst.nm) { char line[96]; FILE *f = fopen(idxp, "a"); r->idx = (int)x; if (f) { { if (cx_fmt(line, sizeof line, "%s\t%ld\n", r->id, x)) refuse("text-too-long", 0); } fputs(line, f); fclose(f); } }
+            else if (!r->why[0]) { if (cx_fmt(r->why, 96, "recipe-not-located")) refuse("text-too-long", 0); }
+            free(m);
+        } else {
+            /* lint gate, relative to the installed tables: an ERROR line the installed delta does not have stops the swap */
+            char wl2[PW + 8], bl2[PW + 8], *ws, *bs, *s, *l; size_t wn, bn; int b2;
+            for (b2 = 0; b2 < nj; b2++) if (jobs[b2].base && jobs[b2].rec == jobs[i].rec) break;
+            if (b2 == nj || cx_fmt(wl2, sizeof wl2, "%s.lint", jobs[i].cache) || cx_fmt(bl2, sizeof bl2, "%s.lint", jobs[b2].cache) || !(ws = cx_read(wl2, &wn)) || !(bs = cx_read(bl2, &bn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-baseline-missing")) refuse("text-too-long", 0); } free(m); continue; }
+            for (s = ws; (l = strchr(s, 10)); s = l + 1) {
+                size_t ll = (size_t)(l - s) + 1, hp; int found = 0;
+                if (strncmp(s, "ERROR\t", 6)) continue;
+                for (hp = 0; !found && hp + ll <= bn; ) { char *he = memchr(bs + hp, 10, bn - hp); if (!he) break; if ((size_t)(he - (bs + hp)) + 1 == ll && !memcmp(bs + hp, s, ll)) found = 1; hp = (size_t)(he - bs) + 1; }
+                if (!found) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-error:new-ERROR-not-in-installed-tables")) refuse("text-too-long", 0); } if (report) { fputs("CXDEV_LINT\t", stderr); fwrite(s, 1, ll, stderr); } break; }
+            }
+            free(ws); free(bs);
+            if (r->why[0]) { free(m); continue; }
+            r->m = m; r->mn = mn;
+        }
+    }
+    {   long s0 = ms_now(), x;
+        for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) {
+            Rec *r = &recs[k];
+            if (!r->why[0] && (r->idx < 0 || !r->m)) { if (cx_fmt(r->why, 96, r->idx < 0 ? "recipe-not-located" : "build-failed:missing")) refuse("text-too-long", 0); }
+            if (r->why[0]) { add_stale(r->id, r->why); r->m = 0; }
+            if (report) fprintf(stderr, "CXDEV_RECIPE\t%s\t%s\tindex=%d\n", r->id, r->why[0] ? r->why : "built", r->idx);
+        }
+        np_put(&nbody, inst.body, (size_t)inst.at[0]);
+        for (x = 0; x < inst.nm; x++) {
+            Rec *hit = 0;
+            for (k = 0; k < nrec; k++) if (recs[k].m && recs[k].idx == x) hit = &recs[k];
+            if (hit && !((size_t)inst.len[x] == hit->mn && !memcmp(inst.body + inst.at[x], hit->m, hit->mn))) { np_put(&nbody, hit->m, hit->mn); S.local++; }
+            else np_put(&nbody, inst.body + inst.at[x], (size_t)inst.len[x]);
+        }
+        x = inst.at[inst.nm - 1] + inst.len[inst.nm - 1];
+        np_put(&nbody, inst.body + x, inst.n - (size_t)x);
+        {   char footer[16]; unsigned long long z = nbody.n; memcpy(footer, "UNIPKG1\n", 8); for (i = 0; i < 8; i++) { footer[8 + i] = (char)(z & 255); z >>= 8; } np_put(&nbody, footer, 16); }
+        nb = malloc(nbody.n); if (!nb) refuse("allocation", 0); cpy(nb, nbody.n, nbody.p, nbody.n);
+        pkg_parse(&cur, nb, nbody.n);
+        pj(p, sess, "pkg.bin");
+        wr(p, nbody.p, nbody.n, 0600); hash(nbody.p, nbody.n, S.pkgsha);   /* always a new file, then rename: a new inode for the run cache identity */
+        write_manifest(&cur, &inst);
+        swap_ms = ms_now() - s0;
+    }
+    { if (cx_fmt(S.scope, sizeof S.scope, "%s", S.base_stale ? "LOCAL-PARTIAL" : S.local ? "LOCAL" : "LOCAL-BASELINE")) refuse("text-too-long", 0); }
+    state_save(); unlink(lock);
+    if (S.base_stale) fprintf(stderr, "BASE_STALE\tpaths=%d\tfirst=%s\tscope=LOCAL-PARTIAL\n", S.base_stale, S.stale_first);
+    if (report) fprintf(stderr, "CXDEV_RELOAD\tnets=%d\tbuilt=%d\tlocal_members=%d\tstale=%d\tgen_ms=%ld\tlint_ms=%ld\ttbl_ms=%ld\tnet_ms=%ld\tswap_ms=%ld\ttotal_ms=%ld\tscope=%s\t%s\n", naff < 0 ? 0 : naff, nbuilt, S.local, S.nstale, sum[0], sum[1], sum[2], sum[3], swap_ms, ms_now() - t0, S.scope, S.nstale ? "LOCAL_FAIL" : "LOCAL_OK");
+}
+
+/* ---- the loader proper: CONTRACT.md steps 2 and 3 (step 1: this executable is the lnx/x86_64 build) ---- */
+static void verify_manifest(char slice[PW], char container[PW]) {
+    char p[PW], *s, *q, *e, *pb = 0; size_t n, pbn = 0; int bases = 0; long order = 0; Pkg pk;
+    pj(p, sess, "manifest.tsv");
+    if (!(s = cx_read(p, &n))) refuse("manifest missing (construct the bundle: sh ./unisacc.com tools/cx-dev.cx -- --build)", p);
+    if (n < 22 || memcmp(s, "NOT_RELEASE\tcx-dev-v1\n", 22)) refuse("manifest first line must be NOT_RELEASE cx-dev-v1", p);
+    pj(container, sess, "pkg.bin");
+    for (q = s + 22; (e = strchr(q, '\n')); q = e + 1) {
+        char name[256], kind[32], arch[32], sha[65], origin[32], trust[32], h[65], msg[900]; long size, ord;
+        *e = 0;
+        if (!*q || *q == '#') continue;
+        if (sscanf(q, "%255[^\t]\t%31[^\t]\t%31[^\t]\t%64[^\t]\t%ld\t%ld\t%31[^\t]\t%31[^\t]", name, kind, arch, sha, &size, &ord, origin, trust) != 8) refuse("manifest row needs eight columns:", q);
+        if (ord != order++) refuse("manifest order not contiguous at", name);
+        if (!strcmp(kind, "base")) {
+            char *b; size_t bn;
+            if (strcmp(arch, "lnx/x86_64") && strcmp(arch, "any")) continue;
+            if (bases++) refuse("duplicate base row lnx/x86_64", name);
+            pj(slice, sess, name);
+            if (!(b = cx_read(slice, &bn))) refuse("missing member", name);
+            hash(b, bn, h); free(b);
+            if ((long)bn != size || strcmp(h, sha)) { { if (cx_fmt(msg, sizeof msg, "sha256 mismatch member %s expected %s got %s", name, sha, h)) refuse("text-too-long", 0); } refuse(msg, 0); }
+        } else if (!strcmp(kind, "stage")) {
+            long i = ord - 1;
+            if (!pb) { if (!(pb = cx_read(container, &pbn))) refuse("missing member", "pkg.bin"); pkg_parse(&pk, pb, pbn); }
+            if (i < 0 || i >= pk.nm) refuse("manifest stage row outside the package:", name);
+            if (strcmp(trust, "verified")) continue;   /* trust=local: recorded, not compared */
+            hash(pk.body + pk.at[i], (size_t)pk.len[i], h);
+            if (pk.len[i] != size || strcmp(h, sha)) { { if (cx_fmt(msg, sizeof msg, "sha256 mismatch member %s expected %s got %s", name, sha, h)) refuse("text-too-long", 0); } refuse(msg, 0); }
+        } else refuse("manifest kind not supported:", kind);
+    }
+    if (!bases) refuse("no base row for lnx/x86_64", 0);
+    if (!pb) refuse("manifest has no stage row", 0);
+    free(pb); free(s);
+}
+static pid_t spawn_compile(const char *srcrel, const char *out) {
+    pid_t p;
+    fflush(stdout); fflush(stderr);
+    if (!(p = fork())) {
+        char src[PW], tmp[PW + 40]; char *av[] = {"sh", ape, src, "-o", tmp, 0}; int rc;
+        pj(src, root, srcrel);
+        if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", out, (int)getpid())) exit(1);
+        rc = step(av, root, step_s, 0);
+        if (!rc && (chmod(tmp, 0700) || rename(tmp, out))) rc = 1;
+        if (rc) unlink(tmp);
+        exit(rc);
+    }
+    if (p < 0) refuse("fork", 0);
+    return p;
+}
+/* construction time only (this is the one place the installed product is used): sh ./unisacc.com tools/cx-dev.cx -- --build */
+static int do_build(void) {
+    const char *e; char cwd[PW], p[PW], q[PW], fp[40], why[96], cd[PW], ck[65], line[2 * PW + 40]; struct stat st; pid_t pid[3]; int i, bad = 0; long t0 = ms_now();
+    static const char *SRC[3] = {"tools/cx-dev.cx", "tools/table-lint.cx", "tools/net-deps.cx"}, *OUT[3] = {"cx-dev", "tools/table-lint", "tools/net-deps"};
+    can_build = 1;
+    e = getenv("CXDEV_ROOT");
+    if (e && e[0]) { if (!realpath(e, root)) refuse("root-unresolvable", e); }
+    else {
+        if (!getcwd(cwd, sizeof cwd)) refuse("cwd", 0);
+        for (;;) { char *s; pj(p, cwd, "unisacc.com"); if (!stat(p, &st)) break; s = strrchr(cwd, '/'); if (!s || s == cwd) refuse("no-installed-product-above-cwd (set CXDEV_ROOT)", 0); *s = 0; }
+        { if (cx_fmt(root, PW, "%s", cwd)) refuse("text-too-long", 0); }
+    }
+    pj(p, root, "unisacc.com"); if (!realpath(p, ape) || stat(ape, &st) || !S_ISREG(st.st_mode)) refuse("installed-ape-missing", p);
+    e = getenv("CXDEV_WT"); if (e && e[0]) { if (!realpath(e, wt) || !isdir(wt)) refuse("worktree-unresolvable", e); } else { if (cx_fmt(wt, PW, "%s", root)) refuse("text-too-long", 0); }
+    e = getenv("CXDEV_HOME");
+    if (e && e[0] == '/') { if (cx_fmt(sess, PW, "%s", e)) refuse("text-too-long", 0); }
+    else { e = getenv("TMPDIR"); if (cx_fmt(sess, PW, "%s/cx-dev-%d/wt%s", e && e[0] ? e : "/tmp", (int)getuid(), root)) refuse("path-too-long", 0); }
+    if (!strncmp(sess, root, strlen(root)) && sess[strlen(root)] == '/') refuse("bundle-dir-inside-repository", sess);
+    mkp(sess); pj(cdir, sess, "cache"); mkp(cdir); pj(p, sess, "tools"); mkp(p); pj(p, sess, "src"); mkp(p);
+    pj(p, sess, "ape.id"); unlink(p); pj(p, sess, "state.tsv"); unlink(p);
+    ape_id_load_or_open();
+    pj(p, root, "tools/cxlib/sourcepackage.cx"); pj(q, sess, "src/sourcepackage.cx"); copyfile(p, q, 0600);
+    pj(p, root, "tools/p3-member-consume.cx"); pj(q, sess, "src/p3-member-consume.cx"); if (isfile(p)) copyfile(p, q, 0600);
+    if (cx_fmt(line, sizeof line, "root\t%s\nwt\t%s\n", root, wt)) refuse("path-too-long", 0);
+    pj(p, sess, "origin.tsv"); wr(p, line, strlen(line), 0600);
+    for (i = 0; i < 3; i++) { pj(p, sess, OUT[i]); pid[i] = spawn_compile(SRC[i], p); }
+    why[0] = 0;
+    if (ensure_ctor(wt, cd, ck, why, sizeof why)) { fprintf(stderr, "cx-dev: constructors: %s\n", why); bad = 1; }
+    for (i = 0; i < 3; i++) { int stv = 0; if (waitpid(pid[i], &stv, 0) < 0 || !WIFEXITED(stv) || WEXITSTATUS(stv)) { fprintf(stderr, "cx-dev: construct %s: %s\n", OUT[i], WIFEXITED(stv) && WEXITSTATUS(stv) == 2 ? "DEFERRED over the step bound" : "failed"); bad = 1; } }
+    if (!bad) { no_diff = 1; { if (cx_fmt(fp, sizeof fp, "not-compared-yet")) refuse("text-too-long", 0); } reload(fp, 0); }   /* the installed package as it is; the first run compares the worktree */
+    pj(p, sess, "cx-dev");
+    printf("NOT_RELEASE\tcx-dev-v1\nCXDEV_BUILD\tloader=%s\tape=%s\tcommit=%s\tworktree=%s\tms=%ld\t%s\n", p, A.sha, A.commit, wt, ms_now() - t0, bad ? "LOCAL_FAIL" : "LOCAL_OK");
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *e; char p[PW], fp[40], slice[PW], container[PW], *s; size_t n; int mode = 0, i, degraded; char **av; long k;
+    if (argc >= 2 && !strcmp(argv[1], "--reload")) mode = 1; else if (argc >= 2 && !strcmp(argv[1], "--status")) mode = 2; else if (argc >= 2 && !strcmp(argv[1], "--close")) mode = 3; else if (argc >= 2 && !strcmp(argv[1], "--build")) mode = 4;
+    if (mode && argc != 2) refuse("usage: cx-dev --build|--reload|--status|--close takes no further argument", 0);
+    e = getenv("CXDEV_VERBOSE"); verbose = e && !strcmp(e, "1");
+    e = getenv("CXDEV_STEP_S"); if (e && atoi(e) >= 1 && atoi(e) <= 55) step_s = atoi(e);
+    if (mode == 4) return do_build();
+    /* run time: everything comes from the directory this executable is in; the installed product is not used */
+    k = (long)readlink("/proc/self/exe", p, sizeof p - 1); if (k <= 0) refuse("self-path", 0);
+    p[k] = 0; if (!(s = strrchr(p, '/'))) refuse("self-path", 0);
+    *s = 0; { if (cx_fmt(sess, PW, "%s", p)) refuse("text-too-long", 0); } pj(cdir, sess, "cache");
+    pj(p, sess, "ape.id");
+    if (!(s = cx_read(p, &n)) || sscanf(s, "%64s\t%64s\t%31s\t%4399s\t%64s\t%64s", A.sha, A.commit, A.key, A.slice, A.basesha, A.instpkg) != 6) refuse("not a cx-dev bundle (construct it: sh ./unisacc.com tools/cx-dev.cx -- --build):", sess);
+    free(s);
+    pj(p, sess, "origin.tsv");
+    if ((s = cx_read(p, &n))) { char *a = strstr(s, "root\t"), *b = strstr(s, "\nwt\t"), *x; if (a && (x = strchr(a, '\n'))) { *x = 0; { if (cx_fmt(root, PW, "%s", a + 5)) refuse("text-too-long", 0); } *x = '\n'; } if (b && (x = strchr(b + 1, '\n'))) { *x = 0; { if (cx_fmt(wt, PW, "%s", b + 4)) refuse("text-too-long", 0); } } free(s); }
+    e = getenv("CXDEV_WT"); if (e && e[0]) { if (cx_fmt(wt, PW, "%s", e)) refuse("text-too-long", 0); }
+    if (mode == 3) {
+        pj(p, sess, "state.tsv"); unlink(p); pj(p, sess, "ecache"); rmtree(p); mkp(p); chmod(p, 0700); pj(p, sess, "work"); rmtree(p); pj(p, sess, "cache/m"); rmtree(p);
+        printf("CXDEV_CLOSE\tbundle=%s\tlocal state, nets and run cache dropped; the next call compares the worktree again\n", sess); return 0;
+    }
+    if (isdir(wt)) {   /* a bundle copied away from its worktree runs as it is */
+        fingerprint(fp);
+        if (mode == 1 || state_load() || strcmp(S.fp, fp)) reload(fp, mode == 1 || verbose);
+    } else if (state_load()) refuse("bundle has no state and its worktree is not here:", wt);
+    degraded = S.nstale > 0;
+    for (i = 0; i < S.nstale; i++) fprintf(stderr, "CXDEV_STALE\trecipe=%s\treason=%s\tmodel=installed\n", S.stale_id[i], S.stale_why[i]);
+    verify_manifest(slice, container);
+    if (mode == 2 || mode == 1) {
+        FILE *o = mode == 2 ? stdout : stderr;
+        if (mode == 2) fprintf(o, "NOT_RELEASE\tcx-dev-v1\nCXDEV_STATUS\tbundle=%s\tape=%s\tcommit=%s\tworktree=%s\ttargets=lnx/x86_64\tother_targets=NOT_CLAIMED\n", sess, A.sha, A.commit, wt);
+        fprintf(o, "CXDEV_SESSION\tscope=%s\tmanifest=%s\tbase=%s\tpkg=%s\tlocal_members=%d\tstale=%d\tbase_stale=%d\n", S.scope, S.mansha, A.basesha, S.pkgsha, S.local, S.nstale, S.base_stale);
+        return mode == 1 && degraded ? 2 : 0;
+    }
+    if (argc < 2) refuse("usage: cx-dev PRODUCT_ARGS... (same arguments as unisacc.com)", 0);
+    av = calloc((size_t)argc + 1, sizeof(char *)); if (!av) refuse("allocation", 0);
+    pj(p, sess, "ecache");
+    if (setenv("UNISACC_E3CACHE", p, 1) || setenv("UNISACC_CACHE_DIR", p, 1) || setenv("UNISA_CONTAINER", container, 1) || setenv("UNISACC_LOCAL", "1", 1) || setenv("UNISACC_LOCAL_SCOPE", S.scope, 1)) refuse("environment", 0);
+    av[0] = slice; for (i = 1; i < argc; i++) av[i] = argv[i]; av[argc] = 0;
+    if (!verbose && !degraded) { execv(slice, av); refuse("slice-exec-failed", slice); }
+    {   long t0 = ms_now(); int stv = 0, rc; pid_t pid;
+        fflush(stdout); fflush(stderr);
+        if (!(pid = fork())) { execv(slice, av); exit(127); }
+        if (pid < 0 || waitpid(pid, &stv, 0) < 0) refuse("slice-run-failed", slice);
+        rc = WIFEXITED(stv) ? WEXITSTATUS(stv) : 128 + WTERMSIG(stv);
+        fprintf(stderr, "CXDEV_RUN\tscope=%s\tmanifest=%s\tbase=%s\tpkg=%s\tlocal_members=%d\trc=%d\tms=%ld\n", degraded && !S.base_stale ? "LOCAL-STALE" : S.scope, S.mansha, A.basesha, S.pkgsha, S.local, rc, ms_now() - t0);
+        return rc;
+    }
+}
