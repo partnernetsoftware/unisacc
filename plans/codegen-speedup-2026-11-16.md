@@ -377,3 +377,18 @@ facts-gen --check:HEAD 归档副本加本项两张表 rc 0 全 SAME;共享工作
 (3) 中间方案(未实测):在 gen-manifest.tsv 里把便宜的子集(stfuse、peep 的 CFOLD)放进 o1 网,需要先拆出它们对 analysis 的依赖,并单独量编译代价。
 
 未验证:-O1 产物比默认档大 4096 字节的原因未查;-O1 的收益来自 scans 与 rounds 的哪一步未拆分;探针五件、check-bench-gencode、check-x86-enc-fuse、random-expr、facts-gen、gold-table、ratchets 因未落地均未跑;load1 低于 2 的复测未做;osx、win、arm64 未测。
+
+## 15. 默认档改走 O1 路由(已落地,LOCAL)
+
+改法:`cx/driver/cli.cx` 的 `cxc_default_run` 成功时一律把 level 置 1;该扫描在 `cxc_step` 逐项解析之前运行,所以显式 -O0 仍落到 level 0,-O1、-O2、-O3、-Os 不变。`src/driveroute.cx`、`src/drive.cx`、`exec/c/compiler-routes.tsv` 未改。默认 -run 同样走 level 1(未做 -run 例外)。这是默认行为变更:不带 -O 的全部产物字节会变,运行缓存键随 level 变化一次。
+
+证据(LOCAL,lnx/x86_64,候选由 HEAD 1673a8ad48 归档树加本改动经 entry-build 构造,sha256 4666b8457e6b02bf,使用已装包里的网;load1 约 5 至 8):
+
+- bench-gencode.c:候选默认档与候选 -O1、已装 -O1 产物逐字节相同(a0a7294413fa8288);候选 -O0 与已装默认档、已装 -O0 逐字节相同(96b18d3393cc10e5);候选 -O2 与已装 -O2 相同(23563228b80f300e)。
+- 探针 /tmp/x3s/probe.c、/tmp/x3m/mp.c、/tmp/x3d/dp.c、/tmp/x3r/hi.c、/tmp/x3f/fp.c:gcc -O0 与候选默认档、-O0、-O2 的输出和退出码全同。
+- runcache 三项(COMPILER 为候选):runcache assertions=24 failed=0,runcache-roots assertions=17 failed=0,runcache-units assertions=6 failed=0。
+- 默认 -run 冷编译(含运行,UNISACC_RUN_CACHE=0,毫秒,默认档对显式 -O0):tests/run.cx --list 三次 4881、4972、5071 对 4635、4565、5133(约加 6%);tools/tool-index.cx 两次 6656、6510 对 5945、6100(约加 9%);tools/status.cx 单次 9955 对 8031(单样本,不下结论)。缓存命中三次 361、336、343 对 385、419、390,无退步。两档 tests/run.cx --list 输出 sha256 相同。
+- 四个工具源(tool-index、status、own-diff、edit-span)-o 产物:候选与已装编出的二进制 --help 输出与退出码相同;产物各大 4096 或 8192 字节。
+- tools/check-driver-cli.cx:新增四条默认 level 断言,CXC failed=0;freeze-gate --boot-files cx/driver/cli.cx:boot PASS units=2 ok=2;ratchets ok=14 fail=1,失败项 cxtrunc 来自他人未提交的 tools/cx-dev.cx 与 tools/devsvc-core.cx 各 1 处,本改动两文件 --files 子集 0 处。
+
+未验证:check-bench-gencode 假根三档校验未跑成(候选在假根下以 sh unisacc.com 启动时报 bad or missing package footer,两种假根做法均失败,未定因);八个工具源只跑完四个(register、tape-gap、chain-ready、derive 未跑);-run 计时在 load1 5 以上取得,样本少,未在低负载复测;tests/ 下以包内 O0 路由为对象的检查(negative-model-loader、ri-image-single、ri-image-multi、ri-route-refuse、resources、check-stream-pipe、check-stream-cells 等)未用候选重跑,其中靠默认档命中 O0 路由行的断言在安装本改动后可能需要补显式 -O0;osx、win、arm64 未测;慢车道未跑;本改动未装入本机根,装入前 tools 与检查的默认 -run 仍是旧行为。
