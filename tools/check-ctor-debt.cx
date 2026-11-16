@@ -1,65 +1,198 @@
 /* tools/check-ctor-debt.cx -- 0.0.50 D 包总负控:constructor-hardwire-inventory.tsv
  * 中标注「0.0.50 处置」的五项债逐一机器断言,其余行断言「保持/不扩改」未被破坏。
+ * 2026-11-16 由源码字符串锚点改为行为断言;预期值(退出码、具名文案、函数名、blob、行数下限)
+ * 全部来自事实表 tests/fixtures/ctor-debt/behavior-facts.tsv,检查器里不写死。
  *
- *   D1 release-build opguard:显式 UNISACC_CTOR 贯穿,无隐式 ROOT 构造器;
- *   D2 kernel-build:UNISACC_CTOR 显式启动器,resolution 失败 REFUSE;
- *   D3 release-build 旧 rb_phase/whole-phase:函数体已删,选项被显式拒绝并指向 whole-front;
- *   D4 src/driveunits.cx hf_phase_b 提前返回:只登记不改(负控=源文本仍含该分支,证明未偷偷改动产品);
- *   D5 chain-step pack:候选表路径显式化(见 check 内 D5 断言)。
- * 另断言清单文件存在且行数不减(不删行、不缩覆盖)。 */
+ *   D1 release-build opguard:显式 UNISACC_CTOR 贯穿,无隐式 ROOT 构造器。
+ *      到达该拒绝点需要真实发布材料(包加带新 op 的网),真跑负路径由带材料的批次
+ *      release-ctor-ctor-missing / release-ctor-ctor-invalid 承担;本检查无材料,按词法 token 核对:
+ *      构造器解析函数体内只有两个字符串 token(环境变量名与具名拒绝文案,没有回退路径字面量),
+ *      且两个 opguard 消费者都调它。
+ *   D2 kernel-build:真跑。UNISACC_CTOR 指向不存在的文件时退出码与具名 REFUSE 同事实表,且不建输出目录。
+ *      说明:v0.0.68 九相重写后文案为 "constructor resolution"(旧文案 "UNISACC_CTOR resolution"),
+ *      行为更严:显式启动器与默认启动器都 realpath,失败具名拒绝。
+ *   D3 release-build 旧 rb_phase/whole-phase:真跑。在无 .git 的快照根上 slice 带旧选项,
+ *      退出码与具名文案同事实表且不产生输出;词法上不存在同名函数定义
+ *      (现有同名的是静态变量与 rb_phase_* 函数,不算)。
+ *   D4 src/driveunits.cx:只登记不改。工作树内容的 git blob 与事实表基线一致。
+ *      说明:比旧断言(只看 hf_phase_b 分支还在)更严,产品合法改该文件时须同步更新事实表的 D4.blob。
+ *   D5 chain-step pack:真跑两次。相对 ROOT 被具名拒绝;绝对临时 ROOT 时调起的是该 ROOT 下的
+ *      tools/release-ape.cx(替身回报标记与工作目录),不是当前目录的。
+ * 另断言清单文件存在且行数不减(不删行、不缩覆盖)。
+ * 用法(仓根):sh ./unisacc.com tools/check-ctor-debt.cx   临时目录在 sy_tmpdir() 下,结束即删。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainargv
+
+#define CHILD_DEADLINE_S 50
 
 static int failed;
-static char root[4096];
+static char root[4096], tmp[4400];
+static char *facts; static long factsn;
 
 static void ck(int ok, const char *n) {
     sy_printf("%s\tcheck-ctor-debt.%s\n", ok ? "PASS" : "FAIL", n);
     if (!ok) failed++;
 }
-
-static char *slurp(const char *rel) {
-    char p[4400]; size_t n;
-    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
-    return (char *)cx_read(p, &n);
+static long zlen(const char *s) { return tx_len(s, 1 << 20); }
+/* 事实表取值:key<TAB>value 行,返回新分配的 value;缺键返回 0(调用处据此判 FAIL) */
+static char *fact(const char *key) {
+    long i = 0, kn = zlen(key);
+    while (facts && i < factsn) {
+        long e = i, vn; char *v;
+        while (e < factsn && facts[e] != '\n') e++;
+        if (e - i > kn && facts[i + kn] == '\t' && tx_same(facts + i, kn, key, kn)) {
+            vn = e - i - kn - 1; v = malloc((size_t)vn + 1);
+            if (!v) return 0;
+            if (vn && mm_copy(v, vn + 1, facts + i + kn + 1, vn)) { free(v); return 0; }
+            v[vn] = 0; return v;
+        }
+        i = e + 1;
+    }
+    return 0;
 }
-
-static int has(const char *b, const char *s) {
-    return b && tx_find(b, tx_len(b, 300000), s, tx_len(s, 200)) >= 0;
+static int fact_int(const char *key) {
+    char *v = fact(key); int n = 0, i = 0;
+    if (!v || !v[0]) return -1000;
+    for (; v[i]; i++) { if (v[i] < '0' || v[i] > '9') return -1000; n = n * 10 + (v[i] - '0'); }
+    free(v); return n;
+}
+/* 子进程输出里按位比对找事实表给的文案 */
+static int outhas(const char *b, long bn, const char *s) {
+    long i, sn;
+    if (!b || !s || !s[0]) return 0;
+    sn = zlen(s);
+    for (i = 0; i + sn <= bn; i++) if (tx_same(b + i, sn, s, sn)) return 1;
+    return 0;
+}
+static int child(const char *label, char **v, pr_result *r) {
+    if (pr_run(label, v, root, 0, CHILD_DEADLINE_S, r)) { sy_eprintf("check-ctor-debt: %s\n", r->why); return -1; }
+    return 0;
+}
+/* 函数体 [b,e) 内:kind 2 的字符串 token 总数,以及文本等于 s 的字符串 token 数 */
+static int strtoks(void *t, int b, int e, const char *s) {
+    int c = 0, i;
+    for (i = b; i < e; i++) if (ca_token_kind(t, i) == 2 && (!s || !strcmp(ca_token_text(t, i), s))) c++;
+    return c;
+}
+static int callsin(void *t, const char *fn, const char *callee) {
+    int b, e, i, c = 0;
+    if (!fn || !callee || !ca_function(t, fn, &b, &e)) return 0;
+    for (i = b; i + 1 < e; i++) if (ca_token_is(t, i, callee) && ca_token_is(t, i + 1, "(")) c++;
+    return c;
 }
 
 int main(void) {
-    char *rb, *kb, *du, *cs, *inv;
+    char com[4400], p[4400], q[4400]; size_t n = 0;
+    char *rb; void *trb = 0; pr_result r;
     if (sy_cwd(root, sizeof root)) return 2;
-    rb = slurp("tools/release-build.cx");
-    kb = slurp("tools/kernel-build.cx");
-    du = slurp("src/driveunits.cx");
-    cs = slurp("tools/chain-step.cx");
-    { const char *invarg = sy_env("CTOR_DEBT_INVENTORY"); size_t invn = 0;
-      char invp[4400];
+    if (cx_fmt(p, sizeof p, "%s/tests/fixtures/ctor-debt/behavior-facts.tsv", root)) return 2;
+    facts = (char *)cx_read(p, &n); factsn = (long)n;
+    if (!facts) { sy_eprintf("check-ctor-debt: REFUSE facts table unreadable: %s\n", p); return 2; }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2; /* lint:allow R1-product 检查合同就是用本仓已装产品真跑被守工具 */
+    if (cx_fmt(tmp, sizeof tmp, "%s/check-ctor-debt-XXXXXX", sy_tmpdir()) || !mkdtemp(tmp)) return 2;
+
+    rb = (char *)cx_read("tools/release-build.cx", &n);
+    if (rb) trb = ca_tokens(rb);
+    { char *t2 = fact("D2.tool"), *t4 = fact("D4.path"), *t5 = fact("D5.tool");
+      ck(trb && t2 && t4 && t5 && sy_exists(t2) && sy_exists(t4) && sy_exists(t5), "sources-readable"); }
+
+    /* D1:词法 token 核对(无材料,不真跑;见头注释) */
+    { char *fn = fact("D1.function"), *env = fact("D1.env"), *msg = fact("D1.message");
+      char *ca = fact("D1.caller-a"), *cb = fact("D1.caller-b"); int b = 0, e = 0;
+      ck(trb && fn && env && msg && ca_function(trb, fn, &b, &e) &&
+         strtoks(trb, b, e, 0) == 2 && strtoks(trb, b, e, env) == 1 && strtoks(trb, b, e, msg) == 1 &&
+         callsin(trb, ca, fn) >= 1 && callsin(trb, cb, fn) >= 1, "D1-opguard-ctor"); }
+
+    /* D2:真跑,UNISACC_CTOR 指向不存在的文件 */
+    { char envv[4600], out[4400]; char *tool = fact("D2.tool"), *msg = fact("D2.stderr"); int ok = 0;
+      if (tool && !cx_fmt(envv, sizeof envv, "UNISACC_CTOR=%s/absent-constructor", tmp) && !cx_fmt(out, sizeof out, "%s/kb-out", tmp)) {
+          char *v[] = {"env", envv, "sh", com, tool, "--", root, out, "bootstrap", 0};
+          if (!child("kernel-build absent constructor", v, &r)) {
+              ok = r.rc == fact_int("D2.rc") && outhas(r.err, (long)r.errn, msg) && !sy_exists(out);
+              if (!ok) pr_echo(&r);
+              pr_free(&r);
+          }
+      }
+      ck(ok, "D2-kernel-build-ctor"); }
+
+    /* D3:真跑,快照根(无 .git、有 include/cx-flat.h,release-build 不冻结)上 slice 带旧选项 */
+    { char snap[4400], out[4400]; char *gone = fact("D3.absent-function"), *msg = fact("D3.stderr");
+      int ran = 0, refused = 0, clean = 0, b, e; FILE *f = 0;
+      if (!cx_fmt(snap, sizeof snap, "%s/snap", tmp) && !mkdir(snap, 0755) &&
+          !cx_fmt(p, sizeof p, "%s/include", snap) && !mkdir(p, 0755) &&
+          !cx_fmt(p, sizeof p, "%s/include/cx-flat.h", snap) && (f = fopen(p, "w")) &&
+          !cx_fmt(q, sizeof q, "%s/absent.pkg", tmp) && !cx_fmt(out, sizeof out, "%s/slice-out", tmp)) {
+          char *v[] = {"sh", com, "tools/release-build.cx", "--", "slice", snap, q, out, "--whole-phase", "A", 0};
+          fclose(f); f = 0;
+          if (!child("release-build retired whole-phase", v, &r)) {
+              ran = 1;
+              refused = r.rc == fact_int("D3.rc") && outhas(r.err, (long)r.errn, msg);
+              clean = !sy_exists(out);
+              if (!refused || !clean) pr_echo(&r);
+              pr_free(&r);
+          }
+      }
+      if (f) fclose(f);
+      ck(trb && gone && !ca_function(trb, gone, &b, &e) && ran && clean, "D3-rb-phase-removed");
+      ck(refused, "D3-option-refused"); }
+
+    /* D4:工作树内容的 git blob 与事实表基线一致 */
+    { char *path = fact("D4.path"), *want = fact("D4.blob"); int ok = 0;
+      if (path && want && zlen(want) == 40) {
+          char *v[] = {"git", "hash-object", "--", path, 0};
+          if (!child("git hash-object", v, &r)) {
+              ok = !r.rc && r.outn >= 40 && tx_same(r.out, 40, want, 40);
+              if (!ok) pr_echo(&r);
+              pr_free(&r);
+          }
+      }
+      ck(ok, "D4-driveunits-untouched"); }
+
+    /* D5:真跑两次。绝对临时 ROOT 下放替身 release-ape 与指向本仓产品的 unisacc.com 链接 */
+    { char troot[4400], real[4400], line[9000]; char *tool = fact("D5.tool"), *msg = fact("D5.stderr"), *mark = fact("D5.marker");
+      int explicit_root = 0, refused = 0;
+      if (tool && mark && !cx_fmt(troot, sizeof troot, "%s/root", tmp) && !mkdir(troot, 0755) &&
+          !cx_fmt(p, sizeof p, "%s/tools", troot) && !mkdir(p, 0755) &&
+          !cx_fmt(p, sizeof p, "%s/unisacc.com", troot) && !symlink(com, p) && /* lint:allow R1-product 临时 ROOT 的启动器链接,指向同一个已装产品 */
+          !cx_fmt(q, sizeof q, "%s/tests/fixtures/ctor-debt/release-ape-stub.cx", root) &&
+          !cx_fmt(p, sizeof p, "%s/tools/release-ape.cx", troot) && !symlink(q, p) &&
+          sy_realpath(troot, real, sizeof real) >= 0 && !cx_fmt(line, sizeof line, "%s\t%s\t", mark, real)) {
+          char *v[] = {"sh", com, tool, "--", "pack", troot, "o", "p", "w", "l", "la", "x", "xa", 0};
+          if (!child("chain-step pack absolute root", v, &r)) {
+              explicit_root = !r.rc && (outhas(r.out, (long)r.outn, line) || outhas(r.err, (long)r.errn, line));
+              if (!explicit_root) pr_echo(&r);
+              pr_free(&r);
+          }
+      }
+      if (tool) {
+          char *v[] = {"sh", com, tool, "--", "pack", ".", "o", "p", "w", "l", "la", "x", "xa", 0};
+          if (!child("chain-step pack relative root", v, &r)) {
+              refused = r.rc == fact_int("D5.rc") && outhas(r.err, (long)r.errn, msg) &&
+                        !(mark && (outhas(r.out, (long)r.outn, mark) || outhas(r.err, (long)r.errn, mark)));
+              if (!refused) pr_echo(&r);
+              pr_free(&r);
+          }
+      }
+      ck(explicit_root, "D5-pack-explicit-root");
+      ck(refused, "D5-refusal-message"); }
+
+    /* 清单存在且行数不低于事实表下限(不删行) */
+    { const char *invarg = sy_env("CTOR_DEBT_INVENTORY"); size_t invn = 0; char *inv = 0; long rows = 0, i;
+      int min = fact_int("inventory.min-rows");
       if (invarg && invarg[0]) inv = (char *)cx_read(invarg, &invn);
-      else if (!cx_fmt(invp, sizeof invp, "%s/tests/fixtures/ctor-debt/constructor-hardwire-inventory.tsv", root)) inv = (char *)cx_read(invp, &invn); }
-    ck(rb && kb && du && cs, "sources-readable");
-    /* D1 */
-    ck(has(rb, "opguard needs explicit UNISACC_CTOR"), "D1-opguard-ctor");
-    /* D2 */
-    ck(has(kb, "UNISACC_CTOR resolution"), "D2-kernel-build-ctor");
-    /* D3:旧分相函数与接线删除,选项显式拒绝 */
-    ck(!has(rb, "static int rb_phase("), "D3-rb-phase-removed");
-    ck(has(rb, "whole-phase removed (0.0.50 D)"), "D3-option-refused");
-    /* D4:产品源未改(hf_phase_b 分支原样在) */
-    ck(has(du, "if (hf_phase_b()) {"), "D4-driveunits-untouched");
-    /* D5 (落地 2026-11-10,G0 上 main 后):pack 首参为显式绝对 ROOT,不再用 "." 隐式 cwd */
-    ck(cs && has(cs, "return cs_tool(root, \"tools/release-ape.cx\", a);"), "D5-pack-explicit-root");
-    ck(cs && has(cs, "pack needs ABSOLUTE ROOT first"), "D5-refusal-message");
-    /* 清单存在且 ≥19 行(不删行) */
-    { long rows = 0, i, n;
-      if (inv) { n = tx_len(inv, 20000); for (i = 0; i < n; i++) if (inv[i] == '\n') rows++; }
-      ck(inv && rows >= 19, "inventory-rows-kept"); }
+      else if (!cx_fmt(p, sizeof p, "%s/tests/fixtures/ctor-debt/constructor-hardwire-inventory.tsv", root)) inv = (char *)cx_read(p, &invn);
+      if (inv) for (i = 0; i < (long)invn; i++) if (inv[i] == '\n') rows++;
+      ck(inv && min >= 19 && rows >= min, "inventory-rows-kept"); }
+
+    { char *v[] = {"rm", "-rf", "--", tmp, 0};
+      if (!child("cleanup", v, &r)) pr_free(&r); }
+    if (trb) ca_tokens_free(trb);
     sy_printf("CHECK_CTOR_DEBT\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
