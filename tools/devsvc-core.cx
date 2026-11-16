@@ -1295,6 +1295,52 @@ static int git_commit_check(int argc, char **argv) {
             fprintf(stderr, "devsvc: git commit: 说明首行必须是正文,署名放最后空行后 (first line must be the body; put Co-Authored-By after the last blank line)\n"); return 2; } }
     return 0;
 }
+/* git merge BRANCH [--cwd WORKTREE]:在工作树(缺省共享检出)当前分支上 git merge --no-edit BRANCH。
+   冲突不自动解决:逐行 MERGE_CONFLICT<TAB>文件,末行 GIT_MERGE rc=1 conflicts=N,工作树留在合并中状态由调用方处理。
+   无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
+static int git_merge(const char *root, int argc, char **argv) {
+    const char *br = 0, *d = root; char rd[PW], top[PW], cur[200], buf[1 << 15], sha[128]; int i, rc, nc = 0;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: unexpected %s\n", argv[i]); return 2; }
+        else br = argv[i];
+    }
+    if (!br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: missing BRANCH\n"); return 2; }
+    if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
+    if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git merge --cwd %s: no such directory\n", d); return 2; }
+    {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
+        if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git merge: %s is not on a branch\n", rd); return 2; }
+        chomp(cur); }
+    {   char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "--", (char *)br, 0}; rc = runcap(mv, buf, sizeof buf); }
+    if (rc != 0) {
+        char *uv[] = {"git", "-C", rd, "diff", "--name-only", "--diff-filter=U", 0}; char *s, *e;
+        if (runcap(uv, buf, sizeof buf) != 0) buf[0] = 0;
+        for (s = buf; *s; s = e) { e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s); if (*s) { printf("MERGE_CONFLICT\t%s\n", s); nc++; } }
+        printf("GIT_MERGE\trc=1\tconflicts=%d\tbranch=%s\tcwd=%s\n", nc, cur, rd);
+        return 1;
+    }
+    {   char *hv[] = {"git", "-C", rd, "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", sha, cur, rd);
+    return 0;
+}
+/* git add PATH...:把这些路径的 index 同步到工作树内容(清残留暂存用)。拒绝(rc 2,什么都不加):
+   绝对路径、含 ..、以 - 开头、out/ 下、被 .gitignore 忽略的路径。成功 GIT_ADD rc=0 n=N。 */
+static int git_add(const char *root, int argc, char **argv) {
+    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc;
+    if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); return 2; }
+    for (i = 1; i < argc; i++) {
+        const char *p = argv[i];
+        if (!*p || p[0] == '/' || p[0] == '-' || strstr(p, "..") || !strncmp(p, "out/", 4) || !strcmp(p, "out")) { fprintf(stderr, "devsvc: REFUSE git add %s: absolute, .., option-like or out/ path (nothing added)\n", p); return 2; }
+        {   char *cv[] = {"git", "-C", (char *)root, "check-ignore", "-q", "--", (char *)p, 0};
+            if (runcap(cv, buf, sizeof buf) == 0) { fprintf(stderr, "devsvc: REFUSE git add %s: ignored path (nothing added)\n", p); return 2; } }
+    }
+    v[n++] = "git"; v[n++] = "-C"; v[n++] = (char *)root; v[n++] = "add"; v[n++] = "--";
+    for (i = 1; i < argc; i++) v[n++] = argv[i];
+    v[n] = 0;
+    rc = runcap(v, buf, sizeof buf);
+    printf("GIT_ADD\trc=%d\tn=%d\n", rc, argc - 1);
+    return rc ? 1 : 0;
+}
 static int cmd_git(const char *root, int argc, char **argv) {
     long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
     if (argc < 1) return 2;
@@ -1313,6 +1359,8 @@ static int cmd_git(const char *root, int argc, char **argv) {
             return rc;
         }
     }
+    if (!strcmp(argv[0], "merge")) return git_merge(root, argc, argv);
+    if (!strcmp(argv[0], "add")) return git_add(root, argc, argv);
     if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) return cr; if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\n"); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
     /* --cwd D:在版本工作树 D(.claude/worktrees/v0.0.NN 等)里提交。commit-own 以 D 为 cwd 跑:基线是 D 的 HEAD、
@@ -1366,6 +1414,10 @@ static int usage(void) {
                     "       devsvc lock acquire NAME --owner O [--ttl S] | lock release NAME --owner O | lock list\n"
                     "       devsvc run [--local] TOOL.cx [ARGS...] | events [--since N] | events emit KIND TEXT | events on-change PATH...\n"
                     "       devsvc git commit -m MSG (--whole PATH... | --keyed PATH KEYS | --registered ID...) [--push] [--bg] [--cwd WORKTREE]: strict args, unknown option or --help -> rc 2, no commit;\n"
+                    "       long commands (over 55 s): devsvc x --bg --par 1 [--timeout-ms N] -- ARGV... -> JOB<TAB>id (returns at once; job runs in its own session, deadline kills its process group);\n"
+                    "         devsvc wait JOB [--timeout-ms N<=55000] [--tail N|--grep S|--summary] -> JOB_DONE id rc=N (rc is the job's) or WAIT_TIMEOUT rc 124 (job keeps running; wait again); devsvc jobs lists\n"
+                    "       devsvc git commit --status [JOB]: receipts of recent commit jobs (foreground commit runs as a job and prints JOB id first)\n"
+                    "       devsvc git merge BRANCH [--cwd WORKTREE]: conflicts -> MERGE_CONFLICT lines, rc 1, not resolved | git add PATH...: sync index (out/, .., absolute, ignored refused)\n"
                     "         MSG first line must be body text (not empty, not a Co-Authored-By:/Signed-off-by: line; trailers go after the last blank line)\n"
                     "       devsvc task open|amend|status|done|list ...  -> tools/devtask.cx task ...; devsvc task SUB --help gives the full syntax; devsvc f --help\n"
                     "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n");
@@ -1375,6 +1427,8 @@ static int usage(void) {
 /* ---- 后台作业:x|flow|git commit|register|derive 带 --bg 时在独立会话里跑(各自 deadline 照旧),元数据落 <实例>/jobs/<id>/
    (pid、meta、stdin、out、rc);结束记事件 job.done。wait 阻塞到结束或超时(超时 rc 124,不杀作业);jobs 列表;events --wait 等事件。 ---- */
 static int main2(int argc, char **argv);
+static int in_bg;   /* 本进程是后台作业子进程(bg_child 置 1):前台 commit 不再转作业 */
+static char last_job[48];   /* bg_launch 最近一次起的作业 id */
 typedef struct { int argc; char **argv; char root[PW], jd[PW], id[48], owner[64]; } BgJob;
 static int okjob(const char *s) { long n = 0; for (; s && s[n]; n++) if (!((s[n] >= '0' && s[n] <= '9') || s[n] == '-')) return 0; return n > 2 && n < 40; }
 static int bg_child(void *ud) {
@@ -1383,6 +1437,7 @@ static int bg_child(void *ud) {
     if (fd < 0) return 126;
     sy_dup2(fd, 1); sy_dup2(fd, 2); sy_close(fd);
     F(p, sizeof p, "%s/stdin", j->jd); if (sy_exists(p) == 1) { fd = sy_open(p, O_RDONLY, 0); if (fd >= 0) { sy_dup2(fd, 0); sy_close(fd); } }
+    in_bg = 1;
     r = main2(j->argc, j->argv);
     fflush(stdout); fflush(stderr);
     F(t, sizeof t, "%d\t%ld\n", r, sy_now_ms() - t0); F(p, sizeof p, "%s/rc", j->jd); sy_write_atomic(p, t, strlen(t), 0644);
@@ -1419,6 +1474,7 @@ static int bg_launch(const char *root, const char *cmd, int oargc, char **oargv,
     sy_close(fds[0]); sy_close(fds[1]);
     F(t, sizeof t, "%d\n", pid); F(p, sizeof p, "%s/pid", j.jd); sy_write_atomic(p, t, strlen(t), 0644);
     printf("JOB\t%s\trun=%s\n", j.id, j.jd);
+    F(last_job, sizeof last_job, "%s", j.id);
     return 0;
 }
 static int job_read(const char *jd, const char *name, char *out, long cap) {   /* 读小文件到 out;成功 0 */
@@ -1511,6 +1567,52 @@ static int flowdir_gc(void) {
     }
     if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, seen); ev_add("flowdir.gc", m); }
     return del;
+}
+/* 前台 git commit 回执:提交一律在作业里跑(独立会话,调用方被外层超时杀掉也照常完成并落 rc/out),
+   前台跟随至作业结束(总 deadline COMMIT_FOLLOW_MS、轮询次数上限),回显作业输出,rc 即提交 rc;
+   跟随超时 rc 124 并提示 git commit --status 取回执。 */
+#define COMMIT_FOLLOW_MS 600000L
+static int commit_follow(const char *id) {
+    char jd[PW], t[64]; long t0 = sy_now_ms(), n;
+    F(jd, sizeof jd, "%s/jobs/%s", dir, id);
+    for (n = 0; n < COMMIT_FOLLOW_MS / 100; n++) {
+        if (!job_read(jd, "rc", t, sizeof t)) break;
+        if (!job_alive(jd) && job_read(jd, "rc", t, sizeof t)) { printf("JOB_LOST\t%s\n", id); return 125; }
+        if (sy_now_ms() - t0 >= COMMIT_FOLLOW_MS) break;
+        sy_sleep_ms(100);
+    }
+    if (job_read(jd, "rc", t, sizeof t)) { printf("WAIT_TIMEOUT\t%s\tms=%ld\thint=devsvc git commit --status %s\n", id, sy_now_ms() - t0, id); return 124; }
+    {   char p[PW + 16]; unsigned char *b = 0; int64_t m = 0;
+        F(p, sizeof p, "%s/out", jd);
+        if (!sy_read_file(p, &b, &m, 1L << 26) && b) { fwrite(b, 1, (size_t)m, stdout); if (m > 0 && b[m - 1] != '\n') putchar('\n'); free(b); } }
+    return atoi(t);
+}
+/* git commit --status [JOB]:列最近至多 5 个 commit 作业(或指定 JOB)的回执:
+   COMMIT_RECEIPT<TAB>JOB<TAB>done|running|lost<TAB>rc=N 后接作业输出里的 GIT_COMMIT 行(rc、commit 号、路径在其中与 meta cmd) */
+static int commit_status(const char *want) {
+    char jd[PW], lst[1 << 15], *s, *e, t[64], m[4096]; int n = 0;
+    char *v[] = {"ls", "-1t", jd, 0};
+    F(jd, sizeof jd, "%s/jobs", dir);
+    if (want && !okjob(want)) { fprintf(stderr, "devsvc: git commit --status [JOB]: bad job id\n"); return 2; }
+    if (sy_exists(jd) != 1 || runcap(v, lst, sizeof lst) < 0) lst[0] = 0;
+    for (s = lst; *s && n < 5; s = e) {
+        char d[PW], *c, *ce, p[PW + 16]; unsigned char *b = 0; int64_t bn = 0; const char *st; int rc = -1;
+        e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s);
+        if (!okjob(s) || (want && strcmp(s, want))) continue;
+        F(d, sizeof d, "%s/%s", jd, s); if (job_read(d, "meta", m, sizeof m)) continue;
+        c = strstr(m, "cmd\t"); if (!c) continue;
+        c += 4; ce = strchr(c, '\n'); if (ce) *ce = 0;
+        if (strncmp(c, "git commit ", 11) && !strstr(c, " git commit ")) continue;   /* meta cmd 首词是执行体全路径 */
+        if (!job_read(d, "rc", t, sizeof t)) { st = "done"; rc = atoi(t); } else st = job_alive(d) ? "running" : "lost";
+        printf("COMMIT_RECEIPT\t%s\t%s\trc=%d\tcmd=%.300s\n", s, st, rc, c);
+        F(p, sizeof p, "%s/out", d);
+        if (!sy_read_file(p, &b, &bn, 1L << 24) && b) {
+            long a, z; for (a = 0; a < bn; a = z + 1) { z = a; while (z < bn && b[z] != '\n') z++; if (z - a > 11 && !memcmp(b + a, "GIT_COMMIT\t", 11)) printf("%.*s\n", (int)(z - a), (char *)b + a); }
+            free(b); }
+        n++;
+    }
+    printf("COMMIT_RECEIPTS\tn=%d\n", n);
+    return want && !n ? 2 : 0;
 }
 static int cmd_jobs(void) {
     char jd[PW], lst[1 << 15], *s, *e, t[64], m[4096]; int n = 0;
@@ -1605,7 +1707,12 @@ static int main2(int argc, char **argv) {
         return 0;
     }
     if (inst_dir()) { fprintf(stderr, "devsvc: cannot resolve instance directory\n"); return 3; }
+    if (!strcmp(cmd, "git") && argc >= 2 && !strcmp(argv[0], "commit") && !strcmp(argv[1], "--status")) return argc <= 3 ? commit_status(argc == 3 ? argv[2] : 0) : 2;
     if (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit") && git_commit_check(argc, argv)) return usage();
+    if (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit") && !in_bg && !flag(argc, argv, "--bg") && !getenv("DEVSVC_GIT_PARSE_ONLY")) {
+        int r = bg_launch(root, cmd, argc + a + 1, argv - (a + 1), 0);
+        return r ? r : commit_follow(last_job);
+    }
     {   int bp; if (bg_strip(cmd, argc, argv, &bp)) return bg_launch(root, cmd, argc + a + 1, argv - (a + 1), argv + bp); }
     if (!strcmp(cmd, "wait")) return cmd_wait(argc, argv);
     if (!strcmp(cmd, "jobs")) return cmd_jobs();
