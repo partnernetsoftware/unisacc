@@ -76,7 +76,6 @@ flowchart LR
 - 自 0.0.68 起 s9 commit 档不挡公开:冻结后与整链并行跑,结果补记 release/evidence.tsv,新增 FAIL 走补丁版(prd.md 候选池 Q)。
 - 0.0.69、0.0.70、0.0.71 合并为一次发布 0.0.71(速度 R1 与 X1、覆盖缺口一期、生成码一期 X3),0.0.69 与 0.0.70 号跳过(项目所有者 2026-11-16);0.0.68 不等发布即合入 main,此后从 main 开发。
 - 执行类工作由主调度经 devsvc flow 并发自己做;子代理只开 fable 级(设计、难题);外部窗口 omp-cdx 停止派工(项目所有者 2026-11-16)。并发总量以机器负载不高于 10 为界。
-- s9 冻结根的原生镜像身份绑定编排源 tools/s9-nightly.cx 内容:改该文件即使旧根失效,要重起根;并发 driver step 受 RUN/lock 启动段串行影响(plans/iter-bottleneck-2026-11-16.md 第 6 节)。daily 里 ri-flow-data 的 data 阶段记 BLOCKED(旧执行器不认包版本 P4),不记通过。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果一律只是 LOCAL 证据,不是候选结果:检查可经假根测改过的 exec 表,基座(src、cx、include)改动要重装产品。
 
 ### 仍未验证(缺什么 / 清零动作)
@@ -93,5 +92,4 @@ flowchart LR
 - 仓库根 out/:逐项迁移到 sy_tmpdir,清单见归档同名条。
 - 多单元函数指针形参:跨单元函数指针形参含结构体指针被拒,R3 去强转待补。
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
-- ctor-debt 批次 D2 失败:tools/kernel-build.cx 在 v0.0.68 kernels 九相重写后 REFUSE 文案由 UNISACC_CTOR resolution 改为 constructor resolution(行为更严,不是回归),检查器按旧文案失败;整个 tools/check-ctor-debt.cx 靠源码锚点断言,动它即触发 lint R4(不可豁免),须整体重写为行为断言(真跑负路径)再提交,不得只改一行文案。
-- compile-as-limit 批次:已装 0.0.67 上 c 与 S 的低限额具名拒绝两项失败,待候选核对是否属已知待落地合同。
+- compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
