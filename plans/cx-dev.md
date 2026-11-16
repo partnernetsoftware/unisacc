@@ -58,8 +58,8 @@
 
 ## 6 已知缺口与第二期待办
 
-(1) 产品运行库的 tmpfile(include/cx-flat.h)用固定序列的 `/tmp/unNNN.tmp` 命名,无 pid、无 O_EXCL:两个由产品编出的构造器同时运行会互读临时表(实测出现 `delta table column count` 与静默不同的网)。cx-dev 现以按用户的锁把构造器步骤串行化来回避,所以多张网的重建目前是串行的;产品修好后去掉该锁即可恢复并行。
-(2) parse2 一张网的 gen 约 40 秒且受影响配方有三张,串行下首次重建以分钟计,贴近或超过每步上限时记 DEFERRED;长期靠生成码提速(0.0.71)。
+(1) 产品运行库的 tmpfile(include/cx-flat.h)用固定序列的 `/tmp/unNNN.tmp` 命名,无 pid、无 O_EXCL:两个由产品编出的构造器同时运行会互读临时表(实测出现 `delta table column count` 与静默不同的网)。修复(09ca7d6c7a,排它创建加栈地址熵)属 0.0.71 产品输入,尚未安装。cx-dev 的回避方式已改:gen 构造器编为 `genp`,生成一个包装源,用按 pid 命名的私有 tmpfile 后再 `#include` 原 `seed/gen.c`,种子不动、缓存键不变;tbl 与 net 本来不用 tmpfile。因此 gen、tbl、net 不再取全局锁,跨作业真并发,lint 与 tbl 到 net 也并行,长网按上次耗时优先起跑。
+(2) 实测(2026-11-16,同一夹具,改 parse2 的 control-reject 一行,CXDEV_PAR=4):改前 96.85 秒且有作业被锁拒、需再重载一次(LOCAL_FAIL);改后 52.98 秒、stale=0(LOCAL_OK),阶段合计约 176 秒压进 53 秒(约 3.3 倍)。单张 parse2 网下限仍是 gen 约 36.5 秒,再降要拆 seed/gen.c 的按子表分片或增量。13 张网全量重建改后耗时未测(UNVERIFIED);改前为 138 秒。lint 并行后瞬时进程数最多为 CXDEV_PAR 的两倍。
 (3) 热调用额外开销约 40 至 50 毫秒,主要是每次核 manifest 成员摘要与工作树 stat 指纹;可再降。
 (4) 第二期:devsvc 子命令 `devsvc cx-dev` 与 flow 节点 local.run、local.reload;本机基座增量构造(改 src、cx 后换切片);写事件触发的后台预重建。第三期:头文件等包内资源替换、gold 网。
 (5) 事实表(exec/facts)改动:第一期只对已是生成结果的表生效(按 net-deps 选网);"事实表 -> 生成器 --write 到覆盖层"未做。

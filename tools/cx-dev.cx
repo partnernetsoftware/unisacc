@@ -232,7 +232,7 @@ static void copyfile(const char *from, const char *to, int mode) { size_t n; cha
 
 /* constructors for TREE/seed, cached by content under CDIR/ctor/KEY; 0 ok, else WHY set */
 static int ensure_ctor(const char *tree, char dir[PW], char key[65], char *why, size_t wl) {
-    static const char *T[3] = {"gen", "tbl", "net"}; FList l = {0}; np_buf b = {0}; char p[PW], rel[PW], shared[PW]; int i, bad = 0; pid_t pid[3];
+    static const char *T[3] = {"genp", "tbl", "net"}; FList l = {0}; np_buf b = {0}; char p[PW], rel[PW], shared[PW]; int i, bad = 0; pid_t pid[3];
     fl_walk(&l, tree, "seed"); fl_sort(&l); np_puts(&b, A.sha);
     for (i = 0; i < l.n; i++) { size_t n; char *s; pj(p, tree, l.v[i].rel); if (!(s = cx_read(p, &n))) { { if (cx_fmt(why, wl, "seed-unreadable")) refuse("text-too-long", 0); } return 1; } np_puts(&b, l.v[i].rel); np_put(&b, "", 1); np_put(&b, s, n); free(s); }
     if (!l.n) { { if (cx_fmt(why, wl, "seed-missing")) refuse("text-too-long", 0); } return 1; }
@@ -251,8 +251,18 @@ static int ensure_ctor(const char *tree, char dir[PW], char key[65], char *why, 
         if (!can_build) { { if (cx_fmt(why, wl, "constructor-missing:seed-changed-rebuild-with---build")) refuse("text-too-long", 0); } return 1; }
         if (!(pid[i] = fork())) {
             char src[PW], tmp[PW + 40], log[PW + 40]; char *av[8]; int n = 0, rc;
-            if (cx_fmt(rel, PW, "seed/%s.c", T[i])) exit(1);
+            if (cx_fmt(rel, PW, "seed/%s.c", i ? T[i] : "gen")) exit(1);
             pj(src, tree, rel);
+            if (!i) {
+                /* genp = seed/gen.c with a private tmpfile(): the installed runtime's tmpfile() opens /tmp/unNNN.tmp from
+                   a fixed sequence with O_TRUNC, so two gen processes at once shared one temporary table.  The wrapper
+                   names the file by pid (unique among live processes) and leaves gen.c itself untouched. */
+                np_buf w = {0}; char wsrc[PW];
+                np_puts(&w, "#include <stdio.h>\n#include <unistd.h>\nstatic FILE *cxdev_tmpfile(void) { static int q; char p[64]; FILE *f; int t; for (t = 0; t < 16; t++) { sprintf(p, \"/tmp/cxdev-gen-%d-%d.tmp\", (int)getpid(), q++); f = fopen(p, \"w+\"); if (f) { remove(p); return f; } } return NULL; }\n#define tmpfile cxdev_tmpfile\n#include \"");
+                np_puts(&w, src); np_puts(&w, "\"\n");
+                if (strchr(src, 34) || strchr(src, 92) || cx_fmt(wsrc, PW, "%s.src%d.c", p, (int)getpid()) || cx_write(wsrc, w.p, w.n)) exit(1);
+                free(w.p); cpy(src, PW, wsrc, strlen(wsrc) + 1);
+            }
             if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", p, (int)getpid()) || cx_fmt(log, sizeof log, "%s.log", p)) exit(1);
             av[n++] = "sh"; av[n++] = ape; if (!i) av[n++] = "-O2"; av[n++] = src; av[n++] = "-o"; av[n++] = tmp; av[n] = 0;
             rc = step(av, tree, step_s, log);
@@ -292,9 +302,9 @@ static int mkq(const char *p) {
 }
 typedef struct { int rec, base; char tree[PW], ctor[PW], dir[PW], cache[PW], shared[PW]; pid_t pid; char status[96]; long ms[4]; int cached; } Job;
 static int build(Job *j) {
-    static const char *names[4] = {"gen", "lint", "tbl", "net"};
+    static const char *names[4] = {"gen", "lint", "tbl", "net"}; pid_t lp = 0; char llog[PW], lms[PW];
     Rec *r = &recs[j->rec]; char g[PW], t[PW], n[PW], json[PW], tbl[PW], net[PW], lint[PW], log[PW], res[PW], lo[PW], lc[PW + 8], line[400]; char *av[12]; int k = 0, i, rc = 0, at = 0; long t0;
-    mkp(j->dir); pj(g, j->ctor, "gen"); pj(t, j->ctor, "tbl"); pj(n, j->ctor, "net"); pj(json, j->dir, "d.json"); pj(tbl, j->dir, "d.tbl"); pj(net, j->dir, "d.net"); pj(lint, sess, "tools/table-lint"); pj(log, j->dir, "fail.log"); pj(res, j->dir, "result"); pj(lo, j->dir, "lint.out");
+    mkp(j->dir); pj(g, j->ctor, "genp"); pj(llog, j->dir, "lint.log"); pj(lms, j->dir, "lint.ms"); unlink(lms); unlink(llog); pj(t, j->ctor, "tbl"); pj(n, j->ctor, "net"); pj(json, j->dir, "d.json"); pj(tbl, j->dir, "d.tbl"); pj(net, j->dir, "d.net"); pj(lint, sess, "tools/table-lint"); pj(log, j->dir, "fail.log"); pj(res, j->dir, "result"); pj(lo, j->dir, "lint.out");
     if (cx_fmt(lc, sizeof lc, "%s.lint", j->cache)) return 1;
     unlink(res); unlink(net); unlink(log);
     for (i = 0; i < 4; i++) j->ms[i] = -1;
@@ -305,10 +315,23 @@ static int build(Job *j) {
         else if (at == 2) { av[k++] = t; av[k++] = json; av[k++] = tbl; }
         else { av[k++] = n; av[k++] = tbl; av[k++] = net; }
         av[k] = 0;
-        if (at != 1 && ctor_lock(1)) { { if (cx_fmt(j->status, sizeof j->status, "DEFERRED:constructor-lock")) refuse("text-too-long", 0); } rc = 2; break; }
+        if (at == 1) {   /* lint only reads d.json: it runs beside tbl -> net and is collected after them */
+            fflush(stdout); fflush(stderr);
+            if (!(lp = fork())) { char mb[32]; int lr; t0 = ms_now(); lr = step(av, j->tree, step_s, llog); if (cx_fmt(mb, sizeof mb, "%ld\n", ms_now() - t0) || cx_write(lms, mb, strlen(mb))) lr = lr ? lr : 1; exit(lr); }
+            step_out = 0;
+            if (lp < 0) { { if (cx_fmt(j->status, sizeof j->status, "build-failed:lint")) refuse("text-too-long", 0); } rc = 1; break; }
+            continue;
+        }
         t0 = ms_now(); rc = step(av, j->tree, step_s, log); j->ms[at] = ms_now() - t0;
-        if (at != 1) ctor_lock(0);
         if (rc) { { if (cx_fmt(j->status, sizeof j->status, "%s:%s", rc == 2 ? "DEFERRED" : "build-failed", names[at])) refuse("text-too-long", 0); } break; }
+    }
+    if (lp > 0) {
+        int st = 0, lr; char *ms; size_t mn;
+        lr = (waitpid(lp, &st, 0) == lp && WIFEXITED(st)) ? WEXITSTATUS(st) : 1;
+        if ((ms = cx_read(lms, &mn))) { j->ms[1] = atol(ms); free(ms); }
+        unlink(lms);
+        if (lr && !rc) { rc = lr; { if (cx_fmt(j->status, sizeof j->status, "%s:lint", lr == 2 ? "DEFERRED" : "build-failed")) refuse("text-too-long", 0); } { char *lg; size_t ln; if ((lg = cx_read(llog, &ln))) { cx_write(log, lg, ln); free(lg); } } }
+        unlink(llog);
     }
     unlink(json); unlink(tbl);
     if (!rc) { copyfile(lo, lc, 0600); copyfile(net, j->cache, 0600); { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } }
@@ -318,6 +341,13 @@ static int build(Job *j) {
 }
 static void run_jobs(Job *j, int n, int par) {
     int started = 0, running = 0, finished = 0, i;
+    {   /* longest first: the previous build in the same work directory left its phase times in "result" */
+        long *w = calloc((size_t)(n > 0 ? n : 1), sizeof(long)); int a, b;
+        if (!w) refuse("allocation", 0);
+        for (a = 0; a < n; a++) { char res[PW], *s, *e; size_t sn; long m[4] = {0, 0, 0, 0}; int q; pj(res, j[a].dir, "result"); if ((s = cx_read(res, &sn))) { if ((e = strchr(s, '\t'))) sscanf(e + 1, "%ld\t%ld\t%ld\t%ld", &m[0], &m[1], &m[2], &m[3]); free(s); } for (q = 0; q < 4; q++) if (m[q] > 0) w[a] += m[q]; }
+        for (a = 1; a < n; a++) for (b = a; b > 0 && w[b] > w[b - 1]; b--) { Job tj = j[b]; long tw = w[b]; j[b] = j[b - 1]; j[b - 1] = tj; w[b] = w[b - 1]; w[b - 1] = tw; }
+        free(w);
+    }
     fflush(stdout); fflush(stderr);
     while (finished < n) {
         int st; pid_t p;
