@@ -407,6 +407,7 @@ static void write_manifest(Pkg *cur, Pkg *inst) {
     }
     hash(b.p, b.n, S.mansha); pj(p, sess, "manifest.tsv"); wr(p, b.p, b.n, 0600); free(b.p);
 }
+static char rdig[MAXR][65];   /* per-recipe digest of the changed files that reach the recipe (reload) */
 /* report: 0 quiet, 1 print CXDEV_RELOAD lines to stderr */
 static void reload(const char *fp, int report) {
     FList wl = {0}, bl = {0}, ch = {0}; char base[PW], p[PW], q[PW], lock[PW], idxp[PW], rel[PW], cdig[65]; int t, i, k, naff = 0, seedch = 0, execch = 0, nj = 0, par = 2, fd, nbuilt = 0; long t0 = ms_now(), sum[4] = {0, 0, 0, 0}, swap_ms = 0; const char *e;
@@ -463,6 +464,43 @@ static void reload(const char *fp, int report) {
         else { char *s = r.out, *l; for (; s && (l = strstr(s, "AFFECTED\t")); s = l + 9) { char id[64]; if ((l == r.out || l[-1] == '\n') && sscanf(l + 9, "%63[^\t\n]", id) == 1) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) recs[k].affected = 1; } }
         np_free(&r); free(av);
     }
+    /* per-recipe cache digest: only the changed files that reach the recipe (stage directory rule plus one
+       net-deps --touch per file, all run together), so an edit to one table does not drop the cached nets of
+       recipes it does not reach.  Conservative fallbacks to the whole-change digest cdig: a file whose own query
+       fails counts for every recipe; when the per-file union differs from the affected set, every recipe uses cdig. */
+    {   int nx = 0, mism = 0; pid_t *pd = calloc((size_t)ch.n + 1, sizeof(pid_t)); unsigned char *fa = calloc((size_t)ch.n + 1, MAXR), hitk[MAXR]; char ndtool[PW], ndd[PW];
+        if (!pd || !fa) refuse("allocation", 0);
+        pj(ndtool, sess, "tools/net-deps"); pj(ndd, sess, "work/nd"); mkp(ndd);
+        for (i = 0; i < ch.n; i++) if (!base_input(ch.v[i].rel) && !strncmp(ch.v[i].rel, "exec/", 5)) nx++;
+        fflush(stdout); fflush(stderr);
+        for (i = 0; i < ch.n; i++) {
+            const char *r = ch.v[i].rel; char out[PW], nm[32];
+            if (base_input(r)) continue;
+            if (seedch || strncmp(r, "exec/", 5) || nx > 64) { memset(fa + (size_t)i * MAXR, 1, MAXR); continue; }
+            for (k = 0; k < nrec; k++) { size_t l = strlen(recs[k].stage); if (!strncmp(r + 5, recs[k].stage, l) && r[5 + l] == '/') fa[(size_t)i * MAXR + k] = 1; }
+            if (cx_fmt(nm, sizeof nm, "%d.out", i)) refuse("text-too-long", 0);
+            pj(out, ndd, nm); unlink(out);
+            if (!(pd[i] = fork())) { char *av[6]; av[0] = ndtool; av[1] = "--root"; av[2] = wt; av[3] = "--touch"; av[4] = (char *)r; av[5] = 0; step_out = out; exit(step(av, wt, 30, 0)); }
+            if (pd[i] < 0) refuse("fork", 0);
+        }
+        for (i = 0; i < ch.n; i++) if (pd[i] > 0) {
+            int st = 0; char out[PW], nm[32], *s = 0, *l, *a; size_t sn;
+            if (cx_fmt(nm, sizeof nm, "%d.out", i)) refuse("text-too-long", 0);
+            pj(out, ndd, nm);
+            if (waitpid(pd[i], &st, 0) < 0 || !WIFEXITED(st) || WEXITSTATUS(st) || !(s = cx_read(out, &sn))) { memset(fa + (size_t)i * MAXR, 1, MAXR); continue; }
+            for (a = s; (l = strstr(a, "AFFECTED\t")); a = l + 9) { char id[64]; if ((l == s || l[-1] == '\n') && sscanf(l + 9, "%63[^\t\n]", id) == 1) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) fa[(size_t)i * MAXR + k] = 1; }
+            free(s); unlink(out);
+        }
+        for (k = 0; k < nrec; k++) { hitk[k] = 0; for (i = 0; i < ch.n; i++) if (fa[(size_t)i * MAXR + k]) hitk[k] = 1; if (!hitk[k] != !recs[k].affected) mism = 1; }
+        for (k = 0; k < nrec; k++) {
+            np_buf d = {0};
+            if (mism || !hitk[k]) { cpy(rdig[k], 65, cdig, 65); continue; }
+            for (i = 0; i < ch.n; i++) if (fa[(size_t)i * MAXR + k]) { size_t n; char *s; const char *r = ch.v[i].rel; pj(q, wt, r); s = cx_read(q, &n); np_puts(&d, r); np_put(&d, "", 1); if (s) np_put(&d, s, n); else np_puts(&d, "<deleted>"); np_put(&d, "", 1); free(s); }
+            np_puts(&d, A.commit); hash(d.p, d.n, rdig[k]); free(d.p);
+        }
+        if (report) fprintf(stderr, "CXDEV_KEYS\tper_recipe=%d\tfiles=%d\n", !mism, ch.n);
+        free(pd); free(fa);
+    }
     for (k = 0; k < nrec; k++) if (recs[k].affected) { if (recs[k].native) naff++; else if (report) fprintf(stderr, "CXDEV_RECIPE\t%s\t%s\n", recs[k].id, recs[k].absent ? "NOT_DEPLOYED" : "NOT_CLAIMED"); }
     pj(p, sess, "pkg.installed"); if (!(ib = cx_read(p, &ibn))) refuse("session-package-missing", p);
     pkg_parse(&inst, ib, ibn);
@@ -485,7 +523,7 @@ static void reload(const char *fp, int report) {
             Job *j; np_buf kb = {0}; char kh[65]; int f;
             j = &jobs[nj++]; j->rec = k; j->base = b;
             np_puts(&kb, recs[k].id); for (f = 0; f < recs[k].nf; f++) { np_puts(&kb, "|"); np_puts(&kb, recs[k].flags[f]); }
-            np_puts(&kb, "|"); np_puts(&kb, b ? bkey : wkey); np_puts(&kb, "|"); np_puts(&kb, b ? A.commit : cdig); np_puts(&kb, b ? "|base" : "|wt");
+            np_puts(&kb, "|"); np_puts(&kb, b ? bkey : wkey); np_puts(&kb, "|"); np_puts(&kb, b ? A.commit : rdig[k]); np_puts(&kb, b ? "|base" : "|wt");
             hash(kb.p, kb.n, kh); free(kb.p);
             if (cx_fmt(rel, PW, "m/%s.net", kh)) refuse("path-too-long", 0);
             pj(j->cache, cdir, rel);
