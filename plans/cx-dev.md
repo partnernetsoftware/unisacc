@@ -24,6 +24,15 @@
 
 (4) 环境变量:`CXDEV_VERBOSE=1` 打印重建摘要与 `CXDEV_RUN` 行;`CXDEV_WT` 指定要比较的工作树(默认构造时的检出);`CXDEV_STEP_S` 每步上限(1 到 55,默认 55);`CXDEV_PAR`、`CXDEV_ABSENT` 见文件头。
 
+## 2.1 假根:让检查与批次把 cx-dev 当产品(2026-11-16)
+
+多数检查与批次硬跑 `sh ./unisacc.com`,所以改了 exec 下的表之后,默认测到的是已装产品,看不到新网。`tools/cx-dev-root DIR` 造一个假根:顶层条目全是指向本检出的符号链接,只有 `unisacc.com` 换成转发到 cx-dev 的壳(带 `UNISACC_LOCAL=1`)。
+
+    sh tools/cx-dev-root /tmp/cxd-root
+    cd /tmp/cxd-root && sh ./unisacc.com tools/check-bench-gencode.cx -- /tmp/cxd-root 3 8
+
+实测(2026-11-16):`gold-table --check` PASS 20 stages;`check-bench-gencode` valid=6 invalid=0 failed=0,三档校验值逐字节相同。结论只是 LOCAL 证据,不是候选结果;`candidate=` 身份相关的批次(要求已装产品身份)在假根里不适用。
+
 ## 3 每次调用做什么
 
 (1) 读 manifest(首行 `NOT_RELEASE<TAB>cx-dev-v1`,其后 name、kind、arch、sha256、size、order、origin、trust 八列)。base 行与全部 trust=verified 的成员逐个核 sha256 与字节数,不符具名拒绝且不执行;trust=local 的成员(由工作树的表建出的网)只记录摘要不比对。
