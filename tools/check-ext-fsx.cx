@@ -1,0 +1,161 @@
+/* tools/check-ext-fsx.cx -- contract check of ext.fsx fs (fsx_ paths, whole files, scratch, walk,
+   glob, tree hash, lock).  Negative controls: ENOENT vs ENOTDIR vs EACCES, a failed atomic write
+   leaves no partial file, ".." escape refused, symlink escape caught, walk order deterministic,
+   tree hash sensitive to mode and symlink target, scratch removed (and refused once swapped for a
+   link), lock timeout and dead-owner reclaim.  Everything lives under one fsx scratch directory.
+     sh ./unisacc.com tools/check-ext-fsx.cx      last line CHECK_EXT_FSX\tchecks=N\tfailed=0, rc 0 */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+static int checks, failed;
+static void ck(int ok, const char *name) { checks++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static char D[4096];
+static const char *at(const char *rel) { static char b[4][4096]; static int k; k = (k + 1) & 3; fsx_join(b[k], sizeof b[k], D, rel); return b[k]; }
+static void put(const char *rel, const char *s) { sy_write_file(at(rel), s, (long)strlen(s), 0644); }
+
+static int walk_list(const char *root, int flags, const char *glob, char *out, long cap) {
+    int w, kind, r, rc = fsx_walk_open(&w, root, flags, glob);
+    const char *rel;
+    out[0] = 0;
+    if (rc < 0) return rc;
+    while ((r = fsx_walk_next(w, &rel, &kind)) == 1) { long n = (long)strlen(out); snprintf(out + n, (size_t)(cap - n), "%c:%s;", kind, rel); }
+    fsx_walk_close(w);
+    return r;
+}
+
+int main(void) {
+    char buf[4096], a[65], b[65], *p;
+    long n;
+    int h, h2, rc, lk, lk2;
+
+    /* paths */
+    ck(fsx_join(buf, sizeof buf, "a/b", "c.tsv") == 9 && !strcmp(buf, "a/b/c.tsv"), "join-like-printf");
+    ck(fsx_join(buf, sizeof buf, "a/", "c") == 3 && !strcmp(buf, "a/c"), "join-one-separator");
+    ck(fsx_join(buf, 5, "abc", "de") == -ERANGE && buf[0] == 0, "join-erange-nul");
+    ck(fsx_join(buf, sizeof buf, "a", "/etc") == -EINVAL, "join-absolute-b-refused");
+    ck(fsx_join_under(buf, sizeof buf, "r", "x/../y") >= 0 && !strcmp(buf, "r/y"), "under-normalises");
+    ck(fsx_join_under(buf, sizeof buf, "r", "x/../../y") == -EXDEV, "under-dotdot-escape");
+    ck(fsx_join_under(buf, sizeof buf, "r", "..") == -EXDEV, "under-dotdot-bare");
+    ck(fsx_join_under(buf, sizeof buf, "r", "/abs") == -EXDEV, "under-absolute");
+
+    /* scratch */
+    rc = fsx_scratch(&h, "fsx-check-");
+    ck(rc == 0 && fsx_scratch_dir(h) != 0, "scratch-create");
+    if (rc) { printf("CHECK_EXT_FSX\tchecks=%d\tfailed=%d\n", checks, failed + 1); return 1; }
+    if (cx_fmt(D, sizeof D, "%s", fsx_scratch_dir(h))) D[0] = 0;
+    ck(!strncmp(D, sy_tmpdir(), strlen(sy_tmpdir())) && strstr(D, "fsx-check-") != 0, "scratch-under-tmpdir-with-prefix");
+
+    /* exists: ENOENT vs ENOTDIR vs EACCES */
+    put("f", "x");
+    sy_mkdir(at("locked"), 0700); put("locked/in", "y"); sy_chmod(at("locked"), 0);
+    ck(fsx_exists(at("f")) == 1, "exists-yes");
+    ck(fsx_exists(at("nope")) == 0, "exists-enoent-zero");
+    ck(fsx_exists(at("f/sub")) == -ENOTDIR, "exists-enotdir-negative");
+    ck(fsx_exists(at("locked/in")) == -EACCES, "exists-eacces-negative");
+    ck(fsx_read(at("nope"), &p, &n, 100) == -ENOENT && !p, "read-enoent");
+    ck(fsx_read(at("f/sub"), &p, &n, 100) == -ENOTDIR, "read-enotdir");
+    ck(fsx_read(at("locked/in"), &p, &n, 100) == -EACCES, "read-eacces");
+
+    /* whole files */
+    ck(fsx_write(at("w.txt"), "hello\n", 6, 0) == 0, "write-ok");
+    ck(fsx_read(at("w.txt"), &p, &n, 100) == 0 && n == 6 && !memcmp(p, "hello\n", 7), "read-back-nul");
+    mm_free(p);
+    ck(fsx_read(at("w.txt"), &p, &n, 5) == -EFBIG && !p, "read-cap-efbig");
+    ck(fsx_write(at("locked/new"), "z", 1, 0) == -EACCES, "write-eacces");
+    sy_chmod(at("locked"), 0700);
+    ck(walk_list(at("locked"), 0, 0, buf, sizeof buf) == 0 && !strcmp(buf, "f:in;"), "atomic-write-no-partial");
+    ck(fsx_write(at("missing/new"), "z", 1, 0) == -ENOENT && fsx_exists(at("missing")) == 0, "write-enoent-no-dir");
+    ck(fsx_write(at("w.txt"), "second", 6, 0) == 0 && fsx_read(at("w.txt"), &p, &n, 100) == 0 && !strcmp(p, "second"), "write-replaces");
+    mm_free(p);
+
+    /* symlink escape */
+    sy_mkdir(at("root"), 0755); sy_mkdir(at("outside"), 0755); put("root/in", "1");
+    sy_symlink("../outside", at("root/esc"));
+    ck(fsx_inside(at("root"), at("root/in")) == 1, "inside-yes");
+    ck(fsx_inside(at("root"), at("root/esc")) == 0, "inside-symlink-escape");
+    ck(fsx_inside(at("root"), at("root/none")) == -ENOENT, "inside-enoent");
+    ck(fsx_inside(at("root"), at("rootx")) < 1, "inside-prefix-not-parent");
+
+    /* glob */
+    ck(fsx_glob_match("*.tsv", "a.tsv") == 1 && fsx_glob_match("*.tsv", "d/a.tsv") == 0, "glob-star-no-slash");
+    ck(fsx_glob_match("a?c", "abc") == 1 && fsx_glob_match("a?c", "a/c") == 0, "glob-question");
+    ck(fsx_glob_match("**/*.cx", "x.cx") == 1 && fsx_glob_match("**/*.cx", "a/b/x.cx") == 1, "glob-doublestar");
+    ck(fsx_glob_match("a/**", "a/b/c") == 1 && fsx_glob_match("a/**", "b/c") == 0, "glob-doublestar-tail");
+    ck(fsx_glob_match("**", "../x") == 0 && fsx_glob_match("**", "/x") == 0, "glob-no-escape");
+
+    /* walk: deterministic sorted order, flags */
+    sy_mkdir(at("t"), 0755); sy_mkdir(at("t/b"), 0755); sy_mkdir(at("t/.git"), 0755);
+    put("t/z", "z"); put("t/a", "a"); put("t/b/m.tsv", "m"); put("t/.git/h", "h"); sy_symlink("b", at("t/lnk"));
+    {
+        char w1[2048], w2[2048];
+        walk_list(at("t"), FSX_WALK_RECURSE, 0, w1, sizeof w1);
+        walk_list(at("t"), FSX_WALK_RECURSE, 0, w2, sizeof w2);
+        ck(!strcmp(w1, "d:.git;f:.git/h;f:a;d:b;f:b/m.tsv;l:lnk;f:z;"), "walk-sorted-recursive");
+        ck(!strcmp(w1, w2), "walk-deterministic");
+        walk_list(at("t"), FSX_WALK_RECURSE | FSX_WALK_SKIP_GIT, 0, w1, sizeof w1);
+        ck(!strcmp(w1, "f:a;d:b;f:b/m.tsv;l:lnk;f:z;"), "walk-skip-git-no-follow");
+        walk_list(at("t"), FSX_WALK_RECURSE | FSX_WALK_SKIP_GIT | FSX_WALK_FOLLOW, 0, w1, sizeof w1);
+        ck(!strcmp(w1, "f:a;d:b;f:b/m.tsv;l:lnk;f:lnk/m.tsv;f:z;"), "walk-follow-links");
+        walk_list(at("t"), FSX_WALK_RECURSE | FSX_WALK_SKIP_GIT, "**/*.tsv", w1, sizeof w1);
+        ck(!strcmp(w1, "f:b/m.tsv;"), "walk-glob-filter");
+        walk_list(at("t"), 0, 0, w1, sizeof w1);
+        ck(!strcmp(w1, "d:.git;f:a;d:b;l:lnk;f:z;"), "walk-flat");
+        sy_symlink(".", at("t/b/loop"));
+        ck(walk_list(at("t"), FSX_WALK_RECURSE | FSX_WALK_FOLLOW, 0, w1, sizeof w1) == -ELOOP, "walk-link-loop-eloop");
+        sy_unlink(at("t/b/loop"));
+        ck(walk_list(at("nope"), 0, 0, w1, sizeof w1) == -ENOENT, "walk-enoent");
+        ck(fsx_walk_next(12345, 0, 0) == -EBADF && fsx_walk_close(0) == -EBADF, "walk-bad-handle");
+    }
+
+    /* hashes */
+    {
+        char s1[65];
+        sy_stat_t st0;
+        int mode0 = sy_stat(at("t/a"), &st0) == 0 ? st0.mode : 0644;
+        ck(fsx_sha256(at("t/a"), s1) == 0 && !strcmp(s1, "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"), "sha256-file");
+        ck(fsx_tree_sha256(at("t"), 0, a) == 0 && fsx_tree_sha256(at("t"), 0, b) == 0 && !strcmp(a, b), "tree-hash-stable");
+        sy_chmod(at("t/a"), 0755);
+        ck(fsx_tree_sha256(at("t"), 0, b) == 0 && strcmp(a, b), "tree-hash-mode-sensitive");
+        sy_chmod(at("t/a"), mode0);
+        ck(fsx_tree_sha256(at("t"), 0, b) == 0 && !strcmp(a, b), "tree-hash-mode-restored");
+        sy_unlink(at("t/lnk")); sy_symlink("z", at("t/lnk"));
+        ck(fsx_tree_sha256(at("t"), 0, b) == 0 && strcmp(a, b), "tree-hash-link-target-sensitive");
+        sy_unlink(at("t/lnk")); sy_symlink("b", at("t/lnk"));
+        put("t/z", "Z");
+        ck(fsx_tree_sha256(at("t"), 0, b) == 0 && strcmp(a, b), "tree-hash-content-sensitive");
+        put("t/z", "z");
+        ck(fsx_tree_sha256(at("t"), 0, b) == 0 && !strcmp(a, b), "tree-hash-content-restored");
+        ck(fsx_tree_sha256(at("nope"), 0, b) == -ENOENT, "tree-hash-enoent");
+    }
+
+    /* lock */
+    ck(fsx_lock(&lk, at("L"), 0, 0) == 0, "lock-take");
+    ck(fsx_lock(&lk2, at("L"), 100, 0) == -ETIMEDOUT, "lock-held-timeout");
+    ck(fsx_unlock(lk) == 0 && fsx_exists(at("L")) == 0, "unlock-removes");
+    ck(fsx_unlock(lk) == -EBADF, "unlock-twice-ebadf");
+    put("L", "999999999\t1\n");
+    ck(fsx_lock(&lk, at("L"), 100, 0) == 0, "lock-dead-owner-reclaimed");
+    put("L", "1\t1\n");
+    ck(fsx_unlock(lk) == -ESTALE && fsx_exists(at("L")) == 1, "unlock-owner-check");
+    {
+        char body[64];
+        if (cx_fmt(body, sizeof body, "%d\t1000\n", sy_pid())) body[0] = 0;
+        put("L", body);
+        ck(fsx_lock(&lk2, at("L"), 50, 0) == -ETIMEDOUT, "lock-live-owner-not-reclaimed");
+        ck(fsx_lock(&lk2, at("L"), 50, 1000) == 0 && fsx_unlock(lk2) == 0, "lock-expired-reclaimed");
+    }
+
+    /* scratch drop: refused when swapped, then removed */
+    ck(fsx_scratch(&h2, "fsx-check2-") == 0, "scratch-second");
+    if (cx_fmt(buf, sizeof buf, "%s", fsx_scratch_dir(h2))) buf[0] = 0;
+    sy_rmdir(buf); sy_symlink(D, buf);
+    ck(fsx_scratch_drop(h2) == -ESTALE && fsx_exists(at("f")) == 1, "scratch-swapped-link-refused");
+    sy_unlink(buf);
+    ck(fsx_scratch_drop(h2) == 0, "scratch-gone-ok");
+    ck(fsx_scratch_drop(h) == 0 && fsx_exists(D) == 0, "scratch-drop-removes-tree");
+    ck(fsx_scratch_drop(h) == -EBADF && fsx_scratch_dir(h) == 0, "scratch-handle-stale");
+    printf("CHECK_EXT_FSX\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
