@@ -16,6 +16,10 @@
  * Run time (no unisacc.com and no installed APE in the process tree):
  *   cx-dev FILE.cx -- ARGS...        same arguments and behaviour as `sh ./unisacc.com FILE.cx -- ARGS...`
  *   cx-dev --reload | --status | --close      optional; a plain call does everything by itself
+ *   cx-dev --watch                            bounded resident prebuilder (see do_watch): rebuilds on the devsvc
+ *                                             write events (CXDEV_EVENTS=<instance>/events.tsv) so the next call
+ *                                             finds the nets ready; a call that arrives mid-rebuild waits for it
+ *                                             (CXDEV_WAIT_S, 0..55, default 50) instead of running stale
  * A plain call follows tools/lab-loader/CONTRACT.md: (1) this executable is the lnx/x86_64 loader; (2) it reads
  * manifest.tsv beside itself; (3) it checks sha256 and size of the base and of every trust=verified member and refuses
  * by name on a mismatch (trust=local members, built from the worktree, are recorded, not compared); (4) it execs the
@@ -453,8 +457,17 @@ static void reload(const char *fp, int report) {
     if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) {
         size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0;
         free(ls);
-        if (owner > 0 && !kill(owner, 0)) { S = old; add_stale("*", "reload-in-progress"); return; }
-        unlink(lock);   /* the owner is gone */
+        if (owner > 0 && !kill(owner, 0)) {
+            /* another call or the prebuild watcher (cx-dev --watch) is rebuilding: wait for it, bounded, and use
+               what it left when it is for the same fingerprint; past the bound the old behaviour (stale) holds */
+            long w0 = ms_now(), lim = 50000; const char *we = getenv("CXDEV_WAIT_S");
+            if (we && we[0] && atoi(we) >= 0 && atoi(we) <= 55) lim = 1000L * atoi(we);
+            while (ms_now() - w0 < lim && !access(lock, 0) && !kill(owner, 0)) sy_sleep_ms(20);
+            if (!access(lock, 0) && !kill(owner, 0)) { S = old; add_stale("*", "reload-in-progress"); return; }
+            if (!report && !state_load() && !strcmp(S.fp, fp)) return;
+            S = old;
+        }
+        if (!access(lock, 0)) unlink(lock);   /* the owner is gone */
         if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) { S = old; add_stale("*", "reload-in-progress"); return; }
     }
     { char pidtxt[32]; { if (cx_fmt(pidtxt, sizeof pidtxt, "%d\n", (int)getpid())) refuse("text-too-long", 0); } if (write(fd, pidtxt, strlen(pidtxt)) < 0) refuse("lock-write", lock); }
@@ -731,10 +744,66 @@ static int do_build(void) {
     return bad ? 1 : 0;
 }
 
+/* cx-dev --watch: bounded resident prebuilder.  It only fills the same content-keyed caches and swaps the same
+   package a plain call would (reload() in a child, under reload.lock), so a later call finds state.tsv current
+   and starts at once; nothing it does is a verdict.  Trigger: growth of the devsvc event log named by
+   CXDEV_EVENTS (every f write, f edit and git commit appends there), plus a fingerprint poll every
+   CXDEV_WATCH_POLL_MS (default 2000) for writes that bypass devsvc.  Bounds: CXDEV_WATCH_TTL_S (default 1800, at
+   most 14400) total, CXDEV_WATCH_IDLE_S (default 600) without a rebuild; one instance per bundle (watch.lock);
+   no rebuild is started while load1 is at or above CXDEV_WATCH_LOAD (default 10); a rebuild already under way
+   (reload.lock) is never started twice. */
+static int env_int(const char *name, int dflt, int lo, int hi) { const char *e = getenv(name); int v = e && e[0] ? atoi(e) : dflt; return v < lo ? lo : v > hi ? hi : v; }
+static int do_watch(void) {
+    char lock[PW], pidtxt[32]; const char *evp = getenv("CXDEV_EVENTS"), *why = "ttl"; int fd, n = 0, skipped = 0;
+    int ttl = env_int("CXDEV_WATCH_TTL_S", 1800, 1, 14400), idle = env_int("CXDEV_WATCH_IDLE_S", 600, 1, 14400), poll = env_int("CXDEV_WATCH_POLL_MS", 2000, 100, 60000), maxload = env_int("CXDEV_WATCH_LOAD", 10, 1, 1024);
+    long t0 = ms_now(), tact = t0, tpoll = 0; int64_t evsz = -1, z = 0;
+    pj(lock, sess, "watch.lock");
+    if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) {
+        size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0;
+        free(ls);
+        if (owner > 0 && !kill(owner, 0)) { printf("CXDEV_WATCH\talready=%d\tbundle=%s\n", owner, sess); return 0; }
+        unlink(lock);
+        if ((fd = open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600)) < 0) refuse("watch-lock", lock);
+    }
+    if (cx_fmt(pidtxt, sizeof pidtxt, "%d\n", (int)getpid()) || write(fd, pidtxt, strlen(pidtxt)) < 0) refuse("lock-write", lock);
+    close(fd);
+    printf("CXDEV_WATCH\tstart\tpid=%d\tttl_s=%d\tidle_s=%d\tpoll_ms=%d\tmax_load=%d\tevents=%s\n", (int)getpid(), ttl, idle, poll, maxload, evp && evp[0] ? evp : "-"); fflush(stdout);
+    for (;;) {
+        long now = ms_now(); int trig = 0; const char *src = "poll";
+        if (now - t0 >= 1000L * ttl) break;
+        if (now - tact >= 1000L * idle) { why = "idle"; break; }
+        if (!isdir(wt)) { why = "worktree-gone"; break; }
+        { size_t ln; char *ls = cx_read(lock, &ln); int owner = ls ? atoi(ls) : 0; free(ls); if (owner != (int)getpid()) { why = "lock-lost"; break; } }
+        { struct stat est; if (evp && evp[0] && !stat(evp, &est)) { z = (int64_t)est.st_size; if (z != evsz) { if (evsz >= 0) { trig = 1; src = "event"; } evsz = z; } } }
+        if (!trig && now - tpoll >= poll) trig = 1;
+        if (trig) {
+            int st = 0, rc; pid_t pid; size_t ln; char *la; double l1;
+            tpoll = now; fflush(stdout); fflush(stderr);
+            la = cx_read("/proc/loadavg", &ln); l1 = la ? atof(la) : 0; free(la);
+            /* the comparison and the rebuild run in a child: the watcher itself keeps no tables and no lists */
+            if (!(pid = fork())) {
+                char fp[40];
+                fingerprint(fp);
+                if (!state_load() && !strcmp(S.fp, fp)) exit(0);
+                if (l1 >= (double)maxload) exit(5);
+                reload(fp, 0);
+                exit(S.nstale ? 4 : 3);
+            }
+            rc = (pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st)) ? WEXITSTATUS(st) : 1;
+            if (rc == 3 || rc == 4) { n++; tact = ms_now(); skipped = 0; printf("CXDEV_PREBUILD\ttrigger=%s\tresult=%s\tms=%ld\tload1=%.2f\n", src, rc == 3 ? "current" : "stale-recipes", tact - now, l1); fflush(stdout); }
+            else if (rc == 5) { if (!skipped) { printf("CXDEV_PREBUILD\ttrigger=%s\tresult=not-started\treason=load1 %.2f >= %d\n", src, l1, maxload); fflush(stdout); } skipped = 1; }
+            else if (rc) { printf("CXDEV_PREBUILD\ttrigger=%s\tresult=child-failed\trc=%d\n", src, rc); fflush(stdout); }
+        }
+        sy_sleep_ms(50);
+    }
+    unlink(lock);
+    printf("CXDEV_WATCH\texit\treason=%s\tprebuilds=%d\tlived_ms=%ld\n", why, n, ms_now() - t0);
+    return 0;
+}
 int main(int argc, char **argv) {
     const char *e; char p[PW], fp[40], slice[PW], container[PW], *s; size_t n; int mode = 0, i, degraded; char **av; long k;
-    if (argc >= 2 && !strcmp(argv[1], "--reload")) mode = 1; else if (argc >= 2 && !strcmp(argv[1], "--status")) mode = 2; else if (argc >= 2 && !strcmp(argv[1], "--close")) mode = 3; else if (argc >= 2 && !strcmp(argv[1], "--build")) mode = 4;
-    if (mode && argc != 2) refuse("usage: cx-dev --build|--reload|--status|--close takes no further argument", 0);
+    if (argc >= 2 && !strcmp(argv[1], "--reload")) mode = 1; else if (argc >= 2 && !strcmp(argv[1], "--status")) mode = 2; else if (argc >= 2 && !strcmp(argv[1], "--close")) mode = 3; else if (argc >= 2 && !strcmp(argv[1], "--build")) mode = 4; else if (argc >= 2 && !strcmp(argv[1], "--watch")) mode = 5;
+    if (mode && argc != 2) refuse("usage: cx-dev --build|--reload|--status|--close|--watch takes no further argument", 0);
     e = getenv("CXDEV_VERBOSE"); verbose = e && !strcmp(e, "1");
     e = getenv("CXDEV_STEP_S"); if (e && atoi(e) >= 1 && atoi(e) <= 55) step_s = atoi(e);
     if (mode == 4) return do_build();
@@ -752,6 +821,7 @@ int main(int argc, char **argv) {
         pj(p, sess, "state.tsv"); unlink(p); pj(p, sess, "ecache"); rmtree(p); mkp(p); chmod(p, 0700); pj(p, sess, "work"); rmtree(p); pj(p, sess, "cache/m"); rmtree(p);
         printf("CXDEV_CLOSE\tbundle=%s\tlocal state, nets and run cache dropped; the next call compares the worktree again\n", sess); return 0;
     }
+    if (mode == 5) { if (!isdir(wt)) refuse("watch needs the worktree:", wt); return do_watch(); }
     if (isdir(wt)) {   /* a bundle copied away from its worktree runs as it is */
         fingerprint(fp);
         if (mode == 1 || state_load() || strcmp(S.fp, fp)) reload(fp, mode == 1 || verbose);
