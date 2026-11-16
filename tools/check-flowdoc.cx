@@ -38,6 +38,30 @@ static void reset(void) {
     fclose(f);
 }
 
+static const char *docp(void) {
+    static char p[600];
+    SF(p, sizeof p, "%s/d.md", root);
+    return p;
+}
+
+static void put(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { failed++; return; }
+    fputs(text, f);
+    fclose(f);
+}
+
+/* the document is byte for byte `want` */
+static int same(const char *want) {
+    FILE *f = fopen(docp(), "rb");
+    long wn = (long)strlen(want), i = 0;
+    int c, ok = 1;
+    if (!f) return 0;
+    while ((c = fgetc(f)) != EOF) { if (i >= wn || (unsigned char)want[i] != (unsigned char)c) ok = 0; i++; }
+    fclose(f);
+    return ok && i == wn;
+}
+
 static int has(ff_out *o, const char *s) { return o->buf && tx_find(o->buf, o->n, s, (long)strlen(s)) >= 0; }
 
 static void whole(ff_out *o) { ff_out_free(o); fd_run("doc.get", A(""), o); }
@@ -110,6 +134,101 @@ int main(void) {
     ff_out_free(&o);
     ck(fd_run("doc.mermaid", A("section=候选池;old=t1;new=z"), &o) == 1 && !strcmp(o.err, "ENOMATCH"), "mermaid_only_in_block");
     ff_out_free(&o);
+
+    /* DCLI1: final-newline contract of doc.append.  A line with and without a final LF, given as a
+       literal or through line@=PATH, must leave the same bytes; nothing outside the insertion moves. */
+    {
+        static const char *MID = "# 标题\n\nintro\n\n## 候选池\n\n### T\n\nt1\nt2\nt3\n\n### U\n\nu1\n\n## 图\n\n```mermaid\nflowchart LR\n  A[旧名] --> B\n  B --> C\n```\n\n## 尾\n\n```\n# 不是标题\n```\nend\n";
+        static const char *END1 = "# 标题\n\nintro\n\n## 候选池\n\n### T\n\nt1\nt2\n\n### U\n\nu1\n\n## 图\n\n```mermaid\nflowchart LR\n  A[旧名] --> B\n  B --> C\n```\n\n## 尾\n\n```\n# 不是标题\n```\nend\nz\n";
+        static const char *END3 = "# 标题\n\nintro\n\n## 候选池\n\n### T\n\nt1\nt2\n\n### U\n\nu1\n\n## 图\n\n```mermaid\nflowchart LR\n  A[旧名] --> B\n  B --> C\n```\n\n## 尾\n\n```\n# 不是标题\n```\nend\na\nb\nc\n";
+        char inp[600], la[700];
+        SF(inp, sizeof inp, "%s/in.txt", root);
+
+        reset();
+        ck(fd_run("doc.append", A("section=候选池/T;line=t3"), &o) == 0 && same(MID), "append_mid_literal_nolf");
+        ff_out_free(&o);
+        reset();
+        ck(fd_run("doc.append", A("section=候选池/T;line=t3%0A"), &o) == 0 && same(MID), "append_mid_literal_lf");
+        ff_out_free(&o);
+        reset();
+        put(inp, "t3\n");
+        SF(la, sizeof la, "section=候选池/T;line@=%s", inp);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same(MID), "append_mid_file_lf");
+        ff_out_free(&o);
+        reset();
+        put(inp, "t3");
+        ck(fd_run("doc.append", A(la), &o) == 0 && same(MID), "append_mid_file_nolf");
+        ff_out_free(&o);
+
+        reset();
+        ck(fd_run("doc.append", A("section=尾;line=z"), &o) == 0 && same(END1), "append_eof_literal_nolf");
+        ff_out_free(&o);
+        reset();
+        ck(fd_run("doc.append", A("section=尾;line=z%0A"), &o) == 0 && same(END1), "append_eof_literal_lf");
+        ff_out_free(&o);
+        reset();
+        put(inp, "z\n");
+        SF(la, sizeof la, "section=尾;line@=%s", inp);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same(END1), "append_eof_file_lf");
+        ff_out_free(&o);
+
+        /* repeated appends do not pile up separators, with LF and without */
+        reset();
+        put(inp, "a\n");
+        ck(fd_run("doc.append", A(la), &o) == 0, "append_repeat_1");
+        ff_out_free(&o);
+        ck(fd_run("doc.append", A("section=尾;line=b"), &o) == 0, "append_repeat_2");
+        ff_out_free(&o);
+        put(inp, "c\n");
+        ck(fd_run("doc.append", A(la), &o) == 0 && same(END3), "append_repeat_3_bytes");
+        ff_out_free(&o);
+
+        /* newlines inside the line are kept, only the final one is not doubled */
+        put(docp(), "# A\n\na1\n\n# B\n\nb1\n");
+        put(inp, "p\n\nq\n");
+        SF(la, sizeof la, "section=A;line@=%s", inp);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same("# A\n\na1\np\n\nq\n\n# B\n\nb1\n"), "append_inner_newlines_kept");
+        ff_out_free(&o);
+        /* blank lines already at the end of the last section stay after the new line */
+        put(docp(), "# A\n\na1\n\n# B\n\nb1\n\n\n");
+        put(inp, "z\n");
+        SF(la, sizeof la, "section=B;line@=%s", inp);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same("# A\n\na1\n\n# B\n\nb1\nz\n\n\n"), "append_eof_keeps_tail_blanks");
+        ff_out_free(&o);
+        /* file without a final LF: one separator is added before the line, one LF ends the file */
+        put(docp(), "# A\n\na1\n\n# B\n\nb1");
+        ck(fd_run("doc.append", A(la), &o) == 0 && same("# A\n\na1\n\n# B\n\nb1\nz\n"), "append_eof_file_without_final_lf");
+        ff_out_free(&o);
+        /* section with an empty body, and an empty line: with and without LF give the same bytes */
+        put(docp(), "# A\n\n# B\n\nb1\n");
+        SF(la, sizeof la, "section=A;line@=%s", inp);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same("# A\nz\n\n# B\n\nb1\n"), "append_empty_body_file_lf");
+        ff_out_free(&o);
+        put(docp(), "# A\n\n# B\n\nb1\n");
+        ck(fd_run("doc.append", A("section=A;line=z"), &o) == 0 && same("# A\nz\n\n# B\n\nb1\n"), "append_empty_body_literal_nolf");
+        ff_out_free(&o);
+        put(docp(), "# A\n\na1\n\n# B\n\nb1\n");
+        ck(fd_run("doc.append", A("section=B;line="), &o) == 0 && same("# A\n\na1\n\n# B\n\nb1\n\n"), "append_empty_line_literal");
+        ff_out_free(&o);
+        put(docp(), "# A\n\na1\n\n# B\n\nb1\n");
+        ck(fd_run("doc.append", A("section=B;line=%0A"), &o) == 0 && same("# A\n\na1\n\n# B\n\nb1\n\n"), "append_empty_line_lf");
+        ff_out_free(&o);
+
+        /* negative control: a stale expect_sha refuses the LF-terminated file input and writes nothing */
+        reset();
+        put(inp, "z\n");
+        SF(la, sizeof la, "section=尾;line@=%s;expect_sha=%s", inp, old);
+        ck(fd_run("doc.append", A(la), &o) == 1 && !strcmp(o.err, "ESHA"), "append_file_lf_expect_sha_refused");
+        ff_out_free(&o);
+        ck(same(DOC), "append_file_lf_refused_bytes_unchanged");
+        /* and the matching sha is accepted, so the refusal above is the sha and not the input form */
+        fd_run("doc.get", A(""), &o);
+        SF(la, sizeof la, "section=尾;line@=%s;expect_sha=%s", inp, o.sha);
+        ff_out_free(&o);
+        ck(fd_run("doc.append", A(la), &o) == 0 && same(END1), "append_file_lf_expect_sha_ok");
+        ff_out_free(&o);
+        unlink(inp);
+    }
 
     SF(args, sizeof args, "root=%s;path=../outside.md;section=a;line=x", root);
     ck(fd_run("doc.append", args, &o) == 1, "outside_root_refused");
