@@ -20,8 +20,17 @@
  *          (the link lives in the payload) and the next request of that class
  *          takes it back.  Nothing is split or coalesced, so nothing can be
  *          corrupted by it: a block is always exactly its class's size.
- *   large: anything bigger is mapped on its own, rounded to 64 KB, class -1,
- *          and `free` returns it to the OS.
+ *   large: anything bigger is mapped on its own, rounded to 64 KB, class -1.
+ *          `free` keeps a large block of at most _UNISA_LMAX bytes on a list
+ *          chosen by its size (list b holds 128 KB << b up to, not including,
+ *          256 KB << b) and the next large request takes the first block among
+ *          the first 16 of its list that is big enough, so a reused block is
+ *          less than twice the rounded request.  The lists together never hold
+ *          more than _UNISA_LCAP bytes: before a block goes on, older ones are
+ *          returned to the OS until it fits, and a block larger than
+ *          _UNISA_LMAX goes straight back.  A reused block keeps its mapping's
+ *          size in the header and is NOT cleared: like a small block, its
+ *          bytes are whatever the last owner left (calloc clears its own).
  * Every failure path sets errno = ENOMEM before returning NULL, the way glibc
  * does; a successful call leaves errno as the caller set it (ISO C: no library
  * function resets it on success). */
@@ -38,6 +47,12 @@
 static char *_unisa_freel[12];
 static char *_unisa_cur = 0;
 static __u_word _unisa_left = 0;
+#define _UNISA_LBINS 9
+#define _UNISA_LMAX 33554432
+#define _UNISA_LCAP 67108864
+static char *_unisa_lbin[_UNISA_LBINS];
+static __u_word _unisa_lheld = 0;
+static int _unisa_lev = 0;
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_map
 static char *_unisa_map(__u_word __u_n) {
@@ -55,11 +70,27 @@ static char *_unisa_map(__u_word __u_n) {
 
 #if !__UNISA_FTRIM_LIBC || __UN_malloc
 static void *malloc(__u_word __u_n) {
-    __u_word __u_sz; int __u_k; char *__u_p;
+    __u_word __u_sz; int __u_k; char *__u_p; char **__u_at; int __u_j;
     if (__u_n < 0 || __u_n > 0x100000000000) { errno = ENOMEM; return NULL; }
     __u_sz = __u_n + 16;
     if (__u_sz > 65536) {
         __u_sz = (__u_sz + 65535) & ~65535;
+        if (__u_sz <= _UNISA_LMAX) {
+            __u_k = 0;
+            while ((262144 << __u_k) <= __u_sz) __u_k = __u_k + 1;
+            __u_at = &_unisa_lbin[__u_k];
+            __u_j = 0;
+            while (*__u_at != NULL && __u_j < 16) {
+                __u_p = *__u_at;
+                if (*(__u_word *)__u_p >= __u_sz) {
+                    *__u_at = *(char **)(__u_p + 16);
+                    _unisa_lheld = _unisa_lheld - *(__u_word *)__u_p;
+                    return __u_p + 16;
+                }
+                __u_at = (char **)(__u_p + 16);
+                __u_j = __u_j + 1;
+            }
+        }
         __u_p = _unisa_map(__u_sz);
         if (__u_p == NULL) return NULL;
         *(__u_word *)__u_p = __u_sz;
@@ -91,11 +122,30 @@ static void *malloc(__u_word __u_n) {
 
 #if !__UNISA_FTRIM_LIBC || __UN_free
 static void free(void *__u_q) {
-    char *__u_p; __u_word __u_k;
+    char *__u_p; __u_word __u_k; __u_word __u_sz; char *__u_v;
     if (__u_q == NULL) return;
     __u_p = (char *)__u_q - 16;
     __u_k = *(__u_word *)(__u_p + 8);
-    if (__u_k < 0) { __munmap(__u_p, *(__u_word *)__u_p); return; }
+    if (__u_k < 0) {
+        __u_sz = *(__u_word *)__u_p;
+        if (__u_sz > _UNISA_LMAX) { __munmap(__u_p, __u_sz); return; }
+        while (_unisa_lheld + __u_sz > _UNISA_LCAP) {
+            __u_v = _unisa_lbin[_unisa_lev];
+            if (__u_v != NULL) {
+                _unisa_lbin[_unisa_lev] = *(char **)(__u_v + 16);
+                _unisa_lheld = _unisa_lheld - *(__u_word *)__u_v;
+                __munmap(__u_v, *(__u_word *)__u_v);
+            }
+            _unisa_lev = _unisa_lev + 1;
+            if (_unisa_lev == _UNISA_LBINS) _unisa_lev = 0;
+        }
+        __u_k = 0;
+        while ((262144 << __u_k) <= __u_sz) __u_k = __u_k + 1;
+        *(char **)(__u_p + 16) = _unisa_lbin[__u_k];
+        _unisa_lbin[__u_k] = __u_p;
+        _unisa_lheld = _unisa_lheld + __u_sz;
+        return;
+    }
     *(char **)(__u_p + 16) = _unisa_freel[__u_k];
     _unisa_freel[__u_k] = __u_p;
 }
