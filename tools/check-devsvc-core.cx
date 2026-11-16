@@ -62,12 +62,15 @@ static int group(int g) {
     /* 夹具:克隆、放入工作副本三件、提交、链接产品 */
     {   char gd[600]; F(gd, sizeof gd, "%s/.git", fx);
         if (access(gd, F_OK) != 0) { char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-clone\n"); return 1; } } }
-    {   const char *names[5] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx", "tools/cxlib/flowfile.cx"}; int i;
-        for (i = 0; i < 5; i++) {
+    {   /* 末项可选:flowexec 引到的 flowadmit 在工作副本里有就一并放入(只把 ENOENT 当没有) */
+        const char *names[6] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx", "tools/cxlib/flowfile.cx", "tools/cxlib/flowadmit.cx"}; int i;
+        for (i = 0; i < 6; i++) {
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
+            if (i == 5 && !ovf && sy_exists(src) == 0) break;
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-core.fixture-copy\t%s\n", names[i]); if (b) free(b); return 1; }
             free(b);
+            if (i == 5) { char *v[] = {"git", "add", "tools/cxlib/flowadmit.cx", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add-admit\n"); return 1; } }
         } }
     {   char *v[] = {"git", "add", "tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/cxlib/flowexec.cx", "tools/cxlib/flowfile.cx", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-add\n"); return 1; } }
     {   char *v[] = {"git", "-c", "user.name=dvcheck", "-c", "user.email=dvcheck@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-commit\n"); return 1; } }
@@ -84,6 +87,20 @@ static int group(int g) {
     {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "pinned-ok", 0}; rc = run(v, fx, envv); }
     ms_hot = sy_now_ms() - t0;
     ck(rc == 0 && has("pinned-ok") && ms_hot < 6000 && ms_hot * 2 < ms_cold + 1000, "hot-call-hits-cache");
+    /* (2a) 命中路免 git:按 HEAD 提交号记身份备忘与产品 sha 备忘;两者在 DV_PIN_DIR/memo 下 */
+    {   char mp[800]; int okm = 0, okp = 0; char *hv[] = {"git", "rev-parse", "HEAD", 0}; char *ls[] = {"ls", "-1", mp, 0};
+        F(mp, sizeof mp, "%s/memo", pin);
+        if (run(hv, fx, 0) == 0 && strlen(out) >= 40) { char hp[900]; out[40] = 0; F(hp, sizeof hp, "%s/head-%s", mp, out); okm = !ovf && sy_exists(hp) == 1; }
+        if (run(ls, 0, 0) == 0) okp = strstr(out, "prod-") != 0;
+        ck(okm, "memo-written-for-head-commit");
+        ck(okp, "product-sha-memo-written"); }
+    /* (2b0) 格式坏的身份备忘不被采信:写入垃圾后调用仍成功,备忘按 git 重算并重写为合法格式 */
+    {   char hp[900]; char *hv[] = {"git", "rev-parse", "HEAD", 0}; unsigned char *b = 0; int64_t n = 0; int okw = 0;
+        if (run(hv, fx, 0) == 0 && strlen(out) >= 40) { out[40] = 0; F(hp, sizeof hp, "%s/memo/head-%s", pin, out); okw = !ovf && !sy_write_atomic(hp, "garbage\n", 8, 0600); }
+        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "memo-bad-ok", 0}; rc = run(v, fx, envv); }
+        ck(okw && rc == 0 && has("memo-bad-ok") && !has("using the working copy"), "bad-memo-ignored");
+        ck(okw && !sy_read_file(hp, &b, &n, 1 << 20) && b && n > 8 && !memcmp(b, "dvmemo1\t", 8), "bad-memo-rewritten");
+        if (b) free(b); }
     /* (2b) 客户端被 INT:1 s 后杀客户端,2 s 内节点进程组清空,事件含 x.cancelled */
     {   const char *sc = "sh ./unisacc.com tools/devsvc.cx -- start >/dev/null 2>&1; sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- sleep 47 2>cancel.err & C=$!; i=0; K=; S=;"
             " while [ $i -lt 50 ] && [ -z \"$S\" ]; do sleep 0.1; i=$((i+1)); K=$(pgrep -P $C | head -1); [ -n \"$K\" ] && S=$(pgrep -P $K -x sleep | head -1); done;"
@@ -142,6 +159,19 @@ static int group(int g) {
         if (rc != 0 || ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-worktree\n"); return 1; }
         {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wt-ok", 0}; rc = run(v, wt, envv); }
         ck(rc == 0 && has("wt-ok") && !has("repo table") && !has("using the working copy"), "worktree-call-works");
+        /* (7a) 工作树取自己的 HEAD;HEAD 一动(新提交)即按新提交号重新钉死,不命中旧备忘;树内容相同则固定版本键不变 */
+        {   char h1[48] = "", h2[48] = "", hp[900]; char *hv[] = {"git", "rev-parse", "HEAD", 0}; char *ls[] = {"ls", "-1", pin, 0}; char *q; int n0 = -1, n1 = -1, okm1, okm2;
+            if (run(hv, wt, 0) == 0 && strlen(out) >= 40) { memcpy(h1, out, 40); h1[40] = 0; }
+            F(hp, sizeof hp, "%s/memo/head-%s", pin, h1); okm1 = h1[0] && !ovf && sy_exists(hp) == 1;
+            ck(okm1, "worktree-memo-for-its-head");
+            if (run(ls, 0, 0) == 0) for (n0 = 0, q = out; *q; q++) n0 += *q == '\n';
+            {   char *cv[] = {"git", "-c", "user.name=dvcheck", "-c", "user.email=dvcheck@example.invalid", "commit", "-q", "--allow-empty", "-m", "wt-move", 0}; (void)run(cv, wt, 0); }
+            if (run(hv, wt, 0) == 0 && strlen(out) >= 40) { memcpy(h2, out, 40); h2[40] = 0; }
+            {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wt-moved-ok", 0}; rc = run(v, wt, envv); }
+            F(hp, sizeof hp, "%s/memo/head-%s", pin, h2); okm2 = h2[0] && strcmp(h1, h2) && !ovf && sy_exists(hp) == 1;
+            ck(rc == 0 && has("wt-moved-ok") && okm2, "head-move-repins-new-commit");
+            if (run(ls, 0, 0) == 0) for (n1 = 0, q = out; *q; q++) n1 += *q == '\n';
+            ck(n0 > 0 && n0 == n1, "head-move-same-tree-same-key"); }
         {   char *v[] = {"rm", "-rf", wt, 0}; (void)run(v, 0, 0); } }
     /* (8) 内容相同的第二个克隆共享固定版本缓存:首次调用即命中(小于 3 s) */
     {   char fx2[200], lk[300]; long t1, ms2; F(fx2, sizeof fx2, "%s-c2", fx); F(lk, sizeof lk, "%s/unisacc.com", fx2);
@@ -183,6 +213,10 @@ static int group(int g) {
         printf("NOTE\twc-first-root-first-call-ms\t%ld\n", ms);
         NWC(k1);
         ck(k1 == k0 + 1, "wc-fallback-caches-by-content");
+        {   /* (9a) git 不可用(GIT_DIR 指向不存在处):不走免 git 路,具名退回工作副本(命中上一步的内容键缓存) */
+            char e3[64] = "GIT_DIR=/nonexistent-dv-git"; char *env2[4]; env2[0] = e1; env2[1] = e2; env2[2] = e3; env2[3] = 0;
+            {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "nogit-ok", 0}; rc = run(v, w1, env2); }
+            ck(rc == 0 && has("nogit-ok") && has("using the working copy"), "git-unusable-named-fallback"); }
         {   /* 启动器自身的产品 -run 编译缓存按源路径取键(产品侧,约 6 至 10 s/新根,不在本入口可控范围):先只暖它(无子命令,rc 2),再计时 */
             char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", 0}; (void)run(v, w2, envv); }
         t1 = sy_now_ms();
