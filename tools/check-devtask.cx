@@ -29,9 +29,9 @@ static long events(const char *dir, const char *id, const char *ev) {
 }
 static int sh(char *cmd, np_result *r) { char *v[] = {"sh", "-c", cmd, 0}; char why[256]; return np_run(v, 0, 0, 50, r, why, sizeof why); }
 int main(int argc, char **argv) {
-    int GA = 1, GB = 1;   /* --cases a:核心与工作单;--cases b:验收记忆、并行 bg、外部写域;缺省两组都跑 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { GA = strchr(argv[2], 'a') != 0; GB = strchr(argv[2], 'b') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devtask.cx [--cases a|b|ab]\n"); return 2; }
+    int GA = 1, GB = 1, GC = 1;   /* --cases a:核心与工作单;--cases b:并行 bg、外部写域;--cases c:验收记忆(由原 b 拆出);缺省全跑 */
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { GA = strchr(argv[2], 'a') != 0; GB = strchr(argv[2], 'b') != 0; GC = strchr(argv[2], 'c') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devtask.cx [--cases a|b|c|abc]\n"); return 2; }
     char dir[] = "/tmp/check-devtask-XXXXXX", why[2048], id[16], id2[16], id3[16], id4[16], cmd[4096]; long now = 1800000000; DtSet s; np_result r = {0}; int rc; long pt0 = 0;
     if (!mkdtemp(dir)) return 2;
     if (GA) {
@@ -148,7 +148,7 @@ int main(int argc, char **argv) {
         ck(ok, "amend-dangerous-bad-and-missing-refused-rc2-and-leave-order-unchanged"); np_free(&r);
     }
     }
-    if (GB) {
+    if (GB || GC) {
     {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
         ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/repo/in && cd %s/repo && git init -q && echo a >in/a.txt && echo b >other.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm init && echo pre >predirty.txt", dir, dir) && !sh(cmd, &r) && !r.rc;
@@ -157,6 +157,7 @@ int main(int argc, char **argv) {
     /* acceptance memo: same input identity skips passed commands, a changed write domain reruns them */
     {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
+        if (GC) {
         ok = !cx_fmt(cmd, sizeof cmd, WT "open --id m1 --title memo --write in --accept 'echo x >>%s/cnt' --accept 'test -f in/ok2' --deadline-min 10 --root %s/repo", dir, now, dir, dir) && !sh(cmd, &r) && !r.rc;
         ck(ok, "memo-open"); np_free(&r);
         ok = !cx_fmt(cmd, sizeof cmd, WT "done m1", dir, now + 1) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tFAIL");
@@ -165,8 +166,15 @@ int main(int argc, char **argv) {
         ck(ok, "memo-unchanged-input-skips-passed"); np_free(&r);
         ok = !cx_fmt(cmd, sizeof cmd, "wc -l <%s/cnt", dir) && !sh(cmd, &r) && r.out && atoi(r.out) == 1;
         ck(ok, "memo-skipped-command-not-executed"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo foreign >>%s/repo/predirty.txt && " WT "done m1", dir, dir, now + 2) && !sh(cmd, &r) && r.rc == 1 && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && !strstr(r.out, "SKIP_PASSED");
+        ck(ok, "memo-foreign-dirty-outside-write-domain-reruns"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "wc -l <%s/cnt", dir) && !sh(cmd, &r) && r.out && atoi(r.out) == 2;
+        ck(ok, "memo-foreign-dirty-command-really-executed"); np_free(&r);
+        ok = !cx_fmt(cmd, sizeof cmd, "echo pre >%s/repo/predirty.txt", dir) && !sh(cmd, &r) && !r.rc; np_free(&r);   /* restore: done refuses foreign changes since open */
         ok = !cx_fmt(cmd, sizeof cmd, "echo ok >%s/repo/in/ok2 && " WT "done m1", dir, dir, now + 3) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tm1\t");
         ck(ok, "memo-changed-input-reruns-all"); np_free(&r);
+        }
+        if (GB) {
         /* parallel: two 30 s acceptance commands inside one 45 s wall, started with --bg then waited */
         ok = !cx_fmt(cmd, sizeof cmd, WT "open --id p1 --title par --write in --accept 'sleep 30' --accept 'sleep 30; echo second' --deadline-min 10 --root %s/repo", dir, now, dir) && !sh(cmd, &r) && !r.rc;
         ck(ok, "par-open"); np_free(&r);
@@ -175,9 +183,10 @@ int main(int argc, char **argv) {
             tb = sy_now_ms() - pt0;
             ck(ok && tb < 15000, "bg-returns-immediately-with-job"); np_free(&r);
         }
+        }
     }
     /* external write directories, --cwd acceptance and work-tree write domains */
-    {   char st[64]; int ok;
+    if (GB) {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
         ok = !cx_fmt(cmd, sizeof cmd, "mkdir -p %s/ext/sub && echo e >%s/ext/sub/e1 && echo q >%s/ext/e2 && cd %s/repo && echo .claude >>.git/info/exclude && git worktree add -q .claude/worktrees/wt -b wtb && echo pre >.claude/worktrees/wt/wpre", dir, dir, dir, dir) && !sh(cmd, &r) && !r.rc;
         ck(ok, "ext-setup-dir-and-worktree"); np_free(&r);
@@ -215,7 +224,7 @@ int main(int argc, char **argv) {
         ck(ok, "write-abs-outside-and-cwd-relative-escape-refused-with-example"); np_free(&r);
     }
     /* the two 30 s acceptance commands of p1 ran in the background while the blocks above ran; wait, total wall under 45 s */
-    {   char st[64]; int ok;
+    if (GB) {   char st[64]; int ok;
         if (cx_fmt(st, sizeof st, "%s/st", dir)) return 1;
         ok = !cx_fmt(cmd, sizeof cmd, WO "done --wait p1", dir, dir, now + 5) && !sh(cmd, &r) && !r.rc && r.out && strstr(r.out, "ACCEPT\t1\tPASS") && strstr(r.out, "ACCEPT\t2\tPASS") && strstr(r.out, "DONE\tp1\t");
         ck(ok && sy_now_ms() - pt0 < 45000, "par-two-30s-accepts-under-45s-and-bg-done"); np_free(&r);
