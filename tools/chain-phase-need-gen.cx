@@ -1,0 +1,155 @@
+/* chain-phase-need-gen.cx -- derive build/chain-phase-need.tsv (the optional measured-need table
+ * read by tools/chain-run.cx) from the chain-run.tsv of real chain sessions.
+ *
+ *   sh ./unisacc.com tools/chain-phase-need-gen.cx -- --write [--drop-unknown] [--phases P] [--out T] SESSION_DIR...
+ *   sh ./unisacc.com tools/chain-phase-need-gen.cx -- --check [--phases P] [--out T]
+ *
+ * Rule, per phase of the current phase table: take the largest wall_ms among its rc=0 attempts over
+ * all sessions; need_s = ceil(max_ms * NEED_FACTOR / 1000) + NEED_PAD_S, capped at the phase's
+ * timeout_s. No row (the phase keeps its whole bound) when the phase has no rc=0 sample, when any
+ * of its attempts ended rc 124 (timeout) or rc 76/77 (yield), or when it is a group-call phase
+ * (chain-run sizes those through ccp_need and never reads their need). Too small a need lets a phase
+ * start in a segment remainder it cannot finish in, so the margin errs on the large side.
+ * A session phase id absent from the phase table refuses (rc 2) unless --drop-unknown; the choice and
+ * the session paths are recorded in the table header, and --check recomputes from that header.
+ * --check: rc 0 same bytes, rc 1 different, rc 0 with SKIPPED-source-missing when a recorded session
+ * directory no longer exists (nothing is claimed to be consistent then). */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.chaincall
+#define NEED_FACTOR 2
+#define NEED_PAD_S 5
+#define MAX_PHASES 2048
+#define MAX_SESSIONS 16
+typedef struct { char id[256]; int bound,bad,samples; long pending,max_ms; } phase;
+static phase ph[MAX_PHASES];
+static int ph_count,dropped;
+static char *obuf; static size_t olen,ocap;
+static int refuse(const char *what,const char *arg) { fprintf(stderr,"chain-phase-need-gen: REFUSE %s %s\n",what,arg?arg:""); return 2; }
+static int find(const char *id,size_t n) { for(int i=0;i<ph_count;i++)if(strlen(ph[i].id)==n&&!strncmp(ph[i].id,id,n))return i;return -1; }
+static int emit(const char *s) { size_t n=strlen(s); if(olen+n+1>ocap||tx_copy(obuf+olen,ocap-olen,s,n))return -1; olen+=n; return 0; }
+/* Field K (0-based, tab separated) of the line [s,e). */
+static int field(const char *s,const char *e,int k,const char **fs,size_t *fn) {
+    const char *p=s;
+    for(;;) { const char *q=p; while(q<e&&*q!='\t')q++; if(!k){*fs=p;*fn=(size_t)(q-p);return 0;} if(q>=e)return -1; p=q+1; k--; }
+}
+static int number(const char *s,size_t n,long *v) {
+    long x=0; if(!n||n>9)return -1;
+    for(size_t i=0;i<n;i++){ if(s[i]<'0'||s[i]>'9')return -1; x=x*10+(s[i]-'0'); }
+    *v=x; return 0;
+}
+/* VALUE of a "key=VALUE" field. */
+static int keyed(const char *s,const char *e,int k,const char *key,const char **vs,size_t *vn) {
+    const char *f; size_t n,kn=strlen(key);
+    if(field(s,e,k,&f,&n)||n<=kn||strncmp(f,key,kn))return -1;
+    *vs=f+kn; *vn=n-kn; return 0;
+}
+static int load_phases(const char *path) {
+    size_t n=0; char *b=cx_read(path,&n); if(!b)return refuse("phase table unreadable",path);
+    for(char *s=b;*s;) {
+        char *e=strchr(s,'\n'); if(!e){free(b);return refuse("phase table invalid",path);}
+        if(*s!='#') {
+            const char *id,*bd; size_t idn,bdn; long bound;
+            if(ph_count==MAX_PHASES||field(s,e,1,&id,&idn)||field(s,e,3,&bd,&bdn)||!idn||idn>255||number(bd,bdn,&bound)||bound<1||find(id,idn)>=0){free(b);return refuse("phase table invalid",path);}
+            phase *p=&ph[ph_count]; if(tx_copy(p->id,sizeof p->id,id,idn)){free(b);return refuse("phase table invalid",path);} ph_count++; p->bound=(int)bound; p->pending=-1; p->max_ms=-1;
+        }
+        s=e+1;
+    }
+    free(b); return ph_count?0:refuse("phase table empty",path);
+}
+/* One session: an ATTEMPT_TIME row precedes the ATTEMPT row of the same attempt of the same phase. */
+static int load_session(const char *dir,int drop,int *attempts,int *oks) {
+    char p[4400]; size_t n=0; if(cx_fmt(p,sizeof p,"%s/chain-run.tsv",dir))return refuse("path bound",dir);
+    char *b=cx_read(p,&n); if(!b)return refuse("session record unreadable",p);
+    for(int i=0;i<ph_count;i++)ph[i].pending=-1;
+    for(char *s=b;*s;) {
+        char *e=strchr(s,'\n'); if(!e){free(b);return refuse("session record has an unterminated row",p);}
+        const char *v; size_t vn; long x;
+        if(!strncmp(s,"ATTEMPT_TIME\t",13)) {
+            if(keyed(s,e,1,"phase=",&v,&vn)){free(b);return refuse("ATTEMPT_TIME row invalid",p);}
+            int d=find(v,vn); const char *w; size_t wn;
+            if(keyed(s,e,2,"wall_ms=",&w,&wn)||number(w,wn,&x)){free(b);return refuse("ATTEMPT_TIME row invalid",p);}
+            if(d>=0)ph[d].pending=x;
+        } else if(!strncmp(s,"ATTEMPT\t",8)) {
+            const char *r; size_t rn; int neg=0;
+            if(keyed(s,e,2,"phase=",&v,&vn)||keyed(s,e,3,"rc=",&r,&rn)){free(b);return refuse("ATTEMPT row invalid",p);}
+            if(rn&&*r=='-'){neg=1;r++;rn--;}
+            if(number(r,rn,&x)){free(b);return refuse("ATTEMPT row invalid",p);}
+            int d=find(v,vn);
+            if(d<0) {
+                if(!drop){char id[256];if(tx_copy(id,sizeof id,v,vn<255?vn:255))id[0]=0;free(b);return refuse("unknown phase id (not in the phase table; --drop-unknown skips it)",id);}
+                dropped++;
+            } else {
+                (*attempts)++;
+                if(!neg&&(x==124||x==76||x==77))ph[d].bad=1;
+                else if(!neg&&x==0) {
+                    /* An rc=0 attempt without its timing row is an unmeasured sample: the phase gets no row. */
+                    if(ph[d].pending<0)ph[d].bad=1;
+                    else { ph[d].samples++; (*oks)++; if(ph[d].pending>ph[d].max_ms)ph[d].max_ms=ph[d].pending; }
+                }
+                ph[d].pending=-1;
+            }
+        }
+        s=e+1;
+    }
+    free(b); return 0;
+}
+int main(int argc,char **argv) {
+    const char *phases="build/chain-phases.tsv",*dst="build/chain-phase-need.tsv";
+    static char sess[MAX_SESSIONS][4400]; int ns=0,drop=0,write;
+    if(argc<2||(strcmp(argv[1],"--check")&&strcmp(argv[1],"--write")))return refuse("usage: --write|--check [--drop-unknown] [--phases P] [--out T] SESSION_DIR...",0);
+    write=!strcmp(argv[1],"--write");
+    for(int i=2;i<argc;i++) {
+        if(!strcmp(argv[i],"--phases")&&i+1<argc)phases=argv[++i];
+        else if(!strcmp(argv[i],"--out")&&i+1<argc)dst=argv[++i];
+        else if(!strcmp(argv[i],"--drop-unknown")&&write)drop=1;
+        else if(write&&argv[i][0]=='/'&&ns<MAX_SESSIONS&&strlen(argv[i])<4300&&!strchr(argv[i],'\t')&&!strchr(argv[i],'\n')&&!tx_copy(sess[ns],sizeof sess[ns],argv[i],strlen(argv[i]))) ns++;
+        else return refuse("argument (sessions are absolute paths and belong to --write)",argv[i]);
+    }
+    char *old=0; size_t oldn=0;
+    if(!write) {
+        /* The table's own header names the sessions and the unknown-id choice. */
+        old=cx_read(dst,&oldn); if(!old)return refuse("need table unreadable",dst);
+        for(char *s=old;*s;) {
+            char *e=strchr(s,'\n'); if(!e)return refuse("need table invalid",dst);
+            const char *f; size_t fn;
+            if(!strncmp(s,"# session\t",10)) {
+                if(field(s,e,1,&f,&fn)||!fn||fn>=4300||*f!='/'||ns==MAX_SESSIONS)return refuse("need table header invalid",dst);
+                if(tx_copy(sess[ns],sizeof sess[ns],f,fn))return refuse("need table header invalid",dst);
+                ns++;
+            } else if(!strncmp(s,"# unknown\t",10)) {
+                if(field(s,e,1,&f,&fn))return refuse("need table header invalid",dst);
+                if(fn==4&&!strncmp(f,"drop",4))drop=1; else if(fn!=6||strncmp(f,"refuse",6))return refuse("need table header invalid",dst);
+            }
+            s=e+1;
+        }
+    }
+    if(!ns)return refuse("no session directory",0);
+    if(!write)for(int i=0;i<ns;i++)if(!sy_exists(sess[i])) { printf("CHAIN_PHASE_NEED\t--check\tSKIPPED-source-missing\t%s\n",sess[i]); return 0; }
+    if(load_phases(phases))return 2;
+    ocap=65536+(size_t)ph_count*400+(size_t)ns*4600; obuf=malloc(ocap); if(!obuf)return 2; obuf[0]=0;
+    char row[5200];
+    if(emit("# generated by tools/chain-phase-need-gen.cx --write; do not edit\n# id\tneed_s\tsource\n"))return 2;
+    if(cx_fmt(row,sizeof row,"# rule\tneed_s = min(timeout_s, ceil(max rc=0 wall_ms * %d / 1000) + %d); no row: no rc=0 sample, any rc 124/76/77 attempt, or a group-call phase\n# unknown\t%s\n",NEED_FACTOR,NEED_PAD_S,drop?"drop":"refuse")||emit(row))return 2;
+    for(int i=0;i<ns;i++) {
+        int attempts=0,oks=0; if(load_session(sess[i],drop,&attempts,&oks))return 2;
+        const char *leaf=strrchr(sess[i],'/'); leaf=leaf?leaf+1:sess[i];
+        if(cx_fmt(row,sizeof row,"# session\t%s\tcommit=%s\tattempts=%d\tok=%d\n",sess[i],leaf,attempts,oks)||emit(row))return 2;
+    }
+    int rows=0,excluded=0,capped=0;
+    for(int i=0;i<ph_count;i++) {
+        phase *p=&ph[i];
+        if(p->samples<1)continue;
+        if(p->bad||ccp_group_of(p->id)){excluded++;continue;}
+        long need=(p->max_ms*NEED_FACTOR+999)/1000+NEED_PAD_S;
+        if(need<1)need=1;
+        if(need>p->bound){need=p->bound;capped++;}
+        if(cx_fmt(row,sizeof row,"%s\t%ld\tmax_ms=%ld,n=%d\n",p->id,need,p->max_ms,p->samples)||emit(row))return 2;
+        rows++;
+    }
+    if(write) { if(cx_write(dst,obuf,olen))return refuse("write failed",dst); }
+    else if(oldn!=olen||memcmp(old,obuf,olen)) { fprintf(stderr,"chain-phase-need-gen: DIFF %s\n",dst); return 1; }
+    printf("CHAIN_PHASE_NEED\t%s\trows=%d\texcluded=%d\tcapped=%d\tdropped_unknown=%d\tsessions=%d\n",argv[1],rows,excluded,capped,dropped,ns);
+    return 0;
+}

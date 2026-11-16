@@ -1,0 +1,80 @@
+/* check-chain-phase-need-gen.cx ROOT OUT -- fixture sessions (hand-made chain-run.tsv and a small
+ * phase table) for tools/chain-phase-need-gen.cx: max times margin, cap at the phase bound, no row
+ * for a phase with a timeout or yield, unknown phase refused, --check same/diff/source-missing.
+ * Not covered here: feeding the generated table to chain-run's own validate_plan. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+static int bad;
+static void ck(int yes,const char *s) { printf("%s\tchain-phase-need-gen.%s\n",yes?"PASS":"FAIL",s); if(!yes)bad++; }
+static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s))){fprintf(stderr,"check-chain-phase-need-gen: write %s\n",p);exit(2);} }
+static int run(char **v) { pr_result r; int z=pr_run(v[0],v,0,0,45,&r); int rc=z?2:r.rc; if(r.residue)rc=2; pr_free(&r); return rc; }
+/* Whole-line match: 1 when FILE has a line equal to ROW (ROW without the newline). */
+static int has_row(const char *file,const char *row) {
+    size_t n=0,k=strlen(row); char *b=cx_read(file,&n); int yes=0; if(!b)return 0;
+    for(char *s=b;*s&&!yes;) { char *e=s; while(*e&&*e!='\n')e++; if((size_t)(e-s)==k&&!memcmp(s,row,k))yes=1; s=*e?e+1:e; }
+    free(b); return yes;
+}
+/* Number of lines of FILE whose first field is ID. */
+static int id_rows(const char *file,const char *id) {
+    size_t n=0,k=strlen(id); char *b=cx_read(file,&n); int c=0; if(!b)return -1;
+    for(char *s=b;*s;) { char *e=s; while(*e&&*e!='\n')e++; if((size_t)(e-s)>k&&!memcmp(s,id,k)&&s[k]=='\t')c++; s=*e?e+1:e; }
+    free(b); return c;
+}
+#define T(p,ms) "x owner-pid=1\nATTEMPT_TIME\tphase=" p "\twall_ms=" ms "\n"
+#define A(p,rc) "ATTEMPT\t1\tphase=" p "\trc=" rc "\tresidue=0\tbound=90\tmemo=on\n"
+int main(int argc,char **argv) {
+    if(argc!=3)return 2; const char *root=argv[1],*out=argv[2];
+    char com[4400],gen[4400],s1[4400],s2[4400],f1[4400],f2[4400],pt[4400],tb[4400],gone[4400];
+    if(sy_mkdir(out,0755)&&errno!=EEXIST)return 2;
+    if(cx_fmt(com,sizeof com,"%s/unisacc.com",root)|| /* lint:allow R1-product the check runs the generator with the installed product */
+cx_fmt(gen,sizeof gen,"%s/tools/chain-phase-need-gen.cx",root)||cx_fmt(s1,sizeof s1,"%s/s1",out)||cx_fmt(s2,sizeof s2,"%s/s2",out)||cx_fmt(f1,sizeof f1,"%s/chain-run.tsv",s1)||cx_fmt(f2,sizeof f2,"%s/chain-run.tsv",s2)||cx_fmt(pt,sizeof pt,"%s/phases.tsv",out)||cx_fmt(tb,sizeof tb,"%s/need.tsv",out)||cx_fmt(gone,sizeof gone,"%s/gone",out))return 2;
+    if((sy_mkdir(s1,0755)&&errno!=EEXIST)||(sy_mkdir(s2,0755)&&errno!=EEXIST))return 2;
+    put(pt,"# order\tid\texclusive_dir\ttimeout_s\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n"
+           "0\tfast\touter\t90\t-\t-\t1\t-\t-\t-\n1\tslow\touter\t90\tfast\t-\t1\t-\t-\t-\n2\ttimed\touter\t90\tslow\t-\t1\t-\t-\t-\n"
+           "3\tyielded\touter\t90\ttimed\t-\t1\t-\t-\t-\n4\tnever\touter\t90\tyielded\t-\t1\t-\t-\t-\n5\tjobs-gen\touter\t90\tnever\t-\t1\t-\t-\t-\n6\tedge\touter\t90\tjobs-gen\t-\t1\t-\t-\t-\n");
+    /* fast: 6001 and 7400 ms -> max 7400 -> ceil(14.8)+5 = 20. slow: 60000 -> 125 -> capped at 90.
+       timed: one rc 124. yielded: one rc 77 (session 2). jobs-gen: group phase. edge: 1000 -> 2+5 = 7;
+       its failed (rc 2) 80000 ms attempt is not a sample. */
+    put(f1,"SEGMENT\t1\tn=1\tstart\n" T("fast","6001") A("fast","0") T("slow","60000") A("slow","0") T("timed","90000") A("timed","124") T("timed","3000") A("timed","0")
+           T("yielded","4000") A("yielded","0") T("jobs-gen","5000") A("jobs-gen","0") T("edge","80000") A("edge","2") T("edge","1000") A("edge","0"));
+    put(f2,T("fast","7400") A("fast","0") T("yielded","2000") A("yielded","77") T("yielded","2500") A("yielded","0"));
+    char *w[]={"sh",com,gen,"--","--write","--phases",pt,"--out",tb,s1,s2,0};
+    ck(run(w)==0,"write-rc0");
+    ck(has_row(tb,"fast\t20\tmax_ms=7400,n=2"),"max-across-sessions-times-2-ceil-plus-5");
+    ck(has_row(tb,"slow\t90\tmax_ms=60000,n=1"),"capped-at-phase-bound");
+    ck(has_row(tb,"edge\t7\tmax_ms=1000,n=1"),"failed-attempt-is-not-a-sample");
+    ck(id_rows(tb,"timed")==0,"timeout-phase-has-no-row");
+    ck(id_rows(tb,"yielded")==0,"yield-phase-has-no-row");
+    ck(id_rows(tb,"never")==0,"unsampled-phase-has-no-row");
+    ck(id_rows(tb,"jobs-gen")==0,"group-call-phase-has-no-row");
+    ck(id_rows(tb,"fast")==1&&id_rows(tb,"slow")==1&&id_rows(tb,"edge")==1,"one-row-per-phase");
+    ck(has_row(tb,"# unknown\trefuse"),"header-records-unknown-choice");
+    char *c[]={"sh",com,gen,"--","--check","--phases",pt,"--out",tb,0};
+    ck(run(c)==0,"check-same-rc0");
+    put(f2,T("fast","7600") A("fast","0"));
+    ck(run(c)==1,"check-drift-rc1");
+    /* Unknown phase: refused by default, and the table is left as it was; skipped under --drop-unknown. */
+    put(f2,T("fast","7400") A("fast","0") T("ghost","100") A("ghost","0"));
+    char tb2[4400]; if(cx_fmt(tb2,sizeof tb2,"%s/need2.tsv",out))return 2;
+    char *u[]={"sh",com,gen,"--","--write","--phases",pt,"--out",tb2,s1,s2,0};
+    ck(run(u)==2&&!sy_exists(tb2),"unknown-phase-refused-nothing-written");
+    char *d[]={"sh",com,gen,"--","--write","--drop-unknown","--phases",pt,"--out",tb2,s1,s2,0};
+    ck(run(d)==0&&id_rows(tb2,"ghost")==0&&has_row(tb2,"# unknown\tdrop")&&has_row(tb2,"fast\t20\tmax_ms=7400,n=2"),"drop-unknown-skips-and-records");
+    char *c2[]={"sh",com,gen,"--","--check","--phases",pt,"--out",tb2,0};
+    ck(run(c2)==0,"check-reuses-recorded-drop-choice");
+    /* A recorded session that no longer exists: rc 0, but through the skip path (a changed table still passes). */
+    char *g[]={"sh",com,gen,"--","--write","--phases",pt,"--out",tb,s1,gone,0};
+    if(sy_mkdir(gone,0755)&&errno!=EEXIST)return 2;
+    char gf[4400]; if(cx_fmt(gf,sizeof gf,"%s/chain-run.tsv",gone))return 2;
+    put(gf,T("fast","7400") A("fast","0"));
+    ck(run(g)==0,"write-with-third-session");
+    if(sy_unlink(gf)||sy_rmdir(gone))return 2;
+    ck(run(c)==0,"check-source-missing-rc0");
+    /* An rc=0 attempt with no timing row is unmeasured: no row. */
+    put(f2,A("fast","0"));
+    char *w2[]={"sh",com,gen,"--","--write","--phases",pt,"--out",tb,s1,s2,0};
+    ck(run(w2)==0&&id_rows(tb,"fast")==0,"untimed-success-has-no-row");
+    printf("CHECK_CHAIN_PHASE_NEED_GEN\tfailed=%d\n",bad);
+    return bad?1:0;
+}
