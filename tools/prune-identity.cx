@@ -7,9 +7,11 @@
  *   e2|e1|e3 --route T/run/O0 --res run-forward, sidecar, then prune --route T/image/O0
  * every stage one bounded child (np_run, 20 s, group kill). Samples whose front stages fail are
  * reported SKIP (not counted). Per sample:
- *   PRUNE_ID<TAB>path<TAB>same|diff<TAB>callr=N<TAB>bytes=N<TAB>removed=N
+ *   PRUNE_ID<TAB>path<TAB>same|diff<TAB>callr=N<TAB>bytes=N<TAB>removed=N<TAB>host=N
  * callr = occurrences of "callr" in the prune input; bytes = prune input size; removed = input
- * lines minus output lines. Last line: PRUNE_IDENTITY samples=N same=N diff=N skip=N.
+ * lines minus output lines; host = .hostcall/.librarycall/.hostaddr instructions in the prune input (each one sends the
+ * prune net to FALLBACK, whole input out unchanged: exec/prune/prune-result.tsv INSDONE.b27 obs 33,37,34).
+ * Last line: PRUNE_IDENTITY samples=N same=N diff=N skip=N.
  * --max/--skip slice the list (whole run must stay under 5 minutes; default deadline 270 s, a
  * slice that hits the deadline prints TRUNCATED and exits 3). rc 0 ok, 2 usage/transport.
  */
@@ -50,7 +52,7 @@ static size_t pi_count(const char *b, size_t n, const char *w) {
 }
 
 /* 0 same, 1 diff, -1 skip */
-static int pi_one(const char *src, size_t *callr, size_t *bytes, long *removed) {
+static int pi_one(const char *src, size_t *callr, size_t *host, size_t *bytes, long *removed) {
     char run[5000], img[5000], f[5][4600];
     char *a, *b;
     size_t na, nb;
@@ -64,6 +66,7 @@ static int pi_one(const char *src, size_t *callr, size_t *bytes, long *removed) 
     b = cx_read(f[4], &nb);
     if (!a || !b || !na) { free(a); free(b); return -1; }
     *callr = pi_count(a, na, "callr");
+    *host = pi_count(a, na, " .hostcall ") + pi_count(a, na, " .librarycall ") + pi_count(a, na, " .hostaddr ");
     *bytes = na;
     *removed = (long)pi_lines(a, na) - (long)pi_lines(b, nb);
     r = !(na == nb && !memcmp(a, b, na));
@@ -98,7 +101,7 @@ int main(int argc, char **argv) {
         if (pi_sh(cmd, &list, &ln) != 0 || !list) pi_die("list failed");
     }
     for (p = list; p < list + ln && *p; p = q + 1) {
-        size_t callr = 0, bytes = 0; long removed = 0; int r;
+        size_t callr = 0, host = 0, bytes = 0; long removed = 0; int r;
         q = strchr(p, '\n');
         if (!q) q = p + strlen(p);
         *q = 0;
@@ -106,11 +109,11 @@ int main(int argc, char **argv) {
         if (idx++ < skip) continue;
         if (max >= 0 && ns + nskip >= max) break;
         if (sy_now_ms() - t0 >= deadline * 1000LL) { printf("TRUNCATED\tdeadline=%ld\tnext_skip=%ld\n", deadline, idx - 1); break; }
-        r = pi_one(p, &callr, &bytes, &removed);
+        r = pi_one(p, &callr, &host, &bytes, &removed);
         if (r < 0) { nskip++; printf("SKIP\t%s\n", p); }
         else {
             ns++; if (r) ndiff++; else nsame++;
-            printf("PRUNE_ID\t%s\t%s\tcallr=%zu\tbytes=%zu\tremoved=%ld\n", p, r ? "diff" : "same", callr, bytes, removed);
+            printf("PRUNE_ID\t%s\t%s\tcallr=%zu\tbytes=%zu\tremoved=%ld\thost=%zu\n", p, r ? "diff" : "same", callr, bytes, removed, host);
         }
         fflush(stdout);
     }
