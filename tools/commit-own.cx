@@ -4,7 +4,9 @@
  *
  * --whole PATH: the working-tree file as it is.  --keyed PATH KEYS: only the lines of PATH you changed, i.e.
  * the changed lines that contain one of the comma-separated KEYs (tools/own-diff.cx --emit); lines other agents
- * appended or removed in the working tree stay out of the commit and stay in the working tree.
+ * appended or removed in the working tree stay out of the commit and stay in the working tree.  --keyed given
+ * several times for one PATH is one entry with the union of the keys (each once); a KEY that no line of PATH
+ * (work tree or HEAD) carries as a whole TAB field refuses with exit 2 (COMMIT_OWN_MISSING_KEY<TAB>path=<TAB>key=).
  * The commit is built in a private index (out/commit-own-PID.idx: read-tree HEAD, the blobs above), so other
  * agents' staged entries in the shared index are neither committed nor dropped.  Afterwards each committed
  * path's entry in the shared index is moved to the new blob when it still held the old HEAD blob (nobody had
@@ -93,6 +95,61 @@ static int co_tool(char **v, int n, const char *tool) {
    commits the link itself, or the deletion, or refuses).  Each table used to be its own process: six for one
    registered set, and each key list was cut at 1000 bytes and 54 keys; the list file has neither limit. */
 static char co_part[CO_MAX][420]; static int co_foreign[CO_MAX];
+/* --keyed PATH KEYS given more than once for one PATH: one entry, its keys the union (in order, each key once).
+   Each --keyed used to be its own entry; the private index took the blob of the last one, so only the last
+   key's lines were committed (2026-11-16: two tool-index rows given as two --keyed, one landed). */
+static char co_ukey[CO_MAX][8192];
+static int co_ukey_has(const char *list, const char *s, long n) {
+    const char *p = list;
+    while (*p) { const char *e = p; while (*e && *e != ',') e++;
+        if (e - p == n && tx_same(p, n, s, n)) return 1; p = *e ? e + 1 : e; }
+    return 0;
+}
+static void co_ukey_add(int k, const char *keys) {
+    const char *p = keys;
+    while (*p) {
+        const char *e = p; long have = tx_len(co_ukey[k], sizeof co_ukey[k]);
+        while (*e && *e != ',') e++;
+        if (e > p && !co_ukey_has(co_ukey[k], p, (long)(e - p))) {
+            if (have + (long)(e - p) + 2 >= (long)sizeof co_ukey[k]) co_die("keys too long", keys);
+            if (have) co_ukey[k][have++] = ',';
+            tx_copy(co_ukey[k] + have, sizeof co_ukey[k] - have, p, (long)(e - p));
+            co_ukey[k][have + (e - p)] = 0;
+        }
+        p = *e ? e + 1 : e;
+    }
+}
+/* 1 when some line of BUF[0..n) has a whole TAB field equal to KEY[0..kn) (own-diff --field's match) */
+static int co_has_field(const char *b, long n, const char *key, long kn) {
+    long i = 0, st = 0;
+    if (!b) return 0;
+    for (; i <= n; i++) if (i == n || b[i] == '\t' || b[i] == '\n') {
+        long fl = i - st; if (fl > 0 && b[st + fl - 1] == '\r') fl--;
+        if (fl == kn && tx_same(b + st, kn, key, kn)) return 1;
+        st = i + 1;
+    }
+    return 0;
+}
+/* a --keyed KEY that no line of PATH (work tree or HEAD) carries as a whole field: named, nothing committed */
+static void co_ukey_check(const char *path, const char *keys) {
+    char spec[400], *h = 0, *w = 0; size_t hn = 0, wn = 0; char *hv[] = {"git", "show", spec, 0}; const char *p = keys; int miss = 0;
+    sy_stat_t st;
+    if ((sy_lstat(path, &st) == 0 && st.kind == 'l') || sy_exists(path) != 1) return;
+    if (cx_fmt(spec, sizeof spec, "HEAD:%s", path)) co_die("path", path);
+    if (cx_runv_timeout(hv, 30, &h, &hn) != 0) { if (h) mm_free(h); h = 0; hn = 0; }
+    w = (char *)cx_read(path, &wn);
+    while (*p) {
+        const char *e = p; while (*e && *e != ',') e++;
+        if (e > p && !co_has_field(w, (long)wn, p, (long)(e - p)) && !co_has_field(h, (long)hn, p, (long)(e - p))) {
+            if (!miss) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\n");
+            fprintf(stderr, "COMMIT_OWN_MISSING_KEY\tpath=%s\tkey=%.*s\n", path, (int)(e - p), p); miss++;
+        }
+        p = *e ? e + 1 : e;
+    }
+    if (w) mm_free(w);
+    if (h) mm_free(h);
+    if (miss) { fprintf(stderr, "commit-own: REFUSE --keyed %s: %d key(s) not found as a whole field in the file; nothing committed\n", path, miss); exit(2); }
+}
 static void co_owndiff(const char **path, const char **keys, int np) {
     static char lst[CO_MAX * 5200]; char lpath[420], *o = 0, *ov[12]; size_t on = 0; long ln = 0, at = 0; int k, nb = 0, rc, got = 0, n;
     for (k = 0; k < np; k++) {
@@ -382,8 +439,15 @@ int main(int argc, char **argv) {
             a++;
             while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; np++; a++; }
         } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
-            if (np == CO_MAX) co_die("too many paths", 0);
-            path[np] = argv[a + 1]; keys[np] = argv[a + 2]; np++; a += 3;
+            int j;   /* at parse time only a --keyed entry has keys: merge a repeated PATH into its first entry */
+            for (j = 0; j < np; j++) if (keys[j] && tx_eqz(path[j], argv[a + 1])) break;
+            if (j == np) {
+                if (np == CO_MAX) co_die("too many paths", 0);
+                co_ukey[np][0] = 0; path[np] = argv[a + 1]; keys[np] = co_ukey[np]; np++;
+            }
+            co_ukey_add(j, argv[a + 2]);
+            if (!co_ukey[j][0]) co_die("usage", "--keyed PATH needs at least one non-empty KEY");
+            a += 3;
         } else co_die("usage", CO_USAGE);
     }
     if (nreg) {
@@ -404,6 +468,7 @@ int main(int argc, char **argv) {
     }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
+    for (k = 0; k < np; k++) if (keys[k] && co_reg_of[k] < 0) co_ukey_check(path[k], keys[k]);
     co_owndiff(path, keys, np);
     for (k = 0; k < np; k++) {
         char src[4400]; sy_stat_t st;
