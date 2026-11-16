@@ -79,3 +79,16 @@
 (b) hs_cxm_sha(src/host.cx)改走 rk_hex:cxm_srcsha 与 cxm_outsha 每次对约 135 KB 加 60 KB 做软件摘要,估计省约 10 毫秒,未测。
 (c) realpath 回调按路径备忘,去掉 186 次 O_PATH 打开中的重复(估计 1 至 2 毫秒,未测)。
 未验证:osx、win、arm64 上 sy_sha256_hex 恒回落软件路径,行为与改前相同但未在这些目标实跑;AF_ALG 不可用的 Linux 内核同理走回落,未构造该环境实测。
+
+## 规划备忘(stat 快路,2026-11-16,候选 ab40057a)
+
+已做(上节 (a) 与 (b)):cx/runtime/rcident.cx 新增规划备忘(文件 <缓存目录>/<键>.plan)。键绑定运行中可执行文件的 stat 身份、cwd、临时目录、-funit 与命令行源路径;备忘记录规划产出的单元路径(U)、规划期读过的每个文件及其 stat 身份(P:size、dev、ino、mtime、ctime)、探测为缺席的路径(A)、规范路径回答(R)和一组参数与产品身份下的源摘要(S)。读文件与规范路径经注入回调 rk_rd、rk_real 记录。只有当所列文件的 mtime 与 ctime 都不晚于规划开始前墙钟读数减 2 秒时才写备忘。命中时跳过 cxm_plan 与 rk_sources;规划不是丢掉而是延迟:cxm_defer(cx/cx0/proj/tail.cx,新增核心导出,用途仅此一处,由 rk_plan 经 src/driveplan.cx 传入)登记补跑回调,cxm_on_now 首次读规划状态前补跑,补跑结果与备忘单元列表不符则删备忘、报 "plan memo mismatch (memo removed); run again"、rc 1。hs_cxm_sha 改走 rk_hex。
+
+| 项(15 次中位,毫秒) | 基线候选 | 新候选 ab40057a |
+|---|---|---|
+| 十条 use 空 main 命中 | 79.0 | 12.8 |
+| 空 main 无 use 命中 | 3.2 | 2.9 |
+
+验证(候选 ab40057a 实跑):runcache-roots 17、runcache 24、runcache-units 6 均 failed=0;改一字节重编、同秒连改两次都重编、新增同名模块改用新模块、删模块报错、恢复后正确;延迟规划补跑路径:备忘在而条目全删则重编且输出正确,-DK=5、-DK=6、无 -D 交替各自输出正确不串用,UNISACC_RUN_CACHE=0 输出正确且缓存目录不变,手工在备忘中多加一行 U 且条目未命中则 rc 1 并删备忘、下一次运行正确。规划器输入只有读文件回调、规范路径回调、临时目录、-funit 与路径,不读环境变量、不依赖 -D。
+
+残余风险与未验证:时钟回拨;不维护 ctime 的文件系统;换 cwd 走 X1 根无关条目命中是既有合同;备忘被篡改且其 S 行对应条目仍在时直接命中不补跑(与缓存目录同一信任级别,未实跑);备忘含临时目录下接口文件(ua-cxif-*.h)的 P 行,该文件被清理后备忘失效,要再跑两次才重新写入,只影响速度;备忘只存一组参数的 S 行,带不同 -D 的命中仍跳过规划但要重算源摘要;缓存目录必须是 0700,否则静默不缓存;osx、win、arm64 未实跑。

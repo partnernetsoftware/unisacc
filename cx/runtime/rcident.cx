@@ -5,6 +5,10 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sys.sig
+#pragma unisa use sys.sysinfo
+#pragma unisa use runtime.modelcache
 /* Hot-reuse key for one regular file: SHA-256 of size, dev, ino, mtime, ctime.
    The caller still content-hashes cache entry files. A forged identity misses
    the fast path and cannot validate a stale entry. */
@@ -220,4 +224,344 @@ bad:
     mm_free(acc);
     mm_free(leg);
     return 1;
+}
+
+/* Plan memo (file <cache dir>/<key>.plan). The key binds the running executable
+   (stat identity of /proc/self/exe), the current directory, the temporary
+   directory, -funit and the command-line source paths. The memo lists the unit
+   paths the plan produced (U), every file the planner read with its stat
+   identity (P: size, dev, ino, mtime, ctime), every path it probed and found
+   absent (A), every canonical-path answer it got (R), and the source digests
+   rk_sources computed for one argument vector and one package (S).
+   A memo is written only when every listed file has mtime and ctime at least
+   two seconds before the wall clock read taken before the plan started: a later
+   rewrite then always carries a different ctime, whatever the clock granularity.
+   A hit skips the plan and rk_sources. The plan itself is deferred, not dropped:
+   the first reader of the plan state (cxm_on_now) runs it, and a result that
+   differs from the memo stops the process after removing the memo. */
+static int (*rm_rd)(char *, char *, int);
+static int (*rm_planf)(char **, int);
+static int (*rm_countf)(void);
+static char *(*rm_unitf)(int);
+static int rm_state;            /* 0 off, 1 recording, 2 hit */
+static int rm_used;
+static unsigned char *rm_log;
+static long rm_logn;
+static long rm_logcap;
+static long rm_t0;
+static char rm_path[720];
+static char *rm_file;
+static char **rm_units;
+static int rm_nunits;
+static char *rm_sline;
+static char **rm_paths;
+static int rm_npaths;
+static const char **rm_srcv;
+
+void rk_bind(int (*rd)(char *, char *, int)) { rm_rd = rd; }
+
+/* stat identity of one regular file; LIMIT > 0 refuses a file changed at or after LIMIT - 2 */
+static int rm_ident(const char *path, char hex[65], long limit) {
+    unsigned char buf[40];
+    sy_stat_t st;
+    if (!path || !path[0]) return 1;
+    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0) return 1;
+    if (limit > 0 && ((long)st.ctime + 2 > limit || (long)st.mtime + 2 > limit)) return 1;
+    ri_put64(buf, (unsigned long long)st.size);
+    ri_put64(buf + 8, (unsigned long long)st.dev);
+    ri_put64(buf + 16, (unsigned long long)st.ino);
+    ri_put64(buf + 24, (unsigned long long)st.mtime);
+    ri_put64(buf + 32, (unsigned long long)st.ctime);
+    cx_sha256_hex(buf, 40, hex);
+    return 0;
+}
+
+static int rm_line(unsigned char **b, long *n, long *cap, int tag, const char *hex, const char *path) {
+    char t[2];
+    long k;
+    long i;
+    k = tx_len(path, 4096);
+    if (k <= 0) return 1;
+    i = 0;
+    while (i < k) {
+        if (path[i] == '\n') return 1;
+        i = i + 1;
+    }
+    t[0] = (char)tag;
+    t[1] = ' ';
+    if (ri_app(b, n, cap, t, 2)) return 1;
+    if (hex && (ri_app(b, n, cap, hex, 64) || ri_app(b, n, cap, " ", 1))) return 1;
+    return ri_app(b, n, cap, path, k) || ri_app(b, n, cap, "\n", 1);
+}
+
+static void rm_note(int tag, const char *hex, const char *path) {
+    if (rm_state != 1) return;
+    if (rm_line(&rm_log, &rm_logn, &rm_logcap, tag, hex, path)) rm_state = 0;
+}
+
+int rk_rd(char *path, char *buf, int cap) {
+    int n;
+    if (!rm_rd) return -3;
+    n = rm_rd(path, buf, cap);
+    if (n == -3) {
+        if (rm_state == 1) rm_state = 0;
+    } else rm_note(n == -1 ? 'A' : 'P', 0, path);
+    return n;
+}
+
+static void rm_canon(const char *path, char hex[65]) {
+    char c[4096];
+    long n;
+    if (sy_realpath(path, c, 4096) < 0) {
+        c[0] = '!';
+        c[1] = 0;
+    }
+    n = tx_len(c, 4096);
+    cx_sha256_hex(c, (size_t)(n > 0 ? n : 0), hex);
+}
+
+int rk_real(const char *path, char *dst, int cap) {
+    char hex[65];
+    if (rm_state == 1 && path && path[0]) {
+        rm_canon(path, hex);
+        rm_note('R', hex, path);
+    }
+    return sy_realpath(path, dst, cap);
+}
+
+/* 0 when the memo text B (N bytes, ends "\nE\n") still describes the file system */
+static int rm_check(char *b, long n) {
+    long at;
+    long e;
+    int nu;
+    int tag;
+    char hex[65];
+    char *p;
+    sy_stat_t st;
+    if (n < 8 || !tx_same(b, 5, "UPM1\n", 5) || b[n - 1] != '\n' || b[n - 2] != 'E' || b[n - 3] != '\n') return 1;
+    at = 5;
+    nu = 0;
+    while (at < n) {
+        if (b[at] == 'U') nu = nu + 1;
+        while (b[at] != '\n') at = at + 1;
+        at = at + 1;
+    }
+    if (nu < 1 || nu > 128) return 1;
+    rm_units = (char **)mm_alloc((long)nu * (long)sizeof(char *));
+    if (!rm_units) return 1;
+    rm_nunits = 0;
+    rm_sline = 0;
+    at = 5;
+    while (at < n) {
+        e = at;
+        while (b[e] != '\n') e = e + 1;
+        b[e] = 0;
+        tag = b[at];
+        if (tag == 'E' && e == at + 1) return e + 1 == n && rm_sline && rm_nunits == nu ? 0 : 1;
+        if (e - at < 3 || b[at + 1] != ' ') return 1;
+        p = b + at + 2;
+        if (tag == 'U') {
+            rm_units[rm_nunits] = p;
+            rm_nunits = rm_nunits + 1;
+        } else if (tag == 'A') {
+            if (sy_stat(p, &st) != -ENOENT) return 1;
+        } else if (tag == 'S') {
+            if (e - at != 2 + 261) return 1;
+            rm_sline = p;
+        } else if (tag == 'P' || tag == 'R') {
+            if (e - at < 2 + 66 || p[64] != ' ') return 1;
+            if (tag == 'P') {
+                if (rm_ident(p + 65, hex, 0)) return 1;
+            } else rm_canon(p + 65, hex);
+            if (!tx_same(hex, 64, p, 64)) return 1;
+        } else return 1;
+        at = e + 1;
+    }
+    return 1;
+}
+
+static int rm_keypath(char **paths, int n, int funit) {
+    unsigned char *k;
+    long kn;
+    long kc;
+    long ln;
+    char exe[65];
+    char hex[65];
+    char dir[400];
+    const char *td;
+    int i;
+    k = 0;
+    kn = 0;
+    kc = 0;
+    if (rk_open() || rm_ident("/proc/self/exe", exe, 0) || mc_cache_dir(dir, 400)) return 1;
+    td = sy_tmpdir();
+    if (!td || tx_len(td, 4096) <= 0) return 1;
+    if (ri_app(&k, &kn, &kc, "UPM1", 5) || ri_app(&k, &kn, &kc, exe, 65) || ri_app(&k, &kn, &kc, ri_cwd, (long)ri_cwdn + 1) ||
+        ri_app(&k, &kn, &kc, td, tx_len(td, 4096) + 1) || ri_app(&k, &kn, &kc, funit ? "F" : "W", 2)) goto bad;
+    i = 0;
+    while (i < n) {
+        ln = paths[i] ? tx_len(paths[i], 4096) : -1;
+        if (ln <= 0 || ri_app(&k, &kn, &kc, paths[i], ln + 1)) goto bad;
+        i = i + 1;
+    }
+    cx_sha256_hex(k, (size_t)kn, hex);
+    mm_free(k);
+    ln = tx_len(dir, 400);
+    if (ln <= 0 || tx_copy(rm_path, 720, dir, ln) || tx_copy(rm_path + ln, 720 - ln, "/", 1) ||
+        tx_copy(rm_path + ln + 1, 720 - ln - 1, hex, 64) || tx_copy(rm_path + ln + 65, 720 - ln - 65, ".plan", 5)) return 1;
+    return 0;
+bad:
+    mm_free(k);
+    return 1;
+}
+
+/* The deferred plan of a memo hit. It must reproduce the memo's unit list. */
+static int rk_replan(void) {
+    int i;
+    int n;
+    int bad;
+    if (rm_state != 2) return 0;
+    rm_state = 0;
+    if (rm_planf(rm_paths, rm_npaths)) sy_exit(1);
+    n = rm_countf();
+    bad = n != rm_nunits;
+    i = 0;
+    while (!bad && i < n) {
+        if (!tx_eq(rm_unitf(i), rm_units[i], 4096)) bad = 1;
+        i = i + 1;
+    }
+    if (bad) {
+        sy_unlink(rm_path);
+        sy_write(2, "unisacc: model driver: plan memo mismatch (memo removed); run again\n", 68);
+        sy_exit(1);
+    }
+    i = 0;
+    while (i < n) {
+        rm_srcv[i] = rm_unitf(i);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* cxm_plan through the memo: a hit leaves the plan deferred (DEFERF arms rk_replan). */
+int rk_plan(int (*planf)(char **, int), void (*deferf)(int (*)(void)), int (*countf)(void), char *(*unitf)(int),
+            char **paths, int n, const char **srcv, int funit) {
+    const char *e;
+    size_t fn;
+    int i;
+    rm_state = 0;
+    e = sy_env("UNISACC_RUN_CACHE");
+    if (rm_used || n < 1 || n > 128 || (e && tx_eq(e, "0", 8))) return planf(paths, n);
+    rm_used = 1;
+    rm_planf = planf;
+    rm_countf = countf;
+    rm_unitf = unitf;
+    rm_srcv = srcv;
+    rm_npaths = n;
+    rm_paths = (char **)mm_alloc((long)n * (long)sizeof(char *));
+    if (!rm_paths) return planf(paths, n);
+    i = 0;
+    while (i < n) {
+        rm_paths[i] = paths[i];
+        i = i + 1;
+    }
+    if (rm_keypath(paths, n, funit)) return planf(paths, n);
+    rm_t0 = sy_wall_s();
+    fn = 0;
+    rm_file = cx_read(rm_path, &fn);
+    if (rm_file && fn < (size_t)(1 << 22) && !rm_check(rm_file, (long)fn)) {
+        rm_state = 2;
+        deferf(rk_replan);
+        return 0;
+    }
+    rm_logn = 0;
+    rm_state = 1;
+    i = planf(paths, n);
+    if (i) rm_state = 0;
+    return i;
+}
+
+int rk_count(int (*f)(void)) { return rm_state == 2 ? rm_nunits : f(); }
+char *rk_unit(char *(*f)(int), int i) { return rm_state == 2 ? rm_units[i] : f(i); }
+
+static void rm_store(const char *ah, const char *prod, const char *hex, const char *raw, int pin) {
+    unsigned char *o;
+    long on;
+    long oc;
+    long at;
+    long e;
+    long ln;
+    int i;
+    int n;
+    int tag;
+    char id[65];
+    char tmp[800];
+    char *p;
+    sy_stat_t st;
+    o = 0;
+    on = 0;
+    oc = 0;
+    if (rm_t0 <= 0 || ri_app(&o, &on, &oc, "UPM1\n", 5)) goto out;
+    n = rm_countf();
+    i = 0;
+    while (i < n) {
+        p = rm_unitf(i);
+        if (rm_ident(p, id, rm_t0) || rm_line(&o, &on, &oc, 'U', 0, p) || rm_line(&o, &on, &oc, 'P', id, p)) goto out;
+        i = i + 1;
+    }
+    at = 0;
+    while (at < rm_logn) {
+        e = at;
+        while (rm_log[e] != '\n') e = e + 1;
+        rm_log[e] = 0;
+        tag = rm_log[at];
+        p = (char *)rm_log + at + 2;
+        if (tag == 'P') {
+            if (rm_ident(p, id, rm_t0) || rm_line(&o, &on, &oc, 'P', id, p)) goto out;
+        } else if (tag == 'A') {
+            if (sy_stat(p, &st) != -ENOENT || rm_line(&o, &on, &oc, 'A', 0, p)) goto out;
+        } else if (rm_line(&o, &on, &oc, 'R', 0, p)) goto out;
+        at = e + 1;
+    }
+    if (ri_app(&o, &on, &oc, "S ", 2) || ri_app(&o, &on, &oc, ah, 64) || ri_app(&o, &on, &oc, " ", 1) ||
+        ri_app(&o, &on, &oc, prod, 64) || ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, hex, 64) ||
+        ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, raw, 64) || ri_app(&o, &on, &oc, pin ? " 1\nE\n" : " 0\nE\n", 5)) goto out;
+    cx_sha256_hex(o, (size_t)on, id);
+    ln = tx_len(rm_path, 720);
+    if (ln <= 0 || tx_copy(tmp, 800, rm_path, ln) || tx_copy(tmp + ln, 800 - ln, ".", 1) || tx_copy(tmp + ln + 1, 800 - ln - 1, id, 64)) goto out;
+    if (cx_write(tmp, o, (size_t)on) || sy_rename(tmp, rm_path)) sy_unlink(tmp);
+out:
+    mm_free(o);
+}
+
+/* rk_sources through the memo. PROD is the package identity of the caller. */
+int rk_sources2(int argc, char **argv, const char **sources, int nsrc, const char *prod, char hex[65], char raw[65], int *pin) {
+    unsigned char *a;
+    long an;
+    long ac;
+    long ln;
+    char ah[65];
+    int j;
+    a = 0;
+    an = 0;
+    ac = 0;
+    j = 1;
+    while (rm_state && j < argc && argv[j] && !tx_eq(argv[j], "--", 8)) {
+        ln = tx_len(argv[j], 4096);
+        if (ln < 0 || ri_app(&a, &an, &ac, argv[j], ln + 1)) { if (rm_state == 1) rm_state = 0; mm_free(a); return rk_sources(argc, argv, sources, nsrc, hex, raw, pin); }
+        j = j + 1;
+    }
+    cx_sha256_hex(a ? (const void *)a : (const void *)"", (size_t)an, ah);
+    mm_free(a);
+    if (rm_state == 2 && rm_sline && tx_same(rm_sline, 64, ah, 64) && tx_same(rm_sline + 65, 64, prod, 64)) {
+        if (tx_copy(hex, 65, rm_sline + 130, 64) || tx_copy(raw, 65, rm_sline + 195, 64)) return 1;
+        *pin = rm_sline[260] == '1';
+        return 0;
+    }
+    if (rk_sources(argc, argv, sources, nsrc, hex, raw, pin)) return 1;
+    if (rm_state == 1) {
+        rm_state = 0;
+        rm_store(ah, prod, hex, raw, *pin);
+    }
+    return 0;
 }
