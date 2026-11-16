@@ -1,0 +1,87 @@
+/* tools/check-genkit.cx -- cxlib.genkit, the generator skeleton, in process against a temp directory.
+ *
+ *   sh ./unisacc.com tools/check-genkit.cx
+ *
+ * The check chdirs into a fresh temp directory (so the dev metadata copy lands in its .devsvc) and
+ * drives gk_args, gk_only, gk_emit, gk_devmeta and gk_summary.  Negative controls: a one-byte drift
+ * is reported (rc 1, drift counted); a write into a missing directory fails with rc 2 and leaves no
+ * file; a write leaves no temporary beside its target (the directory is empty again after the one
+ * target is removed); a usage error is rc 2; --only selects exactly the listed names; a dev metadata
+ * copy that differs from the table is caught.  Prints PASS/FAIL per case and CHECK_GENKIT<TAB>failed=N. */
+#pragma unisa use cxlib.genkit
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) { sy_printf("%s\tcheck-genkit.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+
+static int body_is(const char *path, const char *want) {
+    size_t z = 0;
+    char *b = cx_read(path, &z);
+    long wn = 0; int ok; while (want[wn]) wn++; ok = b && (long)z == wn && (z == 0 || mm_same(b, want, wn));
+    return ok;
+}
+
+int main(void) {
+    char work[4400], sub[4600];
+    const char *root = 0;
+    int check = -1, rc;
+    if (sy_mkdtemp("/tmp", "check-genkit.", work, sizeof work)) { sy_eprintf("check-genkit: mkdtemp\n"); return 2; }
+    if (sy_chdir(work)) { sy_eprintf("check-genkit: chdir\n"); return 2; }
+
+    /* (1) argument syntax */
+    {
+        char *a1[] = {"g", "--check"};
+        char *a2[] = {"g", "--write", "R", "--only", "a,bb"};
+        char *a3[] = {"g", "--fix"};
+        char *a4[] = {"g", "--check", "--only"};
+        char *a5[] = {"g", "--check", "R", "S"};
+        char *a6[] = {"g"};
+        rc = gk_args("g", 2, a1, &check, &root);
+        ck(rc == 0 && check == 1 && tx_eqz(root, ".") && gk_only("anything"), "args-check-default-root");
+        rc = gk_args("g", 5, a2, &check, &root);
+        ck(rc == 0 && check == 0 && tx_eqz(root, "R"), "args-write-root-only");
+        ck(gk_only("a") && gk_only("bb") && !gk_only("b") && !gk_only("abb") && !gk_only(""), "only-exact-names");
+        ck(gk_args("g", 2, a3, &check, &root) == 2, "args-bad-mode-refused");
+        ck(gk_args("g", 3, a4, &check, &root) == 2, "args-only-missing-value-refused");
+        ck(gk_args("g", 4, a5, &check, &root) == 2, "args-two-roots-refused");
+        ck(gk_args("g", 1, a6, &check, &root) == 2, "args-no-mode-refused");
+        ck(gk_only("after-refusal"), "only-reset-by-refusal");
+    }
+
+    /* (2) write then check; one-byte drift */
+    rc = gk_emit("g", 0, "out.txt", "abc\n", 4, 0);
+    ck(rc == 0 && body_is("out.txt", "abc\n"), "write-publishes");
+    ck(gk_emit("g", 1, "out.txt", "abc\n", 4, 0) == 0 && gk_drift() == 0, "check-clean-after-write");
+    ck(gk_emit("g", 1, "out.txt", "abd\n", 4, "out.txt") == 1 && gk_drift() == 1, "check-one-byte-drift");
+    ck(gk_emit("g", 1, "out.txt", "abc", 3, 0) == 1 && gk_drift() == 2, "check-length-drift");
+    ck(gk_emit("g", 1, "missing.txt", "x", 1, 0) == 1 && gk_drift() == 3, "check-missing-is-drift");
+    ck(body_is("out.txt", "abc\n"), "check-never-writes");
+
+    /* (3) atomic write: failure leaves nothing; success leaves no temporary */
+    ck(gk_emit("g", 0, "nodir/out.txt", "x", 1, 0) == 2 && sy_exists("nodir/out.txt") != 1, "write-missing-dir-refused");
+    if (cx_fmt(sub, sizeof sub, "%s/d", work) || sy_mkdir(sub, 0755)) { sy_eprintf("check-genkit: mkdir\n"); return 2; }
+    ck(gk_emit("g", 0, "d/t.txt", "one\n", 4, 0) == 0 && gk_emit("g", 0, "d/t.txt", "two\n", 4, 0) == 0 && body_is("d/t.txt", "two\n"), "write-replaces");
+    ck(sy_unlink("d/t.txt") == 0 && sy_rmdir("d") == 0, "write-leaves-no-temporary");
+
+    /* (4) dev metadata double copy */
+    ck(gk_devmeta(0, "t.tsv", "row\n", 4) == 0 && body_is(".devsvc/t.tsv", "row\n"), "devmeta-write");
+    ck(gk_devmeta(1, "t.tsv", "row\n", 4) == 0, "devmeta-check-clean");
+    rc = gk_devmeta(1, "t.tsv", "rox\n", 4);
+    ck(rc == 1, "devmeta-differs-caught");
+    ck(gk_devmeta(1, "bad/name", "x", 1) == 2 && gk_devmeta(1, ".hidden", "x", 1) == 2, "devmeta-bad-name-refused");
+
+    /* (5) summary */
+    ck(gk_files() == 11 && gk_drift() == 4, "counters");
+    ck(gk_summary("GK_PROBE", 1) == 1, "summary-rc-on-drift");
+
+    sy_unlink("out.txt");
+    sy_unlink(".devsvc/t.tsv");
+    sy_rmdir(".devsvc");
+    sy_chdir("/");
+    sy_rmdir(work);
+    sy_printf("CHECK_GENKIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
