@@ -101,13 +101,23 @@ static int ri_app(unsigned char **b, long *n, long *cap, const void *p, long k) 
     return 0;
 }
 
-/* SHA-256 of one regular file of at most 64 MiB. A file of 64 KiB or more is
-   hashed with sy_sha256_hex; a non-zero return falls back to cx_sha256_hex.
+/* SHA-256 of N bytes. A block of 4 KiB or more is hashed with sy_sha256_hex
+   (kernel AF_ALG); a non-zero return falls back to cx_sha256_hex. The digest
+   is the same on both paths, so keys and receipts do not depend on the choice. */
+int rk_hex(const void *b, long n, char hex[65]) {
+    if (!b || n < 0 || !hex) return 1;
+    if (n >= 4096 && sy_sha256_hex(b, n, hex) == 0) return 0;
+    cx_sha256_hex(b, (size_t)n, hex);
+    return 0;
+}
+
+/* SHA-256 (rk_hex) of one regular file of at most 64 MiB.
    NAMES, when given, receives 1 when the bytes contain __FILE__. */
 int rk_file(const char *path, char hex[65], int *names) {
     sy_stat_t st;
     char *b;
     size_t n;
+    int rc;
     if (!path || !path[0]) return 1;
     if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
     b = cx_read(path, &n);
@@ -116,13 +126,9 @@ int rk_file(const char *path, char hex[65], int *names) {
         return 1;
     }
     if (names) *names = ri_names_file(b, (long)n);
-    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
-        mm_free(b);
-        return 0;
-    }
-    cx_sha256_hex(b, n, hex);
+    rc = rk_hex(b, (long)n, hex);
     mm_free(b);
-    return 0;
+    return rc;
 }
 
 /* 1 when one of the N recorded present files names __FILE__, 0 when none, -1 on a read failure. */
@@ -204,7 +210,7 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
         mm_free(body);
         j = j + 1;
     }
-    cx_sha256_hex(acc ? (const void *)acc : (const void *)"", (size_t)n, hex);
+    if (rk_hex(acc ? (const void *)acc : (const void *)"", n, hex)) goto bad;
     if (ri_app(&leg, &ln2, &cap2, hex, 64)) goto bad;
     cx_sha256_hex(leg, (size_t)ln2, raw);
     mm_free(acc);

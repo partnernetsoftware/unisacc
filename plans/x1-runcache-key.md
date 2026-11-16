@@ -53,3 +53,29 @@
 | 候选 8d48e018(含 X1 v2) | 644 毫秒 | 6 | 7(命中) | 6 |
 
 换路径首跑约 90 倍。此前 check-pins 的 515 对 4132 毫秒(仓根第二次对冻结根首次)同向。每个新冻结根里数百个不同工具的首次编译因此可免。口径:单个小程序;大工具的绝对节省更大,未逐个测。
+
+## 命中路固定开销:分段实测与第一步(2026-11-16,基 a254011d0a)
+
+口径:归档树 /tmp 下,空 main 加十条 use(time、fs、posix、proc、env、sha、os.osx、sysx.process、bytes、heap,闭包 13 个源文件共约 135 KB,缓存映像 345683 字节,条目文件约 52 万字节),候选直接执行(不经 sh 包装),各候选独立 UNISACC_E3CACHE,每项 15 次,毫秒,load1 约 3 至 7。
+
+定因(strace -f -tt 加 UNISACC_RR_TIME,改前):
+(1) 命中路的大头不在 runcache 里,而在它之前的 cxm_plan(cx/compiler/cxmod.cx,生成物,源在 cx/cx0):每次运行都对整个 use 闭包做全量前端规划,strace 下约 100 毫秒、实际约 70 毫秒。它把每个模块源读两遍并各做一次扫描(第一遍 cxm_scan 模式 0 取 use 闭包,其间每个文件先被 realpath 回调以 O_PATH 打开加 readlink 约 17 次,合计 186 次打开;第二遍 cxm_srcsha 加 cxm_scan 模式 1 加 cxm_project 导出接口,再做 usechk、collisions、checkcalls 全程序检查),然后把 16 个 CXIF 逐个整读比对(cxm_put,内容相同不重写)。cxmod.o 属 -O1 六个驱动对象之一。
+(2) "闭包源读三遍":cxm_plan 两遍,第三遍是 rk_sources 把全部单元拼成一个 135 KB 的块算键(软件 SHA-256 约 8.5 毫秒)。
+(3) "CXIF 读两遍":cxm_put 一遍,第二遍是 rc_lookup_kind 的收据核对(收据即各单元的强制包含,也就是这 16 个 CXIF,逐个 rk_file 重算 sha)。
+(4) 52 万字节不是懒装载问题:条目是整份转发 ELF(USE34),整读后对 345683 字节的映像做一次软件 SHA-256(cx_sha256_hex,约 16 MB 每秒,22 毫秒),这是 lookup 29 毫秒里的主项;读文件本身不到 2 毫秒,memfd 写入 0.2 毫秒。mmap 省不了哈希,故不选。
+
+已做(本节提交):cx/runtime/rcident.cx 新增 rk_hex(4 KiB 及以上走 sy_sha256_hex 即内核 AF_ALG,失败回落 cx_sha256_hex),rk_file、rk_sources 的总摘要、src/runcache.cx 存与取两处映像摘要都改走它。两条路径摘要值相同,键版本(ver=13)、条目格式、收据内容都不变,正确性合同不变(仍是内容摘要,没有引入 stat 信任)。src/runcache.cx 行数不变(608)。
+
+| 项 | 改前候选 8d48e018 中位/最小 | 改后候选 ff64a2c8 中位/最小 |
+|---|---|---|
+| 十条 use 空 main 命中 | 116.4 / 112.3(第二轮 116.9 / 113.2) | 85.5 / 81.2(第二轮 83.9 / 79.9) |
+| 空 main 无 use 命中 | 3.3 / 2.9 | 2.2 / 2.1 |
+| RR_TIME lookup(十条 use) | 28.8 | 5.8 |
+
+验证(候选 ff64a2c8 实跑):runcache-roots assertions=17 failed=0;runcache assertions=24 failed=0;runcache-units assertions=6 failed=0;freeze-gate boot(bootstrap-0.0.59 多单元)PASS units=3;ratchets 见提交说明。
+
+未做、收益更大的下一步(约 70 毫秒,需动 cx/cx0 生成源与 src/driveplan.cx、src/host.cx,不在本次写域):
+(a) 规划备忘:键为(产品身份、cwd、"--" 之前的参数、入口源的 size、dev、ino、mtime、ctime),值为闭包每个源与每个 CXIF 的同一组 stat 身份、规划期所有探测为 ENOENT 的路径(同目录优先的模块候选、cxroot.tsv、cxpack.tsv)、以及最终条目键。全部 stat 相符且缺席路径仍缺席时跳过 cxm_plan 与 rk_sources,直接取条目;任何一项不符、stat 失败、或 mtime 落在备忘写入时刻的同一秒内(可疑)一律回落现行全读路径。前提是 cxm_plan 现在不记录缺席探测,须先给 cxm_rd 的 -1 返回接上 rc_on_file 同类的记录钩子,否则新出现的同名模块不会使备忘失效,这是不能省的正确性条件。
+(b) hs_cxm_sha(src/host.cx)改走 rk_hex:cxm_srcsha 与 cxm_outsha 每次对约 135 KB 加 60 KB 做软件摘要,估计省约 10 毫秒,未测。
+(c) realpath 回调按路径备忘,去掉 186 次 O_PATH 打开中的重复(估计 1 至 2 毫秒,未测)。
+未验证:osx、win、arm64 上 sy_sha256_hex 恒回落软件路径,行为与改前相同但未在这些目标实跑;AF_ALG 不可用的 Linux 内核同理走回落,未构造该环境实测。
