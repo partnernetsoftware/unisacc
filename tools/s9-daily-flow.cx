@@ -1,0 +1,126 @@
+/* tools/s9-daily-flow.cx -- write the flow file for one s9 daily phase of a frozen root, so a daily run is
+ * a few `devsvc flow run` calls instead of hand-built shell loops.
+ *
+ *   sh ./unisacc.com tools/s9-daily-flow.cx -- RT PHASE [--families FILE] [--w N] [--par N] > FLOW.tsv
+ *
+ * RT is the frozen root (tools/s9-root.cx output); the session is RT/out/daily (--run DIR overrides it), tier daily.
+ * PHASE:
+ *   chain  build-shards, build-waves, build, the staged families (ri-flow-runtime source/compile/seal,
+ *          ri-flow-data data, kernels nine stages) in their order, every other family of --families
+ *          (one name per line) after build, a join node per 28 families (a node takes at most 32 deps),
+ *          then map, init-session, prepare-1..6, map-register-1..32 (each needs the one before) and the
+ *          sealing map.
+ *   steps  one flow per --class (plain at --par, heavy at width 2, alone one at a time; run the three one
+ *          after another so heavy and alone slices never overlap plain ones).  Each node runs
+ *          `driver step RT RUN --slice LEAF` with no deadline environment (the driver gives itself its
+ *          outer window) and holds w=N machine tokens (--w, default 6: one slice fans out to about six
+ *          busy processes, so the machine-wide admission pool, not the node count, bounds the load).
+ * A slice node exits 3 when it recorded its slice and others remain: flow counts that as fail, so read
+ * the slice result from its output (S9 STEP_SLICE ... DONE_RECORDED), not from the flow summary.
+ * Nothing runs here; the tool only prints.  Check: tools/check-s9-daily-flow.cx. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *rt, *fams; static int wt = 6, par = 5; static char run[4400];
+static void die(const char *s) { sy_eprintf("s9-daily-flow: REFUSE %s\n", s); exit(2); }
+/* append S to DST (capacity CAP); the text library has no bounded append (build/pkg-gaps.tsv) */
+static void cat_s(char *dst, long cap, const char *s) { long n = tx_len(dst, cap); if (tx_copy(dst + n, cap - n, s, tx_len(s, cap))) die("append bound"); }
+
+static void node(const char *id, const char *deps, const char *extra, int w) {
+    sy_printf("%s\texec\t%s\ta0=sh;a1=./unisacc.com;a2=tools/s9-nightly.cx;a3=--;a4=%s;a5=%s;a6=--tier;a7=daily;%s;timeout_ms=58000", id, deps, rt, run, extra);
+    if (w > 1) sy_printf(";w=%d", w);
+    sy_printf("\n");
+}
+
+static void chain(void) {
+    static const char *rts[] = {"source", "compile", "seal"};
+    static const char *ks[] = {"bootstrap", "prepare", "prepare-assembler", "preprocess-x86_64", "preprocess-arm64", "assemble-x86_64", "assemble-arm64", "link-x86_64", "link-arm64"};
+    char id[96], prev[96], ex[400], joins[4096] = "rt-pub,rd-pub,k-pub", cur[8192]; int i, c = 0, g = 0; size_t n = 0; char *b = 0;
+    sy_printf("par\t3\n");
+    node("bs", "-", "a8=--phase;a9=build-shards", 1); node("bw", "-", "a8=--phase;a9=build-waves", 1); node("b", "bs,bw", "a8=--phase;a9=build", 1);
+    tx_copy(prev, sizeof prev, "b", 1);
+    for (i = 0; i < 3; i++) { if (cx_fmt(id, sizeof id, "rt-%s", rts[i]) || cx_fmt(ex, sizeof ex, "a8=--phase;a9=map;a10=--map-family;a11=ri-flow-runtime;a12=--material-stage;a13=%s", rts[i])) die("bound"); node(id, prev, ex, 1); tx_copy(prev, sizeof prev, id, tx_len(id, 96)); }
+    node("rt-pub", prev, "a8=--phase;a9=map;a10=--map-family;a11=ri-flow-runtime", 1);
+    node("rd-data", "rt-pub", "a8=--phase;a9=map;a10=--map-family;a11=ri-flow-data;a12=--material-stage;a13=data", 1);
+    node("rd-pub", "rd-data", "a8=--phase;a9=map;a10=--map-family;a11=ri-flow-data", 1);
+    tx_copy(prev, sizeof prev, "b", 1);
+    for (i = 0; i < 9; i++) { if (cx_fmt(id, sizeof id, "k-%s", ks[i]) || cx_fmt(ex, sizeof ex, "a8=--phase;a9=map;a10=--map-family;a11=kernels;a12=--material-stage;a13=%s", ks[i])) die("bound"); node(id, prev, ex, 1); tx_copy(prev, sizeof prev, id, tx_len(id, 96)); }
+    node("k-pub", prev, "a8=--phase;a9=map;a10=--map-family;a11=kernels", 1);
+    cur[0] = 0;
+    if (fams) { b = cx_read(fams, &n); if (!b) die("families file unreadable"); }
+    for (char *p = b; p && p < b + n; ) {
+        char *e = memchr(p, '\n', (size_t)(b + n - p)), name[200]; size_t l; if (!e) e = b + n; l = (size_t)(e - p);
+        if (l && l < sizeof name) {
+            mm_copy(name, sizeof name, p, (long)l); name[l] = 0;
+            if (cx_fmt(id, sizeof id, "f-%s", name) || cx_fmt(ex, sizeof ex, "a8=--phase;a9=map;a10=--map-family;a11=%s", name)) die("bound");
+            node(id, "b", ex, 1);
+            if (tx_len(cur, sizeof cur) + l + 8 >= sizeof cur) die("join bound");
+            if (cur[0]) cat_s(cur, sizeof cur, ","); cat_s(cur, sizeof cur, id);
+            if (++c == 28) { sy_printf("g%d\texec\t%s\ta0=true;timeout_ms=5000\n", g, cur); if (cx_fmt(joins + tx_len(joins, sizeof joins), sizeof joins - tx_len(joins, sizeof joins), ",g%d", g)) die("bound"); g++; c = 0; cur[0] = 0; }
+        }
+        p = e + 1;
+    }
+    if (cur[0]) { sy_printf("g%d\texec\t%s\ta0=true;timeout_ms=5000\n", g, cur); if (cx_fmt(joins + tx_len(joins, sizeof joins), sizeof joins - tx_len(joins, sizeof joins), ",g%d", g)) die("bound"); }
+    node("map", joins, "a8=--phase;a9=map", 1);
+    node("init", "map", "a8=--phase;a9=init-session", 1);
+    tx_copy(prev, sizeof prev, "init", 4);
+    for (i = 1; i <= 6; i++) { if (cx_fmt(id, sizeof id, "p%d", i) || cx_fmt(ex, sizeof ex, "a8=--phase;a9=prepare-%d", i)) die("bound"); node(id, prev, ex, 1); tx_copy(prev, sizeof prev, id, tx_len(id, 96)); }
+    for (i = 1; i <= 32; i++) { if (cx_fmt(id, sizeof id, "r%d", i) || cx_fmt(ex, sizeof ex, "a8=--phase;a9=map-register-%d", i)) die("bound"); node(id, prev, ex, 1); tx_copy(prev, sizeof prev, id, tx_len(id, 96)); }
+    node("seal", prev, "a8=--phase;a9=map", 1);
+    mm_free(b);
+}
+
+/* One pending row: S9_PENDING<TAB>slice=LEAF<TAB>tier=..<TAB>alone=A<TAB>heavy=H<TAB>... */
+static int field(const char *row, const char *key) { const char *q = strstr(row, key); return q ? (int)atol(q + tx_len(key, 40)) : -1; }
+
+/* cls 0 plain (at --par), 1 heavy (width 2), 2 alone (one at a time): three flows, run one after another. */
+static void steps(int cls) {
+    char drv[4500], *v[6], why[256]; np_result r = {0}; int any = 0;
+    if (cx_fmt(drv, sizeof drv, "%s/driver", run)) die("bound");
+    v[0] = drv; v[1] = "pending"; v[2] = (char *)rt; v[3] = run; v[4] = 0;
+    if (np_run(v, rt, 0, 55, &r, why, sizeof why) || r.rc) die("driver pending failed");
+    sy_printf("par\t%d\n", cls == 0 ? par : cls == 1 ? 2 : 1);
+    for (char *p = r.out; p && *p; ) {
+        char *e = strchr(p, '\n'), row[600], leaf[160]; size_t l = e ? (size_t)(e - p) : tx_len(p, 600);
+        if (l < sizeof row && !strncmp(p, "S9_PENDING\tslice=", 17)) {
+            int a, h; size_t z = 0; const char *q;
+            mm_copy(row, sizeof row, p, (long)l); row[l] = 0; q = row + 17;
+            while (q[z] && q[z] != '\t' && z + 1 < sizeof leaf) { leaf[z] = q[z]; z++; } leaf[z] = 0;
+            a = field(row, "\talone="); h = field(row, "\theavy=");
+            if (a < 0 || h < 0 || !z) die("pending row shape");
+            if ((cls == 0 && !a && !h) || (cls == 1 && !a && h) || (cls == 2 && a)) {
+                sy_printf("%s\texec\t-\ta0=%s;a1=step;a2=%s;a3=%s;a4=--slice;a5=%s;timeout_ms=280000;w=%d\n", leaf, drv, rt, run, leaf, wt);
+                any++;
+            }
+        }
+        if (!e) break; p = e + 1;
+    }
+    np_free(&r);
+    if (!any) sy_eprintf("s9-daily-flow: no pending %s slice\n", cls == 0 ? "plain" : cls == 1 ? "heavy" : "alone");
+}
+
+int main(int argc, char **argv) {
+    const char *phase, *cls = "plain"; int a;
+    if (argc < 3) die("usage: RT chain|steps [--class plain|heavy|alone] [--families FILE] [--w N] [--par N]");
+    rt = argv[1]; phase = argv[2];
+    for (a = 3; a < argc; a++) {
+        if (tx_eqz(argv[a], "--families") && a + 1 < argc) fams = argv[++a];
+        else if (tx_eqz(argv[a], "--class") && a + 1 < argc) cls = argv[++a];
+        else if (tx_eqz(argv[a], "--run") && a + 1 < argc) { if (argv[a + 1][0] != '/' || cx_fmt(run, sizeof run, "%s", argv[a + 1])) die("--run must be an absolute directory"); a++; }
+        else if (tx_eqz(argv[a], "--w") && a + 1 < argc) { wt = (int)atol(argv[++a]); if (wt < 1 || wt > 32) die("--w 1..32"); }
+        else if (tx_eqz(argv[a], "--par") && a + 1 < argc) { par = (int)atol(argv[++a]); if (par < 1 || par > 16) die("--par 1..16"); }
+        else die("unknown argument");
+    }
+    if (rt[0] != '/') die("RT must be absolute");
+    if (!run[0] && cx_fmt(run, sizeof run, "%s/out/daily", rt)) die("bound");   /* the s9 session directory inside the frozen root */
+    if (tx_eqz(phase, "chain")) chain();
+    else if (tx_eqz(phase, "steps")) {
+        if (tx_eqz(cls, "plain")) steps(0); else if (tx_eqz(cls, "heavy")) steps(1); else if (tx_eqz(cls, "alone")) steps(2); else die("--class is plain, heavy or alone");
+    } else die("PHASE is chain or steps");
+    return 0;
+}

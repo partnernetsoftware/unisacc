@@ -1,0 +1,92 @@
+/* tools/check-s9-daily-flow.cx -- checks of tools/s9-daily-flow.cx on a fake frozen root (no real s9 run).
+ *
+ *   sh ./unisacc.com tools/check-s9-daily-flow.cx
+ *   last line: CHECK_S9_DAILY_FLOW<TAB>failed=N
+ *
+ * The fake root holds sess/driver (passed as --run FAKE/sess), a script that answers `pending ROOT RUN` with five rows (three plain,
+ * one heavy, one alone).  Assertions: (a) chain with two families prints a flow tools/flowrun.cx --dry accepts,
+ * with build before the families, a join node, map after the joins, 6 prepares, 32 chained registers and the
+ * sealing map; (b) steps --class plain|heavy|alone select exactly the matching slices, with par 5/2/1 and w=6
+ * on every node; (c) --w 3 changes the weight; (d) a relative RT, an unknown phase, an unknown class and an
+ * unreadable --families are refused rc 2. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed; static char root[4096], fake[4400], flowf[4400], sess[4500];
+static void ck(int ok, const char *name) { sy_printf("%s\tcheck-s9-daily-flow.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static int has(const np_result *r, const char *s) { return r->out && strstr(r->out, s) != 0; }
+static long count(const char *b, const char *s) { long n = 0; const char *p = b; size_t l = tx_len(s, 200); if (!b) return 0; while ((p = strstr(p, s))) { n++; p += l; } return n; }
+/* runs the tool with up to six arguments; a run named "steps" also gets --run FAKE/sess appended */
+static int tool6(const char *a3, const char *a4, const char *a5, const char *a6, const char *a7, const char *a8, np_result *r) {
+    char *v[14]; int k = 0; char why[256];
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/s9-daily-flow.cx"; v[k++] = "--";
+    if (a3) v[k++] = (char *)a3; if (a4) v[k++] = (char *)a4; if (a5) v[k++] = (char *)a5; if (a6) v[k++] = (char *)a6; if (a7) v[k++] = (char *)a7; if (a8) v[k++] = (char *)a8;
+    if (a4 && tx_eqz(a4, "steps")) { v[k++] = "--run"; v[k++] = sess; }
+    v[k] = 0;
+    return np_run(v, root, 0, 50, r, why, sizeof why);
+}
+static int tool(const char *a3, const char *a4, const char *a5, const char *a6, const char *a7, np_result *r) { return tool6(a3, a4, a5, a6, a7, 0, r); }
+static void wbytes(const char *p, const char *s, size_t n, int mode) { int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode); if (fd < 0) { sy_eprintf("check-s9-daily-flow: write %s\n", p); exit(2); } while (n) { ssize_t k = write(fd, s, n); if (k <= 0) { sy_eprintf("check-s9-daily-flow: short write %s\n", p); exit(2); } s += k; n -= (size_t)k; } close(fd); }
+static void wfile(const char *p, const char *s, int mode) { wbytes(p, s, strlen(s), mode); }
+
+int main(void) {
+    np_result r = {0}; char p[4600], fams[4600]; char *v[8]; char why[256];
+    if (sy_cwd(root, sizeof root)) return 2;
+    if (cx_fmt(fake, sizeof fake, "%s/s9df-check-%d", sy_tmpdir(), (int)getpid())) return 2;
+    if (cx_fmt(sess, sizeof sess, "%s/sess", fake) || cx_fmt(p, sizeof p, "%s", sess)) return 2;
+    { char *mk[] = {"mkdir", "-p", p, 0}; if (np_run(mk, root, 0, 10, &r, why, sizeof why) || r.rc) return 2; np_free(&r); }
+    if (cx_fmt(p, sizeof p, "%s/driver", sess)) return 2;
+    wfile(p, "#!/bin/sh\n[ \"$1\" = pending ] || exit 9\n"
+             "printf 'S9_PENDING\\tslice=slice-0-1\\ttier=0\\talone=0\\theavy=0\\tbudget=55\\tmaterials=0\\tneed=90\\n'\n"
+             "printf 'S9_PENDING\\tslice=slice-0-2\\ttier=0\\talone=0\\theavy=0\\tbudget=55\\tmaterials=0\\tneed=90\\n'\n"
+             "printf 'S9_PENDING\\tslice=slice-0-3\\ttier=0\\talone=0\\theavy=0\\tbudget=55\\tmaterials=0\\tneed=90\\n'\n"
+             "printf 'S9_PENDING\\tslice=slice-1-4\\ttier=1\\talone=0\\theavy=1\\tbudget=55\\tmaterials=0\\tneed=120\\n'\n"
+             "printf 'S9_PENDING\\tslice=slice-2-5\\ttier=2\\talone=1\\theavy=0\\tbudget=55\\tmaterials=0\\tneed=150\\n'\n"
+             "printf 'S9_PENDING_SUMMARY\\tpending=5\\tslices=5\\n'\n", 0700);
+    if (cx_fmt(fams, sizeof fams, "%s/families", fake)) return 2;
+    wfile(fams, "famA\nfamB\n", 0600);
+    if (cx_fmt(flowf, sizeof flowf, "%s/chain.flow", fake)) return 2;
+
+    /* (a) chain */
+    tool(fake, "chain", "--families", fams, 0, &r);
+    ck(r.rc == 0 && has(&r, "par\t3\n") && has(&r, "\nf-famA\texec\tb\t") && has(&r, "\nf-famB\texec\tb\t")
+       && has(&r, "\ng0\texec\tf-famA,f-famB\ta0=true") && has(&r, "\nmap\texec\trt-pub,rd-pub,k-pub,g0\t")
+       && count(r.out, "a9=prepare-") == 6 && count(r.out, "a9=map-register-") == 32
+       && has(&r, "\nr2\texec\tr1\t") && has(&r, "\nseal\texec\tr32\t"), "a-chain-shape");
+    if (r.out) wbytes(flowf, r.out, r.outn, 0600);
+    np_free(&r);
+    { char *dv[] = {"sh", "./unisacc.com", "tools/flowrun.cx", "--", "run", flowf, "--dry", 0}; (void)v;
+      np_run(dv, root, 0, 50, &r, why, sizeof why); ck(r.rc == 0 && has(&r, "FLOW_DRY\tnodes="), "a-chain-flowrun-dry-accepts"); np_free(&r); }
+
+    /* (b) steps classes */
+    tool(fake, "steps", "--class", "plain", 0, &r);
+    ck(r.rc == 0 && has(&r, "par\t5\n") && count(r.out, "\texec\t-\t") == 3 && has(&r, "a5=slice-0-1;") && !has(&r, "slice-1-4") && !has(&r, "slice-2-5") && count(r.out, ";w=6\n") == 3, "b-plain");
+    np_free(&r);
+    tool(fake, "steps", "--class", "heavy", 0, &r);
+    ck(r.rc == 0 && has(&r, "par\t2\n") && count(r.out, "\texec\t-\t") == 1 && has(&r, "a5=slice-1-4;"), "b-heavy");
+    np_free(&r);
+    tool(fake, "steps", "--class", "alone", 0, &r);
+    ck(r.rc == 0 && has(&r, "par\t1\n") && count(r.out, "\texec\t-\t") == 1 && has(&r, "a5=slice-2-5;"), "b-alone");
+    np_free(&r);
+
+    /* (c) weight */
+    tool6(fake, "steps", "--class", "plain", "--w", "3", &r);
+    ck(r.rc == 0 && count(r.out, ";w=3\n") == 3 && !has(&r, ";w=6"), "c-weight");
+    np_free(&r);
+
+    /* (d) refusals */
+    tool("relative/root", "chain", 0, 0, 0, &r); ck(r.rc == 2, "d-relative-root-refused"); np_free(&r);
+    tool(fake, "nonsense", 0, 0, 0, &r); ck(r.rc == 2, "d-unknown-phase-refused"); np_free(&r);
+    tool(fake, "steps", "--class", "huge", 0, &r); ck(r.rc == 2, "d-unknown-class-refused"); np_free(&r);
+    tool(fake, "chain", "--families", "/nonexistent/fams", 0, &r); ck(r.rc == 2, "d-unreadable-families-refused"); np_free(&r);
+
+    { char *rm[] = {"rm", "-rf", fake, 0}; np_run(rm, root, 0, 10, &r, why, sizeof why); np_free(&r); }
+    sy_printf("CHECK_S9_DAILY_FLOW\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
