@@ -494,7 +494,7 @@ static FILE *tmpfile(void) {
         __u_i = 0;
         while (__u_i < 5) { __u_p[__u_i] = __u_pfx[__u_i]; __u_i = __u_i + 1; }
         __u_p[5] = 117; __u_p[6] = 110;                  /* "un" */
-        __u_v = (int)((unsigned int)__u_seq * 1103515245u + 12345u);
+        __u_v = (int)((unsigned int)__u_seq * 1103515245u + 12345u + (unsigned int)((__u_uword)&__u_try >> 4) * 2654435761u);   /* the stack address differs per process (ASLR): two programs started together no longer walk the same names */
         __u_seq = __u_seq + 1;
         /* _u_digits fills a buffer of 24 from the END and returns where the
            digits start, so the decimal text lands in __u_d[__u_s..23] */
@@ -508,7 +508,22 @@ static FILE *tmpfile(void) {
         }
         __u_p[__u_i] = 46; __u_p[__u_i + 1] = 116; __u_p[__u_i + 2] = 109; __u_p[__u_i + 3] = 112;
         __u_p[__u_i + 4] = 0;
+#ifdef _WIN32
         __u_f = fopen(__u_p, "w+");
+#else
+        {   /* create the name EXCLUSIVELY (O_RDWR|O_CREAT|O_EXCL): a name another process already holds fails with EEXIST and
+               we try the next one.  fopen "w+" truncated an existing file, so two programs that came up with the same name
+               shared (and cleared) one temporary file. */
+            __u_word __u_fd;
+#ifdef __APPLE__
+            __u_fd = __open(__u_p, 0xA02, 384);
+#else
+            __u_fd = __open(__u_p, 0302, 384);
+#endif
+            __u_f = NULL;
+            if (__u_fd >= 0) { int __u_s2; __u_s2 = _u_st_slot((FILE *)__u_fd); if (__u_s2 >= 0) _u_st_ro[__u_s2] = 0; __u_f = (FILE *)__u_fd; }
+        }
+#endif
         if (__u_f != NULL) { __unlink(__u_p); return __u_f; }
         __u_try = __u_try + 1;
     }
