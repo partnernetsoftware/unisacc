@@ -185,7 +185,39 @@ static int cx_run_timeout(const char *__u_cmd, int __u_secs, char **__u_out, siz
 static void cx_sha256(const void *__u_buf, size_t __u_len, unsigned char __u_md[32]) { unisa_sha256(__u_buf, __u_len, __u_md); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_cx_sha256_hex
-static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65]) { unisa_sha256_hex(__u_buf, __u_len, __u_hex); }
+/* A block of 4 KiB or more asks the kernel first (AF_ALG "hash"/"sha256": socket, bind, accept, one write of
+   the whole block, one read of the 32 digest bytes); a shorter block, any failed or short step, or a target
+   without _UNISA_AFALG uses the software implementation.  Both give the same 64 hex digits.  Both descriptors
+   are closed on every path. */
+static void cx_sha256_hex(const void *__u_buf, size_t __u_len, char __u_hex[65]) {
+#ifdef _UNISA_AFALG
+    if (__u_len >= 4096 && __u_len <= 0x40000000) {
+        unsigned char __u_a[88]; unsigned char __u_md[32]; long __u_s, __u_b, __u_g = 0 - 1; int __u_i;
+        for (__u_i = 0; __u_i < 88; __u_i++) __u_a[__u_i] = 0;
+        __u_a[0] = 38;                                                  /* sockaddr_alg: family AF_ALG */
+        __u_a[2] = 'h'; __u_a[3] = 'a'; __u_a[4] = 's'; __u_a[5] = 'h';  /* type at 2 */
+        __u_a[24] = 's'; __u_a[25] = 'h'; __u_a[26] = 'a'; __u_a[27] = '2'; __u_a[28] = '5'; __u_a[29] = '6';   /* name at 24 */
+        __u_s = (long)_UNISA_AFALG(41, 198, 38, 5, 0);                  /* socket(AF_ALG, SOCK_SEQPACKET, 0) */
+        if (__u_s >= 0) {
+            if ((long)_UNISA_AFALG(49, 200, __u_s, (long)__u_a, 88) == 0) {             /* bind */
+                __u_b = (long)_UNISA_AFALG(43, 202, __u_s, 0, 0);                       /* accept */
+                if (__u_b >= 0) {
+                    if ((long)_UNISA_AFALG(1, 64, __u_b, (long)__u_buf, (long)__u_len) == (long)__u_len)   /* write */
+                        __u_g = (long)_UNISA_AFALG(0, 63, __u_b, (long)__u_md, 32);     /* read */
+                    (void)_UNISA_AFALG(3, 57, __u_b, 0, 0);                             /* close */
+                }
+            }
+            (void)_UNISA_AFALG(3, 57, __u_s, 0, 0);                                     /* close */
+        }
+        if (__u_g == 32) {
+            for (__u_i = 0; __u_i < 32; __u_i++) { __u_hex[2*__u_i] = "0123456789abcdef"[__u_md[__u_i] >> 4]; __u_hex[2*__u_i+1] = "0123456789abcdef"[__u_md[__u_i] & 15]; }
+            __u_hex[64] = 0;
+            return;
+        }
+    }
+#endif
+    unisa_sha256_hex(__u_buf, __u_len, __u_hex);
+}
 #endif
 /* 0.0.35 K0: argv processes (no /bin/sh; cx_run/cx_run_timeout above still use sh and are
    being retired) and a directory walk. */

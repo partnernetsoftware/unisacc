@@ -47,6 +47,15 @@
 #else
 #define _UNISA_REMAP(__u_a, __u_o, __u_n) __syscall6(216, (long)(__u_a), (__u_o), (__u_n), 1, 0)
 #endif
+/* The kernel's hash socket (AF_ALG), used by cx_sha256_hex for large blocks:
+ * one raw call through the generic gate, the call number picked per machine
+ * (first the x86_64 number, then the generic-table one).  Only Linux has it;
+ * where _UNISA_AFALG is not defined the software SHA-256 is the only path. */
+#ifdef __x86_64__
+#define _UNISA_AFALG(__u_x, __u_g, __u_a, __u_b, __u_c) __syscall6((__u_x), (__u_a), (__u_b), (__u_c), 0, 0)
+#else
+#define _UNISA_AFALG(__u_x, __u_g, __u_a, __u_b, __u_c) __syscall6((__u_g), (__u_a), (__u_b), (__u_c), 0, 0)
+#endif
 #else
 #define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 3, 0x1002, 0 - 1, 0)
 #endif
