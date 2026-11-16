@@ -1,0 +1,154 @@
+/* runcache-roots.cx -- X1 root-independent run-cache key vs {candidate}.
+   usage: sh ./unisacc.com tests/runcache-roots.cx -- NEW_OUT CANDIDATE
+   Two roots A and B hold byte-identical t.cx plus a used module mods/m.cx.
+   Every run is started inside its root with the relative path t.cx, a private
+   cache (UNISACC_E3CACHE) and UNISACC_RR_TIME=1; a hit is the line
+   "RR_TIME\tlookup_hit=2", a miss "lookup_hit=0".  Program output is asserted
+   on every run, hit or miss, against the expected text and against a
+   UNISACC_RUN_CACHE=0 arm.
+   Controls: (1) B after A hits; (2) one source byte changed misses; (3) one
+   used-module byte changed misses and the new value shows; (4) another
+   compiler identity (a copy of CANDIDATE, new inode) misses; (5) a changed
+   -D option misses and the new value shows; (6) a unit naming __FILE__ run
+   by absolute path prints its own root in A and in B and B does not hit.
+   rc 0 all PASS, 1 some FAIL, 2 usage or setup trouble. */
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+
+#define CAP 65536
+static int checks, failed;
+static char work[2048], cache[2200], ra[2200], rb[2200], cand2[2200];
+
+static void die(const char *s) { fprintf(stderr, "runcache-roots: %s\n", s); exit(2); }
+static const char *last_out = "";
+static long outn; /* captured bytes are not NUL-terminated: lengths come from the run */
+static void ck(int yes, const char *name) {
+    checks++;
+    if (!yes) failed++;
+    printf("%s\truncache-roots.%s\n", yes ? "PASS" : "FAIL", name);
+    if (!yes) fprintf(stderr, "runcache-roots: %s output (%ld bytes):\n%.*s\n", name, outn, (int)(outn > 2000 ? 2000 : outn), last_out);
+}
+static void put(const char *dir, const char *leaf, const char *text) {
+    char p[2400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) die("path");
+    if (cx_write(p, text, (size_t)tx_len(text, CAP))) die("write");
+}
+static int has(const char *out, const char *needle) { return tx_find(out, outn, needle, tx_len(needle, 2600)) >= 0; }
+
+/* run CAND inside DIR on ARG1 [ARG2]; stdout and stderr merged into *outp */
+static int run(const char *cand, const char *dir, int cache_on, const char *a1, const char *a2, char **outp) {
+    char envc[2300], *v[24], *out = 0;
+    size_t n = 0;
+    int k = 0, rc;
+    if (cx_fmt(envc, sizeof envc, "UNISACC_E3CACHE=%s", cache)) die("env");
+    v[k++] = "env";
+    /* the parent -run exports its own container path (relative to the parent cwd) and capture switches */
+    v[k++] = "-u";
+    v[k++] = "UNISA_CONTAINER";
+    v[k++] = "-u";
+    v[k++] = "UNISACC_RF_CAPTURE";
+    v[k++] = "-u";
+    v[k++] = "UNISA_ATTRIBUTES";
+    v[k++] = "-C";
+    v[k++] = (char *)dir;
+    v[k++] = envc;
+    v[k++] = "UNISACC_RR_TIME=1";
+    v[k++] = cache_on ? "UNISACC_RUN_CACHE=1" : "UNISACC_RUN_CACHE=0";
+    v[k++] = "sh";
+    v[k++] = "-c";
+    v[k++] = "exec \"$0\" \"$@\" 2>&1";
+    v[k++] = (char *)cand;
+    if (a2) v[k++] = (char *)a2;
+    v[k++] = (char *)a1;
+    v[k] = 0;
+    rc = cx_runv_timeout(v, 50, &out, &n);
+    *outp = out ? out : "";
+    outn = out ? (long)n : 0;
+    last_out = *outp;
+    return rc;
+}
+static int hit(const char *out) { return has(out, "RR_TIME\tlookup_hit=2"); }
+static int miss(const char *out) { return has(out, "RR_TIME\tlookup_hit=0") && !hit(out); }
+/* same program output with the cache arm and with UNISACC_RUN_CACHE=0 */
+static void arm(const char *cand, const char *dir, const char *a1, const char *a2, const char *want, const char *name) {
+    char *out = 0, label[128];
+    int rc = run(cand, dir, 0, a1, a2, &out);
+    if (cx_fmt(label, sizeof label, "%s-cache-off-arm", name)) die("fmt");
+    ck(rc == 0 && has(out, want), label);
+}
+
+int main(int argc, char **argv) {
+    static const char mod1[] = "#pragma unisa module m\nint m_val(void){return 7;}\n";
+    static const char mod2[] = "#pragma unisa module m\nint m_val(void){return 8;}\n";
+    static const char tool1[] = "#pragma unisa use mods.m\n#ifndef K\n#define K 1\n#endif\n"
+                                "int main(void){printf(\"v=%d k=%d\\n\",m_val(),K);return 0;}\n";
+    static const char tool2[] = "#pragma unisa use mods.m\n#ifndef K\n#define K 1\n#endif\n"
+                                "int main(void){printf(\"v=%d k=%d\\n\",m_val(),K);return 0;}\n/**/\n";
+    static const char filesrc[] = "int main(void){printf(\"file=%s\\n\",__FILE__);return 0;}\n";
+    const char *cand;
+    char *out = 0, fa[2400], fb[2400], wa[2500], wb[2500], *body;
+    size_t bn;
+    int rc;
+    if (argc != 3) die("usage: NEW_OUT CANDIDATE");
+    cand = argv[2];
+    if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path");
+    if (sy_mkdir(work, 0700)) die("NEW_OUT");
+    if (cx_fmt(cache, sizeof cache, "%s/cache", work) || sy_mkdir(cache, 0700)) die("cache");
+    if (cx_fmt(ra, sizeof ra, "%s/rootA", work) || sy_mkdir(ra, 0700)) die("rootA");
+    if (cx_fmt(rb, sizeof rb, "%s/rootB", work) || sy_mkdir(rb, 0700)) die("rootB");
+    if (cx_fmt(fa, sizeof fa, "%s/mods", ra) || sy_mkdir(fa, 0700)) die("mods");
+    if (cx_fmt(fb, sizeof fb, "%s/mods", rb) || sy_mkdir(fb, 0700)) die("mods");
+    put(ra, "t.cx", tool1); put(rb, "t.cx", tool1);
+    put(ra, "mods/m.cx", mod1); put(rb, "mods/m.cx", mod1);
+    put(ra, "f.cx", filesrc); put(rb, "f.cx", filesrc);
+
+    /* (0) positive control in A: cold miss, then hit */
+    rc = run(cand, ra, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "a-cold-miss");
+    rc = run(cand, ra, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "a-warm-hit");
+    /* (1) another root, same bytes, same relative command: hit */
+    rc = run(cand, rb, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "b-first-hit");
+    arm(cand, rb, "t.cx", 0, "v=7 k=1", "b");
+    /* (2) one source byte in B: miss */
+    put(rb, "t.cx", tool2);
+    rc = run(cand, rb, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "src-byte-miss");
+    /* (3) one byte in the used module in B: miss, new value */
+    put(rb, "mods/m.cx", mod2);
+    rc = run(cand, rb, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=8 k=1") && miss(out), "dep-byte-miss");
+    arm(cand, rb, "t.cx", 0, "v=8 k=1", "dep");
+    /* A still holds the old module: its entry must still hit with the old value */
+    rc = run(cand, ra, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "a-unaffected-hit");
+    /* (4) another compiler identity: a copy of the candidate (new inode) */
+    if (cx_fmt(cand2, sizeof cand2, "%s/candidate-copy", work)) die("path");
+    body = cx_read(cand, &bn);
+    if (!body || cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("copy candidate");
+    rc = run(cand2, ra, 1, "t.cx", 0, &out);
+    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+    /* (5) an output-affecting option: -DK=2 misses and shows k=2; repeated it hits */
+    rc = run(cand, ra, 1, "t.cx", "-DK=2", &out);
+    ck(rc == 0 && has(out, "v=7 k=2") && miss(out), "option-miss");
+    rc = run(cand, ra, 1, "t.cx", "-DK=2", &out);
+    ck(rc == 0 && has(out, "v=7 k=2") && hit(out), "option-warm-hit");
+    arm(cand, ra, "t.cx", "-DK=2", "v=7 k=2", "option");
+    /* (6) __FILE__ by absolute path: each root prints itself, B never reuses A */
+    if (cx_fmt(fa, sizeof fa, "%s/f.cx", ra) || cx_fmt(fb, sizeof fb, "%s/f.cx", rb)) die("path");
+    if (cx_fmt(wa, sizeof wa, "file=%s", fa) || cx_fmt(wb, sizeof wb, "file=%s", fb)) die("path");
+    rc = run(cand, ra, 1, fa, 0, &out);
+    ck(rc == 0 && has(out, wa) && miss(out), "file-a-miss");
+    rc = run(cand, ra, 1, fa, 0, &out);
+    ck(rc == 0 && has(out, wa) && hit(out), "file-a-hit");
+    rc = run(cand, rb, 1, fb, 0, &out);
+    ck(rc == 0 && has(out, wb) && !has(out, wa) && miss(out), "file-b-own-path-miss");
+    /* relative __FILE__ unit is pinned to its cwd too */
+    rc = run(cand, ra, 1, "f.cx", 0, &out);
+    ck(rc == 0 && has(out, "file=f.cx"), "file-rel-a");
+    rc = run(cand, rb, 1, "f.cx", 0, &out);
+    ck(rc == 0 && has(out, "file=f.cx") && miss(out), "file-rel-b-pinned-miss");
+    printf("RUNCACHE_ROOTS\tassertions=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

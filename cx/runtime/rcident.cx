@@ -1,5 +1,10 @@
 #pragma unisa module rcident
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
 /* Hot-reuse key for one regular file: SHA-256 of size, dev, ino, mtime, ctime.
    The caller still content-hashes cache entry files. A forged identity misses
    the fast path and cannot validate a stale entry. */
@@ -25,4 +30,188 @@ int rc_hex_ident(const char *path, char hex[65]) {
     ri_put64(buf + 32, (unsigned long long)st.ctime);
     cx_sha256_hex(buf, 40, hex);
     return 0;
+}
+
+/* X1: root-independent run-cache key material (the callers are in src/runcache.cx).
+   rk_open records the current directory of this process. rk_norm strips that
+   prefix from an absolute path: a path below the current directory enters the
+   key and the entry receipts relative to it and is resolved again under the
+   directory of the looking-up process; every other path is kept verbatim.
+   A unit or a recorded present header whose bytes contain __FILE__ can expand
+   its own path into the output. Such an entry is pinned: it is stored under
+   the raw digest (current directory, raw arguments, raw source paths) with
+   absolute receipts, and a lookup tries the pinned key only when the unpinned
+   one is absent. */
+static char ri_cwd[4096];
+static int ri_cwdn;
+
+int rk_open(void) {
+    long n;
+    ri_cwdn = 0;
+    ri_cwd[0] = 0;
+    if (sy_cwd(ri_cwd, 4096)) return 1;
+    n = tx_len(ri_cwd, 4096);
+    if (n <= 0 || n >= 4095) return 1;
+    ri_cwdn = (int)n;
+    return 0;
+}
+
+const char *rk_norm(const char *p) {
+    long n;
+    if (!p || ri_cwdn <= 0) return p;
+    n = tx_len(p, 4096);
+    if (n < (long)ri_cwdn + 2 || !tx_same(p, (long)ri_cwdn, ri_cwd, (long)ri_cwdn)) return p;
+    /* "cwd//x" would turn into the absolute "/x": kept verbatim */
+    if (p[ri_cwdn] != '/' || p[ri_cwdn + 1] == '/') return p;
+    return p + ri_cwdn + 1;
+}
+
+static int ri_names_file(const char *b, long n) {
+    long i;
+    if (!b || n < 8) return 0;
+    /* pivot on the 'F' at offset 2: rarer in C text than '_' */
+    i = 2;
+    while (i + 6 <= n) {
+        if (b[i] == 'F' && b[i - 2] == '_' && b[i - 1] == '_' && b[i + 1] == 'I' && b[i + 2] == 'L' &&
+            b[i + 3] == 'E' && b[i + 4] == '_' && b[i + 5] == '_')
+            return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+static int ri_app(unsigned char **b, long *n, long *cap, const void *p, long k) {
+    unsigned char *nb;
+    long c;
+    if (k < 0 || *n > 2147483647L - k) return 1;
+    if (*n + k > *cap) {
+        c = *cap > 0 ? *cap : 4096;
+        while (c < *n + k) {
+            if (c > 1073741824L) return 1;
+            c = c * 2;
+        }
+        nb = *b ? (unsigned char *)mm_grow(*b, c) : (unsigned char *)mm_alloc(c);
+        if (!nb) return 1;
+        *b = nb;
+        *cap = c;
+    }
+    if (k == 0) return 0;
+    if (mm_copy(*b + *n, k, p, k)) return 1;
+    *n = *n + k;
+    return 0;
+}
+
+/* SHA-256 of one regular file of at most 64 MiB. A file of 64 KiB or more is
+   hashed with sy_sha256_hex; a non-zero return falls back to cx_sha256_hex.
+   NAMES, when given, receives 1 when the bytes contain __FILE__. */
+int rk_file(const char *path, char hex[65], int *names) {
+    sy_stat_t st;
+    char *b;
+    size_t n;
+    if (!path || !path[0]) return 1;
+    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
+    b = cx_read(path, &n);
+    if (!b || (long)n != st.size) {
+        mm_free(b);
+        return 1;
+    }
+    if (names) *names = ri_names_file(b, (long)n);
+    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
+        mm_free(b);
+        return 0;
+    }
+    cx_sha256_hex(b, n, hex);
+    mm_free(b);
+    return 0;
+}
+
+/* 1 when one of the N recorded present files names __FILE__, 0 when none, -1 on a read failure. */
+int rk_pinned(char **have, int n) {
+    char hex[65];
+    int names;
+    int i;
+    i = 0;
+    while (i < n) {
+        names = 0;
+        if (rk_file(have[i], hex, &names)) return -1;
+        if (names) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* HEX: normalized arguments (up to "--"), normalized source paths and source bytes;
+   each path is tagged R (made relative) or A (verbatim). RAW: the pinned digest
+   (current directory, raw arguments, raw paths, then HEX, which already binds the
+   bytes). *PIN is 1 when a source names __FILE__. rk_open must have succeeded. */
+int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65], char raw[65], int *pin) {
+    unsigned char *acc;
+    unsigned char *leg;
+    long n;
+    long cap;
+    long ln2;
+    long cap2;
+    int j;
+    acc = 0;
+    n = 0;
+    cap = 0;
+    leg = 0;
+    ln2 = 0;
+    cap2 = 0;
+    *pin = 0;
+    if (ri_cwdn <= 0 || ri_app(&leg, &ln2, &cap2, ri_cwd, (long)ri_cwdn + 1)) goto bad;
+    j = 1;
+    while (j < argc) {
+        long ln;
+        const char *a;
+        if (!argv[j]) goto bad;
+        if (tx_eq(argv[j], "--", 8)) break;
+        ln = tx_len(argv[j], 4096);
+        if (ln < 0) goto bad;
+        if (ri_app(&leg, &ln2, &cap2, argv[j], ln + 1)) goto bad;
+        a = rk_norm(argv[j]);
+        ln = tx_len(a, 4096);
+        if (ln < 0) goto bad;
+        if (ri_app(&acc, &n, &cap, a == argv[j] ? "A" : "R", 1) || ri_app(&acc, &n, &cap, a, ln + 1)) goto bad;
+        j = j + 1;
+    }
+    j = 0;
+    while (j < nsrc) {
+        sy_stat_t st;
+        char *body;
+        size_t bn;
+        long pl;
+        const char *s;
+        if (!sources[j]) goto bad;
+        pl = tx_len(sources[j], 4096);
+        if (pl < 0) goto bad;
+        if (sy_stat(sources[j], &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) goto bad;
+        if (ri_app(&leg, &ln2, &cap2, sources[j], pl + 1)) goto bad;
+        s = rk_norm(sources[j]);
+        pl = tx_len(s, 4096);
+        if (pl < 0) goto bad;
+        if (ri_app(&acc, &n, &cap, s == sources[j] ? "A" : "R", 1) || ri_app(&acc, &n, &cap, s, pl + 1)) goto bad;
+        body = cx_read(sources[j], &bn);
+        if (!body || (long)bn != st.size) {
+            mm_free(body);
+            goto bad;
+        }
+        if (ri_names_file(body, (long)bn)) *pin = 1;
+        if (ri_app(&acc, &n, &cap, body, (long)bn)) {
+            mm_free(body);
+            goto bad;
+        }
+        mm_free(body);
+        j = j + 1;
+    }
+    cx_sha256_hex(acc ? (const void *)acc : (const void *)"", (size_t)n, hex);
+    if (ri_app(&leg, &ln2, &cap2, hex, 64)) goto bad;
+    cx_sha256_hex(leg, (size_t)ln2, raw);
+    mm_free(acc);
+    mm_free(leg);
+    return 0;
+bad:
+    mm_free(acc);
+    mm_free(leg);
+    return 1;
 }

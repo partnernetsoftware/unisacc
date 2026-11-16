@@ -1,0 +1,612 @@
+diff --git a/cx/runtime/rcident.cx b/cx/runtime/rcident.cx
+index 0f4d784..623fb6f 100644
+--- a/cx/runtime/rcident.cx
++++ b/cx/runtime/rcident.cx
+@@ -1,5 +1,10 @@
+ #pragma unisa module rcident
+ #pragma unisa use sys.fs
++#pragma unisa use sys.env
++#pragma unisa use sys.sha
++#pragma unisa use mem.heap
++#pragma unisa use mem.bytes
++#pragma unisa use text.text
+ /* Hot-reuse key for one regular file: SHA-256 of size, dev, ino, mtime, ctime.
+    The caller still content-hashes cache entry files. A forged identity misses
+    the fast path and cannot validate a stale entry. */
+@@ -26,3 +31,187 @@ int rc_hex_ident(const char *path, char hex[65]) {
+     cx_sha256_hex(buf, 40, hex);
+     return 0;
+ }
++
++/* X1: root-independent run-cache key material (the callers are in src/runcache.cx).
++   rk_open records the current directory of this process. rk_norm strips that
++   prefix from an absolute path: a path below the current directory enters the
++   key and the entry receipts relative to it and is resolved again under the
++   directory of the looking-up process; every other path is kept verbatim.
++   A unit or a recorded present header whose bytes contain __FILE__ can expand
++   its own path into the output. Such an entry is pinned: it is stored under
++   the raw digest (current directory, raw arguments, raw source paths) with
++   absolute receipts, and a lookup tries the pinned key only when the unpinned
++   one is absent. */
++static char ri_cwd[4096];
++static int ri_cwdn;
++
++int rk_open(void) {
++    long n;
++    ri_cwdn = 0;
++    ri_cwd[0] = 0;
++    if (sy_cwd(ri_cwd, 4096)) return 1;
++    n = tx_len(ri_cwd, 4096);
++    if (n <= 0 || n >= 4095) return 1;
++    ri_cwdn = (int)n;
++    return 0;
++}
++
++const char *rk_norm(const char *p) {
++    long n;
++    if (!p || ri_cwdn <= 0) return p;
++    n = tx_len(p, 4096);
++    if (n < (long)ri_cwdn + 2 || !tx_same(p, (long)ri_cwdn, ri_cwd, (long)ri_cwdn)) return p;
++    /* "cwd//x" would turn into the absolute "/x": kept verbatim */
++    if (p[ri_cwdn] != '/' || p[ri_cwdn + 1] == '/') return p;
++    return p + ri_cwdn + 1;
++}
++
++static int ri_names_file(const char *b, long n) {
++    long i;
++    if (!b || n < 8) return 0;
++    /* pivot on the 'F' at offset 2: rarer in C text than '_' */
++    i = 2;
++    while (i + 6 <= n) {
++        if (b[i] == 'F' && b[i - 2] == '_' && b[i - 1] == '_' && b[i + 1] == 'I' && b[i + 2] == 'L' &&
++            b[i + 3] == 'E' && b[i + 4] == '_' && b[i + 5] == '_')
++            return 1;
++        i = i + 1;
++    }
++    return 0;
++}
++
++static int ri_app(unsigned char **b, long *n, long *cap, const void *p, long k) {
++    unsigned char *nb;
++    long c;
++    if (k < 0 || *n > 2147483647L - k) return 1;
++    if (*n + k > *cap) {
++        c = *cap > 0 ? *cap : 4096;
++        while (c < *n + k) {
++            if (c > 1073741824L) return 1;
++            c = c * 2;
++        }
++        nb = *b ? (unsigned char *)mm_grow(*b, c) : (unsigned char *)mm_alloc(c);
++        if (!nb) return 1;
++        *b = nb;
++        *cap = c;
++    }
++    if (k == 0) return 0;
++    if (mm_copy(*b + *n, k, p, k)) return 1;
++    *n = *n + k;
++    return 0;
++}
++
++/* SHA-256 of one regular file of at most 64 MiB. A file of 64 KiB or more is
++   hashed with sy_sha256_hex; a non-zero return falls back to cx_sha256_hex.
++   NAMES, when given, receives 1 when the bytes contain __FILE__. */
++int rk_file(const char *path, char hex[65], int *names) {
++    sy_stat_t st;
++    char *b;
++    size_t n;
++    if (!path || !path[0]) return 1;
++    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
++    b = cx_read(path, &n);
++    if (!b || (long)n != st.size) {
++        mm_free(b);
++        return 1;
++    }
++    if (names) *names = ri_names_file(b, (long)n);
++    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
++        mm_free(b);
++        return 0;
++    }
++    cx_sha256_hex(b, n, hex);
++    mm_free(b);
++    return 0;
++}
++
++/* 1 when one of the N recorded present files names __FILE__, 0 when none, -1 on a read failure. */
++int rk_pinned(char **have, int n) {
++    char hex[65];
++    int names;
++    int i;
++    i = 0;
++    while (i < n) {
++        names = 0;
++        if (rk_file(have[i], hex, &names)) return -1;
++        if (names) return 1;
++        i = i + 1;
++    }
++    return 0;
++}
++
++/* HEX: normalized arguments (up to "--"), normalized source paths and source bytes;
++   each path is tagged R (made relative) or A (verbatim). RAW: the pinned digest
++   (current directory, raw arguments, raw paths, then HEX, which already binds the
++   bytes). *PIN is 1 when a source names __FILE__. rk_open must have succeeded. */
++int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65], char raw[65], int *pin) {
++    unsigned char *acc;
++    unsigned char *leg;
++    long n;
++    long cap;
++    long ln2;
++    long cap2;
++    int j;
++    acc = 0;
++    n = 0;
++    cap = 0;
++    leg = 0;
++    ln2 = 0;
++    cap2 = 0;
++    *pin = 0;
++    if (ri_cwdn <= 0 || ri_app(&leg, &ln2, &cap2, ri_cwd, (long)ri_cwdn + 1)) goto bad;
++    j = 1;
++    while (j < argc) {
++        long ln;
++        const char *a;
++        if (!argv[j]) goto bad;
++        if (tx_eq(argv[j], "--", 8)) break;
++        ln = tx_len(argv[j], 4096);
++        if (ln < 0) goto bad;
++        if (ri_app(&leg, &ln2, &cap2, argv[j], ln + 1)) goto bad;
++        a = rk_norm(argv[j]);
++        ln = tx_len(a, 4096);
++        if (ln < 0) goto bad;
++        if (ri_app(&acc, &n, &cap, a == argv[j] ? "A" : "R", 1) || ri_app(&acc, &n, &cap, a, ln + 1)) goto bad;
++        j = j + 1;
++    }
++    j = 0;
++    while (j < nsrc) {
++        sy_stat_t st;
++        char *body;
++        size_t bn;
++        long pl;
++        const char *s;
++        if (!sources[j]) goto bad;
++        pl = tx_len(sources[j], 4096);
++        if (pl < 0) goto bad;
++        if (sy_stat(sources[j], &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) goto bad;
++        if (ri_app(&leg, &ln2, &cap2, sources[j], pl + 1)) goto bad;
++        s = rk_norm(sources[j]);
++        pl = tx_len(s, 4096);
++        if (pl < 0) goto bad;
++        if (ri_app(&acc, &n, &cap, s == sources[j] ? "A" : "R", 1) || ri_app(&acc, &n, &cap, s, pl + 1)) goto bad;
++        body = cx_read(sources[j], &bn);
++        if (!body || (long)bn != st.size) {
++            mm_free(body);
++            goto bad;
++        }
++        if (ri_names_file(body, (long)bn)) *pin = 1;
++        if (ri_app(&acc, &n, &cap, body, (long)bn)) {
++            mm_free(body);
++            goto bad;
++        }
++        mm_free(body);
++        j = j + 1;
++    }
++    cx_sha256_hex(acc ? (const void *)acc : (const void *)"", (size_t)n, hex);
++    if (ri_app(&leg, &ln2, &cap2, hex, 64)) goto bad;
++    cx_sha256_hex(leg, (size_t)ln2, raw);
++    mm_free(acc);
++    mm_free(leg);
++    return 0;
++bad:
++    mm_free(acc);
++    mm_free(leg);
++    return 1;
++}
+diff --git a/src/runcache.cx b/src/runcache.cx
+index 5557ea7..237ab71 100644
+--- a/src/runcache.cx
++++ b/src/runcache.cx
+@@ -25,6 +25,8 @@ static int rc_armed;
+ static int rc_broken;
+ static char rc_prod[65];
+ static char rc_src[65];
++static char rc_raw[65];
++static int rc_pin;
+ static char rc_target[96];
+ static int rc_level;
+ static int rc_mode;
+@@ -217,84 +219,6 @@ static int rc_app(unsigned char **b, long *n, long *cap, const void *p, long k)
+     return 0;
+ }
+ 
+-static int rc_hex_file(const char *path, char hex[65]) {
+-    int sy_stat(const char *, sy_stat_t *);
+-    int sy_sha256_hex(const void *, long, char *);
+-    sy_stat_t st;
+-    char *b;
+-    size_t n;
+-    if (!path || !path[0]) return 1;
+-    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
+-    b = cx_read(path, &n);
+-    if (!b || (long)n != st.size) {
+-        rc_release(b);
+-        return 1;
+-    }
+-    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
+-        rc_release(b);
+-        return 0;
+-    }
+-    cx_sha256_hex(b, n, hex);
+-    rc_release(b);
+-    return 0;
+-}
+-
+-static int rc_hex_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65]) {
+-    int sy_cwd(char *, int);
+-    int sy_stat(const char *, sy_stat_t *);
+-    long tx_len(const char *, long);
+-    int tx_eq(const char *, const char *, long);
+-    char cwd[4096];
+-    unsigned char *acc;
+-    long n;
+-    long cap;
+-    int j;
+-    if (sy_cwd(cwd, 4096)) return 1;
+-    acc = 0;
+-    n = 0;
+-    cap = 0;
+-    if (rc_app(&acc, &n, &cap, cwd, tx_len(cwd, 4096) + 1)) goto bad;
+-    j = 1;
+-    while (j < argc) {
+-        long ln;
+-        if (!argv[j]) goto bad;
+-        if (tx_eq(argv[j], "--", 8)) break;
+-        ln = tx_len(argv[j], 4096);
+-        if (ln < 0) goto bad;
+-        if (rc_app(&acc, &n, &cap, argv[j], ln + 1)) goto bad;
+-        j = j + 1;
+-    }
+-    j = 0;
+-    while (j < nsrc) {
+-        sy_stat_t st;
+-        char *body;
+-        size_t bn;
+-        long pl;
+-        if (!sources[j]) goto bad;
+-        pl = tx_len(sources[j], 4096);
+-        if (pl < 0) goto bad;
+-        if (sy_stat(sources[j], &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) goto bad;
+-        if (rc_app(&acc, &n, &cap, sources[j], pl + 1)) goto bad;
+-        body = cx_read(sources[j], &bn);
+-        if (!body || (long)bn != st.size) {
+-            rc_release(body);
+-            goto bad;
+-        }
+-        if (rc_app(&acc, &n, &cap, body, (long)bn)) {
+-            rc_release(body);
+-            goto bad;
+-        }
+-        rc_release(body);
+-        j = j + 1;
+-    }
+-    cx_sha256_hex(acc, (size_t)n, hex);
+-    rc_release(acc);
+-    return 0;
+-bad:
+-    rc_release(acc);
+-    return 1;
+-}
+-
+ static int rc_off(void) {
+     const char *sy_env(const char *);
+     int tx_eq(const char *, const char *, long);
+@@ -316,16 +240,17 @@ static int rc_route(char *dst, int cap, int elf) {
+     return 0;
+ }
+ 
+-static int rc_key(char key[65], const char *route) {
++/* X1 (cx/runtime/rcident.cx rk_*): pin 0 is the root-independent key, pin 1 the key of an entry naming __FILE__ */
++static int rc_key(char key[65], const char *route, int pin) {
+     char blob[640];
+     int at;
+     at = 0;
+-    if (rc_cat(blob, 640, &at, "USE33\nver=12\nmode=") || rc_cat(blob, 640, &at, rc_prod) ||
++    if (rc_cat(blob, 640, &at, "USE33\nver=13\nmode=") || rc_cat(blob, 640, &at, rc_prod) ||
+         rc_cat_u(blob, 640, &at, (unsigned long long)rc_mode) || rc_cat(blob, 640, &at, "\npkg=") || rc_cat(blob, 640, &at, rc_prod) ||
+         rc_cat(blob, 640, &at, "\nroute=") || rc_cat(blob, 640, &at, route) ||
+         rc_cat(blob, 640, &at, "\ntarget=") || rc_cat(blob, 640, &at, rc_target) ||
+         rc_cat(blob, 640, &at, "\nlevel=") || rc_cat_u(blob, 640, &at, (unsigned long long)rc_level) ||
+-        rc_cat(blob, 640, &at, "\nsrc=") || rc_cat(blob, 640, &at, rc_src) ||
++        rc_cat(blob, 640, &at, pin ? "\npin=1\nsrc=" : "\npin=0\nsrc=") || rc_cat(blob, 640, &at, pin ? rc_raw : rc_src) ||
+         rc_cat(blob, 640, &at, "\n")) return 1;
+     cx_sha256_hex(blob, (size_t)at, key);
+     return 0;
+@@ -424,12 +349,14 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
+     unsigned i;
+     unsigned hn;
+     unsigned abn;
++    int pin;
+     if (!rc_on || rc_broken || !tape || tn < 0 || tn > (1L << 26)) return 1;
+     hn = (unsigned)rc_nh;
+     abn = (unsigned)rc_nm;
+     if (mc_cache_dir(dir, 400)) return 1;
+     if (rc_route(route, 160, elf)) return 1;
+-    if (rc_key(key, route)) return 1;
++    pin = rc_pin ? 1 : rk_pinned(rc_have, rc_nh);
++    if (pin < 0 || rc_key(key, route, pin)) return 1;
+     if (rc_join(path, 560, dir, key, elf)) return 1;
+     payload = 0;
+     at = 0;
+@@ -452,14 +379,16 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
+         unsigned char lb[2];
+         long pl;
+         char one[65];
+-        pl = tx_len(rc_have[i], 4096);
++        const char *rp;
++        rp = pin ? rc_have[i] : rk_norm(rc_have[i]);
++        pl = tx_len(rp, 4096);
+         if (pl <= 0 || pl > 4096) goto bad;
+-        if (sy_stat(rc_have[i], &st) || st.kind != 'f' || rc_hex_file(rc_have[i], one)) goto bad;
++        if (sy_stat(rc_have[i], &st) || st.kind != 'f' || rk_file(rc_have[i], one, 0)) goto bad;
+         lb[0] = (unsigned char)(pl & 255);
+         lb[1] = (unsigned char)((pl >> 8) & 255);
+         rc_put64(meta, (unsigned long long)st.size);
+         rc_put64(meta + 8, (unsigned long long)st.mtime);
+-        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_have[i], pl) ||
++        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rp, pl) ||
+             rc_app(&payload, &at, &cap, meta, 16) || rc_app(&payload, &at, &cap, one, 64))
+             goto bad;
+         if (rc_debug()) rc_dbg_path("RR_PRESENT", rc_have[i]);
+@@ -469,11 +398,13 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
+     while (i < abn) {
+         unsigned char lb[2];
+         long pl;
+-        pl = tx_len(rc_miss[i], 4096);
++        const char *rp;
++        rp = pin ? rc_miss[i] : rk_norm(rc_miss[i]);
++        pl = tx_len(rp, 4096);
+         if (pl <= 0 || pl > 4096) goto bad;
+         lb[0] = (unsigned char)(pl & 255);
+         lb[1] = (unsigned char)((pl >> 8) & 255);
+-        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_miss[i], pl)) goto bad;
++        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rp, pl)) goto bad;
+         if (rc_debug()) rc_dbg_path("RR_ABSENT", rc_miss[i]);
+         i = i + 1;
+     }
+@@ -486,13 +417,26 @@ bad:
+     return 1;
+ }
+ 
+-static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
++/* 0 when an entry file of a valid size is at PATH: the unpinned key first, the pinned key only when that one is absent */
++static int rc_probe(int elf, char *dir, char *path) {
+     int sy_lstat(const char *, sy_stat_t *);
++    char route[160];
++    char key[65];
++    sy_stat_t st;
++    int pin;
++    pin = 0;
++    while (pin < 2) {
++        if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 1;
++        if (!sy_lstat(path, &st)) return st.kind != 'f' || st.size < 88 || st.size > (1L << 26);
++        pin = pin + 1;
++    }
++    return 1;
++}
++
++static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+     int tx_same(const char *, long, const char *, long);
+     long long hs_ns(void);
+     char dir[400];
+-    char route[160];
+-    char key[65];
+     char path[560];
+     char hex[65];
+     char got[65];
+@@ -514,19 +458,11 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+     if (!rc_on || !out || !outn) return 0;
+     t0 = hs_ns();
+     magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
+-    if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route) || rc_join(path, 560, dir, key, elf)) {
++    if (rc_probe(elf, dir, path)) {
+         t1 = hs_ns();
+         rc_report(0, t1 - t0);
+         return 0;
+     }
+-    {
+-        sy_stat_t st;
+-        if (sy_lstat(path, &st) || st.kind != 'f' || st.size < 88 || st.size > (1L << 26)) {
+-            t1 = hs_ns();
+-            rc_report(0, t1 - t0);
+-            return 0;
+-        }
+-    }
+     file = (unsigned char *)cx_read(path, &fn);
+     if (!file) {
+         t1 = hs_ns();
+@@ -561,7 +497,7 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+         if (!pl || pl > 4096 || at + (long)pl + 16 + 64 > n) goto miss;
+         if (tx_copy(pp, 4097, (const char *)(file + at), (long)pl)) goto miss;
+         at = at + (long)pl + 16;
+-        if (rc_hex_file(pp, cur) || !tx_same(cur, 64, (const char *)(file + at), 64)) {
++        if (rk_file(pp, cur, 0) || !tx_same(cur, 64, (const char *)(file + at), 64)) {
+             if (rc_debug()) rc_dbg_path("RR_MISS\tpresent", pp);
+             goto miss;
+         }
+@@ -622,6 +558,8 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
+     rc_broken = 0;
+     rc_prod[0] = 0;
+     rc_src[0] = 0;
++    rc_raw[0] = 0;
++    rc_pin = 0;
+     /* Resource-flow capture rewrites a ledger on every build, and --strict-resource-flow
+        replays it; a cache hit would skip both, so capture disables the cache entirely. */
+     if ((rc_off() && rc_time_on() && (rc_report(0, 1), 1)) || rc_off() || tape || deps) return 0;
+@@ -634,7 +572,7 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
+     rc_mode = mode;
+     rc_nsrc = nsrc;
+     if (rc_hex_ident(product, rc_prod)) return 0;
+-    if (rc_hex_sources(argc, argv, sources, nsrc, rc_src)) return 0;
++    if (rk_open() || rk_sources(argc, argv, sources, nsrc, rc_src, rc_raw, &rc_pin)) return 0;
+     rc_on = 1;
+     if (rc_debug()) {
+         char line[180];
+diff --git a/tests/runcache-roots.cx b/tests/runcache-roots.cx
+new file mode 100644
+index 0000000..91c271b
+--- /dev/null
++++ b/tests/runcache-roots.cx
+@@ -0,0 +1,154 @@
++/* runcache-roots.cx -- X1 root-independent run-cache key vs {candidate}.
++   usage: sh ./unisacc.com tests/runcache-roots.cx -- NEW_OUT CANDIDATE
++   Two roots A and B hold byte-identical t.cx plus a used module mods/m.cx.
++   Every run is started inside its root with the relative path t.cx, a private
++   cache (UNISACC_E3CACHE) and UNISACC_RR_TIME=1; a hit is the line
++   "RR_TIME\tlookup_hit=2", a miss "lookup_hit=0".  Program output is asserted
++   on every run, hit or miss, against the expected text and against a
++   UNISACC_RUN_CACHE=0 arm.
++   Controls: (1) B after A hits; (2) one source byte changed misses; (3) one
++   used-module byte changed misses and the new value shows; (4) another
++   compiler identity (a copy of CANDIDATE, new inode) misses; (5) a changed
++   -D option misses and the new value shows; (6) a unit naming __FILE__ run
++   by absolute path prints its own root in A and in B and B does not hit.
++   rc 0 all PASS, 1 some FAIL, 2 usage or setup trouble. */
++#pragma unisa use text.text
++#pragma unisa use sys.fs
++
++#define CAP 65536
++static int checks, failed;
++static char work[2048], cache[2200], ra[2200], rb[2200], cand2[2200];
++
++static void die(const char *s) { fprintf(stderr, "runcache-roots: %s\n", s); exit(2); }
++static const char *last_out = "";
++static long outn; /* captured bytes are not NUL-terminated: lengths come from the run */
++static void ck(int yes, const char *name) {
++    checks++;
++    if (!yes) failed++;
++    printf("%s\truncache-roots.%s\n", yes ? "PASS" : "FAIL", name);
++    if (!yes) fprintf(stderr, "runcache-roots: %s output (%ld bytes):\n%.*s\n", name, outn, (int)(outn > 2000 ? 2000 : outn), last_out);
++}
++static void put(const char *dir, const char *leaf, const char *text) {
++    char p[2400];
++    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) die("path");
++    if (cx_write(p, text, (size_t)tx_len(text, CAP))) die("write");
++}
++static int has(const char *out, const char *needle) { return tx_find(out, outn, needle, tx_len(needle, 2600)) >= 0; }
++
++/* run CAND inside DIR on ARG1 [ARG2]; stdout and stderr merged into *outp */
++static int run(const char *cand, const char *dir, int cache_on, const char *a1, const char *a2, char **outp) {
++    char envc[2300], *v[24], *out = 0;
++    size_t n = 0;
++    int k = 0, rc;
++    if (cx_fmt(envc, sizeof envc, "UNISACC_E3CACHE=%s", cache)) die("env");
++    v[k++] = "env";
++    /* the parent -run exports its own container path (relative to the parent cwd) and capture switches */
++    v[k++] = "-u";
++    v[k++] = "UNISA_CONTAINER";
++    v[k++] = "-u";
++    v[k++] = "UNISACC_RF_CAPTURE";
++    v[k++] = "-u";
++    v[k++] = "UNISA_ATTRIBUTES";
++    v[k++] = "-C";
++    v[k++] = (char *)dir;
++    v[k++] = envc;
++    v[k++] = "UNISACC_RR_TIME=1";
++    v[k++] = cache_on ? "UNISACC_RUN_CACHE=1" : "UNISACC_RUN_CACHE=0";
++    v[k++] = "sh";
++    v[k++] = "-c";
++    v[k++] = "exec \"$0\" \"$@\" 2>&1";
++    v[k++] = (char *)cand;
++    if (a2) v[k++] = (char *)a2;
++    v[k++] = (char *)a1;
++    v[k] = 0;
++    rc = cx_runv_timeout(v, 50, &out, &n);
++    *outp = out ? out : "";
++    outn = out ? (long)n : 0;
++    last_out = *outp;
++    return rc;
++}
++static int hit(const char *out) { return has(out, "RR_TIME\tlookup_hit=2"); }
++static int miss(const char *out) { return has(out, "RR_TIME\tlookup_hit=0") && !hit(out); }
++/* same program output with the cache arm and with UNISACC_RUN_CACHE=0 */
++static void arm(const char *cand, const char *dir, const char *a1, const char *a2, const char *want, const char *name) {
++    char *out = 0, label[128];
++    int rc = run(cand, dir, 0, a1, a2, &out);
++    if (cx_fmt(label, sizeof label, "%s-cache-off-arm", name)) die("fmt");
++    ck(rc == 0 && has(out, want), label);
++}
++
++int main(int argc, char **argv) {
++    static const char mod1[] = "#pragma unisa module m\nint m_val(void){return 7;}\n";
++    static const char mod2[] = "#pragma unisa module m\nint m_val(void){return 8;}\n";
++    static const char tool1[] = "#pragma unisa use mods.m\n#ifndef K\n#define K 1\n#endif\n"
++                                "int main(void){printf(\"v=%d k=%d\\n\",m_val(),K);return 0;}\n";
++    static const char tool2[] = "#pragma unisa use mods.m\n#ifndef K\n#define K 1\n#endif\n"
++                                "int main(void){printf(\"v=%d k=%d\\n\",m_val(),K);return 0;}\n/**/\n";
++    static const char filesrc[] = "int main(void){printf(\"file=%s\\n\",__FILE__);return 0;}\n";
++    const char *cand;
++    char *out = 0, fa[2400], fb[2400], wa[2500], wb[2500], *body;
++    size_t bn;
++    int rc;
++    if (argc != 3) die("usage: NEW_OUT CANDIDATE");
++    cand = argv[2];
++    if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path");
++    if (sy_mkdir(work, 0700)) die("NEW_OUT");
++    if (cx_fmt(cache, sizeof cache, "%s/cache", work) || sy_mkdir(cache, 0700)) die("cache");
++    if (cx_fmt(ra, sizeof ra, "%s/rootA", work) || sy_mkdir(ra, 0700)) die("rootA");
++    if (cx_fmt(rb, sizeof rb, "%s/rootB", work) || sy_mkdir(rb, 0700)) die("rootB");
++    if (cx_fmt(fa, sizeof fa, "%s/mods", ra) || sy_mkdir(fa, 0700)) die("mods");
++    if (cx_fmt(fb, sizeof fb, "%s/mods", rb) || sy_mkdir(fb, 0700)) die("mods");
++    put(ra, "t.cx", tool1); put(rb, "t.cx", tool1);
++    put(ra, "mods/m.cx", mod1); put(rb, "mods/m.cx", mod1);
++    put(ra, "f.cx", filesrc); put(rb, "f.cx", filesrc);
++
++    /* (0) positive control in A: cold miss, then hit */
++    rc = run(cand, ra, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "a-cold-miss");
++    rc = run(cand, ra, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "a-warm-hit");
++    /* (1) another root, same bytes, same relative command: hit */
++    rc = run(cand, rb, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "b-first-hit");
++    arm(cand, rb, "t.cx", 0, "v=7 k=1", "b");
++    /* (2) one source byte in B: miss */
++    put(rb, "t.cx", tool2);
++    rc = run(cand, rb, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "src-byte-miss");
++    /* (3) one byte in the used module in B: miss, new value */
++    put(rb, "mods/m.cx", mod2);
++    rc = run(cand, rb, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=8 k=1") && miss(out), "dep-byte-miss");
++    arm(cand, rb, "t.cx", 0, "v=8 k=1", "dep");
++    /* A still holds the old module: its entry must still hit with the old value */
++    rc = run(cand, ra, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && hit(out), "a-unaffected-hit");
++    /* (4) another compiler identity: a copy of the candidate (new inode) */
++    if (cx_fmt(cand2, sizeof cand2, "%s/candidate-copy", work)) die("path");
++    body = cx_read(cand, &bn);
++    if (!body || cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("copy candidate");
++    rc = run(cand2, ra, 1, "t.cx", 0, &out);
++    ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
++    /* (5) an output-affecting option: -DK=2 misses and shows k=2; repeated it hits */
++    rc = run(cand, ra, 1, "t.cx", "-DK=2", &out);
++    ck(rc == 0 && has(out, "v=7 k=2") && miss(out), "option-miss");
++    rc = run(cand, ra, 1, "t.cx", "-DK=2", &out);
++    ck(rc == 0 && has(out, "v=7 k=2") && hit(out), "option-warm-hit");
++    arm(cand, ra, "t.cx", "-DK=2", "v=7 k=2", "option");
++    /* (6) __FILE__ by absolute path: each root prints itself, B never reuses A */
++    if (cx_fmt(fa, sizeof fa, "%s/f.cx", ra) || cx_fmt(fb, sizeof fb, "%s/f.cx", rb)) die("path");
++    if (cx_fmt(wa, sizeof wa, "file=%s", fa) || cx_fmt(wb, sizeof wb, "file=%s", fb)) die("path");
++    rc = run(cand, ra, 1, fa, 0, &out);
++    ck(rc == 0 && has(out, wa) && miss(out), "file-a-miss");
++    rc = run(cand, ra, 1, fa, 0, &out);
++    ck(rc == 0 && has(out, wa) && hit(out), "file-a-hit");
++    rc = run(cand, rb, 1, fb, 0, &out);
++    ck(rc == 0 && has(out, wb) && !has(out, wa) && miss(out), "file-b-own-path-miss");
++    /* relative __FILE__ unit is pinned to its cwd too */
++    rc = run(cand, ra, 1, "f.cx", 0, &out);
++    ck(rc == 0 && has(out, "file=f.cx"), "file-rel-a");
++    rc = run(cand, rb, 1, "f.cx", 0, &out);
++    ck(rc == 0 && has(out, "file=f.cx") && miss(out), "file-rel-b-pinned-miss");
++    printf("RUNCACHE_ROOTS\tassertions=%d\tfailed=%d\n", checks, failed);
++    return failed ? 1 : 0;
++}

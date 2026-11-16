@@ -25,6 +25,8 @@ static int rc_armed;
 static int rc_broken;
 static char rc_prod[65];
 static char rc_src[65];
+static char rc_raw[65];
+static int rc_pin;
 static char rc_target[96];
 static int rc_level;
 static int rc_mode;
@@ -217,84 +219,6 @@ static int rc_app(unsigned char **b, long *n, long *cap, const void *p, long k) 
     return 0;
 }
 
-static int rc_hex_file(const char *path, char hex[65]) {
-    int sy_stat(const char *, sy_stat_t *);
-    int sy_sha256_hex(const void *, long, char *);
-    sy_stat_t st;
-    char *b;
-    size_t n;
-    if (!path || !path[0]) return 1;
-    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
-    b = cx_read(path, &n);
-    if (!b || (long)n != st.size) {
-        rc_release(b);
-        return 1;
-    }
-    if ((long)n >= 65536 && sy_sha256_hex(b, (long)n, hex) == 0) {
-        rc_release(b);
-        return 0;
-    }
-    cx_sha256_hex(b, n, hex);
-    rc_release(b);
-    return 0;
-}
-
-static int rc_hex_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65]) {
-    int sy_cwd(char *, int);
-    int sy_stat(const char *, sy_stat_t *);
-    long tx_len(const char *, long);
-    int tx_eq(const char *, const char *, long);
-    char cwd[4096];
-    unsigned char *acc;
-    long n;
-    long cap;
-    int j;
-    if (sy_cwd(cwd, 4096)) return 1;
-    acc = 0;
-    n = 0;
-    cap = 0;
-    if (rc_app(&acc, &n, &cap, cwd, tx_len(cwd, 4096) + 1)) goto bad;
-    j = 1;
-    while (j < argc) {
-        long ln;
-        if (!argv[j]) goto bad;
-        if (tx_eq(argv[j], "--", 8)) break;
-        ln = tx_len(argv[j], 4096);
-        if (ln < 0) goto bad;
-        if (rc_app(&acc, &n, &cap, argv[j], ln + 1)) goto bad;
-        j = j + 1;
-    }
-    j = 0;
-    while (j < nsrc) {
-        sy_stat_t st;
-        char *body;
-        size_t bn;
-        long pl;
-        if (!sources[j]) goto bad;
-        pl = tx_len(sources[j], 4096);
-        if (pl < 0) goto bad;
-        if (sy_stat(sources[j], &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) goto bad;
-        if (rc_app(&acc, &n, &cap, sources[j], pl + 1)) goto bad;
-        body = cx_read(sources[j], &bn);
-        if (!body || (long)bn != st.size) {
-            rc_release(body);
-            goto bad;
-        }
-        if (rc_app(&acc, &n, &cap, body, (long)bn)) {
-            rc_release(body);
-            goto bad;
-        }
-        rc_release(body);
-        j = j + 1;
-    }
-    cx_sha256_hex(acc, (size_t)n, hex);
-    rc_release(acc);
-    return 0;
-bad:
-    rc_release(acc);
-    return 1;
-}
-
 static int rc_off(void) {
     const char *sy_env(const char *);
     int tx_eq(const char *, const char *, long);
@@ -316,16 +240,17 @@ static int rc_route(char *dst, int cap, int elf) {
     return 0;
 }
 
-static int rc_key(char key[65], const char *route) {
+/* X1 (cx/runtime/rcident.cx rk_*): pin 0 is the root-independent key, pin 1 the key of an entry naming __FILE__ */
+static int rc_key(char key[65], const char *route, int pin) {
     char blob[640];
     int at;
     at = 0;
-    if (rc_cat(blob, 640, &at, "USE33\nver=12\nmode=") || rc_cat(blob, 640, &at, rc_prod) ||
+    if (rc_cat(blob, 640, &at, "USE33\nver=13\nmode=") || rc_cat(blob, 640, &at, rc_prod) ||
         rc_cat_u(blob, 640, &at, (unsigned long long)rc_mode) || rc_cat(blob, 640, &at, "\npkg=") || rc_cat(blob, 640, &at, rc_prod) ||
         rc_cat(blob, 640, &at, "\nroute=") || rc_cat(blob, 640, &at, route) ||
         rc_cat(blob, 640, &at, "\ntarget=") || rc_cat(blob, 640, &at, rc_target) ||
         rc_cat(blob, 640, &at, "\nlevel=") || rc_cat_u(blob, 640, &at, (unsigned long long)rc_level) ||
-        rc_cat(blob, 640, &at, "\nsrc=") || rc_cat(blob, 640, &at, rc_src) ||
+        rc_cat(blob, 640, &at, pin ? "\npin=1\nsrc=" : "\npin=0\nsrc=") || rc_cat(blob, 640, &at, pin ? rc_raw : rc_src) ||
         rc_cat(blob, 640, &at, "\n")) return 1;
     cx_sha256_hex(blob, (size_t)at, key);
     return 0;
@@ -424,12 +349,14 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
     unsigned i;
     unsigned hn;
     unsigned abn;
+    int pin;
     if (!rc_on || rc_broken || !tape || tn < 0 || tn > (1L << 26)) return 1;
     hn = (unsigned)rc_nh;
     abn = (unsigned)rc_nm;
     if (mc_cache_dir(dir, 400)) return 1;
     if (rc_route(route, 160, elf)) return 1;
-    if (rc_key(key, route)) return 1;
+    pin = rc_pin ? 1 : rk_pinned(rc_have, rc_nh);
+    if (pin < 0 || rc_key(key, route, pin)) return 1;
     if (rc_join(path, 560, dir, key, elf)) return 1;
     payload = 0;
     at = 0;
@@ -452,14 +379,16 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
         unsigned char lb[2];
         long pl;
         char one[65];
-        pl = tx_len(rc_have[i], 4096);
+        const char *rp;
+        rp = pin ? rc_have[i] : rk_norm(rc_have[i]);
+        pl = tx_len(rp, 4096);
         if (pl <= 0 || pl > 4096) goto bad;
-        if (sy_stat(rc_have[i], &st) || st.kind != 'f' || rc_hex_file(rc_have[i], one)) goto bad;
+        if (sy_stat(rc_have[i], &st) || st.kind != 'f' || rk_file(rc_have[i], one, 0)) goto bad;
         lb[0] = (unsigned char)(pl & 255);
         lb[1] = (unsigned char)((pl >> 8) & 255);
         rc_put64(meta, (unsigned long long)st.size);
         rc_put64(meta + 8, (unsigned long long)st.mtime);
-        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_have[i], pl) ||
+        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rp, pl) ||
             rc_app(&payload, &at, &cap, meta, 16) || rc_app(&payload, &at, &cap, one, 64))
             goto bad;
         if (rc_debug()) rc_dbg_path("RR_PRESENT", rc_have[i]);
@@ -469,11 +398,13 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
     while (i < abn) {
         unsigned char lb[2];
         long pl;
-        pl = tx_len(rc_miss[i], 4096);
+        const char *rp;
+        rp = pin ? rc_miss[i] : rk_norm(rc_miss[i]);
+        pl = tx_len(rp, 4096);
         if (pl <= 0 || pl > 4096) goto bad;
         lb[0] = (unsigned char)(pl & 255);
         lb[1] = (unsigned char)((pl >> 8) & 255);
-        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rc_miss[i], pl)) goto bad;
+        if (rc_app(&payload, &at, &cap, lb, 2) || rc_app(&payload, &at, &cap, rp, pl)) goto bad;
         if (rc_debug()) rc_dbg_path("RR_ABSENT", rc_miss[i]);
         i = i + 1;
     }
@@ -486,13 +417,26 @@ bad:
     return 1;
 }
 
-static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+/* 0 when an entry file of a valid size is at PATH: the unpinned key first, the pinned key only when that one is absent */
+static int rc_probe(int elf, char *dir, char *path) {
     int sy_lstat(const char *, sy_stat_t *);
+    char route[160];
+    char key[65];
+    sy_stat_t st;
+    int pin;
+    pin = 0;
+    while (pin < 2) {
+        if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 1;
+        if (!sy_lstat(path, &st)) return st.kind != 'f' || st.size < 88 || st.size > (1L << 26);
+        pin = pin + 1;
+    }
+    return 1;
+}
+
+static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     int tx_same(const char *, long, const char *, long);
     long long hs_ns(void);
     char dir[400];
-    char route[160];
-    char key[65];
     char path[560];
     char hex[65];
     char got[65];
@@ -514,18 +458,10 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     if (!rc_on || !out || !outn) return 0;
     t0 = hs_ns();
     magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
-    if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route) || rc_join(path, 560, dir, key, elf)) {
+    if (rc_probe(elf, dir, path)) {
         t1 = hs_ns();
         rc_report(0, t1 - t0);
         return 0;
-    }
-    {
-        sy_stat_t st;
-        if (sy_lstat(path, &st) || st.kind != 'f' || st.size < 88 || st.size > (1L << 26)) {
-            t1 = hs_ns();
-            rc_report(0, t1 - t0);
-            return 0;
-        }
     }
     file = (unsigned char *)cx_read(path, &fn);
     if (!file) {
@@ -561,7 +497,7 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
         if (!pl || pl > 4096 || at + (long)pl + 16 + 64 > n) goto miss;
         if (tx_copy(pp, 4097, (const char *)(file + at), (long)pl)) goto miss;
         at = at + (long)pl + 16;
-        if (rc_hex_file(pp, cur) || !tx_same(cur, 64, (const char *)(file + at), 64)) {
+        if (rk_file(pp, cur, 0) || !tx_same(cur, 64, (const char *)(file + at), 64)) {
             if (rc_debug()) rc_dbg_path("RR_MISS\tpresent", pp);
             goto miss;
         }
@@ -622,6 +558,8 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
     rc_broken = 0;
     rc_prod[0] = 0;
     rc_src[0] = 0;
+    rc_raw[0] = 0;
+    rc_pin = 0;
     /* Resource-flow capture rewrites a ledger on every build, and --strict-resource-flow
        replays it; a cache hit would skip both, so capture disables the cache entirely. */
     if ((rc_off() && rc_time_on() && (rc_report(0, 1), 1)) || rc_off() || tape || deps) return 0;
@@ -634,7 +572,7 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
     rc_mode = mode;
     rc_nsrc = nsrc;
     if (rc_hex_ident(product, rc_prod)) return 0;
-    if (rc_hex_sources(argc, argv, sources, nsrc, rc_src)) return 0;
+    if (rk_open() || rk_sources(argc, argv, sources, nsrc, rc_src, rc_raw, &rc_pin)) return 0;
     rc_on = 1;
     if (rc_debug()) {
         char line[180];
