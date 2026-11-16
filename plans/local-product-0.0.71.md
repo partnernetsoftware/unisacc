@@ -3,10 +3,9 @@
 日期 2026-11-16。输入身份:main HEAD c70986446cf19540c6ab066d180e76d3d41fb66e(git archive 解到 /tmp/lp71/root)。对照:已装 0.0.67(APE sha a99ea71de7ed,回执提交 e02a8f8099)。机器 16 核,测量期间 load1 在 1.8 到 5.1 之间(另有他人作业),数字只作 LOCAL 证据。
 
 ## 结论
-
-- 正规整链(bg-candidate -> chain-run -> candidate-chain)在 main HEAD 上起不来,三处确定性拒绝,见"正规链路与阻塞"。本记录没有正规链候选,不宣称 QUALIFIED。
-- 改用 LOCAL 混合候选跑通端到端:HEAD 源重编的入口(entry-build)加 HEAD 表重建的私有网包(cx-dev)加 HEAD 三个头文件(手工换入包资源)。约 2.5 分钟可得。
-- 收益已能在混合候选上看到:分配密集复现 14.3 秒降到 0.33 秒;8MB sha 979 降到 839 毫秒;编译墙钟同条件降 1.7% 到 7.9%(prune 相 345 降到 144 毫秒);首次启动 655 降到 574 毫秒。sort、memcpy、缓存命中后的重复启动基本持平。
+- 本文前半部分保留最初 LOCAL 混合候选实验；其中“三处正规链拒绝”是当时的历史状态，不再代表当前 main。后续链已走到 pack-recheck。第五条链与计划备忘的接班核验见文末同名节；正式打包仍留到冻结时按发布配方准备私有 src 树，本记录不宣称 QUALIFIED。
+- 最初 LOCAL 混合候选由 HEAD 源重编入口(entry-build)、HEAD 表重建私有网包(cx-dev)与 HEAD 三个头文件换包构成，约 2.5 分钟可得。具体输入身份与当时命令见下文。
+- 当时混合候选上的收益为：分配密集复现 14.3 秒降到 0.33 秒；8MB sha 979 降到 839 毫秒；编译墙钟同条件降 1.7% 到 7.9%(prune 相 345 降到 144 毫秒)；首次启动 655 降到 574 毫秒。sort、memcpy、缓存命中后的重复启动基本持平。这些旧测量不迁移到最新 HEAD。
 
 ## 正规链路与阻塞
 
@@ -101,3 +100,19 @@ bg-candidate 起守护进程,守护进程跑 chain-run(--supervise,段 270 秒,�
 ## 留在 /tmp 的东西
 
 /tmp/lp71(混合候选、假根、测量输出)、/tmp/unisacc-session-lp71 与 /tmp/unisacc-session-lp71d(被拒的链输出)、/tmp/unisacc-bg-b1-1001(第一次被拒的候选目录)。snap 相在 ~/.cache/unisacc/chains/snap/c70986446c-045c5a38 留了一份 HEAD 快照(链工具自己的会话根,非发布根)。未安装、未发布、未改已装产品。
+
+## 第五条链与计划备忘接班核验
+
+输入为 main 提交 4c2e7ad1676b3c744986258adda5378738a27668。这是性能实验，不是发布资格：沿用 cc 的决定，只跑到 pack-recheck；缺正式配方的私有 src 树时 pack 的 rc 2 是已知终点，不据此修打包或放宽门。
+
+(1) 真实终态已核。会话 /tmp/unisacc-session-lp71/4c2e7ad1676b3c744986258adda5378738a27668/exit.tsv 为 rc=2，chain-run-216.stderr 是既有 cache-manager 前置拒绝；pack-recheck 为 rc=0。接班时没有该链进程，不重起同输入。g2 与 g3 的两个 Linux 目标共四份 fixedpoint.planmemo-gN-I.stat 均为 reused，证明各自末次调用命中。该文件每次覆盖，不能还原全程命中率，也不能据它证明所有调用的 TMPDIR 都稳定。
+
+(2) 同口径重算。使用 tools/phase-times-calc.cx，对第四条 ab212d647d 与第五条 4c2e7ad167 各自的 chain-run.tsv、plan.tsv 重算：closure 域的尝试墙钟合计分别为 748.3 与 668.9 秒，均 16 次，差 79.4 秒；所有尝试合计 4047.1 与 3903.2 秒。这些是尝试耗时之和，不是整链墙钟或单因素收益。两条均没有完整成功终态，该工具明确输出 wall_s=UNMEASURED。第五条仍有整目标相超时，不能宣称已消除该瓶颈。
+
+(3) 独立开关对照。使用第五条真实冻结树 ~/.cache/unisacc/chains/snap/4c2e7ad167-045c5a38、compiler.p4.pkg、gen1/lnx-x86_64/candidate、钉住的 entry-build.pin.d/tools/entry-build.cx，以及原 tmp-g2-lnx-x86_64 的 TMPDIR。仅运行 --closure-list，不编译对象、不修改原链会话；备忘复制到 /tmp/codex-lp71-memo-nQt2Rs/plan.memo，输出也写该目录。A 将 UNISACC_EB_PLAN_MEMO 设空，B 指向副本。两者均经已装产品运行同一个钉住工具，故耗时包含相同的工具启动与输入核验。
+
+tools/abab-bench.cx --n 3 的 A/B 交错结果：A 为 3714、3852、3715 毫秒，B 为 3162、3178、3269 毫秒；中位数 3715 与 3178 毫秒，差 537 毫秒，下降 14.45%；CV 为 1.72% 与 1.47%，load1 为 0.42 至 0.55，noisy=0。六次调用均 rc=0。之前的预跑和交错结束后均用 cmp 核 off.tsv 与 on.tsv，逐字节一致；备忘状态为 reused。原始 ABAB 输出在 /tmp/devsvc-flow 执行记录对应的 devsvc run 回执；本次会话的输出和备忘副本在 /tmp/codex-lp71-memo-nQt2Rs。临时目录清除后，原始材料不再可用。
+
+(4) 判断边界。已证明真实链末次命中，以及一组真实冻结输入上复用计划能降低列闭包调用的耗时、输出不变。未证明全链命中率，未给对象编译或正式资格新增通过结论。约 3.5 秒前导还包含封签等工作，不能全部记成 44 根规划可省成本；B 仍约 3.18 秒，剩余各项比例未独立测量。下一步优先分账，而不是直接删去首尾输入核验。
+
+(5) 中断小单保全。cc 额度耗尽时，对象入口桩、tape 绕过 elf 网、整目标限流三单均未完成验收，不合入半成品。已找到原材料 /tmp/ord-objstub-S9avpO、/tmp/ord-tapebypass-d7v7SR、/tmp/ord-wholeo-4VNQlE；其中 wholeo 树已有前端子步耗时表的未完成修改，不能视作已完成限流。共享检出的 tests 路径有大量 100644 -> 100755 变化而内容无差异，来源未核，接班未改动或提交这些路径。
