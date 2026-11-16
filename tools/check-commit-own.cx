@@ -185,6 +185,7 @@ static void s2_want(const char *script_tail, const char *want, const char *name)
     if (cx_fmt(script, sizeof script, "cd %s/clone && %s", base, script_tail)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) >= 0, name);
+    if (tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) < 0) sy_printf("GOT\t%s\n", out);   /* the evidence of a FAIL */
 }
 static void case_s2(int part) {
     /* the pending-derived hint is not under test here (the three older batches assert it); without tools/on-change.cx
@@ -235,6 +236,58 @@ static void case_s2(int part) {
         sh(script, out, sizeof out);
         {   const char *want = "RC=0\n1\n1\n0\n1\nEND";
             ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "s2-registered-drops-redundant-whole"); }
+    }
+}
+/* --derive (one group per case, each one real commit with tools/derive.cx on the commit's tree; on-change.cx is
+   removed from the clone as in case_s2, the pending hint is asserted by the artifacts group):
+   tool     a new tools/zz-dt.cx committed with --derive: its build/tool-index.tsv row lands in the same commit; a
+            foreign row appended to the work-tree tool-index stays out of HEAD and stays in the work tree, and the
+            work tree gains the recomputed row (merged, not overwritten);
+   reg      a batch registered with --registered --derive (no build/batch-packages.tsv row written by hand): the
+            same commit carries its build/links.tsv and build/batch-packages.tsv rows;
+   neg      without --derive the commit is exactly the named path (no COMMIT_OWN_DERIVE, tool-index untouched); with
+            --derive and a derive manifest whose --check drifts after --write: exit 1, class derive-drift named, HEAD
+            unchanged. */
+static void case_derive(int part) {
+    /* the product's -run cache is keyed by path: with the clone's own copy of unisacc.com every generator compiled
+       cold in each check run (measured: tables-gen 6 s, batch-packages-gen over 25 s, the group over 55 s), so the
+       clone's product files point at the checkout's (same bytes, a stable path; commit-own's derive slot root then
+       stays warm as it does in the shared checkout) */
+    {   char o[256], s[9000], r[4096];
+        if (sy_cwd(r, sizeof r) < 0) die("cwd");
+        if (!cx_fmt(s, sizeof s, "rm -f %s/clone/tools/on-change.cx; cd %s/clone && for f in unisacc.com unisacc.com.ape.sha256 unisacc.com.build.json; do [ -e %s/$f ] && ln -sf %s/$f $f; done; true", base, base, r, r, 0)) sh(s, o, sizeof o); }
+    if (part == 0)
+    s2_want("printf '/* tools/zz-dt.cx -- zz derive fixture tool */\\nint main(void){return 0;}\\n' > tools/zz-dt.cx; "
+            "printf 'zzforeigndt\\tforeign row\\n' >> build/tool-index.tsv; "
+            CO_RUN "-m dt --whole tools/zz-dt.cx --derive > dt.out 2>&1; echo RC=$?; grep -c '^DERIVED.build/tool-index.tsv' dt.out; "
+            "echo HEAD; git show HEAD:build/tool-index.tsv | grep -c '^zz-dt.cx'; git show --name-only --format= HEAD | grep -c '^build/tool-index.tsv'; "
+            "git show HEAD:build/tool-index.tsv | grep -c zzforeigndt; echo WORK; grep -c zzforeigndt build/tool-index.tsv; grep -c '^zz-dt.cx' build/tool-index.tsv; echo END",
+            "RC=0\n1\nHEAD\n1\n1\n0\nWORK\n1\n1\nEND", "derive-tool-index-same-commit-foreign-kept");
+    /* reg-prep (part 3): the same set with --dry-run.  It asserts the derive pass on its own (rc 0, stage ok, the
+       links and batch-packages files derived, HEAD unchanged) and leaves the derive slot's -run cache warm: a group
+       killed at its bound mid-compile stores nothing, so the cold pass (derive.cx 10 s, tables-gen 6 s,
+       batch-packages-gen 24.7 s) never became warm while reg ran alone.  reg (part 1) then runs the real commit
+       (measured 48 s warm); the batch list runs reg-prep first. */
+#define CO_DR_SETUP CO_MK "mk zzdr; git show HEAD:build/batch-packages.tsv > build/batch-packages.tsv; printf 'int main(void){return 0;}\\n' > tools/check-zzdr.cx; "
+    if (part == 3)
+    s2_want(CO_DR_SETUP "H0=$(git rev-parse HEAD); " CO_RUN "-m dr --registered zzdr --whole tools/check-zzdr.cx --derive --dry-run > dp.out 2>&1; echo RC=$?; "
+            "grep -c 'COMMIT_OWN_DERIVE.rc=0.stage=ok' dp.out; grep -c -e '^DERIVED.build/links.tsv' -e '^DERIVED.build/batch-packages.tsv' dp.out; "
+            "[ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
+            "RC=0\n1\n2\nSAMEHEAD\nEND", "derive-registered-dry-run-derives-commits-nothing");
+    if (part == 1)
+    s2_want(CO_DR_SETUP CO_RUN "-m dr --registered zzdr --whole tools/check-zzdr.cx --derive > dr.out 2>&1; echo RC=$?; "
+            "echo HEAD; git show HEAD:build/links.tsv | grep -c zzdr; git show HEAD:build/batch-packages.tsv | grep -c zzdr; "
+            "git show --name-only --format= HEAD | grep -c -e '^build/links.tsv' -e '^build/batch-packages.tsv'; echo END",
+            "RC=0\nHEAD\n1\n1\n2\nEND", "derive-registered-links-and-packages-same-commit");
+    if (part == 2) {
+    s2_want("printf '/* tools/zz-do.cx -- zz no-derive tool */\\nint main(void){return 0;}\\n' > tools/zz-do.cx; "
+            CO_RUN "-m do --whole tools/zz-do.cx > do.out 2>&1; echo RC=$?; grep -c COMMIT_OWN_DERIVE do.out; "
+            "git show --name-only --format= HEAD; git show HEAD:build/tool-index.tsv | grep -c '^zz-do.cx'; echo END",
+            "RC=0\n0\ntools/zz-do.cx\n0\nEND", "derive-off-commits-only-the-path");
+    s2_want("printf '# zz\\nzzd\\tzzgen\\tfalse\\ttrue\\tzzd.out\\tzzd-*\\t1\\t5\\n' > $PWD/zzd-manifest.tsv; printf 'i\\n' > zzd-in.txt; H0=$(git rev-parse HEAD); "
+            "UNISACC_COMMIT_OWN_DERIVE_MANIFEST=$PWD/zzd-manifest.tsv " CO_RUN "-m dd --whole zzd-in.txt --derive > dd.out 2>&1; echo RC=$?; "
+            "grep -c 'COMMIT_OWN_FAIL.class=derive-drift' dd.out; grep -c 'DERIVE.zzd.DRIFT' dd.out; [ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
+            "RC=1\n1\n1\nSAMEHEAD\nEND", "derive-drift-named-nothing-committed");
     }
 }
 /* --cases bench-a | bench-b: not a batch -- a measurement.  Five small commits through commit-own with the real
@@ -307,6 +360,10 @@ int main(int argc, char **argv) {
     if (g && !strncmp(g, "bench-", 6)) bench(g[6] - 0x30);
     if (co_has(g, "s2", 0)) { case_s2(0); case_s2(1); case_s2(2); }
     if (co_has(g, "s2b", 0)) case_s2(3);
+    if (co_has(g, "derive-tool", 0)) case_derive(0);
+    if (co_has(g, "derive-reg-prep", 0)) case_derive(3);
+    if (co_has(g, "derive-reg", 0)) case_derive(1);
+    if (co_has(g, "derive-neg", 0)) case_derive(2);
     /* case_s2 removes tools/on-change.cx from the clone; with no --cases every group shares that clone, so put it
        back before the artifacts group asserts the pending-derived hint */
     if (!g) {   char o[256], s[9000];
