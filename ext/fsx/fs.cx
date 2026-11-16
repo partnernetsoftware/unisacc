@@ -6,7 +6,8 @@
  *          that leaves ROOT is caught).
  * Files:   fsx_read (whole file, bounded, NUL-terminated, -EFBIG past MAX), fsx_write (atomic:
  *          sibling temporary + fsync + rename; on failure nothing is left behind), fsx_exists
- *          (1 / 0 only for ENOENT / -errno for ENOTDIR, EACCES, ...).
+ *          (1 / 0 only for ENOENT / -errno for ENOTDIR, EACCES, ...), fsx_is_dir and fsx_is_file
+ *          (links followed: 1 that kind / 0 absent (ENOENT only) or another kind / -errno).
  * Scratch: fsx_scratch makes PREFIXxxxx under sy_tmpdir() (never a hard-coded /tmp); drop removes
  *          the tree only when the path is still the directory it made (dev+ino, not a symlink);
  *          every live scratch is dropped at process exit.
@@ -83,6 +84,19 @@ int fsx_inside(const char *root, const char *path) {
 
 /* ---- whole files ---- */
 int fsx_exists(const char *path) { return sy_exists(path); }
+
+/* What PATH names after following links: 1 when it is KIND ('d' directory, 'f' regular file), 0 when it
+   is absent (ENOENT only; a dangling link is absent) or names another kind, -errno for every other
+   failure (ENOTDIR, EACCES, ...): those are not "absent", so callers that want a plain yes test > 0. */
+static int fsx_is_kind(const char *path, int kind) {
+    sy_stat_t st;
+    int rc = sy_stat(path, &st);
+    if (rc == -ENOENT) return 0;
+    if (rc < 0) return rc;
+    return st.kind == kind;
+}
+int fsx_is_dir(const char *path) { return fsx_is_kind(path, 'd'); }
+int fsx_is_file(const char *path) { return fsx_is_kind(path, 'f'); }
 
 /* *OUT is mm_alloc'd, NUL-terminated, N bytes (caller mm_free's it); *OUT is 0 on failure. */
 int fsx_read(const char *path, char **out, long *n, long max) {
