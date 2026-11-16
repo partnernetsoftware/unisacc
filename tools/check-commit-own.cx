@@ -289,6 +289,25 @@ static void case_derive(int part) {
             "grep -c 'COMMIT_OWN_FAIL.class=derive-drift' dd.out; grep -c 'DERIVE.zzd.DRIFT' dd.out; [ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
             "RC=1\n1\n1\nSAMEHEAD\nEND", "derive-drift-named-nothing-committed");
     }
+    /* bound (part 4): every generator runs under its own bound_s of the derive manifest, not under a fixed one.  A
+       write that sleeps 4 s passes with bound_s 20 (rc 0, WROTE, at least 4000 ms) and is a TIMEOUT with bound_s 2
+       (exit 1, class derive-failed, HEAD unchanged).  The repo's own table is held to the same floor: no row of
+       exec/facts/derive.tsv may carry a bound_s under 20 (libc-decls had 3: it fit the warm shared checkout and was a
+       TIMEOUT rc 142 on the commit's own tree, where the -run cache is cold; every --derive commit touching include/
+       was refused). */
+    if (part == 4) {
+    s2_want("printf '# zz\\nzzb\\tzzgen\\ttrue\\tsleep 4\\tzzb.out\\tzzb-*\\t1\\t20\\n' > $PWD/zzb-manifest.tsv; printf 'i\\n' > zzb-in.txt; "
+            "UNISACC_COMMIT_OWN_DERIVE_MANIFEST=$PWD/zzb-manifest.tsv " CO_RUN "-m db --whole zzb-in.txt --derive > db.out 2>&1; echo RC=$?; "
+            "grep -c 'COMMIT_OWN_DERIVE.rc=0.stage=ok' db.out; grep -c 'TIMEOUT' db.out; "
+            "ms=$(grep '^DERIVE.zzb.WROTE' db.out | head -1 | cut -f4); [ \"${ms:-0}\" -ge 4000 ] && echo SLEPT; git show --name-only --format= HEAD; echo END",
+            "RC=0\n1\n0\nSLEPT\nzzb-in.txt\nEND", "derive-honours-bound-s-sleep-4-under-20");
+    s2_want("printf '# zz\\nzzt\\tzzgen\\ttrue\\tsleep 4\\tzzt.out\\tzzt-*\\t1\\t2\\n' > $PWD/zzt-manifest.tsv; printf 'i\\n' > zzt-in.txt; H0=$(git rev-parse HEAD); "
+            "UNISACC_COMMIT_OWN_DERIVE_MANIFEST=$PWD/zzt-manifest.tsv " CO_RUN "-m dt2 --whole zzt-in.txt --derive > dt2.out 2>&1; echo RC=$?; "
+            "grep -c 'COMMIT_OWN_FAIL.class=derive-failed' dt2.out; grep -c 'DERIVE.zzt.TIMEOUT' dt2.out; [ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
+            "RC=1\n1\n1\nSAMEHEAD\nEND", "derive-bound-s-2-times-out-nothing-committed");
+    s2_want("echo BEG; cut -f1,8 exec/facts/derive.tsv | grep -v '^#' | while IFS='\t' read -r n b; do [ \"$b\" = - ] || [ \"$b\" -ge 20 ] || echo \"LOW $n $b\"; done; echo END",
+            "BEG\nEND", "derive-table-no-bound-under-20");
+    }
 }
 /* --cases bench-a | bench-b: not a batch -- a measurement.  Five small commits through commit-own with the real
    pre-commit hook (tools/precommit.cx) in the clone; prints BENCH<TAB>name<TAB>rc<TAB>ms per commit. */
@@ -364,6 +383,7 @@ int main(int argc, char **argv) {
     if (co_has(g, "derive-reg-prep", 0)) case_derive(3);
     if (co_has(g, "derive-reg", 0)) case_derive(1);
     if (co_has(g, "derive-neg", 0)) case_derive(2);
+    if (co_has(g, "derive-bound", "derive-neg")) case_derive(4);   /* also part of the derive-neg batch */
     /* case_s2 removes tools/on-change.cx from the clone; with no --cases every group shares that clone, so put it
        back before the artifacts group asserts the pending-derived hint */
     if (!g) {   char o[256], s[9000];
@@ -378,6 +398,17 @@ int main(int argc, char **argv) {
         ck(tx_find(out, tx_len(out, sizeof out), "cached-foreign", 14) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "CACHED\nforeign.txt", 18) >= 0, "foreign-staged-kept");
     }
+    /* prestaged (2026-11-16, three times in one day: tools/check-tape-gap.cx after ca2ed83ca9): an OLD version of a
+       tracked path is staged in the shared index, the work tree is edited again, the path is committed --whole.  The
+       shared index entry must be the committed blob (git status shows nothing for the path), the dropped staged blob
+       is named in a NOTE; a path that is NOT in the commit keeps its staged entry (the foreign case above). */
+    if (co_has(g, "prestaged", "foreign"))   /* also part of the foreign batch */
+        s2_want("printf 'v1\\n' > zz-pre.txt && git add -- zz-pre.txt && git commit -q --no-verify -m pre0 -- zz-pre.txt && "
+                "printf 'v2-staged-old\\n' > zz-pre.txt && git add -- zz-pre.txt && printf 'v3-work\\n' > zz-pre.txt && "
+                CO_RUN "-m pre --whole zz-pre.txt > pre.out 2>&1; echo RC=$?; grep -c 'index_unsynced=0' pre.out; grep -c 'NOTE.zz-pre.txt.the shared index held a staged version' pre.out; "
+                "[ \"$(git ls-files -s -- zz-pre.txt | cut -c8-47)\" = \"$(git rev-parse HEAD:zz-pre.txt)\" ] && echo SAMEBLOB; git cat-file -p HEAD:zz-pre.txt; "
+                "echo ST; git status --short -- zz-pre.txt; echo END",
+                "RC=0\n1\n1\nSAMEBLOB\nv3-work\nST\nEND", "prestaged-old-version-index-equals-head-after-commit");
     if (co_has(g, "artifacts", 0)) 
     {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */
         if (cx_fmt(script, sizeof script,

@@ -9,9 +9,11 @@
  * (work tree or HEAD) carries as a whole TAB field refuses with exit 2 (COMMIT_OWN_MISSING_KEY<TAB>path=<TAB>key=).
  * The commit is built in a private index (out/commit-own-PID.idx: read-tree HEAD, the blobs above), so other
  * agents' staged entries in the shared index are neither committed nor dropped.  Afterwards each committed
- * path's entry in the shared index is moved to the new blob when it still held the old HEAD blob (nobody had
- * staged that path) or a blob the path had in one of its last 50 commits (a stale, already-committed version --
- * leaving it would let a later plain `git commit` put the old file back); an entry that already is the new blob
+ * path's entry in the shared index is moved to the committed blob, whatever was staged there: the request owns
+ * its paths.  A staged version that was never committed (not the old HEAD blob, not a blob of the path's last 50
+ * commits) is named in a NOTE with its blob id before it is replaced; paths outside the request keep their staged
+ * entries.  An entry that cannot be moved after 12 tries prints COMMIT_OWN_INDEX_UNSYNCED<TAB>path=..<TAB>run: CMD
+ * and COMMIT_OWN_FAIL<TAB>class=index-unsynced on stderr, exit 1 (the commit has landed).  An entry that already is the new blob
  * 收尾: 绝不 git read-tree HEAD 覆盖默认索引。只对刚提交路径补 cacheinfo。
  * 然后 git diff --cached --name-only: 空则 CACHED_QUIET; 含非本批路径则 NOTE 保留(负控:不吞别人暂存)。
  * --registered ID...: the registration set of each batch ID as one unit: tests/manifests/ID.tsv whole, and in
@@ -67,7 +69,8 @@
 
 /* every refusal names its class on stderr (COMMIT_OWN_FAIL<TAB>class=...) one line before the reason, so the
    devsvc event history can be classified without reading prose: args, setup, registered-foreign-row,
-   reg-manifest, derive-drift, derive-failed, precommit, head-moved, index-lock, nothing-to-commit, git-or-hook */
+   reg-manifest, derive-drift, derive-failed, precommit, head-moved, index-lock, nothing-to-commit, git-or-hook,
+   index-unsynced (the commit landed; the shared index entries named by COMMIT_OWN_INDEX_UNSYNCED lines did not move) */
 static void co_die(const char *a, const char *b) {
     fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", (tx_eqz(a, "usage") || tx_eqz(a, "no such file") || tx_eqz(a, "no registration manifest")) ? "args" : "setup");
     fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
@@ -800,14 +803,32 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
             entry(0, path[k], ib, im);
-            if (del[k]) {   /* a deletion: drop the shared entry only when it still held the old HEAD blob */
-                if (ib[0] && tx_eqz(ib, old[k])) { char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0}; if (run(v, out, sizeof out) != 0) { sy_printf("NOTE\t%s\tthe shared index entry could not be removed; run: git rm --cached %s\n", path[k], path[k]); lost++; } }
-                else if (ib[0]) printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+            /* The request owns its paths: after the commit the shared entry IS the committed state, whatever was
+               staged there.  A staged version that was never committed (not the old HEAD blob, not one of the
+               path's last 50 commits) used to be "left as it is": git status then showed MM with the work tree
+               equal to HEAD, derive --check reported drift and the next --derive commit was refused, until someone
+               ran git add by hand (2026-11-16, three times in one day).  The dropped blob id is printed, the object
+               stays in the store.  Paths outside the request are never touched (cached-foreign below). */
+            if (del[k]) {
+                if (ib[0]) {
+                    int tries, good = 0;
+                    for (tries = 0; tries < 12 && !good; tries++) {
+                        char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0}; char nb[48], nm[8];
+                        if (tries) sy_sleep_ms(150 + 100 * tries);
+                        run(v, out, sizeof out);
+                        entry(0, path[k], nb, nm);
+                        good = !nb[0];
+                    }
+                    if (!good) { lost++; fprintf(stderr, "COMMIT_OWN_INDEX_UNSYNCED\tpath=%s\twant=absent\thave=%s\trun: sh ./unisacc.com tools/devsvc.cx -- git add %s\n", path[k], ib, path[k]); }
+                    else if (!tx_eqz(ib, old[k])) sy_printf("NOTE\t%s\tthe shared index held a staged version that was never committed (blob %s); the commit deletes the path, the entry is removed; the old content: git cat-file -p %s\n", path[k], ib, ib);
+                }
                 continue;
             }
             if (ib[0] && tx_eqz(ib, blob[k])) continue;   /* already the committed blob */
-            if (!ib[0] || tx_eqz(ib, old[k]) || committed_before(path[k], ib)) {
-                if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (im[0] ? im : "100644"), blob[k], path[k]) >= (int)sizeof info) continue;
+            {   int uniq = ib[0] && !tx_eqz(ib, old[k]) && !committed_before(path[k], ib);
+                if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (im[0] ? im : "100644"), blob[k], path[k]) >= (int)sizeof info) {
+                    lost++; fprintf(stderr, "COMMIT_OWN_INDEX_UNSYNCED\tpath=%s\twant=%s\thave=%s\trun: sh ./unisacc.com tools/devsvc.cx -- git add %s\n", path[k], blob[k], ib[0] ? ib : "absent", path[k]);
+                    continue; }
                 /* git update-index fails when another git process holds .git/index.lock (an agent's git status
                    refreshes the index): retry, then check the entry really is the committed blob.  Ignoring the
                    failure left new files staged as deletions (penoff, macbyt: the last paths of a batch). */
@@ -819,9 +840,10 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                         entry(0, path[k], nb, nm);
                         good = nb[0] && tx_eqz(nb, blob[k]);
                     }
-                    if (!good) { sy_printf("NOTE\t%s\tthe shared index could not be updated after 12 tries (index.lock?); run: git update-index --add --cacheinfo %s\n", path[k], info); lost++; }
+                    if (!good) { lost++; fprintf(stderr, "COMMIT_OWN_INDEX_UNSYNCED\tpath=%s\twant=%s\thave=%s\tafter 12 tries (index.lock?)\trun: sh ./unisacc.com tools/devsvc.cx -- git add %s\n", path[k], blob[k], ib[0] ? ib : "absent", path[k]); }
+                    else if (uniq) sy_printf("NOTE\t%s\tthe shared index held a staged version that was never committed (blob %s); this commit owns the path, the entry now is the committed blob; the old content: git cat-file -p %s\n", path[k], ib, ib);
                 }
-            } else printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+            }
         }
         {   char *v[] = {"git", "diff", "--cached", "--name-only", 0};
             if (run(v, out, sizeof out) == 0) {
@@ -841,7 +863,11 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         co_pending_collect();
         printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
         printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
-        if (lost) return 1;   /* committed, but the shared index still shows these paths as staged deletions */
+        if (lost) {   /* committed, but the shared index does not show the committed state for these paths: loud, with the remedy */
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=index-unsynced\n");
+            fprintf(stderr, "commit-own: commit %s LANDED, but %d shared index entr%s could not be synced (COMMIT_OWN_INDEX_UNSYNCED lines above name each path); "
+                            "do not commit again -- run the git add command of each line, then git status must show nothing staged for them\n", newc, lost, lost == 1 ? "y" : "ies");
+            return 1; }
     }
     return 0;
 }
