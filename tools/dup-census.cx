@@ -1,0 +1,224 @@
+/* tools/dup-census.cx -- census of duplicated static functions in tools/*.cx and tools/cxlib/*.cx (the 15th ratchet).
+ *
+ *   sh ./unisacc.com tools/dup-census.cx [-- --print | --check | --write] [--root DIR]
+ *
+ * Scans ROOT/tools/*.cx and ROOT/tools/cxlib/*.cx (direct children, file names sorted).  A static function is a
+ * line starting "static " with "NAME(" before any '=' or ';', whose parameter list is followed by '{'; its text
+ * runs from the start of that line to the matching '}' (braces inside string and char literals skipped).
+ *   by name:     names defined in 2 or more files, their definitions, and excess lines (sum of lines minus
+ *                lines / defs per name: an upper bound of what one shared copy would save);
+ *   verbatim:    a group is 2 or more definitions with the same name and byte-identical text; per group the
+ *                copies, lines of one copy, total lines (copies x lines) and redundant lines ((copies-1) x lines);
+ *   fragments:   counts of hand-written snippets (information only, never judged).
+ * --print writes the report (stable: no time, no absolute path) to stdout:
+ *   GROUP<TAB>name<TAB>copies<TAB>lines<TAB>total<TAB>redundant     one row per verbatim group, by name
+ *   FRAG<TAB>label<TAB>occurrences<TAB>files                         information rows
+ *   DUP_SUMMARY files=.. static_fn=.. dup_names=.. dup_defs=.. excess_lines=.. verbatim_groups=.. verbatim_defs=.. verbatim_lines=.. verbatim_redundant=..
+ * --write replaces build/dup-census-baseline.tsv (rows total<TAB>verbatim_groups|verbatim_redundant<TAB>N and
+ * group<TAB>name<TAB>copies<TAB>lines).  --check compares with it and prints
+ *   dup-census: ok: verbatim_groups=N (baseline M) verbatim_redundant=R (baseline S)
+ *   dup-census: FAIL: new=A grown=B groups=N baseline=M redundant=R baseline=S
+ * preceded by rows "dup-census: NAME has N verbatim copies, baseline M" for a group the baseline lacks (M 0) or
+ * one with more copies, and "dup-census: tools total lines verbatim_redundant R, baseline S" when that total grew.
+ * Fewer groups, copies or lines pass (only go down); --write then lowers the baseline.  rc 0 ok, 1 FAIL, 2 error. */
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXF 4096
+#define MAXE 80000
+#define MAXG 4096
+static const char *root = ".";
+static char *fname[MAXF]; static char *fbuf[MAXF]; static long flen[MAXF]; static int nf;
+static int e_file[MAXE], e_lines[MAXE]; static long e_s[MAXE], e_e[MAXE], e_ns[MAXE], e_nl[MAXE];
+static unsigned long e_h[MAXE]; static int ne, idx[MAXE];
+static int g_rep[MAXG], g_copies[MAXG], g_lines[MAXG]; static int ng;
+
+static const char *frag[][2] = {
+    {"path.fmt-join", "\"%s/%s\""}, {"tsv.hand-tabchr", "'\\t'"}, {"fmt.snprintf", "snprintf("},
+    {"argv.strcmp-argv", "strcmp(argv["}, {"tmp.mkdtemp", "mkdtemp("}, {"tmp.literal", "\"/tmp/"},
+    {"sort.hand-shellgap", "gap /= 2"}, {"io.libc-fopen", "fopen("},
+};
+#define NFRAG 8
+static long fr_occ[NFRAG]; static int fr_files[NFRAG];
+
+static int isid(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+static void scan(int fi) {
+    const char *b = fbuf[fi]; long n = flen[fi], i = 0;
+    while (i < n) {
+        long ls = i, le, p, q, qe, k, t; int par = 0, d = 0, lines = 1; unsigned long h = 1469598103934665603ul;
+        while (i < n && b[i] != '\n') i++;
+        le = i; if (i < n) i++;
+        if (le - ls < 10 || !mm_same(b + ls, "static ", 7)) continue;
+        p = ls; while (p < le && b[p] != '(' && b[p] != '=' && b[p] != ';') p++;
+        if (p >= le || b[p] != '(') continue;
+        qe = p; while (qe > ls && b[qe - 1] == ' ') qe--;
+        q = qe; while (q > ls && isid(b[q - 1])) q--;
+        if (qe == q) continue;
+        k = p;
+        while (k < n) { if (b[k] == '(') par++; else if (b[k] == ')') { par--; if (!par) { k++; break; } } k++; }
+        while (k < n && (b[k] == ' ' || b[k] == '\n' || b[k] == '\t')) k++;
+        if (k >= n || b[k] != '{') continue;
+        while (k < n) {
+            char c = b[k];
+            if (c == '"' || c == '\'') { k++; while (k < n && b[k] != c && b[k] != '\n') { if (b[k] == '\\') k++; k++; } k++; continue; }
+            if (c == '{') d++;
+            else if (c == '}') { d--; if (!d) { k++; break; } }
+            k++;
+        }
+        if (k > n) k = n;
+        for (t = ls; t < k; t++) { if (b[t] == '\n') lines++; h ^= (unsigned char)b[t]; h *= 1099511628211ul; }
+        if (ne < MAXE) { e_file[ne] = fi; e_s[ne] = ls; e_e[ne] = k; e_ns[ne] = q; e_nl[ne] = qe - q; e_lines[ne] = lines; e_h[ne] = h; ne++; }
+        i = k; while (i < n && b[i] != '\n') i++;
+        if (i < n) i++;
+    }
+}
+
+static int ncmp(int a, int b) { return tx_cmp(fbuf[e_file[a]] + e_ns[a], e_nl[a], fbuf[e_file[b]] + e_ns[b], e_nl[b]); }
+static int ecmp(int a, int b) {
+    int r = ncmp(a, b);
+    if (r) return r;
+    if (e_h[a] != e_h[b]) return e_h[a] < e_h[b] ? -1 : 1;
+    return e_file[a] - e_file[b];
+}
+static int same_body(int a, int b) {
+    long la = e_e[a] - e_s[a];
+    return e_h[a] == e_h[b] && la == e_e[b] - e_s[b] && mm_same(fbuf[e_file[a]] + e_s[a], fbuf[e_file[b]] + e_s[b], la);
+}
+static void sort_e(void) {
+    int gap, i, j, t;
+    for (i = 0; i < ne; i++) idx[i] = i;
+    for (gap = ne / 2; gap > 0; gap /= 2) for (i = gap; i < ne; i++) { t = idx[i]; for (j = i; j >= gap && ecmp(idx[j - gap], t) > 0; j -= gap) idx[j] = idx[j - gap]; idx[j] = t; }
+}
+static void sort_names(int lo, int hi) {   /* the file names of one directory, by bytes */
+    int i, j; char *t;
+    for (i = lo + 1; i < hi; i++) { t = fname[i]; for (j = i; j > lo && tx_cmp(fname[j - 1], tx_len(fname[j - 1], 1024), t, tx_len(t, 1024)) > 0; j--) fname[j] = fname[j - 1]; fname[j] = t; }
+}
+static int list_dir(const char *rel) {
+    sy_dir_t d; char dir[1200]; int lo = nf;
+    if (cx_fmt(dir, sizeof dir, "%s/%s", root, rel) || sy_dir_open(&d, dir)) return -1;
+    while (sy_dir_next(&d) == 1) {
+        long l = tx_len(d.name, 512); char r[1200];
+        if (l < 4 || !tx_eqz(d.name + l - 3, ".cx") || d.name[0] == '.' || nf >= MAXF) continue;
+        if (cx_fmt(r, sizeof r, "%s/%s", rel, d.name)) continue;
+        fname[nf] = mm_alloc(tx_len(r, 1200) + 1);
+        if (!fname[nf]) break;
+        mm_copy(fname[nf], tx_len(r, 1200) + 1, r, tx_len(r, 1200) + 1); nf++;
+    }
+    sy_dir_close(&d);
+    sort_names(lo, nf);
+    return 0;
+}
+
+static long s_dupnames, s_dupdefs, s_excess, s_vdefs, s_vlines, s_vred;
+
+static void census(void) {
+    int i, j, k, f;
+    for (f = 0; f < nf; f++) {
+        char p[1300]; size_t m = 0; char *b;
+        if (cx_fmt(p, sizeof p, "%s/%s", root, fname[f])) continue;
+        b = cx_read(p, &m);
+        fbuf[f] = b ? b : (char *)""; flen[f] = b ? (long)m : 0;
+        scan(f);
+        for (k = 0; k < NFRAG; k++) {
+            long pl = tx_len(frag[k][1], 64), c = 0, at;
+            for (at = 0; at + pl <= flen[f]; at++) if (fbuf[f][at] == frag[k][1][0] && mm_same(fbuf[f] + at, frag[k][1], pl)) c++;
+            if (c) { fr_occ[k] += c; fr_files[k]++; }
+        }
+    }
+    sort_e();
+    for (i = 0; i < ne; i = j) {
+        long lines = 0; int files = 0;
+        for (j = i; j < ne && !ncmp(idx[j], idx[i]); j++) lines += e_lines[idx[j]];
+        for (k = i; k < j; k++) { int x, seen = 0; for (x = i; x < k; x++) if (e_file[idx[x]] == e_file[idx[k]]) { seen = 1; break; } if (!seen) files++; }
+        if (files >= 2) { s_dupnames++; s_dupdefs += j - i; s_excess += lines - lines / (j - i); }
+        for (k = i; k < j; ) {   /* verbatim runs: sorted by hash inside a name */
+            int m = k + 1;
+            while (m < j && same_body(idx[k], idx[m])) m++;
+            if (m - k >= 2 && ng < MAXG) {
+                g_rep[ng] = idx[k]; g_copies[ng] = m - k; g_lines[ng] = e_lines[idx[k]]; ng++;
+                s_vdefs += m - k; s_vlines += (long)(m - k) * e_lines[idx[k]]; s_vred += (long)(m - k - 1) * e_lines[idx[k]];
+            }
+            k = m;
+        }
+    }
+}
+
+static void gname(int g, const char **s, long *l) { int e = g_rep[g]; *s = fbuf[e_file[e]] + e_ns[e]; *l = e_nl[e]; }
+static long num(const char *s, long n) { long v = 0, x; for (x = 0; x < n && s[x] >= '0' && s[x] <= '9'; x++) v = v * 10 + (s[x] - '0'); return v; }
+
+/* baseline: one name may carry more than one verbatim group; compare per name, copies summed */
+static int base_find(const char *t, long tn, const char *nm, long nl, long *copies) {
+    long at = 0; int found = 0;
+    while (at < tn) {
+        long e = tx_chr(t + at, tn - at, '\n'), ln = e < 0 ? tn - at : e, o1, l1, o2, l2;
+        if (ln > 6 && mm_same(t + at, "group\t", 6) && !tx_field(t + at, ln, '\t', 1, &o1, &l1) && l1 == nl && mm_same(t + at + o1, nm, nl)
+            && !tx_field(t + at, ln, '\t', 2, &o2, &l2)) { *copies += num(t + at + o2, l2); found = 1; }
+        at += ln + 1;
+    }
+    return found;
+}
+static long base_total(const char *t, long tn, const char *key) {
+    char pre[64]; long pl, at = 0;
+    if (cx_fmt(pre, sizeof pre, "total\t%s\t", key)) return -1;
+    pl = tx_len(pre, 64);
+    while (at < tn) {
+        long e = tx_chr(t + at, tn - at, '\n'), ln = e < 0 ? tn - at : e;
+        if (ln > pl && mm_same(t + at, pre, pl)) return num(t + at + pl, ln - pl);
+        at += ln + 1;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    int mode = 0, a, g, h; char bpath[1300];
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--print")) mode = 0;
+        else if (tx_eqz(argv[a], "--check")) mode = 1;
+        else if (tx_eqz(argv[a], "--write")) mode = 2;
+        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { fprintf(stderr, "usage: tools/dup-census.cx [--print | --check | --write] [--root DIR]\n"); return 2; }
+    }
+    if (list_dir("tools")) { fprintf(stderr, "dup-census: cannot list %s/tools\n", root); return 2; }
+    list_dir("tools/cxlib");   /* optional */
+    census();
+    if (cx_fmt(bpath, sizeof bpath, "%s/build/dup-census-baseline.tsv", root)) return 2;
+    if (mode == 0) {
+        for (g = 0; g < ng; g++) { const char *s; long l; gname(g, &s, &l); printf("GROUP\t%.*s\t%d\t%d\t%ld\t%ld\n", (int)l, s, g_copies[g], g_lines[g], (long)g_copies[g] * g_lines[g], (long)(g_copies[g] - 1) * g_lines[g]); }
+        for (a = 0; a < NFRAG; a++) printf("FRAG\t%s\t%ld\t%d\n", frag[a][0], fr_occ[a], fr_files[a]);
+        printf("DUP_SUMMARY files=%d static_fn=%d dup_names=%ld dup_defs=%ld excess_lines=%ld verbatim_groups=%d verbatim_defs=%ld verbatim_lines=%ld verbatim_redundant=%ld\n",
+               nf, ne, s_dupnames, s_dupdefs, s_excess, ng, s_vdefs, s_vlines, s_vred);
+        return 0;
+    }
+    if (mode == 2) {
+        long cap = 256 + (long)ng * 160, on; char *ob = mm_alloc(cap);
+        if (!ob || cx_fmt(ob, cap, "# tools/dup-census.cx --write: verbatim duplicate groups, only go down (15th ratchet)\ntotal\tverbatim_groups\t%d\ntotal\tverbatim_redundant\t%ld\n", ng, s_vred)) return 2;
+        on = tx_len(ob, cap);
+        for (g = 0; g < ng; g++) { const char *s; long l; gname(g, &s, &l); if (cx_fmt(ob + on, cap - on, "group\t%.*s\t%d\t%d\n", (int)l, s, g_copies[g], g_lines[g])) return 2; on += tx_len(ob + on, cap - on); }
+        if (cx_write(bpath, ob, on)) { fprintf(stderr, "dup-census: cannot write %s\n", bpath); return 2; }
+        printf("DUP_CENSUS_WRITE\tgroups=%d\tredundant=%ld\n", ng, s_vred);
+        return 0;
+    }
+    {   size_t m = 0; char *t = cx_read(bpath, &m); long bg, br; int nw = 0, gr = 0, bad;
+        if (!t) { fprintf(stderr, "dup-census: cannot read %s\n", bpath); return 2; }
+        bg = base_total(t, (long)m, "verbatim_groups"); br = base_total(t, (long)m, "verbatim_redundant");
+        if (bg < 0 || br < 0) { fprintf(stderr, "dup-census: baseline lacks total rows\n"); return 2; }
+        for (g = 0; g < ng; g = h) {
+            const char *s; long l, copies = 0, bc = 0; int found;
+            gname(g, &s, &l);
+            for (h = g; h < ng; h++) { const char *s2; long l2; gname(h, &s2, &l2); if (l2 != l || !mm_same(s, s2, l)) break; copies += g_copies[h]; }
+            found = base_find(t, (long)m, s, l, &bc);
+            if (!found || copies > bc) { printf("dup-census: %.*s has %ld verbatim copies, baseline %ld\n", (int)l, s, copies, bc); if (found) gr++; else nw++; }
+        }
+        if (s_vred > br) printf("dup-census: tools total lines verbatim_redundant %ld, baseline %ld\n", s_vred, br);
+        bad = nw || gr || ng > bg || s_vred > br;
+        if (bad) printf("dup-census: FAIL: new=%d grown=%d groups=%d baseline=%ld redundant=%ld baseline=%ld\n", nw, gr, ng, bg, s_vred, br);
+        else printf("dup-census: ok: verbatim_groups=%d (baseline %ld) verbatim_redundant=%ld (baseline %ld)\n", ng, bg, s_vred, br);
+        return bad ? 1 : 0;
+    }
+}

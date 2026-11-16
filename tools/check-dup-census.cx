@@ -1,0 +1,119 @@
+/* tools/check-dup-census.cx -- checks tools/dup-census.cx (the 15th ratchet).
+ *
+ *   sh ./unisacc.com tools/check-dup-census.cx [-- --group a|b|c]     (no group: all three)
+ *
+ * a counts: a fixture root (tools/a.cx, tools/b.cx, tools/cxlib/c.cx) with foo byte-identical in 3 files, bar
+ *   with the same name but different bodies in 2, a brace inside a string literal and one "%s/%s"; --print
+ *   gives GROUP foo 3 3 9 6, no bar group, the exact DUP_SUMMARY and FRAG path.fmt-join 1 1.
+ * b baseline: after --write --check is ok; one more copy of foo fails "foo has 4 verbatim copies, baseline 3"
+ *   (grown=1, rc 1); a new verbatim pair fails new=1; removing copies passes (only go down); a missing baseline
+ *   and an unknown option exit 2.
+ * c verbatim: a copy differing by one space or by name is not in the group; a comment line before the function
+ *   does not split it; on this checkout --check is ok and --print ends with DUP_SUMMARY.
+ * Ends with CHECK_DUP_CENSUS<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int dc_failed;
+static char dc_out[1 << 16];
+static char dc_root[600];
+static void dc_ck(int ok, const char *name) { if (!ok) dc_failed++; printf("%s\tdup-census.%s\n", ok ? "PASS" : "FAIL", name); }
+static int dc_has(const char *s) { long n = tx_len(dc_out, sizeof dc_out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(dc_out + i, s, sn)) return 1; return 0; }
+static int dc_run(char *a1, char *a2, char *a3) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/dup-census.cx", "--", a1, a2, a3, 0};
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(fd, dc_out + n, (long)sizeof dc_out - 1 - n)) > 0) n += r;
+    dc_out[n] = 0; sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static void dc_put(const char *rel, const char *s) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", dc_root, rel)) cx_write(p, s, tx_len(s, 1 << 16)); }
+static void dc_rm(const char *rel) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", dc_root, rel)) sy_unlink(p); }
+
+#define FOO "static int foo(int x) {\n    return x;\n}\n"
+static void dc_fixture(void) {
+    char p[700];
+    cx_fmt(dc_root, sizeof dc_root, "%s/dupcensus-%d", sy_tmpdir(), (int)sy_pid());
+    sy_mkdir(dc_root, 0700);
+    cx_fmt(p, sizeof p, "%s/tools", dc_root); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools/cxlib", dc_root); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/build", dc_root); sy_mkdir(p, 0700);
+    dc_put("tools/a.cx", "/* a */\n" FOO "static int bar(void) { return 1; }\nstatic void s(void) {\n    puts(\"}\");\n    puts(\"%s/%s\");\n}\n");
+    dc_put("tools/b.cx", FOO "static int bar(void) { return 2; }\n");
+    dc_put("tools/cxlib/c.cx", "/* c */\n" FOO);
+}
+static void dc_cleanup(void) {
+    char p[700];
+    dc_rm("tools/a.cx"); dc_rm("tools/b.cx"); dc_rm("tools/d.cx"); dc_rm("tools/e.cx"); dc_rm("tools/f.cx"); dc_rm("tools/cxlib/c.cx");
+    dc_rm("build/dup-census-baseline.tsv");
+    cx_fmt(p, sizeof p, "%s/tools/cxlib", dc_root); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools", dc_root); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/build", dc_root); sy_rmdir(p);
+    sy_rmdir(dc_root);
+}
+
+static void group_a(void) {
+    int rc;
+    dc_fixture();
+    rc = dc_run("--print", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("GROUP\tfoo\t3\t3\t9\t6\n") && !dc_has("GROUP\tbar\t"), "fixture-verbatim-group-counted");
+    dc_ck(dc_has("DUP_SUMMARY files=3 static_fn=6 dup_names=2 dup_defs=5 excess_lines=") && dc_has(" verbatim_groups=1 verbatim_defs=3 verbatim_lines=9 verbatim_redundant=6\n"), "fixture-summary");
+    dc_ck(dc_has("FRAG\tpath.fmt-join\t1\t1\n") && dc_has("FRAG\ttmp.literal\t0\t0\n"), "fixture-fragments");
+    dc_cleanup();
+}
+static void group_b(void) {
+    int rc;
+    dc_fixture();
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "missing-baseline-exit-2");
+    rc = dc_run("--write", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("DUP_CENSUS_WRITE\tgroups=1\tredundant=6\n"), "write-baseline");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("dup-census: ok: verbatim_groups=1 (baseline 1) verbatim_redundant=6 (baseline 6)"), "check-ok-after-write");
+    dc_put("tools/d.cx", FOO);
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 1 && dc_has("dup-census: foo has 4 verbatim copies, baseline 3\n") && dc_has("dup-census: tools total lines verbatim_redundant 9, baseline 6\n") && dc_has("FAIL: new=0 grown=1"), "more-copies-fails-grown");
+    dc_put("tools/d.cx", "static int qux(void) {\n    return 7;\n}\n");
+    dc_put("tools/e.cx", "static int qux(void) {\n    return 7;\n}\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 1 && dc_has("dup-census: qux has 2 verbatim copies, baseline 0\n") && dc_has("FAIL: new=1 grown=0 groups=2 baseline=1"), "new-group-fails-new");
+    dc_rm("tools/d.cx"); dc_rm("tools/e.cx"); dc_put("tools/b.cx", "static int bar(void) { return 2; }\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("dup-census: ok: verbatim_groups=1 (baseline 1) verbatim_redundant=3 (baseline 6)"), "fewer-copies-pass-only-down");
+    rc = dc_run("--bogus", 0, 0);
+    dc_ck(rc == 2, "unknown-option-exit-2");
+    dc_cleanup();
+}
+static void group_c(void) {
+    int rc;
+    dc_fixture();
+    dc_put("tools/d.cx", "static int foo(int x) {\n    return  x;\n}\n");
+    dc_put("tools/e.cx", "static int fox(int x) {\n    return x;\n}\n");
+    dc_put("tools/f.cx", "/* other comment */\n" FOO);
+    rc = dc_run("--print", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("GROUP\tfoo\t4\t3\t12\t9\n") && !dc_has("GROUP\tfox\t") && dc_has(" verbatim_groups=1 "), "verbatim-byte-identical-only");
+    dc_cleanup();
+    rc = dc_run("--check", 0, 0);
+    dc_ck(rc == 0 && dc_has("dup-census: ok: verbatim_groups="), "repo-check-ok");
+    rc = dc_run("--print", 0, 0);
+    dc_ck(rc == 0 && dc_has("\nDUP_SUMMARY files="), "repo-print-summary");
+}
+
+int main(int argc, char **argv) {
+    const char *g = argc == 3 && tx_eqz(argv[1], "--group") ? argv[2] : 0;
+    if (argc != 1 && !g) { fprintf(stderr, "usage: tools/check-dup-census.cx [--group a|b|c]\n"); return 2; }
+    if (!g || tx_eqz(g, "a")) group_a();
+    if (!g || tx_eqz(g, "b")) group_b();
+    if (!g || tx_eqz(g, "c")) group_c();
+    printf("CHECK_DUP_CENSUS\tfailed=%d\n", dc_failed);
+    return dc_failed ? 1 : 0;
+}
