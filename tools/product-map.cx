@@ -5,6 +5,9 @@
  *
  * Slice authority: logic-distribution --ape ROOT/unisacc.com (installed APE).
  * Module bytes: UNATTRIBUTED until origin chain exists. Numbers from commands only.
+ * Column content_id: layer/flow/gold-unassigned/net rows carry content_id() of their input paths (no commit
+ * id anywhere in the table, so --write before a commit stays valid after it); slice rows carry the slice
+ * sha256, flow-model rows the first 40 hex of the package sha256.
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -132,28 +135,55 @@ static void ape_census(void) {
     }
 }
 
-/* Stable revision: last commit touching the given input paths (not HEAD), so unrelated commits do not change it. */
-static void rev_last(char rev[65], const char *p1, const char *p2, const char *p3, const char *p4) {
-    char *v[12] = {"git", "log", "-1", "--format=%H", "--", 0};
-    int k = 5;
+/* Content identity of the given input paths: a sha256 chain over (tracked path, sha256 of its working-tree
+ * bytes) in git ls-files order. It depends on file content only, never on a commit id, so the table that
+ * carries it can be written before the commit and still matches after it (a commit id names the commit that
+ * will contain the table itself, which made every product-path commit need a second one). Unrelated commits
+ * do not change it; any byte change in a tracked input does, including a same-size one. */
+static void content_id(char id[65], const char *p1, const char *p2, const char *p3, const char *p4) {
+    char *v[12] = {"git", "ls-files", "-z", "--", 0};
+    int k = 4, files = 0;
     np_result r = {0};
+    size_t at = 0;
+    char acc[65];
     if (p1) v[k++] = (char *)p1;
     if (p2) v[k++] = (char *)p2;
     if (p3) v[k++] = (char *)p3;
     if (p4) v[k++] = (char *)p4;
     v[k] = 0;
-    if (np_run(v, root, 0, 8, &r, why, sizeof why) || r.rc || r.outn < 40) {
-        np_free(&r);
-        die("rev-log");
+    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("id-ls-files"); }
+    if (sy_sha256_hex("", 0, acc)) die("id-sha");
+    while (at < r.outn) {
+        const char *s = r.out + at;
+        size_t z = strlen(s), n = 0, bn;
+        char full[4400], fh[65], blk[4700];
+        struct stat st;
+        join(full, sizeof full, root, s);
+        if (lstat(full, &st) || !S_ISREG(st.st_mode)) {
+            /* tracked but absent or not a regular file: a fixed marker, so the change is still visible */
+            if (cx_fmt(fh, sizeof fh, "%s", "NOT-A-REGULAR-FILE")) die("id-mark");
+        } else if (st.st_size == 0) {
+            if (sy_sha256_hex("", 0, fh)) die("id-sha");
+        } else {
+            char *c = cx_read(full, &n);
+            if (!c) die("id-read");
+            if (sy_sha256_hex(c, n, fh)) die("id-sha");
+            free(c);
+        }
+        if (cx_fmt(blk, sizeof blk, "%s\n%s\n%s\n", acc, s, fh)) die("id-blk");
+        bn = strlen(blk);
+        if (sy_sha256_hex(blk, bn, acc)) die("id-sha");
+        files++;
+        at += z + 1;
     }
-    if (mm_copy(rev, 41, r.out, 40)) die("rev");
-    rev[40] = 0;
     np_free(&r);
+    if (!files) die("id-no-tracked-input");
+    if (mm_copy(id, 65, acc, 65)) die("id");
 }
 
 static void emit_tsv(char *buf, size_t cap, size_t *n,
                      long l0, long l1, long shost, long spack, long sex, long sst, long sdrive, long sbind) {
-    const char *hdr = "kind\tid\tparent\tfunction\tsize_bytes\tsize_note\tsha256\taux\tcmd\tverified_rev\tcold_s\thot_s\tlast_s\n";
+    const char *hdr = "kind\tid\tparent\tfunction\tsize_bytes\tsize_note\tsha256\taux\tcmd\tcontent_id\tcold_s\thot_s\tlast_s\n";
     size_t at = 0;
     int i;
     char rev[65];
@@ -163,56 +193,56 @@ static void emit_tsv(char *buf, size_t cap, size_t *n,
     {
         char line[1200];
         const char *cmd = "git ls-files -z -- DIR && stat bytes";
-        rev_last(rev, "cx/sys", "cx/mem", "cx/text", 0);
+        content_id(rev, "cx/sys", "cx/mem", "cx/text", 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tL0\t-\tL0 sy/mem/text\t%ld\tsource-bytes\t-\tdirs=cx/sys,cx/mem,cx/text\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    l0, cmd, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "cx/core", "cx/driver", "cx/runtime", "cx/compiler");
+        content_id(rev, "cx/core", "cx/driver", "cx/runtime", "cx/compiler");
         if (cx_fmt(line, sizeof line,
                    "layer\tL1\t-\tL1 core/driver/runtime/compiler\t%ld\tsource-bytes\t-\tdirs=cx/core,cx/driver,cx/runtime,cx/compiler\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    l1, cmd, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/host.cx", 0, 0, 0);
+        content_id(rev, "src/host.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.host\tsrc\thost launch\t%ld\tsource-bytes\t-\tfile=src/host.cx\tstat src/host.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    shost, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/packmodel.cx", 0, 0, 0);
+        content_id(rev, "src/packmodel.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.packmodel\tsrc\tpack model\t%ld\tsource-bytes\t-\tfile=src/packmodel.cx\tstat src/packmodel.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    spack, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/executor.cx", 0, 0, 0);
+        content_id(rev, "src/executor.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.executor\tsrc\texecutor\t%ld\tsource-bytes\t-\tfile=src/executor.cx\tstat src/executor.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sex, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/stages.cx", 0, 0, 0);
+        content_id(rev, "src/stages.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.stages\tsrc\tseven flows bind\t%ld\tsource-bytes\t-\tfile=src/stages.cx\tstat src/stages.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sst, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/drive.cx", 0, 0, 0);
+        content_id(rev, "src/drive.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.drive\tsrc\tdrive\t%ld\tsource-bytes\t-\tfile=src/drive.cx\tstat src/drive.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sdrive, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
-        rev_last(rev, "src/bind.cx", 0, 0, 0);
+        content_id(rev, "src/bind.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.bind\tsrc\tbind\t%ld\tsource-bytes\t-\tfile=src/bind.cx\tstat src/bind.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sbind, rev)) die("row");
@@ -578,7 +608,7 @@ static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
             if (mm_copy(gl[k] + cur, (long)(sizeof gl[k] - cur), t, (long)strlen(t) + 1)) die("gl-copy");
         }
     }
-    rev_last(rev, "exec/pipeline/image-stages.tsv", "weights/gold", 0, 0);
+    content_id(rev, "exec/pipeline/image-stages.tsv", "weights/gold", 0, 0);
     for (j = 0; j < 7; j++) {
         char in[40] = "", out2[40] = "", mf[40] = "", nm[16];
         char *t = 0;
@@ -649,7 +679,7 @@ static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
         }
     }
     /* nets */
-    rev_last(rev, "tools/source-package.cx", 0, 0, 0);
+    content_id(rev, "tools/source-package.cx", 0, 0, 0);
     for (i = 0; i < nrec; i++) {
         const char *f = net_flow(rec[i].stage);
         int g = gidx(rec[i].stage);
