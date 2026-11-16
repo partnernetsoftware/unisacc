@@ -257,6 +257,31 @@ int main(int argc, char **argv) {
      ck(tree && strstr(tree,"\tkernels-g2\touter\t") && strstr(tree,"\t1\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route,fixedpoint/g2/*.kernel\n")
         && strstr(tree,"\t1\tscrub\tfixedpoint/g3/phase-6.tsv\tfixedpoint/g3/kernel-route,fixedpoint/g3/*.kernel\n"), "residue-facts-in-table");}
 
+    /* Wave lane: wave-objects and wave-runner are one lane that starts at build-objects (not snap, not
+       build) and runs beside build-front and build; ctx joins both lines. No controller-line row
+       depends on a wave row. A ctl-wave write prefix that meets a ctl-build prefix is refused and
+       nothing is written. */
+    {char factpath[3000],want[200];size_t z=0,after=0;char *facts,*bad,*now,*snap=tree?strstr(tree,"\n0\tsnap\touter\t"):0;int lim=snap?atoi(snap+14):0,rows_ok=tree&&lim>0;
+     SP(want,sizeof want,"\twave-objects\twave-runner\t%d\tbuild-objects\twave-runner\t4\t",lim);if(rows_ok&&!strstr(tree,want))rows_ok=0;
+     SP(want,sizeof want,"\twave-runner\twave-runner\t%d\twave-objects\twave-runner\t4\t",lim);if(rows_ok&&!strstr(tree,want))rows_ok=0;
+     SP(want,sizeof want,"\tctx\touter\t%d\tbuild,wave-runner\t-\t1\t",lim);if(rows_ok&&!strstr(tree,want))rows_ok=0;
+     SP(want,sizeof want,"\tbuild-front\touter\t%d\tbuild-objects\t-\t1\t",lim);if(rows_ok&&!strstr(tree,want))rows_ok=0;
+     SP(want,sizeof want,"\tbuild\touter\t%d\tbuild-front\t-\t1\t",lim);if(rows_ok&&!strstr(tree,want))rows_ok=0;
+     ck(rows_ok,"wave-lane-starts-at-build-objects-and-ctx-joins-both-lines");
+     SP(factpath,sizeof factpath,"%s/build/chain-phase-outputs.tsv",fix);facts=cx_read(factpath,&z);
+     static const char neg[]="ctl-wave\tneg\t1\tOUT/build/source-package-O2.elf\tcreate\tyes\tneg\tSOURCE\n";
+     bad=facts?malloc(z+sizeof neg):0;
+     if(!bad)return 2;
+     for(size_t q=0;q<z;q++)bad[q]=facts[q];
+     for(size_t q=0;q<sizeof neg-1;q++)bad[z+q]=neg[q];
+     if(cx_write(factpath,bad,z+sizeof neg-1))return 2;
+     SP(cmd, sizeof cmd, "cd '%s' && %s --write 2>&1", fix, gen);
+     rc=sh(cmd,out,sizeof out);now=cx_read(tbl,&after);
+     ck(rc==2&&strstr(out,"chain-phases-gen: REFUSE shard outputs line overlap")&&!strstr(out,"status=WRITE")&&b&&now&&after==bn&&!memcmp(now,b,bn),"neg-wave-line-write-prefix-meets-build-line-refused-no-write");
+     free(now);free(bad);
+     if(cx_write(factpath,facts,z))return 2;
+     free(facts);}
+
     /* Residue facts that leave the output dir, name no phase or have no known policy are refused; nothing is written. */
     {char factpath[3000];size_t z,gn=0;char *facts,*good;int refused=0;
      static const char *bad_rows[8]={

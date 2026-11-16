@@ -432,6 +432,45 @@ int main(int argc, char **argv) {
                 if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, slice[k], k ? "p3-guard-4" : "final-net-1")) return 2;
                 ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE slice lane until"), k ? "p3-guard-lane-until-other-slice-refused" : "final-net-lane-until-other-slice-refused");
             }
+            {   /* Wave lane (wave-objects, wave-runner): refused by name before build-objects is
+                   complete and when the bootstrap or the seed helper is missing; finished rows are
+                   not redone and nothing of the wave controller is written. The controller compile
+                   itself is never reached here. */
+                char rowsw[1400], bdir[4500], boot[4600], seed[4600], wave[4600];
+                int made_dir, made_boot = 0, made_seed = 0;
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane wave-runner --until wave-runner --resume 2>&1", td, candidate, phases, revision, run) ||
+                    cx_fmt(bdir, sizeof bdir, "%s/build", run) || cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", bdir) ||
+                    cx_fmt(seed, sizeof seed, "%s/identity-helper", bdir)) return 2;
+                if (cx_write(checkpoint, rows, strlen(rows))) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, "lane dependency incomplete: build-objects") && !has(out, "unknown lane") && !has(out, "RECEIPT"), "wave-lane-accepted-needs-build-objects");
+                if (cx_fmt(rowsw, sizeof rowsw, "%sDONE\twave-objects\tx\nDONE\twave-runner\tx\n", rows) || cx_write(checkpoint, rowsw, strlen(rowsw))) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, "lane dependency incomplete: build-objects"), "wave-lane-done-rows-do-not-replace-build-objects");
+                if (cx_fmt(rowsw, sizeof rowsw, "%sDONE\tbuild-objects\tx\nDONE\twave-objects\tx\nDONE\twave-runner\tx\n", rows) || cx_write(checkpoint, rowsw, strlen(rowsw))) return 2;
+                made_dir = !sy_exists(bdir) && !sy_mkdir(bdir, 0700);
+                if (!sy_exists(boot)) {
+                    ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE missing bootstrap constructor") && !has(out, "RESUME\twave"), "wave-lane-missing-bootstrap-refused");
+                    if (cx_write(boot, "x", 1)) return 2;
+                    made_boot = 1;
+                } else ck(0, "wave-lane-missing-bootstrap-refused");
+                if (!sy_exists(seed)) {
+                    ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE missing seed identity helper") && !has(out, "RESUME\twave"), "wave-lane-missing-seed-helper-refused");
+                    if (cx_write(seed, "x", 1)) return 2;
+                    made_seed = 1;
+                } else ck(0, "wave-lane-missing-seed-helper-refused");
+                ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\twave-objects\t") && has(out, "RESUME\twave-runner\t") && !has(out, "RECEIPT"), "wave-lane-done-rows-not-redone");
+                saved = cx_read(checkpoint, &saved_n);
+                ck(saved && saved_n == strlen(rowsw) && !memcmp(saved, rowsw, saved_n), "wave-lane-repeat-leaves-checkpoint"); free(saved);
+                if (cx_fmt(wave, sizeof wave, "%s/source-job-wave-O2.o.lock", bdir)) return 2;
+                ck(!sy_exists(wave), "wave-lane-repeat-writes-no-controller-file");
+                if (cx_fmt(wave, sizeof wave, "%s/heartbeat-wave-runner.tsv", run)) return 2;
+                ck(!sy_exists(wave), "wave-lane-repeat-no-heartbeat");
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane wave-runner --until build --resume 2>&1", td, candidate, phases, revision, run)) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE wave lane until"), "wave-lane-until-outside-lane-refused");
+                if (made_seed) sy_unlink(seed);
+                if (made_boot) sy_unlink(boot);
+                if (made_dir) sy_rmdir(bdir);
+                if (cx_write(checkpoint, rows, strlen(rows))) return 2;
+            }
             for (int k = 0; k < 6; k++) {
                 if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, unknown[k], unknown[k])) return 2;
                 ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE unknown lane") && !has(out, "RECEIPT"), "slice-lane-out-of-range-or-noncanonical-name-refused");

@@ -123,6 +123,12 @@ static const char *join_list(const char *id) {
     int f = !strcmp(id, "final") ? 0 : !strcmp(id, "p3-opguard-prep") ? 1 : -1;
     return f >= 0 && shard_n[f] ? shard_list[f] : 0;
 }
+/* Wave lane: wave-objects then wave-runner, one lane named after its final row. It starts at
+ * build-objects, not snap: the bootstrap install and the seed helper are made by the MS_BOOT preamble
+ * of the first build-objects call (tools/candidate-chain.cx), which is not a phase. The lane runs
+ * beside build-front and build; ctx joins both lines (deps build,wave-runner). */
+#define WAVE_LANE "wave-runner"
+static int wave_row(const char *id) { return !strcmp(id, "wave-objects") ? 1 : !strcmp(id, WAVE_LANE) ? 2 : 0; }
 static void fall_emit(const char *id, const char *lane, int chained) {
     int n, k = 0, is_outer = !strcmp(lane, "-");
     const char *own = join_list(id);
@@ -146,11 +152,16 @@ static void fall_emit(const char *id, const char *lane, int chained) {
     if (shard_of(id)) return;
     if (!is_outer && strcmp(id, lane)) return;
     if (is_outer && chained && ft_n && ft_outer[ft_n - 1]) ft_n--;
+    /* ctx joins the controller line (build) and the wave lane: build is in its deps closure, so it
+       leaves the list like a chained predecessor; the lane-final row wave-runner stays. */
+    if (!strcmp(id, "ctx") && ft_n >= 2 && !strcmp(ft_id[ft_n - 1], WAVE_LANE) && ft_outer[ft_n - 2]) {
+        cx_fmt(ft_id[ft_n - 2], sizeof ft_id[0], "%s", ft_id[ft_n - 1]); ft_outer[ft_n - 2] = 0; ft_n--;
+    }
     if (ft_n == 96) { fprintf(stderr, "chain-phases-gen: fallthrough bound\n"); exit(2); }
     cx_fmt(ft_id[ft_n], sizeof ft_id[ft_n], "%s", id); ft_outer[ft_n++] = is_outer;
 }
 static void emit(const char *id) {
-    char deps[2048],domain[160]; int shard=shard_of(id); const char *lane=shard?id:target_lane(outer)?outer:"-"; int chained=0;
+    char deps[2048],domain[160]; int shard=shard_of(id),wave=wave_row(id); const char *lane=shard?id:wave?WAVE_LANE:target_lane(outer)?outer:"-"; int chained=0;
     const char *joined=join_list(id);
     const char *policy="-",*record="-",*paths="-";
     for(int i=0;i<res_n;i++)if(!strcmp(res_phase[i],id)){policy=res_policy[i];record=res_record[i];paths=res_paths[i];res_used[i]=1;}
@@ -163,6 +174,15 @@ static void emit(const char *id) {
         if(cx_fmt(list+have,sizeof shard_list[0]-have,"%s%s",have?",":"",id)){fprintf(stderr,"chain-phases-gen: shard list bound\n");exit(2);}
         shard_n[shard-1]++;
         cx_fmt(deps,sizeof deps,"%s",start);
+    }
+    else if(wave) {
+        /* The controller line must have been emitted up to build before the lane's first row. */
+        if(strcmp(previous,"build")){fprintf(stderr,"chain-phases-gen: REFUSE wave lane start: %s\n",id);exit(2);}
+        cx_fmt(deps,sizeof deps,"%s",wave==1?"build-objects":"wave-objects");
+    }
+    else if(!strcmp(id,"ctx")) {
+        if(strcmp(previous,"build")){fprintf(stderr,"chain-phases-gen: REFUSE ctx join: %s\n",previous);exit(2);}
+        cx_fmt(deps,sizeof deps,"build," WAVE_LANE); chained=1;
     }
     /* A join row replaces its predecessor in ft_id like a chained row: the start phase is in its deps closure. */
     else if(joined) { cx_fmt(deps,sizeof deps,"%s",joined); chained=1; }
@@ -196,7 +216,7 @@ static void emit(const char *id) {
      int m=snprintf(ibytes+iused,sizeof ibytes-iused,"%s\t%s\n",id,in);
      if(m<0||m>=(int)sizeof ibytes-iused){fprintf(stderr,"chain-phases-gen: output bound\n");exit(2);}
      iused+=m;}
-    if(!legacy&&!shard) { cx_fmt(previous,sizeof previous,"%s",id); if(strcmp(lane,"-"))cx_fmt(lane_previous,sizeof lane_previous,"%s",id); }
+    if(!legacy&&!shard&&!wave) { cx_fmt(previous,sizeof previous,"%s",id); if(strcmp(lane,"-"))cx_fmt(lane_previous,sizeof lane_previous,"%s",id); }
 }
 /* Write-set assertion over build/chain-phase-outputs.tsv (hand-written facts): each shard family has
  * exclusive rows (phase_pattern FAMILY-{i}, exclusive_dir yes, phases = shard count) whose
@@ -250,6 +270,37 @@ static void outputs_check(void) {
             size_t la = strlen(inst[a]);
             if (!strcmp(inst[a], inst[b]) || (inst[a][la - 1] == '/' && !strncmp(inst[b], inst[a], la))) out_die("overlap", inst[a]);
         }
+    }
+    free(text);
+}
+/* Controller lines that run side by side after build-objects: family ctl-build (build-front, build)
+ * and family ctl-wave (wave-objects, wave-runner) in build/chain-phase-outputs.tsv. Each exclusive
+ * row's write_path_pattern is a path prefix under OUT/; no prefix of one family may be a prefix of,
+ * or lie under, a prefix of the other. */
+static void lines_check(void) {
+    static const char *fam[2] = {"ctl-build", "ctl-wave"};
+    static char pat[2][16][160]; int np[2] = {0, 0};
+    size_t n = 0; char *text = cx_read("build/chain-phase-outputs.tsv", &n);
+    if (!text || !n || n > 65536 || text[n - 1] != '\n' || memchr(text, 0, n)) out_die("text", "build/chain-phase-outputs.tsv");
+    for (char *p = text; p < text + n;) {
+        char *e = memchr(p, '\n', (size_t)(text + n - p)), *v[8]; int fields = 1;
+        if (*p != '#') {
+            v[0] = p;
+            for (char *q = p; q < e; q++) if (*q == '\t') { *q = 0; if (fields == 8) out_die("columns", v[0]); v[fields++] = q + 1; }
+            *e = 0;
+            if (fields != 8) out_die("columns", v[0]);
+            for (int f = 0; f < 2; f++) if (!strcmp(v[0], fam[f]) && !strcmp(v[5], "yes")) {
+                if (np[f] == 16) out_die("row bound", fam[f]);
+                if (strncmp(v[3], "OUT/build/", 10) || !v[3][10]) out_die("line pattern", v[3]);
+                if (cx_fmt(pat[f][np[f]++], sizeof pat[0][0], "%s", v[3])) out_die("pattern bound", v[3]);
+            }
+        }
+        p = e + 1;
+    }
+    for (int f = 0; f < 2; f++) if (!np[f]) out_die("no exclusive row", fam[f]);
+    for (int a = 0; a < np[0]; a++) for (int b = 0; b < np[1]; b++) {
+        size_t la = strlen(pat[0][a]), lb = strlen(pat[1][b]);
+        if (!strncmp(pat[0][a], pat[1][b], la < lb ? la : lb)) out_die("line overlap", pat[0][a]);
     }
     free(text);
 }
@@ -340,6 +391,7 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < res_n; i++) if (!res_used[i]) res_die("unknown phase", res_phase[i]);
     outputs_check();
+    lines_check();
     {   const char *idst = "build/chain-phase-inputs.tsv";
         static char ihead[] = "# id\tinputs\n# generated by tools/chain-phases-gen.cx --write; do not edit\n";
         static char all[65664]; int an = snprintf(all, sizeof all, "%s%.*s", ihead, iused, ibytes);

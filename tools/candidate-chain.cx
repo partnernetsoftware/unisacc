@@ -2325,6 +2325,32 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
         if (sy_close(lock)) die("prepare unlock", prep);
         return rc;
     }
+    if (!strcmp(lane_phase, "wave-runner")) {
+        /* Wave lane: wave-objects then wave-runner, beside build-front and build. Both lines read
+           the snapshot, the installed bootstrap and the seed helper; those two files are made by
+           the MS_BOOT preamble of the build-objects call, so the lane starts after build-objects
+           and never makes them itself. It writes only build/source-job-wave-O2.* and its own
+           heartbeat; the checkpoint append is locked. MS_BUILD stays as the serial fallback. */
+        static const char *ids[] = {"wave-objects", "wave-runner"};
+        char boot[4400], seed[4400];
+        if (until_phase && strcmp(until_phase, ids[0]) && strcmp(until_phase, ids[1])) die("REFUSE wave lane until", until_phase);
+        lane_need(outdir, "build-objects", "");
+        if (cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", build) || cx_fmt(seed, sizeof seed, "%s/identity-helper", build)) die("wave lane path", lane_phase);
+        if (fsize(boot) <= 0) die("REFUSE missing bootstrap constructor", boot);
+        if (fsize(seed) <= 0) die("REFUSE missing seed identity helper", seed);
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", seed, 1)) die("env", "controller identity helper");
+        for (int i = 0; i < 2; i++) {
+            if (ck_done(outdir, ids[i])) sy_printf("RESUME\t%s\tlane=wave-already-done\n", ids[i]);
+            else {
+                hb(outdir, ids[i], "start");
+                long began = sy_now_ms(); char *a[] = {(char *)ids[i], (char *)rev, (char *)snap, (char *)build, 0};
+                if (step(root, a)) die(ids[i], build);
+                mark(outdir, ids[i], sy_now_ms() - began);
+            }
+            if (until_phase && !strcmp(until_phase, ids[i])) return 0;
+        }
+        return 0;
+    }
     {   /* Slice lanes: final-net-N and p3-guard-N. One lane runs exactly one slice of the serial
            loops in jobs_ok and MS_P3, which stay as the fallback and the re-check. A slice writes
            only its own proof files; the checkpoint append is locked. A finished slice is skipped
