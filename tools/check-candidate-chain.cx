@@ -70,11 +70,18 @@ static int cp_grouped_id(const char *id) {
     for (int i = 0; i < 4; i++) { size_t n = strlen(groups[i]); if (!strncmp(id, groups[i], n) && (id[n] == 0 || id[n] == '-')) return 1; }
     return 0;
 }
-static char cp_key[96][200];
-static int cp_grp[96], cp_bound[96], cp_kinds;
+/* CP_MAX: physical capacity, one kind per phase row at most (candidate-chain holds 512 rows) plus the runner's own kind.
+   Over capacity is a named failure: cp_kinds stays negative and no slot is written. */
+#define CP_MAX 513
+static char cp_key[CP_MAX][200];
+static int cp_grp[CP_MAX], cp_bound[CP_MAX], cp_kinds;
 static void cp_kind(const char *key, int grouped, int bound) {
+    if (cp_kinds < 0) return;
     for (int i = 0; i < cp_kinds; i++) if (!strcmp(cp_key[i], key)) return;
-    if (cp_kinds == 96 || tx_copy(cp_key[cp_kinds], 200, key, strlen(key))) { cp_kinds = -1000; return; }
+    if (cp_kinds >= CP_MAX || tx_copy(cp_key[cp_kinds], 200, key, strlen(key))) {
+        sy_printf("REFUSE\tcheck-candidate-chain.call-plan-kinds-over-capacity\tkinds=%d\tcap=%d\tkey=%s\n", cp_kinds, CP_MAX, key);
+        cp_kinds = -1000; return;
+    }
     cp_grp[cp_kinds] = grouped; cp_bound[cp_kinds] = bound; cp_kinds++;
 }
 static void call_plan_cases(const char *candidate, const char *phases, const char *td) {
@@ -400,6 +407,37 @@ int main(int argc, char **argv) {
         ck(saved && saved_n == strlen(rows) && !memcmp(saved, rows, saved_n), "lane-no-sibling-checkpoints"); free(saved);
         if (cx_fmt(p, sizeof p, "%s/heartbeat.tsv", run)) return 2;
         ck(!sy_exists(p), "lane-does-not-touch-global-heartbeat");
+        {   /* Slice lanes final-net-N and p3-guard-N: accepted by name, refused by name before the
+               start phase is complete, and a finished slice is not redone. No heavy material: the
+               slice itself (controller, release-build) is never reached here. */
+            const char *slice[2] = {"final-net-0", "p3-guard-3"}, *need[2] = {"jobs-net", "p3-guard-init"};
+            const char *unknown[6] = {"final-net-42", "final-net-01", "final-net-x", "p3-guard-40", "p3-guard-init", "final-net-"};
+            for (int k = 0; k < 2; k++) {
+                char want[200], rowsk[1200], proof[4500];
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, slice[k], slice[k]) ||
+                    cx_fmt(want, sizeof want, "lane dependency incomplete: %s", need[k])) return 2;
+                if (cx_write(checkpoint, rows, strlen(rows))) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, want) && !has(out, "unknown lane") && !has(out, "RECEIPT"), k ? "p3-guard-lane-accepted-needs-guard-init" : "final-net-lane-accepted-needs-jobs-net");
+                /* A done row of the slice alone does not open the lane: the start phase is still required. */
+                if (cx_fmt(rowsk, sizeof rowsk, "%sDONE\t%s\tx\n", rows, slice[k]) || cx_write(checkpoint, rowsk, strlen(rowsk))) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, want), k ? "p3-guard-lane-done-row-does-not-replace-guard-init" : "final-net-lane-done-row-does-not-replace-jobs-net");
+                if (cx_fmt(rowsk, sizeof rowsk, "%sDONE\t%s\tx\nDONE\t%s\tx\n", rows, need[k], slice[k]) || cx_write(checkpoint, rowsk, strlen(rowsk))) return 2;
+                ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\t") && has(out, slice[k]) && !has(out, "RECEIPT"), k ? "p3-guard-lane-done-slice-not-redone" : "final-net-lane-done-slice-not-redone");
+                saved = cx_read(checkpoint, &saved_n);
+                ck(saved && saved_n == strlen(rowsk) && !memcmp(saved, rowsk, saved_n), k ? "p3-guard-lane-repeat-leaves-checkpoint" : "final-net-lane-repeat-leaves-checkpoint"); free(saved);
+                if (k ? cx_fmt(proof, sizeof proof, "%s/p3-run", run) : cx_fmt(proof, sizeof proof, "%s/final-net-0.proof", run)) return 2;
+                ck(!sy_exists(proof), k ? "p3-guard-lane-repeat-writes-no-seal" : "final-net-lane-repeat-writes-no-proof");
+                if (cx_fmt(proof, sizeof proof, "%s/heartbeat-%s.tsv", run, slice[k])) return 2;
+                ck(!sy_exists(proof), k ? "p3-guard-lane-repeat-no-heartbeat" : "final-net-lane-repeat-no-heartbeat");
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, slice[k], k ? "p3-guard-4" : "final-net-1")) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE slice lane until"), k ? "p3-guard-lane-until-other-slice-refused" : "final-net-lane-until-other-slice-refused");
+            }
+            for (int k = 0; k < 6; k++) {
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, unknown[k], unknown[k])) return 2;
+                ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE unknown lane") && !has(out, "RECEIPT"), "slice-lane-out-of-range-or-noncanonical-name-refused");
+            }
+            if (cx_write(checkpoint, rows, strlen(rows))) return 2;
+        }
         /* First prepare uses a fake launcher, not a completed prepare checkpoint. */
         if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/tools/templates'", td) || sh(cmd, out, sizeof out)) return 2;
         size_t template_n = 0; char *template_bytes = cx_read("tools/templates/whole-front.cx.in", &template_n);
@@ -449,7 +487,7 @@ int main(int argc, char **argv) {
             if (cx_fmt(pcmd, sizeof pcmd, "UNISACC_CHAIN_PHASE_BOUND_S=227 '%s' --phases '%s' --plan 2>&1", candidate, phases)) return 2;
             ck(sh(pcmd, out, sizeof out) != 0 && has(out, "REFUSE phase bound from caller"), "single-bound-227-still-refused");
             /* all-phase-kinds-accept-exported-bound: every distinct (domain, timeout, group) kind of the real table */
-            {   size_t tn = 0; char *tb = cx_read(phases, &tn); char seen[64][80]; int ns = 0, bad = 0, kinds = 0;
+            {   size_t tn = 0; char *tb = cx_read(phases, &tn); static char seen[CP_MAX][80]; int ns = 0, bad = 0, kinds = 0;
                 for (char *ln = tb; tb && ln && *ln;) {
                     char *nl = strchr(ln, '\n'); if (nl) *nl = 0;
                     if (*ln != '#' && *ln) {
@@ -460,7 +498,9 @@ int main(int argc, char **argv) {
                             char key[80]; int dup = 0;
                             if (cx_fmt(key, sizeof key, "%s/%s/%d", f[2], f[3], grp)) bad++;
                             for (int s = 0; s < ns; s++) if (!strcmp(seen[s], key)) dup = 1;
-                            if (!dup && ns < 64) {
+                            /* a kind that does not fit is a named failure, never a silently skipped kind */
+                            if (!dup && ns >= CP_MAX) { bad++; sy_printf("REFUSE\tcheck-candidate-chain.phase-kinds-over-capacity\tcap=%d\tkey=%s\n", CP_MAX, key); }
+                            if (!dup && ns < CP_MAX) {
                                 tx_copy(seen[ns++], 80, key, strlen(key)); kinds++;
                                 /* bound chain-run exports in a fresh segment: group -> segment-3 remainder, single -> row timeout */
                                 if (cx_fmt(pcmd, sizeof pcmd, "UNISACC_CHAIN_PHASE_BOUND_S=%s '%s' --phases '%s' %s --plan 2>&1", grp ? "267" : f[3], candidate, phases, grp ? "--jobs-segment-s 267" : "")) bad++;

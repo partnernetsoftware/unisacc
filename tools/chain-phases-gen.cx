@@ -105,8 +105,27 @@ static int pack_path_id(const char *id) { return !strcmp(id, "cache-manager") ||
 static int pack_skipped(const char *id) {
     return !strncmp(id, "g3-", 3) || !strcmp(id, "wf-prep-g3") || !strcmp(id, "wf-span-prep-g3") || !strcmp(id, "kernels-g3") || !strcmp(id, "compare");
 }
+/* Channel shards: final-net-N and p3-guard-N (N decimal). Each is its own lane and exclusive dir,
+ * width 4, and depends only on the family's start phase (jobs-net, p3-guard-init); the join row
+ * (final, p3-opguard-prep) lists every shard in deps. A shard never enters ft_id: a later outer row
+ * reaches it through the join row's deps closure, and the join row's own fall-through list carries
+ * its shard list (join_list) so that the list still contains its whole deps closure. */
+static char shard_list[2][1024];
+static int shard_n[2];
+static int shard_of(const char *id) {
+    const char *d = !strncmp(id, "final-net-", 10) ? id + 10 : !strncmp(id, "p3-guard-", 9) ? id + 9 : 0;
+    if (!d || !*d) return 0;
+    for (const char *q = d; *q; q++) if (*q < '0' || *q > '9') return 0;
+    return id[0] == 'f' ? 1 : 2;
+}
+static const char *shard_start(int family) { return family == 1 ? "jobs-net" : "p3-guard-init"; }
+static const char *join_list(const char *id) {
+    int f = !strcmp(id, "final") ? 0 : !strcmp(id, "p3-opguard-prep") ? 1 : -1;
+    return f >= 0 && shard_n[f] ? shard_list[f] : 0;
+}
 static void fall_emit(const char *id, const char *lane, int chained) {
     int n, k = 0, is_outer = !strcmp(lane, "-");
+    const char *own = join_list(id);
     n = snprintf(fbytes + fused, sizeof fbytes - fused, "%s\t", id);
     if (n < 0 || n >= (int)sizeof fbytes - fused) { fprintf(stderr, "chain-phases-gen: output bound\n"); exit(2); }
     fused += n;
@@ -116,20 +135,37 @@ static void fall_emit(const char *id, const char *lane, int chained) {
         if (n < 0 || n >= (int)sizeof fbytes - fused) { fprintf(stderr, "chain-phases-gen: output bound\n"); exit(2); }
         fused += n; k++;
     }
+    if (is_outer && own) {
+        n = snprintf(fbytes + fused, sizeof fbytes - fused, "%s%s", k ? "," : "", own);
+        if (n < 0 || n >= (int)sizeof fbytes - fused) { fprintf(stderr, "chain-phases-gen: output bound\n"); exit(2); }
+        fused += n; k++;
+    }
     n = snprintf(fbytes + fused, sizeof fbytes - fused, "%s\n", k ? "" : "-");
     if (n < 0 || n >= (int)sizeof fbytes - fused) { fprintf(stderr, "chain-phases-gen: output bound\n"); exit(2); }
     fused += n;
+    if (shard_of(id)) return;
     if (!is_outer && strcmp(id, lane)) return;
     if (is_outer && chained && ft_n && ft_outer[ft_n - 1]) ft_n--;
     if (ft_n == 96) { fprintf(stderr, "chain-phases-gen: fallthrough bound\n"); exit(2); }
     cx_fmt(ft_id[ft_n], sizeof ft_id[ft_n], "%s", id); ft_outer[ft_n++] = is_outer;
 }
 static void emit(const char *id) {
-    char deps[2048],domain[160]; const char *lane=target_lane(outer)?outer:"-"; int chained=0;
+    char deps[2048],domain[160]; int shard=shard_of(id); const char *lane=shard?id:target_lane(outer)?outer:"-"; int chained=0;
+    const char *joined=join_list(id);
     const char *policy="-",*record="-",*paths="-";
     for(int i=0;i<res_n;i++)if(!strcmp(res_phase[i],id)){policy=res_policy[i];record=res_record[i];paths=res_paths[i];res_used[i]=1;}
     int legacy=!strncmp(id,"g2-lnx-",7)&&strstr(id,"-obj-");
     if(legacy) cx_fmt(deps,sizeof deps,"-");
+    else if(shard) {
+        /* The start phase must be the row emitted just before the family's first shard. */
+        const char *start=shard_start(shard); char *list=shard_list[shard-1]; size_t have=strlen(list);
+        if(strcmp(previous,start)){fprintf(stderr,"chain-phases-gen: REFUSE shard start: %s\n",id);exit(2);}
+        if(cx_fmt(list+have,sizeof shard_list[0]-have,"%s%s",have?",":"",id)){fprintf(stderr,"chain-phases-gen: shard list bound\n");exit(2);}
+        shard_n[shard-1]++;
+        cx_fmt(deps,sizeof deps,"%s",start);
+    }
+    /* A join row replaces its predecessor in ft_id like a chained row: the start phase is in its deps closure. */
+    else if(joined) { cx_fmt(deps,sizeof deps,"%s",joined); chained=1; }
     else if(strcmp(lane,"-")) {
         if(*lane_previous) cx_fmt(deps,sizeof deps,"%s",lane_previous);
         else if(!strncmp(lane,"wf-",3)) cx_fmt(deps,sizeof deps,!strstr(lane,"-g")?"gen1-lnx-x86_64":strstr(lane,"-g2")?"g2-lnx-x86_64":"g3-lnx-x86_64");
@@ -160,7 +196,62 @@ static void emit(const char *id) {
      int m=snprintf(ibytes+iused,sizeof ibytes-iused,"%s\t%s\n",id,in);
      if(m<0||m>=(int)sizeof ibytes-iused){fprintf(stderr,"chain-phases-gen: output bound\n");exit(2);}
      iused+=m;}
-    if(!legacy) { cx_fmt(previous,sizeof previous,"%s",id); if(strcmp(lane,"-"))cx_fmt(lane_previous,sizeof lane_previous,"%s",id); }
+    if(!legacy&&!shard) { cx_fmt(previous,sizeof previous,"%s",id); if(strcmp(lane,"-"))cx_fmt(lane_previous,sizeof lane_previous,"%s",id); }
+}
+/* Write-set assertion over build/chain-phase-outputs.tsv (hand-written facts): each shard family has
+ * exclusive rows (phase_pattern FAMILY-{i}, exclusive_dir yes, phases = shard count) whose
+ * write_path_pattern starts with OUT/ and contains {i}; instantiated for every shard of the family
+ * (same start phase), no two shards share a path and none lies under another shard's directory. */
+static void out_die(const char *why, const char *what) { fprintf(stderr, "chain-phases-gen: REFUSE shard outputs %s: %s\n", why, what ? what : "-"); exit(2); }
+static int out_inst(char *o, size_t cap, const char *pat, int index) {
+    size_t k = 0;
+    for (const char *p = pat; *p;) {
+        int n;
+        if (!strncmp(p, "{i}", 3)) { n = snprintf(o + k, cap - k, "%d", index); p += 3; }
+        else { n = snprintf(o + k, cap - k, "%c", *p); p++; }
+        if (n < 0 || (size_t)n >= cap - k) return 1;
+        k += (size_t)n;
+    }
+    return 0;
+}
+static void outputs_check(void) {
+    static const char *fam[2] = {"final-net", "p3-guard"};
+    static char inst[512][200]; static int inst_shard[512];
+    size_t n = 0; char *text = cx_read("build/chain-phase-outputs.tsv", &n);
+    if (!text || !n || n > 65536 || text[n - 1] != '\n' || memchr(text, 0, n)) out_die("text", "build/chain-phase-outputs.tsv");
+    for (int f = 0; f < 2; f++) {
+        char pat[16][160], want[40]; int np = 0, ni = 0;
+        if (!shard_n[f]) out_die("no shard", fam[f]);
+        if (cx_fmt(want, sizeof want, "%s-{i}", fam[f])) out_die("bound", fam[f]);
+        for (char *p = text; p < text + n;) {
+            char *e = memchr(p, '\n', (size_t)(text + n - p)), *v[8]; int fields = 1;
+            if (*p != '#') {
+                v[0] = p;
+                for (char *q = p; q < e; q++) if (*q == '\t' || !*q) { *q = 0; if (fields == 8) out_die("columns", v[0]); v[fields++] = q + 1; }
+                *e = 0;
+                if (fields != 8) out_die("columns", v[0]);
+                if (!strcmp(v[0], fam[f]) && !strcmp(v[1], want) && !strcmp(v[5], "yes")) {
+                    if (np == 16) out_die("row bound", fam[f]);
+                    if (atoi(v[2]) != shard_n[f]) out_die("phases count", v[3]);
+                    if (strncmp(v[3], "OUT/", 4) || !strstr(v[3], "{i}")) out_die("pattern", v[3]);
+                    for (int i = 0; i < np; i++) if (!strcmp(pat[i], v[3])) out_die("duplicate pattern", v[3]);
+                    if (cx_fmt(pat[np++], sizeof pat[0], "%s", v[3])) out_die("pattern bound", v[3]);
+                }
+                for (int i = 1; i < fields; i++) v[i][-1] = '\t';
+            }
+            *e = '\n'; p = e + 1;
+        }
+        if (!np) out_die("no exclusive row", fam[f]);
+        for (int s = 0; s < shard_n[f]; s++) for (int i = 0; i < np; i++) {
+            if (ni == 512 || out_inst(inst[ni], sizeof inst[ni], pat[i], s)) out_die("instance bound", fam[f]);
+            inst_shard[ni++] = s;
+        }
+        for (int a = 0; a < ni; a++) for (int b = 0; b < ni; b++) if (inst_shard[a] != inst_shard[b]) {
+            size_t la = strlen(inst[a]);
+            if (!strcmp(inst[a], inst[b]) || (inst[a][la - 1] == '/' && !strncmp(inst[b], inst[a], la))) out_die("overlap", inst[a]);
+        }
+    }
+    free(text);
 }
 /* Reject a stale generated library before deriving phase expansion. */
 static int facts_current(void) {
@@ -248,6 +339,7 @@ int main(int argc, char **argv) {
         emit(base[i]);
     }
     for (int i = 0; i < res_n; i++) if (!res_used[i]) res_die("unknown phase", res_phase[i]);
+    outputs_check();
     {   const char *idst = "build/chain-phase-inputs.tsv";
         static char ihead[] = "# id\tinputs\n# generated by tools/chain-phases-gen.cx --write; do not edit\n";
         static char all[65664]; int an = snprintf(all, sizeof all, "%s%.*s", ihead, iused, ibytes);

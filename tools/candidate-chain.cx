@@ -2320,6 +2320,44 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
         if (sy_close(lock)) die("prepare unlock", prep);
         return rc;
     }
+    {   /* Slice lanes: final-net-N and p3-guard-N. One lane runs exactly one slice of the serial
+           loops in jobs_ok and MS_P3, which stay as the fallback and the re-check. A slice writes
+           only its own proof files; the checkpoint append is locked. A finished slice is skipped
+           here without reading or rewriting its proof: the serial loop re-checks it. */
+        int slice_kind = 0, slice_index = -1;
+        for (int k = 1; k <= 2 && !slice_kind; k++) {
+            int count = k == 1 ? cf_net_count() : cf_p3_guard_count();
+            for (int i = 0; i < count; i++) {
+                if (cx_fmt(tag, sizeof tag, k == 1 ? "final-net-%d" : "p3-guard-%d", i)) die("slice lane tag", lane_phase);
+                if (!strcmp(tag, lane_phase)) { slice_kind = k; slice_index = i; break; }
+            }
+        }
+        if (slice_kind) {
+            if (until_phase && strcmp(until_phase, lane_phase)) die("REFUSE slice lane until", until_phase);
+            lane_need(outdir, slice_kind == 1 ? "jobs-net" : "p3-guard-init", "");
+            if (ck_done(outdir, lane_phase)) { sy_printf("RESUME\t%s\tlane=slice-already-done\n", lane_phase); return 0; }
+            hb(outdir, lane_phase, "start");
+            long started = sy_now_ms();
+            if (slice_kind == 1) {
+                char ctx[4400];
+                if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("slice lane ctx", lane_phase);
+                final_proof(snap, ctx, build, outdir, slice_index, 0);
+            } else {
+                char nets[4400], rts[4400], srcpkg[4400], rbt[4400], run[4400], phaseout[4400], stage[40], ctor[4400];
+                if (cx_fmt(nets, sizeof nets, "%s/ctx/jobs", outdir) || cx_fmt(rts, sizeof rts, "%s/routes/declaration/routes.tsv", outdir) ||
+                    cx_fmt(srcpkg, sizeof srcpkg, "%s/routes/compiler.pkg", outdir) || cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root) ||
+                    cx_fmt(run, sizeof run, "%s/p3-run", outdir) || cx_fmt(phaseout, sizeof phaseout, "%s/compiler.p4.pkg", run) ||
+                    cx_fmt(stage, sizeof stage, "guard-%d", slice_index) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("slice lane path", lane_phase);
+                if (fsize(run) < 0) die("REFUSE slice lane missing p3 run", run);
+                if (fsize(ctor) <= 0) die("REFUSE missing bootstrap constructor", ctor);
+                if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
+                char *a[] = {rbt, "--", "p3", (char *)snap, srcpkg, phaseout, "--nets", nets, "--routes", rts, "--phase", stage, "--run", run, 0};
+                if (bound_sh(root, a)) die(lane_phase, run);
+            }
+            mark(outdir, lane_phase, sy_now_ms() - started);
+            return 0;
+        }
+    }
     for (int g = 1; g <= 3; g++) for (int t = 0; t < 6; t++) {
         if (g == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s", slugs[t]) : cx_fmt(tag, sizeof tag, "g%d-%s", g, slugs[t])) die("lane tag", lane_phase);
         if (!strcmp(tag, lane_phase)) { gen = g; ti = t; }
