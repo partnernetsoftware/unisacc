@@ -14,6 +14,18 @@
  *   idempotence  the same call again prints `hdr SKIP`, starts no DONE step and gives the same sha
  *   status       --status on that directory: exit 3, `build TODO`, and no cxdev directory appears
  *   marker       OUT/NOT_RELEASE exists
+ *   until-done   refusals (--total-s without --until-done, --total-s 0, --until-done with --wait: exit 2).  Then a
+ *                second directory with a forged finished build step whose cxdev/cx-dev is a two-line script (sleep
+ *                2 s, copy the fixture package to cxdev/pkg.bin): this is the real background path of the reload
+ *                step with a small fake job.  `--until-done --total-s 1` must end with exit 3, a DEV_UNTIL line
+ *                naming remaining=reload,entry,hdr,seal and a last line DEV_PRODUCT_PENDING step=reload; the job
+ *                then records rc 0 and no process is left in its session (bounded wait: 60 polls of 200 ms).
+ *                With a forged entry step (identity built from the recorded tree fingerprint), `--until-done`
+ *                finishes in one call: reload DONE, entry SKIP, hdr DONE (real swap), exit 0, last line
+ *                DEV_PRODUCT scope=LOCAL; once more on that finished directory: exit 0, nothing DONE or STARTED,
+ *                no DEV_UNTIL line, same sha.
+ *                Not exercised here: the real reload and entry under --until-done, the entry PENDING line, the
+ *                poll count cap as the binding bound, the DIED path (job killed from outside).
  * Product mode (only when DEV_PRODUCT_TREE and DEV_PRODUCT_OUT name a tree and a finished product directory, and
  * DEV_PRODUCT_GIT the --git it was built with; otherwise printed as NOT_RUN, never PASS): --status exits 0, its
  * last line is DEV_PRODUCT with scope=LOCAL, it prints NOT_RELEASE and redoes nothing; the marker and the receipt
@@ -22,6 +34,7 @@
  * Last line: CHECK_DEV_PRODUCT<TAB>assertions=N<TAB>failed=N<TAB>product=RUN|NOT_RUN */
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
+#pragma unisa use sys.time
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
 
@@ -42,6 +55,65 @@ static int last_has(const np_result *r, const char *s) {
 static void hdr_sha(const np_result *r, char o[65]) {
     size_t i; o[0] = 0;
     for (i = 0; r->out && i + 4 + 64 <= r->outn; i++) if (!memcmp(r->out + i, "sha=", 4)) { if (mm_copy(o, 65, r->out + i + 4, 64)) o[0] = 0; o[64] = 0; }
+}
+
+static int isf(const char *p) { struct stat st; return !stat(p, &st) && S_ISREG(st.st_mode); }
+static int wr(const char *dir, const char *rel, const char *s) { char p[PW]; return cx_fmt(p, PW, "%s/%s", dir, rel) || cx_write(p, s, strlen(s)); }
+static void line1(const char *dir, const char *rel, char *o, size_t cap) {
+    char p[PW]; size_t n = 0, i; char *b = cx_fmt(p, PW, "%s/%s", dir, rel) ? 0 : cx_read(p, &n);
+    o[0] = 0; if (!b) return;
+    for (i = 0; i < n && i + 1 < cap && b[i] != '\n'; i++) o[i] = b[i];
+    o[i] = 0; free(b);
+}
+
+/* --until-done on the real background path of the reload step, with a small fake job as OUT/cxdev/cx-dev */
+static void until(const char *cwd, const char *w, const char *pkg) {
+    char o[PW], p[PW], script[2 * PW], id[PW + 16], v[600], pid_s[64], h[65], h1[65], h2[65], sha1[65], sha2[65]; np_result r; int bad = 0, i, rc_seen = 0, gone = 0; long pid; size_t n; char *b;
+    bad |= cx_fmt(o, PW, "%s/outu", w) || mkdir(o, 0700);
+    bad |= cx_fmt(p, PW, "%s/state", o) || mkdir(p, 0700) || cx_fmt(p, PW, "%s/cxdev", o) || mkdir(p, 0700) || cx_fmt(p, PW, "%s/entry", o) || mkdir(p, 0700);
+    bad |= cx_fmt(script, sizeof script, "#!/bin/sh\nsleep 2\nexec cp '%s' \"$CXDEV_HOME/pkg.bin\"\n", pkg) || wr(o, "cxdev/cx-dev", script);
+    bad |= cx_fmt(p, PW, "%s/cxdev/cx-dev", o) || chmod(p, 0755) || wr(o, "cxdev/base.bin", "base");
+    cx_sha256_hex(script, strlen(script), h);
+    bad |= cx_fmt(id, sizeof id, "build:%s", cwd) || wr(o, "state/build.id", id) || wr(o, "state/build.sha", h) || wr(o, "state/build.rc", "0");
+    ok(!bad, "until-fixture-forged-build-step");
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", "--total-s", "1", 0};
+      int e = run(av, &r);
+      ok(!e && r.rc == 3, "until-short-total-exit-3");
+      if (r.rc != 3) { if (r.out) fwrite(r.out, 1, r.outn, stderr); if (r.err) fwrite(r.err, 1, r.errn, stderr); }
+      ok(has(r.out, r.outn, "DEV_STEP\tbuild\tSKIP") && has(r.out, r.outn, "DEV_STEP\treload\tSTARTED"), "until-short-total-started-reload-only");
+      ok(has(r.out, r.outn, "DEV_UNTIL\ttotal_s=1\t") && has(r.out, r.outn, "\tremaining=reload,entry,hdr,seal\n"), "until-short-total-names-remaining-steps");
+      ok(last_has(&r, "DEV_PRODUCT_PENDING\tstep=reload\tpid=") && last_has(&r, "next=rerun the same command"), "until-short-total-last-line-PENDING-reload");
+      ok(!has(r.out, r.outn, "DEV_PRODUCT\t"), "until-short-total-no-DEV_PRODUCT"); np_free(&r); }
+    /* the job outlives the call by design; it must end by itself, record rc 0 and leave nothing in its session */
+    line1(o, "state/reload.pid", pid_s, sizeof pid_s); pid = atol(pid_s);
+    ok(pid > 1, "until-reload-pid-recorded");
+    for (i = 0; i < 60 && pid > 1; i++) {
+        if (!rc_seen && !cx_fmt(p, PW, "%s/state/reload.rc", o) && isf(p)) rc_seen = 1;
+        if (rc_seen && kill((pid_t)-pid, 0) && errno == ESRCH && kill((pid_t)pid, 0) && errno == ESRCH) { gone = 1; break; }
+        sy_sleep_ms(200);
+    }
+    line1(o, "state/reload.rc", v, sizeof v);
+    ok(rc_seen && !strcmp(v, "0"), "until-job-ended-rc-0");
+    ok(gone, "until-no-process-left-in-job-session");
+    /* forge the entry step so that one --until-done call can finish without building an entry */
+    bad = 0; line1(o, "state/reload.runid", v, sizeof v);
+    b = cx_fmt(p, PW, "%s/cxdev/pkg.bin", o) ? 0 : cx_read(p, &n);
+    if (b) { cx_sha256_hex(b, n, h1); free(b); } else bad = 1;
+    cx_sha256_hex("base", 4, h2); cx_sha256_hex("candidate\n", 10, h);
+    bad |= strncmp(v, "reload:", 7) || strlen(v) != 7 + 64;
+    bad |= cx_fmt(id, sizeof id, "entry:%.16s:%.16s:%.16s", v + 7, h1, h2) || wr(o, "entry/candidate", "candidate\n") || wr(o, "state/entry.id", id) || wr(o, "state/entry.sha", h) || wr(o, "state/entry.rc", "0");
+    ok(!bad, "until-fixture-forged-entry-step");
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
+      int e = run(av, &r); hdr_sha(&r, sha1);
+      ok(!e && r.rc == 0, "until-one-call-finishes-exit-0");
+      if (r.rc) { if (r.out) fwrite(r.out, 1, r.outn, stderr); if (r.err) fwrite(r.err, 1, r.errn, stderr); }
+      ok(has(r.out, r.outn, "DEV_STEP\treload\tDONE") && has(r.out, r.outn, "DEV_STEP\tentry\tSKIP") && has(r.out, r.outn, "DEV_STEP\thdr\tDONE") && !has(r.out, r.outn, "\tSTARTED\t"), "until-one-call-reload-DONE-entry-SKIP-hdr-DONE");
+      ok(last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "until-one-call-last-line-DEV_PRODUCT-scope-LOCAL"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", "--total-s", "5", 0};
+      int e = run(av, &r); hdr_sha(&r, sha2);
+      ok(!e && r.rc == 0 && last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "until-finished-directory-exit-0-DEV_PRODUCT");
+      ok(!has(r.out, r.outn, "\tDONE\t") && !has(r.out, r.outn, "\tSTARTED\t") && !has(r.out, r.outn, "DEV_UNTIL\t") && !has(r.out, r.outn, "PENDING"), "until-finished-directory-redoes-nothing");
+      ok(sha1[0] && !strcmp(sha1, sha2), "until-finished-directory-same-sha"); np_free(&r); }
 }
 
 static const char *H[3] = {"cx-flat.h", "stdio.h", "stdlib.h"};
@@ -108,6 +180,7 @@ static void light(void) {
       ok(!run(av, &r) && r.rc == 3 && has(r.out, r.outn, "DEV_STEP\tbuild\tTODO") && !has(r.out, r.outn, "DEV_PRODUCT\t"), "status-unbuilt-exit-3-build-TODO"); np_free(&r);
       ok(!cx_fmt(p, PW, "%s/cxdev", outd) && lstat(p, &st) && errno == ENOENT, "status-starts-nothing");
       ok(!cx_fmt(p, PW, "%s/NOT_RELEASE", outd) && !stat(p, &st), "light-NOT_RELEASE-marker"); }
+    until(cwd, w, pkg);
     { char *av[] = {"rm", "-rf", "--", w, 0}; if (!strncmp(w, "/tmp/check-dev-product-build-", 29)) { run(av, &r); np_free(&r); } }
 }
 
@@ -121,6 +194,12 @@ int main(void) {
       ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "tree-has-no-unisacc.com"), "tree-without-launcher-refused"); np_free(&r); }
     { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/x", "--wait", "51", 0};
       ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "--wait"), "wait-over-50-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/check-dev-product-none", "--total-s", "5", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "--total-s needs --until-done"), "total-s-without-until-done-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/check-dev-product-none", "--until-done", "--total-s", "0", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "--total-s 1..900"), "total-s-zero-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/check-dev-product-none", "--until-done", "--wait", "5", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "--until-done not with"), "until-done-with-wait-refused"); np_free(&r); }
     { struct stat st; ok(lstat("/tmp/check-dev-product-none", &st) && errno == ENOENT, "refusal-creates-nothing"); }
     light();
     if (t && o && t[0] == '/' && o[0] == '/') {
