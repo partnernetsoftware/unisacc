@@ -1,0 +1,146 @@
+/* tools/check-dev-product-build.cx -- check of tools/dev-product.cx (not tools/check-dev-product.cx, which is
+ * the older "is a product file installable" check and keeps its own contract and batch).
+ * usage: sh ./unisacc.com tools/check-dev-product-build.cx      (cwd = tree root)
+ *
+ * Light mode (always; what the batch entry runs; no environment needed; a few seconds):
+ *   refusals     no arguments, relative tree, tree without launcher, --wait over 50: exit 2, named; nothing created
+ *   fixture      a package of one route, one model and four resources is written here (three hdr/ keys with dummy payloads, one unrelated
+ *                record of method 1) and assembled by the real tools/p3-implode.cx
+ *   hdr          dev-product --hdr-only on the fixture with cwd as the tree: exit 0, last line DEV_HDR scope=LOCAL;
+ *                the result is exploded again by tools/p3-explode.cx (which refuses a wrong body length) and its
+ *                manifest must hold, for each of the three headers, the record `F nlen L L 0 0` with L = size of
+ *                TREE/include/NAME and the payload sha256 of that file; the unrelated record is unchanged, byte
+ *                for byte; packlen equals the value computed here from the record lines and payload sizes
+ *   idempotence  the same call again prints `hdr SKIP`, starts no DONE step and gives the same sha
+ *   status       --status on that directory: exit 3, `build TODO`, and no cxdev directory appears
+ *   marker       OUT/NOT_RELEASE exists
+ * Product mode (only when DEV_PRODUCT_TREE and DEV_PRODUCT_OUT name a tree and a finished product directory, and
+ * DEV_PRODUCT_GIT the --git it was built with; otherwise printed as NOT_RUN, never PASS): --status exits 0, its
+ * last line is DEV_PRODUCT with scope=LOCAL, it prints NOT_RELEASE and redoes nothing; the marker and the receipt
+ * exist; the launcher compiles and runs a one-line program.  The heavy steps (build, reload, entry) are exercised
+ * only by whoever built that directory; this check builds no nets and no entry.
+ * Last line: CHECK_DEV_PRODUCT<TAB>assertions=N<TAB>failed=N<TAB>product=RUN|NOT_RUN */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+#define PW 4400
+#define FIXED_LEN ((long long)(sizeof "P 4 1 1 4" + sizeof "D 0 0" + sizeof "M 5" + 5))   /* three lines with their newlines, model payload */
+static const char COM[] = "./unisacc.com"; /* lint:allow R1-product the check contract is to run the tool through the installed product */
+static const char TOOL[] = "tools/dev-product.cx";
+static int nas, nfail;
+static void ok(int c, const char *name) { nas++; if (!c) nfail++; printf("%s\t%s\n", c ? "ok" : "FAIL", name); }
+static int run(char **av, np_result *r) { char why[512]; why[0] = 0; r->rc = -1; r->out = r->err = 0; r->outn = r->errn = 0; return np_run(av, 0, 0, 55, r, why, sizeof why); }
+static int has(const char *b, size_t n, const char *s) { size_t l = strlen(s), i; for (i = 0; b && i + l <= n; i++) if (!memcmp(b + i, s, l)) return 1; return 0; }
+static int last_has(const np_result *r, const char *s) {
+    size_t i, last = 0;
+    for (i = 0; r->out && i + 1 < r->outn; i++) if (r->out[i] == '\n') last = i + 1;
+    return r->out && r->outn > last && has(r->out + last, r->outn - last, s);
+}
+/* the sha= value of the DEV_HDR line, "" when absent */
+static void hdr_sha(const np_result *r, char o[65]) {
+    size_t i; o[0] = 0;
+    for (i = 0; r->out && i + 4 + 64 <= r->outn; i++) if (!memcmp(r->out + i, "sha=", 4)) { if (mm_copy(o, 65, r->out + i + 4, 64)) o[0] = 0; o[64] = 0; }
+}
+
+static const char *H[3] = {"cx-flat.h", "stdio.h", "stdlib.h"};
+static const char OTHER_KEY[] = "\0other/blob";                 /* 11 bytes */
+static const char OTHER_BIN[] = "opaque-method-1-payload";      /* 23 bytes, kept verbatim: never inflated here */
+
+static void light(void) {
+    char cwd[PW], w[PW], fx[PW], p[PW], pkg[PW], outd[PW], ver[PW], other_line[600], sha1[65], sha2[65], h[65]; np_buf mf = {0}; np_result r; int k, bad = 0;
+    long long packlen, want_len; size_t n; char *b;
+    if (!getcwd(cwd, sizeof cwd) || cx_fmt(w, PW, "/tmp/check-dev-product-build-%d", (int)getpid())) { ok(0, "light-setup"); return; }
+    bad |= cx_fmt(fx, PW, "%s/fx", w) || cx_fmt(pkg, PW, "%s/fixture.pkg", w) || cx_fmt(outd, PW, "%s/out", w) || cx_fmt(ver, PW, "%s/verify", w);
+    bad |= mkdir(w, 0700) || mkdir(fx, 0700) || (cx_fmt(p, PW, "%s/resources", fx) || mkdir(p, 0700)) || (cx_fmt(p, PW, "%s/models", fx) || mkdir(p, 0700));
+    /* fixture manifest: P line, four F records */
+    { char mh[65], ml[300]; cx_sha256_hex("model", 5, mh);   /* explode wants at least one route and one model */
+      bad |= cx_fmt(p, PW, "%s/models/model-000.bin", fx) || cx_write(p, "model", 5);
+      bad |= cx_fmt(ml, sizeof ml, "p3-roundtrip-v1\nheader\tP 4 1 1 4\nroute\tD 0 0\nmodel\tM 5\tmodels/model-000.bin\t%s\n", mh); np_puts(&mf, ml); }
+    packlen = FIXED_LEN;
+    for (k = 0; k < 4 && !bad; k++) {
+        char key[80], bin[80], fl[120], line[600], kh[65], bh[65]; size_t kn, bn;
+        if (k < 3) { key[0] = 0; bad |= cx_fmt(key + 1, sizeof key - 1, "hdr/%s", H[k]); kn = strlen(key + 1) + 1; bad |= cx_fmt(bin, sizeof bin, "old %s\n", H[k]); bn = strlen(bin); bad |= cx_fmt(fl, sizeof fl, "F %d %d %d 0 0", (int)kn, (int)bn, (int)bn); }
+        else { kn = sizeof OTHER_KEY - 1; bad |= mm_copy(key, sizeof key, OTHER_KEY, (long)kn); bn = sizeof OTHER_BIN - 1; bad |= mm_copy(bin, sizeof bin, OTHER_BIN, (long)bn); bad |= cx_fmt(fl, sizeof fl, "F %d %d 99 1 12345", (int)kn, (int)bn); }
+        cx_sha256_hex(key, kn, kh); cx_sha256_hex(bin, bn, bh);
+        bad |= cx_fmt(p, PW, "%s/resources/res-%03d.key", fx, k) || cx_write(p, key, kn);
+        bad |= cx_fmt(p, PW, "%s/resources/res-%03d.bin", fx, k) || cx_write(p, bin, bn);
+        bad |= cx_fmt(line, sizeof line, "resource\t%s\tresources/res-%03d.key\t%s\tresources/res-%03d.bin\t%s\n", fl, k, kh, k, bh);
+        np_puts(&mf, line); if (k == 3) bad |= cx_fmt(other_line, sizeof other_line, "%s", line);
+        packlen += (long long)strlen(fl) + 1 + (long long)kn + (long long)bn;
+    }
+    { char pl[64]; bad |= cx_fmt(pl, sizeof pl, "packlen\t%lld\n", packlen); np_puts(&mf, pl); }
+    bad |= cx_fmt(p, PW, "%s/manifest.tsv", fx) || cx_write(p, mf.p, mf.n); free(mf.p);
+    ok(!bad, "fixture-written");
+    { char *av[] = {"sh", (char *)COM, "tools/p3-implode.cx", "--", fx, pkg, 0}; ok(!run(av, &r) && r.rc == 0, "fixture-imploded"); np_free(&r); }
+    /* hdr-only on the fixture */
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", cwd, "--out", outd, "--hdr-only", pkg, 0};
+      ok(!run(av, &r) && r.rc == 0, "hdr-only-exit-0");
+      if (r.rc) { if (r.out) fwrite(r.out, 1, r.outn, stderr); if (r.err) fwrite(r.err, 1, r.errn, stderr); }
+      ok(last_has(&r, "DEV_HDR\tpath=") && last_has(&r, "\tscope=LOCAL"), "hdr-only-last-line-DEV_HDR-scope-LOCAL");
+      ok(has(r.out, r.outn, "DEV_STEP\thdr\tDONE"), "hdr-step-done"); hdr_sha(&r, sha1); np_free(&r); }
+    bad = cx_fmt(p, PW, "%s/pkg-hdr.bin", outd);
+    { char *av[] = {"sh", (char *)COM, "tools/p3-explode.cx", "--", p, ver, 0}; ok(!bad && !run(av, &r) && r.rc == 0 && has(r.out, r.outn, "resources=4"), "result-explodes-body-length-consistent"); np_free(&r); }
+    b = cx_fmt(p, PW, "%s/manifest.tsv", ver) ? 0 : cx_read(p, &n);
+    ok(b != 0, "result-manifest-readable");
+    want_len = FIXED_LEN + (long long)strlen("F 11 23 99 1 12345") + 1 + 11 + 23;
+    for (k = 0; k < 3; k++) {
+        char src[PW], want[200], name[120]; size_t hn = 0; char *hb = cx_fmt(src, PW, "%s/include/%s", cwd, H[k]) ? 0 : cx_read(src, &hn);
+        int nlen = (int)strlen(H[k]) + 5, e = 1;
+        if (hb) { cx_sha256_hex(hb, hn, h); free(hb); e = cx_fmt(want, sizeof want, "resource\tF %d %lld %lld 0 0\tresources/res-%03d.key\t", nlen, (long long)hn, (long long)hn, k); }
+        if (cx_fmt(name, sizeof name, "F-record-stored-method-0-size-of-tree-%s", H[k])) e = 1;
+        ok(!e && b && has(b, n, want), name);
+        if (cx_fmt(name, sizeof name, "payload-sha-of-tree-%s", H[k])) e = 1;
+        ok(!e && b && has(b, n, h), name);
+        if (!e) want_len += (long long)strlen(want) - (long long)strlen("resource\t") - (long long)strlen("\tresources/res-000.key\t") + 1 + nlen + (long long)hn;
+    }
+    ok(b && has(b, n, other_line), "unrelated-record-unchanged");
+    { char pl[64]; ok(!cx_fmt(pl, sizeof pl, "\npacklen\t%lld\n", want_len) && b && has(b, n, pl), "packlen-equals-independent-sum"); }
+    free(b);
+    /* idempotence */
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", cwd, "--out", outd, "--hdr-only", pkg, 0};
+      int e = run(av, &r); hdr_sha(&r, sha2);
+      ok(!e && r.rc == 0 && has(r.out, r.outn, "DEV_STEP\thdr\tSKIP") && !has(r.out, r.outn, "\tDONE\t"), "second-call-skips-hdr");
+      ok(sha1[0] && !strcmp(sha1, sha2), "second-call-same-sha"); np_free(&r); }
+    /* status on a directory without the heavy steps */
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", cwd, "--out", outd, "--status", 0}; struct stat st;
+      ok(!run(av, &r) && r.rc == 3 && has(r.out, r.outn, "DEV_STEP\tbuild\tTODO") && !has(r.out, r.outn, "DEV_PRODUCT\t"), "status-unbuilt-exit-3-build-TODO"); np_free(&r);
+      ok(!cx_fmt(p, PW, "%s/cxdev", outd) && lstat(p, &st) && errno == ENOENT, "status-starts-nothing");
+      ok(!cx_fmt(p, PW, "%s/NOT_RELEASE", outd) && !stat(p, &st), "light-NOT_RELEASE-marker"); }
+    { char *av[] = {"rm", "-rf", "--", w, 0}; if (!strncmp(w, "/tmp/check-dev-product-build-", 29)) { run(av, &r); np_free(&r); } }
+}
+
+int main(void) {
+    np_result r; const char *t = getenv("DEV_PRODUCT_TREE"), *o = getenv("DEV_PRODUCT_OUT"); int product = 0;
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "REFUSE usage"), "no-arguments-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "rel", "--out", "/tmp/x", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "absolute"), "relative-tree-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/check-dev-product-none", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "tree-has-no-unisacc.com"), "tree-without-launcher-refused"); np_free(&r); }
+    { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", "/proc", "--out", "/tmp/x", "--wait", "51", 0};
+      ok(!run(av, &r) && r.rc == 2 && has(r.err, r.errn, "--wait"), "wait-over-50-refused"); np_free(&r); }
+    { struct stat st; ok(lstat("/tmp/check-dev-product-none", &st) && errno == ENOENT, "refusal-creates-nothing"); }
+    light();
+    if (t && o && t[0] == '/' && o[0] == '/') {
+        char p[PW], src[PW];
+        product = 1;
+        { const char *g = getenv("DEV_PRODUCT_GIT");   /* the --git the product was built with (part of the build identity) */
+          char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)t, "--out", (char *)o, "--status", g ? "--git" : 0, (char *)g, 0};
+          int e = run(av, &r);
+          ok(!e && r.rc == 0, "status-exit-0");
+          ok(last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "last-line-DEV_PRODUCT-scope-LOCAL");
+          ok(has(r.out, r.outn, "NOT_RELEASE\tdev-product-v1"), "prints-NOT_RELEASE");
+          ok(!has(r.out, r.outn, "\tDONE\t") && !has(r.out, r.outn, "\tSTARTED\t"), "status-redoes-nothing"); np_free(&r); }
+        { struct stat st; ok(!cx_fmt(p, sizeof p, "%s/NOT_RELEASE", o) && !stat(p, &st), "NOT_RELEASE-marker"); ok(!cx_fmt(p, sizeof p, "%s/receipt.tsv", o) && !stat(p, &st), "receipt"); }
+        if (cx_fmt(p, sizeof p, "%s/%s", o, COM + 2) || cx_fmt(src, sizeof src, "%s/state/check-hello.cx", o)) { ok(0, "path"); }
+        else {
+            const char *prog = "int main(void) { printf(\"dev-product-hello\\n\"); return 0; }\n";
+            char *av[] = {"sh", p, src, 0};
+            ok(!cx_write(src, prog, strlen(prog)) && !run(av, &r) && r.rc == 0 && has(r.out, r.outn, "dev-product-hello"), "launcher-runs-a-program"); np_free(&r);
+        }
+    } else printf("NOT_RUN\tproduct (set DEV_PRODUCT_TREE, DEV_PRODUCT_OUT, DEV_PRODUCT_GIT)\n");
+    printf("CHECK_DEV_PRODUCT\tassertions=%d\tfailed=%d\tproduct=%s\n", nas, nfail, product ? "RUN" : "NOT_RUN");
+    return nfail ? 1 : 0;
+}
