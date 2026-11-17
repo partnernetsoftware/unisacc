@@ -75,5 +75,5 @@ W2:`host1-runtime.step` 已有;四 demo wasm 仍 `globals:[]`,须改 `.ujs` 为�
 
 ## 7. 进度
 
-Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。water `dist`、ink `cam` 已进核。oneshot/fly globals 未齐。不称替代 three。
+Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。water `dist`、ink `cam`、oneshot `ang` 已进核。fly 金 3868 与 globals 未并存。不称替代 three。
 
