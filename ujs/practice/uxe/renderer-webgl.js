@@ -47,8 +47,8 @@ void main() {
   vFogDepth = length(p - uEye);
   vUV = aUV;
   gl_Position = uVP * vec4(p, 1.0);
-
 }
+
 `;
 
 const FS = `#version 100
