@@ -1,5 +1,5 @@
 #pragma unisa use chrome_dom
-/* tools/check-uxe-blend.cx -- UXE 直通混合与远近互换.
+/* tools/check-uxe-blend.cx -- .cx 整数公式 vs HUD px.
  * sh ./unisacc.com tools/check-uxe-blend.cx --
  */
 static int failed;
@@ -7,22 +7,53 @@ static void ck(int ok, const char *lab) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
     if (!ok) failed++;
 }
-static int dump(const char *url, const char *lab) {
-    const char *fin[3];
-    int retries = 0, rc;
-    fin[0] = "BLEND_OK";
-    fin[1] = "BLEND_FAIL";
-    fin[2] = "BLEND_ERR";
-    rc = chd_dump_expect("/usr/bin/google-chrome", url, "BLEND_OK", fin, 3, "uxe-blend", 6, 25, &retries);
-    if (rc == 3) { printf("BLEND_UNMEASURED\tno-chrome\n"); return 2; }
-    ck(rc == 0, lab);
-    return rc == 3 ? 2 : 0;
+static int mix(int s, int d, int a) {
+    return (s * a + d * (255 - a) + 127) / 255;
+}
+static int parse_px(const char *s, int *o) {
+    const char *p = s;
+    int i, n, v, sign;
+    if (!s) return 1;
+    while (*p && !(p[0] == 'p' && p[1] == 'x' && p[2] == '"' && p[3] == ':' && p[4] == '[')) p++;
+    if (!*p) return 1;
+    p += 5;
+    for (i = 0; i < 4; i++) {
+        while (*p == ' ') p++;
+        v = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+        o[i] = v;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+static int dump_px(const char *url, int *px) {
+    char *av[14];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = "--user-data-dir=/tmp/uxe-blend-chk";
+    av[7] = "--virtual-time-budget=20000";
+    av[8] = "--dump-dom";
+    av[9] = (char *)url;
+    av[10] = 0;
+    rc = cx_runv_timeout(av, 25, &out, &on);
+    if (rc == 127 || rc == 3) { if (out) free(out); return 3; }
+    rc = parse_px(out ? out : "", px);
+    if (out) free(out);
+    return rc;
 }
 int main(void) {
     char cwd[512], url[700], us[720];
     const char *pre = "file://";
     const char *suf = "/ujs/practice/uxe/test/uxe-blend.html";
-    int n, i, k;
+    int n, i, k, px[4], er, eg, eb;
+    int r0, g0, b0;
     if (!getcwd(cwd, sizeof cwd)) return 2;
     n = 0;
     while (pre[n]) { url[n] = pre[n]; n++; }
@@ -36,8 +67,15 @@ int main(void) {
         for (k = 0; q[k]; k++) us[i + k] = q[k];
         us[i + k] = 0;
     }
-    if (dump(url, "uxe-blend")) return 2;
-    if (dump(us, "uxe-blend-swap")) return 2;
+    /* far 5,220,40,128 over 200,10,30 then near 40,5,200,128 */
+    r0 = mix(5, 200, 128); g0 = mix(220, 10, 128); b0 = mix(40, 30, 128);
+    er = mix(40, r0, 128); eg = mix(5, g0, 128); eb = mix(200, b0, 128);
+    if (dump_px(url, px) == 3) { printf("BLEND_UNMEASURED\tno-chrome\n"); return 2; }
+    ck(px[0] >= er - 1 && px[0] <= er + 1 && px[1] >= eg - 1 && px[1] <= eg + 1 && px[2] >= eb - 1 && px[2] <= eb + 1 && px[3] >= 254, "uxe-blend-px");
+    r0 = mix(40, 200, 128); g0 = mix(5, 10, 128); b0 = mix(200, 30, 128);
+    er = mix(5, r0, 128); eg = mix(220, g0, 128); eb = mix(40, b0, 128);
+    if (dump_px(us, px) == 3) { printf("BLEND_UNMEASURED\tno-chrome\n"); return 2; }
+    ck(px[0] >= er - 1 && px[0] <= er + 1 && px[1] >= eg - 1 && px[1] <= eg + 1 && px[2] >= eb - 1 && px[2] <= eb + 1 && px[3] >= 254, "uxe-blend-swap-px");
     printf("CHECK_UXE_BLEND\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

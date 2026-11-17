@@ -248,7 +248,9 @@ export async function createBrowserHost(canvas, opts = {}) {
       cloud.roughness = c.roughness ?? 0.5;
       cloud.meshId = c.meshId ?? 0;
       cloud.mapId = c.mapId ?? 0;
+      cloud.alphaMode = c.alphaMode ?? 0;
       cloud.dirty = true;
+
     }
     lastPacketClouds = packet.clouds?.length || 0;
     lastPacketSummary = summarizeRenderPacket(packet);

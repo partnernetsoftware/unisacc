@@ -111,8 +111,12 @@ export function encodeRenderPacket(packet) {
     for (let i = 0; i < c.count; i++) { dv.setFloat32(o, c.scale[i], true); o += 4; }
     if (useV4) {
       dv.setUint16(o, c.mapId ?? 0, true); o += 2;
-      dv.setUint16(o, 0, true); o += 2;
+      {
+        const flags = ((c.uvOrigin | 0) & 1) | (((c.alphaMode | 0) & 1) << 1);
+        dv.setUint16(o, flags, true); o += 2;
+      }
     }
+
   }
   if (useV4) {
     dv.setUint32(o, texs.length, true); o += 4;
@@ -151,12 +155,15 @@ function readClouds(dv, o, nClouds, ver) {
     for (let i = 0; i < count * 3; i++) { xyz[i] = dv.getFloat32(o, true); o += 4; }
     const scale = new Float32Array(count);
     for (let i = 0; i < count; i++) { scale[i] = dv.getFloat32(o, true); o += 4; }
-    let mapId = 0;
+    let mapId = 0, uvOrigin = 0, alphaMode = 0;
     if (ver >= 4) {
       mapId = dv.getUint16(o, true); o += 2;
-      o += 2;
+      const flags = dv.getUint16(o, true); o += 2;
+      uvOrigin = flags & 1;
+      alphaMode = (flags >> 1) & 1;
     }
-    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId });
+    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId, uvOrigin, alphaMode });
+
   }
   return { clouds, o };
 }
