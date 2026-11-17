@@ -46,19 +46,37 @@ static void edit(const char *path, const char *old, const char *new) {
 }
 static char envhome[PW + 20], envwt[PW + 20];
 static void ensure_bundle(int force) {
-    char src[PW], cmd[4 * PW]; struct stat a, b; np_result r = {0};
+    /* The bundle is shared by groups b to e (one construction, many uses), so it is published atomically under a
+       content-addressed name (tools/cx-dev.cx bytes + unisacc.com size/mtime): each run builds into its own
+       pid-private directory and rename()s it into place; an existing published bundle is never removed or
+       replaced, so a concurrent group copying it cannot see it vanish (the old rm -rf + rebuild of a fixed
+       check-bundle path made a concurrent group's cp fail with ENOENT).  Only build material is reused. */
+    char src[PW], cmd[4 * PW], base[PW], priv[PW], un[PW]; struct stat us; np_result r = {0}; size_t n, i; char *s;
+    unsigned long long h = 1469598103934665603ULL;
     const char *t = getenv("TMPDIR");
-    if (cx_fmt(bundle, PW, "%s/cx-dev-%d/check-bundle", t && t[0] ? t : "/tmp", (int)getuid())) die("path");
-    pj(loader, bundle, "cx-dev"); pj(src, root, "tools/cx-dev.cx");
-    if (!force && !stat(loader, &a) && !stat(src, &b) && a.st_mtime > b.st_mtime) return;
-    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", bundle)) die("path");
+    pj(src, root, "tools/cx-dev.cx"); pj(un, root, "unisacc.com");
+    if (!(s = cx_read(src, &n)) || stat(un, &us)) die("bundle key");
+    for (i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ULL; }
+    free(s);
+    h ^= (unsigned long long)us.st_size * 1000003ULL + (unsigned long long)us.st_mtime; h *= 1099511628211ULL;
+    if (cx_fmt(base, PW, "%s/cx-dev-%d", t && t[0] ? t : "/tmp", (int)getuid()) || cx_fmt(bundle, PW, "%s/check-bundle-%016llx", base, h)) die("path");
+    pj(loader, bundle, "cx-dev");
+    if (!force && !access(loader, 1)) return;
+    if (cx_fmt(priv, PW, "%s/check-bundle.tmp.%d", base, (int)getpid())) die("path");
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && rm -rf '%s'", base, priv)) die("path");   /* priv belongs to this pid only */
     sh(cmd);
     {   char unisacc[PW], home[PW + 20]; char *av[] = {"sh", unisacc, src, "--", "--build", 0}; char *env[] = {home, 0}; long t0 = sy_now_ms();
-        pj(unisacc, root, "unisacc.com"); if (cx_fmt(home, sizeof home, "CXDEV_HOME=%s", bundle)) die("path");
+        pj(unisacc, root, "unisacc.com"); if (cx_fmt(home, sizeof home, "CXDEV_HOME=%s", priv)) die("path");
         run(av, root, env, 55, &r, 1);
         printf("CXDEV_TIMING\tbuild_bundle_ms=%ld\tload1=%.2f\n", sy_now_ms() - t0, load1());
         if (force) { ck(r.rc == 0 && has(&r, 0, "CXDEV_BUILD\t") && has(&r, 0, "\tLOCAL_OK"), "a.build-bundle-LOCAL_OK"); ck(r.out && !strncmp(r.out, "NOT_RELEASE\tcx-dev-v1\n", 22), "a.build-first-line-NOT_RELEASE"); }
         else if (r.rc) { fputs(r.err ? r.err : "", stderr); die("bundle construction failed (run group a)"); }
+    }
+    if (r.rc == 0 && rename(priv, bundle) == 0) { /* published */ }
+    else {   /* a concurrent run published the same content first (or the build failed): keep theirs, drop ours */
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", priv)) die("path");
+        sh(cmd);
+        if (access(loader, 1)) die("bundle not published");
     }
     np_free(&r);
 }
@@ -104,6 +122,18 @@ static void group_a(void) {
     ensure_bundle(1);
     ck(strncmp(bundle, root, strlen(root)) != 0, "a.bundle-outside-repository");
     ck(!access(loader, 1), "a.loader-executable-exists");
+    {   /* concurrency control: two concurrent copies of the published bundle while a rival publication of the
+           same name is attempted; the rival must be refused and both copies must succeed (no ENOENT) */
+        char cmd[8 * PW], rival[PW]; int refused;
+        pj(rival, work, "rival-bundle");
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && : > '%s/cx-dev'", rival, rival)) die("path");
+        sh(cmd);
+        if (cx_fmt(cmd, sizeof cmd, "cp -r '%s' '%s/race1' & p1=$!; cp -r '%s' '%s/race2' & p2=$!; wait $p1 && wait $p2 && test -x '%s/race1/cx-dev' && test -x '%s/race2/cx-dev' && rm -rf '%s/race1' '%s/race2'",
+                   bundle, work, bundle, work, work, work, work, work)) die("path");
+        refused = rename(rival, bundle) != 0;
+        sh(cmd);
+        ck(refused && !access(loader, 1), "a.concurrent-copies-ok-rival-publication-refused");
+    }
     sources(); pj(thin, root, "tools/cx-dev"); pj(img, work, "a.img"); pj(ref, work, "a.ref");
     if (cx_fmt(home, sizeof home, "CXDEV_HOME=%s", bundle) || cx_fmt(clean, sizeof clean, "CXDEV_WT=%s/base-tree", bundle)) die("path");   /* the installed revision itself: nothing to rebuild */
     { char *av[] = {"sh", thin, "m.c", "-o", img, 0}; run(av, work, env, 55, &r, 1); }
