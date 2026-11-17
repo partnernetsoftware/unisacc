@@ -2262,6 +2262,45 @@ static int host_reset_body(Buf *c, int ng) {
   return bu8(c, 0x0b);
 }
 
+static int host_reset_globals_body(Buf *c) {
+  if (!bleu(c, 1) || !bleu(c, 2) || !bu8(c, 0x7f)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x02) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x03) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 64)) return 0;
+  if (!bu8(c, 0x4f)) return 0;
+  if (!bu8(c, 0x0d) || !bleu(c, 1)) return 0;
+  if (!bi32(c, (int32_t)PERSIST_BASE)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 4)) return 0;
+  if (!bu8(c, 0x74)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 1)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 4)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 8)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x42) || !bu8(c, 0)) return 0;
+  if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 1)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x0c) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x0b) || !bu8(c, 0x0b)) return 0;
+  if (!bi32(c, 0)) return 0;
+  return bu8(c, 0x0b);
+}
+
 static int host_set_global_body(Buf *c, int ng) {
   /* (param i h) — store h at GBASE+i*4 if i < ng */
   if (!bleu(c, 0)) return 0;
@@ -2458,9 +2497,9 @@ static int store_bytes_body(Buf *c) {
 
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[34];
+  Buf cs[35];
   int i, ng = P->ng > 0 ? P->ng : 1;
-  enum { NCORE = 19, NHOST = 15, NFUNCS = NCORE + NHOST };
+  enum { NCORE = 19, NHOST = 16, NFUNCS = NCORE + NHOST };
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
   for (i = 0; i < NFUNCS; i++) if (!binit(&cs[i], i==1 ? 8192 : 256)) return 0;
@@ -2487,13 +2526,14 @@ static int build_mod(Prog *P, Buf *mod) {
     1, 1, 1, 11, 2, 6, 6, 1, 1, 1, 2, 2,
     12,
     1,
-    2
+    2,
+    1
   };
   for (i = 0; i < NFUNCS; i++) if (!bu8(&funcs, fty[i])) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
   /* exports */
-  if (!bleu(&exps, 27)) return 0;
+  if (!bleu(&exps, 28)) return 0;
   #define EXP(name, kind, idx) do { \
     uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)g_need_gpu : (uint32_t)(idx); \
     if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, _i)) return 0; \
@@ -2525,7 +2565,7 @@ static int build_mod(Prog *P, Buf *mod) {
   EXP("str_ptr_export", 0x00, 29);
   EXP("str_len_export", 0x00, 30);
   EXP("host_mk_null", 0x00, 32);
-  #undef EXP
+  EXP("host_reset_globals", 0x00, 34);
 
   if (!mk_num_body(&cs[0], 0)) return 0;
   if (!emit_locals(&cs[1], P)) return 0;
@@ -2587,6 +2627,7 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!host_dict_set_body(&cs[31])) return 0;
   if (!const_i32_ret_body(&cs[32], 0)) return 0;
   if (!store_bytes_body(&cs[33])) return 0;
+  if (!host_reset_globals_body(&cs[34])) return 0;
 
   if (!bleu(&codes, NFUNCS)) return 0;
   for (i = 0; i < NFUNCS; i++) {

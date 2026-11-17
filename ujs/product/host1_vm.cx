@@ -20,7 +20,7 @@ typedef struct {
   uint8_t nparam[H1_MAX_FUNC];
   uint32_t nfunc;
   uint32_t nimport;
-  int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
+  int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i, resetg_i;
   uint32_t gpu_len, gpu_sum, gpu_fnv;
   int gpu_got;
   WV stk[H1_STK];
@@ -144,7 +144,7 @@ static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
   uint32_t ftype[H1_MAX_FUNC];
 
   h->mod = p; h->mod_n = n; h->sp = 0; h->err[0] = 0;
-  h->main_i = h->tag_i = h->i64_i = h->f64_i = h->sptr_i = h->slen_i = -1;
+  h->main_i = h->tag_i = h->i64_i = h->f64_i = h->sptr_i = h->slen_i = h->resetg_i = -1;
   h->nfunc = 0; h->nimport = 0; h->mem = 0;
   memset(type_argc, 0, sizeof type_argc);
   memset(type_retc, 0, sizeof type_retc);
@@ -214,6 +214,11 @@ static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
           if (nl == 13 && !memcmp(p + j, "f64_of_export", 13)) h->f64_i = (int)idx;
           if (nl == 14 && !memcmp(p + j, "str_ptr_export", 14)) h->sptr_i = (int)idx;
           if (nl == 14 && !memcmp(p + j, "str_len_export", 14)) h->slen_i = (int)idx;
+          if (nl == 18 && p[j]=='h' && p[j+1]=='o' && p[j+2]=='s' && p[j+3]=='t' &&
+              p[j+4]=='_' && p[j+5]=='r' && p[j+6]=='e' && p[j+7]=='s' && p[j+8]=='e' &&
+              p[j+9]=='t' && p[j+10]=='_' && p[j+11]=='g' && p[j+12]=='l' && p[j+13]=='o' &&
+              p[j+14]=='b' && p[j+15]=='a' && p[j+16]=='l' && p[j+17]=='s')
+            h->resetg_i = (int)idx;
         }
         j = jj;
       }
@@ -517,7 +522,7 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
   return h1_exec(h, fi, locals, np, depth);
 }
 
-int host1_wasm_run_frames(const uint8_t *wasm, uint32_t wasm_n, int frames,
+int host1_wasm_run_frames2(const uint8_t *wasm, uint32_t wasm_n, int frames, int rg,
                           char *out, uint32_t out_cap) {
   H1 h;
   WV handle, tagv, val;
@@ -530,20 +535,39 @@ int host1_wasm_run_frames(const uint8_t *wasm, uint32_t wasm_n, int frames,
     return 1;
   }
   for (k = 0; k < frames; k++) {
-    if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) {
-      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err[0] ? h.err : "exec");
+    if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) goto fail_exec;
+    if (h.sp < 1) goto fail_none;
+    h1_pop_to(&h, &handle);
+    h.sp = 0;
+  }
+  if (rg) {
+    if (h.resetg_i < 0) {
+      const char *e = "{\"run\":\"fail\",\"err\":\"no host_reset_globals\"}";
+      int n = 0;
+      while (e[n] && (uint32_t)n + 1 < out_cap) { out[n] = e[n]; n++; }
+      out[n] = 0;
       free(h.mem);
       return 1;
     }
-    if (h.sp < 1) {
-      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"no result\"}");
-      free(h.mem);
-      return 1;
-    }
+    if (h1_call(&h, (uint32_t)h.resetg_i, 0) != 0) goto fail_exec;
+    h.sp = 0;
+    if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) goto fail_exec;
+    if (h.sp < 1) goto fail_none;
     h1_pop_to(&h, &handle);
     h.sp = 0;
   }
   h1_push_copy(&h, &handle);
+  if (0) {
+fail_exec:
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err[0] ? h.err : "exec");
+    free(h.mem);
+    return 1;
+fail_none:
+    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"no result\"}");
+    free(h.mem);
+    return 1;
+  }
+
   if (h1_call(&h, (uint32_t)h.tag_i, 0) != 0) {
     snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"tag:%s\"}", h.err);
     free(h.mem);
@@ -620,6 +644,10 @@ int host1_wasm_run_frames(const uint8_t *wasm, uint32_t wasm_n, int frames,
   }
   free(h.mem);
   return 0;
+}
+int host1_wasm_run_frames(const uint8_t *wasm, uint32_t wasm_n, int frames,
+                          char *out, uint32_t out_cap) {
+  return host1_wasm_run_frames2(wasm, wasm_n, frames, 0, out, out_cap);
 }
 
 int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap) {
