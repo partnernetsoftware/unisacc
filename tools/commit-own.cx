@@ -64,6 +64,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
+#pragma unisa use sys.sha
 
 #define CO_MAX 64
 
@@ -530,6 +531,7 @@ static void co_pending_collect(void) {
 int main(int argc, char **argv) {
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
     int dry = 0, att = 0, derive = 0, np0 = 0, nder = 0; long t_der = 0;
+    const char *prepare = 0, *receipt = 0, *receipt_id = 0;
     static char dpath[CO_MAX][400];   /* --derive: the derived files appended after the commit's own paths */ long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
     char gatef[400] = "", idx[400], blob[CO_MAX][64], out[8192], root[4096];
     char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
@@ -539,6 +541,9 @@ int main(int argc, char **argv) {
     while (a < argc) {
         if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
         else if (tx_eqz(argv[a], "--derive")) { derive = 1; a++; }
+        else if (tx_eqz(argv[a], "--derive-prepare") && a + 1 < argc) { prepare = argv[a + 1]; derive = 1; a += 2; }
+        else if (tx_eqz(argv[a], "--derive-receipt") && a + 1 < argc) { receipt = argv[a + 1]; derive = 1; a += 2; }
+        else if (tx_eqz(argv[a], "--derive-id") && a + 1 < argc) { receipt_id = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--dry-run")) { dry = 1; a++; }   /* everything up to and including the pre-commit hook, on the private index; no commit */
         else if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--registered")) {
@@ -665,6 +670,9 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
+        char inputtree[64] = "";
+        if ((prepare && receipt) || (!!receipt != !!receipt_id)) co_die("usage", "derive receipt requires its identity and cannot prepare simultaneously");
+        if (derive) { char *tv[] = {"git", "write-tree", 0}; if(run(tv,inputtree,sizeof inputtree))co_die("derive input identity",0); }
         if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
             static char dout[32768]; char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
@@ -672,7 +680,19 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             for (k = 0; k < np0; k++) dv[n++] = (char *)path[k];
             dv[n] = 0;
             g_bound_s = 55; tc0 = sy_now_ms();
-            drc = run(dv, dout, sizeof dout);
+            if (receipt) {
+                size_t rn = 0; char *rec = cx_read(receipt, &rn), hash[65], rb[64], ri[64], rt[64];
+                char *body = rec ? strchr(rec, '\n') : 0;
+                if (!rec || rn >= sizeof dout || sy_sha256_hex(rec,rn,hash) || !tx_eqz(hash,receipt_id) ||
+                    sscanf(rec,"CO_PREPARED %63s %63s %63s",rb,ri,rt)!=3 || !body || !tx_eqz(rb,basec) || !tx_eqz(ri,inputtree)) {
+                    fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
+                    sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
+                }
+                char *tv[]={"git","read-tree",rt,0};
+                if(run(tv,out,sizeof out))co_die("derive result tree",rt);
+                tx_copy(dout,sizeof dout,body+1,(long)(rn-(body+1-rec)));dout[rn-(body+1-rec)]=0;drc=0;
+                sy_printf("COMMIT_DERIVE_IDENTITY\tinput=%s\tresult=%s\tsha=%s\tverified=1\n",ri,rt,hash);
+            } else drc = run(dv, dout, sizeof dout);
             g_bound_s = 30; t_der = sy_now_ms() - tc0;
             dn = tx_len(dout, sizeof dout);
             while (at < dn) {
@@ -712,6 +732,14 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                             tx_eqz(cls, "derive-drift") ? "reports drift" : "failed", st, drc);
                     return 1;
                 }
+            }
+            if (prepare) {
+                char resulttree[64], hash[65];static char rec[34000];char *tv[]={"git","write-tree",0};
+                if(run(tv,resulttree,sizeof resulttree))co_die("derive result identity",0);
+                int rn=snprintf(rec,sizeof rec,"CO_PREPARED %s %s %s\n%s",basec,inputtree,resulttree,dout);
+                if(rn<0||rn>=(int)sizeof rec||sy_sha256_hex(rec,rn,hash)||sy_write_atomic(prepare,rec,rn,0600))co_die("derive receipt write",prepare);
+                sy_printf("COMMIT_DERIVE_PREPARED\tfile=%s\tsha=%s\tinput=%s\tresult=%s\n",prepare,hash,inputtree,resulttree);
+                sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 0;
             }
         }
         if (derive) co_phase("derive", 0);
