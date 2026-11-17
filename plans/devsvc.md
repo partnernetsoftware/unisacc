@@ -296,3 +296,11 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 (3) 移除:table-index.tsv 分开处理(它也由 tool-index.cx 写,读集含 build/*,另做 table-index 查询再迁);doc-links 同法补 `devsvc doc-links`(读集 *.md 加 baseline 加 doclink.cx)。
 收益估算:每次触及 tools/ 或 tests/batches.tsv 的提交门省 tool-index 约 7.8 s(并行 derive 下省的是该行占最慢行的份额,单独 --only 时全省),doc-links 约 1.1 s;build/ 提交数按近 7 天估少 222 次中只改该表的那部分(上限 222/617 = 36%,与 batches.tsv 等同改的提交仍会动 build/)。
 风险:身份清单每次查询读 1100+ 文件(约 100 ms);缓存跨工作树共享(按内容键,安全);unstable 时读者须重查。
+
+### R1 第二步:查询与物化分离
+
+`derive.tsv` 的 `write_argv` 以 `query-only ` 开头时,该行不进入自动 `--write` 与写计划闭包,也不产生自动物化关系边。显式 `--check` 仍执行其独立现算校验,`--write --only NAME` 可生成本地导出。查询缓存只存构造物,不存检查结论。tool-index 的校验走 `derived-query.cx tool-index --check`:命中时也独立调用原生成器,逐字节比较正文,并在输出前再次核源树身份。
+
+table-index 是独立物化项,保留本地表和元数据副本逐字节检查。tool-index 本地导出不再由 `--registered` 自动选入提交;新工具登记事实仍由原门检查。回退先恢复 derive 两行与登记表名单,再恢复 tool-index 文件跟踪。历史夹具所验证的离线生成器写入与篡改拒绝合同仍保留。
+
+基线入口 `/tmp/r1-baseline`:低载两项检查总 34641 ms,product-map 23106 ms,tool-index 11535 ms(表索引副本漂移,该项非 PASS)。7 天全仓提交 1998,build/ 622,tool-index 225,product-map 43。旧整体派生和 reg-a/derive-reg 的超窗均保留 UNKNOWN,后测不得改写为基线 PASS。新查询模式与原模式的负控入口 `/tmp/r1-query-red` 和 `/tmp/r1-query-check`。

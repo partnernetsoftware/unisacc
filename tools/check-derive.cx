@@ -139,7 +139,18 @@ static int incremental_check(void){
     char full[1600];cx_fmt(full,sizeof full,"%s --full",args);rc=run(full);int identical=rc==0&&!hasl(out,"\tIDENTICAL\t");for(int i=0;i<count;i++){char output[200];cx_fmt(output,sizeof output,"%s.out",names[i]);identical&=file_is(output,i==0?"changed\n":"original\n");}ck(identical,"incremental-full-write-byte-equivalence-all-consumers");
     sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\tconsumers=%d\n",nok,failed,count);return failed?1:0;
 }
+static int query_only_check(void){
+    if(cx_fmt(dir,sizeof dir,"%s/derive-query-XXXXXX",sy_tmpdir())||!mkdtemp(dir))return 2;
+    cx_fmt(mf,sizeof mf,"%s/derive.tsv",dir);put("gen.sh",GEN);
+    char row[2200];cx_fmt(row,sizeof row,"catalog\tfake/catalog\tsh %s/gen.sh %s catalog check ok\tquery-only sh %s/gen.sh %s catalog write ok\t%s/catalog.out\tsrc/*\t1\t5\n",dir,dir,dir,dir,dir);put("derive.tsv",row);
+    int rc=runm("--write");ck(rc==0&&hasl(out,"catalog\tSKIPPED")&&file_is("log",0),"query-only-automatic-write-skipped");
+    rc=runm("--write --plan --changed src/a.cx");ck(rc==0&&!hasl(out,"PLAN\tcatalog")&&file_is("log",0),"query-only-not-in-commit-plan");
+    rc=runm("--write --only catalog");ck(rc==0&&file_is("catalog.out","new-catalog\n"),"query-only-explicit-local-export");
+    rm("log");rc=runm("--check");ck(rc==0&&hasl(out,"catalog\tOK")&&file_is("log","catalog\n"),"query-only-check-really-executed");
+    sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\n",nok,failed);return failed?1:0;
+}
 int main(int argc,char**argv) {
+    if(argc==2&&!strcmp(argv[1],"--query-only"))return query_only_check();
     if(argc==2&&!strcmp(argv[1],"--incremental"))return incremental_check();
     if(argc!=1)return 2;
     int rc; long ms;
