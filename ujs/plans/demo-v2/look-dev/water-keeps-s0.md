@@ -1,6 +1,7 @@
-# water-keeps S0 静帧(出图前审)
+# water-keeps S0
 
-画布 1280x720。固定相机、seed=0。倒影占位 T5。不写玩法。本步不出图。
+`water-keeps-s0-concept.png` 是 2D canvas 概念稿,非 UXE 渲染,仅供所有者定美术方向。UXE 移植另叫 `water-keeps-s0-uxe.png`,须过 13 条存在性门。
+
 
 ## 构图(像素包围盒,原点左上)
 
