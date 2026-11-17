@@ -4,6 +4,7 @@
 
 现状: fly/water/ink/oneshot 已调 host_gpu_submit,失败回退页内 renderer。
 现状: W2 仍缺。
+现状: water/ink/oneshot 舵 turn 进核; fly yaw+=turn 且金 3868; Host 仍积分飞位置。P2 未验收。
 
 | 参考 | 本仓 | 不是 |
 |---|---|---|
