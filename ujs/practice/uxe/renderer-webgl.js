@@ -186,8 +186,11 @@ export function createWebGLRenderer(canvas) {
     const isPt = (cloud.meshId | 0) === 4;
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
 
-    if (cloud.alphaMode || isPt) {
-
+    if (isPt) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.depthMask(false);
+    } else if (cloud.alphaMode) {
       gl.enable(gl.BLEND);
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
@@ -195,6 +198,7 @@ export function createWebGLRenderer(canvas) {
       gl.disable(gl.BLEND);
       gl.depthMask(true);
     }
+
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
     gl.uniform1f(uBillboard, (cloud.billboard || isPt) ? 1 : 0);
     if (uRadial) gl.uniform1f(uRadial, isPt ? 1 : 0);

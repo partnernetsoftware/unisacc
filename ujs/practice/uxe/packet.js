@@ -57,13 +57,17 @@ export function encodeRenderPacket(packet) {
   const lights = packet.lights || DEFAULT_LIGHTS;
   const texs = packet.textures || [];
   let useV4 = texs.length > 0;
-  for (const c of clouds) if ((c.mapId | 0) !== 0) useV4 = 1;
+  for (const c of clouds) {
+    if ((c.mapId | 0) !== 0 || (c.alphaMode | 0) || (c.instColor && c.instColor.length)) useV4 = 1;
+  }
   const ver = useV4 ? PACKET_VERSION_TEX : PACKET_VERSION;
   let nbytes = 8 + 16 + 36 + 16 + 16 + 4 + lights.length * 28 + 4;
   for (const c of clouds) {
     nbytes += 12 + 12 + 4 + 4 + 4 + 4 + c.count * 3 * 4 + c.count * 4;
     if (useV4) nbytes += 4;
+    if (c.instColor && c.instColor.length) nbytes += c.count * 4;
   }
+
   if (useV4) {
     nbytes += 4;
     for (const t of texs) {
@@ -111,11 +115,15 @@ export function encodeRenderPacket(packet) {
     for (let i = 0; i < c.count; i++) { dv.setFloat32(o, c.scale[i], true); o += 4; }
     if (useV4) {
       dv.setUint16(o, c.mapId ?? 0, true); o += 2;
-      {
-        const flags = ((c.uvOrigin | 0) & 1) | (((c.alphaMode | 0) & 1) << 1);
-        dv.setUint16(o, flags, true); o += 2;
+      const hasIC = c.instColor && c.instColor.length >= c.count * 4;
+      const flags = ((c.uvOrigin | 0) & 1) | (((c.alphaMode | 0) & 1) << 1) | (hasIC ? 4 : 0);
+      dv.setUint16(o, flags, true); o += 2;
+      if (hasIC) {
+        for (let i = 0; i < c.count * 4; i++) dv.setUint8(o + i, c.instColor[i] & 255);
+        o += c.count * 4;
       }
     }
+
 
   }
   if (useV4) {
@@ -155,14 +163,20 @@ function readClouds(dv, o, nClouds, ver) {
     for (let i = 0; i < count * 3; i++) { xyz[i] = dv.getFloat32(o, true); o += 4; }
     const scale = new Float32Array(count);
     for (let i = 0; i < count; i++) { scale[i] = dv.getFloat32(o, true); o += 4; }
-    let mapId = 0, uvOrigin = 0, alphaMode = 0;
+    let mapId = 0, uvOrigin = 0, alphaMode = 0, instColor = null;
     if (ver >= 4) {
       mapId = dv.getUint16(o, true); o += 2;
       const flags = dv.getUint16(o, true); o += 2;
       uvOrigin = flags & 1;
       alphaMode = (flags >> 1) & 1;
+      if (flags & 4) {
+        instColor = new Uint8Array(count * 4);
+        for (let i = 0; i < count * 4; i++) instColor[i] = dv.getUint8(o + i);
+        o += count * 4;
+      }
     }
-    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId, uvOrigin, alphaMode });
+    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId, uvOrigin, alphaMode, instColor });
+
 
   }
   return { clouds, o };
