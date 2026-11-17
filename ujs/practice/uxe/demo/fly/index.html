@@ -1,141 +1,74 @@
 <!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8"/>
-<title>fly-host1</title>
+<html lang="zh"><head>
+<meta charset="utf-8"/><title>fly-host1</title>
 <style>
-  html,body { margin:0; height:100%; background:#081018; color:#dce7f0; font:13px sans-serif; overflow:hidden; }
-  #hud { position:fixed; left:12px; top:12px; z-index:2; background:rgba(8,16,24,.75); padding:8px 10px; border:1px solid #3a6; max-width:520px; }
-  canvas { display:block; width:100%; height:100%; }
-</style>
-</head>
+html,body{margin:0;height:100%;overflow:hidden;background:#081018;color:#cfe;font:13px sans-serif}
+#hud{position:fixed;left:10px;top:10px;z-index:2;background:rgba(0,0,0,.55);padding:6px 8px}
+canvas{display:block;width:100%;height:100%}
+</style></head>
 <body>
-<div id="hud">hold Space · click roll · A/D bank · C camera</div>
-<canvas id="c"></canvas>
+<div id="hud">WASD thrust · click roll · chase · no three</div>
+<canvas id="view"></canvas>
 <script src="../host1-runtime.js"></script>
 <script src="fly-b64.js"></script>
-<script>
-async function goldFromWasm() {
-  var rt = await host1Boot(window.FLY_WASM);
-  return rt.goldI64();
-}
-
-function sim16() {
-  var x = 0, alt = 5, spd = 2, i = 0;
-  while (i < 16) {
-    spd = spd + 1;
-    alt = alt + 2;
-    if (alt > 40) alt = 40;
-    x = x + spd;
-    i = i + 1;
+<script type="module">
+import { createWebGLRenderer } from "../../renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "../../scene.js";
+import { MESH_SHIP, MESH_OCTA, MESH_PLANE } from "../../meshes.js";
+const AUTO=/(?:\?|&)auto=1(?:&|$)/.test(location.search);
+const keys={};
+window.addEventListener("keydown",e=>{ keys[e.code]=1; if(e.code==="Space") e.preventDefault(); });
+window.addEventListener("keyup",e=>keys[e.code]=0);
+let rollClick=0;
+window.addEventListener("mousedown",()=>{ rollClick=1; });
+const renderer=createWebGLRenderer(document.getElementById("view"));
+const scene=new Scene();
+scene.wave=0.4; scene.ink=0.2;
+scene.clearColor=[0.03,0.06,0.1,1];
+scene.fog={density:0.012,color:[0.05,0.09,0.14]};
+const water=scene.instances("w",1,[0.07,0.18,0.26]);
+water.meshId=MESH_PLANE; water.set(0,0,-0.4,-40,120);
+const isles=scene.instances("i",12,[0.35,0.42,0.28]);
+isles.meshId=MESH_OCTA;
+let k;
+for(k=0;k<12;k++) isles.set(k, (k%4)*18-27, 1.4, -k*14-10, 4+(k%3)*2);
+const ship=scene.instances("s",1,[0.85,0.35,0.2]);
+ship.meshId=MESH_SHIP; ship.emissive=[0.15,0.04,0];
+const camera=new PerspectiveCamera(Math.PI/3,0.2,500);
+let x=0,y=3,z=8, yaw=0, spd=0, roll=0, gold=0, ok=0, n=0;
+function tick(){
+  n++;
+  if(!AUTO){
+    if(keys.KeyA||keys.ArrowLeft) yaw+=0.04;
+    if(keys.KeyD||keys.ArrowRight) yaw-=0.04;
+    if(keys.KeyW||keys.ArrowUp) spd=Math.min(1.6, spd+0.04);
+    else spd*=0.96;
+    if(keys.Space) y+=0.12; else y+=(3-y)*0.02;
+    if(rollClick){ roll+=0.35; rollClick=0; }
+  } else {
+    yaw+=0.01; spd=0.8; y=4+Math.sin(n*0.02);
   }
-  return x + 100 * alt;
-}
-
-var AUTO = /(?:\?|&)auto=1(?:&|$)/.test(location.search);
-var st = { x: 0, alt: 5, spd: 2, bank: 0, roll: 0 };
-var keys = {};
-var cam = 0;
-var gold = 0, ok = 0, play = 0;
-window.addEventListener("keydown", function (e) {
-  keys[e.code] = 1;
-  if (e.code === "Space") e.preventDefault();
-  if (e.code === "KeyC") cam = cam ? 0 : 1;
-});
-window.addEventListener("keyup", function (e) { keys[e.code] = 0; });
-window.addEventListener("mousedown", function () { st.roll = st.roll ? 0 : 1; });
-
-function stepLive() {
-  var thrust = keys.Space ? 1 : 0;
-  if (keys.KeyA || keys.ArrowLeft) st.bank -= 1;
-  if (keys.KeyD || keys.ArrowRight) st.bank += 1;
-  if (st.bank > 8) st.bank = 8;
-  if (st.bank < -8) st.bank = -8;
-  if (thrust) { st.spd += 1; st.alt += 2; }
-  else { if (st.spd > 1) st.spd -= 1; if (st.alt > 2) st.alt -= 1; }
-  if (st.alt > 40) st.alt = 40;
-  if (st.alt < 2) st.alt = 2;
-  st.x += st.spd + (st.roll ? 2 : 0);
-}
-
-var c = document.getElementById("c");
-var g = c.getContext("2d");
-function resize() { c.width = innerWidth; c.height = innerHeight; }
-window.addEventListener("resize", resize);
-resize();
-
-function island(gx, gy, s) {
-  var k;
-  g.fillStyle = "#1a3a28";
-  for (k = 0; k < 6; k++) {
-    g.beginPath();
-    g.ellipse(gx, gy - k * 3, s - k, s * 0.45 - k * 0.3, 0, 0, 6.28);
-    g.fill();
+  roll*=0.92;
+  x+=Math.sin(yaw)*spd;
+  z-=Math.cos(yaw)*spd;
+  ship.set(0,x,y,z,2.2, yaw+roll);
+  const bx=x-Math.sin(yaw)*14, bz=z+Math.cos(yaw)*14;
+  camera.setEye(bx, y+5, bz);
+  camera.setTarget(x, y, z-8);
+  renderer.render(scene, camera);
+  if(AUTO && n>80){
+    document.title=ok?"FLY_OK":"FLY_FAIL";
+    return;
   }
-  g.fillStyle = "#2e5a38";
-  g.beginPath();
-  g.ellipse(gx, gy - 18, s * 0.4, s * 0.2, 0, 0, 6.28);
-  g.fill();
+  requestAnimationFrame(tick);
 }
-function jet(cx, cy, bank, roll) {
-  var layer, ox = bank * 2 + (roll ? 10 : 0);
-  for (layer = 0; layer < 8; layer++) {
-    g.fillStyle = layer < 3 ? "#8ab" : (layer < 6 ? "#c45" : "#eee");
-    g.fillRect(cx + ox - 18 + layer, cy - layer * 2, 36 - layer, 8);
-    g.fillRect(cx + ox - 28 + layer, cy - layer * 2 + 3, 12, 4);
-    g.fillRect(cx + ox + 16 - layer, cy - layer * 2 + 3, 12, 4);
-  }
-}
-function stars(w, h, t) {
-  var i, sx, sy;
-  g.fillStyle = "#cfe";
-  for (i = 0; i < 40; i++) {
-    sx = (i * 97 + t * 0.2) % w;
-    sy = (i * 53) % (h * 0.45);
-    g.fillRect(sx, sy, 2, 2);
-  }
-}
-
-(async function () {
-  try { gold = await goldFromWasm(); } catch (e) { gold = -1; }
-  var js = sim16();
-  play = (gold === 3868 && js === 3868) ? 1 : 0;
-  ok = play;
-  document.title = play ? "FLY_PLAY_OK" : "FLY_PLAY_FAIL";
-  if (AUTO) {
-    document.getElementById("hud").textContent =
-      (play ? "FLY_PLAY_OK" : "FLY_PLAY_FAIL") + " wasm=" + gold + " js16=" + js;
-  }
+(async function(){
+  try{
+    const rt=await host1Boot(window.FLY_WASM);
+    gold=rt.gold164();
+    ok=gold===3868;
+  }catch(e){ ok=0; }
+  if(AUTO) document.getElementById("hud").textContent=(ok?"FLY_OK":"FLY_FAIL")+" gold="+gold;
+  renderer.resize(); tick();
 })();
-
-function draw() {
-  var w = c.width, h = c.height, i, gx, jy;
-  if (!AUTO) stepLive();
-  var sky = st.alt / 40;
-  g.fillStyle = "rgb(" + (12 + sky * 30) + "," + (24 + sky * 70) + "," + (50 + sky * 110) + ")";
-  g.fillRect(0, 0, w, h);
-  stars(w, h, st.x);
-  g.fillStyle = "#0a2030";
-  g.fillRect(0, h * 0.62, w, h);
-  for (i = 0; i < 7; i++) {
-    gx = ((i * 180 - (st.x * 3) % (w + 220)) + w + 220) % (w + 220) - 80;
-    island(gx, h * 0.62, 40 + (i % 3) * 10);
-  }
-  jy = cam ? h * 0.72 : (h * 0.45 - st.alt * 2);
-  if (!cam) jet(w * 0.5, jy, st.bank, st.roll);
-  else {
-    g.strokeStyle = "rgba(180,255,160,.7)";
-    g.strokeRect(w * 0.5 - 14, h * 0.5 - 14, 28, 28);
-  }
-  var hud = document.getElementById("hud");
-  if (!AUTO) {
-    hud.textContent = (play ? "FLY_PLAY_OK" : "FLY_HOST1") +
-      " wasm=" + gold + " alt=" + st.alt + " spd=" + st.spd +
-      " cam=" + (cam ? "cockpit" : "chase") + " no-three · Space/click/AD/C";
-  }
-  requestAnimationFrame(draw);
-}
-draw();
-</script>
-</body>
-</html>
+</script></body></html>

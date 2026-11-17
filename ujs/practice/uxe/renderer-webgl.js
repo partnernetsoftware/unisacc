@@ -6,16 +6,29 @@ const VS = `#version 100
 attribute vec3 aPos;
 attribute vec3 aInst;
 attribute float aScale;
+attribute float aYaw;
 uniform mat4 uVP;
 uniform vec3 uEye;
+uniform float uWave;
+uniform float uTime;
 varying vec3 vN;
+varying vec3 vP;
+varying vec3 vEye;
 varying float vFogDepth;
 void main() {
-  vec3 p = aPos * aScale + aInst;
-  vN = normalize(aPos);
+  float c = cos(aYaw);
+  float s = sin(aYaw);
+  vec3 lp = aPos * aScale;
+  vec3 rp = vec3(lp.x * c + lp.z * s, lp.y, -lp.x * s + lp.z * c);
+  vec3 p = rp + aInst;
+  p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
+  vN = normalize(vec3(aPos.x * c + aPos.z * s, aPos.y, -aPos.x * s + aPos.z * c));
+  vP = p;
+  vEye = uEye;
   vFogDepth = length(p - uEye);
   gl_Position = uVP * vec4(p, 1.0);
-}`;
+}
+`;
 
 const FS = `#version 100
 precision mediump float;
@@ -33,7 +46,10 @@ uniform vec3 uL1Col;
 uniform float uL1I;
 uniform float uFogD;
 uniform vec3 uFogC;
+uniform float uInk;
 varying vec3 vN;
+varying vec3 vP;
+varying vec3 vEye;
 varying float vFogDepth;
 void main() {
   vec3 n = normalize(vN);
@@ -44,10 +60,14 @@ void main() {
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
   vec3 col = base * (amb + diff) + uEmissive;
+  vec3 view = normalize(vEye - vP);
+  float rim = pow(1.0 - max(dot(n, view), 0.0), 2.4);
+  col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
   float fogF = 1.0 - exp(-uFogD * uFogD * vFogDepth * vFogDepth);
   col = mix(col, uFogC, clamp(fogF, 0.0, 1.0));
   gl_FragColor = vec4(col, 1.0);
-}`;
+}
+`;
 
 function compile(gl, type, src) {
   const s = gl.createShader(type);
@@ -85,9 +105,11 @@ export function createWebGLRenderer(canvas) {
 
   const ibo = gl.createBuffer();
   const sbo = gl.createBuffer();
+  const ybo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
+  const aYaw = gl.getAttribLocation(prog, "aYaw");
   const u = (n) => gl.getUniformLocation(prog, n);
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
@@ -96,6 +118,7 @@ export function createWebGLRenderer(canvas) {
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
+  const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk");
 
   const P = mat4(), V = mat4(), VP = mat4();
 
@@ -109,8 +132,9 @@ export function createWebGLRenderer(canvas) {
     gl.viewport(0, 0, canvas.width, canvas.height);
   }
 
-  function drawCloud(cloud) {
+  function drawCloud(cloud, wave) {
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
+    gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
@@ -133,6 +157,12 @@ export function createWebGLRenderer(canvas) {
     gl.vertexAttribPointer(aScale, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aScale, 1);
 
+    gl.bindBuffer(gl.ARRAY_BUFFER, ybo);
+    const yaw = cloud.yaw || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, yaw.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aYaw);
+    gl.vertexAttribPointer(aYaw, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aYaw, 1);
     ext.drawArraysInstancedANGLE(gl.TRIANGLES, 0, mesh.vCount, cloud.count);
     cloud.markClean();
   }
@@ -162,6 +192,8 @@ export function createWebGLRenderer(canvas) {
       gl.useProgram(prog);
       gl.uniformMatrix4fv(uVP, false, VP);
       gl.uniform3f(uEye, ex, ey, ez);
+      gl.uniform1f(uTime, (performance.now ? performance.now() : 0) * 0.001);
+      gl.uniform1f(uInk, scene.ink || 0);
       gl.uniform3fv(uAmbient, amb.color);
       gl.uniform1f(uAmbI, amb.intensity);
       gl.uniform3fv(uL0Dir, norm3(L0.dir));
@@ -173,8 +205,9 @@ export function createWebGLRenderer(canvas) {
       gl.uniform1f(uFogD, fog.density);
       gl.uniform3fv(uFogC, fog.color);
 
+      const wave = scene.wave || 0;
       for (const cloud of scene.clouds.values()) {
-        if (cloud.count > 0) drawCloud(cloud);
+        if (cloud.count > 0) drawCloud(cloud, wave);
       }
     },
   };
