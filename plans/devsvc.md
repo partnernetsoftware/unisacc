@@ -89,7 +89,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
 ### 提交门:新增 tlib 模块与分相派生
 
-新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --registered ID... --whole 本次源... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 新增分片ID --whole build/layer-api/tools.cxlib.tsv --keyed build/tlib-packages.tsv tools.cxlib --push`;共享表只带本次行,ujs 暂存保留。
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --keyed build/batch-packages.tsv 批次ID与分片ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
 
 `git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
 
@@ -133,6 +133,12 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 
 
 
+
+### tlib 包版本预留 bump(K3,2026-11-17)
+- 用途:多个并行任务改同一 tlib 包(如 tools.cxlib)时,各自跑 `layer-api --bump` 会得到互相覆盖的版本。改为先经 devsvc 预留版本:`sh ./unisacc.com tools/devsvc.cx -- bump PKG [--owner O] [--kind patch|minor] [--ttl-s N]`,输出 `BUMP PKG=.. VERSION=.. OWNER=.. EXPIRES=.. REUSED=0|1`;释放 `bump --release PKG VERSION [--owner O]`;查询 `bump --list [PKG]`(每行 BUMP_ROW 带 STATE=reserved|released|expired|consumed 与 HEAD 版本)。启动器把 bump 直接转 tools/bump.cx,不经核心。
+- 语义:V 取 `git show HEAD:build/tlib-packages.tsv` 里该包版本(不读工作副本);新预留 = max(V, 该包全部有效预留) 的下一 patch(或 minor);同属主同包再预留返回原值(REUSED=1,不递增);属主缺省 $DEVSVC_OWNER,再缺省 auto-<pid>;ttl 缺省 7200 s,上限 14400 s;到期转 expired 并记 bump.expire,其版本可再分配;版本不大于 HEAD 版本的预留在每次调用时按 HEAD 判为 consumed,不再占用,无需写回。
+- 状态:实例目录(同 leases/locks,dt_instdir;检查用 --dir 或 $BUMP_DIR)下 bump-reservations.tsv、bump-events.tsv 与 bump.lock(flock,等待 $BUMP_LOCK_WAIT_MS 缺省 5000、上限 20000 ms,超时 rc 1 `BUMP_REFUSE lock busy`)。不进 git。事件 bump.reserve/bump.release/bump.expire 另经 `devsvc events emit` 进事件日志($BUMP_EMIT=0 关闭)。
+- 与 layer-api 的关系:本期不改 layer-api 与提交门;跑完 `layer-api --bump` 后把它给出的版本与预留值核对,不一致以预留值为准。下一单 K4 让 tlibapi 门认预留。检查 tools/check-bump.cx(批次 devsvc-bump)。
 
 ## 6 已知限制与下一单
 
