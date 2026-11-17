@@ -370,17 +370,20 @@ export function createWebGLRenderer(canvas, opts) {
           let h = 2166136261;
           h ^= (t.w | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           h ^= (t.h | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
+          h ^= (t.filter | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           const src = t.rgba;
-          for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
+
           const rec = texCache[id];
           if (rec && rec.hash === h && rec.tex) continue;
           const tex = rec && rec.tex ? rec.tex : gl.createTexture();
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          const lin = (t.filter | 0) === 1;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, lin ? gl.LINEAR : gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, lin ? gl.LINEAR : gl.NEAREST);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
           texCache[id] = { hash: h, tex: tex };
 
