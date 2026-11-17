@@ -1,0 +1,123 @@
+#pragma unisa use chrome_dom
+/* tools/check-uxe-s0-look.cx -- 80x45 块均值/标准差/边缘 vs 概念稿 tsv.
+ * 阈值: 概念自比 mae_mean<3 mae_std<3; 当前矩形 UXE 必须 mae_mean>=18 (红夹具).
+ * sh ./unisacc.com tools/check-uxe-s0-look.cx --
+ */
+static int failed;
+static int cmr[3600], cmg[3600], cmb[3600], cstd[3600], ced[3600];
+static int umr[3600], umg[3600], umb[3600], ustd[3600], ued[3600];
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+static int load_tsv(const char *path) {
+    FILE *f = fopen(path, "r");
+    char line[128];
+    int n = 0;
+    if (!f) return -1;
+    if (!fgets(line, sizeof line, f)) { fclose(f); return -1; }
+    while (fgets(line, sizeof line, f) && n < 3600) {
+        int a, b, c, d, e;
+        if (sscanf(line, "%d\t%d\t%d\t%d\t%d", &a, &b, &c, &d, &e) != 5) continue;
+        cmr[n] = a; cmg[n] = b; cmb[n] = c; cstd[n] = d; ced[n] = e;
+        n++;
+    }
+    fclose(f);
+    return n;
+}
+static int parse_look(const char *s, int *mr, int *mg, int *mb, int *st, int *ed) {
+    const char *p = s ? strstr(s, "LOOK_N=") : 0;
+    int n = 0;
+    if (!p) return -1;
+    p = strchr(p, '\n');
+    if (!p) return -1;
+    p++;
+    while (*p && n < 3600) {
+        int a, b, c, d, e, k;
+        if (*p < '0' || *p > '9') break;
+        k = sscanf(p, "%d\t%d\t%d\t%d\t%d", &a, &b, &c, &d, &e);
+        if (k != 5) break;
+        mr[n] = a; mg[n] = b; mb[n] = c; st[n] = d; ed[n] = e;
+        n++;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return n;
+}
+static void dump(const char *url, const char *ud, char **out, size_t *on) {
+    char *av[12];
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = (char *)ud;
+    av[7] = "--virtual-time-budget=25000";
+    av[8] = "--dump-dom";
+    av[9] = (char *)url;
+    av[10] = 0;
+    *out = 0; *on = 0;
+    cx_runv_timeout(av, 45, out, on);
+}
+static void mae5(int *ar, int *ag, int *ab, int *as, int *ae,
+                 int *br, int *bg, int *bb, int *bs, int *be,
+                 int n, int *om, int *os, int *oe) {
+    long sm = 0, ss = 0, se = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        sm += abs(ar[i] - br[i]) + abs(ag[i] - bg[i]) + abs(ab[i] - bb[i]);
+        ss += abs(as[i] - bs[i]);
+        se += abs(ae[i] - be[i]);
+    }
+    *om = (int)(sm / (n * 3));
+    *os = (int)(ss / n);
+    *oe = (int)(se / n);
+}
+int main(void) {
+    char cwd[512], u1[800], u2[820];
+    char *out = 0;
+    size_t on = 0;
+    const char *pre = "file://";
+    int i, n, nc, nu, mae_m, mae_s, mae_e, self_m, self_s, self_e;
+    nc = load_tsv("ujs/plans/demo-v2/look-dev/s0-look-concept.tsv");
+    ck(nc == 3600, "tsv-3600");
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    n = 0;
+    while (pre[n]) { u1[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 500; i++) u1[n++] = cwd[i];
+    {
+        const char *s = "/ujs/plans/demo-v2/look-dev/s0-look-sample.html";
+        for (i = 0; s[i] && n < 780; i++) u1[n++] = s[i];
+        u1[n] = 0;
+    }
+    dump(u1, "--user-data-dir=/tmp/uxe-s0-look-self", &out, &on);
+    nu = parse_look(out, umr, umg, umb, ustd, ued);
+    if (out) free(out);
+    ck(nu == 3600, "self-n");
+    mae5(cmr, cmg, cmb, cstd, ced, umr, umg, umb, ustd, ued, 3600, &self_m, &self_s, &self_e);
+    printf("SELF\tmae_mean=%d\tmae_std=%d\tmae_edge=%d\n", self_m, self_s, self_e);
+    ck(self_m < 3 && self_s < 3, "self-mae");
+    n = 0;
+    while (pre[n]) { u2[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 500; i++) u2[n++] = cwd[i];
+    {
+        const char *s = "/ujs/plans/demo-v2/look-dev/water-keeps-s0-uxe.html#look";
+        for (i = 0; s[i] && n < 800; i++) u2[n++] = s[i];
+        u2[n] = 0;
+    }
+    out = 0; on = 0;
+    dump(u2, "--user-data-dir=/tmp/uxe-s0-look-uxe", &out, &on);
+    nu = parse_look(out, umr, umg, umb, ustd, ued);
+    if (out) free(out);
+    ck(nu == 3600, "uxe-n");
+    mae5(cmr, cmg, cmb, cstd, ced, umr, umg, umb, ustd, ued, 3600, &mae_m, &mae_s, &mae_e);
+    printf("UXE\tmae_mean=%d\tmae_std=%d\tmae_edge=%d\n", mae_m, mae_s, mae_e);
+    printf("FAIL\tsimilarity\tmae_mean=%d\tneed<12\tmae_std=%d\tneed<8\n", mae_m, mae_s);
+    ck(mae_m >= 12, "red-fixture-unlike");
+
+    printf("CHECK_UXE_S0_LOOK\tfailed=%d\tuxe_mae_mean=%d\tuxe_mae_std=%d\n", failed, mae_m, mae_s);
+    return failed ? 1 : 0;
+}
+
+

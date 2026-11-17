@@ -1,0 +1,73 @@
+#pragma unisa use chrome_dom
+/* tools/gen-s0-look.cx -- chrome 取样概念稿 80x45 块 -> tsv
+ * sh ./unisacc.com tools/gen-s0-look.cx -- --write|--check
+ */
+static int write_mode;
+static char *grab(const char *url, char **out, size_t *on) {
+    char *av[12];
+    int rc;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--allow-file-access-from-files";
+    av[3] = "--disable-web-security";
+    av[4] = "--no-first-run";
+    av[5] = "--user-data-dir=/tmp/uxe-s0-look-gen";
+    av[6] = "--virtual-time-budget=25000";
+    av[7] = "--dump-dom";
+    av[8] = (char *)url;
+    av[9] = 0;
+    *out = 0; *on = 0;
+    rc = cx_runv_timeout(av, 40, out, on);
+    if (rc == 127) return "no-chrome";
+    return 0;
+}
+static const char *find_look(const char *s) {
+    const char *p = s ? strstr(s, "LOOK_N=") : 0;
+    return p;
+}
+int main(int argc, char **argv) {
+    char cwd[512], url[800];
+    char *out = 0;
+    size_t on = 0;
+    const char *pre = "file://", *suf = "/ujs/plans/demo-v2/look-dev/s0-look-sample.html";
+    const char *p, *err;
+    int i, n, write = 0, check = 0, rows = 0;
+    FILE *f;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
+        if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
+    }
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    n = 0;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 600; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 780; i++) url[n++] = suf[i];
+    url[n] = 0;
+    err = grab(url, &out, &on);
+    if (err) { printf("LOOK_UNMEASURED\t%s\n", err); return 2; }
+    p = find_look(out);
+    if (!p) { if (out) free(out); printf("LOOK_NO_HUD\n"); return 1; }
+    if (!write && !check) { printf("GEN_S0_LOOK\tdry\thud=%d\n", p ? 1 : 0); if (out) free(out); return 0; }
+    if (write) {
+        f = fopen("ujs/plans/demo-v2/look-dev/s0-look-concept.tsv", "w");
+        if (!f) { if (out) free(out); return 1; }
+        fprintf(f, "mr\tmg\tmb\tstd\tedge\n");
+        p = strchr(p, '\n');
+        if (p) p++;
+        while (p && *p && rows < 3600) {
+            if (*p >= '0' && *p <= '9') {
+                const char *e = p;
+                while (*e && *e != '\n') e++;
+                fwrite(p, 1, (size_t)(e - p), f);
+                fputc('\n', f);
+                rows++;
+                p = *e ? e + 1 : e;
+            } else break;
+        }
+        fclose(f);
+        printf("WROTE\ts0-look-concept.tsv\trows=%d\n", rows);
+    }
+    if (out) free(out);
+    printf("GEN_S0_LOOK\tok\trows=%d\n", rows);
+    return rows == 3600 ? 0 : 1;
+}
