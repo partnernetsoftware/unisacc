@@ -1,0 +1,58 @@
+/* Check the material producer using its declared native image. ROOT NEW_OUT PRODUCER.
+ * The producer builds only owned fixture output; shared prepared bytes stay immutable. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+static int failed;
+static void ck(int yes,const char *name){printf("%s\tisolated-streams-material.%s\n",yes?"PASS":"FAIL",name);if(!yes)failed++;}
+static int digest(const char *path,char hash[65]){
+    unsigned char *b=0;int64_t n;int rc=sy_read_file(path,&b,&n,67108864);
+    if(!rc)rc=sy_sha256_hex(b,n,hash);mm_free(b);return rc;
+}
+static int invoke(const char *producer,const char *root,const char *out,const char *compiler,np_result *r){
+    char why[600];char *v[]={(char *)producer,(char *)root,(char *)out,(char *)compiler,0};
+    int rc=np_run(v,root,0,30,r,why,sizeof why);if(rc)fprintf(stderr,"producer transport: %s\n",why);return rc;
+}
+static int members(const char *dir,char hash[65]){
+    np_buf list={0};
+    for(int i=0;i<10;i++){
+        char leaf[64],path[4400],h[65];sy_stat_t st;
+        if(i<8){if(cx_fmt(leaf,sizeof leaf,"unisacc-stream%d.com",i+1))return -1;}
+        else if(cx_fmt(leaf,sizeof leaf,"%s",i==8?"streams.json":"material.tsv"))return -1;
+        if(cx_fmt(path,sizeof path,"%s/%s",dir,leaf)||sy_lstat(path,&st)||st.kind!='f'||digest(path,h))return -1;
+        np_puts(&list,leaf);np_puts(&list,"\t");np_puts(&list,h);np_puts(&list,"\n");
+    }
+    int rc=sy_sha256_hex(list.p,list.n,hash);mm_free(list.p);return rc;
+}
+int main(int argc,char **argv){
+    if(argc!=4||argv[2][0]!='/'||argv[3][0]!='/')return 2;
+    char root[4096],candidate[4400],output[4400],receipt[4400],before[65],after[65],sealed[65],unchanged[65];
+    if(sy_realpath(argv[1],root,sizeof root)<0||sy_mkdir(argv[2],0700)||cx_fmt(candidate,sizeof candidate,"%s/unisacc.com",root)||cx_fmt(output,sizeof output,"%s/material",argv[2])||cx_fmt(receipt,sizeof receipt,"%s/material.tsv",output)||digest(candidate,before))return 2;
+    np_result r={0};int rc=invoke(argv[3],root,output,candidate,&r);
+    ck(!rc&&!r.rc&&!r.residue&&tx_contains(r.out,r.outn,"PREPARED\tisolated-streams\t",tx_len("PREPARED\tisolated-streams\t",100))&&!tx_contains(r.out,r.outn,"PASS\t",5),"construction-is-prepared-only");
+    if(rc||r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return 1;}np_free(&r);
+    unsigned char *record=0;int64_t rn;if(sy_read_file(receipt,&record,&rn,65536))return 2;
+    char want[100];if(cx_fmt(want,sizeof want,"\ncandidate\t%s\n",before))return 2;
+    ck(tx_count((const char *)record,rn,"\ncandidate\t",11)==1&&tx_contains((const char *)record,rn,want,tx_len(want,sizeof want)),"candidate-identity-recorded");
+    int valid=1;
+    for(int i=0;i<9;i++){
+        char leaf[64],path[4400],h[65],row[150];sy_stat_t st;
+        if(i<8){if(cx_fmt(leaf,sizeof leaf,"unisacc-stream%d.com",i+1))return 2;}
+        else if(cx_fmt(leaf,sizeof leaf,"streams.json"))return 2;
+        if(cx_fmt(path,sizeof path,"%s/%s",output,leaf)||sy_lstat(path,&st)||st.kind!='f'||(i<8&&!(st.mode&0100))||digest(path,h)||cx_fmt(row,sizeof row,"\n%s\t%s\n",leaf,h)||!tx_contains((const char *)record,rn,row,tx_len(row,sizeof row)))valid=0;
+    }
+    ck(valid,"eight-executables-and-json-match-receipt");mm_free(record);
+    if(members(output,sealed))return 2;
+    rc=invoke(argv[3],root,output,candidate,&r);
+    ck(!rc&&r.rc==2&&!r.residue&&tx_contains(r.err,r.errn,"new output required",19),"existing-output-refused-before-construction");np_free(&r);
+    ck(!members(output,unchanged)&&tx_eqz(sealed,unchanged),"existing-output-all-ten-members-unchanged");
+    char wrong[4400];if(cx_fmt(wrong,sizeof wrong,"%s/wrong-compiler",argv[2]))return 2;
+    rc=invoke(argv[3],root,wrong,"/bin/true",&r);
+    ck(!rc&&r.rc==2&&!r.residue&&tx_contains(r.err,r.errn,"compiler must be the root candidate\n",tx_len("compiler must be the root candidate\n",100)),"different-compiler-refused");np_free(&r);
+    sy_stat_t st;ck(sy_lstat(wrong,&st)==-ENOENT,"different-compiler-creates-no-output");
+    ck(!digest(candidate,after)&&tx_eqz(before,after),"root-candidate-unchanged");
+    printf("CHECK_ISOLATED_STREAMS_MATERIAL\tfailed=%d\n",failed);return failed?1:0;
+}

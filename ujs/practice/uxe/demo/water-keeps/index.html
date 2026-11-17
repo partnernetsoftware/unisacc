@@ -19,8 +19,6 @@ import { createWebGLRenderer } from "../../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../../scene.js";
 import { MESH_SHIP, MESH_BOX, MESH_OCTA } from "../../meshes.js";
 import { MESH_PLANE } from "../../meshes.js";
-import { createBrowserHost } from "../../host-browser.js";
-import { encodeRenderPacket } from "../../packet.js";
 
 function rgb(n){
   return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
@@ -33,9 +31,9 @@ window.addEventListener("keydown",e=>{ keys[e.code]=1; });
 window.addEventListener("keyup",e=>{ keys[e.code]=0; });
 
 let pal=[660520,1708064,530456,1574920,1052696,1310732,790548,657936];
-let ok=0, z=0, hdg=0, spd=0.4, rt=null;
+let ok=0, z=0, hdg=0, spd=0.4;
 
-let renderer=null;
+const renderer=createWebGLRenderer(canvas);
 const scene=new Scene();
 scene.wave=1.0;
 scene.ink=0.25;
@@ -50,11 +48,7 @@ houses.meshId=MESH_BOX;
 const ship=scene.instances("ship", 1, [0.42,0.28,0.16]);
 ship.meshId=MESH_SHIP; ship.emissive=[0.35,0.18,0.04];
 const lamp=scene.instances("lamp", 1, [1,0.7,0.3]);
-lamp.meshId=MESH_OCTA; lamp.emissive=[1.2,0.7,0.2]; lamp.billboard=1;
-const lanterns=scene.instances("lanterns", 32, [1,0.55,0.18]);
-lanterns.meshId=MESH_OCTA;
-lanterns.billboard=1;
-lanterns.emissive=[2.4,1.1,0.25];
+lamp.meshId=MESH_OCTA; lamp.emissive=[1.2,0.7,0.2];
 
 function placeWorld(){
   let i;
@@ -68,81 +62,23 @@ function placeWorld(){
     const side=(i%2)?22:-22;
     houses.set(i, side, 2.2, -rz, 1.6);
   }
-  for(i=0;i<32;i++){
-    const rz=((i/4)|0)*40-8;
-    const side=(i%2)?20:-20;
-    lanterns.set(i, side, 3.6, -rz, 0.28);
-  }
 }
 placeWorld();
-function placeRocksFromList(d){
-  let i;
-  for(i=0;i<64;i++){
-    const x=(Number(d[i*2])-40)*0.6;
-    const zz=(Number(d[i*2+1])-40)*0.6;
-    rocks.set(i, x, 1.2, zz, 1.4+(i%3)*0.4);
-  }
-}
-function placeLanternsFromList(d){
-  let i;
-  for(i=0;i<32;i++){
-    const k=i*2;
-    const x=(Number(d[k*2])-40)*0.6;
-    const zz=(Number(d[k*2+1])-40)*0.6;
-    lanterns.set(i, x, 3.6, zz, 0.28);
-  }
-  lanterns.billboard=1;
-}
-
 
 function realmAt(zz){
   let r=(zz/40)|0; if(r<0)r=0; if(r>7)r=7; return r;
 }
 
-function packCloud(c){
-  return {
-    color:c.color, count:c.count, xyz:c.xyz, scale:c.scale,
-    meshId:c.meshId, emissive:c.emissive,
-    metalness:c.metalness, roughness:c.roughness,
-  };
-}
-function submitGpu(host){
-  const clouds=[];
-  scene.clouds.forEach(c=>clouds.push(packCloud(c)));
-  host.host_gpu_submit(encodeRenderPacket({
-    clear:scene.clearColor,
-    camera:{ fovy:camera.fovy, near:camera.near, far:camera.far, eye:camera.eye, target:camera.target },
-    fog:scene.fog,
-    ambient:scene.ambient,
-    lights:scene.lights,
-    clouds,
-  }));
-  host.host_frame_present();
-}
-function stepSim(){
-  let dt, turn=0;
+function tick(){
   if(!AUTO){
-    if(keys.KeyA||keys.ArrowLeft) turn=-0.03;
-    if(keys.KeyD||keys.ArrowRight) turn=0.03;
+    if(keys.KeyA||keys.ArrowLeft) hdg-=0.03;
+    if(keys.KeyD||keys.ArrowRight) hdg+=0.03;
     if(keys.KeyW||keys.ArrowUp) spd+=0.02;
     if(keys.KeyS||keys.ArrowDown) spd-=0.02;
     if(spd<0.15) spd=0.15;
     if(spd>1.2) spd=1.2;
-    dt=spd;
-  }else{
-    dt=0.35;
-    turn=0.01;
+    z+=spd;
   }
-  let used=0;
-  if(rt&&typeof rt.step==="function"){
-    try{
-      const r=rt.step({hdg:hdg,dist:z,dt:dt,turn:turn});
-      if(r&&r.dist!=null){ z=Number(r.dist); used=1; }
-      if(r&&r.hdg!=null) hdg=Number(r.hdg);
-      if(r&&r.pal&&r.pal.length>=8) pal=r.pal;
-    }catch(e){ used=0; }
-  }
-  if(!used) z+=dt;
   const ri=realmAt(z);
   const col=rgb(pal[ri]);
   scene.clearColor=[col[0]*0.15,col[1]*0.18,col[2]*0.22,1];
@@ -150,52 +86,26 @@ function stepSim(){
   scene.lights[0]={ dir:[0.2,0.9,0.2], color:[1,0.85,0.55], intensity:1.1 };
   scene.lights[1]={ dir:[-0.3,0.2,-0.4], color:col, intensity:0.5 };
   const x=Math.sin(hdg)*8;
-  ship.set(0, x, 0.4, -z-6, 1.4, hdg);
-  lamp.set(0, x, 1.3, -z-6, 0.18);
+  ship.set(0, x, 0.4, -z-6, 1.4);
+  lamp.set(0, x, 1.3, -z-7.2, 0.18);
   water.set(0, 0, 0, -z-80, 240);
   camera.setEye(x*0.3, 4.2, -z+10);
   camera.setTarget(x, 0.6, -z-14);
-  hud.textContent=(ok?"WATER_OK ":"")+"realm "+(ri+1)+"/8  UXE GL ship+fog+plane · WASD · no three";
-  return ri;
+  renderer.render(scene, camera);
+  if(!AUTO) hud.textContent=(ok?"WATER_OK ":"")+"realm "+(ri+1)+"/8  UXE GL ship+fog+plane · WASD · no three";
+  requestAnimationFrame(tick);
 }
+
 (async function(){
   try{
-    rt=await host1Boot(window.WATER_WASM);
-    let palSrc=null, d=null;
-    try{
-      const r=rt.step({hdg:0,dist:0,dt:0});
-      if(r&&r.pal) palSrc=r.pal;
-      if(r&&r.d) d=r.d;
-    }catch(e){}
-    if(!palSrc){
-      d=rt.readI64List(rt.mainHandle());
-      if(d.length>=8) palSrc=d.slice(-8);
-    }
-    if(palSrc&&palSrc.length>=8) pal=palSrc.slice(-8);
-    ok=!!(pal&&pal.length>=8);
-    if(d&&d.length>=128){ placeRocksFromList(d); placeLanternsFromList(d); houses.count=0; }
-  }catch(e){ ok=0; rt=null; }
+    const rt=await host1Boot(window.WATER_WASM);
+    const d=rt.readI64List(rt.mainHandle());
+    if(d.length>=8) pal=d.slice(-8);
+    ok=d.length>=8;
+  }catch(e){ ok=0; }
   document.title=ok?"WATER_OK":"WATER_FAIL";
-  if(AUTO) hud.textContent=(ok?"WATER_OK ":"")+"realm 1/8";
-  let host=null, gpu=0;
-  try{
-    host=await createBrowserHost(canvas,{ prefer:"webgl", baseURL:new URL("../../", import.meta.url) });
-    stepSim();
-    submitGpu(host);
-    gpu=1;
-  }catch(e){ host=null; gpu=0; }
-  if(gpu){
-    function tick(){ try{ stepSim(); submitGpu(host); requestAnimationFrame(tick); }catch(e){} }
-    requestAnimationFrame(tick);
-    return;
-  }
-  renderer=createWebGLRenderer(canvas);
+  if(AUTO) hud.textContent=(ok?"WATER_OK":"WATER_FAIL")+" pal="+pal.length;
   renderer.resize();
-  function tick(){
-    stepSim();
-    renderer.render(scene, camera);
-    requestAnimationFrame(tick);
-  }
   tick();
 })();
 </script>

@@ -25,12 +25,42 @@ static int tool(const char *args) {
     return sh(cmd);
 }
 
-int main(void) {
+static void fixture(const char *name,const char *body){char p[512];if(cx_fmt(p,sizeof p,"%s/%s",dir,name)||cx_write(p,body,strlen(body)))exit(2);}
+static int check_rerun(void){int rc;
+ const char *agg="BATCH\ta\tUNKNOWN\nBATCH\tb\tUNKNOWN\nBATCH\tc\tFAIL\nBATCH\td\tPASS\n";
+ const char *classes="CLASS\ta\tUNKNOWN\tOUTER_KILL\twatchdog-deadline\nCLASS\tb\tUNKNOWN\tUNCLASSIFIED\tno-receipt\nCLASS\tc\tFAIL\tASSERT\tbatch-fail\nREASON_CLASS\tASSERT=1\tINNER_TIMEOUT=0\tOUTER_KILL=1\tNO_MATERIAL=0\tENV=0\tUNCLASSIFIED=1\tno_receipt=1\n";
+ fixture("agg.tsv",agg);fixture("class.out",classes);fixture("set.out","a\nb\n");fixture("assert.out","a\nb\nc\n");fixture("missing.out","a\n");fixture("dup.out","a\na\nb\n");
+ rc=tool("agg.tsv --rerun-plan class.out --jobs 1 --chunk 2 --load-max 8");
+ ok("rerun exact counts",rc==0&&has("selected=2\touter_kill=1\tno_receipt=1\tshards=1\tper_shard=2\tmax_jobs=1\tload1_lt=8"));
+ ok("rerun only resource set",has("RERUN\t000\ta\tUNKNOWN\tOUTER_KILL\t1\t8")&&has("RERUN\t000\tb\tUNKNOWN\tno-receipt\t1\t8")&&!has("RERUN\t000\tc")&&!has("RERUN\t000\td"));
+ ok("rerun retained receipts and bounds",has("original=READ_ONLY\tnew_receipts=SEPARATE_SESSION")&&has("\t250000\t55\tretain-original,new-session\t")&&has("note=plan-only-no-test-result"));
+ rc=tool("agg.tsv --rerun-plan class.out --chunk 1 --rerun-ids set.out");ok("rerun verified explicit set",rc==0&&has("shards=2\tper_shard=1"));
+ rc=tool("agg.tsv --rerun-plan class.out --rerun-ids assert.out");ok("rerun ASSERT injection refused",rc==2&&has("REFUSE rerun-ineligible c")&&!has("RERUN\t"));
+ rc=tool("agg.tsv --rerun-plan class.out --rerun-ids missing.out");ok("rerun omitted target refused",rc==2&&has("rerun-set-incomplete b"));
+ rc=tool("agg.tsv --rerun-plan class.out --rerun-ids dup.out");ok("rerun duplicate target refused",rc==2&&has("rerun-duplicate a"));
+ fixture("bad.out","CLASS\ta\tUNKNOWN\tOUTER_KILL\twatchdog\nCLASS\tb\tUNKNOWN\tUNCLASSIFIED\tno-receipt\nCLASS\tc\tFAIL\tASSERT\tbatch-fail\nREASON_CLASS\tASSERT=1\tINNER_TIMEOUT=0\tOUTER_KILL=2\tNO_MATERIAL=0\tENV=0\tUNCLASSIFIED=1\tno_receipt=1\n");
+ rc=tool("agg.tsv --rerun-plan bad.out");ok("rerun census mismatch refused",rc==2&&has("class-summary-count OUTER_KILL"));
+ fixture("bad.out","CLASS\ta\tUNKNOWN\tOUTER_KILL\twatchdog\nCLASS\tb\tUNKNOWN\tASSERT\tno-receipt\n");rc=tool("agg.tsv --rerun-plan bad.out");ok("rerun ASSERT cannot impersonate absent receipt",rc==2&&has("class-no-receipt-kind b"));
+ fixture("bad.out","CLASS\ta\tFAIL\tOUTER_KILL\twatchdog\n");rc=tool("agg.tsv --rerun-plan bad.out");ok("rerun aggregate status mismatch refused",rc==2&&has("class-aggregate-mismatch a"));
+ rc=tool("agg.tsv --rerun-plan class.out --chunk 9 --jobs 2");ok("rerun shard bounded below five minutes",rc==2&&has("plan-shard-deadline"));
+ rc=tool("agg.tsv --rerun-plan class.out --jobs 5");ok("rerun concurrency bound",rc==2&&has("plan-integer"));
+ rc=tool("agg.tsv --rerun-plan class.out --load-max 11");ok("rerun admission bound",rc==2&&has("plan-integer"));
+ rc=tool("agg.tsv --rerun-plan class.out --ids");ok("rerun mixed modes refused",rc==2&&has("REFUSE usage"));
+ {char p[512];size_t n;char*b;if(cx_fmt(p,sizeof p,"%s/agg.tsv",dir))return 2;b=cx_read(p,&n);ok("rerun aggregate never overwritten",b&&n==strlen(agg)&&!memcmp(b,agg,n));free(b);}
+ rc=tool("--admit-load 10");ok("rerun actual load gate",(rc==0&&has("admitted=1"))||(rc==75&&has("admitted=0")));
+ rc=tool("--admit-load 11");ok("rerun load gate rejects relaxed limit",rc==2&&has("plan-integer"));
+ const char *names[]={"agg.tsv","class.out","set.out","assert.out","missing.out","dup.out","bad.out"};for(int i=0;i<7;i++){char p[512];if(cx_fmt(p,sizeof p,"%s/%s",dir,names[i])||unlink(p))return 2;}if(rmdir(dir))return 2;
+ printf("CHECK_S9_TRIAGE_RERUN\tpassed=%d\tfailed=%d\n",pass_n,fail_n);return fail_n?1:0;
+}
+
+int main(int argc,char **argv) {
     char cmd[4096];
     int rc;
     if (sh("mktemp -d /tmp/check-s9-triage-XXXXXX") || tx_len(out, sizeof out) < 10) { printf("FAIL\tmktemp\n"); return 1; }
     cx_fmt(dir, sizeof dir, "%s", out);
     for (rc = 0; dir[rc]; rc++) if (dir[rc] == '\n') dir[rc] = 0;
+    if(argc==2&&!strcmp(argv[1],"--rerun-only"))return check_rerun();
+    if(argc!=1)return 2;
     cx_fmt(cmd, sizeof cmd,
         "cd %s && printf 'COVERAGE\\tx\\tSATISFIED\\nBATCH\\tb-pass\\tPASS\\tattempts=1\\treason=batch-pass\\nBATCH\\tb-fail\\tFAIL\\tattempts=1\\treason=\\n"
         "BATCH\\tb-unk\\tUNKNOWN\\tattempts=1\\treason=watchdog-deadline\\nBATCH\\tb-ref\\tREFUSED\\tattempts=1\\treason=\\n"

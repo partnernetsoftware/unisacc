@@ -65,7 +65,7 @@
 | S10 依赖已稳定 | 该包在 `build/tlib-packages.tsv` 的每个依赖,策略行为 `yes` 或在同一次声明里一并达标;不依赖任何 `ext.*` | 读两张表 |
 | S11 所有权合同 | 签名返回或填充资源的每行 `own` 列非空,配对的关闭函数是表内一行;S6 的用例里含重复关闭与关闭后使用各一条(期望 `-EBADF`) | 读表与证据 |
 | S12 机制绿 | `layer-api --check`、`check-tlib-frozen`、`tools/ratchets.cx` 对当前树通过 | 调用现有工具,各自不超过 60 秒 |
-| S13 独立评审 | `agentwork/ledger.tsv` 有一行 id 为 `STABLE-REVIEW-PKG`,事件含 `accept` 与当前 `api_sha`,角色列不是实现者角色 | 读账本;`api_sha` 不符即 FAIL |
+| S13 独立评审 | `build/approvals.tsv` 有一行 id 为 `STABLE-REVIEW-PKG`,kind 为 `stable-review`,note 含 `accept` 与当前 `api_sha`,approver 不是实现者 | 读批准事实;`api_sha` 不符即 FAIL |
 
 取值说明:
 
@@ -94,7 +94,7 @@
 - (d) (1) 是合法终态。维护成本低、已在新接口之上重写的旧入口可以一直留着。从 P6(10)。
 - (e) 别名或空桩够用时不进 (2)。改名迁移保留旧名为别名并标 legacy,不以删除旧名完成改名。从 N6(8);与本仓工具改名规则一致。
 - (f) 编号 `CXDEPnnnn` 从 0001 起,登记在表的弃用行或墓碑行,永不复用;撤销弃用时行回到 legacy,编号保留并注明已撤销。从 N5.4(5)。
-- (g) 安全例外:接口本身危险或不安全(内存越界、凭据泄露、数据损毁)时,可以跳过 (2) 的停留期直接移除或改签名。由集成者决定并执行,在 `agentwork/ledger.tsv` 记一行(决定、依据、证据、回滚办法),发布说明单列。从 P5.2 的例外条款;决定者按本仓决策授权是集成者,不是项目所有者。
+- (g) 安全例外:接口本身危险或不安全(内存越界、凭据泄露、数据损毁)时,可以跳过 (2) 的停留期直接移除或改签名。由集成者决定并执行,在 `prd_mempalace.md` 登记决定(决定、依据、证据、回滚办法),发布说明单列。从 P5.2 的例外条款;决定者按本仓决策授权是集成者,不是项目所有者。
 - (h) 事实稳定条款:孵化或预稳定的行,只要仓内有调用者,破坏它的那个候选必须在同一候选内改完全部调用点并用 `tools/affected.cx` 选批实跑。「没有承诺」不等于「可以让仓内红」。从 N6(3);阈值取 1 个调用者,因为仓内改写成本低。
 - (i) 预稳定与孵化阶段没有弃用周期;legacy 标记在这两个阶段只表示「该行将以软弃用身份进入稳定面,新代码不要用」。
 
@@ -132,7 +132,7 @@ sh ./unisacc.com tools/stable-eval.cx -- --fixtures
 | `tests/batches.tsv`、`tests/cxlibc.tsv` | S6、S9 |
 | `release/candidate.tsv` 与 `--evidence` 目录下该候选的批次日志(`SURF` 行) | S6、S7、S11 |
 | git 的公开版 tag 与其上的历史文件内容 | S8 与提升判据 (1) |
-| `agentwork/ledger.tsv` | S13 |
+| `build/approvals.tsv` | S13 |
 | symindex 或 `tools/refactor.cx sites` 的调用点计数 | S9(a)、提升判据 (2)、`--callers` |
 
 它组合的现有工具:`tools/layer-api.cx --check`、`tools/check-std-surface.cx`、`tools/check-tlib-frozen.cx --fast`、`tools/ratchets.cx`。它读证据,不重跑面批次;证据必须属于 `release/candidate.tsv` 所指候选,且该候选的 `api_sha` 等于当前树的 `api_sha`,否则 S6、S7、S11 记 UNKNOWN。每个子步骤不超过 60 秒。

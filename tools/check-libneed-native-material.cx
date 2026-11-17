@@ -1,6 +1,7 @@
 /* Producer and affected integration controls. ROOT PREPARED_TOOL --cases producer|mapping.
  * Each group has its own registry batch and unchanged 55-second outer budget. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.materialconsumers
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 static char root[4096],image[4400],tmp[4400];static int checks,failed;
@@ -32,6 +33,24 @@ static void mapping(void){char *v[]={image,"--materials-dump","--prepare-materia
  char work[4600];path(work,"attributes");test[6]=work;r=call(test,0,20);ck(!r.rc&&strstr(r.out,"LIBNEED_ATTRIBUTES\tassertions=14\tfailed=0"),"all-12-original-plus-2-linkage-assertions");np_free(&r);}
  char envbuf[4700];if(snprintf(envbuf,sizeof envbuf,"CC=%s/no-cc",tmp)>=(int)sizeof envbuf)die("missing-CC-path-bound");char *env[]={envbuf,0};char *neg[]={image,"--ids","libneed-attributes","--prepare-materials","--run",0};r=call(neg,env,30);
  ck(r.rc==3&&strstr(r.out,"HOST_TOOL_MISSING:hostcc")&&strstr(r.out,"deferred=1")&&!strstr(r.out,"status=PASS"),"affected-missing-hostcc-DEFERRED");np_free(&r);}
+/* Compare the exact refusal for every declared consumer. */
+static int refusal_map_matches(const char *wire, size_t n) {
+ if(!wire || !n || memchr(wire,0,n))return 0;
+ int expected=mc_load("libneed-native"),actual=0,ok=1;
+ if(expected<=0)return 0;
+ for(size_t i=0;i<n;i++)if(wire[i]=='\n')actual++;
+ if(wire[n-1]!='\n')ok=0;
+ for(int i=0;i<expected;i++){char wanted[1024];const char *id=mc_id(i);if(!id)return 0;
+  if(cx_fmt(wanted,sizeof wanted,"MATERIAL\t%s\tlibneed-native\t-\tREFUSED=HOST_TOOL_MISSING:hostcc\n",id))die("refusal-row-bound");
+  int matches=0;size_t wantlen=strlen(wanted);
+  for(size_t at=0;at<n;){size_t stop=at;while(stop<n&&wire[stop]!='\n')stop++;
+   if(stop<n&&stop-at+1==wantlen&&!memcmp(wire+at,wanted,wantlen))matches++;
+   at=stop<n?stop+1:n;
+  }
+  if(matches!=1)ok=0;
+ }
+ return ok&&actual==expected;
+}
 static void nightly(void){
  char run[4600],missing_run[4600],envbuf[4700];path(run,"nightly-good");path(missing_run,"nightly-missing");
  char *v[]={image,root,run,"--tier","daily","--phase","map","--map-family","libneed-native",0};np_result r=call(v,0,40);
@@ -39,11 +58,11 @@ static void nightly(void){
  if(snprintf(envbuf,sizeof envbuf,"CC=%s/no-nightly-cc",tmp)>=(int)sizeof envbuf)die("nightly-CC-bound");char *env[]={envbuf,0};v[2]=missing_run;r=call(v,env,30);
  if(r.rc||!r.out||!strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=DEFERRED"))fprintf(stderr,"NIGHTLY_NEGATIVE rc=%d stdout=%s stderr=%s\n",r.rc,r.out?r.out:"",r.err?r.err:"");
  ck(!r.rc&&strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=DEFERRED\treason=HOST_TOOL_MISSING:hostcc")&&!strstr(r.out,"S9_MAP_PRODUCER\tname=libneed-native\tstatus=PREPARED"),"nightly-missing-hostcc-DEFERRED");
- char dump[4800];if(snprintf(dump,sizeof dump,"%s.nightly-init/family-libneed-native.dump",missing_run)>=(int)sizeof dump)die("dump-path");size_t n;char *wire=cx_read(dump,&n);const char *gold="MATERIAL\tlibneed-attributes\tlibneed-native\t-\tREFUSED=HOST_TOOL_MISSING:hostcc\n";ck(wire&&n==strlen(gold)&&!memcmp(wire,gold,n),"nightly-refusal-map-visible-no-NA");free(wire);np_free(&r);
+ char dump[4800];if(snprintf(dump,sizeof dump,"%s.nightly-init/family-libneed-native.dump",missing_run)>=(int)sizeof dump)die("dump-path");size_t n;char *wire=cx_read(dump,&n);const char *gold="MATERIAL\tlibneed-attributes\tlibneed-native\t-\tREFUSED=HOST_TOOL_MISSING:hostcc\n";ck(wire&&n>=strlen(gold)&&!memcmp(wire,gold,strlen(gold))&&refusal_map_matches(wire,n),"nightly-refusal-map-visible-no-NA");free(wire);np_free(&r);
 }
 int main(int argc,char **argv){
  if(argc==1){if(!realpath(".",root))die("root");char *v[]={"sh","./unisacc.com","tools/affected.cx","--","--ids","libneed-native-producer,libneed-native-mapping,libneed-native-nightly","--prepare-materials","--run","-j","3",0};np_result r=call(v,0,50);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);return rc;}
  if(argc!=5||strcmp(argv[3],"--cases")||!realpath(argv[1],root)||!realpath(argv[2],image))die("usage-ROOT-TOOL---cases-producer-or-mapping");
- char t[]="/tmp/check-libneed-native-XXXXXX";if(!mkdtemp(t))die("mkdtemp");if(cx_fmt(tmp,sizeof tmp,"%s",t))die("temporary-path-bound");
+ char t[]="/tmp/unisacc-affected-check-libneed-native-XXXXXX";if(!mkdtemp(t))die("mkdtemp");if(cx_fmt(tmp,sizeof tmp,"%s",t))die("temporary-path-bound");
  if(!strcmp(argv[4],"producer"))producer();else if(!strcmp(argv[4],"mapping"))mapping();else if(!strcmp(argv[4],"nightly"))nightly();else die("unknown-case");
  printf("CHECK_LIBNEED_NATIVE\tchecks=%d\tfailed=%d\tcase=%s\n",checks,failed,argv[4]);return failed?1:0;}

@@ -60,17 +60,33 @@ static int badtable(const char *dir, const char *rows) {
 }
 
 /* run devsvc in DIR; output to LOG; returns exit code (-1 spawn failure) */
+static char g_outer[4096];   /* the real repo root: plays the outer devsvc job's exported root */
+static int g_nomark;         /* 1: export UNISACC_FLOW_ROOT without the job marker */
 static int run_dv(const char *dir, const char *inst, char **args, const char *log) {
-    char *argv[16], e1[4200]; sy_spawn_t sp; sy_exit_t st; int fd, i, n = 0, r;
+    char *argv[40], e1[4200], e2[4200], e3[4200], e4[4300], e5[4400]; sy_spawn_t sp; sy_exit_t st; int fd, i, n = 0, r;
     cx_fmt(e1, sizeof e1, "UNISACC_DEVSVC_DIR=%s", inst);
-    argv[n++] = "env"; argv[n++] = e1; argv[n++] = "DEVSVC_LOCAL_WRITES=1"; argv[n++] = "sh"; argv[n++] = "./unisacc.com"; /* lint:allow R1-product fixture root: devsvc is driven through the repo launcher on purpose */ argv[n++] = "tools/devsvc.cx"; argv[n++] = "--";
-    for (i = 0; args[i] && n < 15; i++) argv[n++] = args[i];
+    /* no scrubbing: every nested call gets exactly what an outer devsvc job exports (root, its marker, a repo-table pin of the outer root);
+       devsvc's nested-inheritance rule (plans/devsvc.md section 3) must drop them because DIR is not under the marked root */
+    cx_fmt(e2, sizeof e2, "UNISACC_FLOW_ROOT=%s", g_outer); cx_fmt(e3, sizeof e3, "UNISACC_FLOW_ROOT_JOB=%s", g_outer);
+    cx_fmt(e4, sizeof e4, "DEVSVC_REPO_TABLE=%s/tools/devsvc-repo.tsv", g_outer); cx_fmt(e5, sizeof e5, "DEVSVC_REPO_TABLE_PIN=outer:%s/tools/devsvc-repo.tsv", g_outer);
+    if (g_nomark) cx_fmt(e3, sizeof e3, "UNISACC_FLOW_ROOT_JOB=");   /* unmarked: UNISACC_FLOW_ROOT counts as explicitly given and is kept */
+    argv[n++] = "env"; argv[n++] = e2; argv[n++] = e3; argv[n++] = e4; argv[n++] = e5; argv[n++] = e1; argv[n++] = "DEVSVC_LOCAL_WRITES=1"; argv[n++] = "sh"; argv[n++] = "./unisacc.com"; argv[n++] = "tools/devsvc.cx"; argv[n++] = "--";
+    for (i = 0; args[i] && n < 38; i++) argv[n++] = args[i];
     argv[n] = 0;
     sy_unlink(log); fd = sy_open_new(log, 0644); if (fd < 0) return -1;
     sy_spawn_init(&sp); sp.argv = argv; sp.cwd = dir; sp.in_fd = SY_STDIO_NULL; sp.out_fd = fd; sp.err_fd = fd; sp.pgroup = -1; sp.deadline_ms = 50000;
     r = sy_proc_run(&sp, &st); sy_close(fd);
-    if (r < 0 || st.timed_out || !st.exited) return -1;
-    return st.code;
+    r = (r < 0 || st.timed_out || !st.exited) ? -1 : st.code;
+    if (r != 0 && !(args[0] && tx_eqz(args[0], "f") && args[2] && tx_eqz(args[2], "x/bad.cx"))) {   /* diagnostics only on an unexpected rc */
+        unsigned char *b = 0; int64_t bn = 0; long i, ln = 0;
+        printf("DIAG\trun_dv\t%s\t%s\trc=%d\n", args[0] ? args[0] : "-", args[2] ? args[2] : "-", r);
+        if (sy_read_file(log, &b, &bn, 1 << 22) == 0 && b) {
+            for (i = 0; i < (long)bn && ln < 5; i++) { if (i == 0 || b[i - 1] == '\n') printf("DIAG\t| "); putchar(b[i]); if (b[i] == '\n') ln++; }
+            if (bn > 0 && b[bn - 1] != '\n' && ln < 5) putchar('\n');
+            mm_free(b);
+        }
+    }
+    return r;
 }
 
 /* LOG has a line starting with PFX */
@@ -86,6 +102,7 @@ int main(int argc, char **argv) {
     char root[4096], d[4096], p[4096], q[4096], inst[4096], log[4096];
     int r;
     if (sy_cwd(root, sizeof root) < 0) return 2;
+    cx_fmt(g_outer, sizeof g_outer, "%s", root);
     r = validate(root, "build/devsvc-compile-context.tsv");
     ok(r == 0, "repo-table-valid");
     if (argc > 1 && tx_eqz(argv[1], "--check")) { printf("CHECK_DEVSVC_COMPILE_CONTEXT\tfailed=%d\n", fails); return fails ? 1 : 0; }
@@ -134,6 +151,19 @@ int main(int argc, char **argv) {
         r = run_dv(d, inst, a4, log);
         ok(r == 0 && has_line(log, "CFG\tcompilectx\tx/frag.cx\tfragment"), "config-shows-table");
         ok(has_line(log, "CFG\tcompilectx_table\tbuild/devsvc-compile-context.tsv\trows=2"), "config-row-count");
+    }
+    {   /* nested-inheritance rule, both directions: marked outer root is dropped in the scratch root; same repo keeps it; unmarked root is kept */
+        char t1[4400], t2[4400];
+        cx_fmt(t1, sizeof t1, "test \"$UNISACC_FLOW_ROOT\" = '%s' && test \"$UNISACC_FLOW_ROOT_JOB\" = '%s'", d, d);
+        cx_fmt(t2, sizeof t2, "test \"$UNISACC_FLOW_ROOT\" = '%s'", g_outer);
+        {   char *a5[] = { "x", "--par", "1", "--timeout-ms", "20000", "--", "sh", "-c", t1, 0 };
+            r = run_dv(d, inst, a5, log); ok(r == 0, "nested-scratch-root-drops-marked-outer-root"); }
+        {   char *a6[] = { "x", "--par", "1", "--timeout-ms", "20000", "--", "sh", "-c", t2, 0 };
+            r = run_dv(g_outer, inst, a6, log); ok(r == 0, "nested-same-repo-inherits-outer-root"); }
+        g_nomark = 1;
+        {   char *a7[] = { "x", "--par", "1", "--timeout-ms", "20000", "--", "sh", "-c", t2, 0 };
+            r = run_dv(d, inst, a7, log); ok(r == 0, "unmarked-explicit-root-kept"); }
+        g_nomark = 0;
     }
     printf("NOTE\tscratch-root-left\t%s\n", d);   /* not removed: it holds symlinks into the repo */
     printf("CHECK_DEVSVC_COMPILE_CONTEXT\tfailed=%d\tasserts=%d\n", fails, asserts);

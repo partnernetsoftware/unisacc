@@ -19,6 +19,7 @@
 - 实例目录:`$UNISACC_DEVSVC_DIR`,否则 `$HOME/.cache/unisacc/devsvc/<sha256(git 公共目录绝对路径)前 16 位>/`。所有版本工作目录共用一个实例。
 - 目录内:`sock`(unix 域套接字)、`pid`、`locks.tsv`(锁落盘)、`native/<键>/<工具名>`(原生执行体)。
 - 有界常驻:ttl 默认 1800 s、硬上限 7200 s;连续 idle(默认 300 s)无请求即自退并删 sock。没有无界常驻。
+- 嵌套继承规则(2026-11-17):devsvc 给子进程导出 `UNISACC_FLOW_ROOT` 时同时导出标记 `UNISACC_FLOW_ROOT_JOB=<该根>`;嵌套的 devsvc 若本次根(入口取 git 顶层,核心取 cwd)等于标记根或在其下,即同仓嵌套,继承照旧;不在其下(临时根、夹具根)就丢弃继承的 `DEVSVC_REPO_TABLE`、`DEVSVC_REPO_TABLE_PIN`、`DEVSVC_SELF_BIN` 与等于标记的 `UNISACC_FLOW_ROOT`,按本根重新解析;未带标记的 `UNISACC_FLOW_ROOT` 视为调用者显式给的,始终保留。实现:tools/devsvc.cx 入口与 tools/devsvc-core.cx 的 flow_root_env;断言:批次 devsvc-compile-context(nested-* 与 unmarked-explicit-root-kept)。调用者不必再自己 `env -u`。
 - 单实例:listen 遇 EADDRINUSE 先试连,连得上即拒绝再起,连不上视为陈旧 sock 清掉重听。
 - 无实例时:lock、run、events 自动拉起(等待上限 40 s);status、ping、stop 不拉起;run 可 `--local` 或在拉起失败时本地执行。
 
@@ -47,6 +48,7 @@
 | Read | `f read PATH [OFF LIM]` | 内容到 stdout;stderr 结果行带整文件 sha256 与总行数,sha 可接着喂给 `--expect-sha` |
 | Write | `f write PATH --from SRC [--expect-sha X] [--mkdir]` | 原子替换;新内容先写到 `/tmp` 或 `$CLAUDE_JOB_DIR/tmp` 的 SRC;有实例时自动取路径锁 |
 | Edit | `f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]` | old/new 从文件读,免命令行转义;old 须恰好出现一次(`--all` 至少一次);`--chomp` 去掉两文件末尾各一个换行 |
+| Edits(同一文件多处) | `f edits PATH --stdin [--sep S] [--sep-next S2] [--expect-sha X]` | stdin 为若干组 `OLD`、独占一行 `@@DEVSVC-NEW@@`、`NEW`,组间独占一行 `@@DEVSVC-NEXT@@`;各组依次在内存里套用,每组 old 须在当时内容里恰好出现一次(ENOMATCH/EMULTI 指明第几组),全过才经一次 file.write 原子落盘,.cx 只试编一次,试编失败(ECOMPILE)整批不落盘;相对 PATH 按写根(UNISACC_FLOW_ROOT,缺省仓根)解析。同一文件改三处:逐次 f edit 约 6960 ms,一次 f edits 约 2390 ms(2026-11-17 实测,检查 check-devsvc-flow 的 f-edits-* 例) |
 | Bash | `x [--timeout-ms N] [--cwd D] -- ARGV...` | 不经 shell(要管道就 `-- sh -c '...'`);独立进程组,超时整组杀,rc 124;退出码即命令自己的 |
 | 多步并行 | `flow - [--cat] [--jobs N]`(stdin 给节点表)或 `flow run FILE.tsv` | 每行 `id<TAB>op<TAB>deps<TAB>k=v;k=v`,op 为 exec、file.read、file.write、file.edit、compare、search;无依赖的节点并发,有依赖的按序;`--cat` 直接带回各节点输出 |
 | Grep、git grep | 节点 `search`:`pattern=固定串;paths=空格分隔的文件、目录或 glob;max=N` | 输出 `path:line:text`;只做固定串(cx 无正则库,`regex=1` 拒绝);跳过 `.git`、链接与二进制;超出 max 末行 `SEARCH_TRUNC` |
@@ -147,7 +149,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - P3 f read 行段与 who-calls 结果直接跳读(sed -n 244 次、cat 311 次)。
 - P4 devsvc check:按改动选批并行跑(check 直跑 666 次),结果进事件。
 - P5 devsvc ps 与按作业 kill(pgrep/ps/sleep 122 次)。
-- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。
+- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。状态(2026-11-17):已做。`devsvc precheck --files PATH...` -> `tools/precommit.cx -- --precheck PATH...`(b7c376e9fd 模式,0bec77c73b 检查与批次 precommit-precheck-pass/-trunc,入口随本行提交):私有临时索引(HEAD 加给定路径)上以 UNISACC_PRECOMMIT_SERIAL=1 重跑同一份无参门,逐门 `PRECHECK gate=NAME verdict=PASS|BLOCKED ms=N reason=...`,末行 `PRECHECK_SUMMARY blocked=K total_ms=T slowest=NAME rc=N`;总 deadline 55 秒,超时出 PRECHECK_TIMEOUT 列已评估/未评估门;真索引不读不写,不缓存结论。已知局限:(1) runlist、facts 门失败时原逻辑直接返回,其后的门不再评估,预检同样只列到此;(2) 不打 BLOCKED/REFUSE/`precommit: blocked` 文案的失败只报 `gate=other` 并给日志路径;(3) 归门按日志出现顺序,文案出现在下一门 begin 之前才归对。评估项(未排):runlist、facts 失败后继续评估其余门是否改变原门判定,须单独论证后再动,不为"一次列全"放宽或改动原门。
 - P7 按历史耗时预警超预算并建议分片;长命令自动转后台。
 - P8 锁 who/wait 查询。
 - P9 只读 git 已有(4ebf3b6834)但采用率低:宣传、简报模板写明;新建工具前的 git log --all 给专用入口。
@@ -228,14 +230,23 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 
 目标:agent 不再直接改 prd*.md、plans/*.md,只经 doc 接口表达意图(取哪节、替换哪节、追加哪行),取锁、原子写、并发校验由服务做。
 
-- 库 `tools/cxlib/flowdoc.cx`(`fd_run(op, args, ff_out*)`):节路径 `A/B/C` 按 Markdown 标题逐层嵌套匹配(标题去首尾空白,代码块内 `#` 行不算标题),找不到 ENOSEC,歧义 EMULTISEC。
-  - doc.get 取节(含标题行,sha 为全文件摘要);doc.list 列节树 `层级<TAB>路径`。
-  - doc.set 整节正文替换(标题保留);doc.append 节尾(尾随空行之前)追加一行;doc.remove 按唯一子串删节内一行。
+- 库 `tools/cxlib/flowdoc.cx`(`fd_run(op, args, ff_out*)`):节路径 `A/B/C` 按 Markdown 标题逐层嵌套匹配(标题去首尾空白,代码块内 `#` 行不算标题),找不到 ENOSEC,歧义 EMULTISEC。标题本身含 `/` 时写成 `%2F`,含 `%` 写成 `%25`(2026-11-17);doc.list 输出同样编码,list 的路径可原样喂回 get/set。
+  - doc.get 取节(含标题行,sha 为全文件摘要);加 body=1(CLI `--body`)只取正文,不含标题行,且去掉 set 会补回的那一个节尾空行,于是 `doc get --body` 的输出原样 `doc set --from` 回写字节不变。doc.list 列节树 `层级<TAB>路径`。
+  - doc.set 整节正文替换(标题保留);正文首个非空行就是本节标题行(把含标题的 get 全文回写)时拒绝 EDUPHEAD,不再静默生成重复标题。两者都做:get --body 给出对称形式,EDUPHEAD 堵住旧误用,两者互不替代。doc.append 节尾(尾随空行之前)追加一行;doc.remove 按唯一子串删节内一行。
+  - doc.repair 节路径末段允许多处同名命中(其余段仍须唯一):取第一处,把同父范围内同层同标题的后续标题行删掉,正文并入第一处;无可合并的报 ENODUP。用于修复旧版回写造成的重复根标题(此前 get/set 一律 EMULTISEC,无入口可修)。
   - doc.mermaid 在节内 mermaid 块里:old 唯一则替换为 new(改节点文字);old 空则在首块闭合前加一行 new(加连线);new 空则删含 old 的行(删连线)。
   - 写入一律经 file.write:原子写、根越界 EOUTSIDE;带读入时的 sha 写,期间他人改过即 ESHA;调用者给的 expect_sha 不符同样 ESHA。
 - 锁:库不取锁,只做 sha 兜底;flow 的 doc.* 写节点默认 lock=doc:<path>(同文件串行,不同文件并行);CLI 写操作内部取 devsvc 锁 doc:<文件>。调用者不感知。
-- CLI:`devsvc doc get|set|append|remove|list|mermaid FILE SECTION [k=v | k@=PATH ...] [--from F] [--expect-sha X]`;set 的 --from 为 content,其余为 line。
+- CLI:`devsvc doc get|set|append|remove|list|mermaid|repair FILE SECTION [k=v | k@=PATH ...] [--from F] [--body] [--expect-sha X]`;set 的 --from 为 content,其余为 line。
 - 允许范围:只作用于 `tools/devsvc-repo.tsv` 的 doc 行(glob,* 不跨 /):prd.md、prd_*.md、plans/*.md;核心不写死路径。cfg_load 对不认识的行类型只告警一次不判坏表(向前兼容旧执行体)。
 - 检查:`tools/check-flowdoc.cx`(批次 flowdoc,26 项)。
 - 未做:CLI 与 flow doc 节点各自的专项检查项;入口按 HEAD 固定核心,doc 子命令在新核心入库后才对 `devsvc.cx` 生效。
 
+
+## 9 flow 负载准入(2026-11-17)
+
+- 规则:并发总量以机器负载不高于 10 为界(prd_mempalace.md 决定)。flow 的 exec 节点起跑前,除机器令牌(cxlib.flowadmit,容量按核数与内存,load1 超两倍核数减半)外,再过负载门:load1 高于阈值时本次运行不放行任何新 exec 节点,已在跑的不动,load1 回落到阈值及以下即放行。
+- 有界:每次 flow 运行因负载推迟的累计时间有上限,到期照常放行并在回执标记;运行总 deadline 仍然有效,不会无界等待。
+- 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
+- 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
+- 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。

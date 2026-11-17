@@ -1,0 +1,81 @@
+/* tools/check-precommit-precheck.cx -- tools/precommit.cx -- --precheck PATH... (plans/devsvc.md 6 P6).
+ *
+ *   sh ./unisacc.com tools/check-precommit-precheck.cx -- pass|trunc
+ *
+ * Fixture /tmp/pcpre-fx-S (fixed path: the compile cache is keyed by path): git archive HEAD plus the working
+ * copies of tools/precommit.cx and tools/ratchets.cx, a ./unisacc.com symlink, git init + one commit; then one
+ * line is appended to tools/flowrun.cx in the work tree only (never added):
+ *   pass   a comment                      expect PRECHECK_SUMMARY blocked=0, rc 0, every PRECHECK line PASS
+ *   trunc  a discarded memcpy (cxtrunc)   expect a PRECHECK ... verdict=BLOCKED line naming cxtrunc, rc 1
+ * Both: git diff --cached --name-only and the index file bytes are the same before and after the precheck.
+ * Every command is bounded at 58 s.  Last line CHECK_PRECOMMIT_PRECHECK<TAB>failed=N; rc 1 when N > 0. */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char out[1 << 15];
+
+static int run(const char *cmd, const char *cwd) {
+    np_result r; char why[200]; int rc; long a, b; char *v[] = {"sh", "-c", (char *)cmd, 0};
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, 0, 58, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static void ck(int c, const char *s, const char *name) {
+    printf("%s\tprecommit-precheck.%s.%s\n", c ? "PASS" : "FAIL", s, name);
+    if (!c) { printf("NOTE\tlast-output\t%.900s\n", out); nfail++; }
+}
+static int has_line(const char *o, const char *a, const char *b) {   /* a line holding both a and b */
+    const char *p = o;
+    while (*p) {
+        const char *e = strchr(p, '\n'); long l = e ? e - p : (long)strlen(p); char ln[1200];
+        if (l > (long)sizeof ln - 1) l = sizeof ln - 1;
+        if (l > 0 && mm_copy(ln, sizeof ln, p, (size_t)l)) return 0;
+        ln[l] = 0;
+        if (strstr(ln, a) && strstr(ln, b)) return 1;
+        if (!e) break; p = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[1024], fx[200], c[3000], before[2000]; const char *s, *add; int rc;
+    if (argc != 2) { fprintf(stderr, "usage: check-precommit-precheck.cx -- pass|trunc\n"); return 2; }
+    s = argv[1];
+    if (!strcmp(s, "pass")) add = "/* zz */";
+    else if (!strcmp(s, "trunc")) add = "static void zz(char *d, const char *s, int n) { memcpy(d, s, n); }";
+    else { fprintf(stderr, "unknown scenario %s\n", s); return 2; }
+    if (!getcwd(root, sizeof root)) return 2;
+    F(fx, sizeof fx, "/tmp/pcpre-fx-%s", s);
+    F(c, sizeof c, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s"
+                   " && cp %s/tools/precommit.cx %s/tools/ratchets.cx %s/tools/ && cd %s && ln -s %s/unisacc.com unisacc.com"
+                   " && git init -q && git add -A && git -c user.name=pcp -c user.email=pcp@example.invalid commit -qm base"
+                   " && printf '%%s\\n' '%s' >> tools/flowrun.cx",
+      fx, fx, root, fx, root, root, fx, fx, root, add);
+    if (ovf || run(c, 0) != 0) { ck(0, s, "fixture"); goto done; }
+    if (run("unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; git diff --cached --name-only; sha256sum .git/index", fx) != 0) { ck(0, s, "index-before"); goto done; }
+    F(before, sizeof before, "%s", out);
+    rc = run("unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; exec sh ./unisacc.com tools/precommit.cx -- --precheck tools/flowrun.cx", fx);
+    if (!strcmp(s, "pass")) {
+        ck(rc == 0 && strstr(out, "PRECHECK_SUMMARY blocked=0 ") != 0, s, "summary-blocked-0");
+        ck(strstr(out, "verdict=BLOCKED") == 0 && strstr(out, "PRECHECK gate=ratchets verdict=PASS") != 0, s, "all-pass");
+    } else {
+        ck(rc == 1 && has_line(out, "verdict=BLOCKED", "cxtrunc"), s, "cxtrunc-blocked");
+        ck(strstr(out, "PRECHECK_SUMMARY blocked=0 ") == 0 && strstr(out, "PRECHECK_SUMMARY blocked=") != 0, s, "summary-blocked");
+    }
+    ck(strstr(out, "total_ms=") != 0 && strstr(out, "slowest=") != 0, s, "summary-fields");
+    if (run("unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; git diff --cached --name-only; sha256sum .git/index", fx) != 0) { ck(0, s, "index-after"); goto done; }
+    ck(!strcmp(before, out), s, "index-unchanged");
+done:
+    printf("CHECK_PRECOMMIT_PRECHECK\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}

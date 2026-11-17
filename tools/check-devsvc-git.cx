@@ -108,6 +108,8 @@ int main(int argc, char **argv) {
     rc = dv("git", "commit", "-m", "Y", "--whole", "tests/manifests/dvg-nonexistent.tsv", 0, 0);
     ck(rc != 0 && has("GIT_COMMIT\trc="), "failed-commit-reports-nonzero");
     ck(rc != 0 && has("GIT_COMMIT_ERR\t"), "failed-commit-prints-err-tail");
+    /* 未产生新提交时回执不再把旧 HEAD 写进 commit=:commit=none 加 reason=(timeout|refused|blocked) */
+    ck(rc != 0 && has("\tcommit=none\t") && (has("\treason=blocked") || has("\treason=refused") || has("\treason=timeout")), "failed-commit-says-none-with-reason");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
 
@@ -137,6 +139,13 @@ int main(int argc, char **argv) {
         ck(!ovf && sh(c, fx) == 0, "wt-fixture-remove");
     }
 
+    /* (t) 超时映射:夹具工作区里把 tools/commit-own.cx 换成立即以 124 退出的假工具(模拟 60 秒窗口超时,不真等),
+       回执须为 commit=none 与 reason=timeout;验后 git checkout 还原夹具里的真工具(夹具是本检查自己的克隆) */
+    if (wfile("tools/commit-own.cx", "int main(void) { return 124; }\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
+    if (wfile("dvg-t.txt", "t\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
+    rc = dv("git", "commit", "-m", "T", "--whole", "dvg-t.txt", 0, 0);
+    ck(rc == 124 && has("\tcommit=none\t") && has("\treason=timeout"), "timeout-commit-says-none-reason-timeout");
+    ck(!ovf && sh("git checkout -q -- tools/commit-own.cx", fx) == 0, "timeout-fixture-restore");
     }
     if (B) {
     /* (c) 两个并发 commit 串行完成,无残留锁 */
@@ -221,7 +230,9 @@ int main(int argc, char **argv) {
         ck(rc == 0 && (p = strstr(out, "JOB\t")) && sscanf(p, "JOB\t%47s", id) == 1 && sy_now_ms() - t1 < 15000, "bg-returns-job-id");
         rc = dv("wait", id, "--timeout-ms", "20000", 0, 0, 0, 0);
         ck(rc == 124 && has("JOB_DONE\t") && has("rc=124"), "bg-deadline-self-exit-rc124");
-        F(c2, sizeof c2, "! kill -0 $(cat bgpid) 2>/dev/null");
+        /* 已杀的 sleep 若祖先里有子收割者(affected.cx 调 sy_child_subreaper)会留成僵尸直到收割,kill -0 对僵尸仍成功;
+           故判"不存在或已是僵尸(stat 第 3 字段 Z)",活进程仍判失败 */
+        F(c2, sizeof c2, "p=$(cat bgpid); ! kill -0 $p 2>/dev/null || grep -q '^[0-9]* ([^)]*) Z' /proc/$p/stat");
         ck(sh(c2, fx) == 0, "bg-deadline-kills-process-group");
     }
     /* (m) git merge:无冲突合入当前分支;冲突报文件清单 rc 1、不自动解决 */

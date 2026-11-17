@@ -64,7 +64,21 @@ int main(int argc, char **argv) {
     char *o = 0, *t = 0; size_t on = 0, tn = 0; long rl; int rc;
     if (argc != 2 || sy_realpath(".", root, sizeof root) < 0 || cx_fmt(dir, sizeof dir, "%s", argv[1])) { printf("usage NEW_DIR\n"); return 2; }
     rl = tx_len(root, sizeof root);
-    if (tx_find(dir, rl, root, rl) != 0 || dir[rl] != '/') { printf("check-coldcompile: NEW_DIR must be below the repository root\n"); return 2; }
+    /* Fixtures need checkout-relative module names. Map only the checkout's
+       explicit out alias back to its lexical spelling; no arbitrary tmp root. */
+    long dl=tx_len(dir,sizeof dir);
+    if(dl<0)return 2;
+    if(!tx_prefix(dir,dl,root,rl)||dir[rl]!='/') {
+        char alias[4400],physical[4400],mapped[4400];
+        if(cx_fmt(alias,sizeof alias,"%s/out",root)||sy_realpath(alias,physical,sizeof physical)<0){printf("check-coldcompile: NEW_DIR must be below the repository root\n");return 2;}
+        long pl=tx_len(physical,sizeof physical);
+        if(pl<0||!tx_prefix(dir,dl,physical,pl)||dir[pl]!='/'||!dir[pl+1]||cx_fmt(mapped,sizeof mapped,"%s%s",alias,dir+pl)||tx_copy(dir,sizeof dir,mapped,tx_len(mapped,sizeof mapped))){printf("check-coldcompile: NEW_DIR must be below the repository root or its explicit out alias\n");return 2;}
+        dl=tx_len(dir,sizeof dir);
+    }
+    for(long i=0;i<dl;i++)if(dir[i]=='/') {
+        long j=i+1;while(j<dl&&dir[j]!='/')j++;
+        if(j==i+1||(j-i==2&&dir[i+1]=='.')||(j-i==3&&dir[i+1]=='.'&&dir[i+2]=='.')){printf("check-coldcompile: NEW_DIR must be lexically normal\n");return 2;}
+    }
     if (sy_mkdir(dir, 0700)) { printf("check-coldcompile: NEW_DIR must not exist\n"); return 2; }
     leaf(good, "ccgood.cx"); leaf(mod, "ccmod.cx"); leaf(bad, "ccbad.cx"); leaf(table, "table.tsv"); leaf(scratch, "tmp");
     if (cx_fmt(rnone, sizeof rnone, "%s/absent.cx", dir + rl + 1)) return 2;

@@ -23,6 +23,7 @@
 | **0.0.5** | ✓ **host1 跑面**（`--run`） | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
 | **0.0.6** | ✓ **日用一条链**（`FILE.ujs --run`） | [`plans/v0.0.6.md`](plans/v0.0.6.md) |
 | **0.0.7** | ✓ **lex 扫描器切片**（`method_construct`；不是 IntNet，不是其余九网） | [`plans/v0.0.7.md`](plans/v0.0.7.md) |
+| **0.0.8** | 计划：**host1 步进诚实**（文档+共享 runtime；不升版号） | [`plans/v0.0.8.md`](plans/v0.0.8.md) |
 
 版号真源：`ujs.com --version`（**`ujs.com 0.0.7`**）。
 
@@ -117,7 +118,7 @@
 | C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
 | C3 | host1 唯一 import 拷包交 renderer;其它 import 拒绝 | G1-submit.md | 同 U1;fly `--run` 3868 |
 | C4 | 2026-11-17 实测(`--check --files` 两文件):`compiler_min.cx` **96**(同记录,未降;基数 96);`host1_vm.cx` **34**(tsv 行仍记 36,未改写基线;曾记 36)。故 host1<=34 已到,compiler<=50 仍差 46。注意全仓扫描当前另有超基线:`ujs/product/build.cx` 21>17、`ujs/product/ujs_main.cx` 60>52,`gold-{ic,lex,parse,rest,type}.cx`、`net-{gold,lex,parse}-check.cx`、`pack-nets.cx` 无基线行,`--check` 因它们 FAIL;两目标文件本身未超 | 本行;不并 G1 | 到期前 `tests/cxraw.cx --check --files` 两文件 |
-| C5 | 字面 list 元素上限 **64**(`compiler_min` `n>64` -> `list too long`)。**256 不是 list 上限**:字符串字面量 0-255 非 NUL(prd 完成判据 / `str_lit256`);`compiler.ujs` 的 `DKEY=list(256)` 是键缓冲。动态 `list(n)` 不受 64 限,`store_bytes` n<=4096 | 本行 | `list65.ujs` 非零且含 `list too long`; oracle `uxep-tri-oracle.tsv` |
+| C5 | 字面 list 元素上限 **256**(`compiler_min` `n>256` -> `list too long`)。字符串字面量 0-255 非 NUL 仍是另一上限(prd 完成判据 / `str_lit256`);`compiler.ujs` 的 `DKEY=list(256)` 是键缓冲。动态 `list(n)` 不受字面 256 限,`store_bytes` n<=4096 | 本行 | `list65.ujs` 可编;`list257.ujs` 非零且含 `list too long`; oracle `uxep-tri-oracle.tsv` |
 
 
 

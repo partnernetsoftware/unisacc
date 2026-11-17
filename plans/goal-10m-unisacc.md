@@ -1,13 +1,13 @@
 # 定时器提示词(unisacc 主线推进)
 
 用途:会话内每 5 分钟触发一次的推进提示词。定时器只在会话内存活,7 天自动过期,重建时用下面的原文。文件名沿用旧称。
-2026-11-14 重写:去掉已退役的 agentwork/dag.tsv 与 real4 专名;协同只用 prd_mempalace.md;新增"前瞻不闲置"硬规则(在途少于 3 个必须补派,fable 前瞻规划有触发条件)。
+2026-11-14 重写:去掉已退役的 archive/agentwork-retire-2026-11/dag.tsv 与 real4 专名;协同只用 prd_mempalace.md;新增"前瞻不闲置"硬规则(在途少于 3 个必须补派,fable 前瞻规划有触发条件)。
 
 ## 提示词原文
 
 ```
 推进unisacc.com 新版本的设计与开发到发布公开(公开后要对缓存目录临时目录大扫除才继续下一个版本);今天要疯狂推进 unisacc.com 的进化(项目所有者 2026-11-14),少记账多推主线;
-协同只用 prd_mempalace.md(记忆宫殿是唯一协同入口,agentwork/ 退役不再追加;当前版本、阻塞、下一动作原位更新,不写流水账,只记别人必须遵守的决定、不可逆动作、阻塞发布的 UNVERIFIED);
+协同只用 prd_mempalace.md(记忆宫殿是唯一协同入口,archive/agentwork-retire-2026-11/ 退役不再追加;当前版本、阻塞、下一动作原位更新,不写流水账,只记别人必须遵守的决定、不可逆动作、阻塞发布的 UNVERIFIED);
 主线:核心库包(cx/cx0/ext)由内往外封装、cx.stream 与 tape 库(tlib)重构;每轮先报告本轮落了什么到 main,没有就定因换动作;
 前瞻不闲置(新增硬规则):每轮开头先数在途 subagent 与未派发的可做任务;若在途少于 3 个,必须当轮补派到 3 个以上,不得空等整链、CI 或下一次触发。补派优先级:(a)fable 前瞻规划:距上次规划超过 60 分钟、或下一动作清单少于 5 项、或刚有整链/发布/CI 结果时,派 fable 预判后续 2 到 3 个版本的瓶颈与风险,产出写进 prd_mempalace.md 下一动作原位更新,任务拆到单项 15 分钟内且写域互不相交;(b)fable 设计演进:cx 模块与内存安全(export、通配、cx.stream、tlib)、nn 以网换逻辑的下一步、造工具辅助进化;(c)sonnet 执行:规划中已拆好的可开工项、并行化与加速、扫除、文档合并。规划产出的任务当轮即派,不等下一轮;
 持续项:unisacc.com 自身运行速度(冷启动、冷编译典型工具、生成代码三档)要持续提升,每轮至少有一个速度项推进或有新实测;速度数字只用 tools/run-startup-bench.cx、tools/coldcompile.cx、tools/check-bench-gencode.cx、tools/speed-probe.cx 实测给出,不报估计;发布前对比 build/speed-baseline.tsv,变慢必须说明理由;产品代码优先于基础设施;

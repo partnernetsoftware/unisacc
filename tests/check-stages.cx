@@ -31,6 +31,7 @@
 #pragma unisa use sys.time
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use sys.io
 
 #define CS_N 10
 
@@ -70,6 +71,12 @@ static void cs_args(const char *stage, const char *name, char *o, size_t cap) {
     free(b);
 }
 static int cs_same(const char *a, size_t na, const char *b, size_t nb) { return a && b && na == nb && (na == 0 || !memcmp(a, b, na)); }
+static void cs_difference(const char *stage,const char *a,size_t na,const char *b,size_t nb){
+    size_t at=0;while(a&&b&&at<na&&at<nb&&a[at]==b[at])at++;
+    sy_printf("DIFF\t%s\texpected_bytes=%ld\tactual_bytes=%ld\tfirst=%ld\n",stage,(long)na,(long)nb,(long)at);
+    sy_printf("DIFF_EXPECT\t");for(size_t j=at;a&&j<na&&j<at+32;j++)sy_printf("%02x",(unsigned char)a[j]);sy_printf("\n");
+    sy_printf("DIFF_ACTUAL\t");for(size_t j=at;b&&j<nb&&j<at+32;j++)sy_printf("%02x",(unsigned char)b[j]);sy_printf("\n");
+}
 /* PROD stream STAGE ARGS < IN > OUT 2> ERR, cwd = the stage directory, 20 s bound. */
 static int cs_run(const char *stage, const char *args, const char *in, const char *out, const char *err) {
     char cmd[9000], cwd[4400];
@@ -109,6 +116,7 @@ static void cs_one(const char *stage) {
     exp = cs_file(stage, "expect", &ne);
     { char nm[80]; cx_fmt(nm, sizeof nm, "%s.out", tag); got = cs_scratch(nm, &no); }
     cs_ck(rc == 0 && cs_same(exp, ne, got, no), stage, "positive");
+    if(rc||!cs_same(exp,ne,got,no)){sy_printf("STAGE_RC\t%s\t%d\n",stage,rc);cs_difference(stage,exp,ne,got,no);}
     free(exp); free(got);
     if (!cs_has(stage, "bad")) {
         printf("GAP\t%s\tno reject fixture\n", stage);
@@ -141,7 +149,7 @@ static void cs_one(const char *stage) {
             rc = cs_run(stage, args, in, tag, tag);
             cx_fmt(gn, sizeof gn, "%s.err", tag); gerr = cs_scratch(gn, &ng);
             cx_fmt(gn, sizeof gn, "%s.out", tag); got = cs_scratch(gn, &ns);
-            cs_ck(rc == 1 && ns == 0 && gerr && tx_find(gerr, (long)ng, "reject: tape truncated", 22) >= 0, stage, "reject-trunc-at-eol");
+            cs_ck(rc == 1 && ns == 0 && cs_same(gerr, ng, "reject: tape truncated\n", 23), stage, "reject-trunc-at-eol");
             free(gerr); free(got);
         }
     }
@@ -209,6 +217,7 @@ int main(int argc, char **argv) {
         a = cs_scratch("anchor", &na);
         b = cs_file("elf", "expect", &nb);
         cs_ck(r.rc == 0 && cs_same(a, na, b, nb), "anchor", "elf-equals-product-o");
+        if(r.rc||!cs_same(a,na,b,nb))cs_difference("anchor-elf",b,nb,a,na);
         free(a); free(b);
     }
     {   /* the -O1 chain ends where `unisacc -O1 -o` of e4/b.c ends */
@@ -226,9 +235,11 @@ int main(int argc, char **argv) {
         a = cs_scratch("anchor-o1", &na);
         b = cs_file("o1/elf", "expect", &nb);
         cs_ck(r.rc == 0 && cs_same(a, na, b, nb), "anchor", "o1-elf-equals-product-O1-o");
+        if(r.rc||!cs_same(a,na,b,nb))cs_difference("anchor-o1-elf",b,nb,a,na);
         free(a); free(b);
     }
-    {   char cmd[4600];
+    if(cs_failed||cs_uncovered)sy_printf("STAGE_EVIDENCE\t%s\n",cs_dir);
+    else {   char cmd[4600];
         if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", cs_dir)) cs_die("cmd");
         if (system(cmd) != 0 || access(cs_dir, F_OK) == 0) cs_ck(0, "scratch", "removed");
     }

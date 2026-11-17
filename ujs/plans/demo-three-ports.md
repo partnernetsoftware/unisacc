@@ -31,7 +31,7 @@
 |---|---|---|---|
 | W1 | 字面量 list 最长 64 | 8 界只能各 3 点,场景装不进 | 放宽 list 上限或 `list(n)` 填表走事实表,不抬棘轮 |
 | W2 | 一次 `main_export`、浏览器局部每调清零 | 舵无法进核 | 浏览器可调的步进(UXE `sim.wasm`/`host_input_read`,或 host1 内存槽不重跑 let) |
-| W3 | 无网格/提交面 | 只能页 JS 组包 | `build_mod`(`compiler_min.cx:2268`)无 import 段,仅 export。兑现:加 import `env.host_gpu_submit(i32,i32)`;先例 `archive/ship host_gpu_submit(ptr,len)`。与 prd 0.3b G1 同条 |
+| W3 | 无网格/提交面 | 只能 `fillRect` | `host_gpu_submit` 吃核打的点/色包(HOST_ABI 已写未兑现) |
 | W4 | 无嵌套 list/长 dict key | 8 界不能一表多岸 | 与 W1 同刀或下一刀 |
 | W5 | CLI 无 `--frames` | 同进程多帧只能 `frame-run.cx` | 等 `ujs_main` 迁 L0 后加,不夹进本计划 |
 
@@ -70,10 +70,7 @@ P2(核):W2 舵进 wasm;W3 提交面包点。未完成不称替代 three。
 three.module、原作 GLB/音频、抬 cxraw/cxtrunc、改 host1-pass 28 行、把扫描器改 ask 网来画。
 
 ## 6. 下一动作
-
-W2:water/ink/oneshot 舵 `turn` 进核;fly `yaw+=turn` 金仍 3868,Host 仍积分船位。P2 未验收。B 片单未锁。
-
 ## 7. 进度
 
-Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。三表核+fly 均调 step。不称替代 three。
+W1:list 字面量上限 64->256,`run-host` 28 仍绿。C P0:8 界各 8 顶点+8 色在 `water.ujs`(136),WASD 开船。A P0:三层折线 `ink.ujs`(38)。B P0:6 盒位姿 `oneshot.ujs`(18),片单仍未锁。W2/W3 未做。
 

@@ -52,6 +52,34 @@ static int run(const char *args) {
     out[0] = 0; if (o && (long)n < (long)sizeof out) { mm_copy(out, sizeof out, o, n); out[n] = 0; }
     return rc;
 }
+/* Independently enumerate the facts, requiring every unselected generator to be
+ * reported as SKIPPED and exactly one selected row. Missing facts fail closed. */
+static int repo_manifest_matches(void) {
+    size_t n = 0; char *t = cx_read("exec/facts/derive.tsv", &n);
+    int rows = 0, selected = 0, ok = 1;
+    if (!t || !n || n >= 200000) { free(t); return 0; }
+    for (char *p = t; *p;) {
+        char *e = strchr(p, '\n'); if (e) *e = 0;
+        if (*p && *p != '#') {
+            char *tab = strchr(p, '\t'), line[512];
+            if (!tab || tab == p || tab - p >= 200) { ok = 0; break; }
+            *tab = 0; rows++;
+            if (!strcmp(p, "tables-gen")) {
+                selected++;
+                ok = ok && (hasl(out, "DERIVE\ttables-gen\tOK\t") || hasl(out, "DERIVE\ttables-gen\tDRIFT\t"));
+            } else {
+                cx_fmt(line, sizeof line, "DERIVE\t%s\tSKIPPED\t0\n", p);
+                ok = ok && hasl(out, line);
+            }
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    char summary[128];
+    cx_fmt(summary, sizeof summary, "\trefused=0\tskipped=%d\telapsed_ms=", rows - 1);
+    ok = ok && rows > 0 && selected == 1 && hasl(out, summary);
+    free(t); return ok;
+}
 static int runm(const char *args) { char a[900]; cx_fmt(a, sizeof a, "%s --manifest %s", args, mf); return run(a); }
 static char mbuf[8192]; static long mlen;
 static void m_begin(void) { mlen = 0; mbuf[0] = 0; }
@@ -192,11 +220,11 @@ int main(void) {
     ck(rc == 2 && hasl(out, "usage:"), "usage-rc2");
     rc = run("--only a");
     ck(rc == 2 && hasl(out, "usage:"), "mode-required");
-    /* 仓内清单:可读,九个生成器在册,只跑最快的一个,其余八个 SKIPPED */
+    /* The manifest owns the generator set and skipped count. Check every consumer row. */
     rc = run("--check --only tables-gen");
     ck((rc == 0 || rc == 1) && hasl(out, "DERIVE\ttables-gen\t") && hasl(out, "DERIVE\tiface-hash\tSKIPPED") && hasl(out, "DERIVE\tproduct-map\tSKIPPED") && hasl(out, "DERIVE\ttool-index\tSKIPPED") &&
        hasl(out, "DERIVE\tbatch-packages-gen\tSKIPPED") && hasl(out, "DERIVE\tlayer-api\tSKIPPED") && hasl(out, "DERIVE\tst-gap\tSKIPPED") &&
-       hasl(out, "DERIVE\tlinks\tSKIPPED") && hasl(out, "skipped=8"), "repo-manifest-loads");
+       hasl(out, "DERIVE\tlinks\tSKIPPED") && repo_manifest_matches(), "repo-manifest-loads");
     ck(hasl(out, "DERIVE\tcx0-three-source\tSKIPPED"), "repo-manifest-has-cx0-three-source");
     /* 仓内清单:layer-api 行自动写(--bump-pending),表本身登记为 outputs(失败时一并还原);全表不再有 write_argv 为 - 的行 */
     {   size_t n = 0; char *t = cx_read("exec/facts/derive.tsv", &n);

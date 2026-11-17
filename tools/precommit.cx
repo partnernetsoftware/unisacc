@@ -67,7 +67,25 @@ static char *gate_slurp(char **argv, long *n) {
     return b;
 }
 
+/* COMMIT_PHASE lines of each named gate (cur_gate) into UNISACC_COMMIT_PHASE_LOG, set by tools/commit-own.cx to
+   its own stdout (/proc/PID/fd/1): a job tail shows the gate in flight, a timeout leaves its begin without an end.
+   Unset (a plain git commit): nothing is written, the hook's own output is unchanged. */
+static void gate_phase(const char *name, int begin, long ms) {
+    const char *lp = sy_env("UNISACC_COMMIT_PHASE_LOG"); char ln[160]; int bad;
+    if (!lp || !lp[0] || !name) return;
+    bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
+                : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
+    if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+}
+static char *slurp_run(char **argv, long *n);
 static char *slurp(char **argv, long *n) {
+    const char *g = (plan_dir || from_run) ? 0 : cur_gate; long t = sy_now_ms(); char *r;
+    gate_phase(g, 1, 0);
+    r = slurp_run(argv, n);
+    gate_phase(g, 0, sy_now_ms() - t);
+    return r;
+}
+static char *slurp_run(char **argv, long *n) {
     int ofd, pid; long cap = 1 << 16, r, deadline; char *b;
     if (cur_gate && (plan_dir || from_run)) return gate_slurp(argv, n);
     b = mm_alloc(cap);
@@ -121,7 +139,7 @@ static const char gt_builtin[] =
     "toolsreg\tADRT\ttools/*.cx\n"
     "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
-    "ledger\tACMR\tagentwork/ledger.tsv\n"
+    "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
     "cx\tACMR\t*.cx\n";
 static const char *gt_tab = 0; static long gt_n = 0; static int gt_src = 0, gt_na = 0; static char gt_nal[160];
 static int gt_load(void) {
@@ -275,7 +293,7 @@ static int new_tools(void) {
 
 /* 冻结窗口闸(fable 咨询 2026-11-08):build/freeze.tsv 存在且未过期时,staged 路径命中冻结前缀、
  * 且 UNISACC_INTEGRATOR 不等于 owner 的提交被拒。列:candidate_sid base_commit owner deadline_epoch_s paths(空格分隔)。
- * 冻结是有界事件:deadline 过期即不拦;tools/ tests/ plans/ agentwork/ 不在 paths 内,永不受影响。 */
+ * 冻结是有界事件:deadline 过期即不拦;tools/ tests/ plans/ archive/ 不在 paths 内,永不受影响。 */
 static int freeze_gate(void) {
     size_t zn = 0; char *z = (char *)cx_read("build/freeze.tsv", &zn), *f[6]; long fn = 0, now, dl = 0, i;
     char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
@@ -340,6 +358,43 @@ static int in_root(const char *path, long pl, const char *rt, long rl) {
     }
     return 0;
 }
+/* tlibapi: a touched tlib package whose source now gives another public-interface sha than the api_sha of
+   build/tlib-packages.tsv blocks the commit (the commit changed a public interface and did not carry the derived
+   layer-api/tlib-packages rows: cb95b01649 ff_ctx_lookup).  Cheap probe: tools/layer-api.cx --sha-only (one
+   -cx-interface per unit, no manifest, no closure check; about 1 s hot for tools.cxlib).  A body-only change
+   keeps the sha and passes.  Skipped in --plan/--from-run (no flow node yet) and when the tool is absent. */
+static int tlib_api_gate(const char *root, const char *cp, char pkgs[][64], int npkg) {
+    char lp[1200], *av[16], *rows; long rn, at; int i, k, blocked = 0;
+    if (plan_dir || from_run || npkg <= 0) return 0;
+    if (cx_fmt(lp, sizeof lp, "%s/tools/layer-api.cx", root)) return 0;
+    if (sy_exists(lp) != 1) {   /* a fixture work tree without tools: the checkout's own, as tlib_frozen_gate does */
+        if (sy_exists("./tools/layer-api.cx") != 1) return 0;
+        tx_copy(lp, sizeof lp, "tools/layer-api.cx", 18);
+    }
+    for (i = 0; i < npkg; i++) {
+        k = 0;
+        av[k++] = "sh"; av[k++] = (char *)cp; av[k++] = lp; av[k++] = "--"; av[k++] = "--sha-only";
+        av[k++] = "--pkg"; av[k++] = pkgs[i]; av[k++] = "--root"; av[k++] = (char *)root; av[k++] = "--product"; av[k++] = (char *)cp;
+        av[k] = 0;
+        cur_gate = "tlibapi"; slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0; cur_gate = 0;
+        if (!rows) { sy_eprintf("precommit: tools/layer-api.cx --sha-only %s did not run\n", pkgs[i]); blocked++; continue; }
+        if (incomplete(rows, rn, "API_SHA\t", "layer-api --sha-only")) { mm_free(rows); blocked++; continue; }
+        for (at = 0; at < rn; ) {
+            long le = tx_chr(rows + at, rn - at, '\n'), l = le < 0 ? rn - at : le, so, sl;
+            if (tx_prefix(rows + at, l, "API_SHA\t", 8) && !tx_field(rows + at, l, '\t', 2, &so, &sl) &&
+                sl == 7 && tx_same(rows + at + so, sl, "differs", 7)) {
+                sy_printf("TLIB_API_STALE\t%s\tthe commit changes a public interface of %s but build/tlib-packages.tsv api_sha (and build/layer-api/%s.tsv) still name the old one: %.*s\n",
+                          pkgs[i], pkgs[i], pkgs[i], (int)l, rows + at);
+                sy_eprintf("precommit: TLIB_API_STALE %s: recommit with --derive (sh ./unisacc.com tools/commit-own.cx -- --derive ...), or first run sh ./unisacc.com tools/derive.cx -- --write --only layer-api and take the derived tables into the commit\n", pkgs[i]);
+                blocked++;
+            }
+            at += l + 1;
+        }
+        mm_free(rows);
+    }
+    return blocked;
+}
+
 static int tlib_frozen_gate(const char *names, long sn) {
     const char *wt = sy_env("GIT_WORK_TREE"), *root = (wt && wt[0]) ? wt : ".";
     char tp[1200], fp[1200], cp[1200], pkgs[32][64], *av[40], *t, *rows;
@@ -402,6 +457,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
         at += l + 1;
     }
     mm_free(rows);
+    blocked += tlib_api_gate(root, cp, pkgs, npkg);
     return blocked;
 }
 
@@ -619,41 +675,30 @@ static int cov_gate(void) {
     return 1;
 }
 
-/* 账本格式闸(METH-LEDGER-GATE):暂存区含 agentwork/ledger.tsv 时,把索引版账本与 HEAD 版基线
- * build/ledger-format-baseline.tsv 写到 sy_tmpdir,调用 tools/ledger-add.cx -- --check --ledger L --baseline B;
- * 任一列数组超过基线(OVER)即拒。基线取 HEAD 而不是索引:同一提交里放宽基线不能洗白新坏行。
- * cwd 下没有 ./unisacc.com 或 tools/ledger-add.cx,或 HEAD 没有基线文件(夹具仓)时跳过。 */
+/* Explicit historical artifact format gate. The read set is declared in
+ * tests/precommit-gates.tsv; no retired directory is required or read. The
+ * immutable HEAD baseline remains the oracle, never the staged baseline. */
+static int ledger_file_gate(const char *source,const char *baseline,long bn) {
+    char lp[1200],bp[1200],*lb=0,*ro;long ln=0,rn2,at=0;int blocked=0;
+    char *cv[]={"sh","./unisacc.com","tools/ledger-add.cx","--","--check","--ledger",lp,"--baseline",bp,0};
+    if(cov_blob("",source,&lb,&ln)){sy_eprintf("precommit: BLOCKED ledger: cannot read staged %s\n",source);return 1;}
+    if(cx_fmt(lp,sizeof lp,"%s/precommit-ledger-%d.tsv",sy_tmpdir(),sy_pid())||cx_fmt(bp,sizeof bp,"%s/precommit-ledger-%d.base",sy_tmpdir(),sy_pid())||cx_write(lp,lb,(size_t)ln)||cx_write(bp,baseline,(size_t)bn)){
+        sy_eprintf("precommit: BLOCKED ledger: scratch files\n");mm_free(lb);return 1;}
+    mm_free(lb);slurp_okrc=1;ro=slurp(cv,&rn2);slurp_okrc=0;sy_unlink(lp);sy_unlink(bp);
+    if(!ro){sy_eprintf("precommit: BLOCKED ledger: explicit format check did not run or hard error\n");return 1;}
+    while(at<rn2){long e=tx_chr(ro+at,rn2-at,'\n'),l=e<0?rn2-at:e;
+        if(tx_prefix(ro+at,l,"LEDGER_COLS\t",12)&&tx_find(ro+at,l,"\tOVER",5)>=0){long c=12;while(c<l&&ro[at+c]!='\t')c++;
+            sy_eprintf("precommit: BLOCKED ledger: staged %s has new rows with cols=%.*s (need 6) over the HEAD baseline: %.*s\n",source,(int)(c-12),ro+at+12,(int)l,ro+at);blocked++;}
+        at+=l+1;}
+    mm_free(ro);if(blocked)sy_eprintf("precommit: historical artifact; inspect with tools/ledger-add.cx -- --check --ledger FILE --baseline build/ledger-format-baseline.tsv\n");return blocked;
+}
 static int ledger_gate(void) {
-    char lp[1200], bp[1200], *names, *lb = 0, *bb = 0, *ro; long dn, ln = 0, bn = 0, rn2, at = 0; int blocked = 0;
-    char *cv[] = {"sh", "./unisacc.com", "tools/ledger-add.cx", "--", "--check", "--ledger", lp, "--baseline", bp, 0};
-    names = gate_diff("ledger", &dn);
-    if (!names) { sy_eprintf("precommit: git diff --cached (ledger) failed\n"); return 1; }
-    mm_free(names);
-    if (dn <= 0) return 0;
-    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/ledger-add.cx") != 1) return 0;
-    if (cov_blob("HEAD", "build/ledger-format-baseline.tsv", &bb, &bn)) return 0;
-    if (cov_blob("", "agentwork/ledger.tsv", &lb, &ln)) { sy_eprintf("precommit: BLOCKED ledger: cannot read staged agentwork/ledger.tsv\n"); mm_free(bb); return 1; }
-    if (cx_fmt(lp, sizeof lp, "%s/precommit-ledger-%d.tsv", sy_tmpdir(), sy_pid()) || cx_fmt(bp, sizeof bp, "%s/precommit-ledger-%d.base", sy_tmpdir(), sy_pid())
-        || cx_write(lp, lb, (size_t)ln) || cx_write(bp, bb, (size_t)bn)) {
-        sy_eprintf("precommit: BLOCKED ledger: scratch files\n"); mm_free(lb); mm_free(bb); return 1;
-    }
-    mm_free(lb); mm_free(bb);
-    slurp_okrc = 1; ro = slurp(cv, &rn2); slurp_okrc = 0;
-    sy_unlink(lp); sy_unlink(bp);
-    if (!ro) { sy_eprintf("precommit: BLOCKED ledger: tools/ledger-add.cx --check did not run or hard error\n"); return 1; }
-    while (at < rn2) {
-        long e = tx_chr(ro + at, rn2 - at, '\n'), l = e < 0 ? rn2 - at : e;
-        if (tx_prefix(ro + at, l, "LEDGER_COLS\t", 12) && tx_find(ro + at, l, "\tOVER", 5) >= 0) {
-            long c = 12; while (c < l && ro[at + c] != '\t') c++;
-            sy_eprintf("precommit: BLOCKED ledger: staged agentwork/ledger.tsv has new rows with cols=%.*s (need 6) over the HEAD baseline: %.*s\n",
-                       (int)(c - 12), ro + at + 12, (int)l, ro + at);
-            blocked++;
-        }
-        at += l + 1;
-    }
-    mm_free(ro);
-    if (blocked) sy_eprintf("precommit: append ledger rows only with: sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA] [--evidence P] [--role R]; list bad rows: tools/ledger-add.cx -- --check --baseline build/ledger-format-baseline.tsv\n");
-    return blocked;
+    char *names,*baseline=0;long dn,bn=0,at=0;int blocked=0;
+    names=gate_diff("ledger",&dn);if(!names){sy_eprintf("precommit: git diff --cached (ledger) failed\n");return 1;}
+    if(dn<=0||sy_exists("./unisacc.com")!=1||sy_exists("tools/ledger-add.cx")!=1){mm_free(names);return 0;}
+    if(cov_blob("HEAD","build/ledger-format-baseline.tsv",&baseline,&bn)){mm_free(names);return 0;}
+    while(at<dn){const char *source=names+at;long len=tx_len(source,dn-at);if(len<0){blocked++;break;}if(len)blocked+=ledger_file_gate(source,baseline,bn);at+=len+1;}
+    mm_free(baseline);mm_free(names);return blocked;
 }
 
 /* 提交主路径走 flow(plans/devsvc.md 6 S3 第一阶段):无参数调用(.git/hooks/pre-commit 与 commit-own 的 --dry-run 都是)
@@ -702,8 +747,76 @@ static int flow_route(void) {
     return code;
 }
 
+/* -- --precheck PATH...(plans/devsvc.md 6 P6):把给定工作树路径放进一份私有临时索引(HEAD 树加这些路径),
+ * 以 UNISACC_PRECOMMIT_SERIAL=1 重新跑本文件的无参门(同一份判定代码,不另抄),门的 COMMIT_PHASE 与 stderr
+ * 追加进同一份日志,按出现顺序把 BLOCKED/REFUSE 行归到最近一道门。真索引不读不写;不缓存:每次实跑。
+ * 总 deadline 55 秒(timeout -k 2 55),超时输出 PRECHECK_TIMEOUT 与已评估/未评估的门。 */
+#define PRECHECK_DEADLINE_S "55"
+static int precheck(int argc, char **argv) {
+    char idx[512], log[512], sc[1600], *av[300]; size_t n = 0; long at = 0, total = 0, slow_ms = -1, rn0 = 0;
+    const char *jd = sy_env("CLAUDE_JOB_DIR"); char *b; int k = 0, i, rc = -1, blocked = 0, timed = 0;
+    char gname[16][32]; long gms[16]; int gblk[16], gend[16], ng = 0, cur = -1; char greason[16][200];
+    char slow[32] = "none";
+    if (argc < 3) { sy_eprintf("precommit: usage: precommit.cx -- --precheck PATH...\n"); return 2; }
+    if (cx_fmt(idx, sizeof idx, "%s/precheck-%d.idx", (jd && jd[0]) ? jd : sy_tmpdir(), sy_pid()) ||
+        cx_fmt(log, sizeof log, "%s/precheck-%d.log", (jd && jd[0]) ? jd : sy_tmpdir(), sy_pid())) return 2;
+    if (idx[0] != '/') { sy_eprintf("precommit: precheck temp dir not absolute: %s\n", idx); return 2; }
+    (void)sy_unlink(log);
+    if (cx_fmt(sc, sizeof sc,
+        "I=\"$1\"; L=\"$2\"; shift 2; export GIT_INDEX_FILE=\"$I\"; "
+        "git read-tree HEAD >>\"$L\" 2>&1 && git add -A -- \"$@\" >>\"$L\" 2>&1 || { echo PRECHECK_RC=3 >>\"$L\"; rm -f \"$I\"; exit 0; }; "
+        "UNISACC_PRECOMMIT_SERIAL=1 UNISACC_COMMIT_PHASE_LOG=\"$L\" timeout -k 2 " PRECHECK_DEADLINE_S
+        " sh ./unisacc.com tools/precommit.cx >>\"$L\" 2>&1; echo PRECHECK_RC=$? >>\"$L\"; rm -f \"$I\"")) return 2;
+    av[k++] = "sh"; av[k++] = "-c"; av[k++] = sc; av[k++] = "precheck"; av[k++] = idx; av[k++] = log;
+    for (i = 2; i < argc && k < 298; i++) av[k++] = argv[i];
+    av[k] = 0;
+    {   long t0 = sy_now_ms(); char *o = slurp_run(av, &rn0); total = sy_now_ms() - t0; if (o) mm_free(o); }
+    b = (char *)cx_read(log, &n);
+    if (!b) { sy_printf("PRECHECK_SUMMARY blocked=1 total_ms=%ld slowest=none reason=no-log\n", total); return 1; }
+    while (at < (long)n) {
+        long e = at, l; while (e < (long)n && b[e] != '\n') e++; l = e - at;
+        if (l > 25 && tx_same(b + at, 18, "COMMIT_PHASE\tname=", 18)) {
+            long ns = at + 18, ne = ns; int g = -1;
+            while (ne < e && b[ne] != '\t') ne++;
+            for (i = 0; i < ng; i++) if (tx_len(gname[i], 32) == ne - ns && tx_same(gname[i], ne - ns, b + ns, ne - ns)) g = i;
+            if (g < 0 && ng < 16 && ne - ns < 31) { g = ng++; mm_copy(gname[g], 32, b + ns, (size_t)(ne - ns)); gname[g][ne - ns] = 0; gms[g] = 0; gblk[g] = 0; gend[g] = 0; greason[g][0] = 0; }
+            if (g >= 0) { long m = tx_find(b + ne, e - ne, "ms=", 3); cur = g;
+                if (tx_find(b + ne, e - ne, "state=end", 9) >= 0) { gend[g] = 1; gms[g] = 0;
+                    if (m >= 0) for (m += ne + 3; m < e && b[m] >= '0' && b[m] <= '9'; m++) gms[g] = gms[g] * 10 + (b[m] - '0'); } }
+        } else if (l > 12 && tx_same(b + at, 12, "PRECHECK_RC=", 12)) {
+            rc = 0; for (i = 12; i < l && b[at + i] >= '0' && b[at + i] <= '9'; i++) rc = rc * 10 + (b[at + i] - '0');
+        } else if (tx_find(b + at, l, "BLOCKED", 7) >= 0 || tx_find(b + at, l, "REFUSE", 6) >= 0 || tx_find(b + at, l, "OVER", 4) >= 0 || tx_find(b + at, l, "precommit: blocked", 18) >= 0) {
+            int g = cur;
+            if (g < 0 && ng < 16) { g = ng++; mm_copy(gname[g], 32, "pre", 4); gms[g] = 0; gblk[g] = 0; gend[g] = 1; greason[g][0] = 0; }
+            if (g >= 0 && !gblk[g]) { long cl = l < 190 ? l : 190; gblk[g] = 1; mm_copy(greason[g], 200, b + at, (size_t)cl); greason[g][cl] = 0;
+                for (i = 0; i < cl; i++) if (greason[g][i] == '\t' || greason[g][i] == ' ') greason[g][i] = '_'; }
+        }
+        at = e + 1;
+    }
+    timed = (rc == 124 || rc == 137 || rc < 0);
+    for (i = 0; i < ng; i++) {
+        int bl = gblk[i] || !gend[i];
+        sy_printf("PRECHECK gate=%s verdict=%s ms=%ld reason=%s\n", gname[i], bl ? "BLOCKED" : "PASS", gms[i],
+                  gblk[i] ? greason[i] : (!gend[i] ? "not-finished" : "-"));
+        blocked += bl; if (gms[i] > slow_ms) { slow_ms = gms[i]; mm_copy(slow, sizeof slow, gname[i], 32); }
+    }
+    if (rc > 0 && !timed && !blocked) { sy_printf("PRECHECK gate=other verdict=BLOCKED ms=0 reason=precommit_rc=%d_see_%s\n", rc, log); blocked++; }
+    if (timed) {
+        sy_printf("PRECHECK_TIMEOUT deadline_s=" PRECHECK_DEADLINE_S " evaluated=");
+        for (i = 0; i < ng; i++) if (gend[i]) sy_printf("%s,", gname[i]);
+        sy_printf(" unevaluated=");
+        for (i = 0; i < ng; i++) if (!gend[i]) sy_printf("%s,", gname[i]);
+        sy_printf("rest-of-gate-list log=%s\n", log); blocked++;
+    }
+    sy_printf("PRECHECK_SUMMARY blocked=%d total_ms=%ld slowest=%s rc=%d\n", blocked, total, slow, rc);
+    mm_free(b);
+    if (!blocked) (void)sy_unlink(log);
+    return blocked ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
+    if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
     if (argc == 3 && tx_eqz(argv[1], "--plan")) plan_dir = argv[2];
     else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
     else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();

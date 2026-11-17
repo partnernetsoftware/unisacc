@@ -1,6 +1,6 @@
 # unisacc 0.0.67 -- 发布说明
 
-状态:已公开,公开读回后补记(Y2)。沿用 plans/release-notes-0.0.66.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
+状态:已公开,公开读回后补记(Y2)。沿用 archive/plans-2026-11f/release-notes-0.0.66.md 的口径:只写已入库事实;未实跑的项写未跑,未证实的项标 UNVERIFIED,不写 PASS;本文件不宣称 QUALIFIED。标"待填"的字段尚无事实,由发布流程填写,不得臆测。
 
 - 冻结提交(REV):855ce83aa9ed2fbf3823d5054048a851fb14485f;源标签 v0.0.67-src 指向 F:e02a8f8099c1214f028b10efb1ab55f1510ea7de(树取 REV,只差 release/candidate.tsv,父为 fbdc99ca 与 REV);候选表提交(X,仅改 release/candidate.tsv):9e54f512a8b06e3ea890920ce8a9428690767d55。整链所用私有提交:a67e7e2d11(树同 REV)。
 - 候选 APE(unisacc.com)sha256:a99ea71de7edf8b21db804839e65dd130aff430c6d57cfb627a26e84a7b49e8b(7091428 字节)。pkg.bin sha256:c7cb3a8c3a6d88779bafc7aa0686ce6fe413c4477be502db4fbddf2cb092beae(与 0.0.66、0.0.65、0.0.63 的 pkg.bin 相同)。
@@ -15,7 +15,7 @@
 
 ## 是什么
 
-面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.67 的主题是 cx.stream R3 在驱动侧的 st_span 收敛,另带起链、测试与发布工具的若干小修。上一发布版见 plans/release-notes-0.0.66.md。
+面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.67 的主题是 cx.stream R3 在驱动侧的 st_span 收敛,另带起链、测试与发布工具的若干小修。上一发布版见 archive/plans-2026-11f/release-notes-0.0.66.md。
 
 ## 本版内容(按入库提交,范围 24bfc44c70..855ce83aa9)
 

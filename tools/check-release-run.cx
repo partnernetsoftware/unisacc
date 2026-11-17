@@ -70,6 +70,24 @@ static int chain_fixture(const char *chain) {
     return fixture_put(chain, "chain-run-1.stdout", "CHAIN\tfixedpoint\tobjects=same\tcount=44\nCHAIN\tfixedpoint\tkernels=same\tcount=2\nCHAIN\tfixedpoint\tslices=same\tcount=6\nCHAIN\tfixedpoint\tproduct=same\n");
 }
 
+/* The runner's memo flag describes entry, while comparison runs after shutdown. */
+static int memo_fixture(const char *chain, int fault) {
+    const char *pre=fault==34?"rc=1\tresidue=0":fault==35?"rc=0\tresidue=1":"rc=0\tresidue=0";
+    char attempts[600];np_buf log={0};
+    if(cx_fmt(attempts,sizeof attempts,"ATTEMPT\t1\tphase=compare-recheck\t%s\tbound=60\tmemo=%s\nATTEMPT\t%d\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=on\n",pre,fault==36?"on":"off",fault==37?3:2)||
+        fixture_put(chain,"chain-run.tsv",attempts))return 1;
+    const char *receipt="RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0\n";
+    if(fixture_put(chain,"chain-run-1.stdout",fault==38?"RECHECK\tbefore=pack\tfull=1\tmemo=off\tbuilt=0\n":receipt))return 1;
+    if(fault==39&&fixture_put(chain,"chain-run-1.stdout","RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0\nRECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0\n"))return 1;
+    const char *off="SHAMEMO\tchain\toff\treason=reached-compare\n";
+    if(fault!=30&&fault!=31)np_puts(&log,fault==33?"SHAMEMO\tchain\toff\treason=no-current-full-recheck-before-compare-or-pack\n":off);
+    if(fault==32)np_puts(&log,"SHAMEMO\tchain\ton\tuntil=compare\tderived=0\n");
+    if(fault==41)np_puts(&log,off);
+    for(int j=0;j<4;j++)if(fault!=40||j!=2)np_puts(&log,fp_rows[j]);
+    if(fault==31)np_puts(&log,off);
+    int rc=fixture_put(chain,fault==37?"chain-run-3.stdout":"chain-run-2.stdout",log.p);free(log.p);return rc;
+}
+
 int main(int argc, char **argv) {
     char out[65536], layout[4400], cand[4400], odir[4400], state[4600], chain[4400], *b; size_t n;
     char *v[8]; int rc, i;
@@ -239,12 +257,18 @@ int main(int argc, char **argv) {
           rc = run(pv, root, out, sizeof out); }
         ck(rc == 2 && sy_exists(marker) == 1 && has(out, "release-ape pack"), "gate positive reaches actual pack child");
         { char *rm[] = {"rm", "-f", marker, 0}; if (run(rm, root, 0, 0)) return 2; }
+        if(memo_fixture(chain,-1)||cx_fmt(od,sizeof od,"%s/gate-positive-shutdown",work))return 2;
+        {char *pv[]={"env",envp,"sh","unisacc.com","tools/release-run.cx","--","--pack",fake,tsv,src,od,"--chain-out",chain,"--snap",snap,0};
+         rc=run(pv,root,out,sizeof out);}
+        ck(rc==2&&sy_exists(marker)==1&&has(out,"release-ape pack"),"gate full recheck and effective memo shutdown reaches pack child");
+        {char *rm[]={"rm","-f",marker,0};if(run(rm,root,0,0))return 2;}
         /* Missing/UNKNOWN proofs, latest failure/residue, changed or missing slices,
          * a completed resume, memo use and chain-directory rebinding must refuse. */
         static char otherchain[4400];
-        for (int test = 0; test < 30; test++) {
+        for (int test = 0; test < 42; test++) {
             char leaf[400], path[4800], label[200]; np_buf log = {0};
             if (chain_fixture(chain) || cx_fmt(od, sizeof od, "%s/gate-negative-%d", work, test)) return 2;
+            if(test>=30&&memo_fixture(chain,test))return 2;
             if (test == 1 && fixture_put(chain, "checkpoint.tsv", "UNKNOWN\tcompare\twall_ms=0\tsha=-\n")) return 2;
             if(test==29&&(cx_fmt(otherchain,sizeof otherchain,"%s/other-chain",work)||chain_fixture(otherchain)))return 2;
             if (test >= 2 && test <= 9) {

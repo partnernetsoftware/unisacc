@@ -1,0 +1,173 @@
+/* tools/check-ujs-merge-sem.cx -- 迁移验证,不是常规回归
+ *
+ * 基准=origin/main@0af4785134 已提交旧 wasm vs 合并后新编。
+ * sh ./unisacc.com tools/check-ujs-merge-sem.cx --
+ * 字节可不同。i64 比 value 整 token;list 比 list_n+list_fnv。
+ * 篡改:list_fnv 对 0 必须不配。
+ */
+static int ck_failed, ck_asserts;
+
+static void ck_ck(int ok, const char *label) {
+    ck_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ck_failed++;
+}
+
+static int json_field_eq(const char *s, size_t n, const char *key, const char *want) {
+    size_t i, klen = 0, m = 0, a, b;
+    if (!s || !key || !want) return 0;
+    while (key[klen]) klen++;
+    while (want[m]) m++;
+    for (i = 0; i + klen + 3 < n; i++) {
+        size_t j = 0;
+        if (s[i] != '"') continue;
+        while (j < klen && s[i + 1 + j] == key[j]) j++;
+        if (j != klen || s[i + 1 + klen] != '"') continue;
+        i = i + 2 + klen;
+        while (i < n && s[i] != ':') i++;
+        if (i < n) i++;
+        while (i < n && (s[i] == ' ' || s[i] == '"')) i++;
+        a = i;
+        while (i < n && s[i] != ',' && s[i] != '}' && s[i] != '"' && s[i] != ' ' && s[i] != '\n') i++;
+        b = i;
+        if (b - a != m) return 0;
+        for (j = 0; j < m; j++) if (s[a + j] != want[j]) return 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int run_fr(const char *wasm, char **out, size_t *on) {
+    char *av[8];
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "ujs/product/frame-run.cx";
+    av[3] = "ujs/product/host1_vm.cx"; av[4] = "--";
+    av[5] = (char *)wasm; av[6] = "1"; av[7] = 0;
+    *out = 0; *on = 0;
+    return cx_runv_timeout(av, 25, out, on);
+}
+
+static int git_show(const char *revpath, const char *dst) {
+    char *av[6];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    FILE *f;
+    av[0] = "git"; av[1] = "show"; av[2] = (char *)revpath; av[3] = 0;
+    rc = cx_runv_timeout(av, 20, &out, &on);
+    if (rc != 0 || !out) { if (out) free(out); return 1; }
+    f = fopen(dst, "wb");
+    if (!f) { free(out); return 1; }
+    if (fwrite(out, 1, on, f) != on) { fclose(f); free(out); return 1; }
+    fclose(f);
+    free(out);
+    return 0;
+}
+
+static int compile_ujs(const char *src, const char *dst) {
+    char *av[8];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    av[0] = "sh"; av[1] = "./ujs/ujs.com"; av[2] = (char *)src;
+    av[3] = "-o"; av[4] = (char *)dst; av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &on);
+    if (out) { fwrite(out, 1, on, stdout); free(out); }
+    return rc;
+}
+
+static void cmp_pair(const char *name, const char *src, const char *oldrev, const char *kind) {
+    char oldp[64], newp[64];
+    char *o1 = 0, *o2 = 0;
+    size_t n1 = 0, n2 = 0;
+    int rc, i, j;
+    const char *a = "/tmp/merge-old-";
+    const char *b = "/tmp/merge-new-";
+    const char *suf = ".wasm";
+    i = 0;
+    while (a[i]) { oldp[i] = a[i]; i++; }
+    for (j = 0; name[j] && i < 56; j++) oldp[i++] = name[j];
+    for (j = 0; suf[j] && i < 62; j++) oldp[i++] = suf[j];
+    oldp[i] = 0;
+    i = 0;
+    while (b[i]) { newp[i] = b[i]; i++; }
+    for (j = 0; name[j] && i < 56; j++) newp[i++] = name[j];
+    for (j = 0; suf[j] && i < 62; j++) newp[i++] = suf[j];
+    newp[i] = 0;
+    rc = git_show(oldrev, oldp);
+    ck_ck(rc == 0, "old-wasm");
+    if (rc) return;
+    rc = compile_ujs(src, newp);
+    ck_ck(rc == 0, "new-compile");
+    if (rc) return;
+    rc = run_fr(oldp, &o1, &n1);
+    ck_ck(rc == 0 && o1, "old-run");
+    rc = run_fr(newp, &o2, &n2);
+    ck_ck(rc == 0 && o2, "new-run");
+    if (o1 && n1) fwrite(o1, 1, n1, stdout);
+    if (o2 && n2) fwrite(o2, 1, n2, stdout);
+    if (kind[0] == 'i') {
+        /* extract value token from old, compare new */
+        size_t i, a = 0, b = 0;
+        char tok[64];
+        int k = 0;
+        if (o1) {
+            for (i = 0; i + 8 < n1; i++) {
+                if (o1[i]=='"' && o1[i+1]=='v' && o1[i+2]=='a') {
+                    while (i < n1 && o1[i] != ':') i++;
+                    if (i < n1) i++;
+                    while (i < n1 && o1[i]==' ') i++;
+                    a = i;
+                    while (i < n1 && o1[i] != ',' && o1[i] != '}') i++;
+                    b = i;
+                    break;
+                }
+            }
+            while (a < b && k < 63) tok[k++] = o1[a++];
+            tok[k] = 0;
+        }
+        ck_ck(o2 && k && json_field_eq(o2, n2, "value", tok), name);
+    } else {
+        size_t i, a, b;
+        char fn[24];
+        int k = 0;
+        fn[0] = 0;
+        if (o1) {
+            for (i = 0; i + 10 < n1; i++) {
+                if (o1[i]=='l' && o1[i+1]=='i' && o1[i+2]=='s' && o1[i+3]=='t' && o1[i+5]=='f') {
+                    while (i < n1 && o1[i] != ':') i++;
+                    if (i < n1) i++;
+                    a = i;
+                    while (i < n1 && o1[i] != ',' && o1[i] != '}') i++;
+                    b = i;
+                    while (a < b && k < 23) fn[k++] = o1[a++];
+                    fn[k] = 0;
+                    break;
+                }
+            }
+        }
+        ck_ck(o2 && k && json_field_eq(o2, n2, "list_fnv", fn), name);
+        ck_ck(!json_field_eq(o2 ? o2 : "", n2, "list_fnv", "0"), "tamper-fnv-not-0");
+    }
+    if (o1) free(o1);
+    if (o2) free(o2);
+}
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    ck_ck(json_field_eq("{\"value\":4}", 11, "value", "4"), "tok-4");
+    ck_ck(!json_field_eq("{\"value\":4.5}", 13, "value", "4"), "tok-not-4.5");
+    cmp_pair("fly", "ujs/tests/examples/fly.ujs", "origin/main:ujs/practice/uxe/demo/fly/fly.wasm", "i64");
+    cmp_pair("water", "ujs/tests/examples/water.ujs", "origin/main:ujs/practice/uxe/demo/water-keeps/water.wasm", "list");
+    cmp_pair("ink", "ujs/tests/examples/ink.ujs", "origin/main:ujs/practice/uxe/demo/ink-walk/ink.wasm", "list");
+    cmp_pair("oneshot", "ujs/tests/examples/oneshot.ujs", "origin/main:ujs/practice/uxe/demo/oneshot/oneshot.wasm", "list");
+    cmp_pair("bounce2d", "ujs/tests/examples/bounce2d.ujs", "origin/main:ujs/practice/uxe/demo/host1-games/bounce2d.wasm", "i64");
+    cmp_pair("paddle2d", "ujs/tests/examples/paddle2d.ujs", "origin/main:ujs/practice/uxe/demo/host1-games/paddle2d.wasm", "i64");
+    cmp_pair("orbit3d", "ujs/tests/examples/orbit3d.ujs", "origin/main:ujs/practice/uxe/demo/host1-games/orbit3d.wasm", "i64");
+    cmp_pair("tick3d", "ujs/tests/examples/tick3d.ujs", "origin/main:ujs/practice/uxe/demo/host1-games/tick3d.wasm", "i64");
+    if (ck_failed) {
+        printf("UJS_MERGE_SEM_FAIL\tasserts=%d\tfailed=%d\n", ck_asserts, ck_failed);
+        return 1;
+    }
+    printf("UJS_MERGE_SEM_OK\tasserts=%d\tfailed=0\n", ck_asserts);
+    return 0;
+}

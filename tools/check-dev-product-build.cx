@@ -58,6 +58,17 @@ static void hdr_sha(const np_result *r, char o[65]) {
 }
 
 static int isf(const char *p) { struct stat st; return !stat(p, &st) && S_ISREG(st.st_mode); }
+/* a reaped-late job leader stays a zombie under a subreaper that does not wait(): kill(pid,0) still succeeds for it. The job is gone when
+   no process of its group is in any state but Z, so ask ps for the group's live members instead of trusting kill(). */
+static int group_idle(long pgid) {
+    char sh[200], why[512]; np_result r; char *av[] = {"sh", "-c", sh, 0}; int idle = 0; why[0] = 0;
+    if (cx_fmt(sh, sizeof sh, "ps -eo pgid=,stat= | grep -c '^ *%ld [^Z]'; true", pgid)) return 0;
+    r.rc = -1; r.out = r.err = 0; r.outn = r.errn = 0;
+    if (!np_run(av, 0, 0, 20, &r, why, sizeof why) && r.out && r.outn >= 1 && r.out[0] == '0') idle = 1;
+    np_free(&r);
+    return idle;
+}
+
 static int wr(const char *dir, const char *rel, const char *s) { char p[PW]; return cx_fmt(p, PW, "%s/%s", dir, rel) || cx_write(p, s, strlen(s)); }
 static void line1(const char *dir, const char *rel, char *o, size_t cap) {
     char p[PW]; size_t n = 0, i; char *b = cx_fmt(p, PW, "%s/%s", dir, rel) ? 0 : cx_read(p, &n);
@@ -89,7 +100,7 @@ static void until(const char *cwd, const char *w, const char *pkg) {
     ok(pid > 1, "until-reload-pid-recorded");
     for (i = 0; i < 60 && pid > 1; i++) {
         if (!rc_seen && !cx_fmt(p, PW, "%s/state/reload.rc", o) && isf(p)) rc_seen = 1;
-        if (rc_seen && kill((pid_t)-pid, 0) && errno == ESRCH && kill((pid_t)pid, 0) && errno == ESRCH) { gone = 1; break; }
+        if (rc_seen && group_idle(pid)) { gone = 1; break; }
         sy_sleep_ms(200);
     }
     line1(o, "state/reload.rc", v, sizeof v);

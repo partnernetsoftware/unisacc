@@ -92,18 +92,32 @@ static long fd_lines(const char *b, long n, fd_line **out) {
 }
 
 /* locate section: *h = heading line index (-1 whole doc), *e = first line after the section */
-static int fd_find(const char *b, fd_line *L, long nl, const char *sec, long *h, long *e, ff_out *o) {
+/* decode one section path component: %2F -> '/', %25 -> '%' (other bytes as they are) */
+static long fd_decode(const char *p, long cn, char *d, long cap) {
+    long w = 0;
+    for (long i = 0; i < cn && w < cap - 1; i++) {
+        if (p[i] == '%' && i + 2 <= cn - 1 && p[i + 1] == '2' && (p[i + 2] == 'F' || p[i + 2] == 'f')) { d[w++] = '/'; i += 2; }
+        else if (p[i] == '%' && i + 2 <= cn - 1 && p[i + 1] == '2' && p[i + 2] == '5') { d[w++] = '%'; i += 2; }
+        else d[w++] = p[i];
+    }
+    d[w] = 0;
+    return w;
+}
+
+/* dup: the last component may match several sibling headings; the first one is taken (doc.repair) */
+static int fd_find(const char *b, fd_line *L, long nl, const char *sec, long *h, long *e, ff_out *o, int dup) {
     long lo = 0, hi = nl, head = -1;
     int plv = 0;
     const char *p = sec ? sec : "";
+    char dc[1024];
     while (*p) {
         const char *q = p;
         while (*q && *q != '/') q++;
-        long cn = q - p, hit = -1, hits = 0;
+        long cn = fd_decode(p, q - p, dc, sizeof dc), hit = -1, hits = 0;
         for (long i = lo; i < hi; i++)
-            if (L[i].lv > plv && fd_title_eq(b + L[i].off, L[i].end - L[i].off, L[i].lv, p, cn)) { if (hit < 0) hit = i; hits++; }
+            if (L[i].lv > plv && fd_title_eq(b + L[i].off, L[i].end - L[i].off, L[i].lv, dc, cn)) { if (hit < 0) hit = i; hits++; }
         if (hits == 0) { fd_fail(o, "ENOSEC", sec); return -1; }
-        if (hits > 1) { fd_fail(o, "EMULTISEC", sec); return -1; }
+        if (hits > 1 && !(dup && !*q)) { fd_fail(o, "EMULTISEC", sec); return -1; }
         head = hit; plv = L[hit].lv; lo = hit + 1;
         long j = lo;
         while (j < hi && !(L[j].lv && L[j].lv <= plv)) j++;
@@ -191,11 +205,15 @@ int fd_run(const char *op, const char *args, ff_out *o) {
     long nl = fd_lines(b, n, &L), h = -1, e = 0;
     int rc = 0;
     if (nl < 0) { fd_fail(o, "ENOMEM", "lines"); rc = 1; goto done; }
-    if (fd_find(b, L, nl, hs == 1 ? sec : "", &h, &e, o)) { rc = 1; goto done; }
+    if (fd_find(b, L, nl, hs == 1 ? sec : "", &h, &e, o, !strcmp(op, "doc.repair"))) { rc = 1; goto done; }
     long s0 = h < 0 ? 0 : L[h].off;
     long body = h < 0 ? 0 : (h + 1 < nl ? L[h + 1].off : n);
     long send = e < nl ? L[e].off : n;
     if (!strcmp(op, "doc.get")) {
+        char *bo = 0; long bon = 0;
+        if (ff_arg(args, "body", &bo, &bon) == 1) { if (!strcmp(bo, "1")) s0 = body; mm_free(bo); }   /* body=1: no heading line, set --from takes it back */
+        /* set puts one blank line back before a following heading, so body form drops that one */
+        if (s0 == body && e < nl && send - s0 >= 2 && b[send - 1] == '\n' && b[send - 2] == '\n') send--;
         o->buf = (char *)mm_alloc(send - s0 + 1);
         fd_cp(o->buf, b + s0, send - s0); o->buf[send - s0] = 0; o->n = send - s0;
         fd_cp(o->sha, sha, 65);
@@ -210,7 +228,15 @@ int fd_run(const char *op, const char *args, ff_out *o) {
             while (z > a && (b[z - 1] == ' ' || b[z - 1] == '\r')) z--;
             int lv = L[i].lv;
             long tl = z - a; if (tl > 500) tl = 500;
-            fd_cp(stack[lv], b + a, tl); stack[lv][tl] = 0;
+            {   /* titles are emitted with '/' -> %2F and '%' -> %25, the form section= takes back */
+                long sw = 0;
+                for (long t = 0; t < tl && sw < 505; t++) {
+                    if (b[a + t] == '/') { fd_cp(stack[lv] + sw, "%2F", 3); sw += 3; }
+                    else if (b[a + t] == '%') { fd_cp(stack[lv] + sw, "%25", 3); sw += 3; }
+                    else stack[lv][sw++] = b[a + t];
+                }
+                stack[lv][sw] = 0;
+            }
             for (int k = lv + 1; k < 7; k++) stack[k][0] = 0;
             top = lv;
             w += snprintf(o->buf + w, cap - w, "%d\t", lv);
@@ -228,6 +254,17 @@ int fd_run(const char *op, const char *args, ff_out *o) {
         if (h < 0) { fd_fail(o, "EARG", "doc.set needs a section"); rc = 1; goto done; }
         if (fd_need(args, "content", &c, o)) { rc = 1; goto done; }
         long cn = (long)strlen(c);
+        {   /* content whose first non-blank line is this section's own heading would nest a duplicate
+               (the full doc.get output fed back); refuse it, doc get --body is the form set takes */
+            long i = 0, z;
+            while (i < cn && (c[i] == '\n' || c[i] == '\r' || c[i] == ' ')) i++;
+            for (z = i; z < cn && c[z] != '\n'; z++) {}
+            int lv = fd_level(c + i, z - i);
+            long hn = L[h].end - L[h].off;
+            if (lv == L[h].lv && z - i == hn && !memcmp(c + i, b + L[h].off, hn)) {
+                mm_free(c); fd_fail(o, "EDUPHEAD", "content starts with the section's own heading; use doc get --body"); rc = 1; goto done;
+            }
+        }
         char *m = (char *)mm_alloc(cn + 3);
         fd_cp(m, c, cn);
         if (cn == 0 || m[cn - 1] != '\n') m[cn++] = '\n';
@@ -297,6 +334,25 @@ int fd_run(const char *op, const char *args, ff_out *o) {
         } else if (fd_store(args, b, hitoff, nw, nwn, hitoff + oln, n, sha, o)) rc = 1;
         if (ol) mm_free(ol);
         if (nw) mm_free(nw);
+    } else if (!strcmp(op, "doc.repair")) {
+        /* merge: every later sibling heading (same parent range, same level, same title) of the first
+           match loses its heading line, its body joins the first one; nothing to merge = ENODUP */
+        long pe = nl, cnt = 0;
+        int lv = L[h].lv;
+        for (long i = h + 1; i < nl; i++) if (L[i].lv && L[i].lv < lv) { pe = i; break; }
+        long hn = L[h].end - L[h].off;
+        char *nb = (char *)mm_alloc(n + 1);
+        long w = 0, from = 0;
+        for (long i = h + 1; i < pe; i++)
+            if (L[i].lv == lv && L[i].end - L[i].off == hn && !memcmp(b + L[i].off, b + L[h].off, hn)) {
+                fd_cp(nb + w, b + from, L[i].off - from); w += L[i].off - from;
+                from = i + 1 < nl ? L[i + 1].off : n;
+                cnt++;
+            }
+        if (!cnt) { mm_free(nb); fd_fail(o, "ENODUP", "no duplicate heading to merge"); rc = 1; goto done; }
+        fd_cp(nb + w, b + from, n - from); w += n - from;
+        if (fd_store(args, nb, w, "", 0, w, w, sha, o)) rc = 1;
+        mm_free(nb);
     } else { fd_fail(o, "EOP", op); rc = 1; }
 done:
     if (L) mm_free(L);

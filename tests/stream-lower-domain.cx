@@ -148,7 +148,7 @@ static void begin(prog *p,const ddef *d,int nd,int data_first){memset(p,0,sizeof
  if(data_first){int i;char l[400];for(i=0;i<nd;i++){if(d[i].bss)FMT(l,".bss %s %llu",d[i].name,d[i].len);else FMT(l,".str %s %s",d[i].name,d[i].spell);T(p,l);}}}
 static void finish(prog *p,np_buf *tape,np_buf *want){int i;char l[400];
  *tape=p->tape;if(!p->data_first)for(i=0;i<p->nd;i++){if(p->d[i].bss)FMT(l,".bss %s %llu",p->d[i].name,p->d[i].len);else FMT(l,".str %s %s",p->d[i].name,p->d[i].spell);lf(tape,l);}
- lf(tape,".end");W(p,".end");np_put(&p->head,p->code.p?p->code.p:"",p->code.n);*want=p->head;free(p->code.p);}
+ lf(tape,".end");rt_tail(p);W(p,".end");np_put(&p->head,p->code.p?p->code.p:"",p->code.n);*want=p->head;free(p->code.p);}
 static void mark(const char *name,size_t from,prog *p){if(nb>=MAXB)die("blocks");bname[nb]=name;bfrom[nb]=from;bto[nb]=p->code.n;nb++;}
 static void entry(prog *p){char l[200];T(p,"_start:");W(p,"_start:");FMT(l,"spinit %s",R("r7"));W(p,l);FMT(l,"argsave %llu, %llu, true",ARGC,ARGV);W(p,l);}
 static void ins_ret(prog *p){char l[100];T(p,"  ret");FMT(l,"ret form=%s",A("ret")->form);W(p,l);}
@@ -165,9 +165,32 @@ static void sysseq(prog *p,const char *op,int nsrc,const char *const *src,int pr
  FMT(l,"gate form=%s gate=%s carry=false winapi=%s catop=%s sysno=%s retconv=%s winimp=%s ret=%s hstd=%llu written=%llu scr0=%llu scr1=%llu",
   Q(q[0],40,a->form),Q(q[1],40,a->f[GATE]),w?Q(q[2],40,w):"none",Q(q[3],40,op),Q(q[4],40,a->f[SYSNO]),Q(q[5],40,a->f[RETCONV]),Q(q[6],40,a->f[WINIMP]),Q(q[7],40,a->f[RET]),HSTD,WRITTEN,SCR0,SCR1);
  W(p,l);}
+/* Runtime tail product lower appends after the body, before .end (367d54a115 named fallthrough guard;
+   3519cdb1aa/56e1018466 code-shell exit -> FG.begin; same tail as tests/stream-lower.cx lower_tail, 86d52b52ea).
+   Every route value comes from the facts this file already derives, not from the product output:
+   - sequence and offsets (fd 2 at SCR0, words at SCR0+24/32/40, pointer at SCR0+8, length 24 then 12 at SCR0+16,
+     status 127, exit twice): exec/lower/fallguard-result.tsv FG.empty..FG.rawexit;
+   - word0..word4 (the 36-byte "control falls off the end of _start\n"): exec/lower/fallguard-manifest.tsv row 3;
+   - scratch base SCR0 = DATA_BASE + used, HSTD = SCR0+168, WRITTEN = SCR0+192: layout() above (unisa/lower.py);
+   - sysno register, arg registers, sysnos 1/60, gate form and quoting: sysseq() from weights/gold/abi.tsv;
+   - immediate register: R("r0") from weights/gold/regmap.tsv. */
+static void rt_tail(prog *p);
 static void x_exit(prog *p,const char *r){char l[200],m[3][40];const char *s[3]={m[0],m[1],m[2]};
  FMT(l,"  .exit %s",r);T(p,l);FMT(l,"setmem %llu, %s",SCR0,R(r));W(p,l);
  FMT(m[0],"mem %llu",SCR0);FMT(m[1],"imm 0");FMT(m[2],"imm 0");sysseq(p,"exit",3,s,0);}
+static void rt_store(prog *p,const char *v,unsigned long long off){char l[200];FMT(l,"imm %s, %s",R("r0"),v);W(p,l);FMT(l,"setmem %llu, %s",SCR0+off,R("r0"));W(p,l);}
+static void rt_ptr(prog *p){char l[200];FMT(l,"setreg %s, addr %llu",R("r0"),SCR0+24);W(p,l);FMT(l,"setmem %llu, %s",SCR1,R("r0"));W(p,l);}
+static void rt_write(prog *p){char m[3][40];const char *s[3]={m[0],m[1],m[2]};FMT(m[0],"mem %llu",SCR0);FMT(m[1],"mem %llu",SCR1);FMT(m[2],"mem %llu",PLEN);sysseq(p,"write",3,s,0);}
+static void rt_exit(prog *p){char m[3][40];const char *s[3]={m[0],m[1],m[2]};rt_store(p,"127",0);FMT(m[0],"mem %llu",SCR0);FMT(m[1],"imm 0");FMT(m[2],"imm 0");sysseq(p,"exit",3,s,0);}
+static void rt_tail(prog *p){
+ rt_store(p,"2",0);rt_store(p,"2336364844068794211",24);rt_store(p,"7381153994395902310",32);rt_store(p,"7954799936736075878",40);
+ rt_ptr(p);rt_store(p,"24",16);rt_write(p);
+ rt_store(p,"8391155123483517028",24);rt_store(p,"175403617",32);
+ rt_store(p,"2",0);rt_ptr(p);rt_store(p,"12",16);rt_write(p);
+ rt_exit(p);rt_exit(p);}
+/* byte length of the runtime tail at the current layout (G_base): the zeros-not-stored budget stays 1024 bytes for
+   header and body; the fixed-size tail does not depend on the BSS size and is added on top */
+static size_t rt_tail_len(void){prog t;size_t n;memset(&t,0,sizeof t);rt_tail(&t);n=t.code.n;free(t.code.p);return n;}
 static void x_write(prog *p,const char *ra,const char *rb){char l[200],m[3][40];const char *s[3]={m[0],m[1],m[2]};
  FMT(l,"  .write %s, %s",ra,rb);T(p,l);FMT(l,"setmem %llu, %s",SCR0,R(ra));W(p,l);FMT(l,"setmem %llu, %s",SCR1,R(rb));W(p,l);
  FMT(m[0],"imm 1");FMT(m[1],"mem %llu",SCR0);FMT(m[2],"mem %llu",SCR1);sysseq(p,"write",3,s,0);}
@@ -271,6 +294,14 @@ static void refused_model(const char *name,np_result *r,const char *declared){ch
  FMT(want,"reject: %s\n",declared);check(r->errn==strlen(want)&&!memcmp(r->err,want,r->errn),name,"reject-stderr-exactly-declared-name");
  if(r->errn!=strlen(want)||memcmp(r->err,want,r->errn))printf("STDERR\t%s\trc=%d\t%.*s\n",name,r->rc,(int)(r->errn>200?200:r->errn),r->err?r->err:"");}
 static void refuse_text(const char *name,const char *text,const char *declared){np_result r=run_text(name,text,strlen(text),0,0);refused_model(name,&r,declared);np_free(&r);recovery(name);}
+/* code-shell C.fail (56e1018466, exec/lower/code-shell-result.tsv, codeend-manifest gapof=@text:"of "): the lowering
+   reject also writes "of " + opcode, then " " + first operand when the instruction has arguments, then "\n" on the
+   diagnostic stream; exec/c/run.c emits the "reject: NAME" line first. Exact stderr = reject line + gap line. */
+static void refused_gap(const char *name,np_result *r,const char *declared,const char *gap){char want[400];
+ check(r->rc==1,name,"reject-rc1-model-refusal");check(r->outn==0,name,"reject-empty-stdout");
+ FMT(want,"reject: %s\nof %s\n",declared,gap);check(r->errn==strlen(want)&&!memcmp(r->err,want,r->errn),name,"reject-stderr-exactly-declared-name");
+ if(r->errn!=strlen(want)||memcmp(r->err,want,r->errn))printf("STDERR\t%s\trc=%d\t%.*s\n",name,r->rc,(int)(r->errn>200?200:r->errn),r->err?r->err:"");}
+static void refuse_gap(const char *name,const char *text,const char *declared,const char *gap){np_result r=run_text(name,text,strlen(text),0,0);refused_gap(name,&r,declared,gap);np_free(&r);recovery(name);}
 
 /* ---- format ---- */
 static void mode_format(void){
@@ -313,7 +344,7 @@ static void mode_format(void){
  /* sparse BSS: 610,000,000 zero bytes advance @data_len only; the stored prefix is the one nonzero byte */
  {static const ddef d[]={{"big",1,610000000ULL,0,0},{"s",0,1,"x","\"x\""}};begin(&p,d,2,0);entry(&p);T(&p,"  .lea r0, big");FMT(l,".lea %s, big",R("r0"));W(&p,l);ins_ret(&p);
   accept_prog("header-sparse-bss",&p,&a,0,0);
-  check(has_line(a.out,a.outn,"@data 78")&&has_line(a.out,a.outn,"@data_len 610000176")&&has_line(a.out,a.outn,"@sym s 256")&&has_line(a.out,a.outn,"@sym big 264")&&a.outn<1024,"header-sparse-bss","zeros-not-stored");np_free(&a);}
+  check(has_line(a.out,a.outn,"@data 78")&&has_line(a.out,a.outn,"@data_len 610000176")&&has_line(a.out,a.outn,"@sym s 256")&&has_line(a.out,a.outn,"@sym big 264")&&a.outn<1024+rt_tail_len(),"header-sparse-bss","zeros-not-stored");np_free(&a);}
  /* POSIX side effects: .print, .write and .exit lower to real write/exit system calls (abi.tsv rows) */
  begin(&p,NODATA,0,0);entry(&p);ins_imm(&p,"r0",5);
  {size_t f=p.code.n;x_print(&p,"r0");mark("print",f,&p);f=p.code.n;x_write(&p,"r1","r2");mark("write",f,&p);f=p.code.n;x_exit(&p,"r0");mark("exit",f,&p);}
@@ -418,9 +449,9 @@ static void mode_refusals(void){
  refuse_text("extent.two-gib-halves","_start:\n  ret\n.bss a 1073741824\n.bss b 1073741824\n.end\n","not covered: tape data directive");
  refuse_text("extent.beyond-u64","_start:\n  ret\n.bss big 18446744073709551616\n.end\n","not covered: tape data directive");
  /* argument shapes the lowering cannot pass (unisa/lower.py: stack argument; hostaddr index 0..3; unknown catalog op) */
- refuse_text("shape.sys-machine-op","_start:\n  .sys add64, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
- refuse_text("shape.hostaddr-index-4","_start:\n  .hostaddr r0, 4\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
- refuse_text("shape.sys-unknown-op","_start:\n  .sys nosuch, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
+ refuse_gap("shape.sys-machine-op","_start:\n  .sys add64, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering",".sys add64");
+ refuse_gap("shape.hostaddr-index-4","_start:\n  .hostaddr r0, 4\n  ret\n.end\n","not covered: lnx/x86_64 lowering",".hostaddr r0");
+ refuse_gap("shape.sys-unknown-op","_start:\n  .sys nosuch, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering",".sys nosuch");
  /* library ops outside library mode */
  refuse_text("library.libraryfn-outside-mode","_start:\n  .libraryfn r0, 1\n  ret\n.end\n","not covered: libraryfn requires library mode");
  refuse_text("library.librarycall-without-bindings","_start:\n  .librarycall r0, r1\n  ret\n.end\n","not covered: library import binding or signature");

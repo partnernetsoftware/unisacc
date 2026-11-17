@@ -42,6 +42,7 @@
 #define PLAN "# fixture phases\n0\tsnap\t-\t55\t-\t-\t1\n1\tctx\t-\t55\tsnap\t-\t1\n2\tcompare\touter\t55\tctx\t-\t1\n3\tpack\touter\t55\tcompare\t-\t1\n"
 /* PLAN with comment rows, column 4 (timeout_s) and columns 8.. removed: what chain-run binds as plan-semantics. */
 #define PLAN_SEM "0\tsnap\t-\t-\t-\t1\n1\tctx\t-\tsnap\t-\t1\n2\tcompare\touter\tctx\t-\t1\n3\tpack\touter\tcompare\t-\t1\n"
+#define FALLTHROUGH "# fixture fallthrough\nphase\tpassed\ncompare\tctx\npack\tcompare\n"
 #define SID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #define REV_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define REV_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -90,7 +91,7 @@ static int chain_files(const char *dir, const char *rev, int phases, int blocker
     long at = 0;
     int i;
     if (sha_text(PLAN, plan) || sha_text("pkg", a) || sha_text("slice", b) || sha_text("fake-ape", c)) return -1;
-    if (sha_text(PLAN_SEM, plan)) return -1;
+    if (sha_text(PLAN_SEM FALLTHROUGH, plan)) return -1;
     if (cx_fmt(t, sizeof t, "rev=%s\nmode=full\ncandidate=source\nroot=/fx\nplan-semantics=%s\nwatch=source\n", rev, plan) || put(dir, "chain-run.identity", t)) return -1;
     t[0] = 0;
     for (i = 0; i < phases; i++) {
@@ -293,7 +294,8 @@ int main(int argc, char **argv) {
         sy_printf("FAIL\tbgc.build-fake-chain\t%s\n", why);
         return 1;
     }
-    if (sy_mkdir(fxroot, 0755) || join(dir, fxroot, "build") || sy_mkdir(dir, 0755) || put(fxroot, "build/chain-phases.tsv", PLAN) || sha_text("fake-ape", ape)) {
+    if (sy_mkdir(fxroot, 0755) || join(dir, fxroot, "build") || sy_mkdir(dir, 0755) || put(fxroot, "build/chain-phases.tsv", PLAN) ||
+        put(fxroot, "build/chain-phase-fallthrough.tsv", FALLTHROUGH) || sha_text("fake-ape", ape)) {
         sy_printf("FAIL\tbgc.fixture-prepare\n");
         return 1;
     }
@@ -381,6 +383,15 @@ int main(int argc, char **argv) {
        lines("NEED\tinput\tp3\t", "bytes=3", 0, 0) == 1 && lines("NEED\tinput\tlnx/x86_64\t", "bytes=5", 0, 0) == 1, "promote-check-accepts-and-prints-needs");
     for (i = 0, rc = 0; leaves[i]; i++) rc |= sha_file(dir, leaves[i], after) || !tx_eqz(after, before[i]);
     ck(!rc && !present(dir, "promoted") && rows(dir, "owner.tsv", "OWNER\t", 0, 0) == 1 && rows(dir, "exit.tsv", "EXIT\t", 0, 0) == 1, "promote-check-writes-nothing");
+    rc = put(fxroot, "build/chain-phase-fallthrough.tsv", "# fixture fallthrough\nphase\tpassed\ncompare\tctx\npack\tsnap\n");
+    ck(!rc && refused(b2, REV_A, "plan-mismatch"), "promote-refuses-changed-fallthrough");
+    rc = put(fxroot, "build/chain-phase-fallthrough.tsv", FALLTHROUGH);
+    ck(!rc && tool(b2, "promote", "--check", "--rev", REV_A, 0, 0) == 0, "promote-accepts-restored-fallthrough");
+    if (join(t, fxroot, "build/chain-phase-fallthrough.tsv") || join(aside, fxroot, "build/fallthrough-aside.tsv")) return 2;
+    rc = sy_rename(t, aside);
+    ck(!rc && refused(b2, REV_A, "no-plan"), "promote-refuses-missing-fallthrough");
+    if (sy_rename(aside, t)) return 2;
+    ck(tool(b2, "promote", "--check", "--rev", REV_A, 0, 0) == 0, "promote-accepts-returned-fallthrough");
     rc = tool(b2, "promote", "--rev", REV_A, 0, 0, 0);
     ck(rc == 2 && lines("PROMOTE_CHECK", 0, 0, 0) == 0 && lines("NEED\t", 0, 0, 0) == 0, "promote-without-check-rc2");
     ck(refused(b2, "ffffffffffffffffffffffffffffffffffffffff", "no-candidate"), "promote-refuses-absent-revision");
@@ -427,7 +438,7 @@ int main(int argc, char **argv) {
     {
         char good_id[512], hex[65], bad[65];
         int k;
-        if (sha_text(PLAN_SEM, hex) || sha_file(dir, "chain-run.identity", bad)) return 2;
+        if (sha_text(PLAN_SEM FALLTHROUGH, hex) || sha_file(dir, "chain-run.identity", bad)) return 2;
         for (k = 0; k < 64; k++) bad[k] = hex[k];
         bad[63] = bad[63] == '0' ? '1' : '0';
         bad[64] = 0;

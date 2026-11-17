@@ -24,6 +24,8 @@ typedef struct {
   uint32_t gpu_len, gpu_sum, gpu_fnv;
   int gpu_got;
   WV stk[H1_STK];
+  WV ploc[256];
+  int ploc_live;
   int sp;
   WV ploc[256];
   int ploc_live;
@@ -458,6 +460,9 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0x7c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 + b2.i64); continue; }
     if (op == 0x7d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 - b2.i64); continue; }
     if (op == 0x7e) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 * b2.i64); continue; }
+    if (op == 0x7f) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, b2.i64 ? a.i64 / b2.i64 : 0); continue; }
+    if (op == 0x80) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, b2.i64 ? (int64_t)((uint64_t)a.i64 / (uint64_t)b2.i64) : 0); continue; }
+    if (op == 0x81) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, b2.i64 ? a.i64 % b2.i64 : 0); continue; }
     if (op == 0xad) { h1_pop_to(h, &a); h1_push_i64(h, (uint32_t)a.i32); continue; }
     if (op == 0xa7) { h1_pop_to(h, &a); h1_push_i32(h, (int32_t)a.i64); continue; }
     if (op == 0xb9) { h1_pop_to(h, &a); h1_push_f64(h, (double)a.i64); continue; }
@@ -465,6 +470,12 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0xa1) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 - b2.f64); continue; }
     if (op == 0xa2) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 * b2.f64); continue; }
     if (op == 0xa3) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 / b2.f64); continue; }
+    if (op == 0x61) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 == b2.f64); continue; }
+    if (op == 0x62) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 != b2.f64); continue; }
+    if (op == 0x63) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 < b2.f64); continue; }
+    if (op == 0x64) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 > b2.f64); continue; }
+    if (op == 0x65) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 <= b2.f64); continue; }
+    if (op == 0x66) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.f64 >= b2.f64); continue; }
     {
       char msg[64];
       snprintf(msg, sizeof msg, "op 0x%02x", op);
@@ -569,7 +580,6 @@ fail_none:
     free(h.mem);
     return 1;
   }
-
   if (h1_call(&h, (uint32_t)h.tag_i, 0) != 0) {
     snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"tag:%s\"}", h.err);
     free(h.mem);
@@ -639,6 +649,29 @@ fail_none:
     sprintf(w, "\",\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}");
     snprintf(out, out_cap, "%s", buf);
     free(buf);
+  } else if (tag == 5) {
+    uint32_t hp = (uint32_t)handle.i32;
+    uint32_t ln = 0, i, off, slot, fnv = 2166136261u;
+    if (hp + 8u > h.mem_n) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"list oob\"}");
+      free(h.mem);
+      return 1;
+    }
+    ln = (uint32_t)h.mem[hp + 4] | ((uint32_t)h.mem[hp + 5] << 8) | ((uint32_t)h.mem[hp + 6] << 16) | ((uint32_t)h.mem[hp + 7] << 24);
+    for (i = 0; i < ln; i++) {
+      off = hp + 8u + i * 4u;
+      if (off + 4u > h.mem_n) break;
+      slot = (uint32_t)h.mem[off] | ((uint32_t)h.mem[off + 1] << 8) | ((uint32_t)h.mem[off + 2] << 16) | ((uint32_t)h.mem[off + 3] << 24);
+      if (slot + 16u <= h.mem_n && h.mem[slot] == 2) {
+        unsigned j;
+        for (j = 0; j < 8; j++) { fnv ^= h.mem[slot + 8u + j]; fnv *= 16777619u; }
+      } else {
+        fnv ^= slot & 255u; fnv *= 16777619u;
+      }
+    }
+    snprintf(out, out_cap,
+             "{\"run\":\"ok\",\"tag\":\"list\",\"list_n\":%u,\"list_fnv\":%u,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
+             ln, fnv);
   } else {
     snprintf(out, out_cap,
              "{\"run\":\"ok\",\"tag\":%d,\"handle\":%d,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",

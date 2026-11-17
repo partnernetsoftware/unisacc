@@ -1,0 +1,64 @@
+/* Single-container behavioral and refusal checks. ROOT STREAMS NEW_OUT.
+ * Every mutation is an owned copy. Shared prepared materials are read-only.
+ * No candidate subprocess or decoder is used as an expected-value oracle. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+static int failed;
+static void ck(int yes,const char *name){printf("%s\tisolated-stream.%s\n",yes?"PASS":"FAIL",name);if(!yes)failed++;}
+static int save(const char *path,const void *bytes,long n){return cx_write(path,bytes,n)||sy_chmod(path,0700);}
+static int run(const char *image,const char *input,const char *cwd,char **env,np_result *r){
+    char why[500];char *v[]={(char *)image,(char *)input,"input.c","include",0};
+    int rc=np_run(v,cwd,env,10,r,why,sizeof why);if(rc)fprintf(stderr,"isolated-stream transport: %s\n",why);return rc;
+}
+static int rejection(const char *image,const char *input,const char *cwd,char **env,const char *word){
+    np_result r={0};int rc=run(image,input,cwd,env,&r);
+    int yes=!rc&&!r.residue&&r.rc==2&&tx_contains(r.err,r.errn,word,tx_len(word,120));np_free(&r);return yes;
+}
+static int exact_frame(const np_result *r,const char *input){
+    long n=tx_len(input,1000);if(r->rc||r->residue||r->errn||r->outn!=(size_t)(31+n)||!mm_same(r->out,"UNIPP2\0",7))return 0;
+    for(int i=0;i<4;i++)if((unsigned char)r->out[7+i]!=(unsigned char)((unsigned)n>>(8*i)))return 0;
+    for(int i=11;i<31;i++)if(r->out[i])return 0;
+    return mm_same(r->out+31,input,n);
+}
+int main(int argc,char **argv){
+    if(argc!=4||argv[3][0]!='/')return 2;
+    char original[4400],image[4400],input[4400],bad[4400],root[4096],candidate[4400],receipt[4400],wanted[100],candidate_sha[65];
+    unsigned char *candidate_bytes=0,*receipt_bytes=0;int64_t candidate_n,receipt_n;
+    if(sy_realpath(argv[1],root,sizeof root)<0||cx_fmt(candidate,sizeof candidate,"%s/unisacc.com",root)||cx_fmt(receipt,sizeof receipt,"%s/material.tsv",argv[2])||sy_read_file(candidate,&candidate_bytes,&candidate_n,67108864)||sy_sha256_hex(candidate_bytes,candidate_n,candidate_sha)||sy_read_file(receipt,&receipt_bytes,&receipt_n,65536)||cx_fmt(wanted,sizeof wanted,"\ncandidate\t%s\n",candidate_sha))return 2;
+    ck(tx_prefix((const char *)receipt_bytes,receipt_n,"ISOLATED_STREAMS\t1\n",19)&&tx_count((const char *)receipt_bytes,receipt_n,"\ncandidate\t",11)==1&&tx_contains((const char *)receipt_bytes,receipt_n,wanted,tx_len(wanted,sizeof wanted)),"material-bound-to-root-candidate");
+    mm_free(candidate_bytes);mm_free(receipt_bytes);
+    if(cx_fmt(original,sizeof original,"%s/unisacc-stream1.com",argv[2])||cx_fmt(image,sizeof image,"%s/alone",argv[3])||cx_fmt(input,sizeof input,"%s/input.c",argv[3])||cx_fmt(bad,sizeof bad,"%s/bad",argv[3])||sy_mkdir(argv[3],0700))return 2;
+    unsigned char *b;int64_t n;if(sy_read_file(original,&b,&n,67108864)||n<16)return 2;
+    char before[65],after[65];if(sy_sha256_hex(b,n,before))return 2;
+    const char *source="int x;\n";if(save(image,b,n)||cx_write(input,source,tx_len(source,1000)))return 2;
+    char *isolated[]={"PATH=/nonexistent","UNISA_CONTAINER=/nonexistent","UNISA_KERNEL=","UNISA_KERNEL_SHA=","UNISA_MAXSTEPS=200000000",0};
+    np_result r={0};int rc=run(image,input,argv[3],isolated,&r);
+    ck(!rc&&exact_frame(&r,source),"alone-without-product-or-path");np_free(&r);
+    if(save(bad,b,n-1))return 2;
+    ck(rejection(bad,input,argv[3],isolated,"self package footer"),"truncated-footer-refused");
+    long extent=0;for(int i=7;i>=0;i--){if(extent>(n-16-b[n-8+i])/256)return 2;extent=extent*256+b[n-8+i];}
+    if(extent<=0||extent>n-16)return 2;long base=n-16-extent,at=base;
+    for(int lines=0;lines<3;lines++){while(at<n-16&&b[at]!='\n')at++;if(at==n-16)return 2;at++;}
+    if(at>=n-16)return 2;b[at]^=1;if(save(bad,b,n))return 2;b[at]^=1;
+    ck(rejection(bad,input,argv[3],isolated,"compressed model CRC"),"model-byte-tamper-refused");
+    const char *two="P 4 2 1 0\nD stream e2 src.c pp.locations 0\nM 1 1 1 0\nxM 1 1 1 0\nx";
+    long tn=tx_len(two,1000);np_buf multiple={0};np_put(&multiple,b,base);np_put(&multiple,two,tn);
+    unsigned char footer[16];if(mm_copy(footer,sizeof footer,"UNIPKG1\n",8))return 2;
+    for(int i=0;i<8;i++)footer[8+i]=(unsigned char)((unsigned long long)tn>>(8*i));np_put(&multiple,footer,16);
+    if(save(bad,multiple.p,multiple.n))return 2;mm_free(multiple.p);
+    ck(rejection(bad,input,argv[3],isolated,"exactly one stream model required"),"multiple-models-refused");
+    char *kernel[]={"UNISA_KERNEL=/nonexistent",0};
+    ck(rejection(image,input,argv[3],kernel,"external kernel forbidden"),"external-kernel-override-refused");
+    char *steps[]={"UNISA_KERNEL=","UNISA_KERNEL_SHA=","UNISA_MAXSTEPS=0",0};
+    ck(rejection(image,input,argv[3],steps,"UNISA_MAXSTEPS positive decimal required"),"invalid-step-budget-refused");
+    char absent[4400];if(cx_fmt(absent,sizeof absent,"%s/absent",argv[3]))return 2;
+    ck(rejection(image,absent,argv[3],isolated,"input read"),"missing-input-refused");
+    ck(rejection(image,argv[3],argv[3],isolated,"input read"),"directory-input-refused");
+    mm_free(b);if(sy_read_file(original,&b,&n,67108864)||sy_sha256_hex(b,n,after))return 2;mm_free(b);
+    ck(tx_eqz(before,after),"shared-container-unchanged");
+    printf("CHECK_ISOLATED_STREAM\tfailed=%d\n",failed);return failed?1:0;
+}

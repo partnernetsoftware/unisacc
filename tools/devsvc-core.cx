@@ -143,6 +143,7 @@ static int cfg_load(const char *root) {
             if (pl > 0 && !(pl == 1 && t2[1] == '-') && !cfg_set(cfg.lockpfx[cfg.nlockname], sizeof cfg.lockpfx[0], t2 + 1, pl)) bad++; else cfg.nlockname++;
             continue;
         }
+        if (kl > 6 && !memcmp(s, "admit_", 6)) continue;   /* admit_* rows belong to cxlib.flowadmit (load gate) */
         for (k = 0; k < 7; k++) if ((long)strlen(keys[k]) == kl && !memcmp(s, keys[k], kl)) break;
         if (k == 7) { static int warned; if (!warned++) fprintf(stderr, "devsvc: WARN repo table: unknown row kind %.*s ignored (newer table?)\n", (int)kl, s); continue; }
         if ((seen & (1 << k)) || !cfg_set(dst[k], cap[k], t + 1, vl)) { bad++; continue; }
@@ -622,6 +623,17 @@ static int cmd_status(const char *root, int paths) {
    含写节点的流先拉起实例,拉不起即 REFUSE writes-need-service(rc 1,不写)。 ---- */
 static char fl_owner[64], held[MAXLOCK][64]; static int held_mine[MAXLOCK], nheld, svc_on, flow_needw;
 static int local_writes_ok(void) { const char *e = getenv("DEVSVC_LOCAL_WRITES"); return e && !strcmp(e, "1"); }   /* 仅检查用:允许本地无锁写 */
+/* 嵌套继承规则(plans/devsvc.md 第 3 节):devsvc 给子进程导出 UNISACC_FLOW_ROOT 时同时导出标记 UNISACC_FLOW_ROOT_JOB=<该根>。
+   本进程根 ROOT 等于标记根或在其下 = 同仓嵌套,继承照旧;不在其下,且 UNISACC_FLOW_ROOT 仍是标记所记的那个继承值,就丢弃它改用 ROOT。
+   未带标记的 UNISACC_FLOW_ROOT 视为调用者显式给的,始终保留。返回 0 成功。 */
+static int dv_under(const char *r, const char *top) { long n = (long)strlen(top); return n > 0 && !strncmp(r, top, n) && (r[n] == 0 || r[n] == '/' || top[n - 1] == '/'); }
+static int flow_root_env(const char *root) {
+    const char *j = getenv("UNISACC_FLOW_ROOT_JOB"), *fr = getenv("UNISACC_FLOW_ROOT"); char keep[PW];
+    if (fr && *fr && j && *j && !strcmp(fr, j) && !dv_under(root, j)) fr = 0;
+    if (fr && *fr) { if (snprintf(keep, sizeof keep, "%s", fr) >= (int)sizeof keep) return -1; }
+    else if (snprintf(keep, sizeof keep, "%s", root) >= (int)sizeof keep || setenv("UNISACC_FLOW_ROOT", keep, 1)) return -1;
+    return setenv("UNISACC_FLOW_ROOT_JOB", keep, 1);
+}
 /* 写命令的实例探测:wr 时无实例先拉起(上限 40 s),拉不起打 REFUSE writes-need-service 返回 -1;否则 1 有实例、0 无(只读) */
 static int wr_svc(const char *root, int wr) {
     int need = wr && !local_writes_ok();
@@ -844,7 +856,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         if (r) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s for node %s: %s\n", nm, f.n[i].id, resp); lk_drop(root); fl_free(&f); return 1; }
     }
     nl = nheld;
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); fl_free(&f); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); fl_free(&f); return 2; }
     sy_sig_watch(SIGINT); sy_sig_watch(SIGTERM); sy_sig_watch(SIGHUP);
     fl_set_cancel(cancel_hit);
     { long t0c = sy_now_ms();
@@ -901,8 +913,9 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         if (en2 > 0) { F(hd, sizeof hd, "==> %s.err %ld <==\n", f.n[i].id, en2); outs(hd, strlen(hd)); fflush(stdout); outfile(p); outs("\n", 1); }
     }
     {   char ln[PW + 400];
-        F(ln, sizeof ln, "DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\tpeak_tokens=%d\tadmit_wait_ms=%ld\trun=%s\n",
-          f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, s.peak_tokens, s.admit_wait_ms, rdir);
+        F(ln, sizeof ln, "DEVSVC_FLOW\tnodes=%d\tok=%d\tfail=%d\ttimeout=%d\tskip=%d\twall_ms=%ld\tpeak=%d\tjobs=%d\tvia=%s\tlocks=%d\tpeak_tokens=%d\tadmit_wait_ms=%ld\tadmit=%s\tload_defer=%d\trun=%s\n",
+          f.count, s.ok, s.fail, s.timeout, s.skip, s.wall_ms, s.max_running, jobs, svc_on ? "service" : "local", nl, s.peak_tokens, s.admit_wait_ms,
+          s.load_timeout ? "timeout" : s.load_defer ? "deferred" : "ok", s.load_defer, rdir);
         outs(ln, strlen(ln)); }
     if (oc.on) {   /* --cat 未给时全量仍含各节点输出(附录,只落盘不参与过滤),便于事后查看 */
         long keep = ocb.n;
@@ -1050,7 +1063,11 @@ static int cmd_f(const char *root, int argc, char **argv) {
         const char *sep = opt(argc, argv, "--sep", SEP_NEW), *nxt = opt(argc, argv, "--sep-next", SEP_NEXT);
         if (!flag(argc, argv, "--stdin") || !*sep || !*nxt || !strcmp(sep, nxt)) return 2;
         if ((n = stdin_all()) < 0) { fprintf(stderr, "F\tedits\tfail\tEARG: stdin limit %ld bytes\n", (long)sizeof big - 2); return 1; }
-        if (sy_read_file(path, &cur, &cn, 1 << 26) || !cur) { fprintf(stderr, "F\tedits\tfail\tENOENT: cannot read %s\n", path); return 1; }
+        {   /* 相对路径按写根解析(同 file.write:UNISACC_FLOW_ROOT,缺省仓根),不按 cwd;否则读的文件与落盘的文件可能不是同一个 */
+            static char rp[PW]; const char *fr = getenv("UNISACC_FLOW_ROOT"); int k;
+            k = path[0] == '/' ? snprintf(rp, sizeof rp, "%s", path) : snprintf(rp, sizeof rp, "%s/%s", fr && *fr ? fr : root, path);
+            if (k < 0 || k >= (int)sizeof rp) { fprintf(stderr, "F\tedits\tfail\tEARG: path too long\n"); return 1; }
+            if (sy_read_file(rp, &cur, &cn, 1 << 26) || !cur) { fprintf(stderr, "F\tedits\tfail\tENOENT: cannot read %s\n", rp); return 1; } }
         if (sy_sha256_hex(cur, cn, ehex)) { free(cur); return 1; }
         if (*xs && strcmp(xs, ehex)) { fprintf(stderr, "F\tedits\tfail\tESHA: expect %s have %s\n", xs, ehex); free(cur); return 1; }
         for (;;) {
@@ -1117,7 +1134,7 @@ static int cmd_f(const char *root, int argc, char **argv) {
         else if (r == 3) { fprintf(stderr, "F\t%s\trefused\tREFUSE writes-need-service: instance lost; nothing written\n", op); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "F\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); return 2; }
     memset(&o, 0, sizeof o);
     r = ff_run(fop, b.p, &o);
     if (tmpf[0]) sy_unlink(tmpf);
@@ -1176,7 +1193,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
         printf("DOC\tcreate\tok\tlines=1\n");
         return 0;
     }
-    if (strcmp(op, "get") && strcmp(op, "set") && strcmp(op, "append") && strcmp(op, "remove") && strcmp(op, "list") && strcmp(op, "mermaid")) return 2;
+    if (strcmp(op, "get") && strcmp(op, "set") && strcmp(op, "append") && strcmp(op, "remove") && strcmp(op, "list") && strcmp(op, "mermaid") && strcmp(op, "repair")) return 2;
     for (i = 0; i < cfg.ndoc; i++) if (doc_glob(cfg.docpat[i], path)) ok = 1;
     if (!ok || strstr(path, "..")) { fprintf(stderr, "DOC\t%s\trefused\tEDOC: %s is not a doc of the repo table\n", op, path); return 1; }
     wr = strcmp(op, "get") && strcmp(op, "list");
@@ -1185,7 +1202,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
     if (argc >= 3 && argv[2][0] != '-') ab_kv(&b, "section", argv[2], strlen(argv[2]));
     for (i = 3; i < argc; i++) {
         const char *eq = strchr(argv[i], '=');
-        if (argv[i][0] == '-') { if (i + 1 < argc && strcmp(argv[i], "--all")) i++; continue; }
+        if (argv[i][0] == '-') { if (i + 1 < argc && strcmp(argv[i], "--all") && strcmp(argv[i], "--body")) i++; continue; }
         if (!eq || eq == argv[i]) return 2;
         if (eq[-1] == '@') {
             char k[64]; unsigned char *t = 0; int64_t tn = 0;
@@ -1210,6 +1227,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
         ab_kv(&b, !strcmp(op, "set") ? "content" : "line", t ? (char *)t : "", (long)tn);
         if (t) free(t);
     }
+    if (flag(argc, argv, "--body")) ab_kv(&b, "body", "1", 1);   /* get --body: section body only, set --from takes it back */
     xs = opt(argc, argv, "--expect-sha", "");
     if (*xs) ab_kv(&b, "expect_sha", xs, strlen(xs));
     if (ovf || !b.p) return 2;
@@ -1222,7 +1240,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
         else if (r == 3) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost; nothing written\n"); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "DOC\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); return 2; }
     memset(&o, 0, sizeof o);
     r = fd_run(fop, b.p, &o);
     lk_drop(root);
@@ -1494,7 +1512,7 @@ static int git_add(const char *root, int argc, char **argv) {
     return rc ? 1 : 0;
 }
 static int cmd_git(const char *root, int argc, char **argv) {
-    long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
+    long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128], sha0[128];
     git_argerr = 0;
     if (argc < 1) { git_argerr = 1; return 2; }
     if (!strcmp(argv[0], "status") && argc == 1) return git_status(root);
@@ -1547,6 +1565,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
      * 门在私有树的检出上求值(不读共享索引与共享工作树),只在最后对 HEAD 做一次比较并交换(git update-ref NEW OLD);
      * HEAD 被他人推进且本请求路径未变则整遍重放,变了则具名报冲突。路径不重叠的 commit 因此真并行;
      * 写域锁(need)照旧按路径取。提交后只把本请求路径同步进共享索引(撞 index.lock 重试 12 次)。push 在提交之后、不持任何提交锁。 */
+    {   char *bv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(bv, sha0, sizeof sha0) == 0) chomp(sha0); else sha0[0] = 0; }
     {   x_last_err[0] = 0;
         rc = tool_locked_cwd(root, need, "tools/commit-own.cx", cwd, n, v);
         if (rc != 0) err_tail(x_last_err, 20);   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行(调用方常只看末几行) */
@@ -1554,8 +1573,17 @@ static int cmd_git(const char *root, int argc, char **argv) {
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
             char *pv[] = {"--par", "1", "--cwd", (char *)cwd, "--", "git", "push", "origin", rs, 0}; pushed = cmd_x(root, 9, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
-    if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s\n", rc, sha, pushed, sy_now_ms() - t0, wbr, cwd);
-    else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\n", rc, sha, pushed, sy_now_ms() - t0);
+    /* 未产生新提交(rc 非 0 且 HEAD 未动,或取不到 HEAD)时 commit=none,并在行尾加 reason=:
+     * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
+     * 旧 HEAD 不再写进 commit= 冒充新提交。提交已落地但推送失败时 commit= 仍是新 HEAD,reason=push-failed。 */
+    {   const char *why = 0;
+        if (rc != 0 && (!sha[0] || !strcmp(sha, sha0))) { why = rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked"; F(sha, sizeof sha, "none"); }
+        else if (rc != 0 && push && !pushed) why = "push-failed";
+        else if (rc != 0) why = "failed";
+        if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s", rc, sha, pushed, sy_now_ms() - t0, wbr, cwd);
+        else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld", rc, sha, pushed, sy_now_ms() - t0);
+        if (why) printf("\treason=%s", why);
+        printf("\n"); }
     return rc;
 }
 
@@ -1952,7 +1980,7 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "run")) { int r = cmd_run(root, argc, argv); return r == 2 && argc < 1 ? usage() : r; }
     if (!strcmp(cmd, "doc")) {
         int r = cmd_doc(root, argc, argv);
-        if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad doc arguments: doc get|set|append|remove|list|mermaid FILE SECTION [k=v|k@=PATH ...] [--from F] [--expect-sha X]\n");
+        if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad doc arguments: doc get|set|append|remove|list|mermaid|repair FILE SECTION [k=v|k@=PATH ...] [--from F] [--body] [--expect-sha X]  (a '/' inside a title is written %%2F, '%%' as %%25)\n");
         return r;
     }
     if (!strcmp(cmd, "task")) {   /* 工单转 tools/devtask.cx task ...;参数、具名拒绝与各子命令 --help 由 devtask 给出 */
@@ -1960,6 +1988,15 @@ static int main2(int argc, char **argv) {
         if (argc > 58) { fprintf(stderr, "devsvc: task: too many arguments (%d, max 58)\n", argc); return 2; }
         v[n++] = "--quiet"; v[n++] = "tools/devtask.cx"; v[n++] = "task";
         for (i = 0; i < argc; i++) v[n++] = argv[i];
+        v[n] = 0;
+        return cmd_run(root, n, v);
+    }
+    if (!strcmp(cmd, "precheck")) {   /* precheck --files PATH...:转 tools/precommit.cx -- --precheck PATH...(plans/devsvc.md 6 P6),逐门判定与耗时,不动索引 */
+        char *v[64]; int n = 0, i;
+        if (argc < 2 || strcmp(argv[0], "--files")) { fprintf(stderr, "devsvc: usage: precheck --files PATH...\n"); return 2; }
+        if (argc > 58) { fprintf(stderr, "devsvc: precheck: too many paths (%d, max 57)\n", argc - 1); return 2; }
+        v[n++] = "--quiet"; v[n++] = "tools/precommit.cx"; v[n++] = "--precheck";
+        for (i = 1; i < argc; i++) v[n++] = argv[i];
         v[n] = 0;
         return cmd_run(root, n, v);
     }

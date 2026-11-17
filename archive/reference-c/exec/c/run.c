@@ -567,7 +567,7 @@ static void load(const char *path) {
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
 UNISA_RUNTIME_STATE unsigned char *PFILE, *PB; UNISA_RUNTIME_STATE int PN, PM, PS;
 UNISA_RUNTIME_STATE int *POFF, *PLEN, *PRAW; UNISA_RUNTIME_STATE uint32_t *PCRC; UNISA_RUNTIME_STATE int PVER; UNISA_RUNTIME_STATE Stage *STAGES;
-typedef struct { int name, n, data, len; } Resource;
+typedef struct { int name, n, data, len, rawlen, codec; unsigned crc; } Resource;
 UNISA_RUNTIME_STATE Resource *RES; UNISA_RUNTIME_STATE int NR;
 /* A parsed package: the file bytes plus the directory tables the globals
    above point into. It is owned by a cache, built once per package stamp. */
@@ -622,7 +622,7 @@ static void package_release(Package *p) {
 static void package_bind(const Package *p) {
     PFILE = p->file; PB = p->b; PN = p->n; PM = p->m; PS = p->s; PVER = p->ver;
     POFF = p->off; PLEN = p->len; PRAW = p->raw; PCRC = p->crc; STAGES = p->stages; RES = p->res; NR = p->nr;
-    if (PVER == 3) crc_init();
+    if (PVER >= 3) crc_init();
 }
 static void package_unbind(void) {
     PFILE = PB = 0; PN = PM = PS = PVER = 0; POFF = PLEN = PRAW = 0; PCRC = 0; STAGES = 0; RES = 0; NR = 0;
@@ -658,12 +658,12 @@ static void package_parse(Package *p, long fd, const char *path) {
     if(cxpk_decode(&d,p->b,p->n))die(d.why?d.why:"invalid package input");
     unsigned char *file=p->file;char *saved_path=p->path;FileStamp stamp=p->stamp;
     *p=d.package;p->file=file;p->path=saved_path;p->stamp=stamp;
-    if(p->ver==3)crc_init();
+    if(p->ver>=3)crc_init();
 #else
     LBIN = 0; LB = p->b; LN = p->n; LP = 0;
     ltag('P'); int version = lint();
-    if (version != 1 && version != 2 && version != 3) die("unknown package version");
-    p->ver = version; if (version == 3) crc_init();
+    if (version != 1 && version != 2 && version != 3 && version != 4) die("unknown package version");
+    p->ver = version; if (version >= 3) crc_init();
     int pm = lint(), ps = lint(), nr = version >= 2 ? lint() : 0;
     if (nr < 0 || nr > p->n/5) die("bad resource count");
     p->res = mrealloc(0, sizeof(Resource)*nr); p->nr = nr;
@@ -685,7 +685,7 @@ static void package_parse(Package *p, long fd, const char *path) {
     }
     for (int i = 0; i < pm; i++) {
         ltag('M'); int n = lint(); p->raw[i]=n; p->crc[i]=0;
-        if (version == 3) {
+        if (version >= 3) {
             p->raw[i]=lint(); int codec=lint(); I checksum=lnum();
             if (p->raw[i]<=0 || codec!=1 || checksum<0 || checksum>(I)UINT32_MAX) die("bad compressed model header");
             p->crc[i]=(uint32_t)checksum;
@@ -696,8 +696,18 @@ static void package_parse(Package *p, long fd, const char *path) {
     }
     for (int i = 0; i < nr; i++) {
         ltag('F'); int n = lint(), len = lint();
+        int rawlen = len, codec = 0; I checksum = 0;
+        if (version >= 4) {
+            rawlen = lint(); codec = lint(); checksum = lnum();
+            if (codec == 1) {
+                if (len <= 0 || rawlen <= 0 || checksum < 0 || checksum > (I)UINT32_MAX) die("bad compressed resource header");
+            } else if (codec == 0) {
+                if (rawlen != len) die("raw resource rawlen mismatch");
+            } else die("bad resource codec");
+        }
         if (LP >= LN || LB[LP++] != 10 || n <= 0 || len < 0 || n > LN-LP || len > LN-LP-n) die("bad resource extent");
         p->res[i].name = LP; p->res[i].n = n; p->res[i].data = LP+n; p->res[i].len = len;
+        p->res[i].rawlen = rawlen; p->res[i].codec = codec; p->res[i].crc = (uint32_t)checksum;
         for (int j = 0; j < i; j++)
             if (p->res[j].n == n && !memcmp(p->b+p->res[j].name, p->b+LP, n)) die("duplicate resource name");
         LP += n+len;
@@ -1842,6 +1852,16 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
     if(rf_capture_dir())rf_capture_record(p,n,owned,*bytes,*len);
     return owned;
 }
+/* Raw resources borrow package bytes; an inflated resource is per-fetch owned.
+   core_host_fetch callers already release ownership code 2 after copying it. */
+static int package_resource_fetch(int index,unsigned char **bytes,int *len) {
+    const Resource *r = &RES[index];
+    if (!r->codec) { *bytes = PB + r->data; *len = r->len; return 1; }
+    unsigned char *raw = xrealloc(0, (size_t)r->rawlen);
+    if (unisa_inflate(raw, (unsigned long)r->rawlen, PB + r->data, (unsigned long)r->len) ||
+        crc((char *)raw,r->rawlen) != r->crc) { free(raw); die("bad compressed resource"); }
+    *bytes = raw; *len = r->rawlen; return 2;
+}
 static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
 #ifdef UNISA_CX_SOURCE_FRAME
     for (int j=0;j<NRI;j++) {
@@ -1852,15 +1872,14 @@ static int rf_default_fetch(const unsigned char *p,int n,unsigned char **bytes,i
     for (int j=0;j<NR;j++) {
         int hit = cxsf_fetch_row(p, n, PB + RES[j].name, RES[j].n, PB + RES[j].data, RES[j].len, bytes, len);
         if (hit == 4) return 0;
-        if (hit == 1) return 1;
+        if (hit == 1) return package_resource_fetch(j,bytes,len);
     }
 #else
     for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
         *bytes=(unsigned char *)RI[j].data; *len=RI[j].len; return 1;
     }
-    for (int j=0;j<NR;j++) if (RES[j].n==n && !memcmp(PB+RES[j].name,p,n)) {
-        *bytes=PB+RES[j].data; *len=RES[j].len; return 1;
-    }
+    for (int j=0;j<NR;j++) if (RES[j].n==n && !memcmp(PB+RES[j].name,p,n))
+        return package_resource_fetch(j,bytes,len);
 #endif
     char path[4096];
 #ifdef UNISA_CX_SOURCE_FRAME
@@ -2161,10 +2180,10 @@ static int runroute_range(const char *route, const char *first_stage, const char
             int len = 0, use_owned = 0, out_len = 0, opened;
             char why[80];
             if (!cached) { bytes = PB + POFF[m]; len = PLEN[m]; }
-            if (!cached && PVER == 3) owned = xrealloc(0, (size_t)PRAW[m]);
+            if (!cached && PVER >= 3) owned = xrealloc(0, (size_t)PRAW[m]);
             opened = rt_open(PVER, cached, bytes, len, owned,
-                             (!cached && PVER == 3) ? PRAW[m] : 0,
-                             (!cached && PVER == 3) ? PCRC[m] : 0,
+                             (!cached && PVER >= 3) ? PRAW[m] : 0,
+                             (!cached && PVER >= 3) ? PCRC[m] : 0,
                              unisa_inflate, crc, &use_owned, &out_len, why, (long)sizeof why);
             if (sh_apply(opened, use_owned, out_len, slot != 0, why, slot,
                          bytes, len, owned,
@@ -2176,7 +2195,7 @@ static int runroute_range(const char *route, const char *first_stage, const char
         if (slot && slot->loaded) model_bind(slot);
         else {
             unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
-            if (PVER == 3) {
+            if (PVER >= 3) {
                 owned = xrealloc(0, PRAW[m]);
                 if (unisa_inflate(owned, PRAW[m], bytes, len)) die("invalid compressed model");
                 if (crc((char *)owned, PRAW[m]) != PCRC[m]) die("compressed model CRC");

@@ -802,7 +802,7 @@ static int pprim(Lex *L, Prog *P) {
     }
     L->pos = save_pos; L->tok = save_tok; L->num = save_num; L->fnum = save_fnum;
     strncpy(L->id, save_id, 64);
-    if (n > 64) { P->err = "list too long"; return 0; }
+    if (n > 256) { P->err = "list too long"; return 0; }
     if (!emit(P, OP_MKLIST, n)) return 0;
     if (!emit(P, OP_STORE, scratch)) return 0;
     int elem_ty = 0;
@@ -2668,6 +2668,16 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!sect(mod,5,&mems)) return 0;
   if (!sect(mod,7,&exps)) return 0;
   if (!sect(mod,10,&codes)) return 0;
+  {
+    Buf custom;
+    static const uint8_t nm[] = {'u','j','s','m','e','t','a'};
+    if (!g_meta_len || !g_meta_ptr) return 1;
+    if (!binit(&custom, 1024)) return 0;
+    if (!bleu(&custom, 7)) return 0;
+    if (!braw(&custom, nm, 7)) return 0;
+    if (!braw(&custom, g_heap + g_meta_ptr, g_meta_len)) return 0;
+    if (!sect(mod, 0, &custom)) return 0;
+  }
   return 1;
 }
 
@@ -2738,10 +2748,10 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   while (L.tok != T_EOF) {
     if (!pstmt(&L, &P)) { g_need_gpu = 0; set_err(P.err ? P.err : "parse"); return 1; }
   }
+  if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
   if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err("emit"); return 1; }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
-  if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   g_need_gpu = 0;
   (void)PERSIST_FIT;
   return 0;

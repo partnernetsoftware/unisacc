@@ -4,6 +4,11 @@
  *   sh ./unisacc.com tools/s9-triage.cx -- AGG --ids [--status S,S] [--chunk N] 取批 id 清单(缺省 FAIL,UNKNOWN,REFUSED,MISSING)
  *   sh ./unisacc.com tools/s9-triage.cx -- AGG --diff OLD                       与上一轮 aggregate 对比
  *
+ *   sh ./unisacc.com tools/s9-triage.cx -- AGG --rerun-plan CLASS_LOG [--chunk 8 --jobs 2 --load-max 10] [--rerun-ids EXACT_IDS]
+ *   sh ./unisacc.com tools/s9-triage.cx -- --admit-load 10
+ * RERUN rows are shard plans, not results. Execute from the repository root in a new session;
+ * max_jobs is a per-shard ceiling, load admission returns 75 without running a batch when busy.
+ * Exact selection must equal OUTER_KILL union no-receipt; ASSERT injection is refused.
  * AGG 与 OLD 是 RUN/aggregate.out(`s9-shards aggregate` 的 stdout 原样落盘)。只读 `BATCH<TAB>id<TAB>STATUS[<TAB>k=v...]` 行。
  * 用途一(建根前预筛):--ids 的输出交给 `tools/affected.cx -- --ids ... --run -j N` 在工作树上逐批单跑,
  *   几分钟内筛出与候选无关的确定性失败,再决定要不要建新冻结根。单跑结果只是摸底,不是 s9 收据。
@@ -14,6 +19,12 @@
  */
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.allsession
+/* --classify RUN(只读,只加分栏):对 AGG 中每个 FAIL/UNKNOWN/REFUSED 批次,在 RUN/slice-* /wave-N/ 下找最后一份
+ * ID.receipt(切片名字典序最后、同切片取最大 wave),用 as_reason_class_dir 依收据与 stdout/stderr 归类,打印
+ *   CLASS<TAB>id<TAB>STATUS<TAB>类<TAB>收据 reason
+ * 与汇总行 REASON_CLASS<TAB>ASSERT=n ... UNCLASSIFIED=n<TAB>no_receipt=n,再打 S9_TRIAGE_CLASSIFY 带 pass/fail/unknown
+ * 原样计数(取自 AGG,与旧聚合逐批一致)。分类不改任何状态;找不到收据归 UNCLASSIFIED。 */
 
 #define MAXB 16384
 typedef struct { char *id, *st, *reason; } Row;
@@ -99,21 +110,131 @@ static const Row *find(const Row *rows, int n, const char *id) {
     return 0;
 }
 
+static char *rdir[MAXB]; static int rslice[MAXB], rwave[MAXB];
+static int name_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int list_dir(const char *p, char ***out) {
+    DIR *d = opendir(p); int n = 0, cap = 0; char **v = 0;
+    if (!d) return -1;
+    for (;;) {
+        struct dirent *e; errno = 0; e = readdir(d);
+        if (!e) break;
+        if (e->d_name[0] == '.') continue;
+        if (n == cap) { cap = cap ? cap * 2 : 64; v = (char **)realloc(v, (size_t)cap * sizeof *v); if (!v) refuse("allocation", p); }
+        { size_t z = strlen(e->d_name) + 1; v[n] = (char *)malloc(z); if (!v[n] || cx_fmt(v[n], z, "%s", e->d_name)) refuse("allocation", p); } n++;
+    }
+    closedir(d);
+    if (n) qsort(v, (size_t)n, sizeof *v, name_cmp);
+    *out = v; return n;
+}
+static int nonpass_st(const char *s) { return !strcmp(s, "FAIL") || !strcmp(s, "UNKNOWN") || !strcmp(s, "REFUSED"); }
+static int classify(const char *run, int n) {
+    char **sl = 0; int ns = list_dir(run, &sl), k, i, cnt[8] = {0}, noreceipt = 0, pass = 0, fail = 0, unknown = 0, refused = 0, missing = 0;
+    if (ns < 0) refuse("run-unreadable", run);
+    for (k = 0; k < ns; k++) {
+        char sp[4400], **wv = 0; int nw, w; struct stat st;
+        if (strncmp(sl[k], "slice-", 6) || cx_fmt(sp, sizeof sp, "%s/%s", run, sl[k]) || lstat(sp, &st) || !S_ISDIR(st.st_mode)) continue;
+        nw = list_dir(sp, &wv);
+        for (w = 0; w < nw; w++) {
+            char wp[4400], **fv = 0; int nf, f, wn; char *x = 0;
+            if (strncmp(wv[w], "wave-", 5)) continue;
+            wn = (int)strtol(wv[w] + 5, &x, 10); if (!x || *x) continue;
+            if (cx_fmt(wp, sizeof wp, "%s/%s", sp, wv[w])) continue;
+            nf = list_dir(wp, &fv);
+            for (f = 0; f < nf; f++) {
+                size_t z = strlen(fv[f]); char id[200]; const Row *r;
+                if (z <= 8 || strcmp(fv[f] + z - 8, ".receipt") || z - 8 >= sizeof id) continue;
+                if (cx_fmt(id, sizeof id, "%.*s", (int)(z - 8), fv[f])) continue;
+                r = find(cur, n, id); if (!r || !nonpass_st(r->st)) continue;
+                i = (int)(r - cur);
+                if (rdir[i] && (rslice[i] > k || (rslice[i] == k && rwave[i] > wn))) continue;
+                free(rdir[i]); { size_t z = strlen(wp) + 1; rdir[i] = (char *)malloc(z); if (!rdir[i] || cx_fmt(rdir[i], z, "%s", wp)) refuse("allocation", wp); } rslice[i] = k; rwave[i] = wn;
+            }
+            for (f = 0; f < nf; f++) free(fv[f]);
+            free(fv);
+        }
+        for (w = 0; w < nw; w++) free(wv[w]);
+        free(wv);
+    }
+    for (i = 0; i < n; i++) {
+        const char *s = cur[i].st;
+        if (!strcmp(s, "PASS")) pass++; else if (!strcmp(s, "FAIL")) fail++; else if (!strcmp(s, "UNKNOWN")) unknown++; else if (!strcmp(s, "REFUSED")) refused++; else if (!strcmp(s, "MISSING")) missing++;
+        if (!nonpass_st(s)) continue;
+        { char vb[160]; const char *vr = "no-receipt"; int c = 5;
+          if (rdir[i]) { const char *got = 0; c = as_reason_class_dir(rdir[i], cur[i].id, &got, vb, sizeof vb); vr = got && got[0] ? got : "-"; } else noreceipt++;
+          cnt[c]++;
+          printf("CLASS\t%s\t%s\t%s\t%s\n", cur[i].id, s, as_reason_name(c), vr); }
+    }
+    printf("REASON_CLASS");
+    for (k = 0; k < 6; k++) printf("\t%s=%d", as_reason_name(k), cnt[k]);
+    printf("\tno_receipt=%d\n", noreceipt);
+    printf("S9_TRIAGE_CLASSIFY\tbatches=%d\tpass=%d\tfail=%d\tunknown=%d\trefused=%d\tmissing=%d\tnote=triage-only-not-a-verdict\n", n, pass, fail, unknown, refused, missing);
+    for (k = 0; k < ns; k++) free(sl[k]);
+    free(sl);
+    return 0;
+}
+
+/* A plan is a fresh execution request, never a test verdict. Classification
+ * must cover exactly the aggregate's nonpass rows and match its own census. */
+static int plan_uint(const char *s,int max){char *e;long v;errno=0;v=strtol(s,&e,10);if(errno||!*s||*e||v<1||v>max)refuse("plan-integer",s);return (int)v;}
+static int rerun_plan(const char *agg,const char *log,const char *set,int n,int jobs,int chunk,int loadmax){
+ unsigned char seen[MAXB]={0},eligible[MAXB]={0},chosen[MAXB]={0};
+ int actual[6]={0},declared[7]={0},summary=0,outer=0,absent=0,total=0,rows=0;
+ char *b=slurp(log),*ln,*next;char ah[65],ch[65];
+ if(!b)refuse("class-unreadable",log);cx_sha256_hex(b,strlen(b),ch);
+ {char *a=slurp(agg);if(!a)refuse("unreadable",agg);cx_sha256_hex(a,strlen(a),ah);free(a);}
+ if(((chunk+jobs-1)/jobs)*60000>240000)refuse("plan-shard-deadline","reduce --chunk or increase --jobs");
+ for(ln=b;*ln;ln=next){char *e=strchr(ln,'\n');if(e){*e=0;next=e+1;}else next=ln+strlen(ln);
+  if(!strncmp(ln,"CLASS\t",6)){char *v[4];v[0]=ln+6;for(int k=1;k<4;k++){char*t=strchr(v[k-1],'\t');if(!t)refuse("class-fields",log);*t=0;v[k]=t+1;}if(strchr(v[3],'\t'))refuse("class-fields",v[0]);
+   const Row*r=find(cur,n,v[0]);if(!r||!nonpass_st(r->st)||strcmp(r->st,v[1]))refuse("class-aggregate-mismatch",v[0]);int i=(int)(r-cur),c=-1;
+   if(seen[i]++)refuse("class-duplicate",v[0]);for(int k=0;k<6;k++)if(!strcmp(v[2],as_reason_name(k)))c=k;if(c<0)refuse("class-unknown",v[2]);actual[c]++;rows++;
+   if(!strcmp(v[3],"no-receipt")){if(strcmp(v[2],"UNCLASSIFIED"))refuse("class-no-receipt-kind",v[0]);eligible[i]=2;absent++;}
+   else if(!strcmp(v[2],"OUTER_KILL")){eligible[i]=1;outer++;}
+  }else if(!strncmp(ln,"REASON_CLASS\t",13)){if(summary++)refuse("class-summary-duplicate",log);int flags[7]={0};char*p=ln+13;
+   while(p&&*p){char*t=strchr(p,'\t');if(t)*t++=0;char*eq=strchr(p,'=');if(!eq)refuse("class-summary-fields",log);*eq++=0;int k=-1;for(int j=0;j<6;j++)if(!strcmp(p,as_reason_name(j)))k=j;if(!strcmp(p,"no_receipt"))k=6;if(k<0||flags[k]++)refuse("class-summary-key",p);char*end;errno=0;long z=strtol(eq,&end,10);if(errno||!*eq||*end||z<0||z>MAXB)refuse("class-summary-value",eq);declared[k]=(int)z;p=t;}
+   for(int k=0;k<7;k++)if(!flags[k])refuse("class-summary-missing",log);
+  }
+ }
+ if(summary!=1)refuse("class-summary-missing",log);for(int k=0;k<6;k++)if(actual[k]!=declared[k])refuse("class-summary-count",as_reason_name(k));if(absent!=declared[6])refuse("class-summary-count","no_receipt");
+ for(int i=0;i<n;i++){if(nonpass_st(cur[i].st)&&!seen[i])refuse("class-row-missing",cur[i].id);if(eligible[i]){const char*p=cur[i].id;if(!*p)refuse("plan-id",p);for(;*p;p++)if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='-'||*p=='_'||*p=='.'))refuse("plan-id",cur[i].id);chosen[i]=1;total++;}}
+ if(set){char*s=slurp(set);if(!s)refuse("rerun-set-unreadable",set);memset(chosen,0,sizeof chosen);for(char*p=s;p&&*p;){char*e=strchr(p,'\n');if(e)*e++=0;const Row*r=find(cur,n,p);if(!r||!eligible[r-cur])refuse("rerun-ineligible",p);int i=(int)(r-cur);if(chosen[i]++)refuse("rerun-duplicate",p);p=e;}for(int i=0;i<n;i++)if(eligible[i]&&!chosen[i])refuse("rerun-set-incomplete",cur[i].id);free(s);}
+ printf("RERUN_INPUT\taggregate=%s\taggregate_sha256=%s\tclass_log=%s\tclass_sha256=%s\toriginal=READ_ONLY\tnew_receipts=SEPARATE_SESSION\tshards=SERIAL\n",agg,ah,log,ch);
+ puts("# RERUN columns: shard id source_state class max_jobs admit_load1_lt shard_deadline_ms batch_limit_s receipt_policy argv");int pos=0;
+ for(int i=0;i<n;i++)if(chosen[i]){printf("RERUN\t%03d\t%s\t%s\t%s\t%d\t%d\t250000\t55\tretain-original,new-session\tsh ./unisacc.com tools/s9-triage.cx -- --admit-load %d && sh ./unisacc.com tools/affected.cx -- --ids %s --prepare-materials --run -j 1\n",pos/chunk,cur[i].id,cur[i].st,eligible[i]==1?"OUTER_KILL":"no-receipt",jobs,loadmax,loadmax,cur[i].id);pos++;}
+ printf("S9_TRIAGE_RERUN\tselected=%d\touter_kill=%d\tno_receipt=%d\tshards=%d\tper_shard=%d\tmax_jobs=%d\tload1_lt=%d\tclass_rows=%d\tnote=plan-only-no-test-result\n",total,outer,absent,(total+chunk-1)/chunk,chunk,jobs,loadmax,rows);free(b);return 0;
+}
+
+static int load_admit(const char *arg){
+ int limit=plan_uint(arg,10);char b[256];double load;FILE*f=fopen("/proc/loadavg","rb");
+ if(!f)refuse("load-unreadable","/proc/loadavg");if(!fgets(b,sizeof b,f)){fclose(f);refuse("load-unreadable","/proc/loadavg");}fclose(f);
+ if(sscanf(b,"%lf",&load)!=1||!(load>=0))refuse("load-invalid","/proc/loadavg");
+ printf("RERUN_ADMIT\tload1=%.2f\tload1_lt=%d\tadmitted=%d\n",load,limit,load<limit);return load<limit?0:75;
+}
 int main(int argc, char **argv) {
-    const char *agg = 0, *oldp = 0, *status = "FAIL,UNKNOWN,REFUSED,MISSING";
-    int ids = 0, chunk = 1, n, m, i;
+    if(argc==3&&!strcmp(argv[1],"--admit-load"))return load_admit(argv[2]);
+    const char *agg = 0, *oldp = 0, *status = "FAIL,UNKNOWN,REFUSED,MISSING", *crun = 0;
+    int ids = 0, chunk = 1, n, m, i, explicit_chunk=0, jobs=2, loadmax=10;
+    const char *planlog=0,*planset=0,*chunkspec=0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--ids")) ids = 1;
         else if (!strcmp(argv[i], "--status") && i + 1 < argc) status = argv[++i];
-        else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) { chunk = atoi(argv[++i]); if (chunk < 1) refuse("chunk", argv[i]); }
+        else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) { chunk = atoi(argv[++i]); chunkspec=argv[i]; explicit_chunk=1; if (chunk < 1) refuse("chunk", argv[i]); }
+        else if (!strcmp(argv[i], "--rerun-plan") && i+1<argc) planlog=argv[++i];
+        else if (!strcmp(argv[i], "--rerun-ids") && i+1<argc) planset=argv[++i];
+        else if (!strcmp(argv[i], "--jobs") && i+1<argc) jobs=plan_uint(argv[++i],4);
+        else if (!strcmp(argv[i], "--load-max") && i+1<argc) loadmax=plan_uint(argv[++i],10);
         else if (!strcmp(argv[i], "--diff") && i + 1 < argc) oldp = argv[++i];
+        else if (!strcmp(argv[i], "--classify") && i + 1 < argc) crun = argv[++i];
         else if (argv[i][0] == '-') refuse("unknown-option", argv[i]);
         else if (!agg) agg = argv[i];
         else refuse("extra-argument", argv[i]);
     }
     if (!agg) refuse("usage", "AGG [--ids [--status S,S] [--chunk N] | --diff OLD]");
     if (ids && oldp) refuse("usage", "--ids and --diff are separate modes");
+    if(planlog&&(ids||oldp||crun))refuse("usage","--rerun-plan is a separate mode");
+    if(planset&&!planlog)refuse("usage","--rerun-ids needs --rerun-plan");
     n = parse(agg, cur);
+    if(planlog)return rerun_plan(agg,planlog,planset,n,jobs,explicit_chunk?plan_uint(chunkspec,16):8,loadmax);
+    if (crun) { if (ids || oldp) refuse("usage", "--classify is a separate mode"); return classify(crun, n); }
     if (ids) {
         int k = 0;
         for (i = 0; i < n; i++) {

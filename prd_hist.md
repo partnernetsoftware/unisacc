@@ -1,6 +1,6 @@
 # prd_hist.md —— 历史与证据记录（自 prd.md 迁出，逐字保留）
 
-本文件收纳曾追加在 `prd.md` 里的**带日期的完成记录与实测证据**（原格式 `〔日期 任务ID〕…`）。它们是历史，不是现行规范：现行规则、能力与状态只看 [prd.md](prd.md)。新增完成记录请写 `agentwork/ledger.tsv`，**不要再追加到 prd.md**；需要长期保留的证据放这里并在 prd.md 的索引里加一行。
+本文件收纳曾追加在 `prd.md` 里的**带日期的完成记录与实测证据**（原格式 `〔日期 任务ID〕…`）。它们是历史，不是现行规范：现行规则、能力与状态只看 [prd.md](prd.md)。共享决定与阻塞只写 `prd_mempalace.md`,过程保留在会话日志，**不要再追加到 prd.md**；需要长期保留的证据放这里并在 prd.md 的索引里加一行。
 
 迁出时间：2026-11-09（cc）。原位置：prd.md §10「归档索引」第 505–673 行。顺序未改，内容逐字，仅在末尾追加了本说明。
 
@@ -238,7 +238,7 @@ D1数据结论：模型大半raw字节是生成动作程序，选择器只是其
 
 ## 0.0.49 收尾（2026-11-10 自 prd.md §10 末尾逐字迁出；0.0.48.1 macOS 车道记录与 0.0.49 发布事实）
 
-迁出说明：以下 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 段落原在 prd.md「§10 子文档与归档索引」之后（提交 bb3e43d218 时第 476–525 行），顺序未改、内容逐字；箭头符号按 AGENTS.md 规则改写为 `->`，其余未动。0.0.49 发布事实本身（APE 2d3852a8、冻结源 979b56e4、CI 42661106290 QUALIFIED 42/0、s9 提交档 96/96、提交 X e3fc485793 / Y 35cfdd1e3a）见 [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md) 与 `agentwork/ledger.tsv` 2026-11-10 `RELEASE-0.0.49 PUBLISH_DECIDED` 行；教训见 [prd_release.md](prd_release.md) §3b。
+迁出说明：以下 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 段落原在 prd.md「§10 子文档与归档索引」之后（提交 bb3e43d218 时第 476–525 行），顺序未改、内容逐字；箭头符号按 AGENTS.md 规则改写为 `->`，其余未动。0.0.49 发布事实本身（APE 2d3852a8、冻结源 979b56e4、CI 42661106290 QUALIFIED 42/0、s9 提交档 96/96、提交 X e3fc485793 / Y 35cfdd1e3a）见 [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md) 与 `archive/agentwork-retire-2026-11/ledger.tsv` 2026-11-10 `RELEASE-0.0.49 PUBLISH_DECIDED` 行；教训见 [prd_release.md](prd_release.md) §3b。
 
 ### OSX-LAUNCH-SLOW（0.0.48 发布回归 P0）
 
