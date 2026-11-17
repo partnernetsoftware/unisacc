@@ -1108,7 +1108,11 @@ static int cmd_f(const char *root, int argc, char **argv) {
     if ((svc_on = wr_svc(root, wr)) < 0) return 1;
     if (wr && svc_on) {
         lk_name(root, path, nm);
-        r = lk_take(root, nm, 30 + wait / 1000, wait);
+        {   /* 编译上下文表里带验收命令的路径:命令最长 55 秒,锁租期相应加长,写入期间不失锁 */
+            char ck[32], cc[1024], cr[400]; int lease = 30 + wait / 1000;
+            if (ff_ctx_lookup(root, path, ck, cc, sizeof cc, cr, sizeof cr) == 1 && strcmp(cc, "-")) lease += 60;
+            r = lk_take(root, nm, lease, wait);
+        }
         if (r == 3 && local_writes_ok()) svc_on = 0;
         else if (r == 3) { fprintf(stderr, "F\t%s\trefused\tREFUSE writes-need-service: instance lost; nothing written\n", op); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "F\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
@@ -1119,7 +1123,8 @@ static int cmd_f(const char *root, int argc, char **argv) {
     if (tmpf[0]) sy_unlink(tmpf);
     lk_drop(root);
     if (snprintf(ev, sizeof ev, "0\tf.%s\t%s\t%ld\t%d\t%.200s %.120s", op, r ? "fail" : "ok", sy_now_ms() - t0, r ? (o.rc ? o.rc : 1) : 0, path, r ? o.why : o.sha) > 0) flow_emit(root, ev);
-    if (o.ccnote && snprintf(ev, sizeof ev, "0\tf.%s\t%s\t%ld\t0\towner=%s %.200s", o.ccnote == 1 ? "compile-skipped" : "compile-undecided", "ok", sy_now_ms() - t0, fl_owner, path) > 0) flow_emit(root, ev);
+    if (o.ccnote && snprintf(ev, sizeof ev, "0\tf.%s\t%s\t%ld\t0\towner=%s %.200s", o.ccnote == 1 ? "compile-skipped" : o.ccnote == 2 ? "compile-undecided" : o.ccnote == 3 ? "compile-context-skipped" : "compile-context-ok", "ok", sy_now_ms() - t0, fl_owner, path) > 0) flow_emit(root, ev);
+    if (!r && (o.ccnote == 3 || o.ccnote == 4)) printf("%s\n", o.ccmsg);
     if (r && !strcmp(o.err, "ECOMPILE")) {
         fprintf(stderr, "F\t%s\trefused-compile\t%s\n", op, o.why);
         if (o.buf && o.n > 0) fwrite(o.buf, 1, (size_t)o.n, stderr);
@@ -1908,6 +1913,17 @@ static int main2(int argc, char **argv) {
         for (i = 0; i < cfg.nlockname; i++) printf("CFG\tlockdomain\t%s\t%s\n", cfg.lockname[i], cfg.lockpfx[i][0] ? cfg.lockpfx[i] : "-");
         for (i = 0; i < cfg.ndoc; i++) printf("CFG\tdoc\t%s\n", cfg.docpat[i]);
         printf("CFG\ttable\t%s\tsource=%s\trev=%s\tsha256=%s\n", cfg.table, cfg.tabsrc, cfg.tabrev, cfg.tabsha);
+        {   /* 非独立 .cx 的编译上下文表(cxlib.flowfile ff_ctx_lookup 的同一份表):每个数据行原样带前缀输出 */
+            char cp[PW]; unsigned char *cb = 0; int64_t cn = 0, s0 = 0, k; int nctx = 0;
+            if (snprintf(cp, sizeof cp, "%s/build/devsvc-compile-context.tsv", root) < (int)sizeof cp && !sy_read_file(cp, &cb, &cn, 1 << 20) && cb) {
+                for (k = 0; k <= cn; k++) if (k == cn || cb[k] == '\n') {
+                    if (k > s0 && cb[s0] != '#') { printf("CFG\tcompilectx\t%.*s\n", (int)(k - s0), (const char *)cb + s0); nctx++; }
+                    s0 = k + 1;
+                }
+                free(cb);
+            }
+            printf("CFG\tcompilectx_table\tbuild/devsvc-compile-context.tsv\trows=%d\n", nctx);
+        }
         printf("DEVSVC_CONFIG\ttable=%s\tlocks=%d\tdocs=%d\tsource=%s\trev=%s\tsha256=%s\n", cfg.table, cfg.nlockname, cfg.ndoc, cfg.tabsrc, cfg.tabrev, cfg.tabsha);
         return 0;
     }
