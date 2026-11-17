@@ -33,7 +33,7 @@ window.addEventListener("keydown",e=>{ keys[e.code]=1; });
 window.addEventListener("keyup",e=>{ keys[e.code]=0; });
 
 let pal=[660520,1708064,530456,1574920,1052696,1310732,790548,657936];
-let ok=0, z=0, hdg=0, spd=0.4;
+let ok=0, z=0, hdg=0, spd=0.4, rt=null;
 
 let renderer=null;
 const scene=new Scene();
@@ -120,6 +120,7 @@ function submitGpu(host){
   host.host_frame_present();
 }
 function stepSim(){
+  let dt;
   if(!AUTO){
     if(keys.KeyA||keys.ArrowLeft) hdg-=0.03;
     if(keys.KeyD||keys.ArrowRight) hdg+=0.03;
@@ -127,10 +128,20 @@ function stepSim(){
     if(keys.KeyS||keys.ArrowDown) spd-=0.02;
     if(spd<0.15) spd=0.15;
     if(spd>1.2) spd=1.2;
-    z+=spd;
+    dt=spd;
   }else{
-    z+=0.35;
+    dt=0.35;
   }
+  let used=0;
+  if(rt&&typeof rt.step==="function"){
+    try{
+      const r=rt.step({hdg:hdg,dist:z,dt:dt});
+      if(r&&r.dist!=null){ z=Number(r.dist); used=1; }
+      if(r&&r.hdg!=null) hdg=Number(r.hdg);
+      if(r&&r.pal&&r.pal.length>=8) pal=r.pal;
+    }catch(e){ used=0; }
+  }
+  if(!used) z+=dt;
   const ri=realmAt(z);
   const col=rgb(pal[ri]);
   scene.clearColor=[col[0]*0.15,col[1]*0.18,col[2]*0.22,1];
@@ -146,15 +157,23 @@ function stepSim(){
   hud.textContent=(ok?"WATER_OK ":"")+"realm "+(ri+1)+"/8  UXE GL ship+fog+plane · WASD · no three";
   return ri;
 }
-
 (async function(){
   try{
-    const rt=await host1Boot(window.WATER_WASM);
-    const d=rt.readI64List(rt.mainHandle());
-    if(d.length>=8) pal=d.slice(-8);
-    ok=d.length>=8;
-    if(d.length>=128){ placeRocksFromList(d); placeLanternsFromList(d); houses.count=0; }
-  }catch(e){ ok=0; }
+    rt=await host1Boot(window.WATER_WASM);
+    let palSrc=null, d=null;
+    try{
+      const r=rt.step({hdg:0,dist:0,dt:0});
+      if(r&&r.pal) palSrc=r.pal;
+      if(r&&r.d) d=r.d;
+    }catch(e){}
+    if(!palSrc){
+      d=rt.readI64List(rt.mainHandle());
+      if(d.length>=8) palSrc=d.slice(-8);
+    }
+    if(palSrc&&palSrc.length>=8) pal=palSrc.slice(-8);
+    ok=!!(pal&&pal.length>=8);
+    if(d&&d.length>=128){ placeRocksFromList(d); placeLanternsFromList(d); houses.count=0; }
+  }catch(e){ ok=0; rt=null; }
   document.title=ok?"WATER_OK":"WATER_FAIL";
   if(AUTO) hud.textContent=(ok?"WATER_OK ":"")+"realm 1/8";
   let host=null, gpu=0;

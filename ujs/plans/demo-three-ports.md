@@ -71,9 +71,9 @@ three.module、原作 GLB/音频、抬 cxraw/cxtrunc、改 host1-pass 28 行、�
 
 ## 6. 下一动作
 
-W2 不能只改 host1-runtime:`run_step` 仍重跑 `main`。要 compiler 不重跑 `let`,或 UXE `sim` import。B 片单未锁前不扩 oneshot 网格。
+W2:`host1-runtime.step` 已有;四 demo wasm 仍 `globals:[]`,须改 `.ujs` 为注入式才算步进。B 片单未锁前不扩 oneshot 网格。
 
 ## 7. 进度
 
-Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。fly/water/ink/oneshot 已接 `host_gpu_submit`(失败回退)。W2 未做。不称替代 three。
+Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。W2 核 globals 未齐。不称替代 three。
 
