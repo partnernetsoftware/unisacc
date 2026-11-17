@@ -22,17 +22,21 @@
 | 标题 WATER KEEPS | 24,24,400,56 | `scene.text` | 无 |
 | 倒影占位 | 水面下镜像 | 半透明直通 | 复用上列,T5 替换 |
 
-## 色板(写死生成器表,assets.tsv 引用)
+## 色板(s0-palette.tsv;chrome 对 c-vt20000 8x8 平均)
 
 | 键 | hex |
 |---|---|
-| sky.top | `#1A1028` |
-| sky.mid | `#C45A18` |
-| sky.horizon | `#F0C060` |
-| water | `#3A2818` |
-| silhouette | `#0A0608` |
+| sky.top | `#AEA579` |
+| sky.mid | `#DAAF68` |
+| sky.horizon | `#EEB54C` |
+| water.far | `#A3733F` |
+| water.near | `#594020` |
+| silhouette | `#5B3B1C` |
 | lamp | `#FFE8A0` |
 | spark | `#FFD080` |
+
+水面=天空镜像暗化,不是单色深褐。缺口 `CX-PNG-INFLATE`。
+
 
 ## 美术方向
 
