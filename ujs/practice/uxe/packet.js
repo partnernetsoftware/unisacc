@@ -66,7 +66,11 @@ export function encodeRenderPacket(packet) {
   }
   if (useV4) {
     nbytes += 4;
-    for (const t of texs) nbytes += 8 + (t.w * t.h * 4);
+    for (const t of texs) {
+      const n = t.w * t.h * 4;
+      if (n > 1048576) throw new Error("tex too large");
+      nbytes += 8 + n;
+    }
   }
   const buf = new ArrayBuffer(nbytes);
   const dv = new DataView(buf);
@@ -157,7 +161,7 @@ function readClouds(dv, o, nClouds, ver) {
   return { clouds, o };
 }
 
-export function decodeRenderPacket(raw) {
+export function decodeRenderPacket(raw, cache) {
   const buf = ArrayBuffer.isView(raw)
     ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength)
     : raw;
@@ -240,9 +244,10 @@ export function decodeRenderPacket(raw) {
   for (let i = 0; i < clouds.length; i++) {
     const id = clouds[i].mapId | 0;
     if (!id) continue;
-    let ok = 0;
-    for (let j = 0; j < textures.length; j++) if (textures[j].id === id) ok = 1;
-    if (!ok) throw new Error("dangling mapId " + id);
+    let hit = 0;
+    for (let j = 0; j < textures.length; j++) if (textures[j].id === id) hit = 1;
+    if (!hit && cache && cache[id]) hit = 1;
+    if (!hit) throw new Error("dangling mapId " + id);
   }
   return {
     version: ver,
