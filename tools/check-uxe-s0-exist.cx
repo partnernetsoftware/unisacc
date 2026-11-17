@@ -1,6 +1,8 @@
 #pragma unisa use chrome_dom
-/* tools/check-uxe-s0-exist.cx -- 13 元素包围盒内外色差.
+#pragma unisa use sys.sha
+/* tools/check-uxe-s0-exist.cx -- 13 元素包围盒内外色差;规格列哈希锁.
  */
+
 static int failed;
 static void ck(int ok, const char *lab) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
@@ -8,9 +10,9 @@ static void ck(int ok, const char *lab) {
 }
 int main(void) {
     char cwd[512], url[800], line[256], ids[16][32];
-    int xmin[16], ymin[16], md[16], er[16], nels = 0, i, n, rc;
-
-    FILE *tf;
+    char spec[4096], hex[65], want[80];
+    int xmin[16], ymin[16], md[16], er[16], nels = 0, i, n, rc, sl = 0;
+    FILE *tf, *hf;
     char *av[12];
     char *out = 0;
     size_t on = 0;
@@ -20,10 +22,18 @@ int main(void) {
     if (!getcwd(cwd, sizeof cwd)) return 2;
     tf = fopen("ujs/plans/demo-v2/look-dev/s0-elements.tsv", "r");
     if (!tf) { printf("S0_EXIST_NO_TSV\n"); return 2; }
-    if (!fgets(line, sizeof line, tf)) { fclose(tf); return 2; }
     while (fgets(line, sizeof line, tf) && nels < 16) {
-        char *s = line;
+        char *s = line, *last = 0, *t;
         int k = 0, skip, d = 0;
+        t = line;
+        while (*t && *t != '\n' && *t != '\r') { if (*t == '\t') last = t; t++; }
+        if (last && sl < 4000) {
+            s = line;
+            while (s < last && sl < 4000) spec[sl++] = *s++;
+            spec[sl++] = '\n';
+        }
+        if (line[0] == 'i' && line[1] == 'd') continue;
+        s = line;
         while (*s && *s != '\t' && k < 31) { ids[nels][k++] = *s++; }
         ids[nels][k] = 0;
         if (*s == '\t') s++;
@@ -38,8 +48,20 @@ int main(void) {
         er[nels] = atoi(s);
         nels++;
     }
-
     fclose(tf);
+    hf = fopen("ujs/plans/demo-v2/look-dev/s0-spec.sha256", "r");
+    if (!hf) { printf("FAIL\t规格被改,请走规格变更提交\n"); return 1; }
+    if (!fgets(want, sizeof want, hf)) { fclose(hf); printf("FAIL\t规格被改,请走规格变更提交\n"); return 1; }
+    fclose(hf);
+    for (i = 0; want[i]; i++) if (want[i] == '\n' || want[i] == '\r') want[i] = 0;
+    sy_sha256_any_hex(spec, sl, hex);
+    if (strcmp(hex, want) != 0) {
+        printf("FAIL\t规格被改,请走规格变更提交\n");
+        printf("got=%s\nwant=%s\n", hex, want);
+        return 1;
+    }
+    ck(1, "spec-sha");
+
     n = 0;
     while (pre[n]) { url[n] = pre[n]; n++; }
     for (i = 0; cwd[i] && n < 600; i++) url[n++] = cwd[i];
@@ -91,8 +113,31 @@ int main(void) {
         printf("EL\tframe-fill\tgot=%d\tmin=1\n", fill);
     }
     if (out) free(out);
+
+    {
+        char u2[820];
+        int bi = -1, gotb = -1, gots = -1;
+        for (i = 0; i < nels; i++) if (ids[i][0]=='b' && ids[i][1]=='o' && ids[i][2]=='w' && ids[i][3]==0) bi = i;
+        n = 0; while (url[n]) { u2[n] = url[n]; n++; }
+        u2[n++] = '#'; u2[n++] = 'n'; u2[n++] = 'o'; u2[n++] = 'b'; u2[n++] = 'o'; u2[n++] = 'w'; u2[n] = 0;
+        av[6] = "--user-data-dir=/tmp/uxe-s0-nobow";
+        av[9] = u2;
+        out = 0; on = 0;
+        rc = cx_runv_timeout(av, 25, &out, &on);
+        p = out ? strstr(out, "<pre id=\"hud\">") : 0;
+        if (p) p = strchr(p, '{');
+        if (p && bi >= 0) {
+            q = strstr(p, "\"bow\":"); if (q) gotb = atoi(q + 6);
+            q = strstr(p, "\"sky\":"); if (q) gots = atoi(q + 6);
+        }
+        ck(gotb < (bi>=0?md[bi]:48), "nobow-bow-red");
+        ck(gots >= 29, "nobow-sky");
+        printf("EL\tnobow-bow\tgot=%d\n", gotb);
+        if (out) free(out);
+    }
     printf("CHECK_UXE_S0_EXIST\tn=%d\tfailed=%d\n", nels, failed);
     return failed ? 1 : 0;
+
 
 }
 
