@@ -230,6 +230,54 @@ int main(void) {
         unlink(inp);
     }
 
+    /* (a) a title containing "/" is addressed as %2F (and "%" as %25); doc.list emits the same
+       encoding so list -> get round-trips.  Negative control: the raw "/" stays a separator. */
+    put(docp(), "# 输入/输出\n\nio1\n\n# 50%\n\np1\n");
+    ck(fd_run("doc.get", A("section=输入%252F输出"), &o) == 0 && has(&o, "io1"), "slash_title_get_encoded");
+    ff_out_free(&o);
+    ck(fd_run("doc.get", A("section=输入/输出"), &o) == 1 && !strcmp(o.err, "ENOSEC"), "slash_title_raw_is_separator");
+    ff_out_free(&o);
+    ck(fd_run("doc.list", A(""), &o) == 0 && has(&o, "1\t输入%2F输出\n") && has(&o, "1\t50%25\n"), "slash_title_list_encoded");
+    ff_out_free(&o);
+    ck(fd_run("doc.get", A("section=50%2525"), &o) == 0 && has(&o, "p1"), "percent_title_get_encoded");
+    ff_out_free(&o);
+    ck(fd_run("doc.set", A("section=输入%252F输出;content=io2"), &o) == 0 && same("# 输入/输出\nio2\n\n# 50%\n\np1\n"), "slash_title_set");
+    ff_out_free(&o);
+
+    /* (b) get with body=1 omits the heading line, so its output fed back to set leaves the file
+       unchanged; negative control: the full get (heading included) fed to set is refused */
+    put(docp(), "# A\n\na1\na2\n\n# B\n\nb1\n");
+    {
+        ff_out g;
+        memset(&g, 0, sizeof g);
+        ck(fd_run("doc.get", A("section=A;body=1"), &g) == 0 && g.buf && !strncmp(g.buf, "\na1\na2\n", 7) && !has(&g, "# A"), "get_body_no_heading");
+        char *esc = (char *)mm_alloc(g.n * 3 + 1);
+        long en = ff_escape(g.buf, g.n, esc, g.n * 3 + 1); esc[en] = 0;
+        char la[2048];
+        SF(la, sizeof la, "section=A;content=%s", esc);
+        ck(fd_run("doc.set", A(la), &o) == 0, "get_body_set_ok");
+        ff_out_free(&o);
+        mm_free(esc);
+        ff_out_free(&g);
+    }
+    ck(same("# A\n\na1\na2\n\n# B\n\nb1\n"), "get_body_set_roundtrip_bytes");
+    ck(fd_run("doc.set", A("section=A;content=%23 A%0A%0Aa1%0A"), &o) == 1 && !strcmp(o.err, "EDUPHEAD"), "set_own_heading_refused");
+    ff_out_free(&o);
+    ck(same("# A\n\na1\na2\n\n# B\n\nb1\n"), "set_own_heading_refused_bytes_unchanged");
+
+    /* (c) repair merges sibling headings with the same title and level into the first one */
+    put(docp(), "# A\n# A\n\na1\n\n# B\n\nb1\n");
+    ck(fd_run("doc.get", A("section=A"), &o) == 1 && !strcmp(o.err, "EMULTISEC"), "dup_heading_emultisec");
+    ff_out_free(&o);
+    ck(fd_run("doc.repair", A("section=A"), &o) == 0 && same("# A\n\na1\n\n# B\n\nb1\n"), "repair_merges_dup_root");
+    ff_out_free(&o);
+    ck(fd_run("doc.repair", A("section=A"), &o) == 1 && !strcmp(o.err, "ENODUP"), "repair_nothing_to_do_refused");
+    ff_out_free(&o);
+    put(docp(), "# A\n\na1\n\n## A\n\nsub\n");
+    ck(fd_run("doc.repair", A("section=A"), &o) == 1 && same("# A\n\na1\n\n## A\n\nsub\n"), "repair_other_level_untouched");
+    ff_out_free(&o);
+    reset();
+
     SF(args, sizeof args, "root=%s;path=../outside.md;section=a;line=x", root);
     ck(fd_run("doc.append", args, &o) == 1, "outside_root_refused");
     ff_out_free(&o);
