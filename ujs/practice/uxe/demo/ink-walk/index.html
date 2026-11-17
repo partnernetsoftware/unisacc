@@ -39,7 +39,7 @@ const mid=scene.instances("m",5,[0.42,0.38,0.32]);
 mid.meshId=MESH_BOX;
 const near=scene.instances("n",6,[0.46,0.42,0.36]);
 near.meshId=MESH_BOX;
-let i, cam=0, ok=0;
+let i, cam=0, ok=0, rt=null;
 for(i=0;i<32;i++) trees.set(i,(i%8)*6-20, 2.2, -((i/8)|0)*12-8, 2+(i%3));
 for(i=0;i<14;i++) bridge.set(i, i*3-20, 0.6, -18, 1.2);
 const camera=new PerspectiveCamera();
@@ -51,10 +51,20 @@ function packCloud(c){
   };
 }
 function stepCam(){
+  let dt;
   if(!AUTO){
-    if(keys.KeyD||keys.ArrowRight) cam+=0.25;
-    if(keys.KeyA||keys.ArrowLeft) cam-=0.25;
-  }else cam+=0.08;
+    dt=0;
+    if(keys.KeyD||keys.ArrowRight) dt+=0.25;
+    if(keys.KeyA||keys.ArrowLeft) dt-=0.25;
+  }else dt=0.08;
+  let used=0;
+  if(rt&&typeof rt.step==="function"){
+    try{
+      const r=rt.step({cam:cam,dt:dt});
+      if(r&&r.cam!=null){ cam=Number(r.cam); used=1; }
+    }catch(e){ used=0; }
+  }
+  if(!used) cam+=dt;
   camera.setEye(cam, 5, 12);
   camera.setTarget(cam, 1, -20);
 }
@@ -73,10 +83,16 @@ function submitGpu(host){
 }
 (async function(){
   try{
-    const rt=await host1Boot(window.INK_WASM);
-    const d=rt.readI64List(rt.mainHandle());
-    ok=d.length>=12;
-    if(d.length>=38){
+    rt=await host1Boot(window.INK_WASM);
+    let d=null;
+    try{
+      const r=rt.step({cam:0,dt:0});
+      if(r&&r.d) d=r.d;
+      if(r&&r.cam!=null) cam=Number(r.cam);
+    }catch(e){}
+    if(!d) d=rt.readI64List(rt.mainHandle());
+    ok=d&&d.length>=12;
+    if(d&&d.length>=38){
       function xz(i){ return [(Number(d[i])-50)*0.4, (Number(d[i+1])-50)*0.4]; }
       for(i=0;i<6;i++){
         const p=xz(i*2);
@@ -105,7 +121,7 @@ function submitGpu(host){
       }
       trees.count=12;
     }
-  }catch(e){ ok=0; }
+  }catch(e){ ok=0; rt=null; }
   document.title=ok?"INK_OK":"INK_FAIL";
   if(AUTO) document.getElementById("hud").textContent=(ok?"INK_OK":"INK_FAIL");
   let host=null, gpu=0;
