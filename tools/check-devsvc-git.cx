@@ -312,6 +312,15 @@ int main(int argc, char **argv) {
                    " && git checkout -q main && printf 'mm\\n' > dve-m.txt && git commit -q -am EM"
                    " && printf 'staged\\n' > dve-o.txt && git add dve-o.txt && printf 'dirty\\n' > dve-s.txt");
     ck(!ovf && sh(c, fx) == 0, "pm-fixture");
+    /* (n) 负控一:他人暂存 dve-o.txt 在场,合并分叉的 dve-n(不带 -m,旧核心也认得的调用)。旧核心(DVGIT_CORE_FROM 换入)git merge
+       被暂存挡住(would be overwritten),落到 merge_conflicts 报 merge-failed-no-conflict-files rc 1;新核心 rc 0、HEAD 含 dve-n.txt、暂存逐字仍在 */
+    {   int oldc = getenv("DVGIT_CORE_FROM") != 0;
+        ck(sh("N=$(printf 'n\\n' | git hash-object -w --stdin) && T=$({ git ls-tree HEAD~1; printf '100644 blob %s\\tdve-n.txt\\n' $N; } | git mktree)"
+              " && git branch dve-n $(git commit-tree -p HEAD~1 -m EN $T)", fx) == 0, "neg-fixture");
+        rc = dv("git", "merge", "dve-n", 0, 0, 0, 0, 0);
+        if (oldc) ck(rc == 1 && has("merge-failed-no-conflict-files"), "neg-old-core-blocked-by-others-staged");
+        else ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && sh("git cat-file -e HEAD:dve-n.txt && git cat-file -e HEAD:dve-m.txt && [ \"$(git show :dve-o.txt)\" = staged ] && [ \"$(cat dve-o.txt)\" = staged ]", fx) == 0,
+                "neg-new-core-merges-with-others-staged"); }
     rc = dv("git", "merge", "dve-x", "-m", "E merge msg", 0, 0, 0);
     ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && has("GIT_MERGE_SYNC\tSYNC_KEPT path=dve-s.txt reason=dirty"), "pm-merge-with-others-staged-rc0");
     F(c, sizeof c, "git cat-file -e HEAD:dve-x.txt && [ \"$(git show HEAD:dve-s.txt)\" = s1 ] && [ \"$(cat dve-s.txt)\" = dirty ] && [ \"$(git show :dve-o.txt)\" = staged ]"
@@ -347,6 +356,21 @@ int main(int argc, char **argv) {
     (void)sh("git rev-parse HEAD", fx);
     ck(!strcmp(h0, out) && sh("git cat-file -e dve-wt:dve-x.txt && [ \"$(cat .claude/worktrees/dve-wt/dve-x.txt)\" = x ] && [ -z \"$(git -C .claude/worktrees/dve-wt status --porcelain -uno)\" ]", fx) == 0, "pm-wt-merge-on-wt-branch-synced");
     (void)sh("git worktree remove --force .claude/worktrees/dve-wt", fx);
+    /* (h) 负控二:受控注入 DEVSVC_TEST_MERGE_MOVE_HEAD 让落地前 HEAD 被移到子提交 X(加 dve-mv.txt)一次 -> 比较并交换失败、重放一次,
+       最终 HEAD 父一为 X,树含 dve-mv.txt 与被合并分支的 dve-r.txt */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        char X[64] = ""; char ev[120];
+        F(c, sizeof c, "git push -q origin HEAD:refs/heads/dve-h && cd %s && git fetch -q origin && git checkout -q -b dve-mv origin/dve-h && printf 'mv\\n' > dve-mv.txt && git add dve-mv.txt && git commit -q -m EMV"
+                       " && git push -q origin dve-mv && git checkout -q -b dve-r origin/dve-h && printf 'r\\n' > dve-r.txt && git add dve-r.txt && git commit -q -m ER && git push -q origin dve-r"
+                       " && cd %s && git fetch -q origin && git rev-parse origin/dve-mv", cl, fx);
+        ck(!ovf && sh(c, fx) == 0 && sscanf(out, "%63s", X) == 1, "replay-fixture");
+        F(ev, sizeof ev, "DEVSVC_TEST_MERGE_MOVE_HEAD=%s", X); envv[1] = ev; envv[2] = 0;
+        rc = dv("git", "merge", "origin/dve-r", 0, 0, 0, 0, 0);
+        envv[1] = 0;
+        ck(rc == 0 && has("GIT_MERGE_RETRY\tattempt=1\t") && has("GIT_MERGE\trc=0\tcommit="), "replay-after-head-moved-rc0");
+        F(c, sizeof c, "[ \"$(git rev-parse HEAD^1)\" = %s ] && git cat-file -e HEAD:dve-mv.txt && git cat-file -e HEAD:dve-r.txt && [ \"$(git show :dve-o.txt)\" = staged ]", X);
+        ck(!ovf && sh(c, fx) == 0, "replay-tree-has-both-sides");
+    }
     F(c, sizeof c, "rm -rf %s", cl); (void)sh(c, 0);
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
