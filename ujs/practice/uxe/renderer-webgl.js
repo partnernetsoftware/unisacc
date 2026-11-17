@@ -253,8 +253,8 @@ export function createWebGLRenderer(canvas) {
           h ^= (t.h | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           const src = t.rgba;
           for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
-
           const rec = texCache[id];
+          if (rec && rec.hash === h && rec.tex) continue;
           const tex = rec && rec.tex ? rec.tex : gl.createTexture();
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
@@ -264,6 +264,7 @@ export function createWebGLRenderer(canvas) {
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
           texCache[id] = { hash: h, tex: tex };
+
         }
       }
       const w = canvas.width, h = canvas.height;
