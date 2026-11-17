@@ -243,8 +243,8 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
     "rm -rf \"$r\"; mkdir -p \"$r\" || { echo 'commit-own: cannot create the private gate root'; exit 1; }; " \
     "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || { rm -rf \"$r\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
-    "for e in * .[!.]*; do [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
-    "( cd \"$r\" && GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
+    "for e in * .[!.]*; do [ \"$e\" = .devsvc ] || [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
+    "( cd \"$r\" && UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
 /* --derive: $0 = TMP, "$@" = the commit's paths, GIT_INDEX_FILE = the private index (absolute).  See the header.
    Last line CO_DERIVE<TAB>rc=N<TAB>stage=plan|write|add|check|ok|setup; DERIVED<TAB>PATH per derived file and
    derive.cx's own DERIVE lines before it.  The root is removed; fd 8 (the slot lock) is not inherited.  The changed
@@ -260,9 +260,9 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "[ -n \"$r\" ] || { exec 8>&-; r=\"$0/commit-own-d$$.root\"; }; " \
     "rm -rf \"$r\"; mkdir -p \"$r\" || fin 2 setup; " \
     "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || fin 2 setup; " \
-    "for e in * .[!.]*; do [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
+    "for e in * .[!.]*; do [ \"$e\" = .devsvc ] || [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
     "[ -f \"$r/tools/derive.cx\" ] || fin 2 setup; " \
-    "cd \"$r\" || fin 2 setup; GIT_DIR=\"$g\"; GIT_WORK_TREE=\"$r\"; export GIT_DIR GIT_WORK_TREE; " \
+    "cd \"$r\" || fin 2 setup; GIT_DIR=\"$g\"; GIT_WORK_TREE=\"$r\"; UNISACC_DEVMETA_DIR=\"$r/.devsvc\"; export GIT_DIR GIT_WORK_TREE UNISACC_DEVMETA_DIR; " \
     "m=; [ -z \"$UNISACC_COMMIT_OWN_DERIVE_MANIFEST\" ] || m=\"--manifest $UNISACC_COMMIT_OWN_DERIVE_MANIFEST\"; " \
     "o=\"$r.out\"; rm -f \"$o\".*; " \
     "cs=$(printf '%s\\n' \"$@\" | sort -u | tr '\\n' ' '); " \
@@ -670,9 +670,14 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
-        char inputtree[64] = "";
+        char inputtree[64] = "", runtime_id[65] = "";
         if ((prepare && receipt) || (!!receipt != !!receipt_id)) co_die("usage", "derive receipt requires its identity and cannot prepare simultaneously");
         if (derive) { char *tv[] = {"git", "write-tree", 0}; if(run(tv,inputtree,sizeof inputtree))co_die("derive input identity",0); }
+        if(derive){size_t pn=0,mn=0;char *prod=cx_read("unisacc.com",&pn),*extra=0,ph[65],mh[65]="tree-manifest",ctx[5000];const char*mf=getenv("UNISACC_COMMIT_OWN_DERIVE_MANIFEST"),*dm=getenv("UNISACC_DEVMETA_DIR");
+            if(!prod||sy_sha256_hex(prod,pn,ph))co_die("derive runtime identity",0);free(prod);
+            if(mf&&*mf){extra=cx_read(mf,&mn);if(!extra||sy_sha256_hex(extra,mn,mh))co_die("derive manifest identity",mf);free(extra);}
+            if(cx_fmt(ctx,sizeof ctx,"%s\n%s\n%s",ph,mh,dm?dm:"")||sy_sha256_hex(ctx,strlen(ctx),runtime_id))co_die("derive context identity",0);
+        }
         if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
             static char dout[32768]; char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
@@ -681,10 +686,10 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             dv[n] = 0;
             g_bound_s = 55; tc0 = sy_now_ms();
             if (receipt) {
-                size_t rn = 0; char *rec = cx_read(receipt, &rn), hash[65], rb[64], ri[64], rt[64];
+                size_t rn = 0; char *rec = cx_read(receipt, &rn), hash[65], rb[64], ri[64], rt[64], rr[65];
                 char *body = rec ? strchr(rec, '\n') : 0;
                 if (!rec || rn >= sizeof dout || sy_sha256_hex(rec,rn,hash) || !tx_eqz(hash,receipt_id) ||
-                    sscanf(rec,"CO_PREPARED %63s %63s %63s",rb,ri,rt)!=3 || !body || !tx_eqz(rb,basec) || !tx_eqz(ri,inputtree)) {
+                    sscanf(rec,"CO_PREPARED2 %63s %63s %63s %64s",rb,ri,rt,rr)!=4 || !body || !tx_eqz(rb,basec) || !tx_eqz(ri,inputtree) || !tx_eqz(rr,runtime_id)) {
                     fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
                     sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
                 }
@@ -736,7 +741,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (prepare) {
                 char resulttree[64], hash[65];static char rec[34000];char *tv[]={"git","write-tree",0};
                 if(run(tv,resulttree,sizeof resulttree))co_die("derive result identity",0);
-                int rn=snprintf(rec,sizeof rec,"CO_PREPARED %s %s %s\n%s",basec,inputtree,resulttree,dout);
+                int rn=snprintf(rec,sizeof rec,"CO_PREPARED2 %s %s %s %s\n%s",basec,inputtree,resulttree,runtime_id,dout);
                 if(rn<0||rn>=(int)sizeof rec||sy_sha256_hex(rec,rn,hash)||sy_write_atomic(prepare,rec,rn,0600))co_die("derive receipt write",prepare);
                 sy_printf("COMMIT_DERIVE_PREPARED\tfile=%s\tsha=%s\tinput=%s\tresult=%s\n",prepare,hash,inputtree,resulttree);
                 sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 0;

@@ -87,6 +87,14 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 用法:长命令一律 `--bg` 再 `wait`,不写 sleep 轮询;宿主 30/60 s 上限内反复 wait 即可。
 
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
+### 提交门:新增 tlib 模块与分相派生
+
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --registered ID... --whole 本次源... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 新增分片ID --whole build/layer-api/tools.cxlib.tsv --keyed build/tlib-packages.tsv tools.cxlib --push`;共享表只带本次行,ujs 暂存保留。
+
+`git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
+
+`derive --write` 只按生成器版本、输入内容和当前产物内容复用构建身份,输出 `IDENTICAL`,不复用测试结论;未知输入闭包仍全量执行。补充读集在 `tools/derive-inputs.tsv`,`derive --check` 始终全量重算,`--write --full` 是强制重建对照。新增派生项同时补读集与逐表篡改负控,完整检查通过后才算派生清零。
+
 ### 工单作业化 task(R5,2026-11-15)
 
 子代理与窗口的每一单都开成工单,协调者只认 `task.done` 事件(`devsvc events --wait task.done` 或实例目录 `task-events.tsv` 的 `task.done` 行),不认"已完成"的口头汇报。工单落在 devsvc 实例目录的 `work/`,不入库。
