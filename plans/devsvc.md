@@ -322,3 +322,13 @@ tool-index 与 product-map 已标 query-only:自动 --derive 不物化,显式 --
 回退时恢复对应 derive.tsv 的普通物化行,显式生成导出并重新跟踪,再按原检查核对；查询与生成器没有各留一套计算逻辑。读取核验的 strace 依赖只属于 Linux 冷构造和独立 --check,命中不依赖它。损坏恢复会删除当前引用的失效正文及旁文件后重算,归档夹具清除继承的 Git 路由变量,不克隆开发检出。
 
 度量入口为 release/evidence/r1-final-2026-11-18.tsv。旧整体派生 stage=none 在 55534 ms 被杀,保留 UNKNOWN。迁移后真实提交 750e63b581 的派生29516 ms、提交阶段内容身份复核41 ms、含门禁与推送总44373 ms；输入不同,只报告各自实测,不把差值当严格同输入加速比。7天 build/ 历史提交数从622变628,工具索引225变226、产品全景43变44,增加包含本次退役提交,不能宣称旧历史已减少；停写后不再由这两张表触发自动快照提交。两项夹具仍以最终独立实跑回执为准。
+
+## 11 按域选择测试 R3-C
+
+affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids、--layer、tier 和宿主限制取交集;也可单独列出指定域。--domain-summary 分别输出 registered、eligible、selected,最后注明 selection-only/no-test-result。完整资格继续按对应清单与实际执行证据判断,筛掉的批次保留未执行状态。
+
+域事实仍由声明、tests/batch-domain-rules.tsv 和 tests/batch-domains.tsv 的少数例外派生到 tests/batch-domain-index.tsv。启用域选项时实际运行生成器 --check --dump,命名拒绝缺声明、冲突和陈旧索引;默认路径不读取域索引。新三批检查全部自动推断,显式例外仍为108行。默认两个典型输入与旧程序逐字节对拍,产品域结果另与全量结果按域投影逐字节核对,证据为 release/evidence/r3-domain-2026-11-18.tsv。
+
+检查的准备相与选择运行相分别有界。真实kit、runner、域生成器与选择器按实际argv并行准备,每个子调用仍25秒,usage输出直接从进程管道捕获并持续排空,只记PREPARED;选择运行仍真实执行。无需把日志读回或用cat转换来源,无需放宽R4。取消筛选的故障实现被五条反例拒绝。整轮测试墙钟未作典型全集对照,标UNMEASURED;选择查询包含新域校验成本,本次不宣称查询加速。
+
+两项后续准备成本需要单列:(1) 同根相对runner调用准备后,绝对runner首次仍实测16697ms;现有预热收据只含文件/产品摘要与缓存目录,后续应统一实际调用形态并给命中做负控,保留路径影响__FILE__等语义的合同。(2) register --no-run冷态仍先准备原生run与run-batch,本次49203ms;可把纯元数据登记与原生runner准备分相,登记校验继续实际执行,准备单独记PREPARED,后续批次必须实跑。
