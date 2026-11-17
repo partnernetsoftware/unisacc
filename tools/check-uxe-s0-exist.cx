@@ -1,0 +1,76 @@
+#pragma unisa use chrome_dom
+/* tools/check-uxe-s0-exist.cx -- 13 元素包围盒内外色差.
+ */
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+int main(void) {
+    char cwd[512], url[800], line[256], ids[16][32];
+    int xmin[16], ymin[16], md[16], nels = 0, i, n, rc;
+    FILE *tf;
+    char *av[12];
+    char *out = 0;
+    size_t on = 0;
+    const char *pre = "file://";
+    const char *suf = "/ujs/plans/demo-v2/look-dev/water-keeps-s0-uxe.html";
+    const char *p, *q;
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    tf = fopen("ujs/plans/demo-v2/look-dev/s0-elements.tsv", "r");
+    if (!tf) { printf("S0_EXIST_NO_TSV\n"); return 2; }
+    if (!fgets(line, sizeof line, tf)) { fclose(tf); return 2; }
+    while (fgets(line, sizeof line, tf) && nels < 16) {
+        char *s = line;
+        int k = 0, x, y, w, h, d;
+        while (*s && *s != '\t' && k < 31) { ids[nels][k++] = *s++; }
+        ids[nels][k] = 0;
+        if (*s == '\t') s++;
+        x = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        y = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        w = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        h = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        d = atoi(s);
+        xmin[nels] = x; ymin[nels] = y; md[nels] = d;
+        (void)w; (void)h;
+        nels++;
+    }
+    fclose(tf);
+    n = 0;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 600; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 780; i++) url[n++] = suf[i];
+    url[n] = 0;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = "--user-data-dir=/tmp/uxe-s0-exist";
+    av[7] = "--virtual-time-budget=20000";
+    av[8] = "--dump-dom";
+    av[9] = url;
+    av[10] = 0;
+    rc = cx_runv_timeout(av, 25, &out, &on);
+    if (rc == 127) { if (out) free(out); printf("S0_EXIST_UNMEASURED\n"); return 2; }
+    p = out ? strstr(out, "<pre id=\"hud\">") : 0;
+    if (p) p = strchr(p, '{');
+    ck(p != 0, "hud");
+    for (i = 0; i < nels; i++) {
+        char key[40];
+        int got = -1, k2 = 0;
+        key[k2++] = '"';
+        { int j = 0; while (ids[i][j] && k2 < 36) key[k2++] = ids[i][j++]; }
+        key[k2++] = '"'; key[k2++] = ':'; key[k2] = 0;
+        q = p ? strstr(p, key) : 0;
+        if (q) got = atoi(q + k2);
+        ck(got >= md[i], ids[i]);
+        printf("EL\t%s\tgot=%d\tmin=%d\n", ids[i], got, md[i]);
+    }
+
+    if (out) free(out);
+    printf("CHECK_UXE_S0_EXIST\tn=%d\tfailed=%d\n", nels, failed);
+    return 0;
+}
+
