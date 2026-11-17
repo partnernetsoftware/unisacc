@@ -22,6 +22,7 @@ worktree `.claude/worktrees/ujs`。
 | 验收 | `?auto=1` | wasm 金=3868 则 `FLY_OK`;金不可用但 GL 跑满则 `FLY_GL_OK` |
 
 GPU/输入停在页上(UXE Host 原则)。InstanceCloud 仅 xyz/scale/yaw;滚转并入 yaw 视觉,无独立 pitch/roll 缓冲。
+岛云 billboard,船全姿态。
 
 ## 与产品缺口
 
