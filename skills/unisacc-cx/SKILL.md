@@ -150,7 +150,7 @@ sh ./unisacc.com skills/unisacc-cx/examples/tmpdir.cx
 ```expect
 len=12 cap>=len=1
 at(6,5)=0 sub=world
-at(6,99)=-1 (refused, sub untouched)
+at(6,99)=-34 (refused, sub untouched)
 pop=! len=11
 after move a.len=0 b.len=11 a.data_null=1
 after free b.len=0
