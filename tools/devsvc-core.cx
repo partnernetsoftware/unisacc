@@ -1497,23 +1497,232 @@ static int merge_conflicts(const char *root, const char *rd, const char *br, con
    无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
 static int git_argerr;   /* cmd_git 及其子命令在参数解析处退出(尚未启动任何 git 动作)时置 1;入口只在此时贴 usage。
                             git 子进程、commit-own 的真实 rc 2 与具名 REFUSE 的 rc 2 原样返回,不贴 usage(仿 x_ran) */
+/* K2/K5 私有索引合并与快进:不经共享索引与工作区算结果,ref 以 update-ref NEW OLD 比较并交换落地(HEAD 被他人移动则重做,至多 3 次),
+   落地后 cxlib.gitsync gs_sync 只同步"索引与工作区都等于旧 HEAD"的路径,其余原样保留并逐行报 <前缀>\tSYNC_KEPT path= reason=。
+   本机 git 2.34 无 merge-tree --write-tree:GIT_INDEX_FILE 私有索引里 read-tree OURS 后 read-tree -m --aggressive BASE OURS THEIRS,
+   剩余三阶段齐全的普通文件逐个 git merge-file(临时目录内)再 hash-object -w 与 update-index --cacheinfo 收口;仍有冲突即报冲突。
+   不用 stash、reset、clean、checkout、read-tree -u、checkout-index。 */
+static char mg_idx[PW], mg_tmp[PW];
+typedef struct { char path[PW]; char mode[3][8]; char sha[3][48]; int has[3]; } mg_ent;
+#define MG_UMAX 128
+static mg_ent mg_u[MG_UMAX];
+/* env GIT_INDEX_FILE=<私有索引> git -C rd ARGS... */
+static int mg_git(const char *rd, char **args, char *out, int cap) {
+    char *v[24]; char ev[PW + 32]; int n = 0, i;
+    F(ev, sizeof ev, "GIT_INDEX_FILE=%s", mg_idx); if (ovf) return -3;
+    v[n++] = "env"; v[n++] = ev; v[n++] = "git"; v[n++] = "-C"; v[n++] = (char *)rd;
+    for (i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    if (args[i]) return -3;
+    v[n] = 0;
+    return runcap(v, out, cap);
+}
+static int mg_rev(const char *rd, const char *spec, char *sha, int cap) {
+    char *v[] = {"git", "-C", (char *)rd, "rev-parse", "-q", "--verify", (char *)spec, 0};
+    if (runcap(v, sha, cap) != 0) { sha[0] = 0; return -1; }
+    chomp(sha); return sha[0] ? 0 : -1;
+}
+static int mg_anc(const char *rd, const char *a, const char *b) {   /* a 是 b 的祖先(含相等) */
+    char o[64]; char *v[] = {"git", "-C", (char *)rd, "merge-base", "--is-ancestor", (char *)a, (char *)b, 0};
+    return runcap(v, o, sizeof o) == 0;
+}
+/* 解析 ls-files -u(非 -z,core.quotepath=off)行 "MODE SHA STAGE\tPATH",按路径归并;逐字节扫描 */
+static int mg_parse_u(const char *b) {
+    int k = -1; const char *s = b;
+    while (*s) {
+        const char *e = s, *t; char md[8], sh[48]; int st; long pl;
+        while (*e && *e != '\n') e++;
+        for (t = s; t < e && *t != '\t'; t++) ;
+        if (t < e && sscanf(s, "%7s %47s %d", md, sh, &st) == 3 && st >= 1 && st <= 3) {
+            pl = e - t - 1;
+            if (pl <= 0 || pl >= PW) return -1;
+            if (k < 0 || (long)strlen(mg_u[k].path) != pl || memcmp(mg_u[k].path, t + 1, (size_t)pl)) {
+                if (++k >= MG_UMAX) return -1;
+                memset(&mg_u[k], 0, sizeof mg_u[k]); mm_copy(mg_u[k].path, sizeof mg_u[k].path, t + 1, (size_t)pl); mg_u[k].path[pl] = 0;
+            }
+            F(mg_u[k].mode[st - 1], sizeof mg_u[k].mode[st - 1], "%s", md); F(mg_u[k].sha[st - 1], sizeof mg_u[k].sha[st - 1], "%s", sh); mg_u[k].has[st - 1] = 1;
+        }
+        s = *e ? e + 1 : e;
+    }
+    return k + 1;
+}
+static int mg_blob(const char *rd, const char *sha, const char *dst) {
+    np_result r; char why[200]; int t;
+    char *v[] = {"git", "-C", (char *)rd, "cat-file", "blob", (char *)sha, 0};
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) return -1;
+    t = r.rc != 0 || r.outn > (64u << 20) || sy_write_atomic(dst, r.out, r.outn, 0600) ? -1 : 0;
+    np_free(&r); return t;
+}
+/* 三阶段齐全且两侧都是普通文件的路径做文本三方合并;成功 0(私有索引里收口为 stage 0),冲突 1,出错 -1 */
+static int mg_file(const char *rd, mg_ent *u) {
+    char o[PW + 16], b[PW + 16], t[PW + 16], sha[128], ci[PW + 160], buf[256]; const char *md; int rc;
+    if (!u->has[0] || !u->has[1] || !u->has[2]) return 1;
+    if (strncmp(u->mode[1], "100", 3) || strncmp(u->mode[2], "100", 3)) return 1;
+    md = strcmp(u->mode[1], u->mode[0]) ? u->mode[1] : u->mode[2];
+    F(o, sizeof o, "%s/o", mg_tmp); F(b, sizeof b, "%s/b", mg_tmp); F(t, sizeof t, "%s/t", mg_tmp);
+    if (ovf || mg_blob(rd, u->sha[1], o) || mg_blob(rd, u->sha[0], b) || mg_blob(rd, u->sha[2], t)) return -1;
+    {   char *v[] = {"git", "merge-file", "-q", o, b, t, 0}; rc = runcap(v, buf, sizeof buf); }
+    if (rc > 0) return 1;
+    if (rc < 0) return -1;
+    {   char *v[] = {"git", "-C", (char *)rd, "hash-object", "-w", "--", o, 0}; if (runcap(v, sha, sizeof sha) != 0) return -1; chomp(sha); }
+    F(ci, sizeof ci, "%s,%s,%s", md, sha, u->path); if (ovf) return -1;
+    {   char *a[] = {"update-index", "--cacheinfo", ci, 0}; return mg_git(rd, a, buf, sizeof buf) == 0 ? 0 : -1; }
+}
+/* 私有索引三方合并:0 无冲突(tree 填合并树),1 冲突(mg_u 前 *nu 项为冲突路径),-1 出错(why) */
+static int mg_try(const char *rd, const char *ours, const char *theirs, char *tree, int tcap, int *nu, char *why, int wcap) {
+    static char ub[1 << 16]; char base[128], buf[512]; int n, i, k = 0, r;
+    {   char *v[] = {"git", "-C", (char *)rd, "merge-base", (char *)ours, (char *)theirs, 0};
+        if (runcap(v, base, sizeof base) != 0) F(base, sizeof base, "4b825dc642cb6eb9a060e54bf8d69288fbee4904"); else chomp(base); }
+    {   char *v[] = {"rm", "-f", mg_idx, 0}; (void)runcap(v, buf, sizeof buf); }
+    /* 私有索引从空开始:先 read-tree OURS 再 -m 会拿工作区 stat 校验(Entry not uptodate),空索引的三树合并不看工作区 */
+    {   char *a[] = {"read-tree", "-m", "--aggressive", base, (char *)ours, (char *)theirs, 0};
+        if (mg_git(rd, a, buf, sizeof buf) != 0) { F(why, wcap, "read-tree-3way"); return -1; } }
+    {   char *a[] = {"-c", "core.quotepath=off", "ls-files", "-u", 0}; if (mg_git(rd, a, ub, sizeof ub) != 0) { F(why, wcap, "ls-files-u"); return -1; } }
+    n = mg_parse_u(ub);
+    if (n < 0) { F(why, wcap, "too-many-unmerged"); return -1; }
+    for (i = 0; i < n; i++) {
+        r = mg_file(rd, &mg_u[i]);
+        if (r < 0) { F(why, wcap, "merge-file %s", mg_u[i].path); return -1; }
+        if (r == 1) { if (k != i) mg_u[k] = mg_u[i]; k++; }
+    }
+    *nu = k;
+    if (k) return 1;
+    {   char *a[] = {"write-tree", 0}; if (mg_git(rd, a, tree, tcap) != 0) { F(why, wcap, "write-tree"); return -1; } chomp(tree); }
+    return 0;
+}
+/* 冲突且不动共享索引与工作区与 ref:逐路径 MERGE_CONFLICT<TAB>path<TAB>stages=base+ours+theirs<TAB>last=最近改动者 */
+static void mg_report(const char *rd, const char *cur, int nu, const char *why) {
+    int i;
+    for (i = 0; i < nu; i++) {
+        char st[40], who[200]; char *v[] = {"git", "-C", (char *)rd, "log", "-1", "--format=%an", "--", mg_u[i].path, 0};
+        F(st, sizeof st, "%s%s%s%s%s", mg_u[i].has[0] ? "base" : "", mg_u[i].has[0] && (mg_u[i].has[1] || mg_u[i].has[2]) ? "+" : "",
+          mg_u[i].has[1] ? "ours" : "", mg_u[i].has[1] && mg_u[i].has[2] ? "+" : "", mg_u[i].has[2] ? "theirs" : "");
+        if (runcap(v, who, sizeof who) != 0) who[0] = 0; chomp(who); clean(who);
+        printf("MERGE_CONFLICT\t%s\tstages=%s\tlast=%s\n", mg_u[i].path, st, who[0] ? who : "-");
+    }
+    printf("MERGE_HINT\t%s\t共享索引、工作区与 HEAD 均未改动;冲突须由路径最近改动者在其分支上解决后再合并\n", why);
+    printf("GIT_MERGE\trc=1\tconflicts=%d\tbranch=%s\tcwd=%s\n", nu, cur, rd);
+}
+/* 经 tools/gitsync-run.cx 子进程(55 秒上限)调 gs_sync;SYNC_KEPT 行加前缀原样输出。同一编译单元不能 use cxlib.gitsync(np_buf 重定义) */
+static const char *mg_root;   /* git_merge/git_pull 入口设为仓根 */
+static int mg_sync(const char *rd, const char *old, const char *new_, const char *pre, int *synced, int *kept) {
+    np_result r; char why[200], com[PW + 16]; const char *s, *e, *end; int ok = 0;
+    F(com, sizeof com, "%s/unisacc.com", mg_root); if (ovf) return -1;   /* lint:allow R1-product gitsync-run runs under the installed product of ROOT, as devsvc itself does */
+    {   char *v[] = {"sh", com, "tools/gitsync-run.cx", "--", (char *)rd, (char *)old, (char *)new_, 0};
+        if (np_run(v, mg_root, 0, 55, &r, why, sizeof why)) { printf("%s\tSYNC_FAIL\t%s\n", pre, why); return -1; } }
+    end = r.out ? r.out + r.outn : 0;
+    for (s = r.out; s && s < end; s = e < end ? e + 1 : end) {
+        for (e = s; e < end && *e != '\n'; e++) ;
+        if (e - s > 8 && !memcmp(s, "GITSYNC\t", 8)) { if (r.rc == 0 && sscanf(s, "GITSYNC\trc=0\tchanged=%*d\tsynced=%d\tkept=%d", synced, kept) == 2) ok = 1; }
+        else if (e > s) printf("%s\t%.*s\n", pre, (int)(e - s), s);
+    }
+    if (!ok) printf("%s\tSYNC_FAIL\trc=%d\n", pre, r.rc);
+    np_free(&r);
+    return ok ? 0 : -1;
+}
+static int mg_setup(void) {
+    char buf[64];
+    F(mg_tmp, sizeof mg_tmp, "/tmp/devsvc-merge-%d-%ld", (int)sy_pid(), sy_now_ms()); F(mg_idx, sizeof mg_idx, "%s/index", mg_tmp);
+    if (ovf) return -1;
+    {   char *v[] = {"mkdir", "-p", mg_tmp, 0}; return runcap(v, buf, sizeof buf) == 0 ? 0 : -1; }
+}
+static void mg_teardown(void) { char buf[64]; char *v[] = {"rm", "-rf", mg_tmp, 0}; if (mg_tmp[0]) (void)runcap(v, buf, sizeof buf); }
+/* 共享索引与工作区(已跟踪部分)与 HEAD 一致 */
+static int mg_clean_tree(const char *rd) {
+    static char st[1 << 12]; char *v[] = {"git", "-C", (char *)rd, "status", "--porcelain", "-uno", 0};
+    return runcap(v, st, sizeof st) == 0 && st[0] == 0;
+}
+/* git merge BRANCH [-m MSG] [--cwd WORKTREE]:私有索引合并,见上。HEAD 是 BRANCH 祖先则快进;已包含则 up_to_date=1。
+   冲突:工作树与索引干净时沿用旧路径(git merge 加 merge_conflicts:派生表冲突自动解、否则停在合并中);否则什么都不动,
+   报 MERGE_CONFLICT 清单与 MERGE_HINT,rc 1。成功末行 GIT_MERGE rc=0 commit=SHA branch= cwd= ff= synced= kept=。参数错 rc 2。 */
 static int git_merge(const char *root, int argc, char **argv) {
-    const char *br = 0, *d = root; char rd[PW], top[PW], cur[200], buf[1 << 15], sha[128]; int i, rc;
+    const char *br = 0, *d = root, *msg = 0; char rd[PW], top[PW], cur[200], buf[1 << 15], theirs[128], old[128], nw[128], tree[128], dm[600], why[PW + 32];
+    int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0;
+    mg_root = root;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
-        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
+        else if (!strcmp(argv[i], "-m") && i + 1 < argc) msg = argv[++i];
+        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH [-m MSG] [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
         else br = argv[i];
     }
-    if (!br) { fprintf(stderr, "devsvc: git merge BRANCH [--cwd WORKTREE]: missing BRANCH\n"); git_argerr = 1; return 2; }
+    if (!br) { fprintf(stderr, "devsvc: git merge BRANCH [-m MSG] [--cwd WORKTREE]: missing BRANCH\n"); git_argerr = 1; return 2; }
+    if (msg) { const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+        if (!*s || *s == '\n' || git_ci_prefix(s, "co-authored-by:") || git_ci_prefix(s, "signed-off-by:")) {
+            fprintf(stderr, "devsvc: git merge -m: first line must be body text (not empty, not a trailer)\n"); git_argerr = 1; return 2; } }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git merge --cwd %s: no such directory\n", d); return 2; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
         if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git merge: %s is not on a branch\n", rd); return 2; }
         chomp(cur); }
-    {   char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "--", (char *)br, 0}; rc = runcap(mv, buf, sizeof buf); }
-    if (rc != 0) return merge_conflicts(root, rd, br, cur);
-    {   char *hv[] = {"git", "-C", rd, "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
-    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", sha, cur, rd);
+    {   char spec[300]; F(spec, sizeof spec, "%s^{commit}", br);
+        if (ovf || mg_rev(rd, spec, theirs, sizeof theirs)) { fprintf(stderr, "devsvc: REFUSE git merge: %s is not a commit\n", br); return 2; } }
+    F(dm, sizeof dm, "Merge branch '%s'", br); if (!msg) msg = dm;
+    if (ovf || mg_setup()) { fprintf(stderr, "devsvc: git merge: temp setup failed\n"); return 1; }
+    for (att = 0; att < 4; att++) {
+        if (mg_rev(rd, "HEAD", old, sizeof old)) { mg_teardown(); fprintf(stderr, "devsvc: git merge: no HEAD\n"); return 1; }
+        if (mg_anc(rd, theirs, old)) { mg_teardown(); printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tup_to_date=1\n", old, cur, rd); return 0; }
+        if (mg_anc(rd, old, theirs)) { ff = 1; F(nw, sizeof nw, "%s", theirs); }
+        else {
+            ff = 0; why[0] = 0;
+            rc = mg_try(rd, old, theirs, tree, sizeof tree, &nu, why, sizeof why);
+            if (rc < 0) { mg_teardown(); printf("MERGE_HINT\tprivate-merge-failed\t%s\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", why, cur, rd); return 1; }
+            if (rc == 1) {
+                mg_teardown();
+                if (mg_clean_tree(rd)) {   /* 旧路径,行为不变:派生表自动解,否则停在合并中 */
+                    char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "-m", (char *)msg, "--", (char *)br, 0};
+                    if (runcap(mv, buf, sizeof buf) != 0) return merge_conflicts(root, rd, br, cur);
+                    if (mg_rev(rd, "HEAD", nw, sizeof nw)) nw[0] = 0;
+                    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", nw, cur, rd); return 0;
+                }
+                mg_report(rd, cur, nu, "conflict-with-local-changes-present");
+                return 1;
+            }
+            {   char *v[] = {"git", "-C", rd, "commit-tree", tree, "-p", old, "-p", theirs, "-m", (char *)msg, 0};
+                if (runcap(v, nw, sizeof nw) != 0) { mg_teardown(); printf("MERGE_HINT\tcommit-tree-failed\t-\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
+                chomp(nw); }
+        }
+        {   char *v[] = {"git", "-C", rd, "update-ref", "-m", "devsvc git merge", "HEAD", nw, old, 0};
+            if (runcap(v, buf, sizeof buf) == 0) break; }
+        printf("GIT_MERGE_RETRY\tattempt=%d\thead-moved-from=%s\n", att + 1, old);
+    }
+    mg_teardown();
+    if (att >= 4) { printf("MERGE_HINT\thead-moving\tHEAD 连续被他人移动,重试 3 次仍未落地\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
+    if (mg_sync(rd, old, nw, "GIT_MERGE_SYNC", &sy, &kp)) { printf("GIT_MERGE\trc=1\tcommit=%s\tbranch=%s\tcwd=%s\tsync=failed\n", nw, cur, rd); return 1; }
+    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tff=%d\tsynced=%d\tkept=%d\n", nw, cur, rd, ff, sy, kp);
+    return 0;
+}
+/* git pull [--cwd WORKTREE]:fetch origin(50 秒上限)后,仅当 HEAD 是 origin/<当前分支> 的祖先时把 HEAD 快进过去
+   (update-ref 比较并交换,再 gs_sync,保留行以 GIT_PULL_SYNC 前缀输出);分叉拒绝 rc 1,不自动 merge/rebase。 */
+static int git_pull(const char *root, int argc, char **argv) {
+    const char *d = root; char rd[PW], top[PW], cur[200], buf[512], up[128], old[128], spec[300]; int i, att, sy = 0, kp = 0;
+    mg_root = root;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else { fprintf(stderr, "devsvc: git pull [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
+    }
+    if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
+    if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git pull --cwd %s: no such directory\n", d); return 2; }
+    {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
+        if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git pull: %s is not on a branch\n", rd); return 2; }
+        chomp(cur); }
+    {   np_result r; char w[200]; char *v[] = {"git", "-C", rd, "fetch", "-q", "origin", 0}; int frc;
+        if (np_run(v, 0, 0, 50, &r, w, sizeof w)) { printf("GIT_PULL\trc=1\treason=fetch-start\t%s\n", w); return 1; }
+        frc = r.rc; np_free(&r);
+        if (frc != 0) { printf("GIT_PULL\trc=1\treason=fetch-failed\tfetch_rc=%d\n", frc); return 1; } }
+    F(spec, sizeof spec, "refs/remotes/origin/%s", cur);
+    if (ovf || mg_rev(rd, spec, up, sizeof up)) { printf("GIT_PULL\trc=1\treason=no-upstream\t%s\n", spec); return 1; }
+    for (att = 0; att < 4; att++) {
+        if (mg_rev(rd, "HEAD", old, sizeof old)) { printf("GIT_PULL\trc=1\treason=no-head\n"); return 1; }
+        if (mg_anc(rd, up, old)) { printf("GIT_PULL\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tup_to_date=1\n", old, cur, rd); return 0; }
+        if (!mg_anc(rd, old, up)) {
+            printf("PULL_HINT\tdiverged\t本地 %s 有未推送提交且与 origin/%s 分叉;不自动 merge/rebase:先 devsvc git merge origin/%s 再推送\n", cur, cur, cur);
+            printf("GIT_PULL\trc=1\treason=diverged\tbranch=%s\tcwd=%s\n", cur, rd); return 1;
+        }
+        {   char *v[] = {"git", "-C", rd, "update-ref", "-m", "devsvc git pull", "HEAD", up, old, 0};
+            if (runcap(v, buf, sizeof buf) == 0) break; }
+    }
+    if (att >= 4) { printf("GIT_PULL\trc=1\treason=head-moving\n"); return 1; }
+    if (mg_sync(rd, old, up, "GIT_PULL_SYNC", &sy, &kp)) { printf("GIT_PULL\trc=1\tcommit=%s\tsync=failed\n", up); return 1; }
+    printf("GIT_PULL\trc=0\tcommit=%s\tfrom=%s\tbranch=%s\tcwd=%s\tsynced=%d\tkept=%d\n", up, old, cur, rd, sy, kp);
     return 0;
 }
 /* git add PATH...:把这些路径的 index 同步到工作树内容(清残留暂存用)。拒绝(rc 2,什么都不加):
@@ -1554,6 +1763,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }
     }
     if (!strcmp(argv[0], "merge")) return git_merge(root, argc, argv);
+    if (!strcmp(argv[0], "pull")) return git_pull(root, argc, argv);
     if (!strcmp(argv[0], "add")) return git_add(root, argc, argv);
     if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\n"); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
@@ -1642,7 +1852,7 @@ static int usage(void) {
                     "       long commands (over 55 s): devsvc x --bg --par 1 [--timeout-ms N] -- ARGV... -> JOB<TAB>id (returns at once; job runs in its own session, deadline kills its process group);\n"
                     "         devsvc wait JOB [--timeout-ms N<=55000] [--tail N|--grep S|--summary] -> JOB_DONE id rc=N (rc is the job's) or WAIT_TIMEOUT rc 124 (job keeps running; wait again); devsvc jobs lists\n"
                     "       devsvc git commit --status [JOB]: receipts of recent commit jobs (foreground commit runs as a job and prints JOB id first)\n"
-                    "       devsvc git merge BRANCH [--cwd WORKTREE]: conflicts -> MERGE_CONFLICT lines, rc 1, not resolved | git add PATH...: sync index (out/, .., absolute, ignored refused)\n"
+                    "       devsvc git merge BRANCH [-m MSG] [--cwd WORKTREE]: private-index merge, others staged/dirty kept; conflicts -> MERGE_CONFLICT lines, rc 1 | git pull [--cwd WORKTREE]: fetch + fast-forward only | git add PATH...: sync index (out/, .., absolute, ignored refused)\n"
                     "         MSG first line must be body text (not empty, not a Co-Authored-By:/Signed-off-by: line; trailers go after the last blank line)\n"
                     "       devsvc task open|amend|status|done|list ...  -> tools/devtask.cx task ...; devsvc task SUB --help gives the full syntax; devsvc f --help\n"
                     "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n");
