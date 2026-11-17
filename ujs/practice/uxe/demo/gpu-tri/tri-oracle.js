@@ -1,1 +1,4 @@
 window.GPU_TRI_FNV=3620361384;
+window.GPU_TRI_CR=255;
+window.GPU_TRI_CG=128;
+window.GPU_TRI_CB=51;

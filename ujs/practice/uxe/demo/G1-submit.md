@@ -1,4 +1,4 @@
-# G1 提交面(条件 import 已合入;host1 符号已提供;尚未真 GPU)
+# G1 提交面(gpu-tri 真 GPU;批次 ujs-gpu-tri)
 
 prd 0.3b G1 / W3 同条。
 
@@ -28,16 +28,17 @@ prd 0.3b G1 / W3 同条。
 
 ## gpu-tri 真 GPU 验收口径
 
-页 `practice/uxe/demo/gpu-tri/index.html`(+`tri-b64.js`)只跑 `gpu-store-v3-tri` 同一 212B 包:host1Boot 在 import 内拷 `[ptr,n)` 交 `host-browser.js` `host_gpu_submit`。AUTO 两层:`__UXE__.gpu_fnv===3620361384`;重心 readPixels 非清屏、角外为清屏。无浏览器标 UNMEASURED。不碰 fly。不得记 G1 完成。
+页 `practice/uxe/demo/gpu-tri/index.html` 跑同一 212B 包。FNV 与顶点色从 tsv/hex 生成 `tri-oracle.js`。AUTO 角外清屏、中心近顶点色。`tools/check-ujs-gpu-tri.cx` dump-dom。
 
 ## 仍未做
 
-(1) gpu-tri 页与像素 AUTO。
-(2) 完整 G1 真 GPU 验收批次。
+(1) M2 核驱动 fly 画面(需 G4)。
+(2) dump-dom 依赖 chrome;无 chrome 为 UNMEASURED。
 
 ## 状态
 
-store_bytes、FNV oracle、hex 生成器已绿。host1Boot 仍须接 renderer。不得记 G1 完成。
+批次 `ujs-gpu-tri` REGISTERED PASS `UJS_GPU_TRI_OK`。Chrome 138.0.7204.168。
+
 
 
 
