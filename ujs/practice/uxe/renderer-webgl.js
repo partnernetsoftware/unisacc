@@ -8,6 +8,8 @@ attribute vec3 aPos;
 attribute vec2 aUV;
 attribute vec3 aInst;
 attribute float aScale;
+attribute float aScaleY;
+
 attribute float aYaw;
 attribute float aPitch;
 attribute float aRoll;
@@ -42,7 +44,12 @@ vec3 billboardXZ(vec3 v, vec3 eye, vec3 inst) {
 }
 void main() {
   if (uOrtho > 0.5) {
-    vec2 px = aInst.xy + aPos.xy * aScale;
+    vec2 px = aInst.xy + vec2(aPos.x * aScale, aPos.y * aScaleY);
+
+
+
+
+
     float nx = px.x / uScreen.x * 2.0 - 1.0;
     float ny = 1.0 - px.y / uScreen.y * 2.0;
     vN = vec3(0.0, 0.0, 1.0);
@@ -176,6 +183,8 @@ export function createWebGLRenderer(canvas, opts) {
 
   const ibo = gl.createBuffer();
   const sbo = gl.createBuffer();
+  const sboY = gl.createBuffer();
+
   const ybo = gl.createBuffer();
   const pbo = gl.createBuffer();
   const rbo = gl.createBuffer();
@@ -184,6 +193,8 @@ export function createWebGLRenderer(canvas, opts) {
   const aUV = gl.getAttribLocation(prog, "aUV");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
+  const aScaleY = gl.getAttribLocation(prog, "aScaleY");
+
   const aYaw = gl.getAttribLocation(prog, "aYaw");
   const aPitch = gl.getAttribLocation(prog, "aPitch");
   const aRoll = gl.getAttribLocation(prog, "aRoll");
@@ -287,6 +298,15 @@ export function createWebGLRenderer(canvas, opts) {
     gl.enableVertexAttribArray(aScale);
     gl.vertexAttribPointer(aScale, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aScale, 1);
+    gl.bindBuffer(gl.ARRAY_BUFFER, sboY);
+    const sy = cloud.scaleY || cloud.scale;
+    gl.bufferData(gl.ARRAY_BUFFER, sy.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    if (aScaleY >= 0) {
+      gl.enableVertexAttribArray(aScaleY);
+      gl.vertexAttribPointer(aScaleY, 1, gl.FLOAT, false, 0, 0);
+      ext.vertexAttribDivisorANGLE(aScaleY, 1);
+    }
+
 
     gl.bindBuffer(gl.ARRAY_BUFFER, ybo);
     const yaw = cloud.yaw || new Float32Array(cloud.count);
@@ -403,19 +423,26 @@ export function createWebGLRenderer(canvas, opts) {
       const wave = scene.wave || 0;
       const opaque = [];
       const trans = [];
+      const ss = [];
+      let li = 0;
       for (const cloud of scene.clouds.values()) {
         if (cloud.count <= 0) continue;
-        if (cloud.alphaMode || (cloud.meshId | 0) === 4) trans.push(cloud);
+        if (cloud.layer === undefined) cloud.layer = li++;
+        const isSS = !!(cloud.screenSpace || ((cloud.flags | 0) & 8));
+        if (isSS) ss.push(cloud);
+        else if (cloud.alphaMode || (cloud.meshId | 0) === 4) trans.push(cloud);
         else opaque.push(cloud);
       }
-
+      ss.sort((a, b) => (a.layer | 0) - (b.layer | 0));
       for (const c of opaque) drawCloud(c, wave);
+      for (const c of ss) drawCloud(c, wave);
       trans.sort((a, b) => {
         const ax = a.xyz[0] - ex, ay = a.xyz[1] - ey, az = a.xyz[2] - ez;
         const bx = b.xyz[0] - ex, by = b.xyz[1] - ey, bz = b.xyz[2] - ez;
         return (bx * bx + by * by + bz * bz) - (ax * ax + ay * ay + az * az);
       });
       for (const c of trans) drawCloud(c, wave);
+
       gl.depthMask(true);
       gl.disable(gl.BLEND);
 
