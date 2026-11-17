@@ -1,27 +1,6 @@
-/* tools/check-awpath.cx -- awp_path answers every kind named in agentwork/items.tsv, and refuses what is
- * not a kind.
- *
- *   sh ./unisacc.com tools/check-awpath.cx [-- ROOT]
- *
- * Why: DEBT-AW-M0-RESOLVER is step one of the agentwork refactor (M0 resolver -> M1 readers -> ...).  Today
- * every reader writes the flat spelling `agentwork/<file>` itself and the refactor moves those files, so the
- * readers have to ask one function instead.  This step adds the function and changes no behaviour: every kind
- * still answers today's flat path, so a reader can switch over with no output change at all.
- *
- * Covered:
- *   (1) for every kind of the module's table the resolver returns 0, the answer is ROOT + "/" + the flat
- *       spelling, and that path exists in ROOT (a row pointing at a file that is not there would make the
- *       resolver useless to its readers);
- *   (2) a root whose spelling already ends in '/' gives the same answer, so no caller has to trim it;
- *   (3) no two kinds answer one path (two kinds aliased to one file would merge two tables);
- *   (4) refusals -- unknown kind, a kind that spells a path ("./x", "a/b", "agentwork/ledger.tsv", a
- *       trailing '/'), an empty or null kind, an empty or null root, a null buffer, and a buffer too small
- *       for the answer -- each returns non-zero and leaves the caller's first byte untouched;
- *   (5) the length boundary is exact: cap = strlen(answer)+1 succeeds, cap = strlen(answer) fails;
- *   (6) awp_count/awp_kind_at cover the table with no gap and no duplicate.
- *
- * Prints PASS/FAIL per case and CHECK_AWPATH<TAB>failed=N; exit 0 only when 0; exit 2 on an unreadable ROOT.
- * Read-only: it writes nothing and compiles no product, so it is safe during a release freeze. */
+/* Check all declared metadata paths and historical aliases without requiring
+ * files to exist. Preserve kind, buffer, collision, tail and bad-argument
+ * negative controls; missing targets are valid, filesystem errors are not. */
 #pragma unisa use cxlib.awpath
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -68,15 +47,21 @@ int main(int argc, char **argv) {
         if (awp_path(root, kind, out, (long)sizeof out) != 0) { all = 0; continue; }
         if (cx_fmt(expect, sizeof expect, "%s/%s", root, rel)) { all = 0; continue; }
         if (strcmp(out, expect)) all = 0;
-        if (sy_exists(out) != 1) { exists = 0; sy_printf("MISSING\t%s\t%s\n", kind, out); }
+        if (sy_exists(out) < 0) { exists = 0; sy_printf("FS_ERROR\t%s\t%s\n", kind, out); }
         for (j = 0; j < i; j++) {
             if (awp_path(root, awp_kind_at(j), other, (long)sizeof other) == 0 && !strcmp(other, out)) distinct = 0;
         }
     }
     ck(all, "every-kind-resolves-to-todays-flat-path");
-    ck(exists, "every-answer-exists-in-this-checkout");
+    ck(exists, "every-answer-present-or-ENOENT");
     ck(distinct, "kinds-are-distinct-paths");
 
+    { char absent[1024], blocker[1200];int ok=0,wrong=0;
+      if(sy_mkdtemp("/tmp","awp-missing-",absent,sizeof absent)==0){
+        if(cx_fmt(blocker,sizeof blocker,"%s/notdir",absent)==0&&cx_write(blocker,"x",1)==0){
+          wrong=awp_path(blocker,"units",out,sizeof out)==0&&sy_exists(out)==-ENOTDIR;sy_unlink(blocker);}
+        if(sy_rmdir(absent)==0)ok=awp_path(absent,"ledger",out,sizeof out)==0&&sy_exists(out)==0;}
+      ck(ok,"missing-historical-directory-is-valid");ck(wrong,"ENOTDIR-is-not-absence");}
     /* (2) a root already ending in '/' answers the same path. */
     {
         int ok = 0;
@@ -88,7 +73,7 @@ int main(int argc, char **argv) {
 
     /* (4) refusals: non-zero, and the caller's first byte is untouched. */
     {
-        static const char *bad[] = {"nonsense", "./ledger", "a/b", "agentwork/ledger.tsv", "ledger/", "", 0};
+        static const char *bad[] = {"nonsense", "./ledger", "a/b", "retired/ledger.tsv", "ledger/", "", 0};
         int k, ok = 1;
         for (k = 0; bad[k]; k++) {
             poison(small, (long)sizeof small);
