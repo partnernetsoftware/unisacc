@@ -15,11 +15,9 @@ import { createBrowserHost } from "../host-browser.js";
     const canvas=document.getElementById("c");
     const host=await createBrowserHost(canvas,{prefer:"webgl"});
     const path=miss?"test/tex16-missing.png":(bad?"test/tex16-bad.png":"test/tex16.png");
-
     let bytes;
     try{
       bytes=await host.host_asset_read(path);
-
     }catch(e){
       document.title="ASSET_MISS";
       hud.textContent=String(e&&e.message||e);
@@ -39,14 +37,35 @@ import { createBrowserHost } from "../host-browser.js";
       hud.textContent=String(e&&e.message||e);
       return;
     }
-    const off=document.createElement("canvas");
-    off.width=bmp.width; off.height=bmp.height;
-    const g=off.getContext("2d",{alpha:true,colorSpace:"srgb"});
-    g.drawImage(bmp,0,0);
-    const img=g.getImageData(0,0,off.width,off.height);
-    window.__TEX2__={w:off.width,h:off.height,rgba:Array.from(img.data)};
-    hud.textContent=JSON.stringify({w:off.width,h:off.height,n:img.data.length,p0:[img.data[0],img.data[1],img.data[2],img.data[3]]});
-    document.title="ASSET_OK";
+    const gl=canvas.getContext("webgl",{premultipliedAlpha:false,alpha:true,preserveDrawingBuffer:true});
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+
+    const tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+    const fb=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const n=bmp.width*bmp.height*4;
+    const got=new Uint8Array(n);
+    gl.readPixels(0,0,bmp.width,bmp.height,gl.RGBA,gl.UNSIGNED_BYTE,got);
+    let exp;
+    try{
+      exp=await host.host_asset_read("test/tex16.expected.rgba");
+    }catch(e){
+      document.title="ASSET_ERR";
+      hud.textContent="no-expected";
+      return;
+    }
+    let ok=exp.length===got.length;
+    if(ok) for(let i=0;i<got.length;i++) if(got[i]!==exp[i]) ok=0;
+    window.__TEX2__={w:bmp.width,h:bmp.height,got:Array.from(got)};
+    hud.textContent=JSON.stringify({w:bmp.width,h:bmp.height,p0:[got[0],got[1],got[2],got[3]],a:[got[3],got[7],got[11],got[15]],ok:ok});
+    document.title=ok?"ASSET_OK":"ASSET_FAIL";
   }catch(e){
     document.title="ASSET_ERR";
     hud.textContent=String(e&&e.message||e);
