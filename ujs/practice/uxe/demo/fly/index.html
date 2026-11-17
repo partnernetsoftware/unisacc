@@ -5,12 +5,12 @@
 <title>fly-host1</title>
 <style>
   html,body { margin:0; height:100%; background:#081018; color:#dce7f0; font:13px sans-serif; overflow:hidden; }
-  #hud { position:fixed; left:12px; top:12px; z-index:2; background:rgba(8,16,24,.75); padding:8px 10px; border:1px solid #3a6; }
+  #hud { position:fixed; left:12px; top:12px; z-index:2; background:rgba(8,16,24,.75); padding:8px 10px; border:1px solid #3a6; max-width:520px; }
   canvas { display:block; width:100%; height:100%; }
 </style>
 </head>
 <body>
-<div id="hud">hold Space thrust · click roll · A/D bank</div>
+<div id="hud">hold Space · click roll · A/D bank · C camera</div>
 <canvas id="c"></canvas>
 <script src="fly-b64.js"></script>
 <script>
@@ -20,40 +20,52 @@ function u8fromB64(b64) {
   return u.buffer;
 }
 async function goldFromWasm() {
-  var buf = u8fromB64(window.FLY_WASM);
-  var inst = await WebAssembly.instantiate(buf);
+  var inst = await WebAssembly.instantiate(u8fromB64(window.FLY_WASM));
   var e = inst.instance.exports;
-  var h = e.main_export();
-  return Number(e.i64_of_export(h));
+  return Number(e.i64_of_export(e.main_export()));
 }
 
-var st = { x: 0, alt: 5, spd: 2, bank: 0, roll: 0, thrust: 0 };
+function sim16() {
+  var x = 0, alt = 5, spd = 2, i = 0;
+  while (i < 16) {
+    spd = spd + 1;
+    alt = alt + 2;
+    if (alt > 40) alt = 40;
+    x = x + spd;
+    i = i + 1;
+  }
+  return x + 100 * alt;
+}
+
+var AUTO = /(?:\?|&)auto=1(?:&|$)/.test(location.search);
+var st = { x: 0, alt: 5, spd: 2, bank: 0, roll: 0 };
 var keys = {};
-window.addEventListener("keydown", function (e) { keys[e.code] = 1; if (e.code === "Space") e.preventDefault(); });
+var cam = 0;
+var gold = 0, ok = 0, play = 0;
+window.addEventListener("keydown", function (e) {
+  keys[e.code] = 1;
+  if (e.code === "Space") e.preventDefault();
+  if (e.code === "KeyC") cam = cam ? 0 : 1;
+});
 window.addEventListener("keyup", function (e) { keys[e.code] = 0; });
 window.addEventListener("mousedown", function () { st.roll = st.roll ? 0 : 1; });
 
-function step(live) {
-  var thrust = live ? (keys.Space ? 1 : 0) : 1;
-  if (live) {
-    if (keys.KeyA || keys.ArrowLeft) st.bank = st.bank - 1;
-    if (keys.KeyD || keys.ArrowRight) st.bank = st.bank + 1;
-    if (st.bank > 8) st.bank = 8;
-    if (st.bank < -8) st.bank = -8;
-  }
-  if (thrust) { st.spd = st.spd + 1; st.alt = st.alt + 2; }
-  else { if (st.spd > 1) st.spd = st.spd - 1; if (st.alt > 2) st.alt = st.alt - 1; }
+function stepLive() {
+  var thrust = keys.Space ? 1 : 0;
+  if (keys.KeyA || keys.ArrowLeft) st.bank -= 1;
+  if (keys.KeyD || keys.ArrowRight) st.bank += 1;
+  if (st.bank > 8) st.bank = 8;
+  if (st.bank < -8) st.bank = -8;
+  if (thrust) { st.spd += 1; st.alt += 2; }
+  else { if (st.spd > 1) st.spd -= 1; if (st.alt > 2) st.alt -= 1; }
   if (st.alt > 40) st.alt = 40;
   if (st.alt < 2) st.alt = 2;
-  st.x = st.x + st.spd + (st.roll ? 2 : 0);
+  st.x += st.spd + (st.roll ? 2 : 0);
 }
 
 var c = document.getElementById("c");
 var g = c.getContext("2d");
-function resize() {
-  c.width = innerWidth;
-  c.height = innerHeight;
-}
+function resize() { c.width = innerWidth; c.height = innerHeight; }
 window.addEventListener("resize", resize);
 resize();
 
@@ -70,10 +82,8 @@ function island(gx, gy, s) {
   g.ellipse(gx, gy - 18, s * 0.4, s * 0.2, 0, 0, 6.28);
   g.fill();
 }
-
 function jet(cx, cy, bank, roll) {
-  var layer, ox;
-  ox = bank * 2 + (roll ? 10 : 0);
+  var layer, ox = bank * 2 + (roll ? 10 : 0);
   for (layer = 0; layer < 8; layer++) {
     g.fillStyle = layer < 3 ? "#8ab" : (layer < 6 ? "#c45" : "#eee");
     g.fillRect(cx + ox - 18 + layer, cy - layer * 2, 36 - layer, 8);
@@ -81,34 +91,53 @@ function jet(cx, cy, bank, roll) {
     g.fillRect(cx + ox + 16 - layer, cy - layer * 2 + 3, 12, 4);
   }
 }
+function stars(w, h, t) {
+  var i, sx, sy;
+  g.fillStyle = "#cfe";
+  for (i = 0; i < 40; i++) {
+    sx = (i * 97 + t * 0.2) % w;
+    sy = (i * 53) % (h * 0.45);
+    g.fillRect(sx, sy, 2, 2);
+  }
+}
 
-var gold = 0, ok = 0, frames = 0;
 (async function () {
-  try {
-    gold = await goldFromWasm();
-    ok = gold === 3868 ? 1 : 0;
-  } catch (e) { ok = 0; gold = -1; }
-  document.title = ok ? "FLY_HOST1_OK" : "FLY_HOST1_FAIL";
+  try { gold = await goldFromWasm(); } catch (e) { gold = -1; }
+  var js = sim16();
+  play = (gold === 3868 && js === 3868) ? 1 : 0;
+  ok = play;
+  document.title = play ? "FLY_PLAY_OK" : "FLY_PLAY_FAIL";
+  if (AUTO) {
+    document.getElementById("hud").textContent =
+      (play ? "FLY_PLAY_OK" : "FLY_PLAY_FAIL") + " wasm=" + gold + " js16=" + js;
+  }
 })();
 
 function draw() {
-  var w = c.width, h = c.height, i, gx;
+  var w = c.width, h = c.height, i, gx, jy;
+  if (!AUTO) stepLive();
   var sky = st.alt / 40;
-  g.fillStyle = "rgb(" + (20 + sky * 40) + "," + (40 + sky * 80) + "," + (70 + sky * 100) + ")";
+  g.fillStyle = "rgb(" + (12 + sky * 30) + "," + (24 + sky * 70) + "," + (50 + sky * 110) + ")";
   g.fillRect(0, 0, w, h);
+  stars(w, h, st.x);
   g.fillStyle = "#0a2030";
   g.fillRect(0, h * 0.62, w, h);
   for (i = 0; i < 7; i++) {
-    gx = ((i * 180 - (st.x * 3)) % (w + 200)) - 80;
+    gx = ((i * 180 - (st.x * 3) % (w + 220)) + w + 220) % (w + 220) - 80;
     island(gx, h * 0.62, 40 + (i % 3) * 10);
   }
-  jet(w * 0.5, h * 0.45 - st.alt * 2, st.bank, st.roll);
-  step(1);
-  frames++;
+  jy = cam ? h * 0.72 : (h * 0.45 - st.alt * 2);
+  if (!cam) jet(w * 0.5, jy, st.bank, st.roll);
+  else {
+    g.strokeStyle = "rgba(180,255,160,.7)";
+    g.strokeRect(w * 0.5 - 14, h * 0.5 - 14, 28, 28);
+  }
   var hud = document.getElementById("hud");
-  hud.textContent = (ok ? "FLY_HOST1_OK" : "FLY_HOST1_FAIL") +
-    " wasm=" + gold + " alt=" + st.alt + " spd=" + st.spd +
-    " x=" + st.x + " no-three host1-wasm · Space/click/AD";
+  if (!AUTO) {
+    hud.textContent = (play ? "FLY_PLAY_OK" : "FLY_HOST1") +
+      " wasm=" + gold + " alt=" + st.alt + " spd=" + st.spd +
+      " cam=" + (cam ? "cockpit" : "chase") + " no-three · Space/click/AD/C";
+  }
   requestAnimationFrame(draw);
 }
 draw();
