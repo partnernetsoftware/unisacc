@@ -6,7 +6,9 @@ prd / 计划 G3。本文件只记账；不改 `compiler_min`、`main`、`three`�
 
 `compiler_min` 无 `sqrt` / `sin` / `cos`。
 
-`f64` 的 `mod` 拒绝（`compiler_min.cx:991`）。
+左操作数 f64 的 `%` 拒绝(`compiler_min.cx:1021` `f64 mod`)。
+
+已知洞: `i64 % f64` 不拒,发出 `i64.rem_s` 对 f64 栈,wasm 类型不合法;`verify_wasm_bytes` 不拦。裸名 `sqrt` 静默当全局 0.0。不在本文件修 compiler_min。
 
 核内建落地前不得假设这些算子可进核。
 
