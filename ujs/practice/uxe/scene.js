@@ -27,8 +27,10 @@ export class InstanceCloud {
     this.metalness = 0.2;
     this.roughness = 0.5;
     this.meshId = 0;
+    this.mapId = 0;
     this.billboard = 0;
     this.dirty = true;
+
   }
   /** yaw Y, then pitch X, then roll Z. omitted angles stay 0 / previous. */
   set(i, x, y, z, s, yaw, pitch, roll) {

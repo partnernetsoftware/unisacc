@@ -5,6 +5,7 @@ import { allMeshes } from "./meshes.js";
 const VS = `#version 100
 precision mediump float;
 attribute vec3 aPos;
+attribute vec2 aUV;
 attribute vec3 aInst;
 attribute float aScale;
 attribute float aYaw;
@@ -19,6 +20,7 @@ varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
+varying vec2 vUV;
 vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
   float cy = cos(yaw), sy = sin(yaw);
   float cp = cos(pitch), sp = sin(pitch);
@@ -43,7 +45,9 @@ void main() {
   vP = p;
   vEye = uEye;
   vFogDepth = length(p - uEye);
+  vUV = aUV;
   gl_Position = uVP * vec4(p, 1.0);
+
 }
 `;
 
@@ -64,11 +68,18 @@ uniform float uL1I;
 uniform float uFogD;
 uniform vec3 uFogC;
 uniform float uInk;
+uniform sampler2D uMap;
+uniform float uHasMap;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
+varying vec2 vUV;
 void main() {
+  if (uHasMap > 0.5) {
+    gl_FragColor = texture2D(uMap, vUV);
+    return;
+  }
   vec3 n = normalize(vN);
   vec3 amb = uAmbient * uAmbI;
   float d0 = max(dot(n, normalize(uL0Dir)), 0.0);
@@ -117,7 +128,10 @@ export function createWebGLRenderer(canvas) {
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, m.positions, gl.STATIC_DRAW);
-    return { buf, vCount: m.vCount };
+    const uvbuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvbuf);
+    gl.bufferData(gl.ARRAY_BUFFER, m.uvs || new Float32Array(m.vCount * 2), gl.STATIC_DRAW);
+    return { buf, uvbuf, vCount: m.vCount };
   });
 
   const ibo = gl.createBuffer();
@@ -126,6 +140,7 @@ export function createWebGLRenderer(canvas) {
   const pbo = gl.createBuffer();
   const rbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
+  const aUV = gl.getAttribLocation(prog, "aUV");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
   const aYaw = gl.getAttribLocation(prog, "aYaw");
@@ -140,6 +155,9 @@ export function createWebGLRenderer(canvas) {
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
+  const uMap = u("uMap"), uHasMap = u("uHasMap");
+  const texCache = Object.create(null);
+
 
   const P = mat4(), V = mat4(), VP = mat4();
 
@@ -166,6 +184,22 @@ export function createWebGLRenderer(canvas) {
     gl.enableVertexAttribArray(aPos);
     gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aPos, 0);
+    if (aUV >= 0 && mesh.uvbuf) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.uvbuf);
+      gl.enableVertexAttribArray(aUV);
+      gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
+      ext.vertexAttribDivisorANGLE(aUV, 0);
+    }
+    {
+      const mid = cloud.mapId | 0;
+      if (mid && texCache[mid]) {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texCache[mid]);
+        if (uMap) gl.uniform1i(uMap, 0);
+        if (uHasMap) gl.uniform1f(uHasMap, 1);
+      } else if (uHasMap) gl.uniform1f(uHasMap, 0);
+    }
+
 
     gl.bindBuffer(gl.ARRAY_BUFFER, ibo);
     gl.bufferData(gl.ARRAY_BUFFER, cloud.xyz.subarray(0, cloud.count * 3), gl.DYNAMIC_DRAW);
@@ -206,12 +240,29 @@ export function createWebGLRenderer(canvas) {
   return {
     backend: "webgl",
     resize,
-    render(scene, camera) {
+    render(scene, camera, textures) {
+      if (textures && textures.length) {
+        for (let i = 0; i < textures.length; i++) {
+          const t = textures[i];
+          const id = t.id | 0;
+          if (!id || texCache[id]) continue;
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, t.rgba);
+          texCache[id] = tex;
+        }
+      }
       const w = canvas.width, h = canvas.height;
       const [cr, cg, cb, ca] = scene.clearColor;
       gl.enable(gl.DEPTH_TEST);
       gl.clearColor(cr, cg, cb, ca);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
 
       perspective(camera.fovy, w / Math.max(1, h), camera.near, camera.far, P);
       const [ex, ey, ez] = camera.eye;
