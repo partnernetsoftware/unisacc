@@ -2,7 +2,6 @@
 
 `ujs_ic_net.c` 已迁 [`archive/ujs-legacy-py-c/ujs_ic_net.c`](../../archive/ujs-legacy-py-c/ujs_ic_net.c)。
 
-- `gold/lex.tsv`: lex 金表,`sh ./unisacc.com ujs/product/gold-lex.cx -- --check`
-- `gold/parse.tsv`: parse 金表 330 键,`sh ./unisacc.com ujs/product/gold-parse.cx -- --check`
-- `nets/lex.net.tsv`: lex 网;net-lex-check
-- `nets/parse.net.tsv`: parse 网;net-parse-check 330 键 exact
+- `gold/lex.tsv` `parse.tsv` 及 `gold-rest.cx` 写出的 scope/irsel/isel/enc/reloc/shape
+- `nets/*.net.tsv`: 上列八张网文件;lex 与 parse 已 ask 穷举
+- 缺 type、ic 金表
