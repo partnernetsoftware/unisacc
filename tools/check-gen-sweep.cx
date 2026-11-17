@@ -1,0 +1,57 @@
+#pragma unisa use chrome_dom
+/* tools/check-gen-sweep.cx -- 五生成器磁盘一字节必红.
+ */
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+static int xor_byte(const char *path, int off, unsigned char *old) {
+    FILE *f = fopen(path, "r+b");
+    unsigned char b, x;
+    if (!f) return 1;
+    if (fseek(f, off, 0) != 0) { fclose(f); return 1; }
+    if (fread(&b, 1, 1, f) != 1) { fclose(f); return 1; }
+    *old = b;
+    x = (unsigned char)(b ^ 1);
+    if (fseek(f, off, 0) != 0) { fclose(f); return 1; }
+    fwrite(&x, 1, 1, f);
+    fclose(f);
+    return 0;
+}
+static int restore_byte(const char *path, int off, unsigned char old) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) return 1;
+    if (fseek(f, off, 0) != 0) { fclose(f); return 1; }
+    fwrite(&old, 1, 1, f);
+    fclose(f);
+    return 0;
+}
+static int run_check(const char *tool) {
+    char *av[6];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = (char *)tool; av[3] = "--"; av[4] = "--check"; av[5] = 0;
+    rc = cx_runv_timeout(av, 40, &out, &on);
+    if (out) { fwrite(out, 1, on, stdout); free(out); }
+    return rc;
+}
+static void one(const char *lab, const char *file, int off, const char *tool) {
+    unsigned char old = 0;
+    int rc;
+    if (xor_byte(file, off, &old)) { ck(0, lab); return; }
+    rc = run_check(tool);
+    printf("SWEEP\t%s\trc=%d\n", lab, rc);
+    ck(rc != 0, lab);
+    restore_byte(file, off, old);
+}
+int main(void) {
+    one("font", "ujs/practice/uxe/font5x7.js", 20, "tools/gen-font.cx");
+    one("pages", "docs/uxe/fly/index.html", 20, "tools/gen-uxe-pages.cx");
+    one("gpu", "ujs/practice/uxe/demo/gpu-tri/tri-b64.js", 20, "tools/gen-gpu-store-v3.cx");
+    one("g4", "ujs/practice/uxe/demo/g4-let/let-b64.js", 20, "tools/gen-g4-let-b64.cx");
+    one("asset", "ujs/practice/uxe/test/tex16.png", 20, "tools/gen-asset-png.cx");
+    printf("CHECK_GEN_SWEEP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
