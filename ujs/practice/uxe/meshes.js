@@ -68,6 +68,8 @@ export const PLANE_UV = new Float32Array([
   0, 0,  1, 1,  0, 1,
 ]);
 export const MESH_PLANE = 3;
+export const MESH_POINTS = 4;
+export const POINT_MESH = new Float32Array([0, 0, 0]);
 
 function zeros2(n) { return new Float32Array(n * 2); }
 
@@ -76,7 +78,9 @@ const TABLE = [
   { id: MESH_SHIP, positions: SHIP_MESH, uvs: zeros2(SHIP_MESH.length / 3), vCount: SHIP_MESH.length / 3 },
   { id: MESH_BOX, positions: BOX_MESH, uvs: zeros2(BOX_MESH.length / 3), vCount: BOX_MESH.length / 3 },
   { id: MESH_PLANE, positions: PLANE_MESH, uvs: PLANE_UV, vCount: PLANE_MESH.length / 3 },
+  { id: MESH_POINTS, positions: POINT_MESH, uvs: new Float32Array([0, 0]), vCount: 1, mode: "points" },
 ];
+
 
 export function meshById(id) {
   return TABLE[id] || TABLE[0];

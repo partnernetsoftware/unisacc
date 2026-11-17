@@ -72,7 +72,8 @@ host1 侧:`host_gpu_submit` 符号可导入,读线性内存后 no-op,**不是** 
 
 字节序:与 v3 相同,小端。magic `UXEP`(u32) | version(u32)=4。
 
-v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin`(u16):0=图像约定(texel 第 0 行在朝向相机时的上方,上传 `UNPACK_FLIP_Y_WEBGL=1`);1=保留 GL 约定。
+v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16) | `flags`(u16):bit0=`uv_origin`(0 图像约定),bit1=`alphaMode`(0 不透明,1 直通混合)。点精灵:`meshId=4`,每实例 `xyz` 为点中心,`scale[i]` 为 `gl_PointSize`(像素,上限实现相关,常见 1..64 写进已知限制);颜色用云 `color` 或后续逐点色表(本版一云一色)。衰减:本版不做距离衰减公式,记 T3 限制。同一云多实例不互相排序。
+
 
 
 包尾**上传段**(可空):`nUpload`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `sha256`(32B) `rgba`(w*h*4)。
