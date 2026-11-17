@@ -47,6 +47,20 @@ static int ends_with(const char *s, const char *suf) {
   if (m > n) return 0;
   return memcmp(s + (n - m), suf, m) == 0;
 }
+static int same_str(const char *a, const char *b) {
+  if (!a || !b) return 0;
+  while (*a && *a == *b) { a++; b++; }
+  return *a == *b;
+}
+static int starts_str(const char *s, const char *p) {
+  if (!s || !p) return 0;
+  while (*p) {
+    if (*s != *p) return 0;
+    s++;
+    p++;
+  }
+  return 1;
+}
 
 static int default_out_path(const char *src, char *buf, size_t cap) {
   size_t n;
@@ -361,33 +375,37 @@ static int cmd_ask_lex(const char *c, const char *peek) {
   static const char *CLASS[] = {
     "eof", "ws", "nl", "id", "num", "str", "punct", "op", "bad"
   };
-  FILE *f;
-  char line[256];
+  uint8_t *src = 0;
+  size_t src_n = 0, off;
   int feed_c[10];
   int w2cls[16];
   int i, nfeed = 0, ci = -1, pi = -1, h, y;
   (void)peek;
   for (i = 0; i < 10; i++) {
     feed_c[i] = -1;
-    if (!strcmp(c, CHARC[i])) ci = i;
-    if (!strcmp(peek, CHARC[i])) pi = i;
+    if (same_str(c, CHARC[i])) ci = i;
+    if (same_str(peek, CHARC[i])) pi = i;
   }
   if (ci < 0 || pi < 0) {
     fprintf(stderr, "ujs.com: --ask-lex unknown class\n");
     return 2;
   }
   for (i = 0; i < 16; i++) w2cls[i] = -1;
-  f = fopen("ujs/weights/nets/lex.net.tsv", "rb");
-  if (!f) {
+  if (!read_file("ujs/weights/nets/lex.net.tsv", &src, &src_n)) {
     fprintf(stderr, "ujs.com: missing ujs/weights/nets/lex.net.tsv\n");
     return 1;
   }
-  while (fgets(line, (int)sizeof line, f)) {
-    if (!strncmp(line, "feed\t", 5)) {
+  off = 0;
+  while (off < src_n) {
+    size_t e = off;
+    char *line;
+    while (e < src_n && src[e] != '\n' && src[e] != '\r') e++;
+    line = (char *)(src + off);
+    if (starts_str(line, "feed\t")) {
       const char *p = line + 5;
       int u = -1;
-      while (*p && *p != '\t' && *p != '\n') p++;
-      if (*p == '\t') {
+      while (p < (char *)(src + e) && *p && *p != '\t' && *p != '\n') p++;
+      if (p < (char *)(src + e) && *p == '\t') {
         p++;
         if (*p >= '0' && *p <= '9') {
           u = 0;
@@ -396,7 +414,7 @@ static int cmd_ask_lex(const char *c, const char *peek) {
       }
       if (nfeed < 10) feed_c[nfeed] = u;
       nfeed++;
-    } else if (!strncmp(line, "w2\t", 3)) {
+    } else if (starts_str(line, "w2\t")) {
       const char *p = line + 3;
       int hid = 0, cl = 0;
       while (*p >= '0' && *p <= '9') { hid = hid * 10 + (*p - '0'); p++; }
@@ -404,8 +422,10 @@ static int cmd_ask_lex(const char *c, const char *peek) {
       while (*p >= '0' && *p <= '9') { cl = cl * 10 + (*p - '0'); p++; }
       if (hid >= 0 && hid < 16) w2cls[hid] = cl;
     }
+    off = e;
+    while (off < src_n && (src[off] == '\n' || src[off] == '\r')) off++;
   }
-  fclose(f);
+  free(src);
   if (ci >= nfeed || feed_c[ci] < 0) {
     fprintf(stderr, "ujs.com: --ask-lex no feed\n");
     return 1;
@@ -419,6 +439,7 @@ static int cmd_ask_lex(const char *c, const char *peek) {
   printf("%s\n", CLASS[y]);
   return 0;
 }
+
 
 
 int main(int argc, char **argv) {
@@ -440,14 +461,14 @@ int main(int argc, char **argv) {
     usage(stdout);
     return 0;
   }
-  if (!strcmp(argv[1], "--ask-lex")) {
+  if (same_str(argv[1], "--ask-lex")) {
     if (argc != 4) {
       fprintf(stderr, "ujs.com: --ask-lex needs C PEEK\n");
       return 2;
     }
     return cmd_ask_lex(argv[2], argv[3]);
   }
-  if (!strcmp(argv[1], "--verify")) {
+  if (same_str(argv[1], "--verify")) {
     if (argc != 3) {
       fprintf(stderr, "ujs.com: --verify needs FILE.wasm\n");
       return 2;
