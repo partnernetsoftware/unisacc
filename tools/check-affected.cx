@@ -181,7 +181,7 @@ static int prep_field(const char *out, const char *name, const char *key, char *
     return 0;
 }
 static int own(const char *line, long n) {
-    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", "affected-hosttcc", "affected-assembler", 0};
+    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-list2", "affected-run", "affected-iface", "affected-iface2", "affected-hosttcc", "affected-assembler", "affected-roots", 0};
     int k; char pre[64];
     for (k = 0; mine[k]; k++) {
         int pl = (int)strlen(mine[k]);
@@ -297,7 +297,7 @@ int main(int argc, char **argv) {
             if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
             if(tx_eqz(argv[k],"--native")&&k+1<argc){if(argv[k+1][0]!='/'||setenv("AFFECTED_NATIVE",argv[++k],1))return 2;continue;}
             /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
-            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym") || tx_eqz(argv[k], "materials") || tx_eqz(argv[k], "hosttcc") || tx_eqz(argv[k], "assembler")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "list2") || tx_eqz(argv[k], "run") || tx_eqz(argv[k], "depth") || tx_eqz(argv[k], "iface") || tx_eqz(argv[k], "iface2") || tx_eqz(argv[k], "sym") || tx_eqz(argv[k], "materials") || tx_eqz(argv[k], "hosttcc") || tx_eqz(argv[k], "assembler") || tx_eqz(argv[k], "roots")) { part_wanted = argv[k]; continue; }
             if (tx_eqz(argv[k], "--")) continue;
             printf("usage: check-affected.cx [--part all|tiers|list|list2|run|materials|hosttcc|depth]\n");
             return 2;
@@ -305,7 +305,7 @@ int main(int argc, char **argv) {
     }
     if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
-    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym") && !want("materials") && !want("hosttcc") && !want("assembler")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (!want("tiers") && !want("list") && !want("list2") && !want("run") && !want("iface") && !want("iface2") && !want("sym") && !want("materials") && !want("hosttcc") && !want("assembler") && !want("roots")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
     if(want("assembler")) {
         char native_dir[]="/tmp/check-assembler-native-XXXXXX",native[4500],reason[512];
         if(!getenv("AFFECTED_NATIVE")){
@@ -430,6 +430,55 @@ int main(int argc, char **argv) {
         ck(rc == 0 && has(o, "BATCH_RUN\tid=tape-gap-tool\tstatus=PASS\t") && has(o, "AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\t"), "real-run");
         ck(has(o, "PREPARED\ttlib-kit") && has(o, "rebuilt="), "kit-prepared-once");
     }
+    }
+    if (want("roots")) {
+        /* Negative control for the root dimension of the material identity (no build: --prep-plan only).
+           A second root -- a real directory whose top-level entries are symlinks into this checkout, so every
+           closure byte and the product are the same -- planned against the SAME cache directory as this root
+           must get a different cache id and path for source-package-tool, and must report cache=miss.  When
+           this root's entry is present (cache=hit) that miss proves the second root does not hit it. */
+        char rb[] = "/tmp/affected-roots-XXXXXX", pb[4400], tb[4400], ida[17] = "", idb[17] = "", dir[4400] = "";
+        int setup = mkdtemp(rb) != 0, hit_a = 0; DIR *d = setup ? opendir(root_abs) : 0; struct dirent *e;
+        const char *k = "PREP_PLAN\tsource-package-tool\tid=", *kd = "\tcache_dir="; long kn = tx_len(k, 64), at, ad;
+        if (!d) setup = 0;
+        while (d && (e = readdir(d))) {
+            char from[4400], to[4400];
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, ".git") || !strcmp(e->d_name, ".claude") || !strcmp(e->d_name, "out")) continue;
+            if (cx_fmt(from, sizeof from, "%s/%s", root_abs, e->d_name) || cx_fmt(to, sizeof to, "%s/%s", rb, e->d_name) || sy_symlink(from, to)) setup = 0;
+        }
+        if (d) closedir(d);
+        if (cx_fmt(pb, sizeof pb, "%s/unisacc.com", rb) || cx_fmt(tb, sizeof tb, "%s/tools/affected.cx", rb)) setup = 0;
+        ck(setup, "roots-fixture");
+        if (setup) {
+            char *pa[] = {"--prep-plan", "--ids", "source-ident-helper", 0};
+            rc = tool(pa, o, OUTCAP);
+            at = tx_find(o, tx_len(o, OUTCAP), k, kn);
+            ad = tx_find(o, tx_len(o, OUTCAP), kd, tx_len(kd, 64));
+            if (rc == 0 && at >= 0 && cx_fmt(ida, sizeof ida, "%.16s", o + at + kn)) ida[0] = 0;
+            if (rc == 0 && ad >= 0) { long s = ad + tx_len(kd, 64), z = s; while (o[z] && o[z] != '\n') z++; if (cx_fmt(dir, sizeof dir, "%.*s", (int)(z - s), o + s)) dir[0] = 0; }
+            hit_a = at >= 0 && has(o + at, "\tcache=hit\t");
+            ck(rc == 0 && tx_len(ida, 17) == 16 && dir[0] && !has(o, "PREPARED\tsource-package-tool"), "roots-first-root-planned-not-built");
+            {   char *v[] = {"sh", pb, tb, "--", "--prep-plan", "--ids", "source-ident-helper", 0};
+                int ofd, efd, ex = 0, code = 0, sig = 0, pid; long n = 0, r; char junk[4096];
+                if (dir[0]) setenv("UNISACC_PREP_CACHE", dir, 1);
+                pid = dir[0] ? spawn_pipe_bounded(v, rb, SY_SPAWN_STDERR_SPLIT, &ofd, &efd) : -1;
+                unsetenv("UNISACC_PREP_CACHE");
+                p[0] = 0; rc = -1;
+                if (pid >= 0) {
+                    while (n < OUTCAP - 1 && (r = sy_read(ofd, p + n, OUTCAP - 1 - n)) > 0) n += r;
+                    p[n] = 0;
+                    while (sy_read(efd, junk, sizeof junk) > 0) {}
+                    sy_close(ofd); sy_close(efd);
+                    if (sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex) rc = code;
+                }
+            }
+            at = tx_find(p, tx_len(p, OUTCAP), k, kn);
+            if (rc == 0 && at >= 0 && cx_fmt(idb, sizeof idb, "%.16s", p + at + kn)) idb[0] = 0;
+            ck(rc == 0 && tx_len(idb, 17) == 16 && has(p, rb) && !has(p, "PREPARED\tsource-package-tool"), "roots-second-root-planned-not-built");
+            ck(ida[0] && idb[0] && strcmp(ida, idb) != 0, "roots-two-roots-two-cache-ids");
+            ck(at >= 0 && has(p + at, "\tcache=miss\t"), "roots-second-root-misses-the-shared-cache");
+            printf("NOTE\taffected.roots\tfirst_root_entry=%s\n", hit_a ? "present" : "absent");
+        }
     }
     if (want("materials")) {
     {   /* A material named `<x>-tool` whose source is not tools/<x>.cx must resolve to tests/cases/<x>.cx:
