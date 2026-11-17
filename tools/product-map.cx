@@ -120,7 +120,8 @@ static void parse_ape(const char *text) {
 
 static void ape_census(void) {
     char ape[4400], tool[4400];
-    join(ape, sizeof ape, root, "unisacc.com");
+    { char entry[4400];join(entry,sizeof entry,root,"unisacc.com");
+      if(sy_realpath(entry,ape,sizeof ape)<0)die("product-path"); }
     join(tool, sizeof tool, root, "tools/logic-distribution.cx");
     {
         char *v[] = {"sh", ape, tool, "--", "--ape", ape, 0};
@@ -524,7 +525,8 @@ static void census_package(void) {
     d.package.file = 0;
     cxpl_release(&d.package, free);
     free(s);
-    join(ape, sizeof ape, root, "unisacc.com");
+    { char entry[4400];join(entry,sizeof entry,root,"unisacc.com");
+      if(sy_realpath(entry,ape,sizeof ape)<0)die("product-path"); }
     join(tool, sizeof tool, root, "tools/model-program-census.cx");
     {
         char *v[] = {"sh", ape, tool, "--", "--package", pkgpath, 0};
@@ -556,6 +558,7 @@ static void census_package(void) {
 static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
     char rev[65], line[3000], old[16000];
     size_t oldn = 0;
+    int history_count = 0, history_seen[7] = {0};
     int i, j, flows;
     char ip[4400];
     size_t n;
@@ -568,14 +571,22 @@ static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
     flows = count_rows("exec/pipeline/image-stages.tsv");
     if (flows != 7) die("image-stages rows != 7");
     old[0] = 0;
-    join(ip, sizeof ip, root, "build/product-map.tsv");
+    join(ip, sizeof ip, root, "tools/product-flow-model.tsv");
     s = cx_read(ip, &n);
+    if (!s) die("flow-model-facts-read");
     if (s) {
         char *q = s;
         while (q && *q) {
             char *nl = strchr(q, '\n');
             size_t z = nl ? (size_t)(nl - q + 1) : strlen(q);
+            if (strncmp(q, "flow-model\t", 11)) die("flow-model-facts-kind");
             if (!strncmp(q, "flow-model\t", 11)) {
+                int ix=-1,tabs=0;char *stop=memchr(q+11,'\t',z-11);
+                if(!stop)die("flow-model-facts-shape");
+                for(int k=0;k<7;k++)if((size_t)(stop-q-11)==strlen(fl[k])&&!memcmp(q+11,fl[k],strlen(fl[k])))ix=k;
+                for(size_t k=0;k<z;k++)if(q[k]=='\t')tabs++;
+                if(ix<0||tabs!=12||history_seen[ix]++)die("flow-model-facts-shape");
+                history_count++;
                 if (oldn + z >= sizeof old) die("old-cap");
                 if (mm_copy(old + oldn, (long)(sizeof old - oldn), q, (long)z)) die("old");
                 oldn += z;
@@ -583,6 +594,7 @@ static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
             }
             q = nl ? nl + 1 : 0;
         }
+        if(history_count!=7)die("flow-model-facts-incomplete");
         free(s);
     }
     for (j = 0; j < 7; j++) gl[j][0] = 0;
@@ -769,9 +781,11 @@ int main(int argc, char **argv) {
     char *tsv, *prd;
     size_t tn, pn;
     int check = 0, writef = 0, daily = 0, i;
+    const char *emit_to = 0;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--write")) writef = 1;
+        if (!strcmp(argv[i], "--emit-tsv") && i + 1 < argc) emit_to = argv[++i];
+        else if (!strcmp(argv[i], "--write")) writef = 1;
         else if (!strcmp(argv[i], "--check")) check = 1;
         else if (!strcmp(argv[i], "--daily")) daily = 1;
         else if (!strcmp(argv[i], "--package") && i + 1 < argc) {
@@ -781,8 +795,12 @@ int main(int argc, char **argv) {
             if (sy_realpath(argv[++i], root, sizeof root) < 0) die("root-path");
         } else die("usage --write|--check [--daily] [--package BARE_PKG] [--root DIR]");
     }
-    if (writef == check || (daily && !check) || (daily && !have_pkg)) die("usage --write|--check [--daily --package BARE_PKG]");
+    if ((!emit_to && writef == check) || (emit_to && (writef || check || daily || have_pkg)) || (daily && !check) || (daily && !have_pkg)) die("usage --write|--check [--daily --package BARE_PKG]");
     build(&tsv, &tn, &prd, &pn);
+    if (emit_to) {
+        if(cx_write(emit_to,tsv,tn))die("emit-tsv-write");
+        return 0;
+    }
     if (writef) {
         char tp[4400];
         join(tp, sizeof tp, root, "build/product-map.tsv");
