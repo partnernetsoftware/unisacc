@@ -7,6 +7,8 @@ attribute vec3 aPos;
 attribute vec3 aInst;
 attribute float aScale;
 attribute float aYaw;
+attribute float aPitch;
+attribute float aRoll;
 uniform mat4 uVP;
 uniform vec3 uEye;
 uniform float uWave;
@@ -15,14 +17,20 @@ varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
+vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
+  float cy = cos(yaw), sy = sin(yaw);
+  float cp = cos(pitch), sp = sin(pitch);
+  float cr = cos(roll), sr = sin(roll);
+  vec3 yv = vec3(v.x * cy + v.z * sy, v.y, -v.x * sy + v.z * cy);
+  vec3 pv = vec3(yv.x, yv.y * cp - yv.z * sp, yv.y * sp + yv.z * cp);
+  return vec3(pv.x * cr - pv.y * sr, pv.x * sr + pv.y * cr, pv.z);
+}
 void main() {
-  float c = cos(aYaw);
-  float s = sin(aYaw);
   vec3 lp = aPos * aScale;
-  vec3 rp = vec3(lp.x * c + lp.z * s, lp.y, -lp.x * s + lp.z * c);
+  vec3 rp = rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
   p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
-  vN = normalize(vec3(aPos.x * c + aPos.z * s, aPos.y, -aPos.x * s + aPos.z * c));
+  vN = normalize(rotYXZ(aPos, aYaw, aPitch, aRoll));
   vP = p;
   vEye = uEye;
   vFogDepth = length(p - uEye);
@@ -106,10 +114,14 @@ export function createWebGLRenderer(canvas) {
   const ibo = gl.createBuffer();
   const sbo = gl.createBuffer();
   const ybo = gl.createBuffer();
+  const pbo = gl.createBuffer();
+  const rbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
   const aYaw = gl.getAttribLocation(prog, "aYaw");
+  const aPitch = gl.getAttribLocation(prog, "aPitch");
+  const aRoll = gl.getAttribLocation(prog, "aRoll");
   const u = (n) => gl.getUniformLocation(prog, n);
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
@@ -163,6 +175,20 @@ export function createWebGLRenderer(canvas) {
     gl.enableVertexAttribArray(aYaw);
     gl.vertexAttribPointer(aYaw, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aYaw, 1);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, pbo);
+    const pitch = cloud.pitch || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, pitch.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aPitch);
+    gl.vertexAttribPointer(aPitch, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aPitch, 1);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, rbo);
+    const roll = cloud.roll || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, roll.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aRoll);
+    gl.vertexAttribPointer(aRoll, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aRoll, 1);
     ext.drawArraysInstancedANGLE(gl.TRIANGLES, 0, mesh.vCount, cloud.count);
     cloud.markClean();
   }
