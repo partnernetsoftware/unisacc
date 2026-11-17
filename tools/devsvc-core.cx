@@ -1436,6 +1436,58 @@ static int mg_derive(const char *root, const char *rd, const char *mode, const c
     np_free(&r); clean(tail);
     return rc;
 }
+/* 版本号 x.y.z 按段数值比较:a>b 返回 1,相等 0,小于 -1;段数不同时缺段按 0 */
+static int mg_vcmp(const char *a, long an, const char *b, long bn) {
+    const char *ae = a + an, *be = b + bn;
+    while (a < ae || b < be) {
+        long x = 0, y = 0;
+        while (a < ae && *a >= '0' && *a <= '9') x = x * 10 + (*a++ - '0');
+        while (b < be && *b >= '0' && *b <= '9') y = y * 10 + (*b++ - '0');
+        if (x != y) return x > y ? 1 : -1;
+        if (a < ae) a++;
+        if (b < be) b++;
+    }
+    return 0;
+}
+/* build/tlib-packages.tsv 冲突的单调字段:已取本侧后,逐包(第一列)比较本侧与对侧(索引第 3 段)的 version(第二列),
+   对侧较大时只把该行 version 换成对侧值,其它列仍取本侧(随后 derive 按本侧接口重算,只会再升不会降);版本相同或本侧较大
+   保持本侧整行(原行为);只在对侧有的包不补(原行为)。逐个改动打 MERGE_VERSION_MAX 行。成功 0,读写失败 -1。 */
+static int mg_tlib_max(const char *rd, const char *path) {
+    static char th[1 << 17], ob[1 << 17], nb[1 << 17]; char fp[PW + 64]; unsigned char *mb = 0; int64_t mn = 0; long on, nn = 0; const char *s, *e;
+    {   char spec[600]; F(spec, sizeof spec, ":3:%s", path);
+        char *v[] = {"git", "-C", (char *)rd, "show", spec, 0};
+        if (ovf || runcap(v, th, sizeof th) != 0) return -1; }
+    F(fp, sizeof fp, "%s/%s", rd, path);
+    if (ovf || sy_read_file(fp, &mb, &mn, sizeof ob - 1) || !mb) { free(mb); return -1; }
+    mm_copy(ob, sizeof ob, mb, (size_t)mn); ob[mn] = 0; on = (long)mn; free(mb);
+    for (s = ob; s < ob + on; s = e) {
+        const char *t1, *t2, *ts, *te, *u1, *u2; long pl;
+        e = memchr(s, '\n', ob + on - s); e = e ? e + 1 : ob + on;
+        t1 = memchr(s, '\t', e - s); t2 = t1 ? memchr(t1 + 1, '\t', e - t1 - 1) : 0;
+        if (*s == '#' || !t1 || !t2) goto copy;
+        pl = t1 - s;
+        for (ts = th; *ts; ts = *te ? te + 1 : te) {
+            te = strchr(ts, '\n'); if (!te) te = ts + strlen(ts);
+            if (*ts == '#' || te - ts <= pl || strncmp(ts, s, pl) || ts[pl] != '\t') continue;
+            u1 = ts + pl; u2 = memchr(u1 + 1, '\t', te - u1 - 1);
+            if (u2 && mg_vcmp(u1 + 1, u2 - u1 - 1, t1 + 1, t2 - t1 - 1) > 0) {
+                long need = (t1 + 1 - s) + (u2 - u1 - 1) + (e - t2);
+                if (nn + need >= (long)sizeof nb) return -1;
+                printf("MERGE_VERSION_MAX\t%.*s\t%.*s -> %.*s\n", (int)pl, s, (int)(t2 - t1 - 1), t1 + 1, (int)(u2 - u1 - 1), u1 + 1);
+                mm_copy(nb + nn, sizeof nb - nn, s, t1 + 1 - s); nn += t1 + 1 - s;
+                mm_copy(nb + nn, sizeof nb - nn, u1 + 1, u2 - u1 - 1); nn += u2 - u1 - 1;
+                mm_copy(nb + nn, sizeof nb - nn, t2, e - t2); nn += e - t2;
+                goto next;
+            }
+            break;
+        }
+    copy:
+        if (nn + (e - s) >= (long)sizeof nb) return -1;
+        mm_copy(nb + nn, sizeof nb - nn, s, e - s); nn += e - s;
+    next:;
+    }
+    return sy_write_atomic(fp, nb, (size_t)nn, 0644) ? -1 : 0;
+}
 static int merge_conflicts(const char *root, const char *rd, const char *br, const char *cur) {
     static char lst[1 << 15], buf[1 << 15], names[1024], outs[MG_MAX][700], tail[700], mp[PW + 64], msg[4096], tabs[2048], sha[128];
     char *fl[MG_MAX]; int nf = 0, nd = 0, i, j, rc; unsigned char *mb = 0; int64_t mn = 0; char *man = 0;
@@ -1459,6 +1511,8 @@ static int merge_conflicts(const char *root, const char *rd, const char *br, con
     for (i = 0; i < nf; i++) {
         char *cv[] = {"git", "-C", (char *)rd, "checkout", "--ours", "--", fl[i], 0};
         if (runcap(cv, buf, sizeof buf) != 0) { mg_stop(fl, nf, rd, cur, "checkout-ours-failed", fl[i]); return 1; }
+        /* 包版本单调:tlib-packages 取本侧后逐包抬到两侧较大版本,再派生;合入后任何包版本不低于任一侧 */
+        if (!strcmp(fl[i], "build/tlib-packages.tsv") && mg_tlib_max(rd, fl[i])) { mg_stop(fl, nf, rd, cur, "tlib-version-max-failed", fl[i]); return 1; }
     }
     rc = mg_derive(root, rd, "--write", names, tail, sizeof tail);
     if (rc != 0) {

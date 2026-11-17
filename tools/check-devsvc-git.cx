@@ -49,10 +49,10 @@ static void cleanup(void) {
 }
 
 int main(int argc, char **argv) {
-    int A = 1, B = 1, C = 0, D = 0, E = 0;   /* e:私有索引合并与 pull 快进(他人暂存与脏文件保留、冲突不动、--cwd、分叉拒绝) */   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
+    int A = 1, B = 1, C = 0, D = 0, E = 0, FF = 0;   /* f:tlib-packages 派生表冲突按包取两侧较大版本 */   /* e:私有索引合并与 pull 快进(他人暂存与脏文件保留、冲突不动、--cwd、分叉拒绝) */   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
                                  c:commit 回执取回、x --bg 作业 deadline 自退与进程组清理、git merge 无冲突与冲突报告、git add 拒绝路径;缺省跑 a 与 b,各组独立夹具 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; E = strchr(argv[2], 'e') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|ab]\n"); return 2; }
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; E = strchr(argv[2], 'e') != 0; FF = strchr(argv[2], 'f') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|ab]\n"); return 2; }
     char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 剥掉调用方 shell 里的 DEVSVC_* 环境变量(如 DEVSVC_OWNER),夹具子进程不继承 */
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
             } else e++;
         } }
     {   /* 夹具路径按仓根哈希与组固定(不含 pid):使启动器自身按源路径取键的产品 -run 编译缓存跨次命中;开头与收尾都清空 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : "e"; char c0[700];
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700];
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
@@ -390,6 +390,24 @@ int main(int argc, char **argv) {
         ck(rc == 0 && !has("git-land"), "lock-not-left-after-merge");
     }
     F(c, sizeof c, "rm -rf %s", cl); (void)sh(c, 0);
+    }
+    if (FF) {
+    /* (f) tlib-packages 派生表冲突的版本单调:两分支各 bump 不同包(p.c 两侧都 bump,对侧 1.0.10 按数值大于本侧 1.0.2),
+       自动解后每个包版本等于两侧较大值,其它列取本侧;旧核心(DVGIT_CORE_FROM)取本侧使 p.a 停在 0.1.0,此断言失败 */
+    static const char tgen[] = "int main(void) { return 0; }\n";
+    static const char tman[] =
+        "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+        "tlx\ttools/tlx-gen.cx\tsh ./unisacc.com tools/tlx-gen.cx -- --check\tsh ./unisacc.com tools/tlx-gen.cx -- --write\tbuild/tlib-packages.tsv\tbuild/tlib-packages.tsv\t1\t30\n";
+    ck(wfile("tools/tlx-gen.cx", tgen) == 0 && wfile("exec/facts/derive.tsv", tman) == 0
+       && wfile("build/tlib-packages.tsv", "# pkg\tversion\tapi_sha\tnote\np.a\t0.1.0\tsa0\tA\np.b\t0.2.0\tsb0\tB\np.c\t1.0.0\tsc0\tC\n") == 0, "tlib-fixture-write");
+    F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git add -f tools/tlx-gen.cx exec/facts/derive.tsv build/tlib-packages.tsv && git commit -q -m TL0"
+                   " && git checkout -q -b tlf-b && printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa1\\tA\\np.b\\t0.2.0\\tsb0\\tB\\np.c\\t1.0.10\\tsc1\\tC\\n' > build/tlib-packages.tsv && git commit -q -am TLB"
+                   " && git checkout -q \"$M\" && printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.0\\tsa0\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.2\\tsc2\\tC\\n' > build/tlib-packages.tsv && git commit -q -am TLM");
+    ck(!ovf && sh(c, fx) == 0, "tlib-fixture-branches");
+    rc = dv("git", "merge", "tlf-b", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("MERGE_AUTO\tbuild/tlib-packages.tsv\n") && has("GIT_MERGE\trc=0\tcommit=") && has("\tderive=tlx"), "tlib-conflict-auto-resolved-rc0");
+    ck(sh("[ \"$(git show HEAD:build/tlib-packages.tsv)\" = \"$(printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa0\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.10\\tsc2\\tC')\" ]"
+          " && [ -z \"$(git status --porcelain -uno)\" ] && git rev-parse -q --verify HEAD^2 >/dev/null", fx) == 0, "tlib-merge-each-pkg-max-version-ours-other-cols");
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();
