@@ -1,0 +1,210 @@
+#pragma unisa use chrome_dom
+/* tools/gen-s0-cloud.cx -- 概念稿分形云 1120x180.
+ * hash/vnoise/fbm 与 water-keeps-s0.html 同常数.
+ * sh ./unisacc.com tools/gen-s0-cloud.cx -- --write|--check
+ */
+#define CW 1120
+#define CH 180
+static unsigned char cpix[CH][CW][4];
+static unsigned crc_tab[256];
+static int write_mode;
+static void crc_init(void) {
+    unsigned i, j, c;
+    for (i = 0; i < 256; i++) {
+        c = i;
+        for (j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+        crc_tab[i] = c;
+    }
+}
+static unsigned crc32(const unsigned char *p, int n) {
+    unsigned c = 0xffffffffu;
+    int i;
+    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+static unsigned adler(const unsigned char *p, int n) {
+    unsigned a = 1, b = 0;
+    int i;
+    for (i = 0; i < n; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
+    return (b << 16) | a;
+}
+static void be32(unsigned char *o, unsigned v) {
+    o[0] = (unsigned char)(v >> 24); o[1] = (unsigned char)(v >> 16);
+    o[2] = (unsigned char)(v >> 8); o[3] = (unsigned char)v;
+}
+static int ifloor(double x) {
+    int i = (int)x;
+    if (x < 0 && (double)i != x) i--;
+    return i;
+}
+static double cl_sin(double x) {
+    double pi = 3.141592653589793;
+    double twopi = 6.283185307179586;
+    double t, x2, s, term;
+    t = x / twopi;
+    t = t - (double)ifloor(t);
+    x = t * twopi;
+    if (x > pi) x -= twopi;
+    x2 = x * x;
+    s = x;
+    term = x;
+    term = term * (-x2) / 6.0; s += term;
+    term = term * (-x2) / 20.0; s += term;
+    term = term * (-x2) / 42.0; s += term;
+    term = term * (-x2) / 72.0; s += term;
+    term = term * (-x2) / 110.0; s += term;
+    return s;
+}
+static double cl_hash(double x, double y) {
+    double n = cl_sin(x * 127.1 + y * 311.7) * 43758.5453;
+    return n - (double)ifloor(n);
+}
+static double vnoise(double x, double y) {
+    int x0 = ifloor(x), y0 = ifloor(y);
+    double fx = x - (double)x0, fy = y - (double)y0;
+    double a = cl_hash((double)x0, (double)y0);
+    double b = cl_hash((double)(x0 + 1), (double)y0);
+    double c = cl_hash((double)x0, (double)(y0 + 1));
+    double d = cl_hash((double)(x0 + 1), (double)(y0 + 1));
+    double ux = fx * fx * (3.0 - 2.0 * fx);
+    double uy = fy * fy * (3.0 - 2.0 * fy);
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+static double fbm(double x, double y) {
+    double a = 0, amp = 0.5, f = 1;
+    int i;
+    for (i = 0; i < 5; i++) {
+        a += amp * vnoise(x * f, y * f);
+        f *= 2;
+        amp *= 0.5;
+    }
+    return a;
+}
+static void fill_cloud(void) {
+    int y, x;
+    for (y = 0; y < CH; y++) for (x = 0; x < CW; x++) {
+        double wx = (double)(80 + x);
+        double wy = (double)(y - 40);
+        double n = fbm(wx * 0.006, wy * 0.035);
+        int ai;
+        n = n * n;
+        cpix[y][x][0] = 244;
+        cpix[y][x][1] = 224;
+        cpix[y][x][2] = 168;
+        if (n < 0.22) ai = 0;
+        else {
+            double ad = (n - 0.22) * 2.2;
+            if (ad > 0.55) ad = 0.55;
+            ai = (int)(ad * 255.0 + 0.5);
+            if (ai > 255) ai = 255;
+        }
+        cpix[y][x][3] = (unsigned char)ai;
+    }
+}
+static unsigned char raw[CH * (1 + CW * 4)];
+static unsigned char zbuf[16 + CH * (1 + CW * 4) + 64];
+static unsigned char outb[64 + CH * (1 + CW * 4) + 128];
+static int emit_png(unsigned char *dst) {
+    unsigned char ihdr[25];
+    int k = 0, y, x, oi = 0, i, zlen, off, rem, n, last;
+    unsigned c, ad;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    for (y = 0; y < CH; y++) {
+        raw[k++] = 0;
+        for (x = 0; x < CW; x++) {
+            raw[k++] = cpix[y][x][0];
+            raw[k++] = cpix[y][x][1];
+            raw[k++] = cpix[y][x][2];
+            raw[k++] = cpix[y][x][3];
+        }
+    }
+    zbuf[0] = 0x78; zbuf[1] = 0x01;
+    zlen = 2;
+    off = 0; rem = k;
+    while (rem > 0) {
+        n = rem > 65535 ? 65535 : rem;
+        last = (n == rem);
+        zbuf[zlen++] = last ? 1 : 0;
+        zbuf[zlen++] = (unsigned char)(n & 255);
+        zbuf[zlen++] = (unsigned char)(n >> 8);
+        zbuf[zlen++] = (unsigned char)((~n) & 255);
+        zbuf[zlen++] = (unsigned char)((~n >> 8) & 255);
+        for (i = 0; i < n; i++) zbuf[zlen++] = raw[off + i];
+        off += n; rem -= n;
+    }
+    ad = adler(raw, k);
+    be32(zbuf + zlen, ad);
+    zlen += 4;
+    for (i = 0; i < 8; i++) dst[oi++] = sig[i];
+    be32(ihdr, 13);
+    ihdr[4] = 'I'; ihdr[5] = 'H'; ihdr[6] = 'D'; ihdr[7] = 'R';
+    be32(ihdr + 8, CW); be32(ihdr + 12, CH);
+    ihdr[16] = 8; ihdr[17] = 6; ihdr[18] = 0; ihdr[19] = 0; ihdr[20] = 0;
+    c = crc32(ihdr + 4, 17);
+    be32(ihdr + 21, c);
+    for (i = 0; i < 25; i++) dst[oi++] = ihdr[i];
+    be32(ihdr, (unsigned)zlen);
+    dst[oi++] = ihdr[0]; dst[oi++] = ihdr[1]; dst[oi++] = ihdr[2]; dst[oi++] = ihdr[3];
+    dst[oi++] = 'I'; dst[oi++] = 'D'; dst[oi++] = 'A'; dst[oi++] = 'T';
+    for (i = 0; i < zlen; i++) dst[oi++] = zbuf[i];
+    {
+        unsigned char crcbuf[4];
+        /* crc of IDAT type+data: rebuild expensive; compute on the fly */
+        unsigned char *start = dst + oi - zlen - 4;
+        c = crc32(start, 4 + zlen);
+        be32(crcbuf, c);
+        dst[oi++] = crcbuf[0]; dst[oi++] = crcbuf[1]; dst[oi++] = crcbuf[2]; dst[oi++] = crcbuf[3];
+    }
+    be32(ihdr, 0);
+    ihdr[4] = 'I'; ihdr[5] = 'E'; ihdr[6] = 'N'; ihdr[7] = 'D';
+    c = crc32(ihdr + 4, 4);
+    be32(ihdr + 8, c);
+    for (i = 0; i < 12; i++) dst[oi++] = ihdr[i];
+    return oi;
+}
+static int check_png(const char *path, unsigned char *b, int oi) {
+    FILE *f = fopen(path, "rb");
+    unsigned char disk[64];
+    int n, i;
+    long sz;
+    if (!f) return 1;
+    fseek(f, 0, 2); sz = ftell(f); fseek(f, 0, 0);
+    if (sz != oi) { fclose(f); return 1; }
+    for (i = 0; i < oi; ) {
+        int want = oi - i; if (want > 64) want = 64;
+        n = (int)fread(disk, 1, want, f);
+        if (n != want) { fclose(f); return 1; }
+        { int j; for (j = 0; j < n; j++) if (disk[j] != b[i + j]) { fclose(f); return 1; } }
+        i += n;
+    }
+    fclose(f);
+    return 0;
+}
+int main(int argc, char **argv) {
+    int write = 0, check = 0, i, oi, failed = 0;
+    FILE *f;
+    crc_init();
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
+        if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
+    }
+    if (!write && !check) { printf("GEN_S0_CLOUD\tdry\n"); return 0; }
+    write_mode = write;
+    fill_cloud();
+    oi = emit_png(outb);
+    if (write) {
+        f = fopen("ujs/plans/demo-v2/look-dev/cloud-soft.png", "wb");
+        if (!f) return 1;
+        fwrite(outb, 1, oi, f);
+        fclose(f);
+        printf("WROTE\tcloud-soft.png\t%d\n", oi);
+    }
+    if (check) {
+        if (check_png("ujs/plans/demo-v2/look-dev/cloud-soft.png", outb, oi)) {
+            printf("DIFF\tcloud-soft.png\n");
+            failed = 1;
+        } else printf("MATCH\tcloud-soft.png\n");
+    }
+    printf("GEN_S0_CLOUD\tok\n");
+    return failed;
+}
