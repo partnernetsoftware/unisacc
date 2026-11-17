@@ -95,18 +95,30 @@
 
 **D5** 草稿页已开(`ghibli-world/`,`GHIBLI_OK` 表长>=8);观感合同未达。
 
-### 0.3b 已核实缺口(2026-11-17,相对 D1-D5+host1-games)
+### 0.3b 已核实缺口(2026-11-17)
 
-| 号 | 面 | 事实 | 排期 |
+记账:`practice/uxe/demo/G1-submit.md` `G3-math.md` `G4-step.md`。
+
+#### UXE
+
+| 号 | 事实 | 计划 | 验收 |
 |---|---|---|---|
-| G1 | UXE 提交 | `compiler_min` 导出 `host_set_global`/`host_list_get`/`run_step`;无 `host_gpu_submit`。现页 JS 组包。W3 | 最高;先于放宽容量 |
-| G2 | 容量 | `:465` MAXC=16384 MAXL=128 MAXG=64 MAXN=32 MAXFN=8 MAXSDATA=8192。D1-D5 `.ujs` 无 `function`,未触 MAXFN | 先表再改常量;跟 G1 |
-| G3 | 数学 | 同文件无 sqrt/sin/cos;`:991` `f64 mod` 拒绝。旋转在页 JS | 定:核 f64 内建或合同写明归 Host |
-| G4 | 步进 | `run_step_body` 调 main(func 1);顶层 let 每帧清。v0.0.8 文字未兑现 | 持久 globals/state 段,独立于 0.0.9 ujsmeta |
-| G5 | 产物 | 五切片 APE+`ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore。`--smoke` 调 `build.cx` 会把 APE 盖成本机 ELF,须再 `build-ape.cx` | 检查已绑;smoke 与 APE 互斥未解 |
-| G6 | 文档 | W1-W5 仍在 `plans/demo-three-ports.md`;本表收 UXE;ujs.com 生产力另见 0.0.x | 本表为真源入口 |
+| U1 | 核无 `host_gpu_submit` import(源码出现该标识才发)。现页 JS 组包。W3 | G1-submit.md | `tools/check-ujs-gpu-import.cx`;批次 `ujs-gpu-import`。无该标识则 wasm 无 section 2 |
+| U2 | D1-D5 `.ujs` 无 `function`,未触 MAXFN=8 | 先表再改常量 | `rg '^function' ujs/tests/examples/{fly,water,ink,oneshot,ghibli}.ujs` 空 |
+| U3 | 无 sqrt/sin/cos;`f64 mod` 拒绝 | G3-math.md | `./ujs/ujs.com` 含 `%` 的 f64 源码非零;页 JS 仍算旋转 |
+| U4 | `run_step` 调 main;顶层 let 每帧清 | G4-step.md;独立 0.0.9 | 全局 yaw/wind 跨 step 仍在;顶层 let 不跨帧 |
+| U5 | D5 观感未达 | ghibli-world/DESIGN.md | AUTO `GHIBLI_OK`;观感人工 |
 
-(6) 未决:D5 观感数字;G3 归核还是归 Host。记账:`practice/uxe/demo/G1-submit.md` `G3-math.md` `G4-step.md`。
+#### ujs.com
+
+| 号 | 事实 | 计划 | 验收 |
+|---|---|---|---|
+| C1 | 五切片 APE;`ujs.com` gitignore;无 win/arm64 | build-ape.cx | `sh ./unisacc.com tools/check-ujs-ape.cx` 末行 `UJS_APE_OK` failed=0。批次 `ujs-ape-slices` |
+| C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
+| C3 | `host1_vm` 遇 section 2 拒绝 `import`(已做)。折算 idx 未做 | G1-submit.md | 无 import 的 fly `--run` 金 3868;有 import 的模块 `--run` JSON err=import |
+
+(6) 未决:U3 归核还是归 Host;C3 折算 vs 拒绝。
+
 
 ---
 

@@ -1,0 +1,88 @@
+/* tools/check-ujs-gpu-import.cx -- fly.ujs wasm must not have import section.
+ *
+ * sh ./unisacc.com tools/check-ujs-gpu-import.cx --
+ *
+ * Compiles ujs/tests/examples/fly.ujs with ./ujs/ujs.com. Asserts the
+ * wasm has no section id 2. Last line UJS_GPU_IMPORT_OK
+ */
+static int ck_failed, ck_asserts;
+
+static void ck_ck(int ok, const char *label) {
+    ck_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ck_failed++;
+}
+
+static int has_sid2(const unsigned char *b, long n) {
+    long i = 8;
+    if (n < 8 || b[0] || b[1] != 0x61 || b[2] != 0x73 || b[3] != 0x6d) return -1;
+    while (i < n) {
+        unsigned sid, sh, c, nn;
+        if (i >= n) return 0;
+        sid = b[i++];
+        nn = 0;
+        sh = 0;
+        for (;;) {
+            if (i >= n) return -1;
+            c = b[i++];
+            nn |= (c & 0x7fu) << sh;
+            if (c < 0x80) break;
+            sh += 7;
+            if (sh > 28) return -1;
+        }
+        if (sid == 2) return 1;
+        i += (long)nn;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    FILE *f;
+    unsigned char *b;
+    long fl;
+    char *av[8];
+    int sid2;
+    (void)argc;
+    (void)argv;
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = "ujs/tests/examples/fly.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-ujs-gpu-fly.wasm";
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    ck_ck(rc == 0, "compile-fly");
+    f = fopen("/tmp/check-ujs-gpu-fly.wasm", "rb");
+    ck_ck(f != 0, "fly-wasm-open");
+    if (!f) {
+        printf("UJS_GPU_IMPORT_OK\tassertions=%d\tfailed=%d\n", ck_asserts, ck_failed);
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 2;
+    }
+    fl = ftell(f);
+    if (fl < 0 || fl > 8 * 1024 * 1024) {
+        fclose(f);
+        return 2;
+    }
+    rewind(f);
+    b = (unsigned char *)malloc((size_t)fl);
+    if (!b || (long)fread(b, 1, (size_t)fl, f) != fl) {
+        free(b);
+        fclose(f);
+        return 2;
+    }
+    fclose(f);
+    sid2 = has_sid2(b, fl);
+    free(b);
+    ck_ck(sid2 == 0, "fly-no-import-section");
+    printf("UJS_GPU_IMPORT_OK\tassertions=%d\tfailed=%d\n", ck_asserts, ck_failed);
+    return ck_failed ? 1 : 0;
+}
