@@ -1,0 +1,66 @@
+/* Rule facts + batch contracts + explicit exceptions -> complete domain index.
+ * --write|--check [--root DIR] [--dump]. No batch is executed or qualified. */
+#pragma unisa use cxlib.batchdomain
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+typedef struct BgRow {char *id,*entry,*source,*tier,*layer,*object,*domain,*origin,*basis;int owns;} BgRow;
+typedef struct BgData {BdomRules rules;char *registry,*facts;BgRow*rows;int count,automatic,exceptions;char regsha[65],factsha[65],rulesha[65],contractsha[65];} BgData;
+static int bg_fail(char*w,size_t cap,const char*code,const char*id){if(cx_fmt(w,cap,"%s id=%s; add tests/batch-domains.tsv exception only when declarations cannot decide",code,id?id:"-"))return -2;return -1;}
+static int bg_path(char*out,size_t cap,const char*root,const char*path){return path[0]=='/'?cx_fmt(out,cap,"%s",path):cx_fmt(out,cap,"%s/%s",root,path);}
+static char*bg_read(const char*path,size_t*n,char*w,size_t cap){char*b=cx_read(path,n);if(!b){bg_fail(w,cap,"read",path);return 0;}if(!*n||*n>8388608||strlen(b)!=*n||b[*n-1]!='\n'){mm_free(b);bg_fail(w,cap,"size-or-newline",path);return 0;}return b;}
+static int bg_fields(char*p,char**v,int want){int n=1;v[0]=p;for(char*q=p;*q;q++){if(*q=='\r')return 0;if(*q=='\t'){*q=0;if(n==want)return 0;v[n++]=q+1;}}if(n!=want)return 0;for(int i=0;i<n;i++)if(!*v[i])return 0;return 1;}
+static int bg_basis(const char*p){for(;*p;p++)if((unsigned char)*p>32)return 1;return 0;}
+static int bg_find(const BgData*d,const char*id){for(int i=0;i<d->count;i++)if(!strcmp(d->rows[i].id,id))return i;return -1;}
+static void bg_close(BgData*d){for(int i=0;i<d->count;i++)if(d->rows[i].owns)mm_free(d->rows[i].object);mm_free(d->registry);mm_free(d->facts);mm_free(d->rows);bdom_close(&d->rules);}
+/* Only the first declared comment paragraph participates; implementation text is excluded. */
+static char*bg_contract(const char*root,const char*source,char*w,size_t cap){
+ char full[8192];if(!strcmp(source,"-"))return strdup("");if(bg_path(full,sizeof full,root,source)){bg_fail(w,cap,"contract-path",source);return 0;}
+ sy_stat_t st;int sr=sy_lstat(full,&st);if(sr==-2)return strdup("");if(sr){bg_fail(w,cap,"contract-stat",source);return 0;}
+ size_t n=0;char*b=cx_read(full,&n);if(!b){bg_fail(w,cap,"contract-read",source);return 0;}char*p=b;
+ for(;;){while(*p==' '||*p=='\t'||*p=='\r'||*p=='\n')p++;if(*p=='#'){char*e=strchr(p,'\n');if(!e)break;p=e+1;continue;}break;}
+ char*end=0;if(!strncmp(p,"/*",2)){p+=2;end=strstr(p,"*/");}else if(!strncmp(p,"//",2)){p+=2;end=strchr(p,'\n');}
+ if(!end){mm_free(b);return strdup("");}if(end-p>16384){mm_free(b);bg_fail(w,cap,"contract-bound",source);return 0;}
+ char*first=strchr(p,'\n');char*sep=strstr(p," -- ");if(sep&&(!first||sep<first))p=sep+4;
+ {int seen=0;for(char*line=p;line<end;){char*nl=strchr(line,'\n');if(!nl||nl>end)nl=end;char*q=line;while(q<nl&&(*q==' '||*q=='\t'||*q=='*'||*q=='\r'))q++;if(q==nl&&seen){end=line;break;}if(q<nl)seen=1;line=nl<end?nl+1:end;}}
+ size_t size=(size_t)(end-p)+1;char*out=mm_alloc(size);if(!out){mm_free(b);return 0;}size_t at=0;
+ for(;p<end;p++){unsigned char c=(unsigned char)*p;if(c=='\t'||c=='\r'||c=='\n')c=' ';if(c=='*'&&(p==b||p[-1]=='\n'||p[-1]==' '))c=' ';if(c==' '&&(!at||out[at-1]==' '))continue;out[at++]=(char)c;}if(at&&out[at-1]==' ')at--;out[at]=0;mm_free(b);return out;
+}
+static int bg_load(const char*root,BgData*d,char*w,size_t cap){
+ int z=mm_fill(d,sizeof *d,0,sizeof *d);(void)z;char path[8192];size_t rn=0,fn=0,qn=0;
+ if(bg_path(path,sizeof path,root,"tests/batches.tsv"))return -1;d->registry=bg_read(path,&rn,w,cap);if(!d->registry)return -1;cx_sha256_hex(d->registry,rn,d->regsha);
+ if(bg_path(path,sizeof path,root,"tests/batch-domains.tsv"))return -1;d->facts=bg_read(path,&fn,w,cap);if(!d->facts)return -1;cx_sha256_hex(d->facts,fn,d->factsha);
+ if(bg_path(path,sizeof path,root,"tests/batch-domain-rules.tsv"))return -1;char*q=bg_read(path,&qn,w,cap);if(!q)return -1;cx_sha256_hex(q,qn,d->rulesha);mm_free(q);if(bdom_read(path,&d->rules,w,cap))return -1;
+ d->rows=mm_alloc(4096*sizeof *d->rows);if(!d->rows)return bg_fail(w,cap,"allocation",0);z=mm_fill(d->rows,4096*sizeof *d->rows,0,4096*sizeof *d->rows);(void)z;
+ for(int mode=0;mode<2;mode++){int header=0;for(char*p=mode?d->facts:d->registry;*p;){char*e=strchr(p,'\n');if(!e)return -1;*e=0;
+  if(*p&&*p!='#'){if(!header){const char*h=mode?"id\tdomain\tbasis":"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier";if(strcmp(p,h))return bg_fail(w,cap,"header",p);header=1;}
+   else {char*v[14];if(!bg_fields(p,v,mode?3:14))return bg_fail(w,cap,"row-shape",p);int i=bg_find(d,v[0]);
+    if(!mode){if(i>=0||d->count==4096)return bg_fail(w,cap,"duplicate-or-limit-batch",v[0]);BgRow*b=&d->rows[d->count++];b->id=v[0];b->source=v[3];b->entry=v[8];b->layer=v[2];b->tier=v[13];}
+    else {if(i<0)return bg_fail(w,cap,"extra-exception",v[0]);BgRow*b=&d->rows[i];if(b->domain)return bg_fail(w,cap,"duplicate-exception",v[0]);if(bdom_kind(v[1])<0)return bg_fail(w,cap,"unknown-domain",v[1]);if(!bg_basis(v[2]))return bg_fail(w,cap,"exception-basis-missing",v[0]);b->domain=v[1];b->basis=v[2];b->origin="exception";d->exceptions++;}
+   }}p=e+1;
+ }if(!header)return bg_fail(w,cap,"empty-table",0);}if(!d->count)return bg_fail(w,cap,"empty-registry",0);
+ size_t hs=rn+(size_t)d->count*70+1024,at=0;char*hashes=mm_alloc(hs);if(!hashes)return -1;
+ for(int i=0;i<d->count;i++){BgRow*b=&d->rows[i];int s=0;for(;s<i&&strcmp(d->rows[s].source,b->source);s++);if(s<i)b->object=d->rows[s].object;else{b->object=bg_contract(root,b->source,w,cap);b->owns=1;if(!b->object){mm_free(hashes);return -1;}}
+  char h[65];cx_sha256_hex(b->object,strlen(b->object),h);int n=snprintf(hashes+at,hs-at,"%s\t%s\n",b->id,h);if(n<0||(size_t)n>=hs-at){mm_free(hashes);return -1;}at+=(size_t)n;
+  if(b->domain)continue;int rule=-1;int kind=bdom_decide(&d->rules,b->id,b->entry,b->tier,b->layer,b->object,&rule,w,cap);if(kind<0){mm_free(hashes);return -1;}BdomRule*r=&d->rules.row[rule];b->domain=r->domain;b->origin=r->id;b->basis=r->basis;d->automatic++;
+ }cx_sha256_hex(hashes,at,d->contractsha);mm_free(hashes);
+ for(int j=0;j<d->rules.count;j++){BdomRule*r=&d->rules.row[j];if(!bg_basis(r->basis))return bg_fail(w,cap,"rule-basis-missing",r->id);int i=bg_find(d,r->sample);if(i<0)return bg_fail(w,cap,"rule-sample-missing",r->id);BgRow*b=&d->rows[i];if(!bdom_matches(r,b->entry,b->tier,b->layer,b->object)||strcmp(r->domain,b->domain))return bg_fail(w,cap,"rule-sample-mismatch",r->id);}
+ return 0;
+}
+static char*bg_render(const BgData*d,size_t*n,char*w,size_t cap){
+ size_t gn=0;char*g=cx_read(__FILE__,&gn),gh[65];if(!g){bg_fail(w,cap,"generator-read",__FILE__);return 0;}cx_sha256_hex(g,gn,gh);mm_free(g);
+ size_t size=1024;for(int i=0;i<d->count;i++){BgRow*b=&d->rows[i];size+=strlen(b->id)+strlen(b->domain)+strlen(b->origin)+strlen(b->basis)+4;}
+ char*out=mm_alloc(size);if(!out)return 0;int k=snprintf(out,size,"# batch-domain-index-v3 registry=%s exceptions=%s rules=%s contracts=%s generator=%s\nid\tdomain\torigin\tbasis\n",d->regsha,d->factsha,d->rulesha,d->contractsha,gh);if(k<0||(size_t)k>=size){mm_free(out);return 0;}size_t at=(size_t)k;
+ for(int i=0;i<d->count;i++){BgRow*b=&d->rows[i];k=snprintf(out+at,size-at,"%s\t%s\t%s\t%s\n",b->id,b->domain,b->origin,b->basis);if(k<0||(size_t)k>=size-at){mm_free(out);return 0;}at+=(size_t)k;}*n=at;return out;
+}
+int main(int argc,char**argv){
+ const char*root=".";int write=-1,dump=0;for(int a=1;a<argc;a++){if(!strcmp(argv[a],"--write")&&write<0)write=1;else if(!strcmp(argv[a],"--check")&&write<0)write=0;else if(!strcmp(argv[a],"--dump"))dump=1;else if(!strcmp(argv[a],"--root")&&a+1<argc)root=argv[++a];else return 2;}
+ if(write<0||write&&dump){fprintf(stderr,"usage: batch-domains-gen --write|--check [--root DIR] [--dump]\n");return 2;}
+ BgData d;char why[1200]={0},path[8192];int rc=bg_load(root,&d,why,sizeof why);size_t n=0;char*out=0;if(!rc){out=bg_render(&d,&n,why,sizeof why);if(!out)rc=-1;}
+ if(!rc&&bg_path(path,sizeof path,root,"tests/batch-domain-index.tsv"))rc=-1;
+ if(!rc&&write){rc=sy_write_atomic(path,out,n,0644);if(rc)bg_fail(why,sizeof why,"index-write",path);}
+ else if(!rc){size_t an=0;char*actual=cx_read(path,&an);if(!actual||an!=n||memcmp(out,actual,n))rc=bg_fail(why,sizeof why,"index-drift",path);mm_free(actual);}
+ if(rc)fprintf(stderr,"BATCH_DOMAINS\tREFUSE\t%s\n",why);else{FILE*f=dump?stderr:stdout;fprintf(f,"BATCH_DOMAINS\t%s\tclassified=%d\tautomatic=%d\texplicit=%d\tmissing=0\texecuted_batches=0\n",write?"WROTE":"OK",d.count,d.automatic,d.exceptions);for(int k=0;k<6;k++){int total=0;for(int i=0;i<d.count;i++)if(bdom_kind(d.rows[i].domain)==k)total++;fprintf(f,"BATCH_DOMAIN\t%s\tbatches=%d\n",bdom_name(k),total);}if(dump)fwrite(out,1,n,stdout);}
+ mm_free(out);bg_close(&d);return rc?2:0;
+}

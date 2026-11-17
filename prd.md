@@ -92,7 +92,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 ## 2. 有什么功能（已实现能力速查）
 
-完整工具索引见 build/tool-index.tsv,表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
+完整工具索引按内容身份现查:`sh ./unisacc.com tools/devsvc.cx -- tool-index`(与源树一致,热命中约 0.2 秒;文件副本 build/tool-index.tsv 并行期保留),表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
 
 签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界；检查 `tools/check-release-members.cx ROOT`，只证明字节/结构，不认证签名或最终候选资格。
 
@@ -148,6 +148,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 每批耗时分相（只读） | `sh ./unisacc.com tools/batch-cost.cx -- [--dir out] [--glob affected-] [--top N]`；检查 `tools/check-batch-cost.cx`（批 `batch-cost`） | 读 out/affected-*/ 日志，每份一行（墙钟、材料 hit/built、kit、冷热），缺字段一律 UNMEASURED；2026-11-13 实测 29 份中墙钟 0 份已测（affected 的 elapsed_ms 只打 stdout），需 affected 落盘后才有分相占比 |
 | 任务状态对账(已退役) | 工具 state-audit 与其检查已归档于 `archive/agentwork-retire-2026-11/tools/` | agentwork 退役第 2 批,批次 state-audit 已撤 |
 | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
+| 进程模块静态编译与选批回归 | `tools/check-processcore-compile.cx` 与 `tools/check-affected-processcore.cx`，同名批次 `processcore-compile`、`affected-processcore` | 前者用同候选 `-S` 编译 bound/aggregate 两个 tests 入口，后者核传递 use 选中八个消费者并拒收无关源；不以 default-run 或工具单元对象替代静态生成验证 |
+| 测试域分母派生 | `sh ./unisacc.com tools/batch-domains-gen.cx -- --write/--check [--dump]` | 从批次头部合同与 `tests/batch-domain-rules.tsv` 自动推断六域，`tests/batch-domains.tsv` 仅存有依据的例外；生成 `tests/batch-domain-index.tsv`，报告每域数量及自动/显式比例；批次 `batch-domains`。分类不代表测试通过 |
 | 测试分治粗分：按层选批（0.0.58 草稿） | `sh ./unisacc.com tools/affected.cx -- --layer base\|ext\|stream\|compiler\|driver\|chain\|release\|all [--tier T] [--list-only\|--run]`；表 `build/batch-packages.tsv` 由 `sh ./unisacc.com tools/batch-packages-gen.cx -- --write\|--check` 生成；检查 `tools/check-batch-packages.cx`（批 `batch-packages`） | 层只按批次 id 与源路径前缀切（不做依赖推理），无规则命中的批次归 `all` 层；`--layer L` 选 L 层加 `all` 层加表中未列的批次，拿不准的不丢。2026-11-12 实测 946 批：all 690、release 73、compiler 70、stream 60、chain 20、driver 18、base 12、ext 3。登记新批次后须 `--write` 重新生成。`affected -- --closure-dump` 逐批导出闭包事实；生成器 `--packages` 另填所达包与包层档（conformance/integration/chain），为依赖精化草稿，未入库、affected 尚不读。只是选择事实，不是测试结论 |
 | 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry\|post-snap\|pre-p3\|post-p3] [--strict]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;hook 列标挂点;断言 absent/present/exec-if-present/epoch-canonical/release-rev/src-has/src-lacks/pkg-headers/env-set/receipt-if-present),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;PHASE= 只跑该挂点规则,且该挂点应已产出的变量缺失记 FAIL;变量未给的规则记 SKIP 不记 PASS,`--strict` 下有 SKIP 即退出 1;失败退出 1 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |

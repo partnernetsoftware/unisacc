@@ -1,0 +1,146 @@
+/* tools/derived-query.cx -- 按内容身份查询派生表(先做 tool-index):缺失或身份不符就现算,命中直接给出,读者拿到的内容恒与当前源树一致。
+ *
+ *   sh ./unisacc.com tools/derived-query.cx -- tool-index [--root DIR] [--cache DIR] [--timeout-ms N] [--sha] [--key]
+ *   sh ./unisacc.com tools/devsvc.cx -- tool-index [同上选项]        (devsvc 转本工具,用缓存的原生执行体)
+ *
+ * 身份(key):sha256 of 清单 "v1 tool-index\n" + 对 ROOT/tools/ 与 ROOT/tools/cxlib/ 的每个目录项(按名排序)一行 "路径\t内容sha256\n"
+ *   (读不了的项记 "-"),再加 tests/batches.tsv 一行。读集是 tools/tool-index.cx build_tools 读集的超集(它只读这两处),多算只会多失效,不会误命中。
+ * 缓存:DIR(缺省 $HOME/.cache/unisacc/derived)/tool-index/<key>.tsv 与 <key>.sha(正文 sha256)。命中时重算正文 sha 与 .sha 比对,
+ *   不符即判损坏:删掉两个文件、记 CORRUPT 后现算,不把损坏内容交给读者。
+ *   清单末行另记当前目录下实际执行的生成器 tools/tool-index.cx 的内容 sha(须在仓根运行)。
+ * 现算:sh ./unisacc.com tools/tool-index.cx -- --root ROOT --emit-tools TMP,有截止(缺省 55000 ms,上限 58000),超时 rc 124;
+ *   现算后重算 key,与现算前不同(源树在途被改)则不入缓存,照常输出并在结果行记 unstable=1,rc 3(读者应重查)。
+ * 输出:正文到 stdout(--sha 只打正文 sha256,--key 只打 key);结果行到 stderr:
+ *   DQ  tool-index  hit|miss|recovered  key=K  sha=S  bytes=N  ms=T [unstable=1]
+ * 退出码:0 成功;2 参数错;3 源树在途变化;4 现算失败;124 现算超时。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXN 4096
+#define MANCAP (1 << 20)
+#define FILEMAX (64L << 20)
+
+static char *nm[MAXN];
+static int nn;
+
+static int seq(const char *a, const char *b) { return strcmp(a, b) == 0; }
+
+static int list_dir(const char *root, const char *rel) {
+    char p[1024]; sy_dir_t d;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return -1;
+    if (sy_dir_open(&d, p)) return -1;
+    while (sy_dir_next(&d) == 1) {
+        char q[1024]; long l;
+        if (seq(d.name, ".") || seq(d.name, "..")) continue;
+        if (nn >= MAXN || cx_fmt(q, sizeof q, "%s/%s", rel, d.name)) { sy_dir_close(&d); return -1; }
+        l = (long)strlen(q) + 1;
+        nm[nn] = mm_alloc(l);
+        if (!nm[nn]) { sy_dir_close(&d); return -1; }
+        mm_copy(nm[nn], l, q, l);
+        nn++;
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static void sort_names(void) {
+    int i, j;
+    for (i = 1; i < nn; i++) {
+        char *k = nm[i];
+        for (j = i - 1; j >= 0 && strcmp(nm[j], k) > 0; j--) nm[j + 1] = nm[j];
+        nm[j + 1] = k;
+    }
+}
+
+/* 身份:清单的 sha256 */
+static int make_key(const char *root, char key[65]) {
+    char *man = mm_alloc(MANCAP); long ml = 0; int i;
+    if (!man) return -1;
+    for (i = 0; i < nn; i++) mm_free(nm[i]);
+    nn = 0;
+    if (list_dir(root, "tools") || list_dir(root, "tools/cxlib")) { mm_free(man); return -1; }
+    sort_names();
+    {   int k = cx_fmt(man, MANCAP, "v1 tool-index\n"); if (k) { mm_free(man); return -1; } ml = (long)strlen(man); }
+    for (i = 0; i <= nn + 1; i++) {   /* 末两行:tests/batches.tsv 与实际执行的生成器 ./tools/tool-index.cx(--root 指向别处时它不在清单里) */
+        const char *rel = i < nn ? nm[i] : i == nn ? "tests/batches.tsv" : "generator\ttools/tool-index.cx";
+        char p[1024], hex[65]; char *b = 0; long n = 0;
+        if (i == nn + 1 ? cx_fmt(p, sizeof p, "tools/tool-index.cx") : cx_fmt(p, sizeof p, "%s/%s", root, rel)) { mm_free(man); return -1; }
+        if (sy_read_file(p, &b, &n, FILEMAX) == 0) { if (sy_sha256_hex(b, n, hex)) { mm_free(b); mm_free(man); return -1; } mm_free(b); }
+        else cx_fmt(hex, sizeof hex, "-");
+        if (ml + (long)strlen(rel) + 70 >= MANCAP) { mm_free(man); return -1; }
+        if (cx_fmt(man + ml, MANCAP - ml, "%s\t%s\n", rel, hex)) { mm_free(man); return -1; }
+        ml += (long)strlen(man + ml);
+    }
+    i = sy_sha256_hex(man, ml, key);
+    mm_free(man);
+    return i ? -1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".", *cache = 0, *what = 0; long tmo = 55000, t0 = sy_now_ms(); int a, only_sha = 0, only_key = 0;
+    char key[65], key2[65], dir[1024], tsv[1100], shf[1100], tmp[1100], hex[65], want[80];
+    char *b = 0; long n = 0; const char *state = "miss"; int unstable = 0;
+    for (a = 1; a < argc; a++) {
+        if (seq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else if (seq(argv[a], "--cache") && a + 1 < argc) cache = argv[++a];
+        else if (seq(argv[a], "--timeout-ms") && a + 1 < argc) tmo = atol(argv[++a]);
+        else if (seq(argv[a], "--sha")) only_sha = 1;
+        else if (seq(argv[a], "--key")) only_key = 1;
+        else if (!what && argv[a][0] != '-') what = argv[a];
+        else what = "?";
+    }
+    if (!what || !seq(what, "tool-index") || tmo <= 0 || tmo > 58000) {
+        fprintf(stderr, "usage: derived-query.cx -- tool-index [--root DIR] [--cache DIR] [--timeout-ms N<=58000] [--sha] [--key]\n");
+        return 2;
+    }
+    if (cache) { if (cx_fmt(dir, sizeof dir, "%s/tool-index", cache)) return 2; }
+    else { const char *h = sy_env("HOME"); if (!h || cx_fmt(dir, sizeof dir, "%s/.cache/unisacc/derived/tool-index", h)) return 2; }
+    if (make_key(root, key)) { fprintf(stderr, "DQ\ttool-index\tfail\twhy=key (cannot read %s/tools)\n", root); return 4; }
+    if (only_key) { printf("%s\n", key); return 0; }
+    if (cx_fmt(tsv, sizeof tsv, "%s/%s.tsv", dir, key) || cx_fmt(shf, sizeof shf, "%s/%s.sha", dir, key)) return 2;
+    if (sy_read_file(tsv, &b, &n, FILEMAX) == 0) {
+        char *s = 0; long sn = 0; int good = 0;
+        if (sy_read_file(shf, &s, &sn, 200) == 0) {
+            if (sn >= 64 && !sy_sha256_hex(b, n, hex) && mm_same(hex, s, 64)) good = 1;
+            mm_free(s);
+        }
+        if (good) state = "hit";
+        else { mm_free(b); b = 0; sy_unlink(tsv); sy_unlink(shf); state = "recovered"; }
+    }
+    if (!b) {
+        sy_spawn_t o; sy_exit_t st; char rootarg[1100]; char *v[12]; int r;
+        if (sy_mkdir_all(dir, 0755) < 0) { fprintf(stderr, "DQ\ttool-index\tfail\twhy=mkdir %s\n", dir); return 4; }
+        if (cx_fmt(tmp, sizeof tmp, "%s/.tmp-%ld-%ld", dir, (long)getpid(), sy_now_ms()) || cx_fmt(rootarg, sizeof rootarg, "tools/tool-index.cx")) return 2;
+        v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = rootarg; v[3] = "--"; v[4] = "--root"; v[5] = (char *)root; v[6] = "--emit-tools"; v[7] = tmp; v[8] = 0;
+        sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = tmo; o.out_fd = 2;
+        r = sy_proc_run(&o, &st);
+        if (r || st.timed_out || sy_exit_code(&st) != 0) {
+            sy_unlink(tmp);
+            fprintf(stderr, "DQ\ttool-index\tfail\twhy=%s\trc=%d\n", r ? "spawn" : st.timed_out ? "timeout" : "generator", r ? r : sy_exit_code(&st));
+            return !r && st.timed_out ? 124 : 4;
+        }
+        if (sy_read_file(tmp, &b, &n, FILEMAX)) { sy_unlink(tmp); fprintf(stderr, "DQ\ttool-index\tfail\twhy=read-emit\n"); return 4; }
+        if (sy_sha256_hex(b, n, hex)) { sy_unlink(tmp); return 4; }
+        if (make_key(root, key2) || !seq(key, key2)) { unstable = 1; sy_unlink(tmp); }
+        else {
+            if (cx_fmt(want, sizeof want, "%s\n", hex) || sy_write_atomic(shf, want, 65, 0644) || sy_rename(tmp, tsv)) {
+                sy_unlink(tmp); sy_unlink(shf); sy_unlink(tsv);   /* 不留半套缓存 */
+            }
+        }
+    } else if (sy_sha256_hex(b, n, hex)) return 4;
+    if (only_sha) printf("%s\n", hex);
+    else fwrite(b, 1, (size_t)n, stdout);
+    fflush(stdout);
+    fprintf(stderr, "DQ\ttool-index\t%s\tkey=%.16s\tsha=%s\tbytes=%ld\tms=%ld%s\n", state, key, hex, n, sy_now_ms() - t0, unstable ? "\tunstable=1" : "");
+    mm_free(b);
+    return unstable ? 3 : 0;
+}

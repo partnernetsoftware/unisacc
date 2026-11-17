@@ -148,6 +148,8 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 另有两项兼容边界必须保持:(1) np_result 的 timed_out 尾字段在开始与释放时清零,仅预算耗尽时置位;(2) UNISACC_NP_FAULT 只由 netpack 门面启用,sysx.process 仍忽略该工具测试变量。首次合并时第二项曾使 check-npfault 的 D 两条原断言失败;保留断言、修正转发标志后 13 条全过。直接子进程在超时返回前有界收尸,不偷取调用者其它子进程,由原 check-netpack 与 check-reaper 合同覆盖。UNISACC_NP_TEST_PREEXEC_MS 仅在子进程中作最多 5000 ms 的回归接缝,默认关闭;未改变调用的截止值。
 
+共享模块变更验收清单:(1) 逐个列出全部 use 消费者及其登记运行批次,用 affected --files 模块取集合,编译分片不能替代运行批次;(2) 共享检出上用当前已装产品分别做 default-run 与 -S/-c 静态编译,明确编译方式和头文件/模块输入身份,不把宿主运行成功当作静态生成成功;(3) 同输入跑受影响运行批次,每批原时限不变,并列保留失败、重跑与 UNKNOWN 收据;(4) 进程原语至少复验 lower-prefix-base3/4、cx-reaper、process-deadline、procrun-tool、cx-netpack、cx-npfault。7026ecaa4d 漏了 processcore 的裸 setpgid 声明,现改走 sys.posix 的 sy_setpgid;processcore-compile 永久覆盖 tests/bound-rc142.cx 与 tests/all-aggregate.cx 的 -S 路径,affected-processcore 覆盖传递 use 的选批正例与无关源负控。
+
 ## 6 已知限制与下一单
 
 - (1) 服务单线程:native 构造期间其它请求排队。改为构造放子进程,主循环继续收请求。
@@ -274,3 +276,23 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 - 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
 - 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
 - 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。
+
+## 10 派生表现算现查 R1 试点:tool-index 与 doc-links(2026-11-18)
+
+目标:把 build/tool-index.tsv、build/doc-links.tsv 移出提交门负担,改由 devsvc 按内容身份现算现查;读者拿到的内容恒与当前源树一致,判定强度不降。
+
+用法:`sh ./unisacc.com tools/devsvc.cx -- tool-index [--sha] [--key] [--cache DIR] [--timeout-ms N]`(转 `tools/derived-query.cx tool-index`)。正文到 stdout,结果行 `DQ tool-index hit|miss|recovered key= sha= bytes= ms=` 到 stderr。身份 = tools/、tools/cxlib/ 全部目录项与 tests/batches.tsv 的内容 sha 清单,外加实际执行的生成器 tools/tool-index.cx 的 sha(读集是 build_tools 读集的超集,多算只多失效)。缓存 `~/.cache/unisacc/derived/tool-index/<key>.tsv` 加 `<key>.sha`;命中时重核正文 sha,不符即删并现算(recovered);现算前后身份不同(源树在途被改)不入缓存,rc 3。生成器新增 `tool-index.cx --emit-tools PATH`,与 `--write` 同一正文,不碰 build/。检查 `tools/check-derived-query.cx`(批次 derived-query,九项;负控:把命中分支改成不核 sha 后 corrupt 与 sidecar 两项先 FAIL,还原后全 PASS)。
+
+度量(2026-11-18,经 devsvc x 实跑,命令 `devsvc x --par 1 -- sh ./unisacc.com tools/derive.cx -- --check --only NAME`):tool-index 三次 7773/7854/7772 ms(中位 7773);doc-links 三次 1136/1137/1116 ms(中位 1136)。近 7 天提交数(`devsvc git log --since='7 days ago' --oneline -- PATH`):全仓 2010,build/ 617,tool-index.tsv 222(11.0%),doc-links.tsv 3,两者并集 222。现查:冷 4.5-7.2 s(一次),热命中 124-183 ms。
+
+读者分类(`git grep -n 'build/tool-index.tsv\|build/doc-links.tsv'`):
+- (甲) 只读查询:AGENTS.md/CLAUDE.md 与 prd.md 的索引指引(人和代理查工具);plans/notcovered-plan.md、plans/cx-lib-roadmap 的引用;tools/archive-candidates.cx(问"索引是否点名该工具")。prd.md 指引已切到 devsvc tool-index;archive-candidates 与 CLAUDE.md 未切。
+- (乙) 门与检查当事实核对:tools/derive.cx 的 tool-index、doc-links 行(exec/facts/derive.tsv、build/links.tsv 的 derive 边、tools/derive-inputs.tsv),tools/commit-own.cx 的 --derive 与键选表名单,tools/check-tool-index.cx、check-doc-links-gen.cx、check-commit-own.cx(夹具根内,与仓内文件无关),tests/coverage.tsv、tests/manifests 文案。
+- (丙) 必须保留文件:未发现构建 unisacc.com 或离线流程读这两张表;tools/cxlib/relload.cx 的 RL_TOOL_INDEX 只认格式,调用方传路径(仅 check-relload 夹具);build/table-index.tsv 的自述行与 .devsvc/ 双写副本属 tool-index.cx 自身。
+
+迁移(每步可回退,回退即还原该步提交):
+(1) 并行期(本次已做):新增查询接口与缓存;文件副本与 derive 门不变;(甲)读者逐个切到查询,对拍 sha 与 `tool-index.cx --emit-tools` / `--write` 一致。
+(2) 停写:commit-own --derive 与 derive 的 tool-index 行改为不进提交门(derive.tsv 标记 query-only,--check 不再核文件,改核"查询输出 = 现算",由查询接口身份保证);build/tool-index.tsv 加入 .gitignore 前先 git rm --cached,本地需要文件者 `derive --write --only tool-index`。回退:恢复 derive.tsv 行与跟踪。
+(3) 移除:table-index.tsv 分开处理(它也由 tool-index.cx 写,读集含 build/*,另做 table-index 查询再迁);doc-links 同法补 `devsvc doc-links`(读集 *.md 加 baseline 加 doclink.cx)。
+收益估算:每次触及 tools/ 或 tests/batches.tsv 的提交门省 tool-index 约 7.8 s(并行 derive 下省的是该行占最慢行的份额,单独 --only 时全省),doc-links 约 1.1 s;build/ 提交数按近 7 天估少 222 次中只改该表的那部分(上限 222/617 = 36%,与 batches.tsv 等同改的提交仍会动 build/)。
+风险:身份清单每次查询读 1100+ 文件(约 100 ms);缓存跨工作树共享(按内容键,安全);unstable 时读者须重查。
