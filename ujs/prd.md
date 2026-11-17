@@ -106,7 +106,7 @@
 | G5 | 产物 | `build-ape` 五切片已实跑;批次 `ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore | 检查已绑;win/arm64 另槽 |
 | G6 | 文档 | W1-W5 仍在 `plans/demo-three-ports.md`;本表收 UXE;ujs.com 生产力另见 0.0.x | 本表为真源入口 |
 
-(6) 未决:D5 观感数字;G3 归核还是归 Host。
+(6) 未决:D5 观感数字;G3 归核还是归 Host。记账:`practice/uxe/demo/G1-submit.md` `G3-math.md` `G4-step.md`。
 
 ---
 
