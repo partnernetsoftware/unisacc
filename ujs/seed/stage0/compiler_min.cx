@@ -158,6 +158,70 @@ static int idc(char c) { return id0(c)||(c>='0'&&c<='9'); }
 static int dig(char c) { return c>='0'&&c<='9'; }
 static int spc(char c) { return c==' '||c=='\t'||c=='\n'||c=='\r'; }
 
+#ifdef UJS_HOST
+static int g_lex_ok;
+static int g_lex_feed[10];
+static int g_lex_w2[16];
+static int lex_net_load(void) {
+  FILE *f;
+  char line[256];
+  int nfeed = 0, i;
+  if (g_lex_ok) return 1;
+  for (i = 0; i < 10; i++) g_lex_feed[i] = -1;
+  for (i = 0; i < 16; i++) g_lex_w2[i] = -1;
+  f = fopen("ujs/weights/nets/lex.net.tsv", "rb");
+  if (!f) return 0;
+  while (fgets(line, (int)sizeof line, f)) {
+    if (!strncmp(line, "feed\t", 5)) {
+      const char *p = line + 5;
+      int u = -1;
+      while (*p && *p != '\t' && *p != '\n') p++;
+      if (*p == '\t') {
+        p++;
+        if (*p >= '0' && *p <= '9') {
+          u = 0;
+          while (*p >= '0' && *p <= '9') { u = u * 10 + (*p - '0'); p++; }
+        }
+      }
+      if (nfeed < 10) g_lex_feed[nfeed] = u;
+      nfeed++;
+    } else if (!strncmp(line, "w2\t", 3)) {
+      const char *p = line + 3;
+      int hid = 0, cl = 0;
+      while (*p >= '0' && *p <= '9') { hid = hid * 10 + (*p - '0'); p++; }
+      if (*p == '\t') p++;
+      while (*p >= '0' && *p <= '9') { cl = cl * 10 + (*p - '0'); p++; }
+      if (hid >= 0 && hid < 16) g_lex_w2[hid] = cl;
+    }
+  }
+  fclose(f);
+  g_lex_ok = (nfeed >= 10);
+  return g_lex_ok;
+}
+static int lex_byte_cc(unsigned char c) {
+  if (c == '\n') return 1;
+  if (spc((char)c)) return 2;
+  if (id0((char)c)) return 3;
+  if (dig((char)c)) return 4;
+  if (c == '"') return 5;
+  if (c == '\'') return 6;
+  if (c=='{'||c=='}'||c=='('||c==')'||c=='['||c==']'||c==';'||c==','||c==':'||c=='.'||c=='?')
+    return 7;
+  if (c=='='||c=='<'||c=='>'||c=='!'||c=='+'||c=='-'||c=='*'||c=='/'||c=='%'||c=='&'||c=='|'||c=='.')
+    return 8;
+  return 9;
+}
+static int lex_net_cls(unsigned char c) {
+  int cc, h;
+  if (!lex_net_load()) return -1;
+  cc = lex_byte_cc(c);
+  if (cc < 0 || cc >= 10 || g_lex_feed[cc] < 0) return 8;
+  h = g_lex_feed[cc];
+  if (h < 0 || h >= 16 || g_lex_w2[h] < 0) return 8;
+  return g_lex_w2[h];
+}
+#endif
+
 static void next(Lex *L) {
   for (;;) {
     while (L->pos < L->len && spc(L->src[L->pos])) L->pos++;
@@ -171,6 +235,15 @@ static void next(Lex *L) {
   if (L->pos >= L->len) { L->tok = T_EOF; return; }
   L->tok_start = L->pos;
   char c = L->src[L->pos];
+#ifdef UJS_HOST
+  {
+    int y = lex_net_cls((unsigned char)c);
+    if (y == 8) { L->tok = T_BAD; L->pos++; return; }
+    if (y == 3 && !id0(c)) { L->tok = T_BAD; L->pos++; return; }
+    if (y == 4 && !dig(c)) { L->tok = T_BAD; L->pos++; return; }
+    if (y == 5 && c != '"' && c != '\'') { L->tok = T_BAD; L->pos++; return; }
+  }
+#endif
   if (dig(c)) {
     int64_t iv = 0;
     while (L->pos < L->len && dig(L->src[L->pos]))
