@@ -101,7 +101,7 @@ function norm3(v) {
 }
 
 export function createWebGLRenderer(canvas) {
-  const gl = canvas.getContext("webgl", { antialias: true, powerPreference: "high-performance" });
+  const gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
   if (!gl) throw new Error("WebGL unavailable");
   const ext = gl.getExtension("ANGLE_instanced_arrays");
   if (!ext) throw new Error("ANGLE_instanced_arrays required");
