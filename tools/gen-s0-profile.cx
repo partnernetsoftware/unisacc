@@ -1,0 +1,174 @@
+#pragma unisa use chrome_dom
+/* tools/gen-s0-profile.cx -- 概念稿行剖面 -> 4xH PNG.
+ * 来源: chrome s0-profile-sample.html dump-dom
+ * sh ./unisacc.com tools/gen-s0-profile.cx -- --write|--check
+ */
+#define PW 4
+#define HS 288
+#define HW 432
+static unsigned crc_tab[256];
+static int write_mode;
+static int sky_r[HS], sky_g[HS], sky_b[HS];
+static int wat_r[HW], wat_g[HW], wat_b[HW];
+static void crc_init(void) {
+    unsigned i, j, c;
+    for (i = 0; i < 256; i++) {
+        c = i;
+        for (j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+        crc_tab[i] = c;
+    }
+}
+static unsigned crc32(const unsigned char *p, int n) {
+    unsigned c = 0xffffffffu;
+    int i;
+    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+static unsigned adler(const unsigned char *p, int n) {
+    unsigned a = 1, b = 0;
+    int i;
+    for (i = 0; i < n; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
+    return (b << 16) | a;
+}
+static void be32(unsigned char *o, unsigned v) {
+    o[0] = (unsigned char)(v >> 24); o[1] = (unsigned char)(v >> 16);
+    o[2] = (unsigned char)(v >> 8); o[3] = (unsigned char)v;
+}
+static int write_png_h(const char *path, int *pr, int *pg, int *pb, int H, int stripe) {
+    unsigned char raw[HW * (1 + PW * 4)];
+    unsigned char z[16 + HW * (1 + PW * 4)];
+    unsigned char chunk[32 + HW * (1 + PW * 4)];
+    unsigned char outb[64 + HW * (1 + PW * 4)];
+    int k = 0, y, x, oi = 0, i, zlen, r, g, b;
+    unsigned c, ad;
+    FILE *f;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    for (y = 0; y < H; y++) {
+        r = pr[y]; g = pg[y]; b = pb[y];
+        if (stripe && (y + 288) >= 300 && (y + 288) < 710 && ((y + 288 - 300) % 7) == 0) {
+            r = r + (238 - r) / 8; g = g + (181 - g) / 8; b = b + (76 - b) / 8;
+        }
+        raw[k++] = 0;
+        for (x = 0; x < PW; x++) {
+            raw[k++] = (unsigned char)r;
+            raw[k++] = (unsigned char)g;
+            raw[k++] = (unsigned char)b;
+            raw[k++] = 255;
+        }
+    }
+
+
+    z[0] = 0x78; z[1] = 0x01; z[2] = 0x01;
+    z[3] = (unsigned char)(k & 255); z[4] = (unsigned char)(k >> 8);
+    z[5] = (unsigned char)((~k) & 255); z[6] = (unsigned char)((~k >> 8) & 255);
+    for (i = 0; i < k; i++) z[7 + i] = raw[i];
+    ad = adler(raw, k);
+    be32(z + 7 + k, ad);
+    for (i = 0; i < 8; i++) outb[oi++] = sig[i];
+    be32(chunk, 13);
+    chunk[4] = 'I'; chunk[5] = 'H'; chunk[6] = 'D'; chunk[7] = 'R';
+    be32(chunk + 8, PW); be32(chunk + 12, (unsigned)H);
+    chunk[16] = 8; chunk[17] = 6; chunk[18] = 0; chunk[19] = 0; chunk[20] = 0;
+    c = crc32(chunk + 4, 17);
+    be32(chunk + 21, c);
+    for (i = 0; i < 25; i++) outb[oi++] = chunk[i];
+    zlen = 7 + k + 4;
+    be32(chunk, (unsigned)zlen);
+    chunk[4] = 'I'; chunk[5] = 'D'; chunk[6] = 'A'; chunk[7] = 'T';
+    for (i = 0; i < zlen; i++) chunk[8 + i] = z[i];
+    c = crc32(chunk + 4, 4 + zlen);
+    be32(chunk + 8 + zlen, c);
+    for (i = 0; i < 12 + zlen; i++) outb[oi++] = chunk[i];
+    be32(chunk, 0);
+    chunk[4] = 'I'; chunk[5] = 'E'; chunk[6] = 'N'; chunk[7] = 'D';
+    c = crc32(chunk + 4, 4);
+    be32(chunk + 8, c);
+    for (i = 0; i < 12; i++) outb[oi++] = chunk[i];
+    if (write_mode) {
+        f = fopen(path, "wb");
+        if (!f) return 1;
+        fwrite(outb, 1, oi, f);
+        fclose(f);
+        printf("WROTE\t%s\t%d\n", path, oi);
+    }
+    return 0;
+}
+static char *grab(char **out, size_t *on) {
+    char cwd[512], url[800];
+    char *av[12];
+    const char *pre = "file://", *suf = "/ujs/plans/demo-v2/look-dev/s0-profile-sample.html";
+    int n, i, rc;
+    if (!getcwd(cwd, sizeof cwd)) return "cwd";
+    n = 0; while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 600; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 780; i++) url[n++] = suf[i];
+    url[n] = 0;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--allow-file-access-from-files";
+    av[3] = "--disable-web-security";
+    av[4] = "--no-first-run";
+    av[5] = "--user-data-dir=/tmp/uxe-s0-prof";
+    av[6] = "--virtual-time-budget=20000";
+    av[7] = "--dump-dom";
+    av[8] = url;
+    av[9] = 0;
+    *out = 0; *on = 0;
+    rc = cx_runv_timeout(av, 40, out, on);
+    if (rc == 127) return "no-chrome";
+    return 0;
+}
+static int parse_block(const char *p, const char *tag, int *pr, int *pg, int *pb, int want) {
+    char key[16];
+    const char *q;
+    int n = 0, a, b, c;
+    key[0] = 0;
+    q = strstr(p, tag);
+    if (!q) return -1;
+    q = strchr(q, '\n');
+    if (!q) return -1;
+    q++;
+    while (*q && n < want) {
+        if (*q < '0' || *q > '9') break;
+        if (sscanf(q, "%d\t%d\t%d", &a, &b, &c) != 3) break;
+        pr[n] = a; pg[n] = b; pb[n] = c;
+        n++;
+        while (*q && *q != '\n') q++;
+        if (*q == '\n') q++;
+    }
+    return n;
+}
+static void write_tsv(const char *path, int *pr, int *pg, int *pb, int n) {
+    FILE *f = fopen(path, "w");
+    int i;
+    if (!f) return;
+    fprintf(f, "r\tg\tb\n");
+    for (i = 0; i < n; i++) fprintf(f, "%d\t%d\t%d\n", pr[i], pg[i], pb[i]);
+    fclose(f);
+    printf("WROTE\t%s\t%d\n", path, n);
+}
+int main(int argc, char **argv) {
+    char *out = 0;
+    size_t on = 0;
+    const char *err;
+    int i, write = 0, ns, nw, failed = 0;
+    crc_init();
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
+    }
+    if (!write) { printf("GEN_S0_PROFILE\tdry\n"); return 0; }
+    write_mode = 1;
+    err = grab(&out, &on);
+    if (err) { printf("PROF_UNMEASURED\t%s\n", err); return 2; }
+    ns = parse_block(out, "SKY_N=", sky_r, sky_g, sky_b, HS);
+    nw = parse_block(out, "WATER_N=", wat_r, wat_g, wat_b, HW);
+    if (out) free(out);
+    printf("PARSED\tsky=%d\twater=%d\n", ns, nw);
+    if (ns != HS || nw != HW) return 1;
+    write_tsv("ujs/plans/demo-v2/look-dev/s0-sky-profile.tsv", sky_r, sky_g, sky_b, HS);
+    write_tsv("ujs/plans/demo-v2/look-dev/s0-water-profile.tsv", wat_r, wat_g, wat_b, HW);
+    if (write_png_h("ujs/plans/demo-v2/look-dev/sky-gold.png", sky_r, sky_g, sky_b, HS, 0)) failed++;
+    if (write_png_h("ujs/plans/demo-v2/look-dev/water-gold.png", wat_r, wat_g, wat_b, HW, 1)) failed++;
+    printf("GEN_S0_PROFILE\tok\n");
+    return failed;
+}
