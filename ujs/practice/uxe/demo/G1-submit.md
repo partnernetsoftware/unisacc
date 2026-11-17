@@ -28,16 +28,19 @@ prd 0.3b G1 / W3 同条。
 
 ## gpu-tri 真 GPU 验收口径
 
-页 `practice/uxe/demo/gpu-tri/index.html` 跑同一 212B 包。FNV 与顶点色从 tsv/hex 生成 `tri-oracle.js`。AUTO 角外清屏、中心近顶点色。`tools/check-ujs-gpu-tri.cx` dump-dom。
+范围:单三角、212B UXEP v3、headless Chrome 138、SwiftShader。FNV/KR/ER 从 hex。检查 title 判定+oracle_fnv 反例+expect_er 反例。
+
+期望中心色:Lambert(环境+两灯,法线=normalize(eye),soft from roughness)+金属混合。**不含** shader rim(`pow(1-ndv,2.4)`)与 ink;容差 24 吸收 rim/量化。灯方向与颜色从包 lights 字节读,不写死。
 
 ## 仍未做
 
-(1) M2 核驱动 fly 画面(需 G4)。
-(2) dump-dom 依赖 chrome;无 chrome 为 UNMEASURED。
+(1) M2 核驱动 fly(需 G4)。
+(2) 无 chrome:UNMEASURED 退出 2,不是 PASS。
 
 ## 状态
 
-待复核:检查曾对 DOM 子串假绿。修好 title 判定与 oracle_fnv 反例后再记完成。
+M1 收口。批次 `ujs-gpu-tri` PASS。U1/C3 按此范围完成。
+
 
 
 
