@@ -58,7 +58,8 @@ export function encodeRenderPacket(packet) {
   const texs = packet.textures || [];
   let useV4 = texs.length > 0;
   for (const c of clouds) {
-    if ((c.mapId | 0) !== 0 || (c.alphaMode | 0) || (c.instColor && c.instColor.length)) useV4 = 1;
+    if ((c.mapId | 0) !== 0 || (c.alphaMode | 0) || (c.instColor && c.instColor.length) || (c.screenSpace | 0) || ((c.flags | 0) & 8)) useV4 = 1;
+
   }
   const ver = useV4 ? PACKET_VERSION_TEX : PACKET_VERSION;
   let nbytes = 8 + 16 + 36 + 16 + 16 + 4 + lights.length * 28 + 4;
@@ -116,8 +117,10 @@ export function encodeRenderPacket(packet) {
     if (useV4) {
       dv.setUint16(o, c.mapId ?? 0, true); o += 2;
       const hasIC = c.instColor && c.instColor.length >= c.count * 4;
-      const flags = ((c.uvOrigin | 0) & 1) | (((c.alphaMode | 0) & 1) << 1) | (hasIC ? 4 : 0);
+      const flags = ((c.uvOrigin | 0) & 1) | (((c.alphaMode | 0) & 1) << 1) | (hasIC ? 4 : 0) | ((c.screenSpace | 0) ? 8 : 0) | ((c.flags | 0) & 8);
+
       dv.setUint16(o, flags, true); o += 2;
+
       if (hasIC) {
         for (let i = 0; i < c.count * 4; i++) dv.setUint8(o + i, c.instColor[i] & 255);
         o += c.count * 4;
@@ -163,10 +166,10 @@ function readClouds(dv, o, nClouds, ver) {
     for (let i = 0; i < count * 3; i++) { xyz[i] = dv.getFloat32(o, true); o += 4; }
     const scale = new Float32Array(count);
     for (let i = 0; i < count; i++) { scale[i] = dv.getFloat32(o, true); o += 4; }
-    let mapId = 0, uvOrigin = 0, alphaMode = 0, instColor = null;
+    let mapId = 0, uvOrigin = 0, alphaMode = 0, instColor = null, screenSpace = 0, flags = 0;
     if (ver >= 4) {
       mapId = dv.getUint16(o, true); o += 2;
-      const flags = dv.getUint16(o, true); o += 2;
+      flags = dv.getUint16(o, true); o += 2;
       uvOrigin = flags & 1;
       alphaMode = (flags >> 1) & 1;
       if (flags & 4) {
@@ -174,8 +177,10 @@ function readClouds(dv, o, nClouds, ver) {
         for (let i = 0; i < count * 4; i++) instColor[i] = dv.getUint8(o + i);
         o += count * 4;
       }
+      screenSpace = (flags & 8) ? 1 : 0;
     }
-    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId, uvOrigin, alphaMode, instColor });
+    clouds.push({ color, emissive, metalness, roughness, meshId, count, xyz, scale, mapId, uvOrigin, alphaMode, instColor, screenSpace, flags });
+
 
 
   }
