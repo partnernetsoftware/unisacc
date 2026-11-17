@@ -149,7 +149,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - P3 f read 行段与 who-calls 结果直接跳读(sed -n 244 次、cat 311 次)。
 - P4 devsvc check:按改动选批并行跑(check 直跑 666 次),结果进事件。
 - P5 devsvc ps 与按作业 kill(pgrep/ps/sleep 122 次)。
-- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。
+- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。状态(2026-11-17):已做。`devsvc precheck --files PATH...` -> `tools/precommit.cx -- --precheck PATH...`(b7c376e9fd 模式,0bec77c73b 检查与批次 precommit-precheck-pass/-trunc,入口随本行提交):私有临时索引(HEAD 加给定路径)上以 UNISACC_PRECOMMIT_SERIAL=1 重跑同一份无参门,逐门 `PRECHECK gate=NAME verdict=PASS|BLOCKED ms=N reason=...`,末行 `PRECHECK_SUMMARY blocked=K total_ms=T slowest=NAME rc=N`;总 deadline 55 秒,超时出 PRECHECK_TIMEOUT 列已评估/未评估门;真索引不读不写,不缓存结论。已知局限:(1) runlist、facts 门失败时原逻辑直接返回,其后的门不再评估,预检同样只列到此;(2) 不打 BLOCKED/REFUSE/`precommit: blocked` 文案的失败只报 `gate=other` 并给日志路径;(3) 归门按日志出现顺序,文案出现在下一门 begin 之前才归对。评估项(未排):runlist、facts 失败后继续评估其余门是否改变原门判定,须单独论证后再动,不为"一次列全"放宽或改动原门。
 - P7 按历史耗时预警超预算并建议分片;长命令自动转后台。
 - P8 锁 who/wait 查询。
 - P9 只读 git 已有(4ebf3b6834)但采用率低:宣传、简报模板写明;新建工具前的 git log --all 给专用入口。
