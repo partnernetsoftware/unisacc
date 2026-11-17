@@ -17,13 +17,14 @@ uniform vec3 uEye;
 uniform float uWave;
 uniform float uTime;
 uniform float uBillboard;
+uniform float uOrtho;
+uniform vec2 uScreen;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
 varying vec2 vUV;
 varying vec4 vColor;
-
 vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
   float cy = cos(yaw), sy = sin(yaw);
   float cp = cos(pitch), sp = sin(pitch);
@@ -40,6 +41,19 @@ vec3 billboardXZ(vec3 v, vec3 eye, vec3 inst) {
   return vec3(v.x * fz + v.z * fx, v.y, -v.x * fx + v.z * fz);
 }
 void main() {
+  if (uOrtho > 0.5) {
+    vec2 px = aInst.xy + aPos.xy * aScale;
+    float nx = px.x / uScreen.x * 2.0 - 1.0;
+    float ny = 1.0 - px.y / uScreen.y * 2.0;
+    vN = vec3(0.0, 0.0, 1.0);
+    vP = vec3(px, 0.0);
+    vEye = uEye;
+    vFogDepth = 0.0;
+    vUV = aUV;
+    vColor = aColor;
+    gl_Position = vec4(nx, ny, 0.0, 1.0);
+    return;
+  }
   vec3 lp = aPos * aScale;
   vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
@@ -77,6 +91,7 @@ uniform sampler2D uMap;
 uniform float uHasMap;
 uniform float uRadial;
 uniform float uInstColor;
+uniform float uOrtho;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
@@ -88,6 +103,11 @@ void main() {
     gl_FragColor = texture2D(uMap, vUV);
     return;
   }
+  if (uOrtho > 0.5) {
+    gl_FragColor = vec4(uColor, 1.0);
+    return;
+  }
+
   vec3 n = normalize(vN);
   vec3 amb = uAmbient * uAmbI;
   float d0 = max(dot(n, normalize(uL0Dir)), 0.0);
@@ -178,6 +198,8 @@ export function createWebGLRenderer(canvas, opts) {
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
   const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial"), uInstColor = u("uInstColor");
+  const uOrtho = u("uOrtho"), uScreen = u("uScreen");
+
 
 
   const texCache = Object.create(null);
@@ -215,15 +237,18 @@ export function createWebGLRenderer(canvas, opts) {
       gl.disable(gl.BLEND);
       gl.depthMask(true);
     }
-
-
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
     gl.uniform1f(uBillboard, (cloud.billboard || isPt) ? 1 : 0);
-    if (uRadial) gl.uniform1f(uRadial, isPt ? 1 : 0);
+    const ss = !!(cloud.screenSpace || ((cloud.flags | 0) & 8));
+    if (uOrtho) gl.uniform1f(uOrtho, ss ? 1 : 0);
+    if (uScreen) gl.uniform2f(uScreen, canvas.width, canvas.height);
+    if (ss) { gl.disable(gl.DEPTH_TEST); gl.depthMask(false); }
 
 
+    if (uRadial) gl.uniform1f(uRadial, (isPt && !ss) ? 1 : 0);
 
     gl.uniform3fv(uColor, cloud.color);
+
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
     gl.uniform1f(uRough, cloud.roughness ?? 0.5);
