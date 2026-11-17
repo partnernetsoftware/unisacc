@@ -18,6 +18,7 @@ typedef struct {
   uint32_t body_n[H1_MAX_FUNC];
   uint8_t nparam[H1_MAX_FUNC];
   uint32_t nfunc;
+  uint32_t nimport;
   int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
   WV stk[H1_STK];
   int sp;
@@ -139,7 +140,7 @@ static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
 
   h->mod = p; h->mod_n = n; h->sp = 0; h->err[0] = 0;
   h->main_i = h->tag_i = h->i64_i = h->f64_i = h->sptr_i = h->slen_i = -1;
-  h->nfunc = 0; h->mem = 0;
+  h->nfunc = 0; h->nimport = 0; h->mem = 0;
   memset(type_argc, 0, sizeof type_argc);
   memset(type_retc, 0, sizeof type_retc);
   memset(ftype, 0, sizeof ftype);
@@ -164,7 +165,24 @@ static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
         if (nr) j++;
       }
     } else if (sid == 2) {
-      return h1_err(h, "import");
+      uint32_t ni, im;
+      if (!h1_uleb(p, j + sz, &j, &ni) || ni > 8) return h1_err(h, "nimport");
+      h->nimport = ni;
+      for (im = 0; im < ni; im++) {
+        uint32_t ml, fl, tidx;
+        uint8_t knd;
+        if (!h1_uleb(p, i + sz, &j, &ml) || j + ml > i + sz) return h1_err(h, "imod");
+        if (!(ml == 3 && !memcmp(p + j, "env", 3))) return h1_err(h, "import mod");
+        j += ml;
+        if (!h1_uleb(p, i + sz, &j, &fl) || j + fl > i + sz) return h1_err(h, "ifield");
+        if (!(fl == 15 && !memcmp(p + j, "host_gpu_submit", 15))) return h1_err(h, "import name");
+        j += fl;
+        if (j >= i + sz) return h1_err(h, "ikind");
+        knd = p[j++];
+        if (knd != 0) return h1_err(h, "import kind");
+        if (!h1_uleb(p, i + sz, &j, &tidx) || tidx >= ntypes) return h1_err(h, "itype");
+        if (type_argc[tidx] != 2 || type_retc[tidx] != 0) return h1_err(h, "import sig");
+      }
     } else if (sid == 3) {
       if (!h1_uleb(p, j + sz, &j, &nf) || nf > H1_MAX_FUNC) return h1_err(h, "nfunc");
       h->nfunc = nf;
@@ -441,6 +459,23 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
   WV locals[256];
   uint32_t np, i;
   if (depth > H1_CALL) return h1_err(h, "call depth");
+  if (fi < h->nimport) {
+    WV lenv, ptrv;
+    uint32_t ptr, len;
+    if (h->sp < 2) return h1_err(h, "stack under");
+    h1_pop_to(h, &lenv);
+    h1_pop_to(h, &ptrv);
+    ptr = (uint32_t)(ptrv.k == WK_I32 ? ptrv.i32 : (int32_t)ptrv.i64);
+    len = (uint32_t)(lenv.k == WK_I32 ? lenv.i32 : (int32_t)lenv.i64);
+    if (len && (ptr > h->mem_n || len > h->mem_n - ptr)) return h1_err(h, "gpu oob");
+    if (len) {
+      volatile uint8_t t = h->mem[ptr];
+      (void)t;
+      if (len > 1) t = h->mem[ptr + len - 1];
+    }
+    return 0;
+  }
+  fi -= h->nimport;
   if (fi >= h->nfunc) return h1_err(h, "bad func");
   np = h->nparam[fi];
   if (h->sp < (int)np) return h1_err(h, "stack under");

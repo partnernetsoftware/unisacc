@@ -115,8 +115,8 @@
 |---|---|---|---|
 | C1 | 五切片 APE;`ujs.com` gitignore;无 win/arm64 | build-ape.cx | `sh ./unisacc.com tools/check-ujs-ape.cx` 末行 `UJS_APE_OK` failed=0。批次 `ujs-ape-slices` |
 | C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
-| C3 | `host1_vm` 遇 section 2 拒绝 `import`(已做)。折算 idx 未做 | G1-submit.md | 无 import 的 fly `--run` 金 3868;有 import 的模块 `--run` JSON err=import |
-| C4 | `compiler_min.cx` cxraw 实测 96(tsv 曾 50);今天网分派提交绕过棘轮。限期 0.0.9 前压回 <=50 | 本行;不并 G1 | 到期前 `tests/cxraw.cx --check --files ujs/seed/stage0/compiler_min.cx` 须 <=50 |
+| C3 | host1 接纳唯一 import `env.host_gpu_submit`(no-op 读内存);其它 import 仍拒绝。非真 GPU | G1-submit.md | fly `--run` 3868; `gpu-submit-call.ujs --run` i64=1 不 trap。不得记 G1 完成 |
+| C4 | `compiler_min.cx` cxraw 96;`host1_vm.cx` 36(tsv 曾 34)。限期 0.0.9 前 compiler<=50 host1<=34 | 本行;不并 G1 | 到期前 `tests/cxraw.cx --check --files` 两文件 |
 
 (6) 未决:U3 归核还是归 Host;C3 折算 vs 拒绝;C4 先于 G1 合入。
 
