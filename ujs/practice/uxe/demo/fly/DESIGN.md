@@ -1,5 +1,9 @@
 # fly 移植(host1 wasm + UXE WebGL1,无 three.js)
 
+开发在分支 `ujs`。
+worktree `.claude/worktrees/ujs`。
+编 wasm 用 `./ujs/ujs.com FILE.ujs --run`，不要 `unisacc.com` 当 C。
+
 ## 原作
 
 - 试玩: https://remix.ui8.ai/fly (Forge 分享页 fighter)
