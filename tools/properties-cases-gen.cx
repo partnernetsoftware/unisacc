@@ -21,6 +21,7 @@
  * Output: ABS_OUT/GROUP/... evidence files, ABS_OUT/results-GROUP.tsv, SUMMARY line; exit 1 on any non-PASS. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
+#pragma unisa use sys.fs
 
 static char root[4096], stream4[4096], stream5[4096], outdir[4096], work[4200], inc[4400], bound[4400], product[4400], ref[4096];
 #define APP(dst, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, sizeof dst - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= sizeof dst - _l) die("text bound"); } while (0)
@@ -91,9 +92,21 @@ static void group_det(void) {
         if (compile(altsrc, "-O2", targets[t], i3, altenv, &r) || r.rc || !shafile(i3, h3)) { { if (cx_fmt(lab, sizeof lab, "%s.compile-alt", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } row("NOT_RUN", "prop.det.no-path-or-time", lab, "alt compile failed"); np_free(&r); continue; } np_free(&r);
         { if (cx_fmt(lab, sizeof lab, "%s.alt-dir-tz-lang", tslug(t))) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } } check(tx_eqz(h1, h3), "prop.det.no-path-or-time", lab, det);
     }
-    { char ie[4400], h1[65], he[65]; np_result r; char *env[] = { "UNISA_MAXSTEPS=5000000", "FOO=bar", "UNISA_UNRELATED=1", 0 };
+    { char ie[4400], h1[65], he[65]; np_result r; char *env[] = { "FOO=bar", "UNISA_UNRELATED=1", 0 };
       { if (cx_fmt(ie, sizeof ie, "%s/img-lnx-x86_64-env", work)) { fprintf(stderr, "properties-cases-gen: text too long for ie\n"); exit(2); } } char i1[4400]; { if (cx_fmt(i1, sizeof i1, "%s/img-lnx-x86_64-1", work)) { fprintf(stderr, "properties-cases-gen: text too long for i1\n"); exit(2); } }
-      if (compile(base, "-O2", targets[0], ie, env, &r) || r.rc || !shafile(ie, he) || !shafile(i1, h1)) row("NOT_RUN", "prop.det.host-env-ignored", "lnx-x86_64.env", "compile failed"); else check(tx_eqz(h1, he), "prop.det.host-env-ignored", "lnx-x86_64.UNISA_MAXSTEPS-and-unrelated-env", "sha256 equal to plain compile"); np_free(&r); }
+      if (compile(base, "-O2", targets[0], ie, env, &r) || r.rc || !shafile(ie, he) || !shafile(i1, h1)) row("NOT_RUN", "prop.det.host-env-ignored", "lnx-x86_64.env", "compile failed"); else check(tx_eqz(h1, he), "prop.det.host-env-ignored", "lnx-x86_64.unrelated-env", "sha256 equal to plain compile"); np_free(&r); }
+    /* UNISA_MAXSTEPS is an effective resource control. Keep the original five-million
+       probe as a rejection contract instead of raising its limit to get an image. */
+    {char ie[4400],ep[4400];np_result r={0};char *env[]={"UNISA_MAXSTEPS=5000000","FOO=bar","UNISA_UNRELATED=1",0};
+     const char first[]="step budget exhausted (budget 5000000 steps)\n";
+     path(ie,sizeof ie,work,"img-budget-refused");path(ep,sizeof ep,work,"budget.stderr");
+     int transport=compile(base,"-O2",targets[0],ie,env,&r);
+     if(transport)row("NOT_RUN","prop.bound.step-budget","lnx-x86_64.budget-5000000","compile transport failed");
+     else{sy_stat_t st;int absent=sy_stat(ie,&st)==-ENOENT;
+       saved(ep,r.err?r.err:"",r.errn);
+       check(r.rc==2&&!r.outn&&r.err&&r.errn>=sizeof first-1&&!memcmp(r.err,first,sizeof first-1)&&absent,
+         "prop.bound.step-budget","lnx-x86_64.budget-5000000","rc2; exact budget diagnostic first line; no output image");}
+     np_free(&r);}
     { char i1[4400]; { if (cx_fmt(i1, sizeof i1, "%s/img-lnx-x86_64-1", work)) { fprintf(stderr, "properties-cases-gen: text too long for i1\n"); exit(2); } } np_result a, b; char *v[] = { i1, "255", 0 };
       if (run(v, noenv, 3, &a) || run(v, noenv, 3, &b)) row("NOT_RUN", "prop.det.run-repeat", "lnx-x86_64.run-255", "image did not run");
       else { int ok = a.rc == b.rc && a.outn == b.outn && !memcmp(a.out, b.out, a.outn) && exact(&a, gold[2]); check(ok, "prop.det.run-repeat", "lnx-x86_64.run-255-twice", "identical stdout and rc, equal to gold"); np_free(&a); np_free(&b); } }
