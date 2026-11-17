@@ -50,8 +50,27 @@ host1_vm `frame-run` 4 帧与 8 帧末值均为 1。
 
 (4) `check-ujs-g4-yaw.cx`:双引擎。红全 1/`G4_LET_RED`;绿 1..8/`G4_LET_OK`;去 persist 回红。堆碰到 948976 前须 trap(大 list 反例,不得改写持久区)。检查断言 `948976+64*16<=950000`。cxraw compiler_min 不增;host1_vm 择机压回 34。
 
+## 堆峰(2026-11-17 实测)
+
+帧起点堆回 HEAP0=4096,可用至 PERSIST_BASE 前约 944880 B。host1 读 wasm mem[0] freep。`frame-run` 帧数后缀 `p` 打 `freep=`。
+
+| 夹具 | 1 帧 freep | 8 帧 freep | 8 帧堆用量 |
+|---|---|---|---|
+| D1 fly.ujs | 4144 | 4480 | 384 |
+| D2 water.ujs | UNMEASURED | UNMEASURED | 现编译 `list too long` |
+| D3 ink.ujs | 5736 | 17216 | 13120 |
+| D4 oneshot.ujs | 4552 | 7744 | 3648 |
+| D5 ghibli.ujs | 6272 | 4368/6272 1帧;8帧 6272 | 2176 |
+
+D5 8 帧 freep=6272。实测最高 D3 8 帧 17216,远低于 948976。新上界不得让 fly 3868 与 g4 全套触 trap。
+
+store_bytes 走 STORE_WIN=1015808,与堆 freep 上界分开,不混进 PERSIST_BASE 检查。
+
+trap 未实现:大 list 仍可静默写进持久区(红)。触发线:freep>=948976 在 mk_list/mk_num/mk_str/mk_dict 同一上界 trap,persist 字节不变。
+
 ## 状态
 
-红金已出。值存原始位+类型。compiler_min 未改。
+persist i64/f64/多槽/reset_globals 已绿。堆 trap 未做。host1_vm libc 35,压回 34 仍保留。
+
 
 
