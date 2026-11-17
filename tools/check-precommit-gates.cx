@@ -24,6 +24,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use text.text
 #pragma unisa use sys.time
 
@@ -33,7 +34,7 @@
 #define PCG_MK "mk(){ i=$1; r=\"$i" T "IMPLEMENTED" T "interfaces" T "tools/check-$i.cx" T "SOURCE" T "lnx/x86_64" T "55" T "-" T "tools/check-$i.cx" T "-" T "interfaces.$i" T "rc0:X" T "product" T "commit\"; " \
     "c=\"interfaces.$i" T "interfaces" T "IMPLEMENTED_SEPARATE_BATCH" T "fixture" T "tools/check-$i.cx\"; p=\"batch" T "$i" T "all" T "-" T "-" T "-" T "-" T "-" T "-\"; " \
     "printf '%s\\n' \"batch" T "$r\" \"coverage" T "$c\" \"packages" T "$p\" > tests/manifests/$i.tsv; printf '%s\\n' \"$r\" >> tests/batches.tsv; " \
-    "printf '%s\\n' \"$c\" >> tests/coverage.tsv; printf '%s\\n' \"$p\" >> build/batch-packages.tsv; printf 'int main(void) { return 0; }\\n' > tools/check-$i.cx; }; "
+    "printf '%s\\n' \"$c\" >> tests/coverage.tsv; printf '%s\\n' \"$p\" >> build/batch-packages.tsv; printf '/* Checks tools/precommit.cx batch registration. */\\nint main(void) { return 0; }\\n' > tools/check-$i.cx; }; "
 
 static int failed;
 static char root[2048], fx[2400], lockd[2500];
@@ -51,6 +52,67 @@ static int sh(const char *script, char *out, int cap, int infx) {
     if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); out[m] = 0; }
     if (o) mm_free(o);
     return rc;
+}
+
+/* Fixture-only inventory completion uses the production registrar, then
+ * records each added shard as a complete registration set for commit-own. */
+static char *pcg_fact_row(const char *table, const char *key) {
+    size_t n = 0, kn = strlen(key); char *b = cx_read(table, &n), *answer = 0;
+    if (!b) die("fixture-fact-read");
+    for (char *p = b; *p;) {
+        char *e = strchr(p, '\n'); if (!e) die("fixture-fact-newline");
+        if ((size_t)(e-p) > kn && !memcmp(p,key,kn) && p[kn]=='\t') {
+            if (answer) die("fixture-fact-duplicate");
+            size_t m = (size_t)(e-p); answer = mm_alloc(m+1);
+            if (!answer || mm_copy(answer,m+1,p,m)) die("fixture-fact-copy");
+            answer[m] = 0;
+        }
+        p=e+1;
+    }
+    mm_free(b); return answer;
+}
+static int pcg_fixture_register(const char *source) {
+    size_t source_n = strlen(source);
+    if (source_n < 10 || strncmp(source,"tools/",6) || strcmp(source + source_n - 3,".cx") ||
+        strspn(source,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/." ) != source_n ||
+        tx_find(source, (long)source_n, "..", 2) >= 0) die("fixture-tool-path");
+    size_t before_n=0; char *before=cx_read("tests/batches.tsv",&before_n);
+    if (!before) die("fixture-registry");
+    char command[4096], report[16384];
+    if (cx_fmt(command,sizeof command,"sh ./unisacc.com tools/register.cx -- --tool %s",source)) die("fixture-register-command");
+    if (sh(command,report,sizeof report,0)) { sy_eprintf("%s",report); die("fixture-register"); }
+    size_t after_n=0; char *after=cx_read("tests/batches.tsv",&after_n);
+    if (!after) die("fixture-registry");
+    char *ids[512]; int added=0;
+    for (char *p=after;*p;) {
+        char *e=strchr(p,'\n'); if(!e)die("fixture-registry-newline");
+        char *tab=memchr(p,'\t',(size_t)(e-p));
+        if(tab && tab-p>14 && !memcmp(p,"tools-compile-",14)) {
+            size_t k=(size_t)(tab-p); int seen=0;
+            for(char*q=before;*q;){char*z=strchr(q,'\n');if(!z)die("fixture-registry-newline");
+                if((size_t)(z-q)>k && !memcmp(q,p,k) && q[k]=='\t')seen=1;q=z+1;}
+            if(!seen){if(added==512)die("fixture-shard-cap");ids[added]=mm_alloc(k+1);
+                if(!ids[added]||mm_copy(ids[added],k+1,p,k))die("fixture-shard-copy");ids[added++][k]=0;}
+        }
+        p=e+1;
+    }
+    if(added && sh("sh ./unisacc.com tools/batch-packages-gen.cx -- --write",report,sizeof report,0)) {
+        sy_eprintf("%s",report); die("fixture-packages");
+    }
+    char *coverage=added?pcg_fact_row("tests/coverage.tsv","tools.compile-all"):0;
+    if(added&&!coverage)die("fixture-shard-coverage");
+    for(int i=0;i<added;i++){
+        char key[4096],path[4096],body[16384];
+        if(cx_fmt(key,sizeof key,"batch\t%s",ids[i]) ||
+           cx_fmt(path,sizeof path,"tests/manifests/%s.tsv",ids[i]))die("fixture-shard-path");
+        char *batch=pcg_fact_row("tests/batches.tsv",ids[i]);
+        char *packages=pcg_fact_row("build/batch-packages.tsv",key);
+        if(!batch||!packages||cx_fmt(body,sizeof body,"batch\t%s\ncoverage\t%s\npackages\t%s\n",batch,coverage,packages))die("fixture-shard-manifest");
+        if(sy_write_atomic(path,body,strlen(body),0644))die("fixture-shard-write");
+        sy_printf("--registered %s\n",ids[i]);
+        mm_free(batch);mm_free(packages);mm_free(ids[i]);
+    }
+    mm_free(coverage);mm_free(before);mm_free(after);return 0;
 }
 
 static void setup(const char *group) {
@@ -74,6 +136,7 @@ static void setup(const char *group) {
                fx, fx, root, fx, root, root, fx, root, root, fx, root, fx, root, fx, fx, root)) die("script");
     sh(c, out, sizeof out, 0);
     if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup"); }
+    if (cx_fmt(c, sizeof c, "cp %s/tools/check-precommit-gates.cx %s/tools/", root, fx) || sh(c, out, sizeof out, 0)) die("fixture helper copy");
 }
 
 static void group_na(void) {
@@ -125,8 +188,9 @@ static void group_reuse(void) {
        so the hook's stderr goes to an absolute path in the fixture, not to a cwd-relative hook.err; and the hook's
        gates see only the private index, so the batch's check source is committed with its set (--whole), as a real
        registration must (the runlist gate refuses metadata-schema missing-implemented-source otherwise) */
-    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf 'tools/check-zzg1.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
-       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
+    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
+       " sh ./unisacc.com tools/check-precommit-gates.cx -- --fixture-register-tool tools/check-zzg1.cx > fixture-register.out 2> fixture-register.err && extra=$(cat fixture-register.out) && "
+       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 $extra --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
        " echo HREUSED=$(grep -c 'gate manifest reused' hook.err); echo SUBJ=$(git log -1 --format=%s); ls \"${TMPDIR:-/tmp}\"/commit-own-*.gate 2>/dev/null | wc -l | tr '\\n' ' '; echo leftover", out, sizeof out, 1);
     ck(has(out, "CORC=0\n") && has(out, "SUBJ=zzg1\n") && has(out, "HREUSED=1\n"), "reuse.commit-own-record-reused-by-hook");
     if (failed) sy_printf("%s\n", out);
@@ -215,6 +279,19 @@ static void bench(const char *which) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "--fixture-register-tool")) return pcg_fixture_register(argv[2]);
+    if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
+        if (strspn(argv[2], "abcdefghijklmnopqrstuvwxyz-") != strlen(argv[2])) return 2;
+        const char *command = tx_eqz(argv[3], "register") ?
+            "sh ./unisacc.com tools/register.cx -- --tool tools/commit-own-base.cx" :
+            tx_eqz(argv[3], "packages") ? "sh ./unisacc.com tools/batch-packages-gen.cx -- --write" : 0;
+        if (!command) return 2;
+        setup(argv[2]);
+        char output[16384]; int prepared_rc = sh(command, output, sizeof output, 1);
+        if (prepared_rc) sy_eprintf("%s", output);
+        else sy_printf("PREPARED\tfixture=%s\ttool=%s\tno-test-result\n", argv[2], argv[3]);
+        unlock(); return prepared_rc;
+    }
     const char *group = 0, *bn = 0; int a; long t0 = sy_now_ms();
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
