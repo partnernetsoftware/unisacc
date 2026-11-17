@@ -197,6 +197,8 @@ static int mc_complete(const char *path, const char *name, const sy_stat_t *st) 
     return (unsigned long long)st->size == n + MC_HEAD;
 }
 /* Create every missing parent of path (0700), not path itself. */
+static int mc_said;
+
 static void mc_mkparents(char *path) {
     int i;
     for (i = 1; path[i]; i++) {
@@ -237,6 +239,16 @@ int mc_cache_dir(char *out, int cap) {
     if (mk == 0) return 0;
     if (mk != -EEXIST) return 1;
     if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
+    /* An existing directory of ours with a looser mode (mkdir under umask 022 gives 0755) is
+       tightened to 0700, so the invariant stays: only the owner may read or plant entries.
+       A link, a foreign owner or a failed chmod is refused, and said once instead of silently. */
+    if (sy_lstat(out, &st) == 0 && st.kind == 'd' && st.uid == (long)sy_uid() &&
+        sy_chmod(out, 0700) == 0 && sy_lstat(out, &st) == 0 && st.kind == 'd' &&
+        (st.mode & 0777) == 0700) return 0;
+    if (!mc_said) {
+        mc_said = 1;
+        sy_eprintf("unisacc: run cache disabled: %s is not a private directory of this user (need owner uid, mode 0700)\n", out);
+    }
     return 1;
 }
 
