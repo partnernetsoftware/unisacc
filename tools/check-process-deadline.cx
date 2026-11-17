@@ -1,0 +1,44 @@
+/* Regression probes: pausing the caller must consume its wall-clock budget;
+ * a delayed pre-exec child must consume the same budget as output capture. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sysx.reaper
+#pragma unisa use sys.sig
+typedef struct probe_result { int t, timed_out; long ms; } probe_result;
+static int failed;
+static void ck(int yes, const char *name) { printf("%s\tprocess-deadline.%s\n", yes ? "PASS" : "FAIL", name); if (!yes) failed++; }
+static probe_result probe(int handshake) {
+    int p[2], st=0; probe_result r={-9,0,-1};
+    if (pipe(p)) return r;
+    int pid=fork();
+    if (pid == 0) {
+        close(p[0]); np_result n={0}; char why[1200];
+        char *slow[]={"sleep","5",0}, *fast[]={"true",0};
+        char *env[]={"UNISACC_NP_TEST_PREEXEC_MS=2500",0};
+        long start=sy_now_ms();
+        r.t=np_run(handshake?fast:slow,0,handshake?env:0,1,&n,why,sizeof why);
+        r.timed_out=n.timed_out; r.ms=sy_now_ms()-start; np_free(&n);
+        long wrote=write(p[1],&r,sizeof r); (void)wrote; close(p[1]); _exit(0);
+    }
+    close(p[1]);
+    if (pid < 0) { close(p[0]); return r; }
+    /* This batch is registered for Linux: SIGSTOP=19, SIGCONT=18. */
+    if (!handshake) { usleep(100000); sy_signal(pid,19); usleep(1500000); sy_signal(pid,18); }
+    fcntl(p[0],F_SETFL,O_NONBLOCK);
+    long end=sy_now_ms()+6000; size_t got=0;
+    for (int tries=0;tries<600 && sy_now_ms()<end && got<sizeof r;tries++) {
+        long n=read(p[0],(char *)&r+got,sizeof r-got); if(n>0)got+=(size_t)n; else usleep(10000);
+    }
+    close(p[0]);
+    if (got!=sizeof r) { char why[256]; int cleaned=rp_kill_tree(pid,2000,0,0,why,sizeof why); (void)cleaned; kill(pid,SIGKILL); }
+    waitpid(pid,&st,0);
+    return r;
+}
+int main(void) {
+    probe_result a=probe(0),b=probe(1);
+    printf("MEASURE\tpause_ms=%ld\thandshake_ms=%ld\n",a.ms,b.ms);
+    ck(a.t==-1 && a.timed_out==1 && a.ms>=1500 && a.ms<2200,"paused-caller-consumes-wall-budget");
+    ck(b.t==-1 && b.timed_out==1 && b.ms>=900 && b.ms<2200,"preexec-handshake-is-bounded");
+    printf("CHECK_PROCESS_DEADLINE\tfailed=%d\n",failed); return failed?1:0;
+}

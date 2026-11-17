@@ -140,6 +140,14 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 状态:实例目录(同 leases/locks,dt_instdir;检查用 --dir 或 $BUMP_DIR)下 bump-reservations.tsv、bump-events.tsv 与 bump.lock(flock,等待 $BUMP_LOCK_WAIT_MS 缺省 5000、上限 20000 ms,超时 rc 1 `BUMP_REFUSE lock busy`)。不进 git。事件 bump.reserve/bump.release/bump.expire 另经 `devsvc events emit` 进事件日志($BUMP_EMIT=0 关闭)。
 - 与 layer-api 的关系(K4 起):提交前先 `sh ./unisacc.com tools/devsvc.cx -- bump PKG` 预留版本 V,再 `sh ./unisacc.com tools/layer-api.cx -- --bump PKG --version V`(只在 V 是调用者自己的有效预留或 HEAD 的下一 patch 时写入,否则 rc 2 REFUSE version-not-reserved);`bump --query PKG [VERSION]` 给出 VERDICT=head|next|reserved|reserved-other|unreserved。提交门 precommit 的 tlib 门对每个涉及的包查询一次:暂存版本既非下一 patch 也非任何有效预留(VERDICT=unreserved)时打印 `TLIB_BUMP_UNRESERVED pkg= version= expected=` 并附 `devsvc bump` 用法,含义是这个版本号没经预留、可能与并行任务撞号;只提示,不计入 blocked,查询失败时不出声;TLIB_BUMP_NEEDED、TLIB_API_STALE 等原有拦截不变。检查 tools/check-bump.cx(批次 devsvc-bump)、tools/check-precommit-tlibhint.cx(批次 precommit-tlibhint)。
 
+### 进程捕获:单执行器与兼容门面
+
+sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sysx.process 与 cxlib.netpack 的 np_run、np_free 只转发。模块尚不支持重导出或同名导出合并,同单元不能同时 use 两个门面;只需捕获的工具任选一个,需要 gitsync 的服务使用 netpack。缺口登记在 build/pkg-gaps.tsv 的 NP-PROCESS-UNIFY。373 个仅依赖 netpack 的真实调用文件无需补 use。
+
+迁移明确改变两项旧行为:(1) netpack 按循环累计 tick 改为单调墙钟,调用进程被暂停时仍消耗同一秒数预算;(2) 旧阻塞 exec 握手改为与捕获共用非阻塞截止,执行前迟滞不再绕过预算。tools/check-process-deadline.cx 各有一条回归断言:旧实现加同一执行前延迟测试接缝后分别为 2610 ms、2502 ms 且两条失败;共享执行器为 1619 ms、1017 ms 且两条通过,均用 1 秒调用预算。日志入口 /tmp/npbuf-cdx 与 /tmp/devsvc-flow-21356743325-2369480。没有放宽原批次时限或修改既有断言。
+
+另有两项兼容边界必须保持:(1) np_result 的 timed_out 尾字段在开始与释放时清零,仅预算耗尽时置位;(2) UNISACC_NP_FAULT 只由 netpack 门面启用,sysx.process 仍忽略该工具测试变量。首次合并时第二项曾使 check-npfault 的 D 两条原断言失败;保留断言、修正转发标志后 13 条全过。直接子进程在超时返回前有界收尸,不偷取调用者其它子进程,由原 check-netpack 与 check-reaper 合同覆盖。UNISACC_NP_TEST_PREEXEC_MS 仅在子进程中作最多 5000 ms 的回归接缝,默认关闭;未改变调用的截止值。
+
 ## 6 已知限制与下一单
 
 - (1) 服务单线程:native 构造期间其它请求排队。改为构造放子进程,主循环继续收请求。
@@ -208,6 +216,8 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - (2026-11-15 cc 排期)启动器自身写入保护:写 tools/devsvc.cx 前强制编译加 ping 通过才落盘(中间态曾使全员入口编译失败)。
 
 
+
+- (14) 公开接口改动后整体派生仍可能超过 55 秒:np 双门面迁移使 layer-api、iface-hash、product-map、tool-index、tables-gen、batch-packages-gen、links、doc-links 进入闭包;两次派生阶段在 55806/55654 ms 退出 rc124、stage=none,第二次低载仍复现。分相只隔开提交阶段,尚未把派生本身按表分相。临时按表在同一私有输入树实际构造并全量检查,绑定每表前后身份,再经收据复核提交;不延时限、不跳表。后续单:派生按表调度并行、接口哈希按机械读集只重算受影响消费者,失败实时指明表名与可恢复身份。证据入口 /tmp/npbuf-cdx 与 devsvc jobs/21357621022-2539683。
 
 ## 7 路线
 
