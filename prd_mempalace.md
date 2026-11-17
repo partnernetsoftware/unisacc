@@ -102,6 +102,8 @@ flowchart LR
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
 - cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
 - ujs `compiler_min.cx` cxraw 实测 96(tsv 基线曾 50,限期 0.0.9 压回 <=50)。决定:不把 96 当合格,不并 G1。依据:d473474f14 与 ujs/prd.md C4。证据:`sh ./unisacc.com -run tests/cxraw.cx -- --check --files ujs/seed/stage0/compiler_min.cx`;host1_vm 实测 34。回滚:到期未压回则拒绝合入 main/公开;不升基线冒充。
+- ujs/product 网分派与检查器 libc 债(2026-11-18):main 上 10 个 .cx 无 cxraw 基线行(gold-ic/lex/parse/rest/type、net-gold/lex/parse-check、pack-nets、frame-run);ujs 分支 tests/cxraw.tsv 已有 9 行(缺 frame-run,该文件自称无 libc)。不得改 ratchets 范围或抬主线基线。合入只带棘轮 tsv 对应行(cxraw 及 ujs 已有的 cxapis/cxtrunc 行),keyed,不带 look-dev。限期 0.0.80 前压回各文件 libc 至 0 或移 archive(一次性 gold 取证)。依据:origin/main 缺行、origin/ujs 有行。回滚:不升主线基线;到期未压回则拒绝再扩债。
+
 - core-compat参考源转换:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换,不扩大批准域;入口build/state-unverified.tsv U20。
 - 全套入口分片聚合:主线423c274c42的入口与原因分栏已合入,新候选端到端验收未完成;入口build/state-unverified.tsv U21。
 - 全套材料与平台证据:118材料族仅47项登记,无生产者与外部主机证据未补齐,全套NOT_QUALIFIED;入口build/state-unverified.tsv U22。
