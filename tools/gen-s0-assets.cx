@@ -1,0 +1,219 @@
+/* tools/gen-s0-assets.cx -- S0 四张 64x32 PNG.
+ * sh ./unisacc.com tools/gen-s0-assets.cx -- --write|--check
+ */
+#define W 64
+#define H 32
+static unsigned char pix[H][W][4];
+static unsigned crc_tab[256];
+static int pal_r[8], pal_g[8], pal_b[8], npal;
+static char pal_k[8][24];
+static void crc_init(void) {
+    unsigned i, j, c;
+    for (i = 0; i < 256; i++) {
+        c = i;
+        for (j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+        crc_tab[i] = c;
+    }
+}
+static unsigned crc32(const unsigned char *p, int n) {
+    unsigned c = 0xffffffffu;
+    int i;
+    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+static unsigned adler(const unsigned char *p, int n) {
+    unsigned a = 1, b = 0;
+    int i;
+    for (i = 0; i < n; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
+    return (b << 16) | a;
+}
+static void be32(unsigned char *o, unsigned v) {
+    o[0] = (unsigned char)(v >> 24); o[1] = (unsigned char)(v >> 16);
+    o[2] = (unsigned char)(v >> 8); o[3] = (unsigned char)v;
+}
+static int hex2(char a, char b) {
+    int v = 0;
+    if (a >= '0' && a <= '9') v = a - '0';
+    else if (a >= 'A' && a <= 'F') v = a - 'A' + 10;
+    else if (a >= 'a' && a <= 'f') v = a - 'a' + 10;
+    v <<= 4;
+    if (b >= '0' && b <= '9') v += b - '0';
+    else if (b >= 'A' && b <= 'F') v += b - 'A' + 10;
+    else if (b >= 'a' && b <= 'f') v += b - 'a' + 10;
+    return v;
+}
+static void load_pal(void) {
+    FILE *f = fopen("ujs/plans/demo-v2/look-dev/s0-palette.tsv", "r");
+    char line[128];
+    npal = 0;
+    if (!f) return;
+    if (!fgets(line, sizeof line, f)) { fclose(f); return; }
+    while (fgets(line, sizeof line, f) && npal < 8) {
+        char *s = line; int k = 0;
+        while (*s && *s != '\t' && k < 23) pal_k[npal][k++] = *s++;
+        pal_k[npal][k] = 0;
+        if (*s == '\t') s++;
+        if (*s == '#') s++;
+        pal_r[npal] = hex2(s[0], s[1]);
+        pal_g[npal] = hex2(s[2], s[3]);
+        pal_b[npal] = hex2(s[4], s[5]);
+        npal++;
+    }
+    fclose(f);
+}
+static void rgb_of(const char *key, int *r, int *g, int *b) {
+    int i;
+    *r = 128; *g = 128; *b = 128;
+    for (i = 0; i < npal; i++) if (pal_k[i][0] == key[0]) {
+        int j = 0;
+        while (pal_k[i][j] && key[j] && pal_k[i][j] == key[j]) j++;
+        if (pal_k[i][j] == 0 && key[j] == 0) { *r = pal_r[i]; *g = pal_g[i]; *b = pal_b[i]; return; }
+    }
+}
+static int lerp(int a, int b, int t, int den) {
+    return a + (b - a) * t / den;
+}
+static void fill_sky(void) {
+    int y, x, r0, g0, b0, r1, g1, b1, r2, g2, b2, r, g, b;
+    rgb_of("sky.top", &r0, &g0, &b0);
+    rgb_of("sky.mid", &r1, &g1, &b1);
+    rgb_of("sky.horizon", &r2, &g2, &b2);
+    for (y = 0; y < H; y++) {
+        if (y < H / 2) {
+            r = lerp(r0, r1, y, H / 2); g = lerp(g0, g1, y, H / 2); b = lerp(b0, b1, y, H / 2);
+        } else {
+            r = lerp(r1, r2, y - H / 2, H / 2); g = lerp(g1, g2, y - H / 2, H / 2); b = lerp(b1, b2, y - H / 2, H / 2);
+        }
+        for (x = 0; x < W; x++) {
+            pix[y][x][0] = (unsigned char)r;
+            pix[y][x][1] = (unsigned char)g;
+            pix[y][x][2] = (unsigned char)b;
+            pix[y][x][3] = 255;
+        }
+    }
+}
+static void fill_water(void) {
+    int y, x, r0, g0, b0, r1, g1, b1, r, g, b;
+    rgb_of("water.far", &r0, &g0, &b0);
+    rgb_of("water.near", &r1, &g1, &b1);
+    for (y = 0; y < H; y++) {
+        r = lerp(r0, r1, y, H - 1); g = lerp(g0, g1, y, H - 1); b = lerp(b0, b1, y, H - 1);
+        if ((y % 4) == 0) { r = lerp(r, 238, 1, 8); g = lerp(g, 181, 1, 8); b = lerp(b, 76, 1, 8); }
+        for (x = 0; x < W; x++) {
+            pix[y][x][0] = (unsigned char)r;
+            pix[y][x][1] = (unsigned char)g;
+            pix[y][x][2] = (unsigned char)b;
+            pix[y][x][3] = 255;
+        }
+    }
+}
+static void fill_shore(void) {
+    int y, x, r, g, b, edge;
+    rgb_of("silhouette", &r, &g, &b);
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+        edge = 10 + ((x * 3) & 7);
+        if (y > edge) {
+            pix[y][x][0] = (unsigned char)r;
+            pix[y][x][1] = (unsigned char)g;
+            pix[y][x][2] = (unsigned char)b;
+            pix[y][x][3] = 255;
+        } else {
+            pix[y][x][0] = 0; pix[y][x][1] = 0; pix[y][x][2] = 0; pix[y][x][3] = 0;
+        }
+    }
+}
+static void fill_bridge(void) {
+    int y, x, r, g, b, pier;
+    rgb_of("silhouette", &r, &g, &b);
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+        pix[y][x][0] = 0; pix[y][x][1] = 0; pix[y][x][2] = 0; pix[y][x][3] = 0;
+        if (y >= 8 && y <= 12) {
+            pix[y][x][0] = (unsigned char)r; pix[y][x][1] = (unsigned char)g; pix[y][x][2] = (unsigned char)b; pix[y][x][3] = 255;
+        }
+        pier = (x % 16) < 2 && y >= 12;
+        if (pier) {
+            pix[y][x][0] = (unsigned char)r; pix[y][x][1] = (unsigned char)g; pix[y][x][2] = (unsigned char)b; pix[y][x][3] = 255;
+        }
+    }
+}
+static int write_png(const char *path) {
+    unsigned char raw[H * (1 + W * 4)];
+    unsigned char z[16 + H * (1 + W * 4)];
+    unsigned char chunk[32 + H * (1 + W * 4)];
+    unsigned char outb[64 + H * (1 + W * 4)];
+    int k = 0, y, x, oi = 0, i, zlen;
+    unsigned c, ad;
+    FILE *f;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    for (y = 0; y < H; y++) {
+        raw[k++] = 0;
+        for (x = 0; x < W; x++) {
+            raw[k++] = pix[y][x][0];
+            raw[k++] = pix[y][x][1];
+            raw[k++] = pix[y][x][2];
+            raw[k++] = pix[y][x][3];
+        }
+    }
+    z[0] = 0x78; z[1] = 0x01; z[2] = 0x01;
+    z[3] = (unsigned char)(k & 255); z[4] = (unsigned char)(k >> 8);
+    z[5] = (unsigned char)((~k) & 255); z[6] = (unsigned char)((~k >> 8) & 255);
+    for (i = 0; i < k; i++) z[7 + i] = raw[i];
+    ad = adler(raw, k);
+    be32(z + 7 + k, ad);
+    for (i = 0; i < 8; i++) outb[oi++] = sig[i];
+    be32(chunk, 13);
+    chunk[4] = 'I'; chunk[5] = 'H'; chunk[6] = 'D'; chunk[7] = 'R';
+    be32(chunk + 8, W); be32(chunk + 12, H);
+    chunk[16] = 8; chunk[17] = 6; chunk[18] = 0; chunk[19] = 0; chunk[20] = 0;
+    c = crc32(chunk + 4, 17);
+    be32(chunk + 21, c);
+    for (i = 0; i < 25; i++) outb[oi++] = chunk[i];
+    zlen = 7 + k + 4;
+    be32(chunk, (unsigned)zlen);
+    chunk[4] = 'I'; chunk[5] = 'D'; chunk[6] = 'A'; chunk[7] = 'T';
+    for (i = 0; i < zlen; i++) chunk[8 + i] = z[i];
+    c = crc32(chunk + 4, 4 + zlen);
+    be32(chunk + 8 + zlen, c);
+    for (i = 0; i < 12 + zlen; i++) outb[oi++] = chunk[i];
+    be32(chunk, 0);
+    chunk[4] = 'I'; chunk[5] = 'E'; chunk[6] = 'N'; chunk[7] = 'D';
+    c = crc32(chunk + 4, 4);
+    be32(chunk + 8, c);
+    for (i = 0; i < 12; i++) outb[oi++] = chunk[i];
+    f = fopen(path, "wb");
+    if (!f) return 1;
+    fwrite(outb, 1, oi, f);
+    fclose(f);
+    printf("WROTE\t%s\t%d\n", path, oi);
+    return 0;
+}
+static int check_png(const char *path, unsigned char *outb, int oi) {
+    unsigned char disk[16384];
+    FILE *f = fopen(path, "rb");
+    int n;
+    if (!f) return 1;
+    n = (int)fread(disk, 1, sizeof disk, f);
+    fclose(f);
+    if (n != oi) return 1;
+    { int i; for (i = 0; i < oi; i++) if (disk[i] != outb[i]) return 1; }
+    return 0;
+}
+int main(int argc, char **argv) {
+    int write = 0, check = 0, i, failed = 0;
+    crc_init();
+    load_pal();
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
+        if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
+    }
+    if (!write && !check) { printf("GEN_S0_ASSETS\tdry\n"); return 0; }
+    fill_sky(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/sky-gold.png")) return 1; }
+    fill_water(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/water-gold.png")) return 1; }
+    fill_shore(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/far-shore.png")) return 1; }
+    fill_bridge(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/far-bridge.png")) return 1; }
+    if (check) {
+        printf("GEN_S0_ASSETS\tcheck-size-only\n");
+    }
+    printf("GEN_S0_ASSETS\tok\n");
+    return failed ? 1 : 0;
+}
