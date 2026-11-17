@@ -152,7 +152,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry\|post-snap\|pre-p3\|post-p3] [--strict]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;hook 列标挂点;断言 absent/present/exec-if-present/epoch-canonical/release-rev/src-has/src-lacks/pkg-headers/env-set/receipt-if-present),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;PHASE= 只跑该挂点规则,且该挂点应已产出的变量缺失记 FAIL;变量未给的规则记 SKIP 不记 PASS,`--strict` 下有 SKIP 即退出 1;失败退出 1 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
-| 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |
+| 文档断链与链接事实表 | `sh ./unisacc.com tools/doc-links.cx -- --tracked`;`sh ./unisacc.com tools/doc-links-gen.cx -- --write` / `--check` | 原断链工具保留;新表 build/doc-links.tsv,已登记断链只减不增,锚点缺口单列,批次 doc-links-gen 与 doclink-lib |
+| 文档分词库 | `sh ./unisacc.com tools/check-doctok.cx` | cxlib.doctok 提供有界 tokenize、CJK bigram、复合词和规则指纹;坏 UTF-8 与限额拒绝,批次 doctok |
 | 只提交自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed PATH KEY` | 多人同改文件（prd/batches/coverage） |
 | devsvc 代替原生读写与命令 | `sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM]` / `f write PATH --from SRC [--expect-sha X]` / `f edit PATH --old-file A --new-file B [--expect-sha X] [--all]` / `x [--timeout-ms N] [--cwd D] -- ARGV...` / `flow - [--cat]`(stdin 节点表并发)/ `flow run FILE.tsv [--jobs N] [--deadline-ms N]` | 写节点自动取 devsvc 路径锁,节点事件以 flow.node 入事件环,超时整组杀;无实例时本地照跑;对照表见 `plans/devsvc.md` 5a;批次 `devsvc-flow`(`tools/check-devsvc-flow.cx`) |
 | cx-dev 本机快速迭代车道(NOT_RELEASE,结果只标 LOCAL) | 构造一次 `sh ./unisacc.com tools/cx-dev.cx -- --build`;日常 `sh tools/cx-dev FILE.cx -- ARGS`(参数同 unisacc.com);`--status`、`--reload`、`--close` | 独立 loader 读 manifest 校验后 exec 本机切片加私有包,运行期不经 unisacc.com;改 exec 网表后下一次调用自动重建受影响的网并换包;未换成的配方每次打 CXDEV_STALE;说明 [plans/cx-dev.md](plans/cx-dev.md),检查 `tools/check-cx-dev.cx` |
@@ -179,7 +180,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 超时作业的整棵树清理 | `#pragma unisa use sys.process` -> `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
 | 子进程超时契约（run/capture + residue） | `sh ./unisacc.com tools/check-netpack.cx` | 双管EOF后仍按原deadline非阻塞等待，超时冻结整树后击杀并有界定向回收直接子，不抢调用者的其他子进程；`np_result.residue` 0才算干净。孤儿可见性仍需调用方先`np_subreaper()`。`UNISACC_NP_FAULT=residue`为tools与run-batch的显式注入缝，默认关，其它值具名拒绝；sysx产品单次回收疑点另列0.0.47，不混同此测试库修复。 |
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
-| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `archive/agentwork-retire-2026-11/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
+| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `prd_mempalace.md` 的已落地与部分落地任务行标 `STALE` 与 `PARTIAL`；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
 
 #### 2.2 测试（棘轮、门禁、批次）
 
@@ -574,7 +575,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；任务看板与账（archive/agentwork-retire-2026-11/：items/ledger/units/freeze/phase-times/pkg-gaps，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
+| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
 
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）

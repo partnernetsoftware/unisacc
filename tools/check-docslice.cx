@@ -1,0 +1,234 @@
+/* tools/check-docslice.cx -- cxlib.docslice: sections, preamble, fences, %2F titles, window size and overlap,
+   sentence / code / table units kept whole, code point counts, bad UTF-8 refusal, oversize single line,
+   determinism, and coverage invariants on real repository documents.
+   Run: sh ./unisacc.com tools/check-docslice.cx     (last line CHECK_DOCSLICE<TAB>failed=N) */
+#pragma unisa use cxlib.docslice
+#pragma unisa use mem.heap
+
+static int failed;
+
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-docslice.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static long slen(const char *s) { long i = 0; while (s[i]) i++; return i; }
+
+static int seq(const char *a, const char *b) {
+    long i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+/* slices tile [0,n): new sections start where the previous slice ended, windows of one section start strictly
+   later and no later than the previous end; returns 1 when all hold */
+static int tiles(ds_out *o, long n) {
+    if (n == 0) return o->n == 0;
+    if (o->n == 0 || o->v[0].b0 != 0) return 0;
+    long secend = o->v[0].b1;
+    for (long i = 1; i < o->n; i++) {
+        ds_slice_t *p = &o->v[i - 1], *x = &o->v[i];
+        if (x->b1 <= x->b0) return 0;
+        if (x->win == 0) { if (x->b0 != secend) return 0; }
+        else {
+            if (x->win != p->win + 1 || !seq(x->sec, p->sec)) return 0;
+            if (!(x->b0 > p->b0 && x->b0 <= p->b1)) return 0;
+        }
+        if (x->b1 > secend) secend = x->b1;
+    }
+    return secend == n;
+}
+
+/* a window boundary sits at a unit boundary: section edge, after a newline, after ". ", after 。！？； */
+static int at_unit(const char *b, long n, long p) {
+    if (p == 0 || p == n) return 1;
+    if (b[p - 1] == '\n') return 1;
+    if (p >= 2 && b[p - 1] == ' ' && b[p - 2] == '.') return 1;
+    if (p >= 3) {
+        unsigned char a = (unsigned char)b[p - 3], c = (unsigned char)b[p - 2], d = (unsigned char)b[p - 1];
+        if (a == 0xE3 && c == 0x80 && d == 0x82) return 1;
+        if (a == 0xEF && c == 0xBC && (d == 0x81 || d == 0x9F || d == 0x9B)) return 1;
+    }
+    return 0;
+}
+
+static int all_at_units(ds_out *o, const char *b, long n) {
+    for (long i = 0; i < o->n; i++) if (!at_unit(b, n, o->v[i].b0) || !at_unit(b, n, o->v[i].b1)) return 0;
+    return 1;
+}
+
+static long chars(const char *b, long s, long e) {
+    long c = 0;
+    for (long i = s; i < e; i++) if (((unsigned char)b[i] & 0xC0) != 0x80) c++;
+    return c;
+}
+
+static char big[200000];
+
+static long build(const char *head, const char *unit, int reps, const char *tail) {
+    long w = 0;
+    for (long i = 0; head[i]; i++) big[w++] = head[i];
+    for (int r = 0; r < reps; r++) for (long i = 0; unit[i]; i++) big[w++] = unit[i];
+    for (long i = 0; tail[i]; i++) big[w++] = tail[i];
+    big[w] = 0;
+    return w;
+}
+
+static void real_doc(const char *path) {
+    char nm[256];
+    FILE *f = fopen(path, "rb");
+    int fr = snprintf(nm, sizeof nm, "real.%s", path);
+    if (fr < 0 || fr >= (int)sizeof nm) failed++;
+    if (!f) { ck(0, nm); return; }
+    long cap = 8L * 1024 * 1024;
+    char *b = (char *)mm_alloc(cap + 1);
+    if (!b) { fclose(f); ck(0, nm); return; }
+    size_t n = fread(b, 1, cap, f);
+    fclose(f);
+    ds_out o;
+    int rc = ds_slice(path, b, n, &o);
+    int ok = rc == 0 && o.n > 0 && tiles(&o, (long)n) && all_at_units(&o, b, (long)n);
+    /* windows over the bound must be a single unit: they cannot be cut at any inner boundary (checked
+       loosely: an oversize window that is not the only window of its section must not end where a window
+       of <= DS_WIN would have fitted -- here: just count them for the report) */
+    long over = 0;
+    for (long i = 0; i < o.n; i++) if (o.v[i].chars > 512) over++;
+    printf("  %s slices=%ld oversize=%ld\n", path, o.n, over);
+    ck(ok, nm);
+    ds_free(&o);
+    mm_free(b);
+}
+
+int main(void) {
+    ds_out o, o2;
+    int rc;
+
+    /* empty, preamble only, one section */
+    rc = ds_slice("e.md", "", 0, &o);
+    ck(rc == 0 && o.n == 0, "empty");
+    ds_free(&o);
+    rc = ds_slice("p.md", "hello\nworld\n", 12, &o);
+    ck(rc == 0 && o.n == 1 && seq(o.v[0].sec, "_preamble") && o.v[0].b0 == 0 && o.v[0].b1 == 12 && o.v[0].l0 == 1 && o.v[0].l1 == 2, "preamble_only");
+    ds_free(&o);
+    rc = ds_slice("s.md", "# T\nbody\n", 9, &o);
+    ck(rc == 0 && o.n == 1 && seq(o.v[0].sec, "T") && o.v[0].b1 == 9 && seq(o.v[0].id, "s.md#T~0@") == 0, "one_section");
+    ck(o.n == 1 && slen(o.v[0].id) == slen("s.md#T~0@") + 8, "id_shape");
+    ds_free(&o);
+
+    /* nesting, child sections apart, fence '#' ignored, %2F and %25 */
+    const char *D = "pre\n# A\na\n## B/C 100%\nb\n```\n# not\n```\n### D\nd\n## E\ne\n# F\n";
+    rc = ds_slice("n.md", D, slen(D), &o);
+    int okn = rc == 0 && o.n == 6;
+    if (okn) {
+        okn = seq(o.v[0].sec, "_preamble") && seq(o.v[1].sec, "A") && seq(o.v[2].sec, "A/B%2FC 100%25")
+              && seq(o.v[3].sec, "A/B%2FC 100%25/D") && seq(o.v[4].sec, "A/E") && seq(o.v[5].sec, "F");
+    }
+    ck(okn, "nesting_and_escape");
+    ck(rc == 0 && tiles(&o, slen(D)), "nesting_tiles");
+    ck(okn && o.v[2].l0 == 4 && o.v[2].l1 == 8, "fence_hash_not_heading");
+    ds_free(&o);
+
+    /* code points: CJK and ASCII mixed */
+    const char *C = "# 中文abc\n";
+    rc = ds_slice("c.md", C, slen(C), &o);
+    ck(rc == 0 && o.n == 1 && o.v[0].chars == 8 && slen(C) == 12 && o.v[0].b1 == (long)slen(C), "cjk_codepoints");
+    ds_free(&o);
+
+    /* bad UTF-8 refused by name */
+    rc = ds_slice("b.md", "ok\xff", 3, &o);
+    ck(rc == 2 && o.bad == 2 && o.n == 0 && seq(ds_errname(rc), "EUTF8"), "bad_utf8_byte");
+    rc = ds_slice("b.md", "a\xe4\xb8", 3, &o);
+    ck(rc == 2 && o.bad == 1, "bad_utf8_truncated");
+    rc = ds_slice("b.md", "\xc0\x80", 2, &o);
+    ck(rc == 2 && o.bad == 0, "bad_utf8_overlong");
+    rc = ds_slice("b.md", "\xed\xa0\x80", 3, &o);
+    ck(rc == 2 && o.bad == 0, "bad_utf8_surrogate");
+
+    /* windows: ASCII sentences; size bound, overlap bound, sentence aligned, determinism */
+    long n = build("# W\n", "Sentence number xx here. ", 100, "\n");
+    rc = ds_slice("w.md", big, n, &o);
+    int okw = rc == 0 && o.n >= 5;
+    long minov = 1 << 30, maxov = -1;
+    for (long i = 0; okw && i < o.n; i++) {
+        if (o.v[i].chars > 512) okw = 0;
+        if (i > 0) {
+            long ov = chars(big, o.v[i].b0, o.v[i - 1].b1);
+            if (ov < minov) minov = ov;
+            if (ov > maxov) maxov = ov;
+        }
+    }
+    printf("  windows=%ld overlap_min=%ld overlap_max=%ld\n", o.n, minov, maxov);
+    ck(okw, "window_bound");
+    ck(okw && minov >= 50 && maxov <= 80, "window_overlap");
+    ck(rc == 0 && tiles(&o, n) && all_at_units(&o, big, n), "sentence_units");
+    rc = ds_slice("w.md", big, n, &o2);
+    int same = rc == 0 && o2.n == o.n;
+    for (long i = 0; same && i < o.n; i++) same = seq(o.v[i].id, o2.v[i].id);
+    ck(same, "deterministic_ids");
+    long dif = 1;
+    for (long i = 1; i < o.n; i++) for (long j = 0; j < i; j++) if (seq(o.v[i].id, o.v[j].id)) dif = 0;
+    ck(dif, "ids_distinct");
+    ds_free(&o); ds_free(&o2);
+
+    /* CJK sentences: windows count code points, not bytes */
+    n = build("# 中\n", "这是一个中文句子。", 120, "\n");
+    rc = ds_slice("z.md", big, n, &o);
+    int okz = rc == 0 && o.n >= 2 && tiles(&o, n) && all_at_units(&o, big, n);
+    for (long i = 0; okz && i < o.n; i++) if (o.v[i].chars > 512 || o.v[i].chars < 400) okz = (i == o.n - 1 && o.v[i].chars <= 512);
+    ck(okz, "cjk_windows");
+    ds_free(&o);
+
+    /* code lines and a fenced block are whole units; the fence block is not split */
+    long w = 0;
+    const char *h = "# K\nintro line one. intro two.\n```\n";
+    for (long i = 0; h[i]; i++) big[w++] = h[i];
+    long fs = w - 4;
+    for (int r = 0; r < 60; r++) { const char *l = "int code_line = 1; /* x. y */\n"; for (long i = 0; l[i]; i++) big[w++] = l[i]; }
+    const char *t = "```\nafter.\n";
+    for (long i = 0; t[i]; i++) big[w++] = t[i];
+    long fe = w - 7;
+    big[w] = 0;
+    rc = ds_slice("k.md", big, w, &o);
+    int okf = 0;
+    for (long i = 0; rc == 0 && i < o.n; i++) if (o.v[i].b0 <= fs && o.v[i].b1 >= fe) okf = 1;
+    for (long i = 0; rc == 0 && i < o.n; i++) if ((o.v[i].b0 > fs && o.v[i].b0 < fe) || (o.v[i].b1 > fs && o.v[i].b1 < fe)) okf = 0;
+    ck(okf && tiles(&o, w), "fence_block_whole");
+    ds_free(&o);
+
+    /* table rows are one unit */
+    w = 0;
+    h = "# Tb\n";
+    for (long i = 0; h[i]; i++) big[w++] = h[i];
+    for (int r = 0; r < 12; r++) { const char *l = "Plain sentence before the table. "; for (long i = 0; l[i]; i++) big[w++] = l[i]; }
+    big[w++] = '\n';
+    long ts = w;
+    for (int r = 0; r < 20; r++) { const char *l = "| col a. b | col c | col d value |\n"; for (long i = 0; l[i]; i++) big[w++] = l[i]; }
+    long te = w;
+    big[w] = 0;
+    rc = ds_slice("t.md", big, w, &o);
+    int okt = 0;
+    for (long i = 0; rc == 0 && i < o.n; i++) if (o.v[i].b0 <= ts && o.v[i].b1 >= te) okt = 1;
+    for (long i = 0; rc == 0 && i < o.n; i++) if ((o.v[i].b0 > ts && o.v[i].b0 < te) || (o.v[i].b1 > ts && o.v[i].b1 < te)) okt = 0;
+    ck(okt && tiles(&o, w), "table_whole");
+    ds_free(&o);
+
+    /* one over-long line becomes one oversize window */
+    w = 0;
+    h = "# L\n";
+    for (long i = 0; h[i]; i++) big[w++] = h[i];
+    for (int r = 0; r < 2000; r++) big[w++] = 'x';
+    big[w++] = '\n';
+    big[w] = 0;
+    rc = ds_slice("l.md", big, w, &o);
+    int okl = rc == 0 && tiles(&o, w) && o.n == 2 && o.v[1].b0 == 4 && o.v[1].chars == 2001;
+    ck(okl, "long_line_whole");
+    ds_free(&o);
+
+    real_doc("plans/devsvc.md");
+    real_doc("prd_mempalace.md");
+    real_doc("CLAUDE.md");
+    real_doc("prd.md");
+
+    printf("CHECK_DOCSLICE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

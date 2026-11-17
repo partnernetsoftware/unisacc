@@ -1,0 +1,137 @@
+/* Checks tools/doc-links-gen.cx and cxlib.doclink: sh ./unisacc.com tools/check-doc-links-gen.cx   (from the repo root)
+   Builds a fixture git tree under sy_tmpdir() (prd.md, a.md, sub/b.md, c.cx, one archive/ file) and runs the
+   generator with --root on it.  Asserted rows: inline link, inline link with a GitHub-slug anchor, inline link
+   with a flowdoc path anchor whose heading holds '/' (%2F), tick path (existing: in; missing: out), bare
+   prd.md#anchor, a link inside a fence and inside inline code (both out), a missing inline target (in, exists=no),
+   an unknown anchor (ANCHOR_MISS), src_sec _preamble and nested.  Then: --write + --check pass; a tampered
+   table is STALE (rc 1); one more broken link is NEW_BROKEN (rc 1); a baseline row no longer broken is
+   STALE_BASELINE (rc 1); archive/ is out of scope.
+   Prints PASS/FAIL lines and CHECK_DOC_LINKS_GEN<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sysx.run
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tdoc-links-gen.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static int run(char **argv, const char *cwd, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = px_spawn_spool(argv, cwd, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while (n < cap - 1 && (r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static const char *U;   /* the launcher, set in main */
+static int gen(const char *root, const char *mode, char *out, long cap) {
+    char *argv[] = {"sh", (char *)U, "tools/doc-links-gen.cx", "--", (char *)mode, "--root", (char *)root, 0};
+    return run(argv, 0, out, cap);
+}
+/* a whole output line equal to WANT */
+static int has(const char *s, const char *want) {
+    long n = tx_len(s, 1 << 20), wl = tx_len(want, 1024), p = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && s[e] != '\n') e++;
+        if (e - p == wl && tx_same(s + p, wl, want, wl)) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
+/* an output line whose leading tab fields equal PREFIX (field-aligned) */
+static int starts(const char *s, const char *prefix) {
+    long n = tx_len(s, 1 << 20), wl = tx_len(prefix, 1024), p = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && s[e] != '\n') e++;
+        if (e - p >= wl && tx_prefix(s + p, e - p, prefix, wl) && (e - p == wl || s[p + wl] == '\t')) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
+/* number of non-comment data rows (after the column header) */
+static int rows(const char *s) {
+    long n = tx_len(s, 1 << 20), p = 0; int c = 0;
+    while (p < n) {
+        long e = p;
+        while (e < n && s[e] != '\n') e++;
+        if (e > p && s[p] != '#' && !tx_prefix(s + p, e - p, "src\t", 4)) c++;
+        p = e + 1;
+    }
+    return c;
+}
+static int put(const char *dir, const char *rel, const char *text) {
+    char p[600]; int fd, rc;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1;
+    sy_unlink(p);   /* sy_open_new creates exclusively; ENOENT is fine */
+    fd = sy_open_new(p, 0644);
+    if (fd < 0) return 1;
+    rc = sy_write_all(fd, text, tx_len(text, 1 << 16));
+    sy_close(fd);
+    return rc != 0;
+}
+static const char *A_MD =
+    "intro [b](sub/b.md) and [anc](sub/b.md#repo-map)\n"
+    "# Top\n"
+    "see `sub/b.md` and `gone/none.md` and `c.cx`\n"
+    "bare prd.md#top here\n"
+    "[pathsec](sub/b.md#B%2FC/Inner)\n"
+    "```\n"
+    "[f](fenced.md) `c.cx`\n"
+    "```\n"
+    "`[code](code.md)` and `x [y](z.md)`\n"
+    "[miss](missing.md)\n"
+    "## Sub\n"
+    "[nope](sub/b.md#nope)\n";
+
+int main(void) {
+    static char o[1 << 20]; char dir[300], sub[340], arc[340], tab[340]; int rc;
+    char *gi[] = {"git", "init", "-q", 0}, *ga[] = {"git", "add", "-A", 0};
+    if (cx_fmt(dir, sizeof dir, "%s/check-doc-links-gen-%d", sy_tmpdir(), sy_pid()) || cx_fmt(sub, sizeof sub, "%s/sub", dir)
+        || cx_fmt(arc, sizeof arc, "%s/archive", dir) || cx_fmt(tab, sizeof tab, "%s/build", dir)) return 2;
+    U = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product 本检查自身的子进程跑法,缺省取仓根启动器,UNISACC 可覆盖 */
+    if (sy_mkdir_all(sub, 0755) || sy_mkdir_all(arc, 0755) || sy_mkdir_all(tab, 0755)) { printf("FAIL\tdoc-links-gen.fixture-dirs\n"); return 1; }
+    if (put(dir, "prd.md", "# Top\nx\n") || put(dir, "c.cx", "int x;\n") || put(dir, "a.md", A_MD)
+        || put(dir, "sub/b.md", "# B/C\n## Inner\ntext\n## Repo map\nx\n") || put(dir, "archive/old.md", "[gone](nowhere.md)\n")
+        || put(dir, "tools-baseline.tsv", "src\tline\tdst\treason\na.md\t10\tmissing.md\tfixture\n")) { printf("FAIL\tdoc-links-gen.fixture-files\n"); return 1; }
+    if (run(gi, dir, o, sizeof o) != 0 || run(ga, dir, o, sizeof o) != 0) { printf("FAIL\tdoc-links-gen.fixture-git\n"); return 1; }
+
+    rc = gen(dir, "--print", o, sizeof o);
+    ck(rc == 0 && starts(o, "a.md\t_preamble\t1\tinline\tsub/b.md\t-\tb\tyes"), "inline");
+    ck(starts(o, "a.md\t_preamble\t1\tinline\tsub/b.md\tB%2FC/Repo map\tanc\tyes"), "inline-slug-anchor");
+    ck(starts(o, "a.md\tTop\t3\ttick\tsub/b.md\t-\tsub/b.md\tyes") && starts(o, "a.md\tTop\t3\ttick\tc.cx\t-\tc.cx\tyes\t-"), "tick-existing-in");
+    ck(!starts(o, "a.md\tTop\t3\ttick\tgone/none.md"), "tick-missing-out");
+    ck(starts(o, "a.md\tTop\t4\tbare\tprd.md\tTop\tprd.md#top\tyes"), "bare-prd-anchor");
+    ck(starts(o, "a.md\tTop\t5\tinline\tsub/b.md\tB%2FC/Inner\tpathsec\tyes"), "flowdoc-path-anchor-%2F");
+    ck(!starts(o, "a.md\tTop\t7") && !starts(o, "a.md\tTop\t9"), "fence-and-inline-code-out");
+    ck(has(o, "a.md\tTop\t10\tinline\tmissing.md\t-\tmiss\tno\t-"), "missing-inline-broken");
+    ck(has(o, "a.md\tTop/Sub\t12\tinline\tsub/b.md\tANCHOR_MISS\tnope\tyes\t-"), "anchor-miss-nested-sec");
+    ck(!starts(o, "archive/old.md"), "archive-out-of-scope");
+    ck(rows(o) == 8, "row-count-8");
+
+    {   char *mv[] = {"sh", (char *)U, "tools/doc-links-gen.cx", "--", "--write", "--root", dir, "--baseline", "tools-baseline.tsv", 0};
+        char *cv[] = {"sh", (char *)U, "tools/doc-links-gen.cx", "--", "--check", "--root", dir, "--baseline", "tools-baseline.tsv", 0};
+        rc = run(mv, 0, o, sizeof o);
+        ck(rc == 0 && starts(o, "DOC_LINKS_GEN\trows=8\tinline=5\ttick=2\tbare=1\tbroken=1\tbaseline=1\tanchor_miss=1"), "write-ok");
+        rc = run(cv, 0, o, sizeof o);
+        ck(rc == 0 && starts(o, "DOC_LINKS_GEN\trows=8"), "check-ok");
+        if (put(dir, "build/doc-links.tsv", "src\tsrc_sec\tline\tkind\tdst\tdst_sec\ttext\texists\tdst_sha\n")) failed++;
+        rc = run(cv, 0, o, sizeof o);
+        ck(rc == 1 && starts(o, "STALE\tbuild/doc-links.tsv"), "check-rejects-tampered-table");
+        rc = run(mv, 0, o, sizeof o);
+        if (put(dir, "sub/b.md", "# B/C\n## Inner\ntext [x](../more-missing.md)\n## Repo map\nx\n")) failed++;
+        rc = run(mv, 0, o, sizeof o);
+        ck(rc == 1 && has(o, "NEW_BROKEN\tsub/b.md\tmore-missing.md"), "new-broken-fails");
+        if (put(dir, "sub/b.md", "# B/C\n## Inner\ntext\n## Repo map\nx\n") || put(dir, "missing.md", "here now\n")) failed++;
+        rc = run(cv, 0, o, sizeof o);
+        ck(rc == 1 && has(o, "STALE_BASELINE\ta.md\tmissing.md"), "fixed-link-must-leave-baseline");
+    }
+    printf("CHECK_DOC_LINKS_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

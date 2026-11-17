@@ -1,0 +1,210 @@
+/* tools/doc-links-gen.cx -- generate build/doc-links.tsv, the outgoing links of the live Markdown files.
+
+   sh ./unisacc.com tools/doc-links-gen.cx -- (--write | --check | --print | --print-broken) [--root DIR] [--table PATH] [--baseline PATH]
+
+   Scope: every `git ls-files '*.md'` path except those under archive/ (historical by design),
+   docs/sweep/ (generated sweep output), ujs/ and apps/csih/ (other lanes; read-only, left out in this
+   phase to keep the noise down) and tools/doc-links/fixture/ (deliberately broken fixtures).
+   Rows come from cxlib.doclink (kinds inline, tick, bare), in ls-files order then line order, as
+     src  src_sec  line  kind  dst  dst_sec  text  exists  dst_sha
+   --write writes the table; --print writes it to stdout; --check rebuilds it in memory and compares it
+   byte for byte with the table (STALE on any difference).  Both --write and --check also hold the
+   broken links (exists=no) to the baseline tools/doc-links-baseline.tsv (src line dst reason): rows are
+   matched by (src, dst) as a multiset, since line numbers move with unrelated edits; a broken link not
+   in the baseline is NEW_BROKEN (fail), a baseline row no longer broken is STALE_BASELINE (fail: delete
+   it once fixed), so the baseline only shrinks.  The baseline is registered debt, not a claim that the
+   rest is clean.  Orphans (live files with no incoming edge, outside the protected set) are counted and
+   listed as ORPHAN lines, never a failure.
+   Last line: DOC_LINKS_GEN<TAB>rows=N<TAB>inline=I<TAB>tick=T<TAB>bare=B<TAB>broken=K<TAB>baseline=L<TAB>anchor_miss=M<TAB>orphans=O<TAB>result=OK|FAIL
+   Exit 0 ok, 1 check failure, 2 usage or I/O error. */
+#pragma unisa use cxlib.doclink
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.posix
+#pragma unisa use sysx.run
+
+static char *ob; static long on, ocap;   /* the table being built */
+static long n_inline, n_tick, n_bare, n_broken, n_miss, n_rows;
+static char brk[4096][2][512]; static long brkl[4096]; static int nbrk;   /* broken (src, dst), line */
+
+static int put(const char *s, long n) {
+    if (on + n + 1 > ocap) { long nc = (ocap + n) * 2; char *g = mm_grow(ob, nc); if (!g) return 1; ob = g; ocap = nc; }
+    { long k; for (k = 0; k < n; k++) ob[on + k] = s[k]; }
+    on += n;
+    return 0;
+}
+#define puts_(s) put((s), tx_len((s), 4096))
+
+static int oom;
+static void sink(const dl_edge *e, void *ctx) {
+    char ln[32];
+    (void)ctx;
+    if (cx_fmt(ln, sizeof ln, "%ld", e->line)) { oom = 1; return; }
+    if (puts_(e->src) || puts_("\t") || puts_(e->src_sec) || puts_("\t") || puts_(ln) || puts_("\t") || puts_(e->kind) || puts_("\t")
+        || puts_(e->dst) || puts_("\t") || puts_(e->dst_sec) || puts_("\t") || puts_(e->text) || puts_("\t")
+        || puts_(e->exists ? "yes" : "no") || puts_("\t") || puts_(e->dst_sha) || puts_("\n")) { oom = 1; return; }
+    n_rows++;
+    if (e->kind[0] == 'i') n_inline++; else if (e->kind[0] == 't') n_tick++; else n_bare++;
+    if (e->dst_sec[0] == 'A') n_miss++;
+    if (!e->exists) {
+        n_broken++;
+        if (nbrk < 4096) { tx_copy(brk[nbrk][0], 512, e->src, tx_len(e->src, 511)); tx_copy(brk[nbrk][1], 512, e->dst, tx_len(e->dst, 511)); brkl[nbrk] = e->line; nbrk++; }
+        else oom = 1;
+    }
+}
+
+static const char *SKIP[] = {"archive/", "docs/sweep/", "ujs/", "apps/csih/", "tools/doc-links/fixture/", 0};
+static int skipped(const char *p, long pl) {
+    int k;
+    for (k = 0; SKIP[k]; k++) if (tx_prefix(p, pl, SKIP[k], tx_len(SKIP[k], 64))) return 1;
+    return 0;
+}
+static const char *PROTECT[] = {"CLAUDE.md", "AGENTS.md", "ARCHITECTURE.md", "plans/devsvc.md", "plans/dev-methodology-2026-10-28.md", 0};
+static int protected_(const char *p, long pl) {
+    int k; long b = pl;
+    for (k = 0; PROTECT[k]; k++) if (tx_eqz(p, PROTECT[k])) return 1;
+    if (tx_prefix(p, pl, "prd", 3) && tx_chr(p, pl, '/') < 0) return 1;
+    while (b > 0 && p[b - 1] != '/') b--;
+    return tx_prefix(p + b, pl - b, "README", 6);
+}
+
+static char *ls_md(long *n) {
+    char *gv[] = {"git", "ls-files", "-z", "--", "*.md", 0}, chunk[65536]; int ofd, pid, k; long r, cap = 1 << 20;
+    char *list = mm_alloc(cap);
+    *n = 0;
+    if (!list) return 0;
+    pid = px_spawn_spool(gv, 0, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) {
+        if (*n + r >= cap) { char *g = mm_grow(list, cap * 2 + r); if (!g) return 0; list = g; cap = cap * 2 + r; }
+        for (k = 0; k < r; k++) list[*n + k] = chunk[k];
+        *n += r;
+    }
+    sy_close(ofd);
+    { int ex = 0, code = 0, sig = 0; if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code) return 0; }
+    return list;
+}
+
+/* field F (0-based) of the tab-separated line [p, e) into OUT */
+static int field(const char *p, long e, int f, char *out, long cap) {
+    long i = 0, s;
+    while (f > 0 && i < e) { if (p[i] == '\t') f--; i++; }
+    if (f) return 1;
+    s = i;
+    while (i < e && p[i] != '\t') i++;
+    if (i - s >= cap) return 1;
+    tx_copy(out, cap, p + s, i - s);
+    return 0;
+}
+
+static int baseline_check(const char *path, long *nbase) {
+    size_t sz; char *b = cx_read(path, &sz); long i = 0, n; int bad = 0, k;
+    static char used[4096];
+    *nbase = 0;
+    if (!b) { printf("BASELINE_MISSING\t%s\n", path); return 1; }
+    n = (long)sz;
+    for (k = 0; k < nbrk; k++) used[k] = 0;
+    while (i < n) {
+        long e = i; char s[512], d[512];
+        while (e < n && b[e] != '\n') e++;
+        if (e > i && b[i] != '#' && !tx_prefix(b + i, e - i, "src\t", 4)) {
+            int hit = 0;
+            if (field(b + i, e - i, 0, s, sizeof s) || field(b + i, e - i, 2, d, sizeof d)) { printf("BASELINE_BAD\t%.*s\n", (int)(e - i), b + i); bad = 1; }
+            else {
+                (*nbase)++;
+                for (k = 0; k < nbrk; k++) if (!used[k] && tx_eqz(brk[k][0], s) && tx_eqz(brk[k][1], d)) { used[k] = 1; hit = 1; break; }
+                if (!hit) { printf("STALE_BASELINE\t%s\t%s\n", s, d); bad = 1; }
+            }
+        }
+        i = e + 1;
+    }
+    for (k = 0; k < nbrk; k++) if (!used[k]) { printf("NEW_BROKEN\t%s\t%s\n", brk[k][0], brk[k][1]); bad = 1; }
+    mm_free(b);
+    return bad;
+}
+
+/* live files with no incoming edge */
+static long orphans(const char *list, long ln) {
+    long at = 0, c = 0;
+    while (at < ln) {
+        const char *p = list + at; long pl = tx_len(p, ln - at), i = 0; int in = 0;
+        if (pl <= 0) break;
+        if (!skipped(p, pl) && !protected_(p, pl)) {
+            while (i < on && !in) {   /* dst is field 4 of each row */
+                long e = i; char d[1024];
+                while (e < on && ob[e] != '\n') e++;
+                if (e > i && ob[i] != '#' && field(ob + i, e - i, 4, d, sizeof d) == 0 && tx_eqz(d, p)) {
+                    char s[1024];
+                    if (field(ob + i, e - i, 0, s, sizeof s) == 0 && !tx_eqz(s, p)) in = 1;
+                }
+                i = e + 1;
+            }
+            if (!in) { printf("ORPHAN\t%s\n", p); c++; }
+        }
+        at += pl + 1;
+    }
+    return c;
+}
+
+int main(int argc, char **argv) {
+    const char *table = "build/doc-links.tsv", *base = "tools/doc-links-baseline.tsv", *root = 0;
+    int mode = 0, a, bad = 0; long ln, at = 0, nbase = 0, orph; char *list;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--write")) mode = 1;
+        else if (tx_eqz(argv[a], "--check")) mode = 2;
+        else if (tx_eqz(argv[a], "--print")) mode = 3;
+        else if (tx_eqz(argv[a], "--print-broken")) mode = 4;
+        else if (a + 1 < argc && tx_eqz(argv[a], "--root")) root = argv[++a];
+        else if (a + 1 < argc && tx_eqz(argv[a], "--table")) table = argv[++a];
+        else if (a + 1 < argc && tx_eqz(argv[a], "--baseline")) base = argv[++a];
+        else mode = 0, a = argc;
+    }
+    if (!mode) { fprintf(stderr, "usage: doc-links-gen (--write | --check | --print) [--root DIR] [--table PATH] [--baseline PATH]\n"); return 2; }
+    if (root && sy_chdir(root) != 0) { fprintf(stderr, "doc-links-gen: cannot enter %s\n", root); return 2; }
+    ocap = 1 << 20; ob = mm_alloc(ocap);
+    list = ls_md(&ln);
+    if (!ob || !list) { fprintf(stderr, "doc-links-gen: git ls-files failed\n"); return 2; }
+    puts_("# build/doc-links.tsv -- generated by tools/doc-links-gen.cx --write; do not edit.\n");
+    puts_("# scope: git ls-files *.md minus archive/ docs/sweep/ ujs/ apps/csih/ tools/doc-links/fixture/\n");
+    puts_("# kinds: inline [t](x) any target; tick `path` only existing targets; bare prdX.md#anchor\n");
+    puts_("src\tsrc_sec\tline\tkind\tdst\tdst_sec\ttext\texists\tdst_sha\n");
+    while (at < ln) {
+        const char *p = list + at; long pl = tx_len(p, ln - at);
+        if (pl <= 0) break;
+        if (!skipped(p, pl)) {
+            size_t sz; char *b = cx_read(p, &sz);
+            if (b) { dl_extract(p, b, (long)sz, 7 /* inline | tick | bare */, sink, 0); mm_free(b); }
+            else if (sy_exists(p)) { fprintf(stderr, "doc-links-gen: cannot read %s\n", p); return 2; }
+        }
+        at += pl + 1;
+    }
+    if (oom) { fprintf(stderr, "doc-links-gen: out of memory or too many broken links\n"); return 2; }
+    if (mode == 3) { sy_write_all(1, ob, on); return 0; }
+    if (mode == 4) {   /* baseline rows for the current broken links (registering debt is a reviewed edit) */
+        int k;
+        for (k = 0; k < nbrk; k++)
+            printf("%s\t%ld\t%s\t%s\n", brk[k][0], brkl[k], brk[k][1],
+                   tx_prefix(brk[k][0], tx_len(brk[k][0], 511), "research/", 9) ? "历史研究记录引用的路径已移走或删除" : "链接目标不存在,待核对后修复或改指");
+        return 0;
+    }
+    if (mode == 1) {
+        char tmp[1100]; int fd;
+        if (cx_fmt(tmp, sizeof tmp, "%s.tmp", table)) return 2;
+        sy_unlink(tmp);   /* a leftover from a killed run; ENOENT is fine */
+        fd = sy_open_new(tmp, 0644);
+        if (fd < 0 || sy_write_all(fd, ob, on) != 0) { fprintf(stderr, "doc-links-gen: cannot write %s\n", tmp); return 2; }
+        sy_close(fd);
+        if (sy_rename(tmp, table) != 0) { fprintf(stderr, "doc-links-gen: cannot rename to %s\n", table); return 2; }
+    } else {
+        size_t sz; char *cur = cx_read(table, &sz);
+        if (!cur || (long)sz != on || !tx_same(cur, (long)sz, ob, on)) { printf("STALE\t%s\n", table); bad = 1; }
+        if (cur) mm_free(cur);
+    }
+    if (baseline_check(base, &nbase)) bad = 1;
+    orph = orphans(list, ln);
+    printf("DOC_LINKS_GEN\trows=%ld\tinline=%ld\ttick=%ld\tbare=%ld\tbroken=%ld\tbaseline=%ld\tanchor_miss=%ld\torphans=%ld\tresult=%s\n",
+           n_rows, n_inline, n_tick, n_bare, n_broken, nbase, n_miss, orph, bad ? "FAIL" : "OK");
+    return bad ? 1 : 0;
+}

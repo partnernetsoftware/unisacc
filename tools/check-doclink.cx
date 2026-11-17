@@ -1,0 +1,50 @@
+/* Checks tools/cxlib/doclink.cx in process: sh ./unisacc.com tools/check-doclink.cx   (from the repo root)
+   Extracts the edges of an in-memory Markdown text whose targets are real repo files (prd.md, plans/devsvc.md,
+   tools/doc-links.cx): inline with and without anchor, a GitHub slug that drops fullwidth punctuation,
+   tick paths (existing in, missing out, commands out), a fenced block and an inline code span (out), a
+   scheme link (out), src_sec nesting with a %2F title, and the kinds mask.  The generator side (tables,
+   --check, baseline) is checked by tools/check-doc-links-gen.cx.
+   Prints PASS/FAIL lines and CHECK_DOCLINK<TAB>failed=N. */
+#pragma unisa use cxlib.doclink
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tdoclink.%s\n", ok ? "PASS" : "FAIL", name); }
+
+static char got[64][4][512]; static long gl[64]; static int ng;   /* kind, dst, dst_sec, src_sec */
+static void sink(const dl_edge *e, void *ctx) {
+    (void)ctx;
+    if (ng >= 64) return;
+    tx_copy(got[ng][0], 512, e->kind, tx_len(e->kind, 16));
+    tx_copy(got[ng][1], 512, e->dst, tx_len(e->dst, 511));
+    tx_copy(got[ng][2], 512, e->dst_sec, tx_len(e->dst_sec, 511));
+    tx_copy(got[ng][3], 512, e->src_sec, tx_len(e->src_sec, 511));
+    gl[ng] = e->exists * 1000 + e->line;
+    ng++;
+}
+static int row(int i, const char *kind, const char *dst, const char *sec, const char *ssec, long ex_line) {
+    return i < ng && tx_eqz(got[i][0], kind) && tx_eqz(got[i][1], dst) && tx_eqz(got[i][2], sec) && tx_eqz(got[i][3], ssec) && gl[i] == ex_line;
+}
+
+static const char *MD =
+    "[p](../prd.md) [https](https://x.org/a.md)\n"                       /* 1 */
+    "# A/B\n"                                                              /* 2 */
+    "## Sub\n"                                                             /* 3 */
+    "[c](../prd.md#0-概念与术语先读歧义以本节为准) `tools/doc-links.cx` `no/such/file.md` `git log -- tools`\n"   /* 4 */
+    "```\n[f](../prd.md) `tools/doc-links.cx`\n```\n"                      /* 5-7 */
+    "`[x](../prd.md)` [gone](nothing-here.md)\n";                          /* 8 */
+
+int main(void) {
+    long n = tx_len(MD, 4096), c;
+    c = dl_extract("plans/x.md", MD, n, 7, sink, 0);
+    ck(c == 4 && ng == 4, "edge-count-4");
+    ck(row(0, "inline", "prd.md", "-", "_preamble", 1001), "inline-relative-preamble");
+    ck(row(1, "inline", "prd.md", "unisacc —— 产品与项目总览/0. 概念与术语（先读；歧义以本节为准）", "A%2FB/Sub", 1004), "slug-drops-fullwidth-punct-and-%2F-sec");
+    ck(row(2, "tick", "tools/doc-links.cx", "-", "A%2FB/Sub", 1004), "tick-existing-repo-root");
+    ck(row(3, "inline", "plans/nothing-here.md", "-", "A%2FB/Sub", 8), "missing-inline-kept-broken");
+    ng = 0;
+    c = dl_extract("plans/x.md", MD, n, 2, sink, 0);
+    ck(c == 1 && row(0, "tick", "tools/doc-links.cx", "-", "A%2FB/Sub", 1004), "kinds-mask-tick-only");
+    printf("CHECK_DOCLINK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

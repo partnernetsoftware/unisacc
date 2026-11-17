@@ -1,0 +1,353 @@
+/* tools/cxlib/doclink.cx -- outgoing links of one Markdown file, for the doc-links table.
+
+   Interface (use cxlib.doclink):
+     dl_edge                                   one outgoing edge (fields below)
+     typedef void (*dl_sink)(const dl_edge *e, void *ctx);
+     long dl_extract(const char *src, const char *b, long n, int kinds, dl_sink fn, void *ctx);
+         src: the file's repo-relative path (base of relative targets); b/n: its bytes; kinds: an OR
+         of DL_INLINE (1), DL_TICK (2), DL_BARE (4); callers outside the module pass the numbers.  Calls fn once per edge in file order; returns the count.
+   Section paths follow cxlib.flowdoc: "A/B/C" of trimmed heading titles, a '/' inside a title
+   written %2F, headings inside ``` or ~~~ fences ignored; before the first heading "_preamble".
+
+   Edge kinds (none is read inside a fenced block; inline and bare not inside an inline code span):
+     inline  [text](target): a scheme (http:, mailto:) or a bare #anchor is not an edge; a title and a
+             ?query are dropped; %20 is a blank; resolved against src's directory (leading / = repo
+             root).  Entered whether the target exists or not (exists=no is a broken link).
+     tick    `path`: a backtick span with no blank that holds a '/' or ends in a known extension,
+             optional #anchor; tried at the repo root, then against src's directory.  Entered only
+             when the target exists (backticks mostly hold commands and long-gone names).
+     bare    prdNAME.md#anchor in plain text, resolved at the repo root.
+   Fields: dst is repo-relative with . and .. folded; dst_sec is "-" without an anchor, the flowdoc
+   section path of the heading the anchor names (GitHub slug, with -N for repeats, or flowdoc path),
+   or ANCHOR_MISS; dst_sha is the first 8 hex of sha256 over the target section (the whole file
+   without an anchor; "-" for a non-Markdown target without anchor, a directory, a missing target
+   or ANCHOR_MISS, so that code edits do not churn the table).  Tabs in text become
+   blanks.  File contents are scanned byte by byte (no substring search). */
+#pragma unisa module doclink
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define DL_INLINE 1
+#define DL_TICK 2
+#define DL_BARE 4
+
+typedef struct {
+    const char *src, *src_sec, *kind;
+    long line;
+    char dst[1024], dst_sec[512], text[256], dst_sha[9];
+    int exists;
+} dl_edge;
+typedef void (*dl_sink)(const dl_edge *e, void *ctx);
+
+static int dl_eqn(const char *a, long an, const char *b, long bn) {
+    long k;
+    if (an != bn) return 0;
+    for (k = 0; k < an; k++) if (a[k] != b[k]) return 0;
+    return 1;
+}
+
+/* ---- paths ---- */
+
+/* fold ./ and ../ of P (repo-relative, cap 1024) in place; 1 when it climbs above the root */
+static int dl_fold(char *p) {
+    char out[1024]; long o = 0, i = 0, n = tx_len(p, 1023);
+    while (i < n) {
+        long e = i;
+        while (e < n && p[e] != '/') e++;
+        if (e - i == 0 || (e - i == 1 && p[i] == '.')) { }
+        else if (e - i == 2 && p[i] == '.' && p[i + 1] == '.') {
+            if (o == 0) return 1;
+            o--;
+            while (o > 0 && out[o - 1] != '/') o--;
+        } else {
+            long k;
+            for (k = i; k < e && o < 1020; k++) out[o++] = p[k];
+            if (o < 1020) out[o++] = '/';
+        }
+        i = e + 1;
+    }
+    if (o > 0 && out[o - 1] == '/') o--;
+    if (o == 0) return 1;
+    tx_copy(p, 1024, out, o);
+    return 0;
+}
+/* OUT (cap 1024) = directory of SRC (when REL) + T[0..n) with %20 as blank, folded; 1 on failure */
+static int dl_join(char *out, const char *src, int rel, const char *t, long n) {
+    long o = 0, k, d = rel ? tx_len(src, 1023) : 0;
+    while (d > 0 && src[d - 1] != '/') d--;
+    for (k = 0; k < d && o < 1020; k++) out[o++] = src[k];
+    for (k = 0; k < n && o < 1020; k++) {
+        if (t[k] == '%' && k + 2 < n && t[k + 1] == '2' && t[k + 2] == '0') { out[o++] = ' '; k += 2; }
+        else out[o++] = t[k];
+    }
+    if (k < n || o == 0) return 1;
+    out[o] = 0;
+    return dl_fold(out);
+}
+
+/* ---- headings ---- */
+
+static int dl_level(const char *s, long n) {
+    int l = 0;
+    while (l < n && s[l] == '#') l++;
+    if (l == 0 || l > 6 || l >= n || s[l] != ' ') return 0;
+    return l;
+}
+static int dl_fence(const char *l, long n) {
+    long k = 0;
+    while (k < n && (l[k] == ' ' || l[k] == '\t')) k++;
+    return n - k >= 3 && (tx_prefix(l + k, n - k, "```", 3) || tx_prefix(l + k, n - k, "~~~", 3));
+}
+/* trimmed title [*a, *b) of heading line S of level LV (closing #s dropped) */
+static void dl_title(const char *s, long n, int lv, long *a, long *b) {
+    long x = lv, y = n;
+    while (x < y && (s[x] == ' ' || s[x] == '\t')) x++;
+    while (y > x && (s[y - 1] == ' ' || s[y - 1] == '\t' || s[y - 1] == '\r')) y--;
+    while (y > x && s[y - 1] == '#') y--;
+    while (y > x && (s[y - 1] == ' ' || s[y - 1] == '\t')) y--;
+    *a = x; *b = y;
+}
+
+typedef struct { long len[7]; char buf[512]; } dl_stack;   /* len[d]: path length through level d, 0 = none */
+
+static void dl_stack_init(dl_stack *st) {
+    int d;
+    for (d = 0; d < 7; d++) st->len[d] = 0;
+    st->buf[0] = 0;
+}
+static void dl_push(dl_stack *st, int lv, const char *t, long n) {
+    long o = 0, k; int d;
+    for (d = lv - 1; d >= 1; d--) if (st->len[d] > 0) { o = st->len[d]; break; }
+    if (o > 0) st->buf[o++] = '/';
+    for (k = 0; k < n && o < 500; k++) {
+        if (t[k] == '/') { st->buf[o++] = '%'; st->buf[o++] = '2'; st->buf[o++] = 'F'; }
+        else st->buf[o++] = t[k] == '\t' ? ' ' : t[k];
+    }
+    st->buf[o] = 0;
+    for (d = lv; d <= 6; d++) st->len[d] = 0;
+    st->len[lv] = o;
+}
+
+/* GitHub slug: ASCII lowercased, blank -> -, ASCII punctuation other than - and _ dropped,
+   bytes >= 0x80 kept */
+static long dl_slug(char *out, long cap, const char *t, long n) {
+    long o = 0, k;
+    for (k = 0; k < n && o + 1 < cap; k++) {
+        unsigned char c = (unsigned char)t[k], c1 = k + 1 < n ? (unsigned char)t[k + 1] : 0, c2 = k + 2 < n ? (unsigned char)t[k + 2] : 0;
+        /* Unicode punctuation is dropped too: U+00A0-00BF, U+2000-203F, U+3000-303F and the fullwidth
+           ASCII punctuation U+FF01-FF0F, FF1A-FF20, FF3B-FF40, FF5B-FF65 */
+        if (c == 0xC2 && c1 >= 0xA0 && c1 <= 0xBF) { k += 1; continue; }
+        if ((c == 0xE2 && c1 == 0x80) || (c == 0xE3 && c1 == 0x80)) { k += 2; continue; }
+        if (c == 0xEF && c1 == 0xBC && ((c2 >= 0x81 && c2 <= 0x8F) || (c2 >= 0x9A && c2 <= 0xA0) || c2 >= 0xBB)) { k += 2; continue; }
+        if (c == 0xEF && c1 == 0xBD && (c2 == 0x80 || (c2 >= 0x9B && c2 <= 0xA5))) { k += 2; continue; }
+        if (c >= 'A' && c <= 'Z') out[o++] = (char)(c + 32);
+        else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c >= 0x80) out[o++] = (char)c;
+        else if (c == ' ') out[o++] = '-';
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* the section of B[0..n) the anchor A names: path into SEC (cap 512), byte range [*s0, *s1); 0 found */
+static int dl_find(const char *b, long n, const char *a, long an, char *sec, long *s0, long *s1) {
+    static char slugs[512][128]; int ns = 0, fence = 0, hit_lv = 0, hit = 0;
+    static dl_stack st; long i = 0;
+    dl_stack_init(&st);
+    while (i < n) {
+        long e = i;
+        while (e < n && b[e] != '\n') e++;
+        if (dl_fence(b + i, e - i)) fence = !fence;
+        else if (!fence) {
+            int lv = dl_level(b + i, e - i);
+            if (lv && hit && lv <= hit_lv) { *s1 = i; return 0; }
+            if (lv && !hit) {
+                long ta, tb, sn; char sl[160]; int dup = 0, k;
+                dl_title(b + i, e - i, lv, &ta, &tb);
+                dl_push(&st, lv, b + i + ta, tb - ta);
+                sn = dl_slug(sl, 128, b + i + ta, tb - ta);
+                for (k = 0; k < ns; k++) if (tx_eqz(slugs[k], sl)) dup++;
+                if (ns < 512) tx_copy(slugs[ns++], 128, sl, sn);
+                if (dup) { if (cx_fmt(sl + sn, 160 - (int)sn, "-%d", dup)) return 1; sn = tx_len(sl, 159); }
+                if (dl_eqn(sl, sn, a, an) || dl_eqn(st.buf, tx_len(st.buf, 511), a, an)) {
+                    hit = 1; hit_lv = lv; *s0 = i;
+                    tx_copy(sec, 512, st.buf, tx_len(st.buf, 511));
+                }
+            }
+        }
+        i = e + 1;
+    }
+    if (hit) { *s1 = n; return 0; }
+    return 1;
+}
+
+/* ---- targets ---- */
+
+static char dl_cpath[1024][160]; static char dl_csha[1024][9]; static int dl_nc;   /* whole-file sha8 cache */
+
+static void dl_sha8(const char *p, long n, char out[9]) {
+    char hex[65];
+    cx_sha256_hex(n > 0 ? p : "", (size_t)(n > 0 ? n : 0), hex);
+    tx_copy(out, 9, hex, 8);
+}
+static void dl_miss(dl_edge *e) { tx_copy(e->dst_sec, 512, "ANCHOR_MISS", 11); tx_copy(e->dst_sha, 9, "-", 1); }
+
+/* exists, dst_sec, dst_sha of E for anchor A[0..an) (an == 0: none) */
+static void dl_target(dl_edge *e, const char *a, long an) {
+    size_t sz; char *b; int k; long dn = tx_len(e->dst, 1023);
+    e->exists = sy_exists(e->dst) ? 1 : 0;
+    tx_copy(e->dst_sec, 512, "-", 1);
+    tx_copy(e->dst_sha, 9, "-", 1);
+    if (!e->exists) return;
+    if (an == 0 && !(dn > 3 && dl_eqn(e->dst + dn - 3, 3, ".md", 3))) return;   /* sha only for Markdown targets */
+    if (an == 0) for (k = 0; k < dl_nc; k++) if (tx_eqz(dl_cpath[k], e->dst)) { tx_copy(e->dst_sha, 9, dl_csha[k], 8); return; }
+    b = cx_read(e->dst, &sz);
+    if (!b) { if (an) dl_miss(e); return; }   /* a directory */
+    if (an == 0) {
+        dl_sha8(b, (long)sz, e->dst_sha);
+        if (dl_nc < 1024 && dn < 160) { tx_copy(dl_cpath[dl_nc], 160, e->dst, dn); tx_copy(dl_csha[dl_nc], 9, e->dst_sha, 8); dl_nc++; }
+    } else {
+        long s0 = 0, s1 = 0;
+        if (dl_find(b, (long)sz, a, an, e->dst_sec, &s0, &s1) == 0) dl_sha8(b + s0, s1 - s0, e->dst_sha);
+        else dl_miss(e);
+    }
+    mm_free(b);
+}
+
+static void dl_text(dl_edge *e, const char *t, long n) {
+    long k, o = 0;
+    for (k = 0; k < n && o < 250; k++) e->text[o++] = (t[k] == '\t' || t[k] == '\r') ? ' ' : t[k];
+    e->text[o] = 0;
+}
+
+/* inline target T[0..n) into E; 0 when it is an edge */
+static int dl_inline(dl_edge *e, const char *t, long n) {
+    long k, h, an = 0; int rel = 1; const char *a = 0;
+    while (n > 0 && (t[0] == ' ' || t[0] == '<')) { t++; n--; }
+    for (k = 0; k < n; k++) if (t[k] == ' ' || t[k] == '"' || t[k] == '>') { n = k; break; }
+    if (n == 0 || t[0] == '#') return 1;
+    for (k = 0; k < n && k < 12; k++) {
+        if (t[k] == ':') return 1;
+        if (!((t[k] >= 'a' && t[k] <= 'z') || (t[k] >= 'A' && t[k] <= 'Z') || t[k] == '+' || t[k] == '.' || t[k] == '-')) break;
+    }
+    h = tx_chr(t, n, '#');
+    if (h >= 0) { a = t + h + 1; an = n - h - 1; n = h; }
+    { long q = tx_chr(t, n, '?'); if (q >= 0) n = q; }
+    if (n == 0) return 1;
+    if (t[0] == '/') { rel = 0; t++; n--; }
+    if (dl_join(e->dst, e->src, rel, t, n)) return 1;
+    dl_target(e, a, an);
+    return 0;
+}
+
+static int dl_extok(const char *t, long n) {
+    static const char *ext[] = {".md", ".cx", ".tsv", ".c", ".h", ".sh", ".json", ".txt", ".com", ".yml", ".yaml", ".toml", 0};
+    int k;
+    for (k = 0; ext[k]; k++) {
+        long el = tx_len(ext[k], 8);
+        if (n > el && dl_eqn(t + n - el, el, ext[k], el)) return 1;
+    }
+    return 0;
+}
+/* tick span T[0..n) into E; 0 when it names an existing repo path */
+static int dl_tick(dl_edge *e, const char *t, long n) {
+    long k, h, an = 0; int slash = 0; const char *a = 0;
+    if (n <= 0 || n > 900) return 1;
+    for (k = 0; k < n; k++) {
+        unsigned char c = (unsigned char)t[k];
+        if (c <= ' ' || c == '*' || c == '$' || c == '<' || c == '>' || c == '|' || c == '{' || c == '(' || c == '"' || c == '\'') return 1;
+        if (c == '/') slash = 1;
+    }
+    if (t[0] == '/' || t[0] == '~' || t[0] == '-') return 1;
+    for (k = 0; k + 2 < n && k < 12; k++) if (t[k] == ':' && t[k + 1] == '/' && t[k + 2] == '/') return 1;
+    h = tx_chr(t, n, '#');
+    if (h >= 0) { a = t + h + 1; an = n - h - 1; n = h; }
+    if (n == 0 || (!slash && !dl_extok(t, n))) return 1;
+    if (dl_join(e->dst, e->src, 0, t, n) || !sy_exists(e->dst)) {
+        if (dl_join(e->dst, e->src, 1, t, n) || !sy_exists(e->dst)) return 1;
+    }
+    dl_target(e, a, an);
+    return 0;
+}
+/* bare prdNAME.md#anchor at L[k..ln): length consumed into *used; 0 when it is an edge */
+static int dl_bare(dl_edge *e, const char *l, long k, long ln, long *used) {
+    long j = k + 3, a0, j2;
+    *used = 0;
+    if (k + 3 >= ln || l[k] != 'p' || l[k + 1] != 'r' || l[k + 2] != 'd') return 1;
+    if (k > 0) { unsigned char c = (unsigned char)l[k - 1]; if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '/' || c == '.' || c == '-') return 1; }
+    while (j < ln && ((l[j] >= 'a' && l[j] <= 'z') || (l[j] >= '0' && l[j] <= '9') || l[j] == '_' || l[j] == '-')) j++;
+    if (j + 4 > ln || l[j] != '.' || l[j + 1] != 'm' || l[j + 2] != 'd' || l[j + 3] != '#') return 1;
+    a0 = j + 4; j2 = a0;
+    while (j2 < ln) {
+        unsigned char c = (unsigned char)l[j2];
+        if (c <= ' ' || c == ')' || c == ']' || c == '`' || c == ',' || c == ';' || c == '"' || c == '\'' || c == '|') break;
+        if (c == 0xEF || c == 0xE3) break;   /* fullwidth punctuation (U+FFxx, U+30xx) ends an anchor */
+        j2++;
+    }
+    while (j2 > a0 && (l[j2 - 1] == '.' || l[j2 - 1] == ':')) j2--;
+    if (j2 == a0) return 1;
+    if (dl_join(e->dst, e->src, 0, l + k, j - k + 3)) return 1;
+    dl_target(e, l + a0, j2 - a0);
+    dl_text(e, l + k, j2 - k);
+    *used = j2 - k;
+    return 0;
+}
+
+long dl_extract(const char *src, const char *b, long n, int kinds, dl_sink fn, void *ctx) {
+    static dl_stack st; static dl_edge e; long i = 0, line = 1, count = 0; int fence = 0;
+    dl_stack_init(&st);
+    tx_copy(st.buf, 512, "_preamble", 9);
+    e.src = src; e.src_sec = st.buf;
+    while (i < n) {
+        long en = i, ln, k;
+        const char *l = b + i;
+        while (en < n && b[en] != '\n') en++;
+        ln = en - i;
+        if (dl_fence(l, ln)) fence = !fence;
+        else if (!fence) {
+            int lv = dl_level(l, ln), code = 0;
+            if (lv) {
+                long ta, tb;
+                if (st.len[1] == 0 && st.len[2] == 0 && st.len[3] == 0 && st.len[4] == 0 && st.len[5] == 0 && st.len[6] == 0) st.buf[0] = 0;
+                dl_title(l, ln, lv, &ta, &tb);
+                dl_push(&st, lv, l + ta, tb - ta);
+            }
+            e.line = line;
+            for (k = 0; k < ln; k++) {
+                if (l[k] == '`') {
+                    long r = k + 1, c0;
+                    if (code) { code = 0; continue; }
+                    c0 = r;
+                    while (r < ln && l[r] != '`') r++;
+                    if (r < ln && (kinds & DL_TICK)) {
+                        e.kind = "tick";
+                        if (dl_tick(&e, l + c0, r - c0) == 0) { dl_text(&e, l + c0, r - c0); fn(&e, ctx); count++; }
+                    }
+                    if (r < ln) { k = r; continue; }
+                    code = 1;
+                    continue;
+                }
+                if (code) continue;
+                if (l[k] == ']' && k + 1 < ln && l[k + 1] == '(') {
+                    long s = k + 2, d = 1, j = s, t0 = k;
+                    while (j < ln && d) { if (l[j] == '(') d++; else if (l[j] == ')') d--; if (d) j++; }
+                    if (d) break;
+                    while (t0 > 0 && l[t0 - 1] != '[') t0--;
+                    if (kinds & DL_INLINE) {
+                        e.kind = "inline";
+                        if (dl_inline(&e, l + s, j - s) == 0) { dl_text(&e, l + t0, k - t0); fn(&e, ctx); count++; }
+                    }
+                    k = j;
+                    continue;
+                }
+                if ((kinds & DL_BARE) && l[k] == 'p') {
+                    long used = 0;
+                    e.kind = "bare";
+                    if (dl_bare(&e, l, k, ln, &used) == 0) { fn(&e, ctx); count++; k += used - 1; }
+                }
+            }
+        }
+        i = en + 1; line++;
+    }
+    return count;
+}

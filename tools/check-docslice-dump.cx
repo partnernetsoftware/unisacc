@@ -1,0 +1,70 @@
+/* tools/check-docslice-dump.cx -- tools/docslice-dump.cx prints a header, one row per slice and a trailer
+   whose slice count matches the rows; a bad-UTF-8 file is refused with rc=EUTF8 and exit 1; no argument is
+   a usage error.
+   Run: sh ./unisacc.com tools/check-docslice-dump.cx     (last line CHECK_DOCSLICE_DUMP<TAB>failed=N)
+   Writes one scratch file under /tmp and removes it. */
+#pragma unisa use sys.posix
+
+static int failed;
+static char out[400000];
+
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-docslice-dump.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+/* run cmd, capture stdout into out; exit status or -1 */
+static int run(const char *cmd) {
+    FILE *p = popen(cmd, "r");
+    if (!p) return -1;
+    size_t n = 0, r;
+    while (n < sizeof out - 1 && (r = fread(out + n, 1, sizeof out - 1 - n, p)) > 0) n += r;
+    out[n] = 0;
+    int st = pclose(p);
+    if (st < 0 || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* count lines of out and whether it contains the trailer prefix with slices=<rows-2> */
+static long lines(void) {
+    long c = 0;
+    for (long i = 0; out[i]; i++) if (out[i] == '\n') c++;
+    return c;
+}
+
+static int has(const char *k) {
+    for (long i = 0; out[i]; i++) {
+        long j = 0;
+        while (k[j] && out[i + j] == k[j]) j++;
+        if (!k[j]) return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    char cmd[512], want[128];
+    int rc = run("sh ./unisacc.com tools/docslice-dump.cx -- CLAUDE.md 2>/dev/null");
+    long nl = lines();
+    int f = snprintf(want, sizeof want, "DOCSLICE_DUMP\tfile=CLAUDE.md\tslices=%ld\trc=OK\n", nl - 2);
+    if (f < 0 || f >= (int)sizeof want) failed++;
+    printf("  rc=%d lines=%ld\n", rc, nl);
+    ck(rc == 0 && nl >= 3 && has("id\tsec\twin\tb0\tb1\tl0\tl1\tchars\n") && has(want), "claude_md");
+    ck(has("CLAUDE.md#_preamble~0@") || has("CLAUDE.md#AGENTS.md~0@"), "first_row");
+
+    const char *tmp = "/tmp/check-docslice-dump-bad.md";
+    FILE *t = fopen(tmp, "wb");
+    if (!t) { ck(0, "scratch"); return 1; }
+    fputs("# ok\nbad \xff\n", t);
+    fclose(t);
+    f = snprintf(cmd, sizeof cmd, "sh ./unisacc.com tools/docslice-dump.cx -- %s 2>/dev/null", tmp);
+    if (f < 0 || f >= (int)sizeof cmd) failed++;
+    rc = run(cmd);
+    ck(rc == 1 && has("rc=EUTF8") && has("bad_offset=9"), "bad_utf8");
+    unlink(tmp);
+
+    rc = run("sh ./unisacc.com tools/docslice-dump.cx 2>/dev/null");
+    ck(rc == 2, "usage");
+
+    printf("CHECK_DOCSLICE_DUMP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

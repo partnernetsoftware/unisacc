@@ -109,7 +109,36 @@ static void bad(const char *body, const char *why, const char *name) {
     "hang) if [ \"$3\" = write ]; then echo half > \"$1/$2.out\"; fi; sleep 6; exit 0;;\n" \
     "esac\nexit 3\n"
 
-int main(void) {
+static int incremental_check(void){
+    if(cx_fmt(dir,sizeof dir,"%s/derive-incremental-XXXXXX",sy_tmpdir())||!mkdtemp(dir))return 2;
+    cx_fmt(mf,sizeof mf,"%s/derive.tsv",dir);
+    static const char gen[]="int main(int c,char**v){if(c!=4)return 2;char p[1000];size_t n=0,m=0;snprintf(p,sizeof p,\"%s/in-%s\",v[1],v[2]);char*b=cx_read(p,&n);if(!b)return 2;snprintf(p,sizeof p,\"%s/%s.out\",v[1],v[2]);if(!strcmp(v[3],\"write\"))return cx_write(p,b,n)?2:0;char*o=cx_read(p,&m);return !o||n!=m||memcmp(b,o,n)?1:0;}\n";
+    put("cache-gen.cx",gen);put("version","compiler-v1\n");
+    size_t rn=0;char*registry=cx_read("exec/facts/derive.tsv",&rn);if(!registry)return 2;
+    char names[64][64];int count=0;static char facts[18000];long fl=0;char line[1800];
+    cx_fmt(line,sizeof line,"*\t%s/version\t-\t-\n",dir);if(mm_copy(facts,sizeof facts,line,strlen(line)+1))return 2;fl=strlen(line);m_begin();
+    for(char*p=registry;*p;){char*e=strchr(p,'\n');if(e)*e=0;if(*p&&*p!='#'){char*t=strchr(p,'\t');if(!t||t-p>=64||count==64||mm_copy(names[count],sizeof names[count],p,t-p))return 2;names[count][t-p]=0;char in[200];cx_fmt(in,sizeof in,"in-%s",names[count]);put(in,"original\n");
+        cx_fmt(line,sizeof line,"%s\t%s/cache-gen.cx\tsh ./unisacc.com %s/cache-gen.cx -- %s %s check\tsh ./unisacc.com %s/cache-gen.cx -- %s %s write\t%s/%s.out\t%s/in-%s\t1\t5\n",names[count],dir,dir,dir,names[count],dir,dir,names[count],dir,names[count],dir,names[count]);long n=strlen(line);if(mlen+n>=(long)sizeof mbuf||mm_copy(mbuf+mlen,sizeof mbuf-mlen,line,n+1))return 2;mlen+=n;
+        cx_fmt(line,sizeof line,"%s\t-\t-\t-\n",names[count]);n=strlen(line);if(fl+n>=(long)sizeof facts||mm_copy(facts+fl,sizeof facts-fl,line,n+1))return 2;fl+=n;count++;}if(!e)break;p=e+1;}
+    m_end();put("input-facts.tsv",facts);char args[1400];
+    cx_fmt(args,sizeof args,"--write --manifest %s --input-facts %s/input-facts.tsv --cache-dir %s/cache",mf,dir,dir);
+    int rc=run(args);ck(rc==0&&hasl(out,"\tWROTE\t"),"incremental-first-write");
+    rc=run(args);int hits=0;for(char*p=out;(p=strstr(p,"\tIDENTICAL\t"));p++)hits++;
+    ck(rc==0&&hits==count&&!hasl(out,"\tWROTE\t"),"incremental-all-consumers-current-identities");
+    char changed[200];cx_fmt(changed,sizeof changed,"in-%s",names[0]);put(changed,"changed\n");rc=run(args);hits=0;for(char*p=out;(p=strstr(p,"\tIDENTICAL\t"));p++)hits++;
+    ck(rc==0&&hits==count-1&&hasl(out,"\tWROTE\t"),"incremental-only-input-changed-row");
+    for(int i=0;i<count;i++){char output[200],label[180],check[1400];cx_fmt(output,sizeof output,"%s.out",names[i]);put(output,"corrupt\n");rc=run(args);hits=0;for(char*p=out;(p=strstr(p,"\tIDENTICAL\t"));p++)hits++;
+        cx_fmt(check,sizeof check,"--check --manifest %s",mf);int same=rc==0&&hits==count-1&&file_is(output,i==0?"changed\n":"original\n");rc=run(check);cx_fmt(label,sizeof label,"incremental-output-tamper-full-check-%s",names[i]);ck(same&&rc==0&&!hasl(out,"\tIDENTICAL\t"),label);
+    }
+    char firstout[200];cx_fmt(firstout,sizeof firstout,"%s.out",names[0]);rm(firstout);rc=run(args);ck(rc==0&&file_is(firstout,"changed\n")&&hasl(out,"\tWROTE\t"),"incremental-missing-output-rebuilt");
+    put("version","compiler-v2\n");rc=run(args);ck(rc==0&&!hasl(out,"\tIDENTICAL\t"),"incremental-common-runtime-version-invalidates-all");
+    put("cache-gen.cx","int main(void){return 2;}\n");rc=run(args);ck(rc==2&&!hasl(out,"\tIDENTICAL\t"),"incremental-generator-version-rejects-old-output");put("cache-gen.cx",gen);
+    char full[1600];cx_fmt(full,sizeof full,"%s --full",args);rc=run(full);int identical=rc==0&&!hasl(out,"\tIDENTICAL\t");for(int i=0;i<count;i++){char output[200];cx_fmt(output,sizeof output,"%s.out",names[i]);identical&=file_is(output,i==0?"changed\n":"original\n");}ck(identical,"incremental-full-write-byte-equivalence-all-consumers");
+    sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\tconsumers=%d\n",nok,failed,count);return failed?1:0;
+}
+int main(int argc,char**argv) {
+    if(argc==2&&!strcmp(argv[1],"--incremental"))return incremental_check();
+    if(argc!=1)return 2;
     int rc; long ms;
     if (cx_fmt(dir, sizeof dir, "%s/derive-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
     cx_fmt(mf, sizeof mf, "%s/derive.tsv", dir);

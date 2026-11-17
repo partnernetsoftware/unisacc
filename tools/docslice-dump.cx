@@ -1,0 +1,32 @@
+/* tools/docslice-dump.cx -- read-only probe: print the slice table of one Markdown file (cxlib.docslice).
+   Run: sh ./unisacc.com tools/docslice-dump.cx -- FILE
+   Output: header "id<TAB>sec<TAB>win<TAB>b0<TAB>b1<TAB>l0<TAB>l1<TAB>chars", one line per slice, last line
+   DOCSLICE_DUMP<TAB>file=FILE<TAB>slices=N<TAB>rc=NAME.  Exit 0 ok, 1 refused (EUTF8 etc.), 2 usage/read error. */
+#pragma unisa use cxlib.docslice
+#pragma unisa use mem.heap
+
+#define DD_MAX (64L * 1024 * 1024)
+
+int main(int argc, char **argv) {
+    if (argc != 2) { fprintf(stderr, "usage: docslice-dump.cx -- FILE\n"); return 2; }
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) { fprintf(stderr, "docslice-dump: cannot open %s\n", argv[1]); return 2; }
+    char *b = (char *)mm_alloc(DD_MAX + 1);
+    if (!b) { fclose(f); return 2; }
+    size_t n = fread(b, 1, DD_MAX + 1, f);
+    int err = ferror(f);
+    fclose(f);
+    if (err || n > (size_t)DD_MAX) { fprintf(stderr, "docslice-dump: read error or over %ld bytes\n", DD_MAX); mm_free(b); return 2; }
+    ds_out o;
+    int rc = ds_slice(argv[1], b, n, &o);
+    printf("id\tsec\twin\tb0\tb1\tl0\tl1\tchars\n");
+    for (long i = 0; i < o.n; i++) {
+        ds_slice_t *x = &o.v[i];
+        printf("%s\t%s\t%d\t%ld\t%ld\t%ld\t%ld\t%ld\n", x->id, x->sec, x->win, x->b0, x->b1, x->l0, x->l1, x->chars);
+    }
+    printf("DOCSLICE_DUMP\tfile=%s\tslices=%ld\trc=%s\n", argv[1], o.n, ds_errname(rc));
+    if (rc == 2) printf("bad_offset=%ld\n", o.bad);
+    ds_free(&o);
+    mm_free(b);
+    return rc ? 1 : 0;
+}
