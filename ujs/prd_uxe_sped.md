@@ -346,7 +346,8 @@ gpu-tri 不是 D1-D5;它是 G1 真 GPU 夹具,单三角 212B。
 |---|---|---|
 | **T1** | 有/部分(正视平面单纹理 nearest,无 mip/wrap/斜视):第 1 帧 nUpload=1、第 2 帧 nUpload=0 驻留、第 3 帧同 id 换内容;tamper=flipy/texel 必红。验收 `sh ./unisacc.com tools/check-uxe-tex16.cx --`、`sh ./unisacc.com tools/check-uxep-v4.cx --`、`sh ./unisacc.com tools/check-ujs-gpu-tri.cx --`。斜视 T1b | 不上 KTX2/mip;不改已发布 demo 页 |
 | **T2** | 有/部分:host_asset_read+ImageBitmap 直传 GL;readPixels 对 expected.rgba;alpha 0/64/128/255;miss/bad/tamper 必红。验收 `sh ./unisacc.com tools/check-uxe-tex2.cx --`。 | 不引用原作资源 |
-| **T3** | 有/部分:blendFuncSeparate(SRC_ALPHA,ONE_MINUS_SRC_ALPHA,ONE,ONE_MINUS_SRC_ALPHA);直通非预乘 out=src*a+dst*(1-a)。夹具 `uxe-tex3.html`。排序未做。 | 不上粒子编辑器 |
+| **T3** | 有/部分:点精灵加法 `SRC_ALPHA,ONE` 衰减 oracle 四探针像素中心 +-1。验收 `sh ./unisacc.com tools/check-uxe-points-proj.cx --`(真 oracle)。冒烟 `sh ./unisacc.com tools/check-uxe-points.cx --`(16 点交替两色,标冒烟)。已知限制:云内实例不排序;逐实例 scale 非逐点大小;alpha 直通精灵另欠 oracle。去衰减/半径减半/换色必红。 | 不上粒子编辑器 |
+
 
 | **M2** | 核驱动 fly 步进:persist yaw(或已有 persist)经 `run_step` 跨帧;`store_bytes`+`host_gpu_submit` 交一包;AUTO 仍只核金/表,不核截图 | 不扩几何;不改 D2-D5;不引进 three |
 | **M3** | G3 最小数学:核内建 `sqrt` **或** `sin`/`cos` 之一,带 `.ujs` 夹具非零/金值;或显式冻结「旋转永在 Host」并加拒绝用例 | 不同时四则全上;不改 renderer |
