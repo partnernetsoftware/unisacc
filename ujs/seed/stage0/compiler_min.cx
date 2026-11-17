@@ -4,7 +4,10 @@
  */
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
-        HOST_SCRATCH = 950000, STORE_WIN = 1015808, MEM_PAGES = 128, MAXSTRLIT = 255 };
+        HOST_SCRATCH = 950000, STORE_WIN = 1015808, MEM_PAGES = 128, MAXSTRLIT = 255,
+        PERSIST_BASE = 948976, PERSIST_STRIDE = 16 };
+enum { PERSIST_SPAN = 64 * PERSIST_STRIDE };
+enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PERSIST_BASE > HEAP0 && PERSIST_BASE > GBASE && PERSIST_BASE + PERSIST_SPAN <= STORE_WIN) };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 
 static uint8_t  g_heap[256 * 1024];
@@ -148,7 +151,7 @@ enum {
   T_SWITCH, T_CASE, T_DEFAULT, T_NULL, T_FOR, T_OF, T_FUNCTION,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT, T_ARROW, T_ELLIPSIS,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_PERSIST, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos, tok_start;
@@ -412,6 +415,7 @@ static void next(Lex *L) {
     else if (!strcmp(L->id,"for")) L->tok = T_FOR;
     else if (!strcmp(L->id,"of")) L->tok = T_OF;
     else if (!strcmp(L->id,"function")) L->tok = T_FUNCTION;
+    else if (L->id[0]=='p'&&L->id[1]=='e'&&L->id[2]=='r'&&L->id[3]=='s'&&L->id[4]=='i'&&L->id[5]=='s'&&L->id[6]=='t'&&L->id[7]==0) L->tok = T_PERSIST;
     else L->tok = T_ID;
     return;
   }
@@ -468,7 +472,7 @@ enum {
   OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST, OP_STRADD,
   OP_I2F, OP_I2F_R, OP_F2I,
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
-  OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES
+  OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET
 };
 enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
 typedef struct { uint8_t op; int64_t a; } Ins;
@@ -485,7 +489,7 @@ typedef struct {
 typedef struct {
   Ins code[MAXC]; int nc;
   char names[MAXL][MAXN]; uint8_t lty[MAXL]; uint8_t lety[MAXL]; int nl;
-  char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; int ng;
+  char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; uint8_t gpersist[MAXG]; int ng;
   uint8_t sdata[MAXSDATA]; uint32_t sn; /* string pool for OP_SCONST */
   int scratch; /* i32 temp for list/dict init, or -1 */
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
@@ -1212,6 +1216,25 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, li)) return 0;
     return 1;
   }
+  if (L->tok == T_PERSIST) {
+    next(L);
+    if (L->tok != T_LET) { P->err = "persist let"; return 0; }
+    next(L);
+    if (L->tok != T_ID) { P->err = "let name"; return 0; }
+    {
+      int g, tmp, ty;
+      g = glob(P, L->id, 1); if (g < 0) return 0;
+      P->gpersist[g] = 1;
+      next(L);
+      if (!expect(L, T_EQ, P, "expected =")) return 0;
+      ty = pexpr(L, P); if (!ty) return 0;
+      P->gty[g] = (uint8_t)ty;
+      tmp = ensure_lscratch(P); if (tmp < 0) return 0;
+      if (!emit(P, OP_PLET, (int64_t)g | ((int64_t)ty << 16) | ((int64_t)tmp << 32))) return 0;
+      return expect(L, T_SEMI, P, "expected ;");
+    }
+  }
+
   if (L->tok == T_LET && (!act || !strcmp(act, "let"))) {
     next(L);
     if (L->tok != T_ID) { P->err = "let name"; return 0; }
@@ -1644,13 +1667,21 @@ static int emit_ops(Buf *c, Prog *P) {
       uint32_t slot = (uint32_t)(ins->a & 0xffff);
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
-      uint32_t addr = GBASE + slot * 4u;
-      if (!bi32(c, (int32_t)addr)) return 0;
-      if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
-      if (ty == TY_F64) {
-        if (!wcall(c, 5)) return 0;
-      } else if (ty == TY_I64) {
-        if (!wcall(c, 3)) return 0;
+      if (slot < MAXG && P->gpersist[slot]) {
+        uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
+        if (!bi32(c, (int32_t)pa)) return 0;
+        if (!bu8(c, 0x29) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        break;
+      }
+      {
+        uint32_t addr = GBASE + slot * 4u;
+        if (!bi32(c, (int32_t)addr)) return 0;
+        if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+        if (ty == TY_F64) {
+          if (!wcall(c, 5)) return 0;
+        } else if (ty == TY_I64) {
+          if (!wcall(c, 3)) return 0;
+        }
       }
       break;
     }
@@ -1658,6 +1689,16 @@ static int emit_ops(Buf *c, Prog *P) {
       uint32_t slot = (uint32_t)(ins->a & 0xffff);
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
+      if (slot < MAXG && P->gpersist[slot]) {
+        int tmp = P->lscratch;
+        uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
+        if (tmp < 0) { tmp = ensure_lscratch(P); if (tmp < 0) return 0; }
+        if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
+        if (!bi32(c, (int32_t)pa)) return 0;
+        if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
+        if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        break;
+      }
       if (ty == TY_I64) {
         if (!wcall(c, 0)) return 0;
       } else if (ty == TY_F64) {
@@ -1720,6 +1761,28 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!wcall(c, 33)) return 0;
       if (!bu8(c, 0xad)) return 0;
       break;
+    case OP_PLET: {
+      uint32_t slot = (uint32_t)(ins->a & 0xffff);
+      uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
+      uint32_t tmp = (uint32_t)((ins->a >> 32) & 0xffff);
+      uint32_t base = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE;
+      if (!bu8(c, 0x21) || !bleu(c, tmp)) return 0;
+      if (!bi32(c, (int32_t)(base + 1u))) return 0;
+      if (!bu8(c, 0x2d) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bu8(c, 0x45)) return 0;
+      if (!bu8(c, 0x04) || !bu8(c, 0x40)) return 0;
+      if (!bi32(c, (int32_t)(base + 8u))) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, tmp)) return 0;
+      if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bi32(c, (int32_t)base)) return 0;
+      if (!bi32(c, (int32_t)ty)) return 0;
+      if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bi32(c, (int32_t)(base + 1u))) return 0;
+      if (!bi32(c, 1)) return 0;
+      if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bu8(c, 0x0b)) return 0;
+      break;
+    }
     default: return 0;
     }
   }
@@ -2620,5 +2683,6 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
   if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   g_need_gpu = 0;
+  (void)PERSIST_FIT;
   return 0;
 }
