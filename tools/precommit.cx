@@ -67,7 +67,25 @@ static char *gate_slurp(char **argv, long *n) {
     return b;
 }
 
+/* COMMIT_PHASE lines of each named gate (cur_gate) into UNISACC_COMMIT_PHASE_LOG, set by tools/commit-own.cx to
+   its own stdout (/proc/PID/fd/1): a job tail shows the gate in flight, a timeout leaves its begin without an end.
+   Unset (a plain git commit): nothing is written, the hook's own output is unchanged. */
+static void gate_phase(const char *name, int begin, long ms) {
+    const char *lp = sy_env("UNISACC_COMMIT_PHASE_LOG"); char ln[160]; int bad;
+    if (!lp || !lp[0] || !name) return;
+    bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
+                : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
+    if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+}
+static char *slurp_run(char **argv, long *n);
 static char *slurp(char **argv, long *n) {
+    const char *g = (plan_dir || from_run) ? 0 : cur_gate; long t = sy_now_ms(); char *r;
+    gate_phase(g, 1, 0);
+    r = slurp_run(argv, n);
+    gate_phase(g, 0, sy_now_ms() - t);
+    return r;
+}
+static char *slurp_run(char **argv, long *n) {
     int ofd, pid; long cap = 1 << 16, r, deadline; char *b;
     if (cur_gate && (plan_dir || from_run)) return gate_slurp(argv, n);
     b = mm_alloc(cap);
@@ -340,6 +358,43 @@ static int in_root(const char *path, long pl, const char *rt, long rl) {
     }
     return 0;
 }
+/* tlibapi: a touched tlib package whose source now gives another public-interface sha than the api_sha of
+   build/tlib-packages.tsv blocks the commit (the commit changed a public interface and did not carry the derived
+   layer-api/tlib-packages rows: cb95b01649 ff_ctx_lookup).  Cheap probe: tools/layer-api.cx --sha-only (one
+   -cx-interface per unit, no manifest, no closure check; about 1 s hot for tools.cxlib).  A body-only change
+   keeps the sha and passes.  Skipped in --plan/--from-run (no flow node yet) and when the tool is absent. */
+static int tlib_api_gate(const char *root, const char *cp, char pkgs[][64], int npkg) {
+    char lp[1200], *av[16], *rows; long rn, at; int i, k, blocked = 0;
+    if (plan_dir || from_run || npkg <= 0) return 0;
+    if (cx_fmt(lp, sizeof lp, "%s/tools/layer-api.cx", root)) return 0;
+    if (sy_exists(lp) != 1) {   /* a fixture work tree without tools: the checkout's own, as tlib_frozen_gate does */
+        if (sy_exists("./tools/layer-api.cx") != 1) return 0;
+        tx_copy(lp, sizeof lp, "tools/layer-api.cx", 18);
+    }
+    for (i = 0; i < npkg; i++) {
+        k = 0;
+        av[k++] = "sh"; av[k++] = (char *)cp; av[k++] = lp; av[k++] = "--"; av[k++] = "--sha-only";
+        av[k++] = "--pkg"; av[k++] = pkgs[i]; av[k++] = "--root"; av[k++] = (char *)root; av[k++] = "--product"; av[k++] = (char *)cp;
+        av[k] = 0;
+        cur_gate = "tlibapi"; slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0; cur_gate = 0;
+        if (!rows) { sy_eprintf("precommit: tools/layer-api.cx --sha-only %s did not run\n", pkgs[i]); blocked++; continue; }
+        if (incomplete(rows, rn, "API_SHA\t", "layer-api --sha-only")) { mm_free(rows); blocked++; continue; }
+        for (at = 0; at < rn; ) {
+            long le = tx_chr(rows + at, rn - at, '\n'), l = le < 0 ? rn - at : le, so, sl;
+            if (tx_prefix(rows + at, l, "API_SHA\t", 8) && !tx_field(rows + at, l, '\t', 2, &so, &sl) &&
+                sl == 7 && tx_same(rows + at + so, sl, "differs", 7)) {
+                sy_printf("TLIB_API_STALE\t%s\tthe commit changes a public interface of %s but build/tlib-packages.tsv api_sha (and build/layer-api/%s.tsv) still name the old one: %.*s\n",
+                          pkgs[i], pkgs[i], pkgs[i], (int)l, rows + at);
+                sy_eprintf("precommit: TLIB_API_STALE %s: recommit with --derive (sh ./unisacc.com tools/commit-own.cx -- --derive ...), or first run sh ./unisacc.com tools/derive.cx -- --write --only layer-api and take the derived tables into the commit\n", pkgs[i]);
+                blocked++;
+            }
+            at += l + 1;
+        }
+        mm_free(rows);
+    }
+    return blocked;
+}
+
 static int tlib_frozen_gate(const char *names, long sn) {
     const char *wt = sy_env("GIT_WORK_TREE"), *root = (wt && wt[0]) ? wt : ".";
     char tp[1200], fp[1200], cp[1200], pkgs[32][64], *av[40], *t, *rows;
@@ -402,6 +457,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
         at += l + 1;
     }
     mm_free(rows);
+    blocked += tlib_api_gate(root, cp, pkgs, npkg);
     return blocked;
 }
 

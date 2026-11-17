@@ -68,7 +68,9 @@ typedef struct ff_out {
     char sha[65];      /* read: sha256 of the whole file; write/edit: sha256 of the new file */
     long lines;        /* total lines of the (new) file */
     long count;        /* edit: replacements made */
-    int ccnote;        /* .cx compile guard: 0 checked or n/a, 1 skipped (compile_check=0), 2 undecided (timeout) */
+    int ccnote;        /* .cx compile guard: 0 checked or n/a, 1 skipped (compile_check=0), 2 undecided (timeout),
+                          3 compile context: SKIPPED-compile (fragment or no command), 4 compile context: declared command passed */
+    char ccmsg[640];   /* ccnote 3/4: the line to print ("SKIPPED-compile PATH KIND REASON" or "COMPILE-CONTEXT ok ...") */
 } ff_out;
 
 #define FF_MAX_FILE (256L * 1024 * 1024)
@@ -619,15 +621,57 @@ static int ff_cc_mirror(const char *dir, const char *sh, const char *keep) {
     return 0;
 }
 
+/* Compile context table ROOT/build/devsvc-compile-context.tsv (columns: path kind host command reason registrar date;
+   kind embedded-in or fragment; command "-" means identity only). A listed .cx is not compiled on its own:
+   its declared command runs in the shadow tree instead ("$1" is a fresh scratch directory), or, with no command,
+   SKIPPED-compile is reported. Exact path match only. Returns 1 listed (fields copied), 0 not listed, -1 bad table row. */
+static int ff_ctx_field(const unsigned char *b, long s, long e, char *dst, long cap) {
+    long k = 0;
+    while (s < e && k < cap - 1) dst[k++] = (char)b[s++];
+    dst[k] = 0;
+    return s < e ? -1 : 0;
+}
+int ff_ctx_lookup(const char *root, const char *rel, char *kind, char *cmd, long ccap, char *reason, long rcap) {
+    char tp[FF_PATH];
+    unsigned char *b = 0;
+    int64_t bn = 0;
+    long i = 0, ls, le, f[8], nf, j;
+    int found = 0;
+    tp[0] = 0; ff_cat(tp, sizeof tp, root); ff_cat(tp, sizeof tp, "/build/devsvc-compile-context.tsv");
+    if (sy_read_file(tp, &b, &bn, 1 << 20) != 0 || !b) return 0;
+    while (i < (long)bn && !found) {
+        ls = i;
+        while (i < (long)bn && b[i] != '\n') i++;
+        le = i; i++;
+        if (le == ls || b[ls] == '#') continue;
+        nf = 0; f[nf++] = ls;
+        for (j = ls; j < le && nf < 8; j++) if (b[j] == '\t') f[nf++] = j + 1;
+        if (nf < 7) continue;
+        {
+            long pl = f[1] - 1 - f[0], rlen = tx_len(rel, FF_PATH), q;
+            if (pl != rlen) continue;
+            for (q = 0; q < pl && b[f[0] + q] == (unsigned char)rel[q]; q++) { }
+            if (q != pl) continue;
+        }
+        if (ff_ctx_field(b, f[1], f[2] - 1, kind, 32) || ff_ctx_field(b, f[3], f[4] - 1, cmd, ccap) || ff_ctx_field(b, f[4], f[5] - 1, reason, rcap)) found = -1;
+        else if (!tx_eqz(kind, "embedded-in") && !tx_eqz(kind, "fragment")) found = -1;
+        else if (!reason[0] || tx_eqz(reason, "-") || !cmd[0]) found = -1;
+        else found = 1;
+    }
+    mm_free(b);
+    return found;
+}
+
 static int ff_ccheck(const char *args, const char *root, const char *target, const char *buf, long n, ff_out *o) {
     char sh[FF_PATH], rd[FF_PATH], sd[FF_PATH], comp[256], prod[FF_PATH], logp[FF_PATH], outp[FF_PATH];
     const char *rel;
     long rl = tx_len(root, FF_PATH), i, k;
-    int on = 1, fd, r, bad = 0;
+    int on = 1, fd, r, bad = 0, ctx = 0;
     sy_spawn_t sp;
     sy_exit_t st;
-    char *argv[7];
+    char *argv[7], ckind[32], ccmd[1024], creason[400], scratch[FF_PATH];
     o->ccnote = 0;
+    scratch[0] = 0;
     {
         char *s = 0;
         int h = ff_arg(args, "compile_check", &s, 0);
@@ -639,6 +683,15 @@ static int ff_ccheck(const char *args, const char *root, const char *target, con
     while (rl > 1 && root[rl - 1] == '/') rl--;
     if (tx_len(target, FF_PATH) <= rl || target[rl] != '/') return 0;
     rel = target + rl + 1;
+    ctx = ff_ctx_lookup(root, rel, ckind, ccmd, sizeof ccmd, creason, sizeof creason);
+    if (ctx < 0) return ff_fail(o, "ECTX", "refused-context: bad row in build/devsvc-compile-context.tsv for", rel);
+    if (ctx == 1 && tx_eqz(ccmd, "-")) {
+        o->ccnote = 3; o->ccmsg[0] = 0;
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "SKIPPED-compile\t"); ff_cat(o->ccmsg, sizeof o->ccmsg, rel);
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "\t"); ff_cat(o->ccmsg, sizeof o->ccmsg, ckind);
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "\t"); ff_cat(o->ccmsg, sizeof o->ccmsg, creason);
+        return 0;
+    }
     prod[0] = 0; ff_cat(prod, sizeof prod, root); ff_cat(prod, sizeof prod, "/unisacc.com");
     {
         sy_stat_t ps;
@@ -669,12 +722,24 @@ static int ff_ccheck(const char *args, const char *root, const char *target, con
     fd = sy_open_new(logp, 0644);
     if (fd < 0) { o->ccnote = 2; goto out; }
     argv[0] = "sh"; argv[1] = prod; argv[2] = "-c"; argv[3] = (char *)rel; argv[4] = "-o"; argv[5] = outp; argv[6] = 0;
+    if (ctx == 1) {   /* declared acceptance command instead of a standalone compile; "$1" is a fresh scratch dir */
+        if (sy_mkdtemp(sy_tmpdir(), "ff-ctx-", scratch, FF_PATH) != 0) { sy_close(fd); o->ccnote = 2; goto out; }
+        argv[0] = "sh"; argv[1] = "-c"; argv[2] = ccmd; argv[3] = "devsvc-ctx"; argv[4] = scratch; argv[5] = 0;
+    }
     sy_spawn_init(&sp);
     sp.argv = argv; sp.cwd = sh; sp.in_fd = SY_STDIO_NULL; sp.out_fd = fd; sp.err_fd = fd;
-    sp.pgroup = -1; sp.deadline_ms = 10000;
+    sp.pgroup = -1; sp.deadline_ms = ctx == 1 ? 55000 : 10000;
     r = sy_proc_run(&sp, &st);
     sy_close(fd);
+    if (scratch[0]) sy_remove_all(scratch);
     if (r < 0 || st.timed_out) { o->ccnote = 2; goto out; }
+    if (ctx == 1 && st.exited && st.code == 0) {
+        o->ccnote = 4; o->ccmsg[0] = 0;
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "COMPILE-CONTEXT\tok\t"); ff_cat(o->ccmsg, sizeof o->ccmsg, rel);
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "\t"); ff_cat(o->ccmsg, sizeof o->ccmsg, ckind);
+        ff_cat(o->ccmsg, sizeof o->ccmsg, "\tdeclared-command-passed");
+        goto out;
+    }
     if (!st.exited || st.code != 0) {
         unsigned char *lb = 0;
         int64_t ln = 0;
@@ -687,7 +752,7 @@ static int ff_ccheck(const char *args, const char *root, const char *target, con
         }
         why[w] = 0;
         if (lb) mm_free(lb);
-        ff_fail(o, "ECOMPILE", "refused-compile: the new content does not compile:", rel);
+        ff_fail(o, "ECOMPILE", ctx == 1 ? "refused-compile: the declared compile-context command failed for:" : "refused-compile: the new content does not compile:", rel);
         if (o->buf) mm_free(o->buf);
         o->buf = (char *)mm_alloc(w + 1);
         if (o->buf) { for (i = 0; i < w; i++) o->buf[i] = why[i]; o->buf[w] = 0; o->n = w; }

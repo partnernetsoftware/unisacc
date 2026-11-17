@@ -15,7 +15,7 @@
 | **0.0.5** | ✓ **host1 跑面**（编→验→跑；`--run` + `run-host`） | construct 全迁；Draft；把 C44 `-run` 加速算进 UJS |
 | **0.0.6** | ✓ **日用一条链**（`FILE.ujs --run`）。见 [`v0.0.6.md`](v0.0.6.md) | construct 真迁；Paper B 改口；公开 |
 | **0.0.7** | ✓ **lex 扫描器切片**（`method_construct`；不是 IntNet，不是其余九网）。见 [`v0.0.7.md`](v0.0.7.md) | 其余九网；IntNet；Paper B 改口；公开 |
-| **0.0.8+** | 下一张网或解析切片；跨机 APE 收据另计 | 未授权公开 |
+| **0.0.8** | host1 步进诚实：文档合同+共享 `host1-runtime.js`；**不**升 `ujs.com` 版号。见 [`v0.0.8.md`](v0.0.8.md) | 改 compiler_min 让 let 跨帧；IntNet；公开 |
 
 ## 退出 0.0.x（暂定）
 

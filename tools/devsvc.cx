@@ -455,11 +455,20 @@ int main(int argc, char **argv) {
     if (argc <= a || argc - a > 250) { fprintf(stderr, "usage: devsvc [--dev] <subcommand...>   (pinned to git HEAD unless --dev; subcommands: see tools/devsvc-core.cx header)\n"); return 2; }
     int fromhead = 0, wcfb = 0, memo = 0;
     {   /* 按当前 git 顶层取根(版本工作树一个树一个实例);能不起 git 读出顶层就直接用(fastgit),否则问 git;不在 git 内时退回 cwd */
-        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl; int fr = fastgit(); const char *ovt = getenv("DEVSVC_REPO_TABLE");
+        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl; int fr = fastgit(); const char *ovt;
         if (sy_cwd(root, sizeof root) < 0) return 3;
         if (fr >= 0) F(root, sizeof root, "%s", fg_top);
         else if (runcap(gv, root, real, sizeof real) == 0 && real[0] == '/') { nl = strchr(real, '\n'); if (nl) *nl = 0; F(root, sizeof root, "%s", real); }
         real[0] = 0;
+        {   /* 嵌套继承规则(plans/devsvc.md 第 3 节):外层 devsvc 作业经 UNISACC_FLOW_ROOT_JOB 标记它导出的根;本次根不在该根下(临时根、夹具根)
+               就丢弃外层的配置钉与执行体(DEVSVC_REPO_TABLE、DEVSVC_REPO_TABLE_PIN、DEVSVC_SELF_BIN)及等于标记的继承 UNISACC_FLOW_ROOT,按本根重新解析;
+               在其下(同仓嵌套)继承照旧。随后把标记改记本根,核心导出 UNISACC_FLOW_ROOT 时再按同一规则校正 */
+            const char *j = getenv("UNISACC_FLOW_ROOT_JOB"), *ofr = getenv("UNISACC_FLOW_ROOT"); long jn = j ? (long)strlen(j) : 0;
+            if (jn > 0 && !(!strncmp(root, j, jn) && (root[jn] == 0 || root[jn] == '/'))) {
+                if (ofr && !strcmp(ofr, j)) unsetenv("UNISACC_FLOW_ROOT");
+                unsetenv("DEVSVC_REPO_TABLE"); unsetenv("DEVSVC_REPO_TABLE_PIN"); unsetenv("DEVSVC_SELF_BIN"); unsetenv("UNISACC_FLOW_ROOT_JOB");
+            } }
+        ovt = getenv("DEVSVC_REPO_TABLE");
         if (fr == 0 && !dev) {   /* 提交号已知:本次一律钉在该提交上;配置表未被环境覆盖时先查备忘 */
             F(hd, sizeof hd, "%s", fg_commit);
             if (!(ovt && *ovt) && memo_load(trees, sizeof trees) == 0) { memo = 1; fromhead = 1; }

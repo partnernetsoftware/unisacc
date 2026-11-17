@@ -517,6 +517,44 @@ done:
 
 /* ---- aggregation (pure read: no file is created, changed or removed) ---------------------------- */
 typedef struct {int pass,fail,unknown,refused,attempts;char last,reason[200];} as_state;
+/* Reason classes for a non-PASS batch, reporting only: never feeds a verdict.  Evidence is the receipt
+   (bound_rc, child_status, verdict reason) and the captured ID.stdout / ID.stderr beside it; anything that
+   does not match a rule is UNCLASSIFIED.  Byte comparison only, no string search on file contents. */
+static const char *const as_reason_names[]={"ASSERT","INNER_TIMEOUT","OUTER_KILL","NO_MATERIAL","ENV","UNCLASSIFIED"};
+enum {AS_RC_ASSERT,AS_RC_INNER,AS_RC_OUTER,AS_RC_MATERIAL,AS_RC_ENV,AS_RC_UNCLASSIFIED,AS_RC_N};
+static int as_reason_classes; /* set by an aggregate that fills class-prefixed reasons; enables the REASON_CLASS row */
+void as_reason_classes_on(void){as_reason_classes=1;}
+int as_hasb(const char *s,size_t n,const char *k){size_t m=strlen(k);if(!s||!m||m>n)return 0;for(size_t i=0;i+m<=n;i++){size_t j=0;while(j<m&&s[i+j]==k[j])j++;if(j==m)return 1;}return 0;}
+static int as_line_pfx(const char *s,size_t n,const char *k){size_t m=strlen(k),at=0;if(!s)return 0;while(at<n){size_t j=0;while(j<m&&at+j<n&&s[at+j]==k[j])j++;if(j==m)return 1;while(at<n&&s[at]!='\n')at++;at++;}return 0;}
+static long long as_rec_num(const char *s,size_t n,const char *key){size_t m=strlen(key),at=0;if(!s)return -1;while(at<n){size_t j=0;while(j<m&&at+j<n&&s[at+j]==key[j])j++;if(j==m&&at+m<n&&s[at+m]=='\t'){long long v=0;size_t q=at+m+1;int any=0;while(q<n&&s[q]>='0'&&s[q]<='9'){v=v*10+(s[q]-'0');q++;any=1;}return any?v:-1;}while(at<n&&s[at]!='\n')at++;at++;}return -1;}
+int as_reason_class_text(const char *out,size_t on,const char *err,size_t en,long long bound_rc,long long child_status,const char *vreason){
+ int material=as_hasb(out,on,"no-producer")||as_hasb(err,en,"no-producer")||as_hasb(out,on,"verified material required")||as_hasb(err,en,"verified material required")||as_hasb(out,on,"REFUSE\tmaterial")||as_hasb(err,en,"REFUSE\tmaterial");
+ if(material)return AS_RC_MATERIAL;
+ int env=as_hasb(out,on,"PREPARE\tFAIL")||as_hasb(err,en,"PREPARE\tFAIL")||as_hasb(out,on,"ENV_FAIL")||as_hasb(err,en,"ENV_FAIL")||as_hasb(err,en,"prepare-materials failed");
+ if(env)return AS_RC_ENV;
+ int assert_line=as_line_pfx(out,on,"FAIL\t")||as_line_pfx(out,on,"FAIL ");
+ int sig=child_status>0&&(child_status&0x7f)!=0&&(child_status&0x7f)!=0x7f;
+ int code=child_status>=0&&!sig?(int)((child_status>>8)&0xff):-1;
+ int outer=bound_rc==142||bound_rc==124||bound_rc==137||bound_rc==143||sig||code==124||code==137||code==143||as_hasb(out,on,"\trc=-9\t")||as_hasb(out,on,"\trc=124\t")||as_hasb(out,on,"\trc=137\t")||as_hasb(out,on,"\trc=143\t")||(vreason&&(!strcmp(vreason,"watchdog-deadline")||!strcmp(vreason,"child-signal")||!strcmp(vreason,"run-batch-batch-timeout")||!strcmp(vreason,"run-batch-idle-timeout")));
+ int inner=as_hasb(err,en,"subprocess.TimeoutExpired")||as_hasb(out,on,"subprocess.TimeoutExpired")||as_hasb(err,en,"bound: timeout")||as_hasb(out,on,"bound: timeout")||as_hasb(out,on,"\ttimeout=1")||as_hasb(out,on,"TIMEOUT\t")||as_hasb(err,en,"TIMEOUT\t");
+ if(assert_line&&!inner)return AS_RC_ASSERT;
+ if(outer&&!assert_line)return AS_RC_OUTER;
+ if(inner)return AS_RC_INNER;
+ if(assert_line)return AS_RC_ASSERT;
+ return AS_RC_UNCLASSIFIED;
+}
+/* DIR holds ID.receipt, ID.stdout, ID.stderr.  Returns the class index; unreadable evidence is UNCLASSIFIED. */
+int as_reason_class_dir(const char *dir,const char *id,const char **vreason_out,char *vreason_buf,size_t vcap){
+ char p[4400],why[600];size_t rn=0,on=0,en=0;
+ if(snprintf(p,sizeof p,"%s/%s.receipt",dir,id)>=(int)sizeof p)return AS_RC_UNCLASSIFIED;char *rec=as_read(p,0,&rn,why,sizeof why);
+ if(snprintf(p,sizeof p,"%s/%s.stdout",dir,id)>=(int)sizeof p){free(rec);return AS_RC_UNCLASSIFIED;}char *out=as_read(p,0,&on,why,sizeof why);
+ if(snprintf(p,sizeof p,"%s/%s.stderr",dir,id)>=(int)sizeof p){free(rec);free(out);return AS_RC_UNCLASSIFIED;}char *err=as_read(p,0,&en,why,sizeof why);
+ if(vreason_buf&&vcap)vreason_buf[0]=0;
+ if(rec&&vreason_buf){size_t at=0;while(at<rn){if(rn-at>7&&!memcmp(rec+at,"reason\t",7)){size_t q=at+7,k=0;while(q<rn&&rec[q]!='\n'&&k+1<vcap)vreason_buf[k++]=rec[q++];vreason_buf[k]=0;break;}while(at<rn&&rec[at]!='\n')at++;at++;}}
+ int cls=!rec?AS_RC_UNCLASSIFIED:as_reason_class_text(out,out?on:0,err,err?en:0,as_rec_num(rec,rn,"bound_rc"),as_rec_num(rec,rn,"child_status"),vreason_buf&&vreason_buf[0]?vreason_buf:0);
+ if(vreason_out)*vreason_out=vreason_buf;free(rec);free(out);free(err);return cls;
+}
+const char *as_reason_name(int cls){return cls>=0&&cls<AS_RC_N?as_reason_names[cls]:"UNCLASSIFIED";}
 static void as_say_refuse(const char *name,const char *detail){printf("REFUSE\t%s\t%s\n",name,detail?detail:"-");}
 static const char *as_rec_value(char **f,int nf,const char *key){return nf==2&&!strcmp(f[0],key)?f[1]:0;}
 /* Split receipt extras: the attempt nonce, the start snapshot (re-hashed) and the RUN block SHA, then
@@ -611,10 +649,12 @@ void as_f4c_summary(as_registry reg,as_manifest m,as_state *st){
 }
 /* Shared complete-coverage predicate, also used by same-run shards. */
 int as_report_states(as_registry reg,as_manifest m,as_state *st){
- int implemented=0,npass=0,nfail=0,nunknown=0,nmissing=0,nrefused=0,nna=0;
+ int implemented=0,npass=0,nfail=0,nunknown=0,nmissing=0,nrefused=0,nna=0,as_rc_count[AS_RC_N]={0};
  for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];as_state *s=&st[i];/* a batch this host cannot run is not part of the scope: it is named and skipped, so it can neither pass nor go missing */if(!as_wave_platform_allowed(b->platform)){nna++;printf("BATCH\t%s\tNOT_APPLICABLE\tplatform=%s\thost_scope=lnx/x86_64\n",b->id,b->platform);continue;}if(strcmp(b->impl,"IMPLEMENTED"))continue;char material[128];if(as_f4c_na(b,&m,s,material)){nna++;printf("BATCH\t%s\tNOT_APPLICABLE\treason=no-candidate-material\tmaterial=%s\tscope=daily-no-candidate\n",b->id,material);continue;}implemented++;const char *state;
   if(s->refused){state="REFUSED";nrefused++;}else if(s->fail){state="FAIL";nfail++;}else if(s->last=='P'){state="PASS";npass++;snprintf(s->reason,sizeof s->reason,"batch-pass");}else if(s->attempts){state="UNKNOWN";nunknown++;}else{state="MISSING";nmissing++;snprintf(s->reason,sizeof s->reason,"no-receipt-in-session");}
-  printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",b->id,state,s->attempts,s->unknown,s->reason);}
+  printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",b->id,state,s->attempts,s->unknown,s->reason);
+  if(as_reason_classes&&strcmp(state,"PASS")&&strcmp(state,"MISSING")){int c=AS_RC_UNCLASSIFIED;for(int k=0;k<AS_RC_N;k++){size_t z=strlen(as_reason_names[k]);if(!strncmp(s->reason,as_reason_names[k],z)&&(s->reason[z]=='/'||!s->reason[z])){c=k;break;}}as_rc_count[c]++;}}
+ if(as_reason_classes){printf("REASON_CLASS");for(int k=0;k<AS_RC_N;k++)printf("\t%s=%d",as_reason_names[k],as_rc_count[k]);printf("\tmissing=%d\n",nmissing);}
  int satisfied=0,unsatisfied=0,unresolved=0,declared=0;
  for(int c=0;c<reg.nc;c++){as_cov *cv=&reg.c[c];if(tx_eqz(cv->impl,"DECLARED_DEPENDENCY")){declared++;continue;}int implemented_row=!strcmp(cv->impl,"IMPLEMENTED")||!strcmp(cv->impl,"IMPLEMENTED_SEPARATE_BATCH");np_buf blocking={0,0,0};int planned=0,mapped=0,material_na=0;
   for(int i=0;i<reg.nb;i++){if(!as_inlist(reg.b[i].coverage,cv->id))continue;if(!as_wave_platform_allowed(reg.b[i].platform))continue;/* out of scope on this host: not a blocker */char material[128];if(!strcmp(reg.b[i].impl,"IMPLEMENTED")&&as_f4c_na(&reg.b[i],&m,&st[i],material)){material_na++;continue;}mapped++;if(strcmp(reg.b[i].impl,"IMPLEMENTED")){planned++;continue;}as_state *s=&st[i];int ok=s->last=='P'&&!s->fail&&!s->refused;if(!ok){if(blocking.n)np_puts(&blocking,",");np_puts(&blocking,reg.b[i].id);}}

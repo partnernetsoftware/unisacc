@@ -52,11 +52,11 @@ IC 表 `.c` 生成物已迁 archive。新权重经 `.cx` 路径（续迁）；�
 门禁：`./tests/ujs2wasm_compiler.sh`。
 
 ## 4　实践 `practice/`
-
 | 位置 | 作用 |
 |---|---|
-| `practice/core/` | `wasm_run` · path-A `ujs_full` · npm 入口 |
-| `practice/uxe/` | Host ABI · demo/ship · Pages |
-| `practice/web/` | playground / Three 对照 |
+| [`practice/core/`](practice/core/) | `wasm_run` · path-A `ujs_full` · npm 入口 |
+| [`practice/uxe/`](practice/uxe/) | Host ABI · demo/ship · Pages |
+| [`practice/uxe/demo/host1-runtime.js`](practice/uxe/demo/host1-runtime.js) | host1 金启动器；**不是**每帧核 |
+| [`practice/web/`](practice/web/) | playground / Three 对照 |
 
 门禁：`./tests/ujs.sh` · `uxe_ship_js` · UXE 另门。

@@ -1,0 +1,150 @@
+/* tools/check-precommit-tlibapi.cx -- the precommit tlibapi gate and its COMMIT_PHASE lines, on a fixture repo.
+ *
+ *   sh ./unisacc.com tools/check-precommit-tlibapi.cx
+ *
+ * Run from the repository root (./unisacc.com, tools/precommit.cx).  A fixture git repo under the temp dir
+ * registers one frozen tlib package fx.mini (unit fx/mini.cx) in its build/tlib-packages.tsv; its tools/ is
+ * empty, so precommit takes layer-api.cx and check-tlib-frozen.cx from this checkout and finds no ratchets.cx
+ * (the ratchet gate reports absent).  tools/precommit.cx runs with GIT_DIR/GIT_WORK_TREE on the fixture:
+ *   stale      a new public function without the derived rows: blocked, TLIB_API_STALE and the --derive fix text;
+ *   derived    the same change with layer-api --write and the new api_sha in the table: not blocked;
+ *   body       a body-only change of a committed unit: not blocked;
+ *   phase      UNISACC_COMMIT_PHASE_LOG receives COMMIT_PHASE begin and end lines for the tlibapi gate.
+ * Prints PASS/FAIL per case and CHECK_PRECOMMIT_TLIBAPI<TAB>failed=N; exit 1 when N > 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failed;
+static char fx[1200], cwd[4096];
+
+static void verdict(const char *name, int ok, const char *why) {
+    sy_printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, ok ? "-" : why);
+    if (!ok) failed++;
+}
+
+/* rc of argv (stdout and stderr merged into *O, *N), bounded 50 s */
+static int run(char **argv, char **o, size_t *n) {
+    char *av[24]; int k = 0, i;
+    av[k++] = "sh"; av[k++] = "-c"; av[k++] = "exec \"$@\" 2>&1"; av[k++] = "sh";
+    for (i = 0; argv[i] && k < 23; i++) av[k++] = argv[i];
+    av[k] = 0;
+    *o = 0; *n = 0;
+    return cx_runv_timeout(av, 50, o, n);
+}
+
+/* 1 when some line of B starts with P */
+static int has_line(const char *b, long n, const char *p) {
+    long i = 0, e, pl = tx_len(p, 4096);
+    while (b && i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (tx_prefix(b + i, e - i, p, pl)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static int put(const char *rel, const char *text) {
+    char p[1400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return 1;
+    return cx_write(p, text, (size_t)tx_len(text, 1 << 20)) != 0;
+}
+
+static int git(const char *a1, const char *a2, const char *a3) {
+    char *av[12], *o; size_t n; int k = 0, rc;
+    av[k++] = "git"; av[k++] = "-C"; av[k++] = fx; av[k++] = "-c"; av[k++] = "user.email=fx@fx"; av[k++] = "-c"; av[k++] = "user.name=fx";
+    av[k++] = (char *)a1; if (a2) av[k++] = (char *)a2; if (a3) av[k++] = (char *)a3; av[k] = 0;
+    rc = run(av, &o, &n); mm_free(o); return rc;
+}
+
+static int table(const char *sha) {
+    char row[600];
+    if (cx_fmt(row, sizeof row, "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\topaque\tfrozen\n"
+               "fx.mini\t0.1.0\t%s\tfx/mini.cx\t-\t-\tfixture\t-\t0000000000000000000000000000000000000000000000000000000000000000\n", sha)) return 1;
+    return put("build/tlib-packages.tsv", row);
+}
+
+/* layer-api --write on the fixture, then the table row with the api_sha it printed. 0 or 1 */
+static int derive(void) {
+    char *av[10], *o, sha[65]; size_t n; long i = 0, e, so, sl; int rc;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/layer-api.cx"; av[3] = "--"; av[4] = "--write";
+    av[5] = "--root"; av[6] = fx; av[7] = 0;
+    rc = run(av, &o, &n);
+    sha[0] = 0;
+    while (o && i < (long)n) {
+        e = i; while (e < (long)n && o[e] != '\n') e++;
+        if (tx_prefix(o + i, e - i, "LAYER_API\t", 10) && !tx_field(o + i, e - i, '\t', 5, &so, &sl) && sl == 72 &&
+            tx_prefix(o + i + so, sl, "api_sha=", 8)) tx_copy(sha, sizeof sha, o + i + so + 8, 64);
+        i = e + 1;
+    }
+    mm_free(o);
+    if (rc || !sha[0]) { sy_printf("NOTE\tlayer-api --write rc=%d sha=%s\n", rc, sha[0] ? sha : "-"); return 1; }
+    return table(sha);
+}
+
+static int precommit(char **o, size_t *n, const char *phase_log) {
+    char *av[4], gd[1300];
+    if (cx_fmt(gd, sizeof gd, "%s/.git", fx)) return -1;
+    sy_setenv("GIT_DIR", gd, 1); sy_setenv("GIT_WORK_TREE", fx, 1);
+    if (phase_log) sy_setenv("UNISACC_COMMIT_PHASE_LOG", phase_log, 1); else sy_unsetenv("UNISACC_COMMIT_PHASE_LOG");
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/precommit.cx"; av[3] = 0;
+    {   int rc = run(av, o, n);
+        sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("UNISACC_COMMIT_PHASE_LOG");
+        return rc; }
+}
+
+static int link_tool(const char *rel) {
+    char t[4400], l[1400];
+    if (cx_fmt(t, sizeof t, "%s/%s", cwd, rel) || cx_fmt(l, sizeof l, "%s/%s", fx, rel)) return 1;
+    return sy_symlink(t, l) != 0;
+}
+
+int main(void) {
+    char *o, d[1300], ph[1300], *pb; size_t n, pn = 0; int rc, setup = 0;
+    if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_mkdtemp(sy_tmpdir(), "chk-tlibapi-", fx, sizeof fx)) { sy_printf("CHECK_PRECOMMIT_TLIBAPI\tfailed=1\n"); return 1; }
+    if (cx_fmt(d, sizeof d, "%s/fx", fx) || sy_mkdir(d, 0755)) setup = 1;
+    if (!setup && (cx_fmt(d, sizeof d, "%s/build", fx) || sy_mkdir(d, 0755))) setup = 1;
+    if (!setup && (cx_fmt(d, sizeof d, "%s/build/layer-api", fx) || sy_mkdir(d, 0755))) setup = 1;
+    if (!setup && (cx_fmt(d, sizeof d, "%s/tools", fx) || sy_mkdir(d, 0755))) setup = 1;
+    if (!setup) setup = link_tool("unisacc.com");
+    if (!setup) setup = put("fx/mini.cx", "int mini_a(int x) { return x + 1; }\n") ||
+                         table("0000000000000000000000000000000000000000000000000000000000000000") || derive();
+    if (!setup) setup = git("init", "-q", 0) || git("add", "-A", 0) || git("commit", "-qm", "base");
+    verdict("setup", !setup, "fixture repo, layer-api --write or git failed");
+    if (setup) { sy_remove_all(fx); sy_printf("CHECK_PRECOMMIT_TLIBAPI\tfailed=%d\n", failed); return 1; }
+
+    put("fx/mini.cx", "int mini_a(int x) { return x + 1; }\nint mini_b(void) { return 2; }\n");
+    git("add", "fx/mini.cx", 0);
+    if (cx_fmt(ph, sizeof ph, "%s/phase.log", fx)) ph[0] = 0;
+    rc = precommit(&o, &n, ph[0] ? ph : 0);
+    verdict("stale", rc != 0 && has_line(o, (long)n, "TLIB_API_STALE\tfx.mini\t") &&
+            has_line(o, (long)n, "precommit: TLIB_API_STALE fx.mini: recommit with --derive"), "not blocked or no TLIB_API_STALE/--derive text");
+    if (rc == 0 || !has_line(o, (long)n, "TLIB_API_STALE\t") ) sy_printf("%.*s\n", (int)(n > 1500 ? 1500 : n), o ? o : "");
+    mm_free(o);
+    pb = ph[0] ? (char *)cx_read(ph, &pn) : 0;
+    verdict("phase", has_line(pb, (long)pn, "COMMIT_PHASE\tname=tlibapi\tstate=begin") &&
+            has_line(pb, (long)pn, "COMMIT_PHASE\tname=tlibapi\tstate=end\tms="), "no tlibapi begin/end COMMIT_PHASE lines");
+    mm_free(pb);
+
+    rc = derive() || git("add", "-A", 0);
+    if (!rc) rc = precommit(&o, &n, 0); else o = 0, n = 0;
+    verdict("derived", rc == 0 && !has_line(o, (long)n, "TLIB_API_STALE\t"), "blocked although the table carries the new api_sha");
+    if (rc) sy_printf("%.*s\n", (int)(n > 1500 ? 1500 : n), o ? o : "");
+    mm_free(o);
+
+    git("commit", "-qm", "derived");
+    put("fx/mini.cx", "int mini_a(int x) { return x + 2; }\nint mini_b(void) { return 2; }\n");
+    git("add", "fx/mini.cx", 0);
+    rc = precommit(&o, &n, 0);
+    verdict("body", rc == 0 && !has_line(o, (long)n, "TLIB_API_STALE\t"), "a body-only change was blocked");
+    if (rc) sy_printf("%.*s\n", (int)(n > 1500 ? 1500 : n), o ? o : "");
+    mm_free(o);
+
+    sy_remove_all(fx);
+    sy_printf("CHECK_PRECOMMIT_TLIBAPI\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

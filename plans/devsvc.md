@@ -19,6 +19,7 @@
 - 实例目录:`$UNISACC_DEVSVC_DIR`,否则 `$HOME/.cache/unisacc/devsvc/<sha256(git 公共目录绝对路径)前 16 位>/`。所有版本工作目录共用一个实例。
 - 目录内:`sock`(unix 域套接字)、`pid`、`locks.tsv`(锁落盘)、`native/<键>/<工具名>`(原生执行体)。
 - 有界常驻:ttl 默认 1800 s、硬上限 7200 s;连续 idle(默认 300 s)无请求即自退并删 sock。没有无界常驻。
+- 嵌套继承规则(2026-11-17):devsvc 给子进程导出 `UNISACC_FLOW_ROOT` 时同时导出标记 `UNISACC_FLOW_ROOT_JOB=<该根>`;嵌套的 devsvc 若本次根(入口取 git 顶层,核心取 cwd)等于标记根或在其下,即同仓嵌套,继承照旧;不在其下(临时根、夹具根)就丢弃继承的 `DEVSVC_REPO_TABLE`、`DEVSVC_REPO_TABLE_PIN`、`DEVSVC_SELF_BIN` 与等于标记的 `UNISACC_FLOW_ROOT`,按本根重新解析;未带标记的 `UNISACC_FLOW_ROOT` 视为调用者显式给的,始终保留。实现:tools/devsvc.cx 入口与 tools/devsvc-core.cx 的 flow_root_env;断言:批次 devsvc-compile-context(nested-* 与 unmarked-explicit-root-kept)。调用者不必再自己 `env -u`。
 - 单实例:listen 遇 EADDRINUSE 先试连,连得上即拒绝再起,连不上视为陈旧 sock 清掉重听。
 - 无实例时:lock、run、events 自动拉起(等待上限 40 s);status、ping、stop 不拉起;run 可 `--local` 或在拉起失败时本地执行。
 
