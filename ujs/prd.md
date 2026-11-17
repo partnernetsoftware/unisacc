@@ -89,7 +89,7 @@
 | D2 | `water-keeps/` | 岸 128 + pal 8;`turn`/`dist`/`hdg` | 八界灯舟;AUTO `WATER_OK` |
 | D3 | `ink-walk/` | 三层 x,z 折线;`cam`/`turn` | NPR 可逛;AUTO `INK_OK` |
 | D4 | `oneshot/` | 6 盒 xyz;`ang`/`turn` | 一发转轨;AUTO `ONESHOT_OK` |
-| D5 | 未开页 | 见下「宫崎骏风动态世界」 | 未实现,只记需求 |
+| D5 | `ghibli-world/` | 种子表长>=8 草稿 | 未达观感合同;AUTO 暂 `GHIBLI_OK` |
 
 另: `host1-games/` 是 host1 金闸(`HOST1_GAMES_OK_GL`),不是叙事世界。
 
