@@ -3,6 +3,15 @@
  * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --check
  * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --write
  */
+static float fsqrt(float x) {
+    float y;
+    int i;
+    if (x <= 0) return 0;
+    y = x < 1 ? 1 : x;
+    for (i = 0; i < 12; i++) y = 0.5f * (y + x / y);
+    return y;
+}
+
 static const char B64T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static int hx(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -132,17 +141,29 @@ int main(int argc, char **argv) {
     }
     put_uint(gen, &glen, (unsigned)nb);
     gen[glen++] = ';'; gen[glen++] = '\n';
-    orjs = (char *)malloc(160);
+    orjs = (char *)malloc(320);
     if (!orjs) { free(gen); return 2; }
     {
         const char *s = "window.GPU_TRI_FNV=";
-        unsigned cr, cg, cb, u;
-        float fr, fg, fb;
+        unsigned cr, cg, cb, kr, kg, kb, er, eg, eb;
+        float fr, fg, fb, ex, ey, ez, nlen;
+        float nx, ny, nz, ambx, amby, ambz, ambi;
+        float metal, rough, soft, d0, d1;
+        float colr, colg, colb, baser, baseg, baseb;
         union { unsigned u; float f; } uf;
         while (*s) orjs[orn++] = *s++;
         put_uint(orjs, &orn, ofnv);
         orjs[orn++] = ';'; orjs[orn++] = '\n';
-        if (nb < 168) { free(gen); free(orjs); return 2; }
+        if (nb < 188) { free(gen); free(orjs); return 2; }
+        uf.u = (unsigned)b[8] | ((unsigned)b[9] << 8) | ((unsigned)b[10] << 16) | ((unsigned)b[11] << 24);
+        fr = uf.f;
+        uf.u = (unsigned)b[12] | ((unsigned)b[13] << 8) | ((unsigned)b[14] << 16) | ((unsigned)b[15] << 24);
+        fg = uf.f;
+        uf.u = (unsigned)b[16] | ((unsigned)b[17] << 8) | ((unsigned)b[18] << 16) | ((unsigned)b[19] << 24);
+        fb = uf.f;
+        kr = (unsigned)(fr * 255.0f + 0.5f);
+        kg = (unsigned)(fg * 255.0f + 0.5f);
+        kb = (unsigned)(fb * 255.0f + 0.5f);
         uf.u = (unsigned)b[156] | ((unsigned)b[157] << 8) | ((unsigned)b[158] << 16) | ((unsigned)b[159] << 24);
         fr = uf.f;
         uf.u = (unsigned)b[160] | ((unsigned)b[161] << 8) | ((unsigned)b[162] << 16) | ((unsigned)b[163] << 24);
@@ -152,6 +173,61 @@ int main(int argc, char **argv) {
         cr = (unsigned)(fr * 255.0f + 0.5f);
         cg = (unsigned)(fg * 255.0f + 0.5f);
         cb = (unsigned)(fb * 255.0f + 0.5f);
+        uf.u = (unsigned)b[36] | ((unsigned)b[37] << 8) | ((unsigned)b[38] << 16) | ((unsigned)b[39] << 24);
+        ex = uf.f;
+        uf.u = (unsigned)b[40] | ((unsigned)b[41] << 8) | ((unsigned)b[42] << 16) | ((unsigned)b[43] << 24);
+        ey = uf.f;
+        uf.u = (unsigned)b[44] | ((unsigned)b[45] << 8) | ((unsigned)b[46] << 16) | ((unsigned)b[47] << 24);
+        ez = uf.f;
+        nlen = fsqrt(ex * ex + ey * ey + ez * ez);
+        if (nlen < 0.0001f) nlen = 1.0f;
+        nx = ex / nlen; ny = ey / nlen; nz = ez / nlen;
+        uf.u = (unsigned)b[76] | ((unsigned)b[77] << 8) | ((unsigned)b[78] << 16) | ((unsigned)b[79] << 24);
+        ambx = uf.f;
+        uf.u = (unsigned)b[80] | ((unsigned)b[81] << 8) | ((unsigned)b[82] << 16) | ((unsigned)b[83] << 24);
+        amby = uf.f;
+        uf.u = (unsigned)b[84] | ((unsigned)b[85] << 8) | ((unsigned)b[86] << 16) | ((unsigned)b[87] << 24);
+        ambz = uf.f;
+        uf.u = (unsigned)b[88] | ((unsigned)b[89] << 8) | ((unsigned)b[90] << 16) | ((unsigned)b[91] << 24);
+        ambi = uf.f;
+        uf.u = (unsigned)b[180] | ((unsigned)b[181] << 8) | ((unsigned)b[182] << 16) | ((unsigned)b[183] << 24);
+        metal = uf.f;
+        uf.u = (unsigned)b[184] | ((unsigned)b[185] << 8) | ((unsigned)b[186] << 16) | ((unsigned)b[187] << 24);
+        rough = uf.f;
+        {
+            float l0x = 0.35f, l0y = 0.9f, l0z = 0.25f, l0l, nd0;
+            float l1x = -0.4f, l1y = 0.2f, l1z = -0.5f, l1l, nd1;
+            l0l = fsqrt(l0x * l0x + l0y * l0y + l0z * l0z);
+            l1l = fsqrt(l1x * l1x + l1y * l1y + l1z * l1z);
+            nd0 = nx * (l0x / l0l) + ny * (l0y / l0l) + nz * (l0z / l0l);
+            nd1 = nx * (l1x / l1l) + ny * (l1y / l1l) + nz * (l1z / l1l);
+            if (nd0 < 0) nd0 = 0;
+            if (nd1 < 0) nd1 = 0;
+            soft = 1.0f + (0.55f - 1.0f) * rough;
+            d0 = nd0 * soft;
+            d1 = nd1 * soft;
+            baser = fr * (1.0f - metal) + (fr * 0.85f + 0.15f) * metal;
+            baseg = fg * (1.0f - metal) + (fg * 0.85f + 0.15f) * metal;
+            baseb = fb * (1.0f - metal) + (fb * 0.85f + 0.15f) * metal;
+            colr = baser * (ambx * ambi + 1.0f * 1.15f * d0 + 0.4f * 0.45f * d1);
+            colg = baseg * (amby * ambi + 0.9f * 1.15f * d0 + 0.53f * 0.45f * d1);
+            colb = baseb * (ambz * ambi + 0.78f * 1.15f * d0 + 1.0f * 0.45f * d1);
+            er = (unsigned)(colr * 255.0f + 0.5f);
+            eg = (unsigned)(colg * 255.0f + 0.5f);
+            eb = (unsigned)(colb * 255.0f + 0.5f);
+        }
+        s = "window.GPU_TRI_KR=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kr);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_KG=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kg);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_KB=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kb);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
         s = "window.GPU_TRI_CR=";
         while (*s) orjs[orn++] = *s++;
         put_uint(orjs, &orn, cr);
@@ -163,6 +239,18 @@ int main(int argc, char **argv) {
         s = "window.GPU_TRI_CB=";
         while (*s) orjs[orn++] = *s++;
         put_uint(orjs, &orn, cb);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_ER=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, er);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_EG=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, eg);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_EB=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, eb);
         orjs[orn++] = ';'; orjs[orn++] = '\n';
     }
     if (want_write) {
