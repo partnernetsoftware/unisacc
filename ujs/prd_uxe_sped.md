@@ -347,7 +347,8 @@ gpu-tri 不是 D1-D5;它是 G1 真 GPU 夹具,单三角 212B。
 | **T1** | 有/部分(正视平面单纹理 nearest,无 mip/wrap/斜视):第 1 帧 nUpload=1、第 2 帧 nUpload=0 驻留、第 3 帧同 id 换内容;tamper=flipy/texel 必红。验收 `sh ./unisacc.com tools/check-uxe-tex16.cx --`、`sh ./unisacc.com tools/check-uxep-v4.cx --`、`sh ./unisacc.com tools/check-ujs-gpu-tri.cx --`。斜视 T1b | 不上 KTX2/mip;不改已发布 demo 页 |
 | **T2** | 有/部分:host_asset_read+ImageBitmap 直传 GL;readPixels 对 expected.rgba;alpha 0/64/128/255;miss/bad/tamper 必红。验收 `sh ./unisacc.com tools/check-uxe-tex2.cx --`。 | 不引用原作资源 |
 | **T3** | 有:点精灵加法 `SRC_ALPHA,ONE` 与直通 `SRC_ALPHA,ONE_MINUS_SRC_ALPHA` 双 oracle,像素中心 `C*a` 夹 255 与 `C*a+B*(1-a)` 各四探针 +-1。验收 `sh ./unisacc.com tools/check-uxe-points-proj.cx --`。冒烟 `sh ./unisacc.com tools/check-uxe-points.cx --`(16 点交替两色)。测试页 `applyTestScene`(uxe-tex16/tex4q/blend/points/points-oracle/points-alpha) 显式 fog=0。已知限制:云内实例不排序;点大小为逐实例 scale 非逐点。反转 alphaMode 分支必红。 | 不上粒子编辑器 |
-| **T4** | 有:屏幕空间 `flags` bit3 / `scene.text`;UXEP v4 往返 `CHECK_UXEP_V4`;`gen-font` 0-9 A-Z `. : - / %` 空格;`check-uxe-font` 整图 82x30 容差 0 外框 0。验收 `sh ./unisacc.com tools/check-uxe-font.cx --`。已知限制:只有 5x7 点阵、无字距/换行、观感层未做。 | 不用系统字体逐像素 |
+| **T4** | 有:屏幕空间 bit3/`scene.text`;UXEP 往返;`gen-font` 全表;`check-uxe-font` A1I0+字形2+全字符集 282x90 容差 0。验收 `sh ./unisacc.com tools/check-uxe-font.cx --`。已知限制:只有 5x7、无字距/换行、观感层未做。 | 不用系统字体 |
+
 
 
 
