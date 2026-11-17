@@ -112,16 +112,16 @@ function Dump-Pair([string]$name, [int]$rcA, [int]$rcB, [string]$fa, [string]$fb
 }
 $npass = 0
 Write-Host ("SP_ENTRY`texe=$Exe`ttgt=$Tgt")
-$ref = Invoke-Cwd $Exe $sp @('-o','plain.ref','plain.c') 55000 $null $null
+$ref = Invoke-Cwd $Exe $sp @('-O0','-o','plain.ref','plain.c') 55000 $null $null
 $pip = Image-Pipe 'plain.c' 'plain.pipe' 'p' $Tgt
 $bok = ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'plain.ref' 'plain.pipe'))
 if ($bok) { $npass++ } else { Dump-Pair 'B plain-image-pipe-cmp' $ref.Code $pip 'plain.ref' 'plain.pipe' }
-$ref = Invoke-Cwd $Exe $sp @('-o','hello.ref','hello.c') 55000 $null $null
+$ref = Invoke-Cwd $Exe $sp @('-O0','-o','hello.ref','hello.c') 55000 $null $null
 $pip = Image-Pipe 'hello.c' 'hello.pipe' 'h' $Tgt
 $cok = ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'hello.ref' 'hello.pipe'))
 if ($cok) { $npass++ } else { Dump-Pair 'C hello-stdio-image-pipe-cmp' $ref.Code $pip 'hello.ref' 'hello.pipe' }
 # D two-source
-$ref = Invoke-Cwd $Exe $sp @('-o','ab.ref','a.c','b.c') 55000 $null $null
+$ref = Invoke-Cwd $Exe $sp @('-O0','-o','ab.ref','a.c','b.c') 55000 $null $null
 $uok = $true
 foreach ($src in @('a.c','b.c')) {
   $j = $(if ($src -ceq 'a.c') { 0 } else { 1 })
@@ -182,7 +182,7 @@ function Run-E65([string]$label, [string[]]$names) {
   $eStep = '-'
   $ePipe = @{ Code = 0; Err = '' }
   $inargs = @('stream','frame')
-  $refArgs = @('-S','-o','s65.ref') + $names
+  $refArgs = @('-O0','-S','-o','s65.ref') + $names
   $ref = Invoke-Cwd $Exe $sp $refArgs 55000 $null $null
   if ($ref.Code -ne 0) { $eStep = 'direct-S' }
   for ($i = 0; $i -lt 65 -and $eok; $i++) {
