@@ -10,6 +10,7 @@
  *   nolock  the same without a lock, as a control.
  * Prints PASS/FAIL per case and CHECK_COMMIT_OWN<TAB>failed=N; exit 1 when N > 0. */
 #pragma unisa use sys.fs
+#pragma unisa use mem.bytes
 #pragma unisa use sys.env
 #pragma unisa use cxlib.productpkg
 #pragma unisa use sys.proc
@@ -245,7 +246,22 @@ static void case_s2(int part) {
    neg      without --derive the commit is exactly the named path (no COMMIT_OWN_DERIVE, tool-index untouched); with
             --derive and a derive manifest whose --check drifts after --write: exit 1, class derive-drift named, HEAD
             unchanged. */
+/* This legacy merge contract requests an explicit materialized catalog.
+ * The default query-only policy is checked independently by derive-query-only. */
+static void prepare_materialized_catalog(int publish){
+    char path[4400],manifest[4400],script[12000],out[8192];size_t n=0;
+    if(cx_fmt(path,sizeof path,"%s/clone/exec/facts/derive.tsv",base)||cx_fmt(manifest,sizeof manifest,"%s/clone/zz-catalog-derive.tsv",base))die("catalog-path");
+    char*source=cx_read(path,&n);if(!source)die("catalog-fact-read");char*row=source,*found=0,*end=0;
+    while(*row){char*e=strchr(row,'\n');if(!e)die("catalog-fact-newline");if(e-row>=11&&!memcmp(row,"tool-index\t",11)){if(found)die("catalog-fact-duplicate");found=row;end=e+1;}row=e+1;}
+    if(!found)die("catalog-fact-missing");char*write=found;for(int i=0;i<3;i++){write=strchr(write,'\t');if(!write||write>=end)die("catalog-fact-shape");write++;}
+    if(end-write<11||memcmp(write,"query-only ",11))die("catalog-fact-policy");size_t head=write-found,total=end-found-11;char*projection=mm_alloc(total);if(!projection)die("catalog-allocation");
+    if(mm_copy(projection,total,found,head)||mm_copy(projection+head,total-head,write+11,end-write-11)||sy_write_atomic(manifest,projection,total,0600))die("catalog-projection");if(publish&&sy_write_atomic(path,projection,total,0600))die("catalog-explicit-policy");mm_free(projection);mm_free(source);
+    if(cx_fmt(script,sizeof script,"cd %s/clone && sh ./unisacc.com tools/tool-index.cx -- --write-tools && git add -f -- build/tool-index.tsv && (git diff --cached --quiet -- build/tool-index.tsv || git commit -qm catalog-baseline -- build/tool-index.tsv)",base))die("catalog-prepare-path");
+    if(sh(script,out,sizeof out))die("catalog-baseline");
+    if(publish){if(cx_fmt(script,sizeof script,"cd %s/clone && sh ./unisacc.com tools/links-gen.cx -- --write",base)||sh(script,out,sizeof out))die("catalog-explicit-links");}
+}
 static void case_derive(int part) {
+    if(part==0||part==2)prepare_materialized_catalog(0);
     /* the product's -run cache is keyed by path: with the clone's own copy of unisacc.com every generator compiled
        cold in each check run (measured: tables-gen 6 s, batch-packages-gen over 25 s, the group over 55 s), so the
        clone's product files point at the checkout's (same bytes, a stable path; commit-own's derive slot root then
@@ -256,7 +272,7 @@ static void case_derive(int part) {
     if (part == 0)
     s2_want("printf '/* tools/zz-dt.cx -- zz derive fixture tool */\\nint main(void){return 0;}\\n' > tools/zz-dt.cx; "
             "printf 'zzforeigndt\\tforeign row\\n' >> build/tool-index.tsv; "
-            CO_RUN "-m dt --whole tools/zz-dt.cx --derive > dt.out 2>&1; echo RC=$?; grep -c '^DERIVED.build/tool-index.tsv' dt.out; "
+            "UNISACC_COMMIT_OWN_DERIVE_MANIFEST=$PWD/zz-catalog-derive.tsv " CO_RUN "-m dt --whole tools/zz-dt.cx --derive > dt.out 2>&1; echo RC=$?; grep -c '^DERIVED.build/tool-index.tsv' dt.out; "
             "echo HEAD; git show HEAD:build/tool-index.tsv | grep -c '^zz-dt.cx'; git show --name-only --format= HEAD | grep -c '^build/tool-index.tsv'; "
             "git show HEAD:build/tool-index.tsv | grep -c zzforeigndt; echo WORK; grep -c zzforeigndt build/tool-index.tsv; grep -c '^zz-dt.cx' build/tool-index.tsv; echo END",
             "RC=0\n1\nHEAD\n1\n1\n0\nWORK\n1\n1\nEND", "derive-tool-index-same-commit-foreign-kept");
@@ -424,6 +440,7 @@ int main(int argc, char **argv) {
                 "[ \"$(git ls-files -s -- zz-pre.txt | cut -c8-47)\" = \"$(git rev-parse HEAD:zz-pre.txt)\" ] && echo SAMEBLOB; git cat-file -p HEAD:zz-pre.txt; "
                 "echo ST; git status --short -- zz-pre.txt; echo END",
                 "RC=0\n1\n1\nSAMEBLOB\nv3-work\nST\nEND", "prestaged-old-version-index-equals-head-after-commit");
+    if(co_has(g,"artifacts",0))prepare_materialized_catalog(1);
     if (co_has(g, "artifacts", 0)) 
     {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */
         if (cx_fmt(script, sizeof script,

@@ -350,7 +350,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-本节是全部结构点的**唯一权威定义**。取数口径：2026-11-11 在 HEAD `6a4fa1fa6f` 的私有克隆、用已装 0.0.52 APE（sha `1bffabba…`，6,529,460 B；P4 包与 0.0.53 同为 `56efea53`）实跑，每个数后括号写命令或出处；带版本号的耗时取自 `build/phase-times.tsv`（多为 0.0.49 候选 979b56e4 的实测，0.0.52/0.0.53 未重测处照写），「未测」即本次没有命令证据。生成块 §9.6 由 `tools/product-map.cx` 重算，与本节冲突时以生成块的字节为准。
+本节是全部结构点的**唯一权威定义**。取数口径：2026-11-11 在 HEAD `6a4fa1fa6f` 的私有克隆、用已装 0.0.52 APE（sha `1bffabba…`，6,529,460 B；P4 包与 0.0.53 同为 `56efea53`）实跑，每个数后括号写命令或出处；带版本号的耗时取自 `build/phase-times.tsv`（多为 0.0.49 候选 979b56e4 的实测，0.0.52/0.0.53 未重测处照写），「未测」即本次没有命令证据。当前源码字节数以 �vsvc product-map` 的内容身份查询为准；生成块 §9.6 是 `tools/product-map.cx` 显式导出的快照，其取数身份与当前查询分开。
 
 ### 3.0 APE 实测（`sh ./unisacc.com tools/com-tree.cx -- --models`，6.6s）
 
