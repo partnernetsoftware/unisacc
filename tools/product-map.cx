@@ -777,6 +777,28 @@ static void extract_prd_block(char *dst, size_t cap, size_t *dn) {
     free(s);
 }
 
+/* Persist only the explicitly measured package rows; default generation is read-only. */
+static void write_flow_model_facts(const char *tsv, size_t tn) {
+    char path[4400], facts[16000];
+    size_t at = 0, n = 0;
+    int count = 0;
+    while (at < tn) {
+        size_t end = at;
+        while (end < tn && tsv[end] != '\n') end++;
+        if (end < tn) end++;
+        if (end - at >= 11 && !memcmp(tsv + at, "flow-model\t", 11)) {
+            size_t z = end - at;
+            if (z >= sizeof facts - n) die("flow-model-facts-cap");
+            if (mm_copy(facts + n, (long)(sizeof facts - n), tsv + at, (long)z)) die("flow-model-facts-copy");
+            n += z; count++;
+        }
+        at = end;
+    }
+    if (count != 7) die("flow-model-facts-incomplete");
+    join(path, sizeof path, root, "tools/product-flow-model.tsv");
+    if (cx_write(path, facts, n)) die("flow-model-facts-write");
+}
+
 int main(int argc, char **argv) {
     char *tsv, *prd;
     size_t tn, pn;
@@ -810,6 +832,7 @@ int main(int argc, char **argv) {
         /* double write: the dev metadata copy (cxlib/awpath awp_devmeta) stays byte-identical */
         if (awp_devmeta(root, "product-map.tsv", 1, tp, sizeof tp) || cx_write(tp, tsv, tn)) die("devmeta-write");
         patch_prd(prd, pn);
+        if (have_pkg) write_flow_model_facts(tsv, tn);
         printf("PRODUCT_MAP\tstatus=WRITE\tbytes=%ld\n", (long)tn);
         return 0;
     }
