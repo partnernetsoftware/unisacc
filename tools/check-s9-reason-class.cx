@@ -1,0 +1,52 @@
+/* check-s9-reason-class: fixture receipts for the reason column (tools/cxlib/allsession.cx as_reason_class_dir,
+ * tools/s9-triage.cx --classify).  Builds a private RUN under /tmp with one receipt per class (assert failure,
+ * inner timeout, outer kill, missing material) plus one PASS, then asserts each class, that the status counts
+ * from AGG are unchanged, and that an AGG without receipts (old session shape) classifies as no_receipt only.
+ * Last line: CHECK_S9_REASON_CLASS<TAB>failed=N */
+#pragma unisa use cxlib.allsession
+#pragma unisa use text.text
+static int failed;
+static void ok(int c,const char *name){printf("%s\t%s\n",c?"PASS":"FAIL",name);if(!c)failed++;}
+static void put(const char *dir,const char *leaf,const char *s){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s",dir,leaf)){failed++;return;}FILE *f=fopen(p,"wb");if(!f){failed++;return;}fputs(s,f);fclose(f);}
+static void batch(const char *wave,const char *id,const char *brc,const char *cst,const char *vr,const char *out,const char *err){
+ char leaf[200],rec[600];
+ cx_fmt(rec,sizeof rec,"ALLRECEIPT\tv1\nbatch\t%s\nbound_rc\t%s\nchild_status\t%s\nverdict\tX\nreason\t%s\nEND\n",id,brc,cst,vr);
+ cx_fmt(leaf,sizeof leaf,"%s.receipt",id);put(wave,leaf,rec);
+ cx_fmt(leaf,sizeof leaf,"%s.stdout",id);put(wave,leaf,out);
+ cx_fmt(leaf,sizeof leaf,"%s.stderr",id);put(wave,leaf,err);
+}
+static int has(const char *s,size_t n,const char *k){return as_hasb(s,n,k);}
+int main(void){
+ char t[]="/tmp/check-s9-reason-XXXXXX";if(!mkdtemp(t)){puts("CHECK_S9_REASON_CLASS\tfailed=1");return 1;}
+ char run[4400],sl[4400],wave[4400],agg[4400],agg0[4400],self[4096],root[4096],product[4400],triage[4400];
+ cx_fmt(run,sizeof run,"%s/run",t);cx_fmt(sl,sizeof sl,"%s/slice-0-0",run);cx_fmt(wave,sizeof wave,"%s/wave-1",sl);
+ mkdir(run,0755);mkdir(sl,0755);mkdir(wave,0755);
+ batch(wave,"b-assert","0","256","batch-fail","FAIL\tcase.one\texpected=1\nBATCH\tb-assert\tstatus=FAIL\trc=1\n","");
+ batch(wave,"b-inner","0","256","batch-fail","BATCH\tb-inner\tstatus=FAIL\trc=1\n","bound: timeout after 20s\n");
+ batch(wave,"b-outer","142","9","watchdog-deadline","partial\n","");
+ batch(wave,"b-mat","0","512","batch-fail","REFUSE\tverified material required\n","");
+ batch(wave,"b-pass","0","0","batch-pass","PASS\tx\n","");
+ cx_fmt(agg,sizeof agg,"%s/agg.out",t);cx_fmt(agg0,sizeof agg0,"%s/agg0.out",t);
+ put(t,"agg.out","BATCH\tb-assert\tFAIL\treason=-\nBATCH\tb-inner\tFAIL\treason=-\nBATCH\tb-outer\tUNKNOWN\treason=-\nBATCH\tb-mat\tFAIL\treason=-\nBATCH\tb-pass\tPASS\treason=batch-pass\n");
+ put(t,"agg0.out","BATCH\tb-x\tFAIL\treason=-\nBATCH\tb-y\tPASS\treason=batch-pass\n");
+ {char vb[160];const char *g=0;
+  ok(as_reason_class_dir(wave,"b-assert",&g,vb,sizeof vb)==0,"dir-assert");
+  ok(as_reason_class_dir(wave,"b-inner",&g,vb,sizeof vb)==1,"dir-inner-timeout");
+  ok(as_reason_class_dir(wave,"b-outer",&g,vb,sizeof vb)==2&&!strcmp(vb,"watchdog-deadline"),"dir-outer-kill");
+  ok(as_reason_class_dir(wave,"b-mat",&g,vb,sizeof vb)==3,"dir-no-material");
+  ok(as_reason_class_dir(wave,"b-absent",&g,vb,sizeof vb)==5,"dir-absent-unclassified");
+  ok(as_reason_class_text("BATCH\tz\tstatus=FAIL\trc=-9\ttransport=0\n",36,"",0,0,256,"batch-fail")==2,"text-rc-minus9-outer");}
+ if(!realpath(__FILE__,self)){puts("CHECK_S9_REASON_CLASS\tfailed=1");return 1;}
+ {size_t z=strlen(self);const char *sfx="/tools/check-s9-reason-class.cx";size_t sn=strlen(sfx);if(z<=sn){puts("CHECK_S9_REASON_CLASS\tfailed=1");return 1;}if(cx_fmt(root,sizeof root,"%.*s",(int)(z-sn),self)){puts("CHECK_S9_REASON_CLASS\tfailed=1");return 1;}}
+ cx_fmt(product,sizeof product,"%s/unisacc.com",root);cx_fmt(triage,sizeof triage,"%s/tools/s9-triage.cx",root);
+ {char *av[]={"sh",product,triage,"--",agg,"--classify",run,0};char *o=0;size_t n=0;int rc=cx_runv_timeout(av,50,&o,&n);
+  ok(rc==0,"triage-rc0");
+  ok(has(o,n,"REASON_CLASS\tASSERT=1\tINNER_TIMEOUT=1\tOUTER_KILL=1\tNO_MATERIAL=1\tENV=0\tUNCLASSIFIED=0\tno_receipt=0\n"),"triage-reason-class-row");
+  ok(has(o,n,"S9_TRIAGE_CLASSIFY\tbatches=5\tpass=1\tfail=3\tunknown=1\trefused=0\tmissing=0\t"),"triage-counts-unchanged");
+  ok(has(o,n,"CLASS\tb-outer\tUNKNOWN\tOUTER_KILL\twatchdog-deadline\n"),"triage-row-keeps-status");free(o);}
+ {char *av[]={"sh",product,triage,"--",agg0,"--classify",run,0};char *o=0;size_t n=0;int rc=cx_runv_timeout(av,50,&o,&n);
+  ok(rc==0&&has(o,n,"UNCLASSIFIED=1\tno_receipt=1\n")&&has(o,n,"batches=2\tpass=1\tfail=1\t"),"old-session-no-receipts");free(o);}
+ {char *av[]={"sh",product,triage,"--",agg,0};char *o=0;size_t n=0;int rc=cx_runv_timeout(av,50,&o,&n);
+  ok(rc==0&&!has(o,n,"REASON_CLASS")&&has(o,n,"S9_TRIAGE\tbatches=5\tpass=1\tnonpass=4\t"),"plain-triage-unchanged");free(o);}
+ printf("CHECK_S9_REASON_CLASS\tfailed=%d\n",failed);return failed?1:0;
+}

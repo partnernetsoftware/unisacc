@@ -351,6 +351,20 @@ static int aggregate_fixture(const char *kind){
  as_manifest session={0};if(cx_fmt(session.ident.candidate,sizeof session.ident.candidate,"fixture-candidate")||cx_fmt(session.ident.registry,sizeof session.ident.registry,"fixture-registry")||cx_fmt(session.ident.sid,sizeof session.ident.sid,"fixture-sid")||cx_fmt(session.ident.harness,sizeof session.ident.harness,"fixture-harness")||cx_fmt(session.ident.candidate_kind,sizeof session.ident.candidate_kind,"ape1"))fail("fixture-identity");
  return aggregate_report(&session,states,2,pending,0,0,rel);
 }
+/* Reason column (reporting only, verdicts already fixed): for each non-PASS batch the receipt of the latest
+   slice listing it is classified from its own stdout/stderr/receipt (as_reason_class_dir); a batch whose
+   slice has no receipt keeps the class UNCLASSIFIED.  The reason field becomes CLASS/receipt-reason. */
+static void fill_reasons(as_state *states){
+ as_reason_classes_on();
+ for(int k=0;k<nslices;k++){s9_slice *s=&slices[k];int want=0;
+  for(int i=0;i<reg.nb&&!want;i++)if(as_inlist(s->ids,reg.b[i].id)&&states[i].attempts&&!(states[i].last=='P'&&!states[i].fail&&!states[i].refused))want=1;
+  if(!want)continue;char session[4400];path(session,sd,s->leaf);as_manifest m;if(as_load(session,&m,sw,sizeof sw))continue;
+  for(int i=0;i<reg.nb;i++){as_state *st=&states[i];if(!as_inlist(s->ids,reg.b[i].id)||!st->attempts||(st->last=='P'&&!st->fail&&!st->refused))continue;
+   const char *cls="UNCLASSIFIED",*vr="no-receipt";char vb[160];
+   for(int j=0;j<m.nref;j++)if(!strcmp(m.ref[j].id,reg.b[i].id)){char dir[4400];const char *slash=strrchr(m.ref[j].rel,'/');if(!slash)continue;if(cx_fmt(dir,sizeof dir,"%s/%.*s",session,(int)(slash-m.ref[j].rel),m.ref[j].rel))continue;const char *got=0;cls=as_reason_name(as_reason_class_dir(dir,reg.b[i].id,&got,vb,sizeof vb));vr=got&&got[0]?got:"-";}
+   if(cx_fmt(st->reason,sizeof st->reason,"%s/%s",cls,vr))fail("format-bound");}
+  as_free(&m);}
+}
 static int aggregate(int part,int nparts,int merge){
  freeze_check();load_plan();as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");as_state *states=calloc((size_t)reg.nb,sizeof *states);if(!states)fail("allocation");
  char p[4400];size_t nn;path(p,sd,"nonce");char *nonce=as_read(p,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");path(p,sd,"mode");size_t mode_n;char *mode=as_read(p,0,&mode_n,sw,sizeof sw);int regression=mode&&mode_n==16&&!memcmp(mode,"REGRESSION_ONLY\n",16),commit=commit_tier(),rel=release_tier();if(commit){if(!mode||mode_n!=12||memcmp(mode,"COMMIT_ONLY\n",12))fail("mode-tier");}else if(rel){if(!mode||mode_n!=13||memcmp(mode,"RELEASE_ONLY\n",13))fail("mode-tier");}else if(!regression&&(!mode||mode_n!=5||memcmp(mode,"FULL\n",5)))fail("mode");
@@ -384,6 +398,7 @@ static int aggregate(int part,int nparts,int merge){
   np_puts(&pb,"END\n");char pp[4400];agg_part_name(pp,part,nparts);save(pp,pb.p,pb.n);free(pb.p);
   printf("S9_AGG_PART\tpart=%d\tof=%d\tslices=%d\tpending_in_part=%d\trecord=%s\n",part,nparts,agg_part_count(part),pending,pp);free(nonce);free(mode);free(states);as_free(&parent);return 0;}
  if(merge){agg_merge_parts(nparts,states,&waves,nonce);free(pb.p);}
+ fill_reasons(states);
  int result=aggregate_report(&parent,states,waves,pending,regression,commit,rel);
  free(nonce);free(mode);free(states);as_free(&parent);return result;
 }
