@@ -1,0 +1,111 @@
+/* tools/gen-g4-let-b64.cx -- persist/red 夹具 -> let-b64.js / red-b64.js
+ *
+ * sh ./unisacc.com tools/gen-g4-let-b64.cx -- --check
+ * sh ./unisacc.com tools/gen-g4-let-b64.cx -- --write
+ */
+static const char B64T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int cmp_file(const char *path, const char *buf, int n) {
+    FILE *g;
+    char *old;
+    long oldn, i;
+    g = fopen(path, "rb");
+    if (!g) { fprintf(stderr, "gen-g4-let-b64: missing %s\n", path); return 1; }
+    if (fseek(g, 0, SEEK_END) != 0) { fclose(g); return 2; }
+    oldn = ftell(g);
+    rewind(g);
+    old = (char *)malloc((size_t)oldn + 1);
+    if (!old || (long)fread(old, 1, (size_t)oldn, g) != oldn) { free(old); fclose(g); return 2; }
+    fclose(g);
+    if (oldn != n) {
+        fprintf(stderr, "gen-g4-let-b64: CHECK %s len %ld vs %d\n", path, oldn, n);
+        free(old); return 1;
+    }
+    for (i = 0; i < oldn; i++) if (old[i] != buf[i]) {
+        fprintf(stderr, "gen-g4-let-b64: CHECK %s byte %ld\n", path, i);
+        free(old); return 1;
+    }
+    free(old);
+    return 0;
+}
+
+static int emit_one(const char *src, const char *wasm, const char *dst, const char *pre,
+                    int want_write, int want_check) {
+    char *out = 0;
+    size_t on = 0;
+    int rc, i, jn = 0;
+    char *av[8];
+    FILE *f;
+    unsigned char *wb;
+    long wn;
+    char *js;
+    unsigned a, b, c, n;
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = (char *)src;
+    av[3] = "-o";
+    av[4] = (char *)wasm;
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &on);
+    if (out) { fwrite(out, 1, on, stdout); free(out); }
+    if (rc != 0) { fprintf(stderr, "gen-g4-let-b64: compile %s rc=%d\n", src, rc); return 2; }
+    f = fopen(wasm, "rb");
+    if (!f) { fprintf(stderr, "gen-g4-let-b64: no wasm %s\n", wasm); return 2; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 2; }
+    wn = ftell(f);
+    rewind(f);
+    wb = (unsigned char *)malloc((size_t)wn + 1);
+    if (!wb || (long)fread(wb, 1, (size_t)wn, f) != wn) { free(wb); fclose(f); return 2; }
+    fclose(f);
+    js = (char *)malloc((size_t)wn * 2 + 80);
+    if (!js) { free(wb); return 2; }
+    while (*pre) js[jn++] = *pre++;
+    for (i = 0; i < (int)wn; i += 3) {
+        a = wb[i];
+        b = (i + 1 < (int)wn) ? wb[i + 1] : 0;
+        c = (i + 2 < (int)wn) ? wb[i + 2] : 0;
+        n = (a << 16) | (b << 8) | c;
+        js[jn++] = B64T[(n >> 18) & 63];
+        js[jn++] = B64T[(n >> 12) & 63];
+        if (i + 1 < (int)wn) js[jn++] = B64T[(n >> 6) & 63];
+        else js[jn++] = '=';
+        if (i + 2 < (int)wn) js[jn++] = B64T[n & 63];
+        else js[jn++] = '=';
+    }
+    js[jn++] = '"';
+    js[jn++] = ';';
+    js[jn++] = '\n';
+    free(wb);
+    if (want_check && !want_write) {
+        rc = cmp_file(dst, js, jn);
+        free(js);
+        return rc;
+    }
+    if (!want_write) { free(js); return 2; }
+    f = fopen(dst, "wb");
+    if (!f) { free(js); return 2; }
+    if ((int)fwrite(js, 1, (size_t)jn, f) != jn) { fclose(f); free(js); return 2; }
+    fclose(f);
+    free(js);
+    printf("GEN_G4_LET_B64_WRITE\t%s\tbytes=%d\n", dst, jn);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int want_write = 0, want_check = 0, i, rc;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
+    }
+    if (!want_write && !want_check) { fprintf(stderr, "need --check or --write\n"); return 2; }
+    rc = emit_one("ujs/tests/g4-let-yaw.ujs", "/tmp/g4-let-yaw.wasm",
+                  "ujs/practice/uxe/demo/g4-let/let-b64.js",
+                  "window.G4_LET_WASM=\"", want_write, want_check);
+    if (rc) return rc;
+    rc = emit_one("ujs/tests/g4-let-red.ujs", "/tmp/g4-let-red.wasm",
+                  "ujs/practice/uxe/demo/g4-let/red-b64.js",
+                  "window.G4_LET_RED_WASM=\"", want_write, want_check);
+    if (rc) return rc;
+    printf("GEN_G4_LET_B64_OK\n");
+    return 0;
+}

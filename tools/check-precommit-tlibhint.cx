@@ -1,0 +1,124 @@
+/* tools/check-precommit-tlibhint.cx -- the K4 reservation hint of tools/precommit.cx (tlib_reserve_hint, inside
+ * tlib_frozen_gate, before tlib_api_gate).
+ *
+ *   sh ./unisacc.com tools/check-precommit-tlibhint.cx -- [PRECOMMIT]   (default tools/precommit.cx; another path
+ *                                                                       lets the check run against an older copy)
+ *
+ * Fixture: its own private git repo under /tmp (never the tlib-frozen fixture): fa/one.cx and a one-row
+ * build/tlib-packages.tsv (fx.a 0.1.1). Reservations live in a private bump store (BUMP_DIR, BUMP_EMIT=0).
+ * (1) no HEAD commit yet: bump.cx --query fails -> precommit prints no TLIB_BUMP_UNRESERVED;
+ * (2) HEAD 0.1.1, reservations o1 -> 0.1.2 and o2 -> 0.1.3; staged version 0.1.3 (a live reservation) -> silent;
+ * (3) staged version 0.7.0 (neither next nor reserved) -> TLIB_BUMP_UNRESERVED pkg=fx.a version=0.7.0
+ *     expected=0.1.2 with the devsvc bump usage, and the PRECOMMIT blocked count equals that of (2) (WARN only).
+ * Last line CHECK_PRECOMMIT_TLIBHINT failed=N; rc 1 when N > 0, 2 fixture could not be prepared. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], fx[4400], st[4400], pc[4400];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tprecommit-tlibhint.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int table(const char *ver) {
+    char t[400];
+    if (cx_fmt(t, sizeof t, "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\nfx.a\t%s\tPENDING\tfa\t-\t-\tfixture\t-\t0000000000000000000000000000000000000000000000000000000000000000\n", ver)) return -1;
+    return put("build/tlib-packages.tsv", t);
+}
+
+static int git(const char *a, const char *b, const char *c) {
+    char *v[12], *o = 0;
+    size_t n = 0;
+    int k = 0, rc;
+    v[k++] = "git"; v[k++] = "-C"; v[k++] = fx; v[k++] = "-c"; v[k++] = "user.name=t"; v[k++] = "-c"; v[k++] = "user.email=t@t";
+    v[k++] = (char *)a;
+    if (b) v[k++] = (char *)b;
+    if (c) v[k++] = (char *)c;
+    v[k] = 0;
+    rc = cx_runv_timeout(v, 20, &o, &n);
+    mm_free(o);
+    return rc;
+}
+
+static int reserve(const char *owner) {
+    char *v[] = {"sh", "./unisacc.com", "tools/bump.cx", "--", "fx.a", "--owner", (char *)owner, "--root", fx, 0}, *o = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(v, 40, &o, &n);
+    mm_free(o);
+    return rc;
+}
+
+/* precommit on the fixture index (cwd = this checkout, as the hook runs); output into *out */
+static int precommit(char **out, size_t *on) {
+    char *v[] = {"sh", "./unisacc.com", pc, 0};
+    *out = 0;
+    return cx_runv_timeout(v, 55, out, on);
+}
+
+/* the B of "PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B", -1 when absent */
+static long blocked_of(const char *o, size_t n) {
+    long i = tx_find(o, (long)n, "\tblocked=", 9), v = 0;
+    if (i < 0) return -1;
+    for (i += 9; i < (long)n && o[i] >= '0' && o[i] <= '9'; i++) v = v * 10 + (o[i] - '0');
+    return v;
+}
+
+int main(int argc, char **argv) {
+    char gd[4500], p[4600], *o = 0;
+    size_t on = 0;
+    long b2 = -2, b3 = -3;
+    int prep = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (cx_fmt(pc, sizeof pc, "%s", argc >= 2 && argv[1][0] ? argv[1] : "tools/precommit.cx")) return 2;
+    if (cx_fmt(fx, sizeof fx, "/tmp/precommit-tlibhint-%d-%ld", sy_pid(), sy_now_ms()) ||
+        cx_fmt(st, sizeof st, "%s.store", fx) || cx_fmt(gd, sizeof gd, "%s/.git", fx)) return 2;
+    sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("GIT_INDEX_FILE");
+    prep |= sy_mkdir(fx, 0700) || sy_mkdir(st, 0700);
+    prep |= cx_fmt(p, sizeof p, "%s/build", fx) || sy_mkdir(p, 0755);
+    prep |= cx_fmt(p, sizeof p, "%s/fa", fx) || sy_mkdir(p, 0755);
+    prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\n") || table("0.1.1");
+    prep |= git("init", "-q", 0) || git("add", "-A", 0);
+    if (prep) { sy_printf("FAIL\tprecommit-tlibhint.fixture-prepare\n"); return 2; }
+    sy_setenv("GIT_DIR", gd, 1); sy_setenv("GIT_WORK_TREE", fx, 1);
+    sy_setenv("BUMP_DIR", st, 1); sy_setenv("BUMP_EMIT", "0", 1);
+
+    /* (1) no HEAD: the query fails, the hint stays silent */
+    (void)precommit(&o, &on);
+    ck(o && tx_find(o, (long)on, "PRECOMMIT\t", 10) >= 0 && tx_find(o, (long)on, "TLIB_BUMP_UNRESERVED", 20) < 0, "silent-when-query-fails");
+    mm_free(o); o = 0;
+
+    /* (2) a staged version equal to a live reservation (of another owner) is silent */
+    prep = git("commit", "-qm", "h") || reserve("o1") || reserve("o2");
+    prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 3; }\n") || table("0.1.3") || git("add", "-A", 0);
+    (void)precommit(&o, &on);
+    if (o) b2 = blocked_of(o, on);
+    ck(!prep && o && b2 >= 0 && tx_find(o, (long)on, "TLIB_BUMP_UNRESERVED", 20) < 0, "silent-when-version-reserved");
+    mm_free(o); o = 0;
+
+    /* (3) neither next nor reserved: the hint, and the blocked count unchanged */
+    prep = table("0.7.0") || git("add", "-A", 0);
+    (void)precommit(&o, &on);
+    if (o) b3 = blocked_of(o, on);
+    ck(!prep && o && tx_find(o, (long)on, "TLIB_BUMP_UNRESERVED\tpkg=fx.a\tversion=0.7.0\texpected=0.1.2", 54) >= 0 &&
+       tx_find(o, (long)on, "devsvc.cx -- bump fx.a", 22) >= 0, "warns-when-unreserved");
+    ck(b3 >= 0 && b3 == b2, "warning-does-not-block");
+    if (b3 != b2) sy_printf("INFO\tprecommit-tlibhint.blocked\treserved=%ld\tunreserved=%ld\n", b2, b3);
+    mm_free(o);
+
+    sy_unsetenv("GIT_DIR"); sy_unsetenv("GIT_WORK_TREE"); sy_unsetenv("BUMP_DIR"); sy_unsetenv("BUMP_EMIT");
+    sy_printf("CHECK_PRECOMMIT_TLIBHINT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,114 @@
+/* check-bump: tools/bump.cx reservation contracts on a fixture repo (git init in /tmp, small build/tlib-packages.tsv)
+ * and a private store directory (--dir), never the real devsvc instance directory; events are kept local (BUMP_EMIT=0).
+ * Covers: two owners get adjacent distinct versions; same owner idempotent; expiry reclaims (event bump.expire) and
+ * the version is handed out again; release frees it; packages are independent; minor vs patch; two concurrent
+ * reservations get distinct versions; a HEAD version at or above a reservation makes it consumed; bad arguments are
+ * refused by name; a held lock gives a bounded wait then refusal (rc 1). Marker line: CHECK_BUMP<TAB>failed=N. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+static int failed, assertions;
+static char T[] = "/tmp/check-bump-XXXXXX", cwd[1024];
+static void ck(int ok, const char *s) { assertions++; if (!ok) failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", s); }
+static np_result r;
+/* run bump with env prefix and args; output in r; returns rc or -1 */
+static int bump(const char *env, const char *args) {
+    char cmd[2048], w[256]; char *v[] = {"sh", "-c", cmd, 0};
+    { np_result z = {0}; np_free(&r); r = z; }
+    if (cx_fmt(cmd, sizeof cmd, "BUMP_EMIT=0 %s sh ./unisacc.com tools/bump.cx -- %s --root %s --dir %s/st", env, args, T, T)) return -1;
+    if (np_run(v, cwd, 0, 50, &r, w, sizeof w)) return -1;
+    return r.rc;
+}
+/* byte search in r.out or r.err */
+static int has(const char *buf, long n, const char *k) {
+    long kl = (long)strlen(k);
+    if (!buf) return 0;
+    for (long i = 0; i + kl <= n; i++) if (!memcmp(buf + i, k, kl)) return 1;
+    return 0;
+}
+static int out_has(const char *k) { return has(r.out, (long)r.outn, k); }
+static int err_has(const char *k) { return has(r.err, (long)r.errn, k); }
+static int sh(const char *cmd) { char w[256]; char *v[] = {"sh", "-c", (char *)cmd, 0}; np_result q = {0}; int rc = np_run(v, cwd, 0, 50, &q, w, sizeof w) || q.rc; np_free(&q); return rc; }
+static int set_head(const char *ver) {
+    char cmd[1024];
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && printf '# pkg\\tversion\\nfoo.bar\\t%s\\tx\\nqux.z\\t1.2.3\\tx\\n' > build/tlib-packages.tsv && git add -A && git -c user.email=c@c -c user.name=c commit -qm v", T, ver)) return 1;
+    return sh(cmd);
+}
+int main(void) {
+    char cmd[2048], p[1200]; long t0 = sy_now_ms();
+    if (sy_cwd(cwd, sizeof cwd) < 0 || !mkdtemp(T)) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && git init -q && mkdir build", T) || sh(cmd) || set_head("0.3.29")) { printf("CHECK_BUMP\tfailed=1\tfixture\n"); return 1; }
+    ck(bump("BUMP_NOW=1000", "foo.bar --owner a") == 0 && out_has("VERSION=0.3.30\tOWNER=a") && out_has("REUSED=0") && out_has("EXPIRES=8200"), "first-owner-next-patch-default-ttl");
+    ck(bump("BUMP_NOW=1001", "foo.bar --owner b") == 0 && out_has("VERSION=0.3.31\tOWNER=b"), "second-owner-adjacent-distinct");
+    ck(bump("BUMP_NOW=1002", "foo.bar --owner a") == 0 && out_has("VERSION=0.3.30\tOWNER=a") && out_has("REUSED=1"), "same-owner-idempotent");
+    ck(bump("BUMP_NOW=1003 DEVSVC_OWNER=envo", "foo.bar") == 0 && out_has("VERSION=0.3.32\tOWNER=envo"), "owner-from-env");
+    ck(bump("BUMP_NOW=1004", "qux.z --owner a") == 0 && out_has("PKG=qux.z\tVERSION=1.2.4"), "packages-independent");
+    ck(bump("BUMP_NOW=1005", "qux.z --owner m --kind minor") == 0 && out_has("VERSION=1.3.0"), "minor-from-max-live");
+    ck(bump("BUMP_NOW=1006", "--release foo.bar 0.3.32 --owner envo") == 0 && out_has("BUMP_RELEASE\tPKG=foo.bar\tVERSION=0.3.32"), "release");
+    ck(bump("BUMP_NOW=1007", "--release foo.bar 0.3.32 --owner envo") == 1 && err_has("no live reservation"), "release-twice-refused");
+    ck(bump("BUMP_NOW=1008", "--release foo.bar 0.3.31 --owner a") == 1, "release-other-owner-refused");
+    ck(bump("BUMP_NOW=1009", "foo.bar --owner c") == 0 && out_has("VERSION=0.3.32\tOWNER=c"), "released-version-reallocated");
+    /* expiry: owner d with ttl 10 at 1010 gets 0.3.33; at 1030 it is expired and handed to e */
+    ck(bump("BUMP_NOW=1010", "foo.bar --owner d --ttl-s 10") == 0 && out_has("VERSION=0.3.33"), "short-ttl-reserve");
+    ck(bump("BUMP_NOW=1030", "foo.bar --owner e") == 0 && out_has("VERSION=0.3.33\tOWNER=e"), "expired-reclaimed-reallocated");
+    {   unsigned char *b = 0; int64_t n = 0;
+        ck(!cx_fmt(p, sizeof p, "%s/st/bump-events.tsv", T) && !sy_read_file(p, &b, &n, 1 << 20) && has((char *)b, (long)n, "bump.expire\tpkg=foo.bar version=0.3.33 owner=d")
+           && has((char *)b, (long)n, "bump.reserve\t") && has((char *)b, (long)n, "bump.release\t"), "events-reserve-release-expire");
+        if (b) free(b); }
+    ck(bump("BUMP_NOW=1031", "--list foo.bar") == 0 && out_has("VERSION=0.3.33\tOWNER=d\tEXPIRES=1020\tSTATE=expired") && out_has("BUMP_HEAD\tPKG=foo.bar\tVERSION=0.3.29"), "list-shows-states");
+    /* consumed: HEAD moves to 0.3.31 -> reservations 0.3.30 (a) and 0.3.31 (b) are consumed and no longer occupy */
+    ck(set_head("0.3.31") == 0, "fixture-head-advanced");
+    ck(bump("BUMP_NOW=1040", "--list foo.bar") == 0 && out_has("VERSION=0.3.30\tOWNER=a\tEXPIRES=8200\tSTATE=consumed"), "head-ge-reservation-consumed");
+    ck(bump("BUMP_NOW=1041", "foo.bar --owner a") == 0 && out_has("VERSION=0.3.34\tOWNER=a") && out_has("REUSED=0"), "consumed-not-reused-next-after-live-max");
+    ck(bump("BUMP_NOW=1042", "--release foo.bar 0.3.31 --owner b") == 1, "consumed-not-releasable");
+    /* K4 --query: HEAD 0.3.31, live reservations 0.3.33 (e) and 0.3.34 (a) */
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 0.3.34 --owner a") == 0 && out_has("VERDICT=reserved\t"), "query-own-reservation");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 0.3.33 --owner a") == 0 && out_has("VERDICT=reserved-other\t"), "query-other-owner-reservation");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 0.3.32 --owner a") == 0 && out_has("VERDICT=reserved-other\t"), "query-next-reserved-by-other-not-next");
+    ck(bump("BUMP_NOW=1043", "--release foo.bar 0.3.32 --owner c") == 0, "fixture-release-next");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 0.3.32 --owner a") == 0 && out_has("HEAD=0.3.31\tNEXT=0.3.32\tVERDICT=next\t"), "query-next-patch");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 0.9.0 --owner a") == 0 && out_has("VERDICT=unreserved\t"), "query-arbitrary-unreserved");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar --owner a") == 0 && out_has("VERSION=0.3.31\tHEAD=0.3.31") && out_has("VERDICT=head\t"), "query-index-version-default");
+    ck(bump("BUMP_NOW=1043", "--query foo.bar 1.x") == 2 && err_has("bad VERSION"), "query-bad-version-refused");
+    /* concurrency: two background reservations at once get distinct versions */
+    if (cx_fmt(cmd, sizeof cmd, "for o in p1 p2; do BUMP_EMIT=0 BUMP_NOW=1050 sh ./unisacc.com tools/bump.cx -- qux.z --owner $o --root %s --dir %s/st > %s/c-$o.out 2>&1 & done; wait", T, T, T)) return 2;
+    sh(cmd);
+    {   unsigned char *b1 = 0, *b2 = 0; int64_t n1 = 0, n2 = 0; char a1[64] = "", a2[64] = ""; const char *k = "VERSION=";
+        char p2[1200];
+        if (!cx_fmt(p, sizeof p, "%s/c-p1.out", T) && !cx_fmt(p2, sizeof p2, "%s/c-p2.out", T) && !sy_read_file(p, &b1, &n1, 1 << 16) && !sy_read_file(p2, &b2, &n2, 1 << 16)) {
+            for (long i = 0; i + 8 <= n1; i++) if (!memcmp(b1 + i, k, 8)) { long j = 0; while (i + 8 + j < n1 && b1[i + 8 + j] != '\t' && j < 63) { a1[j] = b1[i + 8 + j]; j++; } a1[j] = 0; break; }
+            for (long i = 0; i + 8 <= n2; i++) if (!memcmp(b2 + i, k, 8)) { long j = 0; while (i + 8 + j < n2 && b2[i + 8 + j] != '\t' && j < 63) { a2[j] = b2[i + 8 + j]; j++; } a2[j] = 0; break; }
+        }
+        ck(a1[0] && a2[0] && strcmp(a1, a2) && (!strcmp(a1, "1.3.1") || !strcmp(a1, "1.3.2")) && (!strcmp(a2, "1.3.1") || !strcmp(a2, "1.3.2")), "concurrent-distinct-versions");
+        if (b1) free(b1);
+        if (b2) free(b2); }
+    /* bad arguments, refused by name */
+    ck(bump("", "foo.bar --kind major") == 2 && err_has("bad --kind"), "refuse-bad-kind");
+    ck(bump("", "foo.bar --ttl-s 99999") == 2 && err_has("bad --ttl-s"), "refuse-ttl-over-cap");
+    ck(bump("", "nosuch.pkg") == 2 && err_has("unknown package"), "refuse-unknown-package");
+    ck(bump("", "--release foo.bar 1.x") == 2 && err_has("bad or missing VERSION"), "refuse-bad-version");
+    ck(bump("", "--frob") == 2 && err_has("unknown option"), "refuse-unknown-option");
+    ck(bump("", "") == 2 && err_has("missing PKG"), "refuse-missing-pkg");
+    ck(bump("", "foo.bar --owner 'a b'") == 2 && err_has("bad owner"), "refuse-bad-owner");
+    ck(bump("", "foo.bar extra") == 2 && err_has("extra argument"), "refuse-extra-argument");
+    ck(bump("", "foo/bar") == 2 && err_has("bad PKG"), "refuse-bad-pkg-name");
+    /* held lock: bounded wait then refusal */
+    {   int fd; long s0;
+        if (cx_fmt(p, sizeof p, "%s/st/bump.lock", T)) return 2;
+        fd = sy_open(p, O_RDWR | O_CREAT, 0600);
+        ck(fd >= 0 && !sy_flock(fd, 2), "fixture-lock-held");
+        s0 = sy_now_ms();
+        ck(bump("BUMP_LOCK_WAIT_MS=400", "foo.bar --owner z") == 1 && err_has("lock busy"), "lock-busy-refused");
+        ck(sy_now_ms() - s0 < 20000, "lock-wait-bounded");
+        if (fd >= 0) { sy_flock(fd, 8); sy_close(fd); }
+        ck(bump("BUMP_NOW=1060", "foo.bar --owner z") == 0, "lock-free-again");
+    }
+    np_free(&r);
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", T) == 0) sh(cmd);
+    printf("CHECK_BUMP\tfailed=%d\tassertions=%d\tms=%ld\n", failed, assertions, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

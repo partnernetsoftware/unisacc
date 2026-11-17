@@ -48,6 +48,7 @@
 | Read | `f read PATH [OFF LIM]` | 内容到 stdout;stderr 结果行带整文件 sha256 与总行数,sha 可接着喂给 `--expect-sha` |
 | Write | `f write PATH --from SRC [--expect-sha X] [--mkdir]` | 原子替换;新内容先写到 `/tmp` 或 `$CLAUDE_JOB_DIR/tmp` 的 SRC;有实例时自动取路径锁 |
 | Edit | `f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]` | old/new 从文件读,免命令行转义;old 须恰好出现一次(`--all` 至少一次);`--chomp` 去掉两文件末尾各一个换行 |
+| Edits(同一文件多处) | `f edits PATH --stdin [--sep S] [--sep-next S2] [--expect-sha X]` | stdin 为若干组 `OLD`、独占一行 `@@DEVSVC-NEW@@`、`NEW`,组间独占一行 `@@DEVSVC-NEXT@@`;各组依次在内存里套用,每组 old 须在当时内容里恰好出现一次(ENOMATCH/EMULTI 指明第几组),全过才经一次 file.write 原子落盘,.cx 只试编一次,试编失败(ECOMPILE)整批不落盘;相对 PATH 按写根(UNISACC_FLOW_ROOT,缺省仓根)解析。同一文件改三处:逐次 f edit 约 6960 ms,一次 f edits 约 2390 ms(2026-11-17 实测,检查 check-devsvc-flow 的 f-edits-* 例) |
 | Bash | `x [--timeout-ms N] [--cwd D] -- ARGV...` | 不经 shell(要管道就 `-- sh -c '...'`);独立进程组,超时整组杀,rc 124;退出码即命令自己的 |
 | 多步并行 | `flow - [--cat] [--jobs N]`(stdin 给节点表)或 `flow run FILE.tsv` | 每行 `id<TAB>op<TAB>deps<TAB>k=v;k=v`,op 为 exec、file.read、file.write、file.edit、compare、search;无依赖的节点并发,有依赖的按序;`--cat` 直接带回各节点输出 |
 | Grep、git grep | 节点 `search`:`pattern=固定串;paths=空格分隔的文件、目录或 glob;max=N` | 输出 `path:line:text`;只做固定串(cx 无正则库,`regex=1` 拒绝);跳过 `.git`、链接与二进制;超出 max 末行 `SEARCH_TRUNC` |
@@ -86,6 +87,14 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 用法:长命令一律 `--bg` 再 `wait`,不写 sleep 轮询;宿主 30/60 s 上限内反复 wait 即可。
 
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
+### 提交门:新增 tlib 模块与分相派生
+
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --keyed build/batch-packages.tsv 批次ID与分片ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
+
+`git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
+
+`derive --write` 只按生成器版本、输入内容和当前产物内容复用构建身份,输出 `IDENTICAL`,不复用测试结论;未知输入闭包仍全量执行。补充读集在 `tools/derive-inputs.tsv`,`derive --check` 始终全量重算,`--write --full` 是强制重建对照。新增派生项同时补读集与逐表篡改负控,完整检查通过后才算派生清零。
+
 ### 工单作业化 task(R5,2026-11-15)
 
 子代理与窗口的每一单都开成工单,协调者只认 `task.done` 事件(`devsvc events --wait task.done` 或实例目录 `task-events.tsv` 的 `task.done` 行),不认"已完成"的口头汇报。工单落在 devsvc 实例目录的 `work/`,不入库。
@@ -125,6 +134,12 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 
 
 
+### tlib 包版本预留 bump(K3,2026-11-17)
+- 用途:多个并行任务改同一 tlib 包(如 tools.cxlib)时,各自跑 `layer-api --bump` 会得到互相覆盖的版本。改为先经 devsvc 预留版本:`sh ./unisacc.com tools/devsvc.cx -- bump PKG [--owner O] [--kind patch|minor] [--ttl-s N]`,输出 `BUMP PKG=.. VERSION=.. OWNER=.. EXPIRES=.. REUSED=0|1`;释放 `bump --release PKG VERSION [--owner O]`;查询 `bump --list [PKG]`(每行 BUMP_ROW 带 STATE=reserved|released|expired|consumed 与 HEAD 版本)。启动器把 bump 直接转 tools/bump.cx,不经核心。
+- 语义:V 取 `git show HEAD:build/tlib-packages.tsv` 里该包版本(不读工作副本);新预留 = max(V, 该包全部有效预留) 的下一 patch(或 minor);同属主同包再预留返回原值(REUSED=1,不递增);属主缺省 $DEVSVC_OWNER,再缺省 auto-<pid>;ttl 缺省 7200 s,上限 14400 s;到期转 expired 并记 bump.expire,其版本可再分配;版本不大于 HEAD 版本的预留在每次调用时按 HEAD 判为 consumed,不再占用,无需写回。
+- 状态:实例目录(同 leases/locks,dt_instdir;检查用 --dir 或 $BUMP_DIR)下 bump-reservations.tsv、bump-events.tsv 与 bump.lock(flock,等待 $BUMP_LOCK_WAIT_MS 缺省 5000、上限 20000 ms,超时 rc 1 `BUMP_REFUSE lock busy`)。不进 git。事件 bump.reserve/bump.release/bump.expire 另经 `devsvc events emit` 进事件日志($BUMP_EMIT=0 关闭)。
+- 与 layer-api 的关系(K4 起):提交前先 `sh ./unisacc.com tools/devsvc.cx -- bump PKG` 预留版本 V,再 `sh ./unisacc.com tools/layer-api.cx -- --bump PKG --version V`(只在 V 是调用者自己的有效预留或 HEAD 的下一 patch 时写入,否则 rc 2 REFUSE version-not-reserved);`bump --query PKG [VERSION]` 给出 VERDICT=head|next|reserved|reserved-other|unreserved。提交门 precommit 的 tlib 门对每个涉及的包查询一次:暂存版本既非下一 patch 也非任何有效预留(VERDICT=unreserved)时打印 `TLIB_BUMP_UNRESERVED pkg= version= expected=` 并附 `devsvc bump` 用法,含义是这个版本号没经预留、可能与并行任务撞号;只提示,不计入 blocked,查询失败时不出声;TLIB_BUMP_NEEDED、TLIB_API_STALE 等原有拦截不变。检查 tools/check-bump.cx(批次 devsvc-bump)、tools/check-precommit-tlibhint.cx(批次 precommit-tlibhint)。
+
 ## 6 已知限制与下一单
 
 - (1) 服务单线程:native 构造期间其它请求排队。改为构造放子进程,主循环继续收请求。
@@ -148,7 +163,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - P3 f read 行段与 who-calls 结果直接跳读(sed -n 244 次、cat 311 次)。
 - P4 devsvc check:按改动选批并行跑(check 直跑 666 次),结果进事件。
 - P5 devsvc ps 与按作业 kill(pgrep/ps/sleep 122 次)。
-- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。
+- P6 precheck --files:一次列出全部门拦截原因(blocked 96 次、REFUSE 73 次)。状态(2026-11-17):已做。`devsvc precheck --files PATH...` -> `tools/precommit.cx -- --precheck PATH...`(b7c376e9fd 模式,0bec77c73b 检查与批次 precommit-precheck-pass/-trunc,入口随本行提交):私有临时索引(HEAD 加给定路径)上以 UNISACC_PRECOMMIT_SERIAL=1 重跑同一份无参门,逐门 `PRECHECK gate=NAME verdict=PASS|BLOCKED ms=N reason=...`,末行 `PRECHECK_SUMMARY blocked=K total_ms=T slowest=NAME rc=N`;总 deadline 55 秒,超时出 PRECHECK_TIMEOUT 列已评估/未评估门;真索引不读不写,不缓存结论。已知局限:(1) runlist、facts 门失败时原逻辑直接返回,其后的门不再评估,预检同样只列到此;(2) 不打 BLOCKED/REFUSE/`precommit: blocked` 文案的失败只报 `gate=other` 并给日志路径;(3) 归门按日志出现顺序,文案出现在下一门 begin 之前才归对。评估项(未排):runlist、facts 失败后继续评估其余门是否改变原门判定,须单独论证后再动,不为"一次列全"放宽或改动原门。
 - P7 按历史耗时预警超预算并建议分片;长命令自动转后台。
 - P8 锁 who/wait 查询。
 - P9 只读 git 已有(4ebf3b6834)但采用率低:宣传、简报模板写明;新建工具前的 git log --all 给专用入口。
@@ -241,3 +256,11 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 检查:`tools/check-flowdoc.cx`(批次 flowdoc,26 项)。
 - 未做:CLI 与 flow doc 节点各自的专项检查项;入口按 HEAD 固定核心,doc 子命令在新核心入库后才对 `devsvc.cx` 生效。
 
+
+## 9 flow 负载准入(2026-11-17)
+
+- 规则:并发总量以机器负载不高于 10 为界(prd_mempalace.md 决定)。flow 的 exec 节点起跑前,除机器令牌(cxlib.flowadmit,容量按核数与内存,load1 超两倍核数减半)外,再过负载门:load1 高于阈值时本次运行不放行任何新 exec 节点,已在跑的不动,load1 回落到阈值及以下即放行。
+- 有界:每次 flow 运行因负载推迟的累计时间有上限,到期照常放行并在回执标记;运行总 deadline 仍然有效,不会无界等待。
+- 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
+- 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
+- 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。

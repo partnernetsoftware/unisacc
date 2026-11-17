@@ -16,10 +16,11 @@
 ./unisacc.com -run ujs/tests/run.cx -- --complete
 
 # 或直接产品闸
-./unisacc.com -run ujs/product/build.cx
+./unisacc.com -run ujs/product/build.cx      # 本机 ELF,不是 APE
+./unisacc.com -run ujs/product/build-ape.cx  # 五切片 APE 写回 ujs/ujs.com
 ./unisacc.com -run ujs/product/complete.cx
 
-./ujs/ujs.com --version          # ujs.com 0.0.7（六目标 APE；Unix 上 shell 按 uname 选切片）
+./ujs/ujs.com --version          # ujs.com 0.0.7(五切片 APE: win/x86_64 裸 + lnx/osx x86_64/arm64 gzip;无 win/arm64)
 ./ujs/ujs.com --help
 ./ujs/ujs.com FILE.ujs           # 默认写出 FILE.wasm
 ./ujs/ujs.com FILE.ujs -o OUT.wasm

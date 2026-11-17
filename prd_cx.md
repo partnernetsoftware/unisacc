@@ -100,7 +100,7 @@ tlib 侧现状(2026-11-15 核,真源 `build/tlib-packages.tsv` 与 `build/layer-
 
 ### 0.7 路线(按依赖排序)
 
-每步是一类改动,按「一个候选只含一类大改」各占候选;版本落点只看 prd.md 9.4 与 `build/version-seq.tsv`(`agentwork/dag.tsv` 已退役;第 6、8 节的 0.0.58 至 0.0.60 版本号已过期)。
+每步是一类改动,按「一个候选只含一类大改」各占候选;版本落点只看 prd.md 9.4 与 `build/version-seq.tsv`(`archive/agentwork-retire-2026-11/dag.tsv` 已退役;第 6、8 节的 0.0.58 至 0.0.60 版本号已过期)。
 
 | 序 | 内容 | 前置 | 触产品输入 |
 |---|---|---|---|
@@ -796,7 +796,7 @@ cx = C99 受检查子集 + `#pragma unisa` 配置(`cx/spec.md` CX-L、CX-G)。�
 
 ### A7 问题清单(每项带证据)
 
-1. 规划器三源、两份实现。`cx/cx0/plan.cx`(1329 行,权威)、`src/cxmod.c`(1235 行,投影,逐字门 `cx0-extract --check`)、`cx/compiler/cxmod.cx`(1348 行,产品实际编入,靠人工同步)。事故记录:`agentwork/ledger.tsv:73-74`(DOCK1 只改了前两份,候选 strings 命中 0)。现存漂移:`CXM_MAXU` 128 对 96;`cxm_*` 函数名 88 对 66。`cx/spec.md` CX-G-4 只要求「实现同一文法」,无门。
+1. 规划器三源、两份实现。`cx/cx0/plan.cx`(1329 行,权威)、`src/cxmod.c`(1235 行,投影,逐字门 `cx0-extract --check`)、`cx/compiler/cxmod.cx`(1348 行,产品实际编入,靠人工同步)。事故记录:`archive/agentwork-retire-2026-11/ledger.tsv:73-74`(DOCK1 只改了前两份,候选 strings 命中 0)。现存漂移:`CXM_MAXU` 128 对 96;`cxm_*` 函数名 88 对 66。`cx/spec.md` CX-G-4 只要求「实现同一文法」,无门。
 2. 权威与产品旁路。README 写「已装产品驱动仍调原 C 规划器」;准确说是产品编入 cxmod.cx,而 plan.cx 的全部调用方是工具链 6 包(`cx/workspace/packages.tsv`)与宿主驱动。权威源不在产品里运行,产品源不在宿主里运行。
 3. C 投影是活依赖。`src/cxmod.c` 被 `tests/cx-host-run.cx:1031`、`tests/check-source-bom.cx:113`、`tools/build-cxcc-host.cx` 读取,退役前须给宿主驱动另一条取得规划器的路。
 4. 骨架网无表无行为。`cx/compiler/net/*.cx` 20 个(18 金表网加 lexcls、lexword)与 `stream/` 7、`image/` 4,函数体全是 `return 0`;`cx/runtime` 再镜像一套。调用方只有检查工具;它们证明的是「名字与事实表一致」,不是行为。
@@ -888,8 +888,8 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 | 54-1 | 三源差异清单:拟写 `cx0-diff`(待建),按函数对齐 plan.cx 与 cxmod.cx,输出差异表 `cx0-three-source-diff`(函数、差异类、是否语义)。带 `check-cx0-diff` 并登记批次 | 否 | `sh ./unisacc.com tools/cx0-extract.cx -- --check`;`sh ./unisacc.com tools/ratchets.cx` | 无 | 对齐靠函数名,改名函数需手工标注 | 工具约 300 行,表约 90 行 |
 | 54-2 | 三宿主一致性矩阵:扩 `tests/cx-host-run.cx` 的对拍为拟建工具 `cx-tri`(待建):对语料目录每个 `.cx` 在三入口取 `-cx-plan` 字节、`-cx-interface` 字节、拒绝行与 rc,输出 MATCH/DIFF/UNKNOWN,DIFF 不记 PASS。语料先含:无 use、单 use、多符号、整模块加符号、alias、注释/续行/条件、cxpack、双软链、环、缺模块、未知 pragma、97 单元与 129 单元(暴露 MAXU 分叉) | 否(测试与工具) | `sh ./unisacc.com tests/cx-host-run.cx` | 宿主驱动可建(54-4) | 语料生成 129 单元要控制在 55 秒内,必要时拆两条命令 | 工具约 400 行,语料约 30 文件 |
 | 54-3 | L0 宿主可编译普查入库:把 `out/cxarch/hostsweep.cx` 的做法做成拟建工具 `cx-host-l0`(待建),遍历 `cx/sys cx/mem cx/text ext/*` 全部模块,输出 `cx-host-l0` 清单(模块、gcc、clang、首条错误)。只记录,不设绿线 | 否 | `sh ./unisacc.com tests/cx-host-run.cx` | 54-4 | 模块数约 80,每个 0.1 至 0.4 秒,须分片 | 约 200 行 |
-| 54-4 | 修宿主引导说明:`tools/build-cxcc-host.cx` 头注命令与实际不符。本版只更正文档与 `cx/cx0/README.md` 的复现节,并在 `agentwork/items.tsv` 立修复项(改代码属 `tools/`,不在源 SID 的 10 文件内则可在本版修:让构建器不依赖 `text.text`,或由 `tests/cx-host-run.cx` 的四步配方抽成共用模块) | 否(先核该文件不在 ident 的 tools 清单) | 文档命令逐条实跑;`sh ./unisacc.com tests/cx-host-run.cx` | 无 | 若该文件在 ident 清单内则顺延到 0.0.55 | 约 60 行 |
-| 54-5 | 相位基线入账:把 A8 的做法做成 `tools/cx-phase.cx`(读 `UNISACC_RR_TIME` 输出,按 stage 汇总冷/热、单元数 1/2/6/12),结果写 `agentwork/phase-times.tsv` 的 cx 行;未测相位标 UNMEASURED | 否 | `sh ./unisacc.com tools/cx-phase.cx -- out/cxphase-N`;`tools/check-cx-phase.cx` | 无 | 12 单元冷跑预计超 7 秒,仍在 60 秒内 | 约 250 行 |
+| 54-4 | 修宿主引导说明:`tools/build-cxcc-host.cx` 头注命令与实际不符。本版只更正文档与 `cx/cx0/README.md` 的复现节,修复项现查 `prd_mempalace.md`,历史记录只读 `archive/agentwork-retire-2026-11/items.tsv`(改代码属 `tools/`,不在源 SID 的 10 文件内则可在本版修:让构建器不依赖 `text.text`,或由 `tests/cx-host-run.cx` 的四步配方抽成共用模块) | 否(先核该文件不在 ident 的 tools 清单) | 文档命令逐条实跑;`sh ./unisacc.com tests/cx-host-run.cx` | 无 | 若该文件在 ident 清单内则顺延到 0.0.55 | 约 60 行 |
+| 54-5 | 相位基线入账:把 A8 的做法做成 `tools/cx-phase.cx`(读 `UNISACC_RR_TIME` 输出,按 stage 汇总冷/热、单元数 1/2/6/12),结果写 `build/phase-times.tsv` 的 cx 行;未测相位标 UNMEASURED | 否 | `sh ./unisacc.com tools/cx-phase.cx -- out/cxphase-N`;`tools/check-cx-phase.cx` | 无 | 12 单元冷跑预计超 7 秒,仍在 60 秒内 | 约 250 行 |
 | 54-6 | CX0 事实表设计稿:拟写 `cx0-tables` 设计稿与 7 张表的初稿(B0 表格所列),每张表每个键标注它对应 plan.cx 的哪一行判断;写「表 = 现行实现」的逐键探针方案。不接入任何构建 | 否(草表不进 `exec/`) | 设计评审;`sh ./unisacc.com tools/decide-gen.cx -- --check ...` 对草表可生成(只验证表形合法) | 54-1 | 键分类不全会在 0.0.55 才暴露;用 54-2 语料反查 | 文档约 300 行,表约 600 行 |
 | 54-7 | 单元级缓存设计与离线原型:在工具侧(`tools/cx-pipeline.cx` 链,不动产品)实现「按 CX0BND1 单元身份缓存 e2 输出 UNIPP1」的原型,量化命中时的节省;键 = 单元源 sha、强制头 sha 序列、E2 模型容器 sha、目标、ABI;命中仍核内容身份,只记 PREPARED | 否 | `sh ./unisacc.com tests/preprocess/pipeline.cx -- ...` 不回退;新增 `tools/check-unit-frontcache.cx`(命中、失效、损坏、键变更四类) | 工作区 6 包可建 | 工具链适配器每单元进程隔离,原型数字不等于产品内数字,须标注 | 约 350 行 |
 | 54-8 | 骨架与名表普查:拟写 `cx-surface-census`(待建)列出 114 处生成文件的生成器、事实表、调用点数;产出候选清理表(不自动删) | 否 | `sh ./unisacc.com tools/surface-gen.cx -- --check` | 无 | 无 | 约 200 行 |
@@ -911,7 +911,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 | 55-6 | 骨架网第一批落行为(B0 第 4 点第一批 7 张)并合并 compiler/runtime 镜像;`surface-gen` 改为从金表生成 ask 函数体,`--check` 逐字;新增逐键门「ask 函数 = 金表」 | 是(`cx/` 生成物) | `sh ./unisacc.com tools/surface-gen.cx -- --check`;`tools/check-cx-surface.cx`、`check-cx-decl.cx`、`check-cx-gold.cx`;三宿主各跑一遍逐键门(生成函数无 libc,应三宿主可编) | 54-8 | 与 55-5 同候选会使「一类大改」边界变宽;若慢车道时间超 2 小时则本步移到 0.0.56 | 生成器改约 300 行 |
 | 55-7 | 产品内提速(与主线同输入域,独立小批):(a) 同进程模型 inflate 去重(A8 第 7 项,预期每多一单元省约 24 ms);(b) 按 CX0BND1 单元身份的 e2/e1 结果缓存(预期对 h5 类程序省 5 个模块单元的 e2 加 e1,约 1.0 s 中的大部分;以实测为准) | 是(`src/`、`cx/runtime`) | `tools/cx-phase.cx` 冷/热两组对比入 `phase-times.tsv`;缓存负例:键变更、内容损坏、截断、并发写,均回退重算且结果字节相同;`UNISACC_RUN_CACHE=0` 路径不变 | 54-5、54-7、55-5(b) | 缓存结果不得替代执行结论;命中仍核内容身份;跨进程并发写需无覆盖发布(沿用 link 发布法) | 约 500 行 |
 
-0.0.55 的整体迭代(冻结到可发布)须低于 2 小时;55-5 的构造按既有相位工具分片,任何单相位超 5 分钟先分解再入库,并登记 `agentwork/phase-times.tsv`。发布说明如实写:CX0 流仅对 `.cx` 生效;三宿主一致性只在 lnx/x86_64 实跑;宿主 L0 缺口清单(54-3)原样列出。
+0.0.55 的整体迭代(冻结到可发布)须低于 2 小时;55-5 的构造按既有相位工具分片,任何单相位超 5 分钟先分解再入库,并登记 `build/phase-times.tsv`。发布说明如实写:CX0 流仅对 `.cx` 生效;三宿主一致性只在 lnx/x86_64 实跑;宿主 L0 缺口清单(54-3)原样列出。
 
 ### B3 0.0.56 及以后
 
@@ -933,7 +933,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - `.c` 红线:cx0 流不扫描 `.c`;`.c` 语料的产物 sha 在每一步前后相同。
 - 缓存纪律:只缓存有测量依据的构造产物(单元 e2/e1 结果、模型解包);键含全部输入身份;命中仍核内容;不缓存测试结论;冷/热两组数据与回退负例同时入账。
 - 所有权措辞:运行期合同与句柄检查三宿主可复验(A6 表);编译期所有权在 CX-W-4 落地前三宿主都写「未声称」。
-- 分治时限:本计划内没有预计超过 5 分钟的单次操作;55-5 的慢车道若实测超限,先登记 `agentwork/phase-times.tsv` 并分解,不放宽时限。
+- 分治时限:本计划内没有预计超过 5 分钟的单次操作;55-5 的慢车道若实测超限,先登记 `build/phase-times.tsv` 并分解,不放宽时限。
 - 车道:`apps/csih/`、`ujs/` 不改;涉及它们依赖的别名(如 `sys.net`)先发信封。
 
 ## 9. 并入:分层、模块与 use、dock、别名与再导出、L0 fmt 与 sig 合同(2026-11-14 并入,批 B3)

@@ -1,0 +1,274 @@
+/* tools/check-ujs-gpu-import.cx -- fly 无 import;其它 import --run 失败.
+ *
+ * sh ./unisacc.com tools/check-ujs-gpu-import.cx --
+ *
+ * 金 fly --run 3868。其它 wasm import 非 env.host_gpu_submit 时 --run 失败。
+ * 不得记 G1 完成。APE 用 sh ./ujs/ujs.com。
+ */
+static int ck_failed, ck_asserts;
+
+static void ck_ck(int ok, const char *label) {
+    ck_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ck_failed++;
+}
+
+static int has_sid2(const unsigned char *b, long n) {
+    long i = 8;
+    if (n < 8 || b[0] || b[1] != 0x61 || b[2] != 0x73 || b[3] != 0x6d) return -1;
+    while (i < n) {
+        unsigned sid, sh, c, nn;
+        if (i >= n) return 0;
+        sid = b[i++];
+        nn = 0;
+        sh = 0;
+        for (;;) {
+            if (i >= n) return -1;
+            c = b[i++];
+            nn |= (c & 0x7fu) << sh;
+            if (c < 0x80) break;
+            sh += 7;
+            if (sh > 28) return -1;
+        }
+        if (sid == 2) return 1;
+        i += (long)nn;
+    }
+    return 0;
+}
+
+static int ck_has(const char *s, size_t n, const char *need) {
+    size_t i, m;
+    if (!s || !need) return 0;
+    m = 0;
+    while (need[m]) m++;
+    if (m == 0 || n < m) return 0;
+    for (i = 0; i + m <= n; i++) {
+        size_t k = 0;
+        while (k < m && s[i + k] == need[k]) k++;
+        if (k == m) return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *out = 0;
+    size_t n = 0;
+    int rc;
+    FILE *f;
+    unsigned char *b;
+    long fl;
+    char *av[8];
+    int sid2;
+    long k;
+    int patched;
+    int hit;
+    (void)argc;
+    (void)argv;
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    av[2] = "ujs/tests/gpu-submit-bad.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-ujs-gpu-bad.wasm";
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out) free(out);
+    out = 0; n = 0;
+    ck_ck(rc != 0, "gpu-bad-refused");
+    av[2] = "ujs/tests/examples/fly.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-ujs-gpu-fly.wasm";
+    av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    ck_ck(rc == 0, "compile-fly");
+    f = fopen("/tmp/check-ujs-gpu-fly.wasm", "rb");
+    ck_ck(f != 0, "fly-wasm-open");
+    if (!f) {
+        printf("UJS_GPU_IMPORT_OK\tassertions=%d\tfailed=%d\n", ck_asserts, ck_failed);
+        return 1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 2; }
+    fl = ftell(f);
+    if (fl < 0 || fl > 8 * 1024 * 1024) { fclose(f); return 2; }
+    rewind(f);
+    b = (unsigned char *)malloc((size_t)fl);
+    if (!b || (long)fread(b, 1, (size_t)fl, f) != fl) { free(b); fclose(f); return 2; }
+    fclose(f);
+    sid2 = has_sid2(b, fl);
+    free(b);
+    ck_ck(sid2 == 0, "fly-no-import-section");
+    av[2] = "ujs/tests/gpu-submit.ujs";
+    av[4] = "/tmp/check-ujs-gpu-pos.wasm";
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    ck_ck(rc == 0, "compile-gpu-submit");
+    f = fopen("/tmp/check-ujs-gpu-pos.wasm", "rb");
+    ck_ck(f != 0, "gpu-wasm-open");
+    if (f) {
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 2; }
+        fl = ftell(f);
+        rewind(f);
+        b = (unsigned char *)malloc((size_t)fl);
+        if (!b || (long)fread(b, 1, (size_t)fl, f) != fl) { free(b); fclose(f); return 2; }
+        fclose(f);
+        sid2 = has_sid2(b, fl);
+        free(b);
+        ck_ck(sid2 == 1, "gpu-has-import-section");
+    }
+    av[2] = "ujs/tests/gpu-submit-call.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-ujs-gpu-call.wasm";
+    av[5] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    free(out);
+    ck_ck(rc == 0, "compile-gpu-call");
+    f = fopen("/tmp/check-ujs-gpu-call.wasm", "rb");
+    ck_ck(f != 0, "gpu-call-open");
+    if (f) {
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 2; }
+        fl = ftell(f);
+        rewind(f);
+        b = (unsigned char *)malloc((size_t)fl);
+        if (!b || (long)fread(b, 1, (size_t)fl, f) != fl) { free(b); fclose(f); return 2; }
+        fclose(f);
+        sid2 = has_sid2(b, fl);
+        ck_ck(sid2 == 1, "gpu-call-has-import");
+        av[2] = "--run";
+        av[3] = "/tmp/check-ujs-gpu-call.wasm";
+        av[4] = 0;
+        out = 0; n = 0;
+        rc = cx_runv_timeout(av, 30, &out, &n);
+        if (out && n) fwrite(out, 1, n, stdout);
+        ck_ck(rc == 0 && ck_has(out, n, "\"value\":1"), "gpu-call-run-ok");
+        if (out) free(out);
+        patched = 0;
+        for (k = 0; k + 15 <= fl; k++) {
+            if (b[k] == 'h' && b[k + 1] == 'o' && b[k + 2] == 's' &&
+                b[k + 3] == 't' && b[k + 4] == '_' && b[k + 5] == 'g' &&
+                b[k + 6] == 'p' && b[k + 7] == 'u' && b[k + 8] == '_' &&
+                b[k + 9] == 's' && b[k + 10] == 'u' && b[k + 11] == 'b' &&
+                b[k + 12] == 'm' && b[k + 13] == 'i' && b[k + 14] == 't') {
+                b[k + 14] = 'x';
+                patched = 1;
+                break;
+            }
+        }
+        ck_ck(patched, "patch-other-import-name");
+        f = fopen("/tmp/check-ujs-gpu-other.wasm", "wb");
+        ck_ck(f != 0, "other-wasm-write");
+        if (f) {
+            ck_ck((long)fwrite(b, 1, (size_t)fl, f) == fl, "other-wasm-bytes");
+            fclose(f);
+        }
+        free(b);
+        av[2] = "--run";
+        av[3] = "/tmp/check-ujs-gpu-other.wasm";
+        av[4] = 0;
+        out = 0; n = 0;
+        rc = cx_runv_timeout(av, 30, &out, &n);
+        if (out && n) fwrite(out, 1, n, stdout);
+        ck_ck(rc != 0 && ck_has(out, n, "import name"), "other-import-run-fail");
+        if (out) free(out);
+    }
+    av[2] = "--run";
+    av[3] = "/tmp/check-ujs-gpu-fly.wasm";
+    av[4] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    ck_ck(rc == 0 && ck_has(out, n, "3868"), "fly-run-3868");
+    if (out) free(out);
+    av[2] = "ujs/tests/gpu-store-tri.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-store-tri.wasm";
+    av[5] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    if (out) free(out);
+    ck_ck(rc == 0, "compile-store-tri");
+    av[2] = "--run";
+    av[3] = "/tmp/check-store-tri.wasm";
+    av[4] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    ck_ck(rc == 0 && ck_has(out, n, "\"gpu_len\":8") && ck_has(out, n, "\"gpu_sum\":323"), "store-tri-len-sum");
+    if (out) free(out);
+    av[2] = "ujs/tests/list65.ujs";
+    av[3] = "-o";
+    av[4] = "/tmp/check-list65.wasm";
+    av[5] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    ck_ck(rc == 0, "list65-ok-under-256");
+    if (out) free(out);
+    av[0] = "sh";
+    av[1] = "-c";
+    av[2] = "exec \"$0\" \"$1\" -o \"$2\" 2>&1";
+    av[3] = "./ujs/ujs.com";
+    av[4] = "ujs/tests/list257.ujs";
+    av[5] = "/tmp/check-list257.wasm";
+    av[6] = 0;
+    out = 0; n = 0;
+    rc = cx_runv_timeout(av, 30, &out, &n);
+    if (out && n) fwrite(out, 1, n, stdout);
+    ck_ck(rc != 0 && ck_has(out, n, "list too long"), "list257-refused");
+    if (out) free(out);
+    av[0] = "sh";
+    av[1] = "./ujs/ujs.com";
+    {
+        FILE *tf;
+        char line[256];
+        char nbuf[32], sbuf[32], fbuf[32];
+        unsigned olen = 0, osum = 0, ofnv = 0;
+        int ni, si, fi;
+        char *p;
+        tf = fopen("ujs/tests/uxep-tri-oracle.tsv", "rb");
+        ck_ck(tf != 0, "oracle-open");
+        if (tf) {
+            while (fgets(line, (int)sizeof line, tf)) {
+                if (line[0] == '#' || line[0] == 'k') continue;
+                p = line;
+                while (*p && *p != '\t') p++;
+                if (*p == '\t') p++;
+                while (*p >= '0' && *p <= '9') { olen = olen * 10u + (unsigned)(*p - '0'); p++; }
+                if (*p == '\t') p++;
+                while (*p >= '0' && *p <= '9') { osum = osum * 10u + (unsigned)(*p - '0'); p++; }
+                if (*p == '\t') p++;
+                while (*p >= '0' && *p <= '9') { ofnv = ofnv * 10u + (unsigned)(*p - '0'); p++; }
+                break;
+            }
+            fclose(tf);
+        }
+        ck_ck(olen > 0 && osum > 0 && ofnv > 0, "oracle-parse");
+        ni = 0; { unsigned t = olen; int r[12], k = 0; if (!t) nbuf[ni++] = '0'; else { while (t) { r[k++] = (int)(t % 10u); t /= 10u; } while (k) nbuf[ni++] = (char)('0' + r[--k]); } } nbuf[ni] = 0;
+        si = 0; { unsigned t = osum; int r[12], k = 0; if (!t) sbuf[si++] = '0'; else { while (t) { r[k++] = (int)(t % 10u); t /= 10u; } while (k) sbuf[si++] = (char)('0' + r[--k]); } } sbuf[si] = 0;
+        fi = 0; { unsigned t = ofnv; int r[12], k = 0; if (!t) fbuf[fi++] = '0'; else { while (t) { r[k++] = (int)(t % 10u); t /= 10u; } while (k) fbuf[fi++] = (char)('0' + r[--k]); } } fbuf[fi] = 0;
+        av[2] = "ujs/tests/gpu-store-v3-tri.ujs";
+        av[3] = "-o";
+        av[4] = "/tmp/check-store-v3.wasm";
+        av[5] = 0;
+        out = 0; n = 0;
+        rc = cx_runv_timeout(av, 30, &out, &n);
+        if (out && n) fwrite(out, 1, n, stdout);
+        if (out) free(out);
+        ck_ck(rc == 0, "compile-v3-tri");
+        av[2] = "--run";
+        av[3] = "/tmp/check-store-v3.wasm";
+        av[4] = 0;
+        out = 0; n = 0;
+        rc = cx_runv_timeout(av, 30, &out, &n);
+        if (out && n) fwrite(out, 1, n, stdout);
+        ck_ck(rc == 0 && ck_has(out, n, nbuf) && ck_has(out, n, sbuf) && ck_has(out, n, fbuf), "v3-matches-oracle");
+        if (out) free(out);
+    }
+    printf("UJS_GPU_IMPORT_OK\tassertions=%d\tfailed=%d\n", ck_asserts, ck_failed);
+    return ck_failed ? 1 : 0;
+}

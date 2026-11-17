@@ -80,9 +80,49 @@
 
 **不交付**：完整 ES · Three-in-wasm · 合包 · 用户 LLM key 进核/packet · UJS 直播主线 · **把外部 `wat2wasm` 当 UJS 品牌出货物**。
 
+### 0.3 实践 demo（host1 + UXE,不挡 `ujs.com` 版号）
+
+目录 `practice/uxe/demo/`。合同与四款现页相同:世界与步进在 `.ujs`/`wasm`,Host 只输入与光栅;`host1Boot.step` + `host_gpu_submit`(失败回退页内 renderer);无 `three.module`;`?auto=1` 只核表长/金,不核截图。细计划仍见 [`plans/demo-three-ports.md`](plans/demo-three-ports.md)。
+
+| 编号 | 页 | 核要交什么 | 完成时玩家应看到 |
+|---|---|---|---|
+| D1 | `fly/` | 金 `return x+100*alt`=3868;可选 `yaw`/`turn` 全局 | 追机;AUTO 标题 `FLY_OK` |
+| D2 | `water-keeps/` | 岸 128 + pal 8;`turn`/`dist`/`hdg` | 八界灯舟;AUTO `WATER_OK` |
+| D3 | `ink-walk/` | 三层 x,z 折线;`cam`/`turn` | NPR 可逛;AUTO `INK_OK` |
+| D4 | `oneshot/` | 6 盒 xyz;`ang`/`turn` | 一发转轨;AUTO `ONESHOT_OK` |
+| D5 | `ghibli-world/` | 种子表长>=8 草稿 | 未达观感合同;AUTO 暂 `GHIBLI_OK` |
+
+另: `host1-games/` 是 host1 金闸(`HOST1_GAMES_OK_GL`),不是叙事世界。
+
+**D5** 草稿页已开(`ghibli-world/`,`GHIBLI_OK` 表长>=8);观感合同未达。
+
+### 0.3b 已核实缺口(2026-11-17)
+
+记账:`practice/uxe/demo/G1-submit.md` `G3-math.md` `G4-step.md`。
+
+#### UXE
+
+规格、three.js 对标与路线见 [`prd_uxe_sped.md`](prd_uxe_sped.md)。摘要:浏览器宿主 + UXEP/UXIN + 渲染器;核组包步进、宿主提交与画;已端到端验证仅 gpu-tri 单三角 212B(批次 `ujs-gpu-tri`);ABI 真源 [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md)。M7 demo 发布 `docs/uxe/<id>/` 见 sped U6。
+
+
+
+#### ujs.com
+
+| 号 | 事实 | 计划 | 验收 |
+|---|---|---|---|
+| C1 | 五切片 APE;`ujs.com` gitignore;无 win/arm64 | build-ape.cx | `sh ./unisacc.com tools/check-ujs-ape.cx` 末行 `UJS_APE_OK` failed=0。批次 `ujs-ape-slices` |
+| C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
+| C3 | host1 唯一 import 拷包交 renderer;其它 import 拒绝 | G1-submit.md | 同 U1;fly `--run` 3868 |
+| C4 | 2026-11-17 实测(`--check --files` 两文件):`compiler_min.cx` **96**(同记录,未降;基数 96);`host1_vm.cx` **34**(tsv 行仍记 36,未改写基线;曾记 36)。故 host1<=34 已到,compiler<=50 仍差 46。注意全仓扫描当前另有超基线:`ujs/product/build.cx` 21>17、`ujs/product/ujs_main.cx` 60>52,`gold-{ic,lex,parse,rest,type}.cx`、`net-{gold,lex,parse}-check.cx`、`pack-nets.cx` 无基线行,`--check` 因它们 FAIL;两目标文件本身未超 | 本行;不并 G1 | 到期前 `tests/cxraw.cx --check --files` 两文件 |
+| C5 | 字面 list 元素上限 **256**(`compiler_min` `n>256` -> `list too long`)。字符串字面量 0-255 非 NUL 仍是另一上限(prd 完成判据 / `str_lit256`);`compiler.ujs` 的 `DKEY=list(256)` 是键缓冲。动态 `list(n)` 不受字面 256 限,`store_bytes` n<=4096 | 本行 | `list65.ujs` 可编;`list257.ujs` 非零且含 `list too long`; oracle `uxep-tri-oracle.tsv` |
+
+
+
+
 ---
 
-## 目标（按杠杆）
+## 目标(按杠杆)
+
 
 **主线按 `plans/0.0.x` 推进 `ujs.com` 生产力工具**；Pages／`{app}` 仍要可玩，但是实践脊，不挡 0.0.x 产品版号。门禁先于功能。不开新门面游戏。
 

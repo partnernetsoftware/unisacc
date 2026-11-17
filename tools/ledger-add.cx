@@ -1,13 +1,13 @@
-/* tools/ledger-add.cx -- the one write entry of agentwork/ledger.tsv, and its column-count check.
+/* tools/ledger-add.cx -- explicit six-column data append and column-count checks; no default coordination ledger.
  *
- *   sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA|-] [--evidence PATHS|-] [--role R] [--ledger FILE] [--date YYYY-MM-DD]
- *   sh ./unisacc.com tools/ledger-add.cx -- --check [--ledger FILE] [--baseline FILE]
- *   sh ./unisacc.com tools/ledger-add.cx -- --baseline-write FILE [--ledger FILE]
+ *   sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA|-] [--evidence PATHS|-] [--role R] --ledger FILE [--date YYYY-MM-DD]
+ *   sh ./unisacc.com tools/ledger-add.cx -- --check --ledger FILE [--baseline FILE]
+ *   sh ./unisacc.com tools/ledger-add.cx -- --baseline-write FILE --ledger FILE
  *
  * The ledger has six TAB columns: 时间, id, 事件(决定/依据/结果合写), commit, 证据, 角色/模型.
  * --add appends exactly one such row (date = today UTC unless --date) and never touches an old line: the
  * new file (old bytes + row) is written to a temp file next to the ledger and renamed over it, under an
- * exclusive flock on out/.ledger-add.lock (ledger.lock beside the ledger when there is no out/), so two
+ * exclusive flock on sy_tmpdir()/.unisacc-ledger-add.lock, so two
  * concurrent adds both land.  A TAB, newline or CR in any field, an empty or whitespace-bearing id, a
  * missing/empty --id or --text is refused with rc 2 and nothing is written.  The id is column 2, which is
  * the key tools/commit-own.cx --keyed PATH ID matches through own-diff --field.
@@ -25,7 +25,6 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 
-#define LA_DEF "agentwork/ledger.tsv"
 #define LA_MAXC 64
 
 static void la_die(const char *a, const char *b) { fprintf(stderr, "ledger-add: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
@@ -132,7 +131,7 @@ static int la_check(const char *ledger, const char *baseline, const char *bwrite
 }
 
 int main(int argc, char **argv) {
-    const char *id = 0, *text = 0, *commit = "-", *evid = "-", *role = "agent", *ledger = LA_DEF, *baseline = 0, *bwrite = 0, *date = 0;
+    const char *id = 0, *text = 0, *commit = "-", *evid = "-", *role = "agent", *ledger = 0, *baseline = 0, *bwrite = 0, *date = 0;
     int mode = 0, a;   /* 1 add, 2 check, 3 baseline-write */
     char today[16];
     for (a = 1; a < argc; a++) {
@@ -151,8 +150,7 @@ int main(int argc, char **argv) {
         else la_die("usage: --add --id ID --text TEXT [--commit SHA|-] [--evidence P|-] [--role R] | --check [--baseline F] | --baseline-write F", s);
     }
     if (!mode) la_die("usage: --add | --check | --baseline-write", 0);
+    if (!ledger || !*ledger) la_die("default coordination ledger retired; use prd_mempalace.md; independent data requires explicit --ledger FILE", 0);
     if (mode == 1) { if (!date) { la_today(today, sizeof today); date = today; } return la_add(ledger, date, id, text, commit, evid, role); }
-    /* default ledger without --baseline: use the committed format baseline when present, so a bare --check is not a false OVER */
-    if (mode == 2 && !baseline && tx_eqz(ledger, LA_DEF) && sy_exists("build/ledger-format-baseline.tsv") == 1) baseline = "build/ledger-format-baseline.tsv";
     return la_check(ledger, mode == 2 ? baseline : 0, mode == 3 ? bwrite : 0);
 }

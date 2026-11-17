@@ -1,0 +1,47 @@
+#pragma unisa use chrome_dom
+/* tools/check-chrome_dom.cx -- 缺 chrome=3; wipe 护栏; 自定义终值不重试.
+ *
+ * sh ./unisacc.com tools/check-chrome_dom.cx --
+ */
+static int failed, asserts;
+static void ck(int ok, const char *lab) {
+    asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+int main(void) {
+    int retries = -1;
+    int rc;
+    FILE *f;
+    const char *hang = "/tmp/chd-hang.html";
+    const char *okp = "/tmp/chd-ok.html";
+    const char *hangb = "<!DOCTYPE html><html><head><title>hang</title></head><body>x</body></html>\n";
+    const char *okb = "<!DOCTYPE html><html><head><title>CHD_DONE</title></head><body>x</body></html>\n";
+    const char *fin_done[1];
+    fin_done[0] = "CHD_DONE";
+    ck(chd_wipe("/") != 0, "wipe-root-refused");
+    ck(chd_wipe("/tmp") != 0, "wipe-tmp-refused");
+    ck(chd_wipe("/tmp/chrome-dom-/../etc") != 0, "wipe-dotdot-refused");
+    rc = chd_dump_expect("/no/such/chrome-bin", "file:///tmp/x.html", "CHD_DONE", fin_done, 1, "hang", 1, 5, &retries);
+    ck(rc == 3, "missing-chrome-unmeasured");
+    f = fopen(hang, "wb");
+    if (!f) return 2;
+    fwrite(hangb, 1, 78, f);
+    fclose(f);
+    retries = -1;
+    rc = chd_dump_expect("/usr/bin/google-chrome", "file:///tmp/chd-hang.html", "CHD_DONE", fin_done, 1, "hang", 2, 8, &retries);
+    ck(rc == 2, "hang-page-pending-exhausted");
+    f = fopen(okp, "wb");
+    if (!f) return 2;
+    fwrite(okb, 1, 82, f);
+    fclose(f);
+    retries = -1;
+    rc = chd_dump_expect("/usr/bin/google-chrome", "file:///tmp/chd-ok.html", "CHD_DONE", fin_done, 1, "hang", 3, 15, &retries);
+    ck(rc == 0 && retries == 0, "custom-final-no-retry");
+    if (failed) {
+        printf("CHD_FAIL\tasserts=%d\tfailed=%d\n", asserts, failed);
+        return 1;
+    }
+    printf("CHD_OK\tasserts=%d\tfailed=0\n", asserts);
+    return 0;
+}

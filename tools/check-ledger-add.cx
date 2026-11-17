@@ -61,6 +61,11 @@ int main(void) {
     }
     cx_write(K, "", 0);
     {   size_t n; char *b = rd(L, &n); cx_write(K, b, n); }
+    {   rc = shc("sh ./unisacc.com tools/ledger-add.cx -- --add --id RETIRED --text no-write 2>&1", o, sizeof o);
+        ck(rc == 2 && has(o, "default coordination ledger retired") && has(o, "prd_mempalace.md") && same(L, K), "default-add-retired-refuses-no-edit");
+        rc = shc("sh ./unisacc.com tools/ledger-add.cx -- --check 2>&1", o, sizeof o);
+        ck(rc == 2 && has(o, "explicit --ledger FILE") && same(L, K), "default-check-retired-refuses-no-edit");
+    }
     {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", "--text", "a\tb", 0}; rc = la(a, o, sizeof o);
         ck(rc == 2 && same(L, K), "refuse-tab"); }
     {   char *a[] = {"--add", "--ledger", L, "--id", "T-3", "--text", "a\nb", 0}; rc = la(a, o, sizeof o);
@@ -91,25 +96,26 @@ int main(void) {
             crc = shc(cc, o, sizeof o);
         ck(crc == 0 && count(L, "\tC-1\tone\t") == 1 && count(L, "\tC-2\ttwo\t") == 1 && count(L, "\tT-1\t") == 1 && count(L, "\tT-2\t") == 1, "concurrent-adds-keep-both");
     }
-    {   /* precommit 账本格式闸(tools/precommit.cx ledger_gate):夹具 git 仓里顶层条目软链回本仓,agentwork/ 与 build/ 自备。
+    {   /* precommit 账本格式闸(tools/precommit.cx ledger_gate):夹具 git 仓里顶层条目软链回本仓,archive/ 与 build/ 自备。
            好行通过;新坏行被拒并点名列数;同一提交放宽基线仍被拒(基线取 HEAD);账本未暂存则不触发。 */
         static char cmd[4096], G[300], GL[340], GB[340]; int prc;
         const char *base = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n";
         const char *good = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n";
         const char *bad = "h\th\th\th\th\th\n2026-01-01\tOLD-5\tonly five\t-\tr\n2026-01-02\tNEW-6\tsix cols\t-\t-\tr\n2026-01-03\tBAD-3\tthree cols\n";
-        const char *run = "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && sh ./unisacc.com tools/precommit.cx 2>&1";
-        cx_fmt(G, sizeof G, "%s/g", td); cx_fmt(GL, sizeof GL, "%s/agentwork/ledger.tsv", G); cx_fmt(GB, sizeof GB, "%s/build/ledger-format-baseline.tsv", G);
-        prc = cx_fmt(cmd, sizeof cmd, "R=$(pwd) && mkdir -p '%s/agentwork' '%s/build' && cd '%s' && git init -q . && git config user.email a@b && git config user.name t"
-                     " && for e in \"$R\"/*; do b=${e##*/}; [ \"$b\" = agentwork ] || [ \"$b\" = build ] || ln -s \"$e\" \"$b\"; done", G, G, G) ? 99 : shc(cmd, o, sizeof o);
+        const char *run = "cd '%s' && git add archive/agentwork-retire-2026-11/ledger.tsv build/ledger-format-baseline.tsv && sh ./unisacc.com tools/precommit.cx 2>&1";
+        cx_fmt(G, sizeof G, "%s/g", td); cx_fmt(GL, sizeof GL, "%s/archive/agentwork-retire-2026-11/ledger.tsv", G); cx_fmt(GB, sizeof GB, "%s/build/ledger-format-baseline.tsv", G);
+        prc = cx_fmt(cmd, sizeof cmd, "R=$(pwd) && mkdir -p '%s/archive/agentwork-retire-2026-11' '%s/build' && cd '%s' && git init -q . && git config user.email a@b && git config user.name t"
+                     " && for e in \"$R\"/*; do b=${e##*/}; [ \"$b\" = archive ] || [ \"$b\" = agentwork ] || [ \"$b\" = build ] || ln -s \"$e\" \"$b\"; done", G, G, G) ? 99 : shc(cmd, o, sizeof o);
         if (prc == 0) prc = cx_write(GL, base, strlen(base)) || cx_write(GB, "5\t1\n", 4);
-        if (prc == 0) prc = cx_fmt(cmd, sizeof cmd, "cd '%s' && git add agentwork/ledger.tsv build/ledger-format-baseline.tsv && git -c core.hooksPath=/dev/null commit -q -m base", G) ? 99 : shc(cmd, o, sizeof o);
+        if (prc == 0) prc = cx_fmt(cmd, sizeof cmd, "cd '%s' && git add archive/agentwork-retire-2026-11/ledger.tsv build/ledger-format-baseline.tsv && git -c core.hooksPath=/dev/null commit -q -m base", G) ? 99 : shc(cmd, o, sizeof o);
         ck(prc == 0, "precommit-fixture-repo");
+        {char retired[500];cx_fmt(retired,sizeof retired,"%s/agentwork",G);ck(sy_exists(retired)==0,"precommit-without-retired-directory");}
         if (prc == 0) {
             cx_fmt(cmd, sizeof cmd, run, G);
             cx_write(GL, good, strlen(good)); rc = shc(cmd, o, sizeof o);
             ck(rc == 0 && has(o, "blocked=0") && !has(o, "BLOCKED ledger"), "precommit-good-row-passes");
             cx_write(GL, bad, strlen(bad)); rc = shc(cmd, o, sizeof o);
-            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3") && has(o, "ledger-add.cx -- --add"), "precommit-new-bad-row-blocked-naming-cols");
+            ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3") && has(o, "ledger-add.cx -- --check --ledger"), "precommit-new-bad-row-blocked-naming-cols");
             cx_write(GB, "3\t1\n5\t1\n", 8); rc = shc(cmd, o, sizeof o);
             ck(rc == 1 && has(o, "BLOCKED ledger") && has(o, "cols=3"), "precommit-baseline-loosened-in-same-commit-still-blocked");
             cx_write(GL, base, strlen(base)); cx_write(GB, "5\t1\n", 4); rc = shc(cmd, o, sizeof o);

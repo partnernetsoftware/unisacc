@@ -6,8 +6,10 @@
 #pragma unisa use cxlib.productpkg
 #pragma unisa use text.text
 #pragma unisa use cases.stream_pin
+#pragma unisa use mem.bytes
 static char root[4096],work[4096],bound[4200],inc[4200],product[4200];
 static int checks,failures;
+static char t_os[8],t_arch[16],t_r0[16];static unsigned long long t_scr;   /* runtime-tail route, set by expected_head */
 static const char *product_pin="7a0cf28bba67f2394abaf783b886baeafe0687f4590c392dbd8611212a0f5f77";
 static const char *com_pin,*model_pin;static char ov_com[65],ov_model[65],ov_prod[65],ov_src[65];
 static const char *source_pin="4d9b8a3a526f340709316f7fb67189603bbd15bcd38dbab5b7997617c505a83e";
@@ -25,8 +27,10 @@ static void path(char *dst,size_t cap,const char *a,const char *b){int n=snprint
 static void save(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);size_t at=0;if(fd<0)die("exclusive-create");while(at<n){ssize_t k=write(fd,s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(fd))die("close");}
 static char *readfile(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
 static void digest(const char *p,char h[65]){size_t n;char *s=readfile(p,&n);cx_sha256_hex(s,n,h);free(s);}
-static int field(const char *s,const char *key,const char *val){char needle[160];int n=snprintf(needle,sizeof needle,"\"%s\":\"%s\"",key,val);return n>0&&(size_t)n<sizeof needle&&strstr(s,needle)!=0;}
-static int lower_field(const char *s,const char *key,const char *val){const char *a=strstr(s,"\"stream_unit\":\"lower\"");const char *e;char item[1200];size_t n;if(!a||(e=strchr(a,'}'))==0)return 0;n=(size_t)(e-a);if(n>=sizeof item)return 0;{void *cx_kept=memcpy(item,a,n);(void)cx_kept;}item[n]=0;return field(item,key,val);}
+/* First occurrence of needle in s[0..n): a bounded memcmp scan (same result as strstr on a NUL-terminated s of length n). */
+static const char *find_in(const char *s,size_t n,const char *needle){size_t k=strlen(needle),i;if(k>n)return 0;for(i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return s+i;return 0;}
+static int field(const char *s,const char *key,const char *val){char needle[160];int n=snprintf(needle,sizeof needle,"\"%s\":\"%s\"",key,val);return n>0&&(size_t)n<sizeof needle&&find_in(s,strlen(s),needle)!=0;}
+static int lower_field(const char *s,const char *key,const char *val){size_t sn=strlen(s);const char *a=find_in(s,sn,"\"stream_unit\":\"lower\"");const char *e;char item[1200];size_t n;if(!a||(e=memchr(a,'}',sn-(size_t)(a-s)))==0)return 0;n=(size_t)(e-a);if(n>=sizeof item)return 0;{void *cx_kept=memcpy(item,a,n);(void)cx_kept;}item[n]=0;return field(item,key,val);}
 static void line(np_buf *b,const char *s){np_puts(b,s);np_puts(b,"\n");}
 static void fmtline(np_buf *b,const char *fmt,const char *a,const char *c,const char *d){char t[400];int n=snprintf(t,sizeof t,fmt,a,c,d);if(n<0||(size_t)n>=sizeof t)die("oracle-bound");line(b,t);}
 /* Read each gold row directly, requiring exactly one key. */
@@ -37,11 +41,67 @@ static void gold(const char *file,const char *key,const char *arch,char *out,siz
    size_t len=end-at-w;if(len+1>cap)die("gold-value-bound");{void *cx_kept=memcpy(out,s+at+w,len);(void)cx_kept;}out[len]=0;hits++;}}
   at=end+1;}
  free(s);if(hits!=1)die("gold-key-count");}
+/* exec/facts/enc-literals.tsv "lower KEY VALUE" rows (exactly one per key) */
+static unsigned long long lit(const char *key){char p[4200];size_t n,at=0;int hits=0;unsigned long long v=0;char *s;path(p,sizeof p,root,"exec/facts/enc-literals.tsv");s=readfile(p,&n);
+ while(at<n){size_t end=at,k=strlen(key);while(end<n&&s[end]!='\n')end++;
+  if(end-at>6+k+1&&!memcmp(s+at,"lower\t",6)&&!memcmp(s+at+6,key,k)&&s[at+6+k]=='\t'){char d[32];size_t m=end-(at+7+k);char *e;if(m==0||m>=sizeof d)die("literal-bound");if(mm_copy(d,(long)sizeof d,s+at+7+k,(long)m))die("literal-copy");d[m]=0;errno=0;v=strtoull(d,&e,10);if(errno||*e)die("literal-value");hits++;}
+  at=end+1;}
+ free(s);if(hits!=1)die("literal-count");return v;}
+/* unisa/lower.py WIN_HSTD = SCRATCH+PRINTMAX, WIN_WRITTEN = +HSTD_BYTES, WIN_SAVE = +WRITTEN_BYTES, WIN_ARGVA = +SAVE_BYTES,
+   WIN_EXTRA = WIN_ARGVA + ARGVA_BYTES (enc-literals.tsv rows 225, 229, 231, 232, 233, 237; ARGVA_BYTES 131080 since 134a1b3643) */
+static unsigned long long win_save(void){return lit("SCRATCH")+lit("PRINTMAX")+lit("WIN_HSTD_BYTES")+lit("WIN_WRITTEN_BYTES");}
+static unsigned long long win_extra(void){return win_save()+lit("WIN_SAVE_BYTES")+lit("WIN_ARGVA_BYTES");}
 static void expected_head(np_buf *b,const char *target,int data){char os[8],arch[16],r7[16];const char *slash=strchr(target,'/');size_t k=(size_t)(slash-target);if(k>=sizeof os)die("target-os-bound");{void *cx_kept=memcpy(os,target,k);(void)cx_kept;}os[k]=0;{if(cx_fmt(arch,sizeof arch,"%s",slash+1))die("format-bound");}gold("weights/gold/regmap.tsv","r7",arch,r7,sizeof r7);
- fmtline(b,"@target %s",target,"","");line(b,data?"@data 41":"@data -");if(data){line(b,"@sym big 264");line(b,"@sym s 256");}fmtline(b,"@src_os %s",os,"","");line(b,tx_eqz(os, "win")?(data?"@data_len 800":"@data_len 776"):(data?"@data_len 192":"@data_len 168"));line(b,tx_eqz(os, "win")?"@bss 65536":"@bss 0");line(b,"@relocs -");line(b,"_start:");
- if(tx_eqz(os, "win")){line(b,data?"winstdh 448":"winstdh 424");line(b,data?"winargs 328, 336, 544":"winargs 304, 312, 520");if(tx_eqz(arch, "arm64"))fmtline(b,"spinit %s, %s",r7,data?"66592":"66568","");else fmtline(b,"spinit %s",r7,"","");}
+ if(cx_fmt(t_os,sizeof t_os,"%s",os)||cx_fmt(t_arch,sizeof t_arch,"%s",arch))die("format-bound");gold("weights/gold/regmap.tsv","r0",arch,t_r0,sizeof t_r0);t_scr=data?280:256;
+ fmtline(b,"@target %s",target,"","");line(b,data?"@data 41":"@data -");if(data){line(b,"@sym big 264");line(b,"@sym s 256");}fmtline(b,"@src_os %s",os,"","");if(tx_eqz(os, "win")){char t[64];if(cx_fmt(t,sizeof t,"@data_len %llu",(data?24ULL:0ULL)+win_extra()))die("format-bound");line(b,t);}else line(b,data?"@data_len 192":"@data_len 168");line(b,tx_eqz(os, "win")?"@bss 65536":"@bss 0");line(b,"@relocs -");line(b,"_start:");
+ if(tx_eqz(os, "win")){line(b,data?"winstdh 448":"winstdh 424");line(b,data?"winargs 328, 336, 544":"winargs 304, 312, 520");if(tx_eqz(arch, "arm64")){char t[32];if(cx_fmt(t,sizeof t,"%llu",256ULL+(data?24ULL:0ULL)+win_extra()+lit("WIN_STACK")))die("format-bound");fmtline(b,"spinit %s, %s",r7,t,"");}else fmtline(b,"spinit %s",r7,"","");}
  else{fmtline(b,"spinit %s",r7,"","");line(b,tx_eqz(os, "lnx")?(data?"argsave 328, 336, true":"argsave 304, 312, true"):(data?"argsave 328, 336, false":"argsave 304, 312, false"));}}
-static void run_case(const char *bin,const char *tag,const char *input,np_buf *want){char p[4200],why[1024],label[180];np_result r;char *av[]={bound,"12",(char *)bin,p,p,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};path(p,sizeof p,work,tag);np_buf tape={0};np_puts(&tape,input);line(&tape,".end");line(want,".end");save(p,tape.p,tape.n);free(tape.p);if(np_run(av,root,(char *const *)env,14,&r,why,sizeof why))die(why);
+/* ---- runtime tail product lower appends after the body, before .end ----
+   367d54a115 named fallthrough guard; 3519cdb1aa/56e1018466 code-shell exit -> FG.begin; same sequence as
+   tests/stream-lower.cx lower_tail (86d52b52ea) and tests/stream-lower-domain.cx rt_tail (288950d344).
+   - sequence and offsets (fd 2 at S, words at S+24/32/40, pointer at S+8, length 24 then 12 at S+16, status 127,
+     exit twice): exec/lower/fallguard-result.tsv FG.empty..FG.rawexit; words: exec/lower/fallguard-manifest.tsv row 3;
+   - S = DATA_BASE 256 + used (unisa/lower.py; used 0 without data, 24 for the sparse tape: .str s 1 at 0, .bss big 16
+     8-aligned at 8), HSTD = S+168, WRITTEN = S+192 (unisa/lower.py WIN_HSTD/WIN_WRITTEN, as in stream-lower-domain.cx);
+   - sysno, nr register, arg registers, ret, gate, retconv, winimp: weights/gold/abi.tsv row (op, os, arch);
+   - gate form: weights/gold/enc.tsv row (op, os, arch); immediate register: weights/gold/regmap.tsv r0 for arch;
+   - winapi names: exec/facts/enc-literals.tsv rows 189 (ExitProcess) and 191 (WriteFile). */
+enum{AB_SYSNO,AB_ARG0,AB_ARG1,AB_ARG2,AB_ARG3,AB_ARG4,AB_ARG5,AB_RET,AB_GATE,AB_NRREG,AB_SHAPE,AB_RETCONV,AB_WINIMP,AB_NF};
+typedef struct {char f[AB_NF][24];char form[16];} abi_row_t;
+/* exactly one row whose first three tab fields are op, os, arch; copies up to max following fields */
+static void row3(const char *file,const char *op,const char *os,const char *arch,char out[][24],int max){char p[4200];size_t n,at=0;int hits=0;char *s;path(p,sizeof p,root,file);s=readfile(p,&n);
+ while(at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;if(end>at&&s[at]!='#'){const char *f[3+AB_NF];size_t fl[3+AB_NF];int k=0;size_t b=at;
+   while(k<3+AB_NF){size_t e=b;while(e<end&&s[e]!='\t')e++;f[k]=s+b;fl[k]=e-b;k++;if(e>=end)break;b=e+1;}
+   if(k>=3+max&&fl[0]==strlen(op)&&!memcmp(f[0],op,fl[0])&&fl[1]==strlen(os)&&!memcmp(f[1],os,fl[1])&&fl[2]==strlen(arch)&&!memcmp(f[2],arch,fl[2])){int i;
+    for(i=0;i<max;i++){if(fl[3+i]+1>24)die("abi-field-bound");if(mm_copy(out[i],24,f[3+i],(long)fl[3+i]))die("abi-field-copy");out[i][fl[3+i]]=0;}hits++;}}
+  at=end+1;}
+ free(s);if(hits!=1)die("abi-row-count");}
+static void abi_get(const char *op,abi_row_t *a){char e[1][24];row3("weights/gold/abi.tsv",op,t_os,t_arch,a->f,AB_NF);row3("weights/gold/enc.tsv",op,t_os,t_arch,e,1);if(cx_fmt(a->form,sizeof a->form,"%s",e[0]))die("format-bound");}
+static int t_intlike(const char *s){const char *p=s;if(*p=='+'||*p=='-')p++;
+ if(p[0]=='0'&&p[1]&&strchr("xXoObB",p[1])){int base=(p[1]|32)=='x'?16:(p[1]|32)=='o'?8:2;p+=2;if(!*p)return 0;for(;*p;p++){int c=*p|32,d=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:99;if(d>=base)return 0;}return 1;}
+ if(!*p)return 0;{const char *q;int nz=0;for(q=p;*q;q++){if(*q<'0'||*q>'9')return 0;if(*q!='0')nz=1;}if(p[0]=='0'&&p[1]&&nz)return 0;}return 1;}
+/* tins.py _arg quoting (as stream-lower-domain.cx Q) */
+static const char *tq(char *buf,size_t cap,const char *v){if(cx_fmt(buf,cap,"%s%s",(t_intlike(v)||tx_eqz(v,"true")||tx_eqz(v,"false")||tx_eqz(v,"none"))?"'":"",v))die("meta-bound");return buf;}
+static void tl(np_buf *b,const char *fmt,...){char t[700];va_list ap;int n;va_start(ap,fmt);n=vsnprintf(t,sizeof t,fmt,ap);va_end(ap);if(n<0||(size_t)n>=sizeof t)die("tail-bound");line(b,t);}
+static void t_store(np_buf *b,const char *v,unsigned long long off){tl(b,"imm %s, %s",t_r0,v);tl(b,"setmem %llu, %s",t_scr+off,t_r0);}
+static void t_ptr(np_buf *b){tl(b,"setreg %s, addr %llu",t_r0,t_scr+24);tl(b,"setmem %llu, %s",t_scr+8,t_r0);}
+static void t_gate(np_buf *b,const char *op,const char *winapi,int is_exit){abi_row_t a;char q[7][40];
+ abi_get(op,&a);
+ /* lower.py 267/295: a winapi gate saves r0..r7 at base+WIN_SAVE before the arguments and restores after it */
+ if(tx_eqz(t_os,"win"))tl(b,"winsave %llu",t_scr+win_save());
+ if(!tx_eqz(a.f[AB_SYSNO],"none")){char *e;long long v;errno=0;v=strtoll(a.f[AB_SYSNO],&e,0);if(errno||*e)die("sysno");tl(b,"setreg %s, imm %lld role=sysno",a.f[AB_NRREG],v);}
+ if(is_exit){tl(b,"setreg %s, mem %llu role=arg0",a.f[AB_ARG0],t_scr);tl(b,"setreg %s, imm 0 role=arg1",a.f[AB_ARG1]);tl(b,"setreg %s, imm 0 role=arg2",a.f[AB_ARG2]);}
+ else{tl(b,"setreg %s, mem %llu role=arg0",a.f[AB_ARG0],t_scr);tl(b,"setreg %s, mem %llu role=arg1",a.f[AB_ARG1],t_scr+8);tl(b,"setreg %s, mem %llu role=arg2",a.f[AB_ARG2],t_scr+16);}
+ tl(b,"gate form=%s gate=%s carry=%s winapi=%s catop=%s sysno=%s retconv=%s winimp=%s ret=%s hstd=%llu written=%llu scr0=%llu scr1=%llu",
+  tq(q[0],40,a.form),tq(q[1],40,a.f[AB_GATE]),tx_eqz(t_os,"osx")?"true":"false",winapi,op,tq(q[2],40,a.f[AB_SYSNO]),tq(q[3],40,a.f[AB_RETCONV]),tq(q[4],40,a.f[AB_WINIMP]),tq(q[5],40,a.f[AB_RET]),t_scr+168,t_scr+192,t_scr,t_scr+8);
+ if(tx_eqz(t_os,"win"))tl(b,"winrest %llu, %s",t_scr+win_save(),a.f[AB_RET]);}
+static void t_tail(np_buf *b){
+ t_store(b,"2",0);t_store(b,"2336364844068794211",24);t_store(b,"7381153994395902310",32);t_store(b,"7954799936736075878",40);
+ t_ptr(b);t_store(b,"24",16);t_gate(b,"write","WriteFile",0);
+ t_store(b,"8391155123483517028",24);t_store(b,"175403617",32);
+ t_store(b,"2",0);t_ptr(b);t_store(b,"12",16);t_gate(b,"write","WriteFile",0);
+ t_store(b,"127",0);t_gate(b,"exit","ExitProcess",1);t_store(b,"127",0);t_gate(b,"exit","ExitProcess",1);}
+static void run_case(const char *bin,const char *tag,const char *input,np_buf *want){char p[4200],why[1024],label[180];np_result r;char *av[]={bound,"12",(char *)bin,p,p,inc,0};const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};path(p,sizeof p,work,tag);np_buf tape={0};np_puts(&tape,input);line(&tape,".end");t_tail(want);line(want,".end");save(p,tape.p,tape.n);free(tape.p);if(np_run(av,root,(char *const *)env,14,&r,why,sizeof why))die(why);
  {if(cx_fmt(label,sizeof label,"%s.accept",tag))die("format-bound");}ck(r.rc==0&&r.errn==0,label);{if(cx_fmt(label,sizeof label,"%s.target-text-exact",tag))die("format-bound");}ck(r.outn==want->n&&!memcmp(r.out,want->p,want->n),label);
  /* One fixed name per case: several cases can fail in one run and save() is exclusive-create, so a shared name would turn the second failure into an unrelated REFUSE. */
  if(r.outn!=want->n||memcmp(r.out,want->p,want->n)){char q[4200],nm[80];if(cx_fmt(nm,sizeof nm,"actual.%s.text",tag))die("actual-name-bound");path(q,sizeof q,work,nm);save(q,r.out,r.outn);}np_free(&r);}
@@ -52,6 +112,14 @@ int main(int argc,char **argv){const target_row *x=0;char dir[4200],bin[4200],re
 #endif
  if(!realpath(argv[2],root)||!realpath(argv[3],dir)||argv[4][0]!='/')die("paths");{if(cx_fmt(work,sizeof work,"%s",argv[4]))die("format-bound");}if(mkdir(work,0700))die("new-outdir-required");
  path(bound,sizeof bound,root,"tools/bound");path(inc,sizeof inc,root,"include");path(product,sizeof product,root,"unisacc.com");path(bin,sizeof bin,dir,"unisacc-stream6.com");path(receipt,sizeof receipt,dir,"streams.json");
+ /* The shared streams material is built at its default route (lnx/x86_64); a foreign target needs a shim whose
+    route is that target. Derive it with the same producer and product into this run's own outdir, never reuse a
+    mismatched route (that compared lnx/x86_64 text against the target oracle). */
+ {char *j=readfile(receipt,&n),rt[100];int same;if(cx_fmt(rt,sizeof rt,"%s/image/O2",x->target))die("route-bound");same=field(j,"selected_route",rt);free(j);
+  if(!same){char tool[4200];np_result r;char why[1024];path(tool,sizeof tool,root,"tools/streams-material.cx");path(dir,sizeof dir,work,"streams-target");
+   {char *bv[]={bound,"50","sh",product,tool,"--",root,dir,"2",(char *)x->target,0};if(np_run(bv,root,0,55,&r,why,sizeof why))die(why);}
+   if(r.rc)die("target-material-build");np_free(&r);path(bin,sizeof bin,dir,"unisacc-stream6.com");path(receipt,sizeof receipt,dir,"streams.json");
+   printf("MATERIAL\tmode=derived-target-route\ttool=tools/streams-material.cx\ttarget=%s\n",x->target);}}
  com_pin=x->com;model_pin=x->model;
  {char *j0=readfile(receipt,&n);/* shim 材料: 钉子取自其收据(见 cases.stream_pin) */
   if(stream_receipt_pin(j0,0,"product_sha256",ov_prod)&&stream_receipt_pin(j0,0,"source_package_sha256",ov_src)&&stream_receipt_pin(j0,"lower","com_sha256",ov_com)&&stream_receipt_pin(j0,"lower","original_M_record_sha256",ov_model)){product_pin=ov_prod;source_pin=ov_src;com_pin=ov_com;model_pin=ov_model;printf("MATERIAL\tmode=receipt-override\tscope=product-stream-shim\ttarget=%s\n",x->target);}

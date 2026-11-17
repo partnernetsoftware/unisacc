@@ -186,7 +186,7 @@ typedef struct stamps {
     long long lookup_hit, lookup_ns, art_hit, art_mode, mem_rc, mem_ns;
     /* in-product phase stamps (exec/c/compiler.c package()/output, exec/c/run.c runroute_range):
        construction (package parse), model (per stage: inflate or cache bind), inference (per stage), output */
-    int con_n, model_n, model_inflate_n, model_cache_n, inf_n, inf_rc_bad, out_n, modelcache_n;
+    int con_n, model_n, model_inflate_n, model_cache_n, inf_n, inf_rc_bad, out_n, modelcache_n, modelphase_n;
     long long con_ns, model_ns, inf_ns, out_ns;
     int out_image_n;
     char inf_seq[96];   /* inference stage names in print order, each followed by one space */
@@ -233,6 +233,8 @@ static void parse_stamps(const char *e, size_t n, stamps *st) {
         } else if (prefixed(l, ln, "RR_TIME\tmodelcache\tresult=", &k) && (prefixed(l + k, ln - k, "hit\tbytes=", &k2) || prefixed(l + k, ln - k, "miss\tbytes=", &k2) ||
                    prefixed(l + k, ln - k, "corrupt\tbytes=", &k2)) && digits(l + k + k2, ln - k - k2, &b, 1)) {
             st->modelcache_n++;   /* SPEED-01 lever 4 (2026-11-04): the inflated-model cache reports one row per model lookup */
+        } else if (prefixed(l, ln, "RR_TIME\tmodelphase\tstage=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\trc=")) {
+            st->modelphase_n++;   /* 25caf2d994: per-model inflate/verify/layout sub-phase timing (cx/runtime/modelcache.cx) */
         } else if (prefixed(l, ln, "RR_TIME\tinference\tstage=", &k) && tail_ns(l, ln, &b) && has_field(l, ln, "\trc=")) {
             st->inf_n++; st->inf_ns += b;
             if (!has_field(l, ln, "\trc=0\t")) st->inf_rc_bad++;
@@ -354,8 +356,11 @@ static void cache_scan(int *all, int *host) {
     *all = *host = 0;
     while ((e = readdir(d))) {
         if (tx_eqz(e->d_name, ".") || tx_eqz(e->d_name, "..")) continue;
-        (*all)++;
         n = strlen(e->d_name);
+        /* 5221d6eda9: <key>.plan is a planning memo, not a reuse entry; it is written only once the
+         * planned files are at least 2 s old, so on a freshly written probe it lands on the hit run. */
+        if (n > 5 && tx_eqz(e->d_name + n - 5, ".plan")) continue;
+        (*all)++;
         if (n > 5 && tx_eqz(e->d_name + n - 5, ".host")) (*host)++;
     }
     if (closedir(d)) die("cache scan close");
@@ -595,8 +600,9 @@ int main(int argc, char **argv) {
         printf("UNVERIFIED\tphase-timing-stamps.obj.miss.one-artifact_hit=0-mode=5\tUVR-需新产品\n");
         printf("UNVERIFIED\tphase-timing-stamps.obj.miss.one-lookup_hit=0\tUVR-需新产品\n");
     }
-    ck2(obj_miss.st.inf_n == 7 && !obj_miss.st.inf_rc_bad && tx_eqz(obj_miss.st.inf_seq, "e2 e1 e3 tapecheck prune lower elf "),
-        "obj.miss", "inference-exactly-7-rows-e2-e1-e3-tapecheck-prune-lower-elf-rc0");
+    /* 55cc27a7e8: the default tier (no -O) routes O1, so -c now runs e4 between tapecheck and prune */
+    ck2(obj_miss.st.inf_n == 8 && !obj_miss.st.inf_rc_bad && tx_eqz(obj_miss.st.inf_seq, "e2 e1 e3 tapecheck e4 prune lower elf "),
+        "obj.miss", "inference-exactly-8-rows-e2-e1-e3-tapecheck-e4-prune-lower-elf-rc0");
     ck2(obj_miss.st.out_n == 1 && obj_miss.st.out_image_n == 1, "obj.miss", "one-output-kind=image");
     digest(object, obj1);
     identity_after(&obj_miss);
@@ -632,7 +638,8 @@ int main(int argc, char **argv) {
         ck2(!obj_chg.r.rc && !obj_chg.r.outn && !obj_chg.st.bad, "obj.chg", "rc0-empty-stdout-grammar-clean");
         ck2(obj_chg.st.art_n == 1 && obj_chg.st.art_hit == 0 && obj_chg.st.art_mode == 5 &&
             obj_chg.st.lookup_n == 1 && obj_chg.st.lookup_hit == 0, "obj.chg", "changed-source-artifact_hit=0-lookup_hit=0");
-        ck2(obj_chg.st.inf_n == 7 && !obj_chg.st.inf_rc_bad, "obj.chg", "changed-source-inference-7-rows");
+        ck2(obj_chg.st.inf_n == 8 && !obj_chg.st.inf_rc_bad && tx_eqz(obj_chg.st.inf_seq, "e2 e1 e3 tapecheck e4 prune lower elf "),
+            "obj.chg", "changed-source-inference-8-rows");
         digest(object, obj3);
         ck2(!tx_eqz(obj1, obj3), "obj.chg", "object-bytes-differ-from-first-source");
         identity_after(&obj_chg);

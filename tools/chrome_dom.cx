@@ -1,0 +1,158 @@
+#pragma unisa module chrome_dom
+/* tools/chrome_dom.cx -- dump-dom 取 <title>,独立 profile,pending 有界重试.
+ *
+ * chd_dump_expect(chrome, url, want, finals, nfinal, init_title, max_try, bound_s, retries)
+ * 0 匹配 want;1 终值不对;2 pending 用尽;3 chrome 不可用.
+ * pending = 无 title 或 title==init_title. 其它 title 视为终值,不重试.
+ * 不按命令行模糊杀进程;子进程组由 cx_runv_timeout 收尸.
+ */
+static int chd_seq;
+static const char chd_pref[] = "/tmp/chrome-dom-";
+
+static int chd_title_span(const char *s, size_t n, size_t *a, size_t *b) {
+    size_t i;
+    if (!s) return 0;
+    for (i = 0; i + 7 < n; i++) {
+        if (s[i] == '<' && s[i + 1] == 't' && s[i + 2] == 'i' && s[i + 3] == 't' &&
+            s[i + 4] == 'l' && s[i + 5] == 'e' && s[i + 6] == '>') {
+            *a = i + 7;
+            for (*b = *a; *b + 8 < n; (*b)++) {
+                if (s[*b] == '<' && s[*b + 1] == '/' && s[*b + 2] == 't' && s[*b + 3] == 'i' &&
+                    s[*b + 4] == 't' && s[*b + 5] == 'l' && s[*b + 6] == 'e' && s[*b + 7] == '>')
+                    return 1;
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int chd_title_eq(const char *s, size_t n, const char *want) {
+    size_t a, b, j, wl = 0;
+    if (!s || !want) return 0;
+    while (want[wl]) wl++;
+    if (!chd_title_span(s, n, &a, &b)) return 0;
+    if (b - a != wl) return 0;
+    for (j = 0; j < wl; j++) if (s[a + j] != want[j]) return 0;
+    return 1;
+}
+
+int chd_wipe(const char *dir) {
+    const char *p = chd_pref;
+    int i, plen = 0, dlen = 0;
+    char *av[4];
+    char *o = 0;
+    size_t n = 0;
+    if (!dir) return 1;
+    while (p[plen]) plen++;
+    while (dir[dlen]) dlen++;
+    if (dlen <= plen) return 1;
+    for (i = 0; i < plen; i++) if (dir[i] != p[i]) return 1;
+    if (dir[plen] == 0 || dir[plen] == '/') return 1;
+    for (i = 0; dir[i]; i++) {
+        if (dir[i] == '.' && dir[i + 1] == '.') return 1;
+        if (dir[i] == '/' && dir[i + 1] == '/') return 1;
+        if (dir[i] == '/' && dir[i + 1] == 0) return 1;
+    }
+    av[0] = "rm";
+    av[1] = "-rf";
+    av[2] = (char *)dir;
+    av[3] = 0;
+    cx_runv_timeout(av, 8, &o, &n);
+    if (o) free(o);
+    return 0;
+}
+
+static int chd_one(const char *chrome, const char *url, int bound_s, char **out, size_t *on, char *dir, int dcap) {
+    char *av[16];
+    static char ud[256];
+    int k = 0, i, pid, num, t = 0, u = 0, m = 0;
+    char tmp[16], r[16];
+    FILE *f;
+    const char *flag = "--user-data-dir=";
+    *out = 0;
+    *on = 0;
+    f = fopen(chrome, "rb");
+    if (!f) return 3;
+    fclose(f);
+    while (chd_pref[k] && k < dcap - 12) { dir[k] = chd_pref[k]; k++; }
+    pid = (int)getpid();
+    num = pid * 1000 + (++chd_seq);
+    if (num < 0) num = -num;
+    if (!num) tmp[t++] = '0';
+    else {
+        while (num && m < 15) { r[m++] = (char)('0' + (num % 10)); num /= 10; }
+        while (m) tmp[t++] = r[--m];
+    }
+    tmp[t] = 0;
+    for (i = 0; tmp[i] && k < dcap - 1; i++) dir[k++] = tmp[i];
+    dir[k] = 0;
+    mkdir(dir, 0700);
+    while (flag[u]) { ud[u] = flag[u]; u++; }
+    for (i = 0; dir[i] && u < 255; i++) ud[u++] = dir[i];
+    ud[u] = 0;
+    av[0] = (char *)chrome;
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = "--no-default-browser-check";
+    av[7] = ud;
+    av[8] = "--virtual-time-budget=20000";
+    av[9] = "--timeout=20000";
+    av[10] = "--dump-dom";
+    av[11] = (char *)url;
+    av[12] = 0;
+    return cx_runv_timeout(av, bound_s > 0 ? bound_s : 25, out, on);
+}
+
+int chd_dump_expect(const char *chrome, const char *url, const char *want, const char **finals, int nfinal, const char *init_title, int max_try, int bound_s, int *retries) {
+    char *out = 0;
+    size_t on = 0;
+    char dir[128];
+    int rc, attempt, ntry, pend = 0, i, is_final;
+    if (retries) *retries = 0;
+    if (!chrome || !url || !want) return 1;
+    ntry = max_try > 0 ? max_try : 1;
+    if (ntry > 3) ntry = 3;
+    for (attempt = 0; attempt < ntry; attempt++) {
+        rc = chd_one(chrome, url, bound_s, &out, &on, dir, (int)sizeof dir);
+        if (rc == 3) {
+            chd_wipe(dir);
+            if (out) free(out);
+            return 3;
+        }
+        is_final = 0;
+        if (out && on && !chd_title_eq(out, on, init_title ? init_title : "")) {
+            size_t a, b;
+            if (chd_title_span(out, on, &a, &b) && b > a)
+                is_final = 1;
+        }
+        if (!is_final) {
+            pend++;
+            if (retries) *retries = pend;
+            chd_wipe(dir);
+            if (out) { free(out); out = 0; on = 0; }
+            continue;
+        }
+        if (chd_title_eq(out, on, want)) {
+            if (finals && nfinal > 0) {
+                int hit = 0;
+                for (i = 0; i < nfinal; i++) if (finals[i] && chd_title_eq(out, on, finals[i])) hit = 1;
+                if (!hit) {
+                    chd_wipe(dir);
+                    if (out) free(out);
+                    return 1;
+                }
+            }
+            chd_wipe(dir);
+            if (out) free(out);
+            return 0;
+        }
+        chd_wipe(dir);
+        if (out) free(out);
+        return 1;
+    }
+    return 2;
+}

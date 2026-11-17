@@ -1,0 +1,122 @@
+/* tools/uxe-sped-stat.cx -- 读 prd_uxe_sped.md 第 3 节表,核 §4.1 数字.
+ *
+ * sh ./unisacc.com tools/uxe-sped-stat.cx -- --check [ROOT]
+ * sh ./unisacc.com tools/uxe-sped-stat.cx -- --write [ROOT]  (本版 --write 与 --check 相同,不改文档)
+ */
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+static int is_sep(const char *p) {
+    int i;
+    if (p[0] != '|') return 0;
+    for (i = 1; p[i] && p[i] != '\n'; i++) {
+        char c = p[i];
+        if (c != '|' && c != '-' && c != ':' && c != ' ') return 0;
+    }
+    return 1;
+}
+static int field2(const char *line, char *a, int ac, char *b, int bc) {
+    int i = 0, n = 0, k;
+    const char *p = line;
+    a[0] = 0; b[0] = 0;
+    if (*p == '|') p++;
+    while (*p && *p != '|') p++;
+    if (*p == '|') p++;
+    while (*p == ' ') p++;
+    n = 0;
+    while (*p && *p != '|' && n < ac - 1) {
+        if (*p != ' ') a[n++] = *p;
+        else if (n && a[n - 1] != ' ') a[n++] = *p;
+        p++;
+    }
+    while (n > 0 && a[n - 1] == ' ') n--;
+    a[n] = 0;
+    if (*p == '|') p++;
+    while (*p == ' ') p++;
+    n = 0;
+    while (*p && *p != '|' && n < bc - 1) {
+        if (*p != ' ') b[n++] = *p;
+        else if (n && b[n - 1] != ' ') b[n++] = *p;
+        p++;
+    }
+    while (n > 0 && b[n - 1] == ' ') n--;
+    b[n] = 0;
+    (void)i; (void)k;
+    return a[0] && b[0];
+}
+int main(int argc, char **argv) {
+    FILE *f;
+    char line[1024];
+    char cat[32], st[32];
+    int in = 0, rows = 0;
+    int c_yes = 0, c_part = 0, c_no = 0;
+    int e_yes = 0, e_part = 0, e_no = 0;
+    const char *root = ".";
+    char path[256];
+    int i, n;
+    if (argc > 2 && argv[2][0] != '-') root = argv[2];
+    if (argc > 3) root = argv[3];
+    n = 0;
+    while (root[n]) n++;
+    i = 0;
+    while (i < n && i < 200) { path[i] = root[i]; i++; }
+    {
+        const char *s = "/ujs/prd_uxe_sped.md";
+        int j = 0;
+        while (s[j] && i < 250) path[i++] = s[j++];
+        path[i] = 0;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        path[0] = 'u'; path[1] = 'j'; path[2] = 's'; path[3] = '/';
+        {
+            const char *s = "prd_uxe_sped.md";
+            int j = 0; i = 4;
+            while (s[j]) path[i++] = s[j++];
+            path[i] = 0;
+        }
+        f = fopen(path, "rb");
+    }
+    if (!f) { fprintf(stderr, "no sped md\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        if (!in) {
+            if (line[0] == '|' && line[1] == ' ' && line[2] == 't' && line[3] == 'h') in = 1;
+            continue;
+        }
+        if (is_sep(line)) continue;
+        if (line[0] != '|') break;
+        if (!field2(line, cat, (int)sizeof cat, st, (int)sizeof st)) continue;
+        rows++;
+        {
+            int core = (unsigned char)cat[0] == 0xe6 && (unsigned char)cat[1] == 0xa0;
+            int yes = (unsigned char)st[0] == 0xe6 && (unsigned char)st[1] == 0x9c;
+            int part = (unsigned char)st[0] == 0xe9;
+            if (core) {
+                if (yes) c_yes++;
+                else if (part) c_part++;
+                else c_no++;
+            } else {
+                if (yes) e_yes++;
+                else if (part) e_part++;
+                else e_no++;
+            }
+        }
+    }
+    fclose(f);
+    printf("rows\t%d\ncore_yes\t%d\ncore_part\t%d\ncore_no\t%d\next_yes\t%d\next_part\t%d\next_no\t%d\n",
+           rows, c_yes, c_part, c_no, e_yes, e_part, e_no);
+    ck(rows == 181, "rows-181");
+    ck(c_yes + c_part + c_no == 146, "core-146");
+    ck(e_yes + e_part + e_no == 35, "ext-35");
+    ck(c_yes + e_yes == 2, "yes-2");
+    ck(c_part + e_part == 48, "part-48");
+    ck(c_no + e_no == 131, "no-131");
+    ck(c_yes == 2 && e_yes == 0, "yes-split");
+    ck(c_part == 45 && e_part == 3, "part-split");
+    ck(c_no == 99 && e_no == 32, "no-split");
+    printf("UXE_SPED_STAT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+

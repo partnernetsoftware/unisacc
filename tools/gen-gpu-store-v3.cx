@@ -1,0 +1,339 @@
+/* tools/gen-gpu-store-v3.cx -- hex 事实 -> ujs + tri-b64.js + tri-oracle.js
+ *
+ * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --check
+ * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --write
+ */
+static float fsqrt(float x) {
+    float y;
+    int i;
+    if (x <= 0) return 0;
+    y = x < 1 ? 1 : x;
+    for (i = 0; i < 12; i++) y = 0.5f * (y + x / y);
+    return y;
+}
+
+static const char B64T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static int hx(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static void put_uint(char *d, int *n, unsigned v) {
+    char r[16];
+    int k = 0;
+    if (v == 0) { d[(*n)++] = '0'; return; }
+    while (v) { r[k++] = (char)('0' + (v % 10u)); v /= 10u; }
+    while (k) d[(*n)++] = r[--k];
+}
+static int cmp_file(const char *path, const char *buf, int n) {
+    FILE *g;
+    char *old;
+    long oldn, i;
+    g = fopen(path, "rb");
+    if (!g) { fprintf(stderr, "gen-gpu-store-v3: missing %s\n", path); return 1; }
+    if (fseek(g, 0, SEEK_END) != 0) { fclose(g); return 2; }
+    oldn = ftell(g);
+    rewind(g);
+    old = (char *)malloc((size_t)oldn + 1);
+    if (!old || (long)fread(old, 1, (size_t)oldn, g) != oldn) { free(old); fclose(g); return 2; }
+    fclose(g);
+    if (oldn != n) {
+        fprintf(stderr, "gen-gpu-store-v3: CHECK %s len %ld vs %d\n", path, oldn, n);
+        free(old); return 1;
+    }
+    for (i = 0; i < n; i++) if (old[i] != buf[i]) {
+        fprintf(stderr, "gen-gpu-store-v3: CHECK %s at %ld\n", path, i);
+        free(old); return 1;
+    }
+    free(old);
+    return 0;
+}
+static int write_file(const char *path, const char *buf, int n) {
+    FILE *g = fopen(path, "wb");
+    if (!g) return 2;
+    if ((int)fwrite(buf, 1, (size_t)n, g) != n) { fclose(g); return 2; }
+    fclose(g);
+    return 0;
+}
+int main(int argc, char **argv) {
+    FILE *f;
+    char line[1024];
+    unsigned char b[4096];
+    int nb = 0, i, want_write = 0, want_check = 0;
+    char *gen;
+    int glen = 0, gcap;
+    unsigned ofnv = 0;
+    char *b64js, *orjs;
+    int b64n = 0, orn = 0;
+    unsigned char *wasm;
+    long wasmn = 0;
+    char *av[8];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
+    }
+    if (!want_write && !want_check) {
+        fprintf(stderr, "gen-gpu-store-v3: need --check or --write\n");
+        return 2;
+    }
+    f = fopen("ujs/tests/uxep-tri-oracle.hex", "rb");
+    if (!f) { fprintf(stderr, "gen-gpu-store-v3: no hex\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        char *p = line;
+        int hi, lo;
+        if (line[0] == '#') continue;
+        while (*p && *p != '\n' && *p != '\r') {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || *p == '\n' || *p == '\r') break;
+            hi = hx(*p++);
+            lo = hx(*p++);
+            if (hi < 0 || lo < 0) { fclose(f); fprintf(stderr, "gen-gpu-store-v3: bad hex\n"); return 2; }
+            if (nb >= 4096) { fclose(f); return 2; }
+            b[nb++] = (unsigned char)((hi << 4) | lo);
+        }
+    }
+    fclose(f);
+    if (nb < 8) { fprintf(stderr, "gen-gpu-store-v3: short\n"); return 2; }
+    f = fopen("ujs/tests/uxep-tri-oracle.tsv", "rb");
+    if (!f) { fprintf(stderr, "gen-gpu-store-v3: no tsv\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        char *p;
+        if (line[0] == '#' || line[0] == 'k') continue;
+        p = line;
+        while (*p && *p != '\t') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') { ofnv = ofnv * 10u + (unsigned)(*p - '0'); p++; }
+        break;
+    }
+    fclose(f);
+    if (!ofnv) { fprintf(stderr, "gen-gpu-store-v3: no fnv\n"); return 2; }
+    gcap = nb * 24 + 128;
+    gen = (char *)malloc((size_t)gcap);
+    if (!gen) return 2;
+    gen[glen++] = 'x'; gen[glen++] = 's'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
+    gen[glen++] = 'l'; gen[glen++] = 'i'; gen[glen++] = 's'; gen[glen++] = 't'; gen[glen++] = '(';
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ')'; gen[glen++] = ';'; gen[glen++] = '\n';
+    for (i = 0; i < nb; i++) {
+        gen[glen++] = 'x'; gen[glen++] = 's'; gen[glen++] = '[';
+        put_uint(gen, &glen, (unsigned)i);
+        gen[glen++] = ']'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
+        put_uint(gen, &glen, (unsigned)b[i]);
+        gen[glen++] = ';'; gen[glen++] = '\n';
+    }
+    {
+        const char *s = "p = store_bytes(xs);\nhost_gpu_submit(p, ";
+        while (*s) gen[glen++] = *s++;
+    }
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ')'; gen[glen++] = ';'; gen[glen++] = '\n';
+    {
+        const char *s = "return ";
+        while (*s) gen[glen++] = *s++;
+    }
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ';'; gen[glen++] = '\n';
+    orjs = (char *)malloc(320);
+    if (!orjs) { free(gen); return 2; }
+    {
+        const char *s = "window.GPU_TRI_FNV=";
+        unsigned cr, cg, cb, kr, kg, kb, er, eg, eb;
+        float fr, fg, fb, ex, ey, ez, nlen;
+        float nx, ny, nz, ambx, amby, ambz, ambi;
+        float metal, rough, soft, d0, d1;
+        float colr, colg, colb, baser, baseg, baseb;
+        union { unsigned u; float f; } uf;
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, ofnv);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        if (nb < 188) { free(gen); free(orjs); return 2; }
+        uf.u = (unsigned)b[8] | ((unsigned)b[9] << 8) | ((unsigned)b[10] << 16) | ((unsigned)b[11] << 24);
+        fr = uf.f;
+        uf.u = (unsigned)b[12] | ((unsigned)b[13] << 8) | ((unsigned)b[14] << 16) | ((unsigned)b[15] << 24);
+        fg = uf.f;
+        uf.u = (unsigned)b[16] | ((unsigned)b[17] << 8) | ((unsigned)b[18] << 16) | ((unsigned)b[19] << 24);
+        fb = uf.f;
+        kr = (unsigned)(fr * 255.0f + 0.5f);
+        kg = (unsigned)(fg * 255.0f + 0.5f);
+        kb = (unsigned)(fb * 255.0f + 0.5f);
+        uf.u = (unsigned)b[156] | ((unsigned)b[157] << 8) | ((unsigned)b[158] << 16) | ((unsigned)b[159] << 24);
+        fr = uf.f;
+        uf.u = (unsigned)b[160] | ((unsigned)b[161] << 8) | ((unsigned)b[162] << 16) | ((unsigned)b[163] << 24);
+        fg = uf.f;
+        uf.u = (unsigned)b[164] | ((unsigned)b[165] << 8) | ((unsigned)b[166] << 16) | ((unsigned)b[167] << 24);
+        fb = uf.f;
+        cr = (unsigned)(fr * 255.0f + 0.5f);
+        cg = (unsigned)(fg * 255.0f + 0.5f);
+        cb = (unsigned)(fb * 255.0f + 0.5f);
+        uf.u = (unsigned)b[36] | ((unsigned)b[37] << 8) | ((unsigned)b[38] << 16) | ((unsigned)b[39] << 24);
+        ex = uf.f;
+        uf.u = (unsigned)b[40] | ((unsigned)b[41] << 8) | ((unsigned)b[42] << 16) | ((unsigned)b[43] << 24);
+        ey = uf.f;
+        uf.u = (unsigned)b[44] | ((unsigned)b[45] << 8) | ((unsigned)b[46] << 16) | ((unsigned)b[47] << 24);
+        ez = uf.f;
+        nlen = fsqrt(ex * ex + ey * ey + ez * ez);
+        if (nlen < 0.0001f) nlen = 1.0f;
+        nx = ex / nlen; ny = ey / nlen; nz = ez / nlen;
+        uf.u = (unsigned)b[76] | ((unsigned)b[77] << 8) | ((unsigned)b[78] << 16) | ((unsigned)b[79] << 24);
+        ambx = uf.f;
+        uf.u = (unsigned)b[80] | ((unsigned)b[81] << 8) | ((unsigned)b[82] << 16) | ((unsigned)b[83] << 24);
+        amby = uf.f;
+        uf.u = (unsigned)b[84] | ((unsigned)b[85] << 8) | ((unsigned)b[86] << 16) | ((unsigned)b[87] << 24);
+        ambz = uf.f;
+        uf.u = (unsigned)b[88] | ((unsigned)b[89] << 8) | ((unsigned)b[90] << 16) | ((unsigned)b[91] << 24);
+        ambi = uf.f;
+        uf.u = (unsigned)b[180] | ((unsigned)b[181] << 8) | ((unsigned)b[182] << 16) | ((unsigned)b[183] << 24);
+        metal = uf.f;
+        uf.u = (unsigned)b[184] | ((unsigned)b[185] << 8) | ((unsigned)b[186] << 16) | ((unsigned)b[187] << 24);
+        rough = uf.f;
+        {
+            float l0x, l0y, l0z, l0l, nd0, l0cr, l0cg, l0cb, l0i;
+            float l1x, l1y, l1z, l1l, nd1, l1cr, l1cg, l1cb, l1i;
+            uf.u = (unsigned)b[96] | ((unsigned)b[97] << 8) | ((unsigned)b[98] << 16) | ((unsigned)b[99] << 24);
+            l0x = uf.f;
+            uf.u = (unsigned)b[100] | ((unsigned)b[101] << 8) | ((unsigned)b[102] << 16) | ((unsigned)b[103] << 24);
+            l0y = uf.f;
+            uf.u = (unsigned)b[104] | ((unsigned)b[105] << 8) | ((unsigned)b[106] << 16) | ((unsigned)b[107] << 24);
+            l0z = uf.f;
+            uf.u = (unsigned)b[108] | ((unsigned)b[109] << 8) | ((unsigned)b[110] << 16) | ((unsigned)b[111] << 24);
+            l0cr = uf.f;
+            uf.u = (unsigned)b[112] | ((unsigned)b[113] << 8) | ((unsigned)b[114] << 16) | ((unsigned)b[115] << 24);
+            l0cg = uf.f;
+            uf.u = (unsigned)b[116] | ((unsigned)b[117] << 8) | ((unsigned)b[118] << 16) | ((unsigned)b[119] << 24);
+            l0cb = uf.f;
+            uf.u = (unsigned)b[120] | ((unsigned)b[121] << 8) | ((unsigned)b[122] << 16) | ((unsigned)b[123] << 24);
+            l0i = uf.f;
+            uf.u = (unsigned)b[124] | ((unsigned)b[125] << 8) | ((unsigned)b[126] << 16) | ((unsigned)b[127] << 24);
+            l1x = uf.f;
+            uf.u = (unsigned)b[128] | ((unsigned)b[129] << 8) | ((unsigned)b[130] << 16) | ((unsigned)b[131] << 24);
+            l1y = uf.f;
+            uf.u = (unsigned)b[132] | ((unsigned)b[133] << 8) | ((unsigned)b[134] << 16) | ((unsigned)b[135] << 24);
+            l1z = uf.f;
+            uf.u = (unsigned)b[136] | ((unsigned)b[137] << 8) | ((unsigned)b[138] << 16) | ((unsigned)b[139] << 24);
+            l1cr = uf.f;
+            uf.u = (unsigned)b[140] | ((unsigned)b[141] << 8) | ((unsigned)b[142] << 16) | ((unsigned)b[143] << 24);
+            l1cg = uf.f;
+            uf.u = (unsigned)b[144] | ((unsigned)b[145] << 8) | ((unsigned)b[146] << 16) | ((unsigned)b[147] << 24);
+            l1cb = uf.f;
+            uf.u = (unsigned)b[148] | ((unsigned)b[149] << 8) | ((unsigned)b[150] << 16) | ((unsigned)b[151] << 24);
+            l1i = uf.f;
+            l0l = fsqrt(l0x * l0x + l0y * l0y + l0z * l0z);
+            l1l = fsqrt(l1x * l1x + l1y * l1y + l1z * l1z);
+            if (l0l < 0.0001f) l0l = 1;
+            if (l1l < 0.0001f) l1l = 1;
+            nd0 = nx * (l0x / l0l) + ny * (l0y / l0l) + nz * (l0z / l0l);
+            nd1 = nx * (l1x / l1l) + ny * (l1y / l1l) + nz * (l1z / l1l);
+            if (nd0 < 0) nd0 = 0;
+            if (nd1 < 0) nd1 = 0;
+            soft = 1.0f + (0.55f - 1.0f) * rough;
+            d0 = nd0 * soft;
+            d1 = nd1 * soft;
+            baser = fr * (1.0f - metal) + (fr * 0.85f + 0.15f) * metal;
+            baseg = fg * (1.0f - metal) + (fg * 0.85f + 0.15f) * metal;
+            baseb = fb * (1.0f - metal) + (fb * 0.85f + 0.15f) * metal;
+            colr = baser * (ambx * ambi + l0cr * l0i * d0 + l1cr * l1i * d1);
+            colg = baseg * (amby * ambi + l0cg * l0i * d0 + l1cg * l1i * d1);
+            colb = baseb * (ambz * ambi + l0cb * l0i * d0 + l1cb * l1i * d1);
+            er = (unsigned)(colr * 255.0f + 0.5f);
+            eg = (unsigned)(colg * 255.0f + 0.5f);
+            eb = (unsigned)(colb * 255.0f + 0.5f);
+        }
+        s = "window.GPU_TRI_KR=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kr);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_KG=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kg);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_KB=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, kb);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_CR=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, cr);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_CG=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, cg);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_CB=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, cb);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_ER=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, er);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_EG=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, eg);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+        s = "window.GPU_TRI_EB=";
+        while (*s) orjs[orn++] = *s++;
+        put_uint(orjs, &orn, eb);
+        orjs[orn++] = ';'; orjs[orn++] = '\n';
+    }
+    if (want_write) {
+        if (write_file("ujs/tests/gpu-store-v3-tri.ujs", gen, glen) != 0) { free(gen); free(orjs); return 2; }
+    } else if (cmp_file("ujs/tests/gpu-store-v3-tri.ujs", gen, glen) != 0) { free(gen); free(orjs); return 1; }
+    av[0] = "sh"; av[1] = "./ujs/ujs.com";
+    av[2] = "ujs/tests/gpu-store-v3-tri.ujs";
+    av[3] = "-o"; av[4] = "/tmp/gpu-tri-gen.wasm"; av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &on);
+    if (out) free(out);
+    if (rc != 0) { fprintf(stderr, "gen-gpu-store-v3: compile rc %d\n", rc); free(gen); free(orjs); return 1; }
+    f = fopen("/tmp/gpu-tri-gen.wasm", "rb");
+    if (!f) { free(gen); free(orjs); return 2; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); free(gen); free(orjs); return 2; }
+    wasmn = ftell(f);
+    rewind(f);
+    wasm = (unsigned char *)malloc((size_t)wasmn);
+    if (!wasm || (long)fread(wasm, 1, (size_t)wasmn, f) != wasmn) { free(wasm); fclose(f); free(gen); free(orjs); return 2; }
+    fclose(f);
+    {
+        int groups = (int)((wasmn + 2) / 3);
+        int cap = 24 + groups * 4 + 4;
+        int wi = 0;
+        b64js = (char *)malloc((size_t)cap);
+        if (!b64js) { free(wasm); free(gen); free(orjs); return 2; }
+        {
+            const char *s = "window.GPU_TRI_WASM=\"";
+            while (*s) b64js[b64n++] = *s++;
+        }
+        while (wi < wasmn) {
+            int nleft = (int)wasmn - wi;
+            unsigned a = wasm[wi];
+            unsigned bb = nleft > 1 ? wasm[wi + 1] : 0;
+            unsigned c = nleft > 2 ? wasm[wi + 2] : 0;
+            unsigned t = (a << 16) | (bb << 8) | c;
+            b64js[b64n++] = B64T[(t >> 18) & 63];
+            b64js[b64n++] = B64T[(t >> 12) & 63];
+            b64js[b64n++] = nleft > 1 ? B64T[(t >> 6) & 63] : '=';
+            b64js[b64n++] = nleft > 2 ? B64T[t & 63] : '=';
+            wi += 3;
+        }
+        b64js[b64n++] = '"'; b64js[b64n++] = ';'; b64js[b64n++] = '\n';
+    }
+    free(wasm);
+    if (want_write) {
+        if (write_file("ujs/practice/uxe/demo/gpu-tri/tri-b64.js", b64js, b64n) != 0) { free(b64js); free(gen); free(orjs); return 2; }
+        if (write_file("ujs/practice/uxe/demo/gpu-tri/tri-oracle.js", orjs, orn) != 0) { free(b64js); free(gen); free(orjs); return 2; }
+        printf("GEN_GPU_V3_WRITE\tujs=%d\tb64=%d\n", glen, b64n);
+    } else {
+        if (cmp_file("ujs/practice/uxe/demo/gpu-tri/tri-b64.js", b64js, b64n) != 0) { free(b64js); free(gen); free(orjs); return 1; }
+        if (cmp_file("ujs/practice/uxe/demo/gpu-tri/tri-oracle.js", orjs, orn) != 0) { free(b64js); free(gen); free(orjs); return 1; }
+        printf("GEN_GPU_V3_OK\tujs=%d\tb64=%d\n", glen, b64n);
+    }
+    free(b64js); free(gen); free(orjs);
+    return 0;
+}

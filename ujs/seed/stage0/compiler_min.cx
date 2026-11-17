@@ -4,13 +4,16 @@
  */
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
-        HOST_SCRATCH = 950000, MEM_PAGES = 128, MAXSTRLIT = 255 };
+        HOST_SCRATCH = 950000, STORE_WIN = 1015808, MEM_PAGES = 128, MAXSTRLIT = 255,
+        PERSIST_BASE = 948976, PERSIST_STRIDE = 16 };
+enum { PERSIST_SPAN = 64 * PERSIST_STRIDE };
+enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PERSIST_BASE > HEAP0 && PERSIST_BASE > GBASE && PERSIST_BASE + PERSIST_SPAN <= STORE_WIN) };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 
 static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
 static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_len;
-
+static int g_need_gpu;
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
@@ -134,6 +137,9 @@ static int sect(Buf *m, uint8_t id, Buf *body) {
   if (!bu8(m, id) || !bleu(m, body->n)) return 0;
   return braw(m, bd(body), body->n);
 }
+static int wcall(Buf *c, uint32_t n) {
+  return bu8(c, 0x10) && bleu(c, n + (uint32_t)g_need_gpu);
+}
 
 static int64_t d_bits(double d) {
   union { double d; int64_t i; } u; u.d = d; return u.i;
@@ -145,7 +151,7 @@ enum {
   T_SWITCH, T_CASE, T_DEFAULT, T_NULL, T_FOR, T_OF, T_FUNCTION,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT, T_ARROW, T_ELLIPSIS,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_QMARK, T_QQ, T_STR, T_PERSIST, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos, tok_start;
@@ -157,6 +163,183 @@ static int id0(char c) {
 static int idc(char c) { return id0(c)||(c>='0'&&c<='9'); }
 static int dig(char c) { return c>='0'&&c<='9'; }
 static int spc(char c) { return c==' '||c=='\t'||c=='\n'||c=='\r'; }
+
+#ifdef UJS_HOST
+static int g_lex_ok;
+static int g_lex_feed[10];
+static int g_lex_w2[16];
+static int lex_net_load(void) {
+  FILE *f;
+  char line[256];
+  int nfeed = 0, i;
+  if (g_lex_ok) return 1;
+  for (i = 0; i < 10; i++) g_lex_feed[i] = -1;
+  for (i = 0; i < 16; i++) g_lex_w2[i] = -1;
+  f = fopen("ujs/weights/nets/lex.net.tsv", "rb");
+  if (!f) return 0;
+  while (fgets(line, (int)sizeof line, f)) {
+    if (!strncmp(line, "feed\t", 5)) {
+      const char *p = line + 5;
+      int u = -1;
+      while (*p && *p != '\t' && *p != '\n') p++;
+      if (*p == '\t') {
+        p++;
+        if (*p >= '0' && *p <= '9') {
+          u = 0;
+          while (*p >= '0' && *p <= '9') { u = u * 10 + (*p - '0'); p++; }
+        }
+      }
+      if (nfeed < 10) g_lex_feed[nfeed] = u;
+      nfeed++;
+    } else if (!strncmp(line, "w2\t", 3)) {
+      const char *p = line + 3;
+      int hid = 0, cl = 0;
+      while (*p >= '0' && *p <= '9') { hid = hid * 10 + (*p - '0'); p++; }
+      if (*p == '\t') p++;
+      while (*p >= '0' && *p <= '9') { cl = cl * 10 + (*p - '0'); p++; }
+      if (hid >= 0 && hid < 16) g_lex_w2[hid] = cl;
+    }
+  }
+  fclose(f);
+  g_lex_ok = (nfeed >= 10);
+  return g_lex_ok;
+}
+static int lex_byte_cc(unsigned char c) {
+  if (c == '\n') return 1;
+  if (spc((char)c)) return 2;
+  if (id0((char)c)) return 3;
+  if (dig((char)c)) return 4;
+  if (c == '"') return 5;
+  if (c == '\'') return 6;
+  if (c=='{'||c=='}'||c=='('||c==')'||c=='['||c==']'||c==';'||c==','||c==':'||c=='.'||c=='?')
+    return 7;
+  if (c=='='||c=='<'||c=='>'||c=='!'||c=='+'||c=='-'||c=='*'||c=='/'||c=='%'||c=='&'||c=='|'||c=='.')
+    return 8;
+  return 9;
+}
+static int lex_net_cls(unsigned char c) {
+  int cc, h;
+  if (!lex_net_load()) return -1;
+  cc = lex_byte_cc(c);
+  if (cc < 0 || cc >= 10 || g_lex_feed[cc] < 0) return 8;
+  h = g_lex_feed[cc];
+  if (h < 0 || h >= 16 || g_lex_w2[h] < 0) return 8;
+  return g_lex_w2[h];
+}
+
+enum { PN_HMAX = 48, PN_CMAX = 80, PN_FMAX = 20, PN_CLS = 40 };
+static int g_pn_ok, g_pn_H, g_pn_ncls, g_pn_b1[PN_HMAX];
+static int g_pn_fn[PN_CMAX], g_pn_fu[PN_CMAX][PN_FMAX];
+static int g_pn_w2c[PN_HMAX], g_pn_w2w[PN_HMAX];
+static char g_pn_cls[PN_CLS][16];
+static int pn_feeds(int coord, int unit) {
+  int k;
+  if (coord < 0 || coord >= PN_CMAX) return 0;
+  for (k = 0; k < g_pn_fn[coord]; k++) if (g_pn_fu[coord][k] == unit) return 1;
+  return 0;
+}
+static int pn_load(void) {
+  FILE *f;
+  char line[1024];
+  int i;
+  if (g_pn_ok) return 1;
+  for (i = 0; i < PN_CMAX; i++) g_pn_fn[i] = 0;
+  f = fopen("ujs/weights/nets/parse.net.tsv", "rb");
+  if (!f) return 0;
+  g_pn_H = 0; g_pn_ncls = 0;
+  while (fgets(line, (int)sizeof line, f)) {
+    if (!strncmp(line, "class\t", 6)) {
+      char *p = line + 6;
+      g_pn_ncls = 0;
+      while (*p && *p != '\n' && g_pn_ncls < PN_CLS) {
+        char *q = p; int n;
+        while (*p && *p != '\t' && *p != '\n') p++;
+        n = (int)(p - q);
+        if (n <= 0 || n >= 16) { fclose(f); return 0; }
+        memcpy(g_pn_cls[g_pn_ncls], q, (size_t)n);
+        g_pn_cls[g_pn_ncls][n] = 0;
+        g_pn_ncls++;
+        if (*p == '\t') p++;
+      }
+    } else if (!strncmp(line, "H\t", 2)) {
+      g_pn_H = atoi(line + 2);
+      if (g_pn_H <= 0 || g_pn_H > PN_HMAX) { fclose(f); return 0; }
+    } else if (!strncmp(line, "b1\t", 3)) {
+      char *p = line + 3; int j = 0;
+      while (*p && *p != '\n' && j < g_pn_H) {
+        g_pn_b1[j++] = atoi(p);
+        while (*p && *p != '\t' && *p != '\n') p++;
+        if (*p == '\t') p++;
+      }
+    } else if (!strncmp(line, "feed\t", 5)) {
+      char *p = line + 5; int coord, u, k = 0;
+      coord = atoi(p);
+      while (*p && *p != '\t' && *p != '\n') p++;
+      if (*p == '\t') p++;
+      while (*p && *p != '\n' && k < PN_FMAX) {
+        if (*p >= '0' && *p <= '9') {
+          u = atoi(p);
+          g_pn_fu[coord][k++] = u;
+          while (*p && *p != '\t' && *p != '\n') p++;
+          if (*p == '\t') p++;
+        } else break;
+      }
+      if (coord >= 0 && coord < PN_CMAX) g_pn_fn[coord] = k;
+    } else if (!strncmp(line, "w2\t", 3)) {
+      char *p = line + 3; int h, c, w;
+      h = atoi(p);
+      while (*p && *p != '\t') p++;
+      if (*p != '\t') { fclose(f); return 0; }
+      p++;
+      c = atoi(p);
+      while (*p && *p != '\t') p++;
+      if (*p != '\t') { fclose(f); return 0; }
+      p++;
+      w = atoi(p);
+      if (h >= 0 && h < PN_HMAX) { g_pn_w2c[h] = c; g_pn_w2w[h] = w; }
+    }
+  }
+  fclose(f);
+  g_pn_ok = (g_pn_H > 0 && g_pn_ncls > 0);
+  return g_pn_ok;
+}
+static int pn_tok_ix(int tok) {
+  switch (tok) {
+  case T_EOF: return 0; case T_ID: return 1; case T_NUM: case T_FNUM: return 2;
+  case T_STR: return 3; case T_NULL: return 4;
+  case T_LET: return 7; case T_FUNCTION: return 8; case T_IF: return 9;
+  case T_ELSE: return 10; case T_WHILE: return 11; case T_FOR: return 12;
+  case T_RETURN: return 13; case T_SWITCH: return 16; case T_CASE: return 17;
+  case T_DEFAULT: return 18; case T_OF: return 21;
+  case T_LB: return 22; case T_RB: return 23; case T_LP: return 24; case T_RP: return 25;
+  case T_LS: return 26; case T_RS: return 27; case T_SEMI: return 28; case T_COMMA: return 29;
+  case T_COLON: return 30; case T_DOT: return 31; case T_QMARK: return 32; case T_EQ: return 33;
+  default: return -1;
+  }
+}
+static const char *parse_net_cls(int nt, int tok) {
+  int ti, j, hv, c, best = -1, bestv = -999999, logit[PN_CLS];
+  if (!pn_load()) return 0;
+  ti = pn_tok_ix(tok);
+  if (ti < 0) return 0;
+  for (c = 0; c < g_pn_ncls; c++) logit[c] = 0;
+  for (j = 0; j < g_pn_H; j++) {
+    hv = g_pn_b1[j];
+    if (pn_feeds(nt, j)) hv++;
+    if (pn_feeds(6 + ti, j)) hv++;
+    if (hv > 0) logit[g_pn_w2c[j]] += g_pn_w2w[j];
+  }
+  for (c = 0; c < g_pn_ncls; c++) {
+    if (best < 0 || logit[c] > bestv) { best = c; bestv = logit[c]; }
+  }
+  return best >= 0 ? g_pn_cls[best] : 0;
+}
+static int parse_net_is_bad(int nt, int tok) {
+  const char *a = parse_net_cls(nt, tok);
+  return a && !strcmp(a, "bad");
+}
+static int parse_net_top_is_bad(int tok) { return parse_net_is_bad(0, tok); }
+#endif
 
 static void next(Lex *L) {
   for (;;) {
@@ -171,7 +354,12 @@ static void next(Lex *L) {
   if (L->pos >= L->len) { L->tok = T_EOF; return; }
   L->tok_start = L->pos;
   char c = L->src[L->pos];
-  if (dig(c)) {
+  int y = -1;
+#ifdef UJS_HOST
+  y = lex_net_cls((unsigned char)c);
+  if (y == 8) { L->tok = T_BAD; L->pos++; return; }
+#endif
+  if (y == 4 || (y < 0 && dig(c))) {
     int64_t iv = 0;
     while (L->pos < L->len && dig(L->src[L->pos]))
       iv = iv * 10 + (L->src[L->pos++] - '0');
@@ -187,7 +375,7 @@ static void next(Lex *L) {
     }
     L->num = iv; L->tok = T_NUM; return;
   }
-  if (c == '"') {
+  if (y == 5 || (y < 0 && c == '"')) {
     L->pos++;
     uint32_t n = 0;
     while (L->pos < L->len && L->src[L->pos] != '"') {
@@ -205,11 +393,16 @@ static void next(Lex *L) {
     L->tok = T_STR;
     return;
   }
-  if (id0(c)) {
+  if (y == 3 || (y < 0 && id0(c))) {
     uint32_t n = 0;
     while (L->pos < L->len && idc(L->src[L->pos]) && n + 1 < sizeof L->id)
       L->id[n++] = L->src[L->pos++];
     L->id[n] = 0;
+    {
+      const char *t = L->id;
+      if (t[0]=='h'&&t[1]=='o'&&t[2]=='s'&&t[3]=='t'&&t[4]=='_'&&t[5]=='g'&&t[6]=='p'&&t[7]=='u'&&t[8]=='_'&&t[9]=='s'&&t[10]=='u'&&t[11]=='b'&&t[12]=='m'&&t[13]=='i'&&t[14]=='t'&&t[15]==0)
+        g_need_gpu = 1;
+    }
     if (!strcmp(L->id,"let")) L->tok = T_LET;
     else if (!strcmp(L->id,"while")) L->tok = T_WHILE;
     else if (!strcmp(L->id,"return")) L->tok = T_RETURN;
@@ -222,6 +415,7 @@ static void next(Lex *L) {
     else if (!strcmp(L->id,"for")) L->tok = T_FOR;
     else if (!strcmp(L->id,"of")) L->tok = T_OF;
     else if (!strcmp(L->id,"function")) L->tok = T_FUNCTION;
+    else if (L->id[0]=='p'&&L->id[1]=='e'&&L->id[2]=='r'&&L->id[3]=='s'&&L->id[4]=='i'&&L->id[5]=='s'&&L->id[6]=='t'&&L->id[7]==0) L->tok = T_PERSIST;
     else L->tok = T_ID;
     return;
   }
@@ -278,7 +472,7 @@ enum {
   OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST, OP_STRADD,
   OP_I2F, OP_I2F_R, OP_F2I,
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
-  OP_RET, OP_FRET, OP_HRET
+  OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET
 };
 enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
 typedef struct { uint8_t op; int64_t a; } Ins;
@@ -295,7 +489,7 @@ typedef struct {
 typedef struct {
   Ins code[MAXC]; int nc;
   char names[MAXL][MAXN]; uint8_t lty[MAXL]; uint8_t lety[MAXL]; int nl;
-  char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; int ng;
+  char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; uint8_t gpersist[MAXG]; int ng;
   uint8_t sdata[MAXSDATA]; uint32_t sn; /* string pool for OP_SCONST */
   int scratch; /* i32 temp for list/dict init, or -1 */
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
@@ -558,20 +752,30 @@ static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
 }
 
 static int pprim(Lex *L, Prog *P) {
-  if (L->tok == T_STR) {
+  const char *uact = 0;
+  const char *pact = 0;
+#ifdef UJS_HOST
+  uact = parse_net_cls(2, L->tok);
+  if (uact && !strcmp(uact, "bad")) { P->err = "parse-net"; return 0; }
+  pact = parse_net_cls(4, L->tok);
+  if (pact && !strcmp(pact, "bad") && L->tok != T_MINUS && L->tok != T_NOT) {
+    P->err = "parse-net"; return 0;
+  }
+#endif
+  if (L->tok == T_STR && (!pact || !strcmp(pact, "string"))) {
     uint32_t n = 0;
     while (L->str[n]) n++;
     if (!emit_sconst_bytes(P, L->str, n)) return 0;
     next(L);
     return TY_STR;
   }
-  if (L->tok == T_NUM) {
+  if (L->tok == T_NUM && (!pact || !strcmp(pact, "number"))) {
     if (!emit(P, OP_CONST, L->num)) return 0; next(L); return TY_I64;
   }
-  if (L->tok == T_FNUM) {
+  if (L->tok == T_FNUM && (!pact || !strcmp(pact, "number"))) {
     if (!emit(P, OP_FCONST, d_bits(L->fnum))) return 0; next(L); return TY_F64;
   }
-  if (L->tok == T_LS) {
+  if (L->tok == T_LS && (!pact || !strcmp(pact, "list"))) {
     /* [e, e, ...] — homogeneous i64 or f64 elems */
     next(L);
     int scratch = ensure_scratch(P); if (scratch < 0) return 0;
@@ -620,7 +824,7 @@ static int pprim(Lex *L, Prog *P) {
     P->lety[scratch] = (uint8_t)elem_ty;
     return TY_LIST;
   }
-  if (L->tok == T_LB) {
+  if (L->tok == T_LB && (!pact || !strcmp(pact, "dict"))) {
     /* { k: v, ... } — ID keys, i64/f64 vals */
     next(L);
     int scratch = ensure_scratch(P); if (scratch < 0) return 0;
@@ -673,7 +877,7 @@ static int pprim(Lex *L, Prog *P) {
     if (!emit(P, OP_LOAD, scratch)) return 0;
     return TY_DICT;
   }
-  if (L->tok == T_ID) {
+  if (L->tok == T_ID && (!pact || !strcmp(pact, "ident"))) {
     if (!strcmp(L->id, "len")) {
       next(L);
       if (!expect(L, T_LP, P, "len (")) return 0;
@@ -710,6 +914,44 @@ static int pprim(Lex *L, Prog *P) {
       return TY_LIST;
     }
     {
+      const char *t = L->id;
+      const char *k = "store_bytes";
+      int hi = 0;
+      while (k[hi] && t[hi] == k[hi]) hi++;
+      if (!k[hi] && !t[hi]) {
+        int ty;
+        next(L);
+        if (!expect(L, T_LP, P, "store_bytes (")) return 0;
+        ty = pexpr(L, P); if (!ty) return 0;
+        if (ty != TY_LIST) { P->err = "store_bytes list"; return 0; }
+        if (!expect(L, T_RP, P, "store_bytes )")) return 0;
+        if (!emit(P, OP_STOREBYTES, 0)) return 0;
+        return TY_I64;
+      }
+    }
+    {
+      const char *t = L->id;
+      const char *k = "host_gpu_submit";
+      int hi = 0;
+      while (k[hi] && t[hi] == k[hi]) hi++;
+      if (!k[hi] && !t[hi]) {
+        int a, b;
+        next(L);
+        if (!expect(L, T_LP, P, "gpu (")) return 0;
+        a = pexpr(L, P); if (!a) return 0;
+        if (a != TY_I64) { P->err = "gpu ptr"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_COMMA, P, "gpu ,")) return 0;
+        b = pexpr(L, P); if (!b) return 0;
+        if (b != TY_I64) { P->err = "gpu len"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_RP, P, "gpu )")) return 0;
+        if (!emit(P, OP_GPU, 0)) return 0;
+        if (!emit(P, OP_CONST, 0)) return 0;
+        return TY_I64;
+      }
+    }
+    {
       char nbuf[MAXN];
       int i, fi, g;
       strncpy(nbuf, L->id, MAXN - 1); nbuf[MAXN - 1] = 0;
@@ -734,17 +976,17 @@ static int pprim(Lex *L, Prog *P) {
       return P->gty[g];
     }
   }
-  if (L->tok == T_LP) {
+  if (L->tok == T_LP && (!pact || !strcmp(pact, "paren"))) {
     next(L); int ty = pexpr(L, P); if (!ty) return 0;
     if (!expect(L, T_RP, P, "expected )")) return 0;
     return ty;
   }
-  if (L->tok == T_MINUS) {
+  if (L->tok == T_MINUS && (!uact || !strcmp(uact, "neg"))) {
     next(L); int ty = pprim(L, P); if (!ty) return 0;
     if (!emit(P, ty == TY_F64 ? OP_FNEG : OP_NEG, 0)) return 0;
     return ty;
   }
-  if (L->tok == T_NOT) {
+  if (L->tok == T_NOT && (!uact || !strcmp(uact, "not"))) {
     next(L); int ty = pprim(L, P); if (!ty) return 0;
     if (ty != TY_I64) { P->err = "! needs i64"; return 0; }
     if (!emit(P, OP_NOT, 0)) return 0;
@@ -756,7 +998,13 @@ static int pprim(Lex *L, Prog *P) {
 static int ppostfix(Lex *L, Prog *P) {
   int ty = pprim(L, P); if (!ty) return 0;
   for (;;) {
-    if (L->tok == T_LS) {
+    const char *xact = 0;
+#ifdef UJS_HOST
+    xact = parse_net_cls(3, L->tok);
+    if (xact && !strcmp(xact, "bad")) { P->err = "parse-net"; return 0; }
+    if (xact && !strcmp(xact, "done")) break;
+#endif
+    if (L->tok == T_LS && (!xact || !strcmp(xact, "index"))) {
       if (ty != TY_LIST) { P->err = "index non-list"; return 0; }
       next(L);
       int ity = pexpr(L, P); if (!ity) return 0;
@@ -766,7 +1014,7 @@ static int ppostfix(Lex *L, Prog *P) {
       int et = P->list_elem_ty ? P->list_elem_ty : TY_I64;
       if (!emit(P, OP_IDXGET, et == TY_F64 ? 1 : 0)) return 0;
       ty = et;
-    } else if (L->tok == T_DOT) {
+    } else if (L->tok == T_DOT && (!xact || !strcmp(xact, "dot"))) {
       if (ty != TY_DICT) { P->err = "dot non-dict"; return 0; }
       next(L);
       if (L->tok != T_ID) { P->err = "dot name"; return 0; }
@@ -923,8 +1171,13 @@ static int pblock(Lex *L, Prog *P) {
 }
 
 static int pstmt(Lex *L, Prog *P) {
+  const char *act = 0;
   if (L->tok == T_BAD) { P->err = "bad token"; return 0; }
-  if (L->tok == T_FUNCTION) {
+#ifdef UJS_HOST
+  act = parse_net_cls(1, L->tok);
+  if (act && !strcmp(act, "bad")) { P->err = "parse-net"; return 0; }
+#endif
+  if (L->tok == T_FUNCTION && (!act || !strcmp(act, "fn"))) {
     FnDef F;
     int fi, li;
     memset(&F, 0, sizeof F);
@@ -963,7 +1216,27 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, li)) return 0;
     return 1;
   }
-  if (L->tok == T_LET) {
+  if (L->tok == T_PERSIST) {
+    next(L);
+    if (L->tok != T_LET) { P->err = "persist let"; return 0; }
+    next(L);
+    if (L->tok != T_ID) { P->err = "let name"; return 0; }
+    {
+      int g, tmp, ty;
+      g = glob(P, L->id, 1); if (g < 0) return 0;
+      P->gpersist[g] = 1;
+      next(L);
+      if (!expect(L, T_EQ, P, "expected =")) return 0;
+      ty = pexpr(L, P); if (!ty) return 0;
+      P->gty[g] = (uint8_t)ty;
+      tmp = (ty == TY_F64) ? ensure_fscratch(P) : ensure_lscratch(P);
+      if (tmp < 0) return 0;
+      if (!emit(P, OP_PLET, (int64_t)g | ((int64_t)ty << 16) | ((int64_t)tmp << 32))) return 0;
+      return expect(L, T_SEMI, P, "expected ;");
+    }
+  }
+
+  if (L->tok == T_LET && (!act || !strcmp(act, "let"))) {
     next(L);
     if (L->tok != T_ID) { P->err = "let name"; return 0; }
     {
@@ -1017,7 +1290,7 @@ static int pstmt(Lex *L, Prog *P) {
       }
     }
   }
-  if (L->tok == T_WHILE) {
+  if (L->tok == T_WHILE && (!act || !strcmp(act, "while"))) {
     next(L);
     if (!emit(P, OP_WBEGIN, 0)) return 0;
     if (!expect(L, T_LP, P, "while (")) return 0;
@@ -1029,7 +1302,7 @@ static int pstmt(Lex *L, Prog *P) {
     return emit(P, OP_WEND, 0);
   }
   /* for (let x of listExpr) { … } → while index walk (no iterator protocol) */
-  if (L->tok == T_FOR) {
+  if (L->tok == T_FOR && (!act || !strcmp(act, "for"))) {
     static int fo_gen;
     char an[MAXN], in[MAXN], xn[MAXN];
     int xa, ia, va, ty, et;
@@ -1074,7 +1347,7 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, ia)) return 0;
     return emit(P, OP_WEND, 0);
   }
-  if (L->tok == T_IF) {
+  if (L->tok == T_IF && (!act || !strcmp(act, "if"))) {
     next(L);
     if (!expect(L, T_LP, P, "if (")) return 0;
     int ty = pexpr(L, P); if (!ty) return 0;
@@ -1095,7 +1368,7 @@ static int pstmt(Lex *L, Prog *P) {
     return emit(P, OP_IF2, 0);
   }
   /* switch (i64) { case N: … default: … } — no fallthrough; bodies usually return */
-  if (L->tok == T_SWITCH) {
+  if (L->tok == T_SWITCH && (!act || !strcmp(act, "switch"))) {
     int sc, ty;
     next(L);
     if (!expect(L, T_LP, P, "switch (")) return 0;
@@ -1105,32 +1378,43 @@ static int pstmt(Lex *L, Prog *P) {
     if (!expect(L, T_LB, P, "switch {")) return 0;
     sc = ensure_lscratch(P); if (sc < 0) return 0;
     if (!emit(P, OP_STORE, sc)) return 0;
-    while (L->tok == T_CASE) {
-      next(L);
-      if (L->tok != T_NUM) { P->err = "case int"; return 0; }
-      {
-        int64_t cv = L->num;
+    for (;;) {
+      const char *sact = 0;
+#ifdef UJS_HOST
+      sact = parse_net_cls(5, L->tok);
+      if (sact && !strcmp(sact, "bad")) { P->err = "parse-net"; return 0; }
+      if (sact && !strcmp(sact, "done")) break;
+#endif
+      if (L->tok == T_CASE && (!sact || !strcmp(sact, "case"))) {
         next(L);
-        if (!expect(L, T_COLON, P, "case :")) return 0;
-        if (!emit(P, OP_LOAD, sc)) return 0;
-        if (!emit(P, OP_CONST, cv)) return 0;
-        if (!emit(P, OP_EQ, 0)) return 0;
-        if (!emit(P, OP_IF0, 0)) return 0;
-        while (L->tok != T_CASE && L->tok != T_DEFAULT && L->tok != T_RB && L->tok != T_EOF)
-          if (!pstmt(L, P)) return 0;
-        if (!emit(P, OP_IF1, 0)) return 0;
-        if (!emit(P, OP_IF2, 0)) return 0;
+        if (L->tok != T_NUM) { P->err = "case int"; return 0; }
+        {
+          int64_t cv = L->num;
+          next(L);
+          if (!expect(L, T_COLON, P, "case :")) return 0;
+          if (!emit(P, OP_LOAD, sc)) return 0;
+          if (!emit(P, OP_CONST, cv)) return 0;
+          if (!emit(P, OP_EQ, 0)) return 0;
+          if (!emit(P, OP_IF0, 0)) return 0;
+          while (L->tok != T_CASE && L->tok != T_DEFAULT && L->tok != T_RB && L->tok != T_EOF)
+            if (!pstmt(L, P)) return 0;
+          if (!emit(P, OP_IF1, 0)) return 0;
+          if (!emit(P, OP_IF2, 0)) return 0;
+        }
+        continue;
       }
-    }
-    if (L->tok == T_DEFAULT) {
-      next(L);
-      if (!expect(L, T_COLON, P, "default :")) return 0;
-      while (L->tok != T_RB && L->tok != T_EOF)
-        if (!pstmt(L, P)) return 0;
+      if (L->tok == T_DEFAULT && (!sact || !strcmp(sact, "default"))) {
+        next(L);
+        if (!expect(L, T_COLON, P, "default :")) return 0;
+        while (L->tok != T_RB && L->tok != T_EOF)
+          if (!pstmt(L, P)) return 0;
+        break;
+      }
+      break;
     }
     return expect(L, T_RB, P, "switch }");
   }
-  if (L->tok == T_RETURN) {
+  if (L->tok == T_RETURN && (!act || !strcmp(act, "return"))) {
     next(L);
     int ty = pexpr(L, P); if (!ty) return 0;
     if (P->in_fn > 0) {
@@ -1185,6 +1469,25 @@ static int pstmt(Lex *L, Prog *P) {
       if (!emit(P, vty == TY_F64 ? OP_BOXF : OP_BOXI, 0)) return 0;
       if (!emit(P, OP_IDXSET, 0)) return 0;
       return expect(L, T_SEMI, P, "expected ;");
+    }
+    {
+      const char *k = "host_gpu_submit";
+      int hi = 0;
+      while (k[hi] && name[hi] == k[hi]) hi++;
+      if (!k[hi] && !name[hi] && L->tok == T_LP) {
+        int a, b;
+        next(L);
+        a = pexpr(L, P); if (!a) return 0;
+        if (a != TY_I64) { P->err = "gpu ptr"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_COMMA, P, "gpu ,")) return 0;
+        b = pexpr(L, P); if (!b) return 0;
+        if (b != TY_I64) { P->err = "gpu len"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_RP, P, "gpu )")) return 0;
+        if (!emit(P, OP_GPU, 0)) return 0;
+        return expect(L, T_SEMI, P, "expected ;");
+      }
     }
     {
       int plus_eq = 0;
@@ -1301,30 +1604,30 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x0b)) return 0;
       break;
     case OP_BOXI:
-      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0; /* call mk_i64 */
+      if (!wcall(c, 0)) return 0; /* call mk_i64 */
       break;
     case OP_BOXF:
-      if (!bu8(c, 0x10) || !bleu(c, 4)) return 0; /* call mk_f64 */
+      if (!wcall(c, 4)) return 0; /* call mk_f64 */
       break;
     case OP_MKLIST:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 6)) return 0; /* call mk_list */
+      if (!wcall(c, 6)) return 0; /* call mk_list */
       break;
     case OP_MKLIST_DYN:
       /* n already i32 on stack */
-      if (!bu8(c, 0x10) || !bleu(c, 6)) return 0;
+      if (!wcall(c, 6)) return 0;
       break;
     case OP_LSET:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 8)) return 0;
+      if (!wcall(c, 8)) return 0;
       break;
     case OP_IDXGET:
       if (!bu8(c, 0xa7)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 7)) return 0; /* list_get */
+      if (!wcall(c, 7)) return 0; /* list_get */
       if (ins->a)
-        { if (!bu8(c, 0x10) || !bleu(c, 5)) return 0; } /* f64_of */
+        { if (!wcall(c, 5)) return 0; } /* f64_of */
       else
-        { if (!bu8(c, 0x10) || !bleu(c, 3)) return 0; } /* i64_of */
+        { if (!wcall(c, 3)) return 0; } /* i64_of */
       break;
     case OP_IWRAP:
       if (!bu8(c, 0xa7)) return 0;
@@ -1355,23 +1658,35 @@ static int emit_ops(Buf *c, Prog *P) {
       break;
     }
     case OP_IDXSET:
-      if (!bu8(c, 0x10) || !bleu(c, 9)) return 0;
+      if (!wcall(c, 9)) return 0;
       break;
     case OP_LEN:
-      if (!bu8(c, 0x10) || !bleu(c, 10)) return 0;
+      if (!wcall(c, 10)) return 0;
       if (!bu8(c, 0xad)) return 0;
       break;
     case OP_GLOAD: {
       uint32_t slot = (uint32_t)(ins->a & 0xffff);
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
-      uint32_t addr = GBASE + slot * 4u;
-      if (!bi32(c, (int32_t)addr)) return 0;
-      if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
-      if (ty == TY_F64) {
-        if (!bu8(c, 0x10) || !bleu(c, 5)) return 0;
-      } else if (ty == TY_I64) {
-        if (!bu8(c, 0x10) || !bleu(c, 3)) return 0;
+      if (slot < MAXG && P->gpersist[slot]) {
+        uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
+        if (!bi32(c, (int32_t)pa)) return 0;
+        if (ty == TY_F64) {
+          if (!bu8(c, 0x2b) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        } else {
+          if (!bu8(c, 0x29) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        }
+        break;
+      }
+      {
+        uint32_t addr = GBASE + slot * 4u;
+        if (!bi32(c, (int32_t)addr)) return 0;
+        if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+        if (ty == TY_F64) {
+          if (!wcall(c, 5)) return 0;
+        } else if (ty == TY_I64) {
+          if (!wcall(c, 3)) return 0;
+        }
       }
       break;
     }
@@ -1379,17 +1694,37 @@ static int emit_ops(Buf *c, Prog *P) {
       uint32_t slot = (uint32_t)(ins->a & 0xffff);
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
+      if (slot < MAXG && P->gpersist[slot]) {
+        int tmp;
+        uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
+        if (ty == TY_F64) {
+          tmp = P->fscratch;
+          if (tmp < 0) { tmp = ensure_fscratch(P); if (tmp < 0) return 0; }
+          if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bi32(c, (int32_t)pa)) return 0;
+          if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bu8(c, 0x39) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        } else {
+          tmp = P->lscratch;
+          if (tmp < 0) { tmp = ensure_lscratch(P); if (tmp < 0) return 0; }
+          if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bi32(c, (int32_t)pa)) return 0;
+          if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        }
+        break;
+      }
       if (ty == TY_I64) {
-        if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
+        if (!wcall(c, 0)) return 0;
       } else if (ty == TY_F64) {
-        if (!bu8(c, 0x10) || !bleu(c, 4)) return 0;
+        if (!wcall(c, 4)) return 0;
       }
       if (!bi32(c, (int32_t)slot)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 15)) return 0;
+      if (!wcall(c, 15)) return 0;
       break;
     }
     case OP_STRADD:
-      if (!bu8(c, 0x10) || !bleu(c, 18)) return 0;
+      if (!wcall(c, 18)) return 0;
       break;
     case OP_SCONST: {
       /* a = (pool_off << 16) | len → bytes at SCRATCH0, call mk_str */
@@ -1405,34 +1740,68 @@ static int emit_ops(Buf *c, Prog *P) {
       }
       if (!bi32(c, (int32_t)(SCRATCH0))) return 0;
       if (!bi32(c, (int32_t)(n))) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 11)) return 0; /* mk_str */
+      if (!wcall(c, 11)) return 0; /* mk_str */
       break;
     }
     case OP_MKDICT:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 12)) return 0; /* mk_dict */
+      if (!wcall(c, 12)) return 0; /* mk_dict */
       break;
     case OP_DSET:
       /* stack h k v → push i → dict_set_hkvi */
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 16)) return 0;
+      if (!wcall(c, 16)) return 0;
       break;
     case OP_DOT:
       /* stack d k → dict_get → i64_of */
-      if (!bu8(c, 0x10) || !bleu(c, 17)) return 0; /* dict_get */
-      if (!bu8(c, 0x10) || !bleu(c, 3)) return 0; /* i64_of */
+      if (!wcall(c, 17)) return 0; /* dict_get */
+      if (!wcall(c, 3)) return 0; /* i64_of */
       break;
     case OP_RET:
-      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
+      if (!wcall(c, 0)) return 0;
       if (!bu8(c, 0x0f)) return 0;
       break;
     case OP_FRET:
-      if (!bu8(c, 0x10) || !bleu(c, 4)) return 0;
+      if (!wcall(c, 4)) return 0;
       if (!bu8(c, 0x0f)) return 0;
       break;
     case OP_HRET:
-      if (!bu8(c, 0x0f)) return 0; /* handle already on stack */
+      if (!bu8(c, 0x0f)) return 0;
       break;
+    case OP_GPU:
+      if (!g_need_gpu) return 0;
+      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
+      break;
+    case OP_STOREBYTES:
+      if (!wcall(c, 33)) return 0;
+      if (!bu8(c, 0xad)) return 0;
+      break;
+    case OP_PLET: {
+      uint32_t slot = (uint32_t)(ins->a & 0xffff);
+      uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
+      uint32_t tmp = (uint32_t)((ins->a >> 32) & 0xffff);
+      uint32_t base = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE;
+      if (!bu8(c, 0x21) || !bleu(c, tmp)) return 0;
+      if (!bi32(c, (int32_t)(base + 1u))) return 0;
+      if (!bu8(c, 0x2d) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bu8(c, 0x45)) return 0;
+      if (!bu8(c, 0x04) || !bu8(c, 0x40)) return 0;
+      if (!bi32(c, (int32_t)(base + 8u))) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, tmp)) return 0;
+      if (ty == TY_F64) {
+        if (!bu8(c, 0x39) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      } else {
+        if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      }
+      if (!bi32(c, (int32_t)base)) return 0;
+      if (!bi32(c, (int32_t)ty)) return 0;
+      if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bi32(c, (int32_t)(base + 1u))) return 0;
+      if (!bi32(c, 1)) return 0;
+      if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (!bu8(c, 0x0b)) return 0;
+      break;
+    }
     default: return 0;
     }
   }
@@ -1912,6 +2281,45 @@ static int host_reset_body(Buf *c, int ng) {
   return bu8(c, 0x0b);
 }
 
+static int host_reset_globals_body(Buf *c) {
+  if (!bleu(c, 1) || !bleu(c, 2) || !bu8(c, 0x7f)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x02) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x03) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 64)) return 0;
+  if (!bu8(c, 0x4f)) return 0;
+  if (!bu8(c, 0x0d) || !bleu(c, 1)) return 0;
+  if (!bi32(c, (int32_t)PERSIST_BASE)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 4)) return 0;
+  if (!bu8(c, 0x74)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 1)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 4)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bi32(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!bi32(c, 8)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x42) || !bu8(c, 0)) return 0;
+  if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!bi32(c, 1)) return 0;
+  if (!bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x0c) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x0b) || !bu8(c, 0x0b)) return 0;
+  if (!bi32(c, 0)) return 0;
+  return bu8(c, 0x0b);
+}
+
 static int host_set_global_body(Buf *c, int ng) {
   /* (param i h) — store h at GBASE+i*4 if i < ng */
   if (!bleu(c, 0)) return 0;
@@ -1952,7 +2360,7 @@ static int host_get_global_body(Buf *c, int ng) {
 static int run_step_body(Buf *c) {
   /* call main (func 1) */
   if (!bleu(c, 0)) return 0;
-  if (!bu8(c, 0x10) || !bleu(c, 1)) return 0;
+  if (!wcall(c, 1)) return 0;
   return bu8(c, 0x0b);
 }
 
@@ -2007,8 +2415,8 @@ static int str_ptr_body(Buf *c) {
 
 
 static int str_cat_body(Buf *c) {
-  static const uint8_t body[] = {
-    1, 5, 0x7f, 0x20, 0x00, 0x10, 0x0a, 0x21, 0x02, 0x20, 0x01, 0x10, 0x0a, 0x21, 0x03,
+  /* After locals: call defined len_of (idx 10). wcall adds import offset. */
+  static const uint8_t rest[] = {
     0x41, 0x00, 0x28, 0x02, 0x00, 0x21, 0x06, 0x20, 0x06, 0x45, 0x04, 0x40, 0x41, 0x80, 0x20,
     0x21, 0x06, 0x0b, 0x20, 0x06, 0x21, 0x04, 0x20, 0x04, 0x41, 0x04, 0x3a, 0x00, 0x00,
     0x20, 0x04, 0x41, 0x04, 0x6a, 0x20, 0x02, 0x20, 0x03, 0x6a, 0x36, 0x02, 0x00, 0x41, 0x00,
@@ -2022,7 +2430,14 @@ static int str_cat_body(Buf *c) {
     0x6a, 0x6a, 0x6a, 0x41, 0x07, 0x6a, 0x41, 0x78, 0x71, 0x21, 0x06, 0x41, 0x00, 0x20, 0x06,
     0x36, 0x02, 0x00, 0x20, 0x04, 0x0b
   };
-  return braw(c, body, (uint32_t)sizeof body);
+  if (!bleu(c, 1) || !bleu(c, 5) || !bu8(c, 0x7f)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!wcall(c, 10)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 2)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!wcall(c, 10)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 3)) return 0;
+  return braw(c, rest, (uint32_t)sizeof rest);
 }
 
 static int host_dict_set_body(Buf *c) {
@@ -2051,11 +2466,59 @@ static int host_dict_set_body(Buf *c) {
   return bu8(c, 0x0b);
 }
 
+/* (param h i32)(result i32) defined idx 33. Trap on n>4096 or byte not 0..255. */
+static int store_bytes_body(Buf *c) {
+  enum { L_H = 0, L_N = 1, L_I = 2, L_EH = 3, L_V = 4 };
+  if (!bleu(c, 2)) return 0;
+  if (!bleu(c, 3) || !bu8(c, 0x7f)) return 0;
+  if (!bleu(c, 1) || !bu8(c, 0x7e)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_H)) return 0;
+  if (!wcall(c, 10)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, L_N)) return 0;
+  if (!bi32(c, 0) || !bu8(c, 0x21) || !bleu(c, L_I)) return 0;
+  if (!bu8(c, 0x02) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x02) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x03) || !bu8(c, 0x40)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_N)) return 0;
+  if (!bi32(c, 4096) || !bu8(c, 0x4b) || !bu8(c, 0x0d) || !bleu(c, 2)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_I)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_N)) return 0;
+  if (!bu8(c, 0x4f) || !bu8(c, 0x0d) || !bleu(c, 1)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_H)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_I)) return 0;
+  if (!wcall(c, 7)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, L_EH)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_EH)) return 0;
+  if (!bu8(c, 0x2d) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+  if (!bi32(c, TAG_I64) || !bu8(c, 0x47) || !bu8(c, 0x0d) || !bleu(c, 2)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_EH)) return 0;
+  if (!bi32(c, 8) || !bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x29) || !bu8(c, 0x03) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, L_V)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_V)) return 0;
+  if (!bu8(c, 0x42) || !blei64(c, 255) || !bu8(c, 0x55) || !bu8(c, 0x0d) || !bleu(c, 2)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_V)) return 0;
+  if (!bu8(c, 0x42) || !blei64(c, 0) || !bu8(c, 0x53) || !bu8(c, 0x0d) || !bleu(c, 2)) return 0;
+  if (!bi32(c, (int32_t)STORE_WIN)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_I) || !bu8(c, 0x6a)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_V) || !bu8(c, 0xa7)) return 0;
+  if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, L_I)) return 0;
+  if (!bi32(c, 1) || !bu8(c, 0x6a) || !bu8(c, 0x21) || !bleu(c, L_I)) return 0;
+  if (!bu8(c, 0x0c) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x0b) || !bu8(c, 0x0b)) return 0;
+  if (!bi32(c, (int32_t)STORE_WIN)) return 0;
+  if (!bu8(c, 0x0f)) return 0;
+  if (!bu8(c, 0x0b)) return 0;
+  if (!bi32(c, 0)) return 0;
+  return bu8(c, 0x0b);
+}
+
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[33];
+  Buf cs[35];
   int i, ng = P->ng > 0 ? P->ng : 1;
-  enum { NCORE = 19, NHOST = 14, NFUNCS = NCORE + NHOST };
+  enum { NCORE = 19, NHOST = 16, NFUNCS = NCORE + NHOST };
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
   for (i = 0; i < NFUNCS; i++) if (!binit(&cs[i], i==1 ? 8192 : 256)) return 0;
@@ -2080,16 +2543,19 @@ static int build_mod(Prog *P, Buf *mod) {
   uint8_t fty[NFUNCS] = {
     0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
     1, 1, 1, 11, 2, 6, 6, 1, 1, 1, 2, 2,
-    12, /* 30 host_dict_set (h,i,k,v) */
-    1  /* 31 host_mk_null */
+    12,
+    1,
+    2,
+    1
   };
   for (i = 0; i < NFUNCS; i++) if (!bu8(&funcs, fty[i])) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
   /* exports */
-  if (!bleu(&exps, 27)) return 0;
+  if (!bleu(&exps, 28)) return 0;
   #define EXP(name, kind, idx) do { \
-    if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, idx)) return 0; \
+    uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)g_need_gpu : (uint32_t)(idx); \
+    if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, _i)) return 0; \
   } while (0)
   EXP("memory", 0x02, 0);
   EXP("main_export", 0x00, 1);
@@ -2118,7 +2584,7 @@ static int build_mod(Prog *P, Buf *mod) {
   EXP("str_ptr_export", 0x00, 29);
   EXP("str_len_export", 0x00, 30);
   EXP("host_mk_null", 0x00, 32);
-  #undef EXP
+  EXP("host_reset_globals", 0x00, 34);
 
   if (!mk_num_body(&cs[0], 0)) return 0;
   if (!emit_locals(&cs[1], P)) return 0;
@@ -2178,7 +2644,9 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!str_ptr_body(&cs[29])) return 0;
   if (!len_of_body(&cs[30])) return 0;
   if (!host_dict_set_body(&cs[31])) return 0;
-  if (!const_i32_ret_body(&cs[32], 0)) return 0; /* host_mk_null */
+  if (!const_i32_ret_body(&cs[32], 0)) return 0;
+  if (!store_bytes_body(&cs[33])) return 0;
+  if (!host_reset_globals_body(&cs[34])) return 0;
 
   if (!bleu(&codes, NFUNCS)) return 0;
   for (i = 0; i < NFUNCS; i++) {
@@ -2188,6 +2656,14 @@ static int build_mod(Prog *P, Buf *mod) {
   static const uint8_t hdr[] = {0,0x61,0x73,0x6d,1,0,0,0};
   if (!braw(mod, hdr, 8)) return 0;
   if (!sect(mod,1,&types)) return 0;
+  if (g_need_gpu) {
+    Buf imps;
+    if (!binit(&imps, 64)) return 0;
+    if (!bleu(&imps, 1)) return 0;
+    if (!bstr(&imps, "env") || !bstr(&imps, "host_gpu_submit")) return 0;
+    if (!bu8(&imps, 0) || !bleu(&imps, 11)) return 0;
+    if (!sect(mod,2,&imps)) return 0;
+  }
   if (!sect(mod,3,&funcs)) return 0;
   if (!sect(mod,5,&mems)) return 0;
   if (!sect(mod,7,&exps)) return 0;
@@ -2252,10 +2728,11 @@ __attribute__((export_name("compile")))
 #endif
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_bump = 64;
+  g_need_gpu = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
-  if (src_len > 100000) { set_err("src too large"); return 1; }
+  if (src_len > 100000) { g_need_gpu = 0; set_err("src too large"); return 1; }
 #ifdef UJS_HOST
-  if (src_ptr + src_len > sizeof(g_heap)) { set_err("bad src"); return 1; }
+  if (src_ptr + src_len > sizeof(g_heap)) { g_need_gpu = 0; set_err("bad src"); return 1; }
   const char *src = (const char *)(g_heap + src_ptr);
 #else
   const char *src = (const char *)(uintptr_t)src_ptr;
@@ -2265,12 +2742,17 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   P.src = src; P.srclen = src_len; P.fn_ret = -1;
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
+#ifdef UJS_HOST
+  if (parse_net_top_is_bad(L.tok)) { g_need_gpu = 0; set_err("parse-net"); return 1; }
+#endif
   while (L.tok != T_EOF) {
-    if (!pstmt(&L, &P)) { set_err(P.err ? P.err : "parse"); return 1; }
+    if (!pstmt(&L, &P)) { g_need_gpu = 0; set_err(P.err ? P.err : "parse"); return 1; }
   }
-  if (!write_meta(&P)) { set_err("meta"); return 1; }
+  if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
-  if (!build_mod(&P, &mod)) { set_err("emit"); return 1; }
+  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err("emit"); return 1; }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
+  g_need_gpu = 0;
+  (void)PERSIST_FIT;
   return 0;
 }

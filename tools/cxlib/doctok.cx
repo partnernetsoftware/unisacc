@@ -1,0 +1,279 @@
+#pragma unisa module doctok
+/* doctok: document tokenizer for the devsvc doc index (BM25 terms plus byte offsets).
+ * Pure function over UTF-8 bytes: no file IO, no locks, no global mutable state.
+ *   int dt_tokenize(const char *buf, size_t n, dt_tok **out, size_t *cnt);
+ *   int dt_tokenize_lim(buf, n, max_tokens, max_bytes, out, cnt);
+ *   void dt_free(dt_tok *t);                 one block: tokens then text arena
+ *   int dt_fingerprint(char out[13]);        sha256 of the rule table, first 12 hex
+ *   int dt_fingerprint_rules(rules, nrules, out)  same over a caller table (negative control)
+ *   const char *dt_errname(int rc);  const char *dt_version(void);
+ * Rules (dt_rules below is the literal source of the fingerprint):
+ *  (1) output: lowercase token bytes plus byte offset into the input, offsets nondecreasing;
+ *  (2) CJK run (Han code points) -> char bigrams; a run of one -> unigram;
+ *  (3) ASCII [A-Za-z0-9_] runs joined by - . / -> whole compound plus each word;
+ *  (4) backtick span holding / or . -> whole span plus basename (after last /);
+ *  (5) "->" is one token; versions like 0.0.59 or v0.0.71 are compounds (whole plus digits);
+ *  (6) other punctuation, whitespace, full-width punctuation and other scripts separate;
+ *  (7) no trigram, no stopwords; ASCII lowercased;
+ *  (8) bad UTF-8 -> DT_EBADUTF8; (9) limits -> DT_ETOOMANY, DT_ETOOLONG, DT_ETOKLONG.
+ */
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.sha
+
+#define DT_VERSION "doctok-1"
+enum dt_status { DT_OK = 0, DT_EBADUTF8 = -1, DT_ETOOMANY = -2, DT_ETOOLONG = -3, DT_ETOKLONG = -4, DT_ENOMEM = -5, DT_EARG = -6 };
+#define DT_MAX_TOKENS_DEF ((size_t)4000000)
+#define DT_MAX_BYTES_DEF ((size_t)(64u << 20))
+#define DT_MAX_TOKLEN 256
+
+typedef struct dt_tok { size_t off; size_t len; const char *s; } dt_tok;
+
+static const char *const dt_rules[] = {
+    "out=lowercase-bytes+offset;offsets-nondecreasing",
+    "cjk=han[3400-4DBF,4E00-9FFF,F900-FAFF,20000-2FFFF];run>=2:bigram;run=1:unigram",
+    "ascii=[A-Za-z0-9_]+;join=[-./];emit=whole-if-joined+each-word",
+    "backtick=span-with-[/.]:whole+basename-after-last-slash;span-max=256;no-newline",
+    "arrow=->:token;version=v?digits(.digits)+:compound",
+    "sep=other-punct,space,fullwidth-punct,other-scripts",
+    "no-trigram;no-stopword;ascii-lower",
+    "bad-utf8=reject;limits=reject-no-truncate;toklen-max=256",
+};
+
+const char *dt_errname(int rc) {
+    switch (rc) {
+    case DT_OK: return "DT_OK";
+    case DT_EBADUTF8: return "DT_EBADUTF8";
+    case DT_ETOOMANY: return "DT_ETOOMANY";
+    case DT_ETOOLONG: return "DT_ETOOLONG";
+    case DT_ETOKLONG: return "DT_ETOKLONG";
+    case DT_ENOMEM: return "DT_ENOMEM";
+    case DT_EARG: return "DT_EARG";
+    }
+    return "DT_EUNKNOWN";
+}
+
+const char *dt_version(void) { return DT_VERSION; }
+
+int dt_fingerprint_rules(const char *const *rules, int nrules, char out[13]) {
+    char hex[65];
+    unsigned char *b;
+    size_t tot = 0, at = 0;
+    if (!rules || nrules <= 0 || !out) return DT_EARG;
+    for (int i = 0; i < nrules; i++) { size_t k = 0; while (rules[i][k]) k++; tot += k + 1; }
+    b = mm_alloc((long)tot + 1);
+    if (!b) return DT_ENOMEM;
+    for (int i = 0; i < nrules; i++) {
+        size_t k = 0;
+        while (rules[i][k]) { b[at++] = (unsigned char)rules[i][k]; k++; }
+        b[at++] = '\n';
+    }
+    if (sy_sha256_hex(b, (long)at, hex)) { mm_free(b); return DT_EARG; }
+    mm_free(b);
+    for (int i = 0; i < 12; i++) out[i] = hex[i];
+    out[12] = 0;
+    return DT_OK;
+}
+
+int dt_fingerprint(char out[13]) {
+    return dt_fingerprint_rules(dt_rules, (int)(sizeof dt_rules / sizeof dt_rules[0]), out);
+}
+
+/* Builder: token records hold arena offsets; pointers are fixed at publish. */
+typedef struct { size_t off, len, at; } dt_rec;
+typedef struct {
+    dt_rec *r; size_t nr, cr, maxt;
+    char *a; size_t na, ca;
+    int err;
+} dt_b;
+
+static int dt_word(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+static int dt_join(unsigned char c) { return c == '-' || c == '.' || c == '/'; }
+
+static void dt_emit(dt_b *b, const char *src, size_t off, size_t len) {
+    if (b->err || len == 0) return;
+    if (len > DT_MAX_TOKLEN) { b->err = DT_ETOKLONG; return; }
+    if (b->nr >= b->maxt) { b->err = DT_ETOOMANY; return; }
+    if (b->nr == b->cr) {
+        size_t nc = b->cr ? b->cr * 2 : 256;
+        dt_rec *p = mm_grow(b->r, (long)(nc * sizeof(dt_rec)));
+        if (!p) { b->err = DT_ENOMEM; return; }
+        b->r = p; b->cr = nc;
+    }
+    if (b->na + len > b->ca) {
+        size_t nc = b->ca ? b->ca * 2 : 4096;
+        while (nc < b->na + len) nc *= 2;
+        char *p = mm_grow(b->a, (long)nc);
+        if (!p) { b->err = DT_ENOMEM; return; }
+        b->a = p; b->ca = nc;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[off + i];
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        b->a[b->na + i] = (char)c;
+    }
+    b->r[b->nr].off = off; b->r[b->nr].len = len; b->r[b->nr].at = b->na;
+    b->na += len; b->nr++;
+}
+
+static int dt_eq(const dt_b *b, long i, const char *src, size_t off, size_t len) {
+    if (i < 0 || b->r[i].len != len) return 0;
+    for (size_t k = 0; k < len; k++) {
+        unsigned char c = (unsigned char)src[off + k];
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        if ((unsigned char)b->a[b->r[i].at + k] != c) return 0;
+    }
+    return 1;
+}
+
+/* Decode one UTF-8 scalar at p (n bytes left). Returns length or 0 when malformed. */
+static int dt_utf8(const unsigned char *p, size_t n, unsigned *cp) {
+    unsigned c = p[0], v, min;
+    int len;
+    if (c < 0x80) { *cp = c; return 1; }
+    if (c >= 0xC2 && c <= 0xDF) { len = 2; v = c & 0x1F; min = 0x80; }
+    else if (c >= 0xE0 && c <= 0xEF) { len = 3; v = c & 0x0F; min = 0x800; }
+    else if (c >= 0xF0 && c <= 0xF4) { len = 4; v = c & 0x07; min = 0x10000; }
+    else return 0;
+    if ((size_t)len > n) return 0;
+    for (int i = 1; i < len; i++) {
+        if ((p[i] & 0xC0) != 0x80) return 0;
+        v = (v << 6) | (p[i] & 0x3F);
+    }
+    if (v < min || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) return 0;
+    *cp = v;
+    return len;
+}
+
+static int dt_han(unsigned v) {
+    return (v >= 0x3400 && v <= 0x4DBF) || (v >= 0x4E00 && v <= 0x9FFF) ||
+           (v >= 0xF900 && v <= 0xFAFF) || (v >= 0x20000 && v <= 0x2FFFF);
+}
+
+/* ASCII compound s[i..e): whole (when joined, unless equal to record skip1/skip2) plus each word. */
+static void dt_compound(dt_b *b, const char *s, size_t i, size_t e, long skip1, long skip2) {
+    int joined = 0;
+    for (size_t k = i; k < e; k++) if (dt_join((unsigned char)s[k])) joined = 1;
+    if (joined && !dt_eq(b, skip1, s, i, e - i) && !dt_eq(b, skip2, s, i, e - i)) dt_emit(b, s, i, e - i);
+    size_t k = i;
+    while (k < e) {
+        size_t w = k;
+        while (w < e && dt_word((unsigned char)s[w])) w++;
+        if (w > k) dt_emit(b, s, k, w - k);
+        k = w + 1;
+    }
+}
+
+/* Scan s[i..e) with rules (2)(3)(5)(6). Backtick spans are handled by the caller. */
+static int dt_scan(dt_b *b, const char *s, size_t i, size_t e, long skip1, long skip2) {
+    const unsigned char *u = (const unsigned char *)s;
+    while (i < e && !b->err) {
+        unsigned c = u[i];
+        if (c == '-' && i + 1 < e && u[i + 1] == '>') { dt_emit(b, s, i, 2); i += 2; continue; }
+        if (dt_word((unsigned char)c)) {
+            size_t j = i;
+            for (;;) {
+                while (j < e && dt_word(u[j])) j++;
+                if (j + 1 < e && dt_join(u[j]) && dt_word(u[j + 1])) { j++; continue; }
+                break;
+            }
+            dt_compound(b, s, i, j, skip1, skip2);
+            i = j;
+            continue;
+        }
+        if (c < 0x80) { i++; continue; }
+        unsigned cp;
+        int l = dt_utf8(u + i, e - i, &cp);
+        if (!l) return DT_EBADUTF8;
+        if (!dt_han(cp)) { i += (size_t)l; continue; }
+        size_t p0 = i, plen = (size_t)l, q = i + (size_t)l;
+        int run = 1;
+        for (;;) {
+            unsigned cp2;
+            int l2;
+            if (q >= e || u[q] < 0x80) break;
+            l2 = dt_utf8(u + q, e - q, &cp2);
+            if (!l2) return DT_EBADUTF8;
+            if (!dt_han(cp2)) break;
+            dt_emit(b, s, p0, plen + (size_t)l2);
+            run++;
+            p0 = q; plen = (size_t)l2; q += (size_t)l2;
+        }
+        if (run == 1) dt_emit(b, s, p0, plen);
+        i = q;
+    }
+    return b->err;
+}
+
+/* Stable insertion sort of records [from, nr) by offset. */
+static void dt_sort(dt_b *b, size_t from) {
+    for (size_t i = from + 1; i < b->nr; i++) {
+        dt_rec t = b->r[i];
+        size_t j = i;
+        while (j > from && b->r[j - 1].off > t.off) { b->r[j] = b->r[j - 1]; j--; }
+        b->r[j] = t;
+    }
+}
+
+int dt_tokenize_lim(const char *buf, size_t n, size_t max_tokens, size_t max_bytes, dt_tok **out, size_t *cnt) {
+    dt_b b;
+    const unsigned char *u = (const unsigned char *)buf;
+    size_t i = 0, seg = 0;
+    int rc = DT_OK;
+    if (!out || !cnt || (!buf && n)) return DT_EARG;
+    *out = 0; *cnt = 0;
+    if (n > max_bytes) return DT_ETOOLONG;
+    b.r = 0; b.nr = 0; b.cr = 0; b.maxt = max_tokens; b.a = 0; b.na = 0; b.ca = 0; b.err = 0;
+    while (i < n && !rc) {
+        if (u[i] != '`') { i++; continue; }
+        size_t j = i + 1, lim = i + 1 + DT_MAX_TOKLEN;
+        int mark = 0;
+        while (j < n && j < lim && u[j] != '`' && u[j] != '\n') { if (u[j] == '/' || u[j] == '.') mark = 1; j++; }
+        if (j >= n || u[j] != '`' || j == i + 1 || !mark) { i++; continue; }
+        rc = dt_scan(&b, buf, seg, i, -1, -1);
+        if (rc) break;
+        size_t s0 = i + 1, from = b.nr, bs = s0;
+        for (size_t k = s0; k < j; k++) if (u[k] == '/') bs = k + 1;
+        for (size_t k = s0; k < j;) {
+            unsigned cp;
+            int l = dt_utf8(u + k, j - k, &cp);
+            if (!l) { rc = DT_EBADUTF8; break; }
+            k += (size_t)l;
+        }
+        if (rc) break;
+        long w, bn = -1;
+        dt_emit(&b, buf, s0, j - s0); w = (long)b.nr - 1;
+        if (bs > s0 && bs < j) { dt_emit(&b, buf, bs, j - bs); bn = (long)b.nr - 1; }
+        if (b.err) { rc = b.err; break; }
+        rc = dt_scan(&b, buf, s0, j, w, bn);
+        if (rc) break;
+        dt_sort(&b, from);
+        seg = j + 1; i = j + 1;
+    }
+    if (!rc) rc = dt_scan(&b, buf, seg, n, -1, -1);
+    if (!rc) {
+        size_t hdr = b.nr * sizeof(dt_tok);
+        dt_tok *t = mm_alloc((long)(hdr + b.na + 1));
+        if (!t) rc = DT_ENOMEM;
+        else {
+            char *a = (char *)t + hdr;
+            if (b.na && mm_copy(a, (long)b.na, b.a, (long)b.na)) { mm_free(t); rc = DT_ENOMEM; }
+            else {
+                a[b.na] = 0;
+                for (size_t k = 0; k < b.nr; k++) { t[k].off = b.r[k].off; t[k].len = b.r[k].len; t[k].s = a + b.r[k].at; }
+                *out = t; *cnt = b.nr;
+            }
+        }
+    }
+    if (b.r) mm_free(b.r);
+    if (b.a) mm_free(b.a);
+    return rc;
+}
+
+int dt_tokenize(const char *buf, size_t n, dt_tok **out, size_t *cnt) {
+    return dt_tokenize_lim(buf, n, DT_MAX_TOKENS_DEF, DT_MAX_BYTES_DEF, out, cnt);
+}
+
+void dt_free(dt_tok *t) { if (t) mm_free(t); }

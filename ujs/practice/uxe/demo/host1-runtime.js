@@ -43,8 +43,16 @@
     var buf = src;
     if (typeof src === "string") buf = u8fromB64(src);
     var meta = parseUjsmeta(buf);
-    var inst = await WebAssembly.instantiate(buf);
+    var memory = null;
+    function gpuSubmit(ptr, len) {
+      if (typeof g.onHostGpuSubmit !== "function" || !memory) return;
+      var u = new Uint8Array(memory.buffer, ptr >>> 0, len >>> 0);
+      var ab = u.buffer.slice(u.byteOffset, u.byteOffset + u.byteLength);
+      g.onHostGpuSubmit(ab);
+    }
+    var inst = await WebAssembly.instantiate(buf, { env: { host_gpu_submit: gpuSubmit } });
     var e = inst.instance.exports;
+    memory = e.memory;
     return {
       exports: e,
       meta: meta,

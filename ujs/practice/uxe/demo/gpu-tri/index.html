@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!-- AUTO=?auto=1 跳过 rAF,同步 readPixels(preserveDrawingBuffer)。交互 rAF 路径不在 ujs-gpu-tri 覆盖。HUD window.__stage -->
+<html lang="zh"><head>
+<meta charset="utf-8"/><title>gpu-tri</title>
+<style>
+html,body{margin:0;height:100%;background:#1a334d;color:#eee;font:13px sans-serif}
+#hud{position:fixed;left:8px;top:8px;z-index:2;background:rgba(0,0,0,.5);padding:6px 8px}
+canvas{display:block;width:256px;height:256px}
+</style></head>
+<body>
+<div id="hud">gpu-tri</div>
+<canvas id="view" width="256" height="256"></canvas>
+<script src="../host1-runtime.js"></script>
+<script src="tri-b64.js"></script>
+<script src="tri-oracle.js"></script>
+<script type="module">
+import { createBrowserHost } from "../../host-browser.js";
+const AUTO=/(?:\?|&)auto=1(?:&|$)/.test(location.search);
+let ORACLE_FNV=window.GPU_TRI_FNV;
+let ER=window.GPU_TRI_ER, EG=window.GPU_TRI_EG, EB=window.GPU_TRI_EB;
+{
+  const m=/(?:\?|&)oracle_fnv=(\d+)/.exec(location.search);
+  if(m) ORACLE_FNV=+m[1];
+  const e=/(?:\?|&)expect_er=(\d+)/.exec(location.search);
+  if(e){ ER=+e[1]; EG=0; EB=0; }
+}
+function fnv1a(buf){
+  const u=new Uint8Array(buf);
+  let h=2166136261;
+  for(let i=0;i<u.length;i++){ h^=u[i]; h=Math.imul(h,16777619)>>>0; }
+  return h;
+}
+function near(a,b,tol){ return Math.abs(a-b)<=tol; }
+(async()=>{
+  const canvas=document.getElementById("view");
+  const hud=document.getElementById("hud");
+  function stage(s){ window.__stage=s; hud.textContent="stage="+s; }
+  stage("boot");
+  let gpu_fnv=0, packet_ok=0, pixel="UNMEASURED", err=null, pkt=null;
+  window.onHostGpuSubmit=function(ab){ pkt=ab; gpu_fnv=fnv1a(ab); stage("submit"); };
+  try{
+    const rt=await host1Boot(window.GPU_TRI_WASM);
+    stage("gold");
+    rt.goldI64();
+    packet_ok=(gpu_fnv===ORACLE_FNV)?1:0;
+  }catch(e){ err=String(e&&e.message||e); stage("boot-err"); }
+  try{
+    if(pkt){
+      const host=await createBrowserHost(canvas,{prefer:"webgl"});
+      stage("host");
+      host.host_gpu_submit(pkt);
+      host.host_frame_present();
+      stage("present");
+      if(!AUTO) await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      const gl=canvas.getContext("webgl")||canvas.getContext("webgl2");
+      if(gl){
+        stage("pixels");
+        const c=new Uint8Array(4), c2=new Uint8Array(4), c3=new Uint8Array(4), m=new Uint8Array(4), inn=new Uint8Array(4);
+        const w=canvas.width|0, h=canvas.height|0;
+        const kr=window.GPU_TRI_KR, kg=window.GPU_TRI_KG, kb=window.GPU_TRI_KB;
+        function samp(x,y,o){ gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,o); }
+        function isClear(o){ return near(o[0],kr,10)&&near(o[1],kg,10)&&near(o[2],kb,10); }
+        function nearExp(o){ return near(o[0],ER,24)&&near(o[1],EG,24)&&near(o[2],EB,24); }
+        samp(2,2,c); samp(w-3,2,c2); samp(2,h-3,c3);
+        samp((w>>1)|0,(h>>1)|0,m);
+        samp((w>>1)|0,((h>>1)+8)|0,inn);
+        const corners=isClear(c)&&isClear(c2)&&isClear(c3);
+        const inner=!isClear(m)&&nearExp(m)&&!isClear(inn);
+        pixel=(corners&&inner)?"ok":"fail";
+        window.__UXE_PX__={c:[c[0],c[1],c[2]],m:[m[0],m[1],m[2]],w:w,h:h};
+      }
+    }
+  }catch(e){ if(!err) err=String(e&&e.message||e); stage("pix-err"); }
+  window.__UXE__={gpu_fnv,packet_ok,pixel,oracle:ORACLE_FNV,err,auto:AUTO?1:0,px:window.__UXE_PX__||null,stage:window.__stage};
+  let title="GPU_TRI_FAIL";
+  if(packet_ok&&pixel==="ok") title="GPU_TRI_OK";
+  else if(packet_ok&&pixel==="UNMEASURED") title="GPU_TRI_UNMEASURED";
+  else if(packet_ok) title="GPU_TRI_PKT";
+  document.title=title;
+  stage("title");
+  hud.textContent=title+" stage="+window.__stage+" fnv="+gpu_fnv+" pixel="+pixel+(err?" "+err:"");
+})();
+</script></body></html>

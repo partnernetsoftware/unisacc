@@ -17,6 +17,11 @@
  *                    `REFUSE admission-timeout`, never run
  *   off              DEVSVC_ADMISSION=off: no tokens taken, par alone bounds the run
  *   no-residue       the slot directory is empty after every run
+ *   load-*           load gate (DEVSVC_LOAD_MAX / DEVSVC_LOAD_WAIT_MS seams, config rows admit_load_max /
+ *                    admit_load_wait_ms via DEVSVC_REPO_TABLE): load 15 > 10 holds the start until a
+ *                    background writer drops it to 2 (ADMIT defer then go); a short budget lets it go
+ *                    with ADMIT timeout and load_timeout = 1; load under max never gates; rows are read
+ *                    by exact key and absent rows fall back to 10 and 5000
  * b (processes): two flowrun --par 16 at the same time on one 4 token pool: every node logs its
  *   start and end, the runs overlap, at no instant do both flows together run more than 4 nodes,
  *   both runs all ok, pool empty afterwards.
@@ -136,6 +141,34 @@ static void group_a(void) {
     r = run_flow("nomem", "x\texec\t-\ta0=true\n", 2, 400, &s, &ev);
     ck(r == 1 && s.skip == 1 && has(ev, "REFUSE admission-timeout"), "admission-timeout-no-memory");
     free(ev); ev = 0;
+    /* load gate: hold starts while load1 > max, let go when it falls, bounded wait marked timeout */
+    pool(8, 64L << 20, "15"); sy_setenv("DEVSVC_LOAD_MAX", "10", 1); sy_setenv("DEVSVC_LOAD_WAIT_MS", "20000", 1);
+    {   char sc[2600], *o = 0; size_t on2 = 0; char *v[] = {"sh", "-c", sc, 0};
+        if (cx_fmt(sc, sizeof sc, "(sleep 0.6; printf '2.00 1.0 1.0 1/100 99\\n' > '%s') >/dev/null 2>&1 </dev/null &", pj("loadavg"))) die("sc");
+        if (cx_runv_timeout(v, 10, &o, &on2) != 0) die("background load writer"); free(o); }
+    if (cx_fmt(b, sizeof b, "x\texec\t-\ta0=true\n")) die("f");
+    r = run_flow("loaddefer", b, 2, 20000, &s, &ev);
+    ck(r == 0 && s.ok == 1 && s.load_defer == 1 && s.load_timeout == 0 && s.admit_wait_ms >= 500
+       && has(ev, "ADMIT\tdefer\tload1=15.00\tmax=10.00\t") && has(ev, "ADMIT\tgo\tload1=2.00\t") && !has(ev, "ADMIT\ttimeout"), "load-defer-then-go");
+    free(ev); ev = 0; ck(entries() == 0, "load-defer-no-residue");
+    pool(8, 64L << 20, "15"); sy_setenv("DEVSVC_LOAD_WAIT_MS", "300", 1);
+    r = run_flow("loadtimeout", b, 2, 20000, &s, &ev);
+    ck(r == 0 && s.ok == 1 && s.load_defer == 1 && s.load_timeout == 1 && s.admit_wait_ms >= 300 && has(ev, "ADMIT\ttimeout\tload1=15.00\tmax=10.00\t"), "load-timeout-marked");
+    free(ev); ev = 0;
+    pool(8, 64L << 20, "9.5");
+    r = run_flow("loadlow", b, 2, 20000, &s, &ev);
+    ck(r == 0 && s.ok == 1 && s.load_defer == 0 && s.admit_wait_ms == 0 && !has(ev, "ADMIT\t"), "load-under-max-no-gate");
+    free(ev); ev = 0;
+    sy_unsetenv("DEVSVC_LOAD_MAX"); sy_unsetenv("DEVSVC_LOAD_WAIT_MS");
+    wf("cfg.tsv", "key\tvalue\tnote\nadmit_load_max_x\t1\tdecoy\nadmit_load_max\t20\tt\nadmit_load_wait_ms\t700\tt\n");
+    sy_setenv("DEVSVC_REPO_TABLE", pj("cfg.tsv"), 1);
+    ck(fa_load_max() == 20.0 && fa_load_wait_ms() == 700, "load-config-rows");
+    pool(8, 64L << 20, "15");
+    r = run_flow("loadcfg", b, 2, 20000, &s, 0);
+    ck(r == 0 && s.ok == 1 && s.load_defer == 0, "load-config-max-applies");
+    wf("cfg.tsv", "key\tvalue\tnote\n");
+    ck(fa_load_max() == 10.0 && fa_load_wait_ms() == 5000, "load-config-defaults");
+    sy_unsetenv("DEVSVC_REPO_TABLE");
     /* off */
     pool(1, 1L << 20, "0.5"); sy_setenv("DEVSVC_ADMISSION", "off", 1); sleeps(b, sizeof b, 4, "0.2", "");
     r = run_flow("off", b, 4, 20000, &s, 0);

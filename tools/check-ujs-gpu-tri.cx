@@ -1,0 +1,114 @@
+#pragma unisa use chrome_dom
+/* tools/check-ujs-gpu-tri.cx -- dump-dom AUTO; 只认 <title> 文本.
+ *
+ * sh ./unisacc.com tools/check-ujs-gpu-tri.cx --
+ * chrome 经 cxlib.chrome-dom; 偶发未到终 title 根因未定位; retries 保留.
+ */
+static int hx(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static int expect_title(const char *url, const char *want, const char *forbid, const char *label) {
+    int retries = 0;
+    const char *fin[3];
+    int rc;
+    (void)forbid;
+    fin[0] = "GPU_TRI_OK";
+    fin[1] = "GPU_TRI_FAIL";
+    fin[2] = "GPU_TRI_PKT";
+    rc = chd_dump_expect("/usr/bin/google-chrome", url, want, fin, 3, "gpu-tri", 3, 25, &retries);
+    if (rc == 3) {
+        printf("UJS_GPU_TRI_UNMEASURED\tno-chrome\n");
+        return 2;
+    }
+    if (rc == 0) {
+        printf("PASS\t%s\tretries=%d\n", label, retries);
+        return 0;
+    }
+    printf("FAIL\t%s\trc=%d\tretries=%d\n", label, rc, retries);
+    return 1;
+}
+static void make_url(char *url, int cap, const char *cwd, const char *suf) {
+    const char *pre = "file://";
+    int n = 0, i;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < cap - 2; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < cap - 1; i++) url[n++] = suf[i];
+    url[n] = 0;
+}
+int main(int argc, char **argv) {
+    FILE *f;
+    char line[1024];
+    unsigned char b[4096];
+    int nb = 0, hi, lo;
+    unsigned ofnv = 0;
+    char *p;
+    char *av[4];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    char cwd[512];
+    char url[640];
+    const char *chrome = "/usr/bin/google-chrome";
+    (void)argc; (void)argv;
+    f = fopen("ujs/tests/uxep-tri-oracle.tsv", "rb");
+    if (!f) { fprintf(stderr, "no tsv\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        if (line[0] == '#' || line[0] == 'k') continue;
+        p = line;
+        while (*p && *p != '\t') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') { ofnv = ofnv * 10u + (unsigned)(*p - '0'); p++; }
+        break;
+    }
+    fclose(f);
+    if (!ofnv) { fprintf(stderr, "no fnv in tsv\n"); return 2; }
+    f = fopen("ujs/tests/uxep-tri-oracle.hex", "rb");
+    if (!f) { fprintf(stderr, "no hex\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        p = line;
+        if (line[0] == '#') continue;
+        while (*p && *p != '\n' && *p != '\r') {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || *p == '\n' || *p == '\r') break;
+            hi = hx(*p++);
+            lo = hx(*p++);
+            if (hi < 0 || lo < 0 || nb >= 4096) { fclose(f); return 2; }
+            b[nb++] = (unsigned char)((hi << 4) | lo);
+        }
+    }
+    fclose(f);
+    if (nb < 168) { fprintf(stderr, "hex short\n"); return 2; }
+    printf("oracle_fnv\t%u\thex_bytes\t%d\n", ofnv, nb);
+    f = fopen(chrome, "rb");
+    if (!f) {
+        printf("UJS_GPU_TRI_UNMEASURED\tno-chrome\n");
+        return 2;
+    }
+    fclose(f);
+    av[0] = (char *)chrome;
+    av[1] = "--version";
+    av[2] = 0;
+    rc = cx_runv_timeout(av, 10, &out, &on);
+    if (out && on) fwrite(out, 1, on, stdout);
+    if (out) { free(out); out = 0; on = 0; }
+    if (rc != 0) {
+        printf("UJS_GPU_TRI_UNMEASURED\tchrome-version\n");
+        return 2;
+    }
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    make_url(url, (int)sizeof url, cwd, "/ujs/practice/uxe/demo/gpu-tri/index.html?auto=1");
+    if (expect_title(url, "GPU_TRI_OK", 0, "good-title")) return 1;
+    make_url(url, (int)sizeof url, cwd, "/ujs/practice/uxe/demo/gpu-tri/index.html?auto=1&oracle_fnv=1");
+    if (expect_title(url, "GPU_TRI_FAIL", "GPU_TRI_OK", "counter-title")) return 1;
+    make_url(url, (int)sizeof url, cwd, "/ujs/practice/uxe/demo/gpu-tri/index.html?auto=1&expect_er=0");
+    if (expect_title(url, "GPU_TRI_PKT", "GPU_TRI_OK", "pixel-counter")) return 1;
+    printf("UJS_GPU_TRI_OK\n");
+    return 0;
+}

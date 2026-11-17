@@ -1,11 +1,19 @@
 /* tools/check-harness-contracts.cx -- every row of tests/harness-contracts.tsv must point at a live
  * negative control.  For an OK row: the fix commit is an ancestor of HEAD, the negctl batch exists in
- * tests/batches.tsv, and running that batch (its entry and args, {root} -> ROOT) prints a PASS line for
+ * tests/batches.tsv, and running that batch prints a PASS line for
  * the named case and no FAIL line for it.  Behaviour evidence only: a case name present in source but
  * never printed PASS is red.  PENDING rows are reported, never counted green.
- *   sh ./unisacc.com tools/check-harness-contracts.cx [-- ROOT]
+ * Batch args are expanded as tests/run-batch.cx binds them: {root} -> ROOT, {out} -> a private
+ * mkdtemp directory under $TMPDIR (removed after the batch), and each material placeholder -> the
+ * path tools/affected.cx --prep-plan reports for that batch (its own cache identity, not a second
+ * copy of the hashing).  A material whose plan line is not cache=hit with an existing path, or any
+ * placeholder left unbound, makes the row UNMET with the name; the batch is not started.  A batch
+ * killed at the deadline without printing the case makes the row UNMEASURED.  Neither is green.
+ *   sh ./unisacc.com tools/check-harness-contracts.cx [-- [--neg-unmet] [ROOT]]
+ *   --neg-unmet  negative control: every material lookup is treated as unprepared.
  * Batches run in parallel, one process group each, 55 s deadline.  Last line:
- *   HARNESS_CONTRACTS rows=N ok=N pending=N failed=N      exit 0 only when failed=0.
+ *   HARNESS_CONTRACTS rows=N ok=N pending=N failed=N unmet=N unmeasured=N
+ * exit 0 only when failed, unmet and unmeasured are all 0.
  * Batch registration and commit are left to the integrator (shared tables were held by another
  * window when this file was written). */
 #pragma unisa use sys.proc
@@ -14,15 +22,16 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use sys.posix
 
 #define UC "./unisacc.com" /* lint:allow R1 referenced batches run under the installed product, as tests/run.cx does */
 #define MAXR 64
 #define MAXB 32
 static char root[4096], tmpd[512];
-static int failed;
+static int failed, neg_unmet;
 
 typedef struct { char id[96], negctl[256], fix[64], status[16], batch[96], cas[160]; } row_t;
-typedef struct { char id[96], entry[512], args[1024], out[600]; int rc, started; sy_child_t c; } bat_t;
+typedef struct { char id[96], entry[512], args[1024], out[600], miss[256], odir[600]; int rc, started, timed; sy_child_t c; } bat_t;
 static row_t rows[MAXR]; static int nr;
 static bat_t bats[MAXB]; static int nb;
 
@@ -51,6 +60,75 @@ static int quiet(char **argv) {
 }
 static int find_batch(const char *id) { for (int i = 0; i < nb; i++) if (tx_eqz(bats[i].id, id)) return i; return -1; }
 
+/* material paths: ask tools/affected.cx for the batch's preparation plan once, keep its stdout */
+static char plan[MAXB][8192]; static long plann[MAXB]; static int planned[MAXB];
+static int load_plan(int i) {
+    bat_t *b = &bats[i]; char pf[700]; long n = 0; sy_spawn_t o; sy_exit_t st;
+    if (planned[i]) return planned[i] > 0 ? 0 : -1;
+    planned[i] = -1;
+    if (cx_fmt(pf, sizeof pf, "%s/%s.plan", tmpd, b->id)) return -1;
+    int fd = sy_open_new(pf, 0600);
+    if (fd < 0) return -1;
+    char *v[] = {"sh", UC, "tools/affected.cx", "--", "--ids", b->id, "--prep-plan", 0};
+    sy_spawn_init(&o); o.argv = v; o.cwd = root; o.deadline_ms = 30000; o.pgroup = -1;
+    o.out_fd = fd; o.err_fd = SY_STDIO_NULL; o.in_fd = SY_STDIO_NULL;
+    int rc = sy_proc_run(&o, &st); sy_close(fd);
+    if (rc || !st.exited || st.code) return -1;
+    char *t = slurp(pf, &n);
+    if (!t) return -1;
+    long L = n < 8191 ? n : 8191;
+    if (mm_copy(plan[i], sizeof plan[i], t, (size_t)L)) { free(t); return -1; }
+    plan[i][L] = 0; plann[i] = L; free(t);
+    planned[i] = 1; return 0;
+}
+/* plan line: PREP_PLAN NAME id=.. cache=hit path=ABS (tab separated) */
+static int material(int i, const char *name, long nl, char *out, long cap, char *why, long wcap) {
+    char nm[96];
+    if (nl >= (long)sizeof nm || mm_copy(nm, sizeof nm, name, (size_t)nl)) { cx_fmt(why, (size_t)wcap, "placeholder-too-long"); return -1; }
+    nm[nl] = 0;
+    if (neg_unmet) { if (cx_fmt(why, (size_t)wcap, "material-unmet=%s(neg-control)", nm)) return -1; return -1; }
+    if (load_plan(i)) { if (cx_fmt(why, (size_t)wcap, "material-unmet=%s(prep-plan-failed)", nm)) return -1; return -1; }
+    for (long at = 0; at < plann[i]; ) {
+        long e = at; while (e < plann[i] && plan[i][e] != '\n') e++;
+        char line[1024]; long L = e - at < 1023 ? e - at : 1023;
+        if (mm_copy(line, sizeof line, plan[i] + at, (size_t)L)) return -1;
+        line[L] = 0; at = e + 1;
+        char *f[8]; int k = fields(line, f, 8);
+        if (k < 5 || !tx_eqz(f[0], "PREP_PLAN") || !tx_eqz(f[1], nm)) continue;
+        if (!tx_eqz(f[3], "cache=hit")) { if (cx_fmt(why, (size_t)wcap, "material-unmet=%s(%s)", nm, f[3])) return -1; return -1; }
+        if (memcmp(f[4], "path=/", 6) || !sy_is_reg(f[4] + 5)) { if (cx_fmt(why, (size_t)wcap, "material-unmet=%s(path-absent)", nm)) return -1; return -1; }
+        if (cx_fmt(out, (size_t)cap, "%s", f[4] + 5)) { if (cx_fmt(why, (size_t)wcap, "material-path-too-long=%s", nm)) return -1; return -1; }
+        return 0;
+    }
+    if (cx_fmt(why, (size_t)wcap, "material-not-in-plan=%s", nm)) return -1;
+    return -1;
+}
+/* expand batch I's args into A (CAP bytes); 0, or -1 with bats[i].miss naming the reason */
+static int expand_args(int i, char *a, long cap) {
+    bat_t *b = &bats[i]; long o = 0; char val[1024];
+    for (const char *s = b->args; *s; ) {
+        const char *src = s; long sl = 1;
+        if (*s == '{') {
+            const char *e = s + 1; while (*e && *e != '}' && *e != ';') e++;
+            if (*e != '}') { cx_fmt(b->miss, sizeof b->miss, "placeholder-unclosed"); return -1; }
+            long nl = (long)(e - s - 1);
+            if (nl == 4 && !memcmp(s + 1, "root", 4)) src = root;
+            else if (nl == 3 && !memcmp(s + 1, "out", 3)) {
+                if (!b->odir[0]) {
+                    const char *td = getenv("TMPDIR");
+                    if (sy_mkdtemp(td && *td ? td : "/tmp", "hc-out-", b->odir, (int)sizeof b->odir)) { cx_fmt(b->miss, sizeof b->miss, "out-mkdtemp"); return -1; }
+                }
+                src = b->odir;
+            } else if (material(i, s + 1, nl, val, sizeof val, b->miss, sizeof b->miss)) return -1;
+            else src = val;
+            sl = (long)tx_len(src, 4096); s = e + 1;
+        } else s++;
+        if (o + sl >= cap || mm_copy(a + o, (size_t)(cap - o), src, (size_t)sl)) { cx_fmt(b->miss, sizeof b->miss, "args-too-long"); return -1; }
+        o += sl;
+    }
+    a[o] = 0; return 0;
+}
+
 /* case token: preceded by tab or '.', followed by end, tab, '.' or newline */
 static int line_has_case(const char *s, long n, const char *cas) {
     long cn = (long)tx_len(cas, 160);
@@ -76,6 +154,7 @@ static void judge_case(const char *out, long n, const char *cas, int *pass, int 
 
 int main(int argc, char **argv) {
     char p[4400]; long n = 0; char *t;
+    if (argc > 1 && tx_eqz(argv[1], "--neg-unmet")) { neg_unmet = 1; argv++; argc--; }
     if (argc > 1) { if (cx_fmt(root, sizeof root, "%s", argv[1])) return 2; }
     else if (sy_cwd(root, (int)sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
     {   const char *tmp = getenv("CLAUDE_JOB_DIR");
@@ -120,15 +199,12 @@ int main(int argc, char **argv) {
 
     /* (3) run every referenced batch in parallel */
     for (int i = 0; i < nb; i++) {
-        bat_t *b = &bats[i]; char *v[24]; int k = 0; static char argbuf[MAXB][1024];
+        bat_t *b = &bats[i]; char *v[24]; int k = 0; static char argbuf[MAXB][4096];
         v[k++] = "sh"; v[k++] = UC; v[k++] = b->entry; v[k++] = "--";
         if (!tx_eqz(b->args, "-")) {
-            char *a = argbuf[i]; long o = 0;
-            for (const char *s = b->args; *s && o < 1000; ) {
-                if (!memcmp(s, "{root}", 6)) { long rl = (long)tx_len(root, 4096); if (o + rl >= 1000 || mm_copy(a + o, (size_t)(1024 - o), root, (size_t)rl)) break; o += rl; s += 6; }
-                else a[o++] = *s++;
-            }
-            a[o] = 0; v[k++] = a;
+            char *a = argbuf[i];
+            if (expand_args(i, a, sizeof argbuf[i])) { printf("UNMET\tbatch=%s\t%s\n", b->id, b->miss); continue; }
+            v[k++] = a;
             for (char *s = a; *s && k < 22; s++) if (*s == ';') { *s = 0; v[k++] = s + 1; }
         }
         v[k] = 0;
@@ -142,12 +218,13 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < nb; i++) {
         sy_exit_t st; bat_t *b = &bats[i]; b->rc = -1;
-        if (b->started && !sy_proc_wait(&b->c, &st)) b->rc = st.exited ? st.code : -1;
-        printf("BATCH\t%s\trc=%d\tlog=%s\n", b->id, b->rc, b->out);
+        if (b->started && !sy_proc_wait(&b->c, &st)) { b->rc = st.exited ? st.code : -1; b->timed = st.timed_out; }
+        if (b->odir[0] && sy_remove_all(b->odir)) printf("WARN\tout-dir-left\t%s\n", b->odir);
+        printf("BATCH\t%s\trc=%d\ttimed_out=%d\tlog=%s\n", b->id, b->rc, b->timed, b->out);
     }
 
     /* (4) judge rows */
-    int ok = 0, pending = 0, bad;
+    int ok = 0, pending = 0, unmet = 0, unmeasured = 0, bad;
     for (int i = 0; i < nr; i++) {
         row_t *r = &rows[i]; bad = 0;
         char why[256] = "-";
@@ -159,16 +236,18 @@ int main(int argc, char **argv) {
         }
         int bi = bad ? -1 : find_batch(r->batch);
         if (!bad && (bi < 0 || !r->cas[0])) { cx_fmt(why, sizeof why, "batch-not-registered=%s", r->negctl); bad = 1; }
+        if (!bad && bats[bi].miss[0]) { printf("UNMET\t%s\tbatch=%s\t%s\n", r->id, bats[bi].id, bats[bi].miss); unmet++; continue; }
         if (!bad) {
             long on = 0; char *out = slurp(bats[bi].out, &on); int ps = 0, fs = 0;
             if (out) { judge_case(out, on, r->cas, &ps, &fs); free(out); }
             /* the verdict is per case: a red batch elsewhere is surfaced, the case itself must PASS */
             if (bats[bi].rc != 0) printf("WARN\t%s\tbatch=%s\trc=%d\tother-cases-red\n", r->id, bats[bi].id, bats[bi].rc);
+            if (!ps && !fs && bats[bi].timed) { printf("UNMEASURED\t%s\tbatch=%s\tdeadline-55s-before-case-printed\n", r->id, bats[bi].id); unmeasured++; continue; }
             if (!ps || fs) { cx_fmt(why, sizeof why, "case-pass=%d-fail=%d-batch-rc=%d", ps, fs, bats[bi].rc); bad = 1; }
         }
         if (bad) { failed++; printf("FAIL\t%s\t%s\n", r->id, why); }
         else { ok++; printf("PASS\t%s\tnegctl=%s\tfix=%s\n", r->id, r->negctl, r->fix); }
     }
-    printf("HARNESS_CONTRACTS\trows=%d\tok=%d\tpending=%d\tfailed=%d\n", nr, ok, pending, failed);
-    return failed ? 1 : 0;
+    printf("HARNESS_CONTRACTS\trows=%d\tok=%d\tpending=%d\tfailed=%d\tunmet=%d\tunmeasured=%d\n", nr, ok, pending, failed, unmet, unmeasured);
+    return failed || unmet || unmeasured ? 1 : 0;
 }

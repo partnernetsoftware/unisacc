@@ -681,7 +681,7 @@ static int finish(Child *C, int ex, int code, int sig) {
 #define PREP_PAR 3
 #define PREP_SECS 90
 #define PREP_BUDGET_MS 38000
-typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65], native_fingerprint[65], ver[160]; long ms; int cached; } Prep;
+typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65], native_fingerprint[65], ver[160], via[600]; long ms; int cached; } Prep;
 /* PK_PROD: the product under test itself (ROOT/unisacc.com, identity = its sha).  PK_HOST: a declared host
    oracle (/usr/bin/cc|ld|ar, identity = file sha + first --version line).  PK_MDIR: a directory from a material
    tool (net/pp-gold/object-material), artifact sha = material.tsv.  PK_SVAL/PK_SID: a sha256 value derived
@@ -797,7 +797,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
         const char *want = getenv("TCC"), *at = getenv("PATH");
         if (!want || !*want) want = "tcc";
         if (strchr(want, '/')) {
-            if (access(want, X_OK) == 0 && sy_realpath(want, src, cap) >= 0) return 0;
+            if (access(want, X_OK) == 0 && !cx_fmt(src, cap, "%s", want)) return 0;   /* canonicalized in prep_add */
             if (errno == ENOENT) cx_fmt(why, whycap, "HOST_TOOL_MISSING:hosttcc:%s", want);
             else cx_fmt(why, whycap, "host-tool-access=%s:errno=%d", want, errno);
             return -1;
@@ -810,7 +810,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
                 cx_fmt(why, whycap, "host-tool-path-too-long=hosttcc"); return -1;
             }
             if (access(path, X_OK) == 0) {
-                if (sy_realpath(path, src, cap) >= 0) return 0;
+                if (!cx_fmt(src, cap, "%s", path)) return 0;   /* canonicalized in prep_add */
                 cx_fmt(why, whycap, "host-tool-unreadable=%s", path); return -1;
             }
             if (errno != ENOENT) {
@@ -854,16 +854,28 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         memcpy(P->sha, prod_sha, 65); memcpy(P->closure, prod_sha, 65); memcpy(P->id, prod_sha, 16); P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
-    if (P->kind == PK_HOST) {   /* declared host oracle: absolute path, file sha, first --version line */
-        char bound[4400], *av[6]; Buf o = {0, 0, 0}; long e = 0;
-        if (cx_fmt(P->path, sizeof P->path, "%s", P->src) || sy_exists(P->path) != 1) { cx_fmt(why, cap, "host-tool-absent=%s", P->src); return -1; }
-        if (file_sha(P->path, P->sha)) { cx_fmt(why, cap, "host-tool-unreadable=%s", P->src); return -1; }
+    if (P->kind == PK_HOST) {   /* declared host oracle: canonical path, file sha, first --version line */
+        /* The batch front gate (tests/run-batch.cx supplied()) takes only a non-link path that is its own
+           realpath, so the material is the resolved regular executable; the spelling found stays as via=. */
+        char bound[4400], *av[6], idl[800], idh[65]; Buf o = {0, 0, 0}; long e = 0; struct stat hs; int r;
+        if (cx_fmt(P->via, sizeof P->via, "%s", P->src)) { cx_fmt(why, cap, "host-tool-path-too-long=%s", name); return -1; }
+        r = sy_realpath(P->src, P->path, (int)sizeof P->path);
+        if (r == -ENOENT || r == -ENOTDIR) { cx_fmt(why, cap, "host-tool-unresolved=%s", P->src); return -1; }
+        if (r < 0) { cx_fmt(why, cap, "host-tool-realpath=%s:errno=%d", P->src, -r); return -1; }
+        errno = 0;
+        if (lstat(P->path, &hs)) { cx_fmt(why, cap, "host-tool-stat=%s:errno=%d", P->path, errno); return -1; }
+        if (!S_ISREG(hs.st_mode)) { cx_fmt(why, cap, "host-tool-not-regular=%s", P->path); return -1; }
+        if (access(P->path, X_OK)) { cx_fmt(why, cap, "host-tool-not-executable=%s:errno=%d", P->path, errno); return -1; }
+        if (file_sha(P->path, P->sha)) { cx_fmt(why, cap, "host-tool-unreadable=%s", P->path); return -1; }
         if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
         av[0] = bound; av[1] = "5"; av[2] = P->path; av[3] = "--version"; av[4] = 0;
         if (read_all(av, &o) != 0 || !o.n) { cx_fmt(why, cap, "host-tool-version=%s", P->src); return -1; }
         while (e < o.n && o.p[e] != '\n' && o.p[e] != '\t') e++;
         cx_fmt(P->ver, sizeof P->ver, "%.*s", (int)(e < 150 ? e : 150), o.p);
-        memcpy(P->closure, P->sha, 65); memcpy(P->id, P->sha, 16); P->id[16] = 0;
+        /* identity = content sha plus canonical path */
+        if (cx_fmt(idl, sizeof idl, "%s\n%s\n", P->sha, P->path)) { cx_fmt(why, cap, "host-tool-path-too-long=%s", name); return -1; }
+        tp_sha(idl, (size_t)tx_len(idl, sizeof idl), idh);
+        memcpy(P->closure, idh, 65); memcpy(P->id, idh, 16); P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
     if(P->kind==PK_MDIR&&tx_eqz(name,"kernels")){
@@ -942,7 +954,9 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         if(closure_sha("tools/isolated-stream.cx",runner_sha)||cx_fmt(both,sizeof both,"%s%s",P->closure,runner_sha)){cx_fmt(why,cap,"closure-unreadable=tools/isolated-stream.cx");return -1;}
         cx_sha256_hex(both,(size_t)tx_len(both,sizeof both),P->closure);
     }
-    {   char idb[200]; if (cx_fmt(idb, sizeof idb, "%s%s", P->closure, prod_sha)) { cx_fmt(why, cap, "identity=%s", name); return -1; }
+    /* the checkout root is part of the identity: builders such as tools/source-package.cx embed
+       realpath(__FILE__), so one closure built under two roots yields different bytes and must not share a cache name */
+    {   char idb[4400]; if (cx_fmt(idb, sizeof idb, "%s%s\troot=%s", P->closure, prod_sha, root)) { cx_fmt(why, cap, "identity=%s", name); return -1; }
         cx_sha256_hex(idb, (size_t)tx_len(idb, sizeof idb), h);
         memcpy(P->id, h, 16); P->id[16] = 0; }
     if (cx_fmt(P->path, sizeof P->path, "%s/%s-%s.%s", cachedir, name, P->id, P->kind == PK_STREAMS || P->kind == PK_MDIR ? "dir" : "bin")
@@ -1033,6 +1047,7 @@ static int prep_derive(Prep *P) {
 static int prep_quiet;
 /* --prep-only: kit + materials only, no batch loop; the summary the AFFECTED_PREP line reports */
 static int prep_only, pb_materials, pb_hits, pb_built, pb_failed;
+static int prep_plan_only;   /* --prep-plan: print each planned material's cache identity and stop; builds nothing */
 static const char *kit_state = "unknown";
 static void prep_print(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vfprintf(prep_quiet ? stderr : stdout, fmt, ap); va_end(ap); }
 static const char *material_family[MAXBATCH]; static int nmaterial_family;
@@ -1042,9 +1057,55 @@ static int material_wanted(const char *name) {
     for (k = 0; k < nmaterial_family; k++) if (tx_eqz(name, material_family[k])) return 1;
     return 0;
 }
+/* UNISACC_PREP_CACHE: an isolated material/prewarm cache directory (checks use it so a negative control never
+   touches the shared ~/.cache/unisacc/prep-cache); unset = the shared default. */
+static int prep_cache_dir(char *out, int cap) {
+    const char *e = sy_env("UNISACC_PREP_CACHE");
+    if (e && e[0] == '/') return cx_fmt(out, cap, "%s", e);
+    return cx_fmt(out, cap, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."));
+}
+/* Compile prewarm of tests/run-batch.cx.  The product's run cache is keyed by product + source content, so the
+   prewarm only fills that compile cache: run-batch is started with no arguments, which stops at its usage line
+   (rc 2) before any batch is selected, so no test is executed and no result is kept.  The receipt records the
+   identity (run-batch sha, product sha, compile-cache dir) that was warmed; --run recomputes it and reports
+   compile_use=prewarmed only on an exact match, else cold.  The receipt never skips work: the batch always runs. */
+static int prewarm_identity(char *line, int cap) {
+    char rb[4400], rs[65], ps[65];
+    const char *cd = sy_env("UNISACC_CACHE_DIR");
+    if (cx_fmt(rb, sizeof rb, "%s/tests/run-batch.cx", root) || file_sha(rb, rs)) return -1;
+    if (cx_fmt(rb, sizeof rb, "%s/unisacc.com", root) || file_sha(rb, ps)) return -1;
+    return cx_fmt(line, cap, "run-batch=%s\tproduct=%s\tcompile_cache=%s\n", rs, ps, cd && cd[0] ? cd : "default");
+}
+static int prewarm_receipt(char *path, int cap) {
+    char d[4400];
+    if (prep_cache_dir(d, sizeof d)) return -1;
+    return cx_fmt(path, cap, "%s/run-batch-prewarm.tsv", d);
+}
+static const char *compile_use(void) {
+    char want[512], path[4400], *have; size_t n; int same;
+    if (prewarm_identity(want, sizeof want) || prewarm_receipt(path, sizeof path)) return "unknown";
+    have = cx_read(path, &n);
+    if (!have) return "cold";
+    same = (long)n == tx_len(want, sizeof want) && memcmp(have, want, n) == 0;
+    free(have);
+    return same ? "prewarmed" : "cold";
+}
+static int prewarm_compile(long *ms) {
+    char bound[4400], product[4400], lim[8] = "40", line[512], path[4400]; Buf out = {0, 0, 0}; char *av[8]; int rc; long t0 = sy_now_ms();
+    *ms = 0;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 0;
+    av[0] = bound; av[1] = lim; av[2] = "sh"; av[3] = product; av[4] = "tests/run-batch.cx"; av[5] = 0;
+    rc = read_all(av, &out);
+    *ms = sy_now_ms() - t0;
+    if (rc != 2 || out.n != 0) { printf("PREWARM_FAILED\trun-batch\trc=%d\tstdout=%ld\n", rc, out.n); return 0; }   /* usage goes to stderr with rc 2; any stdout means it did more than stop */
+    if (prewarm_identity(line, sizeof line) || prewarm_receipt(path, sizeof path)
+        || cx_write(path, line, (size_t)tx_len(line, sizeof line))) { printf("PREWARM_FAILED\trun-batch\treceipt\n"); return 0; }
+    printf("PREWARMED\trun-batch\t%.*s", (int)tx_len(line, sizeof line), line);
+    return 1;
+}
 static void prebuild(const int *sel, int nsel) {
     int b, todo[PREP_MAX], ntodo = 0, nextt = 0, k, nact = 0, hits = 0, built = 0, failed = 0, deferred = 0; PJob job[PREP_PAR]; long t0 = sy_now_ms();
-    if (cx_fmt(cachedir, sizeof cachedir, "%s/.cache/unisacc/prep-cache", sy_env_or("HOME", "."))) die("path too long");
+    if (prep_cache_dir(cachedir, sizeof cachedir)) die("path too long");
     {   char od[4400]; long n = tx_len(cachedir, sizeof cachedir), k; int r;   /* the cache directory, parents included */
         for (k = 1; k <= n; k++) if (k == n || cachedir[k] == '/') {
             if (tx_copy(od, sizeof od, cachedir, k)) die("path too long");
@@ -1055,6 +1116,11 @@ static void prebuild(const int *sel, int nsel) {
         const char *at = batch[sel[b]].materials; tp_material_decl d; int rc;
         if (tx_eqz(at, "-")) continue;
         while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; if (material_wanted(d.name)) (void)prep_plan(d.name, d.kind, why, sizeof why); }
+    }
+    if (prep_plan_only) {   /* identity only (id, cache hit or miss, cache path): a plan, never PREPARED */
+        for (k = 0; k < nprep; k++) printf("PREP_PLAN\t%s\tid=%s\tcache=%s\tpath=%s%s%s\n", prep[k].name, prep[k].id, prep[k].state == PS_READY ? "hit" : "miss", prep[k].path, prep[k].via[0] ? "\tvia=" : "", prep[k].via);
+        printf("PREP_PLAN_SUMMARY\tmaterials=%d\troot=%s\tcache_dir=%s\n", nprep, root, cachedir);
+        fflush(stdout); exit(0);
     }
     for (k = 0; k < nprep; k++) { if (prep[k].state == PS_READY) hits++; else if (prep[k].kind != PK_SVAL && prep[k].kind != PK_SID) todo[ntodo++] = k; }
     while (nextt < ntodo || nact) {
@@ -1104,7 +1170,7 @@ static void prebuild(const int *sel, int nsel) {
     }
     for (k = 0; k < nprep; k++) if (prep[k].kind == PK_SVAL || prep[k].kind == PK_SID) { if (prep_derive(&prep[k])) failed++; else built++; }
     for (k = 0; k < nprep; k++)
-        if (prep[k].state == PS_READY && prep[k].kind == PK_HOST) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\tpath=%s\tversion=%s\n", prep[k].name, prep[k].id, prep[k].sha, "hit", 0L, prep[k].path, prep[k].ver);
+        if (prep[k].state == PS_READY && prep[k].kind == PK_HOST) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\tpath=%s\tversion=%s\tvia=%s\n", prep[k].name, prep[k].id, prep[k].sha, "hit", 0L, prep[k].path, prep[k].ver, prep[k].via);
         else if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
         else prep_print("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
     prep_print("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
@@ -1149,7 +1215,7 @@ static int run(const int *sel, int nsel, int jobs) {
     refuse_expired_inherited_deadline();
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
-    long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0;
+    long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0; const char *cu = "unknown";
     window_end = t_start + (deadline_hook ? hard_deadline : 57000);   /* 60 秒总上限,留 3 秒收尾 */
     sy_child_subreaper();   /* orphans of a killed batch become our children, so the sweep can see them */
     if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
@@ -1170,10 +1236,14 @@ static int run(const int *sel, int nsel, int jobs) {
         prep_ms = sy_now_ms() - p0;
     }
     if (prep_only) {   /* 只预热:不进批循环,不打 BATCH_RUN/PASS;材料只记 PREPARED */
-        printf("AFFECTED_PREP\tkit=%s\tmaterials=%d\tbuilt=%d\thit=%d\tfailed=%d\tkit_ms=%ld\tprep_ms=%ld\n",
-               kit_state, pb_materials, pb_built, pb_hits, pb_failed, kit_ms, prep_ms);
-        return pb_failed ? 1 : 0;
+        {   int k; for (k = 0; k < nprep; k++) if (prep[k].state == PS_READY)   /* 材料身份,供后续 --run 的 PREPARED 行核对 */
+                printf("PREP_IDENTITY\t%s\tid=%s\tsha256=%s\tproduct=%s\tpath=%s\n", prep[k].name, prep[k].id, prep[k].sha, prod_sha, prep[k].path); }
+        {   long pw_ms = 0; int pw = prewarm_compile(&pw_ms);
+            printf("AFFECTED_PREP\tkit=%s\tmaterials=%d\tbuilt=%d\thit=%d\tfailed=%d\tkit_ms=%ld\tprep_ms=%ld\tcompile_prewarmed=%d\tprewarm_ms=%ld\n",
+                   kit_state, pb_materials, pb_built, pb_hits, pb_failed, kit_ms, prep_ms, pw, pw_ms);
+            return pb_failed || !pw ? 1 : 0; }
     }
+    cu = compile_use();   /* 只是标记:批次照常全跑,编译缓存由产品按内容身份自核 */
     t_main = sy_now_ms();   /* 预建结束才起算:prep 已经计入 prep_ms,不再占批次的启动/硬杀窗口 */
     while (next < nsel || nrun) {
         sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
@@ -1245,8 +1315,11 @@ static int run(const int *sel, int nsel, int jobs) {
             ch[k] = ch[nrun - 1]; nrun--; k--;
         }
     }
-    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\tnot_applicable=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\n",
-           pass, fail, deferred, nna, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms);
+    /* kit_use: prepared = the tlib kit reported rebuilt=0 (its own content/identity check passed, nothing rebuilt);
+       rebuilt = identity mismatched and the kit was rebuilt here; unknown = no PREPARED line.  Never a test result. */
+    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\tnot_applicable=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\tkit_use=%s\tcompile_use=%s\n",
+           pass, fail, deferred, nna, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms,
+           tx_eqz(kit_state, "hit") ? "prepared" : tx_eqz(kit_state, "built") ? "rebuilt" : "unknown", cu);
     return fail ? 1 : deferred ? 3 : 0;
 }
 
@@ -1500,6 +1573,7 @@ int main(int argc, char **argv) {
         }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
         else if (tx_eqz(argv[a], "--prep-only")) { mode_run = 1; prep_only = 1; prep_on = 1; a++; }
+        else if (tx_eqz(argv[a], "--prep-plan")) { mode_run = 1; prep_only = 1; prep_on = 1; prep_plan_only = 1; a++; }
         else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
         else if (tx_eqz(argv[a], "--full")) { iface_full = 1; a++; }
         else if (tx_eqz(argv[a], "--symbol-narrow") && a + 1 < argc) { sym_list = argv[a + 1]; a += 2; }

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh"><head>
+<meta charset="utf-8"/><title>ghibli-world-host1</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#c5d4c0;color:#334;font:13px sans-serif}
+#hud{position:fixed;left:10px;top:10px;z-index:2;background:rgba(255,255,255,.65);padding:6px 8px}
+canvas{display:block;width:100%;height:100%}
+</style></head>
+<body>
+<div id="hud">WASD · ghibli-world · no three</div>
+<canvas id="view"></canvas>
+<script src="../host1-runtime.js"></script>
+<script src="ghibli-b64.js"></script>
+<script type="module">
+import { createWebGLRenderer } from "../../renderer-webgl.js";
+import { createBrowserHost } from "../../host-browser.js";
+import { encodeRenderPacket } from "../../packet.js";
+import { Scene, PerspectiveCamera } from "../../scene.js";
+import { MESH_OCTA, MESH_PLANE, MESH_BOX } from "../../meshes.js";
+const AUTO=/(?:\?|&)auto=1(?:&|$)/.test(location.search);
+const SEED=Number((location.search.match(/[?&]seed=(\d+)/)||[])[1]||1);
+const keys={};
+window.addEventListener("keydown",e=>keys[e.code]=1);
+window.addEventListener("keyup",e=>keys[e.code]=0);
+const canvas=document.getElementById("view");
+const scene=new Scene();
+scene.ink=0.55; scene.wave=0.15;
+scene.clearColor=[0.72,0.82,0.78,1];
+scene.fog={density:0.012,color:[0.7,0.78,0.74]};
+scene.ambient={color:[0.75,0.72,0.55],intensity:0.7};
+const ground=scene.instances("g",1,[0.55,0.62,0.42]);
+ground.meshId=MESH_PLANE; ground.set(0,0,0,-20,90);
+const hills=scene.instances("h",8,[0.45,0.58,0.38]);
+hills.meshId=MESH_OCTA;
+const far=scene.instances("f",8,[0.52,0.62,0.58]);
+far.meshId=MESH_OCTA;
+const clouds=scene.instances("c",8,[0.88,0.9,0.86]);
+clouds.meshId=MESH_OCTA;
+clouds.billboard=1;
+const grass=scene.instances("r",8,[0.4,0.55,0.28]);
+grass.meshId=MESH_OCTA;
+const trees=scene.instances("t",8,[0.28,0.42,0.22]);
+trees.meshId=MESH_BOX;
+const camera=new PerspectiveCamera();
+let cam=0, camY=6, ok=0, d=[], wind=0, rt=null;
+function place(){
+  let i, n=Math.min(8, d.length);
+  hills.count=n;
+  far.count=n;
+  clouds.count=n;
+  grass.count=n;
+  trees.count=n;
+  for(i=0;i<n;i++){
+    const v=Number(d[i])||0;
+    const w=Number(wind)||0;
+    hills.set(i, (v-25)*0.8, 2.2+(i%3)*0.4, -8-i*6, 2.4+(i%2), w*0.02);
+    far.set(i, (v-22)*1.4, 5+(i%3), -40-i*4, 6+(i%2));
+    clouds.set(i, (v-20)*0.5+(w%40)*0.15, 8+(i%2), -20-i*5, 3.2);
+    grass.set(i, (v-24)*0.9, 0.6, -4-i*3, 0.55, w*0.04);
+    trees.set(i, (v-26)*0.7, 1.4, -10-i*4, 0.5, 2.2);
+  }
+}
+function packCloud(c){
+  return {
+    color:c.color, count:c.count, xyz:c.xyz, scale:c.scale,
+    meshId:c.meshId, emissive:c.emissive,
+    metalness:c.metalness, roughness:c.roughness,
+  };
+}
+(async function(){
+  try{
+    rt=await host1Boot(window.GHIBLI_WASM);
+    try{
+      const r=rt.step({seed:SEED,wind:0});
+      if(r&&r.d&&r.d.length) d=r.d;
+      if(r&&r.wind!=null) wind=Number(r.wind);
+    }catch(e){}
+    if(!d.length) d=rt.readI64List(rt.mainHandle());
+    ok=d.length>=8;
+    place();
+  }catch(e){ ok=0; }
+  document.title=ok?"GHIBLI_OK":"GHIBLI_FAIL";
+  if(AUTO) document.getElementById("hud").textContent=(ok?"GHIBLI_OK":"GHIBLI_FAIL")+" n="+d.length;
+  let host=null, gpu=0;
+  try{
+    host=await createBrowserHost(canvas,{ prefer:"webgl", baseURL:new URL("../../", import.meta.url) });
+    gpu=1;
+  }catch(e){ gpu=0; }
+  function tick(){
+    if(!AUTO){
+      if(keys.KeyD||keys.ArrowRight) cam+=0.25;
+      if(keys.KeyA||keys.ArrowLeft) cam-=0.25;
+      if(keys.KeyW||keys.ArrowUp) camY+=0.12;
+      if(keys.KeyS||keys.ArrowDown) camY-=0.12;
+      if(camY<2) camY=2;
+      if(camY>18) camY=18;
+    }else cam+=0.04;
+    if(rt&&typeof rt.step==="function"){
+      try{
+        const r=rt.step({seed:SEED,wind:wind});
+        if(r&&r.wind!=null) wind=Number(r.wind);
+        if(r&&r.d&&r.d.length) d=r.d;
+        place();
+      }catch(e){}
+    }
+    const t=((Number(wind)||0)%200)/200;
+    const k=t<0.5?t*2:2-t*2;
+    scene.ink=0.45+0.25*k;
+    scene.wave=0.1+0.15*k;
+    scene.clearColor=[0.55+0.22*k,0.62+0.2*k,0.7+0.08*k,1];
+    scene.fog.color=[0.55+0.2*k,0.62+0.16*k,0.7];
+    camera.setEye(cam, camY, 14);
+    camera.setTarget(cam, 1, -18);
+    if(gpu&&host){
+      try{
+        const clouds=[];
+        scene.clouds.forEach(c=>clouds.push(packCloud(c)));
+        host.host_gpu_submit(encodeRenderPacket({
+          clear:scene.clearColor,
+          camera:{ fovy:camera.fovy, near:camera.near, far:camera.far, eye:camera.eye, target:camera.target },
+          fog:scene.fog, ambient:scene.ambient, lights:scene.lights, clouds,
+        }));
+        host.host_frame_present();
+      }catch(e){ gpu=0; }
+    }
+    if(!gpu){
+      if(!tick.r){ tick.r=createWebGLRenderer(canvas); tick.r.resize(); }
+      tick.r.render(scene, camera);
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+</script></body></html>

@@ -1,0 +1,273 @@
+/* bump: tlib package version reservation (devsvc K3). Parallel tasks that change one tlib package ask here for the
+ * next version instead of each computing it from build/tlib-packages.tsv; the allocation is serialized by a lock.
+ * Usage (prefix: sh ./unisacc.com tools/devsvc.cx -- bump ...  or  sh ./unisacc.com tools/bump.cx -- ...):
+ *   PKG [--owner O] [--kind patch|minor] [--ttl-s N]   reserve; prints BUMP PKG=.. VERSION=.. OWNER=.. EXPIRES=.. REUSED=0|1
+ *   --release PKG VERSION [--owner O]                  release an own live reservation; prints BUMP_RELEASE
+ *   --list [PKG]                                       every stored reservation with its state; prints BUMP_ROW lines
+ *   --query PKG [VERSION] [--owner O]                  K4: classify VERSION (default: PKG's version in the git index,
+ *                                                      :build/tlib-packages.tsv) against HEAD and the live reservations;
+ *                                                      prints BUMP_QUERY PKG= VERSION= HEAD= NEXT= VERDICT= where VERDICT
+ *                                                      is head (not bumped), next (next patch of HEAD), reserved (live
+ *                                                      reservation of O), reserved-other (live, another owner) or
+ *                                                      unreserved. Read by layer-api --bump --version and the commit gate.
+ *   common: [--root R] [--dir D]
+ * Semantics:
+ *   V = version of PKG in HEAD:build/tlib-packages.tsv (git show, never the work tree).
+ *   reserve: next = increment(max(V, every live reservation of PKG)); patch X.Y.Z -> X.Y.Z+1, minor -> X.Y+1.0.
+ *   the same owner reserving the same PKG again gets its live reservation back (REUSED=1, nothing incremented).
+ *   live = state reserved, not past expiry and version greater than V. A reservation whose version is not greater
+ *   than V counts as consumed (the commit landed; decided against HEAD at every call, no write-back needed);
+ *   one past expiry is turned to expired with event bump.expire. ttl default 7200 s, hard cap 14400 s.
+ *   owner: --owner, else $DEVSVC_OWNER, else auto-<pid>.
+ * Store (volatile coordination state, not in git): DIR/bump-reservations.tsv (pkg version owner time expires state),
+ *   DIR/bump-events.tsv (time kind text), DIR/bump.lock (flock). DIR: --dir, else $BUMP_DIR, else the devsvc instance
+ *   directory of the repo (cxlib.devtask dt_instdir; the same place as leases and locks).
+ * Events bump.reserve, bump.release, bump.expire: always appended to DIR/bump-events.tsv, and sent to the devsvc event
+ *   log through devsvc events emit unless $BUMP_EMIT=0 (checks).
+ * Bounds: lock wait $BUMP_LOCK_WAIT_MS (default 5000, cap 20000) then refusal; git and emit subprocesses 10 s each.
+ *   $BUMP_NOW (epoch seconds) replaces the clock, for checks only.
+ * K4: layer-api --bump PKG --version V writes the reserved V (refused unless V is a live reservation of the caller or
+ * the next patch of HEAD); the commit gate (precommit tlib) warns TLIB_BUMP_UNRESERVED for a staged version that is
+ * neither (WARN only, does not block).
+ * Exit: 0 ok, 1 refused (lock busy, nothing to release), 2 bad input or I/O. */
+#pragma unisa use cxlib.devtask
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.build
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define RMAX 512
+#define TTL_DEF 7200
+#define TTL_MAX 14400
+typedef struct Res { char pkg[96], ver[32], owner[64], state[12]; long t, exp; } Res;
+static Res rs[RMAX]; static int nr;
+static char dir[1024], root[1024], evq[8][256], evk[8][16]; static int nev;
+static long now_s;
+
+static int bad(const char *m, const char *a) { fprintf(stderr, "BUMP_REFUSE\t%s%s%s\n", m, a ? "\t" : "", a ? a : ""); return 2; }
+/* name: 1..cap-1 bytes of [A-Za-z0-9._-] */
+static int name_ok(const char *s, long cap) {
+    long i = 0;
+    for (; s[i]; i++) { unsigned char c = (unsigned char)s[i]; if (i >= cap - 1 || !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0; }
+    return i > 0;
+}
+/* X.Y.Z with decimal parts; 0 ok */
+static int ver_parse(const char *s, long v[3]) {
+    int k = 0; long cur = -1, nd = 0;
+    for (long i = 0;; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= '0' && c <= '9') { if (++nd > 9) return 1; cur = (cur < 0 ? 0 : cur * 10) + (c - '0'); continue; }
+        if (cur < 0 || k > 2) return 1;
+        v[k++] = cur; cur = -1; nd = 0;
+        if (c == 0) break;
+        if (c != '.') return 1;
+    }
+    return k == 3 ? 0 : 1;
+}
+static int ver_cmp(const char *a, const char *b) {
+    long x[3], y[3];
+    if (ver_parse(a, x) || ver_parse(b, y)) return 0;
+    for (int i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+static void cpn(char *d, long cap, const unsigned char *s, long n) { if (n >= cap) n = cap - 1; if (n < 0) n = 0; if (n) mm_copy(d, cap, s, n); d[n] = 0; }
+
+static int run_cap(char **v, np_result *r) { char w[256]; int rc = np_run(v, root, 0, 10, r, w, sizeof w); return rc || r->rc; }
+
+/* version of pkg in SPEC (HEAD:build/tlib-packages.tsv, or :build/tlib-packages.tsv for the index); 0 ok, 1 unknown package, 2 I/O */
+static int spec_ver(const char *spec, const char *pkg, char *out, long cap) {
+    char *v[] = {"git", "-C", root, "show", (char *)spec, 0}; np_result r = {0}; long pl = (long)strlen(pkg); int found = 1;
+    if (run_cap(v, &r) || !r.out) { np_free(&r); return 2; }
+    for (long i = 0; i < (long)r.outn;) {
+        long le = i, t1, t2;
+        while (le < (long)r.outn && r.out[le] != '\n') le++;
+        for (t1 = i; t1 < le && r.out[t1] != '\t'; t1++) {}
+        for (t2 = t1 + 1; t2 < le && r.out[t2] != '\t'; t2++) {}
+        if (r.out[i] != '#' && t1 - i == pl && t1 < le && !memcmp(r.out + i, pkg, pl)) { cpn(out, cap, (const unsigned char *)r.out + t1 + 1, t2 - t1 - 1); found = 0; break; }
+        i = le + 1;
+    }
+    np_free(&r);
+    if (!found) { long tmp[3]; if (ver_parse(out, tmp)) return 2; }
+    return found;
+}
+static int head_ver(const char *pkg, char *out, long cap) { return spec_ver("HEAD:build/tlib-packages.tsv", pkg, out, cap); }
+
+static int load(void) {
+    char p[1200]; unsigned char *b = 0; int64_t n = 0; int rc;
+    nr = 0;
+    if (cx_fmt(p, sizeof p, "%s/bump-reservations.tsv", dir)) return 2;
+    rc = sy_read_file(p, &b, &n, 1L << 22);
+    if (rc == -ENOENT) return 0;
+    if (rc || !b) return 2;
+    for (long i = 0; i < n;) {
+        long le = i, f[7], k = 0;
+        while (le < n && b[le] != '\n') le++;
+        f[0] = i;
+        for (long j = i; j < le && k < 6; j++) if (b[j] == '\t') f[++k] = j + 1;
+        if (k == 5 && b[i] != '#' && nr < RMAX) {
+            Res *x = &rs[nr]; char t[32];
+            cpn(x->pkg, sizeof x->pkg, b + f[0], f[1] - f[0] - 1); cpn(x->ver, sizeof x->ver, b + f[1], f[2] - f[1] - 1);
+            cpn(x->owner, sizeof x->owner, b + f[2], f[3] - f[2] - 1);
+            cpn(t, sizeof t, b + f[3], f[4] - f[3] - 1); x->t = atol(t);
+            cpn(t, sizeof t, b + f[4], f[5] - f[4] - 1); x->exp = atol(t);
+            cpn(x->state, sizeof x->state, b + f[5], le - f[5]);
+            nr++;
+        }
+        i = le + 1;
+    }
+    free(b); return 0;
+}
+static int save(void) {
+    char p[1200]; sb *o = sb_new(); int bad2 = 0;
+    if (cx_fmt(p, sizeof p, "%s/bump-reservations.tsv", dir)) { sb_free(o); return 2; }
+    sb_puts(o, "# pkg\tversion\towner\ttime\texpires\tstate\n");
+    for (int i = 0; i < nr; i++) {   /* terminal rows older than a day are dropped */
+        char ln[400];
+        if (strcmp(rs[i].state, "reserved") && now_s - rs[i].exp > 86400) continue;
+        if (cx_fmt(ln, sizeof ln, "%s\t%s\t%s\t%ld\t%ld\t%s\n", rs[i].pkg, rs[i].ver, rs[i].owner, rs[i].t, rs[i].exp, rs[i].state)) { bad2 = 1; break; }
+        sb_puts(o, ln);
+    }
+    if (bad2 || !sb_cstr(o) || sy_write_atomic(p, sb_cstr(o), sb_len(o), 0600)) { sb_free(o); return 2; }
+    sb_free(o); return 0;
+}
+static void event(const char *kind, const char *text) {
+    char p[1200], ln[400];
+    if (!cx_fmt(p, sizeof p, "%s/bump-events.tsv", dir) && !cx_fmt(ln, sizeof ln, "%ld\t%s\t%s\n", now_s, kind, text)) sy_append_file(p, ln, strlen(ln), 0600);
+    if (nev < 8 && !cx_fmt(evq[nev], sizeof evq[0], "%s", text) && !cx_fmt(evk[nev], sizeof evk[0], "%s", kind)) nev++;
+}
+static void emit_all(void) {
+    const char *e = getenv("BUMP_EMIT");
+    if (e && !strcmp(e, "0")) return;
+    for (int i = 0; i < nev; i++) {
+        char prod[1100], *v[] = {"sh", prod, "tools/devsvc.cx", "--", "events", "emit", evk[i], evq[i], 0}; np_result r = {0};
+        if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) { fprintf(stderr, "BUMP_EMIT_FAIL\t%s\tpath too long\n", evk[i]); continue; } /* lint:allow R1-product events emit runs the installed product of ROOT, as devsvc itself does */
+        if (run_cap(v, &r)) fprintf(stderr, "BUMP_EMIT_FAIL\t%s\trc=%d\n", evk[i], r.rc);
+        np_free(&r);
+    }
+}
+/* expire past-due reservations (event bump.expire); consumed ones are decided against HEAD by live() */
+static void sweep(void) {
+    for (int i = 0; i < nr; i++) if (!strcmp(rs[i].state, "reserved") && rs[i].exp <= now_s) {
+        char t[256];
+        (void)cx_fmt(rs[i].state, sizeof rs[i].state, "expired");
+        if (!cx_fmt(t, sizeof t, "pkg=%s version=%s owner=%s", rs[i].pkg, rs[i].ver, rs[i].owner)) event("bump.expire", t);
+    }
+}
+static int live(const Res *x, const char *pkg, const char *hv) { return !strcmp(x->pkg, pkg) && !strcmp(x->state, "reserved") && x->exp > now_s && ver_cmp(x->ver, hv) > 0; }
+
+static int lock_take(void) {
+    char p[1200]; int fd; const char *e = getenv("BUMP_LOCK_WAIT_MS"); long wait = e ? atol(e) : 5000, t0 = sy_now_ms();
+    if (wait < 0) wait = 0;
+    if (wait > 20000) wait = 20000;
+    if (cx_fmt(p, sizeof p, "%s/bump.lock", dir) || sy_mkdir_all(dir, 0700)) return -2;
+    fd = sy_open(p, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return -2;
+    for (;;) {
+        if (!sy_flock(fd, 2 | 4)) return fd;
+        if (sy_now_ms() - t0 >= wait) { sy_close(fd); return -1; }
+        sy_sleep_ms(25);
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *owner = 0, *kind = "patch", *pkg = 0, *relver = 0, *odir = 0, *oroot = 0; long ttl = TTL_DEF; int mode = 0, a = 1, rc = 0, fd, i; char hv[32] = "", why[512], own[64];
+    if (argc > 1 && !strcmp(argv[1], "--")) a = 2;
+    if (argc > a && !strcmp(argv[a], "bump")) a++;
+    for (i = a; i < argc; i++) {
+        const char *s = argv[i]; int more = i + 1 < argc;
+        if (!strcmp(s, "--owner") && more) owner = argv[++i];
+        else if (!strcmp(s, "--kind") && more) kind = argv[++i];
+        else if (!strcmp(s, "--ttl-s") && more) { char *end; ttl = strtol(argv[++i], &end, 10); if (*end || ttl <= 0 || ttl > TTL_MAX) return bad("bad --ttl-s (1..14400)", argv[i]); }
+        else if (!strcmp(s, "--dir") && more) odir = argv[++i];
+        else if (!strcmp(s, "--root") && more) oroot = argv[++i];
+        else if (!strcmp(s, "--release")) mode = 1;
+        else if (!strcmp(s, "--list")) mode = 2;
+        else if (!strcmp(s, "--query")) mode = 3;
+        else if (!strcmp(s, "--help")) { printf("usage: bump PKG [--owner O] [--kind patch|minor] [--ttl-s N] | bump --release PKG VERSION [--owner O] | bump --list [PKG]; common [--root R] [--dir D]\n"); return 0; }
+        else if (s[0] == '-') return bad("unknown option", s);
+        else if (!pkg) pkg = s;
+        else if ((mode == 1 || mode == 3) && !relver) relver = s;
+        else return bad("extra argument", s);
+    }
+    if (strcmp(kind, "patch") && strcmp(kind, "minor")) return bad("bad --kind (patch|minor)", kind);
+    if (mode != 2 && !pkg) return bad("missing PKG", 0);
+    if (pkg && !name_ok(pkg, 96)) return bad("bad PKG", pkg);
+    if (mode == 1) { long t[3]; if (!relver || ver_parse(relver, t)) return bad("bad or missing VERSION", relver); }
+    if (mode == 3 && relver) { long t[3]; if (ver_parse(relver, t)) return bad("bad VERSION", relver); }
+    if (!owner) owner = getenv("DEVSVC_OWNER");
+    if (!owner || !*owner) { if (cx_fmt(own, sizeof own, "auto-%d", sy_pid())) return 2; owner = own; }
+    if (!name_ok(owner, 64)) return bad("bad owner", owner);
+    {   const char *e = getenv("BUMP_NOW"); now_s = e && *e ? atol(e) : sy_wall_s(); }
+    if (oroot) { if (cx_fmt(root, sizeof root, "%s", oroot)) return bad("root too long", 0); }
+    else {
+        char *v[] = {"git", "rev-parse", "--show-toplevel", 0}; np_result r = {0}; char w[256]; long n;
+        if (np_run(v, 0, 0, 10, &r, w, sizeof w) || r.rc || !r.out) { np_free(&r); return bad("not in a git work tree", 0); }
+        n = (long)r.outn; while (n > 0 && r.out[n - 1] == '\n') n--;
+        cpn(root, sizeof root, (const unsigned char *)r.out, n); np_free(&r);
+    }
+    if (odir) { if (cx_fmt(dir, sizeof dir, "%s", odir)) return bad("dir too long", 0); }
+    else if (getenv("BUMP_DIR") && *getenv("BUMP_DIR")) { if (cx_fmt(dir, sizeof dir, "%s", getenv("BUMP_DIR"))) return bad("dir too long", 0); }
+    else if (dt_instdir(root, "tools/devsvc-repo.tsv", dir, sizeof dir, why, sizeof why)) return bad("instance directory", why);
+
+    if (pkg) { int h = head_ver(pkg, hv, sizeof hv); if (h == 1) return bad("unknown package in HEAD:build/tlib-packages.tsv", pkg); if (h) return bad("cannot read HEAD:build/tlib-packages.tsv", 0); }
+    fd = lock_take();
+    if (fd == -1) { fprintf(stderr, "BUMP_REFUSE\tlock busy\t%s/bump.lock\n", dir); return 1; }
+    if (fd < 0) return bad("cannot open lock", dir);
+    if (load()) { sy_close(fd); return bad("cannot read reservations", dir); }
+    sweep();
+    if (mode == 2) {
+        for (i = 0; i < nr; i++) {
+            char h2[32]; const char *st;
+            if (pkg && strcmp(rs[i].pkg, pkg)) continue;
+            if (pkg) cpn(h2, sizeof h2, (const unsigned char *)hv, (long)strlen(hv));
+            else if (head_ver(rs[i].pkg, h2, sizeof h2)) cpn(h2, sizeof h2, (const unsigned char *)"0.0.0", 5);
+            st = !strcmp(rs[i].state, "reserved") && ver_cmp(rs[i].ver, h2) <= 0 ? "consumed" : rs[i].state;
+            printf("BUMP_ROW\tPKG=%s\tVERSION=%s\tOWNER=%s\tEXPIRES=%ld\tSTATE=%s\tHEAD=%s\n", rs[i].pkg, rs[i].ver, rs[i].owner, rs[i].exp, st, h2);
+        }
+        if (pkg) printf("BUMP_HEAD\tPKG=%s\tVERSION=%s\n", pkg, hv);
+    } else if (mode == 3) {
+        char qv[32], nx[32]; long v[3]; int own2 = 0, oth = 0; const char *vd;
+        if (relver) cpn(qv, sizeof qv, (const unsigned char *)relver, (long)strlen(relver));
+        else { int h = spec_ver(":build/tlib-packages.tsv", pkg, qv, sizeof qv); if (h) { sy_close(fd); return bad("cannot read the index version", pkg); } }
+        if (ver_parse(hv, v) || cx_fmt(nx, sizeof nx, "%ld.%ld.%ld", v[0], v[1], v[2] + 1)) { sy_close(fd); return bad("bad version", hv); }
+        for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && !strcmp(rs[i].ver, qv)) { if (!strcmp(rs[i].owner, owner)) own2 = 1; else oth = 1; }
+        vd = !strcmp(qv, hv) ? "head" : own2 ? "reserved" : oth ? "reserved-other" : !strcmp(qv, nx) ? "next" : "unreserved";
+        printf("BUMP_QUERY\tPKG=%s\tVERSION=%s\tHEAD=%s\tNEXT=%s\tVERDICT=%s\tOWNER=%s\n", pkg, qv, hv, nx, vd, owner);
+    } else if (mode == 1) {
+        int hit = -1;
+        for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && !strcmp(rs[i].ver, relver) && !strcmp(rs[i].owner, owner)) hit = i;
+        if (hit < 0) { fprintf(stderr, "BUMP_REFUSE\tno live reservation\tPKG=%s\tVERSION=%s\tOWNER=%s\n", pkg, relver, owner); rc = 1; }
+        else {
+            char t[256];
+            (void)cx_fmt(rs[hit].state, sizeof rs[hit].state, "released");
+            if (!cx_fmt(t, sizeof t, "pkg=%s version=%s owner=%s", pkg, relver, owner)) event("bump.release", t);
+            printf("BUMP_RELEASE\tPKG=%s\tVERSION=%s\tOWNER=%s\n", pkg, relver, owner);
+        }
+    } else {
+        int hit = -1; char top[32]; long v[3];
+        for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && !strcmp(rs[i].owner, owner)) hit = i;
+        if (hit >= 0) printf("BUMP\tPKG=%s\tVERSION=%s\tOWNER=%s\tEXPIRES=%ld\tREUSED=1\n", pkg, rs[hit].ver, owner, rs[hit].exp);
+        else if (nr >= RMAX) { fprintf(stderr, "BUMP_REFUSE\treservation table full\t%d\n", nr); rc = 1; }
+        else {
+            Res *x = &rs[nr]; char t[256];
+            cpn(top, sizeof top, (const unsigned char *)hv, (long)strlen(hv));
+            for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && ver_cmp(rs[i].ver, top) > 0) cpn(top, sizeof top, (const unsigned char *)rs[i].ver, (long)strlen(rs[i].ver));
+            if (ver_parse(top, v)) { sy_close(fd); return bad("bad version", top); }
+            if (!strcmp(kind, "minor")) { v[1]++; v[2] = 0; } else v[2]++;
+            if (cx_fmt(x->ver, sizeof x->ver, "%ld.%ld.%ld", v[0], v[1], v[2]) || cx_fmt(x->pkg, sizeof x->pkg, "%s", pkg) || cx_fmt(x->owner, sizeof x->owner, "%s", owner) || cx_fmt(x->state, sizeof x->state, "reserved")) { sy_close(fd); return 2; }
+            x->t = now_s; x->exp = now_s + ttl; nr++;
+            if (!cx_fmt(t, sizeof t, "pkg=%s version=%s owner=%s expires=%ld", pkg, x->ver, owner, x->exp)) event("bump.reserve", t);
+            printf("BUMP\tPKG=%s\tVERSION=%s\tOWNER=%s\tEXPIRES=%ld\tREUSED=0\n", pkg, x->ver, owner, x->exp);
+        }
+        if (!rc) printf("BUMP_NOTE\tafter layer-api --bump %s compare its version with VERSION above; when they differ the reserved VERSION wins\n", pkg);
+    }
+    if (save()) { sy_close(fd); return bad("cannot write reservations", dir); }
+    sy_flock(fd, 8); sy_close(fd);
+    emit_all();
+    return rc;
+}

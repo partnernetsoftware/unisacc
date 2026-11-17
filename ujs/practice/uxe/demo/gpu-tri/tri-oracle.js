@@ -1,0 +1,10 @@
+window.GPU_TRI_FNV=3620361384;
+window.GPU_TRI_KR=26;
+window.GPU_TRI_KG=51;
+window.GPU_TRI_KB=77;
+window.GPU_TRI_CR=255;
+window.GPU_TRI_CG=128;
+window.GPU_TRI_CB=51;
+window.GPU_TRI_ER=157;
+window.GPU_TRI_EG=86;
+window.GPU_TRI_EB=40;
