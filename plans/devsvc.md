@@ -304,3 +304,13 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 table-index 是独立物化项,保留本地表和元数据副本逐字节检查。tool-index 本地导出不再由 `--registered` 自动选入提交;新工具登记事实仍由原门检查。回退先恢复 derive 两行与登记表名单,再恢复 tool-index 文件跟踪。历史夹具所验证的离线生成器写入与篡改拒绝合同仍保留。
 
 基线入口 `/tmp/r1-baseline`:低载两项检查总 34641 ms,product-map 23106 ms,tool-index 11535 ms(表索引副本漂移,该项非 PASS)。7 天全仓提交 1998,build/ 622,tool-index 225,product-map 43。旧整体派生和 reg-a/derive-reg 的超窗均保留 UNKNOWN,后测不得改写为基线 PASS。新查询模式与原模式的负控入口 `/tmp/r1-query-red` 和 `/tmp/r1-query-check`。
+
+### product-map 查询构造与读集核验
+
+tools/product-map-query.cx 的清单真源是 tools/product-map-inputs.tsv。缓存身份包含清单本身、目录列举与文件内容、两个根的实际编译器与生成器、完整 Git 跟踪名称集合和实际观察到的读取清单。每次命中重新核内容哈希及缓存正文摘要,不缓存检查结论;显式 --check 独立执行原生成器再逐字节对拍。仅用于 Linux 开发机,不代表六目标平台资格。
+
+strace 只在缺失构造与独立核验路径调用,命中分支不查找也不执行它。未安装时输出 PRODUCT_MAP_READSET_NEEDS_STRACE 并非零退出;路径权限错误另行命名拒绝。检查在私有 PATH 中先构造缓存、移走 strace 链接,证明命中仍可用而冷查询命名拒绝。旧实现该负控失败,新实现通过。替代方向是统一 cx_read、stat、目录列举入口生成读取回执,并与编译器 use 闭包及子进程回执合并;只包装主进程的 cx_read 不足以覆盖 census 子进程,替代方案须保留相同未声明读取负控。
+
+product-map --root 选择被分析的数据,分析子程序由当前已装编译器引导。目标 APE 的字节作为数据读取,不会再因外壳保留字节变化而另编同一分析程序。旧七条 flow-model 留存值已经先迁为显式事实,正常生成物前后逐字节相同。六类变更以独立现算验收,常量缓存键故障实现六项均被拦;正文、读取清单、摘要损坏与正文缺失分别保留恢复断言。热命中已测约 1.45 秒,不宣称达到百毫秒,后续先量哈希主耗时再优化。
+
+登记与执行分相:现有 register --no-run 仅保存合同并返回 REGISTERED_NORUN,只算准备;之后经标准 affected 入口逐批实跑才记 PASS。登记尾段仍有缺口:批次耗时接近 55 秒时,试跑已经通过,60 秒外层仍可能在 packages 与 manifest 收尾前杀掉进程,且当前提前打印 REGISTERED。应拆成独立收尾阶段并在完整收尾后打印终态;不得延长时限。本轮缺失 manifest 按三张真实表逐字节投影补齐,不另造登记逻辑,并由 reg-manifest 检查闭合。
