@@ -1,0 +1,120 @@
+/* tools/gen-gpu-store-v3.cx -- hex 事实 -> gpu-store-v3-tri.ujs
+ *
+ * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --check
+ * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --write
+ *
+ * 读 ujs/tests/uxep-tri-oracle.hex(# 注释后十六进制),写出 list(n)+xs[i]=v。
+ * --check 与现文件逐字节比,不写盘。
+ */
+static int hx(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static void put_uint(char *d, int *n, unsigned v) {
+    char r[16];
+    int k = 0;
+    if (v == 0) { d[(*n)++] = '0'; return; }
+    while (v) { r[k++] = (char)('0' + (v % 10u)); v /= 10u; }
+    while (k) d[(*n)++] = r[--k];
+}
+int main(int argc, char **argv) {
+    FILE *f;
+    char line[1024];
+    unsigned char b[4096];
+    int nb = 0, i, want_write = 0, want_check = 0;
+    char *gen;
+    int glen = 0, gcap;
+    char *old = 0;
+    long oldn = 0;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
+    }
+    if (!want_write && !want_check) {
+        fprintf(stderr, "gen-gpu-store-v3: need --check or --write\n");
+        return 2;
+    }
+    f = fopen("ujs/tests/uxep-tri-oracle.hex", "rb");
+    if (!f) { fprintf(stderr, "gen-gpu-store-v3: no hex\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        char *p = line;
+        int hi, lo;
+        if (line[0] == '#') continue;
+        while (*p && *p != '\n' && *p != '\r') {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || *p == '\n' || *p == '\r') break;
+            hi = hx(*p++);
+            lo = hx(*p++);
+            if (hi < 0 || lo < 0) { fclose(f); fprintf(stderr, "gen-gpu-store-v3: bad hex\n"); return 2; }
+            if (nb >= 4096) { fclose(f); return 2; }
+            b[nb++] = (unsigned char)((hi << 4) | lo);
+        }
+    }
+    fclose(f);
+    if (nb < 8) { fprintf(stderr, "gen-gpu-store-v3: short\n"); return 2; }
+    gcap = nb * 24 + 128;
+    gen = (char *)malloc((size_t)gcap);
+    if (!gen) return 2;
+    gen[glen++] = 'x'; gen[glen++] = 's'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
+    gen[glen++] = 'l'; gen[glen++] = 'i'; gen[glen++] = 's'; gen[glen++] = 't'; gen[glen++] = '(';
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ')'; gen[glen++] = ';'; gen[glen++] = '\n';
+    for (i = 0; i < nb; i++) {
+        gen[glen++] = 'x'; gen[glen++] = 's'; gen[glen++] = '[';
+        put_uint(gen, &glen, (unsigned)i);
+        gen[glen++] = ']'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
+        put_uint(gen, &glen, (unsigned)b[i]);
+        gen[glen++] = ';'; gen[glen++] = '\n';
+    }
+    gen[glen++] = 'p'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
+    {
+        const char *s = "store_bytes(xs);\n";
+        while (*s) gen[glen++] = *s++;
+    }
+    {
+        const char *s = "host_gpu_submit(p, ";
+        while (*s) gen[glen++] = *s++;
+    }
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ')'; gen[glen++] = ';'; gen[glen++] = '\n';
+    {
+        const char *s = "return ";
+        while (*s) gen[glen++] = *s++;
+    }
+    put_uint(gen, &glen, (unsigned)nb);
+    gen[glen++] = ';'; gen[glen++] = '\n';
+    if (want_check) {
+        FILE *g;
+        g = fopen("ujs/tests/gpu-store-v3-tri.ujs", "rb");
+        if (!g) { free(gen); fprintf(stderr, "gen-gpu-store-v3: no ujs\n"); return 2; }
+        if (fseek(g, 0, SEEK_END) != 0) { fclose(g); free(gen); return 2; }
+        oldn = ftell(g);
+        rewind(g);
+        old = (char *)malloc((size_t)oldn + 1);
+        if (!old || (long)fread(old, 1, (size_t)oldn, g) != oldn) { free(old); free(gen); fclose(g); return 2; }
+        fclose(g);
+        if (oldn != glen) {
+            fprintf(stderr, "gen-gpu-store-v3: CHECK fail len %ld vs %d\n", oldn, glen);
+            free(old); free(gen); return 1;
+        }
+        for (i = 0; i < glen; i++) if (old[i] != gen[i]) {
+            fprintf(stderr, "gen-gpu-store-v3: CHECK fail at %d\n", i);
+            free(old); free(gen); return 1;
+        }
+        free(old);
+        printf("GEN_GPU_V3_OK\tbytes=%d\n", glen);
+        free(gen);
+        return 0;
+    }
+    {
+        FILE *g = fopen("ujs/tests/gpu-store-v3-tri.ujs", "wb");
+        if (!g) { free(gen); return 2; }
+        if ((int)fwrite(gen, 1, (size_t)glen, g) != glen) { fclose(g); free(gen); return 2; }
+        fclose(g);
+    }
+    printf("GEN_GPU_V3_WRITE\tbytes=%d\n", glen);
+    free(gen);
+    return 0;
+}
