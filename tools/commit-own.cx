@@ -76,6 +76,16 @@ static void co_die(const char *a, const char *b) {
     fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 #define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--derive] [--dry-run]"
 #define CO_PHASE "COMMIT_OWN_PHASE\tselect_ms=%ld\tpending_ms=%ld\tregm_ms=%ld\tcommit_ms=%ld\tattempts=%d\n"
+/* Live progress: `COMMIT_PHASE<TAB>name=N<TAB>state=begin` when a phase starts and
+   `COMMIT_PHASE<TAB>name=N<TAB>state=end<TAB>ms=M` when it ends, flushed at once, so a job tail (devsvc git commit
+   --status) shows the phase in flight and a timeout leaves the last begin without an end.  The precommit hook's
+   gates write the same lines into this process's stdout through UNISACC_COMMIT_PHASE_LOG (/proc/PID/fd/1). */
+static long co_ph_t0;
+static void co_phase(const char *name, int begin) {
+    if (begin) { co_ph_t0 = sy_now_ms(); sy_printf("COMMIT_PHASE\tname=%s\tstate=begin\n", name); }
+    else sy_printf("COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, sy_now_ms() - co_ph_t0);
+    fflush(stdout);
+}
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
 static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
@@ -611,6 +621,7 @@ int main(int argc, char **argv) {
         if (keys[k] || link[k]) sy_unlink(src);
     }
     t_sel = sy_now_ms() - t0;
+    sy_printf("COMMIT_PHASE\tname=select\tstate=end\tms=%ld\n", t_sel); fflush(stdout);
     if (refused) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=registered-foreign-row\n");
     if (refused) { fprintf(stderr, "commit-own: REFUSE --registered: %d selected line(s) are not manifest rows (a whole-field key matched someone else's row); nothing committed\n", refused); return 1; }
     if (nreg) {   /* drop the tables with nothing of this set */
@@ -654,6 +665,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
+        if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
             static char dout[32768]; char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
             dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = CO_DERIVE_SH; dv[n++] = (char *)sy_tmpdir();
@@ -702,6 +714,8 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 }
             }
         }
+        if (derive) co_phase("derive", 0);
+        if (nreg) co_phase("regm", 1);
         if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
             char *rv[12], ro[16384]; int n = 0, bad = 0, rrc, std = 0; long at = 0, rn;
             const char *tool = getenv("UNISACC_REGM_TOOL"), *rtool = (tool && tool[0]) ? tool : "tools/reg-manifest.cx";
@@ -740,6 +754,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 else { sy_unsetenv("UNISACC_GATE_REUSE"); gatef[0] = 0; }
             }
             sy_printf("REGISTERED\tsets=%d\tgate=reg-manifest-ok\n", nreg);
+            co_phase("regm", 0);
         }
         {   /* git's stderr (hook output, "nothing to commit", identity errors) merged into OUT so the refusal names the cause */
             char *v[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
@@ -751,6 +766,9 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             char *gv[] = {"sh", "-c", CO_GATE_SH, groot, 0};
             (void)v;
             tc0 = sy_now_ms();
+            {   char pl[64];   /* the hook's gates append their COMMIT_PHASE lines to this process's stdout */
+                if (!cx_fmt(pl, sizeof pl, "/proc/%d/fd/1", sy_pid())) sy_setenv("UNISACC_COMMIT_PHASE_LOG", pl, 1); }
+            co_phase("gates", 1);
             if (dry) {   /* the hook git would run (core.hooksPath honoured), on the private index; absent hook = pass */
                 char *dv[] = {"sh", "-c", "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; exec \"$h\" 2>&1", 0};
                 (void)dv;
@@ -760,6 +778,8 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
             }
             t_commit += sy_now_ms() - tc0;
+            co_phase("gates", 0);
+            sy_unsetenv("UNISACC_COMMIT_PHASE_LOG");
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
