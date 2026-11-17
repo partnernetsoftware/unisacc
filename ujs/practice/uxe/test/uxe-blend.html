@@ -8,43 +8,52 @@
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_PLANE } from "../meshes.js";
-function mix(s,d,a){return ((s*a+d*(255-a)+127)/255)|0;}
+import { encodeRenderPacket, decodeRenderPacket } from "../packet.js";
 (async()=>{
   const hud=document.getElementById("hud");
   try{
     const swap=/(?:\?|&)swap=1(?:&|$)/.test(location.search||"");
     const canvas=document.getElementById("c");
     const r=createWebGLRenderer(canvas);
-    const scene=new Scene();
-    scene.clearColor=[0,0,0,1];
-    scene.fog={density:0,color:[0,0,0]};
-    scene.ambient={color:[0,0,0],intensity:0};
-    scene.lights=[];
-    const bg=scene.instances("bg",1,[1,1,1]);
-    bg.meshId=MESH_PLANE; bg.mapId=1;
-    bg.set(0,0,0,-0.4,8,0,-Math.PI/2);
     const za=swap?0:-0.2, zb=swap?-0.2:0;
-    const ca=scene.instances("a",1,[1,1,1]);
-    ca.meshId=MESH_PLANE; ca.mapId=2; ca.alphaMode=1;
-    ca.set(0,0,0,za,8,0,-Math.PI/2);
-    const cb=scene.instances("b",1,[1,1,1]);
-    cb.meshId=MESH_PLANE; cb.mapId=3; cb.alphaMode=1;
-    cb.set(0,0,0,zb,8,0,-Math.PI/2);
-    const cam=new PerspectiveCamera(1.0,0.05,40);
-    cam.setEye(0,0,8); cam.setTarget(0,0,0);
     const rgba1=new Uint8Array(64), rgba2=new Uint8Array(64), rgba3=new Uint8Array(64);
     for(let i=0;i<16;i++){
       rgba1[i*4]=200;rgba1[i*4+1]=10;rgba1[i*4+2]=30;rgba1[i*4+3]=255;
       rgba2[i*4]=5;rgba2[i*4+1]=220;rgba2[i*4+2]=40;rgba2[i*4+3]=128;
       rgba3[i*4]=40;rgba3[i*4+1]=5;rgba3[i*4+2]=200;rgba3[i*4+3]=128;
     }
-    r.render(scene,cam,[{id:1,w:4,h:4,rgba:rgba1},{id:2,w:4,h:4,rgba:rgba2},{id:3,w:4,h:4,rgba:rgba3}]);
+    const pkt=encodeRenderPacket({
+      clear:[0,0,0,1],
+      camera:{fovy:1,near:0.05,far:40,eye:[0,0,8],target:[0,0,0]},
+      clouds:[
+        {color:[1,1,1],count:1,xyz:new Float32Array([0,0,-0.4]),scale:new Float32Array([8]),meshId:MESH_PLANE,mapId:1,alphaMode:0},
+        {color:[1,1,1],count:1,xyz:new Float32Array([0,0,za]),scale:new Float32Array([8]),meshId:MESH_PLANE,mapId:2,alphaMode:1},
+        {color:[1,1,1],count:1,xyz:new Float32Array([0,0,zb]),scale:new Float32Array([8]),meshId:MESH_PLANE,mapId:3,alphaMode:1}
+      ],
+      textures:[{id:1,w:4,h:4,rgba:rgba1},{id:2,w:4,h:4,rgba:rgba2},{id:3,w:4,h:4,rgba:rgba3}]
+    });
+    const dec=decodeRenderPacket(pkt);
+    const scene=new Scene();
+    scene.clearColor=dec.clear;
+    scene.fog={density:0,color:[0,0,0]};
+    scene.ambient={color:[0,0,0],intensity:0};
+    scene.lights=[];
+    for(let i=0;i<dec.clouds.length;i++){
+      const c=dec.clouds[i];
+      const cloud=scene.instances("c"+i,c.count,c.color);
+      cloud.count=c.count; cloud.xyz=c.xyz; cloud.scale=c.scale;
+      cloud.meshId=c.meshId; cloud.mapId=c.mapId; cloud.alphaMode=c.alphaMode;
+      cloud.pitch=new Float32Array(c.count); cloud.pitch[0]=-Math.PI/2;
+    }
+    const cam=new PerspectiveCamera(dec.camera.fovy,dec.camera.near,dec.camera.far);
+    cam.setEye(dec.camera.eye[0],dec.camera.eye[1],dec.camera.eye[2]);
+    cam.setTarget(dec.camera.target[0],dec.camera.target[1],dec.camera.target[2]);
+    r.render(scene,cam,dec.textures);
     const gl=canvas.getContext("webgl");
     const px=new Uint8Array(4);
     gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
-    hud.textContent=JSON.stringify({px:[px[0],px[1],px[2],px[3]],swap:swap});
+    hud.textContent=JSON.stringify({px:[px[0],px[1],px[2],px[3]],swap:swap,alpha:[dec.clouds[1].alphaMode,dec.clouds[2].alphaMode]});
     document.title="BLEND_OK";
-
   }catch(e){
     document.title="BLEND_ERR";
     hud.textContent=String(e&&e.message||e);
