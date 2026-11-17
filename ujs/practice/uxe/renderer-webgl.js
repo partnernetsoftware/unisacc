@@ -129,8 +129,10 @@ function norm3(v) {
   return [v[0] / L, v[1] / L, v[2] / L];
 }
 
-export function createWebGLRenderer(canvas) {
-  const gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
+export function createWebGLRenderer(canvas, opts) {
+  const aa = !(opts && opts.antialias === false);
+  const gl = canvas.getContext("webgl", { antialias: aa, preserveDrawingBuffer: true, powerPreference: "high-performance" });
+
   if (!gl) throw new Error("WebGL unavailable");
   const ext = gl.getExtension("ANGLE_instanced_arrays");
   if (!ext) throw new Error("ANGLE_instanced_arrays required");
