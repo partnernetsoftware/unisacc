@@ -55,7 +55,7 @@ flowchart LR
   SPEC --> CX
   SPEED --> V68
   ORCH --> WT --> V68
-  T71["P2实跑172通过/3失败,全套仍NOT_QUALIFIED<br/>/tmp/unisacc-session-v71-rc2/p2-evidence.md"]
+  T71["P2实跑173通过/2失败,全套仍NOT_QUALIFIED<br/>/tmp/unisacc-session-v71-rc2/p2-evidence.md"]
   S71["封存复核已在 v0.0.71 修复,待整轮复验<br/>tools/bg-candidate.cx"]
   V71 --> T71 --> Q
   V71 --> S71 --> Q
@@ -104,4 +104,4 @@ flowchart LR
 - tlib-frozen既有失败:两轮旧聚合均FAIL,cc核过HEAD同样失败,不算通过;下一版独立定位,入口build/state-unverified.tsv U24。
 - interfaces-lnx-x86_64既有oracle:两轮FAIL且低载复现,接口oracle迁移与独立核验留下一版,保留断言与失败;入口build/state-unverified.tsv U25。
 
-- P2直接集合剩余断言:properties-cases-bound/meta、precommit-gates-reuse由cc定因,原收据保留,不算通过;入口build/state-unverified.tsv U26。
+- P2直接集合剩余断言:properties-cases-meta既有缺口、precommit-gates-reuse待定因,原收据保留,不算通过;入口build/state-unverified.tsv U26。
