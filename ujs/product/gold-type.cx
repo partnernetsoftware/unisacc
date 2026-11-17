@@ -1,0 +1,120 @@
+#!/usr/bin/env -S unisacc.com -run
+/* Enumerate UJS type gold. TYS x TOPS x TYS.
+   sh ./unisacc.com ujs/product/gold-type.cx -- --check|--write
+*/
+static const char *TYS[] = {
+    "null", "bool", "i64", "f64", "str", "list", "dict", "fn", "tup", 0
+};
+static const char *TOPS[] = {
+    "+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!=",
+    "&&", "||", "!", "=", "[]", ".", "call", "len", "keys", "in",
+    "spread", ",",
+    0
+};
+static int eq(const char *a, const char *b) { return !strcmp(a, b); }
+static int nstr(const char **a) { int n = 0; while (a[n]) n++; return n; }
+static int is_num(const char *t) { return eq(t, "i64") || eq(t, "f64"); }
+static int in4(const char *t) {
+    return eq(t, "str") || eq(t, "list") || eq(t, "dict") || eq(t, "tup");
+}
+
+static const char *type_label(const char *t1, const char *op, const char *t2) {
+    if (eq(op, "!")) return eq(t1, "fn") ? "illegal" : "bool";
+    if (eq(op, "len")) return in4(t1) ? "i64" : "illegal";
+    if (eq(op, "keys")) return eq(t1, "dict") ? "list" : "illegal";
+    if (eq(op, "spread"))
+        return (eq(t1, "list") || eq(t1, "tup")) ? t1 : "illegal";
+    if (eq(op, ",")) return "tup";
+    if (eq(op, "call")) return eq(t1, "fn") ? "null" : "illegal";
+    if (eq(op, ".")) return eq(t1, "dict") ? "null" : "illegal";
+    if (eq(op, "[]")) {
+        if (eq(t1, "list") && eq(t2, "i64")) return "null";
+        if (eq(t1, "dict") && eq(t2, "str")) return "null";
+        if (eq(t1, "str") && eq(t2, "i64")) return "str";
+        return "illegal";
+    }
+    if (eq(op, "in"))
+        return (eq(t1, "str") && eq(t2, "dict")) ? "bool" : "illegal";
+    if (eq(op, "="))
+        return (eq(t1, t2) || eq(t1, "null")) ? t2 : "illegal";
+    if (eq(op, "&&") || eq(op, "||"))
+        return (eq(t1, "bool") && eq(t2, "bool")) ? "bool" : "illegal";
+    if (eq(op, "==") || eq(op, "!=")) {
+        if (eq(t1, t2)) return "bool";
+        if (is_num(t1) && is_num(t2)) return "bool";
+        return "illegal";
+    }
+    if (eq(op, "<") || eq(op, "<=") || eq(op, ">") || eq(op, ">=")) {
+        if (is_num(t1) && is_num(t2)) return "bool";
+        if (eq(t1, "str") && eq(t2, "str")) return "bool";
+        return "illegal";
+    }
+    if (eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || eq(op, "%")) {
+        if (eq(t1, "i64") && eq(t2, "i64")) return eq(op, "/") ? "f64" : "i64";
+        if (is_num(t1) && is_num(t2)) return "f64";
+        if (eq(op, "+") && eq(t1, "str") && eq(t2, "str")) return "str";
+        return "illegal";
+    }
+    return "illegal";
+}
+
+static int slurp(const char *path, char *dst, int cap, int *out_n) {
+    FILE *f = fopen(path, "rb");
+    long sz; size_t k;
+    if (!f) return 1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    sz = ftell(f);
+    if (sz < 0 || sz + 1 > cap) { fclose(f); return 1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 1; }
+    k = fread(dst, 1, (size_t)sz, f);
+    fclose(f);
+    if (k != (size_t)sz) return 1;
+    dst[k] = 0; *out_n = (int)k; return 0;
+}
+
+int main(int argc, char **argv) {
+    static char want[131072], have[131072];
+    int wn = 0, hn = 0, write = 0, i, j, k, keys = 0;
+    int nt = nstr(TYS), no = nstr(TOPS);
+    const char *path = "ujs/weights/gold/type.tsv";
+    FILE *f;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--write")) write = 1;
+        else if (!strcmp(argv[i], "--check")) ;
+        else { fprintf(stderr, "gold-type.cx: unknown %s\n", argv[i]); return 2; }
+    }
+    wn += sprintf(want + wn, "# ujs/weights/gold/type.tsv -- TYS x TOPS x TYS\n");
+    wn += sprintf(want + wn, "t1\top\tt2\ty\n");
+    for (i = 0; i < nt; i++) {
+        for (j = 0; j < no; j++) {
+            for (k = 0; k < nt; k++) {
+                wn += sprintf(want + wn, "%s\t%s\t%s\t%s\n",
+                              TYS[i], TOPS[j], TYS[k],
+                              type_label(TYS[i], TOPS[j], TYS[k]));
+                keys++;
+                if (wn + 64 >= (int)sizeof want) {
+                    fprintf(stderr, "gold-type.cx: overflow\n");
+                    return 1;
+                }
+            }
+        }
+    }
+    if (write) {
+        f = fopen(path, "wb");
+        if (!f) { fprintf(stderr, "gold-type.cx: cannot write\n"); return 1; }
+        if ((int)fwrite(want, 1, (size_t)wn, f) != wn) { fclose(f); return 1; }
+        fclose(f);
+        printf("gold-type.cx: wrote %s bytes=%d keys=%d\n", path, wn, keys);
+        return 0;
+    }
+    if (slurp(path, have, (int)sizeof have, &hn) != 0) {
+        fprintf(stderr, "gold-type.cx: missing %s\n", path);
+        return 1;
+    }
+    if (hn != wn || memcmp(have, want, (size_t)wn) != 0) {
+        fprintf(stderr, "gold-type.cx: STALE\n");
+        return 1;
+    }
+    printf("gold-type.cx: ok keys=%d bytes=%d\n", keys, wn);
+    return 0;
+}
