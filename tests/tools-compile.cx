@@ -242,10 +242,31 @@ static int compile(int i) {
     fprintf(f,"%s\t%s\tmode=%s\trun=%d\trc=%d\tobject=%d\tresidue=%d\traw_compile_failure=%d\tcategory=%s\treason=%s\tstderr=%s\n",status,sources[i],links[i]?"symlink-follow":"regular",run,r.rc,object,r.residue,r.rc!=0,known?category[i]:"-",known?reason[i]:"-",err);
     if(fclose(f))die("result close");np_free(&r);return deferred?4:(xfail||input_ok?3:(!known&&ok?0:1));
 }
+static int reg_force;
+/* every line is SOURCE<TAB>regular|symlink: the only file --register --force may replace */
+static int registry_shaped(const char *p) {
+    char line[8192];FILE *f=fopen(p,"rb");int n=0;if(!f)return 0;
+    while(fgets(line,sizeof line,f)) {
+        size_t len=strlen(line);char *k;
+        if(!len||line[len-1]!='\n'){fclose(f);return 0;}
+        line[--len]=0;k=strchr(line,'\t');
+        if(!k||k==line||(strcmp(k+1,"regular")&&strcmp(k+1,"symlink"))){fclose(f);return 0;}
+        n++;
+    }
+    fclose(f);return n>0;
+}
 static void registry(int update,const char *destination) {
     char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-sources.tsv");
     if(update) {
-        FILE *f=fopen(destination,"wx");if(!f)die("new registry destination required");
+        /* fopen "wx" does not refuse an existing file on this runtime (observed 2026-11-17: a tools/check-*.cx was
+           overwritten with the registry), so existence is checked here; only ENOENT counts as absent. */
+        int ex=sy_exists(destination);
+        if(ex<0)die("REFUSE registry destination: cannot stat (only ENOENT counts as absent)");
+        if(ex==1&&(!reg_force||!registry_shaped(destination))) {
+            fprintf(stderr,"tools-compile: REFUSE --register would overwrite existing %s: the third argument is the OUTPUT registry path, give a new path (or add --force only over a file that already is a tools-compile registry). To register a new tool and its check batch use: sh ./unisacc.com tools/register.cx -- --tool\n",destination);
+            exit(2);
+        }
+        FILE *f=fopen(destination,ex==1?"wb":"wx");if(!f)die("new registry destination required");
         for(int i=0;i<count;i++)fprintf(f,"%s\t%s\n",sources[i],links[i]?"symlink":"regular");
         if(ferror(f)||fclose(f))die("registry write");return;
     }
@@ -367,12 +388,13 @@ int main(int argc,char **argv) {
        the inventory adds git ls-files -o --exclude-standard -- tools .cx files; an untracked symlink or
        other non-regular file is refused.  Every verification (shards, --shards, the precommit toolsreg
        gate) stays index-only, so a registry row for an unstaged file is still rejected there. */
+    if(argc>=5&&!strcmp(argv[1],"--register")&&!strcmp(argv[argc-1],"--force")){reg_force=1;argc--;}
     int with_untracked=argc==5&&!strcmp(argv[1],"--register")&&!strcmp(argv[4],"--with-untracked");
     if(with_untracked)argc=4;
     int update=argc==4&&!strcmp(argv[1],"--register");
     int listing=argc==3&&!strcmp(argv[1],"--shards");
     explicit_consumer=argc==8&&!strcmp(argv[4],"--compiler")&&!strcmp(argv[6],"--models");
-    if(argc!=4&&!listing&&!explicit_consumer)die("usage: ROOT NEW_OUT SHARD [--compiler ABS_PRODUCT --models ABS_PKG] | --shards ROOT | --register ROOT NEW_REGISTRY");
+    if(argc!=4&&!listing&&!explicit_consumer)die("usage: ROOT NEW_OUT SHARD [--compiler ABS_PRODUCT --models ABS_PKG] | --shards ROOT | --register ROOT NEW_REGISTRY [--with-untracked] [--force] (NEW_REGISTRY is an output path that must not exist; to register a new tool use sh ./unisacc.com tools/register.cx -- --tool)");
     if(!realpath(argv[update||listing?2:1],root))die("root");
     char *end;long shard=0;
     if(!update&&!listing){errno=0;shard=strtol(argv[3],&end,10);if(errno||!*argv[3]||*end||shard<0)die("shard");}
