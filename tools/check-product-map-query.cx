@@ -20,12 +20,12 @@ static void pq_text(char*d,size_t cap,const char*s){pq_copy(d,cap,s,strlen(s)+1)
 static void*pq_alloc(size_t n){void*p=mm_alloc(n);if(!p)die("allocation");return p;}
 #define PQ_FMT(d,c,...) do { if(cx_fmt(d,c,__VA_ARGS__))die("format-bound"); } while(0)
 static void join(char*out,size_t cap,const char*a,const char*b){if(cx_fmt(out,cap,"%s/%s",a,b))die("path-bound");}
-static int run(char**v,const char*cwd,np_result*r){if(np_run(v,cwd,0,55,r,why,sizeof why)){fprintf(stderr,"transport %s\n",why);return -1;}return r->rc;}
+static int run(char**v,const char*cwd,np_result*r){char*clean[128]={"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","GIT_OBJECT_DIRECTORY","-u","GIT_ALTERNATE_OBJECT_DIRECTORIES"};int k=11;for(int i=0;v[i];i++){if(k>=127)die("fixture-argv-bound");clean[k++]=v[i];}clean[k]=0;if(np_run(clean,cwd,0,55,r,why,sizeof why)){fprintf(stderr,"transport %s\n",why);return -1;}return r->rc;}
 static void command(char**v,const char*cwd){np_result r={0};int rc=run(v,cwd,&r);if(rc){fprintf(stderr,"%s\n",r.err?r.err:"");die("fixture-command");}np_free(&r);}
 static void copy(const char*a,const char*b){size_t n=0;char*s=cx_read(a,&n);if(!s||sy_write_atomic(b,s,n,0700))die("fixture-copy");mm_free(s);}
 static void setup(void){
     if(cx_fmt(fx,sizeof fx,"%s/product-map-query-check-XXXXXX",sy_tmpdir())||!mkdtemp(fx))die("tmpdir");
-    char tree[4400];join(tree,sizeof tree,fx,"tree");char*cl[]={"git","clone","-q","--shared",root,tree,0};command(cl,root);pq_text(fx,sizeof fx,tree);
+    char tree[4400],archive[4400];join(tree,sizeof tree,fx,"tree");join(archive,sizeof archive,fx,"input.tar");if(sy_mkdir(tree,0700))die("fixture-tree");char*pack[]={"git","archive","--format=tar","--output",archive,"HEAD",0};command(pack,root);char*unpack[]={"tar","-xf",archive,"-C",tree,0};command(unpack,root);char*init[]={"git","init","-q",0};command(init,tree);char*index[]={"git","add","-f","--",".",0};command(index,tree);pq_text(fx,sizeof fx,tree);
     char entry[4400];join(entry,sizeof entry,fx,"unisacc.com");copy(product,entry);
     join(cache,sizeof cache,fx,"query-cache");
 }
@@ -87,6 +87,6 @@ int main(int argc,char**argv){
     char generator[4400],fresh[4400];join(generator,sizeof generator,root,"tools/product-map.cx");join(fresh,sizeof fresh,fx,"independent.tsv");char*v[]={"sh",product,generator,"--","--root",fx,"--emit-tsv",fresh,0};np_result independent={0};rc=run(v,root,&independent);ck(rc==0,"independent-original-generator-ran");np_free(&independent);
     size_t n=0;char*b=cx_read(fresh,&n);ck(b&&n==changed.outn&&!memcmp(b,changed.out,n),"new-result-byte-equal-independent-recomputation");
     int body_changed=first.outn!=changed.outn||(first.outn&&memcmp(first.out,changed.out,first.outn));ck((!strcmp(which,"tracked")||recovery)?!body_changed:body_changed,"expected-product-byte-effect");
-    if(recovery){char dir[4400],leaf[200],path[4400];join(dir,sizeof dir,cache,"product-map");PQ_FMT(leaf,sizeof leaf,"%s.tsv",after);join(path,sizeof path,dir,leaf);size_t m=0;char*c=cx_read(path,&m);ck(c&&m==n&&!memcmp(c,b,n),"repaired-cache-holds-only-fresh-body");mm_free(c);}
+    if(recovery){char dir[4400],leaf[200],path[4400];join(dir,sizeof dir,cache,"product-map");PQ_FMT(leaf,sizeof leaf,"%s.tsv",after);join(path,sizeof path,dir,leaf);size_t m=0;char*c=cx_read(path,&m);ck(c&&m==n&&!memcmp(c,b,n),"repaired-cache-holds-only-fresh-body");mm_free(c);if(strcmp(before,after)){const char*ext[]={"tsv","reads","sha"};int clean=1;for(int i=0;i<3;i++){PQ_FMT(leaf,sizeof leaf,"%s.%s",before,ext[i]);join(path,sizeof path,dir,leaf);sy_stat_t st;if(sy_lstat(path,&st)!=-ENOENT)clean=0;}ck(clean,"invalidated-cache-object-has-no-dirty-sidecars");}else ck(1,"invalidated-cache-object-has-no-dirty-sidecars");}
     mm_free(b);np_free(&first);np_free(&changed);printf("%s\tfailed=%d\tpassed=%d\tcase=%s\tfixture=%s\n",grouped?"PRODUCT_MAP_QUERY_SUBCASE":"CHECK_PRODUCT_MAP_QUERY",failed,passed,which,fx);return failed?1:0;
 }
