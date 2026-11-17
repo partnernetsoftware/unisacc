@@ -1,5 +1,6 @@
 /* host1 \\0asm mini VM for stage0 product modules. Linked into ujs.com.
- * No #include. No struct returns (unisacc limit). API: host1_wasm_run.
+ * No #include. No struct returns (unisacc limit). API: host1_wasm_run,
+ * host1_wasm_run_frames (same H1, main persist).
  */
 enum {
   H1_TAG_I64 = 2, H1_TAG_F64 = 3, H1_TAG_STR = 4,
@@ -20,6 +21,8 @@ typedef struct {
   uint32_t nfunc;
   int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
   WV stk[H1_STK];
+  WV ploc[256];
+  int ploc_live;
   int sp;
   char err[128];
 } H1;
@@ -216,6 +219,7 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
   CTL ctl[H1_CTL];
   int csp = 0;
   WV a, b2, v;
+  int keep = (locals == h->ploc && h->ploc_live);
 
   if (!h1_uleb(b, bn, &ip, &ng)) return h1_err(h, "locals");
   for (g = 0; g < ng; g++) {
@@ -224,8 +228,10 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (!h1_uleb(b, bn, &ip, &cnt) || ip >= bn) return h1_err(h, "ldecl");
     ty = b[ip++];
     for (n = 0; n < cnt && nloc < 256; n++) {
-      locals[nloc].k = (ty == 0x7e) ? WK_I64 : (ty == 0x7c) ? WK_F64 : WK_I32;
-      locals[nloc].i32 = 0; locals[nloc].i64 = 0; locals[nloc].f64 = 0;
+      if (!keep) {
+        locals[nloc].k = (ty == 0x7e) ? WK_I64 : (ty == 0x7c) ? WK_F64 : WK_I32;
+        locals[nloc].i32 = 0; locals[nloc].i64 = 0; locals[nloc].f64 = 0;
+      }
       nloc++;
     }
   }
@@ -446,11 +452,26 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
 
 static int h1_call(H1 *h, uint32_t fi, int depth) {
   WV locals[256];
+  WV *lp;
   uint32_t np, i;
   if (depth > H1_CALL) return h1_err(h, "call depth");
   if (fi >= h->nfunc) return h1_err(h, "bad func");
   np = h->nparam[fi];
   if (h->sp < (int)np) return h1_err(h, "stack under");
+  if (depth == 0 && (int)fi == h->main_i) {
+    lp = h->ploc;
+    for (i = 0; i < np; i++) h1_pop_to(h, &lp[np - 1 - i]);
+    if (!h->ploc_live) {
+      for (i = np; i < 256; i++) {
+        lp[i].k = WK_I32; lp[i].i32 = 0; lp[i].i64 = 0; lp[i].f64 = 0;
+      }
+    }
+    {
+      int rc = h1_exec(h, fi, lp, np, depth);
+      if (rc == 0) h->ploc_live = 1;
+      return rc;
+    }
+  }
   for (i = 0; i < np; i++) h1_pop_to(h, &locals[np - 1 - i]);
   for (i = np; i < 256; i++) {
     locals[i].k = WK_I32; locals[i].i32 = 0; locals[i].i64 = 0; locals[i].f64 = 0;
@@ -458,27 +479,32 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
   return h1_exec(h, fi, locals, np, depth);
 }
 
-int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap) {
+int host1_wasm_run_frames(const uint8_t *wasm, uint32_t wasm_n, int frames,
+                          char *out, uint32_t out_cap) {
   H1 h;
   WV handle, tagv, val;
-  int tag;
+  int tag, k;
   memset(&h, 0, sizeof h);
+  if (frames < 1) frames = 1;
   if (h1_parse(&h, wasm, wasm_n) != 0) {
     snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err);
     free(h.mem);
     return 1;
   }
-  if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) {
-    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err[0] ? h.err : "exec");
-    free(h.mem);
-    return 1;
+  for (k = 0; k < frames; k++) {
+    if (h1_call(&h, (uint32_t)h.main_i, 0) != 0) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"%s\"}", h.err[0] ? h.err : "exec");
+      free(h.mem);
+      return 1;
+    }
+    if (h.sp < 1) {
+      snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"no result\"}");
+      free(h.mem);
+      return 1;
+    }
+    h1_pop_to(&h, &handle);
+    h.sp = 0;
   }
-  if (h.sp < 1) {
-    snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"no result\"}");
-    free(h.mem);
-    return 1;
-  }
-  h1_pop_to(&h, &handle);
   h1_push_copy(&h, &handle);
   if (h1_call(&h, (uint32_t)h.tag_i, 0) != 0) {
     snprintf(out, out_cap, "{\"run\":\"fail\",\"err\":\"tag:%s\"}", h.err);
@@ -555,3 +581,8 @@ int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out
   free(h.mem);
   return 0;
 }
+
+int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap) {
+  return host1_wasm_run_frames(wasm, wasm_n, 1, out, out_cap);
+}
+

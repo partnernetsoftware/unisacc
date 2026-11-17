@@ -50,6 +50,20 @@
       meta: meta,
       goldI64: function () {
         return Number(e.i64_of_export(e.main_export()));
+      },
+      mainHandle: function () { return e.main_export(); },
+      tag: function (h) { return e.tag_of_export(h); },
+      i64: function (h) { return Number(e.i64_of_export(h)); },
+      readI64List: function (h) {
+        var n = e.host_len(h);
+        var i, el, out;
+        if (typeof n !== "number") n = Number(e.i64_of_export(n));
+        out = [];
+        for (i = 0; i < n; i++) {
+          el = e.host_list_get(h, i);
+          out.push(Number(e.i64_of_export(el)));
+        }
+        return out;
       }
     };
   };
