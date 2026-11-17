@@ -62,7 +62,23 @@ static int tool(const char *root, const char *ape, const char *sha, int write, c
     v[k] = 0;
     return bounded_run(v, 50, out, cap, &cut);
 }
-static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 14), s, tx_len(s, 256)) >= 0; }
+/* Command assertions consume INSTALL_APE TSV facts, never arbitrary substrings
+   of file contents or diagnostic prose. A required fact must occur once. */
+static int has(const char *o, const char *s) {
+    long n=tx_len(o,1<<14),sn=tx_len(s,256),at=0;int count=0;
+    if(n<0||sn<0)return 0;
+    while(at<n){
+        long end=at,off,len,ao,al;while(end<n&&o[end]!='\n')end++;
+        if(!tx_field(o+at,end-at,'\t',0,&off,&len)&&tx_same(o+at+off,len,"INSTALL_APE",11)&&
+           !tx_field(o+at,end-at,'\t',1,&ao,&al)){
+            int match=tx_same(o+at+ao,al,s,sn);
+            if(tx_same(o+at+ao,al,"REFUSED",7)&&!tx_field(o+at,end-at,'\t',2,&off,&len))match=match||tx_same(o+at+off,len,s,sn);
+            if(match)count++;
+        }
+        at=end+1;
+    }
+    return count==1;
+}
 
 static int write_file(const char *p, const char *s, int mode) {
     if (cx_write(p, s, (size_t)tx_len(s, 1 << 16))) return -1;
@@ -173,8 +189,7 @@ int main(int argc, char **argv) {
             sha_of(com, h0); sha_of(bj, first);
             ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "split-root-install", out);
             t = cx_read(bj, &tn);
-            if (cx_fmt(text, sizeof text, "\"bytes\": %ld,", ape_bytes)) return 2;
-            ck(t && has(t, "\"product_kind\": \"ape1\"") && has(t, real) && has(t, text), "build-record-synced-to-ape1", t ? t : "no record");
+            ck(t && record_consumer(root,0), "build-record-synced-to-ape1", t ? t : "no record");
             if (t) mm_free(t);
             ck(record_consumer(root, 0), "build-record-consumer-after-install", "installed record rejected");
             if (record_fixture(bj, 1, "ape1", real)) return 2;
@@ -200,6 +215,29 @@ int main(int argc, char **argv) {
                    "already-clean-keeps-record-identity", "clean record was rewritten");
                 ck(product_before.ino == product_after.ino && product_before.mtime == product_after.mtime && product_before.ctime == product_after.ctime,
                    "already-keeps-product-identity", "existing APE was rewritten");
+            }
+            /* A matching binary can still carry a previous candidate's receipt. */
+            {   char receipt[4400],expected[9000],before_sha[65],after_sha[65];sy_stat_t before,after,product_before,product_after;
+                if(cx_fmt(receipt,sizeof receipt,"%s/ape-receipt.txt",root)||
+                   cx_fmt(expected,sizeof expected,"unisacc.com\t%s\tsha=%s\tbytes=%ld\n",ape,real,ape_bytes)||
+                   write_file(receipt,"unisacc.com\tprevious-candidate\tsha=0000000000000000000000000000000000000000000000000000000000000000\tbytes=1\n",0600)||sha_of(receipt,before_sha)||sy_stat(com,&product_before))return 2;
+                ck(tool(root,ape,real,0,out,sizeof out)==0&&has(out,"ALREADY"),"already-receipt-dryrun",out);
+                if(sha_of(receipt,after_sha))return 2;
+                ck(tx_eqz(before_sha,after_sha),"already-dryrun-keeps-stale-receipt","dry run rewrote receipt");
+                ck(tool(root,ape,real,1,out,sizeof out)==0&&has(out,"ALREADY"),"already-repairs-stale-receipt",out);
+                size_t rn=0;char *rt=cx_read(receipt,&rn);
+                ck(rt&&tx_same(rt,(long)rn,expected,tx_len(expected,sizeof expected)),"already-receipt-exact-candidate-identity","wrong receipt bytes");mm_free(rt);
+                if(sy_stat(receipt,&before))return 2;
+                ck(tool(root,ape,real,1,out,sizeof out)==0&&has(out,"ALREADY"),"already-receipt-clean",out);
+                if(sy_stat(receipt,&after))return 2;
+                ck(before.ino==after.ino&&before.mtime==after.mtime&&before.ctime==after.ctime,"already-clean-keeps-receipt-identity","clean receipt was rewritten");
+                if(sy_unlink(receipt))return 2;
+                ck(tool(root,ape,real,1,out,sizeof out)==0&&has(out,"ALREADY"),"already-recreates-missing-receipt",out);
+                rt=cx_read(receipt,&rn);ck(rt&&tx_same(rt,(long)rn,expected,tx_len(expected,sizeof expected)),"already-missing-receipt-exact-identity","missing receipt not repaired");mm_free(rt);
+                if(sy_unlink(receipt)||sy_mkdir(receipt,0700))return 2;
+                ck(tool(root,ape,real,1,out,sizeof out)==2,"already-receipt-directory-rejected",out);
+                if(sy_rmdir(receipt)||write_file(receipt,expected,0600)||sy_stat(com,&product_after))return 2;
+                ck(product_before.ino==product_after.ino&&product_before.mtime==product_after.mtime&&product_before.ctime==product_after.ctime,"already-receipt-repair-keeps-product-identity","receipt repair rewrote the APE");
             }
             /* candidate record beside the APE: wrong digest is not used (RECORD_STALE, three-field sync only);
                a matching digest replaces the whole record (commit and sources_sha256 follow). */
@@ -249,13 +287,17 @@ int main(int argc, char **argv) {
                 ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "IDENTITY_EMITTED"), "receipt-identity-install", out);
                 rt = cx_read(rcp, &rtn);
                 {   char want_line[9000];
-                    if (cx_fmt(want_line, sizeof want_line, "sha=%s\tbytes=", real)) return 2;
-                    ck(rt && rt[0] == 'u' && has(rt, "unisacc.com\t") && has(rt, want_line) && !has(rt, "entry.elf") && !has(rt, "NOT_RELEASE"), "receipt-is-one-ape-line", rt ? rt : "no receipt");
-                    ck(rt && rtn > 0 && rt[rtn - 1] == '\n' && tx_find(rt, (long)rtn - 1, "\n", 1) < 0, "receipt-has-exactly-one-line", rt ? rt : "no receipt");
+                    if (cx_fmt(want_line, sizeof want_line, "unisacc.com\t%s\tsha=%s\tbytes=%ld\n",ape,real,ape_bytes)) return 2;
+                    ck(rt&&tx_same(rt,(long)rtn,want_line,tx_len(want_line,sizeof want_line)), "receipt-is-one-ape-line", rt ? rt : "no receipt");
+                    long off,len;
+                    ck(rt&&rtn>0&&rt[rtn-1]=='\n'&&!tx_field(rt,(long)rtn-1,'\n',0,&off,&len)&&len==(long)rtn-1, "receipt-has-exactly-one-line", rt ? rt : "no receipt");
                 }
                 if (rt) mm_free(rt);
                 dt = cx_read(idoc, &dtn);
-                ck(dt && has(dt, "product_kind\tape1") && !has(dt, "split2") && !has(dt, "\nold\n"), "identity-block-ape1", dt ? dt : "no doc");
+                { char want_doc[512];
+                  if(cx_fmt(want_doc,sizeof want_doc,"x\n<!-- identity-begin -->\nproduct_kind\tape1\nproduct_digest\t%s\nunisacc.com\t%s\t%ld\n<!-- identity-end -->\n",real,real,ape_bytes))return 2;
+                  ck(dt&&tx_same(dt,(long)dtn,want_doc,tx_len(want_doc,sizeof want_doc)), "identity-block-ape1", dt ? dt : "no doc");
+                }
                 if (dt) mm_free(dt);
                 /* negative: a root without the document is skipped, not failed */
                 (void)sy_unlink(idoc);

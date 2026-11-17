@@ -13,8 +13,8 @@
  *      ROOT/unisacc.com in one step; any failure removes the temporary file and leaves unisacc.com as it was.
  * The record of the source sha is ROOT/unisacc.com.ape.sha256 (one line "sha256<TAB>bytes<TAB>name"), written the
  * same way.  unisacc.com stays ignored by git (it is a product); this tool and the record format are what is kept.
- * An identical installed APE reports ALREADY: --write repairs stale build-record bytes/kind/digest only;
- * a clean build record is not rewritten. Without --write even a stale build record is unchanged.
+ * An identical installed APE reports ALREADY: --write repairs stale build-record bytes/kind/digest and
+ * the APE receipt. Clean records are not rewritten. Without --write stale metadata is unchanged.
  * Prints INSTALL_APE<TAB>status<TAB>sha256<TAB>bytes; exit 0 ok, 1 refused, 2 usage/IO.
  * An L3 tool: no #include, no direct libc call. */
 #pragma unisa use runtime.packagefooter
@@ -190,6 +190,15 @@ static void ia_write_receipt(const char *root, const char *ape, const char *sha,
     char path[4400], tmp[4400], line[9000];
     if (ia_join(path, (int)sizeof path, root, "ape-receipt.txt") || cx_fmt(tmp, sizeof tmp, "%s.%d", path, sy_pid())) ia_die("path");
     if (cx_fmt(line, sizeof line, "unisacc.com\t%s\tsha=%s\tbytes=%ld\n", ape, sha, bytes)) ia_die("receipt format");
+    sy_stat_t st;int present=sy_lstat(path,&st);
+    if(present&&present!=-ENOENT)ia_die("cannot stat the receipt");
+    if(!present){
+        if(st.kind!='f')ia_die("receipt is not a regular file");
+        if(st.size>=0&&st.size<=(long)sizeof line){
+            size_t n=0;char *old=cx_read(path,&n);if(!old)ia_die("cannot read the receipt");
+            int same=tx_same(old,(long)n,line,tx_len(line,sizeof line));mm_free(old);if(same)return;
+        }
+    }
     if (cx_write(tmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); ia_die("cannot write the receipt"); }
     if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); ia_die("cannot rename the receipt"); }
 }
@@ -224,7 +233,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         ia_join(rec, (int)sizeof rec, root, "unisacc.com.ape.sha256")) ia_die("path");
     if (cx_fmt(tmp, sizeof tmp, "%s/.unisacc.com.install.%d", root, pid) || cx_fmt(rtmp, sizeof rtmp, "%s/.unisacc.com.ape.sha256.%d", root, pid)) ia_die("path");
     if (ia_sha(com, cur, &cb) == 0 && tx_eqz(cur, got)) {
-        if (write) ia_sync_record(root, ape, got, bytes);
+        if (write) { ia_sync_record(root, ape, got, bytes); ia_write_receipt(root, ape, got, bytes); }
         sy_printf("INSTALL_APE\tALREADY\t%s\t%ld\t%s\n", got, bytes, ver);
         return 0;
     }
