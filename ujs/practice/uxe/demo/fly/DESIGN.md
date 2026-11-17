@@ -11,7 +11,7 @@
 | 层 | 路径 | 职责 |
 |---|---|---|
 | 玩法金 | `ujs/tests/examples/fly.ujs` | host1 子集:16 帧满推进,`return x+100*alt`,金 3868 |
-| wasm | `fly.wasm` | `ujs.com fly.ujs -o`,无 import,导出 `main_export`/`i64_of_export` |
+| wasm | `fly.wasm` | 含 custom 段 `ujsmeta`;`ujs.com fly.ujs -o` |
 | 页 | `index.html` + `fly-b64.js` + `../host1-runtime.js` | 金走 host1Boot;互动物理在 Host |
 | 验收 | `?auto=1` | wasm 金与 js16 同 3868 才 `FLY_PLAY_OK` |
 
