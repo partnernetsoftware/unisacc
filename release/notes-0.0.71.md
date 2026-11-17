@@ -1,6 +1,8 @@
 # unisacc 0.0.71 发布说明草案
 
-冻结输入为0571f88105e5da96335ae4a7add1d9e605d40d7c。新正规构造正在/tmp/unisacc-session-v71-rc2进行。最终候选SHA256:待填;SID:待填;字节数:待填。本稿尚不表示QUALIFIED,旧候选证据不能迁移为新候选资格。
+冻结输入为0571f88105e5da96335ae4a7add1d9e605d40d7c。正规构造499/499相位、pack与pack-recheck通过,退出0;promote检查由主调度实跑通过。候选SHA256 ca84adc0fb36748a7194f5830791f20f1998ff5e6816eab4db55b4f9d7c7c24a,7228055字节,与旧候选逐字节相同。新来源SID a87d1ea260de48edbddb688de4a39ad2a66e59815d04d33cc5d017cb751a75c4。正式重建配对build记录、核验资产并经release-layout生成本地布局,cx-root-identity实跑13条通过。来源身份与产物字节身份分别核验;同字节不代替来源记录。仍不宣称QUALIFIED。
+
+多单元函数指针形参U17已由候选整批13项(含6个跨单元正例)实跑通过。定义先于原型探针修为首单元包含main,仍保留定义/原型顺序;同探针旧0.0.67拒绝,新候选输出X 5。入口位置未被误当类型合同,原失败收据保留。
 
 ## 改动与旧候选证据
 
@@ -28,10 +30,10 @@
 
 ## 证据与撤回
 
-新链证据:/tmp/unisacc-session-v71-rc2。旧链与对照:/tmp/unisacc-session-v71-full,旧全套:/tmp/unisacc-session-v71-tests/retest-54142681d2。直接集合清单与身份在新链目录direct-v2-plan.tsv和p1-summary.txt,尚未取得新候选通过证据。临时路径不是公开可复现附件,正式发布应另附可取证材料。本窗口未建tag、未公开发布、未替换共享产品;集成者对外发布前另记资产撤回与旧版恢复办法。
+新链证据:/tmp/unisacc-session-v71-rc2。旧链与对照:/tmp/unisacc-session-v71-full,旧全套:/tmp/unisacc-session-v71-tests/retest-54142681d2。直接集合清单与身份在新链目录direct-v2-plan.tsv和p1-summary.txt,P2指定175项已全部执行,当前172 PASS、3 FAIL、0 UNMEASURED、0 pending;原失败与复验收据并列保留。剩余properties-cases-bound/meta、precommit-gates-reuse由主调度定因,不算通过;状态U26。临时路径不是公开可复现附件,正式发布应另附可取证材料。本窗口未建tag、未公开发布、未替换共享产品;集成者对外发布前另记资产撤回与旧版恢复办法。
 
 ## 直接集合验收口径
 
-按主调度P2裁定:冻结输入0571f88105的374批直接集合中,tests/run-batch.cx扇出152批、tools/cxlib/chainargv.cx扇出79批,去重并集227批。S_main为不属于并集的147批;H_sample为并集按批次ID逐字节字典序排列后,从第1个起每4个取1个,共57批。合计204批必须在新候选上逐批验收或明确登记既定豁免;计划中29项为既定豁免,175项待新候选实跑。
+按主调度P2裁定:冻结输入0571f88105的374批直接集合中,tests/run-batch.cx扇出152批、tools/cxlib/chainargv.cx扇出79批,去重并集227批。S_main为不属于并集的147批;H_sample为并集按批次ID逐字节字典序排列后,从第1个起每4个取1个,共57批。合计204批必须在新候选上逐批验收或明确登记既定豁免;计划中29项为既定豁免,175项全部实跑,172通过、3失败;29项豁免仍不算通过。
 
 剩余170个harness扇出批次记CARRIED_NOT_PASS,保留旧候选收据,不记新候选PASS。沿用依据是这两个harness的改动在第二轮全套前已存在,同一运行器已实际跑过相关批次;新候选产品输入相对旧ca84仅多事实表调整,15对生成物与九个编译产物对拍逐字节相同。网等价证据不冒充这170批在新候选上的执行结果。完整成员、分组、状态与豁免见/tmp/unisacc-session-v71-rc2/direct-v2-run.tsv及direct-v2-status.tsv;本段仍是验收口径,不是完成声明。

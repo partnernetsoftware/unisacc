@@ -257,6 +257,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | cx 包稳定缺口清单（stable-eval 的 S2/S4/S10/S13 失败落到具体行） | `sh ./unisacc.com tools/stable-gaps.cx [-- ROOT [PKG...]]`；检查 `tools/check-stable-gaps.cx`（批次 `stable-gaps`） | 只读;输出 `GAP pkg 条款 行名 动作`,末行 `STABLE_GAPS total= s2= s4= s10= s13=`;全树实测 228/115/71/23/19 |
 | 检查的冷编译耗时与 use 闭包量表（0.0.57 T57 方案 B） | `sh ./unisacc.com tools/coldcompile.cx -- OUT.tsv SCRATCH FILE...`；`-- --plan-only FILE...` 只出闭包；数据 `plans/check-coldcompile.tsv`；检查 `tools/check-coldcompile.cx`（批次 `coldcompile`） | 逐文件串行：全新 TMPDIR 下 `PRODUCT FILE -o IMAGE` 的墙钟（tools/bound 40，只编不跑），另记单元数、闭包字节、起测时 load1 与 use 列表。是测量不是测试结论；耗时随机器负载变，跨行比较要看 load1。 |
 独立流材料：`tools/isolated-streams-material.cx ROOT NEW_OUT COMPILER` 复制当前候选的八个单模型包及资源，共用 `tools/isolated-stream.cx` 通用执行基座，COMPILER 必须是 ROOT 的候选；`tools/check-isolated-stream.cx ROOT MATERIAL NEW_OUT` 检查脱离产品运行和结构拒绝。准备只记 PREPARED；同候选模型字节与 E2 行为分别由 stream-model-identity、e2-input-binding 批次实跑核对。
+- 材料消费者事实查询:tools/cxlib/materialconsumers.cx 的 mc_load/mc_id 按正式批次声明枚举消费者,tools/check-materialconsumers.cx 检查重载、所有权边界和家族名精确匹配;libneed 夜测逐项核完整拒绝集合。
 
 
 #### 2.3 发布（资格、会话、安装）
