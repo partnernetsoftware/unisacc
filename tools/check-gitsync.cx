@@ -1,0 +1,173 @@
+/* check-gitsync: contract of tools/cxlib/gitsync.cx gs_sync on throwaway fixture repos.
+ *   sh ./unisacc.com tools/check-gitsync.cx
+ * Each case: git init a fresh repo under /tmp, commit OLD (worktree = OLD), build NEW in a side
+ * worktree with a private index, commit-tree it and update-ref HEAD (shared index and worktree
+ * still OLD), apply the case's local edits (others' staged or dirty work), call gs_sync and check
+ * the counts, the SYNC_KEPT lines, the index (git ls-files -s / diff --cached) and worktree bytes.
+ * Cases: modify, add, delete, rename, symlink, unrelated staged file kept byte-exact, dirty same
+ * path kept, staged same path kept, no change, space and non-ASCII path, 250 paths across the
+ * 200-path batch edge, executable bit change, untracked conflict, delete of a whole directory.
+ * Negative control: the verify script of the dirty case is also run against an unchanged fixture
+ * where it must fail, proving the checks can see a difference.
+ * Last line: CHECK_GITSYNC<TAB>failed=N. Exit 0 only when failed=0. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.gitsync
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+
+static int failed, passed;
+static char base[512];
+
+typedef struct gcase {
+    const char *name;
+    const char *old;     /* shell run in repo before the OLD commit */
+    const char *mknew;   /* shell run in the side worktree $NW before the NEW commit */
+    const char *local;   /* shell run in repo after HEAD moved (others' work) */
+    int synced, kept;    /* expected counts, -1 skips */
+    const char *kept_has; /* substring that must be in kept_text, 0 none */
+    const char *verify;  /* shell run in repo after gs_sync, must exit 0 */
+} gcase;
+
+static int sh(const char *dir, const char *script, pr_result *res) {
+    char *argv[] = { "sh", "-ec", (char *)script, 0 };
+    int t = pr_run("check-gitsync sh", argv, dir, 0, 30, res);
+    if (t != 0) return -1;
+    return res->rc;
+}
+
+static int contains(const char *h, size_t hn, const char *n) {
+    size_t m = 0;
+    while (n[m]) m++;
+    if (!m) return 1;
+    for (size_t i = 0; i + m <= hn; i++) {
+        size_t k = 0;
+        while (k < m && h[i + k] == n[k]) k++;
+        if (k == m) return 1;
+    }
+    return 0;
+}
+
+static void fail(const char *name, const char *why, const char *got) {
+    failed++;
+    fprintf(stderr, "FAIL\tgitsync\t%s\t%s\t%s\n", name, why, got ? got : "-");
+}
+
+static const char *SETUP =
+    "git init -q . && git config user.email t@t && git config user.name t && git config core.autocrlf false\n";
+
+static void run_case(const gcase *c, int idx) {
+    char dir[700], script[16384], oldh[64], newh[64];
+    pr_result res;
+    int w = snprintf(dir, sizeof dir, "%s/c%02d", base, idx);
+    if (w < 0 || (size_t)w >= sizeof dir || sy_mkdir_all(dir, 0755) != 0) { fail(c->name, "mkdir", dir); return; }
+    w = snprintf(script, sizeof script,
+                 "%s%s\ngit add -A && git commit -q -m old --allow-empty\n"
+                 "NW=\"$PWD/../nw%02d\"; mkdir -p \"$NW\"; git archive HEAD | tar -x -C \"$NW\"\n"
+                 "( cd \"$NW\" && %s )\n"
+                 "export GIT_INDEX_FILE=\"$PWD/.git/nidx\"; cp .git/index \"$GIT_INDEX_FILE\"\n"
+                 "git --work-tree=\"$NW\" add -A\n"
+                 "T=$(git write-tree); O=$(git rev-parse HEAD); N=$(git commit-tree \"$T\" -p \"$O\" -m new)\n"
+                 "unset GIT_INDEX_FILE; git update-ref HEAD \"$N\" \"$O\"\n"
+                 "%s\nprintf '%%s %%s' \"$O\" \"$N\"\n",
+                 SETUP, c->old, idx, c->mknew, c->local);
+    if (w < 0 || (size_t)w >= sizeof script) { fail(c->name, "script too long", 0); return; }
+    int rc = sh(dir, script, &res);
+    if (rc != 0) { fail(c->name, "fixture", res.err); pr_free(&res); return; }
+    if (res.outn != 81 || res.out[40] != ' ') { fail(c->name, "fixture heads", res.out); pr_free(&res); return; }
+    for (int k = 0; k < 40; k++) { oldh[k] = res.out[k]; newh[k] = res.out[41 + k]; }
+    oldh[40] = newh[40] = 0;
+    pr_free(&res);
+    gs_report r;
+    int t = gs_sync(dir, oldh, c->synced == -2 ? oldh : newh, &r);
+    if (t != 0) { fail(c->name, "gs_sync", r.why); gs_report_free(&r); return; }
+    int ok = 1;
+    int es = c->synced == -2 ? 0 : c->synced;
+    if (es >= 0 && r.synced != es) { ok = 0; fprintf(stderr, "  synced=%d want %d\n", r.synced, es); }
+    if (c->kept >= 0 && r.kept != c->kept) { ok = 0; fprintf(stderr, "  kept=%d want %d\n", r.kept, c->kept); }
+    if (c->kept_has && !(r.kept_text && contains(r.kept_text, r.kept_len, c->kept_has))) {
+        ok = 0;
+        fprintf(stderr, "  kept_text lacks %s: %s\n", c->kept_has, r.kept_text ? r.kept_text : "-");
+    }
+    rc = sh(dir, c->verify, &res);
+    if (rc != 0) { ok = 0; fprintf(stderr, "  verify rc=%d %s%s\n", rc, res.out ? res.out : "", res.err ? res.err : ""); }
+    if (rc >= 0 || res.out) pr_free(&res);
+    if (ok) { passed++; printf("PASS\t%s\tchanged=%d synced=%d kept=%d ms=%ld\n", c->name, r.changed, r.synced, r.kept, r.ms); }
+    else fail(c->name, "expectation", r.kept_text);
+    gs_report_free(&r);
+}
+
+/* index equals NEW and worktree equals index for every tracked path */
+#define CLEAN_ALL "git diff --cached --quiet HEAD && git diff --quiet && test -z \"$(git status --porcelain)\"\n"
+
+static const gcase cases[] = {
+    { "a-modify", "printf 'v1\\n' > a; printf 'keep\\n' > k", "printf 'v2\\n' > a", "", 1, 0, 0,
+      CLEAN_ALL "test \"$(cat a)\" = v2 && test ! -x a" },
+    { "b-add", "printf 'x\\n' > k", "mkdir -p d/e; printf 'new\\n' > d/e/n", "", 1, 0, 0,
+      CLEAN_ALL "test \"$(cat d/e/n)\" = new" },
+    { "c-delete", "mkdir -p d; printf 'x\\n' > d/gone; printf 'y\\n' > k", "rm d/gone", "", 1, 0, 0,
+      CLEAN_ALL "test ! -e d/gone && test ! -e d" },
+    { "d-rename", "printf 'body\\n' > from; printf 'y\\n' > k", "mv from to", "", 2, 0, 0,
+      CLEAN_ALL "test ! -e from && test \"$(cat to)\" = body" },
+    { "e-symlink", "ln -s t1 L; printf 'y\\n' > t1; printf 'z\\n' > t2", "rm L; ln -s t2 L", "", 1, 0, 0,
+      CLEAN_ALL "test -L L && test \"$(readlink L)\" = t2 && git ls-files -s L | grep -q '^120000 '" },
+    { "f-unrelated-staged", "printf 'v1\\n' > a; printf 'o1\\n' > other",
+      "printf 'v2\\n' > a", "printf 'theirs\\n' > other; git add other; printf 'theirs2\\n' > other", 1, 0, 0,
+      "test \"$(cat a)\" = v2 && test \"$(git show :other)\" = theirs && test \"$(cat other)\" = theirs2"
+      " && git diff --cached --quiet HEAD -- a && git diff --quiet -- a" },
+    { "g-dirty-same-path", "printf 'v1\\n' > a; printf 'b1\\n' > b", "printf 'v2\\n' > a; printf 'b2\\n' > b",
+      "printf 'mine\\n' > a", 1, 1, "SYNC_KEPT path=a reason=dirty",
+      "test \"$(cat a)\" = mine && test \"$(cat b)\" = b2 && test \"$(git show :a)\" = v1 && test \"$(git show :b)\" = b2" },
+    { "h-staged-same-path", "printf 'v1\\n' > a", "printf 'v2\\n' > a",
+      "printf 'staged\\n' > a; git add a", 0, 1, "SYNC_KEPT path=a reason=staged",
+      "test \"$(cat a)\" = staged && test \"$(git show :a)\" = staged" },
+    { "i-no-change", "printf 'v1\\n' > a", "printf 'v2\\n' > a", "", -2, 0, 0,
+      "test \"$(cat a)\" = v1 && test \"$(git show :a)\" = v1" },
+    { "j-space-nonascii", "printf 'v1\\n' > 'sp ace.txt'; printf 'u1\\n' > 'déjà vu 文件'",
+      "printf 'v2\\n' > 'sp ace.txt'; printf 'u2\\n' > 'déjà vu 文件'; printf 'n\\n' > 'новый файл'", "", 3, 0, 0,
+      CLEAN_ALL "test \"$(cat 'déjà vu 文件')\" = u2 && test \"$(cat 'новый файл')\" = n" },
+    { "k-batch-250", "i=0; while [ $i -lt 250 ]; do printf 'o%d\\n' $i > f$i; i=$((i+1)); done",
+      "i=0; while [ $i -lt 250 ]; do printf 'n%d\\n' $i > f$i; i=$((i+1)); done", "", 250, 0, 0,
+      CLEAN_ALL "test \"$(cat f0)\" = n0 && test \"$(cat f199)\" = n199 && test \"$(cat f200)\" = n200 && test \"$(cat f249)\" = n249" },
+    { "l-exec-bit", "printf '#!/bin/sh\\n' > s; printf 'y\\n' > k", "chmod +x s", "", 1, 0, 0,
+      CLEAN_ALL "test -x s && git ls-files -s s | grep -q '^100755 '" },
+    { "m-untracked-conflict", "printf 'y\\n' > k", "printf 'theirs\\n' > u", "printf 'mine\\n' > u", 0, 1,
+      "SYNC_KEPT path=u reason=untracked-conflict",
+      "test \"$(cat u)\" = mine && test -z \"$(git ls-files u)\"" },
+    { "n-chmod-dirty-kept", "printf 'v1\\n' > a; printf 'y\\n' > k", "printf 'v2\\n' > a", "chmod +x a", 0, 1,
+      "reason=dirty", "test \"$(cat a)\" = v1 && test -x a" },
+};
+
+int main(void) {
+    char cmd[700];
+    int w = snprintf(base, sizeof base, "/tmp/check-gitsync-%ld", sy_now_ms());
+    if (w < 0 || (size_t)w >= sizeof base || sy_mkdir_all(base, 0755) != 0) { fprintf(stderr, "check-gitsync: no temp dir\n"); return 2; }
+    int n = (int)(sizeof cases / sizeof cases[0]);
+    for (int i = 0; i < n; i++) run_case(&cases[i], i);
+    /* negative control: the dirty-case verify must fail on a plain OLD fixture */
+    {
+        pr_result res;
+        char dir[700];
+        w = snprintf(dir, sizeof dir, "%s/neg", base);
+        if (w < 0 || (size_t)w >= sizeof dir || sy_mkdir_all(dir, 0755) != 0) fail("neg-control", "mkdir", 0);
+        else {
+            w = snprintf(cmd, sizeof cmd, "%sprintf 'v1\\n' > a; printf 'b1\\n' > b; git add -A; git commit -q -m o\n", SETUP);
+            if (w < 0 || (size_t)w >= sizeof cmd || sh(dir, cmd, &res) != 0) fail("neg-control", "fixture", 0);
+            else {
+                pr_free(&res);
+                int rc = sh(dir, cases[6].verify, &res);
+                pr_free(&res);
+                if (rc == 0) fail("neg-control", "verify passed on unsynced fixture", 0);
+                else { passed++; printf("PASS\tneg-control\tverify rc=%d on unsynced fixture\n", rc); }
+            }
+        }
+    }
+    {
+        pr_result res;
+        char *argv[] = { "rm", "-rf", base, 0 };
+        if (pr_run("check-gitsync cleanup", argv, 0, 0, 30, &res) == 0) pr_free(&res);
+    }
+    printf("passed=%d\n", passed);
+    printf("CHECK_GITSYNC\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

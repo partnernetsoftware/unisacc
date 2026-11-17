@@ -1,0 +1,418 @@
+#pragma unisa module gitsync
+/* gitsync: after a ref moved from OLD to NEW, bring the shared index and worktree along, touching
+ * only paths whose index entry and worktree bytes both equal OLD.  Everything else is kept and named.
+ *
+ *   gs_report r;
+ *   int t = gs_sync(repo, old_head, new_head, &r);   0 ok (r filled), -1 failure (r.why names it)
+ *   ... r.changed, r.synced, r.kept, r.kept_text (lines "SYNC_KEPT path=P reason=R\n"), r.ms
+ *   gs_report_free(&r);
+ *
+ * Calling convention: gs_sync takes no lock.  The caller holds the devsvc write window and its own
+ * git index lock discipline (as commit-own co_land does) while calling; gs_sync runs after the ref
+ * update to NEW was made, for the same OLD it replaced.  old_head and new_head are full commit or
+ * tree ids (or names git rev-parses).
+ *
+ * Decision per path P changed between OLD and NEW (git diff-tree -r -z --raw --no-renames, so a
+ * rename is a delete plus an add; a mode or type change is an M or T entry):
+ *  (1) index: the stage-0 entry equals OLD (mode and blob), or both are absent; any other entry,
+ *      a missing entry for an OLD path, or a conflict stage -> kept reason=staged;
+ *  (2) worktree, OLD has P: lstat kind equals the OLD kind (symlink vs file), the executable bit
+ *      equals the OLD mode, and the bytes (link target for a symlink) equal the OLD blob;
+ *      otherwise -> kept reason=dirty (a missing file is dirty too);
+ *  (3) worktree, OLD lacks P: P must not exist; otherwise -> kept reason=untracked-conflict;
+ *  (4) a gitlink (mode 160000) on either side -> kept reason=gitlink;
+ *  (5) clean: NEW has P -> write the NEW blob to a temp file in the same directory, chmod, rename
+ *      over (symlink: symlink temp then rename); NEW lacks P -> unlink, then remove now-empty
+ *      parent directories up to the repo root (rmdir refuses non-empty ones).  Index entries
+ *      follow per batch of GS_BATCH paths: update-index --add --cacheinfo MODE SHA P, or
+ *      --force-remove, then update-index on the written paths to refresh their stat data.
+ * Never used: stash, reset, clean, checkout, read-tree -u, checkout-index.
+ * Every git child has a GS_DEADLINE_S bound (cxlib.procrun pr_run); blobs over GS_MAX_BLOB refuse.
+ * diff-tree and ls-files output is parsed byte by byte on its -z framing.
+ * Check: tools/check-gitsync.cx. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+
+#define GS_DEADLINE_S 20
+#define GS_BATCH 200
+#define GS_MAX_BLOB ((size_t)(256u << 20))
+#define GS_MAX_PATHS 200000
+#define GS_KEPT_CAP ((size_t)(4u << 20))
+
+typedef struct gs_report {
+    int synced;
+    int kept;
+    int changed;
+    char *kept_text;
+    size_t kept_len;
+    long ms;
+    char why[1024];
+} gs_report;
+
+typedef struct gs_ent {
+    char *path;
+    unsigned omode, nmode;
+    char osha[41], nsha[41];
+    int idx_state;   /* 0 unseen, 1 equals old, 2 differs */
+    int kept;        /* 0 clean, else a GS_K_ code */
+} gs_ent;
+
+enum { GS_K_STAGED = 1, GS_K_DIRTY, GS_K_UNTRACKED, GS_K_GITLINK };
+
+static const char *gs_reason(int k) {
+    switch (k) {
+    case GS_K_STAGED: return "staged";
+    case GS_K_DIRTY: return "dirty";
+    case GS_K_UNTRACKED: return "untracked-conflict";
+    case GS_K_GITLINK: return "gitlink";
+    }
+    return "unknown";
+}
+
+void gs_report_free(gs_report *r) {
+    free(r->kept_text);
+    r->kept_text = 0;
+    r->kept_len = 0;
+}
+
+static int gs_fail(gs_report *r, const char *a, const char *b) {
+    int w = snprintf(r->why, sizeof r->why, "gitsync: %s%s", a, b ? b : "");
+    if (w < 0) r->why[0] = 0;
+    return -1;
+}
+
+static int gs_git(const char *repo, char **argv, pr_result *res, gs_report *r) {
+    int t = pr_run("gitsync git", argv, repo, 0, GS_DEADLINE_S, res);
+    if (t != 0) { gs_fail(r, res->why, 0); pr_free(res); return -1; }
+    if (res->rc != 0) {
+        gs_fail(r, argv[1], res->err && res->errn ? res->err : " failed");
+        pr_free(res);
+        return -1;
+    }
+    return 0;
+}
+
+static int gs_is_hex40(const char *s) {
+    for (size_t i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static unsigned gs_octal(const char *s, size_t n) {
+    unsigned v = 0;
+    for (size_t i = 0; i < n; i++) v = v * 8u + (unsigned)(s[i] - '0');
+    return v;
+}
+
+static int gs_streq(const char *a, const char *b) {
+    size_t i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+static int gs_memeq(const void *a, const void *b, size_t n) {
+    const unsigned char *x = a, *y = b;
+    for (size_t i = 0; i < n; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+
+static int gs_kept_add(gs_report *r, const char *path, int k) {
+    char line[4352];
+    int w = snprintf(line, sizeof line, "SYNC_KEPT path=%s reason=%s\n", path, gs_reason(k));
+    if (w < 0 || (size_t)w >= sizeof line) return -1;
+    if (r->kept_len + (size_t)w + 1 > GS_KEPT_CAP) return -1;
+    char *nb = realloc(r->kept_text, r->kept_len + (size_t)w + 1);
+    if (!nb) return -1;
+    r->kept_text = nb;
+    for (int i = 0; i < w; i++) nb[r->kept_len + (size_t)i] = line[i];
+    r->kept_len += (size_t)w;
+    nb[r->kept_len] = 0;
+    return 0;
+}
+
+/* diff-tree -z --raw --no-abbrev: ":OM NM OSHA NSHA X\0PATH\0" repeated; the header is 98 bytes. */
+static int gs_parse_diff(char *b, size_t n, gs_ent **out, int *cnt, gs_report *r) {
+    size_t i = 0;
+    int cap = 0, c = 0;
+    gs_ent *v = 0;
+    while (i < n) {
+        size_t h = i, p;
+        if (b[h] != ':') { free(v); return gs_fail(r, "diff-tree: bad record", 0); }
+        while (i < n && b[i] != 0) i++;
+        if (i >= n) { free(v); return gs_fail(r, "diff-tree: truncated header", 0); }
+        if (i - h != 98 || b[h + 7] != ' ' || b[h + 14] != ' ' || b[h + 55] != ' ' || b[h + 96] != ' ') {
+            free(v);
+            return gs_fail(r, "diff-tree: unexpected header shape", 0);
+        }
+        p = ++i;
+        while (i < n && b[i] != 0) i++;
+        if (i >= n) { free(v); return gs_fail(r, "diff-tree: truncated path", 0); }
+        i++;
+        if (c >= GS_MAX_PATHS) { free(v); return gs_fail(r, "too many changed paths", 0); }
+        if (c == cap) {
+            int nc = cap ? cap * 2 : 64;
+            gs_ent *nv = realloc(v, (size_t)nc * sizeof *nv);
+            if (!nv) { free(v); return gs_fail(r, "out of memory", 0); }
+            v = nv;
+            cap = nc;
+        }
+        gs_ent *g = &v[c];
+        g->omode = gs_octal(b + h + 1, 6);
+        g->nmode = gs_octal(b + h + 8, 6);
+        for (int k = 0; k < 40; k++) { g->osha[k] = b[h + 15 + k]; g->nsha[k] = b[h + 56 + k]; }
+        g->osha[40] = g->nsha[40] = 0;
+        if (!gs_is_hex40(g->osha) || !gs_is_hex40(g->nsha)) { free(v); return gs_fail(r, "diff-tree: bad sha", 0); }
+        g->path = b + p;   /* NUL terminated inside the diff buffer */
+        g->idx_state = 0;
+        g->kept = 0;
+        c++;
+    }
+    *out = v;
+    *cnt = c;
+    return 0;
+}
+
+/* ls-files -s -z: "MODE SHA STAGE\tPATH\0".  Sets idx_state for entries in [lo, hi). */
+static int gs_scan_index(const char *repo, gs_ent *v, int lo, int hi, gs_report *r) {
+    char **argv = malloc((size_t)(hi - lo + 8) * sizeof *argv);
+    pr_result res;
+    int a = 0;
+    if (!argv) return gs_fail(r, "out of memory", 0);
+    argv[a++] = "git"; argv[a++] = "--literal-pathspecs"; argv[a++] = "ls-files"; argv[a++] = "-s";
+    argv[a++] = "-z"; argv[a++] = "--";
+    for (int i = lo; i < hi; i++) argv[a++] = v[i].path;
+    argv[a] = 0;
+    if (gs_git(repo, argv, &res, r)) { free(argv); return -1; }
+    free(argv);
+    size_t i = 0, n = res.outn;
+    const char *b = res.out;
+    while (i < n) {
+        size_t h = i, tab = 0;
+        while (i < n && b[i] != 0) { if (!tab && b[i] == '\t') tab = i; i++; }
+        if (i >= n || !tab || tab - h < 49) { pr_free(&res); return gs_fail(r, "ls-files: bad record", 0); }
+        const char *path = b + tab + 1;
+        size_t sp1 = h;
+        while (sp1 < tab && b[sp1] != ' ') sp1++;
+        if (sp1 + 43 != tab || b[sp1 + 41] != ' ') { pr_free(&res); return gs_fail(r, "ls-files: bad fields", 0); }
+        unsigned mode = gs_octal(b + h, sp1 - h);
+        const char *sha = b + sp1 + 1;
+        char stage = b[sp1 + 42];
+        for (int k = lo; k < hi; k++) {
+            if (!gs_streq(v[k].path, path)) continue;
+            int same = stage == '0' && v[k].omode != 0 && mode == v[k].omode && gs_memeq(sha, v[k].osha, 40);
+            v[k].idx_state = (v[k].idx_state == 0 && same) ? 1 : 2;
+        }
+        i++;
+    }
+    pr_free(&res);
+    return 0;
+}
+
+static int gs_blob(const char *repo, const char *sha, pr_result *res, gs_report *r) {
+    char s[41];
+    char *argv[] = { "git", "cat-file", "blob", s, 0 };
+    for (int k = 0; k < 41; k++) s[k] = sha[k];
+    if (gs_git(repo, argv, res, r)) return -1;
+    if (res->outn > GS_MAX_BLOB) { pr_free(res); return gs_fail(r, "blob too large: ", sha); }
+    return 0;
+}
+
+static int gs_join(char *dst, size_t cap, const char *repo, const char *path) {
+    int w = snprintf(dst, cap, "%s/%s", repo, path);
+    return (w < 0 || (size_t)w >= cap) ? -1 : 0;
+}
+
+/* Worktree check for one entry: 0 clean, a GS_K_ code to keep, -1 on failure. */
+static int gs_check_wt(const char *repo, gs_ent *g, gs_report *r) {
+    char full[4096];
+    sy_stat_t st;
+    pr_result res;
+    if (gs_join(full, sizeof full, repo, g->path)) return gs_fail(r, "path too long: ", g->path);
+    int l = sy_lstat(full, &st);
+    if (g->omode == 0) {
+        if (l == -2) return 0;
+        if (l != 0) return gs_fail(r, "lstat failed: ", g->path);
+        return GS_K_UNTRACKED;
+    }
+    if (l == -2) return GS_K_DIRTY;
+    if (l != 0) return gs_fail(r, "lstat failed: ", g->path);
+    if (g->omode == 0120000) {
+        char tgt[4096];
+        if (st.kind != 'l') return GS_K_DIRTY;
+        long tn = sy_readlink(full, tgt, (long)sizeof tgt);
+        if (tn < 0) return gs_fail(r, "readlink failed: ", g->path);
+        if (gs_blob(repo, g->osha, &res, r)) return -1;
+        int eq = (size_t)tn == res.outn && gs_memeq(tgt, res.out, res.outn);
+        pr_free(&res);
+        return eq ? 0 : GS_K_DIRTY;
+    }
+    if (st.kind != 'f') return GS_K_DIRTY;
+    if (((st.mode & 0100) != 0) != (g->omode == 0100755)) return GS_K_DIRTY;
+    if ((size_t)st.size > GS_MAX_BLOB) return GS_K_DIRTY;
+    unsigned char *buf = 0;
+    int64_t bn = 0;
+    if (sy_read_file(full, &buf, &bn, (int64_t)GS_MAX_BLOB) != 0) return gs_fail(r, "read failed: ", g->path);
+    if (gs_blob(repo, g->osha, &res, r)) { mm_free(buf); return -1; }
+    int eq = (size_t)bn == res.outn && gs_memeq(buf, res.out, res.outn);
+    pr_free(&res);
+    mm_free(buf);
+    return eq ? 0 : GS_K_DIRTY;
+}
+
+/* Cut p at its last '/', refusing to go at or above the repo root prefix of length floor. */
+static int gs_parent(char *p, size_t floor) {
+    size_t n = 0;
+    while (p[n]) n++;
+    while (n > floor && p[n - 1] != '/') n--;
+    if (n <= floor + 1) return -1;
+    p[n - 1] = 0;
+    return 0;
+}
+
+static void gs_copy(char *dst, size_t cap, const char *src) {
+    size_t k = 0;
+    while (k + 1 < cap && src[k]) { dst[k] = src[k]; k++; }
+    dst[k] = 0;
+}
+
+/* Bring one clean entry's worktree to NEW. */
+static int gs_apply_wt(const char *repo, gs_ent *g, int seq, gs_report *r) {
+    char full[4096], tmp[4200], dir[4096];
+    size_t rl = 0;
+    pr_result res;
+    int bad;
+    while (repo[rl]) rl++;
+    if (gs_join(full, sizeof full, repo, g->path)) return gs_fail(r, "path too long: ", g->path);
+    gs_copy(dir, sizeof dir, full);
+    if (g->nmode == 0) {
+        int u = sy_unlink(full);
+        if (u != 0 && u != -2) return gs_fail(r, "unlink failed: ", g->path);
+        for (int k = 0; k < 4096 && gs_parent(dir, rl) == 0; k++) if (sy_rmdir(dir) != 0) break;
+        return 0;
+    }
+    if (gs_parent(dir, rl) == 0 && sy_mkdir_all(dir, 0755) != 0) return gs_fail(r, "mkdir failed: ", g->path);
+    int w = snprintf(tmp, sizeof tmp, "%s.gitsync-%ld-%d.tmp", full, sy_now_ms(), seq);
+    if (w < 0 || (size_t)w >= sizeof tmp) return gs_fail(r, "temp path too long: ", g->path);
+    if (gs_blob(repo, g->nsha, &res, r)) return -1;
+    if (g->nmode == 0120000) {
+        char tgt[4096];
+        if (res.outn >= sizeof tgt) { pr_free(&res); return gs_fail(r, "symlink target too long: ", g->path); }
+        for (size_t k = 0; k < res.outn; k++) tgt[k] = res.out[k];
+        tgt[res.outn] = 0;
+        bad = sy_symlink(tgt, tmp) != 0;
+    } else {
+        int mode = g->nmode == 0100755 ? 0755 : 0644;
+        bad = sy_write_file(tmp, res.out, (int64_t)res.outn, mode) != 0 || sy_chmod(tmp, mode) != 0;
+    }
+    pr_free(&res);
+    if (bad || sy_rename(tmp, full) != 0) {
+        int u = sy_unlink(tmp);
+        (void)u;
+        return gs_fail(r, "write failed: ", g->path);
+    }
+    return 0;
+}
+
+/* Run "git update-index HEAD_ARGS... PER-ENTRY..." for the clean entries of [lo, hi) chosen by want. */
+static int gs_index_batch(const char *repo, gs_ent *v, int lo, int hi, gs_report *r) {
+    int nadd = 0, nrm = 0;
+    pr_result res;
+    for (int i = lo; i < hi; i++) if (!v[i].kept) { if (v[i].nmode) nadd++; else nrm++; }
+    if (nadd) {
+        char **argv = malloc((size_t)(nadd * 4 + 6) * sizeof *argv);
+        char (*ms)[8] = malloc((size_t)nadd * sizeof *ms);
+        int a = 0, j = 0, t;
+        if (!argv || !ms) { free(argv); free(ms); return gs_fail(r, "out of memory", 0); }
+        argv[a++] = "git"; argv[a++] = "update-index"; argv[a++] = "--add";
+        for (int i = lo; i < hi; i++) {
+            if (v[i].kept || !v[i].nmode) continue;
+            int w = snprintf(ms[j], sizeof ms[j], "%o", v[i].nmode);
+            if (w < 0 || (size_t)w >= sizeof ms[j]) { free(argv); free(ms); return gs_fail(r, "mode format", 0); }
+            argv[a++] = "--cacheinfo"; argv[a++] = ms[j]; argv[a++] = v[i].nsha; argv[a++] = v[i].path;
+            j++;
+        }
+        argv[a] = 0;
+        t = gs_git(repo, argv, &res, r);
+        free(argv);
+        free(ms);
+        if (t) return -1;
+        pr_free(&res);
+        /* refresh the stat data of the written paths (content already equals NEW) */
+        argv = malloc((size_t)(nadd + 6) * sizeof *argv);
+        if (!argv) return gs_fail(r, "out of memory", 0);
+        a = 0;
+        argv[a++] = "git"; argv[a++] = "update-index"; argv[a++] = "--";
+        for (int i = lo; i < hi; i++) if (!v[i].kept && v[i].nmode) argv[a++] = v[i].path;
+        argv[a] = 0;
+        t = gs_git(repo, argv, &res, r);
+        free(argv);
+        if (t) return -1;
+        pr_free(&res);
+    }
+    if (nrm) {
+        char **argv = malloc((size_t)(nrm + 6) * sizeof *argv);
+        int a = 0, t;
+        if (!argv) return gs_fail(r, "out of memory", 0);
+        argv[a++] = "git"; argv[a++] = "update-index"; argv[a++] = "--force-remove"; argv[a++] = "--";
+        for (int i = lo; i < hi; i++) if (!v[i].kept && !v[i].nmode) argv[a++] = v[i].path;
+        argv[a] = 0;
+        t = gs_git(repo, argv, &res, r);
+        free(argv);
+        if (t) return -1;
+        pr_free(&res);
+    }
+    return 0;
+}
+
+int gs_sync(const char *repo, const char *old_head, const char *new_head, gs_report *out) {
+    long t0 = sy_now_ms();
+    pr_result dres;
+    gs_ent *v = 0;
+    int n = 0, rc = -1;
+    out->synced = out->kept = out->changed = 0;
+    out->kept_text = 0;
+    out->kept_len = 0;
+    out->ms = 0;
+    out->why[0] = 0;
+    if (!repo || !old_head || !new_head) return gs_fail(out, "bad arguments", 0);
+    if (gs_streq(old_head, new_head)) { out->ms = sy_now_ms() - t0; return 0; }
+    {
+        char *argv[] = { "git", "diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-abbrev",
+                         (char *)old_head, (char *)new_head, 0 };
+        if (gs_git(repo, argv, &dres, out)) return -1;
+    }
+    if (gs_parse_diff(dres.out, dres.outn, &v, &n, out)) { pr_free(&dres); return -1; }
+    out->changed = n;
+    for (int lo = 0; lo < n; lo += GS_BATCH) {
+        int hi = lo + GS_BATCH < n ? lo + GS_BATCH : n;
+        if (gs_scan_index(repo, v, lo, hi, out)) goto done;
+        for (int i = lo; i < hi; i++) {
+            gs_ent *g = &v[i];
+            if (g->omode == 0160000 || g->nmode == 0160000) g->kept = GS_K_GITLINK;
+            else if (g->idx_state == 2 || (g->idx_state == 0 && g->omode != 0)) g->kept = GS_K_STAGED;
+            else {
+                int k = gs_check_wt(repo, g, out);
+                if (k < 0) goto done;
+                g->kept = k;
+            }
+            if (g->kept) {
+                out->kept++;
+                if (gs_kept_add(out, g->path, g->kept)) { gs_fail(out, "kept report overflow", 0); goto done; }
+                continue;
+            }
+            if (gs_apply_wt(repo, g, i, out)) goto done;
+            out->synced++;
+        }
+        if (gs_index_batch(repo, v, lo, hi, out)) goto done;
+    }
+    rc = 0;
+done:
+    free(v);
+    pr_free(&dres);
+    out->ms = sy_now_ms() - t0;
+    return rc;
+}
