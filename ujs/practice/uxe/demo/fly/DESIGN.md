@@ -20,6 +20,7 @@ worktree `.claude/worktrees/ujs`。
 | wasm | `fly.wasm` | 含 custom 段 `ujsmeta`;现编可能因顶层 construct 失败 |
 | 页 | `index.html` + `fly-b64.js` + `../host1-runtime.js` | 金走 host1Boot;互动物理在 Host |
 | 验收 | `?auto=1` | wasm 金=3868 则 `FLY_OK`;金不可用但 GL 跑满则 `FLY_GL_OK` |
+无世界表不发明岛雾;gold i64 3868 -> FLY_OK。
 
 GPU/输入停在页上(UXE Host 原则)。InstanceCloud 仅 xyz/scale/yaw;滚转并入 yaw 视觉,无独立 pitch/roll 缓冲。
 岛云 billboard,船全姿态。
