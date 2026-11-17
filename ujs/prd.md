@@ -100,7 +100,7 @@
 | 号 | 面 | 事实 | 排期 |
 |---|---|---|---|
 | G1 | UXE 提交 | `compiler_min` 导出 `host_set_global`/`host_list_get`/`run_step`;无 `host_gpu_submit`。现页 JS 组包。W3 | 最高;先于放宽容量 |
-| G2 | 容量 | `seed/stage0/compiler_min.cx:465` `MAXC=16384 MAXL=128 MAXG=64 MAXN=32 MAXFN=8 MAXSDATA=8192`。未逐 demo 量化 | 先表再改常量;跟 G1 |
+| G2 | 容量 | `:465` MAXC=16384 MAXL=128 MAXG=64 MAXN=32 MAXFN=8 MAXSDATA=8192。D1-D5 `.ujs` 无 `function`,未触 MAXFN | 先表再改常量;跟 G1 |
 | G3 | 数学 | 同文件无 sqrt/sin/cos;`:991` `f64 mod` 拒绝。旋转在页 JS | 定:核 f64 内建或合同写明归 Host |
 | G4 | 步进 | `run_step_body` 调 main(func 1);顶层 let 每帧清。v0.0.8 文字未兑现 | 持久 globals/state 段,独立于 0.0.9 ujsmeta |
 | G5 | 产物 | `build-ape` 五切片已实跑;批次 `ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore | 检查已绑;win/arm64 另槽 |
