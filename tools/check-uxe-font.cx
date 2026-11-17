@@ -1,5 +1,5 @@
 #pragma unisa use chrome_dom
-/* tools/check-uxe-font.cx -- A1I0 5x7 vs 页 bits.
+/* tools/check-uxe-font.cx -- 82x30 整图 vs 5x7 展开,外框全 0.
  */
 static int failed;
 static void ck(int ok, const char *lab) {
@@ -19,7 +19,8 @@ int main(void) {
     char *av[12];
     char *out = 0;
     size_t on = 0;
-    int n, i, rc, exp[140], got[140], ng = 0, match = 0, gi, x, y, k;
+    int n, i, rc, W = 82, H = 30, s = 4, pad = 1, ng = 0, match = 0, gi, x, y, px, py, k, border = 1, cell;
+    int *exp, *got;
     const char *p;
     if (!getcwd(cwd, sizeof cwd)) return 2;
     n = 0;
@@ -27,11 +28,20 @@ int main(void) {
     for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
     for (i = 0; suf[i] && n < 640; i++) url[n++] = suf[i];
     url[n] = 0;
-    k = 0;
-    for (y = 0; y < 7; y++)
-        for (gi = 0; gi < 4; gi++)
-            for (x = 0; x < 5; x++)
-                exp[k++] = (col[gi][x] >> y) & 1;
+    exp = (int *)malloc((size_t)W * H * sizeof(int));
+    got = (int *)malloc((size_t)W * H * sizeof(int));
+    if (!exp || !got) return 2;
+    for (i = 0; i < W * H; i++) exp[i] = 0;
+    for (gi = 0; gi < 4; gi++)
+        for (x = 0; x < 5; x++)
+            for (y = 0; y < 7; y++) {
+                if (!((col[gi][x] >> y) & 1)) continue;
+                for (py = 0; py < s; py++)
+                    for (px = 0; px < s; px++) {
+                        k = (pad + y * s + py) * W + (pad + gi * 5 * s + x * s + px);
+                        if (k >= 0 && k < W * H) exp[k] = 1;
+                    }
+            }
     av[0] = "/usr/bin/google-chrome";
     av[1] = "--headless=new";
     av[2] = "--enable-unsafe-swiftshader";
@@ -44,21 +54,33 @@ int main(void) {
     av[9] = url;
     av[10] = 0;
     rc = cx_runv_timeout(av, 25, &out, &on);
-    if (rc == 127) { if (out) free(out); printf("FONT_UNMEASURED\n"); return 2; }
+    if (rc == 127) { if (out) free(out); free(exp); free(got); printf("FONT_UNMEASURED\n"); return 2; }
     p = out ? strstr(out, "\"bits\":[") : 0;
     if (p) {
         p += 8;
-        while (*p && ng < 140) {
+        while (*p && ng < W * H) {
             if (*p == '0' || *p == '1') got[ng++] = *p - '0';
             if (*p == ']') break;
             p++;
         }
     }
     if (out) free(out);
-    ck(ng == 140, "nbits");
-    match = (ng == 140);
-    if (match) for (i = 0; i < 140; i++) if (got[i] != exp[i]) match = 0;
+    ck(ng == W * H, "nbits");
+    match = (ng == W * H);
+    if (match) for (i = 0; i < W * H; i++) if (got[i] != exp[i]) match = 0;
     ck(match, "bits-eq");
-    printf("CHECK_UXE_FONT\tng=%d\tmatch=%d\tfailed=%d\n", ng, match, failed);
+    if (ng == W * H) {
+        for (x = 0; x < W; x++) {
+            if (got[x] || got[(H - 1) * W + x]) border = 0;
+        }
+        for (y = 0; y < H; y++) {
+            if (got[y * W] || got[y * W + (W - 1)]) border = 0;
+        }
+    } else border = 0;
+    ck(border, "border0");
+    cell = 0;
+    for (i = 0; i < W * H; i++) if (exp[i]) cell++;
+    printf("CHECK_UXE_FONT\tng=%d\tmatch=%d\tcell=%d\tfailed=%d\n", ng, match, cell, failed);
+    free(exp); free(got);
     return failed ? 1 : 0;
 }
