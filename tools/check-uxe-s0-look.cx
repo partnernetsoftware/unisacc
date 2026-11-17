@@ -1,11 +1,16 @@
 #pragma unisa use chrome_dom
-/* tools/check-uxe-s0-look.cx -- 80x45 块均值/标准差/边缘 vs 概念稿 tsv.
- * 阈值: 概念自比 mae_mean<3 mae_std<3; 当前矩形 UXE 必须 mae_mean>=18 (红夹具).
- * sh ./unisacc.com tools/check-uxe-s0-look.cx --
+/* tools/check-uxe-s0-look.cx -- 80x45 块 vs 概念稿.
+ * sh ./unisacc.com tools/check-uxe-s0-look.cx -- [--report]
+ * --report: 按 s0-elements 内块与无元素区拆 mae,按误差占比排序.
  */
+
 static int failed;
+static int do_report;
 static int cmr[3600], cmg[3600], cmb[3600], cstd[3600], ced[3600];
 static int umr[3600], umg[3600], umb[3600], ustd[3600], ued[3600];
+static char eid[16][32];
+static int eix[16], eiy[16], eiw[16], eih[16], nels;
+
 static void ck(int ok, const char *lab) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
     if (!ok) failed++;
@@ -74,15 +79,75 @@ static void mae5(int *ar, int *ag, int *ab, int *as, int *ae,
     *os = (int)(ss / n);
     *oe = (int)(se / n);
 }
-int main(void) {
+static int load_els(void) {
+    FILE *f = fopen("ujs/plans/demo-v2/look-dev/s0-elements.tsv", "r");
+    char line[256];
+    nels = 0;
+    if (!f) return -1;
+    if (!fgets(line, sizeof line, f)) { fclose(f); return -1; }
+    while (fgets(line, sizeof line, f) && nels < 16) {
+        char *s = line;
+        int k = 0;
+        while (*s && *s != '\t' && k < 31) { eid[nels][k++] = *s++; }
+        eid[nels][k] = 0;
+        if (!eid[nels][0]) continue;
+        if (*s == '\t') s++;
+        eix[nels] = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        eiy[nels] = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        eiw[nels] = atoi(s); while (*s && *s != '\t') s++; if (*s == '\t') s++;
+        eih[nels] = atoi(s);
+        nels++;
+    }
+    fclose(f);
+    return nels;
+}
+static int blk_hits(int bx, int by, int x, int y, int w, int h) {
+    int x0 = bx * 16, y0 = by * 16, x1 = x0 + 16, y1 = y0 + 16;
+    int ex1 = x + w, ey1 = y + h;
+    return !(x1 <= x || x0 >= ex1 || y1 <= y || y0 >= ey1);
+}
+static void report_share(void) {
+    long tot = 0, esum[17], estd[17];
+    int nblk[17], i, b, e, bx, by, ord[17], t;
+    for (i = 0; i < 17; i++) { esum[i] = 0; estd[i] = 0; nblk[i] = 0; }
+    for (b = 0; b < 3600; b++) {
+        bx = b % 80; by = b / 80;
+        e = -1;
+        for (i = 0; i < nels; i++) if (blk_hits(bx, by, eix[i], eiy[i], eiw[i], eih[i])) { e = i; break; }
+        if (e < 0) e = nels;
+        esum[e] += abs(cmr[b] - umr[b]) + abs(cmg[b] - umg[b]) + abs(cmb[b] - umb[b]);
+        estd[e] += abs(cstd[b] - ustd[b]);
+        nblk[e]++;
+        tot += abs(cmr[b] - umr[b]) + abs(cmg[b] - umg[b]) + abs(cmb[b] - umb[b]);
+    }
+    for (i = 0; i <= nels; i++) ord[i] = i;
+    for (i = 0; i < nels; i++) for (t = 0; t < nels - i; t++) if (esum[ord[t]] < esum[ord[t + 1]]) {
+        int z = ord[t]; ord[t] = ord[t + 1]; ord[t + 1] = z;
+    }
+    printf("REPORT\tid\tnblk\tmae_mean\tmae_std\tshare_pct\terr_sum\n");
+    for (i = 0; i <= nels; i++) {
+        int id = ord[i];
+        const char *name = (id == nels) ? "rest" : eid[id];
+        int mm = nblk[id] ? (int)(esum[id] / (nblk[id] * 3)) : 0;
+        int ms = nblk[id] ? (int)(estd[id] / nblk[id]) : 0;
+        int pct = tot ? (int)(esum[id] * 100 / tot) : 0;
+        printf("ROW\t%s\t%d\t%d\t%d\t%d\t%ld\n", name, nblk[id], mm, ms, pct, esum[id]);
+    }
+    printf("TOTAL\terr_sum=%ld\n", tot);
+}
+
+int main(int argc, char **argv) {
+
     char cwd[512], u1[800], u2[820];
     char *out = 0;
     size_t on = 0;
     const char *pre = "file://";
     int i, n, nc, nu, mae_m, mae_s, mae_e, self_m, self_s, self_e;
+    for (i = 1; i < argc; i++) if (argv[i][0] == '-' && argv[i][2] == 'r') do_report = 1;
     nc = load_tsv("ujs/plans/demo-v2/look-dev/s0-look-concept.tsv");
     ck(nc == 3600, "tsv-3600");
     if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (!do_report) {
     n = 0;
     while (pre[n]) { u1[n] = pre[n]; n++; }
     for (i = 0; cwd[i] && n < 500; i++) u1[n++] = cwd[i];
@@ -98,6 +163,8 @@ int main(void) {
     mae5(cmr, cmg, cmb, cstd, ced, umr, umg, umb, ustd, ued, 3600, &self_m, &self_s, &self_e);
     printf("SELF\tmae_mean=%d\tmae_std=%d\tmae_edge=%d\n", self_m, self_s, self_e);
     ck(self_m < 3 && self_s < 3, "self-mae");
+    }
+
     n = 0;
     while (pre[n]) { u2[n] = pre[n]; n++; }
     for (i = 0; cwd[i] && n < 500; i++) u2[n++] = cwd[i];
@@ -115,8 +182,12 @@ int main(void) {
     printf("UXE\tmae_mean=%d\tmae_std=%d\tmae_edge=%d\n", mae_m, mae_s, mae_e);
     printf("FAIL\tsimilarity\tmae_mean=%d\tneed<12\tmae_std=%d\tneed<8\n", mae_m, mae_s);
     ck(mae_m >= 12, "red-fixture-unlike");
-
+    if (do_report) {
+        ck(load_els() > 0, "els");
+        report_share();
+    }
     printf("CHECK_UXE_S0_LOOK\tfailed=%d\tuxe_mae_mean=%d\tuxe_mae_std=%d\n", failed, mae_m, mae_s);
+
     return failed ? 1 : 0;
 }
 
