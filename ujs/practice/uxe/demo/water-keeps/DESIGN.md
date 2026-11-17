@@ -10,3 +10,4 @@ worktree `.claude/worktrees/ujs`。
 
 缺口:列表不能超过 64;无网格;舵仍在 Host(无每帧 import)。
 两岸 32 灯 MESH_OCTA billboard。
+前 128 岸点+灯,末 8 pal,WATER_OK;Host 不自造房屋网格。
