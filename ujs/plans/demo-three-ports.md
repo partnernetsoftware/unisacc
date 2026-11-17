@@ -71,9 +71,9 @@ three.module、原作 GLB/音频、抬 cxraw/cxtrunc、改 host1-pass 28 行、�
 
 ## 6. 下一动作
 
-W2 三表核已步进(water dist/ink cam/oneshot ang)。fly 金 3868 与 `yaw=yaw+dt` 并存,Host 仍积分船位。P2 未验收。B 片单未锁。
+W2:water/ink/oneshot 舵 `turn` 进核;fly `yaw+=turn` 金仍 3868,Host 仍积分船位。P2 未验收。B 片单未锁。
 
 ## 7. 进度
 
-Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。water/ink/oneshot/fly 均调 step。不称替代 three。
+Host 已按表画 water128 岸+灯、ink 三层 x,z 折线、oneshot 6xyz;fly 无表不发明岛。四页已接 `host_gpu_submit`(失败回退)。`host1Boot.step` 已入库。三表核+fly 均调 step。不称替代 three。
 
