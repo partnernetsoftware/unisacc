@@ -3,6 +3,8 @@
  *   sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit|daily [--date YYYY-MM-DD] [--max-steps N] [--step-s S] [--fake SCRIPT]
  *
  * tier: commit -> init 带 "--tier commit";daily -> init 不带 --tier(s9-shards 只认 commit,缺省即全层)。
+ * Real execution admits only canonical absolute RUN under ROOT/out or TMPDIR/unisacc-affected-;
+ * invalid output is refused before construction or preparation state. --output-controls tests this contract.
  *   sh ./unisacc.com tools/s9-nightly.cx -- ROOT --resume RUN [--tier T] [--date D] [--max-steps N] [--step-s S] [--fake SCRIPT]
  *
  * --resume RUN: 沿用已 init+prepare 的 RUN(须含 session.tsv),跳过 build/init/prepare,
@@ -1280,7 +1282,71 @@ static int steps_par(const char *run, int par, long wall_ms) {
     last_ms = ms;
     return rc;
 }
+static int output_refuse(char *reason,size_t cap,const char *kind,int code) {
+    if(cx_fmt(reason,cap,"%s rc=%d",kind,code)&&cap)reason[0]=0; return -1;
+}
+/* Match run-batch's output domains before creating any preparation state. */
+static int output_ready(const char *repo,const char *run,char *reason,size_t cap) {
+    char parent[4400],canonical[4400],path[4400],base[4400],tmp[4400],prefix[4400];
+    sy_stat_t st; int rc; long n,runlen;
+    reason[0]=0;
+    if(!run||run[0]!='/')return output_refuse(reason,cap,"output-session-not-absolute",-EINVAL);
+    runlen=tx_len(run,sizeof parent);if(runlen<0)return output_refuse(reason,cap,"output-session-bound",-ENAMETOOLONG);
+    long slash=tx_rchr(run,runlen,'/');
+    if(slash<=0||!run[slash+1]||tx_eqz(run+slash+1,".")||tx_eqz(run+slash+1,".."))return output_refuse(reason,cap,"output-session-name",-EINVAL);
+    n=slash;if(tx_copy(parent,sizeof parent,run,n))return output_refuse(reason,cap,"output-parent-bound",-ENAMETOOLONG);
+    rc=sy_realpath(parent,canonical,sizeof canonical);
+    if(rc<0)return output_refuse(reason,cap,"output-parent-unavailable",rc);
+    if(!tx_eqz(parent,canonical))return output_refuse(reason,cap,"output-parent-not-canonical",-EINVAL);
+    rc=sy_lstat(canonical,&st);if(rc)return output_refuse(reason,cap,"output-parent-stat",rc);
+    if(st.kind!='d')return output_refuse(reason,cap,"output-parent-not-directory",-ENOTDIR);
+    if(cx_fmt(path,sizeof path,"%s/out",repo))return output_refuse(reason,cap,"output-root-bound",-ENAMETOOLONG);
+    rc=sy_realpath(path,base,sizeof base);
+    if(rc>=0){
+        rc=sy_lstat(base,&st);if(rc)return output_refuse(reason,cap,"output-root-stat",rc);
+        if(st.kind!='d')return output_refuse(reason,cap,"output-root-not-directory",-ENOTDIR);
+        n=tx_len(base,sizeof base);if(n>=0&&tx_prefix(run,runlen,base,n)&&run[n]=='/')return 0;
+    }else if(rc!=-ENOENT)return output_refuse(reason,cap,"output-root-unavailable",rc);
+    rc=sy_realpath(sy_tmpdir(),tmp,sizeof tmp);
+    if(rc<0)return output_refuse(reason,cap,"output-temp-unavailable",rc);
+    if(cx_fmt(prefix,sizeof prefix,"%s/unisacc-affected-",tmp))return output_refuse(reason,cap,"output-temp-bound",-ENAMETOOLONG);
+    n=tx_len(prefix,sizeof prefix);if(n>=0&&tx_prefix(run,runlen,prefix,n))return 0;
+    return output_refuse(reason,cap,"output-outside-root-out-or-affected-temp",-EPERM);
+}
+static void output_ck(int ok,const char *name,int *bad){
+    if(!ok)(*bad)++;printf("%s\toutput.%s\n",ok?"PASS":"FAIL",name);
+}
+static int output_controls(void){
+    char td[4400],allowed[4400],repo[4400],alias[4400],physical[4400],outside[4400],p[4400],q[4400],w[500];int bad=0;
+    if(sy_mkdtemp(sy_tmpdir(),"s9-output-check-",td,sizeof td)<0||sy_realpath(td,td,sizeof td)<0||
+       sy_mkdtemp(sy_tmpdir(),"unisacc-affected-output-",allowed,sizeof allowed)<0||sy_realpath(allowed,allowed,sizeof allowed)<0)return 2;
+    const char *dirs[]={"root","root/out","root/outside","outside","root-link","physical","root-file"};
+    for(int i=0;i<7;i++)if(cx_fmt(p,sizeof p,"%s/%s",td,dirs[i])||sy_mkdir(p,0700))return 2;
+    if(cx_fmt(repo,sizeof repo,"%s/root",td)||cx_fmt(alias,sizeof alias,"%s/root-link",td)||cx_fmt(physical,sizeof physical,"%s/physical",td)||cx_fmt(outside,sizeof outside,"%s/outside",td))return 2;
+    if(cx_fmt(p,sizeof p,"%s/out/run",repo))return 2;
+    output_ck(!output_ready(repo,p,w,sizeof w),"project-output",&bad);
+    if(cx_fmt(p,sizeof p,"%s/run",allowed))return 2;
+    output_ck(!output_ready(repo,p,w,sizeof w),"affected-temp",&bad);
+    output_ck(output_ready(repo,"relative-output",w,sizeof w)!=0,"relative-refused",&bad);
+    if(cx_fmt(p,sizeof p,"%s/outside/run",repo))return 2;
+    output_ck(output_ready(repo,p,w,sizeof w)!=0,"output-prefix-collision-refused",&bad);
+    if(cx_fmt(p,sizeof p,"%s/run",outside))return 2;
+    output_ck(output_ready(repo,p,w,sizeof w)!=0,"arbitrary-temp-refused",&bad);
+    if(cx_fmt(p,sizeof p,"%s/out/../outside/run",repo))return 2;
+    output_ck(output_ready(repo,p,w,sizeof w)!=0,"parent-traversal-refused",&bad);
+    if(cx_fmt(q,sizeof q,"%s/out/escape",repo)||sy_symlink(outside,q)||cx_fmt(p,sizeof p,"%s/run",q))return 2;
+    output_ck(output_ready(repo,p,w,sizeof w)!=0,"symlink-parent-refused",&bad);
+    if(cx_fmt(q,sizeof q,"%s/out",alias)||sy_symlink(physical,q)||cx_fmt(p,sizeof p,"%s/run",physical))return 2;
+    output_ck(!output_ready(alias,p,w,sizeof w),"explicit-output-alias",&bad);
+    if(cx_fmt(q,sizeof q,"%s/regular",td)||cx_write(q,"x",1)||cx_fmt(p,sizeof p,"%s/run",q))return 2;
+    output_ck(output_ready(repo,p,w,sizeof w)!=0&&tx_contains(w,tx_len(w,sizeof w),"not-directory",13),"file-parent-is-not-missing",&bad);
+    if(cx_fmt(q,sizeof q,"%s/root-file/out",td)||cx_write(q,"x",1)||cx_fmt(p,sizeof p,"%s/run",allowed)||cx_fmt(q,sizeof q,"%s/root-file",td))return 2;
+    output_ck(output_ready(q,p,w,sizeof w)!=0&&tx_contains(w,tx_len(w,sizeof w),"not-directory",13),"file-output-root-refused",&bad);
+    if(!bad&&(cx_rmtree(td)||cx_rmtree(allowed)))return 2;
+    printf("S9_OUTPUT_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
+}
 int main(int argc, char **argv) {
+    if(argc==2&&tx_eqz(argv[1],"--output-controls"))return output_controls();
     if(argc==2&&!strcmp(argv[1],"--ri-controls"))return ri_controls();
     if(argc==2&&!strcmp(argv[1],"--map-controls"))return map_controls();
     const char *run = 0, *tier = "commit", *date = 0;
@@ -1351,6 +1417,7 @@ int main(int argc, char **argv) {
     if (steps_par_n && phase != 2) die("par", "only with --phase steps");
     if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) die("tier", tier);
     if (daily_no_candidate && strcmp(tier, "daily")) die("scope", "--daily-no-candidate requires --tier daily");
+    if(!fake&&output_ready(root,run,why,sizeof why))die("REFUSE output",why);
     if (!date) {
         long ws = sy_wall_s();
         if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");
