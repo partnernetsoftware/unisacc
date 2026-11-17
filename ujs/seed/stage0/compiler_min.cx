@@ -468,7 +468,7 @@ enum {
   OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST, OP_STRADD,
   OP_I2F, OP_I2F_R, OP_F2I,
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
-  OP_RET, OP_FRET, OP_HRET
+  OP_RET, OP_FRET, OP_HRET, OP_GPU
 };
 enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
 typedef struct { uint8_t op; int64_t a; } Ins;
@@ -908,6 +908,28 @@ static int pprim(Lex *L, Prog *P) {
       if (!emit(P, OP_MKLIST_DYN, 0)) return 0;
       P->list_elem_ty = TY_I64;
       return TY_LIST;
+    }
+    {
+      const char *t = L->id;
+      const char *k = "host_gpu_submit";
+      int hi = 0;
+      while (k[hi] && t[hi] == k[hi]) hi++;
+      if (!k[hi] && !t[hi]) {
+        int a, b;
+        next(L);
+        if (!expect(L, T_LP, P, "gpu (")) return 0;
+        a = pexpr(L, P); if (!a) return 0;
+        if (a != TY_I64) { P->err = "gpu ptr"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_COMMA, P, "gpu ,")) return 0;
+        b = pexpr(L, P); if (!b) return 0;
+        if (b != TY_I64) { P->err = "gpu len"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_RP, P, "gpu )")) return 0;
+        if (!emit(P, OP_GPU, 0)) return 0;
+        if (!emit(P, OP_CONST, 0)) return 0;
+        return TY_I64;
+      }
     }
     {
       char nbuf[MAXN];
@@ -1409,6 +1431,25 @@ static int pstmt(Lex *L, Prog *P) {
       return expect(L, T_SEMI, P, "expected ;");
     }
     {
+      const char *k = "host_gpu_submit";
+      int hi = 0;
+      while (k[hi] && name[hi] == k[hi]) hi++;
+      if (!k[hi] && !name[hi] && L->tok == T_LP) {
+        int a, b;
+        next(L);
+        a = pexpr(L, P); if (!a) return 0;
+        if (a != TY_I64) { P->err = "gpu ptr"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_COMMA, P, "gpu ,")) return 0;
+        b = pexpr(L, P); if (!b) return 0;
+        if (b != TY_I64) { P->err = "gpu len"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+        if (!expect(L, T_RP, P, "gpu )")) return 0;
+        if (!emit(P, OP_GPU, 0)) return 0;
+        return expect(L, T_SEMI, P, "expected ;");
+      }
+    }
+    {
       int plus_eq = 0;
       int is_g = 0;
       int i, ty;
@@ -1653,7 +1694,11 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x0f)) return 0;
       break;
     case OP_HRET:
-      if (!bu8(c, 0x0f)) return 0; /* handle already on stack */
+      if (!bu8(c, 0x0f)) return 0;
+      break;
+    case OP_GPU:
+      if (!g_need_gpu) return 0;
+      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
       break;
     default: return 0;
     }
@@ -2229,8 +2274,8 @@ static int str_ptr_body(Buf *c) {
 
 
 static int str_cat_body(Buf *c) {
-  static const uint8_t body[] = {
-    1, 5, 0x7f, 0x20, 0x00, 0x10, 0x0a, 0x21, 0x02, 0x20, 0x01, 0x10, 0x0a, 0x21, 0x03,
+  /* After locals: call defined len_of (idx 10). wcall adds import offset. */
+  static const uint8_t rest[] = {
     0x41, 0x00, 0x28, 0x02, 0x00, 0x21, 0x06, 0x20, 0x06, 0x45, 0x04, 0x40, 0x41, 0x80, 0x20,
     0x21, 0x06, 0x0b, 0x20, 0x06, 0x21, 0x04, 0x20, 0x04, 0x41, 0x04, 0x3a, 0x00, 0x00,
     0x20, 0x04, 0x41, 0x04, 0x6a, 0x20, 0x02, 0x20, 0x03, 0x6a, 0x36, 0x02, 0x00, 0x41, 0x00,
@@ -2244,10 +2289,15 @@ static int str_cat_body(Buf *c) {
     0x6a, 0x6a, 0x6a, 0x41, 0x07, 0x6a, 0x41, 0x78, 0x71, 0x21, 0x06, 0x41, 0x00, 0x20, 0x06,
     0x36, 0x02, 0x00, 0x20, 0x04, 0x0b
   };
-  if (!braw(c, body, (uint32_t)sizeof body)) return 0;
-  if (g_need_gpu) { bd(c)[6]++; bd(c)[12]++; }
-  return 1;
- }
+  if (!bleu(c, 1) || !bleu(c, 5) || !bu8(c, 0x7f)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
+  if (!wcall(c, 10)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 2)) return 0;
+  if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
+  if (!wcall(c, 10)) return 0;
+  if (!bu8(c, 0x21) || !bleu(c, 3)) return 0;
+  return braw(c, rest, (uint32_t)sizeof rest);
+}
 
 static int host_dict_set_body(Buf *c) {
   /* (param h i k v) — emit_wasm / run_step order */
@@ -2477,9 +2527,9 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_bump = 64;
   g_need_gpu = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
-  if (src_len > 100000) { set_err("src too large"); return 1; }
+  if (src_len > 100000) { g_need_gpu = 0; set_err("src too large"); return 1; }
 #ifdef UJS_HOST
-  if (src_ptr + src_len > sizeof(g_heap)) { set_err("bad src"); return 1; }
+  if (src_ptr + src_len > sizeof(g_heap)) { g_need_gpu = 0; set_err("bad src"); return 1; }
   const char *src = (const char *)(g_heap + src_ptr);
 #else
   const char *src = (const char *)(uintptr_t)src_ptr;
@@ -2490,14 +2540,15 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
 #ifdef UJS_HOST
-  if (parse_net_top_is_bad(L.tok)) { set_err("parse-net"); return 1; }
+  if (parse_net_top_is_bad(L.tok)) { g_need_gpu = 0; set_err("parse-net"); return 1; }
 #endif
   while (L.tok != T_EOF) {
-    if (!pstmt(&L, &P)) { set_err(P.err ? P.err : "parse"); return 1; }
+    if (!pstmt(&L, &P)) { g_need_gpu = 0; set_err(P.err ? P.err : "parse"); return 1; }
   }
   Buf mod;
-  if (!build_mod(&P, &mod)) { set_err("emit"); return 1; }
+  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err("emit"); return 1; }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
-  if (!write_meta(&P)) { set_err("meta"); return 1; }
+  if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
+  g_need_gpu = 0;
   return 0;
 }
