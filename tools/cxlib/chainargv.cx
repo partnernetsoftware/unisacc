@@ -214,6 +214,11 @@ static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  if(!at_eq(a,call+1,"(")||(other&&(!at_id(a->t[call].s[0])||!at_eq(a,call+3,","))))continue;
  int e=at_end(a,call+1,"(",")");if(e<0)continue;
  int comma=at_find(a,call+2,e,",");if(comma<0||comma+1>=e)continue;const char *name=a->t[comma+1].s;
+ /* A scalar table element is not an argv pointer escaping to a wrapper. */
+ if(other&&at_eq(a,comma+2,"[")){
+ int scalar_end=at_end(a,comma+2,"[","]");
+ if(scalar_end>=0&&(at_eq(a,scalar_end+1,",")||at_eq(a,scalar_end+1,")")))continue;
+ }
  if(at_eq(a,comma+1,"char")||at_eq(a,comma+1,"args"))continue;
  /* Locate the lexical declaration of precisely this array. */
  int decl=-1;for(int j=call-1;j>=2;j--)if(at_eq(a,j,name)&&at_eq(a,j+1,"[")&&at_eq(a,j-1,"*")&&at_eq(a,j-2,"char")){decl=j;break;}
@@ -403,7 +408,8 @@ int ca_forwarding_envelope(const char *source){void *a=ca_tokens(source);if(!a)r
  * const char *alias=table[index] -> argv[0]=alias。枚举每个命令核合同，不给alias通用角色。 */
 static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,struct at_arg *commands,int capacity){
  while(lo<hi&&ca_token_is(a,lo,"(")){int close=ca_token_end(a,lo);if(close<0||close>=hi)return 0;lo=close+1;}
- if(hi!=lo+1||ca_token_kind(a,lo)!=1)return 0;const char *alias=ca_token_text(a,lo);
+ int direct=hi==lo+4&&ca_token_is(a,lo+1,"[")&&ca_token_is(a,lo+3,"]");
+ if((hi!=lo+1&&!direct)||ca_token_kind(a,lo)!=1)return 0;const char *alias=ca_token_text(a,lo);
  int loop=-1,body=-1;
  for(int i=0;i<decl;i++)if(ca_token_is(a,i,"for")&&ca_token_is(a,i+1,"(")){
  int close=ca_token_end(a,i+1);if(close<0||!ca_token_is(a,close+1,"{"))continue;
@@ -418,12 +424,13 @@ static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,st
  const char *bound=ca_token_text(a,s1+3);for(int i=0;bound[i];i++)if(bound[i]<'0'||bound[i]>'9')return 0;
  int count=atoi(bound);if(count<1||count>capacity||close-s2!=3||!ca_token_is(a,s2+1,index)||!ca_token_is(a,s2+2,"++"))return 0;
  int binding=-1,table_use=-1;
- for(int i=body+1;i<decl;i++)if(ca_token_is(a,i,alias)&&ca_token_is(a,i+1,"=")){
+ if(direct){if(!at_env_index(a,lo,hi,alias,index))return 0;table_use=lo;}
+ else for(int i=body+1;i<decl;i++)if(ca_token_is(a,i,alias)&&ca_token_is(a,i+1,"=")){
  if(binding>=0||!ca_token_is(a,i-1,"*")||!ca_token_is(a,i-2,"char")||!ca_token_is(a,i-3,"const"))return 0;
  int end=ca_token_end(a,i+3);if(!ca_token_is(a,i+3,"[")||end<0||!at_env_index(a,i+2,end+1,ca_token_text(a,i+2),index)||!ca_token_is(a,end+1,";"))return 0;
  binding=i;table_use=i+2;
  }
- if(binding<0)return 0;const char *table=ca_token_text(a,table_use);int table_decl=-1,table_end=-1;
+ if(!direct&&binding<0)return 0;const char *table=ca_token_text(a,table_use);int table_decl=-1,table_end=-1;
  for(int i=3;i<loop;i++)if(ca_token_is(a,i,table)&&ca_token_is(a,i+1,"[")&&ca_token_is(a,i-1,"*")&&ca_token_is(a,i-2,"char")&&ca_token_is(a,i-3,"const")){
  if(table_decl>=0)return 0;int sub=ca_token_end(a,i+1);if(sub<0||sub!=i+2||!ca_token_is(a,sub+1,"=")||!ca_token_is(a,sub+2,"{"))return 0;
  table_decl=i;int b=sub+2;table_end=ca_token_end(a,b);if(table_end<0)return 0;int n=0;
@@ -432,10 +439,20 @@ static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,st
  if(n!=count)return 0;
  }
  if(table_decl<0)return 0;
- for(int i=table_end+1;i<call;i++)if(ca_token_is(a,i,table)&&i!=table_use)return 0;
- for(int i=body+1;i<call;i++){
+ int proof_end=direct?ca_token_end(a,body):call;if(proof_end<0)return 0;
+ for(int i=table_end+1;i<proof_end;i++)if(ca_token_is(a,i,table)&&i!=table_use){
+ if(!direct)return 0;
+ int sub=ca_token_end(a,i+1);if(!ca_token_is(a,i+1,"[")||sub!=i+3||ca_token_is(a,i-1,"&"))return 0;
+ if(!ca_token_is(a,sub+1,",")&&!ca_token_is(a,sub+1,")")&&!ca_token_is(a,sub+1,";"))return 0;
+ if(!ca_token_is(a,i+2,index)){
+ const char *q=ca_token_text(a,i+2);int value=0;if(!*q)return 0;
+ for(int z=0;q[z];z++){if(q[z]<'0'||q[z]>'9'||value>=count)return 0;value=value*10+q[z]-'0';}if(value>=count)return 0;
+ }
+ }
+ for(int i=body+1;i<proof_end;i++){
  if(ca_token_is(a,i,index)&&(ca_token_is(a,i+1,"=")||ca_token_is(a,i+1,"++")||ca_token_is(a,i+1,"-")))return 0;
- if(i>binding&&ca_token_is(a,i,alias)&&(ca_token_is(a,i+1,"=")||ca_token_is(a,i+1,"++")))return 0;
+ if(direct&&ca_token_is(a,i,index)&&(ca_token_is(a,i-1,"&")||ca_token_is(a,i-1,"int")||ca_token_is(a,i-1,"++")||ca_token_is(a,i-1,"-")))return 0;
+ if(!direct&&i>binding&&ca_token_is(a,i,alias)&&(ca_token_is(a,i+1,"=")||ca_token_is(a,i+1,"++")))return 0;
  }
  return count;
 }
