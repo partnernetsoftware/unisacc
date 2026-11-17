@@ -2,9 +2,8 @@
 
 三款参考都按「核出整数金、Host 画」落地,不引进 three。
 
-现状: water/ink/oneshot 的 Host 按 wasm 表画。
-现状: fly 无表,不发明岛。
-现状: W2/W3 未接这三页。
+现状: fly/water/ink/oneshot 已调 host_gpu_submit,失败回退页内 renderer。
+现状: W2 仍缺。
 
 | 参考 | 本仓 | 不是 |
 |---|---|---|
@@ -15,7 +14,7 @@
 ## 架构该增强(一类一条,勿并行)
 
 (1) 步进核进浏览器:host1 `main_export` 每调清局部;UXE `sim.wasm`+`host_input_read` 才是每帧核。缺 import 段。
-(2) 提交面:`HOST_ABI` 要一次 `host_gpu_submit` 整包,现 demo 仍是页内 `fillRect`/`scissor`。
+(2) 提交面: fly/water/ink/oneshot 已调 host_gpu_submit,失败回退页内 renderer。W2 仍缺。
 (3) 2D/3D 实例化:UXE 只有八面体/船盒;水彩边、点精灵、贴图仍缺(HOST_ABI H3/H4)。
 (4) 元数据:wasm 已有 `ujsmeta`;Pages 仍靠 `compile.mjs` meta。
 (5) 不该增强:把 three 搬进仓;把扫描器改 ask 网来画游戏。
