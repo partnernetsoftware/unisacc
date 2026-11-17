@@ -1,0 +1,154 @@
+/* tools/check-run-warm.cx -- the run cache --warm option and the private cache directory rule.
+ *
+ *   sh ./unisacc.com tools/check-run-warm.cx -- OUT [--product CMD]
+ *
+ * CMD (default "sh ./unisacc.com") is the product under test; OUT a scratch directory (recreated).
+ * Each compile runs with UNISACC_CACHE_DIR=<dir> (and DEV_PRODUCT_CACHE=<dir>, which a tools/dev-product.cx
+ * launcher maps onto it) and UNISACC_RR_TIME=1, so every run cache lookup prints RR_TIME<TAB>lookup_hit=0|1|2.  The program prints WARM_RAN when it executes.
+ *  (1) --warm on a cold, pre-made 0755 directory: rc 0, nothing executed (no WARM_RAN), a lookup miss,
+ *      at least one run cache entry written, and the directory tightened to 0700;
+ *  (2) the same --warm again: rc 0, a lookup hit, still nothing executed, no new entry;
+ *  (3) the same command without --warm: a lookup hit (the key ignores --warm) and the program runs;
+ *  (4) negative: a directory of another owner (/usr/share, root) is refused once on stderr
+ *      ("not a private directory of this user"), its mode is not touched, nothing is stored, the
+ *      plain run still executes the program, and --warm reports the failed store with a nonzero rc;
+ *  (5) negative: a symlink to a private 0700 directory is refused the same way and nothing is
+ *      stored through it.
+ * Without the --warm option in the product ((1) fails, stderr names --warm or "option not migrated") the check prints
+ * DEFERRED needs-product-with-warm and exits 3, never PASS.
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *OUT = 0;
+static const char *PROD = "sh ./unisacc.com";
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-run-warm.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-run-warm.%s\n", name); }
+}
+static int sh(const char *cmd) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    char *o = 0; size_t on = 0; int rc;
+    rc = cx_runv_timeout(v, 52, &o, &on);
+    mm_free(o);
+    return rc;
+}
+/* Occurrences of PAT in the captured output of the product call saved at PATH (the bytes the
+ * product itself wrote to its stdout/stderr, read back through a process capture). */
+static int count(const char *path, const char *pat) {
+    char *v[] = {"cat", (char *)path, 0};
+    char *o = 0; size_t on = 0; int c;
+    if (cx_runv_timeout(v, 10, &o, &on) != 0) { mm_free(o); return -1; }
+    c = on ? (int)tx_count(o, (long)on, pat, tx_len(pat, 128)) : 0;
+    mm_free(o);
+    return c;
+}
+/* One product call: env, flags, the program; stdout to OUT/NAME.out, stderr to OUT/NAME.err; returns rc. */
+static int run(const char *dir, const char *flags, const char *name) {
+    char cmd[4000];
+    cx_fmt(cmd, sizeof cmd, "UNISACC_CACHE_DIR=%s DEV_PRODUCT_CACHE=%s UNISACC_RR_TIME=1 %s %s %s/prog.cx >%s/%s.out 2>%s/%s.err",
+           dir, dir, PROD, flags, OUT, OUT, name, OUT, name);
+    return sh(cmd);
+}
+static int ran(const char *name) { char p[900]; cx_fmt(p, sizeof p, "%s/%s.out", OUT, name); return count(p, "WARM_RAN"); }
+static int errhas(const char *name, const char *pat) { char p[900]; cx_fmt(p, sizeof p, "%s/%s.err", OUT, name); return count(p, pat); }
+/* Run cache hits of one call: lookup_hit=1 (stage entry) or lookup_hit=2 (ELF entry), src/runcache.cx rc_report. */
+static int hit(const char *name) { return errhas(name, "lookup_hit=1") + errhas(name, "lookup_hit=2"); }
+/* Number of run cache entries (names not starting uc- or mc-) in DIR, via a listing file. */
+static int entries(const char *dir) {
+    char cmd[2400], lst[900]; size_t n = 0, i; char *b; int c = 0;
+    cx_fmt(lst, sizeof lst, "%s/entries.lst", OUT);
+    cx_fmt(cmd, sizeof cmd, "ls %s 2>/dev/null | grep -v '^uc-' | grep -v '^mc-' > %s; true", dir, lst);
+    sh(cmd);
+    b = cx_read(lst, &n);
+    for (i = 0; b && i < n; i++) if (b[i] == '\n') c++;
+    mm_free(b);
+    return c;
+}
+/* Mode bits of PATH (no link follow) as stat prints them in octal, into M. */
+static void mode_of(const char *path, char *m, int cap) {
+    char cmd[1400], f[900]; size_t n = 0; char *b;
+    cx_fmt(f, sizeof f, "%s/mode.txt", OUT);
+    cx_fmt(cmd, sizeof cmd, "stat -c %%a %s > %s 2>/dev/null; true", path, f);
+    sh(cmd);
+    b = cx_read(f, &n);
+    m[0] = 0;
+    if (b) { while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == ' ')) n--; if ((long)n < cap) { mm_copy(m, (size_t)cap, b, n); m[n] = 0; } }
+    mm_free(b);
+}
+
+int main(int argc, char **argv) {
+    char d[900], cmd[2400], m[32], lk[900], tgt[900];
+    int i, rc, e1, e2;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--product") && i + 1 < argc) PROD = argv[++i];
+        else if (!OUT) OUT = argv[i];
+    }
+    if (!OUT) { sy_printf("usage: check-run-warm.cx -- OUT [--product CMD]\n"); return 2; }
+    cx_fmt(cmd, sizeof cmd, "rm -rf %s; mkdir -p %s", OUT, OUT);
+    if (sh(cmd)) { sy_printf("check-run-warm: cannot make %s\n", OUT); return 2; }
+    cx_fmt(cmd, sizeof cmd, "%s/prog.cx", OUT);
+    if (cx_write(cmd, "int puts(const char *);\nint main(void){ puts(\"WARM_RAN\"); return 0; }\n",
+                 tx_len("int puts(const char *);\nint main(void){ puts(\"WARM_RAN\"); return 0; }\n", 400))) {
+        sy_printf("check-run-warm: cannot write %s\n", cmd); return 2; }
+
+    /* (1) cold --warm on a 0755 directory of ours */
+    cx_fmt(d, sizeof d, "%s/C", OUT);
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0755 %s", d, d); sh(cmd);
+    rc = run(d, "--warm", "w1");
+    if (rc != 0 && (errhas("w1", "--warm") > 0 || errhas("w1", "option not migrated") > 0)) { sy_printf("DEFERRED\tcheck-run-warm\tneeds-product-with-warm\n"); return 3; }
+    ck(rc == 0, "warm.cold-rc0");
+    ck(ran("w1") == 0, "warm.cold-not-executed");
+    ck(errhas("w1", "lookup_hit=0") >= 1 && hit("w1") == 0, "warm.cold-lookup-miss");
+    e1 = entries(d);
+    ck(e1 >= 1, "warm.cold-stored-entry");
+    mode_of(d, m, sizeof m);
+    ck(tx_eqz(m, "700"), "warm.existing-dir-tightened-0700");
+
+    /* (2) the same --warm again: a hit, no execution, no new entry */
+    rc = run(d, "--warm", "w2");
+    ck(rc == 0, "warm.again-rc0");
+    ck(hit("w2") >= 1, "warm.again-hit");
+    ck(ran("w2") == 0, "warm.again-not-executed");
+    e2 = entries(d);
+    ck(e2 == e1, "warm.again-no-new-entry");
+
+    /* (3) plain run: same key, a hit, and the program runs */
+    rc = run(d, "", "p1");
+    ck(rc == 0 && ran("p1") == 1, "plain.runs-program");
+    ck(hit("p1") >= 1, "plain.hits-warm-entry");
+
+    /* (4) a directory of another owner is refused, untouched, nothing stored */
+    {   char before[32]; int e0;
+        mode_of("/usr/share", before, sizeof before);
+        e0 = entries("/usr/share");
+        rc = run("/usr/share", "", "f1");
+        ck(rc == 0 && ran("f1") == 1, "foreign.plain-still-runs");
+        ck(errhas("f1", "not a private directory of this user") == 1, "foreign.refused-said-once");
+        ck(hit("f1") == 0, "foreign.no-hit");
+        rc = run("/usr/share", "--warm", "f2");
+        ck(rc != 0 && errhas("f2", "warm: run cache store failed") == 1, "foreign.warm-store-failed-rc-nonzero");
+        ck(ran("f2") == 0, "foreign.warm-not-executed");
+        mode_of("/usr/share", m, sizeof m);
+        ck(before[0] && tx_eqz(m, before), "foreign.mode-untouched");
+        ck(entries("/usr/share") == e0, "foreign.nothing-stored");
+    }
+
+    /* (5) a symlink to a private directory is refused */
+    cx_fmt(tgt, sizeof tgt, "%s/T", OUT);
+    cx_fmt(lk, sizeof lk, "%s/L", OUT);
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0700 %s && ln -s %s %s", tgt, tgt, tgt, lk); sh(cmd);
+    rc = run(lk, "--warm", "s1");
+    ck(rc != 0 && errhas("s1", "not a private directory of this user") == 1, "link.refused-rc-nonzero");
+    ck(ran("s1") == 0 && entries(tgt) == 0, "link.nothing-stored");
+
+    sy_printf("CHECK_RUN_WARM\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
