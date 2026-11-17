@@ -29,3 +29,9 @@
 ## 证据与撤回
 
 新链证据:/tmp/unisacc-session-v71-rc2。旧链与对照:/tmp/unisacc-session-v71-full,旧全套:/tmp/unisacc-session-v71-tests/retest-54142681d2。直接集合清单与身份在新链目录direct-v2-plan.tsv和p1-summary.txt,尚未取得新候选通过证据。临时路径不是公开可复现附件,正式发布应另附可取证材料。本窗口未建tag、未公开发布、未替换共享产品;集成者对外发布前另记资产撤回与旧版恢复办法。
+
+## 直接集合验收口径
+
+按主调度P2裁定:冻结输入0571f88105的374批直接集合中,tests/run-batch.cx扇出152批、tools/cxlib/chainargv.cx扇出79批,去重并集227批。S_main为不属于并集的147批;H_sample为并集按批次ID逐字节字典序排列后,从第1个起每4个取1个,共57批。合计204批必须在新候选上逐批验收或明确登记既定豁免;计划中29项为既定豁免,175项待新候选实跑。
+
+剩余170个harness扇出批次记CARRIED_NOT_PASS,保留旧候选收据,不记新候选PASS。沿用依据是这两个harness的改动在第二轮全套前已存在,同一运行器已实际跑过相关批次;新候选产品输入相对旧ca84仅多事实表调整,15对生成物与九个编译产物对拍逐字节相同。网等价证据不冒充这170批在新候选上的执行结果。完整成员、分组、状态与豁免见/tmp/unisacc-session-v71-rc2/direct-v2-run.tsv及direct-v2-status.tsv;本段仍是验收口径,不是完成声明。
