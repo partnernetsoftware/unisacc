@@ -31,7 +31,7 @@
 |---|---|---|---|
 | W1 | 字面量 list 最长 64 | 8 界只能各 3 点,场景装不进 | 放宽 list 上限或 `list(n)` 填表走事实表,不抬棘轮 |
 | W2 | 一次 `main_export`、浏览器局部每调清零 | 舵无法进核 | 浏览器可调的步进(UXE `sim.wasm`/`host_input_read`,或 host1 内存槽不重跑 let) |
-| W3 | 无网格/提交面 | 只能 `fillRect` | `host_gpu_submit` 吃核打的点/色包(HOST_ABI 已写未兑现) |
+| W3 | 无网格/提交面 | 只能页 JS 组包 | `build_mod`(`compiler_min.cx:2268`)无 import 段,仅 export。兑现:加 import `env.host_gpu_submit(i32,i32)`;先例 `archive/ship host_gpu_submit(ptr,len)`。与 prd 0.3b G1 同条 |
 | W4 | 无嵌套 list/长 dict key | 8 界不能一表多岸 | 与 W1 同刀或下一刀 |
 | W5 | CLI 无 `--frames` | 同进程多帧只能 `frame-run.cx` | 等 `ujs_main` 迁 L0 后加,不夹进本计划 |
 
