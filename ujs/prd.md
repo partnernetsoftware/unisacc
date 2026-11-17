@@ -116,8 +116,10 @@
 | C1 | 五切片 APE;`ujs.com` gitignore;无 win/arm64 | build-ape.cx | `sh ./unisacc.com tools/check-ujs-ape.cx` 末行 `UJS_APE_OK` failed=0。批次 `ujs-ape-slices` |
 | C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
 | C3 | `host1_vm` 遇 section 2 拒绝 `import`(已做)。折算 idx 未做 | G1-submit.md | 无 import 的 fly `--run` 金 3868;有 import 的模块 `--run` JSON err=import |
+| C4 | `compiler_min.cx` cxraw 实测 96、tsv 50;cxtrunc 17 vs 16。HEAD 已超,与 G1 无关 | 单独基线债,不并 G1 放宽 | `sh ./unisacc.com -run tests/cxraw.cx -- --check --files ujs/seed/stage0/compiler_min.cx` |
 
-(6) 未决:U3 归核还是归 Host;C3 折算 vs 拒绝。
+(6) 未决:U3 归核还是归 Host;C3 折算 vs 拒绝;C4 先于 G1 合入。
+
 
 
 ---
