@@ -30,6 +30,12 @@
  *          `REFUSE<TAB>pkg<TAB>major-needs-confirm<TAB>...`; --allow-major is the human confirmation.
  * --bump-pending  --bump for every package (or --pkg PKG); unchanged packages are left alone, and the
  *          dirty-package-path refusal applies only to a package that would be rewritten. Last line
+ * --bump PKG --version V [--owner O]  (devsvc K4) write V instead of the computed version. Allowed only when
+ *          tools/bump.cx --query PKG V gives VERDICT=reserved (a live reservation of the caller: --owner, else
+ *          $DEVSVC_OWNER) or VERDICT=next (the next patch of HEAD, not reserved by anyone else); V must also be
+ *          above the table's current version. Anything else is refused, rc 2, nothing rewritten:
+ *          `REFUSE<TAB>pkg<TAB>version-not-reserved<TAB>V<TAB>verdict=..`. Reserve first:
+ *          sh ./unisacc.com tools/devsvc.cx -- bump PKG. Without --version nothing changes.
  *          `BUMP_PENDING<TAB>ok|REFUSED<TAB>bumped=N<TAB>unchanged=M<TAB>first refusal or -`. This is the
  *          write_argv of the layer-api row of exec/facts/derive.tsv: `derive.cx -- --write` is the one command.
  * Exit: 0 ok, 1 a check failed, 2 usage or an unreadable input.
@@ -52,6 +58,35 @@ static int index_only;
 /* --bump-pending: every package, only the changed ones are rewritten. --allow-major: confirm a breaking bump. */
 static int pending, allow_major, n_bumped, n_unchanged;
 static char refuse_note[700];
+/* --version V / --owner O (K4); bumppath: tools/bump.cx as seen from the caller's directory, before chdir(root) */
+static const char *want_ver, *want_owner;
+static char bumppath[4400];
+
+/* 0 when bump.cx --query PKG V classifies V as reserved (own) or next; else prints REFUSE and returns 2. */
+static int version_allowed(const char *name, const char *v) {
+    char *av[16], *o = 0, vd[32];
+    size_t n = 0;
+    long i, j;
+    int k = 0, rc;
+    vd[0] = 0;
+    av[k++] = "sh"; av[k++] = product; av[k++] = bumppath; av[k++] = "--"; av[k++] = "--query"; av[k++] = (char *)name;
+    av[k++] = (char *)v; av[k++] = "--root"; av[k++] = root;
+    if (want_owner) { av[k++] = "--owner"; av[k++] = (char *)want_owner; }
+    av[k] = 0;
+    rc = cx_runv_timeout(av, 30, &o, &n);
+    for (i = 0; o && rc == 0 && i + 8 <= (long)n; i++) {   /* byte scan for VERDICT= */
+        if (o[i] == 'V' && mm_same(o + i, "VERDICT=", 8)) {
+            for (j = 0; i + 8 + j < (long)n && o[i + 8 + j] != '\t' && o[i + 8 + j] != '\n' && j < 31; j++) vd[j] = o[i + 8 + j];
+            vd[j] = 0;
+            break;
+        }
+    }
+    mm_free(o);
+    if (tx_eqz(vd, "reserved") || tx_eqz(vd, "next")) return 0;
+    sy_printf("REFUSE\t%s\tversion-not-reserved\t%s\tverdict=%s\treserve first: sh ./unisacc.com tools/devsvc.cx -- bump %s\n",
+              name, v, vd[0] ? vd : "query-failed", name);
+    return 2;
+}
 
 /* 1 when ROOT is itself the top level of a git work tree. */
 static int is_git_root(void) {
@@ -374,6 +409,11 @@ static int one_bump(const char *name) {
         mm_free(old); mm_free(api);
         return 2;
     }
+    if (want_ver && !cur[0]) {
+        sy_printf("REFUSE\t%s\tversion-on-adopt\t%s\n", name, want_ver);
+        mm_free(old); mm_free(api);
+        return 2;
+    }
     if (!cur[0]) { what = "adopt"; tx_copy(nv, sizeof nv, pk.version, tx_len(pk.version, 32)); }
     else {
         if (cls != 3 && !pkg_stable(name)) {
@@ -392,6 +432,18 @@ static int one_bump(const char *name) {
         else if (cls == 2) { v[1]++; v[2] = 0; what = "minor"; }
         else { v[2]++; what = "patch"; }
         if (cx_fmt(nv, sizeof nv, "%d.%d.%d", v[0], v[1], v[2])) return 2;
+        if (want_ver) {
+            int w[3], c[3];
+            if (tp_ver_parse(want_ver, w) || tp_ver_parse(pk.version, c) ||
+                !(w[0] > c[0] || (w[0] == c[0] && (w[1] > c[1] || (w[1] == c[1] && w[2] > c[2]))))) {
+                sy_printf("REFUSE\t%s\tversion-not-above-current\t%s\tcurrent=%s\n", name, want_ver, pk.version);
+                mm_free(old); mm_free(api);
+                return 2;
+            }
+            if (version_allowed(name, want_ver)) { mm_free(old); mm_free(api); return 2; }
+            tx_copy(nv, sizeof nv, want_ver, tx_len(want_ver, 32));
+            what = "reserved";
+        }
     }
     (void)sy_mkdir(dir, 0755);
     if (cx_write(path, api, (size_t)an) || set_row(name, nv, hex, fz)) { sy_eprintf("layer-api: cannot rewrite %s\n", name); return 2; }
@@ -474,16 +526,26 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[k], "--bump-pending") && write < 0) { write = 3; pending = 1; }
         else if (tx_eqz(argv[k], "--allow-major")) allow_major = 1;
         else if (tx_eqz(argv[k], "--index-only")) index_only = 1;
+        else if (tx_eqz(argv[k], "--version") && k + 1 < argc) want_ver = argv[++k];
+        else if (tx_eqz(argv[k], "--owner") && k + 1 < argc) want_owner = argv[++k];
         else if (tx_eqz(argv[k], "--pkg") && k + 1 < argc) only = argv[++k];
         else if (tx_eqz(argv[k], "--root") && k + 1 < argc) rarg = argv[++k];
         else if (tx_eqz(argv[k], "--product") && k + 1 < argc) parg = argv[++k];
         else { write = -1; break; }
     }
+    if ((want_ver || want_owner) && (write != 3 || pending)) write = -1;   /* --version only with a single --bump PKG */
     if (write < 0) {
-        sy_eprintf("layer-api: usage: --write|--check|--sha-only|--freeze PKG|--bump PKG|--bump-pending [--allow-major] [--index-only] [--pkg PKG] [--root ROOT] [--product FILE]\n");
+        sy_eprintf("layer-api: usage: --write|--check|--sha-only|--freeze PKG|--bump PKG|--bump-pending [--allow-major] [--index-only] [--version V [--owner O]] [--pkg PKG] [--root ROOT] [--product FILE]\n");
         return 2;
     }
     if (sy_realpath(rarg, root, sizeof root) < 0) { sy_eprintf("layer-api: bad root %s\n", rarg); return 2; }
+    if (want_ver) {   /* the root's own tools/bump.cx, else the caller's checkout (a fixture root without tools) */
+        char bp[4400];
+        if (cx_fmt(bp, sizeof bp, "%s/tools/bump.cx", root) || sy_exists(bp) != 1) {
+            if (sy_realpath("tools/bump.cx", bp, sizeof bp) < 0) { sy_eprintf("layer-api: --version needs tools/bump.cx\n"); return 2; }
+        }
+        tx_copy(bumppath, sizeof bumppath, bp, tx_len(bp, sizeof bp));
+    }
     if (parg) { if (sy_realpath(parg, product, sizeof product) < 0) { sy_eprintf("layer-api: bad product %s\n", parg); return 2; } }
     else if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 2;
     if (sy_chdir(root)) { sy_eprintf("layer-api: cannot enter %s\n", root); return 2; }

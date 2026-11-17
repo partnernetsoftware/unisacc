@@ -20,6 +20,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
@@ -144,6 +145,32 @@ static int gput(const char *d, const char *rel, int unused) {
     (void)unused;
     if (cx_fmt(p, sizeof p, "%s/%s", d, rel)) return -1;
     return sy_symlink(bin_product, p);
+}
+
+/* layer-api --bump PKG --root R --version V --owner O (K4): rc, output in last. */
+static int bumpv(const char *r, const char *pkg, const char *ver, const char *owner) {
+    char *v[12];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin; v[k++] = "--bump"; v[k++] = (char *)pkg; v[k++] = "--root"; v[k++] = (char *)r;
+    v[k++] = "--version"; v[k++] = (char *)ver; v[k++] = "--owner"; v[k++] = (char *)owner;
+    v[k] = 0;
+    return cx_runv_timeout(v, 40, &last, &lastn);
+}
+
+/* tools/bump.cx -- PKG --owner O --root R (BUMP_DIR, BUMP_EMIT=0 from the environment): rc. */
+static int reserve(const char *r, const char *pkg, const char *owner) {
+    char *v[12], *o = 0;
+    size_t n = 0;
+    int k = 0, rc;
+    v[k++] = "sh"; v[k++] = bin_product; v[k++] = "tools/bump.cx"; v[k++] = "--"; v[k++] = (char *)pkg;
+    v[k++] = "--owner"; v[k++] = (char *)owner; v[k++] = "--root"; v[k++] = (char *)r;
+    v[k] = 0;
+    rc = cx_runv_timeout(v, 40, &o, &n);
+    mm_free(o);
+    return rc;
 }
 
 /* layer-api --bump PKG --root R [FLAG]: rc, output in last. */
@@ -319,6 +346,34 @@ int main(int argc, char **argv) {
             a6 = bumpt(gx, "gx.a", "--allow-major");
             ck(a6 == 0 && line3("BUMP", "gx.a", "major") && tool(gx, "--check", "gx.a") == 0, "bump-major-written-with-allow-major");
             mm_free(t1); mm_free(t2);
+            /* (11) K4 --version: HEAD carries 1.0.0; a body change; reservations o1 -> 1.0.1, o2 -> 1.0.2 in a private store */
+            {
+                char st[4400], *t0 = 0, *t3 = 0;
+                size_t n0 = 0, n3 = 0;
+                int b1, b2, b3, b4, b5;
+                q = gitrun(gx, "add", "-A", 0, 0) || gitrun(gx, "commit", "-q", "-m", "major");
+                q |= cx_fmt(st, sizeof st, "%s/bumpstore", work) || sy_setenv("BUMP_DIR", st, 1) || sy_setenv("BUMP_EMIT", "0", 1);
+                q |= gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint ga_one(long x) { return (int)x + 2; }\n") || gitrun(gx, "add", "ga/one.cx", 0, 0);
+                t0 = cx_read(tp, &n0);
+                /* without --version: the old computed patch, old line format */
+                b1 = bumpt(gx, "gx.a", 0);
+                ck(!q && b1 == 0 && line3("BUMP", "gx.a", "patch") && has_field("gx.a", "1.0.0 -> 1.0.1"), "bump-without-version-unchanged");
+                q |= !t0 || cx_write(tp, t0, n0);
+                q |= reserve(gx, "gx.a", "o1") || reserve(gx, "gx.a", "o2");
+                ck(!q, "bump-version-fixture-reservations");
+                b2 = bumpv(gx, "gx.a", "1.0.2", "o1");
+                t3 = cx_read(tp, &n3);
+                ck(b2 == 2 && line3("REFUSE", "gx.a", "version-not-reserved") && has_field("gx.a", "verdict=reserved-other") &&
+                   t3 && n3 == n0 && tx_same(t0, (long)n0, t3, (long)n3), "bump-version-other-owner-refused-table-untouched");
+                mm_free(t3);
+                b3 = bumpv(gx, "gx.a", "7.7.7", "o1");
+                ck(b3 == 2 && line3("REFUSE", "gx.a", "version-not-reserved") && has_field("gx.a", "verdict=unreserved"), "bump-version-arbitrary-refused");
+                b4 = bumpv(gx, "gx.a", "0.9.9", "o1");
+                ck(b4 == 2 && line3("REFUSE", "gx.a", "version-not-above-current"), "bump-version-below-current-refused");
+                b5 = bumpv(gx, "gx.a", "1.0.2", "o2");
+                ck(b5 == 0 && line3("BUMP", "gx.a", "reserved") && has_field("gx.a", "1.0.0 -> 1.0.2") && tool(gx, "--check", "gx.a") == 0, "bump-version-own-reservation-written");
+                mm_free(t0);
+            }
         }
     }
 
