@@ -4,6 +4,9 @@
 
 本任务未重跑批次或 `.cx`。已端到端验证只记账 **gpu-tri 单三角 212B** 与批次名 `ujs-gpu-tri`(见 [`practice/uxe/demo/G1-submit.md`](practice/uxe/demo/G1-submit.md));其余标 UNMEASURED。历史 PASS 不并入本任务分子。
 
+项目所有者 2026-11-17:已发布 fly/water-keeps/ink-walk/oneshot 保持现状,不新增发布。下一步先补三项基础能力再回头做 demo:(T1) 贴图与采样 (T2) 素材加载 (T3) 精灵与粒子。参考 C 原站是插画贴图整景,现状纯色低多边形。
+
+
 ## 0. 从 prd 切出的 UXE 缺口
 
 | 号 | 事实 | 计划 | 验收 |
@@ -64,6 +67,21 @@ UXE = (1) 浏览器宿主 (2) UXEP / UXIN 字节契约 (3) 渲染器。
 host1 侧:`host_gpu_submit` 符号可导入,读线性内存后 no-op,**不是** 真 GPU。真 GPU 验收只覆盖浏览器 gpu-tri。细节不抄,见 HOST_ABI.md 与 G1-submit.md。
 
 ---
+
+## 2.1 UXEP v4 草案(T1,未实现不得记 PASS)
+
+字节序:与 v3 相同,小端。magic `UXEP`(u32) | version(u32)=4。
+
+v3 前缀原样:clear rgba、camera 9xf32、fog、ambient、nLights、lights、nClouds、每云 v3 字段(color/emissive/metal/rough/mesh_id/count/xyz/scale)。
+
+v4 在每云 `scale[]` 之后追加:`map_id`(u16,0=无贴图) | `uv_origin`(u16,保留 0)。
+
+包尾纹理段(nClouds 之后):`nTex`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `pad`(u16) `rgba`(w*h*4 字节,行主序,R,G,B,A)。
+
+兼容:version<=3 的解码器读完 v3 云即停,忽略尾;v4 编码器仅当有纹理时写 version=4,否则仍写 3。v3 夹具(gpu-tri 212B)字节不变。核可经 `store_bytes` 提供 rgba,或经 `host_asset_read` 填同一段(T2)。
+
+默认 wrap=clamp、filter=nearest。不上 mip/KTX2。
+
 
 ## 3. 对标表
 
@@ -297,6 +315,21 @@ host1 侧:`host_gpu_submit` 符号可导入,读线性内存后 no-op,**不是** 
 
 gpu-tri 不是 D1-D5;它是 G1 真 GPU 夹具,单三角 212B。
 
+### 4.4 做完 T1-T3 后参考 C 仍缺什么
+
+对照 `demo-three-ports.md` 参考 C 文字与 ccapi 对原站的描述(插画贴图整景)。未打开原站像素。T1-T3 完成后:
+
+| 视觉元素 | T1-T3 能否覆盖 | 仍缺 |
+|---|---|---|
+| 金色天空 | T1 一张天空贴图可铺平面/背景 | 无立方体/渐变程序天空;Scene.background 贴图仍无 |
+| 木桥/芦苇/睡莲叶 | T1 贴图+平面/盒 | 无专用网格;岸折线仍 Host 未画 |
+| 倒影 | 否 | 需离屏/镜面或第二 pass(M6),T1-T3 不做 |
+| 发光莲花灯 | T3 半透明精灵+T1 贴图可近似 | 无 emissive 贴图;核灯仍方向光 |
+| 浮动光点 | T3 points | 无衰减公式落地前标无 |
+| 标题文字 | 否 | 无文字光栅;T1-T3 不做 |
+| 云 | 现 Scene.clouds 是实例云不是体积云 | T1 可贴云片精灵;体积云仍缺 |
+
+
 ---
 
 ## 5. 路线(每一项 = 一个单一提交能完成什么)
@@ -305,6 +338,9 @@ gpu-tri 不是 D1-D5;它是 G1 真 GPU 夹具,单三角 212B。
 
 | 项 | 单一提交完成 | 不做 |
 |---|---|---|
+| **T1** | UXEP v4 草案落地一张 albedo:`map_id`+纹理段;host 2D 上传 wrap=clamp filter=nearest;已知色块贴平面;指定屏幕点像素等于 texel(容差内),期望由 .cx 从源算;篡改一 texel 必红;chrome_dom | 不上 KTX2/mip;不改已发布 demo 页 |
+| **T2** | `host_asset_read` 解码仓内自绘小 PNG;像素读回与 .cx 期望一致;缺/坏素材明确失败非黑屏 | 不引用原作资源 |
+| **T3** | billboard 四边形 alpha 混合最小排序,或 points 大小/颜色/衰减,只选一先做;混合像素等于公式 | 不上粒子编辑器 |
 | **M2** | 核驱动 fly 步进:persist yaw(或已有 persist)经 `run_step` 跨帧;`store_bytes`+`host_gpu_submit` 交一包;AUTO 仍只核金/表,不核截图 | 不扩几何;不改 D2-D5;不引进 three |
 | **M3** | G3 最小数学:核内建 `sqrt` **或** `sin`/`cos` 之一,带 `.ujs` 夹具非零/金值;或显式冻结「旋转永在 Host」并加拒绝用例 | 不同时四则全上;不改 renderer |
 | **M4** | UXEP 二进制补齐 yaw/pitch/roll(与 WebGL 已画字段对齐)或新预置一种几何(Sphere **或** Cylinder 只选一) | 不一次加全套内置几何 |
