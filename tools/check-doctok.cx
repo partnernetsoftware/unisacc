@@ -1,0 +1,150 @@
+/* check-doctok: tokenizer contract of tools/cxlib/doctok.cx (devsvc doc index T2).
+ *   sh ./unisacc.com tools/check-doctok.cx [-- ROOT]
+ * Fixture cases compare every token with its byte offset ("OFF:TOK" joined by spaces).
+ * Covers mixed CJK/ASCII, bigram edges, a single Han char between ASCII, compound words and
+ * sub-words, backtick path whole plus basename, "->", versions, full-width punctuation as
+ * separator, bad UTF-8 refusal, named limit errors, determinism, fingerprint stability and a
+ * negative control (copied rule table with one rule changed must give another fingerprint).
+ * Real documents plans/devsvc.md, prd_mempalace.md and CLAUDE.md: no empty token, offsets
+ * nondecreasing, token count within [bytes/40, bytes]; counts are printed.
+ * Last line: CHECK_DOCTOK<TAB>failed=N. Exit 0 only when failed=0; 2 on unreadable input. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.doctok
+
+static int failed, passed;
+
+static void fail(const char *name, const char *why, const char *got) {
+    failed++;
+    fprintf(stderr, "FAIL\t%s\t%s\t%s\n", name, why, got ? got : "-");
+}
+
+/* Serialize tokens into out (cap bytes) as "OFF:TOK ...". Returns 0 or -1 on overflow. */
+static int ser(const dt_tok *t, size_t n, char *out, size_t cap) {
+    size_t at = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < n; i++) {
+        int w = snprintf(out + at, cap - at, "%s%zu:%.*s", i ? " " : "", t[i].off, (int)t[i].len, t[i].s);
+        if (w < 0 || (size_t)w >= cap - at) return -1;
+        at += (size_t)w;
+    }
+    return 0;
+}
+
+static void tcase(const char *name, const char *in, const char *want) {
+    dt_tok *t; size_t n; char got[4096];
+    size_t len = 0;
+    while (in[len]) len++;
+    int rc = dt_tokenize(in, len, &t, &n);
+    if (rc) { fail(name, dt_errname(rc), 0); return; }
+    if (ser(t, n, got, sizeof got)) { dt_free(t); fail(name, "serialize overflow", 0); return; }
+    dt_free(t);
+    int same = 1;
+    for (size_t k = 0;; k++) { if (got[k] != want[k]) { same = 0; break; } if (!got[k]) break; }
+    if (!same) { fprintf(stderr, "WANT\t%s\n", want); fail(name, "token mismatch", got); return; }
+    passed++;
+    printf("PASS\t%s\t%zu tokens\n", name, n);
+}
+
+static void rcase(const char *name, const char *in, size_t len, size_t maxt, size_t maxb, int want) {
+    dt_tok *t = 0; size_t n = 99;
+    int rc = dt_tokenize_lim(in, len, maxt, maxb, &t, &n);
+    if (rc != want || t || n) { dt_free(t); fail(name, dt_errname(rc), dt_errname(want)); return; }
+    passed++;
+    printf("PASS\t%s\t%s\n", name, dt_errname(rc));
+}
+
+static void realdoc(const char *root, const char *rel) {
+    char path[1024]; unsigned char *b; long n;
+    dt_tok *t, *t2; size_t c, c2;
+    int w = snprintf(path, sizeof path, "%s/%s", root, rel);
+    if (w < 0 || (size_t)w >= sizeof path) { fprintf(stderr, "check-doctok: REFUSE path too long\n"); exit(2); }
+    if (sy_read_file(path, &b, &n, 1 << 24)) { fprintf(stderr, "check-doctok: REFUSE cannot read %s\n", path); exit(2); }
+    int rc = dt_tokenize((const char *)b, (size_t)n, &t, &c);
+    if (rc) { mm_free(b); fail(rel, dt_errname(rc), 0); return; }
+    int bad = 0;
+    size_t prev = 0;
+    for (size_t i = 0; i < c; i++) {
+        if (!t[i].len) bad |= 1;
+        if (t[i].off < prev) bad |= 2;
+        if (t[i].off + t[i].len > (size_t)n) bad |= 4;
+        prev = t[i].off;
+    }
+    if (c < (size_t)n / 40 || c > (size_t)n) bad |= 8;
+    rc = dt_tokenize((const char *)b, (size_t)n, &t2, &c2);
+    if (rc || c2 != c) bad |= 16;
+    else for (size_t i = 0; i < c && !(bad & 16); i++) {
+        if (t[i].off != t2[i].off || t[i].len != t2[i].len) bad |= 16;
+        else for (size_t k = 0; k < t[i].len; k++) if (t[i].s[k] != t2[i].s[k]) { bad |= 16; break; }
+    }
+    if (!rc) dt_free(t2);
+    dt_free(t); mm_free(b);
+    char why[32];
+    int wl = snprintf(why, sizeof why, "invariant mask=%d", bad);
+    if (wl < 0 || (size_t)wl >= sizeof why) { fail(rel, "format overflow", 0); return; }
+    if (bad) { fail(rel, why, 0); return; }
+    passed++;
+    printf("REAL\t%s\tbytes=%ld\ttokens=%zu\n", rel, n, c);
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    /* (2) bigrams, single Han char between ASCII, full-width punctuation separates. */
+    tcase("cjk-bigram", "\xe4\xb8\xad\xe6\x96\x87\xe6\x96\x87\xe6\xa1\xa3",
+          "0:\xe4\xb8\xad\xe6\x96\x87 3:\xe6\x96\x87\xe6\x96\x87 6:\xe6\x96\x87\xe6\xa1\xa3");
+    tcase("cjk-single-between-ascii", "a\xe4\xb8\xad" "b",
+          "0:a 1:\xe4\xb8\xad 4:b");
+    tcase("fullwidth-sep", "\xe4\xb8\xad\xe6\x96\x87\xef\xbc\x8c\xe5\xad\x97\xe3\x80\x82\xe6\x96\x87\xe6\xa1\xa3",
+          "0:\xe4\xb8\xad\xe6\x96\x87 9:\xe5\xad\x97 15:\xe6\x96\x87\xe6\xa1\xa3");
+    /* (3) ASCII word, lowercase, compound plus sub-words. */
+    tcase("ascii-words", "Hello World_2", "0:hello 6:world_2");
+    tcase("ascii-compound", "check-docslice.cx", "0:check-docslice.cx 0:check 6:docslice 15:cx");
+    /* (4) backtick path whole plus basename, no duplicate of the whole. */
+    tcase("backtick-path", "`tools/devsvc.cx`", "1:tools/devsvc.cx 1:tools 7:devsvc.cx 7:devsvc 14:cx");
+    tcase("backtick-plain", "`abc` x", "1:abc 6:x");
+    /* (5) arrow and versions. */
+    tcase("arrow", "a -> b->c", "0:a 2:-> 5:b 6:-> 8:c");
+    tcase("version", "0.0.59 v0.0.71.", "0:0.0.59 0:0 2:0 4:59 7:v0.0.71 7:v0 10:0 12:71");
+    /* Mixed line. */
+    tcase("mixed", "\xe8\xa7\x81 `tools/devsvc.cx` -> 0.0.43\xe7\x89\x88",
+          "0:\xe8\xa7\x81 5:tools/devsvc.cx 5:tools 11:devsvc.cx 11:devsvc 18:cx 22:-> 25:0.0.43 25:0 27:0 29:43 31:\xe7\x89\x88");
+    /* (8) bad UTF-8, (9) limits. */
+    rcase("bad-utf8-cont", "ab\x80" "cd", 5, 1000, 1000, DT_EBADUTF8);
+    rcase("bad-utf8-trunc", "ab\xe4\xb8", 4, 1000, 1000, DT_EBADUTF8);
+    rcase("bad-utf8-overlong", "\xc0\xaf", 2, 1000, 1000, DT_EBADUTF8);
+    rcase("bad-utf8-in-backtick", "`a/\xff` ", 6, 1000, 1000, DT_EBADUTF8);
+    rcase("limit-tokens", "a b c d", 7, 3, 1000, DT_ETOOMANY);
+    rcase("limit-bytes", "a b c d", 7, 1000, 6, DT_ETOOLONG);
+    {
+        static char longw[300];
+        for (int i = 0; i < 299; i++) longw[i] = 'x';
+        rcase("limit-toklen", longw, 299, 1000, 1000, DT_ETOKLONG);
+    }
+    /* (10) fingerprint: stable, 12 hex, changes with a rule literal. */
+    {
+        char f1[13], f2[13], f3[13];
+        static const char *const copy[] = { "rule-a", "rule-b" };
+        static const char *const changed[] = { "rule-a", "rule-B" };
+        int ok = !dt_fingerprint(f1) && !dt_fingerprint(f2) && !dt_fingerprint_rules(copy, 2, f3);
+        int same = 1, hex = 1;
+        for (int i = 0; i < 12 && ok; i++) {
+            if (f1[i] != f2[i]) same = 0;
+            if (!((f1[i] >= '0' && f1[i] <= '9') || (f1[i] >= 'a' && f1[i] <= 'f'))) hex = 0;
+        }
+        if (!ok || !same || !hex || f1[12]) fail("fingerprint-stable", "unstable or not 12 hex", f1);
+        else { passed++; printf("PASS\tfingerprint-stable\t%s\t%s\n", dt_version(), f1); }
+        char f4[13];
+        int diff = 0;
+        if (dt_fingerprint_rules(changed, 2, f4)) fail("fingerprint-negctl", "rc", 0);
+        else {
+            for (int i = 0; i < 12; i++) if (f3[i] != f4[i]) diff = 1;
+            if (!diff) fail("fingerprint-negctl", "changed rule gave same fingerprint", f4);
+            else { passed++; printf("PASS\tfingerprint-negctl\t%s\t%s\n", f3, f4); }
+        }
+    }
+    realdoc(root, "plans/devsvc.md");
+    realdoc(root, "prd_mempalace.md");
+    realdoc(root, "CLAUDE.md");
+    printf("CHECK_DOCTOK\tfailed=%d\tpassed=%d\n", failed, passed);
+    return failed ? 1 : 0;
+}
