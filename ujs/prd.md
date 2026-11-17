@@ -79,6 +79,36 @@
 
 **不交付**：完整 ES · Three-in-wasm · 合包 · 用户 LLM key 进核/packet · UJS 直播主线 · **把外部 `wat2wasm` 当 UJS 品牌出货物**。
 
+### 0.3 实践 demo（host1 + UXE,不挡 `ujs.com` 版号）
+
+目录 `practice/uxe/demo/`。合同与四款现页相同:世界与步进在 `.ujs`/`wasm`,Host 只输入与光栅;`host1Boot.step` + `host_gpu_submit`(失败回退页内 renderer);无 `three.module`;`?auto=1` 只核表长/金,不核截图。细计划仍见 [`plans/demo-three-ports.md`](plans/demo-three-ports.md)。
+
+| 编号 | 页 | 核要交什么 | 完成时玩家应看到 |
+|---|---|---|---|
+| D1 | `fly/` | 金 `return x+100*alt`=3868;可选 `yaw`/`turn` 全局 | 追机;AUTO 标题 `FLY_OK` |
+| D2 | `water-keeps/` | 岸 128 + pal 8;`turn`/`dist`/`hdg` | 八界灯舟;AUTO `WATER_OK` |
+| D3 | `ink-walk/` | 三层 x,z 折线;`cam`/`turn` | NPR 可逛;AUTO `INK_OK` |
+| D4 | `oneshot/` | 6 盒 xyz;`ang`/`turn` | 一发转轨;AUTO `ONESHOT_OK` |
+| D5 | 未开页 | 见下「宫崎骏风动态世界」 | 未实现,只记需求 |
+
+另: `host1-games/` 是 host1 金闸(`HOST1_GAMES_OK_GL`),不是叙事世界。
+
+**D5 宫崎骏漫画风动态世界(需求,未开工)**
+
+与 D1-D4 同一套积木,不是另开引擎:ink 的分层手绘/NPR、water 的雾与界色、fly 的天空与镜头、oneshot 的实例云,合成一个**可走的随机世界**。
+
+(1) 观感:宫崎骏漫画/水彩,不是写实、不是赛博、不是像素。远山叠层、软边云、风动草与树冠、 pal 偏土黄-草绿-灰蓝。先不做可辨认角色 IP。
+
+(2) 随机:种子在 `.ujs` 整数全局(`seed`);同种子重进页地形/云/树位一致;换种子换布局。Host 不得另写一套噪声当真值。
+
+(3) 动态:核每帧 `step` 推风、云位移、草倾角、可选昼夜 pal;Host 只提交包。
+
+(4) 玩:WASD/拖镜头在世界里走或飞低空,10 秒内能看出风与层在动,不是静贴图。
+
+(5) 验收:`?auto=1` 核 wasm 有种子与表长(具体数字实现时锁);人工看层与风。不引进 three、不搬 GLB、不升 `ujs.com` 版号、不改 host1-pass 28 行。
+
+(6) 未决:页名(`ghibli-world` 暂用)、种子位数、是否与 D3 同页加模式。实现前写 `practice/uxe/demo/<名>/DESIGN.md`。
+
 ---
 
 ## 目标（按杠杆）
