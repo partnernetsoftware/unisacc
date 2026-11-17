@@ -20,6 +20,8 @@ typedef struct {
   uint32_t nfunc;
   uint32_t nimport;
   int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
+  uint32_t gpu_len, gpu_sum;
+  int gpu_got;
   WV stk[H1_STK];
   int sp;
   char err[128];
@@ -477,12 +479,12 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
   if (imp) {
     uint32_t ptr = (uint32_t)(locals[0].k == WK_I32 ? locals[0].i32 : (int32_t)locals[0].i64);
     uint32_t len = (uint32_t)(locals[1].k == WK_I32 ? locals[1].i32 : (int32_t)locals[1].i64);
+    uint32_t s = 0, k;
     if (len && (ptr > h->mem_n || len > h->mem_n - ptr)) return h1_err(h, "gpu oob");
-    if (len) {
-      volatile uint8_t t = h->mem[ptr];
-      (void)t;
-      if (len > 1) t = h->mem[ptr + len - 1];
-    }
+    for (k = 0; k < len; k++) s += h->mem[ptr + k];
+    h->gpu_len = len;
+    h->gpu_sum = s;
+    h->gpu_got = 1;
     return 0;
   }
   return h1_exec(h, fi, locals, np, depth);
@@ -526,8 +528,10 @@ int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out
     }
     h1_pop_to(&h, &val);
     snprintf(out, out_cap,
-             "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
-             (long long)val.i64);
+             h.gpu_got
+             ? "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"gpu_len\":%u,\"gpu_sum\":%u,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}"
+             : "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
+             (long long)val.i64, h.gpu_len, h.gpu_sum);
   } else if (tag == H1_TAG_F64 && h.f64_i >= 0) {
     h1_push_copy(&h, &handle);
     if (h1_call(&h, (uint32_t)h.f64_i, 0) != 0) {
