@@ -1,0 +1,37 @@
+/* tools/check-ckassert.cx -- tool: ckassert shared counters and argv runner.
+ * sh ./unisacc.com tools/check-ckassert.cx
+ * A separate probe intentionally fails once; its exact captured output is asserted. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use sys.env
+static int ca_bad, ca_checks;
+static void ca_expect(int ok,const char *name) {
+    ca_checks++; if(!ok)ca_bad++;
+    printf("%s\tckassert.%s\n",ok?"PASS":"FAIL",name);
+}
+int main(int argc,char **argv) {
+    if(argc==2 && tx_eqz(argv[1],"--probe")) {
+        ck(1,"good"); ck(0,"bad"); ck(1,"again");
+        printf("PROBE assertions=%d failed=%d\n",ck_assertions(),ck_failures());
+        return ck_failures()?1:0;
+    }
+    char out[4096]; int rc;
+    const char *product=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product Probe must use this checkout's candidate; the harness can override UNISACC. */
+    ca_expect(!ck_assertions() && !ck_failures(),"initial-zero");
+    { char *v[]={"sh",product,"tools/check-ckassert.cx","--","--probe",0};
+      rc=ck_run(v,out,sizeof out); }
+    ca_expect(rc==1,"failed-assertion-exit");
+    ca_expect(tx_eqz(out,"PASS\tgood\nFAIL\tbad\nPASS\tagain\nPROBE assertions=3 failed=1\n"),"exact-output-count-and-failure");
+    ca_expect(!ck_assertions() && !ck_failures(),"child-counters-isolated");
+    { char *v[]={"sh","-c","printf out; printf err >&2; exit 7",0};rc=ck_run(v,out,sizeof out); }
+    ca_expect(rc==7 && tx_eqz(out,"outerr"),"nonzero-exit-retains-both-streams");
+    { char *v[]={"sh","-c","printf 12345",0};rc=ck_run(v,out,5); }
+    ca_expect(rc==-1 && out[0]==0,"overflow-rejected");
+    { char *v[]={"sh","-c","printf 1234",0};rc=ck_run(v,out,5); }
+    ca_expect(rc==0 && tx_eqz(out,"1234"),"exact-capacity-boundary");
+    ca_expect(ck_run(0,out,0)==-1,"zero-capacity-refused");
+    printf("CHECK_CKASSERT\tassertions=%d\tfailed=%d\n",ca_checks,ca_bad);
+    return ca_bad?1:0;
+}
