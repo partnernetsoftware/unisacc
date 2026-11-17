@@ -12,8 +12,12 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
 
 static int nok, nfail;
+/* every child run below carries its own deadline: past it sy_proc_wait kills the group */
+enum { CHILD_DEADLINE_MS = 20000, KILLER_DEADLINE_MS = 5000, SLEEPER_DEADLINE_MS = 10000 };
 static const char *self = "tools/check-cx-sys-sig.cx";
 static void ck(int c, const char *name) {
     printf("%s\tsig.%s\n", c ? "PASS" : "FAIL", name);
@@ -36,6 +40,34 @@ static void on_term(int sig) {
 
 static void bye(void) { sy_write_all(1, "ATEXIT ran\n", 11); }
 
+/* Run AV to its end under DEADLINE_MS, stdout and stderr spooled to a scratch file then copied
+   into OUT (NUL-terminated; what does not fit in CAP-1 bytes is dropped).  PGROUP as in
+   sy_spawn_t (-1 its own group, 0 the caller's).  0 with *ST filled, or -errno (ST then untouched). */
+static int run_bounded(char **av, char *out, long cap, int pgroup, long deadline_ms, sy_exit_t *st) {
+    char spool[512];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long k;
+    int fd, r;
+    sy_spawn_t o;
+    out[0] = 0;
+    if (tx_snprintf(spool, sizeof spool, "%s/cx-sys-sig-%d-%ld.out", sy_tmpdir(), sy_pid(), sy_now_ms()) >= (int)sizeof spool) return -ENAMETOOLONG;
+    sy_unlink(spool);
+    fd = sy_open_new(spool, 0600);
+    if (fd < 0) return fd;
+    sy_spawn_init(&o);
+    o.argv = av; o.in_fd = SY_STDIO_NULL; o.out_fd = fd; o.flags = SY_SPAWN_ERR_TO_OUT; o.pgroup = pgroup; o.deadline_ms = deadline_ms;
+    r = sy_proc_run(&o, st);
+    sy_close(fd);
+    if (r == 0 && sy_read_file(spool, &b, &n, 1 << 20) == 0 && b) {
+        for (k = 0; k < n && k < cap - 1; k++) out[k] = (char)b[k];
+        out[k] = 0;
+        mm_free(b);
+    }
+    sy_unlink(spool);
+    return r;
+}
+
 static int at_count;
 static void bump(void) { at_count = at_count + 1; }
 static void bye_last(void) {
@@ -46,15 +78,14 @@ static void bye_last(void) {
 
 /* a: handler from sy_raise and from another process, SIGPIPE ignored, atexit on return */
 static int child_a(void) {
-    int pf[2] = {-1, -1}, w, pid, ofd = -1, ex = -1, code = -1, sg = -1;
+    int pf[2] = {-1, -1}, w;
     char pidtxt[24], out[64];
+    sy_exit_t kst;
     if (sy_sig_handle(15, on_term) != 0) { printf("handle failed\n"); return 2; }
     if (sy_raise(15) != 0 || hits != 1 || last_sig != 15) { printf("raise: hits=%d sig=%d\n", hits, last_sig); return 3; }
     tx_snprintf(pidtxt, sizeof pidtxt, "%d", sy_pid());
     {   char *v[] = { "sh", "-c", "kill -TERM \"$1\"", "sh", pidtxt, 0 };
-        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
-        if (pid > 0) { long k; while ((k = sy_read(ofd, out, sizeof out)) > 0) {} sy_close(ofd); }
-        if (pid <= 0 || sy_wait_status(pid, 0, &ex, &code, &sg) != pid || !ex || code != 0) { printf("kill child failed\n"); return 4; }
+        if (run_bounded(v, out, sizeof out, -1, KILLER_DEADLINE_MS, &kst) != 0 || kst.timed_out || !kst.exited || kst.code != 0) { printf("kill child failed\n"); return 4; }
     }
     if (hits != 2 || last_sig != 15) { printf("outside kill: hits=%d\n", hits); return 5; }
     if (sy_sig_ignore(13) != 0) { printf("ignore failed\n"); return 6; }
@@ -65,7 +96,7 @@ static int child_a(void) {
     printf("WRITE %s %d\n", w == -EPIPE ? "EPIPE" : "other", w);
     if (w != -EPIPE) return 8;
     if (sy_atexit(bye) != 0) return 9;
-    printf("CHILD done\n");
+    sy_write_all(1, "CHILD done\n", 11);
     return 0;                       /* exits 0 by its own choice; bye runs after this */
 }
 
@@ -85,9 +116,9 @@ static int child_c(void) {
     if (sy_sig_handle(15, on_term) != 0) return 2;
     if (sy_sig_default(15) != 0) return 3;
     if (sy_atexit(bye) != 0) return 4;
-    printf("BEFORE\n");
+    sy_write_all(1, "BEFORE\n", 7);
     sy_raise(15);
-    printf("AFTER\n");
+    sy_write_all(1, "AFTER\n", 6);
     return 0;
 }
 
@@ -102,7 +133,7 @@ static void on_fatal(int sig) {
 static int child_r(void) {
     if (sy_sig_handle(15, on_fatal) != 0) return 2;
     sy_raise(15);
-    printf("NOT-REACHED\n");
+    sy_write_all(1, "NOT-REACHED\n", 12);
     return 0;
 }
 
@@ -128,20 +159,23 @@ static int child(const char *m) {
 /* ---- parent --------------------------------------------------------------------------- */
 
 static void run_child(const char *mode, char *out, long cap, int *ex, int *code, int *sg) {
-    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    const char *u = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product 本检查自身的子进程跑法,缺省取仓根启动器,UNISACC 可覆盖 */
     char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", (char *)mode, 0 };
-    int pid, ofd = -1;
-    long n = 0, k;
-    *ex = -1; *code = -1; *sg = -1; out[0] = 0;
-    pid = sy_spawn_pipe(av, 0, 0, &ofd, 0);
-    if (pid <= 0) return;
-    while (n < cap - 1 && (k = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += k;
-    out[n] = 0;
-    sy_close(ofd);
-    sy_wait_status(pid, 0, ex, code, sg);
+    sy_exit_t st;
+    *ex = -1; *code = -1; *sg = -1;
+    if (run_bounded(av, out, cap, -1, CHILD_DEADLINE_MS, &st) != 0 || st.timed_out) return;
+    *ex = st.exited; *code = st.code; *sg = st.sig;
 }
 
-static long at(const char *s, const char *p) { return tx_find(s, tx_len(s, 1 << 20), p, tx_len(p, 1 << 20)); }
+/* first offset of P in S (both NUL-terminated child output or literals), or -1; byte compare */
+static long at(const char *s, const char *p) {
+    long sn = tx_len(s, 1 << 20), pn = tx_len(p, 1 << 20), i, j;
+    for (i = 0; i + pn <= sn; i++) {
+        for (j = 0; j < pn && s[i + j] == p[j]; j++) {}
+        if (j == pn) return i;
+    }
+    return -1;
+}
 
 static void check_children(void) {
     char out[1024];
@@ -193,12 +227,14 @@ static int in_session(void *ud) {
 }
 
 static void check_setpgid(void) {
-    const char *u = sy_env_or("UNISACC", "./unisacc.com");
+    const char *u = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product 同 run_child:本检查自身的子进程跑法 */
     char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", "h", 0 };
     char out[512];
-    int cut = 0, rc, fds[2] = {-1, -1}, pid, ofd = -1;
+    int rc, fds[2] = {-1, -1}, pid;
     long n = 0, k;
-    rc = sy_run(av, out, sizeof out, &cut);
+    sy_exit_t st;
+    rc = run_bounded(av, out, sizeof out, 0, CHILD_DEADLINE_MS, &st);   /* 0: stays in this group, not its leader */
+    if (rc == 0) rc = sy_exit_code(&st);
     ck(rc == 0 && at(out, "PGID before_self=0 rc=0 after_self=1\n") >= 0, "setpgid-0-0-new-group-id-is-own-pid");
     if (at(out, "PGID before_self=0 rc=0 after_self=1\n") < 0) printf("  child h: rc=%d out<<%s>>\n", rc, out);
     pid = sy_fork_session(in_session, 0, fds);
@@ -208,10 +244,14 @@ static void check_setpgid(void) {
     } else out[0] = 0;
     ck(pid > 0 && sy_wait(pid, 0) == 0 && at(out, "SESS 1\n") >= 0, "setpgid-forked-session-leader-eperm");
     {   char *v[] = { "sh", "-c", "sleep 5", 0 };
-        pid = sy_spawn_pipe(v, 0, 0, &ofd, 0);
+        sy_spawn_t o;
+        sy_child_t c;
+        sy_spawn_init(&o);
+        o.argv = v; o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_PIPE; o.flags = SY_SPAWN_ERR_TO_OUT; o.pgroup = -1; o.deadline_ms = SLEEPER_DEADLINE_MS;
+        pid = sy_proc_spawn(&o, &c) == 0 ? c.pid : -1;
         ck(pid > 0 && sy_getpgid(pid) == pid, "spawn-pipe-child-leads-own-group");
         ck(pid > 0 && sy_setpgid(pid, pid) == -EACCES, "setpgid-exec-d-child-eacces");
-        if (pid > 0) { sy_kill(pid); sy_close(ofd); }
+        if (pid > 0) { sy_kill(pid); sy_proc_close(&c); }
     }
     ck(sy_setpgid(-1, 0) == -EINVAL && sy_setpgid(0, -1) == -EINVAL, "setpgid-negative-einval");
     ck(sy_setpgid(999999999, 0) == -ESRCH, "setpgid-not-self-nor-child-esrch");
