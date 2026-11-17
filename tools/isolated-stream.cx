@@ -1,0 +1,101 @@
+/* Self-contained single-model runner for development checks. INPUT|- SOURCE INCLUDE.
+ * Read exactly one stream model plus resources from this executable's own footer;
+ * execute through the packaged generic kernel, with no product subprocess.
+ * Native host only. Files, decoded models and resources are bounded to 64 MiB.
+ * Check: tools/check-isolated-stream.cx and tests/e2-input-binding.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.hostid
+#pragma unisa use sys.kernel
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.model_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use runtime.codec
+#pragma unisa use runtime.rescache
+#pragma unisa use compiler.bindstage
+
+static CxPackageDecode package;
+static const char *source_label,*include_dir;
+static unsigned char one=1,empty=0;
+void core_host_panic(const char *reason){sy_eprintf("isolated-stream: %s\n",reason?reason:"panic");sy_exit(2);}
+const CxPackage *pm_package(void){return &package.package;}
+static void *allocate(void *p,size_t n){return mm_grow(p,n?n:1);}
+static int keyeq(const unsigned char *key,int n,const char *want,long wn){return n==wn&&mm_same(key,want,wn);}
+int core_host_fetch(const unsigned char *key,int n,unsigned char **bytes,int *len){
+    if(!key||n<=0||!bytes||!len)core_host_panic("invalid resource request");
+    *bytes=0;*len=0;
+    if(keyeq(key,n,"\0cli/f1",7)){*bytes=&one;*len=1;return 1;}
+    if(keyeq(key,n,"\0cli/source",11)){*bytes=(unsigned char *)source_label;*len=tx_len(source_label,4096);return 1;}
+    if(keyeq(key,n,"\0cli/target",11)){*bytes=(unsigned char *)tn_self();*len=tx_len(tn_self(),64);return 1;}
+    if(keyeq(key,n,"\0cli/include-dir",16)){*bytes=(unsigned char *)include_dir;*len=tx_len(include_dir,4096);return 1;}
+    if(keyeq(key,n,"\0cli/attributes",15)){*bytes=&empty;return 1;}
+    if(rescache_fetch(key,n,bytes,len))return 1;
+    if(n>=7&&key[0]==0&&mm_same(key+1,"inc/",4)&&(key[5]=='a'||key[5]=='q')&&key[6]=='/'){
+        char path[4096];int64_t size;int rc;
+        if(n>=15&&key[5]=='a'&&mm_same(key+7,"include/",8))return 0;
+        if(n-7>=(int)sizeof path||tx_chr((const char *)key+7,n-7,0)>=0)core_host_panic("include path bound");
+        if(tx_copy(path,sizeof path,(const char *)key+7,n-7))core_host_panic("include path copy");
+        rc=sy_read_file(path,bytes,&size,67108864);
+        if(rc==-ENOENT)return 0;if(rc)core_host_panic("include file read");
+        *len=(int)size;return 2;
+    }
+    return 0;
+}
+static unsigned char *read_input(const char *name,int *length){
+    unsigned char *b=0;int64_t n=0;
+    if(!tx_eqz(name,"-")){if(sy_read_file(name,&b,&n,67108864))core_host_panic("input read");}
+    else{
+        long cap=4096;b=mm_alloc(cap);if(!b)core_host_panic("input allocation");
+        for(;;){if(n==cap){if(cap>=67108864){unsigned char extra;long got=sy_read(0,&extra,1);if(got<0)core_host_panic("stdin read");if(got)core_host_panic("input bound");break;}cap*=2;unsigned char *p=mm_grow(b,cap);if(!p)core_host_panic("input allocation");b=p;}
+            long got=sy_read(0,b+n,cap-n);if(got<0)core_host_panic("stdin read");if(!got)break;n+=got;}
+    }
+    *length=(int)n;return b;
+}
+static void bind_model(CoreModel *out,const CxModel *m){
+    if(mm_fill(out,sizeof *out,0,sizeof *out))core_host_panic("model binding");
+    out->ns=m->ns;out->nq=m->nq;out->nrg=m->nrg;out->start=m->start;out->isnet=m->isnet;
+    out->str=m->str;out->strl=m->strl;out->qoff=m->qoff;out->qlen=m->qlen;out->qa=m->qa;
+    out->mode=m->smode;out->count=m->rowc;out->keys=m->rowk;out->next=m->rown;out->seq=m->rowq;
+    out->lo=m->nlo;out->hi=m->nhi;out->base_next=m->bn;out->base_seq=m->bq;out->ret_seq=m->rets;out->ret_ok=m->retok;
+}
+static long long budget(void){
+    const char *v=sy_env("UNISA_MAXSTEPS");long long n=0;
+    if(!v||!*v)return 200000000;
+    for(long i=0;v[i];i++){int d=v[i]-'0';if(d<0||d>9||n>(9223372036854775807LL-d)/10)core_host_panic("UNISA_MAXSTEPS positive decimal required");n=n*10+d;}
+    if(n<1)core_host_panic("UNISA_MAXSTEPS positive decimal required");return n;
+}
+int main(int argc,char **argv){
+    char self[4096];unsigned char *file;int64_t fn;PackageFooter footer;
+    if(argc<1||argc>4)core_host_panic("usage INPUT|- SOURCE INCLUDE");
+    source_label=argc>2?argv[2]:"stdin.c";include_dir=argc>3?argv[3]:"include";
+    if(tx_len(source_label,4096)<0||tx_len(include_dir,4096)<0)core_host_panic("argument bound");
+    if((sy_env("UNISA_KERNEL")&&*sy_env("UNISA_KERNEL"))||(sy_env("UNISA_KERNEL_SHA")&&*sy_env("UNISA_KERNEL_SHA")))core_host_panic("external kernel forbidden");
+    if(sy_self_path(self,sizeof self)<=0||sy_read_file(self,&file,&fn,67108864)||!packagefooter_locate_bytes(file,fn,&footer))core_host_panic("self package footer");
+    package.allocate=allocate;package.release=mm_free;
+    if(cxpk_decode(&package,file+footer.package_offset,footer.package_length))core_host_panic(package.why);
+    CxPackage *p=&package.package;
+    if(p->m!=1||p->s!=1||p->stages[0].model!=0||!tx_eqz(p->stages[0].route,"stream"))core_host_panic("exactly one stream model required");
+    if(p->raw[0]<=0||p->raw[0]>67108864)core_host_panic("model bound");
+    for(int i=0;i<p->nr;i++)if(p->res[i].rawlen>67108864)core_host_panic("resource bound");
+    unsigned char *raw=mm_alloc(p->raw[0]);if(!raw)core_host_panic("model allocation");
+    CxCodecCrc crc;uint32_t actual;
+    if(cxcodec_inflate(raw,p->raw[0],p->b+p->off[0],p->len[0])||cxcodec_crc_init(&crc)||cxcodec_crc(&crc,(const char *)raw,p->raw[0],&actual)||actual!=p->crc[0])core_host_panic("compressed model CRC");
+    CxDecode decoded={0};decoded.allocate=allocate;decoded.release=mm_free;
+    if(cxmd_decode(&decoded,raw,p->raw[0]))core_host_panic(decoded.why);
+    CoreModel model;bind_model(&model,&decoded.model);
+    int inputn;unsigned char *input=read_input(argc>1?argv[1]:"-",&inputn);CoreResult result={0};
+    int rc=core_run(&model,input,inputn,source_label,budget(),&result);
+    if(result.err.n&&sy_write_all(2,result.err.b,result.err.n))rc=2;
+    if(rc){if(result.reason)sy_eprintf("isolated-stream: %s\n",result.reason);}
+    else if(result.out.n&&sy_write_all(1,result.out.b,result.out.n))rc=2;
+    mm_free(result.out.b);mm_free(result.err.b);mm_free(input);cxml_release(&decoded.model,mm_free);mm_free(raw);
+    rescache_release();cxpl_release(p,mm_free);mm_free(file);return rc;
+}
