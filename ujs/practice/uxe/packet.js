@@ -239,8 +239,10 @@ export function decodeRenderPacket(raw, cache) {
       for (let k = 0; k < n; k++) rgba[k] = dv.getUint8(o + k);
       o += n;
       textures.push({ id, w, h, wrap, filter, rgba });
+      if (cache) cache[id] = 1;
     }
   }
+
   for (let i = 0; i < clouds.length; i++) {
     const id = clouds[i].mapId | 0;
     if (!id) continue;

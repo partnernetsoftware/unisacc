@@ -9,6 +9,7 @@
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_PLANE } from "../meshes.js";
+import { encodeRenderPacket, decodeRenderPacket } from "../packet.js";
 (async()=>{
   try{
     const P=window.TEX16_PROBES;
@@ -36,7 +37,6 @@ import { MESH_PLANE } from "../meshes.js";
     scene.fog={density:0,color:[0,0,0]};
     scene.ambient={color:[0,0,0],intensity:0};
     scene.lights=[];
-    scene.wave=0;
     const cloud=scene.instances("p",1,[1,1,1]);
     cloud.meshId=MESH_PLANE;
     cloud.mapId=1;
@@ -45,6 +45,7 @@ import { MESH_PLANE } from "../meshes.js";
     cam.setEye(0,0,8); cam.setTarget(0,0,0);
     const gl=canvas.getContext("webgl");
     const px=new Uint8Array(4);
+    const cache={};
     function sample(){
       const out=[];
       for(const p of probes){
@@ -60,15 +61,28 @@ import { MESH_PLANE } from "../meshes.js";
       }
       return 1;
     }
-    r.render(scene, cam, [{id:1,w:4,h:4,rgba}]);
+    function pkt(texs){
+      return encodeRenderPacket({
+        clear:[0,0,0,1],
+        camera:{fovy:1,near:0.05,far:40,eye:[0,0,8],target:[0,0,0]},
+        clouds:[{color:[1,1,1],count:1,xyz:new Float32Array([0,0,0]),scale:new Float32Array([8]),meshId:MESH_PLANE,mapId:1}],
+        textures:texs
+      });
+    }
+    function go(texs){
+      const p=decodeRenderPacket(pkt(texs), cache);
+      r.render(scene, cam, p.textures);
+      return p.textures.length;
+    }
+    const n1=go([{id:1,w:4,h:4,rgba}]);
     const a=sample();
-    r.render(scene, cam, []);
+    const n2=go([]);
     const b=sample();
-    r.render(scene, cam, [{id:1,w:4,h:4,rgba:rgba2}]);
+    const n3=go([{id:1,w:4,h:4,rgba:rgba2}]);
     const c=sample();
-    window.__TEX16__={a,b,c,probes};
-    document.getElementById("hud").textContent=JSON.stringify({a,b,c,probes});
-    const ok=eq(a,"r")&&eq(b,"r")&&eq(c,"r2");
+    window.__TEX16__={a,b,c,nUpload:[n1,n2,n3],probes};
+    document.getElementById("hud").textContent=JSON.stringify({a,b,c,nUpload:[n1,n2,n3]});
+    const ok=eq(a,"r")&&eq(b,"r")&&eq(c,"r2")&&n1===1&&n2===0&&n3===1;
     document.title=ok?"TEX16_OK":"TEX16_FAIL";
   }catch(e){
     document.title="TEX16_ERR";

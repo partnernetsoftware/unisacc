@@ -185,6 +185,8 @@ export async function createBrowserHost(canvas, opts = {}) {
   }
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
+  const texCache = {};
+
   /** @type {ReturnType<typeof summarizeRenderPacket>} */
   let lastPacketSummary = null;
   /** @type {object[]} */
@@ -245,11 +247,13 @@ export async function createBrowserHost(canvas, opts = {}) {
       cloud.metalness = c.metalness ?? 0.2;
       cloud.roughness = c.roughness ?? 0.5;
       cloud.meshId = c.meshId ?? 0;
+      cloud.mapId = c.mapId ?? 0;
       cloud.dirty = true;
     }
     lastPacketClouds = packet.clouds?.length || 0;
     lastPacketSummary = summarizeRenderPacket(packet);
-    renderer.render(scene, camera);
+    renderer.render(scene, camera, packet.textures);
+
     publishDebugSnap();
   }
 
@@ -345,7 +349,8 @@ export async function createBrowserHost(canvas, opts = {}) {
         lastPacketBytes = ArrayBuffer.isView(packetOrBuf)
           ? packetOrBuf.byteLength
           : packetOrBuf.byteLength;
-        packet = decodeRenderPacket(packetOrBuf);
+        packet = decodeRenderPacket(packetOrBuf, texCache);
+
       } else {
         lastPacketBytes = 0;
       }
