@@ -372,6 +372,7 @@ export function createWebGLRenderer(canvas, opts) {
           h ^= (t.h | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           h ^= (t.filter | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           const src = t.rgba;
+          for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
 
           const rec = texCache[id];
           if (rec && rec.hash === h && rec.tex) continue;
