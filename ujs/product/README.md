@@ -5,7 +5,7 @@
 
 ## 版本
 
-`ujs.com 0.0.7`(`--version`;APE `--product ujs 0.0.7`)。host1 编/验/跑语义与 0.0.6 相同。0.0.7 新增的是 lex 扫描器切片,不是 IntNet,也不是其余九网。`build.cx` 出本机 ELF;`build-ape.cx` 出五切片 APE(win/x86_64 裸 + 四 gzip);`build-six.cx` 出六目标原生镜像,不是 APE。无 win/arm64 切片。
+`ujs.com 0.0.7`(`--version`;APE `--product ujs 0.0.7`)。host1 编/验/跑语义与 0.0.6 相同。0.0.7 新增的是 lex 扫描器切片,不是 IntNet,也不是其余九网。`build.cx` 出本机 ELF;`build-ape.cx` 出五切片 APE(win/x86_64 裸 + 四 gzip);`build-six.cx` 出六目标原生镜像,不是 APE。无 win/arm64 切片。`--smoke` 调 `build.cx`,会把已有 APE 盖成 ELF;要 APE 须再跑 `build-ape.cx`。检查 `tools/check-ujs-ape.cx`。
 
 ## 命令
 
