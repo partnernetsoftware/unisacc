@@ -20,7 +20,7 @@ typedef struct {
   uint32_t nfunc;
   uint32_t nimport;
   int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
-  uint32_t gpu_len, gpu_sum;
+  uint32_t gpu_len, gpu_sum, gpu_fnv;
   int gpu_got;
   WV stk[H1_STK];
   int sp;
@@ -479,11 +479,17 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
   if (imp) {
     uint32_t ptr = (uint32_t)(locals[0].k == WK_I32 ? locals[0].i32 : (int32_t)locals[0].i64);
     uint32_t len = (uint32_t)(locals[1].k == WK_I32 ? locals[1].i32 : (int32_t)locals[1].i64);
-    uint32_t s = 0, k;
+    uint32_t s = 0, k, fnv = 2166136261u;
     if (len && (ptr > h->mem_n || len > h->mem_n - ptr)) return h1_err(h, "gpu oob");
-    for (k = 0; k < len; k++) s += h->mem[ptr + k];
+    for (k = 0; k < len; k++) {
+      uint8_t b = h->mem[ptr + k];
+      s += b;
+      fnv ^= b;
+      fnv *= 16777619u;
+    }
     h->gpu_len = len;
     h->gpu_sum = s;
+    h->gpu_fnv = fnv;
     h->gpu_got = 1;
     return 0;
   }
@@ -529,9 +535,9 @@ int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out
     h1_pop_to(&h, &val);
     snprintf(out, out_cap,
              h.gpu_got
-             ? "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"gpu_len\":%u,\"gpu_sum\":%u,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}"
+             ? "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"gpu_len\":%u,\"gpu_sum\":%u,\"gpu_fnv\":%u,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}"
              : "{\"run\":\"ok\",\"tag\":\"i64\",\"value\":%lld,\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}",
-             (long long)val.i64, h.gpu_len, h.gpu_sum);
+             (long long)val.i64, h.gpu_len, h.gpu_sum, h.gpu_fnv);
   } else if (tag == H1_TAG_F64 && h.f64_i >= 0) {
     h1_push_copy(&h, &handle);
     if (h1_call(&h, (uint32_t)h.f64_i, 0) != 0) {
