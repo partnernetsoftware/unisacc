@@ -311,7 +311,7 @@ static int pn_tok_ix(int tok) {
   default: return -1;
   }
 }
-static int parse_net_is_bad(int nt, int tok) {
+static const char *parse_net_cls(int nt, int tok) {
   int ti, j, hv, c, best = -1, bestv = -999999, logit[PN_CLS];
   if (!pn_load()) return 0;
   ti = pn_tok_ix(tok);
@@ -326,7 +326,11 @@ static int parse_net_is_bad(int nt, int tok) {
   for (c = 0; c < g_pn_ncls; c++) {
     if (best < 0 || logit[c] > bestv) { best = c; bestv = logit[c]; }
   }
-  return best >= 0 && !strcmp(g_pn_cls[best], "bad");
+  return best >= 0 ? g_pn_cls[best] : 0;
+}
+static int parse_net_is_bad(int nt, int tok) {
+  const char *a = parse_net_cls(nt, tok);
+  return a && !strcmp(a, "bad");
 }
 static int parse_net_top_is_bad(int tok) { return parse_net_is_bad(0, tok); }
 #endif
@@ -1101,11 +1105,13 @@ static int pblock(Lex *L, Prog *P) {
 }
 
 static int pstmt(Lex *L, Prog *P) {
+  const char *act = 0;
   if (L->tok == T_BAD) { P->err = "bad token"; return 0; }
 #ifdef UJS_HOST
-  if (parse_net_is_bad(1, L->tok)) { P->err = "parse-net"; return 0; }
+  act = parse_net_cls(1, L->tok);
+  if (act && !strcmp(act, "bad")) { P->err = "parse-net"; return 0; }
 #endif
-  if (L->tok == T_FUNCTION) {
+  if (L->tok == T_FUNCTION && (!act || !strcmp(act, "fn"))) {
     FnDef F;
     int fi, li;
     memset(&F, 0, sizeof F);
@@ -1144,7 +1150,7 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, li)) return 0;
     return 1;
   }
-  if (L->tok == T_LET) {
+  if (L->tok == T_LET && (!act || !strcmp(act, "let"))) {
     next(L);
     if (L->tok != T_ID) { P->err = "let name"; return 0; }
     {
@@ -1198,7 +1204,7 @@ static int pstmt(Lex *L, Prog *P) {
       }
     }
   }
-  if (L->tok == T_WHILE) {
+  if (L->tok == T_WHILE && (!act || !strcmp(act, "while"))) {
     next(L);
     if (!emit(P, OP_WBEGIN, 0)) return 0;
     if (!expect(L, T_LP, P, "while (")) return 0;
@@ -1210,7 +1216,7 @@ static int pstmt(Lex *L, Prog *P) {
     return emit(P, OP_WEND, 0);
   }
   /* for (let x of listExpr) { … } → while index walk (no iterator protocol) */
-  if (L->tok == T_FOR) {
+  if (L->tok == T_FOR && (!act || !strcmp(act, "for"))) {
     static int fo_gen;
     char an[MAXN], in[MAXN], xn[MAXN];
     int xa, ia, va, ty, et;
@@ -1255,7 +1261,7 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, ia)) return 0;
     return emit(P, OP_WEND, 0);
   }
-  if (L->tok == T_IF) {
+  if (L->tok == T_IF && (!act || !strcmp(act, "if"))) {
     next(L);
     if (!expect(L, T_LP, P, "if (")) return 0;
     int ty = pexpr(L, P); if (!ty) return 0;
@@ -1276,7 +1282,7 @@ static int pstmt(Lex *L, Prog *P) {
     return emit(P, OP_IF2, 0);
   }
   /* switch (i64) { case N: … default: … } — no fallthrough; bodies usually return */
-  if (L->tok == T_SWITCH) {
+  if (L->tok == T_SWITCH && (!act || !strcmp(act, "switch"))) {
     int sc, ty;
     next(L);
     if (!expect(L, T_LP, P, "switch (")) return 0;
@@ -1311,7 +1317,7 @@ static int pstmt(Lex *L, Prog *P) {
     }
     return expect(L, T_RB, P, "switch }");
   }
-  if (L->tok == T_RETURN) {
+  if (L->tok == T_RETURN && (!act || !strcmp(act, "return"))) {
     next(L);
     int ty = pexpr(L, P); if (!ty) return 0;
     if (P->in_fn > 0) {
