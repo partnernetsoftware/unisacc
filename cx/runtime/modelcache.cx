@@ -388,6 +388,31 @@ done:
     mm_free(names);
 }
 
+/* Remove uc-<key>.tmp files on the account fast path, which skips mc_trim: such a temp exists
+   only while its writer holds the budget lock, held by this caller now, so one seen here was
+   left by a crashed writer (the unitcache.cx contract). Names only, no stat; the 71-byte
+   reserved name is the same test as mc_trim, so no other file is touched; unlink never follows
+   a symlink. Listing or allocation failure leaves the sweep to the next pass. */
+static void mc_sweep_tmp(const char *dir) {
+    char *names, path[4400];
+    long at = 0, len, i;
+    int fd, count;
+    names = mm_alloc(65536);
+    if (!names) return;
+    fd = sy_open_read(dir);
+    if (fd < 0) { mm_free(names); return; }
+    count = sy_dir_names(fd, names, 65536);
+    sy_close(fd);
+    for (i = 0; i < count; i++) {
+        const char *name = names + at;
+        len = tx_len(name, 65536 - at);
+        at += len + 1;
+        if (len == 71 && name[0] == 'u' && name[1] == 'c' && name[2] == '-' && tx_eqz(name + 67, ".tmp") &&
+            !mc_join(path, sizeof path, dir, name)) sy_unlink(path);
+    }
+    mm_free(names);
+}
+
 /* Consume LOCKFD, publishing exactly the caller's already complete temp file.
    Trimming cannot change publication success or the enclosing program result. */
 int mc_cache_publish(const char *dir, const char *tmp, const char *path, int lockfd) {
@@ -408,7 +433,7 @@ int mc_cache_publish(const char *dir, const char *tmp, const char *path, int loc
             if (acct < old) acct = 0; else acct -= old;
             if (acct <= 18446744073709551615ull - (unsigned long long)nst.size) {
                 acct += (unsigned long long)nst.size;
-                if (acct <= limit) { mc_acct_write(dir, acct); ok = 2; }
+                if (acct <= limit) { mc_acct_write(dir, acct); mc_sweep_tmp(dir); ok = 2; }
             }
         }
         if (ok != 2) {
