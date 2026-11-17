@@ -71,7 +71,7 @@ three.module、原作 GLB/音频、抬 cxraw/cxtrunc、改 host1-pass 28 行、�
 
 ## 6. 下一动作
 
-W2 浏览器可调步进(不重跑 let);W3 `host_gpu_submit`。B 片单未锁前不扩 oneshot 网格。A 按 far/mid/near 描边尚未做。
+W2 不能只改 host1-runtime：`run_step` 仍重跑 `main`。要 compiler 不重跑 `let`，或 UXE `sim` import。W3 三页未接已有 `host_gpu_submit`。B 片单未锁前不扩 oneshot 网格。A 按 far/mid/near 描边尚未做。
 
 ## 7. 进度
 
