@@ -93,8 +93,11 @@ flowchart LR
 - 多单元函数指针形参:跨单元函数指针形参含结构体指针被拒,R3 去强转待补。
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
-- cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
 - core-compat参考源转换:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换,不扩大批准域;入口build/state-unverified.tsv U20。
 - 全套入口分片聚合:tests/run.cx --all未读取子片收据,本候选另报missing=1275;正式driver分片统计保留,入口build/state-unverified.tsv U21。
 - 全套材料与平台证据:118材料族仅47项登记,无生产者与外部主机证据未补齐,全套NOT_QUALIFIED;入口build/state-unverified.tsv U22。
 - stages独立金样:五项字节差异的独立oracle尚未完成,保留原断言和失败,下一版补齐;入口build/state-unverified.tsv U23。
+
+### 接班与交付边界
+
+cc额度暂停期间cdx按项目所有者授权临时接班;不重起已终止的同输入实验,不把额度中断小单或隔离树半成品当已验交付,提交排除来源未核的执行位改动。证据入口plans/local-product-0.0.71.md。
