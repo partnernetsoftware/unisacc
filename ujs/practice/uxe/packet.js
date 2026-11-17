@@ -216,19 +216,33 @@ export function decodeRenderPacket(raw) {
   const textures = [];
   if (ver >= 4 && o + 4 <= dv.byteLength) {
     const nTex = dv.getUint32(o, true); o += 4;
+    let sum = 0;
     for (let i = 0; i < nTex; i++) {
+      if (o + 8 > dv.byteLength) throw new Error("truncated tex header");
       const id = dv.getUint16(o, true); o += 2;
       const w = dv.getUint16(o, true); o += 2;
       const h = dv.getUint16(o, true); o += 2;
       const wrap = dv.getUint8(o); o += 1;
       const filter = dv.getUint8(o); o += 1;
       o += 2;
+      if (!w || !h || w > 4096 || h > 4096) throw new Error("tex bound");
       const n = w * h * 4;
+      if (n > 1048576) throw new Error("tex too large");
+      sum += n;
+      if (sum > 1048576) throw new Error("tex too large");
+      if (o + n > dv.byteLength) throw new Error("truncated tex");
       const rgba = new Uint8Array(n);
       for (let k = 0; k < n; k++) rgba[k] = dv.getUint8(o + k);
       o += n;
       textures.push({ id, w, h, wrap, filter, rgba });
     }
+  }
+  for (let i = 0; i < clouds.length; i++) {
+    const id = clouds[i].mapId | 0;
+    if (!id) continue;
+    let ok = 0;
+    for (let j = 0; j < textures.length; j++) if (textures[j].id === id) ok = 1;
+    if (!ok) throw new Error("dangling mapId " + id);
   }
   return {
     version: ver,

@@ -1,0 +1,61 @@
+#pragma unisa use chrome_dom
+/* tools/check-uxep-v4.cx -- 浏览器验 v3 FNV 与 v4 悬空/超限.
+ *
+ * sh ./unisacc.com tools/check-uxep-v4.cx --
+ */
+static unsigned ofnv;
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+int main(void) {
+    FILE *f;
+    char line[1024], cwd[512], url[768];
+    char *p;
+    int retries = 0, rc, n, i;
+    const char *fin[2];
+    const char *pre = "file://";
+    const char *suf = "/ujs/practice/uxe/test/uxep-v4.html?fnv=";
+    char fnvdec[16];
+    int nd = 0, x;
+    f = fopen("ujs/tests/uxep-tri-oracle.tsv", "rb");
+    if (!f) { fprintf(stderr, "no tsv\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        if (line[0] == '#' || line[0] == 'k') continue;
+        p = line;
+        while (*p && *p != '\t') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') { ofnv = ofnv * 10u + (unsigned)(*p - '0'); p++; }
+        break;
+    }
+    fclose(f);
+    if (!ofnv) { fprintf(stderr, "no fnv\n"); return 2; }
+    {
+        unsigned u = ofnv;
+        char tmp[16];
+        int k = 0;
+        if (u == 0) tmp[k++] = '0';
+        while (u) { tmp[k++] = (char)('0' + (u % 10u)); u /= 10u; }
+        nd = k;
+        for (i = 0; i < k; i++) fnvdec[i] = tmp[i];
+    }
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    n = 0;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 700; i++) url[n++] = suf[i];
+    for (i = nd; i > 0 && n < 760; i--) url[n++] = fnvdec[i - 1];
+    url[n] = 0;
+    fin[0] = "UXEP_V4_OK";
+    fin[1] = "UXEP_V4_FAIL";
+    rc = chd_dump_expect("/usr/bin/google-chrome", url, "UXEP_V4_OK", fin, 2, "uxep-v4", 3, 25, &retries);
+    if (rc == 3) { printf("UXEP_V4_UNMEASURED\tno-chrome\n"); return 2; }
+    ck(rc == 0, "uxep-v4-title");
+    printf("CHECK_UXEP_V4\tfnv=%u\tfailed=%d\n", ofnv, failed);
+    return failed ? 1 : 0;
+}
