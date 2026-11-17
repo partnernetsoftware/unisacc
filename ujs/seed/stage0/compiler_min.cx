@@ -1229,7 +1229,8 @@ static int pstmt(Lex *L, Prog *P) {
       if (!expect(L, T_EQ, P, "expected =")) return 0;
       ty = pexpr(L, P); if (!ty) return 0;
       P->gty[g] = (uint8_t)ty;
-      tmp = ensure_lscratch(P); if (tmp < 0) return 0;
+      tmp = (ty == TY_F64) ? ensure_fscratch(P) : ensure_lscratch(P);
+      if (tmp < 0) return 0;
       if (!emit(P, OP_PLET, (int64_t)g | ((int64_t)ty << 16) | ((int64_t)tmp << 32))) return 0;
       return expect(L, T_SEMI, P, "expected ;");
     }
@@ -1670,7 +1671,11 @@ static int emit_ops(Buf *c, Prog *P) {
       if (slot < MAXG && P->gpersist[slot]) {
         uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
         if (!bi32(c, (int32_t)pa)) return 0;
-        if (!bu8(c, 0x29) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        if (ty == TY_F64) {
+          if (!bu8(c, 0x2b) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        } else {
+          if (!bu8(c, 0x29) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        }
         break;
       }
       {
@@ -1690,13 +1695,23 @@ static int emit_ops(Buf *c, Prog *P) {
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
       if (slot < MAXG && P->gpersist[slot]) {
-        int tmp = P->lscratch;
+        int tmp;
         uint32_t pa = (uint32_t)PERSIST_BASE + slot * (uint32_t)PERSIST_STRIDE + 8u;
-        if (tmp < 0) { tmp = ensure_lscratch(P); if (tmp < 0) return 0; }
-        if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
-        if (!bi32(c, (int32_t)pa)) return 0;
-        if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
-        if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        if (ty == TY_F64) {
+          tmp = P->fscratch;
+          if (tmp < 0) { tmp = ensure_fscratch(P); if (tmp < 0) return 0; }
+          if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bi32(c, (int32_t)pa)) return 0;
+          if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bu8(c, 0x39) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        } else {
+          tmp = P->lscratch;
+          if (tmp < 0) { tmp = ensure_lscratch(P); if (tmp < 0) return 0; }
+          if (!bu8(c, 0x21) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bi32(c, (int32_t)pa)) return 0;
+          if (!bu8(c, 0x20) || !bleu(c, (uint32_t)tmp)) return 0;
+          if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+        }
         break;
       }
       if (ty == TY_I64) {
@@ -1773,7 +1788,11 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x04) || !bu8(c, 0x40)) return 0;
       if (!bi32(c, (int32_t)(base + 8u))) return 0;
       if (!bu8(c, 0x20) || !bleu(c, tmp)) return 0;
-      if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      if (ty == TY_F64) {
+        if (!bu8(c, 0x39) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      } else {
+        if (!bu8(c, 0x37) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
+      }
       if (!bi32(c, (int32_t)base)) return 0;
       if (!bi32(c, (int32_t)ty)) return 0;
       if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
