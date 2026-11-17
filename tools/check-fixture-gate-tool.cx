@@ -1,0 +1,85 @@
+/* Checks tools/fixture-gate-tool.cx: private roots and byte equality against
+ * the real register --tool producer. No product qualification. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+static int failed,passed;
+static void ck(int ok,const char*name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(ok)passed++;else failed++;}
+static void run(char **v,const char*cwd,int sec,np_result*r){char why[1024];if(np_run(v,cwd,0,sec,r,why,sizeof why)){sy_eprintf("fixture check transport: %s\n",why);sy_exit(2);}}
+static void join(char*out,size_t cap,const char*root,const char*leaf){if(cx_fmt(out,cap,"%s/%s",root,leaf))sy_exit(2);}
+static void product_path(char*out,size_t cap,const char*root){join(out,cap,root,"unisacc.com");}
+static char *fact(const char*root,const char*table,const char*key){
+    char path[4400];join(path,sizeof path,root,table);size_t n=0,kn=strlen(key);char*b=cx_read(path,&n),*answer=0;if(!b)sy_exit(2);
+    for(char*p=b;*p;){char*e=strchr(p,'\n');if(!e)sy_exit(2);if((size_t)(e-p)>kn&&!memcmp(p,key,kn)&&p[kn]=='\t'){
+        if(answer)sy_exit(2);size_t z=(size_t)(e-p);answer=mm_alloc(z+1);if(!answer||mm_copy(answer,z+1,p,z))sy_exit(2);answer[z]=0;}p=e+1;}
+    mm_free(b);return answer;
+}
+static int inventory_count(const char*root){
+    char path[4400];join(path,sizeof path,root,"tests/tools-compile-sources.tsv");size_t n=0;char*b=cx_read(path,&n);if(!b)sy_exit(2);
+    int rows=0;for(char*p=b;*p;){char*e=strchr(p,'\n');if(!e)sy_exit(2);if(e>p&&*p!='#')rows++;p=e+1;}mm_free(b);return rows;
+}
+static int projection(const char*root,const char*work,const char*image){
+    char group[80],suffix[32],fx[4400],product[4400],parent[4400],registrar[4400],pkggen[4400],path[4400],why[1024];
+    long pid=sy_pid();int si=0;do{suffix[si++]=(char)('a'+pid%10);pid/=10;}while(pid&&si<30);suffix[si]=0;
+    if(cx_fmt(group,sizeof group,"projection-%s",suffix)||cx_fmt(fx,sizeof fx,"%s/.cache/unisacc/check-precommit-gates/fx-%s",sy_env_or("HOME",""),group))return 2;
+    product_path(product,sizeof product,root);join(parent,sizeof parent,root,"tools/check-precommit-gates.cx");
+    join(registrar,sizeof registrar,root,"tools/register.cx");join(pkggen,sizeof pkggen,root,"tools/batch-packages-gen.cx");
+    char*prepare[]={"sh",product,parent,"--","--prepare",group,"register",0};np_result r={0};run(prepare,root,35,&r);
+    ck(!r.rc,"projection-private-tree-prepared");np_free(&r);if(failed)return 1;
+    int rows=inventory_count(fx),padding=(8-rows%8)%8;
+    char register_native[4400];join(register_native,sizeof register_native,work,"register.native");
+    if(tq_native(root,registrar,register_native,why,sizeof why))return 2;
+    char names[8][100],*reg[24]={register_native};int rn=1;
+    const char*body="/* Checks tools/fixture-gate-tool.cx metadata. */\nint main(void){return 0;}\n";
+    for(int i=0;i<padding;i++){
+        if(cx_fmt(names[i],sizeof names[i],"tools/zzprojection-pad-%d.cx",i))return 2;join(path,sizeof path,fx,names[i]);
+        if(sy_write_atomic(path,body,strlen(body),0644))return 2;reg[rn++]="--tool";reg[rn++]=names[i];
+    }
+    if(padding){reg[rn]=0;run(reg,fx,30,&r);ck(!r.rc,"projection-reference-padding");np_free(&r);if(failed)return 1;}
+    rows=inventory_count(fx);ck(rows%8==0,"projection-forces-real-shard-boundary");if(failed)return 1;
+    const char*source="tools/zzprojection-probe.cx";join(path,sizeof path,fx,source);if(sy_write_atomic(path,body,strlen(body),0644))return 2;
+    const char*tables[]={"tests/batches.tsv","tests/tools-compile-sources.tsv","build/batch-packages.tsv"};char*baseline[3];size_t sizes[3];
+    for(int i=0;i<3;i++){join(path,sizeof path,fx,tables[i]);baseline[i]=cx_read(path,&sizes[i]);if(!baseline[i])return 2;}
+    char*tree[]={"git","write-tree",0};run(tree,fx,10,&r);if(r.rc)return 2;char*before_tree=strdup(r.out);np_free(&r);
+    reg[1]="--tool";reg[2]=(char*)source;reg[3]=0;run(reg,fx,30,&r);ck(!r.rc,"projection-real-register-ran");np_free(&r);if(failed)return 1;
+    char*packages[]={"sh",product,pkggen,"--","--write",0};run(packages,fx,30,&r);ck(!r.rc,"projection-real-package-generator-ran");np_free(&r);if(failed)return 1;
+    char id[100],pkgkey[120];if(cx_fmt(id,sizeof id,"tools-compile-%03d",rows/8)||cx_fmt(pkgkey,sizeof pkgkey,"batch\t%s",id))return 2;
+    char*expected_inventory=fact(fx,tables[1],source),*expected_batch=fact(fx,tables[0],id),*expected_package=fact(fx,tables[2],pkgkey);
+    ck(expected_inventory&&expected_batch&&expected_package,"projection-real-rows-present");if(failed)return 1;
+    for(int i=0;i<3;i++){join(path,sizeof path,fx,tables[i]);if(sy_write_atomic(path,baseline[i],sizes[i],0644))return 2;mm_free(baseline[i]);}
+    char*unstage[]={"git","update-index","--force-remove","--",(char*)source,0};run(unstage,fx,10,&r);if(r.rc)return 2;np_free(&r);
+    run(tree,fx,10,&r);ck(!r.rc&&!strcmp(r.out,before_tree),"projection-reference-baseline-restored");np_free(&r);if(failed)return 1;
+    char*project[]={(char*)image,"--fixture-register-tool",(char*)source,0};run(project,fx,10,&r);ck(!r.rc,"projection-helper-ran");np_free(&r);if(failed)return 1;
+    char*actual_inventory=fact(fx,tables[1],source),*actual_batch=fact(fx,tables[0],id),*actual_package=fact(fx,tables[2],pkgkey);
+    ck(actual_inventory&&!strcmp(actual_inventory,expected_inventory),"projection-register.inventory-row-byte-identical");
+    ck(actual_batch&&!strcmp(actual_batch,expected_batch),"projection-register.batch-row-byte-identical");
+    ck(actual_package&&!strcmp(actual_package,expected_package),"projection-register.package-row-byte-identical");
+    run(tree,fx,10,&r);ck(!r.rc&&!strcmp(r.out,before_tree),"projection-index-unchanged");np_free(&r);
+    join(path,sizeof path,fx,source);size_t after_n=0;char*after=cx_read(path,&after_n);
+    ck(after&&after_n==strlen(body)&&!memcmp(after,body,after_n),"projection-same-input-source-unchanged");
+    printf("FIXTURE_GATE_TOOL\tfailed=%d\tpassed=%d\tcase=projection\n",failed,passed);return failed?1:0;
+}
+int main(int argc,char**argv){
+    int diff=argc==3&&!strcmp(argv[1],"--case")&&!strcmp(argv[2],"projection");if(argc!=1&&!diff)return 2;
+    char root[4096],work[4400],source[4400],image[4400],marker[4400],why[1024];
+    if(sy_cwd(root,sizeof root)||cx_fmt(work,sizeof work,"%s/check-fixture-gate-XXXXXX",sy_tmpdir())||!mkdtemp(work)||
+       cx_fmt(source,sizeof source,"%s/tools/fixture-gate-tool.cx",root)||cx_fmt(image,sizeof image,"%s/helper.native",work)||
+       tq_native(root,source,image,why,sizeof why)||cx_fmt(marker,sizeof marker,"%s/.commit-gate-fixture",work))return 2;
+    if(diff)return projection(root,work,image);
+    char *args[]={image,"--fixture-batch","zzprobe","precommit",0};np_result result={0};run(args,work,10,&result);
+    ck(result.rc==2&&!strcmp(result.err,"fixture-gate-tool: REFUSE fixture-root-required\n"),"fixture-root-required");np_free(&result);
+    const char *text="UNISACC_GATE_FIXTURE_V1\n";if(sy_write_atomic(marker,text,strlen(text),0600))return 2;
+    args[2]="zz../escape";run(args,work,10,&result);
+    ck(result.rc==2&&!strcmp(result.err,"fixture-gate-tool: REFUSE fixture-batch-id\n"),"fixture-invalid-id-refused");np_free(&result);
+    args[2]="zzprobe";args[3]="other";run(args,work,10,&result);
+    ck(result.rc==2&&!strcmp(result.err,"fixture-gate-tool: REFUSE fixture-family\n"),"fixture-invalid-family-refused");np_free(&result);
+    char path[4400];join(path,sizeof path,work,"tools");ck(sy_exists(path)==0,"fixture-negative-controls-create-no-tool-tree");
+    printf("FIXTURE_GATE_TOOL\tfailed=%d\tpassed=%d\n",failed,passed);return failed?1:0;
+}
+

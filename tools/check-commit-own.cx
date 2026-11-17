@@ -135,10 +135,7 @@ static void case_multikey(void) {
    foreign row appended by someone else.  One call selects all nine rows and the three manifests, the foreign row
    stays out (and stays in the work tree), and reg-manifest --check --index -- the precommit gate's verdict --
    reports nothing for them.  Then a foreign row whose field equals a new id (zzrb1) is refused, nothing committed. */
-#define CO_MK "mk(){ i=$1; r=\"$i\\tIMPLEMENTED\\tinterfaces\\ttools/check-$i.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-$i.cx\\t-\\tinterfaces.$i\\trc0:X\\tproduct\\tcommit\"; " \
-    "c=\"interfaces.$i\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tfixture\\ttools/check-$i.cx\"; p=\"batch\\t$i\\tall\\t-\\t-\\t-\\t-\\t-\\t-\"; " \
-    "printf \"batch\\t$r\\ncoverage\\t$c\\npackages\\t$p\\n\" > tests/manifests/$i.tsv; printf \"$r\\n\" >> tests/batches.tsv; " \
-    "printf \"$c\\n\" >> tests/coverage.tsv; printf \"$p\\n\" >> build/batch-packages.tsv; }; "
+#define CO_MK "mk(){ sh \"$COMMIT_GATE_FIXTURE_PRODUCT\" \"$COMMIT_GATE_FIXTURE_SOURCE\" -- --fixture-batch \"$1\" commit-own > \"fixture-$1.out\"; }; "
 /* --registered ID...: the registration unit of one set (one manifest plus its coverage and packages rows) is
    committed in one call: the set's rows reach HEAD, a foreign row appended by someone else stays out and stays
    in the work tree, and reg-manifest --check --index -- the precommit gate's verdict -- reports nothing for it.
@@ -268,14 +265,14 @@ static void case_derive(int part) {
        killed at its bound mid-compile stores nothing, so the cold pass (derive.cx 10 s, tables-gen 6 s,
        batch-packages-gen 24.7 s) never became warm while reg ran alone.  reg (part 1) then runs the real commit
        (measured 48 s warm); the batch list runs reg-prep first. */
-#define CO_DR_SETUP CO_MK "mk zzdr; git show HEAD:build/batch-packages.tsv > build/batch-packages.tsv; printf 'int main(void){return 0;}\\n' > tools/check-zzdr.cx; "
+#define CO_DR_SETUP CO_MK "mk zzdr; git show HEAD:build/batch-packages.tsv > build/batch-packages.tsv; extra=$(cat fixture-zzdr.out); "
     if (part == 3)
-    s2_want(CO_DR_SETUP "H0=$(git rev-parse HEAD); " CO_RUN "-m dr --registered zzdr --whole tools/check-zzdr.cx --derive --dry-run > dp.out 2>&1; echo RC=$?; "
+    s2_want(CO_DR_SETUP "H0=$(git rev-parse HEAD); " CO_RUN "-m dr --registered zzdr $extra --whole tools/check-zzdr.cx --whole tests/tools-compile-sources.tsv --derive --dry-run > dp.out 2>&1; echo RC=$?; "
             "grep -c 'COMMIT_OWN_DERIVE.rc=0.stage=ok' dp.out; grep -c -e '^DERIVED.build/links.tsv' -e '^DERIVED.build/batch-packages.tsv' dp.out; "
             "[ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
             "RC=0\n1\n2\nSAMEHEAD\nEND", "derive-registered-dry-run-derives-commits-nothing");
     if (part == 1)
-    s2_want(CO_DR_SETUP CO_RUN "-m dr --registered zzdr --whole tools/check-zzdr.cx --derive > dr.out 2>&1; echo RC=$?; "
+    s2_want(CO_DR_SETUP CO_RUN "-m dr --registered zzdr $extra --whole tools/check-zzdr.cx --whole tests/tools-compile-sources.tsv --derive > dr.out 2>&1; echo RC=$?; "
             "echo HEAD; git show HEAD:build/links.tsv | grep -c zzdr; git show HEAD:build/batch-packages.tsv | grep -c zzdr; "
             "git show --name-only --format= HEAD | grep -c -e '^build/links.tsv' -e '^build/batch-packages.tsv'; echo END",
             "RC=0\nHEAD\n1\n1\n2\nEND", "derive-registered-links-and-packages-same-commit");
@@ -359,10 +356,13 @@ int main(int argc, char **argv) {
     char prep[2048], clone[4400];
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
     if (cx_fmt(prep, sizeof prep, "rm -rf %s && mkdir -p %s && git clone -q --local . %s && "
-           "cp tools/commit-own.cx tools/own-diff.cx tools/on-change.cx %s/tools/ && "
+           "cp tools/commit-own.cx tools/own-diff.cx tools/on-change.cx tools/check-precommit-gates.cx %s/tools/ && "
            "cd %s && git config user.email t@t && git config user.name t", base, base, clone, clone, clone)) die("path");
     if (sh(prep, out, sizeof out) != 0)
         die("cannot prepare the clone");
+    { char marker[4400];const char *text="UNISACC_GATE_FIXTURE_V1\n";
+      if(cx_fmt(marker,sizeof marker,"%s/.commit-gate-fixture",clone)||
+         sy_write_atomic(marker,text,strlen(text),0600))die("fixture-marker-write"); }
     /* The product into the clone: which files make up "the product" is a layout question, so ask
        productpkg rather than naming unisacc.com.dev here. A hardcoded `cp -r unisacc.com.dev`
        breaks the day a complete APE ships again, and silently copies nothing when the layout is
@@ -370,6 +370,11 @@ int main(int argc, char **argv) {
     {   char root[4400];
         if (sy_cwd(root, sizeof root) < 0) die("cwd");
         if (pp_copy_product(root, clone)) die("cannot copy the product into the clone");
+        char source[4400],product[4400];
+        if(cx_fmt(source,sizeof source,"%s/tools/fixture-gate-tool.cx",root)||
+           cx_fmt(product,sizeof product,"%s/unisacc.com",root)||
+           sy_setenv("COMMIT_GATE_FIXTURE_SOURCE",source,1)||
+           sy_setenv("COMMIT_GATE_FIXTURE_PRODUCT",product,1))die("fixture-tool-env");
     }
     /* One case per batch: a single real commit costs ~30 s in this tool (its precommit gate plus git plus the
        checks), so two cases measure 60 s and cannot fit the 55 s budget.  Every case keeps its assertions and its
@@ -444,7 +449,8 @@ int main(int argc, char **argv) {
         ck(tx_find(out, tx_len(out, sizeof out), "git commit refused (rc 1): ZZHOOKREASON", 39) >= 0, "commit-refused-names-git-reason");
     }
 done:
-    {   char rm[4500]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", base)) sh(rm, out, sizeof out); }
+    if (failed) sy_eprintf("CHECK_COMMIT_OWN_DIAGNOSTICS retained=%s/clone\n", base);
+    else { char rm[4500]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", base)) sh(rm, out, sizeof out); }
     sy_printf("CHECK_COMMIT_OWN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
