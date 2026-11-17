@@ -148,6 +148,8 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 另有两项兼容边界必须保持:(1) np_result 的 timed_out 尾字段在开始与释放时清零,仅预算耗尽时置位;(2) UNISACC_NP_FAULT 只由 netpack 门面启用,sysx.process 仍忽略该工具测试变量。首次合并时第二项曾使 check-npfault 的 D 两条原断言失败;保留断言、修正转发标志后 13 条全过。直接子进程在超时返回前有界收尸,不偷取调用者其它子进程,由原 check-netpack 与 check-reaper 合同覆盖。UNISACC_NP_TEST_PREEXEC_MS 仅在子进程中作最多 5000 ms 的回归接缝,默认关闭;未改变调用的截止值。
 
+共享模块变更验收清单:(1) 逐个列出全部 use 消费者及其登记运行批次,用 affected --files 模块取集合,编译分片不能替代运行批次;(2) 共享检出上用当前已装产品分别做 default-run 与 -S/-c 静态编译,明确编译方式和头文件/模块输入身份,不把宿主运行成功当作静态生成成功;(3) 同输入跑受影响运行批次,每批原时限不变,并列保留失败、重跑与 UNKNOWN 收据;(4) 进程原语至少复验 lower-prefix-base3/4、cx-reaper、process-deadline、procrun-tool、cx-netpack、cx-npfault。7026ecaa4d 漏了 processcore 的裸 setpgid 声明,现改走 sys.posix 的 sy_setpgid;processcore-compile 永久覆盖 tests/bound-rc142.cx 与 tests/all-aggregate.cx 的 -S 路径,affected-processcore 覆盖传递 use 的选批正例与无关源负控。
+
 ## 6 已知限制与下一单
 
 - (1) 服务单线程:native 构造期间其它请求排队。改为构造放子进程,主循环继续收请求。
