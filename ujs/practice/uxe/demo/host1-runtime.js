@@ -113,9 +113,19 @@
     var buf = src;
     if (typeof src === "string") buf = u8fromB64(src);
     var meta = parseUjsmeta(buf);
-    var inst = await WebAssembly.instantiate(buf);
+    var memHold = { m: null };
+    var inst = await WebAssembly.instantiate(buf, {
+      env: {
+        host_gpu_submit: function (ptr, len) {
+          var m = memHold.m;
+          if (!m || !len) return;
+          void new Uint8Array(m.buffer, ptr >>> 0, len >>> 0);
+        }
+      }
+    });
     var e = inst.instance.exports;
     var mem = e.memory;
+    memHold.m = mem;
     var gnames = (meta && meta.globals) ? meta.globals : [];
     var scratch = typeof e.host_scratch === "function"
       ? Number(e.host_scratch()) : 950000;
