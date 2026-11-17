@@ -37,7 +37,8 @@ prd 0.3b G1 / W3 同条。
 
 ## 状态
 
-批次 `ujs-gpu-tri` REGISTERED PASS `UJS_GPU_TRI_OK`。Chrome 138.0.7204.168。
+待复核:检查曾对 DOM 子串假绿。修好 title 判定与 oracle_fnv 反例后再记完成。
+
 
 
 
