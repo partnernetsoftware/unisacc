@@ -1,6 +1,6 @@
 # 产品全景表(生成文件)
 
-本文件由 `tools/product-map.cx -- --write` 重算,勿手改;`--check` 核对。原位于 prd.md 9.6(2026-11-14 切出,避免随源码字节数变化的大块 diff 与手写内容混在一起)。
+本文件是显式导出快照,由 `tools/product-map.cx -- --write` 重算,勿手改生成块。当前源树用 �vsvc product-map` 查询,�vsvc product-map --check` 独立现算核对;提交门不自动更新本快照。原位于 prd.md 9.6(2026-11-14 切出,避免随源码字节数变化的大块 diff 与手写内容混在一起)。
 
 <!-- product-map:begin -->
 产品全景表阶段一(层+六片)与阶段二(七流+42构造网)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。

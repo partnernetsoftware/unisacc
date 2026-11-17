@@ -63,6 +63,8 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+派生查询规则:工具索引与产品全景经 devsvc tool-index、devsvc product-map 取得当前内容身份结果;两个 build/ 导出不再跟踪,自动 --derive 不物化。快照仅显式导出,独立 --check 仍实际现算并逐字节对拍。回退为恢复 derive.tsv 的物化行、显式生成后重新跟踪。读集、外部核验依赖、失效负控与证据入口见 [plans/devsvc.md](plans/devsvc.md) 的 R1 节。
+
 - agentwork 已整体退役到 archive/agentwork-retire-2026-11/:协同决定只进本记忆宫殿,不追加过程账本;ledger-add 默认拒绝,仅显式 --ledger 可维护独立数据。旧 schema 别名只供历史审计,目录缺失合法而负控仍拒绝缺证据。回滚由前向提交恢复原路径,六文件归档保持原字节。
 
 - 版本号跳过 0.0.64。入口 build/version-seq.tsv。
@@ -102,6 +104,8 @@ flowchart LR
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
 - cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
 - ujs `compiler_min.cx` cxraw 实测 96(tsv 基线曾 50,限期 0.0.9 压回 <=50)。决定:不把 96 当合格,不并 G1。依据:d473474f14 与 ujs/prd.md C4。证据:`sh ./unisacc.com -run tests/cxraw.cx -- --check --files ujs/seed/stage0/compiler_min.cx`;host1_vm 实测 34。回滚:到期未压回则拒绝合入 main/公开;不升基线冒充。
+- ujs/product 九文件 cxraw/cxapis/cxtrunc 缺行已按实测补基线(2026-11-18,合入请求):gold-ic 18/3, gold-lex 25/3, gold-parse 17/3, gold-rest 15/4, gold-type 17/3, net-gold-check 34/2/6, net-lex-check 13, net-parse-check 18/1, pack-nets 27/4/2。不把缺行当 0。限期 0.0.80 压回各表该行 calls 至少减半(cxraw 优先 sy_*)。证据:`sh ./unisacc.com tests/cxraw.cx -- --check --files ujs/product/gold-ic.cx ...`。回滚:删这九行则棘轮再 FAIL;到期未压回拒绝公开升格。
+
 - core-compat参考源转换:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换,不扩大批准域;入口build/state-unverified.tsv U20。
 - 全套入口分片聚合:主线423c274c42的入口与原因分栏已合入,新候选端到端验收未完成;入口build/state-unverified.tsv U21。
 - 全套材料与平台证据:118材料族仅47项登记,无生产者与外部主机证据未补齐,全套NOT_QUALIFIED;入口build/state-unverified.tsv U22。

@@ -24,16 +24,14 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use text.text
 #pragma unisa use sys.time
 
 #define PCG_BASE "9a69f28dbc"       /* tools/precommit.cx before read sets */
 #define PCG_BASE_CO "b94d1a83a2"    /* tools/commit-own.cx before the reuse record */
 #define T "\t"
-#define PCG_MK "mk(){ i=$1; r=\"$i" T "IMPLEMENTED" T "interfaces" T "tools/check-$i.cx" T "SOURCE" T "lnx/x86_64" T "55" T "-" T "tools/check-$i.cx" T "-" T "interfaces.$i" T "rc0:X" T "product" T "commit\"; " \
-    "c=\"interfaces.$i" T "interfaces" T "IMPLEMENTED_SEPARATE_BATCH" T "fixture" T "tools/check-$i.cx\"; p=\"batch" T "$i" T "all" T "-" T "-" T "-" T "-" T "-" T "-\"; " \
-    "printf '%s\\n' \"batch" T "$r\" \"coverage" T "$c\" \"packages" T "$p\" > tests/manifests/$i.tsv; printf '%s\\n' \"$r\" >> tests/batches.tsv; " \
-    "printf '%s\\n' \"$c\" >> tests/coverage.tsv; printf '%s\\n' \"$p\" >> build/batch-packages.tsv; printf 'int main(void) { return 0; }\\n' > tools/check-$i.cx; }; "
+#define PCG_MK "mk(){ sh \"$COMMIT_GATE_FIXTURE_PRODUCT\" \"$COMMIT_GATE_FIXTURE_SOURCE\" -- --fixture-batch \"$1\" precommit > \"fixture-$1.out\"; }; "
 
 static int failed;
 static char root[2048], fx[2400], lockd[2500];
@@ -52,6 +50,24 @@ static int sh(const char *script, char *out, int cap, int infx) {
     if (o) mm_free(o);
     return rc;
 }
+
+/* Compatibility entrypoints delegate fixture construction to its own tool. */
+static int pcg_fixture_forward(char **extra) {
+    const char *product=sy_env("COMMIT_GATE_FIXTURE_PRODUCT"),*source=sy_env("COMMIT_GATE_FIXTURE_SOURCE");
+    if(!product||!*product||!source||!*source)die("fixture-tool-not-prepared");
+    char *args[12];int n=4;args[0]="sh";args[1]=(char *)product;args[2]=(char *)source;args[3]="--";
+    for(int i=0;extra[i];i++){if(n==11)die("fixture-tool-argv");args[n++]=extra[i];}args[n]=0;
+    sy_spawn_t options;sy_exit_t status;sy_spawn_init(&options);
+    options.argv=args;options.deadline_ms=50000;
+    int rc=sy_proc_run(&options,&status);return rc?2:sy_exit_code(&status);
+}
+static int pcg_fixture_register(const char *source) {
+    char *args[]={"--fixture-register-tool",(char *)source,0};return pcg_fixture_forward(args);
+}
+static int pcg_fixture_batch(const char *id,const char *family) {
+    char *args[]={"--fixture-batch",(char *)id,(char *)family,0};return pcg_fixture_forward(args);
+}
+
 
 static void setup(const char *group) {
     static char c[8000], out[4096]; const char *home = sy_env("HOME");
@@ -74,6 +90,15 @@ static void setup(const char *group) {
                fx, fx, root, fx, root, root, fx, root, root, fx, root, fx, root, fx, fx, root)) die("script");
     sh(c, out, sizeof out, 0);
     if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup"); }
+    if (cx_fmt(c, sizeof c, "cp %s/tools/check-precommit-gates.cx %s/tools/", root, fx) || sh(c, out, sizeof out, 0)) die("fixture helper copy");
+    { char marker[4096];const char *text="UNISACC_GATE_FIXTURE_V1\n";
+      if(cx_fmt(marker,sizeof marker,"%s/.commit-gate-fixture",fx)||
+         sy_write_atomic(marker,text,strlen(text),0600))die("fixture-marker-write"); }
+    { char source[4096],product[4096];
+      if(cx_fmt(source,sizeof source,"%s/tools/fixture-gate-tool.cx",root)||
+         cx_fmt(product,sizeof product,"%s/unisacc.com",root)||
+         sy_setenv("COMMIT_GATE_FIXTURE_SOURCE",source,1)||
+         sy_setenv("COMMIT_GATE_FIXTURE_PRODUCT",product,1))die("fixture-tool-env"); }
 }
 
 static void group_na(void) {
@@ -125,8 +150,9 @@ static void group_reuse(void) {
        so the hook's stderr goes to an absolute path in the fixture, not to a cwd-relative hook.err; and the hook's
        gates see only the private index, so the batch's check source is committed with its set (--whole), as a real
        registration must (the runlist gate refuses metadata-schema missing-implemented-source otherwise) */
-    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf 'tools/check-zzg1.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
-       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
+    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
+       " extra=$(cat fixture-zzg1.out) && "
+       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 $extra --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
        " echo HREUSED=$(grep -c 'gate manifest reused' hook.err); echo SUBJ=$(git log -1 --format=%s); ls \"${TMPDIR:-/tmp}\"/commit-own-*.gate 2>/dev/null | wc -l | tr '\\n' ' '; echo leftover", out, sizeof out, 1);
     ck(has(out, "CORC=0\n") && has(out, "SUBJ=zzg1\n") && has(out, "HREUSED=1\n"), "reuse.commit-own-record-reused-by-hook");
     if (failed) sy_printf("%s\n", out);
@@ -215,6 +241,20 @@ static void bench(const char *which) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "--fixture-register-tool")) return pcg_fixture_register(argv[2]);
+    if (argc == 4 && tx_eqz(argv[1], "--fixture-batch")) return pcg_fixture_batch(argv[2],argv[3]);
+    if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
+        if (strspn(argv[2], "abcdefghijklmnopqrstuvwxyz-") != strlen(argv[2])) return 2;
+        const char *command = tx_eqz(argv[3], "register") ?
+            "sh ./unisacc.com tools/register.cx -- --tool tools/commit-own-base.cx" :
+            tx_eqz(argv[3], "packages") ? "sh ./unisacc.com tools/batch-packages-gen.cx -- --write" : 0;
+        if (!command) return 2;
+        setup(argv[2]);
+        char output[16384]; int prepared_rc = sh(command, output, sizeof output, 1);
+        if (prepared_rc) sy_eprintf("%s", output);
+        else sy_printf("PREPARED\tfixture=%s\ttool=%s\tno-test-result\n", argv[2], argv[3]);
+        unlock(); return prepared_rc;
+    }
     const char *group = 0, *bn = 0; int a; long t0 = sy_now_ms();
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];

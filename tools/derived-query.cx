@@ -31,6 +31,7 @@
 
 static char *nm[MAXN];
 static int nn;
+static char query_product[4400];
 
 static int seq(const char *a, const char *b) { return strcmp(a, b) == 0; }
 
@@ -86,19 +87,21 @@ static int make_key(const char *root, char key[65]) {
 }
 
 int main(int argc, char **argv) {
-    const char *root = ".", *cache = 0, *what = 0; long tmo = 55000, t0 = sy_now_ms(); int a, only_sha = 0, only_key = 0;
+    if(sy_realpath("unisacc.com",query_product,sizeof query_product)<0)return 4;
+    const char *root = ".", *cache = 0, *what = 0; long tmo = 55000, t0 = sy_now_ms(); int a, only_sha = 0, only_key = 0, check = 0;
     char key[65], key2[65], dir[1024], tsv[1100], shf[1100], tmp[1100], hex[65], want[80];
     char *b = 0; long n = 0; const char *state = "miss"; int unstable = 0;
     for (a = 1; a < argc; a++) {
         if (seq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
         else if (seq(argv[a], "--cache") && a + 1 < argc) cache = argv[++a];
         else if (seq(argv[a], "--timeout-ms") && a + 1 < argc) tmo = atol(argv[++a]);
+        else if (seq(argv[a], "--check")) check = 1;
         else if (seq(argv[a], "--sha")) only_sha = 1;
         else if (seq(argv[a], "--key")) only_key = 1;
         else if (!what && argv[a][0] != '-') what = argv[a];
         else what = "?";
     }
-    if (!what || !seq(what, "tool-index") || tmo <= 0 || tmo > 58000) {
+    if (!what || !seq(what, "tool-index") || tmo <= 0 || tmo > 58000 || (check && (only_sha || only_key))) {
         fprintf(stderr, "usage: derived-query.cx -- tool-index [--root DIR] [--cache DIR] [--timeout-ms N<=58000] [--sha] [--key]\n");
         return 2;
     }
@@ -120,7 +123,7 @@ int main(int argc, char **argv) {
         sy_spawn_t o; sy_exit_t st; char rootarg[1100]; char *v[12]; int r;
         if (sy_mkdir_all(dir, 0755) < 0) { fprintf(stderr, "DQ\ttool-index\tfail\twhy=mkdir %s\n", dir); return 4; }
         if (cx_fmt(tmp, sizeof tmp, "%s/.tmp-%ld-%ld", dir, (long)getpid(), sy_now_ms()) || cx_fmt(rootarg, sizeof rootarg, "tools/tool-index.cx")) return 2;
-        v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = rootarg; v[3] = "--"; v[4] = "--root"; v[5] = (char *)root; v[6] = "--emit-tools"; v[7] = tmp; v[8] = 0;
+        v[0] = "sh"; v[1] = query_product; v[2] = rootarg; v[3] = "--"; v[4] = "--root"; v[5] = (char *)root; v[6] = "--emit-tools"; v[7] = tmp; v[8] = 0;
         sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = tmo; o.out_fd = 2;
         r = sy_proc_run(&o, &st);
         if (r || st.timed_out || sy_exit_code(&st) != 0) {
@@ -137,7 +140,21 @@ int main(int argc, char **argv) {
             }
         }
     } else if (sy_sha256_hex(b, n, hex)) return 4;
-    if (only_sha) printf("%s\n", hex);
+    /* A check always invokes the producer independently, including cache hits. */
+    if (check) {
+        char fresh[1100];sy_spawn_t opts;sy_exit_t done;char *actual=0;long an=0;
+        if(cx_fmt(fresh,sizeof fresh,"%s/.verify-%ld-%ld",dir,(long)getpid(),sy_now_ms()))return 2;
+        char *v[]={"sh",query_product,"tools/tool-index.cx","--","--root",(char*)root,"--emit-tools",fresh,0};
+        sy_spawn_init(&opts);opts.argv=v;opts.pgroup=-1;opts.deadline_ms=tmo;opts.out_fd=2;
+        int r=sy_proc_run(&opts,&done);
+        if(r||done.timed_out||sy_exit_code(&done)||sy_read_file(fresh,&actual,&an,FILEMAX)){sy_unlink(fresh);return !r&&done.timed_out?124:4;}
+        sy_unlink(fresh);int same=an==n&&mm_same(b,actual,n);mm_free(actual);
+        if(!same){fprintf(stderr,"DQ_CHECK\ttool-index\tMISMATCH\n");mm_free(b);return 1;}
+    }
+    /* Hits must also be rejected if the source changed while loading the body. */
+    if(make_key(root,key2)||!seq(key,key2))unstable=1;
+    if (check) printf("DQ_CHECK\ttool-index\tOK\tsha=%s\n",hex);
+    else if (only_sha) printf("%s\n", hex);
     else fwrite(b, 1, (size_t)n, stdout);
     fflush(stdout);
     fprintf(stderr, "DQ\ttool-index\t%s\tkey=%.16s\tsha=%s\tbytes=%ld\tms=%ld%s\n", state, key, hex, n, sy_now_ms() - t0, unstable ? "\tunstable=1" : "");

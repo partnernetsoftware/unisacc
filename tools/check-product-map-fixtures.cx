@@ -1,7 +1,7 @@
 /* tools/check-product-map-fixtures.cx -- daily scenes, empty <=25s.
  *   sh ./unisacc.com tools/check-product-map-fixtures.cx -- unrelated|prd-red|prd-restore|input-change
- * Mutate a git clone only. product-map is started from the original tree
- * (default -run) with --root CLONE so cwd/source stay on the original tree.
+ * Mutate a git archive fixture only. Its optional local export is prepared
+ * explicitly before each scene; assertions never depend on a tracked export.
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -22,7 +22,8 @@ static char *fnd(const char *s, const char *pat) {
 static int sh(char **v, const char *cwd, char *err, size_t ec) {
     np_result r = {0};
     int rc;
-    if (np_run(v, cwd, 0, 40, &r, why, sizeof why)) { np_free(&r); return -1; }
+    char*clean[128]={"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","GIT_OBJECT_DIRECTORY","-u","GIT_ALTERNATE_OBJECT_DIRECTORIES"};int k=11;for(int i=0;v[i];i++){if(k>=127)die("fixture-argv-bound");clean[k++]=v[i];}clean[k]=0;
+    if (np_run(clean, cwd, 0, 40, &r, why, sizeof why)) { np_free(&r); return -1; }
     rc = r.rc;
     if (err && ec) { size_t k = r.errn < ec - 1 ? r.errn : ec - 1; if (k && mm_copy(err, (long)ec, r.err, (long)k)) { np_free(&r); return rc; } err[k] = 0; }
     np_free(&r);
@@ -33,40 +34,15 @@ static void ck(int ok, const char *n) {
     if (!ok) failed++;
 }
 static int setup(char *dir, int dcap, char *product, char *e, size_t ec) {
-    char f[4400];
-    if (cx_fmt(dir, dcap, "%s/unisacc-pmchk.%d.%d", sy_tmpdir(), sy_pid(), (int)(sy_now_ms() & 0xffffff))) die("fxdir");
-    {
-        char *cl[] = {"git", "clone", "-q", "--shared", root, dir, 0};
-        if (sh(cl, root, e, ec) != 0) die("fx-clone");
-    }
-    if (cx_fmt(f, sizeof f, "%s/%s", dir, "unisacc" ".com")) die("fx");
-    {
-        char *cp[] = {"cp", product, f, 0};
-        if (sh(cp, root, e, ec) != 0) die("fx-cp");
-    }
-    {
-        char bdir[4400], sdir[4400];
-        if (cx_fmt(bdir, sizeof bdir, "%s/build", dir) || cx_fmt(sdir, sizeof sdir, "%s/src", dir)) die("fx");
-        { char *mk[] = {"mkdir", "-p", bdir, sdir, 0}; sh(mk, root, e, ec); }
-    }
-    {
-        char srcp[4400], dstp[4400];
-        if (cx_fmt(srcp, sizeof srcp, "%s/prd_productmap.md", root) || cx_fmt(dstp, sizeof dstp, "%s/prd_productmap.md", dir)) die("fx");
-        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-prd"); }
-        if (cx_fmt(srcp, sizeof srcp, "%s/build/product-map.tsv", root) || cx_fmt(dstp, sizeof dstp, "%s/build/product-map.tsv", dir)) die("fx");
-        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-tsv"); }
-        /* 97fa12625a: product-map --check also compares the ignored dev metadata copy
-         * (awp_devmeta, CLONE/.devsvc/product-map.tsv); a clone never carries it, so seed it
-         * from the tracked table, which the double write keeps byte-identical. */
-        {
-            char ddir[4400];
-            if (cx_fmt(ddir, sizeof ddir, "%s/.devsvc", dir) || cx_fmt(dstp, sizeof dstp, "%s/.devsvc/product-map.tsv", dir)) die("fx");
-            { char *mk[] = {"mkdir", "-p", ddir, 0}; if (sh(mk, root, e, ec) != 0) die("fx-devmeta-dir"); }
-            { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-devmeta"); }
-        }
-        if (cx_fmt(srcp, sizeof srcp, "%s/src/host.cx", root) || cx_fmt(dstp, sizeof dstp, "%s/src/host.cx", dir)) die("fx");
-        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-host"); }
-    }
+    char archive[4400],generator[4400],entry[4400];
+    if(cx_fmt(dir,dcap,"%s/unisacc-pmchk.%d.%d",sy_tmpdir(),sy_pid(),(int)(sy_now_ms()&0xffffff))||sy_mkdir(dir,0700))die("fxdir");
+    if(cx_fmt(archive,sizeof archive,"%s.tar",dir))die("fx-path");
+    char*pack[]={"git","archive","--format=tar","--output",archive,"HEAD",0};if(sh(pack,root,e,ec))die("fx-archive");
+    char*unpack[]={"tar","-xf",archive,"-C",dir,0};if(sh(unpack,root,e,ec)||sy_unlink(archive))die("fx-unpack");
+    char*init[]={"git","init","-q",0};if(sh(init,dir,e,ec))die("fx-git-init");char*index[]={"git","add","-f","--",".",0};if(sh(index,dir,e,ec))die("fx-index");
+    if(cx_fmt(entry,sizeof entry,"%s/unisacc.com",dir)||cx_fmt(generator,sizeof generator,"%s/tools/product-map.cx",root))die("fx-path");
+    char*cp[]={"cp",product,entry,0};if(sh(cp,root,e,ec))die("fx-product");
+    char*write[]={"sh",product,generator,"--","--root",dir,"--write",0};if(sh(write,root,e,ec)){fprintf(stderr,"%s\n",e);die("fx-local-export");}
     return 0;
 }
 static void cleanup(const char *dir, char *e, size_t ec) {

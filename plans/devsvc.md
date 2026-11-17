@@ -296,3 +296,29 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 (3) 移除:table-index.tsv 分开处理(它也由 tool-index.cx 写,读集含 build/*,另做 table-index 查询再迁);doc-links 同法补 `devsvc doc-links`(读集 *.md 加 baseline 加 doclink.cx)。
 收益估算:每次触及 tools/ 或 tests/batches.tsv 的提交门省 tool-index 约 7.8 s(并行 derive 下省的是该行占最慢行的份额,单独 --only 时全省),doc-links 约 1.1 s;build/ 提交数按近 7 天估少 222 次中只改该表的那部分(上限 222/617 = 36%,与 batches.tsv 等同改的提交仍会动 build/)。
 风险:身份清单每次查询读 1100+ 文件(约 100 ms);缓存跨工作树共享(按内容键,安全);unstable 时读者须重查。
+
+### R1 第二步:查询与物化分离
+
+`derive.tsv` 的 `write_argv` 以 `query-only ` 开头时,该行不进入自动 `--write` 与写计划闭包,也不产生自动物化关系边。显式 `--check` 仍执行其独立现算校验,`--write --only NAME` 可生成本地导出。查询缓存只存构造物,不存检查结论。tool-index 的校验走 `derived-query.cx tool-index --check`:命中时也独立调用原生成器,逐字节比较正文,并在输出前再次核源树身份。
+
+table-index 是独立物化项,保留本地表和元数据副本逐字节检查。tool-index 本地导出不再由 `--registered` 自动选入提交;新工具登记事实仍由原门检查。回退先恢复 derive 两行与登记表名单,再恢复 tool-index 文件跟踪。历史夹具所验证的离线生成器写入与篡改拒绝合同仍保留。
+
+基线入口 `/tmp/r1-baseline`:低载两项检查总 34641 ms,product-map 23106 ms,tool-index 11535 ms(表索引副本漂移,该项非 PASS)。7 天全仓提交 1998,build/ 622,tool-index 225,product-map 43。旧整体派生和 reg-a/derive-reg 的超窗均保留 UNKNOWN,后测不得改写为基线 PASS。新查询模式与原模式的负控入口 `/tmp/r1-query-red` 和 `/tmp/r1-query-check`。
+
+### product-map 查询构造与读集核验
+
+tools/product-map-query.cx 的清单真源是 tools/product-map-inputs.tsv。缓存身份包含清单本身、目录列举与文件内容、两个根的实际编译器与生成器、完整 Git 跟踪名称集合和实际观察到的读取清单。每次命中重新核内容哈希及缓存正文摘要,不缓存检查结论;显式 --check 独立执行原生成器再逐字节对拍。仅用于 Linux 开发机,不代表六目标平台资格。
+
+strace 只在缺失构造与独立核验路径调用,命中分支不查找也不执行它。未安装时输出 PRODUCT_MAP_READSET_NEEDS_STRACE 并非零退出;路径权限错误另行命名拒绝。检查在私有 PATH 中先构造缓存、移走 strace 链接,证明命中仍可用而冷查询命名拒绝。旧实现该负控失败,新实现通过。替代方向是统一 cx_read、stat、目录列举入口生成读取回执,并与编译器 use 闭包及子进程回执合并;只包装主进程的 cx_read 不足以覆盖 census 子进程,替代方案须保留相同未声明读取负控。
+
+product-map --root 选择被分析的数据,分析子程序由当前已装编译器引导。目标 APE 的字节作为数据读取,不会再因外壳保留字节变化而另编同一分析程序。旧七条 flow-model 留存值已经先迁为显式事实,正常生成物前后逐字节相同。六类变更以独立现算验收,常量缓存键故障实现六项均被拦;正文、读取清单、摘要损坏与正文缺失分别保留恢复断言。热命中已测约 1.45 秒,不宣称达到百毫秒,后续先量哈希主耗时再优化。
+
+登记与执行分相:现有 register --no-run 仅保存合同并返回 REGISTERED_NORUN,只算准备;之后经标准 affected 入口逐批实跑才记 PASS。登记尾段仍有缺口:批次耗时接近 55 秒时,试跑已经通过,60 秒外层仍可能在 packages 与 manifest 收尾前杀掉进程,且当前提前打印 REGISTERED。应拆成独立收尾阶段并在完整收尾后打印终态;不得延长时限。本轮缺失 manifest 按三张真实表逐字节投影补齐,不另造登记逻辑,并由 reg-manifest 检查闭合。
+
+### R1 停写与验收边界
+
+tool-index 与 product-map 已标 query-only:自动 --derive 不物化,显式 --check 走查询与独立现算逐字节对拍,显式 --write --only 保留本地导出。两个 build/ 导出均停跟踪并忽略,本地字节保留。当前产品全景经 devsvc product-map 获取,文档生成块只作显式快照。日常形状检查读查询,四个离线快照场景用归档输入显式准备后保留原断言。显式 --write --package 同步七条 flow-model 测量事实,默认生成与检查不写事实。
+
+回退时恢复对应 derive.tsv 的普通物化行,显式生成导出并重新跟踪,再按原检查核对；查询与生成器没有各留一套计算逻辑。读取核验的 strace 依赖只属于 Linux 冷构造和独立 --check,命中不依赖它。损坏恢复会删除当前引用的失效正文及旁文件后重算,归档夹具清除继承的 Git 路由变量,不克隆开发检出。
+
+度量入口为 release/evidence/r1-final-2026-11-18.tsv。旧整体派生 stage=none 在 55534 ms 被杀,保留 UNKNOWN。迁移后真实提交 750e63b581 的派生29516 ms、提交阶段内容身份复核41 ms、含门禁与推送总44373 ms；输入不同,只报告各自实测,不把差值当严格同输入加速比。7天 build/ 历史提交数从622变628,工具索引225变226、产品全景43变44,增加包含本次退役提交,不能宣称旧历史已减少；停写后不再由这两张表触发自动快照提交。两项夹具仍以最终独立实跑回执为准。
