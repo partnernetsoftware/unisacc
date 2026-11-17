@@ -1,23 +1,21 @@
-# G1 提交面（未实现）
+# G1 提交面(未实现)
 
-prd 0.3b G1 / 计划 W3 同条。本文件只记账；不改 demo 页。禁区：`compiler_min`、`main`、`three`。
+prd 0.3b G1 / W3 同条。
 
-## 现状
+## 核实
 
-`build_mod`（`compiler_min.cx:2268`）无 import 段，仅 export。现 wasm 无 import，可 instantiate。
+`build_mod`(`compiler_min.cx:2268-2410`)只发 section 1/3/5/7/10,无 section 2。export 27。type 11 已是 `(i32,i32)->()`。`NFUNCS=33`。
 
-兑现目标：`env.host_gpu_submit(i32 ptr, i32 len)`。先例：`archive/ship` 胶水 `host_gpu_submit(ptr, len)`（切片 `gameMem.buffer` 再交给 Host 对象形 `host_gpu_submit`）。
+先例:`ship/host-entry.js:210` `host_gpu_submit(ptr,len)` 切 `memory` 再交 `host-browser.js:342`。
 
-## host1Boot
+## 最小刀(未做)
 
-现 wasm 仍无 import 可 instantiate。一旦核侧加 import，`host1Boot` **必须**补 import 对象（`env.host_gpu_submit`），否则 instantiate 失败。本条未做。
-
-## 不做
-
-- 不改 fly / water / ink / oneshot / ghibli 等 demo 页（已调页侧 `host_gpu_submit`，失败回退）。
-- 不改 `compiler_min`。
-- 不引入 three。
+(1) 仅源码出现 `host_gpu_submit` 才发 import `env.host_gpu_submit` type 11。无条件加 import 会让现页 `host1Boot` 裸 instantiate LinkError,并打 ujs2wasm 字节基线。
+(2) import 占 idx 0 后,所有 call/EXP 绝对索引 +1(`FI(n)`)。`run_step_body` 的 `call 1` 改 `call 2`。
+(3) `host1_vm.cx` 须记 import 数并折算,否则 `--run` 静默跑错函数。
+(4) 真包远超 `MAXSTRLIT=255`;声明+call 与填 UXEP 是两刀。
 
 ## 状态
 
-未实现。
+未实现。不改 compiler_min 本轮。
+
