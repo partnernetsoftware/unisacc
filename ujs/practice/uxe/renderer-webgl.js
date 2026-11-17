@@ -199,11 +199,14 @@ export function createWebGLRenderer(canvas, opts) {
     const isPt = (cloud.meshId | 0) === 4;
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
 
-    if (isPt) {
+    if (isPt && cloud.alphaMode) {
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+    } else if (isPt) {
       gl.enable(gl.BLEND);
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
       gl.depthMask(false);
-
     } else if (cloud.alphaMode) {
       gl.enable(gl.BLEND);
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -213,9 +216,12 @@ export function createWebGLRenderer(canvas, opts) {
       gl.depthMask(true);
     }
 
+
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
     gl.uniform1f(uBillboard, (cloud.billboard || isPt) ? 1 : 0);
     if (uRadial) gl.uniform1f(uRadial, isPt ? 1 : 0);
+
+
 
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
