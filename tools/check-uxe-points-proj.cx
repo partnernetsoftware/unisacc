@@ -1,22 +1,89 @@
 #pragma unisa use chrome_dom
-/* tools/check-uxe-points-proj.cx -- 转调 uxe-points-proj.cx.
+/* tools/check-uxe-points-proj.cx -- 点径向像素中心比对.
+ * sh ./unisacc.com tools/check-uxe-points-proj.cx --
  */
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+static int iabs(int x) { return x < 0 ? -x : x; }
 int main(void) {
-    char *av[5];
+    char cwd[512], url[700];
+    const char *pre = "file://";
+    const char *suf = "/ujs/practice/uxe/test/uxe-points-oracle.html";
+    char *av[12];
     char *out = 0;
     size_t on = 0;
-    int rc;
-    av[0] = "sh";
-    av[1] = "./unisacc.com";
-    av[2] = "tools/uxe-points-proj.cx";
-    av[3] = "--";
-    av[4] = 0;
-    rc = cx_runv_timeout(av, 20, &out, &on);
-    if (out) {
-        fwrite(out, 1, on, stdout);
-        free(out);
+    int n, i, rc, ns = 0, okn = 0;
+    double scale = 1.6, cam_d = 8.0, W = 64.0, H = 64.0;
+    double half = 0.5463024898437905;
+    double R, cx, cy;
+    int sx[4], sy[4], r[4], g[4], b[4];
+    const char *p;
+    R = ((scale * 0.5) / cam_d) / half * (W * 0.5);
+    cx = W * 0.5;
+    cy = H * 0.5;
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    n = 0;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 640; i++) url[n++] = suf[i];
+    url[n] = 0;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = "--user-data-dir=/tmp/uxe-pts-proj";
+    av[7] = "--virtual-time-budget=20000";
+    av[8] = "--dump-dom";
+    av[9] = url;
+    av[10] = 0;
+    rc = cx_runv_timeout(av, 25, &out, &on);
+    if (rc == 127) { if (out) free(out); printf("POINTS_PROJ_UNMEASURED\n"); return 2; }
+    p = out ? strstr(out, "samples") : 0;
+    if (!p) p = out;
+    if (p) {
+        while (*p && ns < 4) {
+            if (p[0] == '[' && p[1] >= '0' && p[1] <= '9') {
+                int vx = 0, vy = 0, vr = 0, vg = 0, vb = 0, va = 0;
+                p++;
+                while (*p >= '0' && *p <= '9') { vx = vx * 10 + *p - '0'; p++; }
+                if (*p == ',') p++;
+                while (*p >= '0' && *p <= '9') { vy = vy * 10 + *p - '0'; p++; }
+                if (*p == ',') p++;
+                while (*p >= '0' && *p <= '9') { vr = vr * 10 + *p - '0'; p++; }
+                if (*p == ',') p++;
+                while (*p >= '0' && *p <= '9') { vg = vg * 10 + *p - '0'; p++; }
+                if (*p == ',') p++;
+                while (*p >= '0' && *p <= '9') { vb = vb * 10 + *p - '0'; p++; }
+                if (*p == ',') p++;
+                while (*p >= '0' && *p <= '9') { va = va * 10 + *p - '0'; p++; }
+                sx[ns] = vx; sy[ns] = vy; r[ns] = vr; g[ns] = vg; b[ns] = vb;
+                ns++;
+            } else p++;
+        }
     }
-    printf("CHECK_UXE_POINTS_PROJ\trc=%d\n", rc);
-    return rc == 0 ? 0 : 1;
+    if (out) free(out);
+    ck(ns >= 4, "samples>=4");
+    for (i = 0; i < ns && i < 4; i++) {
+        double dx = ((double)sx[i] + 0.5) - cx;
+        double dy = ((double)sy[i] + 0.5) - cy;
+        double t2 = (dx * dx + dy * dy) / (R * R);
+        double a;
+        int er, eg, eb;
+        a = 1.0 - t2;
+        if (a < 0.0) a = 0.0;
+        a = a * a;
+        er = (int)(220.0 * a + 0.5);
+        eg = (int)(10.0 * a + 0.5);
+        eb = (int)(30.0 * a + 0.5);
+        printf("PIX\t%d\t%d\tgot=%d,%d,%d\texp=%d,%d,%d\n", sx[i], sy[i], r[i], g[i], b[i], er, eg, eb);
+        if (iabs(r[i] - er) <= 1 && iabs(g[i] - eg) <= 1 && iabs(b[i] - eb) <= 1) okn++;
+    }
+    ck(okn == 4, "pixel-center-match");
+    printf("CHECK_UXE_POINTS_PROJ\tns=%d\tok=%d\tfailed=%d\n", ns, okn, failed);
+    return failed ? 1 : 0;
 }
-
