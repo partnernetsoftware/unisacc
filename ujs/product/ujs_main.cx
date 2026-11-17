@@ -25,6 +25,7 @@ static void usage(FILE *f) {
   fprintf(f, "  ujs.com --verify FILE.wasm\n");
   fprintf(f, "  ujs.com --verify-list MANIFEST PREFIX\n");
   fprintf(f, "  ujs.com --run FILE.wasm\n");
+  fprintf(f, "  ujs.com --ask-lex C PEEK\n");
   fprintf(f, "  ujs.com FILE.ujs [-o OUT.wasm]\n");
   fprintf(f, "  ujs.com FILE.ujs --run [-o OUT.wasm]\n");
   fprintf(f, "contract:\n");
@@ -34,7 +35,7 @@ static void usage(FILE *f) {
   fprintf(f, "  --verify / --verify-list: structure + required exports\n");
   fprintf(f, "  --run FILE.wasm: host1 mini-VM execute main_export (tag=host1_package)\n");
   fprintf(f, "  FILE.ujs --run: compile and execute in one process; stdout is host1 JSON\n");
-  fprintf(f, "  -o with FILE.ujs --run still writes wasm; without -o no wasm file is written\n");
+  fprintf(f, "  --ask-lex: classify CHARC via ujs/weights/nets/lex.net.tsv\n");
   fprintf(f, "not this binary: M3/compiler_core, construct IntNet, Pages/UXE\n");
 }
 
@@ -353,6 +354,73 @@ static int cmd_compile_run(const char *src_path, const char *out_path) {
   return rc;
 }
 
+static int cmd_ask_lex(const char *c, const char *peek) {
+  static const char *CHARC[] = {
+    "eof", "nl", "ws", "A", "D", "Q", "S", "P", "O", "other"
+  };
+  static const char *CLASS[] = {
+    "eof", "ws", "nl", "id", "num", "str", "punct", "op", "bad"
+  };
+  FILE *f;
+  char line[256];
+  int feed_c[10];
+  int w2cls[16];
+  int i, nfeed = 0, ci = -1, pi = -1, h, y;
+  (void)peek;
+  for (i = 0; i < 10; i++) {
+    feed_c[i] = -1;
+    if (!strcmp(c, CHARC[i])) ci = i;
+    if (!strcmp(peek, CHARC[i])) pi = i;
+  }
+  if (ci < 0 || pi < 0) {
+    fprintf(stderr, "ujs.com: --ask-lex unknown class\n");
+    return 2;
+  }
+  for (i = 0; i < 16; i++) w2cls[i] = -1;
+  f = fopen("ujs/weights/nets/lex.net.tsv", "rb");
+  if (!f) {
+    fprintf(stderr, "ujs.com: missing ujs/weights/nets/lex.net.tsv\n");
+    return 1;
+  }
+  while (fgets(line, (int)sizeof line, f)) {
+    if (!strncmp(line, "feed\t", 5)) {
+      const char *p = line + 5;
+      int u = -1;
+      while (*p && *p != '\t' && *p != '\n') p++;
+      if (*p == '\t') {
+        p++;
+        if (*p >= '0' && *p <= '9') {
+          u = 0;
+          while (*p >= '0' && *p <= '9') { u = u * 10 + (*p - '0'); p++; }
+        }
+      }
+      if (nfeed < 10) feed_c[nfeed] = u;
+      nfeed++;
+    } else if (!strncmp(line, "w2\t", 3)) {
+      const char *p = line + 3;
+      int hid = 0, cl = 0;
+      while (*p >= '0' && *p <= '9') { hid = hid * 10 + (*p - '0'); p++; }
+      if (*p == '\t') p++;
+      while (*p >= '0' && *p <= '9') { cl = cl * 10 + (*p - '0'); p++; }
+      if (hid >= 0 && hid < 16) w2cls[hid] = cl;
+    }
+  }
+  fclose(f);
+  if (ci >= nfeed || feed_c[ci] < 0) {
+    fprintf(stderr, "ujs.com: --ask-lex no feed\n");
+    return 1;
+  }
+  h = feed_c[ci];
+  if (h < 0 || h >= 16 || w2cls[h] < 0 || w2cls[h] >= 9) {
+    fprintf(stderr, "ujs.com: --ask-lex bad w2\n");
+    return 1;
+  }
+  y = w2cls[h];
+  printf("%s\n", CLASS[y]);
+  return 0;
+}
+
+
 int main(int argc, char **argv) {
   const char *src = 0;
   const char *out_wasm = 0;
@@ -371,6 +439,13 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")) {
     usage(stdout);
     return 0;
+  }
+  if (!strcmp(argv[1], "--ask-lex")) {
+    if (argc != 4) {
+      fprintf(stderr, "ujs.com: --ask-lex needs C PEEK\n");
+      return 2;
+    }
+    return cmd_ask_lex(argv[2], argv[3]);
   }
   if (!strcmp(argv[1], "--verify")) {
     if (argc != 3) {
