@@ -17,5 +17,6 @@ prd 0.3b G1 / W3 同条。
 
 ## 状态
 
-未实现。不改 compiler_min 本轮。
+未合入 `compiler_min`。工作区实跑过条件 import,但 `tests/cxraw.tsv` 该文件基线 50、HEAD 扫描 96,棘轮只降不升,含该文件的提交被 precommit 拦。下刀须零新增 libc 调用点(含 `strcmp`/`strlen`)。
+
 
