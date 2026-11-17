@@ -15,9 +15,7 @@
 static int failed,passed,grouped;static char root[4400],fx[4400],product[4400],query_source[4400],cache[4400],why[1024];
 static void die(const char*s){fprintf(stderr,"check-product-map-query REFUSE %s\n",s);sy_exit(2);}
 static void ck(int ok,const char*s){printf("%s\tproduct-map-query.%s\n",ok?"PASS":"FAIL",s);if(ok)passed++;else failed++;}
-static void pq_copy(void*d,size_t cap,const void*s,size_t n){if(mm_copy(d,cap,s,n))die("copy-bound");}
-static void pq_text(char*d,size_t cap,const char*s){pq_copy(d,cap,s,strlen(s)+1);}
-static void*pq_alloc(size_t n){void*p=mm_alloc(n);if(!p)die("allocation");return p;}
+static void guard(int bad,const char*s){if(bad)die(s);}
 #define PQ_FMT(d,c,...) do { if(cx_fmt(d,c,__VA_ARGS__))die("format-bound"); } while(0)
 static void join(char*out,size_t cap,const char*a,const char*b){if(cx_fmt(out,cap,"%s/%s",a,b))die("path-bound");}
 static int run(char**v,const char*cwd,np_result*r){char*clean[128]={"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","GIT_OBJECT_DIRECTORY","-u","GIT_ALTERNATE_OBJECT_DIRECTORIES"};int k=11;for(int i=0;v[i];i++){if(k>=127)die("fixture-argv-bound");clean[k++]=v[i];}clean[k]=0;if(np_run(clean,cwd,0,55,r,why,sizeof why)){fprintf(stderr,"transport %s\n",why);return -1;}return r->rc;}
@@ -25,13 +23,13 @@ static void command(char**v,const char*cwd){np_result r={0};int rc=run(v,cwd,&r)
 static void copy(const char*a,const char*b){size_t n=0;char*s=cx_read(a,&n);if(!s||sy_write_atomic(b,s,n,0700))die("fixture-copy");mm_free(s);}
 static void setup(void){
     if(cx_fmt(fx,sizeof fx,"%s/product-map-query-check-XXXXXX",sy_tmpdir())||!mkdtemp(fx))die("tmpdir");
-    char tree[4400],archive[4400];join(tree,sizeof tree,fx,"tree");join(archive,sizeof archive,fx,"input.tar");if(sy_mkdir(tree,0700))die("fixture-tree");char*pack[]={"git","archive","--format=tar","--output",archive,"HEAD",0};command(pack,root);char*unpack[]={"tar","-xf",archive,"-C",tree,0};command(unpack,root);char*init[]={"git","init","-q",0};command(init,tree);char*index[]={"git","add","-f","--",".",0};command(index,tree);pq_text(fx,sizeof fx,tree);
+    char tree[4400],archive[4400];join(tree,sizeof tree,fx,"tree");join(archive,sizeof archive,fx,"input.tar");if(sy_mkdir(tree,0700))die("fixture-tree");char*pack[]={"git","archive","--format=tar","--output",archive,"HEAD",0};command(pack,root);char*unpack[]={"tar","-xf",archive,"-C",tree,0};command(unpack,root);char*init[]={"git","init","-q",0};command(init,tree);char*index[]={"git","add","-f","--",".",0};command(index,tree);guard(mm_copy(fx,sizeof fx,tree,strlen(tree)+1),"copy-bound");
     char entry[4400];join(entry,sizeof entry,fx,"unisacc.com");copy(product,entry);
     join(cache,sizeof cache,fx,"query-cache");
 }
 static int query(np_result*r){char*v[]={"sh",product,query_source,"--","--root",fx,"--cache",cache,0};return run(v,root,r);}
-static int key_of(np_result*r,char key[65]){char*p=r->err?strstr(r->err,"key="):0;if(!p||strlen(p+4)<64)return 0;pq_copy(key,65,p+4,64);key[64]=0;return strspn(key,"0123456789abcdef")==64;}
-static void append(const char*relative){char p[4400];join(p,sizeof p,fx,relative);size_t n=0;char*b=cx_read(p,&n);if(!b)die("mutation-read");const char*s="\n/* R1 content identity probe. */\n";if(!strcmp(relative,"weights/gold/abi.tsv"))s="\n";size_t m=strlen(s);char*out=pq_alloc(n+m);pq_copy(out,n+m,b,n);pq_copy(out+n,m,s,m);if(sy_write_atomic(p,out,n+m,0644))die("mutation-write");mm_free(b);mm_free(out);}
+static int key_of(np_result*r,char key[65]){char*p=r->err?strstr(r->err,"key="):0;if(!p||strlen(p+4)<64)return 0;guard(mm_copy(key,65,p+4,64),"copy-bound");key[64]=0;return strspn(key,"0123456789abcdef")==64;}
+static void append(const char*relative){char p[4400];join(p,sizeof p,fx,relative);size_t n=0;char*b=cx_read(p,&n);if(!b)die("mutation-read");const char*s="\n/* R1 content identity probe. */\n";if(!strcmp(relative,"weights/gold/abi.tsv"))s="\n";size_t m=strlen(s);char*out=mm_alloc(n+m);guard(!out,"allocation");guard(mm_copy(out,n+m,b,n),"copy-bound");guard(mm_copy(out+n,m,s,m),"copy-bound");if(sy_write_atomic(p,out,n+m,0644))die("mutation-write");mm_free(b);mm_free(out);}
 static void apply_case(const char*which,const char*key){
     char p[4400];
     if(!strcmp(which,"cx"))append("cx/runtime/modelcache.cx");
@@ -46,18 +44,18 @@ static void apply_case(const char*which,const char*key){
     }else if(!strcmp(which,"tracked")){
         join(p,sizeof p,fx,"R1-unrelated-tracked.txt");if(sy_write_atomic(p,"probe\n",6,0644))die("tracked-file-write");char*v[]={"git","add","--","R1-unrelated-tracked.txt",0};command(v,fx);
     }else if(!strcmp(which,"history")){
-        join(p,sizeof p,fx,"tools/product-flow-model.tsv");size_t n=0;char*b=cx_read(p,&n),*e=b?strchr(b,'\n'):0,*last=0;if(!e)die("history-read");for(char*q=b;q<e;q++)if(*q=='\t')last=q;if(!last)die("history-shape");size_t head=last-b+1,tail=n-(e-b);char*out=pq_alloc(head+1+tail);pq_copy(out,head+1+tail,b,head);out[head]='0';pq_copy(out+head+1,tail,e,tail);if(sy_write_atomic(p,out,head+1+tail,0644))die("history-write");mm_free(b);mm_free(out);
+        join(p,sizeof p,fx,"tools/product-flow-model.tsv");size_t n=0;char*b=cx_read(p,&n),*e=b?strchr(b,'\n'):0,*last=0;if(!e)die("history-read");for(char*q=b;q<e;q++)if(*q=='\t')last=q;if(!last)die("history-shape");size_t head=last-b+1,tail=n-(e-b);char*out=mm_alloc(head+1+tail);guard(!out,"allocation");guard(mm_copy(out,head+1+tail,b,head),"copy-bound");out[head]='0';guard(mm_copy(out+head+1,tail,e,tail),"copy-bound");if(sy_write_atomic(p,out,head+1+tail,0644))die("history-write");mm_free(b);mm_free(out);
     }else if(!strcmp(which,"undeclared")){
         join(p,sizeof p,fx,"UNDECLARED-R1.txt");if(sy_write_atomic(p,"read probe\n",11,0644))die("undeclared-file");
         join(p,sizeof p,fx,"tools/logic-distribution.cx");size_t n=0;char*b=cx_read(p,&n);if(!b)die("producer-read");
         const char*prefix="#define main r1_original_main\n";
         const char*wrapper="\n#undef main\nint main(int argc,char **argv){size_t probe_n=0;char*probe=cx_read(\"UNDECLARED-R1.txt\",&probe_n);if(!probe)return 2;free(probe);return r1_original_main(argc,argv);}\n";
-        size_t pn=strlen(prefix),wn=strlen(wrapper);char*out=pq_alloc(pn+n+wn);pq_copy(out,pn+n+wn,prefix,pn);pq_copy(out+pn,n+wn,b,n);pq_copy(out+pn+n,wn,wrapper,wn);if(sy_write_atomic(p,out,pn+n+wn,0644))die("producer-probe-write");mm_free(b);mm_free(out);
+        size_t pn=strlen(prefix),wn=strlen(wrapper);char*out=mm_alloc(pn+n+wn);guard(!out,"allocation");guard(mm_copy(out,pn+n+wn,prefix,pn),"copy-bound");guard(mm_copy(out+pn,n+wn,b,n),"copy-bound");guard(mm_copy(out+pn+n,wn,wrapper,wn),"copy-bound");if(sy_write_atomic(p,out,pn+n+wn,0644))die("producer-probe-write");mm_free(b);mm_free(out);
     }else if(!strcmp(which,"corrupt")||!strcmp(which,"missing")||!strcmp(which,"readset")||!strcmp(which,"sidecar")){
         char leaf[200],dir[4400];join(dir,sizeof dir,cache,"product-map");if(cx_fmt(leaf,sizeof leaf,"%s.%s",key,!strcmp(which,"readset")?"reads":!strcmp(which,"sidecar")?"sha":"tsv"))die("cache-leaf");join(p,sizeof p,dir,leaf);if(strcmp(which,"missing")){if(sy_write_atomic(p,"junk\n",5,0600))die("cache-corrupt");}else if(sy_unlink(p))die("cache-remove");
     }else die("unknown-case");
 }
-static void resolve(const char*name,char path[4400]){char*v[]={"which",(char*)name,0};np_result r={0};if(run(v,root,&r)||r.outn<2||r.outn>=4400)die("resolve-tool");pq_copy(path,4400,r.out,r.outn);path[r.outn]=0;while(r.outn&&path[r.outn-1]=='\n')path[--r.outn]=0;np_free(&r);}
+static void resolve(const char*name,char path[4400]){char*v[]={"which",(char*)name,0};np_result r={0};if(run(v,root,&r)||r.outn<2||r.outn>=4400)die("resolve-tool");guard(mm_copy(path,4400,r.out,r.outn),"copy-bound");path[r.outn]=0;while(r.outn&&path[r.outn-1]=='\n')path[--r.outn]=0;np_free(&r);}
 static int no_strace(void){
     char base[4400],bin[4400],image[4400],env[4400],patharg[4500],cold[4400],link[4400],warm[4400];
     if(cx_fmt(base,sizeof base,"%s/product-map-no-strace-XXXXXX",sy_tmpdir())||!mkdtemp(base))die("no-strace-tmp");
