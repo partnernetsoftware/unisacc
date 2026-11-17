@@ -11,6 +11,7 @@ attribute float aScale;
 attribute float aYaw;
 attribute float aPitch;
 attribute float aRoll;
+attribute vec4 aColor;
 uniform mat4 uVP;
 uniform vec3 uEye;
 uniform float uWave;
@@ -21,6 +22,8 @@ varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
 varying vec2 vUV;
+varying vec4 vColor;
+
 vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
   float cy = cos(yaw), sy = sin(yaw);
   float cp = cos(pitch), sp = sin(pitch);
@@ -46,8 +49,10 @@ void main() {
   vEye = uEye;
   vFogDepth = length(p - uEye);
   vUV = aUV;
+  vColor = aColor;
   gl_Position = uVP * vec4(p, 1.0);
 }
+
 
 `;
 
@@ -71,12 +76,13 @@ uniform float uInk;
 uniform sampler2D uMap;
 uniform float uHasMap;
 uniform float uRadial;
-
+uniform float uInstColor;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
 varying vec2 vUV;
+varying vec4 vColor;
 void main() {
   if (uHasMap > 0.5) {
     gl_FragColor = texture2D(uMap, vUV);
@@ -90,6 +96,7 @@ void main() {
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
   vec3 col = base * (amb + diff) + uEmissive;
+  if (uInstColor > 0.5) col = vColor.rgb;
   vec3 view = normalize(vEye - vP);
   float rim = pow(1.0 - max(dot(n, view), 0.0), 2.4);
   col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
@@ -102,6 +109,7 @@ void main() {
     a = max(1.0 - r2, 0.0);
     a = a * a;
   }
+  if (uInstColor > 0.5) a *= vColor.a;
   gl_FragColor = vec4(col, a);
 }
 
@@ -149,6 +157,7 @@ export function createWebGLRenderer(canvas) {
   const ybo = gl.createBuffer();
   const pbo = gl.createBuffer();
   const rbo = gl.createBuffer();
+  const cbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
   const aUV = gl.getAttribLocation(prog, "aUV");
   const aInst = gl.getAttribLocation(prog, "aInst");
@@ -156,6 +165,7 @@ export function createWebGLRenderer(canvas) {
   const aYaw = gl.getAttribLocation(prog, "aYaw");
   const aPitch = gl.getAttribLocation(prog, "aPitch");
   const aRoll = gl.getAttribLocation(prog, "aRoll");
+  const aColor = gl.getAttribLocation(prog, "aColor");
   const u = (n) => gl.getUniformLocation(prog, n);
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
@@ -165,7 +175,8 @@ export function createWebGLRenderer(canvas) {
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
-  const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial");
+  const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial"), uInstColor = u("uInstColor");
+
 
   const texCache = Object.create(null);
 
@@ -263,9 +274,32 @@ export function createWebGLRenderer(canvas) {
     gl.enableVertexAttribArray(aRoll);
     gl.vertexAttribPointer(aRoll, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aRoll, 1);
+
+    if (aColor >= 0) {
+      const ic = cloud.instColor;
+      const has = ic && ic.length >= cloud.count * 4;
+      const f = new Float32Array(cloud.count * 4);
+      for (let i = 0; i < cloud.count; i++) {
+        if (has) {
+          f[i * 4] = ic[i * 4] / 255;
+          f[i * 4 + 1] = ic[i * 4 + 1] / 255;
+          f[i * 4 + 2] = ic[i * 4 + 2] / 255;
+          f[i * 4 + 3] = ic[i * 4 + 3] / 255;
+        } else {
+          f[i * 4] = f[i * 4 + 1] = f[i * 4 + 2] = f[i * 4 + 3] = 1;
+        }
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, cbo);
+      gl.bufferData(gl.ARRAY_BUFFER, f, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(aColor);
+      gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
+      ext.vertexAttribDivisorANGLE(aColor, 1);
+      if (uInstColor) gl.uniform1f(uInstColor, has ? 1 : 0);
+    }
     ext.drawArraysInstancedANGLE(gl.TRIANGLES, 0, mesh.vCount, cloud.count);
     cloud.markClean();
   }
+
 
   return {
     backend: "webgl",
