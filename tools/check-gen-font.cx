@@ -1,18 +1,16 @@
 #pragma unisa use chrome_dom
-/* tools/check-gen-font.cx -- 转调 gen-font --check.
- * sh ./unisacc.com tools/check-gen-font.cx --
+/* tools/check-gen-font.cx -- gen-font --check 与磁盘逐字节;篡改必红.
  */
 static int failed;
 static void ck(int ok, const char *lab) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
     if (!ok) failed++;
 }
-int main(void) {
+static int run_check(void) {
     char *av[6];
     char *out = 0;
     size_t on = 0;
-    int rc, n = 0;
-    const char *p;
+    int rc;
     av[0] = "sh";
     av[1] = "./unisacc.com";
     av[2] = "tools/gen-font.cx";
@@ -20,23 +18,30 @@ int main(void) {
     av[4] = "--check";
     av[5] = 0;
     rc = cx_runv_timeout(av, 20, &out, &on);
-    if (out) {
-        p = out;
-        while (*p) {
-            if (p[0] == 'F' && p[1] == 'O' && p[2] == 'N' && p[3] == 'T' && p[4] == '\t') {
-                p += 5;
-                if (p[0] == 'n' && p[1] == '=') {
-                    p += 2;
-                    n = 0;
-                    while (*p >= '0' && *p <= '9') { n = n * 10 + *p - '0'; p++; }
-                }
-            } else p++;
-        }
-        fwrite(out, 1, on, stdout);
-        free(out);
-    }
+    if (out) { fwrite(out, 1, on, stdout); free(out); }
+    return rc;
+}
+int main(void) {
+    FILE *f;
+    char buf[2048];
+    int n = 0, rc, i;
+    const char *path = "ujs/practice/uxe/test/font5x7.tsv";
+    rc = run_check();
     ck(rc == 0, "gen-font-rc0");
-    ck(n >= 4, "glyphs>=4");
-    printf("CHECK_GEN_FONT\tn=%d\tfailed=%d\n", n, failed);
+    f = fopen(path, "rb");
+    if (!f) { ck(0, "open-tsv"); printf("CHECK_GEN_FONT\tfailed=%d\n", failed); return 1; }
+    n = (int)fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    for (i = 0; i < n; i++) if (buf[i] == '6' && buf[i + 1] == '2') { buf[i + 1] = '3'; break; }
+    f = fopen(path, "wb");
+    if (f) { fwrite(buf, 1, n, f); fclose(f); }
+    rc = run_check();
+    ck(rc != 0, "tamper-diff");
+    for (i = 0; i < n; i++) if (buf[i] == '6' && buf[i + 1] == '3') { buf[i + 1] = '2'; break; }
+    f = fopen(path, "wb");
+    if (f) { fwrite(buf, 1, n, f); fclose(f); }
+    rc = run_check();
+    ck(rc == 0, "restore-ok");
+    printf("CHECK_GEN_FONT\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

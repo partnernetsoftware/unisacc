@@ -1,6 +1,5 @@
 /* tools/gen-font.cx -- 5x7 点阵(自绘,无外部字体许可).
  * sh ./unisacc.com tools/gen-font.cx -- [--write] [--check]
- * 行: ch  c0..c4  每列 7bit, bit0=顶.
  */
 static unsigned char col[64][5];
 static char chs[64];
@@ -20,14 +19,40 @@ static void load(void) {
     add('A', 0x7E, 0x09, 0x09, 0x09, 0x7E);
     add('I', 0x00, 0x41, 0x7F, 0x41, 0x00);
 }
+static void emit(char *buf, int *n) {
+    int i, j, k = 0;
+    const char *h = "ch\tc0\tc1\tc2\tc3\tc4\n";
+    while (h[k]) { buf[k] = h[k]; k++; }
+    for (i = 0; i < nch; i++) {
+        buf[k++] = chs[i];
+        buf[k++] = '\t';
+        for (j = 0; j < 5; j++) {
+            int v = col[i][j];
+            char tmp[8];
+            int t = 0, r;
+            if (v == 0) tmp[t++] = '0';
+            else {
+                char rev[8]; int rn = 0;
+                while (v) { rev[rn++] = (char)('0' + v % 10); v /= 10; }
+                while (rn) tmp[t++] = rev[--rn];
+            }
+            for (r = 0; r < t; r++) buf[k++] = tmp[r];
+            buf[k++] = (j == 4) ? '\n' : '\t';
+        }
+    }
+    buf[k] = 0;
+    *n = k;
+}
 int main(int argc, char **argv) {
-    int write = 0, check = 0, i, j;
+    int write = 0, check = 0, i, j, gn = 0, dn = 0;
+    char gen[2048], disk[2048];
     FILE *f;
     load();
     for (i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') write = 1;
         if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') check = 1;
     }
+    emit(gen, &gn);
     printf("FONT\tn=%d\tw=5\th=7\n", nch);
     for (i = 0; i < nch; i++) {
         printf("GLYPH\t%c", chs[i]);
@@ -37,15 +62,19 @@ int main(int argc, char **argv) {
     if (write) {
         f = fopen("ujs/practice/uxe/test/font5x7.tsv", "wb");
         if (!f) return 2;
-        fprintf(f, "ch\tc0\tc1\tc2\tc3\tc4\n");
-        for (i = 0; i < nch; i++)
-            fprintf(f, "%c\t%d\t%d\t%d\t%d\t%d\n", chs[i], col[i][0], col[i][1], col[i][2], col[i][3], col[i][4]);
+        fwrite(gen, 1, gn, f);
         fclose(f);
     }
     if (check) {
         f = fopen("ujs/practice/uxe/test/font5x7.tsv", "rb");
         if (!f) { printf("FONT_CHECK\tmissing\n"); return 1; }
+        dn = (int)fread(disk, 1, sizeof disk - 1, f);
         fclose(f);
+        disk[dn] = 0;
+        if (dn != gn || memcmp(disk, gen, gn) != 0) {
+            printf("FONT_CHECK\tDIFF\n");
+            return 1;
+        }
         printf("FONT_CHECK\tok\n");
     }
     return 0;
