@@ -1,4 +1,4 @@
-# G1 提交面(未实现)
+# G1 提交面(条件 import 已合入;填包未做)
 
 prd 0.3b G1 / W3 同条。
 
@@ -17,6 +17,7 @@ prd 0.3b G1 / W3 同条。
 
 ## 状态
 
-未合入 `compiler_min`。工作区实跑过条件 import,但 `tests/cxraw.tsv` 该文件基线 50、HEAD 扫描 96,棘轮只降不升,含该文件的提交被 precommit 拦。下刀须零新增 libc 调用点(含 `strcmp`/`strlen`)。
+条件 import 已合入 `bfa1692134`。词法字节比较,无新 strcmp。fly 无 sid2; `ujs/tests/gpu-submit.ujs` 有 sid2;`--run` 报 import。批次 `ujs-gpu-import`。填 UXEP 与 host1Boot import 对象仍未做。
+
 
 
