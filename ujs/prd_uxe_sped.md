@@ -343,7 +343,7 @@ gpu-tri 不是 D1-D5;它是 G1 真 GPU 夹具,单三角 212B。
 
 | 项 | 单一提交完成 | 不做 |
 |---|---|---|
-| **T1** | UXEP v4 草案落地一张 albedo:`map_id`+纹理段;host 2D 上传 wrap=clamp filter=nearest;已知色块贴平面;指定屏幕点像素等于 texel(容差内),期望由 .cx 从源算;篡改一 texel 必红;chrome_dom | 不上 KTX2/mip;不改已发布 demo 页 |
+| **T1** | 有/部分:正视 16 texel 中心绿;驻留 nUpload=0;同 id 换内容;tamper=flipy 与 tamper=texel 必红。验收 `sh ./unisacc.com tools/check-uxe-tex16.cx --` 与 `sh ./unisacc.com tools/check-ujs-gpu-tri.cx --`。斜视记 T1b | 不上 KTX2/mip;不改已发布 demo 页 |
 | **T2** | `host_asset_read` 解码仓内自绘小 PNG;像素读回与 .cx 期望一致;缺/坏素材明确失败非黑屏 | 不引用原作资源 |
 | **T3** | billboard 四边形 alpha 混合最小排序,或 points 大小/颜色/衰减,只选一先做;混合像素等于公式 | 不上粒子编辑器 |
 | **M2** | 核驱动 fly 步进:persist yaw(或已有 persist)经 `run_step` 跨帧;`store_bytes`+`host_gpu_submit` 交一包;AUTO 仍只核金/表,不核截图 | 不扩几何;不改 D2-D5;不引进 three |
