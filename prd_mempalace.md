@@ -20,7 +20,7 @@ flowchart LR
     V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
-    V71["0.0.71 链接单元一期(性能 R2)"]
+    V71["0.0.71 候选已构造,全套NOT_QUALIFIED;冻结前最小闭环中"]
     V72["0.0.72 netraw"]
     ECO["0.0.73 至 0.0.76 生态门路线(建议)<br/>G0 推算 0.0.76<br/>prd_cx.md 0.9"]
     PERF["0.0.77 执行器吞吐、0.0.78 链接单元二期<br/>prd.md 候选池 性能新方向"]
@@ -33,7 +33,7 @@ flowchart LR
   subgraph 质量门
     GATE["棘轮 13、derive 9、chain-ready 9 项<br/>tools/ratchets.cx、tools/derive.cx、tools/chain-ready.cx"]
     TEST["测试入口 tests/run.cx<br/>tests/batches.tsv、tests/coverage.tsv"]
-    UV["仍未验证 12 条<br/>build/state-unverified.tsv"]
+    UV["仍未验证 17 条<br/>build/state-unverified.tsv"]
   end
   subgraph 设计与规划
     PRD["结构与路线、候选池(加速 A 至 P)<br/>prd.md"]
@@ -94,3 +94,7 @@ flowchart LR
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
 - cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
+- core-compat参考源转换:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换,不扩大批准域;入口build/state-unverified.tsv U20。
+- 全套入口分片聚合:tests/run.cx --all未读取子片收据,本候选另报missing=1275;正式driver分片统计保留,入口build/state-unverified.tsv U21。
+- 全套材料与平台证据:118材料族仅47项登记,无生产者与外部主机证据未补齐,全套NOT_QUALIFIED;入口build/state-unverified.tsv U22。
+- stages独立金样:五项字节差异的独立oracle尚未完成,保留原断言和失败,下一版补齐;入口build/state-unverified.tsv U23。
