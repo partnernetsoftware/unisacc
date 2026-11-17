@@ -44,11 +44,11 @@ host1_vm `frame-run` 4 帧与 8 帧末值均为 1。
 
 (1) 语法:默认顶层 `let` 仍每帧清,不提升。显式 `persist let yaw = 0`(关键字 `persist` 在 `let` 前)。未标的 D1-D5/语料 28 条与 fly 3868 语义不变。不靠把全部顶层 let 塞进 MAXG=64。
 
-(2) 值存储选 (a):区 `PERSIST_BASE=949024`(=HOST_SCRATCH-1024)。每槽 9 字节(type 1B + flag 1B + bits 8B 可 pad 到 16 对齐;64 槽 <=1024)。type:1=i64(`persist let yaw = 0`)、2=f64(`= 0.0`)。读写拆箱/装箱,不用 GBASE 句柄过帧(reset 会回收 HEAP0)。`host_reset_globals` 清该区。不与 GBASE=2048、HEAP0=4096、HOST_SCRATCH=950000、STORE_WIN=1015808 重叠。
+(2) 值存储选 (a):`PERSIST_BASE=948976`(=HOST_SCRATCH-1024=950000-1024),stride=16。64*16=1024,区间 [948976,950000) 与 HOST_SCRATCH 相接不相交。每槽 16B:type 1 + flag 1 + pad 6 + bits 8。type:1=i64(`persist let yaw = 0`)、2=f64(`= 0.0`)。拆箱/装箱,不用 GBASE 句柄过帧。`host_reset_globals` 清 1024 字节。不变量:`PERSIST_BASE+64*16<=HOST_SCRATCH` 且与 GBASE=2048、HEAP0=4096、STORE_WIN=1015808 互不相交;检查读常量自检。
 
 (3) `let-b64.js` 派生物:生成器 `tools/gen-g4-let-b64.cx --check/--write`(编 `g4-let-yaw.ujs` 再 base64),对盘比对。不手贴。
 
-(4) `check-ujs-g4-yaw.cx`:双引擎。红全 1/`G4_LET_RED`;绿 1..8/`G4_LET_OK`;去 persist 回红。堆碰到 949024 前须 trap(大 list 反例,不得改写持久区)。cxraw compiler_min 不增;host1_vm 择机压回 34。
+(4) `check-ujs-g4-yaw.cx`:双引擎。红全 1/`G4_LET_RED`;绿 1..8/`G4_LET_OK`;去 persist 回红。堆碰到 948976 前须 trap(大 list 反例,不得改写持久区)。检查断言 `948976+64*16<=950000`。cxraw compiler_min 不增;host1_vm 择机压回 34。
 
 ## 状态
 
