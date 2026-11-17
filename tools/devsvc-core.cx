@@ -1626,6 +1626,33 @@ static int mg_setup(void) {
     {   char *v[] = {"mkdir", "-p", mg_tmp, 0}; return runcap(v, buf, sizeof buf) == 0 ? 0 : -1; }
 }
 static void mg_teardown(void) { char buf[64]; char *v[] = {"rm", "-rf", mg_tmp, 0}; if (mg_tmp[0]) (void)runcap(v, buf, sizeof buf); }
+/* 落地窗口锁 git-land:只覆盖 update-ref 加 gs_sync,合并计算不持锁。租期 60 秒,等待至多 MG_LOCK_WAIT_MS(3 秒),
+   他人持有则按名拒绝(MERGE_LOCK_HELD 行加重试提示),rc 1;无实例时照跑不取锁(同 f/x/flow)。 */
+#define MG_LOCK "git-land"
+#define MG_LOCK_WAIT_MS 3000
+static int mg_locked;
+static int mg_lock(const char *root) {
+    char req[256]; long end = sy_now_ms() + MG_LOCK_WAIT_MS; int rc; const char *ow = auto_owner();
+    mg_locked = 0;
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t60", MG_LOCK, ow); if (ovf) return 1;
+    for (;;) {
+        rc = request(root, req, 1);
+        if (rc == 0) { mg_locked = !strncmp(resp, "OK\tacquired", 11); return 0; }
+        if (rc == 3) return 0;
+        if (rc != 1 || strncmp(resp, "ERR\theld", 8) || sy_now_ms() >= end) break;
+        sy_sleep_ms(100);
+    }
+    chomp(resp); clean(resp);
+    printf("MERGE_LOCK_HELD\tlock=%s\t%s\t他人正在落地 git 写入;稍后重试同一命令(锁租期至多 60 秒)\n", MG_LOCK, rn ? resp : "-");
+    printf("GIT_MERGE\trc=1\treason=lock-held\tlock=%s\n", MG_LOCK);
+    return 1;
+}
+static void mg_unlock(const char *root) {
+    char req[200];
+    if (!mg_locked) return;
+    F(req, sizeof req, "lock-release\t%s\t%s", MG_LOCK, auto_owner()); if (!ovf) request(root, req, 0);
+    mg_locked = 0;
+}
 /* 共享索引与工作区(已跟踪部分)与 HEAD 一致 */
 static int mg_clean_tree(const char *rd) {
     static char st[1 << 12]; char *v[] = {"git", "-C", (char *)rd, "status", "--porcelain", "-uno", 0};
@@ -1680,16 +1707,19 @@ static int git_merge(const char *root, int argc, char **argv) {
                 if (runcap(v, nw, sizeof nw) != 0) { mg_teardown(); printf("MERGE_HINT\tcommit-tree-failed\t-\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
                 chomp(nw); }
         }
+        if (mg_lock(root)) { mg_teardown(); return 1; }
         if (att == 0) {   /* 受控注入点,只供 tools/check-devsvc-git.cx 夹具:落地前把 HEAD 从 old 移到给定提交一次,验证比较并交换失败后的重放;正常运行不设此变量 */
             const char *mvh = getenv("DEVSVC_TEST_MERGE_MOVE_HEAD");
             if (mvh && *mvh) { char *v2[] = {"git", "-C", rd, "update-ref", "HEAD", (char *)mvh, old, 0}; (void)runcap(v2, buf, sizeof buf); } }
         {   char *v[] = {"git", "-C", rd, "update-ref", "-m", "devsvc git merge", "HEAD", nw, old, 0};
             if (runcap(v, buf, sizeof buf) == 0) break; }
+        mg_unlock(root);
         printf("GIT_MERGE_RETRY\tattempt=%d\thead-moved-from=%s\n", att + 1, old);
     }
     mg_teardown();
     if (att >= 4) { printf("MERGE_HINT\thead-moving\tHEAD 连续被他人移动,重试 3 次仍未落地\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
-    if (mg_sync(rd, old, nw, "GIT_MERGE_SYNC", &sy, &kp)) { printf("GIT_MERGE\trc=1\tcommit=%s\tbranch=%s\tcwd=%s\tsync=failed\n", nw, cur, rd); return 1; }
+    rc = mg_sync(rd, old, nw, "GIT_MERGE_SYNC", &sy, &kp); mg_unlock(root);
+    if (rc) { printf("GIT_MERGE\trc=1\tcommit=%s\tbranch=%s\tcwd=%s\tsync=failed\n", nw, cur, rd); return 1; }
     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tff=%d\tsynced=%d\tkept=%d\n", nw, cur, rd, ff, sy, kp);
     return 0;
 }
@@ -1720,11 +1750,14 @@ static int git_pull(const char *root, int argc, char **argv) {
             printf("PULL_HINT\tdiverged\t本地 %s 有未推送提交且与 origin/%s 分叉;不自动 merge/rebase:先 devsvc git merge origin/%s 再推送\n", cur, cur, cur);
             printf("GIT_PULL\trc=1\treason=diverged\tbranch=%s\tcwd=%s\n", cur, rd); return 1;
         }
+        if (mg_lock(root)) return 1;
         {   char *v[] = {"git", "-C", rd, "update-ref", "-m", "devsvc git pull", "HEAD", up, old, 0};
             if (runcap(v, buf, sizeof buf) == 0) break; }
+        mg_unlock(root);
     }
     if (att >= 4) { printf("GIT_PULL\trc=1\treason=head-moving\n"); return 1; }
-    if (mg_sync(rd, old, up, "GIT_PULL_SYNC", &sy, &kp)) { printf("GIT_PULL\trc=1\tcommit=%s\tsync=failed\n", up); return 1; }
+    i = mg_sync(rd, old, up, "GIT_PULL_SYNC", &sy, &kp); mg_unlock(root);
+    if (i) { printf("GIT_PULL\trc=1\tcommit=%s\tsync=failed\n", up); return 1; }
     printf("GIT_PULL\trc=0\tcommit=%s\tfrom=%s\tbranch=%s\tcwd=%s\tsynced=%d\tkept=%d\n", up, old, cur, rd, sy, kp);
     return 0;
 }

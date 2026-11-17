@@ -371,6 +371,24 @@ int main(int argc, char **argv) {
         F(c, sizeof c, "[ \"$(git rev-parse HEAD^1)\" = %s ] && git cat-file -e HEAD:dve-mv.txt && git cat-file -e HEAD:dve-r.txt && [ \"$(git show :dve-o.txt)\" = staged ]", X);
         ck(!ovf && sh(c, fx) == 0, "replay-tree-has-both-sides");
     }
+    /* (l) 落地窗口锁 git-land:他人持锁时 merge 拒绝且 HEAD、索引不变;释放后同输入成功 */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        char k0[64] = "", k1[64] = "";
+        ck(sh("N=$(printf 'k\\n' | git hash-object -w --stdin) && T=$({ git ls-tree HEAD~1; printf '100644 blob %s\\tdve-k.txt\\n' $N; } | git mktree)"
+              " && git branch dve-k $(git commit-tree -p HEAD~1 -m EK $T)", fx) == 0, "lock-fixture");
+        rc = dv("lock", "acquire", "git-land", "--owner", "dvg-other", "--ttl", "60", 0);
+        ck(rc == 0, "lock-held-by-other");
+        (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin", fx); if (sscanf(out, "%63s %63s", k0, k1) != 2) k0[0] = 0;
+        rc = dv("git", "merge", "dve-k", 0, 0, 0, 0, 0);
+        ck(rc == 1 && has("MERGE_LOCK_HELD\tlock=git-land\t") && has("GIT_MERGE\trc=1\treason=lock-held"), "lock-held-merge-refused");
+        {   char h[64] = "", ix[64] = ""; (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin", fx);
+            ck(k0[0] && sscanf(out, "%63s %63s", h, ix) == 2 && !strcmp(h, k0) && !strcmp(ix, k1), "lock-held-ref-and-index-unchanged"); }
+        rc = dv("lock", "release", "git-land", "--owner", "dvg-other", 0, 0, 0);
+        rc = dv("git", "merge", "dve-k", 0, 0, 0, 0, 0);
+        ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && sh("git cat-file -e HEAD:dve-k.txt && [ \"$(git show :dve-o.txt)\" = staged ]", fx) == 0, "lock-released-same-input-merges");
+        rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
+        ck(rc == 0 && !has("git-land"), "lock-not-left-after-merge");
+    }
     F(c, sizeof c, "rm -rf %s", cl); (void)sh(c, 0);
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
