@@ -3,6 +3,7 @@ import { mat4, perspective, lookAt, mul } from "./math.js";
 import { allMeshes } from "./meshes.js";
 
 const VS = `#version 100
+precision mediump float;
 attribute vec3 aPos;
 attribute vec3 aInst;
 attribute float aScale;
@@ -13,6 +14,7 @@ uniform mat4 uVP;
 uniform vec3 uEye;
 uniform float uWave;
 uniform float uTime;
+uniform float uBillboard;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
@@ -25,12 +27,19 @@ vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
   vec3 pv = vec3(yv.x, yv.y * cp - yv.z * sp, yv.y * sp + yv.z * cp);
   return vec3(pv.x * cr - pv.y * sr, pv.x * sr + pv.y * cr, pv.z);
 }
+vec3 billboardXZ(vec3 v, vec3 eye, vec3 inst) {
+  vec3 toCam = eye - inst;
+  float hl = length(vec2(toCam.x, toCam.z));
+  float fx = hl > 0.0001 ? toCam.x / hl : 0.0;
+  float fz = hl > 0.0001 ? toCam.z / hl : 1.0;
+  return vec3(v.x * fz + v.z * fx, v.y, -v.x * fx + v.z * fz);
+}
 void main() {
   vec3 lp = aPos * aScale;
-  vec3 rp = rotYXZ(lp, aYaw, aPitch, aRoll);
+  vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
   p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
-  vN = normalize(rotYXZ(aPos, aYaw, aPitch, aRoll));
+  vN = normalize(uBillboard > 0.5 ? billboardXZ(aPos, uEye, aInst) : rotYXZ(aPos, aYaw, aPitch, aRoll));
   vP = p;
   vEye = uEye;
   vFogDepth = length(p - uEye);
@@ -130,7 +139,7 @@ export function createWebGLRenderer(canvas) {
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
-  const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk");
+  const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
 
   const P = mat4(), V = mat4(), VP = mat4();
 
@@ -147,6 +156,7 @@ export function createWebGLRenderer(canvas) {
   function drawCloud(cloud, wave) {
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
+    gl.uniform1f(uBillboard, cloud.billboard ? 1 : 0);
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
