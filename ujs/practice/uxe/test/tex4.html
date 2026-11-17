@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh"><head>
+<meta charset="utf-8"/><title>tex4</title>
+</head><body>
+<canvas id="c" width="4" height="4"></canvas>
+<script type="module">
+import { encodeRenderPacket, decodeRenderPacket } from "../packet.js";
+const rgba=new Uint8Array([
+  255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255,
+  255,0,255,255, 0,255,255,255, 128,0,0,255, 0,128,0,255,
+  0,0,128,255, 128,128,0,255, 128,0,128,255, 0,128,128,255,
+  64,64,64,255, 192,192,192,255, 255,128,0,255, 0,255,128,255
+]);
+const expR=rgba[0], expG=rgba[1], expB=rgba[2];
+(async()=>{
+  let err="";
+  try{
+    const pkt=encodeRenderPacket({
+      clear:[0,0,0,1],
+      camera:{fovy:1,near:0.1,far:10,eye:[0,0,1],target:[0,0,0]},
+      clouds:[{color:[1,1,1],count:1,xyz:new Float32Array([0,0,0]),scale:new Float32Array([1]),mapId:1,meshId:3}],
+      textures:[{id:1,w:4,h:4,rgba}]
+    });
+    decodeRenderPacket(pkt);
+    const c=document.getElementById("c");
+    const gl=c.getContext("webgl",{preserveDrawingBuffer:true,antialias:false});
+    const vs=gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs,"attribute vec2 p;varying vec2 u;void main(){u=p*0.5+0.5;gl_Position=vec4(p,0,1);}");
+    gl.compileShader(vs);
+    const fs=gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs,"precision mediump float;varying vec2 u;uniform sampler2D t;void main(){gl_FragColor=texture2D(t,u);}");
+    gl.compileShader(fs);
+    const pr=gl.createProgram();
+    gl.attachShader(pr,vs); gl.attachShader(pr,fs); gl.linkProgram(pr); gl.useProgram(pr);
+    const buf=gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+    const loc=gl.getAttribLocation(pr,"p");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    const tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,0);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+    gl.viewport(0,0,4,4);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    const px=new Uint8Array(4);
+    gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
+    const ok=px[0]===expR&&px[1]===expG&&px[2]===expB;
+    document.title=ok?"TEX4_OK":"TEX4_FAIL";
+    document.body.appendChild(document.createTextNode(document.title+" px="+px[0]+","+px[1]+","+px[2]));
+  }catch(e){
+    document.title="TEX4_ERR";
+    document.body.appendChild(document.createTextNode(String(e&&e.message||e)));
+  }
+})();
+</script>
+</body></html>

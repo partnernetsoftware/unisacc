@@ -69,7 +69,7 @@ export function encodeRenderPacket(packet) {
     for (const t of texs) {
       const n = t.w * t.h * 4;
       if (n > 1048576) throw new Error("tex too large");
-      nbytes += 8 + n;
+      nbytes += 10 + n;
     }
   }
   const buf = new ArrayBuffer(nbytes);
