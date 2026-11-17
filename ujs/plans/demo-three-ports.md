@@ -72,5 +72,5 @@ three.module、原作 GLB/音频、抬 cxraw/cxtrunc、改 host1-pass 28 行、�
 ## 6. 下一动作
 ## 7. 进度
 
-W1:list 字面量上限 64->256,`run-host` 28 仍绿。C P0:8 界各 8 顶点+8 色在 `water.ujs`(136),WASD 开船。A P0:三层折线 `ink.ujs`(38)。B P0:6 盒位姿 `oneshot.ujs`(18),片单仍未锁。W2/W3 未做。
+W1:list 字面量上限 64->256,`run-host` 28 仍绿。C P0:8 界各 8 顶点+8 色在 `water.ujs`(136),WASD 开船;Host 前 128 作岸点。A P0:三层折线 `ink.ujs`(38)。B P0:6 盒位姿 `oneshot.ujs`(18),片单仍未锁。W2/W3 未做。
 
