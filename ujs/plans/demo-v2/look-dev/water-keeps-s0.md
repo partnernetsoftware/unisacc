@@ -1,6 +1,7 @@
 # water-keeps S0
 
-`water-keeps-s0-concept.png` 是 2D canvas 概念稿,非 UXE 渲染,仅供所有者定美术方向。UXE 移植另叫 `water-keeps-s0-uxe.png`,须过 13 条存在性门。
+`water-keeps-s0-concept.png` 冻结:2D 概念稿,非 UXE。已知缺口:倒影仅桥。UXE 移植 `water-keeps-s0-uxe.png` 须 13 条存在性门。
+
 
 
 ## 构图(像素包围盒,原点左上)
