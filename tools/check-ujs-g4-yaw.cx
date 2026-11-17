@@ -1,10 +1,10 @@
+#pragma unisa use chrome_dom
 /* tools/check-ujs-g4-yaw.cx -- 红夹具 8 帧=1; persist 8 帧=8; chrome G4_LET_OK.
  *
  * sh ./unisacc.com tools/check-ujs-g4-yaw.cx --
- *
- * 页 ujs/practice/uxe/demo/g4-let/ 编 persist 夹具 g4-let-yaw.ujs (let-b64.js)。
- * 无 chrome: UJS_G4_YAW_UNMEASURED 退出 2,不是 PASS。
+ * chrome 经 cxlib.chrome-dom.
  */
+
 static int ck_failed, ck_asserts;
 
 static void ck_ck(int ok, const char *label) {
@@ -57,43 +57,27 @@ static int json_value(const char *s, size_t n) {
     return -999;
 }
 
-static int title_is(const char *s, size_t n, const char *want) {
-    size_t i, j, a, b, wl = 0;
-    if (!s || !want) return 0;
-    while (want[wl]) wl++;
-    for (i = 0; i + 7 < n; i++) {
-        if (s[i]=='<' && s[i+1]=='t' && s[i+2]=='i' && s[i+3]=='t' &&
-            s[i+4]=='l' && s[i+5]=='e' && s[i+6]=='>') {
-            a = i + 7;
-            for (b = a; b + 8 < n; b++) {
-                if (s[b]=='<' && s[b+1]=='/' && s[b+2]=='t' && s[b+3]=='i' &&
-                    s[b+4]=='t' && s[b+5]=='l' && s[b+6]=='e' && s[b+7]=='>') {
-                    if (b - a != wl) return 0;
-                    for (j = 0; j < wl; j++) if (s[a + j] != want[j]) return 0;
-                    return 1;
-                }
-            }
-            return 0;
-        }
+static int expect_title(const char *url, const char *want, const char *forbid, const char *label) {
+    int retries = 0;
+    const char *fin[3];
+    int rc;
+    (void)forbid;
+    fin[0] = "G4_LET_OK";
+    fin[1] = "G4_LET_RED";
+    fin[2] = "G4_LET_FAIL";
+    rc = chd_dump_expect("/usr/bin/google-chrome", url, want, fin, 3, "g4-let", 3, 25, &retries);
+    if (rc == 3) {
+        printf("UJS_G4_YAW_UNMEASURED\tno-chrome\n");
+        return 2;
     }
-    return 0;
+    if (rc == 0) {
+        printf("PASS\t%s\tretries=%d\n", label, retries);
+        return 0;
+    }
+    printf("FAIL\t%s\trc=%d\tretries=%d\n", label, rc, retries);
+    return 1;
 }
 
-static int dump_dom(const char *url, char **out, size_t *on) {
-    char *av[12];
-    av[0] = "/usr/bin/google-chrome";
-    av[1] = "--headless=new";
-    av[2] = "--enable-unsafe-swiftshader";
-    av[3] = "--allow-file-access-from-files";
-    av[4] = "--disable-web-security";
-    av[5] = "--virtual-time-budget=20000";
-    av[6] = "--timeout=20000";
-    av[7] = "--dump-dom";
-    av[8] = (char *)url;
-    av[9] = 0;
-    *out = 0; *on = 0;
-    return cx_runv_timeout(av, 25, out, on);
-}
 
 static int frame_last(const char *wasm, int nframes) {
     char *av[8];
@@ -276,15 +260,10 @@ int main(int argc, char **argv) {
         for (i = 0; suf[i] && n < 639; i++) url[n++] = suf[i];
     }
     url[n] = 0;
-    rc = dump_dom(url, &out, &on);
-    if (!out || !title_is(out, on, "G4_LET_OK")) {
-        printf("FAIL\tchrome-title rc=%d\n", rc);
-        if (out) free(out);
+    if (expect_title(url, "G4_LET_OK", 0, "chrome-title")) {
         printf("UJS_G4_YAW_FAIL\tasserts=%d\tfailed=%d\n", ck_asserts + 1, ck_failed + 1);
         return 1;
     }
-    printf("PASS\tchrome-G4_LET_OK\n");
-    free(out); out = 0; on = 0;
     n = 0;
     while (pre[n]) { url[n] = pre[n]; n++; }
     for (i = 0; cwd[i] && n < 620; i++) url[n++] = cwd[i];
@@ -293,15 +272,10 @@ int main(int argc, char **argv) {
         for (i = 0; suf[i] && n < 639; i++) url[n++] = suf[i];
     }
     url[n] = 0;
-    rc = dump_dom(url, &out, &on);
-    if (!out || !title_is(out, on, "G4_LET_RED") || title_is(out, on, "G4_LET_OK")) {
-        printf("FAIL\tchrome-red-title rc=%d\n", rc);
-        if (out) free(out);
+    if (expect_title(url, "G4_LET_RED", "G4_LET_OK", "chrome-red-title")) {
         printf("UJS_G4_YAW_FAIL\tasserts=%d\tfailed=%d\n", ck_asserts + 2, ck_failed + 1);
         return 1;
     }
-    printf("PASS\tchrome-G4_LET_RED\n");
-    if (out) free(out);
     printf("UJS_G4_YAW_OK\tasserts=%d\tfailed=0\n", ck_asserts + 2);
     return 0;
 }
