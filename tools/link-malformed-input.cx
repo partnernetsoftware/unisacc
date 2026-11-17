@@ -30,18 +30,22 @@ int main(int argc, char **argv) {
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
     char p[4400]; const char *M = "int main(void){return 7;}\n"; path(p, sizeof p, outdir, "m.c"); saved(p, M, strlen(M));
-    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); /* the 0.0.43 product decodes UTAPEBIN but has no encoder (C44-TAPEBIN-01): the real package is a frozen fixture written by 79fb84e6 */
-      char fx[4400]; size_t fxn; char *fb; path(fx, sizeof fx, root, "tests/fixtures/tapebin/return7.tapebin"); fb = cx_read(fx, &fxn); if (!fb || fxn < 64 || !tx_same(fb, 8, "UTAPEBIN", 8)) die("tapebin fixture"); path(p, sizeof p, outdir, "t.tapebin"); saved(p, fb, fxn); mm_free(fb); }
+    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); }
+    /* the frozen pre-.end fixture (79fb84e6) is refused whole since 4f2c7e5574 (tape end mark); the product now encodes
+       UTAPEBIN itself, so the real package is written by the candidate under test */
+    { char *v[] = { "-S", "--tapebin", "-b", "lnx/x86_64", "-o", "t.tapebin", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("t.tapebin"); np_free(&r);
+      size_t fxn; char *fb = load("t.tapebin", &fxn); if (fxn < 136 || !tx_same(fb, 8, "UTAPEBIN", 8)) die("tapebin header"); mm_free(fb); }
     derive("u.o", "trunc.o", 100, -1, 0); derive("u.o", "badmagic.o", 0, 0, 'X'); derive("u.o", "half.o", 2000, -1, 0);
     derive("t.tapebin", "tb-flip.tapebin", 0, 100, 0xff); derive("t.tapebin", "tb-trunc.tapebin", 64, -1, 0); derive("t.tapebin", "tb-minor.tapebin", 0, 10, 7);
-    const char *bad = "_start:\n  bogus r9, r0\n  ret\n", *noret = "_start:\n  imm r0, 7\n", *bin = "\0\1\2garbage\n";
+    const char *bad = "_start:\n  bogus r9, r0\n  ret\n.end\n", *noret = "_start:\n  imm r0, 7\n", *bin = "\0\1\2garbage\n";
     path(p, sizeof p, outdir, "bad.tape"); saved(p, bad, strlen(bad)); path(p, sizeof p, outdir, "noret.tape"); saved(p, noret, strlen(noret)); path(p, sizeof p, outdir, "bin.tape"); saved(p, bin, 11);
     /* green today */
     { char *v[] = { "-o", "p1", "trunc.o", 0 }; refused("object.truncated-100.named", v, "p1", "malformed unit object container"); }
-    { char *v[] = { "-S", "-o", "o1.tape", "tb-flip.tapebin", 0 }; refused("tapebin.flipped-byte.named", v, "o1.tape", "invalid tapebin"); }
-    { char *v[] = { "-S", "-o", "o2.tape", "tb-trunc.tapebin", 0 }; refused("tapebin.truncated-header.named", v, "o2.tape", "invalid tapebin"); }
+    /* since 4f2c7e5574 (src/drivetapebin.cx dv_tapebin_check rc 2) a damaged carrier is named `tape truncated` */
+    { char *v[] = { "-S", "-o", "o1.tape", "tb-flip.tapebin", 0 }; refused("tapebin.flipped-byte.named", v, "o1.tape", "reject: tape truncated"); }
+    { char *v[] = { "-S", "-o", "o2.tape", "tb-trunc.tapebin", 0 }; refused("tapebin.truncated-header.named", v, "o2.tape", "reject: tape truncated"); }
     { char *v[] = { "-S", "-o", "o3.tape", "tb-minor.tapebin", 0 }; refused("tapebin.bad-minor.named", v, "o3.tape", "invalid tapebin"); }
-    { char *v[] = { "-run", "tb-flip.tapebin", 0 }; refused("run.tapebin-flipped.named", v, 0, "invalid tapebin"); }
+    { char *v[] = { "-run", "tb-flip.tapebin", 0 }; refused("run.tapebin-flipped.named", v, 0, "reject: tape truncated"); }
     { char *v[] = { "-run", "bad.tape", 0 }; refused("run.tape-unknown-opcode.named", v, 0, "unknown opcode"); }
     { char *v[] = { "-run", "bin.tape", 0 }; refused("run.tape-binary-garbage.named", v, 0, 0); }
     { char *v[] = { "-o", "p4", "bad.tape", 0 }; refused("image.tape-unknown-opcode.named", v, "p4", "unknown opcode"); }
