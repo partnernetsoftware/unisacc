@@ -179,7 +179,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 超时作业的整棵树清理 | `#pragma unisa use sys.process` -> `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
 | 子进程超时契约（run/capture + residue） | `sh ./unisacc.com tools/check-netpack.cx` | 双管EOF后仍按原deadline非阻塞等待，超时冻结整树后击杀并有界定向回收直接子，不抢调用者的其他子进程；`np_result.residue` 0才算干净。孤儿可见性仍需调用方先`np_subreaper()`。`UNISACC_NP_FAULT=residue`为tools与run-batch的显式注入缝，默认关，其它值具名拒绝；sysx产品单次回收疑点另列0.0.47，不混同此测试库修复。 |
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
-| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `archive/agentwork-retire-2026-11/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
+| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `prd_mempalace.md` 的已落地与部分落地任务行标 `STALE` 与 `PARTIAL`；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
 
 #### 2.2 测试（棘轮、门禁、批次）
 
@@ -574,7 +574,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；任务看板与账（archive/agentwork-retire-2026-11/：items/ledger/units/freeze/phase-times/pkg-gaps，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
+| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
 
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
