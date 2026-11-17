@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<title>water-keeps-host1</title>
+<style>
+html,body{margin:0;height:100%;background:#05060c;color:#e8e0d4;font:13px sans-serif;overflow:hidden}
+#hud{position:fixed;left:12px;top:12px;z-index:2;background:rgba(5,6,12,.8);padding:8px 10px;border:1px solid #456}
+canvas{display:block;width:100%;height:100%}
+</style>
+</head>
+<body>
+<div id="hud">W/S · A/D · UXE WebGL · no three</div>
+<canvas id="view"></canvas>
+<script src="./host1-runtime.js"></script>
+<script src="water-b64.js"></script>
+<script type="module">
+import { createWebGLRenderer } from "./renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "./scene.js";
+import { MESH_SHIP, MESH_BOX, MESH_OCTA } from "./meshes.js";
+import { MESH_PLANE } from "./meshes.js";
+
+function rgb(n){
+  return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+}
+const AUTO=/(?:\?|&)auto=1(?:&|$)/.test(location.search);
+const canvas=document.getElementById("view");
+const hud=document.getElementById("hud");
+const keys={};
+window.addEventListener("keydown",e=>{ keys[e.code]=1; });
+window.addEventListener("keyup",e=>{ keys[e.code]=0; });
+
+let pal=[660520,1708064,530456,1574920,1052696,1310732,790548,657936];
+let ok=0, z=0, hdg=0, spd=0.4;
+
+const renderer=createWebGLRenderer(canvas);
+const scene=new Scene();
+scene.wave=1.0;
+scene.ink=0.25;
+const camera=new PerspectiveCamera(Math.PI/3, 0.2, 400);
+const water=scene.instances("water", 1, [0.08,0.16,0.22]);
+water.meshId=MESH_PLANE; water.roughness=0.85; water.metalness=0.35;
+water.set(0, 0, 0, -80, 220);
+const rocks=scene.instances("rocks", 64, [0.28,0.32,0.28]);
+rocks.meshId=MESH_OCTA;
+const houses=scene.instances("houses", 32, [0.45,0.38,0.32]);
+houses.meshId=MESH_BOX;
+const ship=scene.instances("ship", 1, [0.42,0.28,0.16]);
+ship.meshId=MESH_SHIP; ship.emissive=[0.35,0.18,0.04];
+const lamp=scene.instances("lamp", 1, [1,0.7,0.3]);
+lamp.meshId=MESH_OCTA; lamp.emissive=[1.2,0.7,0.2];
+
+function placeWorld(){
+  let i;
+  for(i=0;i<64;i++){
+    const rz=((i/8)|0)*40-20;
+    const side=(i%2)?18:-18;
+    rocks.set(i, side+(i%5)-2, 1.2, -rz, 1.4+(i%3)*0.4);
+  }
+  for(i=0;i<32;i++){
+    const rz=((i/4)|0)*40-8;
+    const side=(i%2)?22:-22;
+    houses.set(i, side, 2.2, -rz, 1.6);
+  }
+}
+placeWorld();
+
+function realmAt(zz){
+  let r=(zz/40)|0; if(r<0)r=0; if(r>7)r=7; return r;
+}
+
+function tick(){
+  if(!AUTO){
+    if(keys.KeyA||keys.ArrowLeft) hdg-=0.03;
+    if(keys.KeyD||keys.ArrowRight) hdg+=0.03;
+    if(keys.KeyW||keys.ArrowUp) spd+=0.02;
+    if(keys.KeyS||keys.ArrowDown) spd-=0.02;
+    if(spd<0.15) spd=0.15;
+    if(spd>1.2) spd=1.2;
+    z+=spd;
+  }
+  const ri=realmAt(z);
+  const col=rgb(pal[ri]);
+  scene.clearColor=[col[0]*0.15,col[1]*0.18,col[2]*0.22,1];
+  scene.fog={ density:0.012+ri*0.002, color:col.map(x=>x*0.25) };
+  scene.lights[0]={ dir:[0.2,0.9,0.2], color:[1,0.85,0.55], intensity:1.1 };
+  scene.lights[1]={ dir:[-0.3,0.2,-0.4], color:col, intensity:0.5 };
+  const x=Math.sin(hdg)*8;
+  ship.set(0, x, 0.4, -z-6, 1.4);
+  lamp.set(0, x, 1.3, -z-7.2, 0.18);
+  water.set(0, 0, 0, -z-80, 240);
+  camera.setEye(x*0.3, 4.2, -z+10);
+  camera.setTarget(x, 0.6, -z-14);
+  renderer.render(scene, camera);
+  if(!AUTO) hud.textContent=(ok?"WATER_OK ":"")+"realm "+(ri+1)+"/8  UXE GL ship+fog+plane · WASD · no three";
+  requestAnimationFrame(tick);
+}
+
+(async function(){
+  try{
+    const rt=await host1Boot(window.WATER_WASM);
+    const d=rt.readI64List(rt.mainHandle());
+    if(d.length>=8) pal=d.slice(-8);
+    ok=d.length>=8;
+  }catch(e){ ok=0; hud.textContent="WATER_ERR "+String(e&&e.message||e); document.title="WATER_ERR"; }
+  if(!document.title||document.title==="water-keeps-host1") document.title=ok?"WATER_OK":"WATER_FAIL";
+  if(AUTO && document.title.slice(0,9)!=="WATER_ERR") hud.textContent=(ok?"WATER_OK":"WATER_FAIL")+" pal="+pal.length;
+  renderer.resize();
+  tick();
+})();
+</script>
+</body>
+</html>
