@@ -23,6 +23,7 @@
 | **0.0.5** | ✓ **host1 跑面**（`--run`） | [`plans/v0.0.5.md`](plans/v0.0.5.md) |
 | **0.0.6** | ✓ **日用一条链**（`FILE.ujs --run`） | [`plans/v0.0.6.md`](plans/v0.0.6.md) |
 | **0.0.7** | ✓ **lex 扫描器切片**（`method_construct`；不是 IntNet，不是其余九网） | [`plans/v0.0.7.md`](plans/v0.0.7.md) |
+| **0.0.8** | 计划：**host1 步进诚实**（文档+共享 runtime；不升版号） | [`plans/v0.0.8.md`](plans/v0.0.8.md) |
 
 版号真源：`ujs.com --version`（**`ujs.com 0.0.7`**）。
 
