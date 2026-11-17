@@ -233,7 +233,7 @@ $wrong = $(if ($Tgt -ceq 'win/x86_64') { 'lnx/x86_64' } else { 'win/x86_64' })
 $pip = Image-Pipe 'plain.c' 'plain.wrong.pipe' 'w' $wrong
 if ($pip -ne 0 -or -not (Same 'plain.ref' 'plain.wrong.pipe')) { $npass++ } else { Dump-Pair 'H wrong-target-pipe-not-equal' 0 $pip 'plain.ref' 'plain.wrong.pipe' }
 # F reject
-$ref = Invoke-Cwd $Exe $sp @('-o','bad.ref','bad.c') 20000 $null $null
+$ref = Invoke-Cwd $Exe $sp @('-O0','-o','bad.ref','bad.c') 20000 $null $null
 $pip = Image-Pipe 'bad.c' 'bad.pipe' 'b' $Tgt
 if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ } else { Write-Host ("SP_FAIL`tF reject-stderr-and-rc`trcA=$($ref.Code)`trcB=$pip`texe=$Exe`ttgt=$Tgt") }
 $streamOk = $npass -eq 6
