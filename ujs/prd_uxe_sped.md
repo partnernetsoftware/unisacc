@@ -72,15 +72,16 @@ host1 侧:`host_gpu_submit` 符号可导入,读线性内存后 no-op,**不是** 
 
 字节序:与 v3 相同,小端。magic `UXEP`(u32) | version(u32)=4。
 
-v3 前缀原样:clear rgba、camera 9xf32、fog、ambient、nLights、lights、nClouds、每云 v3 字段(color/emissive/metal/rough/mesh_id/count/xyz/scale)。
+v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin`(u16,保留 0)。
 
-v4 在每云 `scale[]` 之后追加:`map_id`(u16,0=无贴图) | `uv_origin`(u16,保留 0)。
+包尾**上传段**(可空):`nUpload`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `sha256`(32B) `rgba`(w*h*4)。
 
-包尾纹理段(nClouds 之后):`nTex`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `pad`(u16) `rgba`(w*h*4 字节,行主序,R,G,B,A)。
+宿主缓存键=`(id, sha256)`。仅当缓存未命中时包内才带 rgba。之后帧 version 仍可为 4,但 `nUpload=0`,只靠 map_id 引用缓存。4x4 夹具:第 1 帧带上传段,第 2 帧 nUpload=0 仍贴出同样像素。
 
-兼容:version<=3 的解码器读完 v3 云即停,忽略尾;v4 编码器仅当有纹理时写 version=4,否则仍写 3。v3 夹具(gpu-tri 212B)字节不变。核可经 `store_bytes` 提供 rgba,或经 `host_asset_read` 填同一段(T2)。
+上限(解码前断言,超限明确错误):单张 `w*h*4<=1048576`(1MiB);一包 `nUpload` 合计 rgba<=1048576;读前 `o+n<=byteLength`。map_id!=0 且不在本包上传段也不在缓存 -> 错误,不得静默黑。
 
-默认 wrap=clamp、filter=nearest。不上 mip/KTX2。
+兼容:无 map_id 且 nUpload=0 时编码器写 version=3,与 `ujs/tests/uxep-tri-oracle.hex` 212B、fnv 3620361384 逐字节相同(浏览器 encodeRenderPacket 对三角夹具验,期望从 oracle tsv/hex 读)。不上 mip/KTX2。不把每帧完整天空贴图塞进包(超 G2 `store_bytes` 4096)。
+
 
 
 ## 3. 对标表
