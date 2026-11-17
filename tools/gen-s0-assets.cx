@@ -136,6 +136,19 @@ static void fill_bridge(void) {
         }
     }
 }
+static int write_mode;
+static int check_png(const char *path, unsigned char *outb, int oi) {
+    unsigned char disk[16384];
+    FILE *f = fopen(path, "rb");
+    int n, i;
+    if (!f) return 1;
+    n = (int)fread(disk, 1, sizeof disk, f);
+    fclose(f);
+    if (n != oi) return 1;
+    for (i = 0; i < oi; i++) if (disk[i] != outb[i]) return 1;
+    return 0;
+}
+
 static int write_png(const char *path) {
     unsigned char raw[H * (1 + W * 4)];
     unsigned char z[16 + H * (1 + W * 4)];
@@ -180,22 +193,19 @@ static int write_png(const char *path) {
     c = crc32(chunk + 4, 4);
     be32(chunk + 8, c);
     for (i = 0; i < 12; i++) outb[oi++] = chunk[i];
-    f = fopen(path, "wb");
-    if (!f) return 1;
-    fwrite(outb, 1, oi, f);
-    fclose(f);
-    printf("WROTE\t%s\t%d\n", path, oi);
-    return 0;
-}
-static int check_png(const char *path, unsigned char *outb, int oi) {
-    unsigned char disk[16384];
-    FILE *f = fopen(path, "rb");
-    int n;
-    if (!f) return 1;
-    n = (int)fread(disk, 1, sizeof disk, f);
-    fclose(f);
-    if (n != oi) return 1;
-    { int i; for (i = 0; i < oi; i++) if (disk[i] != outb[i]) return 1; }
+    if (write_mode) {
+        f = fopen(path, "wb");
+        if (!f) return 1;
+        fwrite(outb, 1, oi, f);
+        fclose(f);
+        printf("WROTE\t%s\t%d\n", path, oi);
+        return 0;
+    }
+    if (check_png(path, outb, oi)) {
+        printf("DIFF\t%s\n", path);
+        return 1;
+    }
+    printf("MATCH\t%s\n", path);
     return 0;
 }
 int main(int argc, char **argv) {
@@ -207,13 +217,12 @@ int main(int argc, char **argv) {
         if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
     }
     if (!write && !check) { printf("GEN_S0_ASSETS\tdry\n"); return 0; }
-    fill_sky(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/sky-gold.png")) return 1; }
-    fill_water(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/water-gold.png")) return 1; }
-    fill_shore(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/far-shore.png")) return 1; }
-    fill_bridge(); if (write) { if (write_png("ujs/plans/demo-v2/look-dev/far-bridge.png")) return 1; }
-    if (check) {
-        printf("GEN_S0_ASSETS\tcheck-size-only\n");
-    }
+    write_mode = write;
+    fill_sky(); if (write_png("ujs/plans/demo-v2/look-dev/sky-gold.png")) failed++;
+    fill_water(); if (write_png("ujs/plans/demo-v2/look-dev/water-gold.png")) failed++;
+    fill_shore(); if (write_png("ujs/plans/demo-v2/look-dev/far-shore.png")) failed++;
+    fill_bridge(); if (write_png("ujs/plans/demo-v2/look-dev/far-bridge.png")) failed++;
+    if (failed) return 1;
     printf("GEN_S0_ASSETS\tok\n");
-    return failed ? 1 : 0;
+    return 0;
 }
