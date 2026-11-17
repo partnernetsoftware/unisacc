@@ -1308,28 +1308,39 @@ static int pstmt(Lex *L, Prog *P) {
     if (!expect(L, T_LB, P, "switch {")) return 0;
     sc = ensure_lscratch(P); if (sc < 0) return 0;
     if (!emit(P, OP_STORE, sc)) return 0;
-    while (L->tok == T_CASE) {
-      next(L);
-      if (L->tok != T_NUM) { P->err = "case int"; return 0; }
-      {
-        int64_t cv = L->num;
+    for (;;) {
+      const char *sact = 0;
+#ifdef UJS_HOST
+      sact = parse_net_cls(5, L->tok);
+      if (sact && !strcmp(sact, "bad")) { P->err = "parse-net"; return 0; }
+      if (sact && !strcmp(sact, "done")) break;
+#endif
+      if (L->tok == T_CASE && (!sact || !strcmp(sact, "case"))) {
         next(L);
-        if (!expect(L, T_COLON, P, "case :")) return 0;
-        if (!emit(P, OP_LOAD, sc)) return 0;
-        if (!emit(P, OP_CONST, cv)) return 0;
-        if (!emit(P, OP_EQ, 0)) return 0;
-        if (!emit(P, OP_IF0, 0)) return 0;
-        while (L->tok != T_CASE && L->tok != T_DEFAULT && L->tok != T_RB && L->tok != T_EOF)
-          if (!pstmt(L, P)) return 0;
-        if (!emit(P, OP_IF1, 0)) return 0;
-        if (!emit(P, OP_IF2, 0)) return 0;
+        if (L->tok != T_NUM) { P->err = "case int"; return 0; }
+        {
+          int64_t cv = L->num;
+          next(L);
+          if (!expect(L, T_COLON, P, "case :")) return 0;
+          if (!emit(P, OP_LOAD, sc)) return 0;
+          if (!emit(P, OP_CONST, cv)) return 0;
+          if (!emit(P, OP_EQ, 0)) return 0;
+          if (!emit(P, OP_IF0, 0)) return 0;
+          while (L->tok != T_CASE && L->tok != T_DEFAULT && L->tok != T_RB && L->tok != T_EOF)
+            if (!pstmt(L, P)) return 0;
+          if (!emit(P, OP_IF1, 0)) return 0;
+          if (!emit(P, OP_IF2, 0)) return 0;
+        }
+        continue;
       }
-    }
-    if (L->tok == T_DEFAULT) {
-      next(L);
-      if (!expect(L, T_COLON, P, "default :")) return 0;
-      while (L->tok != T_RB && L->tok != T_EOF)
-        if (!pstmt(L, P)) return 0;
+      if (L->tok == T_DEFAULT && (!sact || !strcmp(sact, "default"))) {
+        next(L);
+        if (!expect(L, T_COLON, P, "default :")) return 0;
+        while (L->tok != T_RB && L->tok != T_EOF)
+          if (!pstmt(L, P)) return 0;
+        break;
+      }
+      break;
     }
     return expect(L, T_RB, P, "switch }");
   }
