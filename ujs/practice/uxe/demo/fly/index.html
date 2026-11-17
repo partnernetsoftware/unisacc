@@ -15,13 +15,15 @@ canvas{display:block;width:100%;height:100%}
 import { createWebGLRenderer } from "../../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../../scene.js";
 import { MESH_SHIP, MESH_OCTA, MESH_PLANE } from "../../meshes.js";
+import { createBrowserHost } from "../../host-browser.js";
+import { encodeRenderPacket } from "../../packet.js";
 const AUTO=/(?:\?|&)auto=1(?:&|$)/.test(location.search);
 const keys={};
 window.addEventListener("keydown",e=>{ keys[e.code]=1; if(e.code==="Space") e.preventDefault(); });
 window.addEventListener("keyup",e=>keys[e.code]=0);
 let rollClick=0;
 window.addEventListener("mousedown",()=>{ rollClick=1; });
-const renderer=createWebGLRenderer(document.getElementById("view"));
+const canvas=document.getElementById("view");
 const scene=new Scene();
 scene.wave=0.4; scene.ink=0.2;
 scene.clearColor=[0.03,0.06,0.1,1];
@@ -38,7 +40,27 @@ const ship=scene.instances("s",1,[0.85,0.35,0.2]);
 ship.meshId=MESH_SHIP; ship.emissive=[0.15,0.04,0];
 const camera=new PerspectiveCamera(Math.PI/3,0.2,500);
 let x=0,y=3,z=8, yaw=0, spd=0, roll=0, pitch=0, gold=0, ok=0, n=0;
-function tick(){
+function packCloud(c){
+  return {
+    color:c.color, count:c.count, xyz:c.xyz, scale:c.scale,
+    meshId:c.meshId, emissive:c.emissive,
+    metalness:c.metalness, roughness:c.roughness,
+  };
+}
+function submitGpu(host){
+  const clouds=[];
+  scene.clouds.forEach(c=>clouds.push(packCloud(c)));
+  host.host_gpu_submit(encodeRenderPacket({
+    clear:scene.clearColor,
+    camera:{ fovy:camera.fovy, near:camera.near, far:camera.far, eye:camera.eye, target:camera.target },
+    fog:scene.fog,
+    ambient:scene.ambient,
+    lights:scene.lights,
+    clouds,
+  }));
+  host.host_frame_present();
+}
+function stepSim(){
   n++;
   if(!AUTO){
     if(keys.KeyA||keys.ArrowLeft) yaw+=0.04;
@@ -60,8 +82,6 @@ function tick(){
   const bx=x-Math.sin(yaw)*14, bz=z+Math.cos(yaw)*14;
   camera.setEye(bx, y+5, bz);
   camera.setTarget(x, y+0.4, z);
-  renderer.render(scene, camera);
-  requestAnimationFrame(tick);
 }
 (async function(){
   try{
@@ -71,6 +91,24 @@ function tick(){
   }catch(e){ ok=0; }
   document.title=ok?"FLY_OK":"FLY_GL_OK";
   if(AUTO||!ok) document.getElementById("hud").textContent=(ok?"FLY_OK":"FLY_GL_OK")+" gold="+gold;
+  let host=null, gpu=0;
+  try{
+    host=await createBrowserHost(canvas,{ prefer:"webgl", baseURL:new URL("../../", import.meta.url) });
+    stepSim();
+    submitGpu(host);
+    gpu=1;
+  }catch(e){ host=null; gpu=0; }
+  if(gpu){
+    function tick(){ try{ stepSim(); submitGpu(host); requestAnimationFrame(tick); }catch(e){} }
+    requestAnimationFrame(tick);
+    return;
+  }
+  const renderer=createWebGLRenderer(canvas);
+  function tick(){
+    stepSim();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
   renderer.resize(); tick();
 })();
 </script></body></html>
