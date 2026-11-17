@@ -94,3 +94,4 @@ flowchart LR
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
 - cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
+- ujs `compiler_min.cx` cxraw 实测 96(tsv 基线曾 50,限期 0.0.9 压回 <=50)。决定:不把 96 当合格,不并 G1。依据:d473474f14 与 ujs/prd.md C4。证据:`sh ./unisacc.com -run tests/cxraw.cx -- --check --files ujs/seed/stage0/compiler_min.cx`;host1_vm 实测 34。回滚:到期未压回则拒绝合入 main/公开;不升基线冒充。

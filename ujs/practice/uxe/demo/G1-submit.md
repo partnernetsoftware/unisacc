@@ -12,14 +12,28 @@ prd 0.3b G1 / W3 同条。
 
 `host1_vm.cx` 接受唯一 import `env.host_gpu_submit(i32,i32)->()`:call 索引 0 为导入,定义函数 idx 减 nimport。实现读线性内存 `[ptr,ptr+len)` 边界检查后 no-op,不崩。**宿主符号已提供;尚未真 GPU。不宣称 G1 完成。**
 
+## 写包原语(设计,未实现;先与 ccapi 同步再改 compiler_min)
+
+(1) 不选 `host_mem_write` 新 import。host1 现只认唯一 import `env.host_gpu_submit`;再加 import 要改 host1_vm 与 fly 无 import 合同。
+
+(2) 选语言内建 `store_bytes(list) -> i64 ptr`。`list` 为 i64 元素 0..255。实现把字节写入**生成模块**线性内存窗口 `HOST_SCRATCH+65536`(=1015808),长度 `len(list)`。然后 `host_gpu_submit(ptr, n)`。
+
+(3) 上限:第一刀 `n<=4096`。一三角 UXEP v1 约百余字节,远超 `MAXSTRLIT=255`,远小于 128 页内存。超限编译或 emit 失败,不截断。
+
+(4) 所有权:窗口属 wasm 实例线性内存,编译器 `g_heap` 不管。Host(host1 / host1Boot)只读 `[ptr,ptr+len)`。`HOST_SCRATCH=950000` 仍给 `host_scratch` / `host_set_global` 注入(64KiB)。写包窗口与注入窗口不相交。同帧先 `store_bytes` 再 submit;下一帧覆盖同一窗口。
+
+(5) 不做:真 GPU、UXEP 全字段编码器、第二 import、把包塞进字符串字面量。
+
+(6) 下一刀验收(未做):最小 `.ujs` 组 1 三角 UXEP 字节 list,`store_bytes`+`host_gpu_submit`;宿主 no-op 记 len 与校验和;`.cx` 与 AUTO 同期望。未实现前不得记 G1 完成。
+
 ## 仍未做
 
-(1) 填 UXEP 真包(远超 `MAXSTRLIT=255`)。
-(2) 页 `host1Boot` import 接真 GPU(现仅 no-op 读内存,`505f749f09`)。
+(1) `store_bytes` 与三角夹具(本设计之后才动 compiler_min)。
+(2) 页 `host1Boot` 接真 GPU(现仅 no-op,`505f749f09`)。
 
 ## 状态
 
-条件 import 已合入。词法字节比较,无新 strcmp。声明+调用已落地。host1 与 host1Boot 均提供 `env.host_gpu_submit` no-op。fly `--run` 金 3868;`gpu-submit-call.ujs --run` i64=1。批次 `ujs-gpu-import`。非真 GPU。不得记 G1 完成。
+条件 import 已合入。声明+调用已落地。host1 与 host1Boot 均提供 `env.host_gpu_submit` no-op。fly 金 3868;`gpu-submit-call` i64=1。无写包原语,submit 只能空包。不得记 G1 完成。
 
 
 
