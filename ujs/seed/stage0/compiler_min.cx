@@ -10,7 +10,7 @@ enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5,
 static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
 static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_len;
-
+static int g_need_gpu;
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
@@ -133,6 +133,9 @@ static int bf64(Buf *b, int64_t bits) {
 static int sect(Buf *m, uint8_t id, Buf *body) {
   if (!bu8(m, id) || !bleu(m, body->n)) return 0;
   return braw(m, bd(body), body->n);
+}
+static int wcall(Buf *c, uint32_t n) {
+  return bu8(c, 0x10) && bleu(c, n + (uint32_t)g_need_gpu);
 }
 
 static int64_t d_bits(double d) {
@@ -392,6 +395,11 @@ static void next(Lex *L) {
     while (L->pos < L->len && idc(L->src[L->pos]) && n + 1 < sizeof L->id)
       L->id[n++] = L->src[L->pos++];
     L->id[n] = 0;
+    {
+      const char *t = L->id;
+      if (t[0]=='h'&&t[1]=='o'&&t[2]=='s'&&t[3]=='t'&&t[4]=='_'&&t[5]=='g'&&t[6]=='p'&&t[7]=='u'&&t[8]=='_'&&t[9]=='s'&&t[10]=='u'&&t[11]=='b'&&t[12]=='m'&&t[13]=='i'&&t[14]=='t'&&t[15]==0)
+        g_need_gpu = 1;
+    }
     if (!strcmp(L->id,"let")) L->tok = T_LET;
     else if (!strcmp(L->id,"while")) L->tok = T_WHILE;
     else if (!strcmp(L->id,"return")) L->tok = T_RETURN;
@@ -1515,30 +1523,30 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x0b)) return 0;
       break;
     case OP_BOXI:
-      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0; /* call mk_i64 */
+      if (!wcall(c, 0)) return 0; /* call mk_i64 */
       break;
     case OP_BOXF:
-      if (!bu8(c, 0x10) || !bleu(c, 4)) return 0; /* call mk_f64 */
+      if (!wcall(c, 4)) return 0; /* call mk_f64 */
       break;
     case OP_MKLIST:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 6)) return 0; /* call mk_list */
+      if (!wcall(c, 6)) return 0; /* call mk_list */
       break;
     case OP_MKLIST_DYN:
       /* n already i32 on stack */
-      if (!bu8(c, 0x10) || !bleu(c, 6)) return 0;
+      if (!wcall(c, 6)) return 0;
       break;
     case OP_LSET:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 8)) return 0;
+      if (!wcall(c, 8)) return 0;
       break;
     case OP_IDXGET:
       if (!bu8(c, 0xa7)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 7)) return 0; /* list_get */
+      if (!wcall(c, 7)) return 0; /* list_get */
       if (ins->a)
-        { if (!bu8(c, 0x10) || !bleu(c, 5)) return 0; } /* f64_of */
+        { if (!wcall(c, 5)) return 0; } /* f64_of */
       else
-        { if (!bu8(c, 0x10) || !bleu(c, 3)) return 0; } /* i64_of */
+        { if (!wcall(c, 3)) return 0; } /* i64_of */
       break;
     case OP_IWRAP:
       if (!bu8(c, 0xa7)) return 0;
@@ -1569,10 +1577,10 @@ static int emit_ops(Buf *c, Prog *P) {
       break;
     }
     case OP_IDXSET:
-      if (!bu8(c, 0x10) || !bleu(c, 9)) return 0;
+      if (!wcall(c, 9)) return 0;
       break;
     case OP_LEN:
-      if (!bu8(c, 0x10) || !bleu(c, 10)) return 0;
+      if (!wcall(c, 10)) return 0;
       if (!bu8(c, 0xad)) return 0;
       break;
     case OP_GLOAD: {
@@ -1583,9 +1591,9 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bi32(c, (int32_t)addr)) return 0;
       if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
       if (ty == TY_F64) {
-        if (!bu8(c, 0x10) || !bleu(c, 5)) return 0;
+        if (!wcall(c, 5)) return 0;
       } else if (ty == TY_I64) {
-        if (!bu8(c, 0x10) || !bleu(c, 3)) return 0;
+        if (!wcall(c, 3)) return 0;
       }
       break;
     }
@@ -1594,16 +1602,16 @@ static int emit_ops(Buf *c, Prog *P) {
       uint8_t ty = (uint8_t)((ins->a >> 16) & 0xff);
       if (!ty) ty = P->gty[slot];
       if (ty == TY_I64) {
-        if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
+        if (!wcall(c, 0)) return 0;
       } else if (ty == TY_F64) {
-        if (!bu8(c, 0x10) || !bleu(c, 4)) return 0;
+        if (!wcall(c, 4)) return 0;
       }
       if (!bi32(c, (int32_t)slot)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 15)) return 0;
+      if (!wcall(c, 15)) return 0;
       break;
     }
     case OP_STRADD:
-      if (!bu8(c, 0x10) || !bleu(c, 18)) return 0;
+      if (!wcall(c, 18)) return 0;
       break;
     case OP_SCONST: {
       /* a = (pool_off << 16) | len → bytes at SCRATCH0, call mk_str */
@@ -1619,29 +1627,29 @@ static int emit_ops(Buf *c, Prog *P) {
       }
       if (!bi32(c, (int32_t)(SCRATCH0))) return 0;
       if (!bi32(c, (int32_t)(n))) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 11)) return 0; /* mk_str */
+      if (!wcall(c, 11)) return 0; /* mk_str */
       break;
     }
     case OP_MKDICT:
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 12)) return 0; /* mk_dict */
+      if (!wcall(c, 12)) return 0; /* mk_dict */
       break;
     case OP_DSET:
       /* stack h k v → push i → dict_set_hkvi */
       if (!bu8(c, 0x41) || !blei32(c, (int32_t)ins->a)) return 0;
-      if (!bu8(c, 0x10) || !bleu(c, 16)) return 0;
+      if (!wcall(c, 16)) return 0;
       break;
     case OP_DOT:
       /* stack d k → dict_get → i64_of */
-      if (!bu8(c, 0x10) || !bleu(c, 17)) return 0; /* dict_get */
-      if (!bu8(c, 0x10) || !bleu(c, 3)) return 0; /* i64_of */
+      if (!wcall(c, 17)) return 0; /* dict_get */
+      if (!wcall(c, 3)) return 0; /* i64_of */
       break;
     case OP_RET:
-      if (!bu8(c, 0x10) || !bleu(c, 0)) return 0;
+      if (!wcall(c, 0)) return 0;
       if (!bu8(c, 0x0f)) return 0;
       break;
     case OP_FRET:
-      if (!bu8(c, 0x10) || !bleu(c, 4)) return 0;
+      if (!wcall(c, 4)) return 0;
       if (!bu8(c, 0x0f)) return 0;
       break;
     case OP_HRET:
@@ -2166,7 +2174,7 @@ static int host_get_global_body(Buf *c, int ng) {
 static int run_step_body(Buf *c) {
   /* call main (func 1) */
   if (!bleu(c, 0)) return 0;
-  if (!bu8(c, 0x10) || !bleu(c, 1)) return 0;
+  if (!wcall(c, 1)) return 0;
   return bu8(c, 0x0b);
 }
 
@@ -2236,8 +2244,10 @@ static int str_cat_body(Buf *c) {
     0x6a, 0x6a, 0x6a, 0x41, 0x07, 0x6a, 0x41, 0x78, 0x71, 0x21, 0x06, 0x41, 0x00, 0x20, 0x06,
     0x36, 0x02, 0x00, 0x20, 0x04, 0x0b
   };
-  return braw(c, body, (uint32_t)sizeof body);
-}
+  if (!braw(c, body, (uint32_t)sizeof body)) return 0;
+  if (g_need_gpu) { bd(c)[6]++; bd(c)[12]++; }
+  return 1;
+ }
 
 static int host_dict_set_body(Buf *c) {
   /* (param h i k v) — emit_wasm / run_step order */
@@ -2303,7 +2313,8 @@ static int build_mod(Prog *P, Buf *mod) {
   /* exports */
   if (!bleu(&exps, 27)) return 0;
   #define EXP(name, kind, idx) do { \
-    if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, idx)) return 0; \
+    uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)g_need_gpu : (uint32_t)(idx); \
+    if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, _i)) return 0; \
   } while (0)
   EXP("memory", 0x02, 0);
   EXP("main_export", 0x00, 1);
@@ -2402,6 +2413,14 @@ static int build_mod(Prog *P, Buf *mod) {
   static const uint8_t hdr[] = {0,0x61,0x73,0x6d,1,0,0,0};
   if (!braw(mod, hdr, 8)) return 0;
   if (!sect(mod,1,&types)) return 0;
+  if (g_need_gpu) {
+    Buf imps;
+    if (!binit(&imps, 64)) return 0;
+    if (!bleu(&imps, 1)) return 0;
+    if (!bstr(&imps, "env") || !bstr(&imps, "host_gpu_submit")) return 0;
+    if (!bu8(&imps, 0) || !bleu(&imps, 11)) return 0;
+    if (!sect(mod,2,&imps)) return 0;
+  }
   if (!sect(mod,3,&funcs)) return 0;
   if (!sect(mod,5,&mems)) return 0;
   if (!sect(mod,7,&exps)) return 0;
@@ -2456,6 +2475,7 @@ __attribute__((export_name("compile")))
 #endif
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_bump = 64;
+  g_need_gpu = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
   if (src_len > 100000) { set_err("src too large"); return 1; }
 #ifdef UJS_HOST
