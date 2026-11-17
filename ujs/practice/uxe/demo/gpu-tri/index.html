@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- AUTO=?auto=1 跳过 rAF,同步 readPixels(preserveDrawingBuffer)。交互 rAF 路径不在 ujs-gpu-tri 覆盖。HUD window.__stage -->
 <html lang="zh"><head>
 <meta charset="utf-8"/><title>gpu-tri</title>
 <style>
@@ -33,21 +34,27 @@ function near(a,b,tol){ return Math.abs(a-b)<=tol; }
 (async()=>{
   const canvas=document.getElementById("view");
   const hud=document.getElementById("hud");
+  function stage(s){ window.__stage=s; hud.textContent="stage="+s; }
+  stage("boot");
   let gpu_fnv=0, packet_ok=0, pixel="UNMEASURED", err=null, pkt=null;
-  window.onHostGpuSubmit=function(ab){ pkt=ab; gpu_fnv=fnv1a(ab); };
+  window.onHostGpuSubmit=function(ab){ pkt=ab; gpu_fnv=fnv1a(ab); stage("submit"); };
   try{
     const rt=await host1Boot(window.GPU_TRI_WASM);
+    stage("gold");
     rt.goldI64();
     packet_ok=(gpu_fnv===ORACLE_FNV)?1:0;
-  }catch(e){ err=String(e&&e.message||e); }
+  }catch(e){ err=String(e&&e.message||e); stage("boot-err"); }
   try{
     if(pkt){
       const host=await createBrowserHost(canvas,{prefer:"webgl"});
+      stage("host");
       host.host_gpu_submit(pkt);
       host.host_frame_present();
-      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      stage("present");
+      if(!AUTO) await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
       const gl=canvas.getContext("webgl")||canvas.getContext("webgl2");
       if(gl){
+        stage("pixels");
         const c=new Uint8Array(4), c2=new Uint8Array(4), c3=new Uint8Array(4), m=new Uint8Array(4), inn=new Uint8Array(4);
         const w=canvas.width|0, h=canvas.height|0;
         const kr=window.GPU_TRI_KR, kg=window.GPU_TRI_KG, kb=window.GPU_TRI_KB;
@@ -63,13 +70,14 @@ function near(a,b,tol){ return Math.abs(a-b)<=tol; }
         window.__UXE_PX__={c:[c[0],c[1],c[2]],m:[m[0],m[1],m[2]],w:w,h:h};
       }
     }
-  }catch(e){ if(!err) err=String(e&&e.message||e); }
-  window.__UXE__={gpu_fnv,packet_ok,pixel,oracle:ORACLE_FNV,err,auto:AUTO?1:0,px:window.__UXE_PX__||null};
+  }catch(e){ if(!err) err=String(e&&e.message||e); stage("pix-err"); }
+  window.__UXE__={gpu_fnv,packet_ok,pixel,oracle:ORACLE_FNV,err,auto:AUTO?1:0,px:window.__UXE_PX__||null,stage:window.__stage};
   let title="GPU_TRI_FAIL";
   if(packet_ok&&pixel==="ok") title="GPU_TRI_OK";
   else if(packet_ok&&pixel==="UNMEASURED") title="GPU_TRI_UNMEASURED";
   else if(packet_ok) title="GPU_TRI_PKT";
   document.title=title;
-  hud.textContent=title+" fnv="+gpu_fnv+" pixel="+pixel+(err?" "+err:"");
+  stage("title");
+  hud.textContent=title+" stage="+window.__stage+" fnv="+gpu_fnv+" pixel="+pixel+(err?" "+err:"");
 })();
 </script></body></html>

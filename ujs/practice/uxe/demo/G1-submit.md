@@ -30,16 +30,24 @@ prd 0.3b G1 / W3 同条。
 
 范围:单三角、212B UXEP v3、headless Chrome 138、SwiftShader。FNV/KR/ER 从 hex。检查 title 判定+oracle_fnv 反例+expect_er 反例。
 
+AUTO 路径(`?auto=1`)在 `host_frame_present` 后**跳过 rAF**,立即 `readPixels`。依赖 canvas `preserveDrawingBuffer`(提交 04cd52876a 保留缓冲)。headless `--virtual-time-budget` 下 rAF 会卡住,跳过之后单独 20 次 `N=20 F=0`(2026-11-17)。闭环依据是「跳 rAF 后 20/20」,不是「根因已修」。
+
+交互路径(经 rAF 出帧、非 AUTO)本检查**不覆盖**,标 UNMEASURED。U1/C3 完成只覆盖 AUTO 同步 readPixels,不覆盖交互出帧。
+
+HUD 写 `window.__stage`(boot/gold/submit/host/present/pixels/title)与 title/fnv/pixel。
+
 期望中心色:Lambert(环境+两灯,法线=normalize(eye),soft from roughness)+金属混合。**不含** shader rim(`pow(1-ndv,2.4)`)与 ink;容差 24 吸收 rim/量化。灯方向与颜色从包 lights 字节读,不写死。
 
 ## 仍未做
 
 (1) M2 核驱动 fly(需 G4)。
 (2) 无 chrome:UNMEASURED 退出 2,不是 PASS。
+(3) 非 AUTO / rAF 出帧像素:UNMEASURED。
 
 ## 状态
 
-M1 收口。批次 `ujs-gpu-tri` PASS。U1/C3 按此范围完成。
+M1 收口。批次 `ujs-gpu-tri` PASS(AUTO 同步 readPixels,20/20)。U1/C3 按此范围完成。
+
 
 
 
