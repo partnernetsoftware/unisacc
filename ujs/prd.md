@@ -117,8 +117,8 @@
 | C2 | `--smoke` 曾用 `build.cx` 盖 APE | run.cx 收尾 `build-ape.cx`+check | smoke 结束后 check-ujs-ape 仍绿 |
 | C3 | host1 接纳唯一 import `env.host_gpu_submit`(no-op 读内存);其它 import 仍拒绝。非真 GPU | G1-submit.md | fly `--run` 3868; `gpu-submit-call.ujs --run` i64=1 不 trap。不得记 G1 完成 |
 | C4 | 2026-11-17 实测(`--check --files` 两文件):`compiler_min.cx` **96**(同记录,未降;基数 96);`host1_vm.cx` **34**(tsv 行仍记 36,未改写基线;曾记 36)。故 host1<=34 已到,compiler<=50 仍差 46。注意全仓扫描当前另有超基线:`ujs/product/build.cx` 21>17、`ujs/product/ujs_main.cx` 60>52,`gold-{ic,lex,parse,rest,type}.cx`、`net-{gold,lex,parse}-check.cx`、`pack-nets.cx` 无基线行,`--check` 因它们 FAIL;两目标文件本身未超 | 本行;不并 G1 | 到期前 `tests/cxraw.cx --check --files` 两文件 |
+| C5 | 字面 list 元素上限 **64**(`compiler_min` `n>64` -> `list too long`)。**256 不是 list 上限**:字符串字面量 0-255 非 NUL(prd 完成判据 / `str_lit256`);`compiler.ujs` 的 `DKEY=list(256)` 是键缓冲。动态 `list(n)` 不受 64 限,`store_bytes` n<=4096 | 本行 | `list65.ujs` 非零且含 `list too long`; oracle `uxep-tri-oracle.tsv` |
 
-(6) 未决:U3 归核还是归 Host;C3 折算 vs 拒绝;C4 先于 G1 合入。
 
 
 
