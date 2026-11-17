@@ -147,27 +147,47 @@ static void pack_chain_gate(void){
         if(n>=2&&tx_eqz(f[1],"compare")){if(!tx_eqz(f[0],"DONE")){free(b);die("UNKNOWN compare checkpoint");}done=1;}p=e+1;
     }
     free(b);if(!done)die("UNKNOWN compare checkpoint not DONE");
-    b=pack_chain_text("chain-run.tsv");long attempt=0;int success=0;
+    b=pack_chain_text("chain-run.tsv");long attempt=0,previous=0,recheck=0;int success=0,previous_recheck=0,memo=0;
     for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;
         if(!strncmp(p,"ATTEMPT\t",8)){
             char *f[8];int n=pack_fields(p,f,8);
             if(n!=7){free(b);die("UNKNOWN compare attempt schema");}
             if(tx_eqz(f[2],"phase=compare")){
                 long id=pack_number(f[1]);if(id<=attempt){free(b);die("UNKNOWN compare attempt identity");}
-                attempt=id;success=tx_eqz(f[3],"rc=0")&&tx_eqz(f[4],"residue=0")&&tx_eqz(f[6],"memo=off")&&
+                attempt=id;memo=tx_eqz(f[6],"memo=on");
+                recheck=memo&&previous_recheck&&previous==id-1?previous:0;
+                success=tx_eqz(f[3],"rc=0")&&tx_eqz(f[4],"residue=0")&&(tx_eqz(f[6],"memo=off")||(memo&&recheck))&&
                     !strncmp(f[5],"bound=",6)&&pack_number(f[5]+6)>0;
             }
+            previous=pack_number(f[1]);
+            previous_recheck=tx_eqz(f[2],"phase=compare-recheck")&&tx_eqz(f[3],"rc=0")&&tx_eqz(f[4],"residue=0")&&
+                tx_eqz(f[6],"memo=off")&&!strncmp(f[5],"bound=",6)&&pack_number(f[5]+6)>0;
         }
         p=e+1;
     }
     free(b);if(!attempt||!success)die("UNKNOWN compare attempt not successful and memo-free");
     char leaf[100];if(cx_fmt(leaf,sizeof leaf,"chain-run-%ld.stdout",attempt))die("compare log path");
-    b=pack_chain_text(leaf);int seen=0;const char *kind[4]={"objects","kernels","slices","product"};
+    if(memo){
+        char rleaf[100];if(cx_fmt(rleaf,sizeof rleaf,"chain-run-%ld.stdout",recheck))die("compare recheck log path");
+        b=pack_chain_text(rleaf);int full=0;
+        for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;
+            if(tx_eqz(p,"RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0"))full++;
+            p=e+1;
+        }
+        free(b);if(full!=1)die("UNKNOWN compare full recheck proof");
+    }
+    b=pack_chain_text(leaf);int seen=0,off=0;const char *kind[4]={"objects","kernels","slices","product"};
     for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;
+        if(tx_eqz(p,"SHAMEMO\tchain\toff\treason=reached-compare")){
+            if(seen||off){free(b);die("UNKNOWN compare memo shutdown order");}off=1;
+        }else if(off&&!strncmp(p,"SHAMEMO\tchain\ton\t",17)){
+            free(b);die("UNKNOWN compare memo reopened");
+        }
         if(!strncmp(p,"CHAIN\tfixedpoint\t",17)){
             char *f[8];int n=pack_fields(p,f,8);if(n<3){free(b);die("UNKNOWN fixedpoint log schema");}
             for(int k=0;k<4;k++){size_t z=strlen(kind[k]);
                 if(!strncmp(f[2],kind[k],z)&&(f[2][z]=='='||!f[2][z])){
+                    if(memo&&!off){free(b);die("UNKNOWN compare memo shutdown proof");}
                     if(strcmp(f[2]+z,"=same")){free(b);die("UNKNOWN fixedpoint verdict");}
                     if(k==3){if(n!=3){free(b);die("UNKNOWN fixedpoint product proof");}}
                     else {long count=n==4&&!strncmp(f[3],"count=",6)?pack_number(f[3]+6):-1;
