@@ -109,6 +109,8 @@
 | U3 | 无 sqrt/sin/cos;`f64 mod` 拒绝 | G3-math.md | `./ujs/ujs.com` 含 `%` 的 f64 源码非零;页 JS 仍算旋转 |
 | U4 | `run_step` 调 main;顶层 let 每帧清 | G4-step.md;独立 0.0.9 | 全局 yaw/wind 跨 step 仍在;顶层 let 不跨帧 |
 | U5 | D5 观感未达 | ghibli-world/DESIGN.md | AUTO `GHIBLI_OK`;观感人工 |
+| U6/M7 | 项目所有者 2026-11-17:demo 发布位置=`docs/uxe/<id>/`,GitHub Pages 指 main 的 `docs/`,站点 https://partnernetsoftware.github.io/unisacc/ 。与 M2 并行优先,不是候选池。现状:首页只链 asteroid/drone/live 且线上 404,`docs/uxe` 文件数 0。回滚:恢复 docs/index.html 原文。 | pages.tsv + gen-uxe-pages.cx + 断链检查 | 未开工;合入 main 由集成者(主调度 cc)带 docs |
+
 
 #### ujs.com
 

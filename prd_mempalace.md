@@ -81,6 +81,8 @@ flowchart LR
 - prd*.md 与 plans/*.md 由 devsvc 文档接口接管(项目所有者 2026-11-15):devsvc doc 子命令与 flow 的 doc.* 算子落地后,所有 agent 只经接口改,不再直接编辑。
 - 自 0.0.68 起 s9 commit 档不挡公开:冻结后与整链并行跑,结果补记 release/evidence.tsv,新增 FAIL 走补丁版(prd.md 候选池 Q)。
 - 0.0.69、0.0.70、0.0.71 合并为一次发布 0.0.71(速度 R1 与 X1、覆盖缺口一期、生成码一期 X3),0.0.69 与 0.0.70 号跳过(项目所有者 2026-11-16);0.0.68 不等发布即合入 main,此后从 main 开发。
+- demo 发布位置=docs/uxe/<id>/(项目所有者 2026-11-17):GitHub Pages 指 main 的 docs/;依据 curl 首页 200 但 ./uxe/asteroid|drone|live 404 且 origin/main docs/uxe 文件数 0;回滚恢复 docs/index.html 原文。里程碑 M7,与 M2 并行优先。docs 改动经 ujs 分支由集成者(主调度 cc)合入 main,不在共享 main 直接改。
+
 - 执行类工作由主调度经 devsvc flow 并发自己做;子代理只开 fable 级(设计、难题);外部窗口 omp-cdx 停止派工(项目所有者 2026-11-16)。并发总量以机器负载不高于 10 为界。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果一律只是 LOCAL 证据,不是候选结果:检查可经假根测改过的 exec 表,基座(src、cx、include)改动要重装产品。
 
