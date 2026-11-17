@@ -56,7 +56,10 @@ void main() {
     vP = vec3(px, 0.0);
     vEye = uEye;
     vFogDepth = 0.0;
-    vUV = aUV;
+    vUV = vec2(aUV.x, 1.0 - aUV.y);
+
+
+
     vColor = aColor;
     gl_Position = vec4(nx, ny, 0.0, 1.0);
     return;

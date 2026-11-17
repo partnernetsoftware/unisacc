@@ -1,0 +1,88 @@
+#pragma unisa use chrome_dom
+/* tools/check-uxe-ss-tex.cx -- 屏幕空间 4x4 贴图 16 中心 + 外侧背景.
+ */
+static int failed;
+static void ck(int ok, const char *lab) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
+    if (!ok) failed++;
+}
+static int cols[16][3] = {
+    {255,0,0},{0,255,0},{0,0,255},{255,255,0},
+    {255,0,255},{0,255,255},{128,0,0},{0,128,0},
+    {0,0,128},{128,128,0},{128,0,128},{0,128,128},
+    {64,64,64},{192,192,192},{255,128,0},{0,255,128}
+};
+static int al[4] = {255,191,128,64};
+static int mix(int c, int a, int b) {
+    return (c * a + b * (255 - a) + 127) / 255;
+}
+int main(void) {
+    char cwd[512], url[700];
+    const char *pre = "file://";
+    const char *suf = "/ujs/practice/uxe/test/uxe-ss-tex.html";
+    char *av[12];
+    char *out = 0;
+    size_t on = 0;
+    int n, i, rc, er, eg, eb, gr, gg, gb, k, ok16 = 1, okout = 1;
+    const char *p;
+    int Br = 80, Bg = 120, Bb = 60;
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    n = 0;
+    while (pre[n]) { url[n] = pre[n]; n++; }
+    for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
+    for (i = 0; suf[i] && n < 640; i++) url[n++] = suf[i];
+    url[n] = 0;
+    av[0] = "/usr/bin/google-chrome";
+    av[1] = "--headless=new";
+    av[2] = "--enable-unsafe-swiftshader";
+    av[3] = "--allow-file-access-from-files";
+    av[4] = "--disable-web-security";
+    av[5] = "--no-first-run";
+    av[6] = "--user-data-dir=/tmp/uxe-sst-chk";
+    av[7] = "--virtual-time-budget=20000";
+    av[8] = "--dump-dom";
+    av[9] = url;
+    av[10] = 0;
+    rc = cx_runv_timeout(av, 25, &out, &on);
+    if (rc == 127) { if (out) free(out); printf("SST_UNMEASURED\n"); return 2; }
+    p = out ? strstr(out, "\"samples\":[") : 0;
+    ck(p != 0, "hud");
+    if (p) {
+        p += 11;
+        for (k = 0; k < 16; k++) {
+            int jj, ii, kk;
+            while (*p && *p != '[') p++;
+            if (*p == '[') p++;
+            gr = atoi(p); while (*p && *p != ',') p++; if (*p == ',') p++;
+            gg = atoi(p); while (*p && *p != ',') p++; if (*p == ',') p++;
+            gb = atoi(p);
+            ii = k % 4; jj = k / 4;
+            kk = jj * 4 + ii;
+            er = mix(cols[kk][0], al[ii], Br);
+            eg = mix(cols[kk][1], al[ii], Bg);
+            eb = mix(cols[kk][2], al[ii], Bb);
+            printf("CELL\t%d\t%d\tgot=%d,%d,%d\texp=%d,%d,%d\td=%d,%d,%d\n", ii, jj, gr, gg, gb, er, eg, eb, gr-er, gg-eg, gb-eb);
+            if (abs(gr - er) > 2 || abs(gg - eg) > 2 || abs(gb - eb) > 2) ok16 = 0;
+
+
+        }
+
+    }
+    ck(ok16, "texels");
+    p = out ? strstr(out, "\"out\":[") : 0;
+    if (p) {
+        p += 7;
+        for (k = 0; k < 4; k++) {
+            while (*p && *p != '[') p++;
+            if (*p == '[') p++;
+            gr = atoi(p); while (*p && *p != ',') p++; if (*p == ',') p++;
+            gg = atoi(p); while (*p && *p != ',') p++; if (*p == ',') p++;
+            gb = atoi(p);
+            if (abs(gr - Br) > 2 || abs(gg - Bg) > 2 || abs(gb - Bb) > 2) okout = 0;
+        }
+    } else okout = 0;
+    ck(okout, "outside");
+    if (out) free(out);
+    printf("CHECK_UXE_SST\ttexels=%d\tout=%d\tfailed=%d\n", ok16, okout, failed);
+    return failed ? 1 : 0;
+}
