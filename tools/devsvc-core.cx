@@ -1494,7 +1494,7 @@ static int git_add(const char *root, int argc, char **argv) {
     return rc ? 1 : 0;
 }
 static int cmd_git(const char *root, int argc, char **argv) {
-    long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128];
+    long t0 = sy_now_ms(); const char *need = 0, *lf; int push = 0, i, n = 0, rc, pushed = 0; char *v[FL_MAX_ARGV]; char sha[128], sha0[128];
     git_argerr = 0;
     if (argc < 1) { git_argerr = 1; return 2; }
     if (!strcmp(argv[0], "status") && argc == 1) return git_status(root);
@@ -1547,6 +1547,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
      * 门在私有树的检出上求值(不读共享索引与共享工作树),只在最后对 HEAD 做一次比较并交换(git update-ref NEW OLD);
      * HEAD 被他人推进且本请求路径未变则整遍重放,变了则具名报冲突。路径不重叠的 commit 因此真并行;
      * 写域锁(need)照旧按路径取。提交后只把本请求路径同步进共享索引(撞 index.lock 重试 12 次)。push 在提交之后、不持任何提交锁。 */
+    {   char *bv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(bv, sha0, sizeof sha0) == 0) chomp(sha0); else sha0[0] = 0; }
     {   x_last_err[0] = 0;
         rc = tool_locked_cwd(root, need, "tools/commit-own.cx", cwd, n, v);
         if (rc != 0) err_tail(x_last_err, 20);   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行(调用方常只看末几行) */
@@ -1554,8 +1555,17 @@ static int cmd_git(const char *root, int argc, char **argv) {
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
             char *pv[] = {"--par", "1", "--cwd", (char *)cwd, "--", "git", "push", "origin", rs, 0}; pushed = cmd_x(root, 9, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
-    if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s\n", rc, sha, pushed, sy_now_ms() - t0, wbr, cwd);
-    else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\n", rc, sha, pushed, sy_now_ms() - t0);
+    /* 未产生新提交(rc 非 0 且 HEAD 未动,或取不到 HEAD)时 commit=none,并在行尾加 reason=:
+     * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
+     * 旧 HEAD 不再写进 commit= 冒充新提交。提交已落地但推送失败时 commit= 仍是新 HEAD,reason=push-failed。 */
+    {   const char *why = 0;
+        if (rc != 0 && (!sha[0] || !strcmp(sha, sha0))) { why = rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked"; F(sha, sizeof sha, "none"); }
+        else if (rc != 0 && push && !pushed) why = "push-failed";
+        else if (rc != 0) why = "failed";
+        if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s", rc, sha, pushed, sy_now_ms() - t0, wbr, cwd);
+        else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld", rc, sha, pushed, sy_now_ms() - t0);
+        if (why) printf("\treason=%s", why);
+        printf("\n"); }
     return rc;
 }
 

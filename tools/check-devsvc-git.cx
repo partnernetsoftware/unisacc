@@ -108,6 +108,8 @@ int main(int argc, char **argv) {
     rc = dv("git", "commit", "-m", "Y", "--whole", "tests/manifests/dvg-nonexistent.tsv", 0, 0);
     ck(rc != 0 && has("GIT_COMMIT\trc="), "failed-commit-reports-nonzero");
     ck(rc != 0 && has("GIT_COMMIT_ERR\t"), "failed-commit-prints-err-tail");
+    /* 未产生新提交时回执不再把旧 HEAD 写进 commit=:commit=none 加 reason=(timeout|refused|blocked) */
+    ck(rc != 0 && has("\tcommit=none\t") && (has("\treason=blocked") || has("\treason=refused") || has("\treason=timeout")), "failed-commit-says-none-with-reason");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
 
@@ -137,6 +139,13 @@ int main(int argc, char **argv) {
         ck(!ovf && sh(c, fx) == 0, "wt-fixture-remove");
     }
 
+    /* (t) 超时映射:夹具工作区里把 tools/commit-own.cx 换成立即以 124 退出的假工具(模拟 60 秒窗口超时,不真等),
+       回执须为 commit=none 与 reason=timeout;验后 git checkout 还原夹具里的真工具(夹具是本检查自己的克隆) */
+    if (wfile("tools/commit-own.cx", "int main(void) { return 124; }\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
+    if (wfile("dvg-t.txt", "t\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
+    rc = dv("git", "commit", "-m", "T", "--whole", "dvg-t.txt", 0, 0);
+    ck(rc == 124 && has("\tcommit=none\t") && has("\treason=timeout"), "timeout-commit-says-none-reason-timeout");
+    ck(!ovf && sh("git checkout -q -- tools/commit-own.cx", fx) == 0, "timeout-fixture-restore");
     }
     if (B) {
     /* (c) 两个并发 commit 串行完成,无残留锁 */
