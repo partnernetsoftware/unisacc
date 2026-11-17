@@ -93,25 +93,25 @@
 
 另: `host1-games/` 是 host1 金闸(`HOST1_GAMES_OK_GL`),不是叙事世界。
 
-**D5 宫崎骏漫画风动态世界(需求,未开工)**
+**D5** 草稿页已开(`ghibli-world/`,`GHIBLI_OK` 表长>=8);观感合同未达。
 
-与 D1-D4 同一套积木,不是另开引擎:ink 的分层手绘/NPR、water 的雾与界色、fly 的天空与镜头、oneshot 的实例云,合成一个**可走的随机世界**。
+### 0.3b 已核实缺口(2026-11-17,相对 D1-D5+host1-games)
 
-(1) 观感:宫崎骏漫画/水彩,不是写实、不是赛博、不是像素。远山叠层、软边云、风动草与树冠、 pal 偏土黄-草绿-灰蓝。先不做可辨认角色 IP。
+| 号 | 面 | 事实 | 排期 |
+|---|---|---|---|
+| G1 | UXE 提交 | `compiler_min` 导出 `host_set_global`/`host_list_get`/`run_step`;无 `host_gpu_submit`。现页 JS 组包。W3 | 最高;先于放宽容量 |
+| G2 | 容量 | `seed/stage0/compiler_min.cx:465` `MAXC=16384 MAXL=128 MAXG=64 MAXN=32 MAXFN=8 MAXSDATA=8192`。未逐 demo 量化 | 先表再改常量;跟 G1 |
+| G3 | 数学 | 同文件无 sqrt/sin/cos;`:991` `f64 mod` 拒绝。旋转在页 JS | 定:核 f64 内建或合同写明归 Host |
+| G4 | 步进 | `run_step_body` 调 main(func 1);顶层 let 每帧清。v0.0.8 文字未兑现 | 持久 globals/state 段,独立于 0.0.9 ujsmeta |
+| G5 | 产物 | `build-ape` 五切片已实跑;批次 `ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore | 检查已绑;win/arm64 另槽 |
+| G6 | 文档 | W1-W5 仍在 `plans/demo-three-ports.md`;本表收 UXE;ujs.com 生产力另见 0.0.x | 本表为真源入口 |
 
-(2) 随机:种子在 `.ujs` 整数全局(`seed`);同种子重进页地形/云/树位一致;换种子换布局。Host 不得另写一套噪声当真值。
-
-(3) 动态:核每帧 `step` 推风、云位移、草倾角、可选昼夜 pal;Host 只提交包。
-
-(4) 玩:WASD/拖镜头在世界里走或飞低空,10 秒内能看出风与层在动,不是静贴图。
-
-(5) 验收:`?auto=1` 核 wasm 有种子与表长(具体数字实现时锁);人工看层与风。不引进 three、不搬 GLB、不升 `ujs.com` 版号、不改 host1-pass 28 行。
-
-(6) 未决:页名(`ghibli-world` 暂用)、种子位数、是否与 D3 同页加模式。实现前写 `practice/uxe/demo/<名>/DESIGN.md`。
+(6) 未决:D5 观感数字;G3 归核还是归 Host。
 
 ---
 
-## 目标（按杠杆）
+## 目标(按杠杆)
+
 
 **主线按 `plans/0.0.x` 推进 `ujs.com` 生产力工具**；Pages／`{app}` 仍要可玩，但是实践脊，不挡 0.0.x 产品版号。门禁先于功能。不开新门面游戏。
 
