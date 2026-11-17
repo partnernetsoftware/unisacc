@@ -23,6 +23,38 @@ static void positive(const char *leaf,const char *input,const char *want,const c
  {int zn=snprintf(msg,sizeof msg,"%s.accept-rc0-empty-stderr",label);if(zn<0||(size_t)zn>=sizeof msg)die("label");}check(!r.rc&&!r.errn,msg);
  {int zn=snprintf(msg,sizeof msg,"%s.output-exact",label);if(zn<0||(size_t)zn>=sizeof msg)die("label");}check(r.outn==strlen(want)&&!memcmp(r.out,want,r.outn),msg);
  np_free(&r);}
+/* Independent runtime tail that product lower appends after the body ret
+   (367d54a115 named fallthrough guard; 3519cdb1aa/56e1018466 code-shell exit -> FG.begin).
+   Sources:
+   - sequence and offsets: exec/lower/fallguard-result.tsv FG.empty..FG.rawexit
+     (fd 2 at offset 0, words at 24/32/40, pointer at 8, length 24 then 12 at 16, status 127).
+   - word0..word4 and line shapes: exec/lower/fallguard-manifest.tsv row 3
+     (the 36-byte text "control falls off the end of _start\n", little-endian words).
+   - gate line field order: exec/lower/code-syscall-result.tsv rows 14-15.
+   - winapi names: exec/facts/enc-literals.tsv rows 189 (exit) and 191 (write).
+   - scratch base, hstd/written addresses, sysnos, register names: route parameters below.
+   with_end appends the FG.done ".end\n" (fallguard-result.tsv OUT 46 101 110 100 10).
+   Reuse: lower_tail(buf,cap,&lower_tail_lnx_x86_64,1) and append after the body ret line. */
+typedef struct {const char *r0,*a0,*a1,*a2;long scratch,hstd,written;int sys_write,sys_exit;} lower_tail_route;
+static const lower_tail_route lower_tail_lnx_x86_64={"rax","rdi","rsi","rdx",256,424,448,1,60};
+static void tail_put(char *out,size_t cap,size_t *at,const char *fmt,...){va_list ap;va_start(ap,fmt);int n=vsnprintf(out+*at,cap-*at,fmt,ap);va_end(ap);if(n<0||(size_t)n>=cap-*at)die("lower-tail-bound");*at+=(size_t)n;}
+static void tail_store(char *out,size_t cap,size_t *at,const lower_tail_route *rt,long v,long off){tail_put(out,cap,at,"imm %s, %ld\nsetmem %ld, %s\n",rt->r0,v,rt->scratch+off,rt->r0);}
+static void tail_word(char *out,size_t cap,size_t *at,const lower_tail_route *rt,const char *w,long off){tail_put(out,cap,at,"imm %s, %s\nsetmem %ld, %s\n",rt->r0,w,rt->scratch+off,rt->r0);}
+static void tail_gate(char *out,size_t cap,size_t *at,const lower_tail_route *rt,int sysno,const char *winapi,const char *op,int is_exit){
+ tail_put(out,cap,at,"setreg %s, imm %d role=sysno\n",rt->r0,sysno);
+ if(is_exit)tail_put(out,cap,at,"setreg %s, mem %ld role=arg0\nsetreg %s, imm 0 role=arg1\nsetreg %s, imm 0 role=arg2\n",rt->a0,rt->scratch,rt->a1,rt->a2);
+ else tail_put(out,cap,at,"setreg %s, mem %ld role=arg0\nsetreg %s, mem %ld role=arg1\nsetreg %s, mem %ld role=arg2\n",rt->a0,rt->scratch,rt->a1,rt->scratch+8,rt->a2,rt->scratch+16);
+ tail_put(out,cap,at,"gate form=syscall gate=syscall carry=false winapi=%s catop=%s sysno='%d retconv='none winimp='none ret=%s hstd=%ld written=%ld scr0=%ld scr1=%ld\n",winapi,op,sysno,rt->r0,rt->hstd,rt->written,rt->scratch,rt->scratch+8);}
+static void tail_pointer(char *out,size_t cap,size_t *at,const lower_tail_route *rt){tail_put(out,cap,at,"setreg %s, addr %ld\nsetmem %ld, %s\n",rt->r0,rt->scratch+24,rt->scratch+8,rt->r0);}
+static void lower_tail(char *out,size_t cap,const lower_tail_route *rt,int with_end){size_t at=0;out[0]=0;
+ tail_store(out,cap,&at,rt,2,0);
+ tail_word(out,cap,&at,rt,"2336364844068794211",24);tail_word(out,cap,&at,rt,"7381153994395902310",32);tail_word(out,cap,&at,rt,"7954799936736075878",40);
+ tail_pointer(out,cap,&at,rt);tail_store(out,cap,&at,rt,24,16);tail_gate(out,cap,&at,rt,rt->sys_write,"WriteFile","write",0);
+ tail_word(out,cap,&at,rt,"8391155123483517028",24);tail_word(out,cap,&at,rt,"175403617",32);
+ tail_store(out,cap,&at,rt,2,0);tail_pointer(out,cap,&at,rt);tail_store(out,cap,&at,rt,12,16);tail_gate(out,cap,&at,rt,rt->sys_write,"WriteFile","write",0);
+ tail_store(out,cap,&at,rt,127,0);tail_gate(out,cap,&at,rt,rt->sys_exit,"ExitProcess","exit",1);
+ tail_store(out,cap,&at,rt,127,0);tail_gate(out,cap,&at,rt,rt->sys_exit,"ExitProcess","exit",1);
+ if(with_end)tail_put(out,cap,&at,".end\n");}
 int main(int argc,char **argv){
  if(argc!=4&&argc!=5){fputs("usage: ROOT STREAM_DIR NEW_OUTDIR [EXPECTED_STREAM6_SHA]\n",stderr);return 2;}
  binary_pin=stream_expected_pin(argc==5?argv[4]:0,binary_pin,"lower");
@@ -37,12 +69,12 @@ int main(int argc,char **argv){
  pp_digest_or_die(root,product_before);digest(binary,binary_before);
  if(!tx_eqz(binary_before, binary_pin))die("material.stream6-identity");check(1,"material.stream6-identity");
  const char *head="@target lnx/x86_64\n@data -\n@src_os lnx\n@data_len 168\n@bss 0\n@relocs -\n_start:\nspinit rsp\nargsave 304, 312, true\n";
- char expected[1024];int n;
- n=snprintf(expected,sizeof expected,"%simm rax, 7\nret form=x86\n.end\n",head);if(n<0||(size_t)n>=sizeof expected)die("literal-oracle");
+ static char tail[8192],expected[12288];int n;lower_tail(tail,sizeof tail,&lower_tail_lnx_x86_64,1);
+ n=snprintf(expected,sizeof expected,"%simm rax, 7\nret form=x86\n%s",head,tail);if(n<0||(size_t)n>=sizeof expected)die("literal-oracle");
  positive("literal.tape","_start:\n  imm r0, 7\n  ret\n.end\n",expected,"literal-register-map");
- n=snprintf(expected,sizeof expected,"%simm rax, 7\nimm rdi, 5\nadd64 rax, rax, rdi form=x86\nret form=x86\n.end\n",head);if(n<0||(size_t)n>=sizeof expected)die("arithmetic-oracle");
+ n=snprintf(expected,sizeof expected,"%simm rax, 7\nimm rdi, 5\nadd64 rax, rax, rdi form=x86\nret form=x86\n%s",head,tail);if(n<0||(size_t)n>=sizeof expected)die("arithmetic-oracle");
  positive("arith.tape","_start:\n  imm r0, 7\n  imm r1, 5\n  add64 r0, r0, r1\n  ret\n.end\n",expected,"arithmetic-register-map");
- n=snprintf(expected,sizeof expected,"%snonsense r0, r1\nret form=x86\n.end\n",head);if(n<0||(size_t)n>=sizeof expected)die("opaque-oracle");
+ n=snprintf(expected,sizeof expected,"%snonsense r0, r1\nret form=x86\n%s",head,tail);if(n<0||(size_t)n>=sizeof expected)die("opaque-oracle");
  positive("opaque.tape","_start:\n  nonsense r0, r1\n  ret\n.end\n",expected,"opaque-span-retained");
  np_result r=run("missing.tape");check(r.rc!=0,"missing-input.reject-nonzero-rc");check(!r.outn,"missing-input.reject-empty-stdout");check(r.errn&&strstr(r.err,"cannot open input"),"missing-input.reject-named");np_free(&r);
  char hex[65];pp_digest_or_die(root,hex);check(tx_eqz(hex, product_before),"root-product-stable");digest(binary,hex);check(tx_eqz(hex, binary_pin),"material.stream6-stable");
