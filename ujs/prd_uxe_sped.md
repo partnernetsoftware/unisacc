@@ -82,6 +82,9 @@ v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin
 
 兼容:无 map_id 且 nUpload=0 时编码器写 version=3,与 `ujs/tests/uxep-tri-oracle.hex` 212B、fnv 3620361384 逐字节相同(浏览器 encodeRenderPacket 对三角夹具验,期望从 oracle tsv/hex 读)。不上 mip/KTX2。不把每帧完整天空贴图塞进包(超 G2 `store_bytes` 4096)。
 
+两种来源(T2 前定):(a) 包内上传段,测试夹具与 JS 核用,rgba 可进包;(b) 素材引用,wasm 核驱动生产路径:包内只写 map_id 加 assets.tsv 素材 id 或内容哈希,宿主 `host_asset_read` 取图解码上传,按 (id,sha256) 缓存。核不得经 `store_bytes`(4096) 塞贴图。4x4 夹具走 (a);天空/睡莲等真实美术走 (b)。
+
+
 
 
 ## 3. 对标表
