@@ -173,8 +173,17 @@ export function createWebGLRenderer(canvas) {
 
   function drawCloud(cloud, wave) {
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
+    if (cloud.alphaMode) {
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+    } else {
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+    }
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
     gl.uniform1f(uBillboard, cloud.billboard ? 1 : 0);
+
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
@@ -303,9 +312,23 @@ export function createWebGLRenderer(canvas) {
       gl.uniform3fv(uFogC, fog.color);
 
       const wave = scene.wave || 0;
+      const opaque = [];
+      const trans = [];
       for (const cloud of scene.clouds.values()) {
-        if (cloud.count > 0) drawCloud(cloud, wave);
+        if (cloud.count <= 0) continue;
+        if (cloud.alphaMode) trans.push(cloud);
+        else opaque.push(cloud);
       }
+      for (const c of opaque) drawCloud(c, wave);
+      trans.sort((a, b) => {
+        const ax = a.xyz[0] - ex, ay = a.xyz[1] - ey, az = a.xyz[2] - ez;
+        const bx = b.xyz[0] - ex, by = b.xyz[1] - ey, bz = b.xyz[2] - ez;
+        return (bx * bx + by * by + bz * bz) - (ax * ax + ay * ay + az * az);
+      });
+      for (const c of trans) drawCloud(c, wave);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+
     },
   };
 }
