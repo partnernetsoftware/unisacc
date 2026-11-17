@@ -277,7 +277,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 - 没有时区、locale、浮点格式化选项;inflate 解压不在面内(只有 deflate、gzip 压缩与 crc32)。
 - `use ... as alias` 与 `export` 在当前产品上不可用(3.2)。
 - 仓外脚本需自备包根(3.3)。
-- 遇到缺口:保留最小默认运行复现,写进 [prd_mempalace.md](prd_mempalace.md) 的「阻塞与未验证」一节。`agentwork/pkg-gaps.tsv` 的记录方式已退役,不再追加。不因缺口退回 Python 或 shell 算法。
+- 遇到缺口:保留最小默认运行复现,写进 [prd_mempalace.md](prd_mempalace.md) 的「阻塞与未验证」一节。库能力缺口记 `build/pkg-gaps.tsv`,协同决定与阻塞只写记忆宫殿。不因缺口退回 Python 或 shell 算法。
 
 ## 6 三个从零写的例子(均实测)
 

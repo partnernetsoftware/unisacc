@@ -24,7 +24,7 @@
 
 对应关系：术语层与结构层只在两处相交——T1 Stream 是结构 L3 nets 的执行次序（每流一组模型），T2 Net 是结构 L3 nets 的内容；T3-T5 与产品结构无关。模块层到结构层的对齐见 §5。
 
-**两类 `.tsv` 不要混**：`exec/`、`weights/` 里的 `.tsv` 是**产品事实表**，由生成器构造成网（TSV -> NN），参与源 SID；`tests/`（51 个：批次表、覆盖表、棘轮基线、域矩阵、冻结/分档表）和 `agentwork/`（任务与账）里的 `.tsv` 是**管理表**，只被测试/流程工具按列读写，不构造成网、不进源 SID。读者按目录判断。
+**两类 `.tsv` 不要混**：`exec/`、`weights/` 里的 `.tsv` 是**产品事实表**，由生成器构造成网（TSV -> NN），参与源 SID；`tests/`（51 个：批次表、覆盖表、棘轮基线、域矩阵、冻结/分档表）和 `archive/agentwork-retire-2026-11/`（任务与账）里的 `.tsv` 是**管理表**，只被测试/流程工具按列读写，不构造成网、不进源 SID。读者按目录判断。
 
 **六条常见误解**（不要按直觉读）：
 
@@ -157,13 +157,13 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | devsvc 代替原生读写与命令 | `sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM]` / `f write PATH --from SRC [--expect-sha X]` / `f edit PATH --old-file A --new-file B [--expect-sha X] [--all]` / `x [--timeout-ms N] [--cwd D] -- ARGV...` / `flow - [--cat]`(stdin 节点表并发)/ `flow run FILE.tsv [--jobs N] [--deadline-ms N]` | 写节点自动取 devsvc 路径锁,节点事件以 flow.node 入事件环,超时整组杀;无实例时本地照跑;对照表见 `plans/devsvc.md` 5a;批次 `devsvc-flow`(`tools/check-devsvc-flow.cx`) |
 | cx-dev 本机快速迭代车道(NOT_RELEASE,结果只标 LOCAL) | 构造一次 `sh ./unisacc.com tools/cx-dev.cx -- --build`;日常 `sh tools/cx-dev FILE.cx -- ARGS`(参数同 unisacc.com);`--status`、`--reload`、`--close` | 独立 loader 读 manifest 校验后 exec 本机切片加私有包,运行期不经 unisacc.com;改 exec 网表后下一次调用自动重建受影响的网并换包;未换成的配方每次打 CXDEV_STALE;说明 [plans/cx-dev.md](plans/cx-dev.md),检查 `tools/check-cx-dev.cx` |
 | 速记生成 flow 节点表(免手工转义) | `sh ./unisacc.com tools/flowsh.cx -- sh 'CMD'...` / `read PATH[:A[-B]]...` / `map VALUE... -- ARGV 含 {}`,选项 `--timeout-ms N --after ID --chain --prefix P --cwd D`;接 `\| sh ./unisacc.com tools/devsvc.cx -- flow - --cat` | 只出节点表不执行,值按 %XX 转义;拒绝项 rc 2 且 stdout 为空;吸收自 moltbaby omp-flow 的 sh/read/map 速记;批次 `flowsh`(`tools/check-flowsh.cx`) |
-| 追加账本一行/查6列 | `sh ./unisacc.com tools/ledger-add.cx -- --add --id ID --text TEXT [--commit SHA] [--evidence P] [--role R]`;`-- --check --baseline build/ledger-format-baseline.tsv` | agentwork/ledger.tsv 唯一写入口(原子追加,id 为 commit-own --keyed 键);存量坏行有基线,新增即 rc 1 |
+| 显式独立数据追加/查6列 | `sh ./unisacc.com tools/ledger-add.cx -- --add --ledger FILE --id ID --text TEXT`;`-- --check --ledger FILE --baseline build/ledger-format-baseline.tsv` | 无默认协同账本;显式数据保留原子追加、坏字段与并发负控;共享决定只写记忆宫殿 |
 | 任务图并发推进(已退役) | 归档到 `archive/agentwork-retire-2026-11/tools/dag.cx`、`archive/agentwork-retire-2026-11/tools/check-dag.cx` | agentwork 退役第 3 批；批次 dag 已撤 |
 | Cursor CLI 无头派工(已退役) | 归档到 `archive/agentwork-retire-2026-11/tools/cursor-fleet.cx`、`archive/agentwork-retire-2026-11/tools/cursor-fleet-template.txt`、`archive/agentwork-retire-2026-11/tools/check-cursor-fleet.cx` | agentwork 退役第 3 批；批次 cursor-fleet 已撤 |
 | 后台候选线 B1（0.0.58） | `sh ./unisacc.com tools/bg-candidate.cx -- start --rev HEX40 [-- 链选项]`、`status [REV]`、`promote --check --rev HEX40`、`prune [--keep N] [--dry-run]` | 候选在 `out/b1/<rev>/`，由 chain-run 带分段与监督器从源冷构造，与发布链同一条命令；start 落 OWNER 行（守护 pid、链 pid/pgid），守护进程在 deadline 加余量处击杀并落 EXIT 行，rc0 后写封条；promote --check 只读核对修订、完整性与收据封条，打印发布尾所需的 APE 路径与 sha、源 SID、打包输入，不发布；版本槽由 `release-run --pack` 用这些片重打包写入，不重跑链；prune 只改名进 `~/cc-work/trash`，无该目录则不动，绝不删除；尚无自动触发（提交钩子或定时）；批次 `bg-candidate`（`tools/check-bg-candidate.cx`） |
 | 补丁队列只读视图(已退役) | 工具 patch-queue 与其检查已归档于 `archive/agentwork-retire-2026-11/tools/` | agentwork 退役第 2 批,批次 patch-queue 已撤 |
 | 提交器出补丁 | `sh ./unisacc.com tools/submit-patch.cx -- OUT.patch [OWN_ID]`；检查 `tools/check-submit-patch.cx` | 私有克隆 git add -A 后 full-index 补丁(序号后缀不覆盖)、sha、tools/*.cx 逐个 -c、新增 .cx 走 newcx-check、batches/coverage 只含 OWN_ID 且 IMPLEMENTED 的 check 存在、须含 index 行；一行 SUBMIT_PATCH |
-| 研发耗时账本(2026-11-14 随 agentwork/ 退役,已归档,不再登记批次) | 源在 `archive/agentwork-retire-2026-11/tools/devtime.cx`,检查在 `archive/agentwork-retire-2026-11/tools/check-devtime.cx`;表 `archive/agentwork-retire-2026-11/tables/devtime.tsv` 仅作历史 | 列 task_id/窗口/开始/交付/落地/类别/备注；类别六种；report 按类总秒与占比，未记 UNMEASURED |
+| 研发耗时账本(2026-11-14 随 archive/agentwork-retire-2026-11/ 退役,已归档,不再登记批次) | 源在 `archive/agentwork-retire-2026-11/tools/devtime.cx`,检查在 `archive/agentwork-retire-2026-11/tools/check-devtime.cx`;表 `archive/agentwork-retire-2026-11/tables/devtime.tsv` 仅作历史 | 列 task_id/窗口/开始/交付/落地/类别/备注；类别六种；report 按类总秒与占比，未记 UNMEASURED |
 | 版本度量表（0.0.58 T9） | `sh ./unisacc.com tools/version-metrics.cx -- --write\|--check [--root DIR] [--table FILE]`；表 `build/version-metrics.tsv`；检查 `tools/check-version-metrics.cx`（批 `version-metrics`） | 从 `steps.tsv`/`chain-run.tsv`/`MANUAL.tsv`/`ledger.tsv` 派生每版 15 列指标（0.0.54..0.0.57 回填），不对 checkpoint `wall_ms` 逐行求和；`--check` 守漂移 |
 | tlib 接口清单（0.0.58） | `sh ./unisacc.com tools/layer-api.cx -- --write\|--check [--pkg PKG] [--root ROOT]`；包表 `build/tlib-packages.tsv`；清单 `build/layer-api/PKG.tsv`；检查 `tools/check-layer-api.cx`（批 `layer-api`） | 由产品 `-cx-interface` 生成每包公开函数与类型（名字、签名、签名 sha、文件）；`--check` 守清单等于源码、表 `api_sha` 一致、单元闭包不出包及其声明依赖；`--write` 报升版类别 none/minor/major，不自动改表 |
 | 文档对检查 | `sh ./unisacc.com tools/check-doc-pair.cx -- [pair\|term\|all] [ROOT]`（批 `doc-pair`） | README.md/README_zh.md 的 `<a id>` 锚点集合须相同、相对链接须存在；现行 md 不得含旧称谓（archive、docs/history、.trash、out 跳过），现存 8 个违规文件入带 2026-12-01 到期的基线；含正负夹具 |
@@ -179,7 +179,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 超时作业的整棵树清理 | `#pragma unisa use sys.process` -> `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
 | 子进程超时契约（run/capture + residue） | `sh ./unisacc.com tools/check-netpack.cx` | 双管EOF后仍按原deadline非阻塞等待，超时冻结整树后击杀并有界定向回收直接子，不抢调用者的其他子进程；`np_result.residue` 0才算干净。孤儿可见性仍需调用方先`np_subreaper()`。`UNISACC_NP_FAULT=residue`为tools与run-batch的显式注入缝，默认关，其它值具名拒绝；sysx产品单次回收疑点另列0.0.47，不混同此测试库修复。 |
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
-| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `agentwork/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
+| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `archive/agentwork-retire-2026-11/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
 
 #### 2.2 测试（棘轮、门禁、批次）
 
@@ -220,9 +220,9 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 禁锚最终父与真实批次（0.0.58 T4） | 落地主线 `a84ef9695b4fb34632081791c7716abdce1a300a`（与K9-r5树逐字相同）-> anchorban-r3 | 仅保留其余十一文件，已落图blob一致且不覆盖；保全生产安全格式/显式OUT、G2负控及表键唯一。R4每文件预建括号、作用域名、函数摘要和有序多定义索引，缓存语法事实不缓存判定、不删传播/未知拒绝/2048容量界；旧module扫描超时须以实际0发现消缺，不放宽55秒。普通apply与字节继承有明示来源，正规integrate-patch自门必须真实READY后交付；本地提交末尾LEDGER及out信封供S9取精确父。 |
 | 参数检查的有限队列与包络结构 | `tools/cxlib/chainargv.cx`；真实批次 `chain-argv-check`、`chain-argv-tokens` | 常量字符串数组经从0递增且界限等于元素数的for及直接const别名进入argv命令位时，逐元素核被调parser数量/角色/转发，不跳过调用；表/别名/索引改写或未知命令拒绝。bound_sh/step/rest包络核唯一函数、调用实参、复制循环与55秒转发，不再核实现文本片段。保留原十一与G2三拒绝并加队列缺终止/错序/第二命令未知/越界控制。 |
 | osx X1旧项复核（2026-11-08） | `tests/driver-target-object.cx ROOT cli`：9/0；平台宏最小源见`tests/cases/driver-default-platform.cx` | Darwin arm64 26.5.1、产品SHA f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82。默认-run原生、裸-c产宿主Mach-O对象并由产品链接执行，NATIVE-RUN-HOST-TARGET核销；不承诺系统链接器兼容。裸-S仍用lnx/x86_64预定义：平台源bare/显式lnx tape SHA同为d7bb734dae19…，显式osx为e02cac44f622…；DEFAULT-TARGET-S-C保留READY，只剩-S语义裁定/修复，不重复-c修复，也不迁移六宿主CI资格 |
-| 真实提交工具配套与源码分类闸 | `sh ./unisacc.com tools/check-precommit-toolsloc.cx -- --loc`、`-- --source`、`-- --symlink`（保留三批历史ID）、`-- --lint-r2-sep`/`--lint-r1-report`；源码锚负控 `tools/check-cx-lint.cx --anchor-controls --lint-tool ABS_NATIVE_LINT` | 独立真实临时git仓运行生产hook；历史行数超额允许，shebang伪源码拒绝，新增tool缺check或缺IMPLEMENTED批次拒绝；staged .cx 经 cx-lint：R2/R3/R4 强制拦，R1 只打印；旧工具无调用者/无批次/重复仅列候选；禁锚负控不授产品或发布资格。暂存 agentwork/ledger.tsv 时 precommit 按 HEAD 版 build/ledger-format-baseline.tsv 跑 `tools/ledger-add.cx -- --check`，新增非 6 列行拒绝（夹具在 check-ledger-add）。 |
+| 真实提交工具配套与源码分类闸 | `sh ./unisacc.com tools/check-precommit-toolsloc.cx -- --loc`、`-- --source`、`-- --symlink`（保留三批历史ID）、`-- --lint-r2-sep`/`--lint-r1-report`；源码锚负控 `tools/check-cx-lint.cx --anchor-controls --lint-tool ABS_NATIVE_LINT` | 独立真实临时git仓运行生产hook；历史行数超额允许，shebang伪源码拒绝，新增tool缺check或缺IMPLEMENTED批次拒绝；staged .cx 经 cx-lint：R2/R3/R4 强制拦，R1 只打印；旧工具无调用者/无批次/重复仅列候选；禁锚负控不授产品或发布资格。暂存 archive/agentwork-retire-2026-11/ledger.tsv 时 precommit 按 HEAD 版 build/ledger-format-baseline.tsv 跑 `tools/ledger-add.cx -- --check --ledger FILE`，新增非 6 列行拒绝（夹具在 check-ledger-add）。 |
 | .cx token 层 lint（第二真相源/子进程/源码锚） | `sh ./unisacc.com tools/cx-lint.cx -- [--strict] [--rules R2,R3,R4,R1-version] [PATH...]` | R1-version/R1-product 只报告；R2-timeout/R2-sep 为子进程合同，R3-die 为失败助手终止合同，R4-source-anchor 为来源感知的源码字面锚合同；precommit 对 staged .cx 跑 `--rules R2,R3,R4 --strict`。R4 与 R2 不接受 lint:allow；运行输出/事实读取及 token/AST 分析不等于字面锚。精确计数与来源夹具 `tools/check-cx-lint.cx`。 |
-| 预冻结演练(SPEED-049-E) | `sh ./unisacc.com tools/freeze-plan.cx -- plan ROOT out/`；`-- check --ident-list FILE --draft FILE`；`-- boot-list LIST`；夹具 `tools/check-freeze-plan.cx` | ident list-current 导出 freeze.tsv 草案到 out/（不写 agentwork/）；覆盖/过宽非零；启动清单缺文件启动前拒；符号链接真身须覆盖。不覆盖现行 L0-CORE-FREEZE-049 |
+| 预冻结演练(SPEED-049-E) | `sh ./unisacc.com tools/freeze-plan.cx -- plan ROOT out/`；`-- check --ident-list FILE --draft FILE`；`-- boot-list LIST`；夹具 `tools/check-freeze-plan.cx` | ident list-current 导出 freeze.tsv 草案到 out/（只写显式输出目录）；覆盖/过宽非零；启动清单缺文件启动前拒；符号链接真身须覆盖。不覆盖现行 L0-CORE-FREEZE-049 |
 | SPEED-049-F 版本数据解耦 | `sh ./unisacc.com tests/release-version.cx`；打包与身份验收见 `tests/README.md` 的 SPEED-049-F 配方 | 唯一版本列为 `release/candidate.tsv`；源固定32字节槽，打包注入。解析测试已登记，未经本轮执行不得转授旧材料资格；L1–L4 非版本格式断言保持。 |
 | 相位耗时重算 phase-times-calc | `sh ./unisacc.com tools/phase-times-calc.cx -- out/b1/<rev>/chain-run.tsv build/chain-phases.tsv [--start EPOCH] [--sim WIDTH] [--phases] [--emit-durations FILE] [--write build/phase-times.tsv --prefix ID --source TEXT]`；夹具 `tools/check-phase-times-calc.cx`(批 phase-times-calc)；0.0.58 缩减记录 `tests/fixtures/chain-c58/durations.tsv` | 由链自己的记录按域重算总秒、单次最大、次数,并按相位表依赖现算关键路径与并行余量;0.0.58 链:合计 8689.6 秒、墙钟 7985、比值 1.09、关键路径 4989.8、余量 3699.8(42.5%);畸形输入退出 2。并行度(C1):CONCURRENCY 行给实际同时在跑的尝试数分布(0.0.58:忙 7706.7 秒中 7127.7 秒只有 1 次在跑,均值 1.12),BYWIDTH 行按生效宽度分摊,`--sim W` 按 chain-run 就绪规则用实测耗时模拟墙钟(宽度 4 为 5258.4 秒,宽度 1 为 8689.6 秒;不模拟分段空等、降宽与负载),`--phases` 逐相位列耗时与模拟起止 |
 | 相位限时余量 bound-headroom | `sh ./unisacc.com tools/bound-headroom.cx -- [--threshold 0.8] [--limits FILE] [--report] [DIR...]`(默认读 out/b1-old/* 与 out/b1/* 的 chain-run.tsv);夹具 `tools/check-bound-headroom.cx`(批 bound-headroom) | 只读;各相位历次最长秒与 limits.tsv phase.bound(含 kernels-* 前缀覆盖)之比,>=阈值标 TIGHT,末行 HEADROOM total= tight=;有 TIGHT 退出 1,--report 恒 0;真实 out 实测 total=204 tight=15,gen1 88.1/90 |
@@ -238,7 +238,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | cx 核心面逐函数表（CX-A-5） | 表 `build/std-surface.tsv`（pkg、name、signature、analogue、errors、lnx、osx、win、status、note；`# out` 行是不进核心面的范围，`# area` 行分区）；检查 `sh ./unisacc.com tools/check-std-surface.cx [-- ROOT]`（批 `std-surface`） | sys + os + net 一次设计完的事实表：`status=exists` 的行签名与 `build/layer-api/` 逐字相同，`new` 是已定未实现，`alias-of:NAME` 是别名。加公开函数先加行并升所属包 Y 位。检查对畸形行、exists 不存在或签名不符、new 已被导出判失败；核心包已导出但无行的只报数（NOROW） |
 | stream 路由目标一致性 | `sh ./unisacc.com tools/check-stream-target.cx`（批次 `stream-target`）；开发可指定 `PRODUCT/ROOT/BASELINE_PRODUCT` | route-only 从事实表 cell 前缀导出目标，显式 target 冲突一行拒绝；六 cell 宏与 direct 相等且互异、E3 long 字宽、显式一致及默认宿主逐次实跑；旧公开预发布的 route-only 曾错误沿用宿主宏，新候选重建后生效，未供旧产品伪报通过 |
 | 分段单阶段用例（逐段字节 golden） | `sh ./unisacc.com tests/check-stages.cx [-- PRODUCT ROOT]`（批次 `stages`） | `tests/stages/<段>/` 每段 `args/in/expect`，可选 `bad/bad.err/bad.args`，喂 `unisacc stream STAGE`；无拒绝用例的段记 GAP。tape 入口校验撤回，本批如实红（见 CHANGELOG 已知限制） |
-| 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `agentwork/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
+| 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `archive/agentwork-retire-2026-11/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
 | 已知 FAIL 必须登记 | `sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv`（`-- --self-test`） | rc1 门槛 1：聚合输出里非 PASS 的批次都得是 `tests/waivers-0.0.44.tsv` 的 `F` 行；F 行只说"已知有主有计划"，不把 FAIL 变 PASS |
 | 懒分配表有没有漏守卫 | `sh ./unisacc.com tools/check-asmtext-tables.cx -- ROOT` | 碰表的 asmtext 入口必须调 `at_tables()`；删掉守卫即红 |
 | 标准流写失败可见吗 | `sh ./unisacc.com tools/check-stdio.cx -- ROOT` | `/dev/full` 下 `puts`/`fflush`/`ferror` 必须全报，退出码 15 |
@@ -492,7 +492,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 - **产品身份 = manifest 的 sha256(Merkle 根)**。取代 `pp_product_digest` / `ape-receipt` / `build.json` artifact 段等多处各算一份的口径(见 `plans/identity-inventory-2026-11-02.md`、`plans/identity-unify-2026-11-02.md`)。kernel context 仍独立于它(判断 kernel 可否复用,不随全树变),两代 GEN 互证仍保留。
 - 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节 -> 输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
 - 单文件发布(pack 内嵌)保留;外部目录形态用于开发。启动开销是主要风险(现热 `-run` ≈10ms),每步测量。
-- 进度与分步:见 `agentwork/items.tsv`(B0 P3 explode/implode -> B1 resolver -> B2 阶段测试台 -> B3 基座外置 -> B4 booter APE 头 -> B5 身份收敛到 manifest)。
+- 进度与分步:见 `archive/agentwork-retire-2026-11/items.tsv`(B0 P3 explode/implode -> B1 resolver -> B2 阶段测试台 -> B3 基座外置 -> B4 booter APE 头 -> B5 身份收敛到 manifest)。
 - 现状:基座 / 模型 / 资源的外置与 loader 分离(items B3、B4、B5c 均 DONE-PARTIAL)未完成,发布形态仍是单文件 APE(尾部一份包);已落地的是 resolver / explode 工具与 `unisacc stream STAGE` 阶段过滤器。
 
 ## 5. 源码结构（src/ 六层 + cx/ 树）
@@ -574,7 +574,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `agentwork/`、`release/`、`agentwork/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；任务看板与账（agentwork/：items/ledger/units/freeze/phase-times/pkg-gaps，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
+| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；任务看板与账（archive/agentwork-retire-2026-11/：items/ledger/units/freeze/phase-times/pkg-gaps，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
 
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
@@ -585,7 +585,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 想做 | 去 |
 |---|---|
-| 看现在做到哪、有什么阻塞 | 本文 §9、[prd_mempalace.md](prd_mempalace.md)(`agentwork/` 已退役) |
+| 看现在做到哪、有什么阻塞 | 本文 §9、[prd_mempalace.md](prd_mempalace.md)(`archive/agentwork-retire-2026-11/` 已退役) |
 | 找一个工具 | 本文 §2 能力速查，或 `ls tools \| grep 关键字` |
 | 看候选构造图与隐性前提 | `build/graph.tsv`、`build/preflight-rules.tsv`、`tools/graph-check.cx` |
 | 改一张解析/约束表 | 改 `exec/parse2/*.tsv` -> `tools/a12-cycle.cx` -> `tools/affected.cx --files 表` |
@@ -598,14 +598,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树(已迁出)
 
-当前版本、阻塞、下一动作与协同规则只写在 [prd_mempalace.md](prd_mempalace.md)(项目所有者 2026-11-14:记忆宫殿是唯一协同入口,`agentwork/` 退役)。本节不再记当前状态,避免两处不一致。
+当前版本、阻塞、下一动作与协同规则只写在 [prd_mempalace.md](prd_mempalace.md)(项目所有者 2026-11-14:记忆宫殿是唯一协同入口,`archive/agentwork-retire-2026-11/` 退役)。本节不再记当前状态,避免两处不一致。
 
 
 <a id="product-map"></a>
 ### 9.6 产品全景表（生成文件，已切出）
 
 产品全景表(层、六片、七流、42 构造网及术语表)是随源码字节数频繁变化的生成块，已于 2026-11-14 切出到 [prd_productmap.md](prd_productmap.md)；`tools/product-map.cx -- --write` 重算、`-- --check` 核对，勿手改。本文其它章节引用的「生成块 9.6」即指该文件。
-历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `prd_mempalace.md`(`agentwork/` 已退役)。
+历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `prd_mempalace.md`(`archive/agentwork-retire-2026-11/` 已退役)。
 <a id="memory-palace"></a>
 ### 9.2 记忆宫殿(索引)
 
@@ -720,7 +720,7 @@ prd.md                 当前状态（本文件，只写当前事实；结构点
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
 ├─ plans/              各版计划与发布说明（最新 v0.0.58-unisacc.md、release-notes-0.0.57.md）
 ├─ build/graph.tsv     构造图事实表（graph-check 读）；build/product-map.tsv 全景表
-├─ agentwork/          任务看板 items.tsv、账本 ledger.tsv、phase-times.tsv、WORKFLOW.md
+├─ archive/agentwork-retire-2026-11/  历史看板、账本与工作流,不参与当前协同
 └─ archive/            旧实现与旧文档（见下）
 ```
 

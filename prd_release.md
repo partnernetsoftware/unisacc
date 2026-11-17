@@ -1,6 +1,6 @@
 # prd_release.md —— 发布与 CI 手册（自 0.0.48、0.0.49 发布经验归纳）
 
-本文件是 [prd.md](prd.md) 的子文档：只写**怎么发布、CI 怎么跑、踩过什么坑**。当前版本状态见 prd.md §9.1；单次任务进度写 `agentwork/ledger.tsv`。
+本文件是 [prd.md](prd.md) 的子文档：只写**怎么发布、CI 怎么跑、踩过什么坑**。当前版本状态见 prd.md §9.1；单次任务进度看会话日志,共享决定与阻塞只写 `prd_mempalace.md`。
 
 ## 1. 发布链（顺序即依赖）
 
@@ -105,9 +105,9 @@
 
 - 共享工作区只有集成者写 main；其他窗口出补丁，集成者在私有克隆 `cherry-pick/rebase` 后推送。
 - 同步本地用 `git merge --ff-only origin/main`，**直接检查返回码**，不接 `| tail`（0.0.48 曾因此漏报合并失败）。
-- s9 会话期间，被跟踪工作树文件（含 `agentwork/ledger.tsv`）变化会使整波作废：用静默窗口；0.0.49 起 child 用 `--shared-wt` wave 级共享扫描（6fccc10255），封条不符仍整 slice refused。
+- s9 会话期间，被跟踪工作树文件（含 `archive/agentwork-retire-2026-11/ledger.tsv`）变化会使整波作废：用静默窗口；0.0.49 起 child 用 `--shared-wt` wave 级共享扫描（6fccc10255），封条不符仍整 slice refused。
 - 发布提交 X/Y 推送后立即快进共享检出（§3b 第 4 条）。
-- 公开发布后写 `agentwork/ledger.tsv`（含撤回办法），并读回 `SHA256SUMS` 与 `--version`。
+- 公开发布后在 `prd_mempalace.md` 登记不可逆动作（含撤回办法），并读回 `SHA256SUMS` 与 `--version`。
 - 其他窗口的工具补丁经 `tools/integrate-patch.cx ROOT PATCH NEW_CLONE` 到 READY_TO_COMMIT 再由集成者带入（0.0.49 工具总补丁 `ba945f3238`，账本 `C49-TOOLS-READY-CDX`）。
 
 ## 7. 往期发布

@@ -98,7 +98,7 @@ done
 
 追加失败保持：注册 `materials-prepare-native` 已按修正后的直接OUT参数真实执行，但内层原20秒编译watchdog触发，BATCH_RUN FAIL/rc2；原始stage输出保存在 `out/t2-reg-final/materials-prepare-native`。此前成功制备与本失败的 runtime.c、material.tsv逐字相同；尚未证明超时根因，不以成功材料覆盖本次FAIL，不提高20/40/55秒预算或对相同输入盲目重试。
 
-cc复核后采用方案(b)：从批次表撤下 `materials-prepare-native`，不把已知红注册成IMPLEMENTED/PLANNED daily；仅以 `agentwork/items.tsv` 的 `T2A-NATIVE-PHASE-20S` 登记KNOWN-GAP、原失败日志与分相位方案。分相位尚未实现，原预算整链实测后才重新登记。补丁重基6a3b87ab12；79制备与十INFRA证据仍只绑定79。逐行pin身份依据见 `plans/t2-pin-rationale.tsv`。
+cc复核后采用方案(b)：从批次表撤下 `materials-prepare-native`，不把已知红注册成IMPLEMENTED/PLANNED daily；仅以 `archive/agentwork-retire-2026-11/items.tsv` 的 `T2A-NATIVE-PHASE-20S` 登记KNOWN-GAP、原失败日志与分相位方案。分相位尚未实现，原预算整链实测后才重新登记。补丁重基6a3b87ab12；79制备与十INFRA证据仍只绑定79。逐行pin身份依据见 `plans/t2-pin-rationale.tsv`。
 
 
 Win 负控的历史就绪/PASS 为父当时实际 stdout 见证，banner 为 `WIN_ARM64_FIXEDPOINT_CONTROLS failed=0`，旧 ROOT 的历史准备记录亦记录该结果；原始持久 stdout/status 日志尚未定位，由父追溯，不虚构证据路径，不为确认既有事实重跑。实际缺代输入已核，为 `$ROOT/out/ltests-c47-materials/win-arm64-missing-generations.tsv`，root/native_root 均为旧 ROOT、rev=`7b98ec2c0618df88115ae1c80cea47144e8614d3`，绑定真实 fde APE、pkg、Linux ELF 与 AA64 PE SHA。其余15项有完整原始 JSON；16 PREPARED/7 NOT_PREPARED 是旧 ROOT 历史状态，不冒称本节点或新 T2 树重新验收。可复现原接口（非本次执行）为 `tools/bound 55 sh ./unisacc.com tests/win-arm64-fixedpoint.cx -- "$MISSING_GENERATIONS_MANIFEST" "$APE"`；缺两代 rc3、实际 ELF 冒充 AA64 rc1、错误 SHA rc1 的三个拒绝合同保持原样。此负控 PASS 永远不等于真实 Windows 固定点 PASS。
