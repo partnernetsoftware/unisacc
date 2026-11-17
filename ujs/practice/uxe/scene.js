@@ -1,3 +1,6 @@
+import { FONT, FONT_W, FONT_H } from "./font5x7.js";
+import { MESH_POINTS } from "./meshes.js";
+
 /** UXE scene — closed, data-oriented. No materials graph. */
 
 export class PerspectiveCamera {
@@ -61,5 +64,38 @@ export class Scene {
     this.clouds.set(name, c);
     return c;
   }
+  text(str, x, y, scale, color) {
+    const s = scale || 4;
+    const xs = [], ys = [], sc = [];
+    const t = String(str || "");
+    for (let gi = 0; gi < t.length; gi++) {
+      const cols = FONT[t[gi]];
+      if (!cols) continue;
+      for (let cx = 0; cx < FONT_W; cx++) {
+        const bits = cols[cx] | 0;
+        for (let cy = 0; cy < FONT_H; cy++) {
+          if (!((bits >> cy) & 1)) continue;
+          xs.push(x + gi * FONT_W * s + cx * s + s / 2);
+          ys.push(y + cy * s + s / 2);
+          sc.push(s);
+        }
+      }
+    }
+    const cnt = xs.length;
+    const name = "text:" + t;
+    const c = this.instances(name, cnt, color || [1, 1, 1]);
+    c.meshId = MESH_POINTS;
+    c.count = cnt;
+    c.screenSpace = 1;
+    c.flags = 8;
+    for (let i = 0; i < cnt; i++) {
+      c.xyz[i * 3] = xs[i];
+      c.xyz[i * 3 + 1] = ys[i];
+      c.xyz[i * 3 + 2] = 0;
+      c.scale[i] = sc[i];
+    }
+    return c;
+  }
+
   get(name) { return this.clouds.get(name); }
 }
