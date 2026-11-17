@@ -72,7 +72,8 @@ host1 侧:`host_gpu_submit` 符号可导入,读线性内存后 no-op,**不是** 
 
 字节序:与 v3 相同,小端。magic `UXEP`(u32) | version(u32)=4。
 
-v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin`(u16,保留 0)。
+v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin`(u16):0=图像约定(texel 第 0 行在朝向相机时的上方,上传 `UNPACK_FLIP_Y_WEBGL=1`);1=保留 GL 约定。
+
 
 包尾**上传段**(可空):`nUpload`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `sha256`(32B) `rgba`(w*h*4)。
 
