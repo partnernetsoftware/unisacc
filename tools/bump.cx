@@ -4,6 +4,12 @@
  *   PKG [--owner O] [--kind patch|minor] [--ttl-s N]   reserve; prints BUMP PKG=.. VERSION=.. OWNER=.. EXPIRES=.. REUSED=0|1
  *   --release PKG VERSION [--owner O]                  release an own live reservation; prints BUMP_RELEASE
  *   --list [PKG]                                       every stored reservation with its state; prints BUMP_ROW lines
+ *   --query PKG [VERSION] [--owner O]                  K4: classify VERSION (default: PKG's version in the git index,
+ *                                                      :build/tlib-packages.tsv) against HEAD and the live reservations;
+ *                                                      prints BUMP_QUERY PKG= VERSION= HEAD= NEXT= VERDICT= where VERDICT
+ *                                                      is head (not bumped), next (next patch of HEAD), reserved (live
+ *                                                      reservation of O), reserved-other (live, another owner) or
+ *                                                      unreserved. Read by layer-api --bump --version and the commit gate.
  *   common: [--root R] [--dir D]
  * Semantics:
  *   V = version of PKG in HEAD:build/tlib-packages.tsv (git show, never the work tree).
@@ -20,8 +26,9 @@
  *   log through devsvc events emit unless $BUMP_EMIT=0 (checks).
  * Bounds: lock wait $BUMP_LOCK_WAIT_MS (default 5000, cap 20000) then refusal; git and emit subprocesses 10 s each.
  *   $BUMP_NOW (epoch seconds) replaces the clock, for checks only.
- * This entry does not change tools/layer-api.cx or the commit gate: after layer-api --bump, compare its version with the
- * reserved one; when they differ the reserved one wins (K4 will make the gate read reservations).
+ * K4: layer-api --bump PKG --version V writes the reserved V (refused unless V is a live reservation of the caller or
+ * the next patch of HEAD); the commit gate (precommit tlib) warns TLIB_BUMP_UNRESERVED for a staged version that is
+ * neither (WARN only, does not block).
  * Exit: 0 ok, 1 refused (lock busy, nothing to release), 2 bad input or I/O. */
 #pragma unisa use cxlib.devtask
 #pragma unisa use cxlib.netpack
@@ -72,9 +79,9 @@ static void cpn(char *d, long cap, const unsigned char *s, long n) { if (n >= ca
 
 static int run_cap(char **v, np_result *r) { char w[256]; int rc = np_run(v, root, 0, 10, r, w, sizeof w); return rc || r->rc; }
 
-/* version of pkg in HEAD:build/tlib-packages.tsv; 0 ok, 1 unknown package, 2 I/O */
-static int head_ver(const char *pkg, char *out, long cap) {
-    char *v[] = {"git", "-C", root, "show", "HEAD:build/tlib-packages.tsv", 0}; np_result r = {0}; long pl = (long)strlen(pkg); int found = 1;
+/* version of pkg in SPEC (HEAD:build/tlib-packages.tsv, or :build/tlib-packages.tsv for the index); 0 ok, 1 unknown package, 2 I/O */
+static int spec_ver(const char *spec, const char *pkg, char *out, long cap) {
+    char *v[] = {"git", "-C", root, "show", (char *)spec, 0}; np_result r = {0}; long pl = (long)strlen(pkg); int found = 1;
     if (run_cap(v, &r) || !r.out) { np_free(&r); return 2; }
     for (long i = 0; i < (long)r.outn;) {
         long le = i, t1, t2;
@@ -88,6 +95,7 @@ static int head_ver(const char *pkg, char *out, long cap) {
     if (!found) { long tmp[3]; if (ver_parse(out, tmp)) return 2; }
     return found;
 }
+static int head_ver(const char *pkg, char *out, long cap) { return spec_ver("HEAD:build/tlib-packages.tsv", pkg, out, cap); }
 
 static int load(void) {
     char p[1200]; unsigned char *b = 0; int64_t n = 0; int rc;
@@ -137,7 +145,7 @@ static void emit_all(void) {
     if (e && !strcmp(e, "0")) return;
     for (int i = 0; i < nev; i++) {
         char prod[1100], *v[] = {"sh", prod, "tools/devsvc.cx", "--", "events", "emit", evk[i], evq[i], 0}; np_result r = {0};
-        if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) { fprintf(stderr, "BUMP_EMIT_FAIL\t%s\tpath too long\n", evk[i]); continue; }
+        if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) { fprintf(stderr, "BUMP_EMIT_FAIL\t%s\tpath too long\n", evk[i]); continue; } /* lint:allow R1-product events emit runs the installed product of ROOT, as devsvc itself does */
         if (run_cap(v, &r)) fprintf(stderr, "BUMP_EMIT_FAIL\t%s\trc=%d\n", evk[i], r.rc);
         np_free(&r);
     }
@@ -179,16 +187,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(s, "--root") && more) oroot = argv[++i];
         else if (!strcmp(s, "--release")) mode = 1;
         else if (!strcmp(s, "--list")) mode = 2;
+        else if (!strcmp(s, "--query")) mode = 3;
         else if (!strcmp(s, "--help")) { printf("usage: bump PKG [--owner O] [--kind patch|minor] [--ttl-s N] | bump --release PKG VERSION [--owner O] | bump --list [PKG]; common [--root R] [--dir D]\n"); return 0; }
         else if (s[0] == '-') return bad("unknown option", s);
         else if (!pkg) pkg = s;
-        else if (mode == 1 && !relver) relver = s;
+        else if ((mode == 1 || mode == 3) && !relver) relver = s;
         else return bad("extra argument", s);
     }
     if (strcmp(kind, "patch") && strcmp(kind, "minor")) return bad("bad --kind (patch|minor)", kind);
     if (mode != 2 && !pkg) return bad("missing PKG", 0);
     if (pkg && !name_ok(pkg, 96)) return bad("bad PKG", pkg);
     if (mode == 1) { long t[3]; if (!relver || ver_parse(relver, t)) return bad("bad or missing VERSION", relver); }
+    if (mode == 3 && relver) { long t[3]; if (ver_parse(relver, t)) return bad("bad VERSION", relver); }
     if (!owner) owner = getenv("DEVSVC_OWNER");
     if (!owner || !*owner) { if (cx_fmt(own, sizeof own, "auto-%d", sy_pid())) return 2; owner = own; }
     if (!name_ok(owner, 64)) return bad("bad owner", owner);
@@ -220,6 +230,14 @@ int main(int argc, char **argv) {
             printf("BUMP_ROW\tPKG=%s\tVERSION=%s\tOWNER=%s\tEXPIRES=%ld\tSTATE=%s\tHEAD=%s\n", rs[i].pkg, rs[i].ver, rs[i].owner, rs[i].exp, st, h2);
         }
         if (pkg) printf("BUMP_HEAD\tPKG=%s\tVERSION=%s\n", pkg, hv);
+    } else if (mode == 3) {
+        char qv[32], nx[32]; long v[3]; int own2 = 0, oth = 0; const char *vd;
+        if (relver) cpn(qv, sizeof qv, (const unsigned char *)relver, (long)strlen(relver));
+        else { int h = spec_ver(":build/tlib-packages.tsv", pkg, qv, sizeof qv); if (h) { sy_close(fd); return bad("cannot read the index version", pkg); } }
+        if (ver_parse(hv, v) || cx_fmt(nx, sizeof nx, "%ld.%ld.%ld", v[0], v[1], v[2] + 1)) { sy_close(fd); return bad("bad version", hv); }
+        for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && !strcmp(rs[i].ver, qv)) { if (!strcmp(rs[i].owner, owner)) own2 = 1; else oth = 1; }
+        vd = !strcmp(qv, hv) ? "head" : own2 ? "reserved" : oth ? "reserved-other" : !strcmp(qv, nx) ? "next" : "unreserved";
+        printf("BUMP_QUERY\tPKG=%s\tVERSION=%s\tHEAD=%s\tNEXT=%s\tVERDICT=%s\tOWNER=%s\n", pkg, qv, hv, nx, vd, owner);
     } else if (mode == 1) {
         int hit = -1;
         for (i = 0; i < nr; i++) if (live(&rs[i], pkg, hv) && !strcmp(rs[i].ver, relver) && !strcmp(rs[i].owner, owner)) hit = i;
