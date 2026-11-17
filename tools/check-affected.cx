@@ -363,6 +363,29 @@ int main(int argc, char **argv) {
             ck(rc == 3 && has(o, "DEFERRED\trandom-expr\tprepare-failed=HOST_TOOL_MISSING:hosttcc:")
                 && has(o, "AFFECTED_RUN\tpass=0\tfail=0\tdeferred=1\t")
                 && !has(o, "BATCH_RUN") && !has(o, "PREPARED\thosttcc\t"), "hosttcc-missing-deferred-no-fallback");
+            {   /* the batch front gate refuses link spellings: a link to the stub must surface as the stub's
+                   canonical path (via= keeps the link); a dangling link and a directory are named refusals */
+                char link[4400], dangle[4400], canon[4400], want[8900];
+                int ls = !cx_fmt(link, sizeof link, "%s/tcc-link", dir) && !cx_fmt(dangle, sizeof dangle, "%s/tcc-dangle", dir)
+                    && !symlink(stub, link) && !symlink("/nonexistent/affected-hosttcc-target", dangle)
+                    && sy_realpath(stub, canon, (int)sizeof canon) > 0;
+                ck(ls, "hosttcc-link-fixture");
+                if (ls) {
+                    setenv("TCC", link, 1);
+                    rc = tool(prep_args, o, OUTCAP);
+                    ck(rc == 0 && !cx_fmt(want, sizeof want, "\tpath=%s\t", canon) && has(o, want)
+                        && !cx_fmt(want, sizeof want, "\tvia=%s\n", link) && has(o, want), "hosttcc-link-canonical-path");
+                    setenv("TCC", dangle, 1);
+                    rc = tool(run_args, o, OUTCAP);
+                    ck(rc == 3 && has(o, "prepare-failed=HOST_TOOL_MISSING:hosttcc:") && !has(o, "BATCH_RUN")
+                        && !has(o, "PREPARED\thosttcc\t"), "hosttcc-dangling-link-named-refusal");
+                    setenv("TCC", dir, 1);
+                    rc = tool(run_args, o, OUTCAP);
+                    ck(rc == 3 && has(o, "prepare-failed=host-tool-not-regular=") && !has(o, "BATCH_RUN")
+                        && !has(o, "PREPARED\thosttcc\t"), "hosttcc-directory-named-refusal");
+                }
+                sy_unlink(link); sy_unlink(dangle);
+            }
             sy_unlink(stub); rmdir(dir);
         }
         if (keep_tcc) { setenv("TCC", keep_tcc, 1); free(keep_tcc); } else unsetenv("TCC");
@@ -566,7 +589,12 @@ int main(int argc, char **argv) {
         ck(rc == 0 && prep_field(o, "unitcache-product", "sha256=", h, 65) && want_h[0] && tx_eqz(h, want_h)
            && prep_field(o, "e2model", "sha256=", h, 65) && tx_eqz(h, want_h), "f4a-product-identity");
         s = cx_read("/usr/bin/cc", &n); if (s) { cx_sha256_hex(s, n, want_h); free(s); } else want_h[0] = 0;
-        ck(prep_field(o, "hostcc", "sha256=", h, 65) && want_h[0] && tx_eqz(h, want_h) && has(o, "\tpath=/usr/bin/cc\tversion=") && !has(o, "version=\n"), "f4a-host-identity");
+        {   /* the material path is /usr/bin/cc's canonical file (the batch front gate refuses link spellings); via= keeps the spelling */
+            char canon[4400], pw[4500];
+            ck(prep_field(o, "hostcc", "sha256=", h, 65) && want_h[0] && tx_eqz(h, want_h)
+               && sy_realpath("/usr/bin/cc", canon, (int)sizeof canon) > 0 && !cx_fmt(pw, sizeof pw, "\tpath=%s\tversion=", canon) && has(o, pw)
+               && has(o, "\tvia=/usr/bin/cc\n") && !has(o, "version=\tvia="), "f4a-host-identity");
+        }
         ck(prep_field(o, "nets", "sha256=", h, 65) && prep_field(o, "objects", "sha256=", h, 65), "f4a-material-dirs-prepared");
         ck(prep_field(o, "streams", "id=", sid, 17) && prep_field(o, "stream-lower-sha", "sha256=", h, 65)
            /* the lower stage is unisacc-stream6.com in the streams-material contract; affected itself refuses

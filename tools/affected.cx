@@ -681,7 +681,7 @@ static int finish(Child *C, int ex, int code, int sig) {
 #define PREP_PAR 3
 #define PREP_SECS 90
 #define PREP_BUDGET_MS 38000
-typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65], native_fingerprint[65], ver[160]; long ms; int cached; } Prep;
+typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65], native_fingerprint[65], ver[160], via[600]; long ms; int cached; } Prep;
 /* PK_PROD: the product under test itself (ROOT/unisacc.com, identity = its sha).  PK_HOST: a declared host
    oracle (/usr/bin/cc|ld|ar, identity = file sha + first --version line).  PK_MDIR: a directory from a material
    tool (net/pp-gold/object-material), artifact sha = material.tsv.  PK_SVAL/PK_SID: a sha256 value derived
@@ -797,7 +797,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
         const char *want = getenv("TCC"), *at = getenv("PATH");
         if (!want || !*want) want = "tcc";
         if (strchr(want, '/')) {
-            if (access(want, X_OK) == 0 && sy_realpath(want, src, cap) >= 0) return 0;
+            if (access(want, X_OK) == 0 && !cx_fmt(src, cap, "%s", want)) return 0;   /* canonicalized in prep_add */
             if (errno == ENOENT) cx_fmt(why, whycap, "HOST_TOOL_MISSING:hosttcc:%s", want);
             else cx_fmt(why, whycap, "host-tool-access=%s:errno=%d", want, errno);
             return -1;
@@ -810,7 +810,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
                 cx_fmt(why, whycap, "host-tool-path-too-long=hosttcc"); return -1;
             }
             if (access(path, X_OK) == 0) {
-                if (sy_realpath(path, src, cap) >= 0) return 0;
+                if (!cx_fmt(src, cap, "%s", path)) return 0;   /* canonicalized in prep_add */
                 cx_fmt(why, whycap, "host-tool-unreadable=%s", path); return -1;
             }
             if (errno != ENOENT) {
@@ -854,16 +854,28 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         memcpy(P->sha, prod_sha, 65); memcpy(P->closure, prod_sha, 65); memcpy(P->id, prod_sha, 16); P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
-    if (P->kind == PK_HOST) {   /* declared host oracle: absolute path, file sha, first --version line */
-        char bound[4400], *av[6]; Buf o = {0, 0, 0}; long e = 0;
-        if (cx_fmt(P->path, sizeof P->path, "%s", P->src) || sy_exists(P->path) != 1) { cx_fmt(why, cap, "host-tool-absent=%s", P->src); return -1; }
-        if (file_sha(P->path, P->sha)) { cx_fmt(why, cap, "host-tool-unreadable=%s", P->src); return -1; }
+    if (P->kind == PK_HOST) {   /* declared host oracle: canonical path, file sha, first --version line */
+        /* The batch front gate (tests/run-batch.cx supplied()) takes only a non-link path that is its own
+           realpath, so the material is the resolved regular executable; the spelling found stays as via=. */
+        char bound[4400], *av[6], idl[800], idh[65]; Buf o = {0, 0, 0}; long e = 0; struct stat hs; int r;
+        if (cx_fmt(P->via, sizeof P->via, "%s", P->src)) { cx_fmt(why, cap, "host-tool-path-too-long=%s", name); return -1; }
+        r = sy_realpath(P->src, P->path, (int)sizeof P->path);
+        if (r == -ENOENT || r == -ENOTDIR) { cx_fmt(why, cap, "host-tool-unresolved=%s", P->src); return -1; }
+        if (r < 0) { cx_fmt(why, cap, "host-tool-realpath=%s:errno=%d", P->src, -r); return -1; }
+        errno = 0;
+        if (lstat(P->path, &hs)) { cx_fmt(why, cap, "host-tool-stat=%s:errno=%d", P->path, errno); return -1; }
+        if (!S_ISREG(hs.st_mode)) { cx_fmt(why, cap, "host-tool-not-regular=%s", P->path); return -1; }
+        if (access(P->path, X_OK)) { cx_fmt(why, cap, "host-tool-not-executable=%s:errno=%d", P->path, errno); return -1; }
+        if (file_sha(P->path, P->sha)) { cx_fmt(why, cap, "host-tool-unreadable=%s", P->path); return -1; }
         if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
         av[0] = bound; av[1] = "5"; av[2] = P->path; av[3] = "--version"; av[4] = 0;
         if (read_all(av, &o) != 0 || !o.n) { cx_fmt(why, cap, "host-tool-version=%s", P->src); return -1; }
         while (e < o.n && o.p[e] != '\n' && o.p[e] != '\t') e++;
         cx_fmt(P->ver, sizeof P->ver, "%.*s", (int)(e < 150 ? e : 150), o.p);
-        memcpy(P->closure, P->sha, 65); memcpy(P->id, P->sha, 16); P->id[16] = 0;
+        /* identity = content sha plus canonical path */
+        if (cx_fmt(idl, sizeof idl, "%s\n%s\n", P->sha, P->path)) { cx_fmt(why, cap, "host-tool-path-too-long=%s", name); return -1; }
+        tp_sha(idl, (size_t)tx_len(idl, sizeof idl), idh);
+        memcpy(P->closure, idh, 65); memcpy(P->id, idh, 16); P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
     if(P->kind==PK_MDIR&&tx_eqz(name,"kernels")){
@@ -1106,7 +1118,7 @@ static void prebuild(const int *sel, int nsel) {
         while ((rc = tp_material_next(&at, &d)) > 0) { char why[200]; if (material_wanted(d.name)) (void)prep_plan(d.name, d.kind, why, sizeof why); }
     }
     if (prep_plan_only) {   /* identity only (id, cache hit or miss, cache path): a plan, never PREPARED */
-        for (k = 0; k < nprep; k++) printf("PREP_PLAN\t%s\tid=%s\tcache=%s\tpath=%s\n", prep[k].name, prep[k].id, prep[k].state == PS_READY ? "hit" : "miss", prep[k].path);
+        for (k = 0; k < nprep; k++) printf("PREP_PLAN\t%s\tid=%s\tcache=%s\tpath=%s%s%s\n", prep[k].name, prep[k].id, prep[k].state == PS_READY ? "hit" : "miss", prep[k].path, prep[k].via[0] ? "\tvia=" : "", prep[k].via);
         printf("PREP_PLAN_SUMMARY\tmaterials=%d\troot=%s\tcache_dir=%s\n", nprep, root, cachedir);
         fflush(stdout); exit(0);
     }
@@ -1158,7 +1170,7 @@ static void prebuild(const int *sel, int nsel) {
     }
     for (k = 0; k < nprep; k++) if (prep[k].kind == PK_SVAL || prep[k].kind == PK_SID) { if (prep_derive(&prep[k])) failed++; else built++; }
     for (k = 0; k < nprep; k++)
-        if (prep[k].state == PS_READY && prep[k].kind == PK_HOST) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\tpath=%s\tversion=%s\n", prep[k].name, prep[k].id, prep[k].sha, "hit", 0L, prep[k].path, prep[k].ver);
+        if (prep[k].state == PS_READY && prep[k].kind == PK_HOST) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\tpath=%s\tversion=%s\tvia=%s\n", prep[k].name, prep[k].id, prep[k].sha, "hit", 0L, prep[k].path, prep[k].ver, prep[k].via);
         else if (prep[k].state == PS_READY) prep_print("PREPARED\t%s\tid=%s\tsha256=%s\tcache=%s\tms=%ld\n", prep[k].name, prep[k].id, prep[k].sha, prep[k].cached ? "hit" : "built", prep[k].ms);
         else prep_print("PREP_FAILED\t%s\t%s\n", prep[k].name, prep[k].why);
     prep_print("PREBUILD\tmaterials=%d\thit=%d\tbuilt=%d\tfailed=%d\tdeferred=%d\telapsed_ms=%ld\n", nprep, hits, built, failed, deferred, sy_now_ms() - t0);
