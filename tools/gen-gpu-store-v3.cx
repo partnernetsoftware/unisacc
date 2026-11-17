@@ -1,11 +1,9 @@
-/* tools/gen-gpu-store-v3.cx -- hex 事实 -> gpu-store-v3-tri.ujs
+/* tools/gen-gpu-store-v3.cx -- hex 事实 -> ujs + tri-b64.js + tri-oracle.js
  *
  * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --check
  * sh ./unisacc.com tools/gen-gpu-store-v3.cx -- --write
- *
- * 读 ujs/tests/uxep-tri-oracle.hex(# 注释后十六进制),写出 list(n)+xs[i]=v。
- * --check 与现文件逐字节比,不写盘。
  */
+static const char B64T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static int hx(int c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -19,6 +17,36 @@ static void put_uint(char *d, int *n, unsigned v) {
     while (v) { r[k++] = (char)('0' + (v % 10u)); v /= 10u; }
     while (k) d[(*n)++] = r[--k];
 }
+static int cmp_file(const char *path, const char *buf, int n) {
+    FILE *g;
+    char *old;
+    long oldn, i;
+    g = fopen(path, "rb");
+    if (!g) { fprintf(stderr, "gen-gpu-store-v3: missing %s\n", path); return 1; }
+    if (fseek(g, 0, SEEK_END) != 0) { fclose(g); return 2; }
+    oldn = ftell(g);
+    rewind(g);
+    old = (char *)malloc((size_t)oldn + 1);
+    if (!old || (long)fread(old, 1, (size_t)oldn, g) != oldn) { free(old); fclose(g); return 2; }
+    fclose(g);
+    if (oldn != n) {
+        fprintf(stderr, "gen-gpu-store-v3: CHECK %s len %ld vs %d\n", path, oldn, n);
+        free(old); return 1;
+    }
+    for (i = 0; i < n; i++) if (old[i] != buf[i]) {
+        fprintf(stderr, "gen-gpu-store-v3: CHECK %s at %ld\n", path, i);
+        free(old); return 1;
+    }
+    free(old);
+    return 0;
+}
+static int write_file(const char *path, const char *buf, int n) {
+    FILE *g = fopen(path, "wb");
+    if (!g) return 2;
+    if ((int)fwrite(buf, 1, (size_t)n, g) != n) { fclose(g); return 2; }
+    fclose(g);
+    return 0;
+}
 int main(int argc, char **argv) {
     FILE *f;
     char line[1024];
@@ -26,8 +54,15 @@ int main(int argc, char **argv) {
     int nb = 0, i, want_write = 0, want_check = 0;
     char *gen;
     int glen = 0, gcap;
-    char *old = 0;
-    long oldn = 0;
+    unsigned ofnv = 0;
+    char *b64js, *orjs;
+    int b64n = 0, orn = 0;
+    unsigned char *wasm;
+    long wasmn = 0;
+    char *av[8];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
     for (i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
         if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
@@ -54,6 +89,23 @@ int main(int argc, char **argv) {
     }
     fclose(f);
     if (nb < 8) { fprintf(stderr, "gen-gpu-store-v3: short\n"); return 2; }
+    f = fopen("ujs/tests/uxep-tri-oracle.tsv", "rb");
+    if (!f) { fprintf(stderr, "gen-gpu-store-v3: no tsv\n"); return 2; }
+    while (fgets(line, (int)sizeof line, f)) {
+        char *p;
+        if (line[0] == '#' || line[0] == 'k') continue;
+        p = line;
+        while (*p && *p != '\t') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '\t') p++;
+        while (*p >= '0' && *p <= '9') { ofnv = ofnv * 10u + (unsigned)(*p - '0'); p++; }
+        break;
+    }
+    fclose(f);
+    if (!ofnv) { fprintf(stderr, "gen-gpu-store-v3: no fnv\n"); return 2; }
     gcap = nb * 24 + 128;
     gen = (char *)malloc((size_t)gcap);
     if (!gen) return 2;
@@ -68,13 +120,8 @@ int main(int argc, char **argv) {
         put_uint(gen, &glen, (unsigned)b[i]);
         gen[glen++] = ';'; gen[glen++] = '\n';
     }
-    gen[glen++] = 'p'; gen[glen++] = ' '; gen[glen++] = '='; gen[glen++] = ' ';
     {
-        const char *s = "store_bytes(xs);\n";
-        while (*s) gen[glen++] = *s++;
-    }
-    {
-        const char *s = "host_gpu_submit(p, ";
+        const char *s = "p = store_bytes(xs);\nhost_gpu_submit(p, ";
         while (*s) gen[glen++] = *s++;
     }
     put_uint(gen, &glen, (unsigned)nb);
@@ -85,36 +132,65 @@ int main(int argc, char **argv) {
     }
     put_uint(gen, &glen, (unsigned)nb);
     gen[glen++] = ';'; gen[glen++] = '\n';
-    if (want_check) {
-        FILE *g;
-        g = fopen("ujs/tests/gpu-store-v3-tri.ujs", "rb");
-        if (!g) { free(gen); fprintf(stderr, "gen-gpu-store-v3: no ujs\n"); return 2; }
-        if (fseek(g, 0, SEEK_END) != 0) { fclose(g); free(gen); return 2; }
-        oldn = ftell(g);
-        rewind(g);
-        old = (char *)malloc((size_t)oldn + 1);
-        if (!old || (long)fread(old, 1, (size_t)oldn, g) != oldn) { free(old); free(gen); fclose(g); return 2; }
-        fclose(g);
-        if (oldn != glen) {
-            fprintf(stderr, "gen-gpu-store-v3: CHECK fail len %ld vs %d\n", oldn, glen);
-            free(old); free(gen); return 1;
-        }
-        for (i = 0; i < glen; i++) if (old[i] != gen[i]) {
-            fprintf(stderr, "gen-gpu-store-v3: CHECK fail at %d\n", i);
-            free(old); free(gen); return 1;
-        }
-        free(old);
-        printf("GEN_GPU_V3_OK\tbytes=%d\n", glen);
-        free(gen);
-        return 0;
-    }
+    orjs = (char *)malloc(64);
+    if (!orjs) { free(gen); return 2; }
     {
-        FILE *g = fopen("ujs/tests/gpu-store-v3-tri.ujs", "wb");
-        if (!g) { free(gen); return 2; }
-        if ((int)fwrite(gen, 1, (size_t)glen, g) != glen) { fclose(g); free(gen); return 2; }
-        fclose(g);
+        const char *s = "window.GPU_TRI_FNV=";
+        while (*s) orjs[orn++] = *s++;
     }
-    printf("GEN_GPU_V3_WRITE\tbytes=%d\n", glen);
-    free(gen);
+    put_uint(orjs, &orn, ofnv);
+    orjs[orn++] = ';'; orjs[orn++] = '\n';
+    if (want_write) {
+        if (write_file("ujs/tests/gpu-store-v3-tri.ujs", gen, glen) != 0) { free(gen); free(orjs); return 2; }
+    } else if (cmp_file("ujs/tests/gpu-store-v3-tri.ujs", gen, glen) != 0) { free(gen); free(orjs); return 1; }
+    av[0] = "sh"; av[1] = "./ujs/ujs.com";
+    av[2] = "ujs/tests/gpu-store-v3-tri.ujs";
+    av[3] = "-o"; av[4] = "/tmp/gpu-tri-gen.wasm"; av[5] = 0;
+    rc = cx_runv_timeout(av, 30, &out, &on);
+    if (out) free(out);
+    if (rc != 0) { fprintf(stderr, "gen-gpu-store-v3: compile rc %d\n", rc); free(gen); free(orjs); return 1; }
+    f = fopen("/tmp/gpu-tri-gen.wasm", "rb");
+    if (!f) { free(gen); free(orjs); return 2; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); free(gen); free(orjs); return 2; }
+    wasmn = ftell(f);
+    rewind(f);
+    wasm = (unsigned char *)malloc((size_t)wasmn);
+    if (!wasm || (long)fread(wasm, 1, (size_t)wasmn, f) != wasmn) { free(wasm); fclose(f); free(gen); free(orjs); return 2; }
+    fclose(f);
+    {
+        int groups = (int)((wasmn + 2) / 3);
+        int cap = 24 + groups * 4 + 4;
+        int wi = 0;
+        b64js = (char *)malloc((size_t)cap);
+        if (!b64js) { free(wasm); free(gen); free(orjs); return 2; }
+        {
+            const char *s = "window.GPU_TRI_WASM=\"";
+            while (*s) b64js[b64n++] = *s++;
+        }
+        while (wi < wasmn) {
+            int nleft = (int)wasmn - wi;
+            unsigned a = wasm[wi];
+            unsigned bb = nleft > 1 ? wasm[wi + 1] : 0;
+            unsigned c = nleft > 2 ? wasm[wi + 2] : 0;
+            unsigned t = (a << 16) | (bb << 8) | c;
+            b64js[b64n++] = B64T[(t >> 18) & 63];
+            b64js[b64n++] = B64T[(t >> 12) & 63];
+            b64js[b64n++] = nleft > 1 ? B64T[(t >> 6) & 63] : '=';
+            b64js[b64n++] = nleft > 2 ? B64T[t & 63] : '=';
+            wi += 3;
+        }
+        b64js[b64n++] = '"'; b64js[b64n++] = ';'; b64js[b64n++] = '\n';
+    }
+    free(wasm);
+    if (want_write) {
+        if (write_file("ujs/practice/uxe/demo/gpu-tri/tri-b64.js", b64js, b64n) != 0) { free(b64js); free(gen); free(orjs); return 2; }
+        if (write_file("ujs/practice/uxe/demo/gpu-tri/tri-oracle.js", orjs, orn) != 0) { free(b64js); free(gen); free(orjs); return 2; }
+        printf("GEN_GPU_V3_WRITE\tujs=%d\tb64=%d\n", glen, b64n);
+    } else {
+        if (cmp_file("ujs/practice/uxe/demo/gpu-tri/tri-b64.js", b64js, b64n) != 0) { free(b64js); free(gen); free(orjs); return 1; }
+        if (cmp_file("ujs/practice/uxe/demo/gpu-tri/tri-oracle.js", orjs, orn) != 0) { free(b64js); free(gen); free(orjs); return 1; }
+        printf("GEN_GPU_V3_OK\tujs=%d\tb64=%d\n", glen, b64n);
+    }
+    free(b64js); free(gen); free(orjs);
     return 0;
 }

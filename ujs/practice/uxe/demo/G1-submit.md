@@ -26,14 +26,19 @@ prd 0.3b G1 / W3 同条。
 
 (6) 下一刀验收(未做):最小 `.ujs` 组 1 三角 UXEP 字节 list,`store_bytes`+`host_gpu_submit`;宿主 no-op 记 len 与校验和;`.cx` 与 AUTO 同期望。未实现前不得记 G1 完成。
 
+## gpu-tri 真 GPU 验收口径
+
+页 `practice/uxe/demo/gpu-tri/index.html`(+`tri-b64.js`)只跑 `gpu-store-v3-tri` 同一 212B 包:host1Boot 在 import 内拷 `[ptr,n)` 交 `host-browser.js` `host_gpu_submit`。AUTO 两层:`__UXE__.gpu_fnv===3620361384`;重心 readPixels 非清屏、角外为清屏。无浏览器标 UNMEASURED。不碰 fly。不得记 G1 完成。
+
 ## 仍未做
 
-(1) `store_bytes` 与三角夹具(本设计之后才动 compiler_min)。
-(2) 页 `host1Boot` 接真 GPU(现仅 no-op,`505f749f09`)。
+(1) gpu-tri 页与像素 AUTO。
+(2) 完整 G1 真 GPU 验收批次。
 
 ## 状态
 
-条件 import 已合入。声明+调用已落地。host1 与 host1Boot 均提供 `env.host_gpu_submit` no-op。fly 金 3868;`gpu-submit-call` i64=1。无写包原语,submit 只能空包。不得记 G1 完成。
+store_bytes、FNV oracle、hex 生成器已绿。host1Boot 仍须接 renderer。不得记 G1 完成。
+
 
 
 

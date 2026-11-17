@@ -118,8 +118,12 @@
       env: {
         host_gpu_submit: function (ptr, len) {
           var m = memHold.m;
+          var src, copy;
           if (!m || !len) return;
-          void new Uint8Array(m.buffer, ptr >>> 0, len >>> 0);
+          src = new Uint8Array(m.buffer, ptr >>> 0, len >>> 0);
+          copy = new Uint8Array(len);
+          copy.set(src);
+          if (typeof g.onHostGpuSubmit === "function") g.onHostGpuSubmit(copy.buffer);
         }
       }
     });
