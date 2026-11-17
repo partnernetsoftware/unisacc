@@ -63,6 +63,8 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+- agentwork 已整体退役到 archive/agentwork-retire-2026-11/:协同决定只进本记忆宫殿,不追加过程账本;ledger-add 默认拒绝,仅显式 --ledger 可维护独立数据。旧 schema 别名只供历史审计,目录缺失合法而负控仍拒绝缺证据。回滚由前向提交恢复原路径,六文件归档保持原字节。
+
 - 版本号跳过 0.0.64。入口 build/version-seq.tsv。
 - 起整链的环境只设 UNISACC_IDENT_HELPER,不设 UNISACC_RUN_CACHE 与 UNISACC_CACHE_DIR。
 - 版本分支:main 只做集成与发布,一分支一类大改。全文 AGENTS.md。
