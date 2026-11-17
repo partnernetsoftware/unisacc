@@ -13,6 +13,28 @@ static void ck_ck(int ok, const char *label) {
     if (!ok) ck_failed++;
 }
 
+static int json_val_eq(const char *s, size_t n, const char *want) {
+    size_t i, a, b, m = 0;
+    if (!s || !want) return 0;
+    while (want[m]) m++;
+    for (i = 0; i + 8 < n; i++) {
+        if (s[i]=='"' && s[i+1]=='v' && s[i+2]=='a' && s[i+3]=='l' &&
+            s[i+4]=='u' && s[i+5]=='e' && s[i+6]=='"') {
+            i += 7;
+            while (i < n && s[i] != ':') i++;
+            if (i < n) i++;
+            while (i < n && (s[i]==' ' || s[i]=='\t')) i++;
+            a = i;
+            while (i < n && s[i] != ',' && s[i] != '}' && s[i] != ' ' && s[i] != '\n') i++;
+            b = i;
+            if (b - a != m) return 0;
+            for (i = 0; i < m; i++) if (s[a + i] != want[i]) return 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int json_value(const char *s, size_t n) {
     size_t i;
     int v, neg;
@@ -27,23 +49,12 @@ static int json_value(const char *s, size_t n) {
             if (i < n && s[i]=='-') { neg = 1; i++; }
             v = 0;
             while (i < n && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+            if (i < n && s[i] != ',' && s[i] != '}' && s[i] != ' ' && s[i] != '\n' && s[i] != 0)
+                return -999;
             return neg ? -v : v;
         }
     }
     return -999;
-}
-
-static int json_has(const char *s, size_t n, const char *need) {
-    size_t i, m = 0;
-    if (!s || !need) return 0;
-    while (need[m]) m++;
-    if (m == 0 || n < m) return 0;
-    for (i = 0; i + m <= n; i++) {
-        size_t k = 0;
-        while (k < m && s[i + k] == need[k]) k++;
-        if (k == m) return 1;
-    }
-    return 0;
 }
 
 static int title_is(const char *s, size_t n, const char *want) {
@@ -162,6 +173,12 @@ int main(int argc, char **argv) {
     char *out = 0;
     size_t on = 0;
     int rc, v;
+    ck_ck(json_val_eq("{\"value\":4}", 11, "4"), "tok-4");
+    ck_ck(!json_val_eq("{\"value\":4.5}", 13, "4"), "tok-not-4.5");
+    ck_ck(!json_val_eq("{\"value\":40}", 12, "4"), "tok-not-40");
+    ck_ck(json_val_eq("{\"value\":0.5}", 13, "0.5"), "tok-0.5");
+    ck_ck(!json_val_eq("{\"value\":10.5}", 14, "0.5"), "tok-not-10.5");
+    ck_ck(!json_val_eq("{\"value\":0.55}", 14, "0.5"), "tok-not-0.55");
     char cwd[512];
     char url[640];
     const char *pre = "file://";
@@ -193,7 +210,7 @@ int main(int argc, char **argv) {
         av[5] = "/tmp/g4-let-f64-red.wasm"; av[6] = "8"; av[7] = 0;
         frc = cx_runv_timeout(av, 20, &out, &on);
         if (out && on) fwrite(out, 1, on, stdout);
-        ck_ck(frc == 0 && out && json_has(out, on, "\"tag\":\"f64\"") && json_has(out, on, "0.5"), "f64-red-8-is-0.5");
+        ck_ck(frc == 0 && out && json_val_eq(out, on, "0.5"), "f64-red-8-is-0.5");
         if (out) free(out);
         out = 0; on = 0;
         rc = compile_ujs("ujs/tests/g4-let-f64.ujs", "/tmp/g4-let-f64.wasm");
@@ -201,9 +218,46 @@ int main(int argc, char **argv) {
         av[5] = "/tmp/g4-let-f64.wasm";
         frc = cx_runv_timeout(av, 20, &out, &on);
         if (out && on) fwrite(out, 1, on, stdout);
-        ck_ck(frc == 0 && out && json_has(out, on, "\"tag\":\"f64\"") && json_has(out, on, "\"value\":4"), "f64-persist-8-is-4");
+        ck_ck(frc == 0 && out && json_val_eq(out, on, "4"), "f64-persist-8-is-4");
         if (out) free(out);
     }
+    rc = compile_ujs("ujs/tests/g4-let-2slot-red.ujs", "/tmp/g4-let-2slot-red.wasm");
+    ck_ck(rc == 0, "compile-2slot-red");
+    v = frame_last("/tmp/g4-let-2slot-red.wasm", 8);
+    ck_ck(v == 1001, "2slot-red-8-is-1001");
+    rc = compile_ujs("ujs/tests/g4-let-2slot.ujs", "/tmp/g4-let-2slot.wasm");
+    ck_ck(rc == 0, "compile-2slot");
+    v = frame_last("/tmp/g4-let-2slot.wasm", 8);
+    ck_ck(v == 8008, "2slot-persist-8-is-8008");
+    rc = compile_ujs("ujs/tests/g4-let-mix-red.ujs", "/tmp/g4-let-mix-red.wasm");
+    ck_ck(rc == 0, "compile-mix-red");
+    {
+        char *av[8];
+        char *out2 = 0;
+        size_t on2 = 0;
+        int frc;
+        av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "ujs/product/frame-run.cx";
+        av[3] = "ujs/product/host1_vm.cx"; av[4] = "--";
+        av[5] = "/tmp/g4-let-mix-red.wasm"; av[6] = "8"; av[7] = 0;
+        frc = cx_runv_timeout(av, 20, &out2, &on2);
+        if (out2 && on2) fwrite(out2, 1, on2, stdout);
+        ck_ck(frc == 0 && out2 && json_val_eq(out2, on2, "0.5"), "mix-red-8-is-0.5");
+        if (out2) free(out2);
+        out2 = 0; on2 = 0;
+        rc = compile_ujs("ujs/tests/g4-let-mix.ujs", "/tmp/g4-let-mix.wasm");
+        ck_ck(rc == 0, "compile-mix");
+        av[5] = "/tmp/g4-let-mix.wasm";
+        frc = cx_runv_timeout(av, 20, &out2, &on2);
+        if (out2 && on2) fwrite(out2, 1, on2, stdout);
+        ck_ck(frc == 0 && out2 && json_val_eq(out2, on2, "4"), "mix-persist-8-is-4");
+        if (out2) free(out2);
+    }
+    rc = compile_ujs("ujs/tests/g4-let-slot63.ujs", "/tmp/g4-let-slot63.wasm");
+    ck_ck(rc == 0, "compile-slot63");
+    v = frame_last("/tmp/g4-let-slot63.wasm", 8);
+    ck_ck(v == 8, "slot63-persist-8-is-8");
+    rc = compile_ujs("ujs/tests/g4-let-65.ujs", "/tmp/g4-let-65.wasm");
+    ck_ck(rc != 0, "compile-65-refused");
     if (ck_failed) {
         printf("UJS_G4_YAW_FAIL\tasserts=%d\tfailed=%d\n", ck_asserts, ck_failed);
         return 1;
