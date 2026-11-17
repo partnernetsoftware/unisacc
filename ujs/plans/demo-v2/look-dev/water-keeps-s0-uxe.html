@@ -4,46 +4,68 @@
 </head>
 <canvas id="c" width="1280" height="720"></canvas>
 <pre id="hud"></pre>
-
 <script type="module">
 import { createWebGLRenderer } from "../../../practice/uxe/renderer-webgl.js";
+
 import { Scene, PerspectiveCamera } from "../../../practice/uxe/scene.js";
 import { applyTestScene } from "../../../practice/uxe/test/test-init.js";
 import { MESH_POINTS } from "../../../practice/uxe/meshes.js";
+import { createBrowserHost } from "../../../practice/uxe/host-browser.js";
 
-function layer(scene,name,x,y,w,h,rgb,a){
-  const c=scene.instances(name,1,rgb);
+function layer(scene,name,x,y,w,h,mapId,layerN,alpha){
+  const c=scene.instances(name,1,[1,1,1]);
   c.meshId=MESH_POINTS;
   c.count=1;
   c.screenSpace=1;
   c.flags=8;
+  c.layer=layerN;
+  c.mapId=mapId;
   c.xyz=new Float32Array([x+w/2,y+h/2,0]);
-  c.scale=new Float32Array([Math.max(w,h)]);
-  if(a) c.alphaMode=1;
+  c.scale=new Float32Array([w]);
+  c.scaleY=new Float32Array([h]);
+  if(alpha) c.alphaMode=1;
   return c;
+}
+async function pngRgba(path){
+  const im=new Image();
+  im.src=new URL(path, import.meta.url).href;
+  await new Promise((res,rej)=>{ im.onload=res; im.onerror=()=>rej(new Error(path)); });
+  const c=document.createElement("canvas");
+  c.width=im.naturalWidth; c.height=im.naturalHeight;
+  const g=c.getContext("2d");
+  g.drawImage(im,0,0);
+  return {w:im.naturalWidth,h:im.naturalHeight,rgba:g.getImageData(0,0,im.naturalWidth,im.naturalHeight).data};
 }
 
 (async()=>{
   const canvas=document.getElementById("c");
   const r=createWebGLRenderer(canvas,{antialias:false});
+  const host=await createBrowserHost(canvas,{prefer:"webgl",baseURL:new URL(".", import.meta.url)});
   const scene=new Scene();
-  applyTestScene(scene,[0.68,0.65,0.47,1]);
+  applyTestScene(scene,[0.12,0.08,0.05,1]);
   scene.fog.density=0;
-  layer(scene,"sky",0,0,1280,288,[0.68,0.65,0.47]);
-  layer(scene,"cloud",80,40,1120,180,[0.95,0.88,0.66]);
-  layer(scene,"shore",0,250,1280,80,[0.36,0.23,0.11]);
-  layer(scene,"bridge",40,240,768,70,[0.23,0.14,0.08]);
-  layer(scene,"water",0,288,1280,432,[0.64,0.45,0.25]);
-  layer(scene,"lily",120,360,900,220,[0.16,0.29,0.09]);
-  layer(scene,"reed",960,200,320,480,[0.10,0.19,0.06]);
-  layer(scene,"bow",80,396,520,252,[0.16,0.09,0.06]);
-  layer(scene,"bowlamp",280,430,48,48,[1,0.91,0.63],1);
-  layer(scene,"lotus",400,340,32,32,[1,0.91,0.63],1);
-  layer(scene,"spark",200,500,16,16,[1,0.82,0.5],1);
-  layer(scene,"refl",80,620,520,80,[0.16,0.09,0.06]);
-  scene.text("WATER KEEPS",24,24,4,[0.10,0.06,0.03]);
+  const skyP=await pngRgba("sky-gold.png");
+  const watP=await pngRgba("water-gold.png");
+  const shP=await pngRgba("far-shore.png");
+  const brP=await pngRgba("far-bridge.png");
+
+  layer(scene,"sky",0,0,1280,288,1,0,0);
+  layer(scene,"water",0,288,1280,432,2,1,0);
+  layer(scene,"shore",0,250,1280,80,3,2,1);
+  layer(scene,"bridge",40,240,768,70,4,3,1);
+
+
+
+
+  const texs=[
+    {id:1,w:skyP.w,h:skyP.h,rgba:skyP.rgba},
+    {id:2,w:watP.w,h:watP.h,rgba:watP.rgba},
+    {id:3,w:shP.w,h:shP.h,rgba:shP.rgba},
+    {id:4,w:brP.w,h:brP.h,rgba:brP.rgba}
+  ];
   const cam=new PerspectiveCamera(1,0.05,40);
-  r.render(scene,cam,[]);
+  r.render(scene,cam,texs);
+
   const gl=canvas.getContext("webgl");
   function mean(x,y,w,h){
     let r=0,gv=0,b=0,n=w*h,p=new Uint8Array(4);
@@ -58,16 +80,19 @@ function layer(scene,name,x,y,w,h,rgb,a){
     ["sky",40,40,32,32,40,320,32,32],
     ["cloud",200,100,32,32,200,20,32,32],
     ["shore",40,255,32,32,40,200,32,32],
-    ["bridge",120,250,32,16,120,200,32,16],
+    ["bridge",80,260,16,8,80,400,16,8],
+
+
     ["water",640,500,32,32,640,40,32,32],
     ["lily",180,400,32,16,180,330,32,16],
     ["reed",1100,280,32,32,800,280,32,32],
-    ["bow",200,560,32,32,800,560,32,32],
+    ["bow",900,600,32,32,950,600,32,32],
     ["bowlamp",300,392,16,16,200,392,16,16],
     ["lotus",416,356,16,16,200,356,16,16],
-    ["spark",640,520,8,8,640,40,8,8],
+    ["spark",900,500,8,8,940,500,8,8],
     ["title",24,24,80,24,24,120,80,24],
-    ["refl",200,680,32,16,200,400,32,16]
+    ["refl",900,680,32,16,950,680,32,16]
+
   ];
   const out={};
   els.forEach(e=>{ out[e[0]]=dist(mean(e[1],e[2],e[3],e[4]), mean(e[5],e[6],e[7],e[8])); });
