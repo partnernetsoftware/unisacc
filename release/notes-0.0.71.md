@@ -1,5 +1,7 @@
 # unisacc 0.0.71 发布说明
 
+状态:已公开发布并置 Latest(2026-11-17);公开读回(全新目录下载六资产、SHA256SUMS 五项、版本与最小编译运行)通过。整体裁决仍为 NOT_QUALIFIED:全套 s9 未过(见下文),不得称全批资格。
+
 同候选原生 CI 通过:run 44072623262 attempt 1,检出 5493e53e4cb667931f4f20b05e650ab852f40229,CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0。Windows 两格(win/x86_64、win/arm64)的 stdio-crossunit 与 stream-pipe 为 portable 子集通过,POSIX 部分(缺 fork、waitpid、kill、F_SETFD、environ)未运行,属平台既有范围。全套 s9 仍为 NOT_QUALIFIED。首轮 CI run 44071695047 attempt 1 失败,主调度已核原始日志定因为 Windows 流管道夹具的参考调用漏带 -O0,与 O0 管道比较时误用了默认 O1。夹具已由5493e53e4cb667931f4f20b05e650ab852f40229修复,断言与覆盖不变;同候选重新调度 run 44072623262 attempt 1,资格已核定通过(见上)。公开读回在公开后进行。P2 指定验收已完成,旧全套仍为 NOT_QUALIFIED;局部通过、草稿资产回读与完整发布资格分别记载。
 
 ## 真实身份
