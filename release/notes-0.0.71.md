@@ -1,41 +1,55 @@
-# unisacc 0.0.71 发布说明草案
+# unisacc 0.0.71 发布说明
 
-冻结输入为0571f88105e5da96335ae4a7add1d9e605d40d7c。正规构造499/499相位、pack与pack-recheck通过,退出0;promote检查由主调度实跑通过。候选SHA256 ca84adc0fb36748a7194f5830791f20f1998ff5e6816eab4db55b4f9d7c7c24a,7228055字节,与旧候选逐字节相同。新来源SID a87d1ea260de48edbddb688de4a39ad2a66e59815d04d33cc5d017cb751a75c4。正式重建配对build记录、核验资产并经release-layout生成本地布局,cx-root-identity实跑13条通过。来源身份与产物字节身份分别核验;同字节不代替来源记录。仍不宣称QUALIFIED。
+当前为草稿发布。首轮 CI run 44071695047 attempt 1 失败,主调度已核原始日志定因为 Windows 流管道夹具的参考调用漏带 -O0,与 O0 管道比较时误用了默认 O1。夹具已由5493e53e4cb667931f4f20b05e650ab852f40229修复,断言与覆盖不变;同候选重新调度 run 44072623262 attempt 1,资格尚未核定。公开读回尚未进行。P2 指定验收已完成,旧全套仍为 NOT_QUALIFIED;局部通过、草稿资产回读与完整发布资格分别记载。
 
-多单元函数指针形参U17已由候选整批13项(含6个跨单元正例)实跑通过。定义先于原型探针修为首单元包含main,仍保留定义/原型顺序;同探针旧0.0.67拒绝,新候选输出X 5。入口位置未被误当类型合同,原失败收据保留。
+## 真实身份
 
-## 改动与旧候选证据
+| 对象 | 身份 |
+|---|---|
+| 构造输入与冻结提交 F | 0571f88105e5da96335ae4a7add1d9e605d40d7c |
+| 来源 SID | a87d1ea260de48edbddb688de4a39ad2a66e59815d04d33cc5d017cb751a75c4 |
+| 候选 APE SHA256 | ca84adc0fb36748a7194f5830791f20f1998ff5e6816eab4db55b4f9d7c7c24a |
+| 候选 APE 字节数 | 7228055 |
+| 配对构造记录 SHA256 | 8c0d3c4f82b714a9e16b9c949ee66afdf58b1383ae605a3e723a39dc1a3bcaea |
+| 候选表资产提交 X | 02d967568c727ea45f973a04f78f7217be222ced |
+| CI run / attempt | 44072623262 / 1 |
+| CI 工作流检出与输入 commit | 5493e53e4cb667931f4f20b05e650ab852f40229 |
+| 发布标签与工作流 | v0.0.71 / candidate-native.yml |
 
-本版包含产品速度改进、性质预算拒绝与充足预算等价探针、pins锚修复、材料夹具输出域修复及拒绝清点规范化。literal改为事实表LOCAL_FOLD_LINES,独立生成网与九个编译产物共15对逐字节相同,check-literal为13,未抬14基线。notcovered保持267条拒绝与33条已测状态,修复完整token去重和枚举顺序漂移,12条检查通过;234条未测仍未测。
+CI 检出提交包含冻结之后的测试、工具与发布记录变更,不替代构造输入 F。发布资产配对记录仍绑定 F 与上述 SID。候选与旧构造的 APE 逐字节相同;来源记录已按 F 正式重建,没有沿用旧来源 SID。
 
-以下仅绑定旧输入2044f903fd25b51d0e526a5de2f7e0dd27e054d9与旧候选SHA256 ca84adc0fb36748a7194f5830791f20f1998ff5e6816eab4db55b4f9d7c7c24a,7228055字节:正规构造499/499,pack、compare、promote检查与smoke通过。无缓存时样例O0/O1最小成功单阶段预算5684701,O2为14297501;充足预算28595002输出SHA与无预算变量相同。O2预算拒绝位于e4,这是单阶段预算边界而非总步数,未量化对旧版回退。
+## 改动与实跑结果
 
-旧全套保留NOT_QUALIFIED:1275个已实现批次,782 PASS、204 FAIL、289 UNKNOWN,另41不适用,missing=0;覆盖1079,satisfied710、unsatisfied348、unresolved12、declared9。与前轮对照40修复、161回退、3新增、1100相同。153项资源症状加5项备料环境共158个ID已独立低载复验取得通过证据;原收据并列保留,不回写全套PASS。原因分类ASSERT50、INNER_TIMEOUT30、OUTER_KILL187、NO_MATERIAL6、UNCLASSIFIED220,其中185批无收据;50项断言失败不能归为负载假失败。
+本版合入性能、编译覆盖与生成码改进。局部帧折叠常量改由事实表 LOCAL_FOLD_LINES 生成,独立生成网与九个编译产物共15对逐字节相同;check-literal 为13,未抬14基线。拒绝清点保持267条、33条已测状态,修复去重与枚举顺序;234条未测仍未测。
+
+正规构造499/499相位完成,pack、pack-recheck、compare 与 promote --check 通过。候选 smoke 16条通过,当前现行15个棘轮全部通过,包含原13项。P2 指定175批逐批实跑全部通过,FAIL、UNMEASURED 与待执行均为0;原失败和复验收据并列保留。七条出口逐项证据在 /tmp/unisacc-session-v71-rc2/exit-criteria-evidence.md。
+
+多单元函数指针形参检查13条通过,含6个跨单元正例。定义先于原型探针保留原顺序并把 main 放到首单元;同探针旧0.0.67拒绝,新候选输出 X 5。性质组 bound 为18/0/0,meta 为28/0/0;meta 使用各目标生成的同目标 tape 往返,六目标 SHA 断言、覆盖与时限不变。precommit-gates-reuse 夹具补齐新增源码所需编译分片后,原5条断言全部通过。夹具的目标上下文已对齐。
+
+无缓存样例的最大单阶段最小成功预算:O0/O1 为5684701,O2 为14297501;充足预算28595002与不带预算变量的产物SHA相同,5M精确拒绝断言保留。这是预算边界实测,不是总步数或对旧版性能回退的量化。
+
+## 验收范围与全套状态
+
+374批直接集合中,S_main 为147批,H_sample 为57批,合计204批;其中29批按主调度裁定豁免,不算通过,其余175批全部实跑通过。另170个harness扇出批记 CARRIED_NOT_PASS:同产物字节的先前实跑证据、相同运行器,不计本轮PASS。完整清单与收据在 /tmp/unisacc-session-v71-rc2/direct-v2-status.tsv 和 p2-results/。
+
+原全套保留 NOT_QUALIFIED:1275个已实现批次,782 PASS、204 FAIL、289 UNKNOWN,另41不适用,missing=0;覆盖1079,satisfied710、unsatisfied348、unresolved12、declared9。正式新旧对照为40修复、161回退、3新增、1100相同。153项资源症状加5项备料环境共158个ID已独立低载复验取得通过证据,逐项对照无漏项;原聚合与原收据不覆写。原原因分类为 ASSERT50、INNER_TIMEOUT30、OUTER_KILL187、NO_MATERIAL6、UNCLASSIFIED220,其中185批无收据;断言失败不归为负载假失败。
 
 ## 已知缺口与未验证范围
 
-(1) core-compat:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换;不扩大批准域,豁免不算通过。状态U20。
+(1) core-compat:参考执行器新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换。不扩大批准域,保留失败;状态U20。
 
-(2) tlib-frozen:两轮旧聚合均FAIL,cc核过HEAD同样失败,作为既有失败豁免,不算通过。独立定位留下一版。状态U24。
+(2) tlib-frozen:两轮旧聚合均FAIL,HEAD同样复现,既有失败留待独立定位,不算通过;状态U24。
 
-(3) interfaces-lnx-x86_64:两轮均FAIL,低载复现;setreg rdx imm0 role=arg2仅出现一次的旧断言假设被新生成边破坏,另有旧reject文案变化。保留原断言与失败,下一版迁移oracle并独立核验;豁免不算通过。状态U25。
+(3) interfaces-lnx-x86_64:既有接口oracle的寄存器次数假设与reject文案需要迁移并独立核验,保留断言和失败;状态U25。
 
-(4) stages:五项字节差异尚未完成独立金样核验,原断言与失败保留,下一版补独立oracle;豁免不算通过。状态U23。
+(4) stages:五项字节差异尚未完成独立金样核验,保留原断言和失败;状态U23。
 
-(5) 材料族无生产者:旧材料准备中45个批次有明确REFUSED=no-producer收据,未备材料不算功能通过;按正式材料生产者补齐后复验。状态U22。
+(5) 材料与平台:118材料族只有47项登记,无生产者材料与外部主机证据未补齐;旧准备中45个批次有明确no-producer拒绝收据。full-domain及同候选跨平台资格缺外部主机完整实跑证据,不算通过;状态U22。
 
-(6) full-domain及同候选跨平台资格缺外部主机实跑证据;豁免不算通过。状态U22。
+(6) 全套入口的分片聚合修复已入冻结输入,新候选端到端验收仍未完成;状态U21。其余18项未验证事项以 build/state-unverified.tsv 为准,没有因局部通过清零。
 
-入口衔接已由423c274c42修复并进入冻结输入,新候选tests/run.cx --all分片端到端验收仍待实跑,状态U21。其余未验证事项以build/state-unverified.tsv为准,不宣称既有未验证项清零。
+## 发布证据与撤回
 
-性质测试夹具修复后已在候选布局整批复验:bound18/0/0、meta28/0/0。meta原先混用宿主tape与各目标C镜像,现每个目标生成同目标tape再往返,六目标SHA断言、覆盖与时限不变。precommit-gates-reuse补齐临时仓新增源码需要的编译分片,原5条断言全过。旧失败收据并列保留,不把夹具失配登记为产品缺口。
+正规链与验收证据:/tmp/unisacc-session-v71-rc2。发布 pack 与 dry-run 重放:/tmp/unisacc-rel71-rehearsal。草稿六资产下载回读:/tmp/unisacc-rel71-dl,全部候选摘要已核对并与重放产物逐字节相同。草稿下载回读不是公开后的读回。临时路径是本机证据入口,不冒充公开可下载附件。
 
-## 证据与撤回
-
-新链证据:/tmp/unisacc-session-v71-rc2。旧链与对照:/tmp/unisacc-session-v71-full,旧全套:/tmp/unisacc-session-v71-tests/retest-54142681d2。直接集合清单与身份在新链目录direct-v2-plan.tsv和p1-summary.txt,P2指定175项已全部执行,当前175 PASS、0 FAIL、0 UNMEASURED、0 pending;原失败与复验收据并列保留。properties-cases-meta同目标往返整批28通过/0失败/0未运行,precommit-gates-reuse修复夹具编译分片登记后整批通过;U26已据此清零。临时路径不是公开可复现附件,正式发布应另附可取证材料。本窗口未建tag、未公开发布、未替换共享产品;集成者对外发布前另记资产撤回与旧版恢复办法。
-
-## 直接集合验收口径
-
-按主调度P2裁定:冻结输入0571f88105的374批直接集合中,tests/run-batch.cx扇出152批、tools/cxlib/chainargv.cx扇出79批,去重并集227批。S_main为不属于并集的147批;H_sample为并集按批次ID逐字节字典序排列后,从第1个起每4个取1个,共57批。合计204批必须在新候选上逐批验收或明确登记既定豁免;计划中29项为既定豁免,175项全部实跑,175通过、0失败;29项豁免仍不算通过。
-
-剩余170个harness扇出批次记CARRIED_NOT_PASS,保留旧候选收据,不记新候选PASS。沿用依据是这两个harness的改动在第二轮全套前已存在,同一运行器已实际跑过相关批次;新候选产品输入相对旧ca84仅多事实表调整,15对生成物与九个编译产物对拍逐字节相同。网等价证据不冒充这170批在新候选上的执行结果。完整成员、分组、状态与豁免见/tmp/unisacc-session-v71-rc2/direct-v2-run.tsv及direct-v2-status.tsv;本段仍是验收口径,不是完成声明。
+八步证据与机器裁决分别在 release/evidence.tsv、release/decision.txt。新 CI run 44072623262 attempt 1 尚未核定通过,第7步保持 UNKNOWN;全套s9第4步与公开读回第8步亦为 UNKNOWN。撤回方案在 release/rollback.txt,回退 Latest 的目标已核为 v0.0.67。Y1/Y2与公开读回回执由后续实际提交及执行补填。
