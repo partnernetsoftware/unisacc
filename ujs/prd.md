@@ -103,7 +103,7 @@
 | G2 | 容量 | `:465` MAXC=16384 MAXL=128 MAXG=64 MAXN=32 MAXFN=8 MAXSDATA=8192。D1-D5 `.ujs` 无 `function`,未触 MAXFN | 先表再改常量;跟 G1 |
 | G3 | 数学 | 同文件无 sqrt/sin/cos;`:991` `f64 mod` 拒绝。旋转在页 JS | 定:核 f64 内建或合同写明归 Host |
 | G4 | 步进 | `run_step_body` 调 main(func 1);顶层 let 每帧清。v0.0.8 文字未兑现 | 持久 globals/state 段,独立于 0.0.9 ujsmeta |
-| G5 | 产物 | `build-ape` 五切片已实跑;批次 `ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore | 检查已绑;win/arm64 另槽 |
+| G5 | 产物 | 五切片 APE+`ujs-ape-slices`;无 win/arm64;`ujs.com` gitignore。`--smoke` 调 `build.cx` 会把 APE 盖成本机 ELF,须再 `build-ape.cx` | 检查已绑;smoke 与 APE 互斥未解 |
 | G6 | 文档 | W1-W5 仍在 `plans/demo-three-ports.md`;本表收 UXE;ujs.com 生产力另见 0.0.x | 本表为真源入口 |
 
 (6) 未决:D5 观感数字;G3 归核还是归 Host。记账:`practice/uxe/demo/G1-submit.md` `G3-math.md` `G4-step.md`。
