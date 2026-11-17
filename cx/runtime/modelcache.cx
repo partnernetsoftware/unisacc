@@ -413,6 +413,14 @@ static void mc_sweep_tmp(const char *dir) {
     mm_free(names);
 }
 
+/* 1 when the basename of TMP is a reserved unit-cache temp, uc-<64 hex>.tmp (71 bytes). */
+static int mc_is_uc_tmp(const char *tmp) {
+    long i, base = 0, n = tx_len(tmp, 4400);
+    for (i = 0; i < n; i++) if (tmp[i] == '/') base = i + 1;
+    tmp += base;
+    return n - base == 71 && tmp[0] == 'u' && tmp[1] == 'c' && tmp[2] == '-' && tx_eqz(tmp + 67, ".tmp");
+}
+
 /* Consume LOCKFD, publishing exactly the caller's already complete temp file.
    Trimming cannot change publication success or the enclosing program result. */
 int mc_cache_publish(const char *dir, const char *tmp, const char *path, int lockfd) {
@@ -433,7 +441,13 @@ int mc_cache_publish(const char *dir, const char *tmp, const char *path, int loc
             if (acct < old) acct = 0; else acct -= old;
             if (acct <= 18446744073709551615ull - (unsigned long long)nst.size) {
                 acct += (unsigned long long)nst.size;
-                if (acct <= limit) { mc_acct_write(dir, acct); mc_sweep_tmp(dir); ok = 2; }
+                if (acct <= limit) {
+                    mc_acct_write(dir, acct);
+                    /* Only a unit-cache publish (uc-<key>.tmp, the unitcache.cx contract) sweeps
+                       crashed uc temps here; a model-cache publish keeps the no-scan fast path. */
+                    if (mc_is_uc_tmp(tmp)) mc_sweep_tmp(dir);
+                    ok = 2;
+                }
             }
         }
         if (ok != 2) {
