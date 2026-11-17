@@ -20,7 +20,7 @@ flowchart LR
     V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
-    V71["0.0.71 候选已构造,未发布<br/>/tmp/unisacc-session-v71-full"]
+    V71["0.0.71 产品输入已更新,待冻结起链<br/>/tmp/unisacc-session-v71-full"]
     V72["0.0.72 netraw"]
     ECO["0.0.73 至 0.0.76 生态门路线(建议)<br/>G0 推算 0.0.76<br/>prd_cx.md 0.9"]
     PERF["0.0.77 执行器吞吐、0.0.78 链接单元二期<br/>prd.md 候选池 性能新方向"]
@@ -33,7 +33,7 @@ flowchart LR
   subgraph 质量门
     GATE["棘轮 13、derive 9、chain-ready 9 项<br/>tools/ratchets.cx、tools/derive.cx、tools/chain-ready.cx"]
     TEST["测试入口 tests/run.cx<br/>tests/batches.tsv、tests/coverage.tsv"]
-    UV["仍未验证 12 条<br/>build/state-unverified.tsv"]
+    UV["仍未验证 17 条<br/>build/state-unverified.tsv"]
   end
   subgraph 设计与规划
     PRD["结构与路线、候选池(加速 A 至 P)<br/>prd.md"]
@@ -55,7 +55,7 @@ flowchart LR
   SPEC --> CX
   SPEED --> V68
   ORCH --> WT --> V68
-  T71["全套测试未通过;独立流与RI材料已补,其余失败待修<br/>/tmp/unisacc-session-v71-tests/full"]
+  T71["旧候选全套NOT_QUALIFIED;直接集合待新候选<br/>/tmp/unisacc-session-v71-full/milestone-note.txt"]
   S71["封存复核已在 v0.0.71 修复,待整轮复验<br/>tools/bg-candidate.cx"]
   V71 --> T71 --> Q
   V71 --> S71 --> Q
@@ -97,5 +97,7 @@ flowchart LR
 - 多单元函数指针形参:跨单元函数指针形参含结构体指针被拒,R3 去强转待补。
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
-
-
+- core-compat参考源转换:参考执行器cacb65b83e新增P4解析与SBLOAD未经独立核验,旧helper仅批准空copy guard转换,不扩大批准域;入口build/state-unverified.tsv U20。
+- 全套入口分片聚合:主线423c274c42的入口与原因分栏已合入,新候选端到端验收未完成;入口build/state-unverified.tsv U21。
+- 全套材料与平台证据:118材料族仅47项登记,无生产者与外部主机证据未补齐,全套NOT_QUALIFIED;入口build/state-unverified.tsv U22。
+- stages独立金样:五项字节差异的独立oracle尚未完成,保留原断言和失败,下一版补齐;入口build/state-unverified.tsv U23。

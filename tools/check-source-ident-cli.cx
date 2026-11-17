@@ -1,50 +1,51 @@
-/* tools/check-source-ident-cli.cx -- S(1) 负控:prepare-context 的 --identity-helper 两例。
- * 由 check-source-ident-helper.cx 的无参两例原样移出(断言名与判据不变),
- * 该文件因 sourcepackage/netpack 冷编译约 35s,s9 并行 wave 下超 55s 看门狗。
- * 模式: relative-path | missing-path;无参两例都跑。每个模式一个批次。 */
+/* S(1) prepare-context identity-helper refusals. A declared native material
+ * separates tool construction from the original 40-second execution bound.
+ * Modes: relative-path | missing-path; optional second argument is the image.
+ * Each invocation owns its fixture directory and captures child streams. */
 #pragma unisa use sys.fs
-#pragma unisa use sys.proc
-#pragma unisa use sys.io
 #pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
 
 static int failed;
-static void ck(int ok, const char *n) {
-    if (ok) sy_printf("PASS\tcheck-source-ident-helper.%s\n", n);
-    else { failed++; sy_printf("FAIL\tcheck-source-ident-helper.%s\n", n); }
+static void ck(int ok,const char *name){
+    if(!ok)failed++;
+    printf("%s\tcheck-source-ident-helper.%s\n",ok?"PASS":"FAIL",name);
 }
-static int hasfile(const char *p, const char *n) {
-    size_t zn = 0;
-    char *b = cx_read(p, &zn);
-    int ok = b && tx_find(b, (long)zn, n, tx_len(n, 80)) >= 0;
-    free(b);
-    return ok;
+static void check_case(const char *root,const char *product,const char *source,const char *native,const char *work,int relative){
+    char context[4400],missing[4400],why[1200];char *v[16];int k=0;
+    if(cx_fmt(context,sizeof context,"%s/%s",work,relative?"relative-context":"missing-context")||
+       cx_fmt(missing,sizeof missing,"%s/absent-helper",work)){ck(0,"path");return;}
+    if(native)v[k++]=(char *)native;
+    else{v[k++]="sh";v[k++]=(char *)product;v[k++]=(char *)source;v[k++]="--";}
+    v[k++]="prepare-context";v[k++]=(char *)root;v[k++]=(char *)product;
+    v[k++]="/usr/bin/x86_64-linux-gnu-gcc-11";v[k++]=context;
+    v[k++]="--identity-helper";v[k++]=relative?"rel/helper":missing;v[k]=0;
+    np_result r={0};int transport=np_run(v,root,0,40,&r,why,sizeof why);
+    int diagnostic=tx_contains(r.err,r.errn,"identity-helper-absolute-path-required",tx_len("identity-helper-absolute-path-required",120))||
+        (!relative&&tx_contains(r.err,r.errn,"identity-helper-not-executable",tx_len("identity-helper-not-executable",120)));
+    ck(!transport&&!r.residue&&r.rc==2&&diagnostic,relative?"relative-path":"missing-path");
+    if(transport||r.rc!=2||!diagnostic){
+        fprintf(stderr,"source-ident-child transport=%d rc=%d residue=%d reason=%s\n",transport,r.rc,r.residue,transport?why:"unexpected-exit-or-diagnostic");
+        if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    }
+    sy_stat_t st;ck(sy_lstat(context,&st)==-ENOENT,relative?"relative-path-no-context":"missing-path-no-context");
+    np_free(&r);
 }
-int main(int argc, char **argv) {
-    char cwd[400], com[500], tool[500], *o = 0;
-    size_t n = 0;
-    const char *mode = argc == 2 ? argv[1] : "";
-    int want_rel = !*mode || !strcmp(mode, "relative-path"), want_miss = !*mode || !strcmp(mode, "missing-path");
-    if (argc > 2 || (argc == 2 && !want_rel && !want_miss)) { ck(0, "usage"); return 2; }
-    { char *v[] = {"pwd", 0};
-      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
-      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; free(o);
-      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
-    }
-    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/source-package.cx", cwd)) {
-        ck(0, "path"); return 1;
-    }
-    if (want_rel) {
-      char *v[] = {"sh", "-c", "exec sh \"$1\" \"$2\" -- prepare-context \"$3\" /tmp/x /usr/bin/true /tmp/s1-ctx-rel --identity-helper rel/helper > /tmp/s1-ident-rel.out 2>&1", "sh", com, tool, cwd, 0};
-      cx_runv_timeout(v, 40, 0, 0);
-      ck(hasfile("/tmp/s1-ident-rel.out", "identity-helper-absolute-path-required"), "relative-path");
-    }
-    if (want_miss) {
-      char *v[] = {"sh", "-c", "exec sh \"$1\" \"$2\" -- prepare-context \"$3\" \"$1\" /usr/bin/x86_64-linux-gnu-gcc-11 /tmp/s1-ctx-miss --identity-helper /no/such/ident-helper > /tmp/s1-ident-miss.out 2>&1", "sh", com, tool, cwd, 0};
-      cx_runv_timeout(v, 40, 0, 0);
-      ck(hasfile("/tmp/s1-ident-miss.out", "identity-helper-absolute-path-required") || hasfile("/tmp/s1-ident-miss.out", "identity-helper-not-executable"), "missing-path");
-    }
-    sy_printf("CHECK_SOURCE_IDENT_HELPER\tfailed=%d\n", failed);
-    return failed ? 1 : 0;
+int main(int argc,char **argv){
+    const char *mode=argc>=2?argv[1]:"";
+    int relative=!*mode||tx_eqz(mode,"relative-path"),missing=!*mode||tx_eqz(mode,"missing-path");
+    if(argc>3||(!relative&&!missing)){ck(0,"usage");return 2;}
+    char root[4096],product[4400],source[4400],work[4400];
+    const char *native=argc==3?argv[2]:0;
+    if(native){sy_stat_t st;if(native[0]!='/'||sy_lstat(native,&st)||st.kind!='f'||sy_access(native,X_OK)){ck(0,"native-material");return 2;}}
+    if(sy_realpath(".",root,sizeof root)<0||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||
+       cx_fmt(source,sizeof source,"%s/tools/source-package.cx",root)||
+       sy_mkdtemp(sy_tmpdir(),"source-ident-cli-",work,sizeof work)<0){ck(0,"fixture");return 2;}
+    if(relative)check_case(root,product,source,native,work,1);
+    if(missing)check_case(root,product,source,native,work,0);
+    if(!failed&&cx_rmtree(work)){ck(0,"fixture-cleanup");}
+    if(failed)fprintf(stderr,"source-ident-cli retained=%s\n",work);
+    printf("CHECK_SOURCE_IDENT_HELPER\tfailed=%d\n",failed);return failed?1:0;
 }

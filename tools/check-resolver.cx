@@ -22,6 +22,7 @@
 #pragma unisa use text.text
 #pragma unisa use cxlib.resolver
 #pragma unisa use cxlib.productpkg
+#pragma unisa use mem.heap
 
 static int failed;
 static void ck(int ok,const char *name){
@@ -33,9 +34,9 @@ static void ck(int ok,const char *name){
    kernel 行的 sha/size 不 pin:现场用本树 tools/kernel-route.cx 从 exec/c/asm 导出
    基座再取(与 product.kernel-base 同一独立来源),不读被测包自己的值。 */
 static char manifest_text[1024];
-static const char *manifest_tail =
-    "hdr/stdio.h\tresource\t\tb0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046\t73454\n"
-    "predefines/lnx/x86_64\tresource\tx86_64\ta148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2\t57\n";
+static char header_sha[65];
+static char *header_bytes;
+static long header_size;
 
 /* 用 kernel-route 导出 x86_64 基座,写 manifest 的 kernel 行。0 成功。 */
 static int kernel_row(const char *root){
@@ -49,7 +50,15 @@ static int kernel_row(const char *root){
     if(cx_fmt(src,sizeof src,"%s/x86_64.kernel",kdir))return -1;
     { char *kb=cx_read(src,&kn); if(!kb)return -1; cx_sha256_hex(kb,kn,ksh); free(kb); }
     cx_rmtree(kdir);
-    return cx_fmt(manifest_text,sizeof manifest_text,"kernel/x86_64\tbase\tx86_64\t%s\t%ld\n%s",ksh,kn,manifest_tail)?-1:0;
+    if(cx_fmt(src,sizeof src,"%s/include/stdio.h",root))return -1;
+    header_bytes=cx_read(src,&header_size);
+    if(!header_bytes||header_size<1||sy_sha256_hex(header_bytes,header_size,header_sha))return -1;
+    /* The expected header comes from source, never the resolver or package metadata. */
+    return cx_fmt(manifest_text,sizeof manifest_text,
+        "kernel/x86_64\tbase\tx86_64\t%s\t%ld\n"
+        "hdr/stdio.h\tresource\t\t%s\t%ld\n"
+        "predefines/lnx/x86_64\tresource\tx86_64\ta148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2\t57\n",
+        ksh,kn,header_sha,header_size)?-1:0;
 }
 
 /* 写 bytes 到 path（含父目录创建）。 */
@@ -189,13 +198,13 @@ int main(int argc,char **argv){
         /* (a) order 连续但不按行序:第 0 行 order=2、第 1 行 order=0、第 2 行 order=1。
                resolve 一个重名成员时,必须先按 order 排序再找,取 order 最小的那条。 */
         const char *shuffled =
-            "hdr/stdio.h\tresource\t\t%s\t73454\t2\n"
+            "hdr/stdio.h\tresource\t\t%s\t%ld\t2\n"
             "kernel/x86_64\tbase\tx86_64\t%s\t7144\t0\n"
             "predefines/lnx/x86_64\tresource\tx86_64\t%s\t57\t1\n";
         char text[1024], why2[512];
         RsvManifest man2; RsvResolver rr2;
         if(cx_fmt(text,sizeof text,shuffled,
-                  "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                  header_sha,header_size,
                   "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
                   "a148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2"))return 2;
         memset(&man2,0,sizeof man2);
@@ -243,12 +252,12 @@ int main(int argc,char **argv){
                因此这里改成断言「解析后 row 顺序保留、order 值正确」,
                并用 rsv_resolve 在同样两条上取到文件(证明不因重名而拒绝)。 */
         {   const char *twice =
-                "hdr/stdio.h\tresource\t\t%s\t73454\t1\n"
-                "hdr/stdio.h\tresource\t\t%s\t73454\t0\n";
+                "hdr/stdio.h\tresource\t\t%s\t%ld\t1\n"
+                "hdr/stdio.h\tresource\t\t%s\t%ld\t0\n";
             char t4[1024]; RsvManifest m5; char w5[512];
             if(cx_fmt(t4,sizeof t4,twice,
-                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e",
-                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e"))return 2;
+                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e",header_size,
+                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e",header_size))return 2;
             memset(&m5,0,sizeof m5);
             { int n5r=rsv_parse_manifest(t4,(long)strlen(t4),&m5,w5,sizeof w5);
               ck(n5r==2,"order-dup-name-parses");
@@ -263,6 +272,19 @@ int main(int argc,char **argv){
               if(b5) free(b5);
               rsv_release(&rr5);
             }
+            rsv_manifest_release(&m5);
+            /* Restore from the independent source and distinguish order from row position. */
+            if(sy_unlink(path)||write_file(path,(unsigned char *)header_bytes,header_size))return 2;
+            if(cx_fmt(t4,sizeof t4,twice,
+                "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e",header_size,
+                header_sha,header_size))return 2;
+            memset(&m5,0,sizeof m5);
+            ck(rsv_parse_manifest(t4,(long)strlen(t4),&m5,w5,sizeof w5)==2,"order-distinct-sha-parses");
+            {RsvResolver rr5;long n5;memset(&rr5,0,sizeof rr5);rr5.manifest=&m5;
+             tx_copy(rr5.home,sizeof rr5.home,ext,tx_len(ext,4095));
+             unsigned char *b5=rsv_resolve(&rr5,"hdr/stdio.h","resource","",&n5,w5,sizeof w5);
+             ck(b5&&n5==header_size&&!memcmp(b5,header_bytes,(size_t)header_size),"order-lower-valid-sha-selected-before-first-row");
+             mm_free(b5);rsv_release(&rr5);}
             rsv_manifest_release(&m5);
         }
         rsv_manifest_release(&man2);
@@ -352,6 +374,7 @@ int main(int argc,char **argv){
 
     rsv_release(&rs);
     rsv_manifest_release(&man);
+    mm_free(header_bytes);
     printf("RESOLVER\tfailed=%d\n",failed);
     return failed?1:0;
 }

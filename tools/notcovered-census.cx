@@ -68,9 +68,13 @@ static int has(const char *h, long hn, const char *s) {
     for (i = 0; i + sn <= hn; i++) if (mm_same(h + i, s, sn)) return 1;
     return 0;
 }
+static int net_seen(int i,const char *net,long n){
+    for(long at=0;at<netsn[i];){long end=at;while(end<netsn[i]&&nets[i][end]!=',')end++;
+        if(end-at==n&&mm_same(nets[i]+at,net,n))return 1;at=end+1;}
+    return 0;
+}
 static void note(const char *m, long n, const char *net, long netn) {
     int i;
-    char nb[900];
     for (i = 0; i < nm; i++) if (msgn[i] == n && mm_same(msg[i], m, n)) break;
     if (i == nm) {
         if (nm >= MAXM) return;
@@ -79,8 +83,7 @@ static void note(const char *m, long n, const char *net, long netn) {
         nm++;
     }
     occ[i]++;
-    mm_copy(nb, sizeof nb, net, netn); nb[netn] = 0;
-    if (!has(nets[i], netsn[i], nb) && netsn[i] + netn + 2 < 4096) {
+    if (!net_seen(i,net,netn) && netsn[i] + netn + 2 < 4096) {
         if (netsn[i]) nets[i][netsn[i]++] = ',';
         mm_copy(nets[i] + netsn[i], 4096 - netsn[i], net, netn); netsn[i] += netn; nets[i][netsn[i]] = 0;
     }
@@ -130,6 +133,20 @@ static int cmp(const char *a, const char *b) {
     long i = 0;
     while (a[i] && a[i] == b[i]) i++;
     return (unsigned char)a[i] - (unsigned char)b[i];
+}
+/* Directory enumeration order is not part of the census contract. */
+static void canonicalize_nets(int i) {
+    long n=netsn[i],count=1,k=0,at=0;
+    if(!n)return;
+    for(long j=0;j<n;j++)if(nets[i][j]==',')count++;
+    char **parts=mm_alloc(count*(long)sizeof *parts),*ordered=mm_alloc(4096);
+    if(!parts||!ordered){fprintf(stderr,"notcovered: cannot canonicalize nets\n");exit(2);}
+    parts[0]=nets[i];
+    for(long j=0;j<n;j++)if(nets[i][j]==','){nets[i][j]=0;parts[++k]=nets[i]+j+1;}
+    for(long j=1;j<count;j++){char*v=parts[j];long h=j;while(h>0&&cmp(parts[h-1],v)>0){parts[h]=parts[h-1];h--;}parts[h]=v;}
+    for(long j=0;j<count;j++){long len=tx_len(parts[j],4096);if(j)ordered[at++]=',';
+        if(len<0||at+len>=4096||mm_copy(ordered+at,4096-at,parts[j],len)){fprintf(stderr,"notcovered: canonical net bound\n");exit(2);}at+=len;}
+    ordered[at]=0;mm_free(parts);mm_free(nets[i]);nets[i]=ordered;netsn[i]=at;
 }
 static const char *class_of(int i) {
     const char *m = msg[i], *s = nets[i];
@@ -220,6 +237,7 @@ int main(int argc, char **argv) {
     }
     walk("exec");
     if (nm == 0) { fprintf(stderr, "notcovered: FAIL: no \"not covered:\" text under %s/exec\n", root); return 2; }
+    for(i=0;i<nm;i++)canonicalize_nets(i);
     for (i = 0; i < nm; i++) ord[i] = i;
     for (i = 1; i < nm; i++) { int v = ord[i]; for (j = i; j > 0 && cmp(msg[ord[j - 1]], msg[v]) > 0; j--) ord[j] = ord[j - 1]; ord[j] = v; }
     ap("message\tclass\tkind\tsites\tnets\tmeasured\trepro\n");

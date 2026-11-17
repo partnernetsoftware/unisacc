@@ -115,8 +115,8 @@ static int file_sha(const char *path, char hex[65], long *bytes) {
     if (bytes) *bytes = (long)n;
     return bad ? -1 : 0;
 }
-/* Same rule as chain-run.cx plan_semantics_hex: comment rows dropped, column 4 (timeout_s) and
-   columns 8.. removed, sha256 of the rest. Must stay identical to that function. */
+/* Same rule as chain-run.cx plan_semantics_hex: normalize the phase rows, then append the
+   fall-through sidecar bytes. The sealed identity binds both inputs. */
 static int plan_semantics_hex(const char *b, size_t n, char hex[65]) {
     char *s = malloc(n + 1);
     size_t i, k = 0;
@@ -131,8 +131,16 @@ static int plan_semantics_hex(const char *b, size_t n, char hex[65]) {
         if (field == 3 || field >= 7) continue;
         s[k++] = c;
     }
-    rc = sy_sha256_hex(s, (long)k, hex);
-    free(s);
+    char path[BG_PATH]; size_t fn = 0;
+    if (cx_fmt(path, sizeof path, "%s/build/chain-phase-fallthrough.tsv", root)) { free(s); return -1; }
+    char *fb = cx_read(path, &fn);
+    if (!fb) { free(s); return -1; }
+    char *all = malloc(k + fn + 1);
+    if (!all) { free(fb); free(s); return -1; }
+    for (size_t j = 0; j < k; j++) all[j] = s[j];
+    for (size_t j = 0; j < fn; j++) all[k + j] = fb[j];
+    rc = sy_sha256_hex(all, (long)(k + fn), hex);
+    free(all); free(fb); free(s);
     return rc ? -1 : 0;
 }
 static void append_row(const char *dir, const char *leaf, const char *row) {

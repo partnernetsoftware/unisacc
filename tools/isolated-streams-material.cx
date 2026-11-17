@@ -1,0 +1,47 @@
+/* Prepare eight self-contained native stream containers from ROOT/unisacc.com.
+ * ROOT NEW_OUT COMPILER: compile the generic runner, copy selected M records/resources
+ * with cxlib.streampack, and seal member hashes as material.tsv. Preparation
+ * never counts as a test. Check: tools/check-isolated-streams-material.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.streampack
+static void die(const char *why){fprintf(stderr,"isolated-streams-material: %s\n",why);sy_exit(2);}
+static void hashfile(const char *path,char hash[65]){
+    sy_stat_t st;unsigned char *b=0;int64_t n;
+    if(sy_lstat(path,&st)||st.kind!='f'||st.size<=0||sy_read_file(path,&b,&n,67108864)||sy_sha256_hex(b,n,hash))die("bounded regular hash input");
+    mm_free(b);
+}
+int main(int argc,char **argv){
+    char root[4096],product[4400],expected[4400],canonical[4400],source[4400],temp[4400],base[4400],why[1200],before[65],after[65],runner_before[65],runner_after[65];
+    if(argc!=4||sy_realpath(argv[1],root,sizeof root)<0||argv[2][0]!='/'||argv[3][0]!='/'||sy_realpath(argv[3],product,sizeof product)<0)die("usage ROOT NEW_ABS_OUT ABS_COMPILER");
+    if(cx_fmt(expected,sizeof expected,"%s/unisacc.com",root)||sy_realpath(expected,canonical,sizeof canonical)<0||!tx_eqz(product,canonical))die("compiler must be the root candidate");
+    sy_stat_t out_stat;int out_rc=sy_lstat(argv[2],&out_stat);
+    if(!out_rc)die("new output required");
+    if(out_rc!=-ENOENT){fprintf(stderr,"isolated-streams-material: output stat rc=%d\n",out_rc);die("output unavailable");}
+    if(cx_fmt(source,sizeof source,"%s/tools/isolated-stream.cx",root)||
+       sy_mkdtemp(sy_tmpdir(),"isolated-stream-prep-",temp,sizeof temp)<0||cx_fmt(base,sizeof base,"%s/runner",temp))die("paths");
+    hashfile(product,before);hashfile(source,runner_before);
+    char *compile[]={"sh",product,source,"-o",base,0};np_result r={0};
+    if(np_run(compile,root,0,35,&r,why,sizeof why))die(why);
+    if(r.rc||r.residue){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("runner construction failed");}np_free(&r);
+    hashfile(source,runner_after);hashfile(product,after);
+    if(!tx_eqz(before,after)||!tx_eqz(runner_before,runner_after))die("construction input changed");
+    char *pack[]={"stream-pack",base,product,argv[2],"lnx/x86_64","O2",0};
+    if(stream_pack(6,pack))die("stream pack refused");
+    np_buf record={0};np_puts(&record,"ISOLATED_STREAMS\t1\nstatus\tPREPARED\ncandidate\t");np_puts(&record,before);np_puts(&record,"\nrunner-source\t");np_puts(&record,runner_before);np_puts(&record,"\n");
+    for(int i=0;i<9;i++){
+        char leaf[64],path[4400],hash[65];
+        if(i<8){if(cx_fmt(leaf,sizeof leaf,"unisacc-stream%d.com",i+1))die("member name");}
+        else if(cx_fmt(leaf,sizeof leaf,"streams.json"))die("receipt name");
+        if(cx_fmt(path,sizeof path,"%s/%s",argv[2],leaf))die("member path");hashfile(path,hash);
+        np_puts(&record,leaf);np_puts(&record,"\t");np_puts(&record,hash);np_puts(&record,"\n");
+    }
+    char receipt[4400];if(cx_fmt(receipt,sizeof receipt,"%s/material.tsv",argv[2])||cx_write(receipt,record.p,record.n))die("material receipt");
+    mm_free(record.p);if(cx_rmtree(temp))die("owned preparation cleanup");
+    printf("PREPARED\tisolated-streams\tcontainers=8\tcandidate=%s\tno-test-result\n",before);return 0;
+}
