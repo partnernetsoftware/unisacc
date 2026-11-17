@@ -26,37 +26,36 @@ function near(a,b,tol){ return Math.abs(a-b)<=tol; }
 (async()=>{
   const canvas=document.getElementById("view");
   const hud=document.getElementById("hud");
-  let gpu_fnv=0, packet_ok=0, pixel="UNMEASURED";
+  let gpu_fnv=0, packet_ok=0, pixel="UNMEASURED", err=null, pkt=null;
+  window.onHostGpuSubmit=function(ab){ pkt=ab; gpu_fnv=fnv1a(ab); };
   try{
-    const host=await createBrowserHost(canvas,{prefer:"webgl"});
-    window.onHostGpuSubmit=function(ab){
-      gpu_fnv=fnv1a(ab);
-      host.host_gpu_submit(ab);
-      host.host_frame_present();
-    };
     const rt=await host1Boot(window.GPU_TRI_WASM);
     rt.goldI64();
-    packet_ok=gpu_fnv===ORACLE_FNV?1:0;
-    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
-    const gl=canvas.getContext("webgl")||canvas.getContext("webgl2");
-    if(gl){
-      const c=new Uint8Array(4), m=new Uint8Array(4);
-      gl.readPixels(2,2,1,1,gl.RGBA,gl.UNSIGNED_BYTE,c);
-      gl.readPixels(128,128,1,1,gl.RGBA,gl.UNSIGNED_BYTE,m);
-      const clear=near(c[0],26,8)&&near(c[1],51,8)&&near(c[2],77,8);
-      const mid=!near(m[0],c[0],4)||!near(m[1],c[1],4)||!near(m[2],c[2],4);
-      pixel=(clear&&mid)?"ok":"fail";
+    packet_ok=(gpu_fnv===ORACLE_FNV)?1:0;
+  }catch(e){ err=String(e&&e.message||e); }
+  try{
+    if(pkt){
+      const host=await createBrowserHost(canvas,{prefer:"webgl"});
+      host.host_gpu_submit(pkt);
+      host.host_frame_present();
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      const gl=canvas.getContext("webgl")||canvas.getContext("webgl2");
+      if(gl){
+        const c=new Uint8Array(4), m=new Uint8Array(4);
+        gl.readPixels(2,2,1,1,gl.RGBA,gl.UNSIGNED_BYTE,c);
+        gl.readPixels(128,128,1,1,gl.RGBA,gl.UNSIGNED_BYTE,m);
+        const clear=near(c[0],26,8)&&near(c[1],51,8)&&near(c[2],77,8);
+        const mid=!near(m[0],c[0],4)||!near(m[1],c[1],4)||!near(m[2],c[2],4);
+        pixel=(clear&&mid)?"ok":"fail";
+      }
     }
-  }catch(e){
-    hud.textContent=String(e&&e.message||e);
-    pixel="UNMEASURED";
-  }
-  window.__UXE__={gpu_fnv,packet_ok,pixel,oracle:ORACLE_FNV,auto:AUTO?1:0};
+  }catch(e){ if(!err) err=String(e&&e.message||e); }
+  window.__UXE__={gpu_fnv,packet_ok,pixel,oracle:ORACLE_FNV,err,auto:AUTO?1:0};
   let title="GPU_TRI_FAIL";
   if(packet_ok&&pixel==="ok") title="GPU_TRI_OK";
-  else if(pixel==="UNMEASURED") title="GPU_TRI_UNMEASURED";
+  else if(packet_ok&&pixel==="UNMEASURED") title="GPU_TRI_UNMEASURED";
   else if(packet_ok) title="GPU_TRI_PKT";
   document.title=title;
-  hud.textContent=title+" fnv="+gpu_fnv+" pixel="+pixel;
+  hud.textContent=title+" fnv="+gpu_fnv+" pixel="+pixel+(err?" "+err:"");
 })();
 </script></body></html>

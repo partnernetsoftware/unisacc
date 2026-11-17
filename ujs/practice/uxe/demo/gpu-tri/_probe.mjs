@@ -8,12 +8,12 @@ import {
 } from "../../_cdp.mjs";
 
 const WALL_MS = 25_000;
-const PORT_HTTP = 8798;
+const PORT_HTTP = 8844;
 const ORIGIN = "http://127.0.0.1:" + PORT_HTTP;
-const URL = ORIGIN + "/uxe/demo/gpu-tri/index.html?auto=1&t=" + Date.now();
-const PORT = 9341;
+const URL = ORIGIN + "/demo/gpu-tri/index.html?auto=1&t=" + Date.now();
+const PORT = 9344;
 const PROFILE = "/tmp/uxe-gpu-tri-" + process.pid;
-const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const deadline = Date.now() + WALL_MS;
 const left = () => {
   const ms = deadline - Date.now();
@@ -37,7 +37,7 @@ try {
   for (let i = 0; i < 40; i++) {
     try {
       await new Promise((res, rej) => {
-        const req = http.get({ hostname: "127.0.0.1", port: PORT_HTTP, path: "/uxe/demo/gpu-tri/index.html", timeout: 400, agent: false }, (r) => {
+        const req = http.get({ hostname: "127.0.0.1", port: PORT_HTTP, path: "/demo/gpu-tri/index.html", timeout: 400, agent: false }, (r) => {
           r.resume();
           if (r.statusCode === 200) res();
           else rej(new Error("http " + r.statusCode));
