@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<title>host1-games</title>
+<style>
+  body { margin: 0; background: #101218; color: #d8dde8; font: 13px/1.4 sans-serif; }
+  #hud { position: absolute; left: 8px; top: 8px; z-index: 2; max-width: 620px; }
+  #row { display: flex; flex-wrap: wrap; padding-top: 72px; }
+  canvas { background: #0b0d12; margin: 4px; }
+</style>
+</head>
+<body>
+<div id="hud">loading host1 wasm...</div>
+<div id="row">
+  <div><canvas id="c2" width="320" height="200"></canvas><div>2D bounce+paddle (host1 wasm)</div></div>
+  <div><canvas id="c3" width="320" height="200"></canvas><div>3D octahedron (raw WebGL, no three.js)</div></div>
+</div>
+<script src="wasm-b64.js"></script>
+<script>
+async function loadWasm(name) {
+  var key = name.replace(".wasm", "");
+  var buf = 0;
+  try {
+    var r = await fetch(name);
+    if (r.ok) buf = await r.arrayBuffer();
+  } catch (e) {}
+  if (!buf && window.HOST1_WASM && HOST1_WASM[key]) {
+    var b64 = HOST1_WASM[key];
+    var bin = atob(b64);
+    var u = new Uint8Array(bin.length);
+    var i;
+    for (i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    buf = u.buffer;
+  }
+  if (!buf) throw new Error("no wasm " + name);
+  var inst = await WebAssembly.instantiate(buf);
+  var e = inst.instance.exports;
+  var h = e.main_export();
+  return { tag: e.tag_of_export(h), value: Number(e.i64_of_export(h)) };
+}
+
+function draw2d(c, x, y, px) {
+  var g = c.getContext("2d");
+  g.fillStyle = "#0b0d12";
+  g.fillRect(0, 0, c.width, c.height);
+  g.strokeStyle = "#2a3344";
+  g.strokeRect(8, 8, 304, 184);
+  g.fillStyle = "#6c8";
+  g.fillRect(16 + (x % 20) * 14, 16 + (y % 12) * 14, 16, 16);
+  g.fillStyle = "#c86";
+  g.fillRect(16 + (px % 18) * 14, 168, 40, 8);
+}
+
+function draw3d(c, x, y, z) {
+  var gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+  if (!gl) return 0;
+  var vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, "attribute vec3 p; uniform vec3 uOff; void main(){ gl_Position=vec4(p*0.35+uOff,1.0); }");
+  gl.compileShader(vs);
+  var fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, "precision mediump float; void main(){ gl_FragColor=vec4(0.35,0.72,0.88,1.0); }");
+  gl.compileShader(fs);
+  var pr = gl.createProgram();
+  gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) return 0;
+  gl.useProgram(pr);
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    0,1,0,  1,0,0,  0,0,1,
+    0,1,0,  0,0,1, -1,0,0,
+    0,1,0, -1,0,0,  0,0,-1,
+    0,1,0,  0,0,-1,  1,0,0,
+    0,-1,0, 0,0,1,  1,0,0,
+    0,-1,0,-1,0,0,  0,0,1,
+    0,-1,0, 0,0,-1,-1,0,0,
+    0,-1,0, 1,0,0,  0,0,-1
+  ]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(pr, "p");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+  var u = gl.getUniformLocation(pr, "uOff");
+  gl.uniform3f(u, (x - 4) * 0.08, (y - 4) * 0.08, 0);
+  gl.clearColor(0.04, 0.05, 0.07, 1);
+  gl.enable(gl.DEPTH_TEST);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLES, 0, 24);
+  return 1;
+}
+
+(async function () {
+  var hud = document.getElementById("hud");
+  try {
+    var b = await loadWasm("bounce2d.wasm");
+    var t = await loadWasm("tick3d.wasm");
+    var p = await loadWasm("paddle2d.wasm");
+    var o = await loadWasm("orbit3d.wasm");
+    var ok = b.value === 201 && t.value === 371 && p.value === 205 && o.value === 173 && b.tag === 2;
+    draw2d(document.getElementById("c2"), b.value % 100, (b.value / 100) | 0, (p.value / 100) | 0);
+    var glOk = draw3d(document.getElementById("c3"), o.value % 8, ((o.value / 8) | 0) % 8, (o.value / 64) | 0);
+    hud.textContent = (ok ? "HOST1_GAMES_OK" : "HOST1_GAMES_FAIL") +
+      " bounce=" + b.value + " tick=" + t.value + " paddle=" + p.value +
+      " orbit=" + o.value + " webgl=" + glOk + " no-three host1-wasm";
+    document.title = ok ? (glOk ? "HOST1_GAMES_OK_GL" : "HOST1_GAMES_OK") : "HOST1_GAMES_FAIL";
+  } catch (e) {
+    hud.textContent = "HOST1_GAMES_FAIL " + e;
+    document.title = "HOST1_GAMES_FAIL";
+  }
+})();
+</script>
+</body>
+</html>

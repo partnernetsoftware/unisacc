@@ -21,11 +21,16 @@
 | [`host1-run-expect.txt`](host1-run-expect.txt) | 跑面金（28；`tag`＋`value`） |
 | [`lex-expect.txt`](lex-expect.txt) | 0.0.7 扫描器夹具（28 段；闸只读） |
 | [`lex-refuse.txt`](lex-refuse.txt) | 扫描器必须非 0 退出的名字 |
+| [`examples/`](examples/) | bounce2d/tick3d/paddle2d/orbit3d,不改 28 冻结 |
 
 ## 验面（0.0.4）／跑面（0.0.5）／日用一条链（0.0.6）／词法切片（0.0.7）
 
 `ujs.com --verify`／`../product/corpus-host.cx`：对 pass 产物做 `\0asm` 节／必导出检查；冒充实文件必须拒绝。  
 `ujs.com --run`／`../product/run-host.cx`：迷你 VM 执行 `main_export`，对船载跑金。
+
+smoke 内联跑四例金值 201/371/205/173。无 three.js 页:`../practice/uxe/demo/host1-games/`(host1 wasm + 裸 WebGL)。
+
+
 
 **船闸不可达**：根 `tests/ujs2wasm/expect.json`、`run_*.mjs`（archive_only／实践脊）。
 
