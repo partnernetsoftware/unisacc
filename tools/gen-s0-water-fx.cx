@@ -1,0 +1,206 @@
+#pragma unisa use chrome_dom
+/* tools/gen-s0-water-fx.cx -- 水面 0.22 桥/灯/船头镜像占位 1280x432.
+ * sh ./unisacc.com tools/gen-s0-water-fx.cx -- --write|--check
+ */
+#define CW 1280
+#define CH 432
+#define OY 288
+static unsigned char cpix[CH][CW][4];
+static unsigned crc_tab[256];
+static double hx[96], hy[96];
+static int hn;
+static void crc_init(void) {
+    unsigned i, j, c;
+    for (i = 0; i < 256; i++) {
+        c = i;
+        for (j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+        crc_tab[i] = c;
+    }
+}
+static unsigned crc32(const unsigned char *p, int n) {
+    unsigned c = 0xffffffffu;
+    int i;
+    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+static unsigned adler(const unsigned char *p, int n) {
+    unsigned a = 1, b = 0;
+    int i;
+    for (i = 0; i < n; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
+    return (b << 16) | a;
+}
+static void be32(unsigned char *o, unsigned v) {
+    o[0] = (unsigned char)(v >> 24); o[1] = (unsigned char)(v >> 16);
+    o[2] = (unsigned char)(v >> 8); o[3] = (unsigned char)v;
+}
+static void qbez(double x0, double y0, double cx, double cy, double x1, double y1) {
+    int i;
+    for (i = 1; i <= 24; i++) {
+        double t = (double)i / 24.0, u = 1.0 - t;
+        hx[hn] = u * u * x0 + 2 * u * t * cx + t * t * x1;
+        hy[hn] = u * u * y0 + 2 * u * t * cy + t * t * y1;
+        hn++;
+    }
+}
+static int pip(double x, double y) {
+    int i, c = 0;
+    double x1, y1, x2, y2;
+    x1 = hx[hn - 1]; y1 = hy[hn - 1];
+    for (i = 0; i < hn; i++) {
+        x2 = hx[i]; y2 = hy[i];
+        if (((y1 > y) != (y2 > y)) && (x < (x2 - x1) * (y - y1) / (y2 - y1 + 0.0) + x1)) c = !c;
+        x1 = x2; y1 = y2;
+    }
+    return c;
+}
+static void puta(int x, int y, int r, int g, int b, int a) {
+    int cr, cg, cb, ca, oa, na;
+    if (x < 0 || x >= CW || y < 0 || y >= CH) return;
+    oa = cpix[y][x][3];
+    if (oa == 0) {
+        cpix[y][x][0] = (unsigned char)r;
+        cpix[y][x][1] = (unsigned char)g;
+        cpix[y][x][2] = (unsigned char)b;
+        cpix[y][x][3] = (unsigned char)a;
+        return;
+    }
+    na = a + oa * (255 - a) / 255;
+    if (na < 1) na = 1;
+    cr = (r * a + cpix[y][x][0] * oa * (255 - a) / 255) / na;
+    cg = (g * a + cpix[y][x][1] * oa * (255 - a) / 255) / na;
+    cb = (b * a + cpix[y][x][2] * oa * (255 - a) / 255) / na;
+    ca = na;
+    if (cr > 255) cr = 255;
+    if (cg > 255) cg = 255;
+    if (cb > 255) cb = 255;
+    if (ca > 255) ca = 255;
+    cpix[y][x][0] = (unsigned char)cr;
+    cpix[y][x][1] = (unsigned char)cg;
+    cpix[y][x][2] = (unsigned char)cb;
+    cpix[y][x][3] = (unsigned char)ca;
+}
+static void fill_fx(void) {
+    int y, x, i, dx, dy;
+    hn = 0;
+    hx[hn] = 90; hy[hn] = 680; hn++;
+    qbez(90, 680, 220, 430, 430, 430);
+    qbez(430, 430, 560, 500, 610, 680);
+    for (y = 0; y < CH; y++) for (x = 0; x < CW; x++) {
+        int wy = OY + y;
+        cpix[y][x][0] = 0; cpix[y][x][1] = 0; cpix[y][x][2] = 0; cpix[y][x][3] = 0;
+        if (x >= 40 && x < 808 && wy >= 288 && wy < 306)
+            puta(x, y, 58, 36, 20, 56);
+        if (pip((double)x, (double)wy))
+            puta(x, y, 42, 24, 16, 56);
+        dx = x - 300; dy = wy - 392;
+        if (dx * dx + dy * dy <= 36 * 36)
+            puta(x, y, 255, 232, 160, 40);
+        if (dx * dx + dy * dy <= 64)
+            puta(x, y, 255, 232, 160, 80);
+    }
+    (void)i;
+}
+static unsigned char raw[CH * (1 + CW * 4)];
+static unsigned char zbuf[16 + CH * (1 + CW * 4) + 64];
+static unsigned char outb[64 + CH * (1 + CW * 4) + 128];
+static int emit_png(unsigned char *dst) {
+    unsigned char ihdr[25];
+    int k = 0, y, x, oi = 0, i, zlen, off, rem, n, last;
+    unsigned c, ad;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    for (y = 0; y < CH; y++) {
+        raw[k++] = 0;
+        for (x = 0; x < CW; x++) {
+            raw[k++] = cpix[y][x][0];
+            raw[k++] = cpix[y][x][1];
+            raw[k++] = cpix[y][x][2];
+            raw[k++] = cpix[y][x][3];
+        }
+    }
+    zbuf[0] = 0x78; zbuf[1] = 0x01;
+    zlen = 2;
+    off = 0; rem = k;
+    while (rem > 0) {
+        n = rem > 65535 ? 65535 : rem;
+        last = (n == rem);
+        zbuf[zlen++] = last ? 1 : 0;
+        zbuf[zlen++] = (unsigned char)(n & 255);
+        zbuf[zlen++] = (unsigned char)(n >> 8);
+        zbuf[zlen++] = (unsigned char)((~n) & 255);
+        zbuf[zlen++] = (unsigned char)((~n >> 8) & 255);
+        for (i = 0; i < n; i++) zbuf[zlen++] = raw[off + i];
+        off += n; rem -= n;
+    }
+    ad = adler(raw, k);
+    be32(zbuf + zlen, ad);
+    zlen += 4;
+    for (i = 0; i < 8; i++) dst[oi++] = sig[i];
+    be32(ihdr, 13);
+    ihdr[4] = 'I'; ihdr[5] = 'H'; ihdr[6] = 'D'; ihdr[7] = 'R';
+    be32(ihdr + 8, CW); be32(ihdr + 12, CH);
+    ihdr[16] = 8; ihdr[17] = 6; ihdr[18] = 0; ihdr[19] = 0; ihdr[20] = 0;
+    c = crc32(ihdr + 4, 17);
+    be32(ihdr + 21, c);
+    for (i = 0; i < 25; i++) dst[oi++] = ihdr[i];
+    be32(ihdr, (unsigned)zlen);
+    dst[oi++] = ihdr[0]; dst[oi++] = ihdr[1]; dst[oi++] = ihdr[2]; dst[oi++] = ihdr[3];
+    dst[oi++] = 'I'; dst[oi++] = 'D'; dst[oi++] = 'A'; dst[oi++] = 'T';
+    for (i = 0; i < zlen; i++) dst[oi++] = zbuf[i];
+    {
+        unsigned char crcbuf[4];
+        unsigned char *start = dst + oi - zlen - 4;
+        c = crc32(start, 4 + zlen);
+        be32(crcbuf, c);
+        dst[oi++] = crcbuf[0]; dst[oi++] = crcbuf[1]; dst[oi++] = crcbuf[2]; dst[oi++] = crcbuf[3];
+    }
+    be32(ihdr, 0);
+    ihdr[4] = 'I'; ihdr[5] = 'E'; ihdr[6] = 'N'; ihdr[7] = 'D';
+    c = crc32(ihdr + 4, 4);
+    be32(ihdr + 8, c);
+    for (i = 0; i < 12; i++) dst[oi++] = ihdr[i];
+    return oi;
+}
+static int check_png(const char *path, unsigned char *b, int oi) {
+    FILE *f = fopen(path, "rb");
+    unsigned char disk[64];
+    int n, i;
+    long sz;
+    if (!f) return 1;
+    fseek(f, 0, 2); sz = ftell(f); fseek(f, 0, 0);
+    if (sz != oi) { fclose(f); return 1; }
+    for (i = 0; i < oi; ) {
+        int want = oi - i; if (want > 64) want = 64;
+        n = (int)fread(disk, 1, want, f);
+        if (n != want) { fclose(f); return 1; }
+        { int j; for (j = 0; j < n; j++) if (disk[j] != b[i + j]) { fclose(f); return 1; } }
+        i += n;
+    }
+    fclose(f);
+    return 0;
+}
+int main(int argc, char **argv) {
+    int write = 0, check = 0, i, oi, failed = 0;
+    FILE *f;
+    crc_init();
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
+        if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
+    }
+    if (!write && !check) { printf("GEN_S0_WATER_FX\tdry\n"); return 0; }
+    fill_fx();
+    oi = emit_png(outb);
+    if (write) {
+        f = fopen("ujs/plans/demo-v2/look-dev/water-fx.png", "wb");
+        if (!f) return 1;
+        fwrite(outb, 1, oi, f);
+        fclose(f);
+        printf("WROTE\twater-fx.png\t%d\n", oi);
+    }
+    if (check) {
+        if (check_png("ujs/plans/demo-v2/look-dev/water-fx.png", outb, oi)) {
+            printf("DIFF\twater-fx.png\n"); failed = 1;
+        } else printf("MATCH\twater-fx.png\n");
+    }
+    printf("GEN_S0_WATER_FX\tok\n");
+    return failed;
+}
