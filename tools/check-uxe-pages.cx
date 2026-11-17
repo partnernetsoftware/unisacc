@@ -1,0 +1,60 @@
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+/* tools/check-uxe-pages.cx -- 首页与 docs/uxe 下 index.html 相对链接存在.
+ *
+ * sh ./unisacc.com tools/check-uxe-pages.cx --
+ */
+static int failed, nlink;
+static int exists_rel(const char *base_dir, const char *href) {
+    char path[512];
+    int i = 0, j = 0;
+    while (base_dir[i]) { path[i] = base_dir[i]; i++; }
+    if (i && path[i - 1] != '/') path[i++] = '/';
+    if (href[0] == '.' && href[1] == '/') href += 2;
+    while (href[j] && href[j] != '?' && href[j] != '#' && i < 500) path[i++] = href[j++];
+    path[i] = 0;
+    if (i && path[i - 1] == '/') {
+        const char *s = "index.html";
+        j = 0;
+        while (s[j] && i < 500) path[i++] = s[j++];
+        path[i] = 0;
+    }
+    return sy_exists(path) == 1;
+}
+static void scan_href(const char *file, const char *dir, unsigned char *b, int64_t n) {
+    int64_t i;
+    for (i = 0; i + 6 < n; i++) {
+        if ((b[i] == 'h' && b[i + 1] == 'r' && b[i + 2] == 'e' && b[i + 3] == 'f' &&
+            b[i + 4] == '=' && b[i + 5] == '"') ||
+            (b[i] == 's' && b[i + 1] == 'r' && b[i + 2] == 'c' && b[i + 3] == '=' &&
+             b[i + 4] == '"')) {
+            char href[256];
+            int h = 0;
+            while (i < n && b[i] != '"') i++;
+            if (i < n && b[i] == '"') i++;
+            while (i < n && b[i] != '"' && h < 255) href[h++] = (char)b[i++];
+            href[h] = 0;
+            if (href[0] == 'h' || href[0] == '/') continue;
+            nlink++;
+            if (!exists_rel(dir, href)) {
+                printf("BROKEN\t%s\t%s\n", file, href);
+                failed++;
+            }
+        }
+    }
+}
+int main(void) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file("docs/index.html", &b, &n, 200000) || !b) return 2;
+    scan_href("docs/index.html", "docs", b, n);
+    mm_free(b);
+    b = 0;
+    if (sy_read_file("docs/uxe/fly/index.html", &b, &n, 200000) || !b) { failed++; }
+    else { scan_href("docs/uxe/fly/index.html", "docs/uxe/fly", b, n); mm_free(b); }
+    b = 0;
+    if (sy_read_file("docs/uxe/water-keeps/index.html", &b, &n, 200000) || !b) { failed++; }
+    else { scan_href("docs/uxe/water-keeps/index.html", "docs/uxe/water-keeps", b, n); mm_free(b); }
+    printf("CHECK_UXE_PAGES\tlinks=%d\tfailed=%d\n", nlink, failed);
+    return failed ? 1 : 0;
+}
