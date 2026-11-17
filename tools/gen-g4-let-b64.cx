@@ -1,4 +1,4 @@
-/* tools/gen-g4-let-b64.cx -- persist 夹具 g4-let-yaw.ujs -> let-b64.js
+/* tools/gen-g4-let-b64.cx -- persist/red 夹具 -> let-b64.js / red-b64.js
  *
  * sh ./unisacc.com tools/gen-g4-let-b64.cx -- --check
  * sh ./unisacc.com tools/gen-g4-let-b64.cx -- --write
@@ -29,42 +29,35 @@ static int cmp_file(const char *path, const char *buf, int n) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    int want_write = 0, want_check = 0, i;
+static int emit_one(const char *src, const char *wasm, const char *dst, const char *pre,
+                    int want_write, int want_check) {
     char *out = 0;
     size_t on = 0;
-    int rc;
+    int rc, i, jn = 0;
     char *av[8];
     FILE *f;
     unsigned char *wb;
     long wn;
     char *js;
-    int jn = 0;
     unsigned a, b, c, n;
-    const char *dst = "ujs/practice/uxe/demo/g4-let/let-b64.js";
-    const char *pre = "window.G4_LET_WASM=\"";
-    for (i = 1; i < argc; i++) {
-        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
-        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
-    }
     av[0] = "sh";
     av[1] = "./ujs/ujs.com";
-    av[2] = "ujs/tests/g4-let-yaw.ujs";
+    av[2] = (char *)src;
     av[3] = "-o";
-    av[4] = "/tmp/g4-let-yaw.wasm";
+    av[4] = (char *)wasm;
     av[5] = 0;
     rc = cx_runv_timeout(av, 30, &out, &on);
     if (out) { fwrite(out, 1, on, stdout); free(out); }
-    if (rc != 0) { fprintf(stderr, "gen-g4-let-b64: compile rc=%d\n", rc); return 2; }
-    f = fopen("/tmp/g4-let-yaw.wasm", "rb");
-    if (!f) { fprintf(stderr, "gen-g4-let-b64: no wasm\n"); return 2; }
+    if (rc != 0) { fprintf(stderr, "gen-g4-let-b64: compile %s rc=%d\n", src, rc); return 2; }
+    f = fopen(wasm, "rb");
+    if (!f) { fprintf(stderr, "gen-g4-let-b64: no wasm %s\n", wasm); return 2; }
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 2; }
     wn = ftell(f);
     rewind(f);
     wb = (unsigned char *)malloc((size_t)wn + 1);
     if (!wb || (long)fread(wb, 1, (size_t)wn, f) != wn) { free(wb); fclose(f); return 2; }
     fclose(f);
-    js = (char *)malloc((size_t)wn * 2 + 64);
+    js = (char *)malloc((size_t)wn * 2 + 80);
     if (!js) { free(wb); return 2; }
     while (*pre) js[jn++] = *pre++;
     for (i = 0; i < (int)wn; i += 3) {
@@ -86,16 +79,33 @@ int main(int argc, char **argv) {
     if (want_check && !want_write) {
         rc = cmp_file(dst, js, jn);
         free(js);
-        if (rc) return rc;
-        printf("GEN_G4_LET_B64_OK\tbytes=%d\n", jn);
-        return 0;
+        return rc;
     }
-    if (!want_write) { free(js); fprintf(stderr, "need --check or --write\n"); return 2; }
+    if (!want_write) { free(js); return 2; }
     f = fopen(dst, "wb");
     if (!f) { free(js); return 2; }
     if ((int)fwrite(js, 1, (size_t)jn, f) != jn) { fclose(f); free(js); return 2; }
     fclose(f);
     free(js);
-    printf("GEN_G4_LET_B64_WRITE\tbytes=%d\n", jn);
+    printf("GEN_G4_LET_B64_WRITE\t%s\tbytes=%d\n", dst, jn);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int want_write = 0, want_check = 0, i, rc;
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'w') want_write = 1;
+        if (argv[i][0] == '-' && argv[i][1] == '-' && argv[i][2] == 'c') want_check = 1;
+    }
+    if (!want_write && !want_check) { fprintf(stderr, "need --check or --write\n"); return 2; }
+    rc = emit_one("ujs/tests/g4-let-yaw.ujs", "/tmp/g4-let-yaw.wasm",
+                  "ujs/practice/uxe/demo/g4-let/let-b64.js",
+                  "window.G4_LET_WASM=\"", want_write, want_check);
+    if (rc) return rc;
+    rc = emit_one("ujs/tests/g4-let-red.ujs", "/tmp/g4-let-red.wasm",
+                  "ujs/practice/uxe/demo/g4-let/red-b64.js",
+                  "window.G4_LET_RED_WASM=\"", want_write, want_check);
+    if (rc) return rc;
+    printf("GEN_G4_LET_B64_OK\n");
     return 0;
 }
