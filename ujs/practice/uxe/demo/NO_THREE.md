@@ -2,6 +2,10 @@
 
 三款参考都按「核出整数金、Host 画」落地,不引进 three。
 
+现状: water/ink/oneshot 的 Host 按 wasm 表画。
+现状: fly 无表,不发明岛。
+现状: W2/W3 未接这三页。
+
 | 参考 | 本仓 | 不是 |
 |---|---|---|
 | 灯舟 8 界 | `water-keeps/` 金 404 | 24MB GLB 原作 |
