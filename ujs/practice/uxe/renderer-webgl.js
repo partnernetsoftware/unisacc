@@ -70,6 +70,8 @@ uniform vec3 uFogC;
 uniform float uInk;
 uniform sampler2D uMap;
 uniform float uHasMap;
+uniform float uRadial;
+
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
@@ -93,8 +95,16 @@ void main() {
   col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
   float fogF = 1.0 - exp(-uFogD * uFogD * vFogDepth * vFogDepth);
   col = mix(col, uFogC, clamp(fogF, 0.0, 1.0));
-  gl_FragColor = vec4(col, 1.0);
+  float a = 1.0;
+  if (uRadial > 0.5) {
+    vec2 d = vUV - vec2(0.5, 0.5);
+    float r2 = dot(d, d) * 4.0;
+    a = max(1.0 - r2, 0.0);
+    a = a * a;
+  }
+  gl_FragColor = vec4(col, a);
 }
+
 `;
 
 function compile(gl, type, src) {
@@ -155,7 +165,8 @@ export function createWebGLRenderer(canvas) {
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
-  const uMap = u("uMap"), uHasMap = u("uHasMap");
+  const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial");
+
   const texCache = Object.create(null);
 
 
@@ -172,8 +183,11 @@ export function createWebGLRenderer(canvas) {
   }
 
   function drawCloud(cloud, wave) {
+    const isPt = (cloud.meshId | 0) === 4;
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
-    if (cloud.alphaMode) {
+
+    if (cloud.alphaMode || isPt) {
+
       gl.enable(gl.BLEND);
       gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
@@ -182,7 +196,8 @@ export function createWebGLRenderer(canvas) {
       gl.depthMask(true);
     }
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
-    gl.uniform1f(uBillboard, cloud.billboard ? 1 : 0);
+    gl.uniform1f(uBillboard, (cloud.billboard || isPt) ? 1 : 0);
+    if (uRadial) gl.uniform1f(uRadial, isPt ? 1 : 0);
 
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
@@ -277,10 +292,12 @@ export function createWebGLRenderer(canvas) {
         }
       }
       const w = canvas.width, h = canvas.height;
+      gl.viewport(0, 0, w, h);
       const [cr, cg, cb, ca] = scene.clearColor;
       gl.enable(gl.DEPTH_TEST);
       gl.clearColor(cr, cg, cb, ca);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
 
 
       perspective(camera.fovy, w / Math.max(1, h), camera.near, camera.far, P);
@@ -316,9 +333,10 @@ export function createWebGLRenderer(canvas) {
       const trans = [];
       for (const cloud of scene.clouds.values()) {
         if (cloud.count <= 0) continue;
-        if (cloud.alphaMode) trans.push(cloud);
+        if (cloud.alphaMode || (cloud.meshId | 0) === 4) trans.push(cloud);
         else opaque.push(cloud);
       }
+
       for (const c of opaque) drawCloud(c, wave);
       trans.sort((a, b) => {
         const ax = a.xyz[0] - ex, ay = a.xyz[1] - ey, az = a.xyz[2] - ez;
