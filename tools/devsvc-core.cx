@@ -622,6 +622,17 @@ static int cmd_status(const char *root, int paths) {
    含写节点的流先拉起实例,拉不起即 REFUSE writes-need-service(rc 1,不写)。 ---- */
 static char fl_owner[64], held[MAXLOCK][64]; static int held_mine[MAXLOCK], nheld, svc_on, flow_needw;
 static int local_writes_ok(void) { const char *e = getenv("DEVSVC_LOCAL_WRITES"); return e && !strcmp(e, "1"); }   /* 仅检查用:允许本地无锁写 */
+/* 嵌套继承规则(plans/devsvc.md 第 3 节):devsvc 给子进程导出 UNISACC_FLOW_ROOT 时同时导出标记 UNISACC_FLOW_ROOT_JOB=<该根>。
+   本进程根 ROOT 等于标记根或在其下 = 同仓嵌套,继承照旧;不在其下,且 UNISACC_FLOW_ROOT 仍是标记所记的那个继承值,就丢弃它改用 ROOT。
+   未带标记的 UNISACC_FLOW_ROOT 视为调用者显式给的,始终保留。返回 0 成功。 */
+static int dv_under(const char *r, const char *top) { long n = (long)strlen(top); return n > 0 && !strncmp(r, top, n) && (r[n] == 0 || r[n] == '/' || top[n - 1] == '/'); }
+static int flow_root_env(const char *root) {
+    const char *j = getenv("UNISACC_FLOW_ROOT_JOB"), *fr = getenv("UNISACC_FLOW_ROOT"); char keep[PW];
+    if (fr && *fr && j && *j && !strcmp(fr, j) && !dv_under(root, j)) fr = 0;
+    if (fr && *fr) { if (snprintf(keep, sizeof keep, "%s", fr) >= (int)sizeof keep) return -1; }
+    else if (snprintf(keep, sizeof keep, "%s", root) >= (int)sizeof keep || setenv("UNISACC_FLOW_ROOT", keep, 1)) return -1;
+    return setenv("UNISACC_FLOW_ROOT_JOB", keep, 1);
+}
 /* 写命令的实例探测:wr 时无实例先拉起(上限 40 s),拉不起打 REFUSE writes-need-service 返回 -1;否则 1 有实例、0 无(只读) */
 static int wr_svc(const char *root, int wr) {
     int need = wr && !local_writes_ok();
@@ -844,7 +855,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
         if (r) { chomp(resp); fprintf(stderr, "devsvc: REFUSE lock %s for node %s: %s\n", nm, f.n[i].id, resp); lk_drop(root); fl_free(&f); return 1; }
     }
     nl = nheld;
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); fl_free(&f); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); fl_free(&f); return 2; }
     sy_sig_watch(SIGINT); sy_sig_watch(SIGTERM); sy_sig_watch(SIGHUP);
     fl_set_cancel(cancel_hit);
     { long t0c = sy_now_ms();
@@ -1117,7 +1128,7 @@ static int cmd_f(const char *root, int argc, char **argv) {
         else if (r == 3) { fprintf(stderr, "F\t%s\trefused\tREFUSE writes-need-service: instance lost; nothing written\n", op); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "F\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); return 2; }
     memset(&o, 0, sizeof o);
     r = ff_run(fop, b.p, &o);
     if (tmpf[0]) sy_unlink(tmpf);
@@ -1222,7 +1233,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
         else if (r == 3) { fprintf(stderr, "devsvc: REFUSE writes-need-service: instance lost; nothing written\n"); return 1; }
         else if (r) { chomp(resp); fprintf(stderr, "DOC\t%s\trefused\tlock=%s\t%s\n", op, nm, resp); return 1; }
     }
-    if (setenv("UNISACC_FLOW_ROOT", root, 0)) { lk_drop(root); return 2; }
+    if (flow_root_env(root)) { lk_drop(root); return 2; }
     memset(&o, 0, sizeof o);
     r = fd_run(fop, b.p, &o);
     lk_drop(root);
