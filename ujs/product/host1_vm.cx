@@ -20,6 +20,8 @@ typedef struct {
   uint32_t nfunc;
   int main_i, tag_i, i64_i, f64_i, sptr_i, slen_i;
   WV stk[H1_STK];
+  WV ploc[256];
+  int ploc_live;
   int sp;
   char err[128];
 } H1;
@@ -446,11 +448,23 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
 
 static int h1_call(H1 *h, uint32_t fi, int depth) {
   WV locals[256];
+  WV *lp;
   uint32_t np, i;
   if (depth > H1_CALL) return h1_err(h, "call depth");
   if (fi >= h->nfunc) return h1_err(h, "bad func");
   np = h->nparam[fi];
   if (h->sp < (int)np) return h1_err(h, "stack under");
+  if (depth == 0 && (int)fi == h->main_i) {
+    lp = h->ploc;
+    for (i = 0; i < np; i++) h1_pop_to(h, &lp[np - 1 - i]);
+    if (!h->ploc_live) {
+      for (i = np; i < 256; i++) {
+        lp[i].k = WK_I32; lp[i].i32 = 0; lp[i].i64 = 0; lp[i].f64 = 0;
+      }
+      h->ploc_live = 1;
+    }
+    return h1_exec(h, fi, lp, np, depth);
+  }
   for (i = 0; i < np; i++) h1_pop_to(h, &locals[np - 1 - i]);
   for (i = np; i < 256; i++) {
     locals[i].k = WK_I32; locals[i].i32 = 0; locals[i].i64 = 0; locals[i].f64 = 0;
