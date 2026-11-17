@@ -3,19 +3,49 @@ import { mat4, perspective, lookAt, mul } from "./math.js";
 import { allMeshes } from "./meshes.js";
 
 const VS = `#version 100
+precision mediump float;
 attribute vec3 aPos;
 attribute vec3 aInst;
 attribute float aScale;
+attribute float aYaw;
+attribute float aPitch;
+attribute float aRoll;
 uniform mat4 uVP;
 uniform vec3 uEye;
+uniform float uWave;
+uniform float uTime;
+uniform float uBillboard;
 varying vec3 vN;
+varying vec3 vP;
+varying vec3 vEye;
 varying float vFogDepth;
+vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
+  float cy = cos(yaw), sy = sin(yaw);
+  float cp = cos(pitch), sp = sin(pitch);
+  float cr = cos(roll), sr = sin(roll);
+  vec3 yv = vec3(v.x * cy + v.z * sy, v.y, -v.x * sy + v.z * cy);
+  vec3 pv = vec3(yv.x, yv.y * cp - yv.z * sp, yv.y * sp + yv.z * cp);
+  return vec3(pv.x * cr - pv.y * sr, pv.x * sr + pv.y * cr, pv.z);
+}
+vec3 billboardXZ(vec3 v, vec3 eye, vec3 inst) {
+  vec3 toCam = eye - inst;
+  float hl = length(vec2(toCam.x, toCam.z));
+  float fx = hl > 0.0001 ? toCam.x / hl : 0.0;
+  float fz = hl > 0.0001 ? toCam.z / hl : 1.0;
+  return vec3(v.x * fz + v.z * fx, v.y, -v.x * fx + v.z * fz);
+}
 void main() {
-  vec3 p = aPos * aScale + aInst;
-  vN = normalize(aPos);
+  vec3 lp = aPos * aScale;
+  vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
+  vec3 p = rp + aInst;
+  p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
+  vN = normalize(uBillboard > 0.5 ? billboardXZ(aPos, uEye, aInst) : rotYXZ(aPos, aYaw, aPitch, aRoll));
+  vP = p;
+  vEye = uEye;
   vFogDepth = length(p - uEye);
   gl_Position = uVP * vec4(p, 1.0);
-}`;
+}
+`;
 
 const FS = `#version 100
 precision mediump float;
@@ -33,7 +63,10 @@ uniform vec3 uL1Col;
 uniform float uL1I;
 uniform float uFogD;
 uniform vec3 uFogC;
+uniform float uInk;
 varying vec3 vN;
+varying vec3 vP;
+varying vec3 vEye;
 varying float vFogDepth;
 void main() {
   vec3 n = normalize(vN);
@@ -44,10 +77,14 @@ void main() {
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
   vec3 col = base * (amb + diff) + uEmissive;
+  vec3 view = normalize(vEye - vP);
+  float rim = pow(1.0 - max(dot(n, view), 0.0), 2.4);
+  col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
   float fogF = 1.0 - exp(-uFogD * uFogD * vFogDepth * vFogDepth);
   col = mix(col, uFogC, clamp(fogF, 0.0, 1.0));
   gl_FragColor = vec4(col, 1.0);
-}`;
+}
+`;
 
 function compile(gl, type, src) {
   const s = gl.createShader(type);
@@ -85,9 +122,15 @@ export function createWebGLRenderer(canvas) {
 
   const ibo = gl.createBuffer();
   const sbo = gl.createBuffer();
+  const ybo = gl.createBuffer();
+  const pbo = gl.createBuffer();
+  const rbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
+  const aYaw = gl.getAttribLocation(prog, "aYaw");
+  const aPitch = gl.getAttribLocation(prog, "aPitch");
+  const aRoll = gl.getAttribLocation(prog, "aRoll");
   const u = (n) => gl.getUniformLocation(prog, n);
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
@@ -96,6 +139,7 @@ export function createWebGLRenderer(canvas) {
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
+  const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
 
   const P = mat4(), V = mat4(), VP = mat4();
 
@@ -109,8 +153,10 @@ export function createWebGLRenderer(canvas) {
     gl.viewport(0, 0, canvas.width, canvas.height);
   }
 
-  function drawCloud(cloud) {
+  function drawCloud(cloud, wave) {
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
+    gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
+    gl.uniform1f(uBillboard, cloud.billboard ? 1 : 0);
     gl.uniform3fv(uColor, cloud.color);
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
@@ -133,6 +179,26 @@ export function createWebGLRenderer(canvas) {
     gl.vertexAttribPointer(aScale, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aScale, 1);
 
+    gl.bindBuffer(gl.ARRAY_BUFFER, ybo);
+    const yaw = cloud.yaw || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, yaw.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aYaw);
+    gl.vertexAttribPointer(aYaw, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aYaw, 1);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, pbo);
+    const pitch = cloud.pitch || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, pitch.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aPitch);
+    gl.vertexAttribPointer(aPitch, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aPitch, 1);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, rbo);
+    const roll = cloud.roll || new Float32Array(cloud.count);
+    gl.bufferData(gl.ARRAY_BUFFER, roll.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aRoll);
+    gl.vertexAttribPointer(aRoll, 1, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aRoll, 1);
     ext.drawArraysInstancedANGLE(gl.TRIANGLES, 0, mesh.vCount, cloud.count);
     cloud.markClean();
   }
@@ -162,6 +228,8 @@ export function createWebGLRenderer(canvas) {
       gl.useProgram(prog);
       gl.uniformMatrix4fv(uVP, false, VP);
       gl.uniform3f(uEye, ex, ey, ez);
+      gl.uniform1f(uTime, (performance.now ? performance.now() : 0) * 0.001);
+      gl.uniform1f(uInk, scene.ink || 0);
       gl.uniform3fv(uAmbient, amb.color);
       gl.uniform1f(uAmbI, amb.intensity);
       gl.uniform3fv(uL0Dir, norm3(L0.dir));
@@ -173,8 +241,9 @@ export function createWebGLRenderer(canvas) {
       gl.uniform1f(uFogD, fog.density);
       gl.uniform3fv(uFogC, fog.color);
 
+      const wave = scene.wave || 0;
       for (const cloud of scene.clouds.values()) {
-        if (cloud.count > 0) drawCloud(cloud);
+        if (cloud.count > 0) drawCloud(cloud, wave);
       }
     },
   };

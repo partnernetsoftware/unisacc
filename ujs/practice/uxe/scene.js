@@ -19,17 +19,25 @@ export class InstanceCloud {
     this.count = capacity;
     this.xyz = new Float32Array(capacity * 3);
     this.scale = new Float32Array(capacity);
+    this.yaw = new Float32Array(capacity);
+    this.pitch = new Float32Array(capacity);
+    this.roll = new Float32Array(capacity);
     this.color = color;
     this.emissive = [0, 0, 0];
     this.metalness = 0.2;
     this.roughness = 0.5;
     this.meshId = 0;
+    this.billboard = 0;
     this.dirty = true;
   }
-  set(i, x, y, z, s) {
+  /** yaw Y, then pitch X, then roll Z. omitted angles stay 0 / previous. */
+  set(i, x, y, z, s, yaw, pitch, roll) {
     const o = i * 3;
     this.xyz[o] = x; this.xyz[o + 1] = y; this.xyz[o + 2] = z;
     this.scale[i] = s;
+    if (yaw !== undefined) this.yaw[i] = yaw;
+    if (pitch !== undefined) this.pitch[i] = pitch;
+    if (roll !== undefined) this.roll[i] = roll;
     this.dirty = true;
   }
   markClean() { this.dirty = false; }

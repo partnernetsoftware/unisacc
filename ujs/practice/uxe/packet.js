@@ -24,6 +24,8 @@ export const PACKET_VERSION = 3;
 
 export const MESH_OCTA = 0;
 export const MESH_SHIP = 1;
+export const MESH_BOX = 2;
+export const MESH_PLANE = 3;
 
 const DEFAULT_FOG = { density: 0.018, color: [0.02, 0.024, 0.04] };
 const DEFAULT_AMBIENT = { color: [0.25, 0.38, 0.5], intensity: 0.55 };

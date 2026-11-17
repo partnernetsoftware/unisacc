@@ -58,10 +58,18 @@ export const BOX_MESH = new Float32Array([
 
 export const MESH_BOX = 2;
 
+/** XZ unit quad (water). */
+export const PLANE_MESH = new Float32Array([
+  -0.5, 0, -0.5,  0.5, 0, -0.5,  0.5, 0, 0.5,
+  -0.5, 0, -0.5,  0.5, 0, 0.5,  -0.5, 0, 0.5,
+]);
+export const MESH_PLANE = 3;
+
 const TABLE = [
   { id: MESH_OCTA, positions: OCTA_MESH, vCount: OCTA_MESH.length / 3 },
   { id: MESH_SHIP, positions: SHIP_MESH, vCount: SHIP_MESH.length / 3 },
   { id: MESH_BOX, positions: BOX_MESH, vCount: BOX_MESH.length / 3 },
+  { id: MESH_PLANE, positions: PLANE_MESH, vCount: PLANE_MESH.length / 3 },
 ];
 
 export function meshById(id) {
