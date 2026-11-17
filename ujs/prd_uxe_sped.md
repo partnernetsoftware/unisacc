@@ -76,7 +76,7 @@ v3 前缀原样。v4 每云 `scale[]` 后:`map_id`(u16,0=无贴图) | `uv_origin
 
 包尾**上传段**(可空):`nUpload`(u32)。每条:`id`(u16) `w`(u16) `h`(u16) `wrap`(u8,0=clamp) `filter`(u8,0=nearest) `sha256`(32B) `rgba`(w*h*4)。
 
-宿主缓存键=`(id, sha256)`。仅当缓存未命中时包内才带 rgba。之后帧 version 仍可为 4,但 `nUpload=0`,只靠 map_id 引用缓存。4x4 夹具:第 1 帧带上传段,第 2 帧 nUpload=0 仍贴出同样像素。
+宿主缓存键=`(id, 内容哈希)`。内容哈希过渡为 FNV-1a32(w,h,rgba),sha256 待换。仅当缓存未命中时包内才带 rgba。之后帧 version 仍可为 4,但 `nUpload=0`,只靠 map_id 引用缓存。4x4 夹具:第 1 帧带上传段,第 2 帧 nUpload=0 仍贴出同样像素。
 
 上限(解码前断言,超限明确错误):单张 `w*h*4<=1048576`(1MiB);一包 `nUpload` 合计 rgba<=1048576;读前 `o+n<=byteLength`。map_id!=0 且不在本包上传段也不在缓存 -> 错误,不得静默黑。
 

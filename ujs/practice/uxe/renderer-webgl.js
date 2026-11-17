@@ -249,8 +249,11 @@ export function createWebGLRenderer(canvas) {
           const id = t.id | 0;
           if (!id) continue;
           let h = 2166136261;
+          h ^= (t.w | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
+          h ^= (t.h | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
           const src = t.rgba;
           for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
+
           const rec = texCache[id];
           if (rec && rec.hash === h) continue;
           const tex = rec && rec.tex ? rec.tex : gl.createTexture();
