@@ -29,7 +29,10 @@ static void ck(int ok, const char *name) {
     sy_printf("%s\ttlib-frozen.%s\n", ok ? "PASS" : "FAIL", name);
 }
 
-/* Run layer-api with up to 5 args under R; output text to *out (caller frees). rc of the tool. */
+/* 1: the next run() also passes --allow-major (the human confirmation 9b17c05683 requires for a breaking bump). */
+static int run_major;
+
+/* Run layer-api with up to 6 args under R; output text to *out (caller frees). rc of the tool. */
 static int run(const char *a, const char *b, const char *r, char **out) {
     char *v[8];
     size_t n = 0;
@@ -40,6 +43,8 @@ static int run(const char *a, const char *b, const char *r, char **out) {
     v[k++] = (char *)b;
     v[k++] = "--root";
     v[k++] = (char *)r;
+    if (run_major) v[k++] = "--allow-major";
+    run_major = 0;
     v[k] = 0;
     return cx_runv_timeout(v, 55, out, &n);
 }
@@ -224,6 +229,13 @@ static int bump_fx(char **out) {
     return run("--bump", "fx.a", fx, out);
 }
 
+/* a breaking bump confirmed with --allow-major */
+static int bump_fx_major(char **out) {
+    (void)stage_fx();
+    run_major = 1;
+    return run("--bump", "fx.a", fx, out);
+}
+
 int main(int argc, char **argv) {
     char src[4400], why[256], badn[256], *out = 0, t[600];
     char sha0[65];
@@ -352,7 +364,11 @@ int main(int argc, char **argv) {
     mm_free(out);
 
     prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nint fa_more(void) { return 4; }\n");
+    /* without --allow-major a breaking change is refused (rc 2, major-needs-confirm) and the table stays at 0.2.0 */
     rc = bump_fx(&out);
+    ck(!prep && rc == 2 && out && tx_contains(out, tx_len(out, TX_ZCAP), "major-needs-confirm", 19) && table_has("0.2.0"), "bump-breaking-refused-without-allow-major");
+    mm_free(out);
+    rc = bump_fx_major(&out);
     ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "major", 5) && table_has("1.0.0"), "bump-breaking-is-x");
     mm_free(out);
     nb = gate(fx, &nv, badn, sizeof badn);
@@ -376,7 +392,7 @@ int main(int argc, char **argv) {
     ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "minor", 5) && table_has("1.1.0"), "stable-yes-restores-y");
     mm_free(out);
     prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 2; }\nlong fa_more(void) { return 4; }\nint fa_more2(void) { return 5; }\nlong fa_more3(void) { return 6; }\n");
-    rc = bump_fx(&out);
+    rc = bump_fx_major(&out);
     ck(!prep && rc == 0 && out && tx_contains(out, tx_len(out, TX_ZCAP), "major", 5) && table_has("2.0.0"), "stable-yes-restores-x");
     mm_free(out);
     (void)t; (void)sha0;
