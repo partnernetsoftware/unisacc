@@ -62,7 +62,7 @@ Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` +
 | `host_input_read` | `(buf?) → Input \| i32` | 无 buf → JS 对象（调试）；有 `ArrayBuffer` → 写入 **UXIN**，返回字节数 |
 | `host_frame_begin` | `() → void` | 帧起点（与宿主事件环对齐；浏览器可为空） |
 | `host_frame_present` | `() → void` | 帧终点 / 换缓冲钩子（浏览器可为空；ship 胶水可在此刷 HUD） |
-| `host_gpu_submit` | `(packet) → void` | 提交 **UXEP**（主路径 `ArrayBuffer`；对象仅调试） |
+| `host_gpu_submit` | `(packet) → void` | 提交 **UXEP**（主路径 `ArrayBuffer`；对象仅调试）。WASM import:`env.host_gpu_submit(i32 ptr, i32 len)`。host1_vm **已提供该符号**(读线性内存后 no-op);**尚未真 GPU**,不宣称 G1 完成。 |
 | `host_debug_snapshot` | `() → object` | **浏览器调试**：一帧 JSON（input · packet 摘要 · `__UXE__`）；同步写 `window.__UXE_SNAP__` |
 | `host_asset_read` | `(path) → bytes` | 只读资源（浏览器：`fetch`；相对路径相对 `baseURL`） |
 | `host_log` | `(level, msg) → void` | 诊断：`info` / `warn` / `error` |

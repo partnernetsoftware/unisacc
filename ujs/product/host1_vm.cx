@@ -169,13 +169,17 @@ static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
       if (!h1_uleb(p, j + sz, &j, &ni) || ni > 8) return h1_err(h, "nimport");
       h->nimport = ni;
       for (im = 0; im < ni; im++) {
-        uint32_t ml, fl, tidx;
+        uint32_t ml, fl, tidx, b;
         uint8_t knd;
         if (!h1_uleb(p, i + sz, &j, &ml) || j + ml > i + sz) return h1_err(h, "imod");
-        if (!(ml == 3 && !memcmp(p + j, "env", 3))) return h1_err(h, "import mod");
+        if (ml != 3 || p[j] != 'e' || p[j + 1] != 'n' || p[j + 2] != 'v') return h1_err(h, "import mod");
         j += ml;
         if (!h1_uleb(p, i + sz, &j, &fl) || j + fl > i + sz) return h1_err(h, "ifield");
-        if (!(fl == 15 && !memcmp(p + j, "host_gpu_submit", 15))) return h1_err(h, "import name");
+        if (fl != 15) return h1_err(h, "import name");
+        {
+          const char *wn = "host_gpu_submit";
+          for (b = 0; b < 15; b++) if (p[j + b] != (uint8_t)wn[b]) return h1_err(h, "import name");
+        }
         j += fl;
         if (j >= i + sz) return h1_err(h, "ikind");
         knd = p[j++];
@@ -457,16 +461,22 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
 
 static int h1_call(H1 *h, uint32_t fi, int depth) {
   WV locals[256];
-  uint32_t np, i;
+  uint32_t np, i, imp;
   if (depth > H1_CALL) return h1_err(h, "call depth");
-  if (fi < h->nimport) {
-    WV lenv, ptrv;
-    uint32_t ptr, len;
-    if (h->sp < 2) return h1_err(h, "stack under");
-    h1_pop_to(h, &lenv);
-    h1_pop_to(h, &ptrv);
-    ptr = (uint32_t)(ptrv.k == WK_I32 ? ptrv.i32 : (int32_t)ptrv.i64);
-    len = (uint32_t)(lenv.k == WK_I32 ? lenv.i32 : (int32_t)lenv.i64);
+  imp = (fi < h->nimport) ? 1u : 0u;
+  if (!imp) {
+    fi -= h->nimport;
+    if (fi >= h->nfunc) return h1_err(h, "bad func");
+    np = h->nparam[fi];
+  } else np = 2;
+  if (h->sp < (int)np) return h1_err(h, "stack under");
+  for (i = 0; i < np; i++) h1_pop_to(h, &locals[np - 1 - i]);
+  for (i = np; i < 256; i++) {
+    locals[i].k = WK_I32; locals[i].i32 = 0; locals[i].i64 = 0; locals[i].f64 = 0;
+  }
+  if (imp) {
+    uint32_t ptr = (uint32_t)(locals[0].k == WK_I32 ? locals[0].i32 : (int32_t)locals[0].i64);
+    uint32_t len = (uint32_t)(locals[1].k == WK_I32 ? locals[1].i32 : (int32_t)locals[1].i64);
     if (len && (ptr > h->mem_n || len > h->mem_n - ptr)) return h1_err(h, "gpu oob");
     if (len) {
       volatile uint8_t t = h->mem[ptr];
@@ -474,14 +484,6 @@ static int h1_call(H1 *h, uint32_t fi, int depth) {
       if (len > 1) t = h->mem[ptr + len - 1];
     }
     return 0;
-  }
-  fi -= h->nimport;
-  if (fi >= h->nfunc) return h1_err(h, "bad func");
-  np = h->nparam[fi];
-  if (h->sp < (int)np) return h1_err(h, "stack under");
-  for (i = 0; i < np; i++) h1_pop_to(h, &locals[np - 1 - i]);
-  for (i = np; i < 256; i++) {
-    locals[i].k = WK_I32; locals[i].i32 = 0; locals[i].i64 = 0; locals[i].f64 = 0;
   }
   return h1_exec(h, fi, locals, np, depth);
 }
