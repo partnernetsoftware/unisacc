@@ -36,13 +36,11 @@ static int same1(const char *a, const char *b) {
     mm_free(ba); mm_free(bb);
     return 1;
 }
-static void rewrite_dots(const char *path) {
-    unsigned char *b = 0;
-    int64_t n = 0, i, o;
+static int rewrite_mem(const unsigned char *b, int64_t n, unsigned char **outp, int64_t *op) {
     unsigned char *out;
-    if (sy_read_file(path, &b, &n, 4000000) || !b) return;
+    int64_t i, o;
     out = (unsigned char *)mm_alloc((int)n + 8);
-    if (!out) { mm_free(b); return; }
+    if (!out) return 1;
     o = 0;
     i = 0;
     while (i < n) {
@@ -54,9 +52,34 @@ static void rewrite_dots(const char *path) {
             out[o++] = b[i++];
         }
     }
+    *outp = out;
+    *op = o;
+    return 0;
+}
+static void rewrite_dots(const char *path) {
+    unsigned char *b = 0, *out = 0;
+    int64_t n = 0, o = 0;
+    if (sy_read_file(path, &b, &n, 4000000) || !b) return;
+    if (rewrite_mem(b, n, &out, &o)) { mm_free(b); return; }
     sy_write_file(path, out, o, 0644);
     mm_free(out);
     mm_free(b);
+}
+static int same_rewritten(const char *src, const char *dst) {
+    unsigned char *bs = 0, *bd = 0, *exp = 0;
+    int64_t ns = 0, nd = 0, ne = 0, i;
+    if (sy_read_file(src, &bs, &ns, 4000000) || sy_read_file(dst, &bd, &nd, 4000000)) {
+        if (bs) mm_free(bs);
+        if (bd) mm_free(bd);
+        return 0;
+    }
+    if (rewrite_mem(bs, ns, &exp, &ne)) { mm_free(bs); mm_free(bd); return 0; }
+    mm_free(bs);
+    if (ne != nd) { mm_free(bd); mm_free(exp); return 0; }
+    for (i = 0; i < ne; i++) if (exp[i] != bd[i]) { mm_free(bd); mm_free(exp); return 0; }
+    mm_free(bd);
+    mm_free(exp);
+    return 1;
 }
 int main(int argc, char **argv) {
     unsigned char *tb = 0;
@@ -122,7 +145,10 @@ int main(int argc, char **argv) {
             if (sy_exists(srcp) != 1) { printf("FAIL\tmissing-src\t%s\n", srcp); failed++; continue; }
             if (!write) {
                 if (sy_exists(dstp) != 1) { printf("MISS\t%s\n", dstp); failed++; }
-                else if (base[0] == 'i' && base[1] == 'n' && base[2] == 'd') printf("HAVE\t%s\n", dstp);
+                else if (base[0] == 'i' && base[1] == 'n' && base[2] == 'd') {
+                    if (!same_rewritten(srcp, dstp)) { printf("DIFF\t%s\n", dstp); failed++; }
+                    else printf("HAVE\t%s\n", dstp);
+                }
                 else if (!same1(srcp, dstp)) { printf("DIFF\t%s\n", dstp); failed++; }
                 else printf("HAVE\t%s\n", dstp);
             } else {
