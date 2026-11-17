@@ -184,6 +184,25 @@ mrest:
         ck(dv(v) == 0 && is("a.txt", "alpha\nbeta\ngamma\n"), "f-write-expect-sha-match"); }
     ck(dv1("events", "--since", "0", 0, 0, 0) == 0 && has("\tflow.node\t0\tf.write\tok\t") && has("\tf.write\tfail\t") && has("\tf.edit\tok\t"), "f-events-in-ring");
 
+    /* f edits:同一文件多组 old/new 一次调用、一次试编、一次原子落盘;任一组不匹配或多处匹配整批不落盘,试编失败整批不落盘 */
+    {   char cmd[1800]; char *e[] = {"sh", "-c", cmd, 0};
+#define EDITS(target, groups) F(cmd, sizeof cmd, "printf '%%s' '%s' | sh '%s' '%s' -- f edits %s --stdin", groups, prod, self, target)
+        EDITS("a.txt", "alpha\n@@DEVSVC-NEW@@\nALPHA\n@@DEVSVC-NEXT@@\ngamma\n@@DEVSVC-NEW@@\nGAMMA\n");
+        ck(cap2(e, out, sizeof out) == 0 && has("F\tedits\tok\tsha=") && is("a.txt", "ALPHA\nbeta\nGAMMA\n"), "f-edits-two-groups-one-write");
+        EDITS("a.txt", "beta\n@@DEVSVC-NEW@@\nBETA\n@@DEVSVC-NEXT@@\nzzz\n@@DEVSVC-NEW@@\nZ\n");
+        ck(cap2(e, out, sizeof out) == 1 && has("ENOMATCH: group 2") && is("a.txt", "ALPHA\nbeta\nGAMMA\n"), "f-edits-second-group-nomatch-nothing-written");
+        EDITS("a.txt", "A\n@@DEVSVC-NEW@@\nx\n");
+        ck(cap2(e, out, sizeof out) == 1 && has("EMULTI: group 1") && is("a.txt", "ALPHA\nbeta\nGAMMA\n"), "f-edits-multi-match-refused");
+        ck(put("e.cx", "int main(void) {\n    int a = 1;\n    int b = 2;\n    return a + b - 3;\n}\n") == 0 && setenv("UNISACC_CC_PRODUCT", prod, 1) == 0, "fixture-edits-cx");
+        EDITS("e.cx", "int a = 1;\n@@DEVSVC-NEW@@\nint a = 2;\n@@DEVSVC-NEXT@@\nint b = 2;\n@@DEVSVC-NEW@@\nint b = 2 +;\n");
+        ck(cap2(e, out, sizeof out) == 1 && has("refused-compile") && has("ECOMPILE") && is("e.cx", "int main(void) {\n    int a = 1;\n    int b = 2;\n    return a + b - 3;\n}\n"), "f-edits-compile-fail-nothing-written");
+        EDITS("e.cx", "int a = 1;\n@@DEVSVC-NEW@@\nint a = 2;\n@@DEVSVC-NEXT@@\nint b = 2;\n@@DEVSVC-NEW@@\nint b = 1;\n@@DEVSVC-NEXT@@\nreturn a + b - 3;\n@@DEVSVC-NEW@@\nreturn b + a - 3;\n");
+        ck(cap2(e, out, sizeof out) == 0 && has("F\tedits\tok\t") && !has("compile-undecided") && is("e.cx", "int main(void) {\n    int a = 2;\n    int b = 1;\n    return b + a - 3;\n}\n"), "f-edits-three-groups-compiled-once-ok");
+#undef EDITS
+        if (unsetenv("UNISACC_CC_PRODUCT")) return 2; }
+    F(p, sizeof p, "%s/src.txt", w);
+    ck(dv1("f", "write", "a.txt", "--from", p, 0) == 0 && is("a.txt", "alpha\nbeta\ngamma\n"), "f-edits-restore-fixture");
+
     /* 路径锁:他人持有时写被拒,文件不变;放锁后通过,事后不留锁 */
     ck(put("src2.txt", "second\n") == 0 && put("wr.tsv", "w1\tfile.write\t-\tpath=a.txt;content=from-flow%0A\n") == 0, "fixture-lock");
     ck(dv1("lock", "acquire", "a.txt", "--owner", "other", 0) == 0, "lock-held-by-other");

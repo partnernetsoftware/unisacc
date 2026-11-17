@@ -48,6 +48,7 @@
 | Read | `f read PATH [OFF LIM]` | 内容到 stdout;stderr 结果行带整文件 sha256 与总行数,sha 可接着喂给 `--expect-sha` |
 | Write | `f write PATH --from SRC [--expect-sha X] [--mkdir]` | 原子替换;新内容先写到 `/tmp` 或 `$CLAUDE_JOB_DIR/tmp` 的 SRC;有实例时自动取路径锁 |
 | Edit | `f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]` | old/new 从文件读,免命令行转义;old 须恰好出现一次(`--all` 至少一次);`--chomp` 去掉两文件末尾各一个换行 |
+| Edits(同一文件多处) | `f edits PATH --stdin [--sep S] [--sep-next S2] [--expect-sha X]` | stdin 为若干组 `OLD`、独占一行 `@@DEVSVC-NEW@@`、`NEW`,组间独占一行 `@@DEVSVC-NEXT@@`;各组依次在内存里套用,每组 old 须在当时内容里恰好出现一次(ENOMATCH/EMULTI 指明第几组),全过才经一次 file.write 原子落盘,.cx 只试编一次,试编失败(ECOMPILE)整批不落盘;相对 PATH 按写根(UNISACC_FLOW_ROOT,缺省仓根)解析。同一文件改三处:逐次 f edit 约 6960 ms,一次 f edits 约 2390 ms(2026-11-17 实测,检查 check-devsvc-flow 的 f-edits-* 例) |
 | Bash | `x [--timeout-ms N] [--cwd D] -- ARGV...` | 不经 shell(要管道就 `-- sh -c '...'`);独立进程组,超时整组杀,rc 124;退出码即命令自己的 |
 | 多步并行 | `flow - [--cat] [--jobs N]`(stdin 给节点表)或 `flow run FILE.tsv` | 每行 `id<TAB>op<TAB>deps<TAB>k=v;k=v`,op 为 exec、file.read、file.write、file.edit、compare、search;无依赖的节点并发,有依赖的按序;`--cat` 直接带回各节点输出 |
 | Grep、git grep | 节点 `search`:`pattern=固定串;paths=空格分隔的文件、目录或 glob;max=N` | 输出 `path:line:text`;只做固定串(cx 无正则库,`regex=1` 拒绝);跳过 `.git`、链接与二进制;超出 max 末行 `SEARCH_TRUNC` |
