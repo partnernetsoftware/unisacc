@@ -192,12 +192,14 @@ export function createWebGLRenderer(canvas) {
     }
     {
       const mid = cloud.mapId | 0;
-      if (mid && texCache[mid]) {
+      const rec = mid ? texCache[mid] : 0;
+      if (rec && rec.tex) {
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, texCache[mid]);
+        gl.bindTexture(gl.TEXTURE_2D, rec.tex);
         if (uMap) gl.uniform1i(uMap, 0);
         if (uHasMap) gl.uniform1f(uHasMap, 1);
       } else if (uHasMap) gl.uniform1f(uHasMap, 0);
+
     }
 
 
@@ -245,16 +247,21 @@ export function createWebGLRenderer(canvas) {
         for (let i = 0; i < textures.length; i++) {
           const t = textures[i];
           const id = t.id | 0;
-          if (!id || texCache[id]) continue;
-          const tex = gl.createTexture();
+          if (!id) continue;
+          let h = 2166136261;
+          const src = t.rgba;
+          for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
+          const rec = texCache[id];
+          if (rec && rec.hash === h) continue;
+          const tex = rec && rec.tex ? rec.tex : gl.createTexture();
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, t.rgba);
-          texCache[id] = tex;
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+          texCache[id] = { hash: h, tex: tex };
         }
       }
       const w = canvas.width, h = canvas.height;
