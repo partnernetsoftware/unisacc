@@ -11,7 +11,8 @@ static void ck(int ok, const char *lab) {
 int main(void) {
     char cwd[512], url[800], line[256], ids[16][32];
     char spec[4096], hex[65], want[80];
-    int xmin[16], ymin[16], md[16], er[16], nels = 0, i, n, rc, sl = 0;
+    int xmin[16], ymin[16], md[16], mstd[16], er[16], nels = 0, i, n, rc, sl = 0;
+
     FILE *tf, *hf;
     char *av[12];
     char *out = 0;
@@ -45,8 +46,12 @@ int main(void) {
         md[nels] = d;
         while (*s && *s != '\t') s++;
         if (*s == '\t') s++;
+        mstd[nels] = atoi(s);
+        while (*s && *s != '\t') s++;
+        if (*s == '\t') s++;
         er[nels] = atoi(s);
         nels++;
+
     }
     fclose(tf);
     hf = fopen("ujs/plans/demo-v2/look-dev/s0-spec.sha256", "r");
@@ -84,14 +89,18 @@ int main(void) {
     if (p) p = strchr(p, '{');
     ck(p != 0, "hud");
     for (i = 0; i < nels; i++) {
-        char key[40];
-        int got = -1, k2 = 0, green;
+        char key[40], ks[44];
+        int got = -1, gstd = -1, k2 = 0, green;
         key[k2++] = '"';
         { int j = 0; while (ids[i][j] && k2 < 36) key[k2++] = ids[i][j++]; }
         key[k2++] = '"'; key[k2++] = ':'; key[k2] = 0;
         q = p ? strstr(p, key) : 0;
         if (q) got = atoi(q + k2);
+        { int j = 0; k2 = 0; ks[k2++] = '"'; while (ids[i][j] && k2 < 36) ks[k2++] = ids[i][j++]; ks[k2++] = '_'; ks[k2++] = 's'; ks[k2++] = 't'; ks[k2++] = 'd'; ks[k2++] = '"'; ks[k2++] = ':'; ks[k2] = 0; }
+        q = p ? strstr(p, ks) : 0;
+        if (q) gstd = atoi(q + k2);
         green = got >= md[i];
+        if (mstd[i] > 0) green = green && gstd >= mstd[i];
         if (er[i] == 0) {
             ck(green, ids[i]);
         } else {
@@ -102,7 +111,7 @@ int main(void) {
                 printf("PASS\t%s\twip-red\n", ids[i]);
             }
         }
-        printf("EL\t%s\tgot=%d\tmin=%d\ter=%d\n", ids[i], got, md[i], er[i]);
+        printf("EL\t%s\tgot=%d\tmin=%d\tstd=%d\tmin_std=%d\ter=%d\n", ids[i], got, md[i], gstd, mstd[i], er[i]);
     }
 
     {
@@ -135,6 +144,30 @@ int main(void) {
         printf("EL\tnobow-bow\tgot=%d\n", gotb);
         if (out) free(out);
     }
+    {
+
+        char u2[820];
+        int ci = -1, gstd = -1, gots = -1, gotc = -1;
+        for (i = 0; i < nels; i++) if (ids[i][0]=='c' && ids[i][1]=='l' && ids[i][2]=='o' && ids[i][3]=='u' && ids[i][4]=='d' && ids[i][5]==0) ci = i;
+        n = 0; while (url[n]) { u2[n] = url[n]; n++; }
+        u2[n++] = '#'; u2[n++] = 'n'; u2[n++] = 'o'; u2[n++] = 'c'; u2[n++] = 'l'; u2[n++] = 'o'; u2[n++] = 'u'; u2[n++] = 'd'; u2[n] = 0;
+        av[6] = "--user-data-dir=/tmp/uxe-s0-nocloud";
+        av[9] = u2;
+        out = 0; on = 0;
+        rc = cx_runv_timeout(av, 25, &out, &on);
+        p = out ? strstr(out, "<pre id=\"hud\">") : 0;
+        if (p) p = strchr(p, '{');
+        if (p && ci >= 0) {
+            q = strstr(p, "\"cloud_std\":"); if (q) gstd = atoi(q + 12);
+            q = strstr(p, "\"sky\":"); if (q) gots = atoi(q + 6);
+            q = strstr(p, "\"cloud\":"); if (q) gotc = atoi(q + 8);
+        }
+        ck(gstd < (ci>=0?mstd[ci]:3), "nocloud-cloud-std");
+        ck(gots >= 29, "nocloud-sky");
+        printf("EL\tnocloud-cloud\tstd=%d\tdelta=%d\n", gstd, gotc);
+        if (out) free(out);
+    }
+
     printf("CHECK_UXE_S0_EXIST\tn=%d\tfailed=%d\n", nels, failed);
     return failed ? 1 : 0;
 
