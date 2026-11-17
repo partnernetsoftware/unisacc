@@ -241,3 +241,11 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 检查:`tools/check-flowdoc.cx`(批次 flowdoc,26 项)。
 - 未做:CLI 与 flow doc 节点各自的专项检查项;入口按 HEAD 固定核心,doc 子命令在新核心入库后才对 `devsvc.cx` 生效。
 
+
+## 9 flow 负载准入(2026-11-17)
+
+- 规则:并发总量以机器负载不高于 10 为界(prd_mempalace.md 决定)。flow 的 exec 节点起跑前,除机器令牌(cxlib.flowadmit,容量按核数与内存,load1 超两倍核数减半)外,再过负载门:load1 高于阈值时本次运行不放行任何新 exec 节点,已在跑的不动,load1 回落到阈值及以下即放行。
+- 有界:每次 flow 运行因负载推迟的累计时间有上限,到期照常放行并在回执标记;运行总 deadline 仍然有效,不会无界等待。
+- 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
+- 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
+- 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。
