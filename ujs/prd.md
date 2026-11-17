@@ -103,7 +103,7 @@
 
 | 号 | 事实 | 计划 | 验收 |
 |---|---|---|---|
-| U1 | import 声明已落地(条件 sid2);无调用填包、无宿主 env。W3 真目标未验收 | G1-submit.md | `tools/check-ujs-gpu-import.cx` 批次 `ujs-gpu-import`。不得记 G1 完成 |
+| U1 | 声明+调用已落地;host1 唯一 import no-op;非真 GPU。不得记 G1 完成 | G1-submit.md | `tools/check-ujs-gpu-import.cx` 批次 `ujs-gpu-import`。fly 金 3868。不得记 G1 完成 |
 | U2 | D1-D5 `.ujs` 无 `function`,未触 MAXFN=8 | 先表再改常量 | `rg '^function' ujs/tests/examples/{fly,water,ink,oneshot,ghibli}.ujs` 空 |
 | U3 | 无 sqrt/sin/cos;`f64 mod` 拒绝 | G3-math.md | `./ujs/ujs.com` 含 `%` 的 f64 源码非零;页 JS 仍算旋转 |
 | U4 | `run_step` 调 main;顶层 let 每帧清 | G4-step.md;独立 0.0.9 | 全局 yaw/wind 跨 step 仍在;顶层 let 不跨帧 |

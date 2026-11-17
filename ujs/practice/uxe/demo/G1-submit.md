@@ -20,7 +20,7 @@ prd 0.3b G1 / W3 同条。
 
 ## 状态
 
-条件 import 已合入。词法字节比较,无新 strcmp。fly 无 sid2;`ujs/tests/gpu-submit.ujs` / `gpu-submit-call.ujs` 有 sid2。host1 `--run` gpu-submit-call 不因缺 import trap。批次 `ujs-gpu-import`。G1 未完成(无真 GPU)。
+条件 import 已合入。词法字节比较,无新 strcmp。声明+调用已落地。host1 唯一 import `env.host_gpu_submit` no-op。fly `--run` 金 3868;`gpu-submit-call.ujs --run` i64=1 不 trap。批次 `ujs-gpu-import`。非真 GPU。不得记 G1 完成。
 
 
 
