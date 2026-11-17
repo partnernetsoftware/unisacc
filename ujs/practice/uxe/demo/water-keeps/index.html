@@ -19,6 +19,8 @@ import { createWebGLRenderer } from "../../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../../scene.js";
 import { MESH_SHIP, MESH_BOX, MESH_OCTA } from "../../meshes.js";
 import { MESH_PLANE } from "../../meshes.js";
+import { createBrowserHost } from "../../host-browser.js";
+import { encodeRenderPacket } from "../../packet.js";
 
 function rgb(n){
   return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
@@ -33,7 +35,7 @@ window.addEventListener("keyup",e=>{ keys[e.code]=0; });
 let pal=[660520,1708064,530456,1574920,1052696,1310732,790548,657936];
 let ok=0, z=0, hdg=0, spd=0.4;
 
-const renderer=createWebGLRenderer(canvas);
+let renderer=null;
 const scene=new Scene();
 scene.wave=1.0;
 scene.ink=0.25;
@@ -97,7 +99,27 @@ function realmAt(zz){
   let r=(zz/40)|0; if(r<0)r=0; if(r>7)r=7; return r;
 }
 
-function tick(){
+function packCloud(c){
+  return {
+    color:c.color, count:c.count, xyz:c.xyz, scale:c.scale,
+    meshId:c.meshId, emissive:c.emissive,
+    metalness:c.metalness, roughness:c.roughness,
+  };
+}
+function submitGpu(host){
+  const clouds=[];
+  scene.clouds.forEach(c=>clouds.push(packCloud(c)));
+  host.host_gpu_submit(encodeRenderPacket({
+    clear:scene.clearColor,
+    camera:{ fovy:camera.fovy, near:camera.near, far:camera.far, eye:camera.eye, target:camera.target },
+    fog:scene.fog,
+    ambient:scene.ambient,
+    lights:scene.lights,
+    clouds,
+  }));
+  host.host_frame_present();
+}
+function stepSim(){
   if(!AUTO){
     if(keys.KeyA||keys.ArrowLeft) hdg-=0.03;
     if(keys.KeyD||keys.ArrowRight) hdg+=0.03;
@@ -121,9 +143,8 @@ function tick(){
   water.set(0, 0, 0, -z-80, 240);
   camera.setEye(x*0.3, 4.2, -z+10);
   camera.setTarget(x, 0.6, -z-14);
-  renderer.render(scene, camera);
   hud.textContent=(ok?"WATER_OK ":"")+"realm "+(ri+1)+"/8  UXE GL ship+fog+plane · WASD · no three";
-  requestAnimationFrame(tick);
+  return ri;
 }
 
 (async function(){
@@ -136,7 +157,25 @@ function tick(){
   }catch(e){ ok=0; }
   document.title=ok?"WATER_OK":"WATER_FAIL";
   if(AUTO) hud.textContent=(ok?"WATER_OK ":"")+"realm 1/8";
+  let host=null, gpu=0;
+  try{
+    host=await createBrowserHost(canvas,{ prefer:"webgl", baseURL:new URL("../../", import.meta.url) });
+    stepSim();
+    submitGpu(host);
+    gpu=1;
+  }catch(e){ host=null; gpu=0; }
+  if(gpu){
+    function tick(){ try{ stepSim(); submitGpu(host); requestAnimationFrame(tick); }catch(e){} }
+    requestAnimationFrame(tick);
+    return;
+  }
+  renderer=createWebGLRenderer(canvas);
   renderer.resize();
+  function tick(){
+    stepSim();
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
   tick();
 })();
 </script>
