@@ -44,14 +44,14 @@ host1_vm `frame-run` 4 帧与 8 帧末值均为 1。
 
 (1) 语法:默认顶层 `let` 仍每帧清,不提升。显式 `persist let yaw = 0`(关键字 `persist` 在 `let` 前)。未标的 D1-D5/语料 28 条与 fly 3868 语义不变。不靠把全部顶层 let 塞进 MAXG=64。
 
-(2) 初值一次标志:线性内存 `PERSIST_FLAG=949936`(=HOST_SCRATCH-64)。每 persist 槽 1 字节,最多 64。`host_reset_globals` 把这 64 字节打 0。不与 GBASE=2048、HEAP0=4096、HOST_SCRATCH=950000(64KiB)、STORE_WIN=1015808 重叠。
+(2) 值存储选 (a):区 `PERSIST_BASE=949024`(=HOST_SCRATCH-1024)。每槽 9 字节(type 1B + flag 1B + bits 8B 可 pad 到 16 对齐;64 槽 <=1024)。type:1=i64(`persist let yaw = 0`)、2=f64(`= 0.0`)。读写拆箱/装箱,不用 GBASE 句柄过帧(reset 会回收 HEAP0)。`host_reset_globals` 清该区。不与 GBASE=2048、HEAP0=4096、HOST_SCRATCH=950000、STORE_WIN=1015808 重叠。
 
 (3) `let-b64.js` 派生物:生成器 `tools/gen-g4-let-b64.cx --check/--write`(编 `g4-let-yaw.ujs` 再 base64),对盘比对。不手贴。
 
-(4) `check-ujs-g4-yaw.cx`:同断言 host1_vm `frame-run` 8 帧与 chrome `<title>`。红:`G4_LET_RED` 与末值 1;绿:1..8 与 `G4_LET_OK`。反例:夹具去掉 `persist` 必须回到 RED。红绿证据进提交说明。cxraw:`compiler_min` 不增(基线 96);`host1_vm` 择机压回 34。
+(4) `check-ujs-g4-yaw.cx`:双引擎。红全 1/`G4_LET_RED`;绿 1..8/`G4_LET_OK`;去 persist 回红。堆碰到 949024 前须 trap(大 list 反例,不得改写持久区)。cxraw compiler_min 不增;host1_vm 择机压回 34。
 
 ## 状态
 
-红金已出。四点已定。compiler_min 未改。
+红金已出。值存原始位+类型。compiler_min 未改。
 
 
