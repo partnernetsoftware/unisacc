@@ -1,0 +1,144 @@
+/* tools/check-funit-procslot.cx -- -funit objects export the process slots as named COMMON symbols.
+ *
+ *   sh ./unisacc.com tools/check-funit-procslot.cx -- [PRODUCT]      (default ./unisacc.com)
+ *
+ * R2 W2a.  The argc and argv cells of the process region used to sit anonymously at the .bss tail of every
+ * -funit object (.bss+off relocations), so two objects linked together got two private copies.  The object
+ * net now writes them as SHN_COMMON symbols _unisa_proc_argc and _unisa_proc_argv (value 8 = alignment,
+ * size 8) and every reference to them is a named relocation, so the system linker merges them into one.
+ * Object: the actual product compiler (the candidate under test), not a repo tool.
+ * Cases, each compiled by PRODUCT with -c -b lnx/x86_64 -funit, linked by /usr/bin/ld:
+ *   (1) common-main   m.o (main) has both symbols, shndx 0xfff2, value 8, size 8
+ *   (2) common-unit   a.o (no main, reads __argc/__argv) has both symbols, same shape
+ *   (3) merge-run     ld s.o a.o (s.o: hand entry with .comm slots), run with "z": a.o sees argc 2, argv[1] "z", rc 21
+ *   (4) negctl        a.o copy with the argc name renamed (_unisa_proc_argX): the two cells no longer merge;
+ *                     the run must NOT give rc 21 (the check reports how it differs); a silent 21 fails the check
+ * Exit 0 all hold, 1 a case fails (named), 2 usage or I/O.
+ */
+#pragma unisa use sys.proc
+
+static int fails;
+static char dir[4096];
+
+static unsigned long rd(const unsigned char *b, long off, int n) {
+    unsigned long v = 0; int i;
+    for (i = n - 1; i >= 0; i--) v = (v << 8) | b[off + i];
+    return v;
+}
+
+/* Find NAME in the ELF64 .symtab: 1 found (shndx/value/size out), 0 absent, -1 malformed. */
+static int sym_of(const unsigned char *b, size_t n, const char *name, long *shndx, long *value, long *size) {
+    long shoff, shnum, i;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    shoff = (long)rd(b, 0x28, 8); shnum = (long)rd(b, 0x3c, 2);
+    if (rd(b, 0x3a, 2) != 64 || shoff + shnum * 64 > (long)n) return -1;
+    for (i = 0; i < shnum; i++) {
+        long h = shoff + i * 64, off, sz, ent, link, stroff, j;
+        if (rd(b, h + 4, 4) != 2) continue;
+        off = (long)rd(b, h + 0x18, 8); sz = (long)rd(b, h + 0x20, 8); ent = (long)rd(b, h + 0x38, 8);
+        link = (long)rd(b, h + 0x28, 4);
+        if (ent != 24 || off + sz > (long)n || link >= shnum) return -1;
+        stroff = (long)rd(b, shoff + link * 64 + 0x18, 8);
+        for (j = 0; j < sz / 24; j++) {
+            long s = off + j * 24, nm = (long)rd(b, s, 4);
+            if (stroff + nm + (long)strlen(name) + 1 > (long)n) return -1;
+            if (!memcmp(b + stroff + nm, name, strlen(name) + 1)) {
+                *shndx = (long)rd(b, s + 6, 2); *value = (long)rd(b, s + 8, 8); *size = (long)rd(b, s + 16, 8);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void path(char *p, size_t cap, const char *leaf) { cx_fmt(p, cap, "%s/%s", dir, leaf); }
+
+static int run(char **v, int secs) { char *out = 0; size_t on = 0; int rc = cx_runv_timeout(v, secs, &out, &on); free(out); return rc; }
+
+static int compile(const char *product, const char *name, const char *src) {
+    char c[4200], o[4200], leaf[64]; char *v[12]; int rc;
+    cx_fmt(leaf, sizeof leaf, "%s.c", name); path(c, sizeof c, leaf);
+    cx_fmt(leaf, sizeof leaf, "%s.o", name); path(o, sizeof o, leaf);
+    if (cx_write(c, src, strlen(src))) { fprintf(stderr, "check-funit-procslot: cannot write %s\n", c); exit(2); }
+    v[0] = "sh"; v[1] = (char *)product; v[2] = "-c"; v[3] = "-b"; v[4] = "lnx/x86_64"; v[5] = "-funit";
+    v[6] = c; v[7] = "-o"; v[8] = o; v[9] = 0;
+    rc = run(v, 50);
+    if (rc) { printf("FAIL\tcompile-%s\trc=%d\n", name, rc); fails++; }
+    return rc;
+}
+
+static void common_case(const char *label, const char *leaf) {
+    static const char *syms[] = {"_unisa_proc_argc", "_unisa_proc_argv"};
+    char o[4200]; size_t bn = 0; unsigned char *b; int i;
+    path(o, sizeof o, leaf);
+    b = (unsigned char *)cx_read(o, &bn);
+    if (!b) { printf("FAIL\t%s\tcannot read %s\n", label, o); fails++; return; }
+    for (i = 0; i < 2; i++) {
+        long shndx = 0, value = 0, size = 0; int got = sym_of(b, bn, syms[i], &shndx, &value, &size);
+        if (got != 1) printf("FAIL\t%s\t%s %s\n", label, syms[i], got < 0 ? "malformed object" : "absent (anonymous slot)");
+        else if (shndx != 0xfff2 || value != 8 || size != 8)
+            printf("FAIL\t%s\t%s shndx=0x%lx value=%ld size=%ld want COMMON 0xfff2 8 8\n", label, syms[i], shndx, value, size);
+        else { printf("PASS\t%s\t%s shndx=0xfff2 value=8 size=8\n", label, syms[i]); continue; }
+        fails++;
+    }
+    free(b);
+}
+
+/* A hand-written entry s.o (assembled by /usr/bin/as) declares the slots with .comm, stores argc and argv
+   into them and exits with ua()*10+uv().  ld s.o UNIT -o EXE, run EXE z; returns the run rc, or -1 when the
+   link fails (link rc in *linkrc).  Two objects each carrying _unisa_proc_argc: the merge is ld's COMMON rule. */
+static const char start_s[] =
+    ".globl _start\n.comm _unisa_proc_argc,8,8\n.comm _unisa_proc_argv,8,8\n.text\n_start:\n"
+    "mov (%rsp),%rax\nmov %rax,_unisa_proc_argc(%rip)\nlea 8(%rsp),%rax\nmov %rax,_unisa_proc_argv(%rip)\n"
+    "call ua\npush %rax\npush %rax\ncall uv\npop %rcx\npop %rcx\nimul $10,%ecx,%ecx\nadd %ecx,%eax\n"
+    "mov %eax,%edi\nmov $60,%eax\nsyscall\n";
+static int link_run(const char *unit, const char *exe, int *linkrc) {
+    char s[4200], so[4200], u[4200], e[4200]; char *v[12];
+    path(s, sizeof s, "s.s"); path(so, sizeof so, "s.o"); path(u, sizeof u, unit); path(e, sizeof e, exe);
+    if (cx_write(s, start_s, strlen(start_s))) { fprintf(stderr, "check-funit-procslot: cannot write %s\n", s); exit(2); }
+    v[0] = "/usr/bin/as"; v[1] = "-o"; v[2] = so; v[3] = s; v[4] = 0;
+    *linkrc = run(v, 30);
+    if (*linkrc) return -1;
+    v[0] = "/usr/bin/ld"; v[1] = "-o"; v[2] = e; v[3] = so; v[4] = u; v[5] = 0;
+    *linkrc = run(v, 30);
+    if (*linkrc) return -1;
+    v[0] = e; v[1] = "z"; v[2] = 0;
+    return run(v, 10);
+}
+
+static void negctl(void) {
+    static const char nm[] = "_unisa_proc_argc";
+    char a[4200], ax[4200]; size_t bn = 0, j; unsigned char *b; int renamed = 0, lrc = 0, rc;
+    path(a, sizeof a, "a.o"); path(ax, sizeof ax, "ax.o");
+    b = (unsigned char *)cx_read(a, &bn);
+    if (!b) { printf("FAIL\tnegctl\tcannot read %s\n", a); fails++; return; }
+    for (j = 0; j + sizeof nm <= bn; j++) if (!memcmp(b + j, nm, sizeof nm)) { b[j + sizeof nm - 2] = 'X'; renamed++; }
+    if (!renamed || cx_write(ax, b, bn)) { printf("FAIL\tnegctl\tno argc name to rename (renamed=%d)\n", renamed); fails++; free(b); return; }
+    free(b);
+    rc = link_run("ax.o", "max", &lrc);
+    if (rc == 21) { printf("FAIL\tnegctl\trenamed slot still gives rc=21 (silent pass)\n"); fails++; }
+    else printf("PASS\tnegctl\trenamed argc slot detected: linkrc=%d runrc=%d != 21\n", lrc, rc);
+}
+
+int main(int argc, char **argv) {
+    const char *product = argc > 1 ? argv[1] : "./unisacc.com";
+    const char *tmp = getenv("TMPDIR");
+    static const char *leaves[] = {"m.c", "m.o", "a.c", "a.o", "ax.o", "ma", "max", "s.s", "s.o"};
+    int lrc = 0, rc, i;
+    if (argc > 2) { fprintf(stderr, "usage: check-funit-procslot.cx -- [PRODUCT]\n"); return 2; }
+    cx_fmt(dir, sizeof dir, "%s/check-funit-procslot-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    if (mkdir(dir, 0700)) { fprintf(stderr, "check-funit-procslot: cannot create %s\n", dir); return 2; }
+    if (!compile(product, "m", "extern int ua(void);\nextern int uv(void);\nint main(void){return ua()*10+uv();}\n") &&
+        !compile(product, "a", "int ua(void){return __argc();}\nint uv(void){char *p=(char *)__argv(1);return p[0]=='z';}\n")) {
+        common_case("common-main", "m.o");
+        common_case("common-unit", "a.o");
+        rc = link_run("a.o", "ma", &lrc);
+        if (rc == 21) printf("PASS\tmerge-run\tld s.o a.o rc=21 (one argc/argv cell)\n");
+        else { printf("FAIL\tmerge-run\tlinkrc=%d runrc=%d want 21\n", lrc, rc); fails++; }
+        negctl();
+    }
+    for (i = 0; i < 9; i++) { char p[4200]; path(p, sizeof p, leaves[i]); unlink(p); }
+    rmdir(dir);
+    printf("CHECK_FUNIT_PROCSLOT\tfailed=%d\n", fails);
+    return fails ? 1 : 0;
+}
