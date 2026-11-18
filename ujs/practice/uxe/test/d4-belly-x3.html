@@ -180,9 +180,20 @@ function townBlock(color,x,y,z,w,h,d,roll) {
   if(houseSlots.has(key) && !houseSlots.get(key)) houseSlots.set(key,item);
   return item;
 }
-const townCounts=buildTown(layout.filter(([kind,,y])=>kind!=="smoke" &&
-  (kind!=="gear" || y>=deckTop || params.has("bare-belly"))),{block:townBlock,add,round},mode,
+const bareBelly=params.has("bare-belly"),heroGear=[];
+const mainGear=([kind,,,,w])=>kind==="gear" && w>=2;
+const townCounts=buildTown(layout.filter(row=>row[0]!=="smoke" && !mainGear(row) &&
+  (row[0]!=="gear" || row[2]>=deckTop || bareBelly)),{block:townBlock,add,round},mode,
   !params.has("no-u2-fittings"));
+if(!params.has("no-main-gear")) {
+  const originalGear=bareBelly || params.has("recessed-main-gear");
+  const hero=layout.filter(mainGear).map(([kind,x,y,z,w,h,d])=>
+    originalGear?[kind,x,y,z,w,h,d]:[kind,x,y-.18,4.76,w*1.48,h*1.48,d]);
+  townCounts.gears+=buildTown(hero,{
+    block:(...args)=>heroGear.push(block(...args)),
+    add:(...args)=>heroGear.push(add(...args)),round
+  },mode).gears;
+}
 const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
 if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
 const arcadeMeshes=new Map();
@@ -547,6 +558,25 @@ function startPlay() {
       visible+=String(Number(pixels[at]>127)+2*Number(pixels[at+1]>127)+4*Number(pixels[at+2]>127));
     }
     document.querySelector("output").textContent=trace.join(";")+"|"+visible;
+  } else if(params.has("main-gear-check")) {
+    const w=400,h=300,x=640,y=25;
+    const full=new Uint8Array(w*h*4),hidden=new Uint8Array(full.length);
+    draw();
+    gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,full);
+    for(const item of heroGear) set(item,[item[0],-90,...item.slice(2)]);
+    renderer.render(scene,camera);
+    gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,hidden);
+    const rows=[];
+    for(let row=0;row<h;row++) {
+      let lit=0;
+      for(let col=0;col<w;col++) {
+        const i=4*(row*w+col),r=full[i],g=full[i+1],b=full[i+2];
+        if(r>115 && r-g>=18 && g-b>=25 &&
+           Math.abs(r-hidden[i])+Math.abs(g-hidden[i+1])+Math.abs(b-hidden[i+2])>=36) lit++;
+      }
+      rows.push(lit);
+    }
+    document.querySelector("output").textContent=rows.join(",");
   } else if(params.has("belly-check")) {
     draw();
     document.querySelector("output").textContent=belly.map(({role,part})=>

@@ -456,6 +456,42 @@ static double smoke_cos(double x) {
     return sum;
 }
 
+static int main_gear_pixels(const char *variant,int *visible) {
+    enum { ROWS=300, WIDTH=400 };
+    char cwd[1024],url[4096],profile[128],option[160],*out=0;
+    char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
+        "--use-angle=swiftshader","--enable-unsafe-swiftshader","--virtual-time-budget=5500","--dump-dom",option,url,0};
+    size_t size=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-belly-x3.html?main-gear-check&%s",cwd,variant);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-d4-main-gear-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    int rc=cx_runv_timeout(av,15,&out,&size);
+    chd_wipe(profile);
+    const char *p=out?strstr(out,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(out); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    *visible=0;
+    for(int row=0;row<ROWS;row++) {
+        int lit,used=0;
+        if(sscanf(p,"%d%n",&lit,&used)!=1 || lit<0 || lit>WIDTH ||
+            p[used]!=(row+1<ROWS?',':'<')) { free(out); return 2; }
+        *visible+=lit;
+        p+=used+1;
+    }
+    free(out);
+    return 0;
+}
+
+static int check_main_gear(const char *mutation) {
+    enum { P7_VISIBLE_PIXELS=3526 };
+    int baseline=0,visible=0;
+    if(main_gear_pixels("bare-belly",&baseline) || main_gear_pixels(mutation,&visible)) return 2;
+    int bad=visible<P7_VISIBLE_PIXELS || visible<baseline;
+    printf("D4_MAIN_GEAR p7_pixels=%d candidate_pixels=%d bad=%d\n",baseline,visible,bad);
+    return bad;
+}
+
 static int check_belly(const char *mutation) {
     char cwd[1024],url[4096],profile[128],option[160],*out=0;
     char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
@@ -901,6 +937,9 @@ int main(int argc,char **argv) {
     if((argc==2 || argc==3) && (!strcmp(argv[1],"w3") || !strcmp(argv[1],"published-w3")))
         return check_w3(argc==3?argv[2]:"",argv[1][0]=='p');
     if((argc==2 || argc==3) && !strcmp(argv[1],"w3-path")) return check_bridge_walk(argc==3?argv[2]:"",2);
+    if(argc==2 && !strcmp(argv[1],"main-gear")) return check_main_gear("");
+    if(argc==2 && (!strcmp(argv[1],"no-main-gear") || !strcmp(argv[1],"recessed-main-gear")))
+        return check_main_gear(argv[1]);
     if(argc==2 && !strcmp(argv[1],"belly")) return check_belly("");
     if(argc==2 && (!strcmp(argv[1],"bare-belly") || !strcmp(argv[1],"flat-belly"))) return check_belly(argv[1]);
     if(argc==2 && !strcmp(argv[1],"belly-smoke")) return check_w2("",2);
