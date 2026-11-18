@@ -198,3 +198,7 @@ D4 开发预览为 `test/d4-skeleton.html?play`。长按 W、S、上下方向键
 墨桥漫游和行走城镇的开发预览从测试页分别导出到 `docs/uxe/ink-walk` 和 `docs/uxe/oneshot`。这两条发布事实为带 SHA-256 全量固定清单的 `live`。`gen-uxe-pages --check` 同时比较源生成物和发布清单。更新候选时按页面先运行 `--write --only ID`，再用 `--pins --only ID` 生成待复核哈希，更新事实表后运行全量检查。
 
 复跑 `tools/check-uxe-d1-flight.cx -- bridge-pages-input` 和 `-- town-pages-input`。Chrome CDP 向实际导出页发送按键按下和松开事件，AUTO 在两者之间推进固定逻辑帧。D3 标题 `D3_OK`，前进 2160 毫米，坐标为 10543、1708、14920 毫米。D4 标题 `D4_OK`，甲板前进 960 毫米并后退归零，镜头同步移动，静止烟团上升 110 毫米。D3 冻结轨道、D4 冻结步态或烟团、两页错误 AUTO 标题分别退出 1。cc 合入后做线上读回。
+
+### P5 发布候选
+
+用 V1 `d3-bridge-v1.html` 和 V2 `d4-skeleton-v2.html` 更新原发布位置，固定的文件清单分别为 20 和 18 项。P4 的 CDP 操控和 AUTO 验收继续适用。另用 `tools/check-uxe-d3-geometry.cx -- published-v1` 和 `-- published-v2` 从导出目录读取画布，复核石桥叶团、垂藤、桥厚及城镇屋顶、钟面、风车、栏旗和腿部表面细节。参考并排图分别在 `/tmp/cdx2-v1-d3-comparison.png` 和 `/tmp/cdx2-v2-d4-comparison.png`。

@@ -26,9 +26,9 @@ import { archMeshes } from "./d3-arch.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
-const release=!location.pathname.endsWith("/d4-skeleton.html");
-const play=release || params.has("play") || params.has("play-check");
-const finishU2c=play || params.has("finish-u2c");
+const release=!location.pathname.endsWith("/d4-skeleton-v2.html");
+const play=(release && !params.has("v2-probe")) || params.has("play") || params.has("play-check");
+const finishU2c=true;
 const enlarged=params.has("scale-u2b") || finishU2c;
 const paper=params.has("paper-u3") || enlarged;
 const dense=params.has("dense-u2") || paper;
@@ -44,7 +44,9 @@ const paint={
   gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96],
   groundMark:[194,92,45], arcade:[207,171,120], alcove:[54,81,86],
   pineDark:[39,87,48], pineMid:[59,115,56], pineLight:[82,135,66], trunk:[96,69,39],pipe:[147,110,61],
-  copper:[161,119,70], steel:[107,124,128]
+  copper:[161,119,70], steel:[107,124,128], legHoop:[106,70,42], legRust:[151,68,42],
+  dialRim:[105,70,44], dialPaper:[242,228,181], dialInk:[54,43,37],
+  balconyRail:[98,59,43], pennantRed:[198,73,49], pennantGold:[232,173,55], pennantBlue:[57,122,139]
 };
 function mesh(positions,normals,uvs) {
   const id=allMeshes().length+extraMeshes.length;
@@ -71,7 +73,7 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if(!groups.has(key)) groups.set(key,{color,id,items:[]});
   const item=[x,y,z,size,yaw,pitch,roll];
   groups.get(key).items.push(item);
-  if (!["joint","link","foot","darkgrass","farhill","grove","groundMark","pineDark","pineMid","pineLight","trunk"].includes(color) && id!==MESH_PLANE) bodies.push(item);
+  if (!["joint","link","foot","legHoop","legRust","darkgrass","farhill","grove","groundMark","pineDark","pineMid","pineLight","trunk"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
 function block(color,x,y,z,w,h,d,roll=0) {
@@ -87,7 +89,19 @@ function linkTransform(a,b,scale=1) {
 function strut(a,b,width) {
   const length=Math.hypot(...b.map((v,i)=>v-a[i]));
   const {positions,normals,uvs}=barrelMesh(width,length);
-  return [add("link",mesh(positions,normals,uvs),...linkTransform(a,b,length)),length];
+  const adornments=[];
+  function band(color,diameter,axisWidth,t,rise=0) {
+    const part=barrelMesh(diameter,axisWidth);
+    const pose=linkTransform(a,b,length);
+    const position=a.map((v,i)=>v+(b[i]-v)*t+(i===2?rise:0));
+    const item=add(color,mesh(part.positions,part.normals,part.uvs),...position,1,...pose.slice(4));
+    adornments.push({item,t,rise});
+  }
+  if(!params.has("v2-bare-legs")) {
+    for(const t of [.22,.50,.78]) band("legHoop",width*1.054,.19,t);
+    for(const t of [.32,.61,.68]) band("legRust",width*.31,.11,t,width*.455);
+  }
+  return [add("link",mesh(positions,normals,uvs),...linkTransform(a,b,length)),length,adornments];
 }
 const ball=leafMesh(1);
 const round=mesh(ball.positions,ball.normals);
@@ -120,8 +134,20 @@ const deckItem=block("wood",0,6.23,0,deckLength/1000,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
 const firstTown=bodies.length;
-const layout=await townLayout(dense && !params.has("thin-u2-town"));
-const townCounts=buildTown(enlarged?layout.filter(row=>row[0]!=="smoke"):layout,{block,add,round},mode,
+const layout=(await townLayout(dense && !params.has("thin-u2-town"))).map(row=>{
+  if(!row[0].startsWith("house-")) return row;
+  const [kind,x,y,z,w,,d]=row, ridge=Math.floor((x+5)*1.7)%3;
+  const h=params.has("v2-level-roofs")?2.05:
+    z>1.7?.74+ridge*.32:z>-.5?1.45+ridge*.70:z>-2.1?2.85+ridge*.81:3.8+ridge*.54;
+  return [kind,x,y,z,w,h,d];
+});
+const houseSlots=new Map(layout.filter(row=>row[0].startsWith("house-")).map(row=>[row[1]+":"+row[3],null]));
+function townBlock(color,x,y,z,w,h,d,roll) {
+  const item=block(color,x,y,z,w,h,d,roll), key=x+":"+z;
+  if(houseSlots.has(key) && !houseSlots.get(key)) houseSlots.set(key,item);
+  return item;
+}
+const townCounts=buildTown(layout.filter(row=>row[0]!=="smoke"),{block:townBlock,add,round},mode,
   !params.has("no-u2-fittings"));
 const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
 if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
@@ -135,6 +161,17 @@ for(const row of (await arcadeSpec.text()).trim().split("\n").slice(1)) {
       .map(({positions,normals,uvs})=>mesh(positions,normals,uvs)));
   for(const segment of arcadeMeshes.get(key)) add("arcade",segment,x,y,z);
   block("alcove",x,y+.48,z-.32,.91,.90,.10);
+  if(!params.has("v2-bare-balcony")) {
+    const railY=y+deck;
+    for(const offset of [-.46,-.23,0,.23,.46]) block("balconyRail",x+offset,railY+.27,z+.15,.078,.53,.078);
+    for(const level of [.10,.54]) block("balconyRail",x,railY+level,z+.15,1.04,.084,.09);
+    if(Math.round((x+4.37)/1.08)%2===0) {
+      const color=["pennantRed","pennantGold","pennantBlue"][Math.round((x+4.37)/2.16)%3];
+      block("balconyRail",x-.38,railY+.74,z+.22,.075,1.44,.075);
+      const p=[0,.17,0,.62,.06,.04,0,-.18,0, 0,-.18,0,.62,.06,.04,.36,-.12,.09];
+      add(color,mesh(new Float32Array(p)),x-.36,railY+1.31,z+.24,1);
+    }
+  }
 }
 const towers=[],domes=[],smoke=[];
 let blade,actualSpan=0;
@@ -157,8 +194,23 @@ if(enlarged) {
     block("glass",x,top-.64,z,w*.76,.40,w*.76);
     towers.push({shaft,cap});
   }
-  actualSpan=wingSpan/(params.has("tiny-u2b-wing")?2000:1000);
-  const hub=[-3.2,deckTop+height*.71,.01];
+  if(!params.has("v2-no-clock")) {
+    const dial=[.15,11.91,2.65];
+    const disc=(color,width,z)=>{
+      const shape=barrelMesh(width,.13);
+      add(color,mesh(shape.positions,shape.normals,shape.uvs),dial[0],dial[1],z,1,0,Math.PI/2);
+    };
+    disc("dialRim",1.54,dial[2]);
+    disc("dialPaper",1.28,dial[2]+.09);
+    for(let i=0;i<12;i++) {
+      const a=i*Math.PI/6;
+      block("dialInk",dial[0]+Math.sin(a)*.47,dial[1]+Math.cos(a)*.47,dial[2]+.169,.036,i%3===0?.12:.063,.036,-a);
+    }
+    for(const [angle,length] of [[.81,.47],[-1.2,.33]]) block("dialInk",
+      dial[0]-Math.sin(angle)*length*.42,dial[1]+Math.cos(angle)*length*.42,dial[2]+.21,.065,length,.05,angle);
+  }
+  actualSpan=wingSpan*(params.has("v2-small-wings")?1:1.35)/1000;
+  const hub=[-3.2,deckTop+height*.71,.85];
   block("wood",...hub,.88,.88,.45);
   blade=[];
   for(const angle of [.49,.49+Math.PI/2]) {
@@ -296,8 +348,13 @@ function renderPose(phase, gaitMode=mode, smokeTick=null) {
     set(parts.knee,[...knee,...parts.knee.slice(3)]);
     set(parts.foot,[...foot,...parts.foot.slice(3)]);
     for(const [name,a,b] of [["thigh",hip,knee],["shin",knee,foot]]) {
-      const [item,length]=parts[name];
-      set(item,linkTransform(a,b,length));
+      const [item,length,adornments]=parts[name];
+      const transform=linkTransform(a,b,length);
+      set(item,transform);
+      for(const {item:detail,t,rise} of adornments) {
+        const xyz=a.map((value,i)=>value+(b[i]-value)*t+(i===2?rise:0));
+        set(detail,[...xyz,1,...transform.slice(4)]);
+      }
     }
   });
   renderer.render(scene,camera,textures);
@@ -451,6 +508,33 @@ if(params.has("u2b-probe")) {
     towers.filter(tower=>present(tower.cap)).length,domes.filter(present).length,smoke.filter(present).length,
     ...bounds
   ].join(",");
+}
+if(params.has("v2-probe")) {
+  const codes={dialRim:[1,0,0],dialPaper:[1,0,0],dialInk:[1,0,0],balconyRail:[0,1,0],
+    pennantRed:[0,0,1],pennantGold:[0,0,1],pennantBlue:[0,0,1],legHoop:[1,1,0],legRust:[1,0,1]};
+  scene.ambient.intensity=0;
+  scene.lights=[];
+  scene.fog={density:0,color:[0,0,0]};
+  scene.shadows=scene.output=null;
+  scene.paper=scene.outlineWidth=0;
+  scene.clearColor=[0,0,0,1];
+  for(const [key,cloud] of scene.clouds) {
+    cloud.color=[0,0,0];
+    cloud.emissive=codes[groups.get(key).color] || [0,0,0];
+    cloud.mapId=0;
+  }
+  renderer.render(scene,camera);
+  const rgba=new Uint8Array(1280*720*4);
+  gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+  let map="";
+  for(let y=3;y<720;y+=6) for(let x=3;x<1280;x+=6) {
+    const at=4*((719-y)*1280+x);
+    map+=String(Number(rgba[at]>127)+2*Number(rgba[at+1]>127)+4*Number(rgba[at+2]>127));
+  }
+  const roofs=[...houseSlots.values()].filter(item=>bindings.has(item))
+    .map(item=>Math.round(1000*(item[1]+dimensions.get(item)[1]*item[3]/2)));
+  const span=Math.round(1000*dimensions.get(blade[0])[1]);
+  document.querySelector("output").textContent=[span,...roofs].join(",")+"|"+map;
 }
 if(play) startPlay();
 </script>
