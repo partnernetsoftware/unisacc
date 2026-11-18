@@ -6,7 +6,10 @@
  * and process-intrinsic /proc and /dev handles are not external input files.
  * The cache stores an artifact, never a check verdict. --check always runs
  * the original generator independently and byte-compares the result.
+ * --candidate-key prints a trigger key over tools/candidate-trigger-inputs.tsv
+ * only (no cache, no generator, no environment); it is never a gate.
  * Usage: product-map-query.cx -- [--root DIR] [--cache DIR] [--key|--sha|--check]
+ *        product-map-query.cx -- [--root DIR] --candidate-key
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -51,12 +54,16 @@ static void walk(const char*p,int depth){
     while((next=sy_dir_next(&dir))==1){if(!strcmp(dir.name,".")||!strcmp(dir.name,".."))continue;char q[4400];fmt(q,sizeof q,p,dir.name);walk(q,depth+1);}
     sy_dir_close(&dir);if(next<0)die("walk-next");
 }
+/* --candidate-key reads the second declaration: product candidate inputs only
+ * (kind tree|file|exclude, scope input). The cache readset is unchanged. */
+static int candidate;
 static void load_rules(void){
-    char p[4400];fmt(p,sizeof p,executor,"tools/product-map-inputs.tsv");manifest=cx_read(p,0);if(!manifest)die("readset-manifest");char*b=pq_dup(manifest);
+    char p[4400];fmt(p,sizeof p,executor,candidate?"tools/candidate-trigger-inputs.tsv":"tools/product-map-inputs.tsv");manifest=cx_read(p,0);if(!manifest)die("readset-manifest");char*b=pq_dup(manifest);
     for(char*s=b;*s;){char*e=strchr(s,'\n');if(!e)die("manifest-newline");*e=0;if(*s&&*s!='#'){char*f[4]={s};int n=1;for(char*q=s;*q;q++)if(*q=='\t'){*q=0;if(n==4)die("manifest-shape");f[n++]=q+1;}
         if(n!=4||n_rules==64)die("manifest-shape");
         int env=!strcmp(f[0],"env")||!strcmp(f[0],"envpref");
-        if((!env&&strcmp(f[0],"file")&&strcmp(f[0],"tree"))||
+        if(candidate){if((strcmp(f[0],"file")&&strcmp(f[0],"tree")&&strcmp(f[0],"exclude"))||strcmp(f[1],"input")||!*f[2]||*f[2]=='/'||strstr(f[2],"..")||!*f[3])die("candidate-manifest-shape");}
+        else if((!env&&strcmp(f[0],"file")&&strcmp(f[0],"tree"))||
            (strcmp(f[1],"both")&&strcmp(f[1],"input")&&strcmp(f[1],"executor"))||
            !*f[2]||*f[2]=='/'||strstr(f[2],"..")||!*f[3]||
            (env&&(strcmp(f[1],"executor")||strspn(f[2],"ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789")!=strlen(f[2]))))die("manifest-shape");
@@ -100,6 +107,40 @@ static void coarse(char hex[65]){
         add(names,&nn,digest);
     }qsort(names,nn,sizeof names[0],order);size_t env_at=used;for(int i=0;i<nn;i++){put(names[i]);mm_free(names[i]);}nn=0;char eh[65];if(sy_sha256_hex(buffer+env_at,used-env_at,eh))die("environment-identity");used=env_at;put("environment-sha");put(eh);
     if(sy_sha256_hex(buffer,used,hex))die("coarse-sha");
+}
+/* Candidate trigger identity: relative names only, so a git archive of a
+ * commit and its checkout give the same key. Names come from the tracked set
+ * when input has .git, else from the tree walk (an archive holds only tracked
+ * names). No environment, executor file or installed product enters it. */
+static int cand_listed(const char*rel){
+    int in=0;for(int i=0;i<n_rules;i++){Rule*r=&rules[i];
+        if(!strcmp(r->kind,"exclude")&&under(rel,r->path))return 0;
+        if((!strcmp(r->kind,"tree")&&under(rel,r->path))||(!strcmp(r->kind,"file")&&!strcmp(rel,r->path)))in=1;}
+    return in;
+}
+static void cand_walk(const char*rel,int depth){
+    if(depth>64)die("directory-depth");char p[4400];fmt(p,sizeof p,input,rel);sy_stat_t st;int rc=sy_lstat(p,&st);if(rc==-ENOENT)return;if(rc)die("walk-stat");
+    if(st.kind!='d'){if(cand_listed(rel))add(names,&nn,rel);return;}
+    sy_dir_t dir;if(sy_dir_open(&dir,p))die("walk-open");int next;
+    while((next=sy_dir_next(&dir))==1){if(!strcmp(dir.name,".")||!strcmp(dir.name,".."))continue;char q[4400];fmt(q,sizeof q,rel,dir.name);cand_walk(q,depth+1);}
+    sy_dir_close(&dir);if(next<0)die("walk-next");
+}
+static void candidate_key(char hex[65]){
+    used=0;put("candidate-trigger-v1");put(manifest);nn=0;
+    char g[4400];fmt(g,sizeof g,input,".git");sy_stat_t st;int rc=sy_lstat(g,&st);
+    if(!rc){char*out=0;size_t n=0;char *v[]={"git","-C",input,"ls-files","-z",0};if(cx_runv_timeout(v,20,&out,&n)||!out)die("git-tracked-set");
+        for(size_t at=0;at<n;){size_t k=strlen(out+at);if(cand_listed(out+at))add(names,&nn,out+at);at+=k+1;}mm_free(out);}
+    else if(rc==-ENOENT){for(int i=0;i<n_rules;i++)if(strcmp(rules[i].kind,"exclude"))cand_walk(rules[i].path,0);}
+    else die("git-stat");
+    qsort(names,nn,sizeof names[0],order);
+    for(int i=0;i<nn;i++){char p[4400];fmt(p,sizeof p,input,names[i]);put(names[i]);rc=sy_lstat(p,&st);
+        if(rc==-ENOENT)put("ENOENT");else if(rc)die("identity-stat");
+        else if(st.kind=='l'){char to[4400];long k=sy_readlink(p,to,sizeof to-1);if(k<0||k>=(long)sizeof to-1)die("readlink");to[k]=0;put("SYMLINK");put(to);}
+        else if(st.kind=='d')put("DIRECTORY");
+        else if(st.kind=='f'){size_t k=0;char*b=cx_read(p,&k),h[65];if(!b||sy_sha256_hex(b,k,h))die("identity-read");put(h);mm_free(b);}
+        else die("identity-kind");
+        mm_free(names[i]);}
+    nn=0;if(sy_sha256_hex(buffer,used,hex))die("candidate-sha");
 }
 static int declared(const char*p){
     for(int i=0;i<n_rules;i++){Rule*r=&rules[i];if(r->kind[0]=='e')continue;for(int which=0;which<2;which++){if(which==0&&!strcmp(r->scope,"executor"))continue;if(which==1&&!strcmp(r->scope,"input"))continue;char q[4400];fmt(q,sizeof q,which?executor:input,r->path);if(!strcmp(p,q)||(!strcmp(r->kind,"tree")&&under(p,q)))return 1;}}
@@ -146,7 +187,10 @@ static void discard(const char*ref,const char*key){const char*ext[]={"tsv","read
 static int same(const char*a,const char*b){size_t an=0,bn=0;char*x=cx_read(a,&an),*y=cx_read(b,&bn);int ok=x&&y&&an==bn&&!memcmp(x,y,an);mm_free(x);mm_free(y);return ok;}
 int main(int argc,char**argv){
     const char*root=".",*cache_arg=0;int key_only=0,sha_only=0,check=0;long start=sy_now_ms();
-    for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];else if(!strcmp(argv[i],"--cache")&&i+1<argc)cache_arg=argv[++i];else if(!strcmp(argv[i],"--key"))key_only=1;else if(!strcmp(argv[i],"--sha"))sha_only=1;else if(!strcmp(argv[i],"--check"))check=1;else die("usage");}
+    for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];else if(!strcmp(argv[i],"--cache")&&i+1<argc)cache_arg=argv[++i];else if(!strcmp(argv[i],"--key"))key_only=1;else if(!strcmp(argv[i],"--sha"))sha_only=1;else if(!strcmp(argv[i],"--check"))check=1;else if(!strcmp(argv[i],"--candidate-key"))candidate=1;else die("usage");}
+    if(candidate){if(key_only+sha_only+check||cache_arg)die("usage");if(sy_realpath(root,input,sizeof input)<0||sy_cwd(executor,sizeof executor)<0)die("root");
+        const char*git_env[]={"GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"};for(int i=0;i<5;i++)if(sy_unsetenv(git_env[i]))die("candidate-environment");
+        char hex[65];load_rules();candidate_key(hex);printf("%s\n",hex);return 0;}
     if(key_only+sha_only+check>1)die("usage");if(sy_realpath(root,input,sizeof input)<0||sy_cwd(executor,sizeof executor)<0||sy_realpath("unisacc.com",product,sizeof product)<0)die("root");
     if(cache_arg){if(cx_fmt(cache,sizeof cache,"%s/product-map",cache_arg))die("cache-bound");}else if(cx_fmt(cache,sizeof cache,"%s/.cache/unisacc/derived/product-map",sy_env_or("HOME","")))die("cache-bound");
     if(sy_mkdir_all(cache,0700)||cx_fmt(work,sizeof work,"%s/product-map-query-XXXXXX",sy_tmpdir())||!mkdtemp(work))die("workspace");load_rules();query_context();
