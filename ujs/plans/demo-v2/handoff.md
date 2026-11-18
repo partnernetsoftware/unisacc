@@ -174,3 +174,27 @@ Q2b 为 UXE WebGL 材质添加 `toonLevels`，范围为 2 至 16 的整数。立
 (4) 开发经 devsvc，仓内改动用 Edit/Write 或 .cx；版本控制也经 devsvc。只动本车道；新工具和批次用 register，逐表跑 own-diff，提交共享表用 commit-own --keyed 全字段键。新清单的 coverage 行常需单列 interfaces.* 键。每次提交后回归并 push origin HEAD:ujs。不要写 main 或发布页。
 
 (5) 视频在 `/tmp/ref/d3.mp4`、`/tmp/ref/d4.mp4`，下载地址和 SHA 在 [D3 来源](ref/d3/SOURCE.txt)、[D4 来源](ref/d4/SOURCE.txt)。ffmpeg 曾可从 `~/.hermes/tools/ffmpeg-9.0.1-linux-x64/bin/` 调用。D3 已核全片，0.25 秒采 52 张；D4 采 208 张，详见 [D3 分析](essence/d3-v2.md)、[D4 分析](essence/d4-v2.md)。评论样本为 `/tmp/x-comments/d1.md` 至 `/tmp/x-comments/d4.md`，共 125 条。其要点、作者归属和永久链接已存入[评论区补证](essence/ESSENCE-v2.md#评论区补证)，临时文件清理后仍可复核。
+
+### D3 与 D4 渲染候选
+
+D3 漫游 `773b535` 已在 `ujs` 候选，入口为 `test/d3-bridge.html?walk=1`。U1 `227ecc6` 的方向光阴影、色调映射和距离雾可用 `?render-u1=1` 预览。U2 `5e9eff4` 的石桥细节和 44 栋城镇建筑可用 `?dense-u2=1` 预览。U3 的纸纹和斜向笔触用 `?paper-u3=1` 预览，同时开启 U1 和 U2。候选等待上线授权，D4 交互漫游仍待验证。
+
+U3 用上节的 Chrome 设置分别拍 D3 和 D4，同一机位用 `?paper-u3=1&no-u3-paper` 拍关闭版。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- paper-u3 D3关闭.png D3开启.png D4关闭.png D4开启.png`。检查将画布与两张裁掉白边的参考帧统一到 960 x 540，按 60 x 60 像素分块，共 144 块每场。逐块输出灰度方差、截顶的相邻亮度差及开关平均变化。用关闭截图替换开启截图时应退出 1。
+
+U3 正例两场各有 144 块达到开关差值区间。与参考帧的相邻亮度差指标相比，D3 距离从 20596 增至 21137，D4 从 47971 降至 27786。方差距离分别从 146482 到 146911、155277 到 154553。参考帧构图不同，指标只描述同位置的局部统计。并排图保存在 `/tmp/cdx2-u3-d3-comparison.png` 和 `/tmp/cdx2-u3-d4-comparison.png`。
+
+U2b 的构图入口为两张测试页的 `?scale-u2b`。D3 有五座递远石拱、带二层阳台的桥头房和桥下山层，房屋墙体包围盒占视口宽度 18.4%。D4 最高塔 9.7，甲板长 11，风车叶展 5.7，同用场景单位。城镇塔楼三座、圆顶两个、按三路九层布置烟团 27 个，甲板到塔顶的包围盒占视口 41.7% 宽、70.5% 高。并排图左侧为参考帧，右侧为候选，路径为 `/tmp/cdx2-u2b-d3-comparison.png` 和 `/tmp/cdx2-u2b-d4-comparison.png`。
+
+经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- scale-u2b`。检查从 TSV 独立投影包围盒以及计算比例和数量，随后读取 Chrome 中的布局终值。追加单个带引号的参数 `short-u2b&small-u2b&low-u2b&tiny-u2b-wing&few-u2b-towers&few-u2b-domes&flat-u2b-smoke` 可复现两场均红、退出 1。
+
+U2c 用 `?finish-u2c` 预览。D3 调整雾和阴影范围，恢复桥头房的双色墙与灰蓝屋面，桥厚从 3 增至 7.4，远山以圆丘替换三角轮廓。D4 保留 27 团，按三路各三簇塑形，另加铜顶和甲板下的机械腹板。并排图在 `/tmp/cdx2-u2c-d3-comparison.png` 和 `/tmp/cdx2-u2c-d4-comparison.png`。
+
+经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- finish-u2c`。检查从画布像素独立计算房屋暖色亮度分箱与方差，以及城镇上方的烟团颜色面积。分别追加 `bare-u2c-house` 和 `thin-u2c-smoke` 可验证两个反例各退出 1。
+
+D4 开发预览为 `test/d4-skeleton.html?play`。长按 W、S、上下方向键或屏幕按钮控制城镇前后行走，镜头跟随甲板，烟团停步后仍上升。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- d4-play`。Chrome 的合成键盘事件走页面监听器，检查读回五个时点的甲板、镜头和烟团终值。前进 0.960、停步保持、后退归零。分别追加 `fixed-u2c-gait`、`fixed-u2c-camera`、`still-u2c-smoke` 验证各反例。起点与跟拍并排图在 `/tmp/cdx2-d4-play-comparison.png`。
+
+### P4 发布候选
+
+墨桥漫游和行走城镇的开发预览从测试页分别导出到 `docs/uxe/ink-walk` 和 `docs/uxe/oneshot`。这两条发布事实为带 SHA-256 全量固定清单的 `live`。`gen-uxe-pages --check` 同时比较源生成物和发布清单。更新候选时按页面先运行 `--write --only ID`，再用 `--pins --only ID` 生成待复核哈希，更新事实表后运行全量检查。
+
+复跑 `tools/check-uxe-d1-flight.cx -- bridge-pages-input` 和 `-- town-pages-input`。Chrome CDP 向实际导出页发送按键按下和松开事件，AUTO 在两者之间推进固定逻辑帧。D3 标题 `D3_OK`，前进 2160 毫米，坐标为 10543、1708、14920 毫米。D4 标题 `D4_OK`，甲板前进 960 毫米并后退归零，镜头同步移动，静止烟团上升 110 毫米。D3 冻结轨道、D4 冻结步态或烟团、两页错误 AUTO 标题分别退出 1。cc 合入后做线上读回。
