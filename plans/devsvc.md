@@ -402,3 +402,30 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 候选触发键维持产品读集口径。改变打包器、版本注入器、构造工具库的行为，或改变版本和管理器配方时，负责人用新 HEAD 手动起候选并核摘要；即使产品键相同，也要给此次变更单独的构造回执。chain4 固定材料的对照中，六份工具各改一个注释字节，APE 均与原件逐字节相同。把启动器内存下限从 53248 改为 53249 KiB，APE 长度相同、摘要改变。
 
 生产按两步放行。先用满 24 小时的影子观测核误触发和漏触发均为零，通过取代、去重和负载负控后，允许一条有界真实候选。该候选与同冻结输入的手动整链各自通过 promote 检查、产物逐字节相同且 prepared.tsv 与磁盘一致，才放行常规自动构造。原始 dry 行是单次预览，影子统计要独立套用稳定期、准入及材料复用条件。逐项判据与复验命令见 release/evidence/react-candidate-inputs-2026-11-18.tsv。
+
+## 整链提速(2026-11-18)
+
+建议先拆长作业实际占用的写域。real6 的慢点是两代 Linux 对象批，chain4 的慢点已转到跨平台整目标重试。real6 从起到止 3752 秒，链内自产管理器。chain4 显式传两份管理器，OWNER 到 EXIT 为 1613 秒，499/499、rc 0；chain2 首次为 1379 秒，停在 pack；chain3 为 1346 秒，停在 cache-manager 缺 checkpoint。三者都不能替 real6 的同配方冷构造验收。
+
+下表取各会话 `chain-run.tsv` 的 ATTEMPT_TIME 按毫秒降序，各列独立排名，单位秒，保留一次尝试的原墙钟。括号 124 表示该次超时；chain4 这五相后来均以 rc 0 收尾。代号 T 是单个 owner 驱动多步目标构造，可按产物拆；F 是已切出的前端或 stub 子步，内部单进程占比 UNMEASURED；L 是 Linux 闭包准备，J 是多作业组。原始会话在 `/tmp/unisacc-session-v072-chain{2,3,4}/REV/`，chain2/3 的 REV 前缀 ec7fbfdbaf，chain4 为 5cdbd305b1。
+
+|名次|chain2 相 / 秒|chain3 相 / 秒|chain4 相 / 秒|
+|---|---|---|---|
+|1|g2-osx-arm64 T 88.078 (124)|g2-win-arm64 T 88.073 (124)|g2-win-x86_64 T 88.077 (124)|
+|2|gen1-osx-x86_64 T 88.068 (124)|g3-osx-x86_64 T 88.059 (124)|g2-win-arm64 T 88.065 (124)|
+|3|g3-win-x86_64 T 82.801|gen2-osx-arm64-stub F 88.055 (124)|gen1-osx-arm64 T 88.058 (124)|
+|4|gen1-osx-arm64 T 82.374|gen3-osx-arm64-front1 F 85.723|g3-win-x86_64 T 88.046 (124)|
+|5|jobs-gen J 71.474|gen1-osx-x86_64 T 83.577|g2-osx-arm64 T 88.042 (124)|
+|6|gen1-win-arm64 T 71.212|g2-osx-x86_64 T 78.311|g2-osx-x86_64 T 84.038|
+|7|gen1-osx-x86_64-stub F 66.368|g2-lnx-x86_64-closure-prepare L 77.249|gen1-osx-x86_64 T 76.839|
+|8|g2-win-arm64 T 65.271|g2-lnx-arm64-closure-prepare L 76.898|gen1-win-x86_64 T 74.238|
+|9|g2-lnx-arm64-closure-prepare L 64.917|g3-win-x86_64 T 72.513|gen2-osx-arm64-front1 F 71.552|
+|10|g2-lnx-x86_64-closure-prepare L 64.578|gen1-osx-arm64-stub F 69.126|jobs-gen J 66.639|
+
+计时口径影响选相。仓内 release/evidence 的 chain4 表按主心跳相邻 end 计时，kernels-g2 栏的 752 秒包含其他 lane 的工作。该相作业 ATTEMPT_TIME 为 41.724 秒，内部 DONE 为 30.268 秒。五次 88 秒也有重叠，节省量须按关键路径实测。历史 build/phase-times.tsv 的 g3 Linux x86/arm 两相分别为 734.227/733.842 秒，g2 为 725.068/727.361 秒。candidate-chain 的 run_g2_lnx 从 roots 开始计到 closures 结束，给同批各根登记累计时间，obj-43 的 359.750 秒不能归给一个编译进程。chain4 两个 g3 objects 的 DONE 仅 1.478/1.484 秒，此前闭包已有独立作业。
+
+(1) Linux 按目标内对象组拆。run_g_lnx_pair 已支持每代两个架构同时跑，until、限次让出及 parallel=1 走串行分支；chain-run 还能分 lane，chain4 的 g3 两条 closure-prepare 有不同 owner 且执行重叠。计划序号 474 至 481 中，arm 准备依赖两条 g2 完成，x86 准备依赖 g2 x86。保留依赖与唯一链接者。在同目标内沿现有 fp_batch 冷首键、暖探针与预算划组，现行 build/g2-budget.tsv 为 55 秒、暖批最多 5 键，chain-step 暂存上限 8。先试每目标两个互斥键组、全局最多四个 worker。每组自有 stage 和临时目录；现有 OUT.batch-gG-T、目标级 receipt 和 .chain-steps 不能让两个 worker 同写。单一 owner 按原根序核完整键集、逐对象摘要及构造者身份后发布收据，再链接。组崩溃只丢该组未提交暂存。优先把切片放进相内，499 行计划已接近 candidate-chain 的 512 行容量。
+
+(2) 跨平台先试 g2-win-x86_64。chain4 的 attempt 165 为整目标 --until 加 --lane，超时后 172 成功。gen_slice_phase 依次执行 fronts、win span、导入 image；沿已有 units/e3/image 的落盘边界逐段记开始、结束、摘要和恢复点，实测哪个段耗尽窗口，再只调度尚缺子段。macOS 保留 B 的串行依赖。对拍时同时记录作业时间与最后一个前置完成到 compare 的墙钟，区分消掉的重试和被兄弟 lane 遮住的收益。
+
+(3) 放行与回退。建议冷链目标 3300 秒，给 3600 秒作业留 300 秒。real6 配方须净省 452 秒达到该目标，改后墙钟 UNMEASURED。固定冻结输入、工具与管理器来源，用两个空会话做原版和拆分版冷对照，记录 OWNER 到 EXIT、负载、每组 PID 和起止；逐对象、六目标 image 与 APE 字节相同，两边 promote --check 通过。另测中断一组后恢复、少键、重复键、坏摘要均不得完成父相。若计划 id、顺序、依赖或宽度改变，chain-run 的计划身份随之变化，须新开 BASE；相内方案也须绑定分片协议版本，旧 stage 或旧 DONE 不能直接采信。保留原配方和独立输出目录作回退。同配方冷跑达到预算后，才具备 react 真起的耗时证据。
