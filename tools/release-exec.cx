@@ -264,6 +264,17 @@ static void gate_strict(void) {
     find_strict();
     if (!(t = slurp(strictp, &n))) refuse("STRICT", strictp);
     while (line_next(t, n, &at, &ls, &ll)) {
+        /* devsvc qualify (tools/dvqualify.cx) writes each BATCH_RUN line verbatim behind "RAW\t",
+           the count in the batch row note (count=P/F) and the APE identity in the SUMMARY row */
+        if (ll > 4 && !memcmp(ls, "RAW\t", 4)) { ls += 4; ll -= 4; }
+        if (ll > 8 && !memcmp(ls, "SUMMARY\t", 8)) {
+            char vk[96];
+            if (kv(ls, ll, "ape_sha256=", c, sizeof c) && !tx_eqz(c, cand.sha[0])) { free(t); refuse("CANDIDATE_SHA", "strict SUMMARY ape_sha256 differs from candidate"); }
+            if (!cx_fmt(vk, sizeof vk, "\tversion=unisacc %s", cand.version)) {
+                long k = tx_find(ls, ll, vk, tlen(vk));
+                if (k >= 0 && (k + tlen(vk) == ll || ls[k + tlen(vk)] == '\t' || ls[k + tlen(vk)] == '\r')) ver = 1;
+            }
+        }
         if (ll >= 10 && !memcmp(ls, "BATCH_RUN\t", 10)) {
             rows++;
             kv(ls, ll, "id=", id, sizeof id); kv(ls, ll, "status=", st, sizeof st); kv(ls, ll, "candidate=", c, sizeof c);
@@ -279,6 +290,17 @@ static void gate_strict(void) {
                         kv(s2, l2, "pass=", pf, sizeof pf); kv(s2, l2, "fail=", ff, sizeof ff);
                         cx_fmt(got, sizeof got, "%s/%s", pf, ff); match = tx_eqz(got, want);
                     }
+                if (!got[0]) {
+                    /* dvqualify batch row: id<TAB>domain<TAB>status<TAB>...<TAB>note with count=P/F[;...] */
+                    char rk[160], f2[32], cn[64]; a2 = 0;
+                    cx_fmt(rk, sizeof rk, "%s\t", id);
+                    while (line_next(t, n, &a2, &s2, &l2))
+                        if (l2 > tlen(rk) && !memcmp(s2, rk, (size_t)tlen(rk)) && tab_field(s2, l2, 2, f2, sizeof f2) && tx_eqz(f2, "FAIL") &&
+                            kv(s2, l2, "count=", cn, sizeof cn)) {
+                            long q = 0; while (cn[q] && cn[q] != ';') q++;
+                            cn[q] = 0; cx_fmt(got, sizeof got, "%s", cn); match = tx_eqz(got, want);
+                        }
+                }
                 if (!match) { cx_fmt(d, sizeof d, "batch %s FAIL count %s != expected %s", id, got[0] ? got : "none", want); free(t); refuse("EXPECTED_FAIL", d); }
                 xf++; continue;
             }
