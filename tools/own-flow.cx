@@ -7,33 +7,38 @@
  *
  * Rules.  Subjects are the plain local names (parameters included; globals and file statics excluded) that
  * appear as the only argument of a releaser: free, mm_free, and every NAME declared in the same file by a
- * comment `own-flow: releases NAME`.  No-return calls also include names containing panic, die_, _die,
- * fatal_, and functions of the same file whose body ends in a no-return call.  A goto label makes every
- * subject live again; a name declared in an inner block leaves scope with it; after for (;;) and while (1)
- * the entry state stands in for the break states.
- * Statements are read in source order; a name is live until it is released, then freed (with the line).
+ * comment `own-flow: releases NAME`, or by a one-line macro `#define NAME(x) free(x)` (mm_free or a declared
+ * releaser in place of free).  The argument may be parenthesized or cast: free((p)), free((void *)p).
+ * No-return calls also include names containing panic, die_, _die, fatal_, and functions of the same file
+ * whose body ends in a no-return call.  A name declared in an inner block leaves scope with it.
+ * The body is walked statement by statement (braced or not); a name is live until it is released, then freed
+ * (with the line).  Every merge point joins the incoming flow states: freed on any incoming path is freed.
  *   E2   any later occurrence of a freed name -- dereference, argument, operand, test, return -- is a use
  *        after free (pointer value reads included: C11 6.2.4p2 makes the value indeterminate).
  *   E2b  a freed name given to a releaser again is a double free.
  * A name comes back to live when it is assigned as a whole (`p = ...`), declared again, or its address is
  * taken (`&p`, treated as reassigned).  `sizeof p` and member names (`x.p`, `x->p`) are not uses.
- * Branches: an if block that ends with return, break, continue, goto or a no-return call (exit, abort, _exit,
- * _Exit, sy_exit, die, fatal, longjmp) does not carry its releases out; if/else if/else chains and switch case
- * groups each start from the state before the branch and are merged afterwards: freed on any arm is freed
- * (possibly freed is rejected).  Loops (for, while, do with braces): the body runs zero or more times; after
- * its first scan the body is scanned once more from the end state (the back edge), so a release that the next
- * iteration reaches again is a double free and a use before it is a use after free.
+ * Flow: return, break, continue, goto and a no-return call (exit, abort, _exit, _Exit, sy_exit, die, fatal,
+ * longjmp) end the path where they stand.  if/else arms (braced or not) start from the state after the
+ * condition and are joined afterwards (possibly freed is rejected).  A switch case label joins the switch
+ * entry with the fall-through of the group before it; the switch exit joins every break, the fall-through of
+ * the last group, and the entry when there is no default.  Loops (for, while, do, braced or not): the body
+ * is read from the entry and, when the back edge (end of body join continue states, then step and condition)
+ * adds a release, once more from entry join back edge, so a release the next iteration reaches again is a
+ * double free; the exit joins the back edge (none for for (;;), while (1), do .. while (1)) and every break.
+ * A goto joins its state into the label; a label joins that with the fall-through; with any goto the body is
+ * read twice so a backward goto reaches its label.
  * Escape: a comment `own-flow: unsafe` inside a function, or between the previous function and its body,
  * exempts that function; it is counted (OWNFLOW_UNSAFE line, unsafe= in the summary).  `#pragma unisa unsafe`
  * does not exist before P1; the comment is the prototype marker.
  *
  * Limits (silent misses, also printed as the LIMITS line): no aliasing (q = p, then free p, then use q), no
  * struct fields, array elements or globals as subjects, no transfer of ownership across functions (a callee
- * that frees its argument is not a releaser unless declared), no longjmp/setjmp, no macro expansion, no
- * goto flow (linear only), braceless loop bodies are not repeated, a block ended by break or continue does not
- * carry its releases out (the release reaching the loop exit or head is missed), switch fallthrough is read as
- * separate case groups, shadowing names in inner blocks are not separated from the outer name, an unbraced
- * else body is read linearly.  Preprocessor lines are skipped (both arms of #if are read).
+ * that frees its argument is not a releaser unless declared; release through a function pointer is missed),
+ * no longjmp/setjmp, macros other than the one-line releaser form are not expanded, a loop body is read at
+ * most twice, a ?: arm is read as unconditional, shadowing names in inner blocks are not separated from the
+ * outer name (the outer one is live again after the block).  Preprocessor lines are skipped (both arms of #if
+ * are read).
  *
  * Output: one line per finding
  *   OWNFLOW<TAB>FILE:LINE<TAB>FUNCTION<TAB>NAME<TAB>E2|E2b<TAB>text
@@ -67,22 +72,23 @@ static int local_noret(int i) {
     return 0;
 }
 
-/* per function state */
+/* per function state.  A flow state St holds, per subject, freed (st) and the line of the release (fl);
+   dead marks an unreachable point (after return, break, continue, goto or a no-return call). */
+typedef struct { int st[MAXV], fl[MAXV], dead; } St;
 static int vo[MAXV], vl[MAXV], vd[MAXV], nv;
-static int jump_from = -1, jump_to = -1;
-static int st[MAXV], fl[MAXV], rp[MAXV];
+static St cur;
 static int rkey[MAXREP][3], nrkey;
 static const char *g_file, *g_fn;
 static int g_fnlen, g_find;
+static int depth_now;
 
-/* block stack */
-static int bk_kind[MAXD], bk_open[MAXD], bk_replayed[MAXD], bk_acc_on[MAXD];
-static int bk_ent_st[MAXD][MAXV], bk_ent_fl[MAXD][MAXV], bk_acc_st[MAXD][MAXV], bk_acc_fl[MAXD][MAXV];
-static int nbk;
-/* if/else chain accumulators, one per stack level */
-static int ch_on[MAXD + 1], ch_st[MAXD + 1][MAXV], ch_fl[MAXD + 1][MAXV];
-
-enum { B_PLAIN, B_IF, B_ELSE, B_LOOP, B_SWITCH };
+/* break/continue targets: loops (kind 1) and switches (kind 2); a switch also keeps its entry state */
+static int fr_kind[MAXD], fr_default[MAXD], nfr;
+static St fr_brk[MAXD], fr_cont[MAXD], fr_ent[MAXD];
+/* goto labels: state joined from every goto and from the fall-through into the label */
+#define MAXL 32
+static int lb_off[MAXL], lb_len[MAXL], nlb;
+static St lb_st[MAXL];
 
 static int files, functions, flagged, findings, unsafe_n;
 
@@ -114,6 +120,36 @@ static void note_comment(const char *s, long n, int line) {
     }
 }
 
+/* `#define NAME(x) free(x)` (or mm_free, or a releaser declared earlier in the file) makes NAME a releaser;
+   the body must be exactly one releaser call on the macro parameter, an optional `;` allowed */
+static long skip_sp(long j, long n) { while (j < n && (src[j] == ' ' || src[j] == '\t')) j++; return j; }
+static long word(long j, long n) { while (j < n && of_idc(src[j])) j++; return j; }
+static void note_define(long i, long n) {
+    long j = skip_sp(i + 1, n), a, b, pa, pb, ra, rb2;
+    int r, known = 0;
+    if (j + 6 > n || memcmp(src + j, "define", 6) != 0) return;
+    j = skip_sp(j + 6, n); a = j; j = word(j, n); b = j;
+    if (b == a || j >= n || src[j] != '(') return;
+    j = skip_sp(j + 1, n); pa = j; j = word(j, n); pb = j;
+    j = skip_sp(j, n);
+    if (pb == pa || j >= n || src[j] != ')') return;
+    j = skip_sp(j + 1, n); ra = j; j = word(j, n); rb2 = j;
+    if (rb2 - ra == 4 && memcmp(src + ra, "free", 4) == 0) known = 1;
+    if (rb2 - ra == 7 && memcmp(src + ra, "mm_free", 7) == 0) known = 1;
+    for (r = 0; r < nrel; r++) if ((long)tx_len(relname[r], 64) == rb2 - ra && memcmp(src + ra, relname[r], (size_t)(rb2 - ra)) == 0) known = 1;
+    if (!known) return;
+    j = skip_sp(j, n);
+    if (j >= n || src[j] != '(') return;
+    j = skip_sp(j + 1, n);
+    if (j + (pb - pa) > n || memcmp(src + j, src + pa, (size_t)(pb - pa)) != 0) return;
+    j = skip_sp(j + (pb - pa), n);
+    if (j >= n || src[j] != ')') return;
+    j = skip_sp(j + 1, n);
+    if (j < n && src[j] == ';') j = skip_sp(j + 1, n);
+    if (j < n && src[j] != '\n' && src[j] != '\r') return;
+    if (b - a < 64 && nrel < MAXREL) { mm_copy(relname[nrel], 64, src + a, (size_t)(b - a)); relname[nrel][b - a] = 0; nrel++; }
+}
+
 static int lex(long n) {
     long i = 0; int line = 1, bol = 1;
     ntk = 0; nul = 0; nrel = 0;
@@ -122,6 +158,7 @@ static int lex(long n) {
         if (c == '\n') { line++; bol = 1; i++; continue; }
         if (c == ' ' || c == '\t' || c == '\r' || c == '\f') { i++; continue; }
         if (c == '#' && bol) {
+            note_define(i, n);
             while (i < n && src[i] != '\n') { if (src[i] == '\\' && i + 1 < n && src[i + 1] == '\n') { line++; i++; } i++; }
             continue;
         }
@@ -176,6 +213,22 @@ static int releaser(int i) {
     for (r = 0; r < nrel; r++) if (tis(i, relname[r])) return 1;
     return 0;
 }
+/* releaser call at I: the token of its single plain-name argument (parentheses and one cast stripped:
+   free((p)), free((void *)p)), or -1 */
+static int rel_arg(int i) {
+    int a, e;
+    if (!releaser(i) || !tp(i + 1, '(') || tk[i + 1].mt < 0 || tp(i - 1, '.') || tp(i - 1, '>')) return -1;
+    a = i + 2; e = tk[i + 1].mt - 1;
+    while (a < e && tp(a, '(') && tk[a].mt == e) { a++; e--; }
+    if (a < e && tp(a, '(') && tk[a].mt > a && tk[a].mt < e && tid(a + 1)) {
+        int c = tk[a].mt, j, typ = 1;
+        for (j = a + 1; j < c; j++) if (!(tid(j) || tp(j, '*'))) typ = 0;
+        if (typ) a = c + 1;
+        while (a < e && tp(a, '(') && tk[a].mt == e) { a++; e--; }
+    }
+    return a == e && tid(a) ? a : -1;
+}
+
 /* identifier I contains W (no-return naming convention: core_host_panic, die_usage, fatal_io) */
 static int name_has(int i, const char *w) {
     int n = (int)tx_len(w, 64), j;
@@ -196,30 +249,36 @@ static int var_of(int i, int add) {
     int v;
     for (v = 0; v < nv; v++) if (vl[v] == tk[i].len && memcmp(src + vo[v], src + tk[i].off, (size_t)vl[v]) == 0) return v;
     if (!add || nv >= MAXV) return -1;
-    vo[nv] = tk[i].off; vl[nv] = tk[i].len; vd[nv] = 0; st[nv] = 0; fl[nv] = 0; rp[nv] = 0;
+    vo[nv] = tk[i].off; vl[nv] = tk[i].len; vd[nv] = 0; cur.st[nv] = 0; cur.fl[nv] = 0;
     return nv++;
 }
 
+/* one line per (name, line, kind); nothing is reported at an unreachable point */
 static void report(int v, int line, int kind) {
     int r;
+    if (cur.dead) return;
     for (r = 0; r < nrkey; r++) if (rkey[r][0] == v && rkey[r][1] == line && rkey[r][2] == kind) return;
     if (nrkey < MAXREP) { rkey[nrkey][0] = v; rkey[nrkey][1] = line; rkey[nrkey][2] = kind; nrkey++; }
-    if (kind == 2) printf("OWNFLOW\t%s:%d\t%.*s\t%.*s\tE2b\t%.*s is released twice (first at line %d)\n", g_file, line, g_fnlen, g_fn, vl[v], src + vo[v], vl[v], src + vo[v], fl[v]);
-    else printf("OWNFLOW\t%s:%d\t%.*s\t%.*s\tE2\t%.*s is used after free at line %d\n", g_file, line, g_fnlen, g_fn, vl[v], src + vo[v], vl[v], src + vo[v], fl[v]);
+    if (kind == 2) printf("OWNFLOW\t%s:%d\t%.*s\t%.*s\tE2b\t%.*s is released twice (first at line %d)\n", g_file, line, g_fnlen, g_fn, vl[v], src + vo[v], vl[v], src + vo[v], cur.fl[v]);
+    else printf("OWNFLOW\t%s:%d\t%.*s\t%.*s\tE2\t%.*s is used after free at line %d\n", g_file, line, g_fnlen, g_fn, vl[v], src + vo[v], vl[v], src + vo[v], cur.fl[v]);
     findings++; g_find++;
 }
 
-static void merge_into(int *ast, int *afl) {
+/* A := A join B: freed on either path is freed; an unreachable side adds nothing */
+static void join(St *a, const St *b) {
     int v;
-    for (v = 0; v < nv; v++) if (!ast[v] && st[v]) { ast[v] = 1; afl[v] = fl[v]; }
+    if (b->dead) return;
+    if (a->dead) { *a = *b; return; }
+    for (v = 0; v < nv; v++) if (!a->st[v] && b->st[v]) { a->st[v] = 1; a->fl[v] = b->fl[v]; }
 }
-static void load_from(const int *ast, const int *afl) {
+static void set_dead(St *a) { int v; for (v = 0; v < MAXV; v++) { a->st[v] = 0; a->fl[v] = 0; } a->dead = 1; }
+/* B adds a release that A lacks */
+static int adds(const St *a, const St *b) {
     int v;
-    for (v = 0; v < nv; v++) { st[v] = ast[v]; fl[v] = afl[v]; rp[v] = 0; }
-}
-static void save_to(int *ast, int *afl) {
-    int v;
-    for (v = 0; v < MAXV; v++) { ast[v] = v < nv ? st[v] : 0; afl[v] = v < nv ? fl[v] : 0; }
+    if (b->dead) return 0;
+    if (a->dead) { for (v = 0; v < nv; v++) if (b->st[v]) return 1; return 0; }
+    for (v = 0; v < nv; v++) if (b->st[v] && !a->st[v]) return 1;
+    return 0;
 }
 
 /* first token of the last statement before the closing brace RB, or -1 */
@@ -233,24 +292,6 @@ static int last_stmt(int lb, int rb) {
         j--;
     }
     return j + 1;
-}
-static int terminated(int lb, int rb) {
-    int s = last_stmt(lb, rb);
-    if (s < 0) return 0;
-    return tis(s, "return") || tis(s, "break") || tis(s, "continue") || tis(s, "goto") || (noreturn_call(s) && tp(s + 1, '('));
-}
-
-static int block_kind(int lb) {
-    int p = lb - 1;
-    if (tis(p, "else")) return B_ELSE;
-    if (tis(p, "do")) return B_LOOP;
-    if (tp(p, ')') && tk[p].mt >= 0) {
-        int h = tk[p].mt - 1;
-        if (tis(h, "if")) return B_IF;
-        if (tis(h, "for") || tis(h, "while")) return B_LOOP;
-        if (tis(h, "switch")) return B_SWITCH;
-    }
-    return B_PLAIN;
 }
 
 /* token K is a declaration of its name: `T NAME` or `T *NAME` followed by ; , = [ or ) */
@@ -268,97 +309,32 @@ static int declared_local(int i, int lb, int rb) {
     return 0;
 }
 
-static void scan_body(int lb, int rb) {
-    int k = lb + 1, d;
-    nbk = 0; jump_from = -1;
-    for (d = 0; d <= MAXD; d++) ch_on[d] = 0;
-    /* subjects: every plain name handed to a releaser somewhere in this body */
-    for (d = lb + 1; d + 3 < rb; d++)
-        if (releaser(d) && tp(d + 1, '(') && tid(d + 2) && tp(d + 3, ')') && !tp(d - 1, '.') && !tp(d - 1, '>') && declared_local(d + 2, lb, rb)) var_of(d + 2, 1);
-    while (k < rb) {
-        if (k == jump_from) { k = jump_to; jump_from = -1; continue; }
-        /* a goto label joins flows this scan does not follow: everything is live again (goto is a limit) */
-        if (tid(k) && tp(k + 1, ':') && !tp(k + 2, ':') && (tp(k - 1, ';') || tp(k - 1, '}') || tp(k - 1, '{')) &&
-            !tis(k, "default") && !(nbk > 0 && bk_kind[nbk - 1] == B_SWITCH)) {
-            int v;
-            for (v = 0; v < nv; v++) { st[v] = 0; rp[v] = 0; }
-            k += 2; continue;
-        }
-        if (tp(k, '{')) {
-            if (nbk >= MAXD) { k = tk[k].mt + 1; continue; }
-            bk_kind[nbk] = block_kind(k); bk_open[nbk] = k; bk_replayed[nbk] = 0; bk_acc_on[nbk] = 0;
-            save_to(bk_ent_st[nbk], bk_ent_fl[nbk]);
-            nbk++;
-            k++; continue;
-        }
-        if (tp(k, '}')) {
-            if (nbk <= 0) { k++; continue; }
-            int b = nbk - 1, kind = bk_kind[b], lbk = bk_open[b];
-            if (kind == B_SWITCH) {
-                if (bk_acc_on[b]) merge_into(bk_acc_st[b], bk_acc_fl[b]), load_from(bk_acc_st[b], bk_acc_fl[b]);
-            } else if (terminated(lbk, k)) {
-                load_from(bk_ent_st[b], bk_ent_fl[b]);
-            } else if (kind == B_LOOP && !bk_replayed[b]) {
-                int v, changed = 0;
-                for (v = 0; v < nv; v++) if (st[v] && !bk_ent_st[b][v]) changed = 1;
-                if (changed) {
-                    /* back edge: a for loop's step clause runs before the next iteration */
-                    int h = tp(lbk - 1, ')') ? tk[lbk - 1].mt : -1, j, semi = 0, start = lbk + 1;
-                    bk_replayed[b] = 1;
-                    if (h > 0 && tis(h - 1, "for")) {
-                        for (j = h + 1; j < lbk - 1; j++) {
-                            if ((tp(j, '(') || tp(j, '[')) && tk[j].mt > j) { j = tk[j].mt; continue; }
-                            if (tp(j, ';') && ++semi == 2) { start = j + 1; break; }
-                        }
-                        if (start != lbk + 1) { jump_from = lbk - 1; jump_to = lbk + 1; }
-                    }
-                    k = start; continue;
-                }
-            }
-            /* a loop without an exit condition (for (;;), while (1)) is left only by break: the end-of-body
-               state does not reach the code after it; the entry state stands in for the break states */
-            if (kind == B_LOOP && tp(lbk - 1, ')') && !terminated(lbk, k)) {
-                int h = tk[lbk - 1].mt;
-                if ((tis(h - 1, "for") && tp(h + 1, ';') && tp(h + 2, ';') && tp(h + 3, ')')) ||
-                    (tis(h - 1, "while") && tis(h + 1, "1") && tp(h + 2, ')')))
-                    load_from(bk_ent_st[b], bk_ent_fl[b]);
-            }
-            nbk--;
-            {
-                /* names declared inside the closed block go out of scope */
-                int v;
-                for (v = 0; v < nv; v++) if (vd[v] > nbk) { st[v] = 0; rp[v] = 0; vd[v] = 0; }
-            }
-            /* if/else chains: an arm followed by else restarts from the state before the arm */
-            if (kind == B_IF || kind == B_ELSE) {
-                int lv = nbk + 1;
-                int d2;
-                for (d2 = lv + 1; d2 <= MAXD; d2++) ch_on[d2] = 0;
-                if (tis(k + 1, "else") && (tp(k + 2, '{') || (tis(k + 2, "if") && tp(k + 3, '(') && tk[k + 3].mt > 0 && tp(tk[k + 3].mt + 1, '{')))) {
-                    if (!ch_on[lv]) { ch_on[lv] = 1; save_to(ch_st[lv], ch_fl[lv]); }
-                    else merge_into(ch_st[lv], ch_fl[lv]);
-                    load_from(bk_ent_st[b], bk_ent_fl[b]);
-                    k += 2; continue;
-                }
-                if (ch_on[lv]) { merge_into(ch_st[lv], ch_fl[lv]); load_from(ch_st[lv], ch_fl[lv]); ch_on[lv] = 0; }
-            }
-            k++; continue;
-        }
-        /* switch case groups start from the switch entry state */
-        if ((tis(k, "case") || tis(k, "default")) && nbk > 0 && bk_kind[nbk - 1] == B_SWITCH) {
-            int b = nbk - 1;
-            if (!bk_acc_on[b]) { bk_acc_on[b] = 1; save_to(bk_acc_st[b], bk_acc_fl[b]); }
-            else merge_into(bk_acc_st[b], bk_acc_fl[b]);
-            load_from(bk_ent_st[b], bk_ent_fl[b]);
-            k++; continue;
-        }
-        if (releaser(k) && tp(k + 1, '(') && tid(k + 2) && tp(k + 3, ')') && !tp(k - 1, '.') && !tp(k - 1, '>')) {
-            int v = var_of(k + 2, 0);
+/* ---- structured walk: one statement at a time, flow states joined at every merge point ---- */
+static int stmt(int i, int rb);
+
+/* end of the expression statement at I: its `;`, or the closing brace / RB when there is none */
+static int stmt_end(int i, int rb) {
+    int j = i;
+    while (j < rb) {
+        if ((tp(j, '(') || tp(j, '[') || tp(j, '{')) && tk[j].mt > j) { j = tk[j].mt + 1; continue; }
+        if (tp(j, ';') || tp(j, '}')) return j;
+        j++;
+    }
+    return rb;
+}
+
+/* tokens [A, B) in source order: releases, uses, reassignments */
+static void expr(int a, int b) {
+    int k = a;
+    while (k < b) {
+        int s = rel_arg(k);
+        if (s >= 0) {
+            int v = var_of(s, 0), close = tk[k + 1].mt;
             if (v >= 0) {
-                if (st[v]) report(v, tk[k + 2].line, 2);
-                else { st[v] = 1; fl[v] = tk[k + 2].line; rp[v] = 0; }
+                if (cur.st[v]) report(v, tk[s].line, 2);
+                else { cur.st[v] = 1; cur.fl[v] = tk[s].line; }
             }
-            k += 4; continue;
+            k = close + 1; continue;
         }
         if (tid(k) && !tp(k + 1, '(')) {
             int v = var_of(k, 0);
@@ -370,12 +346,191 @@ static void scan_body(int lb, int rb) {
             int addr = tp(k - 1, '&') && !(tid(k - 2) || tp(k - 2, ')') || tp(k - 2, ']') || (k >= 2 && tk[k - 2].k == T_LIT));
             int szof = tis(k - 1, "sizeof") || (tp(k - 1, '(') && tis(k - 2, "sizeof"));
             if (szof) { k++; continue; }
-            if (decl) vd[v] = nbk;
-            if (decl || addr || (assign && !deref_assign && !tp(k - 1, ']'))) { st[v] = 0; rp[v] = 0; k++; continue; }
-            if (st[v] && !rp[v]) { report(v, tk[k].line, 1); rp[v] = 1; }
+            if (decl) vd[v] = depth_now;
+            if (decl || addr || (assign && !deref_assign && !tp(k - 1, ']'))) { cur.st[v] = 0; k++; continue; }
+            if (cur.st[v]) report(v, tk[k].line, 1);
             k++; continue;
         }
         k++;
+    }
+}
+
+static int block(int lb) {
+    int rb = tk[lb].mt, j = lb + 1, v;
+    depth_now++;
+    while (j < rb) { int nj = stmt(j, rb); j = nj > j ? nj : j + 1; }
+    depth_now--;
+    /* names declared inside the closed block go out of scope */
+    for (v = 0; v < nv; v++) if (vd[v] > depth_now) { cur.st[v] = 0; vd[v] = 0; }
+    return rb + 1;
+}
+
+static int label_of(int i) {
+    int l;
+    for (l = 0; l < nlb; l++) if (lb_len[l] == tk[i].len && memcmp(src + lb_off[l], src + tk[i].off, (size_t)tk[i].len) == 0) return l;
+    if (nlb >= MAXL) return -1;
+    lb_off[nlb] = tk[i].off; lb_len[nlb] = tk[i].len; set_dead(&lb_st[nlb]);
+    return nlb++;
+}
+
+static int push_frame(int kind) {
+    if (nfr >= MAXD) return -1;
+    fr_kind[nfr] = kind; fr_default[nfr] = 0;
+    set_dead(&fr_brk[nfr]); set_dead(&fr_cont[nfr]); fr_ent[nfr] = cur;
+    return nfr++;
+}
+
+/* while and for: COND [CA, CB) is read before every iteration, STEP [SA, SB) after it.  The body runs zero
+   or more times: it is read once from the entry, and once more from entry join back edge when the back edge
+   brings a release the entry lacks.  The exit is entry join back edge (none for a loop without a condition)
+   join every break. */
+static int run_loop(int ca, int cb, int sa, int sb, int body, int rb, int forever) {
+    St e, back;
+    int f, end = body, it;
+    expr(ca, cb);
+    e = cur;
+    f = push_frame(1);
+    if (f < 0) return stmt_end(body, rb) + 1;
+    for (it = 0; it < 2; it++) {
+        end = stmt(body, rb);
+        join(&cur, &fr_cont[f]);
+        expr(sa, sb);
+        expr(ca, cb);
+        back = cur;
+        if (it == 1 || !adds(&e, &back)) break;
+        cur = e; join(&cur, &back);
+    }
+    if (forever) set_dead(&cur); else { St x = e; join(&x, &back); cur = x; }
+    join(&cur, &fr_brk[f]);
+    nfr--;
+    return end;
+}
+
+static int cond_forever(int ca, int cb) {
+    return ca == cb || (cb == ca + 1 && (tis(ca, "1") || tis(ca, "true")));
+}
+
+static int stmt(int i, int rb) {
+    if (i >= rb) return rb;
+    if (tp(i, '{') && tk[i].mt > i) return block(i);
+    if (tp(i, ';')) return i + 1;
+    if (tis(i, "if") && tp(i + 1, '(') && tk[i + 1].mt > i) {
+        int c = tk[i + 1].mt, j;
+        St e, a;
+        expr(i + 2, c);
+        e = cur;
+        j = stmt(c + 1, rb);
+        a = cur;
+        if (tis(j, "else")) { cur = e; j = stmt(j + 1, rb); join(&cur, &a); }
+        else join(&cur, &e);
+        return j;
+    }
+    if (tis(i, "while") && tp(i + 1, '(') && tk[i + 1].mt > i) {
+        int c = tk[i + 1].mt;
+        return run_loop(i + 2, c, c, c, c + 1, rb, cond_forever(i + 2, c));
+    }
+    if (tis(i, "for") && tp(i + 1, '(') && tk[i + 1].mt > i) {
+        int c = tk[i + 1].mt, j, s1 = -1, s2 = -1;
+        for (j = i + 2; j < c; j++) {
+            if ((tp(j, '(') || tp(j, '[') || tp(j, '{')) && tk[j].mt > j) { j = tk[j].mt; continue; }
+            if (tp(j, ';')) { if (s1 < 0) s1 = j; else if (s2 < 0) s2 = j; }
+        }
+        if (s1 < 0 || s2 < 0) { expr(i + 2, c); return run_loop(c, c, c, c, c + 1, rb, 0); }
+        expr(i + 2, s1);
+        return run_loop(s1 + 1, s2, s2 + 1, c, c + 1, rb, cond_forever(s1 + 1, s2));
+    }
+    if (tis(i, "do")) {
+        St e = cur, back;
+        int f = push_frame(1), j = i + 1, c = -1, it;
+        if (f < 0) return i + 1;
+        for (it = 0; it < 2; it++) {
+            j = stmt(i + 1, rb);
+            join(&cur, &fr_cont[f]);
+            if (tis(j, "while") && tp(j + 1, '(') && tk[j + 1].mt > j) { c = tk[j + 1].mt; expr(j + 2, c); }
+            back = cur;
+            if (it == 1 || !adds(&e, &back)) break;
+            cur = e; join(&cur, &back);
+        }
+        cur = back;
+        if (c > 0 && cond_forever(j + 2, c)) set_dead(&cur);
+        join(&cur, &fr_brk[f]);
+        nfr--;
+        if (c > 0) return tp(c + 1, ';') ? c + 2 : c + 1;
+        return j;
+    }
+    if (tis(i, "switch") && tp(i + 1, '(') && tk[i + 1].mt > i) {
+        int c = tk[i + 1].mt, f, j;
+        St fall;
+        expr(i + 2, c);
+        if (!tp(c + 1, '{')) return stmt(c + 1, rb);
+        f = push_frame(2);
+        if (f < 0) return tk[c + 1].mt + 1;
+        set_dead(&cur);
+        j = block(c + 1);
+        fall = cur;
+        cur = fr_brk[f];
+        join(&cur, &fall);
+        if (!fr_default[f]) join(&cur, &fr_ent[f]);
+        nfr--;
+        return j;
+    }
+    if (tis(i, "case") || (tis(i, "default") && tp(i + 1, ':'))) {
+        int f, j = i + 1;
+        for (f = nfr - 1; f >= 0 && fr_kind[f] != 2; f--) ;
+        if (tis(i, "case"))
+            while (j < rb && !(tp(j, ':') && !tp(j + 1, ':'))) { if ((tp(j, '(') || tp(j, '[')) && tk[j].mt > j) j = tk[j].mt; j++; }
+        if (f >= 0) { join(&cur, &fr_ent[f]); if (tis(i, "default")) fr_default[f] = 1; }
+        return j + 1;
+    }
+    if (tis(i, "return")) {
+        int e = stmt_end(i, rb);
+        expr(i + 1, e);
+        set_dead(&cur);
+        return tp(e, ';') ? e + 1 : e;
+    }
+    if ((tis(i, "break") || tis(i, "continue")) && tp(i + 1, ';')) {
+        int f = nfr - 1;
+        if (tis(i, "continue")) while (f >= 0 && fr_kind[f] != 1) f--;
+        if (f >= 0) join(tis(i, "break") ? &fr_brk[f] : &fr_cont[f], &cur);
+        set_dead(&cur);
+        return i + 2;
+    }
+    if (tis(i, "goto") && tid(i + 1)) {
+        int l = label_of(i + 1);
+        if (l >= 0) join(&lb_st[l], &cur);
+        set_dead(&cur);
+        return tp(i + 2, ';') ? i + 3 : i + 2;
+    }
+    if (tis(i, "else")) return i + 1;
+    if (tid(i) && tp(i + 1, ':') && !tp(i + 2, ':')) {
+        int l = label_of(i);
+        if (l >= 0) join(&cur, &lb_st[l]);
+        return i + 2;
+    }
+    {
+        int e = stmt_end(i, rb);
+        expr(i, e);
+        if (tid(i) && tp(i + 1, '(') && noreturn_call(i)) set_dead(&cur);
+        return tp(e, ';') ? e + 1 : (e > i ? e : i + 1);
+    }
+}
+
+static void scan_body(int lb, int rb) {
+    int d, pass, has_goto = 0;
+    nfr = 0; nlb = 0; depth_now = 0;
+    for (d = 0; d < MAXV; d++) { cur.st[d] = 0; cur.fl[d] = 0; }
+    cur.dead = 0;
+    /* subjects: every plain local name handed to a releaser somewhere in this body */
+    for (d = lb + 1; d < rb; d++) {
+        int s = rel_arg(d);
+        if (s >= 0 && declared_local(s, lb, rb)) var_of(s, 1);
+        if (tis(d, "goto")) has_goto = 1;
+    }
+    /* a backward goto carries states the first pass meets only after the label: read the body twice */
+    for (pass = 0; pass < (has_goto ? 2 : 1); pass++) {
+        for (d = 0; d < MAXV; d++) { cur.st[d] = 0; cur.fl[d] = 0; vd[d] = 0; }
+        cur.dead = 0; nfr = 0; depth_now = 0;
+        block(lb);
     }
 }
 
@@ -445,7 +600,7 @@ int main(int argc, char **argv) {
     int a, rc = 0;
     if (argc < 2) { fprintf(stderr, "usage: own-flow.cx -- FILE...\n"); return 2; }
     for (a = 1; a < argc; a++) if (do_file(argv[a])) rc = 2;
-    printf("LIMITS\tno-alias\tno-fields-or-globals\tno-cross-function-transfer\tno-longjmp\tno-macro-expansion\tno-goto-flow\tbraceless-loops-once\tbreak-continue-blocks-not-carried\tswitch-fallthrough-split\tno-shadowing\n");
+    printf("LIMITS\tno-alias\tno-fields-or-globals\tno-cross-function-transfer\tno-longjmp\tmacro-releaser-one-line-only\tloop-body-read-twice\tternary-arm-unconditional\tno-shadowing\n");
     printf("OWNFLOW_SUMMARY files=%d functions=%d flagged=%d findings=%d unsafe=%d\n", files, functions, flagged, findings, unsafe_n);
     if (rc) return rc;
     return findings ? 1 : 0;
