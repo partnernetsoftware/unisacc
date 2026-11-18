@@ -1,0 +1,271 @@
+/* tools/check-derive-readset.cx -- 派生表读集审计:真实读集必须是声明读集的子集(漏登记的永久防线)。
+ *
+ *   sh ./unisacc.com tools/check-derive-readset.cx [-- [--only NAME,...] [--keep] [--facts-rev REV]]
+ * --facts-rev REV 负控:把私有树的 derive.tsv 与 derive-inputs.tsv 换成 REV 版本再审(修准前的声明应 FAIL)。
+ *
+ * 在私有树里(git archive HEAD 解到临时目录,根放 unisacc.com 符号链接,复制 .devsvc,git init 并提交一次快照,
+ * 供读 git ls-files 的生成器用)对 exec/facts/derive.tsv 的每张非 query-only 表,并发以 strace -f 跑其 check_argv
+ * (每表 timeout 40 秒,整体 43 秒),把仓内相对的成功读取(open 只读、stat 成功;tools/sys|text|mem 归一到 cx/...)与声明读集
+ * 比对。声明读集与 tools/derive.cx 合并规则相同:inputs_glob + derive-inputs.tsv 的 "*" 行 + cx-runtime 行(只并入
+ * .cx 生成器)+ 本表行 + generator。表自身 outputs、.git、out/、临时目录与失败探测不计;pathset 表(doc-links)
+ * 的 stat 存在性探测由路径集合身份覆盖,只计 open 读取;目录列举只计 open 的文件。
+ * 输出:READSET_MISS<TAB>表<TAB>路径(漏登记);每表 READSET<TAB>表<TAB>OK|FAIL|INCOMPLETE<TAB>reads=N<TAB>miss=N<TAB>rc=N;
+ * 末行 DERIVE_READSET<TAB>ok=<TAB>fail=<TAB>incomplete=。
+ * 退出码:0 全部 OK;1 有漏登记;3 无漏登记但有表在 strace 下未跑完(INCOMPLETE,读集为部分,不记通过);
+ * 2 用法错、私有树准备失败,或找不到 strace(DERIVE_READSET_NEEDS_STRACE,不静默通过)。
+ * 每次 CI 或慢车道跑,不进提交门热路径。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXR 64
+typedef struct { char name[64], gen[200], chk[500], wr[500], outs[700], ins[2048]; int pathset, query, sel; } T;
+static T t[MAXR]; static int nt;
+typedef struct { char name[64], ins[2048]; int ctx; } C;
+static C c[MAXR + 2]; static int nc;
+
+static int glob(const char *g, long gn, const char *s, long sn) {
+    while (gn > 0) {
+        if (g[0] == '*') { long k; for (k = 0; k <= sn; k++) if (glob(g + 1, gn - 1, s + k, sn - k)) return 1; return 0; }
+        if (sn <= 0 || g[0] != s[0]) return 0;
+        g++; gn--; s++; sn--;
+    }
+    return sn == 0;
+}
+static int words_hit(const char *ws, const char *p, int dirpfx) {
+    long i = 0, n = (long)strlen(ws), pn = (long)strlen(p);
+    while (i < n) {
+        long s;
+        while (i < n && ws[i] == ' ') i++;
+        s = i; while (i < n && ws[i] != ' ') i++;
+        if (i == s) break;
+        if (glob(ws + s, i - s, p, pn)) return 1;
+        if (dirpfx && ws[i - 1] == '/' && pn >= i - s && mm_same(ws + s, p, i - s)) return 1;
+    }
+    return 0;
+}
+static int split(char *l, char **f, int max) { int k = 1; f[0] = l; for (char *q = l; *q; q++) if (*q == '\t') { *q = 0; if (k == max) return -1; f[k++] = q + 1; } return k; }
+static int cpy(char *d, long cap, const char *s) { long n = (long)strlen(s); if (n >= cap) return 1; mm_copy(d, cap, s, n + 1); return 0; }
+static C *cfind(const char *n) { for (int i = 0; i < nc; i++) if (!strcmp(c[i].name, n)) return &c[i]; return 0; }
+
+static int load(const char *root) {
+    char p[4400]; char *b;
+    cx_fmt(p, sizeof p, "%s/tools/derive-inputs.tsv", root);
+    if (!(b = cx_read(p, 0))) return 1;
+    for (char *l = b; *l;) { char *e = strchr(l, '\n'); if (e) *e = 0;
+        if (*l && *l != '#') { char *f[4]; if (split(l, f, 4) != 4 || nc >= MAXR + 2 || cpy(c[nc].name, 64, f[0]) || cpy(c[nc].ins, 2048, f[1])) return 1; c[nc].ctx = !strcmp(f[3], "pathset"); nc++; }
+        if (!e) break; l = e + 1; }
+    cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", root);
+    if (!(b = cx_read(p, 0))) return 1;
+    for (char *l = b; *l;) { char *e = strchr(l, '\n'); if (e) *e = 0;
+        if (*l && *l != '#') { char *f[8]; T *r = &t[nt]; if (split(l, f, 8) != 8 || nt >= MAXR) return 1;
+            if (cpy(r->name, 64, f[0]) || cpy(r->gen, 200, f[1]) || cpy(r->chk, 500, f[2]) || cpy(r->wr, 500, f[3]) || cpy(r->outs, 700, f[4])) return 1;
+            C *own = cfind(r->name), *all = cfind("*"), *rt = cfind("cx-runtime"); long gn = (long)strlen(r->gen);
+            int iscx = gn > 3 && !strcmp(r->gen + gn - 3, ".cx");
+            if (cx_fmt(r->ins, sizeof r->ins, "%s %s %s %s %s", f[5], all ? all->ins : "-", iscx && rt ? rt->ins : "-", own ? own->ins : "-", r->gen)) return 1;
+            r->pathset = own && own->ctx; r->query = !strncmp(r->wr, "query-only ", 11); nt++; }
+        if (!e) break; l = e + 1; }
+    return nt == 0;
+}
+/* strace 日志 -> 漏登记。kinds: 1 open 读,2 stat 成功。 */
+#define MAXP 40000
+static char *pp[MAXP]; static char pk[MAXP]; static int np;
+/* tracked paths of the private tree (git ls-files): only these can be declared inputs; untracked generated
+ * temporaries, the git dir and caches are never inputs. */
+static char **trk; static long ntrk;
+static int pcmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int tracked_load(const char *root) {
+    char *v[] = {"git", "-C", (char *)root, "ls-files", "-z", 0}; char *o = 0; size_t n = 0; long k = 0;
+    if (cx_runv_timeout(v, 20, &o, &n) || !o) return 1;
+    for (size_t i = 0; i < n; i++) if (!o[i]) k++;
+    trk = mm_alloc((k + 1) * (long)sizeof(char *)); if (!trk) return 1;
+    for (size_t i = 0; i < n;) { trk[ntrk++] = o + i; while (i < n && o[i]) i++; i++; }
+    qsort(trk, ntrk, sizeof trk[0], pcmp);
+    return 0;
+}
+static int tracked(const char *p) { const char *k = p; return bsearch(&k, trk, ntrk, sizeof trk[0], pcmp) != 0; }
+/* one strace line "PID name(args) = RET": syscall name, first quoted path, flag tokens of openat, return sign. */
+static int tok_eq(const char *s, long n, const char *w) { long wn = (long)strlen(w); return n == wn && mm_same(s, w, n); }
+static int parse_line(const char *l, char *name, long ncap, const char **path, long *pn, int *flags_bad, int *failed) {
+    const char *p = l, *q; long k;
+    while (*p >= '0' && *p <= '9') p++;
+    while (*p == ' ') p++;
+    for (k = 0; p[k] && p[k] != '(' && k < ncap - 1; k++) name[k] = p[k];
+    if (p[k] != '(') return 1;
+    name[k] = 0; p += k + 1;
+    const char *a0 = p; long a0n = 0; while (a0[a0n] && a0[a0n] != ',' && a0[a0n] != ')') a0n++;
+    while (*p && *p != '"') p++;
+    if (!*p) return 1;
+    q = p + 1; while (*q && *q != '"') { if (*q == '\\' && q[1]) q++; q++; }
+    if (!*q) return 1;
+    *path = p + 1; *pn = q - p - 1; *flags_bad = 0;
+    if (tok_eq(name, k, "openat") && !tok_eq(a0, a0n, "AT_FDCWD")) *flags_bad = 1;
+    if (tok_eq(name, k, "openat") || tok_eq(name, k, "open")) {   /* flag field: tokens between ", " and the next "," or ")" split by | */
+        const char *f = q + 1; while (*f == ',' || *f == ' ') f++;
+        while (*f && *f != ',' && *f != ')') {
+            long t = 0; while (f[t] && f[t] != '|' && f[t] != ',' && f[t] != ')') t++;
+            if (tok_eq(f, t, "O_WRONLY") || tok_eq(f, t, "O_RDWR") || tok_eq(f, t, "O_CREAT") || tok_eq(f, t, "O_DIRECTORY")) *flags_bad = 1;
+            f += t; if (*f == '|') f++;
+        }
+    }
+    { long n = (long)strlen(l), e = n - 1; *failed = 1;
+      while (e > 2 && !(l[e] == '=' && l[e - 1] == ' ' && l[e + 1] == ' ')) e--;
+      if (e > 2) *failed = l[e + 2] == '-'; }
+    return 0;
+}
+static int audit(T *r, const char *root, const char *log, int *nreads) {
+    size_t n = 0; char *b = cx_read(log, &n); long rn = (long)strlen(root); int miss = 0, i;
+    np = 0; *nreads = 0;
+    if (!b) return -1;
+    for (char *l = b; *l;) {
+        char *e = strchr(l, '\n'); if (e) *e = 0;
+        char name[32]; const char *s; long pn; int bad, failed;
+        if (!parse_line(l, name, sizeof name, &s, &pn, &bad, &failed) && !failed && !bad) {
+            int isopen = !strcmp(name, "openat") || !strcmp(name, "open");
+            int isstat = !strcmp(name, "stat") || !strcmp(name, "lstat") || !strcmp(name, "newfstatat") || !strcmp(name, "statx");
+            char path[4400]; int skip = !(isopen || isstat);
+            if (!skip && pn > 0 && pn < (long)sizeof path) {
+                if (pn >= rn && mm_same(s, root, rn) && (pn == rn || s[rn] == '/')) { s += rn; pn -= rn; while (pn > 0 && s[0] == '/') { s++; pn--; } }
+                else if (s[0] == '/') skip = 1;
+                while (pn >= 2 && s[0] == '.' && s[1] == '/') { s += 2; pn -= 2; }
+                if (!skip && pn > 0) {
+                    mm_copy(path, sizeof path, s, pn); path[pn] = 0;
+                    while (pn > 1 && path[pn - 1] == '/') path[--pn] = 0;
+                    if (!strncmp(path, "tools/sys/", 10) || !strncmp(path, "tools/mem/", 10) || !strncmp(path, "tools/text/", 11)) { char t2[4400]; cx_fmt(t2, sizeof t2, "cx/%s", path + 6); cpy(path, sizeof path, t2); }
+                    if (tracked(path)) {
+                        for (i = 0; i < np; i++) if (!strcmp(pp[i], path)) break;
+                        if (i == np && np < MAXP) { long k = (long)strlen(path) + 1; pp[np] = mm_alloc(k); mm_copy(pp[np], k, path, k); pk[np++] = 0; }
+                        if (i < np) pk[i] |= isopen ? 1 : 2;
+                    }
+                }
+            }
+        }
+        if (!e) break; l = e + 1;
+    }
+    for (i = 0; i < np; i++) {
+        sy_stat_t st; char full[4400];
+        cx_fmt(full, sizeof full, "%s/%s", root, pp[i]);
+        if (sy_stat(full, &st) || st.kind != 'f') continue;   /* directories and vanished temporaries */
+        if (r->pathset && !(pk[i] & 1)) continue;             /* existence probes: covered by the pathset identity */
+        if (words_hit(r->outs, pp[i], 1)) continue;          /* its own outputs are compared, not inputs */
+        (*nreads)++;
+        if (!words_hit(r->ins, pp[i], 0)) { miss++; sy_printf("READSET_MISS\t%s\t%s\n", r->name, pp[i]); }
+    }
+    return miss;
+}
+static int shared_status(char *out, long cap) {
+    char *v[] = {"git", "status", "--porcelain", "--untracked-files=no", 0}; char *o = 0; size_t n = 0;
+    if (cx_runv_timeout(v, 20, &o, &n) || !o || (long)n >= cap) { free(o); return 1; }
+    mm_copy(out, cap, o, n); out[n] = 0; free(o); return 0;
+}
+static int whole_tree(T *r) {
+    const char *p = r->ins;
+    while (*p) { while (*p == ' ') p++; const char *e = p; while (*e && *e != ' ') e++; if (e - p == 1 && *p == '*') return 1; p = e; }
+    return 0;
+}
+static void find_strace(char out[4400]) {
+    const char *p = getenv("PATH"); out[0] = 0;
+    while (p && *p) {
+        const char *e = strchr(p, ':'); long n = e ? e - p : (long)strlen(p); char cand[4400];
+        if (n > 0 && n < 4000) { cx_fmt(cand, sizeof cand, "%.*s/strace", (int)n, p); if (!sy_access(cand, X_OK)) { cpy(out, 4400, cand); return; } }
+        if (!e) break; p = e + 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *only = 0, *facts_rev = 0, *root_arg = 0; int keep = 0, i;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+        else if (!strcmp(argv[i], "--facts-rev") && i + 1 < argc) facts_rev = argv[++i];
+        else if (!strcmp(argv[i], "--keep")) keep = 1;
+        else if (!strcmp(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];   /* tests: a root inside the shared checkout must be refused */
+        else { sy_printf("usage: check-derive-readset.cx [-- --only NAME,... --keep --facts-rev REV]\n"); return 2; }
+    }
+    char tracer[4400]; find_strace(tracer);
+    if (!tracer[0]) { sy_printf("DERIVE_READSET_NEEDS_STRACE\n"); return 2; }
+    char cwd[4400], root[4400], cmd[16000];
+    if (sy_cwd(cwd, sizeof cwd) < 0) return 2;
+    const char *jd = getenv("CLAUDE_JOB_DIR");
+    if (root_arg && root_arg[0] == '/') cpy(root, sizeof root, root_arg);
+    else if (root_arg) cx_fmt(root, sizeof root, "%s/%s", cwd, root_arg);   /* relative roots are judged as absolute paths */
+    else if (jd && *jd) cx_fmt(root, sizeof root, "%s/tmp/derive-readset-%d", jd, (int)sy_pid()); else cx_fmt(root, sizeof root, "%s/derive-readset-%d", sy_tmpdir(), (int)sy_pid());
+    /* Every write of this check lands under root; root must not be the shared checkout or inside it. */
+    {   char rc_[4400], rr[4400]; long cn;
+        if (sy_realpath(cwd, rc_, sizeof rc_) < 0) return 2;
+        if (sy_realpath(root, rr, sizeof rr) < 0) cpy(rr, sizeof rr, root);
+        cn = (long)strlen(rc_);
+        if (!strncmp(rr, rc_, cn) && (rr[cn] == 0 || rr[cn] == '/')) { sy_printf("DERIVE_READSET_ROOT_IN_SHARED_TREE\t%s\n", rr); return 2; }
+    }
+    char before[65536]; if (shared_status(before, sizeof before)) { sy_printf("DERIVE_READSET\tshared-status-unreadable\n"); return 2; }
+    cx_fmt(cmd, sizeof cmd, "set -e; rm -rf '%s'; mkdir -p '%s'; git archive HEAD | tar -x -C '%s'; ln -s '%s/unisacc.com' '%s/unisacc.com'; "
+        "[ ! -d .devsvc ] || cp -r .devsvc '%s/.devsvc'; cd '%s'; git init -q; printf '.devsvc\\nunisacc.com\\n' >> .git/info/exclude; git add -A; "
+        "git -c user.name=readset -c user.email=readset@localhost commit -qm snapshot", root, root, root, cwd, root, root, root);
+    { char *v[] = {"sh", "-c", cmd, 0}; char *o = 0; size_t on = 0; if (cx_runv_timeout(v, 40, &o, &on)) { sy_printf("DERIVE_READSET\tsetup-failed\t%s\n", root); return 2; } free(o); }
+    if (facts_rev) {   /* negative control: audit the declarations of an older revision (or of DIR/derive.tsv + DIR/derive-inputs.tsv) against today's real reads */
+        if (!strncmp(facts_rev, "dir:", 4)) cx_fmt(cmd, sizeof cmd, "set -e; cp '%s/derive.tsv' '%s/exec/facts/derive.tsv'; cp '%s/derive-inputs.tsv' '%s/tools/derive-inputs.tsv'", facts_rev + 4, root, facts_rev + 4, root);
+        else cx_fmt(cmd, sizeof cmd, "set -e; git show '%s:exec/facts/derive.tsv' > '%s/exec/facts/derive.tsv'; git show '%s:tools/derive-inputs.tsv' > '%s/tools/derive-inputs.tsv'", facts_rev, root, facts_rev, root);
+        char *v[] = {"sh", "-c", cmd, 0}; char *o = 0; size_t on = 0; if (cx_runv_timeout(v, 20, &o, &on)) { sy_printf("DERIVE_READSET\tfacts-rev-unreadable\t%s\n", facts_rev); return 2; } free(o);
+        sy_printf("READSET_FACTS_REV\t%s\n", facts_rev);
+    }
+    if (load(root)) { sy_printf("DERIVE_READSET\tmanifest-unreadable\n"); return 2; }
+    if (tracked_load(root)) { sy_printf("DERIVE_READSET\ttracked-list-unreadable\n"); return 2; }
+    long at = 0;
+    at += cx_fmt(cmd, sizeof cmd, "cd '%s' || exit 2; ", root) ? 0 : (long)strlen(cmd);
+    for (i = 0; i < nt; i++) {
+        T *r = &t[i]; r->sel = !r->query;
+        if (only) { const char *p = only; long nn = (long)strlen(r->name); r->sel = 0;
+            while (*p) { long k = 0; while (p[k] && p[k] != ',') k++; if (tok_eq(p, k, r->name) && k == nn) r->sel = 1; p += k; if (*p) p++; } }
+        if (!r->sel) continue;
+        if (whole_tree(r)) continue;   /* declares "*": every real read is declared by construction, no trace needed */
+        const char *ck = r->chk; if (!strncmp(ck, "query-only ", 11)) ck += 11;
+        int k = snprintf(cmd + at, sizeof cmd - at, "( '%s' -f -qq -e trace=openat,open,stat,newfstatat,lstat,statx -o '%s/.rs-%s.log' timeout 40 %s >'%s/.rs-%s.out' 2>&1; echo $? >'%s/.rs-%s.rc' ) & ",
+                         tracer, root, r->name, ck, root, r->name, root, r->name);
+        if (k <= 0 || at + k >= (long)sizeof cmd - 16) { sy_printf("DERIVE_READSET\tcommand-too-long\n"); return 2; }
+        at += k;
+    }
+    cx_fmt(cmd + at, sizeof cmd - at, "wait");
+    { char *v[] = {"sh", "-c", cmd, 0}; char *o = 0; size_t on = 0; (void)cx_runv_timeout(v, 43, &o, &on); free(o); }
+    int ok = 0, fail = 0, inc = 0;
+    for (i = 0; i < nt; i++) {
+        T *r = &t[i]; char log[4600], rcp[4600]; int nreads = 0, rc = -1, miss;
+        if (!r->sel) { if (r->query && !only) sy_printf("READSET\t%s\tSKIPPED\tquery-only\n", r->name); continue; }
+        if (whole_tree(r)) { ok++; sy_printf("READSET\t%s\tOK\tdeclared=whole-tree\n", r->name); continue; }
+        cx_fmt(log, sizeof log, "%s/.rs-%s.log", root, r->name); cx_fmt(rcp, sizeof rcp, "%s/.rs-%s.rc", root, r->name);
+        { char *b = cx_read(rcp, 0); if (b) rc = atoi(b); free(b); }
+        miss = audit(r, root, log, &nreads);
+        const char *st = miss > 0 ? "FAIL" : (miss < 0 || rc < 0 || rc == 124 || rc > 1) ? "INCOMPLETE" : "OK";
+        if (miss > 0) fail++; else if (st[0] == 'I') inc++; else ok++;
+        sy_printf("READSET\t%s\t%s\treads=%d\tmiss=%d\trc=%d\n", r->name, st, nreads, miss < 0 ? 0 : miss, rc);
+    }
+    if (!keep) { char rm[4600]; cx_fmt(rm, sizeof rm, "rm -rf '%s' 2>/dev/null || { sleep 1; rm -rf '%s'; }", root, root); char *v[] = {"sh", "-c", rm, 0}; char *o = 0; size_t on = 0; (void)cx_runv_timeout(v, 20, &o, &on); free(o); }
+    else sy_printf("READSET_TREE\t%s\n", root);
+    {   char after[65536];   /* tracked files of the shared checkout must be exactly as before (no restore: a concurrent agent may own the change) */
+        /* Other agents edit the shared checkout concurrently: a new dirty path fails only when this run could have
+           written it (cxroot.tsv, the two fact tables, or an output of a traced table); others are printed as notes. */
+        if (shared_status(after, sizeof after)) { sy_printf("DERIVE_READSET_SHARED_TREE_CHANGED\tstatus-unreadable\n"); fail++; }
+        else for (char *l = after; *l;) {
+            char *e = strchr(l, '\n'); long ln = e ? e - l : (long)strlen(l); char line[4400], *p;
+            if (ln > 3 && ln < (long)sizeof line) {
+                mm_copy(line, sizeof line, l, ln); line[ln] = 0; p = line + 3;
+                char key[4410]; cx_fmt(key, sizeof key, "\n%s\n", line); char bk[65600]; cx_fmt(bk, sizeof bk, "\n%s", before);
+                long kn = (long)strlen(key), bn = (long)strlen(bk), q; int seen = 0;
+                for (q = 0; q + kn <= bn + 1 && !seen; q++) if (mm_same(bk + q, key, kn - (bk[bn - 1] == '\n' || q + kn <= bn ? 0 : 1))) seen = 1;
+                if (!seen) {
+                    int mine = tok_eq(p, (long)strlen(p), "cxroot.tsv") || tok_eq(p, (long)strlen(p), "exec/facts/derive.tsv") || tok_eq(p, (long)strlen(p), "tools/derive-inputs.tsv");
+                    for (int j = 0; j < nt && !mine; j++) if (t[j].sel && words_hit(t[j].outs, p, 1)) mine = 1;
+                    sy_printf("DERIVE_READSET_SHARED_TREE_CHANGED\t%s\t%s\n", p, mine ? "FAIL-writable-by-this-run" : "note-foreign");
+                    if (mine) fail++;
+                }
+            }
+            if (!e) break; l = e + 1;
+        }
+    }
+    sy_printf("DERIVE_READSET\tok=%d\tfail=%d\tincomplete=%d\n", ok, fail, inc);
+    return fail ? 1 : inc ? 3 : 0;
+}
