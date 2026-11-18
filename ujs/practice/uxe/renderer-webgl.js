@@ -356,6 +356,87 @@ function createOutline(gl, ext) {
   };
 }
 
+function createPaperPass(gl, ext) {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, `
+    attribute vec2 corner;
+    void main() { gl_Position = vec4(corner, 0.0, 1.0); }
+  `));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    precision highp float;
+    #else
+    precision mediump float;
+    #endif
+    uniform sampler2D image;
+    uniform vec2 resolution;
+    uniform float amount;
+    float grain(vec2 cell) {
+      vec3 v = fract(vec3(cell.xyx) * vec3(.1031, .1099, .0973));
+      v += dot(v, v.yzx + 19.19);
+      return fract((v.x + v.y) * v.z);
+    }
+    float brush(vec2 p) {
+      vec2 cell = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      return mix(mix(grain(cell), grain(cell + vec2(1,0)), f.x),
+        mix(grain(cell + vec2(0,1)), grain(cell + vec2(1,1)), f.x), f.y);
+    }
+    void main() {
+      vec2 p = gl_FragCoord.xy;
+      vec4 src = texture2D(image, p / resolution);
+      float luma = dot(src.rgb, vec3(.30,.59,.11));
+      float tooth = grain(floor(p)) - .5;
+      float fiber = grain(floor(vec2(p.x * .29, p.y + p.x * .14))) - .5;
+      float drag = brush(vec2((p.x + p.y * .35) / 26.0, (p.y - p.x * .35) / 3.8)) - .5;
+      float pigment = smoothstep(.035,.30,luma) * (1.0 - .55*smoothstep(.62,.97,luma));
+      float texture = .037 * tooth + .021 * fiber + .10 * pigment * drag;
+      vec3 color = src.rgb + amount * texture * vec3(1.0,.94,.82);
+      gl_FragColor = vec4(clamp(color, 0.0, 1.0), src.a);
+    }
+  `));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  const corner = gl.getAttribLocation(program, "corner");
+  const image = gl.getUniformLocation(program, "image");
+  const resolution = gl.getUniformLocation(program, "resolution");
+  const strength = gl.getUniformLocation(program, "amount");
+  const triangle = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+  const color = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, color);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  let width = 0, height = 0;
+  return (w, h, amount) => {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, color);
+    if (w !== width || h !== height) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      width = w;
+      height = h;
+    }
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+    gl.useProgram(program);
+    gl.disable(gl.DEPTH_TEST);
+    gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
+    gl.enableVertexAttribArray(corner);
+    gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(corner, 0);
+    gl.uniform1i(image, 0);
+    gl.uniform2f(resolution, w, h);
+    gl.uniform1f(strength, amount);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.enable(gl.DEPTH_TEST);
+  };
+}
+
 export function createWebGLRenderer(canvas, opts) {
   const aa = !(opts && opts.antialias === false);
   const gl = canvas.getContext("webgl", { antialias: aa, preserveDrawingBuffer: true, powerPreference: "high-performance" });
@@ -423,7 +504,7 @@ export function createWebGLRenderer(canvas, opts) {
   const uShadowPass=u("uShadowPass"),uLightVP=u("uLightVP"),uShadowMap=u("uShadowMap");
   const uShadowTexel=u("uShadowTexel"),uShadowBias=u("uShadowBias"),uShadowStrength=u("uShadowStrength");
   const lightProjection=mat4(),lightView=mat4(),lightVP=mat4();
-  let shadow;
+  let shadow, paperPass;
 
 
 
@@ -738,6 +819,10 @@ export function createWebGLRenderer(canvas, opts) {
 
       gl.depthMask(true);
       gl.disable(gl.BLEND);
+      if (scene.paper > 0 && w > 0 && h > 0) {
+        paperPass ||= createPaperPass(gl, ext);
+        paperPass(w, h, Math.min(1, scene.paper));
+      }
 
     },
   };

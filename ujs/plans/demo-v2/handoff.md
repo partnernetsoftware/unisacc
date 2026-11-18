@@ -174,3 +174,11 @@ Q2b 为 UXE WebGL 材质添加 `toonLevels`，范围为 2 至 16 的整数。立
 (4) 开发经 devsvc，仓内改动用 Edit/Write 或 .cx；版本控制也经 devsvc。只动本车道；新工具和批次用 register，逐表跑 own-diff，提交共享表用 commit-own --keyed 全字段键。新清单的 coverage 行常需单列 interfaces.* 键。每次提交后回归并 push origin HEAD:ujs。不要写 main 或发布页。
 
 (5) 视频在 `/tmp/ref/d3.mp4`、`/tmp/ref/d4.mp4`，下载地址和 SHA 在 [D3 来源](ref/d3/SOURCE.txt)、[D4 来源](ref/d4/SOURCE.txt)。ffmpeg 曾可从 `~/.hermes/tools/ffmpeg-9.0.1-linux-x64/bin/` 调用。D3 已核全片，0.25 秒采 52 张；D4 采 208 张，详见 [D3 分析](essence/d3-v2.md)、[D4 分析](essence/d4-v2.md)。评论样本为 `/tmp/x-comments/d1.md` 至 `/tmp/x-comments/d4.md`，共 125 条。其要点、作者归属和永久链接已存入[评论区补证](essence/ESSENCE-v2.md#评论区补证)，临时文件清理后仍可复核。
+
+### D3 与 D4 渲染候选
+
+D3 漫游 `773b535` 已在 `ujs` 候选，入口为 `test/d3-bridge.html?walk=1`。U1 `227ecc6` 的方向光阴影、色调映射和距离雾可用 `?render-u1=1` 预览。U2 `5e9eff4` 的石桥细节和 44 栋城镇建筑可用 `?dense-u2=1` 预览。U3 的纸纹和斜向笔触用 `?paper-u3=1` 预览，同时开启 U1 和 U2。候选等待上线授权，D4 交互漫游仍待验证。
+
+U3 用上节的 Chrome 设置分别拍 D3 和 D4，同一机位用 `?paper-u3=1&no-u3-paper` 拍关闭版。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- paper-u3 D3关闭.png D3开启.png D4关闭.png D4开启.png`。检查将画布与两张裁掉白边的参考帧统一到 960 x 540，按 60 x 60 像素分块，共 144 块每场。逐块输出灰度方差、截顶的相邻亮度差及开关平均变化。用关闭截图替换开启截图时应退出 1。
+
+U3 正例两场各有 144 块达到开关差值区间。与参考帧的相邻亮度差指标相比，D3 距离从 20596 增至 21137，D4 从 47971 降至 27786。方差距离分别从 146482 到 146911、155277 到 154553。参考帧构图不同，指标只描述同位置的局部统计。并排图保存在 `/tmp/cdx2-u3-d3-comparison.png` 和 `/tmp/cdx2-u3-d4-comparison.png`。

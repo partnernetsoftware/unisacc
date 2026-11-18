@@ -324,7 +324,77 @@ static int check_bridge_walk(const char *mutation) {
     return path_fail || wind_fail || image_changes<3;
 }
 
+enum { PAPER_W=960, PAPER_H=540, PAPER_TILE=60 };
+
+static unsigned char *paper_pixels(char *file,int reference) {
+    char *out=0;
+    size_t size=0;
+    char *av[]={"convert",file,"-crop",reference?"960x485+8+8":"1280x720+0+0",
+        "+repage","-resize","960x540!","-alpha","off","-colorspace","Gray","-depth","8","gray:-",0};
+    if(cx_runv_timeout(av,8,&out,&size) || size!=PAPER_W*PAPER_H) {
+        fprintf(stderr,"UXE_U3 image read failed: %s (%zu bytes)\n",file,size);
+        free(out);
+        return 0;
+    }
+    return (unsigned char *)out;
+}
+
+static void paper_block(const unsigned char *image,int x0,int y0,int *contrast,int *texture) {
+    long sum=0,squares=0,grain=0;
+    int x,y,n=PAPER_TILE*PAPER_TILE;
+    for(y=y0;y<y0+PAPER_TILE;y++) for(x=x0;x<x0+PAPER_TILE;x++) {
+        int i=y*PAPER_W+x,v=image[i];
+        sum+=v;
+        squares+=v*v;
+        if(x>x0 && y>y0) {
+            int d=abs(2*v-image[i-1]-image[i-PAPER_W]);
+            grain+=d<12?d:12;
+        }
+    }
+    *contrast=(int)((squares*n-sum*sum)/(n*n));
+    *texture=(int)(grain*100/((PAPER_TILE-1)*(PAPER_TILE-1)));
+}
+
+static int compare_paper(char **paths) {
+    char *refs[]={"ujs/plans/demo-v2/ref/d3/frames/04.png","ujs/plans/demo-v2/ref/d4/frames/13.png"};
+    int scene,failed=0;
+    puts("scene\tx\ty\tref_variance\tplain_variance\tpaper_variance\tref_texture\tplain_texture\tpaper_texture\tpaper_delta");
+    for(scene=0;scene<2;scene++) {
+        unsigned char *ref=paper_pixels(refs[scene],1);
+        unsigned char *plain=paper_pixels(paths[2*scene],0);
+        unsigned char *paper=paper_pixels(paths[2*scene+1],0);
+        int x,y,edited=0,texture_gain=0,contrast_gap[2]={0},texture_gap[2]={0};
+        if(!ref || !plain || !paper) { free(ref); free(plain); free(paper); return 2; }
+        for(y=0;y<PAPER_H;y+=PAPER_TILE) for(x=0;x<PAPER_W;x+=PAPER_TILE) {
+            int c[3],t[3],u,v,delta=0;
+            paper_block(ref,x,y,c,t);
+            paper_block(plain,x,y,c+1,t+1);
+            paper_block(paper,x,y,c+2,t+2);
+            for(v=y;v<y+PAPER_TILE;v++) for(u=x;u<x+PAPER_TILE;u++) {
+                int i=v*PAPER_W+u;
+                delta+=abs(plain[i]-paper[i]);
+            }
+            delta=delta*100/(PAPER_TILE*PAPER_TILE);
+            edited+=delta>=65 && delta<=380;
+            texture_gain+=t[2]>=t[1]+20;
+            for(u=0;u<2;u++) {
+                contrast_gap[u]+=abs(c[0]-c[u+1]);
+                texture_gap[u]+=abs(t[0]-t[u+1]);
+            }
+            printf("D%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+                scene+3,x,y,c[0],c[1],c[2],t[0],t[1],t[2],delta);
+        }
+        free(ref); free(plain); free(paper);
+        failed+=edited<120 || texture_gain<75 || contrast_gap[1]>contrast_gap[0]*102/100;
+        printf("UXE_U3_D%d blocks=144 edited=%d texture_gain=%d texture_gap_plain=%d texture_gap_paper=%d contrast_gap_plain=%d contrast_gap_paper=%d\n",
+            scene+3,edited,texture_gain,texture_gap[0],texture_gap[1],contrast_gap[0],contrast_gap[1]);
+    }
+    printf("CHECK_UXE_U3 failed=%d\n",failed);
+    return failed?1:0;
+}
+
 int main(int argc,char **argv) {
+    if(argc==6 && !strcmp(argv[1],"paper-u3")) return compare_paper(argv+2);
     if(argc==2 && !strcmp(argv[1],"dense-u2")) return check_u2("");
     if(argc==2 && (!strcmp(argv[1],"thin-u2-town") || !strcmp(argv[1],"plain-u2-bricks") ||
         !strcmp(argv[1],"thin-u2-plant") || !strcmp(argv[1],"no-u2-fittings"))) return check_u2(argv[1]);
