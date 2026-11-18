@@ -1,0 +1,153 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+/* check-closure-obj.cx: tools/closure-obj.cx (v0.0.75 R2 W2 prebuilt runtime closure).
+   Run from the repo root: sh ./unisacc.com tools/check-closure-obj.cx
+   Positive controls:
+     (1) build twice into two fresh directories -> same sha256, name rtclosure-<sha>.o, bytes > 0;
+     (2) hello (printf) and strprog (strlen/strcpy/malloc/qsort/fopen+fprintf on a FILE)
+         linked as user object (-DRT_EXTERN) + closure give the same stdout and rc as the
+         whole-program -run route of the same source.
+   Negative controls:
+     (3) closure with one byte flipped (copied under its original content name) -> link refuses
+         with rc 3 (REFUSE tamper), no executable;
+     (4) the same flipped bytes handed straight to the product linker -> the product must
+         refuse or the program output must differ (no silent equal output);
+     (5) a closure name whose sha does not match its bytes -> rc 3.
+   Work goes to $TMPDIR/check-closure-obj-PID (removed at the end on success).  Each child is
+   bounded at 50 s.  Product: $UNISACC_COM, default ./unisacc.com.
+   Prints CHECK lines and CLOSURE_OBJ_CHECK pass=N fail=M; rc 1 on any failure. */
+
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "check-closure-obj: REFUSE text too long\n"); exit(2); } } while (0)
+
+static int npass, nfail;
+static char W[2048], TOOL[2200];   /* TOOL: closure-obj.cx compiled once to a native image */
+
+static void cco_expect(int ok, const char *name, const char *why) {
+    if (ok) { npass++; printf("CHECK\tPASS\t%s\n", name); }
+    else { nfail++; printf("CHECK\tFAIL\t%s\t%s\n", name, why); }
+}
+
+static const char *cco_product(void) { return sy_env_or("UNISACC_COM", "./unisacc.com"); }
+
+/* Run AV with stdout to OUTP (when given); returns the exit code, 255 on spawn error/timeout. */
+static int run(char **av, const char *outp) {
+    int fd = SY_STDIO_NULL;
+    if (outp) { fd = sy_open(outp, O_WRONLY | O_CREAT | O_TRUNC, 0600); if (fd < 0) return 255; }
+    sy_spawn_t o; sy_exit_t st; sy_spawn_init(&o);
+    o.argv = av; o.pgroup = -1; o.deadline_ms = 50000; o.out_fd = fd; o.err_fd = SY_STDIO_NULL;
+    int r = sy_proc_run(&o, &st);
+    if (outp) sy_close(fd);
+    if (r || st.timed_out) return 255;
+    return sy_exit_code(&st);
+}
+
+static long slurp(const char *p, unsigned char **b) {
+    int64_t n = 0; *b = 0;
+    if (sy_read_file(p, b, &n, 1L << 30) || !*b) return -1;
+    return (long)n;
+}
+
+static int same_file(const char *a, const char *b) {
+    unsigned char *x, *y; long n = slurp(a, &x), m = slurp(b, &y); int s = n >= 0 && n == m && !memcmp(x, y, (size_t)n);
+    free(x); free(y); return s;
+}
+
+/* closure-obj build DIR; fills PATH and SHA from the BUILT line. */
+static int build(const char *dir, char *path, long pcap, char sha[65]) {
+    char outp[2200]; FMT(outp, sizeof outp, "%s.built", dir);
+    char *av[] = { TOOL,"build", (char *)dir, 0 };
+    int rc = run(av, outp);
+    unsigned char *b; long n = slurp(outp, &b);
+    path[0] = 0; sha[0] = 0;
+    if (rc || n < 7 || memcmp(b, "BUILT\t", 6)) { free(b); return rc ? rc : 1; }
+    char *p = (char *)b + 6, *t = memchr(p, '\t', (size_t)(n - 6));
+    if (!t || t - p >= pcap || t + 65 > (char *)b + n) { free(b); return 1; }
+    if (mm_copy(path, (size_t)pcap, p, (size_t)(t - p))) { free(b); return 1; }
+    path[t - p] = 0;
+    if (mm_copy(sha, 65, t + 1, 64)) { free(b); return 1; }
+    sha[64] = 0; free(b);
+    return 0;
+}
+
+static const char *HELLO = "#include <stdio.h>\nint main(void){printf(\"hello %d\\n\",42);return 0;}\n";
+static const char *STRP =
+    "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+    "static int cmp(const void*a,const void*b){return *(const int*)a-*(const int*)b;}\n"
+    "int main(void){char b[64];int v[5]={5,3,9,1,7};int i;char *m=malloc(32);\n"
+    "strcpy(b,\"closure\");strcpy(m,b);qsort(v,5,sizeof v[0],cmp);\n"
+    "for(i=0;i<5;i++)printf(\"%d \",v[i]);printf(\"%s %d\\n\",m,(int)strlen(m));free(m);\n"
+    "FILE *f=fopen(FP,\"w\");if(f){fprintf(f,\"via FILE %d\\n\",v[4]);fclose(f);}f=fopen(FP,\"r\");\n"
+    "if(f&&fgets(b,sizeof b,f))fputs(b,stdout);if(f)fclose(f);return 3;}\n";
+
+/* Whole-program -run vs closure link of one source; returns 1 when stdout and rc are equal. */
+static int compare(const char *tag, const char *body, const char *clo) {
+    char src[2200], wo[2200], exe[2200], lo[2200], lg[2200];
+    FMT(src, sizeof src, "%s/%s.c", W, tag); FMT(wo, sizeof wo, "%s/%s.whole.out", W, tag);
+    FMT(exe, sizeof exe, "%s/%s.exe", W, tag); FMT(lo, sizeof lo, "%s/%s.link.out", W, tag); FMT(lg, sizeof lg, "%s/%s.link.log", W, tag);
+    char full[4096]; FMT(full, sizeof full, "#define FP \"%s/%s.txt\"\n%s", W, tag, body);
+    if (sy_write_file(src, full, (int64_t)strlen(full), 0644)) return 0;
+    char *wv[] = { "sh", (char *)cco_product(), src, 0 };
+    int wrc = run(wv, wo);
+    char *lv[] = { TOOL,"link", (char *)clo, src, exe, 0 };
+    int krc = run(lv, lg);
+    if (krc) { printf("INFO\t%s link rc=%d\n", tag, krc); return 0; }
+    char *ev[] = { exe, 0 };
+    int erc = run(ev, lo);
+    printf("INFO\t%s whole_rc=%d link_rc=%d\n", tag, wrc, erc);
+    return wrc == erc && wrc != 255 && same_file(wo, lo);
+}
+
+int main(void) {
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    char d1[2200], d2[2200], p1[2200], p2[2200], s1[65], s2[65];
+    FMT(W, sizeof W, "%s/check-closure-obj-%d", tmp, (int)getpid());
+    if (sy_mkdir_all(W, 0755)) { fprintf(stderr, "check-closure-obj: REFUSE mkdir %s\n", W); return 2; }
+    FMT(TOOL, sizeof TOOL, "%s/closure-obj", W);
+    { char *tv[] = { "sh", (char *)cco_product(), "tools/closure-obj.cx", "-o", TOOL, 0 };
+      int trc = run(tv, 0); cco_expect(!trc, "tool-compiles", "tools/closure-obj.cx -o failed");
+      if (trc) { printf("CLOSURE_OBJ_CHECK\tpass=%d\tfail=%d\n", npass, nfail); return 1; } }
+    FMT(d1, sizeof d1, "%s/b1", W); FMT(d2, sizeof d2, "%s/b2", W);
+    int r1 = build(d1, p1, sizeof p1, s1), r2 = build(d2, p2, sizeof p2, s2);
+    cco_expect(!r1 && !r2, "build-twice-rc0", "closure-obj build failed");
+    cco_expect(!r1 && !r2 && !strcmp(s1, s2) && strlen(s1) == 64, "reproducible-sha", "two builds differ");
+    { const char *b = strrchr(p1, '/'); char want[100]; FMT(want, sizeof want, "rtclosure-%s.o", s1);
+      cco_expect(b && !strcmp(b + 1, want), "content-addressed-name", p1); }
+    { char hx[65]; unsigned char *b; long n = slurp(p1, &b);
+      cco_expect(n > 0 && !sy_sha256_hex(b, n, hx) && !strcmp(hx, s1), "sha-matches-bytes", "BUILT sha is not the file sha"); free(b); }
+    cco_expect(!r1 && compare("hello", HELLO, p1), "link-eq-whole-hello", "output or rc differ");
+    cco_expect(!r1 && compare("strprog", STRP, p1), "link-eq-whole-strprog", "output or rc differ");
+
+    /* tamper: flip one byte in the middle, keep the content name */
+    unsigned char *b; long n = slurp(p1, &b);
+    char td[2200], tp[2200], texe[2200], hd[2200];
+    FMT(td, sizeof td, "%s/tamper", W); FMT(tp, sizeof tp, "%s/rtclosure-%s.o", td, s1); FMT(texe, sizeof texe, "%s/t.exe", W);
+    FMT(hd, sizeof hd, "%s/hello.c", W);
+    int okw = n > 0 && !sy_mkdir_all(td, 0755);
+    if (okw) { b[n / 2] ^= 0xff; okw = !sy_write_file(tp, b, n, 0644); }
+    free(b);
+    { char *av[] = { TOOL,"link", tp, hd, texe, 0 };
+      int rc = okw ? run(av, 0) : -1; struct stat sb;
+      cco_expect(okw && rc == 3 && sy_stat(texe, &sb) != 0, "tamper-refused-rc3", "flipped closure was not refused"); }
+    /* the same bytes through the bare product linker: refuse or different output, never silent */
+    { char uo[2200], te2[2200], to[2200], wo[2200];
+      FMT(uo, sizeof uo, "%s/hu.o", W); FMT(te2, sizeof te2, "%s/t2.exe", W); FMT(to, sizeof to, "%s/t2.out", W); FMT(wo, sizeof wo, "%s/hello.whole.out", W);
+      char *cv[] = { "sh", (char *)cco_product(), "-c", "-b", "lnx/x86_64", "-funit", "-DRT_EXTERN", hd, "-o", uo, 0 };
+      char *lv[] = { "sh", (char *)cco_product(), uo, tp, "-o", te2, 0 };
+      int crc = run(cv, 0), lrc = crc ? -1 : run(lv, 0), erc = -1, differ = 1;
+      if (!lrc) { char *ev[] = { te2, 0 }; erc = run(ev, to); differ = erc != 0 || !same_file(to, wo); }
+      printf("INFO\tbare-tamper compile_rc=%d link_rc=%d run_rc=%d\n", crc, lrc, erc);
+      cco_expect(okw && !crc && (lrc != 0 || differ), "bare-tamper-not-silent", "tampered closure linked and ran with equal output"); }
+    /* wrong name */
+    { char wn[2200]; FMT(wn, sizeof wn, "%s/rtclosure-%064d.o", td, 0);
+      int okc = !r1 && !sy_rename(tp, wn);
+      if (okc) { unsigned char *c; long cn = slurp(p1, &c); okc = cn > 0 && !sy_write_file(wn, c, cn, 0644); free(c); }
+      char *av[] = { TOOL,"link", wn, hd, texe, 0 };
+      cco_expect(okc && run(av, 0) == 3, "wrong-name-refused-rc3", "name/content mismatch accepted"); }
+
+    printf("CLOSURE_OBJ_CHECK\tpass=%d\tfail=%d\n", npass, nfail);
+    if (!nfail) { char *rv[] = { "rm", "-rf", W, 0 }; run(rv, 0); printf("CLOSURE_OBJ_PASS\n"); }
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,93 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+/* closure-obj.cx: prebuilt runtime closure object for the R2 unit route (v0.0.75 W2,
+   plans/v0.0.75-r2.md).  lnx/x86_64 only.  Builds with the installed product; never
+   changes the product.
+   usage:
+     build DIR                 compile the fixed closure root (header set HDRS) with
+         -c -b lnx/x86_64 -funit -DRT_UNIT (the one global runtime state: stdio table,
+         env heap, every RT-DEDUP function) and store it content addressed as
+         DIR/rtclosure-<sha256>.o.  Prints BUILT<TAB>path<TAB>sha256<TAB>bytes.
+     link CLOSURE USER.c EXE   compile USER.c with -DRT_EXTERN to EXE.u.o and link it with
+         CLOSURE into EXE.  CLOSURE must be named rtclosure-<sha256>.o and its bytes must
+         hash to that name, else rc 3 (REFUSE tamper).  Prints LINKED<TAB>EXE.
+   Product: $UNISACC_COM, default ./unisacc.com (run as sh PRODUCT).  Each product call is
+   bounded at 50 s.  rc 2 usage or I/O, 3 tamper, 4 product step failed.
+   Known limit: variadic runtime functions (printf family) stay static per unit under
+   RT_EXTERN, so user objects still carry them; the closure removes only the shared state
+   and the tri-state functions.  A program needing a header outside HDRS is not covered
+   (one fixed closure in phase one; the caller falls back to the whole-program route). */
+
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "closure-obj: REFUSE text too long\n"); exit(2); } } while (0)
+#define HDRS "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <ctype.h>\n#include <errno.h>\n"
+
+static const char *co_product(void) { return sy_env_or("UNISACC_COM", "./unisacc.com"); }
+
+static int run_prod_in(char **av, const char *cwd) {
+    sy_spawn_t o; sy_exit_t st; sy_spawn_init(&o);
+    o.argv = av; o.cwd = cwd; o.pgroup = -1; o.deadline_ms = 50000;
+    if (sy_proc_run(&o, &st)) return 255;
+    if (st.timed_out) { fprintf(stderr, "closure-obj: REFUSE product step timed out (50 s)\n"); return 255; }
+    return sy_exit_code(&st);
+}
+static int run_prod(char **av) { return run_prod_in(av, 0); }
+
+static int file_sha(const char *path, char hex[65], int64_t *bytes) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 1L << 30) || !b) return 1;
+    int r = sy_sha256_hex(b, (long)n, hex) ? 1 : 0;
+    free(b);
+    if (bytes) *bytes = n;
+    return r;
+}
+
+static int cmd_build(const char *dir) {
+    char src[4096], tmp[4096], fin[4096], hex[65]; int64_t n = 0;
+    if (sy_mkdir_all(dir, 0755)) { fprintf(stderr, "closure-obj: REFUSE mkdir %s\n", dir); return 2; }
+    /* The root is compiled from inside DIR under a fixed relative name, so neither DIR nor the
+       pid reaches the object (two builds in two directories must give the same bytes). */
+    char pabs[4096], *pr = realpath(co_product(), 0);
+    if (!pr) { fprintf(stderr, "closure-obj: REFUSE product %s not found\n", co_product()); return 2; }
+    FMT(pabs, sizeof pabs, "%s", pr); free(pr);
+    FMT(src, sizeof src, "%s/rtclosure-root.c", dir);
+    FMT(tmp, sizeof tmp, "%s/.rtclosure-%d.o", dir, (int)getpid());
+    if (sy_write_file(src, HDRS, (int64_t)(sizeof HDRS - 1), 0644)) { fprintf(stderr, "closure-obj: REFUSE write %s\n", src); return 2; }
+    char *av[] = { "sh", pabs, "-c", "-b", "lnx/x86_64", "-funit", "-DRT_UNIT", "rtclosure-root.c", "-o", tmp + strlen(dir) + 1, 0 };
+    int rc = run_prod_in(av, dir);
+    sy_unlink(src);
+    if (rc) { fprintf(stderr, "closure-obj: REFUSE closure compile rc=%d\n", rc); sy_unlink(tmp); return 4; }
+    if (file_sha(tmp, hex, &n)) { fprintf(stderr, "closure-obj: REFUSE read %s\n", tmp); return 2; }
+    FMT(fin, sizeof fin, "%s/rtclosure-%s.o", dir, hex);
+    if (sy_rename(tmp, fin)) { fprintf(stderr, "closure-obj: REFUSE rename to %s\n", fin); return 2; }
+    printf("BUILT\t%s\t%s\t%lld\n", fin, hex, (long long)n);
+    return 0;
+}
+
+static int cmd_link(const char *clo, const char *user, const char *exe) {
+    const char *base = strrchr(clo, '/'); base = base ? base + 1 : clo;
+    char want[65], hex[65], uo[4096];
+    if (strlen(base) != 10 + 64 + 2 || memcmp(base, "rtclosure-", 10) || strcmp(base + 74, ".o")) { fprintf(stderr, "closure-obj: REFUSE closure name %s\n", base); return 3; }
+    if (mm_copy(want, sizeof want, base + 10, 64)) return 2;
+    want[64] = 0;
+    if (file_sha(clo, hex, 0)) { fprintf(stderr, "closure-obj: REFUSE read %s\n", clo); return 2; }
+    if (strcmp(want, hex)) { fprintf(stderr, "closure-obj: REFUSE tamper %s content sha %s\n", base, hex); return 3; }
+    FMT(uo, sizeof uo, "%s.u.o", exe);
+    char *cv[] = { "sh", (char *)co_product(), "-c", "-b", "lnx/x86_64", "-funit", "-DRT_EXTERN", (char *)user, "-o", uo, 0 };
+    int rc = run_prod(cv);
+    if (rc) { fprintf(stderr, "closure-obj: REFUSE user compile rc=%d\n", rc); return 4; }
+    char *lv[] = { "sh", (char *)co_product(), uo, (char *)clo, "-o", (char *)exe, 0 };
+    rc = run_prod(lv);
+    if (rc) { fprintf(stderr, "closure-obj: REFUSE link rc=%d\n", rc); return 4; }
+    printf("LINKED\t%s\n", exe);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "build")) return cmd_build(argv[2]);
+    if (argc == 5 && !strcmp(argv[1], "link")) return cmd_link(argv[2], argv[3], argv[4]);
+    fprintf(stderr, "usage: closure-obj.cx -- build DIR | link CLOSURE USER.c EXE\n");
+    return 2;
+}
