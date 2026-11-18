@@ -1,5 +1,7 @@
 #pragma unisa use chrome_dom
-/* tools/check-gen-uxe-pages.cx -- gen --check; 篡改必红; AUTO FLY_OK WATER_OK.
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+/* tools/check-gen-uxe-pages.cx -- 全量逐字节、隔离篡改、活跃导出页面 AUTO.
  *
  * sh ./unisacc.com tools/check-gen-uxe-pages.cx --
  */
@@ -17,55 +19,78 @@ static int runv(char **av, int secs) {
     if (o) free(o);
     return rc;
 }
+static int replace_head(const char *path,int byte,int *previous) {
+    FILE *f=fopen(path,"r+b");
+    int old,ok;
+    if(!f) return 0;
+    old=fgetc(f);
+    ok=old!=EOF && fseek(f,0,SEEK_SET)==0 && fputc(byte<0?old^1:byte,f)!=EOF;
+    if(fclose(f)) ok=0;
+    if(previous) *previous=old;
+    return ok;
+}
+
+static void tamper(const char *page,const char *asset) {
+    char path[190],diff[205],*out=0;
+    char *av[]={"sh","./unisacc.com","tools/gen-uxe-pages.cx","--","--check","--only",(char *)page,0};
+    size_t bytes=0;
+    int previous,rc,matched,restored;
+    tx_snprintf(path,sizeof path,"docs/uxe/%s/%s",page,asset);
+    tx_snprintf(diff,sizeof diff,"DIFF\t%s\n",path);
+    if(!replace_head(path,-1,&previous)) { ck(0,path); return; }
+    rc=cx_runv_timeout(av,12,&out,&bytes);
+    matched=out && strstr(out,diff) && strstr(out,"failed=1\n");
+    free(out);
+    restored=replace_head(path,previous,0);
+    ck(rc==1 && matched && restored,path);
+}
+
+static int fixture(const char *cwd,const char *root) {
+    const char *links[]={"unisacc.com","ujs","tools","cx","ext","cxroot.tsv"};
+    char from[700],to[750],docs[220];
+    char *copy[]={"cp","-a","docs/uxe",docs,0};
+    int i;
+    tx_snprintf(docs,sizeof docs,"%s/docs",root);
+    if(sy_mkdir_all(docs,0700) || runv(copy,8)) return 0;
+    for(i=0;i<(int)(sizeof links/sizeof links[0]);i++) {
+        tx_snprintf(from,sizeof from,"%s/%s",cwd,links[i]);
+        tx_snprintf(to,sizeof to,"%s/%s",root,links[i]);
+        if(sy_symlink(from,to)) return 0;
+    }
+    return sy_chdir(root)==0;
+}
+
 int main(void) {
-    char *av[8];
-    int rc, retries, n, i;
-    const char *fin_fly[3];
-    const char *fin_w[3];
-    char *shav[4];
-    char *out = 0;
-    size_t on = 0;
-    char cwd[512];
-    char url[640];
-    const char *pre = "file://";
-    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/gen-uxe-pages.cx";
-    av[3] = "--"; av[4] = "--check"; av[5] = 0;
-    rc = runv(av, 20);
-    ck(rc == 0, "gen-check");
-    shav[0] = "sh";
-    shav[1] = "-c";
-    shav[2] = "D=/tmp/uxe-chk-$$; mkdir -p \"$D/tools\" && cp -a docs ujs \"$D/\" && cp tools/gen-uxe-pages.cx \"$D/tools/\" && ln -s \"$PWD/unisacc.com\" \"$D/unisacc.com\" && printf x >> \"$D/docs/uxe/fly/index.html\" && (cd \"$D\" && sh ./unisacc.com tools/gen-uxe-pages.cx -- --check); r=$?; printf y >> \"$D/docs/uxe/fly/fly-b64.js\"; (cd \"$D\" && sh ./unisacc.com tools/gen-uxe-pages.cx -- --check >/dev/null); r2=$?; printf z >> \"$D/docs/uxe/fly/host1-runtime.js\"; (cd \"$D\" && sh ./unisacc.com tools/gen-uxe-pages.cx -- --check >/dev/null); r3=$?; rm -rf \"$D\"; test \"$r\" != 0 && test \"$r2\" != 0 && test \"$r3\" != 0";
-    shav[3] = 0;
-    rc = cx_runv_timeout(shav, 40, &out, &on);
-    if (out) free(out);
-    ck(rc == 0, "tamper-index-b64-runtime-red");
-    if (!getcwd(cwd, sizeof cwd)) return 2;
-    n = 0;
-    while (pre[n]) { url[n] = pre[n]; n++; }
-    for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
-    {
-        const char *s = "/docs/uxe/fly/index.html?auto=1";
-        int j = 0;
-        while (s[j] && n < 630) url[n++] = s[j++];
-        url[n] = 0;
+    const char *pages[]={"fly","ink-walk","oneshot"};
+    const char *assets[]={"renderer-webgl.js","scene.js","meshes.js","font5x7.js"};
+    const char *examples[][5]={{"fly","fly-host1","FLY_OK","FLY_ERR","FLY_GL_OK"},
+        {"ink-walk","ink-walk-host1","INK_OK","INK_ERR","INK_FAIL"},
+        {"oneshot","oneshot-host1","ONESHOT_OK","ONESHOT_ERR","ONESHOT_FAIL"},
+        {"water-keeps","water-keeps-host1","WATER_OK","WATER_ERR","WATER_FAIL"}};
+    char *check[]={"sh","./unisacc.com","tools/gen-uxe-pages.cx","--","--check",0};
+    char cwd[512],root[100],url[800];
+    int i,j;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    ck(runv(check,20)==0,"gen-check");
+    tx_snprintf(root,sizeof root,"/tmp/chrome-dom-uxe-pages-%d",(int)getpid());
+    if(!fixture(cwd,root)) {
+        chd_wipe(root);
+        return 2;
     }
-    fin_fly[0] = "FLY_OK"; fin_fly[1] = "FLY_ERR"; fin_fly[2] = "FLY_GL_OK";
-    retries = 0;
-    rc = chd_dump_expect("/usr/bin/google-chrome", url, "FLY_OK", fin_fly, 3, "fly-host1", 3, 25, &retries);
-    ck(rc == 0, "fly-AUTO-FLY_OK");
-    n = 0;
-    while (pre[n]) { url[n] = pre[n]; n++; }
-    for (i = 0; cwd[i] && n < 500; i++) url[n++] = cwd[i];
-    {
-        const char *s = "/docs/uxe/water-keeps/index.html?auto=1";
-        int j = 0;
-        while (s[j] && n < 630) url[n++] = s[j++];
-        url[n] = 0;
+    tamper("fly","index.html");
+    tamper("fly","fly-b64.js");
+    tamper("fly","host1-runtime.js");
+    for(i=0;i<3;i++) for(j=0;j<4;j++) tamper(pages[i],assets[j]);
+    ck(runv(check,20)==0,"tamper-restored-full-check");
+    if(sy_chdir(cwd)) return 2;
+    chd_wipe(root);
+    for(i=0;i<4;i++) {
+        const char **entry=examples[i];
+        int retries=0,rc;
+        tx_snprintf(url,sizeof url,"file://%s/docs/uxe/%s/index.html?auto=1",cwd,entry[0]);
+        rc=chd_dump_expect("/usr/bin/google-chrome",url,entry[2],entry+2,3,entry[1],3,25,&retries);
+        ck(rc==0,entry[2]);
     }
-    fin_w[0] = "WATER_OK"; fin_w[1] = "WATER_ERR"; fin_w[2] = "WATER_FAIL";
-    retries = 0;
-    rc = chd_dump_expect("/usr/bin/google-chrome", url, "WATER_OK", fin_w, 3, "water-keeps-host1", 3, 25, &retries);
-    ck(rc == 0, "water-AUTO-WATER_OK");
     printf("CHECK_GEN_UXE_PAGES\tasserts=%d\tfailed=%d\n", asserts, failed);
     return failed ? 1 : 0;
 }
