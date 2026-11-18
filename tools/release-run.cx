@@ -30,6 +30,25 @@
  *   sh ./unisacc.com tools/release-run.cx -- --resume OUT_DIR
  *     从 OUT_DIR/state.tsv 记录的下一未完步继续;每步先核对前置产物身份。
  *
+ *   --pack 追加选项(N-05 最小切片):
+ *     --commit HEX40|HEAD  打包前把候选表 commit 字段回填为冻结提交:提交须在调用仓可解析,
+ *                    其 release/candidate.tsv 的 version/tag 与输入表相同,输入表原 commit 须是
+ *                    它的祖先或相等,否则 RELEASE_PACK_NOT_FREEZE_POINT / RELEASE_PACK_COMMIT_MISMATCH;
+ *                    回填写 OUT_DIR/candidate-in.tsv 并打印前后值;已相等时空操作(表与产物字节不变)。
+ *                    不给 --commit 时不回填(保持旧语义)。build.json 写出后回读,commit 须等于
+ *                    回填值且等于 SID 实核所用快照的提交,否则 RELEASE_PACK_COMMIT_MISMATCH。
+ *     --cm-sha X64 ARM64  cache-manager 期望 sha256;缺省读 ROOT/release/evidence/<version>/cache-manager.tsv。
+ *     cache-manager 回落:SRC_DIR 下缺失或空文件时,先找持久副本
+ *       ($UNISACC_RELEASE_CACHE 或 ~/.cache/unisacc 下 release-*\/cm/<role>、release-*\/<role>、
+ *       release-cm/<sha8>/<role>,sha256 须等于期望值),找不到才用 ROOT 产品跑
+ *       tools/cache-retain.cx -b osx/x86_64|osx/arm64 重建,sha256 须逐字节相等否则
+ *       RELEASE_PACK_CM_SHA_MISMATCH;重建结果写入 release-cm/<sha8>/<role>。ape-pack 成功后
+ *       把两份的 role/sha256/path/来源写 OUT_DIR/cache-manager.tsv 与
+ *       ROOT/release/evidence/<version>/cache-manager.tsv。
+ *   sh ./unisacc.com tools/release-run.cx -- --plan CANDIDATE_TSV
+ *     只列发布对外段固定顺序(X 提交、草稿、CI、Y1、公开、读回、Y2)每步的命令原文、
+ *     前置门与回滚;不执行任何命令,零网络零 gh。
+ *
  * SRC_DIR 输入约定(H8,与 0.0.50 后备重放 /tmp/cc-rel50 一致的文件名):
  *   p3.pkg win-x86_64 lnx-x86_64 lnx-arm64 osx-x86_64 osx-arm64 win-arm64
  *   cache-manager-x64 cache-manager-arm64 sources.tsv(一行 64 位 sources_sha256)
@@ -55,6 +74,13 @@
 static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448], snapdir[4096];
 static char chainout[4096];
 static RcCandidate cand;
+/* Commit backfill and cache-manager resolution state (N-05 minimal slice). */
+static char commitarg[64], frozen[64], here[4096], sidcommit[64];
+static char cmpath[2][4400], cmsha[2][65], cmwhere[2][16], cmwant[2][65];
+static const char *cm_role[2] = {"x64", "arm64"};
+static const char *cm_leaf[2] = {"cache-manager-x64", "cache-manager-arm64"};
+static const char *cm_target[2] = {"osx/x86_64", "osx/arm64"};
+static void commit_mismatch(const char *what, const char *a, const char *b);
 
 static void die(const char *s) { sy_eprintf("release-run: REFUSE %s\n", s); sy_exit(2); }
 static long tlen(const char *s) { return tx_len(s, 1 << 20); }
@@ -209,6 +235,192 @@ static void pack_chain_gate(void){
     }
     emit("FIXEDPOINT","VERIFIED",chainout);
 }
+/* ---- N-05: commit backfill, cache-manager fallback, plan ------------------ */
+
+static int hexn(const char *s, int n) {
+    if (tlen(s) != n) return 0;
+    for (int i = 0; i < n; i++) { char c = s[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0; }
+    return 1;
+}
+/* Runs a bounded child in the invoking checkout; output is trimmed of trailing newlines. */
+static int here_run(char **v, char *o, long cap) {
+    np_result r = {0}; char why[256] = {0}; int rc;
+    if (o && cap > 0) o[0] = 0;
+    if (np_run(v, here, 0, 20, &r, why, sizeof why)) { np_free(&r); return -1; }
+    rc = r.rc;
+    if (o && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        for (size_t i = 0; i < n; i++) o[i] = r.out[i];
+        o[n] = 0; while (n && o[n - 1] == '\n') o[--n] = 0;
+        if (r.outn >= (size_t)cap) rc = rc ? rc : 124;
+    }
+    np_free(&r);
+    return rc;
+}
+static void field_of_row2(const char *t, int col, char *o, long cap) {
+    const char *p = strchr(t, '\n'); int c = 0; long k = 0;
+    o[0] = 0; if (!p) return; p++;
+    while (*p && *p != '\n' && c < col) { if (*p == '\t') c++; p++; }
+    while (*p && *p != '\t' && *p != '\n' && k + 1 < cap) o[k++] = *p++;
+    o[k] = 0;
+}
+/* --commit: the candidate row's commit becomes the freeze commit. The freeze commit's own
+ * release/candidate.tsv must carry the same tag/version (it is that version's freeze
+ * point) and the old row value must be its ancestor (the branch-base placeholder). */
+static void commit_backfill(void) {
+    char spec[80], show[16384], ftag[64], fver[64], newp[4448];
+    if (!commitarg[0]) { emit("COMMIT_BACKFILL", "SKIPPED", "no --commit; table commit kept"); return; }
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", tx_eqz(commitarg, "HEAD") ? "HEAD" : commitarg)) die("commit spec");
+    { char *v[] = {"git", "rev-parse", "--verify", "--quiet", spec, 0};
+      if (here_run(v, frozen, sizeof frozen) || !hexn(frozen, 40)) die("RELEASE_PACK_NOT_FREEZE_POINT commit unresolved"); }
+    if (!tx_eqz(commitarg, "HEAD") && !(hexn(commitarg, 40) && tx_eqz(commitarg, frozen))) die("RELEASE_PACK_NOT_FREEZE_POINT --commit must be 40 hex or HEAD");
+    if (cx_fmt(spec, sizeof spec, "%s:release/candidate.tsv", frozen)) die("commit spec");
+    { char *v[] = {"git", "show", spec, 0};
+      if (here_run(v, show, sizeof show)) die("RELEASE_PACK_NOT_FREEZE_POINT no release/candidate.tsv at commit"); }
+    field_of_row2(show, 1, ftag, sizeof ftag); field_of_row2(show, 3, fver, sizeof fver);
+    if (!tx_eqz(ftag, cand.tag) || !tx_eqz(fver, cand.version)) {
+        sy_eprintf("release-run: REFUSE RELEASE_PACK_NOT_FREEZE_POINT commit=%s tag=%s version=%s table_tag=%s table_version=%s\n", frozen, ftag, fver, cand.tag, cand.version);
+        sy_exit(2);
+    }
+    if (tx_eqz(cand.commit, frozen)) { emit("COMMIT_BACKFILL", "NOOP", frozen); return; }
+    if (!hexn(cand.commit, 40)) commit_mismatch("placeholder-not-40hex", cand.commit, frozen);
+    { char *v[] = {"git", "merge-base", "--is-ancestor", cand.commit, frozen, 0};
+      if (here_run(v, 0, 0)) commit_mismatch("placeholder-not-ancestor", cand.commit, frozen); }
+    { size_t n; char *t = cx_read(table, &n); np_buf b = {0}; const char *p, *s; int c = 0; char before[64];
+      if (!t) die("candidate read");
+      p = memchr(t, '\n', n); if (!p) { free(t); die("candidate header"); }
+      s = p + 1; while (s < t + n && *s != '\n' && c < 2) { if (*s == '\t') c++; s++; }
+      if (c != 2 || s + 40 > t + n || memcmp(s, cand.commit, 40) || s[40] != '\t') { free(t); die("candidate commit column"); }
+      np_put(&b, t, (size_t)(s - t)); np_puts(&b, frozen); np_put(&b, s + 40, n - (size_t)(s + 40 - t));
+      if (cx_fmt(newp, sizeof newp, "%s/candidate-in.tsv", out) || cx_write(newp, b.p, b.n)) die("candidate-in write");
+      free(t); free(b.p);
+      if (cx_fmt(before, sizeof before, "%s", cand.commit)) die("before");
+      if (cx_fmt(table, sizeof table, "%s", newp)) die("table path");
+      { char why[512]; if (rcand_load(table, &cand, why, sizeof why)) die(why); }
+      if (!tx_eqz(cand.commit, frozen)) die("candidate-in reload");
+      sy_printf("RELEASE_RUN\tCOMMIT_BACKFILL\tbefore=%s\tafter=%s\t%s\n", before, frozen, table); }
+}
+static long fsize(const char *p) { sy_stat_t st; if (sy_stat(p, &st) || st.kind != 'f') return -1; return (long)st.size; }
+static void cache_root(char *o, long cap) {
+    const char *e = sy_env("UNISACC_RELEASE_CACHE"), *h = sy_env("HOME");
+    if (e && e[0]) { if (cx_fmt(o, cap, "%s", e)) die("cache root"); }
+    else if (!h || !h[0] || cx_fmt(o, cap, "%s/.cache/unisacc", h)) die("cache root HOME");
+}
+/* Expected digests: --cm-sha, else this version's tool-written evidence rows. */
+static void cm_load_want(void) {
+    char p[4400], *t; size_t n;
+    if (cmwant[0][0] && cmwant[1][0]) return;
+    if (cx_fmt(p, sizeof p, "%s/release/evidence/%s/cache-manager.tsv", root, cand.version)) die("path");
+    t = cx_read(p, &n); if (!t) return;
+    for (char *a = t; *a;) {
+        char *e = strchr(a, '\n'), *f[6]; int k;
+        if (!e) break; *e = 0;
+        if (*a != '#') { k = pack_fields(a, f, 6);
+            for (int r = 0; r < 2; r++) if (k >= 2 && tx_eqz(f[0], cm_role[r]) && hexn(f[1], 64) && !cmwant[r][0]) cx_fmt(cmwant[r], 65, "%s", f[1]); }
+        a = e + 1;
+    }
+    free(t);
+}
+static int cm_try(int r, const char *p) {
+    char h[65];
+    if (fsize(p) <= 0) return 0;
+    sha_of(root, p, h);
+    if (!tx_eqz(h, cmwant[r])) return 0;
+    if (cx_fmt(cmpath[r], sizeof cmpath[r], "%s", p) || cx_fmt(cmsha[r], 65, "%s", h) || cx_fmt(cmwhere[r], 16, "persist")) die("cm path");
+    return 1;
+}
+static int cm_persisted(int r, const char *cr) {
+    char p[4400], list[16384];
+    if (cx_fmt(p, sizeof p, "%s/release-cm/%.8s/%s", cr, cmwant[r], cm_role[r])) die("path");
+    if (cm_try(r, p)) return 1;
+    { char *v[] = {"ls", "-1", (char *)cr, 0}; if (here_run(v, list, sizeof list)) return 0; }
+    for (char *a = list; *a;) {
+        char *e = strchr(a, '\n'); if (e) *e = 0;
+        if (!strncmp(a, "release-", 8) && !tx_eqz(a, "release-cm")) {
+            if (cx_fmt(p, sizeof p, "%s/%s/cm/%s", cr, a, cm_role[r])) die("path");
+            if (cm_try(r, p)) return 1;
+            if (cx_fmt(p, sizeof p, "%s/%s/%s", cr, a, cm_role[r])) die("path");
+            if (cm_try(r, p)) return 1;
+        }
+        if (!e) break; a = e + 1;
+    }
+    return 0;
+}
+static void mkdir_p1(const char *p) { if (sy_mkdir(p, 0755) && sy_exists(p) != 1) die("mkdir"); }
+static void cm_rebuild(int r, const char *cr) {
+    char tmp[4400], d[4400], h[65];
+    if (cx_fmt(tmp, sizeof tmp, "%s/cm-rebuild-%s", out, cm_role[r])) die("path");
+    { char *v[] = {"sh", "unisacc.com", "tools/cache-retain.cx", "-b", (char *)cm_target[r], "-o", tmp, 0};
+      if (child(v, root)) die("RELEASE_PACK_CM_REBUILD cache-retain failed"); }
+    if (fsize(tmp) <= 0) die("RELEASE_PACK_CM_REBUILD empty output");
+    sha_of(root, tmp, h);
+    if (!tx_eqz(h, cmwant[r])) {
+        sy_eprintf("release-run: REFUSE RELEASE_PACK_CM_SHA_MISMATCH role=%s want=%s got=%s rebuilt=%s\n", cm_role[r], cmwant[r], h, tmp);
+        sy_exit(2);
+    }
+    mkdir_p1(cr);
+    if (cx_fmt(d, sizeof d, "%s/release-cm", cr)) die("path"); mkdir_p1(d);
+    if (cx_fmt(d, sizeof d, "%s/release-cm/%.8s", cr, h)) die("path"); mkdir_p1(d);
+    if (cx_fmt(d, sizeof d, "%s/release-cm/%.8s/%s", cr, h, cm_role[r]) || sy_copy(tmp, d, 0644)) die("persist cache-manager");
+    if (cx_fmt(cmpath[r], sizeof cmpath[r], "%s", d) || cx_fmt(cmsha[r], 65, "%s", h) || cx_fmt(cmwhere[r], 16, "rebuild")) die("cm path");
+}
+/* SRC_DIR first (old contract, bytes unchanged); a missing or empty file falls back to
+ * a persistent copy with the recorded digest, then to a byte-identical rebuild. */
+static void cm_resolve(void) {
+    char cr[4096];
+    cache_root(cr, sizeof cr);
+    for (int r = 0; r < 2; r++) {
+        char p[4400];
+        if (cx_fmt(p, sizeof p, "%s/%s", srcdir, cm_leaf[r])) die("path");
+        if (fsize(p) > 0) {
+            sha_of(root, p, cmsha[r]);
+            if (cx_fmt(cmpath[r], sizeof cmpath[r], "%s", p) || cx_fmt(cmwhere[r], 16, "srcdir")) die("cm path");
+        } else {
+            cm_load_want();
+            if (!hexn(cmwant[r], 64)) { sy_eprintf("release-run: REFUSE RELEASE_PACK_CM_NO_RECORDED_SHA role=%s missing=%s\n", cm_role[r], p); sy_exit(2); }
+            if (!cm_persisted(r, cr)) cm_rebuild(r, cr);
+        }
+        sy_printf("RELEASE_RUN\tCACHE_MANAGER\t%s\t%s\t%s\t%s\n", cm_role[r], cmsha[r], cmwhere[r], cmpath[r]);
+    }
+}
+static void cm_evidence(void) {
+    char text[12000], p[4400];
+    if (cx_fmt(text, sizeof text, "# cache-manager inputs of release-run --pack (tool-written) version=%s tag=%s commit=%s\n"
+        "role\tsha256\tsource\tpath\n%s\t%s\t%s\t%s\n%s\t%s\t%s\t%s\n", cand.version, cand.tag, cand.commit,
+        cm_role[0], cmsha[0], cmwhere[0], cmpath[0], cm_role[1], cmsha[1], cmwhere[1], cmpath[1])) die("cm evidence");
+    if (cx_fmt(p, sizeof p, "%s/cache-manager.tsv", out) || cx_write(p, text, (size_t)tlen(text))) die("cm evidence write");
+    if (cx_fmt(p, sizeof p, "%s/release/evidence", root)) die("path");
+    if (sy_exists(p) == 1) {
+        if (cx_fmt(p, sizeof p, "%s/release/evidence/%s", root, cand.version)) die("path"); mkdir_p1(p);
+        if (cx_fmt(p, sizeof p, "%s/release/evidence/%s/cache-manager.tsv", root, cand.version) || cx_write(p, text, (size_t)tlen(text))) die("cm evidence write");
+    }
+    emit("CM_EVIDENCE", p, 0);
+}
+/* --plan: the fixed external sequence, printed only. Nothing here runs a command. */
+static void plan_step(int i, const char *name, const char *cmd, const char *gate, const char *rollback) {
+    sy_printf("PLAN\t%d\t%s\n  cmd\t%s\n  gate\t%s\n  rollback\t%s\n", i, name, cmd, gate, rollback);
+}
+static void run_plan(void) {
+    const char *R = "gh -R partnernetsoftware/unisacc";
+    char c[7][1200];
+    if (cx_fmt(c[0], 1200, "sh ./unisacc.com tools/devsvc.cx -- git commit -m 'v%s X: candidate table' --whole release/candidate.tsv --push", cand.version) ||
+        cx_fmt(c[1], 1200, "%s release create %s --draft --title %s --target %s; %s release upload %s LAYOUT/{%s,%s,%s,%s,%s,%s} --clobber",
+            R, cand.tag, cand.version, cand.commit, R, cand.tag, cand.name[0], cand.name[1], cand.name[2], cand.name[3], cand.name[4], cand.name[6]) ||
+        cx_fmt(c[2], 1200, "%s workflow run %s --ref %s -f commit={commit-x}; %s run watch {run-id}", R, cand.workflow, cand.workflow_ref, R) ||
+        cx_fmt(c[3], 1200, "fill ci_run_id={run-id} in release/candidate.tsv; sh ./unisacc.com tools/release-decide.cx -- --candidate release/candidate.tsv --evidence EVIDENCE --assets LAYOUT; sh ./unisacc.com tools/devsvc.cx -- git commit -m 'v%s Y1' --whole release/candidate.tsv release/evidence/%s release/notes-%s.md --push", cand.version, cand.version, cand.version) ||
+        cx_fmt(c[4], 1200, "%s release edit %s --draft=false --latest", R, cand.tag) ||
+        cx_fmt(c[5], 1200, "sh ./unisacc.com tools/c47-1-readback.cx -- %s; %s release download %s -p %s -D FRESH_DIR; sha256sum FRESH_DIR/%s", cand.tag, R, cand.tag, cand.name[0], cand.name[0]) ||
+        cx_fmt(c[6], 1200, "sh ./unisacc.com tools/devsvc.cx -- git commit -m 'v%s Y2: public readback' --whole release/evidence/%s --push", cand.version, cand.version)) die("plan format");
+    emit("MODE", "PLAN", cand.tag);
+    plan_step(1, "X-commit", c[0], "release-run --pack RESULT PACK_OK with --commit FREEZE (COMMIT_BACKFILL after=FREEZE, BUILD_JSON_COMMIT, SOURCES_SID VERIFIED); table commit 40 hex", "git revert X before any public step");
+    plan_step(2, "draft", c[1], "X pushed; layout SHA256SUMS --check OK; draft readback downloads six assets and SHA256SUMS OK", "gh release delete TAG (draft only, never delete a published tag)");
+    plan_step(3, "ci", c[2], "draft readback PASS; workflow input commit = X (40 hex); all six targets success", "none external; do not publish, fix and re-run CI on a new X");
+    plan_step(4, "Y1", c[3], "CI run success recorded by run id; release-decide verdict written; notes list known gaps", "git revert Y1 before publish");
+    plan_step(5, "publish", c[4], "Y1 pushed; CI success on same candidate; manual confirm", "gh release edit {previous-tag} --latest; gh release edit TAG --draft=true; tag is never deleted");
+    plan_step(6, "readback", c[5], "public asset sha256 equals candidate ape_sha256; readback rc 0", "same as publish rollback");
+    plan_step(7, "Y2", c[6], "readback evidence and INDEX.tsv timestamps written", "git revert Y2 (evidence only)");
+    sy_printf("RELEASE_RUN\tPLAN\tsteps=7\texecuted=0\tcommit=%s\n", cand.commit);
+}
 /* 步 4:显式 --osx-slices + --cache-manager-osx。不用 BUILT_CURRENT_PRODUCT:
  * 那会拿当前产品重造 manager,产物身份随宿主漂移,重放不再确定。 */
 static void step_ape_pack(void) {
@@ -218,11 +430,12 @@ static void step_ape_pack(void) {
     const char *src[9] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64", "cache-manager-x64", "cache-manager-arm64"};
     int i;
     pack_chain_gate();
-    for (i = 0; i < 9; i++) need(srcdir, src[i]);
+    for (i = 0; i < 7; i++) need(srcdir, src[i]);
+    if (!cmpath[0][0] || !cmpath[1][0]) die("cache-manager unresolved");
     if (cx_fmt(apedir, sizeof apedir, "%s/ape", out)) die("path");
     if (sy_mkdir(apedir, 0755) && sy_exists(apedir) != 1) die("ape dir");
     if (cx_fmt(ox, sizeof ox, "%s/osx-x86_64", srcdir) || cx_fmt(om, sizeof om, "%s/osx-arm64", srcdir)) die("path");
-    if (cx_fmt(cmx, sizeof cmx, "%s/cache-manager-x64", srcdir) || cx_fmt(cma, sizeof cma, "%s/cache-manager-arm64", srcdir)) die("path");
+    if (cx_fmt(cmx, sizeof cmx, "%s", cmpath[0]) || cx_fmt(cma, sizeof cma, "%s", cmpath[1])) die("path");
     if (cx_fmt(p3p, sizeof p3p, "%s/p3.pkg", srcdir)) die("path");
     if (cx_fmt(wx, sizeof wx, "%s/win-x86_64", srcdir) || cx_fmt(lx, sizeof lx, "%s/lnx-x86_64", srcdir)) die("path");
     if (cx_fmt(la, sizeof la, "%s/lnx-arm64", srcdir) || cx_fmt(wa, sizeof wa, "%s/win-arm64", srcdir)) die("path");
@@ -235,6 +448,7 @@ static void step_ape_pack(void) {
     { char com[4400];
       if (cx_fmt(com, sizeof com, "%s/unisacc-next.com", apedir)) die("path");
       if (sy_exists(com) != 1) die("unisacc-next.com"); }
+    cm_evidence();
     mark(4, "ape-pack", "DONE");
 }
 /* 步 5:version-inject 用表内版本注入第六片,得独立资产 slice-win-arm64。 */
@@ -323,6 +537,8 @@ static void require_sources_sid(void) {
         sy_eprintf("release-run: REFUSE sources-sid-mismatch file=%s live=%s snap=%s helper=%s\n", file_sid, live, snap, helper);
         sy_exit(2);
     }
+    /* An explicit --snap does not name its commit; only the derived snapshot binds one. */
+    if (!snapdir[0] && cx_fmt(sidcommit, sizeof sidcommit, "%s", cand.commit)) die("sid commit");
     emit("SOURCES_SID", "VERIFIED", file_sid);
 }
 static void write_build_json(const char *path, long bytes, const char *sources_sha, const char *digest) {
@@ -332,6 +548,21 @@ static void write_build_json(const char *path, long bytes, const char *sources_s
         "  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",
         bytes, cand.commit, sources_sha, digest)) die("build.json format");
     if (cx_write(path, text, (size_t)tlen(text))) die("build.json write");
+}
+static void commit_mismatch(const char *what, const char *a, const char *b) {
+    sy_eprintf("release-run: REFUSE RELEASE_PACK_COMMIT_MISMATCH %s table=%s want=%s\n", what, a, b);
+    sy_exit(2);
+}
+/* build.json is read back: its commit must be the backfilled freeze commit and the
+ * commit whose derived snapshot passed the identity helper. */
+static void check_build_json_commit(const char *path) {
+    char want[80]; size_t n; char *t = cx_read(path, &n);
+    if (!t || cx_fmt(want, sizeof want, "\"commit\": \"%s\"", cand.commit)) die("build.json reread");
+    if (tx_find(t, (long)n, want, tlen(want)) < 0) { free(t); commit_mismatch("build.json", cand.commit, cand.commit); }
+    free(t);
+    if (frozen[0] && !tx_eqz(cand.commit, frozen)) commit_mismatch("build.json-vs-freeze", cand.commit, frozen);
+    if (sidcommit[0] && !tx_eqz(cand.commit, sidcommit)) commit_mismatch("build.json-vs-sid-snapshot", cand.commit, sidcommit);
+    emit("BUILD_JSON_COMMIT", cand.commit, sidcommit[0] ? "sid=derived-snapshot" : "sid=explicit-or-unverified");
 }
 /* 步 6:装配 layout 输入目录再交给 release-layout 生成(自带 --check)。
  * release-layout 源目录须含 name[0..3]:unisacc.com(APE)、pkg.bin、slice-win-arm64、
@@ -360,6 +591,7 @@ static void step_layout_gen(void) {
     if (cx_fmt(a, sizeof a, "%s/inject", out) || cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[2]) || sy_copy(a, b, 0755)) die("stage slice");
     if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[3])) die("path");
     write_build_json(b, ape_bytes, sources_sha, ape_sha);
+    check_build_json_commit(b);
     /* Initial candidate pins are unknown; derive the four source pins from bytes. */
     np_buf pinned={0};
     np_puts(&pinned,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
@@ -466,7 +698,7 @@ static void pack_binding(int create) {
     np_buf b={0};char p[4400],h[65];static char row[22000];size_t n;
     if(cx_fmt(row,sizeof row,"%s\n%s\n%s\n%s\n%s\n",root,table,srcdir,snapdir,chainout))die("binding");np_puts(&b,row);
     sha_of(root,table,h);np_puts(&b,h);np_puts(&b,"\n");
-    for(int i=0;i<10;i++){if(cx_fmt(p,sizeof p,"%s/%s",srcdir,names[i]))die("binding path");sha_of(root,p,h);np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
+    for(int i=0;i<10;i++){if(i==7||i==8){if(cx_fmt(p,sizeof p,"%s",cmpath[i-7]))die("binding path");}else if(cx_fmt(p,sizeof p,"%s/%s",srcdir,names[i]))die("binding path");sha_of(root,p,h);np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
     if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("binding path");char *old=cx_read(p,&n);
     if(old){if(n!=b.n||memcmp(old,b.p,n))die("pack input changed");free(old);}else if(!create||cx_write(p,b.p,b.n))die("pack binding missing");free(b.p);
 }
@@ -491,7 +723,7 @@ int main(int argc, char **argv) {
         char p[4400];size_t n;if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("resume path");char *s=cx_read(p,&n);if(!s)die("resume inputs");
         char *dest[]={root,table,srcdir,snapdir,chainout};size_t caps[]={sizeof root,sizeof table,sizeof srcdir,sizeof snapdir,sizeof chainout};char *at=s;
         for(int i=0;i<5;i++){char *e=strchr(at,'\n');if(!e||(size_t)(e-at)>=caps[i])die("resume schema");*e=0;if(cx_fmt(dest[i],caps[i],"%s",at))die("resume capacity");at=e+1;}free(s);
-        if(rcand_load(table,&cand,why,sizeof why))die(why);pack_continue();return 0;
+        if(rcand_load(table,&cand,why,sizeof why))die(why);if(sy_cwd(here,sizeof here))die("cwd");cm_resolve();pack_continue();return 0;
     }
     if (argc == 6 && tx_eqz(argv[1], "--dry-run")) {
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
@@ -509,12 +741,29 @@ int main(int argc, char **argv) {
         emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
         return 0;
     }
-    if ((argc==6||argc==8||argc==10)&&tx_eqz(argv[1],"--pack")) {
+    if (argc >= 3 && tx_eqz(argv[1], "--execute")) {   /* gated execution lives in tools/release-exec.cx */
+        char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/release-exec.cx"; v[k++] = "--";
+        for (int i = 1; i < argc && k < 23; i++) v[k++] = argv[i];
+        v[k] = 0; if (sy_cwd(here, sizeof here)) die("cwd");
+        { np_result r = {0}; char w[256] = {0}; int rc; if (np_run(v, here, 0, 2400, &r, w, sizeof w)) die("release-exec transport");
+          if (r.outn) sy_write_all(1, r.out, r.outn); if (r.errn) sy_write_all(2, r.err, r.errn); rc = r.rc; np_free(&r); return rc; }
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--plan")) {
+        if (sy_realpath(argv[2], table, sizeof table) < 0) die("candidate table");
+        if (rcand_load(table, &cand, why, sizeof why)) die(why);
+        run_plan();
+        return 0;
+    }
+    if (argc>=6&&tx_eqz(argv[1],"--pack")) {
         char root_tsv[4400],vr[24],vt[24];snapdir[0]=0;chainout[0]=0;
+        if(sy_cwd(here,sizeof here))die("cwd");
         for(int i=6;i<argc;i+=2){
+            if(i+1>=argc)die("usage option value missing");
             if(tx_eqz(argv[i],"--snap")){if(snapdir[0]||sy_realpath(argv[i+1],snapdir,sizeof snapdir)<0)die("snap");}
             else if(tx_eqz(argv[i],"--chain-out")){if(chainout[0]||sy_realpath(argv[i+1],chainout,sizeof chainout)<0)die("UNKNOWN chain output");}
-            else die("usage --pack requires --chain-out DIR and optional --snap DIR");
+            else if(tx_eqz(argv[i],"--commit")){if(commitarg[0]||cx_fmt(commitarg,sizeof commitarg,"%s",argv[i+1]))die("commit");}
+            else if(tx_eqz(argv[i],"--cm-sha")){if(i+2>=argc||!hexn(argv[i+1],64)||!hexn(argv[i+2],64)||cx_fmt(cmwant[0],65,"%s",argv[i+1])||cx_fmt(cmwant[1],65,"%s",argv[i+2]))die("--cm-sha X64 ARM64 (64 hex each)");i++;}
+            else die("usage --pack requires --chain-out DIR; optional --snap DIR --commit HEX40|HEAD --cm-sha X64 ARM64");
         }
         if(!chainout[0]||strchr(chainout,'\n')||strchr(chainout,'\r'))die("UNKNOWN chain output --chain-out required");
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
@@ -532,14 +781,16 @@ int main(int argc, char **argv) {
         if (sy_mkdir(out, 0755) && sy_exists(out) != 1) die("out dir");
         if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
         if (rcand_load(table, &cand, why, sizeof why)) die(why);
+        commit_backfill();
         need(srcdir, "sources.tsv");
         require_sources_sid();
         emit("MODE", "PACK", cand.tag);
+        cm_resolve();
         pack_binding(1);
         pack_continue();
         emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
         return 0;
     }
-    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR --chain-out DIR [--snap DIR]");
+    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR --chain-out DIR [--snap DIR] [--commit HEX40|HEAD] [--cm-sha X64 ARM64] | --plan CANDIDATE_TSV | --resume OUT_DIR");
     return 2;
 }

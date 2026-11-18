@@ -1,0 +1,750 @@
+/* tools/release-exec.cx -- gated release execution: candidate ready -> public readback.
+ *
+ *   sh ./unisacc.com tools/release-exec.cx -- --execute CANDIDATE_TSV --layout DIR
+ *        [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE]
+ *   (also reached as: tools/release-run.cx -- --execute ...)
+ *
+ * Runs in the repo root (cwd). Seven steps, same order and commands as release-run --plan:
+ *   1 X-commit  2 draft  3 ci  4 Y1  5 publish  6 readback  7 Y2
+ * Every step: pre-gate -> act -> post-gate; every gate is machine-decided.
+ *   G1 STRICT/EXPECTED_FAIL/CANDIDATE_SHA/APE_VERSION/RATCHETS  before X
+ *   G2 X_PUSHED/ASSETS                                          before draft
+ *   G3 DRAFT_READBACK                                           before CI dispatch
+ *   G4 CI_SUCCESS/CI_VERDICT/Y1_PUSHED                          before publish
+ *   G5 PUBLIC_SHA/READBACK                                      after publish
+ *   G6 DECISION                                                 at Y2
+ * A failing gate stops with "release-exec: REFUSE RELEASE_EXEC_GATE_<NAME>" (rc 2).
+ * After publish (steps 5..7) a gate failure runs the rollback of release/rollback.txt (1):
+ * release back to draft, Latest back to the previous tag; tags/releases are never deleted.
+ * Before publish nothing public exists; rollback is "keep the draft private" (printed).
+ *
+ * Expected failures: release/evidence/V/expected-fail.tsv rows "batch<TAB>pass/fail<TAB>reason";
+ * a strict FAIL row passes G1 only when listed and its COUNT equals the listed pair.
+ * Idempotent: each step first detects its done-state (INDEX rows, candidate ci_run_id,
+ * gh release view) and does not repeat an external action already done; the command is
+ * still printed with label DONE.
+ * --from-step N: steps < N are verify-only (no action; not done -> RELEASE_EXEC_GATE_RESUME).
+ * --dry: gates and command expansion only; no gh, no commit, no push, no edit of the
+ * candidate table. Gates over external state read the committed evidence files
+ * (draft-readback.txt, ci-ID.json/.log, public-readback.txt) and say so; missing
+ * evidence is DEFERRED, never PASS.
+ * Evidence: execute appends exec-N rows (real timestamps) to release/evidence/V/INDEX.tsv;
+ * --dry writes the rows to OUT/INDEX.tsv. Execute emits devsvc phase events per step
+ * (cmd=x phase=release.NAME), skipped with RELEASE_EXEC_NO_EVENTS=1.
+ * CI polling: RELEASE_EXEC_POLL_MS (default 30000) x RELEASE_EXEC_POLL_MAX (default 50 = 25 min).
+ * Check: tools/check-release-exec.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
+#pragma unisa use mem.bytes
+
+#define REPO cand.repo
+static RcCandidate cand;
+static char here[4096], table[4096], layout[4096], outdir[4096], evdir[4400], strictp[4400], baseline[4096];
+static char indexp[4500], xsha[64], y1sha[64], runid[32], prevtag[64], timebuf[64];
+static int dry, from_step = 1, cur_step, published, deferred;
+static long step_t0;
+static const char *step_names[8] = {"-", "X-commit", "draft", "ci", "Y1", "publish", "readback", "Y2"};
+
+#define tlen(s) tx_len((s), 1 << 24)
+static int has(const char *b, long n, const char *s) { return tx_find(b, n, s, tlen(s)) >= 0; }
+static void rollback(void);
+static void emit_phase(int rc);
+
+static void say(const char *tag, const char *a, const char *b) {
+    sy_printf("%s\t%d\t%s\t%s\n", tag, cur_step, a, b ? b : "-");
+}
+static void refuse(const char *gate, const char *detail) {
+    sy_printf("GATE\t%d\t%s\tFAIL\t%s\n", cur_step, gate, detail);
+    sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_%s step=%d %s\n", gate, cur_step, detail);
+    emit_phase(2);
+    rollback();
+    sy_exit(2);
+}
+static void die(const char *s) { sy_eprintf("release-exec: REFUSE %s\n", s); sy_exit(2); }
+static void gate_pass(const char *gate, const char *detail) { sy_printf("GATE\t%d\t%s\tPASS\t%s\n", cur_step, gate, detail); }
+static void gate_deferred(const char *gate, const char *detail) { deferred++; sy_printf("GATE\t%d\t%s\tDEFERRED\t%s\n", cur_step, gate, detail); }
+
+/* bounded child, output captured; returns rc or -1 on transport failure */
+static int run(char **v, int secs, char *o, long cap) {
+    np_result r = {0}; char why[512] = {0}; int rc;
+    if (o && cap > 0) o[0] = 0;
+    if (np_run(v, here, 0, secs, &r, why, sizeof why)) { np_free(&r); return -1; }
+    rc = r.rc;
+    if (o && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        for (size_t i = 0; i < n; i++) o[i] = r.out[i];
+        o[n] = 0; while (n && (o[n - 1] == '\n' || o[n - 1] == '\r')) o[--n] = 0;
+        if (r.outn >= (size_t)cap && !rc) rc = 124;
+    }
+    if (r.errn && rc) sy_write_all(2, r.err, r.errn);
+    np_free(&r);
+    return rc;
+}
+/* same, stdout to a file (large CI logs, readback transcripts) */
+static int run_to(char **v, int secs, const char *path) {
+    np_result r = {0}; char why[512] = {0}; int rc;
+    if (np_run(v, here, 0, secs, &r, why, sizeof why)) { np_free(&r); return -1; }
+    rc = r.rc;
+    if (cx_write(path, r.out ? r.out : "", r.outn)) rc = rc ? rc : 125;
+    if (r.errn && rc) sy_write_all(2, r.err, r.errn);
+    np_free(&r);
+    return rc;
+}
+static void now_text(void) {
+    char *v[] = {"date", "+%Y-%m-%d %H:%M:%S %z", 0};
+    if (run(v, 5, timebuf, sizeof timebuf)) cx_fmt(timebuf, sizeof timebuf, "-");
+}
+static void show(char **v, const char *label) {
+    np_buf b = {0}; int i;
+    for (i = 0; v[i]; i++) {
+        int q = strchr(v[i], ' ') != 0 || strchr(v[i], '\t') != 0 || strchr(v[i], '"') != 0;
+        if (i) np_puts(&b, " ");
+        if (q) np_puts(&b, "'");
+        np_puts(&b, v[i]);
+        if (q) np_puts(&b, "'");
+    }
+    np_put(&b, "", 1);
+    sy_printf("CMD\t%d\t%s\t%s\n", cur_step, label, b.p);
+    free(b.p);
+}
+/* external action: shown always, run only when not --dry */
+static int act(char **v, int secs, char *o, long cap) {
+    int rc;
+    show(v, dry ? "DRY" : "RUN");
+    if (dry) { if (o && cap) o[0] = 0; return 0; }
+    rc = run(v, secs, o, cap);
+    sy_printf("RUN\t%d\t%s\trc=%d\n", cur_step, v[0], rc);
+    return rc;
+}
+static void index_row(const char *item, const char *verdict, const char *ref, const char *note) {
+    char line[2048]; int f;
+    now_text();
+    if (cx_fmt(line, sizeof line, "exec-%d-%s\t%s\t%s\t%s\t%s\n", cur_step, item, timebuf, verdict, ref, note)) die("index row capacity");
+    f = sy_open(indexp, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (f < 0 || sy_write_all(f, line, tlen(line)) || sy_close(f)) die("index write");
+    sy_printf("INDEX\t%s", line);
+}
+static void emit_phase(int rc) {
+    char text[700], o[256]; const char *e = sy_env("RELEASE_EXEC_NO_EVENTS");
+    long d = sy_now_ms() - step_t0;
+    if (cur_step < 1 || cur_step > 7) return;
+    if (cx_fmt(text, sizeof text, "cmd=x\tphase=release.%s\tms=%ld\tinput=%s\trc=%d\tload1=-\tjob=release-exec", step_names[cur_step], d, cand.tag, rc)) return;
+    sy_printf("TIMING\t%d\t%s\tms=%ld\trc=%d\n", cur_step, step_names[cur_step], d, rc);
+    if (dry || (e && e[0] == '1')) return;
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "events", "emit", "phase", text, 0};
+      if (run(v, 15, o, sizeof o)) sy_printf("TIMING\t%d\tEVENT_NOT_RECORDED\tdevsvc events emit failed\n", cur_step); }
+}
+
+/* ---- small readers ---------------------------------------------------------- */
+static char *slurp(const char *p, long *n) { size_t k = 0; char *t = cx_read(p, &k); if (n) *n = t ? (long)k : 0; return t; }
+static int is_hex(const char *s, int n) { return tlen(s) == n && rcand_hex(s, n); }
+static int is_digits(const char *s) { long i, n = tlen(s); if (n < 4) return 0; for (i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0; return 1; }
+static int line_next(const char *t, long n, long *at, const char **ls, long *ll) {
+    long e;
+    if (*at >= n) return 0;
+    *ls = t + *at; e = tx_chr(t + *at, n - *at, '\n');
+    *ll = e < 0 ? n - *at : e;
+    *at += *ll + 1;
+    return 1;
+}
+/* value after KEY= in a line (up to tab/space/end) */
+static int kv(const char *l, long ll, const char *key, char *o, long cap) {
+    long k = tx_find(l, ll, key, tlen(key)), j = 0;
+    o[0] = 0;
+    if (k < 0) return 0;
+    k += tlen(key);
+    while (k < ll && l[k] != '\t' && l[k] != ' ' && l[k] != '\r' && j + 1 < cap) o[j++] = l[k++];
+    o[j] = 0;
+    return 1;
+}
+static int tab_field(const char *l, long ll, int col, char *o, long cap) {
+    long i = 0, j = 0; int c = 0;
+    o[0] = 0;
+    while (i < ll && c < col) { if (l[i] == '\t') c++; i++; }
+    if (c < col) return 0;
+    while (i < ll && l[i] != '\t' && l[i] != '\r' && j + 1 < cap) o[j++] = l[i++];
+    o[j] = 0;
+    return 1;
+}
+/* release/evidence/V/INDEX.tsv: first column in {a,b} -> column 3 (path_or_ref) */
+static int index_ref(const char *a, const char *b, char *o, long cap) {
+    char p[4500], f0[128]; long n, at = 0, ll; const char *ls; char *t; int found = 0;
+    o[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/INDEX.tsv", evdir) || !(t = slurp(p, &n))) return 0;
+    while (line_next(t, n, &at, &ls, &ll)) {
+        if (!ll || ls[0] == '#') continue;
+        tab_field(ls, ll, 0, f0, sizeof f0);
+        if (tx_eqz(f0, a) || (b && tx_eqz(f0, b))) { tab_field(ls, ll, 3, o, cap); found = 1; }
+    }
+    free(t);
+    return found && o[0] && !tx_eqz(o, "-") && !tx_eqz(o, "pending");
+}
+static void sha_file(const char *path, char hex[65]) {
+    char o[200]; char *v[] = {"sha256sum", "--", (char *)path, 0};
+    hex[0] = 0;
+    if (run(v, 30, o, sizeof o) || tlen(o) < 64) return;
+    memcpy(hex, o, 64); hex[64] = 0;
+}
+static int pushed(const char *sha) {
+    char *v[] = {"git", "merge-base", "--is-ancestor", (char *)sha, "origin/main", 0};
+    return is_hex(sha, 40) && run(v, 15, 0, 0) == 0;
+}
+/* candidate tables equal ignoring row column 6 (ci_run_id), which Y1 fills */
+static int same_candidate_but_run(const char *a, const char *b) {
+    const char *pa = strchr(a, '\n'), *pb = strchr(b, '\n'); long ia, ib; int c;
+    if (!pa || !pb || (pa - a) != (pb - b) || memcmp(a, b, (size_t)(pa - a))) return 0;
+    pa++; pb++;
+    for (c = 0; ; c++) {
+        ia = 0; ib = 0;
+        while (pa[ia] && pa[ia] != '\t' && pa[ia] != '\n') ia++;
+        while (pb[ib] && pb[ib] != '\t' && pb[ib] != '\n') ib++;
+        if (c != 6 && (ia != ib || memcmp(pa, pb, (size_t)ia))) return 0;
+        if ((pa[ia] == '\t') != (pb[ib] == '\t')) return 0;
+        if (pa[ia] != '\t') return 1;
+        pa += ia + 1; pb += ib + 1;
+    }
+}
+
+/* ---- rollback ----------------------------------------------------------------- */
+static void rollback(void) {
+    char *a[] = {"gh", "-R", REPO, "release", "edit", cand.tag, "--draft=true", 0};
+    char *b[] = {"gh", "-R", REPO, "release", "edit", prevtag, "--latest", 0};
+    if (!published) {
+        sy_printf("ROLLBACK\t%d\tPLAN\tnot public: keep draft %s private, do not publish; git revert X/Y1 per release/rollback.txt (3); tag and release are never deleted\n", cur_step, cand.tag);
+        return;
+    }
+    sy_printf("ROLLBACK\t%d\t%s\trelease/rollback.txt (1): back to draft, Latest -> %s; tag never deleted\n", cur_step, dry ? "PLAN" : "RUN", prevtag);
+    { int r1 = act(a, 30, 0, 0), r2 = act(b, 30, 0, 0);
+      if (!dry) sy_printf("ROLLBACK\t%d\tRESULT\tdraft_rc=%d\tlatest_rc=%d\n", cur_step, r1, r2); }
+}
+
+/* ---- G1: strict evidence --------------------------------------------------------- */
+static int expected_fail(const char *id, char *want, long cap) {
+    char p[4500], f0[128]; long n, at = 0, ll; const char *ls; char *t; int ok = 0;
+    want[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/expected-fail.tsv", evdir) || !(t = slurp(p, &n))) return 0;
+    while (line_next(t, n, &at, &ls, &ll)) {
+        if (!ll || ls[0] == '#') continue;
+        tab_field(ls, ll, 0, f0, sizeof f0);
+        if (tx_eqz(f0, id)) { tab_field(ls, ll, 1, want, cap); ok = want[0] != 0; }
+    }
+    free(t);
+    return ok;
+}
+static void find_strict(void) {
+    char dir[4500], pre[128], best[512]; static char nb[262144]; int fd, cnt, pos = 0;
+    if (strictp[0]) return;
+    best[0] = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/release/evidence", here) || cx_fmt(pre, sizeof pre, "v%s-strict-", cand.version)) die("strict path");
+    fd = sy_open(dir, O_RDONLY, 0);
+    if (fd < 0) refuse("STRICT", "release/evidence unreadable");
+    cnt = sy_dir_names(fd, nb, (int)sizeof nb); sy_close(fd);
+    while (cnt > 0 && pos < (int)sizeof nb) {
+        const char *nm = nb + pos; long len = tx_len(nm, (long)sizeof nb - pos);
+        if (len <= 0) break;
+        if (len > tlen(pre) + 4 && len < 500 && !memcmp(nm, pre, (size_t)tlen(pre)) && !memcmp(nm + len - 4, ".tsv", 4) && strcmp(nm, best) > 0)
+            mm_copy(best, (long)sizeof best, nm, len + 1);
+        pos += (int)len + 1; cnt--;
+    }
+    if (!best[0]) refuse("STRICT", "no release/evidence/vVERSION-strict-*.tsv");
+    if (cx_fmt(strictp, sizeof strictp, "%s/%s", dir, best)) die("strict path");
+}
+static void gate_strict(void) {
+    long n, at = 0, ll; const char *ls; char *t, id[128], st[32], c[80], d[512], want[64], got[64];
+    int rows = 0, xf = 0, ver = 0;
+    find_strict();
+    if (!(t = slurp(strictp, &n))) refuse("STRICT", strictp);
+    while (line_next(t, n, &at, &ls, &ll)) {
+        if (ll >= 10 && !memcmp(ls, "BATCH_RUN\t", 10)) {
+            rows++;
+            kv(ls, ll, "id=", id, sizeof id); kv(ls, ll, "status=", st, sizeof st); kv(ls, ll, "candidate=", c, sizeof c);
+            if (!tx_eqz(c, cand.sha[0])) { cx_fmt(d, sizeof d, "batch %s candidate=%s != ape_sha256 %s", id, c, cand.sha[0]); free(t); refuse("CANDIDATE_SHA", d); }
+            if (tx_eqz(st, "PASS")) continue;
+            if (tx_eqz(st, "FAIL") && expected_fail(id, want, sizeof want)) {
+                /* the COUNT row of this batch must equal the listed expectation */
+                long a2 = 0, l2; const char *s2; char key[160], pf[32], ff[32]; int match = 0;
+                got[0] = 0;
+                cx_fmt(key, sizeof key, "COUNT\t%s\t", id);
+                while (line_next(t, n, &a2, &s2, &l2))
+                    if (l2 > tlen(key) && !memcmp(s2, key, (size_t)tlen(key))) {
+                        kv(s2, l2, "pass=", pf, sizeof pf); kv(s2, l2, "fail=", ff, sizeof ff);
+                        cx_fmt(got, sizeof got, "%s/%s", pf, ff); match = tx_eqz(got, want);
+                    }
+                if (!match) { cx_fmt(d, sizeof d, "batch %s FAIL count %s != expected %s", id, got[0] ? got : "none", want); free(t); refuse("EXPECTED_FAIL", d); }
+                xf++; continue;
+            }
+            cx_fmt(d, sizeof d, "batch %s status=%s not PASS and not in expected-fail.tsv", id, st); free(t); refuse("STRICT", d);
+        }
+        if (ll >= 7 && !memcmp(ls, "INVALID", 7)) { free(t); refuse("STRICT", "INVALID row"); }
+        if (ll >= 4 && !memcmp(ls, "APE\t", 4)) { kv(ls, ll, "sha256=", c, sizeof c); if (!tx_eqz(c, cand.sha[0])) { free(t); refuse("CANDIDATE_SHA", "strict APE sha256 differs from candidate"); } }
+        if (ll > 8 && !memcmp(ls, "unisacc ", 8) && (long)tlen(cand.version) == ll - 8 && !memcmp(ls + 8, cand.version, (size_t)(ll - 8))) ver = 1;
+    }
+    free(t);
+    if (!rows) refuse("STRICT", "no BATCH_RUN rows");
+    if (!ver) refuse("APE_VERSION", "strict file lacks a --version line equal to the candidate version");
+    cx_fmt(d, sizeof d, "%s rows=%d expected_fail=%d", strictp, rows, xf);
+    gate_pass("STRICT", d);
+    gate_pass("CANDIDATE_SHA", "every BATCH_RUN candidate= equals ape_sha256");
+}
+static void gate_ape(void) {
+    char p[4500], hex[65], o[256], want[128];
+    if (cx_fmt(p, sizeof p, "%s/%s", layout, cand.name[0])) die("ape path");
+    sha_file(p, hex);
+    if (!tx_eqz(hex, cand.sha[0])) refuse("CANDIDATE_SHA", "layout APE sha256 differs from candidate");
+    { char *v[] = {"sh", p, "--version", 0}; run(v, 20, o, sizeof o); }
+    cx_fmt(want, sizeof want, "unisacc %s", cand.version);
+    if (!tx_eqz(o, want)) { char d[400]; cx_fmt(d, sizeof d, "APE --version '%s' != '%s'", o, want); refuse("APE_VERSION", d); }
+    gate_pass("APE_VERSION", want);
+}
+static void gate_ratchets(void) {
+    char p[4500], okv[16], fv[16], src[64]; long n, at = 0, ll; const char *ls; char *t = 0; int found = 0;
+    long okn = -1, fn = -1;
+    if (cx_fmt(p, sizeof p, "%s/ratchets.txt", evdir)) die("ratchets path");
+    cx_fmt(src, sizeof src, "evidence");
+    if (!(t = slurp(p, &n))) {
+        /* no recorded evidence: run the ratchets now (local, read-only) and keep the output */
+        char *v[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
+        if (dry && cx_fmt(p, sizeof p, "%s/ratchets.txt", outdir)) die("ratchets path");
+        run_to(v, 60, p);
+        cx_fmt(src, sizeof src, "live-HEAD");
+        if (!(t = slurp(p, &n))) refuse("RATCHETS", "ratchets output missing");
+    }
+    while (line_next(t, n, &at, &ls, &ll))
+        if (ll > 9 && !memcmp(ls, "RATCHETS\t", 9)) {
+            kv(ls, ll, "ok=", okv, sizeof okv); kv(ls, ll, "fail=", fv, sizeof fv);
+            okn = okv[0] ? atol(okv) : -1; fn = fv[0] ? atol(fv) : -1; found = 1;
+        }
+    free(t);
+    if (!found || fn != 0 || okn < 15) { char d[200]; cx_fmt(d, sizeof d, "ok=%ld fail=%ld (need ok>=15 fail=0)", okn, fn); refuse("RATCHETS", d); }
+    { char d[200]; cx_fmt(d, sizeof d, "%ld/0 source=%s", okn, src); gate_pass("RATCHETS", d); }
+}
+
+/* ---- step 1: X ----------------------------------------------------------------------- */
+static int x_candidate_ok(const char *sha) {
+    char spec[80], show_[16384]; long n; char *cur; int ok;
+    char *v[] = {"git", "show", spec, 0};
+    if (!is_hex(sha, 40) || cx_fmt(spec, sizeof spec, "%s:release/candidate.tsv", sha) || run(v, 15, show_, sizeof show_)) return 0;
+    if (!(cur = slurp(table, &n))) return 0;
+    ok = same_candidate_but_run(show_, cur);
+    free(cur);
+    return ok;
+}
+static void step_x(void) {
+    char head[64], p[4500], msg[200];
+    char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", "--push", 0};
+    cx_fmt(msg, sizeof msg, "v%s X: candidate table", cand.version);
+    gate_strict(); gate_ape(); gate_ratchets();
+    if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", here)) die("path");
+    { char rp[4096]; if (sy_realpath(p, rp, sizeof rp) < 0 || !tx_eqz(rp, table)) refuse("CANDIDATE_SHA", "CANDIDATE_TSV must be the checkout's release/candidate.tsv"); }
+    if (index_ref("exec-1-X-commit", "commit-X", xsha, sizeof xsha) && x_candidate_ok(xsha)) {
+        show(v, "DONE");
+        say("SKIP", "X already recorded", xsha);
+    } else if (cur_step < from_step) {
+        refuse("RESUME", "no X recorded in INDEX.tsv for a verify-only step");
+    } else {
+        if (act(v, 55, 0, 0)) refuse("X_PUSHED", "devsvc git commit X failed");
+        if (dry) { gate_deferred("X_PUSHED", "X not created in --dry"); cx_fmt(xsha, sizeof xsha, "{commit-x}"); return; }
+        { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0};
+          if (run(g, 15, head, sizeof head) || !x_candidate_ok(head)) refuse("X_PUSHED", "X commit not found for the current candidate");
+          cx_fmt(xsha, sizeof xsha, "%s", head); }
+        index_row("X-commit", "-", xsha, "release/candidate.tsv");
+    }
+    if (!pushed(xsha)) refuse("X_PUSHED", "X is not an ancestor of origin/main");
+    gate_pass("X_PUSHED", xsha);
+}
+
+/* ---- step 2: draft --------------------------------------------------------------------- */
+static void gate_assets(void) {
+    char why[512], p[4500], hex[65];
+    if (rcand_verify(&cand, layout, 7, why, sizeof why)) refuse("ASSETS", why);
+    cx_fmt(p, sizeof p, "%s/%s", layout, cand.name[6]); sha_file(p, hex);
+    if (!tx_eqz(hex, cand.sha[6])) refuse("ASSETS", "SHA256SUMS sha differs from candidate");
+    gate_pass("ASSETS", "six assets equal candidate sha256");
+}
+/* SHA256SUMS text vs files in dir: every listed line must hash equal; returns count or -1 */
+static int sums_check(const char *dir, const char *sums, long sn, char *bad, long cap) {
+    long at = 0, ll; const char *ls; int k = 0;
+    while (line_next(sums, sn, &at, &ls, &ll)) {
+        char nm[300], p[4800], hex[65]; long j;
+        if (ll < 67) continue;
+        for (j = 0; j < ll - 66 && j < 299; j++) nm[j] = ls[66 + j];
+        nm[j] = 0;
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, nm)) return -1;
+        sha_file(p, hex);
+        if (tlen(hex) != 64 || memcmp(hex, ls, 64)) { cx_fmt(bad, cap, "SHA256SUMS mismatch %s", nm); return -1; }
+        k++;
+    }
+    return k;
+}
+/* 1 ok, 0 present but failing, -1 absent */
+static int evidence_readback_ok(const char *leaf, int need_public) {
+    char p[4500]; long n; char *t; int ok;
+    if (cx_fmt(p, sizeof p, "%s/%s", evdir, leaf) || !(t = slurp(p, &n))) return -1;
+    if (need_public) {
+        char want[120]; cx_fmt(want, sizeof want, "READBACK_SHA %s %s", cand.name[0], cand.sha[0]);
+        ok = has(t, n, "rc=0") && has(t, n, "\"isDraft\":false") && has(t, n, want) && !has(t, n, " FAIL");
+    } else {
+        int i, k = 0;
+        for (i = 0; i < 6; i++) {
+            char w[300]; if (rcand_skip(&cand, i)) continue;
+            cx_fmt(w, sizeof w, "%s: OK", cand.name[i]); if (has(t, n, w)) k++;
+        }
+        ok = k == 5 && !has(t, n, "FAILED");
+    }
+    free(t);
+    return ok;
+}
+static void draft_readback(void) {
+    char tmp[4500], p[4800], bad[300], line[512]; long sn; char *s; int k, i;
+    char *v[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-D", tmp, "--clobber", 0};
+    if (cx_fmt(tmp, sizeof tmp, "%s/draft-download", outdir)) die("path");
+    if (dry) {
+        int e = evidence_readback_ok("draft-readback.txt", 0);
+        show(v, e == 1 ? "DONE" : "DRY");
+        if (e < 0) gate_deferred("DRAFT_READBACK", "no draft-readback.txt evidence");
+        else if (!e) refuse("DRAFT_READBACK", "draft-readback.txt has missing or failed rows");
+        else gate_pass("DRAFT_READBACK", "evidence draft-readback.txt (recorded)");
+        return;
+    }
+    sy_mkdir(tmp, 0755);
+    if (act(v, 55, 0, 0)) refuse("DRAFT_READBACK", "gh release download failed");
+    if (cx_fmt(p, sizeof p, "%s/SHA256SUMS", tmp) || !(s = slurp(p, &sn))) refuse("DRAFT_READBACK", "SHA256SUMS not downloaded");
+    k = sums_check(tmp, s, sn, bad, sizeof bad);
+    if (k != 5) { free(s); refuse("DRAFT_READBACK", k < 0 ? bad : "SHA256SUMS does not list five assets"); }
+    { np_buf b = {0}; now_text();
+      cx_fmt(line, sizeof line, "# draft %s download %s via gh release download (release-exec)\n", cand.tag, timebuf); np_puts(&b, line);
+      for (i = 0; i < 6; i++) { if (rcand_skip(&cand, i)) continue; cx_fmt(line, sizeof line, "%s: OK\n", cand.name[i]); np_puts(&b, line); }
+      np_put(&b, s, (size_t)sn);
+      cx_fmt(p, sizeof p, "%s/draft-readback.txt", evdir);
+      if (cx_write(p, b.p, b.n)) die("draft evidence write");
+      free(b.p); }
+    free(s);
+    gate_pass("DRAFT_READBACK", "five assets match downloaded SHA256SUMS");
+    index_row("draft-readback", "PASS", "draft-readback.txt", "gh release download, SHA256SUMS OK");
+}
+/* 0 none, 1 draft, 2 public; -1 not queried (dry) */
+static int release_state(void) {
+    char o[512];
+    char *v[] = {"gh", "-R", REPO, "release", "view", cand.tag, "--json", "isDraft", "--jq", ".isDraft", 0};
+    if (dry) return -1;
+    show(v, "READ");
+    if (run(v, 30, o, sizeof o)) return 0;
+    if (tx_eqz(o, "true")) return 1;
+    if (tx_eqz(o, "false")) return 2;
+    return 0;
+}
+static void step_draft(void) {
+    int st, i, n = 0, ev;
+    char files[7][4500]; char *up[20];
+    char *cr[] = {"gh", "-R", REPO, "release", "create", cand.tag, "--draft", "--title", cand.version, "--target", cand.commit, 0};
+    up[n++] = "gh"; up[n++] = "-R"; up[n++] = REPO; up[n++] = "release"; up[n++] = "upload"; up[n++] = cand.tag;
+    for (i = 0; i < 7; i++) { if (rcand_skip(&cand, i)) continue; cx_fmt(files[i], sizeof files[i], "%s/%s", layout, cand.name[i]); up[n++] = files[i]; }
+    up[n++] = "--clobber"; up[n] = 0;
+    if (!(dry && xsha[0] == '{') && !pushed(xsha)) refuse("X_PUSHED", "X not pushed");
+    gate_assets();
+    st = release_state();
+    ev = dry ? evidence_readback_ok("draft-readback.txt", 0) : 0;
+    if (st == 2) { published = 1; show(cr, "DONE"); show(up, "DONE"); say("SKIP", "release already public", cand.tag); }
+    else if (dry && ev == 1) { show(cr, "DONE"); show(up, "DONE"); say("SKIP", "draft recorded in evidence", cand.tag); }
+    else if (st == 1 && cur_step < from_step) { show(cr, "DONE"); show(up, "DONE"); say("SKIP", "draft exists (verify only)", cand.tag); }
+    else if (cur_step < from_step && !dry) refuse("RESUME", "no draft release for a verify-only step");
+    else {
+        if (st == 1) { show(cr, "DONE"); say("SKIP", "draft exists, not recreated", cand.tag); }
+        else if (act(cr, 55, 0, 0)) refuse("DRAFT_READBACK", "gh release create failed");
+        if (act(up, 55, 0, 0)) refuse("DRAFT_READBACK", "gh release upload failed");
+    }
+    if (st == 2 && !dry) { gate_pass("DRAFT_READBACK", "release already public; readback at step 6"); return; }
+    draft_readback();
+}
+
+/* ---- step 3: CI -------------------------------------------------------------------------- */
+static void ci_verify_files(const char *json, const char *log) {
+    long n, at = 0, ll; const char *ls; char *t; int jobs = 0; long pos = 0; char d[400];
+    if (!(t = slurp(json, &n))) refuse("CI_SUCCESS", "ci json missing");
+    if (tx_find(t, n < 40 ? n : 40, "\"conclusion\":\"success\"", 22) < 0) { free(t); refuse("CI_SUCCESS", "run conclusion is not success"); }
+    for (;;) {
+        long k = tx_find(t + pos, n - pos, "\"name\":\"candidate (", 19), b0;
+        if (k < 0) break;
+        k += pos; b0 = k > 90 ? k - 90 : 0;
+        if (tx_find(t + b0, k - b0, "\"conclusion\":\"success\"", 22) < 0) { free(t); refuse("CI_SUCCESS", "a candidate job is not success"); }
+        jobs++; pos = k + 19;
+    }
+    free(t);
+    if (jobs != 6) { cx_fmt(d, sizeof d, "candidate jobs=%d, need 6 success", jobs); refuse("CI_SUCCESS", d); }
+    gate_pass("CI_SUCCESS", "run success, six candidate targets success");
+    if (!(t = slurp(log, &n))) refuse("CI_VERDICT", "ci log missing");
+    { int found = 0; char vv[64], fv[16], iv[16];
+      while (line_next(t, n, &at, &ls, &ll)) {
+          long k = tx_find(ls, ll, "CANDIDATE_QUALIFY\tverdict=", 26);
+          if (k < 0 || has(ls, ll, "36;1m")) continue;
+          kv(ls + k, ll - k, "verdict=", vv, sizeof vv); kv(ls + k, ll - k, "\tfail=", fv, sizeof fv); kv(ls + k, ll - k, "invalid=", iv, sizeof iv);
+          found = 1;
+          if (has(vv, tlen(vv), "FAIL") || has(vv, tlen(vv), "INVALID") || has(vv, tlen(vv), "fail") || has(vv, tlen(vv), "invalid") || !tx_eqz(fv, "0") || !tx_eqz(iv, "0")) {
+              cx_fmt(d, sizeof d, "verdict=%s fail=%s invalid=%s", vv, fv, iv); free(t); refuse("CI_VERDICT", d); }
+          cx_fmt(d, sizeof d, "verdict=%s fail=0 invalid=0", vv);
+      }
+      free(t);
+      if (!found) refuse("CI_VERDICT", "no CANDIDATE_QUALIFY verdict line in CI log"); }
+    gate_pass("CI_VERDICT", d);
+}
+static void ci_paths(char *json, char *log) {
+    cx_fmt(json, 4500, "%s/ci-%s.json", evdir, runid);
+    cx_fmt(log, 4500, "%s/ci-%s.log", evdir, runid);
+}
+static void ci_fetch_and_verify(void) {
+    char json[4500], log[4500], o[256]; int i, max = 50; long ms = 30000; const char *e;
+    char *w[] = {"gh", "-R", REPO, "run", "watch", runid, 0};
+    ci_paths(json, log);
+    if (dry) {
+        show(w, sy_exists(json) == 1 ? "DONE" : "DRY");
+        if (sy_exists(json) != 1 || sy_exists(log) != 1) { gate_deferred("CI_SUCCESS", "no ci-RUN.json/.log evidence"); return; }
+        say("NOTE", "CI gates read recorded evidence", runid);
+        ci_verify_files(json, log);
+        return;
+    }
+    if ((e = sy_env("RELEASE_EXEC_POLL_MS")) && e[0]) ms = atol(e);
+    if ((e = sy_env("RELEASE_EXEC_POLL_MAX")) && e[0]) max = (int)atol(e);
+    if (ms > 30000 || max > 50 || ms < 0 || max < 1) die("poll bound: at most 30000 ms x 50");
+    for (i = 0; i < max; i++) {
+        char *v[] = {"gh", "-R", REPO, "run", "view", runid, "--json", "status", "--jq", ".status", 0};
+        if (i == 0) show(v, "POLL");
+        if (!run(v, 30, o, sizeof o) && tx_eqz(o, "completed")) break;
+        sy_printf("POLL\t%d\t%s\t%d/%d\tstatus=%s\n", cur_step, runid, i + 1, max, o);
+        sy_sleep_ms(ms);
+    }
+    if (i == max) refuse("CI_SUCCESS", "CI not completed within the polling bound");
+    { char *v[] = {"gh", "-R", REPO, "run", "view", runid, "--json", "conclusion,createdAt,databaseId,event,headSha,jobs", 0};
+      show(v, "READ");
+      if (run_to(v, 30, json)) refuse("CI_SUCCESS", "gh run view --json failed"); }
+    { char *v[] = {"gh", "-R", REPO, "run", "view", runid, "--log", 0};
+      show(v, "READ");
+      if (run_to(v, 55, log)) refuse("CI_VERDICT", "gh run view --log failed"); }
+    ci_verify_files(json, log);
+    index_row("ci", "PASS", runid, "six targets success, CANDIDATE_QUALIFY no fail/invalid");
+}
+static void step_ci(void) {
+    char since[64], fx[100], fs[100], ft[100], o[4096];
+    char *v[] = {"gh", "-R", REPO, "workflow", "run", cand.workflow, "--ref", cand.workflow_ref, "-f", ft, "-f", fs, "-f", fx, 0};
+    cx_fmt(ft, sizeof ft, "release_tag=%s", cand.tag); cx_fmt(fs, sizeof fs, "ape_sha256=%s", cand.sha[0]); cx_fmt(fx, sizeof fx, "commit=%s", xsha);
+    if (published && !dry) say("NOTE", "release already public", "CI gate re-proven from evidence");
+    else if (evidence_readback_ok("draft-readback.txt", 0) != 1 && !(dry && deferred)) refuse("DRAFT_READBACK", "draft readback evidence missing before CI");
+    if (is_digits(cand.ci_run_id)) {
+        cx_fmt(runid, sizeof runid, "%s", cand.ci_run_id);
+        show(v, "DONE"); say("SKIP", "CI run recorded in candidate ci_run_id, not re-dispatched", runid);
+    } else if (index_ref("exec-3-ci-dispatch", "exec-3-ci", runid, sizeof runid)) {
+        show(v, "DONE"); say("SKIP", "CI run recorded in INDEX, not re-dispatched", runid);
+    } else if (cur_step < from_step) {
+        refuse("RESUME", "no CI run recorded for a verify-only step");
+    } else {
+        { char *d[] = {"date", "-u", "+%Y-%m-%dT%H:%M:%SZ", 0}; run(d, 5, since, sizeof since); }
+        if (act(v, 55, 0, 0)) refuse("CI_SUCCESS", "gh workflow run failed");
+        if (dry) { gate_deferred("CI_SUCCESS", "CI not dispatched in --dry"); return; }
+        /* newest workflow_dispatch run of this workflow created at or after dispatch */
+        for (int i = 0; i < 6 && !runid[0]; i++) {
+            char *l[] = {"gh", "-R", REPO, "run", "list", "--workflow", cand.workflow, "--event", "workflow_dispatch", "--limit", "5",
+                         "--json", "databaseId,createdAt", "--jq", ".[]|\"\\(.databaseId)\\t\\(.createdAt)\"", 0};
+            long at = 0, ll; const char *ls;
+            if (i == 0) show(l, "READ");
+            if (!run(l, 30, o, sizeof o))
+                while (line_next(o, tlen(o), &at, &ls, &ll)) {
+                    char id[32], ca[64]; tab_field(ls, ll, 0, id, sizeof id); tab_field(ls, ll, 1, ca, sizeof ca);
+                    if (strcmp(ca, since) >= 0 && !runid[0] && is_digits(id)) cx_fmt(runid, sizeof runid, "%s", id);
+                }
+            if (!runid[0]) sy_sleep_ms(5000);
+        }
+        if (!runid[0]) refuse("CI_SUCCESS", "dispatched run not found");
+        index_row("ci-dispatch", "-", runid, "candidate-native.yml dispatched");
+    }
+    ci_fetch_and_verify();
+}
+
+/* ---- step 4: Y1 ---------------------------------------------------------------------------- */
+static void set_ci_run_id(void) {
+    long n; char *t = slurp(table, &n), *p; np_buf b = {0}; int c = 0; long s, e;
+    if (!t) die("candidate read");
+    p = memchr(t, '\n', (size_t)n); if (!p) die("candidate header");
+    s = p - t + 1;
+    while (s < n && c < 6) { if (t[s] == '\t') c++; s++; }
+    e = s; while (e < n && t[e] != '\t') e++;
+    if (c != 6) die("candidate ci_run_id column");
+    np_put(&b, t, (size_t)s); np_puts(&b, runid); np_put(&b, t + e, (size_t)(n - e));
+    if (cx_write(table, b.p, b.n)) die("candidate write");
+    free(t); free(b.p);
+    sy_printf("EDIT\t%d\trelease/candidate.tsv\tci_run_id=%s\n", cur_step, runid);
+}
+static void step_y1(void) {
+    char evrel[200], notes[200], msg[200], dp[4500];
+    char *dv[] = {"sh", "./unisacc.com", "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
+    char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", evrel, notes, "release/evidence.tsv", "release/decision.txt", "release/rollback.txt", "--push", 0};
+    cx_fmt(evrel, sizeof evrel, "release/evidence/%s", cand.version);
+    cx_fmt(notes, sizeof notes, "release/notes-%s.md", cand.version);
+    cx_fmt(msg, sizeof msg, "v%s Y1", cand.version);
+    if (index_ref("exec-4-Y1", "commit-Y1", y1sha, sizeof y1sha)) { show(dv, "DONE"); show(v, "DONE"); say("SKIP", "Y1 already recorded", y1sha); }
+    else if (cur_step < from_step) refuse("RESUME", "no Y1 recorded for a verify-only step");
+    else {
+        if (!tx_eqz(cand.ci_run_id, runid)) { if (dry) sy_printf("EDIT\t%d\tDRY\trelease/candidate.tsv ci_run_id=%s\n", cur_step, runid); else set_ci_run_id(); }
+        cx_fmt(dp, sizeof dp, "%s/decision.txt", dry ? outdir : "release");
+        show(dv, "LOCAL");
+        if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
+        if (act(v, 55, 0, 0)) refuse("Y1_PUSHED", "devsvc git commit Y1 failed");
+        if (dry) { gate_deferred("Y1_PUSHED", "Y1 not created in --dry"); return; }
+        { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0}; if (run(g, 10, y1sha, sizeof y1sha)) refuse("Y1_PUSHED", "Y1 commit lookup"); }
+        index_row("Y1", "-", y1sha, "candidate ci_run_id, evidence, decision, notes, rollback");
+    }
+    if (!pushed(y1sha)) refuse("Y1_PUSHED", "Y1 is not an ancestor of origin/main");
+    gate_pass("Y1_PUSHED", y1sha);
+}
+
+/* ---- step 5: publish ------------------------------------------------------------------------ */
+static void step_publish(void) {
+    char json[4500], log[4500], ref[600]; int st;
+    char *v[] = {"gh", "-R", REPO, "release", "edit", cand.tag, "--draft=false", "--latest", 0};
+    /* G4 re-proven from the CI evidence files right before the public action */
+    ci_paths(json, log);
+    if (sy_exists(json) == 1 && sy_exists(log) == 1) ci_verify_files(json, log);
+    else if (dry) gate_deferred("CI_SUCCESS", "no CI evidence before publish");
+    else refuse("CI_SUCCESS", "CI evidence missing before publish");
+    if (!dry && !pushed(y1sha)) refuse("Y1_PUSHED", "Y1 not pushed before publish");
+    st = release_state();
+    if (st == 2 || (dry && index_ref("publish", "exec-5-publish", ref, sizeof ref))) { published = 1; show(v, "DONE"); say("SKIP", "release already public", cand.tag); }
+    else if (cur_step < from_step && !dry) refuse("RESUME", "release not public for a verify-only step");
+    else {
+        if (act(v, 30, 0, 0)) refuse("PUBLIC_SHA", "gh release edit --draft=false failed");
+        if (!dry) { published = 1; if (release_state() != 2) refuse("PUBLIC_SHA", "release still draft after edit"); index_row("publish", "-", cand.tag, "isDraft=false, Latest"); }
+    }
+}
+
+/* ---- step 6: readback ------------------------------------------------------------------------- */
+static void step_readback(void) {
+    char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
+    char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
+    char *rb[] = {"sh", "./unisacc.com", "release/tools/c47-1-readback.cx", "--", here, "release/candidate.tsv", nout, baseline, "false", 0};
+    cx_fmt(fresh, sizeof fresh, "%s/fresh", outdir);
+    cx_fmt(nout, sizeof nout, "%s/readback", outdir);
+    if (dry) {
+        int e = evidence_readback_ok("public-readback.txt", 1);
+        show(dl, e == 1 ? "DONE" : "DRY"); show(rb, e == 1 ? "DONE" : "DRY");
+        if (e < 0) gate_deferred("READBACK", "no public-readback.txt evidence");
+        else if (!e) refuse("READBACK", "public-readback.txt lacks rc=0, isDraft=false or the APE sha");
+        else { gate_pass("PUBLIC_SHA", "evidence public-readback.txt READBACK_SHA equals candidate"); gate_pass("READBACK", "evidence public-readback.txt rc=0 (recorded)"); }
+        return;
+    }
+    sy_mkdir(fresh, 0755);
+    if (act(dl, 55, 0, 0)) refuse("PUBLIC_SHA", "public download failed");
+    cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[0]); sha_file(p, hex);
+    if (!tx_eqz(hex, cand.sha[0])) refuse("PUBLIC_SHA", "public APE sha256 differs from candidate");
+    cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[6]);
+    if (!(s = slurp(p, &sn))) refuse("PUBLIC_SHA", "public SHA256SUMS missing");
+    { long at = 0, ll; const char *ls; char want[400]; int seen = 0;
+      cx_fmt(want, sizeof want, "%s  %s", cand.sha[0], cand.name[0]);
+      while (line_next(s, sn, &at, &ls, &ll)) if (ll == tlen(want) && !memcmp(ls, want, (size_t)ll)) seen = 1;
+      free(s);
+      if (!seen) refuse("PUBLIC_SHA", "public SHA256SUMS does not list the candidate APE sha"); }
+    gate_pass("PUBLIC_SHA", hex);
+    cx_fmt(p, sizeof p, "%s/public-readback.txt", evdir);
+    for (attempt = 0; attempt < 2 && rc != 0; attempt++) {
+        show(rb, "RUN");
+        rc = run_to(rb, 55, p);
+        sy_printf("RUN\t%d\treadback\tattempt=%d\trc=%d\n", cur_step, attempt + 1, rc);
+        if (rc != 124) break;   /* only the documented outer timeout is retried, once */
+    }
+    { long n; char *t = slurp(p, &n); np_buf b = {0}; now_text();
+      cx_fmt(o, sizeof o, "# c47-1-readback (public) %s via release-exec; rc=%d\n", timebuf, rc);
+      np_puts(&b, o); if (t) np_put(&b, t, (size_t)n);
+      cx_fmt(o, sizeof o, "READBACK_SHA %s %s\n", cand.name[0], hex); np_puts(&b, o);
+      if (cx_write(p, b.p, b.n)) die("readback evidence write");
+      free(b.p); free(t); }
+    if (rc != 0) refuse("READBACK", "c47-1-readback rc != 0");
+    gate_pass("READBACK", "rc=0");
+    index_row("public-readback", "PASS", "public-readback.txt", "fresh download sha256 equals candidate, c47-1-readback rc 0");
+}
+
+/* ---- step 7: Y2 --------------------------------------------------------------------------------- */
+static void step_y2(void) {
+    char dp[4500], msg[200], evrel[200], ref[200]; long a, b; char *ta, *tb; int same;
+    char *dv[] = {"sh", "./unisacc.com", "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
+    char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", evrel, "release/decision.txt", "release/rollback.txt", "--push", 0};
+    cx_fmt(evrel, sizeof evrel, "release/evidence/%s", cand.version);
+    cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
+    cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
+    show(dv, "LOCAL");
+    if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
+    ta = slurp(dp, &a); tb = slurp("release/decision.txt", &b);
+    same = ta && tb && a == b && !memcmp(ta, tb, (size_t)a);
+    free(ta); free(tb);
+    if (!same) refuse("DECISION", "release-decide recompute differs from release/decision.txt");
+    gate_pass("DECISION", "recompute equals release/decision.txt");
+    if (index_ref("exec-7-Y2-done", 0, ref, sizeof ref)) { show(v, "DONE"); say("SKIP", "Y2 already recorded", ref); return; }
+    if (!dry) index_row("Y2", "-", "pending", "evidence INDEX and decision recomputed equal; Y2 commit follows");
+    if (act(v, 55, 0, 0)) refuse("Y2", "devsvc git commit Y2 failed");
+    if (!dry) {
+        char *g[] = {"git", "rev-parse", "HEAD", 0};
+        if (run(g, 10, ref, sizeof ref) || !is_hex(ref, 40)) refuse("Y2", "Y2 commit lookup");
+        index_row("Y2-done", "-", ref, "Y2 committed; this row rides with the next commit");
+    }
+}
+
+int main(int argc, char **argv) {
+    char why[512], ver[64]; int i;
+    const char *home = sy_env("HOME");
+    if (argc < 3 || !tx_eqz(argv[1], "--execute"))
+        die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE]");
+    if (sy_cwd(here, sizeof here)) die("cwd");
+    if (sy_realpath(argv[2], table, sizeof table) < 0) die("candidate table");
+    cx_fmt(baseline, sizeof baseline, "%s/.unisacc-baselines/c46-2/unisacc-c46-2.com", home ? home : "");
+    for (i = 3; i < argc; i++) {
+        if (tx_eqz(argv[i], "--dry")) { dry = 1; continue; }
+        if (i + 1 >= argc) die("option value missing");
+        if (tx_eqz(argv[i], "--layout")) { if (sy_realpath(argv[++i], layout, sizeof layout) < 0) die("layout dir"); }
+        else if (tx_eqz(argv[i], "--from-step")) { from_step = (int)atol(argv[++i]); if (from_step < 1 || from_step > 7) die("--from-step 1..7"); }
+        else if (tx_eqz(argv[i], "--out")) { if (cx_fmt(outdir, sizeof outdir, "%s", argv[++i]) || outdir[0] != '/') die("--out absolute"); }
+        else if (tx_eqz(argv[i], "--strict")) { if (sy_realpath(argv[++i], strictp, sizeof strictp) < 0) die("strict file"); }
+        else if (tx_eqz(argv[i], "--baseline")) { if (cx_fmt(baseline, sizeof baseline, "%s", argv[++i])) die("baseline"); }
+        else die("unknown option");
+    }
+    if (!layout[0]) die("--layout DIR required (six persistent release assets)");
+    if (rcand_load(table, &cand, why, sizeof why)) die(why);
+    if (cx_fmt(evdir, sizeof evdir, "%s/release/evidence/%s", here, cand.version)) die("evidence path");
+    if (!outdir[0]) {
+        const char *j = sy_env("CLAUDE_JOB_DIR");
+        if (cx_fmt(outdir, sizeof outdir, "%s/release-exec-%s", j && j[0] ? j : "/tmp", cand.version)) die("out path");
+    }
+    if (sy_mkdir(outdir, 0755) && sy_exists(outdir) != 1) die("out dir");
+    if (!dry && sy_mkdir(evdir, 0755) && sy_exists(evdir) != 1) die("evidence dir");
+    if (cx_fmt(indexp, sizeof indexp, "%s/INDEX.tsv", dry ? outdir : evdir)) die("index path");
+    if (dry && cx_write(indexp, "item\ttime\tverdict\tpath_or_ref\tnote\n", 36)) die("index write");
+    /* previous tag for rollback: last version component minus one */
+    { long n = tlen(cand.version), k = n; while (k > 0 && cand.version[k - 1] != '.') k--;
+      if (k <= 0 || k >= 60 || atol(cand.version + k) < 1) die("version shape");
+      if (mm_copy(ver, (long)sizeof ver, cand.version, k)) die("version copy");
+      ver[k] = 0;
+      cx_fmt(prevtag, sizeof prevtag, "v%s%ld", ver, atol(cand.version + k) - 1); }
+    sy_printf("RELEASE_EXEC\tMODE\t%s\t%s\tfrom_step=%d\tlayout=%s\n", dry ? "DRY" : "EXECUTE", cand.tag, from_step, layout);
+    for (cur_step = 1; cur_step <= 7; cur_step++) {
+        step_t0 = sy_now_ms();
+        sy_printf("STEP\t%d\t%s\t%s\n", cur_step, step_names[cur_step], cur_step < from_step ? "VERIFY" : "BEGIN");
+        switch (cur_step) {
+        case 1: step_x(); break;
+        case 2: step_draft(); break;
+        case 3: step_ci(); break;
+        case 4: step_y1(); break;
+        case 5: step_publish(); break;
+        case 6: step_readback(); break;
+        default: step_y2(); break;
+        }
+        if (dry) index_row(step_names[cur_step], "GATES", "-", "dry: gates checked, no external action");
+        emit_phase(0);
+        sy_printf("STEP\t%d\t%s\tDONE\n", cur_step, step_names[cur_step]);
+    }
+    sy_printf("RELEASE_EXEC\tRESULT\t%s\tsteps=7\tdeferred=%d\tindex=%s\n", dry ? "DRY_GATES_OK" : "EXECUTED", deferred, indexp);
+    return 0;
+}

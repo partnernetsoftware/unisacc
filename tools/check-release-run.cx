@@ -7,7 +7,9 @@
  *   R4 dry-run 不产生 git 变更:跑前后 rev-parse HEAD 相同;gh 从未被调用
  *      (环境里注入 GH=never,任何 gh 调用都会失败使测试红)。
  * 负控:布局改字节;pack要求真实chain compare证据与六对非空同字节文件,
- * 并以实际子进程marker验证拒绝发生在打包前(含ape-pack DONE续跑)。 */
+ * 并以实际子进程marker验证拒绝发生在打包前(含ape-pack DONE续跑)。
+ * N1-N8(N-05 切片):--commit 回填冻结提交与空操作字节相同、非祖先与非冻结点具名拒绝、
+ * cache-manager 持久副本回落、重建一致与不一致具名拒绝、无记录 sha 拒绝、--plan 顺序。 */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -88,6 +90,139 @@ static int memo_fixture(const char *chain, int fault) {
     int rc=fixture_put(chain,fault==37?"chain-run-3.stdout":"chain-run-2.stdout",log.p);free(log.p);return rc;
 }
 
+/* N-series (N-05 slice): commit backfill, cache-manager fallback and --plan, on a fixture
+ * root whose unisacc.com stands in for the pack children. release-ape writes a fake APE
+ * and records the cache-manager paths it was given; version-inject copies; cache-retain
+ * writes fixed bytes per target; release-layout stops the run (rc 2) after build.json
+ * has been written and read back. Commits are real history of this repository:
+ * 3865c7c9e0 is the v0.0.73 freeze, 316830b86d its branch base (v0.0.72 table),
+ * 1c18498e6e a descendant. RELEASE_RUN_TOOL may point at another release-run.cx
+ * (used to show the old tool fails these checks). */
+#define NC_FREEZE "3865c7c9e0e5b7b75a18e9839a459f12553d0b55"
+#define NC_BASE "316830b86d7285787be3453fc2c167a08b9c3558"
+#define NC_LATER "1c18498e6eba31e189c21e1dd8c2717f29445ee9"
+static char nc_out[65536];
+static int nc_pack(const char *ncroot, const char *tsv, const char *src, const char *od, const char *chain,
+                   const char *snap, const char *envh, const char *envc, const char *a1, const char *a2, const char *a3) {
+    const char *tool = sy_env("RELEASE_RUN_TOOL");
+    char *v[24]; int k = 0;
+    v[k++] = "env"; v[k++] = (char *)envh; v[k++] = (char *)envc; v[k++] = "GH=never"; v[k++] = "PATH=/usr/bin:/bin";
+    v[k++] = "sh"; v[k++] = "unisacc.com"; v[k++] = (char *)(tool && tool[0] ? tool : "tools/release-run.cx"); v[k++] = "--";
+    v[k++] = "--pack"; v[k++] = (char *)ncroot; v[k++] = (char *)tsv; v[k++] = (char *)src; v[k++] = (char *)od;
+    v[k++] = "--chain-out"; v[k++] = (char *)chain; v[k++] = "--snap"; v[k++] = (char *)snap;
+    if (a1) v[k++] = (char *)a1; if (a2) v[k++] = (char *)a2; if (a3) v[k++] = (char *)a3;
+    v[k] = 0;
+    return run(v, root, nc_out, sizeof nc_out);
+}
+static int nc_table(const char *path, const char *commit) {
+    char buf[2000];
+    const char *z = "0000000000000000000000000000000000000000000000000000000000000000";
+    return cx_fmt(buf, sizeof buf, "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+        "r\tv0.0.73\t%s\t0.0.73\tw\tmain\t0\ta\t%s\tp\t%s\ts\t%s\trd\t%s\tb\t%s\t-\t-\tc\t%s\n", commit, z, z, z, z, z, z) || cx_write(path, buf, tlen(buf));
+}
+/* Byte comparison of a tool-written artifact (build.json, TSV) with an expected line. */
+static int nc_holds(const char *t, const char *w) {
+    long n = tlen(w);
+    for (const char *p = t; p && *p; p++) { long i = 0; while (i < n && p[i] == w[i]) i++; if (i == n) return 1; }
+    return 0;
+}
+static char *nc_read(const char *dir, const char *leaf) { char p[4800]; size_t n; return cx_fmt(p, sizeof p, "%s/%s", dir, leaf) ? 0 : cx_read(p, &n); }
+static void nc_suite(const char *chain, const char *snap, const char *hp) {
+    char ncroot[4400], p[4800], src[4400], src2[4400], used[4600], envh[4800], envc[4800], t1[4400], t2[4400], t3[4400], t4[4400], od[4400], script[2400];
+    const char *inputs[7] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64"};
+    const char *sid = "a811885eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+    const char *sx = "ab8716abf18f6443cb5080a500de8180091d15f4b661f72823db81dae496266a", *sa = "ddc29cce446296f864451d35ed85fca68ecbc967223bd43348ad908c5382f07f";
+    const char *rx = "8af532d28181c4dfb3b926c7b22c90cdea867643ff8fa40df61db3b7f14567f9", *ra = "e35ba067f5aac44f5b803f09484f8eee69856783898b3553c3fb45372ad6b17b";
+    const char *bad = "7e4fa2eb8c7ac089739d5defc4489fad68a100d92082ca35c6b40a4524821f87";
+    int rc; char *a, *b;
+    if (cx_fmt(ncroot, sizeof ncroot, "%s/ncroot", work) || sy_mkdir(ncroot, 0755)) { ck(0, "N setup root"); return; }
+    if (cx_fmt(p, sizeof p, "%s/release", ncroot) || sy_mkdir(p, 0755) || cx_fmt(p, sizeof p, "%s/release/evidence", ncroot) || sy_mkdir(p, 0755) ||
+        cx_fmt(p, sizeof p, "%s/release/candidate.tsv", ncroot) || nc_table(p, NC_BASE)) { ck(0, "N setup release"); return; }
+    if (cx_fmt(used, sizeof used, "%s/nc-cm-used", work) ||
+        cx_fmt(script, sizeof script, "#!/bin/sh\ncase \"$1\" in\n"
+            "tools/release-ape.cx) printf '%%s\\n%%s\\n' \"$7\" \"$8\" > '%s'; printf 'ape-bytes\\n' > \"$9/unisacc-next.com\"; exit 0;;\n"
+            "tools/version-inject.cx) cp \"$3\" \"$4\"; exit 0;;\n"
+            "tools/cache-retain.cx) if [ \"$3\" = osx/x86_64 ]; then printf 'cm-x64\\n' > \"$5\"; else printf 'cm-arm64\\n' > \"$5\"; fi; exit 0;;\n"
+            "esac\necho \"fake-stop $1\" >&2\nexit 2\n", used) ||
+        cx_fmt(p, sizeof p, "%s/unisacc.com", ncroot) || cx_write(p, script, tlen(script))) { ck(0, "N setup product"); return; }
+    if (cx_fmt(src, sizeof src, "%s/ncsrc", work) || sy_mkdir(src, 0755) || cx_fmt(src2, sizeof src2, "%s/ncsrc-nocm", work) || sy_mkdir(src2, 0755)) { ck(0, "N setup src"); return; }
+    for (int i = 0; i < 7; i++) if (fixture_put(src, inputs[i], "private pack input\n") || fixture_put(src2, inputs[i], "private pack input\n")) { ck(0, "N setup inputs"); return; }
+    if (fixture_put(src, "sources.tsv", sid) || fixture_put(src2, "sources.tsv", sid) ||
+        fixture_put(src, "cache-manager-x64", "src-x64\n") || fixture_put(src, "cache-manager-arm64", "src-arm64\n") ||
+        fixture_put(src2, "cache-manager-x64", "")) { ck(0, "N setup cm"); return; }
+    if (cx_fmt(envh, sizeof envh, "UNISACC_IDENT_HELPER=%s", hp) || cx_fmt(envc, sizeof envc, "UNISACC_RELEASE_CACHE=%s/nccache-empty", work)) return;
+    if (cx_fmt(t1, sizeof t1, "%s/nc-base.tsv", work) || nc_table(t1, NC_BASE) || cx_fmt(t2, sizeof t2, "%s/nc-frozen.tsv", work) || nc_table(t2, NC_FREEZE) ||
+        cx_fmt(t3, sizeof t3, "%s/nc-later.tsv", work) || nc_table(t3, NC_LATER)) return;
+    /* N1 placeholder -> freeze commit; build.json binds the freeze commit. */
+    if (cx_fmt(od, sizeof od, "%s/nc1", work)) return;
+    rc = nc_pack(ncroot, t1, src, od, chain, snap, envh, envc, "--commit", NC_FREEZE, 0);
+    ck(rc == 2 && has(nc_out, "COMMIT_BACKFILL\tbefore=" NC_BASE "\tafter=" NC_FREEZE), "N1a placeholder commit backfilled to freeze commit with before/after");
+    a = nc_read(od, "stage/rd");
+    ck(a && nc_holds(a, "\"commit\": \"" NC_FREEZE "\"") && has(nc_out, "BUILD_JSON_COMMIT\t" NC_FREEZE), "N1b packed build.json binds freeze commit");
+    b = nc_read(od, "candidate-in.tsv");
+    ck(b && nc_holds(b, "\t" NC_FREEZE "\t0.0.73\t") && !nc_holds(b, NC_BASE), "N1c candidate-in.tsv carries freeze commit only");
+    free(b);
+    /* N2 correct commit: no-op, table and build.json bytes unchanged. */
+    { char *before = nc_read(work, "nc-frozen.tsv"), *after, *j2;
+      if (cx_fmt(od, sizeof od, "%s/nc2", work)) return;
+      rc = nc_pack(ncroot, t2, src, od, chain, snap, envh, envc, "--commit", NC_FREEZE, 0);
+      after = nc_read(work, "nc-frozen.tsv"); j2 = nc_read(od, "stage/rd");
+      ck(rc == 2 && has(nc_out, "COMMIT_BACKFILL\tNOOP\t" NC_FREEZE) && !nc_read(od, "candidate-in.tsv"), "N2a correct commit is a no-op");
+      ck(before && after && !strcmp(before, after) && a && j2 && !strcmp(a, j2), "N2b table bytes and build.json bytes identical");
+      free(before); free(after); free(j2); }
+    free(a);
+    /* N3 a table commit that is not an ancestor of the freeze commit. */
+    { char *rm[] = {"rm", "-f", used, 0}; run(rm, root, 0, 0); }
+    if (cx_fmt(od, sizeof od, "%s/nc3", work)) return;
+    rc = nc_pack(ncroot, t3, src, od, chain, snap, envh, envc, "--commit", NC_FREEZE, 0);
+    ck(rc == 2 && has(nc_out, "RELEASE_PACK_COMMIT_MISMATCH") && sy_exists(used) != 1, "N3 non-ancestor table commit refused by name before packing");
+    if (cx_fmt(od, sizeof od, "%s/nc3b", work)) return;
+    rc = nc_pack(ncroot, t1, src, od, chain, snap, envh, envc, "--commit", NC_BASE, 0);
+    ck(rc == 2 && has(nc_out, "RELEASE_PACK_NOT_FREEZE_POINT") && sy_exists(used) != 1, "N3b commit whose table is another version refused");
+    /* N4 cache-manager missing/empty -> persistent copy with recorded sha256. */
+    if (cx_fmt(p, sizeof p, "%s/nccache", work) || sy_mkdir(p, 0755) || cx_fmt(p, sizeof p, "%s/nccache/release-v999", work) || sy_mkdir(p, 0755) ||
+        cx_fmt(p, sizeof p, "%s/nccache/release-v999/cm", work) || sy_mkdir(p, 0755) ||
+        fixture_put(p, "x64", "persist-x64\n") || fixture_put(p, "arm64", "persist-arm64\n")) return;
+    if (cx_fmt(p, sizeof p, "%s/release/evidence/0.0.73", ncroot) || (sy_mkdir(p, 0755) && sy_exists(p) != 1)) return;
+    { char ev[600]; if (cx_fmt(ev, sizeof ev, "role\tsha256\tsource\tpath\nx64\t%s\trecorded\t-\narm64\t%s\trecorded\t-\n", sx, sa) || fixture_put(p, "cache-manager.tsv", ev)) return; }
+    if (cx_fmt(envc, sizeof envc, "UNISACC_RELEASE_CACHE=%s/nccache", work) || cx_fmt(od, sizeof od, "%s/nc4", work)) return;
+    rc = nc_pack(ncroot, t2, src2, od, chain, snap, envh, envc, 0, 0, 0);
+    a = nc_read(work, "nc-cm-used"); b = nc_read(p, "cache-manager.tsv");
+    ck(rc == 2 && has(nc_out, "CACHE_MANAGER\tx64\tab8716ab") && has(nc_out, "CACHE_MANAGER\tarm64\tddc29cce") && has(nc_out, "\tpersist\t") &&
+       a && nc_holds(a, "/nccache/release-v999/cm/x64\n") && nc_holds(a, "/nccache/release-v999/cm/arm64\n"), "N4a missing cache-manager resolved from persistent copy with recorded sha256");
+    ck(b && nc_holds(b, "x64\tab8716abf18f6443cb5080a500de8180091d15f4b661f72823db81dae496266a\tpersist\t") && nc_holds(b, "tool-written"), "N4b evidence cache-manager.tsv written by the tool");
+    free(a); free(b);
+    /* N5 no persistent copy -> rebuild, digest equal, persisted under release-cm/<sha8>/. */
+    { char *rm[] = {"rm", "-f", used, 0}; run(rm, root, 0, 0); }
+    if (cx_fmt(envc, sizeof envc, "UNISACC_RELEASE_CACHE=%s/nccache-rebuild", work) || cx_fmt(od, sizeof od, "%s/nc5", work)) return;
+    rc = nc_pack(ncroot, t2, src2, od, chain, snap, envh, envc, "--cm-sha", rx, ra);
+    if (cx_fmt(p, sizeof p, "%s/nccache-rebuild/release-cm/8af532d2/x64", work)) return;
+    { char q[4800]; if (cx_fmt(q, sizeof q, "%s/nccache-rebuild/release-cm/e35ba067/arm64", work)) return;
+      ck(rc == 2 && has(nc_out, "CACHE_MANAGER\tx64\t8af532d2") && has(nc_out, "\trebuild\t") && sy_exists(p) == 1 && sy_exists(q) == 1 && sy_exists(used) == 1,
+         "N5 rebuilt cache-manager digest equals recorded and is persisted"); }
+    /* N6 recorded digest differs from rebuild -> named refusal, no packing. */
+    { char *rm[] = {"rm", "-f", used, 0}; run(rm, root, 0, 0); }
+    if (cx_fmt(envc, sizeof envc, "UNISACC_RELEASE_CACHE=%s/nccache-bad", work) || cx_fmt(od, sizeof od, "%s/nc6", work)) return;
+    rc = nc_pack(ncroot, t2, src2, od, chain, snap, envh, envc, "--cm-sha", bad, ra);
+    ck(rc == 2 && has(nc_out, "RELEASE_PACK_CM_SHA_MISMATCH role=x64 want=7e4fa2eb") && has(nc_out, "got=8af532d2") && sy_exists(used) != 1,
+       "N6 rebuilt digest mismatch refused by name with difference reported");
+    /* N7 no recorded digest at all -> refusal instead of trusting any copy. */
+    if (cx_fmt(p, sizeof p, "%s/release/evidence/0.0.73/cache-manager.tsv", ncroot)) return;
+    { char *rm[] = {"rm", "-f", p, 0}; run(rm, root, 0, 0); }
+    if (cx_fmt(envc, sizeof envc, "UNISACC_RELEASE_CACHE=%s/nccache", work) || cx_fmt(od, sizeof od, "%s/nc7", work)) return;
+    rc = nc_pack(ncroot, t2, src2, od, chain, snap, envh, envc, 0, 0, 0);
+    ck(rc == 2 && has(nc_out, "RELEASE_PACK_CM_NO_RECORDED_SHA") && sy_exists(used) != 1, "N7 missing cache-manager without recorded sha256 refused");
+    /* N8 --plan lists the seven external steps in order and executes nothing. */
+    { const char *tool = sy_env("RELEASE_RUN_TOOL");
+      char *v[] = {"env", "GH=never", "PATH=/usr/bin:/bin", "sh", "unisacc.com", (char *)(tool && tool[0] ? tool : "tools/release-run.cx"), "--", "--plan", t2, 0};
+      const char *names[7] = {"PLAN\t1\tX-commit\n", "PLAN\t2\tdraft\n", "PLAN\t3\tci\n", "PLAN\t4\tY1\n", "PLAN\t5\tpublish\n", "PLAN\t6\treadback\n", "PLAN\t7\tY2\n"};
+      long last = -1; int order = 1;
+      if (cx_fmt(t4, sizeof t4, "%s", t2)) return;
+      rc = run(v, root, nc_out, sizeof nc_out);
+      for (int i = 0; i < 7; i++) { long at = tx_find(nc_out, tlen(nc_out), names[i], tlen(names[i])); if (at <= last) order = 0; last = at; }
+      ck(rc == 0 && order && has(nc_out, "PLAN\tsteps=7\texecuted=0") && has(nc_out, "release edit v0.0.73 --draft=false --latest") &&
+         has(nc_out, "  gate\t") && has(nc_out, "  rollback\t"), "N8 --plan prints seven steps in order with command, gate and rollback"); }
+}
 int main(int argc, char **argv) {
     char out[65536], layout[4400], cand[4400], odir[4400], state[4600], chain[4400], *b; size_t n;
     char *v[8]; int rc, i;
@@ -325,6 +460,8 @@ int main(int argc, char **argv) {
                 !has(out,"sources-sid-mismatch")&&(test==29?has(out,"pack input changed"):!has(out,"pack input changed"))&&
                 !has(out, "sha256sum --check"), label);
         }
+        if (chain_fixture(chain)) return 2;
+        nc_suite(chain, snap, hp);
       }
     }
     sy_printf("%s\tfailed=%d\n",gate_only?"CHECK_RELEASE_PACK_GATE":"CHECK_RELEASE_RUN",failed);
