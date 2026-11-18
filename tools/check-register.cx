@@ -354,6 +354,34 @@ static int tool_check(void) {
     ok(run_in(hold, gn, out, sizeof out) == 0, "both new tools are staged in the index");
     rc = run_in(hold, sh, out, sizeof out);
     ok(rc == 0 && strstr(out, "2\n") && !strstr(out, "REFUSE"), "tests/tools-compile.cx --shards accepts the registered state and prints 2");
+    {
+        char *dry[]={prepared_driver,"--tool","--sync","--dry",0};
+        char cv[4500],decl[4500],idx[4500],c0[65],d0[65],i0[65];
+        pjoin(cv,sizeof cv,hold,"tests/coverage.tsv");pjoin(decl,sizeof decl,hold,"tests/batch-product-inputs.tsv");
+        pjoin(idx,sizeof idx,hold,".git/index");
+        put_file(hold,"tests/coverage.tsv","coverage\tuntouched\n");
+        put_file(hold,"tests/batch-product-inputs.tsv","id\tkeep\ttools/fx.cx\tfixture\n");
+        sha_of(cv,c0);sha_of(decl,d0);sha_of(idx,i0);
+        size_t n;char *saved=cx_read(bp,&n);if(!saved)die("read",bp);
+        put_file(hold,"tests/batches.tsv","x-before\tx\n" TC_ROW("000","0") "x-after\tx\nx-last\tx\n");
+        sha_of(bp,hb);sha_of(sp,hs);
+        rc=run_in(hold,dry,out,sizeof out);
+        if(rc)fprintf(stderr,"sync dry rc=%d %s\n",rc,out);
+        ok(rc==0 && strstr(out,"shard_rows_added=1"),"sync dry reports the missing registered shard");
+        ok(strstr(out,"REGISTER_SYNC_TABLE\ttests/coverage.tsv\tnot_checked\n") &&
+           strstr(out,"REGISTER_SYNC_TABLE\ttests/batch-product-inputs.tsv\tnot_checked\n"),
+           "sync dry identifies tables without a proposed delta");
+        sha_of(bp,h);ok(!strcmp(h,hb),"sync dry leaves shard rows byte-identical");
+        sha_of(sp,h);ok(!strcmp(h,hs),"sync dry leaves source inventory byte-identical");
+        sha_of(cv,h);ok(!strcmp(h,c0),"sync dry leaves coverage byte-identical");
+        sha_of(decl,h);ok(!strcmp(h,d0),"sync dry leaves product declarations byte-identical");
+        sha_of(idx,h);ok(!strcmp(h,i0),"sync dry leaves git index byte-identical");
+        put_file(hold,"tests/batches.tsv","x-before\tx\n" TC_ROW("000","0") TC_ROW("01","1") "x-after\tx\nx-last\tx\n");
+        rc=run_in(hold,dry,out,sizeof out);
+        ok(rc==2 && strstr(out,"REFUSE batch contract or duplicate"),"sync dry refuses a malformed in-range shard id");
+        if(cx_write(bp,saved,n))die("restore private shard fixture",bp);
+        free(saved);
+    }
     rc = run_in(hold, r1, out, sizeof out);   /* the literal is still undeclared: reported again, nothing written */
     ok(strstr(out, "PIN_NEEDED\ttools/t-new.cx:1\t") && strstr(out, "pins_needed=1") && count_all(pp) == 1, "a 64-hex literal without a pins row is reported as PIN_NEEDED with its line, pins.tsv untouched");
     sha_of(sp, hs); sha_of(bp, hb);

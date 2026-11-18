@@ -1,6 +1,11 @@
 /* tools/register.cx -- register a check program as a test batch, validate the registry, run it once.
  *
  *   sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "COVERAGE TEXT" "FILES" [LAYER] [HEADERS] [--runner ABS_DEV_DIR] [--args ARGS]
+ *   sh ./unisacc.com tools/register.cx -- --tool --sync --dry
+ * The inventory preview holds the registration lock. It may create
+ * .register.lock in the table directory. Only the private layout receives
+ * proposed table bytes. Coverage and product declarations are fingerprinted
+ * for concurrent changes but have no proposed rows in this inventory mode.
  *
  * Appends one SOURCE batch row to tests/batches.tsv
  *   ID IMPLEMENTED LAYER CHECK SOURCE lnx/x86_64 55 - CHECK - LAYER.ID rc0:MARKER HEADERS
@@ -369,13 +374,32 @@ static int rg_snapshot(const char *path,char hex[65]){
     size_t n;char *b=cx_read(path,&n);if(!b)return 1;
     int failed=sy_sha256_hex(b,n,hex);free(b);return failed;
 }
+static int rg_plan_delta(const char *path,const char *before,size_t bn,const char *after,size_t an){
+    int oldn,newn,changes=0;
+    RegRow *old=rg_rows(before,bn,&oldn),*next=rg_rows(after,an,&newn);
+    for(int i=0;i<oldn;i++){
+        int j=rg_find_row(next,newn,&old[i]);
+        if(j<0 || old[i].n!=next[j].n || memcmp(old[i].p,next[j].p,old[i].n)){
+            printf("REGISTER_SYNC_KEY\t%s\t%s\t%.*s\n",path,j<0?"remove":"change",(int)old[i].key,old[i].p);
+            changes++;
+        }
+    }
+    for(int i=0;i<newn;i++)if(rg_find_row(old,oldn,&next[i])<0){
+        printf("REGISTER_SYNC_KEY\t%s\tadd\t%.*s\n",path,(int)next[i].key,next[i].p);changes++;
+    }
+    free(old);free(next);
+    printf("REGISTER_SYNC_TABLE\t%s\tchanged_keys=%d\n",path,changes);
+    return changes;
+}
 static int rg_tool_mode(int argc, char **argv) {
     static char buf[1 << 15];
     const char *tools[RG_TOOLS_MAX], *kinds[RG_TOOLS_MAX], *owner = 0; int staged[RG_TOOLS_MAX], have[RG_TOOLS_MAX], nt = 0, i, j, rc, lk;
     char *sb, *bb, *pb = 0, *ns, *nb, *np = 0; size_t sn = 0, bn = 0, pn = 0, nsn = 0, nbn = 0, npn = 0;
     long at, rows = 0, shards, added_src = 0, added_sh = 0, removed_sh = 0, added_pin = 0, need_pin = 0, ins, *seen;
     int ch_s, ch_b, ch_p = 0, dirty = 0, did = 0;
-    for (i = 1; i < argc; i++) {
+    int sync_dry=argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--dry");
+    char stage[4400],stage_tests[4500],stage_sources[4600],stage_batches[4600];
+    for (i = 1; !sync_dry && i < argc; i++) {
         if (tx_eqz(argv[i], "--tool") && i + 1 < argc) {
             const char *t = argv[++i]; size_t tl = strlen(t); struct stat st; int dup = 0;
             if (tl < 10 || tl > 240 || memcmp(t, "tools/", 6) || strcmp(t + tl - 3, ".cx") || !clean(t) || strstr(t, "..") || strstr(t, "//")) rg_die("--tool wants tools/NAME.cx", t);
@@ -389,7 +413,7 @@ static int rg_tool_mode(int argc, char **argv) {
             owner = argv[++i]; if (!*owner || !clean(owner)) rg_die("--pin-owner wants a plain name", owner);
         } else rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER]");
     }
-    if (!nt) rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER]");
+    if (!nt && !sync_dry) rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER] | --tool --sync --dry");
     for (i = 1; i < nt; i++) {   /* byte order, so one merge pass places them all */
         const char *t = tools[i], *k = kinds[i];
         for (j = i - 1; j >= 0 && rg_bcmp(tools[j], (long)strlen(tools[j]), t, (long)strlen(t)) > 0; j--) { tools[j + 1] = tools[j]; kinds[j + 1] = kinds[j]; }
@@ -436,6 +460,18 @@ static int rg_tool_mode(int argc, char **argv) {
         at = e + 1;
     }
     for (; j < nt; j++) if (!have[j]) { nsn += (size_t)tx_snprintf(ns + nsn, 260, "%s\t%s\n", tools[j], kinds[j]); added_src++; rows++; }
+    if(sync_dry){
+        if(sy_mkdtemp(sy_tmpdir(),"register-sync-",stage,sizeof stage) ||
+           cx_fmt(stage_tests,sizeof stage_tests,"%s/tests",stage) || sy_mkdir(stage_tests,0700) ||
+           cx_fmt(stage_sources,sizeof stage_sources,"%s/tools-compile-sources.tsv",stage_tests) ||
+           cx_fmt(stage_batches,sizeof stage_batches,"%s/batches.tsv",stage_tests))rg_die("sync private layout",0);
+        char *generate[]={"./tools/bound","30","sh","./unisacc.com","tests/tools-compile.cx","--","--register",".",stage_sources,0};
+        rc=run(generate,buf,sizeof buf);
+        if(rc){cx_rmtree(stage);rg_die("sync inventory",buf);}
+        free(ns);ns=cx_read(stage_sources,&nsn);
+        if(!ns){cx_rmtree(stage);rg_die("sync inventory read",0);}
+        rows=0;for(size_t k=0;k<nsn;k++)if(ns[k]=='\n')rows++;
+    }
     shards = rows / 8 + (rows % 8 != 0);
     /* (b) the shard rows: exactly 0..shards-1 */
     seen = calloc((size_t)shards + 1, sizeof *seen); nb = malloc(bn + (size_t)shards * 256 + 1);
@@ -460,6 +496,28 @@ static int rg_tool_mode(int argc, char **argv) {
             else { if (mm_copy(nb + nbn, (long)(bn + (size_t)shards * 256 + 1 - nbn), bb + at, (long)(e + 1 - at))) rg_die("batches copy bound", 0); nbn += (size_t)(e + 1 - at); }
             at = e + 1;
         }
+    }
+    if(sync_dry){
+        char gitdir[4600],worktree[4600],want[64];
+        char *gitpath[]={"./tools/bound","5","git","rev-parse","--absolute-git-dir",0};
+        if(run(gitpath,buf,sizeof buf) || !strchr(buf,'\n')){cx_rmtree(stage);rg_die("sync git directory",buf);}
+        *strchr(buf,'\n')=0;
+        if(cx_fmt(gitdir,sizeof gitdir,"GIT_DIR=%s",buf) ||
+           cx_fmt(worktree,sizeof worktree,"GIT_WORK_TREE=%s",stage) || cx_write(stage_batches,nb,nbn)){
+            cx_rmtree(stage);rg_die("sync private tables",0);
+        }
+        char *verify[]={"./tools/bound","30","env",gitdir,worktree,"sh","./unisacc.com","tests/tools-compile.cx","--","--shards",stage,0};
+        rc=run(verify,buf,sizeof buf);
+        if(cx_rmtree(stage))rg_die("sync cleanup",stage);
+        if(cx_fmt(want,sizeof want,"%ld\n",shards) || rc || !tx_eqz(buf,want))rg_die("sync shard verification",buf);
+        for(int t=0;t<4;t++){
+            char current[65];if(rg_snapshot(tables[t],current))rg_die("sync snapshot",tables[t]);
+            if(!tx_eqz(current,versions[t])){rg_unlock(lk);return 4;}
+        }
+        rg_plan_delta(RG_SOURCES,sb,sn,ns,nsn);rg_plan_delta(rg_bpath(),bb,bn,nb,nbn);
+        printf("REGISTER_SYNC_TABLE\t%s\tnot_checked\nREGISTER_SYNC_TABLE\t%s\tnot_checked\n",rg_cpath(),decl);
+        printf("REGISTER_SYNC\tmode=dry\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\n",shards,added_sh,removed_sh);
+        rg_unlock(lk);free(sb);free(bb);free(ns);free(nb);free(seen);return 0;
     }
     /* (c) 64-hex literals without a pins row */
     if (sy_exists(RG_PINS) == 1) { pb = cx_read(RG_PINS, &pn); if (!pb) rg_die("cannot read", RG_PINS); }
