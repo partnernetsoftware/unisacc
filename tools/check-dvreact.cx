@@ -1,0 +1,33 @@
+/* Check the dvreact tool's shipped fixture policy, TTL bound and write boundary.
+ * Batch dvreact-policy. The scheduler behaviour is exercised by devsvc-react. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+
+static int invoke(char **args,const char *dir) {
+    char why[300]; np_result r={0};
+    int rc=np_run(args,dir,0,8,&r,why,sizeof why);
+    int result=rc?-1:r.rc; np_free(&r); return result;
+}
+int main(void) {
+    char root[4096],tmp[4096],image[4300],src[4300],facts[4300],why[512];
+    if(sy_cwd(root,sizeof root)<0 || sy_mkdtemp("/tmp","dvreact-policy-",tmp,sizeof tmp) ||
+       cx_fmt(image,sizeof image,"%s/react",tmp) || cx_fmt(src,sizeof src,"%s/tools/dvreact.cx",root) ||
+       cx_fmt(facts,sizeof facts,"%s/tools/devsvc-react-fixture.tsv",root) || tq_native(root,src,image,why,sizeof why))return 2;
+    char *v[]={image,root,facts,"7201",0};
+    int bounded=invoke(v,tmp)==2;
+    v[3]="3"; int boundary=invoke(v,root)==2;
+    char repo[4300],expected[65];
+    if(sy_chdir(tmp) || sy_mkdir("repo",0700) || cx_fmt(repo,sizeof repo,"%s/repo",tmp) ||
+       sy_write_atomic("repo/fixture.product","policy",6,0600) || sy_sha256_hex("policy",6,expected) ||
+       sy_write_atomic("fixture.adapter","single-file-v1\n",15,0600))return 2;
+    v[1]=repo;
+    int rc=invoke(v,tmp); char *desired=cx_read("desired",0);
+    int policy=rc==0 && desired && !strcmp(desired,expected) && sy_exists("started.tsv")==0;
+    free(desired);
+    printf("%s\tttl-bound\n%s\trepository-write-boundary\n%s\tshipped-fixture-policy\n",bounded?"PASS":"FAIL",boundary?"PASS":"FAIL",policy?"PASS":"FAIL");
+    int failed=!bounded+!boundary+!policy;
+    printf("CHECK_DVREACT_POLICY\tfailed=%d\n",failed); return failed?1:0;
+}

@@ -54,25 +54,55 @@ static void walk(const char*p,int depth){
 static void load_rules(void){
     char p[4400];fmt(p,sizeof p,executor,"tools/product-map-inputs.tsv");manifest=cx_read(p,0);if(!manifest)die("readset-manifest");char*b=pq_dup(manifest);
     for(char*s=b;*s;){char*e=strchr(s,'\n');if(!e)die("manifest-newline");*e=0;if(*s&&*s!='#'){char*f[4]={s};int n=1;for(char*q=s;*q;q++)if(*q=='\t'){*q=0;if(n==4)die("manifest-shape");f[n++]=q+1;}
-        if(n!=4||n_rules==64||(!strcmp(f[0],"file")?0:strcmp(f[0],"tree"))||(strcmp(f[1],"both")&&strcmp(f[1],"input")&&strcmp(f[1],"executor"))||!*f[2]||*f[2]=='/'||strstr(f[2],"..")||!*f[3])die("manifest-shape");
+        if(n!=4||n_rules==64)die("manifest-shape");
+        int env=!strcmp(f[0],"env")||!strcmp(f[0],"envpref");
+        if((!env&&strcmp(f[0],"file")&&strcmp(f[0],"tree"))||
+           (strcmp(f[1],"both")&&strcmp(f[1],"input")&&strcmp(f[1],"executor"))||
+           !*f[2]||*f[2]=='/'||strstr(f[2],"..")||!*f[3]||
+           (env&&(strcmp(f[1],"executor")||strspn(f[2],"ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789")!=strlen(f[2]))))die("manifest-shape");
         Rule*r=&rules[n_rules++];if(strlen(f[2])>=sizeof r->path)die("manifest-bound");pq_text(r->kind,sizeof r->kind,f[0]);pq_text(r->scope,sizeof r->scope,f[1]);pq_text(r->path,sizeof r->path,f[2]);}s=e+1;}mm_free(b);if(!n_rules)die("empty-manifest");
 }
 static void run(char**v,const char*cwd,int sec){char*out=0;size_t n=0;sy_spawn_t opts;sy_exit_t done;sy_spawn_init(&opts);opts.argv=v;opts.cwd=cwd;opts.pgroup=-1;opts.deadline_ms=sec*1000;int r=sy_proc_run(&opts,&done);(void)out;(void)n;if(r||done.timed_out||sy_exit_code(&done))die(done.timed_out?"producer-timeout":"producer-failed");}
+/* Apply the declared environment before both Git enumeration and generation.
+ * Cache placement and temporary workspace selection have already taken place.
+ * Keep the execution context and the hashed context identical. */
+static int retained(const char *name){
+    for(int i=0;i<n_rules;i++){
+        Rule*r=&rules[i];
+        if(!strcmp(r->kind,"env")&&!strcmp(r->path,name))return 1;
+        if(!strcmp(r->kind,"envpref")&&!strncmp(name,r->path,strlen(r->path)))return 1;
+    }
+    return 0;
+}
+static void query_context(void){
+    for(int i=0;;){
+        char **env=sy_env_vec();
+        if(!env || !env[i])break;
+        char *name=pq_dup(env[i]),*eq=strchr(name,'=');
+        if(!eq)die("invalid-environment-entry");
+        *eq=0;
+        if(retained(name))i++;
+        else if(sy_unsetenv(name))die("query-environment");
+        mm_free(name);
+    }
+    /* The APE launcher sets this to its argv spelling. The generator below
+     * always runs the resolved executor, including when this query is native. */
+    if(sy_setenv("LC_ALL","C",1) || sy_setenv("UNISA_CONTAINER",product,1))die("query-context");
+}
 static void coarse(char hex[65]){
-    used=0;put("product-query-v1");put(input);put(executor);put(manifest);nn=0;
-    for(int i=0;i<n_rules;i++){Rule*r=&rules[i];char p[4400];if(strcmp(r->scope,"executor")){fmt(p,sizeof p,input,r->path);walk(p,0);}if(strcmp(r->scope,"input")){fmt(p,sizeof p,executor,r->path);walk(p,0);}}
+    used=0;put("product-query-v2");put(input);put(executor);put(manifest);nn=0;
+    for(int i=0;i<n_rules;i++){Rule*r=&rules[i];if(r->kind[0]=='e')continue;char p[4400];if(strcmp(r->scope,"executor")){fmt(p,sizeof p,input,r->path);walk(p,0);}if(strcmp(r->scope,"input")){fmt(p,sizeof p,executor,r->path);walk(p,0);}}
     qsort(names,nn,sizeof names[0],order);for(int i=0;i<nn;i++){file_identity(names[i]);mm_free(names[i]);}nn=0;
     char*out=0;size_t n=0;char *v[]={"git","-C",input,"ls-files","-z",0};if(cx_runv_timeout(v,20,&out,&n)||!out)die("git-tracked-set");char git_hash[65];if(sy_sha256_hex(out,n,git_hash))die("git-identity");put("git-tracked-names");put(git_hash);mm_free(out);
     /* Environment values are only hashed, never written to a receipt. */
     char**env=sy_env_vec();int count=0;while(env&&env[count]){const char*v=env[count++];
-        /* Job routing and shell bookkeeping are not generator inputs. */
-        if(!strncmp(v,"UNISACC_FLOW_",13)||!strncmp(v,"DEVSVC_",7)||!strncmp(v,"CLAUDE_",7)||!strncmp(v,"CODEX_TOOL_CALL_ID=",19)||!strncmp(v,"_=",2)||!strncmp(v,"SHLVL=",6)||!strncmp(v,"PWD=",4)||!strncmp(v,"OLDPWD=",7))continue;
-        add(names,&nn,v);
+        char digest[65];if(sy_sha256_hex(v,strlen(v),digest))die("environment-entry-sha");
+        add(names,&nn,digest);
     }qsort(names,nn,sizeof names[0],order);size_t env_at=used;for(int i=0;i<nn;i++){put(names[i]);mm_free(names[i]);}nn=0;char eh[65];if(sy_sha256_hex(buffer+env_at,used-env_at,eh))die("environment-identity");used=env_at;put("environment-sha");put(eh);
     if(sy_sha256_hex(buffer,used,hex))die("coarse-sha");
 }
 static int declared(const char*p){
-    for(int i=0;i<n_rules;i++){Rule*r=&rules[i];for(int which=0;which<2;which++){if(which==0&&!strcmp(r->scope,"executor"))continue;if(which==1&&!strcmp(r->scope,"input"))continue;char q[4400];fmt(q,sizeof q,which?executor:input,r->path);if(!strcmp(p,q)||(!strcmp(r->kind,"tree")&&under(p,q)))return 1;}}
+    for(int i=0;i<n_rules;i++){Rule*r=&rules[i];if(r->kind[0]=='e')continue;for(int which=0;which<2;which++){if(which==0&&!strcmp(r->scope,"executor"))continue;if(which==1&&!strcmp(r->scope,"input"))continue;char q[4400];fmt(q,sizeof q,which?executor:input,r->path);if(!strcmp(p,q)||(!strcmp(r->kind,"tree")&&under(p,q)))return 1;}}
     return 0;
 }
 typedef struct{long pid;char cwd[4400];} Process;
@@ -119,7 +149,7 @@ int main(int argc,char**argv){
     for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];else if(!strcmp(argv[i],"--cache")&&i+1<argc)cache_arg=argv[++i];else if(!strcmp(argv[i],"--key"))key_only=1;else if(!strcmp(argv[i],"--sha"))sha_only=1;else if(!strcmp(argv[i],"--check"))check=1;else die("usage");}
     if(key_only+sha_only+check>1)die("usage");if(sy_realpath(root,input,sizeof input)<0||sy_cwd(executor,sizeof executor)<0||sy_realpath("unisacc.com",product,sizeof product)<0)die("root");
     if(cache_arg){if(cx_fmt(cache,sizeof cache,"%s/product-map",cache_arg))die("cache-bound");}else if(cx_fmt(cache,sizeof cache,"%s/.cache/unisacc/derived/product-map",sy_env_or("HOME","")))die("cache-bound");
-    if(sy_mkdir_all(cache,0700)||cx_fmt(work,sizeof work,"%s/product-map-query-XXXXXX",sy_tmpdir())||!mkdtemp(work))die("workspace");load_rules();
+    if(sy_mkdir_all(cache,0700)||cx_fmt(work,sizeof work,"%s/product-map-query-XXXXXX",sy_tmpdir())||!mkdtemp(work))die("workspace");load_rules();query_context();
     char before[65],after[65],key[65],ref[4400],body[4400],readfile[4400],sha_file[4400],tmp[4400],trace[4400],hex[65];coarse(before);fmt(ref,sizeof ref,cache,before);char*reference=cx_read(ref,0);const char*state=reference?"recovered":"miss";int hit=0;
     if(reference&&strlen(reference)==65&&reference[64]=='\n'&&strspn(reference,"0123456789abcdef\n")==65){pq_copy(key,sizeof key,reference,64);key[64]=0;char leaf[100];PQ_FMT(leaf,sizeof leaf,"%s.reads",key);fmt(readfile,sizeof readfile,cache,leaf);char*r=cx_read(readfile,0);if(r){for(char*p=r;*p;){char*e=strchr(p,'\n');if(!e){nr=0;break;}*e=0;if(*p!='/'||nr==NPATH){nr=0;break;}add(reads,&nr,p);p=e+1;}full_key(before,reads,nr,after);if(!strcmp(key,after)){PQ_FMT(leaf,sizeof leaf,"%s.tsv",key);fmt(body,sizeof body,cache,leaf);PQ_FMT(leaf,sizeof leaf,"%s.sha",key);fmt(sha_file,sizeof sha_file,cache,leaf);size_t n=0;char*b=cx_read(body,&n),*want=cx_read(sha_file,0);if(b&&want&&strlen(want)==65&&!sy_sha256_hex(b,n,hex)&&!memcmp(hex,want,64))hit=1;mm_free(b);mm_free(want);}mm_free(r);}if(!hit){state="recovered";discard(ref,key);}}mm_free(reference);
     if(!hit){for(int i=0;i<nr;i++)mm_free(reads[i]);nr=0;fmt(tmp,sizeof tmp,work,"fresh.tsv");fmt(trace,sizeof trace,work,"reads.trace");producer(tmp,trace);trace_reads(trace,tmp);coarse(after);if(strcmp(before,after))die("source-changed-during-generation");full_key(before,reads,nr,key);char leaf[100];PQ_FMT(leaf,sizeof leaf,"%s.tsv",key);fmt(body,sizeof body,cache,leaf);PQ_FMT(leaf,sizeof leaf,"%s.reads",key);fmt(readfile,sizeof readfile,cache,leaf);PQ_FMT(leaf,sizeof leaf,"%s.sha",key);fmt(sha_file,sizeof sha_file,cache,leaf);size_t n=0;char*b=cx_read(tmp,&n);if(!b||sy_sha256_hex(b,n,hex))die("fresh-body");used=0;for(int i=0;i<nr;i++)put(reads[i]);if(sy_write_atomic(readfile,buffer,used,0600)||sy_write_atomic(body,b,n,0600))die("cache-publish");mm_free(b);char line[66];PQ_FMT(line,sizeof line,"%s\n",hex);if(sy_write_atomic(sha_file,line,65,0600))die("cache-publish");PQ_FMT(line,sizeof line,"%s\n",key);if(sy_write_atomic(ref,line,65,0600))die("cache-ref");}

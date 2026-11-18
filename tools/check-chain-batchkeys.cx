@@ -16,6 +16,8 @@
 static int failed;
 static char root[4096], why[512];
 static char fx_base[4400], fx_snap[4400], fx_out[4400], fx_helper[4400];
+static char *fx_phase = "g2", *fx_target = "lnx/x86_64";
+static int fx_absent;   /* 1: pass when the run does NOT print NEEDLE (positive control) */
 static void die(const char *s) { fprintf(stderr, "check-chain-batchkeys: %s\n", s); exit(2); }
 static void ck(int ok, const char *n) {
     printf("%s\tcheck-chain-batchkeys.%s\n", ok ? "PASS" : "FAIL", n);
@@ -28,14 +30,15 @@ static int fp(const char *extra1, const char *extra2, const char *extra3, const 
     v[n++] = "sh"; v[n++] = "./unisacc.com"; /* lint:allow R1-product 检查合同就是跑已装产品 */ v[n++] = "tools/chain-step.cx"; v[n++] = "--";
     v[n++] = "fixedpoint"; v[n++] = (char *)REV; v[n++] = (char *)snap; v[n++] = "x.pkg"; v[n++] = "x.gen1"; v[n++] = (char *)out;
     v[n++] = "--identity-helper"; v[n++] = (char *)helper;
-    v[n++] = "--phase"; v[n++] = "g2"; v[n++] = "--target"; v[n++] = "lnx/x86_64";
+    v[n++] = "--phase"; v[n++] = fx_phase; v[n++] = "--target"; v[n++] = fx_target;
     if (extra1) v[n++] = (char *)extra1;
     if (extra2) v[n++] = (char *)extra2;
     if (extra3) v[n++] = (char *)extra3;
     v[n] = 0;
     if (np_run(v, root, 0, 40, &r, why, sizeof why)) die("run");
     rc = r.rc;
-    ok = rc != 0 && ((r.out && strstr(r.out, needle)) || (r.err && strstr(r.err, needle)));
+    ok = (r.out && strstr(r.out, needle)) || (r.err && strstr(r.err, needle));
+    ok = fx_absent ? !ok : (rc != 0 && ok);
     np_free(&r);
     ck(ok, name);
     return rc;
@@ -81,6 +84,33 @@ int main(int argc, char **argv) {
     }
     if (want("d")) {
     fp("--objects", "m1.o", "--link-only", "REFUSE --objects with --object/--link-only", "with-link-only");
+    }
+    if (want("e")) {
+    /* 批次暂存目录 OUT.batch-gG-T 落点合同(v0.0.72 整链 g3 两条 lane 的 closure-prepare 在清理该目录时被
+       unisa_safedel 以 "lies in a repository outside its out/ and .trash/" 拒绝):OUT 的父目录在带 .git 的树里
+       且不在该树 out/、.trash/ 之下时,chain-step 必须在建任何键之前拒绝;两条 lane(x86_64、arm64)、g2 与 g3 同查。
+       正控:同一树的 out/ 之下不得被这条拒绝。 */
+    char rep[4400], git[4400], rout[4400], saved[4400];
+    const char *tg[2] = {"lnx/x86_64", "lnx/arm64"}, *ph[2] = {"g2", "g3"};
+    const char *nm[2][2] = {{"stage-in-repo-refused-x86_64-g2", "stage-in-repo-refused-x86_64-g3"}, {"stage-in-repo-refused-arm64-g2", "stage-in-repo-refused-arm64-g3"}};
+    const char *pm[2] = {"stage-under-repo-out-allowed-x86_64", "stage-under-repo-out-allowed-arm64"};
+    if (cx_fmt(rep, sizeof rep, "%s/repo-e", fx_base) || cx_fmt(git, sizeof git, "%s/.git", rep) || cx_fmt(rout, sizeof rout, "%s/out", rep) || cx_fmt(saved, sizeof saved, "%s", fx_out)) die("fixture e path");
+    if (sy_mkdir(rep, 0700) || cx_write(git, "gitdir: /nonexistent\n", 21) || sy_mkdir(rout, 0700)) die("fixture e");
+    for (int t = 0; t < 2; t++) {
+        fx_target = (char *)tg[t];
+        for (int p = 0; p < 2; p++) {
+            fx_phase = (char *)ph[p];
+            if (cx_fmt(fx_out, sizeof fx_out, "%s/fp", rep)) die("fixture e path");
+            fp("--objects", "m1.o,m2.o", 0, "REFUSE batch stage inside repository", nm[t][p]);
+        }
+        fx_phase = "g3";
+        if (cx_fmt(fx_out, sizeof fx_out, "%s/fp", rout)) die("fixture e path");
+        fx_absent = 1;
+        fp("--objects", "m1.o,m2.o", 0, "REFUSE batch stage inside repository", pm[t]);
+        fx_absent = 0;
+    }
+    fx_target = "lnx/x86_64"; fx_phase = "g2";
+    if (cx_fmt(fx_out, sizeof fx_out, "%s", saved)) die("fixture e path");
     }
     struct stat st;
     if (want("c")) {

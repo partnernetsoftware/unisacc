@@ -53,7 +53,11 @@
  * O (HEAD), N (committed), W (work tree), the file keeps N + max(0, W - max(O,N)) - max(0, min(O,N) - W) copies --
  * other agents' added or removed rows stay as they were (an added row lands after its work-tree predecessor).  The
  * shared index entry moves as for any committed path.  COMMIT_OWN_DERIVE<TAB>rc=<TAB>stage=<TAB>files=<TAB>ms= is
- * printed.  UNISACC_COMMIT_OWN_DERIVE_MANIFEST=FILE passes --manifest FILE to derive.cx (tests). */
+ * printed.  UNISACC_COMMIT_OWN_DERIVE_MANIFEST=FILE passes --manifest FILE to derive.cx (tests).
+ * --derive-selected (opt-in, off by default; --derive is unchanged): the same private root, but the table set comes from
+ * derive.cx --touched (git diff --cached --name-status HEAD of the commit's paths, so A/D reach pathset rows; real read
+ * sets plus the outputs -> inputs closure inside derive.cx), one --write --touched, and --check --only NAME for EVERY
+ * selected table (not only the ones a --write wrote), so a cache-identical row is still checked. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -75,7 +79,7 @@
 static void co_die(const char *a, const char *b) {
     fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", (tx_eqz(a, "usage") || tx_eqz(a, "no such file") || tx_eqz(a, "no registration manifest")) ? "args" : "setup");
     fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
-#define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--derive] [--dry-run]"
+#define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--derive|--derive-selected] [--dry-run]"
 #define CO_PHASE "COMMIT_OWN_PHASE\tselect_ms=%ld\tpending_ms=%ld\tregm_ms=%ld\tcommit_ms=%ld\tattempts=%d\n"
 /* Live progress: `COMMIT_PHASE<TAB>name=N<TAB>state=begin` when a phase starts and
    `COMMIT_PHASE<TAB>name=N<TAB>state=end<TAB>ms=M` when it ends, flushed at once, so a job tail (devsvc git commit
@@ -253,7 +257,19 @@ static void co_owndiff(const char **path, const char **keys, int np) {
    set is closed first with derive --write --plan (no generator runs: the selected rows' outputs join the set until
    it stops growing, at most 6 rounds), then ONE --write runs in manifest order, so a row whose input another row
    writes runs after it, once (the earlier second --write reran tool-index and links: about 10 s). */
-#define CO_DERIVE_SH \
+#define CO_DERIVE_SH CO_DERIVE_SETUP CO_DERIVE_CHANGED
+#define CO_DERIVE_SEL_SH CO_DERIVE_SETUP CO_DERIVE_TOUCHED
+/* --derive-selected: touched list with A/M/D from the private index, one plan (PLAN outputs, SELECT names), one
+   --write --touched, then --check --only for every selected name (ws = sel), the rest shared with --derive. */
+#define CO_DERIVE_TOUCHED \
+    "git diff --cached --name-status --no-renames HEAD -- $cs >\"$o.t\" || fin 2 plan; [ -s \"$o.t\" ] || printf '%s\\n' $cs >\"$o.t\"; " \
+    "sh ./unisacc.com tools/derive.cx -- --write --plan $m --touched \"$o.t\" 8>&- >\"$o.p\" || fin 2 plan; cat \"$o.p\" | grep '^SELECT'; " \
+    "po=$(while IFS='\t' read -r a b c d e; do [ \"$a\" = PLAN ] && echo \"$e\"; done <\"$o.p\"); " \
+    "sel=$(while IFS='\t' read -r a b c; do [ \"$a\" = SELECT ] && echo \"$b\"; done <\"$o.p\"); " \
+    "bt=$(git write-tree) || fin 2 setup; " \
+    "sh ./unisacc.com tools/derive.cx -- --write $m --touched \"$o.t\" 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
+    CO_DERIVE_ADD "ws=$sel; " CO_DERIVE_CHECK
+#define CO_DERIVE_SETUP \
     "fin(){ [ -z \"$r\" ] || { cd /; rm -rf \"$r\" \"$r.out\".*; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) fin 2 setup ;; esac; " \
     "g=$(git rev-parse --absolute-git-dir) || fin 2 setup; " \
@@ -267,16 +283,21 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "cd \"$r\" || fin 2 setup; GIT_DIR=\"$g\"; GIT_WORK_TREE=\"$r\"; UNISACC_DEVMETA_DIR=\"$r/.devsvc\"; export GIT_DIR GIT_WORK_TREE UNISACC_DEVMETA_DIR; " \
     "m=; [ -z \"$UNISACC_COMMIT_OWN_DERIVE_MANIFEST\" ] || m=\"--manifest $UNISACC_COMMIT_OWN_DERIVE_MANIFEST\"; " \
     "o=\"$r.out\"; rm -f \"$o\".*; " \
-    "cs=$(printf '%s\\n' \"$@\" | sort -u | tr '\\n' ' '); " \
+    "cs=$(printf '%s\\n' \"$@\" | sort -u | tr '\\n' ' '); "
+#define CO_DERIVE_CHANGED \
     "for i in 1 2 3 4 5 6; do po=$(sh ./unisacc.com tools/derive.cx -- --write --plan $m --changed $cs 8>&- | while IFS='\t' read -r a b c d e; do [ \"$a\" = PLAN ] && echo \"$e\"; done) || fin 2 plan; " \
     "nc=$(printf '%s\\n' $cs $po | sort -u | tr '\\n' ' '); [ \"$nc\" = \"$cs\" ] && break; cs=$nc; done; " \
     "bt=$(git write-tree) || fin 2 setup; " \
     "sh ./unisacc.com tools/derive.cx -- --write $m --changed $cs 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
+    CO_DERIVE_ADD \
+    "ws=$(cat \"$o\".w* | while IFS='\t' read -r a b c d; do [ \"$a\" = DERIVE ] && [ \"$c\" = WROTE ] && echo \"$b\"; done | sort -u); " \
+    CO_DERIVE_CHECK
+#define CO_DERIVE_ADD \
     "n=$(git diff --name-only -- . ':(exclude)archive'); " \
     "[ -z \"$n\" ] || git add -- $n || fin 2 add; " \
     "for p in $po; do [ ! -e \"$p\" ] || git add -- \"$p\" || fin 2 add; done; " \
-    "n=$(git diff --cached --name-only \"$bt\" -- . ':(exclude)archive'); " \
-    "ws=$(cat \"$o\".w* | while IFS='\t' read -r a b c d; do [ \"$a\" = DERIVE ] && [ \"$c\" = WROTE ] && echo \"$b\"; done | sort -u); " \
+    "n=$(git diff --cached --name-only \"$bt\" -- . ':(exclude)archive'); "
+#define CO_DERIVE_CHECK \
     "ps=; for x in $ws; do sh ./unisacc.com tools/derive.cx -- --check $m --only $x 8>&- >\"$o.c.$x\" & ps=\"$ps $!\"; done; " \
     "w=0; for p in $ps; do wait $p; c=$?; [ $c -le $w ] || w=$c; done; " \
     "for x in $ws; do grep '^DERIVE\t' \"$o.c.$x\" | grep -v '\tSKIPPED\t'; done; [ $w = 0 ] || fin $w check; " \
@@ -536,7 +557,7 @@ static void co_pending_collect(void) {
 
 int main(int argc, char **argv) {
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
-    int dry = 0, att = 0, derive = 0, np0 = 0, nder = 0; long t_der = 0;
+    int dry = 0, att = 0, derive = 0, derive_sel = 0, np0 = 0, nder = 0; long t_der = 0;
     const char *prepare = 0, *receipt = 0, *receipt_id = 0;
     static char dpath[CO_MAX][400];   /* --derive: the derived files appended after the commit's own paths */ long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
     char gatef[400] = "", idx[400], blob[CO_MAX][64], out[8192], root[4096];
@@ -547,6 +568,7 @@ int main(int argc, char **argv) {
     while (a < argc) {
         if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
         else if (tx_eqz(argv[a], "--derive")) { derive = 1; a++; }
+        else if (tx_eqz(argv[a], "--derive-selected")) { derive = 1; derive_sel = 1; a++; }
         else if (tx_eqz(argv[a], "--derive-prepare") && a + 1 < argc) { prepare = argv[a + 1]; derive = 1; a += 2; }
         else if (tx_eqz(argv[a], "--derive-receipt") && a + 1 < argc) { receipt = argv[a + 1]; derive = 1; a += 2; }
         else if (tx_eqz(argv[a], "--derive-id") && a + 1 < argc) { receipt_id = argv[a + 1]; a += 2; }
@@ -678,6 +700,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         }
         char inputtree[64] = "", runtime_id[65] = "";
         if ((prepare && receipt) || (!!receipt != !!receipt_id)) co_die("usage", "derive receipt requires its identity and cannot prepare simultaneously");
+        if (derive_sel && (prepare || receipt)) co_die("usage", "--derive-selected has no receipt mode yet; use --derive with --derive-prepare/--derive-receipt");
         if (derive) { char *tv[] = {"git", "write-tree", 0}; if(run(tv,inputtree,sizeof inputtree))co_die("derive input identity",0); }
         if(derive){size_t pn=0,mn=0;char *prod=cx_read("unisacc.com",&pn),*extra=0,ph[65],mh[65]="tree-manifest",ctx[5000];const char*mf=getenv("UNISACC_COMMIT_OWN_DERIVE_MANIFEST"),*dm=getenv("UNISACC_DEVMETA_DIR");
             if(!prod||sy_sha256_hex(prod,pn,ph))co_die("derive runtime identity",0);free(prod);
@@ -687,7 +710,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
             static char dout[32768]; char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
-            dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = CO_DERIVE_SH; dv[n++] = (char *)sy_tmpdir();
+            dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = derive_sel ? CO_DERIVE_SEL_SH : CO_DERIVE_SH; dv[n++] = (char *)sy_tmpdir();
             for (k = 0; k < np0; k++) dv[n++] = (char *)path[k];
             dv[n] = 0;
             g_bound_s = 55; tc0 = sy_now_ms();

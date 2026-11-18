@@ -1,0 +1,124 @@
+/* Tool self-check: exercise the fixture reactor against a private git repository.
+ * Optional first argument selects a previously compiled reactor for red/green comparison.
+ * Check: CHECK_DEVSVC_REACT. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+static char tmp[4096], repo[4096], bin[4096], root[4096], before[65], base[65];
+static int passed, failed;
+static void check(const char *label,int yes) {
+    printf("%s\t%s\n",yes?"PASS":"FAIL",label);
+    if(yes) passed++; else failed++;
+}
+static int run(char **v,const char *cwd,char *out,int cap) {
+    np_result r={0}; char why[300];
+    int rc=np_run(v,cwd,0,25,&r,why,sizeof why);
+    if (!rc && !r.rc && out) {
+        if (r.outn>=cap) rc=1;
+        else { rc=mm_copy(out,cap,r.out,r.outn); if(!rc)out[r.outn]=0; }
+    }
+    int ok=!rc && !r.rc; np_free(&r); return ok;
+}
+static int snapshot(char sha[65]) {
+    char *v[]={"git","diff","--binary",base,"--",0},why[300];
+    np_result r={0};
+    int ok=!np_run(v,root,0,15,&r,why,sizeof why) && !r.rc && !sy_sha256_hex(r.out?r.out:"",r.outn,sha);
+    np_free(&r); return ok;
+}
+static int writefile(const char *p,const char *s) { return !sy_write_atomic(p,s,strlen(s),0600); }
+static int equals(const char *p,const char *s) {
+    char *a=cx_read(p,0); int ok=a && !strcmp(a,s); free(a); return ok;
+}
+static int lines(void) {
+    char *a=cx_read("started.tsv",0); int n=0;
+    if (a) for(char *p=a;*p;p++) if(*p=='\n') n++;
+    free(a); return n;
+}
+static int fixture(const char *id,const char *source,int lag,int maxload) {
+    char path[4200],s[512];
+    if (cx_fmt(path,sizeof path,"%s/%s",tmp,id) || sy_mkdir(path,0700) || sy_chdir(path)) return 0;
+    if (cx_fmt(s,sizeof s,"name\tidentity\tdedup\tsupersede\tdebounce_s\tadmit\tdeadline_s\tcmd\tprepared\nprobe\t%s\tname+input\tkill-old\t%d\t%d\t6\tfixture-material\tsha256\n",source,lag,maxload)) return 0;
+    return writefile("rules",s) && writefile("fixture.adapter","single-file-v1\n");
+}
+static int start(sy_child_t *c) {
+    char *v[]={bin,repo,"rules","12",0};
+    sy_spawn_t o; sy_spawn_init(&o); o.argv=v; o.pgroup=-1;
+    o.in_fd=SY_STDIO_NULL; o.out_fd=SY_STDIO_NULL; o.err_fd=SY_STDIO_NULL;
+    return !sy_proc_spawn(&o,c);
+}
+static void stop(sy_child_t *c) {
+    if(c->pid>0) { sy_exit_t st; sy_proc_kill(c,9); sy_proc_wait(c,&st); c->pid=0; }
+}
+static int seen(const char *key,int ms) {
+    char path[155]; if(cx_fmt(path,sizeof path,"probe.%s.material",key)) return 0;
+    long end=sy_now_ms()+ms;
+    do { if(equals(path,key)) return 1; sy_sleep_ms(50); } while(sy_now_ms()<end);
+    return 0;
+}
+static int oid(char **v,char out[65]) {
+    char line[80]; if(!run(v,repo,line,sizeof line))return 0;
+    char *nl=strchr(line,'\n'); if(!nl || nl[1])return 0; *nl=0;
+    if(strlen(line)!=40 && strlen(line)!=64)return 0;
+    return !mm_copy(out,65,line,strlen(line)+1);
+}
+int main(int argc,char **argv) {
+    char after[65],first[65],second[65],f[4200],product[4200],tree[65],key[65],latest[65];
+    char *head[]={"git","rev-parse","HEAD",0};
+    if(sy_cwd(root,sizeof root)<0 || !run(head,root,base,sizeof base))return 2;
+    char *nl=strchr(base,'\n'); if(!nl)return 2; *nl=0;
+    if(!snapshot(before) || sy_mkdtemp("/tmp","dvreact-check",tmp,sizeof tmp))return 2;
+    if(cx_fmt(repo,sizeof repo,"%s/repo",tmp) || sy_mkdir(repo,0700))return 2;
+    if(argc==2) { if(sy_realpath(argv[1],bin,sizeof bin)<0)return 2; }
+    else {
+        if(argc!=1 || cx_fmt(bin,sizeof bin,"%s/react",tmp))return 2;
+        char source[4200],why[512];
+        if(cx_fmt(source,sizeof source,"%s/tools/dvreact.cx",root) || tq_native(root,source,bin,why,sizeof why))return 2;
+    }
+    char *init[]={"git","init","--object-format=sha256","-q",0},*commit[]={"git","-c","user.name=fixture","-c","user.email=test@localhost","-c","commit.gpgsign=false","commit","-qm","fixture","--allow-empty",0};
+    const char *git_env[]={"GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"};
+    for(int i=0;i<5;i++) if(sy_unsetenv(git_env[i]))return 2;
+    if(!run(init,repo,0,0) || !run(commit,repo,0,0) || !oid(head,first))return 2;
+    sy_child_t c={0};
+    if(!fixture("head","head",0,9999) || !start(&c))return 2;
+    int initial=seen(first,1800); stop(&c);
+    if(!run(commit,repo,0,0) || !oid(head,second) || !start(&c))return 2;
+    check("restart-reconciles-head",initial && seen(second,1800));
+    writefile("event","duplicate1"); sy_sleep_ms(200); writefile("event","duplicate2"); sy_sleep_ms(250);
+    check("duplicate-delivery-starts-once",lines()==2); stop(&c);
+    if(!start(&c))return 2;
+    sy_sleep_ms(800); check("crash-reuses-verified-artifact",lines()==2 && seen(second,100)); stop(&c);
+    char damaged[160];
+    if(cx_fmt(damaged,sizeof damaged,"probe.%s.material",second) || !writefile(damaged,"damaged") ||
+       !writefile("fixture.delay-ms","1000") || !start(&c))return 2;
+    long pending=sy_now_ms()+1800;
+    while(lines()<3 && sy_now_ms()<pending) sy_sleep_ms(50);
+    stop(&c); if(!start(&c))return 2;
+    check("crash-during-repair-keeps-one-builder",seen(second,2300) && lines()==3); stop(&c);
+    if(!fixture("index","index-tree",0,9999) || !start(&c) || cx_fmt(f,sizeof f,"%s/staged",repo))return 2;
+    sy_sleep_ms(250); if(!writefile(f,"b"))return 2;
+    char *add[]={"git","add","staged",0},*wt[]={"git","write-tree",0};
+    if(!run(add,repo,0,0) || !oid(wt,tree))return 2;
+    check("lost-event-reconciles-staged-index",seen(tree,3300)); stop(&c);
+    if(cx_fmt(product,sizeof product,"%s/fixture.product",repo) || !writefile(product,"a") ||
+        !fixture("changes","readset:product-map",1,9999) || !writefile("fixture.delay-ms","1500") || !start(&c))return 2;
+    sy_sha256_hex("a",1,key); sy_sha256_hex("c",1,latest);
+    long end=sy_now_ms()+3300;
+    while(lines()==0 && sy_now_ms()<end) sy_sleep_ms(50);
+    char *line=cx_read("started.tsv",0); int oldpid=0;
+    if(line) { sscanf(line,"%*s %d",&oldpid); free(line); }
+    writefile(product,"b"); writefile("event","wake-b"); sy_sleep_ms(350);
+    writefile(product,"c"); writefile("event","wake-c");
+    char proc[80]; cx_fmt(proc,sizeof proc,"/proc/%d",oldpid);
+    check("supersede-kills-owned-group-and-debounces",seen(latest,4800) && lines()==2 && !seen(key,50) && oldpid>0 && sy_exists(proc)==0); stop(&c);
+    if(!fixture("load","head",0,0) || !start(&c))return 2;
+    sy_sleep_ms(850); check("load-gate-observed-before-start",equals("desired",second) && lines()==0); stop(&c);
+    check("shared-tracked-bytes-preserved",snapshot(after) && !strcmp(before,after));
+    printf("CHECK_DEVSVC_REACT\tpassed=%d\tfailed=%d\n",passed,failed);
+    return failed?1:0;
+}

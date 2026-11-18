@@ -33,8 +33,8 @@
    Files are compared by sy_realpath, so two link spellings of one file are one file.
    Prints AFFECTED<TAB>id<TAB>why=FILE<TAB>via=KIND per batch (the strongest match, first changed file on a
    tie) and AFFECTED_SUMMARY<TAB>changed=N<TAB>batches=M<TAB>scanned=K.  --list-only (the default) stops there.
-   --run [-j N] (N 1..8, default the free machine admission tokens of cxlib.flowadmit fa_budget, at most 8): each affected batch through tests/run-batch.cx into
-   out/affected-PID/ (its output in out/affected-PID/ID.log), at most N at once; prints each BATCH_RUN line
+   --run [--candidate ABS_DIR] [-j N] (N 1..8, default the free machine admission tokens of cxlib.flowadmit fa_budget, at most 8): each affected batch through tests/run-batch.cx into
+   sy_tmpdir()/unisacc-affected-PID/ (its output in that run dir as ID.log), at most N at once; prints each BATCH_RUN line
    (RUN_REFUSED<TAB>id when run-batch printed none) and AFFECTED_RUN<TAB>pass=..<TAB>fail=..<TAB>deferred=..
    <TAB>elapsed_ms=..  No batch is started after 45 s; batches still running at 54 s are killed with their
    process groups (Linux: descendants found with pgrep -P) -- both are reported DEFERRED<TAB>id, to be run
@@ -137,6 +137,7 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 
 static int arena;
 static char root[4096];
+static const char *candidate_dir;
 static long root_n;
 static const char *root_product_relative = "./unisacc.com"; /* lint:allow R1-product Explicit current-root candidate launcher; preserve the existing relative argv contract. */
 static int root_candidate(char *dst,size_t cap){return cx_fmt(dst,cap,"%s/unisacc.com",root);}
@@ -706,7 +707,7 @@ static int finish(Child *C, int ex, int code, int sig) {
    The builds run BEFORE the batch loop, at most PREP_PAR at a time, each bounded at PREP_SECS (and
    never past the run's own 54 s kill), and no build starts after PREP_BUDGET_MS from process start (the rest are DEFERRED prebuild-budget; a rerun
    resumes from the cache).  Identity = sha256 over the source use/literal closure plus the product sha;
-   the result lives at out/prep-cache/NAME-ID16.{bin,rcpt}; a hit is re-verified by the file's own sha256.
+   the result lives at ~/.cache/unisacc/prep-cache/NAME-ID16.{bin,rcpt}; a hit is re-verified by the file's own sha256.
    A receipt is never a PASS and a PASS is never cached. */
 #define PREP_PAR 3
 #define PREP_SECS 90
@@ -879,9 +880,14 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     cx_fmt(P->name, sizeof P->name, "%s", name);
     P->kind = prep_kind_of(name, kind);
     if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
-    if (P->kind == PK_PROD) {   /* the object under test is the root's own product: no build, identity = its sha */
-        if (cx_fmt(P->path, sizeof P->path, "%s/unisacc.com", root)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
-        memcpy(P->sha, prod_sha, 65); memcpy(P->closure, prod_sha, 65); memcpy(P->id, prod_sha, 16); P->id[16] = 0;
+    if (P->kind == PK_PROD) {   /* A split product has an executable launcher and a distinct model container. */
+        const char *leaf = candidate_dir && tx_eqz(name,"e2model") ? "pkg-hdr.bin" : "unisacc.com";
+        if (cx_fmt(P->path, sizeof P->path, "%s/%s", candidate_dir ? candidate_dir : root, leaf)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
+        if(candidate_dir) {
+            if(file_sha(P->path,P->sha)){cx_fmt(why,cap,"candidate-material-unreadable=%s",name);return -1;}
+        } else if(mm_copy(P->sha,sizeof P->sha,prod_sha,65))die("material digest bound");
+        if(mm_copy(P->closure,sizeof P->closure,P->sha,65) || mm_copy(P->id,sizeof P->id,P->sha,16))die("material identity bound");
+        P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
     if (P->kind == PK_HOST) {   /* declared host oracle: canonical path, file sha, first --version line */
@@ -1280,7 +1286,9 @@ static int run(const int *sel, int nsel, int jobs) {
         long now = sy_now_ms();
         while (nrun < jobs && next < nsel && now - t_main < start_deadline) {
             Batch *B = &batch[sel[next]]; Child *C = &ch[nrun];
-            const char *av[48] = {"sh", candidate, runner, "--", root, outparent, B->id, 0}; int nav = 7;
+            const char *av[48] = {"sh", candidate, runner, "--"}; int nav = 4;
+            if (candidate_dir) { av[nav++] = "--candidate"; av[nav++] = candidate_dir; }
+            av[nav++] = root; av[nav++] = outparent; av[nav++] = B->id;
             if (!tx_eqz(B->materials, "-")) {
                 char why[200];
                 if (!prep_on) { printf("DEFERRED\t%s\tneeds-materials=%s\n", B->id, B->materials); deferred++; next++; continue; }
@@ -1604,6 +1612,10 @@ int main(int argc, char **argv) {
             if (!known[q]) die("--layer: base|ext|stream|compiler|driver|chain|release|all");
         }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "--candidate")) {
+            if (candidate_dir || a+1 >= argc || argv[a+1][0] != '/') die("--candidate requires one absolute directory");
+            candidate_dir = argv[a+1]; a += 2;
+        }
         else if (tx_eqz(argv[a], "--prep-only")) { mode_run = 1; prep_only = 1; prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "--prep-plan")) { mode_run = 1; prep_only = 1; prep_on = 1; prep_plan_only = 1; a++; }
         else if (tx_eqz(argv[a], "--iface-narrow")) { iface_narrow = 1; a++; }
@@ -1628,6 +1640,7 @@ int main(int argc, char **argv) {
         }
         else usage();
     }
+    if(candidate_dir && (!mode_run || prep_only || prep_plan_only))die("--candidate requires --run");
     if(domain_on&&(materials_dump||closure_dump||family_index||nmaterial_family))die("--domain supports --files, --since, --ids, --layer and domain-only selection");
     if(domain_on&&mode_run&&!jobs){int c=fa_budget();jobs=c<1?4:c>MAXJOBS?MAXJOBS:c;}
     if (materials_dump) {   /* the source each declared material resolves to.  The row is

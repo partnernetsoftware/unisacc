@@ -41,3 +41,28 @@ T1 贴图采样 -> T2 素材加载 -> T3 精灵粒子 -> **T4 NPR(描边、赛�
 ## Q2a2 圆弧拱圈
 
 Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和贯通的内壁。[固定机位截图](look-dev/d3-q2a2.png) 与 Q2a 可直接比较。拱顶和两个偏心位置取圆方程上下各 100 毫米的投影点，旧台阶在偏心位置失败，压低拱顶也会失败。Chrome 须等 TSV 完成加载再取读回。Q2a2 提交身份可由 `git log -1 --format=%h -- ujs/plans/demo-v2/look-dev/d3-q2a2.png` 查得。下一项先合 main，再开 Q2b。
+
+## Q2 进度
+
+接手分支为 `ujs`，工作目录为 `~/repos/unisacc/.claude/worktrees/ujs`。Q2a `271b47b5e7` 建立真三维三孔桥与低机位。Q2a2 `0c8fddc3c5` 改为 16 段圆弧和有厚度的内壁。督导已分别看图复核；所有者最终风格签字仍在 Q2e。本次同步的 main 输入为 `8cf969aeb3`，冲突表按合并后的批次重新生成，工具编译清单为 149 个分片。接手时先核对 `git status --short --branch` 和 `git log -1 --format='%h %p'`。
+
+下一步从 Q2b 开始，每项单独提交，先证失败再做正例，提交说明和信封附同输入的正常、篡改与回归输出。
+
+|项|实现入口|验收口径|
+|---|---|---|
+|Q2b 赛璐璐色阶|给 UXE 材质增加可选的 N 级漫反射。先在固定方向光下画已知平面法线的立方体或球体。检查渲染器现有法线来源；拱腹法线应来自圆弧几何。|选择落在不同量化区间内部的面或像素，.cx 从法线与光向的点积独立算档位和 RGB。只改着色器的 N，原 oracle 应以非零退出。默认未启用时保住既有材质合同。|
+|Q2c 描边与细线|在法线或深度不连续处生成可控宽度的线，分别处理外轮廓、折角及无轮廓的同面区域。|.cx 投影固定立方体的已知棱线，在线内、线外及平面内部验像素，比较两个指定线宽；篡改宽度或禁用边缘应红。查看桥缝与树冠的边缘区别。|
+|Q2d 手绘质感|用 .cx 生成原创石砌纹。桥正面按石面坐标铺，内拱按弧长和深度铺。树冠在不同大明暗组内叠水彩噪声。|生成器 --check 逐字节比对磁盘文件，磁盘篡改应红，加入 tools/check-gen-sweep.cx。固定相机再小幅横移，检查砌缝贴住桥面、绕进内壁；只验元素存在不能代替此项。|
+|Q2e 签字材料|同一份场景、资产、光照与种子，保留固定机位主帧，再从同一机位作一小段连续横移。与参考视频第 3.00 秒的低机位并排，时间和位移写清楚。|独立检查桥洞透天、拱腹高度、近树和远屋的相对位移；将主帧和短序列一起交督导及所有者，人工看移动时细铅笔线和柔软树冠能否共存。|
+
+### 接手后的检查
+
+(1) 在 worktree 根用 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 --timeout-ms 55000 -- sh ./unisacc.com tools/run-uxe-regress.cx --` 跑十项，末行应为 `UXE_REGRESS n=10 failed=0`。Q2a2 的几何门单独运行，把内层工具换成 `tools/check-uxe-d3-geometry.cx -- normal`。normal、bare 均为 16/0；sealed 为 16/7、low-crown 为 16/4，两个负例退出 1。bare 在同一像素露出被树挡的墩面。
+
+(2) 截图用 headless Chrome、SwiftShader、`--window-size=1280,807`。签字图取 1280 x 720 的 canvas；整窗截图须裁出 canvas。d3-bridge.html 通过模块读取 d3-arch.tsv，本地 file 测试需允许本地资源并等异步加载，空读回须报错。
+
+(3) water-keeps 的 `s0-elements.tsv` 第 2 至 11 列由 `s0-spec.sha256` 锁定。变更规格需独立提交并写依据。D3 圆弧规格见 `ujs/practice/uxe/test/d3-arch.tsv`，.cx 从圆方程和相机算预期，页面只回传读回值。发现差异先查物理来源。
+
+(4) 开发经 devsvc，仓内改动用 Edit/Write 或 .cx；版本控制也经 devsvc。只动本车道；新工具和批次用 register，逐表跑 own-diff，提交共享表用 commit-own --keyed 全字段键。新清单的 coverage 行常需单列 interfaces.* 键。每次提交后回归并 push origin HEAD:ujs。不要写 main 或发布页。
+
+(5) 视频在 `/tmp/ref/d3.mp4`、`/tmp/ref/d4.mp4`，下载地址和 SHA 在 [D3 来源](ref/d3/SOURCE.txt)、[D4 来源](ref/d4/SOURCE.txt)。ffmpeg 曾可从 `~/.hermes/tools/ffmpeg-9.0.1-linux-x64/bin/` 调用。D3 已核全片，0.25 秒采 52 张；D4 采 208 张，详见 [D3 分析](essence/d3-v2.md)、[D4 分析](essence/d4-v2.md)。评论样本为 `/tmp/x-comments/d1.md` 至 `/tmp/x-comments/d4.md`，共 125 条。其要点、作者归属和永久链接已存入[评论区补证](essence/ESSENCE-v2.md#评论区补证)，临时文件清理后仍可复核。

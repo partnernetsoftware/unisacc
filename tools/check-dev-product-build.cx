@@ -33,6 +33,7 @@
  * only by whoever built that directory; this check builds no nets and no entry.
  * Last line: CHECK_DEV_PRODUCT<TAB>assertions=N<TAB>failed=N<TAB>product=RUN|NOT_RUN */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use cxlib.netpack
@@ -77,6 +78,39 @@ static void line1(const char *dir, const char *rel, char *o, size_t cap) {
     o[i] = 0; free(b);
 }
 
+static int has_unit_entries(const char *dir) {
+    sy_dir_t d; int next, found=0;
+    if(sy_dir_open(&d,dir))return 0;
+    while((next=sy_dir_next(&d))==1) {
+        if(!strncmp(d.name,"uc-",3) && strlen(d.name)==67){found=1;break;}
+    }
+    sy_dir_close(&d); return found;
+}
+/* Exercise the sealed script with real compilations into two fresh cache directories. */
+static void cache_routes(const char *dir, const np_result *sealed) {
+    char product[PW],a[PW],b[PW],bin[PW],explicit_dir[PW],fallback[PW],setting[PW+32];
+    const char *start=sealed->out ? strstr(sealed->out,"DEV_PRODUCT\tpath=") : 0;
+    if(start)start+=sizeof("DEV_PRODUCT\tpath=")-1;
+    const char *end=start ? strchr(start,'\t') : 0;
+    if(!end || end==start || end-start>=PW || mm_copy(product,PW,start,end-start)){ok(0,"launcher-receipt-path");return;}
+    product[end-start]=0;
+    if(cx_fmt(a,PW,"%s/a.c",dir)||cx_fmt(b,PW,"%s/b.c",dir)||
+       cx_fmt(bin,PW,"%s/probe",dir)||cx_fmt(explicit_dir,PW,"%s/requested",dir)||cx_fmt(fallback,PW,"%s/runcache",dir)||
+       cx_fmt(setting,sizeof setting,"UNISACC_E3CACHE=%s",explicit_dir)||
+       wr(dir,"a.c","int g(void); int main(void){return g();}\n")||wr(dir,"b.c","int g(void){return 0;}\n")) {
+        ok(0,"launcher-cache-fixture");return;
+    }
+    char *v[]={"env","-u","UNISACC_CACHE_DIR","-u","DEV_PRODUCT_CACHE","-u","UNISACC_E3CACHE",
+               "UNISACC_CACHE_DIR=/dev/null","UNISACC_UNIT_CACHE=1","UNISACC_RUN_CACHE=1",setting,"sh",product,a,b,"-o",bin,0};
+    np_result r={0};int rc=run(v,&r);
+    ok(!rc && !r.rc && has_unit_entries(explicit_dir) && !has_unit_entries(fallback),"launcher-explicit-e3-cache-entries");
+    np_free(&r);
+    char *plain[]={"env","-u","UNISACC_CACHE_DIR","-u","DEV_PRODUCT_CACHE","-u","UNISACC_E3CACHE",
+                   "UNISACC_UNIT_CACHE=1","UNISACC_RUN_CACHE=1","sh",product,a,b,"-o",bin,0};
+    rc=run(plain,&r);
+    ok(!rc && !r.rc && has_unit_entries(fallback),"launcher-default-runcache-entries");
+    np_free(&r);
+}
 /* --until-done on the real background path of the reload step, with a small fake job as OUT/cxdev/cx-dev */
 static void until(const char *cwd, const char *w, const char *pkg) {
     char o[PW], p[PW], script[2 * PW], id[PW + 16], v[600], pid_s[64], h[65], h1[65], h2[65], sha1[65], sha2[65]; np_result r; int bad = 0, i, rc_seen = 0, gone = 0; long pid; size_t n; char *b;
@@ -110,9 +144,11 @@ static void until(const char *cwd, const char *w, const char *pkg) {
     bad = 0; line1(o, "state/reload.runid", v, sizeof v);
     b = cx_fmt(p, PW, "%s/cxdev/pkg.bin", o) ? 0 : cx_read(p, &n);
     if (b) { cx_sha256_hex(b, n, h1); free(b); } else bad = 1;
-    cx_sha256_hex("base", 4, h2); cx_sha256_hex("candidate\n", 10, h);
+    bad |= cx_fmt(script,sizeof script,"#!/bin/sh\nexec sh '%s/unisacc.com' \"$@\"\n",cwd);
+    cx_sha256_hex("base", 4, h2); cx_sha256_hex(script,strlen(script),h);
     bad |= strncmp(v, "reload:", 7) || strlen(v) != 7 + 64;
-    bad |= cx_fmt(id, sizeof id, "entry:%.16s:%.16s:%.16s", v + 7, h1, h2) || wr(o, "entry/candidate", "candidate\n") || wr(o, "state/entry.id", id) || wr(o, "state/entry.sha", h) || wr(o, "state/entry.rc", "0");
+    bad |= cx_fmt(id, sizeof id, "entry:%.16s:%.16s:%.16s", v + 7, h1, h2) || wr(o, "entry/candidate", script) ||
+           cx_fmt(p,sizeof p,"%s/entry/candidate",o) || sy_chmod(p,0755) || wr(o, "state/entry.id", id) || wr(o, "state/entry.sha", h) || wr(o, "state/entry.rc", "0");
     ok(!bad, "until-fixture-forged-entry-step");
     { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
       int e = run(av, &r); hdr_sha(&r, sha1);
@@ -124,7 +160,8 @@ static void until(const char *cwd, const char *w, const char *pkg) {
       int e = run(av, &r); hdr_sha(&r, sha2);
       ok(!e && r.rc == 0 && last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "until-finished-directory-exit-0-DEV_PRODUCT");
       ok(!has(r.out, r.outn, "\tDONE\t") && !has(r.out, r.outn, "\tSTARTED\t") && !has(r.out, r.outn, "DEV_UNTIL\t") && !has(r.out, r.outn, "PENDING"), "until-finished-directory-redoes-nothing");
-      ok(sha1[0] && !strcmp(sha1, sha2), "until-finished-directory-same-sha"); np_free(&r); }
+      ok(sha1[0] && !strcmp(sha1, sha2), "until-finished-directory-same-sha");
+      cache_routes(o,&r); np_free(&r); }
 }
 
 static const char *H[3] = {"cx-flat.h", "stdio.h", "stdlib.h"};

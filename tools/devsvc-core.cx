@@ -160,6 +160,7 @@ static int cfg_load(const char *root) {
 typedef struct { char name[64]; char owner[64]; long exp; } Lock;
 static Lock locks[MAXLOCK]; static int nlock;
 static char ring[RING][EVW]; static long ring_wall[RING]; static long seq;
+static long ring_floor;
 static char dir[PW], sockp[PW];
 static char resp[1 << 17]; static long rn;
 static char big[1 << 22];
@@ -210,7 +211,66 @@ static int inst_dir(void) {
 /* ---- 事件环 ---- */
 static long ev_rotate_bytes(void) { const char *e = getenv("DEVSVC_EV_ROTATE"); long v = e ? atol(e) : 0; return v > 0 ? v : 4L << 20; }   /* 缺省 4 MB;检查用环境变量调小 */
 #define EV_ROTATE ev_rotate_bytes()
+/* Restore both retained generations, including logs from older services which
+ * reused sequence numbers. Only a contiguous suffix can be offered to --since. */
+static int ev_replay(const char *path, int current) {
+    /* Read a bounded tail even when an instance uses a large rotation size. */
+    int fd = sy_open_read(path), damaged = 0; long n, start;
+    char *s, *end, *nl, *p, *body; sy_stat_t st;
+    if (fd < 0) return fd;
+    if (sy_fstat(fd, &st) || st.kind != 'f' || st.size <= 0) { sy_close(fd); return -EINVAL; }
+    n = st.size >= (long)sizeof big ? sizeof big - 1 : st.size;
+    start = st.size - n;
+    if (sy_lseek(fd, start, SEEK_SET) < 0 || sy_read_full(fd, big, n)) { sy_close(fd); return -EIO; }
+    sy_close(fd);
+    s = big; end = s + n;
+    if (start) { nl = memchr(s, '\n', n); if (!nl) return -EINVAL; s = nl + 1; }
+    for (; s < end; s = nl + 1) {
+        long id, wall;
+        nl = memchr(s, '\n', end - s);
+        if (!nl) { if (current) sy_append_file(path, "\n", 1, 0600); damaged = 1; break; }
+        *nl = 0;
+        if (strncmp(s, "EV\t", 3)) { damaged = 1; continue; }
+        errno = 0; id = strtol(s + 3, &p, 10);
+        if (errno || id <= 0 || *p != '\t') { damaged = 1; continue; }
+        wall = strtol(p + 1, &body, 10);
+        if (errno || wall <= 0 || *body != '\t' || nl - body <= 1 || nl - body > EVW ||
+            strlen(body + 1) != (size_t)(nl - body - 1)) { damaged = 1; continue; }
+        if (id <= seq) continue;
+        if (id - 1 != seq) ring_floor = id - 1;
+        seq = id;
+        if (mm_copy(ring[(seq - 1) % RING], EVW, body + 1, nl - body)) return -EINVAL;
+        ring_wall[(seq - 1) % RING] = wall;
+    }
+    return damaged ? -EINVAL : 0;
+}
+static void ev_resume(char *notice, int cap) {
+    char cur[PW + 24], prev[PW + 24], high[PW + 24], *end; unsigned char *b = 0; int64_t n = 0;
+    if (cx_fmt(cur, sizeof cur, "%s/events.tsv", dir) || cx_fmt(prev, sizeof prev, "%s/events.tsv.1", dir) ||
+        cx_fmt(high, sizeof high, "%s/events.seq", dir)) { fprintf(stderr, "EVENT_SEQ_PATH_TOO_LONG\n"); return; }
+    int backup = ev_replay(prev, 0), current = ev_replay(cur, 1);
+    long watermark = 0;
+    int saved = sy_read_file(high, &b, &n, 32);
+    if (!saved) {
+        errno = 0; watermark = strtol((char *)b, &end, 10);
+        if (errno || watermark < 0 || end != (char *)b + n || !n) { watermark = 0; saved = -EINVAL; }
+        free(b);
+    }
+    if (current || (backup && backup != -ENOENT) || (saved && saved != -ENOENT) || watermark > seq) {
+        long floor = watermark;
+        if (!floor && current != -ENOENT && current) floor = sy_wall_s() * 1000000L;
+        if (seq < floor) { seq = floor; ring_floor = seq; }
+        if (cx_fmt(notice, cap, "EVENT_SEQ_RECOVERY current_rc=%d rotated_rc=%d watermark_rc=%d resume=%ld", current, backup, saved, seq)) return;
+        fprintf(stderr, "%s\n", notice);
+    }
+}
 static void ev_add(const char *kind, const char *text) {
+    if (seq == LONG_MAX) { fprintf(stderr, "EVENT_SEQ_EXHAUSTED\n"); return; }
+    {
+        char p[PW + 24], b[32];
+        if (cx_fmt(b, sizeof b, "%ld", seq + 1) || cx_fmt(p, sizeof p, "%s/events.seq", dir) ||
+            sy_write_atomic(p, b, strlen(b), 0600)) fprintf(stderr, "EVENT_SEQ_WATERMARK_UNWRITABLE\n");
+    }
     char *e = ring[seq % RING];
     int w = snprintf(e, EVW, "%s\t%s", kind, text);   /* 事件正文超出 EVW 即截断并标记,这是环的定长合同 */
     if (w >= EVW) { e[EVW - 2] = '~'; e[EVW - 1] = 0; }
@@ -432,6 +492,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     }
     if (!strcmp(f[0], "events")) {
         long since = atol(f[1]), lo = seq > RING ? seq - RING : 0, k;
+        if (lo < ring_floor) lo = ring_floor;
         if (since < lo) since = lo;
         if (since > seq) since = seq;
         radd("OK\tevents\tseq=%ld\tn=%ld\tdropped_before=%ld\n", seq, seq - since, lo);
@@ -459,8 +520,11 @@ static int serve(long ttl, long idle) {
     F(p, sizeof p, "%s/pid", dir);
     F(info, sizeof info, "%d\t%ld\tttl=%ld\tidle=%ld\n", sy_pid(), sy_wall_s(), ttl, idle);
     sy_write_atomic(p, info, strlen(info), 0600);
+    char recovery[160] = "";
+    ev_resume(recovery, sizeof recovery);
     locks_load();
     chomp(info); ev_add("svc.start", info);
+    if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
@@ -1277,6 +1341,27 @@ static const char *auto_owner(void) {
     return o;
 }
 static char commit_class[24];   /* git commit 失败类别:取自 commit-own stderr 的 COMMIT_OWN_FAIL<TAB>class=;完成事件带 class= */
+static char commit_range[180] = "old=-\tnew=-\tpaths=unknown";
+/* Count changes between the two observed worktree HEADs. Paths containing
+ * newlines are a single NUL-delimited entry. Observation cannot fail a commit. */
+static void commit_range_note(const char *cwd, char *old, char *now) {
+    char count[32] = "unknown";
+    if (*old && *now) {
+        if (!strcmp(old, now)) count[0] = '0', count[1] = 0;
+        else {
+            char *v[] = {"git", "diff-tree", "--no-commit-id", "-r", "--no-renames", "--name-only", "-z", old, now, "--", 0};
+            np_result res; char why[128]; long paths = 0; size_t i;
+            if (!np_run(v, cwd, 0, 2, &res, why, sizeof why)) {
+                if (!res.rc) {
+                    for (i = 0; i < res.outn; i++) if (!res.out[i]) paths++;
+                    (void)cx_fmt(count, sizeof count, "%ld", paths);
+                }
+                np_free(&res);
+            }
+        }
+    }
+    (void)cx_fmt(commit_range, sizeof commit_range, "old=%s\tnew=%s\tpaths=%s", *old ? old : "-", *now ? now : "-", count);
+}
 static void commit_class_from(const char *path) {
     unsigned char *b = 0; int64_t n = 0; long i, k;
     if (!path[0] || sy_read_file(path, &b, &n, 1 << 24) || !b) return;
@@ -1553,6 +1638,9 @@ static int merge_conflicts(const char *root, const char *rd, const char *br, con
    无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
 static int git_argerr;   /* cmd_git 及其子命令在参数解析处退出(尚未启动任何 git 动作)时置 1;入口只在此时贴 usage。
                             git 子进程、commit-own 的真实 rc 2 与具名 REFUSE 的 rc 2 原样返回,不贴 usage(仿 x_ran) */
+static const char *commit_outcome(int rc) {
+    return rc == 0 ? "ok" : rc == 124 ? "timeout" : commit_class[0] ? commit_class : git_argerr ? "args" : "other";
+}
 /* K2/K5 私有索引合并与快进:不经共享索引与工作区算结果,ref 以 update-ref NEW OLD 比较并交换落地(HEAD 被他人移动则重做,至多 3 次),
    落地后 cxlib.gitsync gs_sync 只同步"索引与工作区都等于旧 HEAD"的路径,其余原样保留并逐行报 <前缀>\tSYNC_KEPT path= reason=。
    本机 git 2.34 无 merge-tree --write-tree:GIT_INDEX_FILE 私有索引里 read-tree OURS 后 read-tree -m --aggressive BASE OURS THEIRS,
@@ -1717,6 +1805,25 @@ static int mg_clean_tree(const char *rd) {
 /* git merge BRANCH [-m MSG] [--cwd WORKTREE]:私有索引合并,见上。HEAD 是 BRANCH 祖先则快进;已包含则 up_to_date=1。
    冲突:工作树与索引干净时沿用旧路径(git merge 加 merge_conflicts:派生表冲突自动解、否则停在合并中);否则什么都不动,
    报 MERGE_CONFLICT 清单与 MERGE_HINT,rc 1。成功末行 GIT_MERGE rc=0 commit=SHA branch= cwd= ff= synced= kept=。参数错 rc 2。 */
+/* Only prepare material in the worktree whose ref moved. The foreground
+ * transaction never waits for the build or consumes a readiness verdict. */
+static int pin_prepare_child(void *arg) {
+    char *v[] = {"sh", cfg.product, "tools/devsvc.cx", "--", "prebuild-self", 0};
+    sy_spawn_t o; sy_exit_t ex;
+    sy_unsetenv("DEVSVC_REPO_TABLE");
+    sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
+    sy_unsetenv("DEVSVC_SELF_BIN");
+    sy_spawn_init(&o); o.cwd = arg; o.argv = v; o.deadline_ms = 55000;
+    o.pgroup = -1; o.in_fd = o.out_fd = o.err_fd = SY_STDIO_NULL;
+    return sy_proc_run(&o, &ex) ? 1 : sy_exit_code(&ex);
+}
+static void pin_prepare_kick(const char *root) {
+    int fds[2]; char launcher[PW];
+    if (snprintf(launcher, sizeof launcher, "%s/tools/devsvc.cx", root) >= (int)sizeof launcher || sy_exists(launcher) != 1) return;
+    if (sy_fork_session(pin_prepare_child, (void *)root, fds) >= 0) {
+        sy_close(fds[0]); sy_close(fds[1]);
+    }
+}
 static int git_merge(const char *root, int argc, char **argv) {
     const char *br = 0, *d = root, *msg = 0; char rd[PW], top[PW], cur[200], buf[1 << 15], theirs[128], old[128], nw[128], tree[128], dm[600], why[PW + 32];
     int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0;
@@ -1752,8 +1859,13 @@ static int git_merge(const char *root, int argc, char **argv) {
                 mg_teardown();
                 if (mg_clean_tree(rd)) {   /* 旧路径,行为不变:派生表自动解,否则停在合并中 */
                     char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "-m", (char *)msg, "--", (char *)br, 0};
-                    if (runcap(mv, buf, sizeof buf) != 0) return merge_conflicts(root, rd, br, cur);
+                    if (runcap(mv, buf, sizeof buf) != 0) {
+                        rc = merge_conflicts(root, rd, br, cur);
+                        if (!rc) pin_prepare_kick(rd);
+                        return rc;
+                    }
                     if (mg_rev(rd, "HEAD", nw, sizeof nw)) nw[0] = 0;
+                    if (nw[0] && strcmp(nw, old)) pin_prepare_kick(rd);
                     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", nw, cur, rd); return 0;
                 }
                 mg_report(rd, cur, nu, "conflict-with-local-changes-present");
@@ -1775,6 +1887,7 @@ static int git_merge(const char *root, int argc, char **argv) {
     mg_teardown();
     if (att >= 4) { printf("MERGE_HINT\thead-moving\tHEAD 连续被他人移动,重试 3 次仍未落地\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
     rc = mg_sync(rd, old, nw, "GIT_MERGE_SYNC", &sy, &kp); mg_unlock(root);
+    pin_prepare_kick(rd);
     if (rc) { printf("GIT_MERGE\trc=1\tcommit=%s\tbranch=%s\tcwd=%s\tsync=failed\n", nw, cur, rd); return 1; }
     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tff=%d\tsynced=%d\tkept=%d\n", nw, cur, rd, ff, sy, kp);
     return 0;
@@ -1813,6 +1926,7 @@ static int git_pull(const char *root, int argc, char **argv) {
     }
     if (att >= 4) { printf("GIT_PULL\trc=1\treason=head-moving\n"); return 1; }
     i = mg_sync(rd, old, up, "GIT_PULL_SYNC", &sy, &kp); mg_unlock(root);
+    pin_prepare_kick(rd);
     if (i) { printf("GIT_PULL\trc=1\tcommit=%s\tsync=failed\n", up); return 1; }
     printf("GIT_PULL\trc=0\tcommit=%s\tfrom=%s\tbranch=%s\tcwd=%s\tsynced=%d\tkept=%d\n", up, old, cur, rd, sy, kp);
     return 0;
@@ -1919,6 +2033,8 @@ static int cmd_git(const char *root, int argc, char **argv) {
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
             char *pv[] = {"--par", "1", "--cwd", (char *)cwd, "--", "git", "push", "origin", rs, 0}; pushed = cmd_x(root, 9, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    commit_range_note(cwd ? cwd : root, sha0, sha);
+    if (sha0[0] && sha[0] && strcmp(sha0, sha)) pin_prepare_kick(cwd ? cwd : root);
     /* 未产生新提交(rc 非 0 且 HEAD 未动,或取不到 HEAD)时 commit=none,并在行尾加 reason=:
      * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
      * 旧 HEAD 不再写进 commit= 冒充新提交。提交已落地但推送失败时 commit= 仍是新 HEAD,reason=push-failed。 */
@@ -1956,7 +2072,7 @@ static int usage(void) {
 static int main2(int argc, char **argv);
 static int in_bg;   /* 本进程是后台作业子进程(bg_child 置 1):前台 commit 不再转作业 */
 static char last_job[48];   /* bg_launch 最近一次起的作业 id */
-typedef struct { int argc; char **argv; char root[PW], jd[PW], id[48], owner[64]; } BgJob;
+typedef struct { int argc, commit; char **argv; char root[PW], jd[PW], id[48], owner[64]; } BgJob;
 static int okjob(const char *s) { long n = 0; for (; s && s[n]; n++) if (!((s[n] >= '0' && s[n] <= '9') || s[n] == '-')) return 0; return n > 2 && n < 40; }
 static int bg_child(void *ud) {
     BgJob *j = (BgJob *)ud; char p[PW + 16], t[400]; int fd, r; long t0 = sy_now_ms();
@@ -1967,6 +2083,9 @@ static int bg_child(void *ud) {
     in_bg = 1;
     r = main2(j->argc, j->argv);
     fflush(stdout); fflush(stderr);
+    if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\t%s",
+                            j->owner, sy_pid(), r, sy_now_ms() - t0, commit_outcome(r), commit_range))
+        request(j->root, t, 0);
     F(t, sizeof t, "%d\t%ld\n", r, sy_now_ms() - t0); F(p, sizeof p, "%s/rc", j->jd); sy_write_atomic(p, t, strlen(t), 0644);
     F(t, sizeof t, "emit\tjob.done\tid=%s\trc=%d\tms=%ld\towner=%s", j->id, r, sy_now_ms() - t0, j->owner); request(j->root, t, 0);
     return r;
@@ -1983,7 +2102,7 @@ static int bg_launch(const char *root, const char *cmd, int oargc, char **oargv,
     static BgJob j; static char *nv[FL_MAX_ARGV + 8]; int i, n = 0, fds[2], pid, rd = 0; char p[PW + 16], t[PW + 200];
     if (oargc > FL_MAX_ARGV + 6) return 2;
     for (i = 0; i < oargc; i++) { if (oargv + i == bgarg) continue; nv[n++] = oargv[i]; if (!strcmp(oargv[i], "-")) rd = 1; }
-    nv[n] = 0; j.argc = n; j.argv = nv;
+    nv[n] = 0; j.argc = n; j.argv = nv; j.commit = !strcmp(cmd, "git");
     F(j.root, sizeof j.root, "%s", root); F(j.id, sizeof j.id, "%ld-%d", sy_now_ms(), sy_pid()); F(j.owner, sizeof j.owner, "%s", auto_owner());
     F(j.jd, sizeof j.jd, "%s/jobs/%s", dir, j.id);
     if (ovf || sy_mkdir_all(j.jd, 0700)) { fprintf(stderr, "devsvc: cannot create job directory\n"); return 3; }
@@ -2234,7 +2353,7 @@ int main(int argc, char **argv) {
         static const char *ev[] = {"f", "x", "flow", "doc", "git", "run", "register", "derive", 0};
         int j; char root[PW], rq[600];
         for (j = 0; ev[j]; j++) if (!strcmp(argv[a], ev[j])) break;
-        if (ev[j] && sy_cwd(root, sizeof root) >= 0) {
+        if (ev[j] && !(last_job[0] && !strcmp(argv[a], "git")) && sy_cwd(root, sizeof root) >= 0) {
             char sub[48] = "-"; int s = a + 1;
             if (!strcmp(argv[a], "x")) {   /* x 事件取工具名:跳过 --timeout-ms N、--cwd D、--owner N、--bg 等选项与 --,再跳过 sh 与 unisacc.com,去目录与 .cx 后缀 */
                 while (s < argc && argv[s][0] == '-') {
@@ -2258,7 +2377,7 @@ int main(int argc, char **argv) {
                 if (u < argc) { for (q = 0; q < 47 && argv[u][q]; q++) sw[q] = argv[u][q]; sw[q] = 0; clean(sw); F(fx, sizeof fx, "\tsub=%s", sw); }
             }
             if (!strcmp(argv[a], "git") && !strcmp(sub, "commit"))   /* K6:class=ok|timeout|<COMMIT_OWN_FAIL 类别>|args(参数错)|other */
-                F(fx, sizeof fx, "\tclass=%s", r == 0 ? "ok" : r == 124 ? "timeout" : commit_class[0] ? commit_class : git_argerr ? "args" : "other");
+                F(fx, sizeof fx, "\tclass=%s\t%s", commit_outcome(r), commit_range);
             if (!strcmp(argv[a], "f") && (!strcmp(sub, "edit") || !strcmp(sub, "write") || !strcmp(sub, "edits")) && argc > a + 2 && !strchr(argv[a + 2], '\t') && !strchr(argv[a + 2], '\n')) {
                 unsigned char *fb = 0; int64_t fn = 0; char hx[65] = "-";
                 if (!sy_read_file(argv[a + 2], &fb, &fn, 1L << 27)) (void)sy_sha256_hex(fb ? (const void *)fb : (const void *)"", (long)fn, hx);

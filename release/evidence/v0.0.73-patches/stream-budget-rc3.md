@@ -1,0 +1,1 @@
+res.steps.stream-exhaust 与 stream-e4-domain-matrix 第 38 行约定预算耗尽返回 3，缺路由返回 2。应用后运行 `sh ./unisacc.com tools/affected.cx -- --ids stream-budget,stream-e4-io --prepare-materials --run -j 1`，覆盖 default-run、`-c -funit`、`-S`，再跑 product-qualification 域全部 stream 批次，逐个验证旧 st_span 调用和空 ctx 路径。

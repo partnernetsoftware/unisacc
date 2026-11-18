@@ -1,3 +1,6 @@
+#pragma unisa use sys.time
+#pragma unisa use sys.poll
+#pragma unisa use cxlib.ckrun
 /* tools/check-unit-frontcache.cx -- 产品内单元前端(e2/e1)缓存的回归(plans/unit-frontcache.md)。
  *
  *   sh ./unisacc.com tools/check-unit-frontcache.cx -- OUT MODE [--product CMD] [--base CMD]
@@ -34,13 +37,7 @@ static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\tcheck-unit-frontcache.%s\n", name);
     else { failed++; sy_printf("FAIL\tcheck-unit-frontcache.%s\n", name); }
 }
-static int sh(const char *cmd) {
-    char *v[] = {"sh", "-c", (char *)cmd, 0};
-    char *o = 0; size_t on = 0; int rc;
-    rc = cx_runv_timeout(v, 52, &o, &on);
-    mm_free(o);
-    return rc;
-}
+static int sh(const char *cmd) { return ckk_sh_t("unit-frontcache", cmd, 0, 0, 52); }
 static char *slurp(const char *path, long *n) {
     size_t k = 0; char *b = cx_read(path, &k);
     *n = b ? (long)k : 0;
@@ -57,11 +54,84 @@ static int same(const char *a, const char *b) {
     fsha(a, ha); fsha(b, hb);
     return ha[0] != '-' && tx_eqz(ha, hb);
 }
+/* Keep command output in memory for assertions; log files are write-only evidence.
+ * Each child retains the original 52-second process-group deadline. */
+typedef struct {
+    sy_child_t child;
+    char *fc_payload;
+    long fc_size, fc_capacity;
+    int started;
+} FcCapture;
+static char output_keys[128][900];
+static char *output_buffers[128];
+static long output_sizes[128];
+static int output_count;
+static int capture_start(FcCapture *r, const char *cmd, int merged) {
+    sy_spawn_t o; char *v[] = {"sh", "-c", (char *)cmd, 0};
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    sy_spawn_init(&o); o.argv = v; o.in_fd = SY_STDIO_NULL;
+    o.out_fd = merged ? SY_STDIO_PIPE : SY_STDIO_INHERIT;
+    o.err_fd = merged ? SY_STDIO_INHERIT : SY_STDIO_PIPE;
+    o.flags = merged ? SY_SPAWN_ERR_TO_OUT : 0;
+    o.pgroup = -1; o.deadline_ms = 52000;
+    int rc = sy_proc_spawn(&o, &r->child);
+    r->started = rc == 0;
+    return rc;
+}
+static int capture_finish(FcCapture *r, int merged) {
+    sy_exit_t ex; int done = 0, bad = 0, timed = 0;
+    if (!r->started) return 127;
+    int fd = merged ? r->child.out_fd : r->child.err_fd;
+    while (sy_now_ms() < r->child.deadline_at_ms) {
+        sy_pollfd_t p; p.fd = fd; p.events = SY_POLLIN; p.revents = 0;
+        int pr = sy_poll(&p, 1, 10);
+        if (pr < 0 && pr != -EINTR) { bad = 1; break; }
+        if (fd >= 0 && p.revents) {
+            char part[4096]; long got = sy_read(fd, part, sizeof part);
+            if (got == 0) { sy_close(fd); if (merged) r->child.out_fd = -1; else r->child.err_fd = -1; fd = -1; }
+            else if (got < 0 && got != -EINTR) { bad = 1; break; }
+            else if (got > 0) {
+                if (r->fc_size + got + 1 > r->fc_capacity) {
+                    long cap = r->fc_capacity ? r->fc_capacity * 2 : 8192;
+                    if (cap < r->fc_size + got + 1) cap = r->fc_size + got + 1;
+                    char *b = mm_grow(r->fc_payload, cap);
+                    if (!b) { bad = 1; break; }
+                    r->fc_payload = b; r->fc_capacity = cap;
+                }
+                mm_copy(r->fc_payload + r->fc_size, r->fc_capacity - r->fc_size, part, got); r->fc_size += got;
+            }
+        }
+        if (!done) {
+            int wr = sy_proc_try_wait(&r->child, &ex);
+            if (wr < 0) { bad = 1; break; }
+            done = wr == 1;
+        }
+        if (done && fd < 0) break;
+    }
+    if (!done || fd >= 0 || bad) {
+        timed = !bad; sy_proc_kill(&r->child, SIGKILL);
+        if (!done && sy_proc_wait(&r->child, &ex)) bad = 1;
+    }
+    sy_proc_close(&r->child);
+    if (!r->fc_payload) { r->fc_payload = mm_alloc(1); if (!r->fc_payload) return 127; }
+    r->fc_payload[r->fc_size] = 0;
+    return bad ? 127 : timed ? 124 : sy_exit_code(&ex);
+}
+static void remember(const char *path, FcCapture *r) {
+    int ix; for (ix = 0; ix < output_count; ix++) if (tx_eqz(output_keys[ix], path)) break;
+    if (ix == output_count) {
+        long pn = tx_len(path, sizeof output_keys[0]);
+        if (ix == 128 || pn >= sizeof output_keys[0]) { failed++; mm_free(r->fc_payload); return; }
+        mm_copy(output_keys[ix], sizeof output_keys[0], path, pn + 1); output_count++;
+    }
+    mm_free(output_buffers[ix]); output_buffers[ix] = r->fc_payload; output_sizes[ix] = r->fc_size;
+    if (cx_write(path, r->fc_payload, r->fc_size)) failed++;
+}
 static int count(const char *path, const char *pat) {
-    long n; char *b = slurp(path, &n); int c = 0, pl = (int)tx_len(pat, 64); long at = 0;
-    if (!b) return -1;
-    while (at + pl <= n) { int p = tx_find(b + at, (int)(n - at), pat, pl); if (p < 0) break; c++; at += p + pl; }
-    mm_free(b);
+    int ix, c = 0, pl = (int)tx_len(pat, 64); long at = 0;
+    for (ix = 0; ix < output_count; ix++) if (tx_eqz(output_keys[ix], path)) break;
+    if (ix == output_count) return -1;
+    while (at + pl <= output_sizes[ix]) { int k = tx_find(output_buffers[ix] + at, output_sizes[ix] - at, pat, pl); if (k < 0) break; c++; at += k + pl; }
     return c;
 }
 static int hits(const char *err) { return count(err, "unitcache\tresult=hit"); }
@@ -69,14 +139,20 @@ static int misses(const char *err) { return count(err, "unitcache\tresult=miss")
 static int stores(const char *err) { return count(err, "unitcache\tresult=store"); }
 static void put(const char *dir, const char *name, const char *body) {
     char p[900];
-    cx_fmt(p, sizeof p, "%s/%s", dir, name);
-    if (cx_write(p, body, tx_len(body, 100000))) failed++;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name) || cx_write(p, body, tx_len(body, 100000))) {
+        failed++;
+        sy_printf("FAIL\tcheck-unit-frontcache.put\tpath=%s/%s\n", dir, name);
+    }
 }
 /* 一次编译:env 前缀、参数串、-o 到 W/NAME.bin,stderr 到 W/NAME.err;返回 rc */
 static int cc(const char *prod, const char *env, const char *args, const char *w, const char *name) {
-    char cmd[4000];
-    cx_fmt(cmd, sizeof cmd, "%s %s %s -o %s/o.bin 2>%s/%s.err; r=$?; mv %s/o.bin %s/%s.bin 2>/dev/null; exit $r", env, prod, args, w, w, name, w, w, name);
-    return sh(cmd);
+    char cmd[4000], path[900]; FcCapture r;
+    cx_fmt(cmd, sizeof cmd, "%s %s %s -o %s/o.bin; r=$?; mv %s/o.bin %s/%s.bin 2>/dev/null; exit $r", env, prod, args, w, w, w, name);
+    cx_fmt(path, sizeof path, "%s/%s.err", w, name);
+    int rc = capture_start(&r, cmd, 0);
+    if (rc) return rc;
+    rc = capture_finish(&r, 0); remember(path, &r);
+    return rc;
 }
 /* 把缓存目录里的运行缓存条目(非 uc-、非 mc-)移到 TO,迫使下一次走单元缓存 */
 static void drop_run(const char *d, const char *to) {
@@ -166,26 +242,25 @@ static int one_case(int k) {
     return ok ? 0 : 1;
 }
 static void mode_equiv(int shard) {
-    char cmd[8000], one[900], res[900], nm[64]; int k, at = 0; long n; char *b;
-    cmd[0] = 0;
+    char cmd[1500], res[900], nm[64]; int k, slot = 0; FcCapture children[6];
     for (k = shard; k < NCASE; k += 5) {
-        cx_fmt(one, sizeof one, "(sh ./unisacc.com tools/check-unit-frontcache.cx -- %s case%d --product '%s' > %s/case%d.txt 2>&1) & ", OUT, k, PROD, OUT, k);
-        at = (int)tx_len(cmd, sizeof cmd);
-        if (at + tx_len(one, sizeof one) + 8 < (long)sizeof cmd) mm_copy(cmd + at, (long)sizeof cmd - at, one, tx_len(one, sizeof one) + 1);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/check-unit-frontcache.cx -- %s case%d --product '%s'", OUT, k, PROD);
+        capture_start(&children[slot++], cmd, 1);
     }
-    at = (int)tx_len(cmd, sizeof cmd);
-    mm_copy(cmd + at, (long)sizeof cmd - at, "wait", 5);
-    sh(cmd);
+    slot = 0;
     for (k = shard; k < NCASE; k += 5) {
+        FcCapture *r = &children[slot++];
+        int rc = capture_finish(r, 1);
         cx_fmt(res, sizeof res, "%s/case%d.txt", OUT, k);
-        b = slurp(res, &n);
+        if (r->fc_payload) {
+            if (cx_write(res, r->fc_payload, r->fc_size)) failed++;
+            sy_printf("%s", r->fc_payload);
+        }
         cx_fmt(nm, sizeof nm, "equiv.%d", k);
-        if (b) sy_printf("%s", b);
-        ck(b && tx_find(b, (int)n, "\tPASS\t", 6) >= 0 && tx_find(b, (int)n, "\tFAIL\t", 6) < 0, nm);
-        mm_free(b);
+        ck(r->fc_payload && tx_find(r->fc_payload, r->fc_size, "\tPASS\t", 6) >= 0 && tx_find(r->fc_payload, r->fc_size, "\tFAIL\t", 6) < 0 && rc == 0, nm);
+        mm_free(r->fc_payload);
     }
 }
-
 /* ---- neg ---- */
 static char NW[700], ND[900], NENV[1000], NFL[1500];
 /* 关缓存参考与走单元缓存各编一次;核产物相同与命中/未命中计数(-1 不核) */
@@ -203,6 +278,25 @@ static void nstep(const char *name, const char *args, int want_hit, int want_mis
     if (!r0) sy_printf("NEG\t%s\thit=%d\tmiss=%d\twant=%d/%d\n", name, hits(b), misses(b), want_hit, want_miss);
     ck(r0, name);
 }
+/* Locate an absent dependency by its complete length-prefixed path, never by
+ * searching arbitrary payload bytes. Layout: UNIUC3, 160-byte header, present
+ * (LE16 path length + path + SHA64), absent (LE16 path length + path). */
+static long absent_path(char *bytes, long n, const char *path) {
+    unsigned char *f = (unsigned char *)bytes; long at = 160;
+    if (!f || n < at || !mm_same(f, "UNIUC3\n", 8)) return -1;
+    unsigned hn = f[16] | (f[17] << 8) | (f[18] << 16) | ((unsigned)f[19] << 24);
+    unsigned an = f[20] | (f[21] << 8) | (f[22] << 16) | ((unsigned)f[23] << 24);
+    if (hn > 4096 || an > 4096) return -1;
+    long want = tx_len(path, 4097);
+    for (unsigned i = 0; i < hn + an; i++) {
+        if (at + 2 > n) return -1;
+        unsigned pl = f[at] | (f[at + 1] << 8); at += 2;
+        if (!pl || pl > 4096 || at + pl + (i < hn ? 64 : 0) > n) return -1;
+        if (i >= hn && pl == want && mm_same(f + at, path, want)) return at;
+        at += pl + (i < hn ? 64 : 0);
+    }
+    return -1;
+}
 /* 对每个 uc 条目:how 0 翻末字节(载荷),1 截到 100 字节,2 翻帧标志(头偏移 24),3 把依赖清单里的 absent 路径 inc1/br.h 改成 inc1/bx.h*/
 static void damage(int how) {
     long n, i, st = 0, fn; char *b = names(ND, "uc-", &n), p[1200], *f;
@@ -212,7 +306,7 @@ static void damage(int how) {
         f = slurp(p, &fn);
         if (f && fn > 300) {
             if (how == 1) cx_write(p, f, 100);
-            else if (how == 3) { int q = tx_find(f, (int)fn, "inc1/br.h", 9); if (q >= 0) { f[q + 6] = 'x'; cx_write(p, f, fn); } }
+            else if (how == 3) { char dep[900]; cx_fmt(dep, sizeof dep, "%s/inc1/br.h", NW); long q = absent_path(f, fn, dep); if (q >= 0) { f[q + tx_len(dep, sizeof dep) - 3] = 'x'; cx_write(p, f, fn); } }
             else { f[how == 0 ? fn - 1 : 24] ^= 1; cx_write(p, f, fn); }
         }
         mm_free(f);

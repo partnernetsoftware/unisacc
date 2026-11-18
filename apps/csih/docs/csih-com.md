@@ -19,8 +19,8 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 
 - **从提交构造（推荐）**：多个会话同时改 cx 底层时，直接在工作区编，五个切片中途源码摘要就可能变掉，pack 会拒绝。改用快照：
   ```
-  sh ./unisacc.com tools/csih-ape.cx -- snapshot [REV]       # 默认 HEAD，git archive 导出到 out/csih-ape/tree
-  cd out/csih-ape/tree
+  sh ./unisacc.com tools/csih-ape.cx -- snapshot [REV]       # 默认 HEAD，git archive 导出到系统临时目录下的 unisacc-session-csih-ape/tree
+  cd <系统临时目录>/unisacc-session-csih-ape/tree
   sh ./unisacc.com tools/csih-ape.cx -- slice lnx/x86_64     # ……五片、pack、verify、smoke 都在快照里跑
   cd ../../..
   sh ./unisacc.com tools/csih-ape.cx -- install              # 装到 apps/csih/csih.com，清单加 commit 行
@@ -45,7 +45,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
   - 末行是 `CSIH_APE SMOKE_OK ran=2 fail=0 unmeasured=3`。
 
 - 成品是 `apps/csih/csih.com`，和 `csih.cx` 放在同一目录，git 不跟踪（见 `apps/csih/.gitignore`）。
-- 中间产物在 `out/csih-ape/`：五个切片和 `manifest.tsv`。
+- 中间产物在系统临时目录下的 `unisacc-session-csih-ape/`(tools/cxlib/sessionroot.cx 的 sr_default("csih-ape"))：五个切片和 `manifest.tsv`。
 - **体积**：pack 调 ape-pack 时带 `--deflate`，四个 Unix 片用 `cx/text/deflate.cx` 压缩，结果是 gzip 格式。
   - csih.com 从 8.9MB 降到 1.34MB（2026-10-30；d8eafebcee 时为 1.12MB，839a435f36 时为 1,129,680 字节，7a8c033ec9 时为 1,130,032 字节，0.1.1 / 4e73f38a8b 时为 1,130,992 字节，0.1.1 / 0490c63017（快照构造）时为 1,131,632 字节）。
   - 每片约 1.9–2.5MB，压到 0.32–0.35MB，比 `gzip -6` 还略小一点。
@@ -98,7 +98,7 @@ csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 
 
 ## csih-ape 快照构造
 
-- 已修（2026-10-30）：在快照树（out/csih-ape/tree）里 pack 时，`clean_head()` 原来去问外层检出的 git 要 HEAD；外层 HEAD 一旦前进，清单就会多一条错的 `commit` 行（构造 0490c63017 时多出了 f4edfb4c），verify 因此退回工作区模式。
+- 已修（2026-10-30）：在快照树（unisacc-session-csih-ape/tree）里 pack 时，`clean_head()` 原来去问外层检出的 git 要 HEAD；外层 HEAD 一旦前进，清单就会多一条错的 `commit` 行（构造 0490c63017 时多出了 f4edfb4c），verify 因此退回工作区模式。
   - 现在 `clean_head()` 在有 `./.commit` 的地方直接读它；install 写清单前先删掉旧的 commit 行，只追加快照那一条。
   - 实测：树里 pack 写出的是 0490c63017；install 之后只有这一条；verify 按快照模式 10/10 通过。
 - 快照里每片都是冷编译，实测 55–58 秒，紧贴 60 秒上限。
