@@ -1033,6 +1033,60 @@ static double water_sine(double x) {
     return x*(1-square*(1.0/6-square*(1.0/120-square*(1.0/5040-square/362880))));
 }
 
+static int check_audit_banks(const char *mutation) {
+    enum { PIXELS=213*65 };
+    const int positions[]={0,30,58};
+    char cwd[1024],url[4096],profile[128],option[160],*out=0;
+    char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
+        "--virtual-time-budget=5500","--dump-dom",option,url,0};
+    const char *p;
+    int i,j,rc,failed=0;
+    size_t bytes=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/demo/water-keeps/banks-audit.html?bank-audit&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-banks-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,15,&out,&bytes);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output>"):0;
+    if(rc || !p) { free(out); return 2; }
+    p+=strlen("<output>");
+    for(i=0;i<3;i++) {
+        int offsets[2]={0},counts[8]={0},near[8]={0},far[8]={0},bad;
+        double boat_x=.78*(5.4*water_sine(positions[i]/49.0)+4.3*water_sine(positions[i]/117.0));
+        for(j=0;j<40;j++) {
+            int at=0,used=0,side=j%2?1:-1,y=111+(j/2)*6;
+            double d=1550.0/(y-90),z=positions[i]+d;
+            double center=5.4*water_sine(z/49)+4.3*water_sine(z/117);
+            double half=13.2+1.9*water_sine(z/39);
+            double shore=213+(center+side*half-boat_x)*155/d;
+            if(sscanf(p,"%d%n",&at,&used)!=1 || !used || p[used]!=(j==39?'|':',')) {
+                free(out); return 2;
+            }
+            p+=used+1;
+            offsets[j%2]+=at-shore>2.5 || shore-at>2.5;
+        }
+        if(strlen(p)<PIXELS+1 || p[PIXELS]!=(i==2?'<':';')) { free(out); return 2; }
+        for(j=0;j<PIXELS;j++) {
+            int code=p[j]-'0';
+            if(code<0 || code>7) { free(out); return 2; }
+            counts[code]++;
+            if(j/213>=35) near[code]++;
+            else far[code]++;
+        }
+        p+=PIXELS+1;
+        bad=offsets[0]<4 || offsets[1]<4 || counts[1]<90 || counts[2]<150 ||
+            counts[4]<45 || near[1]<15 || near[2]<25 || far[1]<15 || far[2]<25;
+        failed+=bad;
+        printf("AUDIT_D2 z=%d shore_rows=%d,%d reeds=%d,%d posts=%d near=%d,%d far=%d,%d failed=%d\n",
+            positions[i],offsets[0],offsets[1],counts[1],counts[2],counts[4],
+            near[1],near[2],far[1],far[2],bad);
+    }
+    free(out);
+    return failed?1:0;
+}
+
 static int water_right_edge(int z) {
     return (int)(12300+5400*water_sine(z/49000.0)+4300*water_sine(z/117000.0)+1900*water_sine(z/39000.0));
 }
@@ -1287,6 +1341,7 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if((argc==2 || argc==3) && !strcmp(argv[1],"audit-banks")) return check_audit_banks(argc==3?argv[2]:"");
     if((argc==2 || argc==3) && !strcmp(argv[1],"bridge-pages-input"))
         return check_pages_keyboard(argc==3?argv[2]:"",LIVE_BRIDGE);
     if((argc==2 || argc==3) && !strcmp(argv[1],"town-pages-input"))
