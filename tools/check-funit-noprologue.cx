@@ -1,0 +1,90 @@
+/* tools/check-funit-noprologue.cx -- a -funit unit without main carries no process entry prologue.
+ *
+ *   sh ./unisacc.com tools/check-funit-noprologue.cx -- [PRODUCT]      (default ./unisacc.com)
+ *
+ * The x86_64 process entry prologue stores the incoming stack words into the argc and argv cells:
+ *   48 8b 04 24 (mov (%rsp),%rax) 48 89 05 .. (mov %rax,cell(%rip)) and 48 8d 44 24 08 (lea 8(%rsp),%rax).
+ * Whole-program entry runs it once at _start.  A -funit unit without main used to inline it at offset 0
+ * of its first function, so every call wrote the return address into the argc cell.
+ * Object: the actual product compiler (the candidate under test), not a repo tool.
+ * Cases, each compiled by PRODUCT with -c -b lnx/x86_64 -funit:
+ *   (1) nomain-one   int u1(void){return 42;}                    .text holds no prologue
+ *   (2) nomain-two   two functions, no main                      .text holds no prologue
+ *   (3) main-ctrl    int main(void){return 0;}                   .text holds the prologue (control)
+ * Exit 0 all hold, 1 a case fails (named), 2 usage or I/O.
+ */
+#pragma unisa use sys.proc
+
+static int fails;
+
+static unsigned long rd(const unsigned char *b, long off, int n) {
+    unsigned long v = 0; int i;
+    for (i = n - 1; i >= 0; i--) v = (v << 8) | b[off + i];
+    return v;
+}
+
+/* .text bytes of an ELF64 relocatable; 0 on a malformed object. */
+static const unsigned char *text_of(const unsigned char *b, size_t n, long *tn) {
+    long shoff, shent, shnum, shstr, stroff, i;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return 0;
+    shoff = (long)rd(b, 0x28, 8); shent = (long)rd(b, 0x3a, 2); shnum = (long)rd(b, 0x3c, 2); shstr = (long)rd(b, 0x3e, 2);
+    if (shent != 64 || shstr >= shnum || shoff + shnum * 64 > (long)n) return 0;
+    stroff = (long)rd(b, shoff + shstr * 64 + 0x18, 8);
+    for (i = 0; i < shnum; i++) {
+        long h = shoff + i * 64, nm = (long)rd(b, h, 4), off = (long)rd(b, h + 0x18, 8), sz = (long)rd(b, h + 0x20, 8);
+        if (stroff + nm + 6 > (long)n) return 0;
+        if (!memcmp(b + stroff + nm, ".text", 6)) {
+            if (off + sz > (long)n) return 0;
+            *tn = sz; return b + off;
+        }
+    }
+    return 0;
+}
+
+static int has(const unsigned char *t, long tn, const unsigned char *p, long pn) {
+    long i;
+    for (i = 0; i + pn <= tn; i++) if (!memcmp(t + i, p, (size_t)pn)) return 1;
+    return 0;
+}
+
+static void one(const char *product, const char *dir, const char *name, const char *src, int want) {
+    static const unsigned char argc_st[] = {0x48, 0x8b, 0x04, 0x24, 0x48, 0x89, 0x05};
+    static const unsigned char argv_ld[] = {0x48, 0x8d, 0x44, 0x24, 0x08};
+    char c[4096], o[4096]; char *out = 0, *v[12]; size_t on = 0, bn = 0; unsigned char *b; const unsigned char *t;
+    long tn = 0; int rc, got;
+    cx_fmt(c, sizeof c, "%s/%s.c", dir, name); cx_fmt(o, sizeof o, "%s/%s.o", dir, name);
+    if (cx_write(c, src, strlen(src))) { fprintf(stderr, "check-funit-noprologue: cannot write %s\n", c); exit(2); }
+    v[0] = "sh"; v[1] = (char *)product; v[2] = "-c"; v[3] = "-b"; v[4] = "lnx/x86_64"; v[5] = "-funit";
+    v[6] = c; v[7] = "-o"; v[8] = o; v[9] = 0;
+    rc = cx_runv_timeout(v, 50, &out, &on); free(out);
+    if (rc) { printf("FAIL\t%s\tcompile rc=%d\n", name, rc); fails++; return; }
+    b = (unsigned char *)cx_read(o, &bn);
+    if (!b) { printf("FAIL\t%s\tcannot read %s\n", name, o); fails++; return; }
+    t = text_of(b, bn, &tn);
+    if (!t) { printf("FAIL\t%s\tno .text in %s\n", name, o); fails++; free(b); return; }
+    got = has(t, tn, argc_st, sizeof argc_st) || has(t, tn, argv_ld, sizeof argv_ld);
+    if (got != want) {
+        printf("FAIL\t%s\tprologue=%s want=%s text=%ld first8=%02x%02x%02x%02x%02x%02x%02x%02x\n", name, got ? "yes" : "no",
+               want ? "yes" : "no", tn, t[0], t[1], t[2], t[3], tn > 4 ? t[4] : 0, tn > 5 ? t[5] : 0, tn > 6 ? t[6] : 0, tn > 7 ? t[7] : 0);
+        fails++;
+    } else printf("PASS\t%s\tprologue=%s text=%ld\n", name, got ? "yes" : "no", tn);
+    free(b);
+}
+
+int main(int argc, char **argv) {
+    const char *product = argc > 1 ? argv[1] : "./unisacc.com";
+    const char *tmp = getenv("TMPDIR");
+    char dir[4096];
+    if (argc > 2) { fprintf(stderr, "usage: check-funit-noprologue.cx -- [PRODUCT]\n"); return 2; }
+    cx_fmt(dir, sizeof dir, "%s/check-funit-noprologue-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    if (mkdir(dir, 0700)) { fprintf(stderr, "check-funit-noprologue: cannot create %s\n", dir); return 2; }
+    one(product, dir, "nomain-one", "int u1(void){return 42;}\n", 0);
+    one(product, dir, "nomain-two", "int u1(void){return 42;}\nint u2(int x){return x+u1();}\n", 0);
+    one(product, dir, "main-ctrl", "int main(void){return 0;}\n", 1);
+    {   char p[4200]; const char *n[] = {"nomain-one", "nomain-two", "main-ctrl"}; int i;
+        for (i = 0; i < 3; i++) { cx_fmt(p, sizeof p, "%s/%s.c", dir, n[i]); unlink(p); cx_fmt(p, sizeof p, "%s/%s.o", dir, n[i]); unlink(p); }
+        rmdir(dir);
+    }
+    printf("CHECK_FUNIT_NOPROLOGUE\tfailed=%d\n", fails);
+    return fails ? 1 : 0;
+}
