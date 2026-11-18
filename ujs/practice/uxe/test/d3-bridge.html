@@ -9,16 +9,18 @@ import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } from "../meshes.js";
 import { archMeshes, loadBays } from "./d3-arch.js";
-import { canopyPatches, crownLobes, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
+import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
 import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode");
 const composition = params.get("style") === "study" ||
-  ["composition","short-composition","rails","no-rails","palette","old-palette"].includes(mode);
+  ["composition","short-composition","rails","no-rails","palette","old-palette","leaf-shape","angular-leaf"].includes(mode);
 const study = composition || ["canopy","thin-canopy"].includes(mode);
 const layout = composition ? await loadComposition() : null;
-const palette = params.get("style") === "study" || mode === "palette" ? await loadPalette() : null;
+const palette = params.get("style") === "study" ||
+  ["palette","leaf-shape","angular-leaf"].includes(mode) ? await loadPalette() : null;
+const cutout = (params.get("style")==="study" || mode==="leaf-shape");
 const textured = study || params.get("style") === "masonry" ||
   ["crowns","sparse","ground","flat-ground"].includes(mode);
 const scene = new Scene();
@@ -106,7 +108,7 @@ if (mode!=="bare") {
   const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
   const ellipsoid = allMeshes().length + extraMeshes.length;
   const lobes = textured ? await crownLobes() : [];
-  if (textured) extraMeshes.push(study ? foliagePatchMesh() : leafMesh());
+  if (textured) extraMeshes.push(cutout ? cutoutLeafMesh() : study ? foliagePatchMesh() : leafMesh());
   if (study) {
     trees.push([-12.1,.35,6.1,2.65],[-6.6,-.55,6.5,2.4],[-.6,-.40,6,2.2],
       [3.6,-.62,7.3,2.4],[7.2,.18,8.2,2.65],layout?[14.8,2.25,8,3.6]:[12,3.2,8,4.3]);
@@ -135,6 +137,10 @@ for(const [name,{material,mesh,items}] of groups) {
       material === "grass" || /^(leaf|meadow|cliff)/.test(material))) {
     cloud.surfaceMap = material === "stone" || material === "barrel" ? "masonry" : "wash";
     cloud.mapId = 1;
+    if (cutout && material.startsWith("leaf")) {
+      cloud.surfaceMap = "leaf-cutout";
+      cloud.mapId = 3;
+    }
     if (material !== "grass") cloud.toonLevels = study && material.startsWith("leaf") ? 3 : 4;
   }
   items.forEach((fields,i)=>cloud.set(i,...fields));
@@ -164,6 +170,7 @@ async function loadTexture(file,id,w,h,filter=0) {
 }
 if (textured) {
   await loadTexture("d3-masonry.rgba",1,64,64);
+  if (cutout) await loadTexture("d3-leaf.rgba",3,64,64,1);
   const shift = Number(params.get("shift"));
   if (Number.isFinite(shift) && Math.abs(shift) <= 2) {
     camera.eye[0] += shift;
@@ -184,11 +191,26 @@ if ((textured || mode === "sky") && mode !== "cloudless") {
 }
 createWebGLRenderer(canvas,{antialias:false,extraMeshes}).render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
-const samples=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
-  const [x,y]=pair.split(",").map(Number);
-  const rgba=new Uint8Array(4);
-  gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
-  return rgba.slice(0,3).join(",");
-});
+const addresses=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>pair.split(",").map(Number));
+let samples;
+if(params.has("region")) {
+  const [x,y,w,h,step]=params.get("region").split(",").map(Number);
+  if (![x,y,w,h,step].every(Number.isInteger) || x<0 || y<0 || w<1 || h<1 ||
+      step<1 || w*h>10000 || x+(w-1)*step>=1280 || y+(h-1)*step>=720) throw new Error("像素区域无效");
+  const width=(w-1)*step+1, height=(h-1)*step+1;
+  const rgba=new Uint8Array(width*height*4);
+  gl.readPixels(x,720-y-height,width,height,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+  samples=[];
+  for(let row=0;row<h;row++) for(let col=0;col<w;col++) {
+    const offset=4*((height-1-row*step)*width+col*step);
+    samples.push(rgba.subarray(offset,offset+3).join(","));
+  }
+} else {
+  samples=addresses.map(([x,y])=>{
+    const rgba=new Uint8Array(4);
+    gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+    return rgba.slice(0,3).join(",");
+  });
+}
 document.querySelector("output").textContent=samples.join(";");
 </script>

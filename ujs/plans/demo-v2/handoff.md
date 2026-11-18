@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3e 为叶片加上原创缺刻 alpha 纹理及不规则下部明暗。`check-uxe-d3-geometry.cx -- leaf-shape` 检查 8736 个点，叶空交替 1212 次，6 个暗部连通块，暗部 2505/4844。旧多边形 `angular-leaf` 只有 867 次交替，低于 1100，返回 1。生成器逐字节校验 16384 字节，磁盘篡改已入 sweep。下一项 Q3f 云。
+
 Q3d `af56a43` 后同步主线。主线提交 `68364f4` 已改为根据登记事实现算批次包层，合并时采用该方案。新增批次按现行 register 流程登记，包层由工具从当前或暂存登记读取。先前记录的 build/batch-packages.tsv 属于旧流程。
 
 Q3d 的六角色色板见 `d3-palette.tsv`。天顶和地平用更饱和的蓝，树暗部偏群青，石面偏暖奶油色。调整天空渐变时保留云的明暗。`check-uxe-d3-geometry.cx -- palette` 读色板验证两处天空梯度与四类材质，正例 122/0，`old-palette` 为 122/9。Q3c 为 `70c0184`。Q3d 提交用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-palette.tsv` 查得。并排图 /tmp/d3-review-comparison.png。

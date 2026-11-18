@@ -44,6 +44,16 @@ export function foliagePatchMesh() {
   return {positions:new Float32Array(positions),normals:new Float32Array(normals),vCount:positions.length/3};
 }
 
+export function cutoutLeafMesh() {
+  const positions = new Float32Array([
+    -.74,-.62,0, .74,-.62,0, .74,.62,0,
+    -.74,-.62,0, .74,.62,0, -.74,.62,0
+  ]);
+  const normals = new Float32Array([0,.28,1,0,.28,1,0,.28,1,0,.28,1,0,.28,1,0,.28,1]);
+  const uvs = new Float32Array([0,0,1,0,1,1,0,0,1,1,0,1]);
+  return {positions,normals,uvs,vCount:6};
+}
+
 export function canopyPatches(lobes, count, x, y, z, radius, emit) {
   for(let i=0;i<count;i++) {
     const lobe=lobes[i%lobes.length];

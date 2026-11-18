@@ -117,6 +117,7 @@ varying float vFogDepth;
 varying vec2 vUV;
 varying vec4 vColor;
 void main() {
+  if (uHasMap > 0.5 && uSurfaceMap > 2.5 && texture2D(uMap, vUV).a < 0.5) discard;
   if (uNormalPass > 0.5) {
     gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, uOutlineEligible);
     return;
@@ -147,6 +148,7 @@ void main() {
     float tint = uSurfaceMap < 1.5
       ? texture2D(uMap, fract(vUV)).r
       : texture2D(uMap, fract((vec2(vP.x, vP.z) + vP.yy * vec2(0.17, 0.31)) * 0.6)).g;
+    if (uSurfaceMap > 2.5) tint *= texture2D(uMap, vUV).r;
     base *= tint;
   }
   vec3 col = base * (amb + diff) + uEmissive;
@@ -390,7 +392,8 @@ export function createWebGLRenderer(canvas, opts) {
     gl.uniform1f(uRough, cloud.roughness ?? 0.5);
     const levels = cloud.toonLevels;
     gl.uniform1f(uToonLevels, Number.isInteger(levels) && levels >= 2 && levels <= 16 ? levels : 0);
-    gl.uniform1f(uSurfaceMap, cloud.surfaceMap === "masonry" ? 1 : cloud.surfaceMap === "wash" ? 2 : 0);
+    gl.uniform1f(uSurfaceMap, cloud.surfaceMap === "masonry" ? 1 :
+      cloud.surfaceMap === "wash" ? 2 : cloud.surfaceMap === "leaf-cutout" ? 3 : 0);
     gl.uniform1f(uOutlineEligible, cloud.outlineExcluded ? 0.5 : 1);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
