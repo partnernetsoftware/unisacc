@@ -1,0 +1,148 @@
+/* tools/check-relmem.cx -- Self-check for tools/dv/relmem.cx:
+ *   resident who-uses DAG, rel-v1 disk persistence, same-second incremental reparse,
+ *   racy-2s in-place edit invalidation, impact inverted index, malformed refusal, rel-stat/invalidate. */
+#pragma unisa use dv.relmem
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int fails;
+static void chk(int ok, const char *name) {
+    if (ok) sy_printf("PASS\trelmem.%s\n", name);
+    else { sy_printf("FAIL\trelmem.%s\n", name); fails++; }
+}
+static int has(const char *buf, long len, const char *sub) {
+    long sl = tx_len(sub, 4096), i;
+    if (!buf || sl <= 0 || len < sl) return 0;
+    for (i = 0; i <= len - sl; i++) {
+        if (buf[i] == sub[0] && memcmp(buf + i, sub, (size_t)sl) == 0) return 1;
+    }
+    return 0;
+}
+static void putf(const char *dir, const char *name, const char *txt) {
+    char p[1024];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name) || sy_write_atomic(p, txt, (size_t)tx_len(txt, 1 << 20), 0644)) {
+        sy_printf("FAIL\trelmem.write.%s\n", name);
+        fails++;
+    }
+}
+
+int main(void) {
+    char wd[512], fx[600], svc[600], trk[600], cl[600], bt[600], lk[600], req[4096], rhex[65], stdir[700];
+    char *rb = 0;
+    long rbl = 0;
+
+    if (cx_fmt(wd, sizeof wd, "%s/check-relmem-%d", sy_tmpdir(), sy_pid()) ||
+        cx_fmt(fx, sizeof fx, "%s/root", wd) ||
+        cx_fmt(svc, sizeof svc, "%s/svc", wd) ||
+        sy_mkdir_all(fx, 0755) || sy_mkdir_all(svc, 0700)) return 2;
+
+    putf(fx, "a.cx", "#pragma unisa use b\nint a(void) { return 0; }\n");
+    putf(fx, "b.cx", "#include \"c.cx\"\nint b(void) { return 0; }\n");
+    putf(fx, "c.cx", "int c(void) { return 0; }\n");
+    putf(fx, "e.cx", "/* idle 22bytes */ int e(void) { return 0; }\n");
+    if (cx_fmt(trk, sizeof trk, "%s/tracked.txt", wd) ||
+        sy_write_atomic(trk, "100644 aa 0\ta.cx\n100644 aa 0\tb.cx\n100644 aa 0\tc.cx\n100644 aa 0\te.cx\n", 72, 0644)) return 2;
+
+    /* 1. Cold who-uses miss -> rel-v1 store written -> hot hit */
+    if (cx_fmt(req, sizeof req, "rel-who-uses\t%s\t%s\tc.cx\t1", fx, trk)) return 2;
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=0\t") &&
+        has(rb, rbl, "USES\ta.cx\nUSES\tb.cx\nUSES_SUMMARY\tfile=c.cx\tusers=2\tscanned=4\n"), "who-uses-cold-miss");
+    mm_free(rb); rb = 0;
+
+    {
+        char realfx[1024], mp[800], ep[800], fp[800];
+        if (sy_realpath(fx, realfx, (int)sizeof realfx) >= 0 &&
+            !sy_sha256_hex(realfx, tx_len(realfx, sizeof realfx), rhex)) {
+            rhex[16] = 0;
+            if (!cx_fmt(stdir, sizeof stdir, "%s/rel/%s", svc, rhex) &&
+                !cx_fmt(mp, sizeof mp, "%s/meta", stdir) &&
+                !cx_fmt(ep, sizeof ep, "%s/edges.tsv", stdir) &&
+                !cx_fmt(fp, sizeof fp, "%s/files.tsv", stdir)) {
+                chk(sy_exists(mp) == 1 && sy_exists(ep) == 1 && sy_exists(fp) == 1, "relstore-v1-persisted");
+            }
+        }
+    }
+
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=1\t") &&
+        has(rb, rbl, "\treparsed=0\n") && has(rb, rbl, "users=2"), "who-uses-hot-hit");
+    mm_free(rb); rb = 0;
+
+    /* 2. Edit e.cx (same second!) -> incremental reparse detects new use edge immediately */
+    putf(fx, "e.cx", "#pragma unisa use c\nint e(void) { return 0; }\n");
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=1\t") &&
+        has(rb, rbl, "\treparsed=1\n") && has(rb, rbl, "USES\te.cx\n") && has(rb, rbl, "users=3"), "who-uses-incremental-edit");
+    mm_free(rb); rb = 0;
+
+    /* 3. Same-second same-size in-place overwrite via O_TRUNC -> racy-2s sha catches it immediately */
+    {
+        char ep[700]; int fd;
+        const char *rep = "/* padding0123456 */\nint e(void) { return 0; }\n";
+        if (cx_fmt(ep, sizeof ep, "%s/e.cx", fx)) return 2;
+        fd = sy_open(ep, O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { (void)sy_write_all(fd, rep, tx_len(rep, 256)); sy_close(fd); }
+    }
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "\treparsed=1\n") &&
+        !has(rb, rbl, "USES\te.cx\n") && has(rb, rbl, "users=2"), "who-uses-racy-inplace-invalidated");
+    mm_free(rb); rb = 0;
+
+    /* 4. Impact cold miss -> hot hit -> edit invalidation -> malformed refusal */
+    if (cx_fmt(cl, sizeof cl, "%s/closure.tsv", wd) ||
+        cx_fmt(bt, sizeof bt, "%s/batches.tsv", wd) ||
+        cx_fmt(lk, sizeof lk, "%s/links.tsv", wd)) return 2;
+    putf(wd, "closure.tsv",
+         "B\tb1\tcommit\t-\ta.cx\nC\tb1\tsource\ta.cx\nC\tb1\tuse\tc.cx\n"
+         "B\tb3\tdaily\t-\tb.cx\nC\tb3\tuse\tc.cx\n");
+    putf(wd, "batches.tsv",
+         "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\n"
+         "b1\tIMPLEMENTED\tinterfaces\ta.cx\tSOURCE\tlnx/x86_64\t55\n"
+         "b3\tIMPLEMENTED\tinterfaces\tb.cx\tSOURCE\tosx/arm64\t55\n");
+    putf(wd, "links.tsv", "derive\tm/*\tt/one.tsv\tgen-a\tbound=10\n");
+
+    if (cx_fmt(req, sizeof req, "rel-impact\t%s\t0\t%s\t%s\t%s\t1\t1\tc.cx\tm/x", fx, cl, bt, lk)) return 2;
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=0\t") &&
+        has(rb, rbl, "IMPACT\tbatch\tb1\twhy=c.cx\tvia=use\n") &&
+        has(rb, rbl, "NOT_APPLICABLE\tb3\tplatform=osx/arm64\t") &&
+        has(rb, rbl, "IMPACT\ttable\tt/one.tsv\twhy=m/x\tvia=gen-a\n") &&
+        has(rb, rbl, "IMPACT\tnode\tgen-a\twhy=m/x\n"), "impact-cold-miss-and-links");
+    mm_free(rb); rb = 0;
+
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=1\t") &&
+        has(rb, rbl, "IMPACT\tbatch\tb1\t"), "impact-hot-hit");
+    mm_free(rb); rb = 0;
+
+    /* Same-second links update invalidates impact cache */
+    putf(wd, "links.tsv", "derive\tm/*\tt/two.tsv\tgen-b\tbound=10\n");
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=0\t") &&
+        has(rb, rbl, "IMPACT\ttable\tt/two.tsv\twhy=m/x\tvia=gen-b\n") &&
+        !has(rb, rbl, "t/one.tsv"), "impact-links-edit-invalidates");
+    mm_free(rb); rb = 0;
+
+    /* Malformed closure refused cleanly with rc=2 */
+    putf(wd, "closure.tsv", "C\tb1\tuse\tc.cx\n");
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "ERR\trel\trc=2\t") &&
+        has(rb, rbl, "malformed closure dump line"), "impact-malformed-refused");
+    mm_free(rb); rb = 0;
+
+    /* 5. rel-stat & rel-invalidate */
+    chk(rm_handle("rel-stat", svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trelstat\t") &&
+        has(rb, rbl, "wu_hits=3") && has(rb, rbl, "imp_hits=1"), "rel-stat-counters");
+    mm_free(rb); rb = 0;
+
+    if (cx_fmt(req, sizeof req, "rel-invalidate\t%s", fx)) return 2;
+    chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trelinvalidated\tn=1"), "rel-invalidate");
+    mm_free(rb); rb = 0;
+
+    {
+        char *rv[] = {"rm", "-rf", wd, 0}; size_t rn = 0; char *ro = 0;
+        (void)cx_runv_timeout(rv, 10, &ro, &rn); if (ro) mm_free(ro);
+    }
+    sy_printf("CHECK_RELMEM\tfailed=%d\n", fails);
+    return fails ? 1 : 0;
+}
