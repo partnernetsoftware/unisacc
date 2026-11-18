@@ -1,0 +1,211 @@
+/* Fixture-only stage-one reactor. Run in a private empty instance directory:
+ * dvreact REPO RULES TTL. Stage one admits one reaction per instance.
+ * A test repository declares its entire product read set as fixture.product.
+ * Other repositories use product-map-query --key. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+static char name[64], source[40], repo[4096], instance[4096];
+static int debounce, ceiling, budget, job_ms, singleton;
+static long expires;
+static char compiler[4200];
+
+static int repo_product(void) {
+    char path[4200];
+    if(cx_fmt(path,sizeof path,"%s/tools/devsvc-repo.tsv",repo)) return 0;
+    char *facts=cx_read(path,0);
+    if(!facts) return 0;
+    int matches=0;
+    for(char *row=facts;row && *row;) {
+        char *next=strchr(row,'\n');
+        if(next) *next++=0;
+        if(!strncmp(row,"product\t",8)) {
+            char *leaf=row+8,*tab=strchr(leaf,'\t');
+            if(tab) *tab=0;
+            if(*leaf && !strchr(leaf,'/') && !cx_fmt(path,sizeof path,"%s/%s",repo,leaf) &&
+               sy_realpath(path,compiler,sizeof compiler)>=0) matches++;
+        }
+        row=next;
+    }
+    free(facts); return matches==1;
+}
+
+static int save(const char *path,const char *value) {
+    return sy_write_atomic(path,value,strlen(value),0600);
+}
+static int same(const char *path,const char *value) {
+    char *s=cx_read(path,0);
+    int yes=s && !strcmp(s,value);
+    free(s); return yes;
+}
+static int rule(const char *path) {
+    char *b=cx_read(path,0), dedup[32], replace[32], cmd[32], prepared[32], extra;
+    if (!b) return 0;
+    char *row=strchr(b,'\n');
+    if (!row) { free(b); return 0; }
+    *row++=0;
+    int ok=!strcmp(b,"name\tidentity\tdedup\tsupersede\tdebounce_s\tadmit\tdeadline_s\tcmd\tprepared") &&
+        sscanf(row,"%63s %39s %31s %31s %d %d %d %31s %31s %c",name,source,dedup,replace,&debounce,&ceiling,&budget,cmd,prepared,&extra)==9 &&
+        strspn(name,"abcdefghijklmnopqrstuvwxyz0123456789-")==strlen(name) &&
+        (!strcmp(source,"head") || !strcmp(source,"index-tree") || !strcmp(source,"readset:product-map")) &&
+        !strcmp(dedup,"name+input") && !strcmp(replace,"kill-old") && !strcmp(prepared,"sha256") &&
+        !strcmp(cmd,"fixture-material") && debounce>=0 && debounce<=7200 && ceiling>=0 && budget>0 && budget<=55;
+    free(b); return ok;
+}
+static int capture(char **v,char **env,char *out,int size) {
+    np_result r={0}; char why[512];
+    long left=(expires-sy_now_ms())/1000;
+    if(left<1) return 0;
+    int rc=np_run(v,repo,env,left>55?55:left,&r,why,sizeof why);
+    int ok=!rc && !r.rc && r.outn>1 && r.outn<=size && r.out[r.outn-1]=='\n';
+    if (ok) { ok=!mm_copy(out,size,r.out,r.outn-1); if(ok)out[r.outn-1]=0; }
+    np_free(&r); return ok;
+}
+static int identity(const char *kind,char key[65]) {
+    char *head[]={"git","rev-parse","--verify","HEAD",0};
+    char *idx[]={"git","rev-parse","--path-format=absolute","--git-path","index",0};
+    char *tree[]={"git","write-tree",0};
+    char path[4200],envline[4250],objects[4250],alternates[4250];
+    char *env[]={envline,objects,alternates,0};
+    int ok;
+    if (!strcmp(kind,"head")) ok=capture(head,0,key,65);
+    else if (!strcmp(kind,"index-tree")) {
+        size_t n=0;
+        if (!capture(idx,0,path,sizeof path)) return 0;
+        char *data=cx_read(path,&n);
+        if (!data) return 0;
+        ok=!sy_write_atomic("index.copy",data,n,0600); free(data);
+        if (!ok || cx_fmt(envline,sizeof envline,"GIT_INDEX_FILE=%s/index.copy",instance)) return 0;
+        char *odb[]={"git","rev-parse","--path-format=absolute","--git-path","objects",0};
+        if(!capture(odb,0,path,sizeof path) ||
+           cx_fmt(objects,sizeof objects,"GIT_OBJECT_DIRECTORY=%s/objects",instance) ||
+           cx_fmt(alternates,sizeof alternates,"GIT_ALTERNATE_OBJECT_DIRECTORIES=%s",path))return 0;
+        ok=capture(tree,env,key,65);
+    } else {
+        /* The fixture adapter is selected explicitly by the isolated check. */
+        if (same("fixture.adapter","single-file-v1\n")) {
+            if (cx_fmt(path,sizeof path,"%s/fixture.product",repo)) return 0;
+            size_t n=0; char *b=cx_read(path,&n); if (!b) return 0;
+            ok=!sy_sha256_hex(b,n,key); free(b);
+        } else {
+            if (cx_fmt(path,sizeof path,"%s/query-cache",instance)) return 0;
+            char *q[]={"sh",compiler,"tools/product-map-query.cx","--","--cache",path,"--key",0};
+            ok=capture(q,0,key,65);
+        }
+    }
+    return ok && (strlen(key)==40 || strlen(key)==64) && strspn(key,"0123456789abcdef")==strlen(key);
+}
+static int receipt_locked(const char *key,int publish) {
+    char artifact[160],row[260],sha[65],record[160];
+    if (cx_fmt(artifact,sizeof artifact,"%s.%s.material",name,key) ||
+        cx_fmt(record,sizeof record,"%s.%s.receipt",name,key) || sy_sha256_hex(key,strlen(key),sha) ||
+        cx_fmt(row,sizeof row,"PREPARED\t%s\t%s\t%s\n",name,key,sha)) return 0;
+    if (publish && (save(artifact,key) || save(record,row))) return 0;
+    if (!same(record,row) || !same(artifact,key)) return 0;
+    return same("prepared.tsv",row) || !save("prepared.tsv",row);
+}
+static int state_lock(void) {
+    int fd=sy_open("state.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(fd<0) return -1;
+    for(int i=0;i<20;i++) {
+        if(!sy_flock(fd,6)) return fd;
+        sy_sleep_ms(5);
+    }
+    sy_close(fd); return -1;
+}
+static int receipt(const char *key,int publish) {
+    int fd=state_lock(); if(fd<0)return 0;
+    int ok=same("desired",key) && receipt_locked(key,publish);
+    sy_close(fd); return ok;
+}
+static int desire(const char *key) {
+    int fd=state_lock(); if(fd<0)return 0;
+    int ok=!save("desired",key); sy_close(fd); return ok;
+}
+static int supervisor(void *input) {
+    char *key=(char *)input;
+    sy_close(singleton);
+    int fd=sy_open("job.lock",O_RDWR|O_CREAT|O_CLOEXEC,0600);
+    if (fd<0 || sy_flock(fd,6) || !same("desired",key) || receipt(key,0)) return 1;
+    char duration[32];
+    if (cx_fmt(duration,sizeof duration,"%d.%03d",job_ms/1000,job_ms%1000)) return 1;
+    char *v[]={"sleep",duration,0};
+    sy_spawn_t o; sy_child_t c; sy_exit_t st;
+    sy_spawn_init(&o); o.argv=v; o.pgroup=-1; o.out_fd=SY_STDIO_NULL; o.err_fd=SY_STDIO_NULL;
+    if (sy_proc_spawn(&o,&c)) return 1;
+    char line[180]; if (cx_fmt(line,sizeof line,"%s\t%d\n",key,c.pid)) return 1;
+    int log=sy_open("started.tsv",O_APPEND|O_CREAT|O_WRONLY,0600);
+    int logged=log>=0 && !sy_write_all(log,line,strlen(line)); if (log>=0) sy_close(log);
+    long until=sy_now_ms()+budget*1000;
+    for (;;) {
+        if (!logged || sy_now_ms()>=until || !same("desired",key)) {
+            sy_proc_kill(&c,9); sy_proc_wait(&c,&st); return 1;
+        }
+        int rc=sy_proc_try_wait(&c,&st);
+        if (rc) return rc==1 && !sy_exit_code(&st) && same("desired",key) && receipt(key,1)?0:1;
+        sy_sleep_ms(25);
+    }
+}
+static int admitted(void) {
+    char *s=cx_read("/proc/loadavg",0); double l=0;
+    int ok=s && sscanf(s,"%lf",&l)==1 && l<ceiling;
+    free(s); return ok;
+}
+int main(int argc,char **argv) {
+    if (argc!=4 || !*argv[3] || strspn(argv[3],"0123456789")!=strlen(argv[3])) return 2;
+    long ttl=strtol(argv[3],0,10);
+    if (ttl<1 || ttl>7200 || sy_realpath(argv[1],repo,sizeof repo)<0 || sy_cwd(instance,sizeof instance)<0 ||
+        strncmp(instance,"/tmp/",5) || !strncmp(instance,repo,strlen(repo)) || !rule(argv[2])) return 2;
+    sy_stat_t dir;
+    if(sy_stat(instance,&dir) || dir.uid!=sy_uid() || (dir.mode&077))return 2;
+    const char *git_env[]={"GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"};
+    for(int i=0;i<5;i++) if(sy_unsetenv(git_env[i]))return 2;
+    singleton=sy_open("react.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if (singleton<0 || sy_lockf(singleton,1,0)) return 2;
+    if(sy_mkdir_all("objects",0700)) return 2;
+    job_ms=500; char *duration=cx_read("fixture.delay-ms",0);
+    if (duration) { job_ms=atoi(duration); free(duration); if(job_ms<0 || job_ms>55000) return 2; }
+    if(!same("fixture.adapter","single-file-v1\n") && !repo_product())return 2;
+    const char *kinds[]={"head","index-tree","readset:product-map"};
+    int selected=!strcmp(source,kinds[0])?0:!strcmp(source,kinds[1])?1:2;
+    char last[65]="",keys[3][65],vector[320]; long stable=0, end=sy_now_ms()+ttl*1000;
+    expires=end;
+    int child=0;
+    while (sy_now_ms()<end) {
+        if (child) { int ex,code,sig; if(sy_wait_status(child,1,&ex,&code,&sig)!=0) child=0; }
+        for(int i=0;i<3;i++) if(!identity(kinds[i],keys[i]) && mm_copy(keys[i],65,"UNKNOWN",8))return 2;
+        if(sy_now_ms()+1000>=end) break;
+        char *key=keys[selected];
+        if(cx_fmt(vector,sizeof vector,"head\t%s\nindex-tree\t%s\nreadset:product-map\t%s\n",keys[0],keys[1],keys[2]) ||
+           (!same("identities.tsv",vector) && save("identities.tsv",vector))) return 2;
+        if (!strcmp(key,"UNKNOWN")) { if(!desire("UNKNOWN")) return 2; last[0]=0; }
+        else {
+            if (strcmp(key,last)) {
+                if(!desire(key)) return 2;
+                if(mm_copy(last,sizeof last,key,strlen(key)+1)) return 2;
+                stable=sy_now_ms();
+            }
+            if (!child && !receipt(key,0) && sy_now_ms()-stable>=debounce*1000 && admitted()) {
+                int fds[2]; child=sy_fork_session(supervisor,key,fds);
+                if(child<0) return 2;
+                sy_close(fds[0]); sy_close(fds[1]);
+            }
+        }
+        char *old=cx_read("event",0);
+        long next=sy_now_ms()+2000;
+        while(sy_now_ms()<next && sy_now_ms()<end) {
+            sy_sleep_ms(100); char *now=cx_read("event",0);
+            int changed=(now==0)!=(old==0) || (now && old && strcmp(now,old));
+            free(now); if(changed) break;
+        }
+        free(old);
+    }
+    return 0;
+}
