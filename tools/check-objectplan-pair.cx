@@ -1,0 +1,219 @@
+/* tools/check-objectplan-pair.cx -- d0 (x86_64, label offset table) and d1 (arm64, direct_labels)
+   paired-section consistency for exec/enc/objectplan-result.tsv.  Read only.
+   Pairing rule: collect sections d0.sN and d1.sN in index order; drop sections declared
+   `one-sided` in the allow table; the k-th remaining d0 section pairs with the k-th remaining d1
+   section (count mismatch fails).  Rows compare on columns 2-5 with whole-field local labels $fN
+   folded to $f (their numbering is per-generation, not semantic).  A pair whose rows differ must
+   have a `diff` allow row whose row counts, diff row count and sha256 over the normalized diff all
+   match; an allow row with no matching divergence fails (stale).  Usage:
+     check-objectplan-pair.cx [--check] [--table T] [--allow A] [--report]
+     check-objectplan-pair.cx --selftest      seven controls, then the real check (batch objectplan-pair)
+   Check line: OBJECTPLAN_PAIR pairs=N same=N known_diff=K new_diff=X stale_allow=Y status=PASS|FAIL;
+   --selftest then ends with OBJECTPLAN_PAIR_SELFTEST<TAB>ok=7<TAB>failed=0<TAB>real=PASS. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+#define MAXROW 2048
+#define MAXSEC 128
+#define ACC (1 << 20)
+#define WHY 256
+typedef struct { int side, idx; int rows[400]; int n; } Sec;
+static char *rbody[MAXROW]; static int nrow;
+static Sec sec[MAXSEC]; static int nsec;
+
+static void cp(void *dst, long cap, const void *src, long n) { if (n < 0 || mm_copy(dst, cap, src, n)) exit(2); }
+static char *dupn(const char *s, long n) { char *p = mm_alloc(n + 1); if (!p) exit(2); cp(p, n + 1, s, n); p[n] = 0; return p; }
+static void reset(void) { for (int i = 0; i < nrow; i++) mm_free(rbody[i]); nrow = 0; nsec = 0; }
+static int secname(const char *s, int *side, int *idx) {
+ if (s[0] != 'd' || (s[1] != '0' && s[1] != '1') || s[2] != '.' || s[3] != 's' || !s[4]) return 0;
+ int v = 0; for (const char *p = s + 4; *p; p++) { if (*p < '0' || *p > '9' || v > 100000) return 0; v = v * 10 + (*p - '0'); }
+ *side = s[1] - '0'; *idx = v; return 1;
+}
+static Sec *findsec(int side, int idx) { for (int i = 0; i < nsec; i++) if (sec[i].side == side && sec[i].idx == idx) return &sec[i]; return 0; }
+static char *normalize(const char *body, long n) {
+ static char out[65536]; long o = 0, i = 0;
+ while (i < n) {
+  if (o >= (long)sizeof out - 16) exit(2);
+  if (body[i] == '$' && i + 1 < n && body[i + 1] == 'f' && (i == 0 || body[i - 1] == '\t')) {
+   long j = i + 2; while (j < n && body[j] >= '0' && body[j] <= '9') j++;
+   if (j > i + 2 && (j == n || body[j] == '\t')) { out[o++] = '$'; out[o++] = 'f'; i = j; continue; }
+  }
+  out[o++] = body[i++];
+ }
+ return dupn(out, o);
+}
+static int parse(const char *b, long n, char *why) {
+ reset(); long p = 0;
+ while (p < n) {
+  long e = p; while (e < n && b[e] != '\n') e++;
+  if (e > p && b[p] != '#') {
+   long t = p; while (t < e && b[t] != '\t') t++;
+   if (t >= e) { if (cx_fmt(why, WHY, "row-without-tab at byte %ld", p)) exit(2); return -1; }
+   char name[32]; if (t - p >= 31) { if (cx_fmt(why, WHY, "section-name-long at byte %ld", p)) exit(2); return -1; }
+   cp(name, sizeof name, b + p, t - p); name[t - p] = 0;
+   int side, idx; if (!secname(name, &side, &idx)) { if (cx_fmt(why, WHY, "bad-section %s", name)) exit(2); return -1; }
+   Sec *s = findsec(side, idx);
+   if (!s) { if (nsec >= MAXSEC) exit(2); s = &sec[nsec++]; s->side = side; s->idx = idx; s->n = 0; }
+   if (nrow >= MAXROW || s->n >= 400) exit(2);
+   rbody[nrow] = normalize(b + t + 1, e - t - 1);
+   s->rows[s->n++] = nrow++;
+  }
+  p = e + 1;
+ }
+ return 0;
+}
+typedef struct { char kind[16], a[32], c[32], sha[72], origin[64]; int ar, cr, dr, used; } Allow;
+static Allow al[64]; static int nal;
+static int field(const char *line, long n, int k, char *dst, int cap) {
+ long p = 0; for (int i = 0; i < k; i++) { while (p < n && line[p] != '\t') p++; if (p >= n) return -1; p++; }
+ long e = p; while (e < n && line[e] != '\t') e++;
+ if (e - p >= cap) return -1; cp(dst, cap, line + p, e - p); dst[e - p] = 0; return 0;
+}
+static int parse_allow(const char *b, long n, char *why) {
+ nal = 0; long p = 0;
+ while (p < n) {
+  long e = p; while (e < n && b[e] != '\n') e++;
+  if (e > p && b[p] != '#') {
+   if (nal >= 64) exit(2); Allow *a = &al[nal]; char t[3][16]; const char *l = b + p; long ln = e - p; int tabs = 0;
+   for (long q = 0; q < ln; q++) if (l[q] == '\t') tabs++;
+   if (tabs != 9 || field(l, ln, 0, a->kind, 16) || field(l, ln, 1, a->a, 32) || field(l, ln, 2, a->c, 32) || field(l, ln, 3, t[0], 16) ||
+       field(l, ln, 4, t[1], 16) || field(l, ln, 5, t[2], 16) || field(l, ln, 6, a->sha, 72) || field(l, ln, 7, a->origin, 64)) {
+    if (cx_fmt(why, WHY, "allow-shape at byte %ld (10 TAB fields)", p)) exit(2); return -1; }
+   if (strcmp(a->kind, "diff") && strcmp(a->kind, "one-sided")) { if (cx_fmt(why, WHY, "allow-kind %s", a->kind)) exit(2); return -1; }
+   if (strlen(a->sha) != 64 || !a->origin[0]) { if (cx_fmt(why, WHY, "allow-sha-or-origin at byte %ld", p)) exit(2); return -1; }
+   a->ar = atoi(t[0]); a->cr = atoi(t[1]); a->dr = atoi(t[2]); a->used = 0; nal++;
+  }
+  p = e + 1;
+ }
+ return 0;
+}
+static Allow *find_allow(const char *kind, const char *a, const char *c) {
+ for (int i = 0; i < nal; i++) if (!strcmp(al[i].kind, kind) && !strcmp(al[i].a, a) && !strcmp(al[i].c, c)) return &al[i]; return 0;
+}
+static int cmpsec(const void *x, const void *y) { const Sec *a = *(Sec *const *)x, *b = *(Sec *const *)y; return a->idx - b->idx; }
+static void summary(const char *s, char o[128]) {
+ if (cx_fmt(o, 128, (long)strlen(s) > 110 ? "%.110s..." : "%s", s)) exit(2);
+ for (char *q = o; *q; q++) if (*q == '\t') *q = ' ';
+}
+static long put(char *acc, long an, char tag, const char *s) {
+ long k = (long)strlen(s); if (an + k + 2 >= ACC) exit(2);
+ if (tag) acc[an++] = tag; cp(acc + an, ACC - an, s, k); an += k; acc[an++] = '\n'; return an;
+}
+/* LCS diff; returns differing row count; hash covers diff bodies only (no row numbers) */
+static int diffpair(Sec *x, Sec *y, char hex[65], int show) {
+ int n = x->n, m = y->n; int *dp = mm_alloc(sizeof(int) * (n + 1) * (m + 1)); if (!dp) exit(2);
+ for (int i = n; i >= 0; i--) for (int j = m; j >= 0; j--) {
+  int *c = &dp[i * (m + 1) + j];
+  if (i == n || j == m) *c = 0;
+  else if (!strcmp(rbody[x->rows[i]], rbody[y->rows[j]])) *c = dp[(i + 1) * (m + 1) + j + 1] + 1;
+  else { int a = dp[(i + 1) * (m + 1) + j], b = dp[i * (m + 1) + j + 1]; *c = a > b ? a : b; }
+ }
+ char *acc = mm_alloc(ACC); long an = 0; int d = 0, i = 0, j = 0; char sm[128]; if (!acc) exit(2);
+ while (i < n || j < m) {
+  if (i < n && j < m && !strcmp(rbody[x->rows[i]], rbody[y->rows[j]])) { i++; j++; continue; }
+  if (j == m || (i < n && dp[(i + 1) * (m + 1) + j] >= dp[i * (m + 1) + j + 1])) {
+   an = put(acc, an, '-', rbody[x->rows[i]]);
+   if (show) { summary(rbody[x->rows[i]], sm); printf("  - d0.s%d#%d %s\n", x->idx, i + 1, sm); } i++;
+  } else {
+   an = put(acc, an, '+', rbody[y->rows[j]]);
+   if (show) { summary(rbody[y->rows[j]], sm); printf("  + d1.s%d#%d %s\n", y->idx, j + 1, sm); } j++;
+  }
+  d++;
+ }
+ if (sy_sha256_hex(acc, an, hex)) exit(2);
+ mm_free(acc); mm_free(dp); return d;
+}
+static int pairs_n, same_n, known_n, new_n, stale_n;
+static int run_check(const char *tb, long tn, const char *ab, long an, int report) {
+ char why[WHY] = {0}; pairs_n = same_n = known_n = new_n = stale_n = 0;
+ if (parse(tb, tn, why) || parse_allow(ab, an, why)) { printf("REFUSE %s\n", why); return -1; }
+ Sec *s0[MAXSEC], *s1[MAXSEC]; int n0 = 0, n1 = 0;
+ for (int i = 0; i < nsec; i++) {
+  char nm[32]; if (cx_fmt(nm, sizeof nm, "d%d.s%d", sec[i].side, sec[i].idx)) exit(2);
+  Allow *a = find_allow("one-sided", nm, "-");
+  if (a) {
+   char hex[65], *acc = mm_alloc(ACC); long k = 0; if (!acc) exit(2);
+   for (int r = 0; r < sec[i].n; r++) k = put(acc, k, 0, rbody[sec[i].rows[r]]);
+   if (sy_sha256_hex(acc, k, hex)) exit(2); mm_free(acc);
+   a->used = 1;
+   if (strcmp(hex, a->sha) || a->ar != sec[i].n) { printf("ONE-SIDED-CHANGED %s rows=%d sha=%s\n", nm, sec[i].n, hex); new_n++; }
+   else if (report) printf("ONE-SIDED %s rows=%d origin=%s\n", nm, sec[i].n, a->origin);
+   continue;
+  }
+  if (sec[i].side == 0) s0[n0++] = &sec[i]; else s1[n1++] = &sec[i];
+ }
+ qsort(s0, n0, sizeof *s0, cmpsec); qsort(s1, n1, sizeof *s1, cmpsec);
+ if (n0 != n1) { printf("PAIR-COUNT-MISMATCH d0=%d d1=%d\n", n0, n1); new_n++; }
+ int np = n0 < n1 ? n0 : n1;
+ for (int k = 0; k < np; k++) {
+  char a[32], c[32], hex[65];
+  if (cx_fmt(a, sizeof a, "d0.s%d", s0[k]->idx) || cx_fmt(c, sizeof c, "d1.s%d", s1[k]->idx)) exit(2);
+  int d = diffpair(s0[k], s1[k], hex, 0); pairs_n++;
+  Allow *ax = find_allow("diff", a, c);
+  if (!d) { same_n++; if (report) printf("PAIR %s %s rows=%d/%d diff=0 status=same\n", a, c, s0[k]->n, s1[k]->n); continue; }
+  if (ax && !strcmp(ax->sha, hex) && ax->ar == s0[k]->n && ax->cr == s1[k]->n && ax->dr == d) {
+   ax->used = 1; known_n++;
+   if (report) { printf("PAIR %s %s rows=%d/%d diff=%d status=known origin=%s sha=%s\n", a, c, s0[k]->n, s1[k]->n, d, ax->origin, hex); diffpair(s0[k], s1[k], hex, 1); }
+   continue;
+  }
+  if (ax) ax->used = 1; /* reported as CHANGED rather than stale */
+  new_n++;
+  printf("PAIR %s %s rows=%d/%d diff=%d status=%s sha=%s\n", a, c, s0[k]->n, s1[k]->n, d, ax ? "CHANGED" : "NEW", hex);
+  diffpair(s0[k], s1[k], hex, 1);
+ }
+ for (int i = 0; i < nal; i++) if (!al[i].used) { stale_n++; printf("STALE-ALLOW %s %s %s origin=%s\n", al[i].kind, al[i].a, al[i].c, al[i].origin); }
+ return new_n || stale_n ? 1 : 0;
+}
+static void final(int rc) { printf("OBJECTPLAN_PAIR pairs=%d same=%d known_diff=%d new_diff=%d stale_allow=%d status=%s\n", pairs_n, same_n, known_n, new_n, stale_n, rc ? "FAIL" : "PASS"); }
+static int ok, bad;
+static void ck(int yes, const char *s) { printf("%s\t%s\n", yes ? "PASS" : "FAIL", s); if (yes) ok++; else bad++; }
+static int control(const char *tb, long tn, const char *ab, long an) { printf("-- control\n"); return run_check(tb, tn, ab, an, 0); }
+/* fixture copy: b[0,at) + ins + b[at+cut,n) */
+static char *splice(const char *b, long n, long at, long cut, const char *ins, long *on) {
+ long k = (long)strlen(ins); *on = n - cut + k; char *o = mm_alloc(*on + 1); if (!o) exit(2);
+ cp(o, *on + 1, b, at); cp(o + at, *on + 1 - at, ins, k); cp(o + at + k, *on + 1 - at - k, b + at + cut, n - at - cut); o[*on] = 0; return o;
+}
+static long line_at(const char *b, long n, const char *prefix, long *len) {
+ long p = 0, pl = (long)strlen(prefix);
+ while (p < n) { long e = p; while (e < n && b[e] != '\n') e++; if (e - p >= pl && !memcmp(b + p, prefix, pl)) { *len = e < n ? e + 1 - p : e - p; return p; } p = e + 1; }
+ return -1;
+}
+static int selftest(const char *tb, long tn, const char *ab, long an) {
+ long on, p, ln; char *m;
+ ck(control(tb, tn, ab, an) == 0, "baseline-passes");
+ p = line_at(tb, tn, "d1.s28\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p + 7, 0, "X", &on);
+ ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d1-row-edit-in-same-pair-fails"); mm_free(m);
+ p = line_at(tb, tn, "d1.s24\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p + 7, 0, "X", &on);
+ ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d1-row-edit-in-known-pair-fails"); mm_free(m);
+ p = line_at(tb, tn, "d0.s31\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p, 0, "d0.s31\tOBJ.extra\t*\tOBJ.fail\t[]\n", &on);
+ ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d0-only-row-add-fails"); mm_free(m);
+ p = line_at(ab, an, "diff\t", &ln); m = p < 0 ? 0 : splice(ab, an, p, ln, "", &on);
+ ck(m && control(tb, tn, m, on) == 1 && new_n == 1, "allow-row-deleted-fails"); mm_free(m);
+ m = splice(ab, an, an, 0, "diff\td0.s27\td1.s28\t130\t130\t1\t0000000000000000000000000000000000000000000000000000000000000000\tprobe\tstale probe\tnone\n", &on);
+ ck(control(tb, tn, m, on) == 1 && stale_n == 1 && new_n == 0, "stale-allow-row-fails"); mm_free(m);
+ ck(control(tb, tn, "", 0) == 1 && new_n >= 1, "empty-allow-fails");
+ return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+ const char *tp = "exec/enc/objectplan-result.tsv", *ap = "tests/objectplan-pair-allow.tsv"; int st = 0, report = 0;
+ for (int i = 1; i < argc; i++) {
+  if (!strcmp(argv[i], "--table") && i + 1 < argc) tp = argv[++i];
+  else if (!strcmp(argv[i], "--allow") && i + 1 < argc) ap = argv[++i];
+  else if (!strcmp(argv[i], "--report")) report = 1;
+  else if (!strcmp(argv[i], "--selftest")) st = 1;
+  else if (!strcmp(argv[i], "--check")) ;
+  else { fprintf(stderr, "usage: check-objectplan-pair.cx [--check] [--report] [--selftest] [--table T] [--allow A]\n"); return 2; }
+ }
+ unsigned char *tb = 0, *ab = 0; int64_t tn = 0, an = 0;
+ if (sy_read_file(tp, &tb, &tn, 1 << 24)) { printf("REFUSE cannot-read %s\n", tp); return 2; }
+ if (sy_read_file(ap, &ab, &an, 1 << 20)) { printf("REFUSE cannot-read %s\n", ap); return 2; }
+ int s = st ? selftest((char *)tb, (long)tn, (char *)ab, (long)an) : 0;
+ if (st) printf("-- real\n");
+ int rc = run_check((char *)tb, (long)tn, (char *)ab, (long)an, report); final(rc);
+ if (st) printf("OBJECTPLAN_PAIR_SELFTEST\tok=%d\tfailed=%d\treal=%s\n", ok, bad, rc ? "FAIL" : "PASS");
+ if (rc < 0) return 2;
+ return rc || s ? 1 : 0;
+}
