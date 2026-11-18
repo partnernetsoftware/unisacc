@@ -174,7 +174,7 @@ export function createWebGLRenderer(canvas, opts) {
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
     throw new Error(gl.getProgramInfoLog(prog) || "link");
 
-  const meshBufs = allMeshes().map((m) => {
+  const meshBufs = allMeshes().concat(opts?.extraMeshes || []).map((m) => {
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, m.positions, gl.STATIC_DRAW);

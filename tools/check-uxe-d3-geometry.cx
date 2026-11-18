@@ -5,13 +5,56 @@
    aperture, not on its rasterized edge. The page receives only pixel addresses. */
 typedef struct { const char *name; double x,y,z; int material; } Probe;
 enum { SKY, STONE, BARREL, PLASTER, LEAF, GRASS, ROOF, ABUTMENT };
-static Probe points[] = {
+static Probe points[16] = {
     {"west-opening",-8,2.5,1,SKY}, {"middle-opening",0,2.6,1,SKY},
     {"east-opening",8,2.6,1,SKY}, {"middle-vault",0,5,0.7,BARREL},
     {"sunlit-pier",-4,3.0,2.5,STONE}, {"east-pier-behind-tree",4,2,2.5,LEAF},
     {"house-wall",-14,8,1,PLASTER}, {"roof",-12.82,9.72,-1,ROOF},
     {"west-abutment",-14,4,2.5,ABUTMENT}, {"near-meadow",0,-2,9,GRASS}
 };
+/* Read survey dimensions in millimetres. Inspect the middle bay, where both
+   the front lip and the shaded intrados immediately behind it are visible. */
+static int survey(void) {
+    size_t bytes=0;
+    char *data=cx_read("ujs/practice/uxe/test/d3-arch.tsv",&bytes);
+    int i, bay, found=0;
+    char *line=data?strchr(data,'\n'):0;
+    for(bay=0;line && line[1];bay++) {
+        int col[9];
+        line++;
+        if(sscanf(line,"%d %d %d %d %d %d %d %d %d",&col[0],&col[1],&col[2],
+            &col[3],&col[4],&col[5],&col[6],&col[7],&col[8])!=9) break;
+        if(col[2]<=0 || col[3]<=col[4] || col[8]<12 || col[8]>16 || bay>=3) break;
+        points[bay].x=col[0]/1000.0;
+        points[bay].y=(col[1]+col[2]*0.20)/1000;
+        points[bay].z=(col[3]+col[4])/2000.0;
+        if(bay==1) {
+            double r=col[2]/1000.0, spring=col[1]/1000.0;
+            double front=col[3]/1000.0;
+            points[3].x=col[0]/1000.0;
+            points[3].y=spring+r;
+            points[3].z=front-(col[3]-col[4])*.0006;
+            for(i=0;i<3;i++) {
+                int j, k=10+2*i;
+                double dx=r*i*.25, root=r;
+                for(j=0;j<8;j++) root=(root+(r*r-dx*dx)/root)*.5;
+                points[k].name=i?"arc-below":"crown-midpoint-below";
+                points[k].x=points[3].x+dx;
+                points[k].z=front;
+                points[k].y=spring+root-.10;
+                points[k].material=BARREL;
+                points[k+1]=points[k];
+                points[k+1].name=i?"arc-above":"crown-midpoint-above";
+                points[k+1].y=spring+root+.10;
+                points[k+1].material=STONE;
+            }
+            found=1;
+        }
+        line=strchr(line,'\n');
+    }
+    if(data) free(data);
+    return bay==3 && found;
+}
 /* Mesh shading is ambient .82 plus a positive, bounded directional term.
    Classify by chromaticity, invariant to this scalar. Sky bypasses shading. */
 static int base[][3] = {{88,160,218},{211,184,140},{119,113,106},
@@ -35,10 +78,11 @@ int main(int argc,char **argv) {
     size_t size=0;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader",
         "--enable-unsafe-swiftshader","--allow-file-access-from-files",
-        "--window-size=1280,807","--no-first-run",option,"--dump-dom",url,0};
+        "--window-size=1280,807","--virtual-time-budget=3000","--no-first-run",option,"--dump-dom",url,0};
     int i, rc, failed=0, used, n=sizeof points/sizeof points[0];
     const char *mode=argc==1 ? "normal" : argv[1], *p;
-    if(argc>2 || (strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare"))) return 2;
+    if(argc>2 || (strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
+    if(!survey()) { printf("FAIL D3_SURVEY\n"); return 2; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     used=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?mode=%s&pixels=",cwd,mode);
     if(used<0 || used>=(int)sizeof url) return 2;

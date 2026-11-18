@@ -7,7 +7,8 @@
 <script type="module">
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
-import { MESH_BOX, MESH_OCTA, MESH_PLANE } from "../meshes.js";
+import { MESH_BOX, MESH_OCTA, MESH_PLANE, allMeshes } from "../meshes.js";
+import { archMeshes, loadBays } from "./d3-arch.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode");
@@ -20,25 +21,17 @@ const colors = {
   leafLight:[97,148,70], leafDark:[40,90,67]
 };
 function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
-  if (!groups.has(material)) groups.set(material,{mesh,items:[]});
-  groups.get(material).items.push([x,y,z,size,yaw,pitch,roll]);
+  const key=material+"-"+mesh;
+  if (!groups.has(key)) groups.set(key,{material,mesh,items:[]});
+  groups.get(key).items.push([x,y,z,size,yaw,pitch,roll]);
 }
 
-// The bridge has a three-unit deep barrel. Leave the inside face visible
-// when removing hidden stones from the solid masonry volume.
-const cell = 0.5;
-function masonry(ix,iy,iz) {
-  if (ix<0 || ix>=48 || iy<0 || iy>=16 || iz<0 || iz>=6) return false;
-  if (mode==="sealed") return true;
-  const offset=(ix%16+.5)*cell-4;
-  const aboveSpring=-2+(iy+.5)*cell-2;
-  return Math.hypot(offset,Math.max(0,aboveSpring))>=2.95;
-}
-const neighbors = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-for(let ix=0;ix<48;ix++) for(let iy=0;iy<16;iy++) for(let iz=0;iz<6;iz++) {
-  if (!masonry(ix,iy,iz) || neighbors.every(([a,b,c])=>masonry(ix+a,iy+b,iz+c))) continue;
-  instance(iz===5 || iy===15 ? "stone":"barrel", MESH_BOX,
-    -12+(ix+.5)*cell,-2+(iy+.5)*cell,-.5+(iz+.5)*cell,cell);
+const extraMeshes=[];
+for(const bay of await loadBays()) {
+  const first=allMeshes().length+extraMeshes.length;
+  extraMeshes.push(...archMeshes(bay,mode));
+  instance("stone",first,0,0,0,1);
+  instance("barrel",first+1,0,0,0,1);
 }
 for(let y=-1;y<=5;y+=2) for(let x=-17;x<=-13;x+=2) {
   for(let z=-.5;z<=1.5;z+=2) instance("abutment",MESH_BOX,x,y,z,2);
@@ -67,8 +60,8 @@ if (mode!=="bare") {
     for(let trunkY=-1.75;trunkY<y;trunkY+=.5) instance("timber",MESH_BOX,x,trunkY,z,.5);
   }
 }
-for(const [name,{mesh,items}] of groups) {
-  const cloud=scene.instances(name,items.length,colors[name].map(c=>c/255));
+for(const [name,{material,mesh,items}] of groups) {
+  const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
   cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
   items.forEach((fields,i)=>cloud.set(i,...fields));
 }
@@ -80,7 +73,7 @@ const camera=new PerspectiveCamera(2*Math.atan(9/16),.1,150);
 camera.setEye(10,1,19);
 camera.setTarget(10-24/41,1+9/41,19-32/41);
 const canvas=document.querySelector("canvas");
-createWebGLRenderer(canvas,{antialias:false}).render(scene,camera);
+createWebGLRenderer(canvas,{antialias:false,extraMeshes}).render(scene,camera);
 const gl=canvas.getContext("webgl");
 const samples=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
   const [x,y]=pair.split(",").map(Number);
