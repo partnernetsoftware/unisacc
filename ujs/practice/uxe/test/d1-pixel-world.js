@@ -74,18 +74,23 @@ export function pixelWorld(context,query) {
     heights[at]=elev(x,y,seed);
     bands[at]=band(heights[at]);
   }
-  const fineSize=MAP*2;
+  const samples=query.has("coarse-relief")?2:4;
+  const fineSize=MAP*samples;
   const relief=new Int16Array(fineSize*fineSize);
   for(let y=0;y<fineSize;y++) for(let x=0;x<fineSize;x++) {
-    const left=x>>1,top=y>>1,right=(left+(x&1))&255,bottom=(top+(y&1))&255;
-    relief[y*fineSize+x]=Math.floor((heights[top*MAP+left]+heights[top*MAP+right]
-      +heights[bottom*MAP+left]+heights[bottom*MAP+right])/4);
+    const left=Math.floor(x/samples),top=Math.floor(y/samples);
+    const right=(left+1)&255,bottom=(top+1)&255;
+    const u=(x%samples)/samples,v=(y%samples)/samples;
+    relief[y*fineSize+x]=Math.floor(
+      (heights[top*MAP+left]*(1-u)+heights[top*MAP+right]*u)*(1-v)
+      +(heights[bottom*MAP+left]*(1-u)+heights[bottom*MAP+right]*u)*v);
   }
   const image=context.createImageData(WIDTH,HEIGHT);
   const pixels=new Uint32Array(image.data.buffer);
   const limit=new Int16Array(WIDTH);
   const stages=Array.from({length:17},(_,step)=>
-    [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87)))]
+    [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87))),
+      [121,155,65],[103,168,81],[52,104,56]]
       .map(color=>rgb(mix(color,haze,step/16*.86))));
   const sky=Array.from({length:49},(_,step)=>rgb(mix([42,126,185],[189,229,239],step/48)));
   function cloudLayer(flight,horizon,forwardX,forwardZ,rightX,rightZ,layer) {
@@ -108,6 +113,8 @@ export function pixelWorld(context,query) {
     paint(flight,tick) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
       const horizon=113+Math.round(flight.pitch*.50), cam=flight.altitude+13;
+      const wavePhase=query.has("still-waves")?0:Math.floor(tick/3);
+      const groundDetail=!query.has("bare-ground");
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
         const shade=Math.min(48,48*y/horizon);
         const dither=bayer[((y&3)<<2)|(x&3)]/16;
@@ -119,14 +126,23 @@ export function pixelWorld(context,query) {
         const x0=flight.x+depth*fx,z0=flight.z+depth*fz;
         for(let col=0;col<WIDTH;col++) {
           const lateral=(col+.5-WIDTH/2)*depth/151;
-          const gx=Math.floor(x0+lateral*rx+256)&511,gy=Math.floor(z0+lateral*rz+256)&511;
+          const gx=Math.floor((x0+lateral*rx+256)*samples/2)&(fineSize-1);
+          const gy=Math.floor((z0+lateral*rz+256)*samples/2)&(fineSize-1);
+          const wx=Math.floor((x0+lateral*rx+256)*2)&1023;
+          const wy=Math.floor((z0+lateral*rz+256)*2)&1023;
           const h=relief[gy*fineSize+gx],id=band(h);
           const top=Math.max(0,Math.floor(horizon+(cam-Math.max(0,h)*.22)*151/depth));
           if(top>=limit[col]) continue;
-          const ripples=id<3 && hash(gx,gy,seed+Math.floor(tick/4))>(id===0?250:id===1?245:229);
-          const waterline=id===2 && h>-3 && hash(gx,gy,seed+71)>165;
-          const shade=id>=4 && (h%10<2 || hash(gx,gy,seed+19)>234);
-          const color=stages[fade][ripples || waterline?8:shade?id+9:id];
+          const waveX=(wx+wavePhase)&1023;
+          const ripples=id<3 && hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229);
+          const waterline=id===2 && h>-3 && hash(wx>>1,wy>>1,seed+71)>165;
+          const shade=id>=4 && (h%10<2 || hash(wx,wy,seed+19)>234);
+          let material=ripples || waterline?8:shade?id+9:id;
+          if(groundDetail) {
+            if(id===4 && (wx+2*wy)%13<3 && hash(wx>>5,wy>>5,seed+27)>83) material=17;
+            if((id===5 || id===6) && hash(wx>>1,wy>>1,seed+31)>224) material=(wx+wy)%3?18:19;
+          }
+          const color=stages[fade][material];
           for(let y=top;y<limit[col];y++) pixels[y*WIDTH+col]=color;
           limit[col]=top;
         }
@@ -134,6 +150,13 @@ export function pixelWorld(context,query) {
       context.putImageData(image,0,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,1);
+    },
+    reliefSwatches(target,points) {
+      points.forEach(([x,y],i)=>{
+        const h=128+relief[Math.floor(y*samples/4)*fineSize+Math.floor(x*samples/4)];
+        target.fillStyle="rgb("+h+","+h+","+h+")";
+        target.fillRect(i,0,1,1);
+      });
     },
     swatches(target,points) {
       points.forEach(([x,y],i)=>{

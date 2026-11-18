@@ -429,10 +429,9 @@ static int down_ratio(int numerator,int denominator) {
     return (numerator<0?numerator-denominator+1:numerator)/denominator;
 }
 
-static int terrain_band(int x,int y,int seed) {
+static int terrain_height(int x,int y,int seed) {
     static const int islands[][4]={{162,82,44,62},{68,103,32,42},{227,65,32,26},{92,29,40,30},{188,15,58,37}};
-    static const int stops[]={-25,-8,0,8,28,55,101};
-    int i,peak=-49,elevation;
+    int i,peak=-49;
     for(i=0;i<5;i++) {
         const int *a=islands[i];
         int dx=abs(a[0]-x),dy=abs(a[1]-y),ground;
@@ -441,9 +440,14 @@ static int terrain_band(int x,int y,int seed) {
         ground=93-96*dx*dx/(a[2]*a[2])-96*dy*dy/(a[3]*a[3]);
         if(ground>peak) peak=ground;
     }
-    elevation=peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
+    return peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
         +down_ratio(field_noise(x,y,8,seed+3)-128,5)
         +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
+}
+
+static int terrain_band(int x,int y,int seed) {
+    static const int stops[]={-25,-8,0,8,28,55,101};
+    int i,elevation=terrain_height(x,y,seed);
     for(i=0;i<7 && elevation>=stops[i];i++) {}
     return i;
 }
@@ -576,6 +580,54 @@ static int check_combat(const char *mutation,int published) {
     printf("D1_COMBAT markers=5 marker_fail=%d lock_fail=%d impact_fail=%d ammo_fail=%d\n",
         marker_fail,lock_fail,hit_fail,ammo_fail);
     return marker_fail || lock_fail || hit_fail || ammo_fail;
+}
+
+static int detail_material(int r,int g,int b) {
+    static const int paint[4][3]={{121,155,65},{103,168,81},{52,104,56},{174,225,231}};
+    static const int haze[3]={173,214,234};
+    int i,j;
+    for(i=0;i<4;i++) for(j=0;j<=16;j++) {
+        int red=paint[i][0]+down_ratio((haze[0]-paint[i][0])*j*86+800,1600);
+        int green=paint[i][1]+down_ratio((haze[1]-paint[i][1])*j*86+800,1600);
+        int blue=paint[i][2]+down_ratio((haze[2]-paint[i][2])*j*86+800,1600);
+        if(r==red && g==green && b==blue) return i+1;
+    }
+    return 0;
+}
+
+static int check_detail(const char *mutation) {
+    char cwd[1024],url[1800],*out=0;
+    const char *p;
+    int x,y,n=0,want[8],at,i,phase,furrows=0,trees=0,waves=0,wrong=0;
+    unsigned char foam[26*107];
+    if(!getcwd(cwd,sizeof cwd)) return input_error("detail-cwd",0);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&detail=",cwd,mutation);
+    for(y=1;y<255 && n<8;y+=9) for(x=1;x<255 && n<8;x+=7) {
+        int a=terrain_height(x,y,7),b=terrain_height(x+1,y,7);
+        int c=terrain_height(x,y+1,7),d=terrain_height(x+1,y+1,7);
+        int fine=down_ratio(9*a+3*b+3*c+d,16)+128;
+        if(fine==128+a || fine<0 || fine>255) continue;
+        at+=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",4*x+1,4*y+1);
+        want[n++]=fine;
+    }
+    if(n!=8) return input_error("detail-probes",0);
+    p=browser(url,&out,7);
+    if(!p) return input_error("detail-browser",out);
+    for(phase=0;phase<2;phase++) for(i=0;i<26*107;i++) {
+        int r=take_channel(&p,','),g=take_channel(&p,','),b=take_channel(&p,','),material;
+        if(r<0 || g<0 || b<0) return input_error("detail-pixel",out);
+        material=detail_material(r,g,b);
+        if(!phase) {
+            furrows+=material==1;
+            trees+=material==2 || material==3;
+            foam[i]=material==4;
+        } else waves+=foam[i]!=(material==4);
+    }
+    for(i=0;i<n;i++) wrong+=take_channel(&p,i+1<n?',':0)!=want[i];
+    if(strncmp(p,"</output>",9)) return input_error("detail-trailer",out);
+    free(out);
+    printf("D1_DETAIL relief_fail=%d furrows=%d crowns=%d wave_changes=%d\n",wrong,furrows,trees,waves);
+    return wrong || furrows<5 || trees<5 || waves<5;
 }
 
 static int check_attitude(const char *mutation) {
@@ -805,6 +857,9 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"combat")) return check_combat("",0);
     if(argc==2 && !strcmp(argv[1],"effects")) return check_effects("");
     if(argc==2 && !strcmp(argv[1],"attitude")) return check_attitude("");
+    if(argc==2 && !strcmp(argv[1],"detail")) return check_detail("");
+    if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||
+        !strcmp(argv[1],"still-waves"))) return check_detail(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"shallow-roll") || !strcmp(argv[1],"flat-pitch") ||
         !strcmp(argv[1],"straight-trail"))) return check_attitude(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"no-fall") || !strcmp(argv[1],"no-plume") ||
