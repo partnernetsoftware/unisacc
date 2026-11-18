@@ -121,6 +121,9 @@ static char cxm_bodysrc[CXM_MAXU][CXM_PATHW];
 /* `#pragma unisa export NAME[,NAME...]` of the unit being scanned (reset by every cxm_scan): the public list
    of its own non-static functions.  cxm_modseen: the unit's `#pragma unisa module` line was already read. */
 static char cxm_exp[CXM_MAXEXP][CXM_SYMW]; static int cxm_nexp; static int cxm_modseen;
+/* `#pragma unisa owns NAME [NAME...]` of the unit being scanned (mode 0, reset by every cxm_scan): functions that
+   return an owned block (prd_cx.md 11.7); cxm_ownl is the pragma line.  A unit without owns never reads these. */
+static char cxm_own[CXM_MAXEXP][CXM_SYMW]; static int cxm_ownl[CXM_MAXEXP]; static int cxm_nown;
 /* exported and defined names: kind 0 a module's function, 1 a module's type name (typedef, "struct T", enum
    constant), 2 a non-static function defined by a unit that is not a module, 3 a module's non-static function
    that is not public (no prototype in the interface; only names the owner of a refused call) */
@@ -670,6 +673,15 @@ static int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, 
                 }
             } else if (cxm_eqn(s + a, b - a, "export")) {
                 if (cxm_exportline(u, line, b, e)) return 1;
+            } else if (cxm_eqn(s + a, b - a, "owns")) {
+                we = cxm_word(s, b, e, &wb);
+                if (we == wb) { cxm_start(u, line); cxm_m("unisa owns takes a function name"); return cxm_fail(); }
+                while (we > wb) {
+                    k = wb; while (k < we && cxm_idch(s[k] & 255)) k = k + 1;
+                    if (k < we || we - wb >= CXM_SYMW || cxm_nown >= CXM_MAXEXP) { cxm_start(u, line); cxm_m("unisa owns takes a function name"); return cxm_fail(); }
+                    cxm_cpyn(cxm_own[cxm_nown], s + wb, we - wb, CXM_SYMW); cxm_ownl[cxm_nown] = line; cxm_nown = cxm_nown + 1;
+                    we = cxm_word(s, we, e, &wb);
+                }
             } else if (cxm_eqn(s + a, b - a, "dock")) {
                 /* `#pragma unisa dock` (bare) or `#pragma unisa dock include|libc`: a
                    declaration only -- it records which boundary the unit is allowed to
@@ -686,12 +698,28 @@ static int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, 
     k = i; while (k < e) { if (s[k] != '\n') s[k] = ' '; k = k + 1; }
     return 0;
 }
+/* every owns NAME of the scanned unit is a non-static function defined in it (prd_cx.md 11.7, the second message) */
+static int cxm_ownschk(int u) {
+    int j; int k; int nb; int nl; int isfn; int ok;
+    j = 0;
+    while (j < cxm_nown) {
+        ok = 0; k = 0;
+        while (k < cxm_nitem && !ok) {
+            if (cxm_ibody[k] >= 0 && cxm_dname(cxm_src, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn) && isfn
+                && cxm_eqn(cxm_src + nb, nl, cxm_own[j]) && !cxm_haskw(cxm_src, cxm_ib[k], cxm_ibody[k], "static")) ok = 1;
+            k = k + 1;
+        }
+        if (!ok) { cxm_start(u, cxm_ownl[j]); cxm_m("unisa owns "); cxm_m(cxm_own[j]); cxm_m(": no non-static function "); cxm_m(cxm_own[j]); cxm_m(" in this unit"); return cxm_fail(); }
+        j = j + 1;
+    }
+    return 0;
+}
 /* scan the loaded unit: directives (mode 0: the unisa pragmas), then the file-scope items (cxm_ib..) */
 static int cxm_scan(int u, int mode) {
     char *s; int n; int i; int line; int bol; int depth; int cond; int seen; int ib; int iline; int icond; int body; int eq; int last; int q; int e;
     s = cxm_src; n = cxm_nsrc; i = 0; line = 1; bol = 1; depth = 0; cond = 0; seen = 0;
     ib = 0 - 1; iline = 0; icond = 0; body = 0 - 1; eq = 0; last = 0;
-    cxm_nitem = 0; cxm_nmac = 0; cxm_nexp = 0; cxm_modseen = 0;
+    cxm_nitem = 0; cxm_nmac = 0; cxm_nexp = 0; cxm_modseen = 0; cxm_nown = 0;
     while (i < n) {
         if (s[i] == '\n') { line = line + 1; bol = 1; i = i + 1; continue; }
         if ((s[i] & 255) <= 32) { i = i + 1; continue; }
@@ -728,6 +756,7 @@ static int cxm_scan(int u, int mode) {
         }
         last = s[i]; i = i + 1;
     }
+    if (cxm_nown > 0) return cxm_ownschk(u);
     return 0;
 }
 
