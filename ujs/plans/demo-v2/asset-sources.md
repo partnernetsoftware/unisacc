@@ -35,3 +35,17 @@ google-chrome --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader
   --allow-file-access-from-files --virtual-time-budget=5000 --window-size=960,627 \
   --screenshot=/tmp/uxe-rock-preview.png "file://$PWD/ujs/practice/uxe/asset-study/rock-preview.html"
 ```
+
+## D3 带贴图灌木对照
+
+素材是 Ultimate Stylized Nature Pack 的 `Bush`。作者目录提供分开的 `Bush.gltf`、`Bush.bin` 与 `Bush_Leaves.png`。该次下载作者 Drive 返回配额限制，实测使用公开镜像里的同名文件。原材质是 `BLEND`、双面。实验打包保留网格和 PNG 字节，材质改为 `MASK`、阈值 0.5、双面。没有制作新贴图。[作者发布及 CC0](https://quaternius.com/packs/ultimatestylizednature.html) [取样文件目录](https://github.com/tilakpatell/tilakverse-assets/tree/main/quaternius/stylized-nature-pack/glTF)
+
+`bush-glb.cx` 把三件拼成 104016 字节 GLB，再读取索引、UV、内嵌纹理头及 SHA-256。实测得到 800 组 UV，U/V 均为 `0.000100` 至 `0.999900`，400 个三角形，PNG 为 `1024x1024` RGBA。该 PNG 的 SHA-256 为 `9f662296a285ca56b1ed56e952a198b93b466ae39ab7b6ee1c1ac1bd1c46242f`。改动 GLB 内的一个 PNG 字节后，尺寸与 UV 仍通过，贴图哈希门返回 `rc=1`，不写出材料。
+
+浏览器通过 `host_asset_read` 与 `createImageBitmap` 走 T2 PNG 路径，按 T2 读回到无预乘的 RGBA，再用同一份 RGBA 上传 UXE v4 贴图。实验只在本地副本给着色器加 base color 采样与双面 alpha 遮罩，量测直接从 v4 缓存的 GPU 贴图读取。独立 PNG 解码预期和 8 个 GPU 点的有效通道一致，含 alpha 0、64、96、128、255。全透明纹素只比较 alpha，因为遮罩会丢掉这些像素。既有 T2 四项回归与全量生成检查通过。
+
+三联图 `/tmp/uxe-bush-d3-comparison.png` 左为参考，中为现有叶团，右为相同开场机位、替换两个前景叶团位置的素材版。素材边缘细碎且有透空，颜色明显更鲜绿，当前同机位观感仍未与桥面及原有叶团协调。石块上一轮的 `baseColorFactor` 折算为约 `32/37/46`，中心实读 `33/41/53`，该点的暗蓝主要来自源颜色。该点无法代表其他面的光照响应。
+
+单次 `.cx` 封装 1.160 毫秒，解包与校验写出 0.943 毫秒。Chrome SwiftShader 首次读取与准备宿主 64.7 毫秒，解码并读回 66.6 毫秒，场景渲染器建立 21.5 毫秒，整桥首绘含上传及同步读回 1335.1 毫秒。整桥数字包含场景所有材质和软件 GPU，不能作为灌木单件耗时或稳态帧率。
+
+本地入口为 [灌木 GLB 实验](../../practice/uxe/asset-study/bush-glb.cx)和[D3 同机位页面](../../practice/uxe/asset-study/bush-bridge.html)。用 `pack` 依次传入 glTF、BIN、PNG、输出 GLB。用 `unpack` 传入 GLB、输出 `/tmp/cdx2-bush-mesh.bin`、`/tmp/cdx2-bush-atlas.png`、`/tmp/cdx2-bush-layout.json`。在允许本地文件读取的 Chrome 打开页面并加 `?auto=1`。CDP 将 `output.dataset.bush` 和 `output.dataset.timing` 用竖线拼接写到读回文件后，`.cx` 的 `pixels` 子命令接收这个文件路径。原始素材与转换产物均留在 `/tmp`。

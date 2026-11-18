@@ -1,0 +1,187 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.json
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+enum { MESH_BYTES=28000, PNG_BYTES=74828, W=1024, H=1024, VERTICES=800, INDICES=1200 };
+static const char png_sha[]="9f662296a285ca56b1ed56e952a198b93b466ae39ab7b6ee1c1ac1bd1c46242f";
+static const int offsets[]={0,9600,19200,25600},sizes[]={9600,9600,6400,2400};
+
+static unsigned le32(const unsigned char *p) {
+    return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;
+}
+static unsigned be32(const unsigned char *p) {
+    return (unsigned)p[3]|(unsigned)p[2]<<8|(unsigned)p[1]<<16|(unsigned)p[0]<<24;
+}
+static void word(unsigned char *p,unsigned u) {
+    for(int i=0;i<4;i++) p[i]=(unsigned char)(u>>(8*i));
+}
+static int isnum(const js_val *doc,const char *path,int expected) {
+    const js_val *v=js_path(doc,path);
+    return js_kind(v)==JS_NUM && js_num(v)==expected;
+}
+static int isstr(const js_val *doc,const char *path,const char *expected) {
+    const char *s=js_str(js_path(doc,path));
+    return s && tx_eqz(s,expected);
+}
+static int expected_layout(const js_val *doc,int packed) {
+    const char *types[]={"VEC3","VEC3","VEC2","SCALAR"};
+    if(!isstr(doc,"asset.version","2.0") || !isnum(doc,"nodes.0.mesh",0) ||
+        js_len(js_path(doc,"nodes.0.rotation"))!=4 || js_len(js_get(doc,"nodes"))!=1 ||
+        !isnum(doc,"meshes.0.primitives.0.attributes.POSITION",0) ||
+        !isnum(doc,"meshes.0.primitives.0.attributes.NORMAL",1) ||
+        !isnum(doc,"meshes.0.primitives.0.attributes.TEXCOORD_0",2) ||
+        !isnum(doc,"meshes.0.primitives.0.indices",3) || !isnum(doc,"meshes.0.primitives.0.material",0) ||
+        !isnum(doc,"materials.0.pbrMetallicRoughness.baseColorTexture.index",0) ||
+        !js_bool(js_path(doc,"materials.0.doubleSided")) || !isnum(doc,"textures.0.source",0) ||
+        !isstr(doc,"images.0.mimeType","image/png") ||
+        !isstr(doc,"materials.0.alphaMode",packed?"MASK":"BLEND")) return 0;
+    for(int i=0;i<4;i++) {
+        const js_val *v=js_at(js_get(doc,"bufferViews"),i),*a=js_at(js_get(doc,"accessors"),i);
+        if(!isnum(v,"buffer",0) || !isnum(v,"byteOffset",offsets[i]) || !isnum(v,"byteLength",sizes[i]) ||
+           js_get(v,"byteStride") || js_get(a,"byteOffset") || js_get(a,"sparse") ||
+           !isnum(a,"bufferView",i) || !isstr(a,"type",types[i]) ||
+           !isnum(a,"componentType",i==3?5123:5126) || !isnum(a,"count",i==3?INDICES:VERTICES)) return 0;
+    }
+    if(packed) return isnum(doc,"buffers.0.byteLength",MESH_BYTES+PNG_BYTES) &&
+        !js_path(doc,"buffers.0.uri") && isnum(doc,"images.0.bufferView",4) && !js_path(doc,"images.0.uri") &&
+        isnum(doc,"bufferViews.4.buffer",0) && isnum(doc,"bufferViews.4.byteOffset",MESH_BYTES) &&
+        isnum(doc,"bufferViews.4.byteLength",PNG_BYTES) && js_num(js_path(doc,"materials.0.alphaCutoff"))==.5;
+    return isnum(doc,"buffers.0.byteLength",MESH_BYTES) && isstr(doc,"buffers.0.uri","Bush.bin") &&
+        isstr(doc,"images.0.uri","Bush_Leaves.png");
+}
+
+static int pack(char **args) {
+    unsigned char *src=0,*bin=0,*png=0,*glb=0;
+    int64_t a=0,b=0,c=0,start=sy_mono_ns();
+    int ok=0;
+    if(!sy_read_file(args[0],&src,&a,10000) && !sy_read_file(args[1],&bin,&b,MESH_BYTES) &&
+       !sy_read_file(args[2],&png,&c,PNG_BYTES) && b==MESH_BYTES && c==PNG_BYTES) {
+        char error[120],header[2500];
+        js_val *doc=js_parse((const char*)src,a,error,sizeof error);
+        if(doc && expected_layout(doc,0)) {
+            const js_val *q=js_path(doc,"nodes.0.rotation");
+            int n=tx_fmt(header,sizeof header,
+              "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+              "\"nodes\":[{\"mesh\":0,\"rotation\":[%.9g,%.9g,%.9g,%.9g]}],"
+              "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0}]}],"
+              "\"materials\":[{\"doubleSided\":true,\"alphaMode\":\"MASK\",\"alphaCutoff\":0.5,\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicFactor\":0,\"roughnessFactor\":0.5}}],"
+              "\"textures\":[{\"source\":0}],\"images\":[{\"mimeType\":\"image/png\",\"bufferView\":4}],\"buffers\":[{\"byteLength\":%d}],"
+              "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":9600},{\"buffer\":0,\"byteOffset\":9600,\"byteLength\":9600},{\"buffer\":0,\"byteOffset\":19200,\"byteLength\":6400},{\"buffer\":0,\"byteOffset\":25600,\"byteLength\":2400},{\"buffer\":0,\"byteOffset\":%d,\"byteLength\":%d}],"
+              "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":800,\"type\":\"VEC3\",\"min\":[-0.572819055,-0.642975331,-0.652008594],\"max\":[0.529059709,0.472773821,0.361497283]},"
+              "{\"bufferView\":1,\"componentType\":5126,\"count\":800,\"type\":\"VEC3\"},{\"bufferView\":2,\"componentType\":5126,\"count\":800,\"type\":\"VEC2\"},{\"bufferView\":3,\"componentType\":5123,\"count\":1200,\"type\":\"SCALAR\"}]}",
+              js_num(js_at(q,0)),js_num(js_at(q,1)),js_num(js_at(q,2)),js_num(js_at(q,3)),MESH_BYTES+PNG_BYTES,MESH_BYTES,PNG_BYTES);
+            if(n>0) {
+                int pad=(n+3)&~3, start_bin=28+pad, length=start_bin+MESH_BYTES+PNG_BYTES;
+                glb=mm_alloc(length);
+                if(glb) {
+                    word(glb,0x46546c67); word(glb+4,2); word(glb+8,length);
+                    word(glb+12,pad); word(glb+16,0x4e4f534a);
+                    mm_fill(glb+20,pad,' ',pad); mm_copy(glb+20,pad,header,n);
+                    word(glb+20+pad,MESH_BYTES+PNG_BYTES); word(glb+24+pad,0x004e4942);
+                    mm_copy(glb+start_bin,MESH_BYTES,bin,MESH_BYTES);
+                    mm_copy(glb+start_bin+MESH_BYTES,PNG_BYTES,png,PNG_BYTES);
+                    ok=sy_write_file(args[3],glb,length,0644)==0;
+                    printf("BUSH_PACK bytes=%d elapsed_us=%lld accepted=%d\n",length,(long long)((sy_mono_ns()-start)/1000),ok);
+                }
+            }
+        }
+        js_free(doc);
+    }
+    mm_free(src); mm_free(bin); mm_free(png); mm_free(glb);
+    return ok?0:1;
+}
+
+static int unpack(char **args) {
+    unsigned char *data=0;
+    int64_t length=0,start=sy_mono_ns();
+    if(sy_read_file(args[0],&data,&length,200000)) return 2;
+    int ok=0;
+    unsigned n=length>=28?le32(data+12):0;
+    if(n && n%4==0 && length==28+n+MESH_BYTES+PNG_BYTES &&
+        le32(data)==0x46546c67 && le32(data+4)==2 && le32(data+8)==length && le32(data+16)==0x4e4f534a &&
+        le32(data+20+n)==MESH_BYTES+PNG_BYTES && le32(data+24+n)==0x004e4942) {
+        const unsigned char *bin=data+28+n,*png=bin+MESH_BYTES;
+        char error[120],hash[65];
+        js_val *doc=js_parse((const char*)data+20,n,error,sizeof error);
+        int w=be32(png+16),h=be32(png+20),hash_ok=!sy_sha256_any_hex(png,PNG_BYTES,hash)&&tx_eqz(hash,png_sha);
+        int valid=doc && expected_layout(doc,1) && be32(png)==0x89504e47 && be32(png+12)==0x49484452 &&
+            w==W && h==H && png[24]==8 && png[25]==6;
+        float min[2]={1,1},max[2]={0,0};
+        for(int i=0;i<VERTICES;i++) for(int axis=0;axis<2;axis++) {
+            unsigned bits=le32(bin+offsets[2]+(i*2+axis)*4);
+            float v;
+            mm_copy(&v,sizeof v,&bits,4);
+            if(!(v>=0 && v<=1)) valid=0;
+            if(v<min[axis]) min[axis]=v;
+            if(v>max[axis]) max[axis]=v;
+        }
+        for(int i=0;i<INDICES;i++) {
+            const unsigned char *p=bin+offsets[3]+i*2;
+            if(p[0]+256*p[1]>=VERTICES) valid=0;
+        }
+        ok=valid && hash_ok && max[0]-min[0]>.5 && max[1]-min[1]>.5;
+        if(ok) ok=!sy_write_file(args[1],bin,MESH_BYTES,0644) && !sy_write_file(args[2],png,PNG_BYTES,0644) &&
+            !sy_write_file(args[3],data+20,n,0644);
+        printf("BUSH_UNPACK png=%dx%d png_hash_ok=%d uv=%d bounds=%.6f,%.6f/%.6f,%.6f triangles=%d elapsed_us=%lld accepted=%d\n",
+            w,h,hash_ok,VERTICES,(double)min[0],(double)min[1],(double)max[0],(double)max[1],INDICES/3,
+            (long long)((sy_mono_ns()-start)/1000),ok);
+        js_free(doc);
+    }
+    mm_free(data);
+    return ok?0:1;
+}
+
+static int check_pixels(const char *file) {
+    // RGBA read independently from the source PNG. Zero-alpha RGB is immaterial to MASK.
+    static const int expected[][4]={{0,0,0,0},{124,205,0,96},{124,205,0,128},{124,205,0,64},
+        {124,205,0,255},{124,205,0,255},{124,205,0,255},{0,0,0,0}};
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file(file,&raw,&length,4096)) return 2;
+    const char *p=(const char*)raw;
+    int w,h,used=0,bad=0,discard=0;
+    if(sscanf(p,"%d,%d%n",&w,&h,&used)!=2) { mm_free(raw); return 2; }
+    p+=used; bad+=w!=W || h!=H;
+    for(int i=0;i<8;i++) {
+        int rgba[4];
+        used=0;
+        if(sscanf(p,",%d,%d,%d,%d%n",rgba,rgba+1,rgba+2,rgba+3,&used)!=4) { mm_free(raw); return 2; }
+        p+=used;
+        bad+=rgba[3]!=expected[i][3];
+        if(rgba[3]<128) discard++;
+        if(expected[i][3]) for(int j=0;j<3;j++) bad+=rgba[j]!=expected[i][j];
+    }
+    double load,decode,setup,draw;
+    if(sscanf(p,"|%lf,%lf,%lf,%lf",&load,&decode,&setup,&draw)!=4) { mm_free(raw); return 2; }
+    printf("BUSH_PIXELS dimensions=%dx%d samples=8 rejected_by_mask=%d bad=%d load_ms=%.3f decode_read_ms=%.3f setup_ms=%.3f first_draw_ms=%.3f\n",
+        w,h,discard,bad,load,decode,setup,draw);
+    mm_free(raw);
+    return bad?1:0;
+}
+
+static int tamper_png(const char *input,const char *output) {
+    unsigned char *bytes=0;
+    int64_t length=0;
+    if(sy_read_file(input,&bytes,&length,200000)) return 2;
+    int rc=2;
+    if(length>PNG_BYTES) {
+        bytes[length-PNG_BYTES+100]^=1;
+        rc=sy_write_file(output,bytes,length,0644)?2:0;
+    }
+    mm_free(bytes);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    if(argc==3 && tx_eqz(argv[1],"pixels")) return check_pixels(argv[2]);
+    if(argc==4 && tx_eqz(argv[1],"tamper")) return tamper_png(argv[2],argv[3]);
+    if(argc!=6) return 2;
+    if(tx_eqz(argv[1],"pack")) return pack(argv+2);
+    if(tx_eqz(argv[1],"unpack")) return unpack(argv+2);
+    return 2;
+}
