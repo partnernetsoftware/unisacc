@@ -46,6 +46,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use text.fmt
@@ -263,8 +264,8 @@ static int run(char **argv, char *out, long cap) {
  *     to add; with --pin-owner OWNER the row "FILE#HEX literal - HEX OWNER ok" is appended instead;
  * (d) git add of each tool that is not tracked yet (a tracked file is left alone: its staging is the caller's).
  * Then tests/tools-compile.cx --shards . must print the computed count.  Everything is validated before the
- * first write; when a later step or the verification fails the three tables are written back from the bytes
- * read at the start and the files this call staged are unstaged again (git rm --cached), exit 1 with the
+ * first write. A failed verification reverses this call's additions and removals by key against the
+ * latest table and unstages the files this call staged (git rm --cached), exit 1 with the
  * step named.  A second identical call changes nothing and ends status=UNCHANGED.  Nothing is compiled and
  * no PASS is recorded here: the shard batches themselves still have to be run. */
 #define RG_TOOLS_MAX 64
@@ -295,10 +296,78 @@ static int rg_pin_has(const char *pb, long pn, const char *tool, const char *hex
     }
     return 0;
 }
-static int rg_tool_restore(const char *path, const char *b, size_t n, int changed) {
-    if (!changed) return 0;
-    if (cx_write(path, b, n)) { fprintf(stderr, "register: --tool rollback could NOT restore %s\n", path); return 1; }
-    return 0;
+/* These three tool tables have their primary key in the first TSV column.
+   Inverse changes are applied to the current file, preserving intervening
+   edits. Deleted rows return immediately before their next surviving anchor. */
+typedef struct {const char *p; long n,key;} RegRow;
+static RegRow *rg_rows(const char *p,size_t n,int *count){
+    int rows=0;for(size_t i=0;i<n;i++)if(p[i]=='\n')rows++;
+    RegRow *r=calloc(rows+2,sizeof *r);if(!r)rg_die("allocation",0);
+    *count=0;
+    for(size_t i=0;i<n;){
+        size_t end=i,key=i;
+        while(end<n && p[end]!='\n')end++;
+        while(key<end && p[key]!='\t')key++;
+        if(end<n)end++;
+        r[*count].p=p+i;r[*count].n=end-i;r[*count].key=key-i;
+        (*count)++;i=end;
+    }
+    return r;
+}
+static int rg_find_row(RegRow *r,int n,const RegRow *row){
+    for(int i=0;i<n;i++)if(r[i].key==row->key && !memcmp(r[i].p,row->p,row->key))return i;
+    return -1;
+}
+static int rg_inverse_once(const char *path,const char *before,size_t bn,const char *written,size_t wn){
+    size_t cn;char *cur=cx_read(path,&cn);
+    if(!cur)return 1;
+    int na,nb,nc;
+    RegRow *original=rg_rows(before,bn,&na),*ours=rg_rows(written,wn,&nb),*now=rg_rows(cur,cn,&nc);
+    char *result=malloc(cn+bn+1);if(!result)rg_die("allocation",0);
+    int *anchor=calloc(na+1,sizeof *anchor);if(!anchor)rg_die("allocation",0);
+    int next=nc;
+    for(int i=na-1;i>=0;i--){
+        int pos=rg_find_row(now,nc,&original[i]);anchor[i]=-1;
+        if(pos>=0)next=pos;
+        else if(rg_find_row(ours,nb,&original[i])<0)anchor[i]=next;
+    }
+    int previous=-1;
+    for(int i=0;i<na;i++){
+        if(anchor[i]==nc)anchor[i]=previous+1;
+        else if(anchor[i]<0){int pos=rg_find_row(now,nc,&original[i]);if(pos>=0)previous=pos;}
+    }
+    size_t used=0;
+    for(int j=0;j<=nc;j++){
+        for(int i=0;i<na;i++)if(anchor[i]==j){
+            if(mm_copy(result+used,cn+bn+1-used,original[i].p,original[i].n))rg_die("rollback bound",path);
+            used+=original[i].n;
+        }
+        if(j==nc)break;
+        int w=rg_find_row(ours,nb,&now[j]);
+        if(w>=0 && ours[w].n==now[j].n && !memcmp(ours[w].p,now[j].p,now[j].n) && rg_find_row(original,na,&now[j])<0)continue;
+        if(mm_copy(result+used,cn+bn+1-used,now[j].p,now[j].n))rg_die("rollback bound",path);
+        used+=now[j].n;
+    }
+    size_t vn;char *verified=cx_read(path,&vn);
+    int err=!verified?1:vn!=cn||memcmp(verified,cur,cn)?4:
+        used==cn&&!memcmp(result,cur,cn)?0:!!sy_write_atomic(path,result,used,0644);
+    free(verified);free(anchor);free(result);free(now);free(ours);free(original);free(cur);return err;
+}
+static int rg_tool_restore(const char *path,const char *before,size_t bn,const char *written,size_t wn,int changed){
+    if(!changed)return 0;
+    for(int trial=0;trial<3;trial++){
+        int rc=rg_inverse_once(path,before,bn,written,wn);
+        if(rc!=4)return rc;
+    }
+    fprintf(stderr,"register: REFUSE rollback-input-changed-three-times %s\n",path);
+    return 1;
+}
+static int rg_snapshot(const char *path,char hex[65]){
+    sy_stat_t st;int rc=sy_lstat(path,&st);
+    if(rc==-ENOENT){hex[0]=0;return 0;}
+    if(rc || st.kind!='f')return 1;
+    size_t n;char *b=cx_read(path,&n);if(!b)return 1;
+    int failed=sy_sha256_hex(b,n,hex);free(b);return failed;
 }
 static int rg_tool_mode(int argc, char **argv) {
     static char buf[1 << 15];
@@ -330,6 +399,10 @@ static int rg_tool_mode(int argc, char **argv) {
     if (sy_exists("tools/bound") != 1) rg_die("--tool: no ./tools/bound in this root", 0);
     if (sy_exists("tests/tools-compile.cx") != 1) rg_die("--tool: no tests/tools-compile.cx in this root", 0);
     lk = rg_lock();
+    char decl[4400],versions[5][65];
+    if(cx_fmt(decl,sizeof decl,"%s/batch-product-inputs.tsv",rg_tdir()))rg_die("path bound","batch-product-inputs");
+    const char *tables[]={rg_bpath(),rg_cpath(),RG_SOURCES,decl,RG_PINS};
+    for(int t=0;t<5;t++)if(rg_snapshot(tables[t],versions[t]))rg_die("cannot fingerprint",tables[t]);
     sb = cx_read(RG_SOURCES, &sn); bb = cx_read(rg_bpath(), &bn);
     if (!sb) rg_die("cannot read", RG_SOURCES);
     if (!bb) rg_die("cannot read", rg_bpath());
@@ -344,7 +417,10 @@ static int rg_tool_mode(int argc, char **argv) {
         long e = at, pl = 0;
         while (e < (long)sn && sb[e] != '\n') e++;
         while (pl < e - at && sb[at + pl] != '\t') pl++;
-        for (j = 0; j < nt; j++) if (!rg_bcmp(tools[j], (long)strlen(tools[j]), sb + at, pl)) have[j] = 1;
+        for (j = 0; j < nt; j++) if (!rg_bcmp(tools[j], (long)strlen(tools[j]), sb + at, pl)) {
+            if(e-at!=pl+1+(long)strlen(kinds[j]) || memcmp(sb+at+pl+1,kinds[j],strlen(kinds[j])))rg_die("key-conflict",tools[j]);
+            have[j] = 1;
+        }
         at = e + 1;
     }
     for (at = 0, j = 0; at < (long)sn;) {
@@ -425,9 +501,21 @@ static int rg_tool_mode(int argc, char **argv) {
             if (rc != 0) { step = "git add"; fprintf(stderr, "register: --tool: git add %s failed rc=%d: %s\n", tools[i], rc, buf); }
             else { staged[i] = 1; did = 1; }
         }
-        if (!step && ch_s) { dirty |= 1; if (cx_write(RG_SOURCES, ns, nsn)) step = "write " RG_SOURCES; }
-        if (!step && ch_b) { dirty |= 2; if (cx_write(rg_bpath(), nb, nbn)) step = "write batches.tsv"; }
-        if (!step && ch_p) { dirty |= 4; if (cx_write(RG_PINS, np, npn)) step = "write " RG_PINS; }
+        int stale=0;
+        int targets[]={2,0,4},changes[]={ch_s,ch_b,ch_p};
+        char *values[]={ns,nb,np};size_t sizes[]={nsn,nbn,npn};
+        for(int w=0;w<3 && !step;w++){
+            for(int t=0;!step && t<5;t++){
+                char current[65];
+                if(rg_snapshot(tables[t],current))step=tables[t];
+                else if(!tx_eqz(current,versions[t])){step="registry input changed";stale=1;}
+            }
+            if(!step && changes[w]){
+                int t=targets[w];
+                if(sy_sha256_hex(values[w],sizes[w],versions[t]) || sy_write_atomic(tables[t],values[w],sizes[w],0644))step=tables[t];
+                else dirty|=1<<w;
+            }
+        }
         if (!step) {
             char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/tools-compile.cx", "--", "--shards", ".", 0};
             char want[32]; long bl;
@@ -442,16 +530,16 @@ static int rg_tool_mode(int argc, char **argv) {
         }
         if (step) {
             int bad = 0;
-            bad |= rg_tool_restore(RG_PINS, pb, pn, dirty & 4);
-            bad |= rg_tool_restore(rg_bpath(), bb, bn, dirty & 2);
-            bad |= rg_tool_restore(RG_SOURCES, sb, sn, dirty & 1);
+            bad |= rg_tool_restore(RG_PINS,pb,pn,np,npn,dirty & 4);
+            bad |= rg_tool_restore(rg_bpath(),bb,bn,nb,nbn,dirty & 2);
+            bad |= rg_tool_restore(RG_SOURCES,sb,sn,ns,nsn,dirty & 1);
             for (i = 0; i < nt; i++) if (staged[i]) {
                 char *u[] = {"./tools/bound", "20", "git", "rm", "--cached", "-q", "--", (char *)tools[i], 0};
                 if (run(u, buf, sizeof buf) != 0) { bad = 1; fprintf(stderr, "register: --tool rollback could NOT unstage %s\n", tools[i]); }
             }
             rg_unlock(lk);
             printf("REGISTER_TOOL\tstatus=%s\tfailed_step=%s\n", bad ? "DIRTY" : "ROLLED_BACK", step);
-            return bad ? 3 : 1;
+            return bad ? 3 : stale ? 4 : 1;
         }
     }
     rg_unlock(lk);
@@ -462,7 +550,10 @@ static int rg_tool_mode(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
-    if (argc >= 2 && (tx_eqz(argv[1], "--tool") || tx_eqz(argv[1], "--pin-owner"))) return rg_tool_mode(argc, argv);
+    if (argc >= 2 && (tx_eqz(argv[1], "--tool") || tx_eqz(argv[1], "--pin-owner"))) {
+        for(int trial=0;trial<3;trial++){int rc=rg_tool_mode(argc,argv);if(rc!=4)return rc;}
+        rg_die("REFUSE registry-changed-three-times",0);
+    }
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";

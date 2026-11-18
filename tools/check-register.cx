@@ -23,6 +23,8 @@
  *   5. a MARKER that already carries "rc0:" is refused and both files stay byte-identical;
  *   6. after the check removes its own rows both registries are byte-identical to the originals.
  * The fixture batches are real: tools/register-fixture.cx prints REGISTER_FIXTURE_OK, so run-batch passes.
+ * The --tool fixture starts two callers together; register serializes both verification and writes
+ * under its lock. A separate verifier fixture edits tables inside that interval to test rollback.
  * Rows are removed by exact line content, never by restoring the whole file, so a row someone else
  * appended meanwhile stays.
  * Mode --root-preflight (batch register-root-preflight, marker CX_REGISTER_ROOT): register started in a
@@ -260,6 +262,15 @@ static void put_file(const char *dir, const char *rel, const char *text) {
     char p[4400]; FILE *f; pjoin(p, sizeof p, dir, rel);
     f = fopen(p, "wb"); if (!f || fputs(text, f) == EOF || fclose(f)) die("write", p);
 }
+static void concurrent_tools(const char *dir,const char *one,const char *two,int right_rc){
+    char *left[]={prepared_driver,"--tool",(char*)one,0},*right[]={prepared_driver,"--tool",(char*)two,0};
+    char msg[4096];int pid=fork();
+    if(pid<0)die("fork","register pair");
+    if(pid==0)_exit(run_in(dir,left,msg,sizeof msg));
+    int rc=run_in(dir,right,msg,sizeof msg),ex=0,code=-1,sig=0;
+    sy_wait_status(pid,0,&ex,&code,&sig);
+    ok(ex && code==0 && rc==right_rc,right_rc?"serialized tool requests keep the successful registration":"two simultaneous callers both complete under the registry lock");
+}
 static int tool_check(void) {
     static char out[1 << 15], src[4096]; char hold[4400], a[4400], b[4400], sp[4400], bp[4400], pp[4400], hs[65], hb[65], hp[65], h[65], hex[65], pinrow[400];
     const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
@@ -333,6 +344,66 @@ static int tool_check(void) {
     ok(rc == 1 && strstr(out, "REGISTER_TOOL\tstatus=ROLLED_BACK\tfailed_step=tests/tools-compile.cx --shards") && strstr(out, "REFUSE added\ttools/stray.cx"), "a failed verification is ROLLED_BACK with the step and the tools-compile refusal named");
     sha_of(sp, h); ok(!strcmp(h, hs), "the rollback restored tools-compile-sources.tsv"); sha_of(bp, h); ok(!strcmp(h, hb), "the rollback restored batches.tsv");
     ok(run_in(hold, gq, out, sizeof out) == 1, "the rollback unstaged the tool this call had staged");
+    put_file(hold,"tests/tools-compile.cx",
+        "int main(void){FILE *f=fopen(\"tests/tools-compile-sources.tsv\",\"rb\");if(!f)return 2;char line[512];while(fgets(line,sizeof line,f))if(!strcmp(line,\"tools/reject.cx\\tregular\\n\")){fclose(f);return 1;}fclose(f);puts(\"2\");return 0;}\n");
+    put_file(hold,"tools/left.cx","int main(void){return 0;}\n");
+    put_file(hold,"tools/right.cx","int main(void){return 0;}\n");
+    put_file(hold,"tools/third.cx","int main(void){return 0;}\n");
+    put_file(hold,"tools/reject.cx","int main(void){return 0;}\n");
+    concurrent_tools(hold,"tools/left.cx","tools/right.cx",0);
+    ok(registry_has(sp,"tools/left.cx\tregular\n") && registry_has(sp,"tools/right.cx\tregular\n"),"different keys both retained");
+    concurrent_tools(hold,"tools/third.cx","tools/reject.cx",1);
+    ok(registry_has(sp,"tools/third.cx\tregular\n") && !registry_has(sp,"tools/reject.cx\tregular\n"),"failed tool removes only its own key");
+    /* The verifier is a separate process. Mutate the private registry while
+       the transaction is waiting for its result, exactly at the rollback boundary. */
+    put_file(hold,"tests/coverage.tsv","id\tlayer\n");
+    put_file(hold,"tests/batch-product-inputs.tsv","kind\tkey\tinputs\tbasis\n");
+    FILE *stale=fopen(bp,"ab");if(!stale||fputs(TC_ROW("005","5"),stale)<0||fclose(stale))die("stale shard",bp);
+    put_file(hold,"tests/tools-compile.cx",
+        "int main(void){FILE *f=fopen(\"tests/batches.tsv\",\"ab\");if(!f)return 2;fputs(\"other-writer\\tvalue\\n\",f);fclose(f);"
+        "f=fopen(\"tests/tools-compile-sources.tsv\",\"r+b\");if(!f)return 2;char line[512];while(fgets(line,sizeof line,f)){if(!strcmp(line,\"tools/tq.cx\\tregular\\n\")){fseek(f,-8,SEEK_CUR);fputs(\"symlink\\n\",f);break;}}fclose(f);"
+        "f=fopen(\"tests/coverage.tsv\",\"ab\");if(!f)return 2;fputs(\"other-coverage\\tunit\\n\",f);fclose(f);"
+        "f=fopen(\"tests/batch-product-inputs.tsv\",\"ab\");if(!f)return 2;fputs(\"id\\tother-writer\\tcx/\\tfixture\\n\",f);fclose(f);return 1;}\n");
+    size_t oldlen;char *original=cx_read(bp,&oldlen);
+    if(!original)die("read batch snapshot",bp);
+    put_file(hold,"tools/remove-me.cx","int main(void){return 0;}\n");
+    char *both[]={prepared_driver,"--tool","tools/tq.cx","--tool","tools/remove-me.cx",0};
+    rc=run_in(hold,both,out,sizeof out);
+    size_t newlen;char *current=cx_read(bp,&newlen);
+    const char *extra="other-writer\tvalue\n";
+    ok(rc!=0 && current && newlen==oldlen+strlen(extra) && !memcmp(original,current,oldlen) &&
+       !memcmp(current+oldlen,extra,strlen(extra)),"batch bytes equal their original order plus the peer's one line");
+    free(original);free(current);
+    ok(!count_lines(sp,"tools/remove-me.cx\t"),"failed registration removes its untouched new row");
+    ok(registry_has(sp,"tools/tq.cx\tsymlink\n"),"rollback retains subsequently replaced same-key source");
+    /* Coverage and product inputs are read-only in --tool; exercise their
+       fingerprints at the pre-publication boundary below. */
+    rc=run_in(hold,rq,out,sizeof out);
+    ok(rc==2 && strstr(out,"key-conflict"),"same source key with a different kind is refused");
+    /* A verifier-independent writer changes only the fourth registry while
+       git is inspecting the new path, between fingerprint and publication. */
+    pjoin(a,sizeof a,hold,"tools/bound");pjoin(b,sizeof b,hold,"tools/bound-real");
+    if(sy_rename(a,b))die("rename fixture bound",a);
+    put_file(hold,"bound-probe.cx",
+        "int main(int argc,char **argv){if(argc>3&&!strcmp(argv[3],\"ls-files\")){"
+        "FILE *f=fopen(access(\"coverage-conflict\",F_OK)?\"tests/batch-product-inputs.tsv\":\"tests/coverage.tsv\",\"ab\");if(!f)return 2;fprintf(f,\"id\\tpeer-%d\\tcx/\\tfixture\\n\",getpid());fclose(f);}"
+        "argv[0]=\"./tools/bound-real\";execv(argv[0],argv);return 2;}\n");
+    char *compile[]={"sh","./unisacc.com","bound-probe.cx","-o","tools/bound",0};
+    if(run_in(hold,compile,out,sizeof out))die("build concurrent writer",out);
+    put_file(hold,"tools/replan.cx","int main(void){return 0;}\n");
+    char *replan[]={prepared_driver,"--tool","tools/replan.cx",0};
+    sha_of(sp,hs);sha_of(bp,hb);
+    rc=run_in(hold,replan,out,sizeof out);
+    ok(rc==2 && strstr(out,"registry-changed-three-times"),"three conflicting product declarations refuse by name");
+    sha_of(sp,h);ok(!strcmp(h,hs),"three conflicts publish no sources change");
+    sha_of(bp,h);ok(!strcmp(h,hb),"three conflicts publish no batch change");
+    pjoin(a,sizeof a,hold,"tests/batch-product-inputs.tsv");
+    ok(count_lines(a,"id\tpeer-")==3,"all three conflicting declarations remain");
+    put_file(hold,"coverage-conflict","1\n");
+    rc=run_in(hold,replan,out,sizeof out);
+    pjoin(a,sizeof a,hold,"tests/coverage.tsv");
+    ok(rc==2 && strstr(out,"registry-changed-three-times") && count_lines(a,"id\tpeer-")==3 &&
+       !count_lines(sp,"tools/replan.cx\t"),"coverage-only changes invalidate the whole plan on each attempt");
     printf("CX_REGISTER_TOOL\tchecks=%d\tfailed=%d\tretained=%s\n", checks, failed, hold);
     return failed ? 1 : 0;
 }
