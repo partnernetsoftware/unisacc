@@ -5,6 +5,7 @@ const query=new URLSearchParams(location.search);
 const reflections=!query.has("no-reflection");
 const waterLayers=!query.has("mud-water"),ripples=!query.has("flat-ripples");
 const gradient=!query.has("flat-reflection");
+const inputTest=query.get("input-test")==="1";
 const reaches=[
   ["苇汀",[151,113,80],[255,187,95],[171,111,63],[105,66,46],[83,57,43],[255,221,151]],
   ["花浅",[83,72,113],[222,153,156],[113,101,145],[63,58,91],[65,52,72],[255,210,171]],
@@ -37,8 +38,9 @@ function step(steer,thrust) {
   boat.x+=boat.yaw*(.12+boat.speed*.17)+(center-boat.x)*.011;
   const rubbing=Math.abs(boat.x-center)>bound;
   boat.x=clamp(boat.x,center-bound,center+bound);
-  const target=rubbing?.16:thrust>0?1.65:thrust<0?-.48:.35;
-  boat.speed+=(target-boat.speed)*(rubbing?.30:.085);
+  const drag=rubbing && !query.has("no-bank-slow");
+  const target=drag?.16:thrust>0?1.65:thrust<0?-.48:.35;
+  boat.speed+=(target-boat.speed)*(drag?.30:.085);
   if(!query.has("frozen-course")) boat.z=clamp(boat.z+boat.speed,0,end);
   boat.tick++;
 }
@@ -364,6 +366,8 @@ function draw() {
     shown=realm;
     document.querySelector("#reach").textContent=(realm+1)+" / "+reaches.length+"  "+theme[0];
   }
+  if(inputTest) document.querySelector("output").textContent=
+    [boat.x,boat.z,boat.speed].map(value=>Math.round(value*1000)).concat(boat.tick).join(",");
 }
 function steerInput() {
   const right=keys.has("KeyD")||keys.has("ArrowRight"),left=keys.has("KeyA")||keys.has("ArrowLeft");
@@ -378,6 +382,7 @@ function pointInput(event) {
 const controls=["KeyW","KeyA","KeyS","KeyD","ArrowUp","ArrowLeft","ArrowDown","ArrowRight"];
 addEventListener("keydown",event=>{
   if(!controls.includes(event.code)) return;
+  if(inputTest && query.has("no-steer-key") && event.code==="KeyD") return;
   event.preventDefault();
   keys.add(event.code);
 });
@@ -412,11 +417,12 @@ if(query.has("zones")) {
   const out=document.querySelector("output");
   out.id="pixels";
   out.textContent=samples.join(",");
-} else if(query.has("still")) {
+} else if(query.has("still") || query.get("auto")==="1") {
   const reach=clamp(Number(query.get("still")) || 1,1,reaches.length);
   const frames=reach>1?Math.ceil(((reach-1)*reachLength+28)/1.65)+16:0;
   for(let i=0;i<frames;i++) step(0,1);
   draw();
+  if(query.get("auto")==="1") document.title=query.has("bad-auto-title")?"WATER_FAIL":"WATER_OK";
 } else {
   canvas.addEventListener("pointerdown",event=>{
     if(pointer) return;

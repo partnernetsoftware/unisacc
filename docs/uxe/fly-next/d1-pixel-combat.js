@@ -1,7 +1,7 @@
 const course=[
-  { x:-49,z:-116,y:55,vx:1,kind:0 },
-  { x:4,z:-91,y:45,vx:0,kind:1 },
-  { x:53,z:-135,y:50,vx:-1,kind:2 }
+  { x:-49,z:-116,y:55,vx:1,kind:0,hull:4,sweep:.65,fire:20 },
+  { x:4,z:-91,y:45,vx:0,kind:1,hull:2,sweep:-1.35,fire:0 },
+  { x:53,z:-135,y:50,vx:-1,kind:2,hull:8,sweep:.28,fire:0 }
 ];
 const marker="#ff746a", lock="#ffe46b";
 const targets=[
@@ -15,6 +15,7 @@ const small={
   O:["111","101","101","101","111"], S:["111","100","111","001","111"],
   L:["100","100","100","100","111"], H:["101","101","111","101","101"],
   P:["110","101","110","100","100"], K:["101","101","110","101","101"],
+  W:["101","101","111","111","101"], V:["101","101","101","101","010"], E:["111","100","110","100","111"],
   "0":["111","101","101","101","111"],
   "1":["010","110","010","010","111"],"2":["111","001","111","100","111"],
   "3":["111","001","111","001","111"],"4":["101","101","111","001","001"],
@@ -39,7 +40,7 @@ function screen(flight,enemy,tick,maneuver) {
   const angle=flight.heading*Math.PI/180,s=Math.sin(angle),c=Math.cos(angle);
   const phase=Math.max(0,tick-30)%96;
   const sweep=maneuver?(phase<24?phase:phase<72?48-phase:phase-96):0;
-  const x=wrap(enemy.x+enemy.vx*Math.trunc((tick%72)/6)+sweep*(enemy.kind===1?-.85:.65)-flight.x);
+  const x=wrap(enemy.x+enemy.vx*Math.trunc((tick%72)/6)+sweep*enemy.sweep-flight.x);
   const z=wrap(enemy.z-Math.trunc(tick/3)-flight.z);
   const depth=x*s-z*c;
   if(depth<9 || depth>345) return null;
@@ -58,6 +59,12 @@ function enemySprite(context,enemy,pose,fall=0) {
         pose.y+(j-2)*size+(i-8)*fall,size,size);
     });
   });
+  if(enemy.kind===2) {
+    for(const side of [-1,1]) {
+      point(context,"#523b72",pose.x+side*5*size-size,pose.y+2*size,3*size,size);
+      point(context,"#9e84ad",pose.x+side*5*size-size,pose.y+3*size,3*size,size);
+    }
+  }
   if(!fall) for(let k=-3;k<=3;k++) point(context,marker,pose.x+k,pose.y-11+3-Math.abs(k));
 }
 function smoke(context,x,y,age,life) {
@@ -74,27 +81,42 @@ function brackets(context,x,y) {
   }
 }
 
-export function combatModel(context,query) {
-  const enemies=course.map(slot=>({...slot,hp:4,respawn:0,fireReady:40+slot.kind*7}));
+export function combatModel(context,query,event) {
   const bursts=[], rounds=[], incoming=[];
   const counterfire=!query.has("no-return-fire"), maneuver=!query.has("no-maneuver");
   let ammo=96, missiles=3, cannonReady=0, missileReady=0, lastFire=0, locked=false;
   let health=100,kills=0,hitUntil=0;
+  let wave=1,waveStart=0,remaining,nextWave=0,enemies;
+  function formation(flight) {
+    const angle=flight.heading*Math.PI/180,c=Math.cos(angle),s=Math.sin(angle);
+    remaining=Math.min(8,wave+2);
+    return Array.from({length:remaining},(_,index)=>{
+      const slot=course[index%course.length],group=Math.floor(index/course.length);
+      const x=slot.x+group*30,z=slot.z-group*41;
+      const hull=query.has("light-as-heavy") && slot.kind===1?8:
+        query.has("weak-heavy") && slot.kind===2?4:slot.hull;
+      return {...slot,x:flight.x+x*c-z*s,z:flight.z+x*s+z*c,y:slot.y+flight.altitude-25+group*3,
+        hp:hull+Math.min(4,wave-1),fireReady:waveStart+40+group*9};
+    });
+  }
+  enemies=formation({heading:0,x:0,z:0,altitude:25});
   function damage(enemy,power,tick,pose) {
     if(enemy.hp<=0) return;
     enemy.hp-=power;
     bursts.unshift({tick,x:pose.x,y:pose.y,kind:"smoke"});
     if(enemy.hp<=0) {
       kills++;
+      remaining--;
+      event("explosion");
       enemy.fall=tick;
-      enemy.respawn=tick+110;
       bursts.unshift({tick,x:pose.x,y:pose.y,kind:"burst"});
+      if(!remaining) nextWave=tick+36;
     }
   }
   function returnFire(visible,flight,tick,attitude) {
     if(counterfire) for(const enemy of visible) {
-      if(enemy.hp<=0 || tick<enemy.fireReady) continue;
-      enemy.fireReady=tick+72;
+      if(enemy.hp<=0 || !enemy.fire || tick<enemy.fireReady) continue;
+      enemy.fireReady=tick+Math.max(14,enemy.fire-wave+1);
       incoming.push({start:tick,x:enemy.pose.x,y:enemy.pose.y,heading:flight.heading,pitch:flight.pitch});
     }
     for(let i=incoming.length-1;i>=0;i--) {
@@ -120,11 +142,20 @@ export function combatModel(context,query) {
     }
   }
   function update(flight,tick,gun,missile,attitude) {
+    if(nextWave && tick>=nextWave && !query.has("no-wave")) {
+      wave++;
+      waveStart=tick;
+      nextWave=0;
+      enemies=formation(flight);
+      rounds.length=incoming.length=0;
+      ammo=96;
+      missiles=3;
+      locked=false;
+    }
     const frozen=query.has("freeze-targets");
     const view=frozen || query.has("hold-course")?{...flight,x:0,z:-1.5}:flight;
     for(const enemy of enemies) {
-      if(enemy.hp<=0 && tick>=enemy.respawn) enemy.hp=4;
-      enemy.pose=screen(view,enemy,frozen?1:tick,maneuver);
+      enemy.pose=screen(view,enemy,frozen?1:tick-waveStart,maneuver);
     }
     const visible=enemies.filter(enemy=>enemy.hp>0 && enemy.pose &&
       enemy.pose.x>=12 && enemy.pose.x<=413 && enemy.pose.y>=16 && enemy.pose.y<196);
@@ -134,6 +165,7 @@ export function combatModel(context,query) {
     const acquired=selected && offset(selected)<30*30;
     if(gun && ammo && tick>=cannonReady) {
       ammo--;
+      event("gun");
       lastFire=tick;
       cannonReady=tick+5;
       if(acquired) {
@@ -143,6 +175,7 @@ export function combatModel(context,query) {
     }
     if(missile && missiles && acquired && tick>=missileReady) {
       missiles--;
+      event("missile");
       lastFire=tick;
       missileReady=tick+18;
       rounds.push({start:tick,target:selected});
@@ -166,7 +199,9 @@ export function combatModel(context,query) {
       enemySprite(context,enemy,{...enemy.pose,x,y},.15+age*.025);
     }
     if(acquired && selected.hp>0 && !query.has("no-lock")) brackets(context,selected.pose.x,selected.pose.y);
-    locked=Boolean(acquired && selected.hp>0);
+    const hasLock=Boolean(acquired && selected.hp>0);
+    if(hasLock && !locked) event("lock");
+    locked=hasLock;
     for(const shot of rounds) if(shot.target.pose) {
       const t=(tick-shot.start)/13;
       const x=213+(shot.target.pose.x-213)*t,y=166+(shot.target.pose.y-166)*t;
@@ -202,6 +237,8 @@ export function combatModel(context,query) {
     }
   }
   function hud() {
+    point(context,"#23344d",8,213,48,10);
+    label(context,"WAVE "+wave,11,216,"#e8eadb");
     point(context,"#23344d",8,224,65,11);
     label(context,"AMMO "+String(ammo).padStart(2,"0"),11,227,"#e8eadb");
     label(context,"MSL "+missiles,50,227,"#e8eadb");

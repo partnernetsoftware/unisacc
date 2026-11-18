@@ -60,5 +60,5 @@ export function audioModel(query) {
     const buffer=(await offline.startRendering()).getChannelData(0);
     return [...Object.values(events),base+slope*speed,...points.map(index=>Math.round(buffer[index]*10000))];
   }
-  return {unlock,engine,toggle,trigger,sample};
+  return {unlock,engine,toggle,trigger,sample,counts:()=>Object.values(events)};
 }

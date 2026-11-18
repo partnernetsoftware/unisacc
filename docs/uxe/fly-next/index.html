@@ -36,6 +36,7 @@ addEventListener("unhandledrejection",event=>reportFlightError(event.reason));
 import { drawAircraft } from "./d1-pixel-aircraft.js";
 import { pixelWorld } from "./d1-pixel-world.js";
 import { combatModel } from "./d1-pixel-combat.js";
+import { audioModel } from "./d1-audio.js";
 
 const low=document.createElement("canvas");
 low.width=426;
@@ -46,12 +47,13 @@ display.imageSmoothingEnabled=false;
 const result=document.querySelector("output");
 const loss=document.querySelector("section"), restartButton=loss.querySelector("button");
 const query=new URLSearchParams(location.search);
+const audio=audioModel(query);
 if(query.has("short-canvas")) display.canvas.style.height="calc(100dvh - 87px)";
 const auto=query.get("auto")==="1";
 const inputTest=query.get("input-test")==="1";
 const frameInterval=1000/30;
 const world=pixelWorld(buffer,query);
-let combat=combatModel(buffer,query);
+let combat=combatModel(buffer,query,audio.trigger);
 
 const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
 if(!wasm.ok) throw new Error("D1 飞行核读取失败");
@@ -71,7 +73,7 @@ window.onHostGpuSubmit=bytes=>{
     altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
   };
 };
-function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true) {
+function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true,battleView=null) {
   if(ended) return;
   flight=null;
   core.host_reset();
@@ -79,13 +81,14 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true)
   core.run_step();
   if(!flight) throw new Error("D1 飞行核没有提交本帧");
   tick++;
+  audio.engine(flight.speed);
   const attitude={
     y:158-Math.round(flight.pitch*(query.has("flat-pitch")?.18:.55)),
     roll:flight.bank*(query.has("shallow-roll")?24:52)*Math.PI/(24*180)
   };
   if(paintWorld) world.paint(flight,tick);
   else buffer.clearRect(0,0,426,240);
-  combat.update(flight,tick,gun,missile,attitude);
+  combat.update(battleView??flight,tick,gun,missile,attitude);
   drawAircraft(buffer,213,attitude.y,flight.pitch,attitude.roll,flight.speed,tick);
   const hud=combat.hud();
   display.drawImage(low,0,0);
@@ -101,13 +104,14 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true)
     previousFrame=stamp;
     result.textContent=[flight.heading,hud.ammo,hud.missiles,Number(hud.locked),tick,
       Math.round(stamp-firstFrame),Math.round(minGap*1000)].join(",");
+    result.dataset.audio=audio.counts().join(",");
   }
 }
 async function restartFlight() {
   restartButton.disabled=true;
   try {
     core=(await window.host1Boot(flightProgram)).exports;
-    combat=combatModel(buffer,query);
+    combat=combatModel(buffer,query,audio.trigger);
     tick=firstFrame=previousFrame=0;
     minGap=1000;
     ended=false;
@@ -126,13 +130,36 @@ restartButton.addEventListener("click",()=>{
 function replayCombat(target) {
   while(!ended && tick<target) frame(0,0,0,false,tick===3,0,tick+1===target);
 }
+function replayWave(target) {
+  for(let n=tick+1;n<=target && !ended;n++) {
+    const x=n<18?4:n<36?-49:53;
+    const view={x,z:-1.5,heading:0,altitude:25,pitch:0,bank:0};
+    frame(0,0,0,n>=36 && n<=51 && (n-36)%5===0,n===4 || n===22 || n===40,0,n===target,view);
+  }
+}
 frame(0,0,0);
 if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
 if(query.get("still")==="impact") for(let i=1;i<18;i++) frame(0,0,0,false,i===3);
 if(query.get("still")==="bank") for(let i=0;i<6;i++) frame(1,1,0);
 if(query.get("still")==="skirmish") replayCombat(55);
-if(query.get("still")==="loss") replayCombat(149);
-if(query.has("skirmish")) {
+if(query.get("still")==="loss") replayCombat(142);
+if(query.get("still")==="wave") replayWave(89);
+if(query.has("audio")) {
+  for(let i=1;i<18;i++) frame(0,0,1,i===1,i===3);
+  const samples=await audio.sample(query.get("audio").split(",").map(Number));
+  result.id="pixels";
+  result.textContent=samples.join(",");
+} else if(query.has("waves")) {
+  const sampled=[];
+  const probes=query.get("waves").split(";").map(probe=>probe.split(",").map(Number));
+  for(const [target,x,y] of probes) {
+    replayWave(target);
+    const pixel=buffer.getImageData(x,y,1,1).data;
+    sampled.push(pixel[0],pixel[1],pixel[2]);
+  }
+  result.id="pixels";
+  result.textContent=sampled.join(",");
+} else if(query.has("skirmish")) {
   const sampled=[];
   const probes=query.get("skirmish").split(";").map(probe=>probe.split(",").map(Number));
   for(const [target,x,y] of probes) {
@@ -210,11 +237,20 @@ if(query.has("skirmish")) {
   const canvas=document.querySelector("canvas");
   let pointer=null,buttons=0;
   addEventListener("keydown",event=>{
+    if(event.code==="KeyN") {
+      if(!event.repeat) {
+        audio.unlock();
+        const muted=audio.toggle();
+        document.querySelector("aside").textContent=muted?"开发预览 · 静音":"开发预览";
+      }
+      return;
+    }
     if(ended) {
       if(event.code==="KeyR") restartButton.click();
       return;
     }
     if(!controls.includes(event.code)) return;
+    audio.unlock();
     if(inputTest && query.has("wrong-key") && event.code==="KeyD") return;
     event.preventDefault();
     keys.add(event.code);
@@ -225,7 +261,7 @@ if(query.has("skirmish")) {
     pointer={x:2*(event.clientX-rect.left)/rect.width-1,y:2*(event.clientY-rect.top)/rect.height-1};
     buttons=event.buttons;
   });
-  canvas.addEventListener("pointerdown",event=>buttons=event.buttons);
+  canvas.addEventListener("pointerdown",event=>{ audio.unlock(); buttons=event.buttons; });
   addEventListener("pointerup",event=>buttons=event.buttons);
   canvas.addEventListener("pointerleave",()=>{ pointer=null; buttons=0; });
   canvas.addEventListener("contextmenu",event=>event.preventDefault());
