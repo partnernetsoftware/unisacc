@@ -39,12 +39,29 @@ function noise(x,y,step,seed) {
   const b=hash(u,(v+1)&mask,seed)*(step-s)+hash((u+1)&mask,(v+1)&mask,seed)*s;
   return Math.floor((a*(step-t)+b*t)/(step*step));
 }
-function elev(x,y,seed) {
+const shelf=[
+  [24,129,54,113,20,27],[54,113,79,104,22,42],[79,104,106,92,22,50],
+  [106,92,114,73,14,28],[35,124,37,98,15,27],[63,116,68,133,11,28],
+  [89,103,103,129,13,30]
+];
+function elev(x,y,seed,continuous) {
   let peak=-49;
   for(const [cx,cy,rx,ry,summit] of islands) {
     const dx=Math.min(Math.abs(x-cx),MAP-Math.abs(x-cx));
     const dy=Math.min(Math.abs(y-cy),MAP-Math.abs(y-cy));
     peak=Math.max(peak,summit-Math.floor(116*dx*dx/(rx*rx))-Math.floor(116*dy*dy/(ry*ry)));
+  }
+  if(continuous) {
+    let shelfHeight=-49;
+    for(const [ax,ay,bx,by,r,h] of shelf) {
+      const dx=bx-ax,dy=by-ay;
+      const t=Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/(dx*dx+dy*dy)));
+      const cross=(x-ax-t*dx)**2+(y-ay-t*dy)**2;
+      shelfHeight=Math.max(shelfHeight,h-Math.floor((h+19)*cross/(r*r)));
+    }
+    const lagoon=((x-59)/10.5)**2+((y-111)/8.2)**2;
+    if(lagoon<1) shelfHeight-=Math.floor((1-lagoon)*65);
+    peak=Math.max(peak,shelfHeight);
   }
   return peak+Math.floor((noise(x,y,64,seed)-128)*.45)
     +Math.floor((noise(x,y,16,seed+3)-128)*.25)
@@ -67,15 +84,40 @@ function rgb(color) {
 }
 function worldDelta(v,base) { return v-base-512*Math.round((v-base)/512); }
 
+function mainlandCells(heights) {
+  const seen=new Uint8Array(heights.length), main=new Uint8Array(heights.length);
+  const queue=new Int32Array(heights.length);
+  let largest=[];
+  for(let cell=0;cell<heights.length;cell++) {
+    if(seen[cell] || heights[cell]<0) continue;
+    let size=1;
+    seen[cell]=1;
+    queue[0]=cell;
+    for(let at=0;at<size;at++) {
+      const p=queue[at], x=p%MAP;
+      const neighbors=[x?p-1:-1,x+1<MAP?p+1:-1,p-MAP,p+MAP];
+      for(const next of neighbors) {
+        if(next<0 || next>=heights.length || seen[next] || heights[next]<0) continue;
+        seen[next]=1;
+        queue[size++]=next;
+      }
+    }
+    if(size>largest.length) largest=queue.slice(0,size);
+  }
+  for(const cell of largest) main[cell]=1;
+  return main;
+}
+
 export function pixelWorld(context,query) {
   const seed=query.has("wrong-seed")?31:7;
   const colors=query.has("wrong-bands")?palette.map((color,i)=>i===5?palette[7]:color)
     :query.has("muted-palette")?muted:palette;
   const heights=new Int16Array(MAP*MAP);
   const bands=new Uint8Array(MAP*MAP);
+  const continuous=!query.has("broken-coast");
   for(let y=0;y<MAP;y++) for(let x=0;x<MAP;x++) {
     const at=y*MAP+x;
-    heights[at]=elev(x,y,seed);
+    heights[at]=elev(x,y,seed,continuous);
     bands[at]=band(heights[at]);
   }
   const samples=query.has("coarse-relief")?2:4;
@@ -91,7 +133,10 @@ export function pixelWorld(context,query) {
   }
   const image=context.createImageData(WIDTH,HEIGHT);
   const pixels=new Uint32Array(image.data.buffer);
+  const land=query.has("coast-audit")?new Uint8Array(WIDTH*HEIGHT):null;
+  const mainland=land?mainlandCells(heights):null;
   const limit=new Int16Array(WIDTH);
+  const slope=new Float32Array(WIDTH),skyScale=new Float32Array(WIDTH);
   const stages=Array.from({length:17},(_,step)=>
     [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87))),
       [121,155,65],[103,168,81],[52,104,56]]
@@ -103,7 +148,7 @@ export function pixelWorld(context,query) {
       const depth=x*forwardX+z*forwardZ;
       if(depth<(layer?28:94) || depth>(layer?130:295)) continue;
       const sx=Math.round(WIDTH/2+151*(x*rightX+z*rightZ)/depth);
-      const sy=Math.round(horizon+(flight.altitude+13-height)*151/depth);
+      const sy=Math.round(horizon+(flight.altitude+13-height)*151/depth+(flight.horizonTilt||0)*(sx-213)/213);
       const step=Math.max(1,Math.round(size/depth*4));
       for(let row=0;row<puff.length;row++) for(let col=0;col<puff[row].length;col++) {
         const type=puff[row][col];
@@ -117,10 +162,16 @@ export function pixelWorld(context,query) {
     paint(flight,tick) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
       const horizon=100+Math.round(flight.pitch*.50), cam=flight.altitude+20;
+      const lean=flight.horizonTilt||0,largeWaves=!query.has("tiny-waves");
       const wavePhase=query.has("still-waves")?0:Math.floor(tick/3);
       const groundDetail=!query.has("bare-ground");
+      if(land) land.fill(0);
+      for(let x=0;x<WIDTH;x++) {
+        slope[x]=lean*(x-213)/213;
+        skyScale[x]=48/(horizon+slope[x]);
+      }
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
-        const shade=Math.min(48,48*y/horizon);
+        const shade=Math.min(48,y*skyScale[x]);
         const dither=bayer[((y&3)<<2)|(x&3)]/16;
         pixels[y*WIDTH+x]=sky[Math.min(48,Math.floor(shade+dither))];
       }
@@ -135,10 +186,12 @@ export function pixelWorld(context,query) {
           const wx=Math.floor((x0+lateral*rx+256)*2)&1023;
           const wy=Math.floor((z0+lateral*rz+256)*2)&1023;
           const h=relief[gy*fineSize+gx],id=band(h);
-          const top=Math.max(0,Math.floor(horizon+(cam-Math.max(0,h)*.22)*151/depth));
+          const top=Math.max(0,Math.floor(horizon+slope[col]+(cam-Math.max(0,h)*.22)*151/depth));
           if(top>=limit[col]) continue;
           const waveX=(wx+wavePhase)&1023;
-          const ripples=id<3 && hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229);
+          const crest=(wy+((wx>>2)&15)+wavePhase*2)&63;
+          const swell=largeWaves && id<3 && crest<4 && wx%83<43 && hash(wx>>5,wy>>6,seed+63)>94;
+          const ripples=id<3 && (swell || hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229));
           const waterline=id===2 && h>-3 && hash(wx>>1,wy>>1,seed+71)>165;
           const shade=id>=4 && (h%10<2 || hash(wx,wy,seed+19)>234);
           let material=ripples || waterline?8:shade?id+9:id;
@@ -147,13 +200,27 @@ export function pixelWorld(context,query) {
             if((id===5 || id===6) && hash(wx>>1,wy>>1,seed+31)>224) material=(wx+wy)%3?18:19;
           }
           const color=stages[fade][material];
-          for(let y=top;y<limit[col];y++) pixels[y*WIDTH+col]=color;
+          const landLabel=land && h>=0?1+mainland[Math.floor(gy/samples)*MAP+Math.floor(gx/samples)]:0;
+          for(let y=top;y<limit[col];y++) {
+            pixels[y*WIDTH+col]=color;
+            if(land) land[y*WIDTH+col]=landLabel;
+          }
           limit[col]=top;
         }
       }
       context.putImageData(image,0,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,1);
+    },
+    coastMap() {
+      let cells="";
+      for(let y=0;y<MAP;y+=2) for(let x=0;x<MAP;x+=2) cells+=String(Number(heights[y*MAP+x]>=0));
+      return cells;
+    },
+    coastView() {
+      let cells="";
+      for(let y=110;y<HEIGHT;y+=3) for(let x=0;x<WIDTH;x+=3) cells+=String(land[y*WIDTH+x]);
+      return cells;
     },
     reliefSwatches(target,points) {
       points.forEach(([x,y],i)=>{

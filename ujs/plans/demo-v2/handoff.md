@@ -202,3 +202,9 @@ D4 开发预览为 `test/d4-skeleton.html?play`。长按 W、S、上下方向键
 ### P5 发布候选
 
 用 V1 `d3-bridge-v1.html` 和 V2 `d4-skeleton-v2.html` 更新原发布位置，固定的文件清单分别为 20 和 18 项。P4 的 CDP 操控和 AUTO 验收继续适用。另用 `tools/check-uxe-d3-geometry.cx -- published-v1` 和 `-- published-v2` 从导出目录读取画布，复核石桥叶团、垂藤、桥厚及城镇屋顶、钟面、风车、栏旗和腿部表面细节。参考并排图分别在 `/tmp/cdx2-v1-d3-comparison.png` 和 `/tmp/cdx2-v2-d4-comparison.png`。
+
+### P7 四页开发预览
+
+飞行的连续海岸和追尾相机从 `d1-coast-audit.html` 导出。灯舟的两岸和首桥从 `banks-audit.html` 导出。墨桥的漫游轨道、伏草和旧化石板从 `d3-deck-w3.html` 导出。行走城镇的远近跟拍和烟柱从 `d4-smoke-w2.html` 导出。石桥和城镇固定清单分别为 21 与 18 项。
+
+跑既有 `check-gen-uxe-pages.cx`、D1 的 `pages` 和 `pages-battle`、D2 的 `water-pages-input` 和 `water-pages-auto` 检查实际目录。进一步复跑 `published-coast`、`published-w1`、`published-banks`、`published-bridge-approach`、`published-w2`、`published-w3`，核对大陆、相机、两岸、五航点桥宽、烟团和石板。详细入口及对照图见 [四页审计](live-audit.md)。

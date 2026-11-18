@@ -18,10 +18,11 @@ import { archMeshes, loadBays } from "./d3-arch.js";
 import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
 import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
 import { paintedCanopy, paintedLeafMesh, tuftMesh, hangingVines } from "./d3-painted.js";
+import { buildWornDeck, windTuft } from "./d3-worn-deck.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params = new URLSearchParams(location.search);
-const release=!location.pathname.endsWith("/d3-bridge-audit.html");
+const release=!location.pathname.endsWith("/d3-deck-w3.html");
 const painted=true;
 const finish=release || painted || params.has("finish-u2c");
 const enlarged=params.has("scale-u2b") || finish;
@@ -52,7 +53,9 @@ const colors = {
   cliffShade:[94,108,125], cliffLight:[132,145,158], roofPale:[91,109,125], ridge:[106,135,151],
   iron:[33,40,52], vine:[59,86,46],
   wallOchre:[191,130,78], wallCream:[237,197,139], roofSlate:[54,73,91], roofRidge:[111,128,136],
-  leafInk:[38,77,60], leafPaint:[76,121,67], leafSun:[139,161,79], vineMoss:[85,116,57]
+  leafInk:[38,77,60], leafPaint:[76,121,67], leafSun:[139,161,79], vineMoss:[85,116,57],
+  deckSeam:[93,100,105], deckSlate:[143,150,147], deckSun:[158,155,140],
+  deckShade:[129,142,143], deckWear:[127,126,111]
 };
 if (palette) {
   for (const material of ["stone","barrel","leafLight","leafDark","leaf.light"]) colors[material]=palette[material];
@@ -112,6 +115,8 @@ if (taller) {
       (material,id,px,y,z,...rest)=>instance(finish && !finishHouse?"wallCream":material,id,px,y,z+shift,...rest))
       .map(([px,y,z])=>[px,y,z+shift]);
     bridgeLines(bridgeTop,addMesh,instance,true,archCount*bayWidth/1000,recession,bays[0][4]+.15);
+    if(!params.has("plain-w3-deck"))
+      buildWornDeck(bridgeTop,archCount*bayWidth/1000,bays[0][4],bays[0][3],recession,addMesh,instance);
     if(painted && !params.has("v1-no-vines")) hangingVines(bridgeTop,recession,addMesh,instance);
     const mountain=finish?addMesh(leafMesh(.40)):MESH_OCTA;
     for(let i=0;i<12;i++) instance("ridge",mountain,-55+i*9,-4+i%3,-43-i%2*13,9+i%4*2,i*.42);
@@ -148,7 +153,7 @@ instance("grass",MESH_PLANE,0,-2.01,0,110);
 if (textured && mode !== "flat-ground") {
   const blades = allMeshes().length + extraMeshes.length;
   const boulder = blades+1;
-  const bladesMesh=painted?tuftMesh():grassMesh();
+  const bladesMesh=params.has("old-w3-grass")?tuftMesh():windTuft();
   if(finish && !painted) for(let i=1;i<bladesMesh.positions.length;i+=3) bladesMesh.positions[i]*=.55;
   extraMeshes.push(bladesMesh,leafMesh(.59));
   let seed=713;
@@ -159,7 +164,7 @@ if (textured && mode !== "flat-ground") {
   for(let row=0;row<23;row++) for(let col=0;col<54;col++) {
     const x = -22 + .74*(col+random()), z = 2.8+.52*(row+random());
     instance(random()<.66?"meadowShade":"meadowLight",blades,x,-2.008,z,
-      .7+random()*.75,random()*Math.PI*2);
+      .7+random()*.75,random()*.52-.26);
   }
   for(let i=0;i<36;i++) {
     const x=-17.7+random()*5.25, y=-1.8+random()*5.6;
@@ -169,7 +174,7 @@ if (textured && mode !== "flat-ground") {
   if(dense && !params.has("thin-u2-plant")) for(let row=0;row<12;row++) for(let col=0;col<46;col++) {
     const x=-23+(col+random())*.93,z=13.4+(row+random())*.51;
     instance(row%4===0?"meadowLight":"meadowShade",blades,x,-2.008,z,
-      .70+random()*.72,random()*Math.PI*2);
+      .70+random()*.72,random()*.52-.26);
   }
 }
 if (mode!=="bare") {
@@ -215,7 +220,7 @@ if (mode!=="bare") {
 for(const [name,{material,mesh,items}] of groups) {
   const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
   cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
-  cloud.outlineExcluded = /^(leaf|meadow|grass|ridge)/.test(material);
+  cloud.outlineExcluded = /^(leaf|meadow|grass|ridge|deck)/.test(material);
   if (textured && (material === "stone" || material === "barrel" ||
       material === "grass" || /^(leaf|meadow|cliff)/.test(material))) {
     cloud.surfaceMap = material === "stone" || material === "barrel" ? "masonry" : "wash";
@@ -351,7 +356,7 @@ if(play) {
           cloud.xyz[3*i]=px+bend*.008;
           leaves=Math.max(leaves,Math.abs(cloud.xyz[3*i]-px));
         } else {
-          cloud.roll[i]=roll+bend*.014;
+          cloud.roll[i]=roll-.169+bend*.006;
           grass=Math.max(grass,Math.abs(cloud.roll[i]-roll));
         }
       }
@@ -363,7 +368,37 @@ if(play) {
   document.body.classList.add("walk");
   document.title=params.has("bad-auto-title")?"墨桥漫游":"墨桥漫游 · 开发预览";
   canvas.setAttribute("aria-label","石桥轨道漫游，W 和 S 移动，拖动看景");
-  if(params.has("walk-check")) {
+  if(params.has("w3-check")) {
+    move(30600);
+    const meadow=wind.find(group=>!group.leaves), [px,,pz]=meadow.items[0];
+    const trace=[];
+    for(const sample of [0,18,38]) {
+      while(tick<sample) step();
+      draw();
+      trace.push(Math.round(meadow.cloud.roll[0]*1000));
+    }
+    const brightness={deckSeam:[1,0,0],deckSlate:[0,1,0],deckSun:[0,1,0],deckShade:[0,1,0],deckWear:[0,0,1]};
+    scene.ambient.intensity=0;
+    scene.lights=[];
+    scene.fog={density:0,color:[0,0,0]};
+    scene.shadows=scene.output=scene.backdrop=null;
+    scene.paper=scene.outlineWidth=0;
+    scene.clearColor=[0,0,0,1];
+    for(const [key,cloud] of scene.clouds) {
+      cloud.color=[0,0,0];
+      cloud.emissive=brightness[groups.get(key).material] || [0,0,0];
+      cloud.mapId=0;
+    }
+    renderer.render(scene,camera);
+    const pixels=new Uint8Array(1280*720*4);
+    gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    let labels="";
+    for(let y=282;y<720;y+=5) for(let x=2;x<1280;x+=5) {
+      const at=4*((719-y)*1280+x);
+      labels+=String(Number(pixels[at]>127)+2*Number(pixels[at+1]>127)+4*Number(pixels[at+2]>127));
+    }
+    result.textContent=[Math.floor(px*3+pz*6),...trace].join(",")+"|"+labels;
+  } else if(params.has("walk-check")) {
     const trace=[];
     const key=(type,code)=>dispatchEvent(new KeyboardEvent(type,{code}));
     for(const frame of [0,60,146,310,340]) {

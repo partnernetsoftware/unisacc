@@ -433,7 +433,7 @@ static int down_ratio(int numerator,int denominator) {
     return (numerator<0?numerator-denominator+1:numerator)/denominator;
 }
 
-static int terrain_height(int x,int y,int seed) {
+static int terrain_height_mode(int x,int y,int seed,int shelf) {
     static const int islands[][5]={{100,106,34,28,113},{163,96,22,18,97},{130,67,12,13,84},
         {72,56,16,15,100},{187,52,17,13,102},{104,25,16,14,98},{150,20,15,13,103},{215,19,19,13,104}};
     int i,peak=-49;
@@ -445,14 +445,37 @@ static int terrain_height(int x,int y,int seed) {
         ground=a[4]-116*dx*dx/(a[2]*a[2])-116*dy*dy/(a[3]*a[3]);
         if(ground>peak) peak=ground;
     }
+    if(shelf) {
+        static const int rims[][6]={{24,129,54,113,20,27},{54,113,79,104,22,42},
+            {79,104,106,92,22,50},{106,92,114,73,14,28},{35,124,37,98,15,27},
+            {63,116,68,133,11,28},{89,103,103,129,13,30}};
+        double lx=(x-59)/10.5,ly=(y-111)/8.2,lagoon=lx*lx+ly*ly;
+        int height=-49;
+        for(i=0;i<7;i++) {
+            const int *a=rims[i];
+            int dx=a[2]-a[0],dy=a[3]-a[1],r=a[4],h=a[5];
+            double t=((x-a[0])*dx+(y-a[1])*dy)/(double)(dx*dx+dy*dy);
+            if(t<0) t=0;
+            if(t>1) t=1;
+            double off_x=x-a[0]-dx*t,off_y=y-a[1]-dy*t;
+            int level=h-(int)((h+19)*(off_x*off_x+off_y*off_y)/(r*r));
+            if(level>height) height=level;
+        }
+        if(lagoon<1) height-=(int)((1-lagoon)*65);
+        if(height>peak) peak=height;
+    }
     return peak+down_ratio(45*(field_noise(x,y,64,seed)-128),100)
         +down_ratio(field_noise(x,y,16,seed+3)-128,4)
         +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
 }
 
-static int terrain_band(int x,int y,int seed) {
+static int terrain_height(int x,int y,int seed) {
+    return terrain_height_mode(x,y,seed,0);
+}
+
+static int terrain_band(int x,int y,int seed,int shelf) {
     static const int stops[]={-25,-8,0,8,28,55,101};
-    int i,elevation=terrain_height(x,y,seed);
+    int i,elevation=terrain_height_mode(x,y,seed,shelf);
     for(i=0;i<7 && elevation>=stops[i];i++) {}
     return i;
 }
@@ -464,10 +487,10 @@ static int take_channel(const char **p,int end) {
     return value;
 }
 
-static int far_islands(void) {
+static int far_islands(int shelf) {
     unsigned char land[64*20];
     int queue[64*20],x,y,i,count=0;
-    for(y=0;y<20;y++) for(x=0;x<64;x++) land[64*y+x]=terrain_height(x*4+2,y*4+2,7)>=0;
+    for(y=0;y<20;y++) for(x=0;x<64;x++) land[64*y+x]=terrain_height_mode(x*4+2,y*4+2,7,shelf)>=0;
     for(i=0;i<64*20;i++) if(land[i]) {
         int next=0,end=1,clipped=0,inside=0;
         queue[0]=i; land[i]=0;
@@ -488,14 +511,14 @@ static int far_islands(void) {
     return count;
 }
 
-static int projected_land_ratio(void) {
+static int projected_land_ratio(int shelf) {
     int x,y,ground=0,water=0;
     for(y=123;y<240;y+=8) for(x=1;x<426;x+=8) {
         int depth;
         for(depth=4;depth<=400;depth+=4) {
             int gx=(int)((256+(x+.5-213)*depth/151)/2)&255;
             int gy=(int)((254.5-depth)/2)&255;
-            int altitude=terrain_height(gx,gy,7);
+            int altitude=terrain_height_mode(gx,gy,7,shelf);
             double top=100+(45-(altitude>0?altitude*.22:0))*151/depth;
             if(y+1<top) continue;
             ground+=altitude>=0;
@@ -517,8 +540,8 @@ static int check_terrain(const char *mutation,int published) {
         "docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-pixel-a.html",mutation);
     if(at<0 || at>=(int)sizeof url) return input_error("terrain-url",0);
     for(y=1;y<256;y+=3) for(x=1;x<256;x+=3) {
-        int kind=terrain_band(x,y,7),size;
-        if(counts[kind]>=4 || terrain_band(x,y,31)==kind) continue;
+        int kind=terrain_band(x,y,7,published),size;
+        if(counts[kind]>=4 || terrain_band(x,y,31,published)==kind) continue;
         size=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",x,y);
         if(size<0 || size>=(int)sizeof url-at) return input_error("terrain-url",0);
         at+=size;
@@ -551,7 +574,7 @@ static int check_terrain(const char *mutation,int published) {
     printf("D1_TERRAIN swatches=%d band_errors=%d land=%d/3210 green=%d water=%d foam=%d\n",
         n,failed,land,green,sea,foam);
     {
-        int islands=far_islands(),expected=projected_land_ratio(),observed=land+sea?land*100/(land+sea):0;
+        int islands=far_islands(published),expected=projected_land_ratio(published),observed=land+sea?land*100/(land+sea):0;
         printf("D1_ARCHIPELAGO seed_far_islands=%d land_expected_pct=%d land_actual_pct=%d sea_actual_pct=%d\n",
             islands,expected,observed,100-observed);
         failed+=islands<5 || expected<25 || expected>70 || abs(expected-observed)>15;
@@ -1072,13 +1095,14 @@ static int coast_stats(const char *text,int w,int h,int role,CoastStats *stats) 
     return 1;
 }
 
-static int check_w1(const char *mutation) {
+static int check_w1(const char *mutation,int published) {
     char cwd[1024],url[2000],*out=0;
     const char *p;
     int banks[55]={0},bank=0,i,j,k,failed=0,full=0;
     double smoothed=0;
     if(!getcwd(cwd,sizeof cwd)) return 2;
-    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-coast-audit.html?w1-check&%s",cwd,mutation);
+    tx_snprintf(url,sizeof url,"file://%s/%s?w1-check&%s",cwd,
+        published?"docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-coast-audit.html",mutation);
     p=browser(url,&out,22);
     if(!p) { free(out); return 2; }
     for(i=1;i<=54;i++) {
@@ -1111,7 +1135,7 @@ static int check_w1(const char *mutation) {
     return failed || full!=26;
 }
 
-static int check_audit_coast(const char *mutation) {
+static int check_audit_coast(const char *mutation,int published) {
     char cwd[1024],url[4096],profile[128],option[160],*out=0;
     char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
         "--virtual-time-budget=5500","--dump-dom",option,url,0};
@@ -1119,7 +1143,8 @@ static int check_audit_coast(const char *mutation) {
     int i,rc,failed=0;
     size_t bytes=0;
     if(!getcwd(cwd,sizeof cwd)) return 2;
-    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-coast-audit.html?coast-audit&%s",cwd,mutation);
+    tx_snprintf(url,sizeof url,"file://%s/%s?coast-audit&%s",cwd,
+        published?"docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-coast-audit.html",mutation);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-coast-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
     rc=cx_runv_timeout(av,16,&out,&bytes);
@@ -1151,7 +1176,7 @@ static int check_audit_coast(const char *mutation) {
     return failed?1:0;
 }
 
-static int check_audit_banks(const char *mutation) {
+static int check_audit_banks(const char *mutation,int published) {
     enum { PIXELS=213*65 };
     const int positions[]={0,30,58};
     char cwd[1024],url[4096],profile[128],option[160],*out=0;
@@ -1162,7 +1187,8 @@ static int check_audit_banks(const char *mutation) {
     size_t bytes=0;
     if(!getcwd(cwd,sizeof cwd)) return 2;
     tx_snprintf(url,sizeof url,
-        "file://%s/ujs/practice/uxe/demo/water-keeps/banks-audit.html?bank-audit&%s",cwd,mutation);
+        "file://%s/%s?bank-audit&%s",cwd,
+        published?"docs/uxe/water-keeps/index.html":"ujs/practice/uxe/demo/water-keeps/banks-audit.html",mutation);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-banks-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
     rc=cx_runv_timeout(av,15,&out,&bytes);
@@ -1377,7 +1403,8 @@ static int read_town_camera(ChromeInput *c,int *depth,int *margin) {
 }
 
 static int town_smoke(const LiveWalk *s) {
-    int lift=4570+(s->a%120*1650+60)/120;
+    double age=(s->a%120)/120.0;
+    int lift=5670+(int)((2650+820*age)*age+.5);
     return abs(s->d-lift)<=1;
 }
 
@@ -1461,10 +1488,13 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
-    if((argc==2 || argc==3) && !strcmp(argv[1],"w1")) return check_w1(argc==3?argv[2]:"");
+    if((argc==2 || argc==3) && (!strcmp(argv[1],"w1") || !strcmp(argv[1],"published-w1")))
+        return check_w1(argc==3?argv[2]:"",argv[1][0]=='p');
     if(argc==2 && !strcmp(argv[1],"coast-battle")) return check_pages_keyboard("",LIVE_COAST);
-    if((argc==2 || argc==3) && !strcmp(argv[1],"audit-coast")) return check_audit_coast(argc==3?argv[2]:"");
-    if((argc==2 || argc==3) && !strcmp(argv[1],"audit-banks")) return check_audit_banks(argc==3?argv[2]:"");
+    if((argc==2 || argc==3) && (!strcmp(argv[1],"audit-coast") || !strcmp(argv[1],"published-coast")))
+        return check_audit_coast(argc==3?argv[2]:"",argv[1][0]=='p');
+    if((argc==2 || argc==3) && (!strcmp(argv[1],"audit-banks") || !strcmp(argv[1],"published-banks")))
+        return check_audit_banks(argc==3?argv[2]:"",argv[1][0]=='p');
     if((argc==2 || argc==3) && !strcmp(argv[1],"bridge-pages-input"))
         return check_pages_keyboard(argc==3?argv[2]:"",LIVE_BRIDGE);
     if((argc==2 || argc==3) && !strcmp(argv[1],"town-pages-input"))

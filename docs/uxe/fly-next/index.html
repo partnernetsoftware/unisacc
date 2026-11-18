@@ -34,7 +34,7 @@ addEventListener("unhandledrejection",event=>reportFlightError(event.reason));
 </script>
 <script type="module">
 import { drawAircraft } from "./d1-pixel-aircraft.js";
-import { pixelWorld } from "./d1-pixel-world.js";
+import { pixelWorld } from "./d1-coast-audit.js";
 import { combatModel } from "./d1-pixel-combat.js";
 import { audioModel } from "./d1-audio.js";
 
@@ -64,6 +64,10 @@ const {meta}=boot;
 const inputs=["input_turn","input_climb","input_boost"].map(name=>meta.globals.indexOf(name));
 if(inputs.some(index=>index<0)) throw new Error("D1 飞行输入槽缺失");
 let flight,tick=0,firstFrame=0,minGap=1000,previousFrame=0,ended=false,restartTask;
+let displayed=0;
+let cameraBank=0;
+const tail=[];
+let chaseMeasure=[];
 window.onHostGpuSubmit=bytes=>{
   const view=new DataView(bytes);
   if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
@@ -73,7 +77,7 @@ window.onHostGpuSubmit=bytes=>{
     altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
   };
 };
-function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true,battleView=null) {
+function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true,battleView=null,present=true) {
   if(ended) return;
   flight=null;
   core.host_reset();
@@ -86,12 +90,39 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true,
     y:158-Math.round(flight.pitch*(query.has("flat-pitch")?.18:.55)),
     roll:flight.bank*(query.has("shallow-roll")?24:52)*Math.PI/(24*180)
   };
-  if(paintWorld) world.paint(flight,tick);
-  else buffer.clearRect(0,0,426,240);
+  cameraBank=query.has("fixed-chase")?0:(3*cameraBank+flight.bank)/4;
+  const rise=Math.abs(cameraBank)*.34,side=-cameraBank*.43,tilt=-cameraBank*.29;
+  const trailLimit=query.has("short-w1-trail")?18:30;
+  tail.unshift(flight.bank);
+  if(tail.length>trailLimit) tail.pop();
+  if(paintWorld && present) {
+    const heading=query.has("still") && query.has("coast-heading")?Number(query.get("coast-heading")):flight.heading;
+    const radians=heading*Math.PI/180;
+    world.paint({...flight,heading,x:flight.x+Math.cos(radians)*side,
+      z:flight.z+Math.sin(radians)*side,altitude:flight.altitude+rise,horizonTilt:tilt},tick);
+  }
+  else if(present) buffer.clearRect(0,0,426,240);
   combat.update(battleView??flight,tick,gun,missile,attitude);
-  drawAircraft(buffer,213,attitude.y,flight.pitch,attitude.roll,flight.speed,tick);
+  const c=Math.cos(attitude.roll),s=Math.sin(attitude.roll);
+  let bend=0;
+  for(let i=0;i<tail.length;i++) {
+    bend+=tail[i]*(i+1)*.007;
+    if(i<5 || !present) continue;
+    for(const wing of [-1,1]) {
+      const tip=wing*38;
+      buffer.fillStyle=i<13?"#e9f3e8":i<24?"#c9e8e6":"#95bfc8";
+      buffer.fillRect(Math.round(213+tip*c-5*s+wing*i*.72-bend),
+        Math.round(attitude.y+tip*s+5*c+i*1.39),i<16?2:1,2);
+    }
+  }
+  chaseMeasure=[flight.bank,Math.round(rise*1000),Math.round(side*1000),Math.round(tilt*1000),
+    tail.length,Math.round(bend*1000)];
+  if(present) drawAircraft(buffer,213,attitude.y,flight.pitch,attitude.roll,flight.speed,tick);
   const hud=combat.hud();
-  display.drawImage(low,0,0);
+  if(present || hud.lost) {
+    display.drawImage(low,0,0);
+    displayed++;
+  }
   if(hud.lost) {
     ended=true;
     loss.querySelector("p").textContent="击落 "+hud.kills+" 架";
@@ -102,7 +133,7 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true,
     if(!firstFrame) firstFrame=stamp;
     if(previousFrame) minGap=Math.min(minGap,stamp-previousFrame);
     previousFrame=stamp;
-    result.textContent=[flight.heading,hud.ammo,hud.missiles,Number(hud.locked),tick,
+    result.textContent=[flight.heading,hud.ammo,hud.missiles,Number(hud.locked),displayed,
       Math.round(stamp-firstFrame),Math.round(minGap*1000)].join(",");
     result.dataset.audio=audio.counts().join(",");
   }
@@ -112,7 +143,9 @@ async function restartFlight() {
   try {
     core=(await window.host1Boot(flightProgram)).exports;
     combat=combatModel(buffer,query,audio.trigger);
-    tick=firstFrame=previousFrame=0;
+    cameraBank=0;
+    tail.length=0;
+    tick=displayed=firstFrame=previousFrame=0;
     minGap=1000;
     ended=false;
     loss.hidden=true;
@@ -141,10 +174,26 @@ frame(0,0,0);
 if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
 if(query.get("still")==="impact") for(let i=1;i<18;i++) frame(0,0,0,false,i===3);
 if(query.get("still")==="bank") for(let i=0;i<6;i++) frame(1,1,0);
+if(query.get("still")==="chase") for(let i=0;i<33;i++) frame(i<31?1:0,0,0);
 if(query.get("still")==="skirmish") replayCombat(55);
 if(query.get("still")==="loss") replayCombat(142);
 if(query.get("still")==="wave") replayWave(89);
-if(query.has("audio")) {
+if(query.has("w1-check")) {
+  const trace=[];
+  for(let i=0;i<54;i++) {
+    frame(i<19?1:i<33?-1:0,0,0,false,false,0,i%8===7);
+    trace.push(chaseMeasure.join(","));
+  }
+  result.id="pixels";
+  result.textContent=trace.join(";");
+} else if(query.has("coast-audit")) {
+  const views=[world.coastMap()];
+  for(const heading of [-18,0,18]) {
+    world.paint({...flight,heading},1);
+    views.push(world.coastView());
+  }
+  result.textContent=views.join("|");
+} else if(query.has("audio")) {
   for(let i=1;i<18;i++) frame(0,0,1,i===1,i===3);
   const samples=await audio.sample(query.get("audio").split(",").map(Number));
   result.id="pixels";
@@ -266,16 +315,24 @@ if(query.has("audio")) {
   canvas.addEventListener("pointerleave",()=>{ pointer=null; buttons=0; });
   canvas.addEventListener("contextmenu",event=>event.preventDefault());
   addEventListener("blur",()=>{ keys.clear(); pointer=null; buttons=0; });
-  let last=performance.now();
+  let previous=performance.now(),last=previous,pending=0;
+  let prior=[0,0,0,false,false];
   function loop(now) {
-    if(now-last+.25>=frameInterval) {
+    pending+=Math.min(200,now-previous);
+    previous=now;
+    if(now-last+.25>=frameInterval && pending+.25>=frameInterval) {
       last=now;
       const keyAxis=Number(keys.has("KeyD")||keys.has("ArrowRight"))-Number(keys.has("KeyA")||keys.has("ArrowLeft"));
       const keyClimb=Number(keys.has("KeyW")||keys.has("ArrowUp"))-Number(keys.has("KeyS")||keys.has("ArrowDown"));
       const axis=keyAxis||(pointer&&Math.abs(pointer.x)>.2?Math.sign(pointer.x):0);
       const climb=keyClimb||(pointer&&Math.abs(pointer.y)>.3?-Math.sign(pointer.y):0);
-      frame(axis,climb,Number(keys.has("ShiftLeft")||keys.has("ShiftRight")),
-        (buttons&1)||keys.has("Space")||keys.has("KeyF"),(buttons&2)||keys.has("KeyM"),now);
+      const boost=Number(keys.has("ShiftLeft")||keys.has("ShiftRight"));
+      const gun=(buttons&1)||keys.has("Space")||keys.has("KeyF"),missile=(buttons&2)||keys.has("KeyM");
+      const steps=Math.floor((pending+.25)/frameInterval);
+      pending-=steps*frameInterval;
+      for(let i=1;i<steps;i++) frame(...prior,0,false,null,false);
+      frame(axis,climb,boost,gun,missile,now);
+      prior=[axis,climb,boost,gun,missile];
     }
     requestAnimationFrame(loop);
   }
