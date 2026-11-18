@@ -1,0 +1,30 @@
+/* Tool self-check for tools/dvreport.cx, using a captured timing --since 0 --job receipt.
+ * Check: dvreport. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+
+static char image[4096],out[4096];
+static int report(char *file,char *kind,char *id) {
+    char *v[]={image,"--sample",file,"--kind",kind,"--job",id,"--window-ms","60000",0};
+    return ck_run(v,out,sizeof out);
+}
+int main(int argc,char **argv){
+    char root[4096],temp[4096],why[256];
+    char *fixture="tests/cases/dvreport-timing.tsv",*id="21409114678-1156501";
+    if(sy_cwd(root,sizeof root)<0 || sy_mkdtemp("/tmp","dvreport-check",temp,sizeof temp))return 2;
+    if(argc==2){if(cx_fmt(image,sizeof image,"%s",argv[1]))return 2;}
+    else if(cx_fmt(image,sizeof image,"%s/report",temp) || tq_native(root,"tools/dvreport.cx",image,why,sizeof why))return 2;
+    ck(report(fixture,"git.commit",id)==0 && strstr(out,"longest=other\tshare_pct=100"),"longest-recorded-phase");
+    ck(strstr(out,"window_pct=100\tadvice=split-phase")!=0,"window-pressure-advice");
+    ck(strstr(out,"refused_pct=UNMEASURED")!=0,"timeout-is-not-a-refusal");
+    ck(report("/dev/null","git.commit",id)==0 && strstr(out,"longest=UNMEASURED"),"empty-events");
+    ck(report(fixture,"other",id)==0 && strstr(out,"advice=UNMEASURED"),"unknown-command");
+    ck(report(fixture,"git.commit","another-job")==0 && strstr(out,"share_pct=UNMEASURED"),"other-job-excluded");
+    if(argc==1)sy_unlink(image);
+    sy_rmdir(temp);
+    printf("CHECK_DVREPORT\tpassed=%d\tfailed=%d\n",ck_assertions()-ck_failures(),ck_failures());
+    return ck_failures()?1:0;
+}

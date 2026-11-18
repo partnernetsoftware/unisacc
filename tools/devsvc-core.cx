@@ -610,6 +610,24 @@ static const char *opt(int argc, char **argv, const char *name, const char *def)
 }
 
 static long run_deadline_ms = 60000;   /* qualify 放宽为自身逐批有界(每批 60 秒)的总上限 */
+static const char *report_kind;
+static long report_window, report_epoch;
+static int report_pid;
+static void report_end(const char *kind,const char *job) {
+    char pid[32],epoch[32],window[32];
+    if(!kind || !dir[0])return;
+    cx_fmt(pid,sizeof pid,"%d",report_pid);cx_fmt(epoch,sizeof epoch,"%ld",report_epoch);
+    cx_fmt(window,sizeof window,"%ld",report_window);
+    char *v[]={"sh",cfg.product,"tools/dvreport.cx","--","--instance",dir,"--kind",(char*)kind,
+               "--job",(char*)job,"--pid",pid,"--since-epoch",epoch,"--window-ms",window,0};
+    sy_spawn_t o;sy_exit_t ex;sy_spawn_init(&o);o.argv=v;o.pgroup=-1;o.deadline_ms=35000;
+    fflush(stdout);
+    if(sy_proc_run(&o,&ex) || sy_exit_code(&ex))printf("REPORT\tcmd=%s\tjob=%s\tlongest=UNMEASURED\n",kind,job);
+}
+static int report_tool(const char *p) {
+    const char *base=strrchr(p,'/');base=base?base+1:p;
+    return !strcmp(base,"candidate-chain.cx") || !strcmp(base,"release-run.cx");
+}
 static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOOL 或 --local */
     char bin[PW], req[2 * PW]; const char *cache = "?"; long prep = 0, t0, t1; int local = 0, rc, i; char *v[64];
     sy_spawn_t o; sy_exit_t ex;
@@ -637,7 +655,10 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
         v[0] = bin; for (i = sk; i < argc; i++) v[k++] = argv[i]; v[k] = 0; }
     sy_spawn_init(&o); o.argv = v; o.flags = SY_SPAWN_NO_PATH; o.pgroup = -1; o.deadline_ms = run_deadline_ms;
     fflush(stdout);
-    rc = sy_proc_run(&o, &ex);
+    if(report_kind && !strcmp(report_kind,"qualify")) {
+        sy_child_t child;rc=sy_proc_spawn(&o,&child);
+        if(!rc){report_pid=child.pid;rc=sy_proc_wait(&child,&ex);sy_proc_close(&child);}
+    } else rc = sy_proc_run(&o, &ex);
     if (!quiet) fprintf(stderr, "DEVSVC_RUN\t%s\tvia=%s\tcache=%s\tprep_ms=%ld\trun_ms=%ld\trc=%d\n", argv[0], local ? "local" : "service", cache, t1 - t0, sy_now_ms() - t1, rc ? -1 : sy_exit_code(&ex));
     return rc ? 1 : sy_exit_code(&ex);
 }
@@ -1063,6 +1084,11 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--ti
         else break;
     }
     if (a >= argc || argc - a > FL_MAX_ARGV) { fprintf(stderr, "devsvc: REFUSE x: %s\n%s\n", a >= argc ? "missing command after --" : "too many command words", X_USE); return 2; }
+    for(int j=a;j<argc;j++) {
+        if(report_tool(argv[j])){report_kind="x";report_window=tm;break;}
+        const char *p=strrchr(argv[j],'/');p=p?p+1:argv[j];
+        if(strcmp(p,"sh") && strcmp(p,"unisacc.com"))break;
+    }
     if (!par) { fprintf(stderr, "devsvc: REFUSE missing --par (x needs --par N, 1..32; one command is --par 1)\n%s\n", X_USE); return 2; }
     if (!strcmp(argv[a], "git") && a + 1 < argc) {   /* 危险 git 子命令具名拒绝(rc 125);DEVSVC_ALLOW_DANGEROUS=1 放行并记事件。先跳过 -C X、-c X、--git-dir= 等前置选项再取子命令词 */
         static const char *bad[] = {"stash", "reset", "clean", "checkout", "restore", "rebase", 0};
@@ -2111,6 +2137,8 @@ static int bg_child(void *ud) {
     dt_job(j->id);
     r = main2(j->argc, j->argv);
     timing_finish(r);
+    if(j->commit){report_window=FL_NODE_MS;report_end("git.commit",j->id);}
+    else report_end(report_kind,j->id);
     fflush(stdout); fflush(stderr);
     if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\t%s",
                             j->owner, sy_pid(), r, sy_now_ms() - t0, commit_outcome(r), commit_range))
@@ -2377,7 +2405,7 @@ static int cxdev_kick(const char *root, const char *path) {   /* 返回 1:路径
 }
 
 int main(int argc, char **argv) {
-    long t0 = sy_now_ms();dt_begin(t0);
+    long t0 = sy_now_ms();dt_begin(t0);report_epoch=sy_wall_s();report_pid=sy_pid();
     int r = main2(argc, argv), a = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;
     if(!last_job[0])timing_finish(r);
     if (!ovf && dir[0] && argc > a) {   /* 命令完成事件:kind=<命令>.<子命令>,带 owner、rc、ms;实例不在则不记(不为记事件拉起实例) */
@@ -2424,6 +2452,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[a], "git") && !strcmp(argv[a + 1], "commit") && !flag(argc, argv, "--cwd") && !getenv("DEVSVC_GIT_PARSE_ONLY")) { for (i = a + 2; i < argc; i++) if (cxdev_kick(root, argv[i])) break; }
         }
     }
+    if(!last_job[0])report_end(report_kind,"");
     if (ovf) { fprintf(stderr, "devsvc: a path or argument did not fit its buffer (%d)\n", ovf); return 2; }
     return r;
 }
@@ -2465,6 +2494,7 @@ static int main2(int argc, char **argv) {
         for(int i=0;i<argc;i++)v[3+i]=argv[i];v[3+argc]=0;return cmd_run(root,3+argc,v);
     }
     if (!strcmp(cmd, "git") && argc >= 2 && !strcmp(argv[0], "commit") && !strcmp(argv[1], "--status")) return argc <= 3 ? commit_status(argc == 3 ? argv[2] : 0) : 2;
+    if(!strcmp(cmd,"git") && argc && !strcmp(argv[0],"commit")){report_kind="git.commit";report_window=FL_NODE_MS;}
     if(!strcmp(cmd,"flow") || !strcmp(cmd,"x") || (!strcmp(cmd,"git") && argc && !strcmp(argv[0],"commit")))
         dt_command(!strcmp(cmd,"git")?"git.commit":cmd,root,argc,argv);
     if (!strcmp(cmd, "git") && argc >= 2 && argc <= 56 && !strcmp(argv[0], "commit") && flag(argc, argv, "--untrack")) {   /* commit --untrack PATH:tools/dvgitx.cx 私有索引停跟踪,工作副本不动 */
@@ -2478,6 +2508,7 @@ static int main2(int argc, char **argv) {
         v[n] = 0; return cmd_run(root, n, v);
     }
     if (!strcmp(cmd, "qualify") && argc <= 56) {   /* qualify --candidate APE [--set ..] [--out F] [--jobs N]:tools/dvqualify.cx,timing 事件经 DEVSVC_SOCK */
+        if(!flag(argc,argv,"--list")){report_kind="qualify";report_window=1800000;}
         char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvqualify.cx"; v[n++] = (char *)root;
         for (int i = 0; i < argc; i++) v[n++] = argv[i];
         v[n] = 0; setenv("DEVSVC_SOCK", sockp, 1); run_deadline_ms = 1800000; return cmd_run(root, n, v);
@@ -2507,7 +2538,10 @@ static int main2(int argc, char **argv) {
     }
     if (!strcmp(cmd, "ping") || !strcmp(cmd, "stop")) return say(request(root, cmd, 0));
     if (!strcmp(cmd, "status")) return cmd_status(root, argc > 0 && !strcmp(argv[0], "--paths"));
-    if (!strcmp(cmd, "run")) { int r = cmd_run(root, argc, argv); return r == 2 && argc < 1 ? usage() : r; }
+    if (!strcmp(cmd, "run")) { for(int k=0;k<argc && argv[k][0]!='\0';k++){
+        if(argv[k][0]=='-')continue;
+        if(report_tool(argv[k])){report_kind="run";report_window=run_deadline_ms;}break;
+    } int r = cmd_run(root, argc, argv); return r == 2 && argc < 1 ? usage() : r; }
     if (!strcmp(cmd, "doc")) {
         int r = cmd_doc(root, argc, argv);
         if (r == 2 && !ovf) fprintf(stderr, "devsvc: bad doc arguments: doc get|set|append|remove|list|mermaid|repair FILE SECTION [k=v|k@=PATH ...] [--from F] [--body] [--expect-sha X]  (a '/' inside a title is written %%2F, '%%' as %%25)\n");

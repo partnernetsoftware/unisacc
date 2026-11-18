@@ -1,0 +1,97 @@
+/* Tool self-check: tools/check-dvreport.cx. Per-job diagnostic from retained timing events.
+ * --sample FILE or --instance DIR, --kind CMD --job ID [--window-ms N].
+ * Check: dvreport. */
+#pragma unisa use sys.fs
+#pragma unisa use text.conv
+
+static long number(const char *s) {
+    int64_t n;
+    return s && *s>='0' && *s<='9' && !tx_to_i64(s,strlen(s),10,&n) && n>=0 ? (long)n : -1;
+}
+/* Resolve the existing job identity of a known child. A reused PID or an
+ * incomplete event cannot attribute an unrelated request to this caller. */
+static int resolve(const char *dir,const char *file,const char *kind,long pid,long epoch,char *job) {
+    char path[4096],line[1024],prefix[96],suffix[48];
+    if(cx_fmt(path,sizeof path,"%s/%s",dir,file) || cx_fmt(prefix,sizeof prefix,"\tphase\tcmd=%s\t",kind) ||
+       cx_fmt(suffix,sizeof suffix,"-%ld",pid))return 1;
+    FILE *f=fopen(path,"r");
+    if(!f)return errno!=ENOENT;
+    int bad=0;
+    while(fgets(line,sizeof line,f)){
+        long seq,t; char *p=strstr(line,"\tjob=");
+        if(!p || !strstr(line,prefix) || sscanf(line,"EV\t%ld\t%ld\t",&seq,&t)!=2 || t<epoch)continue;
+        p+=5;char *end=strpbrk(p,"\t\n");if(!end)continue;*end=0;
+        long n=strlen(p),k=strlen(suffix);
+        if(n<=k || strcmp(p+n-k,suffix))continue;
+        if((*job && strcmp(job,p)) || cx_fmt(job,96,"%s",p)){bad=1;break;}
+    }
+    if(ferror(f))bad=1;
+    fclose(f);return bad;
+}
+static void percent(char *s,long part,long total) {
+    if (part<0 || total<=0) cx_fmt(s,32,"UNMEASURED");
+    else cx_fmt(s,32,"%.0f",(double)part*100.0/(double)total);
+}
+int main(int argc,char **argv) {
+    const char *kind="",*job="",*sample=0,*dir=0;
+    long window=-1,pid=0,epoch=-1;char resolved[96]="";
+    for (int i=1;i<argc;i+=2) {
+        if (i+1==argc) return 2;
+        if (!strcmp(argv[i],"--kind")) kind=argv[i+1];
+        else if (!strcmp(argv[i],"--job")) job=argv[i+1];
+        else if (!strcmp(argv[i],"--sample")) sample=argv[i+1];
+        else if (!strcmp(argv[i],"--instance")) dir=argv[i+1];
+        else if (!strcmp(argv[i],"--window-ms")) window=number(argv[i+1]);
+        else if (!strcmp(argv[i],"--pid")) pid=number(argv[i+1]);
+        else if (!strcmp(argv[i],"--since-epoch")) epoch=number(argv[i+1]);
+        else return 2;
+    }
+    if ((!dir && !sample) || (dir && sample)) return 2;
+    if (dir && !*job && pid>0 && epoch>=0 &&
+        !resolve(dir,"events.tsv.1",kind,pid,epoch,resolved) &&
+        !resolve(dir,"events.tsv",kind,pid,epoch,resolved)) job=resolved;
+    int known=!strcmp(kind,"git.commit") || !strcmp(kind,"qualify") || !strcmp(kind,"x") || !strcmp(kind,"flow") || !strcmp(kind,"perf");
+    char longest[160]="UNMEASURED"; long maximum=-1,total=-1,total_rc=-1;
+    int refused=0,totals=0;
+    for(int part=0;known && *job && part<(sample?1:2);part++){
+      char path[4096],line[2048];
+      if(!sample && cx_fmt(path,sizeof path,"%s/%s",dir,part?"events.tsv":"events.tsv.1"))break;
+      FILE *f=fopen(sample?sample:path,"r");if(!f)continue;
+      while(fgets(line,sizeof line,f)){
+        char *end=strchr(line,'\n');if(!end)continue;*end=0;
+        char *body;
+        if(sample) {
+            if(strncmp(line,"JOB\t",4))continue;
+            body=line+4;
+        } else {
+            long seq,t;int offset=0;
+            if(sscanf(line,"EV\t%ld\t%ld\tphase\t%n",&seq,&t,&offset)!=2 || !offset)continue;
+            body=line+offset;
+        }
+        char *name=0,*op=0,*id=0; long ms=-1,rc=-1;
+        for (char *p=body;p;) {
+            char *next=strchr(p,'\t'); if(next)*next++=0;
+            if (!strncmp(p,"cmd=",4)) op=p+4;
+            else if (!strncmp(p,"phase=",6)) name=p+6;
+            else if (!strncmp(p,"job=",4)) id=p+4;
+            else if (!strncmp(p,"ms=",3)) ms=number(p+3);
+            else if (!strncmp(p,"rc=",3)) rc=number(p+3);
+            p=next;
+        }
+        if (!op || strcmp(op,kind) || !id || strcmp(id,job) || !name || !*name || ms<0) continue;
+        if (!strcmp(name,"total")) {total=ms;total_rc=rc;totals++;continue;}
+        if (!strcmp(name,"gates") && !strcmp(kind,"git.commit") && (rc==1 || rc==2)) refused=1;
+        if (ms>maximum) {maximum=ms;cx_fmt(longest,sizeof longest,"%s",name);}
+      }
+      fclose(f);
+    }
+    if(!strcmp(kind,"qualify") && !strncmp(longest,"batch:",6))window=60000;
+    if(!strcmp(kind,"qualify") && !strcmp(longest,"segment"))window=300000;
+    char share[32],pressure[32];
+    percent(share,maximum,totals==1 && total>=maximum?total:-1);
+    percent(pressure,maximum,window);
+    const char *rate=totals!=1?"UNMEASURED":total_rc==0?"0":refused?"100":"UNMEASURED";
+    const char *advice=maximum<0 || window<=0?"UNMEASURED":(double)maximum/window>0.6?"split-phase":"none";
+    printf("REPORT\tcmd=%s\tjob=%s\tlongest=%s\tshare_pct=%s\trefused_pct=%s\twindow_pct=%s\tadvice=%s\n",kind,job,longest,share,rate,pressure,advice);
+    return 0;
+}

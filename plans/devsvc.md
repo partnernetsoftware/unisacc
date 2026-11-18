@@ -411,6 +411,10 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 补测截至 main 的 865ce7472c。按共享检出 main 的 reflog 重建实际前移顺序,十二次更新中十一次未改候选输入,键均未变。从 7ff86082a9 快进到 0dae4d3024 时带入产品事实表和执行表,候选键变化一次。离线回放有了一个正样本。在线影子仍缺连续 24 小时记录,自动与手动候选字节对照仍待实跑。
 
+## devsvc 作业结束时的耗时回报
+
+提交、qualify 和经 devsvc x 运行的 candidate-chain、release-run 在原回执之后输出 REPORT。dvreport 按本次 job 读取 timing 使用的两代事件文件。share_pct 的分母是该作业的 total,window_pct 的分母是运行窗口,最长相占窗口超过 60% 时提示 split-phase。qualify 的单批窗口为 60 秒,分段窗口为 300 秒。refused_pct 按本次请求计算,成功为 0,明确被提交门拒绝为 100;超时、缺少本次事件、缺少分母时相应字段为 UNMEASURED。直接经 devsvc run 执行且没有分相事件的工具也输出 UNMEASURED。报告只读,原命令的输出与退出码保留。复验入口为 tools/check-dvreport.cx,样本为 tests/cases/dvreport-timing.tsv。
+
 ## 整链提速(2026-11-18)
 
 建议先拆长作业实际占用的写域。real6 的慢点是两代 Linux 对象批，chain4 的慢点已转到跨平台整目标重试。real6 从起到止 3752 秒，链内自产管理器。chain4 显式传两份管理器，OWNER 到 EXIT 为 1613 秒，499/499、rc 0；chain2 首次为 1379 秒，停在 pack；chain3 为 1346 秒，停在 cache-manager 缺 checkpoint。三者都不能替 real6 的同配方冷构造验收。
