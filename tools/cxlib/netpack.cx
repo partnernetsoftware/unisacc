@@ -21,9 +21,9 @@
                                    stderr through two pipes read to their ends (as communicate() does), res.rc the
                                    returncode (-N for signal N).  0, or -1 with WHY the exception's line (the exec's or
                                    the cwd's OSError, or `subprocess.TimeoutExpired: ...`; the child's whole process
-                                   group is SIGKILLed, so grandchildren do not outlive the bound).  SECS counts 1 ms
-                                   ticks, one per loop pass whether or not output arrived (<time.h> is not in the
-                                   prelude), so a child that keeps writing is bounded too; read time is not counted
+                                   group is SIGKILLed, so grandchildren do not outlive the bound). SECS is a monotonic
+                                   wall-clock budget shared by the exec handshake, process exit and output draining;
+                                   caller suspension and continuously arriving output do not reset it.
      np_free(&res)
      np_put / np_puts / np_putll   append bytes / a string / a decimal to an np_buf (grown on the heap; never a
                                    vsnprintf of a string, see the runtime's long-%s bug)
@@ -45,10 +45,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
 
-typedef struct np_buf { char *p; size_t n, cap; } np_buf;
-/* timed_out is 1 when np_run killed the child at its bound (np_run then returns -1 with the
-   TimeoutExpired text in why); 0 for a spawn/cwd failure or a child that exited. */
-typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result;
+#pragma unisa use sysx.processcore
 
 /* ---- byte buffers -------------------------------------------------------------------------------------------- */
 void np_put(np_buf *b, const char *s, size_t n) {
@@ -757,123 +754,8 @@ done:
 }
 
 /* ---- subprocess.run(capture_output=True) ---------------------------------------------------------------------- */
-void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; r->residue = 0; r->timed_out = 0; }
-/* A double-forked descendant that lost its parent reparents to the nearest subreaper; the sweep below only
-   recognises children of this process, so a caller that spawns a tree must call np_subreaper() first (before
-   np_run).  Without it the orphan belongs to some ancestor (tmux, systemd --user, an editor) and residue 0
-   would say clean about a process nobody looked at.  np_run does not reap adopted orphans either -- a global
-   waitpid here would steal the caller's own children -- so a caller that wants a pid to be gone from /proc
-   reaps them itself after the tree is dead. */
+/* Compatibility name; capture and buffer types are owned by sysx.process. */
 int np_subreaper(void) { return rp_subreaper(); }
-/* Test seam for the residue path (tools/ only; cx/ and src/ never read it): UNISACC_NP_FAULT=residue makes a
-   timeout report one fake survivor, so the "survived)" suffix and the run-batch FAIL branch can be exercised
-   on a machine where nothing actually survives.  Any other value is refused by name; unset is the normal path. */
-static int np_fault(void) {
-    const char *v = getenv("UNISACC_NP_FAULT");
-    if (!v || !*v) return 0;
-    if (!strcmp(v, "residue")) return 1;
-    return -1;
-}
-/* Reap only this child, never the caller's other jobs. SIGKILL is asynchronous;
-   allow at most two seconds and 2000 polls for its exit to become waitable. */
-static int np_reap_killed(pid_t pid, int *st) {
-    int i;
-    for (i = 0; i < 2000; i++) {
-        int w = waitpid(pid, st, WNOHANG);
-        if (w == pid || (w < 0 && errno == ECHILD)) return 0;
-        if (w < 0 && errno != EINTR) return -1;
-        usleep(1000);
-    }
-    return -1;
-}
-int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
-    int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
-    pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
-    int fault = np_fault();
-    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0; res->timed_out = 0;
-    if (fault < 0) { snprintf(why, wl, "ValueError: UNISACC_NP_FAULT=%s refused (only residue)", getenv("UNISACC_NP_FAULT")); return -1; }
-    if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
-    (void)sy_fd_cloexec(pf[1], 1);
-    pid = fork();
-    if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
-    if (pid == 0) {
-        sy_setpgid(0, 0);   /* own process group: a timeout kills every descendant */
-        close(po[0]); close(pe[0]); close(pf[0]);
-        dup2(po[1], 1); dup2(pe[1], 2); close(po[1]); close(pe[1]);
-        if (envadd && envadd[0]) {
-            /* dict(os.environ, K=V): rebuilt in environ itself (the runtime's setenv() does not reach execvp) */
-            size_t n = 0, a = 0, x, y; char **ne, **v;
-            for (v = environ; *v; v++) n++;
-            while (envadd[a]) a++;
-            ne = malloc((n + a + 1) * sizeof *ne);
-            if (!ne) _exit(255);
-            for (x = 0, v = environ; *v; v++) {
-                int keep = 1;
-                for (y = 0; y < a; y++) {
-                    size_t l = strcspn(envadd[y], "=");
-                    if (!strncmp(*v, envadd[y], l) && (*v)[l] == '=') keep = 0;
-                }
-                if (keep) ne[x++] = *v;
-            }
-            for (y = 0; y < a; y++) ne[x++] = envadd[y];
-            ne[x] = 0;
-            environ = ne;
-        }
-        if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
-        execvp(argv[0], argv);
-        err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
-        _exit(255);
-    }
-    sy_setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
-    close(po[1]); close(pe[1]); close(pf[1]);
-    k = read(pf[0], err, sizeof err);
-    close(pf[0]);
-    if (k == (ssize_t)sizeof err) {
-        if (np_reap_killed(pid, &st) < 0) res->residue = 1;
-        close(po[0]); close(pe[0]);
-        np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
-        return -1;
-    }
-    fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
-    np_put(&o, "", 0); np_put(&e, "", 0);
-    while (open_o || open_e || !reaped) {
-        int got = 0;
-        if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
-        if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
-        if (!reaped) {
-            int w = waitpid(pid, &st, WNOHANG);
-            if (w == pid) reaped = 1;
-        }
-        if (!open_o && !open_e && reaped) break;
-        (void)got;
-        if (idle >= (long)secs * 1000) {   /* 1 ms ticks, counted with or without output */
-            size_t i; char rep[256];
-            int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
-            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
-            res->residue = sv;
-            res->timed_out = 1;
-            if (fault == 1) { res->residue = 1; fputs("FAULT_INJECTED\tresidue\n", stderr); }
-            if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
-                res->residue = 1;
-                memcpy(rep, "direct child not reaped", sizeof "direct child not reaped");
-                sv = 1;
-            }
-            if (open_o) close(po[0]);
-            if (open_e) close(pe[0]);
-            free(o.p); free(e.p);
-            {   np_buf l = { 0, 0, 0 };
-                np_puts(&l, "subprocess.TimeoutExpired: Command '[");
-                for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
-                np_puts(&l, "]' timed out after ");
-                snprintf(t, sizeof t, "%d seconds", secs); np_puts(&l, t);
-                if (res->residue > 0) { np_puts(&l, " ("); np_puts(&l, sv > 0 ? rep : "injected"); np_puts(&l, " survived)"); }
-                snprintf(why, wl, "%s", l.p); free(l.p);
-            }
-            return -1;
-        }
-        usleep(1000); idle++;
-    }
-    res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
-    res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
-    return 0;
-}
+/* Thin compatibility facade. Do not co-import sysx.process (same facade names). */
+void np_free(np_result *r) { pc_free(r); }
+int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) { return pc_run(argv,cwd,envadd,secs,res,why,wl,1); }

@@ -1,0 +1,26 @@
+/* Checks cxlib.batchdomain: six domains, checked rules and fail-closed inference. */
+#pragma unisa use cxlib.batchdomain
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+static int ok=0,failed=0;
+static void check(int yes,const char*name){printf("CHECK %s %s\n",name,yes?"PASS":"FAIL");if(yes)ok++;else failed++;}
+static const char*head="id\tpriority\tentry\ttier\tlayer\tobject\tdomain\tsample\tbasis\n";
+static void put(const char*path,const char*rows){size_t n=strlen(head)+strlen(rows)+1;char*b=mm_alloc(n);if(!b||cx_fmt(b,n,"%s%s",head,rows)){check(0,"fixture-format");mm_free(b);return;}int z=sy_write_atomic(path,b,strlen(b),0600);check(!z,"fixture-write");mm_free(b);}
+static int decide(const BdomRules*d,const char*entry,const char*tier,const char*layer,const char*object,char*w){int r=-1;return bdom_decide(d,"probe",entry,tier,layer,object,&r,w,600);}
+int main(void){
+ char path[256],why[600]={0};if(cx_fmt(path,sizeof path,"/tmp/unisacc-batchdomain-%ld.tsv",(long)sy_pid()))return 2;BdomRules d;
+ for(int i=0;i<6;i++)check(bdom_name(i)&&bdom_kind(bdom_name(i))==i,"six-domains-roundtrip");
+ check(bdom_kind("product")<0&&!bdom_name(-1)&&!bdom_name(6),"invalid-domain-refused");
+ put(path,"base\t10\t*\t*\t*\tcompiler\tproduct-qualification\tprobe\tCompiler is the tested object.\nservice\t20\ttools/*\tcommit\ttool\tcompiler&devsvc|flow\tdevsvc-selfcheck\tprobe\tDevelopment-service contract is more specific.\n");
+ int rc=bdom_read(path,&d,why,sizeof why);check(!rc,"rules-read");
+ if(!rc){check(decide(&d,"tools/check.cx","commit","tool","compiler devsvc",why)==3,"priority-wins");check(decide(&d,"tools/check.cx","full","tool","COMPILER devsvc",why)==0,"tier-and-case");check(decide(&d,"tests/check.cx","commit","tool","compiler devsvc",why)==0,"entry-pattern");check(decide(&d,"tools/check.cx","commit","product","compiler devsvc",why)==0,"layer-pattern");check(decide(&d,"tools/check.cx","commit","tool","compiler",why)==0,"object-and-or");check(decide(&d,"tools/check.cx","commit","tool","",why)<0&&strstr(why,"domain-missing-declaration"),"missing-declaration-refused");check(decide(&d,"tools/check.cx","commit","tool","unrelated",why)<0,"unknown-object-refused");}bdom_close(&d);
+ put(path,"a\t10\t*\t*\t*\tcompiler\tproduct-qualification\tprobe\tFirst object.\nb\t10\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tConflicting object.\n");rc=bdom_read(path,&d,why,sizeof why);check(!rc&&decide(&d,"tools/x.cx","full","tool","compiler",why)<0&&strstr(why,"domain-conflict"),"conflict-refused");bdom_close(&d);
+ put(path,"a\t10\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tFirst.\nb\t10\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tSame domain.\n");rc=bdom_read(path,&d,why,sizeof why);check(!rc&&decide(&d,"tests/x.cx","full","product","compiler",why)==2,"same-domain-tie");bdom_close(&d);
+ put(path,"a\t10\t*\t*\t*\tcompiler\tbogus\tprobe\tInvalid domain.\n");rc=bdom_read(path,&d,why,sizeof why);check(rc<0&&strstr(why,"unknown-domain"),"rule-domain-refused");bdom_close(&d);
+ put(path,"a\t0\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tInvalid priority.\n");rc=bdom_read(path,&d,why,sizeof why);check(rc<0&&strstr(why,"rule-priority"),"zero-priority-refused");bdom_close(&d);
+ put(path,"a\t10\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tFirst.\na\t20\t*\t*\t*\tcompiler\ttool-selfcheck\tprobe\tDuplicate.\n");rc=bdom_read(path,&d,why,sizeof why);check(rc<0&&strstr(why,"duplicate-rule"),"duplicate-rule-refused");bdom_close(&d);
+ put(path,"a\t10\t*\t*\t*\tcompiler&&flow\ttool-selfcheck\tprobe\tInvalid expression.\n");rc=bdom_read(path,&d,why,sizeof why);check(rc<0&&strstr(why,"rules-shape"),"empty-object-term-refused");bdom_close(&d);
+ int z=sy_unlink(path);(void)z;printf("CHECK_BATCHDOMAIN\tfailed=%d\tpassed=%d\n",failed,ok);return failed?1:0;
+}

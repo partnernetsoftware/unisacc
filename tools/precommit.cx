@@ -395,6 +395,45 @@ static int tlib_api_gate(const char *root, const char *cp, char pkgs[][64], int 
     return blocked;
 }
 
+/* K4 reservation hint (WARN, never blocks): for each touched package ask tools/bump.cx --query PKG (version taken from
+   the index row of build/tlib-packages.tsv); VERDICT=unreserved -- bumped, but neither the next patch of HEAD nor any
+   live devsvc reservation -- prints TLIB_BUMP_UNRESERVED. head/next/reserved/reserved-other are silent. Any failure
+   of the query (no HEAD table, no instance directory) is silent too: this is a hint, the blocking gates stay as they are. */
+static void tlib_reserve_hint(const char *root, const char *cp, char pkgs[][64], int npkg) {
+    char bp[1200], *av[12], *o, f[3][40];
+    const char *key[3] = {"VERSION=", "NEXT=", "VERDICT="};
+    size_t n; long i, j; int p, k, q;
+    if (plan_dir || from_run || npkg <= 0) return;
+    if (cx_fmt(bp, sizeof bp, "%s/tools/bump.cx", root)) return;
+    if (sy_exists(bp) != 1) {
+        if (sy_exists("./tools/bump.cx") != 1) return;
+        tx_copy(bp, sizeof bp, "tools/bump.cx", 13);
+    }
+    for (p = 0; p < npkg; p++) {
+        k = 0; o = 0; n = 0;
+        av[k++] = "sh"; av[k++] = (char *)cp; av[k++] = bp; av[k++] = "--"; av[k++] = "--query"; av[k++] = pkgs[p];
+        av[k++] = "--root"; av[k++] = (char *)root; av[k] = 0;
+        if (cx_runv_timeout(av, 20, &o, &n) != 0 || !o) { mm_free(o); continue; }
+        for (q = 0; q < 3; q++) {   /* byte scan for each KEY= field of the BUMP_QUERY line */
+            long kl = tx_len(key[q], 16);
+            f[q][0] = 0;
+            for (i = 0; i + kl <= (long)n; i++) {
+                if ((i == 0 || o[i - 1] == '\t') && mm_same(o + i, key[q], kl)) {
+                    for (j = 0; i + kl + j < (long)n && o[i + kl + j] != '\t' && o[i + kl + j] != '\n' && j < 39; j++) f[q][j] = o[i + kl + j];
+                    f[q][j] = 0;
+                    break;
+                }
+            }
+        }
+        mm_free(o);
+        if (tx_eqz(f[2], "unreserved")) {
+            sy_printf("TLIB_BUMP_UNRESERVED\tpkg=%s\tversion=%s\texpected=%s\tWARN (not blocking): reserve first: sh ./unisacc.com tools/devsvc.cx -- bump %s, then sh ./unisacc.com tools/layer-api.cx -- --bump %s --version VERSION\n",
+                      pkgs[p], f[0], f[1], pkgs[p], pkgs[p]);
+            sy_eprintf("precommit: TLIB_BUMP_UNRESERVED %s version=%s expected=%s (WARN): sh ./unisacc.com tools/devsvc.cx -- bump %s\n", pkgs[p], f[0], f[1], pkgs[p]);
+        }
+    }
+}
+
 static int tlib_frozen_gate(const char *names, long sn) {
     const char *wt = sy_env("GIT_WORK_TREE"), *root = (wt && wt[0]) ? wt : ".";
     char tp[1200], fp[1200], cp[1200], pkgs[32][64], *av[40], *t, *rows;
@@ -457,6 +496,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
         at += l + 1;
     }
     mm_free(rows);
+    tlib_reserve_hint(root, cp, pkgs, npkg);
     blocked += tlib_api_gate(root, cp, pkgs, npkg);
     return blocked;
 }
@@ -913,7 +953,7 @@ int main(int argc, char **argv) {
                 long at5 = 0; int refused = 0, shards = 0;
                 while (at5 < rn3) { long e = tx_chr(ro + at5, rn3 - at5, '\n'), l = e < 0 ? rn3 - at5 : e, d = 0;
                     if (tx_find(ro + at5, l, "REFUSE", 6) >= 0) {
-                        sy_eprintf("precommit: BLOCKED tools-compile registry %.*s (run sh ./unisacc.com tests/tools-compile.cx -- --register . NEW, stage tests/tools-compile-sources.tsv and the tools-compile-NNN batches with the tool)\n", (int)l, ro + at5);
+                        sy_eprintf("precommit: BLOCKED tools-compile registry %.*s (register the new tool with sh ./unisacc.com tools/register.cx -- --tool tools/NAME.cx, which adds the tests/tools-compile-sources.tsv row and the tools-compile-NNN batches; stage them with the tool. Never pass an existing source as the output of tests/tools-compile.cx --register)\n", (int)l, ro + at5);
                         refused = 1; }
                     while (d < l && ro[at5 + d] >= '0' && ro[at5 + d] <= '9') d++;
                     if (l > 0 && d == l) shards = 1;

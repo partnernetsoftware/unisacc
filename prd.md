@@ -92,7 +92,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 ## 2. 有什么功能（已实现能力速查）
 
-完整工具索引见 build/tool-index.tsv,表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
+完整工具索引按内容身份现查:`sh ./unisacc.com tools/devsvc.cx -- tool-index`(与源树一致,热命中约 0.2 秒;本地文件副本不进版本控制,需要时 `derive.cx -- --write --only tool-index`),表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
 
 签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界；检查 `tools/check-release-members.cx ROOT`，只证明字节/结构，不认证签名或最终候选资格。
 
@@ -147,7 +147,10 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 测子进程 CPU 毫秒(不依赖墙钟/负载) | `sh ./unisacc.com tools/cpu-meter.cx -- CMD ARGS...`；检查 `tools/check-cpu-meter.cx`（批 `cpu-meter`） | 输出 `CPU_METER<TAB>cpu_ms<TAB>wall_ms<TAB>rc`；读 /proc/self/stat cutime+cstime 差（仅 Linux，USER_HZ=100，精度 10 ms）；缺命令输出 CPU_METER_ERROR 退 127；L0 缺 rusage 包装见 pkg-gaps CPU-METER-RUSAGE |
 | 每批耗时分相（只读） | `sh ./unisacc.com tools/batch-cost.cx -- [--dir out] [--glob affected-] [--top N]`；检查 `tools/check-batch-cost.cx`（批 `batch-cost`） | 读 out/affected-*/ 日志，每份一行（墙钟、材料 hit/built、kit、冷热），缺字段一律 UNMEASURED；2026-11-13 实测 29 份中墙钟 0 份已测（affected 的 elapsed_ms 只打 stdout），需 affected 落盘后才有分相占比 |
 | 任务状态对账(已退役) | 工具 state-audit 与其检查已归档于 `archive/agentwork-retire-2026-11/tools/` | agentwork 退役第 2 批,批次 state-audit 已撤 |
-| 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
+| 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F [--domain NAME] [--domain-summary]`；域可重复取并集，也支持 `--ids`、`--layer` 和域单独选择 | 按 use 闭包选批，再与显式域、tier、宿主条件取交集；默认不加载域索引、输出保持原样；域摘要仅记选择分母。规则事实与例外经 `tools/batch-domains-gen.cx -- --write\|--check` 派生 |
+| 进程模块静态编译与选批回归 | `tools/check-processcore-compile.cx` 与 `tools/check-affected-processcore.cx`，同名批次 `processcore-compile`、`affected-processcore` | 前者用同候选 `-S` 编译 bound/aggregate 两个 tests 入口，后者核传递 use 选中八个消费者并拒收无关源；不以 default-run 或工具单元对象替代静态生成验证 |
+| 共享检查断言与 argv 捕获 | `#pragma unisa use cxlib.ckassert`；`ck`、`ck_assertions`、`ck_failures`、`ck_run`；检查批次 `ckassert` | 保留 PASS/FAIL 输出与失败计数；argv 助手仍55秒，先 stdout 后 stderr，溢出拒绝。不同前缀、返回值、shell 字符串和静默成功变体不混合 |
+| 测试域分母派生 | `sh ./unisacc.com tools/batch-domains-gen.cx -- --write/--check [--dump]` | 从批次头部合同与 `tests/batch-domain-rules.tsv` 自动推断六域，`tests/batch-domains.tsv` 仅存有依据的例外；生成 `tests/batch-domain-index.tsv`，报告每域数量及自动/显式比例；批次 `batch-domains`。分类不代表测试通过 |
 | 测试分治粗分：按层选批（0.0.58 草稿） | `sh ./unisacc.com tools/affected.cx -- --layer base\|ext\|stream\|compiler\|driver\|chain\|release\|all [--tier T] [--list-only\|--run]`；表 `build/batch-packages.tsv` 由 `sh ./unisacc.com tools/batch-packages-gen.cx -- --write\|--check` 生成；检查 `tools/check-batch-packages.cx`（批 `batch-packages`） | 层只按批次 id 与源路径前缀切（不做依赖推理），无规则命中的批次归 `all` 层；`--layer L` 选 L 层加 `all` 层加表中未列的批次，拿不准的不丢。2026-11-12 实测 946 批：all 690、release 73、compiler 70、stream 60、chain 20、driver 18、base 12、ext 3。登记新批次后须 `--write` 重新生成。`affected -- --closure-dump` 逐批导出闭包事实；生成器 `--packages` 另填所达包与包层档（conformance/integration/chain），为依赖精化草稿，未入库、affected 尚不读。只是选择事实，不是测试结论 |
 | 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry\|post-snap\|pre-p3\|post-p3] [--strict]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;hook 列标挂点;断言 absent/present/exec-if-present/epoch-canonical/release-rev/src-has/src-lacks/pkg-headers/env-set/receipt-if-present),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;PHASE= 只跑该挂点规则,且该挂点应已产出的变量缺失记 FAIL;变量未给的规则记 SKIP 不记 PASS,`--strict` 下有 SKIP 即退出 1;失败退出 1 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
@@ -172,7 +175,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | tlib 接线：准备路径自动走磁带库（0.0.58） | `sh ./unisacc.com tools/tlib.cx -- kit [--out DIR] [--jobs N]` 建套件（各包 tlib、`tlib-prep` 原生映像、`kit.tsv`，默认 `out/tlib`）；之后 `cxlib.toolprep` 的 `tq_native` 与 `cxlib.runnerprep` 的 `rn_prepare` 不改调用方式，编译前先在 `tools/bound` 20 秒内跑 `out/tlib/tlib-prep prep TOOL -o BIN`（两个模块不新增 `use`：实测多一个模块让每个用它的检查冷编多约 2 秒）；环境守卫 `cxlib.tlibpkg` 的 `tp_prep_forbidden` 由映像自己调用；准入表 `build/tlib-prep.tsv`；检查 `tools/check-tlib-prep.cx`（批 `tlib-prep`） | 只有准入表列出的工具走链接（现列 `tools/release-sweep.cx`、`tools/version-metrics.cx`，入表须带本机实测且该工具自己的检查用链接映像跑过）；`prep` 先验 `kit.tsv` 自身 sha、产品 sha、`tools/tlib.cx` 闭包各单元 sha 与映像 sha，再走与 `link`/`check --fresh` 相同的结构、版本、新鲜度校验；任何不满足（无套件、未列、过期、篡改、链接失败）都回退到原来的 `-o` 编译，退出码 7 表示不适用。成功时 `PREPARED` 行多一个 `via=tlib` 字段，只是准备，不存不读任何结论。发布链与 gen1/g2/g3 不走此路：环境里有 `UNISACC_CHAIN_*`、`UNISACC_CTOR`、`UNISACC_IDENTITY_HELPER` 任一项或 `UNISACC_TLIB_PREP=0` 即拒绝，发布快照根下也没有套件。套件不会自己触发重建：产品、包源码或 `tools/tlib.cx` 闭包一变就过期并回退，需再跑一次 `kit`，但 `kit` 是增量的（只重建身份变了的包与其依赖者，映像只在产品或工具闭包变动时重编，空转 0.49 秒，批 `tlib-kit`），可放在每次门或批之前；"多对象各有私有 stdio 表"告警已消除且不是无害的：分开编译的对象各带一份运行库状态，实测在一个单元打开的 FILE 经另一单元写入会丢行，现在包单元一律按 `-DRT_EXTERN` 编译、`link` 把工具根单元按 `-DRT_UNIT` 编译（全程序一份流表），行为与一次调用整体编译相同（批 `tlib` 的 5c）；`link --with MORE.cx` 接受同一程序的其它根单元。已知限制：对象保留单元内全部函数，未被调用的函数若引用闭包外符号则链接失败（整体编译会丢弃这类函数），`src/` 多根映像（如批 `module-units` 的 40 单元映像）因此尚不能走 tlib 链接。实测（2026-11-12，关运行缓存逐批冷跑 run-batch，一次一个编译）：批 `release-sweep` 26.4 -> 22.6/21.6 秒，`version-metrics` 24.7 -> 24.6/24.8 秒（无可测收益），未列工具的 `toolprep` 17.8 -> 17.3、`runnerprep` 27.7 -> 26.4 秒（噪声内）；收益只来自闭包大半在包内且根单元小的工具。 |
 | tlib 覆盖计数（0.0.58） | `sh ./unisacc.com tools/tlib-cover.cx -- [--slice K/N] (FILE.cx... \| --batches)`；检查 `tools/check-tlib-cover.cx`（批 `tlib-cover`） | 每个程序一行 `COVER file units= tlib= source= excluded=`：闭包里多少单元已在包内、多少要现编；`--batches` 扫批次登记表的全部 .cx 源，`--slice` 分片保证单次有界。只计数，不代表链接可行。实测（2026-11-12，9 包）：491 个批次源共 4317 个闭包单元，3334 个（77%）在包内，74 个源满足包内不少于 10 且现编不多于 3；一次一个编译的冷编对 tlib 链接：`tests/modelcache-budget.cx` 11.0 -> 5.1 秒、`tests/coreapi.cx` 12.8 -> 7.1 秒、`tools/check-cx-fmt.cx` 12.2 -> 7.9 秒、`tests/loader-faults.cx` 14.7 -> 14.8 秒（三个现编单元重，无收益）、`tools/check-dev-product.cx` 链接失败（`compiler.bindstage` 对象里未调用的函数引用 `bx_stage_route`，与 `module-units` 映像同因）。批次自身入口仍由产品默认运行路径整体编译，未接 tlib。 |
 | s9 夜跑编排 | `sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit\|daily [--date D] [--fake BIN]`；假 s9 `tests/fixtures/s9-nightly-fake.cx`；检查 `tools/check-s9-nightly.cx` | 按手册 build/init/prepare 六步/step 至非 PENDING/aggregate；失败具名停止留报告；夹具不跑真批次 |
-| 产品全景表 | `sh ./unisacc.com tools/product-map.cx -- --write\| --check`；轻检查 `tools/check-product-map.cx`；重夹具 `tools/check-product-map-fixtures.cx -- unrelated\|prd-edit\|input-change` | 层/片/流/网字节与 prd_productmap.md 生成块对齐；默认检查只读 tsv+该文件，不跑 --write |
+| 产品全景查询 | `sh ./unisacc.com tools/product-map.cx -- --write\| --check`；现算查询 �vsvc product-map [--check]`；轻检查 `tools/check-product-map.cx`；重夹具 `tools/check-product-map-fixtures.cx -- unrelated\|prd-edit\|input-change` | 层/片/流/网字节由当前读集内容身份查询；--check 独立现算对拍；本地 TSV 与文档生成块仅显式 --write 导出，不随提交自动物化 |
 | agentwork分片读侧、迁移与账本追加(已退役) | 归档到 `archive/agentwork-retire-2026-11/tools/aw.cx`、`archive/agentwork-retire-2026-11/tools/check-aw.cx` | agentwork 退役第 3 批；批次 aw-sharding-* 与 aw-append* 已撤 |
 | 单元前端缓存回归 | `sh ./unisacc.com tools/check-unit-frontcache.cx -- OUT equiv0..equiv4\|neg\|race\|stderr\|switch\|concurrent\|budget [--product CMD] [--base CMD]` | 产品内 e2/e1 单元缓存(cx/runtime/unitcache.cx):26 例字节等价分五片、九类负例、编译中改头、stderr 回放、两个开关与非宿主目标、并发写同键、预算淘汰;产品无该特性时 DEFERRED 返回 3;批次 unit-frontcache-*(材料 unitcache-product=带特性的候选,无材料时 affected 报 DEFERRED needs-materials);设计见 plans/unit-frontcache.md |
 | 装前判产品能不能用 | `sh ./unisacc.com tools/check-dev-product.cx -- ROOT PRODUCT` | 六条：shell 头 / `sh --version` / 不带 `UNISA_CONTAINER` 能编译 / 写入产物 / 内嵌包是新头 |
@@ -348,7 +351,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-本节是全部结构点的**唯一权威定义**。取数口径：2026-11-11 在 HEAD `6a4fa1fa6f` 的私有克隆、用已装 0.0.52 APE（sha `1bffabba…`，6,529,460 B；P4 包与 0.0.53 同为 `56efea53`）实跑，每个数后括号写命令或出处；带版本号的耗时取自 `build/phase-times.tsv`（多为 0.0.49 候选 979b56e4 的实测，0.0.52/0.0.53 未重测处照写），「未测」即本次没有命令证据。生成块 §9.6 由 `tools/product-map.cx` 重算，与本节冲突时以生成块的字节为准。
+本节是全部结构点的**唯一权威定义**。取数口径：2026-11-11 在 HEAD `6a4fa1fa6f` 的私有克隆、用已装 0.0.52 APE（sha `1bffabba…`，6,529,460 B；P4 包与 0.0.53 同为 `56efea53`）实跑，每个数后括号写命令或出处；带版本号的耗时取自 `build/phase-times.tsv`（多为 0.0.49 候选 979b56e4 的实测，0.0.52/0.0.53 未重测处照写），「未测」即本次没有命令证据。当前源码字节数以 �vsvc product-map` 的内容身份查询为准；生成块 §9.6 是 `tools/product-map.cx` 显式导出的快照，其取数身份与当前查询分开。
 
 ### 3.0 APE 实测（`sh ./unisacc.com tools/com-tree.cx -- --models`，6.6s）
 
@@ -605,7 +608,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="product-map"></a>
 ### 9.6 产品全景表（生成文件，已切出）
 
-产品全景表(层、六片、七流、42 构造网及术语表)是随源码字节数频繁变化的生成块，已于 2026-11-14 切出到 [prd_productmap.md](prd_productmap.md)；`tools/product-map.cx -- --write` 重算、`-- --check` 核对，勿手改。本文其它章节引用的「生成块 9.6」即指该文件。
+产品全景表(层、六片、七流、42 构造网及术语表)是随源码字节数频繁变化的生成块，已于 2026-11-14 切出到 [prd_productmap.md](prd_productmap.md)；�vsvc product-map` 查询当前源树，�vsvc product-map --check` 独立现算核对。该文件为显式导出快照，`tools/product-map.cx -- --write` 可重算，勿手改生成块。本文其它章节引用的「生成块 9.6」即指该文件。
 历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `prd_mempalace.md`(`archive/agentwork-retire-2026-11/` 已退役)。
 <a id="memory-palace"></a>
 ### 9.2 记忆宫殿(索引)
@@ -720,7 +723,7 @@ prd.md                 当前状态（本文件，只写当前事实；结构点
 ├─ prd_hist.md         历史完成记录与证据（只读；新记录写 prd_mempalace.md）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
 ├─ plans/              各版计划与发布说明（最新 v0.0.58-unisacc.md、release-notes-0.0.57.md）
-├─ build/graph.tsv     构造图事实表（graph-check 读）；build/product-map.tsv 全景表
+├─ build/graph.tsv     构造图事实表（graph-check 读）；devsvc product-map 全景查询(本地导出 build/product-map.tsv)
 ├─ archive/agentwork-retire-2026-11/  历史看板、账本与工作流,不参与当前协同
 └─ archive/            旧实现与旧文档（见下）
 ```

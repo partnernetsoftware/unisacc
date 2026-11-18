@@ -1,0 +1,32 @@
+/* Checks batch-domains-gen: automatic contracts, explicit exceptions and stale evidence refusal. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+static char root[400],path[800];static const char*product;static int failed=0,passed=0;static np_result result;
+static const char*rh="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+static const char*qh="id\tpriority\tentry\ttier\tlayer\tobject\tdomain\tsample\tbasis\n";
+static const char*ar="a\tIMPLEMENTED\tinterfaces\ttests/a.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/a.cx\t-\ta\trc0:A\tproduct\tcommit\n";
+static const char*br="b\tIMPLEMENTED\tinterfaces\ttests/b.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/b.cx\t-\tb\trc0:B\tproduct\tcommit\n";
+static const char*cr="c\tIMPLEMENTED\tinterfaces\ttests/c.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/c.cx\t-\tc\trc0:C\tproduct\tcommit\n";
+static void check(int yes,const char*s){printf("CHECK\t%s\t%s\n",s,yes?"PASS":"FAIL");if(yes)passed++;else failed++;}
+static void put(const char*rel,const char*a,const char*b,const char*c,const char*d){if(cx_fmt(path,sizeof path,"%s/%s",root,rel)){failed++;return;}size_t n=strlen(a)+strlen(b)+strlen(c)+strlen(d)+1;char*out=mm_alloc(n);if(!out||cx_fmt(out,n,"%s%s%s%s",a,b,c,d)){failed++;mm_free(out);return;}int z=sy_write_atomic(path,out,strlen(out),0600);check(!z,"fixture-write");mm_free(out);}
+static int run(int write,int dump){char why[400];np_free(&result);char*v[]={"sh",product,"tools/batch-domains-gen.cx","--",write?"--write":"--check","--root",root,dump?"--dump":0,0};int rc=np_run(v,0,0,20,&result,why,sizeof why);if(rc){fprintf(stderr,"RUN_TRANSPORT %s\n",why);return -1;}return result.rc;}
+static void rules(const char*extra){put("tests/batch-domain-rules.tsv",qh,"compiler\t10\t*\t*\t*\tcompiler\tproduct-qualification\ta\tCompiler object.\n","tool\t10\t*\t*\t*\tselfcheck\ttool-selfcheck\tb\tTool object.\n",extra);}
+int main(void){
+ product=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product Same-candidate generator launcher; UNISACC overrides it, including native-check execution. */
+ if(cx_fmt(root,sizeof root,"/tmp/unisacc-affected-domain-gen-%d",sy_pid())||cx_fmt(path,sizeof path,"%s/tests",root)||sy_mkdir_all(path,0700))return 2;
+ put("tests/a.cx","/* Installed compiler behavior. */\n","","","");put("tests/b.cx","/* Tool selfcheck fixture. */\n","","","");put("tests/batches.tsv",rh,ar,br,"");put("tests/batch-domains.tsv","id\tdomain\tbasis\n","","","");rules("");
+ check(run(1,0)==0&&strstr(result.out,"automatic=2\texplicit=0"),"automatic-write");check(run(0,1)==0&&strstr(result.out,"a\tproduct-qualification\tcompiler\t")&&strstr(result.out,"b\ttool-selfcheck\ttool\t"),"check-dump-complete");
+ put("tests/batch-domain-index.tsv","tampered\n","","","");check(run(0,0)!=0&&strstr(result.err,"index-drift"),"tampered-index-refused");
+ put("tests/batches.tsv",rh,ar,br,cr);check(run(1,0)!=0&&strstr(result.err,"domain-missing-declaration id=c"),"new-missing-declaration-refused");
+ put("tests/batch-domains.tsv","id\tdomain\tbasis\n","c\tproduct-qualification\tLegacy missing declaration reviewed independently.\n","","");check(run(1,0)==0&&strstr(result.out,"automatic=2\texplicit=1"),"explicit-exception-restores-completeness");
+ put("tests/a.cx","/* Installed compiler behavior changed. */\n","","","");check(run(0,0)!=0&&strstr(result.err,"index-drift"),"contract-identity-refused");
+ rules("conflict\t10\t*\t*\t*\tcompiler\ttool-selfcheck\ta\tConflicting object.\n");check(run(1,0)!=0&&strstr(result.err,"domain-conflict id=a"),"conflict-refused-before-write");
+ rules("");put("tests/batch-domains.tsv","id\tdomain\tbasis\n","outside\ttool-selfcheck\tNot registered.\n","","");check(run(1,0)!=0&&strstr(result.err,"extra-exception"),"extra-exception-refused");
+ put("tests/batches.tsv",rh,ar,br,"");put("tests/batch-domains.tsv","id\tdomain\tbasis\n","","","");put("tests/batch-domain-rules.tsv",qh,"compiler\t10\t*\t*\t*\tcompiler\tproduct-qualification\tmissing\tInvalid example.\n","tool\t10\t*\t*\t*\tselfcheck\ttool-selfcheck\tb\tTool object.\n","");check(run(1,0)!=0&&strstr(result.err,"rule-sample-missing"),"rule-sample-refused");
+ rules("");put("tests/batch-domains.tsv","id\tdomain\tbasis\n","a\tproduct-qualification\t   \n","","");check(run(1,0)!=0&&strstr(result.err,"exception-basis-missing"),"blank-exception-basis-refused");
+ np_free(&result);printf("CHECK_BATCH_DOMAINS_GEN\tfailed=%d\tpassed=%d\n",failed,passed);return failed?1:0;
+}

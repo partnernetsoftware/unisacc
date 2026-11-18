@@ -1,6 +1,6 @@
 # 产品全景表(生成文件)
 
-本文件由 `tools/product-map.cx -- --write` 重算,勿手改;`--check` 核对。原位于 prd.md 9.6(2026-11-14 切出,避免随源码字节数变化的大块 diff 与手写内容混在一起)。
+本文件是显式导出快照,由 `tools/product-map.cx -- --write` 重算,勿手改生成块。当前源树用 �vsvc product-map` 查询,�vsvc product-map --check` 独立现算核对;提交门不自动更新本快照。原位于 prd.md 9.6(2026-11-14 切出,避免随源码字节数变化的大块 diff 与手写内容混在一起)。
 
 <!-- product-map:begin -->
 产品全景表阶段一(层+六片)与阶段二(七流+42构造网)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。
@@ -8,12 +8,12 @@
 ```
 kind	id	parent	function	size_bytes	size_note	sha256	aux	cmd	content_id	cold_s	hot_s	last_s
 layer	L0	-	L0 sy/mem/text	252475	source-bytes	-	dirs=cx/sys,cx/mem,cx/text	git ls-files -z -- DIR && stat bytes	5a387d1b907108175514e9b18dab0b5dcb271b97154ba6cccedaed3dc4c447f3	UNMEASURED	UNMEASURED	UNMEASURED
-layer	L1	-	L1 core/driver/runtime/compiler	884177	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	a0742d308a460e298cefd071baa73d87cf31657a9070e71145b18df616702c51	UNMEASURED	UNMEASURED	UNMEASURED
+layer	L1	-	L1 core/driver/runtime/compiler	887897	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	bd7662ba7458cbd74ac0afb691ba69b5ca2c2d3fd513accc2d040945ffc71efc	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.host	src	host launch	16477	source-bytes	-	file=src/host.cx	stat src/host.cx	309d880c2eeb96bae8d8e14883f69ab13ffb60dd9db199fee007098619155616	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.packmodel	src	pack model	4925	source-bytes	-	file=src/packmodel.cx	stat src/packmodel.cx	f15f76b6346f8348ae85144997d4a4c5f035c1384b3fa1524495d148cb2af89a	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.executor	src	executor	9320	source-bytes	-	file=src/executor.cx	stat src/executor.cx	af25cc0ef671fe775cbcc0910225eb2bae06380f351fd5ea514d8b9ba8c21bd2	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.stages	src	seven flows bind	15018	source-bytes	-	file=src/stages.cx	stat src/stages.cx	1192d127e2bc25f2172eaab72a3bb2e476b9d6e38bda868bb0ebaef388d9bb3e	UNMEASURED	UNMEASURED	UNMEASURED
-layer	src.drive	src	drive	39005	source-bytes	-	file=src/drive.cx	stat src/drive.cx	d5ceb7af891e3ca7819deba6b50392bc534139fa9f0e01dea774b264a736d5b5	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.drive	src	drive	39204	source-bytes	-	file=src/drive.cx	stat src/drive.cx	fdd8d935a0cd18825fcc0c470a579e7aa3028c37f92ab35017eb58adf8cfff93	UNMEASURED	UNMEASURED	UNMEASURED
 layer	src.bind	src	bind	205	source-bytes	-	file=src/bind.cx	stat src/bind.cx	f0bafb6b065a4a042949e5087a95fb819d128c986e02d6223c3b4121e1401f27	UNMEASURED	UNMEASURED	UNMEASURED
 slice	lnx/x86_64	ape	embedded target image	2117934	target-image-bytes	de6b5c084ba01c8891ff474a5b106057079ab9af3911877f245077824ab06f2c	format=ELF;unattributed_bytes=2117934;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	de6b5c084ba01c8891ff474a5b106057079ab9af3911877f245077824ab06f2c	UNMEASURED	UNMEASURED	UNMEASURED
 slice	lnx/arm64	ape	embedded target image	2285814	target-image-bytes	79a19d67979f446bbbecf5c65449b1375cc5d0a283336dd52fa14547af96fd1e	format=ELF;unattributed_bytes=2285814;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	79a19d67979f446bbbecf5c65449b1375cc5d0a283336dd52fa14547af96fd1e	UNMEASURED	UNMEASURED	UNMEASURED

@@ -253,9 +253,37 @@ static int cxc_skips(const char *a) {
         || cxc_eqz(a, "--emit-host-symbols");
 }
 
+static int cxc_warm;
+
+/* 1 when the command line carried --warm. Process state only: nothing is put in the environment. */
+int cxc_warm_on(void) { return cxc_warm; }
+
+/* Under --warm: drop each --warm before -- from argv, so the run cache key is that of the same
+   command without it and a later plain run hits the entry. Returns the new argc. */
+int cxc_warm_strip(int argc, char **argv) {
+    int wi, wj, ws;
+    if (!cxc_warm) return argc;
+    wi = 1; wj = 1; ws = 0;
+    while (wi < argc) {
+        if (argv[wi] && !ws && cxc_eqz(argv[wi], "--")) ws = 1;
+        if (!ws && argv[wi] && cxc_eqz(argv[wi], "--warm")) { wi = wi + 1; continue; }
+        argv[wj] = argv[wi]; wj = wj + 1; wi = wi + 1;
+    }
+    if (wj < argc) argv[wj] = 0;
+    return wj;
+}
+
+/* --warm result: 0 when the store succeeded, 1 with a message when it did not. */
+int cxc_warm_done(int stored_rc) {
+    int sy_eprintf(const char *, ...);
+    if (!stored_rc) return 0;
+    sy_eprintf("unisacc: warm: run cache store failed\n");
+    return 1;
+}
+
 static int cxc_mode_word(const char *a) {
     return cxc_eqz(a, "--target") || cxc_prefixz(a, "--target=", 9)
-        || cxc_eqz(a, "-run") || cxc_eqz(a, "-dump-tokens") || cxc_eqz(a, "--tapebin")
+        || cxc_eqz(a, "-run") || cxc_eqz(a, "--warm") || cxc_eqz(a, "-dump-tokens") || cxc_eqz(a, "--tapebin")
         || cxc_eqz(a, "--version") || cxc_eqz(a, "-version");
 }
 
@@ -424,6 +452,8 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         return cxc_ok(why, whycap);
     }
     if (cxc_eqz(a, "-run")) { st->runit = 1; *index = *index + 1; return cxc_ok(why, whycap); }
+    /* --warm: -run that stores the image in the run cache and does not execute it. */
+    if (cxc_eqz(a, "--warm")) { st->runit = 1; cxc_warm = 1; *index = *index + 1; return cxc_ok(why, whycap); }
     if (cxc_eqz(a, "--force-origin")) { st->force_origin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
     if (cxc_eqz(a, "--tapebin")) { st->emitbin = 1; *index = *index + 1; return cxc_ok(why, whycap); }
     if (cxc_eqz(a, "-funit")) { st->funit = 1; *index = *index + 1; return cxc_ok(why, whycap); }

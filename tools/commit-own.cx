@@ -112,11 +112,13 @@ static int run(char **argv, char *out, long cap) {
    every root.  A build artifact only: the same source runs with the same arguments and judges for itself every time.
    UNISACC_COMMIT_OWN_RUN=1 forces -run. */
 static int co_via_devsvc;
+static char co_product[4400];
+static char *co_product_path(void){if(!co_product[0]&&sy_realpath("unisacc.com",co_product,sizeof co_product)<0)co_die("product path",0);return co_product;}
 static int co_tool(char **v, int n, const char *tool) {
     const char *sb = getenv("DEVSVC_SELF_BIN"), *force = getenv("UNISACC_COMMIT_OWN_RUN");
     co_via_devsvc = sb && sb[0] == '/' && sy_exists(sb) == 1 && !(force && force[0] == '1');
     if (co_via_devsvc) { v[n++] = (char *)sb; v[n++] = "run"; v[n++] = "--local"; v[n++] = "--quiet"; v[n++] = (char *)tool; v[n++] = "--"; }
-    else { v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = (char *)tool; v[n++] = "--"; }
+    else { v[n++] = "sh"; v[n++] = co_product_path(); v[n++] = (char *)tool; v[n++] = "--"; }
     return n;
 }
 /* every keyed path of the commit through ONE own-diff process (--field --batch LIST): the emitted own-only file of
@@ -385,10 +387,10 @@ static int committed_before(const char *path, const char *blob) {
     return 0;
 }
 
-/* --registered: the three registry tables (manifest kinds), then the three derived tables keyed by name */
-#define CO_REGT 6
+/* --registered: three registry tables, then links and the table catalog. */
+#define CO_REGT 5
 static const char *CO_REG_TABLE[CO_REGT] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv",
-                                            "build/links.tsv", "build/tool-index.tsv", "build/table-index.tsv"};
+                                            "build/links.tsv", "build/table-index.tsv"};
 static const char *CO_REG_KIND[3] = {"batch", "coverage", "packages"};
 static char co_regkeys[CO_REGT][4096];   /* comma-separated keys per table */
 static char *co_regrows[3];              /* manifest rows per registry table, '\n'-joined (each row once) */
@@ -397,6 +399,7 @@ static int co_reg_of[CO_MAX];            /* table index of path k, -1 when not a
 static char co_manpath[CO_MAX][300];
 
 static void co_addkey(int t, const char *s, long n) {
+    if(t<0||t>=CO_REGT)co_die("registration table index",0);
     long have = tx_len(co_regkeys[t], sizeof co_regkeys[t]);
     if (n <= 0) return;
     if (have + n + 2 >= (long)sizeof co_regkeys[t]) co_die("too many --registered keys", CO_REG_TABLE[t]);
@@ -420,7 +423,7 @@ static long co_field(const char *s, long n, int f, long *len) {
     }
     *len = 0; return -1;
 }
-/* read tests/manifests/ID.tsv: keys for the six tables, the rows for the three registry tables */
+/* Read manifest keys for the five selected tables and the three registry rows. */
 static void co_manifest(const char *id, char *mpath, long mcap) {
     size_t n = 0; char *m; long at = 0;
     if (cx_fmt(mpath, mcap, "tests/manifests/%s.tsv", id)) co_die("manifest path", id);
@@ -438,7 +441,7 @@ static void co_manifest(const char *id, char *mpath, long mcap) {
                     if ((fs = co_field(row, rl, 10, &fl)) >= 0 && fl > 1) co_addkey(1, row + fs, fl);
                     {   int f; for (f = 3; f <= 8; f += 5) if ((fs = co_field(row, rl, f, &fl)) >= 0 && fl > 1) {
                             long b = fl; while (b > 0 && row[fs + b - 1] != '/') b--;
-                            co_addkey(3, row + fs, fl); co_addkey(4, row + fs, fl); co_addkey(5, row + fs, fl);
+                            co_addkey(3, row + fs, fl); co_addkey(4, row + fs, fl);
                             if (b > 0) { co_addkey(3, row + fs + b, fl - b); co_addkey(4, row + fs + b, fl - b); }
                         } }
                 }
@@ -645,7 +648,7 @@ int main(int argc, char **argv) {
         /* --derive-only: the hint reads pending= alone, so the per-path affected, git grep and domain children stay
            unrun (41 s for four paths in a fresh clone, where this commit then waited out its 30 s collect bound) */
         if (np <= 48) n = co_tool(ov, 0, "tools/on-change.cx");
-        else { ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; }
+        else { ov[n++] = "sh"; ov[n++] = co_product_path(); ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; }
         ov[n++] = "--dry-run"; ov[n++] = "--derive-only";
         for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
         ov[n] = 0;

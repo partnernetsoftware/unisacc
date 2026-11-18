@@ -1,0 +1,27 @@
+/* Shared check counters and the argv runner variant with stdout/stderr concatenation.
+ * The counters belong to this module instance. A failed assertion is printed and retained.
+ * String-shell runners and checks with other output contracts remain separate. */
+#pragma unisa module ckassert
+#pragma unisa use sysx.processcore
+#pragma unisa use mem.bytes
+static int ca_total, ca_failed;
+void ck(int ok, const char *label) {
+    ca_total++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ca_failed++;
+}
+int ck_assertions(void) { return ca_total; }
+int ck_failures(void) { return ca_failed; }
+/* Keep the existing 55 second bound, output ordering and overflow refusal.
+ * The caller owns OUT; bytes remain available on nonzero child exit. */
+int ck_run(char **v, char *out, size_t cap) {
+    np_result r; char why[200]; int rc; long a, b;
+    if (!out || !cap) return -1;
+    memset(out, 0, cap);
+    if (pc_run(v, 0, 0, 55, &r, why, sizeof why, 0)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)cap - 1 || (a > 0 && mm_copy(out, cap, r.out, a)) ||
+        (b > 0 && mm_copy(out + a, cap - a, r.err, b))) rc = -1;
+    pc_free(&r);
+    return rc;
+}

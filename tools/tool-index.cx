@@ -3,7 +3,9 @@
  *   sh ./unisacc.com tools/tool-index.cx -- --write [--root DIR]     重算并写 build/tool-index.tsv 与 build/table-index.tsv
  *   sh ./unisacc.com tools/tool-index.cx -- --check [--root DIR]     重算并与已有文件逐字节比对,不一致打印 DIFF 并 rc 1
  *   sh ./unisacc.com tools/tool-index.cx -- --undescribed [--root DIR]  列出 summary 为 UNDESCRIBED 的工具
- *   sh ./unisacc.com tools/tool-index.cx -- --tables [--root DIR]    只重写 build/table-index.tsv
+ *   sh ./unisacc.com tools/tool-index.cx -- --tables|--check-tables [--root DIR]    只写入或核对表索引
+ *   sh ./unisacc.com tools/tool-index.cx -- --write-tools|--check-tools [--root DIR]  只写入或核对工具索引
+ *   sh ./unisacc.com tools/tool-index.cx -- --emit-tools PATH [--root DIR]  只把工具索引正文写到 PATH(查询缓存用,不碰 build/)
  *
  * 头注释约定:首个注释 `/* tools/NAME.cx -- 一句话 ... *\/`,取 `--` 后到第一个句号或换行;缺失则 UNDESCRIBED。 */
 #pragma unisa use sys.io
@@ -19,6 +21,7 @@
 #define OUTCAP (8 * 1024 * 1024)
 
 static const char *root = ".";
+static const char *emit_to = 0;
 static char *names[MAXF];     /* 相对 tools/ 的名字,cxlib 库文件为 cxlib/X.cx */
 static char *body[MAXF];
 static long blen[MAXF];
@@ -391,7 +394,11 @@ int main(int argc, char **argv) {
         else if (streq(argv[a], "--check")) mode = 2;
         else if (streq(argv[a], "--undescribed")) mode = 3;
         else if (streq(argv[a], "--tables")) mode = 4;
+        else if (streq(argv[a], "--check-tables")) mode = 6;
+        else if (streq(argv[a], "--write-tools")) mode = 7;
+        else if (streq(argv[a], "--check-tools")) mode = 8;
         else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else if (streq(argv[a], "--emit-tools") && a + 1 < argc) { mode = 5; emit_to = argv[++a]; }
         else { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
     }
     if (!mode) { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
@@ -415,7 +422,13 @@ int main(int argc, char **argv) {
         sy_printf("UNDESCRIBED_COUNT\t%d\n", c);
         return 0;
     }
+    if (mode == 5) {   /* --emit-tools PATH:只把工具索引正文原子写到 PATH,不碰 build/ 与 devmeta(tools/derived-query.cx 按内容身份缓存用) */
+        if (sy_write_atomic(emit_to, tb, tn, 0644)) { sy_printf("EMIT_FAIL\t%s\n", emit_to); return 2; }
+        return 0;
+    }
+    if (mode == 7 || mode == 8) return emit("build/tool-index.tsv", tb, tn, mode == 7);
     bb = build_tables(&bn);
+    if (mode == 6) return emit("build/table-index.tsv", bb, bn, 0);
     if (mode == 4) return emit("build/table-index.tsv", bb, bn, 1);
     if (emit("build/tool-index.tsv", tb, tn, mode == 1)) rc = 1;
     if (emit("build/table-index.tsv", bb, bn, mode == 1)) rc = 1;

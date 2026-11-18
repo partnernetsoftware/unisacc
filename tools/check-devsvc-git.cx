@@ -49,10 +49,10 @@ static void cleanup(void) {
 }
 
 int main(int argc, char **argv) {
-    int A = 1, B = 1, C = 0, D = 0;   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
+    int A = 1, B = 1, C = 0, D = 0, E = 0, FF = 0;   /* f:tlib-packages 派生表冲突按包取两侧较大版本 */   /* e:私有索引合并与 pull 快进(他人暂存与脏文件保留、冲突不动、--cwd、分叉拒绝) */   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
                                  c:commit 回执取回、x --bg 作业 deadline 自退与进程组清理、git merge 无冲突与冲突报告、git add 拒绝路径;缺省跑 a 与 b,各组独立夹具 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|ab]\n"); return 2; }
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; E = strchr(argv[2], 'e') != 0; FF = strchr(argv[2], 'f') != 0; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|ab]\n"); return 2; }
     char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 剥掉调用方 shell 里的 DEVSVC_* 环境变量(如 DEVSVC_OWNER),夹具子进程不继承 */
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
             } else e++;
         } }
     {   /* 夹具路径按仓根哈希与组固定(不含 pid):使启动器自身按源路径取键的产品 -run 编译缓存跨次命中;开头与收尾都清空 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : "d"; char c0[700];
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700];
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
@@ -73,19 +73,27 @@ int main(int argc, char **argv) {
     envv[0] = e2; envv[1] = 0; (void)e1;
     if (ovf) return 2;
     {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-clone\n"); cleanup(); return 1; } }
+    /* 夹具起点与本仓所在分支无关:在版本分支(如 v0.0.72)或工作树里跑时克隆体 HEAD 不在 main,后续 checkout main 会从 origin/main 另建分支;
+       这里把克隆体当前 HEAD 强制命名为 main 并跟踪 origin/main,与在 main 上跑时同形 */
+    {   char *v[] = {"git", "-C", fx, "checkout", "-q", "-B", "main", 0}; char *u[] = {"git", "-C", fx, "branch", "-q", "--set-upstream-to=origin/main", "main", 0};
+        if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-main\n"); cleanup(); return 1; }
+        (void)run(u, 0, 0); /* 本仓无 main 分支时无 origin/main 可跟踪,不算夹具失败 */ }
     {   const char *names[5] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx", "tools/cxlib/flowexec.cx"}; int i;
         for (i = 0; i < 5; i++) {
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
+            if (i == 1 && getenv("DVGIT_CORE_FROM")) F(src, sizeof src, "%s", getenv("DVGIT_CORE_FROM"));   /* 负控:换入旧核心,证明 e 组断言有效 */
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-git.fixture-copy\t%s\n", names[i]); cleanup(); return 1; }
             free(b);
         }
         {   /* flowexec 工作副本若已 use 新模块(如 cxlib.flowadmit)而它尚未入 HEAD,一并带进夹具,否则固定版本构造失败回落旧执行体 */
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/tools/cxlib/flowadmit.cx", root); F(dst, sizeof dst, "%s/tools/cxlib/flowadmit.cx", fx);
+            if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); }
+            b = 0; F(src, sizeof src, "%s/tools/gitsync-run.cx", root); F(dst, sizeof dst, "%s/tools/gitsync-run.cx", fx);   /* git merge/pull 的同步子进程 */
             if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); } } }
     F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     if (A) {
@@ -297,6 +305,114 @@ int main(int argc, char **argv) {
     ck(rc == 1 && has("MERGE_CONFLICT\texec/facts/dvd-2.tsv\n") && has("MERGE_CONFLICT\tbuild/dvd.tsv\n") && has("MERGE_HINT\tnon-derived-conflict\t")
        && has("merge --abort") && has("GIT_MERGE\trc=1\tconflicts=2") && !has("MERGE_AUTO"), "mixed-conflict-stops-lists-rc1");
     ck(sh("test -e .git/MERGE_HEAD && git merge --abort", fx) == 0, "mixed-conflict-left-in-merge-not-aborted");
+    }
+    if (E) {
+    /* (k) 私有索引合并:他人暂存(无关路径)与他人未提交改动(被合并路径)都在场时合并成功,暂存逐字仍在、脏路径 SYNC_KEPT 内容保留,
+       HEAD 树含合并结果;-m 生效;冲突时 HEAD、共享索引、工作区都不变且无 MERGE_HEAD;pull 只快进、保留暂存、分叉拒绝;--cwd 版本树合并 */
+    char cl[200], h0[64] = "", i0[64] = "", w0[64] = "";
+    F(cl, sizeof cl, "%s-c2", fx);
+    F(c, sizeof c, "printf 's0\\n' > dve-s.txt && printf 'o0\\n' > dve-o.txt && printf 'm0\\n' > dve-m.txt && git add dve-s.txt dve-o.txt dve-m.txt && git commit -q -m E0"
+                   " && git checkout -q -b dve-x && printf 'x\\n' > dve-x.txt && printf 's1\\n' > dve-s.txt && git add dve-x.txt dve-s.txt && git commit -q -m EX"
+                   " && git checkout -q -b dve-c HEAD~1 && printf 'mc\\n' > dve-m.txt && git commit -q -am EC"
+                   " && git checkout -q main && printf 'mm\\n' > dve-m.txt && git commit -q -am EM"
+                   " && printf 'staged\\n' > dve-o.txt && git add dve-o.txt && printf 'dirty\\n' > dve-s.txt");
+    ck(!ovf && sh(c, fx) == 0, "pm-fixture");
+    /* (n) 负控一:他人暂存 dve-o.txt 在场,合并分叉的 dve-n(不带 -m,旧核心也认得的调用)。旧核心(DVGIT_CORE_FROM 换入)git merge
+       被暂存挡住(would be overwritten),落到 merge_conflicts 报 merge-failed-no-conflict-files rc 1;新核心 rc 0、HEAD 含 dve-n.txt、暂存逐字仍在 */
+    {   int oldc = getenv("DVGIT_CORE_FROM") != 0;
+        ck(sh("N=$(printf 'n\\n' | git hash-object -w --stdin) && T=$({ git ls-tree HEAD~1; printf '100644 blob %s\\tdve-n.txt\\n' $N; } | git mktree)"
+              " && git branch dve-n $(git commit-tree -p HEAD~1 -m EN $T)", fx) == 0, "neg-fixture");
+        rc = dv("git", "merge", "dve-n", 0, 0, 0, 0, 0);
+        if (oldc) ck(rc == 1 && has("merge-failed-no-conflict-files"), "neg-old-core-blocked-by-others-staged");
+        else ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && sh("git cat-file -e HEAD:dve-n.txt && git cat-file -e HEAD:dve-m.txt && [ \"$(git show :dve-o.txt)\" = staged ] && [ \"$(cat dve-o.txt)\" = staged ]", fx) == 0,
+                "neg-new-core-merges-with-others-staged"); }
+    rc = dv("git", "merge", "dve-x", "-m", "E merge msg", 0, 0, 0);
+    ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && has("GIT_MERGE_SYNC\tSYNC_KEPT path=dve-s.txt reason=dirty"), "pm-merge-with-others-staged-rc0");
+    F(c, sizeof c, "git cat-file -e HEAD:dve-x.txt && [ \"$(git show HEAD:dve-s.txt)\" = s1 ] && [ \"$(cat dve-s.txt)\" = dirty ] && [ \"$(git show :dve-o.txt)\" = staged ]"
+                   " && [ \"$(cat dve-x.txt)\" = x ] && [ \"$(git show :dve-x.txt)\" = x ] && git log -1 --format=%%s | grep -qx 'E merge msg' && git rev-parse -q --verify HEAD^2 >/dev/null");
+    ck(!ovf && sh(c, fx) == 0, "pm-staged-kept-dirty-kept-head-has-merge-msg");
+    (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin; cat dve-s.txt dve-o.txt dve-m.txt | git hash-object --stdin", fx);
+    if (sscanf(out, "%63s %63s %63s", h0, i0, w0) != 3) h0[0] = 0;
+    rc = dv("git", "merge", "dve-c", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("MERGE_CONFLICT\tdve-m.txt\tstages=base+ours+theirs\tlast=") && has("MERGE_HINT\t") && has("GIT_MERGE\trc=1\tconflicts=1"), "pm-conflict-lists-stages-rc1");
+    (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin; cat dve-s.txt dve-o.txt dve-m.txt | git hash-object --stdin; test -e .git/MERGE_HEAD && echo MH", fx);
+    {   char h1[64] = "", i1[64] = "", w1[64] = "";
+        ck(h0[0] && sscanf(out, "%63s %63s %63s", h1, i1, w1) == 3 && !strcmp(h0, h1) && !strcmp(i0, i1) && !strcmp(w0, w1) && !has("MH"), "pm-conflict-touches-nothing"); }
+    /* pull:第二克隆推进 origin/main,本地快进且暂存保留;再造分叉 -> 拒绝 */
+    F(c, sizeof c, "git push -q origin HEAD:main && rm -rf %s && git clone -q %s %s && cd %s && git checkout -q main && git config user.name dvc2 && git config user.email dvc2@example.invalid"
+                   " && printf 'p\\n' > dve-p.txt && git add dve-p.txt && git commit -q -m EP && git push -q origin HEAD:main", cl, bare, cl, cl);
+    ck(!ovf && sh(c, fx) == 0, "pull-fixture");
+    rc = dv("git", "pull", 0, 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_PULL\trc=0\tcommit="), "pull-ff-rc0");
+    ck(sh("[ \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/main)\" ] && [ \"$(cat dve-p.txt)\" = p ] && [ \"$(git show :dve-o.txt)\" = staged ] && [ \"$(cat dve-s.txt)\" = dirty ]", fx) == 0, "pull-ff-keeps-staged-and-dirty");
+    F(c, sizeof c, "printf 'l\\n' > dve-l.txt && git add dve-l.txt && git commit -q -m EL -- dve-l.txt && cd %s && printf 'q\\n' > dve-q.txt && git add dve-q.txt && git commit -q -m EQ && git push -q origin HEAD:main", cl);
+    ck(!ovf && sh(c, fx) == 0, "pull-diverge-fixture");
+    (void)sh("git rev-parse HEAD", fx); F(h0, sizeof h0, "%.60s", out);
+    rc = dv("git", "pull", 0, 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("GIT_PULL\trc=1\treason=diverged") && has("PULL_HINT\tdiverged\t"), "pull-diverged-refused");
+    (void)sh("git rev-parse HEAD", fx);
+    ck(!strcmp(h0, out), "pull-diverged-head-unchanged");
+    /* --cwd:版本工作树里合并,落该树分支,共享检出 HEAD 不动 */
+    F(c, sizeof c, "git branch dve-y dve-x && git worktree add -q -b dve-wt .claude/worktrees/dve-wt HEAD~2 && ln -s %s/unisacc.com .claude/worktrees/dve-wt/unisacc.com && git rev-parse HEAD", root);
+    ck(!ovf && sh(c, fx) == 0, "pm-wt-fixture");
+    F(h0, sizeof h0, "%.60s", out);
+    rc = dv("git", "merge", "dve-y", "--cwd", ".claude/worktrees/dve-wt", 0, 0, 0);
+    ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && has("\tbranch=dve-wt\t"), "pm-wt-merge-rc0");
+    (void)sh("git rev-parse HEAD", fx);
+    ck(!strcmp(h0, out) && sh("git cat-file -e dve-wt:dve-x.txt && [ \"$(cat .claude/worktrees/dve-wt/dve-x.txt)\" = x ] && [ -z \"$(git -C .claude/worktrees/dve-wt status --porcelain -uno)\" ]", fx) == 0, "pm-wt-merge-on-wt-branch-synced");
+    (void)sh("git worktree remove --force .claude/worktrees/dve-wt", fx);
+    /* (h) 负控二:受控注入 DEVSVC_TEST_MERGE_MOVE_HEAD 让落地前 HEAD 被移到子提交 X(加 dve-mv.txt)一次 -> 比较并交换失败、重放一次,
+       最终 HEAD 父一为 X,树含 dve-mv.txt 与被合并分支的 dve-r.txt */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        char X[64] = ""; char ev[120];
+        F(c, sizeof c, "git push -q origin HEAD:refs/heads/dve-h && cd %s && git fetch -q origin && git checkout -q -b dve-mv origin/dve-h && printf 'mv\\n' > dve-mv.txt && git add dve-mv.txt && git commit -q -m EMV"
+                       " && git push -q origin dve-mv && git checkout -q -b dve-r origin/dve-h && printf 'r\\n' > dve-r.txt && git add dve-r.txt && git commit -q -m ER && git push -q origin dve-r"
+                       " && cd %s && git fetch -q origin && git rev-parse origin/dve-mv", cl, fx);
+        ck(!ovf && sh(c, fx) == 0 && sscanf(out, "%63s", X) == 1, "replay-fixture");
+        F(ev, sizeof ev, "DEVSVC_TEST_MERGE_MOVE_HEAD=%s", X); envv[1] = ev; envv[2] = 0;
+        rc = dv("git", "merge", "origin/dve-r", 0, 0, 0, 0, 0);
+        envv[1] = 0;
+        ck(rc == 0 && has("GIT_MERGE_RETRY\tattempt=1\t") && has("GIT_MERGE\trc=0\tcommit="), "replay-after-head-moved-rc0");
+        F(c, sizeof c, "[ \"$(git rev-parse HEAD^1)\" = %s ] && git cat-file -e HEAD:dve-mv.txt && git cat-file -e HEAD:dve-r.txt && [ \"$(git show :dve-o.txt)\" = staged ]", X);
+        ck(!ovf && sh(c, fx) == 0, "replay-tree-has-both-sides");
+    }
+    /* (l) 落地窗口锁 git-land:他人持锁时 merge 拒绝且 HEAD、索引不变;释放后同输入成功 */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        char k0[64] = "", k1[64] = "";
+        ck(sh("N=$(printf 'k\\n' | git hash-object -w --stdin) && T=$({ git ls-tree HEAD~1; printf '100644 blob %s\\tdve-k.txt\\n' $N; } | git mktree)"
+              " && git branch dve-k $(git commit-tree -p HEAD~1 -m EK $T)", fx) == 0, "lock-fixture");
+        rc = dv("lock", "acquire", "git-land", "--owner", "dvg-other", "--ttl", "60", 0);
+        ck(rc == 0, "lock-held-by-other");
+        (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin", fx); if (sscanf(out, "%63s %63s", k0, k1) != 2) k0[0] = 0;
+        rc = dv("git", "merge", "dve-k", 0, 0, 0, 0, 0);
+        ck(rc == 1 && has("MERGE_LOCK_HELD\tlock=git-land\t") && has("GIT_MERGE\trc=1\treason=lock-held"), "lock-held-merge-refused");
+        {   char h[64] = "", ix[64] = ""; (void)sh("git rev-parse HEAD; git ls-files -s | git hash-object --stdin", fx);
+            ck(k0[0] && sscanf(out, "%63s %63s", h, ix) == 2 && !strcmp(h, k0) && !strcmp(ix, k1), "lock-held-ref-and-index-unchanged"); }
+        rc = dv("lock", "release", "git-land", "--owner", "dvg-other", 0, 0, 0);
+        rc = dv("git", "merge", "dve-k", 0, 0, 0, 0, 0);
+        ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && sh("git cat-file -e HEAD:dve-k.txt && [ \"$(git show :dve-o.txt)\" = staged ]", fx) == 0, "lock-released-same-input-merges");
+        rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
+        ck(rc == 0 && !has("git-land"), "lock-not-left-after-merge");
+    }
+    F(c, sizeof c, "rm -rf %s", cl); (void)sh(c, 0);
+    }
+    if (FF) {
+    /* (f) tlib-packages 派生表冲突的版本单调:两分支各 bump 不同包(p.c 两侧都 bump,对侧 1.0.10 按数值大于本侧 1.0.2),
+       自动解后每个包版本等于两侧较大值,其它列取本侧;旧核心(DVGIT_CORE_FROM)取本侧使 p.a 停在 0.1.0,此断言失败 */
+    static const char tgen[] = "int main(void) { return 0; }\n";
+    static const char tman[] =
+        "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+        "tlx\ttools/tlx-gen.cx\tsh ./unisacc.com tools/tlx-gen.cx -- --check\tsh ./unisacc.com tools/tlx-gen.cx -- --write\tbuild/tlib-packages.tsv\tbuild/tlib-packages.tsv\t1\t30\n";
+    ck(wfile("tools/tlx-gen.cx", tgen) == 0 && wfile("exec/facts/derive.tsv", tman) == 0
+       && wfile("build/tlib-packages.tsv", "# pkg\tversion\tapi_sha\tnote\np.a\t0.1.0\tsa0\tA\np.b\t0.2.0\tsb0\tB\np.c\t1.0.0\tsc0\tC\n") == 0, "tlib-fixture-write");
+    F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git add -f tools/tlx-gen.cx exec/facts/derive.tsv build/tlib-packages.tsv && git commit -q -m TL0"
+                   " && git checkout -q -b tlf-b && printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa1\\tA\\np.b\\t0.2.0\\tsb0\\tB\\np.c\\t1.0.10\\tsc1\\tC\\n' > build/tlib-packages.tsv && git commit -q -am TLB"
+                   " && git checkout -q \"$M\" && printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.0\\tsa0\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.2\\tsc2\\tC\\n' > build/tlib-packages.tsv && git commit -q -am TLM");
+    ck(!ovf && sh(c, fx) == 0, "tlib-fixture-branches");
+    rc = dv("git", "merge", "tlf-b", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("MERGE_AUTO\tbuild/tlib-packages.tsv\n") && has("GIT_MERGE\trc=0\tcommit=") && has("\tderive=tlx"), "tlib-conflict-auto-resolved-rc0");
+    ck(sh("[ \"$(git show HEAD:build/tlib-packages.tsv)\" = \"$(printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa0\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.10\\tsc2\\tC')\" ]"
+          " && [ -z \"$(git status --porcelain -uno)\" ] && git rev-parse -q --verify HEAD^2 >/dev/null", fx) == 0, "tlib-merge-each-pkg-max-version-ours-other-cols");
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();

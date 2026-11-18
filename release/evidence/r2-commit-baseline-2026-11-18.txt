@@ -1,0 +1,459 @@
+R2 first-step real baseline, before FIFO implementation
+source=317493cdfc124841019695043c1e256aea0bf5bc
+product=installed v0.0.71, real devsvc --derive and original precommit
+fixture=/tmp/r2-cdx-baseline-317493
+Cold round1 wall=59581ms; warm round2 wall=35675ms. Each round:3 concurrent disjoint requests,1 success,2 stale-receipt refusal,3 gate executions. This is two observations, not a p50/p95 speed claim.
+The original collector's cas_replays=0 only inspected final attempts= fields, missing early-refusal paths. Counts corrected below using the actual HEAD-moved NOTE. These are private-index rebuilds; no automatic re-derivation occurred.
+A failed request's GIT_COMMIT can report another request's HEAD OID in the old route; such an OID is not owned success. R2 must use the successful CAS journal.
+
+BEGIN controller path=/tmp/r3-domain/r2-baseline.cx bytes=7842
+/* Frozen real-repository fixture, real devsvc commit/derive and original precommit.
+ * setup DIR BASE; start DIR ROUND; collect DIR ROUND (one bounded wait per call).
+ * This never creates measurement commits on the shared main. */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+static const char*repo="/home/devali/repos/unisacc";
+static char fx[1200],gd[1400],gw[1400],gi[1400],dd[1400],td[1400],un[1400];
+static void configure(const char*p){snprintf(fx,sizeof fx,"%s",p);snprintf(gd,sizeof gd,"GIT_DIR=%s/.git",fx);snprintf(gw,sizeof gw,"GIT_WORK_TREE=%s",fx);snprintf(gi,sizeof gi,"GIT_INDEX_FILE=%s/.git/index",fx);snprintf(dd,sizeof dd,"DEVSVC_DIR=%s/.r2-devsvc",fx);snprintf(td,sizeof td,"TMPDIR=%s/.r2-tmp",fx);snprintf(un,sizeof un,"UNISACC=%s/unisacc.com",fx);}
+static np_result run(char**v,int fixture,int secs){np_result r={0};char why[500];char*env[]={gd,gw,gi,dd,td,un,"DEVSVC_CXDEV_WATCH=0",0};if(np_run(v,fixture?fx:repo,fixture?env:0,secs,&r,why,sizeof why)){fprintf(stderr,"R2_BASELINE transport %s\n",why);exit(2);}return r;}
+static int command(char**v,int fixture){np_result r=run(v,fixture,55);int rc=r.rc;if(rc){if(r.out)fwrite(r.out,1,r.outn,stdout);if(r.err)fwrite(r.err,1,r.errn,stderr);}printf("BASELINE_STEP command=%s rc=%d\n",v[0],rc);np_free(&r);return rc;}
+static int put(const char*name,const char*s){char p[1500];snprintf(p,sizeof p,"%s/%s",fx,name);return cx_write(p,s,strlen(s));}
+static const char*files[]={"tools/check-budget.cx","tools/check-devsvc-budget.cx","tools/check-devsvc-usage.cx"};
+static int setup(const char*base){if(sy_exists(fx)!=0||strlen(base)!=40)return 2;if(sy_mkdir_all(fx,0700))return 2;char arc[1500],opt[1600];snprintf(arc,sizeof arc,"%s.tar",fx);snprintf(opt,sizeof opt,"--output=%s",arc);char*av[]={"git","archive","--format=tar",opt,(char*)base,0};if(command(av,0))return 2;char*tv[]={"tar","-xf",arc,"-C",fx,0};if(command(tv,0))return 2;char*iv[]={"git","init","-q",0};if(command(iv,1))return 2;
+ char*cv[]={"git","config","core.hooksPath",".git/hooks",0};if(command(cv,1))return 2;char*add[]={"git","add","-f","-A",".",0};if(command(add,1))return 2;char*commit[]={"git","-c","user.name=R2Fixture","-c","user.email=r2@example.invalid","-c","commit.gpgsign=false","commit","-q","-m","R2 frozen fixture",0};if(command(commit,1))return 2;
+ char*name[]={"user.name","user.email"};char*value[]={"R2Fixture","r2@example.invalid"};for(int i=0;i<2;i++){char*v[]={"git","config",name[i],value[i],0};if(command(v,1))return 2;}
+ const char*links[]={"unisacc.com","unisacc.com.build.json","tools/bound"};for(int i=0;i<3;i++){char src[1500],dst[1500];snprintf(src,sizeof src,"%s/%s",repo,links[i]);snprintf(dst,sizeof dst,"%s/%s",fx,links[i]);int exists=sy_exists(dst);if(exists<0)return 2;if(!exists&&sy_symlink(src,dst))return 2;}
+ char temp[1500];snprintf(temp,sizeof temp,"%s/.r2-tmp",fx);if(sy_mkdir_all(temp,0700))return 2;
+ const char*hook="#!/bin/sh\nexec sh ./unisacc.com tools/precommit.cx\n";if(put(".git/hooks/pre-commit",hook))return 2;snprintf(temp,sizeof temp,"%s/.git/hooks/pre-commit",fx);if(sy_chmod(temp,0755))return 2;
+ if(put(".r2-source-base",base))return 2;
+ char*v[]={"sh","./unisacc.com","tools/devsvc.cx","--","run","--local","--quiet","tools/commit-own.cx","--help",0};np_result r=run(v,1,55);int rc=r.rc;if(r.out)fwrite(r.out,1,r.outn,stdout);if(r.err)fwrite(r.err,1,r.errn,stderr);np_free(&r);printf("R2_BASELINE_PREPARED base=%s fixture=%s rc=%d no-test-result\n",base,fx,rc);return rc;
+}
+static int start(int round){char manifest[1500],text[2000];snprintf(manifest,sizeof manifest,"%s/.r2-round-%d",fx,round);if(sy_exists(manifest)!=0)return 2;FILE*out=fopen(manifest,"wb");if(!out)return 2;long t=sy_now_ms();fprintf(out,"START\t%ld\tDEADLINE\t%ld\n",t,t+180000);
+ {char*load=cx_read("/proc/loadavg",0);fprintf(out,"LOAD\t%s",load?load:"UNMEASURED\n");free(load);}
+ for(int i=0;i<3;i++){char path[1500];snprintf(path,sizeof path,"%s/%s",fx,files[i]);size_t n=0;char*b=cx_read(path,&n);if(!b)return 2;int k=snprintf(text,sizeof text,"\n/* R2 measurement request %d-%d. */\n",round,i);char*next=malloc(n+k);memcpy(next,b,n);memcpy(next+n,text,k);if(cx_write(path,next,n+k))return 2;char h[65];cx_sha256_hex(next,n+k,h);fprintf(out,"INPUT\t%d\t%s\t%s\n",i,files[i],h);snprintf(path,sizeof path,"%s/.r2-round-%d-input-%d.cx",fx,round,i);if(cx_write(path,next,n+k))return 2;free(next);free(b);}
+ fflush(out);
+ for(int i=0;i<3;i++){char msg[100];snprintf(msg,sizeof msg,"R2-baseline-r%d-%d",round,i);char*v[]={"sh","./unisacc.com","tools/devsvc.cx","--","git","commit","-m",msg,"--whole",(char*)files[i],"--derive","--bg",0};np_result r=run(v,1,55);char id[80],jd[1200];if(r.rc||!r.out||sscanf(r.out,"JOB %79s run=%1199s",id,jd)!=2){if(r.out)fwrite(r.out,1,r.outn,stdout);if(r.err)fwrite(r.err,1,r.errn,stderr);return 2;}fprintf(out,"JOB\t%d\t%s\t%s\n",i,id,jd);printf("R2_BASELINE_JOB i=%d id=%s dir=%s\n",i,id,jd);fflush(out);np_free(&r);}fclose(out);return 0;
+}
+static int collect(int round){char mp[1500];snprintf(mp,sizeof mp,"%s/.r2-round-%d",fx,round);char*b=cx_read(mp,0);if(!b)return 2;long start=0,deadline=0;if(sscanf(b,"START %ld DEADLINE %ld",&start,&deadline)!=2)return 2;char ids[3][80],dirs[3][1200];int nj=0;for(char*p=b;*p;){char*e=strchr(p,'\n');if(e)*e=0;int i;if(nj<3&&sscanf(p,"JOB %d %79s %1199s",&i,ids[nj],dirs[nj])==3){if(i!=nj||++nj>3)return 2;}if(!e)break;p=e+1;}if(nj!=3)return 2;
+ int waited=0,done=0,ok=0,stale=0,gates=0,replays=0;long ended=start;char report[1500];snprintf(report,sizeof report,"%s/.r2-round-%d-result",fx,round);FILE*out=fopen(report,"wb");if(!out)return 2;
+ for(int i=0;i<3;i++){char path[1500];snprintf(path,sizeof path,"%s/rc",dirs[i]);if(sy_exists(path)==0&&!waited&&sy_now_ms()<deadline){char*v[]={"sh","./unisacc.com","tools/devsvc.cx","--","wait",ids[i],"--timeout-ms","45000","--summary",0};np_result r=run(v,1,50);np_free(&r);waited=1;}
+  int present=sy_exists(path);if(present<0)return 2;if(!present){fprintf(out,"REQUEST\t%d\tRUNNING\tjob=%s\n",i,ids[i]);continue;}char*rcs=cx_read(path,0);if(!rcs)return 2;int rc=atoi(rcs);long ms=0;char*tab=strchr(rcs,'\t');if(tab)ms=atol(tab+1);free(rcs);snprintf(path,sizeof path,"%s/meta",dirs[i]);char*meta=cx_read(path,0);if(!meta)return 2;char*when=strstr(meta,"start\t");if(!when)return 2;long end=atol(when+6)+ms;if(end>ended)ended=end;free(meta);done++;ok+=rc==0;snprintf(path,sizeof path,"%s/out",dirs[i]);char*log=cx_read(path,0);if(!log)return 2;int st=strstr(log,"class=derive-identity")!=0,ga=0,attempts=0;for(char*p=log;(p=strstr(p,"COMMIT_PHASE\tname=gates\tstate=begin"));p++)ga++;for(char*p=log;(p=strstr(p,"attempts="));p++){int a=atoi(p+9);if(a>attempts)attempts=a;}gates+=ga;stale+=st;if(attempts>1)replays+=attempts-1;fprintf(out,"REQUEST\t%d\trc=%d\tms=%ld\treceipt_stale=%d\tgate_runs=%d\tcas_replays=%d\tjob=%s\n",i,rc,ms,st,ga,attempts>1?attempts-1:0,ids[i]);char lp[1500];snprintf(lp,sizeof lp,"%s/.r2-round-%d-job-%d.log",fx,round,i);if(cx_write(lp,log,strlen(log)))return 2;free(log);}
+ fprintf(out,"ROUND\t%d\tdone=%d\tsuccess=%d\twall_ms=%ld\treceipt_stale=%d\tgate_runs=%d\tcas_replays=%d\n",round,done,ok,done==3?ended-start:-1L,stale,gates,replays);fclose(out);printf("R2_BASELINE round=%d done=%d success=%d receipt_stale=%d gate_runs=%d cas_replays=%d wall_ms=%ld evidence=%s\n",round,done,ok,stale,gates,replays,done==3?ended-start:-1L,report);return done==3?0:sy_now_ms()>=deadline?4:3;
+}
+int main(int argc,char**argv){if(argc<4||strncmp(argv[2],"/tmp/r2-cdx-",12)||strstr(argv[2],".."))return 2;configure(argv[2]);if(!strcmp(argv[1],"setup")&&argc==4)return setup(argv[3]);int round=atoi(argv[3]);if(round<1||round>5)return 2;if(!strcmp(argv[1],"start"))return start(round);if(!strcmp(argv[1],"collect"))return collect(round);return 2;}
+
+END controller
+
+BEGIN manifest path=/tmp/r2-cdx-baseline-317493/.r2-round-1 bytes=646
+START	21386399135	DEADLINE	21386579135
+INPUT	0	tools/check-budget.cx	6250ddad549f96dc1eb432f30c6651b36537110393dff501fa14ee4f7b0b0c23
+INPUT	1	tools/check-devsvc-budget.cx	ce094688094efa99d1594f49c2fb361f55b5a77e5ff0ed500665cab7341565df
+INPUT	2	tools/check-devsvc-usage.cx	00224c2638210b5a6a99bac7448ad7f890723e2dda14dcf19e97b9b55ab29e90
+JOB	0	21386399277-2139107	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399277-2139107
+JOB	1	21386399351-2139170	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399351-2139170
+JOB	2	21386399424-2139209	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399424-2139209
+
+END manifest
+
+BEGIN original-collector-result path=/tmp/r2-cdx-baseline-317493/.r2-round-1-result bytes=351
+REQUEST	0	rc=1	ms=59283	receipt_stale=1	gate_runs=1	cas_replays=0	job=21386399277-2139107
+REQUEST	1	rc=1	ms=59365	receipt_stale=1	gate_runs=1	cas_replays=0	job=21386399351-2139170
+REQUEST	2	rc=0	ms=58949	receipt_stale=0	gate_runs=1	cas_replays=0	job=21386399424-2139209
+ROUND	1	done=3	success=1	wall_ms=59581	receipt_stale=2	gate_runs=3	cas_replays=0
+
+END original-collector-result
+CORRECTED round=1 request=0 head_rebuilds=1 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-1-job-0.log bytes=3129
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399288-2139111	state=begin
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	28241
+DERIVE	batch-domains	WROTE	5261
+DERIVE	table-index	WROTE	7529
+DERIVE	batch-domains	OK	1984
+DERIVE	batch-packages-gen	OK	7979
+DERIVE	table-index	OK	7610
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=52210
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399288-2139111/receipt	sha=381e291192199c9aa0b00ff847d2c7cb2430ef8b945e162582e05644b419a641	input=e4731913b78013241f314bc2c21850dc9e49f660	result=0b49da7e664b795dc606d3eb121d6f39ce59b6c9
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=52556	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386399288-2139111
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399288-2139111	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=381e291192199c9aa0b00ff847d2c7cb2430ef8b945e162582e05644b419a641
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=e4731913b78013241f314bc2c21850dc9e49f660	result=0b49da7e664b795dc606d3eb121d6f39ce59b6c9	sha=381e291192199c9aa0b00ff847d2c7cb2430ef8b945e162582e05644b419a641	verified=1
+DERIVE	batch-packages-gen	WROTE	28241
+DERIVE	batch-domains	WROTE	5261
+DERIVE	table-index	WROTE	7529
+DERIVE	batch-domains	OK	1984
+DERIVE	batch-packages-gen	OK	7979
+DERIVE	table-index	OK	7610
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=53
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=6282
+NOTE	HEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_FAIL	class=derive-identity
+commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+X	fail	rc=1	ms=6710	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386451848-2139111
+COMMIT_STAGE_FAIL	phase=commit	rc=1	derived=completed	next=devsvc git commit --status (retain receipt /home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399288-2139111/receipt; retry original command if inputs changed)
+GIT_COMMIT_ERR	COMMIT_OWN_FAIL	class=derive-identity
+GIT_COMMIT_ERR	commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+GIT_COMMIT	rc=1	commit=b1c8a984654d88405500e5c93cdd27d7c014e87e	pushed=0	ms=59279	reason=failed
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399277-2139107/pid bytes=8
+2139111
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399277-2139107/meta bytes=177
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r1-0 --whole tools/check-budget.cx --derive
+owner	pane-376
+start	21386399278
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399277-2139107/rc bytes=8
+1	59283
+
+END rc
+CORRECTED round=1 request=1 head_rebuilds=1 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-1-job-1.log bytes=3129
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399357-2139176	state=begin
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	28333
+DERIVE	batch-domains	WROTE	5365
+DERIVE	table-index	WROTE	7552
+DERIVE	batch-domains	OK	2020
+DERIVE	batch-packages-gen	OK	8172
+DERIVE	table-index	OK	7633
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=52648
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399357-2139176/receipt	sha=431e1e93062f0f1b29ebd74c8607feac84f8e4888226758dc324507bddcbce7f	input=d5d29189f706ec3fb206defe6e2b19e42959a52e	result=69f904e669a7c62aaa9cc3b0e60e0bdbdde5c91d
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=52974	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386399357-2139176
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399357-2139176	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=431e1e93062f0f1b29ebd74c8607feac84f8e4888226758dc324507bddcbce7f
+COMMIT_PHASE	name=select	state=end	ms=10
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=d5d29189f706ec3fb206defe6e2b19e42959a52e	result=69f904e669a7c62aaa9cc3b0e60e0bdbdde5c91d	sha=431e1e93062f0f1b29ebd74c8607feac84f8e4888226758dc324507bddcbce7f	verified=1
+DERIVE	batch-packages-gen	WROTE	28333
+DERIVE	batch-domains	WROTE	5365
+DERIVE	table-index	WROTE	7552
+DERIVE	batch-domains	OK	2020
+DERIVE	batch-packages-gen	OK	8172
+DERIVE	table-index	OK	7633
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=52
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=5978
+NOTE	HEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_FAIL	class=derive-identity
+commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+X	fail	rc=1	ms=6375	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386452334-2139176
+COMMIT_STAGE_FAIL	phase=commit	rc=1	derived=completed	next=devsvc git commit --status (retain receipt /home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399357-2139176/receipt; retry original command if inputs changed)
+GIT_COMMIT_ERR	COMMIT_OWN_FAIL	class=derive-identity
+GIT_COMMIT_ERR	commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+GIT_COMMIT	rc=1	commit=b1c8a984654d88405500e5c93cdd27d7c014e87e	pushed=0	ms=59363	reason=failed
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399351-2139170/pid bytes=8
+2139176
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399351-2139170/meta bytes=184
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r1-1 --whole tools/check-devsvc-budget.cx --derive
+owner	pane-376
+start	21386399351
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399351-2139170/rc bytes=8
+1	59365
+
+END rc
+CORRECTED round=1 request=2 head_rebuilds=0 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-1-job-2.log bytes=2573
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399433-2139211	state=begin
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	28240
+DERIVE	batch-domains	WROTE	5384
+DERIVE	table-index	WROTE	7475
+DERIVE	batch-domains	OK	2069
+DERIVE	batch-packages-gen	OK	8054
+DERIVE	table-index	OK	7568
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=52398
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399433-2139211/receipt	sha=23d737b5cd84f7150243f1bb246ad80bd7c1664d35e943d14829a70353fa2550	input=ef2c9841cc0fc2457cd849816f1ea5d1cc8609a2	result=1020be92d31d1ca27810954c2fe9e77d387e5d0e
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=52646	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386399433-2139211
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21386399433-2139211	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=23d737b5cd84f7150243f1bb246ad80bd7c1664d35e943d14829a70353fa2550
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=ef2c9841cc0fc2457cd849816f1ea5d1cc8609a2	result=1020be92d31d1ca27810954c2fe9e77d387e5d0e	sha=23d737b5cd84f7150243f1bb246ad80bd7c1664d35e943d14829a70353fa2550	verified=1
+DERIVE	batch-packages-gen	WROTE	28240
+DERIVE	batch-domains	WROTE	5384
+DERIVE	table-index	WROTE	7475
+DERIVE	batch-domains	OK	2069
+DERIVE	batch-packages-gen	OK	8054
+DERIVE	table-index	OK	7568
+DERIVED	tests/batch-domain-index.tsv
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=1	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=53
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=5843
+CACHED_QUIET
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_PHASE	select_ms=11	pending_ms=1	regm_ms=0	commit_ms=5843	attempts=1
+COMMIT_OWN	commit=b1c8a98465	paths=2	foreign_kept=0	index_unsynced=0
+X	ok	rc=0	ms=6284	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21386452082-2139211
+GIT_COMMIT	rc=0	commit=b1c8a984654d88405500e5c93cdd27d7c014e87e	pushed=0	ms=58944
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399424-2139209/pid bytes=8
+2139211
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399424-2139209/meta bytes=183
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r1-2 --whole tools/check-devsvc-usage.cx --derive
+owner	pane-376
+start	21386399424
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21386399424-2139209/rc bytes=8
+0	58949
+
+END rc
+CORRECTED_ROUND round=1 head_rebuilds=2
+
+BEGIN manifest path=/tmp/r2-cdx-baseline-317493/.r2-round-2 bytes=681
+START	21387218947	DEADLINE	21387398947
+LOAD	4.29 1.89 1.49 1/1505 2219880
+INPUT	0	tools/check-budget.cx	066a1a1cd1cdc4c9fbd4bfc78d1e0091802b0378cc5b97723a5ec5d4171b35f7
+INPUT	1	tools/check-devsvc-budget.cx	8561150d15e1a0b8fb38afb7d5cfe77db5120ed7b1778c2d77cbcc2b98187f11
+INPUT	2	tools/check-devsvc-usage.cx	6bce7a6d317cc7f62c30813f53252e084f00e65c223c72de4d89091828a26a60
+JOB	0	21387219016-2219891	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219016-2219891
+JOB	1	21387219087-2219917	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219087-2219917
+JOB	2	21387219155-2219960	/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219155-2219960
+
+END manifest
+
+BEGIN original-collector-result path=/tmp/r2-cdx-baseline-317493/.r2-round-2-result bytes=351
+REQUEST	0	rc=0	ms=35017	receipt_stale=0	gate_runs=1	cas_replays=0	job=21387219016-2219891
+REQUEST	1	rc=1	ms=35535	receipt_stale=1	gate_runs=1	cas_replays=0	job=21387219087-2219917
+REQUEST	2	rc=1	ms=35086	receipt_stale=1	gate_runs=1	cas_replays=0	job=21387219155-2219960
+ROUND	2	done=3	success=1	wall_ms=35675	receipt_stale=2	gate_runs=3	cas_replays=0
+
+END original-collector-result
+CORRECTED round=2 request=0 head_rebuilds=0 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-2-job-0.log bytes=2497
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219024-2219893	state=begin
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	7724
+DERIVE	batch-domains	WROTE	2044
+DERIVE	table-index	WROTE	7518
+DERIVE	batch-domains	OK	2063
+DERIVE	batch-packages-gen	OK	8166
+DERIVE	table-index	OK	8102
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=28619
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219024-2219893/receipt	sha=4bdc628c0ac91ec6d67b9d3e771fa96850aa91599ecb74ee353addd922924e8a	input=7d525ba4c92d6c55c64e611885f344e63ecfde5b	result=7d525ba4c92d6c55c64e611885f344e63ecfde5b
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=28855	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387219024-2219893
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219024-2219893	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=4bdc628c0ac91ec6d67b9d3e771fa96850aa91599ecb74ee353addd922924e8a
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=7d525ba4c92d6c55c64e611885f344e63ecfde5b	result=7d525ba4c92d6c55c64e611885f344e63ecfde5b	sha=4bdc628c0ac91ec6d67b9d3e771fa96850aa91599ecb74ee353addd922924e8a	verified=1
+DERIVE	batch-packages-gen	WROTE	7724
+DERIVE	batch-domains	WROTE	2044
+DERIVE	table-index	WROTE	7518
+DERIVE	batch-domains	OK	2063
+DERIVE	batch-packages-gen	OK	8166
+DERIVE	table-index	OK	8102
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=31
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=5862
+CACHED_QUIET
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_PHASE	select_ms=11	pending_ms=0	regm_ms=0	commit_ms=5862	attempts=1
+COMMIT_OWN	commit=8e249c38f9	paths=1	foreign_kept=0	index_unsynced=0
+X	ok	rc=0	ms=6140	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387247883-2219893
+GIT_COMMIT	rc=0	commit=8e249c38f91cc349542bd5611432bfadd2e1041c	pushed=0	ms=35012
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219016-2219891/pid bytes=8
+2219893
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219016-2219891/meta bytes=177
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r2-0 --whole tools/check-budget.cx --derive
+owner	pane-376
+start	21387219016
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219016-2219891/rc bytes=8
+0	35017
+
+END rc
+CORRECTED round=2 request=1 head_rebuilds=1 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-2-job-1.log bytes=3053
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219095-2219919	state=begin
+COMMIT_PHASE	name=select	state=end	ms=11
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	7898
+DERIVE	batch-domains	WROTE	2119
+DERIVE	table-index	WROTE	7474
+DERIVE	batch-domains	OK	2086
+DERIVE	batch-packages-gen	OK	7980
+DERIVE	table-index	OK	7663
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=28725
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219095-2219919/receipt	sha=316bcbfdfa4300e2f7680210d631680c71c55f8a23badf9ce07666add8023ba3	input=dc012af12f96889d541e74109c9e8c11a5c30ba6	result=dc012af12f96889d541e74109c9e8c11a5c30ba6
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=28951	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387219095-2219919
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219095-2219919	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=316bcbfdfa4300e2f7680210d631680c71c55f8a23badf9ce07666add8023ba3
+COMMIT_PHASE	name=select	state=end	ms=10
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=dc012af12f96889d541e74109c9e8c11a5c30ba6	result=dc012af12f96889d541e74109c9e8c11a5c30ba6	sha=316bcbfdfa4300e2f7680210d631680c71c55f8a23badf9ce07666add8023ba3	verified=1
+DERIVE	batch-packages-gen	WROTE	7898
+DERIVE	batch-domains	WROTE	2119
+DERIVE	table-index	WROTE	7474
+DERIVE	batch-domains	OK	2086
+DERIVE	batch-packages-gen	OK	7980
+DERIVE	table-index	OK	7663
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=31
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=6185
+NOTE	HEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_FAIL	class=derive-identity
+commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+X	fail	rc=1	ms=6566	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387248050-2219919
+COMMIT_STAGE_FAIL	phase=commit	rc=1	derived=completed	next=devsvc git commit --status (retain receipt /home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219095-2219919/receipt; retry original command if inputs changed)
+GIT_COMMIT_ERR	COMMIT_OWN_FAIL	class=derive-identity
+GIT_COMMIT_ERR	commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+GIT_COMMIT	rc=1	commit=8e249c38f91cc349542bd5611432bfadd2e1041c	pushed=0	ms=35530	reason=failed
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219087-2219917/pid bytes=8
+2219919
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219087-2219917/meta bytes=184
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r2-1 --whole tools/check-devsvc-budget.cx --derive
+owner	pane-376
+start	21387219087
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219087-2219917/rc bytes=8
+1	35535
+
+END rc
+CORRECTED round=2 request=2 head_rebuilds=1 receipt_regenerations=0
+
+BEGIN raw-request-log path=/tmp/r2-cdx-baseline-317493/.r2-round-2-job-2.log bytes=3053
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219163-2219962	state=begin
+COMMIT_PHASE	name=select	state=end	ms=10
+COMMIT_PHASE	name=derive	state=begin
+DERIVE	batch-packages-gen	WROTE	7975
+DERIVE	batch-domains	WROTE	2048
+DERIVE	table-index	WROTE	7577
+DERIVE	batch-domains	OK	2126
+DERIVE	batch-packages-gen	OK	7789
+DERIVE	table-index	OK	7781
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=28576
+COMMIT_DERIVE_PREPARED	file=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219163-2219962/receipt	sha=d5ca24a641a28d7d8d213b7cf5854b208595f0557b129baf66164fade3090097	input=ab9e210cf92bff0c6ea9f0e3293d7b50cf7a9d08	result=ab9e210cf92bff0c6ea9f0e3293d7b50cf7a9d08
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+X	ok	rc=0	ms=28772	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387219163-2219962
+COMMIT_STAGE	phase=derive	job=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219163-2219962	rc=0	derived=completed
+COMMIT_STAGE	phase=commit	derived=completed	identity=d5ca24a641a28d7d8d213b7cf5854b208595f0557b129baf66164fade3090097
+COMMIT_PHASE	name=select	state=end	ms=10
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_DERIVE_IDENTITY	input=ab9e210cf92bff0c6ea9f0e3293d7b50cf7a9d08	result=ab9e210cf92bff0c6ea9f0e3293d7b50cf7a9d08	sha=d5ca24a641a28d7d8d213b7cf5854b208595f0557b129baf66164fade3090097	verified=1
+DERIVE	batch-packages-gen	WROTE	7975
+DERIVE	batch-domains	WROTE	2048
+DERIVE	table-index	WROTE	7577
+DERIVE	batch-domains	OK	2126
+DERIVE	batch-packages-gen	OK	7789
+DERIVE	table-index	OK	7781
+COMMIT_OWN_DERIVE	rc=0	stage=ok	files=0	ms=31
+COMMIT_PHASE	name=derive	state=end	ms=31
+COMMIT_PHASE	name=gates	state=begin
+COMMIT_PHASE	name=gates	state=end	ms=5895
+NOTE	HEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once
+COMMIT_PHASE	name=derive	state=begin
+COMMIT_OWN pending-derived=batch-domains run: sh ./unisacc.com tools/derive.cx -- --write --only batch-domains
+COMMIT_OWN pending-derived=table-index run: sh ./unisacc.com tools/derive.cx -- --write --only table-index
+COMMIT_OWN_FAIL	class=derive-identity
+commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+X	fail	rc=1	ms=6294	via=local	run=/tmp/r2-cdx-baseline-317493/.r2-tmp/devsvc-flow-21387247939-2219962
+COMMIT_STAGE_FAIL	phase=commit	rc=1	derived=completed	next=devsvc git commit --status (retain receipt /home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/commit-derive-21387219163-2219962/receipt; retry original command if inputs changed)
+GIT_COMMIT_ERR	COMMIT_OWN_FAIL	class=derive-identity
+GIT_COMMIT_ERR	commit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs
+GIT_COMMIT	rc=1	commit=8e249c38f91cc349542bd5611432bfadd2e1041c	pushed=0	ms=35083	reason=failed
+
+END raw-request-log
+
+BEGIN pid path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219155-2219960/pid bytes=8
+2219962
+
+END pid
+
+BEGIN meta path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219155-2219960/meta bytes=183
+cmd	/home/devali/.cache/unisacc/devsvc/pinned/c647c7e5b4e0bf0c3a7b/devsvc git commit -m R2-baseline-r2-2 --whole tools/check-devsvc-usage.cx --derive
+owner	pane-376
+start	21387219155
+
+END meta
+
+BEGIN rc path=/home/devali/.cache/unisacc/devsvc/61b13ccb7fb05344/jobs/21387219155-2219960/rc bytes=8
+1	35086
+
+END rc
+CORRECTED_ROUND round=2 head_rebuilds=2

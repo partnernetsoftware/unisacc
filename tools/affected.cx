@@ -2,6 +2,10 @@
    From the repo root:
 
      sh ./unisacc.com tools/affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]]
+     sh ./unisacc.com tools/affected.cx -- --domain NAME [--domain NAME...] [--domain-summary]
+     Domain options intersect --files/--since/--ids/--layer and tier/host filters.
+     The checked domain index is loaded only when a domain option is present.
+     Summaries describe selection, never an executed test result.
      sh ./unisacc.com tools/affected.cx -- --users FILE
      sh ./unisacc.com tools/affected.cx -- --materials-dump [--ids ID...] [--family NAME] [--prepare-materials]
 
@@ -70,6 +74,7 @@
 #pragma unisa use cxlib.tlibpkg
 #pragma unisa use cxlib.kernelinputs
 #pragma unisa use cxlib.flowadmit
+#pragma unisa use cxlib.batchdomain
 
 /* an unlinked spool file the drained output of a bounded child goes to */
 static int spool_open(void) {
@@ -133,12 +138,15 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 static int arena;
 static char root[4096];
 static long root_n;
+static const char *root_product_relative = "./unisacc.com"; /* lint:allow R1-product Explicit current-root candidate launcher; preserve the existing relative argv contract. */
+static int root_candidate(char *dst,size_t cap){return cx_fmt(dst,cap,"%s/unisacc.com",root);}
 static void die(const char *s) { fprintf(stderr, "affected: %s\n", s); exit(2); }
 static char *keep(const char *s, long n) { char *p = ar_dup(arena, s, n); if (!p) die("out of memory"); return p; }
 static char *zkeep(const char *s) { return keep(s, tx_len(s, CAP)); }
 
 /* ---------- a growable buffer in the arena ---------- */
 typedef struct { char *p; long n, cap; } Buf;
+static int read_all(char **argv, Buf *out);
 static void put(Buf *b, const char *s, long n) {
     if (b->n + n + 1 > b->cap) {
         long c = (b->n + n + 1) * 2; char *t = ar_alloc(arena, c);
@@ -522,6 +530,27 @@ static void refuse_expired_inherited_deadline(void) {
 }
 static int nbatch;
 static const char *selected_tier;
+static int domain_on,domain_filter,domain_wanted[6],domain_of[MAXBATCH],domain_registered[6];
+static void domain_load(void){
+    Buf out={0,0,0};char product[4400];if(root_candidate(product,sizeof product))die("domain candidate path bound");
+    char*v[]={"sh",product,"tools/batch-domains-gen.cx","--","--check","--dump",0};
+    if(read_all(v,&out)){fprintf(stderr,"DOMAIN_REFUSE\treason=index-not-current\taction=run batch-domains-gen --write after resolving named contract errors\n");exit(2);}
+    for(int b=0;b<nbatch;b++)domain_of[b]=-1;int rows=0;
+    for(char*p=out.p;p&&*p;){char*e=strchr(p,'\n');if(!e)die("domain index missing newline");*e=0;
+        if(*p&&*p!='#'&&strcmp(p,"id\tdomain\torigin\tbasis")){char*f[4];int nf=1;f[0]=p;for(char*q=p;*q;q++)if(*q=='\t'){*q=0;if(nf==4)die("domain index row shape");f[nf++]=q+1;}
+            if(nf!=4)die("domain index row shape");int k=bdom_kind(f[1]);if(k<0)die("domain index unknown domain");domain_registered[k]++;rows++;
+            for(int b=0;b<nbatch;b++)if(tx_eqz(batch[b].id,f[0])){if(domain_of[b]>=0)die("domain index duplicate batch");domain_of[b]=k;break;}
+        }p=e+1;
+    }if(!rows)die("domain index empty");for(int b=0;b<nbatch;b++)if(domain_of[b]<0){fprintf(stderr,"DOMAIN_REFUSE\tid=%s\treason=missing-index-row\taction=resolve declaration or explicit exception, then regenerate\n",batch[b].id);exit(2);}
+}
+static int domain_accept(int b){return !domain_on||!domain_filter||domain_wanted[domain_of[b]];}
+/* registered is the full denominator; eligible applies tier and host; selected applies the query. */
+static void domain_emit(const int*sel,int nsel){if(!domain_on)return;int eligible[6]={0},chosen[6]={0},total=0;
+    for(int b=0;b<nbatch;b++)if((!selected_tier||tp_tier_includes(selected_tier,batch[b].tier))&&psc_platform_allowed(batch[b].platform))eligible[domain_of[b]]++;
+    for(int i=0;i<nsel;i++)chosen[domain_of[sel[i]]]++;
+    for(int k=0;k<6;k++){total+=domain_registered[k];printf("DOMAIN_SUMMARY\tdomain=%s\tregistered=%d\teligible=%d\tselected=%d\n",bdom_name(k),domain_registered[k],eligible[k],chosen[k]);}
+    printf("DOMAIN_TOTAL\tregistered=%d\tselected=%d\tselection-only\tno-test-result\n",total,nsel);
+}
 static void on_batch(const tp_batch_view *v, void *ctx) {
     (void)ctx;
     /* The assembler contract lives in its generated material directory. Other
@@ -541,6 +570,7 @@ static void load_registry(void) {
     char *r = cx_read("tests/batches.tsv", &rn), *c = cx_read("tests/coverage.tsv", &cn);
     if (!r || !c) die("cannot read tests/batches.tsv or tests/coverage.tsv");
     if (tp_visit(root, r, rn, c, cn, &ob, &sum, why, sizeof why)) { fprintf(stderr, "affected: REFUSE metadata %s\n", why); exit(2); }
+    if(domain_on)domain_load();
 }
 static void mark_batch(Batch *B) {
     unsigned long models = 0; int ni;
@@ -882,7 +912,7 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         const char *material=getenv("UNISACC_KERNELS_MATERIAL_DIR");char tool[4400],product[4400],bound[4400],receipt[4600],identity[140];struct stat st;
         if(!material||!*material){cx_fmt(why,cap,"MULTIPHASE_REQUIRED:kernels:bootstrap,prepare,prepare-assembler,preprocess-ISA,assemble-ISA,link-ISA,seal");return -1;}
         if(!realpath(material,P->path)||lstat(P->path,&st)||!S_ISDIR(st.st_mode)){cx_fmt(why,cap,"kernels-material-directory");return -1;}
-        if(cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return -1;
+        if(cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||root_candidate(product,sizeof product)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return -1;
         char *v[]={bound,"25","sh",product,tool,"--",root,P->path,"--verify",0};Buf observed={0,0,0};
         if(read_all(v,&observed)||!observed.p||!strstr(observed.p,"VERIFIED\tkernels\t")){cx_fmt(why,cap,"kernels-material-refused");return -1;}
         if(cx_fmt(receipt,sizeof receipt,"%s/material.tsv",P->path)||file_sha(receipt,P->sha)||closure_sha(P->src,P->closure)||cx_fmt(identity,sizeof identity,"%s%s",P->sha,P->closure))return -1;
@@ -927,7 +957,7 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         }
         if(!found){cx_fmt(why,cap,"HOST_TOOL_MISSING:hostcc");return -1;}
         char product[4400],tool[4400],bound[4400],combined[140];Buf output={0,0,0};
-        if(cx_fmt(product,sizeof product,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return -1;
+        if(root_candidate(product,sizeof product)||cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return -1;
         char *v[]={bound,"20","sh",product,tool,"--","--fingerprint",root,0};
         int rc=read_all(v,&output);
         if(rc||output.n!=65||output.p[64]!='\n'){cx_fmt(why,cap,rc==3?"HOST_TOOL_MISSING:hostcc":"libneed-native-fingerprint-refused");return -1;}
@@ -968,7 +998,7 @@ typedef struct { int pid, ofd, efd, job, secs; long t0; char tmp[4400]; Buf out,
 static int prep_start(PJob *J, int k) {
     Prep *P = &prep[k]; char product[4400], bound[4400], image[4400], kitdir[4400], srcabs[4400], pid_s[32];
     char *av[16]; int n = 0;
-    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)
+    if (root_candidate(product, sizeof product) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)
         || tp_kit_dir(root, kitdir, sizeof kitdir) || cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir)
         || cx_fmt(srcabs, sizeof srcabs, "%s/%s", root, P->src)
         || cx_fmt(pid_s, sizeof pid_s, "%d", sy_pid())
@@ -1093,7 +1123,7 @@ static const char *compile_use(void) {
 static int prewarm_compile(long *ms) {
     char bound[4400], product[4400], lim[8] = "40", line[512], path[4400]; Buf out = {0, 0, 0}; char *av[8]; int rc; long t0 = sy_now_ms();
     *ms = 0;
-    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 0;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || root_candidate(product, sizeof product)) return 0;
     av[0] = bound; av[1] = lim; av[2] = "sh"; av[3] = product; av[4] = "tests/run-batch.cx"; av[5] = 0;
     rc = read_all(av, &out);
     *ms = sy_now_ms() - t0;
@@ -1194,7 +1224,7 @@ static int prepare_materials(const Batch *B, const char **av, int *nav, char *wh
 /* tools/tlib.cx kit under a 40 s bound; its own PREPARED line (rebuilt=N) is forwarded, else a visible FAILED line. */
 static void kit_prepare(void) {
     char bound[4400], product[4400], lim[8] = "40"; Buf out = {0, 0, 0}; char *av[8]; int rc, shown = 0; long i, e;
-    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || root_candidate(product, sizeof product)) return;
     av[0] = bound; av[1] = lim; av[2] = "sh"; av[3] = product; av[4] = "tools/tlib.cx"; av[5] = "--"; av[6] = "kit"; av[7] = 0;
     rc = read_all(av, &out);
     for (i = 0; i < out.n; i = e + 1) {
@@ -1415,7 +1445,7 @@ static int iface_same(const char *pkg, const char **why) {
     if (cx_fmt(man, sizeof man, "build/layer-api/%s.tsv", pkg)) { *why = "pkg-name"; return 0; }
     { char *v[] = {"git", "diff", "--quiet", "HEAD", "--", man, 0}; if (read_all(v, &o) != 0) { *why = "manifest-differs-from-HEAD"; return 0; } }
     if (iface_fresh_state == 0) {
-        char *v[] = {"sh", "./unisacc.com", "tools/iface-hash.cx", "--", "--write", "--table", tmp, 0};
+        char *v[] = {"sh", (char*)root_product_relative, "tools/iface-hash.cx", "--", "--write", "--table", tmp, 0};
         iface_fresh_state = -1;
         if (!cx_fmt(tmp, sizeof tmp, "%s/unisacc-affected-ifh-%d.tsv", sy_tmpdir(), sy_pid()) && read_all(v, &o) == 0) {
             iface_fresh = cx_read(tmp, &iface_fresh_n); if (iface_fresh) iface_fresh_state = 1;
@@ -1429,7 +1459,7 @@ static int iface_same(const char *pkg, const char **why) {
     if (!pkg_line(t, (long)tn, pkg, &s1, &l1) || !pkg_line(iface_fresh, (long)iface_fresh_n, pkg, &s2, &l2) || !pkg_line(h.p, h.n, pkg, &s3, &l3)
         || !lines_eq(t, s1, l1, iface_fresh, s2, l2) || !lines_eq(t, s1, l1, h.p, s3, l3)) { free(t); *why = "iface-hash-row"; return 0; }
     free(t);
-    { char *v[] = {"sh", "./unisacc.com", "tools/layer-api.cx", "--", "--check", "--pkg", (char *)pkg, 0}; if (read_all(v, &o) != 0) { *why = "layer-api-check"; return 0; } }
+    { char *v[] = {"sh", (char*)root_product_relative, "tools/layer-api.cx", "--", "--check", "--pkg", (char *)pkg, 0}; if (read_all(v, &o) != 0) { *why = "layer-api-check"; return 0; } }
     *why = "same"; return 1;
 }
 /* 1 when batch root REL sits in the directory of changed node CI or uses it directly (or cannot be told) */
@@ -1467,7 +1497,7 @@ static int sym_batch(const char *src, const char *entry) {
 }
 /* mark every file calling a symbol of SYMS; returns the number of call sites (0 = cannot narrow) */
 static int sym_load(const char *syms) {
-    char *v[] = {"sh", "./unisacc.com", "tools/symindex.cx", "--", "calls", (char *)syms, "--tracked", 0}; Buf o = {0, 0, 0}; long at = 0; int n = 0;
+    char *v[] = {"sh", (char*)root_product_relative, "tools/symindex.cx", "--", "calls", (char *)syms, "--tracked", 0}; Buf o = {0, 0, 0}; long at = 0; int n = 0;
     if (read_all(v, &o) != 0) return 0;
     while (at < o.n) {
         long ln = 0, c = 0;
@@ -1557,6 +1587,8 @@ int main(int argc, char **argv) {
             src += ids ? 100 : 1;
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
+        else if(tx_eqz(argv[a],"--domain-summary")){domain_on=1;a++;}
+        else if(tx_eqz(argv[a],"--domain")&&a+1<argc){int k=bdom_kind(argv[a+1]);if(k<0){fprintf(stderr,"DOMAIN_REFUSE\treason=unknown-domain\tname=%s\n",argv[a+1]);return 2;}domain_on=domain_filter=1;domain_wanted[k]=1;a+=2;}
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
@@ -1596,6 +1628,8 @@ int main(int argc, char **argv) {
         }
         else usage();
     }
+    if(domain_on&&(materials_dump||closure_dump||family_index||nmaterial_family))die("--domain supports --files, --since, --ids, --layer and domain-only selection");
+    if(domain_on&&mode_run&&!jobs){int c=fa_budget();jobs=c<1?4:c>MAXJOBS?MAXJOBS:c;}
     if (materials_dump) {   /* the source each declared material resolves to.  The row is
                                MATERIAL<TAB>BATCH<TAB>NAME<TAB>SOURCE-or-'-'[<TAB>REFUSED=why] -- four
                                fields plus the reason on a refusal -- and with --prepare-materials it is the
@@ -1676,6 +1710,7 @@ int main(int argc, char **argv) {
         printf("CLOSURE_SUMMARY\tbatches=%d\tfiles=%d\n", nbatch, nnode);
         return 0;
     }
+    if(domain_on&&!src&&!layer){if(mode_run&&!domain_filter)die("--domain-summary --run needs a selection");load_registry();for(b=0;b<nbatch;b++){if(!domain_accept(b)||(selected_tier&&!tp_tier_includes(selected_tier,batch[b].tier)))continue;if(!host_allows(b))continue;sel[nsel++]=b;if(domain_filter)printf("SELECTED\t%s\n",batch[b].id);}domain_emit(sel,nsel);return mode_run?run(sel,nsel,jobs):0;}
     if (layer) {   /* coarse cut: the batches build/batch-packages.tsv puts in LAYER, plus layer `all` and every batch the table does not name */
         size_t tn; char *t = cx_read("build/batch-packages.tsv", &tn); int own = 0, all = 0, missing = 0;
         if (src) usage();
@@ -1683,6 +1718,7 @@ int main(int argc, char **argv) {
         load_registry();
         for (b = 0; b < nbatch; b++) {
             char key[400]; long at, kl, ll = 0; const char *lay = "-";
+            if(!domain_accept(b))continue;
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
             if (cx_fmt(key, sizeof key, "\nbatch\t%s\t", batch[b].id)) die("id too long");
             kl = tx_len(key, sizeof key); at = tx_find(t, (long)tn, key, kl);
@@ -1696,6 +1732,7 @@ int main(int argc, char **argv) {
             sel[nsel++] = b;
         }
         printf("LAYER_SUMMARY\tlayer=%s\tbatches=%d\town=%d\tall=%d\tunknown=%d\tscanned=%d\n", layer, nsel, own, all, missing, nbatch);
+        domain_emit(sel,nsel);
         return mode_run ? run(sel, nsel, jobs) : 0;
     }
     if (src != 1 && src != 100) usage();
@@ -1706,12 +1743,13 @@ int main(int argc, char **argv) {
         for (k = 0; k < nfiles; k++) {
             for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
             if (b == nbatch) { fprintf(stderr, "affected: REFUSE id %s is not an IMPLEMENTED SOURCE batch\n", files[k]); return 2; }
+            if(!domain_accept(b))continue;
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
             if (!host_allows(b)) continue;
             sel[nsel++] = b;
             printf("SELECTED\t%s\n", batch[b].id);
         }
-        return mode_run ? run(sel, nsel, jobs) : 0;
+        domain_emit(sel,nsel);return mode_run ? run(sel, nsel, jobs) : 0;
     }
     if (since) {
         char *gv[] = {"git", "diff", "--name-only", "-z", (char *)since, "--", 0}; Buf o = {0, 0, 0}; long at = 0;
@@ -1751,6 +1789,7 @@ int main(int argc, char **argv) {
     {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
         /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
         for (b = 0; b < nbatch; b++) {
+            if(!domain_accept(b))continue;
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
             int why = -1, v;
             char key[8400]; int slot = -1;
@@ -1791,5 +1830,6 @@ int main(int argc, char **argv) {
     if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel + nsymdefer, ndefer + nsel + nsymdefer);
     if (sym_on) printf("DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", nsymdefer, nsel, ndefer + nsymdefer + nsel);
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\tnot_applicable=%d\n", nch, nsel, nbatch, nna);
+    domain_emit(sel,nsel);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }

@@ -1,0 +1,61 @@
+/* tools/check-derived-query.cx -- tools/derived-query.cx 的检查:夹具根里验证现算与 tool-index --write 字节一致、命中、源树改动后失效且旧缓存不被误用、缓存损坏回退现算且不留脏数据。
+ *
+ *   sh ./unisacc.com tools/check-derived-query.cx
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-derived-query.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-derived-query.%s\n", name); }
+}
+static int has(const char *h, const char *lit) { return h && strstr(h, lit) != 0; }
+
+int main(void) {
+    char dir[320], cmd[6000]; char *o = 0; size_t n = 0; int rc;
+    if (cx_fmt(dir, sizeof dir, "%s/derived-query-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(cmd, sizeof cmd,
+        "T=%s/root; C=%s/cache; mkdir -p $T/tools/cxlib $T/tests $T/build/layer-api || exit 9; "
+        "printf '/* tools/alpha.cx -- does alpha. */\\nint main(void){return 0;}\\n' > $T/tools/alpha.cx; "
+        "printf '/* tools/check-alpha.cx -- alpha check */\\nint main(void){return 0;}\\n' > $T/tools/check-alpha.cx; "
+        "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\nb-alpha\\tIMPLEMENTED\\tx\\ttools/check-alpha.cx\\tSOURCE\\tlnx\\t5\\t-\\ttools/check-alpha.cx\\n' > $T/tests/batches.tsv; "
+        "Q=\"sh ./unisacc.com tools/derived-query.cx -- tool-index --root $T --cache $C\"; "
+        "$Q > $T/q1 2> $T/e1; echo Q1RC=$?; echo S1=$(cut -f3 $T/e1); "
+        "sh ./unisacc.com tools/tool-index.cx -- --write --root $T > /dev/null 2>&1; echo WRC=$?; "
+        "cmp -s $T/q1 $T/build/tool-index.tsv && echo SAME_AS_WRITE; "
+        "$Q > $T/q2 2> $T/e2; echo S2=$(cut -f3 $T/e2); cmp -s $T/q1 $T/q2 && echo HIT_SAME; "
+        "$Q --check > $T/verified 2> $T/verify.err; echo VERIFY_RC=$?; grep '^DQ_CHECK' $T/verified; "
+        "K1=$($Q --key); echo ZETA_BEFORE=$(grep -c '^zeta.cx' $T/q2); "
+        "printf '/* tools/zeta.cx -- does zeta. */\\nint main(void){return 0;}\\n' > $T/tools/zeta.cx; "
+        "$Q > $T/q3 2> $T/e3; echo Q3RC=$?; echo S3=$(cut -f3 $T/e3); K2=$($Q --key); [ \"$K1\" != \"$K2\" ] && echo KEY_MOVED; "
+        "echo ZETA_AFTER=$(grep -c '^zeta.cx' $T/q3); "
+        "rm $T/tools/zeta.cx; $Q > $T/q4 2> $T/e4; echo S4=$(cut -f3 $T/e4); cmp -s $T/q4 $T/q1 && echo BACK_SAME; "
+        "printf 'junk\\n' > $C/tool-index/$K1.tsv; $Q > $T/q5 2> $T/e5; echo Q5RC=$?; echo S5=$(cut -f3 $T/e5); "
+        "cmp -s $T/q5 $T/q1 && echo CORR_OUT_SAME; cmp -s $C/tool-index/$K1.tsv $T/q1 && echo CORR_CACHE_CLEAN; "
+        "rm $C/tool-index/$K1.sha; $Q > $T/q6 2> $T/e6; echo S6=$(cut -f3 $T/e6); cmp -s $T/q6 $T/q1 && echo NOSHA_SAME; "
+        "echo TMPLEFT=$(ls -a $C/tool-index | grep -c '^\\.tmp'); "
+        "$Q --timeout-ms 99999 > /dev/null 2>&1; echo BADTMO=$?",
+        dir, dir);
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        rc = cx_runv_timeout(v, 58, &o, &n);
+    }
+    if (o) sy_printf("%s", o);
+    ck(rc == 0 && has(o, "Q1RC=0") && has(o, "S1=miss\n"), "first-query-computes");
+    ck(has(o, "WRC=0") && has(o, "SAME_AS_WRITE"), "bytes-equal-tool-index-write");
+    ck(has(o, "S2=hit\n") && has(o, "HIT_SAME"), "second-query-hits-same-bytes");
+    ck(has(o, "ZETA_BEFORE=0") && has(o, "ZETA_AFTER=1") && has(o, "KEY_MOVED") && has(o, "S3=miss\n") && has(o, "Q3RC=0"), "source-change-invalidates-old-cache");
+    ck(has(o, "S4=hit\n") && has(o, "BACK_SAME"), "revert-reuses-identity");
+    ck(has(o, "Q5RC=0") && has(o, "S5=recovered\n") && has(o, "CORR_OUT_SAME") && has(o, "CORR_CACHE_CLEAN"), "corrupt-cache-recomputed-and-replaced");
+    ck(has(o, "S6=recovered\n") && has(o, "NOSHA_SAME"), "missing-sidecar-recomputed");
+    ck(has(o, "TMPLEFT=0"), "no-temp-left");
+    ck(has(o, "BADTMO=2"), "timeout-above-cap-refused");
+    ck(has(o, "VERIFY_RC=0")&&has(o, "DQ_CHECK\ttool-index\tOK"),"query-check-independently-recomputes");
+    sy_printf("CHECK_DERIVED_QUERY\t%s\tfailed=%d\n", failed ? "FAIL" : "PASS", failed);
+    return failed ? 1 : 0;
+}

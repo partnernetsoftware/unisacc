@@ -138,7 +138,17 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 用途:多个并行任务改同一 tlib 包(如 tools.cxlib)时,各自跑 `layer-api --bump` 会得到互相覆盖的版本。改为先经 devsvc 预留版本:`sh ./unisacc.com tools/devsvc.cx -- bump PKG [--owner O] [--kind patch|minor] [--ttl-s N]`,输出 `BUMP PKG=.. VERSION=.. OWNER=.. EXPIRES=.. REUSED=0|1`;释放 `bump --release PKG VERSION [--owner O]`;查询 `bump --list [PKG]`(每行 BUMP_ROW 带 STATE=reserved|released|expired|consumed 与 HEAD 版本)。启动器把 bump 直接转 tools/bump.cx,不经核心。
 - 语义:V 取 `git show HEAD:build/tlib-packages.tsv` 里该包版本(不读工作副本);新预留 = max(V, 该包全部有效预留) 的下一 patch(或 minor);同属主同包再预留返回原值(REUSED=1,不递增);属主缺省 $DEVSVC_OWNER,再缺省 auto-<pid>;ttl 缺省 7200 s,上限 14400 s;到期转 expired 并记 bump.expire,其版本可再分配;版本不大于 HEAD 版本的预留在每次调用时按 HEAD 判为 consumed,不再占用,无需写回。
 - 状态:实例目录(同 leases/locks,dt_instdir;检查用 --dir 或 $BUMP_DIR)下 bump-reservations.tsv、bump-events.tsv 与 bump.lock(flock,等待 $BUMP_LOCK_WAIT_MS 缺省 5000、上限 20000 ms,超时 rc 1 `BUMP_REFUSE lock busy`)。不进 git。事件 bump.reserve/bump.release/bump.expire 另经 `devsvc events emit` 进事件日志($BUMP_EMIT=0 关闭)。
-- 与 layer-api 的关系:本期不改 layer-api 与提交门;跑完 `layer-api --bump` 后把它给出的版本与预留值核对,不一致以预留值为准。下一单 K4 让 tlibapi 门认预留。检查 tools/check-bump.cx(批次 devsvc-bump)。
+- 与 layer-api 的关系(K4 起):提交前先 `sh ./unisacc.com tools/devsvc.cx -- bump PKG` 预留版本 V,再 `sh ./unisacc.com tools/layer-api.cx -- --bump PKG --version V`(只在 V 是调用者自己的有效预留或 HEAD 的下一 patch 时写入,否则 rc 2 REFUSE version-not-reserved);`bump --query PKG [VERSION]` 给出 VERDICT=head|next|reserved|reserved-other|unreserved。提交门 precommit 的 tlib 门对每个涉及的包查询一次:暂存版本既非下一 patch 也非任何有效预留(VERDICT=unreserved)时打印 `TLIB_BUMP_UNRESERVED pkg= version= expected=` 并附 `devsvc bump` 用法,含义是这个版本号没经预留、可能与并行任务撞号;只提示,不计入 blocked,查询失败时不出声;TLIB_BUMP_NEEDED、TLIB_API_STALE 等原有拦截不变。检查 tools/check-bump.cx(批次 devsvc-bump)、tools/check-precommit-tlibhint.cx(批次 precommit-tlibhint)。
+
+### 进程捕获:单执行器与兼容门面
+
+sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sysx.process 与 cxlib.netpack 的 np_run、np_free 只转发。模块尚不支持重导出或同名导出合并,同单元不能同时 use 两个门面;只需捕获的工具任选一个,需要 gitsync 的服务使用 netpack。缺口登记在 build/pkg-gaps.tsv 的 NP-PROCESS-UNIFY。373 个仅依赖 netpack 的真实调用文件无需补 use。
+
+迁移明确改变两项旧行为:(1) netpack 按循环累计 tick 改为单调墙钟,调用进程被暂停时仍消耗同一秒数预算;(2) 旧阻塞 exec 握手改为与捕获共用非阻塞截止,执行前迟滞不再绕过预算。tools/check-process-deadline.cx 各有一条回归断言:旧实现加同一执行前延迟测试接缝后分别为 2610 ms、2502 ms 且两条失败;共享执行器为 1619 ms、1017 ms 且两条通过,均用 1 秒调用预算。日志入口 /tmp/npbuf-cdx 与 /tmp/devsvc-flow-21356743325-2369480。没有放宽原批次时限或修改既有断言。
+
+另有两项兼容边界必须保持:(1) np_result 的 timed_out 尾字段在开始与释放时清零,仅预算耗尽时置位;(2) UNISACC_NP_FAULT 只由 netpack 门面启用,sysx.process 仍忽略该工具测试变量。首次合并时第二项曾使 check-npfault 的 D 两条原断言失败;保留断言、修正转发标志后 13 条全过。直接子进程在超时返回前有界收尸,不偷取调用者其它子进程,由原 check-netpack 与 check-reaper 合同覆盖。UNISACC_NP_TEST_PREEXEC_MS 仅在子进程中作最多 5000 ms 的回归接缝,默认关闭;未改变调用的截止值。
+
+共享模块变更验收清单:(1) 逐个列出全部 use 消费者及其登记运行批次,用 affected --files 模块取集合,编译分片不能替代运行批次;(2) 共享检出上用当前已装产品分别做 default-run 与 -S/-c 静态编译,明确编译方式和头文件/模块输入身份,不把宿主运行成功当作静态生成成功;(3) 同输入跑受影响运行批次,每批原时限不变,并列保留失败、重跑与 UNKNOWN 收据;(4) 进程原语至少复验 lower-prefix-base3/4、cx-reaper、process-deadline、procrun-tool、cx-netpack、cx-npfault。7026ecaa4d 漏了 processcore 的裸 setpgid 声明,现改走 sys.posix 的 sy_setpgid;processcore-compile 永久覆盖 tests/bound-rc142.cx 与 tests/all-aggregate.cx 的 -S 路径,affected-processcore 覆盖传递 use 的选批正例与无关源负控。
 
 ## 6 已知限制与下一单
 
@@ -209,6 +219,8 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 
 
 
+- (14) 公开接口改动后整体派生仍可能超过 55 秒:np 双门面迁移使 layer-api、iface-hash、product-map、tool-index、tables-gen、batch-packages-gen、links、doc-links 进入闭包;两次派生阶段在 55806/55654 ms 退出 rc124、stage=none,第二次低载仍复现。分相只隔开提交阶段,尚未把派生本身按表分相。临时按表在同一私有输入树实际构造并全量检查,绑定每表前后身份,再经收据复核提交;不延时限、不跳表。后续单:派生按表调度并行、接口哈希按机械读集只重算受影响消费者,失败实时指明表名与可恢复身份。证据入口 /tmp/npbuf-cdx 与 devsvc jobs/21357621022-2539683。
+
 ## 7 路线
 
 - lint:把十三个棘轮与 precommit 预演做成服务内的增量检查,按变更路径触发。
@@ -264,3 +276,79 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
 - 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
 - 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。
+
+## 10 派生表现算现查 R1 试点:tool-index 与 doc-links(2026-11-18)
+
+目标:把 build/tool-index.tsv、build/doc-links.tsv 移出提交门负担,改由 devsvc 按内容身份现算现查;读者拿到的内容恒与当前源树一致,判定强度不降。
+
+用法:`sh ./unisacc.com tools/devsvc.cx -- tool-index [--sha] [--key] [--cache DIR] [--timeout-ms N]`(转 `tools/derived-query.cx tool-index`)。正文到 stdout,结果行 `DQ tool-index hit|miss|recovered key= sha= bytes= ms=` 到 stderr。身份 = tools/、tools/cxlib/ 全部目录项与 tests/batches.tsv 的内容 sha 清单,外加实际执行的生成器 tools/tool-index.cx 的 sha(读集是 build_tools 读集的超集,多算只多失效)。缓存 `~/.cache/unisacc/derived/tool-index/<key>.tsv` 加 `<key>.sha`;命中时重核正文 sha,不符即删并现算(recovered);现算前后身份不同(源树在途被改)不入缓存,rc 3。生成器新增 `tool-index.cx --emit-tools PATH`,与 `--write` 同一正文,不碰 build/。检查 `tools/check-derived-query.cx`(批次 derived-query,九项;负控:把命中分支改成不核 sha 后 corrupt 与 sidecar 两项先 FAIL,还原后全 PASS)。
+
+度量(2026-11-18,经 devsvc x 实跑,命令 `devsvc x --par 1 -- sh ./unisacc.com tools/derive.cx -- --check --only NAME`):tool-index 三次 7773/7854/7772 ms(中位 7773);doc-links 三次 1136/1137/1116 ms(中位 1136)。近 7 天提交数(`devsvc git log --since='7 days ago' --oneline -- PATH`):全仓 2010,build/ 617,tool-index.tsv 222(11.0%),doc-links.tsv 3,两者并集 222。现查:冷 4.5-7.2 s(一次),热命中 124-183 ms。
+
+读者分类(`git grep -n 'build/tool-index.tsv\|build/doc-links.tsv'`):
+- (甲) 只读查询:AGENTS.md/CLAUDE.md 与 prd.md 的索引指引(人和代理查工具);plans/notcovered-plan.md、plans/cx-lib-roadmap 的引用;tools/archive-candidates.cx(问"索引是否点名该工具")。prd.md 指引已切到 devsvc tool-index;archive-candidates 与 CLAUDE.md 未切。
+- (乙) 门与检查当事实核对:tools/derive.cx 的 tool-index、doc-links 行(exec/facts/derive.tsv、build/links.tsv 的 derive 边、tools/derive-inputs.tsv),tools/commit-own.cx 的 --derive 与键选表名单,tools/check-tool-index.cx、check-doc-links-gen.cx、check-commit-own.cx(夹具根内,与仓内文件无关),tests/coverage.tsv、tests/manifests 文案。
+- (丙) 必须保留文件:未发现构建 unisacc.com 或离线流程读这两张表;tools/cxlib/relload.cx 的 RL_TOOL_INDEX 只认格式,调用方传路径(仅 check-relload 夹具);build/table-index.tsv 的自述行与 .devsvc/ 双写副本属 tool-index.cx 自身。
+
+迁移(每步可回退,回退即还原该步提交):
+(1) 并行期(本次已做):新增查询接口与缓存;文件副本与 derive 门不变;(甲)读者逐个切到查询,对拍 sha 与 `tool-index.cx --emit-tools` / `--write` 一致。
+(2) 停写:commit-own --derive 与 derive 的 tool-index 行改为不进提交门(derive.tsv 标记 query-only,--check 不再核文件,改核"查询输出 = 现算",由查询接口身份保证);build/tool-index.tsv 加入 .gitignore 前先 git rm --cached,本地需要文件者 `derive --write --only tool-index`。回退:恢复 derive.tsv 行与跟踪。
+(3) 移除:table-index.tsv 分开处理(它也由 tool-index.cx 写,读集含 build/*,另做 table-index 查询再迁);doc-links 同法补 `devsvc doc-links`(读集 *.md 加 baseline 加 doclink.cx)。
+收益估算:每次触及 tools/ 或 tests/batches.tsv 的提交门省 tool-index 约 7.8 s(并行 derive 下省的是该行占最慢行的份额,单独 --only 时全省),doc-links 约 1.1 s;build/ 提交数按近 7 天估少 222 次中只改该表的那部分(上限 222/617 = 36%,与 batches.tsv 等同改的提交仍会动 build/)。
+风险:身份清单每次查询读 1100+ 文件(约 100 ms);缓存跨工作树共享(按内容键,安全);unstable 时读者须重查。
+
+### R1 第二步:查询与物化分离
+
+`derive.tsv` 的 `write_argv` 以 `query-only ` 开头时,该行不进入自动 `--write` 与写计划闭包,也不产生自动物化关系边。显式 `--check` 仍执行其独立现算校验,`--write --only NAME` 可生成本地导出。查询缓存只存构造物,不存检查结论。tool-index 的校验走 `derived-query.cx tool-index --check`:命中时也独立调用原生成器,逐字节比较正文,并在输出前再次核源树身份。
+
+table-index 是独立物化项,保留本地表和元数据副本逐字节检查。tool-index 本地导出不再由 `--registered` 自动选入提交;新工具登记事实仍由原门检查。回退先恢复 derive 两行与登记表名单,再恢复 tool-index 文件跟踪。历史夹具所验证的离线生成器写入与篡改拒绝合同仍保留。
+
+基线入口 `/tmp/r1-baseline`:低载两项检查总 34641 ms,product-map 23106 ms,tool-index 11535 ms(表索引副本漂移,该项非 PASS)。7 天全仓提交 1998,build/ 622,tool-index 225,product-map 43。旧整体派生和 reg-a/derive-reg 的超窗均保留 UNKNOWN,后测不得改写为基线 PASS。新查询模式与原模式的负控入口 `/tmp/r1-query-red` 和 `/tmp/r1-query-check`。
+
+### product-map 查询构造与读集核验
+
+tools/product-map-query.cx 的清单真源是 tools/product-map-inputs.tsv。缓存身份包含清单本身、目录列举与文件内容、两个根的实际编译器与生成器、完整 Git 跟踪名称集合和实际观察到的读取清单。每次命中重新核内容哈希及缓存正文摘要,不缓存检查结论;显式 --check 独立执行原生成器再逐字节对拍。仅用于 Linux 开发机,不代表六目标平台资格。
+
+strace 只在缺失构造与独立核验路径调用,命中分支不查找也不执行它。未安装时输出 PRODUCT_MAP_READSET_NEEDS_STRACE 并非零退出;路径权限错误另行命名拒绝。检查在私有 PATH 中先构造缓存、移走 strace 链接,证明命中仍可用而冷查询命名拒绝。旧实现该负控失败,新实现通过。替代方向是统一 cx_read、stat、目录列举入口生成读取回执,并与编译器 use 闭包及子进程回执合并;只包装主进程的 cx_read 不足以覆盖 census 子进程,替代方案须保留相同未声明读取负控。
+
+product-map --root 选择被分析的数据,分析子程序由当前已装编译器引导。目标 APE 的字节作为数据读取,不会再因外壳保留字节变化而另编同一分析程序。旧七条 flow-model 留存值已经先迁为显式事实,正常生成物前后逐字节相同。六类变更以独立现算验收,常量缓存键故障实现六项均被拦;正文、读取清单、摘要损坏与正文缺失分别保留恢复断言。热命中已测约 1.45 秒,不宣称达到百毫秒,后续先量哈希主耗时再优化。
+
+登记与执行分相:现有 register --no-run 仅保存合同并返回 REGISTERED_NORUN,只算准备;之后经标准 affected 入口逐批实跑才记 PASS。登记尾段仍有缺口:批次耗时接近 55 秒时,试跑已经通过,60 秒外层仍可能在 packages 与 manifest 收尾前杀掉进程,且当前提前打印 REGISTERED。应拆成独立收尾阶段并在完整收尾后打印终态;不得延长时限。本轮缺失 manifest 按三张真实表逐字节投影补齐,不另造登记逻辑,并由 reg-manifest 检查闭合。
+
+### R1 停写与验收边界
+
+tool-index 与 product-map 已标 query-only:自动 --derive 不物化,显式 --check 走查询与独立现算逐字节对拍,显式 --write --only 保留本地导出。两个 build/ 导出均停跟踪并忽略,本地字节保留。当前产品全景经 devsvc product-map 获取,文档生成块只作显式快照。日常形状检查读查询,四个离线快照场景用归档输入显式准备后保留原断言。显式 --write --package 同步七条 flow-model 测量事实,默认生成与检查不写事实。
+
+回退时恢复对应 derive.tsv 的普通物化行,显式生成导出并重新跟踪,再按原检查核对；查询与生成器没有各留一套计算逻辑。读取核验的 strace 依赖只属于 Linux 冷构造和独立 --check,命中不依赖它。损坏恢复会删除当前引用的失效正文及旁文件后重算,归档夹具清除继承的 Git 路由变量,不克隆开发检出。
+
+度量入口为 release/evidence/r1-final-2026-11-18.tsv。旧整体派生 stage=none 在 55534 ms 被杀,保留 UNKNOWN。迁移后真实提交 750e63b581 的派生29516 ms、提交阶段内容身份复核41 ms、含门禁与推送总44373 ms；输入不同,只报告各自实测,不把差值当严格同输入加速比。7天 build/ 历史提交数从622变628,工具索引225变226、产品全景43变44,增加包含本次退役提交,不能宣称旧历史已减少；停写后不再由这两张表触发自动快照提交。两项夹具仍以最终独立实跑回执为准。
+
+## 11 按域选择测试 R3-C
+
+affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids、--layer、tier 和宿主限制取交集;也可单独列出指定域。--domain-summary 分别输出 registered、eligible、selected,最后注明 selection-only/no-test-result。完整资格继续按对应清单与实际执行证据判断,筛掉的批次保留未执行状态。
+
+域事实仍由声明、tests/batch-domain-rules.tsv 和 tests/batch-domains.tsv 的少数例外派生到 tests/batch-domain-index.tsv。启用域选项时实际运行生成器 --check --dump,命名拒绝缺声明、冲突和陈旧索引;默认路径不读取域索引。新三批检查全部自动推断,显式例外仍为108行。默认两个典型输入与旧程序逐字节对拍,产品域结果另与全量结果按域投影逐字节核对,证据为 release/evidence/r3-domain-2026-11-18.tsv。
+
+检查的准备相与选择运行相分别有界。真实kit、runner、域生成器与选择器按实际argv并行准备,每个子调用仍25秒,usage输出直接从进程管道捕获并持续排空,只记PREPARED;选择运行仍真实执行。无需把日志读回或用cat转换来源,无需放宽R4。取消筛选的故障实现被五条反例拒绝。整轮测试墙钟未作典型全集对照,标UNMEASURED;选择查询包含新域校验成本,本次不宣称查询加速。
+
+两项后续准备成本需要单列:(1) 同根相对runner调用准备后,绝对runner首次仍实测16697ms;现有预热收据只含文件/产品摘要与缓存目录,后续应统一实际调用形态并给命中做负控,保留路径影响__FILE__等语义的合同。(2) register --no-run冷态仍先准备原生run与run-batch,本次49203ms;可把纯元数据登记与原生runner准备分相,登记校验继续实际执行,准备单独记PREPARED,后续批次必须实跑。
+
+## 12 合并队列 R2:最小第一步设计
+
+状态:降为回退方案,先做读集归因与收据绑读集内容身份(见 prd_mempalace.md 决定)。
+
+第一步已批准,尚未实现。目标是减少同一 ref 的竞争重放和回执误归属。沿用现有私有索引、原门禁、gitsync 与 flow;调用者仍只交提交意图,不管理锁、收据或私有目录。第一步在 devsvc git commit 增加可回退的 opt-in 队列,同一 Git common-dir 加目标 ref 同时只执行一笔完整提交事务;不同 ref 与只读工作继续并行。先接受这处串行换取零自发 CAS 重放,测过吞吐再扩展,不把本提案写成已提速。
+
+(1) 入队即冻结请求内容:owner、request-id、base、目标 ref、whole 的 blob/mode、keyed 的键和值、登记集合、说明、产品与门工具身份、deadline。只存路径名不够,排队中编辑器继续改文件不能改变已接收请求。等待返回 job-id,不占一个55秒执行窗口。入队即并行预热 tlib、kit、冷编译及私有输入,这些准备不占活动队首槽,只记 PREPARED;队首只做验证相。预热结果仍核内容及适用输入身份,过期回到准备相重做,不复用旧结论。请求、事件和恢复记录先用有界 TSV 与原子发布,不引入数据库前置。
+
+(2) 到队首核最新 HEAD 与准备身份,只有适用时才组装验证树;身份过期就退出活动槽在队外重做准备,不能把冷准备串入队首:本请求的路径或键已冲突则具名拒绝,不覆盖别人;不相交则把冻结意图重建到最新底树。准备、逐表派生、完整提交门、落库、同步与推送分别为 flow 相,沿用各命令原时限,失败回报相名与最小反例。派生可以按内容身份复用生成物,测试与门仍真实执行;旧门读集没有闭合前,不实现 K(b) 的判定复用。
+
+队列必须有深度上限、入队等待总 deadline 与活动队首 deadline。每次排队事件记录请求 owner、队首 owner、已等时间和剩余预算;超深度或到期具名拒绝。队首卡死时按真实 PID/PGID 有界清理并核终态,释放活动槽,不能无界等锁或只删租约而放任旧进程继续落库。
+
+(3) 落 ref 前核产品、输入树、结果树、工具身份,并核完整路径集及变更路径集严格等于声明意图加正式派生 outputs;多出或缺少路径都具名拒绝,目录与 ignored 链接不得被 git add -A 混入。只有原门通过且 CAS 成功才记 owned-commit=NEW。外部写者抢先推进 HEAD 时,重新组树并重跑门,次数有界;不能把观察到的 HEAD 变化当成本请求已提交。本轮 derive-identity 拒绝却回报他人 OID 为 push-failed 的收据说明这项归属合同必须独立验收。
+
+(4) CAS 前持久化 OLD、NEW 和请求身份。服务重启后核实际 ref、祖先关系与真实进程句柄,区分未落库、已落库待同步和归属不明;不能因缺末行回执重复生成提交。CAS 后 gitsync 保留原有脏工作区与暂存保护及整段55秒边界;同步或推送失败只续各自相,不重跑 commit。回执分别列 owned-commit、sync、push,不把已落库写成未提交,也不把别人的 OID 写成自己的结果。排队取消不动源码;CAS 后取消须明确已落库事实。
+
+(5) 度量先行:实现前冻结现状基线,记录同时3笔互不相交请求到终态的总墙钟、成功/拒绝数、因 HEAD 推进而重做的收据次数及门执行次数;实现后用同一输入与口径取 p50、p95,冷/热准备分开,不能只比较成功子集。提交路径的实现先在私有树完整验证,一次原子落库,避免中间态影响 v0.0.72 合入和冻结。首单验收限定一条 ref:三笔不相交请求各实跑一次原门且队内 CAS 重放为零;入队后改工作区不改变请求 blob;同键冲突拒绝;插入声明外路径及删去声明路径分别拒绝;门失败无 CAS;外部 HEAD 推进触发新输入重验;模拟 CAS 后断电可恢复同一 OID、不重复提交;同步冲突保留新脏数据;推送失败只重试 push。以同输入同门对比排队、准备、派生、门、CAS、同步、推送耗时及门执行次数,未测标 UNMEASURED。
+
+回退只关闭新请求入队并明确处理队列剩余项,已经 CAS 的事务完成同步或保留具名待续状态,随后回到现有 devsvc git commit。暂不做门结论跨请求复用、只读底树缓存、推送合批或多仓调度;这些属于后续独立可验的小单。

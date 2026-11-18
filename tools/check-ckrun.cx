@@ -4,9 +4,14 @@
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.io
 #pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sys.poll
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
 
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tckrun.%s\n", name); else { failed++; sy_printf("FAIL\tckrun.%s\n", name); } }
+static int raw_probe(void*ignored){(void)ignored;return ckk_sh_t("check-ckrun","printf discarded; printf ERR >&2; exit 7",0,0,52);}
 
 int main(void) {
     char out[512], small[8];
@@ -23,6 +28,20 @@ int main(void) {
     ck(ckk_has(out, sizeof out, "RC=0"), "probe-compiles-runs-and-appends-rc");
     rc = ckk_sh("check-ckrun", "sleep 0; true", out, 0);
     ck(rc == 0, "sh-cap-zero-copies-nothing");
+    {
+        int fd[2],n[2]={0,0},done=0,ex=0,code=0,sig=0;char bytes[2][32];fflush(stdout);fflush(stderr);int pid=sy_fork_session(raw_probe,0,fd);if(pid<0)return 2;long until=sy_now_ms()+10000;
+        for(int tries=0;tries<200&&sy_now_ms()<until;tries++){sy_pollfd_t pf[2];for(int j=0;j<2;j++){pf[j].fd=fd[j];pf[j].events=SY_POLLIN;pf[j].revents=0;}sy_poll(pf,2,50);for(int j=0;j<2;j++)if(fd[j]>=0&&pf[j].revents){long got=sy_read(fd[j],bytes[j]+n[j],sizeof bytes[j]-n[j]);if(got<=0){sy_close(fd[j]);fd[j]=-1;}else n[j]+=got;if(n[j]==sizeof bytes[j]){sy_close(fd[j]);fd[j]=-1;}}if(!done&&sy_wait_status(pid,1,&ex,&code,&sig)==pid)done=1;if(done&&fd[0]<0&&fd[1]<0)break;}
+        if(!done)sy_kill(pid);for(int j=0;j<2;j++)if(fd[j]>=0)sy_close(fd[j]);ck(done&&ex&&code==7&&n[0]==0&&n[1]==3&&!memcmp(bytes[1],"ERR",3),"raw-shell-keeps-stderr-separate-and-returns-rc");
+    }
+    {
+        char script[20000],large[16385];memcpy(script,"printf '",8);for(int i=0;i<16384;i++)script[i+8]='A';memcpy(script+16392,"'; exit 9",10);
+        rc=ckk_sh_t("check-ckrun",script,large,sizeof large,52);
+        ck(rc==9&&tx_len(large,sizeof large)==16384&&large[0]=='A'&&large[16383]=='A',"raw-shell-no-8k-script-or-capture-limit");
+    }
+    rc=ckk_sh_t("check-ckrun","printf abcdef",small,sizeof small,52);ck(rc==0&&tx_eqz(small,"abcdef"),"raw-shell-copies-stdout");
+    small[0]='Z';rc=ckk_sh_t("check-ckrun","printf discarded; exit 4",small,0,52);ck(rc==4&&small[0]=='Z',"raw-shell-cap-zero-discards-without-writing");
+    {long started=sy_now_ms();rc=ckk_sh_t("check-ckrun","sleep 4",0,0,1);ck(rc!=0&&sy_now_ms()-started<3500,"raw-shell-honors-timeout-parameter");}
+    rc=ckk_sh_t("check-ckrun","exit 0",small,sizeof small,0);ck(rc<0&&small[0]==0,"raw-shell-invalid-timeout-refused");
     sy_printf("CHECK_CKRUN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

@@ -1,0 +1,90 @@
+/* Checks tools/product-map-query.cx: invalidation and recovery.
+ * Each case owns a private fixture and independently runs product-map --emit-tsv.
+ * Usage: --case cx|ape|gold|recipe|tracked|history|corrupt|missing
+ * Optional --query-source PATH runs the same assertions against a fault mutant.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.toolprep
+static int failed,passed,grouped;static char root[4400],fx[4400],product[4400],query_source[4400],cache[4400],why[1024];
+static void die(const char*s){fprintf(stderr,"check-product-map-query REFUSE %s\n",s);sy_exit(2);}
+static void ck(int ok,const char*s){printf("%s\tproduct-map-query.%s\n",ok?"PASS":"FAIL",s);if(ok)passed++;else failed++;}
+static void guard(int bad,const char*s){if(bad)die(s);}
+#define PQ_FMT(d,c,...) do { if(cx_fmt(d,c,__VA_ARGS__))die("format-bound"); } while(0)
+static void join(char*out,size_t cap,const char*a,const char*b){if(cx_fmt(out,cap,"%s/%s",a,b))die("path-bound");}
+static int run(char**v,const char*cwd,np_result*r){char*clean[128]={"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","GIT_OBJECT_DIRECTORY","-u","GIT_ALTERNATE_OBJECT_DIRECTORIES"};int k=11;for(int i=0;v[i];i++){if(k>=127)die("fixture-argv-bound");clean[k++]=v[i];}clean[k]=0;if(np_run(clean,cwd,0,55,r,why,sizeof why)){fprintf(stderr,"transport %s\n",why);return -1;}return r->rc;}
+static void command(char**v,const char*cwd){np_result r={0};int rc=run(v,cwd,&r);if(rc){fprintf(stderr,"%s\n",r.err?r.err:"");die("fixture-command");}np_free(&r);}
+static void copy(const char*a,const char*b){size_t n=0;char*s=cx_read(a,&n);if(!s||sy_write_atomic(b,s,n,0700))die("fixture-copy");mm_free(s);}
+static void setup(void){
+    if(cx_fmt(fx,sizeof fx,"%s/product-map-query-check-XXXXXX",sy_tmpdir())||!mkdtemp(fx))die("tmpdir");
+    char tree[4400],archive[4400];join(tree,sizeof tree,fx,"tree");join(archive,sizeof archive,fx,"input.tar");if(sy_mkdir(tree,0700))die("fixture-tree");char*pack[]={"git","archive","--format=tar","--output",archive,"HEAD",0};command(pack,root);char*unpack[]={"tar","-xf",archive,"-C",tree,0};command(unpack,root);char*init[]={"git","init","-q",0};command(init,tree);char*index[]={"git","add","-f","--",".",0};command(index,tree);guard(mm_copy(fx,sizeof fx,tree,strlen(tree)+1),"copy-bound");
+    char entry[4400];join(entry,sizeof entry,fx,"unisacc.com");copy(product,entry);
+    join(cache,sizeof cache,fx,"query-cache");
+}
+static int query(np_result*r){char*v[]={"sh",product,query_source,"--","--root",fx,"--cache",cache,0};return run(v,root,r);}
+static int key_of(np_result*r,char key[65]){char*p=r->err?strstr(r->err,"key="):0;if(!p||strlen(p+4)<64)return 0;guard(mm_copy(key,65,p+4,64),"copy-bound");key[64]=0;return strspn(key,"0123456789abcdef")==64;}
+static void append(const char*relative){char p[4400];join(p,sizeof p,fx,relative);size_t n=0;char*b=cx_read(p,&n);if(!b)die("mutation-read");const char*s="\n/* R1 content identity probe. */\n";if(!strcmp(relative,"weights/gold/abi.tsv"))s="\n";size_t m=strlen(s);char*out=mm_alloc(n+m);guard(!out,"allocation");guard(mm_copy(out,n+m,b,n),"copy-bound");guard(mm_copy(out+n,m,s,m),"copy-bound");if(sy_write_atomic(p,out,n+m,0644))die("mutation-write");mm_free(b);mm_free(out);}
+static void apply_case(const char*which,const char*key){
+    char p[4400];
+    if(!strcmp(which,"cx"))append("cx/runtime/modelcache.cx");
+    else if(!strcmp(which,"gold"))append("weights/gold/abi.tsv");
+    else if(!strcmp(which,"recipe"))append("tools/source-package.cx");
+    else if(!strcmp(which,"ape")){
+        join(p,sizeof p,fx,"unisacc.com");size_t n=0;unsigned char*b=(unsigned char*)cx_read(p,&n);
+        if(!b||n<65||memcmp(b,"MZqFpD='",8)||b[40]!='.'||b[64]!='\'')die("ape-reserved-header-layout");
+        b[40]='_';if(sy_write_atomic(p,b,n,0700))die("ape-write");mm_free(b);
+        char version_path[4400];if(sy_realpath(p,version_path,sizeof version_path)<0)die("ape-path");
+        np_result r={0};char*v[]={"sh",version_path,"--version",0};ck(run(v,fx,&r)==0,"ape-reserved-byte-preserves-execution");np_free(&r);
+    }else if(!strcmp(which,"tracked")){
+        join(p,sizeof p,fx,"R1-unrelated-tracked.txt");if(sy_write_atomic(p,"probe\n",6,0644))die("tracked-file-write");char*v[]={"git","add","--","R1-unrelated-tracked.txt",0};command(v,fx);
+    }else if(!strcmp(which,"history")){
+        join(p,sizeof p,fx,"tools/product-flow-model.tsv");size_t n=0;char*b=cx_read(p,&n),*e=b?strchr(b,'\n'):0,*last=0;if(!e)die("history-read");for(char*q=b;q<e;q++)if(*q=='\t')last=q;if(!last)die("history-shape");size_t head=last-b+1,tail=n-(e-b);char*out=mm_alloc(head+1+tail);guard(!out,"allocation");guard(mm_copy(out,head+1+tail,b,head),"copy-bound");out[head]='0';guard(mm_copy(out+head+1,tail,e,tail),"copy-bound");if(sy_write_atomic(p,out,head+1+tail,0644))die("history-write");mm_free(b);mm_free(out);
+    }else if(!strcmp(which,"undeclared")){
+        join(p,sizeof p,fx,"UNDECLARED-R1.txt");if(sy_write_atomic(p,"read probe\n",11,0644))die("undeclared-file");
+        join(p,sizeof p,fx,"tools/logic-distribution.cx");size_t n=0;char*b=cx_read(p,&n);if(!b)die("producer-read");
+        const char*prefix="#define main r1_original_main\n";
+        const char*wrapper="\n#undef main\nint main(int argc,char **argv){size_t probe_n=0;char*probe=cx_read(\"UNDECLARED-R1.txt\",&probe_n);if(!probe)return 2;free(probe);return r1_original_main(argc,argv);}\n";
+        size_t pn=strlen(prefix),wn=strlen(wrapper);char*out=mm_alloc(pn+n+wn);guard(!out,"allocation");guard(mm_copy(out,pn+n+wn,prefix,pn),"copy-bound");guard(mm_copy(out+pn,n+wn,b,n),"copy-bound");guard(mm_copy(out+pn+n,wn,wrapper,wn),"copy-bound");if(sy_write_atomic(p,out,pn+n+wn,0644))die("producer-probe-write");mm_free(b);mm_free(out);
+    }else if(!strcmp(which,"corrupt")||!strcmp(which,"missing")||!strcmp(which,"readset")||!strcmp(which,"sidecar")){
+        char leaf[200],dir[4400];join(dir,sizeof dir,cache,"product-map");if(cx_fmt(leaf,sizeof leaf,"%s.%s",key,!strcmp(which,"readset")?"reads":!strcmp(which,"sidecar")?"sha":"tsv"))die("cache-leaf");join(p,sizeof p,dir,leaf);if(strcmp(which,"missing")){if(sy_write_atomic(p,"junk\n",5,0600))die("cache-corrupt");}else if(sy_unlink(p))die("cache-remove");
+    }else die("unknown-case");
+}
+static void resolve(const char*name,char path[4400]){char*v[]={"which",(char*)name,0};np_result r={0};if(run(v,root,&r)||r.outn<2||r.outn>=4400)die("resolve-tool");guard(mm_copy(path,4400,r.out,r.outn),"copy-bound");path[r.outn]=0;while(r.outn&&path[r.outn-1]=='\n')path[--r.outn]=0;np_free(&r);}
+static int no_strace(void){
+    char base[4400],bin[4400],image[4400],env[4400],patharg[4500],cold[4400],link[4400],warm[4400];
+    if(cx_fmt(base,sizeof base,"%s/product-map-no-strace-XXXXXX",sy_tmpdir())||!mkdtemp(base))die("no-strace-tmp");
+    join(bin,sizeof bin,base,"bin");if(sy_mkdir(bin,0700))die("no-strace-bin");join(image,sizeof image,base,"query.native");
+    if(tq_native(root,query_source,image,why,sizeof why))die("no-strace-query-prepare");resolve("env",env);
+    const char*tools[]={"git","sh","bash","uname","chmod","tail","dd","cat","head","tr","grep","sed","cut","dirname","readlink","mkdir","rm","mv","wc","sort","gzip","strace"};
+    for(int i=0;i<22;i++){char target[4400];resolve(tools[i],target);join(link,sizeof link,bin,tools[i]);if(sy_symlink(target,link))die("no-strace-link");}
+    if(cx_fmt(patharg,sizeof patharg,"PATH=%s",bin))die("no-strace-path");join(warm,sizeof warm,base,"warm");join(cold,sizeof cold,base,"cold");
+    char*v[]={env,patharg,image,"--root",root,"--cache",warm,0};np_result before={0},hit={0},missing={0};
+    int rc=run(v,root,&before);ck(rc==0,"restricted-path-cache-prepared");if(rc){fprintf(stderr,"%s\n",before.err?before.err:"");return 1;}
+    join(link,sizeof link,bin,"strace");if(sy_unlink(link))die("remove-private-strace");
+    rc=run(v,root,&hit);ck(rc==0&&hit.err&&strstr(hit.err,"\thit\t")&&before.outn==hit.outn&&!memcmp(before.out,hit.out,before.outn),"hit-does-not-require-strace");
+    v[6]=cold;rc=run(v,root,&missing);ck(rc==2&&missing.err&&strstr(missing.err,"PRODUCT_MAP_READSET_NEEDS_STRACE"),"cold-query-without-strace-named-refusal");
+    np_free(&before);np_free(&hit);np_free(&missing);printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=no-strace\n",failed,passed);return failed?1:0;
+}
+int main(int argc,char**argv){
+    const char*which=0,*alternate=0;for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--case")&&i+1<argc)which=argv[++i];else if(!strcmp(argv[i],"--query-source")&&i+1<argc)alternate=argv[++i];else die("usage");}if(!which)die("case-required");
+    if(sy_cwd(root,sizeof root)<0||sy_realpath("unisacc.com",product,sizeof product)<0)die("root");if(alternate){if(sy_realpath(alternate,query_source,sizeof query_source)<0)die("query-source");}else join(query_source,sizeof query_source,root,"tools/product-map-query.cx");
+    if(!strcmp(which,"no-strace"))return no_strace();
+    if(!strcmp(which,"recovery")){grouped=1;const char*cases[]={"corrupt","missing","readset","sidecar"};for(int i=0;i<4;i++){char*v[]={argv[0],"--case",(char*)cases[i],0};if(main(3,v))return 1;}printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=recovery\n",failed,passed);return failed?1:0;}
+    if(!fx[0])setup();np_result first={0},hot={0},changed={0};char before[65],after[65];int rc=query(&first);ck(rc==0&&key_of(&first,before),"initial-real-query");if(failed)return 1;
+    rc=query(&hot);ck(rc==0&&hot.err&&strstr(hot.err,"\thit\t")&&first.outn==hot.outn&&!memcmp(first.out,hot.out,first.outn),"hit-verifies-current-manifest-and-body");np_free(&hot);if(failed)return 1;
+    apply_case(which,before);rc=query(&changed);
+    if(!strcmp(which,"undeclared")){ck(rc==2&&changed.err&&strstr(changed.err,"undeclared-repository-read"),"new-actual-read-without-declaration-refused");printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=%s\n",failed,passed,which);return failed?1:0;}
+    ck(rc==0&&key_of(&changed,after),"mutated-query-completes");if(rc){fprintf(stderr,"%s\n",changed.err?changed.err:"");return 1;}
+    int recovery=!strcmp(which,"corrupt")||!strcmp(which,"missing")||!strcmp(which,"readset")||!strcmp(which,"sidecar");ck(recovery?(changed.err&&strstr(changed.err,"\trecovered\t")):(strcmp(before,after)&&changed.err&&!strstr(changed.err,"\thit\t")),recovery?"damaged-cache-recomputed":"input-change-invalidates-cache");
+    char generator[4400],fresh[4400];join(generator,sizeof generator,root,"tools/product-map.cx");join(fresh,sizeof fresh,fx,"independent.tsv");char*v[]={"sh",product,generator,"--","--root",fx,"--emit-tsv",fresh,0};np_result independent={0};rc=run(v,root,&independent);ck(rc==0,"independent-original-generator-ran");np_free(&independent);
+    size_t n=0;char*b=cx_read(fresh,&n);ck(b&&n==changed.outn&&!memcmp(b,changed.out,n),"new-result-byte-equal-independent-recomputation");
+    int body_changed=first.outn!=changed.outn||(first.outn&&memcmp(first.out,changed.out,first.outn));ck((!strcmp(which,"tracked")||recovery)?!body_changed:body_changed,"expected-product-byte-effect");
+    if(recovery){char dir[4400],leaf[200],path[4400];join(dir,sizeof dir,cache,"product-map");PQ_FMT(leaf,sizeof leaf,"%s.tsv",after);join(path,sizeof path,dir,leaf);size_t m=0;char*c=cx_read(path,&m);ck(c&&m==n&&!memcmp(c,b,n),"repaired-cache-holds-only-fresh-body");mm_free(c);if(strcmp(before,after)){const char*ext[]={"tsv","reads","sha"};int clean=1;for(int i=0;i<3;i++){PQ_FMT(leaf,sizeof leaf,"%s.%s",before,ext[i]);join(path,sizeof path,dir,leaf);sy_stat_t st;if(sy_lstat(path,&st)!=-ENOENT)clean=0;}ck(clean,"invalidated-cache-object-has-no-dirty-sidecars");}else ck(1,"invalidated-cache-object-has-no-dirty-sidecars");}
+    mm_free(b);np_free(&first);np_free(&changed);printf("%s\tfailed=%d\tpassed=%d\tcase=%s\tfixture=%s\n",grouped?"PRODUCT_MAP_QUERY_SUBCASE":"CHECK_PRODUCT_MAP_QUERY",failed,passed,which,fx);return failed?1:0;
+}

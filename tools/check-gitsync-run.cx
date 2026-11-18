@@ -1,0 +1,56 @@
+/* tools/check-gitsync-run.cx -- 检查 tools/gitsync-run.cx(cxlib.gitsync gs_sync 的子进程入口)。
+ *
+ *   sh ./unisacc.com tools/check-gitsync-run.cx        (在仓根跑)
+ *
+ * 夹具:/tmp 下临时 git 仓,main 在 A,分支 b 在 B(改 f1、f2);他人把 f2 改脏后 update-ref main B,再跑 gitsync-run REPO A B。
+ * 断言:(1) 无参数与多参数 rc 2 且 stderr 有 usage;(2) 正常同步 rc 0,f1 写成 B 的内容且索引跟随,f2 逐字保留,
+ *   输出含 SYNC_KEPT path=f2 reason=dirty 与末行 GITSYNC rc=0 changed=2 synced=1 kept=1;(3) 坏 OLD rc 1 且 GITSYNC rc=1 why=;
+ *   (4) 每次子进程 55 秒上限内结束(有界)。末行 CHECK_GITSYNC_RUN<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nfail, ovf;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char out[1 << 15], fx[200];
+static int run(char **v, const char *cwd) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { long n = (long)strlen(s), i; for (i = 0; out[i]; i++) if (!memcmp(out + i, s, (size_t)n)) return 1; return 0; }
+static int sh(const char *c, const char *cwd) { char *v[] = {"sh", "-c", (char *)c, 0}; return run(v, cwd); }
+static void ck(int c, const char *name) { printf("%s\tgitsync-run.%s\n", c ? "PASS" : "FAIL", name); if (!c) { printf("NOTE\tlast-output\t%.600s\n", out); nfail++; } }
+static int gr(const char *a, const char *b, const char *c) {
+    char *v[8]; int n = 0; v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/gitsync-run.cx"; v[n++] = "--";
+    if (a) v[n++] = (char *)a; if (b) v[n++] = (char *)b; if (c) v[n++] = (char *)c; v[n] = 0;
+    return run(v, 0);
+}
+int main(void) {
+    char c[1600], A[64] = "", B[64] = ""; long t0 = sy_now_ms(), t; int rc;
+    F(fx, sizeof fx, "/tmp/check-gitsync-run-%d", (int)sy_pid()); if (ovf) return 2;
+    F(c, sizeof c, "rm -rf %s && mkdir -p %s && cd %s && git init -q -b main && git config user.name g && git config user.email g@example.invalid"
+                   " && printf 'a1\\n' > f1 && printf 'a2\\n' > f2 && git add f1 f2 && git commit -q -m A"
+                   " && git checkout -q -b b && printf 'b1\\n' > f1 && printf 'b2\\n' > f2 && git commit -q -am B && git checkout -q main"
+                   " && printf 'dirty\\n' > f2 && git rev-parse main b", fx, fx, fx);
+    ck(!ovf && sh(c, 0) == 0 && sscanf(out, "%63s %63s", A, B) == 2, "fixture");
+    rc = gr(0, 0, 0); ck(rc == 2 && has("usage: gitsync-run.cx"), "no-args-rc2-usage");
+    rc = gr(fx, A, 0); ck(rc == 2 && has("usage: gitsync-run.cx"), "two-args-rc2-usage");
+    F(c, sizeof c, "git update-ref refs/heads/main %s %s", B, A); ck(!ovf && sh(c, fx) == 0, "fixture-move-ref");
+    t = sy_now_ms(); rc = gr(fx, A, B);
+    ck(rc == 0 && has("SYNC_KEPT path=f2 reason=dirty\n") && has("GITSYNC\trc=0\tchanged=2\tsynced=1\tkept=1\tms="), "sync-rc0-kept-line-format");
+    ck(sy_now_ms() - t < 55000, "sync-bounded");
+    ck(sh("[ \"$(cat f1)\" = b1 ] && [ \"$(git show :f1)\" = b1 ] && [ \"$(cat f2)\" = dirty ] && [ \"$(git show :f2)\" = a2 ]", fx) == 0, "sync-f1-synced-f2-kept");
+    rc = gr(fx, "0000000000000000000000000000000000000001", B);
+    ck(rc == 1 && has("GITSYNC\trc=1\twhy="), "bad-old-rc1-why");
+    F(c, sizeof c, "rm -rf %s", fx); (void)sh(c, 0);
+    printf("NOTE\twall_ms\t%ld\n", sy_now_ms() - t0);
+    printf("CHECK_GITSYNC_RUN\tfailed=%d\n", nfail);
+    return nfail ? 1 : 0;
+}
