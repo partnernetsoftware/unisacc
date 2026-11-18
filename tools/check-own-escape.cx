@@ -1,0 +1,233 @@
+/* tools/check-own-escape.cx -- fixtures and oracle cross-check for OWN-E1 (prd_cx.md 11.7, plans/v0.0.77.md P3).
+ *
+ *   sh ./unisacc.com tools/check-own-escape.cx                    oracle side only; product side PENDING
+ *   sh ./unisacc.com tools/check-own-escape.cx -- --product CC    also compile every fixture with CC -c
+ *   sh ./unisacc.com tools/check-own-escape.cx -- --dir D         fixtures from D (default tests/cases/own-escape)
+ *
+ * Seven fixtures (a)..(g) live in tests/cases/own-escape/.  Each carries the comment
+ *   own-escape: EXPECT=accept|reject1|reject2|reject3
+ * and the table below holds the same verdict, so editing either side alone is a failure.
+ * Oracle: one run of `tools/cx-own.cx -- --escapes` over the seven files gives the public functions whose
+ * return hands out an owned block; the `#pragma unisa owns NAME` lines are read from the source.  Verdict
+ * (plans/v0.0.77.md 1.3, deviation from prd_cx.md 11.7 fixture (b) recorded there):
+ *   reject3  an owns pragma without a name
+ *   reject2  an owns NAME that is not a non-static function defined in the unit
+ *   reject1  the unit has at least one owns and an escaping public function is not declared
+ *   accept   otherwise (a unit without any owns is never rejected for a missing declaration: fixture (f))
+ * The oracle verdict must equal the table for every fixture.  Two negative controls run every time on the
+ * same cx-own output: one fixture left out, and one table verdict flipped; each must produce a failure.
+ *
+ * Product side: OWN-E1 is not in any product yet (P1, P2 of 0.0.77).  Without --product it is not run and
+ * the last line says PRODUCT_SIDE=PENDING; nothing of the product side is counted as passed.  With
+ * --product CC each fixture is compiled with `sh CC -c` from the repo root: accept needs rc 0, rejectN rc 1
+ * and output containing the exact message of prd_cx.md 11.7.  A product without owns support must fail
+ * there (unknown unisa pragma owns): that is the negative control of the product side.
+ *
+ * Last line  CHECK_OWN_ESCAPE<TAB>oracle_passed=N<TAB>failed=M<TAB>PRODUCT_SIDE=PENDING|passed=P/7
+ * rc 1 when M > 0, rc 2 on a usage or I/O error. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+typedef struct { const char *file, *expect, *msg; } Fx;
+static const Fx fx[] = {
+    {"a-owns-declared.cx", "accept", 0},
+    {"b-undeclared-in-owns-unit.cx", "reject1", "function mk2 returns an owned block; declare it with #pragma unisa owns mk2"},
+    {"c-owns-static-name.cx", "reject2", "unisa owns hid: no non-static function hid in this unit"},
+    {"d-static-return.cx", "accept", 0},
+    {"e-borrow-return.cx", "accept", 0},
+    {"f-no-owns-unit.cx", "accept", 0},
+    {"g-owns-no-name.cx", "reject3", "unisa owns takes a function name"},
+};
+#define NFX 7
+
+static int failed, oracle_passed;
+static char *src[NFX];
+static size_t srcn[NFX];
+static char *esc;
+static size_t escn;
+
+static int is_id(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* ---- a small C tokenizer: identifiers and one-byte punctuation; comments, strings, char literals and
+   numbers are skipped.  Each token keeps its brace depth and whether it starts a source line. */
+typedef struct { const char *s; long n; int depth, bol; } Tk;
+#define NTK 4096
+static Tk tk[NTK];
+static int ntk;
+
+static void lex(const char *s, long n) {
+    long i = 0; int depth = 0, bol = 1;
+    ntk = 0;
+    while (i < n && ntk < NTK) {
+        char c = s[i];
+        if (c == '\n') { bol = 1; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r') { i++; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') { i += 2; while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++; i += 2; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') { while (i < n && s[i] != '\n') i++; continue; }
+        if (c == '"' || c == '\'') { char q = c; i++; while (i < n && s[i] != q) { if (s[i] == '\\') i++; i++; } i++; bol = 0; continue; }
+        Tk *t = &tk[ntk];
+        t->s = s + i; t->bol = bol; bol = 0;
+        if (is_id(c)) { long j = i; while (j < n && is_id(s[j])) j++; t->n = j - i; i = j; }
+        else { t->n = 1; i++; }
+        if (t->n == 1 && c == '}') depth--;
+        t->depth = depth;
+        if (t->n == 1 && c == '{') depth++;
+        ntk++;
+    }
+}
+static int tis(int k, const char *w) { return k >= 0 && k < ntk && tx_same(tk[k].s, tk[k].n, w, tx_len(w, 64)); }
+static int same_line(int a, int b) { int k; for (k = a + 1; k <= b; k++) if (tk[k].bol) return 0; return 1; }
+
+/* NAME (token k) is a non-static function defined at file scope: NAME ( ... ) { at depth 0, and no
+   `static` token between the previous file-scope ; or } and NAME */
+static int public_def(const char *p, long n) {
+    int k;
+    for (k = 0; k + 1 < ntk; k++) {
+        if (tk[k].depth || !tx_same(tk[k].s, tk[k].n, p, n) || !tis(k + 1, "(")) continue;
+        int j = k + 2, par = 1;
+        while (j < ntk && par) { if (tis(j, "(")) par++; else if (tis(j, ")")) par--; j++; }
+        if (!tis(j, "{")) continue;
+        int b = k - 1, st = 0;
+        while (b >= 0 && !(tk[b].depth == 0 && (tis(b, ";") || tis(b, "}")))) { if (tis(b, "static")) st = 1; if (tis(b, "#")) break; b--; }
+        if (!st) return 1;
+    }
+    return 0;
+}
+
+/* function FN of fixture path P escapes per cx-own: a line ESCAPE<TAB>P:LINE<TAB>FN<TAB>VAR (fields compared whole) */
+static int escapes_fn(const char *p, const char *fn, long fnl) {
+    long at = 0, pl = tx_len(p, 4500);
+    while (esc && at < (long)escn) {
+        long e = at; while (e < (long)escn && esc[e] != '\n') e++;
+        long f0 = at, f1 = f0; while (f1 < e && esc[f1] != '\t') f1++;
+        long f2 = f1 + 1, f3; while (f2 < e && esc[f2] != ':' && esc[f2] != '\t') f2++;
+        f3 = f2; while (f3 < e && esc[f3] != '\t') f3++;
+        long f4 = f3 + 1, f5 = f4; while (f5 < e && esc[f5] != '\t') f5++;
+        if (tx_same(esc + f0, f1 - f0, "ESCAPE", 6) && f1 < e && tx_same(esc + f1 + 1, f2 - f1 - 1, p, pl)
+            && (fn == 0 || tx_same(esc + f4, f5 - f4, fn, fnl))) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+
+/* oracle verdict of fixture i (path P): 0 accept, 1..3 rejectN */
+static int oracle(int i, const char *p) {
+    int k, owns = 0, r2 = 0, r3 = 0, nd = 0, dk[16];
+    lex(src[i], (long)srcn[i]);
+    for (k = 0; k + 3 < ntk; k++) {
+        if (!tk[k].bol || !tis(k, "#") || !tis(k + 1, "pragma") || !tis(k + 2, "unisa") || !tis(k + 3, "owns") || !same_line(k, k + 3)) continue;
+        owns++;
+        if (k + 4 >= ntk || tk[k + 4].bol || !is_id(tk[k + 4].s[0])) { r3 = 1; continue; }
+        if (!public_def(tk[k + 4].s, tk[k + 4].n)) r2 = 1;
+        if (nd < 16) dk[nd++] = k + 4;
+    }
+    if (r3) return 3;
+    if (r2) return 2;
+    if (!owns) return 0;
+    /* every function of the unit that cx-own reports as escaping must be declared */
+    for (k = 0; k + 1 < ntk; k++) {
+        if (tk[k].depth || !is_id(tk[k].s[0]) || !tis(k + 1, "(")) continue;
+        char fn[64]; long fl = tk[k].n < 63 ? tk[k].n : 63, c;
+        for (c = 0; c < fl; c++) fn[c] = tk[k].s[c];
+        fn[fl] = 0;
+        if (!escapes_fn(p, fn, fl)) continue;
+        int d, found = 0;
+        for (d = 0; d < nd; d++) if (tx_same(tk[dk[d]].s, tk[dk[d]].n, fn, fl)) found = 1;
+        if (!found) return 1;
+    }
+    return 0;
+}
+
+static const char *vname(int v) { return v == 0 ? "accept" : v == 1 ? "reject1" : v == 2 ? "reject2" : "reject3"; }
+
+/* the fixture's own verdict: first line "/" "* own-escape: EXPECT=WORD ..." */
+static int marker_is(int i, const char *want) {
+    static const char pre[] = "/* own-escape: EXPECT=";
+    long pn = (long)sizeof pre - 1, wn = tx_len(want, 16), n = (long)srcn[i];
+    const char *s = src[i];
+    if (n < pn + wn + 1 || !tx_same(s, pn, pre, pn)) return 0;
+    return tx_same(s + pn, wn, want, wn) && s[pn + wn] == ' ';
+}
+
+/* one evaluation over the fixtures; skip leaves fixture `skip` out (as if missing), flip turns the table
+ * verdict of fixture `flip` into another one.  Returns the number of failures; prints only when loud. */
+static int eval(const char *dir, int skip, int flip, int loud) {
+    int i, bad = 0;
+    char path[4500];
+    for (i = 0; i < NFX; i++) {
+        const char *want = fx[i].expect;
+        if (i == flip) want = tx_eqz(want, "accept") ? "reject1" : "accept";
+        if (i == skip || !src[i]) { bad++; if (loud) printf("FAIL\t%s\tmissing\n", fx[i].file); continue; }
+        if (!marker_is(i, want)) { bad++; if (loud) printf("FAIL\t%s\tmarker differs from table (%s)\n", fx[i].file, want); continue; }
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, fx[i].file)) { bad++; continue; }
+        int v = oracle(i, path);
+        if (!tx_eqz(vname(v), want)) { bad++; if (loud) printf("FAIL\t%s\toracle=%s\twant=%s\n", fx[i].file, vname(v), want); continue; }
+        if (loud) printf("ORACLE\t%s\t%s\tPASS\n", fx[i].file, want);
+    }
+    return bad;
+}
+
+static int has_summary(void) {
+    long at = 0;
+    while (esc && at < (long)escn) {
+        long e = at; while (e < (long)escn && esc[e] != '\n') e++;
+        if (e - at > 15 && tx_same(esc + at, 15, "CX_OWN_ESCAPES\t", 15)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *dir = "tests/cases/own-escape", *cc = 0;
+    char cmd[8192], path[4500];
+    int a = 1, i, nfound = 0, product_passed = 0;
+    long cl;
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--dir") && a + 1 < argc) { dir = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--product") && a + 1 < argc) { cc = argv[a + 1]; a += 2; }
+        else { fprintf(stderr, "usage: check-own-escape.cx [--dir D] [--product CC]\n"); return 2; }
+    }
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --escapes")) return 2;
+    cl = tx_len(cmd, sizeof cmd);
+    for (i = 0; i < NFX; i++) {
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, fx[i].file)) return 2;
+        src[i] = cx_read(path, &srcn[i]);
+        if (!src[i]) continue;
+        nfound++;
+        if (cx_fmt(cmd + cl, sizeof cmd - (size_t)cl, " %s", path)) return 2;
+        cl = tx_len(cmd, sizeof cmd);
+    }
+    if (nfound) cx_run_timeout(cmd, 50, &esc, &escn);
+    if (nfound && !has_summary()) { printf("FAIL\tcx-own --escapes gave no summary line\n"); failed++; }
+    int bad = eval(dir, -1, -1, 1);
+    failed += bad;
+    oracle_passed = NFX - bad;
+    /* negative controls on the same cx-own output: a missing fixture and a tampered verdict must be caught */
+    if (eval(dir, NFX - 1, -1, 0) == 0) { failed++; printf("FAIL\tnegative control: missing fixture not caught\n"); }
+    else printf("NEGCTL\tmissing-fixture\tcaught\n");
+    if (eval(dir, -1, 1, 0) == 0) { failed++; printf("FAIL\tnegative control: tampered verdict not caught\n"); }
+    else printf("NEGCTL\ttampered-verdict\tcaught\n");
+    if (!cc) {
+        printf("CHECK_OWN_ESCAPE\toracle_passed=%d\tfailed=%d\tPRODUCT_SIDE=PENDING\n", oracle_passed, failed);
+        return failed ? 1 : 0;
+    }
+    for (i = 0; i < NFX; i++) {
+        char *out = 0, obj[4500];
+        size_t on = 0;
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, fx[i].file) || cx_fmt(obj, sizeof obj, "%s/own-escape-%d-%d.o", sy_tmpdir(), sy_pid(), i)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh %s -c %s -o %s 2>&1", cc, path, obj)) return 2;
+        int rc = cx_run_timeout(cmd, 50, &out, &on);
+        int want_rc = fx[i].msg ? 1 : 0;
+        int ok = rc == want_rc && (!fx[i].msg || (out && tx_find(out, (long)on, fx[i].msg, tx_len(fx[i].msg, 256)) >= 0));
+        long fl = 0;
+        while (out && fl < (long)on && fl < 160 && out[fl] != '\n') fl++;
+        if (ok) { product_passed++; printf("PRODUCT\t%s\trc=%d\tPASS\n", fx[i].file, rc); }
+        else { failed++; printf("FAIL\tPRODUCT\t%s\trc=%d\twant_rc=%d\tfirst=%.*s\n", fx[i].file, rc, want_rc, (int)fl, out ? out : ""); }
+        sy_unlink(obj);
+    }
+    printf("CHECK_OWN_ESCAPE\toracle_passed=%d\tfailed=%d\tPRODUCT_SIDE=passed=%d/%d\n", oracle_passed, failed, product_passed, NFX);
+    return failed ? 1 : 0;
+}
