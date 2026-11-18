@@ -1,12 +1,14 @@
 /* tools/a12-cycle.cx -- the parse2 / facts table-edit validation loop as one command (cwd = repo root).
  *   sh ./unisacc.com tools/a12-cycle.cx -- [--dry-run] [--only STEP] [--build B] [--flags F] [--src C [--reject]] [--neg43 EXE]
  * Thin driver over existing tools in cdx's order: gen tbl net bin (G=B/tools built by main, B default
- * out/c47-main-a8, flags default --errors) -> e2 e1 sim (probe on --src; --reject: sim must exit 1 with a named error) -> decide decide-rtc check-decide ->
+ * sr_default("a12-cycle") = $TMPDIR/unisacc-session-a12-cycle, never the repo out/; a relative --build is
+ * taken below the repo root; flags default --errors) -> e2 e1 sim (probe on --src; --reject: sim must exit 1 with a named error) -> decide decide-rtc check-decide ->
  * ratchets -> neg43 (frozen 43-row executable, --neg43 required; not tools/c-negative.cx). A missing tool or
  * input fails by name (MISSING; build G first, this tool never builds it). Each step runs under np_run 58 s with
  * UNISACC_WAVE_REUSE=1 in its children only (release chain default off); receipts in B/a12-cycle-PID/.
  * Prints STEP<TAB>name<TAB>rc<TAB>seconds<TAB>receipt, stops at the first failure, ends A12_CYCLE total_s= steps= failed=. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.fs
 #pragma unisa use sys.fd
 #pragma unisa use sys.time
@@ -20,7 +22,7 @@ static const char *st[][3] = {
     { "bin", "{G}/net-binary.cx", "sh ./unisacc.com {G}/net-binary.cx -- {B}/errorparse.net {B}/errorparse.bin" },
     { "e2", "{src}", "sh ./unisacc.com stream e2 --source {src} <{src} >{B}/original.e2" },
     { "e1", "{src}", "sh ./unisacc.com stream e1 --raw <{B}/original.e2 >{B}/original.e1.raw" },
-    { "sim", "tools/sim.cx {src}", "sh ./unisacc.com tools/sim.cx -- {B}/errorparse.json {B}/original.e1.raw {src} {root} --resource cli/target={root}/{B}/target.txt --cov {B}/original.cov.tsv" },
+    { "sim", "tools/sim.cx {src}", "sh ./unisacc.com tools/sim.cx -- {B}/errorparse.json {B}/original.e1.raw {src} {root} --resource cli/target={B}/target.txt --cov {B}/original.cov.tsv" },
     { "decide", "tools/decide-gen.cx", "sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=index weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv" },
     { "decide-rtc", "tools/decide-gen.cx", "sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=ret-arith,ret-bool weights/type/context.tsv RTC RTC.ask exec/parse2/returncontext-result.tsv" },
     { "check-decide", "tests/check-decide.cx", "sh ./unisacc.com tests/check-decide.cx" },
@@ -28,7 +30,7 @@ static const char *st[][3] = {
     { "neg43", "{neg43} tools/bound", "tools/bound 55 {neg43} {root} {rcpt}/neg43 /usr/bin/gcc" },
 };
 #define NST ((int)(sizeof st / sizeof st[0]))
-static char root[4096], rcpt[4400]; static int reject; static const char *B = "out/c47-main-a8", *flags = "--errors", *src = "{src}", *neg = "{neg43}";
+static char root[4096], rcpt[4400]; static int reject; static const char *B = 0, *flags = "--errors", *src = "{src}", *neg = "{neg43}";
 static void die(const char *s) { fprintf(stderr, "a12-cycle: %s\n", s); exit(2); }
 static size_t expand(const char *t, char *b, size_t cap) {
     size_t n = 0; static const char *key[] = { "{G}", "{B}", "{flags}", "{src}", "{neg43}", "{root}", "{rcpt}" };
@@ -66,7 +68,15 @@ int main(int argc, char **argv) {
         k++;
     }
     if (k < argc) die("usage: see header");
-    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(rcpt, sizeof rcpt, "%s/%s/a12-cycle-%d", root, B, (int)getpid())) die("root");
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    {   /* B is made absolute once, so every {B} expansion and the receipt dir agree */
+        static char babs[4400];
+        if (!B) { if (sr_default("a12-cycle", babs, sizeof babs)) die("default build dir"); }
+        else if (B[0] == '/') { if (cx_fmt(babs, sizeof babs, "%s", B)) die("path"); }
+        else if (cx_fmt(babs, sizeof babs, "%s/%s", root, B)) die("path");
+        B = babs;
+    }
+    if (cx_fmt(rcpt, sizeof rcpt, "%s/a12-cycle-%d", B, (int)getpid())) die("root");
     if (only) { for (; from < NST && strcmp(st[from][0], only); from++) {} if (from == NST) die("unknown --only STEP"); }
     printf("ENV\tUNISACC_WAVE_REUSE=1\tscope=a12-cycle children only; release chain default off\n");
     long t0 = sy_now_ms(); char *envadd[] = { "UNISACC_WAVE_REUSE=1", 0 };
