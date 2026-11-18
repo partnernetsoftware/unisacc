@@ -1072,6 +1072,45 @@ static int coast_stats(const char *text,int w,int h,int role,CoastStats *stats) 
     return 1;
 }
 
+static int check_w1(const char *mutation) {
+    char cwd[1024],url[2000],*out=0;
+    const char *p;
+    int banks[55]={0},bank=0,i,j,k,failed=0,full=0;
+    double smoothed=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-coast-audit.html?w1-check&%s",cwd,mutation);
+    p=browser(url,&out,22);
+    if(!p) { free(out); return 2; }
+    for(i=1;i<=54;i++) {
+        int at[6],used=0,wanted=i<=19?24:i<=33?-24:0;
+        int lifetime=i+1<30?i+1:30,bad;
+        double bend=0,expected[6];
+        if(sscanf(p,"%d,%d,%d,%d,%d,%d%n",at,at+1,at+2,at+3,at+4,at+5,&used)!=6 ||
+            !used || p[used]!=(i==54?'<':';')) { free(out); return 2; }
+        p+=used+1;
+        if(bank<wanted) bank+=4;
+        else if(bank>wanted) bank-=4;
+        banks[i]=bank;
+        smoothed=(3*smoothed+bank)/4;
+        for(j=0;j<lifetime;j++) bend+=banks[i-j]*(j+1)*7;
+        expected[0]=bank; expected[1]=(smoothed<0?-smoothed:smoothed)*340;
+        expected[2]=-smoothed*430; expected[3]=-smoothed*290;
+        expected[4]=lifetime; expected[5]=bend;
+        bad=0;
+        for(k=0;k<6;k++) {
+            double diff=at[k]-expected[k];
+            bad|=diff>(k==0 || k==4?0:1) || diff<-(k==0 || k==4?0:1);
+        }
+        failed+=bad;
+        full+=at[4]==30;
+        if(i==8 || i==19 || i==33 || i==54)
+            printf("W1 tick=%d bank=%d rise_mm=%d side_mm=%d tilt_mpx=%d trail=%d bend_mpx=%d failed=%d\n",
+                i,at[0],at[1],at[2],at[3],at[4],at[5],bad);
+    }
+    free(out);
+    return failed || full!=26;
+}
+
 static int check_audit_coast(const char *mutation) {
     char cwd[1024],url[4096],profile[128],option[160],*out=0;
     char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
@@ -1422,6 +1461,7 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if((argc==2 || argc==3) && !strcmp(argv[1],"w1")) return check_w1(argc==3?argv[2]:"");
     if(argc==2 && !strcmp(argv[1],"coast-battle")) return check_pages_keyboard("",LIVE_COAST);
     if((argc==2 || argc==3) && !strcmp(argv[1],"audit-coast")) return check_audit_coast(argc==3?argv[2]:"");
     if((argc==2 || argc==3) && !strcmp(argv[1],"audit-banks")) return check_audit_banks(argc==3?argv[2]:"");

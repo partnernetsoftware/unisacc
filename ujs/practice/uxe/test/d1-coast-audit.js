@@ -136,6 +136,7 @@ export function pixelWorld(context,query) {
   const land=query.has("coast-audit")?new Uint8Array(WIDTH*HEIGHT):null;
   const mainland=land?mainlandCells(heights):null;
   const limit=new Int16Array(WIDTH);
+  const slope=new Float32Array(WIDTH),skyScale=new Float32Array(WIDTH);
   const stages=Array.from({length:17},(_,step)=>
     [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87))),
       [121,155,65],[103,168,81],[52,104,56]]
@@ -147,7 +148,7 @@ export function pixelWorld(context,query) {
       const depth=x*forwardX+z*forwardZ;
       if(depth<(layer?28:94) || depth>(layer?130:295)) continue;
       const sx=Math.round(WIDTH/2+151*(x*rightX+z*rightZ)/depth);
-      const sy=Math.round(horizon+(flight.altitude+13-height)*151/depth);
+      const sy=Math.round(horizon+(flight.altitude+13-height)*151/depth+(flight.horizonTilt||0)*(sx-213)/213);
       const step=Math.max(1,Math.round(size/depth*4));
       for(let row=0;row<puff.length;row++) for(let col=0;col<puff[row].length;col++) {
         const type=puff[row][col];
@@ -161,11 +162,16 @@ export function pixelWorld(context,query) {
     paint(flight,tick) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
       const horizon=100+Math.round(flight.pitch*.50), cam=flight.altitude+20;
+      const lean=flight.horizonTilt||0,largeWaves=!query.has("tiny-waves");
       const wavePhase=query.has("still-waves")?0:Math.floor(tick/3);
       const groundDetail=!query.has("bare-ground");
       if(land) land.fill(0);
+      for(let x=0;x<WIDTH;x++) {
+        slope[x]=lean*(x-213)/213;
+        skyScale[x]=48/(horizon+slope[x]);
+      }
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
-        const shade=Math.min(48,48*y/horizon);
+        const shade=Math.min(48,y*skyScale[x]);
         const dither=bayer[((y&3)<<2)|(x&3)]/16;
         pixels[y*WIDTH+x]=sky[Math.min(48,Math.floor(shade+dither))];
       }
@@ -180,10 +186,12 @@ export function pixelWorld(context,query) {
           const wx=Math.floor((x0+lateral*rx+256)*2)&1023;
           const wy=Math.floor((z0+lateral*rz+256)*2)&1023;
           const h=relief[gy*fineSize+gx],id=band(h);
-          const top=Math.max(0,Math.floor(horizon+(cam-Math.max(0,h)*.22)*151/depth));
+          const top=Math.max(0,Math.floor(horizon+slope[col]+(cam-Math.max(0,h)*.22)*151/depth));
           if(top>=limit[col]) continue;
           const waveX=(wx+wavePhase)&1023;
-          const ripples=id<3 && hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229);
+          const crest=(wy+((wx>>2)&15)+wavePhase*2)&63;
+          const swell=largeWaves && id<3 && crest<4 && wx%83<43 && hash(wx>>5,wy>>6,seed+63)>94;
+          const ripples=id<3 && (swell || hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229));
           const waterline=id===2 && h>-3 && hash(wx>>1,wy>>1,seed+71)>165;
           const shade=id>=4 && (h%10<2 || hash(wx,wy,seed+19)>234);
           let material=ripples || waterline?8:shade?id+9:id;
