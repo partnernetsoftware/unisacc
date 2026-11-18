@@ -44,6 +44,16 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q2e 签字材料为 [固定帧](look-dev/d3-review.png) 和 [横移短片](look-dev/d3-review-traverse.mp4)。固定光照，以同一机位起步，机眼和目标沿世界 X 轴同步移动 1 单位，12 帧、12 fps、1280 x 720。并排对照 /tmp/d3-review-comparison.png 左侧为 /tmp/ref/d3.mp4 第 3.00 秒，右侧为原创帧。参考图仅放在临时对照件。最终风格待所有者签字。
+
+|补景提交|检查入口与同版本证据|
+|---|---|
+|Q2e1 `2c67b5e`| `check-uxe-d3-geometry.cx -- sky` 4/0，渐变红值 71 至 93，云上、下为 235 和 203。cloudless 4/4。两个生成文件逐字节检查，篡改天空一字节退出 1。|
+|Q2e2 `33104a0`| `check-uxe-d3-geometry.cx -- crowns` 120/0，模板每树九团，树冠样本 48 中 20 个暗部。sparse 120/1。|
+|Q2e3 `238a231`| `check-uxe-d3-geometry.cx -- ground` 144/0，取到草簇 28、桥台岩 32 个样本。flat-ground 144/2。|
+
+原几何校验 16/0，色阶 6/0，描边 1 和 3 像素正例零错误，生成物篡改扫查零失败，三个补景提交各自的十项 UXE 回归均为 10/0。Q2e 签字页和短片都用原创材质；小屋造型仍简化，云为有明暗的天空贴图。签字时重点看横移中的透天拱洞、拱腹砌缝、树冠暗块黏附以及草与桥台的前后层次。
+
 Q2d 的原创砌缝与水彩纹由 `tools/gen-d3-masonry.cx` 生成，`--check` 比对 16384 字节；磁盘篡改已纳入 `tools/check-gen-sweep.cx`。用 `d3-bridge.html?style=masonry&shift=0` 看石面，`shift=1` 在同样光照下横移一单位。拱腹沿弧长与深度取样，静止树冠在世界坐标中取水彩纹。下一项 Q2e，Q2d 提交可用 `git log -1 --format=%h -- tools/gen-d3-masonry.cx` 定位。
 
 Q2c 在 WebGL 场景设 `outlineWidth` 启用 1 至 8 像素的内描边。额外绘制不透明物体的可见法线，按法线跳变和背景覆盖画线。立方体中线的 1、3 像素验证入口为 `tools/check-uxe-outline.cx`，`--mutate` 关闭第二轮描边，应返回 1。下一项 Q2d 石砌纹。
