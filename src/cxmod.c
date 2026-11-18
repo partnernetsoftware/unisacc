@@ -1038,6 +1038,74 @@ static int cxf_body(int lb, int rb) {
     return 0;
 }
 static int cxf_isuns(int nm) { int k; k = 0; while (k < cxm_nuns) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_uns[k])) return 1; k = k + 1; } return 0; }
+/* OWN-E1 of a safe unit (plans/v0.0.78.md item 5, prd_cx.md 11.7 the first message): a non-static function that
+   is neither named by `#pragma unisa owns` nor exempt by `unisa unsafe`, and whose `return` hands out an owned
+   block, is refused.  Name rule, flow insensitive: the owned names of a body are the identifiers assigned (or
+   initialised) as a whole from a call of an allocator (the alloc and realloc names of tools/cx-own.cx), one
+   parenthesised cast allowed; an escape is `return` [cast] followed by such a name alone, `(name)`, or an
+   allocator call.  Known limits (no refusal): a copy into another local (q = p; return q), a block returned
+   inside a larger expression or through a field, a helper that allocates for the caller.  More than 64 owned
+   names in one function refuses by name. */
+static int cxf_isalloc(int i) {
+    if (!cxf_tid(i) || !cxf_tp(i + 1, '(')) return 0;
+    return cxf_tis(i, "malloc") || cxf_tis(i, "calloc") || cxf_tis(i, "strdup") || cxf_tis(i, "cx_read") || cxf_tis(i, "mm_alloc")
+        || cxf_tis(i, "mm_zalloc") || cxf_tis(i, "mm_strdup") || cxf_tis(i, "realloc") || cxf_tis(i, "mm_grow");
+}
+/* token j, past an optional cast `( ... )` followed by an identifier or `(`; `(name)` alone is not a cast */
+static int cxf_skcast(int j) {
+    if (cxf_tp(j, '(') && cxf_mt[j] > j && (cxf_tid(cxf_mt[j] + 1) || cxf_tp(cxf_mt[j] + 1, '(')) && !(cxf_tid(j + 1) && cxf_mt[j] == j + 2 && !cxf_tid(j + 3)))
+        return cxf_mt[j] + 1;
+    return j;
+}
+static int cxf_e1same(int a, int b, int n) { int i; i = 0; while (i < n) { if (cxm_src[a + i] != cxm_src[b + i]) return 0; i = i + 1; } return 1; }
+static int cxf_e1(int u) {
+    int k; int d; int nm; int rb; int b; int j; int st; int no; int ov; int x; int y; int hl; int r;
+    int oo[64]; int on[64];
+    d = 0; k = 0;
+    while (k < cxf_nt) {
+        if (cxf_tp(k, '{')) {
+            if (d == 0 && cxf_tp(k - 1, ')') && cxf_mt[k - 1] > 0 && cxf_tid(cxf_mt[k - 1] - 1) && cxf_mt[k] > k) {
+                nm = cxf_mt[k - 1] - 1; rb = cxf_mt[k];
+                st = 0; b = nm - 1;
+                while (b >= 0 && !cxf_tp(b, ';') && !cxf_tp(b, '}') && !cxf_tp(b, '{')) { if (cxf_tis(b, "static")) st = 1; b = b - 1; }
+                r = 0; while (r < cxm_nown) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_own[r])) st = 1; r = r + 1; }
+                if (cxf_isuns(nm)) st = 1;
+                no = 0; ov = 0; hl = 0;
+                j = k + 1;
+                while (!st && j < rb) {
+                    if (cxf_tid(j) && cxf_tp(j + 1, '=') && !cxf_tp(j + 2, '=') && !cxf_tp(j - 1, '.') && !cxf_tp(j - 1, '>')
+                        && cxf_isalloc(cxf_skcast(j + 2))) {
+                        y = 0; x = 0; while (x < no) { if (on[x] == cxf_n[j] && cxf_e1same(oo[x], cxf_o[j], on[x])) y = 1; x = x + 1; }
+                        if (!y) { if (no >= 64) ov = 1; else { oo[no] = cxf_o[j]; on[no] = cxf_n[j]; no = no + 1; } }
+                    }
+                    j = j + 1;
+                }
+                if (ov) { cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: more than 64 owned names for the owns check in "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]); return cxm_fail(); }
+                j = k + 1;
+                while (!st && j < rb && !hl) {
+                    if (cxf_tis(j, "return")) {
+                        x = cxf_skcast(j + 1);
+                        if (cxf_tp(x, '(') && cxf_tid(x + 1) && cxf_mt[x] == x + 2 && cxf_tp(x + 3, ';')) x = x + 1;
+                        if (cxf_isalloc(x)) hl = cxf_ln[j];
+                        else if (cxf_tid(x) && (cxf_tp(x + 1, ';') || (cxf_tp(x + 1, ')') && cxf_tp(x + 2, ';')))) {
+                            y = 0; while (y < no) { if (on[y] == cxf_n[x] && cxf_e1same(oo[y], cxf_o[x], on[y])) hl = cxf_ln[j]; y = y + 1; }
+                        }
+                    }
+                    j = j + 1;
+                }
+                if (hl) {
+                    cxm_start(u, hl); cxm_m("function "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]);
+                    cxm_m(" returns an owned block; declare it with #pragma unisa owns "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]);
+                    return cxm_fail();
+                }
+                k = rb + 1; continue;
+            }
+            d = d + 1;
+        } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
+        k = k + 1;
+    }
+    return 0;
+}
 /* the safe unit u: every unsafe NAME is a function of the unit, then each other function body is walked */
 static int cxf_unit(int u) {
     int k; int d; int round; int nm; int rb; int s; int j; int ok;
@@ -1098,7 +1166,7 @@ static int cxf_unit(int u) {
         } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
         k = k + 1;
     }
-    if (!cxf_hit) return 0;
+    if (!cxf_hit) return cxf_e1(u);
     cxm_start(u, cxf_hl);
     if (cxf_hit == 2) cxm_m("unisa safe: double free of "); else cxm_m("unisa safe: use after free of ");
     cxm_mn(cxm_src + cxf_vo[cxf_hv], cxf_vl[cxf_hv]); cxm_m(" in "); cxm_mn(cxm_src + cxf_fo, cxf_fn);
