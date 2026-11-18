@@ -141,6 +141,9 @@ export function pixelWorld(context,query) {
     [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87))),
       [121,155,65],[103,168,81],[52,104,56]]
       .map(color=>rgb(mix(color,haze,step/16*.86))));
+  const rockFade=Array.from({length:17},(_,fade)=>Array.from({length:9},(_,tone)=>
+    rgb(mix(mix(colors[6],colors[7],tone/8),haze,fade/16*.86))));
+  const rockSamples=new Array(9).fill(0);
   const sky=Array.from({length:49},(_,step)=>rgb(mix([42,126,185],[189,229,239],step/48)));
   function cloudLayer(flight,horizon,forwardX,forwardZ,rightX,rightZ,layer) {
     for(const [gx,gz,height,size] of clouds[layer]) {
@@ -176,6 +179,7 @@ export function pixelWorld(context,query) {
         pixels[y*WIDTH+x]=sky[Math.min(48,Math.floor(shade+dither))];
       }
       limit.fill(HEIGHT);
+      rockSamples.fill(0);
       for(let depth=4;depth<=400;depth+=Math.max(.60,depth*.022)) {
         const fade=Math.max(0,Math.min(16,Math.floor((depth-52)/13)));
         const x0=flight.x+depth*fx,z0=flight.z+depth*fz;
@@ -199,7 +203,11 @@ export function pixelWorld(context,query) {
             if(id===4 && (wx+2*wy)%13<3 && hash(wx>>5,wy>>5,seed+27)>83) material=17;
             if((id===5 || id===6) && hash(wx>>1,wy>>1,seed+31)>224) material=(wx+wy)%3?18:19;
           }
-          const color=stages[fade][material];
+          const detail=hash(wx>>2,wy>>2,seed+79)-128;
+          const tone=Math.max(0,Math.min(8,Math.round((h-84+detail/18)*.25)));
+          const softRock=groundDetail && !query.has("hard-rock") && h>=81 && h<=120;
+          const color=softRock?rockFade[fade][tone]:stages[fade][material];
+          if(softRock) rockSamples[tone]+=limit[col]-top;
           const landLabel=land && h>=0?1+mainland[Math.floor(gy/samples)*MAP+Math.floor(gx/samples)]:0;
           for(let y=top;y<limit[col];y++) {
             pixels[y*WIDTH+col]=color;
@@ -212,6 +220,7 @@ export function pixelWorld(context,query) {
       cloudLayer(flight,horizon,fx,fz,rx,rz,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,1);
     },
+    rockView() { return rockSamples.join(","); },
     coastMap() {
       let cells="";
       for(let y=0;y<MAP;y+=2) for(let x=0;x<MAP;x+=2) cells+=String(Number(heights[y*MAP+x]>=0));
