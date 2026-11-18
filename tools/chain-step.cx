@@ -1118,11 +1118,58 @@ static int cs_fp_key_kind(const char *key) {
     k = 1; while (key[k] >= '0' && key[k] <= '9') k++;
     return (key[k] == '.' && key[k + 1] == 'o' && !key[k + 2]) ? 1 : -1;
 }
+/* The batch stage OUT.batch-gG-T is scratch beside OUT and is removed through cx_rmtree, which
+   refuses any path in a repository outside that repository's out/ and .trash/.  The stage is
+   placed by the chain, so a placement that unisa_safedel would refuse is the chain's defect:
+   cs_fp_stage_place checks it before any key is built (both lanes, every target), and
+   cs_fp_stage_witness prints, when a removal is refused anyway, every ancestor's .git lstat
+   and the cwd, so the refusal carries the repository it saw instead of only the verdict. */
+static int cs_fp_repo_of(const char *start, char *repo, size_t cap) {
+    char d[4400], g[4500], *s; struct stat st;
+    if (start[0] != '/' || cx_fmt(d, sizeof d, "%s", start)) return -1;
+    for (;;) {
+        if (cx_fmt(g, sizeof g, "%s%s.git", d, d[1] ? "/" : "")) return -1;
+        if (lstat(g, &st) == 0) { if (cx_fmt(repo, cap, "%s", d)) return -1; return 1; }
+        if (!d[1]) return 0;
+        s = strrchr(d, '/');
+        if (s == d) d[1] = 0; else *s = 0;
+    }
+}
+static void cs_fp_stage_place(const char *out) {
+    char par[4400], real[4400], repo[4400], o[4500], x[4500], *s; size_t n; int k;
+    if (cx_fmt(par, sizeof par, "%s", out)) cs_die("batch stage path", out);
+    n = strlen(par); while (n > 1 && par[n - 1] == '/') par[--n] = 0;
+    s = strrchr(par, '/');
+    if (!s) { par[0] = '.'; par[1] = 0; } else if (s == par) par[1] = 0; else *s = 0;
+    if (sy_realpath(par, real, sizeof real) < 0) cs_die("REFUSE batch stage parent unresolvable", par);
+    k = cs_fp_repo_of(real, repo, sizeof repo);
+    if (k < 0) cs_die("batch stage path", real);
+    if (!k) return;
+    if (cx_fmt(o, sizeof o, "%s/out/", repo) || cx_fmt(x, sizeof x, "%s/.trash/", repo)) cs_die("batch stage path", repo);
+    /* the stage is REAL/NAME: allowed when REAL is out/ or .trash/ of that repository or lies below one */
+    if (cx_fmt(par, sizeof par, "%s/", real)) cs_die("batch stage path", real);
+    if (!strncmp(par, o, strlen(o)) || !strncmp(par, x, strlen(x))) return;
+    sy_eprintf("chain-step: batch stage parent %s lies in repository %s outside its out/ and .trash/\n", real, repo);
+    cs_die("REFUSE batch stage inside repository", out);
+}
+static void cs_fp_stage_witness(const char *p) {
+    char d[4400], g[4500], c[4400], *s; struct stat st; int r;
+    if (cx_fmt(d, sizeof d, "%s", p)) return;
+    for (;;) {
+        if (cx_fmt(g, sizeof g, "%s%s.git", d, d[1] ? "/" : "")) return;
+        r = lstat(g, &st);
+        sy_eprintf("BATCH_STAGE_WITNESS\t%s\tlstat=%d\terrno=%d\tmode=%o\n", g, r, r ? errno : 0, r ? 0 : (unsigned)st.st_mode);
+        if (!d[1] || d[0] != '/') break;
+        s = strrchr(d, '/');
+        if (s == d) d[1] = 0; else *s = 0;
+    }
+    if (getcwd(c, sizeof c)) sy_eprintf("BATCH_STAGE_WITNESS\tcwd=%s\n", c);
+}
 static void cs_fp_stage_drop(void) {
     int k;
     for (k = 0; k < cs_fp_stage_n; k++) { free(cs_fp_stage_line[k]); cs_fp_stage_line[k] = 0; }
     free(cs_fp_stage_pre); free(cs_fp_stage_post); cs_fp_stage_pre = cs_fp_stage_post = 0; cs_fp_stage_n = 0;
-    if (cs_fp_stage[0] && sy_exists(cs_fp_stage) == 1 && cx_rmtree(cs_fp_stage)) cs_die("batch stage cleanup", cs_fp_stage);
+    if (cs_fp_stage[0] && sy_exists(cs_fp_stage) == 1 && cx_rmtree(cs_fp_stage)) { cs_fp_stage_witness(cs_fp_stage); cs_die("batch stage cleanup", cs_fp_stage); }
 }
 static int cs_fp_stage_find(const char *sub, const char *object) {
     int k;
@@ -1962,6 +2009,7 @@ int main(int argc, char **argv) {
                     if (!keys[nk - 1][0]) cs_die("REFUSE objects list (empty key or over 256)", objects);
                 }
                 for (j = 0; j < nk; j++) for (k2 = 0; k2 < j; k2++) if (!strcmp(keys[j], keys[k2])) cs_die("REFUSE duplicate object key", keys[j]);
+                cs_fp_stage_place(argv[6]);
                 cs_fp_bkeys = keys; cs_fp_bn = nk;
                 for (j = 0; j < nk; j++) {
                     rc = cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target, phase, resume || j > 0, keys[j], 0);
