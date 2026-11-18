@@ -403,6 +403,12 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 生产按两步放行。先用满 24 小时的影子观测核误触发和漏触发均为零，通过取代、去重和负载负控后，允许一条有界真实候选。该候选与同冻结输入的手动整链各自通过 promote 检查、产物逐字节相同且 prepared.tsv 与磁盘一致，才放行常规自动构造。原始 dry 行是单次预览，影子统计要独立套用稳定期、准入及材料复用条件。逐项判据与复验命令见 release/evidence/react-candidate-inputs-2026-11-18.tsv。
 
+### 真起切换评估(2026-11-18)
+
+影子实例最后落盘在 14:17,只有一条 would-start(rev 969a5a49c8),现在 running=0,devsvc 事件流里没有 react 行。所以 24 小时影子条件未满足。补救做法是回放:基线加 main 在 14:18 后的 8 个提交,逐个 git archive 后跑 --candidate-key。9 个键完全相同,8 个提交都没动产品输入,误触发 0。没有正样本,漏触发检出力 UNMEASURED。check-dvreact 4/4、check-devsvc-react 8/8 实跑通过,含取代和同键一次。负载准入只有 load1<6 一道门,没有槽位联动。真起候选与手动整链的字节对照 UNMEASURED:v0.0.74 整链 0dae4d3024 仍在跑。
+
+默认做法:保持影子。切真起前要满足三条。(1) 影子常驻满 24 小时,并自动记录事件。(2) 至少一个产品输入提交触发键变化。(3) 一条有界真起候选与同输入的手动整链逐字节相同,两侧 promote --check 都通过。证据见 release/evidence/react-flip-readiness-2026-11-18.tsv。
+
 ## 整链提速(2026-11-18)
 
 建议先拆长作业实际占用的写域。real6 的慢点是两代 Linux 对象批，chain4 的慢点已转到跨平台整目标重试。real6 从起到止 3752 秒，链内自产管理器。chain4 显式传两份管理器，OWNER 到 EXIT 为 1613 秒，499/499、rc 0；chain2 首次为 1379 秒，停在 pack；chain3 为 1346 秒，停在 cache-manager 缺 checkpoint。三者都不能替 real6 的同配方冷构造验收。
