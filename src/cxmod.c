@@ -577,13 +577,27 @@ int cxm_exported(char *nm, int nl) { int k; k = 0; while (k < cxm_nexp) { if (cx
    release; return, break, continue, goto and no-return calls end a path.  `#pragma unisa unsafe NAME` exempts a
    function.  Limits (silent misses): aliases, fields, globals, function pointers, cross-function transfer; the
    `own-flow: releases` comment of the prototype has no product form (comments are blanked before the scan).
-   Only a unit that declares safe reaches cxf_unit. ---- */
+   Only a unit that declares safe reaches cxf_unit.
+   Capacity (plans/v0.0.78.md items 1-3): a limit is never a silent pass, each one refuses the unit by name.
+     65536 tokens, 4096 nested brackets, unbalanced brackets (also across #if branches, whose directive lines
+       are blank): "unisa safe: too large or unbalanced for the flow check in unit"
+     64 released names per function (CXF_V): "more than 64 released names for the flow check in FUNC"
+     32 goto labels per function (CXF_L): "more than 32 goto labels for the flow check in FUNC"
+     64 nested loops and switches (CXF_D): "loops or switches nested deeper than 64 for the flow check in FUNC"
+     goto: the body is walked again until the label states are stable, at most 64 walks (CXF_GP):
+       "goto labels not stable after 64 walks for the flow check in FUNC"
+     256 live shadowing declarations (CXF_SH): "more than 256 shadowing declarations for the flow check in FUNC"
+     512 flow states (CXF_S): "FUNC is too deep for the flow check"
+   A declaration in an inner block gives the name its own slot: the outer state is saved and comes back when the
+   block ends.  The operand of sizeof (with or without parentheses) is not a use. ---- */
 #define CXF_T 65536
 #define CXF_V 64
 #define CXF_D 64
 #define CXF_L 32
 #define CXF_S 512
 #define CXF_NR 256
+#define CXF_GP 64
+#define CXF_SH 256
 static int cxf_k[CXF_T]; static int cxf_o[CXF_T]; static int cxf_n[CXF_T]; static int cxf_ln[CXF_T]; static int cxf_mt[CXF_T];
 static int cxf_nt; static int cxf_stk[4096];
 static int cxf_nro[CXF_NR]; static int cxf_nrn[CXF_NR]; static int cxf_nnr;
@@ -593,6 +607,12 @@ static int cxf_st[CXF_S][CXF_V]; static int cxf_fl[CXF_S][CXF_V]; static int cxf
 static int cxf_frk[CXF_D]; static int cxf_frdef[CXF_D]; static int cxf_frb[CXF_D]; static int cxf_frc[CXF_D]; static int cxf_fre[CXF_D]; static int cxf_nfr;
 static int cxf_lbo[CXF_L]; static int cxf_lbn[CXF_L]; static int cxf_nlb;
 static int cxf_depth; static int cxf_hit; static int cxf_hv; static int cxf_hl; static int cxf_fo; static int cxf_fn;
+/* shadowing: the outer state of a name declared again in a deeper block, restored when that block ends */
+static int cxf_shv[CXF_SH]; static int cxf_shs[CXF_SH]; static int cxf_shf[CXF_SH]; static int cxf_shd[CXF_SH]; static int cxf_nsh;
+/* label states before a goto walk, to see whether another walk can change them */
+static int cxf_gs[CXF_L + 1][CXF_V]; static int cxf_gd[CXF_L + 1];
+/* the first capacity limit met (1 states, 2 names, 3 labels, 4 nesting, 5 goto walks, 6 shadowing) */
+static int cxf_ov(int r) { if (!cxf_over) cxf_over = r; return 0; }
 static int cxf_sk(char *s, int j, int e) { while (j < e && (s[j] == ' ' || s[j] == '\t')) j = j + 1; return j; }
 static int cxf_wd(char *s, int j, int e) { while (j < e && cxm_idch(s[j] & 255)) j = j + 1; return j; }
 static int cxf_isrel(char *p, int n) {
@@ -703,7 +723,8 @@ static int cxf_kw(int i) {
 static int cxf_var(int i, int add) {
     int v;
     v = 0; while (v < cxf_nv) { if (cxf_same(i, cxf_vo[v], cxf_vl[v])) return v; v = v + 1; }
-    if (!add || cxf_nv >= CXF_V) return 0 - 1;
+    if (!add) return 0 - 1;
+    if (cxf_nv >= CXF_V) { cxf_ov(2); return 0 - 1; }
     cxf_vo[cxf_nv] = cxf_o[i]; cxf_vl[cxf_nv] = cxf_n[i]; cxf_vd[cxf_nv] = 0; cxf_st[0][cxf_nv] = 0; cxf_fl[0][cxf_nv] = 0;
     cxf_nv = cxf_nv + 1;
     return cxf_nv - 1;
@@ -729,7 +750,32 @@ static int cxf_adds(int a, int b) {
     v = 0; while (v < cxf_nv) { if (cxf_st[b][v] && (cxf_dd[a] || !cxf_st[a][v])) return 1; v = v + 1; }
     return 0;
 }
-static int cxf_new(void) { if (cxf_ns >= CXF_S) { cxf_over = 1; return CXF_S - 1; } cxf_ns = cxf_ns + 1; return cxf_ns - 1; }
+static int cxf_new(void) { if (cxf_ns >= CXF_S) { cxf_ov(1); return CXF_S - 1; } cxf_ns = cxf_ns + 1; return cxf_ns - 1; }
+/* a declaration of V at the current depth: a deeper block saves the outer state of V first */
+static int cxf_shadow(int v) {
+    if (cxf_vd[v] >= cxf_depth) return 0;
+    if (cxf_nsh >= CXF_SH) { cxf_ov(6); return 0; }
+    cxf_shv[cxf_nsh] = v; cxf_shs[cxf_nsh] = cxf_st[0][v]; cxf_shf[cxf_nsh] = cxf_fl[0][v]; cxf_shd[cxf_nsh] = cxf_vd[v];
+    cxf_nsh = cxf_nsh + 1;
+    cxf_vd[v] = cxf_depth;
+    return 0;
+}
+/* the end of the operand of the sizeof at K (not evaluated, not a use) */
+static int cxf_szend(int k, int b) {
+    int j;
+    j = k + 1;
+    if (cxf_tp(j, '(') && cxf_mt[j] > j) return cxf_mt[j] + 1;
+    while (j < b && (cxf_tp(j, '*') || cxf_tp(j, '&') || cxf_tp(j, '!') || cxf_tp(j, '~') || cxf_tp(j, '-') || cxf_tp(j, '+'))) j = j + 1;
+    if (j < b && cxf_tp(j, '(') && cxf_mt[j] > j) return cxf_mt[j] + 1;
+    if (j < b && cxf_tid(j)) j = j + 1;
+    while (j < b) {
+        if ((cxf_tp(j, '[') || cxf_tp(j, '(')) && cxf_mt[j] > j) { j = cxf_mt[j] + 1; continue; }
+        if (cxf_tp(j, '.') && cxf_tid(j + 1)) { j = j + 2; continue; }
+        if (cxf_tp(j, '-') && cxf_tp(j + 1, '>') && cxf_tid(j + 2)) { j = j + 3; continue; }
+        break;
+    }
+    return j;
+}
 /* first token of the last statement before the closing brace RB, or -1 */
 static int cxf_last(int lb, int rb) {
     int j;
@@ -770,6 +816,7 @@ static int cxf_expr(int a, int b) {
     int k; int s; int v; int as; int de; int da; int ad; int sz;
     k = a;
     while (k < b) {
+        if (cxf_tis(k, "sizeof")) { k = cxf_szend(k, b); continue; }
         s = cxf_relarg(k);
         if (s >= 0) {
             v = cxf_var(s, 0);
@@ -789,7 +836,7 @@ static int cxf_expr(int a, int b) {
             ad = cxf_tp(k - 1, '&') && !(cxf_tid(k - 2) || cxf_tp(k - 2, ')') || cxf_tp(k - 2, ']') || (k >= 2 && cxf_k[k - 2] == 3));
             sz = cxf_tis(k - 1, "sizeof") || (cxf_tp(k - 1, '(') && cxf_tis(k - 2, "sizeof"));
             if (sz) { k = k + 1; continue; }
-            if (de) cxf_vd[v] = cxf_depth;
+            if (de) cxf_shadow(v);
             if (de || ad || (as && !da && !cxf_tp(k - 1, ']'))) { cxf_st[0][v] = 0; k = k + 1; continue; }
             if (cxf_st[0][v]) cxf_report(v, cxf_ln[k], 1);
             k = k + 1; continue;
@@ -804,19 +851,23 @@ static int cxf_block(int lb) {
     cxf_depth = cxf_depth + 1;
     while (j < rb) { nj = cxf_stmt(j, rb); if (nj > j) j = nj; else j = j + 1; }
     cxf_depth = cxf_depth - 1;
+    while (cxf_nsh > 0 && cxf_vd[cxf_shv[cxf_nsh - 1]] > cxf_depth) {
+        cxf_nsh = cxf_nsh - 1; v = cxf_shv[cxf_nsh];
+        cxf_st[0][v] = cxf_shs[cxf_nsh]; cxf_fl[0][v] = cxf_shf[cxf_nsh]; cxf_vd[v] = cxf_shd[cxf_nsh];
+    }
     v = 0; while (v < cxf_nv) { if (cxf_vd[v] > cxf_depth) { cxf_st[0][v] = 0; cxf_vd[v] = 0; } v = v + 1; }
     return rb + 1;
 }
 static int cxf_label(int i) {
     int l;
     l = 0; while (l < cxf_nlb) { if (cxf_same(i, cxf_lbo[l], cxf_lbn[l])) return l + 1; l = l + 1; }
-    if (cxf_nlb >= CXF_L) return 0 - 1;
+    if (cxf_nlb >= CXF_L) { cxf_ov(3); return 0 - 1; }
     cxf_lbo[cxf_nlb] = cxf_o[i]; cxf_lbn[cxf_nlb] = cxf_n[i]; cxf_kill(cxf_nlb + 1);
     cxf_nlb = cxf_nlb + 1;
     return cxf_nlb;
 }
 static int cxf_push(int kind) {
-    if (cxf_nfr >= CXF_D) return 0 - 1;
+    if (cxf_nfr >= CXF_D) { cxf_ov(4); return 0 - 1; }
     cxf_frk[cxf_nfr] = kind; cxf_frdef[cxf_nfr] = 0;
     cxf_frb[cxf_nfr] = cxf_new(); cxf_kill(cxf_frb[cxf_nfr]);
     cxf_frc[cxf_nfr] = cxf_new(); cxf_kill(cxf_frc[cxf_nfr]);
@@ -961,7 +1012,7 @@ static int cxf_stmt(int i, int rb) {
     return i + 1;
 }
 static int cxf_body(int lb, int rb) {
-    int d; int s; int pass; int gt;
+    int d; int s; int pass; int gt; int nl; int l; int ch;
     cxf_nv = 0; cxf_nlb = 0; gt = 0;
     d = lb + 1;
     while (d < rb) {
@@ -971,19 +1022,111 @@ static int cxf_body(int lb, int rb) {
         d = d + 1;
     }
     pass = 0;
-    while (pass < 1 + gt) {
+    while (1) {
+        nl = cxf_nlb; l = 1;
+        while (l <= nl) { d = 0; while (d < CXF_V) { cxf_gs[l][d] = cxf_st[l][d]; d = d + 1; } cxf_gd[l] = cxf_dd[l]; l = l + 1; }
         d = 0; while (d < CXF_V) { cxf_st[0][d] = 0; cxf_fl[0][d] = 0; cxf_vd[d] = 0; d = d + 1; }
-        cxf_dd[0] = 0; cxf_nfr = 0; cxf_depth = 0; cxf_ns = CXF_L + 1;
+        cxf_dd[0] = 0; cxf_nfr = 0; cxf_depth = 0; cxf_ns = CXF_L + 1; cxf_nsh = 0;
         cxf_block(lb);
         pass = pass + 1;
+        if (!gt || cxf_hit || cxf_over) break;
+        ch = cxf_nlb != nl; l = 1;
+        while (l <= nl && !ch) { d = 0; while (d < CXF_V) { if (cxf_gs[l][d] != cxf_st[l][d]) ch = 1; d = d + 1; } if (cxf_gd[l] != cxf_dd[l]) ch = 1; l = l + 1; }
+        if (!ch) break;
+        if (pass >= CXF_GP) { cxf_ov(5); break; }
     }
     return 0;
 }
 static int cxf_isuns(int nm) { int k; k = 0; while (k < cxm_nuns) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_uns[k])) return 1; k = k + 1; } return 0; }
+/* OWN-E1 of a safe unit (plans/v0.0.78.md item 5, prd_cx.md 11.7 the first message): a non-static function that
+   is neither named by `#pragma unisa owns` nor exempt by `unisa unsafe`, and whose `return` hands out an owned
+   block, is refused.  Name rule, flow insensitive: the owned names of a body are the identifiers assigned (or
+   initialised) as a whole from a call of an allocator (the alloc and realloc names of tools/cx-own.cx), one
+   parenthesised cast allowed; an escape is `return` [cast] followed by such a name alone, `(name)`, or an
+   allocator call.  Known limits (no refusal): a copy into another local (q = p; return q), a block returned
+   inside a larger expression or through a field, a helper that allocates for the caller.  More than 64 owned
+   names in one function refuses by name. */
+static int cxf_isalloc(int i) {
+    if (!cxf_tid(i) || !cxf_tp(i + 1, '(')) return 0;
+    return cxf_tis(i, "malloc") || cxf_tis(i, "calloc") || cxf_tis(i, "strdup") || cxf_tis(i, "cx_read") || cxf_tis(i, "mm_alloc")
+        || cxf_tis(i, "mm_zalloc") || cxf_tis(i, "mm_strdup") || cxf_tis(i, "realloc") || cxf_tis(i, "mm_grow");
+}
+/* token j, past an optional cast `( ... )` followed by an identifier or `(`; `(name)` alone is not a cast */
+static int cxf_skcast(int j) {
+    if (cxf_tp(j, '(') && cxf_mt[j] > j && (cxf_tid(cxf_mt[j] + 1) || cxf_tp(cxf_mt[j] + 1, '(')) && !(cxf_tid(j + 1) && cxf_mt[j] == j + 2 && !cxf_tid(j + 3)))
+        return cxf_mt[j] + 1;
+    return j;
+}
+static int cxf_e1same(int a, int b, int n) { int i; i = 0; while (i < n) { if (cxm_src[a + i] != cxm_src[b + i]) return 0; i = i + 1; } return 1; }
+static int cxf_e1attr(int i) { return cxf_tis(i, "__attribute__") || cxf_tis(i, "__asm__") || cxf_tis(i, "__asm") || cxf_tis(i, "asm"); }
+/* the ) of the parameter list before a body whose last token is e: trailing __attribute__((...)) and __asm__(...) are
+   skipped; -1 when something was skipped and no parameter list with a name is left (refused by name, not misnamed) */
+static int cxf_e1tail(int e) {
+    int s; s = 0;
+    while (cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_e1attr(cxf_mt[e] - 1)) { e = cxf_mt[e] - 2; s = 1; }
+    if (s && !(cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_tid(cxf_mt[e] - 1))) return -1;
+    return e;
+}
+/* *NAME = ALLOC writes through NAME (an output parameter), it does not make NAME an owned name */
+static int cxf_e1deref(int j) {
+    return cxf_tp(j - 1, '*') && (j < 2 || cxf_tp(j - 2, ';') || cxf_tp(j - 2, '{') || cxf_tp(j - 2, '}') || cxf_tp(j - 2, ')') || cxf_tis(j - 2, "else"));
+}
+static int cxf_e1(int u) {
+    int k; int d; int nm; int rb; int b; int j; int st; int no; int ov; int x; int y; int hl; int r; int e;
+    int oo[64]; int on[64];
+    d = 0; k = 0;
+    while (k < cxf_nt) {
+        if (cxf_tp(k, '{')) {
+            e = cxf_e1tail(k - 1);
+            if (d == 0 && e < 0 && cxf_mt[k] > k) {
+                cxm_start(u, cxf_ln[k]); cxm_m("unisa safe: cannot name the function before this body for the owns check"); return cxm_fail();
+            }
+            if (d == 0 && cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_tid(cxf_mt[e] - 1) && cxf_mt[k] > k) {
+                nm = cxf_mt[e] - 1; rb = cxf_mt[k];
+                st = 0; b = nm - 1;
+                while (b >= 0 && !cxf_tp(b, ';') && !cxf_tp(b, '}') && !cxf_tp(b, '{')) { if (cxf_tis(b, "static")) st = 1; b = b - 1; }
+                r = 0; while (r < cxm_nown) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_own[r])) st = 1; r = r + 1; }
+                if (cxf_isuns(nm)) st = 1;
+                no = 0; ov = 0; hl = 0;
+                j = k + 1;
+                while (!st && j < rb) {
+                    if (cxf_tid(j) && cxf_tp(j + 1, '=') && !cxf_tp(j + 2, '=') && !cxf_tp(j - 1, '.') && !cxf_tp(j - 1, '>') && !cxf_e1deref(j)
+                        && cxf_isalloc(cxf_skcast(j + 2))) {
+                        y = 0; x = 0; while (x < no) { if (on[x] == cxf_n[j] && cxf_e1same(oo[x], cxf_o[j], on[x])) y = 1; x = x + 1; }
+                        if (!y) { if (no >= 64) ov = 1; else { oo[no] = cxf_o[j]; on[no] = cxf_n[j]; no = no + 1; } }
+                    }
+                    j = j + 1;
+                }
+                if (ov) { cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: more than 64 owned names for the owns check in "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]); return cxm_fail(); }
+                j = k + 1;
+                while (!st && j < rb && !hl) {
+                    if (cxf_tis(j, "return")) {
+                        x = cxf_skcast(j + 1);
+                        if (cxf_tp(x, '(') && cxf_tid(x + 1) && cxf_mt[x] == x + 2 && cxf_tp(x + 3, ';')) x = x + 1;
+                        if (cxf_isalloc(x)) hl = cxf_ln[j];
+                        else if (cxf_tid(x) && (cxf_tp(x + 1, ';') || (cxf_tp(x + 1, ')') && cxf_tp(x + 2, ';')))) {
+                            y = 0; while (y < no) { if (on[y] == cxf_n[x] && cxf_e1same(oo[y], cxf_o[x], on[y])) hl = cxf_ln[j]; y = y + 1; }
+                        }
+                    }
+                    j = j + 1;
+                }
+                if (hl) {
+                    cxm_start(u, hl); cxm_m("function "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]);
+                    cxm_m(" returns an owned block; declare it with #pragma unisa owns "); cxm_mn(cxm_src + cxf_o[nm], cxf_n[nm]);
+                    return cxm_fail();
+                }
+                k = rb + 1; continue;
+            }
+            d = d + 1;
+        } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
+        k = k + 1;
+    }
+    return 0;
+}
 /* the safe unit u: every unsafe NAME is a function of the unit, then each other function body is walked */
 static int cxf_unit(int u) {
     int k; int d; int round; int nm; int rb; int s; int j; int ok;
-    if (cxf_lex()) return 0;
+    if (cxf_lex()) { cxm_start(u, 1); cxm_m("unisa safe: too large or unbalanced for the flow check in unit"); return cxm_fail(); }
     cxf_nnr = 0; round = 0;
     while (round < 3) {
         d = 0; k = 0;
@@ -1023,14 +1166,24 @@ static int cxf_unit(int u) {
                 nm = cxf_mt[k - 1] - 1; rb = cxf_mt[k];
                 cxf_fo = cxf_o[nm]; cxf_fn = cxf_n[nm];
                 if (!cxf_isuns(nm)) cxf_body(k, rb);
-                if (cxf_over && !cxf_hit) { cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: "); cxm_mn(cxm_src + cxf_fo, cxf_fn); cxm_m(" is too deep for the flow check"); return cxm_fail(); }
+                if (cxf_over == 1 && !cxf_hit) { cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: "); cxm_mn(cxm_src + cxf_fo, cxf_fn); cxm_m(" is too deep for the flow check"); return cxm_fail(); }
+                if (cxf_over && !cxf_hit) {
+                    cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: ");
+                    if (cxf_over == 2) cxm_m("more than 64 released names");
+                    else if (cxf_over == 3) cxm_m("more than 32 goto labels");
+                    else if (cxf_over == 4) cxm_m("loops or switches nested deeper than 64");
+                    else if (cxf_over == 5) cxm_m("goto labels not stable after 64 walks");
+                    else cxm_m("more than 256 shadowing declarations");
+                    cxm_m(" for the flow check in "); cxm_mn(cxm_src + cxf_fo, cxf_fn);
+                    return cxm_fail();
+                }
                 k = rb + 1; continue;
             }
             d = d + 1;
         } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
         k = k + 1;
     }
-    if (!cxf_hit) return 0;
+    if (!cxf_hit) return cxf_e1(u);
     cxm_start(u, cxf_hl);
     if (cxf_hit == 2) cxm_m("unisa safe: double free of "); else cxm_m("unisa safe: use after free of ");
     cxm_mn(cxm_src + cxf_vo[cxf_hv], cxf_vl[cxf_hv]); cxm_m(" in "); cxm_mn(cxm_src + cxf_fo, cxf_fn);

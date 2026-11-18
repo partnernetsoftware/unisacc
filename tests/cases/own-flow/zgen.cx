@@ -1,0 +1,67 @@
+/* tests/cases/own-flow/zgen.cx -- writes the generated boundary fixtures of the own-flow product table
+ * (plans/v0.0.78.md, OWN-FLOW-BOUNDARY-FIXTURES-MISSING).  The outputs are committed as static files; the
+ * check reads them like any other fixture and never runs this generator.
+ *
+ *   sh ./unisacc.com tests/cases/own-flow/zgen.cx -- DIR
+ *
+ * b1-vars64 b2-labels32 b3-loops64 (exactly at the limit, OK), b4-shadow257 b5-tok65537 b6-paren4097
+ * (one past, LIMIT), b7-own65 (65 owned names for the owns check, LIMIT).  rc 2 on a usage or I/O error. */
+#pragma unisa use sys.env
+
+static FILE *zg_open(const char *dir, const char *name) {
+    char p[4096]; FILE *f;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) { fprintf(stderr, "zgen: path too long\n"); exit(2); }
+    f = fopen(p, "w");
+    if (!f) { fprintf(stderr, "zgen: cannot write %s\n", p); exit(2); }
+    return f;
+}
+static void zg_close(FILE *f) { if (fclose(f)) { fprintf(stderr, "zgen: write failed\n"); exit(2); } }
+
+int main(int argc, char **argv) {
+    FILE *f; int i; const char *d;
+    if (argc != 2) { fprintf(stderr, "usage: zgen.cx -- DIR\n"); return 2; }
+    d = argv[1];
+    f = zg_open(d, "b1-vars64.cx");
+    fprintf(f, "/* own-flow product fixture B1 (zgen.cx): exactly 64 released locals, the most the flow check tracks -> OK */\nint f(void) {\n");
+    for (i = 0; i < 64; i++) fprintf(f, "    char *a%02d = malloc(1);\n", i);
+    for (i = 0; i < 64; i++) fprintf(f, "    free(a%02d);\n", i);
+    fprintf(f, "    return 0;\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b2-labels32.cx");
+    fprintf(f, "/* own-flow product fixture B2 (zgen.cx): exactly 32 goto labels, the most the flow check keeps -> OK */\nvoid f(char *p, int x) {\n");
+    for (i = 1; i <= 32; i++) fprintf(f, "    if (x == %d) goto L%02d;\n", i, i);
+    fprintf(f, "    free(p); return;\n");
+    for (i = 1; i <= 32; i++) fprintf(f, "L%02d: ;\n", i);
+    fprintf(f, "    use(p);\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b3-loops64.cx");
+    fprintf(f, "/* own-flow product fixture B3 (zgen.cx): exactly 64 nested loops, the most the flow check keeps -> OK */\nvoid f(char *p, int x) {\n");
+    for (i = 0; i < 64; i++) fprintf(f, "    while (x)\n");
+    fprintf(f, "        { x = x - 1; }\n    use(p);\n    free(p);\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b4-shadow257.cx");
+    fprintf(f, "/* own-flow product fixture B4 (zgen.cx): 257 live shadowing declarations of p, one more than the 256 the\n   flow check saves -> LIMIT */\nint f(void) {\n    char *p = malloc(1);\n    free(p);\n");
+    for (i = 0; i < 257; i++) fprintf(f, "    { char *p = malloc(1); free(p);\n");
+    for (i = 0; i < 257; i++) fprintf(f, "    }\n");
+    fprintf(f, "    return 0;\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b5-tok65537.cx");
+    fprintf(f, "/* own-flow product fixture B5 (zgen.cx): more than 65536 tokens, the most the flow check reads -> LIMIT unit */\nint f(void) {\n    int x = 0;\n");
+    for (i = 0; i < 11000; i++) fprintf(f, "    x = x + 1;\n");
+    fprintf(f, "    return x;\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b6-paren4097.cx");
+    fprintf(f, "/* own-flow product fixture B6 (zgen.cx): 4097 nested parentheses, one more than the flow check keeps -> LIMIT unit */\nint f(void) {\n    return ");
+    for (i = 0; i < 4097; i++) fputc('(', f);
+    fputc('0', f);
+    for (i = 0; i < 4097; i++) fputc(')', f);
+    fprintf(f, ";\n}\n");
+    zg_close(f);
+    f = zg_open(d, "b7-own65.cx");
+    fprintf(f, "/* own-flow product fixture B7 (zgen.cx): 65 owned names in one function, one more than the 64 the owns\n   check keeps -> LIMIT */\n#pragma unisa use mem.heap\nchar *mk(void) {\n");
+    for (i = 0; i < 65; i++) fprintf(f, "    char *a%02d;\n", i);
+    for (i = 0; i < 65; i++) fprintf(f, "    a%02d = mm_alloc(1);\n", i);
+    fprintf(f, "    return 0;\n}\n");
+    zg_close(f);
+    return 0;
+}

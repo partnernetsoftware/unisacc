@@ -17,6 +17,11 @@
  *             as an undeclared helper, are not the plan's verdict and are only counted as cc_rc_nonzero)
  *   UNSAFE    as OK; the exempt count unsafe= is the number of UNSAFE rows
  *   KNOWN-LIMIT  compiled and listed, not counted
+ *   LIMIT     refused with a named capacity refusal "unisa safe: ... in FN" (neither use after free nor double
+ *             free) for the row's function; FN `unit` for a unit the flow check cannot read at all
+ *   E1        refused with "function FN returns an owned block; declare it with #pragma unisa owns FN" for the
+ *             row's function (plans/v0.0.78.md item 5); an OK or UNSAFE row fails on that refusal
+ * D/product.tsv (optional, same columns) adds product-only rows the prototype oracle does not take.
  * A product without the pragma (0.0.76 and older) refuses every copy with "unknown unisa pragma": all counted
  * rows fail, the negative control.
  * Last line  CHECK_OWN_FLOW_PRODUCT<TAB>passed=P/N<TAB>failed=F<TAB>known_limit=K<TAB>unsafe=U<TAB>cc_rc_nonzero=R
@@ -81,9 +86,13 @@ int main(int argc, char **argv) {
     if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && for m in mem sys text; do ln -sfn \"$(pwd)/cx/$m\" '%s'/$m; done", work, work)) return 2;
     { char *o = 0; size_t on = 0; cx_run_timeout(cmd, 10, &o, &on); if (o) mm_free(o); }
     if (cx_fmt(path, sizeof path, "%s/expected.tsv", dir) || load_table(path)) { fprintf(stderr, "check-own-flow-product: cannot read %s\n", path); return 2; }
+    /* product-only rows (plans/v0.0.78.md items 1-4): the prototype oracle does not read this table */
+    if (cx_fmt(path, sizeof path, "%s/product.tsv", dir)) return 2;
+    { size_t pn; char *ps = cx_read(path, &pn); if (ps) { mm_free(ps); if (load_table(path)) return 2; } }
     for (i = 0; i < nrow; i++) {
         size_t n, hn; char *s, *buf, *out = 0; size_t outn = 0;
-        int j, kl = !strcmp(rexp[i], "KNOWN-LIMIT"), uns = !strcmp(rexp[i], "UNSAFE"), ok = 0, refused, pragmabad, rc;
+        int j, kl = !strcmp(rexp[i], "KNOWN-LIMIT"), uns = !strcmp(rexp[i], "UNSAFE"), ok = 0, refused, pragmabad, rc, e1hit;
+        char e1fn[128];
         char head[2048];
         if (cx_fmt(path, sizeof path, "%s/%s", dir, rfile[i])) return 2;
         s = cx_read(path, &n);
@@ -132,9 +141,18 @@ int main(int argc, char **argv) {
             }
         }
         pragmabad = strstr(out, "unknown unisa pragma") != 0 || strstr(out, "unisa unsafe ") != 0 || strstr(out, "unisa safe takes") != 0;
+        /* OWN-E1 (plans/v0.0.78.md item 5): "function FN returns an owned block; declare it with #pragma unisa owns FN" */
+        e1hit = 0; e1fn[0] = 0;
+        {
+            char *m = strstr(out, " returns an owned block; declare it with #pragma unisa owns "), *b;
+            if (m) {
+                b = m; while (b > out && b[-1] != ' ') b--;
+                if (b - 9 >= out && !strncmp(b - 9, "function ", 9) && m - b < (long)sizeof e1fn) { e1hit = 1; mm_copy(e1fn, sizeof e1fn, b, (size_t)(m - b)); e1fn[m - b] = 0; }
+            }
+        }
         if (kl) {
             known++;
-            printf("KNOWN-LIMIT\t%s\t%s\trefused=%d\trc=%d\n", rfile[i], rfn[i], refused, rc);
+            printf("KNOWN-LIMIT\t%s\t%s\trefused=%d\te1=%d\trc=%d\n", rfile[i], rfn[i], refused, e1hit, rc);
             mm_free(out); continue;
         }
         counted++;
@@ -143,8 +161,10 @@ int main(int argc, char **argv) {
             ok = !pragmabad && (refused == 1 || refused == 2) && !strcmp(fn, rfn[i]) && (table_has(rfile[i], fn, "E2") || table_has(rfile[i], fn, "E2b"));
             if (ok && !table_has(rfile[i], fn, refused == 2 ? "E2b" : "E2")) { kindother++; printf("KIND\t%s\t%s\texpect=%s\tfirst=%s\n", rfile[i], rfn[i], rexp[i], refused == 2 ? "E2b" : "E2"); }
         }
+        else if (!strcmp(rexp[i], "LIMIT")) ok = !pragmabad && refused == 3 && !strcmp(fn, rfn[i]);
+        else if (!strcmp(rexp[i], "E1")) ok = !pragmabad && !refused && e1hit && !strcmp(e1fn, rfn[i]);
         else {
-            ok = !pragmabad && !refused;
+            ok = !pragmabad && !refused && !e1hit;
             if (ok && rc != 0) ccnz++;
             if (ok && uns) unsafe_n++;
         }
