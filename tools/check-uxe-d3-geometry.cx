@@ -117,6 +117,73 @@ static int rounded_mm(double x) {
     return n>x+.5?n-1:n;
 }
 
+static int check_u1(const char *mutation) {
+    char cwd[1024],url[20000],profile[128],option[160],*out=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=5000","--dump-dom",option,url,0};
+    char scenes[8][8],names[8][48],line[160];
+    int regions[8][4],n=0,scene,i,j,x,y,failed=0;
+    FILE *facts=fopen("ujs/practice/uxe/test/u1-light.tsv","r");
+    if(!facts) return 2;
+    if(!fgets(line,sizeof line,facts)) { fclose(facts); return 2; }
+    while(n<8 && fgets(line,sizeof line,facts)) {
+        if(sscanf(line,"%7s %47s %d %d %d %d",scenes[n],names[n],
+            &regions[n][0],&regions[n][1],&regions[n][2],&regions[n][3])!=6 ||
+            regions[n][0]<0 || regions[n][0]>1216 || regions[n][1]<0 || regions[n][1]>656) {
+            fclose(facts); return 2;
+        }
+        n++;
+    }
+    fclose(facts);
+    if(n!=5 || !getcwd(cwd,sizeof cwd)) return 2;
+    for(scene=3;scene<=4;scene++) {
+        int at,queued=0,seen=0,rc;
+        size_t size=0;
+        const char *p;
+        at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/%s.html?style=study&render-u1=1&%s&pixels=",
+            cwd,scene==3?"d3-bridge":"d4-skeleton",mutation);
+        for(i=0;i<n;i++) if(scenes[i][1]=='0'+scene) {
+            int *box=regions[i];
+            for(y=box[1];y<box[1]+64;y+=4) for(x=box[0];x<box[0]+64;x+=4) {
+                int w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",queued?";":"",x,y);
+                if(w<0 || w>=(int)sizeof url-at) return 2;
+                at+=w; queued++;
+            }
+        }
+        if(!queued) return 2;
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-u1-%d-%d",(int)getpid(),scene);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        out=0;
+        rc=cx_runv_timeout(av,14,&out,&size);
+        chd_wipe(profile);
+        p=out?strstr(out,"<output id=\"pixels\">"):0;
+        if(rc || !p) { free(out); return 2; }
+        p+=strlen("<output id=\"pixels\">");
+        for(i=0;i<n;i++) if(scenes[i][1]=='0'+scene) {
+            int sum=0,luma,delta;
+            for(j=0;j<256;j++) {
+                int r,g,b,used=0;
+                if(sscanf(p,"%d,%d,%d%n",&r,&g,&b,&used)!=3 || used==0 ||
+                    r<0 || r>255 || g<0 || g>255 || b<0 || b>255) { free(out); return 2; }
+                p+=used;
+                if(++seen<queued && *p++!=';') { free(out); return 2; }
+                sum+=(30*r+59*g+11*b+50)/100;
+            }
+            luma=(sum+128)/256;
+            delta=abs(luma-regions[i][2]);
+            failed+=delta>regions[i][3];
+            printf("UXE_U1 scene=d%d region=%s luma=%d reference=%d delta=%d limit=%d\n",
+                scene,names[i],luma,regions[i][2],delta,regions[i][3]);
+        }
+        rc=strncmp(p,"</output>",9)!=0;
+        free(out);
+        if(rc) return 2;
+    }
+    printf("CHECK_UXE_U1 regions=%d failed=%d\n",n,failed);
+    return failed!=0;
+}
+
 static int check_bridge_walk(const char *mutation) {
     static const int ticks[]={0,60,146,310,340};
     char cwd[1024],url[1700],profile[128],option[160],*out=0,*facts;
@@ -184,6 +251,9 @@ static int check_bridge_walk(const char *mutation) {
 }
 
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"render-u1")) return check_u1("");
+    if(argc==2 && (!strcmp(argv[1],"no-u1-shadow") || !strcmp(argv[1],"no-u1-grade") ||
+        !strcmp(argv[1],"no-u1-fog"))) return check_u1(argv[1]);
     if(argc==2 && !strcmp(argv[1],"walk")) return check_bridge_walk("");
     if(argc==2 && (!strcmp(argv[1],"frozen-path") || !strcmp(argv[1],"still-wind"))) return check_bridge_walk(argv[1]);
     char cwd[1024],url[2200],profile[128],option[160],*out=0;
@@ -472,5 +542,6 @@ int main(int argc,char **argv) {
     if(strncmp(p,"</output>",9)) return 2;
     free(out);
     printf("CHECK_UXE_D3_GEOMETRY\tn=%d failed=%d mode=%s\n",n,failed,mode);
+    if(!failed && argc==1) return check_u1("");
     return failed?1:0;
 }

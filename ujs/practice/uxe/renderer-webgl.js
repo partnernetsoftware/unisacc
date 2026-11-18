@@ -102,6 +102,15 @@ uniform vec3 uL1Col;
 uniform float uL1I;
 uniform float uFogD;
 uniform vec3 uFogC;
+uniform vec2 uFogRange;
+uniform vec3 uFogForward;
+uniform float uExposure;
+uniform float uShadowPass;
+uniform mat4 uLightVP;
+uniform sampler2D uShadowMap;
+uniform float uShadowTexel;
+uniform float uShadowBias;
+uniform float uShadowStrength;
 uniform float uInk;
 uniform sampler2D uMap;
 uniform float uHasMap;
@@ -116,9 +125,41 @@ varying vec3 vEye;
 varying float vFogDepth;
 varying vec2 vUV;
 varying vec4 vColor;
+vec3 decodeColor(vec3 c) {
+  c = max(c, 0.0);
+  return mix(c / 12.92, pow((c + .055) / 1.055, vec3(2.4)), step(vec3(.04045), c));
+}
+vec3 encodeColor(vec3 c) {
+  c = max(c, 0.0);
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0/2.4)) - .055, step(vec3(.0031308), c));
+}
+vec3 outputColor(vec3 c) {
+  c *= uExposure;
+  c = clamp((c*(2.51*c+.03))/(c*(2.43*c+.59)+.14), 0.0, 1.0);
+  return encodeColor(c);
+}
+float lightVisibility(float normalLight) {
+  if (uShadowTexel <= 0.0) return 1.0;
+  vec3 coord = (uLightVP * vec4(vP, 1.0)).xyz * .5 + .5;
+  if (any(lessThanEqual(coord, vec3(0.0))) || any(greaterThanEqual(coord, vec3(1.0)))) return 1.0;
+  float depth = coord.z - uShadowBias * (2.0 - normalLight);
+  float blocked = 0.0;
+  for(int y=-1; y<=1; y++) for(int x=-1; x<=1; x++) {
+    vec2 taps = coord.xy + vec2(float(x), float(y)) * uShadowTexel;
+    vec2 stored = texture2D(uShadowMap, taps).rg;
+    blocked += step(dot(stored, vec2(1.0, 1.0/255.0)), depth);
+  }
+  return 1.0 - uShadowStrength * blocked / 9.0;
+}
 void main() {
   if (uHasMap > 0.5 && uSurfaceMap > 2.5 && uSurfaceMap < 3.5 &&
       texture2D(uMap, vUV).a < 0.5) discard;
+  if (uShadowPass > 0.5) {
+    vec2 depth = fract(min(gl_FragCoord.z, .99998) * vec2(1.0, 255.0));
+    depth.x -= depth.y / 255.0;
+    gl_FragColor = vec4(depth, 0.0, 1.0);
+    return;
+  }
   if (uNormalPass > 0.5) {
     gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, uOutlineEligible);
     return;
@@ -142,7 +183,7 @@ void main() {
     d1 = min(floor(d1 * uToonLevels), top) / top;
   }
   float soft = mix(1.0, 0.55, clamp(uRough, 0.0, 1.0));
-  vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
+  vec3 diff = uL0Col * uL0I * d0 * soft * lightVisibility(d0) + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
   if (uHasMap > 0.5 && uSurfaceMap > 0.5) {
     // Stone follows mesh UVs; stationary foliage samples a world-space wash.
@@ -161,13 +202,17 @@ void main() {
     }
     base *= tint;
   }
-  vec3 col = base * (amb + diff) + uEmissive;
-  if (uInstColor > 0.5) col = vColor.rgb;
+  vec3 col = uExposure > 0.0 ? decodeColor(base) * (amb + diff) + decodeColor(uEmissive) :
+    base * (amb + diff) + uEmissive;
+  if (uInstColor > 0.5) col = uExposure > 0.0 ? decodeColor(vColor.rgb) : vColor.rgb;
   vec3 view = normalize(vEye - vP);
   float rim = pow(1.0 - max(dot(n, view), 0.0), 2.4);
   col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
   float fogF = 1.0 - exp(-uFogD * uFogD * vFogDepth * vFogDepth);
-  col = mix(col, uFogC, clamp(fogF, 0.0, 1.0));
+  if (uFogRange.y > uFogRange.x)
+    fogF = smoothstep(uFogRange.x, uFogRange.y, dot(vP - vEye, uFogForward));
+  col = mix(col, uExposure > 0.0 ? decodeColor(uFogC) : uFogC, clamp(fogF, 0.0, 1.0));
+  if (uExposure > 0.0) col = outputColor(col);
   float a = 1.0;
   if (uRadial > 0.5) {
     vec2 d = vUV - vec2(0.5, 0.5);
@@ -193,6 +238,33 @@ function compile(gl, type, src) {
 function norm3(v) {
   const L = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / L, v[1] / L, v[2] / L];
+}
+
+function createShadowTarget(gl, size) {
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,size,size,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  const depth=gl.createRenderbuffer(),fb=gl.createFramebuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER,depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,size,size);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,depth);
+  const complete=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.bindRenderbuffer(gl.RENDERBUFFER,null);
+  gl.bindTexture(gl.TEXTURE_2D,null);
+  if(!complete) {
+    gl.deleteTexture(tex);
+    gl.deleteFramebuffer(fb);
+    gl.deleteRenderbuffer(depth);
+    throw new Error("shadow framebuffer incomplete");
+  }
+  return {tex,fb,depth,size};
 }
 
 function createOutline(gl, ext) {
@@ -347,6 +419,11 @@ export function createWebGLRenderer(canvas, opts) {
   const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial"), uInstColor = u("uInstColor");
   const uSurfaceMap = u("uSurfaceMap");
   const uOrtho = u("uOrtho"), uScreen = u("uScreen");
+  const uFogRange=u("uFogRange"),uFogForward=u("uFogForward"),uExposure=u("uExposure");
+  const uShadowPass=u("uShadowPass"),uLightVP=u("uLightVP"),uShadowMap=u("uShadowMap");
+  const uShadowTexel=u("uShadowTexel"),uShadowBias=u("uShadowBias"),uShadowStrength=u("uShadowStrength");
+  const lightProjection=mat4(),lightView=mat4(),lightVP=mat4();
+  let shadow;
 
 
 
@@ -501,11 +578,57 @@ export function createWebGLRenderer(canvas, opts) {
     cloud.markClean();
   }
 
+  function drawShadow(lighting,light,opaque,wave,eye,w,h) {
+    const size=Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE),lighting.size ?? 1024);
+    if(shadow?.size!==size) {
+      if(shadow) {
+        gl.deleteTexture(shadow.tex);
+        gl.deleteFramebuffer(shadow.fb);
+        gl.deleteRenderbuffer(shadow.depth);
+      }
+      shadow=createShadowTarget(gl,size);
+    }
+    const [x,y,z]=lighting.center ?? [0,0,0],span=lighting.extent ?? 28;
+    const axis=norm3(light.dir);
+    if(Math.abs(axis[1])>.999) axis[0]=.02;
+    const far=span*4;
+    lightProjection[0]=lightProjection[5]=1/span;
+    lightProjection[10]=-2/(far-.1);
+    lightProjection[14]=-(far+.1)/(far-.1);
+    lightProjection[15]=1;
+    lookAt(x+axis[0]*span*2,y+axis[1]*span*2,z+axis[2]*span*2,x,y,z,lightView);
+    mul(lightProjection,lightView,lightVP);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D,null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,shadow.fb);
+    gl.viewport(0,0,size,size);
+    gl.clearColor(1,1,1,1);
+    gl.depthMask(true);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    gl.uniformMatrix4fv(uVP,false,lightVP);
+    gl.uniform3fv(uEye,eye);
+    gl.uniform1f(uShadowPass,1);
+    for(const cloud of opaque) if(cloud.castShadow ?? cloud.meshId!==3) drawCloud(cloud,wave);
+    gl.uniform1f(uShadowPass,0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    gl.viewport(0,0,w,h);
+    gl.uniformMatrix4fv(uVP,false,VP);
+    gl.uniformMatrix4fv(uLightVP,false,lightVP);
+    gl.uniform1f(uShadowTexel,1/size);
+    gl.uniform1f(uShadowBias,lighting.bias ?? .0015);
+    gl.uniform1f(uShadowStrength,lighting.strength ?? .82);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D,shadow.tex);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
 
   return {
     backend: "webgl",
     resize,
     render(scene, camera, textures) {
+      gl.activeTexture(gl.TEXTURE0);
       if (textures && textures.length) {
         for (let i = 0; i < textures.length; i++) {
           const t = textures[i];
@@ -570,6 +693,11 @@ export function createWebGLRenderer(canvas, opts) {
       gl.uniform1f(uL1I, L1.intensity);
       gl.uniform1f(uFogD, fog.density);
       gl.uniform3fv(uFogC, fog.color);
+      gl.uniform2f(uFogRange,fog.start ?? 0,fog.end ?? 0);
+      gl.uniform3fv(uFogForward,norm3([tx-ex,ty-ey,tz-ez]));
+      gl.uniform1f(uExposure,scene.output?.exposure ?? 0);
+      gl.uniform1i(uShadowMap,1);
+      gl.uniform1f(uShadowTexel,0);
 
       const wave = scene.wave || 0;
       const opaque = [];
@@ -585,6 +713,7 @@ export function createWebGLRenderer(canvas, opts) {
         else opaque.push(cloud);
       }
       ss.sort((a, b) => (a.layer | 0) - (b.layer | 0));
+      if(scene.shadows && opaque.length) drawShadow(scene.shadows,L0,opaque,wave,camera.eye,w,h);
       if (scene.backdrop?.count > 0 && scene.backdrop.screenSpace) {
         drawCloud(scene.backdrop, wave);
         gl.enable(gl.DEPTH_TEST);
