@@ -1,6 +1,6 @@
 # unisacc 0.0.75 发布说明
 
-状态:同候选原生 CI run <CI_RUN_ID>(待回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,严格证据只覆盖下列批次,不得称全批资格。
+状态:同候选原生 CI run 44305141825(待回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -10,7 +10,7 @@
 | 冻结提交(构造输入、发布标签目标) | fe6dfb32cfea0dcea33df4974dbf861c425230f6(T 合入 origin/main 的合并提交;相对 T 产品输入零改动,候选键 2427c25c 相同) |
 | 发布 APE SHA256(unisacc.com) | fc57bf5b5545b9b40c58734369a0b9c31ceec071040dde572ae0093279d147b6(7241315 字节,--version 打印 unisacc 0.0.75) |
 | 源快照 SID | f3c876326104ad6c27310f34ccd947b3f8bca9f6c94422c4cc08c7b0d3f815f4(VERIFIED) |
-| CI run | <CI_RUN_ID> |
+| CI run | 44305141825 |
 
 ## 产品改动
 
