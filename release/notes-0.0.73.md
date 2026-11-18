@@ -1,6 +1,6 @@
 # unisacc 0.0.73 发布说明
 
-状态:同候选原生 CI run 44248703181 attempt 1(输入 commit=X e289dd473d),六目标全部作业 success(lnx x86_64、lnx arm64、osx x86_64、osx arm64、win x86_64、win arm64),CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0。尚未公开(Y1 记录,公开与读回在 Y2 补记)。 整体裁决 NOT_QUALIFIED:全套 s9 本版未全跑,c-negative 仍有 9 项 FAIL,产品域仍有 FAIL 与 UNKNOWN,不得称全批资格。
+状态:同候选原生 CI run 44248703181 attempt 1(输入 commit=X e289dd473d),六目标全部作业 success(lnx x86_64、lnx arm64、osx x86_64、osx arm64、win x86_64、win arm64),CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0。已公开发布并置 Latest(2026-11-18T06:09:29Z);公开读回(c47-1-readback:元数据、标签、六件下载与 sha、版本、smoke 5 项、COMM、布局与 SHA256SUMS)通过,回执 release/evidence/0.0.73/public-readback.txt。冻结到公开实测 42 分 13 秒(0.0.72 为 43 分 47 秒)。 整体裁决 NOT_QUALIFIED:全套 s9 本版未全跑,c-negative 仍有 9 项 FAIL,产品域仍有 FAIL 与 UNKNOWN,不得称全批资格。
 
 ## 真实身份
 
