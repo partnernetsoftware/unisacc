@@ -66,7 +66,7 @@ function brackets(context,x,y) {
 export function combatModel(context,query) {
   const enemies=course.map(slot=>({...slot,hp:4,respawn:0}));
   const bursts=[], rounds=[];
-  let ammo=96, missiles=3, cannonReady=0, missileReady=0, lastFire=0;
+  let ammo=96, missiles=3, cannonReady=0, missileReady=0, lastFire=0, locked=false;
   function damage(enemy,power,tick,pose) {
     if(enemy.hp<=0) return;
     enemy.hp-=power;
@@ -114,6 +114,7 @@ export function combatModel(context,query) {
     }
     for(const enemy of visible) if(enemy.hp>0) enemySprite(context,enemy,enemy.pose);
     if(acquired && selected.hp>0 && !query.has("no-lock")) brackets(context,selected.pose.x,selected.pose.y);
+    locked=Boolean(acquired && selected.hp>0);
     for(const shot of rounds) if(shot.target.pose) {
       const t=(tick-shot.start)/13;
       const x=213+(shot.target.pose.x-213)*t,y=166+(shot.target.pose.y-166)*t;
@@ -145,6 +146,7 @@ export function combatModel(context,query) {
     point(context,"#23344d",8,224,65,11);
     label(context,"AMMO "+String(ammo).padStart(2,"0"),11,227,"#e8eadb");
     label(context,"MSL "+missiles,50,227,"#e8eadb");
+    return {ammo,missiles,locked};
   }
   return {update,hud};
 }

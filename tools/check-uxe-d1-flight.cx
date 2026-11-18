@@ -1,5 +1,8 @@
 #pragma unisa use chrome_dom
 #pragma unisa use text.fmt
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
 
 typedef struct { int r,g,b; } Color;
 typedef struct { int row,h,lo,hi,paint; } Span;
@@ -334,15 +337,14 @@ static int csv(const char **p) {
     return n;
 }
 
-static int check_world(const char *mutation,int published) {
+static int check_world(const char *mutation) {
     const int islands[3][3]={{-60,-102,24},{61,-134,28},{-5,-192,31}};
     int px[2][3],py[2][3],seed=7,travel=-12,speed=12,i,j,k;
     int speeds[2]={60,0},world_fail=0,hud_fail=0,at;
     char cwd[1024],url[2200],*out=0;
     const char *p;
     if(!getcwd(cwd,sizeof cwd)) return input_error("world-cwd",0);
-    at=tx_snprintf(url,sizeof url,"file://%s/%s?%s&world=",cwd,published?
-        "docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-flight.html",mutation);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-flight.html?%s&world=",cwd,mutation);
     if(at<0 || at>=(int)sizeof url) return input_error("world-url",0);
     for(j=0;j<2;j++) {
         seed=7;
@@ -453,14 +455,15 @@ static int take_channel(const char **p,int end) {
     return value;
 }
 
-static int check_terrain(const char *mutation) {
+static int check_terrain(const char *mutation,int published) {
     static const int palette[][3]={{19,67,128},{30,111,165},{45,158,190},{231,204,134},
         {133,183,71},{89,153,59},{60,115,61},{119,111,121}};
     char cwd[1024],url[2300],*out=0;
     const char *p;
     int x,y,at,n=0,i,j,failed=0,green=0,land=0,sea=0,foam=0,counts[8]={0},want[32];
     if(!getcwd(cwd,sizeof cwd)) return input_error("terrain-cwd",0);
-    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&terrain=",cwd,mutation);
+    at=tx_snprintf(url,sizeof url,"file://%s/%s?%s&terrain=",cwd,published?
+        "docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-pixel-a.html",mutation);
     if(at<0 || at>=(int)sizeof url) return input_error("terrain-url",0);
     for(y=1;y<256;y+=3) for(x=1;x<256;x+=3) {
         int kind=terrain_band(x,y,7),size;
@@ -507,7 +510,7 @@ static void enemy_point(int tick,int index,int *px,int *py) {
     *py=(int)(113.5+151*(38-e[2])/forward);
 }
 
-static int check_combat(const char *mutation) {
+static int check_combat(const char *mutation,int published) {
     static const int colors[][3]={{255,116,106},{255,228,107},{255,235,134},{247,121,61},
         {35,52,77},{232,234,219}};
     char cwd[1024],url[2100],*out=0;
@@ -537,7 +540,8 @@ static int check_combat(const char *mutation) {
     locations[1][4][1]-=8;
     locations[0][5][0]=locations[1][5][0]=35;
     locations[0][5][1]=locations[1][5][1]=227;
-    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&combat=",cwd,mutation);
+    at=tx_snprintf(url,sizeof url,"file://%s/%s?%s&combat=",cwd,published?
+        "docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-pixel-a.html",mutation);
     if(at<0 || at>=(int)sizeof url) return input_error("combat-url",0);
     for(frame=0;frame<2;frame++) {
         for(i=0;i<6;i++) {
@@ -574,23 +578,181 @@ static int check_combat(const char *mutation) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+typedef struct {
+    sy_child_t child;
+    int id,at,len;
+    long deadline;
+    char buffer[4096],reply[8192],session[100];
+} ChromeInput;
+typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
+
+static int cdp_message(ChromeInput *c,long deadline) {
+    int n=0;
+    while(n<(int)sizeof c->reply-1) {
+        if(c->at>=c->len) {
+            long left=deadline-sy_now_ms();
+            if(left<=0 || sy_readable(c->child.out_fd,left)<=0) return 0;
+            c->len=(int)sy_read(c->child.out_fd,c->buffer,sizeof c->buffer);
+            c->at=0;
+            if(c->len<=0) return 0;
+        }
+        c->reply[n]=c->buffer[c->at++];
+        if(!c->reply[n++]) return 1;
+    }
+    return 0;
+}
+
+static int cdp_call(ChromeInput *c,const char *method,const char *params) {
+    char payload[2100],session[130];
+    long deadline=sy_now_ms()+3000;
+    int id=++c->id,n;
+    if(deadline>c->deadline) deadline=c->deadline;
+    if(deadline<=sy_now_ms()) return 0;
+    session[0]=0;
+    if(c->session[0]) tx_snprintf(session,sizeof session,",\"sessionId\":\"%s\"",c->session);
+    n=tx_snprintf(payload,sizeof payload,"{\"id\":%d,\"method\":\"%s\",\"params\":%s%s}",id,method,params,session);
+    if(n<0 || n>=(int)sizeof payload || sy_write_all(c->child.in_fd,payload,n+1)) return 0;
+    while(cdp_message(c,deadline)) {
+        char *p=strstr(c->reply,"\"id\":");
+        if(p && atoi(p+5)==id) return strstr(c->reply,"\"error\":")==0;
+    }
+    return 0;
+}
+
+static int cdp_string(ChromeInput *c,const char *mark,char *out,int cap) {
+    const char *p=strstr(c->reply,mark);
+    int n=0;
+    if(!p) return 0;
+    p+=strlen(mark);
+    while(p[n] && p[n]!='"' && n+1<cap) { out[n]=p[n]; n++; }
+    out[n]=0;
+    return p[n]=='"' && n>0;
+}
+
+static int keyboard(ChromeInput *c,const char *key,const char *code,int vk,int down) {
+    char args[300];
+    tx_snprintf(args,sizeof args,"{\"type\":\"%s\",\"key\":\"%s\",\"code\":\"%s\",\"windowsVirtualKeyCode\":%d}",
+        down?"rawKeyDown":"keyUp",key,code,vk);
+    return cdp_call(c,"Input.dispatchKeyEvent",args);
+}
+
+static int read_flight(ChromeInput *c,LiveFlight *state) {
+    char text[250];
+    if(!cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.title==='D1_FLY_NEXT_READY'?document.querySelector('output').textContent:''\"}") ||
+        !cdp_string(c,"\"value\":\"",text,sizeof text)) return 0;
+    return sscanf(text,"%d,%d,%d,%d,%d,%d,%d",&state->heading,&state->ammo,&state->missiles,
+        &state->lock,&state->frames,&state->elapsed,&state->gap)==7;
+}
+
+static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int field,LiveFlight *state) {
+    int old=field==0?state->heading:field==1?state->ammo:state->missiles;
+    int changed=0;
+    long end=sy_now_ms()+700;
+    if(!keyboard(c,key,code,vk,1)) return -1;
+    while(!changed && sy_now_ms()<end) {
+        if(read_flight(c,state)) changed=(field==0?state->heading:field==1?state->ammo:state->missiles)!=old;
+        if(!changed) sy_sleep_ms(12);
+    }
+    if(!keyboard(c,key,code,vk,0)) return -1;
+    return changed;
+}
+
+static int exercise_keyboard(ChromeInput *c,const char *url) {
+    LiveFlight state;
+    char target[100],params[1300];
+    int original,turned,ammo,missiles,change,i,failed=0;
+    long end;
+    if(!cdp_call(c,"Target.createTarget","{\"url\":\"about:blank\"}") ||
+        !cdp_string(c,"\"targetId\":\"",target,sizeof target)) return input_error("cdp-target",0);
+    tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
+    if(!cdp_call(c,"Target.attachToTarget",params) ||
+        !cdp_string(c,"\"sessionId\":\"",c->session,sizeof c->session)) return input_error("cdp-attach",0);
+    tx_snprintf(params,sizeof params,"{\"url\":\"%s\"}",url);
+    if(!cdp_call(c,"Page.navigate",params)) return input_error("cdp-navigate",0);
+    end=sy_now_ms()+6000;
+    for(i=0;!read_flight(c,&state);i++) {
+        if(sy_now_ms()>=end || i>=100) return input_error("cdp-ready",0);
+        sy_sleep_ms(35);
+    }
+    original=state.heading; ammo=state.ammo; missiles=state.missiles;
+    change=key_change(c,"d","KeyD",68,0,&state);
+    if(change<0) return input_error("cdp-turn",0);
+    turned=state.heading;
+    failed+=!change || turned==original;
+    change=key_change(c," ","Space",32,1,&state);
+    if(change<0) return input_error("cdp-gun",0);
+    failed+=!change || state.ammo!=ammo-1;
+    printf("D1_KEYBOARD turn=%d->%d ammo=%d->%d lock=%d\n",original,turned,ammo,state.ammo,state.lock);
+    for(i=0;!state.lock && state.heading>0 && state.heading<33 && i<7;i++) {
+        change=key_change(c,"a","KeyA",65,0,&state);
+        if(change<=0) break;
+    }
+    if(!state.lock) failed++;
+    else {
+        change=key_change(c,"m","KeyM",77,2,&state);
+        if(change<0) return input_error("cdp-missile",0);
+        failed+=!change || state.missiles!=missiles-1;
+    }
+    printf("D1_KEYBOARD missile=%d->%d\n",missiles,state.missiles);
+    sy_sleep_ms(1150);
+    if(!read_flight(c,&state)) return input_error("cdp-frame-stats",0);
+    failed+=state.frames<13 || state.elapsed<600 || state.gap<33000;
+    printf("D1_PLAY\tframes=%d elapsed_ms=%d fps_milli=%d minimum_frame_us=%d lock_fps=30 failed=%d\n",
+        state.frames,state.elapsed,state.elapsed?1000000*(state.frames-2)/state.elapsed:0,state.gap,failed);
+    return !!failed;
+}
+
+static int check_pages_keyboard(int mutate) {
+    ChromeInput c={0};
+    sy_spawn_t launch;
+    sy_exit_t ended;
+    char cwd[1024],url[1260],profile[128],option[160];
+    char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","chrome-pipe",
+        "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
+        "--remote-debugging-pipe","--window-size=1280,807",option,"about:blank",0};
+    int rc,n;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
+    n=tx_snprintf(url,sizeof url,"file://%s/docs/uxe/fly-next/index.html?input-test=1%s",cwd,mutate?"&wrong-key":"");
+    if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    sy_spawn_init(&launch);
+    launch.argv=argv; launch.in_fd=SY_STDIO_PIPE; launch.out_fd=SY_STDIO_PIPE;
+    launch.err_fd=SY_STDIO_NULL; launch.pgroup=-1; launch.deadline_ms=23000;
+    rc=sy_proc_spawn(&launch,&c.child);
+    if(rc) return input_error("cdp-spawn",0);
+    c.deadline=sy_now_ms()+22500;
+    rc=exercise_keyboard(&c,url);
+    sy_close(c.child.in_fd);
+    sy_close(c.child.out_fd);
+    sy_proc_kill(&c.child,9);
+    sy_proc_wait(&c.child,&ended);
+    chd_wipe(profile);
+    return rc;
+}
+
 int main(int argc,char **argv) {
     int rc;
     if(argc==1) {
         rc=check_airframe("");
-        return rc?rc:check_world("",0);
+        return rc?rc:check_world("");
     }
-    if(argc==2 && !strcmp(argv[1],"pages")) return check_world("",1);
+    if(argc==2 && !strcmp(argv[1],"pages")) {
+        rc=check_terrain("",1);
+        return rc?rc:check_combat("",1);
+    }
     if(argc==2 && !strcmp(argv[1],"pages-auto")) return check_pages_auto(0);
     if(argc==2 && !strcmp(argv[1],"pages-live")) return check_pages_auto(1);
-    if(argc==2 && !strcmp(argv[1],"terrain")) return check_terrain("");
+    if(argc==2 && !strcmp(argv[1],"pages-input")) return check_pages_keyboard(0);
+    if(argc==2 && !strcmp(argv[1],"pages-wrong-key")) return check_pages_keyboard(1);
+    if(argc==2 && !strcmp(argv[1],"terrain")) return check_terrain("",0);
     if(argc==2 && (!strcmp(argv[1],"wrong-seed") || !strcmp(argv[1],"wrong-bands") || !strcmp(argv[1],"muted-palette")))
-        return check_terrain(argv[1]);
-    if(argc==2 && !strcmp(argv[1],"combat")) return check_combat("");
-    if(argc==2 && (!strcmp(argv[1],"freeze-targets") || !strcmp(argv[1],"no-lock"))) return check_combat(argv[1]);
-    if(argc==2 && !strcmp(argv[1],"world")) return check_world("",0);
+        return check_terrain(argv[1],0);
+    if(argc==2 && !strcmp(argv[1],"combat")) return check_combat("",0);
+    if(argc==2 && (!strcmp(argv[1],"freeze-targets") || !strcmp(argv[1],"no-lock"))) return check_combat(argv[1],0);
+    if(argc==2 && !strcmp(argv[1],"world")) return check_world("");
     if(argc==2 && (!strcmp(argv[1],"frozen-position") || !strcmp(argv[1],"frozen-hud")))
-        return check_world(argv[1],0);
+        return check_world(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"reverse") || !strcmp(argv[1],"offset") ||
         !strcmp(argv[1],"short-wings") || !strcmp(argv[1],"no-tails") || !strcmp(argv[1],"frozen-pitch")))
         return check_airframe(argv[1]);
