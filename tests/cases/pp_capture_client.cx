@@ -1,0 +1,44 @@
+#pragma unisa module pp_capture_client
+#pragma unisa use mem.bytes
+typedef struct { int rc; char *packet, *out, *err; size_t outn, errn; } pp_capture;
+static char pp_helper[4400];
+/* Direct callers may omit the prepared image. The compile happens once in
+   their fresh fixture directory and never substitutes for executing a case. */
+int pp_capture_init(const char *root, const char *dir, const char *prepared, const char *product) {
+    if (prepared) return prepared[0] != '/' || cx_fmt(pp_helper, sizeof pp_helper, "%s", prepared);
+    char source[4400];
+    if (cx_fmt(source,sizeof source,"%s/tests/cases/pp-capture.cx",root) ||
+        cx_fmt(pp_helper,sizeof pp_helper,"%s/pp-capture",dir)) return 1;
+    char *v[]={"sh",(char *)product,source,"-o",pp_helper,0}, *msg=0;
+    size_t len=0; int rc=cx_runv_timeout(v,55,&msg,&len);
+    if(rc && len)fwrite(msg,1,len,stderr);
+    free(msg); return rc;
+}
+void pp_capture_free(pp_capture *r) { free(r->packet); r->packet=0; }
+int pp_capture_run(char **args, const char *root, int seconds, pp_capture *r, char *why, size_t cap) {
+    char *v[52], sec[12], *packet=0;
+    size_t len=0, i=0;
+    if(cx_fmt(sec,sizeof sec,"%d",seconds))return -1;
+    v[0]=pp_helper;v[1]=(char *)root;v[2]=sec;
+    while(args[i] && i<48){v[3+i]=args[i];i++;}
+    if(args[i])return -1;
+    v[3+i]=0;
+    int rc=cx_runv_timeout(v,seconds,&packet,&len);
+    r->packet=packet;
+    char *lf=packet?memchr(packet,'\n',len):0;
+    int tr, child; unsigned long on,en,wn;
+    if(rc || !lf || lf-packet>120)goto invalid;
+    *lf=0;
+    if(sscanf(packet,"PPC1 %d %d %lu %lu %lu",&tr,&child,&on,&en,&wn)!=5)goto invalid;
+    char *p=lf+1;size_t left=len-(size_t)(p-packet);
+    if(on>=left || p[on])goto invalid;
+    r->out=p;r->outn=on;p+=on+1;left-=on+1;
+    if(en>=left || p[en])goto invalid;
+    r->err=p;r->errn=en;p+=en+1;left-=en+1;
+    if(wn>=cap || wn>=left || wn+1!=left || p[wn])goto invalid;
+    if (mm_copy(why,cap,p,wn+1)) goto invalid;
+    r->rc=child;return tr;
+invalid:
+    cx_fmt(why,cap,"pp-capture transport or frame failed rc=%d",rc);
+    r->out="";r->err="";r->outn=0;r->errn=0;return -1;
+}
