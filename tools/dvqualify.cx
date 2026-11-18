@@ -383,9 +383,7 @@ static int prepare_kit(void) {
     return 0;
 }
 
-static int load_receipts(const char *path) {
-    FILE *file = fopen(path, "r");
-    if (!file) return 1;
+static int load_receipts(FILE *file) {
     char line[2048], id[96], domain[48], status[16], candidate[72];
     static int eligible[MAXB];
     while (fgets(line, sizeof line, file)) {
@@ -415,9 +413,7 @@ static int load_receipts(const char *path) {
         }
     }
     for (int i=0;i<nb;i++) if (!resumed[i]) bs[i].status[0]=0;
-    int error = ferror(file);
-    fclose(file);
-    return error;
+    return ferror(file);
 }
 
 static void write_batch(FILE *f, const Batch *b) {
@@ -478,19 +474,42 @@ int main(int argc, char **argv) {
     sockp = sy_env("DEVSVC_SOCK"); cx_fmt(jobbuf, sizeof jobbuf, "qualify-%ld-%d", t0, sy_pid()); job_id = jobbuf;
     { sy_stat_t st; if (sy_stat(ape, &st) || st.kind != 'f') return die("candidate is not a regular file: ", ape); }
     { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(ape, &b, &n, 256L << 20) || !b || sy_sha256_hex(b, (long)n, sha)) return die("cannot hash ", ape); free(b); }
-    if (resume && load_receipts(resume)) return die("cannot read evidence ", resume);
     { char *v[] = {"sh", ape, "--version", 0}; char o[256]; if (run(v, 0, 30, o, sizeof o)) return die("candidate --version failed: ", ape);
       long k = 0; while (o[k] && o[k] != '\n' && k < (long)sizeof version - 1) { version[k] = o[k]; k++; } version[k] = 0; if (!k) return die("candidate --version printed nothing", 0); }
     { char *v[] = {"git", "-C", root, "rev-parse", "HEAD", 0}; char o[64]; if (run(v, 0, 10, o, sizeof o)) return die("git rev-parse HEAD", 0); cx_fmt(head, sizeof head, "%.40s", o); }
     fprintf(stderr, "QUALIFY_PRECHECK\tsha256=%s\tversion=%s\tsource=%s\tbatches=%d\n", sha, version, head, nb);
+    /* Open without truncation. Alias paths contend on the same inode;
+       every read, truncate and append below uses this one descriptor. */
+    FILE *f=stdout;
+    int evidence_fd=-1;
+    if(outp){
+        int flags=resume ? O_RDWR|O_APPEND : O_WRONLY|O_CREAT;
+        evidence_fd=sy_open(outp,flags|O_CLOEXEC|O_NONBLOCK,0666);
+        if(evidence_fd<0)return die(resume?"cannot read evidence ":"cannot write evidence ",outp);
+        sy_stat_t evidence_stat;
+        if(sy_fstat(evidence_fd,&evidence_stat) || evidence_stat.kind!='f'){
+            sy_close(evidence_fd);return die("expected regular evidence file ",outp);
+        }
+        int locked=sy_flock(evidence_fd,2|4);
+        if(locked){
+            sy_close(evidence_fd);
+            return die(locked==-EWOULDBLOCK?"evidence-writer-busy ":"cannot lock evidence ",outp);
+        }
+        f=fdopen(evidence_fd,resume?"a+":"w");
+        if(!f){sy_close(evidence_fd);return die("cannot open evidence stream ",outp);}
+        if(resume && (fseek(f,0,SEEK_SET) || load_receipts(f) || fseek(f,0,SEEK_END))){
+            fclose(f);return die("cannot read evidence ",outp);
+        }
+    }
     /* (2) layout root */
     long tl = sy_now_ms();
-    if (build_layout()) return 2;
+    if (build_layout()){if(outp)fclose(f);return 2;}
     long layout_ms = sy_now_ms() - tl;
     emit("layout", layout_ms, 0, "-");
     fprintf(stderr, "QUALIFY_LAYOUT\t%s\tms=%ld\n", lay, layout_ms);
-    FILE *f = outp ? fopen(outp, resume ? "a" : "w") : stdout;
-    if (!f) return die("cannot write evidence ", outp);
+    if(outp && !resume && sy_truncate(evidence_fd,0)){
+        fclose(f);return die("cannot truncate evidence ",outp);
+    }
     if (resume) fputc('\n', f);
     else fprintf(f, "# devsvc qualify: strict evidence bound to candidate APE bytes.\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n");
     fprintf(f, "# source=%s layout=%s set=%s seed=%ld jobs=%d window_s=55 outer_s=60 ape_sha256=%s\n",head,lay,ids?"ids":set,seed,jobs,sha);

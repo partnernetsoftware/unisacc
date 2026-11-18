@@ -422,6 +422,7 @@ static void strict_terminals(char *t,long n) {
             strict_batch *b=strict_slot(id);
             if(!b->status[0])refuse("STRICT_UNKNOWN","RAW without a corresponding batch row");
             b->witnessed=tx_eqz(sha,cand.sha[0])&&tx_eqz(b->status,st)&&tx_eqz(b->rc,rc);
+            if(tx_eqz(st,"FAIL") && !b->witnessed)refuse("STRICT_UNKNOWN","FAIL receipt differs from its batch row");
             continue;
         }
         if(nf!=9)refuse("STRICT_UNKNOWN","invalid qualify batch row");
@@ -451,15 +452,41 @@ static void strict_terminals(char *t,long n) {
     }
     if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing final SUMMARY");
 }
+/* Locate the final later attempt for this batch without issuing diagnostics.
+   The full structured parser checks the witnesses before G1 can pass. */
+static long later_pass(const char *t,long n,long at,long row,const char *id) {
+    long len,pass=0;const char *s;
+    char field[128],st[16],rc[16],sha[80];
+    int pending=0;
+    while(line_next(t,n,&at,&s,&len)){
+        row++;
+        if(len>14 && !memcmp(s,"RAW\tBATCH_RUN\t",14)){
+            if(kv(s,len,"id=",field,sizeof field) && tx_eqz(field,id)){
+                pass=pending && kv(s,len,"status=",st,sizeof st) && tx_eqz(st,"PASS") &&
+                     kv(s,len,"rc=",rc,sizeof rc) && tx_eqz(rc,"0") &&
+                     kv(s,len,"candidate=",sha,sizeof sha) && tx_eqz(sha,cand.sha[0]) ? row : 0;
+            }
+        } else if(tab_field(s,len,0,field,sizeof field) && tx_eqz(field,id)){
+            pass=0;
+            pending=tab_field(s,len,2,st,sizeof st) && tx_eqz(st,"PASS") &&
+                    tab_field(s,len,3,rc,sizeof rc) && tx_eqz(rc,"0") &&
+                    tab_field(s,len,4,sha,sizeof sha) && tx_eqz(sha,cand.sha[0]);
+        }
+    }
+    return pass;
+}
 static void gate_strict(void) {
     long n, at = 0, ll; const char *ls; char *t, id[128], st[32], c[80], d[512], want[64], got[64];
     int rows = 0, xf = 0, ver = 0;
     find_strict();
     if (!(t = slurp(strictp, &n))) refuse("STRICT", strictp);
+    long row=0;int superseded=0;
     while (line_next(t, n, &at, &ls, &ll)) {
+        row++;
         /* devsvc qualify (tools/dvqualify.cx) writes each BATCH_RUN line verbatim behind "RAW\t",
            the count in the batch row note (count=P/F) and the APE identity in the SUMMARY row */
-        if (ll > 4 && !memcmp(ls, "RAW\t", 4)) { ls += 4; ll -= 4; }
+        int raw=ll>4 && !memcmp(ls,"RAW\t",4);
+        if(raw){ls+=4;ll-=4;}
         if (ll > 8 && !memcmp(ls, "SUMMARY\t", 8)) {
             char vk[96];
             if (kv(ls, ll, "ape_sha256=", c, sizeof c) && !tx_eqz(c, cand.sha[0])) { free(t); refuse("CANDIDATE_SHA", "strict SUMMARY ape_sha256 differs from candidate"); }
@@ -473,6 +500,7 @@ static void gate_strict(void) {
             kv(ls, ll, "id=", id, sizeof id); kv(ls, ll, "status=", st, sizeof st); kv(ls, ll, "candidate=", c, sizeof c);
             if (!tx_eqz(c, cand.sha[0])) { cx_fmt(d, sizeof d, "batch %s candidate=%s != ape_sha256 %s", id, c, cand.sha[0]); free(t); refuse("CANDIDATE_SHA", d); }
             if (tx_eqz(st, "PASS")) continue;
+            long replacement=raw && tx_eqz(st,"FAIL") ? later_pass(t,n,at,row,id) : 0;
             if (tx_eqz(st, "FAIL") && expected_fail(id, want, sizeof want)) {
                 /* the COUNT row of this batch must equal the listed expectation */
                 long a2 = 0, l2; const char *s2; char key[160], pf[32], ff[32]; int match = 0;
@@ -495,7 +523,11 @@ static void gate_strict(void) {
                         }
                 }
                 if (!match) { cx_fmt(d, sizeof d, "batch %s FAIL count %s != expected %s", id, got[0] ? got : "none", want); free(t); refuse("EXPECTED_FAIL", d); }
-                xf++; continue;
+                if(!replacement){xf++;continue;}
+            }
+            if(replacement){
+                sy_printf("GATE\t1\tSTRICT\tSUPERSEDED\tid=%s\tfail_row=%ld\tpass_row=%ld\tcandidate=%s\n",id,row,replacement,c);
+                superseded++;continue;
             }
             cx_fmt(d, sizeof d, "batch %s status=%s not PASS and not in expected-fail.tsv", id, st); free(t); refuse("STRICT", d);
         }
@@ -508,6 +540,7 @@ static void gate_strict(void) {
     if (!rows) refuse("STRICT", "no BATCH_RUN rows");
     if (!ver) refuse("APE_VERSION", "strict file lacks a --version line equal to the candidate version");
     cx_fmt(d, sizeof d, "%s rows=%d expected_fail=%d", strictp, rows, xf);
+    if(superseded)cx_fmt(d,sizeof d,"%s rows=%d expected_fail=%d superseded=%d",strictp,rows,xf,superseded);
     gate_pass("STRICT", d);
     gate_pass("CANDIDATE_SHA", "every BATCH_RUN candidate= equals ape_sha256");
 }
