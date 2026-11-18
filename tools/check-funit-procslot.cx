@@ -13,6 +13,12 @@
  *   (3) merge-run     ld s.o a.o (s.o: hand entry with .comm slots), run with "z": a.o sees argc 2, argv[1] "z", rc 21
  *   (4) negctl        a.o copy with the argc name renamed (_unisa_proc_argX): the two cells no longer merge;
  *                     the run must NOT give rc 21 (the check reports how it differs); a silent 21 fails the check
+ *   (5) corpus-slot   every examples/apps/*.c (17 real sources, at least 16 must compile) built -c -funit: in
+ *                     .rela.text and .rela.data, a relocation whose symbol lies in .bss with an addend inside
+ *                     [bss_size-128, bss_size-100] (the argc/argv cell window, bss_size = datalen-nzend) is an
+ *                     anonymous process-slot reference the net did not recognise (for example an addend that is
+ *                     not cell-4); each one fails with object, section, offset and addend.  The corpus must also
+ *                     carry at least one named _unisa_proc_* relocation, so an empty scan cannot pass.
  * Exit 0 all hold, 1 a case fails (named), 2 usage or I/O.
  */
 #pragma unisa use sys.proc
@@ -120,6 +126,74 @@ static void negctl(void) {
     else printf("PASS\tnegctl\trenamed argc slot detected: linkrc=%d runrc=%d != 21\n", lrc, rc);
 }
 
+/* Section header field of section I. */
+static long sh(const unsigned char *b, long shoff, long i, int off, int n) { return (long)rd(b, shoff + i * 64 + off, n); }
+
+/* Scan one object for anonymous slot relocations; adds named _unisa_proc_* relocations to *named.
+   Returns the anonymous count, -1 when the object is malformed. */
+static int slot_scan(const char *label, const unsigned char *b, size_t n, long *named) {
+    long shoff, shnum, shstr, i, bss = -1, bsssz = 0; int anon = 0;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    shoff = (long)rd(b, 0x28, 8); shnum = (long)rd(b, 0x3c, 2); shstr = (long)rd(b, 0x3e, 2);
+    if (rd(b, 0x3a, 2) != 64 || shoff + shnum * 64 > (long)n || shstr >= shnum) return -1;
+    for (i = 0; i < shnum; i++) {
+        long nm = sh(b, shoff, shstr, 0x18, 8) + sh(b, shoff, i, 0, 4);
+        if (nm + 5 <= (long)n && !memcmp(b + nm, ".bss", 5)) { bss = i; bsssz = sh(b, shoff, i, 0x20, 8); }
+    }
+    if (bss < 0) return 0;
+    for (i = 0; i < shnum; i++) {
+        long nm = sh(b, shoff, shstr, 0x18, 8) + sh(b, shoff, i, 0, 4), off, sz, link, symoff, stroff, j;
+        const char *sec;
+        if (sh(b, shoff, i, 4, 4) != 4) continue;
+        if (nm + 11 <= (long)n && !memcmp(b + nm, ".rela.text", 11)) sec = ".rela.text";
+        else if (nm + 11 <= (long)n && !memcmp(b + nm, ".rela.data", 11)) sec = ".rela.data";
+        else continue;
+        off = sh(b, shoff, i, 0x18, 8); sz = sh(b, shoff, i, 0x20, 8); link = sh(b, shoff, i, 0x28, 4);
+        if (off + sz > (long)n || link >= shnum) return -1;
+        symoff = sh(b, shoff, link, 0x18, 8);
+        stroff = sh(b, shoff, sh(b, shoff, link, 0x28, 4), 0x18, 8);
+        for (j = 0; j < sz / 24; j++) {
+            long e = off + j * 24, sym = (long)(rd(b, e + 8, 8) >> 32), add = (long)rd(b, e + 16, 8), s = symoff + sym * 24;
+            long shndx, snm;
+            if (s + 24 > (long)n) return -1;
+            shndx = (long)rd(b, s + 6, 2); snm = (long)rd(b, s, 4);
+            if (shndx == 0xfff2 && stroff + snm + 12 <= (long)n && !memcmp(b + stroff + snm, "_unisa_proc_", 12)) { (*named)++; continue; }
+            if (shndx != bss) continue;
+            add += (long)rd(b, s + 8, 8);
+            if (add >= bsssz - 128 && add <= bsssz - 100) {
+                printf("FAIL\tcorpus-slot\t%s %s offset=0x%lx addend=%ld bss_size=%ld anonymous slot reference\n",
+                       label, sec, (long)rd(b, e, 8), add, bsssz);
+                anon++;
+            }
+        }
+    }
+    return anon;
+}
+
+static void corpus(const char *product) {
+    static const char *apps[] = {"args", "bf", "calc", "colorpack", "ctour", "dijkstra", "exeinfo", "life", "mandel",
+                                 "memmap", "procview", "queens", "sieve", "winlayout", "winlist", "wordfreq", "xgui"};
+    long named = 0; int i, built = 0, anon = 0, bad = 0;
+    for (i = 0; i < 17; i++) {
+        char c[4200], o[4200]; char *v[12]; size_t bn = 0; unsigned char *b; int rc, k;
+        cx_fmt(c, sizeof c, "examples/apps/%s.c", apps[i]); path(o, sizeof o, "corpus.o");
+        v[0] = "sh"; v[1] = (char *)product; v[2] = "-c"; v[3] = "-b"; v[4] = "lnx/x86_64"; v[5] = "-funit";
+        v[6] = c; v[7] = "-o"; v[8] = o; v[9] = 0;
+        rc = run(v, 50);
+        if (rc) { printf("NOTE\tcorpus-slot\t%s compile rc=%d\n", apps[i], rc); continue; }
+        b = (unsigned char *)cx_read(o, &bn);
+        if (!b) { printf("FAIL\tcorpus-slot\tcannot read %s\n", o); bad++; continue; }
+        k = slot_scan(apps[i], b, bn, &named);
+        free(b); unlink(o);
+        if (k < 0) { printf("FAIL\tcorpus-slot\t%s malformed object\n", apps[i]); bad++; continue; }
+        anon += k; built++;
+    }
+    if (built < 16) { printf("FAIL\tcorpus-slot\tonly %d of 17 sources compiled, want at least 16\n", built); fails++; }
+    if (named == 0) { printf("FAIL\tcorpus-slot\tno named _unisa_proc_* relocation in the corpus (vacuous scan)\n"); fails++; }
+    if (anon || bad) fails++;
+    else if (built >= 16 && named) printf("PASS\tcorpus-slot\t%d objects, 0 anonymous slot relocations, %ld named\n", built, named);
+}
+
 int main(int argc, char **argv) {
     const char *product = argc > 1 ? argv[1] : "./unisacc.com";
     const char *tmp = getenv("TMPDIR");
@@ -137,6 +211,7 @@ int main(int argc, char **argv) {
         else { printf("FAIL\tmerge-run\tlinkrc=%d runrc=%d want 21\n", lrc, rc); fails++; }
         negctl();
     }
+    corpus(product);
     for (i = 0; i < 9; i++) { char p[4200]; path(p, sizeof p, leaves[i]); unlink(p); }
     rmdir(dir);
     printf("CHECK_FUNIT_PROCSLOT\tfailed=%d\n", fails);
