@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3e `e2b4ae8` 已推。Q3f 为积云贴图增加两种尺度的水彩噪声和离散亮度带。`check-uxe-d3-geometry.cx -- cloud-volume` 的暗、中、亮样本为 19、32、149，全部通过。`flat-cloud` 的暗层为 0，返回 1。云层为固定背景贴图，呈现明暗体积感。生成物 `d3-cloud-volume.rgba` 逐字节验收，篡改已入 sweep，Q3f 提交可用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-cloud-volume.rgba` 查得。并排图 /tmp/d3-review-comparison.png 已更新，左侧为核过 SHA-256 的参考第 3 秒，右侧为当前场景。
+
 Q3e 为叶片加上原创缺刻 alpha 纹理及不规则下部明暗。`check-uxe-d3-geometry.cx -- leaf-shape` 检查 8736 个点，叶空交替 1212 次，6 个暗部连通块，暗部 2505/4844。旧多边形 `angular-leaf` 只有 867 次交替，低于 1100，返回 1。生成器逐字节校验 16384 字节，磁盘篡改已入 sweep。下一项 Q3f 云。
 
 Q3d `af56a43` 后同步主线。主线提交 `68364f4` 已改为根据登记事实现算批次包层，合并时采用该方案。新增批次按现行 register 流程登记，包层由工具从当前或暂存登记读取。先前记录的 build/batch-packages.tsv 属于旧流程。

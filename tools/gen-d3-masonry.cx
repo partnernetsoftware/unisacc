@@ -5,6 +5,8 @@ static const char path[]="ujs/practice/uxe/test/d3-masonry.rgba";
 static unsigned char tile[64*64*4];
 static unsigned char sky[160*90*4];
 static const char sky_path[]="ujs/practice/uxe/test/d3-sky.rgba";
+static unsigned char cloud_volume[160*90*4];
+static const char volume_path[]="ujs/practice/uxe/test/d3-cloud-volume.rgba";
 static unsigned char leaf[64*64*4];
 static const char leaf_path[]="ujs/practice/uxe/test/d3-leaf.rgba";
 
@@ -39,7 +41,7 @@ static void generate(void) {
     }
 }
 
-static void generate_sky(void) {
+static void generate_sky(unsigned char *pixels,int layered) {
     /* Lobes overlap in three banks. Their upper shoulders catch more light. */
     static int lobes[][4]={{-2,24,19,9},{12,23,18,10},{27,19,15,10},{42,26,20,8},
         {52,27,14,6},{100,9,23,6},{111,5,12,7},{122,12,15,5},
@@ -48,11 +50,23 @@ static void generate_sky(void) {
     for(y=0;y<90;y++) for(x=0;x<160;x++) {
         int k=(y*160+x)*4, alpha=0, light=0;
         int clear[3]={66+y,126+y*3/4,184+y/2};
+        int broad=watercolor(x%64,y%64)-128;
+        int fine=watercolor((2*x+17)%64,(2*y+13)%64)-128;
+        int grain_detail=grain(x,y)-128;
         for(i=0;i<11;i++) {
             int dx=x-lobes[i][0], dy=y-lobes[i][1], rx=lobes[i][2], ry=lobes[i][3];
             int inside=256-256*dx*dx/(rx*rx)-256*dy*dy/(ry*ry);
             int cover=inside*8;
             int shade=245-dy*52/ry;
+            if(layered) {
+                int density=inside+broad/4+fine/7+grain_detail/24;
+                int exposure=221-dy*58/ry+broad/8+fine/13;
+                cover=density*9;
+                if(exposure>=228) shade=251;
+                else if(exposure>=214) shade=239;
+                else if(exposure>=194) shade=218;
+                else shade=187;
+            }
             if(cover<0) cover=0;
             if(cover>255) cover=255;
             if(shade>251) shade=251;
@@ -61,9 +75,9 @@ static void generate_sky(void) {
         }
         for(i=0;i<3;i++) {
             int cloud=light-(2-i)*8;
-            sky[k+i]=(clear[i]*(255-alpha)+cloud*alpha+127)/255;
+            pixels[k+i]=(clear[i]*(255-alpha)+cloud*alpha+127)/255;
         }
-        sky[k+3]=255;
+        pixels[k+3]=255;
     }
 }
 
@@ -103,14 +117,16 @@ static int output(const char *file_path,const unsigned char *pixels,size_t lengt
 }
 
 int main(int argc,char **argv) {
-    int write, masonry, clouds, foliage;
+    int write, masonry, clouds, foliage, volume;
     if(argc!=2 || (strcmp(argv[1],"--write") && strcmp(argv[1],"--check"))) return 2;
     write=!strcmp(argv[1],"--write");
     generate();
-    generate_sky();
+    generate_sky(sky,0);
+    generate_sky(cloud_volume,1);
     generate_leaf();
     masonry=output(path,tile,sizeof tile,write);
     clouds=output(sky_path,sky,sizeof sky,write);
     foliage=output(leaf_path,leaf,sizeof leaf,write);
-    return masonry || clouds || foliage;
+    volume=output(volume_path,cloud_volume,sizeof cloud_volume,write);
+    return masonry || clouds || foliage || volume;
 }
