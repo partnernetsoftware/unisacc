@@ -42,6 +42,9 @@
    AFFECTED_RUN also carries kit_ms=, prep_ms= and run_ms=: kit is the tlib kit pre-build, prep is the
    material pre-build, run is start-to-finish of the batches; the three add up to elapsed_ms.  They exist
    for tools/batch-cost.cx to attribute cold builds and link time, and change no decision.
+   --native-run-batch opts into compiling the runner in the layout's private .git directory.
+   The key binds the source closure, candidate and compile command. A damaged executable is
+   refused, and a failed build reports NATIVE_RUNBATCH_FALLBACK before the ordinary invocation.
    tests/run-batch.cx prints BATCH_TIMING after BATCH_RUN with prep_ms/link_ms/run_ms/norm_ms/total_ms and
    kit=hot|cold|fallback, so a single batch's phases are attributable without parsing its stderr.
    rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
@@ -147,6 +150,8 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 static int arena;
 static char root[4096];
 static const char *candidate_dir;
+static int native_requested, native_ready;
+static char native_runner[4400], native_digest[65];
 static long root_n;
 static const char *root_product_relative = "./unisacc.com"; /* lint:allow R1-product Explicit current-root candidate launcher; preserve the existing relative argv contract. */
 static int root_candidate(char *dst,size_t cap){return cx_fmt(dst,cap,"%s/unisacc.com",root);}
@@ -715,7 +720,8 @@ static int finish(Child *C, int ex, int code, int sig) {
     if (cx_fmt(pre, sizeof pre, "BATCH_RUN\tid=%s\t", id)) die("id too long");
     line = last_line(C->out.p ? C->out.p : "", C->out.n, pre, &ln);
     if (line) {
-        printf("%.*s\n", (int)ln, line);
+        if (native_requested) printf("%.*s\trunner=%s\n",(int)ln,line,native_ready?"native":"sh");
+        else printf("%.*s\n", (int)ln, line);
         return tx_find(line, ln, "\tstatus=PASS\t", 13) >= 0;
     }
     {   const char *why = last_line(C->err.p ? C->err.p : "", C->err.n, "run-batch: ", &ln);
@@ -773,6 +779,51 @@ static int closure_sha(const char *rel, char *out65) {
     return 0;
 }
 static int file_sha(const char *p, char *h) { size_t sz; char *s = cx_read(p, &sz); if (!s) return -1; tp_sha(s, sz, h); free(s); return 0; }   /* same SHA-256; cxlib.tlibpkg tp_sha = kernel AF_ALG with the portable fallback */
+/* The opt-in runner is built from the candidate and this checkout, never from
+ * a caller-supplied executable. The default route doesn't inspect this cache. */
+static int native_key(const char *candidate,char *key) {
+    char ape[65],sources[65],recipe[256];
+    if(file_sha(candidate,ape) || closure_sha("tests/run-batch.cx",sources) ||
+       cx_fmt(recipe,sizeof recipe,"run-batch-v1\t%s\t%s\tsh APE tests/run-batch.cx -o IMAGE\n",ape,sources))return -1;
+    tp_sha(recipe,strlen(recipe),key);return 0;
+}
+static int native_intact(void) {
+    char got[65];sy_stat_t st;
+    return !sy_lstat(native_runner,&st) && st.kind=='f' && st.uid==sy_uid() &&
+           !file_sha(native_runner,got) && !strcmp(got,native_digest);
+}
+static int native_prepare(const char *candidate) {
+    char gitdir[4200],dir[4200],key[65],again[65],lock[4400],receipt[4400],temp[4500];
+    sy_stat_t st;int rc=0;
+    if(candidate_dir || native_key(candidate,key) || cx_fmt(gitdir,sizeof gitdir,"%s/.git",root) ||
+       sy_lstat(gitdir,&st) || st.kind!='d' || st.uid!=sy_uid() ||
+       cx_fmt(dir,sizeof dir,"%s/unisacc-native-runner",gitdir) ||
+       (sy_mkdir(dir,0700) && (sy_lstat(dir,&st) || st.kind!='d' || st.mode!=0700 || st.uid!=sy_uid())) ||
+       cx_fmt(native_runner,sizeof native_runner,"%s/%s",dir,key) ||
+       cx_fmt(receipt,sizeof receipt,"%s.sha256",native_runner) ||
+       cx_fmt(lock,sizeof lock,"%s/prepare.lock",dir) ||
+       cx_fmt(temp,sizeof temp,"%s.%d.tmp",native_runner,sy_pid()))return 0;
+    int fd=open(lock,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0)return 0;
+    long end=sy_now_ms()+3000;
+    while(sy_flock(fd,6)){if(sy_now_ms()>=end){sy_close(fd);return 0;}sy_sleep_ms(50);}
+    int present=sy_lstat(receipt,&st);
+    if(!present){
+        size_t n=0;char *record=st.kind=='f'?cx_read(receipt,&n):0;
+        if(!record || n!=64 || mm_copy(native_digest,sizeof native_digest,record,64))rc=-1;
+        else {native_digest[64]=0;rc=native_intact()?1:-1;}
+        free(record);
+    } else if(present==-ENOENT){
+        char *v[]={"sh",(char *)candidate,"tests/run-batch.cx","-o",temp,0};np_result result={0};char why[256];
+        if(!np_run(v,root,0,55,&result,why,sizeof why) && !result.rc &&
+           !file_sha(temp,native_digest) && !native_key(candidate,again) && !strcmp(again,key) &&
+           !sy_rename(temp,native_runner) && !sy_write_atomic(receipt,native_digest,64,0600))rc=1;
+        np_free(&result);sy_unlink(temp);
+    }
+    sy_close(fd);
+    if(rc==1)printf("PREPARED\tnative-run-batch\tkey=%s\tsha256=%s\tpath=%s\n",key,native_digest,native_runner);
+    return rc;
+}
 /* A material.tsv hash alone cannot attest either generated CX root. */
 static int prep_asm_sha(const char *dir,char h[65]) {
     const char *names[]={"assembler.cx","contracts.cx","material.tsv"};Buf bytes={0};
@@ -1282,6 +1333,11 @@ static int run(const int *sel, int nsel, int jobs) {
         || cx_fmt(outparent, sizeof outparent, "%s/unisacc-affected-%d", sy_tmpdir(), sy_pid())) die("path too long");
     /* run-batch.cx accepts an output parent below ROOT/out or below sy_tmpdir()/unisacc-affected-; no repo-local out/ is created */
     if (sy_mkdir(outparent, 0755) < 0) die("cannot make unisacc-affected-PID");
+    if(native_requested){
+        native_ready=native_prepare(candidate);
+        if(native_ready<0)die("NATIVE_RUNBATCH_IDENTITY_MISMATCH");
+        if(!native_ready)fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\tprepare failed\n");
+    }
     printf("RUN_DIR\t%s\tjobs=%d\n", outparent, jobs);
     {   long k0 = sy_now_ms();
         kit_prepare();   /* the tlib kit once, before any batch: -j N batches then find it fresh and link from it */
@@ -1298,7 +1354,7 @@ static int run(const int *sel, int nsel, int jobs) {
     if (prep_only) {   /* 只预热:不进批循环,不打 BATCH_RUN/PASS;材料只记 PREPARED */
         {   int k; for (k = 0; k < nprep; k++) if (prep[k].state == PS_READY)   /* 材料身份,供后续 --run 的 PREPARED 行核对 */
                 printf("PREP_IDENTITY\t%s\tid=%s\tsha256=%s\tproduct=%s\tpath=%s\n", prep[k].name, prep[k].id, prep[k].sha, prod_sha, prep[k].path); }
-        {   long pw_ms = 0; int pw = prewarm_compile(&pw_ms);
+        {   long pw_ms = 0; int pw = native_ready ? 1 : prewarm_compile(&pw_ms);
             printf("AFFECTED_PREP\tkit=%s\tmaterials=%d\tbuilt=%d\thit=%d\tfailed=%d\tkit_ms=%ld\tprep_ms=%ld\tcompile_prewarmed=%d\tprewarm_ms=%ld\n",
                    kit_state, pb_materials, pb_built, pb_hits, pb_failed, kit_ms, prep_ms, pw, pw_ms);
             return pb_failed || !pw ? 1 : 0; }
@@ -1311,6 +1367,10 @@ static int run(const int *sel, int nsel, int jobs) {
         while (nrun < jobs && next < nsel && now - t_main < start_deadline) {
             Batch *B = &batch[sel[next]]; Child *C = &ch[nrun];
             const char *av[48] = {"sh", candidate, runner, "--"}; int nav = 4;
+            if(native_ready){
+                if(!native_intact())die("NATIVE_RUNBATCH_IDENTITY_MISMATCH");
+                av[0]=native_runner;nav=1;
+            }
             if (candidate_dir) { av[nav++] = "--candidate"; av[nav++] = candidate_dir; }
             av[nav++] = root; av[nav++] = outparent; av[nav++] = B->id;
             if (!tx_eqz(B->materials, "-")) {
@@ -1734,6 +1794,7 @@ int main(int argc, char **argv) {
             if (!tx_eqz(iface_verdict, "same") && !tx_eqz(iface_verdict, "changed")) usage();
         }
         else if (tx_eqz(argv[a], "--prepare-materials")) { prep_on = 1; a++; }
+        else if (tx_eqz(argv[a], "--native-run-batch")) { native_requested=1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
             start_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
@@ -1748,6 +1809,7 @@ int main(int argc, char **argv) {
         else usage();
     }
     if(candidate_dir && (!mode_run || prep_only || prep_plan_only))die("--candidate requires --run");
+    if(native_requested && (!mode_run || prep_plan_only))die("--native-run-batch requires --run or --prep-only");
     if(domain_on&&(materials_dump||closure_dump||family_index||nmaterial_family))die("--domain supports --files, --since, --ids, --layer and domain-only selection");
     if(domain_on&&mode_run&&!jobs){int c=fa_budget();jobs=c<1?4:c>MAXJOBS?MAXJOBS:c;}
     if (materials_dump) {   /* the source each declared material resolves to.  The row is

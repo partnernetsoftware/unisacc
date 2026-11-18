@@ -28,12 +28,42 @@ static int command(char**v){np_free(&result);char why[400];int tr=np_run(v,root,
 static int gen(void){char*v[]={"sh",product,generator,"--","--write","--root",root,0};return command(v);}
 static int query(const char*a,const char*b,const char*c,const char*d,const char*e,const char*f){char*v[14]={"sh",product,affected,"--",0};const char*opts[]={a,b,c,d,e,f};int n=4;for(int i=0;i<6&&opts[i];i++)v[n++]=(char*)opts[i];v[n]=0;return command(v);}
 static int selected(const char*id){char want[100];if(cx_fmt(want,sizeof want,"SELECTED\t%s\n",id))return 0;return strstr(result.out,want)!=0;}
+static int native_cases(const char *binary){
+ char dir[6000],image[6200],previous[6200];
+ const char *src="int main(int argc,char **argv){if(argc<4)return 2;printf(\"BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\tcandidate=fixture\\n\",argv[3]);return 0;}\n";
+ char *native[]={(char*)binary,"--ids","a","--run","--native-run-batch",0};
+ char *plain[]={(char*)binary,"--ids","a","--run",0};
+ if(cx_fmt(dir,sizeof dir,"%s/.git",root)||sy_mkdir(dir,0700)||put("tests/run-batch.cx",src,"","",""))return 2;
+ int rc=command(plain);
+ ck(!rc&&strstr(result.out,"candidate=fixture\n")&&!strstr(result.out,"runner="),"default-original-row");
+ rc=command(native);
+ ck(!rc&&strstr(result.out,"candidate=fixture\trunner=native"),"native-real-fixture");
+ if(!result.out)return 2;
+ char *p=strstr(result.out,"\tpath=");char *e=p?strchr(p,'\n'):0;
+ if(!e||e-p-6>=sizeof image||mm_copy(image,sizeof image,p+6,e-p-6))return 2;
+ image[e-p-6]=0;
+ if(strncmp(image,dir,strlen(dir)) || image[strlen(dir)]!='/' || cx_fmt(previous,sizeof previous,"%s\n",image))return 2;
+ int fd=open(image,O_RDWR|O_NOFOLLOW);unsigned char octet;
+ if(fd<0||read(fd,&octet,1)!=1||lseek(fd,0,SEEK_SET)!=0)return 2;
+ octet^=1;if(write(fd,&octet,1)!=1||close(fd))return 2;
+ rc=command(native);
+ ck(rc==2&&strstr(result.err,"NATIVE_RUNBATCH_IDENTITY_MISMATCH")&&!strstr(result.out,"BATCH_RUN\t"),"tampered-executable-refused");
+ if(put("tests/run-batch.cx",src,"/* changed source */\n","",""))return 2;
+ rc=command(native);
+ ck(!rc && strstr(result.out,"runner=native")&&!strstr(result.out,previous),"source-change-builds-new-image");
+ if(put("tests/run-batch.cx","invalid fixture compilation\n","","",""))return 2;
+ int normal=command(plain);rc=command(native);
+ ck(normal!=0 && rc==normal && strstr(result.err,"NATIVE_RUNBATCH_FALLBACK") &&
+    !strstr(result.out,"runner=native"),"build-failure-original-sh-verdict");
+ printf("CHECK_AFFECTED_DOMAIN\tcase=native\tfailed=%d\tpassed=%d\n",failed,passed);
+ return failed?1:0;
+}
 static int prepare_real_runners(void){
  const char*tool[]={"tools/tlib.cx","tests/run-batch.cx","tools/batch-domains-gen.cx","affected"};
  sy_child_t child[4];sy_exit_t status[4];int started[4]={0},done[4]={0},bad[4]={0};size_t have[4]={0};static char output[4][8192];
- char local[6000],runner[6000];if(cx_fmt(local,sizeof local,"%s/unisacc.com",root)||cx_fmt(runner,sizeof runner,"%s/tests/run-batch.cx",root))return 0;
+ char runner[6000];if(cx_fmt(runner,sizeof runner,"%s/tests/run-batch.cx",root))return 0;
  long begin=sy_now_ms(),deadline=begin+25000;int killed=0;
- for(int i=0;i<4;i++){output[i][0]=0;char*v[]={"sh",local,(char*)tool[i],0,0,0,0};if(i==1)v[2]=runner;if(i==2){v[3]="--";v[4]="--check";v[5]="--dump";}if(i==3){v[1]=product;v[2]=affected;}
+ for(int i=0;i<4;i++){output[i][0]=0;char*v[]={"sh",product,(char*)tool[i],0,0,0,0};if(i==1)v[2]=runner;if(i==2){v[3]="--";v[4]="--check";v[5]="--dump";}if(i==3)v[2]=affected;
   sy_spawn_t options;sy_spawn_init(&options);options.argv=v;options.cwd=root;options.pgroup=-1;options.out_fd=SY_STDIO_PIPE;options.flags=SY_SPAWN_ERR_TO_OUT;options.deadline_ms=25000;
   started[i]=sy_proc_spawn(&options,&child[i])==0;if(!started[i])bad[i]=1;
  }
@@ -49,12 +79,13 @@ static int prepare_real_runners(void){
  printf("PREPARED_DOMAIN\tms=%ld\tno-test-result\n",sy_now_ms()-begin);return ok;
 }
 int main(int argc,char**argv){const char*phase="query",*draft=0;for(int a=1;a<argc;a++){if(!strcmp(argv[a],"--case")&&a+1<argc)phase=argv[++a];else if(!strcmp(argv[a],"--affected")&&a+1<argc)draft=argv[++a];else return 2;}
- if(strcmp(phase,"query")&&strcmp(phase,"refusal")&&strcmp(phase,"run"))return 2;
+ if(strcmp(phase,"query")&&strcmp(phase,"refusal")&&strcmp(phase,"run")&&strcmp(phase,"native"))return 2;
  const char*launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product This fixture runs the same root candidate; the harness can override UNISACC. */
  if(sy_realpath(".",repo,sizeof repo)<0||sy_realpath(launcher,product,sizeof product)<0||cx_fmt(root,sizeof root,"/tmp/unisacc-affected-domain-%d",sy_pid())||cx_fmt(affected,sizeof affected,"%s",draft?draft:"")||(!draft&&cx_fmt(affected,sizeof affected,"%s/tools/affected.cx",repo))||cx_fmt(generator,sizeof generator,"%s/tools/batch-domains-gen.cx",repo))return 2;
  char p[6000];if(cx_fmt(p,sizeof p,"%s/tests",root)||sy_mkdir_all(p,0700)||cx_fmt(p,sizeof p,"%s/build",root)||sy_mkdir_all(p,0700))return 2;
  if(link_repo("tools")||link_repo("cx")||link_repo("ext")||link_repo("exec")||link_repo("cxroot.tsv")||link_repo("unisacc.com")||copy_repo("tests/run-batch.cx"))return 2;
  if(put("tests/a.cx","/* Installed compiler fixture object. */\nint main(void){return 23;}\n","","","")||put("tests/b.cx","/* Tool selfcheck fixture object. */\nint main(void){printf(\"B_OK\\n\");return 0;}\n","","","")||put("tests/batches.tsv",rh,ar,br,"")||put("tests/coverage.tsv",ch,ac,bc,"")||put("tests/batch-domains.tsv","id\tdomain\tbasis\n","","","")||put("tests/batch-domain-rules.tsv","id\tpriority\tentry\ttier\tlayer\tobject\tdomain\tsample\tbasis\n","compiler\t10\t*\t*\t*\tcompiler\tproduct-qualification\ta\tDeclared compiler fixture.\n","tool\t10\t*\t*\t*\tselfcheck\ttool-selfcheck\tb\tDeclared tool fixture.\n","")||put("build/batch-packages.tsv","# independent coarse layer fixture\n","batch\ta\tcompiler\t-\t-\t-\t-\t-\t-\n","batch\tb\tall\t-\t-\t-\t-\t-\t-\n",""))return 2;
+ if(!strcmp(phase,"native"))return draft && draft[0]=='/' ? native_cases(draft):2;
  if(!strcmp(phase,"query")){
   ck(query("--ids","a,b",0,0,0,0)==0&&selected("a")&&selected("b")&&!strstr(result.out,"DOMAIN_"),"default-without-index");
   ck(query("--ids","a,b","--domain","product-qualification",0,0)!=0&&!selected("a")&&strstr(result.err,"index-drift"),"domain-refuses-missing-index");
