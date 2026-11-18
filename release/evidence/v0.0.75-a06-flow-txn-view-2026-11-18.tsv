@@ -1,0 +1,12 @@
+# v0.0.75 A-06 (flow --txn 视图分裂修复: ff_txn_view 暂存层物化供 exec 统一读取) 实测与负控证据表
+# 编表日期: 2026-11-18; 基线: 6fe943359c / 3830a13bfd + A-06 (flowfile.cx, flowexec.cx, check-flow-txn.cx)
+# 证据状态: MEASURED=实测直接产出, PASS=入库单元与隔离负控断言通过
+指标	值	单位	输入或对照命令	证据状态	备注
+a06-split-view-before	rc=1/abor_enode=1/disk_kept_old=1/133ms	state	neg_item3 对照(修复前 flowfile/flowexec): file.write 后 exec grep NEW_V2 data.txt	MEASURED	修复前 exec 直读原盘旧数据 OLD_V1 触发 TXN_ABORT
+a06-unified-view-after	rc=0/committed=1/disk_new=1/views_left=0/143ms	state	neg_item3 对照(修复后): 同流经 ff_txn_view 暂存层物化后 exec 读取与提交	MEASURED	exec 读到暂存 NEW_V2 并原子提交, txn_view_* 清零
+a06-neg-exec-abort	rc=1/aborted=1/disk_clean=1/views_left=0	state	neg_item3 / check-flow-txn exec-staged-abort: file.write 后 exec 读到暂存内容随后失败	MEASURED	后续 exec 失败触发中止, 原盘内容不变且 txn_view_* 已清理
+a06-cx-compile-in-view	rc=0/committed=1/mod_updated=1/529ms	state	neg_item3 AFTER_CX_COMPILE_VIEW: file.write mod.cx 后 exec 内 sh ./unisacc.com -c 编译	MEASURED	暂存 .cx 经 exec 内真实产品编译并提交生效
+neg-exec-staged-view	PASS	unit	sh ./unisacc.com tools/check-flow-txn.cx (exec-staged-view)	PASS	file.edit -> exec cat -> 后续 file.edit 串联并在提交后落盘最终值
+neg-exec-staged-abort	PASS	unit	sh ./unisacc.com tools/check-flow-txn.cx (exec-staged-abort)	PASS	exec cat 读到暂存 write 后 exec false 中止事务并保留磁盘旧值
+suite-flow-txn	23/0	pass/fail	sh ./unisacc.com tools/check-flow-txn.cx	PASS	CHECK_FLOW_TXN failed=0 (23 passed); cx-lint findings=0
+suite-devsvc-flow-p	9/0	pass/fail	sh ./unisacc.com tools/check-devsvc-flow.cx -- --cases p	PASS	CHECK_DEVSVC_FLOW ok=9 failed=0; ratchets ok=15 fail=0
