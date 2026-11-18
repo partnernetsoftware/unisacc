@@ -17,18 +17,20 @@ import { BOX_MESH, MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } fro
 import { archMeshes, loadBays } from "./d3-arch.js";
 import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
 import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
-import { paintedCanopy, paintedLeafMesh, tuftMesh, hangingVines } from "./d3-painted.js";
+import { tuftMesh, hangingVines } from "./d3-painted.js";
+import { brushCanopy, brushLeafMesh, liningCourses } from "./d3-bridge-brush.js";
 import { buildWornDeck, windTuft } from "./d3-worn-deck.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params = new URLSearchParams(location.search);
-const release=!location.pathname.endsWith("/d3-deck-w3.html");
+const release=!location.pathname.endsWith("/d3-brush-audit.html");
 const painted=true;
+const brushed=!params.has("plain-brush");
 const finish=release || painted || params.has("finish-u2c");
 const enlarged=params.has("scale-u2b") || finish;
 const paper=params.has("paper-u3") || enlarged;
 const dense=params.has("dense-u2") || paper;
-const play=!params.has("v1-probe") && (release || params.get("walk")!=="0" || params.has("walk-check"));
+const play=!params.has("v1-probe") && !params.has("brush-probe") && (release || params.get("walk")!=="0" || params.has("walk-check"));
 const style=play || dense?"study":params.get("style");
 const mode = params.get("mode");
 const composition = style === "study" ||
@@ -45,7 +47,8 @@ const scene = new Scene();
 const groups = new Map();
 const wind=[];
 const colors = {
-  stone:[211,184,140], barrel:[119,113,106], plaster:[246,222,183],
+  stone:[211,184,140], barrel:[119,113,106], barrelLip:[186,159,122], barrelMiddle:[139,120,100],
+  barrelDeep:[89,94,97], barrelJoint:[120,106,97], plaster:[246,222,183],
   leaf:[50,110,62], grass:[140,160,73], roof:[72,91,110],
   abutment:[151,129,108], timber:[95,65,44], window:[244,160,67],
   leafLight:[97,148,70], leafDark:[40,90,67],
@@ -85,7 +88,7 @@ const bays=enlarged?Array.from({length:params.has("short-u2b")?3:archCount},(_,i
   const bay=template[0].slice();
   bay[0]=(i-(archCount-1)/2)*bayWidth/1000;
   bay[5]=bayWidth/2000;
-  if(finish) bay[4]-=painted && !params.has("v1-thin-bridge")?6.6:4.4;
+  if(finish) bay[4]-=painted && !params.has("v1-thin-bridge")?(params.has("thin-brush-bridge")?6.6:8.15):4.4;
   return bay;
 }):template;
 const arches=[];
@@ -101,7 +104,9 @@ for(const bay of bays) {
   if(painted) for(const mesh of meshes) for(let i=0;i<mesh.uvs.length;i++) mesh.uvs[i]*=.60;
   arches.push(first);
   instance("stone",first,0,0,0,1);
-  instance("barrel",first+1,0,0,0,1);
+  if(params.has("flat-brush-lining")) instance("barrel",first+1,0,0,0,1);
+  else for(const [material,mesh] of liningCourses(meshes[1]))
+    instance(material,addMesh(mesh),0,0,0,1);
 }
 let houseBounds;
 if (taller) {
@@ -181,7 +186,7 @@ if (mode!=="bare") {
   const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
   const ellipsoid = allMeshes().length + extraMeshes.length;
   const lobes = textured && !painted ? await crownLobes() : [];
-  if(painted) for(let seed=0;seed<3;seed++) extraMeshes.push(paintedLeafMesh(seed));
+  if(painted) for(let seed=0;seed<3;seed++) extraMeshes.push(brushLeafMesh(seed,brushed));
   else if (textured) extraMeshes.push(cutout ? cutoutLeafMesh() : study ? foliagePatchMesh() : leafMesh());
   if (study) {
     trees.push([-12.1,.35,6.1,2.65],[-6.6,-.55,6.5,2.4],[-.6,-.40,6,2.2],
@@ -200,7 +205,7 @@ if (mode!=="bare") {
   }
   for(const [x,y,z,r] of trees) {
     if(painted) {
-      paintedCanopy(x,y,z,r,(material,variant,...pose)=>
+      brushCanopy(x,y,z,r,brushed,(material,variant,...pose)=>
         instance(params.has("v1-flat-leaves")?"leafPaint":material,ellipsoid+variant,...pose));
     } else if (study) {
       canopyPatches(lobes, mode==="thin-canopy"?9:48,x,y,z,r,warm,
@@ -221,7 +226,7 @@ for(const [name,{material,mesh,items}] of groups) {
   const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
   cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
   cloud.outlineExcluded = /^(leaf|meadow|grass|ridge|deck)/.test(material);
-  if (textured && (material === "stone" || material === "barrel" ||
+  if (textured && (material === "stone" || material.startsWith("barrel") ||
       material === "grass" || /^(leaf|meadow|cliff)/.test(material))) {
     cloud.surfaceMap = material === "stone" || material === "barrel" ? "masonry" : "wash";
     cloud.mapId = 1;
@@ -491,8 +496,9 @@ const counts=[...groups.values()].reduce(([leaves,grass],group)=>[
 result.textContent=params.has("u2b-probe")?
   [arches.filter(id=>scene.clouds.has("stone-"+id)).length,...screenBox(camera,...houseBounds)].join(","):
   (params.has("u2-probe")?counts.join(",")+"|":"")+samples.join(";");
-if(params.has("v1-probe")) {
+if(params.has("v1-probe") || params.has("brush-probe")) {
   const codes={leafInk:[1,0,0],leafPaint:[0,1,0],leafSun:[0,0,1],vine:[1,0,1],vineMoss:[1,0,1]};
+  if(params.has("brush-probe")) Object.assign(codes,{barrelLip:[1,1,0],barrelDeep:[0,1,1]});
   const rgba=new Uint8Array(1280*720*4), colors=new Uint8Array(rgba.length);
   gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,colors);
   scene.ambient.intensity=0;
@@ -522,6 +528,16 @@ if(params.has("v1-probe")) {
     near=Math.max(near,z); far=Math.min(far,z);
   }
   result.textContent=Math.round(1000*(near-far))+"|"+map;
+  if(params.has("brush-probe")) {
+    const leaf=brushLeafMesh(1,brushed);
+    let jag=0,facet=0;
+    for(let i=0;i<leaf.positions.length;i+=9) {
+      const p=leaf.positions;
+      jag+=Math.round(Math.abs(Math.hypot(p[i+3],p[i+4])-Math.hypot(p[i+6],p[i+7]))*1000);
+      facet+=Math.round(Math.abs(leaf.normals[i+2]-.84)*1000);
+    }
+    result.textContent+="|"+jag+","+facet;
+  }
 }
 }
 </script>
