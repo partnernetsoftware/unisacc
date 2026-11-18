@@ -822,18 +822,30 @@ static int native_prepare(const char *candidate) {
     if(fd<0)return 0;
     long end=sy_now_ms()+3000;
     while(sy_flock(fd,6)){if(sy_now_ms()>=end){sy_close(fd);return 0;}sy_sleep_ms(50);}
-    int present=sy_lstat(receipt,&st);
+    int present=sy_lstat(receipt,&st),repair=0,refuse_current=0;
     if(!present){
-        size_t n=0;char *record=st.kind=='f'?cx_read(receipt,&n):0;
+        size_t n=0;char *record=st.kind=='f' && st.uid==sy_uid()?cx_read(receipt,&n):0;
         if(!record || n!=64 || mm_copy(native_digest,sizeof native_digest,record,64))rc=-1;
-        else {native_digest[64]=0;rc=native_intact()?1:-1;}
+        else {
+            native_digest[64]=0;
+            if(native_intact())rc=1;
+            else {
+                int missing=sy_lstat(native_runner,&st)==-ENOENT;
+                refuse_current=!missing;
+                if(sy_unlink(receipt))rc=-1;
+                else {repair=1;present=-ENOENT;}
+            }
+        }
         free(record);
-    } else if(present==-ENOENT){
+    }
+    if(present==-ENOENT){
         char *v[]={"sh",(char *)candidate,"tests/run-batch.cx","-o",temp,0};np_result result={0};char why[256];
         if(!np_run(v,root,0,55,&result,why,sizeof why) && !result.rc &&
            !file_sha(temp,native_digest) && !native_key(candidate,again) && !strcmp(again,key) &&
            !sy_rename(temp,native_runner) && !sy_write_atomic(receipt,native_digest,64,0600))rc=1;
         np_free(&result);sy_unlink(temp);
+        if(repair && rc==1)printf("NATIVE_RUNBATCH_REBUILT\tkey=%s\treason=%s\n",key,refuse_current?"digest-mismatch":"missing-image");
+        if(refuse_current)rc=-1;
     }
     sy_close(fd);
     if(rc==1)printf("PREPARED\tnative-run-batch\tkey=%s\tsha256=%s\tpath=%s\n",key,native_digest,native_runner);
