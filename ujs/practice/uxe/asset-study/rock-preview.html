@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>UXE 石块素材实验</title>
+<style>
+  html,body{margin:0;background:#b5c9d1}
+  canvas{display:block;width:min(100vw,960px);height:auto}
+  output{position:absolute;top:22px;left:22px;color:#182c3c;font:15px system-ui}
+</style>
+<canvas width="960" height="540" aria-label="用 UXE 渲染的 Quaternius 石块"></canvas>
+<output>载入石块实验</output>
+<script type="module">
+import {createWebGLRenderer} from "../renderer-webgl.js";
+import {Scene,PerspectiveCamera} from "../scene.js";
+import {allMeshes,MESH_PLANE} from "../meshes.js";
+
+const canvas=document.querySelector("canvas"),out=document.querySelector("output");
+try {
+  const query=new URLSearchParams(location.search);
+  const source=query.get("mesh") || "file:///tmp/cdx2-uxe-rocks.json";
+  const start=performance.now();
+  const response=await fetch(source);
+  if(!response.ok) throw Error("转换产物读取失败");
+  const mesh=await response.json();
+  const positions=new Float32Array(mesh.positions),normals=new Float32Array(mesh.normals);
+  if(!positions.length || positions.length%9 || positions.length!==normals.length)
+    throw Error("网格长度不符");
+  const bounds=Array.from({length:3},(_,axis)=>{
+    let min=Infinity,max=-Infinity;
+    for(let i=axis;i<positions.length;i+=3) {
+      min=Math.min(min,positions[i]);
+      max=Math.max(max,positions[i]);
+    }
+    return [min,max];
+  });
+  const scale=2.7/Math.max(...bounds.map(([min,max])=>max-min));
+  const offset=bounds.map(([min,max],axis)=>scale*(axis===1?-min:-(min+max)/2));
+  const scene=new Scene();
+  scene.clearColor=[.70,.79,.82,1];
+  scene.fog={density:0,color:[.70,.79,.82]};
+  scene.ambient={color:[.85,.91,1],intensity:.95};
+  scene.lights=[{dir:[-.46,.86,.35],color:[1,.93,.78],intensity:1.24}];
+  scene.shadows={center:[0,0,0],extent:5,size:512,strength:.65};
+  scene.outlineWidth=1;
+  const floor=scene.instances("ground",1,[.51,.57,.52]);
+  floor.meshId=MESH_PLANE;
+  floor.set(0,0,-.02,0,5);
+  floor.outlineExcluded=true;
+  const rock=scene.instances("CC0 Rocks",1,mesh.color);
+  rock.meshId=allMeshes().length;
+  rock.roughness=.8;
+  rock.metalness=0;
+  rock.toonLevels=4;
+  rock.set(0,...offset,scale);
+  const camera=new PerspectiveCamera(.61,.1,25);
+  camera.setEye(4.2,2.9,4.8);
+  camera.setTarget(0,.44,0);
+  const parsed=performance.now();
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes:[{
+    positions,normals,vCount:positions.length/3
+  }]});
+  const initialized=performance.now();
+  renderer.render(scene,camera);
+  const gl=canvas.getContext("webgl"),pixel=new Uint8Array(4);
+  gl.readPixels(480,270,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  const drawn=performance.now();
+  if(pixel[0]>130 || pixel[3]!==255) throw Error("中心像素未读到石块");
+  out.textContent="Quaternius 石块 · CC0 · UXE 载入实验";
+  out.dataset.metrics=JSON.stringify({triangles:positions.length/9,
+    readPrepareMs:parsed-start,setupMs:initialized-parsed,firstDrawReadbackMs:drawn-initialized,
+    center:[...pixel]});
+  document.title="UXE_GLB_ROCK_OK";
+} catch(error) {
+  out.textContent=String(error);
+  document.title="UXE_GLB_ROCK_FAIL";
+}
+</script>
