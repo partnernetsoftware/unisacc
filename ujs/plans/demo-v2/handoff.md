@@ -186,3 +186,7 @@ U3 正例两场各有 144 块达到开关差值区间。与参考帧的相邻亮
 U2b 的构图入口为两张测试页的 `?scale-u2b`。D3 有五座递远石拱、带二层阳台的桥头房和桥下山层，房屋墙体包围盒占视口宽度 18.4%。D4 最高塔 9.7，甲板长 11，风车叶展 5.7，同用场景单位。城镇塔楼三座、圆顶两个、按三路九层布置烟团 27 个，甲板到塔顶的包围盒占视口 41.7% 宽、70.5% 高。并排图左侧为参考帧，右侧为候选，路径为 `/tmp/cdx2-u2b-d3-comparison.png` 和 `/tmp/cdx2-u2b-d4-comparison.png`。
 
 经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- scale-u2b`。检查从 TSV 独立投影包围盒以及计算比例和数量，随后读取 Chrome 中的布局终值。追加单个带引号的参数 `short-u2b&small-u2b&low-u2b&tiny-u2b-wing&few-u2b-towers&few-u2b-domes&flat-u2b-smoke` 可复现两场均红、退出 1。
+
+U2c 用 `?finish-u2c` 预览。D3 调整雾和阴影范围，恢复桥头房的双色墙与灰蓝屋面，桥厚从 3 增至 7.4，远山以圆丘替换三角轮廓。D4 保留 27 团，按三路各三簇塑形，另加铜顶和甲板下的机械腹板。并排图在 `/tmp/cdx2-u2c-d3-comparison.png` 和 `/tmp/cdx2-u2c-d4-comparison.png`。
+
+经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- finish-u2c`。检查从画布像素独立计算房屋暖色亮度分箱与方差，以及城镇上方的烟团颜色面积。分别追加 `bare-u2c-house` 和 `thin-u2c-smoke` 可验证两个反例各退出 1。

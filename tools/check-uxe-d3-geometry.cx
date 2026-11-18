@@ -294,6 +294,60 @@ static int check_u2b(const char *mutation) {
     return failed?1:0;
 }
 
+static int check_u2c(const char *mutation) {
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0;
+    const char *region="&region=236,244,39,28,4";
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    int scene,failed=0;
+    size_t bytes=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    for(scene=3;scene<=4;scene++) {
+        int n=scene==3?39*28:128*72,i,used,rc,bins[32]={0},shades=0,warm=0,plume=0,area=0;
+        long sum=0,squares=0;
+        const char *p;
+        tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/%s.html?finish-u2c&u2c-probe&%s%s",
+            cwd,scene==3?"d3-bridge":"d4-skeleton",mutation,scene==3?region:"");
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-u2c-%d-%d",(int)getpid(),scene);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        rc=cx_runv_timeout(av,15,&doc,&bytes);
+        chd_wipe(profile);
+        p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+        if(rc || !p) { free(doc); return 2; }
+        p+=strlen("<output id=\"pixels\">");
+        for(i=0;i<n;i++) {
+            int r,g,b,luma;
+            if(sscanf(p,"%d,%d,%d%n",&r,&g,&b,&used)!=3 || p[used]!=(i+1==n?'<':';') ||
+                r<0 || r>255 || g<0 || g>255 || b<0 || b>255) { free(doc); return 2; }
+            p+=used+1;
+            luma=(30*r+59*g+11*b)/100;
+            if(scene==3 && r>=g+5 && g>=b+7 && luma>=90) {
+                bins[luma/8]++;
+                warm++;
+                sum+=luma;
+                squares+=luma*luma;
+            }
+            if(scene==4 && i%128>=32 && i%128<116 && i/128<19) {
+                area++;
+                plume+=luma>=176 && b-r>=-13 && b-r<=35 && g-r>=-8 && g-r<=23;
+            }
+        }
+        free(doc); doc=0;
+        if(scene==3) {
+            int variance=warm?(int)((squares*warm-sum*sum)/((long)warm*warm)):0;
+            for(i=0;i<32;i++) shades+=bins[i]>=4;
+            printf("D3 warm=%d shades=%d wall variance=%d\n",warm,shades,variance);
+            failed+=warm<250 || shades<7 || variance<80;
+        } else {
+            int ratio=plume*1000/area;
+            printf("D4 upper plumes=%d/%d area per mille=%d\n",plume,area,ratio);
+            failed+=ratio<90;
+        }
+    }
+    return failed?1:0;
+}
+
 static int check_u2(const char *mutation) {
     char cwd[1024],url[5000],profile[128],option[160],*out=0,*spec;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
@@ -504,6 +558,7 @@ static int compare_paper(char **paths) {
 }
 
 int main(int argc,char **argv) {
+    if(argc>=2 && argc<=3 && !strcmp(argv[1],"finish-u2c")) return check_u2c(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"scale-u2b")) return check_u2b(argc==3?argv[2]:"");
     if(argc==6 && !strcmp(argv[1],"paper-u3")) return compare_paper(argv+2);
     if(argc==2 && !strcmp(argv[1],"dense-u2")) return check_u2("");
