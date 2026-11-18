@@ -1,0 +1,99 @@
+/* Tool self-check for tools/dvqualify.cx (devsvc qualify) on a private fixture repository.
+ * The fixture APE is a small sh script: --version prints a version, and the per-batch command
+ * `sh ./unisacc.com tools/affected.cx -- --ids ID ...` prints one BATCH_RUN line whose
+ * candidate= is the sha256 of the layout copy of itself (id "bad" prints a wrong candidate).
+ * It also refuses (rc 3/4) when the layout root has no git inventory or unisacc.com is a link.
+ * Optional first argument selects a prebuilt dvqualify for red/green comparison.
+ * Last case: the devsvc entry `devsvc qualify --list` of the real repository answers.
+ * Check: CHECK_DVQUALIFY. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+static char tmp[4096], bin[4200], root[4096], repo[4300], apep[4300], ev[4300], tmpenv[4200], sha[65];
+static char out[16384];
+static int passed, failed;
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvqualify\n", yes ? "PASS" : "FAIL", label); }
+static int runv(char **v, const char *cwd, int secs, int *rc) {
+    np_result r = {0}; char why[300]; char *env[] = {tmpenv, 0};
+    if (np_run(v, cwd, env, secs, &r, why, sizeof why)) { fprintf(stderr, "exec %s: %s\n", v[0], why); return 0; }
+    *rc = r.rc; long k = (long)r.outn < (long)sizeof out - 1 ? (long)r.outn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
+    if (r.errn) { long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k; if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; } }
+    np_free(&r); return 1;
+}
+static int put(const char *dir, const char *rel, const char *text, int mode) {
+    char p[4500]; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1;
+    return sy_write_file(p, text, strlen(text), mode);
+}
+static int has(const char *text, const char *needle) { return text && strstr(text, needle) != 0; }
+static int git(char *a, char *b, char *c, char *d, char *e) {
+    char *v[12] = {"git", "-C", repo, a, b, c, d, e, 0}; int rc = 1;
+    return runv(v, 0, 30, &rc) && rc == 0;
+}
+static const char *ape_text =
+    "#!/bin/sh\n"
+    "if [ \"$1\" = --version ]; then echo 'unisacc 9.9.9-fixture'; exit 0; fi\n"
+    "git rev-parse --verify HEAD >/dev/null 2>&1 || { echo 'no git inventory'; exit 3; }\n"
+    "[ -L ./unisacc.com ] && { echo 'unisacc.com is a link'; exit 4; }\n"
+    "s=$(sha256sum ./unisacc.com | cut -c1-64)\n"
+    "[ \"$4\" = bad ] && s=0000000000000000000000000000000000000000000000000000000000000000\n"
+    "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
+
+int main(int argc, char **argv) {
+    char why[512]; int rc = -1;
+    if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || cx_fmt(apep, sizeof apep, "%s/ape.com", tmp) || cx_fmt(ev, sizeof ev, "%s/ev.tsv", tmp) ||
+        cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp)) return 2;
+    /* fixture repository with a domain index and one committed file */
+    if (sy_mkdir(repo, 0700)) return 2;
+    { char t[4400]; cx_fmt(t, sizeof t, "%s/tests", repo); if (sy_mkdir(t, 0700)) return 2; }
+    if (put(repo, "tests/batch-domain-index.tsv", "# fixture\nid\tdomain\torigin\tbasis\nalpha\tproduct-qualification\tx\tx\nbeta\tproduct-qualification\tx\tx\nbad\tproduct-qualification\tx\tx\nother\tdev-tool\tx\tx\n", 0644) ||
+        put(repo, "tests/batches.tsv", "alpha\tIMPLEMENTED\n", 0644) || sy_write_file(apep, ape_text, strlen(ape_text), 0755)) return 2;
+    if (!git("init", "-q", 0, 0, 0) || !git("add", "-A", ".", 0, 0)) { fprintf(stderr, "fixture git failed: %s\n", out); return 2; }
+    { char *v[] = {"git", "-C", repo, "-c", "user.name=f", "-c", "user.email=f@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture", 0};
+      if (!runv(v, 0, 30, &rc) || rc) { fprintf(stderr, "fixture commit failed: %s\n", out); return 2; } }
+    { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(apep, &b, &n, 1 << 20) || sy_sha256_hex(b, (long)n, sha)) return 2; free(b); }
+    /* Q1 list of the product-qualification set follows the domain index */
+    { char *v[] = {bin, repo, "--set", "product-qualification", "--list", 0};
+      check("list-domain-set", runv(v, 0, 30, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\tproduct-qualification\twindow=1") &&
+            has(out, "QUALIFY_LIST\tbad\tproduct-qualification\twindow=2") && !has(out, "\tother\t") && has(out, "batches=3\tjobs=2\twindows=2")); }
+    /* Q2 full run: two valid batches and one candidate mismatch */
+    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad", "--out", ev, "--jobs", "2", 0};
+      int ok = runv(v, 0, 50, &rc);
+      check("mismatch-run-rc1", ok && rc == 1);
+      char *e = cx_read(ev, 0), want[512], lay[4400], lc[4500];
+      check("evidence-columns", has(e, "\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"));
+      cx_fmt(want, sizeof want, "\nalpha\tproduct-qualification\tPASS\t0\t%s\t", sha); check("alpha-pass-candidate-equals-ape", has(e, want));
+      cx_fmt(want, sizeof want, "\nbeta\tproduct-qualification\tPASS\t0\t%s\t", sha); check("beta-pass-candidate-equals-ape", has(e, want));
+      check("bad-invalid-named", has(e, "\nbad\tproduct-qualification\tINVALID\t0\t0000000000000000000000000000000000000000000000000000000000000000\t") && has(e, "candidate-mismatch expected="));
+      check("raw-batch-run-kept", has(e, "\nRAW\tBATCH_RUN\tid=alpha\t") && has(e, "\nRAW\tBATCH_RUN\tid=bad\t"));
+      cx_fmt(want, sizeof want, "\nSUMMARY\tbatches=3\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=1\t");
+      check("summary-counts", has(e, want));
+      cx_fmt(want, sizeof want, "\tape_sha256=%s\tversion=unisacc 9.9.9-fixture\n", sha); check("summary-sha-version", has(e, want));
+      /* layout root: private dir under TMPDIR, real file copy, own git inventory */
+      cx_fmt(lay, sizeof lay, "%s/unisacc-qualify-%.8s", tmp, sha);
+      cx_fmt(lc, sizeof lc, "%s/unisacc.com", lay); sy_stat_t st; int reg = !sy_lstat(lc, &st) && st.kind == 'f';
+      unsigned char *b = 0; int64_t n = 0; char h[65] = "";
+      if (reg && !sy_read_file(lc, &b, &n, 1 << 20)) sy_sha256_hex(b, (long)n, h); free(b);
+      check("layout-real-copy-of-ape", reg && !strcmp(h, sha));
+      cx_fmt(lc, sizeof lc, "%s/.git", lay); check("layout-has-git-inventory", sy_exists(lc) == 1);
+      cx_fmt(lc, sizeof lc, "%s/tests/batch-domain-index.tsv", lay); check("layout-from-git-archive", sy_exists(lc) == 1);
+      free(e); }
+    /* Q3 valid-only run exits 0 */
+    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
+      char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
+      check("valid-run-rc0", ok && rc == 0 && has(e, "\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\t")); free(e); }
+    /* Q4 the devsvc entry (working copy) routes qualify to this tool (red before the core hook existed) */
+    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
+      check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }
+    { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 0, 30, &rc); }
+    printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
