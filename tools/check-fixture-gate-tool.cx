@@ -44,22 +44,26 @@ static int projection(const char*root,const char*work,const char*image){
     if(padding){reg[rn]=0;run(reg,fx,30,&r);ck(!r.rc,"projection-reference-padding");np_free(&r);if(failed)return 1;}
     rows=inventory_count(fx);ck(rows%8==0,"projection-forces-real-shard-boundary");if(failed)return 1;
     const char*source="tools/zzprojection-probe.cx";join(path,sizeof path,fx,source);if(sy_write_atomic(path,body,strlen(body),0644))return 2;
-    const char*tables[]={"tests/batches.tsv","tests/tools-compile-sources.tsv","build/batch-packages.tsv"};char*baseline[3];size_t sizes[3];
-    for(int i=0;i<3;i++){join(path,sizeof path,fx,tables[i]);baseline[i]=cx_read(path,&sizes[i]);if(!baseline[i])return 2;}
+    const char*tables[]={"tests/batches.tsv","tests/tools-compile-sources.tsv"};char*baseline[3];size_t sizes[3];
+    for(int i=0;i<2;i++){join(path,sizeof path,fx,tables[i]);baseline[i]=cx_read(path,&sizes[i]);if(!baseline[i])return 2;}
     char*tree[]={"git","write-tree",0};run(tree,fx,10,&r);if(r.rc)return 2;char*before_tree=strdup(r.out);np_free(&r);
     reg[1]="--tool";reg[2]=(char*)source;reg[3]=0;run(reg,fx,30,&r);ck(!r.rc,"projection-real-register-ran");np_free(&r);if(failed)return 1;
-    char*packages[]={"sh",product,pkggen,"--","--write",0};run(packages,fx,30,&r);ck(!r.rc,"projection-real-package-generator-ran");np_free(&r);if(failed)return 1;
     char id[100],pkgkey[120];if(cx_fmt(id,sizeof id,"tools-compile-%03d",rows/8)||cx_fmt(pkgkey,sizeof pkgkey,"batch\t%s",id))return 2;
-    char*expected_inventory=fact(fx,tables[1],source),*expected_batch=fact(fx,tables[0],id),*expected_package=fact(fx,tables[2],pkgkey);
+    char*packages[]={"sh",product,pkggen,"--","--query","--row",id,0};run(packages,fx,30,&r);
+    char *expected_package=r.out?strdup(r.out):0;size_t len=expected_package?strlen(expected_package):0;
+    ck(!r.rc&&len&&expected_package[len-1]=='\n',"projection-real-package-generator-ran");np_free(&r);if(failed)return 1;
+    expected_package[len-1]=0;
+    char*expected_inventory=fact(fx,tables[1],source),*expected_batch=fact(fx,tables[0],id);
     ck(expected_inventory&&expected_batch&&expected_package,"projection-real-rows-present");if(failed)return 1;
-    for(int i=0;i<3;i++){join(path,sizeof path,fx,tables[i]);if(sy_write_atomic(path,baseline[i],sizes[i],0644))return 2;mm_free(baseline[i]);}
+    for(int i=0;i<2;i++){join(path,sizeof path,fx,tables[i]);if(sy_write_atomic(path,baseline[i],sizes[i],0644))return 2;mm_free(baseline[i]);}
     char*unstage[]={"git","update-index","--force-remove","--",(char*)source,0};run(unstage,fx,10,&r);if(r.rc)return 2;np_free(&r);
     run(tree,fx,10,&r);ck(!r.rc&&!strcmp(r.out,before_tree),"projection-reference-baseline-restored");np_free(&r);if(failed)return 1;
     char*project[]={(char*)image,"--fixture-register-tool",(char*)source,0};run(project,fx,10,&r);ck(!r.rc,"projection-helper-ran");np_free(&r);if(failed)return 1;
-    char*actual_inventory=fact(fx,tables[1],source),*actual_batch=fact(fx,tables[0],id),*actual_package=fact(fx,tables[2],pkgkey);
+    char manifest[400],pkgprefix[160];if(cx_fmt(manifest,sizeof manifest,"tests/manifests/%s.tsv",id)||cx_fmt(pkgprefix,sizeof pkgprefix,"packages\t%s",pkgkey))return 2;
+    char*actual_inventory=fact(fx,tables[1],source),*actual_batch=fact(fx,tables[0],id),*actual_package=fact(fx,manifest,pkgprefix);
     ck(actual_inventory&&!strcmp(actual_inventory,expected_inventory),"projection-register.inventory-row-byte-identical");
     ck(actual_batch&&!strcmp(actual_batch,expected_batch),"projection-register.batch-row-byte-identical");
-    ck(actual_package&&!strcmp(actual_package,expected_package),"projection-register.package-row-byte-identical");
+    ck(actual_package&&!strcmp(actual_package+9,expected_package),"projection-register.package-row-byte-identical");
     run(tree,fx,10,&r);ck(!r.rc&&!strcmp(r.out,before_tree),"projection-index-unchanged");np_free(&r);
     join(path,sizeof path,fx,source);size_t after_n=0;char*after=cx_read(path,&after_n);
     ck(after&&after_n==strlen(body)&&!memcmp(after,body,after_n),"projection-same-input-source-unchanged");

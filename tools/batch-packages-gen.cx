@@ -1,5 +1,6 @@
 /* tools/batch-packages-gen.cx -- which tape-library packages each test batch reaches, and its layer tier.
  *
+ *   sh ./unisacc.com tools/batch-packages-gen.cx -- --query [--row ID] [--registry FILE|--index]
  *   sh ./unisacc.com tools/batch-packages-gen.cx -- --write|--check [--table FILE] [--dump FILE]
  *
  * Run from the repo root. Facts in: `tools/affected.cx -- --closure-dump` (per IMPLEMENTED SOURCE batch
@@ -23,7 +24,7 @@
  *                package), edges (a literal/arg/table/guard edge to a file outside the packages), nopkg.
  * The table marks tiers; tests/batches.tsv is not edited. It is facts about selection, never a result:
  * nothing here is a PASS and a batch that was not run is not PASS.
- * Coarse round (the default, and what is checked in): only the layer column is filled -- no pkg rows, and
+ * Coarse projection (the default): only the layer column is filled -- no pkg rows, and
  * packages, subject, ptier, basis are "-" -- so the table depends on tests/batches.tsv alone and does not
  * move while build/tlib-packages.tsv is being edited. --packages fills the package columns and pkg rows
  * (the draft of the dependency refinement; not checked in yet, not read by affected yet).
@@ -176,26 +177,71 @@ static void put_set(TpBuf *o, unsigned set) {
     if (!any) tp_put(o, "-", 1);
 }
 
+/* Coarse selection consumes only the B records of the closure dump. Project
+ * the registry directly, retaining its order and the pre-tier schema defaults. */
+static void project_registry(const char *path, int index) {
+    size_t n = 0;
+    char *rows = 0;
+    if (index) {
+        char *v[] = {"git", "show", ":tests/batches.tsv", 0};
+        if (cx_runv_timeout(v, 15, &rows, &n)) die("index registry unavailable", path);
+    } else rows = cx_read(path, &n);
+    if (!rows || !n || rows[n-1] != '\n' || memchr(rows, 0, n)) die("registry unreadable or incomplete", path);
+    char *next;
+    for (char *p = rows; *p; p = next) {
+        next = strchr(p, '\n');
+        *next++ = 0;
+        if (!*p || *p == '#' || !strcmp(p, "id") || !strncmp(p, "id\t", 3)) continue;
+        char *f[14] = {p};
+        int cols = 1;
+        for (char *q = p; *q; q++) {
+            if (*q != '\t') continue;
+            if (cols == 14) die("registry columns", path);
+            *q = 0;
+            f[cols++] = q + 1;
+        }
+        if (cols < 12) die("registry columns", path);
+        int assembler = !strcmp(f[4], "PREPARED") && !strcmp(f[0], "assembler") && !strcmp(f[7], "assembler");
+        if (strcmp(f[1], "IMPLEMENTED") || (strcmp(f[4], "SOURCE") && !assembler)) continue;
+        if (nbt == MAXB) die("batch capacity", f[0]);
+        Bt *b = &bt[nbt++];
+        if (cx_fmt(b->id, sizeof b->id, "%s", f[0])) die("id bound", f[0]);
+        int release = cols == 14 ? !strcmp(f[13], "release") : !strcmp(f[2], "platform");
+        b->layer = layer_of(f[0], f[3], release);
+    }
+    free(rows);
+}
+
 int main(int argc, char **argv) {
     char root[4096], table[4400], *dump = 0, *old;
     const char *dump_file = 0, *table_arg = 0;
     size_t dn = 0, on = 0;
-    int a, write = -1, k, u, conf = 0, integ = 0, chain = 0, bad = 0;
+    int a, write = -1, k, u, conf = 0, integ = 0, chain = 0, bad = 0, index=0;
+    const char *registry=0,*row_id=0;
     long i = 0, e;
     TpBuf o;
     o.b = 0; o.n = 0; o.cap = 0; o.bad = 0;
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--write")) write = 1;
         else if (tx_eqz(argv[a], "--check")) write = 0;
+        else if (tx_eqz(argv[a], "--query")) write = 2;
+        else if (tx_eqz(argv[a], "--index")) index=1;
+        else if (tx_eqz(argv[a], "--registry") && a+1<argc) registry=argv[++a];
+        else if (tx_eqz(argv[a], "--row") && a+1<argc) row_id=argv[++a];
         else if (tx_eqz(argv[a], "--table") && a + 1 < argc) table_arg = argv[++a];
         else if (tx_eqz(argv[a], "--dump") && a + 1 < argc) dump_file = argv[++a];
         else if (tx_eqz(argv[a], "--packages")) with_pkgs = 1;
-        else write = -2;
+        else { fprintf(stderr,"batch-packages-gen: unexpected argument %s\n",argv[a]);return 2; }
     }
-    if (write < 0) { fprintf(stderr, "usage: batch-packages-gen.cx -- --write|--check [--packages] [--table FILE] [--dump FILE]\n"); return 2; }
-    if (sy_is_reg("tests/batches.tsv") != 1 || sy_realpath(".", root, sizeof root) < 0) die("run from the repo root", 0);
+    if (write < 0) { fprintf(stderr, "usage: batch-packages-gen.cx -- --query [--row ID] [--index|--registry PATH] | --write|--check [--packages] [--table FILE] [--dump FILE]\n"); return 2; }
+    if (sy_realpath(".", root, sizeof root) < 0) die("cannot resolve root",0);
+    if ((index && registry) || ((row_id||index||registry) && write!=2) ||
+        (write==2 && (table_arg||dump_file||with_pkgs)))die("query arguments",0);
+    if (!registry) registry="tests/batches.tsv";
     if (cx_fmt(table, sizeof table, "%s", table_arg ? table_arg : "build/batch-packages.tsv")) die("path too long", 0);
     if (with_pkgs) load_packages(root);
+    if(write==2 && !with_pkgs && !dump_file)project_registry(registry,index);
+    else {
     if (dump_file) { dump = cx_read(dump_file, &dn); if (!dump) die("cannot read the dump", dump_file); }
     else {
         char prod[4400];
@@ -213,6 +259,7 @@ int main(int argc, char **argv) {
         i = e + 1;
     }
     if (!nbt) die("the closure dump names no batch", 0);
+    }
 
     tp_puts(&o, "# build/batch-packages.tsv -- generated by tools/batch-packages-gen.cx --write; do not edit. Checked by tools/check-batch-packages.cx; read by tools/affected.cx --by-package.\n");
     tp_puts(&o, "# pkg rows: packages = itself and what it depends on, dependents = what depends on it, units = the files it owns. batch rows: packages = every package the batch reaches (closed over dependencies), subject = the reached packages nothing else reached depends on, ptier conformance|integration|chain and its basis. Facts for selection, never a test result.\n");
@@ -245,10 +292,20 @@ int main(int argc, char **argv) {
         tp_puts(&o, tier); tp_put(&o, "\t", 1); tp_puts(&o, basis); tp_puts(&o, "\t-\t-\n");
     }
     if (o.bad || !o.b) die("out of memory", 0);
-    if (write) {
+    if(write==2){
+        if(row_id){
+            char key[256];if(cx_fmt(key,sizeof key,"\nbatch\t%s\t",row_id))die("row key",row_id);
+            char *p=strstr(o.b,key);if(!p)die("batch absent",row_id);
+            p++;char *e=strchr(p,'\n');if(!e)die("row end",row_id);fwrite(p,1,e-p+1,stdout);
+        }else fwrite(o.b,1,o.n,stdout);
+        return 0;
+    } else if (write) {
         if (cx_write(table, o.b, (size_t)o.n)) die("cannot write", table);
     } else {
-        old = cx_read(table, &on);
+        if(!table_arg && !with_pkgs){
+            char *v[]={"sh","./unisacc.com","tools/batch-packages-gen.cx","--","--query",0};
+            if(cx_runv_timeout(v,30,&old,&on))die("independent registry query failed",0);
+        }else old = cx_read(table, &on);
         if (!old) { printf("DIFF\ttable-missing\t%s\n", table); bad = 1; }
         else if ((long)on != o.n || !mm_same(old, o.b, o.n)) {
             long x = 0, y = 0, shown = 0;   /* the first few lines that differ, by position */

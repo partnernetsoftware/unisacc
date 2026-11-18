@@ -33,7 +33,7 @@
 ## 5 基础版服务
 
 - (1) status:各工作目录的已暂存、未暂存、未跟踪计数(`--paths` 列路径)、在途进程、实例与锁。
-- (2) lock:命名写窗口锁,带属主与截止,自动过期,同属主再拿即续期,落盘跨实例重启。约定名:`registry`(tests/batches.tsv、tests/coverage.tsv、build/batch-packages.tsv 写窗口)、`derive`(派生表写窗口)。锁是协作约定,当前不强制拦截写入。
+- (2) lock:命名写窗口锁,带属主与截止,自动过期,同属主再拿即续期,落盘跨实例重启。约定名:`registry`(tests/batches.tsv、tests/coverage.tsv 写窗口)、`derive`(派生表写窗口)。锁是协作约定,当前不强制拦截写入。
 - (3) run:服务构造并缓存工具的原生执行体,客户端直接执行,stdout 与退出码即工具自己的。缓存键含工具源摘要、产品身份、库源目录的树号与未提交差异摘要;库源目录有未跟踪文件时不缓存。
 - (4) events:容量 256 的环形缓冲,`--since N` 增量轮询。来源:锁的获取、释放、过期,实例启动,`events emit`,`events on-change PATH...`(只读跑 on-change --dry-run 后入环,不改钩子)。
 
@@ -89,7 +89,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
 ### 提交门:新增 tlib 模块与分相派生
 
-新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --keyed build/batch-packages.tsv 批次ID与分片ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
 
 `git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
 
@@ -365,6 +365,8 @@ affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids�
 |4 build/links.tsv|10 个命中。links-gen 生成,rel 默认路径、on-change 经 awp_devmeta_read 读内容。cxlib/relload 是关系导入的解析单点,文件头示例不是额外读取。commit-own 有 keyed 路由。check-commit-own、check-relstore、check-links-gen、check-relload、check-on-change 覆盖落盘、解析与提交。|F14,derive 事实、批次表、生成器及库。默认关系查询交给按身份生成的文件,显式 --links 继续读取调用者输入。区分 .devsvc 镜像与 build 回退,防止无表时漏报派生边。|4 至 7|
 |5 build/table-index.tsv|6 个命中。tool-index 的 --tables 生成,--check-tables 核表。关系加载复用 relload,另有 commit-own keyed 路由。check-relstore、check-relload、check-tool-index 分别核导入、显式文件和生成。|F1139 D4,tools 源头注释、tests/batches.tsv、build 表目录和正文。按前四项的逻辑导出清单枚举表,验证有无本地导出时索引一致,避免 fresh checkout 少行。|5 至 8|
 |6 build/batch-packages.tsv|15 个命中。affected --layer、evidence-cover 的两份快照、reg-manifest、register、fixture-gate-tool 读取正文或行。register 和 batch-packages-gen 写,commit-own 选 keyed 行,precommit 选路径。check-affected-domain、check-fixture-gate-tool、check-batch-packages、check-commit-own、check-reg-manifest、check-devsvc、check-tables-gen 均需复核私有夹具。|F3129 仅为部分读集,跟踪下 affected --closure-dump 超时。先拆闭包与投影两相,包含 tools、exec、cx、tests、src 及实际读取的 apps/csih、archive、iterate、release/ci、ujs。门内 manifest 的 packages 行与独立现算逐行比对。读集未闭合前仅可无缓存现算。|8 至 16|
+
+批次包层按当前 tests/batches.tsv 现算，用 `sh ./unisacc.com tools/batch-packages-gen.cx -- --query` 取完整投影，`--row ID` 取单行。暂存登记门用 `--index`，历史证据按各快照选择当时的生成器或已跟踪的表。新检出可直接按层选批。显式导出用 `derive --write --only batch-packages-gen`，全量 `--check` 与独立闭包对拍。回退本次迁移提交即可恢复跟踪及原读者。
 
 六项共用第 10 节的查询合同。键纳入生成器、运行库、启动产品、请求参数、内容清单及所枚举的目录成员。新克隆和链接工作树首次查询在所请求的输入树现算,校验内容后原子发布私有导出。损坏时重算,读入或生成失败向调用者返回具名非零。显式 derive --write --only NAME 保留文件导出。实现按 CLI 调用并保留 rl_load 的显式文件接口,六项预计均无需 tools.cxlib 升版。若改为新增公开库入口,该张表另行预留版本。
 
