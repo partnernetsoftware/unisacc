@@ -3,7 +3,8 @@
  * Reads the pre-network delta (state names intact, cxlib.delta) and reports, per check, every finding
  * with the state/edge it concerns. rc 0 when no ERROR; --strict also turns WARN into rc 1.
  * Checks (the ones that this week's E2 UCN work found by probing after construction):
- *   total       a b/r state missing an edge for some key 0..256 (the executor dies at run time there)
+ *   total       a b state missing an edge for some key 0..256, or an r state missing one for an r value that can reach
+ *               it (the executor dies at run time there; r ranges per setter, see the check)
  *   reach       states unreachable from the start state (dead rows are debt, not coverage)
  *   stale-r     (WARN: path-insensitive) a result-mode state entered without r set since the last dispatch
  *               (CMP/CMPI/C64/C64U/RLD/A64/A64I/DIVMOD10/OLAST), so it dispatches on a stale result
@@ -75,7 +76,27 @@ int main(int argc, char **argv) {
     dl_load(argv[1], &D); collect_edges();
     char kb[256], detail[1024];
     /* total */
-    for (int s = 0; s < D.ns; s++) if (D.s[s].mode != 't') { int miss = 0, first = -1; for (int k = 0; k < 257; k++) if (D.s[s].byte[k].next < 0) { miss++; if (first < 0) first = k; } if (miss) { { if (cx_fmt(detail, sizeof detail, "%d keys without an edge (first %d)", miss, first)) { fprintf(stderr, "table-lint: text too long for detail\n"); exit(2); } } finding("ERROR", "total", D.s[s].name, detail); } }
+    /* a result-mode state is total over the r values that can reach it, not over all 257 keys: rdom[t] is the union,
+       over every edge into t, of the last r-setter's range (CMP CMPI C64 C64U 0..2, DIVMOD10 0..19, RLD OLAST A64 A64I
+       0..256) or, without a setter, the edge's own key out of a result state, else 0..256.  A result table declared with
+       a narrow domain (exec/lex "domain": [0, 20]) is then judged on the values the executor can deliver. */
+    unsigned char *rdom = calloc((size_t)D.ns * 257, 1); if (!rdom) return 2;
+    for (int s = 0; s < D.ns; s++) {
+        dl_state *st = &D.s[s]; int n = st->mode == 't' ? st->tn : 257;
+        for (int k = 0; k < n; k++) {
+            dl_edge *e = st->mode == 't' ? &st->tedges[k] : &st->byte[k]; if (e->next < 0) continue;
+            int lo = 0, hi = 256, set = 0;
+            for (int j = 0; j < e->seq->n; j++) { int op = e->seq->a[j].op;
+                if (op == DL_CMP || op == DL_CMPI || op == DL_C64 || op == DL_C64U) { lo = 0; hi = 2; set = 1; }
+                else if (op == DL_DIVMOD10) { lo = 0; hi = 19; set = 1; }
+                else if (op == DL_RLD || op == DL_OLAST || op == DL_A64 || op == DL_A64I) { lo = 0; hi = 256; set = 1; } }
+            if (!set && st->mode == 'r') lo = hi = k;
+            for (int v = lo; v <= hi; v++) rdom[(size_t)e->next * 257 + (size_t)v] = 1;
+        }
+    }
+    for (int k = 0; k < 257; k++) rdom[(size_t)D.start * 257 + (size_t)k] = 1;
+    for (int s = 0; s < D.ns; s++) if (D.s[s].mode != 't') { int any = 0; for (int k = 0; k < 257; k++) any |= rdom[(size_t)s * 257 + (size_t)k];
+        int miss = 0, first = -1; for (int k = 0; k < 257; k++) if (D.s[s].byte[k].next < 0 && (D.s[s].mode != 'r' || !any || rdom[(size_t)s * 257 + (size_t)k])) { miss++; if (first < 0) first = k; } if (miss) { { if (cx_fmt(detail, sizeof detail, "%d keys without an edge (first %d)", miss, first)) { fprintf(stderr, "table-lint: text too long for detail\n"); exit(2); } } finding("ERROR", "total", D.s[s].name, detail); } }
     /* reach */
     unsigned char *seen = calloc((size_t)D.ns, 1); int *work = malloc((size_t)D.ns * sizeof(int)); int wn = 0; if (!seen || !work) return 2;
     seen[D.start] = 1; work[wn++] = D.start;
