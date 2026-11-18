@@ -147,27 +147,50 @@ static int run_through(char **v, long deadline_ms) {
     if (sy_proc_run(&o, &ex)) return 1;
     return sy_exit_code(&ex);
 }
-/* 执行体字节 sha 存在 <bin>.sha;命中时只做这一项校验 */
+/* 执行体字节 sha 存在 <bin>.sha,racy-2s stat 备忘存在 <bin>.stat;命中时 O(1) stat 校验 */
+static int fg_small(const char *p, char *out, int cap);
+static int fg_hex40(const char *s);
 static int bin_sha(const char *bin, char hex[65]) {
     unsigned char *b = 0; int64_t n = 0; int rc = -1;
     if (!sy_read_file(bin, &b, &n, 1LL << 30) && b && !sy_sha256_hex(b, (long)n, hex)) rc = 0;
     if (b) free(b);
     return rc;
 }
-static void bin_seal(const char *bin) {
-    char hex[65], p[PW + 16]; F(p, sizeof p, "%s.sha", bin);
-    if (!ovf && !bin_sha(bin, hex)) sy_write_atomic(p, hex, 64, 0600);
+static void bin_seal_stat(const char *bin, const sy_stat_t *st, const char *hex) {
+    char sp[PW + 16], line[256]; long now = sy_wall_s(); int k;
+    F(sp, sizeof sp, "%s.stat", bin);
+    if (ovf || now < st->ctime + 2 || now < st->mtime + 2) return;
+    sy_stat_t s2;
+    if (sy_stat(bin, &s2) || s2.size != st->size || s2.ino != st->ino || s2.dev != st->dev || s2.mtime != st->mtime || s2.ctime != st->ctime) return;
+    k = snprintf(line, sizeof line, "dvbin1\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\tr%010ld", st->size, st->dev, st->ino, st->mtime, st->ctime, hex, now);
+    if (k > 0 && k < (int)sizeof line) (void)sy_write_atomic(sp, line, k, 0600);
 }
-/* 1:执行体在且与 .sha 相符(无 .sha 的旧条目补写后视为相符);0:不在或不符(不符时删掉以便重建) */
+static void bin_seal(const char *bin) {
+    char hex[65], p[PW + 16], sp[PW + 16]; sy_stat_t st;
+    F(p, sizeof p, "%s.sha", bin); F(sp, sizeof sp, "%s.stat", bin);
+    if (!ovf) sy_unlink(sp);
+    if (!ovf && !bin_sha(bin, hex) && !sy_write_atomic(p, hex, 64, 0600) && !sy_stat(bin, &st) && st.kind == 'f') bin_seal_stat(bin, &st, hex);
+}
+/* 1:执行体在且与 .stat (racy 2s 规则) 或 .sha 相符(无 .sha 的旧条目补写后视为相符);0:不在或不符(不符时删掉以便重建) */
 static int bin_ok(const char *bin) {
-    char hex[65], p[PW + 16]; unsigned char *b = 0; int64_t n = 0; int ok;
-    if (sy_exists(bin) != 1) return 0;
-    F(p, sizeof p, "%s.sha", bin);
-    if (ovf || bin_sha(bin, hex)) return 0;
-    if (sy_read_file(p, &b, &n, 128) || !b) { if (b) free(b); sy_write_atomic(p, hex, 64, 0600); return 1; }
+    char hex[65], p[PW + 16], sp[PW + 16], want[160], sline[256]; unsigned char *b = 0; int64_t n = 0;
+    sy_stat_t st; int ok, wl;
+    if (ovf || sy_stat(bin, &st) || st.kind != 'f') return 0;
+    F(p, sizeof p, "%s.sha", bin); F(sp, sizeof sp, "%s.stat", bin);
+    if (ovf) return 0;
+    wl = snprintf(want, sizeof want, "dvbin1\t%ld\t%lu\t%ld\t%ld\t%ld\t", st.size, st.dev, st.ino, st.mtime, st.ctime);
+    if (wl > 0 && wl < (int)sizeof want && sy_exists(p) == 1 && fg_small(sp, sline, sizeof sline) == wl + 64 + 12 && !memcmp(sline, want, wl)) {
+        if (sline[wl + 64] == '\t' && sline[wl + 65] == 'r' && fg_hex40(sline + wl) && fg_hex40(sline + wl + 24)) {
+            long rec = atol(sline + wl + 66);
+            if (rec >= st.ctime + 2 && rec >= st.mtime + 2) return 1;
+        }
+    }
+    if (bin_sha(bin, hex)) return 0;
+    if (sy_read_file(p, &b, &n, 128) || !b) { if (b) free(b); sy_write_atomic(p, hex, 64, 0600); bin_seal_stat(bin, &st, hex); return 1; }
     ok = n == 64 && !memcmp(b, hex, 64);
     free(b);
-    if (!ok) { fprintf(stderr, "dv: cached %s does not match its sha, rebuilding\n", bin); sy_unlink(bin); sy_unlink(p); }
+    if (ok) bin_seal_stat(bin, &st, hex);
+    else { fprintf(stderr, "dv: cached %s does not match its sha, rebuilding\n", bin); sy_unlink(bin); sy_unlink(p); sy_unlink(sp); }
     return ok;
 }
 /* 用产品把 src 编成 bin(cwd 下,上限 55 s,日志 logp),原子改名;0 成功 */
@@ -486,10 +509,12 @@ int main(int argc, char **argv) {
         sy_unsetenv("DEVSVC_REPO_TABLE");
         sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
     }
-    int fromhead = 0, wcfb = 0, memo = 0;
+    int fromhead = 0, wcfb = 0, memo = 0, fr = -1; char cwd0[PW];
     {   /* 按当前 git 顶层取根(版本工作树一个树一个实例);能不起 git 读出顶层就直接用(fastgit),否则问 git;不在 git 内时退回 cwd */
-        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl; int fr = fastgit(); const char *ovt;
-        if (sy_cwd(root, sizeof root) < 0) return 3;
+        char *gv[] = {"git", "rev-parse", "--show-toplevel", 0}; char *nl; const char *ovt;
+        if (sy_cwd(cwd0, sizeof cwd0) < 0) return 3;
+        F(root, sizeof root, "%s", cwd0);
+        fr = fastgit();
         if (fr >= 0) F(root, sizeof root, "%s", fg_top);
         else if (runcap(gv, root, real, sizeof real) == 0 && real[0] == '/') { nl = strchr(real, '\n'); if (nl) *nl = 0; F(root, sizeof root, "%s", real); }
         real[0] = 0;
@@ -500,6 +525,7 @@ int main(int argc, char **argv) {
             if (jn > 0 && !(!strncmp(root, j, jn) && (root[jn] == 0 || root[jn] == '/'))) {
                 if (ofr && !strcmp(ofr, j)) unsetenv("UNISACC_FLOW_ROOT");
                 unsetenv("DEVSVC_REPO_TABLE"); unsetenv("DEVSVC_REPO_TABLE_PIN"); unsetenv("DEVSVC_SELF_BIN"); unsetenv("UNISACC_FLOW_ROOT_JOB");
+                unsetenv("DEVSVC_FG_CWD"); unsetenv("DEVSVC_FG_TOP"); unsetenv("DEVSVC_FG_COMMON"); unsetenv("DEVSVC_FG_HEAD");
             } }
         ovt = getenv("DEVSVC_REPO_TABLE");
         if (fr != 0 && !dev) {
@@ -597,13 +623,25 @@ int main(int argc, char **argv) {
         printf("%s", receipt);
         return 0;
     }
+    unsetenv("DEVSVC_FG_CWD"); unsetenv("DEVSVC_FG_TOP"); unsetenv("DEVSVC_FG_COMMON"); unsetenv("DEVSVC_FG_HEAD");
+    if (fr >= 0 && cwd0[0] && fg_top[0]) {
+        setenv("DEVSVC_FG_CWD", cwd0, 1); setenv("DEVSVC_FG_TOP", fg_top, 1);
+        if (fr == 0 && fg_common[0]) setenv("DEVSVC_FG_COMMON", fg_common, 1);
+        if (fr == 0 && fg_commit[0]) setenv("DEVSVC_FG_HEAD", fg_commit, 1);
+    }
     if (dev) { v[n++] = "sh"; v[n++] = prod; v[n++] = selfp; v[n++] = "--"; }
     else {
         if (setenv("DEVSVC_SELF_BIN", bin, 1)) return 3;
         if (fromhead) {   /* HEAD 版配置表存进 pinned/<键>/ 并经 DEVSVC_REPO_TABLE 交给核心 */
             char tp[PW + 32]; F(tp, sizeof tp, "%s/devsvc-repo.tsv", kd);
             char pin[PW + 96]; F(pin, sizeof pin, "%s:%s", hd, tp);   /* 告诉核心这张表取自哪个修订(config 输出配置身份用) */
-            if (ovf || sy_write_atomic(tp, headtab, headtab_n, 0600) || setenv("DEVSVC_REPO_TABLE", tp, 1) || setenv("DEVSVC_REPO_TABLE_PIN", pin, 1)) { fprintf(stderr, "dv: cannot stage HEAD repo table\n"); return 3; }
+            int same = 0;
+            if (!ovf && sy_exists(tp) == 1) {
+                unsigned char *eb = 0; int64_t en = 0;
+                if (!sy_read_file(tp, &eb, &en, headtab_n + 1) && eb && en == headtab_n && !memcmp(eb, headtab, headtab_n)) same = 1;
+                if (eb) free(eb);
+            }
+            if (ovf || (!same && sy_write_atomic(tp, headtab, headtab_n, 0600)) || setenv("DEVSVC_REPO_TABLE", tp, 1) || setenv("DEVSVC_REPO_TABLE_PIN", pin, 1)) { fprintf(stderr, "dv: cannot stage HEAD repo table\n"); return 3; }
         }
         v[n++] = bin;
     }

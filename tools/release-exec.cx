@@ -327,26 +327,47 @@ static void gate_ape(void) {
     if (!tx_eqz(o, want)) { char d[400]; cx_fmt(d, sizeof d, "APE --version '%s' != '%s'", o, want); refuse("APE_VERSION", d); }
     gate_pass("APE_VERSION", want);
 }
+static int frozen_checkout(void) {
+    char head[64], dirty[256];
+    char *rev[]={"git","rev-parse","HEAD",0};
+    char *diff[]={"git","status","--porcelain","--untracked-files=no",0};
+    return !run(rev,5,head,sizeof head) && tx_eqz(head,cand.commit) &&
+           !run(diff,10,dirty,sizeof dirty) && !dirty[0];
+}
 static void gate_ratchets(void) {
     char p[4500], okv[16], fv[16], src[64]; long n, at = 0, ll; const char *ls; char *t = 0; int found = 0;
     long okn = -1, fn = -1;
+    int persist = 0;
     if (cx_fmt(p, sizeof p, "%s/ratchets.txt", evdir)) die("ratchets path");
     cx_fmt(src, sizeof src, "evidence");
     if (!(t = slurp(p, &n))) {
         /* no recorded evidence: run the ratchets now (local, read-only) and keep the output */
         char *v[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
-        if (dry && cx_fmt(p, sizeof p, "%s/ratchets.txt", outdir)) die("ratchets path");
-        run_to(v, 60, p);
+        persist = dry && frozen_checkout();
+        if (cx_fmt(p, sizeof p, "%s/ratchets-live.txt", outdir)) die("ratchets path");
+        if (run_to(v, 60, p)) refuse("RATCHETS", "live ratchets command failed");
         cx_fmt(src, sizeof src, "live-HEAD");
         if (!(t = slurp(p, &n))) refuse("RATCHETS", "ratchets output missing");
     }
+    if (n >= 9 && !memcmp(t, "# freeze=", 9) &&
+        (n < 50 || memcmp(t + 9, cand.commit, 40) || t[49] != '\n'))
+        refuse("RATCHETS", "saved ratchets belong to another freeze");
     while (line_next(t, n, &at, &ls, &ll))
         if (ll > 9 && !memcmp(ls, "RATCHETS\t", 9)) {
             kv(ls, ll, "ok=", okv, sizeof okv); kv(ls, ll, "fail=", fv, sizeof fv);
             okn = okv[0] ? atol(okv) : -1; fn = fv[0] ? atol(fv) : -1; found = 1;
         }
-    free(t);
     if (!found || fn != 0 || okn < 15) { char d[200]; cx_fmt(d, sizeof d, "ok=%ld fail=%ld (need ok>=15 fail=0)", okn, fn); refuse("RATCHETS", d); }
+    if (persist && frozen_checkout()) {
+        if (sy_mkdir(evdir,0755) && sy_exists(evdir)!=1) die("ratchets evidence directory");
+        np_buf receipt={0}; np_puts(&receipt,"# freeze="); np_puts(&receipt,cand.commit);
+        np_puts(&receipt,"\n"); np_put(&receipt,t,n);
+        if (cx_fmt(p,sizeof p,"%s/ratchets.txt",evdir) || sy_write_atomic(p,receipt.p,receipt.n,0644))
+            die("write frozen ratchets evidence");
+        free(receipt.p);
+        cx_fmt(src,sizeof src,"frozen-HEAD");
+    }
+    free(t);
     { char d[200]; cx_fmt(d, sizeof d, "%ld/0 source=%s", okn, src); gate_pass("RATCHETS", d); }
 }
 

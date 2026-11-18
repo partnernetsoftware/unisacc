@@ -1,0 +1,109 @@
+#pragma unisa module uxeimage
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static unsigned png_table[256];
+
+void uxe_crc_init(void) {
+    unsigned i,j,c;
+    for(i=0;i<256;i++) {
+        c=i;
+        for(j=0;j<8;j++) c=(c&1)?(0xedb88320u^(c>>1)):(c>>1);
+        png_table[i]=c;
+    }
+}
+
+unsigned uxe_crc32(const unsigned char *p,int n) {
+    unsigned c=0xffffffffu;
+    int i;
+    for(i=0;i<n;i++) c=png_table[(c^p[i])&255]^(c>>8);
+    return c^0xffffffffu;
+}
+
+unsigned uxe_adler(const unsigned char *p,int n) {
+    unsigned a=1,b=0;
+    int i;
+    for(i=0;i<n;i++) { a=(a+p[i])%65521; b=(b+a)%65521; }
+    return (b<<16)|a;
+}
+
+void uxe_be32(unsigned char *out,unsigned value) {
+    out[0]=(unsigned char)(value>>24);
+    out[1]=(unsigned char)(value>>16);
+    out[2]=(unsigned char)(value>>8);
+    out[3]=(unsigned char)value;
+}
+
+/* RGBA8 PNG with one IDAT and uncompressed deflate blocks. */
+int uxe_encode_rgba_png(unsigned char *dst,int capacity,const unsigned char *pixels,int width,int height) {
+    static const unsigned char signature[]={137,80,78,71,13,10,26,10};
+    static const unsigned char header_tail[]={8,6,0,0,0};
+    unsigned char *raw;
+    int stride,n,blocks,zlen,size,offset,i,pos=0,used=0;
+    if(width<1 || height<1 || width>4096 || height>4096) return 0;
+    stride=4*width+1;
+    n=height*stride;
+    blocks=(n+65534)/65535;
+    zlen=n+5*blocks+6;
+    size=zlen+57;
+    if(capacity<size) return 0;
+    raw=(unsigned char *)mm_alloc(n);
+    if(!raw) return 0;
+    for(i=0;i<height;i++) {
+        raw[i*stride]=0;
+        mm_copy(raw+i*stride+1,stride-1,pixels+i*(stride-1),stride-1);
+    }
+    mm_copy(dst,capacity,signature,8);
+    uxe_be32(dst+8,13);
+    mm_copy(dst+12,capacity-12,"IHDR",4);
+    uxe_be32(dst+16,(unsigned)width);
+    uxe_be32(dst+20,(unsigned)height);
+    mm_copy(dst+24,capacity-24,header_tail,5);
+    uxe_be32(dst+29,uxe_crc32(dst+12,17));
+    uxe_be32(dst+33,(unsigned)zlen);
+    mm_copy(dst+37,capacity-37,"IDAT",4);
+    pos=41;
+    dst[pos++]=0x78;
+    dst[pos++]=1;
+    while(used<n) {
+        int left=n-used,length=left>65535?65535:left;
+        dst[pos++]=length==left?1:0;
+        dst[pos++]=(unsigned char)length;
+        dst[pos++]=(unsigned char)(length>>8);
+        dst[pos++]=(unsigned char)(~length);
+        dst[pos++]=(unsigned char)(~length>>8);
+        mm_copy(dst+pos,capacity-pos,raw+used,length);
+        pos+=length;
+        used+=length;
+    }
+    uxe_be32(dst+pos,uxe_adler(raw,n));
+    mm_free(raw);
+    pos+=4;
+    uxe_be32(dst+pos,uxe_crc32(dst+37,zlen+4));
+    offset=pos+4;
+    uxe_be32(dst+offset,0);
+    mm_copy(dst+offset+4,capacity-offset-4,"IEND",4);
+    uxe_be32(dst+offset+8,uxe_crc32(dst+offset+4,4));
+    return size;
+}
+
+int uxe_check_png(const char *path,const unsigned char *want,int size) {
+    unsigned char *disk=0;
+    int64_t n=0;
+    int rc=sy_read_file(path,&disk,&n,(int64_t)size+1);
+    int mismatch=rc || n!=size || !mm_same(disk,want,size);
+    if(disk) mm_free(disk);
+    return mismatch;
+}
+
+int uxe_polygon_contains(const double *xs,const double *ys,int n,double x,double y) {
+    double x1=xs[n-1],y1=ys[n-1];
+    int i,inside=0;
+    for(i=0;i<n;i++) {
+        double x2=xs[i],y2=ys[i];
+        if(((y1>y)!=(y2>y)) && x<(x2-x1)*(y-y1)/(y2-y1)+x1) inside=!inside;
+        x1=x2; y1=y2;
+    }
+    return inside;
+}

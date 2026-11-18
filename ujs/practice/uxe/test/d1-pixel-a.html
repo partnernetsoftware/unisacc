@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>D1 像素机体开发预览</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;background:#225675;overflow:hidden}
+  canvas{display:block;width:100%;height:100%;object-fit:cover;image-rendering:pixelated}
+  output{display:none}
+  aside{position:absolute;top:12px;right:14px;padding:5px 8px;background:#18344dd9;
+    color:#e5f4f1;font:13px system-ui}
+</style>
+<canvas width="1278" height="720" aria-label="D1 飞行。指针或方向键转向，空格开炮，M 发射导弹"></canvas>
+<aside>开发预览</aside>
+<output></output>
+<script src="../demo/host1-runtime.js"></script>
+<script>
+function reportFlightError(message) {
+  document.title="D1_FLY_NEXT_ERROR";
+  document.querySelector("output").textContent=String(message);
+}
+addEventListener("error",event=>reportFlightError(event.message||"资源读取失败"));
+addEventListener("unhandledrejection",event=>reportFlightError(event.reason));
+</script>
+<script type="module">
+import { drawAircraft } from "./d1-pixel-aircraft.js";
+import { pixelWorld } from "./d1-pixel-world.js";
+import { combatModel } from "./d1-pixel-combat.js";
+
+const low=document.createElement("canvas");
+low.width=426;
+low.height=240;
+const buffer=low.getContext("2d");
+const display=document.querySelector("canvas").getContext("2d");
+display.imageSmoothingEnabled=false;
+const result=document.querySelector("output");
+const query=new URLSearchParams(location.search);
+const auto=query.get("auto")==="1";
+const inputTest=query.get("input-test")==="1";
+const frameInterval=1000/30;
+const world=pixelWorld(buffer,query);
+const combat=combatModel(buffer,query);
+
+const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
+if(!wasm.ok) throw new Error("D1 飞行核读取失败");
+const {exports:core,meta}=await window.host1Boot(await wasm.arrayBuffer());
+const inputs=["input_turn","input_climb","input_boost"].map(name=>meta.globals.indexOf(name));
+if(inputs.some(index=>index<0)) throw new Error("D1 飞行输入槽缺失");
+let flight,tick=0,firstFrame=0,minGap=1000,previousFrame=0;
+window.onHostGpuSubmit=bytes=>{
+  const view=new DataView(bytes);
+  if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
+  flight={
+    heading:view.getUint16(1,true), bank:view.getUint8(3)-24,
+    x:(view.getUint16(4,true)-2048)/8,z:(view.getUint16(6,true)-2048)/8,
+    altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
+  };
+};
+function frame(axis,climb,boost,gun=false,missile=false,stamp=0) {
+  flight=null;
+  core.host_reset();
+  [axis,climb,boost].forEach((value,i)=>core.host_set_global(inputs[i],core.host_mk_i64(BigInt(value))));
+  core.run_step();
+  if(!flight) throw new Error("D1 飞行核没有提交本帧");
+  tick++;
+  world.paint(flight,tick);
+  combat.update(flight,tick,gun,missile);
+  drawAircraft(buffer,213,158,flight.pitch,flight.bank,flight.speed,tick);
+  const hud=combat.hud();
+  display.drawImage(low,0,0,1278,720);
+  if(inputTest && stamp) {
+    if(!firstFrame) firstFrame=stamp;
+    if(previousFrame) minGap=Math.min(minGap,stamp-previousFrame);
+    previousFrame=stamp;
+    result.textContent=[flight.heading,hud.ammo,hud.missiles,Number(hud.locked),tick,
+      Math.round(stamp-firstFrame),Math.round(minGap*1000)].join(",");
+  }
+}
+frame(0,0,0);
+if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
+if(query.get("still")==="impact") for(let i=1;i<18;i++) frame(0,0,0,false,i===3);
+if(query.has("terrain")) {
+  const dots=query.get("terrain").split(";").map(pair=>pair.split(",").map(Number));
+  const grid=buffer.getImageData(0,0,426,240).data, raw=[];
+  for(let y=123;y<240;y+=4) for(let x=1;x<426;x+=4) {
+    const at=4*(y*426+x);
+    raw.push(grid[at],grid[at+1],grid[at+2]);
+  }
+  const swatch=document.createElement("canvas");
+  swatch.width=dots.length; swatch.height=1;
+  const ink=swatch.getContext("2d");
+  world.swatches(ink,dots);
+  const colors=ink.getImageData(0,0,dots.length,1).data, sampled=[];
+  for(let i=0;i<dots.length;i++) sampled.push(colors[4*i],colors[4*i+1],colors[4*i+2]);
+  result.id="pixels";
+  result.textContent=sampled.join(",")+"|"+raw.join(",");
+} else if(query.has("combat")) {
+  const sample=(pairs)=>{
+    const data=buffer.getImageData(0,0,426,240).data, pixels=[];
+    for(const pair of pairs.split(";")) {
+      const [x,y]=pair.split(",").map(Number),at=4*(y*426+x);
+      pixels.push(data[at],data[at+1],data[at+2]);
+    }
+    return pixels.join(",");
+  };
+  const regions=query.get("combat").split("|");
+  const initial=sample(regions[0]);
+  for(let i=1;i<18;i++) frame(0,0,0,i===1,i===3);
+  result.id="pixels";
+  result.textContent=initial+"|"+sample(regions[1]);
+} else if(query.has("still") || auto) {
+  result.textContent=String(flight.heading);
+  if(auto) document.title="D1_FLY_NEXT_READY";
+} else {
+  const keys=new Set();
+  const controls=["KeyA","KeyD","KeyW","KeyS","ArrowLeft","ArrowRight","ArrowUp","ArrowDown","ShiftLeft","ShiftRight","Space","KeyF","KeyM"];
+  const canvas=document.querySelector("canvas");
+  let pointer=null,buttons=0;
+  addEventListener("keydown",event=>{
+    if(!controls.includes(event.code)) return;
+    if(inputTest && query.has("wrong-key") && event.code==="KeyD") return;
+    event.preventDefault();
+    keys.add(event.code);
+  });
+  addEventListener("keyup",event=>keys.delete(event.code));
+  canvas.addEventListener("pointermove",event=>{
+    const rect=canvas.getBoundingClientRect();
+    pointer={x:2*(event.clientX-rect.left)/rect.width-1,y:2*(event.clientY-rect.top)/rect.height-1};
+    buttons=event.buttons;
+  });
+  canvas.addEventListener("pointerdown",event=>buttons=event.buttons);
+  addEventListener("pointerup",event=>buttons=event.buttons);
+  canvas.addEventListener("pointerleave",()=>{ pointer=null; buttons=0; });
+  canvas.addEventListener("contextmenu",event=>event.preventDefault());
+  addEventListener("blur",()=>{ keys.clear(); pointer=null; buttons=0; });
+  let last=performance.now();
+  function loop(now) {
+    if(now-last+.25>=frameInterval) {
+      last=now;
+      const keyAxis=Number(keys.has("KeyD")||keys.has("ArrowRight"))-Number(keys.has("KeyA")||keys.has("ArrowLeft"));
+      const keyClimb=Number(keys.has("KeyW")||keys.has("ArrowUp"))-Number(keys.has("KeyS")||keys.has("ArrowDown"));
+      const axis=keyAxis||(pointer&&Math.abs(pointer.x)>.2?Math.sign(pointer.x):0);
+      const climb=keyClimb||(pointer&&Math.abs(pointer.y)>.3?-Math.sign(pointer.y):0);
+      frame(axis,climb,Number(keys.has("ShiftLeft")||keys.has("ShiftRight")),
+        (buttons&1)||keys.has("Space")||keys.has("KeyF"),(buttons&2)||keys.has("KeyM"),now);
+    }
+    requestAnimationFrame(loop);
+  }
+  if(inputTest) document.title="D1_FLY_NEXT_READY";
+  requestAnimationFrame(loop);
+}
+</script>
+</html>
