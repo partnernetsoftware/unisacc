@@ -1,0 +1,188 @@
+/* tools/check-own-flow-tree.cx -- whole-tree false-reject gate for the own-flow prototype (OWN-E2, plans/v0.0.77.md A2).
+ *
+ *   sh ./unisacc.com tools/check-own-flow-tree.cx [-- [--max N] [--paths FILE] [--no-tools]]
+ *
+ * Runs tools/own-flow.cx over every tracked .cx under cx/, ext/ and src/ (git ls-files, one own-flow run per
+ * directory) and counts the rejected functions (distinct FILE+FUNCTION with at least one OWNFLOW line).
+ * Gate: cx + ext + src together reject at most N functions (default 5, the A2 gate of plans/v0.0.77.md v2).
+ * tools/ is run and reported the same way but carries no gate (--no-tools leaves it out).
+ * --paths FILE replaces the three directory lists by the paths of FILE (one per line, one gated group
+ * "paths"); a listed path that cannot be read is a named refusal (REFUSE missing PATH, rc 2) before own-flow
+ * runs.  A run of own-flow that ends in rc 2 or without its summary line is a refusal too.
+ * Output: OWNFLOW_TREE_REJECT<TAB>GROUP<TAB>FILE:LINE<TAB>FUNCTION for every rejected function, one
+ * OWNFLOW_TREE_GROUP line per group, OWNFLOW_TREE_SKIP for files own-flow could not tokenize, and last
+ *   CHECK_OWN_FLOW_TREE<TAB>gate=PASS|FAIL<TAB>gated_rejected=G<TAB>max=N<TAB>tools_rejected=T<TAB>failed=F<TAB>checks=K
+ * Two negative controls run every time: the gate at max 0 over the gated result plus the reject fixture
+ * tests/cases/own-flow/a-read-after-free.cx must FAIL and list that fixture's function; a path list holding a
+ * missing file must be refused by name.  rc 1 when F > 0, rc 2 on a usage or I/O error. */
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXREJ 512
+#define CMDCAP 131072
+static char rj_key[MAXREJ][320], rj_at[MAXREJ][320], rj_grp[MAXREJ][16];
+static int nrj, failed, checks;
+
+static int seen(const char *key) {
+    int i;
+    for (i = 0; i < nrj; i++) if (!strcmp(rj_key[i], key)) return 1;
+    return 0;
+}
+
+/* collect OWNFLOW lines of T into the reject list under GROUP; returns rejected functions added, -1 on refusal */
+static int collect(const char *t, size_t tn, const char *grp, int *skips) {
+    const char *p = t, *end = t + tn;
+    int added = 0, summary = 0;
+    while (p && p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)), *le = nl ? nl : end;
+        long n = le - p;
+        if (n >= 16 && !strncmp(p, "OWNFLOW_SUMMARY ", 16)) summary = 1;
+        if (n > 8 && n < 900 && !strncmp(p, "OWNFLOW_SKIP\t", 13)) {
+            printf("OWNFLOW_TREE_SKIP\t%s\t%.*s\n", grp, (int)(n - 13), p + 13);
+            ++*skips;
+        }
+        if (n > 8 && n < 900 && !strncmp(p, "OWNFLOW\t", 8)) {
+            char line[900], *c1 = line, *c2, *c3, *colon, key[320];
+            mm_copy(line, sizeof line, p + 8, (size_t)(n - 8)); line[n - 8] = 0;
+            c2 = strchr(c1, '\t'); c3 = c2 ? strchr(c2 + 1, '\t') : 0;
+            if (c2 && c3) {
+                *c2++ = 0; *c3 = 0;
+                colon = strrchr(c1, ':');
+                if (colon && !cx_fmt(key, sizeof key, "%.*s\t%s", (int)(colon - c1), c1, c2) && !seen(key) && nrj < MAXREJ) {
+                    mm_copy(rj_key[nrj], sizeof rj_key[0], key, tx_len(key, sizeof key) + 1);
+                    (void)cx_fmt(rj_at[nrj], sizeof rj_at[0], "%s\t%s", c1, c2);
+                    (void)cx_fmt(rj_grp[nrj], sizeof rj_grp[0], "%s", grp);
+                    nrj++; added++;
+                }
+            }
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    return summary ? added : -1;
+}
+
+/* every path of the newline list L readable; prints REFUSE missing PATH for the first that is not */
+static int paths_ok(const char *l) {
+    const char *p = l;
+    while (p && *p) {
+        const char *nl = strchr(p, '\n');
+        long n = nl ? nl - p : (long)tx_len(p, 4096);
+        if (n > 0) {
+            char path[1024]; size_t m; char *s;
+            if (n >= (long)sizeof path) { printf("REFUSE\tpath too long\n"); return 0; }
+            mm_copy(path, sizeof path, p, (size_t)n); path[n] = 0;
+            s = cx_read(path, &m);
+            if (!s) { printf("REFUSE\tmissing\t%s\n", path); return 0; }
+            mm_free(s);
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    return 1;
+}
+
+/* own-flow over the newline list L as group GRP; returns rejected functions or -1 */
+static int run_group(const char *grp, const char *l, int *files, int *skips) {
+    char *cmd = mm_alloc(CMDCAP), *out = 0;
+    size_t outn = 0, cl;
+    const char *p = l;
+    int r;
+    if (!cmd) return -1;
+    if (cx_fmt(cmd, CMDCAP, "sh ./unisacc.com tools/own-flow.cx --")) { mm_free(cmd); return -1; }
+    cl = tx_len(cmd, CMDCAP);
+    *files = 0;
+    while (p && *p) {
+        const char *nl = strchr(p, '\n');
+        long n = nl ? nl - p : (long)tx_len(p, 4096);
+        if (n > 0) {
+            if (cl + (size_t)n + 2 >= CMDCAP) { mm_free(cmd); printf("REFUSE\t%s\tpath list too long\n", grp); return -1; }
+            cmd[cl++] = ' '; mm_copy(cmd + cl, CMDCAP - cl, p, (size_t)n); cl += (size_t)n; cmd[cl] = 0;
+            ++*files;
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    if (!*files) { mm_free(cmd); printf("REFUSE\t%s\tno files\n", grp); return -1; }
+    cx_run_timeout(cmd, 50, &out, &outn);
+    mm_free(cmd);
+    r = out ? collect(out, outn, grp, skips) : -1;
+    if (out) mm_free(out);
+    if (r < 0) printf("REFUSE\t%s\town-flow gave no summary\n", grp);
+    return r;
+}
+
+static char *ls_files(const char *spec) {
+    char cmd[512], *out = 0; size_t n = 0;
+    if (cx_fmt(cmd, sizeof cmd, "git ls-files -- '%s/*.cx'", spec)) return 0;
+    if (cx_run_timeout(cmd, 20, &out, &n) && out) { mm_free(out); return 0; }
+    return out;
+}
+
+static void ck(int ok, const char *what) {
+    checks++;
+    if (!ok) { failed++; printf("FAIL\t%s\n", what); } else printf("PASS\t%s\n", what);
+}
+
+int main(int argc, char **argv) {
+    const char *gated[3] = {"cx", "ext", "src"}, *paths = 0;
+    int a = 1, maxrej = 5, tools = 1, g, gated_rej = 0, tools_rej = 0, files, skips = 0, refused = 0, ng;
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--max") && a + 1 < argc) { maxrej = atoi(argv[a + 1]); a += 2; }
+        else if (tx_eqz(argv[a], "--paths") && a + 1 < argc) { paths = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--no-tools")) { tools = 0; a++; }
+        else { fprintf(stderr, "usage: check-own-flow-tree.cx [--max N] [--paths FILE] [--no-tools]\n"); return 2; }
+    }
+    if (maxrej < 0) { fprintf(stderr, "check-own-flow-tree: --max must be >= 0\n"); return 2; }
+    if (paths) {
+        size_t n; char *l = cx_read(paths, &n), *z;
+        if (!l) { printf("REFUSE\tmissing\t%s\n", paths); return 2; }
+        z = mm_alloc(n + 1); if (!z) { mm_free(l); return 2; }
+        mm_copy(z, n + 1, l, n); z[n] = 0; mm_free(l);
+        if (!paths_ok(z)) { mm_free(z); return 2; }
+        g = run_group("paths", z, &files, &skips);
+        mm_free(z);
+        if (g < 0) return 2;
+        gated_rej = g;
+        printf("OWNFLOW_TREE_GROUP\tpaths\tfiles=%d\trejected=%d\n", files, g);
+        tools = 0;
+    } else {
+        for (ng = 0; ng < 3; ng++) {
+            char *l = ls_files(gated[ng]);
+            if (!l || !paths_ok(l)) { if (l) mm_free(l); printf("REFUSE\t%s\tcannot list or read\n", gated[ng]); refused = 1; continue; }
+            g = run_group(gated[ng], l, &files, &skips);
+            mm_free(l);
+            if (g < 0) { refused = 1; continue; }
+            gated_rej += g;
+            printf("OWNFLOW_TREE_GROUP\t%s\tfiles=%d\trejected=%d\n", gated[ng], files, g);
+        }
+    }
+    if (refused) return 2;
+    {
+        int gate_n = nrj, i, fx, caught = 0, missing_named = 0;
+        for (i = 0; i < gate_n; i++) printf("OWNFLOW_TREE_REJECT\t%s\t%s\n", rj_grp[i], rj_at[i]);
+        ck(gated_rej <= maxrej, "gate: cx + ext + src rejected functions within max");
+        /* negative control 1: max 0 with a known reject fixture added must fail and name it */
+        fx = run_group("control", "tests/cases/own-flow/a-read-after-free.cx\n", &files, &skips);
+        for (i = gate_n; i < nrj; i++) if (strstr(rj_at[i], "a-read-after-free.cx")) caught = 1;
+        ck(fx > 0 && gated_rej + fx > 0 && caught, "negative control: max 0 fails and lists the reject fixture");
+        nrj = gate_n;
+        /* negative control 2: a missing file is refused by name */
+        missing_named = !paths_ok("tests/cases/own-flow/__own_flow_tree_missing__.cx\n");
+        ck(missing_named && !paths_ok("tests/cases/own-flow/__own_flow_tree_missing__.cx\n"), "negative control: a missing file is refused by name");
+        if (tools) {
+            char *l = ls_files("tools");
+            int t0 = nrj;
+            if (!l) return 2;
+            g = run_group("tools", l, &files, &skips);
+            mm_free(l);
+            if (g < 0) return 2;
+            tools_rej = g;
+            for (i = t0; i < nrj; i++) printf("OWNFLOW_TREE_REJECT\t%s\t%s\n", rj_grp[i], rj_at[i]);
+            printf("OWNFLOW_TREE_GROUP\ttools\tfiles=%d\trejected=%d\tgate=none\n", files, g);
+        }
+        if (checks != 3) { failed++; printf("FAIL\tassertion count %d != 3\n", checks); }
+        printf("CHECK_OWN_FLOW_TREE\tgate=%s\tgated_rejected=%d\tmax=%d\ttools_rejected=%d\tskips=%d\tfailed=%d\tchecks=%d\n",
+               gated_rej <= maxrej ? "PASS" : "FAIL", gated_rej, maxrej, tools_rej, skips, failed, checks);
+    }
+    return failed ? 1 : 0;
+}
