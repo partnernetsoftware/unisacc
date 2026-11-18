@@ -6,11 +6,12 @@
 <script type="module">
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
-import { BOX_MESH, MESH_BOX, MESH_OCTA, MESH_PLANE, allMeshes } from "../meshes.js";
+import { BOX_MESH, MESH_BOX, MESH_PLANE, allMeshes } from "../meshes.js";
 import { leafMesh } from "./d3-foliage.js";
 import { gaitPose, readGaitPixels } from "./d4-gait.js";
 import { buildTown, townLayout } from "./d4-town.js";
 import { barrelMesh, closeCamera } from "./d4-framing.js";
+import { archMeshes } from "./d3-arch.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
 const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map();
@@ -19,11 +20,12 @@ const paint={
   chassis:[61,74,92], witness:[185,63,49], joint:[187,139,62], link:[119,123,126],
   foot:[119,74,49], white:[232,226,197], orange:[181,84,46], wood:[92,60,46],
   red:[174,50,42], glass:[85,133,149], smoke:[236,239,234], grass:[130,164,91],
-  darkgrass:[83,131,74], gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96]
+  darkgrass:[83,131,74], farhill:[95,143,118], grove:[48,104,77],
+  gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96]
 };
-function mesh(positions,normals) {
+function mesh(positions,normals,uvs) {
   const id=allMeshes().length+extraMeshes.length;
-  extraMeshes.push({positions,normals,vCount:positions.length/3});
+  extraMeshes.push({positions,normals,uvs,vCount:positions.length/3});
   return id;
 }
 function box(w,h,d) {
@@ -31,7 +33,13 @@ function box(w,h,d) {
   if (!boxes.has(key)) {
     const size=[w,h,d];
     const normals=allMeshes()[MESH_BOX].normals;
-    boxes.set(key,mesh(BOX_MESH.map((v,i)=>v*size[i%3]),normals));
+    const positions=BOX_MESH.map((v,i)=>v*size[i%3]), uv=[];
+    for(let i=0;i<positions.length;i+=3) {
+      const [x,y,z]=positions.subarray(i,i+3);
+      const u=normals[i] ? z : x, v=normals[i+1] ? z : y;
+      uv.push((u+.32)/1.28,(v+.23)/1.28);
+    }
+    boxes.set(key,mesh(positions,normals,new Float32Array(uv)));
   }
   return boxes.get(key);
 }
@@ -40,7 +48,7 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if(!groups.has(key)) groups.set(key,{color,id,items:[]});
   const item=[x,y,z,size,yaw,pitch,roll];
   groups.get(key).items.push(item);
-  if (!["joint","link","foot"].includes(color) && id!==MESH_PLANE && color!=="darkgrass") bodies.push(item);
+  if (!["joint","link","foot","darkgrass","farhill","grove"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
 function block(color,x,y,z,w,h,d,roll=0) { return add(color,box(w,h,d),x,y,z,1,0,0,roll); }
@@ -51,8 +59,8 @@ function linkTransform(a,b,scale=1) {
 }
 function strut(a,b,width) {
   const length=Math.hypot(...b.map((v,i)=>v-a[i]));
-  const {positions,normals}=barrelMesh(width,length);
-  return [add("link",mesh(positions,normals),...linkTransform(a,b,length)),length];
+  const {positions,normals,uvs}=barrelMesh(width,length);
+  return [add("link",mesh(positions,normals,uvs),...linkTransform(a,b,length)),length];
 }
 const ball=leafMesh(1);
 const round=mesh(ball.positions,ball.normals);
@@ -82,6 +90,11 @@ block("wood",0,6.23,0,11,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
 buildTown(await townLayout(),{block,add,round},mode);
+const arcade=archMeshes([0,.28,.28,.10,-.10,.45,.73,0,10],"");
+for(const part of arcade) {
+  const segment=mesh(part.positions,part.normals,part.uvs);
+  for(let i=0;i<8;i++) add("white",segment,-4.2+i*.99,6.37,3.20);
+}
 for(let i=0;i<8;i++) block(i%2?"white":"red",3.62,6.58+i*.43,.02,1.02,.43,1.02);
 block("glass",3.62,10.12,.02,1.05,.46,1.05);
 block("red",3.62,10.49,.02,1.27,.29,1.27);
@@ -89,13 +102,26 @@ block("wood",-3.35,9.65,2.13,.29,1.5,.36);
 for(const angle of [.51,.51+Math.PI/2]) block("white",-3.35,9.62,2.37,.24,2.7,.12,angle);
 bodies.push(add("joint",round,-3.35,9.62,2.47,.23));
 add("grass",MESH_PLANE,0,-.035,0,130);
-for(let i=0;i<9;i++) add("darkgrass",MESH_OCTA,-45+i*10,-4.8,-47-i%3,7+i%4,.4*i);
+const hill=leafMesh(.29);
+const ridge=mesh(hill.positions,hill.normals);
+for(let i=0;i<12;i++) {
+  add("farhill",ridge,-64+i*12,-1,-69-i%3*4,12+i%4, i*.37);
+  add("darkgrass",ridge,-48+i*9,-1.5,-45-i%3,8+i%4,i*.23);
+  for(let j=0;j<12;j++) {
+    const spread=Math.sin(i*13+j*7);
+    add("grove",round,-49+i*9+j*.7,.35+(j%4)*.18,-39+(i%2)*4+spread*3,.64+(j%3)*.25);
+  }
+}
 
 const bindings=new Map();
 for(const [key,{color,id,items}] of groups) {
   const cloud=scene.instances(key,items.length,paint[color].map(c=>c/255));
   cloud.meshId=id; cloud.metalness=0; cloud.roughness=.65; cloud.toonLevels=3;
-  cloud.outlineExcluded=["grass","darkgrass","smoke"].includes(color);
+  cloud.outlineExcluded=["grass","darkgrass","farhill","grove","smoke"].includes(color);
+  if(mode!=="no-texture" && ["white","wood","link"].includes(color)) {
+    cloud.mapId=7;
+    cloud.surfaceMap=color==="white"?"masonry":color==="wood"?"wood-grain":"metal-stain";
+  }
   items.forEach((values,i)=>{
     cloud.set(i,...values);
     bindings.set(values,[cloud,i]);
@@ -106,12 +132,17 @@ scene.fog.density=0;
 scene.ambient={color:[1,1,1],intensity:.84};
 scene.lights=[{dir:[-.45,.79,.44],color:[1,1,1],intensity:.25}];
 scene.outlineWidth=1;
-const view=(!mode || mode==="framing")?await closeCamera():null;
+const view=(!mode || ["framing","finish","no-texture","single-smoke"].includes(mode))?await closeCamera():null;
 const camera=new PerspectiveCamera(view?.fovy ?? 2*Math.atan(.625),.1,150);
 camera.setEye(...(view?.eye ?? [14.4,12,19.2]));
 camera.setTarget(...(view?.target ?? [0,5,0]));
 const canvas=document.querySelector("canvas");
 const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes});
+const atlas=await fetch(new URL("d3-masonry.rgba", import.meta.url));
+if(!atlas.ok) throw new Error("材质纹理读取失败");
+const rgba=new Uint8Array(await atlas.arrayBuffer());
+if(rgba.length!==64*64*4) throw new Error("材质纹理长度错误");
+const textures=[{id:7,w:64,h:64,rgba,filter:1}];
 function set(item,values) {
   const [cloud,i]=bindings.get(item);
   cloud.set(i,...values);
@@ -129,7 +160,7 @@ function renderPose(phase) {
       set(item,linkTransform(a,b,length));
     }
   });
-  renderer.render(scene,camera);
+  renderer.render(scene,camera,textures);
 }
 if(params.has("animate")) {
   const start=performance.now();
@@ -139,9 +170,10 @@ if(params.has("animate")) {
   };
   requestAnimationFrame(frame);
 } else if(params.has("phase")) renderPose(Number(params.get("phase")));
-else renderer.render(scene,camera);
+else renderer.render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
 const density=["density","small-town","no-gear","framing","wide-camera"].includes(mode);
+const finish=["finish","no-texture","single-smoke"].includes(mode);
 function densityPixels() {
   const pixels=new Uint8Array(1280*720*4), result=[];
   gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
@@ -149,9 +181,18 @@ function densityPixels() {
     const at=4*((719-y)*1280+x);
     result.push(pixels.subarray(at,at+3).join(","));
   }
+  if(finish) for(const region of (params.get("patches")||"").split(";").filter(Boolean)) {
+    const [x,y,w,h]=region.split(",").map(Number);
+    if(![x,y,w,h].every(Number.isInteger) || x<0 || y<0 || w<1 || h<1 ||
+        w>64 || h>64 || x+w>1280 || y+h>720) throw new Error("纹理采样区非法");
+    for(let yy=y;yy<y+h;yy++) for(let xx=x;xx<x+w;xx++) {
+      const at=4*((719-yy)*1280+xx);
+      result.push(pixels.subarray(at,at+3).join(","));
+    }
+  }
   return result.join(";");
 }
-document.querySelector("output").textContent=density ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
+document.querySelector("output").textContent=density || finish ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
   ? readGaitPixels(legs,mode)
   : (params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
   const [x,y]=pair.split(",").map(Number);

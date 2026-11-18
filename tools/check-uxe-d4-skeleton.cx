@@ -279,7 +279,7 @@ static int read_town(const char *p) {
             project(q,&clock_x,&clock_y);
         }
         if(part.kind==CRANE) project(q,&crane_x,&crane_y);
-        if(part.kind==SMOKE) project(q,&smoke_x,&smoke_y);
+        if(part.kind==SMOKE && smoke_x==0) project(q,&smoke_x,&smoke_y);
         if(part.kind!=HOUSE && part.kind!=CLOCK) continue;
         for(k=0;k<8;k++) {
             double x,y;
@@ -315,12 +315,81 @@ static int read_town(const char *p) {
     }
     if(strncmp(p,"</output>",9)) return 2;
     failed+=part_counts[HOUSE]<9 || part_counts[CLOCK]!=1 || part_counts[GEAR]!=1 ||
-        part_counts[CRANE]!=1 || part_counts[SMOKE]!=1;
+        part_counts[CRANE]!=1 || part_counts[SMOKE]<4;
     failed+=town_pixels*100.0<(max_x-min_x)*(max_y-min_y)*.28;
     failed+=houses<30 || clocks<2 || cranes<4 || puffs<12;
     failed+=gears<7;
     printf("D4_DENSITY\thouses=%d roof_samples=%d occupied=%d/9216 gear=%d clock=%d crane=%d smoke=%d failed=%d\n",
         part_counts[HOUSE],houses,town_pixels,gears,clocks,cranes,puffs,failed);
+    return !!failed;
+}
+
+static int patches[3][4];
+static const char *surface_name[]={"wall","deck","metal"};
+static int survey_finish(void) {
+    size_t n=0;
+    char *data=cx_read("ujs/practice/uxe/test/d4-finish.tsv",&n);
+    char *line=data?strchr(data,'\n'):0;
+    int i;
+    for(i=0;i<3 && line;i++) {
+        char name[20];
+        int *q=patches[i];
+        if(sscanf(line+1,"%19s %d %d %d %d",name,&q[0],&q[1],&q[2],&q[3])!=5 ||
+            strcmp(name,surface_name[i]) || q[0]<0 || q[1]<0 || q[2]<1 ||
+            q[3]<1 || q[2]>64 || q[3]>64 || q[0]+q[2]>1280 || q[1]+q[3]>720) break;
+        line=strchr(line+1,'\n');
+    }
+    if(data) free(data);
+    return i==3;
+}
+
+static int read_rgb(const char **p,int rgb[3]) {
+    int i;
+    for(i=0;i<3;i++) {
+        rgb[i]=byte(p);
+        if(rgb[i]<0) return 0;
+        if(i<2) {
+            if(**p!=',') return 0;
+            *p=*p+1;
+        }
+    }
+    return 1;
+}
+
+static int read_finish(const char *p) {
+    static const int smoke[]={236,239,234}, wall[]={232,226,197}, deck[]={92,60,46};
+    int i,k,failed=0,smoke_pixels=0,occupied[5]={0},bands=0;
+    for(i=0;i<128*72;i++) {
+        int rgb[3],x=i%128*10+5;
+        if(!read_rgb(&p,rgb) || *p++!=';') return 2;
+        if(i/128<26 && rgb[0]>138 && tone(rgb[0],rgb[1],rgb[2],smoke)) {
+            smoke_pixels++;
+            if(x>=480 && x<1080) occupied[(x-480)/120]++;
+        }
+    }
+    for(i=0;i<5;i++) bands+=occupied[i]>=15;
+    failed+=part_counts[SMOKE]<4 || bands<4 || smoke_pixels<190;
+    printf("D4_SMOKE\tspec_clusters=%d visible_bands=%d upper_samples=%d/3328\n",part_counts[SMOKE],bands,smoke_pixels);
+    for(k=0;k<3;k++) {
+        int n=patches[k][2]*patches[k][3],count=0,levels=0,bins[86]={0};
+        double total=0,sumsq=0,variance;
+        for(i=0;i<n;i++) {
+            int rgb[3],material,r;
+            if(!read_rgb(&p,rgb) || ((k<2 || i+1<n) && *p++!=';')) return 2;
+            r=rgb[0];
+            if(k<2) material=tone(r,rgb[1],rgb[2],k==0?wall:deck);
+            else material=r>60 && r<166 && abs(r-rgb[1])<31 && abs(r-rgb[2])<37;
+            if(!material) continue;
+            count++;
+            total+=r; sumsq+=r*r;
+            if(!bins[r/3]++) levels++;
+        }
+        variance=count?(sumsq-total*total/count)/count:0;
+        failed+=count<n/4 || levels<5 || variance<12;
+        printf("D4_TEXTURE\t%s samples=%d levels=%d variance=%d\n",surface_name[k],count,levels,(int)variance);
+    }
+    if(strncmp(p,"</output>",9)) return 2;
+    printf("D4_FINISH\tfailed=%d\n",failed);
     return !!failed;
 }
 
@@ -335,13 +404,22 @@ static int check_pose(const char *mode) {
     int gait=!strcmp(mode,"gait") || !strcmp(mode,"three-air") || !strcmp(mode,"long-leg");
     int density=!strcmp(mode,"density") || !strcmp(mode,"small-town") || !strcmp(mode,"no-gear");
     int framing=!strcmp(mode,"framing") || !strcmp(mode,"wide-camera");
-    if(!gait && !density && !framing && strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck")) return 2;
+    int finish=!strcmp(mode,"finish") || !strcmp(mode,"no-texture") || !strcmp(mode,"single-smoke");
+    if(!gait && !density && !framing && !finish && strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck")) return 2;
     if(!town_count && !survey_town()) { printf("FAIL D4_TOWN_DATA\n"); return 1; }
     if(!survey()) { printf("FAIL D4_SUPPORT\n"); return 1; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-skeleton.html?mode=%s&pixels=",cwd,mode);
     if(at<0 || at>=(int)sizeof url) return 2;
-    for(i=0;!gait && !density && !framing && i<10;i++) {
+    if(finish) {
+        int w;
+        if(!survey_finish()) return 2;
+        w=tx_snprintf(url+at,sizeof url-at,"&patches=%d,%d,%d,%d;%d,%d,%d,%d;%d,%d,%d,%d",
+            patches[0][0],patches[0][1],patches[0][2],patches[0][3],patches[1][0],patches[1][1],
+            patches[1][2],patches[1][3],patches[2][0],patches[2][1],patches[2][2],patches[2][3]);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+    }
+    for(i=0;!gait && !density && !framing && !finish && i<10;i++) {
         double x=probes[i].x-14.4,y=probes[i].y-12,z=probes[i].z-19.2;
         double ground=.6*x+.8*z, depth=-(24*ground+7*y)/25, up=(24*y-7*ground)/25;
         int px=(int)(640+576*(.8*x-.6*z)/depth),py=(int)(360-576*up/depth);
@@ -356,8 +434,8 @@ static int check_pose(const char *mode) {
     p=out?strstr(out,"<output id=\"pixels\">"):0;
     if(rc || !p) return 2;
     p+=strlen("<output id=\"pixels\">");
-    if(gait || density || framing) {
-        rc=gait?read_gait(p):density?read_town(p):read_framing(p);
+    if(gait || density || framing || finish) {
+        rc=gait?read_gait(p):density?read_town(p):framing?read_framing(p):read_finish(p);
         free(out);
         printf("CHECK_UXE_D4_SKELETON\tmode=%s failed=%d\n",mode,rc);
         return rc;
@@ -383,14 +461,16 @@ static int check_pose(const char *mode) {
 }
 
 int main(int argc,char **argv) {
-    int fixed, dynamic, density, framing;
+    int fixed, dynamic, density, framing, finish;
     if(argc==2) return check_pose(argv[1]);
     if(argc!=1) return 2;
     fixed=check_pose("normal");
     dynamic=check_pose("gait");
     density=check_pose("density");
     framing=check_pose("framing");
+    finish=check_pose("finish");
     if(dynamic>fixed) fixed=dynamic;
     if(density>fixed) fixed=density;
-    return fixed>framing?fixed:framing;
+    if(framing>fixed) fixed=framing;
+    return fixed>finish?fixed:finish;
 }
