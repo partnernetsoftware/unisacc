@@ -287,8 +287,9 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
       cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
     cx_fmt(cand, sizeof cand,
         "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
-        "example/fixture\tv0.0.99\t%s\t0.0.99\tcandidate-native.yml\tv0.0.99\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
-        "1111111111111111111111111111111111111111", sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+        "example/fixture\tv0.0.%d\t%s\t0.0.%d\tcandidate-native.yml\tv0.0.%d\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+        strict_variant==76?76:99,"1111111111111111111111111111111111111111",strict_variant==76?76:99,strict_variant==76?76:99,
+        strict_variant==76?"8ffe6b0ba318be4bb77049f1b69165d8b3376ac7c6a917cd1969b5b39ef32e60":sha[0],sha[1],sha[2],sha[3],sha[4],sha[5]);
     put(fx, "release/candidate.tsv", cand);
     /* strict evidence */
     { const char *c0 = strict_variant == 3 ? "0000000000000000000000000000000000000000000000000000000000000000" : sha[0];
@@ -419,7 +420,63 @@ static void part_n(void) {
       ck(r.rc == 2 && has(o, "release-run: REFUSE usage") && !has(o, "RELEASE_EXEC") && !has(o, "release-exec: REFUSE"), "N0.old-release-run-has-no-execute");
       np_free(&r); }
 }
+static void unknown_cases(void) {
+    fixture(99,4,0,1);
+    const char *labels[]={"unknown-then-pass","pass-then-unknown","exact-exception","wrong-reason","summary-mismatch","missing-raw","free-text-exception"};
+    char pass[640],raw[240],evidence[2400];
+    cx_fmt(pass,sizeof pass,"sample\tproduct-qualification\tPASS\t0\t%s\t1\t1\t0\tcount=1/0\n",sha[0]);
+    cx_fmt(raw,sizeof raw,"RAW\tBATCH_RUN\tid=sample\tstatus=PASS\trc=0\tcandidate=%s\n",sha[0]);
+    const char *unknown="sample\tproduct-qualification\tUNKNOWN\t124\t-\t60000\t1\t0\touter-timeout-60s\n";
+    for(int i=0;i<7;i++){
+        int cleared=i==0||i==5;
+        cx_fmt(evidence,sizeof evidence,"batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n%s%s%s%sSUMMARY\tbatches=1\tPASS=%d\tFAIL=0\tUNKNOWN=%d\tINVALID=0\tape_sha256=%s\tversion=unisacc 0.0.99\n",
+          cleared?unknown:pass,cleared?pass:raw,cleared?(i==5?"":raw):unknown,"",cleared,cleared||i==4?0:1,sha[0]);
+        put(fx,"release/evidence/v0.0.99-strict-2026-01-01.tsv",evidence);
+        put(fx,"release/evidence/0.0.99/expected-unmeasured.tsv",i==2||i==4?"sample\touter-timeout\n":i==3?"sample\tno-producer\n":i==6?"sample\toperator explanation\n":"batch\treason\n");
+        int rc=rx("--dry",0,0,0);
+        if(i==0||i==2)ck(rc==0 && has(out,"GATE\t1\tSTRICT\tPASS"),labels[i]);
+        else expect_gate(labels[i],rc,"STRICT_UNKNOWN");
+    }
+    const char *header="batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n";
+    char first[1200],last[1200];
+    const char *missing="missing\tproduct-qualification\tUNKNOWN\t3\t-\t1260\t5.68\t0\tno-BATCH_RUN rc=3;load_wait>6\nmissing\tproduct-qualification\tUNKNOWN\t3\t-\t1418\t2.94\t1\tno-BATCH_RUN rc=3\n";
+    cx_fmt(first,sizeof first,"%s%sSUMMARY\tUNKNOWN=1\tape_sha256=%s\tversion=unisacc 0.0.99\n",header,missing,sha[0]);
+    cx_fmt(last,sizeof last,"%s%s%sSUMMARY\tUNKNOWN=0\tape_sha256=%s\tversion=unisacc 0.0.99\n",header,pass,raw,sha[0]);
+    cx_fmt(evidence,sizeof evidence,"%s%s",first,last);
+    put(fx,"release/evidence/v0.0.99-strict-2026-01-01.tsv",evidence);
+    put(fx,"release/evidence/0.0.99/missing.out","DEFERRED\tmissing\tprepare-failed=no-producer=old-checker\n");
+    put(fx,"release/evidence/0.0.99/deadline.out","DEFERRED\tmissing\tstart-deadline\n");
+    const char *lists[]={"batch\treason\n","missing\tno-producer\tmissing.out\n","missing\tno-producer\tmissing.out\nsample\touter-timeout\n","missing\tno-producer\tmissing.out\nabsent\touter-timeout\n","missing\tno-producer\n","missing\tno-producer\tdeadline.out\n"};
+    const char *cases[]={"empty-exception-list","legacy-deferred-two-segments","stale-resolved-exception","unused-exception","no-producer-without-proof","start-deadline-has-no-producer-proof"};
+    for(int j=0;j<6;j++){
+        put(fx,"release/evidence/0.0.99/expected-unmeasured.tsv",lists[j]);
+        int rc=rx("--dry",0,0,0);
+        if(j==1)ck(rc==0 && has(out,"GATE\t1\tSTRICT\tPASS"),cases[j]);
+        else expect_gate(cases[j],rc,"STRICT_UNKNOWN");
+    }
+    put(fx,"release/evidence/0.0.99/expected-unmeasured.tsv",lists[1]);
+    for(int j=0;j<2;j++){
+        if(j)cx_fmt(evidence,sizeof evidence,"%s%s%s%s%sSUMMARY\tUNKNOWN=0\tape_sha256=%s\tversion=unisacc 0.0.99\n",first,header,pass,raw,unknown,sha[0]);
+        else cx_fmt(evidence,sizeof evidence,"%s%sSUMMARY\tUNKNOWN=0\tape_sha256=%s\tversion=unisacc 0.0.99\n%s",header,missing,sha[0],last);
+        put(fx,"release/evidence/v0.0.99-strict-2026-01-01.tsv",evidence);
+        expect_gate(j?"second-summary-omits-unknown":"first-summary-wrong",rx("--dry",0,0,0),"STRICT_UNKNOWN");
+        ck(has(out,"segment SUMMARY.UNKNOWN differs from terminal rows"),j?"second-segment-count-diagnostic":"first-segment-count-diagnostic");
+    }
+    /* Replay the published 0.0.76 strict bytes through G1. The synthetic
+       layout still contains a 0.0.99 fixture APE, so the next gate refuses. */
+    char path[4400],dst[4400];
+    fixture(99,76,0,1);
+    cx_fmt(dst,sizeof dst,"%s/release/evidence/0.0.76",fx);
+    if(sy_mkdir(dst,0700))die("v76 evidence directory");
+    cx_fmt(path,sizeof path,"%s/release/evidence/0.0.76/expected-fail.tsv",root);
+    cx_fmt(dst,sizeof dst,"%s/release/evidence/0.0.76/expected-fail.tsv",fx);
+    if(sy_copy(path,dst,0600))die("v76 expected failures");
+    cx_fmt(path,sizeof path,"%s/release/evidence/v0.0.76-strict-2026-11-18.tsv",root);
+    ck(rx("--dry","--strict",path,0)==2 && has(out,"GATE\t1\tSTRICT\tPASS") &&
+       has(out,"rows=66 expected_fail=1") && has(out,"GATE\t1\tCANDIDATE_SHA\tPASS"),"published-v076-g1-replay");
+}
 static void part_a(void) {
+    unknown_cases();
     int rc; char *c;
     /* D1 dry */
     fixture(99, 0, 0, 1);

@@ -304,6 +304,153 @@ static void find_strict(void) {
     if (!best[0]) refuse("STRICT", "no release/evidence/vVERSION-strict-*.tsv");
     if (cx_fmt(strictp, sizeof strictp, "%s/%s", dir, best)) die("strict path");
 }
+/* Fold qualify's append-only evidence in its recorded order, like --resume.
+   RAW identifies the execution associated with the latest structured row. */
+typedef struct { char id[128], status[8], rc[16]; int reason, allowed, witnessed, segment; } strict_batch;
+static strict_batch strict_batches[1024];
+static int strict_count;
+static strict_batch *strict_slot(const char *id) {
+    for(int i=0;i<strict_count;i++) if(tx_eqz(strict_batches[i].id,id))return &strict_batches[i];
+    if(!*id || strict_count>=1024 || cx_fmt(strict_batches[strict_count].id,128,"%s",id))refuse("STRICT_UNKNOWN","invalid batch identifier or too many batches");
+    return &strict_batches[strict_count++];
+}
+static int strict_reason(const char *s) {
+    if(tx_eqz(s,"no-producer"))return 1;
+    if(tx_eqz(s,"load-wait-timeout"))return 2;
+    if(tx_eqz(s,"outer-timeout"))return 3;
+    return 0;
+}
+/* Split exact fields, rejecting extra columns and embedded NUL or CR. */
+static int strict_split(char *s,long n,char **fields,int cap) {
+    int count=1;fields[0]=s;
+    for(long i=0;i<n;i++){
+        if(!s[i] || s[i]=='\r')return 0;
+        if(s[i]=='\t'){if(count==cap)return 0;s[i]=0;fields[count++]=s+i+1;}
+    }
+    s[n]=0;return count;
+}
+static int producer_evidence(const char *id,const char *leaf) {
+    char path[4500],prefix[240],buf[16385];long at=0,len,used=0;const char *line;
+    if(!leaf[0] || leaf[0]=='.' || strchr(leaf,'/') || cx_fmt(path,sizeof path,"%s/%s",evdir,leaf) ||
+       cx_fmt(prefix,sizeof prefix,"DEFERRED\t%s\tprepare-failed=no-producer=",id))return 0;
+    int fd=sy_open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW,0);
+    if(fd<0)return 0;
+    sy_stat_t st;int valid=!sy_fstat(fd,&st)&&st.kind=='f';
+    while(valid && used<(long)sizeof buf){
+        long got=sy_read(fd,buf+used,sizeof buf-used);
+        if(!got)break;
+        if(got<0){valid=0;break;}
+        used+=got;
+    }
+    sy_close(fd);
+    if(!valid||used==(long)sizeof buf)return 0;
+    long size=tlen(prefix);
+    while(line_next(buf,used,&at,&line,&len)){
+        if(len<=size||memcmp(line,prefix,size))continue;
+        int ok=1;
+        for(long i=size;i<len;i++){char c=line[i];if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_'))ok=0;}
+        if(ok)return 1;
+    }
+    return 0;
+}
+static void strict_exceptions(void) {
+    char path[4500],buf[240];const char *s;long n,at=0,len;sy_stat_t st;
+    if(cx_fmt(path,sizeof path,"%s/expected-unmeasured.tsv",evdir))die("expected-unmeasured path");
+    int err=sy_lstat(path,&st);if(err==-ENOENT)return;
+    char *t=err?0:slurp(path,&n);
+    if(!t)refuse("STRICT_UNKNOWN","unreadable expected-unmeasured.tsv");
+    while(line_next(t,n,&at,&s,&len)){
+        if(!len||*s=='#')continue;
+        char *f[3];
+        if(len>=(long)sizeof buf)refuse("STRICT_UNKNOWN","expected-unmeasured row too long");
+        if(mm_copy(buf,sizeof buf,s,len))refuse("STRICT_UNKNOWN","invalid exception row length");
+        int nf=strict_split(buf,len,f,3);
+        if(nf<2)refuse("STRICT_UNKNOWN","malformed expected-unmeasured row");
+        if(tx_eqz(f[0],"batch") && tx_eqz(f[1],"reason") && (nf==2||tx_eqz(f[2],"evidence")))continue;
+        strict_batch *b=strict_slot(f[0]);
+        if(b->allowed || !(b->allowed=strict_reason(f[1])))refuse("STRICT_UNKNOWN","duplicate batch or unknown reason in expected-unmeasured.tsv");
+        if(b->allowed==1 && (nf!=3||!producer_evidence(b->id,f[2])))refuse("STRICT_UNKNOWN","no-producer needs matching affected evidence");
+    }
+    free(t);
+}
+static void strict_terminals(char *t,long n) {
+    const char *s;long at=0,len;int table=0,unknowns=-1;
+    char buf[4096],*f[32];
+    strict_exceptions();
+    while(line_next(t,n,&at,&s,&len)){
+        if(!len||*s=='#')continue;
+        if(len>=6 && !memcmp(s,"batch\t",6)){
+            const char *header="batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote";
+            if(len!=tlen(header)||memcmp(s,header,len))refuse("STRICT_UNKNOWN","invalid qualify header");
+            if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing completed segment SUMMARY");
+            table++;unknowns=-1;continue;
+        }
+        if(!table){
+            if((len>=8&&!memcmp(s,"SUMMARY\t",8))||(len>=4&&!memcmp(s,"RAW\t",4)) ||
+               tx_find(s,len,"\tUNKNOWN\t",9)>=0)refuse("STRICT_UNKNOWN","qualify header missing");
+            continue;
+        }
+        if(len>=(long)sizeof buf)refuse("STRICT_UNKNOWN","oversize qualify row");
+        if(mm_copy(buf,sizeof buf,s,len))refuse("STRICT_UNKNOWN","invalid qualify row length");
+        int nf=strict_split(buf,len,f,32);
+        if(nf<2)refuse("STRICT_UNKNOWN","malformed qualify row");
+        if(tx_eqz(f[0],"CHECKPOINT")){unknowns=-1;continue;}
+        if(tx_eqz(f[0],"SUMMARY")){
+            unknowns=-1;
+            for(int i=1;i<nf;i++)if(!strncmp(f[i],"UNKNOWN=",8)){
+                char *v=f[i]+8;
+                if(unknowns>=0 || !*v || tlen(v)>4)refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
+                for(int k=0;v[k];k++)if(v[k]<'0'||v[k]>'9')refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
+                unknowns=atoi(v);
+            }
+            if(unknowns<0)refuse("STRICT_UNKNOWN","missing SUMMARY.UNKNOWN");
+            int count=0;
+            for(int i=0;i<strict_count;i++)if(strict_batches[i].segment==table && tx_eqz(strict_batches[i].status,"UNKNOWN"))count++;
+            if(count!=unknowns)refuse("STRICT_UNKNOWN","segment SUMMARY.UNKNOWN differs from terminal rows");
+            continue;
+        }
+        if(tx_eqz(f[0],"RAW")){
+            if(!tx_eqz(f[1],"BATCH_RUN"))refuse("STRICT_UNKNOWN","invalid RAW row");
+            const char *id=0,*st=0,*sha=0,*rc=0;
+            for(int i=2;i<nf;i++){
+                if(!strncmp(f[i],"id=",3)){if(id)refuse("STRICT_UNKNOWN","duplicate RAW id");id=f[i]+3;}
+                if(!strncmp(f[i],"status=",7)){if(st)refuse("STRICT_UNKNOWN","duplicate RAW status");st=f[i]+7;}
+                if(!strncmp(f[i],"candidate=",10)){if(sha)refuse("STRICT_UNKNOWN","duplicate RAW candidate");sha=f[i]+10;}
+                if(!strncmp(f[i],"rc=",3)){if(rc)refuse("STRICT_UNKNOWN","duplicate RAW rc");rc=f[i]+3;}
+            }
+            if(!id||!st||!sha||!rc)refuse("STRICT_UNKNOWN","incomplete RAW");
+            strict_batch *b=strict_slot(id);
+            if(!b->status[0])refuse("STRICT_UNKNOWN","RAW without a corresponding batch row");
+            b->witnessed=tx_eqz(sha,cand.sha[0])&&tx_eqz(b->status,st)&&tx_eqz(b->rc,rc);
+            continue;
+        }
+        if(nf!=9)refuse("STRICT_UNKNOWN","invalid qualify batch row");
+        strict_batch *b=strict_slot(f[0]);
+        if(!tx_eqz(f[2],"UNKNOWN")&&!tx_eqz(f[2],"PASS")&&!tx_eqz(f[2],"FAIL"))refuse("STRICT_UNKNOWN",f[0]);
+        if(!tx_eqz(f[4],cand.sha[0]) && !(tx_eqz(f[2],"UNKNOWN")&&tx_eqz(f[4],"-")))refuse("CANDIDATE_SHA",f[0]);
+        if(!f[3][0] || cx_fmt(b->rc,sizeof b->rc,"%s",f[3]))refuse("STRICT_UNKNOWN","invalid batch rc");
+        for(int j=f[3][0]=='-';;j++){
+            if(!f[3][j]){if(j==1 && f[3][0]=='-')refuse("STRICT_UNKNOWN","invalid batch rc");break;}
+            if(f[3][j]<'0'||f[3][j]>'9')refuse("STRICT_UNKNOWN","invalid batch rc");
+        }
+        cx_fmt(b->status,sizeof b->status,"%s",f[2]);b->witnessed=0;b->segment=table;
+        b->reason=tx_eqz(f[8],"outer-timeout-60s")?3:strict_reason(f[8]);
+        /* Qualify records rc=3 for several DEFERRED causes. The matching
+           affected producer diagnostic is required by strict_exceptions. */
+        if(tx_eqz(f[3],"3") && (tx_eqz(f[8],"no-BATCH_RUN rc=3") ||
+           tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>6") || tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>3")))b->reason=1;
+        unknowns=-1;
+    }
+    for(int i=0;i<strict_count;i++){
+        strict_batch *b=&strict_batches[i];
+        if(b->allowed && !tx_eqz(b->status,"UNKNOWN"))refuse("STRICT_UNKNOWN",b->id);
+        if(!b->status[0])continue;
+        if(tx_eqz(b->status,"UNKNOWN")){
+            if(!b->reason||b->allowed!=b->reason)refuse("STRICT_UNKNOWN",b->id);
+        }else if(!b->witnessed)refuse("STRICT_UNKNOWN",b->id);
+    }
+    if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing final SUMMARY");
+}
 static void gate_strict(void) {
     long n, at = 0, ll; const char *ls; char *t, id[128], st[32], c[80], d[512], want[64], got[64];
     int rows = 0, xf = 0, ver = 0;
@@ -356,6 +503,7 @@ static void gate_strict(void) {
         if (ll >= 4 && !memcmp(ls, "APE\t", 4)) { kv(ls, ll, "sha256=", c, sizeof c); if (!tx_eqz(c, cand.sha[0])) { free(t); refuse("CANDIDATE_SHA", "strict APE sha256 differs from candidate"); } }
         if (ll > 8 && !memcmp(ls, "unisacc ", 8) && (long)tlen(cand.version) == ll - 8 && !memcmp(ls + 8, cand.version, (size_t)(ll - 8))) ver = 1;
     }
+    strict_terminals(t,n);
     free(t);
     if (!rows) refuse("STRICT", "no BATCH_RUN rows");
     if (!ver) refuse("APE_VERSION", "strict file lacks a --version line equal to the candidate version");
