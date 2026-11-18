@@ -74,6 +74,23 @@ static void launcher(const char *extra) {
     put(l, buf); if (chmod(l, 0755)) die("chmod launcher");
 }
 
+static void affected_refuses_changed_member(void) {
+    char *v[]={"sh",com,"tools/affected.cx","--","--ids","globspan,ckassert","--run","-j","2","--candidate",dev,0};
+    const char *ids[]={"globspan","ckassert"}; char why[512]; np_result r={0};
+    if(np_run(v,root,0,50,&r,why,sizeof why))die(why);
+    for(int i=0;i<2;i++){
+        char prefix[128],reason[5200],label[128];
+        if(cx_fmt(prefix,sizeof prefix,"RUN_REFUSED\t%s\trc=2\t",ids[i]) ||
+           cx_fmt(reason,sizeof reason,"reason=run-batch: REFUSE candidate members pkg=%s/pkg-hdr.bin:sha-mismatch",dev) ||
+           cx_fmt(label,sizeof label,"affected-%s-refuses-changed-pkg",ids[i]))die("affected assertion bound");
+        long n=r.outn, at=r.out?tx_find(r.out,n,prefix,strlen(prefix)):-1;
+        long len=at<0?0:tx_chr(r.out+at,n-at,'\n');
+        ck(r.rc==1 && len>0 && tx_find(r.out+at,len,reason,strlen(reason))>=0 &&
+           !has(r.out,r.outn,"status=PASS"),label);
+    }
+    np_free(&r);
+}
+
 int main(int argc, char **argv) {
     char p[4800], q[4800], m[4900]; np_result r;
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
@@ -130,6 +147,7 @@ int main(int argc, char **argv) {
         r = batch(1, "plain", 0); ck(has(r.out, r.outn, line), "dev-candidate-identity-in-batch-run"); passed(r, "dev-candidate-passes"); }
     if (cx_fmt(p, sizeof p, "%s/pkg-hdr.bin", dev)) die("p"); put(p, "pkg-hdr changed\n");
     refused(batch(1, "plain", 0), "pkg=", "dev-member-content-changed-refused-named");
+    affected_refuses_changed_member();
     put(p, "pkg-hdr\n"); passed(batch(1, "plain", 0), "dev-candidate-restored-passes");
     if (cx_fmt(q, sizeof q, "%s/cxdev/pkg.bin", dev) || unlink(q)) die("unlink member");
     refused(batch(1, "plain", 0), "nets_pkg=", "dev-member-absent-refused-named");
