@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3a `898b11c` 将大树冠改为每团 48 片不规则叶片，三档着色。canopy 覆盖 51/120，暗部 23/51；thin-canopy 覆盖 32/120，暗部 5/32，两项失败。Q3b 把桥高拉到 1.6 倍，采用更低近的机位，添瓦屋面、木阳台、烟囱、崖台岩及远岭。构图规格见 `d3-composition.tsv`，`check-uxe-d3-geometry.cx -- composition` 为 4/0，short-composition 为 4/3。当前并排件在 /tmp/d3-review-comparison.png，左侧参考第 3 秒，右侧为新构图。Q3b 提交可用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-composition.tsv` 查得。下一项 Q3c 细线。
+
 Q2e 签字材料为 [固定帧](look-dev/d3-review.png) 和 [横移短片](look-dev/d3-review-traverse.mp4)。固定光照，以同一机位起步，机眼和目标沿世界 X 轴同步移动 1 单位，12 帧、12 fps、1280 x 720。并排对照 /tmp/d3-review-comparison.png 左侧为 /tmp/ref/d3.mp4 第 3.00 秒，右侧为原创帧。参考图仅放在临时对照件。最终风格待所有者签字。
 
 |补景提交|检查入口与同版本证据|

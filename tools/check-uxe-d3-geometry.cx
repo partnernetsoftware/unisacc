@@ -12,6 +12,7 @@ static Probe points[16] = {
     {"house-wall",-14,8,1,PLASTER}, {"roof",-12.82,9.72,-1,ROOF},
     {"west-abutment",-14,4,2.5,ABUTMENT}, {"near-meadow",0,-2,9,GRASS}
 };
+static double center_deck, center_base;
 /* Read survey dimensions in millimetres. Inspect the middle bay, where both
    the front lip and the shaded intrados immediately behind it are visible. */
 static int survey(void) {
@@ -29,6 +30,8 @@ static int survey(void) {
         points[bay].y=(col[1]+col[2]*0.20)/1000;
         points[bay].z=(col[3]+col[4])/2000.0;
         if(bay==1) {
+            center_deck=col[6]/1000.0;
+            center_base=col[7]/1000.0;
             double r=col[2]/1000.0, spring=col[1]/1000.0;
             double front=col[3]/1000.0;
             points[3].x=col[0]/1000.0;
@@ -84,12 +87,38 @@ int main(int argc,char **argv) {
     int sky=!strcmp(mode,"sky") || !strcmp(mode,"cloudless");
     int crowns=!strcmp(mode,"crowns") || !strcmp(mode,"sparse");
     int canopy=!strcmp(mode,"canopy") || !strcmp(mode,"thin-canopy");
+    int composition=!strcmp(mode,"composition") || !strcmp(mode,"short-composition");
+    int layout[8]={0};
     int ground=!strcmp(mode,"ground") || !strcmp(mode,"flat-ground");
-    if(argc>2 || (!sky && !crowns && !canopy && !ground && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
+    if(argc>2 || (!sky && !crowns && !canopy && !ground && !composition && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
     if(!survey()) { printf("FAIL D3_SURVEY\n"); return 2; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     used=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?mode=%s&pixels=",cwd,mode);
     if(used<0 || used>=(int)sizeof url) return 2;
+    if(composition) {
+        size_t bytes=0;
+        char *data=cx_read("ujs/practice/uxe/test/d3-composition.tsv",&bytes);
+        char *line=data?strchr(data,'\n'):0;
+        double deck;
+        int fields=line?sscanf(line+1,"%d %d %d %d %d %d %d %d",
+            &layout[0],&layout[1],&layout[2],&layout[3],&layout[4],&layout[5],&layout[6],&layout[7]):0;
+        if(data) free(data);
+        if(fields!=8 || layout[1]>500 || layout[2]>=19000 || layout[3]<1500 ||
+            layout[3]>2000 || layout[5]<5500 || layout[6]<4000 || layout[7]<3500) return 2;
+        deck=center_base+(center_deck-center_base)*layout[3]/1000.0;
+        n=4;
+        points[0].name="tall-fascia"; points[0].x=0; points[0].y=deck-.55;
+        points[0].z=2.5; points[0].material=STONE;
+        points[1].name="upper-opening"; points[1].x=0; points[1].y=deck-3.3;
+        points[1].z=1; points[1].material=SKY;
+        for(i=2;i<4;i++) {
+            points[i].name=i==2?"house-upper-wall":"house-wide-wall";
+            points[i].x=layout[4]/1000.0-(i==2?0:layout[5]*.00032);
+            points[i].y=deck+layout[6]*.00072;
+            points[i].z=-1+layout[7]/2000.0;
+            points[i].material=PLASTER;
+        }
+    }
     if(sky) {
         n=4;
         if(tx_snprintf(url+used,sizeof url-used,"600,40;600,220;220,125;220,243") >= (int)sizeof url-used) return 2;
@@ -120,6 +149,15 @@ int main(int argc,char **argv) {
         double across=.8*x-.6*z, ground=.6*x+.8*z;
         double depth=(9*y-40*ground)/41;
         double up=(40*y+9*ground)/41;
+        if(composition) {
+            x=points[i].x-layout[0]/1000.0;
+            y=points[i].y-layout[1]/1000.0;
+            z=points[i].z-layout[2]/1000.0;
+            across=(12*x-5*z)/13;
+            ground=(5*x+12*z)/13;
+            depth=(7*y-24*ground)/25;
+            up=(24*y+7*ground)/25;
+        }
         int px=(int)(640+640*across/depth), py=(int)(360-640*up/depth);
         int w;
         if(depth<=0 || px<0 || px>=1280 || py<0 || py>=720) return 2;
@@ -164,6 +202,7 @@ int main(int argc,char **argv) {
             continue;
         }
         observed=classify(c[0],c[1],c[2]);
+        if(composition && want==SKY && c[2]-c[0]>=50) observed=SKY;
         if(!strcmp(mode,"bare") && want==LEAF) want=STONE;
         printf("%s %s rgb=%d,%d,%d want=%d got=%d\n",observed==want?"PASS":"FAIL",points[i].name,c[0],c[1],c[2],want,observed);
         failed+=observed!=want;
