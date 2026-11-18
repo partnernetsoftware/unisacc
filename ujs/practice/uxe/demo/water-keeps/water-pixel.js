@@ -3,6 +3,8 @@ const canvas=document.querySelector("canvas"),paint=canvas.getContext("2d",{alph
 const image=paint.createImageData(width,height),data=image.data;
 const query=new URLSearchParams(location.search);
 const reflections=!query.has("no-reflection");
+const waterLayers=!query.has("mud-water"),ripples=!query.has("flat-ripples");
+const gradient=!query.has("flat-reflection");
 const reaches=[
   ["苇汀",[151,113,80],[255,187,95],[171,111,63],[105,66,46],[83,57,43],[255,221,151]],
   ["花浅",[83,72,113],[222,153,156],[113,101,145],[63,58,91],[65,52,72],[255,210,171]],
@@ -75,6 +77,12 @@ function background(theme) {
     const glint=blend(riverColor,glow,.73);
     const waterLight=blend(riverColor,glow,.47);
     const wave=Math.floor(Math.sin(y*.58+boat.tick*.16)*(2+drift*.025));
+    const mirror=blend(low,high,clamp(.22+drift/166,0,1));
+    const reflectedBody=gradient?blend(riverColor,mirror,clamp(.49-drift*.002,0,.49)):nearWater;
+    const depthTint=blend(deepWater,[39,78,80],.73);
+    const shadow=gradient?blend(reflectedBody,depthTint,clamp((drift-32)/110,0,.82)):nearWater;
+    const striped=blend(reflectedBody,glow,.16);
+    const bankShade=blend(shore,[36,57,43],.52);
     for(let x=0;x<width;x++) {
       const at=4*(y*width+x);
       if(drift<0) {
@@ -85,9 +93,17 @@ function background(theme) {
       } else {
         const wet=Math.abs(x-center)<edge,seed=noise((x+wave)>>2,Math.floor(z*.64));
         const reflected=reflections && Math.abs(x-light-wave)<3+drift*.23;
-        if(!wet) channels(at,shore,((seed>>4)&7)-3);
-        else if(reflected && seed>115) channels(at,seed>221?glint:waterLight,(seed&7)-4);
-        else channels(at,riverColor,(seed>240?23:seed<19?-9:0)+(seed&3));
+        if(!wet) {
+          const grass=waterLayers && drift>8 && noise(x>>3,y>>2)<Math.min(170,drift+36);
+          channels(at,grass?bankShade:shore,((seed>>4)&7)-3);
+        } else if(reflected && seed>115) channels(at,seed>205?glint:waterLight,(seed&7)-4);
+        else if(waterLayers && reflections) {
+          const crest=(y+((x>>4)&1)+wave)%6===0;
+          const cut=(seed&31)<25, shadeline=(y+(wave>>1))%11<3;
+          const away=Math.abs(x-light-wave)>25+drift*.19;
+          if(ripples && crest && cut && drift>18 && seed>70) channels(at,[233,181,112]);
+          else channels(at,away && (shadeline || drift>108)?shadow:crest && ripples?striped:reflectedBody,(seed&7)-3);
+        } else channels(at,riverColor,(seed>240?23:seed<19?-9:0)+(seed&3));
       }
     }
   }
@@ -235,6 +251,61 @@ function foregroundLily(theme) {
     }
   }
 }
+function dock() {
+  if(query.has("no-dock")) return;
+  const z=8+Math.floor(boat.z/reachLength)*reachLength;
+  const near=z+6,far=z+17;
+  if(near-boat.z<7 || far-boat.z>72) return;
+  const edge=d=>river(d)-half(d);
+  const a=point(edge(near)-5,near),b=point(edge(near)+6,near);
+  const c=point(edge(far)+3,far),d=point(edge(far)-5,far);
+  polygon("#77553e",[[a.x,a.y],[b.x,b.y],[c.x,c.y],[d.x,d.y]]);
+  for(let i=0;i<10;i++) {
+    const f=i/10, left=a.x+(d.x-a.x)*f,right=b.x+(c.x-b.x)*f;
+    pixel(i%2?"#8c633f":"#5e4a3c",left,a.y+(d.y-a.y)*f,Math.max(1,right-left),i<4?2:1);
+  }
+  const posts=[point(edge(near)+4,near),point(edge(near+5)+3,near+5),
+    point(edge(far)+2,far),point(edge(near+3)-1,near+3)];
+  for(const p of posts.sort((l,r)=>l.y-r.y)) {
+    const w=Math.max(3,Math.round(p.scale*.44)),h=Math.max(7,p.scale*2.4);
+    if(reflections) pixel("#514b38",p.x-w*.5,p.y+2,w,p.scale*.83);
+    pixel("#463c2e",p.x-w*.5,p.y-h,w,h+4);
+    pixel("#8e6949",p.x+w*.15,p.y-h+2,Math.max(1,w*.25),h*.8);
+    pixel("#bd8e53",p.x-w*.5,p.y-h,w,3);
+  }
+}
+function reedBed() {
+  if(query.has("thin-reeds")) return;
+  const first=Math.floor(boat.z/3)*3;
+  for(let strip=21;strip>=0;strip--) {
+    const z=first+12+strip*3,d=z-boat.z;
+    if(d<11) continue;
+    for(let stem=0;stem<11;stem++) {
+      const n=noise(stem,Math.floor(z));
+      const x=river(z)+half(z)-.8+(n%34)/10;
+      const p=point(x,z);
+      if(p.x>width+12 || p.y>height+12) continue;
+      const h=Math.max(3,p.scale*(1.45+(n%31)/8));
+      const w=Math.max(1,Math.round(p.scale*.14));
+      const leaning=n%3-1;
+      if(reflections && stem%3===0) pixel("#48604a",p.x,p.y+1,1,h*.30);
+      pixel("#384a34",p.x,p.y-h,w,h);
+      pixel("#667045",p.x+leaning,p.y-h,Math.max(1,w*.7),h*.4);
+      if(n%4===0) pixel("#b39755",p.x+leaning,p.y-h-2,1,3);
+    }
+  }
+}
+function fireflies() {
+  if(query.has("no-fireflies")) return;
+  for(let mote=0;mote<46;mote++) {
+    const phase=boat.tick+mote*17;
+    if(phase%29>=22) continue;
+    const x=(mote*73+11)%426+Math.sin(phase*.083)*5-boat.x*1.4;
+    const y=93+(mote*47+23)%125+Math.sin(phase*.053)*2;
+    if(mote%7===0) pixel("#f2bc69",x-1,y,3,1);
+    pixel("#ffe4a5",x,y,1,1);
+  }
+}
 function lilies(theme) {
   const [, , , ,water,bank,glow]=theme;
   for(let j=22;j>=0;j--) {
@@ -282,10 +353,13 @@ function draw() {
   clouds(theme);
   ridges(theme,realm);
   banks(theme);
+  reedBed();
   lilies(theme);
   crossing(theme);
   foregroundLily(theme);
+  dock();
   prow();
+  fireflies();
   if(realm!==shown) {
     shown=realm;
     document.querySelector("#reach").textContent=(realm+1)+" / "+reaches.length+"  "+theme[0];
