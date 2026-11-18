@@ -1717,6 +1717,25 @@ static int mg_clean_tree(const char *rd) {
 /* git merge BRANCH [-m MSG] [--cwd WORKTREE]:私有索引合并,见上。HEAD 是 BRANCH 祖先则快进;已包含则 up_to_date=1。
    冲突:工作树与索引干净时沿用旧路径(git merge 加 merge_conflicts:派生表冲突自动解、否则停在合并中);否则什么都不动,
    报 MERGE_CONFLICT 清单与 MERGE_HINT,rc 1。成功末行 GIT_MERGE rc=0 commit=SHA branch= cwd= ff= synced= kept=。参数错 rc 2。 */
+/* Only prepare material in the worktree whose ref moved. The foreground
+ * transaction never waits for the build or consumes a readiness verdict. */
+static int pin_prepare_child(void *arg) {
+    char *v[] = {"sh", cfg.product, "tools/devsvc.cx", "--", "prebuild-self", 0};
+    sy_spawn_t o; sy_exit_t ex;
+    sy_unsetenv("DEVSVC_REPO_TABLE");
+    sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
+    sy_unsetenv("DEVSVC_SELF_BIN");
+    sy_spawn_init(&o); o.cwd = arg; o.argv = v; o.deadline_ms = 55000;
+    o.pgroup = -1; o.in_fd = o.out_fd = o.err_fd = SY_STDIO_NULL;
+    return sy_proc_run(&o, &ex) ? 1 : sy_exit_code(&ex);
+}
+static void pin_prepare_kick(const char *root) {
+    int fds[2]; char launcher[PW];
+    if (snprintf(launcher, sizeof launcher, "%s/tools/devsvc.cx", root) >= (int)sizeof launcher || sy_exists(launcher) != 1) return;
+    if (sy_fork_session(pin_prepare_child, (void *)root, fds) >= 0) {
+        sy_close(fds[0]); sy_close(fds[1]);
+    }
+}
 static int git_merge(const char *root, int argc, char **argv) {
     const char *br = 0, *d = root, *msg = 0; char rd[PW], top[PW], cur[200], buf[1 << 15], theirs[128], old[128], nw[128], tree[128], dm[600], why[PW + 32];
     int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0;
@@ -1752,8 +1771,13 @@ static int git_merge(const char *root, int argc, char **argv) {
                 mg_teardown();
                 if (mg_clean_tree(rd)) {   /* 旧路径,行为不变:派生表自动解,否则停在合并中 */
                     char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "-m", (char *)msg, "--", (char *)br, 0};
-                    if (runcap(mv, buf, sizeof buf) != 0) return merge_conflicts(root, rd, br, cur);
+                    if (runcap(mv, buf, sizeof buf) != 0) {
+                        rc = merge_conflicts(root, rd, br, cur);
+                        if (!rc) pin_prepare_kick(rd);
+                        return rc;
+                    }
                     if (mg_rev(rd, "HEAD", nw, sizeof nw)) nw[0] = 0;
+                    if (nw[0] && strcmp(nw, old)) pin_prepare_kick(rd);
                     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\n", nw, cur, rd); return 0;
                 }
                 mg_report(rd, cur, nu, "conflict-with-local-changes-present");
@@ -1775,6 +1799,7 @@ static int git_merge(const char *root, int argc, char **argv) {
     mg_teardown();
     if (att >= 4) { printf("MERGE_HINT\thead-moving\tHEAD 连续被他人移动,重试 3 次仍未落地\nGIT_MERGE\trc=1\tconflicts=0\tbranch=%s\tcwd=%s\n", cur, rd); return 1; }
     rc = mg_sync(rd, old, nw, "GIT_MERGE_SYNC", &sy, &kp); mg_unlock(root);
+    pin_prepare_kick(rd);
     if (rc) { printf("GIT_MERGE\trc=1\tcommit=%s\tbranch=%s\tcwd=%s\tsync=failed\n", nw, cur, rd); return 1; }
     printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tff=%d\tsynced=%d\tkept=%d\n", nw, cur, rd, ff, sy, kp);
     return 0;
@@ -1813,6 +1838,7 @@ static int git_pull(const char *root, int argc, char **argv) {
     }
     if (att >= 4) { printf("GIT_PULL\trc=1\treason=head-moving\n"); return 1; }
     i = mg_sync(rd, old, up, "GIT_PULL_SYNC", &sy, &kp); mg_unlock(root);
+    pin_prepare_kick(rd);
     if (i) { printf("GIT_PULL\trc=1\tcommit=%s\tsync=failed\n", up); return 1; }
     printf("GIT_PULL\trc=0\tcommit=%s\tfrom=%s\tbranch=%s\tcwd=%s\tsynced=%d\tkept=%d\n", up, old, cur, rd, sy, kp);
     return 0;
@@ -1919,6 +1945,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
             char *pv[] = {"--par", "1", "--cwd", (char *)cwd, "--", "git", "push", "origin", rs, 0}; pushed = cmd_x(root, 9, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    if (sha0[0] && sha[0] && strcmp(sha0, sha)) pin_prepare_kick(cwd ? cwd : root);
     /* 未产生新提交(rc 非 0 且 HEAD 未动,或取不到 HEAD)时 commit=none,并在行尾加 reason=:
      * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
      * 旧 HEAD 不再写进 commit= 冒充新提交。提交已落地但推送失败时 commit= 仍是新 HEAD,reason=push-failed。 */
