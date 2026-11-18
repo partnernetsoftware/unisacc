@@ -1,0 +1,92 @@
+/* tools/check-brief-lint.cx -- fixtures for tools/brief-lint.cx on real brief samples (tests/briefs-samples/)
+ * and the template plans/briefs/TEMPLATE.md.  One brief-lint process lints every file (one compile).
+ *   sh ./unisacc.com tools/check-brief-lint.cx
+ * Positive: the template and the complete sample have zero findings (the template's own prohibition line
+ * "不得使用 UNISACC_E3CACHE=0" is not a reject).  Negative: the missing-profile sample names the missing
+ * 截止 section, the profile reference, the cold-fresh layout and the core-path review; the counterexample is
+ * rejected for UNISACC_E3CACHE=0 and named for patch-first; a template copy with its 禁区 section cut is
+ * named section-禁区; a template copy with the prohibition dropped from the E3CACHE line is rejected.
+ * Ends with CHECK_BRIEF_LINT passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use cxlib.ckassert
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/brief-lint.cx under the installed product */
+/* first line of tool output H that starts with W, or 0 */
+static const char *at(const char *h, const char *w) {
+    size_t wn = strlen(w);
+    for (const char *p = h; p && *p; ) {
+        if (!strncmp(p, w, wn)) return p;
+        p = strchr(p, '\n'); if (p) p++;
+    }
+    return 0;
+}
+/* block IDX (0-based) of the output: the lines up to and including the IDX-th BRIEF_LINT line (files are
+ * linted in argument order) */
+static int seg(const char *out, int idx, char *dst, int cap) {
+    const char *start = out, *p = out; int i = 0;
+    dst[0] = 0;
+    while (*p) {
+        const char *e = strchr(p, '\n'); const char *next = e ? e + 1 : p + strlen(p);
+        if (!strncmp(p, "BRIEF_LINT\t", 11)) {
+            if (i == idx) {
+                long k = (long)(next - start); if (k >= cap) k = cap - 1;
+                mm_copy(dst, (size_t)cap, start, (size_t)k); dst[k] = 0;
+                return 0;
+            }
+            i++; start = next;
+        }
+        p = next;
+    }
+    return -1;
+}
+/* copy SRC to DST with the line equal to CUT removed (CUT 0: none), then ADD appended as one more line */
+static int derive(const char *src, const char *dst, const char *cut, const char *add) {
+    size_t n; char *t = cx_read(src, &n); static char o[65536]; long k = 0;
+    if (!t) return -1;
+    int done = cut ? 0 : 1;
+    for (char *p = t, *e; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        if (!done && !strcmp(p, cut)) { done = 1; continue; }
+        k += snprintf(o + k, sizeof o - (size_t)k, "%s\n", p);
+    }
+    if (add) k += snprintf(o + k, sizeof o - (size_t)k, "%s\n", add);
+    free(t);
+    return done ? cx_write(dst, o, (size_t)k) : -1;
+}
+int main(void) {
+    static char out[65536], s[16384]; char tmpd[300], cutd[400], undo[400];
+    const char *tpl = "plans/briefs/TEMPLATE.md", *full = "tests/briefs-samples/complete-release-prep.md",
+               *miss = "tests/briefs-samples/missing-profile-w3a.md", *e3 = "tests/briefs-samples/e3cache-counterexample.md";
+    if (sy_mkdtemp(sy_tmpdir(), "brief-lint-check-", tmpd, sizeof tmpd)) { puts("FAIL\ttmpdir"); return 1; }
+    if (cx_fmt(cutd, sizeof cutd, "%s/no-forbid.md", tmpd) || cx_fmt(undo, sizeof undo, "%s/e3-unforbidden.md", tmpd)) return 1;
+    ck(derive(tpl, cutd, "## 禁区", 0) == 0, "derive-cut-forbid-section");
+    ck(derive(tpl, undo, 0, "跑批前先设 UNISACC_E3CACHE=0 省时。") == 0, "derive-add-e3cache-line");
+    char *v[] = {"./tools/bound", "50", "sh", UC, "tools/brief-lint.cx", "--", (char *)tpl, (char *)full, (char *)miss, (char *)e3, cutd, undo, 0};
+    int rc = ck_run(v, out, sizeof out);
+    ck(rc == 1, "worst-rc-is-1");
+    ck(seg(out, 0, s, sizeof s) == 0 && at(s, "BRIEF_LINT\tmissing=0\treject=0\tfile=plans/briefs/TEMPLATE.md"), "template-zero-findings");
+    ck(seg(out, 1, s, sizeof s) == 0 && at(s, "BRIEF_LINT\tmissing=0\treject=0\tfile=tests/briefs-samples/complete"), "complete-sample-zero-findings");
+    ck(seg(out, 5, s, sizeof s) == 0, "six-file-blocks");
+    seg(out, 2, s, sizeof s);
+    ck(at(s, "MISSING\tsection-截止") != 0, "missing-sample-names-deadline");
+    ck(at(s, "MISSING\tprofile-ref") != 0, "missing-sample-names-profile-ref");
+    ck(at(s, "MISSING\tcold-fresh") != 0, "missing-sample-names-cold-fresh");
+    ck(at(s, "MISSING\tcore-review\t核心路径 tools/commit-own.cx") != 0, "missing-sample-names-core-review");
+    ck(at(s, "REJECT") == 0, "missing-sample-no-reject");
+    seg(out, 3, s, sizeof s);
+    ck(at(s, "REJECT\te3cache") != 0, "e3cache-sample-rejected");
+    ck(at(s, "MISSING\tpatch-first") != 0, "e3cache-sample-names-patch-first");
+    seg(out, 4, s, sizeof s);
+    ck(at(s, "MISSING\tsection-禁区") != 0, "cut-template-names-forbid-section");
+    seg(out, 5, s, sizeof s);
+    ck(at(s, "REJECT\te3cache") != 0, "unforbidden-e3cache-rejected");
+    if (ck_failures()) printf("#\toutput:\n%s\n", out);
+    printf("CHECK_BRIEF_LINT\tpassed=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

@@ -1,0 +1,183 @@
+/* tools/check-own-flow.cx -- fixtures and table cross-check for the own-flow prototype (OWN-E2, plans/v0.0.77.md A1).
+ *
+ *   sh ./unisacc.com tools/check-own-flow.cx                  fixtures from tests/cases/own-flow
+ *   sh ./unisacc.com tools/check-own-flow.cx -- --dir D       fixtures from D
+ *
+ * tests/cases/own-flow/expected.tsv has one row per fixture: file, function, expect, where expect is
+ *   E2      own-flow must report E2 (use after free) for that function
+ *   E2b     own-flow must report E2b (double free) for that function
+ *   OK      own-flow must report nothing for that function
+ *   UNSAFE  the function carries the prototype escape marker: nothing reported, one OWNFLOW_UNSAFE line
+ * One run of `tools/own-flow.cx` over every fixture of the table gives the findings; the summary's unsafe=
+ * count must equal the number of UNSAFE rows.  The table must keep at least five reject rows, four OK rows,
+ * one UNSAFE row and the three real-defect rows r1..r3.
+ * Three negative controls run every time on the same own-flow output and each must produce a failure:
+ * one table verdict flipped, one fixture left out, and an injected false E2 on the OK fixture h.
+ * Product side: OWN-E2 is not in any product yet (P5 of 0.0.77); the last line says PRODUCT_SIDE=PENDING
+ * and nothing of the product side is counted as passed.
+ * The number of assertions is fixed (rows + 3 shape + 2 summary + 3 negative controls) and checked itself.
+ * Last line  CHECK_OWN_FLOW<TAB>oracle_passed=N<TAB>failed=M<TAB>checks=K<TAB>PRODUCT_SIDE=PENDING
+ * rc 1 when M > 0, rc 2 on a usage or I/O error. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXROW 32
+static char rfile[MAXROW][128], rfn[MAXROW][64], rexp[MAXROW][16];
+static int nrow, failed, checks, oracle_passed;
+static char *out;
+static size_t outn;
+static int present[MAXROW];
+
+static int field(const char *s, const char *e, char *dst, int cap) {
+    int n = (int)(e - s);
+    if (n <= 0 || n >= cap) return -1;
+    mm_copy(dst, (size_t)cap, s, (size_t)n);
+    dst[n] = 0;
+    return 0;
+}
+
+static int load_table(const char *path) {
+    size_t n;
+    char *t = cx_read(path, &n), *p, *end;
+    if (!t) return -1;
+    p = t; end = t + n; nrow = 0;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p)), *le = nl ? nl : end, *a, *b;
+        a = memchr(p, '\t', (size_t)(le - p));
+        b = a ? memchr(a + 1, '\t', (size_t)(le - a - 1)) : 0;
+        if (a && b && strncmp(p, "file\t", 5) != 0) {
+            if (nrow >= MAXROW || field(p, a, rfile[nrow], 128) || field(a + 1, b, rfn[nrow], 64) || field(b + 1, le, rexp[nrow], 16)) { mm_free(t); return -1; }
+            nrow++;
+        }
+        p = le + 1;
+    }
+    mm_free(t);
+    return 0;
+}
+
+/* does the own-flow text T report class K ("E2", "E2b", "UNSAFE", or 0 for any finding) on file F, function FN */
+static int reported(const char *t, size_t tn, const char *f, const char *fn, const char *k) {
+    const char *p = t, *end = t + tn;
+    while (p && p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p)), *le = nl ? nl : end;
+        int unsafe_line = strncmp(p, "OWNFLOW_UNSAFE\t", 15) == 0;
+        if (strncmp(p, "OWNFLOW\t", 8) == 0 || unsafe_line) {
+            char line[1024]; char *c[6]; int nc = 0; char *q;
+            if (field(p, le, line, sizeof line) == 0) {
+                q = line; c[nc++] = q;
+                while (nc < 6 && (q = strchr(q, '\t'))) { *q++ = 0; c[nc++] = q; }
+                /* c[1] is PATH:LINE; match the basename F */
+                char *colon = nc > 1 ? strrchr(c[1], ':') : 0;
+                if (colon) *colon = 0;
+                char *base = nc > 1 ? strrchr(c[1], '/') : 0;
+                base = base ? base + 1 : (nc > 1 ? c[1] : 0);
+                if (base && nc > 2 && !strcmp(base, f) && !strcmp(c[2], fn)) {
+                    if (unsafe_line) { if (k && !strcmp(k, "UNSAFE")) return 1; }
+                    else if (!k || (nc > 4 && !strcmp(c[4], k))) return 1;
+                }
+            }
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    return 0;
+}
+
+/* verdict over the table; FLIP flips the expectation of that row, SKIP treats that fixture as absent.
+   Returns the number of failing rows. */
+static int eval(const char *t, size_t tn, int flip, int skip, int loud) {
+    int i, bad = 0;
+    for (i = 0; i < nrow; i++) {
+        const char *want = rexp[i];
+        int ok;
+        if (i == flip) want = strcmp(want, "OK") ? "OK" : "E2";
+        if (i == skip || !present[i]) { bad++; if (loud) printf("FAIL\t%s\tmissing fixture\n", rfile[i]); continue; }
+        if (!strcmp(want, "OK")) ok = !reported(t, tn, rfile[i], rfn[i], 0) && !reported(t, tn, rfile[i], rfn[i], "UNSAFE");
+        else if (!strcmp(want, "UNSAFE")) ok = !reported(t, tn, rfile[i], rfn[i], 0) && reported(t, tn, rfile[i], rfn[i], "UNSAFE");
+        else ok = reported(t, tn, rfile[i], rfn[i], want);
+        if (!ok) { bad++; if (loud) printf("FAIL\t%s\t%s\twant=%s\n", rfile[i], rfn[i], want); }
+        else if (loud) printf("ORACLE\t%s\t%s\t%s\tPASS\n", rfile[i], rfn[i], want);
+    }
+    return bad;
+}
+
+static void ck(int ok, const char *what) {
+    checks++;
+    if (!ok) { failed++; printf("FAIL\t%s\n", what); }
+    else printf("PASS\t%s\n", what);
+}
+
+static long summary_num(const char *key) {
+    const char *s = out ? strstr(out, "OWNFLOW_SUMMARY") : 0, *k;
+    char pat[64];
+    if (!s || cx_fmt(pat, sizeof pat, " %s=", key)) return -1;
+    k = strstr(s, pat);
+    return k ? atol(k + tx_len(pat, sizeof pat)) : -1;
+}
+
+int main(int argc, char **argv) {
+    const char *dir = "tests/cases/own-flow";
+    char cmd[8192], path[4500];
+    int a = 1, i, n_rej = 0, n_ok = 0, n_unsafe = 0, n_real = 0, h = -1;
+    long cl;
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--dir") && a + 1 < argc) { dir = argv[a + 1]; a += 2; }
+        else { fprintf(stderr, "usage: check-own-flow.cx [--dir D]\n"); return 2; }
+    }
+    if (cx_fmt(path, sizeof path, "%s/expected.tsv", dir) || load_table(path)) { fprintf(stderr, "check-own-flow: cannot read %s\n", path); return 2; }
+    for (i = 0; i < nrow; i++) {
+        if (!strcmp(rexp[i], "OK")) n_ok++;
+        else if (!strcmp(rexp[i], "UNSAFE")) n_unsafe++;
+        else n_rej++;
+        if (rfile[i][0] == 'r' && rfile[i][1] >= '1' && rfile[i][1] <= '9' && strcmp(rexp[i], "OK")) n_real++;
+        if (!strcmp(rfile[i], "h-transfer-static.cx")) h = i;
+    }
+    ck(n_rej >= 5 + 3 && n_ok >= 4 && n_unsafe == 1, "table keeps five reject, four OK and one UNSAFE row plus the real rows");
+    ck(n_real >= 3, "table keeps three real-defect rows r1..r3");
+    ck(h >= 0 && !strcmp(rexp[h], "OK"), "table keeps the OK ownership-transfer fixture h");
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/own-flow.cx --")) return 2;
+    cl = tx_len(cmd, sizeof cmd);
+    for (i = 0; i < nrow; i++) {
+        size_t n; char *s;
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, rfile[i])) return 2;
+        s = cx_read(path, &n);
+        present[i] = s != 0;
+        if (s) mm_free(s); else continue;
+        if (cx_fmt(cmd + cl, sizeof cmd - (size_t)cl, " %s", path)) return 2;
+        cl = tx_len(cmd, sizeof cmd);
+    }
+    cx_run_timeout(cmd, 50, &out, &outn);
+    if (!out) outn = 0;
+    ck(out && strstr(out, "OWNFLOW_SUMMARY") != 0, "own-flow gave a summary line");
+    ck(summary_num("unsafe") == n_unsafe, "summary unsafe= equals the UNSAFE rows");
+    int bad = eval(out ? out : "", outn, -1, -1, 1);
+    checks += nrow;
+    failed += bad;
+    oracle_passed = nrow - bad;
+    /* negative controls on the same own-flow output */
+    ck(eval(out ? out : "", outn, 0, -1, 0) > 0, "negative control: flipped table verdict is caught");
+    ck(eval(out ? out : "", outn, -1, nrow - 1, 0) > 0, "negative control: a missing fixture is caught");
+    {
+        char *inj = mm_alloc(outn + 256);
+        int caught = 0;
+        if (inj) {
+            int m;
+            mm_copy(inj, outn + 256, out ? out : "", outn);
+            if (!cx_fmt(inj + outn, 256, "OWNFLOW\t%s/h-transfer-static.cx:9\tfh\tp\tE2\tinjected\n", dir)) {
+                m = (int)tx_len(inj + outn, 256);
+                caught = eval(inj, outn + (size_t)m, -1, -1, 0) > 0;
+            }
+            mm_free(inj);
+        }
+        ck(caught, "negative control: a false E2 on the OK fixture h is caught");
+    }
+    {
+        int want = nrow + 3 + 2 + 3;
+        if (checks != want) { failed++; printf("FAIL\tassertion count %d != %d\n", checks, want); }
+    }
+    printf("CHECK_OWN_FLOW\toracle_passed=%d\tfailed=%d\tchecks=%d\tPRODUCT_SIDE=PENDING\n", oracle_passed, failed, checks);
+    return failed ? 1 : 0;
+}

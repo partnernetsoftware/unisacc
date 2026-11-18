@@ -1,0 +1,125 @@
+/* tools/check-handoff-check.cx -- fixtures for tools/handoff-check.cx.  Two private git repos in a fresh temp
+ * dir (no repo history); every case runs in ONE handoff-check batch process (one compile).
+ *   sh ./unisacc.com tools/check-handoff-check.cx
+ * Positive: no core/product path -> NOT_APPLICABLE; product change with a patch file or --allow-product passes
+ * (ALLOWED is printed); a new tool with check, tools-compile row and prd.md row passes registry --strict.
+ * Negative (each must be named): core path -> REVIEW_REQUIRED (never PASS); product change without patch ->
+ * FAIL PATCH_FIRST; new tool without check/rows -> UNMEASURED, FAIL with --strict; a row added to
+ * tests/batches.tsv is detected and, with --skip-batches, UNMEASURED (never PASS); core.hooksPath set ->
+ * FAIL; bad option -> rc 2.  Every HANDOFF line carries scope=LOCAL and the output never says QUALIFIED.
+ * Tamper control: with a profiles table stripped of core-path rows the core assertion must flip.
+ * Ends with CHECK_HANDOFF_CHECK passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use cxlib.ckassert
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/handoff-check.cx under the installed product */
+static char tmpd[300];
+/* first occurrence of W in tool output H, or 0 */
+static const char *at(const char *h, const char *w) {
+    long i = tx_find(h, (long)strlen(h), w, (long)strlen(w));
+    return i < 0 ? 0 : h + i;
+}
+/* ck_run (cxlib.ckassert) bounds every child at 55 seconds */
+static int run(char **argv, char *out, int cap) { return ck_run(argv, out, (size_t)cap); }
+static int g(const char *dir, const char *a, const char *b, const char *c, const char *d) {
+    static char o[8192];
+    char *v[] = {"./tools/bound", "20", "git", "-C", (char *)dir, "-c", "user.name=fx", "-c", "user.email=fx@localhost",
+                 (char *)a, (char *)b, (char *)c, (char *)d, 0};
+    return run(v, o, sizeof o);
+}
+static void put(const char *dir, const char *rel, const char *body) {
+    char p[700], d[700]; char *s;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return;
+    if (cx_fmt(d, sizeof d, "%s", p)) return;
+    for (s = d + strlen(dir) + 1; (s = strchr(s, '/')); s++) { *s = 0; sy_mkdir(d, 0755); *s = '/'; }
+    if (cx_write(p, body, strlen(body))) ck(0, "write-fixture");
+}
+static void repo(const char *name, char *dir, int cap) {
+    if (cx_fmt(dir, (size_t)cap, "%s/%s", tmpd, name)) return;
+    sy_mkdir(dir, 0755);
+    ck(g(dir, "init", "-q", 0, 0) == 0, "git-init");
+    put(dir, "README", "fixture\n");
+    put(dir, "prd.md", "| x | tools/goodtool.cx | y |\n");
+    put(dir, "tests/tools-compile-sources.tsv", "tools/goodtool.cx\tregular\n");
+    put(dir, "tests/batches.tsv", "id\tstatus\nold-batch\tIMPLEMENTED\n");
+    ck(g(dir, "add", "-A", 0, 0) == 0, "git-add");
+    ck(g(dir, "commit", "-qm", "base", "--no-gpg-sign") == 0, "git-commit");
+}
+#define MAXC 32
+static const char *cname[MAXC], *cfrag[MAXC], *cnot[MAXC]; static int cwant[MAXC], ncase;
+static char cases[16384]; static long clen;
+static void hc(const char *name, const char *args, int want, const char *frag, const char *notfrag) {
+    if (ncase == MAXC) { ck(0, "case-capacity"); return; }
+    cname[ncase] = name; cfrag[ncase] = frag; cnot[ncase] = notfrag; cwant[ncase] = want; ncase++;
+    clen += snprintf(cases + clen, sizeof cases - (size_t)clen, "%s\n", args);
+}
+static void segment(const char *out, int i, char *seg, int cap, int *rc) {
+    char mark[40]; const char *s, *e; *rc = -1; seg[0] = 0;
+    if (cx_fmt(mark, sizeof mark, "CASE\t%d\n", i + 1)) return;
+    s = at(out, mark);
+    if (cx_fmt(mark, sizeof mark, "END\t%d\trc=", i + 1)) return;
+    e = at(out, mark);
+    if (!s || !e || e < s) return;
+    long k = (long)(e - s); if (k >= cap) k = cap - 1;
+    mm_copy(seg, (size_t)cap, s, (size_t)k); seg[k] = 0;
+    *rc = e[strlen(mark)] - '0';
+}
+int main(void) {
+    static char out[131072], seg[8192]; char a[400], b[400], args[2000], f[500], strip[500];
+    if (sy_mkdtemp(sy_tmpdir(), "handoff-check-check-", tmpd, sizeof tmpd)) { puts("FAIL\ttmpdir"); return 1; }
+    repo("a", a, sizeof a);
+    repo("b", b, sizeof b);
+    /* repo a: a new tool without check or rows, a good tool with all, a batch row added (uncommitted) */
+    put(a, "tools/newtool.cx", "int main(void){return 0;}\n");
+    put(b, "tools/goodtool.cx", "int main(void){return 0;}\n");
+    put(b, "tools/check-goodtool.cx", "int main(void){return 0;}\n");
+    put(a, "tests/batches.tsv", "id\tstatus\nold-batch\tIMPLEMENTED\nnew-batch-x\tIMPLEMENTED\n");
+    ck(g(b, "config", "core.hooksPath", "/nonexistent-hooks", 0) == 0, "set-hooks-path");
+    /* profiles table without core-path rows: tamper control */
+    { size_t n; char *t = cx_read("tests/accept-profiles.tsv", &n); static char o[65536]; long k = 0;
+      ck(t != 0, "read-profiles");
+      for (char *p = t, *e; t && *p; p = e) { e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p); if (strncmp(p, "core-path\t", 10)) k += snprintf(o + k, sizeof o - (size_t)k, "%s\n", p); }
+      if (cx_fmt(strip, sizeof strip, "%s/no-core.tsv", tmpd) || cx_write(strip, o, (size_t)k)) ck(0, "write-stripped");
+      free(t); }
+#define A(...) (cx_fmt(args, sizeof args, __VA_ARGS__) ? "" : args)
+    hc("core-path-review-required", A("--root\t%s\t--static\t--files\ttools/precommit.cx,README\t--item\tcore-review", a), 0, "ITEM\tcore-review\tREVIEW_REQUIRED", "core-review\tPASS");
+    hc("core-review-counted", A("--root\t%s\t--static\t--files\ttools/devsvc-core.cx\t--item\tcore-review", a), 0, "review=1", 0);
+    hc("no-core-not-applicable", A("--root\t%s\t--static\t--files\tREADME\t--item\tcore-review", a), 0, "core-review\tNOT_APPLICABLE", 0);
+    hc("tamper-no-core-rows", A("--root\t%s\t--static\t--profiles\t%s\t--files\ttools/precommit.cx\t--item\tcore-review", a, strip), 0, "core-review\tNOT_APPLICABLE", 0);
+    hc("product-no-patch-fail", A("--root\t%s\t--static\t--files\tsrc/x.c\t--item\tpatch-first", a), 1, "patch-first\tFAIL\t0\tPATCH_FIRST src/x.c", 0);
+    hc("product-with-patch-pass", A("--root\t%s\t--static\t--files\tsrc/x.c,plans/x.patch\t--item\tpatch-first", a), 0, "patch-first\tPASS\t0\tpatch present", 0);
+    hc("product-allowed-recorded", A("--root\t%s\t--static\t--allow-product\t--files\tcx/sys/a.cx\t--item\tpatch-first", a), 0, "ALLOWED --allow-product cx/sys/a.cx", 0);
+    hc("registry-missing-unmeasured", A("--root\t%s\t--static\t--item\tregistry", a), 0, "registry\tUNMEASURED\t0\ttools/newtool.cx no-check", "registry\tPASS");
+    hc("registry-missing-strict-fail", A("--root\t%s\t--static\t--strict\t--item\tregistry", a), 1, "no-prd-row", 0);
+    hc("registry-complete-pass", A("--root\t%s\t--static\t--strict\t--item\tregistry", b), 0, "registry\tPASS", 0);
+    hc("new-batch-unmeasured", A("--root\t%s\t--skip-batches\t--item\tfresh-cold", a), 0, "fresh-cold\tUNMEASURED", "fresh-cold\tPASS");
+    hc("no-new-batch-not-applicable", A("--root\t%s\t--skip-batches\t--item\tfresh-cold", b), 0, "fresh-cold\tNOT_APPLICABLE", 0);
+    hc("hookspath-fail", A("--root\t%s\t--static\t--item\tno-bypass", b), 1, "no-bypass\tFAIL\t0\tcore.hooksPath-set", 0);
+    hc("no-hookspath-pass", A("--root\t%s\t--static\t--item\tno-bypass", a), 0, "no-bypass\tPASS", 0);
+    hc("static-all-unmeasured", A("--root\t%s\t--static\t--files\ttools/x.cx", a), 0, "unmeasured=3", "HANDOFF\tpassed=0\tfailed=0\tunmeasured=0");
+    hc("help-lists-items", "--help", 0, "core-review no-bypass patch-first registry", 0);
+    hc("bad-option-usage", "--bogus", 2, "", 0);
+    if (cx_fmt(f, sizeof f, "%s/cases.tsv", tmpd) || cx_write(f, cases, (size_t)clen)) { ck(0, "write-cases"); return 1; }
+    char *v[] = {"./tools/bound", "50", "sh", UC, "tools/handoff-check.cx", "--", "batch", f, 0};
+    ck(run(v, out, sizeof out) == 0, "batch-process-rc0");
+    for (int i = 0; i < ncase; i++) {
+        int rc; segment(out, i, seg, sizeof seg, &rc);
+        int ok = rc == cwant[i] && at(seg, cfrag[i]) && (!cnot[i] || !at(seg, cnot[i]));
+        if (!strcmp(cname[i], "tamper-no-core-rows")) ok = ok && !at(seg, "REVIEW_REQUIRED");
+        ck(ok, cname[i]);
+        if (!ok) printf("#\t%s rc=%d out=%s\n", cname[i], rc, seg);
+    }
+    /* every HANDOFF line is scoped LOCAL; nothing claims a release qualification */
+    { int hand = 0, local = 0;
+      for (const char *p = out; (p = at(p, "\nHANDOFF\t")); p++) { hand++; const char *e = strchr(p + 1, '\n'); const char *l = at(p, "scope=LOCAL"); if (l && (!e || l < e)) local++; }
+      ck(hand > 0 && hand == local, "every-handoff-scope-local");
+      ck(at(out, "QUALIFIED") == 0, "no-qualified-claim"); }
+    printf("CHECK_HANDOFF_CHECK\tpassed=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}
