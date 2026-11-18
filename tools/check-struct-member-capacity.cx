@@ -1,0 +1,34 @@
+/* check-struct-member-capacity.cx -- contract of tools/struct-member-capacity.cx on fixtures every product since
+ * 0.0.73 agrees on (so the check runs on the installed product as well as on a 512-cap candidate):
+ *
+ *   sh ./unisacc.com tools/check-struct-member-capacity.cx --        (repo root)
+ *
+ *   A1 no arguments: exit 2 with the usage line.
+ *   A2 an ABS_OUT that already exists: exit 2, REFUSE.
+ *   A3 SMC_ONLY=m64 on ./ : 64 members accepted by all three entries, output equal to the host cc oracle:
+ *      exit 0, last line STRUCT_MEMBER_CAPACITY pass=3 fail=0.
+ *   A4 SMC_ONLY=m513 on ./ : 513 members refused by name ("structure member capacity") by all three entries:
+ *      exit 0, pass=3 fail=0.
+ * Work goes to a fresh directory under /tmp.  Last line CHECK_STRUCT_MEMBER_CAPACITY assertions=N failed=M.
+ */
+#pragma unisa use cxlib.netpack
+
+static int na, nf;
+static void ck(int ok, const char *what) { na++; if (!ok) nf++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); }
+static int has(const char *h, size_t n, const char *s) { size_t m = strlen(s); for (size_t i = 0; i + m <= n; i++) if (!memcmp(h + i, s, m)) return 1; return 0; }
+static int run(char *const argv[], char *const env[], np_result *r) { char why[512]; return np_run(argv, ".", env, 50, r, why, sizeof why); }
+
+int main(void) {
+    char base[256], out3[300], out4[300];
+    if (cx_fmt(base, sizeof base, "/tmp/check-smc-%d", (int)getpid()) || mkdir(base, 0700) || cx_fmt(out3, sizeof out3, "%s/m64", base) || cx_fmt(out4, sizeof out4, "%s/m513", base)) { fprintf(stderr, "check-struct-member-capacity: work dir\n"); return 2; }
+    char gcc[] = "/usr/bin/gcc"; np_result r;
+    char *a1[] = { "sh", "./unisacc.com", "tools/struct-member-capacity.cx", "--", 0 };
+    if (run(a1, 0, &r)) ck(0, "A1 transport"); else { ck(r.rc == 2 && has(r.err, r.errn, "usage: ROOT ABS_OUT HOST_CC"), "A1 usage refused rc 2"); np_free(&r); }
+    char *a2[] = { "sh", "./unisacc.com", "tools/struct-member-capacity.cx", "--", ".", base, gcc, 0 };
+    if (run(a2, 0, &r)) ck(0, "A2 transport"); else { ck(r.rc == 2 && has(r.err, r.errn, "REFUSE new out dir must be absent"), "A2 existing out dir refused rc 2"); np_free(&r); }
+    char *e3[] = { "SMC_ONLY=m64", 0 }; char *a3[] = { "sh", "./unisacc.com", "tools/struct-member-capacity.cx", "--", ".", out3, gcc, 0 };
+    if (run(a3, e3, &r)) ck(0, "A3 transport"); else { ck(r.rc == 0 && has(r.out, r.outn, "STRUCT_MEMBER_CAPACITY\tpass=3\tfail=0"), "A3 m64 accepted by three entries, equal to host"); np_free(&r); }
+    char *e4[] = { "SMC_ONLY=m513", 0 }; char *a4[] = { "sh", "./unisacc.com", "tools/struct-member-capacity.cx", "--", ".", out4, gcc, 0 };
+    if (run(a4, e4, &r)) ck(0, "A4 transport"); else { ck(r.rc == 0 && has(r.out, r.outn, "STRUCT_MEMBER_CAPACITY\tpass=3\tfail=0"), "A4 m513 refused by name by three entries"); np_free(&r); }
+    printf("CHECK_STRUCT_MEMBER_CAPACITY\tassertions=%d\tfailed=%d\n", na, nf); return nf ? 1 : 0;
+}
