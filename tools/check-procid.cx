@@ -1,0 +1,106 @@
+#pragma unisa use dv.procid
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+
+/* check-procid: unit & live child process tests for tools/dv/procid.cx */
+
+static int fail = 0;
+static int pass = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        pass++;
+    } else {
+        fail++;
+        printf("FAIL\tprocid.%s\n", name);
+    }
+}
+
+int main(void) {
+    /* 1. Stat parser with spaces & nested parens inside comm */
+    {
+        const char *s1 = "42 (foo (bar) baz) S 1 42 42 0 -1 4194304 10 20 0 0 1 2 3 4 20 0 1 0 987654321 1000 50 0\n";
+        unsigned long long tk = 0;
+        char st = 0;
+        int rc = pi_parse_stat_buf(s1, (long)strlen(s1), &tk, &st);
+        ck(rc == 0 && st == 'S' && tk == 987654321ULL, "parse-comm-parens");
+    }
+    /* 2. Zombie state & malformed stat lines */
+    {
+        const char *sz = "99 (dead) Z 1 99 99 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 555 0 0\n";
+        const char *short_line = "42 (a) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18\n";
+        const char *no_rp = "42 (unclosed S 1 2 3\n";
+        unsigned long long tk = 0;
+        char st = 0;
+        ck(pi_parse_stat_buf(sz, (long)strlen(sz), &tk, &st) == 0 && st == 'Z' && tk == 555ULL, "parse-zombie");
+        ck(pi_parse_stat_buf(short_line, (long)strlen(short_line), &tk, &st) != 0, "reject-short");
+        ck(pi_parse_stat_buf(no_rp, (long)strlen(no_rp), &tk, &st) != 0, "reject-no-paren");
+    }
+    /* 3. Tag parse & roundtrip */
+    {
+        int p = -1;
+        unsigned long long tk = 1;
+        ck(pi_parse_tag("1234:567890", &p, &tk) == 0 && p == 1234 && tk == 567890ULL, "tag-valid");
+        ck(pi_parse_tag("", &p, &tk) == 0 && p == 0 && tk == 0ULL, "tag-empty");
+        ck(pi_parse_tag("0:0", &p, &tk) == 0 && p == 0 && tk == 0ULL, "tag-zero");
+        ck(pi_parse_tag("abc:1", &p, &tk) != 0, "tag-bad-pid");
+        ck(pi_parse_tag("12:", &p, &tk) != 0, "tag-empty-ticks");
+        ck(pi_parse_tag("12:xyz", &p, &tk) != 0, "tag-bad-ticks");
+    }
+    /* 4. Self process identity & mismatch (simulated PID reuse) */
+    {
+        int self = sy_pid();
+        unsigned long long tk = 0;
+        char st = 0, tag[64];
+        int p2 = 0;
+        unsigned long long t2 = 0;
+        ck(pi_read_ticks(self, &tk, &st) == 0 && tk > 0ULL && st != 'Z', "self-read-ticks");
+        pi_self_tag(0, tag, sizeof tag);
+        ck(pi_parse_tag(tag, &p2, &t2) == 0 && p2 == self && t2 == tk, "self-tag-roundtrip");
+        ck(pi_alive(self, tk) == 1, "self-alive");
+        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
+        ck(pi_alive(self, tk + 1ULL) == 1, "esrch-narrow-default-keeps-live");
+        sy_setenv("UNISACC_PROCID_FULL_REAP", "1", 1);
+        ck(pi_alive(self, tk + 1ULL) == 0, "pid-reuse-rejected");
+        ck(pi_alive(0, 0ULL) == 1, "unbound-lease-allowed");
+        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
+    }
+    /* 5. Real child spawn + SIGKILL zombie/reaped detection */
+    {
+        sy_spawn_t o;
+        sy_child_t c;
+        sy_exit_t ex;
+        char *v[] = {"sleep", "30", 0};
+        unsigned long long ctk = 0;
+        int w, alive_after_kill = 1;
+        sy_setenv("UNISACC_PROCID_FULL_REAP", "1", 1);
+        sy_spawn_init(&o);
+        o.argv = v;
+        o.pgroup = -1;
+        o.in_fd = SY_STDIO_NULL;
+        o.out_fd = SY_STDIO_NULL;
+        o.err_fd = SY_STDIO_NULL;
+        if (sy_proc_spawn(&o, &c) == 0) {
+            int got = 0;
+            for (w = 0; w < 20; w++) {
+                if (pi_read_ticks(c.pid, &ctk, 0) == 0 && ctk > 0ULL) { got = 1; break; }
+                sy_sleep_ms(10);
+            }
+            ck(got && pi_alive(c.pid, ctk) == 1, "child-alive");
+            sy_proc_kill(&c, 9);
+            for (w = 0; w < 50; w++) {
+                if (pi_alive(c.pid, ctk) == 0) { alive_after_kill = 0; break; }
+                sy_sleep_ms(10);
+            }
+            ck(alive_after_kill == 0, "child-dead-before-wait-zombie");
+            sy_proc_wait(&c, &ex);
+            ck(pi_alive(c.pid, ctk) == 0, "child-dead-after-wait");
+        } else {
+            ck(0, "spawn-sleep");
+        }
+        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
+    }
+    printf("CHECK_PROCID\tfailed=%d\tpassed=%d\n", fail, pass);
+    return fail ? 1 : 0;
+}

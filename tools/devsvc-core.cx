@@ -80,6 +80,7 @@
 #pragma unisa use dv.timing
 #pragma unisa use dv.nativestat
 #pragma unisa use dv.relmem
+#pragma unisa use dv.procid
 #pragma unisa use cxlib.flowfile
 #pragma unisa use cxlib.flowdoc
 #pragma unisa use sys.sigwatch
@@ -161,7 +162,7 @@ static int cfg_load(const char *root) {
     return (bad || seen != 127 || nlib != 3) ? -2 : 0;
 }
 
-typedef struct { char name[64]; char owner[64]; long exp; } Lock;
+typedef struct { char name[64]; char owner[64]; long exp; int pid; unsigned long long ticks; } Lock;
 static Lock locks[MAXLOCK]; static int nlock;
 static char ring[RING][EVW]; static long ring_wall[RING]; static long seq;
 static long ring_floor;
@@ -300,8 +301,8 @@ static void ev_add(const char *kind, const char *text) {
 
 /* ---- 锁 ---- */
 static void locks_save(void) {
-    static char b[MAXLOCK * 160]; long n = 0; int i; char p[PW];
-    for (i = 0; i < nlock && n < (long)sizeof b - 160; i++) n += snprintf(b + n, sizeof b - n, "%s\t%s\t%ld\n", locks[i].name, locks[i].owner, locks[i].exp);
+    static char b[MAXLOCK * 256]; long n = 0; int i; char p[PW];
+    for (i = 0; i < nlock && n < (long)sizeof b - 256; i++) n += snprintf(b + n, sizeof b - n, "%s\t%s\t%ld\t%d\t%llu\n", locks[i].name, locks[i].owner, locks[i].exp, locks[i].pid, locks[i].ticks);
     F(p, sizeof p, "%s/locks.tsv", dir);
     if (sy_write_atomic(p, b, n, 0600)) fprintf(stderr, "devsvc: cannot save %s\n", p);
 }
@@ -311,11 +312,14 @@ static void locks_load(void) {
     if (sy_exists(p) != 1 || sy_read_file(p, &b, &n, 1 << 16) || !b) return;
     s = (char *)b;
     while (s < (char *)b + n && nlock < MAXLOCK) {
-        char nm[64], ow[64]; long ex = 0;
+        char nm[64], ow[64]; long ex = 0; int pd = 0, got; unsigned long long tk = 0;
         e = memchr(s, '\n', (char *)b + n - s); if (!e) break;
         *e = 0;
-        if (sscanf(s, "%63[^\t]\t%63[^\t]\t%ld", nm, ow, &ex) == 3) {
-            F(locks[nlock].name, 64, "%s", nm); F(locks[nlock].owner, 64, "%s", ow); locks[nlock].exp = ex; nlock++;
+        got = sscanf(s, "%63[^\t]\t%63[^\t]\t%ld\t%d\t%llu", nm, ow, &ex, &pd, &tk);
+        if (got == 3 || got == 5) {
+            F(locks[nlock].name, 64, "%s", nm); F(locks[nlock].owner, 64, "%s", ow); locks[nlock].exp = ex;
+            locks[nlock].pid = got == 5 ? pd : 0; locks[nlock].ticks = got == 5 ? tk : 0ULL;
+            nlock++;
         }
         s = e + 1;
     }
@@ -329,10 +333,13 @@ static int expd_find(const char *name, const char *owner) {
     return -1;
 }
 static void locks_expire(void) {
-    long now = sy_wall_s(); int i, ch = 0; char t[200];
+    long now = sy_wall_s(); int i, ch = 0; char t[224];
     for (i = 0; i < nlock; ) {
-        if (locks[i].exp <= now) {
-            F(t, sizeof t, "%s\towner=%s", locks[i].name, locks[i].owner); ev_add("lock.expire", t);
+        int dead = locks[i].pid > 0 && !pi_alive(locks[i].pid, locks[i].ticks);
+        if (locks[i].exp <= now || dead) {
+            if (dead) F(t, sizeof t, "%s\towner=%s\tdead_pid=%d", locks[i].name, locks[i].owner, locks[i].pid);
+            else F(t, sizeof t, "%s\towner=%s", locks[i].name, locks[i].owner);
+            ev_add("lock.expire", t);
             expd[nexpd % NEXPD] = locks[i]; nexpd++;
             locks[i] = locks[--nlock]; ch = 1;
         } else i++;
@@ -479,18 +486,22 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     if (!strcmp(f[0], "ping")) { radd("OK\tpong\tpid=%d\tseq=%ld\tlocks=%d\n", sy_pid(), seq, nlock); return 0; }
     if (!strcmp(f[0], "stop")) { radd("OK\tstopping\tpid=%d\n", sy_pid()); return 1; }
     if (!strcmp(f[0], "lock-acquire")) {
-        long ttl = atol(f[3]); char t[200];
+        long ttl = atol(f[3]); char t[224]; int rpid = 0; unsigned long long rtk = 0;
         if (!okname(f[1]) || !okname(f[2]) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+        if (f[4][0] && pi_parse_tag(f[4], &rpid, &rtk) != 0) { rpid = 0; rtk = 0; }
         i = lock_find(f[1]);
         if (i >= 0 && strcmp(locks[i].owner, f[2])) { radd("ERR\theld\t%s\towner=%s\texpires_in_s=%ld\n", f[1], locks[i].owner, locks[i].exp - now); return 0; }
         if (i < 0) {
             if (nlock >= MAXLOCK) { radd("ERR\tfull\tmax=%d\n", MAXLOCK); return 0; }
             i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", f[2]);
             radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
-            F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl); ev_add("lock.acquire", t);
-            locks[i].exp = now + ttl;
-        } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短 */
+            if (rpid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], f[2], ttl, rpid);
+            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl);
+            ev_add("lock.acquire", t);
+            locks[i].exp = now + ttl; locks[i].pid = rpid; locks[i].ticks = rtk;
+        } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短; 且仅同 PID 或原持有者已确认死亡才改绑(P1) */
             if (locks[i].exp < now + ttl) locks[i].exp = now + ttl;
+            if (rpid > 0 && locks[i].pid > 0 && (rpid == locks[i].pid || !pi_alive(locks[i].pid, locks[i].ticks))) { locks[i].pid = rpid; locks[i].ticks = rtk; }
             radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], locks[i].exp - now);
         }
         locks_save(); return 0;
@@ -505,7 +516,10 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     }
     if (!strcmp(f[0], "lock-list")) {
         radd("OK\tlocks\tn=%d\n", nlock);
-        for (i = 0; i < nlock; i++) radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\n", locks[i].name, locks[i].owner, locks[i].exp - now);
+        for (i = 0; i < nlock; i++) {
+            if (locks[i].pid > 0) radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\tpid=%d:%llu\n", locks[i].name, locks[i].owner, locks[i].exp - now, locks[i].pid, locks[i].ticks);
+            else radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\n", locks[i].name, locks[i].owner, locks[i].exp - now);
+        }
         return 0;
     }
     if (!strcmp(f[0], "native")) {
@@ -889,7 +903,7 @@ static int lk_take(const char *root, const char *name, long ttl, long wait_ms) {
     for (i = 0; i < nheld; i++) if (!strcmp(held[i], name)) return 0;
     if (nheld >= MAXLOCK) { rn = snprintf(resp, sizeof resp, "ERR\tfull\tmax=%d\n", MAXLOCK); return 1; }
     if (ttl > LOCK_TTL_MAX) ttl = LOCK_TTL_MAX;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t%ld", name, fl_owner, ttl);
+    {   char pt[48]; pi_self_tag(0, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%ld\t%s", name, fl_owner, ttl, pt); }
     for (;;) {
         rc = request(root, req, 0);
         if (rc == 0) { F(held[nheld], 64, "%s", name); held_mine[nheld] = !strncmp(resp, "OK\tacquired", 11); nheld++; return 0; }
@@ -1539,8 +1553,9 @@ static const char *lock_for(const char *p) {   /* 路径 -> 锁名;无匹配返�
     return 0;
 }
 static int auto_lock(const char *root, const char *name, const char *ow) {
-    char req[256]; long end = sy_now_ms() + 50000; int rc;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t120", name, ow);
+    char req[256], pt[48]; long end = sy_now_ms() + 50000; int rc;
+    pi_self_tag(0, pt, sizeof pt);
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t120\t%s", name, ow, pt);
     for (;;) {
         rc = request(root, req, 1);
         if (rc == 0) return 0;
@@ -1936,9 +1951,10 @@ static void mg_teardown(void) { char buf[64]; char *v[] = {"rm", "-rf", mg_tmp, 
 #define MG_LOCK_WAIT_MS 3000
 static int mg_locked;
 static int mg_lock(const char *root) {
-    char req[256]; long end = sy_now_ms() + MG_LOCK_WAIT_MS; int rc; const char *ow = auto_owner();
+    char req[256], pt[48]; long end = sy_now_ms() + MG_LOCK_WAIT_MS; int rc; const char *ow = auto_owner();
     mg_locked = 0;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t60", MG_LOCK, ow); if (ovf) return 1;
+    pi_self_tag(0, pt, sizeof pt);
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t60\t%s", MG_LOCK, ow, pt); if (ovf) return 1;
     for (;;) {
         rc = request(root, req, 1);
         if (rc == 0) { mg_locked = !strncmp(resp, "OK\tacquired", 11); return 0; }
@@ -2723,7 +2739,12 @@ static int main2(int argc, char **argv) {
         const char *ow = opt(argc, argv, "--owner", "");
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
         if (argc < 2 || !okname(argv[1]) || !okname(ow)) { fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME --owner O (NAME and O non-empty, under 64 bytes, no spaces)\n"); return usage(); }
-        if (!strcmp(argv[0], "acquire")) F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
+        if (!strcmp(argv[0], "acquire")) {
+            const char *lp = opt(argc, argv, "--pid", getenv("DEVSVC_LOCK_PID"));
+            int bp = (lp && lp[0]) ? atoi(lp) : 0;
+            if (bp > 0) { char pt[48]; pi_self_tag(bp, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"), pt); }
+            else F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
+        }
         else if (!strcmp(argv[0], "release")) F(req, sizeof req, "lock-release\t%s\t%s", argv[1], ow);
         else { fprintf(stderr, "devsvc: REFUSE lock-args: unknown lock action %s (acquire|release|list)\n", argv[0]); return usage(); }
         return say(request(root, req, 1));

@@ -1,0 +1,39 @@
+/* Formal batch wrapper for tools/check-release-exec.cx. Native images are
+ * prepared materials. Each assertion runs in this invocation. */
+static int inventory(const char *scene,const char *facts,size_t size,const char *out,size_t count){
+    size_t at=0,observed=0,ns=strlen(scene);int n=0;
+    while(at<size){
+        size_t end=at;while(end<size && facts[end]!='\n')end++;
+        if(end>at+ns && facts[at+ns]=='\t' && !memcmp(facts+at,scene,ns)){
+            const char *label=facts+at+ns+1;size_t len=end-at-ns-1;
+            for(;;){
+                if(observed>=count)return 0;
+                size_t start=observed;while(observed<count && out[observed]!='\n')observed++;
+                size_t width=observed-start;observed+=observed<count;
+                if(width<5 || memcmp(out+start,"PASS\t",5))continue;
+                if(width!=len+5 || memcmp(out+start+5,label,len))return 0;
+                break;
+            }
+            n++;
+        }
+        at=end+1;
+    }
+    while(observed<count){
+        if(count-observed>=5 && !memcmp(out+observed,"PASS\t",5))return 0;
+        while(observed<count && out[observed++]!='\n'){}
+    }
+    return n>0;
+}
+int main(int argc,char **argv){
+    if(argc!=4 && argc!=5)return 2;
+    char *v[]={argv[2],"--part",argv[1],argv[3],argc==5?argv[4]:0,0};
+    size_t size=0,n=0;char *facts=cx_read("tests/release-exec-assertions.tsv",&size),*out=0;
+    if(!facts)return 2;
+    int rc=cx_runv_timeout(v,55,&out,&n);
+    if(out && n)fwrite(out,1,n,stdout);
+    if(!rc && (!out || !inventory(argv[1],facts,size,out,n) ||
+       inventory("test","test\ta\ntest\tb\n",14,"PASS\ta\n",7))){
+        fprintf(stderr,"RELEASE_EXEC ASSERTION_INVENTORY_MISMATCH %s\n",argv[1]);rc=1;
+    }
+    free(facts);free(out);return rc;
+}
