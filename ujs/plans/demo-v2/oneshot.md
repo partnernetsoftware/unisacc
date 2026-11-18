@@ -1,11 +1,13 @@
 # demo-v2 oneshot
 
-**BLOCKED(缺参考)**:无 B 关键帧,元素清单空,不开写网格。
+原话真源:[requirements-original.md](requirements-original.md)。
 
-假设(可被项目所有者纠正):对应参考 B(Anvith 片同款三维一发)。
+**BLOCKED(缺关键帧)**: 所有者来源是视频,无文字描述,元素清单空,不开写网格。
 
-- URL: https://x.com/anvithbuilds/status/2122408638950371579
-- 帧:需项目所有者提供关键帧。未看清片不得锁物体清单(计划原文)。
+## 参考
+
+- 所有者来源(2026-11-18): `https://x.com/anvithbuilds/status/2122408638950371579/video/1?s=46`。
+
 
 ## 体验一句话
 

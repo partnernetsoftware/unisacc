@@ -1,6 +1,8 @@
 # water-keeps S0
 
-`water-keeps-s0-concept.png` 冻结:2D 概念稿,非 UXE。已知缺口:倒影仅桥。UXE 移植 `water-keeps-s0-uxe.png` 须 13 条存在性门。
+按参考 C 的探索,待所有者确认是否沿用为 D2。D2 所有者来源是 kevin_t_ngo 视频,见 [../requirements-original.md](../requirements-original.md)。
+
+
 
 
 

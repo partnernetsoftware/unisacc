@@ -1,11 +1,12 @@
 # demo-v2 ink-walk
 
-假设(可被项目所有者纠正):对应参考 A(铅笔水彩可逛 3D),与 ghibli-world 同分参考 A。
+原话真源:[requirements-original.md](requirements-original.md)。
 
 ## 参考
 
-- URL: https://x.com/beyondtheboxcn/status/2122472282824065492
-- 帧:需项目所有者提供关键帧。headless 抓 x.com 视频未做;不得凭印象写桥/树/屋的具体造型。
+- 所有者来源(2026-11-18): `https://x.com/beyondtheboxcn/status/2122472282824065492/video/1?s=46` (只有目标效果视频)。
+- 帧: BLOCKED, 需所有者关键帧。不得凭印象写桥/树/屋。
+- 不得把本参考当分给 D5。
 
 ## 体验一句话
 

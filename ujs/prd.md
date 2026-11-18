@@ -82,7 +82,8 @@
 
 ### 0.3 实践 demo（host1 + UXE,不挡 `ujs.com` 版号）
 
-目录 `practice/uxe/demo/`。合同与四款现页相同:世界与步进在 `.ujs`/`wasm`,Host 只输入与光栅;`host1Boot.step` + `host_gpu_submit`(失败回退页内 renderer);无 `three.module`;`?auto=1` 只核表长/金,不核截图。细计划仍见 [`plans/demo-three-ports.md`](plans/demo-three-ports.md)。
+demo-v2 卡片以 [`plans/demo-v2/requirements-original.md`](plans/demo-v2/requirements-original.md) 为准(所有者原话只增不改)。目录 `practice/uxe/demo/`。合同与四款现页相同:世界与步进在 `.ujs`/`wasm`,Host 只输入与光栅;`host1Boot.step` + `host_gpu_submit`(失败回退页内 renderer);无 `three.module`;`?auto=1` 只核表长/金,不核截图。细计划仍见 [`plans/demo-three-ports.md`](plans/demo-three-ports.md)。
+
 
 | 编号 | 页 | 核要交什么 | 完成时玩家应看到 |
 |---|---|---|---|

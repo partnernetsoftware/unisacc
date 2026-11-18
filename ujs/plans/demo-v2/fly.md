@@ -1,10 +1,12 @@
 # demo-v2 fly
 
-项目所有者 2026-11-18 补录原始需求。此前「无外部参考、另立峡谷穿环」作废。
+原话真源:[requirements-original.md](requirements-original.md)。项目所有者 2026-11-18 补录。此前「无外部参考、另立峡谷穿环」作废。
+
 
 ## 参考
 
 - 试玩: `https://remix.ui8.ai/fly` (308 到 `https://forge.ui8.ai/share/frag_1eb8944c-57b1-42ca-a909-5c2d7e517c24`)。标题 Forge / fighter, 版本 fighterv2, 作者 Dash。平台 `https://ui8.ai/forge`, 可 Remix。
+
 - 取证: ccapi 2026-11-18 headless chrome 只读。画布空白, 画面观感 UNMEASURED, 需所有者录屏或关键帧。参数面板可读, 即功能清单。
 
 ## 体验一句话

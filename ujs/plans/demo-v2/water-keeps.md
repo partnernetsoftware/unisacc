@@ -1,58 +1,37 @@
 # demo-v2 water-keeps
 
-假设(可被项目所有者纠正):对应参考 C。
+原话真源:[requirements-original.md](requirements-original.md)。
 
 ## 参考
 
-- URL: https://what-the-water-keeps.vercel.app/
-- 帧: `c-home.png` sha256 ebda8e993a0d8630e6e1553d5c83e5ed08662af6859bcd660f68170bb0551824 (vt 默认,~加载页)
-- `c-vt20000.png` sha256 4de4491725f2dab13138a3d2caf299d57b82ecf3f49b463e872c02c9a55cb50f (virtual-time-budget=20000)
-- `c-vt40000.png` sha256 a08f56dc3b1ddcd94ab739bca3078bed35ec0de53b6000e5d78904a75867ae20 (budget=40000,141176B,可能未到完整可玩画面)
-- 取证标:未能确认已过 Still loading;对照只用构图/色调,不复制资产。完整可玩参考=未取得。
-- 不复制原作插画资产。
+- 所有者来源(2026-11-18): `https://x.com/kevin_t_ngo/status/2119868970643964177?a=aCeoOx8SH960JPOcUiQ&s=46` (只有目标效果视频)。
+- 元素清单 BLOCKED: x.com 视频无法 headless 抓取,缺所有者关键帧/录屏,不得凭印象写元素。
+- 曾用对照(参考 C,降级,不再作 D2 依据): `https://what-the-water-keeps.vercel.app/` 与 `ref/water-keeps/c-home.png` `c-vt20000.png`。那是 demo-three-ports.md 的假设。
 
 ## 体验一句话
 
-驾一盏自绘风格的灯舟,沿水道穿过八个观感不同的界。
+BLOCKED(缺关键帧)。不得用八界灯舟冒充所有者视频内容。
 
 ## 玩法闭环
 
-开始:界 1 舟在水道中,灯亮。操作:WASD/触屏舵与油门。反馈:界切换时岸形、水色、灯色变;撞岸减速。结束:抵达界 8 或自选回头。
+BLOCKED。
 
 ## 场景元素
 
-| 元素 | 必须/可选 | UXE | 可检 |
-|---|---|---|---|
-| 金色天空渐变与云 | 必须 | T1 天空贴图/背景 | look-dev 一眼可见,非清屏单色 |
-| 桥或岸景深 | 必须 | T1+核岸折线 | 近岸远岸分层 |
-| 水面倒影 | 必须 | T5(排 T1-T3 后) | 舟/岸在水中有倒影,非可选 |
-| 发光莲花灯 | 必须 | T3 精灵+T1 | 舟首或水面灯 |
-| 浮动光点 | 必须 | T3 points | 可见粒子 |
-| 睡莲叶/芦苇 | 必须 | T1 自绘小图 | 水面/岸边,不抄原作 |
-| 标题文字 | 必须 | T4(排 T1-T3 后) | 可读标题,非可选 |
-| 水道与 8 界 pal | 必须 | 核表 | 界切换岸形水色变 |
-| 倒影/文字未落地前 | 切片未完成 | T4 T5 | 不得宣称观感过 |
+全部 BLOCKED(缺关键帧)。
+
+## S0 现有成果
+
+`look-dev/` 概念稿与 UXE 版按参考 C 探索,待所有者确认是否沿用。确认前不得宣称 D2 观感过。
 
 ## 相机与操作
 
-第三人称随舟;键鼠 WASD;触屏左舵右看。设备:桌面+触屏。
-
-## 性能预算
-
-60fps 目标(未测=UNMEASURED);实例<=64;纹理合计<=512KiB;UXEP 一帧 <=4096 store_bytes 窗口需拆包或升窗(G2)先标风险。
-
-## 素材清单
-
-P1 `assets.tsv` 未开工。本卡:岸/水/灯自绘或 .cx 生成;禁止原作 PNG。
-
-## 所需 UXE 能力
-
-T1 贴图(`prd_uxe_sped.md` Texture 行,现无);T2 素材加载;T3 精灵/粒子(灯、光点);FogExp2 部分;UXEP 提交面 G1;persist 舵 G4。
+BLOCKED。
 
 ## 验收
 
-机器:固定相机 S0 像素 oracle(.cx 从纹理算)+篡改红。人工:look-dev 静帧签字。禁止 title/金值冒充观感。
+关键帧到位后再签 S0。禁止 WATER_OK 金值冒充观感。
 
 ## 不做什么
 
-不打补丁旧 `demo/water-keeps`;不引进 three;不抄原作资产;线上旧页不动直到 S4 人工门。
+不把参考 C 当所有者来源;不凭印象写元素;不新增渲染直到所有者确认方向。
