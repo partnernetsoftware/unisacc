@@ -17,10 +17,16 @@ import { BOX_MESH, MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } fro
 import { archMeshes, loadBays } from "./d3-arch.js";
 import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
 import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
+import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params = new URLSearchParams(location.search);
-const play=params.get("walk")==="1" || params.has("walk-check");
-const style=play?"study":params.get("style");
+const release=!location.pathname.endsWith("/d3-bridge.html");
+const finish=release || params.has("finish-u2c");
+const enlarged=params.has("scale-u2b") || finish;
+const paper=params.has("paper-u3") || enlarged;
+const dense=params.has("dense-u2") || paper;
+const play=release || params.get("walk")==="1" || params.has("walk-check");
+const style=play || dense?"study":params.get("style");
 const mode = params.get("mode");
 const composition = style === "study" ||
   ["composition","short-composition","rails","no-rails","palette","old-palette","leaf-shape","angular-leaf","leaf-light","no-leaf-light"].includes(mode);
@@ -42,11 +48,17 @@ const colors = {
   leafLight:[97,148,70], leafDark:[40,90,67],
   meadowShade:[70,115,45], meadowLight:[160,181,82],
   cliffShade:[94,108,125], cliffLight:[132,145,158], roofPale:[91,109,125], ridge:[106,135,151],
-  iron:[33,40,52], vine:[59,86,46]
+  iron:[33,40,52], vine:[59,86,46],
+  wallOchre:[191,130,78], wallCream:[237,197,139], roofSlate:[54,73,91], roofRidge:[111,128,136]
 };
 if (palette) {
   for (const material of ["stone","barrel","leafLight","leafDark","leaf.light"]) colors[material]=palette[material];
   colors.leaf=palette.leafDark.map((v,i)=>.55*v+.45*palette.leafLight[i]);
+}
+if(finish) {
+  colors.leafDark=[46,89,61];
+  colors.leafLight=[109,148,77];
+  colors.leaf=[71,119,66];
 }
 function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
   const key=material+"-"+mesh;
@@ -60,25 +72,53 @@ function addMesh(mesh) {
   extraMeshes.push(mesh);
   return id;
 }
-const bays=await loadBays();
+const template=await loadBays();
+const [archCount,bayWidth,depthShift,houseX,houseWidth,houseHeight,houseDepth]=enlarged?await loadScaleStudy("d3"):[];
+const recession=x=>enlarged?depthShift*x/1000:0;
+const bays=enlarged?Array.from({length:params.has("short-u2b")?3:archCount},(_,i)=>{
+  const bay=template[0].slice();
+  bay[0]=(i-(archCount-1)/2)*bayWidth/1000;
+  bay[5]=bayWidth/2000;
+  if(finish) bay[4]-=4.4;
+  return bay;
+}):template;
+const arches=[];
 const taller=layout && mode!=="short-composition";
 for(const bay of bays) {
   const first=allMeshes().length+extraMeshes.length;
   const meshes=archMeshes(bay,mode);
   extraMeshes.push(...(taller?meshes.map(mesh=>stretchBridge(mesh,layout.scale,bay[7])):meshes));
+  if(enlarged) for(const mesh of meshes) for(let i=0;i<mesh.positions.length;i+=3) {
+    mesh.positions[i+2]+=recession(mesh.positions[i]);
+    mesh.normals[i]-=depthShift/1000*mesh.normals[i+2];
+  }
+  arches.push(first);
   instance("stone",first,0,0,0,1);
   instance("barrel",first+1,0,0,0,1);
 }
+let houseBounds;
 if (taller) {
   const [, , , , , , deck,bottom] = bays[0];
   const bridgeTop=bottom+(deck-bottom)*layout.scale;
-  buildClifftop(layout,bridgeTop,addMesh,instance);
-  bridgeLines(bridgeTop,addMesh,instance,mode!=="no-rails");
+  if(enlarged) {
+    const x=houseX/1000, width=houseWidth/(params.has("small-u2b")?2200:1000);
+    const height=houseHeight/1000, depth=houseDepth/1000, shift=recession(-20);
+    const finishHouse=finish && !params.has("bare-u2c-house");
+    houseBounds=buildClifftop({houseX:x,width,height,depth,upperFloor:true,finishHouse,roundedHills:finish},bridgeTop,addMesh,
+      (material,id,px,y,z,...rest)=>instance(finish && !finishHouse?"wallCream":material,id,px,y,z+shift,...rest))
+      .map(([px,y,z])=>[px,y,z+shift]);
+    bridgeLines(bridgeTop,addMesh,instance,true,archCount*bayWidth/1000,recession,finish?-4.75:-.35);
+    const mountain=finish?addMesh(leafMesh(.40)):MESH_OCTA;
+    for(let i=0;i<12;i++) instance("ridge",mountain,-55+i*9,-4+i%3,-43-i%2*13,9+i%4*2,i*.42);
+  } else {
+    buildClifftop(layout,bridgeTop,addMesh,instance);
+    bridgeLines(bridgeTop,addMesh,instance,mode!=="no-rails");
+  }
   if(play) {
     const positions=BOX_MESH.map((v,i)=>v*[5.4,.40,2.7][i%3]);
     const landing=addMesh({positions,vCount:positions.length/3});
-    instance("stone",landing,14.65,bridgeTop-.20,1.1,1);
-    instance("stone",landing,-13.15,bridgeTop-.20,3.7,1);
+    instance("stone",landing,14.65,bridgeTop-.20,1.1+recession(14.65),1);
+    instance("stone",landing,-13.15,bridgeTop-.20,3.7+recession(-13.15),1);
   }
 } else {
 for(let y=-1;y<=5;y+=2) for(let x=-17;x<=-13;x+=2) {
@@ -103,7 +143,9 @@ instance("grass",MESH_PLANE,0,-2.01,0,110);
 if (textured && mode !== "flat-ground") {
   const blades = allMeshes().length + extraMeshes.length;
   const boulder = blades+1;
-  extraMeshes.push(grassMesh(),leafMesh(.59));
+  const bladesMesh=grassMesh();
+  if(finish) for(let i=1;i<bladesMesh.positions.length;i+=3) bladesMesh.positions[i]*=.55;
+  extraMeshes.push(bladesMesh,leafMesh(.59));
   let seed=713;
   const random=()=>{
     seed=( Math.imul(seed,1664525)+1013904223)>>>0;
@@ -119,6 +161,11 @@ if (textured && mode !== "flat-ground") {
     instance(i%3===0?"cliffLight":"cliffShade",boulder,x,y,2.55+random()*.56,
       .68+random()*.80,random()*Math.PI,random()*.5);
   }
+  if(dense && !params.has("thin-u2-plant")) for(let row=0;row<12;row++) for(let col=0;col<46;col++) {
+    const x=-23+(col+random())*.93,z=13.4+(row+random())*.51;
+    instance(row%4===0?"meadowLight":"meadowShade",blades,x,-2.008,z,
+      .70+random()*.72,random()*Math.PI*2);
+  }
 }
 if (mode!=="bare") {
   const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
@@ -132,6 +179,13 @@ if (mode!=="bare") {
   if(play) {
     trees.push([-15.4,13.6,-5.9,3.6],[-8,10.8,-5,2.9],[-1.6,10.3,-7.8,2.7],[6.8,10.9,-4.9,2.6]);
     for(let i=0;i<7;i++) instance("ridge",MESH_OCTA,-27+i*8,-2,-22-i%2*4,8+i%3*2,i*.3);
+  }
+  if(dense && !params.has("thin-u2-plant")) {
+    for(let i=0;i<17;i++) {
+      const x=-27+i*3.15+Math.sin(i*11)*1.0,z=i%3===0?7.8:i%3===1?3.3:-5.7;
+      const y=i%3===0?.4:i%3===1?1.8:4.2;
+      trees.push([x,y,z,1.0+(i*13%7)*.19]);
+    }
   }
   for(const [x,y,z,r] of trees) {
     if (study) {
@@ -170,13 +224,20 @@ scene.clearColor=[88/255,160/255,218/255,1];
 scene.ambient={color:[1,1,1],intensity:.82};
 scene.lights=[{dir:[-.4,.85,.45],color:[1,1,1],intensity:.30}];
 scene.fog.density=0;
-if(params.has("render-u1")) {
+if(paper && !params.has("no-u3-paper")) scene.paper=.38;
+if(params.has("render-u1") || dense) {
   scene.ambient.intensity=.58;
   scene.lights[0].intensity=.83;
   scene.lights[0].color=[1,.94,.83];
   if(!params.has("no-u1-shadow")) scene.shadows={center:[0,3,0],extent:28,size:1024,strength:.86};
   if(!params.has("no-u1-grade")) scene.output={exposure:1.12};
   if(!params.has("no-u1-fog")) scene.fog={density:0,start:13,end:65,color:[.62,.76,.82]};
+}
+if(finish) {
+  scene.fog={density:0,start:30,end:109,color:[.60,.74,.81]};
+  scene.shadows={center:[-11,6,-3],extent:46,size:1024,strength:.80};
+  scene.ambient.intensity=.70;
+  scene.paper=.24;
 }
 const camera=new PerspectiveCamera(2*Math.atan(9/16),.1,150);
 camera.setEye(10,1,19);
@@ -186,6 +247,10 @@ if(layout) {
   camera.setEye(x,y,z);
   camera.setTarget(x-60/169,y+5/13,z-144/169);
   scene.outlineWidth = 1;
+}
+if(enlarged) {
+  camera.setEye(15,4,29);
+  camera.setTarget(3,9,-5);
 }
 const canvas=document.querySelector("canvas");
 const textures = [];
@@ -198,7 +263,8 @@ async function loadTexture(file,id,w,h,filter=0) {
   return rgba;
 }
 if (textured) {
-  await loadTexture("d3-masonry.rgba",1,64,64);
+  if(dense && !params.has("plain-u2-bricks")) await loadTexture("d3-detail.rgba",1,128,128,1);
+  else await loadTexture("d3-masonry.rgba",1,64,64);
   if (cutout) await loadTexture("d3-leaf.rgba",3,64,64,1);
   const shift = Number(params.get("shift"));
   if (Number.isFinite(shift) && Math.abs(shift) <= 2) {
@@ -256,8 +322,10 @@ if(play) {
     const hi=edge<0?route.length-1:edge;
     const a=route[hi-1],b=route[hi],t=(distance-a[0])/(b[0]-a[0]);
     const [x,y,z,dx,dy,dz]=a.slice(1).map((v,i)=>(v+(b[i+1]-v)*t)/1000);
-    camera.setEye(x,y,z);
-    camera.setTarget(x+dx*Math.cos(yaw)-dz*Math.sin(yaw),y+dy+pitch,z+dx*Math.sin(yaw)+dz*Math.cos(yaw));
+    const curve=cap((distance-7000)/8000,0,1);
+    const pz=z+curve*recession(x), heading=dz+curve*recession(dx);
+    camera.setEye(x,y,pz);
+    camera.setTarget(x+dx*Math.cos(yaw)-heading*Math.sin(yaw),y+dy+pitch,pz+dx*Math.sin(yaw)+heading*Math.cos(yaw));
     let grass=0,leaves=0;
     for(const group of wind) {
       const {cloud,items,leaves:isLeaf}=group;
@@ -280,7 +348,7 @@ if(play) {
     return [distance,...camera.eye.map(n=>Math.round(n*1000)),Math.round(grass*1000),Math.round(leaves*1000)];
   }
   document.body.classList.add("walk");
-  document.title="墨桥漫游 · 开发预览";
+  document.title=params.has("bad-auto-title")?"墨桥漫游":"墨桥漫游 · 开发预览";
   canvas.setAttribute("aria-label","石桥轨道漫游，W 和 S 移动，拖动看景");
   if(params.has("walk-check")) {
     const trace=[];
@@ -301,6 +369,14 @@ if(play) {
       trace.push(state.join(","));
     }
     result.textContent=trace.join(";");
+  } else if(params.has("auto")) {
+    globalThis.advancePreview=frames=>{
+      for(let i=0;i<frames;i++) step();
+      result.textContent=draw().join(",");
+      return result.textContent;
+    };
+    globalThis.advancePreview(0);
+    document.title=params.has("bad-auto-title")?"D3_FAIL":"D3_OK";
   } else {
     document.querySelector("aside").hidden=false;
     canvas.addEventListener("wheel",event=>{
@@ -360,6 +436,12 @@ if(params.has("region")) {
     return rgba.slice(0,3).join(",");
   });
 }
-result.textContent=samples.join(";");
+const counts=[...groups.values()].reduce(([leaves,grass],group)=>[
+  leaves+(group.material.startsWith("leaf")?group.items.length:0),
+  grass+(group.material.startsWith("meadow")?group.items.length:0)
+],[0,0]);
+result.textContent=params.has("u2b-probe")?
+  [arches.filter(id=>scene.clouds.has("stone-"+id)).length,...screenBox(camera,...houseBounds)].join(","):
+  (params.has("u2-probe")?counts.join(",")+"|":"")+samples.join(";");
 }
 </script>

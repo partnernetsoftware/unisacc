@@ -1,8 +1,19 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>D4 行走城镇骨架</title>
-<style>html,body{margin:0;background:#7bafca}canvas{display:block}output{display:none}</style>
+<style>
+html,body{margin:0;background:#7bafca}canvas{display:block}output{display:none}
+.play canvas{position:fixed;inset:0;width:100dvw;height:100dvh;object-fit:contain}
+.controls{position:fixed;bottom:16px;left:16px;padding:9px;background:#272d35e8;color:#fff4dc;font:14px system-ui}
+.controls button{min-height:42px;padding:0 13px;margin-left:5px;touch-action:none}
+</style>
 <canvas width="1280" height="720"></canvas><output id="pixels"></output>
+<aside class="controls" hidden>
+  <span>按住 W 或 S 驱动城镇</span>
+  <button type="button" data-key="KeyW" aria-label="城镇前进">前进</button>
+  <button type="button" data-key="KeyS" aria-label="城镇后退">后退</button>
+</aside>
 <script type="module">
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
@@ -12,20 +23,28 @@ import { gaitPose, readGaitPixels } from "./d4-gait.js";
 import { buildTown, townLayout } from "./d4-town.js";
 import { barrelMesh, closeCamera } from "./d4-framing.js";
 import { archMeshes } from "./d3-arch.js";
+import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
+const release=!location.pathname.endsWith("/d4-skeleton.html");
+const play=release || params.has("play") || params.has("play-check");
+const finishU2c=play || params.has("finish-u2c");
+const enlarged=params.has("scale-u2b") || finishU2c;
+const paper=params.has("paper-u3") || enlarged;
+const dense=params.has("dense-u2") || paper;
 const walkProbe=["walk","sliding-feet","frozen-body"].includes(mode);
 const finish=["finish","no-texture","single-smoke","sealed-arcade","thin-woodland"].includes(mode);
-const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map();
+const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map(), dimensions=new Map();
 const bodies=[];
 const paint={
   chassis:[61,74,92], witness:[185,63,49], joint:[187,139,62], link:[119,123,126],
   foot:[119,74,49], white:[232,226,197], orange:[181,84,46], wood:[92,60,46],
-  red:[174,50,42], glass:[85,133,149], smoke:[236,239,234], grass:[130,164,91],
+  red:[174,50,42], glass:[85,133,149], smoke:[236,239,234], smokeShade:[202,214,226], grass:[130,164,91],
   darkgrass:[83,131,74], farhill:[95,143,118], grove:[48,104,77],
   gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96],
   groundMark:[194,92,45], arcade:[207,171,120], alcove:[54,81,86],
-  pineDark:[39,87,48], pineMid:[59,115,56], pineLight:[82,135,66], trunk:[96,69,39]
+  pineDark:[39,87,48], pineMid:[59,115,56], pineLight:[82,135,66], trunk:[96,69,39],pipe:[147,110,61],
+  copper:[161,119,70], steel:[107,124,128]
 };
 function mesh(positions,normals,uvs) {
   const id=allMeshes().length+extraMeshes.length;
@@ -55,7 +74,11 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if (!["joint","link","foot","darkgrass","farhill","grove","groundMark","pineDark","pineMid","pineLight","trunk"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
-function block(color,x,y,z,w,h,d,roll=0) { return add(color,box(w,h,d),x,y,z,1,0,0,roll); }
+function block(color,x,y,z,w,h,d,roll=0) {
+  const item=add(color,box(w,h,d),x,y,z,1,0,0,roll);
+  dimensions.set(item,[w,h,d]);
+  return item;
+}
 function linkTransform(a,b,scale=1) {
   const [x,y,z]=b.map((v,i)=>v-a[i]);
   const length=Math.hypot(x,y,z);
@@ -88,12 +111,18 @@ const legItems=legs.map(([hip,knee,foot],i)=>{
   };
 });
 
+const [townScale=1000,deckLength=11000,towerHeight,wingSpan,towerCount,domeCount,puffCount]=
+  enlarged?await loadScaleStudy("d4"):[];
+const deckTop=6.37;
 if(mode!=="no-deck") block("chassis",0,5.4,0,10.6,1.55,6.4);
 block("witness",-.56,4.87,1.92,.64,.42,.65);
-block("wood",0,6.23,0,11,.28,6.7);
+const deckItem=block("wood",0,6.23,0,deckLength/1000,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
-buildTown(await townLayout(),{block,add,round},mode);
+const firstTown=bodies.length;
+const layout=await townLayout(dense && !params.has("thin-u2-town"));
+const townCounts=buildTown(enlarged?layout.filter(row=>row[0]!=="smoke"):layout,{block,add,round},mode,
+  !params.has("no-u2-fittings"));
 const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
 if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
 const arcadeMeshes=new Map();
@@ -107,12 +136,73 @@ for(const row of (await arcadeSpec.text()).trim().split("\n").slice(1)) {
   for(const segment of arcadeMeshes.get(key)) add("arcade",segment,x,y,z);
   block("alcove",x,y+.48,z-.32,.91,.90,.10);
 }
+const towers=[],domes=[],smoke=[];
+let blade,actualSpan=0;
+if(enlarged) {
+  const factor=townScale/1000;
+  for(const item of bodies.slice(firstTown)) {
+    item[1]=deckTop+(item[1]-deckTop)*factor;
+    item[3]*=factor;
+  }
+  const height=towerHeight/(params.has("low-u2b")?2000:1000);
+  for(let i=0;i<(params.has("few-u2b-towers")?1:towerCount);i++) {
+    const [x,z,w]=[[2.6,-1.85,1.8],[-3.2,-1.1,1.65],[.15,1.85,1.45]][i];
+    const h=height*[1,.81,.65][i], top=deckTop+h;
+    const shaft=block(i===1?"orange":"white",x,deckTop+(h-.84)/2,z,w,h-.84,w);
+    for(let level=1;level<h-.9;level+=1.25) {
+      block("wood",x,deckTop+level,z,w+.19,.14,w+.19);
+      for(const side of [-1,1]) block("glass",x+side*w*.23,deckTop+level+.43,z+w*.51,.38,.64,.09);
+    }
+    const cap=block("red",x,top-.22,z,w+.33,.44,w+.33);
+    block("glass",x,top-.64,z,w*.76,.40,w*.76);
+    towers.push({shaft,cap});
+  }
+  actualSpan=wingSpan/(params.has("tiny-u2b-wing")?2000:1000);
+  const hub=[-3.2,deckTop+height*.71,.01];
+  block("wood",...hub,.88,.88,.45);
+  blade=[];
+  for(const angle of [.49,.49+Math.PI/2]) {
+    blade.push(block("white",hub[0],hub[1],hub[2]+.28,.26,actualSpan,.17,angle));
+    for(const side of [-1,1]) block("orange",hub[0]-side*Math.sin(angle)*actualSpan*.34,
+      hub[1]+side*Math.cos(angle)*actualSpan*.34,hub[2]+.39,.54,actualSpan*.28,.16,angle);
+  }
+  for(let i=0;i<(params.has("few-u2b-domes")?1:domeCount);i++) {
+    const [x,z]=[[-1.25,2.04],[4.25,1.42]][i];
+    block("alcove",x,9.32,z,1.94,1.45,1.94);
+    domes.push(add(finishU2c?"copper":"glass",round,x,9.97,z,1.06));
+    block("gearGold",x,11.04,z,.16,.56,.16);
+  }
+  for(let i=0;i<(params.has("flat-u2b-smoke")?3:puffCount);i++) {
+    const layer=Math.floor(i/3), stack=i%3;
+    const x=[-4.9,.65,4.7][stack], y=[10.8,12.6,11.18][stack], z=[-3.5,-3.85,-2.65][stack];
+    if(!layer) block("wood",x,y-.45,z,.49,.9,.51);
+    if(finishU2c && !params.has("thin-u2c-smoke")) {
+      const cluster=Math.floor(layer/3), lobe=layer%3, angle=stack*2.15+lobe*2.09;
+      const spread=.45+cluster*.30;
+      smoke.push(add(lobe===2?"smokeShade":"smoke",round,
+        x+cluster*[.30,1.26,1.70][stack]+Math.cos(angle)*spread,
+        y+cluster*[1.12,1.20,.86][stack]+Math.sin(angle)*spread,z+cluster*.42+lobe*.19,
+        .67+cluster*.31+lobe*.12,angle));
+    } else smoke.push(add("smoke",round,x+layer*.39,y+layer*.43,z+layer*.06,.24+layer*.053));
+  }
+  if(finishU2c) {
+    block("chassis",0,4.45,.40,7.4,1.3,4.4);
+    block("steel",0,4.52,2.67,7.8,.73,.21);
+    block("pipe",0,4.19,2.84,7.5,.12,.19);
+    for(const x of [-2.5,0,2.5]) {
+      const bearing=barrelMesh(1.01,.24);
+      add("copper",mesh(bearing.positions,bearing.normals,bearing.uvs),x,4.57,2.80,1,0,Math.PI/2);
+      add("steel",round,x,4.57,3.01,.21);
+    }
+  }
+} else {
 for(let i=0;i<8;i++) block(i%2?"white":"red",3.62,6.58+i*.43,.02,1.02,.43,1.02);
 block("glass",3.62,10.12,.02,1.05,.46,1.05);
 block("red",3.62,10.49,.02,1.27,.29,1.27);
 block("wood",-3.35,9.65,2.13,.29,1.5,.36);
 for(const angle of [.51,.51+Math.PI/2]) block("white",-3.35,9.62,2.37,.24,2.7,.12,angle);
 bodies.push(add("joint",round,-3.35,9.62,2.47,.23));
+}
 add("grass",MESH_PLANE,0,-.035,0,130);
 if(walkProbe || params.has("animate")) {
   for(let x=-12;x<=60;x+=3) block("darkgrass",x,-.007,8,.11,.05,1.1);
@@ -144,7 +234,7 @@ const bindings=new Map();
 for(const [key,{color,id,items}] of groups) {
   const cloud=scene.instances(key,items.length,paint[color].map(c=>c/255));
   cloud.meshId=id; cloud.metalness=0; cloud.roughness=.65; cloud.toonLevels=3;
-  cloud.outlineExcluded=["grass","darkgrass","farhill","grove","smoke","pineDark","pineMid","pineLight","trunk"].includes(color);
+  cloud.outlineExcluded=["grass","darkgrass","farhill","grove","smoke","smokeShade","pineDark","pineMid","pineLight","trunk"].includes(color);
   if(mode!=="no-texture" && ["white","arcade","wood","link"].includes(color)) {
     cloud.mapId=7;
     cloud.surfaceMap=color==="white" || color==="arcade"?"masonry":color==="wood"?"wood-grain":"metal-stain";
@@ -159,7 +249,8 @@ scene.fog.density=0;
 scene.ambient={color:[1,1,1],intensity:.84};
 scene.lights=[{dir:[-.45,.79,.44],color:[1,1,1],intensity:.25}];
 scene.outlineWidth=1;
-if(params.has("render-u1")) {
+if(paper && !params.has("no-u3-paper")) scene.paper=.66;
+if(params.has("render-u1") || dense) {
   scene.ambient.intensity=.55;
   scene.lights[0].intensity=.88;
   scene.lights[0].color=[1,.93,.82];
@@ -167,7 +258,8 @@ if(params.has("render-u1")) {
   if(!params.has("no-u1-grade")) scene.output={exposure:1.12};
   if(!params.has("no-u1-fog")) scene.fog={density:0,start:21,end:96,color:[.54,.70,.77]};
 }
-const view=(!mode || mode==="framing" || finish)?await closeCamera():null;
+const view=enlarged?{eye:[14,11.8,22],target:[0,9.4,0],fovy:2*Math.atan(.34)}:
+  (!mode || mode==="framing" || finish)?await closeCamera():null;
 const camera=new PerspectiveCamera(view?.fovy ?? 2*Math.atan(.625),.1,150);
 camera.setEye(...(view?.eye ?? [14.4,12,19.2]));
 camera.setTarget(...(view?.target ?? [0,5,0]));
@@ -182,12 +274,22 @@ function set(item,values) {
   const [cloud,i]=bindings.get(item);
   cloud.set(i,...values);
 }
-function renderPose(phase, gaitMode=mode) {
+function renderPose(phase, gaitMode=mode, smokeTick=null) {
   const pose=gaitPose(legs,phase,gaitMode);
   const eye=view?.eye ?? [14.4,12,19.2], target=view?.target ?? [0,5,0];
-  camera.setEye(eye[0]+pose.travel,eye[1],eye[2]);
-  camera.setTarget(target[0]+pose.travel,target[1],target[2]);
+  const chase=play && params.has("fixed-u2c-camera")?0:pose.travel;
+  camera.setEye(eye[0]+chase,eye[1],eye[2]);
+  camera.setTarget(target[0]+chase,target[1],target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
+  if(smokeTick!==null && !params.has("still-u2c-smoke")) {
+    for(let index=0;index<smoke.length;index++) {
+      const item=smoke[index], age=((smokeTick+index*11)%120)/120;
+      const [x,y,z,size,yaw,pitch,roll]=item;
+      const fade=Math.min(1,age*12,(1-age)*8);
+      set(item,[x+pose.offset[0]+age*2.3,y+pose.offset[1]+age*1.65,
+        z+pose.offset[2]+age*.61,size*(.64+age*.40)*fade,yaw+age*.7,pitch,roll]);
+    }
+  }
   pose.legs.forEach(([hip,knee,foot],i)=>{
     const parts=legItems[i];
     set(parts.hip,[...hip,...parts.hip.slice(3)]);
@@ -199,18 +301,19 @@ function renderPose(phase, gaitMode=mode) {
     }
   });
   renderer.render(scene,camera,textures);
+  return pose;
 }
-if(!walkProbe && params.has("animate")) {
+if(!play && !walkProbe && params.has("animate")) {
   const start=performance.now();
   const frame=time=>{
     renderPose((time-start)/670,mode || "walk");
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
-} else if(params.has("phase")) renderPose(Number(params.get("phase")));
-else if(!walkProbe) renderer.render(scene,camera,textures);
+} else if(!play && params.has("phase")) renderPose(Number(params.get("phase")));
+else if(!play && !walkProbe) renderer.render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
-const density=["density","small-town","no-gear","framing","wide-camera"].includes(mode);
+const density=params.has("u2c-probe") || ["density","small-town","no-gear","framing","wide-camera"].includes(mode);
 function densityPixels() {
   const pixels=new Uint8Array(1280*720*4), result=[];
   gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
@@ -247,7 +350,84 @@ function walkPixels() {
   });
   return [readGaitPixels(legs,mode,97),...ground].join(";");
 }
-document.querySelector("output").textContent=walkProbe ? walkPixels() :
+function startPlay() {
+  const keyboard=new Set(), pointers=new Map(), panel=document.querySelector(".controls");
+  const keys=["KeyW","KeyS","ArrowUp","ArrowDown"];
+  let phase=0,tick=0;
+  const cap=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  document.body.classList.add("play");
+  document.title=params.has("bad-auto-title")?"行走城镇":"行走城镇 · 开发预览";
+  canvas.setAttribute("aria-label","行走城镇。按住 W 或 S 前进或后退。");
+  panel.hidden=false;
+  addEventListener("keydown",event=>{
+    if(!keys.includes(event.code)) return;
+    event.preventDefault();
+    keyboard.add(event.code);
+  });
+  addEventListener("keyup",event=>keyboard.delete(event.code));
+  addEventListener("blur",()=>{keyboard.clear();pointers.clear();});
+  for(const button of panel.querySelectorAll("button")) {
+    button.addEventListener("pointerdown",event=>{
+      event.preventDefault();
+      pointers.set(event.pointerId,button.dataset.key);
+      button.setPointerCapture(event.pointerId);
+    });
+    for(const type of ["pointerup","pointercancel","lostpointercapture"]) {
+      button.addEventListener(type,event=>pointers.delete(event.pointerId));
+    }
+  }
+  function step() {
+    const down=key=>keyboard.has(key) || Array.from(pointers.values()).includes(key);
+    const direction=Number(down("KeyW")||down("ArrowUp"))-Number(down("KeyS")||down("ArrowDown"));
+    if(!params.has("fixed-u2c-gait")) phase=cap(phase+direction*.20,-200,300);
+    tick++;
+  }
+  function draw() {
+    renderPose(phase,"walk",tick);
+    const [cloud,i]=bindings.get(smoke[0]);
+    const [deck,j]=bindings.get(deckItem);
+    const delta=cloud.xyz[3*i+1]-deck.xyz[3*j+1];
+    return [tick,deck.xyz[3*j],camera.eye[0],delta].map((v,i)=>i?Math.round(1000*v):v).join(",");
+  }
+  if(params.has("play-check")) {
+    const trace=[],key=(type,code)=>dispatchEvent(new KeyboardEvent(type,{code}));
+    for(const frame of [0,40,80,120,160]) {
+      while(tick<frame) step();
+      trace.push(draw());
+      if(frame===40) key("keydown","KeyW");
+      if(frame===80) key("keyup","KeyW");
+      if(frame===120) key("keydown","KeyS");
+      if(frame===160) key("keyup","KeyS");
+    }
+    document.querySelector("output").textContent=trace.join(";");
+  } else if(params.has("auto")) {
+    globalThis.advancePreview=frames=>{
+      for(let i=0;i<frames;i++) step();
+      const state=draw();
+      document.querySelector("output").textContent=state;
+      return state;
+    };
+    globalThis.advancePreview(0);
+    document.title=params.has("bad-auto-title")?"D4_FAIL":"D4_OK";
+  } else if(params.has("still")) {
+    tick=Number(params.get("tick"))||0;
+    phase=cap(Number(params.get("travel"))/.12||0,-200,300);
+    draw();
+  } else {
+    let previous=performance.now(), pending=0;
+    function frame(now) {
+      pending+=Math.min(100,now-previous);
+      previous=now;
+      const first=tick;
+      while(pending>=1000/30) { step(); pending-=1000/30; }
+      if(tick!==first) draw();
+      requestAnimationFrame(frame);
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+}
+if(!play) document.querySelector("output").textContent=walkProbe ? walkPixels() :
   density || finish ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
   ? readGaitPixels(legs,mode)
   : (params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
@@ -256,4 +436,21 @@ document.querySelector("output").textContent=walkProbe ? walkPixels() :
   gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
   return rgba.slice(0,3).join(",");
 }).join(";");
+if(params.has("u2-probe")) {
+  const out=document.querySelector("output");
+  out.textContent=Object.values(townCounts).join(",")+"|"+out.textContent;
+}
+if(params.has("u2b-probe")) {
+  const present=item=>bindings.has(item);
+  const [width,,depth]=dimensions.get(deckItem), deckY=deckItem[1]+dimensions.get(deckItem)[1]/2;
+  const top=Math.max(...towers.filter(({shaft,cap})=>present(shaft)&&present(cap))
+    .map(({cap})=>cap[1]+dimensions.get(cap)[1]/2));
+  const bounds=screenBox(camera,[-width/2,deckY,-depth/2],[width/2,top,depth/2]);
+  document.querySelector("output").textContent=[
+    Math.round(1000*(top-deckY)),blade.every(present)?Math.round(1000*dimensions.get(blade[0])[1]):0,
+    towers.filter(tower=>present(tower.cap)).length,domes.filter(present).length,smoke.filter(present).length,
+    ...bounds
+  ].join(",");
+}
+if(play) startPlay();
 </script>

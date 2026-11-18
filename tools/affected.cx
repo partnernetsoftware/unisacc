@@ -782,9 +782,10 @@ static int file_sha(const char *p, char *h) { size_t sz; char *s = cx_read(p, &s
 /* The opt-in runner is built from the candidate and this checkout, never from
  * a caller-supplied executable. The default route doesn't inspect this cache. */
 static int native_key(const char *candidate,char *key) {
-    char ape[65],sources[65],recipe[256];
+    char ape[65],sources[65],recipe[512],receipt[4400],manifest[65]="";
+    if(candidate_dir && (cx_fmt(receipt,sizeof receipt,"%s/receipt.tsv",candidate_dir) || file_sha(receipt,manifest)))return -1;
     if(file_sha(candidate,ape) || closure_sha("tests/run-batch.cx",sources) ||
-       cx_fmt(recipe,sizeof recipe,"run-batch-v1\t%s\t%s\tsh APE tests/run-batch.cx -o IMAGE\n",ape,sources))return -1;
+       cx_fmt(recipe,sizeof recipe,"run-batch-v1\t%s\t%s\tsh APE tests/run-batch.cx -o IMAGE\n%s",ape,sources,manifest))return -1;
     tp_sha(recipe,strlen(recipe),key);return 0;
 }
 static int native_intact(void) {
@@ -795,9 +796,23 @@ static int native_intact(void) {
 static int native_prepare(const char *candidate) {
     char gitdir[4200],dir[4200],key[65],again[65],lock[4400],receipt[4400],temp[4500];
     sy_stat_t st;int rc=0;
-    if(candidate_dir || native_key(candidate,key) || cx_fmt(gitdir,sizeof gitdir,"%s/.git",root) ||
-       sy_lstat(gitdir,&st) || st.kind!='d' || st.uid!=sy_uid() ||
-       cx_fmt(dir,sizeof dir,"%s/unisacc-native-runner",gitdir) ||
+    if(native_key(candidate,key) || cx_fmt(gitdir,sizeof gitdir,"%s/.git",root) ||
+       sy_lstat(gitdir,&st) || st.uid!=sy_uid()) return 0;
+    if(st.kind=='f'){
+        /* Git resolves the per-worktree gitdir. Check its backlink before
+           creating anything there; never put a worktree cache in common-dir. */
+        char back[4400],resolved[4400]; size_t n=0;
+        if(!git_path_abs(".git/gitdir",back,sizeof back))return 0;
+        char *point=cx_read(back,&n);
+        int matches=point && n==strlen(gitdir)+1 && point[n-1]=='\n' && !memcmp(point,gitdir,n-1);
+        free(point);
+        char *slash=strrchr(back,'/');
+        if(!matches || !slash || strcmp(slash,"/gitdir"))return 0;
+        *slash=0;
+        if(sy_realpath(back,resolved,sizeof resolved)<0 || strcmp(back,resolved) ||
+           cx_fmt(gitdir,sizeof gitdir,"%s",resolved) || sy_lstat(gitdir,&st) || st.uid!=sy_uid())return 0;
+    }
+    if(st.kind!='d' || cx_fmt(dir,sizeof dir,"%s/unisacc-native-runner",gitdir) ||
        (sy_mkdir(dir,0700) && (sy_lstat(dir,&st) || st.kind!='d' || st.mode!=0700 || st.uid!=sy_uid())) ||
        cx_fmt(native_runner,sizeof native_runner,"%s/%s",dir,key) ||
        cx_fmt(receipt,sizeof receipt,"%s.sha256",native_runner) ||
