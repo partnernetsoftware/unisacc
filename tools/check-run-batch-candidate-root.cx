@@ -1,0 +1,115 @@
+/* tools/check-run-batch-candidate-root.cx -- tests/run-batch.cx {candidate-root} placeholder fixture check.
+ * A batch whose args take the tested product root (ROOT/unisacc.com is the product under test) writes
+ * {candidate-root}: run-batch --candidate DIR binds it to DIR, without --candidate to the repo root.  {root}
+ * keeps the repo-root meaning in both modes.  The fixture builds a private root (unisacc.com links the
+ * installed launcher, MARK says installed), a strict dev-product-v1 candidate directory (launcher, entry,
+ * pkg, nets_pkg, receipt; entry delegates to the installed product; MARK says candidate), fixture tables
+ * (UNISACC_TABLES) and a probe tool printing the MARK it finds under its ROOT argument.
+ *   sh ./unisacc.com tools/check-run-batch-candidate-root.cx [-- ROOT] [--runner ABS_RUN_BATCH_CX]
+ * Cases: (1) {candidate-root} with --candidate sees the candidate and candidate= is the candidate identity,
+ * not the installed one; (2) {root} with --candidate still sees the repo root (control: the old gap);
+ * (3) {candidate-root} without --candidate sees the installed root.
+ * --runner swaps in another run-batch.cx (negative control: the pre-fix runner must fail case 1).
+ * Prints one PASS/FAIL line per case and RUN_BATCH_CANDIDATE_ROOT checks=N failed=M; rc 0 only if M=0. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed, checks;
+static char repo[4096], work[4400], froot[4400], dev[4400], tabs[4400], runner[4400];
+static char *last; static size_t lastn;
+
+static void die(const char *m) { sy_printf("FAIL\trun-batch-candidate-root.setup\t%s\n", m); exit(2); }
+static void pth(char *o, const char *a, const char *b) { if (cx_fmt(o, 4400, "%s/%s", a, b)) die("path bound"); }
+static void put(const char *p, const char *t) { if (cx_write(p, t, (size_t)tx_len(t, TX_ZCAP))) die(p); }
+static void sha_file(const char *p, char h[65]) { size_t n; char *b = cx_read(p, &n); if (!b) die(p); cx_sha256_hex(b, n, h); mm_free(b); }
+static int out_has(const char *needle) {
+    long nl = tx_len(needle, 512);
+    for (long i = 0; last && i + nl <= (long)lastn; i++) if (mm_same(last + i, needle, nl)) return 1;
+    return 0;
+}
+static void ck(int ok, const char *name) {
+    checks++;
+    if (!ok) { failed++; if (last) sy_printf("%s", last); }
+    sy_printf("%s\trun-batch-candidate-root.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int run_batch(const char *cand, const char *parent, const char *id) {
+    char launcher[4400], *v[12]; int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    pth(launcher, repo, "unisacc.com");
+    v[k++] = "sh"; v[k++] = launcher; v[k++] = runner; v[k++] = "--";
+    if (cand) { v[k++] = "--candidate"; v[k++] = (char *)cand; }
+    v[k++] = froot; v[k++] = (char *)parent; v[k++] = (char *)id; v[k] = 0;
+    return cx_runv_timeout(v, 50, &last, &lastn);
+}
+
+int main(int argc, char **argv) {
+    char p[4400], q[4400], tmpc[4096], entry[4400], pkg[4400], nets[4400], launch[4400];
+    char es[65], ps[65], ns[65], fin[65], body[14000], dig[200];
+    int w = 1;
+    for (int i = 1; i < argc; i++) { if (tx_eqz(argv[i], "--runner") && i + 1 < argc) { if (cx_fmt(runner, sizeof runner, "%s", argv[++i])) die("runner"); continue; } argv[w++] = argv[i]; }
+    argc = w;
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", repo, sizeof repo) < 0) die("root");
+    if (!runner[0]) pth(runner, repo, "tests/run-batch.cx");
+    if (sy_realpath(sy_tmpdir(), tmpc, sizeof tmpc) < 0) die("tmpdir");
+    if (cx_fmt(work, sizeof work, "%s/unisacc-affected-crbcr-%d-%ld", tmpc, sy_pid(), sy_now_ms()) || sy_mkdir(work, 0700)) die("work");
+    pth(froot, work, "root"); pth(dev, work, "dev"); pth(tabs, work, "tables");
+    if (sy_mkdir(froot, 0700) || sy_mkdir(dev, 0700) || sy_mkdir(tabs, 0700)) die("dirs");
+    /* fixture root: installed launcher by link, probe tool, MARK */
+    pth(p, repo, "unisacc.com"); pth(q, froot, "unisacc.com"); if (sy_symlink(p, q)) die("root launcher link");
+    pth(q, froot, "out"); if (sy_mkdir(q, 0700)) die("root out");
+    pth(q, froot, "tools"); if (sy_mkdir(q, 0700)) die("root tools");
+    pth(q, froot, "INSTALLED_MARK"); put(q, "installed\n");
+    pth(q, froot, "tools/probe.cx");   /* fixture probe: implicit runtime only, no module search under the fixture root */
+    put(q, "static int reg(const char *d, const char *n) { char p[4400]; FILE *f; if (snprintf(p, sizeof p, \"%s/%s\", d, n) >= (int)sizeof p) return 0; f = fopen(p, \"r\"); if (!f) return 0; fclose(f); return 1; }\n"
+           "int main(int argc, char **argv) { int hc, hi; if (argc < 3) return 2;\n"
+           "  hc = reg(argv[1], \"CANDIDATE_MARK\"); hi = reg(argv[1], \"INSTALLED_MARK\");\n"
+           "  printf(\"%s\\n\", hc && !hi ? \"PROBE_CANDIDATE\" : hi && !hc ? \"PROBE_INSTALLED\" : \"PROBE_NEITHER\");\n"
+           "  return 0; }\n");
+    /* strict dev-product-v1 candidate: entry delegates to the installed product */
+    pth(entry, dev, "entry"); pth(pkg, dev, "pkg-hdr.bin"); pth(nets, dev, "nets.bin"); pth(launch, dev, "unisacc.com");
+    pth(p, repo, "unisacc.com");
+    if (cx_fmt(body, sizeof body, "#!/bin/sh\nunset UNISA_CONTAINER UNISACC_LOCAL UNISACC_CACHE_DIR\nexec sh '%s' \"$@\"\n", p)) die("entry bound");
+    put(entry, body); if (sy_chmod(entry, 0700)) die("entry mode");
+    put(pkg, "fixture pkg\n"); put(nets, "fixture nets\n");
+    if (cx_fmt(body, sizeof body, "#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=LOCAL (tools/dev-product.cx); lnx/x86_64 only\nexport UNISA_CONTAINER='%s' UNISACC_LOCAL=1\nif [ x${UNISACC_E3CACHE+x} = x ]; then export UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\"; else unset UNISACC_CACHE_DIR; fi\nexec '%s' \"$@\"\n", pkg, dev, entry)) die("launcher bound");
+    put(launch, body); if (sy_chmod(launch, 0700)) die("launcher mode");
+    sha_file(entry, es); sha_file(pkg, ps); sha_file(nets, ns);
+    if (cx_fmt(dig, sizeof dig, "%s\n%s\n", es, ps)) die("digest bound"); cx_sha256_hex(dig, tx_len(dig, 200), fin);
+    if (cx_fmt(body, sizeof body, "NOT_RELEASE\tdev-product-v1\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\tLOCAL\n", entry, es, pkg, ps, nets, ns, launch, fin)) die("receipt bound");
+    pth(q, dev, "receipt.tsv"); put(q, body);
+    pth(q, dev, "CANDIDATE_MARK"); put(q, "candidate\n");
+    /* fixture tables */
+    pth(q, tabs, "batches.tsv");
+    put(q, "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+           "probe-cr\tIMPLEMENTED\tnegative\ttools/probe.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/probe.cx\t{candidate-root};{out}\tprobe.cr\trc0:PROBE_CANDIDATE\tproduct\tdaily\n"
+           "probe-root\tIMPLEMENTED\tnegative\ttools/probe.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/probe.cx\t{root};{out}\tprobe.root\trc0:PROBE_INSTALLED\tproduct\tdaily\n"
+           "probe-cr-inst\tIMPLEMENTED\tnegative\ttools/probe.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/probe.cx\t{candidate-root};{out}\tprobe.cr-inst\trc0:PROBE_INSTALLED\tproduct\tdaily\n");
+    pth(q, tabs, "coverage.tsv");
+    put(q, "id\tlayer\timplementation\texpected_or_gap\tsource\n"
+           "probe.cr\tnegative\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttools/probe.cx\n"
+           "probe.root\tnegative\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttools/probe.cx\n"
+           "probe.cr-inst\tnegative\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttools/probe.cx\n");
+    if (sy_setenv("UNISACC_TABLES", tabs, 1) || sy_setenv("UNISACC_BATCH_TIMES", "off", 1)) die("env");
+    char pa[4400], pb[4400], pc[4400], inst[100];
+    pth(pa, work, "a"); pth(pb, work, "b"); pth(pc, work, "c");
+    if (sy_mkdir(pa, 0700) || sy_mkdir(pb, 0700) || sy_mkdir(pc, 0700)) die("parents");
+    /* (3) first: learn the installed identity */
+    run_batch(0, pc, "probe-cr-inst");
+    ck(out_has("\tid=probe-cr-inst\tstatus=PASS\t"), "candidate-root-without-candidate-is-repo-root");
+    inst[0] = 0; { char *c = last ? strstr(last, "\tcandidate=") : 0; if (c) { c += 11; int i = 0; while (c[i] && c[i] != '\t' && i < 99) { inst[i] = c[i]; i++; } inst[i] = 0; } }
+    run_batch(dev, pa, "probe-cr");
+    { char want[200]; int notinst = inst[0] && cx_fmt(want, sizeof want, "\tcandidate=%s\t", inst) == 0 && !out_has(want);
+      ck(out_has("\tid=probe-cr\tstatus=PASS\t") && out_has("\tcandidate=") && notinst, "candidate-root-with-candidate-is-candidate"); }
+    run_batch(dev, pb, "probe-root");
+    ck(out_has("\tid=probe-root\tstatus=PASS\t"), "root-with-candidate-stays-repo-root");
+    sy_printf("RUN_BATCH_CANDIDATE_ROOT\tchecks=%d\tfailed=%d\twork=%s\n", checks, failed, work);
+    return failed ? 1 : 0;
+}

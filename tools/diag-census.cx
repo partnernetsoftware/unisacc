@@ -1,0 +1,398 @@
+/* tools/diag-census.cx -- S0 census for the v0.0.73 front-end diagnostics (plans/v0.0.73.md section 2).
+ *
+ *   sh ./unisacc.com tools/diag-census.cx -- [--root DIR] [--probe PRODUCT] [--out TSV] [--max-loc N]
+ *   sh ./unisacc.com tools/diag-census.cx -- --self-test
+ *
+ * For the 17 constraint classes that the product accepted silently in release/s9-diagnostic-0.0.71.txt
+ * (15 c-negative, 2 pp-negative) it estimates whether a new rejection would hit the project's own tree:
+ * files from `git -C ROOT ls-files src cx ext tools tests` ending .c .h .cx.  Read-only.
+ *   kind H  a line heuristic exists: comments are removed and string/char literal contents blanked (so the
+ *           negative fixtures that live inside string literals are not counted); preprocessor classes look at
+ *           raw directive lines.  Hits are CANDIDATES, single-line only; 0 hits means "zero candidates", not proof.
+ *   kind U  the class needs type or scope information a line heuristic cannot give: verdict UNMEASURED.
+ * --probe PRODUCT compiles each class's sample with the given product (-c -b lnx/x86_64, or -E for pp) and records
+ * rc and whether stderr was non-empty, bound 20 s per job.
+ * Output (stdout, and --out TSV when given), TAB separated:
+ *   class family kind hits_src hits_cx hits_ext hits_tools hits_tests verdict probe_rc probe_stderr phase locations
+ *   verdict: ZERO_CANDIDATES | HAS_CANDIDATES | UNMEASURED;  phase: 0.0.73 | 0.0.74 (selection rule below)
+ *   last line DIAG_CENSUS classes=17 zero=Z has=H unmeasured=U selected=S
+ * Selection: a class is selected for 0.0.73 when it is in the plan's S1/S2 candidate list and verdict is
+ * ZERO_CANDIDATES; everything else is deferred to 0.0.74 (UNMEASURED is never selected).
+ * --self-test runs every heuristic on positive and benign fixture lines; last line DIAG_CENSUS_SELFTEST failed=N.
+ * rc 0 ok, 1 self-test failure, 2 usage or I/O error. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+typedef int (*Det)(const char *code, const char *raw);
+
+static int idc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int ids(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static const char *skipws(const char *p) { while (*p == ' ' || *p == '\t') p++; return p; }
+
+/* Count identifier tokens in [b,e). */
+static int ntok(const char *b, const char *e) {
+    int n = 0;
+    for (const char *p = b; p < e; p++) if (ids(*p) && (p == b || !idc(p[-1]))) n++;
+    return n;
+}
+static int has_any(const char *b, const char *e, const char *set) {
+    for (const char *p = b; p < e; p++) for (const char *s = set; *s; s++) if (*p == *s) return 1;
+    return 0;
+}
+static int word_at(const char *p, const char *line, const char *w) {
+    size_t n = strlen(w);
+    return !strncmp(p, w, n) && !idc(p[n]) && (p == line || !idc(p[-1]));
+}
+
+/* Skip leading braces and statement keywords that cannot start a declaration (else do return goto case). */
+static const char *stmt_start(const char *c) {
+    for (;;) {
+        const char *p = skipws(c);
+        if (*p == '{' || *p == '}') { c = p + 1; continue; }
+        if (word_at(p, p, "else")) { c = p + 4; continue; }
+        if (word_at(p, p, "do")) { c = p + 2; continue; }
+        return p;
+    }
+}
+/* zero-array-size: TYPE NAME[0] ; , = with at least two identifier tokens before '[' and no ( = before. */
+static int d_zero_array(const char *c, const char *r) {
+    (void)r;
+    for (const char *p = strstr(c, "[0]"); p; p = strstr(p + 1, "[0]")) {
+        const char *q = skipws(p + 3);
+        if (*q != ';' && *q != ',' && *q != '=') continue;
+        if (q[0] == '=' && q[1] == '=') continue;
+        if (p == c || !idc(p[-1])) continue;
+        const char *s = p;
+        while (s > c && s[-1] != '{' && s[-1] != ';' && s[-1] != '}') s--;
+        s = stmt_start(s);
+        if (has_any(s, p, "(=.>[,:<!-+/%&|") || (s > c && s[-1] == '{' && has_any(c, s, "=,("))) continue;
+        { int sz = 0; for (const char *k = s; k < p; k++) if (word_at(k, c, "sizeof")) sz = 1; if (sz) continue; }
+        if (word_at(s, s, "return") || word_at(s, s, "goto") || word_at(s, s, "case")) continue;
+        if (ntok(s, p) >= 2) return 1;
+    }
+    return 0;
+}
+/* multiple-storage-classes: two of static extern typedef register before the first ( = ; */
+static int d_multi_storage(const char *c, const char *r) {
+    (void)r;
+    static const char *w[] = { "static", "extern", "typedef", "register" };
+    int seen[4] = { 0 }, n = 0;
+    for (const char *p = c; *p && *p != '(' && *p != '=' && *p != ';' && *p != '{'; p++)
+        for (int i = 0; i < 4; i++) if (word_at(p, c, w[i]) && !seen[i]) { seen[i] = 1; n++; }
+    return n >= 2;
+}
+/* void-parameter-named: "(void NAME" or ", void NAME" where NAME is not a qualifier. */
+static int d_void_param(const char *c, const char *r) {
+    (void)r;
+    for (const char *p = strstr(c, "void"); p; p = strstr(p + 1, "void")) {
+        if (!word_at(p, c, "void")) continue;
+        const char *b = p;
+        while (b > c && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if (b == c || (b[-1] != '(' && b[-1] != ',')) continue;
+        const char *q = p + 4;
+        if (*q != ' ' && *q != '\t') continue;
+        q = skipws(q);
+        if (!ids(*q)) continue;
+        if (word_at(q, c, "const") || word_at(q, c, "volatile") || word_at(q, c, "restrict")) continue;
+        return 1;
+    }
+    return 0;
+}
+/* duplicate-parameter: a top-level header "T f(a, b) {" or ";" whose parameter names repeat. */
+static int d_dup_param(const char *c, const char *r) {
+    (void)r;
+    if (!ids(c[0])) return 0;
+    const char *o = strchr(c, '(');
+    if (!o) return 0;
+    const char *e = strchr(o + 1, ')');
+    if (!e || has_any(o + 1, e, "(-.>+&|!=?:\"'") || has_any(c, o, ":=")) return 0;
+    for (const char *p = o + 1; p < e; p++) if (word_at(p, c, "sizeof")) return 0;
+    const char *t = skipws(e + 1);
+    if (*t != '{' && *t != ';' && *t != 0) return 0;
+    char names[16][64];
+    int nn = 0;
+    const char *s = o + 1;
+    while (s <= e && nn < 16) {
+        const char *m = s;
+        while (m < e && *m != ',') m++;
+        const char *last = 0;
+        int depth = 0;
+        for (const char *p = s; p < m; p++) {
+            if (*p == '[') depth++;
+            else if (*p == ']') depth--;
+            else if (!depth && ids(*p) && (p == s || !idc(p[-1]))) last = p;
+        }
+        size_t len = 0;
+        if (last) while (last + len < m && idc(last[len]) && len < 63) len++;
+        /* named only when nothing but an array suffix follows, and the name is not a type keyword */
+        int named = last != 0;
+        if (named) { const char *a = skipws(last + len); if (*a && *a != '[' && a < m) named = 0; }
+        static const char *kw[] = { "char", "int", "long", "short", "unsigned", "signed", "void", "float", "double", "const", "volatile", 0 };
+        for (int i = 0; named && kw[i]; i++) if (strlen(kw[i]) == len && !strncmp(last, kw[i], len)) named = 0;
+        if (named && ntok(s, m) >= 2) {
+            cx_fmt(names[nn], sizeof names[nn], "%.*s", (int)len, last);
+            for (int i = 0; i < nn; i++) if (!strcmp(names[i], names[nn])) return 1;
+            nn++;
+        }
+        s = m + 1;
+    }
+    return 0;
+}
+/* int-plus-assign-string: "+= \"" */
+static int d_plus_string(const char *c, const char *r) {
+    (void)r;
+    for (const char *p = strstr(c, "+="); p; p = strstr(p + 1, "+=")) if (*skipws(p + 2) == '"') return 1;
+    return 0;
+}
+/* void-value-used: "= (void)" not followed by '*' or an identifier char (a cast to void* is fine). */
+static int d_void_value(const char *c, const char *r) {
+    (void)r;
+    for (const char *p = strchr(c, '='); p; p = strchr(p + 1, '=')) {
+        if (p > c && strchr("=!<>+-*/%&|^", p[-1])) continue;
+        if (p[1] == '=') continue;
+        const char *q = skipws(p + 1);
+        if (!strncmp(q, "(void)", 6)) return 1;
+    }
+    return 0;
+}
+/* int-to-pointer-init: "TYPE *NAME = N" with N a nonzero integer literal. */
+static int d_int_ptr(const char *c, const char *r) {
+    (void)r;
+    for (const char *p = strchr(c, '*'); p; p = strchr(p + 1, '*')) {
+        const char *s = p;
+        while (s > c && s[-1] != '{' && s[-1] != ';' && s[-1] != '}') s--;
+        s = stmt_start(s);
+        if (s > p) continue;
+        if (word_at(s, s, "return") || word_at(s, s, "goto") || word_at(s, s, "case")) continue;
+        if (!ntok(s, p) || has_any(s, p, "(=,")) continue;
+        const char *q = skipws(p + 1);
+        if (!ids(*q)) continue;
+        while (idc(*q)) q++;
+        q = skipws(q);
+        if (*q != '=' || q[1] == '=') continue;
+        q = skipws(q + 1);
+        if (*q >= '1' && *q <= '9') return 1;
+    }
+    return 0;
+}
+static const char *directive(const char *r, const char *name) {
+    const char *p = skipws(r);
+    if (*p != '#') return 0;
+    p = skipws(p + 1);
+    size_t n = strlen(name);
+    if (strncmp(p, name, n) || idc(p[n])) return 0;
+    return skipws(p + n);
+}
+/* macro-name-not-identifier: #define / #undef followed by a non-identifier start. */
+static int d_macro_name(const char *c, const char *r) {
+    (void)c;
+    const char *p = directive(r, "define");
+    if (!p) p = directive(r, "undef");
+    return p && *p && *p != '\n' && *p != '\r' && !ids(*p);
+}
+/* header-name-unclosed: #include <x or #include "x without the closing delimiter. */
+static int d_header_unclosed(const char *c, const char *r) {
+    (void)c;
+    const char *p = directive(r, "include");
+    if (!p) return 0;
+    if (*p == '<') return !strchr(p + 1, '>');
+    if (*p == '"') return !strchr(p + 1, '"');
+    return 0;
+}
+
+typedef struct { const char *name, *family, *sample; Det det; int planned; const char *why; } Cls;
+static Cls cls[] = {
+    { "assign-to-const", "c", "const int k = 1; void f(void){ k = 2; }\n", 0, 1, "needs const-qualified lvalue type" },
+    { "implicit-function", "c", "int u(void){ undeclared_fn(); return 0; }\n", 0, 0, "needs declaration scope across units and headers" },
+    { "incompatible-pointer-init", "c", "int r(void){ int *p = 0; char *c = p; return 0; }\n", 0, 0, "needs pointer types" },
+    { "duplicate-parameter", "c", "void vv(int a, int a){}\n", d_dup_param, 1, 0 },
+    { "int-to-pointer-init", "c", "int f2(void){ int *p = 5; return 0; }\n", d_int_ptr, 0, 0 },
+    { "conflicting-function-types", "c", "int n2(int); char n2(int);\n", 0, 0, "needs all declarations of a name" },
+    { "zero-array-size", "c", "int t2[0];\n", d_zero_array, 1, 0 },
+    { "void-value-used", "c", "int v2(void){ int x; x = (void)0; return x; }\n", d_void_value, 1, 0 },
+    { "write-through-const-pointer", "c", "int w2(void){ const char *c = \"x\"; c[0] = 'y'; return 0; }\n", 0, 1, "needs pointee qualifiers" },
+    { "int-plus-assign-string", "c", "int x2(void){ int i = 0; i += \"str\"; return i; }\n", d_plus_string, 1, 0 },
+    { "distinct-pointer-compare", "c", "int a7(void){ char *p = 0; int *q = 0; return p == q; }\n", 0, 0, "needs pointer types" },
+    { "local-redefinition", "c", "int a13(void){ int x = 1; int x = 2; return x; }\n", 0, 1, "needs block scope tracking" },
+    { "discards-const", "c", "int a20(void){ const int c = 1; int *p = &c; return *p; }\n", 0, 0, "needs qualifier types" },
+    { "void-parameter-named", "c", "void b15(void x){ }\n", d_void_param, 1, 0 },
+    { "multiple-storage-classes", "c", "static extern int b16;\n", d_multi_storage, 1, 0 },
+    { "macro-name-not-identifier", "pp", "#define 3x 1\nint a;\n", d_macro_name, 1, 0 },
+    { "header-name-unclosed", "pp", "#include <stdio.h\nint a;\n", d_header_unclosed, 1, 0 },
+};
+#define NCLS ((int)(sizeof cls / sizeof cls[0]))
+static const char *roots[] = { "src", "cx", "ext", "tools", "tests" };
+#define NROOT 5
+static int hits[NCLS][NROOT];
+static char loc[NCLS][1200];
+static int maxloc = 6;
+
+/* Turn one physical line into code (comments removed, literal contents blanked); *inc carries a block comment. */
+static void codeline(const char *r, char *out, size_t cap, int *inc) {
+    size_t o = 0;
+    char q = 0;
+    for (const char *p = r; *p && o + 1 < cap; p++) {
+        if (*inc) { if (p[0] == '*' && p[1] == '/') { *inc = 0; p++; } continue; }
+        if (q) {
+            if (*p == '\\' && p[1]) { out[o++] = ' '; if (o + 1 < cap) out[o++] = ' '; p++; continue; }
+            if (*p == q) { out[o++] = q; q = 0; continue; }
+            out[o++] = ' ';
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '*') { *inc = 1; p++; continue; }
+        if (p[0] == '/' && p[1] == '/') break;
+        if (*p == '"' || *p == '\'') { q = *p; out[o++] = *p; continue; }
+        out[o++] = *p;
+    }
+    out[o] = 0;
+}
+
+static void scan_file(const char *root, const char *rel, int ri) {
+    char path[4096];
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return;
+    size_t n;
+    char *b = cx_read(path, &n);
+    if (!b) return;
+    int inc = 0, lineno = 0;
+    char raw[4096], code[4096];
+    size_t i = 0;
+    while (i < n) {
+        size_t j = i;
+        while (j < n && b[j] != '\n') j++;
+        size_t len = j - i < sizeof raw - 1 ? j - i : sizeof raw - 1;
+        if (mm_copy(raw, (long)sizeof raw, b + i, (long)len)) break;
+        raw[len] = 0;
+        lineno++;
+        codeline(raw, code, sizeof code, &inc);
+        for (int k = 0; k < NCLS; k++) {
+            if (!cls[k].det || !cls[k].det(code, raw)) continue;
+            if (hits[k][0] + hits[k][1] + hits[k][2] + hits[k][3] + hits[k][4] < maxloc) {
+                size_t L = strlen(loc[k]);
+                cx_fmt(loc[k] + L, sizeof loc[k] - L, "%s%s:%d", L ? ";" : "", rel, lineno);
+            }
+            hits[k][ri]++;
+        }
+        i = j + 1;
+    }
+    free(b);
+}
+
+static int selftest(void) {
+    struct { const char *line; int k; int want; } t[] = {
+        { "void vv(int a, int a){}", 3, 1 }, { "int f(const unsigned char psk[N], unsigned char out[N]) {", 3, 0 },
+        { "int g(const char *, const char *); int h(unsigned, unsigned);", 3, 0 }, { "int k(char *p, char p[2]);", 3, 1 },
+        { "done:memcpy(c->order_sha,order_sha,sizeof order_sha);", 3, 0 }, { " for(i=0;i<sizeof classic/sizeof classic[0];i++){}", 6, 0 },
+        { "char *neg[]={bound,\"45\",obj[0],obj[1],0};", 6, 0 }, { "switch (3) { case NT: copy[0] = 1; break; }", 6, 0 }, { "struct s { int n; char tail[0]; };", 6, 1 },
+        { "    for (i = 0; i < len[0]; i++) {", 6, 0 }, { "    for (ls = st; ls < en && !sum[0]; ls = le + 1) {", 6, 0 },
+        { "    else *status = 2;", 4, 0 }, { "        else { t[0] = (char)c; tl = 1; }", 6, 0 }, { "  } else { v[0] = b; v[1] = 0; }", 6, 0 }, { "int f(int a, int b) {", 3, 0 }, { "int f(void);", 3, 0 },
+        { "int f2(void){ int *p = 5; return 0; }", 4, 1 }, { "  int *p = 5;", 4, 1 }, { "  x = a * b;", 4, 0 }, { "  char *s = 0;", 4, 0 },
+        { "int t2[0];", 6, 1 }, { "  x[0] = 1;", 6, 0 }, { "  return a[0];", 6, 0 }, { "  char buf[0], c;", 6, 1 },
+        { "  x = (void)0;", 7, 1 }, { "  p = (void *)q;", 7, 0 }, { "  (void)x;", 7, 0 }, { "  if (a == (void)0) {}", 7, 0 },
+        { "  i += \"str\";", 9, 1 }, { "  i += 1;", 9, 0 },
+        { "void b15(void x){ }", 13, 1 }, { "void f(void);", 13, 0 }, { "void *p = (void *)q;", 13, 0 }, { "  (void)x;", 13, 0 }, { "int f(void const *p);", 13, 0 },
+        { "static extern int b16;", 14, 1 }, { "static int x;", 14, 0 }, { "typedef static int T;", 14, 1 }, { "static int f(int extern_x);", 14, 0 },
+        { "#define 3x 1", 15, 1 }, { "#define X 1", 15, 0 }, { "  #  undef 9", 15, 1 }, { "#pragma unisa use x", 15, 0 },
+        { "#include <stdio.h", 16, 1 }, { "#include <stdio.h>", 16, 0 }, { "#include \"a.h\"", 16, 0 }, { "#include \"a.h", 16, 1 },
+    };
+    int failed = 0;
+    for (int i = 0; i < (int)(sizeof t / sizeof t[0]); i++) {
+        char code[512];
+        int inc = 0;
+        codeline(t[i].line, code, sizeof code, &inc);
+        int got = cls[t[i].k].det(code, t[i].line);
+        if (got != t[i].want) { printf("FAIL\t%s\t%s\twant=%d\tgot=%d\n", cls[t[i].k].name, t[i].line, t[i].want, got); failed++; }
+    }
+    /* literal blanking: a fixture inside a string must not count */
+    { char code[256]; int inc = 0; codeline("{ \"zero\", \"int t2[0];\" },", code, sizeof code, &inc);
+      if (d_zero_array(code, "")) { printf("FAIL\tblank-literal\n"); failed++; } }
+    { char code[256]; int inc = 1; codeline("static extern int x; */ int y;", code, sizeof code, &inc);
+      if (d_multi_storage(code, "")) { printf("FAIL\tblock-comment-carry\n"); failed++; } }
+    /* every class sample (first line) must hit its own heuristic */
+    for (int k = 0; k < NCLS; k++) {
+        if (!cls[k].det) continue;
+        char raw[256], code[256];
+        int inc = 0;
+        const char *nl = strchr(cls[k].sample, '\n');
+        cx_fmt(raw, sizeof raw, "%.*s", (int)(nl - cls[k].sample), cls[k].sample);
+        codeline(raw, code, sizeof code, &inc);
+        if (!cls[k].det(code, raw)) { printf("FAIL\tsample\t%s\n", cls[k].name); failed++; }
+    }
+    printf("DIAG_CENSUS_SELFTEST\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".", *probe = 0, *outp = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--self-test")) return selftest();
+        else if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (!strcmp(argv[i], "--probe") && i + 1 < argc) probe = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--max-loc") && i + 1 < argc) maxloc = atoi(argv[++i]);
+        else { fprintf(stderr, "diag-census: usage [--root DIR] [--probe PRODUCT] [--out TSV] [--max-loc N] | --self-test\n"); return 2; }
+    }
+    char cmd[4400];
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' ls-files src cx ext tools tests", root)) return 2;
+    FILE *ls = popen(cmd, "r");
+    if (!ls) { fprintf(stderr, "diag-census: git ls-files failed\n"); return 2; }
+    char rel[2048];
+    int files = 0, fixtures = 0;
+    while (fgets(rel, sizeof rel, ls)) {
+        size_t n = strlen(rel);
+        while (n && (rel[n - 1] == '\n' || rel[n - 1] == '\r')) rel[--n] = 0;
+        int ok = (n > 2 && (!strcmp(rel + n - 2, ".c") || !strcmp(rel + n - 2, ".h"))) || (n > 3 && !strcmp(rel + n - 3, ".cx"));
+        if (!ok) continue;
+        /* deliberate negative fixtures (tests/neg-*, any path segment containing "negative") are where a new
+           rejection is wanted, not a self-tree violation: counted apart */
+        if (strstr(rel, "/neg-") || strstr(rel, "negative/")) { fixtures++; continue; }
+        for (int r = 0; r < NROOT; r++) {
+            size_t L = strlen(roots[r]);
+            if (!strncmp(rel, roots[r], L) && rel[L] == '/') { scan_file(root, rel, r); files++; break; }
+        }
+    }
+    if (pclose(ls)) { fprintf(stderr, "diag-census: git ls-files rc != 0\n"); return 2; }
+    char tmp[256] = "";
+    if (probe) { cx_fmt(tmp, sizeof tmp, "/tmp/diag-census-%d", sy_pid()); sy_mkdir(tmp, 0755); }
+    FILE *out = outp ? fopen(outp, "w") : 0;
+    if (outp && !out) { fprintf(stderr, "diag-census: cannot write %s\n", outp); return 2; }
+    const char *hdr = "class\tfamily\tkind\thits_src\thits_cx\thits_ext\thits_tools\thits_tests\tverdict\tprobe_rc\tprobe_stderr\tphase\tlocations\n";
+    printf("%s", hdr);
+    if (out) fputs(hdr, out);
+    int zero = 0, has = 0, unm = 0, sel = 0;
+    for (int k = 0; k < NCLS; k++) {
+        int tot = hits[k][0] + hits[k][1] + hits[k][2] + hits[k][3] + hits[k][4];
+        const char *v = !cls[k].det ? "UNMEASURED" : tot ? "HAS_CANDIDATES" : "ZERO_CANDIDATES";
+        if (!cls[k].det) unm++; else if (tot) has++; else zero++;
+        int pick = cls[k].planned && cls[k].det && !tot;
+        sel += pick;
+        char prc[16] = "-", perr[16] = "-";
+        if (probe) {
+            char src[512], obj[512], why[256];
+            cx_fmt(src, sizeof src, "%s/%s.c", tmp, cls[k].name);
+            cx_fmt(obj, sizeof obj, "%s/%s.o", tmp, cls[k].name);
+            cx_write(src, cls[k].sample, strlen(cls[k].sample));
+            np_result u;
+            char *cv[] = { "sh", (char *)probe, "-c", "-b", "lnx/x86_64", "-o", obj, src, 0 };
+            char *ev[] = { "sh", (char *)probe, "-E", src, 0 };
+            if (np_run(strcmp(cls[k].family, "pp") ? cv : ev, tmp, 0, 20, &u, why, sizeof why)) cx_fmt(prc, sizeof prc, "transport");
+            else { cx_fmt(prc, sizeof prc, "%d", u.rc); cx_fmt(perr, sizeof perr, "%s", u.errn ? "nonempty" : "empty"); np_free(&u); }
+        }
+        char row[2048];
+        cx_fmt(row, sizeof row, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n", cls[k].name, cls[k].family,
+               cls[k].det ? "H" : "U", hits[k][0], hits[k][1], hits[k][2], hits[k][3], hits[k][4], v, prc, perr,
+               pick ? "0.0.73" : "0.0.74", cls[k].det ? (loc[k][0] ? loc[k] : "-") : cls[k].why);
+        printf("%s", row);
+        if (out) fputs(row, out);
+    }
+    char last[256];
+    cx_fmt(last, sizeof last, "DIAG_CENSUS\tfiles=%d\tfixtures_skipped=%d\tclasses=%d\tzero=%d\thas=%d\tunmeasured=%d\tselected=%d\n", files, fixtures, NCLS, zero, has, unm, sel);
+    printf("%s", last);
+    if (out) { fputs(last, out); fclose(out); }
+    return 0;
+}

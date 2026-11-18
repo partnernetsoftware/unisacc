@@ -1,0 +1,97 @@
+/* Tool self-check for tools/dvgitx.cx (devsvc git commit --untrack, git worktree) on a private repository.
+ * Optional first argument selects a prebuilt dvgitx for red/green comparison.
+ * Check: CHECK_DVGITX. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+static char tmp[4096], bin[4200], root[4096], repo[4200], out[16384];
+static int passed, failed;
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvgitx\n", yes ? "PASS" : "FAIL", label); }
+static int git(char **v, const char *cwd, char *o, int cap) {
+    np_result r = {0}; char why[300]; int ok = !np_run(v, cwd, 0, 30, &r, why, sizeof why) && r.rc == 0;
+    if (o && cap > 0) { long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (k > 0) mm_copy(o, cap, r.out, k); o[k > 0 ? k : 0] = 0; }
+    np_free(&r); return ok;
+}
+static int dv(char **args, int *rc) {
+    char *v[24]; int n = 0; v[n++] = bin; v[n++] = repo;
+    for (int i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    v[n] = 0; np_result r = {0}; char why[300];
+    if (np_run(v, repo, 0, 50, &r, why, sizeof why)) return 0;
+    *rc = r.rc; long k = (long)r.outn < (long)sizeof out - 1 ? (long)r.outn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
+    if (r.errn) { long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k; if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; } }
+    np_free(&r); return 1;
+}
+static int fileid(const char *p, char sha[65], int *mode) {
+    unsigned char *b = 0; int64_t n = 0; sy_stat_t st;
+    if (sy_read_file(p, &b, &n, 1 << 20) || sy_stat(p, &st) || sy_sha256_hex(b ? (char *)b : "", n, sha)) { free(b); return 0; }
+    free(b); *mode = st.mode & 07777; return 1;
+}
+static int count_line(const char *p, const char *l) {
+    char *a = cx_read(p, 0); int c = 0; long L = strlen(l);
+    for (char *s = a; a && *s; ) { char *e = strchr(s, '\n'); long n = e ? e - s : (long)strlen(s); if (n == L && !memcmp(s, l, L)) c++; if (!e) break; s = e + 1; }
+    free(a); return c;
+}
+int main(int argc, char **argv) {
+    char why[512], p[4400], s1[65], s2[65], o[4096]; int m1, m2, rc;
+    if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvgitx-check", tmp, sizeof tmp)) return 2;
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvgitx", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvgitx.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    const char *genv[] = {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"};
+    for (int i = 0; i < 5; i++) if (sy_unsetenv(genv[i])) return 2;
+    if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || sy_mkdir(repo, 0700)) return 2;
+    {   char *init[] = {"git", "init", "-q", "-b", "main", 0};
+        if (!git(init, repo, 0, 0)) return 2;
+        cx_fmt(p, sizeof p, "%s/keep.tsv", repo); if (sy_write_file(p, "k\t1\n", 4, 0640) || sy_chmod(p, 0640)) return 2;
+        cx_fmt(p, sizeof p, "%s/gen.tsv", repo); if (sy_write_file(p, "g\t1\n", 4, 0640) || sy_chmod(p, 0640)) return 2;
+        cx_fmt(p, sizeof p, "%s/.gitignore", repo); if (sy_write_file(p, "/unisacc.com\n", 13, 0644)) return 2;
+        cx_fmt(p, sizeof p, "%s/unisacc.com", repo); if (sy_write_file(p, "#!/bin/sh\n", 10, 0755)) return 2;
+        char *add[] = {"git", "add", "keep.tsv", "gen.tsv", ".gitignore", 0};
+        char *ci[] = {"git", "-c", "user.name=fixture", "-c", "user.email=test@localhost", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture", 0};
+        if (!git(add, repo, 0, 0) || !git(ci, repo, 0, 0)) return 2; }
+    /* U1 untrack: index loses the path, working copy bytes and mode unchanged, receipt like git commit */
+    cx_fmt(p, sizeof p, "%s/gen.tsv", repo);
+    if (!fileid(p, s1, &m1)) return 2;
+    {   char *a[] = {"untrack", "-m", "stop tracking gen.tsv", "--untrack", "gen.tsv", "--ignore", "/gen.tsv", 0};
+        int ok = dv(a, &rc) && rc == 0 && strstr(out, "UNTRACK\tpath=gen.tsv\tstate=untracked") && strstr(out, "GIT_COMMIT\trc=0\tcommit=");
+        char *ls[] = {"git", "ls-files", "--", "gen.tsv", 0}; ok = ok && git(ls, repo, o, sizeof o) && !o[0];
+        char *lt[] = {"git", "ls-tree", "-r", "--name-only", "HEAD", 0}; ok = ok && git(lt, repo, o, sizeof o) && !strstr(o, "gen.tsv") && strstr(o, "keep.tsv");
+        char *lg[] = {"git", "log", "-1", "--format=%s", 0}; ok = ok && git(lg, repo, o, sizeof o) && !strcmp(o, "stop tracking gen.tsv\n");
+        check("untrack-drops-index-entry", ok);
+        check("untrack-working-copy-bytes-and-mode-same", fileid(p, s2, &m2) && !strcmp(s1, s2) && m1 == m2 && m1 == 0640);
+        char gi[4400]; cx_fmt(gi, sizeof gi, "%s/.gitignore", repo);
+        char *st[] = {"git", "status", "--porcelain", 0};
+        check("untrack-ignore-appended-and-clean", count_line(gi, "/gen.tsv") == 1 && git(st, repo, o, sizeof o) && !o[0]); }
+    /* U2 untracked path is named, not an error; --ignore is idempotent */
+    {   char *a[] = {"untrack", "-m", "again", "--untrack", "gen.tsv", "--ignore", "/gen.tsv", 0};
+        char gi[4400]; cx_fmt(gi, sizeof gi, "%s/.gitignore", repo);
+        check("untrack-not-tracked-named-rc0", dv(a, &rc) && rc == 0 && strstr(out, "UNTRACK\tpath=gen.tsv\tstate=not-tracked") && strstr(out, "reason=nothing-to-commit"));
+        check("untrack-ignore-idempotent", strstr(out, "IGNORE\tpath=/gen.tsv\tstate=present") && count_line(gi, "/gen.tsv") == 1); }
+    /* U3 argument refusals name the reason */
+    {   char *a[] = {"untrack", "--untrack", "keep.tsv", 0}; check("untrack-needs-message", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE untrack-args")); }
+    /* W1 worktree path form refused (negative controls) */
+    {   char *a[] = {"worktree", "add", "wt/v0.0.99", "v0.0.99", 0}; check("worktree-add-bad-path-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.99", "feature", 0}; check("worktree-add-bad-branch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.98", "v0.0.99", 0}; check("worktree-add-mismatch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    /* W2 add: branch created, symlink placed and ignored */
+    char wt[4400], ln[4500], tg[4500]; cx_fmt(wt, sizeof wt, "%s/.claude/worktrees/v0.0.99", repo); cx_fmt(ln, sizeof ln, "%s/unisacc.com", wt);
+    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.99", "v0.0.99", 0}; sy_stat_t st; long n;
+        int ok = dv(a, &rc) && rc == 0 && strstr(out, "branch_new=1") && strstr(out, "ignored=yes");
+        n = sy_readlink(ln, tg, sizeof tg - 1); if (n > 0) tg[n] = 0;
+        check("worktree-add-links-product", ok && !sy_lstat(ln, &st) && st.kind == 'l' && n > 0 && strstr(tg, "/repo/unisacc.com")); }
+    {   char *a[] = {"worktree", "list", 0}; check("worktree-list", dv(a, &rc) && rc == 0 && strstr(out, "v0.0.99")); }
+    /* W3 remove refuses a dirty tree and lists files (negative control), tree stays */
+    {   char f[4500]; cx_fmt(f, sizeof f, "%s/new.txt", wt); if (sy_write_file(f, "x\n", 2, 0644)) return 2;
+        char *a[] = {"worktree", "remove", ".claude/worktrees/v0.0.99", 0};
+        check("worktree-remove-dirty-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-dirty") && strstr(out, "DIRTY\t?? new.txt") && sy_exists(wt) == 1);
+        sy_unlink(f); }
+    /* W4 clean remove */
+    {   char *a[] = {"worktree", "remove", ".claude/worktrees/v0.0.99", 0}; check("worktree-remove-clean", dv(a, &rc) && rc == 0 && sy_exists(wt) == 0); }
+    printf("CHECK_DVGITX\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

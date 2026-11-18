@@ -1,0 +1,51 @@
+/* Tool self-check: observe the producer's actual socket messages for a failed x request. */
+#pragma unisa use dv.timing
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.fd
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use net.unix
+#pragma unisa use net.sock
+#pragma unisa use net.tcp
+
+static int consume(void *listener) {
+    const char *expected[]={"prepare","service-lock","execute","other","total"};
+    long sum=0;
+    for(int i=0;i<5;i++){
+        int fd=sy_tcp_accept(*(int *)listener,1500);
+        if(fd<0)return 1;
+        char line[512]={0},phase[40],load[24],job[64];long used=0,ms;int rc;
+        sy_deadline_t end=sy_deadline_in(1000);
+        while(used<(long)sizeof line-1 && !strchr(line,'\n')){
+            long n=sy_recv_until(fd,line+used,sizeof line-1-used,end);
+            if(n<=0)return 2;
+            used+=n;line[used]=0;
+        }
+        if(sscanf(line,"emit\tphase\tcmd=x\tphase=%39[^\t]\tms=%ld\tinput=fixture\trc=%d\tload1=%23[^\t]\tjob=%63s",
+                  phase,&ms,&rc,load,job)!=5 || strcmp(phase,expected[i]) || strcmp(job,"socket-fixture") ||
+           rc!=(i>=2?7:0) || ms<0 || (i==4 && ms!=sum))return 3;
+        sum+=ms;
+        if(sy_send_all_until(fd,"OK\tack\n",7,end))return 4;
+        sy_close(fd);
+    }
+    return 0;
+}
+int main(void) {
+    char sock[108];
+    if(cx_fmt(sock,sizeof sock,"%s/dvtiming-sock-%d",sy_tmpdir(),sy_pid()))return 2;
+    int ls=sy_unix_listen(sock,8);
+    if(ls<0)return 2;
+    int fds[2],pid=sy_fork_session(consume,&ls,fds),ok=0;
+    if(pid>0){
+        sy_unsetenv("DEVSVC_TIMING_BEGIN");
+        dt_begin(sy_now_ms());dt_command("x",".",0,0);
+        dt_identity("fixture");dt_job("socket-fixture");
+        long start=sy_now_ms();dt_flow(start,start,7);dt_finish(sock,7);
+        ok=sy_wait(pid,0)==0;
+        sy_close(fds[0]);sy_close(fds[1]);
+    }
+    sy_close(ls);sy_unlink(sock);
+    printf("%s\ttiming.producer-fields-rc-and-exclusive-sum\nCHECK_TIMING\tfailed=%d\n",ok?"PASS":"FAIL",!ok);
+    return !ok;
+}

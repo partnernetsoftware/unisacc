@@ -9,6 +9,30 @@ static void fixture(const char *path,const char *body,int accept){
  int rc=rv_load(path,out);ck((rc==0)==accept,body);
  if(!accept)ck(!strcmp(out,"unchanged"),"failed-load-preserves-output");
 }
+/* Version-slot gate (FREEZE-VERSION-SLOT-PREP): on a version branch vX.Y.Z the candidate
+ * table must already carry the target version row before freeze, so the chain pack injects
+ * the target version. 0 PASS, 1 REFUSE (why set), 2 NOT_APPLICABLE (not a version branch). */
+static int slot_gate(const char *branch,const char *path,char *why,int cap){
+ char out[24]="";
+ if(!branch||branch[0]!='v'||!rv_valid(branch+1)){cx_fmt(why,cap,"not-a-version-branch");return 2;}
+ if(rv_load(path,out)){cx_fmt(why,cap,"candidate-unreadable target=%s",branch+1);return 1;}
+ if(strcmp(out,branch+1)){cx_fmt(why,cap,"version-slot-missing target=%s candidate=%s",branch+1,out);return 1;}
+ cx_fmt(why,cap,"target=%s",branch+1);return 0;
+}
+static void slot_fixture(const char *path,const char *branch,const char *body,int want,const char *name){
+ char why[128];if(body)ck(!cx_write(path,body,strlen(body)),"slot-fixture-write");else remove(path);
+ ck(slot_gate(branch,path,why,sizeof why)==want,name);
+}
+static void slot_live(void){
+ char branch[128]="",why[160];const char *env=getenv("RELEASE_SLOT_BRANCH");
+ if(env&&env[0])cx_fmt(branch,sizeof branch,"%s",env);
+ else{FILE *p=popen("git rev-parse --abbrev-ref HEAD 2>/dev/null","r");
+  if(p){if(!fgets(branch,sizeof branch,p))branch[0]=0;pclose(p);}
+  size_t n=strlen(branch);while(n&&(branch[n-1]=='\n'||branch[n-1]=='\r'))branch[--n]=0;}
+ int rc=slot_gate(branch,"release/candidate.tsv",why,sizeof why);
+ printf("VERSION_SLOT\t%s\tbranch=%s\t%s\n",rc==0?"PASS":rc==1?"REFUSE":"NOT_APPLICABLE",branch[0]?branch:"-",why);
+ ck(rc!=1,"version-slot-live");
+}
 int main(void){
  const char *good[]={"0.0.0","0.0.48","65535.65535.65535","1.20.300","0.0.48.1","65535.65535.65535.65535","0.0.0.0"};
  const char *bad[]={"","0","0.0","0.0.0.0.0","00.0.0","0.01.0","0.0.00","65536.0.0","999999999.0.0","-1.0.0","+1.0.0","1.2.3 "," 1.2.3","1..3","1.2.3\n","1.2.3.65536","1.2.3.01","1.2.3.","1.2.3.4 ","65535.65535.65535.655350"};
@@ -31,6 +55,14 @@ int main(void){
  fixture(path,"version\tother\n0.0.48\n",0);
  remove(path);
  ck(!rv_load("release/candidate.tsv",out),"canonical-candidate");
+ slot_fixture(path,"v0.0.73","version\n0.0.71\n",1,"slot-neg-stale-version-refused");
+ slot_fixture(path,"v0.0.73",0,1,"slot-neg-missing-table-refused");
+ slot_fixture(path,"v0.0.73","other\n0.0.73\n",1,"slot-neg-no-version-column-refused");
+ slot_fixture(path,"v0.0.73","version\n0.0.73\n",0,"slot-pos-target-row-accepted");
+ slot_fixture(path,"main","version\n0.0.71\n",2,"slot-main-not-applicable");
+ slot_fixture(path,"v0.0.7x","version\n0.0.71\n",2,"slot-bad-branch-not-applicable");
+ remove(path);
+ slot_live();
  ck(sizeof("UNISACC_VERSION_SLOT_0000000000")==32,"slot-is-31-plus-NUL");
  {unsigned char bytes[66],saved[66],expected[66];const char slot[32]="UNISACC_VERSION_SLOT_0000000000";
   memset(bytes,'x',sizeof bytes);memcpy(bytes+1,slot,32);memcpy(saved,bytes,sizeof bytes);

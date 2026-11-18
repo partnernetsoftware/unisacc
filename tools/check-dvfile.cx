@@ -1,0 +1,74 @@
+/* Tool self-check for tools/dvfile.cx (devsvc f append) on private fixture files.
+ * Optional first argument selects a prebuilt dvfile for red/green comparison.
+ * Check: CHECK_DVFILE. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+static char tmp[4096], bin[4200], root[4096], out[8192];
+static int passed, failed;
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvfile\n", yes ? "PASS" : "FAIL", label); }
+static int dv(char **args, int *rc) {
+    char *v[16]; int n = 0; v[n++] = bin; v[n++] = tmp; v[n++] = "append";
+    for (int i = 0; args[i] && n < 15; i++) v[n++] = args[i];
+    v[n] = 0; np_result r = {0}; char why[300];
+    if (np_run(v, tmp, 0, 30, &r, why, sizeof why)) return 0;
+    *rc = r.rc; long k = (long)r.outn < (long)sizeof out - 1 ? (long)r.outn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
+    if (r.errn) { long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k; if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; } }
+    np_free(&r); return 1;
+}
+static int equals(const char *p, const char *s) { char *a = cx_read(p, 0); int ok = a && !strcmp(a, s); free(a); return ok; }
+static int count_lines(const char *p) { char *a = cx_read(p, 0); int n = 0; if (a) for (char *q = a; *q; q++) if (*q == '\n') n++; free(a); return n; }
+static int has_line(const char *p, const char *l) {
+    char *a = cx_read(p, 0); int ok = 0; long L = strlen(l);
+    for (char *s = a; a && *s; ) { char *e = strchr(s, '\n'); long n = e ? e - s : (long)strlen(s); if (n == L && !memcmp(s, l, L)) ok = 1; if (!e) break; s = e + 1; }
+    free(a); return ok;
+}
+int main(int argc, char **argv) {
+    char f[4300], src[4300], sha[65], why[512]; int rc;
+    if (sy_unsetenv("UNISACC_FLOW_ROOT") || sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvfile-check", tmp, sizeof tmp)) return 2;
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvfile", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvfile.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    if (cx_fmt(f, sizeof f, "%s/t.tsv", tmp) || cx_fmt(src, sizeof src, "%s/src", tmp)) return 2;
+    /* A1 missing final newline is added first; permission bits kept */
+    if (sy_write_file(f, "a\nb", 3, 0640) || sy_chmod(f, 0640)) return 2;
+    { char *a[] = {f, "--line", "c", 0}; sy_stat_t st;
+      check("append-fixes-missing-eol", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\n") && strstr(out, "eol_fixed=1"));
+      check("append-keeps-mode", !sy_stat(f, &st) && (st.mode & 07777) == 0640); }
+    /* A2 --from appends bytes as they are */
+    if (sy_write_file(src, "d\ne\n", 4, 0600)) return 2;
+    { char *a[] = {f, "--from", src, 0}; check("append-from-file", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\nd\ne\n") && strstr(out, "added=2")); }
+    /* A3 --expect-sha mismatch: named refusal, file unchanged (negative control) */
+    { char *a[] = {f, "--line", "x", "--expect-sha", "0000", 0};
+      check("append-expect-sha-mismatch-refused", dv(a, &rc) && rc == 1 && strstr(out, "ESHA: expect 0000") && equals(f, "a\nb\nc\nd\ne\n")); }
+    /* A4 --expect-sha match */
+    { char *b = cx_read(f, 0); if (!b || sy_sha256_hex(b, strlen(b), sha)) return 2; free(b);
+      char *a[] = {f, "--line", "g", "--expect-sha", sha, 0}; check("append-expect-sha-match", dv(a, &rc) && rc == 0 && has_line(f, "g")); }
+    /* A5 argument errors rc 2; missing target rc 1 ENOENT */
+    { char *a[] = {f, 0}; check("append-needs-line-or-from", dv(a, &rc) && rc == 2 && strstr(out, "EARG")); }
+    { char nf[4300]; cx_fmt(nf, sizeof nf, "%s/none.tsv", tmp); char *a[] = {nf, "--line", "x", 0};
+      check("append-missing-target-enoent", dv(a, &rc) && rc == 1 && strstr(out, "ENOENT") && sy_exists(nf) == 0); }
+    /* A5b a target outside the write root is refused like f write (EOUTSIDE), file unchanged */
+    {   char od[4096], of[4200]; if (sy_mkdtemp("/tmp", "dvfile-outside", od, sizeof od) || cx_fmt(of, sizeof of, "%s/o.tsv", od) || sy_write_file(of, "o\n", 2, 0600)) return 2;
+        char *a[] = {of, "--line", "x", 0}; check("append-outside-root-refused", dv(a, &rc) && rc == 1 && strstr(out, "EOUTSIDE") && equals(of, "o\n"));
+        sy_unlink(of); sy_rmdir(od); }
+    /* A6 concurrency: 12 appends at once lose no line (negative control: each line must be present exactly once) */
+    {   enum { N = 12 }; sy_child_t c[N]; char lines[N][16]; char *av[N][7]; int base = count_lines(f), ok = 1;
+        for (int i = 0; i < N; i++) {
+            cx_fmt(lines[i], sizeof lines[i], "par-%02d", i);
+            av[i][0] = bin; av[i][1] = tmp; av[i][2] = "append"; av[i][3] = f; av[i][4] = "--line"; av[i][5] = lines[i]; av[i][6] = 0;
+            sy_spawn_t o; sy_spawn_init(&o); o.argv = av[i]; o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+            if (sy_proc_spawn(&o, &c[i])) { ok = 0; c[i].pid = 0; }
+        }
+        for (int i = 0; i < N; i++) if (c[i].pid > 0) { sy_exit_t st; if (sy_proc_wait(&c[i], &st) || sy_exit_code(&st) != 0) ok = 0; }
+        for (int i = 0; i < N; i++) if (!has_line(f, lines[i])) ok = 0;
+        check("append-concurrent-no-lost-line", ok && count_lines(f) == base + N);
+    }
+    printf("CHECK_DVFILE\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

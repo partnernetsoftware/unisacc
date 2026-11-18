@@ -1,0 +1,224 @@
+/* dvgitx: devsvc git extensions that commit-own does not cover.
+ *   dvgitx ROOT untrack -m MSG --untrack PATH... [--ignore PATH...] [--push]
+ *       (devsvc git commit --untrack PATH ... routes here) Remove the declared paths from the
+ *       index in one commit while the working copy stays byte-for-byte untouched. The commit is
+ *       built in a private index (read-tree HEAD, rm --cached the paths), then HEAD moves by
+ *       compare-and-swap update-ref; only the declared paths are then dropped from the shared
+ *       index. A path that is not tracked prints UNTRACK<TAB>state=not-tracked and is skipped.
+ *       --ignore PATH appends the line PATH to .gitignore when it is not already a line
+ *       (idempotent); the commit carries .gitignore as HEAD's copy plus exactly those lines.
+ *       Receipt: GIT_COMMIT<TAB>rc=..<TAB>commit=..<TAB>pushed=..<TAB>ms=.. like git commit.
+ *   dvgitx ROOT worktree add .claude/worktrees/v0.0.NN v0.0.NN [--base REF]
+ *       Same rule as tools/guard-hook.cx: only that path form and branch name; anything else is
+ *       REFUSE worktree-path-form (rc 2). Creates the branch when missing, then places the
+ *       ignored symlink unisacc.com -> ROOT/unisacc.com at the work tree top.
+ *   dvgitx ROOT worktree remove .claude/worktrees/v0.0.NN
+ *       Never forces: uncommitted changes -> REFUSE worktree-dirty plus DIRTY<TAB>line rows (rc 2).
+ *   dvgitx ROOT worktree list
+ * Check: tools/check-dvgitx.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+static char root[4096];
+static char cap_out[1 << 16];
+
+/* Run ARGV in CWD with optional extra env; stdout (first CAP bytes) into OUT. Returns child rc, -1 when it did not run. */
+static int run(char **v, const char *cwd, char **env, char *out, int cap) {
+    np_result r = {0}; char why[300]; int rc;
+    if (np_run(v, cwd, env, 55, &r, why, sizeof why)) { fprintf(stderr, "dvgitx: %s did not start: %s\n", v[0], why); return -1; }
+    rc = r.rc;
+    if (out && cap > 0) { long n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (n > 0) mm_copy(out, cap, r.out, n); out[n > 0 ? n : 0] = 0; }
+    if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r); return rc;
+}
+/* object ids from git end in one newline: cut the line end in place */
+static void chomp(char *s) { char *e = s + strlen(s); while (e > s && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0; }
+static int safe_rel(const char *p) {
+    if (!p[0] || p[0] == '/' || p[0] == '-') return 0;
+    for (const char *q = p; *q; q++) { if (*q == '\n' || *q == '\t') return 0; if (q[0] == '.' && q[1] == '.' && (q == p || q[-1] == '/') && (!q[2] || q[2] == '/')) return 0; }
+    return 1;
+}
+static int msg_ok(const char *m) {
+    while (*m == ' ' || *m == '\t' || *m == '\r') m++;
+    if (!*m || *m == '\n') return 0;
+    char low[20]; int i; for (i = 0; i < 19 && m[i]; i++) low[i] = (char)(m[i] >= 'A' && m[i] <= 'Z' ? m[i] + 32 : m[i]); low[i] = 0;
+    return strncmp(low, "co-authored-by:", 15) && strncmp(low, "signed-off-by:", 14);
+}
+
+static int untrack(int argc, char **argv) {
+    const char *msg = 0, *up[64], *ig[64]; int nu = 0, ni = 0, push = 0, i, rc, pushed = 0; long t0 = sy_now_ms();
+    char old[64], tree[64], nw[64], idx[600], ev[700], gi[4200];
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a, "commit")) continue;
+        if (!strcmp(a, "-m") && i + 1 < argc) { msg = argv[++i]; continue; }
+        if (!strcmp(a, "--push")) { push = 1; continue; }
+        if (!strcmp(a, "--untrack") && i + 1 < argc && nu < 64) { up[nu++] = argv[++i]; continue; }
+        if (!strcmp(a, "--ignore") && i + 1 < argc && ni < 64) { ig[ni++] = argv[++i]; continue; }
+        fprintf(stderr, "devsvc: REFUSE untrack-args: %s is not accepted with --untrack (use -m MSG --untrack PATH... [--ignore PATH...] [--push]; nothing committed)\n", a);
+        return 2;
+    }
+    if (!msg || !msg_ok(msg)) { fprintf(stderr, "devsvc: REFUSE untrack-args: -m MSG required, first line must be body text (nothing committed)\n"); return 2; }
+    if (!nu) { fprintf(stderr, "devsvc: REFUSE untrack-args: at least one --untrack PATH (nothing committed)\n"); return 2; }
+    for (i = 0; i < nu; i++) if (!safe_rel(up[i])) { fprintf(stderr, "devsvc: REFUSE untrack-args: path %s must be repo-relative without .. (nothing committed)\n", up[i]); return 2; }
+    for (i = 0; i < ni; i++) if (!ig[i][0] || ig[i][0] == '-' || strchr(ig[i], '\n') || strchr(ig[i], '\t')) { fprintf(stderr, "devsvc: REFUSE untrack-args: --ignore %s must be a repo-relative pattern line (nothing committed)\n", ig[i]); return 2; }
+    /* which declared paths are tracked at HEAD */
+    int tracked[64], nt = 0;
+    for (i = 0; i < nu; i++) {
+        char *v[] = {"git", "ls-tree", "-r", "--name-only", "HEAD", "--", (char *)up[i], 0};
+        tracked[i] = run(v, root, 0, cap_out, sizeof cap_out) == 0 && cap_out[0];
+        if (!tracked[i]) printf("UNTRACK\tpath=%s\tstate=not-tracked\n", up[i]); else nt++;
+    }
+    /* .gitignore: append missing lines in the working copy (idempotent) */
+    unsigned char *wc = 0; int64_t wn = 0; int added = 0; char addbuf[8192]; long an = 0; sy_stat_t gst; int gmode = 0644;
+    if (cx_fmt(gi, sizeof gi, "%s/.gitignore", root)) return 3;
+    if (ni) {
+        if (sy_read_file(gi, &wc, &wn, 1 << 22) != 0) { wc = 0; wn = 0; }
+        if (!sy_stat(gi, &gst)) gmode = gst.mode & 07777;
+        for (i = 0; i < ni; i++) {
+            long L = strlen(ig[i]), k, s = 0, have = 0;
+            for (k = 0; k <= wn; k++) if (k == wn || wc[k] == '\n') { if (k - s == L && !memcmp(wc + s, ig[i], L)) have = 1; s = k + 1; }
+            for (k = 0, s = 0; k <= an && !have; k++) if (k == an || addbuf[k] == '\n') { if (k - s == L && !memcmp(addbuf + s, ig[i], L)) have = 1; s = k + 1; }
+            printf("IGNORE\tpath=%s\tstate=%s\n", ig[i], have ? "present" : "added");
+            if (!have) { if (an + L + 2 > (long)sizeof addbuf) return 3;
+                if (mm_copy(addbuf + an, sizeof addbuf - an, ig[i], L)) return 3;
+                an += L; addbuf[an++] = '\n'; added++; }
+        }
+        if (added) {
+            int nl = wn > 0 && wc[wn - 1] != '\n';
+            unsigned char *nb = malloc(wn + nl + an + 1); if (!nb) return 3;
+            if ((wn && mm_copy(nb, wn + nl + an + 1, wc, wn)) || mm_copy(nb + wn + nl, an + 1, addbuf, an)) { free(nb); return 3; }
+            if (nl) nb[wn] = '\n';
+            if (sy_write_atomic(gi, nb, wn + nl + an, gmode) || sy_chmod(gi, gmode)) { fprintf(stderr, "devsvc: cannot write .gitignore\n"); free(nb); return 3; }
+            free(nb);
+        }
+    }
+    if (wc) free(wc);
+    if (!nt && !added) { printf("UNTRACK_NONE\tdeclared=%d\n", nu); printf("GIT_COMMIT\trc=0\tcommit=none\tpushed=0\tms=%ld\treason=nothing-to-commit\n", sy_now_ms() - t0); return 0; }
+    /* .gitignore blob = HEAD copy plus our added lines (others' uncommitted lines stay out of the commit) */
+    char gblob[64]; gblob[0] = 0;
+    if (added) {
+        char *sv[] = {"git", "show", "HEAD:.gitignore", 0}; static char hb[1 << 20]; char tf[600];
+        char *ce[] = {"git", "cat-file", "-e", "HEAD:.gitignore", 0};
+        if (run(ce, root, 0, 0, 0) != 0 || run(sv, root, 0, hb, sizeof hb) != 0) hb[0] = 0;
+        long hn = strlen(hb); int nl = hn > 0 && hb[hn - 1] != '\n';
+        if (hn + nl + an + 1 > (long)sizeof hb) return 3;
+        if (nl) hb[hn++] = '\n';
+        if (mm_copy(hb + hn, sizeof hb - hn, addbuf, an)) return 3;
+        hn += an;
+        if (cx_fmt(tf, sizeof tf, "/tmp/dvgitx-gi-%d", sy_pid()) || sy_write_file(tf, hb, hn, 0600)) return 3;
+        char *hv[] = {"git", "hash-object", "-w", "--", tf, 0};
+        rc = run(hv, root, 0, gblob, sizeof gblob); sy_unlink(tf);
+        if (rc) return 3;
+        chomp(gblob);
+    }
+    if (cx_fmt(idx, sizeof idx, "/tmp/dvgitx-idx-%d-%ld", sy_pid(), sy_now_ms()) || cx_fmt(ev, sizeof ev, "GIT_INDEX_FILE=%s", idx)) return 3;
+    char *env[] = {ev, 0};
+    int tries;
+    for (tries = 0; tries < 4; tries++) {
+        char *hv[] = {"git", "rev-parse", "HEAD", 0};
+        if (run(hv, root, 0, old, sizeof old)) return 3;
+        chomp(old);
+        char *rv[] = {"git", "read-tree", old, 0};
+        if (run(rv, root, env, 0, 0)) { sy_unlink(idx); return 3; }
+        {   char *v[80]; int n = 0; v[n++] = "git"; v[n++] = "rm"; v[n++] = "--cached"; v[n++] = "-r"; v[n++] = "-q"; v[n++] = "--ignore-unmatch"; v[n++] = "--";
+            for (i = 0; i < nu; i++) if (tracked[i]) v[n++] = (char *)up[i];
+            v[n] = 0; if (nt && run(v, root, env, 0, 0)) { sy_unlink(idx); return 3; } }
+        if (added) { char ci[200]; if (cx_fmt(ci, sizeof ci, "100644,%s,.gitignore", gblob)) return 3;
+            char *uv[] = {"git", "update-index", "--add", "--cacheinfo", ci, 0}; if (run(uv, root, env, 0, 0)) { sy_unlink(idx); return 3; } }
+        char *wv[] = {"git", "write-tree", 0};
+        if (run(wv, root, env, tree, sizeof tree)) { sy_unlink(idx); return 3; }
+        chomp(tree);
+        char *cv[] = {"git", "commit-tree", tree, "-p", old, "-m", (char *)msg, 0};
+        if (run(cv, root, 0, nw, sizeof nw)) { sy_unlink(idx); return 3; }
+        chomp(nw);
+        char *uv[] = {"git", "update-ref", "-m", "devsvc git commit --untrack", "HEAD", nw, old, 0};
+        rc = run(uv, root, 0, 0, 0); sy_unlink(idx);
+        if (!rc) break;
+        printf("UNTRACK_RETRY\treason=head-moved\ttry=%d\n", tries + 1);
+    }
+    if (tries == 4) { printf("GIT_COMMIT\trc=1\tcommit=none\tpushed=0\tms=%ld\treason=blocked\n", sy_now_ms() - t0); return 1; }
+    /* shared index: drop only the declared tracked paths; .gitignore only when nothing of it is staged */
+    for (int k = 0; k < 12; k++) {
+        char *v[80]; int n = 0; v[n++] = "git"; v[n++] = "rm"; v[n++] = "--cached"; v[n++] = "-r"; v[n++] = "-q"; v[n++] = "--ignore-unmatch"; v[n++] = "--";
+        for (i = 0; i < nu; i++) if (tracked[i]) v[n++] = (char *)up[i];
+        v[n] = 0; if (!nt || run(v, root, 0, 0, 0) == 0) break;
+        sy_sleep_ms(250);
+    }
+    if (added) {
+        char *dv[] = {"git", "diff", "--cached", "--quiet", old, "--", ".gitignore", 0};
+        if (run(dv, root, 0, 0, 0) == 0) { char ci[200]; cx_fmt(ci, sizeof ci, "100644,%s,.gitignore", gblob);
+            char *uv[] = {"git", "update-index", "--add", "--cacheinfo", ci, 0}; (void)run(uv, root, 0, 0, 0); }
+    }
+    for (i = 0; i < nu; i++) if (tracked[i]) printf("UNTRACK\tpath=%s\tstate=untracked\n", up[i]);
+    if (push) { char *pv[] = {"git", "push", "origin", "HEAD:main", 0}; pushed = run(pv, root, 0, 0, 0) == 0; }
+    rc = push && !pushed ? 1 : 0;
+    printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld%s\n", rc, nw, pushed, sy_now_ms() - t0, rc ? "\treason=push-failed" : "");
+    return rc;
+}
+
+/* .claude/worktrees/v0.0.NN (relative or ROOT-absolute) whose leaf equals BRANCH = v0.0.NN */
+static int wt_form(const char *path, const char *br, char *abs, int cap) {
+    const char *q = br; if (strncmp(q, "v0.0.", 5)) return 0;
+    q += 5; if (!*q) return 0;
+    for (; *q; q++) if (*q < '0' || *q > '9') return 0;
+    char want[4200]; if (cx_fmt(want, sizeof want, "%s/.claude/worktrees/%s", root, br)) return 0;
+    if (path[0] == '/') { if (strcmp(path, want)) return 0; }
+    else { char rel[300]; if (cx_fmt(rel, sizeof rel, ".claude/worktrees/%s", br) || strcmp(path, rel)) return 0; }
+    return !cx_fmt(abs, cap, "%s", want);
+}
+static const char *leaf(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
+
+static int worktree(int argc, char **argv) {
+    char abs[4200], link[4300], tgt[4200];
+    if (argc == 1 && !strcmp(argv[0], "list")) { char *v[] = {"git", "worktree", "list", 0}; int rc = run(v, root, 0, cap_out, sizeof cap_out); fputs(cap_out, stdout); return rc; }
+    if (argc >= 3 && !strcmp(argv[0], "add") && (argc == 3 || (argc == 5 && !strcmp(argv[3], "--base")))) {
+        if (!wt_form(argv[1], argv[2], abs, sizeof abs)) {
+            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree add takes .claude/worktrees/v0.0.NN and branch v0.0.NN with the same NN (got %s %s; same rule as tools/guard-hook.cx)\n", argv[1], argv[2]);
+            return 2; }
+        char ref[300], o[200]; cx_fmt(ref, sizeof ref, "refs/heads/%s", argv[2]);
+        char *ev[] = {"git", "rev-parse", "-q", "--verify", ref, 0}; int exists = run(ev, root, 0, o, sizeof o) == 0;
+        int rc;
+        if (exists) { char *v[] = {"git", "worktree", "add", abs, argv[2], 0}; rc = run(v, root, 0, 0, 0); }
+        else { char *v[] = {"git", "worktree", "add", "-b", argv[2], abs, argc == 5 ? argv[4] : "HEAD", 0}; rc = run(v, root, 0, 0, 0); }
+        if (rc) { printf("WORKTREE\tadd\trc=%d\tpath=%s\n", rc, abs); return 1; }
+        if (cx_fmt(link, sizeof link, "%s/unisacc.com", abs) || cx_fmt(tgt, sizeof tgt, "%s/unisacc.com", root)) return 3;
+        int lr = sy_symlink(tgt, link);
+        char *iv[] = {"git", "check-ignore", "-q", "unisacc.com", 0}; int ign = run(iv, abs, 0, 0, 0) == 0;
+        printf("WORKTREE\tadd\trc=0\tpath=%s\tbranch=%s\tbranch_new=%d\tlink=%s\tignored=%s\n", abs, argv[2], !exists, lr ? "failed" : "unisacc.com", ign ? "yes" : "no");
+        return lr ? 1 : 0;
+    }
+    if (argc == 2 && !strcmp(argv[0], "remove")) {
+        if (!wt_form(argv[1], leaf(argv[1]), abs, sizeof abs)) {
+            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree remove takes .claude/worktrees/v0.0.NN (got %s)\n", argv[1]); return 2; }
+        char *sv[] = {"git", "-C", abs, "status", "--porcelain", 0};
+        if (run(sv, root, 0, cap_out, sizeof cap_out)) { fprintf(stderr, "devsvc: REFUSE worktree-missing: %s is not a work tree\n", abs); return 2; }
+        if (cap_out[0]) {
+            fprintf(stderr, "devsvc: REFUSE worktree-dirty: %s has uncommitted changes; commit or move them first (no --force offered)\n", abs);
+            for (char *s = cap_out, *e; *s; s = e + 1) { e = strchr(s, '\n'); if (!e) { printf("DIRTY\t%s\n", s); break; } *e = 0; printf("DIRTY\t%s\n", s); }
+            return 2;
+        }
+        if (cx_fmt(link, sizeof link, "%s/unisacc.com", abs) || cx_fmt(tgt, sizeof tgt, "%s/unisacc.com", root)) return 3;
+        sy_stat_t st; int had = !sy_lstat(link, &st) && st.kind == 'l';
+        if (had) sy_unlink(link);
+        char *v[] = {"git", "worktree", "remove", abs, 0}; int rc = run(v, root, 0, 0, 0);
+        if (rc && had) sy_symlink(tgt, link);
+        printf("WORKTREE\tremove\trc=%d\tpath=%s\n", rc, abs);
+        return rc ? 1 : 0;
+    }
+    fprintf(stderr, "devsvc: REFUSE worktree-args: use git worktree add .claude/worktrees/v0.0.NN v0.0.NN [--base REF] | remove .claude/worktrees/v0.0.NN | list\n");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3 || sy_realpath(argv[1], root, sizeof root) < 0) { fprintf(stderr, "usage: dvgitx ROOT untrack|worktree ARGS...\n"); return 2; }
+    if (!strcmp(argv[2], "untrack")) return untrack(argc - 3, argv + 3);
+    if (!strcmp(argv[2], "worktree")) return worktree(argc - 3, argv + 3);
+    fprintf(stderr, "usage: dvgitx ROOT untrack|worktree ARGS...\n");
+    return 2;
+}

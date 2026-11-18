@@ -1,0 +1,103 @@
+#pragma unisa module timing
+#pragma unisa use net.unix
+#pragma unisa use net.sock
+#pragma unisa use net.tcp
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.fd
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+
+/* Per-request measurement. The background worker inherits the client's start
+ * and uses the same job id as its durable receipt. The daemon owns EV sequence,
+ * rotation and ring updates; measurements use its ordinary emit protocol. */
+enum { DERIVE,GATES,CAS,PUSH,PREPARE,LOCK,EXECUTE,LAUNCHER,OTHER,TOTAL,PHASE_COUNT };
+static long started, core_started, duration[PHASE_COUNT];
+static int measured[PHASE_COUNT], result[PHASE_COUNT];
+static const char *command;
+static char command_root[4096];
+static char job_id[64], identity[80], sample[PHASE_COUNT][24];
+static const char *names[]={"derive","gates","cas","push","prepare","service-lock","execute","launcher","other","total"};
+
+void dt_begin(long now) {
+    started=now;core_started=now;
+    const char *stamp=sy_env("DEVSVC_TIMING_BEGIN");
+    if(stamp){
+        long launch=atol(stamp);
+        if(launch>0 && launch<=now && now-launch<3700000)started=launch;
+        sy_unsetenv("DEVSVC_TIMING_BEGIN");
+    }
+    cx_fmt(job_id,sizeof job_id,"%ld-%d",started,sy_pid());
+}
+void dt_job(const char *job){cx_fmt(job_id,sizeof job_id,"%s",job);}
+void dt_identity(const char *head){cx_fmt(identity,sizeof identity,"%s",head);}
+void dt_command(const char *cmd,const char *root,int argc,char **argv) {
+    command=cmd;
+    if(cx_fmt(command_root,sizeof command_root,"%s",root))command_root[0]=0;
+    const char *cwd=root;
+    for(int i=0;i+1<argc && strcmp(argv[i],"--");i++){
+        if(!strcmp(argv[i],"--cwd")){cwd=argv[i+1];break;}
+    }
+    char *v[]={"git","-C",(char*)cwd,"rev-parse","--verify","HEAD",0};
+    char why[100];np_result h;
+    if(!np_run(v,0,0,1,&h,why,sizeof why)){
+        if(h.rc==0 && h.outn==41)cx_fmt(identity,sizeof identity,"%.40s",h.out);
+        np_free(&h);
+    }
+}
+const char *dt_root(void){return command_root;}
+static void add_time(int k,long ms,int rc) {
+    if(ms<0)return;
+    duration[k]+=ms;measured[k]=1;result[k]=rc;
+    unsigned char *b=0;int64_t n=0;
+    if(sy_read_file("/proc/loadavg",&b,&n,4096) || !b || sscanf((char*)b,"%23s",sample[k])!=1)
+        cx_fmt(sample[k],sizeof sample[k],"unknown");
+    free(b);
+}
+void dt_derive(long begin,int rc){add_time(DERIVE,sy_now_ms()-begin,rc);}
+void dt_push(long begin,int rc){add_time(PUSH,sy_now_ms()-begin,rc);}
+void dt_flow(long lock_begin,long begin,int rc) {
+    if(!command || !strcmp(command,"git.commit"))return;
+    long end=sy_now_ms();
+    add_time(PREPARE,lock_begin-core_started,0);
+    add_time(LOCK,begin-lock_begin,0);
+    add_time(EXECUTE,end-begin,rc);
+}
+void dt_worker(const char *error_path,int selected) {
+    char path[2048],line[512];long n=strlen(error_path);
+    if(n<4 || strcmp(error_path+n-4,".err") ||
+       cx_fmt(path,sizeof path,"%.*s.out",(int)n-4,error_path))return;
+    FILE *f=fopen(path,"rb");
+    if(!f)return;
+    for(long bytes=0;bytes<(1L<<22) && fgets(line,sizeof line,f);bytes+=strlen(line)){
+        long gates,cas,derive;int gr,cr;
+        if(sscanf(line,"COMMIT_TIMING\tgates_ms=%ld\tgates_rc=%d\tcas_ms=%ld\tcas_rc=%d",&gates,&gr,&cas,&cr)==4){
+            add_time(GATES,gates,gr);
+            if(cr>=0)add_time(CAS,cas,cr);
+        }else if(selected && sscanf(line,"COMMIT_PHASE\tname=derive\tstate=end\tms=%ld",&derive)==1){
+            add_time(DERIVE,derive,0);
+        }
+    }
+    fclose(f);
+}
+void dt_finish(const char *socket_path,int rc) {
+    if(!command || !socket_path[0])return;
+    long elapsed=sy_now_ms()-started,parts=0;
+    if(core_started>started)add_time(LAUNCHER,core_started-started,0);
+    for(int k=0;k<OTHER;k++)parts+=duration[k];
+    add_time(OTHER,elapsed-parts,rc);add_time(TOTAL,elapsed,rc);
+    /* A missing or busy service can drop observations, but cannot fail or start
+     * a command. All emissions together get one absolute 250 ms deadline. */
+    sy_deadline_t deadline=sy_deadline_in(250);
+    for(int k=0;k<PHASE_COUNT;k++)if(measured[k]){
+        char msg[460],reply[64];
+        int size=snprintf(msg,sizeof msg,"emit\tphase\tcmd=%s\tphase=%s\tms=%ld\tinput=%s\trc=%d\tload1=%s\tjob=%s\n",
+            command,names[k],duration[k],identity[0]?identity:"unknown",result[k],sample[k],job_id);
+        if(size<0 || size>=(int)sizeof msg)break;
+        int fd=sy_unix_connect(socket_path,deadline);if(fd<0)break;
+        int sent=sy_send_all_until(fd,msg,size,deadline);
+        long received=sent?-1:sy_recv_until(fd,reply,sizeof reply,deadline);
+        sy_close(fd);if(received<1)break;
+    }
+}
