@@ -82,21 +82,22 @@ function stamp(rows,x,y,mirror=false) {
   }
 }
 
-export function drawAircraft(buffer,x,y,pitch,bank,speed,tick) {
+export function drawAircraft(buffer,x,y,pitch,roll,speed,tick) {
   draw.clearRect(0,0,96,50);
   stamp(wing,8,18);
   stamp(wing,87,18,true);
   stamp(root,28,18);
   stamp(root,67,18,true);
-  stamp(fin,26,9);
-  stamp(fin,69,9,true);
+  const finOffset=Math.round(pitch/6);
+  stamp(fin,26,9+finOffset);
+  stamp(fin,69,9+finOffset,true);
   stamp(body,37,10);
   const flicker=(tick%5===0?1:0)+(speed>18?2:0);
   stamp(jet.slice(0,8+flicker),39,24);
   stamp(jet.slice(0,8+(tick%5===2?1:0)+(speed>18?2:0)),50,24);
   buffer.save();
-  buffer.translate(Math.round(x),Math.round(y-pitch*.18));
-  buffer.rotate(bank*Math.PI/180);
+  buffer.translate(x,y);
+  buffer.rotate(roll);
   buffer.imageSmoothingEnabled=false;
   buffer.drawImage(plate,-48,-26,96,55);
   buffer.restore();

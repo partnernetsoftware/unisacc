@@ -84,7 +84,7 @@ export function combatModel(context,query) {
       bursts.unshift({tick,x:pose.x,y:pose.y,kind:"burst"});
     }
   }
-  function update(flight,tick,gun,missile) {
+  function update(flight,tick,gun,missile,attitude) {
     for(const enemy of enemies) {
       if(enemy.hp<=0 && tick>=enemy.respawn) enemy.hp=4;
       const view=query.has("freeze-targets")?{...flight,x:0,z:-1.5}:flight;
@@ -154,10 +154,14 @@ export function combatModel(context,query) {
       } else if(event.kind==="plume" || !query.has("no-hit-smoke"))
         smoke(context,event.x+age*.19,event.y-age*.43,age,life);
     }
+    const sine=Math.sin(attitude.roll),cosine=Math.cos(attitude.roll);
     for(const wing of [-1,1]) for(let i=0;i<18;i++) {
       const life=(i+tick)%18;
+      const x=wing*38,y=5;
+      const drift=query.has("straight-trail")?0:flight.bank*life*life*.004;
       point(context,life<7?"#e7f1e8":"#94bec5",
-        213+wing*(38+life*.68)-flight.bank*life*.044,163+life,life%4===0?2:1);
+        213+x*cosine-y*sine+wing*life*.68-drift,
+        attitude.y+x*sine+y*cosine+life,life%4===0?2:1);
     }
   }
   function hud() {
