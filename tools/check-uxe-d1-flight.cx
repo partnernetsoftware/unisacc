@@ -217,6 +217,10 @@ static const char *browser(char *url,char **out,int stage) {
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
     int attempt;
+    if(stage==8) {
+        args[2]="--disable-gpu";
+        args[3]="--disable-component-update";
+    }
     for(attempt=1;attempt<=2;attempt++) {
         int rc,complete,error;
         tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-flight-%d-%d-%d",(int)getpid(),stage,attempt);
@@ -429,21 +433,26 @@ static int down_ratio(int numerator,int denominator) {
     return (numerator<0?numerator-denominator+1:numerator)/denominator;
 }
 
-static int terrain_band(int x,int y,int seed) {
-    static const int islands[][4]={{162,82,44,62},{68,103,32,42},{227,65,32,26},{92,29,40,30},{188,15,58,37}};
-    static const int stops[]={-25,-8,0,8,28,55,101};
-    int i,peak=-49,elevation;
-    for(i=0;i<5;i++) {
+static int terrain_height(int x,int y,int seed) {
+    static const int islands[][5]={{100,106,34,28,113},{163,96,22,18,97},{130,67,12,13,84},
+        {72,56,16,15,100},{187,52,17,13,102},{104,25,16,14,98},{150,20,15,13,103},{215,19,19,13,104}};
+    int i,peak=-49;
+    for(i=0;i<8;i++) {
         const int *a=islands[i];
         int dx=abs(a[0]-x),dy=abs(a[1]-y),ground;
         if(dx>128) dx=256-dx;
         if(dy>128) dy=256-dy;
-        ground=93-96*dx*dx/(a[2]*a[2])-96*dy*dy/(a[3]*a[3]);
+        ground=a[4]-116*dx*dx/(a[2]*a[2])-116*dy*dy/(a[3]*a[3]);
         if(ground>peak) peak=ground;
     }
-    elevation=peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
-        +down_ratio(field_noise(x,y,8,seed+3)-128,5)
+    return peak+down_ratio(45*(field_noise(x,y,64,seed)-128),100)
+        +down_ratio(field_noise(x,y,16,seed+3)-128,4)
         +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
+}
+
+static int terrain_band(int x,int y,int seed) {
+    static const int stops[]={-25,-8,0,8,28,55,101};
+    int i,elevation=terrain_height(x,y,seed);
     for(i=0;i<7 && elevation>=stops[i];i++) {}
     return i;
 }
@@ -453,6 +462,48 @@ static int take_channel(const char **p,int end) {
     if(value<0 || value>255 || (end && **p!=end)) return -1;
     if(end) *p=*p+1;
     return value;
+}
+
+static int far_islands(void) {
+    unsigned char land[64*20];
+    int queue[64*20],x,y,i,count=0;
+    for(y=0;y<20;y++) for(x=0;x<64;x++) land[64*y+x]=terrain_height(x*4+2,y*4+2,7)>=0;
+    for(i=0;i<64*20;i++) if(land[i]) {
+        int next=0,end=1,clipped=0,inside=0;
+        queue[0]=i; land[i]=0;
+        while(next<end) {
+            int at=queue[next++],col=at%64,row=at/64,j;
+            int near[4]={at-1,at+1,at-64,at+64};
+            if(col==0 || col==63 || row==0 || row==19) clipped=1;
+            inside+=abs(4*col+2-128)*151 < (127-(4*row+2))*213;
+            for(j=0;j<4;j++) {
+                int adjacent=near[j];
+                if((j==0 && col==0) || (j==1 && col==63) || adjacent<0 || adjacent>=64*20 || !land[adjacent]) continue;
+                land[adjacent]=0;
+                queue[end++]=adjacent;
+            }
+        }
+        count+=!clipped && inside>=5;
+    }
+    return count;
+}
+
+static int projected_land_ratio(void) {
+    int x,y,ground=0,water=0;
+    for(y=123;y<240;y+=8) for(x=1;x<426;x+=8) {
+        int depth;
+        for(depth=4;depth<=400;depth+=4) {
+            int gx=(int)((256+(x+.5-213)*depth/151)/2)&255;
+            int gy=(int)((254.5-depth)/2)&255;
+            int altitude=terrain_height(gx,gy,7);
+            double top=100+(45-(altitude>0?altitude*.22:0))*151/depth;
+            if(y+1<top) continue;
+            ground+=altitude>=0;
+            water+=altitude<0;
+            break;
+        }
+    }
+    return ground+water?ground*100/(ground+water):0;
 }
 
 static int check_terrain(const char *mutation,int published) {
@@ -499,6 +550,12 @@ static int check_terrain(const char *mutation,int published) {
     free(out);
     printf("D1_TERRAIN swatches=%d band_errors=%d land=%d/3210 green=%d water=%d foam=%d\n",
         n,failed,land,green,sea,foam);
+    {
+        int islands=far_islands(),expected=projected_land_ratio(),observed=land+sea?land*100/(land+sea):0;
+        printf("D1_ARCHIPELAGO seed_far_islands=%d land_expected_pct=%d land_actual_pct=%d sea_actual_pct=%d\n",
+            islands,expected,observed,100-observed);
+        failed+=islands<5 || expected<25 || expected>70 || abs(expected-observed)>15;
+    }
     return failed || land<550 || green<350 || sea<320 || foam<20;
 }
 
@@ -578,6 +635,180 @@ static int check_combat(const char *mutation,int published) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+static void pursuing_left(int tick,int *x,int *y) {
+    int phase=(tick-30)%96;
+    int sweep=phase<24?phase:phase<72?48-phase:phase-96;
+    double depth=114.5+tick/3;
+    *x=(int)(213.5+151*(-49+tick%72/6+.65*sweep)/depth);
+    *y=(int)(113.5+151*(-17+.18*sweep)/depth);
+}
+
+static int check_skirmish(const char *mutation) {
+    static const int expected[][3]={{232,234,219},{255,116,106},{226,82,159},
+        {121,220,162},{62,75,92},{62,75,92},{121,220,162},{35,52,77}};
+    char cwd[1024],url[1950],*out=0;
+    int x,y,bolt_x,bolt_y,i,j,failed=0,n=(int)(sizeof expected/sizeof expected[0]);
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("skirmish-cwd",0);
+    pursuing_left(40,&x,&y);
+    bolt_x=(int)(.5+x+(213-x)*15.0/22);
+    bolt_y=(int)(.5+y+(158-y)*15.0/22);
+    pursuing_left(55,&x,&y);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?hold-course&%s&skirmish=18,409,228;55,%d,%d;55,%d,%d;63,376,227;63,380,227;149,352,227;0,380,227;0,409,228",
+        cwd,mutation,x,y-8,bolt_x,bolt_y);
+    p=browser(url,&out,8);
+    if(!p) return input_error("skirmish-browser",out);
+    for(i=0;i<n;i++) {
+        int got[3],bad=0;
+        for(j=0;j<3;j++) {
+            got[j]=take_channel(&p,i+1==n && j==2?0:',');
+            bad|=got[j]!=expected[i][j];
+        }
+        printf("D1_SKIRMISH probe=%d rgb=%d,%d,%d failed=%d\n",i,got[0],got[1],got[2],bad);
+        failed+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("skirmish-trailer",out);
+    free(out);
+    return failed!=0;
+}
+
+static int check_viewport(const char *mutation) {
+    char cwd[1024],url[1800],profile[160],option[180],path[160],shot[180],*out=0;
+    char *window[]={ "--window-size=1280,807","--window-size=960,1000" };
+    char *bottom[]={ "3x1+639+719","3x1+479+912" };
+    char *chrome[]={"google-chrome","--headless=new","--disable-background-networking",
+        "--allow-file-access-from-files","--no-first-run","--virtual-time-budget=5000",
+        option,shot,0,url,0};
+    char *crop[]={"convert",path,"-crop",0,"+repage","-depth","8","rgb:-",0};
+    size_t size;
+    int i,j,failed=0;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("viewport-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?still=1&%s",cwd,mutation);
+    for(i=0;i<2;i++) {
+        int rc,background=0;
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-viewport-%d-%d",(int)getpid(),i);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        tx_snprintf(path,sizeof path,"%s/viewport.png",profile);
+        tx_snprintf(shot,sizeof shot,"--screenshot=%s",path);
+        chrome[8]=window[i];
+        crop[3]=bottom[i];
+        rc=cx_runv_timeout(chrome,12,&out,&size);
+        if(rc) { chd_wipe(profile); return input_error("viewport-chrome",out); }
+        free(out); out=0;
+        rc=cx_runv_timeout(crop,4,&out,&size);
+        chd_wipe(profile);
+        if(rc || size!=9) return input_error("viewport-pixels",out);
+        for(j=0;j<9;j+=3)
+            background+=(unsigned char)out[j]==34 && (unsigned char)out[j+1]==86 && (unsigned char)out[j+2]==117;
+        printf("D1_VIEWPORT size=%s background_pixels=%d/3\n",window[i]+14,background);
+        failed+=background!=0;
+        free(out); out=0;
+    }
+    return failed!=0;
+}
+
+static int detail_material(int r,int g,int b) {
+    static const int paint[4][3]={{121,155,65},{103,168,81},{52,104,56},{174,225,231}};
+    static const int haze[3]={173,214,234};
+    int i,j;
+    for(i=0;i<4;i++) for(j=0;j<=16;j++) {
+        int red=paint[i][0]+down_ratio((haze[0]-paint[i][0])*j*86+800,1600);
+        int green=paint[i][1]+down_ratio((haze[1]-paint[i][1])*j*86+800,1600);
+        int blue=paint[i][2]+down_ratio((haze[2]-paint[i][2])*j*86+800,1600);
+        if(r==red && g==green && b==blue) return i+1;
+    }
+    return 0;
+}
+
+static int check_detail(const char *mutation) {
+    char cwd[1024],url[1800],*out=0;
+    const char *p;
+    int x,y,n=0,want[8],at,i,phase,furrows=0,trees=0,waves=0,wrong=0;
+    unsigned char foam[26*107];
+    if(!getcwd(cwd,sizeof cwd)) return input_error("detail-cwd",0);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&detail=",cwd,mutation);
+    for(y=1;y<255 && n<8;y+=9) for(x=1;x<255 && n<8;x+=7) {
+        int a=terrain_height(x,y,7),b=terrain_height(x+1,y,7);
+        int c=terrain_height(x,y+1,7),d=terrain_height(x+1,y+1,7);
+        int fine=down_ratio(9*a+3*b+3*c+d,16)+128;
+        if(fine==128+a || fine<0 || fine>255) continue;
+        at+=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",4*x+1,4*y+1);
+        want[n++]=fine;
+    }
+    if(n!=8) return input_error("detail-probes",0);
+    p=browser(url,&out,7);
+    if(!p) return input_error("detail-browser",out);
+    for(phase=0;phase<2;phase++) for(i=0;i<26*107;i++) {
+        int r=take_channel(&p,','),g=take_channel(&p,','),b=take_channel(&p,','),material;
+        if(r<0 || g<0 || b<0) return input_error("detail-pixel",out);
+        material=detail_material(r,g,b);
+        if(!phase) {
+            furrows+=material==1;
+            trees+=material==2 || material==3;
+            foam[i]=material==4;
+        } else waves+=foam[i]!=(material==4);
+    }
+    for(i=0;i<n;i++) wrong+=take_channel(&p,i+1<n?',':0)!=want[i];
+    if(strncmp(p,"</output>",9)) return input_error("detail-trailer",out);
+    free(out);
+    printf("D1_DETAIL relief_fail=%d furrows=%d crowns=%d wave_changes=%d\n",wrong,furrows,trees,waves);
+    return wrong || furrows<5 || trees<5 || waves<5;
+}
+
+static int check_attitude(const char *mutation) {
+    char cwd[1024],url[1800],*out=0;
+    const double radians=52*3.141592653589793/180;
+    double squared=radians*radians;
+    double c=1-squared*(.5-squared*(1.0/24-squared/720));
+    double s=radians*(1-squared*(1.0/6-squared*(1.0/120-squared/5040)));
+    int x=(int)(213-34.5*c+.15*s),y=(int)(148-34.5*s-.15*c);
+    int trail_x=(int)(213.5-38*c-5*s-17*.68-24*17*17*.004);
+    int trail_y=(int)(148.5-38*s+5*c+17);
+    int r,g,b,wing,trail;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("attitude-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?still=bank&%s&attitude=7,%d,%d;7,%d,%d",
+        cwd,mutation,x,y,trail_x,trail_y);
+    p=browser(url,&out,6);
+    if(!p) return input_error("attitude-browser",out);
+    r=take_channel(&p,','); g=take_channel(&p,','); b=take_channel(&p,',');
+    wing=r>105 && g>35 && g<150 && b>=0 && b<100;
+    printf("D1_ATTITUDE wing=%d rgb=%d,%d,%d\n",wing,r,g,b);
+    r=take_channel(&p,','); g=take_channel(&p,','); b=take_channel(&p,0);
+    trail=r==148 && g==190 && b==197;
+    printf("D1_ATTITUDE trail=%d rgb=%d,%d,%d\n",trail,r,g,b);
+    if(strncmp(p,"</output>",9)) return input_error("attitude-trailer",out);
+    free(out);
+    return !wing || !trail;
+}
+
+static int check_effects(const char *mutation) {
+    static const int expected[3][3]={{155,162,175},{155,162,175},{121,197,189}};
+    char cwd[1024],url[1800],*out=0;
+    int x,y,probe,channel,failed=0,missile_x,missile_y;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("effects-cwd",0);
+    enemy_point(1,1,&x,&y);
+    missile_x=(int)(213.5+(x-213)*7.0/13);
+    missile_y=(int)(172.5+(y-166)*7.0/13);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?freeze-targets&%s&effects=3,%d,%d;11,%d,%d;30,%d,%d",
+        cwd,mutation,x,y+1,missile_x,missile_y,x+(int)(.5+13*.48),y+(int)(.5+13*13*.12));
+    p=browser(url,&out,5);
+    if(!p) return input_error("effects-browser",out);
+    for(probe=0;probe<3;probe++) {
+        int got[3],bad=0;
+        for(channel=0;channel<3;channel++) {
+            got[channel]=take_channel(&p,probe==2 && channel==2?0:',');
+            bad|=got[channel]!=expected[probe][channel];
+        }
+        printf("D1_EFFECT probe=%d rgb=%d,%d,%d failed=%d\n",probe,got[0],got[1],got[2],bad);
+        failed+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("effects-trailer",out);
+    free(out);
+    return failed!=0;
+}
+
 typedef struct {
     sy_child_t child;
     int id,at,len;
@@ -585,6 +816,7 @@ typedef struct {
     char buffer[4096],reply[8192],session[100];
 } ChromeInput;
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
+typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -644,6 +876,44 @@ static int read_flight(ChromeInput *c,LiveFlight *state) {
         &state->lock,&state->frames,&state->elapsed,&state->gap)==7;
 }
 
+static int read_battle(ChromeInput *c,LiveBattle *state) {
+    char text[180];
+    const char *query="{\"expression\":\"(()=>{const q=document.querySelector('canvas').getContext('2d');"
+        "const rgb=(x,y)=>{const p=q.getImageData(x,y,1,1).data;return p[0]*65536+p[1]*256+p[2]};"
+        "return [rgb(352,229),rgb(383,229),rgb(409,228),Number(!document.querySelector('section').hidden)].join(',')})()\"}";
+    if(!cdp_call(c,"Runtime.evaluate",query) || !cdp_string(c,"\"value\":\"",text,sizeof text)) return 0;
+    return sscanf(text,"%d,%d,%d,%d",&state->hp_first,&state->hp_last,&state->ko,&state->loss)==4;
+}
+
+static int exercise_battle(ChromeInput *c) {
+    const int full=0x79dca2,empty=0x3e4b5c,digit=0xe8eadb,panel=0x23344d;
+    LiveBattle b={0};
+    LiveFlight f={0};
+    int i,drop=0,kill=0,restarted=0;
+    long end=sy_now_ms()+9000;
+    for(i=0;i<100 && sy_now_ms()<end;i++) {
+        if(!read_battle(c,&b)) return input_error("cdp-battle-hud",0);
+        kill|=b.ko==digit;
+        drop|=b.hp_first!=empty && b.hp_last==empty;
+        if(b.loss) break;
+        sy_sleep_ms(90);
+    }
+    printf("D1_BATTLE hp_drop=%d ko_increase=%d loss=%d hp_empty=%d\n",
+        drop,kill,b.loss,b.hp_first==empty && b.hp_last==empty);
+    if(!drop || !kill || !b.loss || b.hp_first!=empty || b.hp_last!=empty) return 1;
+    if(!keyboard(c,"r","KeyR",82,1) || !keyboard(c,"r","KeyR",82,0)) return input_error("cdp-restart-key",0);
+    end=sy_now_ms()+1800;
+    for(i=0;i<40 && sy_now_ms()<end;i++) {
+        if(!read_battle(c,&b)) return input_error("cdp-restart-hud",0);
+        if(!b.loss && b.hp_first==full && b.hp_last==full && b.ko==panel && read_flight(c,&f) &&
+            f.heading==0 && f.ammo==96 && f.missiles==3) { restarted=1; break; }
+        sy_sleep_ms(45);
+    }
+    printf("D1_RESTART key=R restored=%d loss=%d hp=%06x/%06x ko_pixel=%06x ammo=%d missiles=%d\n",
+        restarted,b.loss,b.hp_first,b.hp_last,b.ko,f.ammo,f.missiles);
+    return !restarted;
+}
+
 static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int field,LiveFlight *state) {
     int old=field==0?state->heading:field==1?state->ammo:state->missiles;
     int changed=0;
@@ -657,7 +927,7 @@ static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int
     return changed;
 }
 
-static int exercise_keyboard(ChromeInput *c,const char *url) {
+static int exercise_keyboard(ChromeInput *c,const char *url,int battle) {
     LiveFlight state;
     char target[100],params[1300];
     int original,turned,ammo,missiles,change,i,failed=0;
@@ -673,6 +943,15 @@ static int exercise_keyboard(ChromeInput *c,const char *url) {
     for(i=0;!read_flight(c,&state);i++) {
         if(sy_now_ms()>=end || i>=100) return input_error("cdp-ready",0);
         sy_sleep_ms(35);
+    }
+    if(battle) {
+        LiveBattle initial;
+        if(!read_battle(c,&initial)) return input_error("cdp-initial-hud",0);
+        if(initial.hp_first!=0x79dca2 || initial.hp_last!=0x79dca2 || initial.ko!=0x23344d || initial.loss) {
+            printf("D1_BATTLE_INITIAL hp=%06x/%06x ko_pixel=%06x loss=%d\n",
+                initial.hp_first,initial.hp_last,initial.ko,initial.loss);
+            return 1;
+        }
     }
     original=state.heading; ammo=state.ammo; missiles=state.missiles;
     change=key_change(c,"d","KeyD",68,0,&state);
@@ -699,10 +978,11 @@ static int exercise_keyboard(ChromeInput *c,const char *url) {
     failed+=state.frames<13 || state.elapsed<600 || state.gap<33000;
     printf("D1_PLAY\tframes=%d elapsed_ms=%d fps_milli=%d minimum_frame_us=%d lock_fps=30 failed=%d\n",
         state.frames,state.elapsed,state.elapsed?1000000*(state.frames-2)/state.elapsed:0,state.gap,failed);
-    return !!failed;
+    if(failed) return 1;
+    return battle?exercise_battle(c):0;
 }
 
-static int check_pages_keyboard(int mutate) {
+static int check_pages_keyboard(const char *mutation,int battle) {
     ChromeInput c={0};
     sy_spawn_t launch;
     sy_exit_t ended;
@@ -712,7 +992,8 @@ static int check_pages_keyboard(int mutate) {
         "--remote-debugging-pipe","--window-size=1280,807",option,"about:blank",0};
     int rc,n;
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    n=tx_snprintf(url,sizeof url,"file://%s/docs/uxe/fly-next/index.html?input-test=1%s",cwd,mutate?"&wrong-key":"");
+    n=tx_snprintf(url,sizeof url,"file://%s/docs/uxe/fly-next/index.html?input-test=1%s&%s",cwd,
+        battle?"&hold-course":"",mutation);
     if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -722,7 +1003,7 @@ static int check_pages_keyboard(int mutate) {
     rc=sy_proc_spawn(&launch,&c.child);
     if(rc) return input_error("cdp-spawn",0);
     c.deadline=sy_now_ms()+22500;
-    rc=exercise_keyboard(&c,url);
+    rc=exercise_keyboard(&c,url,battle);
     sy_close(c.child.in_fd);
     sy_close(c.child.out_fd);
     sy_proc_kill(&c.child,9);
@@ -743,12 +1024,29 @@ int main(int argc,char **argv) {
     }
     if(argc==2 && !strcmp(argv[1],"pages-auto")) return check_pages_auto(0);
     if(argc==2 && !strcmp(argv[1],"pages-live")) return check_pages_auto(1);
-    if(argc==2 && !strcmp(argv[1],"pages-input")) return check_pages_keyboard(0);
-    if(argc==2 && !strcmp(argv[1],"pages-wrong-key")) return check_pages_keyboard(1);
+    if(argc==2 && !strcmp(argv[1],"pages-input")) return check_pages_keyboard("",0);
+    if(argc==2 && !strcmp(argv[1],"pages-wrong-key")) return check_pages_keyboard("wrong-key",0);
+    if(argc==2 && !strcmp(argv[1],"pages-battle")) return check_pages_keyboard("",1);
+    if(argc==2 && !strcmp(argv[1],"pages-no-return-fire")) return check_pages_keyboard("no-return-fire",1);
+    if(argc==2 && !strcmp(argv[1],"pages-no-restart")) return check_pages_keyboard("no-restart",1);
     if(argc==2 && !strcmp(argv[1],"terrain")) return check_terrain("",0);
     if(argc==2 && (!strcmp(argv[1],"wrong-seed") || !strcmp(argv[1],"wrong-bands") || !strcmp(argv[1],"muted-palette")))
         return check_terrain(argv[1],0);
     if(argc==2 && !strcmp(argv[1],"combat")) return check_combat("",0);
+    if(argc==2 && !strcmp(argv[1],"effects")) return check_effects("");
+    if(argc==2 && !strcmp(argv[1],"attitude")) return check_attitude("");
+    if(argc==2 && !strcmp(argv[1],"detail")) return check_detail("");
+    if(argc==2 && !strcmp(argv[1],"viewport")) return check_viewport("");
+    if(argc==2 && !strcmp(argv[1],"short-canvas")) return check_viewport(argv[1]);
+    if(argc==2 && !strcmp(argv[1],"skirmish")) return check_skirmish("");
+    if(argc==2 && (!strcmp(argv[1],"no-return-fire") || !strcmp(argv[1],"no-maneuver") ||
+        !strcmp(argv[1],"no-restart"))) return check_skirmish(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||
+        !strcmp(argv[1],"still-waves"))) return check_detail(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"shallow-roll") || !strcmp(argv[1],"flat-pitch") ||
+        !strcmp(argv[1],"straight-trail"))) return check_attitude(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"no-fall") || !strcmp(argv[1],"no-plume") ||
+        !strcmp(argv[1],"no-hit-smoke"))) return check_effects(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"freeze-targets") || !strcmp(argv[1],"no-lock"))) return check_combat(argv[1],0);
     if(argc==2 && !strcmp(argv[1],"world")) return check_world("");
     if(argc==2 && (!strcmp(argv[1],"frozen-position") || !strcmp(argv[1],"frozen-hud")))
