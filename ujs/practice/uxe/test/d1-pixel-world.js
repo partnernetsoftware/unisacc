@@ -1,14 +1,18 @@
 const WIDTH=426, HEIGHT=240, MAP=256;
 const palette=[
-  [29,74,112],[43,108,143],[68,148,164],[216,190,133],
-  [94,148,77],[66,123,67],[52,95,62],[111,111,114]
+  [19,67,128],[30,111,165],[45,158,190],[231,204,134],
+  [133,183,71],[89,153,59],[60,115,61],[119,111,121]
 ];
-const foam=[170,217,214], haze=[171,199,201];
+const muted=[[29,74,112],[43,108,143],[68,148,164],[216,190,133],
+  [94,148,77],[66,123,67],[52,95,62],[111,111,114]];
+const foam=[174,225,231], haze=[173,214,234];
 const islands=[[162,82,44,62],[68,103,32,42],[227,65,32,26],[92,29,40,30],[188,15,58,37]];
 const bayer=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
 const clouds=[
-  [[93,74,39,18],[202,63,23,14],[155,8,32,15],[55,25,39,18],[231,14,36,17]],
-  [[115,103,45,24],[142,96,43,25],[78,48,34,20],[212,93,40,19],[190,53,39,13]]
+  [[93,74,39,18],[202,63,23,14],[155,8,32,15],[55,25,39,18],[231,14,36,17],
+    [117,11,26,19],[136,6,36,15],[216,10,31,14],[31,43,38,20]],
+  [[115,103,45,24],[142,96,43,25],[78,48,34,20],[212,93,40,19],[190,53,39,13],
+    [116,109,53,33],[155,99,54,34],[148,107,48,30]]
 ];
 const puff=[
   "........LLL........",
@@ -57,12 +61,12 @@ function mix(a,b,t) {
 function rgb(color) {
   return 0xff000000 | (color[2]<<16) | (color[1]<<8) | color[0];
 }
-function coordinate(n) { return Math.floor((n+256)/2)&255; }
 function worldDelta(v,base) { return v-base-512*Math.round((v-base)/512); }
 
 export function pixelWorld(context,query) {
   const seed=query.has("wrong-seed")?31:7;
-  const colors=query.has("wrong-bands")?palette.map((color,i)=>i===5?palette[7]:color):palette;
+  const colors=query.has("wrong-bands")?palette.map((color,i)=>i===5?palette[7]:color)
+    :query.has("muted-palette")?muted:palette;
   const heights=new Int16Array(MAP*MAP);
   const bands=new Uint8Array(MAP*MAP);
   for(let y=0;y<MAP;y++) for(let x=0;x<MAP;x++) {
@@ -70,13 +74,20 @@ export function pixelWorld(context,query) {
     heights[at]=elev(x,y,seed);
     bands[at]=band(heights[at]);
   }
+  const fineSize=MAP*2;
+  const relief=new Int16Array(fineSize*fineSize);
+  for(let y=0;y<fineSize;y++) for(let x=0;x<fineSize;x++) {
+    const left=x>>1,top=y>>1,right=(left+(x&1))&255,bottom=(top+(y&1))&255;
+    relief[y*fineSize+x]=Math.floor((heights[top*MAP+left]+heights[top*MAP+right]
+      +heights[bottom*MAP+left]+heights[bottom*MAP+right])/4);
+  }
   const image=context.createImageData(WIDTH,HEIGHT);
   const pixels=new Uint32Array(image.data.buffer);
   const limit=new Int16Array(WIDTH);
   const stages=Array.from({length:17},(_,step)=>
     [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87)))]
       .map(color=>rgb(mix(color,haze,step/16*.86))));
-  const sky=Array.from({length:33},(_,step)=>rgb(mix([62,122,160],[196,218,212],step/32)));
+  const sky=Array.from({length:49},(_,step)=>rgb(mix([42,126,185],[189,229,239],step/48)));
   function cloudLayer(flight,horizon,forwardX,forwardZ,rightX,rightZ,layer) {
     for(const [gx,gz,height,size] of clouds[layer]) {
       const x=worldDelta(gx*2-256,flight.x),z=worldDelta(gz*2-256,flight.z);
@@ -98,23 +109,23 @@ export function pixelWorld(context,query) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
       const horizon=113+Math.round(flight.pitch*.50), cam=flight.altitude+13;
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
-        const shade=Math.min(32,32*y/horizon);
+        const shade=Math.min(48,48*y/horizon);
         const dither=bayer[((y&3)<<2)|(x&3)]/16;
-        pixels[y*WIDTH+x]=sky[Math.min(32,Math.floor(shade+dither))];
+        pixels[y*WIDTH+x]=sky[Math.min(48,Math.floor(shade+dither))];
       }
       limit.fill(HEIGHT);
-      for(let depth=4;depth<=400;depth+=Math.max(.75,depth*.026)) {
+      for(let depth=4;depth<=400;depth+=Math.max(.60,depth*.022)) {
         const fade=Math.max(0,Math.min(16,Math.floor((depth-59)/18)));
         const x0=flight.x+depth*fx,z0=flight.z+depth*fz;
         for(let col=0;col<WIDTH;col++) {
           const lateral=(col+.5-WIDTH/2)*depth/151;
-          const gx=coordinate(x0+lateral*rx),gy=coordinate(z0+lateral*rz);
-          const at=gy*MAP+gx,h=heights[at],id=bands[at];
+          const gx=Math.floor(x0+lateral*rx+256)&511,gy=Math.floor(z0+lateral*rz+256)&511;
+          const h=relief[gy*fineSize+gx],id=band(h);
           const top=Math.max(0,Math.floor(horizon+(cam-Math.max(0,h)*.22)*151/depth));
           if(top>=limit[col]) continue;
           const ripples=id<3 && hash(gx,gy,seed+Math.floor(tick/4))>(id===0?250:id===1?245:229);
           const waterline=id===2 && h>-3 && hash(gx,gy,seed+71)>165;
-          const shade=id>=4 && (h%11<2 || hash(gx,gy,seed+19)>238);
+          const shade=id>=4 && (h%10<2 || hash(gx,gy,seed+19)>234);
           const color=stages[fade][ripples || waterline?8:shade?id+9:id];
           for(let y=top;y<limit[col];y++) pixels[y*WIDTH+col]=color;
           limit[col]=top;

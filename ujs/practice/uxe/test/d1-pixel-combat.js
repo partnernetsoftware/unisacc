@@ -1,5 +1,3 @@
-import { FONT } from "../font5x7.js";
-
 const course=[
   { x:-49,z:-116,y:55,vx:1,kind:0 },
   { x:4,z:-91,y:45,vx:0,kind:1 },
@@ -7,21 +5,31 @@ const course=[
 ];
 const marker="#ff746a", lock="#ffe46b";
 const targets=[
-  ["...W.......W...","...OW..B..WO...","..KOKKMBMKKOK..","KKKDKMMMMMKDKKK","...KKO.K.OKK..."],
-  ["....W.....W....","...OW..B..WO...","..KOKKMBMKKOK..","KKKDKMMMMMKDKKK","...KKO.K.OKK..."],
-  [".....W...W.....","....OW.B.WO....","..KOKKMBMKKOK..","KKKDKMMMMMKDKKK","...KKO.K.OKK..."]
+  ["...OW.......WO...","...OW..BBB..WO...","..KOOKMBBBMKOOK..","KKODOOMMMMMOODOKK","KKKDKMMMMMMMDKKKK","...KKO.KKK.OKK..."],
+  ["....OW.....WO....","...OW..BBB..WO...","..KOOKMBBBMKOOK..","KKODOOMMMMMOODOKK","KKKDKMMMMMMMDKKKK","...KKO.KKK.OKK..."],
+  [".....OW...WO.....","....OW.BBB.WO....","..KOOKMBBBMKOOK..","KKODOOMMMMMOODOKK","KKKDKMMMMMMMDKKKK","...KKO.KKK.OKK..."]
 ];
-const paint={W:"#bba5a0",O:"#c15748",K:"#2b2030",D:"#503347",M:"#8b5263",B:"#84c6bd"};
+const paint={W:"#f3b450",O:"#e47731",K:"#2b2030",D:"#70422d",M:"#a65b35",B:"#79c5bd"};
+const small={
+  A:["010","101","111","101","101"], M:["101","111","111","101","101"],
+  O:["111","101","101","101","111"], S:["111","100","111","001","111"],
+  L:["100","100","100","100","111"], "0":["111","101","101","101","111"],
+  "1":["010","110","010","010","111"],"2":["111","001","111","100","111"],
+  "3":["111","001","111","001","111"],"4":["101","101","111","001","001"],
+  "5":["111","100","111","001","111"],"6":["011","100","111","101","111"],
+  "7":["111","001","010","010","010"],"8":["111","101","111","101","111"],
+  "9":["111","101","111","001","110"]
+};
 function point(context,color,x,y,w=1,h=1) {
   context.fillStyle=color;
   context.fillRect(Math.round(x),Math.round(y),w,h);
 }
 function label(context,text,x,y,color) {
   for(const letter of text) {
-    const columns=FONT[letter]||[];
-    for(let i=0;i<columns.length;i++) for(let j=0;j<7;j++)
-      if(columns[i]&(1<<j)) point(context,color,x+i,y+j);
-    x+=6;
+    const rows=small[letter]||[];
+    for(let j=0;j<rows.length;j++) for(let i=0;i<3;i++)
+      if(rows[j][i]==="1") point(context,color,x+i,y+j);
+    x+=4;
   }
 }
 function wrap(delta) { return delta-512*Math.round(delta/512); }
@@ -42,7 +50,7 @@ function enemySprite(context,enemy,pose) {
   const sprite=targets[enemy.kind];
   sprite.forEach((row,j)=>{
     [...row].forEach((glyph,i)=>{
-      if(paint[glyph]) point(context,paint[glyph],pose.x+(i-7)*size,pose.y+(j-2)*size,size,size);
+      if(paint[glyph]) point(context,paint[glyph],pose.x+(i-8)*size,pose.y+(j-2)*size,size,size);
     });
   });
   for(let k=-3;k<=3;k++) point(context,marker,pose.x+k,pose.y-11+3-Math.abs(k));
@@ -134,9 +142,9 @@ export function combatModel(context,query) {
     }
   }
   function hud() {
-    point(context,"#23344d",8,219,112,14);
-    label(context,"AMMO "+String(ammo).padStart(2,"0"),12,223,"#e8eadb");
-    label(context,"MSL "+missiles,74,223,"#e8eadb");
+    point(context,"#23344d",8,224,65,11);
+    label(context,"AMMO "+String(ammo).padStart(2,"0"),11,227,"#e8eadb");
+    label(context,"MSL "+missiles,50,227,"#e8eadb");
   }
   return {update,hud};
 }

@@ -28,6 +28,15 @@ const fin=[
   "KDDDDK..",
   ".KKKK..."
 ];
+const root=[
+  "..KKKMMMMMK.",
+  ".KMMMLLMMMMK",
+  "KDDMMMLMMMMD",
+  "KDDMMMMMMMDD",
+  ".KDDMDDDDDDK",
+  "..KKDDDDDDK.",
+  "...KKKKKKK.."
+];
 const body=[
   "........KKKKKKKK........",
   "......KKGGGGGGGCKK......",
@@ -77,6 +86,8 @@ export function drawAircraft(buffer,x,y,pitch,bank,speed,tick) {
   draw.clearRect(0,0,96,50);
   stamp(wing,8,18);
   stamp(wing,87,18,true);
+  stamp(root,28,18);
+  stamp(root,67,18,true);
   stamp(fin,26,9);
   stamp(fin,69,9,true);
   stamp(body,37,10);
@@ -87,6 +98,6 @@ export function drawAircraft(buffer,x,y,pitch,bank,speed,tick) {
   buffer.translate(Math.round(x),Math.round(y-pitch*.18));
   buffer.rotate(bank*Math.PI/180);
   buffer.imageSmoothingEnabled=false;
-  buffer.drawImage(plate,-48,-23);
+  buffer.drawImage(plate,-48,-26,96,55);
   buffer.restore();
 }
