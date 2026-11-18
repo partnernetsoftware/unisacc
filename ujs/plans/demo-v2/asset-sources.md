@@ -49,3 +49,13 @@ google-chrome --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader
 单次 `.cx` 封装 1.160 毫秒，解包与校验写出 0.943 毫秒。Chrome SwiftShader 首次读取与准备宿主 64.7 毫秒，解码并读回 66.6 毫秒，场景渲染器建立 21.5 毫秒，整桥首绘含上传及同步读回 1335.1 毫秒。整桥数字包含场景所有材质和软件 GPU，不能作为灌木单件耗时或稳态帧率。
 
 本地入口为 [灌木 GLB 实验](../../practice/uxe/asset-study/bush-glb.cx)和[D3 同机位页面](../../practice/uxe/asset-study/bush-bridge.html)。用 `pack` 依次传入 glTF、BIN、PNG、输出 GLB。用 `unpack` 传入 GLB、输出 `/tmp/cdx2-bush-mesh.bin`、`/tmp/cdx2-bush-atlas.png`、`/tmp/cdx2-bush-layout.json`。在允许本地文件读取的 Chrome 打开页面并加 `?auto=1`。CDP 将 `output.dataset.bush` 和 `output.dataset.timing` 用竖线拼接写到读回文件后，`.cx` 的 `pixels` 子命令接收这个文件路径。原始素材与转换产物均留在 `/tmp`。
+
+## 三阶调色与描边对照
+
+`?auto=1&palette-study` 沿用 D3 石桥开场机位。实验把原贴图亮度、UXE 的三阶 toon 主光和面受光方向合成色阶选择，映射到暗蓝绿色、叶绿和日照色。描边沿用 UXE 的法线描边通道。素材网格在该通道使用统一法线，保留 alpha 裁切边缘，避免把叶片平面三角折线画成黑线。发布文件与共享渲染器沿用原字节。
+
+加 `leaf-pixels` 获取 `output.dataset.leafAudit`。`reference-leaves` 采同机位、相同两个替换位置的现有叶团。读回用保留桥体遮挡的叶区蒙版，逐像素记录开启和关闭目标叶片描边后的亮度。运行 `bush-glb.cx -- palette 现有叶团样本 GLB样本`。`.cx` 按亮度 85、132 分界计算三阶频率，以总变差衡量两组距离。距离上限为 160 千分比，每阶至少 40 千分比，且至少 500 个描边像素。描边像素必须在开启后变暗至少 24 级，并降到 38 以下。
+
+现有叶团样本 63805 像素，暗、中、亮三阶为 `622/317/60` 千分比。素材样本 34258 像素，三阶为 `540/350/109`，距离 82 千分比，描边像素 1042。`no-palette` 令距离增至 939 千分比，`no-outline` 令描边像素降为 0，两者均返回 `rc=1`。
+
+三联图 `/tmp/uxe-bush-palette-comparison.png` 左为参考，中为现有叶团，右为调色素材。素材的透空叶缘保留下来，原先的荧光黄绿已收住。对照中素材仍读成圆鼓、细碎的一团，现有叶团的大色块和前后叠压更贴近目标风格。D3 保留现有叶团，停止这款 GLB 灌木替换路线。截图和资产继续留在 `/tmp`。

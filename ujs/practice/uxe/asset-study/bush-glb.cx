@@ -177,9 +177,53 @@ static int tamper_png(const char *input,const char *output) {
     return rc;
 }
 
+typedef struct { int pixels,levels[3],outline; } LeafStats;
+
+static int hex_nibble(unsigned char c) {
+    if(c>='0' && c<='9') return c-'0';
+    if(c>='a' && c<='f') return 10+c-'a';
+    return -1;
+}
+
+static int leaf_stats(const char *path,LeafStats *stats) {
+    unsigned char *data=0;
+    int64_t size=0;
+    if(sy_read_file(path,&data,&size,4*1280*720)) return 0;
+    int ok=size>=4 && size%4==0;
+    for(int64_t i=0;ok && i<size;i+=4) {
+        int a=hex_nibble(data[i]),b=hex_nibble(data[i+1]);
+        int c=hex_nibble(data[i+2]),d=hex_nibble(data[i+3]);
+        if(a<0 || b<0 || c<0 || d<0) { ok=0; break; }
+        int drawn=16*a+b,plain=16*c+d;
+        stats->pixels++;
+        stats->levels[plain<85?0:plain<132?1:2]++;
+        if(drawn<38 && plain-drawn>=24) stats->outline++;
+    }
+    mm_free(data);
+    return ok;
+}
+
+static int check_palette(const char *reference,const char *candidate) {
+    LeafStats old={0},next={0};
+    if(!leaf_stats(reference,&old) || !leaf_stats(candidate,&next)) return 2;
+    int ref[3],got[3],distance=0,three=1;
+    for(int i=0;i<3;i++) {
+        ref[i]=1000*old.levels[i]/old.pixels;
+        got[i]=1000*next.levels[i]/next.pixels;
+        distance+=ref[i]>got[i]?ref[i]-got[i]:got[i]-ref[i];
+        if(got[i]<40) three=0;
+    }
+    distance/=2;
+    int bad=old.pixels<3000 || next.pixels<3000 || !three || distance>160 || next.outline<500;
+    printf("BUSH_PALETTE samples=%d/%d ref=%d,%d,%d candidate=%d,%d,%d distance_permille=%d outline=%d bad=%d\n",
+        old.pixels,next.pixels,ref[0],ref[1],ref[2],got[0],got[1],got[2],distance,next.outline,bad);
+    return bad?1:0;
+}
+
 int main(int argc,char **argv) {
     if(argc==3 && tx_eqz(argv[1],"pixels")) return check_pixels(argv[2]);
     if(argc==4 && tx_eqz(argv[1],"tamper")) return tamper_png(argv[2],argv[3]);
+    if(argc==4 && tx_eqz(argv[1],"palette")) return check_palette(argv[2],argv[3]);
     if(argc!=6) return 2;
     if(tx_eqz(argv[1],"pack")) return pack(argv+2);
     if(tx_eqz(argv[1],"unpack")) return unpack(argv+2);

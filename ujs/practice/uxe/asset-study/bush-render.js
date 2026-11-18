@@ -58,6 +58,8 @@ export async function loadBush() {
 }
 
 export async function createStudyRenderer(canvas,extraMeshes,bush) {
+  const params=new URLSearchParams(location.search);
+  const paletteStudy=params.has("palette-study"),graded=paletteStudy && !params.has("no-palette");
   const sourceURL=new URL("../renderer-webgl.js",import.meta.url);
   const response=await fetch(sourceURL);
   if(!response.ok) throw Error("UXE 渲染器读取失败");
@@ -68,13 +70,24 @@ export async function createStudyRenderer(canvas,extraMeshes,bush) {
   };
   source=source.replace(/from "(\.\/[^\"]+)"/g,(_,path)=>`from ${JSON.stringify(new URL(path,sourceURL).href)}`);
   edit('cloud.surfaceMap === "metal-stain" ? 4 :',
-    'cloud.surfaceMap === "base-color-mask" ? 6 : cloud.surfaceMap === "metal-stain" ? 4 :');
+    'cloud.surfaceMap === "leaf-audit-mask" ? 7 : cloud.surfaceMap === "base-color-mask" ? 6 : cloud.surfaceMap === "metal-stain" ? 4 :');
   edit('  if (uShadowPass > 0.5) {',`  bool bush = uHasMap > 0.5 && uSurfaceMap > 5.5;
   if (bush && texture2D(uMap, vUV).a < 0.5) discard;
+  if (uSurfaceMap > 6.5) { gl_FragColor = vec4(1.,0.,1.,1.); return; }
   if (uShadowPass > 0.5) {`);
   edit('vec3 n = normalize(vN);','vec3 n = normalize(bush && !gl_FrontFacing ? -vN : vN);');
   edit('  if (uHasMap > 0.5 && uSurfaceMap > 0.5) {',`  if (bush) base = texture2D(uMap, vUV).rgb;
   if (uHasMap > 0.5 && uSurfaceMap > 0.5 && !bush) {`);
+  if(graded) edit('  if (uInstColor > 0.5) col =',`  if (bush) {
+    float texelLuma = dot(base, vec3(.30,.59,.11));
+    float faceLight = max(dot(n, normalize(uL0Dir)), 0.0);
+    float tone = .30*texelLuma + .40*d0*lightVisibility(d0) + .30*faceLight;
+    vec3 leaf = tone < .62 ? vec3(37.,75.,68.) : tone < .86 ? vec3(76.,121.,67.) : vec3(139.,161.,79.);
+    col = uExposure > 0.0 ? decodeColor(leaf/255.) : leaf/255.;
+  }
+  if (uInstColor > 0.5) col =`);
+  if(paletteStudy) edit('vec4(normalize(vN) * 0.5 + 0.5, uOutlineEligible)',
+    'vec4(bush ? vec3(.5,.5,1.) : normalize(vN) * 0.5 + 0.5, uOutlineEligible)');
   edit('          texCache[id] = { hash: h, tex: tex };',
     '          texCache[id] = { hash: h, tex: tex }; if (id === 31) opts.readBushTexture(gl,tex);');
   const moduleURL=URL.createObjectURL(new Blob([source],{type:"text/javascript"}));
@@ -98,16 +111,51 @@ export async function createStudyRenderer(canvas,extraMeshes,bush) {
   }});
   const initialized=performance.now();
   const render=renderer.render.bind(renderer);
+  function readLeafAudit(scene,camera,textures) {
+    const gl=canvas.getContext("webgl"),w=canvas.width,h=canvas.height;
+    const read=()=>{
+      const data=new Uint8Array(w*h*4);
+      gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,data);
+      return data;
+    };
+    const outlined=read();
+    const leaves=[...scene.clouds.values()].filter(cloud=>cloud.studyLeaf);
+    const saved=leaves.map(cloud=>[cloud,cloud.outlineExcluded,cloud.surfaceMap]);
+    for(const cloud of leaves) cloud.outlineExcluded=true;
+    render(scene,camera,textures);
+    const plain=read();
+    const {paper,shadows,outlineWidth}=scene;
+    scene.paper=0; scene.shadows=null; scene.outlineWidth=0;
+    for(const cloud of leaves) cloud.surfaceMap="leaf-audit-mask";
+    render(scene,camera,textures);
+    const mask=read(),samples=[];
+    const luma=(rgba,i)=>Math.floor((30*rgba[i]+59*rgba[i+1]+11*rgba[i+2])/100);
+    for(let y=0;y<h;y++) for(let x=0;x<w;x++) {
+      const i=4*(y*w+x);
+      if(mask[i]===255 && mask[i+1]===0 && mask[i+2]===255) {
+        samples.push(luma(outlined,i).toString(16).padStart(2,"0")+luma(plain,i).toString(16).padStart(2,"0"));
+      }
+    }
+    for(const [cloud,excluded,map] of saved) {
+      cloud.outlineExcluded=excluded; cloud.surfaceMap=map;
+    }
+    Object.assign(scene,{paper,shadows,outlineWidth});
+    render(scene,camera,textures);
+    return samples.join("");
+  }
   renderer.render=(scene,camera,textures)=>{
-    const first=!document.querySelector("output").dataset.bush;
+    const out=document.querySelector("output");
+    const first=bush && !out.dataset.bush;
     const start=performance.now();
     render(scene,camera,textures);
     if(first && samples.length) {
       const gl=canvas.getContext("webgl"),pixel=new Uint8Array(4);
       gl.readPixels(640,360,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
-      document.querySelector("output").dataset.bush=[bush.texture.w,bush.texture.h,...samples].join(",");
-      document.querySelector("output").dataset.timing=[bush.readMs,bush.decodeMs,initialized-setup,performance.now()-start].join(",");
+      out.dataset.bush=[bush.texture.w,bush.texture.h,...samples].join(",");
+      out.dataset.timing=[bush.readMs,bush.decodeMs,initialized-setup,performance.now()-start].join(",");
     }
+    if(paletteStudy && params.has("leaf-pixels") && out.dataset.leafAudit===undefined)
+      out.dataset.leafAudit=readLeafAudit(scene,camera,textures);
   };
   return renderer;
 }
