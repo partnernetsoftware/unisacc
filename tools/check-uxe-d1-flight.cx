@@ -1102,6 +1102,7 @@ static int check_w1(const char *mutation,int published) {
     double smoothed=0;
     if(!getcwd(cwd,sizeof cwd)) return 2;
     tx_snprintf(url,sizeof url,"file://%s/%s?w1-check&%s",cwd,
+        published==2?"ujs/practice/uxe/test/d1-depth-audit.html":
         published?"docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-coast-audit.html",mutation);
     p=browser(url,&out,22);
     if(!p) { free(out); return 2; }
@@ -1144,6 +1145,7 @@ static int check_audit_coast(const char *mutation,int published) {
     size_t bytes=0;
     if(!getcwd(cwd,sizeof cwd)) return 2;
     tx_snprintf(url,sizeof url,"file://%s/%s?coast-audit&%s",cwd,
+        published==2?"ujs/practice/uxe/test/d1-depth-audit.html":
         published?"docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-coast-audit.html",mutation);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-coast-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -1174,6 +1176,43 @@ static int check_audit_coast(const char *mutation,int published) {
     }
     free(out);
     return failed?1:0;
+}
+
+static int check_d1_depth(const char *mutation) {
+    char cwd[1024],url[4096],profile[128],option[160],*out=0;
+    char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
+        "--virtual-time-budget=5500","--dump-dom",option,url,0};
+    size_t bytes=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-depth-audit.html?depth-audit&still=1&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-d1-depth-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    int rc=cx_runv_timeout(av,15,&out,&bytes);
+    chd_wipe(profile);
+    const char *p=out?strstr(out,"<output>"):0;
+    if(rc || !p) { free(out); return 2; }
+    p+=8;
+    int bad=0,first=0;
+    for(int frame=0;frame<4;frame++) {
+        int a[9],used=0;
+        if(sscanf(p,"%d,%d,%d,%d,%d,%d,%d,%d,%d%n",a,a+1,a+2,a+3,a+4,a+5,a+6,a+7,a+8,&used)!=9 ||
+            p[used]!=(frame<3?';':'<')) { free(out); return 2; }
+        if(frame<3) {
+            int spread=a[7]-a[1];
+            bad+=a[0]<9 || a[3]-a[0]<24 || a[6]-a[3]<60 || spread<120 || abs(a[2]-a[5])<8;
+            if(frame==0) first=a[0];
+            if(frame==2) bad+=abs(first-a[0])<8;
+            printf("D1_DEPTH frame=%d depths=%d,%d,%d spread=%d\n",frame,a[0],a[3],a[6],spread);
+        } else {
+            int tones=0,total=0;
+            for(int i=1;i<8;i++) { tones+=a[i]>=12; total+=a[i]; }
+            bad+=tones<5 || total<200;
+            printf("D1_ROCK intermediate_tones=%d pixels=%d bad=%d\n",tones,total,bad);
+        }
+        p+=used+1;
+    }
+    free(out);
+    return bad!=0;
 }
 
 static int check_water_mirrors(const char *mutation) {
@@ -1565,6 +1604,13 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"pages-no-restart")) return check_pages_keyboard("no-restart",1);
     if(argc==2 && !strcmp(argv[1],"pages-no-lock-sound")) return check_pages_keyboard("no-lock-sound",LIVE_BATTLE);
     if(argc==2 && !strcmp(argv[1],"mirror-banks")) return check_audit_banks("",2);
+    if(argc==2 && !strcmp(argv[1],"flight-depth")) return check_d1_depth("");
+    if(argc==2 && (!strcmp(argv[1],"flat-formation") || !strcmp(argv[1],"hard-rock")))
+        return check_d1_depth(argv[1]);
+    if(argc==2 && !strcmp(argv[1],"depth-battle")) return check_keyboard_path("",LIVE_COAST,
+        "ujs/practice/uxe/test/d1-depth-audit.html");
+    if(argc==2 && !strcmp(argv[1],"depth-w1")) return check_w1("",2);
+    if(argc==2 && !strcmp(argv[1],"depth-coast")) return check_audit_coast("",2);
     if(argc==2 && (!strcmp(argv[1],"mirror-input") || !strcmp(argv[1],"mirror-auto")))
         return check_keyboard_path("",!strcmp(argv[1],"mirror-auto")?LIVE_WATER_AUTO:LIVE_WATER,
             "ujs/practice/uxe/demo/water-keeps/reflection-audit.html");
