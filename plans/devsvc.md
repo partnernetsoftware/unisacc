@@ -371,3 +371,7 @@ affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids�
 六张表在 exec/facts/derive.tsv 各有活动行,因此逐张改 query-only 时,derive --check 须改验查询与独立现算的字节等价。chain-ready.cx 的 2a-derive 直接执行此检查。commit-own --derive 的私有树自动写集合逐张少一个输出,其中 links、table-index、batch-packages 还须先迁 CO_REG_TABLE 的登记和夹具。核对 chain 工具与阶段清单未见六个完整路径的直接消费,整链的间接依赖仍须以新工作树的链前置及冻结快照实跑验收。现有收据只覆盖旧入口。
 
 每张表各一笔可回退提交。先并行比对跟踪文件与查询,再切全部默认读者,最后移除跟踪并忽略本地导出。用空缓存新工作树覆盖查询、导出、篡改输入、损坏缓存、chain-ready 的 2a-derive 与私有提交门。回退该笔提交即可同时恢复读者、derive.tsv 行、忽略规则和跟踪文件,在对应源树重算后核 --check。batch-packages 两相读集与六表迁移后的墙钟均待实测。
+
+## 派生按读集选表(opt-in,2026-11-18)
+
+derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + derive-inputs.tsv 的全局触发 * 行、cx-runtime 行、本表行)选表,改到输出本身也选,pathset 表在增删文件时选,再做 outputs -> inputs 闭包;query-only 不选。commit-own --derive-selected 用它派生并对选中集合每张表完整 --check;--derive 默认不变,默认切换由集成者决定。真实读集由 tools/check-derive-readset.cx(strace,daily 层)守住,漏登记即 FAIL。全树 derive --check 仍保留在 chain-ready 的 2a 与慢车道,不取消全树覆盖,只换时机。证据 release/evidence/derive-selected-2026-11-18.txt。
