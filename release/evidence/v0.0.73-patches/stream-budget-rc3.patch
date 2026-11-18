@@ -1,0 +1,61 @@
+diff --git a/src/stages.cx b/src/stages.cx
+--- a/src/stages.cx
++++ b/src/stages.cx
+@@ -253,5 +253,5 @@
+-int st_span(const char *route, const char *tgt, const char *src, int cx, unsigned unit,
++int st_span_status(const char *route, const char *tgt, const char *src, int cx, unsigned unit,
+             const char *first, const char *last,
+             unsigned char *in, long inn, unsigned char **out, long *outn,
+-            char *why, int cap) {
++            char *why, int cap, int *budget_stop) {
+     RsCursor cur;
+@@ -273,3 +273,4 @@
+     int ex_ri_exec(const char *, const char *, unsigned char *, int, const char *, unsigned char **, long *, char *, int);
++    if (budget_stop) *budget_stop = 0;
+     if (!out || !outn) return 4;
+     *out = 0;
+@@ -386,4 +387,5 @@
+         if (erc) {
+             free(curb);
++            if (budget_stop && erc == 3) *budget_stop = 1;
+             if (erc == 4) return 4;
+             return erc;
+@@ -422,3 +424,10 @@
+     *outn = curn;
+     return 0;
+ }
++
++int st_span(const char *route, const char *tgt, const char *src, int cx, unsigned unit,
++            const char *first, const char *last, unsigned char *in, long inn,
++            unsigned char **out, long *outn, char *why, int cap) {
++    return st_span_status(route, tgt, src, cx, unit, first, last, in, inn,
++                          out, outn, why, cap, 0);
++}
+diff --git a/src/drivestream.cx b/src/drivestream.cx
+--- a/src/drivestream.cx
++++ b/src/drivestream.cx
+@@ -379,4 +379,3 @@
+     int ex_touch(void);
+     int bd_touch(void);
+-    (void)ctx;
+     preason[0] = 0;
+@@ -408,3 +407,3 @@
+-    rc = st_span(ds_route, ds_tgt, ds_src, dv_cx(ds_src), ds_unit, ds_stage, ds_stage, in, inn, &out, &outn, why, cap);
++    rc = st_span_status(ds_route, ds_tgt, ds_src, dv_cx(ds_src), ds_unit, ds_stage, ds_stage, in, inn, &out, &outn, why, cap, (int *)ctx);
+     pm_close();
+     mm_free(pkg);
+@@ -419,3 +418,3 @@
+     long inn = 0;
+-    int pr, h;
++    int pr, h, budget_stop = 0;
+     xs_item it, ot;
+@@ -438,4 +437,8 @@
+-         xs_add(h, 2, 2, 3, tx_eqz(ds_stage, "sidecar") ? ds_sidecar : ds_model, 0) || xs_item_set(&it, 1, in, inn, inn);
++         xs_add(h, 2, 2, 3, tx_eqz(ds_stage, "sidecar") ? ds_sidecar : ds_model, &budget_stop) || xs_item_set(&it, 1, in, inn, inn);
+     pr = pr ? (tx_copy(why, 128, "stream: pipeline setup", 22), 1) : xs_run(h, &it, &ot, why, 128);
++    if (pr == 3 && budget_stop) {
++        xs_close(h);
++        return 3;
++    }
+     if (pr == 3) {
+         sy_eprintf("route=%s\nNOT_IMPLEMENTED %s\n", ds_route, ds_stage);
