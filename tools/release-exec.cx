@@ -603,11 +603,33 @@ static void set_ci_run_id(void) {
     free(t); free(b.p);
     sy_printf("EDIT\t%d\trelease/candidate.tsv\tci_run_id=%s\n", cur_step, runid);
 }
+/* devsvc git commit --whole takes files, not a directory (0.0.74 Y1: "git hash-object failed:
+   release/evidence/0.0.74"): expand release/evidence/V into its regular files, sorted names. */
+static char ev_names[96][300];
+static int ev_expand(char **v, int k, int cap) {
+    char dir[600], p[1000]; static char nb[65536]; int fd, cnt, pos = 0, m = 0;
+    if (cx_fmt(dir, sizeof dir, "release/evidence/%s", cand.version)) die("evidence dir");
+    fd = sy_open(dir, O_RDONLY, 0);
+    if (fd < 0) refuse("Y1_PUSHED", "evidence dir unreadable");
+    cnt = sy_dir_names(fd, nb, (int)sizeof nb); sy_close(fd);
+    while (cnt > 0 && pos < (int)sizeof nb && m < 96) {
+        const char *nm = nb + pos; long len = tx_len(nm, (long)sizeof nb - pos);
+        if (len <= 0) break;
+        if (nm[0] != '.' && !cx_fmt(p, sizeof p, "%s/%s", dir, nm) && sy_exists(p) == 1 && !cx_fmt(ev_names[m], sizeof ev_names[m], "%s", p)) m++;
+        pos += (int)len + 1; cnt--;
+    }
+    for (int i = 1; i < m; i++) for (int j = i; j > 0 && strcmp(ev_names[j - 1], ev_names[j]) > 0; j--) {
+        char t[300]; memcpy(t, ev_names[j], 300); memcpy(ev_names[j], ev_names[j - 1], 300); memcpy(ev_names[j - 1], t, 300); }
+    for (int i = 0; i < m && k < cap - 8; i++) v[k++] = ev_names[i];
+    return k;
+}
 static void step_y1(void) {
-    char evrel[200], notes[200], msg[200], dp[4500];
+    char notes[200], msg[200], dp[4500];
     char *dv[] = {"sh", "./unisacc.com", "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
-    char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", evrel, notes, "release/evidence.tsv", "release/decision.txt", "release/rollback.txt", "--push", 0};
-    cx_fmt(evrel, sizeof evrel, "release/evidence/%s", cand.version);
+    char *v[120]; int k = 0;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/devsvc.cx"; v[k++] = "--"; v[k++] = "git"; v[k++] = "commit"; v[k++] = "-m"; v[k++] = msg;
+    v[k++] = "--whole"; v[k++] = "release/candidate.tsv"; k = ev_expand(v, k, 120);
+    v[k++] = notes; v[k++] = "release/evidence.tsv"; v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(notes, sizeof notes, "release/notes-%s.md", cand.version);
     cx_fmt(msg, sizeof msg, "v%s Y1", cand.version);
     if (index_ref("exec-4-Y1", "commit-Y1", y1sha, sizeof y1sha)) { show(dv, "DONE"); show(v, "DONE"); say("SKIP", "Y1 already recorded", y1sha); }
@@ -692,10 +714,12 @@ static void step_readback(void) {
 
 /* ---- step 7: Y2 --------------------------------------------------------------------------------- */
 static void step_y2(void) {
-    char dp[4500], msg[200], evrel[200], ref[200]; long a, b; char *ta, *tb; int same;
+    char dp[4500], msg[200], ref[200]; long a, b; char *ta, *tb; int same;
     char *dv[] = {"sh", "./unisacc.com", "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
-    char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", evrel, "release/decision.txt", "release/rollback.txt", "--push", 0};
-    cx_fmt(evrel, sizeof evrel, "release/evidence/%s", cand.version);
+    char *v[120]; int k = 0;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/devsvc.cx"; v[k++] = "--"; v[k++] = "git"; v[k++] = "commit"; v[k++] = "-m"; v[k++] = msg;
+    v[k++] = "--whole"; k = ev_expand(v, k, 120);
+    v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
     cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
     show(dv, "LOCAL");
