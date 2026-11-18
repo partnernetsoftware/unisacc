@@ -40,6 +40,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.loadavg
 #pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.tlibpkg
 
 #define MAXB 1024
 #define WINDOW_S 60
@@ -188,12 +189,17 @@ static int launch(Slot *s, int idx, int attempt) {
 static void prepare_first(const int *pending,int count,int jobs){
     if(!use_native || !count)return;
     char src[4400],why[512],ids[1800]="";
+    long selector_start=sy_now_ms();
     if(cx_fmt(src,sizeof src,"%s/tools/affected.cx",lay) ||
        cx_fmt(prepared_affected,sizeof prepared_affected,"%s/affected",outlog) ||
        tq_native(lay,src,prepared_affected,why,sizeof why)){
         prepared_affected[0]=0;use_native=0;
         fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=selector-preparation\n");return;
     }
+    /* tq_native validates the image bytes under the key for the candidate
+     * compiler and the resolved source closure. This image serves all slots. */
+    fprintf(stderr,"QUALIFY_SELECTOR_PREP\tms=%ld\treused=%d\n",
+            sy_now_ms()-selector_start,tq_last_state()==1);
     for(int i=0;i<count && i<jobs;i++){
         size_t n=strlen(ids);if(cx_fmt(ids+n,sizeof ids-n,"%s%s",n?",":"",bs[pending[i]].id))return;
     }
@@ -338,6 +344,14 @@ static int prepare_kit(void) {
     int failed=sy_sha256_hex(bytes,length,key);
     free(bytes);
     if(failed)return die("kit package hash ",table);
+    char kit[4400],producer[4400];
+    if(tp_kit_dir(lay,kit,sizeof kit))return die("kit identity ",table);
+    const char *kit_key=strrchr(kit,'/');
+    if(!kit_key || strlen(kit_key+1)!=64)return die("kit identity ",table);
+    /* Compile the producer as a separate material step. The subsequent lock wait
+       and the producer execution share a single monotonic deadline. */
+    if(cx_fmt(producer,sizeof producer,"%s/kit-producer",outlog) ||
+       tq_native(lay,source,producer,why,sizeof why))return die("kit producer preparation ",why);
     char lock[4400];
     if(cx_fmt(lock,sizeof lock,"%s/.git/qualify-kit.lock",lay))return die("kit lock path",0);
     int fd=open(lock,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
@@ -346,25 +360,25 @@ static int prepare_kit(void) {
     for(;;){
         int lk=sy_flock(fd,6);
         if(!lk)break;
-        if(lk!=-EAGAIN || sy_now_ms()>=limit){sy_close(fd);return die("kit lock unavailable ",lock);}
+        if(lk!=-EAGAIN){sy_close(fd);return die("kit lock unavailable ",lock);}
+        if(sy_now_ms()>=limit){sy_close(fd);return 1;}
         sy_sleep_ms(100);
-    }
-    char producer[4400];
-    if(cx_fmt(producer,sizeof producer,"%s/kit-producer",outlog) ||
-       tq_native(lay,source,producer,why,sizeof why)){
-        sy_close(fd);return die("kit producer preparation ",why);
     }
     char *v[]={producer,"kit","--jobs","4",0};
     np_result r={0};long start=sy_now_ms();
-    int transport=np_run(v,lay,0,60,&r,why,sizeof why);
+    int remaining=(int)((limit-start)/1000);
+    if(remaining<1){sy_close(fd);return 1;}
+    int transport=np_run(v,lay,0,remaining,&r,why,sizeof why);
     sy_close(fd);
     int tampered=r.err && strstr(r.err,"tlib: TAMPERED\t");
     int prepared=!transport && !r.rc && !tampered && r.out && strstr(r.out,"PREPARED\ttlib-kit\t");
-    fprintf(stderr,"QUALIFY_KIT\t%s\tcandidate=%s\tpackages=%s\trc=%d\tms=%ld\n",
-            prepared?"PREPARED":"REFUSED",sha,key,transport?-1:r.rc,sy_now_ms()-start);
+    fprintf(stderr,"QUALIFY_KIT\t%s\tcandidate=%s\tpackages=%s\tkit_key=%s\trc=%d\tms=%ld\n",
+            prepared?"PREPARED":"REFUSED",sha,key,kit_key+1,transport?-1:r.rc,sy_now_ms()-start);
     if(!prepared && r.errn)fwrite(r.err,1,r.errn,stderr);
+    int timed_out=r.timed_out;
     np_free(&r);
     if(tampered)return die("kit-tampered ",table);
+    if(timed_out)return 1;
     if(!prepared)return die("kit-preparation ",why);
     return 0;
 }
@@ -484,7 +498,15 @@ int main(int argc, char **argv) {
     static int pending[MAXB], retry[MAXB];
     int count = 0, completed = 0, number = 0;
     for (int i = 0; i < nb; i++) if (!resumed[i]) pending[count++] = i;
-    if(count && prepare_kit()){if(outp)fclose(f);return 2;}
+    int kit_state=count?prepare_kit():0;
+    if(kit_state){
+        if(kit_state==1){
+            fprintf(f,"# UNKNOWN kit-window\nCHECKPOINT\tremaining=%d\tape_sha256=%s\n",count,sha);
+            fprintf(stderr,"QUALIFY_KIT\tUNKNOWN\treason=kit-window\tremaining=%d\tresume=%s\n",count,outp?outp:"-");
+        }
+        if(outp)fclose(f);
+        return kit_state;
+    }
     prepare_first(pending,count,jobs);
     long stop = t0 + 1720000L;
     while (completed < count && sy_now_ms() < stop) {
