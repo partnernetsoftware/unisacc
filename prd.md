@@ -94,6 +94,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 完整工具索引按内容身份现查:`sh ./unisacc.com tools/devsvc.cx -- tool-index`(与源树一致,热命中约 0.2 秒;本地文件副本不进版本控制,需要时 `derive.cx -- --write --only tool-index`),表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
 
+前端诊断普查(S0):`sh ./unisacc.com tools/diag-census.cx -- [--probe PRODUCT] [--out TSV]`对 s9 静默接受的 17 类(c-negative 15、pp-negative 2)逐行启发式统计自身树候选违例,类型相关类记 UNMEASURED,输出本版入选与顺延;`--self-test` 与 `tools/check-diag-census.cx`(批次 diag-census)。
+
 签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界；检查 `tools/check-release-members.cx ROOT`，只证明字节/结构，不认证签名或最终候选资格。
 
 #### 2.1 日常（运行、改写、查询）
