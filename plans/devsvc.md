@@ -352,3 +352,22 @@ affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids�
 (5) 度量先行:实现前冻结现状基线,记录同时3笔互不相交请求到终态的总墙钟、成功/拒绝数、因 HEAD 推进而重做的收据次数及门执行次数;实现后用同一输入与口径取 p50、p95,冷/热准备分开,不能只比较成功子集。提交路径的实现先在私有树完整验证,一次原子落库,避免中间态影响 v0.0.72 合入和冻结。首单验收限定一条 ref:三笔不相交请求各实跑一次原门且队内 CAS 重放为零;入队后改工作区不改变请求 blob;同键冲突拒绝;插入声明外路径及删去声明路径分别拒绝;门失败无 CAS;外部 HEAD 推进触发新输入重验;模拟 CAS 后断电可恢复同一 OID、不重复提交;同步冲突保留新脏数据;推送失败只重试 push。以同输入同门对比排队、准备、派生、门、CAS、同步、推送耗时及门执行次数,未测标 UNMEASURED。
 
 回退只关闭新请求入队并明确处理队列剩余项,已经 CAS 的事务完成同步或保留具名待续状态,随后回到现有 devsvc git commit。暂不做门结论跨请求复用、只读底树缓存、推送合批或多仓调度;这些属于后续独立可验的小单。
+
+## 派生表停止跟踪路线(2026-11-18)
+
+建议发布后按下表顺序逐张切换。以 211fc5b4b1 的生成器 strace 读集报告为测量基点,以 d2cc9f7702 之后的 main 核对调用方。F 是打开或 stat 成功的文件数,D 是目录打开数。耗时与人时分别是旧单表测量和工程估算。消费者按 tools、tests、build 下 .cx、.sh、.ps1 的完整路径字面量去重,另列间接入口。表内省略 tools/ 与 .cx 后缀。
+
+|顺序、导出文件|消费者清单与切换点|查询与缓存键的专属输入|预计人时|
+|---|---|---|---|
+|1 build/doc-links.tsv|2 个命中。doc-links-gen 生成和比对,check-doc-links-gen 核内容。两者已有 --print 正文可对拍。|devsvc doc-links 取生成器 stdout。F1502,活 Markdown 正文、基线、doclink、git 跟踪路径集合和目标实际存在性。删去工作树内已跟踪目标也须失效。|2 至 3|
+|2 tests/batch-domain-index.tsv|3 个命中。batch-domains-gen 产出和核表,check-batch-domains-gen 与 check-affected-domain 构造或读回夹具。affected.domain_load 间接调用 --check --dump,切此单点。|按树查询 batch-domains,保留缺声明、重复与显式例外校验。F761,批次、规则、例外、入口文件头部合同及其解析器。默认 affected 仍无此读集。|3 至 4|
+|3 build/iface-hash.tsv|2 个命中。iface-hash 输出和校验,affected 两处读工作区且 git show HEAD:build/iface-hash.tsv。先迁私有输入树和 HEAD 双查询,缺任何一侧就走原保守全选。|F36 D1,build/layer-api 下成员集合和正文、生成器、所用库。按两棵树分别计算,保留 layer-api 的独立检查及 devmeta 路由。|4 至 6|
+|4 build/links.tsv|10 个命中。links-gen 生成,rel 默认路径、on-change 经 awp_devmeta_read 读内容。cxlib/relload 是关系导入的解析单点,文件头示例不是额外读取。commit-own 有 keyed 路由。check-commit-own、check-relstore、check-links-gen、check-relload、check-on-change 覆盖落盘、解析与提交。|F14,derive 事实、批次表、生成器及库。默认关系查询交给按身份生成的文件,显式 --links 继续读取调用者输入。区分 .devsvc 镜像与 build 回退,防止无表时漏报派生边。|4 至 7|
+|5 build/table-index.tsv|6 个命中。tool-index 的 --tables 生成,--check-tables 核表。关系加载复用 relload,另有 commit-own keyed 路由。check-relstore、check-relload、check-tool-index 分别核导入、显式文件和生成。|F1139 D4,tools 源头注释、tests/batches.tsv、build 表目录和正文。按前四项的逻辑导出清单枚举表,验证有无本地导出时索引一致,避免 fresh checkout 少行。|5 至 8|
+|6 build/batch-packages.tsv|15 个命中。affected --layer、evidence-cover 的两份快照、reg-manifest、register、fixture-gate-tool 读取正文或行。register 和 batch-packages-gen 写,commit-own 选 keyed 行,precommit 选路径。check-affected-domain、check-fixture-gate-tool、check-batch-packages、check-commit-own、check-reg-manifest、check-devsvc、check-tables-gen 均需复核私有夹具。|F3129 仅为部分读集,跟踪下 affected --closure-dump 超时。先拆闭包与投影两相,包含 tools、exec、cx、tests、src 及实际读取的 apps/csih、archive、iterate、release/ci、ujs。门内 manifest 的 packages 行与独立现算逐行比对。读集未闭合前仅可无缓存现算。|8 至 16|
+
+六项共用第 10 节的查询合同。键纳入生成器、运行库、启动产品、请求参数、内容清单及所枚举的目录成员。新克隆和链接工作树首次查询在所请求的输入树现算,校验内容后原子发布私有导出。损坏时重算,读入或生成失败向调用者返回具名非零。显式 derive --write --only NAME 保留文件导出。实现按 CLI 调用并保留 rl_load 的显式文件接口,六项预计均无需 tools.cxlib 升版。若改为新增公开库入口,该张表另行预留版本。
+
+六张表在 exec/facts/derive.tsv 各有活动行,因此逐张改 query-only 时,derive --check 须改验查询与独立现算的字节等价。chain-ready.cx 的 2a-derive 直接执行此检查。commit-own --derive 的私有树自动写集合逐张少一个输出,其中 links、table-index、batch-packages 还须先迁 CO_REG_TABLE 的登记和夹具。核对 chain 工具与阶段清单未见六个完整路径的直接消费,整链的间接依赖仍须以新工作树的链前置及冻结快照实跑验收。现有收据只覆盖旧入口。
+
+每张表各一笔可回退提交。先并行比对跟踪文件与查询,再切全部默认读者,最后移除跟踪并忽略本地导出。用空缓存新工作树覆盖查询、导出、篡改输入、损坏缓存、chain-ready 的 2a-derive 与私有提交门。回退该笔提交即可同时恢复读者、derive.tsv 行、忽略规则和跟踪文件,在对应源树重算后核 --check。batch-packages 两相读集与六表迁移后的墙钟均待实测。
