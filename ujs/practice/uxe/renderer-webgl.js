@@ -105,6 +105,7 @@ uniform vec3 uFogC;
 uniform float uInk;
 uniform sampler2D uMap;
 uniform float uHasMap;
+uniform float uSurfaceMap;
 uniform float uRadial;
 uniform float uInstColor;
 uniform float uOrtho;
@@ -119,7 +120,7 @@ void main() {
     gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0);
     return;
   }
-  if (uHasMap > 0.5) {
+  if (uHasMap > 0.5 && uSurfaceMap < 0.5) {
     gl_FragColor = texture2D(uMap, vUV);
     return;
   }
@@ -140,6 +141,13 @@ void main() {
   float soft = mix(1.0, 0.55, clamp(uRough, 0.0, 1.0));
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
+  if (uHasMap > 0.5 && uSurfaceMap > 0.5) {
+    // Stone follows mesh UVs; stationary foliage samples a world-space wash.
+    float tint = uSurfaceMap < 1.5
+      ? texture2D(uMap, fract(vUV)).r
+      : texture2D(uMap, fract((vec2(vP.x, vP.z) + vP.yy * vec2(0.17, 0.31)) * 0.6)).g;
+    base *= tint;
+  }
   vec3 col = base * (amb + diff) + uEmissive;
   if (uInstColor > 0.5) col = vColor.rgb;
   vec3 view = normalize(vEye - vP);
@@ -323,6 +331,7 @@ export function createWebGLRenderer(canvas, opts) {
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
   const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial"), uInstColor = u("uInstColor");
+  const uSurfaceMap = u("uSurfaceMap");
   const uOrtho = u("uOrtho"), uScreen = u("uScreen");
 
 
@@ -379,6 +388,7 @@ export function createWebGLRenderer(canvas, opts) {
     gl.uniform1f(uRough, cloud.roughness ?? 0.5);
     const levels = cloud.toonLevels;
     gl.uniform1f(uToonLevels, Number.isInteger(levels) && levels >= 2 && levels <= 16 ? levels : 0);
+    gl.uniform1f(uSurfaceMap, cloud.surfaceMap === "masonry" ? 1 : cloud.surfaceMap === "wash" ? 2 : 0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
     gl.enableVertexAttribArray(aPos);

@@ -12,6 +12,7 @@ import { archMeshes, loadBays } from "./d3-arch.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode");
+const textured = params.get("style") === "masonry";
 const scene = new Scene();
 const groups = new Map();
 const colors = {
@@ -63,6 +64,11 @@ if (mode!=="bare") {
 for(const [name,{material,mesh,items}] of groups) {
   const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
   cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
+  if (textured && (mesh >= allMeshes().length || material.startsWith("leaf"))) {
+    cloud.surfaceMap = mesh >= allMeshes().length ? "masonry" : "wash";
+    cloud.mapId = 1;
+    cloud.toonLevels = 4;
+  }
   items.forEach((fields,i)=>cloud.set(i,...fields));
 }
 scene.clearColor=[88/255,160/255,218/255,1];
@@ -73,7 +79,20 @@ const camera=new PerspectiveCamera(2*Math.atan(9/16),.1,150);
 camera.setEye(10,1,19);
 camera.setTarget(10-24/41,1+9/41,19-32/41);
 const canvas=document.querySelector("canvas");
-createWebGLRenderer(canvas,{antialias:false,extraMeshes}).render(scene,camera);
+const textures = [];
+if (textured) {
+  const reply = await fetch(new URL("d3-masonry.rgba", import.meta.url));
+  if (!reply.ok) throw new Error("石砌纹读取失败");
+  const rgba = new Uint8Array(await reply.arrayBuffer());
+  if (rgba.length !== 64 * 64 * 4) throw new Error("石砌纹长度错误");
+  textures.push({id:1,w:64,h:64,rgba});
+  const shift = Number(params.get("shift"));
+  if (Number.isFinite(shift) && Math.abs(shift) <= 2) {
+    camera.eye[0] += shift;
+    camera.target[0] += shift;
+  }
+}
+createWebGLRenderer(canvas,{antialias:false,extraMeshes}).render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
 const samples=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
   const [x,y]=pair.split(",").map(Number);

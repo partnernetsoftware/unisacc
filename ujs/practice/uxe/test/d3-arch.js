@@ -19,7 +19,7 @@ export function archMeshes(bay, mode) {
   }
   function lining(a,b,s,t,normal) {
     quad(intrados,innerUV,innerNormals,normal,[a.x,a.y,front],[b.x,b.y,front],[b.x,b.y,back],[a.x,a.y,back],
-      [[s,0],[t,0],[t,front-back],[s,front-back]]);
+      [[s/2,0],[t/2,0],[t/2,(front-back)/2],[s/2,(front-back)/2]]);
   }
   const left=center-halfSpan, right=center+halfSpan;
   const yRadius=mode==="low-crown" ? .8*radius : radius;
@@ -29,7 +29,8 @@ export function archMeshes(bay, mode) {
     strip({x:center+radius,y:base},{x:right,y:base});
     for(const side of [-1,1]) {
       const x=center+side*radius;
-      lining({x,y:base},{x,y:spring},base,spring,[-side,0,0]);
+      const start = side === 1 ? 0 : Math.PI * radius;
+      lining({x,y:base},{x,y:spring},start-side*(spring-base),start,[-side,0,0]);
     }
     const arc = angle=>({x:center+radius*Math.cos(angle),y:spring+yRadius*Math.sin(angle)});
     for(let i=0;i<segments;i++) {

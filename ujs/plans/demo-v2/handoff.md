@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q2d 的原创砌缝与水彩纹由 `tools/gen-d3-masonry.cx` 生成，`--check` 比对 16384 字节；磁盘篡改已纳入 `tools/check-gen-sweep.cx`。用 `d3-bridge.html?style=masonry&shift=0` 看石面，`shift=1` 在同样光照下横移一单位。拱腹沿弧长与深度取样，静止树冠在世界坐标中取水彩纹。下一项 Q2e，Q2d 提交可用 `git log -1 --format=%h -- tools/gen-d3-masonry.cx` 定位。
+
 Q2c 在 WebGL 场景设 `outlineWidth` 启用 1 至 8 像素的内描边。额外绘制不透明物体的可见法线，按法线跳变和背景覆盖画线。立方体中线的 1、3 像素验证入口为 `tools/check-uxe-outline.cx`，`--mutate` 关闭第二轮描边，应返回 1。下一项 Q2d 石砌纹。
 
 Q2b 为 UXE WebGL 材质添加 `toonLevels`，范围为 2 至 16 的整数。立方体使用面法线，D3 内拱使用各圆弧段的几何法线。检查 `tools/check-uxe-toon.cx` 在 SwiftShader 下独立算 2 档与 4 档 RGB。加 `--mutate` 将 4 档改为 3 档，原期望保持不变。下一项 Q2c，Q2b 提交可用 `git log -1 --format=%h -- tools/check-uxe-toon.cx` 定位。
