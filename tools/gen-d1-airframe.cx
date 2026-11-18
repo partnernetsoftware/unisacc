@@ -19,31 +19,37 @@ static int publish(const char *path, const char *bytes, size_t n, int check) {
 int main(int argc, char **argv) {
     char output[4096], wasm[128], *facts, *line, *compiled, *log=0;
     size_t size=0, n=0;
-    int rows=0, layers=0, last=-1, at=0, rc, check;
+    int layers=0, paints=0, parts=0, at=0, rc, check;
     char *args[]={"sh","./ujs/ujs.com","ujs/tests/d1-flight.ujs","-o",wasm,0};
     if(argc!=2 || (strcmp(argv[1],"--check") && strcmp(argv[1],"--write"))) return 2;
     check=!strcmp(argv[1],"--check");
     facts=cx_read("ujs/practice/uxe/test/d1-airframe.tsv",&size);
     if(!facts || !size) return 2;
-    at=tx_snprintf(output,sizeof output,"// Generated from d1-airframe.tsv.\nexport const profile=[\n");
+    at=tx_snprintf(output,sizeof output,"// Generated from d1-airframe.tsv.\nexport const layers=[\n");
     for(line=strtok(facts,"\n");line;line=strtok(0,"\n")) {
-        int a,b,c,d,e,f,used=0;
+        int a,b,c,d,e,f,g,h,used=0;
         if(line[0]=='#') continue;
-        if(!layers && sscanf(line,"shape %d %d %d %d%n",&a,&b,&c,&d,&used)==4 &&
-           !line[used] && a==last+1 && b>=a && b<46 && c>0 && c<=17 &&
-           d>=-17 && d<=17 && c+(b-a)*d>0 && c+(b-a)*d<=17) {
-            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d,%d],\n",a,b,c,d);
-            rows++; last=b;
-        } else if(last==45 && sscanf(line,"layer %d %d %d %d %d %d%n",&a,&b,&c,&d,&e,&f,&used)==6 &&
-           !line[used] && a==layers && a<13 && abs(b)<=8 && abs(c)<=8 &&
-           d>=1 && d<=255 && e>=1 && e<=255 && f>=1 && f<=255) {
-            if(!layers) at+=tx_snprintf(output+at,sizeof output-at,"];\nexport const layers=[\n");
-            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d,%d,%d],\n",b,c,d,e,f);
+        if(!paints && sscanf(line,"layer %d %d %d%n",&a,&b,&c,&used)==3 &&
+           !line[used] && a==layers && a<13 && abs(b)<=8 && abs(c)<=8) {
+            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d],\n",b,c);
             layers++;
+        } else if(layers==13 && !parts && sscanf(line,"paint %d %d %d %d%n",&a,&b,&c,&d,&used)==4 &&
+            !line[used] && a==paints+1 && a<=16 && b>=1 && b<=255 && c>=1 && c<=255 && d>=1 && d<=255) {
+            if(!paints) at+=tx_snprintf(output+at,sizeof output-at,"];\nexport const paints=[null,\n");
+            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d],\n",b,c,d);
+            paints++;
+        } else if(paints && parts<64 && sscanf(line,"part %d %d %d %d %d %d %d %d%n",&a,&b,&c,&d,&e,&f,&g,&h,&used)==8 &&
+            !line[used] && a>=0 && b>=a && b<13 && c>=0 && d>=c && d<46 &&
+            e>=0 && e<=34 && f>=1 && f<=17 && abs(g)<=17 && h>=1 && h<=paints) {
+            int end=f+(d-c)*g, bound=f>end?f:end;
+            if(end<1 || e-bound<0 || e+bound>34) { free(facts); return 2; }
+            if(!parts) at+=tx_snprintf(output+at,sizeof output-at,"];\nexport const parts=[\n");
+            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d,%d,%d,%d,%d,%d],\n",a,b,c,d,e,f,g,h);
+            parts++;
         } else { free(facts); return 2; }
     }
     free(facts);
-    if(!rows || layers!=13) return 2;
+    if(!parts || layers!=13) return 2;
     at+=tx_snprintf(output+at,sizeof output-at,"];\n");
     tx_snprintf(wasm,sizeof wasm,"/tmp/d1-flight-%d.wasm",(int)getpid());
     rc=cx_runv_timeout(args,30,&log,&n);

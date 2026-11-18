@@ -1,31 +1,49 @@
 #pragma unisa use chrome_dom
 #pragma unisa use text.fmt
 
-typedef struct { int dx,dz,r,g,b; } Layer;
+typedef struct { int r,g,b; } Color;
+typedef struct { int row,h,lo,hi,paint; } Span;
 typedef struct { int x,y,want; } Probe;
-static Layer layers[13];
-static int widths[46], groups[4];
+static int offsets[13][2], groups[4], span_count, paint_count;
+static Color palette[17];
+static unsigned char grid[13][46][34];
+static Span spans[13*46*34];
 static Probe probes[48];
 
 static int load_facts(void) {
     size_t size=0;
     char *data=cx_read("ujs/practice/uxe/test/d1-airframe.tsv",&size), *line;
-    int rows=0, count=0, ok=1;
+    int count=0, ok=1, h,row,col;
     if(!data) return 0;
     for(line=strtok(data,"\n");line && ok;line=strtok(0,"\n")) {
-        int a,b,c,d,e,f;
+        int a,b,c,d,e,f,g,i;
         if(line[0]=='#') continue;
-        if(sscanf(line,"shape %d %d %d %d",&a,&b,&c,&d)==4 && a==rows && b>=a && b<46) {
-            for(;rows<=b;rows++) {
-                widths[rows]=c+(rows-a)*d;
-                if(widths[rows]<1 || widths[rows]>17) ok=0;
+        if(sscanf(line,"layer %d %d %d",&a,&b,&c)==3 && a==count && count<13) {
+            offsets[count][0]=b; offsets[count++][1]=c;
+        } else if(sscanf(line,"paint %d %d %d %d",&a,&b,&c,&d)==4 && a==paint_count+1 && a<=16) {
+            palette[++paint_count]=(Color){b,c,d};
+        } else if(sscanf(line,"part %d %d %d %d %d %d %d %d",&a,&b,&c,&d,&e,&f,&g,&i)==8 &&
+            a>=0 && b>=a && b<13 && c>=0 && d>=c && d<46 && i>=1 && i<=paint_count) {
+            for(row=c;row<=d;row++) {
+                int width=f+(row-c)*g;
+                if(width<1 || e-width<0 || e+width>34) { ok=0; break; }
+                for(h=a;h<=b;h++) for(col=e-width;col<e+width;col++) grid[h][row][col]=i;
             }
-        } else if(sscanf(line,"layer %d %d %d %d %d %d",&a,&b,&c,&d,&e,&f)==6 && a==count && count<13) {
-            layers[count++]=(Layer){b,c,d,e,f};
         } else ok=0;
     }
     free(data);
-    return ok && rows==46 && count==13;
+    if(!ok || count!=13 || paint_count<8) return 0;
+    for(h=0;h<13;h++) for(row=0;row<46;row++) {
+        int start=0;
+        while(start<34) {
+            int end=start+1, paint=grid[h][row][start];
+            while(end<34 && grid[h][row][end]==paint) end++;
+            if(paint) spans[span_count++]=(Span){row,h,start-17,end-17,paint};
+            start=end;
+        }
+    }
+    palette[0]=(Color){17,28,48};
+    return span_count>0;
 }
 
 static int slab(double origin,double direction,double low,double high,double *enter,double *leave) {
@@ -39,27 +57,22 @@ static int slab(double origin,double direction,double low,double high,double *en
     return *enter<=*leave;
 }
 
-/* Intersect the pixel ray with each contiguous row of unit cubes. */
+/* Intersect the pixel ray with each contiguous run of like-colored unit cubes. */
 static int nearest(double px,double py,int mode,int *hits) {
     double right=(px-213)/240, down=(py-120)/240;
     double vy=-.6-.8*down,vz=-.8+.6*down,best=300;
-    int result=-1,h,row;
+    int result=-1,i,last_layer=-1;
     *hits=0;
-    for(h=0;h<13;h++) {
-        Layer layer=layers[h];
-        int y=(mode==1?12-h:h)-6, x=layer.dx+(mode==2 && h>=7?3:0);
-        int crossed=0;
-        for(row=h;row<46-h;row++) {
-            double enter=.1, leave=300;
-            int span=widths[row]-h;
-            if(span<1) span=1;
-            if(!slab(48,vy,y-.5,y+.5,&enter,&leave) ||
-               !slab(64,vz,row-23+layer.dz,row-22+layer.dz,&enter,&leave) ||
-               !slab(0,right,x-span,x+span,&enter,&leave)) continue;
-            crossed=1;
-            if(enter<best) { best=enter; result=h; }
-        }
-        *hits+=crossed;
+    for(i=0;i<span_count;i++) {
+        Span span=spans[i];
+        int h=span.h, row=span.row, dz=offsets[h][1];
+        int y=(mode==1?12-h:h)-6, x=offsets[h][0]+(mode==2 && h>=7?3:0);
+        double enter=.1,leave=300;
+        if(!slab(48,vy,y-.5,y+.5,&enter,&leave) ||
+           !slab(64,vz,row-23+dz,row-22+dz,&enter,&leave) ||
+           !slab(0,right,x+span.lo,x+span.hi,&enter,&leave)) continue;
+        if(h!=last_layer) { (*hits)++; last_layer=h; }
+        if(enter<best) { best=enter; result=span.paint; }
     }
     return result;
 }
@@ -126,6 +139,39 @@ static int flight(const char **p,int *settled) {
     return fail;
 }
 
+static int silhouette(const char **p) {
+    int expected[17]={0},actual[17]={0}, min_x[2]={999,999},max_x[2]={0,0};
+    int x,y,k,failed=0;
+    if(**p!='|') return -1;
+    *p=*p+1;
+    for(y=44;y<=211;y+=3) for(x=145;x<=280;x+=3) {
+        int hits,want=nearest(x+.5,y+.5,0,&hits),r=number(p),g,b,got;
+        if(r<0 || **p!=',') return -1;
+        *p=*p+1; g=number(p);
+        if(g<0 || **p!=',') return -1;
+        *p=*p+1; b=number(p);
+        if(b<0) return -1;
+        if(y+3<=211 || x+3<=280) {
+            if(**p!=',') return -1;
+            *p=*p+1;
+        }
+        want=want<0?0:want;
+        for(got=0;got<=paint_count;got++)
+            if(palette[got].r==r && palette[got].g==g && palette[got].b==b) break;
+        if(got>paint_count) return -1;
+        expected[want]++; actual[got]++;
+        if(want==4) { if(x<min_x[0]) min_x[0]=x; if(x>max_x[0]) max_x[0]=x; }
+        if(got==4) { if(x<min_x[1]) min_x[1]=x; if(x>max_x[1]) max_x[1]=x; }
+    }
+    for(k=1;k<=paint_count;k++) failed+=abs(expected[k]-actual[k])>2+expected[k]/20;
+    failed+=expected[4]<10 || expected[5]<8 || expected[6]<1;
+    failed+=abs((max_x[1]-min_x[1])-(max_x[0]-min_x[0]))>3;
+    printf("D1_SILHOUETTE wing_area=%d/%d tail_accent_area=%d/%d canopy_area=%d/%d wingspan_px=%d/%d failed=%d\n",
+        actual[4],expected[4],actual[5],expected[5],actual[6]+actual[7],expected[6]+expected[7],
+        max_x[1]-min_x[1],max_x[0]-min_x[0],failed);
+    return failed;
+}
+
 int main(int argc,char **argv) {
     char cwd[1024],url[2200],profile[128],option[160],*out=0;
     const char *p,*mutation=argc==2?argv[1]:"";
@@ -133,8 +179,9 @@ int main(int argc,char **argv) {
         "--enable-unsafe-swiftshader","--disable-background-networking","--allow-file-access-from-files",
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
-    int n,i,j,k,rc,at,pixel_fail=0,scale_fail=0,flight_fail,settled;
-    if(argc>2 || (*mutation && strcmp(mutation,"reverse") && strcmp(mutation,"offset"))) return 2;
+    int n,i,j,k,rc,at,pixel_fail=0,scale_fail=0,flight_fail,settled,shape_fail;
+    if(argc>2 || (*mutation && strcmp(mutation,"reverse") && strcmp(mutation,"offset") &&
+        strcmp(mutation,"short-wings") && strcmp(mutation,"no-tails"))) return 2;
     if(!load_facts() || !getcwd(cwd,sizeof cwd)) return 2;
     n=choose_probes();
     if(n<8 || groups[0]<2 || groups[1]<2 || groups[2]<2) return 2;
@@ -156,7 +203,7 @@ int main(int argc,char **argv) {
     }
     p+=strlen("<output id=\"pixels\">");
     for(i=0;i<n;i++) {
-        Layer color=probes[i].want<0?(Layer){0,0,17,28,48}:layers[probes[i].want];
+        Color color=palette[probes[i].want<0?0:probes[i].want];
         int expected[]={color.r,color.g,color.b,255}, first[4];
         for(j=0;j<9;j++) for(k=0;k<4;k++) {
             int got=number(&p);
@@ -166,10 +213,12 @@ int main(int argc,char **argv) {
         }
         if(i<n-1 && *p++!=';') return 2;
     }
+    shape_fail=silhouette(&p);
+    if(shape_fail<0) return 2;
     flight_fail=flight(&p,&settled);
     if(flight_fail<0 || strncmp(p,"</output>",9)) return 2;
     free(out);
     printf("CHECK_UXE_D1_FLIGHT\tprobes=%d background=%d offset=%d occlusion=%d pixel_fail=%d scale_fail=%d replay_frames=46 flight_fail=%d release_frames=%d\n",
         n,groups[0],groups[1],groups[2],pixel_fail,scale_fail,flight_fail,settled);
-    return pixel_fail || scale_fail || flight_fail;
+    return pixel_fail || scale_fail || flight_fail || shape_fail;
 }
