@@ -1,0 +1,693 @@
+#pragma unisa module objlink
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+/* Pure object link for the R2 unit route (v0.0.75 R2 W3a, plans/v0.0.75-r2-w3.md).
+   Not wired into drive yet (W3c).  lnx/x86_64 only.
+   ol_link(n, objs, &exe, &exen) reads n ELF64 REL objects built with
+   -c -b lnx/x86_64 -funit (user units with -DRT_EXTERN plus the W2 runtime closure),
+   keeps their machine code (.text/.data/.bss, .rela.*, .symtab) and writes one static
+   ET_EXEC image into a fresh buffer.  It never re-lowers the .unisa.tape payload.
+   Steps: header and target check (every object ELF64 LSB REL x86_64, else rc 2);
+   global symbol table (duplicate strong definition rc 4; unresolved named undefined
+   rc 5); each object's __init_u stays object local and a synthesized __init calls
+   them in input order (the drivelink unit order); a local GOT is built statically
+   for GOTPCREL / GOTPCRELX / REX_GOTPCRELX; relocations R_X86_64_64, PC32, PLT32,
+   32, 32S and the three GOT forms are applied with range checks (overflow rc 7);
+   any other relocation type is refused by name (rc 3) so the caller falls back to the
+   whole-program route; a missing _start is rc 6; read failure rc 1.
+   Layout: base 0x400000, headers in the first page, text from 0x401000, then a
+   page aligned RW segment holding GOT, data and bss.  No time, path or pid reaches
+   the image, so two links of the same inputs give the same bytes.
+   ol_error() names the refusal; ol_reloc_count(type) counts applied relocations of
+   the last link.  Direct libc stays out: cx_read, mm_alloc/mm_free, local loops.
+   Not covered: source frame id renumbering of the tape route (backtrace locations
+   through this route are UNMEASURED); string interning and TLS are not merged
+   across units. */
+
+#define OL_BASE 0x400000L
+#define OL_PAGE 0x1000L
+#define OL_MAXOBJ 4096
+#define OL_NTYPE 64
+
+typedef struct {
+    unsigned char *b;
+    long n;
+    int shnum;
+    long shoff;
+    long *base;      /* per section: link address, -1 when not placed */
+    int *kind;       /* per section: 1 text, 2 data, 3 bss, 0 other */
+    int symsec;
+    long symoff;
+    long nsym;
+    long stroff;
+    long strsz;
+    long *got;       /* per symbol: local GOT slot, -1 none */
+    int hasinit;
+    long initsym;
+} ol_obj;
+
+typedef struct {
+    const unsigned char *name;
+    long len;
+    int obj;         /* defining object, -1 undefined */
+    long sym;
+    int weak;
+    long got;
+} ol_glob;
+
+static char ol_msg[600];
+static long ol_cnt[OL_NTYPE];
+static ol_glob *ol_tab;
+static long ol_tcap;
+
+const char *ol_error(void) {
+    return ol_msg;
+}
+
+long ol_reloc_count(int type) {
+    if (type < 0 || type >= OL_NTYPE) return 0;
+    return ol_cnt[type];
+}
+
+static void ol_put(long *at, const char *s, long len) {
+    long i;
+    i = 0;
+    while (i < len && s[i] && *at < (long)sizeof ol_msg - 1) {
+        ol_msg[*at] = s[i];
+        *at = *at + 1;
+        i = i + 1;
+    }
+    ol_msg[*at] = 0;
+}
+
+static void ol_putn(long *at, long v) {
+    char d[24];
+    int k;
+    unsigned long u;
+    k = 0;
+    if (v < 0) {
+        ol_put(at, "-", 1);
+        u = (unsigned long)(-v);
+    } else u = (unsigned long)v;
+    if (!u) d[k++] = '0';
+    while (u && k < 23) {
+        d[k++] = (char)('0' + (int)(u % 10));
+        u = u / 10;
+    }
+    while (k > 0) {
+        k = k - 1;
+        ol_put(at, d + k, 1);
+    }
+}
+
+/* Message: WHAT [name] [in OBJ] [(num)]; returns RC so callers can return ol_fail(...). */
+static int ol_fail(int rc, const char *what, const unsigned char *name, long nlen, const char *obj, long num, int hasnum) {
+    long at;
+    at = 0;
+    ol_msg[0] = 0;
+    ol_put(&at, "objlink: REFUSE ", 1L << 20);
+    ol_put(&at, what, 1L << 20);
+    if (name) {
+        ol_put(&at, " ", 1);
+        ol_put(&at, (const char *)name, nlen);
+    }
+    if (obj) {
+        ol_put(&at, " in ", 4);
+        ol_put(&at, obj, 1L << 20);
+    }
+    if (hasnum) {
+        ol_put(&at, " (", 2);
+        ol_putn(&at, num);
+        ol_put(&at, ")", 1);
+    }
+    return rc;
+}
+
+static unsigned long long ol_get(const unsigned char *p, int w) {
+    unsigned long long v;
+    int i;
+    v = 0;
+    i = w - 1;
+    while (i >= 0) {
+        v = (v << 8) | (unsigned long long)p[i];
+        i = i - 1;
+    }
+    return v;
+}
+
+static void ol_set(unsigned char *p, unsigned long long v, int w) {
+    int i;
+    i = 0;
+    while (i < w) {
+        p[i] = (unsigned char)(v & 255ull);
+        v = v >> 8;
+        i = i + 1;
+    }
+}
+
+static long ol_align(long v, long a) {
+    if (a <= 1) return v;
+    return (v + a - 1) / a * a;
+}
+
+static void *ol_zalloc(long n) {
+    unsigned char *p;
+    long i;
+    if (n < 1) n = 1;
+    p = (unsigned char *)mm_alloc(n);
+    if (!p) return 0;
+    i = 0;
+    while (i < n) {
+        p[i] = 0;
+        i = i + 1;
+    }
+    return p;
+}
+
+static long ol_slen(const unsigned char *s, long cap) {
+    long n;
+    n = 0;
+    while (n < cap && s[n]) n = n + 1;
+    if (n >= cap) return -1;
+    return n;
+}
+
+static int ol_eq(const unsigned char *a, long al, const char *b) {
+    long i;
+    i = 0;
+    while (i < al) {
+        if (!b[i] || (unsigned char)b[i] != a[i]) return 0;
+        i = i + 1;
+    }
+    return b[al] == 0;
+}
+
+static unsigned char *ol_sh(ol_obj *o, int i) {
+    return o->b + o->shoff + (long)i * 64;
+}
+
+/* Symbol record I of object O; name pointer and length through NAME/NLEN. */
+static unsigned char *ol_sym(ol_obj *o, long i, const unsigned char **name, long *nlen) {
+    unsigned char *s;
+    long off;
+    s = o->b + o->symoff + i * 24;
+    off = (long)ol_get(s, 4);
+    *name = 0;
+    *nlen = 0;
+    if (off < o->strsz) {
+        *name = o->b + o->stroff + off;
+        *nlen = ol_slen(*name, o->strsz - off);
+        if (*nlen < 0) {
+            *name = 0;
+            *nlen = 0;
+        }
+    }
+    return s;
+}
+
+/* Address of a defined symbol record (absolute or section relative). */
+static long ol_defva(ol_obj *o, long i) {
+    unsigned char *s = o->b + o->symoff + i * 24;
+    int shn = (int)ol_get(s + 6, 2);
+    if (shn == 0xfff1) return (long)ol_get(s + 8, 8);
+    return o->base[shn] + (long)ol_get(s + 8, 8);
+}
+
+static unsigned long ol_hash(const unsigned char *s, long n) {
+    unsigned long h;
+    long i;
+    h = 1469598103934665603ul;
+    i = 0;
+    while (i < n) {
+        h = (h ^ s[i]) * 1099511628211ul;
+        i = i + 1;
+    }
+    return h;
+}
+
+static ol_glob *ol_find(const unsigned char *s, long n, int add) {
+    unsigned long h;
+    long i, k, j;
+    h = ol_hash(s, n);
+    i = (long)(h & (unsigned long)(ol_tcap - 1));
+    k = 0;
+    while (k < ol_tcap) {
+        ol_glob *g = &ol_tab[i];
+        if (!g->name) {
+            if (!add) return 0;
+            g->name = s;
+            g->len = n;
+            g->obj = -1;
+            g->got = -1;
+            return g;
+        }
+        if (g->len == n) {
+            j = 0;
+            while (j < n && g->name[j] == s[j]) j = j + 1;
+            if (j == n) return g;
+        }
+        i = (i + 1) & (ol_tcap - 1);
+        k = k + 1;
+    }
+    return 0;
+}
+
+static int ol_parse(ol_obj *o, const char *path) {
+    unsigned char *h;
+    int i, shstr;
+    long shsoff, shssz;
+    h = o->b;
+    if (o->n < 64 || h[0] != 127 || h[1] != 'E' || h[2] != 'L' || h[3] != 'F')
+        return ol_fail(2, "target mismatch: not an ELF object", 0, 0, path, 0, 0);
+    if (h[4] != 2 || h[5] != 1 || ol_get(h + 16, 2) != 1 || ol_get(h + 18, 2) != 62)
+        return ol_fail(2, "target mismatch: want ELF64 LSB REL x86_64, machine", 0, 0, path, (long)ol_get(h + 18, 2), 1);
+    o->shoff = (long)ol_get(h + 40, 8);
+    o->shnum = (int)ol_get(h + 60, 2);
+    shstr = (int)ol_get(h + 62, 2);
+    if (ol_get(h + 58, 2) != 64 || o->shnum < 1 || o->shoff < 64 || o->shoff + (long)o->shnum * 64 > o->n || shstr >= o->shnum)
+        return ol_fail(2, "bad section table", 0, 0, path, 0, 0);
+    shsoff = (long)ol_get(ol_sh(o, shstr) + 24, 8);
+    shssz = (long)ol_get(ol_sh(o, shstr) + 32, 8);
+    if (shsoff < 0 || shssz < 0 || shsoff + shssz > o->n) return ol_fail(2, "bad section names", 0, 0, path, 0, 0);
+    o->base = (long *)ol_zalloc((long)o->shnum * 8);
+    o->kind = (int *)ol_zalloc((long)o->shnum * 4);
+    if (!o->base || !o->kind) return ol_fail(1, "out of memory", 0, 0, path, 0, 0);
+    o->symsec = -1;
+    i = 0;
+    while (i < o->shnum) {
+        unsigned char *s = ol_sh(o, i);
+        long nm = (long)ol_get(s, 4);
+        int ty = (int)ol_get(s + 4, 4);
+        long fl = (long)ol_get(s + 8, 8);
+        long off = (long)ol_get(s + 24, 8);
+        long sz = (long)ol_get(s + 32, 8);
+        const unsigned char *name;
+        long nl;
+        o->base[i] = -1;
+        if (nm >= shssz) return ol_fail(2, "bad section name", 0, 0, path, i, 1);
+        name = h + shsoff + nm;
+        nl = ol_slen(name, shssz - nm);
+        if (nl < 0) return ol_fail(2, "bad section name", 0, 0, path, i, 1);
+        if (ty != 8 && sz > 0 && (off < 0 || sz < 0 || off + sz > o->n)) return ol_fail(2, "section out of file", name, nl, path, i, 1);
+        if (ol_eq(name, nl, ".text")) o->kind[i] = 1;
+        else if (ol_eq(name, nl, ".data")) o->kind[i] = 2;
+        else if (ol_eq(name, nl, ".bss")) o->kind[i] = 3;
+        else if (ty == 2) {
+            if (o->symsec >= 0) return ol_fail(2, "two symbol tables", 0, 0, path, 0, 0);
+            o->symsec = i;
+        } else if ((fl & 2) && sz > 0) return ol_fail(2, "unsupported allocated section", name, nl, path, 0, 0);
+        if (o->kind[i] && ((fl & 1024) || (o->kind[i] == 3) != (ty == 8))) return ol_fail(2, "unsupported section form", name, nl, path, 0, 0);
+        i = i + 1;
+    }
+    if (o->symsec < 0) return ol_fail(2, "no symbol table", 0, 0, path, 0, 0);
+    {
+        unsigned char *s = ol_sh(o, o->symsec);
+        int link = (int)ol_get(s + 40, 4);
+        o->symoff = (long)ol_get(s + 24, 8);
+        o->nsym = (long)ol_get(s + 32, 8) / 24;
+        if (ol_get(s + 56, 8) != 24 || link <= 0 || link >= o->shnum || o->symoff < 0 || o->symoff + o->nsym * 24 > o->n)
+            return ol_fail(2, "bad symbol table", 0, 0, path, 0, 0);
+        o->stroff = (long)ol_get(ol_sh(o, link) + 24, 8);
+        o->strsz = (long)ol_get(ol_sh(o, link) + 32, 8);
+        if (o->stroff < 0 || o->strsz < 0 || o->stroff + o->strsz > o->n) return ol_fail(2, "bad string table", 0, 0, path, 0, 0);
+    }
+    o->got = (long *)ol_zalloc(o->nsym * 8 + 8);
+    if (!o->got) return ol_fail(1, "out of memory", 0, 0, path, 0, 0);
+    i = 0;
+    while ((long)i < o->nsym) {
+        o->got[i] = -1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* Collect global definitions; __init_u stays per object. */
+static int ol_globals(ol_obj *ob, int n, const char **objs) {
+    int k;
+    long i;
+    k = 0;
+    while (k < n) {
+        ol_obj *o = &ob[k];
+        i = 1;
+        while (i < o->nsym) {
+            const unsigned char *nm;
+            long nl;
+            unsigned char *s = ol_sym(o, i, &nm, &nl);
+            int bind = s[4] >> 4;
+            int type = s[4] & 15;
+            int shn = (int)ol_get(s + 6, 2);
+            if (type == 6 || type == 10) return ol_fail(2, "unsupported symbol type", nm, nl, objs[k], type, 1);
+            if (shn != 0 && shn != 0xfff1 && (shn >= o->shnum || (!o->kind[shn] && bind != 0)))
+                return ol_fail(2, "symbol in unplaced section", nm, nl, objs[k], shn, 1);
+            if ((bind == 1 || bind == 2) && shn != 0) {
+                ol_glob *g;
+                if (!nm || !nl) return ol_fail(2, "unnamed global", 0, 0, objs[k], i, 1);
+                if (ol_eq(nm, nl, "__init_u")) {
+                    if (o->hasinit) return ol_fail(4, "duplicate symbol", nm, nl, objs[k], 0, 0);
+                    o->hasinit = 1;
+                    o->initsym = i;
+                } else {
+                    if (ol_eq(nm, nl, "__init")) return ol_fail(4, "duplicate symbol", nm, nl, objs[k], 0, 0);
+                    g = ol_find(nm, nl, 1);
+                    if (!g) return ol_fail(1, "symbol table full", 0, 0, 0, 0, 0);
+                    if (g->obj >= 0 && !(g->weak || bind == 2)) return ol_fail(4, "duplicate symbol", nm, nl, objs[k], 0, 0);
+                    if (g->obj < 0 || (g->weak && bind == 1)) {
+                        g->obj = k;
+                        g->sym = i;
+                        g->weak = bind == 2;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/* Every named strong undefined global must resolve (a weak undefined is 0). */
+static int ol_undef(ol_obj *ob, int n, const char **objs) {
+    int k;
+    long i;
+    k = 0;
+    while (k < n) {
+        ol_obj *o = &ob[k];
+        i = 1;
+        while (i < o->nsym) {
+            const unsigned char *nm;
+            long nl;
+            unsigned char *s = ol_sym(o, i, &nm, &nl);
+            if ((s[4] >> 4) == 1 && ol_get(s + 6, 2) == 0 && nl > 0 && !ol_eq(nm, nl, "__init")) {
+                ol_glob *g = ol_find(nm, nl, 0);
+                if (!g || g->obj < 0) return ol_fail(5, "undefined symbol", nm, nl, objs[k], 0, 0);
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+static int ol_known(int t) {
+    return t == 1 || t == 2 || t == 4 || t == 9 || t == 10 || t == 11 || t == 41 || t == 42;
+}
+
+static int ol_isgot(int t) {
+    return t == 9 || t == 41 || t == 42;
+}
+
+static int ol_isglob(const unsigned char *s, const unsigned char *nm, long nl) {
+    return (s[4] >> 4) != 0 && nl > 0 && !ol_eq(nm, nl, "__init_u") && !ol_eq(nm, nl, "__init");
+}
+
+/* Resolve symbol I of object K into *VA; returns 0, or the refusal rc (message set). */
+static int ol_addr(ol_obj *ob, int k, long i, const char *path, long initva, long *va) {
+    ol_obj *o = &ob[k];
+    const unsigned char *nm;
+    long nl;
+    unsigned char *s;
+    int shn;
+    *va = 0;
+    if (i == 0) return 0;
+    s = ol_sym(o, i, &nm, &nl);
+    shn = (int)ol_get(s + 6, 2);
+    if (ol_isglob(s, nm, nl)) {
+        ol_glob *g = ol_find(nm, nl, 0);
+        if (g && g->obj >= 0) {
+            *va = ol_defva(&ob[g->obj], g->sym);
+            return 0;
+        }
+        if ((s[4] >> 4) == 2) return 0;
+        return ol_fail(5, "undefined symbol", nm, nl, path, 0, 0);
+    }
+    if (shn == 0) {
+        if (nl > 0 && ol_eq(nm, nl, "__init")) {
+            *va = initva;
+            return 0;
+        }
+        return ol_fail(5, "undefined symbol", nm, nl, path, 0, 0);
+    }
+    if (shn != 0xfff1 && (shn >= o->shnum || o->base[shn] < 0)) return ol_fail(2, "relocation against unplaced section", nm, nl, path, shn, 1);
+    *va = ol_defva(o, i);
+    return 0;
+}
+
+/* GOT slot of symbol I in object K (global symbols share one slot). */
+static long *ol_gotref(ol_obj *ob, int k, long i) {
+    ol_obj *o = &ob[k];
+    const unsigned char *nm;
+    long nl;
+    unsigned char *s = ol_sym(o, i, &nm, &nl);
+    if (ol_isglob(s, nm, nl)) {
+        ol_glob *g = ol_find(nm, nl, 0);
+        if (g) return &g->got;
+    }
+    return &o->got[i];
+}
+
+/* Walk every RELA section; pass 0 checks types and assigns GOT slots, pass 1 applies. */
+static int ol_relocs(ol_obj *ob, int n, const char **objs, int pass, long *ngot, unsigned char *img, long gotva, long initva) {
+    int k, i, rc;
+    k = 0;
+    while (k < n) {
+        ol_obj *o = &ob[k];
+        i = 0;
+        while (i < o->shnum) {
+            unsigned char *s = ol_sh(o, i);
+            int tgt = (int)ol_get(s + 44, 4);
+            if (ol_get(s + 4, 4) == 4 && ol_get(s + 32, 8) > 0 && !(tgt > 0 && tgt < o->shnum && !o->kind[tgt] && !(ol_get(ol_sh(o, tgt) + 8, 8) & 2))) {
+                int link = (int)ol_get(s + 40, 4);
+                long off = (long)ol_get(s + 24, 8);
+                long cnt = (long)ol_get(s + 32, 8) / 24;
+                long tsz, j;
+                if (link != o->symsec || ol_get(s + 56, 8) != 24) return ol_fail(2, "bad relocation section", 0, 0, objs[k], i, 1);
+                if (tgt <= 0 || tgt >= o->shnum || (o->kind[tgt] != 1 && o->kind[tgt] != 2))
+                    return ol_fail(2, "relocation of unplaced section", 0, 0, objs[k], tgt, 1);
+                tsz = (long)ol_get(ol_sh(o, tgt) + 32, 8);
+                j = 0;
+                while (j < cnt) {
+                    unsigned char *r = o->b + off + j * 24;
+                    long ro = (long)ol_get(r, 8);
+                    int ty = (int)ol_get(r + 8, 4);
+                    long si = (long)ol_get(r + 12, 4);
+                    long ad = (long)ol_get(r + 16, 8);
+                    int w = (ty == 1) ? 8 : 4;
+                    if (!ol_known(ty)) return ol_fail(3, "unknown relocation type", 0, 0, objs[k], ty, 1);
+                    if (si >= o->nsym) return ol_fail(2, "relocation symbol out of range", 0, 0, objs[k], si, 1);
+                    if (ro < 0 || ro + w > tsz) return ol_fail(2, "relocation offset out of section", 0, 0, objs[k], ro, 1);
+                    if (pass == 0) {
+                        if (ol_isgot(ty)) {
+                            long *slot = ol_gotref(ob, k, si);
+                            if (*slot < 0) {
+                                *slot = *ngot;
+                                *ngot = *ngot + 1;
+                            }
+                        }
+                    } else {
+                        long S, P, v;
+                        unsigned char *at;
+                        rc = ol_addr(ob, k, si, objs[k], initva, &S);
+                        if (rc) return rc;
+                        P = o->base[tgt] + ro;
+                        at = img + (P - OL_BASE);
+                        if (ol_isgot(ty)) {
+                            long g = *ol_gotref(ob, k, si);
+                            ol_set(img + (gotva - OL_BASE) + g * 8, (unsigned long long)S, 8);
+                            v = gotva + g * 8 + ad - P;
+                        } else if (ty == 2 || ty == 4) v = S + ad - P;
+                        else v = S + ad;
+                        if (ty == 1) ol_set(at, (unsigned long long)v, 8);
+                        else {
+                            if ((ty == 10 && (v < 0 || v > 0xffffffffL)) || (ty != 10 && (v < -0x80000000L || v > 0x7fffffffL)))
+                                return ol_fail(7, "relocation overflow", 0, 0, objs[k], ro, 1);
+                            ol_set(at, (unsigned long long)v, 4);
+                        }
+                        ol_cnt[ty] = ol_cnt[ty] + 1;
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+static void ol_release(ol_obj *ob, int n) {
+    int k;
+    k = 0;
+    while (k < n) {
+        if (ob[k].b) mm_free(ob[k].b);
+        if (ob[k].base) mm_free(ob[k].base);
+        if (ob[k].kind) mm_free(ob[k].kind);
+        if (ob[k].got) mm_free(ob[k].got);
+        k = k + 1;
+    }
+    mm_free(ob);
+    if (ol_tab) mm_free(ol_tab);
+    ol_tab = 0;
+    ol_tcap = 0;
+}
+
+static long ol_place(ol_obj *ob, int n, int kind, long cur) {
+    int k, i;
+    long al;
+    k = 0;
+    while (k < n) {
+        i = 0;
+        while (i < ob[k].shnum) {
+            if (ob[k].kind[i] == kind) {
+                al = (long)ol_get(ol_sh(&ob[k], i) + 48, 8);
+                if (al < 16) al = 16;
+                cur = ol_align(cur, al);
+                ob[k].base[i] = cur;
+                cur = cur + (long)ol_get(ol_sh(&ob[k], i) + 32, 8);
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return cur;
+}
+
+static void ol_copy(ol_obj *ob, int n, int kind, unsigned char *img) {
+    int k, i;
+    long j, off, sz;
+    unsigned char *d;
+    k = 0;
+    while (k < n) {
+        i = 0;
+        while (i < ob[k].shnum) {
+            if (ob[k].kind[i] == kind) {
+                off = (long)ol_get(ol_sh(&ob[k], i) + 24, 8);
+                sz = (long)ol_get(ol_sh(&ob[k], i) + 32, 8);
+                d = img + (ob[k].base[i] - OL_BASE);
+                j = 0;
+                while (j < sz) {
+                    d[j] = ob[k].b[off + j];
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+}
+
+static void ol_phdr(unsigned char *p, long type, long flags, long off, long va, long fsz, long msz, long al) {
+    ol_set(p, (unsigned long long)type, 4);
+    ol_set(p + 4, (unsigned long long)flags, 4);
+    ol_set(p + 8, (unsigned long long)off, 8);
+    ol_set(p + 16, (unsigned long long)va, 8);
+    ol_set(p + 24, (unsigned long long)va, 8);
+    ol_set(p + 32, (unsigned long long)fsz, 8);
+    ol_set(p + 40, (unsigned long long)msz, 8);
+    ol_set(p + 48, (unsigned long long)al, 8);
+}
+
+static int ol_out(ol_obj *ob, int n, int rc) {
+    ol_release(ob, n);
+    return rc;
+}
+
+int ol_link(int n, const char **objs, unsigned char **exe, long *exen) {
+    ol_obj *ob;
+    long tot, tend, initva, nin, dva, ngot, dend, bend, entry, i, at;
+    unsigned char *img;
+    int k, rc;
+    ol_glob *st;
+    if (exe) *exe = 0;
+    if (exen) *exen = 0;
+    i = 0;
+    while (i < OL_NTYPE) {
+        ol_cnt[i] = 0;
+        i = i + 1;
+    }
+    if (!exe || !exen || !objs || n < 1 || n > OL_MAXOBJ) return ol_fail(1, "bad arguments", 0, 0, 0, n, 1);
+    ob = (ol_obj *)ol_zalloc((long)n * (long)sizeof(ol_obj));
+    if (!ob) return ol_fail(1, "out of memory", 0, 0, 0, 0, 0);
+    tot = 0;
+    k = 0;
+    while (k < n) {
+        size_t fn;
+        fn = 0;
+        ob[k].b = (unsigned char *)cx_read(objs[k], &fn);
+        if (!ob[k].b) return ol_out(ob, n, ol_fail(1, "cannot read", 0, 0, objs[k], 0, 0));
+        ob[k].n = (long)fn;
+        rc = ol_parse(&ob[k], objs[k]);
+        if (rc) return ol_out(ob, n, rc);
+        tot = tot + ob[k].nsym;
+        k = k + 1;
+    }
+    ol_tcap = 64;
+    while (ol_tcap < tot * 2 + 16) ol_tcap = ol_tcap * 2;
+    ol_tab = (ol_glob *)ol_zalloc(ol_tcap * (long)sizeof(ol_glob));
+    if (!ol_tab) return ol_out(ob, n, ol_fail(1, "out of memory", 0, 0, 0, 0, 0));
+    rc = ol_globals(ob, n, objs);
+    if (!rc) rc = ol_undef(ob, n, objs);
+    if (rc) return ol_out(ob, n, rc);
+    st = ol_find((const unsigned char *)"_start", 6, 0);
+    if (!st || st->obj < 0) return ol_out(ob, n, ol_fail(6, "missing _start entry", 0, 0, 0, 0, 0));
+    ngot = 0;
+    rc = ol_relocs(ob, n, objs, 0, &ngot, 0, 0, 0);
+    if (rc) return ol_out(ob, n, rc);
+    /* layout: text, synthesized __init, then RW page: GOT, data, bss */
+    tend = ol_place(ob, n, 1, OL_BASE + OL_PAGE);
+    nin = 0;
+    k = 0;
+    while (k < n) {
+        if (ob[k].hasinit) nin = nin + 1;
+        k = k + 1;
+    }
+    initva = ol_align(tend, 16);
+    tend = initva + nin * 5 + 1;
+    dva = ol_align(tend, OL_PAGE);
+    dend = ol_place(ob, n, 2, dva + ngot * 8);
+    bend = ol_place(ob, n, 3, dend);
+    img = (unsigned char *)ol_zalloc(dend - OL_BASE);
+    if (!img) return ol_out(ob, n, ol_fail(1, "out of memory", 0, 0, 0, 0, 0));
+    ol_copy(ob, n, 1, img);
+    ol_copy(ob, n, 2, img);
+    at = initva;
+    k = 0;
+    while (k < n) {
+        if (ob[k].hasinit) {
+            img[at - OL_BASE] = 0xe8;
+            ol_set(img + (at - OL_BASE) + 1, (unsigned long long)(ol_defva(&ob[k], ob[k].initsym) - (at + 5)), 4);
+            at = at + 5;
+        }
+        k = k + 1;
+    }
+    img[at - OL_BASE] = 0xc3;
+    rc = ol_relocs(ob, n, objs, 1, &ngot, img, dva, initva);
+    if (rc) {
+        mm_free(img);
+        return ol_out(ob, n, rc);
+    }
+    entry = ol_defva(&ob[st->obj], st->sym);
+    /* ELF header and three program headers */
+    img[0] = 127;
+    img[1] = 'E';
+    img[2] = 'L';
+    img[3] = 'F';
+    img[4] = 2;
+    img[5] = 1;
+    img[6] = 1;
+    ol_set(img + 16, 2, 2);
+    ol_set(img + 18, 62, 2);
+    ol_set(img + 20, 1, 4);
+    ol_set(img + 24, (unsigned long long)entry, 8);
+    ol_set(img + 32, 64, 8);
+    ol_set(img + 52, 64, 2);
+    ol_set(img + 54, 56, 2);
+    ol_set(img + 56, 3, 2);
+    ol_phdr(img + 64, 1, 5, 0, OL_BASE, tend - OL_BASE, tend - OL_BASE, OL_PAGE);
+    ol_phdr(img + 120, 1, 6, dva - OL_BASE, dva, dend - dva, bend - dva, OL_PAGE);
+    ol_phdr(img + 176, 0x6474e551L, 6, 0, 0, 0, 0, 16);
+    ol_release(ob, n);
+    *exe = img;
+    *exen = dend - OL_BASE;
+    ol_msg[0] = 0;
+    return 0;
+}
