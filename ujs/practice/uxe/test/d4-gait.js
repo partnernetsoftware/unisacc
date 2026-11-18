@@ -21,6 +21,9 @@ function kneeFor(rest, hip, foot, extend) {
 
 export function gaitPose(rest, phase, mode) {
   const t=((phase%4)+4)%4;
+  const walking=["walk","sliding-feet","frozen-body"].includes(mode);
+  const stride=walking?.48:0;
+  const travel=mode==="frozen-body"?0:phase*stride/4;
   const active=Math.floor(t), progress=t-active;
   const swing=Math.max(0,Math.min(1,(progress-.2)/.6));
   const envelope=progress<.2 ? progress/.2 : progress>.8 ? (1-progress)/.2 : 1;
@@ -28,21 +31,28 @@ export function gaitPose(rest, phase, mode) {
   const stance=rest.filter((_,i)=>i!==active);
   const offset=[0,1,2].map(axis=>axis===1 ? -.95*ease :
     ease*.39*stance.reduce((sum,leg)=>sum+leg[2][axis],0)/3);
+  offset[0]+=travel;
+  // Keep the nominal links within reach even as an anchored foot trails the hips.
+  if(walking) offset[1]-=.45;
   const legs=rest.map((leg,i)=>{
     const hip=leg[0].map((v,axis)=>v+offset[axis]);
     const raised=i===active || (mode==="three-air" && i!==(active+1)%4);
     const lift=raised?Math.sin(Math.PI*swing)**2:0;
-    const foot=[leg[2][0],leg[2][1]+.80*lift,leg[2][2]+lift*.28*Math.sin(2*Math.PI*swing)];
+    const blend=swing*swing*(3-2*swing);
+    const cycle=Math.floor(phase/4);
+    const anchor=(cycle+(i<active?1:i===active?blend:0))*stride;
+    const foot=[leg[2][0]+(mode==="sliding-feet"?travel:anchor),
+      leg[2][1]+.80*lift,leg[2][2]+lift*.28*Math.sin(2*Math.PI*swing)];
     return [hip,kneeFor(leg,hip,foot,mode==="long-leg" && i===0?.48:0),foot];
   });
-  return {legs,offset};
+  return {legs,offset,travel};
 }
 
 // Three orthographic coordinate channels packed into opaque raster pixels.
 // The probe consumes exactly the same pose used to position the visible links.
-export function readGaitPixels(rest, mode) {
+export function readGaitPixels(rest, mode, frames=48) {
   const canvas=document.createElement("canvas");
-  canvas.width=36; canvas.height=48;
+  canvas.width=36; canvas.height=frames;
   const ctx=canvas.getContext("2d",{willReadFrequently:true});
   const data=ctx.createImageData(canvas.width,canvas.height);
   for(let row=0;row<canvas.height;row++) {

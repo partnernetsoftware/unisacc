@@ -14,6 +14,7 @@ import { barrelMesh, closeCamera } from "./d4-framing.js";
 import { archMeshes } from "./d3-arch.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
+const walkProbe=["walk","sliding-feet","frozen-body"].includes(mode);
 const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map();
 const bodies=[];
 const paint={
@@ -21,7 +22,8 @@ const paint={
   foot:[119,74,49], white:[232,226,197], orange:[181,84,46], wood:[92,60,46],
   red:[174,50,42], glass:[85,133,149], smoke:[236,239,234], grass:[130,164,91],
   darkgrass:[83,131,74], farhill:[95,143,118], grove:[48,104,77],
-  gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96]
+  gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96],
+  groundMark:[194,92,45]
 };
 function mesh(positions,normals,uvs) {
   const id=allMeshes().length+extraMeshes.length;
@@ -48,7 +50,7 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if(!groups.has(key)) groups.set(key,{color,id,items:[]});
   const item=[x,y,z,size,yaw,pitch,roll];
   groups.get(key).items.push(item);
-  if (!["joint","link","foot","darkgrass","farhill","grove"].includes(color) && id!==MESH_PLANE) bodies.push(item);
+  if (!["joint","link","foot","darkgrass","farhill","grove","groundMark"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
 function block(color,x,y,z,w,h,d,roll=0) { return add(color,box(w,h,d),x,y,z,1,0,0,roll); }
@@ -102,6 +104,10 @@ block("wood",-3.35,9.65,2.13,.29,1.5,.36);
 for(const angle of [.51,.51+Math.PI/2]) block("white",-3.35,9.62,2.37,.24,2.7,.12,angle);
 bodies.push(add("joint",round,-3.35,9.62,2.47,.23));
 add("grass",MESH_PLANE,0,-.035,0,130);
+if(walkProbe || params.has("animate")) {
+  for(let x=-12;x<=60;x+=3) block("darkgrass",x,-.007,8,.11,.05,1.1);
+  block("groundMark",0,.12,9,.18,.24,.18);
+}
 const hill=leafMesh(.29);
 const ridge=mesh(hill.positions,hill.normals);
 for(let i=0;i<12;i++) {
@@ -147,8 +153,11 @@ function set(item,values) {
   const [cloud,i]=bindings.get(item);
   cloud.set(i,...values);
 }
-function renderPose(phase) {
-  const pose=gaitPose(legs,phase,mode);
+function renderPose(phase, gaitMode=mode) {
+  const pose=gaitPose(legs,phase,gaitMode);
+  const eye=view?.eye ?? [14.4,12,19.2], target=view?.target ?? [0,5,0];
+  camera.setEye(eye[0]+pose.travel,eye[1],eye[2]);
+  camera.setTarget(target[0]+pose.travel,target[1],target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
   pose.legs.forEach(([hip,knee,foot],i)=>{
     const parts=legItems[i];
@@ -162,15 +171,15 @@ function renderPose(phase) {
   });
   renderer.render(scene,camera,textures);
 }
-if(params.has("animate")) {
+if(!walkProbe && params.has("animate")) {
   const start=performance.now();
   const frame=time=>{
-    renderPose(Math.floor((time-start)*12/670)/12);
+    renderPose((time-start)/670,mode || "walk");
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 } else if(params.has("phase")) renderPose(Number(params.get("phase")));
-else renderer.render(scene,camera,textures);
+else if(!walkProbe) renderer.render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
 const density=["density","small-town","no-gear","framing","wide-camera"].includes(mode);
 const finish=["finish","no-texture","single-smoke"].includes(mode);
@@ -192,7 +201,21 @@ function densityPixels() {
   }
   return result.join(";");
 }
-document.querySelector("output").textContent=density || finish ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
+function walkPixels() {
+  const samples=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
+    const [x,y]=pair.split(",").map(Number);
+    return [x,y];
+  });
+  const pixels=new Uint8Array(4);
+  const ground=samples.map(([x,y],i)=>{
+    renderPose(i);
+    gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    return pixels.slice(0,3).join(",");
+  });
+  return [readGaitPixels(legs,mode,97),...ground].join(";");
+}
+document.querySelector("output").textContent=walkProbe ? walkPixels() :
+  density || finish ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
   ? readGaitPixels(legs,mode)
   : (params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
   const [x,y]=pair.split(",").map(Number);

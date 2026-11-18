@@ -120,13 +120,17 @@ static int byte(const char **p) {
     return value;
 }
 
-static int read_gait(const char *p) {
+static int read_gait(const char *p, int walking) {
     int frame, leg, j, stance_fail=0, length_fail=0, air_fail=0, plant_fail=0;
     int swings[4]={0}, max_air=0;
-    for(frame=0;frame<48;frame++) {
+    int frames=walking?97:48, slide_fail=0, seam_fail=0, forward_fail=0, ground_fail=0;
+    Point previous[4], first[4];
+    int planted[4]={0};
+    double first_body=0, previous_body=0, advance=0, peak_lift=0, max_slide_sq=0;
+    for(frame=0;frame<frames;frame++) {
         Point pose[4][3], support[4], center={upper_x,0,upper_z};
         int supports=0,air=0;
-        double super_mass=upper_mass;
+        double super_mass=upper_mass, body=0;
         for(leg=0;leg<4;leg++) for(j=0;j<3;j++) {
             double c[3];
             int axis;
@@ -135,7 +139,7 @@ static int read_gait(const char *p) {
                 if(hi<0 || *p++!=',') return 2;
                 lo=byte(&p);
                 if(lo<0) return 2;
-                if((frame!=47 || leg!=3 || j!=2 || axis!=2) && *p++!=',') return 2;
+                if((frame!=frames-1 || leg!=3 || j!=2 || axis!=2) && *p++!=',') return 2;
                 c[axis]=(hi*256+lo)/1024.0-16;
             }
             pose[leg][j]=(Point){c[0],c[1],c[2]};
@@ -143,11 +147,31 @@ static int read_gait(const char *p) {
         }
         for(leg=0;leg<4;leg++) {
             Point foot=pose[leg][2];
-            if(foot.y>rest[leg][2].y+.012) {
+            double lift=foot.y-rest[leg][2].y;
+            int on_ground=foot.y<=rest[leg][2].y+.012;
+            if(lift>peak_lift) peak_lift=lift;
+            if(!frame) first[leg]=foot;
+            if(walking && frame && on_ground && planted[leg]) {
+                double slip_sq=length_squared(foot,previous[leg]);
+                int slipped=slip_sq>.000009;
+                if(slip_sq>max_slide_sq) max_slide_sq=slip_sq;
+                slide_fail+=slipped;
+                if(frame%48==0) seam_fail+=slipped;
+            }
+            if(walking && frame%48==0) {
+                double expected=.48*(frame/48);
+                Point landing=first[leg];
+                landing.x+=expected;
+                if(length_squared(foot,landing)>.000009) seam_fail++;
+            }
+            previous[leg]=foot;
+            planted[leg]=on_ground;
+            if(!on_ground) {
                 air++; swings[leg]++;
             } else {
                 support[supports++]=foot;
-                plant_fail+=length_squared(foot,rest[leg][2])>.0002;
+                if(!walking) plant_fail+=length_squared(foot,rest[leg][2])>.0002;
+                else plant_fail+=foot.y<rest[leg][2].y-.012;
             }
             for(j=0;j<2;j++) {
                 double reference=length_squared(rest[leg][j],rest[leg][j+1]);
@@ -156,13 +180,43 @@ static int read_gait(const char *p) {
             }
             center.x+=super_mass*(pose[leg][0].x-rest[leg][0].x)/4;
             center.z+=super_mass*(pose[leg][0].z-rest[leg][0].z)/4;
+            body+=(pose[leg][0].x-rest[leg][0].x)/4;
         }
+        if(!frame) first_body=body;
+        advance=body-first_body;
+        if(walking && frame && frame%48==0) {
+            double difference=advance-.48*(frame/48);
+            forward_fail+=difference<-.003 || difference>.003;
+            if(body-previous_body<-.4 || body-previous_body>.4) seam_fail++;
+            for(leg=0;leg<4;leg++) {
+                air_fail+=swings[leg]<4 || swings[leg]>10;
+                swings[leg]=0;
+            }
+        }
+        previous_body=body;
         center.x/=super_mass+12; center.z/=super_mass+12;
         if(air>max_air) max_air=air;
         air_fail+=air>1;
         int stable=supports>=3;
         for(j=0;stable && j<supports;j++) stable=twice_area(support[j],support[(j+1)%supports],center)>=0;
         stance_fail+=!stable;
+    }
+    if(walking) {
+        for(frame=0;frame<9;frame++) {
+            int rgb[3];
+            if(*p++!=';') return 2;
+            for(j=0;j<3;j++) {
+                rgb[j]=byte(&p);
+                if(rgb[j]<0 || (j<2 && *p++!=',')) return 2;
+            }
+            ground_fail+=rgb[0]<125 || rgb[0]<rgb[1]+50 || rgb[1]<rgb[2]+22;
+        }
+        if(strncmp(p,"</output>",9)) return 2;
+        printf("D4_WALK frames=%d advance_mm=%d peak_lift_mm=%d max_slide_mm2=%d slide_fail=%d forward_fail=%d air_fail=%d seam_fail=%d stance_fail=%d length_fail=%d plant_fail=%d ground_fail=%d\n",
+            frames,(int)(1000*advance+.5),(int)(1000*peak_lift+.5),(int)(1000000*max_slide_sq+.5),
+            slide_fail,forward_fail,air_fail,seam_fail,
+            stance_fail,length_fail,plant_fail,ground_fail);
+        return slide_fail || forward_fail || air_fail || seam_fail || stance_fail || length_fail || plant_fail || ground_fail;
     }
     if(strncmp(p,"</output>",9)) return 2;
     for(leg=0;leg<4;leg++) if(swings[leg]<4 || swings[leg]>10) air_fail++;
@@ -401,7 +455,8 @@ static int check_pose(const char *mode) {
         "--enable-unsafe-swiftshader","--allow-file-access-from-files","--window-size=1280,807",
         "--virtual-time-budget=3000","--no-first-run",option,"--dump-dom",url,0};
     int i,at,rc,failed=0;
-    int gait=!strcmp(mode,"gait") || !strcmp(mode,"three-air") || !strcmp(mode,"long-leg");
+    int walking=!strcmp(mode,"walk") || !strcmp(mode,"sliding-feet") || !strcmp(mode,"frozen-body");
+    int gait=walking || !strcmp(mode,"gait") || !strcmp(mode,"three-air") || !strcmp(mode,"long-leg");
     int density=!strcmp(mode,"density") || !strcmp(mode,"small-town") || !strcmp(mode,"no-gear");
     int framing=!strcmp(mode,"framing") || !strcmp(mode,"wide-camera");
     int finish=!strcmp(mode,"finish") || !strcmp(mode,"no-texture") || !strcmp(mode,"single-smoke");
@@ -411,6 +466,15 @@ static int check_pose(const char *mode) {
     if(!getcwd(cwd,sizeof cwd)) return 2;
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-skeleton.html?mode=%s&pixels=",cwd,mode);
     if(at<0 || at>=(int)sizeof url) return 2;
+    for(i=0;walking && i<9;i++) {
+        /* Project the center of the fixed marker's top with the nominal chase camera. */
+        double x=-14.4-.12*i,y=.24-12,z=9-19.2;
+        double ground=.6*x+.8*z, depth=-(24*ground+7*y)/25, up=(24*y-7*ground)/25;
+        int px=(int)(640+576*(.8*x-.6*z)/depth),py=(int)(360-576*up/depth);
+        int w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",i?";":"",px,py);
+        if(w<0 || w>=(int)sizeof url-at || px<0 || px>=1280 || py<0 || py>=720) return 2;
+        at+=w;
+    }
     if(finish) {
         int w;
         if(!survey_finish()) return 2;
@@ -435,7 +499,7 @@ static int check_pose(const char *mode) {
     if(rc || !p) return 2;
     p+=strlen("<output id=\"pixels\">");
     if(gait || density || framing || finish) {
-        rc=gait?read_gait(p):density?read_town(p):framing?read_framing(p):read_finish(p);
+        rc=gait?read_gait(p,walking):density?read_town(p):framing?read_framing(p):read_finish(p);
         free(out);
         printf("CHECK_UXE_D4_SKELETON\tmode=%s failed=%d\n",mode,rc);
         return rc;
@@ -461,7 +525,7 @@ static int check_pose(const char *mode) {
 }
 
 int main(int argc,char **argv) {
-    int fixed, dynamic, density, framing, finish;
+    int fixed, dynamic, density, framing, finish, walk;
     if(argc==2) return check_pose(argv[1]);
     if(argc!=1) return 2;
     fixed=check_pose("normal");
@@ -469,8 +533,10 @@ int main(int argc,char **argv) {
     density=check_pose("density");
     framing=check_pose("framing");
     finish=check_pose("finish");
+    walk=check_pose("walk");
     if(dynamic>fixed) fixed=dynamic;
     if(density>fixed) fixed=density;
     if(framing>fixed) fixed=framing;
-    return fixed>finish?fixed:finish;
+    if(finish>fixed) fixed=finish;
+    return fixed>walk?fixed:walk;
 }
