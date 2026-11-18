@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D1 实例切片实验</title>
+<style>body { margin: 0; background: black } canvas { display: block }</style>
+<canvas id="frame" width="1280" height="720"></canvas>
+<pre id="report"></pre>
+<script type="module">
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { MESH_PLANE } from "../meshes.js";
+
+const low = document.createElement("canvas");
+low.width = 426;
+low.height = 240;
+const output = document.querySelector("#frame").getContext("2d", {willReadFrequently: true});
+output.imageSmoothingEnabled = false;
+output.fillRect(0, 0, 1280, 720);
+const renderer = createWebGLRenderer(low, {antialias: false});
+const gl = low.getContext("webgl");
+const camera = new PerspectiveCamera(2 * Math.atan(0.5), 1, 300);
+camera.setEye(0, 80, 60);
+camera.setTarget(0, 0, 0);
+const scene = new Scene();
+scene.clearColor = [0, 0, 0, 1];
+scene.fog.density = 0;
+
+// Original symmetric planform: nose, swept wings and tailplanes.
+function halfSpan(row) {
+  if (row < 10) return 1 + Math.floor(row / 3);
+  if (row < 24) return 4 + row - 10;
+  if (row < 30) return 17 - 2 * (row - 23);
+  if (row < 36) return 4;
+  return row < 42 ? 5 + row - 36 : 10 - 2 * (row - 41);
+}
+
+const reverse = new URLSearchParams(location.search).has("reverse");
+const cells = [];
+for (let pass = 0; pass < 13; pass++) {
+  const layer = reverse ? 12 - pass : pass;
+  for (let row = layer; row < 46 - layer; row++) {
+    const width = Math.max(1, halfSpan(row) - layer);
+    for (let col = 17 - width; col < 17 + width; col++) {
+      cells.push([col - 16.5, layer - 6, row - 22.5]);
+    }
+  }
+}
+const jet = scene.instances("jet", cells.length);
+jet.meshId = MESH_PLANE;
+// Painter order is observable with opaque texels and depth writes disabled.
+jet.alphaMode = 1;
+jet.instColor = new Uint8Array(4 * cells.length);
+for (let i = 0; i < cells.length; i++) {
+  const layer = cells[i][1] + 6;
+  jet.instColor.set([16 * (layer + 1), 75 + 8 * layer, 145, 255], i * 4);
+}
+
+function draw(angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  for (let i = 0; i < cells.length; i++) {
+    const [x, y, z] = cells[i];
+    jet.set(i, c * x + s * z, y, c * z - s * x, 1, angle);
+  }
+  renderer.render(scene, camera);
+  output.drawImage(low, 1, 0, 1278, 720);
+}
+
+// Lossless red-channel runs of the actual presented pixels.
+function runs(data) {
+  const result = [];
+  let start = 0;
+  for (let i = 4; i <= data.length; i += 4) {
+    if (i === data.length || data[i] !== data[start]) {
+      result.push((i - start) / 4 + ":" + data[start]);
+      start = i;
+    }
+  }
+  return result.join(",");
+}
+
+const frames = [];
+for (let view = 0; view < 4; view++) {
+  draw(view * Math.PI / 2);
+  frames.push(runs(output.getImageData(0, 0, 1280, 720).data));
+}
+const timings = [];
+for (let i = 0; i < 20; i++) {
+  const start = performance.now();
+  draw(i * Math.PI / 40);
+  gl.finish();
+  output.getImageData(640, 360, 1, 1);
+  if (i >= 4) timings.push(Math.round((performance.now() - start) * 1000));
+}
+const debug = gl.getExtension("WEBGL_debug_renderer_info");
+const device = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : "unknown";
+document.querySelector("#report").textContent =
+  [device, timings.join(","), ...frames].join("\n");
+</script>

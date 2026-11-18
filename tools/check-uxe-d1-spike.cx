@@ -1,0 +1,146 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+/* D1 spike: inverse perspective rays against thirteen independent occupancy masks. */
+static unsigned char logical[4][240][426];
+static int width_at(int row) {
+    if (row < 10) return 1 + row / 3;
+    if (row < 24) return row - 6;
+    if (row < 30) return 63 - 2 * row;
+    if (row < 36) return 4;
+    if (row < 42) return row - 31;
+    return 92 - 2 * row;
+}
+
+static int sample(int col, int row, int layer) {
+    int span;
+    if (row < layer || row >= 46 - layer) return 0;
+    span = width_at(row) - layer;
+    if (span < 1) span = 1;
+    return col >= 17 - span && col < 17 + span;
+}
+
+/* Pixel centre ray: right=(1,0,0), down=(0,-.6,.8), forward=(0,-.8,-.6).
+   Resolve frontmost occupied layer first. Skip only ambiguous projected edges. */
+static int expected(int px, int py, int heading) {
+    double right = (px + 0.5 - 213) / 240.0;
+    double down = (py + 0.5 - 120) / 240.0;
+    int h;
+    for (h = 12; h >= 0; h--) {
+        double distance = (86.0 - h) / (0.8 + 0.6 * down);
+        double x = distance * right;
+        double z = 60 + distance * (0.8 * down - 0.6);
+        double u = x, v = z;
+        int col, row, occupied, dx, dy;
+        if (heading == 1) { u = -z; v = x; }
+        if (heading == 2) { u = -x; v = -z; }
+        if (heading == 3) { u = z; v = -x; }
+        u += 17; v += 23;
+        if (u < -1 || u > 35 || v < -1 || v > 47) continue;
+        col = (int)(u + 1) - 1; row = (int)(v + 1) - 1;
+        occupied = sample(col, row, h);
+        dx = u - col < 0.02 ? -1 : (u - col > 0.98 ? 1 : 0);
+        dy = v - row < 0.02 ? -1 : (v - row > 0.98 ? 1 : 0);
+        if (sample(col + dx, row, h) != occupied ||
+            sample(col, row + dy, h) != occupied ||
+            sample(col + dx, row + dy, h) != occupied) return -1;
+        if (occupied) return 16 * (h + 1);
+    }
+    return 0;
+}
+
+static int number(const char **p) {
+    int n = 0;
+    if (**p < '0' || **p > '9') return -1;
+    while (**p >= '0' && **p <= '9') {
+        if (n > 1000000) return -1;
+        n = n * 10 + **p - '0';
+        *p = *p + 1;
+    }
+    return n;
+}
+
+static int read_frame(const char **p, int heading) {
+    int pos = 0, scale_errors = 0;
+    while (pos < 1280 * 720) {
+        int count = number(p), value, i;
+        if (count < 1 || count > 1280 * 720 - pos || **p != ':') return -1;
+        *p = *p + 1;
+        value = number(p);
+        if (value < 0 || value > 255) return -1;
+        for (i = 0; i < count; i++, pos++) {
+            int x = pos % 1280, y = pos / 1280;
+            if (!x || x == 1279) { scale_errors += value != 0; continue; }
+            x--;
+            if (x % 3 == 0 && y % 3 == 0) logical[heading][y/3][x/3] = value;
+            else scale_errors += logical[heading][y/3][x/3] != value;
+        }
+        if (pos < 1280 * 720) {
+            if (**p != ',') return -1;
+            *p = *p + 1;
+        }
+    }
+    return scale_errors;
+}
+
+int main(int argc, char **argv) {
+    char cwd[1024], url[1400], profile[128], option[180], *out = 0;
+    size_t size = 0;
+    const char *p;
+    int h, x, y, i, rc, total = 0, worst = 0, layer_errors = 0, symmetry = 0;
+    int tested = 0, edges = 0, scale_errors = 0, seen[13] = {0};
+    int reverse = argc == 2 && !strcmp(argv[1], "--reverse");
+    char *args[] = {"google-chrome","--headless=new","--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader","--allow-file-access-from-files",
+        "--window-size=1280,807","--no-first-run",option,"--dump-dom",url,0};
+    if (argc > 1 && !reverse) return 2;
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (tx_snprintf(profile, sizeof profile, "/tmp/chrome-dom-d1-%d", (int)getpid()) >= (int)sizeof profile) return 2;
+    if (tx_snprintf(option, sizeof option, "--user-data-dir=%s", profile) >= (int)sizeof option) return 2;
+    if (tx_snprintf(url, sizeof url, "file://%s/ujs/practice/uxe/test/uxe-d1-spike.html%s",
+        cwd, reverse ? "?reverse" : "") >= (int)sizeof url) return 2;
+    rc = cx_runv_timeout(args, 40, &out, &size);
+    chd_wipe(profile);
+    p = out ? strstr(out, "<pre id=\"report\">") : 0;
+    if (rc || !p) { printf("FAIL D1_BROWSER rc=%d\n", rc); return 2; }
+    p += strlen("<pre id=\"report\">");
+    {
+        const char *end = strchr(p, '\n'), *driver = strstr(p, "SwiftShader");
+        if (!end || !driver || driver >= end) { printf("FAIL D1_DRIVER\n"); return 2; }
+        p = end + 1;
+    }
+    for (i = 0; i < 16; i++) {
+        int us = number(&p);
+        if (us < 0 || *p++ != (i == 15 ? '\n' : ',')) return 2;
+        total += us;
+        if (us > worst) worst = us;
+    }
+    if (!total) return 2;
+    for (h = 0; h < 4; h++) {
+        rc = read_frame(&p, h);
+        if (rc < 0 || (h < 3 && *p++ != '\n')) { printf("FAIL D1_READBACK heading=%d\n", h); return 2; }
+        scale_errors += rc;
+    }
+    if (strncmp(p, "</pre>", 6)) return 2;
+    for (h = 0; h < 4; h++) {
+        int mirror = (4 - h) % 4;
+        for (y = 0; y < 240; y++) for (x = 0; x < 426; x++) {
+            int want = expected(x, y, h), got = logical[h][y][x];
+            if (want < 0) { edges++; continue; }
+            if (want) seen[want / 16 - 1]++;
+            tested++;
+            if (got != want) {
+                if (!layer_errors) printf("D1_PIXEL heading=%d x=%d y=%d want=%d got=%d\n", h*90,x,y,want,got);
+                layer_errors++;
+            }
+            symmetry += (got != 0) != (logical[mirror][y][425-x] != 0);
+        }
+    }
+    for (i = 0; i < 13; i++) if (!seen[i]) { printf("FAIL D1_INVISIBLE layer=%d\n",i); return 1; }
+    printf("D1_SWIFTSHADER frames=16 mean_us=%d max_us=%d hardware=UNMEASURED\n", total/16,worst);
+    printf("D1_CHECK tested=%d edge_ambiguous=%d layer_errors=%d symmetry_errors=%d scale_errors=%d\n",
+        tested,edges,layer_errors,symmetry,scale_errors);
+    rc = layer_errors || symmetry || scale_errors;
+    printf("CHECK_UXE_D1_SPIKE\t%s\n", rc ? "FAIL" : "PASS");
+    free(out);
+    return rc;
+}
