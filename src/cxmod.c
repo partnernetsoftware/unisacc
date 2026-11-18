@@ -69,6 +69,11 @@ char cxm_exp[CXM_MAXEXP][CXM_SYMW]; int cxm_nexp; int cxm_modseen;
 /* `#pragma unisa owns NAME [NAME...]` of the unit being scanned (mode 0, reset by every cxm_scan): functions that
    return an owned block (prd_cx.md 11.7); cxm_ownl is the pragma line.  A unit without owns never reads these. */
 char cxm_own[CXM_MAXEXP][CXM_SYMW]; int cxm_ownl[CXM_MAXEXP]; int cxm_nown;
+/* `#pragma unisa safe` (cxm_safe: its line) and `#pragma unisa unsafe NAME...` of the scanned unit (plans/v0.0.77.md
+   P5); cxf_rel: one-line `#define NAME(x) free(x)` releaser macros seen by the scan (blanked lines keep no text) */
+int cxm_safe; char cxm_uns[CXM_MAXEXP][CXM_SYMW]; int cxm_unsl[CXM_MAXEXP]; int cxm_nuns;
+#define CXF_R 32
+static char cxf_rel[CXF_R][CXM_SYMW]; static int cxf_nrel;
 /* exported and defined names: kind 0 a module's function, 1 a module's type name (typedef, "struct T", enum
    constant), 2 a non-static function defined by a unit that is not a module, 3 a module's non-static function
    that is not public (no prototype in the interface; only names the owner of a refused call) */
@@ -563,6 +568,474 @@ int cxm_exportline(int u, int line, int i, int e) {
     }
 }
 int cxm_exported(char *nm, int nl) { int k; k = 0; while (k < cxm_nexp) { if (cxm_eqn(nm, nl, cxm_exp[k])) return 1; k = k + 1; } return 0; }
+/* ---- `#pragma unisa safe` (plans/v0.0.77.md 2.3, P5): use after free (E2) and double free (E2b) by a structured,
+   intraprocedural walk of each function body of a safe unit.  The rules are those of tools/own-flow.cx (the oracle,
+   tests/cases/own-flow/expected.tsv): subjects are local names (parameters included) handed alone to free, mm_free
+   or a one-line releaser macro; a name is freed after its release until it is assigned as a whole, declared again or
+   its address is taken; any later occurrence is E2, a second release E2b; branches, case groups, loop exits and goto
+   labels join their predecessors (freed on any is freed); a loop body is read twice when the back edge adds a
+   release; return, break, continue, goto and no-return calls end a path.  `#pragma unisa unsafe NAME` exempts a
+   function.  Limits (silent misses): aliases, fields, globals, function pointers, cross-function transfer; the
+   `own-flow: releases` comment of the prototype has no product form (comments are blanked before the scan).
+   Only a unit that declares safe reaches cxf_unit. ---- */
+#define CXF_T 65536
+#define CXF_V 64
+#define CXF_D 64
+#define CXF_L 32
+#define CXF_S 512
+#define CXF_NR 256
+static int cxf_k[CXF_T]; static int cxf_o[CXF_T]; static int cxf_n[CXF_T]; static int cxf_ln[CXF_T]; static int cxf_mt[CXF_T];
+static int cxf_nt; static int cxf_stk[4096];
+static int cxf_nro[CXF_NR]; static int cxf_nrn[CXF_NR]; static int cxf_nnr;
+static int cxf_vo[CXF_V]; static int cxf_vl[CXF_V]; static int cxf_vd[CXF_V]; static int cxf_nv;
+/* flow states: slot 0 is the current state, 1..CXF_L the goto labels, the rest a stack for joins */
+static int cxf_st[CXF_S][CXF_V]; static int cxf_fl[CXF_S][CXF_V]; static int cxf_dd[CXF_S]; static int cxf_ns; static int cxf_over;
+static int cxf_frk[CXF_D]; static int cxf_frdef[CXF_D]; static int cxf_frb[CXF_D]; static int cxf_frc[CXF_D]; static int cxf_fre[CXF_D]; static int cxf_nfr;
+static int cxf_lbo[CXF_L]; static int cxf_lbn[CXF_L]; static int cxf_nlb;
+static int cxf_depth; static int cxf_hit; static int cxf_hv; static int cxf_hl; static int cxf_fo; static int cxf_fn;
+static int cxf_sk(char *s, int j, int e) { while (j < e && (s[j] == ' ' || s[j] == '\t')) j = j + 1; return j; }
+static int cxf_wd(char *s, int j, int e) { while (j < e && cxm_idch(s[j] & 255)) j = j + 1; return j; }
+static int cxf_isrel(char *p, int n) {
+    int r;
+    if (cxm_eqn(p, n, "free") || cxm_eqn(p, n, "mm_free")) return 1;
+    r = 0; while (r < cxf_nrel) { if (cxm_eqn(p, n, cxf_rel[r])) return 1; r = r + 1; }
+    return 0;
+}
+/* `#define NAME(x) R(x)` with R a releaser, an optional `;`; s[b..e) follows the word define */
+static int cxf_define(char *s, int b, int e) {
+    int j; int a; int nb; int pa; int pb; int ra; int rb; int k;
+    j = cxf_sk(s, b, e); a = j; j = cxf_wd(s, j, e); nb = j;
+    if (nb == a || j >= e || s[j] != '(') return 0;
+    j = cxf_sk(s, j + 1, e); pa = j; j = cxf_wd(s, j, e); pb = j; j = cxf_sk(s, j, e);
+    if (pb == pa || j >= e || s[j] != ')') return 0;
+    j = cxf_sk(s, j + 1, e); ra = j; j = cxf_wd(s, j, e); rb = j;
+    if (!cxf_isrel(s + ra, rb - ra)) return 0;
+    j = cxf_sk(s, j, e);
+    if (j >= e || s[j] != '(') return 0;
+    j = cxf_sk(s, j + 1, e);
+    if (j + (pb - pa) > e) return 0;
+    k = 0; while (k < pb - pa) { if (s[j + k] != s[pa + k]) return 0; k = k + 1; }
+    j = cxf_sk(s, j + (pb - pa), e);
+    if (j >= e || s[j] != ')') return 0;
+    j = cxf_sk(s, j + 1, e);
+    if (j < e && s[j] == ';') j = cxf_sk(s, j + 1, e);
+    if (j < e && s[j] != '\n' && s[j] != '\r') return 0;
+    if (nb - a < CXM_SYMW && cxf_nrel < CXF_R) { cxm_cpyn(cxf_rel[cxf_nrel], s + a, nb - a, CXM_SYMW); cxf_nrel = cxf_nrel + 1; }
+    return 0;
+}
+static int cxf_tis(int i, char *w) { return i >= 0 && i < cxf_nt && cxm_eqn(cxm_src + cxf_o[i], cxf_n[i], w); }
+static int cxf_tp(int i, int c) { return i >= 0 && i < cxf_nt && cxf_k[i] == 2 && cxm_src[cxf_o[i]] == c; }
+static int cxf_tid(int i) { return i >= 0 && i < cxf_nt && cxf_k[i] == 1; }
+static int cxf_same(int i, int o, int n) {
+    int k;
+    if (cxf_n[i] != n) return 0;
+    k = 0; while (k < n) { if (cxm_src[cxf_o[i] + k] != cxm_src[o + k]) return 0; k = k + 1; }
+    return 1;
+}
+/* tokens of the cleaned unit (comments and directive lines are blanks already); 1 bracket mismatch or too many */
+static int cxf_lex(void) {
+    char *s; int n; int i; int line; int c; int q; int sp; int k; int o;
+    s = cxm_src; n = cxm_nsrc; i = 0; line = 1; cxf_nt = 0;
+    while (i < n) {
+        c = s[i] & 255;
+        if (c == '\n') { line = line + 1; i = i + 1; continue; }
+        if (c <= 32) { i = i + 1; continue; }
+        if (cxf_nt >= CXF_T) return 1;
+        cxf_o[cxf_nt] = i; cxf_ln[cxf_nt] = line; cxf_mt[cxf_nt] = 0 - 1;
+        if (c == '"' || c == '\'') {
+            q = c; i = i + 1;
+            while (i < n && s[i] != q && s[i] != '\n') { if (s[i] == '\\') i = i + 1; i = i + 1; }
+            i = i + 1; cxf_k[cxf_nt] = 3;
+        } else if (cxm_idch(c) && !(c >= '0' && c <= '9')) {
+            while (i < n && cxm_idch(s[i] & 255)) i = i + 1;
+            cxf_k[cxf_nt] = 1;
+        } else if (c >= '0' && c <= '9') {
+            while (i < n && (cxm_idch(s[i] & 255) || s[i] == '.')) i = i + 1;
+            cxf_k[cxf_nt] = 3;
+        } else { i = i + 1; cxf_k[cxf_nt] = 2; }
+        cxf_n[cxf_nt] = i - cxf_o[cxf_nt];
+        cxf_nt = cxf_nt + 1;
+    }
+    sp = 0; k = 0;
+    while (k < cxf_nt) {
+        if (cxf_k[k] == 2) {
+            c = s[cxf_o[k]];
+            if (c == '(' || c == '[' || c == '{') { if (sp >= 4096) return 1; cxf_stk[sp] = k; sp = sp + 1; }
+            else if (c == ')' || c == ']' || c == '}') { if (sp <= 0) return 1; sp = sp - 1; o = cxf_stk[sp]; cxf_mt[o] = k; cxf_mt[k] = o; }
+        }
+        k = k + 1;
+    }
+    return sp != 0;
+}
+static int cxf_releaser(int i) { return cxf_tid(i) && cxf_isrel(cxm_src + cxf_o[i], cxf_n[i]); }
+/* releaser call at I: the token of its single plain-name argument (parentheses and one cast stripped), or -1 */
+static int cxf_relarg(int i) {
+    int a; int e; int c; int j; int typ;
+    if (!cxf_releaser(i) || !cxf_tp(i + 1, '(') || cxf_mt[i + 1] < 0 || cxf_tp(i - 1, '.') || cxf_tp(i - 1, '>')) return 0 - 1;
+    a = i + 2; e = cxf_mt[i + 1] - 1;
+    while (a < e && cxf_tp(a, '(') && cxf_mt[a] == e) { a = a + 1; e = e - 1; }
+    if (a < e && cxf_tp(a, '(') && cxf_mt[a] > a && cxf_mt[a] < e && cxf_tid(a + 1)) {
+        c = cxf_mt[a]; typ = 1; j = a + 1;
+        while (j < c) { if (!(cxf_tid(j) || cxf_tp(j, '*'))) typ = 0; j = j + 1; }
+        if (typ) a = c + 1;
+        while (a < e && cxf_tp(a, '(') && cxf_mt[a] == e) { a = a + 1; e = e - 1; }
+    }
+    if (a == e && cxf_tid(a)) return a;
+    return 0 - 1;
+}
+static int cxf_has(int i, char *w) {
+    int n; int j; int k;
+    n = 0; while (w[n]) n = n + 1;
+    if (!cxf_tid(i)) return 0;
+    j = 0;
+    while (j + n <= cxf_n[i]) { k = 0; while (k < n && cxm_src[cxf_o[i] + j + k] == w[k]) k = k + 1; if (k == n) return 1; j = j + 1; }
+    return 0;
+}
+static int cxf_locnr(int i) { int r; r = 0; while (r < cxf_nnr) { if (cxf_same(i, cxf_nro[r], cxf_nrn[r])) return 1; r = r + 1; } return 0; }
+static int cxf_noret(int i) {
+    return cxf_tis(i, "exit") || cxf_tis(i, "abort") || cxf_tis(i, "_exit") || cxf_tis(i, "_Exit") || cxf_tis(i, "sy_exit") ||
+           cxf_tis(i, "die") || cxf_tis(i, "fatal") || cxf_tis(i, "longjmp") || cxf_tis(i, "siglongjmp") || cxf_has(i, "panic") ||
+           cxf_has(i, "die_") || cxf_has(i, "fatal_") || cxf_has(i, "_die") || cxf_locnr(i);
+}
+static int cxf_kw(int i) {
+    return cxf_tis(i, "return") || cxf_tis(i, "else") || cxf_tis(i, "case") || cxf_tis(i, "do") || cxf_tis(i, "sizeof") || cxf_tis(i, "goto");
+}
+static int cxf_var(int i, int add) {
+    int v;
+    v = 0; while (v < cxf_nv) { if (cxf_same(i, cxf_vo[v], cxf_vl[v])) return v; v = v + 1; }
+    if (!add || cxf_nv >= CXF_V) return 0 - 1;
+    cxf_vo[cxf_nv] = cxf_o[i]; cxf_vl[cxf_nv] = cxf_n[i]; cxf_vd[cxf_nv] = 0; cxf_st[0][cxf_nv] = 0; cxf_fl[0][cxf_nv] = 0;
+    cxf_nv = cxf_nv + 1;
+    return cxf_nv - 1;
+}
+/* the first finding of the unit (kind 1 E2, 2 E2b); nothing at an unreachable point */
+static int cxf_report(int v, int line, int kind) {
+    if (cxf_dd[0] || cxf_hit) return 0;
+    cxf_hit = kind; cxf_hv = v; cxf_hl = line;
+    return 0;
+}
+static int cxf_cpy(int a, int b) { int v; v = 0; while (v < CXF_V) { cxf_st[a][v] = cxf_st[b][v]; cxf_fl[a][v] = cxf_fl[b][v]; v = v + 1; } cxf_dd[a] = cxf_dd[b]; return 0; }
+static int cxf_join(int a, int b) {
+    int v;
+    if (cxf_dd[b]) return 0;
+    if (cxf_dd[a]) return cxf_cpy(a, b);
+    v = 0; while (v < cxf_nv) { if (!cxf_st[a][v] && cxf_st[b][v]) { cxf_st[a][v] = 1; cxf_fl[a][v] = cxf_fl[b][v]; } v = v + 1; }
+    return 0;
+}
+static int cxf_kill(int a) { int v; v = 0; while (v < CXF_V) { cxf_st[a][v] = 0; cxf_fl[a][v] = 0; v = v + 1; } cxf_dd[a] = 1; return 0; }
+static int cxf_adds(int a, int b) {
+    int v;
+    if (cxf_dd[b]) return 0;
+    v = 0; while (v < cxf_nv) { if (cxf_st[b][v] && (cxf_dd[a] || !cxf_st[a][v])) return 1; v = v + 1; }
+    return 0;
+}
+static int cxf_new(void) { if (cxf_ns >= CXF_S) { cxf_over = 1; return CXF_S - 1; } cxf_ns = cxf_ns + 1; return cxf_ns - 1; }
+/* first token of the last statement before the closing brace RB, or -1 */
+static int cxf_last(int lb, int rb) {
+    int j;
+    j = rb - 1;
+    if (!cxf_tp(j, ';')) return 0 - 1;
+    j = j - 1;
+    while (j > lb) {
+        if ((cxf_tp(j, ')') || cxf_tp(j, ']')) && cxf_mt[j] >= 0) { j = cxf_mt[j] - 1; continue; }
+        if (cxf_tp(j, ';') || cxf_tp(j, '{') || cxf_tp(j, '}')) break;
+        j = j - 1;
+    }
+    return j + 1;
+}
+static int cxf_isdecl(int k) {
+    if (!(cxf_tp(k + 1, ';') || cxf_tp(k + 1, ',') || cxf_tp(k + 1, '=') || cxf_tp(k + 1, '[') || cxf_tp(k + 1, ')'))) return 0;
+    if (cxf_tid(k - 1) && !cxf_kw(k - 1)) return 1;
+    return cxf_tp(k - 1, '*') && (cxf_tid(k - 2) || cxf_tp(k - 2, '*') || cxf_tp(k - 2, ',')) && !cxf_kw(k - 2);
+}
+static int cxf_local(int i, int lb, int rb) {
+    int k;
+    k = lb; if (cxf_tp(lb - 1, ')') && cxf_mt[lb - 1] > 0) k = cxf_mt[lb - 1];
+    while (k < rb) { if (cxf_tid(k) && cxf_same(k, cxf_o[i], cxf_n[i]) && cxf_isdecl(k)) return 1; k = k + 1; }
+    return 0;
+}
+static int cxf_stmt(int i, int rb);
+static int cxf_send(int i, int rb) {
+    int j;
+    j = i;
+    while (j < rb) {
+        if ((cxf_tp(j, '(') || cxf_tp(j, '[') || cxf_tp(j, '{')) && cxf_mt[j] > j) { j = cxf_mt[j] + 1; continue; }
+        if (cxf_tp(j, ';') || cxf_tp(j, '}')) return j;
+        j = j + 1;
+    }
+    return rb;
+}
+/* tokens [A, B) in source order: releases, uses, reassignments */
+static int cxf_expr(int a, int b) {
+    int k; int s; int v; int as; int de; int da; int ad; int sz;
+    k = a;
+    while (k < b) {
+        s = cxf_relarg(k);
+        if (s >= 0) {
+            v = cxf_var(s, 0);
+            if (v >= 0) {
+                if (cxf_st[0][v]) cxf_report(v, cxf_ln[s], 2);
+                else { cxf_st[0][v] = 1; cxf_fl[0][v] = cxf_ln[s]; }
+            }
+            k = cxf_mt[k + 1] + 1; continue;
+        }
+        if (cxf_tid(k) && !cxf_tp(k + 1, '(')) {
+            v = cxf_var(k, 0);
+            if (v < 0 || cxf_tp(k - 1, '.') || (cxf_tp(k - 1, '>') && cxf_tp(k - 2, '-'))) { k = k + 1; continue; }
+            as = cxf_tp(k + 1, '=') && !cxf_tp(k + 2, '=');
+            de = (cxf_tp(k + 1, ';') || cxf_tp(k + 1, ',') || cxf_tp(k + 1, '=') || cxf_tp(k + 1, '[')) &&
+                 ((cxf_tid(k - 1) && !cxf_kw(k - 1)) || (cxf_tp(k - 1, '*') && (cxf_tid(k - 2) || cxf_tp(k - 2, '*') || cxf_tp(k - 2, ',')) && !cxf_kw(k - 2)));
+            da = as && cxf_tp(k - 1, '*') && !de;
+            ad = cxf_tp(k - 1, '&') && !(cxf_tid(k - 2) || cxf_tp(k - 2, ')') || cxf_tp(k - 2, ']') || (k >= 2 && cxf_k[k - 2] == 3));
+            sz = cxf_tis(k - 1, "sizeof") || (cxf_tp(k - 1, '(') && cxf_tis(k - 2, "sizeof"));
+            if (sz) { k = k + 1; continue; }
+            if (de) cxf_vd[v] = cxf_depth;
+            if (de || ad || (as && !da && !cxf_tp(k - 1, ']'))) { cxf_st[0][v] = 0; k = k + 1; continue; }
+            if (cxf_st[0][v]) cxf_report(v, cxf_ln[k], 1);
+            k = k + 1; continue;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+static int cxf_block(int lb) {
+    int rb; int j; int nj; int v;
+    rb = cxf_mt[lb]; j = lb + 1;
+    cxf_depth = cxf_depth + 1;
+    while (j < rb) { nj = cxf_stmt(j, rb); if (nj > j) j = nj; else j = j + 1; }
+    cxf_depth = cxf_depth - 1;
+    v = 0; while (v < cxf_nv) { if (cxf_vd[v] > cxf_depth) { cxf_st[0][v] = 0; cxf_vd[v] = 0; } v = v + 1; }
+    return rb + 1;
+}
+static int cxf_label(int i) {
+    int l;
+    l = 0; while (l < cxf_nlb) { if (cxf_same(i, cxf_lbo[l], cxf_lbn[l])) return l + 1; l = l + 1; }
+    if (cxf_nlb >= CXF_L) return 0 - 1;
+    cxf_lbo[cxf_nlb] = cxf_o[i]; cxf_lbn[cxf_nlb] = cxf_n[i]; cxf_kill(cxf_nlb + 1);
+    cxf_nlb = cxf_nlb + 1;
+    return cxf_nlb;
+}
+static int cxf_push(int kind) {
+    if (cxf_nfr >= CXF_D) return 0 - 1;
+    cxf_frk[cxf_nfr] = kind; cxf_frdef[cxf_nfr] = 0;
+    cxf_frb[cxf_nfr] = cxf_new(); cxf_kill(cxf_frb[cxf_nfr]);
+    cxf_frc[cxf_nfr] = cxf_new(); cxf_kill(cxf_frc[cxf_nfr]);
+    cxf_fre[cxf_nfr] = cxf_new(); cxf_cpy(cxf_fre[cxf_nfr], 0);
+    cxf_nfr = cxf_nfr + 1;
+    return cxf_nfr - 1;
+}
+/* while and for: COND [CA, CB) before every iteration, STEP [SA, SB) after it; the body is read once from the entry
+   and once more from entry join back edge when the back edge adds a release; exit = entry join back edge (none for
+   a loop without a condition) join every break */
+static int cxf_loop(int ca, int cb, int sa, int sb, int body, int rb, int forever) {
+    int m; int e; int bk; int x; int f; int end; int it;
+    m = cxf_ns; end = body;
+    cxf_expr(ca, cb);
+    e = cxf_new(); cxf_cpy(e, 0); bk = cxf_new(); cxf_cpy(bk, 0);
+    f = cxf_push(1);
+    if (f < 0) { cxf_ns = m; return cxf_send(body, rb) + 1; }
+    it = 0;
+    while (it < 2) {
+        end = cxf_stmt(body, rb);
+        cxf_join(0, cxf_frc[f]);
+        cxf_expr(sa, sb); cxf_expr(ca, cb);
+        cxf_cpy(bk, 0);
+        if (it == 1 || !cxf_adds(e, bk)) break;
+        cxf_cpy(0, e); cxf_join(0, bk);
+        it = it + 1;
+    }
+    if (forever) cxf_kill(0); else { x = cxf_new(); cxf_cpy(x, e); cxf_join(x, bk); cxf_cpy(0, x); }
+    cxf_join(0, cxf_frb[f]);
+    cxf_nfr = cxf_nfr - 1; cxf_ns = m;
+    return end;
+}
+static int cxf_ever(int ca, int cb) { return ca == cb || (cb == ca + 1 && (cxf_tis(ca, "1") || cxf_tis(ca, "true"))); }
+static int cxf_stmt(int i, int rb) {
+    int c; int j; int e; int a; int m; int s1; int s2; int f; int it; int fall; int bk;
+    if (i >= rb) return rb;
+    if (cxf_tp(i, '{') && cxf_mt[i] > i) return cxf_block(i);
+    if (cxf_tp(i, ';')) return i + 1;
+    m = cxf_ns;
+    if (cxf_tis(i, "if") && cxf_tp(i + 1, '(') && cxf_mt[i + 1] > i) {
+        c = cxf_mt[i + 1];
+        cxf_expr(i + 2, c);
+        e = cxf_new(); cxf_cpy(e, 0);
+        j = cxf_stmt(c + 1, rb);
+        a = cxf_new(); cxf_cpy(a, 0);
+        if (cxf_tis(j, "else")) { cxf_cpy(0, e); j = cxf_stmt(j + 1, rb); cxf_join(0, a); }
+        else cxf_join(0, e);
+        cxf_ns = m;
+        return j;
+    }
+    if (cxf_tis(i, "while") && cxf_tp(i + 1, '(') && cxf_mt[i + 1] > i) {
+        c = cxf_mt[i + 1];
+        return cxf_loop(i + 2, c, c, c, c + 1, rb, cxf_ever(i + 2, c));
+    }
+    if (cxf_tis(i, "for") && cxf_tp(i + 1, '(') && cxf_mt[i + 1] > i) {
+        c = cxf_mt[i + 1]; s1 = 0 - 1; s2 = 0 - 1; j = i + 2;
+        while (j < c) {
+            if ((cxf_tp(j, '(') || cxf_tp(j, '[') || cxf_tp(j, '{')) && cxf_mt[j] > j) { j = cxf_mt[j] + 1; continue; }
+            if (cxf_tp(j, ';')) { if (s1 < 0) s1 = j; else if (s2 < 0) s2 = j; }
+            j = j + 1;
+        }
+        if (s1 < 0 || s2 < 0) { cxf_expr(i + 2, c); return cxf_loop(c, c, c, c, c + 1, rb, 0); }
+        cxf_expr(i + 2, s1);
+        return cxf_loop(s1 + 1, s2, s2 + 1, c, c + 1, rb, cxf_ever(s1 + 1, s2));
+    }
+    if (cxf_tis(i, "do")) {
+        e = cxf_new(); cxf_cpy(e, 0); bk = cxf_new(); cxf_cpy(bk, 0);
+        f = cxf_push(1); j = i + 1; c = 0 - 1;
+        if (f < 0) { cxf_ns = m; return i + 1; }
+        it = 0;
+        while (it < 2) {
+            j = cxf_stmt(i + 1, rb);
+            cxf_join(0, cxf_frc[f]);
+            if (cxf_tis(j, "while") && cxf_tp(j + 1, '(') && cxf_mt[j + 1] > j) { c = cxf_mt[j + 1]; cxf_expr(j + 2, c); }
+            cxf_cpy(bk, 0);
+            if (it == 1 || !cxf_adds(e, bk)) break;
+            cxf_cpy(0, e); cxf_join(0, bk);
+            it = it + 1;
+        }
+        cxf_cpy(0, bk);
+        if (c > 0 && cxf_ever(j + 2, c)) cxf_kill(0);
+        cxf_join(0, cxf_frb[f]);
+        cxf_nfr = cxf_nfr - 1; cxf_ns = m;
+        if (c > 0) { if (cxf_tp(c + 1, ';')) return c + 2; return c + 1; }
+        return j;
+    }
+    if (cxf_tis(i, "switch") && cxf_tp(i + 1, '(') && cxf_mt[i + 1] > i) {
+        c = cxf_mt[i + 1];
+        cxf_expr(i + 2, c);
+        if (!cxf_tp(c + 1, '{')) return cxf_stmt(c + 1, rb);
+        f = cxf_push(2);
+        if (f < 0) { cxf_ns = m; return cxf_mt[c + 1] + 1; }
+        cxf_kill(0);
+        j = cxf_block(c + 1);
+        fall = cxf_new(); cxf_cpy(fall, 0);
+        cxf_cpy(0, cxf_frb[f]);
+        cxf_join(0, fall);
+        if (!cxf_frdef[f]) cxf_join(0, cxf_fre[f]);
+        cxf_nfr = cxf_nfr - 1; cxf_ns = m;
+        return j;
+    }
+    if (cxf_tis(i, "case") || (cxf_tis(i, "default") && cxf_tp(i + 1, ':'))) {
+        j = i + 1;
+        f = cxf_nfr - 1; while (f >= 0 && cxf_frk[f] != 2) f = f - 1;
+        if (cxf_tis(i, "case"))
+            while (j < rb && !(cxf_tp(j, ':') && !cxf_tp(j + 1, ':'))) { if ((cxf_tp(j, '(') || cxf_tp(j, '[')) && cxf_mt[j] > j) j = cxf_mt[j]; j = j + 1; }
+        if (f >= 0) { cxf_join(0, cxf_fre[f]); if (cxf_tis(i, "default")) cxf_frdef[f] = 1; }
+        return j + 1;
+    }
+    if (cxf_tis(i, "return")) {
+        e = cxf_send(i, rb);
+        cxf_expr(i + 1, e);
+        cxf_kill(0);
+        if (cxf_tp(e, ';')) return e + 1;
+        return e;
+    }
+    if ((cxf_tis(i, "break") || cxf_tis(i, "continue")) && cxf_tp(i + 1, ';')) {
+        f = cxf_nfr - 1;
+        if (cxf_tis(i, "continue")) while (f >= 0 && cxf_frk[f] != 1) f = f - 1;
+        if (f >= 0) { if (cxf_tis(i, "break")) cxf_join(cxf_frb[f], 0); else cxf_join(cxf_frc[f], 0); }
+        cxf_kill(0);
+        return i + 2;
+    }
+    if (cxf_tis(i, "goto") && cxf_tid(i + 1)) {
+        a = cxf_label(i + 1);
+        if (a > 0) cxf_join(a, 0);
+        cxf_kill(0);
+        if (cxf_tp(i + 2, ';')) return i + 3;
+        return i + 2;
+    }
+    if (cxf_tis(i, "else")) return i + 1;
+    if (cxf_tid(i) && cxf_tp(i + 1, ':') && !cxf_tp(i + 2, ':')) {
+        a = cxf_label(i);
+        if (a > 0) cxf_join(0, a);
+        return i + 2;
+    }
+    e = cxf_send(i, rb);
+    cxf_expr(i, e);
+    if (cxf_tid(i) && cxf_tp(i + 1, '(') && cxf_noret(i)) cxf_kill(0);
+    if (cxf_tp(e, ';')) return e + 1;
+    if (e > i) return e;
+    return i + 1;
+}
+static int cxf_body(int lb, int rb) {
+    int d; int s; int pass; int gt;
+    cxf_nv = 0; cxf_nlb = 0; gt = 0;
+    d = lb + 1;
+    while (d < rb) {
+        s = cxf_relarg(d);
+        if (s >= 0 && cxf_local(s, lb, rb)) cxf_var(s, 1);
+        if (cxf_tis(d, "goto")) gt = 1;
+        d = d + 1;
+    }
+    pass = 0;
+    while (pass < 1 + gt) {
+        d = 0; while (d < CXF_V) { cxf_st[0][d] = 0; cxf_fl[0][d] = 0; cxf_vd[d] = 0; d = d + 1; }
+        cxf_dd[0] = 0; cxf_nfr = 0; cxf_depth = 0; cxf_ns = CXF_L + 1;
+        cxf_block(lb);
+        pass = pass + 1;
+    }
+    return 0;
+}
+static int cxf_isuns(int nm) { int k; k = 0; while (k < cxm_nuns) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_uns[k])) return 1; k = k + 1; } return 0; }
+/* the safe unit u: every unsafe NAME is a function of the unit, then each other function body is walked */
+static int cxf_unit(int u) {
+    int k; int d; int round; int nm; int rb; int s; int j; int ok;
+    if (cxf_lex()) return 0;
+    cxf_nnr = 0; round = 0;
+    while (round < 3) {
+        d = 0; k = 0;
+        while (k < cxf_nt) {
+            if (cxf_tp(k, '{')) {
+                if (d == 0 && cxf_tp(k - 1, ')') && cxf_mt[k - 1] > 0 && cxf_tid(cxf_mt[k - 1] - 1) && cxf_mt[k] > k) {
+                    nm = cxf_mt[k - 1] - 1; rb = cxf_mt[k]; s = cxf_last(k, rb);
+                    if (s >= 0 && cxf_tid(s) && cxf_tp(s + 1, '(') && cxf_noret(s) && !cxf_locnr(nm) && cxf_nnr < CXF_NR) {
+                        cxf_nro[cxf_nnr] = cxf_o[nm]; cxf_nrn[cxf_nnr] = cxf_n[nm]; cxf_nnr = cxf_nnr + 1;
+                    }
+                    k = rb + 1; continue;
+                }
+                d = d + 1;
+            } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
+            k = k + 1;
+        }
+        round = round + 1;
+    }
+    j = 0;
+    while (j < cxm_nuns) {
+        ok = 0; d = 0; k = 0;
+        while (k < cxf_nt && !ok) {
+            if (cxf_tp(k, '{') && d == 0 && cxf_tp(k - 1, ')') && cxf_mt[k - 1] > 0 && cxf_tid(cxf_mt[k - 1] - 1) && cxf_mt[k] > k) {
+                if (cxm_eqn(cxm_src + cxf_o[cxf_mt[k - 1] - 1], cxf_n[cxf_mt[k - 1] - 1], cxm_uns[j])) ok = 1;
+                k = cxf_mt[k] + 1; continue;
+            }
+            if (cxf_tp(k, '{')) d = d + 1; else if (cxf_tp(k, '}') && d > 0) d = d - 1;
+            k = k + 1;
+        }
+        if (!ok) { cxm_start(u, cxm_unsl[j]); cxm_m("unisa unsafe "); cxm_m(cxm_uns[j]); cxm_m(": no function "); cxm_m(cxm_uns[j]); cxm_m(" in this unit"); return cxm_fail(); }
+        j = j + 1;
+    }
+    cxf_hit = 0; cxf_over = 0; d = 0; k = 0;
+    while (k < cxf_nt && !cxf_hit) {
+        if (cxf_tp(k, '{')) {
+            if (d == 0 && cxf_tp(k - 1, ')') && cxf_mt[k - 1] > 0 && cxf_tid(cxf_mt[k - 1] - 1) && cxf_mt[k] > k) {
+                nm = cxf_mt[k - 1] - 1; rb = cxf_mt[k];
+                cxf_fo = cxf_o[nm]; cxf_fn = cxf_n[nm];
+                if (!cxf_isuns(nm)) cxf_body(k, rb);
+                if (cxf_over && !cxf_hit) { cxm_start(u, cxf_ln[nm]); cxm_m("unisa safe: "); cxm_mn(cxm_src + cxf_fo, cxf_fn); cxm_m(" is too deep for the flow check"); return cxm_fail(); }
+                k = rb + 1; continue;
+            }
+            d = d + 1;
+        } else if (cxf_tp(k, '}') && d > 0) d = d - 1;
+        k = k + 1;
+    }
+    if (!cxf_hit) return 0;
+    cxm_start(u, cxf_hl);
+    if (cxf_hit == 2) cxm_m("unisa safe: double free of "); else cxm_m("unisa safe: use after free of ");
+    cxm_mn(cxm_src + cxf_vo[cxf_hv], cxf_vl[cxf_hv]); cxm_m(" in "); cxm_mn(cxm_src + cxf_fo, cxf_fn);
+    return cxm_fail();
+}
 /* the directive at s[i] ('#' at the start of a line), ending at the first newline not after a splice.  mode 0 handles
    `#pragma unisa`; every mode reads `#pragma unisa export` (the list belongs to the scan), tracks #if nesting
    (*cond) and records #define names.  The line is blanked after. */
@@ -577,6 +1050,7 @@ int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, int *en
     if (cxm_eqn(s + a, b - a, "define")) {
         we = cxm_id(s, b, e, &wb);
         if (we > wb && cxm_nmac < CXM_MACROS) { cxm_cpyn(cxm_mac[cxm_nmac], s + wb, we - wb, CXM_SYMW); cxm_nmac = cxm_nmac + 1; }
+        if (mode == 0) cxf_define(s, b, e);
     }
     if (cxm_eqn(s + a, b - a, "pragma")) {
         we = cxm_id(s, b, e, &wb);
@@ -630,6 +1104,19 @@ int cxm_directive(int u, int mode, int i, int line, int *cond, int seen, int *en
                     cxm_cpyn(cxm_own[cxm_nown], s + wb, we - wb, CXM_SYMW); cxm_ownl[cxm_nown] = line; cxm_nown = cxm_nown + 1;
                     we = cxm_word(s, we, e, &wb);
                 }
+            } else if (cxm_eqn(s + a, b - a, "safe")) {
+                we = cxm_word(s, b, e, &wb);
+                if (we > wb) { cxm_start(u, line); cxm_m("unisa safe takes no operand"); return cxm_fail(); }
+                cxm_safe = line;
+            } else if (cxm_eqn(s + a, b - a, "unsafe")) {
+                we = cxm_word(s, b, e, &wb);
+                if (we == wb) { cxm_start(u, line); cxm_m("unisa unsafe takes a function name"); return cxm_fail(); }
+                while (we > wb) {
+                    k = wb; while (k < we && cxm_idch(s[k] & 255)) k = k + 1;
+                    if (k < we || we - wb >= CXM_SYMW || cxm_nuns >= CXM_MAXEXP) { cxm_start(u, line); cxm_m("unisa unsafe takes a function name"); return cxm_fail(); }
+                    cxm_cpyn(cxm_uns[cxm_nuns], s + wb, we - wb, CXM_SYMW); cxm_unsl[cxm_nuns] = line; cxm_nuns = cxm_nuns + 1;
+                    we = cxm_word(s, we, e, &wb);
+                }
             } else if (cxm_eqn(s + a, b - a, "dock")) {
                 /* `#pragma unisa dock` (bare) or `#pragma unisa dock include|libc`: a
                    declaration only -- it records which boundary the unit is allowed to
@@ -667,7 +1154,7 @@ int cxm_scan(int u, int mode) {
     char *s; int n; int i; int line; int bol; int depth; int cond; int seen; int ib; int iline; int icond; int body; int eq; int last; int q; int e;
     s = cxm_src; n = cxm_nsrc; i = 0; line = 1; bol = 1; depth = 0; cond = 0; seen = 0;
     ib = 0 - 1; iline = 0; icond = 0; body = 0 - 1; eq = 0; last = 0;
-    cxm_nitem = 0; cxm_nmac = 0; cxm_nexp = 0; cxm_modseen = 0; cxm_nown = 0;
+    cxm_nitem = 0; cxm_nmac = 0; cxm_nexp = 0; cxm_modseen = 0; cxm_nown = 0; cxm_safe = 0; cxm_nuns = 0; cxf_nrel = 0;
     while (i < n) {
         if (s[i] == '\n') { line = line + 1; bol = 1; i = i + 1; continue; }
         if ((s[i] & 255) <= 32) { i = i + 1; continue; }
@@ -704,7 +1191,8 @@ int cxm_scan(int u, int mode) {
         }
         last = s[i]; i = i + 1;
     }
-    if (cxm_nown > 0) return cxm_ownschk(u);
+    if (cxm_nown > 0 && cxm_ownschk(u)) return 1;
+    if (cxm_safe) return cxf_unit(u);
     return 0;
 }
 
