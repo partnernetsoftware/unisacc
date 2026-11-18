@@ -1,0 +1,333 @@
+/* tools/release-prep.cx -- B4: release pre-publication drafts from committed facts and real products.
+ *
+ *   sh ./unisacc.com tools/release-run.cx -- --prepare VERSION --layout DIR [--out DIR]
+ *        [--strict FILE] [--commit HEX40] [--prev VERSION] [--ratchets FILE]
+ *   (release-run forwards --prepare here unchanged; this file can also be run directly.)
+ *
+ * Reads only: DIR/SHA256SUMS (unisacc.com line; DIR/unisacc.com is hashed when present and
+ * must match), DIR/build.json "commit" (unless --commit), the strict evidence TSV (default:
+ * newest committed release/evidence/vVERSION-strict-*.tsv, devsvc qualify format: 9-column
+ * rows, RAW BATCH_RUN lines, SUMMARY), release/evidence/PREV/expected-fail.tsv,
+ * release/evidence/VERSION/{chain-promote.txt,pack-run.out} when present,
+ * release/notes-PREV.md (previous APE sha256 for the rollback target), build/pkg-gaps.tsv.
+ * Writes drafts only into OUT (default $TMPDIR/unisacc-release-prep-VERSION-PID, private);
+ * never edits a tracked file, never commits, never touches gh or the network:
+ *   expected-fail.tsv  batch<TAB>expected<TAB>reason. A strict FAIL row is carried only when the
+ *                      previous version lists the same batch with the same fail count
+ *                      (reason starts "上一版同批同数"); any other FAIL is written as a
+ *                      "# NEW" comment line, which release-exec G1 ignores, so it is never
+ *                      auto-admitted, and the run exits 1.
+ *   ratchets.txt       tools/ratchets.cx run inside a git archive of the frozen commit
+ *                      (first line SOURCE<TAB>frozen-commit<TAB>commit=C), not the shared HEAD.
+ *                      --ratchets FILE reuses an earlier output only when its SOURCE line names
+ *                      frozen-commit and the same commit, else REFUSE PREP_RATCHETS_SOURCE.
+ *   notes-VERSION.md   identity table, strict summary, gaps (OPEN rows of build/pkg-gaps.tsv
+ *                      plus every strict batch that is UNKNOWN/INVALID/without RAW), CI run
+ *                      placeholder, verdict fixed to NOT_QUALIFIED (never QUALIFIED).
+ *   rollback.txt       draft back to vPREV as Latest; release and tags are never deleted.
+ *   evidence-rows.tsv  the 8 step rows; PASS only where the committed evidence file carries its
+ *                      OK marker, step 4 stays UNKNOWN (strict covers listed batches only),
+ *                      steps 6-8 PENDING until CI and readbacks exist.
+ * Gates (rc 2, REFUSE PREP_*): version shape, layout sha vs strict SUMMARY ape_sha256, commit
+ * not a 40-hex commit object, ratchets source. Strict rows whose candidate differs are INVALID.
+ * rc 0 all drafts written with no NEW failure and nothing uncovered; rc 1 drafts written but
+ * NEW failures or uncovered batches need a human decision. Children bounded (git 30 s,
+ * ratchets 55 s). Check: tools/check-release-prep.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+#define MAXB 1024
+static char here[4096], ver[32], prev[32], layout[4096], outd[4096], strictp[4400], commit[64], ratin[4400];
+static char apesha[80], prevsha[80];
+static char bid[MAXB][128], bst[MAXB][16], bnote[MAXB][96];
+static int braw[MAXB], nb, npass, nfail, nnew, nuncov, has_summary;
+static np_buf notes, efail, rat, rb, ev;
+
+static void die(const char *code, const char *d) { sy_eprintf("release-prep: REFUSE PREP_%s %s\n", code, d); sy_exit(2); }
+static int path2(char *o, long cap, const char *a, const char *b) { return cx_fmt(o, cap, "%s/%s", a, b); }
+static const char *rel(const char *p) { long n = tx_len(here, 4096); return (!memcmp(p, here, (size_t)n) && p[n] == '/') ? p + n + 1 : p; }
+static int is_hex(const char *s, int n) { int i; for (i = 0; i < n; i++) { char c = s[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0; } return 1; }
+static void put(np_buf *b, const char *s) { np_puts(b, s); }
+static void putf(np_buf *b, const char *f, const char *a, const char *c, const char *d) {
+    char t[8192]; if (cx_fmt(t, sizeof t, f, a ? a : "", c ? c : "", d ? d : "")) die("TEXT", "line too long"); np_puts(b, t);
+}
+/* field k of a TAB line (ls,ll) into o */
+static void field(const char *ls, long ll, int k, char *o, long cap) {
+    long i, s = 0; int f = 0; o[0] = 0;
+    for (i = 0; i <= ll; i++) if (i == ll || ls[i] == '\t') { if (f == k) { long m = i - s; if (m >= cap) m = cap - 1; mm_copy(o, cap, ls + s, m); o[m] = 0; return; } f++; s = i + 1; }
+}
+static int nfields(const char *ls, long ll) { int n = 1; long i; for (i = 0; i < ll; i++) if (ls[i] == '\t') n++; return n; }
+static int next_line(const char *t, long n, long *at, const char **ls, long *ll) {
+    long s = *at, e; if (!t || s >= n) return 0; e = s; while (e < n && t[e] != '\n') e++;
+    *ls = t + s; *ll = e - s; *at = e + 1; return 1;
+}
+static int run(char **v, const char *cwd, int secs, np_result *r) {
+    char why[512] = {0}; if (np_run(v, cwd, 0, secs, r, why, sizeof why)) { sy_eprintf("release-prep: child %s: %s\n", v[0], why); return -1; } return r->rc;
+}
+static int bump_prev(void) {   /* 0.0.74 -> 0.0.73 */
+    long n = tx_len(ver, sizeof ver), i = n - 1; int last = 0, mul = 1;
+    while (i >= 0 && ver[i] >= '0' && ver[i] <= '9') { last += (ver[i] - '0') * mul; mul *= 10; i--; }
+    if (i < 0 || ver[i] != '.' || last <= 0) return -1;
+    { char head[32]; mm_copy(head, sizeof head, ver, i); head[i] = 0; return cx_fmt(prev, sizeof prev, "%s.%d", head, last - 1); }
+}
+static int ver_ok(const char *v) { int dots = 0, dig = 0; for (; *v; v++) { if (*v == '.') { if (!dig) return 0; dots++; dig = 0; } else if (*v >= '0' && *v <= '9') dig++; else return 0; } return dots == 2 && dig; }
+
+/* ---- layout: candidate sha and frozen commit ---- */
+static void read_layout(void) {
+    char p[4400]; size_t n; char *t; long at = 0, ll; const char *ls;
+    if (path2(p, sizeof p, layout, "SHA256SUMS") || !(t = cx_read(p, &n))) die("LAYOUT", "SHA256SUMS unreadable");
+    while (next_line(t, (long)n, &at, &ls, &ll))
+        if (ll == 64 + 2 + 11 && is_hex(ls, 64) && !memcmp(ls + 66, "unisacc.com", 11)) { mm_copy(apesha, sizeof apesha, ls, 64); apesha[64] = 0; break; }
+    free(t);
+    if (!apesha[0]) die("LAYOUT", "no unisacc.com line in SHA256SUMS");
+    if (path2(p, sizeof p, layout, "unisacc.com") == 0 && sy_exists(p) == 1) {
+        char h[65]; t = cx_read(p, &n); if (!t) die("LAYOUT", "unisacc.com unreadable");
+        cx_sha256_hex(t, n, h); free(t);
+        if (memcmp(h, apesha, 64)) die("LAYOUT_SHA", "unisacc.com sha256 differs from SHA256SUMS");
+    }
+    if (!commit[0]) {
+        long k; if (path2(p, sizeof p, layout, "build.json") || !(t = cx_read(p, &n))) die("LAYOUT", "no --commit and build.json unreadable");
+        k = tx_find(t, (long)n, "\"commit\"", 8);
+        if (k >= 0) { long i = k + 8; while (i < (long)n && t[i] != '"') i++; i++; if (i + 40 <= (long)n && is_hex(t + i, 40)) { mm_copy(commit, sizeof commit, t + i, 40); commit[40] = 0; } }
+        free(t);
+    }
+    if (tx_len(commit, sizeof commit) != 40 || !is_hex(commit, 40)) die("COMMIT", "frozen commit must be 40 hex");
+    { np_result r = {0}; char obj[64]; char *v[] = {"git", "cat-file", "-e", obj, 0}; int rc; cx_fmt(obj, sizeof obj, "%s^{commit}", commit);
+      rc = run(v, here, 30, &r); np_free(&r); if (rc) die("COMMIT", "frozen commit is not a commit object in this repository"); }
+}
+
+/* ---- strict evidence ---- */
+static void find_strict(void) {
+    np_result r = {0}; char pat[128]; char *v[] = {"git", "ls-files", "--", pat, 0}; long at = 0, ll; const char *ls; char best[512] = {0};
+    if (strictp[0]) return;
+    cx_fmt(pat, sizeof pat, "release/evidence/v%s-strict-*.tsv", ver);
+    if (run(v, here, 30, &r)) die("STRICT", "git ls-files failed");
+    while (next_line(r.out, (long)r.outn, &at, &ls, &ll)) if (ll > 0 && ll < 500) { char c[512]; mm_copy(c, sizeof c, ls, ll); c[ll] = 0; if (strcmp(c, best) > 0) mm_copy(best, sizeof best, c, ll + 1); }
+    np_free(&r);
+    if (!best[0]) die("STRICT", "no committed release/evidence/vVERSION-strict-*.tsv; pass --strict");
+    if (path2(strictp, sizeof strictp, here, best)) die("STRICT", "path");
+}
+static int find_b(const char *id) { int i; for (i = 0; i < nb; i++) if (tx_eqz(bid[i], id)) return i; return -1; }
+static void read_strict(void) {
+    size_t n; char *t = cx_read(strictp, &n); long at = 0, ll; const char *ls;
+    if (!t) die("STRICT", strictp);
+    while (next_line(t, (long)n, &at, &ls, &ll)) {
+        char f0[128], st[32], cand[80], note[96];
+        if (!ll || ls[0] == '#') continue;
+        if (ll > 4 && !memcmp(ls, "RAW\t", 4)) {   /* RAW BATCH_RUN id=X status=Y candidate=Z */
+            long k = tx_find(ls, ll, "\tid=", 4), e; int i; char id[128], want[96];
+            if (tx_find(ls, ll, "BATCH_RUN", 9) < 0 || k < 0) continue;
+            k += 4; e = k; while (e < ll && ls[e] != '\t') e++;
+            if (e - k >= (long)sizeof id) continue;
+            mm_copy(id, sizeof id, ls + k, e - k); id[e - k] = 0;
+            i = find_b(id); if (i < 0) continue;
+            cx_fmt(want, sizeof want, "candidate=%s", apesha); if (tx_find(ls, ll, want, 74) >= 0) braw[i] = 1;
+            continue;
+        }
+        field(ls, ll, 0, f0, sizeof f0);
+        if (tx_eqz(f0, "SUMMARY")) { char want[96]; has_summary = 1; cx_fmt(want, sizeof want, "ape_sha256=%s", apesha);
+            if (tx_find(ls, ll, want, 75) < 0) die("STRICT_CANDIDATE", "SUMMARY ape_sha256 differs from layout unisacc.com"); continue; }
+        if (tx_eqz(f0, "batch") || nfields(ls, ll) != 9) continue;
+        if (nb >= MAXB) die("STRICT", "too many batches");
+        field(ls, ll, 2, st, sizeof st); field(ls, ll, 4, cand, sizeof cand); field(ls, ll, 8, note, sizeof note);
+        cx_fmt(bid[nb], 128, "%s", f0);
+        if (!tx_eqz(cand, apesha)) cx_fmt(bst[nb], 16, "INVALID"); else cx_fmt(bst[nb], 16, "%s", st);
+        cx_fmt(bnote[nb], 96, "%s", note); nb++;
+    }
+    free(t);
+    if (!nb) die("STRICT", "no batch rows");
+}
+/* a batch counts only with PASS/FAIL, matching candidate, and its RAW BATCH_RUN line */
+static int covered(int i) { return braw[i] && (tx_eqz(bst[i], "PASS") || tx_eqz(bst[i], "FAIL")); }
+
+/* ---- expected-fail draft ---- */
+static void prev_expected(const char *id, char *want, long cap, char *src, long scap) {
+    char p[4400]; size_t n; char *t; long at = 0, ll; const char *ls; char f0[128];
+    want[0] = 0; cx_fmt(src, scap, "release/evidence/%s/expected-fail.tsv", prev);
+    if (path2(p, sizeof p, here, src) || !(t = cx_read(p, &n))) return;
+    while (next_line(t, (long)n, &at, &ls, &ll)) { if (!ll || ls[0] == '#') continue; field(ls, ll, 0, f0, sizeof f0); if (tx_eqz(f0, id)) field(ls, ll, 1, want, cap); }
+    free(t);
+}
+static const char *fails_of(const char *pf) { const char *s = strchr(pf, '/'); return s ? s + 1 : 0; }
+static void draft_expected(void) {
+    int i; put(&efail, "batch\texpected\treason\n");
+    for (i = 0; i < nb; i++) {
+        char cnt[64] = {0}, pw[64], src[256], r[1400];
+        if (!tx_eqz(bst[i], "FAIL")) continue;
+        if (!memcmp(bnote[i], "count=", 6)) cx_fmt(cnt, sizeof cnt, "%s", bnote[i] + 6);
+        prev_expected(bid[i], pw, sizeof pw, src, sizeof src);
+        if (cnt[0] && pw[0] && covered(i) && fails_of(cnt) && fails_of(pw) && tx_eqz(fails_of(cnt), fails_of(pw))) {
+            char l[2048];
+            cx_fmt(r, sizeof r, "上一版同批同数:失败 %s 项与 v%s 同(上一版 %s,本版 %s);依据 %s 与 %s", fails_of(cnt), prev, pw, cnt, src, rel(strictp));
+            cx_fmt(l, sizeof l, "%s\t%s\t%s\n", bid[i], cnt, r); put(&efail, l);
+        } else {
+            nnew++;
+            putf(&efail, "# NEW\t%s\t%s\t", bid[i], cnt[0] ? cnt : "-", 0);
+            putf(&efail, "本版新增或失败数变化(上一版 %s),不自动放行,须人工裁决\n", pw[0] ? pw : "未列", 0, 0);
+            sy_printf("PREP\tNEW_FAIL\t%s\t%s\n", bid[i], cnt[0] ? cnt : "-");
+        }
+    }
+}
+
+/* ---- ratchets on the frozen tree ---- */
+static void draft_ratchets(void) {
+    char want[128]; long wl; cx_fmt(want, sizeof want, "SOURCE\tfrozen-commit\tcommit=%s", commit); wl = tx_len(want, sizeof want);
+    if (ratin[0]) {
+        size_t n; char *t = cx_read(ratin, &n);
+        if (!t) die("RATCHETS_SOURCE", "--ratchets unreadable");
+        if ((long)n < wl || memcmp(t, want, (size_t)wl)) { free(t); die("RATCHETS_SOURCE", "ratchets output does not start with SOURCE frozen-commit of this commit"); }
+        np_put(&rat, t, n); free(t); return;
+    }
+    { char tree[4400], tar[4400], self[4400], link[4500]; np_result r = {0}; int rc;
+      path2(tree, sizeof tree, outd, "frozen-tree"); path2(tar, sizeof tar, outd, "frozen.tar");
+      if (sy_mkdir(tree, 0700) && sy_exists(tree) != 1) die("RATCHETS", "frozen-tree dir");
+      { char *v[] = {"git", "archive", "--format=tar", "-o", tar, commit, 0}; rc = run(v, here, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git archive"); }
+      { char *v[] = {"tar", "-xf", tar, "-C", tree, 0}; rc = run(v, here, 30, &r); np_free(&r); if (rc) die("RATCHETS", "tar extract"); }
+      sy_unlink(tar);
+      /* tools/ratchets.cx inventories through git ls-files: give the archive tree an index */
+      { char *v[] = {"git", "init", "-q", 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git init"); }
+      { char alt[4500], objs[4400]; path2(alt, sizeof alt, tree, ".git/objects/info/alternates");
+        if (cx_fmt(objs, sizeof objs, "%s/.git/objects\n", here) || cx_write(alt, objs, (size_t)tx_len(objs, sizeof objs))) die("RATCHETS", "alternates"); }
+      { char *v[] = {"git", "read-tree", commit, 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git read-tree"); }
+      path2(self, sizeof self, here, "unisacc.com"); path2(link, sizeof link, tree, "unisacc.com");
+      if (sy_exists(link) != 1 && sy_symlink(self, link)) die("RATCHETS", "unisacc.com link");
+      /* The fifteen ratchet programs are compiled through the content-keyed run cache (compile products
+       * only; every ratchet result is computed now): measured 2026-11-18, cold compile of all fifteen
+       * exceeds the 55 s bound (each ERROR), with the compile cache the whole run takes about 4 s. */
+      { char *v[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0}; char *env[] = {"UNISACC_RUN_CACHE=1", 0}; char why[512] = {0}; /* lint:allow R1-product the frozen tree links the shared product at ./unisacc.com */
+        rc = np_run(v, tree, env, 55, &r, why, sizeof why) ? -1 : r.rc; }
+      put(&rat, want); put(&rat, "\ttree=git-archive\n");
+      if (r.outn) np_put(&rat, r.out, r.outn);
+      if (rc) { char t[64]; cx_fmt(t, sizeof t, "RATCHETS_RC\t%d\n", rc); put(&rat, t); sy_printf("PREP\tRATCHETS_FAIL\trc=%d\n", rc); nuncov++; }
+      np_free(&r); }
+}
+
+/* ---- notes / rollback / evidence rows ---- */
+static void prev_ape_sha(void) {
+    char p[4400], src[128]; size_t n; char *t; long at = 0, ll; const char *ls;
+    cx_fmt(src, sizeof src, "release/notes-%s.md", prev);
+    if (path2(p, sizeof p, here, src) || !(t = cx_read(p, &n))) return;
+    while (next_line(t, (long)n, &at, &ls, &ll)) {
+        long k = tx_find(ls, ll, "APE SHA256", 10), i;
+        if (k < 0 || tx_find(ls, ll, "整链", 6) >= 0) continue;
+        for (i = k; i + 64 <= ll; i++) if (is_hex(ls + i, 64)) { mm_copy(prevsha, sizeof prevsha, ls + i, 64); prevsha[64] = 0; break; }
+        if (prevsha[0]) break;
+    }
+    free(t);
+}
+static void draft_notes(void) {
+    int i, k = 0; char l[1600];
+    putf(&notes, "# unisacc %s 发布说明\n\n<!-- 草稿:release-prep 生成,须人工补产品改动、三入口实测与时间账 -->\n\n", ver, 0, 0);
+    put(&notes, "状态:同候选原生 CI run <CI_RUN_ID>(待回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,严格证据只覆盖下列批次,不得称全批资格。\n\n");
+    put(&notes, "## 真实身份\n\n| 对象 | 身份 |\n|---|---|\n");
+    putf(&notes, "| 冻结提交(构造输入、发布标签目标) | %s |\n| 发布 APE SHA256(unisacc.com) | %s |\n| CI run | <CI_RUN_ID> |\n\n", commit, apesha, 0);
+    put(&notes, "## 产品改动\n\n<待人工填写>\n\n## 严格证据\n\n");
+    cx_fmt(l, sizeof l, "证据 %s:%d 批,PASS %d,FAIL %d,未覆盖 %d。%sFAIL 批与上一版对照见 release/evidence/%s/expected-fail.tsv,标 NEW 的不自动放行。\n\n",
+           rel(strictp), nb, npass, nfail, nb - npass - nfail, has_summary ? "有 SUMMARY 行。" : "无 SUMMARY 行(分段未完),视为未完成。", ver);
+    put(&notes, l);
+    put(&notes, "## 已知缺口与未验证范围\n\n");
+    for (i = 0; i < nb; i++) if (!covered(i)) { cx_fmt(l, sizeof l, "(%d) 严格证据批次 %s 状态 %s%s,未覆盖,不记 PASS。\n", ++k, bid[i], bst[i], braw[i] ? "" : "(无 RAW BATCH_RUN 行)"); put(&notes, l); }
+    cx_fmt(l, sizeof l, "(%d) s9 全套本版未跑;严格证据所列 %d 批之外的批次 UNMEASURED。\n", ++k, nb); put(&notes, l);
+    { char p[4400]; size_t n; char *g; long at = 0, ll; const char *ls;
+      if (!path2(p, sizeof p, here, "build/pkg-gaps.tsv") && (g = cx_read(p, &n))) {
+          while (next_line(g, (long)n, &at, &ls, &ll)) { char st[96], task[128], need[1024];
+              field(ls, ll, 5, st, sizeof st); if (memcmp(st, "OPEN", 4)) continue;
+              field(ls, ll, 1, task, sizeof task); field(ls, ll, 2, need, sizeof need);
+              if (cx_fmt(l, sizeof l, "(%d) %s:%s(build/pkg-gaps.tsv,%s)\n", k + 1, task, need, st)) continue; k++; put(&notes, l); }
+          free(g); } }
+    put(&notes, "\n## 证据入口\n\n");
+    cx_fmt(l, sizeof l, "release/evidence/%s/INDEX.tsv;%s;release/evidence/%s/expected-fail.tsv。撤回方案:release/rollback.txt(回退 Latest 到 v%s,不删标签与 release)。\n", ver, rel(strictp), ver, prev);
+    put(&notes, l);
+}
+static void draft_rollback(void) {
+    const char *ps = prevsha[0] ? prevsha : "<PREV_APE_SHA256>";
+    putf(&rb, "# %s 回滚方案\n# 状态:公开前写好;尚未执行回滚,本方案不是回滚收据。(草稿,release-prep 生成)\n# 适用窗口:%s 公开后至下一个版本公开并完成读回。窗口内保留 ", ver, ver, 0);
+    putf(&rb, "%s 公开资产(回退目标)、本版冻结源码、候选表、CI、草稿与公开读回回执(release/evidence/%s/)。\n", prev, ver, 0);
+    put(&rb, "# 发布资产共六件:unisacc.com、pkg.bin、slice-win-arm64、unisacc.com.build.json、build.json、SHA256SUMS。\n");
+    putf(&rb, "# v%s、v%s 及更早标签与 release 均不删除;不 force push。\n# F=T=%s (构造输入、冻结提交与发布标签目标)\n", ver, prev, commit);
+    putf(&rb, "# X、Y1、Y2 与 CI run 号见 release/evidence/%s/INDEX.tsv 的 exec-* 行\n# 本版发布 APE SHA256=%s\n\n", ver, apesha, 0);
+    putf(&rb, "# (1) 将本版转回草稿,再把 Latest 移回 %s;随后读回 isDraft、tag、资产及 Latest。\n", prev, 0, 0);
+    putf(&rb, "gh -R partnernetsoftware/unisacc release edit v%s --draft=true\ngh -R partnernetsoftware/unisacc release edit v%s --latest\n", ver, prev, 0);
+    putf(&rb, "gh -R partnernetsoftware/unisacc release view v%s --json tagName,isDraft,assets\ngh -R partnernetsoftware/unisacc release view v%s --json tagName,isDraft,assets\n", ver, prev, 0);
+    put(&rb, "gh api repos/partnernetsoftware/unisacc/releases/latest --jq .tag_name\n\n");
+    put(&rb, "# (2) CI 若仍在运行:gh -R partnernetsoftware/unisacc run cancel RUN(RUN 取 INDEX.tsv exec-3-ci 行)。\n\n");
+    put(&rb, "# (3) 集成者在共享 main 上从新到旧前向撤销本版发布记录(Y2、Y1、X),不回退冻结后他人代码;禁止 stash/reset/clean/checkout。\n# git revert --no-edit Y2; git revert --no-edit Y1; git revert --no-edit X; git push origin HEAD:main\n\n");
+    putf(&rb, "# (4) 装机:若已装 %s,按 %s 公开资产下载到全新目录,\n", ver, prev, 0);
+    putf(&rb, "# sha256 逐字节匹配 %s 后用 tools/install-ape.cx 写回,并核 --version=unisacc %s。\n\n", ps, prev, 0);
+    putf(&rb, "# (5) 收尾实测:Latest=v%s,%s isDraft=false,", prev, prev, 0);
+    putf(&rb, "%s isDraft=true;保留撤回命令的 stdout/stderr/退出码。未执行项不记 PASS。\n", ver, 0, 0);
+}
+static int file_has(const char *relp, const char *mark) {
+    char p[4400]; size_t n; char *t; int ok;
+    if (path2(p, sizeof p, here, relp) || !(t = cx_read(p, &n))) return 0;
+    ok = tx_find(t, (long)n, mark, tx_len(mark, 256)) >= 0; free(t); return ok;
+}
+static void draft_evidence(void) {
+    char cp[256], pk[256], l[2048]; int c, p;
+    cx_fmt(cp, sizeof cp, "release/evidence/%s/chain-promote.txt", ver); cx_fmt(pk, sizeof pk, "release/evidence/%s/pack-run.out", ver);
+    c = file_has(cp, "PROMOTE_CHECK\tOK"); p = file_has(pk, "SOURCES_SID\tVERIFIED");
+    putf(&ev, "# v%s 八步证据(草稿,release-prep 生成);PASS 仅在已入仓证据文件带 OK 标记时给出;第4步严格证据只覆盖所列批次,s9 未全跑 UNKNOWN。\n", ver, 0, 0);
+    putf(&ev, "1\t%s\t%s\n", c ? "PASS" : "PENDING", cp, 0); putf(&ev, "2\t%s\t%s\n", c ? "PASS" : "PENDING", cp, 0);
+    putf(&ev, "3\t%s\t%s\n", p ? "PASS" : "PENDING", pk, 0);
+    cx_fmt(l, sizeof l, "4\tUNKNOWN\t%s\n", rel(strictp)); put(&ev, l);
+    putf(&ev, "5\t%s\t%s\n", p ? "PASS" : "PENDING", pk, 0);
+    putf(&ev, "6\tPENDING\trelease/evidence/%s/draft-readback.txt\n7\tPENDING\trelease/evidence/%s/ci-CI_RUN_ID.log\n", ver, ver, 0);
+    putf(&ev, "8\tPENDING\trelease/evidence/%s/public-readback.txt\n", ver, 0, 0);
+}
+static void emit(const char *leaf, np_buf *b) {
+    char p[4400]; if (path2(p, sizeof p, outd, leaf) || cx_write(p, b->p ? b->p : "", b->n)) die("OUT", leaf);
+    sy_printf("PREP\tDRAFT\t%s\n", p);
+}
+
+int main(int argc, char **argv) {
+    int i; char notesleaf[64];
+    if (sy_cwd(here, sizeof here)) die("USAGE", "cwd");
+    /* chain-tail reaction draft (plans/devsvc.md "链尾反应草案"): print only, start nothing */
+    if (argc == 5 && tx_eqz(argv[1], "--tail-plan")) {
+        const char *c = argv[2], *a = argv[3], *v = argv[4]; int k;
+        const char *st[5][3] = {
+            {"chain.done", "bg-candidate status: DONE N/N rc=0 for rev", "-"},
+            {"promote", "sh ./unisacc.com tools/bg-candidate.cx -- promote --check --rev %s", "PROMOTE_CHECK OK and NEED ape sha=APE"},
+            {"qualify", "sh ./unisacc.com tools/devsvc.cx -- qualify --candidate APE --out|--resume release/evidence/vV-strict-DATE.tsv", "SUMMARY ape_sha256=APE, UNKNOWN=0 INVALID=0 (CHECKPOINT -> --resume, never PASS)"},
+            {"pack", "sh ./unisacc.com tools/release-run.cx -- --pack ROOT CANDIDATE_TSV SRC_DIR OUT --chain-out CHAIN --commit %s", "APE sha equals chain product, SID VERIFIED"},
+            {"execute-dry", "sh ./unisacc.com tools/release-run.cx -- --execute release/candidate.tsv --layout OUT/layout --dry", "every gate PASS or DEFERRED, no FAIL"}};
+        if (tx_len(c, 64) != 40 || !is_hex(c, 40) || tx_len(a, 80) != 64 || !is_hex(a, 64) || !ver_ok(v)) die("USAGE", "--tail-plan COMMIT40 APE_SHA64 VERSION");
+        for (k = 0; k < 5; k++) { char cmd[600]; cx_fmt(cmd, sizeof cmd, st[k][1], c);
+            sy_printf("TAIL\t%d\t%s\tkey=%s:%s\tversion=%s\tcmd=%s\tgate=%s\ton_fail=stop\n", k, st[k][0], a, c, v, cmd, st[k][2]); }
+        sy_printf("TAIL\tPLAN_ONLY\tnothing started; idempotent key (ape sha, commit); a step whose evidence for this key exists is DONE, not rerun\n");
+        return 0;
+    }
+    if (argc < 2 || !ver_ok(argv[1]) || cx_fmt(ver, sizeof ver, "%s", argv[1]))
+        die("USAGE", "release-prep VERSION --layout DIR [--out DIR] [--strict FILE] [--commit HEX40] [--prev VERSION] [--ratchets FILE]");
+    for (i = 2; i < argc; i += 2) {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) die("USAGE", "option without value");
+        if (tx_eqz(a, "--layout")) { if (sy_realpath(v, layout, sizeof layout) < 0) die("LAYOUT", "layout dir"); }
+        else if (tx_eqz(a, "--out")) { if (cx_fmt(outd, sizeof outd, "%s", v) || outd[0] != '/') die("USAGE", "--out must be absolute"); }
+        else if (tx_eqz(a, "--strict")) { if (sy_realpath(v, strictp, sizeof strictp) < 0) die("STRICT", "--strict file"); }
+        else if (tx_eqz(a, "--commit")) { if (cx_fmt(commit, sizeof commit, "%s", v)) die("COMMIT", "too long"); }
+        else if (tx_eqz(a, "--prev")) { if (!ver_ok(v) || cx_fmt(prev, sizeof prev, "%s", v)) die("USAGE", "--prev version"); }
+        else if (tx_eqz(a, "--ratchets")) { if (sy_realpath(v, ratin, sizeof ratin) < 0) die("RATCHETS_SOURCE", "--ratchets file"); }
+        else die("USAGE", a);
+    }
+    if (!layout[0]) die("USAGE", "--layout DIR required");
+    if (!prev[0] && bump_prev()) die("USAGE", "cannot derive previous version; pass --prev");
+    if (!outd[0]) { const char *tmp = sy_env("TMPDIR"); if (cx_fmt(outd, sizeof outd, "%s/unisacc-release-prep-%s-%d", tmp && tmp[0] ? tmp : "/tmp", ver, (int)getpid())) die("OUT", "path"); }
+    if (sy_mkdir_all(outd, 0700) && sy_exists(outd) != 1) die("OUT", outd);
+    read_layout(); find_strict(); read_strict();
+    for (i = 0; i < nb; i++) { if (!covered(i)) { nuncov++; sy_printf("PREP\tUNCOVERED\t%s\t%s\n", bid[i], bst[i]); } else if (tx_eqz(bst[i], "PASS")) npass++; else nfail++; }
+    prev_ape_sha();
+    draft_expected(); draft_ratchets(); draft_notes(); draft_rollback(); draft_evidence();
+    cx_fmt(notesleaf, sizeof notesleaf, "notes-%s.md", ver);
+    emit("expected-fail.tsv", &efail); emit("ratchets.txt", &rat); emit(notesleaf, &notes); emit("rollback.txt", &rb); emit("evidence-rows.tsv", &ev);
+    { char l[1024]; cx_fmt(l, sizeof l, "PREP\tSUMMARY\tversion=%s\tprev=%s\tcommit=%s\tape=%s\tbatches=%d\tpass=%d\tfail=%d\tuncovered=%d\tnew_fail=%d\tout=%s\tverdict=NOT_QUALIFIED\n",
+              ver, prev, commit, apesha, nb, npass, nfail, nuncov, nnew, outd); sy_printf("%s", l); }
+    return (nnew || nuncov) ? 1 : 0;
+}

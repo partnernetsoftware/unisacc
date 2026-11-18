@@ -1,0 +1,151 @@
+/* Tool self-check for tools/release-prep.cx (release-run --prepare, B4 drafts).
+ * Upstream inputs are the real committed v0.0.74 products: release/evidence/v0.0.74-strict-2026-11-18.tsv
+ * (devsvc qualify format with RAW BATCH_RUN lines and SUMMARY), release/evidence/0.0.73/expected-fail.tsv,
+ * release/evidence/0.0.74/{expected-fail.tsv,ratchets.txt,chain-promote.txt,pack-run.out},
+ * release/notes-0.0.74.md, release/notes-0.0.73.md and the frozen commit 0dae4d3024 itself; the committed
+ * v0.0.74 rollback (Y2 642c44488a) is kept as tests/release-prep/rollback-0.0.74.txt because
+ * release/rollback.txt moves on every release. Only the layout (SHA256SUMS + build.json naming the real
+ * candidate sha and commit) is synthesized, since the published assets are not in the repository.
+ * Positive: replaying 0.0.74 gives drafts structurally equal to the committed ones (columns, required
+ * fields, version substitution, NOT_QUALIFIED fixed wording, ratchets from the frozen commit).
+ * Negative: an UNKNOWN batch is never counted PASS and is listed uncovered; a ratchets file whose source is
+ * not the frozen commit is refused; a new FAIL (or a changed fail count) is never auto-admitted to
+ * expected-fail.tsv; a layout sha that differs from the strict SUMMARY is refused.
+ * Optional first argument selects a prebuilt release-prep binary for red/green comparison.
+ * Check: CHECK_RELEASE_PREP. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+#define T_COMMIT "0dae4d30246052a436e7c0c6a9cee94a12ca31bd"
+#define T_APE "63334e185bb906d5352ff9f8b2c5dfa2c26b8fef1a35f965994ba8c7907cca39"
+#define T_STRICT "release/evidence/v0.0.74-strict-2026-11-18.tsv"
+static char tmp[4096], bin[4200], root[4096], lay[4300], badlay[4300], tmpenv[4200];
+static char out[65536];
+static int passed, failed, part;
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\trelease-prep\n", yes ? "PASS" : "FAIL", label); }
+static int has(const char *hay, const char *s) { return hay && s && strstr(hay, s); }
+static int runv(char **v, int secs, int *rc) {
+    np_result r = {0}; char why[300]; char *env[] = {tmpenv, 0};
+    *rc = -1; out[0] = 0;
+    if (np_run(v, root, env, secs, &r, why, sizeof why)) { fprintf(stderr, "exec %s: %s\n", v[0], why); return 0; }
+    *rc = r.rc; long k = (long)r.outn < (long)sizeof out - 1 ? (long)r.outn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
+    if (r.errn) { long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k; if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; } }
+    np_free(&r); return 1;
+}
+static char *rd(const char *dir, const char *rel) { char p[4500]; size_t n; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 0; return cx_read(p, &n); }
+static int wr(const char *dir, const char *rel, const char *text) { char p[4500]; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1; return sy_write_file(p, text, strlen(text), 0644); }
+/* drafts of one run in DIR; argv tail after VERSION */
+static int prep(const char *dir, const char *strict, const char *ratin, const char *layout, int *rc) {
+    char *v[16]; int k = 0; v[k++] = bin; v[k++] = "0.0.74"; v[k++] = "--layout"; v[k++] = (char *)layout; v[k++] = "--out"; v[k++] = (char *)dir; /* lint:allow R1-version replay of the committed v0.0.74 evidence */
+    if (strict) { v[k++] = "--strict"; v[k++] = (char *)strict; }
+    if (ratin) { v[k++] = "--ratchets"; v[k++] = (char *)ratin; }
+    v[k] = 0; return runv(v, 58, rc);
+}
+/* lines of TEXT not starting with '#', joined */
+static void nocomment(const char *t, char *o, long cap) {
+    long k = 0; const char *p = t;
+    while (p && *p) { const char *e = strchr(p, '\n'); long n = e ? e - p + 1 : (long)strlen(p);
+        if (*p != '#' && k + n < cap) { mm_copy(o + k, cap - k, p, n); k += n; } p += n; }
+    o[k] = 0;
+}
+static int count_lines(const char *t, const char *prefix) { int n = 0; long pl = (long)strlen(prefix); const char *p = t;
+    while (p && *p) { if (!strncmp(p, prefix, (size_t)pl)) n++; p = strchr(p, '\n'); if (p) p++; } return n; }
+static int tabs_on_line(const char *t, const char *prefix) { const char *p = t; long pl = (long)strlen(prefix);
+    while (p && *p) { if (!strncmp(p, prefix, (size_t)pl)) { int n = 0; for (; *p && *p != '\n'; p++) if (*p == '\t') n++; return n; } p = strchr(p, '\n'); if (p) p++; } return -1; }
+/* every QUALIFIED is the tail of NOT_QUALIFIED */
+static int only_not_qualified(const char *t) { const char *p = t; while ((p = strstr(p, "QUALIFIED"))) { if (p - t < 4 || strncmp(p - 4, "NOT_", 4)) return 0; p++; } return 1; }
+/* copy of the real strict evidence with one replacement */
+static int variant(const char *name, const char *from, const char *to, char *path, long cap) {
+    char *s = rd(root, T_STRICT), *at; np_buf b = {0}; int bad;
+    if (!s || !(at = strstr(s, from))) { free(s); return 1; }
+    np_put(&b, s, (size_t)(at - s)); np_puts(&b, to); np_puts(&b, at + strlen(from));
+    bad = cx_fmt(path, cap, "%s/%s", tmp, name) || sy_write_file(path, b.p, b.n, 0644);
+    free(s); free(b.p); return bad;
+}
+
+int main(int argc, char **argv) {
+    char why[512], d1[4400], d2[4400], d3[4400], d4[4400], d5[4400], d6[4400], rat1[4500], s_unk[4400], s_new[4400], s_cnt[4400]; int rc = -1;
+    if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "release-prep-check", tmp, sizeof tmp)) return 2;
+    /* --part pos|neg splits the two halves into separate batches (each under the cold budget) */
+    if (argc >= 3 && !strcmp(argv[1], "--part")) { part = !strcmp(argv[2], "pos") ? 1 : !strcmp(argv[2], "neg") ? 2 : -1; if (part < 0) return 2; argv += 2; argc -= 2; }
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/release-prep", tmp) || cx_fmt(s, sizeof s, "%s/tools/release-prep.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build release-prep: %s\n", why); return 2; } }
+    if (cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp) || cx_fmt(lay, sizeof lay, "%s/layout", tmp) || cx_fmt(badlay, sizeof badlay, "%s/badlayout", tmp) ||
+        sy_mkdir(lay, 0700) || sy_mkdir(badlay, 0700) ||
+        wr(lay, "SHA256SUMS", T_APE "  unisacc.com\n") || wr(lay, "build.json", "{\"commit\":\"" T_COMMIT "\",\"version\":\"0.0.74\"}\n") ||
+        wr(badlay, "SHA256SUMS", "1111111111111111111111111111111111111111111111111111111111111111  unisacc.com\n") || wr(badlay, "build.json", "{\"commit\":\"" T_COMMIT "\"}\n")) return 2;
+    cx_fmt(d1, sizeof d1, "%s/p1", tmp); cx_fmt(d2, sizeof d2, "%s/n-unknown", tmp); cx_fmt(d3, sizeof d3, "%s/n-ratsrc", tmp);
+    cx_fmt(d4, sizeof d4, "%s/n-newfail", tmp); cx_fmt(d5, sizeof d5, "%s/n-count", tmp); cx_fmt(d6, sizeof d6, "%s/n-sha", tmp);
+    cx_fmt(rat1, sizeof rat1, "%s/ratchets.txt", d1);
+    if (part == 2) { /* negatives only: a ratchets file that names the frozen commit (the positive half proves the real run) */
+        const char *t = "SOURCE\tfrozen-commit\tcommit=" T_COMMIT "\ttree=git-archive\nRATCHETS\tok=15\tfail=0\n";
+        if (sy_mkdir(d1, 0700) || sy_write_file(rat1, t, strlen(t), 0644)) return 2; goto negatives; }
+
+    /* (1) positive: replay 0.0.74 with the real ratchets run on the frozen commit */
+    check("replay-0.0.74-rc0", prep(d1, 0, 0, lay, &rc) && rc == 0 && has(out, "verdict=NOT_QUALIFIED") && has(out, "batches=30\tpass=29\tfail=1\tuncovered=0\tnew_fail=0"));
+    { char *g = rd(d1, "expected-fail.tsv"), *w = rd(root, "release/evidence/0.0.74/expected-fail.tsv");
+      check("expected-fail-header-and-columns", g && w && !strncmp(g, "batch\texpected\treason\n", 22) && !strncmp(w, "batch\texpected\treason\n", 22) && tabs_on_line(g, "c-negative\t") == 2 && tabs_on_line(w, "c-negative\t") == 2);
+      check("expected-fail-same-batch-and-count", has(g, "\nc-negative\t53/9\t") && has(w, "\nc-negative\t53/9\t") && count_lines(g, "c-negative\t") == 1);
+      check("expected-fail-reason-carried", has(g, "\t上一版同批同数:失败 9 项与 v0.0.73 同(上一版 50/9,本版 53/9)") && !has(g, "# NEW"));
+      free(g); free(w); }
+    { char *g = rd(d1, "rollback.txt"), *w = rd(root, "tests/release-prep/rollback-0.0.74.txt"); static char a[16384], b[16384];
+      if (g && w) { nocomment(g, a, sizeof a); nocomment(w, b, sizeof b); }
+      check("rollback-commands-equal-committed", g && w && a[0] && !strcmp(a, b));
+      check("rollback-identity", has(g, "# 0.0.74 回滚方案") && has(g, "F=T=" T_COMMIT) && has(g, "SHA256=" T_APE) && has(g, "82d0926e9bed988091dac4ed43e07ab3c199652b0dc470e1cb5e445564e3f3a3") && has(g, "--version=unisacc 0.0.73"));
+      free(g); free(w); }
+    { char *g = rd(d1, "notes-0.0.74.md"), *w = rd(root, "release/notes-0.0.74.md");
+      const char *hd[] = {"# unisacc 0.0.74 发布说明\n", "\n## 真实身份\n", "\n## 产品改动\n", "\n## 严格证据\n", "\n## 已知缺口与未验证范围\n", "\n## 证据入口\n", 0}; int ok = g && w, i;
+      for (i = 0; hd[i]; i++) ok = ok && has(g, hd[i]) && has(w, hd[i]);
+      check("notes-headings-match-committed", ok);
+      check("notes-identity", has(g, T_COMMIT) && has(g, T_APE) && has(w, T_APE) && has(g, T_STRICT) && has(g, "<CI_RUN_ID>"));
+      check("notes-not-qualified-fixed", has(g, "整体裁决 NOT_QUALIFIED") && has(w, "整体裁决 NOT_QUALIFIED") && only_not_qualified(g));
+      check("notes-gaps-listed", has(g, "s9 全套本版未跑") && has(g, "(build/pkg-gaps.tsv,OPEN") && has(g, "30 批,PASS 29,FAIL 1,未覆盖 0"));
+      free(g); free(w); }
+    { char *g = rd(d1, "ratchets.txt"), *w = rd(root, "release/evidence/0.0.74/ratchets.txt");
+      check("ratchets-source-frozen-commit", g && !strncmp(g, "SOURCE\tfrozen-commit\tcommit=" T_COMMIT "\ttree=git-archive\n", 86));
+      check("ratchets-same-rows-as-committed", has(g, "\nRATCHETS\tok=15\tfail=0\t") && count_lines(g, "RATCHET\t") == count_lines(w, "RATCHET\t") && count_lines(g, "RATCHET\t") == 15 && has(w, "RATCHETS\tok=15\tfail=0"));
+      free(g); free(w); }
+    { char *g = rd(d1, "evidence-rows.tsv"); int ok = g != 0, i;
+      const char *rows[] = {"\n1\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n", "\n2\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n", "\n3\tPASS\trelease/evidence/0.0.74/pack-run.out\n",
+                            "\n4\tUNKNOWN\t" T_STRICT "\n", "\n5\tPASS\trelease/evidence/0.0.74/pack-run.out\n", "\n6\tPENDING\t", "\n7\tPENDING\t", "\n8\tPENDING\t", 0};
+      for (i = 0; rows[i]; i++) ok = ok && has(g, rows[i]);
+      check("evidence-rows-8-steps-as-committed", ok && count_lines(g, "#") == 1);
+      free(g); }
+
+    if (part == 1) goto done;
+negatives:
+    /* (2) negative: UNKNOWN batch never becomes PASS, it is listed uncovered */
+    if (variant("strict-unknown.tsv", "pp-negative\tproduct-qualification\tPASS", "pp-negative\tproduct-qualification\tUNKNOWN", s_unk, sizeof s_unk)) return 2;
+    { char *g; check("unknown-batch-rc1-uncovered", prep(d2, s_unk, rat1, lay, &rc) && rc == 1 && has(out, "PREP\tUNCOVERED\tpp-negative\tUNKNOWN") && has(out, "pass=28\tfail=1\tuncovered=1"));
+      g = rd(d2, "notes-0.0.74.md"); check("unknown-batch-in-gaps-not-pass", has(g, "严格证据批次 pp-negative 状态 UNKNOWN") && has(g, "30 批,PASS 28,FAIL 1,未覆盖 1") && only_not_qualified(g)); free(g); }
+    /* (3) negative: ratchets not from the frozen commit */
+    { char p[4500]; cx_fmt(p, sizeof p, "%s/rat-head.txt", tmp);
+      { const char *t = "SOURCE\tshared-head\tcommit=" T_COMMIT "\nRATCHETS\tok=15\tfail=0\n"; if (sy_write_file(p, t, strlen(t), 0644)) return 2; }
+      check("ratchets-shared-head-refused", prep(d3, 0, p, lay, &rc) && rc == 2 && has(out, "REFUSE PREP_RATCHETS_SOURCE"));
+      cx_fmt(p, sizeof p, "%s/rat-other.txt", tmp);
+      { const char *t = "SOURCE\tfrozen-commit\tcommit=b546f23546aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRATCHETS\tok=15\tfail=0\n"; if (sy_write_file(p, t, strlen(t), 0644)) return 2; }
+      check("ratchets-other-commit-refused", prep(d3, 0, p, lay, &rc) && rc == 2 && has(out, "REFUSE PREP_RATCHETS_SOURCE")); }
+    /* (4) negative: new FAIL and changed fail count are not auto-admitted */
+    if (variant("strict-newfail.tsv", "pp-negative\tproduct-qualification\tPASS\t0", "pp-negative\tproduct-qualification\tFAIL\t1", s_new, sizeof s_new)) return 2;
+    { char *g; check("new-fail-rc1", prep(d4, s_new, rat1, lay, &rc) && rc == 1 && has(out, "PREP\tNEW_FAIL\tpp-negative\t10/0") && has(out, "new_fail=1"));
+      g = rd(d4, "expected-fail.tsv"); check("new-fail-not-admitted", has(g, "\n# NEW\tpp-negative\t") && !has(g, "\npp-negative\t") && has(g, "\nc-negative\t53/9\t")); free(g); }
+    if (variant("strict-count.tsv", "count=53/9", "count=52/10", s_cnt, sizeof s_cnt)) return 2;
+    { char *g; check("changed-fail-count-rc1", prep(d5, s_cnt, rat1, lay, &rc) && rc == 1 && has(out, "PREP\tNEW_FAIL\tc-negative\t52/10"));
+      g = rd(d5, "expected-fail.tsv"); check("changed-fail-count-not-admitted", has(g, "\n# NEW\tc-negative\t52/10\t") && !has(g, "\nc-negative\t")); free(g); }
+    /* (5) negative: layout candidate differs from strict SUMMARY */
+    check("layout-sha-mismatch-refused", prep(d6, 0, rat1, badlay, &rc) && rc == 2 && has(out, "REFUSE PREP_STRICT_CANDIDATE"));
+    /* (6) chain-tail reaction draft prints five keyed steps and starts nothing; bad key refused */
+    { char *v[] = {bin, "--tail-plan", T_COMMIT, T_APE, "0.0.74", 0}; /* lint:allow R1-version replay of the committed v0.0.74 evidence */
+      check("tail-plan-keyed-steps", runv(v, 20, &rc) && rc == 0 && count_lines(out, "TAIL\t") == 6 && has(out, "TAIL\t4\texecute-dry\tkey=" T_APE ":" T_COMMIT) && has(out, "--dry\tgate=") && has(out, "TAIL\tPLAN_ONLY\t")); }
+    { char *v[] = {bin, "--tail-plan", "HEAD", T_APE, "0.0.74", 0}; /* lint:allow R1-version replay of the committed v0.0.74 evidence */
+      check("tail-plan-bad-key-refused", runv(v, 20, &rc) && rc == 2 && has(out, "REFUSE PREP_USAGE")); }
+done:
+    { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 30, &rc); }
+    printf("CHECK_RELEASE_PREP\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
