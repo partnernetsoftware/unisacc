@@ -429,25 +429,30 @@ static int down_ratio(int numerator,int denominator) {
     return (numerator<0?numerator-denominator+1:numerator)/denominator;
 }
 
-static int terrain_height(int x,int y,int seed) {
-    static const int islands[][4]={{162,82,44,62},{68,103,32,42},{227,65,32,26},{92,29,40,30},{188,15,58,37}};
-    int i,peak=-49;
-    for(i=0;i<5;i++) {
-        const int *a=islands[i];
+static int terrain_height(int x,int y,int seed,int legacy) {
+    static const int islands[][5]={{100,106,34,28,113},{163,96,22,18,97},{130,67,12,13,84},
+        {72,56,16,15,100},{187,52,17,13,102},{104,25,16,14,98},{150,20,15,13,103},{215,19,19,13,104}};
+    static const int release[][5]={{162,82,44,62,93},{68,103,32,42,93},{227,65,32,26,93},{92,29,40,30,93},{188,15,58,37,93}};
+    int i,peak=-49,steepness=legacy?96:116;
+    for(i=0;i<(legacy?5:8);i++) {
+        const int *a=legacy?release[i]:islands[i];
         int dx=abs(a[0]-x),dy=abs(a[1]-y),ground;
         if(dx>128) dx=256-dx;
         if(dy>128) dy=256-dy;
-        ground=93-96*dx*dx/(a[2]*a[2])-96*dy*dy/(a[3]*a[3]);
+        ground=a[4]-steepness*dx*dx/(a[2]*a[2])-steepness*dy*dy/(a[3]*a[3]);
         if(ground>peak) peak=ground;
     }
-    return peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
+    if(legacy) return peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
         +down_ratio(field_noise(x,y,8,seed+3)-128,5)
+        +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
+    return peak+down_ratio(45*(field_noise(x,y,64,seed)-128),100)
+        +down_ratio(field_noise(x,y,16,seed+3)-128,4)
         +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
 }
 
-static int terrain_band(int x,int y,int seed) {
+static int terrain_band(int x,int y,int seed,int legacy) {
     static const int stops[]={-25,-8,0,8,28,55,101};
-    int i,elevation=terrain_height(x,y,seed);
+    int i,elevation=terrain_height(x,y,seed,legacy);
     for(i=0;i<7 && elevation>=stops[i];i++) {}
     return i;
 }
@@ -457,6 +462,48 @@ static int take_channel(const char **p,int end) {
     if(value<0 || value>255 || (end && **p!=end)) return -1;
     if(end) *p=*p+1;
     return value;
+}
+
+static int far_islands(void) {
+    unsigned char land[64*20];
+    int queue[64*20],x,y,i,count=0;
+    for(y=0;y<20;y++) for(x=0;x<64;x++) land[64*y+x]=terrain_height(x*4+2,y*4+2,7,0)>=0;
+    for(i=0;i<64*20;i++) if(land[i]) {
+        int next=0,end=1,clipped=0,inside=0;
+        queue[0]=i; land[i]=0;
+        while(next<end) {
+            int at=queue[next++],col=at%64,row=at/64,j;
+            int near[4]={at-1,at+1,at-64,at+64};
+            if(col==0 || col==63 || row==0 || row==19) clipped=1;
+            inside+=abs(4*col+2-128)*151 < (127-(4*row+2))*213;
+            for(j=0;j<4;j++) {
+                int adjacent=near[j];
+                if((j==0 && col==0) || (j==1 && col==63) || adjacent<0 || adjacent>=64*20 || !land[adjacent]) continue;
+                land[adjacent]=0;
+                queue[end++]=adjacent;
+            }
+        }
+        count+=!clipped && inside>=5;
+    }
+    return count;
+}
+
+static int projected_land_ratio(void) {
+    int x,y,ground=0,water=0;
+    for(y=123;y<240;y+=8) for(x=1;x<426;x+=8) {
+        int depth;
+        for(depth=4;depth<=400;depth+=4) {
+            int gx=(int)((256+(x+.5-213)*depth/151)/2)&255;
+            int gy=(int)((254.5-depth)/2)&255;
+            int altitude=terrain_height(gx,gy,7,0);
+            double top=100+(45-(altitude>0?altitude*.22:0))*151/depth;
+            if(y+1<top) continue;
+            ground+=altitude>=0;
+            water+=altitude<0;
+            break;
+        }
+    }
+    return ground+water?ground*100/(ground+water):0;
 }
 
 static int check_terrain(const char *mutation,int published) {
@@ -470,8 +517,8 @@ static int check_terrain(const char *mutation,int published) {
         "docs/uxe/fly-next/index.html":"ujs/practice/uxe/test/d1-pixel-a.html",mutation);
     if(at<0 || at>=(int)sizeof url) return input_error("terrain-url",0);
     for(y=1;y<256;y+=3) for(x=1;x<256;x+=3) {
-        int kind=terrain_band(x,y,7),size;
-        if(counts[kind]>=4 || terrain_band(x,y,31)==kind) continue;
+        int kind=terrain_band(x,y,7,published),size;
+        if(counts[kind]>=4 || terrain_band(x,y,31,published)==kind) continue;
         size=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",x,y);
         if(size<0 || size>=(int)sizeof url-at) return input_error("terrain-url",0);
         at+=size;
@@ -503,6 +550,12 @@ static int check_terrain(const char *mutation,int published) {
     free(out);
     printf("D1_TERRAIN swatches=%d band_errors=%d land=%d/3210 green=%d water=%d foam=%d\n",
         n,failed,land,green,sea,foam);
+    if(!published) {
+        int islands=far_islands(),expected=projected_land_ratio(),observed=land+sea?land*100/(land+sea):0;
+        printf("D1_ARCHIPELAGO seed_far_islands=%d land_expected_pct=%d land_actual_pct=%d sea_actual_pct=%d\n",
+            islands,expected,observed,100-observed);
+        failed+=islands<5 || expected<25 || expected>70 || abs(expected-observed)>15;
+    }
     return failed || land<550 || green<350 || sea<320 || foam<20;
 }
 
@@ -638,8 +691,8 @@ static int check_detail(const char *mutation) {
     if(!getcwd(cwd,sizeof cwd)) return input_error("detail-cwd",0);
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&detail=",cwd,mutation);
     for(y=1;y<255 && n<8;y+=9) for(x=1;x<255 && n<8;x+=7) {
-        int a=terrain_height(x,y,7),b=terrain_height(x+1,y,7);
-        int c=terrain_height(x,y+1,7),d=terrain_height(x+1,y+1,7);
+        int a=terrain_height(x,y,7,0),b=terrain_height(x+1,y,7,0);
+        int c=terrain_height(x,y+1,7,0),d=terrain_height(x+1,y+1,7,0);
         int fine=down_ratio(9*a+3*b+3*c+d,16)+128;
         if(fine==128+a || fine<0 || fine>255) continue;
         at+=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",4*x+1,4*y+1);

@@ -6,7 +6,11 @@ const palette=[
 const muted=[[29,74,112],[43,108,143],[68,148,164],[216,190,133],
   [94,148,77],[66,123,67],[52,95,62],[111,111,114]];
 const foam=[174,225,231], haze=[173,214,234];
-const islands=[[162,82,44,62],[68,103,32,42],[227,65,32,26],[92,29,40,30],[188,15,58,37]];
+const islands=[
+  [100,106,34,28,113],[163,96,22,18,97],[130,67,12,13,84],
+  [72,56,16,15,100],[187,52,17,13,102],[104,25,16,14,98],
+  [150,20,15,13,103],[215,19,19,13,104]
+];
 const bayer=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
 const clouds=[
   [[93,74,39,18],[202,63,23,14],[155,8,32,15],[55,25,39,18],[231,14,36,17],
@@ -37,13 +41,13 @@ function noise(x,y,step,seed) {
 }
 function elev(x,y,seed) {
   let peak=-49;
-  for(const [cx,cy,rx,ry] of islands) {
+  for(const [cx,cy,rx,ry,summit] of islands) {
     const dx=Math.min(Math.abs(x-cx),MAP-Math.abs(x-cx));
     const dy=Math.min(Math.abs(y-cy),MAP-Math.abs(y-cy));
-    peak=Math.max(peak,93-Math.floor(96*dx*dx/(rx*rx))-Math.floor(96*dy*dy/(ry*ry)));
+    peak=Math.max(peak,summit-Math.floor(116*dx*dx/(rx*rx))-Math.floor(116*dy*dy/(ry*ry)));
   }
-  return peak+Math.floor((noise(x,y,32,seed)-128)*.35)
-    +Math.floor((noise(x,y,8,seed+3)-128)*.20)
+  return peak+Math.floor((noise(x,y,64,seed)-128)*.45)
+    +Math.floor((noise(x,y,16,seed+3)-128)*.25)
     +Math.floor((noise(x,y,2,seed+5)-128)*.07);
 }
 function band(h) {
@@ -112,7 +116,7 @@ export function pixelWorld(context,query) {
   return {
     paint(flight,tick) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
-      const horizon=113+Math.round(flight.pitch*.50), cam=flight.altitude+13;
+      const horizon=100+Math.round(flight.pitch*.50), cam=flight.altitude+20;
       const wavePhase=query.has("still-waves")?0:Math.floor(tick/3);
       const groundDetail=!query.has("bare-ground");
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
@@ -122,7 +126,7 @@ export function pixelWorld(context,query) {
       }
       limit.fill(HEIGHT);
       for(let depth=4;depth<=400;depth+=Math.max(.60,depth*.022)) {
-        const fade=Math.max(0,Math.min(16,Math.floor((depth-59)/18)));
+        const fade=Math.max(0,Math.min(16,Math.floor((depth-52)/13)));
         const x0=flight.x+depth*fx,z0=flight.z+depth*fz;
         for(let col=0;col<WIDTH;col++) {
           const lateral=(col+.5-WIDTH/2)*depth/151;
