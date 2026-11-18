@@ -1,16 +1,18 @@
 /* csih-ape.cx -- build csih.com, one APE file for six targets (apps/csih/docs/csih-com.md).
    From the repo root, one step per call (each slice compiles csih in ~45-50s):
      sh ./unisacc.com tools/csih-ape.cx -- slice lnx/x86_64     (then lnx/arm64, osx/x86_64, osx/arm64, win/x86_64)
-     sh ./unisacc.com tools/csih-ape.cx -- pack                 -> apps/csih/csih.com (deflated slices) + out/csih-ape/manifest.tsv
+     sh ./unisacc.com tools/csih-ape.cx -- pack                 -> apps/csih/csih.com (deflated slices) + $TMPDIR/unisacc-session-csih-ape/manifest.tsv
      sh ./unisacc.com tools/csih-ape.cx -- verify               the files, their sha256 and today's sources agree
    Slices: apps/csih/csih.cx with -b TARGET for the four Unix targets; win/x86_64 is
    apps/csih/tools/win-unsupported.cx for now (csih's TUI is POSIX), and win/arm64 runs that PE.
    Each slice records the csih source digest (apps/csih/csih.sh digest) it was built from;
    pack refuses slices from different sources, verify refuses when today's sources differ.
-   Reproducible: `snapshot [REV]` exports that commit's sources into out/csih-ape/tree;
-   slice/pack/verify/smoke run there (cd into it), then `install` from the repo root puts
-   the result at apps/csih/csih.com with a commit row, and verify checks the snapshot.
+   Reproducible: `snapshot [REV]` exports that commit's sources into $TMPDIR/unisacc-session-csih-ape/tree
+   (sr_default("csih-ape"); never the repo out/); slice/pack/verify/smoke run there (cd into it),
+   then `install` from the repo root puts the result at apps/csih/csih.com with a commit row,
+   and verify checks the snapshot.
    An L3 tool: no #include, no direct libc call (cx/sys, cx/text, the cx_* prelude). */
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -38,7 +40,9 @@ static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
     return rc;
 }
 
-#define OUT "out/csih-ape"
+/* OUT is sr_default("csih-ape") = canonical(sy_tmpdir())/unisacc-session-csih-ape; never repo out/. */
+static char g_out[4096];
+#define OUT g_out
 #define COM "apps/csih/csih.com"
 #define NS 5
 
@@ -47,6 +51,21 @@ static const char *const files[NS] = { "csih_win64-x86.exe", "csih_lnx64-x86.bin
                                        "csih_osx64-x86.bin", "csih_osx64-arm.bin" };
 
 static int eq(const char *a, const char *b) { return tx_eq(a, b, 4096); }
+
+/* resolve and create the session dir; 0, or -1 with a message on stderr */
+static int ensure_out(void) {
+    int mk;
+    if (!g_out[0] && sr_default("csih-ape", g_out, sizeof g_out)) {
+        fprintf(stderr, "csih-ape: cannot resolve sr_default(csih-ape)\n");
+        return -1;
+    }
+    mk = sy_mkdir(g_out, 0755);
+    if (mk && mk != -EEXIST && sy_exists(g_out) != 1) {
+        fprintf(stderr, "csih-ape: cannot create %s\n", g_out);
+        return -1;
+    }
+    return 0;
+}
 
 /* sha256 of PATH's bytes into HEX (65), 0 on success. cx_read's buffers are
    not freed: this is a one-shot CLI (a few files of a few MB), the process
@@ -60,7 +79,7 @@ static int sha_file(const char *path, char hex[65]) {
 }
 
 /* "" for the working tree, or OUT/tree/ when verifying a commit-built csih.com */
-static char g_base[64];
+static char g_base[4400];
 
 /* the csih product source digest, as csih.sh prepare stamps it, into OUT (65) */
 static int src_digest(char out[65]) {
@@ -94,8 +113,7 @@ static int slice(const char *target) {
     if (k < 0) { fprintf(stderr, "csih-ape: unknown target %s\n", target); return 2; }
     if (k == 0) src = "apps/csih/tools/win-unsupported.cx";
     if (src_digest(d) != 0) { fprintf(stderr, "csih-ape: cannot read the source digest\n"); return 1; }
-    sy_mkdir("out", 0755);
-    sy_mkdir(OUT, 0755);
+    if (ensure_out()) return 1;
     { if (cx_fmt(path, sizeof path, "%s/%s", OUT, files[k])) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
     {
         char *av[] = { "sh", "./unisacc.com", (char *)src, "-b", (char *)target, "-o", path, 0 };
@@ -142,11 +160,13 @@ static void clean_head(char hash[41]) {
     }
     char *av[] = { "sh", "-c",
                    "cd apps/csih && sh ../../unisacc.com -cx-plan csih.cx | cut -f2 "
-                   "| while read f; do realpath --relative-to=../.. \"$f\"; done > ../../out/csih-ape/closure.txt "
-                   "&& cd ../.. && [ -s out/csih-ape/closure.txt ] "
-                   "&& git diff --quiet HEAD -- $(cat out/csih-ape/closure.txt) apps/csih/csih.sh "
-                   "&& git rev-parse HEAD", 0 };
+                   "| while read f; do realpath --relative-to=../.. \"$f\"; done > \"$1/closure.txt\" "
+                   "&& cd ../.. && [ -s \"$1/closure.txt\" ] "
+                   "&& git diff --quiet HEAD -- $(cat \"$1/closure.txt\") apps/csih/csih.sh "
+                   "&& git rev-parse HEAD",
+                   "sh", OUT, 0 };
     hash[0] = 0;
+    if (ensure_out()) return;
     if (bounded_run(av, 50, out, sizeof out, &cut) == 0 && tx_len(out, sizeof out) >= 40) tx_copy(hash, 41, out, 40);
 }
 
@@ -261,7 +281,7 @@ static int verify(void) {
             else printf("  ok    compiler %s as packed\n", f2);
         } else if (eq(f1, "slice") && nf == 4) {
             rows++;
-            { if (cx_fmt(path, sizeof path, "%s%s/%s", g_base, OUT, f3)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
+            { if (cx_fmt(path, sizeof path, "%s/%s", OUT, f3)) { fprintf(stderr, "csih-ape: text too long for path\n"); exit(2); } }
             if (sha_file(path, hex) != 0 || !eq(hex, f4)) { printf("  FAIL  slice %s (%s) differs from the manifest\n", f2, f3); bad++; }
             else printf("  ok    slice %s %s\n", f2, f3);
         } else if (eq(f1, "version") && nf >= 2) {
@@ -415,7 +435,7 @@ static int smoke(void) {
 
 /* In a snapshot only (./.commit exists: the sources cannot change), record the
    source digest beside a slice compiled directly with
-     sh ./unisacc.com SRC -b TARGET -o out/csih-ape/FILE
+     sh ./unisacc.com SRC -b TARGET -o $TMPDIR/unisacc-session-csih-ape/FILE
    (the compile alone is 50-57s; with this tool's own -run start it would not fit
    one 60s call). The slice must exist and be newer than .commit. */
 static int mark(const char *target) {
@@ -424,7 +444,7 @@ static int mark(const char *target) {
     int i, k = -1;
     for (i = 0; i < NS; i++) if (eq(targets[i], target)) k = i;
     if (k < 0) { fprintf(stderr, "csih-ape: unknown target %s\n", target); return 2; }
-    if (sy_exists(".commit") != 1) { fprintf(stderr, "csih-ape: mark only inside a snapshot (out/csih-ape/tree)\n"); return 2; }
+    if (sy_exists(".commit") != 1) { fprintf(stderr, "csih-ape: mark only inside a snapshot (OUT/tree, see snapshot)\n"); return 2; }
     if (cx_fmt(path, sizeof path, "%s/%s", OUT, files[k]) || cx_fmt(side, sizeof side, "%s.src", path)) return 2;
     if (sy_stat(path, &a) != 0 || sy_stat(".commit", &b) != 0 || a.mtime < b.mtime) {
         fprintf(stderr, "csih-ape: %s missing or older than the snapshot: compile it first\n", path);
@@ -453,8 +473,6 @@ static int snapshot(const char *rev) {
         hash[40] = 0;
     }
     if (cx_fmt(tree, sizeof tree, "%s/tree", OUT)) return 2;
-    sy_mkdir("out", 0755);
-    sy_mkdir(OUT, 0755);
     if (sy_exists(tree) == 1 && cx_rmtree(tree) != 0) { fprintf(stderr, "csih-ape: cannot clear %s\n", tree); return 1; }
     if (sy_mkdir(tree, 0755) != 0) { fprintf(stderr, "csih-ape: cannot create %s\n", tree); return 1; }
     {
@@ -472,8 +490,8 @@ static int snapshot(const char *rev) {
     if (cx_fmt(path, sizeof path, "%s/.commit", tree) || cx_write(path, hash, 40) != 0) return 1;
     printf("CSIH_APE\tSNAPSHOT\t%s\t%s\n", hash, tree);
     printf("next, in %s, one per call: for each target\n"
-           "  sh ./unisacc.com SRC -b TARGET -o out/csih-ape/FILE   then   sh ./unisacc.com tools/csih-ape.cx -- mark TARGET\n"
-           "  (SRC apps/csih/csih.cx; win/x86_64: apps/csih/tools/win-unsupported.cx), then pack, verify, smoke\n", tree);
+           "  sh ./unisacc.com SRC -b TARGET -o %s/FILE   then   sh ./unisacc.com tools/csih-ape.cx -- mark TARGET\n"
+           "  (SRC apps/csih/csih.cx; win/x86_64: apps/csih/tools/win-unsupported.cx), then pack, verify, smoke\n", tree, OUT);
     printf("then, from the repo root:  sh ./unisacc.com tools/csih-ape.cx -- install\n");
     return 0;
 }
@@ -485,7 +503,7 @@ static int install(void) {
     size_t n = 0, mn = 0, hn = 0;
     char *b, *m, *h;
     static char man[16384];
-    if (cx_fmt(p, sizeof p, "%s/tree/%s", OUT, COM) || cx_fmt(q, sizeof q, "%s/tree/%s/manifest.tsv", OUT, OUT)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tree/%s", OUT, COM) || cx_fmt(q, sizeof q, "%s/manifest.tsv", OUT)) return 2; /* OUT is absolute and shared: the snapshot pack wrote OUT/manifest.tsv */
     b = cx_read(p, &n);
     m = cx_read(q, &mn);
     if (cx_fmt(p, sizeof p, "%s/tree/.commit", OUT)) return 2;
@@ -515,6 +533,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "csih-ape: run from the repo root\n");
         return 2;
     }
+    if (argc >= 2 && ensure_out()) return 1;
     if (argc == 3 && eq(argv[1], "slice")) return slice(argv[2]);
     if (argc == 2 && eq(argv[1], "pack")) return pack();
     if (argc == 2 && eq(argv[1], "verify")) return verify();

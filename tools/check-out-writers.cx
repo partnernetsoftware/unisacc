@@ -4,12 +4,11 @@
  *
  * Scans the top level of ROOT/tools and ROOT/tests for lines that call sy_mkdir( with a path naming the
  * repository out directory: ("out" , "%s/out" , "%s/out/..." , "out/...".  A hit in any file other than
- * the baseline exemption is FAIL (a new writer: use sy_tmpdir() or a tmpdir session root, see
- * tools/cxlib/sessionroot.cx).  The baseline is tools/csih-ape.cx (csih lane, envelope sent to its
- * maintainer, rewrite to sy_tmpdir()/csih-ape pending); the exemption expires 2026-12-31 (before the next
- * release day): after that date the baseline file counts as a new writer too.
+ * any file is FAIL (a new writer: use sy_tmpdir() or a tmpdir session root, see
+ * tools/cxlib/sessionroot.cx).  No baseline exemption remains: tools/csih-ape.cx now writes under sy_tmpdir() (sr_default("csih-ape")) and the
+ * former exemption is removed.
  * Fixtures (fake repo trees under sy_tmpdir(), removed at the end) prove: a tree with a writer FAILs, the
- * csih-ape exemption holds, legal tmpdir spellings pass, and an expired exemption FAILs.
+ * csih-ape name is not exempt, and legal tmpdir spellings pass.
  * Second rule (format root): a non-comment line whose string literal starts "%s/out" or "%s/out/..." and
  * whose first argument after that literal is a checkout-root variable (root, repo, repo_dir, nc_root,
  * safe_root, scan_root, gm_root, cwd, ROOT) names the repository out/ whatever it does next (mkdir,
@@ -167,10 +166,6 @@ static int ow_scan_dir(const char *root, const char *dir, long now_s) {
             sy_printf("ALLOWED\t%s\thits=%d\t%s\n", rel, h, why);
             continue;
         }
-        if (!strcmp(dir, "tools") && !strcmp(names[i], "csih-ape.cx") && now_s < OW_EXPIRY_S) {
-            sy_printf("EXEMPT\t%s/%s\thits=%d\texpires=2026-12-31\n", dir, names[i], h);
-            continue;
-        }
         sy_printf("WRITER\t%s/%s\thits=%d\n", dir, names[i], h);
         bad += h;
     }
@@ -240,16 +235,15 @@ int main(int argc, char **argv) {
     ow_put(t, "tests/w3.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); /* out-ok: fixture */ }\n");
     ow_put(t, "tools/s9-root.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out\", root); }\n");
     ck(ow_scan(t, now_s) == 2, "fixture-allow-list-holds");
-    /* csih-ape exemption */
+    /* csih-ape is no longer exempt (it writes under sy_tmpdir()): the old spelling counts as a writer */
     if (cx_fmt(t, sizeof t, "%s/csih", fx) || sy_mkdir(t, 0700)) return 2;
     {   char b1[4600], b2[4600];
         if (cx_fmt(b1, sizeof b1, "%s/tools", t) || cx_fmt(b2, sizeof b2, "%s/tests", t) || sy_mkdir(b1, 0700) || sy_mkdir(b2, 0700)) return 2;
         ow_put(t, "tools/csih-ape.cx", "int main(void){ sy_mkdir(\"out\", 0755); sy_mkdir(\"out/csih-ape\", 0755); return 0; }\n");
     }
-    ck(ow_scan(t, now_s) == 0, "fixture-csih-ape-exempt");
-    ck(ow_scan(t, OW_EXPIRY_S + 1) == 1,"fixture-csih-ape-exemption-expires");
+    ck(ow_scan(t, now_s) == 1, "fixture-csih-ape-name-not-exempt");
     ow_put(t, "tools/other.cx", "int main(void){ sy_mkdir(\"out\", 0755); return 0; }\n");
-    ck(ow_scan(t, now_s) == 1, "fixture-csih-ape-exemption-is-per-file");
+    ck(ow_scan(t, now_s) == 2, "fixture-no-file-is-exempt");
     (void)cx_rmtree(fx);
     /* the real tree */
     ow_verbose = 1;
