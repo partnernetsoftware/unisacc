@@ -30,6 +30,7 @@
 
 static int failed;
 static char root[4096], td[4096], fx[4400], lay[4400], binp[4400], pathenv[8192], fakeenv[4500];
+static char selfbin[4400],execbin[4400],hookbin[4400];
 #define tlen(s) tx_len((s), 1 << 24)
 /* record match: some line of b starts with s or ends with s (output and call logs are line records) */
 static int has(const char *b, const char *s) {
@@ -118,8 +119,9 @@ static int fake_gh(int argc, char **argv) {
         return 0;
     }
     if (argi(argc, argv, "workflow") > 0) return 0;
-    if (argi(argc, argv, "list") > 0) { sy_printf("777001\t9999-01-01T00:00:00Z\n"); return 0; }
+    if (argi(argc, argv, "list") > 0) { cx_fmt(q,sizeof q,"%s/replacement",fdir);sy_printf("%s\t9999-01-01T00:00:00Z\n",sy_exists(q)==1?"777002":"777001"); return 0; }
     if (argi(argc, argv, "run") > 0 && argi(argc, argv, "view") > 0) {
+        if(argi(argc,argv,"status,conclusion")>0){cx_fmt(q,sizeof q,"%s/replacement",fdir);sy_printf("completed\t%s\n",sy_exists(q)==1?"failure":"success");return 0;}
         if (argi(argc, argv, "--log") > 0) { cx_fmt(q, sizeof q, "%s/ci.log", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
         if (argi(argc, argv, "status") > 0) { sy_printf("completed\n"); return 0; }
         cx_fmt(q, sizeof q, "%s/ci.json", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0;
@@ -131,9 +133,32 @@ static int fake_unisacc(int argc, char **argv) {
     flog("unisacc", argc, argv, 3);
     if (argc < 4) return 3;
     if (tx_eqz(argv[3], "tools/ratchets.cx")) { sy_printf("RATCHETS\tok=15\tfail=0\n"); return 0; }
-    if (tx_eqz(argv[3], "tools/devsvc.cx")) { sy_printf("OK\tfake devsvc\n"); return 0; }
+    if (tx_eqz(argv[3], "tools/devsvc.cx")) {
+        int mi=argi(argc,argv,"-m");
+        if(mi>0 && mi+1<argc && has(argv[mi+1]," Y1")){
+            if(argi(argc,argv,"release/evidence/0.0.99/INDEX.tsv")<0)return 2;
+            for(int i=argi(argc,argv,"--whole")+1;i<argc && argv[i][0]!='-';i++){
+                sy_stat_t st;if(!sy_lstat(argv[i],&st) && st.kind=='d')return 2;
+            }
+            sy_printf("Y1_FIXTURE_REGULAR_FILES\n");
+        }
+        sy_printf("OK\tfake devsvc\n"); return 0;
+    }
     if (tx_eqz(argv[3], "tools/release-decide.cx")) { cx_fmt(q, sizeof q, "%s/decision.txt", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
     if (tx_eqz(argv[3], "release/tools/c47-1-readback.cx")) {
+        cx_fmt(q,sizeof q,"%s/readback-timeout-once",fdir);
+        if(sy_exists(q)==1){
+            if(argc<10 || sy_mkdir(argv[7],0700))return 2;
+            if(sy_unlink(q) || put(fdir,"first-output",argv[7]))return 2;
+            return 124;
+        }
+        cx_fmt(q,sizeof q,"%s/first-output",fdir);
+        if(sy_exists(q)==1){
+            char *first=slurp(q);
+            if(!first || argc<10 || tx_eqz(argv[7],first) || sy_exists(first)!=1 || sy_exists(argv[7])!=0)return 2;
+            free(first);
+            if(sy_unlink(q) || put(fdir,"fresh-output-verified","yes"))return 2;
+        }
         cx_fmt(q, sizeof q, "%s/readback-fail", fdir);
         sy_printf("READBACK_STEP fake %s\n", sy_exists(q) == 1 ? "FAIL" : "PASS");
         return sy_exists(q) == 1 ? 1 : 0;
@@ -141,9 +166,9 @@ static int fake_unisacc(int argc, char **argv) {
     if (tx_eqz(argv[3], "tools/release-exec.cx")) {   /* the release-run hook: forward to the real tool */
         const char *real = sy_env("CHECK_RX_REAL"); char rp[4400], cwd[4096]; np_result r = {0}; char why[256]; char *v[40]; int k = 0, rc;
         cx_fmt(rp, sizeof rp, "%s/tools/release-exec.cx", real); sy_cwd(cwd, sizeof cwd);
-        char up[4400]; cx_fmt(up, sizeof up, "%s/unisacc.com", real);
-        v[k++] = "sh"; v[k++] = up; v[k++] = rp;
-        for (int i = 4; i < argc && k < 39; i++) v[k++] = argv[i];
+        char prepared[4400];cx_fmt(prepared,sizeof prepared,"%s/exec",fdir);
+        v[k++] = prepared;
+        for (int i = 4+(argc>4 && tx_eqz(argv[4],"--")); i < argc && k < 39; i++) v[k++] = argv[i];
         v[k] = 0;
         if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return 125;
         if (r.outn) sy_write_all(1, r.out, r.outn); if (r.errn) sy_write_all(2, r.err, r.errn);
@@ -180,14 +205,19 @@ static void ci_json(int bad) {
     put(td, "ci.json", b.p); free(b.p);
 }
 /* opts: version printed by the fake APE, strict variant, ratchets fail count */
-static void fixture(const char *apever, int strict_variant, int ratchet_fail, int with_expected) {
+static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int with_expected) {
     char p[4800], t[8192], cand[4096], blob[128], tree[128], tree2[128], commit[128], row[600];
+    char apever[32];cx_fmt(apever,sizeof apever,"0.0.%d",fixture_patch);
     rmrf(fx); rmrf(lay);
     { char *v[] = {"mkdir", "-p", fx, lay, binp, 0}; if (sh(v, "/", 0, 0)) die("mkdir"); }
     cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99", fx); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
     cx_fmt(p, sizeof p, "%s/remote", td); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
+    cx_fmt(p,sizeof p,"%s/tools",fx);
+    if(sy_mkdir(p,0755))die("fixture tools directory");
+    cx_fmt(t,sizeof t,"product\t%s\tfixture checkout driver\n",leafs[0]);
+    if(put(p,"devsvc-repo.tsv",t))die("fixture checkout configuration");
     /* fake APE and assets */
-    cx_fmt(t, sizeof t, "#!/bin/sh\necho unisacc %s\n", apever); put(lay, "unisacc.com", t);
+    cx_fmt(t, sizeof t, "#!/bin/sh\necho unisacc %s\n", apever); put(lay, leafs[0], t);
     put(lay, "pkg.bin", "pkg bytes\n"); put(lay, "slice-win-arm64", "slice bytes\n");
     put(lay, "unisacc.com.build.json", "{\"version\":\"0.0.99\"}\n"); put(lay, "build.json", "{\"version\":\"0.0.99\"}\n");
     for (int i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s", lay, leafs[i]); sha_of(p, sha[i]); }
@@ -227,8 +257,8 @@ static void fixture(const char *apever, int strict_variant, int ratchet_fail, in
     cx_fmt(p, sizeof p, "%s/corrupt-download", td); rmrf(p);
     cx_fmt(p, sizeof p, "%s/readback-fail", td); rmrf(p);
     /* wrappers: fake gh in PATH, fake ./unisacc.com in the fixture root */
-    cx_fmt(t, sizeof t, "#!/bin/sh\nexec sh %s/unisacc.com %s/tools/check-release-exec.cx -- --fake gh \"$@\"\n", root, root); put(binp, "gh", t);
-    cx_fmt(t, sizeof t, "#!/bin/sh\nexec sh %s/unisacc.com %s/tools/check-release-exec.cx -- --fake unisacc \"$@\"\n", root, root); put(fx, "unisacc.com", t);
+    cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake gh \"$@\"\n",selfbin); put(binp, "gh", t);
+    cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake unisacc \"$@\"\n",selfbin); put(fx, leafs[0], t);
     { char g[4500]; cx_fmt(g, sizeof g, "%s/gh", binp); char *v[] = {"chmod", "+x", g, 0}; sh(v, "/", 0, 0); }
     /* git: one commit holding release/candidate.tsv, also origin/main (= pushed) */
     if (git("init", "-q", 0, 0, 0, 0, 0)) die("git init");
@@ -246,6 +276,9 @@ static void fixture(const char *apever, int strict_variant, int ratchet_fail, in
     if (git("commit-tree", tree, "-m", "fixture X", 0, commit, sizeof commit)) die("commit-tree");
     if (git("update-ref", "refs/heads/main", commit, 0, 0, 0, 0) || git("update-ref", "refs/remotes/origin/main", commit, 0, 0, 0, 0) ||
         git("symbolic-ref", "HEAD", "refs/heads/main", 0, 0, 0, 0)) die("update-ref");
+    { char bare[4400];cx_fmt(bare,sizeof bare,"%s/bare.git",td);rmrf(bare);
+      if(git("init","--bare","-q",bare,0,0,0) || git("remote","add","origin",bare,0,0,0) ||
+         git("update-ref","refs/heads/v0.0.99",commit,0,0,0,0))die("private remote"); }
 }
 static char out[262144];
 static char *candidate_input="release/candidate.tsv";
@@ -254,9 +287,10 @@ static int rx(const char *a1, const char *a2, const char *a3, const char *tool) 
     char *env[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
     char realenv[4200]; cx_fmt(realenv, sizeof realenv, "CHECK_RX_REAL=%s", root);
     char *env2[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
-    cx_fmt(up, sizeof up, "%s/unisacc.com", root); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
+    cx_fmt(up, sizeof up, "%s/%s", root, leafs[0]); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
     cx_fmt(ex, sizeof ex, "%s/xout", td);
-    v[k++] = "sh"; v[k++] = up; v[k++] = tp; v[k++] = "--"; v[k++] = "--execute"; v[k++] = candidate_input; v[k++] = "--layout"; v[k++] = lay;
+    v[k++]=tool?hookbin:execbin;
+    v[k++] = "--execute"; v[k++] = candidate_input; v[k++] = "--layout"; v[k++] = lay;
     v[k++] = "--out"; v[k++] = ex; v[k++] = "--baseline"; v[k++] = "/nonexistent-baseline";
     if (a1) v[k++] = (char *)a1; if (a2) v[k++] = (char *)a2; if (a3) v[k++] = (char *)a3;
     v[k] = 0;
@@ -297,7 +331,7 @@ static void expect_gate(const char *name, int rc, const char *gate) {
 /* N0: release-run before --execute existed, from a git archive of 85a2d3242e (read-only /tmp copy) */
 static void part_n(void) {
     char old[4400], tarp[4400], up[4400], o[2000]; np_result r = {0}; char why[200];
-    cx_fmt(old, sizeof old, "%s/old", td); cx_fmt(tarp, sizeof tarp, "%s/old.tar", td); cx_fmt(up, sizeof up, "%s/unisacc.com", root);
+    cx_fmt(old, sizeof old, "%s/old", td); cx_fmt(tarp, sizeof tarp, "%s/old.tar", td); cx_fmt(up, sizeof up, "%s/%s", root, leafs[0]);
     { char *v[] = {"mkdir", "-p", old, 0}; sh(v, "/", 0, 0); }
     { char *g[] = {"git", "archive", "-o", tarp, "85a2d3242e", "cxroot.tsv", "tools/release-run.cx", "tools/cxlib", "cx", "ext", 0};
       if (sh(g, root, 0, 0)) die("git archive old release-run"); }
@@ -311,7 +345,7 @@ static void part_n(void) {
 static void part_a(void) {
     int rc; char *c;
     /* D1 dry */
-    fixture("0.0.99", 0, 0, 1);
+    fixture(99, 0, 0, 1);
     rc = rx("--dry", 0, 0, 0); c = calls();
     ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tDRY_GATES_OK"), "D1.dry-ok");
     ck(has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tRATCHETS\tPASS") && has(out, "GATE\t1\tAPE_VERSION\tPASS") && has(out, "GATE\t2\tASSETS\tPASS"), "D1.g1-g2-pass");
@@ -322,19 +356,19 @@ static void part_a(void) {
     ck(c && !has(c, "gh ") && !has(c, "unisacc tools/devsvc") && !has(c, "unisacc release/tools/c47-1-readback"), "D1.dry-zero-gh-zero-commit-zero-readback");
     free(c);
     /* G1 negatives */
-    fixture("0.0.99", 0, 0, 0); expect_gate("G1.strict-fail-outside-expected", rx("--dry", 0, 0, 0), "STRICT");
-    fixture("0.0.99", 2, 0, 1); expect_gate("G1.expected-fail-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
-    fixture("0.0.99", 3, 0, 1); expect_gate("G1.batch-candidate-differs", rx("--dry", 0, 0, 0), "CANDIDATE_SHA");
-    fixture("0.0.99", 4, 0, 1); rc = rx("--dry", 0, 0, 0);
+    fixture(99, 0, 0, 0); expect_gate("G1.strict-fail-outside-expected", rx("--dry", 0, 0, 0), "STRICT");
+    fixture(99, 2, 0, 1); expect_gate("G1.expected-fail-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
+    fixture(99, 3, 0, 1); expect_gate("G1.batch-candidate-differs", rx("--dry", 0, 0, 0), "CANDIDATE_SHA");
+    fixture(99, 4, 0, 1); rc = rx("--dry", 0, 0, 0);
     ck(rc == 0 && has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tAPE_VERSION\tPASS"), "G1.dvqualify-layout-pass");
-    fixture("0.0.99", 5, 0, 1); expect_gate("G1.dvqualify-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
-    fixture("0.0.98", 0, 0, 1); expect_gate("G1.ape-version-differs", rx("--dry", 0, 0, 0), "APE_VERSION");
-    fixture("0.0.99", 0, 1, 1); expect_gate("G1.ratchets-fail", rx("--dry", 0, 0, 0), "RATCHETS");
-    fixture("0.0.99", 0, 0, 1);
+    fixture(99, 5, 0, 1); expect_gate("G1.dvqualify-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
+    fixture(98, 0, 0, 1); expect_gate("G1.ape-version-differs", rx("--dry", 0, 0, 0), "APE_VERSION");
+    fixture(99, 0, 1, 1); expect_gate("G1.ratchets-fail", rx("--dry", 0, 0, 0), "RATCHETS");
+    fixture(99, 0, 0, 1);
     put(fx,"release/evidence/0.0.99/ratchets.txt","# freeze=2222222222222222222222222222222222222222\nRATCHETS\tok=15\tfail=0\n");
     expect_gate("G1.ratchets-receipt-wrong-freeze",rx("--dry",0,0,0),"RATCHETS");
     { char p[4500], head[128], want[128];
-      fixture("0.0.99",0,0,1);
+      fixture(99,0,0,1);
       if(git("read-tree","HEAD",0,0,0,0,0) || git("rev-parse","HEAD",0,0,0,head,sizeof head))die("fixture freeze");
       cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);char *table=slurp(p);
       char *oid=table?strstr(table,"1111111111111111111111111111111111111111"):0;
@@ -346,7 +380,7 @@ static void part_a(void) {
       cx_fmt(want,sizeof want,"# freeze=%s",head);
       ck(has(out,"source=frozen-HEAD") && saved && has(saved,want) && has(saved,"RATCHETS\tok=15\tfail=0"),"G1.dry-saves-freeze-ratchets");
       free(saved);candidate_input="release/candidate.tsv"; }
-    fixture("0.0.99", 0, 0, 1); put(lay, "pkg.bin", "changed after the table\n");
+    fixture(99, 0, 0, 1); put(lay, "pkg.bin", "changed after the table\n");
     expect_gate("G2.asset-byte-change", rx("--dry", 0, 0, 0), "ASSETS");
     c = calls(); ck(c && !has(c, "gh "), "G.dry-negatives-zero-gh"); free(c);
 }
@@ -358,8 +392,14 @@ static void part_b(void) {
         "gh -R example/fixture release edit v0.0.99 --draft=false --latest", "gh -R example/fixture release download v0.0.99 -p unisacc.com -p SHA256SUMS",
         "unisacc release/tools/c47-1-readback", "unisacc tools/devsvc -- git commit -m v0.0.99 Y2: public readback"};
     /* E1 full execute */
-    fixture("0.0.99", 0, 0, 1);
+    fixture(99, 0, 0, 1);
+    put(td,"readback-timeout-once","1");
+    {char d[4500];cx_fmt(d,sizeof d,"%s/release/evidence/0.0.99/nested",fx);sy_mkdir(d,0700);}
     rc = rx(0, 0, 0, 0); c = calls();
+    ck(git("ls-remote","--exit-code","--heads","origin","refs/heads/v0.0.99",0,0)==0,"E1.release-branch-created");
+    ck(rc==0 && c && has(c,"unisacc tools/devsvc -- git commit -m v0.0.99 Y1"),"E1.Y1-regular-files-only");
+    cx_fmt(p,sizeof p,"%s/fresh-output-verified",td);
+    ck(rc==0 && sy_exists(p)==1,"E1.retry-uses-new-output-keeps-first");
     ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "E1.execute-ok");
     if (rc) sy_printf("  rc=%d tail: %.600s\n", rc, out + (tlen(out) > 600 ? tlen(out) - 600 : 0));
     ck(c && ordered(c, seq, 12), "E1.external-order");
@@ -387,19 +427,29 @@ static void part_b(void) {
 static void part_c(void) {
     int rc; char *c, p[4500];
     /* G3 draft readback */
-    fixture("0.0.99", 0, 0, 1); put(td, "corrupt-download", "1");
+    fixture(99, 0, 0, 1); put(td, "corrupt-download", "1");
     rc = rx(0, 0, 0, 0); expect_gate("G3.draft-readback-mismatch", rc, "DRAFT_READBACK");
     c = calls(); ck(has(out, "ROLLBACK\t2\tPLAN\tnot public") && c && !has(c, "gh -R example/fixture workflow run") && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "G3.stops-before-ci-and-publish"); free(c);
     /* G4 CI */
-    fixture("0.0.99", 0, 0, 1);
+    fixture(99, 0, 0, 1);
     ci_json(3);
     rc = rx(0, 0, 0, 0); expect_gate("G4.ci-job-not-success", rc, "CI_SUCCESS");
     c = calls(); ck(c && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "G4.ci-fail-not-published"); free(c);
-    fixture("0.0.99", 0, 0, 1);
+    put(td,"calls.log","");
+    rc=rx(0,0,0,0);c=calls();
+    ck(rc==2 && c && !has(c,"gh -R example/fixture workflow run"),"G4.failure-no-implicit-redispatch");free(c);
+    rc=rx("--redispatch",0,0,0);
+    ck(rc==2 && has(out,"release-exec: REFUSE RELEASE_EXEC_GATE_REDISPATCH previous run must be completed with conclusion failure"),"G4.redispatch-requires-failed-conclusion");
+    put(td,"replacement","1");ci_json(0);rc=rx("--redispatch",0,0,0);
+    {char p[4500];cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/INDEX.tsv",fx);char *ix=catf(p);
+      ck(rc==0 && has(ix,"exec-3b-ci-dispatch-2") && has(ix,"superseded-by=777002") &&
+         has(ix,"exec-3-ci-dispatch") && has(ix,"777001"),"G4.explicit-redispatch-keeps-old-run");free(ix);
+      cx_fmt(p,sizeof p,"%s/replacement",td);sy_unlink(p);}
+    fixture(99, 0, 0, 1);
     put(td, "ci.log", "report\tx\t2026Z CANDIDATE_QUALIFY\tverdict=NOT_QUALIFIED\tpass=41\tfail=1\tnot_run=0\tinvalid=0\n");
     rc = rx(0, 0, 0, 0); expect_gate("G4.ci-verdict-fail", rc, "CI_VERDICT");
     /* G5 readback failure after publish -> rollback runs */
-    fixture("0.0.99", 0, 0, 1); put(td, "readback-fail", "1");
+    fixture(99, 0, 0, 1); put(td, "readback-fail", "1");
     rc = rx(0, 0, 0, 0); expect_gate("G5.readback-fail", rc, "READBACK");
     c = calls();
     ck(c && has(c, "gh -R example/fixture release edit v0.0.99 --draft=true") && has(c, "gh -R example/fixture release edit v0.0.98 --latest") &&
@@ -409,6 +459,7 @@ static void part_c(void) {
 
 int main(int argc, char **argv) {
     const char *part = "nabc", *path;
+    if(argc==2 && tx_eqz(argv[1],"--fixture-image")){sy_printf("RELEASE_FIXTURE_IMAGE\n");return 0;}
     if (argc >= 3 && tx_eqz(argv[1], "--fake")) {
         const char *d = sy_env("CHECK_RX_FAKE");
         if (!d || cx_fmt(fdir, sizeof fdir, "%s", d)) return 3;
@@ -419,10 +470,30 @@ int main(int argc, char **argv) {
     if (cx_fmt(td, sizeof td, "/tmp/check-release-exec-%d", sy_pid())) die("td");
     rmrf(td);
     { char *v[] = {"mkdir", "-p", td, 0}; if (sh(v, "/", 0, 0)) die("mkdir td"); }
+    sy_child_t prep,hook;int preparing=0,preparing_hook=0;
+    if(strcmp(part,"n")) {
+        char self[4096],msg[120];
+        if(cx_fmt(selfbin,sizeof selfbin,"%s/check",td) || cx_fmt(execbin,sizeof execbin,"%s/exec",td))die("fixture image path");
+        char *probe[]={selfbin,"--fixture-image",0};
+        if(sy_self_path(self,sizeof self)<0 || sy_copy(!strncmp(self,"/memfd:",7)?"/proc/self/exe":self,selfbin,0700) ||
+           sh(probe,root,msg,sizeof msg) || !tx_eqz(msg,"RELEASE_FIXTURE_IMAGE")) {
+            char *v[]={"sh",leafs[0],"tools/check-release-exec.cx","-o",selfbin,0};if(sh(v,root,0,0))die("prepare fixture executable");
+        }
+        char *v[]={"sh",leafs[0],"tools/release-exec.cx","-o",execbin,0};
+        sy_spawn_t o;sy_spawn_init(&o);o.argv=v;o.cwd=root;o.pgroup=-1;o.deadline_ms=30000;
+        if(sy_proc_spawn(&o,&prep))die("prepare release executable");preparing=1;
+        if(strchr(part,'b')){
+            if(cx_fmt(hookbin,sizeof hookbin,"%s/hook",td))die("hook path");
+            char *h[]={"sh",leafs[0],"tools/release-run.cx","-o",hookbin,0};
+            o.argv=h;if(sy_proc_spawn(&o,&hook))die("prepare hook");preparing_hook=1;
+        }
+    }
     cx_fmt(fx, sizeof fx, "%s/repo", td); cx_fmt(lay, sizeof lay, "%s/layout", td); cx_fmt(binp, sizeof binp, "%s/bin", td);
     path = sy_env("PATH");
     if (cx_fmt(pathenv, sizeof pathenv, "PATH=%s:%s", binp, path ? path : "/usr/bin:/bin") || cx_fmt(fakeenv, sizeof fakeenv, "CHECK_RX_FAKE=%s", td)) die("env");
     if (strchr(part, 'n')) part_n();
+    if(preparing){sy_exit_t st;int rc=sy_proc_wait(&prep,&st);sy_proc_close(&prep);if(rc || sy_exit_code(&st))die("release executable");}
+    if(preparing_hook){sy_exit_t st;int rc=sy_proc_wait(&hook,&st);sy_proc_close(&hook);if(rc || sy_exit_code(&st))die("release-run executable");}
     if (strchr(part, 'a')) part_a();
     if (strchr(part, 'b')) part_b();
     if (strchr(part, 'c')) part_c();
