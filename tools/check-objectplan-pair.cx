@@ -5,11 +5,17 @@
    section (count mismatch fails).  Rows compare on columns 2-5 with whole-field local labels $fN
    folded to $f (their numbering is per-generation, not semantic).  A pair whose rows differ must
    have a `diff` allow row whose row counts, diff row count and sha256 over the normalized diff all
-   match; an allow row with no matching divergence fails (stale).  Usage:
-     check-objectplan-pair.cx [--check] [--table T] [--allow A] [--report]
-     check-objectplan-pair.cx --selftest      seven controls, then the real check (batch objectplan-pair)
-   Check line: OBJECTPLAN_PAIR pairs=N same=N known_diff=K new_diff=X stale_allow=Y status=PASS|FAIL;
-   --selftest then ends with OBJECTPLAN_PAIR_SELFTEST<TAB>ok=7<TAB>failed=0<TAB>real=PASS. */
+   match; an allow row with no matching divergence fails (stale).
+   Shared sections (T2, 0.0.79): a `rows objectplan d0.sN direct_labels` line in the manifest makes
+   d1 load the d0 section itself; such a d0 section is one pair with status shared (counted in same)
+   and has no d1 rows of its own (a d1 copy left behind shows up as a pair-count mismatch).
+   COUPLING: editing a shared d0 section changes the arm64 (d1) output too; the check counts it
+   as same and cannot warn.  Before changing a shared d0 section either verify the arm64 object
+   output or split the section back into a d1 copy (and drop its `rows objectplan d0.sN` line).  Usage:
+     check-objectplan-pair.cx [--check] [--table T] [--allow A] [--manifest M] [--report]
+     check-objectplan-pair.cx --selftest      eight controls, then the real check (batch objectplan-pair)
+   Check line: OBJECTPLAN_PAIR pairs=N same=N known_diff=K new_diff=X stale_allow=Y shared=S status=PASS|FAIL;
+   --selftest then ends with OBJECTPLAN_PAIR_SELFTEST<TAB>ok=8<TAB>failed=0<TAB>real=PASS. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use mem.heap
@@ -126,9 +132,16 @@ static int diffpair(Sec *x, Sec *y, char hex[65], int show) {
  if (sy_sha256_hex(acc, an, hex)) exit(2);
  mm_free(acc); mm_free(dp); return d;
 }
-static int pairs_n, same_n, known_n, new_n, stale_n;
+static int pairs_n, same_n, known_n, new_n, stale_n, shared_n;
+static const char *mbuf; static long mlen;
+static long line_at(const char *b, long n, const char *prefix, long *len);
+/* manifest line `rows<TAB>objectplan<TAB>d0.sN<TAB>direct_labels<TAB>...`: d1 loads d0.sN itself */
+static int shared(int idx) {
+ char pre[64]; if (cx_fmt(pre, sizeof pre, "rows\tobjectplan\td0.s%d\tdirect_labels\t", idx)) exit(2);
+ long ln; return mbuf && line_at(mbuf, mlen, pre, &ln) >= 0;
+}
 static int run_check(const char *tb, long tn, const char *ab, long an, int report) {
- char why[WHY] = {0}; pairs_n = same_n = known_n = new_n = stale_n = 0;
+ char why[WHY] = {0}; pairs_n = same_n = known_n = new_n = stale_n = shared_n = 0;
  if (parse(tb, tn, why) || parse_allow(ab, an, why)) { printf("REFUSE %s\n", why); return -1; }
  Sec *s0[MAXSEC], *s1[MAXSEC]; int n0 = 0, n1 = 0;
  for (int i = 0; i < nsec; i++) {
@@ -141,6 +154,11 @@ static int run_check(const char *tb, long tn, const char *ab, long an, int repor
    a->used = 1;
    if (strcmp(hex, a->sha) || a->ar != sec[i].n) { printf("ONE-SIDED-CHANGED %s rows=%d sha=%s\n", nm, sec[i].n, hex); new_n++; }
    else if (report) printf("ONE-SIDED %s rows=%d origin=%s\n", nm, sec[i].n, a->origin);
+   continue;
+  }
+  if (sec[i].side == 0 && shared(sec[i].idx)) {
+   pairs_n++; same_n++; shared_n++;
+   if (report) printf("PAIR %s d1->%s rows=%d diff=0 status=shared\n", nm, nm, sec[i].n);
    continue;
   }
   if (sec[i].side == 0) s0[n0++] = &sec[i]; else s1[n1++] = &sec[i];
@@ -167,7 +185,7 @@ static int run_check(const char *tb, long tn, const char *ab, long an, int repor
  for (int i = 0; i < nal; i++) if (!al[i].used) { stale_n++; printf("STALE-ALLOW %s %s %s origin=%s\n", al[i].kind, al[i].a, al[i].c, al[i].origin); }
  return new_n || stale_n ? 1 : 0;
 }
-static void final(int rc) { printf("OBJECTPLAN_PAIR pairs=%d same=%d known_diff=%d new_diff=%d stale_allow=%d status=%s\n", pairs_n, same_n, known_n, new_n, stale_n, rc ? "FAIL" : "PASS"); }
+static void final(int rc) { printf("OBJECTPLAN_PAIR pairs=%d same=%d known_diff=%d new_diff=%d stale_allow=%d shared=%d status=%s\n", pairs_n, same_n, known_n, new_n, stale_n, shared_n, rc ? "FAIL" : "PASS"); }
 static int ok, bad;
 static void ck(int yes, const char *s) { printf("%s\t%s\n", yes ? "PASS" : "FAIL", s); if (yes) ok++; else bad++; }
 static int control(const char *tb, long tn, const char *ab, long an) { printf("-- control\n"); return run_check(tb, tn, ab, an, 0); }
@@ -184,30 +202,38 @@ static long line_at(const char *b, long n, const char *prefix, long *len) {
 static int selftest(const char *tb, long tn, const char *ab, long an) {
  long on, p, ln; char *m;
  ck(control(tb, tn, ab, an) == 0, "baseline-passes");
- p = line_at(tb, tn, "d1.s28\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p + 7, 0, "X", &on);
+ p = line_at(tb, tn, "d1.s3\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p + 6, 0, "X", &on);
  ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d1-row-edit-in-same-pair-fails"); mm_free(m);
  p = line_at(tb, tn, "d1.s24\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p + 7, 0, "X", &on);
  ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d1-row-edit-in-known-pair-fails"); mm_free(m);
- p = line_at(tb, tn, "d0.s31\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p, 0, "d0.s31\tOBJ.extra\t*\tOBJ.fail\t[]\n", &on);
+ p = line_at(tb, tn, "d0.s8\t", &ln); m = p < 0 ? 0 : splice(tb, tn, p, 0, "d0.s8\tOBJ.extra\t*\tOBJ.fail\t[]\n", &on);
  ck(m && control(m, on, ab, an) == 1 && new_n == 1, "d0-only-row-add-fails"); mm_free(m);
  p = line_at(ab, an, "diff\t", &ln); m = p < 0 ? 0 : splice(ab, an, p, ln, "", &on);
  ck(m && control(tb, tn, m, on) == 1 && new_n == 1, "allow-row-deleted-fails"); mm_free(m);
  m = splice(ab, an, an, 0, "diff\td0.s27\td1.s28\t130\t130\t1\t0000000000000000000000000000000000000000000000000000000000000000\tprobe\tstale probe\tnone\n", &on);
  ck(control(tb, tn, m, on) == 1 && stale_n == 1 && new_n == 0, "stale-allow-row-fails"); mm_free(m);
  ck(control(tb, tn, "", 0) == 1 && new_n >= 1, "empty-allow-fails");
+ { const char *keep = mbuf; long keepn = mlen; char *mm = 0;
+   p = mbuf ? line_at(mbuf, mlen, "rows\tobjectplan\td0.s27\tdirect_labels\t", &ln) : -1;
+   if (p >= 0) { mm = splice(mbuf, mlen, p + 15, 6, "d1.s28", &on); mbuf = mm; mlen = on; }
+   ck(mm && control(tb, tn, ab, an) == 1 && new_n >= 1, "unshared-d0-section-without-d1-copy-fails");
+   mbuf = keep; mlen = keepn; if (mm) mm_free(mm); }
  return bad ? 1 : 0;
 }
 int main(int argc, char **argv) {
- const char *tp = "exec/enc/objectplan-result.tsv", *ap = "tests/objectplan-pair-allow.tsv"; int st = 0, report = 0;
+ const char *tp = "exec/enc/objectplan-result.tsv", *ap = "tests/objectplan-pair-allow.tsv", *mp = "exec/enc/objectplan-manifest.tsv"; int st = 0, report = 0;
  for (int i = 1; i < argc; i++) {
   if (!strcmp(argv[i], "--table") && i + 1 < argc) tp = argv[++i];
   else if (!strcmp(argv[i], "--allow") && i + 1 < argc) ap = argv[++i];
+  else if (!strcmp(argv[i], "--manifest") && i + 1 < argc) mp = argv[++i];
   else if (!strcmp(argv[i], "--report")) report = 1;
   else if (!strcmp(argv[i], "--selftest")) st = 1;
   else if (!strcmp(argv[i], "--check")) ;
-  else { fprintf(stderr, "usage: check-objectplan-pair.cx [--check] [--report] [--selftest] [--table T] [--allow A]\n"); return 2; }
+  else { fprintf(stderr, "usage: check-objectplan-pair.cx [--check] [--report] [--selftest] [--table T] [--allow A] [--manifest M]\n"); return 2; }
  }
- unsigned char *tb = 0, *ab = 0; int64_t tn = 0, an = 0;
+ unsigned char *tb = 0, *ab = 0, *mb = 0; int64_t tn = 0, an = 0, mn = 0;
+ if (sy_read_file(mp, &mb, &mn, 1 << 22)) { printf("REFUSE cannot-read %s\n", mp); return 2; }
+ mbuf = (const char *)mb; mlen = (long)mn;
  if (sy_read_file(tp, &tb, &tn, 1 << 24)) { printf("REFUSE cannot-read %s\n", tp); return 2; }
  if (sy_read_file(ap, &ab, &an, 1 << 20)) { printf("REFUSE cannot-read %s\n", ap); return 2; }
  int s = st ? selftest((char *)tb, (long)tn, (char *)ab, (long)an) : 0;
