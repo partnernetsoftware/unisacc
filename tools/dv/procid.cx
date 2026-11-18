@@ -4,9 +4,41 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.fmt
 
-/* procid: process identity binding (PID + /proc/<pid>/stat start_ticks).
-   Prevents orphaned write locks from outliving crashed holders or matching
-   later processes after PID reuse, without altering lease TTL contracts. */
+/* procid: process identity binding (PID + start_ticks + host btime + pid_ns inode).
+ * Prevents orphaned write locks from outliving crashed holders without false-reaping
+ * live holders under hidepid=2 (-EPERM), unavailable /proc, PID reuse, clock/reboot,
+ * or foreign PID namespaces. */
+
+typedef struct {
+    int pid;
+    unsigned long long ticks;
+    unsigned long long btime;
+    unsigned long long ns_ino;
+} pi_id_t;
+
+static int pi_parse_u64(const char *s, long n, unsigned long long *out) {
+    unsigned long long v = 0;
+    long i;
+    if (!s || n <= 0 || !out) return -1;
+    for (i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch < '0' || ch > '9') return -1;
+        if (v > (18446744073709551615ULL - (unsigned long long)(ch - '0')) / 10ULL) return -1;
+        v = v * 10ULL + (unsigned long long)(ch - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+static unsigned long long pi_env_u64(const char *name) {
+    const char *v = sy_env(name);
+    unsigned long long out = 0;
+    long i = 0;
+    if (!v || !v[0]) return 0ULL;
+    while (v[i]) i++;
+    if (pi_parse_u64(v, i, &out) != 0) return 0ULL;
+    return out;
+}
 
 /* Parse Linux /proc/<pid>/stat line: find final ')' past comm (which may
    contain spaces/parens), read field 3 state, and field 22 starttime (index 19
@@ -29,108 +61,230 @@ int pi_parse_stat_buf(const char *buf, long n, unsigned long long *ticks, char *
         if (i >= n) break;
         tok_start = i;
         while (i < n && buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\n' && buf[i] != '\r') i++;
-        if (idx == 19) {
-            unsigned long long v = 0;
-            long k;
-            if (i <= tok_start) return -1;
-            for (k = tok_start; k < i; k++) {
-                unsigned char ch = (unsigned char)buf[k];
-                if (ch < '0' || ch > '9') return -1;
-                if (v > (18446744073709551615ULL - (unsigned long long)(ch - '0')) / 10ULL) return -1;
-                v = v * 10ULL + (unsigned long long)(ch - '0');
-            }
-            *ticks = v;
-            return 0;
-        }
+        if (idx == 19) return pi_parse_u64(buf + tok_start, i - tok_start, ticks);
         idx++;
     }
     return -1;
 }
 
-/* Read current start_ticks and state for PID from /proc/<pid>/stat.
-   Returns 0 on success, negative -errno if open fails, or -1 on parse failure. */
-int pi_read_ticks(int pid, unsigned long long *ticks, char *state_out) {
-    char p[64], buf[2048];
+/* Parse host boot time from Linux /proc/stat ("btime <u64>"). Returns 0 on match, -1 otherwise. */
+int pi_parse_btime_buf(const char *buf, long n, unsigned long long *btime_out) {
+    long at = 0;
+    if (!buf || n <= 0 || !btime_out) return -1;
+    while (at < n) {
+        long le = at;
+        while (le < n && buf[le] != '\n' && buf[le] != '\r') le++;
+        if (le - at > 6 && buf[at] == 'b' && buf[at + 1] == 't' && buf[at + 2] == 'i' &&
+            buf[at + 3] == 'm' && buf[at + 4] == 'e' && (buf[at + 5] == ' ' || buf[at + 5] == '\t')) {
+            long s = at + 6;
+            while (s < le && (buf[s] == ' ' || buf[s] == '\t')) s++;
+            if (pi_parse_u64(buf + s, le - s, btime_out) == 0) return 0;
+            return -1;
+        }
+        at = le;
+        while (at < n && (buf[at] == '\n' || buf[at] == '\r')) at++;
+    }
+    return -1;
+}
+
+/* Parse readlink("/proc/self/ns/pid") form "pid:[<inode>]". Returns 0 on success, -1 otherwise. */
+int pi_parse_ns_link(const char *buf, long n, unsigned long long *ino_out) {
+    if (!buf || n < 8 || !ino_out) return -1;
+    if (buf[0] != 'p' || buf[1] != 'i' || buf[2] != 'd' || buf[3] != ':' || buf[4] != '[') return -1;
+    if (buf[n - 1] != ']') return -1;
+    return pi_parse_u64(buf + 5, n - 6, ino_out);
+}
+
+static int pi_read_small(const char *path, char *buf, long cap, long *len_out) {
     int fd;
     long len = 0;
-    if (pid <= 0 || !ticks) return -EINVAL;
-    if (cx_fmt(p, (long)sizeof p, "/proc/%d/stat", pid) != 0) return -EINVAL;
-    fd = sy_open_read(p);
+    if (!path || !buf || cap < 2) return -EINVAL;
+    fd = sy_open_read(path);
     if (fd < 0) return fd;
-    while (len < (long)sizeof buf - 1) {
-        long r = sy_read(fd, buf + len, (long)sizeof buf - 1 - len);
+    while (len < cap - 1) {
+        long r = sy_read(fd, buf + len, cap - 1 - len);
         if (r <= 0) break;
         len += r;
     }
     sy_close(fd);
     if (len <= 0) return -1;
     buf[len] = 0;
-    return pi_parse_stat_buf(buf, len, ticks, state_out);
-}
-
-/* Format PID:START_TICKS identity tag into OUT. If PID <= 0 uses sy_pid().
-   Falls back to PID:0 when /proc/<pid>/stat is unavailable. */
-void pi_self_tag(int pid, char *out, long cap) {
-    unsigned long long tk = 0;
-    if (!out || cap < 4) return;
-    if (pid <= 0) pid = sy_pid();
-    if (pi_read_ticks(pid, &tk, 0) != 0) tk = 0;
-    if (cx_fmt(out, cap, "%d:%llu", pid, tk) != 0) out[0] = 0;
-}
-
-/* Parse "PID:TICKS", "PID", or empty/"0" into pid_out and ticks_out.
-   Returns 0 on success, -1 on syntax error or overflow. */
-int pi_parse_tag(const char *tag, int *pid_out, unsigned long long *ticks_out) {
-    int pid = 0;
-    unsigned long long tk = 0;
-    long i = 0;
-    if (!pid_out || !ticks_out) return -1;
-    *pid_out = 0;
-    *ticks_out = 0;
-    if (!tag || !tag[0]) return 0;
-    while (tag[i] && tag[i] != ':') {
-        unsigned char ch = (unsigned char)tag[i];
-        if (ch < '0' || ch > '9') return -1;
-        if (pid > (2147483647 - (int)(ch - '0')) / 10) return -1;
-        pid = pid * 10 + (int)(ch - '0');
-        i++;
-    }
-    if (i == 0) return -1;
-    if (tag[i] == ':') {
-        long j = i + 1;
-        if (!tag[j]) return -1;
-        while (tag[j]) {
-            unsigned char ch = (unsigned char)tag[j];
-            if (ch < '0' || ch > '9') return -1;
-            if (tk > (18446744073709551615ULL - (unsigned long long)(ch - '0')) / 10ULL) return -1;
-            tk = tk * 10ULL + (unsigned long long)(ch - '0');
-            j++;
-        }
-    }
-    *pid_out = pid;
-    *ticks_out = tk;
+    *len_out = len;
     return 0;
 }
 
-/* Return 1 if lock-bound PID/TICKS represents an active non-zombie process
-   matching the recorded start_ticks (or 1 when pid <= 0 for unbound leases);
-   0 when confirmed dead (-ESRCH, -ENOENT with /proc, zombie, or ticks mismatch). */
-int pi_alive(int pid, unsigned long long ticks) {
+unsigned long long pi_host_btime(void) {
+    char buf[8192];
+    long len = 0;
+    unsigned long long ov = pi_env_u64("UNISACC_PROCID_BTIME"), bt = 0;
+    if (ov > 0ULL) return ov;
+    if (pi_read_small("/proc/stat", buf, (long)sizeof buf, &len) == 0 &&
+        pi_parse_btime_buf(buf, len, &bt) == 0) return bt;
+    return 0ULL;
+}
+
+unsigned long long pi_self_ns_ino(void) {
+    char lk[128];
+    long n;
+    unsigned long long ov = pi_env_u64("UNISACC_PROCID_NS_INO"), ino = 0;
+    if (ov > 0ULL) return ov;
+    n = sy_readlink("/proc/self/ns/pid", lk, (long)sizeof lk - 1);
+    if (n <= 0 || n >= (long)sizeof lk) return 0ULL;
+    lk[n] = 0;
+    if (pi_parse_ns_link(lk, n, &ino) == 0) return ino;
+    return 0ULL;
+}
+
+/* Read current start_ticks and state for PID from <proc_root>/<pid>/stat.
+   Returns 0 on success, negative -errno if open fails, or -1 on parse failure. */
+int pi_read_ticks_at(const char *proc_root, int pid, unsigned long long *ticks, char *state_out) {
+    char p[256], buf[2048];
+    long len = 0;
+    int rc;
+    const char *pr = (proc_root && proc_root[0]) ? proc_root : "/proc";
+    if (pid <= 0 || !ticks) return -EINVAL;
+    if (cx_fmt(p, (long)sizeof p, "%s/%d/stat", pr, pid) != 0) return -EINVAL;
+    rc = pi_read_small(p, buf, (long)sizeof buf, &len);
+    if (rc != 0) return rc;
+    return pi_parse_stat_buf(buf, len, ticks, state_out);
+}
+
+int pi_read_ticks(int pid, unsigned long long *ticks, char *state_out) {
+    return pi_read_ticks_at("/proc", pid, ticks, state_out);
+}
+
+/* Format PID:START_TICKS:BTIME:PIDNS_INO identity tag into OUT. If PID <= 0 uses sy_pid(). */
+void pi_self_tag(int pid, char *out, long cap) {
+    unsigned long long tk = 0, bt = 0, ns = 0;
+    if (!out || cap < 8) return;
+    if (pid <= 0) pid = sy_pid();
+    if (pi_read_ticks(pid, &tk, 0) != 0) tk = 0ULL;
+    bt = pi_host_btime();
+    ns = pi_self_ns_ino();
+    if (cx_fmt(out, (size_t)cap, "%d:%llu:%llu:%llu", pid, tk, bt, ns) != 0) out[0] = 0;
+}
+
+/* Parse "", "0", "PID", "PID:TICKS", or "PID:TICKS:BTIME:NS_INO" into id_out.
+   Returns 0 on success, -1 on syntax error or overflow. */
+int pi_parse_tag_ex(const char *tag, pi_id_t *id_out) {
+    long pos = 0, seg = 0;
+    unsigned long long vals[4] = {0ULL, 0ULL, 0ULL, 0ULL};
+    if (!id_out) return -1;
+    id_out->pid = 0; id_out->ticks = 0ULL; id_out->btime = 0ULL; id_out->ns_ino = 0ULL;
+    if (!tag || !tag[0]) return 0;
+    for (;;) {
+        long s = pos;
+        if (seg >= 4) return -1;
+        while (tag[pos] && tag[pos] != ':') pos++;
+        if (pos == s) return -1;
+        if (pi_parse_u64(tag + s, pos - s, &vals[seg]) != 0) return -1;
+        seg++;
+        if (!tag[pos]) break;
+        pos++;
+        if (!tag[pos]) return -1;
+    }
+    if (seg != 1 && seg != 2 && seg != 4) return -1;
+    if (vals[0] > 2147483647ULL) return -1;
+    id_out->pid = (int)vals[0];
+    id_out->ticks = vals[1];
+    id_out->btime = vals[2];
+    id_out->ns_ino = vals[3];
+    return 0;
+}
+
+int pi_parse_tag(const char *tag, int *pid_out, unsigned long long *ticks_out) {
+    pi_id_t id;
+    if (!pid_out || !ticks_out) return -1;
+    if (pi_parse_tag_ex(tag, &id) != 0) {
+        *pid_out = 0; *ticks_out = 0ULL; return -1;
+    }
+    *pid_out = id.pid;
+    *ticks_out = id.ticks;
+    return 0;
+}
+
+/* Evaluate lock holder liveness.
+   sig_rc_override: pass 1 in production to call sy_signal(id->pid, 0); <= 0 overrides signal result for tests.
+   Returns 1 if live or ambiguous (TTL governs), 0 only when confirmed dead with *reason_out set. */
+int pi_check_holder(const pi_id_t *id, int sig_rc_override, const char *proc_root,
+                    unsigned long long *cur_ticks_out, const char **reason_out) {
     int sr, rr;
-    unsigned long long cur_ticks = 0;
-    char st = 0;
-    const char *full;
-    if (pid <= 0) return 1;
-    sr = sy_signal(pid, 0);
-    if (sr == -ESRCH) return 0;
-    full = sy_env("UNISACC_PROCID_FULL_REAP");
-    if (!full || full[0] != '1' || full[1] != 0) return 1;
-    rr = pi_read_ticks(pid, &cur_ticks, &st);
-    if (rr == 0) {
-        if (st == 'Z' || st == 'X') return 0;
-        if (ticks > 0 && cur_ticks != ticks) return 0;
+    unsigned long long cur_ticks = 0ULL, cur_bt, cur_ns;
+    char st = 0, self_stat[256];
+    const char *pr = (proc_root && proc_root[0]) ? proc_root : "/proc";
+    if (cur_ticks_out) *cur_ticks_out = 0ULL;
+    if (reason_out) *reason_out = "alive";
+    if (!id || id->pid <= 0) return 1;
+
+    /* P3: verify PID namespace and host boot epoch before sending any signal or reading /proc. */
+    if (id->ns_ino == 0ULL || id->btime == 0ULL) {
+        if (reason_out) *reason_out = "unanchored";
         return 1;
     }
-    if (rr == -ENOENT && sy_exists("/proc/self/stat") == 1) return 0;
+    cur_ns = pi_self_ns_ino();
+    if (cur_ns == 0ULL || cur_ns != id->ns_ino) {
+        if (reason_out) *reason_out = "ns-mismatch";
+        return 1;
+    }
+    cur_bt = pi_host_btime();
+    if (cur_bt == 0ULL || cur_bt != id->btime) {
+        if (reason_out) *reason_out = "btime-mismatch";
+        return 1;
+    }
+
+    sr = (sig_rc_override != 1) ? sig_rc_override : sy_signal(id->pid, 0);
+    if (sr == -ESRCH) {
+        if (cur_ticks_out) *cur_ticks_out = 0ULL;
+        if (reason_out) *reason_out = "ESRCH";
+        return 0;
+    }
+    /* P2: under hidepid=2 kill returns -EPERM while /proc/<pid> yields ENOENT; EPERM proves process exists. */
+    if (sr == -EPERM) {
+        if (reason_out) *reason_out = "EPERM";
+        return 1;
+    }
+
+    /* P3 fallback: when start_ticks == 0, only trust -ESRCH above; degrade to PID-only + TTL. */
+    if (id->ticks == 0ULL) {
+        if (reason_out) *reason_out = "ticks-zero";
+        return 1;
+    }
+
+    rr = pi_read_ticks_at(pr, id->pid, &cur_ticks, &st);
+    if (rr == 0) {
+        if (cur_ticks_out) *cur_ticks_out = cur_ticks;
+        if (cur_ticks != id->ticks) {
+            if (reason_out) *reason_out = "ticks-mismatch";
+            return 0;
+        }
+        if (st == 'Z' || st == 'X') {
+            if (reason_out) *reason_out = "zombie";
+            return 0;
+        }
+        return 1;
+    }
+    /* P2: only treat -ENOENT as dead when <proc_root>/self/stat confirms /proc is mounted and visible. */
+    if (rr == -ENOENT) {
+        if (cx_fmt(self_stat, (long)sizeof self_stat, "%s/self/stat", pr) == 0 && sy_exists(self_stat) == 1) {
+            if (cur_ticks_out) *cur_ticks_out = 0ULL;
+            if (reason_out) *reason_out = "ENOENT";
+            return 0;
+        }
+        if (reason_out) *reason_out = "no-proc";
+        return 1;
+    }
     return 1;
+}
+
+int pi_alive_ex(const pi_id_t *id, unsigned long long *cur_ticks_out, const char **reason_out) {
+    return pi_check_holder(id, 1, "/proc", cur_ticks_out, reason_out);
+}
+
+int pi_alive(int pid, unsigned long long ticks) {
+    pi_id_t id;
+    id.pid = pid;
+    id.ticks = ticks;
+    id.btime = pi_host_btime();
+    id.ns_ino = pi_self_ns_ino();
+    return pi_alive_ex(&id, 0, 0);
 }

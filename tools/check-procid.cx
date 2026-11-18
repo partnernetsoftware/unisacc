@@ -1,9 +1,14 @@
 #pragma unisa use dv.procid
+#pragma unisa use net.unix
+#pragma unisa use net.tcp
 #pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
+#pragma unisa use text.fmt
 
-/* check-procid: unit & live child process tests for tools/dv/procid.cx */
+/* check-procid: unit + real isolated devsvc server negative-control suite for P1-P4. */
 
 static int fail = 0;
 static int pass = 0;
@@ -17,90 +22,353 @@ static void ck(int ok, const char *name) {
     }
 }
 
+static int wr_file(const char *path, const char *txt) {
+    return sy_write_atomic(path, txt, strlen(txt), 0644);
+}
+
+static int svc_req(const char *sock, const char *line, char *out, long cap) {
+    int fd;
+    sy_deadline_t d = sy_deadline_in(5000);
+    long n = 0, r;
+    out[0] = 0;
+    fd = sy_unix_connect(sock, sy_deadline_in(2000));
+    if (fd < 0) return -1;
+    if (sy_send_all_until(fd, line, (long)strlen(line), d) ||
+        sy_send_all_until(fd, "\n", 1, d)) {
+        sy_close(fd);
+        return -1;
+    }
+    while (n < cap - 1) {
+        r = sy_recv_until(fd, out + n, cap - 1 - n, d);
+        if (r <= 0) break;
+        n += r;
+    }
+    sy_close(fd);
+    out[n] = 0;
+    return 0;
+}
+
+static int read_prod_rel(char *dst, long cap) {
+    int fd;
+    char buf[4096];
+    long n = 0, at = 0;
+    fd = sy_open_read("tools/devsvc-repo.tsv");
+    if (fd < 0) return -1;
+    while (n < (long)sizeof buf - 1) {
+        long r = sy_read(fd, buf + n, (long)sizeof buf - 1 - n);
+        if (r <= 0) break;
+        n += r;
+    }
+    sy_close(fd);
+    buf[n] = 0;
+    while (at < n) {
+        long le = at;
+        while (le < n && buf[le] != '\n' && buf[le] != '\r') le++;
+        if (le - at > 8 && memcmp(buf + at, "product\t", 8) == 0) {
+            long s = at + 8, e = s;
+            while (e < le && buf[e] != '\t') e++;
+            if (e > s && e - s < cap) {
+                long j;
+                for (j = 0; j < e - s; j++) dst[j] = buf[s + j];
+                dst[e - s] = 0;
+                return 0;
+            }
+        }
+        at = le;
+        while (at < n && (buf[at] == '\n' || buf[at] == '\r')) at++;
+    }
+    return -1;
+}
+
+static int compile_devsvc_bin(const char *out_bin) {
+    sy_spawn_t o;
+    sy_child_t c;
+    sy_exit_t ex;
+    char prod_rel[256], rel_call[280];
+    if (read_prod_rel(prod_rel, (long)sizeof prod_rel) != 0) return -1;
+    if (cx_fmt(rel_call, (long)sizeof rel_call, "./%s", prod_rel) != 0) return -1;
+    char *av[] = {"sh", rel_call, "tools/devsvc-core.cx", "-o", (char *)out_bin, 0};
+    sy_spawn_init(&o);
+    o.argv = av;
+    o.pgroup = -1;
+    o.in_fd = SY_STDIO_NULL;
+    o.out_fd = SY_STDIO_NULL;
+    o.err_fd = SY_STDIO_NULL;
+    o.deadline_ms = 40000;
+    if (sy_proc_spawn(&o, &c) != 0) return -1;
+    if (sy_proc_wait(&c, &ex) != 0) return -1;
+    return ex.code == 0 && sy_exists(out_bin) == 1 ? 0 : -1;
+}
+
+static int spawn_sleep(sy_child_t *c, unsigned long long *tk_out) {
+    sy_spawn_t o;
+    char *v[] = {"sleep", "30", 0};
+    int w;
+    unsigned long long tk = 0ULL;
+    sy_spawn_init(&o);
+    o.argv = v;
+    o.pgroup = -1;
+    o.in_fd = SY_STDIO_NULL;
+    o.out_fd = SY_STDIO_NULL;
+    o.err_fd = SY_STDIO_NULL;
+    if (sy_proc_spawn(&o, c) != 0) return -1;
+    for (w = 0; w < 30; w++) {
+        if (pi_read_ticks(c->pid, &tk, 0) == 0 && tk > 0ULL) {
+            if (tk_out) *tk_out = tk;
+            return 0;
+        }
+        sy_sleep_ms(10);
+    }
+    return -1;
+}
+
 int main(void) {
-    /* 1. Stat parser with spaces & nested parens inside comm */
+    unsigned long long self_tk = 0ULL, self_bt = 0ULL, self_ns = 0ULL;
+    int self = sy_pid();
+
+    /* 1. Stat, btime & pid_ns parsers */
     {
         const char *s1 = "42 (foo (bar) baz) S 1 42 42 0 -1 4194304 10 20 0 0 1 2 3 4 20 0 1 0 987654321 1000 50 0\n";
-        unsigned long long tk = 0;
-        char st = 0;
-        int rc = pi_parse_stat_buf(s1, (long)strlen(s1), &tk, &st);
-        ck(rc == 0 && st == 'S' && tk == 987654321ULL, "parse-comm-parens");
-    }
-    /* 2. Zombie state & malformed stat lines */
-    {
         const char *sz = "99 (dead) Z 1 99 99 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 555 0 0\n";
         const char *short_line = "42 (a) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18\n";
         const char *no_rp = "42 (unclosed S 1 2 3\n";
-        unsigned long long tk = 0;
+        const char *statf = "cpu 1 2 3\nintr 0\nctxt 100\nbtime 1773572613\nprocesses 5\n";
+        unsigned long long tk = 0ULL, bt = 0ULL, ino = 0ULL;
         char st = 0;
+        ck(pi_parse_stat_buf(s1, (long)strlen(s1), &tk, &st) == 0 && st == 'S' && tk == 987654321ULL, "parse-comm-parens");
         ck(pi_parse_stat_buf(sz, (long)strlen(sz), &tk, &st) == 0 && st == 'Z' && tk == 555ULL, "parse-zombie");
         ck(pi_parse_stat_buf(short_line, (long)strlen(short_line), &tk, &st) != 0, "reject-short");
         ck(pi_parse_stat_buf(no_rp, (long)strlen(no_rp), &tk, &st) != 0, "reject-no-paren");
+        ck(pi_parse_btime_buf(statf, (long)strlen(statf), &bt) == 0 && bt == 1773572613ULL, "parse-btime");
+        ck(pi_parse_btime_buf("cpu 1\n", 6, &bt) != 0, "reject-no-btime");
+        ck(pi_parse_ns_link("pid:[4026531836]", 16, &ino) == 0 && ino == 4026531836ULL, "parse-ns-link");
+        ck(pi_parse_ns_link("mnt:[4026531836]", 16, &ino) != 0 &&
+           pi_parse_ns_link("pid:[abc]", 9, &ino) != 0 &&
+           pi_parse_ns_link("pid:[]", 6, &ino) != 0, "reject-bad-ns-link");
     }
-    /* 3. Tag parse & roundtrip */
+
+    /* 2. Tag parsing (0/1/2/4 segments & invalid forms) */
     {
-        int p = -1;
-        unsigned long long tk = 1;
-        ck(pi_parse_tag("1234:567890", &p, &tk) == 0 && p == 1234 && tk == 567890ULL, "tag-valid");
-        ck(pi_parse_tag("", &p, &tk) == 0 && p == 0 && tk == 0ULL, "tag-empty");
-        ck(pi_parse_tag("0:0", &p, &tk) == 0 && p == 0 && tk == 0ULL, "tag-zero");
-        ck(pi_parse_tag("abc:1", &p, &tk) != 0, "tag-bad-pid");
-        ck(pi_parse_tag("12:", &p, &tk) != 0, "tag-empty-ticks");
-        ck(pi_parse_tag("12:xyz", &p, &tk) != 0, "tag-bad-ticks");
+        pi_id_t id;
+        ck(pi_parse_tag_ex("1234:567890:1700000000:4026531836", &id) == 0 &&
+           id.pid == 1234 && id.ticks == 567890ULL && id.btime == 1700000000ULL && id.ns_ino == 4026531836ULL, "tag-valid-4seg");
+        ck(pi_parse_tag_ex("1234:567890", &id) == 0 && id.pid == 1234 && id.ticks == 567890ULL && id.btime == 0ULL && id.ns_ino == 0ULL, "tag-valid-2seg");
+        ck(pi_parse_tag_ex("1234", &id) == 0 && id.pid == 1234 && id.ticks == 0ULL, "tag-valid-1seg");
+        ck(pi_parse_tag_ex("", &id) == 0 && id.pid == 0 && id.ticks == 0ULL, "tag-empty");
+        ck(pi_parse_tag_ex("0", &id) == 0 && id.pid == 0 && id.ticks == 0ULL, "tag-zero");
+        ck(pi_parse_tag_ex("abc:1", &id) != 0 && pi_parse_tag_ex("12:", &id) != 0 &&
+           pi_parse_tag_ex("12:34:56", &id) != 0 && pi_parse_tag_ex("1:2:3:4:5", &id) != 0, "tag-reject-bad");
     }
-    /* 4. Self process identity & mismatch (simulated PID reuse) */
+
+    /* 3. Self identity + btime/ns_ino roundtrip + P2/P3/P4 unit negative controls */
     {
-        int self = sy_pid();
-        unsigned long long tk = 0;
-        char st = 0, tag[64];
-        int p2 = 0;
-        unsigned long long t2 = 0;
-        ck(pi_read_ticks(self, &tk, &st) == 0 && tk > 0ULL && st != 'Z', "self-read-ticks");
-        pi_self_tag(0, tag, sizeof tag);
-        ck(pi_parse_tag(tag, &p2, &t2) == 0 && p2 == self && t2 == tk, "self-tag-roundtrip");
-        ck(pi_alive(self, tk) == 1, "self-alive");
-        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
-        ck(pi_alive(self, tk + 1ULL) == 1, "esrch-narrow-default-keeps-live");
-        sy_setenv("UNISACC_PROCID_FULL_REAP", "1", 1);
-        ck(pi_alive(self, tk + 1ULL) == 0, "pid-reuse-rejected");
-        ck(pi_alive(0, 0ULL) == 1, "unbound-lease-allowed");
-        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
+        char st = 0, tag[96], wd[512], proot_hide[600], proot_noproc[600], pdir[640], pf[700];
+        pi_id_t id;
+        unsigned long long ctk = 0ULL;
+        const char *rsn = 0;
+
+        ck(pi_read_ticks(self, &self_tk, &st) == 0 && self_tk > 0ULL && st != 'Z', "self-read-ticks");
+        self_bt = pi_host_btime();
+        self_ns = pi_self_ns_ino();
+        ck(self_bt > 0ULL && self_ns > 0ULL, "self-btime-and-ns");
+
+        pi_self_tag(0, tag, (long)sizeof tag);
+        ck(pi_parse_tag_ex(tag, &id) == 0 && id.pid == self && id.ticks == self_tk &&
+           id.btime == self_bt && id.ns_ino == self_ns, "self-tag-roundtrip-4seg");
+        ck(pi_alive_ex(&id, &ctk, &rsn) == 1 && strcmp(rsn, "alive") == 0, "self-alive");
+
+        /* Fake /proc roots for deterministic P2/P4 checks */
+        if (cx_fmt(wd, sizeof wd, "%s/procid-unit-%d", sy_tmpdir(), self) == 0 &&
+            cx_fmt(proot_hide, sizeof proot_hide, "%s/hidepid", wd) == 0 &&
+            cx_fmt(proot_noproc, sizeof proot_noproc, "%s/noproc", wd) == 0 &&
+            cx_fmt(pdir, sizeof pdir, "%s/self", proot_hide) == 0 &&
+            sy_mkdir_all(pdir, 0755) == 0 && sy_mkdir_all(proot_noproc, 0755) == 0 &&
+            cx_fmt(pf, sizeof pf, "%s/stat", pdir) == 0 &&
+            wr_file(pf, "1 (self) R 0 1 1 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 100 0 0\n") == 0) {
+            pi_id_t hid = {4242, 999ULL, self_bt, self_ns};
+            char zdir[640], zf[700];
+
+            /* (i) hidepid=2 negative: kill=-EPERM + /proc/<pid>/stat ENOENT -> MUST stay alive */
+            ck(pi_check_holder(&hid, -EPERM, proot_hide, &ctk, &rsn) == 1 && strcmp(rsn, "EPERM") == 0, "p2-hidepid-eperm-alive");
+
+            /* (ii) /proc unavailable negative: /proc/self/stat absent + ENOENT -> MUST stay alive */
+            ck(pi_check_holder(&hid, 0, proot_noproc, &ctk, &rsn) == 1 && strcmp(rsn, "no-proc") == 0, "p2-proc-unavail-enoent-alive");
+
+            /* (iv) P4 ENOENT when /proc IS mounted and kill==0 (unprivileged ENOENT fallback only without EPERM) */
+            ck(pi_check_holder(&hid, 0, proot_hide, &ctk, &rsn) == 0 && ctk == 0ULL && strcmp(rsn, "ENOENT") == 0, "p4-reason-enoent");
+
+            /* (iv) P4 zombie reason + cur_ticks recorded */
+            if (cx_fmt(zdir, sizeof zdir, "%s/4242", proot_hide) == 0 &&
+                sy_mkdir_all(zdir, 0755) == 0 &&
+                cx_fmt(zf, sizeof zf, "%s/stat", zdir) == 0 &&
+                wr_file(zf, "4242 (z) Z 1 4242 4242 0 0 0 0 0 0 0 0 0 0 0 20 0 1 0 999 0 0\n") == 0) {
+                ck(pi_check_holder(&hid, 0, proot_hide, &ctk, &rsn) == 0 && ctk == 999ULL && strcmp(rsn, "zombie") == 0, "p4-reason-zombie");
+            } else {
+                ck(0, "p4-zombie-setup");
+            }
+            sy_remove_all(wd);
+        } else {
+            ck(0, "unit-proot-setup");
+        }
+
+        /* P4 ticks-mismatch & ESRCH */
+        {
+            pi_id_t mis = {self, self_tk + 1ULL, self_bt, self_ns};
+            ck(pi_alive_ex(&mis, &ctk, &rsn) == 0 && ctk == self_tk && strcmp(rsn, "ticks-mismatch") == 0, "p4-reason-ticks-mismatch");
+            ck(pi_check_holder(&id, -ESRCH, "/proc", &ctk, &rsn) == 0 && ctk == 0ULL && strcmp(rsn, "ESRCH") == 0, "p4-reason-esrch");
+        }
+
+        /* (v) P3 ticks=0 degradation: live process kept alive regardless of ticks, -ESRCH still reaps */
+        {
+            pi_id_t tz = {self, 0ULL, self_bt, self_ns};
+            ck(pi_alive_ex(&tz, &ctk, &rsn) == 1 && strcmp(rsn, "ticks-zero") == 0, "p3-ticks-zero-live-kept");
+            ck(pi_check_holder(&tz, -ESRCH, "/proc", &ctk, &rsn) == 0 && strcmp(rsn, "ESRCH") == 0, "p3-ticks-zero-esrch-reaps");
+        }
+
+        /* (vi) P3 btime/ns_ino mismatch or unanchored (0) -> NEVER reaps even if -ESRCH */
+        {
+            pi_id_t bad_bt = {999999999, 123ULL, self_bt + 1ULL, self_ns};
+            pi_id_t bad_ns = {999999999, 123ULL, self_bt, self_ns + 1ULL};
+            pi_id_t no_anc = {999999999, 123ULL, 0ULL, 0ULL};
+            ck(pi_check_holder(&bad_bt, -ESRCH, "/proc", &ctk, &rsn) == 1 && strcmp(rsn, "btime-mismatch") == 0, "p3-btime-mismatch-no-reap");
+            ck(pi_check_holder(&bad_ns, -ESRCH, "/proc", &ctk, &rsn) == 1 && strcmp(rsn, "ns-mismatch") == 0, "p3-ns-mismatch-no-reap");
+            ck(pi_check_holder(&no_anc, -ESRCH, "/proc", &ctk, &rsn) == 1 && strcmp(rsn, "unanchored") == 0, "p3-unanchored-no-reap");
+        }
+
+        {
+            pi_id_t zero = {0, 0ULL, 0ULL, 0ULL};
+            ck(pi_alive_ex(&zero, &ctk, &rsn) == 1, "unbound-lease-allowed");
+        }
     }
-    /* 5. Real child spawn + SIGKILL zombie/reaped detection */
+
+    /* 4. Real child SIGKILL detection */
     {
-        sy_spawn_t o;
         sy_child_t c;
         sy_exit_t ex;
-        char *v[] = {"sleep", "30", 0};
-        unsigned long long ctk = 0;
-        int w, alive_after_kill = 1;
-        sy_setenv("UNISACC_PROCID_FULL_REAP", "1", 1);
-        sy_spawn_init(&o);
-        o.argv = v;
-        o.pgroup = -1;
-        o.in_fd = SY_STDIO_NULL;
-        o.out_fd = SY_STDIO_NULL;
-        o.err_fd = SY_STDIO_NULL;
-        if (sy_proc_spawn(&o, &c) == 0) {
-            int got = 0;
-            for (w = 0; w < 20; w++) {
-                if (pi_read_ticks(c.pid, &ctk, 0) == 0 && ctk > 0ULL) { got = 1; break; }
-                sy_sleep_ms(10);
-            }
-            ck(got && pi_alive(c.pid, ctk) == 1, "child-alive");
+        unsigned long long ctk = 0ULL, cur_tk = 0ULL;
+        const char *rsn = 0;
+        if (spawn_sleep(&c, &ctk) == 0) {
+            pi_id_t cid = {c.pid, ctk, self_bt, self_ns};
+            int w, dead_seen = 0;
+            ck(pi_alive_ex(&cid, &cur_tk, &rsn) == 1, "child-alive");
             sy_proc_kill(&c, 9);
             for (w = 0; w < 50; w++) {
-                if (pi_alive(c.pid, ctk) == 0) { alive_after_kill = 0; break; }
+                if (pi_alive_ex(&cid, &cur_tk, &rsn) == 0) { dead_seen = 1; break; }
                 sy_sleep_ms(10);
             }
-            ck(alive_after_kill == 0, "child-dead-before-wait-zombie");
+            ck(dead_seen && (strcmp(rsn, "zombie") == 0 || strcmp(rsn, "ESRCH") == 0 || strcmp(rsn, "ENOENT") == 0), "child-dead-before-wait-zombie");
             sy_proc_wait(&c, &ex);
-            ck(pi_alive(c.pid, ctk) == 0, "child-dead-after-wait");
+            ck(pi_alive_ex(&cid, &cur_tk, &rsn) == 0 && strcmp(rsn, "ESRCH") == 0, "child-dead-after-wait-esrch");
         } else {
             ck(0, "spawn-sleep");
         }
-        sy_unsetenv("UNISACC_PROCID_FULL_REAP");
     }
+
+    /* 5. Real isolated devsvc daemon service-level negative controls (P1/P3/P4) */
+    {
+        char wd[512], sdir[600], bin[600], sock[640], envd[640], envh[640], pathv[4200];
+        const char *orig_path = sy_env("PATH");
+        if (sy_exists("tools/devsvc-core.cx") == 1 && sy_exists("unisacc.com") == 1 &&
+            cx_fmt(wd, sizeof wd, "%s/procid-svc-%d", sy_tmpdir(), self) == 0 &&
+            cx_fmt(sdir, sizeof sdir, "%s/svc", wd) == 0 &&
+            cx_fmt(bin, sizeof bin, "%s/devsvc-bin", wd) == 0 &&
+            cx_fmt(sock, sizeof sock, "%s/sock", sdir) == 0 &&
+            sy_mkdir_all(sdir, 0700) == 0 &&
+            compile_devsvc_bin(bin) == 0) {
+            sy_spawn_t o;
+            sy_child_t srv;
+            sy_exit_t sex;
+            const char *senv[5];
+            int ei = 0, ready = 0, k;
+            char *sav[] = {bin, "serve", "--ttl", "60", "--idle", "30", 0};
+            cx_fmt(envd, sizeof envd, "UNISACC_DEVSVC_DIR=%s", sdir); senv[ei++] = envd;
+            cx_fmt(envh, sizeof envh, "HOME=%s", wd); senv[ei++] = envh;
+            if (orig_path && orig_path[0]) {
+                cx_fmt(pathv, sizeof pathv, "PATH=%s", orig_path); senv[ei++] = pathv;
+            }
+            senv[ei] = 0;
+
+            sy_spawn_init(&o);
+            o.argv = sav;
+            o.env = (char **)senv;
+            o.pgroup = -1;
+            o.in_fd = SY_STDIO_NULL;
+            o.out_fd = SY_STDIO_NULL;
+            o.err_fd = SY_STDIO_NULL;
+            if (sy_proc_spawn(&o, &srv) == 0) {
+                char resp[8192];
+                for (k = 0; k < 50; k++) {
+                    if (sy_exists(sock) == 1 && svc_req(sock, "ping", resp, sizeof resp) == 0 && strstr(resp, "OK\tpong")) {
+                        ready = 1; break;
+                    }
+                    sy_sleep_ms(20);
+                }
+                ck(ready, "svc-started");
+                if (ready) {
+                    sy_child_t cA, cB;
+                    sy_exit_t exA, exB;
+                    unsigned long long tkA = 0ULL, tkB = 0ULL;
+                    char req[512], tagA[96], tagB[96], tagC[96], expect[256];
+                    pi_self_tag(0, tagC, (long)sizeof tagC);
+
+                    if (spawn_sleep(&cA, &tkA) == 0 && spawn_sleep(&cB, &tkB) == 0) {
+                        pi_self_tag(cA.pid, tagA, (long)sizeof tagA);
+                        pi_self_tag(cB.pid, tagB, (long)sizeof tagB);
+
+                        /* A acquires lock */
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_p1\townA\t60\t%s", tagA);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "OK\tacquired"), "svc-acquire-a");
+
+                        /* (iv) Competitor B denied while A is live */
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_p1\townB\t60\t%s", tagC);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "ERR\theld"), "svc-live-competitor-err-held");
+
+                        /* (iii) P1: Short-lived process B renews SAME owner ownA, then dies; lock MUST stay bound to live A */
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_p1\townA\t60\t%s", tagB);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "OK\trenewed"), "svc-renew-from-b");
+                        sy_proc_kill(&cB, 9);
+                        sy_proc_wait(&cB, &exB);
+
+                        cx_fmt(expect, sizeof expect, "\tpid=%d:%llu\t", cA.pid, tkA);
+                        ck(svc_req(sock, "lock-list", resp, sizeof resp) == 0 && strstr(resp, expect) != 0, "svc-p1-renew-keeps-a-pid");
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_p1\townB\t60\t%s", tagC);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "ERR\theld"), "svc-p1-dead-renewer-no-reap");
+
+                        /* (vi) Service-level btime & pid_ns mismatch NEVER reaps dead PID */
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_bt\townX\t60\t999999999:1:%llu:%llu", self_bt + 1ULL, self_ns);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "OK\tacquired"), "svc-btime-acquire");
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_bt\townZ\t60\t%s", tagC);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "ERR\theld"), "svc-p3-btime-mismatch-held");
+
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_ns\townY\t60\t999999999:1:%llu:%llu", self_bt, self_ns + 1ULL);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "OK\tacquired"), "svc-ns-acquire");
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_ns\townZ\t60\t%s", tagC);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "ERR\theld"), "svc-p3-ns-mismatch-held");
+
+                        /* (vii) P4: Kill real holder A -> competitor immediately acquires + lock.reap event logged */
+                        sy_proc_kill(&cA, 9);
+                        sy_proc_wait(&cA, &exA);
+                        cx_fmt(req, sizeof req, "lock-acquire\tk_p1\townB\t60\t%s", tagC);
+                        ck(svc_req(sock, req, resp, sizeof resp) == 0 && strstr(resp, "OK\tacquired"), "svc-p4-kill-a-reaped");
+                        cx_fmt(expect, sizeof expect, "lock.reap\tk_p1\towner=ownA\tpid=%d\tstart_ticks=%llu\tcur_ticks=0\treason=ESRCH", cA.pid, tkA);
+                        ck(svc_req(sock, "events\t0", resp, sizeof resp) == 0 && strstr(resp, expect) != 0, "svc-p4-lock-reap-event");
+                    } else {
+                        sy_proc_kill(&cA, 9); sy_proc_wait(&cA, &exA);
+                        sy_proc_kill(&cB, 9); sy_proc_wait(&cB, &exB);
+                        ck(0, "svc-spawn-children");
+                    }
+                }
+                (void)svc_req(sock, "stop", resp, sizeof resp);
+                sy_proc_wait(&srv, &sex);
+            } else {
+                ck(0, "svc-spawn");
+            }
+            sy_remove_all(wd);
+        } else {
+            ck(0, "svc-setup-or-compile");
+        }
+    }
+
     printf("CHECK_PROCID\tfailed=%d\tpassed=%d\n", fail, pass);
     return fail ? 1 : 0;
 }

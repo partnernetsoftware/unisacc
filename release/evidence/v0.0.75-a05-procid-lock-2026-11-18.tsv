@@ -1,0 +1,18 @@
+# v0.0.75 A-05 (写锁绑定真实进程身份 PID + start_ticks + btime + pid_ns inode) 实测与负控证据表
+# 编表日期: 2026-11-18; 基线: de20ba1e05 + 8eb8da9d5c (A-05b) + 复核补丁 P1-P4
+# 证据状态: MEASURED=本仓真实事件/夹具实测直接产出, PASS=入库单元与服务级负控断言通过, SUPERSEDED=早期无实测估计值(已按实测纠偏)
+指标	值	单位	输入或对照命令	证据状态	备注
+a05-early-est-lock-fail	20	pct	历史草案估测(非实测)	SUPERSEDED	已被下方 devsvc events.tsv* 与 devsvc timing 实测取代
+a05-events-git-commit	919/240/9	total/nz/rc124	D=~/.cache/unisacc/devsvc/045c5a383068df3b; grep -h '\tgit\.commit\t' "$D"/events.tsv* (总数/非rc0/rc=124)	MEASURED	devsvc events.tsv(1891872B)+events.tsv.1(4194453B); rc=124 占 git.commit 总数 0.98 百分比
+a05-timing-git-commit	141/6055/25987	n/p50_ms/p90_ms	sh ./unisacc.com tools/devsvc.cx -- timing --kind git.commit	MEASURED	SUMMARY sum=1626168ms; 当前轮含双笔 60044ms/60040ms rc=124 样本
+a05-events-lock-expire	18/4184	exp/acq	grep -h '\tlock\.expire\t' "$D"/events.tsv* wc -l vs '\tlock\.acquire\t' wc -l	MEASURED	自然 TTL 过期占获锁总数 0.43 百分比
+a05-before-after-kill	ERR_held->11	ms	de20ba1e05 隔离服务夹具: SIGKILL 持有者后等待 TTL(60-600s) 对比即时回收	MEASURED	BEFORE_AFTER_KILL rc=1 held=1 ms=5 (旧方案需等满 TTL); AFTER_KILL_RECOVER rc=0 acquired=1 ms=11; AFTER_PID_REUSE_RECOVER rc=0 acquired=1 ms=10
+neg-p1-renew-keeps-pid	PASS	svc	sh ./unisacc.com tools/check-procid.cx (svc-acquire-a/svc-renew-from-b/svc-p1-renew-keeps-a-pid/svc-p1-dead-renewer-no-reap)	PASS	持有者 A 持锁时短命进程 B 同 owner 续期后被 SIGKILL, 锁仍绑定 A 的 pid:ticks 且竞争者得 ERR held
+neg-p1-competitor-held	PASS	svc	同上 svc-live-competitor-err-held	PASS	持有者 A 存活时竞争者必须得 ERR held
+neg-p2-hidepid-eperm	PASS	unit	同上 p2-hidepid-eperm-kept-alive (pi_check_holder sig_rc_override=-EPERM + 伪/proc/<pid> ENOENT)	PASS	hidepid=2 下 EPERM 直接判活(reason=EPERM), 不因 /proc/<pid>/stat ENOENT 误回收
+neg-p2-no-proc-enoent	PASS	unit	同上 p2-proc-unavail-enoent-alive (<proc_root>/self/stat 缺失)	PASS	/proc 不可用时 ENOENT 直接判活(reason=no-proc), 仅回退 TTL
+neg-p3-ticks-zero	PASS	unit	同上 p3-ticks-zero-live-kept / p3-ticks-zero-esrch-reaps	PASS	start_ticks=0 时非 ESRCH 走 TTL, -ESRCH 仍判死
+neg-p3-btime-ns-mismatch	PASS	unit+svc	同上 p3-btime-mismatch-no-reap / p3-ns-mismatch-no-reap / svc-p3-btime-mismatch-held / svc-p3-ns-mismatch-held	PASS	tag 含 btime 与 /proc/self/ns/pid inode; 即使 PID=-ESRCH 不一致或缺失(0)仍返回 alive 走 TTL
+neg-p4-lock-reap-event	PASS	unit+svc	同上 svc-p4-kill-a-reaped / svc-p4-lock-reap-event 及 p4-reason-{esrch,enoent,zombie,ticks-mismatch}	PASS	真实 SIGKILL 触发 lock.reap 事件含 owner/pid/start_ticks/cur_ticks/reason, 4 类原因全覆盖
+suite-check-procid	45/0	pass/fail	sh ./unisacc.com tools/check-procid.cx	PASS	CHECK_PROCID failed=0 passed=45 (cx-lint 0 findings, ratchets 15/0)
+suite-core-and-ratchets	38/42/15	core/a2/ratch	check-devsvc-core a/bc/d + check-devsvc a2 + ratchets + cx-lint	PASS	check-devsvc-core ok=16+17+5 failed=0; check-devsvc a2 ok=42 failed=0; cx-lint findings=0; ratchets ok=15 fail=0
