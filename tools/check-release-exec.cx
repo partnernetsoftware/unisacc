@@ -130,6 +130,7 @@ static int fake_unisacc(int argc, char **argv) {
     char q[4400]; char *t;
     flog("unisacc", argc, argv, 3);
     if (argc < 4) return 3;
+    if (tx_eqz(argv[3], "tools/ratchets.cx")) { sy_printf("RATCHETS\tok=15\tfail=0\n"); return 0; }
     if (tx_eqz(argv[3], "tools/devsvc.cx")) { sy_printf("OK\tfake devsvc\n"); return 0; }
     if (tx_eqz(argv[3], "tools/release-decide.cx")) { cx_fmt(q, sizeof q, "%s/decision.txt", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
     if (tx_eqz(argv[3], "release/tools/c47-1-readback.cx")) {
@@ -247,6 +248,7 @@ static void fixture(const char *apever, int strict_variant, int ratchet_fail, in
         git("symbolic-ref", "HEAD", "refs/heads/main", 0, 0, 0, 0)) die("update-ref");
 }
 static char out[262144];
+static char *candidate_input="release/candidate.tsv";
 static int rx(const char *a1, const char *a2, const char *a3, const char *tool) {
     char ex[4400], up[4400], tp[4400]; char *v[20]; int k = 0, rc; np_result r = {0}; char why[256];
     char *env[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
@@ -254,7 +256,7 @@ static int rx(const char *a1, const char *a2, const char *a3, const char *tool) 
     char *env2[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
     cx_fmt(up, sizeof up, "%s/unisacc.com", root); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
     cx_fmt(ex, sizeof ex, "%s/xout", td);
-    v[k++] = "sh"; v[k++] = up; v[k++] = tp; v[k++] = "--"; v[k++] = "--execute"; v[k++] = "release/candidate.tsv"; v[k++] = "--layout"; v[k++] = lay;
+    v[k++] = "sh"; v[k++] = up; v[k++] = tp; v[k++] = "--"; v[k++] = "--execute"; v[k++] = candidate_input; v[k++] = "--layout"; v[k++] = lay;
     v[k++] = "--out"; v[k++] = ex; v[k++] = "--baseline"; v[k++] = "/nonexistent-baseline";
     if (a1) v[k++] = (char *)a1; if (a2) v[k++] = (char *)a2; if (a3) v[k++] = (char *)a3;
     v[k] = 0;
@@ -328,6 +330,22 @@ static void part_a(void) {
     fixture("0.0.99", 5, 0, 1); expect_gate("G1.dvqualify-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
     fixture("0.0.98", 0, 0, 1); expect_gate("G1.ape-version-differs", rx("--dry", 0, 0, 0), "APE_VERSION");
     fixture("0.0.99", 0, 1, 1); expect_gate("G1.ratchets-fail", rx("--dry", 0, 0, 0), "RATCHETS");
+    fixture("0.0.99", 0, 0, 1);
+    put(fx,"release/evidence/0.0.99/ratchets.txt","# freeze=2222222222222222222222222222222222222222\nRATCHETS\tok=15\tfail=0\n");
+    expect_gate("G1.ratchets-receipt-wrong-freeze",rx("--dry",0,0,0),"RATCHETS");
+    { char p[4500], head[128], want[128];
+      fixture("0.0.99",0,0,1);
+      if(git("read-tree","HEAD",0,0,0,0,0) || git("rev-parse","HEAD",0,0,0,head,sizeof head))die("fixture freeze");
+      cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);char *table=slurp(p);
+      char *oid=table?strstr(table,"1111111111111111111111111111111111111111"):0;
+      if(!oid || strlen(head)!=40)die("fixture candidate");
+      memcpy(oid,head,40);put(fx,"freeze-candidate.tsv",table);free(table);
+      cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/ratchets.txt",fx);rmrf(p);
+      candidate_input="freeze-candidate.tsv";
+      rx("--dry",0,0,0);char *saved=slurp(p);
+      cx_fmt(want,sizeof want,"# freeze=%s",head);
+      ck(has(out,"source=frozen-HEAD") && saved && has(saved,want) && has(saved,"RATCHETS\tok=15\tfail=0"),"G1.dry-saves-freeze-ratchets");
+      free(saved);candidate_input="release/candidate.tsv"; }
     fixture("0.0.99", 0, 0, 1); put(lay, "pkg.bin", "changed after the table\n");
     expect_gate("G2.asset-byte-change", rx("--dry", 0, 0, 0), "ASSETS");
     c = calls(); ck(c && !has(c, "gh "), "G.dry-negatives-zero-gh"); free(c);
