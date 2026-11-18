@@ -134,6 +134,21 @@ static int group(int g) {
         ck(has("WAIT_RC=0"), "wait-gets-rc");
         ck(has("EVENT_GOT"), "events-wait-job-done");
         ck(has("LOCK_HELD") && has("FLOW_RC=0") && has("LOCK_FREED"), "bg-lock-released"); }
+    /* (2d) <bin>.stat O(1) 缓存与篡改失败/重编负控(racy-2s 封存、坏 .stat 回退重写、修改二进制强制失效重建) */
+    {   char sc[1600];
+        F(sc, sizeof sc,
+          "D='sh ./unisacc.com tools/devsvc.cx'; "
+          "$D -- x --par 1 -- echo stat-warm; "
+          "B=$(ls %s/*/devsvc 2>/dev/null | head -1); "
+          "[ -n \"$B\" ] && [ -f \"$B.stat\" ] || { sleep 2; $D -- x --par 1 -- echo stat-seal; }; "
+          "grep -q '^dvbin1\t[0-9]' \"$B.stat\" && echo STAT_SEALED; "
+          "printf 'dvbin1\\tbad\\n' > \"$B.stat\"; "
+          "$D -- x --par 1 -- echo stat-bad-ok; "
+          "grep -q '^dvbin1\t[0-9]' \"$B.stat\" && echo STAT_REWRITTEN; "
+          "cp \"$B\" \"$B.tamper\" && chmod u+w \"$B.tamper\" && printf X >> \"$B.tamper\" && mv -f \"$B.tamper\" \"$B\"; "
+          "$D -- x --par 1 -- echo bin-tamper-rebuilt 2>&1; $D -- stop >/dev/null 2>&1 || true", pin);
+        char *v[] = {"sh", "-c", sc, 0}; rc = run(v, fx, envv);
+        ck(!ovf && rc == 0 && has("STAT_SEALED") && has("STAT_REWRITTEN") && has("does not match its sha, rebuilding") && has("bin-tamper-rebuilt"), "stat-cache-hit-and-tamper-rebuilds"); }
     }
     if (g == 'b') {
     /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
