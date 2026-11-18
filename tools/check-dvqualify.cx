@@ -51,10 +51,37 @@ static const char *ape_text =
     "[ \"$4\" = bad ] && s=0000000000000000000000000000000000000000000000000000000000000000\n"
     "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
 
+static int gate_fixture(void) {
+    char probe[4300], marks[4300], option[4600];
+    int rc=-1;
+    if(cx_fmt(probe,sizeof probe,"%s/gate-probe",tmp) ||
+       cx_fmt(marks,sizeof marks,"%s/starts",tmp) ||
+       cx_fmt(option,sizeof option,"QG_STARTS=%s",marks)) return 2;
+    const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
+    char *build[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",probe,0};
+    if(!runv(build,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
+    const char *cases[]={"boundary","expired","drops","retry"};
+    for(int i=0;i<4;i++){
+        const char *id=i==3?"no-receipt":"alpha";
+        char setting[80];cx_fmt(setting,sizeof setting,"QG_CASE=%s",cases[i]);
+        char *v[]={"env",option,setting,probe,repo,"--candidate",apep,"--ids",(char*)id,0};
+        if(put(tmp,"starts","",0600) || !runv(v,root,15,&rc))return 2;
+        unsigned char *s=0;int64_t n=0;
+        if(sy_read_file(marks,&s,&n,1024))return 2;
+        int allowed=i==0||i==2;
+        check(cases[i],allowed?(n==1 && rc==0 && has(out,"RAW\tBATCH_RUN\tid=alpha")):
+              (n==(i==3?1:0) && rc==1 && has(out,"load-wait-timeout") && !has(out,"RAW\tBATCH_RUN")));
+        free(s);
+    }
+    printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
+    return !!failed;
+}
 int main(int argc, char **argv) {
     char why[512]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
-    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    int gate=argc==2 && !strcmp(argv[1],"--gate");
+    if (gate) { /* The deterministic gate probe is built after the fixture repository. */ }
+    else if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
     if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || cx_fmt(apep, sizeof apep, "%s/ape.com", tmp) || cx_fmt(ev, sizeof ev, "%s/ev.tsv", tmp) ||
         cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp)) return 2;
@@ -67,6 +94,12 @@ int main(int argc, char **argv) {
     { char *v[] = {"git", "-C", repo, "-c", "user.name=f", "-c", "user.email=f@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture", 0};
       if (!runv(v, 0, 30, &rc) || rc) { fprintf(stderr, "fixture commit failed: %s\n", out); return 2; } }
     { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(apep, &b, &n, 1 << 20) || sy_sha256_hex(b, (long)n, sha)) return 2; free(b); }
+    if(gate){
+        char script[4096];
+        if(cx_fmt(script,sizeof script,"#!/bin/sh\nif [ \"$1\" != --version ]; then printf X >> \"$QG_STARTS\"; [ \"$4\" != no-receipt ] || exit 1; fi\n%s",ape_text) ||
+           sy_write_file(apep,script,strlen(script),0755))return 2;
+        int r=gate_fixture();char *del[]={"rm","-rf",tmp,0};runv(del,0,20,&rc);return r;
+    }
     /* Q1 list of the product-qualification set follows the domain index */
     { char *v[] = {bin, repo, "--set", "product-qualification", "--list", 0};
       check("list-domain-set", runv(v, 0, 30, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\tproduct-qualification\twindow=1") &&

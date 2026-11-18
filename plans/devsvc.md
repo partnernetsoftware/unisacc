@@ -277,6 +277,8 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 - 留痕:每次决策在 run 目录 events.tsv 写一行 `ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W`(不占 EVT 序号);`DEVSVC_FLOW` 回执新增 `admit=ok|deferred|timeout` 与 `load_defer=N`,推迟时长计入 `admit_wait_ms`。
 - 调用方不再自写临时节点记 load1。检查:`tools/check-flowadmit.cx` 的 load-* 七项(批次 flowadmit-a)。
 
+qualify 只在有空槽时开始计入发车等待。首次发车允许 load1 等于 6，最多等 120 秒；复验要求 load1 小于 3，最多等 60 秒。到期仍高时，未发车的批次逐项记 UNKNOWN，原因为 load-wait-timeout。已经发出的作业按原窗口收回。整链优先，冻结窗遵守发布单的静默安排。
+
 ## 10 派生表现算现查 R1 试点:tool-index 与 doc-links(2026-11-18)
 
 目标:把 build/tool-index.tsv、build/doc-links.tsv 移出提交门负担,改由 devsvc 按内容身份现算现查;读者拿到的内容恒与当前源树一致,判定强度不降。

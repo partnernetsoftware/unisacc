@@ -60,11 +60,22 @@ static const char *sample_ids[] = {"c-negative","pp-negative","pp-differential",
     "unit-frontcache-budget","run-warm","cx-driver-cli",0};
 
 static int die(const char *a, const char *b) { fprintf(stderr, "QUALIFY_FAIL\t%s%s\n", a, b ? b : ""); return 2; }
-static void wait_load(double limit, int secs, char *note, int cap) {
-    long end = sy_now_ms() + secs * 1000L; int waited = 0;
-    while (tool_load1() > limit && sy_now_ms() < end) { sy_sleep_ms(2000); waited = 1; }
-    if (waited && note) { long n = strlen(note); cx_fmt(note + n, cap - n, "%sload_wait>%.0f", n ? ";" : "", limit); }
+#ifdef DVQUALIFY_GATE_FIXTURE
+/* Only the separately compiled test image supplies scripted observations. */
+static double gate_load(void) {
+    static int samples;
+    const char *scenario=sy_env_or("QG_CASE","");
+    samples++;
+    if (!strcmp(scenario,"boundary")) return 6.0;
+    if (!strcmp(scenario,"drops") && samples>1) return 5.0;
+    if (!strcmp(scenario,"retry") && samples==1) return 0.0;
+    return 9.0;
 }
+static long gate_time(long now) { return now*3000L; }
+#else
+#define gate_load() tool_load1()
+#define gate_time(now) (now)
+#endif
 static int run(char **v, const char *cwd, int secs, char *out, int cap) {
     np_result r = {0}; char why[300];
     if (np_run(v, cwd, 0, secs, &r, why, sizeof why)) { fprintf(stderr, "QUALIFY_EXEC\t%s\t%s\n", v[0], why); return -1; }
@@ -200,15 +211,31 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
     long admitting_since = 0;
     while ((next < count && sy_now_ms() < deadline) || live) {
         long now = sy_now_ms();
-        if (next < count && now < deadline && !admitting_since) admitting_since = now;
-        int admit = now < deadline && (tool_load1() <= 6.0 || now - admitting_since >= 120000L);
+        int admit=0;
+        if (next<count && live<jobs && now<deadline) {
+            double load=gate_load();
+            admit=attempt ? load<3.0 : load<=6.0;
+            if (!admit && !admitting_since) admitting_since=gate_time(now);
+            if (!admit && gate_time(now)-admitting_since >= (attempt?60000L:120000L)) {
+                while(next<count) {
+                    Batch *b=&bs[idx[next++]];
+                    cx_fmt(b->status,sizeof b->status,"UNKNOWN");
+                    cx_fmt(b->note,sizeof b->note,"load-wait-timeout");
+                    cx_fmt(b->load,sizeof b->load,"%.2f",load);
+                    b->ms=0;b->rc=-1;b->raw[0]=0;b->cand[0]=0;
+                    fprintf(stderr,"QUALIFY_BATCH\t%s\tUNKNOWN\tload-wait-timeout\n",b->id);
+                }
+            }
+        }
         for (int k = 0; admit && k < jobs && next < count; k++) if (!busy[k]) {
             int i = idx[next++];
+            if(attempt)bs[i].retries=1;
             if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN");continue; }
-            if (now - admitting_since >= 2000L) cx_fmt(bs[i].note, sizeof bs[i].note, "load_wait>6");
-            if (next == count || live + 1 == jobs) admitting_since = 0;
+            if (admitting_since && gate_time(now)-admitting_since>=2000L)
+                cx_fmt(bs[i].note,sizeof bs[i].note,"load_wait>%d",attempt?3:6);
             busy[k] = 1; live++;
         }
+        if(admit)admitting_since=0;
         for (int k = 0; k < jobs; k++) if (busy[k]) {
             sy_exit_t st; memset(&st, 0, sizeof st); Slot *s = &slot[k];
             int r = sy_proc_try_wait(&s->c, &st), timed = 0;
@@ -425,16 +452,14 @@ int main(int argc, char **argv) {
         for (int i = 0; i < size; i++) {
             Batch *b = &bs[idx[i]];
             write_batch(f, b);
-            if (!strcmp(b->status, "UNKNOWN")) retry[nu++] = idx[i];
+            if (!strcmp(b->status, "UNKNOWN") && strcmp(b->note,"load-wait-timeout")) retry[nu++] = idx[i];
         }
         fprintf(f, "# segment=%d batches=%d\n", ++number, size);
         if (fflush(f)) return die("cannot flush evidence ", outp);
         long retry_stop = segment_stop < stop ? segment_stop : stop;
         if (nu && sy_now_ms() + 60000L < retry_stop) {
-            wait_load(3.0, 60, 0, 0);
-            for (int i = 0; i < nu && sy_now_ms() < retry_stop; i++) {
-                bs[retry[i]].retries = 1;
-                if (!run_set(retry + i, 1, 1, 1, retry_stop)) break;
+            int retried=run_set(retry,nu,1,1,retry_stop);
+            for (int i = 0; i < retried; i++) {
                 write_batch(f, &bs[retry[i]]);
                 if (fflush(f)) return die("cannot flush evidence ", outp);
             }
