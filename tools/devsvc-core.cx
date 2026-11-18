@@ -609,6 +609,7 @@ static const char *opt(int argc, char **argv, const char *name, const char *def)
     int i; for (i = 0; i + 1 < argc; i++) if (!strcmp(argv[i], name)) return argv[i + 1]; return def;
 }
 
+static long run_deadline_ms = 60000;   /* qualify 放宽为自身逐批有界(每批 60 秒)的总上限 */
 static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOOL 或 --local */
     char bin[PW], req[2 * PW]; const char *cache = "?"; long prep = 0, t0, t1; int local = 0, rc, i; char *v[64];
     sy_spawn_t o; sy_exit_t ex;
@@ -634,7 +635,7 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
     t1 = sy_now_ms();
     {   int k = 1, sk = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;   /* 原生执行体不收驱动的 "--",TOOL 后紧跟的一个 "--" 去掉 */
         v[0] = bin; for (i = sk; i < argc; i++) v[k++] = argv[i]; v[k] = 0; }
-    sy_spawn_init(&o); o.argv = v; o.flags = SY_SPAWN_NO_PATH; o.pgroup = -1; o.deadline_ms = 60000;
+    sy_spawn_init(&o); o.argv = v; o.flags = SY_SPAWN_NO_PATH; o.pgroup = -1; o.deadline_ms = run_deadline_ms;
     fflush(stdout);
     rc = sy_proc_run(&o, &ex);
     if (!quiet) fprintf(stderr, "DEVSVC_RUN\t%s\tvia=%s\tcache=%s\tprep_ms=%ld\trun_ms=%ld\trc=%d\n", argv[0], local ? "local" : "service", cache, t1 - t0, sy_now_ms() - t1, rc ? -1 : sy_exit_code(&ex));
@@ -2471,6 +2472,11 @@ static int main2(int argc, char **argv) {
         char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvgitx.cx"; v[n++] = (char *)root;
         for (int i = 0; i < argc; i++) v[n++] = argv[i];
         v[n] = 0; return cmd_run(root, n, v);
+    }
+    if (!strcmp(cmd, "qualify") && argc <= 56) {   /* qualify --candidate APE [--set ..] [--out F] [--jobs N]:tools/dvqualify.cx,timing 事件经 DEVSVC_SOCK */
+        char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvqualify.cx"; v[n++] = (char *)root;
+        for (int i = 0; i < argc; i++) v[n++] = argv[i];
+        v[n] = 0; setenv("DEVSVC_SOCK", sockp, 1); run_deadline_ms = 1800000; return cmd_run(root, n, v);
     }
     if (!strcmp(cmd, "f") && argc >= 1 && argc <= 56 && !strcmp(argv[0], "append")) {   /* f append PATH (--from F | --line T) [--expect-sha X]:tools/dvfile.cx */
         char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvfile.cx"; v[n++] = (char *)root;

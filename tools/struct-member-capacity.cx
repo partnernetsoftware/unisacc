@@ -1,0 +1,124 @@
+/* tools/struct-member-capacity.cx -- frontend capacity for struct members and struct count (v0.0.74, parse2 member
+ * cap 64 -> 512).  Generated fixtures, each compiled by ROOT/unisacc.com and by the declared host cc oracle:
+ *   accept fixtures: default-run stdout must equal the stdout of the host-cc-built binary (sizeof, every offsetof,
+ *     and a weighted read-back sum that catches two members sharing storage), and the -c -funit and -S entries
+ *     must succeed too (rc 0, object/asm present).
+ *       m64 m65 m256 m512        one struct, members cycle char/int/short/long
+ *       anon500p12               500 named + anonymous struct of 12 (flattened 512)
+ *       nest512                  outer struct holding a 512-member struct plus members after it
+ *       structs255               255 distinct structs sharing member names x,y,z (struct ids below 256)
+ *       structs2040one           2040 structs with the single member name x (member slot table sid*512+i up to
+ *                                sid 2039 without any name-key overlap; STRUCT_LIMIT is 2049)
+ *       structs257 structs300    257 / 300 structs sharing member names x,y,z: struct ids past 255.  The member name
+ *                                key is name*MEMBER_STRIDE+struct id; with stride 256 struct id 256+i aliased struct i
+ *                                with the next name id (FRONTEND-STRUCT-ID-OVER-255, silent miscompile in 0.0.73 and
+ *                                earlier); stride 4096 keeps every id below STRUCT_LIMIT 2049 apart
+ *       structs2040              2040 structs sharing member names x,y,z (ids up to the limit, names alias-free)
+ *   reject fixtures: every entry rc != 0, no output file, stderr names the capacity.
+ *       m513 anon501p12          "structure member capacity"
+ *       structs2100one           2100 structs: "structure id capacity" (STRUCT_LIMIT 2049)
+ *   sh ./unisacc.com tools/struct-member-capacity.cx -- ROOT ABS_OUT HOST_CC
+ * SMC_ONLY=name[,name] limits the run to the named fixtures (local probing only; the batch runs all).
+ * Ends STRUCT_MEMBER_CAPACITY<TAB>pass=N<TAB>fail=N, rc 0 only when fail=0. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+static char root[4096], outdir[4096], product[4400], hostcc[4096]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "struct-member-capacity: REFUSE %s errno=%d\n", s, errno); exit(2); }
+#define FMT(buf, ...) do { if (cx_fmt(buf, sizeof buf, __VA_ARGS__)) die("text bound"); } while (0)
+static void path(char *p, size_t cap, const char *a, const char *b) { if (cx_fmt(p, cap, "%s/%s", a, b)) die("path"); }
+/* fixture source: new file only (wbx), whole buffer or refuse */
+static void saved(const char *p, const char *s, size_t n) { FILE *f = fopen(p, "wbx"); if (!f) die("fixture exists or cannot be created"); if (fwrite(s, 1, n, f) != n) die("fixture write"); if (fclose(f)) die("fixture close"); }
+static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\tstruct.capacity.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); if (ok) npass++; else nfail++; }
+static int runin(char *const argv[], np_result *r) { char why[1024]; return np_run(argv, outdir, 0, 50, r, why, sizeof why); }
+/* output file of an entry: 1 when ENOENT, 0 when present, other errno refuses */
+static int absent(const char *leaf) { char p[4400]; path(p, sizeof p, outdir, leaf); struct stat st; errno = 0; if (lstat(p, &st) == 0) return 0; if (errno == ENOENT) return 1; die("output lstat"); return 0; }
+
+static char *sb; static size_t sn, scap;
+static void app(const char *b, size_t k) { if (sn + (size_t)k + 1 > scap) { scap = scap * 2 + (size_t)k + 4096; sb = realloc(sb, scap); if (!sb) die("alloc"); } if (mm_copy(sb + sn, (long)(scap - sn), b, (long)k)) die("append"); sn += (size_t)k; sb[sn] = 0; }
+#define put(...) do { char pb_[2048]; FMT(pb_, __VA_ARGS__); app(pb_, strlen(pb_)); } while (0)
+static const char *ty[] = { "char", "int", "short", "long" };
+static void head(void) { sn = 0; put("#include <stdio.h>\n#include <stddef.h>\n"); }
+static void members(const char *p, int from, int n) { for (int i = from; i < from + n; i++) put("  %s %s%d;\n", ty[i % 4], p, i); }
+/* fill, print sizeof and every offsetof, read back with weights; OBJ is the object expression, T its type */
+static void probe_body(const char *obj, const char *t, const char *p, int n) {
+    for (int i = 0; i < n; i++) put("  %s.%s%d = %d;\n", obj, p, i, (i * 7 + 3) % 100);
+    put("  printf(\"sizeof %%d\\n\", (int)sizeof(%s));\n", t);
+    for (int i = 0; i < n; i++) put("  printf(\"%s%d %%d\\n\", (int)offsetof(%s, %s%d));\n", p, i, t, p, i);
+    for (int i = 0; i < n; i++) put("  sum += (long)%s.%s%d * %d;\n", obj, p, i, i + 1);
+    put("  printf(\"sum %%ld\\n\", sum);\n");
+}
+static void one(int n) { head(); put("struct S {\n"); members("m", 0, n); put("};\nstatic struct S g;\nint main(void){\n  long sum = 0;\n"); probe_body("g", "struct S", "m", n); put("  return 0;\n}\n"); }
+static void anon(int named) { head(); put("struct S {\n"); members("m", 0, named); put("  struct {\n"); members("a", 0, 12); put("  };\n};\nstatic struct S g;\nint main(void){\n  long sum = 0;\n"); probe_body("g", "struct S", "m", named); probe_body("g", "struct S", "a", 12); put("  return 0;\n}\n"); }
+static void nest(void) { head(); put("struct B {\n"); members("m", 0, 512); put("};\nstruct O { char h; struct B inner; int t1; long t2; };\nstatic struct O o;\nint main(void){\n  long sum = 0;\n");
+    probe_body("o.inner", "struct B", "m", 512);
+    put("  o.h = 1; o.t1 = 5; o.t2 = 6;\n  printf(\"outer %%d %%d %%d %%d %%ld\\n\", (int)sizeof(struct O), (int)offsetof(struct O, inner), (int)offsetof(struct O, t1), (int)offsetof(struct O, t2), (long)o.h + o.inner.m511 + o.t1 * 10 + o.t2 * 100);\n  return 0;\n}\n"); }
+static void many(int n) { head(); for (int i = 0; i < n; i++) put("struct T%d { %s x; int y; %s z; int u%d; };\nstatic struct T%d g%d;\n", i, ty[i % 4], ty[(i + 1) % 4], i, i, i);
+    put("int main(void){\n  long sum = 0;\n"); for (int i = 0; i < n; i++) put("  g%d.x = %d; g%d.y = %d; g%d.z = %d; g%d.u%d = %d;\n", i, i % 50, i, i, i, (i * 3) % 60, i, i, i + 7);
+    for (int i = 0; i < n; i++) put("  sum += (long)g%d.x * 3 + (long)g%d.y * 5 + (long)g%d.z * 7 + (long)g%d.u%d * 11 + (long)sizeof(struct T%d) * 13 + (long)offsetof(struct T%d, z) * 17 + (long)offsetof(struct T%d, u%d) * 19;\n", i, i, i, i, i, i, i, i, i);
+    put("  printf(\"sizeof %%d %%d\\n\", (int)sizeof(struct T0), (int)sizeof(struct T%d));\n  printf(\"sum %%ld\\n\", sum);\n  return 0;\n}\n", n - 1); }
+
+static void onename(int n) { head(); for (int i = 0; i < n; i++) put("struct T%d { %s x; };\nstatic struct T%d g%d;\n", i, ty[i % 4], i, i);
+    put("int main(void){\n  long sum = 0;\n"); for (int i = 0; i < n; i++) put("  g%d.x = %d;\n", i, i % 100);
+    for (int i = 0; i < n; i++) put("  sum += (long)g%d.x * %d + (long)sizeof(struct T%d) * 3;\n", i, i + 1, i);
+    put("  printf(\"sum %%ld\\n\", sum);\n  return 0;\n}\n"); }
+
+static void first(const char *s, size_t n, char *o, size_t cap) { size_t k = 0; while (k < n && s[k] != '\n' && k + 1 < cap && k < 160) { o[k] = s[k] == '\t' ? ' ' : s[k]; k++; } o[k] = 0; }
+static void accept(const char *name) {
+    char c[96], bin[96], o[96], s[96]; FMT(c,"%s.c", name); FMT(bin,"%s.host", name); FMT(o,"%s.o", name); FMT(s,"%s.s", name);
+    char p[4400]; path(p, sizeof p, outdir, c); saved(p, sb, sn);
+    np_result g, h, u; char *gv[] = { hostcc, "-std=c99", "-w", "-o", bin, c, 0 };
+    if (runin(gv, &g)) { check(0, name, "oracle-build", "transport"); return; } if (g.rc) { check(0, name, "oracle-build", "host cc failed"); np_free(&g); return; } np_free(&g);
+    char bp[4400]; path(bp, sizeof bp, outdir, bin); char *hv[] = { bp, 0 }; if (runin(hv, &h)) { check(0, name, "oracle-run", "transport"); return; } if (h.rc) { check(0, name, "oracle-run", "host binary failed"); np_free(&h); return; }
+    char *uv[] = { "sh", product, c, 0 };
+    if (runin(uv, &u)) { check(0, name, "default-run", "transport"); np_free(&h); return; }
+    char e[170]; first(u.err, u.errn, e, sizeof e);
+    char d[600]; FMT(d,"rc=%d stdout_bytes=%zu host_bytes=%zu stderr1=%s", u.rc, u.outn, h.outn, e[0] ? e : "-");
+    check(u.rc == 0 && u.outn == h.outn && !memcmp(u.out, h.out, h.outn), name, "default-run-equals-host", d);
+    { char f[170]; first(h.out, h.outn, f, sizeof f); fprintf(res, "INFO\tstruct.capacity.%s.host-first-line\t%s\n", name, f); }
+    np_free(&u); np_free(&h);
+    char *cv[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-funit", "-o", o, c, 0 }; if (runin(cv, &u)) { check(0, name, "c-funit", "transport"); return; }
+    first(u.err, u.errn, e, sizeof e); FMT(d,"rc=%d object-present=%d stderr1=%s", u.rc, !absent(o), e[0] ? e : "-"); check(u.rc == 0 && !absent(o), name, "c-funit", d); np_free(&u);
+    char *sv[] = { "sh", product, "-S", "-o", s, c, 0 }; if (runin(sv, &u)) { check(0, name, "S", "transport"); return; }
+    first(u.err, u.errn, e, sizeof e); FMT(d,"rc=%d asm-present=%d stderr1=%s", u.rc, !absent(s), e[0] ? e : "-"); check(u.rc == 0 && !absent(s), name, "S", d); np_free(&u);
+}
+/* known gap: default-run only; GAP row records whether the product still differs from the host (not counted) */
+static void gap(const char *name, const char *id) {
+    char c[96], bin[96]; FMT(c,"%s.c", name); FMT(bin,"%s.host", name);
+    char p[4400]; path(p, sizeof p, outdir, c); saved(p, sb, sn);
+    np_result g, h, u; char *gv[] = { hostcc, "-std=c99", "-w", "-o", bin, c, 0 };
+    if (runin(gv, &g)) { check(0, name, "oracle-build", "transport"); return; } if (g.rc) { check(0, name, "oracle-build", "host cc failed"); np_free(&g); return; } np_free(&g);
+    char bp[4400]; path(bp, sizeof bp, outdir, bin); char *hv[] = { bp, 0 }; if (runin(hv, &h)) { check(0, name, "oracle-run", "transport"); return; } if (h.rc) { check(0, name, "oracle-run", "host binary failed"); np_free(&h); return; }
+    char *uv[] = { "sh", product, c, 0 }; if (runin(uv, &u)) { check(0, name, "default-run", "transport"); np_free(&h); return; }
+    int same = u.rc == 0 && u.outn == h.outn && !memcmp(u.out, h.out, h.outn);
+    fprintf(res, "GAP\t%s\tstruct.capacity.%s\trc=%d still-differs=%d\n", id, name, u.rc, !same); printf("GAP\t%s\t%s\trc=%d still-differs=%d\n", id, name, u.rc, !same);
+    np_free(&u); np_free(&h);
+}
+static void reject(const char *name, const char *needle) { size_t nl = strlen(needle);
+    char c[96], o[96], s[96]; FMT(c,"%s.c", name); FMT(o,"%s.o", name); FMT(s,"%s.s", name);
+    char p[4400]; path(p, sizeof p, outdir, c); saved(p, sb, sn);
+    char *a0[] = { "sh", product, c, 0 }, *a1[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-funit", "-o", o, c, 0 }, *a2[] = { "sh", product, "-S", "-o", s, c, 0 };
+    char **argvs[3] = { a0, a1, a2 }; const char *lab[3] = { "default-run", "c-funit", "S" }; const char *leaf[3] = { 0, o, s };
+    for (int k = 0; k < 3; k++) { np_result u; if (runin(argvs[k], &u)) { check(0, name, lab[k], "transport"); continue; }
+        char e[170]; first(u.err, u.errn, e, sizeof e); int named = 0; for (size_t q = 0; q + nl <= u.errn && !named; q++) named = !memcmp(u.err + q, needle, nl); int noout = !leaf[k] || absent(leaf[k]);
+        char d[600]; FMT(d,"rc=%d named=%d output-absent=%d stdout_bytes=%zu stderr1=%s", u.rc, named, noout, u.outn, e[0] ? e : "-");
+        char l[64]; FMT(l,"%s-refuses-named", lab[k]); check(u.rc != 0 && named && noout && u.outn == 0, name, l, d); np_free(&u); }
+}
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    FMT(outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
+    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\n", h, hostcc); }
+    const char *only = getenv("SMC_ONLY");
+#define WANT(x) (!only || strstr(only, x))
+    if (WANT("m64,") || (only && !strcmp(only, "m64"))) { one(64); accept("m64"); }
+    if (WANT("m65")) { one(65); accept("m65"); } if (WANT("m256")) { one(256); accept("m256"); } if (WANT("m512")) { one(512); accept("m512"); }
+    if (WANT("anon500p12")) { anon(500); accept("anon500p12"); } if (WANT("nest512")) { nest(); accept("nest512"); }
+    if (WANT("structs255")) { many(255); accept("structs255"); } if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
+    if (WANT("structs257")) { many(257); accept("structs257"); } if (WANT("structs300")) { many(300); accept("structs300"); }
+    if (WANT("structs2040,") || (only && !strcmp(only, "structs2040"))) { many(2040); accept("structs2040"); }
+    if (WANT("m513")) { one(513); reject("m513", "structure member capacity"); } if (WANT("anon501p12")) { anon(501); reject("anon501p12", "structure member capacity"); }
+    if (WANT("structs2100one")) { onename(2100); reject("structs2100one", "structure id capacity"); }
+    fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("STRUCT_MEMBER_CAPACITY\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
+}

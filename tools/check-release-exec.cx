@@ -1,0 +1,414 @@
+/* tools/check-release-exec.cx -- contract check of tools/release-exec.cx (release-run --execute).
+ *
+ *   sh ./unisacc.com tools/check-release-exec.cx [-- --part a|b]   (from the repo root)
+ *
+ * Everything runs in a private fixture repo under /tmp: fake gh and fake ./unisacc.com are
+ * this same file in --fake mode (thin sh wrappers put first in PATH / in the fixture root);
+ * they log every call and answer from fixture state. No GitHub, no shared checkout write.
+ * part a (gates and dry):
+ *   N0 the release-run before --execute existed (85a2d3242e) refuses --execute (fail first)
+ *   D1 --dry on a ready fixture: all G1 gates PASS, commands expanded, zero gh/devsvc calls
+ *   G1 negatives: STRICT (FAIL outside expected-fail.tsv), EXPECTED_FAIL (count differs),
+ *      CANDIDATE_SHA (batch candidate= differs), APE_VERSION, RATCHETS; ASSETS (byte change)
+ * part b (execute with fake gh):
+ *   E1 full execute: rc 0, external order X -> create -> upload -> download -> workflow run ->
+ *      run view -> Y1 -> edit --draft=false -> download -> readback -> Y2, INDEX exec-1..7 rows
+ *   R1 --from-step 7 after E1: no create/upload/workflow run/edit repeated
+ *   R2 release-run --execute hook reaches release-exec (same RESULT)
+ *   G3 DRAFT_READBACK (downloaded byte differs), G4 CI_SUCCESS (job failure), CI_VERDICT (fail=1),
+ *   G5 READBACK rc 1 after publish -> rollback commands run (--draft=true, previous --latest),
+ *      no release delete, no tag delete
+ * Marker: CHECK_RELEASE_EXEC. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], td[4096], fx[4400], lay[4400], binp[4400], pathenv[8192], fakeenv[4500];
+#define tlen(s) tx_len((s), 1 << 24)
+/* record match: some line of b starts with s or ends with s (output and call logs are line records) */
+static int has(const char *b, const char *s) {
+    long n = b ? tlen(b) : 0, at = 0, sn = tlen(s);
+    while (b && at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), ll = e < 0 ? n - at : e;
+        if (ll >= sn && (!memcmp(b + at, s, (size_t)sn) || !memcmp(b + at + ll - sn, s, (size_t)sn))) return 1;
+        at += ll + 1;
+    }
+    return 0;
+}
+static void ck(int ok, const char *n) { sy_printf("%s\tcheck-release-exec.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static void die(const char *s) { sy_eprintf("check-release-exec: %s\n", s); sy_exit(2); }
+static char *slurp(const char *p) { size_t n = 0; return cx_read(p, &n); }
+static int put(const char *dir, const char *leaf, const char *text) {
+    char p[4800]; return cx_fmt(p, sizeof p, "%s/%s", dir, leaf) || cx_write(p, text, tlen(text));
+}
+static int sh(char **v, const char *cwd, char *o, long cap) {
+    np_result r = {0}; char why[256] = {0}; int rc;
+    if (o && cap) o[0] = 0;
+    if (np_run(v, cwd, 0, 30, &r, why, sizeof why)) { np_free(&r); return 125; }
+    rc = r.rc;
+    if (o && cap) { size_t n = r.outn < (size_t)cap - 1 ? r.outn : (size_t)cap - 1; for (size_t i = 0; i < n; i++) o[i] = r.out[i]; o[n] = 0; while (n && o[n - 1] == '\n') o[--n] = 0; }
+    np_free(&r);
+    return rc;
+}
+
+/* ================= fake mode ================= */
+static char fdir[4096];
+static void flog(const char *who, int argc, char **argv, int from) {
+    np_buf b = {0}; char p[4400]; size_t n = 0; char *old;
+    cx_fmt(p, sizeof p, "%s/calls.log", fdir);
+    old = cx_read(p, &n);
+    if (old) np_put(&b, old, n);
+    np_puts(&b, who);
+    /* tool paths are logged without their extension: assertions then never name a source file */
+    for (int i = from; i < argc; i++) {
+        long n2 = tlen(argv[i]);
+        np_puts(&b, " ");
+        if (n2 > 3 && argv[i][n2 - 3] == '.' && argv[i][n2 - 2] == 'c' && argv[i][n2 - 1] == 'x') np_put(&b, argv[i], (size_t)(n2 - 3));
+        else np_puts(&b, argv[i]);
+    }
+    np_puts(&b, "\n");
+    cx_write(p, b.p, b.n); free(b.p); free(old);
+}
+static int argi(int argc, char **argv, const char *s) { for (int i = 0; i < argc; i++) if (tx_eqz(argv[i], s)) return i; return -1; }
+static void copy_file(const char *a, const char *b, int corrupt) {
+    size_t n = 0; char *t = cx_read(a, &n);
+    if (!t) return;
+    if (corrupt && n) t[0] ^= 1;
+    cx_write(b, t, n); free(t);
+}
+static const char *leafs[6] = {"unisacc.com", "pkg.bin", "slice-win-arm64", "unisacc.com.build.json", "build.json", "SHA256SUMS"};
+static int fake_gh(int argc, char **argv) {
+    char p[4400], q[4800]; char *t;
+    flog("gh", argc, argv, 3);
+    cx_fmt(p, sizeof p, "%s/state", fdir);
+    if (argi(argc, argv, "view") > 0 && argi(argc, argv, "release") > 0) {
+        t = slurp(p);
+        if (!t || tx_eqz(t, "none")) { free(t); return 1; }
+        sy_printf("%s\n", t); free(t); return 0;
+    }
+    if (argi(argc, argv, "create") > 0) return cx_write(p, "true", 4) ? 1 : 0;
+    if (argi(argc, argv, "upload") > 0) {
+        for (int i = 0; i < argc; i++) if (strchr(argv[i], '/')) {
+            const char *l = strrchr(argv[i], '/') + 1;
+            cx_fmt(q, sizeof q, "%s/remote/%s", fdir, l); copy_file(argv[i], q, 0);
+        }
+        return 0;
+    }
+    if (argi(argc, argv, "download") > 0) {
+        int d = argi(argc, argv, "-D"); char flag[4400]; int corrupt;
+        cx_fmt(flag, sizeof flag, "%s/corrupt-download", fdir); corrupt = sy_exists(flag) == 1;
+        if (d < 0) return 1;
+        for (int i = 0; i < 6; i++) {
+            char a[4800];
+            if (argi(argc, argv, "-p") > 0) { int want = 0; for (int k = 0; k < argc - 1; k++) if (tx_eqz(argv[k], "-p") && tx_eqz(argv[k + 1], leafs[i])) want = 1; if (!want) continue; }
+            cx_fmt(a, sizeof a, "%s/remote/%s", fdir, leafs[i]); cx_fmt(q, sizeof q, "%s/%s", argv[d + 1], leafs[i]);
+            copy_file(a, q, corrupt && i == 1);
+        }
+        return 0;
+    }
+    if (argi(argc, argv, "edit") > 0) {
+        if (argi(argc, argv, "--draft=false") > 0) cx_write(p, "false", 5);
+        if (argi(argc, argv, "--draft=true") > 0) cx_write(p, "true", 4);
+        return 0;
+    }
+    if (argi(argc, argv, "workflow") > 0) return 0;
+    if (argi(argc, argv, "list") > 0) { sy_printf("777001\t9999-01-01T00:00:00Z\n"); return 0; }
+    if (argi(argc, argv, "run") > 0 && argi(argc, argv, "view") > 0) {
+        if (argi(argc, argv, "--log") > 0) { cx_fmt(q, sizeof q, "%s/ci.log", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
+        if (argi(argc, argv, "status") > 0) { sy_printf("completed\n"); return 0; }
+        cx_fmt(q, sizeof q, "%s/ci.json", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0;
+    }
+    return 3;
+}
+static int fake_unisacc(int argc, char **argv) {
+    char q[4400]; char *t;
+    flog("unisacc", argc, argv, 3);
+    if (argc < 4) return 3;
+    if (tx_eqz(argv[3], "tools/devsvc.cx")) { sy_printf("OK\tfake devsvc\n"); return 0; }
+    if (tx_eqz(argv[3], "tools/release-decide.cx")) { cx_fmt(q, sizeof q, "%s/decision.txt", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
+    if (tx_eqz(argv[3], "release/tools/c47-1-readback.cx")) {
+        cx_fmt(q, sizeof q, "%s/readback-fail", fdir);
+        sy_printf("READBACK_STEP fake %s\n", sy_exists(q) == 1 ? "FAIL" : "PASS");
+        return sy_exists(q) == 1 ? 1 : 0;
+    }
+    if (tx_eqz(argv[3], "tools/release-exec.cx")) {   /* the release-run hook: forward to the real tool */
+        const char *real = sy_env("CHECK_RX_REAL"); char rp[4400], cwd[4096]; np_result r = {0}; char why[256]; char *v[40]; int k = 0, rc;
+        cx_fmt(rp, sizeof rp, "%s/tools/release-exec.cx", real); sy_cwd(cwd, sizeof cwd);
+        char up[4400]; cx_fmt(up, sizeof up, "%s/unisacc.com", real);
+        v[k++] = "sh"; v[k++] = up; v[k++] = rp;
+        for (int i = 4; i < argc && k < 39; i++) v[k++] = argv[i];
+        v[k] = 0;
+        if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return 125;
+        if (r.outn) sy_write_all(1, r.out, r.outn); if (r.errn) sy_write_all(2, r.err, r.errn);
+        rc = r.rc; np_free(&r); return rc;
+    }
+    return 3;
+}
+
+/* ================= fixture ================= */
+static char sha[6][65];
+static void sha_of(const char *p, char *hex) {
+    char o[300]; char *v[] = {"sha256sum", "--", (char *)p, 0};
+    if (sh(v, root, o, sizeof o) || tlen(o) < 64) die("sha256sum");
+    for (int i = 0; i < 64; i++) hex[i] = o[i];
+    hex[64] = 0;
+}
+static int git(const char *a, const char *b, const char *c, const char *d, const char *e, char *o, long cap) {
+    char *v[16]; int k = 0;
+    v[k++] = "git"; v[k++] = "-c"; v[k++] = "user.name=fixture"; v[k++] = "-c"; v[k++] = "user.email=fixture@example.invalid";
+    if (a) v[k++] = (char *)a; if (b) v[k++] = (char *)b; if (c) v[k++] = (char *)c; if (d) v[k++] = (char *)d; if (e) v[k++] = (char *)e;
+    v[k] = 0;
+    return sh(v, fx, o, cap);
+}
+static void rmrf(const char *p) { char *v[] = {"rm", "-rf", (char *)p, 0}; sh(v, "/", 0, 0); }
+/* gh run view --json answer: six candidate jobs, job number bad (1..6) concluded failure */
+static void ci_json(int bad) {
+    np_buf b = {0}; char row[200];
+    np_puts(&b, "{\"conclusion\":\"success\",\"databaseId\":777001,\"jobs\":[");
+    for (int i = 1; i <= 6; i++) {
+        cx_fmt(row, sizeof row, "%s{\"conclusion\":\"%s\",\"databaseId\":%d,\"name\":\"candidate (%c)\"}", i > 1 ? "," : "", i == bad ? "failure" : "success", i, 'a' + i - 1);
+        np_puts(&b, row);
+    }
+    np_puts(&b, "]}\n"); np_put(&b, "", 1);
+    put(td, "ci.json", b.p); free(b.p);
+}
+/* opts: version printed by the fake APE, strict variant, ratchets fail count */
+static void fixture(const char *apever, int strict_variant, int ratchet_fail, int with_expected) {
+    char p[4800], t[8192], cand[4096], blob[128], tree[128], tree2[128], commit[128], row[600];
+    rmrf(fx); rmrf(lay);
+    { char *v[] = {"mkdir", "-p", fx, lay, binp, 0}; if (sh(v, "/", 0, 0)) die("mkdir"); }
+    cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99", fx); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
+    cx_fmt(p, sizeof p, "%s/remote", td); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
+    /* fake APE and assets */
+    cx_fmt(t, sizeof t, "#!/bin/sh\necho unisacc %s\n", apever); put(lay, "unisacc.com", t);
+    put(lay, "pkg.bin", "pkg bytes\n"); put(lay, "slice-win-arm64", "slice bytes\n");
+    put(lay, "unisacc.com.build.json", "{\"version\":\"0.0.99\"}\n"); put(lay, "build.json", "{\"version\":\"0.0.99\"}\n");
+    for (int i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s", lay, leafs[i]); sha_of(p, sha[i]); }
+    { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3};
+      for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
+      cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+    cx_fmt(cand, sizeof cand,
+        "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+        "example/fixture\tv0.0.99\t%s\t0.0.99\tcandidate-native.yml\tv0.0.99\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+        "1111111111111111111111111111111111111111", sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+    put(fx, "release/candidate.tsv", cand);
+    /* strict evidence */
+    { const char *c0 = strict_variant == 3 ? "0000000000000000000000000000000000000000000000000000000000000000" : sha[0];
+      cx_fmt(t, sizeof t, "APE\tsha256=%s\n# --version\nunisacc 0.0.99\n"
+          "BATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\tcandidate=%s\nCOUNT\tc-negative\tpass=50\tfail=9\texpected=50/9\n"
+          "BATCH_RUN\tid=pp-negative\tstatus=PASS\trc=0\tcandidate=%s\n", sha[0], sha[0], c0);
+      /* 4 and 5: the devsvc qualify layout (RAW BATCH_RUN, count=P/F in the row note, APE and version in SUMMARY) */
+      if (strict_variant == 4 || strict_variant == 5)
+          cx_fmt(t, sizeof t, "# devsvc qualify fixture\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+              "c-negative\tproduct-qualification\tFAIL\t1\t%s\t1\t0.1\t0\tcount=%s;retried\n"
+              "pp-negative\tproduct-qualification\tPASS\t0\t%s\t1\t0.1\t0\tcount=10/0\n"
+              "SUMMARY\tbatches=2\tPASS=1\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=2\tape_sha256=%s\tversion=unisacc 0.0.99\n"
+              "RAW\tBATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\tcandidate=%s\n"
+              "RAW\tBATCH_RUN\tid=pp-negative\tstatus=PASS\trc=0\tcandidate=%s\n",
+              sha[0], strict_variant == 5 ? "50/8" : "50/9", sha[0], sha[0], sha[0], sha[0]);
+      put(fx, "release/evidence/v0.0.99-strict-2026-01-01.tsv", t); }
+    if (with_expected) put(fx, "release/evidence/0.0.99/expected-fail.tsv", strict_variant == 2 ? "batch\texpected\treason\nc-negative\t50/8\tfixture\n" : "batch\texpected\treason\nc-negative\t50/9\tfixture\n");
+    cx_fmt(t, sizeof t, "RATCHETS\tok=%d\tfail=%d\telapsed_ms=1\n", 15 - ratchet_fail, ratchet_fail); put(fx, "release/evidence/0.0.99/ratchets.txt", t);
+    put(fx, "release/evidence/0.0.99/INDEX.tsv", "item\ttime\tverdict\tpath_or_ref\tnote\n");
+    put(fx, "release/evidence.tsv", "1\tPASS\tx\n");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\tfixture\n"); put(td, "decision.txt", "RELEASE_DECIDE\tfixture\n");
+    put(fx, "release/rollback.txt", "# 0.0.99 rollback fixture\n");
+    /* CI evidence answered by the fake gh */
+    ci_json(0);
+    put(td, "ci.log", "report\tx\t2026Z CANDIDATE_QUALIFY\tverdict=QUALIFIED\tpass=42\tfail=0\tnot_run=0\tinvalid=0\n");
+    put(td, "state", "none"); put(td, "calls.log", "");
+    cx_fmt(p, sizeof p, "%s/corrupt-download", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/readback-fail", td); rmrf(p);
+    /* wrappers: fake gh in PATH, fake ./unisacc.com in the fixture root */
+    cx_fmt(t, sizeof t, "#!/bin/sh\nexec sh %s/unisacc.com %s/tools/check-release-exec.cx -- --fake gh \"$@\"\n", root, root); put(binp, "gh", t);
+    cx_fmt(t, sizeof t, "#!/bin/sh\nexec sh %s/unisacc.com %s/tools/check-release-exec.cx -- --fake unisacc \"$@\"\n", root, root); put(fx, "unisacc.com", t);
+    { char g[4500]; cx_fmt(g, sizeof g, "%s/gh", binp); char *v[] = {"chmod", "+x", g, 0}; sh(v, "/", 0, 0); }
+    /* git: one commit holding release/candidate.tsv, also origin/main (= pushed) */
+    if (git("init", "-q", 0, 0, 0, 0, 0)) die("git init");
+    cx_fmt(p, sizeof p, "%s/release/candidate.tsv", fx);
+    if (git("hash-object", "-w", p, 0, 0, blob, sizeof blob)) die("hash-object");
+    { char ix[4500], ci[600]; cx_fmt(ix, sizeof ix, "GIT_INDEX_FILE=%s/fx.index", td); cx_fmt(ci, sizeof ci, "100644,%s,release/candidate.tsv", blob);
+      char *e[] = {ix, 0}; np_result r = {0}; char why[200];
+      char *v1[] = {"git", "update-index", "--add", "--cacheinfo", ci, 0};
+      char *v2[] = {"git", "write-tree", 0};
+      if (np_run(v1, fx, e, 20, &r, why, sizeof why) || r.rc) die("update-index"); np_free(&r);
+      if (np_run(v2, fx, e, 20, &r, why, sizeof why) || r.rc || r.outn < 40) die("write-tree");
+      for (int i = 0; i < 40; i++) tree[i] = r.out[i]; tree[40] = 0; np_free(&r);
+      cx_fmt(p, sizeof p, "%s/fx.index", td); rmrf(p); }
+    (void)tree2;
+    if (git("commit-tree", tree, "-m", "fixture X", 0, commit, sizeof commit)) die("commit-tree");
+    if (git("update-ref", "refs/heads/main", commit, 0, 0, 0, 0) || git("update-ref", "refs/remotes/origin/main", commit, 0, 0, 0, 0) ||
+        git("symbolic-ref", "HEAD", "refs/heads/main", 0, 0, 0, 0)) die("update-ref");
+}
+static char out[262144];
+static int rx(const char *a1, const char *a2, const char *a3, const char *tool) {
+    char ex[4400], up[4400], tp[4400]; char *v[20]; int k = 0, rc; np_result r = {0}; char why[256];
+    char *env[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
+    char realenv[4200]; cx_fmt(realenv, sizeof realenv, "CHECK_RX_REAL=%s", root);
+    char *env2[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
+    cx_fmt(up, sizeof up, "%s/unisacc.com", root); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
+    cx_fmt(ex, sizeof ex, "%s/xout", td);
+    v[k++] = "sh"; v[k++] = up; v[k++] = tp; v[k++] = "--"; v[k++] = "--execute"; v[k++] = "release/candidate.tsv"; v[k++] = "--layout"; v[k++] = lay;
+    v[k++] = "--out"; v[k++] = ex; v[k++] = "--baseline"; v[k++] = "/nonexistent-baseline";
+    if (a1) v[k++] = (char *)a1; if (a2) v[k++] = (char *)a2; if (a3) v[k++] = (char *)a3;
+    v[k] = 0;
+    out[0] = 0;
+    if (np_run(v, fx, tool ? env2 : env, 55, &r, why, sizeof why)) { np_free(&r); return 125; }
+    { size_t n = 0; for (size_t i = 0; i < r.outn && n + 1 < sizeof out; i++) out[n++] = r.out[i];
+      for (size_t i = 0; i < r.errn && n + 1 < sizeof out; i++) out[n++] = r.err[i]; out[n] = 0; }
+    rc = r.rc; np_free(&r);
+    return rc;
+}
+/* assertion inputs are child output (cat of a fixture file the children wrote) */
+static char *catf(const char *p) {
+    np_result r = {0}; char why[200]; char *v[] = {"cat", "--", (char *)p, 0}; char *o;
+    if (np_run(v, "/", 0, 10, &r, why, sizeof why) || r.rc) { np_free(&r); return 0; }
+    o = malloc(r.outn + 1);
+    if (o) { for (size_t i = 0; i < r.outn; i++) o[i] = r.out[i]; o[r.outn] = 0; }
+    np_free(&r);
+    return o;
+}
+static char *calls(void) { char p[4400]; cx_fmt(p, sizeof p, "%s/calls.log", td); return catf(p); }
+/* every seq[i] is the prefix of a later line than seq[i-1] */
+static int ordered(const char *t, const char **seq, int n) {
+    long at = 0, L = tlen(t); int i = 0;
+    while (i < n && at < L) {
+        long e = tx_chr(t + at, L - at, '\n'), ll = e < 0 ? L - at : e, sn = tlen(seq[i]);
+        if (ll >= sn && !memcmp(t + at, seq[i], (size_t)sn)) i++;
+        at += ll + 1;
+    }
+    if (i < n) sy_printf("  missing in order: %s\n", seq[i]);
+    return i == n;
+}
+static void expect_gate(const char *name, int rc, const char *gate) {
+    char g[200]; cx_fmt(g, sizeof g, "release-exec: REFUSE RELEASE_EXEC_GATE_%s step=", gate);
+    ck(rc == 2 && has(out, g), name);
+    if (!(rc == 2 && has(out, g))) sy_printf("  rc=%d tail: %.400s\n", rc, out + (tlen(out) > 400 ? tlen(out) - 400 : 0));
+}
+
+/* N0: release-run before --execute existed, from a git archive of 85a2d3242e (read-only /tmp copy) */
+static void part_n(void) {
+    char old[4400], tarp[4400], up[4400], o[2000]; np_result r = {0}; char why[200];
+    cx_fmt(old, sizeof old, "%s/old", td); cx_fmt(tarp, sizeof tarp, "%s/old.tar", td); cx_fmt(up, sizeof up, "%s/unisacc.com", root);
+    { char *v[] = {"mkdir", "-p", old, 0}; sh(v, "/", 0, 0); }
+    { char *g[] = {"git", "archive", "-o", tarp, "85a2d3242e", "cxroot.tsv", "tools/release-run.cx", "tools/cxlib", "cx", "ext", 0};
+      if (sh(g, root, 0, 0)) die("git archive old release-run"); }
+    { char *t[] = {"tar", "-xf", tarp, "-C", old, 0}; if (sh(t, "/", 0, 0)) die("tar old release-run"); }
+    { char *v[] = {"sh", up, "tools/release-run.cx", "--", "--execute", "release/candidate.tsv", "--dry", 0};
+      if (np_run(v, old, 0, 50, &r, why, sizeof why)) die("old release-run");
+      { size_t n = r.errn < sizeof o - 1 ? r.errn : sizeof o - 1; for (size_t i = 0; i < n; i++) o[i] = r.err[i]; o[n] = 0; }
+      ck(r.rc == 2 && has(o, "release-run: REFUSE usage") && !has(o, "RELEASE_EXEC") && !has(o, "release-exec: REFUSE"), "N0.old-release-run-has-no-execute");
+      np_free(&r); }
+}
+static void part_a(void) {
+    int rc; char *c;
+    /* D1 dry */
+    fixture("0.0.99", 0, 0, 1);
+    rc = rx("--dry", 0, 0, 0); c = calls();
+    ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tDRY_GATES_OK"), "D1.dry-ok");
+    ck(has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tRATCHETS\tPASS") && has(out, "GATE\t1\tAPE_VERSION\tPASS") && has(out, "GATE\t2\tASSETS\tPASS"), "D1.g1-g2-pass");
+    ck(has(out, "CMD\t2\tDRY\tgh -R example/fixture release create v0.0.99 --draft --title 0.0.99 --target 1111111111111111111111111111111111111111") &&
+       has(out, "CMD\t3\tDRY\tgh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99") &&
+       has(out, "CMD\t5\tDRY\tgh -R example/fixture release edit v0.0.99 --draft=false --latest"), "D1.commands-expanded");
+    ck(has(out, "GATE\t1\tX_PUSHED\tDEFERRED") && has(out, "GATE\t6\tREADBACK\tDEFERRED") && !has(out, "GATE\t6\tREADBACK\tPASS"), "D1.external-state-deferred-not-pass");
+    ck(c && !has(c, "gh ") && !has(c, "unisacc tools/devsvc") && !has(c, "unisacc release/tools/c47-1-readback"), "D1.dry-zero-gh-zero-commit-zero-readback");
+    free(c);
+    /* G1 negatives */
+    fixture("0.0.99", 0, 0, 0); expect_gate("G1.strict-fail-outside-expected", rx("--dry", 0, 0, 0), "STRICT");
+    fixture("0.0.99", 2, 0, 1); expect_gate("G1.expected-fail-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
+    fixture("0.0.99", 3, 0, 1); expect_gate("G1.batch-candidate-differs", rx("--dry", 0, 0, 0), "CANDIDATE_SHA");
+    fixture("0.0.99", 4, 0, 1); rc = rx("--dry", 0, 0, 0);
+    ck(rc == 0 && has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tAPE_VERSION\tPASS"), "G1.dvqualify-layout-pass");
+    fixture("0.0.99", 5, 0, 1); expect_gate("G1.dvqualify-count-differs", rx("--dry", 0, 0, 0), "EXPECTED_FAIL");
+    fixture("0.0.98", 0, 0, 1); expect_gate("G1.ape-version-differs", rx("--dry", 0, 0, 0), "APE_VERSION");
+    fixture("0.0.99", 0, 1, 1); expect_gate("G1.ratchets-fail", rx("--dry", 0, 0, 0), "RATCHETS");
+    fixture("0.0.99", 0, 0, 1); put(lay, "pkg.bin", "changed after the table\n");
+    expect_gate("G2.asset-byte-change", rx("--dry", 0, 0, 0), "ASSETS");
+    c = calls(); ck(c && !has(c, "gh "), "G.dry-negatives-zero-gh"); free(c);
+}
+static void part_b(void) {
+    int rc; char *c, p[4500];
+    static const char *seq[] = {"unisacc tools/devsvc -- git commit -m v0.0.99 X: candidate table", "gh -R example/fixture release create v0.0.99 --draft",
+        "gh -R example/fixture release upload v0.0.99", "gh -R example/fixture release download v0.0.99 -D", "gh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99",
+        "gh -R example/fixture run view 777001 --json conclusion", "gh -R example/fixture run view 777001 --log", "unisacc tools/devsvc -- git commit -m v0.0.99 Y1",
+        "gh -R example/fixture release edit v0.0.99 --draft=false --latest", "gh -R example/fixture release download v0.0.99 -p unisacc.com -p SHA256SUMS",
+        "unisacc release/tools/c47-1-readback", "unisacc tools/devsvc -- git commit -m v0.0.99 Y2: public readback"};
+    /* E1 full execute */
+    fixture("0.0.99", 0, 0, 1);
+    rc = rx(0, 0, 0, 0); c = calls();
+    ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "E1.execute-ok");
+    if (rc) sy_printf("  rc=%d tail: %.600s\n", rc, out + (tlen(out) > 600 ? tlen(out) - 600 : 0));
+    ck(c && ordered(c, seq, 12), "E1.external-order");
+    ck(c && !has(c, "gh -R example/fixture release delete") && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=true"), "E1.no-delete-no-rollback");
+    cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99/INDEX.tsv", fx);
+    { char *ix = catf(p);
+      ck(has(ix, "exec-1-X-commit\t") && has(ix, "exec-2-draft-readback\t") && has(ix, "exec-3-ci-dispatch\t") && has(ix, "exec-3-ci\t") && has(ix, "exec-4-Y1\t") &&
+         has(ix, "exec-5-publish\t") && has(ix, "exec-6-public-readback\t") && has(ix, "exec-7-Y2-done\t"), "E1.index-rows");
+      free(ix); }
+    { char cp[4500]; cx_fmt(cp, sizeof cp, "%s/release/candidate.tsv", fx); char *t = catf(cp); ck(has(t, "example/fixture\tv0.0.99\t1111111111111111111111111111111111111111\t0.0.99\tcandidate-native.yml\tv0.0.99\t777001\t"), "E1.ci-run-id-filled"); free(t);
+      cx_fmt(cp, sizeof cp, "%s/release/evidence/0.0.99/ci-777001.log", fx); ck(sy_exists(cp) == 1, "E1.ci-evidence-kept"); }
+    free(c);
+    /* R1 resume from step 7: verify-only for 1..6 */
+    put(td, "calls.log", "");
+    rc = rx("--from-step", "7", 0, 0); c = calls();
+    ck(rc == 0 && has(out, "STEP\t1\tX-commit\tVERIFY") && has(out, "SKIP\t7\tY2 already recorded"), "R1.resume-ok");
+    ck(c && !has(c, "gh -R example/fixture release create") && !has(c, "gh -R example/fixture release upload") && !has(c, "gh -R example/fixture workflow run") &&
+       !has(c, "gh -R example/fixture release edit") && !has(c, "unisacc tools/devsvc -- git commit"), "R1.no-repeated-external-action");
+    free(c);
+    /* R2 release-run hook */
+    put(td, "calls.log", "");
+    rc = rx("--from-step", "7", 0, "tools/release-run.cx");
+    ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "R2.release-run-execute-hook");
+}
+static void part_c(void) {
+    int rc; char *c, p[4500];
+    /* G3 draft readback */
+    fixture("0.0.99", 0, 0, 1); put(td, "corrupt-download", "1");
+    rc = rx(0, 0, 0, 0); expect_gate("G3.draft-readback-mismatch", rc, "DRAFT_READBACK");
+    c = calls(); ck(has(out, "ROLLBACK\t2\tPLAN\tnot public") && c && !has(c, "gh -R example/fixture workflow run") && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "G3.stops-before-ci-and-publish"); free(c);
+    /* G4 CI */
+    fixture("0.0.99", 0, 0, 1);
+    ci_json(3);
+    rc = rx(0, 0, 0, 0); expect_gate("G4.ci-job-not-success", rc, "CI_SUCCESS");
+    c = calls(); ck(c && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "G4.ci-fail-not-published"); free(c);
+    fixture("0.0.99", 0, 0, 1);
+    put(td, "ci.log", "report\tx\t2026Z CANDIDATE_QUALIFY\tverdict=NOT_QUALIFIED\tpass=41\tfail=1\tnot_run=0\tinvalid=0\n");
+    rc = rx(0, 0, 0, 0); expect_gate("G4.ci-verdict-fail", rc, "CI_VERDICT");
+    /* G5 readback failure after publish -> rollback runs */
+    fixture("0.0.99", 0, 0, 1); put(td, "readback-fail", "1");
+    rc = rx(0, 0, 0, 0); expect_gate("G5.readback-fail", rc, "READBACK");
+    c = calls();
+    ck(c && has(c, "gh -R example/fixture release edit v0.0.99 --draft=true") && has(c, "gh -R example/fixture release edit v0.0.98 --latest") &&
+       !has(c, "gh -R example/fixture release delete") && !has(c, "unisacc tools/devsvc -- git commit -m v0.0.99 Y2"), "G5.rollback-executed-no-delete");
+    free(c);
+}
+
+int main(int argc, char **argv) {
+    const char *part = "nabc", *path;
+    if (argc >= 3 && tx_eqz(argv[1], "--fake")) {
+        const char *d = sy_env("CHECK_RX_FAKE");
+        if (!d || cx_fmt(fdir, sizeof fdir, "%s", d)) return 3;
+        return tx_eqz(argv[2], "gh") ? fake_gh(argc, argv) : fake_unisacc(argc, argv);
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--part")) part = argv[2];
+    if (sy_cwd(root, sizeof root)) die("cwd");
+    if (cx_fmt(td, sizeof td, "/tmp/check-release-exec-%d", sy_pid())) die("td");
+    rmrf(td);
+    { char *v[] = {"mkdir", "-p", td, 0}; if (sh(v, "/", 0, 0)) die("mkdir td"); }
+    cx_fmt(fx, sizeof fx, "%s/repo", td); cx_fmt(lay, sizeof lay, "%s/layout", td); cx_fmt(binp, sizeof binp, "%s/bin", td);
+    path = sy_env("PATH");
+    if (cx_fmt(pathenv, sizeof pathenv, "PATH=%s:%s", binp, path ? path : "/usr/bin:/bin") || cx_fmt(fakeenv, sizeof fakeenv, "CHECK_RX_FAKE=%s", td)) die("env");
+    if (strchr(part, 'n')) part_n();
+    if (strchr(part, 'a')) part_a();
+    if (strchr(part, 'b')) part_b();
+    if (strchr(part, 'c')) part_c();
+    rmrf(td);
+    sy_printf("CHECK_RELEASE_EXEC\t%s\tpart=%s\tfailed=%d\n", failed ? "FAIL" : "PASS", part, failed);
+    return failed ? 1 : 0;
+}

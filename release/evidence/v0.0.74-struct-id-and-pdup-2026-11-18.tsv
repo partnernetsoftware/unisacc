@@ -1,0 +1,24 @@
+# v0.0.74 struct id over 255 (A) and duplicate-parameter false refusal (B). Branch v0.0.74: A 184e3abb2b, B 8aa1fb6de6 on a1e2b491bc.
+# Dev product /tmp/v74b/devprod/unisacc.com DEV_PRODUCT sha 6f72c27cd9c20ee6 (LOCAL, NOT_RELEASE, built from branch tree after both commits; run-batch candidate identity 8d3f1cc3681565d6). Old dev product bf80147c, installed product as baselines. Shared machine 16 cores, load1 2.4 to 4.
+item	status	evidence
+A-choice	DECIDED	option (1) lower STRUCT_LIMIT to 256 rejected: sqlite3.c alone has 286 struct/union bodies (gcc -E count), it would turn into a new refusal; option (2) widen chosen: MEMBER_STRIDE 256 -> 4096, MEMBER_MASK -256 -> -4096; 4096 > STRUCT_LIMIT 2049; banks are n<<40 apart and SHAPE_IDS 2^32 sits inside the 2^40 SHAPE bank, so names stay below 2^28 ids; every consumer (SB.put4, SB.anoncopy, IL.membername, BF.metadata, MB.INFO, OFF.memberid, RG.member.lookup, SH member shape x2) uses the constant name, no literal 256
+A-edit	DONE	gen2-constants.tsv, k2-control.tsv (MEMBER_MASK, MEMBER_STRIDE), bitfields.tsv by hand; facts-gen --write k2-gen2 k2-membercontrol k2-libraryenv; facts-gen --check all SAME afterwards
+A-negative-control	MEASURED	installed product: t257 t300 t2040 (Ti{int x;int y;}, no headers) exit 3 = offsetof(T0,y) != 4, gcc exit 0; struct-member-capacity structs257 and structs300 default-run-equals-host FAIL (2 FAIL of 9 on the installed product), structs2100one refused named on all three entries
+A-sim	MEASURED	base delta vs new delta: t257 t300 output identical in shape to t256 (only .unit name differs); base t257 lacks the imm 4 offsets; t2040 sim over 58 s (not measured in sim)
+A-dev-product	MEASURED	t257 t2040 default-run exit 0; run-batch struct-member-capacity PASS 42/0 (was 30/0 plus GAP): new structs257 structs300 structs2040 x {default-run equals gcc, -c -funit, -S} and structs2100one x three entries refused "structure id capacity"; run-batch check-struct-member-capacity PASS 5/0 (A5 new)
+B-bisect	MEASURED	sqlite3.c cut at top-level boundaries with #if closed (cut2.cx): prefix to 8737 rc 0, to 8962 rejects; window has sqlite3_status64(int op,...) then sqlite3_db_status(sqlite3*, int op, ...)
+B-minimal	MEASURED	"int s(int op, int x); int d(void *, int op);": dev product bf80147c reject: redefinition of parameter (C99 6.7p3); gcc -std=c99 -pedantic-errors rc 0; installed rc 0
+B-root-cause	DECIDED	unnamed parameter path FN.unnamed -> FN.pcount only increments pk, PIDS[pk] keeps the name the previous parameter list stored at that index; FN.pdup scan then matches the stale name
+B-fix	DONE	FN.pcount writes PIDS[pk]=0 before pk+1 (intern ids start at 1; FN.copytype on id 0 goes to copynext)
+B-sim	MEASURED	d1 (minimal) and umix (mixed prototypes plus definition) rc 1 -> rc 0; d5 int d(int op, int op) still rejected
+B-dev-product	MEASURED	c-negative 53/9 (before: 50/9 on bf80147c baseline; old product with the new rows 51/11, the 2 accept controls failing); the 9 failures are the same 9 known rows; new rows: duplicate-parameter-after-unnamed refused, unnamed-then-named-parameter and unnamed-parameters-mixed accepted; pp-negative 10/0
+B-sqlite	MEASURED	dev product 6f72c27c: cut to 29986 lines rc 0 (was the pdup reject); cut to 59958 lines next refusal cut60000.c:38598:21 not covered: function pointer cast result type (separate gap); whole file -c over 59 s, not completed (UNMEASURED)
+B-location	NOT-DONE	S2-INLINE-REJECT-NO-LOCATION: inline REJECT prints only reject: text in every parse2 site (sim and product); a per-site fix needs JUMP to a saved token position like HL.static, and the general fix touches the REJECT action in every backend; out of this 100 minute slot
+byte-equality	MEASURED	13 real sources (exec/c/probes/*.c, exec/c/memory-ref.c) sim stdout, stderr and rc identical base delta vs A+B delta (memory-ref rc 1 on both)
+table-lint	MEASURED	states 12357 edges 27147 registers 1562 errors 0 warnings 1606 unchanged; --strict same 1606 lines base vs new (zero new)
+three-entry	MEASURED	d1 umix t257: default-run, -c -b lnx/x86_64 -funit, -S all rc 0 empty stderr; d5 first line identical on all three: reject: redefinition of parameter (C99 6.7p3)
+cx-compiler-funit	MEASURED	47/47 cx/compiler/*.cx -c -funit rc 0 on dev product
+ratchets	MEASURED	RATCHETS ok=15 fail=0
+dev-product	MEASURED	tools/dev-product.cx --until-done: DEV_PRODUCT_PARTS wall_ms 99122, outer 99 s
+affected	PARTIAL	affected --plan on the changed files: 421 batches (facts and control-result reach most of the product); only struct-member-capacity, check-struct-member-capacity, c-negative, pp-negative run here; the rest UNMEASURED
+lint	NOTE	precommit report-only R1-product: one new occurrence at tools/check-struct-member-capacity.cx:35 (A5), same pattern as A1 to A4

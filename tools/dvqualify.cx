@@ -1,0 +1,292 @@
+/* dvqualify: strict evidence for one candidate APE in one command (devsvc qualify routes here).
+ *   dvqualify ROOT --candidate APE [--set sample|product-qualification] [--ids A,B,..]
+ *             [--out FILE] [--jobs N] [--seed N] [--list]
+ * (1) Precheck: APE is a regular file, its sha256, and `sh APE --version` actually run.
+ * (2) Independent local layout root $TMPDIR/unisacc-qualify-<sha8> (default /tmp), rebuilt
+ *     fresh every call: `git -C ROOT archive HEAD` unpacked, ROOT/unisacc.com there is a real
+ *     copy of APE (not a link), then `git init` plus one private commit so the git inventory of
+ *     tests/tools-compile.cx works (v0.0.73 found rc 2 "git inventory failed" in a bare archive).
+ * (3) Batch set: sample = the 12 named batches of the v0.0.73 strict evidence plus 10 random
+ *     tools-compile shards (the seed is written to the evidence); product-qualification = every
+ *     id of tests/batch-domain-index.tsv in that domain; --ids replaces the set. --list prints
+ *     the set with its 55 s window number and runs nothing.
+ * (4) Every batch is actually run in the layout root by
+ *     `sh ./unisacc.com tools/affected.cx -- --ids ID --prepare-materials --run -j 1`
+ *     (affected -> tests/run-batch.cx, default material path, product = ROOT/unisacc.com),
+ *     outer limit 60 s per batch, at most --jobs (default 2) at once, launch waits (bounded
+ *     120 s) while load1 > 6. The BATCH_RUN line is kept verbatim. candidate= must equal the APE
+ *     sha256, else the batch is INVALID (evidence validity, not a product rejection). A batch
+ *     without a BATCH_RUN line (timeout, crash) is UNKNOWN and is rerun once after load1 < 3
+ *     (bounded wait 60 s). Nothing is cached and no earlier evidence is reused.
+ * (5) Evidence TSV to --out (default stdout): batch, domain, status, rc, candidate, ms, load1,
+ *     retries, note; then RAW rows with each BATCH_RUN line and one SUMMARY row. With
+ *     DEVSVC_SOCK set, each batch and the total emit a devsvc timing phase event (cmd=qualify).
+ * Exit 0 when every batch has a valid PASS/FAIL result, 1 when any is UNKNOWN or INVALID,
+ * 2 for usage or setup errors.
+ * Check: tools/check-dvqualify.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sys.net
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+#define MAXB 1024
+#define WINDOW_S 60
+
+typedef struct {
+    char id[96], domain[48], status[16], cand[72], load[16], note[256], raw[600];
+    int rc, retries; long ms;
+} Batch;
+static Batch bs[MAXB];
+static int nb;
+static char root[4096], lay[4096], ape[4096], sha[65], version[256], head[64], outlog[4200];
+static const char *sockp, *job_id;
+static char jobbuf[64];
+
+static const char *sample_ids[] = {"c-negative","pp-negative","pp-differential","pp-cli-targets",
+    "pp-cli-macros","pp-cli-includes","pp-header-locations","pp-targets-lines","c99-whitespace",
+    "unit-frontcache-budget","run-warm","cx-driver-cli",0};
+
+static int die(const char *a, const char *b) { fprintf(stderr, "QUALIFY_FAIL\t%s%s\n", a, b ? b : ""); return 2; }
+static double load1(void) {
+    unsigned char *b = 0; int64_t n = 0; double v = 99;
+    if (!sy_read_file("/proc/loadavg", &b, &n, 4096) && b) { char t[64]; long k = n < 63 ? n : 63; mm_copy(t, sizeof t, b, k); t[k] = 0; v = atof(t); }
+    free(b); return v;
+}
+static void wait_load(double limit, int secs, char *note, int cap) {
+    long end = sy_now_ms() + secs * 1000L; int waited = 0;
+    while (load1() > limit && sy_now_ms() < end) { sy_sleep_ms(2000); waited = 1; }
+    if (waited && note) { long n = strlen(note); cx_fmt(note + n, cap - n, "%sload_wait>%.0f", n ? ";" : "", limit); }
+}
+static int run(char **v, const char *cwd, int secs, char *out, int cap) {
+    np_result r = {0}; char why[300];
+    if (np_run(v, cwd, 0, secs, &r, why, sizeof why)) { fprintf(stderr, "QUALIFY_EXEC\t%s\t%s\n", v[0], why); return -1; }
+    if (out && cap > 0) { long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (k > 0) mm_copy(out, cap, r.out, k); out[k > 0 ? k : 0] = 0; }
+    if (r.rc) fprintf(stderr, "QUALIFY_STEP\t%s rc=%d\t%.*s\n", v[0], r.rc, (int)(r.errn > 300 ? 300 : r.errn), r.err ? r.err : "");
+    int rc = r.rc; np_free(&r); return rc;
+}
+static void field(const char *line, const char *key, char *dst, int cap) {
+    char k[40]; cx_fmt(k, sizeof k, "\t%s=", key); dst[0] = 0;
+    const char *p = strstr(line, k); if (!p) return; p += strlen(k);
+    long n = 0; while (p[n] && p[n] != '\t' && p[n] != '\n') n++;
+    if (n >= cap) n = cap - 1; mm_copy(dst, cap, p, n); dst[n] = 0;
+}
+static void add(const char *id) {
+    for (int i = 0; i < nb; i++) if (!strcmp(bs[i].id, id)) return;
+    if (nb < MAXB && strlen(id) < sizeof bs[0].id) { memset(&bs[nb], 0, sizeof bs[nb]); cx_fmt(bs[nb].id, sizeof bs[nb].id, "%s", id); cx_fmt(bs[nb].domain, sizeof bs[nb].domain, "-"); nb++; }
+}
+/* Walk a TSV under ROOT; call fn(col0, col1) for each data row. */
+static int each_row(const char *rel, void (*fn)(char *, char *, void *), void *ud) {
+    char p[4300]; unsigned char *b = 0; int64_t n = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel) || sy_read_file(p, &b, &n, 64L << 20) || !b) return 1;
+    char *s = (char *)b, *end = s + n;
+    while (s < end) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+        if (*s && *s != '#') { char *t = strchr(s, '\t'), *c1 = ""; if (t) { *t = 0; c1 = t + 1; char *t2 = strchr(c1, '\t'); if (t2) *t2 = 0; } fn(s, c1, ud); }
+        s = e + 1;
+    }
+    free(b); return 0;
+}
+static char shards[512][96]; static int nshard;
+static void take_shard(char *id, char *c1, void *ud) {
+    (void)c1; (void)ud; long n = strlen(id);
+    if (n > 14 && !strncmp(id, "tools-compile-", 14) && nshard < 512) { for (long i = 14; i < n; i++) if (id[i] < '0' || id[i] > '9') return; cx_fmt(shards[nshard++], 96, "%s", id); }
+}
+static void take_domain(char *id, char *c1, void *ud) { if (!strcmp(c1, (const char *)ud) && strcmp(id, "id")) add(id); }
+static void set_domain(char *id, char *c1, void *ud) {
+    (void)ud; for (int i = 0; i < nb; i++) if (!strcmp(bs[i].id, id)) cx_fmt(bs[i].domain, sizeof bs[i].domain, "%s", c1);
+}
+static void emit(const char *phase, long ms, int rc, const char *ld) {
+    if (!sockp || !*sockp) return;
+    char msg[600]; int n = snprintf(msg, sizeof msg, "emit\tphase\tcmd=qualify\tphase=%s\tms=%ld\tinput=%s\trc=%d\tload1=%s\tjob=%s\n", phase, ms, head[0] ? head : "unknown", rc, ld, job_id);
+    if (n <= 0 || n >= (int)sizeof msg) return;
+    int fd = sy_unix_connect(sockp, 250); if (fd < 0) return;
+    sy_send(fd, msg, n); char r[64]; sy_recv(fd, r, sizeof r); sy_close(fd);
+}
+
+/* Classify one finished attempt from its captured output. */
+static void classify(Batch *b, const char *path, int timed_out, int code) {
+    unsigned char *buf = 0; int64_t n = 0; char want[120], rundir[1024] = "";
+    b->raw[0] = 0; b->rc = code; b->cand[0] = 0;
+    cx_fmt(want, sizeof want, "BATCH_RUN\tid=%s\t", b->id);
+    if (!sy_read_file(path, &buf, &n, 16L << 20) && buf) {
+        char *s = (char *)buf, *end = s + n;
+        while (s < end) {
+            char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+            if (!strncmp(s, want, strlen(want))) cx_fmt(b->raw, sizeof b->raw, "%s", s);
+            if (!strncmp(s, "RUN_DIR\t", 8)) { char *t = strchr(s + 8, '\t'); long k = t ? t - (s + 8) : (long)strlen(s + 8); if (k < (long)sizeof rundir) { mm_copy(rundir, sizeof rundir, s + 8, k); rundir[k] = 0; } }
+            s = e + 1;
+        }
+    }
+    free(buf);
+    b->note[0] = 0;
+    if (!b->raw[0]) { cx_fmt(b->status, sizeof b->status, "UNKNOWN"); cx_fmt(b->note, sizeof b->note, timed_out ? "outer-timeout-60s" : "no-BATCH_RUN rc=%d", code); return; }
+    char st[16], rc[16]; field(b->raw, "status", st, sizeof st); field(b->raw, "rc", rc, sizeof rc); field(b->raw, "candidate", b->cand, sizeof b->cand);
+    b->rc = atoi(rc);
+    if (strcmp(b->cand, sha)) { cx_fmt(b->status, sizeof b->status, "INVALID"); cx_fmt(b->note, sizeof b->note, "candidate-mismatch expected=%s", sha); return; }
+    cx_fmt(b->status, sizeof b->status, "%s", st[0] ? st : "UNKNOWN");
+    if (rundir[0]) {   /* case counts the batch printed (TAG<TAB>pass=N<TAB>fail=M), kept as a note only */
+        char lp[1200]; unsigned char *lb = 0; int64_t ln = 0;
+        if (!cx_fmt(lp, sizeof lp, "%s/%s.log", rundir, b->id) && !sy_read_file(lp, &lb, &ln, 16L << 20) && lb) {
+            char *s = (char *)lb, *end = s + ln, pass[16] = "", fail[16] = "";
+            while (s < end) { char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+                char *t = strstr(s, "\tpass="); if (t && strstr(t, "\tfail=")) { field(t, "pass", pass, sizeof pass); field(t, "fail", fail, sizeof fail); }
+                s = e + 1; }
+            if (pass[0]) cx_fmt(b->note, sizeof b->note, "count=%s/%s", pass, fail);
+        }
+        free(lb);
+    }
+}
+
+typedef struct { sy_child_t c; int idx; long t0; int fd; } Slot;
+static char *argvs[MAXB][12];
+static int launch(Slot *s, int idx, int attempt) {
+    Batch *b = &bs[idx];
+    char path[4400]; cx_fmt(path, sizeof path, "%s/%s.%d.out", outlog, b->id, attempt);
+    int fd = sy_open_new(path, 0600); if (fd < 0) return 1;
+    char **v = argvs[idx]; int n = 0;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/affected.cx"; v[n++] = "--"; v[n++] = "--ids"; v[n++] = b->id;
+    v[n++] = "--prepare-materials"; v[n++] = "--run"; v[n++] = "-j"; v[n++] = "1"; v[n] = 0;
+    sy_spawn_t o; sy_spawn_init(&o); o.argv = v; o.cwd = lay; o.in_fd = SY_STDIO_NULL; o.out_fd = fd; o.err_fd = fd;
+    o.pgroup = -1; o.deadline_ms = WINDOW_S * 1000L;
+    cx_fmt(b->load, sizeof b->load, "%.2f", load1());
+    s->idx = idx; s->t0 = sy_now_ms(); s->fd = fd;
+    if (sy_proc_spawn(&o, &s->c)) { sy_close(fd); return 1; }
+    return 0;
+}
+/* Run the given indices, at most jobs at once. */
+static void run_set(int *idx, int count, int jobs, int attempt) {
+    Slot slot[16]; int busy[16] = {0}, next = 0, live = 0;
+    if (jobs > 16) jobs = 16;
+    while (next < count || live) {
+        for (int k = 0; k < jobs && next < count; k++) if (!busy[k]) {
+            char ln[64] = ""; wait_load(6.0, 120, ln, sizeof ln);
+            int i = idx[next++];
+            if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN"); cx_fmt(bs[i].note, sizeof bs[i].note, "spawn-failed"); continue; }
+            if (ln[0]) cx_fmt(bs[i].note, sizeof bs[i].note, "%s", ln);
+            busy[k] = 1; live++;
+        }
+        for (int k = 0; k < jobs; k++) if (busy[k]) {
+            sy_exit_t st; memset(&st, 0, sizeof st); Slot *s = &slot[k];
+            int r = sy_proc_try_wait(&s->c, &st), timed = 0;
+            if (r == 0 && sy_now_ms() - s->t0 >= WINDOW_S * 1000L) { sy_proc_kill(&s->c, 9); sy_proc_wait(&s->c, &st); timed = 1; r = 1; }
+            if (r == 0) continue;
+            sy_close(s->fd); busy[k] = 0; live--;
+            Batch *b = &bs[s->idx]; char keep[256]; cx_fmt(keep, sizeof keep, "%s", b->note);
+            b->ms = sy_now_ms() - s->t0;
+            char path[4400]; cx_fmt(path, sizeof path, "%s/%s.%d.out", outlog, b->id, attempt);
+            classify(b, path, timed || st.timed_out, r < 0 ? -1 : sy_exit_code(&st));
+            if (keep[0]) { long n = strlen(b->note); cx_fmt(b->note + n, sizeof b->note - n, "%s%s", n ? ";" : "", keep); }
+            char ph[140]; cx_fmt(ph, sizeof ph, "batch:%s", b->id);
+            emit(ph, b->ms, !strcmp(b->status, "PASS") ? 0 : 1, b->load);
+            fprintf(stderr, "QUALIFY_BATCH\t%s\t%s\tms=%ld\n", b->id, b->status, b->ms);
+        }
+        sy_sleep_ms(50);
+    }
+}
+
+static int build_layout(void) {
+    char tar[4400], out[256]; const char *td = sy_env("TMPDIR");
+    cx_fmt(lay, sizeof lay, "%s/unisacc-qualify-%.8s", td && *td ? td : "/tmp", sha);
+    cx_fmt(tar, sizeof tar, "%s.tar", lay);
+    cx_fmt(outlog, sizeof outlog, "%s.logs", lay);
+    char *rm[] = {"rm", "-rf", lay, tar, outlog, 0}; if (run(rm, 0, 60, 0, 0)) return die("cannot clear ", lay);
+    if (sy_mkdir(lay, 0700) || sy_mkdir(outlog, 0700)) return die("mkdir ", lay);
+    char *ar[] = {"git", "-C", root, "archive", "--format=tar", "-o", tar, "HEAD", 0}; if (run(ar, 0, 60, 0, 0)) return die("git archive ", root);
+    char *x[] = {"tar", "-xf", tar, "-C", lay, 0}; if (run(x, 0, 60, 0, 0)) return die("tar ", tar);
+    char *rt[] = {"rm", "-f", tar, 0}; run(rt, 0, 10, 0, 0);
+    char dst[4200]; cx_fmt(dst, sizeof dst, "%s/unisacc.com", lay);
+    char *cp[] = {"cp", "--", ape, dst, 0}; if (run(cp, 0, 30, 0, 0)) return die("copy APE ", dst);
+    sy_chmod(dst, 0755);
+    char *gi[] = {"git", "-C", lay, "init", "-q", 0}; if (run(gi, 0, 30, 0, 0)) return die("git init ", lay);
+    char *ga[] = {"git", "-C", lay, "add", "-A", ".", 0}; if (run(ga, 0, 60, 0, 0)) return die("git add (private layout) ", lay);
+    char *gc[] = {"git", "-C", lay, "-c", "user.name=devsvc-qualify", "-c", "user.email=qualify@localhost", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "-m", "devsvc qualify layout", 0};
+    if (run(gc, 0, 60, out, sizeof out)) return die("git commit (private layout) ", lay);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *set = "sample", *ids = 0, *outp = 0; int jobs = 2, list = 0; long seed = -1;
+    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0) return die("usage: devsvc qualify --candidate APE [--set sample|product-qualification] [--ids A,B] [--out FILE] [--jobs N] [--seed N] [--list]", 0);
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--candidate") && i + 1 < argc) { if (sy_realpath(argv[++i], ape, sizeof ape) < 0) return die("candidate not found: ", argv[i]); }
+        else if (!strcmp(argv[i], "--set") && i + 1 < argc) set = argv[++i];
+        else if (!strcmp(argv[i], "--ids") && i + 1 < argc) ids = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--jobs") && i + 1 < argc) { jobs = atoi(argv[++i]); if (jobs < 1 || jobs > 16) return die("--jobs must be 1..16", 0); }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--list")) list = 1;
+        else return die("unknown argument ", argv[i]);
+    }
+    if (strcmp(set, "sample") && strcmp(set, "product-qualification")) return die("--set must be sample or product-qualification: ", set);
+    if (seed < 0) seed = sy_wall_s() % 1000000;
+    /* (3) batch set */
+    if (ids) { char t[8192]; cx_fmt(t, sizeof t, "%s", ids); for (char *p = strtok(t, ","); p; p = strtok(0, ",")) add(p); }
+    else if (!strcmp(set, "sample")) {
+        for (int i = 0; sample_ids[i]; i++) add(sample_ids[i]);
+        if (each_row("tests/batches.tsv", take_shard, 0) || nshard < 10) return die("tools-compile shards not found in tests/batches.tsv", 0);
+        unsigned long x = (unsigned long)seed * 2654435761UL + 1;
+        for (int k = 0; k < 10; k++) {
+            int left = nshard - k; x = x * 6364136223846793005UL + 1442695040888963407UL;
+            int j = k + (int)((x >> 33) % (unsigned long)left);
+            char tmp[96]; mm_copy(tmp, 96, shards[k], 96); mm_copy(shards[k], 96, shards[j], 96); mm_copy(shards[j], 96, tmp, 96);
+        }
+        for (int a = 0; a < 10; a++) for (int c = a + 1; c < 10; c++) if (strcmp(shards[a], shards[c]) > 0) { char tmp[96]; mm_copy(tmp, 96, shards[a], 96); mm_copy(shards[a], 96, shards[c], 96); mm_copy(shards[c], 96, tmp, 96); }
+        for (int k = 0; k < 10; k++) add(shards[k]);
+    } else each_row("tests/batch-domain-index.tsv", take_domain, "product-qualification");
+    if (!nb) return die("empty batch set", 0);
+    each_row("tests/batch-domain-index.tsv", set_domain, 0);
+    if (list) {
+        for (int i = 0; i < nb; i++) printf("QUALIFY_LIST\t%s\t%s\twindow=%d\n", bs[i].id, bs[i].domain, i / jobs + 1);
+        printf("QUALIFY_LIST_SUMMARY\tset=%s\tbatches=%d\tjobs=%d\twindows=%d\twindow_s=55\tseed=%ld\n", ids ? "ids" : set, nb, jobs, (nb + jobs - 1) / jobs, seed);
+        return 0;
+    }
+    if (!ape[0]) return die("--candidate APE is required", 0);
+    /* (1) precheck */
+    long t0 = sy_now_ms();
+    sockp = sy_env("DEVSVC_SOCK"); cx_fmt(jobbuf, sizeof jobbuf, "qualify-%ld-%d", t0, sy_pid()); job_id = jobbuf;
+    { sy_stat_t st; if (sy_stat(ape, &st) || st.kind != 'f') return die("candidate is not a regular file: ", ape); }
+    { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(ape, &b, &n, 256L << 20) || !b || sy_sha256_hex(b, (long)n, sha)) return die("cannot hash ", ape); free(b); }
+    { char *v[] = {"sh", ape, "--version", 0}; char o[256]; if (run(v, 0, 30, o, sizeof o)) return die("candidate --version failed: ", ape);
+      long k = 0; while (o[k] && o[k] != '\n' && k < (long)sizeof version - 1) { version[k] = o[k]; k++; } version[k] = 0; if (!k) return die("candidate --version printed nothing", 0); }
+    { char *v[] = {"git", "-C", root, "rev-parse", "HEAD", 0}; char o[64]; if (run(v, 0, 10, o, sizeof o)) return die("git rev-parse HEAD", 0); cx_fmt(head, sizeof head, "%.40s", o); }
+    fprintf(stderr, "QUALIFY_PRECHECK\tsha256=%s\tversion=%s\tsource=%s\tbatches=%d\n", sha, version, head, nb);
+    /* (2) layout root */
+    long tl = sy_now_ms();
+    if (build_layout()) return 2;
+    long layout_ms = sy_now_ms() - tl;
+    emit("layout", layout_ms, 0, "-");
+    fprintf(stderr, "QUALIFY_LAYOUT\t%s\tms=%ld\n", lay, layout_ms);
+    /* (4) run, then one low-load rerun of UNKNOWN */
+    static int idx[MAXB]; for (int i = 0; i < nb; i++) idx[i] = i;
+    run_set(idx, nb, jobs, 0);
+    int nu = 0; for (int i = 0; i < nb; i++) if (!strcmp(bs[i].status, "UNKNOWN")) idx[nu++] = i;
+    if (nu) {
+        char ln[64] = ""; wait_load(3.0, 60, ln, sizeof ln);
+        for (int i = 0; i < nu; i++) bs[idx[i]].retries = 1;
+        run_set(idx, nu, 1, 1);
+        for (int i = 0; i < nu; i++) { Batch *b = &bs[idx[i]]; long n = strlen(b->note); cx_fmt(b->note + n, sizeof b->note - n, "%sretried", n ? ";" : ""); }
+    }
+    /* (5) evidence */
+    long total = sy_now_ms() - t0;
+    int cp = 0, cf = 0, cu = 0, ci = 0;
+    for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
+    FILE *f = outp ? fopen(outp, "w") : stdout;
+    if (!f) return die("cannot write ", outp);
+    fprintf(f, "# devsvc qualify: strict evidence, every batch actually run in an independent local layout root, nothing cached or reused.\n");
+    fprintf(f, "# source=%s layout=%s set=%s seed=%ld jobs=%d window_s=55 outer_s=60\n", head, lay, ids ? "ids" : set, seed, jobs);
+    fprintf(f, "# per batch: sh ./unisacc.com tools/affected.cx -- --ids ID --prepare-materials --run -j 1 (cwd=layout, layout/unisacc.com = candidate APE copy)\n");
+    fprintf(f, "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n");
+    for (int i = 0; i < nb; i++) { Batch *b = &bs[i];
+        fprintf(f, "%s\t%s\t%s\t%d\t%s\t%ld\t%s\t%d\t%s\n", b->id, b->domain, b->status, b->rc, b->cand[0] ? b->cand : "-", b->ms, b->load[0] ? b->load : "-", b->retries, b->note[0] ? b->note : "-"); }
+    for (int i = 0; i < nb; i++) if (bs[i].raw[0]) fprintf(f, "RAW\t%s\n", bs[i].raw);
+    fprintf(f, "SUMMARY\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld\tape_sha256=%s\tversion=%s\n", nb, cp, cf, cu, ci, total, layout_ms, sha, version);
+    if (outp) fclose(f);
+    emit("total", total, (cu || ci) ? 1 : 0, "-");
+    fprintf(stderr, "QUALIFY_DONE\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tout=%s\n", nb, cp, cf, cu, ci, total, outp ? outp : "-");
+    return (cu || ci) ? 1 : 0;
+}
