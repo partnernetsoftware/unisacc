@@ -8,7 +8,28 @@ static void ck(int ok, const char *lab) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", lab);
     if (!ok) failed++;
 }
-int main(void) {
+/* 29^2 times the sum of the three channel variances; identical scale for both frames. */
+static long strip_variance(const char *dom) {
+    const char *p = dom ? strstr(dom, "<pre id=\"hud\">") : 0;
+    long sum[3] = {0}, squares = 0;
+    int i;
+    p = p ? strstr(p, "\"topRGB\":[") : 0;
+    if (!p) return -1;
+    p += 10;
+    for (i = 0; i < 87; i++) {
+        int value = 0;
+        if (*p < '0' || *p > '9') return -1;
+        while (*p >= '0' && *p <= '9') {
+            value = value * 10 + *p++ - '0';
+            if (value > 255) return -1;
+        }
+        if (*p++ != (i == 86 ? ']' : ',')) return -1;
+        sum[i % 3] += value;
+        squares += value * value;
+    }
+    return 29 * squares - sum[0]*sum[0] - sum[1]*sum[1] - sum[2]*sum[2];
+}
+int main(int argc, char **argv) {
     char cwd[512], url[800], line[256], ids[16][32];
     char spec[4096], hex[65], want[80];
     int xmin[16], ymin[16], md[16], mstd[16], er[16], nels = 0, i, n, rc, sl = 0;
@@ -81,7 +102,12 @@ int main(void) {
     av[6] = "--user-data-dir=/tmp/uxe-s0-exist";
     av[7] = "--virtual-time-budget=20000";
     av[8] = "--dump-dom";
-    av[9] = url;
+    char test_url[840], ref_url[840];
+    int striped = argc == 2 && !strcmp(argv[1], "--striped-sky");
+    if (argc != 1 && !striped) return 2;
+    int len = snprintf(test_url, sizeof test_url, "%s%s", url, striped ? "#striped-sky" : "");
+    if (len < 0 || len >= (int)sizeof test_url) return 2;
+    av[9] = test_url;
     av[10] = 0;
     rc = cx_runv_timeout(av, 25, &out, &on);
     if (rc == 127) { if (out) free(out); printf("S0_EXIST_UNMEASURED\n"); return 2; }
@@ -121,6 +147,16 @@ int main(void) {
         ck(fill == 1, "frame-fill");
         printf("EL\tframe-fill\tgot=%d\tmin=1\n", fill);
     }
+    long actual = strip_variance(out);
+    if (out) free(out);
+    len = snprintf(ref_url, sizeof ref_url, "%s%s/ujs/plans/demo-v2/look-dev/s0-look-sample.html#sky-strip", pre, cwd);
+    if (len < 0 || len >= (int)sizeof ref_url) return 2;
+    av[9] = ref_url;
+    out = 0; on = 0;
+    rc = cx_runv_timeout(av, 25, &out, &on);
+    long reference = strip_variance(out);
+    ck(rc == 0 && actual >= 0 && reference > 0 && 2*actual < 3*reference, "top-strip");
+    printf("TOP_STRIP\tvariance_scaled=%ld\treference_scaled=%ld\n", actual, reference);
     if (out) free(out);
 
     {
