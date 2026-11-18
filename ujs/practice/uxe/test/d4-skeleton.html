@@ -15,6 +15,7 @@ import { archMeshes } from "./d3-arch.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
 const walkProbe=["walk","sliding-feet","frozen-body"].includes(mode);
+const finish=["finish","no-texture","single-smoke","sealed-arcade","thin-woodland"].includes(mode);
 const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map();
 const bodies=[];
 const paint={
@@ -23,7 +24,8 @@ const paint={
   red:[174,50,42], glass:[85,133,149], smoke:[236,239,234], grass:[130,164,91],
   darkgrass:[83,131,74], farhill:[95,143,118], grove:[48,104,77],
   gearGold:[218,161,59], clockFace:[180,207,182], lift:[152,78,96],
-  groundMark:[194,92,45]
+  groundMark:[194,92,45], arcade:[207,171,120], alcove:[54,81,86],
+  pineDark:[39,87,48], pineMid:[59,115,56], pineLight:[82,135,66], trunk:[96,69,39]
 };
 function mesh(positions,normals,uvs) {
   const id=allMeshes().length+extraMeshes.length;
@@ -50,7 +52,7 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if(!groups.has(key)) groups.set(key,{color,id,items:[]});
   const item=[x,y,z,size,yaw,pitch,roll];
   groups.get(key).items.push(item);
-  if (!["joint","link","foot","darkgrass","farhill","grove","groundMark"].includes(color) && id!==MESH_PLANE) bodies.push(item);
+  if (!["joint","link","foot","darkgrass","farhill","grove","groundMark","pineDark","pineMid","pineLight","trunk"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
 function block(color,x,y,z,w,h,d,roll=0) { return add(color,box(w,h,d),x,y,z,1,0,0,roll); }
@@ -92,10 +94,18 @@ block("wood",0,6.23,0,11,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
 buildTown(await townLayout(),{block,add,round},mode);
-const arcade=archMeshes([0,.28,.28,.10,-.10,.45,.73,0,10],"");
-for(const part of arcade) {
-  const segment=mesh(part.positions,part.normals,part.uvs);
-  for(let i=0;i<8;i++) add("white",segment,-4.2+i*.99,6.37,3.20);
+const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
+if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
+const arcadeMeshes=new Map();
+for(const row of (await arcadeSpec.text()).trim().split("\n").slice(1)) {
+  const dims=row.split("\t").map(value=>Number(value)/1000);
+  if(dims.length!==6 || !dims.every(Number.isFinite)) throw new Error("拱廊规格格式错误");
+  const [x,y,z,spring,radius,deck]=dims,key=[spring,radius,deck].join(",");
+  if(!arcadeMeshes.has(key)) arcadeMeshes.set(key,
+    archMeshes([0,spring,radius,0,-.26,.54,deck,0,16],mode==="sealed-arcade"?"sealed":"")
+      .map(({positions,normals,uvs})=>mesh(positions,normals,uvs)));
+  for(const segment of arcadeMeshes.get(key)) add("arcade",segment,x,y,z);
+  block("alcove",x,y+.48,z-.32,.91,.90,.10);
 }
 for(let i=0;i<8;i++) block(i%2?"white":"red",3.62,6.58+i*.43,.02,1.02,.43,1.02);
 block("glass",3.62,10.12,.02,1.05,.46,1.05);
@@ -118,15 +128,26 @@ for(let i=0;i<12;i++) {
     add("grove",round,-49+i*9+j*.7,.35+(j%4)*.18,-39+(i%2)*4+spread*3,.64+(j%3)*.25);
   }
 }
+if(mode!=="thin-woodland") {
+  const bough=leafMesh(.87), canopy=mesh(bough.positions,bough.normals);
+  for(const side of [-1,1]) for(let i=0;i<82;i++) {
+    const x=side*(10.9+(i*37%123)/11), z=5-(i*47%237)/11;
+    const size=.43+(i*31%29)/45,height=size*(2.3+i%3*.23);
+    block("trunk",x,height*.35,z,size*.18,height*.7,size*.18);
+    add("pineDark",canopy,x,height*.78,z,size);
+    add("pineMid",canopy,x-.18*size,height*1.06,z+.12*size,.76*size);
+    add("pineLight",canopy,x+.14*size,height*1.26,z,.52*size);
+  }
+}
 
 const bindings=new Map();
 for(const [key,{color,id,items}] of groups) {
   const cloud=scene.instances(key,items.length,paint[color].map(c=>c/255));
   cloud.meshId=id; cloud.metalness=0; cloud.roughness=.65; cloud.toonLevels=3;
-  cloud.outlineExcluded=["grass","darkgrass","farhill","grove","smoke"].includes(color);
-  if(mode!=="no-texture" && ["white","wood","link"].includes(color)) {
+  cloud.outlineExcluded=["grass","darkgrass","farhill","grove","smoke","pineDark","pineMid","pineLight","trunk"].includes(color);
+  if(mode!=="no-texture" && ["white","arcade","wood","link"].includes(color)) {
     cloud.mapId=7;
-    cloud.surfaceMap=color==="white"?"masonry":color==="wood"?"wood-grain":"metal-stain";
+    cloud.surfaceMap=color==="white" || color==="arcade"?"masonry":color==="wood"?"wood-grain":"metal-stain";
   }
   items.forEach((values,i)=>{
     cloud.set(i,...values);
@@ -138,7 +159,7 @@ scene.fog.density=0;
 scene.ambient={color:[1,1,1],intensity:.84};
 scene.lights=[{dir:[-.45,.79,.44],color:[1,1,1],intensity:.25}];
 scene.outlineWidth=1;
-const view=(!mode || ["framing","finish","no-texture","single-smoke"].includes(mode))?await closeCamera():null;
+const view=(!mode || mode==="framing" || finish)?await closeCamera():null;
 const camera=new PerspectiveCamera(view?.fovy ?? 2*Math.atan(.625),.1,150);
 camera.setEye(...(view?.eye ?? [14.4,12,19.2]));
 camera.setTarget(...(view?.target ?? [0,5,0]));
@@ -182,7 +203,6 @@ if(!walkProbe && params.has("animate")) {
 else if(!walkProbe) renderer.render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
 const density=["density","small-town","no-gear","framing","wide-camera"].includes(mode);
-const finish=["finish","no-texture","single-smoke"].includes(mode);
 function densityPixels() {
   const pixels=new Uint8Array(1280*720*4), result=[];
   gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
@@ -198,6 +218,11 @@ function densityPixels() {
       const at=4*((719-yy)*1280+xx);
       result.push(pixels.subarray(at,at+3).join(","));
     }
+  }
+  if(finish) for(const pair of (params.get("arcade")||"").split(";").filter(Boolean)) {
+    const [x,y]=pair.split(",").map(Number);
+    const at=4*((719-y)*1280+x);
+    result.push(pixels.subarray(at,at+3).join(","));
   }
   return result.join(";");
 }
