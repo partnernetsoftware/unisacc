@@ -1082,14 +1082,31 @@ static int cxf_skcast(int j) {
     return j;
 }
 static int cxf_e1same(int a, int b, int n) { int i; i = 0; while (i < n) { if (cxm_src[a + i] != cxm_src[b + i]) return 0; i = i + 1; } return 1; }
+static int cxf_e1attr(int i) { return cxf_tis(i, "__attribute__") || cxf_tis(i, "__asm__") || cxf_tis(i, "__asm") || cxf_tis(i, "asm"); }
+/* the ) of the parameter list before a body whose last token is e: trailing __attribute__((...)) and __asm__(...) are
+   skipped; -1 when something was skipped and no parameter list with a name is left (refused by name, not misnamed) */
+static int cxf_e1tail(int e) {
+    int s; s = 0;
+    while (cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_e1attr(cxf_mt[e] - 1)) { e = cxf_mt[e] - 2; s = 1; }
+    if (s && !(cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_tid(cxf_mt[e] - 1))) return -1;
+    return e;
+}
+/* *NAME = ALLOC writes through NAME (an output parameter), it does not make NAME an owned name */
+static int cxf_e1deref(int j) {
+    return cxf_tp(j - 1, '*') && (j < 2 || cxf_tp(j - 2, ';') || cxf_tp(j - 2, '{') || cxf_tp(j - 2, '}') || cxf_tp(j - 2, ')') || cxf_tis(j - 2, "else"));
+}
 static int cxf_e1(int u) {
-    int k; int d; int nm; int rb; int b; int j; int st; int no; int ov; int x; int y; int hl; int r;
+    int k; int d; int nm; int rb; int b; int j; int st; int no; int ov; int x; int y; int hl; int r; int e;
     int oo[64]; int on[64];
     d = 0; k = 0;
     while (k < cxf_nt) {
         if (cxf_tp(k, '{')) {
-            if (d == 0 && cxf_tp(k - 1, ')') && cxf_mt[k - 1] > 0 && cxf_tid(cxf_mt[k - 1] - 1) && cxf_mt[k] > k) {
-                nm = cxf_mt[k - 1] - 1; rb = cxf_mt[k];
+            e = cxf_e1tail(k - 1);
+            if (d == 0 && e < 0 && cxf_mt[k] > k) {
+                cxm_start(u, cxf_ln[k]); cxm_m("unisa safe: cannot name the function before this body for the owns check"); return cxm_fail();
+            }
+            if (d == 0 && cxf_tp(e, ')') && cxf_mt[e] > 0 && cxf_tid(cxf_mt[e] - 1) && cxf_mt[k] > k) {
+                nm = cxf_mt[e] - 1; rb = cxf_mt[k];
                 st = 0; b = nm - 1;
                 while (b >= 0 && !cxf_tp(b, ';') && !cxf_tp(b, '}') && !cxf_tp(b, '{')) { if (cxf_tis(b, "static")) st = 1; b = b - 1; }
                 r = 0; while (r < cxm_nown) { if (cxm_eqn(cxm_src + cxf_o[nm], cxf_n[nm], cxm_own[r])) st = 1; r = r + 1; }
@@ -1097,7 +1114,7 @@ static int cxf_e1(int u) {
                 no = 0; ov = 0; hl = 0;
                 j = k + 1;
                 while (!st && j < rb) {
-                    if (cxf_tid(j) && cxf_tp(j + 1, '=') && !cxf_tp(j + 2, '=') && !cxf_tp(j - 1, '.') && !cxf_tp(j - 1, '>')
+                    if (cxf_tid(j) && cxf_tp(j + 1, '=') && !cxf_tp(j + 2, '=') && !cxf_tp(j - 1, '.') && !cxf_tp(j - 1, '>') && !cxf_e1deref(j)
                         && cxf_isalloc(cxf_skcast(j + 2))) {
                         y = 0; x = 0; while (x < no) { if (on[x] == cxf_n[j] && cxf_e1same(oo[x], cxf_o[j], on[x])) y = 1; x = x + 1; }
                         if (!y) { if (no >= 64) ov = 1; else { oo[no] = cxf_o[j]; on[no] = cxf_n[j]; no = no + 1; } }
