@@ -1,0 +1,492 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D3 石桥几何小样</title>
+<style>
+html,body {margin:0;background:#58a0da} canvas {display:block} output {display:none}
+.walk canvas {position:fixed;inset:0;width:100dvw;height:100dvh;object-fit:cover;touch-action:none}
+aside {position:fixed;bottom:18px;left:18px;padding:8px 11px;background:#1a2b33d9;color:#fff4dc;font:14px system-ui}
+</style>
+<canvas id="frame" width="1280" height="720"></canvas>
+<aside hidden>W / S 或滚轮沿桥前后移动，拖动看景，触屏按住前进</aside>
+<output id="pixels"></output>
+<script type="module">
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { BOX_MESH, MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } from "../meshes.js";
+import { archMeshes, loadBays } from "./d3-arch.js";
+import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
+import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
+import { paintedCanopy, paintedLeafMesh, tuftMesh, hangingVines } from "./d3-painted.js";
+import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
+
+const params = new URLSearchParams(location.search);
+const release=!location.pathname.endsWith("/d3-bridge-audit.html");
+const painted=true;
+const finish=release || painted || params.has("finish-u2c");
+const enlarged=params.has("scale-u2b") || finish;
+const paper=params.has("paper-u3") || enlarged;
+const dense=params.has("dense-u2") || paper;
+const play=(release && !params.has("v1-probe")) || params.get("walk")!=="0" || params.has("walk-check");
+const style=play || dense?"study":params.get("style");
+const mode = params.get("mode");
+const composition = style === "study" ||
+  ["composition","short-composition","rails","no-rails","palette","old-palette","leaf-shape","angular-leaf","leaf-light","no-leaf-light"].includes(mode);
+const study = composition || ["canopy","thin-canopy"].includes(mode);
+const layout = composition ? await loadComposition() : null;
+const palette = style === "study" ||
+  ["palette","leaf-shape","angular-leaf","leaf-light","no-leaf-light"].includes(mode) ? await loadPalette() : null;
+const cutout = style==="study" || ["leaf-shape","leaf-light","no-leaf-light"].includes(mode);
+const warm = style==="study" || mode==="leaf-light";
+const textured = study || style === "masonry" ||
+  ["crowns","sparse","ground","flat-ground"].includes(mode);
+const scene = new Scene();
+const groups = new Map();
+const wind=[];
+const colors = {
+  stone:[211,184,140], barrel:[119,113,106], plaster:[246,222,183],
+  leaf:[50,110,62], grass:[140,160,73], roof:[72,91,110],
+  abutment:[151,129,108], timber:[95,65,44], window:[244,160,67],
+  leafLight:[97,148,70], leafDark:[40,90,67],
+  meadowShade:[70,115,45], meadowLight:[160,181,82],
+  cliffShade:[94,108,125], cliffLight:[132,145,158], roofPale:[91,109,125], ridge:[106,135,151],
+  iron:[33,40,52], vine:[59,86,46],
+  wallOchre:[191,130,78], wallCream:[237,197,139], roofSlate:[54,73,91], roofRidge:[111,128,136],
+  leafInk:[38,77,60], leafPaint:[76,121,67], leafSun:[139,161,79], vineMoss:[85,116,57]
+};
+if (palette) {
+  for (const material of ["stone","barrel","leafLight","leafDark","leaf.light"]) colors[material]=palette[material];
+  colors.leaf=palette.leafDark.map((v,i)=>.55*v+.45*palette.leafLight[i]);
+}
+if(finish) {
+  colors.leafDark=[46,89,61];
+  colors.leafLight=[109,148,77];
+  colors.leaf=[71,119,66];
+}
+function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
+  const key=material+"-"+mesh;
+  if (!groups.has(key)) groups.set(key,{material,mesh,items:[]});
+  groups.get(key).items.push([x,y,z,size,yaw,pitch,roll]);
+}
+
+const extraMeshes=[];
+function addMesh(mesh) {
+  const id=allMeshes().length+extraMeshes.length;
+  extraMeshes.push(mesh);
+  return id;
+}
+const template=await loadBays();
+const [archCount,bayWidth,depthShift,houseX,houseWidth,houseHeight,houseDepth]=enlarged?await loadScaleStudy("d3"):[];
+const recession=x=>enlarged?depthShift*x/1000:0;
+const bays=enlarged?Array.from({length:params.has("short-u2b")?3:archCount},(_,i)=>{
+  const bay=template[0].slice();
+  bay[0]=(i-(archCount-1)/2)*bayWidth/1000;
+  bay[5]=bayWidth/2000;
+  if(finish) bay[4]-=painted && !params.has("v1-thin-bridge")?6.6:4.4;
+  return bay;
+}):template;
+const arches=[];
+const taller=layout && mode!=="short-composition";
+for(const bay of bays) {
+  const first=allMeshes().length+extraMeshes.length;
+  const meshes=archMeshes(bay,mode);
+  extraMeshes.push(...(taller?meshes.map(mesh=>stretchBridge(mesh,layout.scale,bay[7])):meshes));
+  if(enlarged) for(const mesh of meshes) for(let i=0;i<mesh.positions.length;i+=3) {
+    mesh.positions[i+2]+=recession(mesh.positions[i]);
+    mesh.normals[i]-=depthShift/1000*mesh.normals[i+2];
+  }
+  if(painted) for(const mesh of meshes) for(let i=0;i<mesh.uvs.length;i++) mesh.uvs[i]*=.60;
+  arches.push(first);
+  instance("stone",first,0,0,0,1);
+  instance("barrel",first+1,0,0,0,1);
+}
+let houseBounds;
+if (taller) {
+  const [, , , , , , deck,bottom] = bays[0];
+  const bridgeTop=bottom+(deck-bottom)*layout.scale;
+  if(enlarged) {
+    const x=houseX/1000, width=houseWidth/(params.has("small-u2b")?2200:1000);
+    const height=houseHeight/1000, depth=houseDepth/1000, shift=recession(-20);
+    const finishHouse=finish && !params.has("bare-u2c-house");
+    houseBounds=buildClifftop({houseX:x,width,height,depth,upperFloor:true,finishHouse,roundedHills:finish},bridgeTop,addMesh,
+      (material,id,px,y,z,...rest)=>instance(finish && !finishHouse?"wallCream":material,id,px,y,z+shift,...rest))
+      .map(([px,y,z])=>[px,y,z+shift]);
+    bridgeLines(bridgeTop,addMesh,instance,true,archCount*bayWidth/1000,recession,bays[0][4]+.15);
+    if(painted && !params.has("v1-no-vines")) hangingVines(bridgeTop,recession,addMesh,instance);
+    const mountain=finish?addMesh(leafMesh(.40)):MESH_OCTA;
+    for(let i=0;i<12;i++) instance("ridge",mountain,-55+i*9,-4+i%3,-43-i%2*13,9+i%4*2,i*.42);
+  } else {
+    buildClifftop(layout,bridgeTop,addMesh,instance);
+    bridgeLines(bridgeTop,addMesh,instance,mode!=="no-rails");
+  }
+  if(play) {
+    const positions=BOX_MESH.map((v,i)=>v*[5.4,.40,2.7][i%3]);
+    const landing=addMesh({positions,vCount:positions.length/3});
+    instance("stone",landing,14.65,bridgeTop-.22,1.1+recession(14.65),1);
+    instance("stone",landing,-13.15,bridgeTop-.22,3.7+recession(-13.15),1);
+  }
+} else {
+for(let y=-1;y<=5;y+=2) for(let x=-17;x<=-13;x+=2) {
+  for(let z=-.5;z<=1.5;z+=2) instance("abutment",MESH_BOX,x,y,z,2);
+}
+for(let x=-15.5;x<=-12.5;x++) for(let z=-2.5;z<=.5;z++) {
+  for(let y=6.5;y<=8.5;y++) instance("plaster",MESH_BOX,x,y,z,1);
+}
+for (const side of [-1,1]) {
+  instance("roof",MESH_PLANE,-14+side*1.18,9.72,-1,3.4,0,0,-side*Math.PI/4);
+}
+for(let x=-15.75;x<-12;x+=.5) for(let y=9.25;y<11-Math.abs(x+14);y+=.5) {
+  instance("plaster",MESH_BOX,x,y,.45,.5);
+}
+for(let y=10;y<=11.5;y+=.5) instance("barrel",MESH_BOX,-14.7,y,-1.6,.5);
+for(const x of [-15.6,-12.4]) {
+  for(let y=6.25;y<9;y+=.5) instance("timber",MESH_BOX,x,y,1.04,.5);
+}
+for(const x of [-15,-13]) instance("window",MESH_BOX,x,7.8,1.08,.54);
+}
+instance("grass",MESH_PLANE,0,-2.01,0,110);
+if (textured && mode !== "flat-ground") {
+  const blades = allMeshes().length + extraMeshes.length;
+  const boulder = blades+1;
+  const bladesMesh=painted?tuftMesh():grassMesh();
+  if(finish && !painted) for(let i=1;i<bladesMesh.positions.length;i+=3) bladesMesh.positions[i]*=.55;
+  extraMeshes.push(bladesMesh,leafMesh(.59));
+  let seed=713;
+  const random=()=>{
+    seed=( Math.imul(seed,1664525)+1013904223)>>>0;
+    return seed/4294967296;
+  };
+  for(let row=0;row<23;row++) for(let col=0;col<54;col++) {
+    const x = -22 + .74*(col+random()), z = 2.8+.52*(row+random());
+    instance(random()<.66?"meadowShade":"meadowLight",blades,x,-2.008,z,
+      .7+random()*.75,random()*Math.PI*2);
+  }
+  for(let i=0;i<36;i++) {
+    const x=-17.7+random()*5.25, y=-1.8+random()*5.6;
+    instance(i%3===0?"cliffLight":"cliffShade",boulder,x,y,2.55+random()*.56,
+      .68+random()*.80,random()*Math.PI,random()*.5);
+  }
+  if(dense && !params.has("thin-u2-plant")) for(let row=0;row<12;row++) for(let col=0;col<46;col++) {
+    const x=-23+(col+random())*.93,z=13.4+(row+random())*.51;
+    instance(row%4===0?"meadowLight":"meadowShade",blades,x,-2.008,z,
+      .70+random()*.72,random()*Math.PI*2);
+  }
+}
+if (mode!=="bare") {
+  const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
+  const ellipsoid = allMeshes().length + extraMeshes.length;
+  const lobes = textured && !painted ? await crownLobes() : [];
+  if(painted) for(let seed=0;seed<3;seed++) extraMeshes.push(paintedLeafMesh(seed));
+  else if (textured) extraMeshes.push(cutout ? cutoutLeafMesh() : study ? foliagePatchMesh() : leafMesh());
+  if (study) {
+    trees.push([-12.1,.35,6.1,2.65],[-6.6,-.55,6.5,2.4],[-.6,-.40,6,2.2],
+      [3.6,-.62,7.3,2.4],[7.2,.18,8.2,2.65],layout?[14.8,2.25,8,3.6]:[12,3.2,8,4.3]);
+  }
+  if(play) {
+    trees.push([-15.4,12.8,-1.5,3.2],[-8,10.8,-13,2.9],[-1.6,10.3,-10,2.7],[6.8,10.9,-6,2.6]);
+    for(let i=0;i<7;i++) instance("ridge",MESH_OCTA,-27+i*8,-2,-22-i%2*4,8+i%3*2,i*.3);
+  }
+  if(dense && !params.has("thin-u2-plant")) {
+    for(let i=0;i<17;i++) {
+      const x=-27+i*3.15+Math.sin(i*11)*1.0,z=i%3===0?7.8:i%3===1?3.3:-5.7;
+      const y=i%3===0?.4:i%3===1?1.8:4.2;
+      trees.push([x,y,z,1.0+(i*13%7)*.19]);
+    }
+  }
+  for(const [x,y,z,r] of trees) {
+    if(painted) {
+      paintedCanopy(x,y,z,r,(material,variant,...pose)=>
+        instance(params.has("v1-flat-leaves")?"leafPaint":material,ellipsoid+variant,...pose));
+    } else if (study) {
+      canopyPatches(lobes, mode==="thin-canopy"?9:48,x,y,z,r,warm,
+        (material,px,py,pz,size,yaw,pitch,roll)=>instance(material,ellipsoid,px,py,pz,size,yaw,pitch,roll));
+    } else if (textured) {
+      for (const lobe of (mode === "sparse" ? lobes.slice(0,1) : lobes)) {
+        instance(lobe.material,ellipsoid,x+lobe.x*r,y+lobe.y*r,z+lobe.z*r,r*lobe.r);
+      }
+    } else {
+      instance("leaf",MESH_OCTA,x,y,z,r);
+      instance("leafLight",MESH_OCTA,x-.55*r,y+.3*r,z-.35*r,.75*r);
+      instance("leafDark",MESH_OCTA,x+.58*r,y-.25*r,z-.15*r,.82*r);
+    }
+    for(let trunkY=-1.75;trunkY<y;trunkY+=.5) instance("timber",MESH_BOX,x,trunkY,z,.5);
+  }
+}
+for(const [name,{material,mesh,items}] of groups) {
+  const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
+  cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
+  cloud.outlineExcluded = /^(leaf|meadow|grass|ridge)/.test(material);
+  if (textured && (material === "stone" || material === "barrel" ||
+      material === "grass" || /^(leaf|meadow|cliff)/.test(material))) {
+    cloud.surfaceMap = material === "stone" || material === "barrel" ? "masonry" : "wash";
+    cloud.mapId = 1;
+    if (cutout && material.startsWith("leaf") && !painted) {
+      cloud.surfaceMap = "leaf-cutout";
+      cloud.mapId = 3;
+    }
+    if (material !== "grass") cloud.toonLevels = study && material.startsWith("leaf") ? 3 : 4;
+  }
+  if(painted && /^(leafInk|leafPaint|leafSun)$/.test(material)) {
+    cloud.surfaceMap=null;
+    cloud.mapId=0;
+    cloud.toonLevels=0;
+    cloud.emissive=colors[material].map(c=>c/255*.17);
+  }
+  items.forEach((fields,i)=>cloud.set(i,...fields));
+  if(play && /^(leaf|meadow)/.test(material)) wind.push({cloud,items,leaves:material.startsWith("leaf")});
+}
+scene.clearColor=[88/255,160/255,218/255,1];
+scene.ambient={color:[1,1,1],intensity:.82};
+scene.lights=[{dir:[-.4,.85,.45],color:[1,1,1],intensity:.30}];
+scene.fog.density=0;
+if(paper && !params.has("no-u3-paper")) scene.paper=.38;
+if(params.has("render-u1") || dense) {
+  scene.ambient.intensity=.58;
+  scene.lights[0].intensity=.83;
+  scene.lights[0].color=[1,.94,.83];
+  if(!params.has("no-u1-shadow")) scene.shadows={center:[0,3,0],extent:28,size:1024,strength:.86};
+  if(!params.has("no-u1-grade")) scene.output={exposure:1.12};
+  if(!params.has("no-u1-fog")) scene.fog={density:0,start:13,end:65,color:[.62,.76,.82]};
+}
+if(finish) {
+  scene.fog={density:0,start:30,end:109,color:[.60,.74,.81]};
+  scene.shadows={center:[-11,6,-3],extent:46,size:1024,strength:.80};
+  scene.ambient.intensity=.70;
+  scene.paper=.24;
+}
+const camera=new PerspectiveCamera(2*Math.atan(9/16),.1,150);
+camera.setEye(10,1,19);
+camera.setTarget(10-24/41,1+9/41,19-32/41);
+if(layout) {
+  const [x,y,z]=layout.eye;
+  camera.setEye(x,y,z);
+  camera.setTarget(x-60/169,y+5/13,z-144/169);
+  scene.outlineWidth = 1;
+}
+if(enlarged) {
+  camera.setEye(15,4,29);
+  camera.setTarget(3,9,-5);
+}
+const canvas=document.querySelector("canvas");
+const textures = [];
+async function loadTexture(file,id,w,h,filter=0) {
+  const reply = await fetch(new URL(file, import.meta.url));
+  if (!reply.ok) throw new Error("纹理读取失败: " + file);
+  const rgba = new Uint8Array(await reply.arrayBuffer());
+  if (rgba.length !== w*h*4) throw new Error("纹理长度错误: " + file);
+  textures.push({id,w,h,rgba,filter});
+  return rgba;
+}
+if (textured) {
+  if(dense && !params.has("plain-u2-bricks")) await loadTexture("d3-detail.rgba",1,128,128,1);
+  else await loadTexture("d3-masonry.rgba",1,64,64);
+  if (cutout) await loadTexture("d3-leaf.rgba",3,64,64,1);
+  const shift = Number(params.get("shift"));
+  if (Number.isFinite(shift) && Math.abs(shift) <= 2) {
+    camera.eye[0] += shift;
+    camera.target[0] += shift;
+  }
+}
+if ((textured || ["sky","cloud-volume","flat-cloud","cloud-edge","hard-cloud-edge"].includes(mode)) && mode !== "cloudless") {
+  const layered = style==="study" || ["cloud-volume","cloud-edge","hard-cloud-edge"].includes(mode);
+  const soft = style==="study" || mode==="cloud-edge";
+  const skyPixels=await loadTexture(soft?"d3-cloud-soft.rgba":layered?"d3-cloud-volume.rgba":"d3-sky.rgba",2,160,90,1);
+  if (palette) tintSky(skyPixels,160,90,palette);
+  const backdrop = new Scene().instances("sky",1);
+  backdrop.meshId = MESH_POINTS;
+  backdrop.screenSpace = 1;
+  backdrop.alphaMode = 1;
+  backdrop.mapId = 2;
+  backdrop.scaleY = new Float32Array([720]);
+  backdrop.set(0,640,360,0,1280);
+  scene.backdrop = backdrop;
+}
+const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes});
+const gl=canvas.getContext("webgl");
+const result=document.querySelector("output");
+if(play) {
+  const reply=await fetch(new URL("d3-walk-audit.tsv",import.meta.url));
+  if(!reply.ok) throw new Error("石桥路线读取失败");
+  const route=(await reply.text()).trim().split("\n").slice(1).map(line=>line.split("\t").map(Number));
+  if(route.length<2 || route.some((row,i)=>row.length!==7 || !row.every(Number.isInteger) ||
+      i && row[0]<=route[i-1][0]) || route[0][0]!==0) throw new Error("石桥路线规格错误");
+  const end=route.at(-1)[0],keys=new Set();
+  const controls=["KeyW","KeyS","ArrowUp","ArrowDown","KeyA","KeyD","ArrowLeft","ArrowRight"];
+  const cap=(value,lo,hi)=>Math.max(lo,Math.min(hi,value));
+  let distance=0,yaw=0,pitch=0,tick=0,pointer=null;
+  addEventListener("keydown",event=>{
+    if(!controls.includes(event.code)) return;
+    event.preventDefault();
+    keys.add(event.code);
+  });
+  addEventListener("keyup",event=>keys.delete(event.code));
+  addEventListener("blur",()=>{ keys.clear(); pointer=null; });
+  function move(mm) {
+    if(!params.has("frozen-path")) distance=cap(distance+mm,0,end);
+  }
+  function step() {
+    const forward=keys.has("KeyW")||keys.has("ArrowUp")||pointer?.touch;
+    const backward=keys.has("KeyS")||keys.has("ArrowDown");
+    move(180*(Number(Boolean(forward))-Number(backward)));
+    const left=keys.has("KeyA")||keys.has("ArrowLeft"),right=keys.has("KeyD")||keys.has("ArrowRight");
+    yaw=cap(yaw+.028*(Number(right)-Number(left)),-1.18,1.18);
+    tick++;
+  }
+  function draw() {
+    const edge=route.findIndex(row=>row[0]>distance);
+    const hi=edge<0?route.length-1:edge;
+    const a=route[hi-1],b=route[hi],t=(distance-a[0])/(b[0]-a[0]);
+    const [x,y,z,dx,dy,dz]=a.slice(1).map((v,i)=>(v+(b[i+1]-v)*t)/1000);
+    camera.setEye(x,y,z);
+    camera.setTarget(x+dx*Math.cos(yaw)-dz*Math.sin(yaw),y+dy+pitch,z+dx*Math.sin(yaw)+dz*Math.cos(yaw));
+    let grass=0,leaves=0;
+    for(const group of wind) {
+      const {cloud,items,leaves:isLeaf}=group;
+      if(params.has("still-wind")) continue;
+      for(let i=0;i<items.length;i++) {
+        const [px, ,pz, , , ,roll]=items[i];
+        const phase=(tick+Math.floor(px*3+pz*6)+480)%48;
+        const bend=phase<24?phase-12:36-phase;
+        if(isLeaf) {
+          cloud.xyz[3*i]=px+bend*.008;
+          leaves=Math.max(leaves,Math.abs(cloud.xyz[3*i]-px));
+        } else {
+          cloud.roll[i]=roll+bend*.014;
+          grass=Math.max(grass,Math.abs(cloud.roll[i]-roll));
+        }
+      }
+      cloud.dirty=true;
+    }
+    renderer.render(scene,camera,textures);
+    return [distance,...camera.eye.map(n=>Math.round(n*1000)),Math.round(grass*1000),Math.round(leaves*1000)];
+  }
+  document.body.classList.add("walk");
+  document.title=params.has("bad-auto-title")?"墨桥漫游":"墨桥漫游 · 开发预览";
+  canvas.setAttribute("aria-label","石桥轨道漫游，W 和 S 移动，拖动看景");
+  if(params.has("walk-check")) {
+    const trace=[];
+    const key=(type,code)=>dispatchEvent(new KeyboardEvent(type,{code}));
+    for(const frame of [0,60,146,310,340]) {
+      if(frame===60) key("keydown","KeyW");
+      if(frame===340) {
+        key("keyup","KeyW");
+        key("keydown","KeyS");
+      }
+      while(tick<frame) step();
+      const state=draw();
+      for(const [x,y] of [[220,541],[621,355],[1060,481]]) {
+        const rgba=new Uint8Array(4);
+        gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+        state.push(...rgba.subarray(0,3));
+      }
+      trace.push(state.join(","));
+    }
+    result.textContent=trace.join(";");
+  } else if(params.has("auto")) {
+    globalThis.advancePreview=frames=>{
+      for(let i=0;i<frames;i++) step();
+      result.textContent=draw().join(",");
+      return result.textContent;
+    };
+    globalThis.advancePreview(0);
+    document.title=params.has("bad-auto-title")?"D3_FAIL":"D3_OK";
+  } else {
+    document.querySelector("aside").hidden=false;
+    canvas.addEventListener("wheel",event=>{
+      event.preventDefault();
+      move(-Math.sign(event.deltaY)*540);
+    },{passive:false});
+    canvas.addEventListener("pointerdown",event=>{
+      if(pointer) return;
+      pointer={id:event.pointerId,x:event.clientX,y:event.clientY,touch:event.pointerType==="touch"};
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointermove",event=>{
+      if(pointer?.id!==event.pointerId) return;
+      yaw=cap(yaw+(event.clientX-pointer.x)*.005,-1.18,1.18);
+      pitch=cap(pitch-(event.clientY-pointer.y)*.004,-.5,.6);
+      pointer.x=event.clientX;
+      pointer.y=event.clientY;
+    });
+    canvas.addEventListener("lostpointercapture",()=>pointer=null);
+    if(params.has("still")) {
+      move(Math.round(Number(params.get("distance"))*1000)||0);
+      draw();
+    } else {
+      let previous=performance.now();
+      function animate(now) {
+        if(now-previous>=32) {
+          previous=now;
+          step();
+          draw();
+        }
+        requestAnimationFrame(animate);
+      }
+      draw();
+      requestAnimationFrame(animate);
+    }
+  }
+} else {
+renderer.render(scene,camera,textures);
+const addresses=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>pair.split(",").map(Number));
+let samples;
+if(params.has("region")) {
+  const [x,y,w,h,step]=params.get("region").split(",").map(Number);
+  if (![x,y,w,h,step].every(Number.isInteger) || x<0 || y<0 || w<1 || h<1 ||
+      step<1 || w*h>10000 || x+(w-1)*step>=1280 || y+(h-1)*step>=720) throw new Error("像素区域无效");
+  const width=(w-1)*step+1, height=(h-1)*step+1;
+  const rgba=new Uint8Array(width*height*4);
+  gl.readPixels(x,720-y-height,width,height,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+  samples=[];
+  for(let row=0;row<h;row++) for(let col=0;col<w;col++) {
+    const offset=4*((height-1-row*step)*width+col*step);
+    samples.push(rgba.subarray(offset,offset+3).join(","));
+  }
+} else {
+  samples=addresses.map(([x,y])=>{
+    const rgba=new Uint8Array(4);
+    gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+    return rgba.slice(0,3).join(",");
+  });
+}
+const counts=[...groups.values()].reduce(([leaves,grass],group)=>[
+  leaves+(group.material.startsWith("leaf")?group.items.length:0),
+  grass+(group.material.startsWith("meadow")?group.items.length:0)
+],[0,0]);
+result.textContent=params.has("u2b-probe")?
+  [arches.filter(id=>scene.clouds.has("stone-"+id)).length,...screenBox(camera,...houseBounds)].join(","):
+  (params.has("u2-probe")?counts.join(",")+"|":"")+samples.join(";");
+if(params.has("v1-probe")) {
+  const codes={leafInk:[1,0,0],leafPaint:[0,1,0],leafSun:[0,0,1],vine:[1,0,1],vineMoss:[1,0,1]};
+  const rgba=new Uint8Array(1280*720*4), colors=new Uint8Array(rgba.length);
+  gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,colors);
+  scene.ambient.intensity=0;
+  scene.lights=[];
+  scene.fog={density:0,color:[0,0,0]};
+  scene.shadows=scene.output=scene.backdrop=null;
+  scene.paper=scene.outlineWidth=0;
+  scene.clearColor=[0,0,0,1];
+  for(const [key,cloud] of scene.clouds) {
+    cloud.color=[0,0,0];
+    cloud.emissive=codes[groups.get(key).material] || [0,0,0];
+    cloud.mapId=0;
+  }
+  renderer.render(scene,camera);
+  gl.readPixels(0,0,1280,720,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+  let map="";
+  for(let y=4;y<720;y+=8) for(let x=4;x<1280;x+=8) {
+    const at=4*((719-y)*1280+x);
+    const role=Number(rgba[at]>127)+2*Number(rgba[at+1]>127)+4*Number(rgba[at+2]>127);
+    map+=String(role)+colors[at].toString(16).padStart(2,"0")+
+      colors[at+1].toString(16).padStart(2,"0")+colors[at+2].toString(16).padStart(2,"0");
+  }
+  const points=extraMeshes[1].positions;
+  let near=-Infinity,far=Infinity;
+  for(let i=0;i<points.length;i+=3) {
+    const z=points[i+2]-recession(points[i]);
+    near=Math.max(near,z); far=Math.min(far,z);
+  }
+  result.textContent=Math.round(1000*(near-far))+"|"+map;
+}
+}
+</script>
