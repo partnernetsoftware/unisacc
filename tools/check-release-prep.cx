@@ -25,6 +25,11 @@
 #define T_STRICT "release/evidence/v0.0.74-strict-2026-11-18.tsv"
 static char tmp[4096], bin[4200], root[4096], lay[4300], badlay[4300], tmpenv[4200];
 static char out[65536];
+/* The frozen commit the replay names: T_COMMIT when this checkout holds its history; otherwise (the
+ * devsvc qualify layout is a git archive plus one private commit) the layout's own HEAD stands in as the
+ * frozen commit, since release-prep must run tools/ratchets.cx on a git archive of a real commit.
+ * Every other replayed input is a committed static evidence file, not a history object. */
+static char fc[48], bjson[160], bjbad[120], ratfc[200], rathead[160], fft[60];
 static int passed, failed, part;
 static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\trelease-prep\n", yes ? "PASS" : "FAIL", label); }
 static int has(const char *hay, const char *s) { return hay && s && strstr(hay, s); }
@@ -36,6 +41,16 @@ static int runv(char **v, int secs, int *rc) {
     if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
     if (r.errn) { long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k; if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; } }
     np_free(&r); return 1;
+}
+static int frozen_pick(void) {
+    np_result r = {0}; char why[300]; char *v1[] = {"git", "cat-file", "-e", T_COMMIT "^{commit}", 0}; char *v2[] = {"git", "rev-parse", "HEAD", 0}; long k;
+    if (!np_run(v1, root, 0, 20, &r, why, sizeof why) && r.rc == 0) { np_free(&r); return cx_fmt(fc, sizeof fc, "%s", T_COMMIT); }
+    np_free(&r);
+    if (np_run(v2, root, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 40) { np_free(&r); return 1; }
+    for (k = 0; k < 40; k++) fc[k] = r.out[k];
+    fc[40] = 0; np_free(&r);
+    printf("NOTE\tfrozen-commit\t%s\tno history for %s: layout HEAD stands in\n", fc, T_COMMIT);
+    return 0;
 }
 static char *rd(const char *dir, const char *rel) { char p[4500]; size_t n; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 0; return cx_read(p, &n); }
 static int wr(const char *dir, const char *rel, const char *text) { char p[4500]; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1; return sy_write_file(p, text, strlen(text), 0644); }
@@ -75,15 +90,17 @@ int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "--part")) { part = !strcmp(argv[2], "pos") ? 1 : !strcmp(argv[2], "neg") ? 2 : -1; if (part < 0) return 2; argv += 2; argc -= 2; }
     if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/release-prep", tmp) || cx_fmt(s, sizeof s, "%s/tools/release-prep.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build release-prep: %s\n", why); return 2; } }
+    if (frozen_pick() || cx_fmt(fft, sizeof fft, "F=T=%s", fc) || cx_fmt(bjson, sizeof bjson, "{\"commit\":\"%s\",\"version\":\"0.0.74\"}\n", fc) || cx_fmt(bjbad, sizeof bjbad, "{\"commit\":\"%s\"}\n", fc) || /* lint:allow R1-version replay of the committed v0.0.74 evidence */
+        cx_fmt(ratfc, sizeof ratfc, "SOURCE\tfrozen-commit\tcommit=%s\ttree=git-archive\n", fc) || cx_fmt(rathead, sizeof rathead, "SOURCE\tshared-head\tcommit=%s\nRATCHETS\tok=15\tfail=0\n", fc)) return 2;
     if (cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp) || cx_fmt(lay, sizeof lay, "%s/layout", tmp) || cx_fmt(badlay, sizeof badlay, "%s/badlayout", tmp) ||
         sy_mkdir(lay, 0700) || sy_mkdir(badlay, 0700) ||
-        wr(lay, "SHA256SUMS", T_APE "  unisacc.com\n") || wr(lay, "build.json", "{\"commit\":\"" T_COMMIT "\",\"version\":\"0.0.74\"}\n") ||
-        wr(badlay, "SHA256SUMS", "1111111111111111111111111111111111111111111111111111111111111111  unisacc.com\n") || wr(badlay, "build.json", "{\"commit\":\"" T_COMMIT "\"}\n")) return 2;
+        wr(lay, "SHA256SUMS", T_APE "  unisacc.com\n") || wr(lay, "build.json", bjson) ||
+        wr(badlay, "SHA256SUMS", "1111111111111111111111111111111111111111111111111111111111111111  unisacc.com\n") || wr(badlay, "build.json", bjbad)) return 2;
     cx_fmt(d1, sizeof d1, "%s/p1", tmp); cx_fmt(d2, sizeof d2, "%s/n-unknown", tmp); cx_fmt(d3, sizeof d3, "%s/n-ratsrc", tmp);
     cx_fmt(d4, sizeof d4, "%s/n-newfail", tmp); cx_fmt(d5, sizeof d5, "%s/n-count", tmp); cx_fmt(d6, sizeof d6, "%s/n-sha", tmp);
     cx_fmt(rat1, sizeof rat1, "%s/ratchets.txt", d1);
     if (part == 2) { /* negatives only: a ratchets file that names the frozen commit (the positive half proves the real run) */
-        const char *t = "SOURCE\tfrozen-commit\tcommit=" T_COMMIT "\ttree=git-archive\nRATCHETS\tok=15\tfail=0\n";
+        char t[260]; if (cx_fmt(t, sizeof t, "%sRATCHETS\tok=15\tfail=0\n", ratfc)) return 2;
         if (sy_mkdir(d1, 0700) || sy_write_file(rat1, t, strlen(t), 0644)) return 2; goto negatives; }
 
     /* (1) positive: replay 0.0.74 with the real ratchets run on the frozen commit */
@@ -96,18 +113,18 @@ int main(int argc, char **argv) {
     { char *g = rd(d1, "rollback.txt"), *w = rd(root, "tests/release-prep/rollback-0.0.74.txt"); static char a[16384], b[16384];
       if (g && w) { nocomment(g, a, sizeof a); nocomment(w, b, sizeof b); }
       check("rollback-commands-equal-committed", g && w && a[0] && !strcmp(a, b));
-      check("rollback-identity", has(g, "# 0.0.74 回滚方案") && has(g, "F=T=" T_COMMIT) && has(g, "SHA256=" T_APE) && has(g, "82d0926e9bed988091dac4ed43e07ab3c199652b0dc470e1cb5e445564e3f3a3") && has(g, "--version=unisacc 0.0.73"));
+      check("rollback-identity", has(g, "# 0.0.74 回滚方案") && has(g, fft) && has(g, "SHA256=" T_APE) && has(g, "82d0926e9bed988091dac4ed43e07ab3c199652b0dc470e1cb5e445564e3f3a3") && has(g, "--version=unisacc 0.0.73"));
       free(g); free(w); }
     { char *g = rd(d1, "notes-0.0.74.md"), *w = rd(root, "release/notes-0.0.74.md");
       const char *hd[] = {"# unisacc 0.0.74 发布说明\n", "\n## 真实身份\n", "\n## 产品改动\n", "\n## 严格证据\n", "\n## 已知缺口与未验证范围\n", "\n## 证据入口\n", 0}; int ok = g && w, i;
       for (i = 0; hd[i]; i++) ok = ok && has(g, hd[i]) && has(w, hd[i]);
       check("notes-headings-match-committed", ok);
-      check("notes-identity", has(g, T_COMMIT) && has(g, T_APE) && has(w, T_APE) && has(g, T_STRICT) && has(g, "<CI_RUN_ID>"));
+      check("notes-identity", has(g, fc) && has(g, T_APE) && has(w, T_APE) && has(g, T_STRICT) && has(g, "<CI_RUN_ID>"));
       check("notes-not-qualified-fixed", has(g, "整体裁决 NOT_QUALIFIED") && has(w, "整体裁决 NOT_QUALIFIED") && only_not_qualified(g));
       check("notes-gaps-listed", has(g, "s9 全套本版未跑") && has(g, "(build/pkg-gaps.tsv,OPEN") && has(g, "30 批,PASS 29,FAIL 1,未覆盖 0"));
       free(g); free(w); }
     { char *g = rd(d1, "ratchets.txt"), *w = rd(root, "release/evidence/0.0.74/ratchets.txt");
-      check("ratchets-source-frozen-commit", g && !strncmp(g, "SOURCE\tfrozen-commit\tcommit=" T_COMMIT "\ttree=git-archive\n", 86));
+      check("ratchets-source-frozen-commit", g && !strncmp(g, ratfc, 86) && strlen(ratfc) == 86);
       check("ratchets-same-rows-as-committed", has(g, "\nRATCHETS\tok=15\tfail=0\t") && count_lines(g, "RATCHET\t") == count_lines(w, "RATCHET\t") && count_lines(g, "RATCHET\t") == 15 && has(w, "RATCHETS\tok=15\tfail=0"));
       free(g); free(w); }
     { char *g = rd(d1, "evidence-rows.tsv"); int ok = g != 0, i;
@@ -125,7 +142,7 @@ negatives:
       g = rd(d2, "notes-0.0.74.md"); check("unknown-batch-in-gaps-not-pass", has(g, "严格证据批次 pp-negative 状态 UNKNOWN") && has(g, "30 批,PASS 28,FAIL 1,未覆盖 1") && only_not_qualified(g)); free(g); }
     /* (3) negative: ratchets not from the frozen commit */
     { char p[4500]; cx_fmt(p, sizeof p, "%s/rat-head.txt", tmp);
-      { const char *t = "SOURCE\tshared-head\tcommit=" T_COMMIT "\nRATCHETS\tok=15\tfail=0\n"; if (sy_write_file(p, t, strlen(t), 0644)) return 2; }
+      { if (sy_write_file(p, rathead, strlen(rathead), 0644)) return 2; }
       check("ratchets-shared-head-refused", prep(d3, 0, p, lay, &rc) && rc == 2 && has(out, "REFUSE PREP_RATCHETS_SOURCE"));
       cx_fmt(p, sizeof p, "%s/rat-other.txt", tmp);
       { const char *t = "SOURCE\tfrozen-commit\tcommit=b546f23546aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRATCHETS\tok=15\tfail=0\n"; if (sy_write_file(p, t, strlen(t), 0644)) return 2; }
