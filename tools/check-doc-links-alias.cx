@@ -1,0 +1,58 @@
+/* Checks two doc-links-gen rules: sh ./unisacc.com tools/check-doc-links-alias.cx   (from the repo root)
+   (1) a tracked symbolic link to a Markdown file (CLAUDE.md -> AGENTS.md) is read once, under the target
+       name: its links are not entered twice;
+   (2) an HTML anchor line <a id="X"></a> (or <a name="X">) names the heading after it, so a link
+       file.md#X resolves to that section instead of ANCHOR_MISS; an unknown id stays ANCHOR_MISS.
+   Builds a fixture git tree under sy_tmpdir() and runs tools/doc-links-gen.cx --print --root on it.
+   Assertions and the bounded runner come from cxlib.ckassert; files are written with sy_write_file.
+   Prints PASS/FAIL lines and CHECK_DOC_LINKS_ALIAS<TAB>failed=N. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+
+/* O holds "\n" + the generator output: the number of lines starting with PREFIX (a whole leading field run) */
+static int alias_lines(const char *o, long n, const char *prefix) {
+    char pat[512]; long pn, at = 0, k; int c = 0;
+    if (cx_fmt(pat, sizeof pat, "\n%s", prefix)) return -1;
+    pn = tx_len(pat, sizeof pat);
+    while (at < n && (k = tx_find(o + at, n - at, pat, pn)) >= 0) {
+        long e = at + k + pn;   /* the prefix must end a field: TAB, newline or end of output */
+        if (e >= n || o[e] == '\t' || o[e] == '\n') c++;
+        at = e;
+    }
+    return c;
+}
+static int fixture(const char *dir, const char *rel, const char *text) {
+    char p[600];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1;
+    return sy_write_file(p, text, tx_len(text, 1 << 16), 0644) != 0;
+}
+
+int main(void) {
+    static char o[1 << 20]; char dir[300], link[340]; const char *U; int rc; long n;
+    if (cx_fmt(dir, sizeof dir, "%s/check-doc-links-alias-%d", sy_tmpdir(), sy_pid()) || cx_fmt(link, sizeof link, "%s/CLAUDE.md", dir)) return 2;
+    U = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product 本检查自身的子进程跑法,缺省取仓根启动器,UNISACC 可覆盖 */
+    if (sy_mkdir_all(dir, 0755)) { printf("FAIL\tdoc-links-alias.fixture-dirs\n"); return 1; }
+    if (fixture(dir, "prd.md", "# Top\nx\n<a id=\"repo-map\"></a>\n## 8.1 Long title (with notes)\ny\n## Next\nz\n")
+        || fixture(dir, "AGENTS.md", "# Rules\nsee [m](prd.md#repo-map) and [u](prd.md#no-such-id) and `prd.md`\n")
+        || sy_symlink("AGENTS.md", link)) { printf("FAIL\tdoc-links-alias.fixture-files\n"); return 1; }
+    {   char *gi[] = {"git", "-C", dir, "init", "-q", 0}, *ga[] = {"git", "-C", dir, "add", "-A", 0};
+        if (ck_run(gi, o, sizeof o) != 0 || ck_run(ga, o, sizeof o) != 0) { printf("FAIL\tdoc-links-alias.fixture-git\n"); return 1; }
+    }
+    {   char *pv[] = {"sh", (char *)U, "tools/doc-links-gen.cx", "--", "--print", "--root", dir, 0};
+        o[0] = '\n';
+        rc = ck_run(pv, o + 1, sizeof o - 1);
+        o[0] = '\n';
+        n = tx_len(o, sizeof o);
+    }
+    ck(rc == 0, "doc-links-alias.print-rc0");
+    ck(alias_lines(o, n, "AGENTS.md") == 3, "doc-links-alias.canonical-name-rows-3");
+    ck(alias_lines(o, n, "CLAUDE.md") == 0, "doc-links-alias.symlink-alias-not-doubled");
+    ck(alias_lines(o, n, "AGENTS.md\tRules\t2\tinline\tprd.md\tTop/8.1 Long title (with notes)\tm\tyes") == 1, "doc-links-alias.html-anchor-names-next-heading");
+    ck(alias_lines(o, n, "AGENTS.md\tRules\t2\tinline\tprd.md\tANCHOR_MISS\tu\tyes\t-") == 1, "doc-links-alias.unknown-id-still-anchor-miss");
+    printf("CHECK_DOC_LINKS_ALIAS\tfailed=%d\n", ck_failures());
+    return ck_failures() ? 1 : 0;
+}

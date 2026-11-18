@@ -1,0 +1,85 @@
+#pragma unisa use sysx.poll
+#pragma unisa use mem.bytes
+/* Checks tools/affected.cx domain selection with independent fixture contracts.
+ * Cases query/refusal/run keep each invocation within the unchanged batch window. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+static char repo[4096],root[5000],product[5000],affected[5000],generator[5000];
+static np_result result;static int failed,passed;
+static const char*rh="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+static const char*ar="a\tIMPLEMENTED\tinterfaces\ttests/a.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/a.cx\t-\tfixture.a\trc0:A_OK\tproduct\tcommit\n";
+static const char*br="b\tIMPLEMENTED\tinterfaces\ttests/b.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/b.cx\t-\tfixture.b\trc0:B_OK\tproduct\tdaily\n";
+static const char*cr="c\tIMPLEMENTED\tinterfaces\ttests/c.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/c.cx\t-\tfixture.c\trc0:C_OK\tproduct\tcommit\n";
+static const char*ch="id\tlayer\timplementation\texpected_or_gap\tsource\n";
+static const char*ac="fixture.a\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture compiler object\ttests/a.cx\n";
+static const char*bc="fixture.b\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture tool object\ttests/b.cx\n";
+static const char*cc="fixture.c\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tmissing object fixture\ttests/c.cx\n";
+static void ck(int yes,const char*name){printf("CHECK\t%s\t%s\n",name,yes?"PASS":"FAIL");if(yes)passed++;else{failed++;fprintf(stderr,"CASE_DIAG %s rc=%d stdout=%.1200s stderr=%.1600s\n",name,result.rc,result.out?result.out:"",result.err?result.err:"");}}
+static int put(const char*rel,const char*a,const char*b,const char*c,const char*d){char path[6000];if(cx_fmt(path,sizeof path,"%s/%s",root,rel))return 2;size_t n=strlen(a)+strlen(b)+strlen(c)+strlen(d)+1;char*out=mm_alloc(n);if(!out||cx_fmt(out,n,"%s%s%s%s",a,b,c,d))return 2;int rc=sy_write_atomic(path,out,strlen(out),0600);mm_free(out);return rc?2:0;}
+static int link_repo(const char*rel){char from[6000],to[6000];if(cx_fmt(from,sizeof from,"%s/%s",repo,rel)||cx_fmt(to,sizeof to,"%s/%s",root,rel))return 2;return sy_symlink(from,to)?2:0;}
+static int copy_repo(const char*rel){char from[6000],to[6000],why[400];if(cx_fmt(from,sizeof from,"%s/%s",repo,rel)||cx_fmt(to,sizeof to,"%s/%s",root,rel))return 2;char*v[]={"cp",from,to,0};np_result r={0};int tr=np_run(v,repo,0,25,&r,why,sizeof why);int rc=tr||r.rc;np_free(&r);return rc?2:0;}
+static int command(char**v){np_free(&result);char why[400];int tr=np_run(v,root,0,25,&result,why,sizeof why);if(tr){fprintf(stderr,"TRANSPORT %s\n",why);return -1;}return result.rc;}
+static int gen(void){char*v[]={"sh",product,generator,"--","--write","--root",root,0};return command(v);}
+static int query(const char*a,const char*b,const char*c,const char*d,const char*e,const char*f){char*v[14]={"sh",product,affected,"--",0};const char*opts[]={a,b,c,d,e,f};int n=4;for(int i=0;i<6&&opts[i];i++)v[n++]=(char*)opts[i];v[n]=0;return command(v);}
+static int selected(const char*id){char want[100];if(cx_fmt(want,sizeof want,"SELECTED\t%s\n",id))return 0;return strstr(result.out,want)!=0;}
+static int prepare_real_runners(void){
+ const char*tool[]={"tools/tlib.cx","tests/run-batch.cx","tools/batch-domains-gen.cx","affected"};
+ sy_child_t child[4];sy_exit_t status[4];int started[4]={0},done[4]={0},bad[4]={0};size_t have[4]={0};static char output[4][8192];
+ char local[6000],runner[6000];if(cx_fmt(local,sizeof local,"%s/unisacc.com",root)||cx_fmt(runner,sizeof runner,"%s/tests/run-batch.cx",root))return 0;
+ long begin=sy_now_ms(),deadline=begin+25000;int killed=0;
+ for(int i=0;i<4;i++){output[i][0]=0;char*v[]={"sh",local,(char*)tool[i],0,0,0,0};if(i==1)v[2]=runner;if(i==2){v[3]="--";v[4]="--check";v[5]="--dump";}if(i==3){v[1]=product;v[2]=affected;}
+  sy_spawn_t options;sy_spawn_init(&options);options.argv=v;options.cwd=root;options.pgroup=-1;options.out_fd=SY_STDIO_PIPE;options.flags=SY_SPAWN_ERR_TO_OUT;options.deadline_ms=25000;
+  started[i]=sy_proc_spawn(&options,&child[i])==0;if(!started[i])bad[i]=1;
+ }
+ for(;;){sy_pollfd_t fd[4];int owner[4],nf=0,pending=0;
+  for(int i=0;i<4;i++)if(started[i]){if(!done[i]){int w=sy_proc_try_wait(&child[i],&status[i]);if(w){done[i]=w;if(w<0)bad[i]=1;}}if(!done[i])pending++;if(child[i].out_fd>=0){owner[nf]=i;fd[nf].fd=child[i].out_fd;fd[nf].events=SY_POLLIN;fd[nf].revents=0;nf++;}}
+  if(!pending&&!nf)break;long now=sy_now_ms();if(now>=deadline){if(killed)break;for(int i=0;i<4;i++)if(started[i]&&!done[i]){sy_proc_kill(&child[i],9);bad[i]=1;}killed=1;deadline=now+2000;}
+  int ready=nf?sy_poll(fd,nf,20):0;if(!nf)sy_sleep_ms(5);if(ready<0&&ready!=-EINTR)break;
+  for(int k=0;k<nf;k++)if(fd[k].revents){int i=owner[k];char chunk[4096];long r=sy_read(fd[k].fd,chunk,sizeof chunk);if(r>0){size_t take=(size_t)r;if(take>=sizeof output[i]-have[i]){take=sizeof output[i]-have[i]-1;bad[i]=1;}if(take&&mm_copy(output[i]+have[i],sizeof output[i]-have[i],chunk,take))bad[i]=1;have[i]+=take;output[i][have[i]]=0;}else if(r==0){sy_close(child[i].out_fd);child[i].out_fd=-1;}else if(r!=-EINTR){bad[i]=1;sy_close(child[i].out_fd);child[i].out_fd=-1;}}
+ }
+ int remaining=0;for(int i=0;i<4;i++)if(started[i]&&!done[i]){sy_proc_kill(&child[i],9);bad[i]=1;remaining++;}
+ if(remaining&&!killed){long grace=sy_now_ms()+2000;while(remaining&&sy_now_ms()<grace){remaining=0;for(int i=0;i<4;i++)if(started[i]&&!done[i]){int w=sy_proc_try_wait(&child[i],&status[i]);if(w)done[i]=w;else remaining++;}if(remaining)sy_sleep_ms(5);}}
+ int ok=1;for(int i=0;i<4;i++){int yes=started[i]&&done[i]==1&&!bad[i]&&sy_exit_code(&status[i])==(i==2?0:2)&&strstr(output[i],i==2?"BATCH_DOMAINS\tOK":"usage:");char label[120];if(cx_fmt(label,sizeof label,"prepare-real-%s-no-test-result",i==0?"kit":i==1?"runner":i==2?"domain-check":"selector"))yes=0;ck(yes,label);if(!yes){ok=0;fprintf(stderr,"PREPARE_DIAG tool=%s pid=%d reaped=%d %s\n",tool[i],started[i]?child[i].pid:-1,done[i],output[i]);}if(started[i])sy_proc_close(&child[i]);}
+ printf("PREPARED_DOMAIN\tms=%ld\tno-test-result\n",sy_now_ms()-begin);return ok;
+}
+int main(int argc,char**argv){const char*phase="query",*draft=0;for(int a=1;a<argc;a++){if(!strcmp(argv[a],"--case")&&a+1<argc)phase=argv[++a];else if(!strcmp(argv[a],"--affected")&&a+1<argc)draft=argv[++a];else return 2;}
+ if(strcmp(phase,"query")&&strcmp(phase,"refusal")&&strcmp(phase,"run"))return 2;
+ const char*launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product This fixture runs the same root candidate; the harness can override UNISACC. */
+ if(sy_realpath(".",repo,sizeof repo)<0||sy_realpath(launcher,product,sizeof product)<0||cx_fmt(root,sizeof root,"/tmp/unisacc-affected-domain-%d",sy_pid())||cx_fmt(affected,sizeof affected,"%s",draft?draft:"")||(!draft&&cx_fmt(affected,sizeof affected,"%s/tools/affected.cx",repo))||cx_fmt(generator,sizeof generator,"%s/tools/batch-domains-gen.cx",repo))return 2;
+ char p[6000];if(cx_fmt(p,sizeof p,"%s/tests",root)||sy_mkdir_all(p,0700)||cx_fmt(p,sizeof p,"%s/build",root)||sy_mkdir_all(p,0700))return 2;
+ if(link_repo("tools")||link_repo("cx")||link_repo("ext")||link_repo("exec")||link_repo("cxroot.tsv")||link_repo("unisacc.com")||copy_repo("tests/run-batch.cx"))return 2;
+ if(put("tests/a.cx","/* Installed compiler fixture object. */\nint main(void){return 23;}\n","","","")||put("tests/b.cx","/* Tool selfcheck fixture object. */\nint main(void){printf(\"B_OK\\n\");return 0;}\n","","","")||put("tests/batches.tsv",rh,ar,br,"")||put("tests/coverage.tsv",ch,ac,bc,"")||put("tests/batch-domains.tsv","id\tdomain\tbasis\n","","","")||put("tests/batch-domain-rules.tsv","id\tpriority\tentry\ttier\tlayer\tobject\tdomain\tsample\tbasis\n","compiler\t10\t*\t*\t*\tcompiler\tproduct-qualification\ta\tDeclared compiler fixture.\n","tool\t10\t*\t*\t*\tselfcheck\ttool-selfcheck\tb\tDeclared tool fixture.\n","")||put("build/batch-packages.tsv","# independent coarse layer fixture\n","batch\ta\tcompiler\t-\t-\t-\t-\t-\t-\n","batch\tb\tall\t-\t-\t-\t-\t-\t-\n",""))return 2;
+ if(!strcmp(phase,"query")){
+  ck(query("--ids","a,b",0,0,0,0)==0&&selected("a")&&selected("b")&&!strstr(result.out,"DOMAIN_"),"default-without-index");
+  ck(query("--ids","a,b","--domain","product-qualification",0,0)!=0&&!selected("a")&&strstr(result.err,"index-drift"),"domain-refuses-missing-index");
+  ck(gen()==0,"prepare-domain-index");
+  ck(query("--ids","a,b","--domain","product-qualification",0,0)==0&&selected("a")&&!selected("b")&&strstr(result.out,"selected=1"),"ids-domain-intersection");
+  ck(query("--ids","a,b","--domain","product-qualification","--domain","tool-selfcheck")==0&&selected("a")&&selected("b"),"domain-union");
+  ck(query("--domain","tool-selfcheck",0,0,0,0)==0&&!selected("a")&&selected("b"),"domain-only");
+  ck(query("--domain-summary",0,0,0,0,0)==0&&!selected("a")&&strstr(result.out,"registered=2\tselected=2"),"summary-denominator");
+  ck(query("--tier","commit","--domain","tool-selfcheck",0,0)==0&&!selected("b")&&strstr(result.out,"registered=2\tselected=0"),"tier-domain-intersection");
+  ck(query("--layer","compiler","--domain","product-qualification",0,0)==0&&strstr(result.out,"LAYER\ta\t")&&!strstr(result.out,"LAYER\tb\t"),"layer-domain-intersection");
+  ck(query("--files","tests/a.cx","--domain","tool-selfcheck",0,0)==0&&strstr(result.out,"\tbatches=0\t"),"files-domain-intersection");
+ }else if(!strcmp(phase,"refusal")){
+  ck(gen()==0,"prepare-domain-index");ck(query("--domain","bogus",0,0,0,0)!=0&&strstr(result.err,"unknown-domain"),"unknown-domain-refused");
+  ck(query("--ids","missing","--domain","tool-selfcheck",0,0)!=0&&strstr(result.err,"REFUSE id missing"),"unknown-id-not-hidden");
+  if(put("tests/c.cx","/* No object declaration. */\nint main(void){return 0;}\n","","","")||put("tests/batches.tsv",rh,ar,br,cr)||put("tests/coverage.tsv",ch,ac,bc,cc))return 2;
+  ck(query("--domain-summary",0,0,0,0,0)!=0&&strstr(result.err,"domain-missing-declaration id=c"),"new-batch-missing-domain-refused");
+  if(put("tests/batch-domains.tsv","id\tdomain\tbasis\n","c\ttool-selfcheck\tReviewed legacy missing declaration fixture.\n","",""))return 2;ck(gen()==0,"explicit-exception-repairs-legacy");
+  ck(query("--domain","tool-selfcheck",0,0,0,0)==0&&selected("b")&&selected("c")&&!selected("a"),"explicit-exception-selected");
+  if(put("tests/batch-domain-index.tsv","tampered\n","","",""))return 2;ck(query("--domain-summary",0,0,0,0,0)!=0&&strstr(result.err,"index-drift"),"tampered-index-refused");
+  ck(query("--ids","a,b",0,0,0,0)==0&&selected("a")&&selected("b"),"default-still-ignores-domain-index");
+ }else{
+  ck(gen()==0,"prepare-domain-index");
+  /* Prepare the exact compiler/source argv used by each real child, concurrently
+   * and within the original 25s bounds. No batch or test verdict is reused. */
+  if(prepare_real_runners())ck(query("--domain","tool-selfcheck","--run",0,0,0)==0&&strstr(result.out,"BATCH_RUN\tid=b\tstatus=PASS")&&!strstr(result.out,"BATCH_RUN\tid=a\t"),"run-only-selected-domain-default-jobs");
+ }
+ np_free(&result);printf("CHECK_AFFECTED_DOMAIN\tcase=%s\tfailed=%d\tpassed=%d\n",phase,failed,passed);return failed?1:0;
+}
