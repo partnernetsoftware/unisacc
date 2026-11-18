@@ -406,9 +406,20 @@ static int native_try_fast(const char *root, const char *tool, char *bin, int ca
     *ms = sy_now_ms() - t0;
     return 0;
 }
+static int in_native_worker;
+static long native_max_ms(void) {
+    const char *v = getenv("DEVSVC_NATIVE_MAX_MS");
+    long n = (v && v[0]) ? atol(v) : 0;
+    return (n >= 200 && n <= 55000) ? n : 55000L;
+}
+static int native_no_async(void) {
+    const char *v = getenv("UNISACC_NATIVE_NO_ASYNC");
+    return v && v[0] == '1' && v[1] == 0;
+}
 static int native_get(const char *root, const char *tool, char *bin, int cap, const char **cache, long *ms) {
     static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], mdir[PW], tmp[PW];
-    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc, lfd = -1; const char *base; char *dot;
+    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(), nmax = native_max_ms(), nat_dl = t0 + (nmax > 2500 ? nmax - 1500 : nmax + 500);
+    int bypass = 0, rc, lfd = -1; const char *base; char *dot;
     sy_spawn_t o; sy_exit_t ex;
     *ms = 0; *cache = "miss"; nlog[0] = 0;
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
@@ -421,8 +432,36 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     if (ns_try_hit(mdir, root, tool, real, bin, cap) == 0) { *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
     if (ns_prod_sha(real, mdir, phex)) return -EIO;
     big[0] = 0;
-    {   char *v[] = {"sh", prod, "-cx-plan", src, 0};
-        if (runcap(v, big, sizeof big) != 0) bypass = 1; }
+    {   char *v[] = {"sh", prod, "-cx-plan", src, 0}, plf[PW];
+        long prem_ms = nat_dl - sy_now_ms();
+        int pfd, prc; sy_spawn_t po; sy_exit_t pex;
+        if (prem_ms <= 0) return -ETIMEDOUT;
+        F(plf, sizeof plf, "%s/nat-plan-%d.tmp", dir, sy_pid());
+        if (ovf) return -EIO;
+        sy_unlink(plf);
+        pfd = sy_open_new(plf, 0600);
+        if (pfd < 0) bypass = 1;
+        else {
+            sy_spawn_init(&po); po.argv = v; po.cwd = root;
+            po.pgroup = in_native_worker ? 0 : -1;
+            po.deadline_ms = prem_ms;
+            po.in_fd = SY_STDIO_NULL; po.out_fd = pfd; po.err_fd = SY_STDIO_NULL;
+            prc = sy_proc_run(&po, &pex);
+            sy_close(pfd);
+            if (prc || pex.timed_out || sy_now_ms() >= nat_dl) { sy_unlink(plf); return -ETIMEDOUT; }
+            if (sy_exit_code(&pex) != 0) bypass = 1;
+            else {
+                unsigned char *pb = 0; int64_t pn = 0;
+                if (sy_read_file(plf, &pb, &pn, sizeof big) || !pb || pn >= (int64_t)sizeof big) bypass = 1;
+                else {
+                    if (pn > 0 && mm_copy(big, sizeof big, pb, (size_t)pn)) bypass = 1;
+                    big[pn] = 0;
+                }
+                free(pb);
+            }
+            sy_unlink(plf);
+        } }
+    if (sy_now_ms() >= nat_dl) return -ETIMEDOUT;
     if (!bypass) {
         char *p = big;
         cl[0] = 0;
@@ -459,7 +498,12 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
         ns_save(mdir, root, tool, real, big, bin);
         *cache = "hit"; *ms = sy_now_ms() - t0; return 0;
     }
-    if (!bypass && ns_lock_begin(bin, &lfd) == 0) {
+    if (!bypass) {
+        long lwait = nat_dl - sy_now_ms() - 500;
+        if (lwait < 100) lwait = 100;
+        if (lwait > 45000) lwait = 45000;
+        if (ns_lock_begin_ms(bin, &lfd, lwait) != 0) return -ETIMEDOUT;
+        if (sy_now_ms() >= nat_dl) { ns_lock_end(lfd); return -ETIMEDOUT; }
         if (ns_bin_ok(bin)) {
             ns_lock_end(lfd);
             ns_save(mdir, root, tool, real, big, bin);
@@ -467,15 +511,20 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
         }
     }
     if (bypass) *cache = "bypass";
-    F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
-    F(nlog, sizeof nlog, "%s.build.log", bin);
-    {   char *v[] = {"sh", prod, src, "-o", tmp, 0}; int lf = sy_open(nlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        sy_spawn_init(&o); o.argv = v; o.cwd = root; o.pgroup = -1; o.deadline_ms = 50000;
-        o.in_fd = SY_STDIO_NULL; o.out_fd = lf >= 0 ? lf : SY_STDIO_NULL; o.err_fd = lf >= 0 ? lf : SY_STDIO_NULL;
-        rc = sy_proc_run(&o, &ex);
-        if (lf >= 0) sy_close(lf); else nlog[0] = 0; }
+    {   long crem = nat_dl - sy_now_ms();
+        if (crem <= 0) { ns_lock_end(lfd); return -ETIMEDOUT; }
+        if (crem > 50000) crem = 50000;
+        F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
+        F(nlog, sizeof nlog, "%s.build.log", bin);
+        {   char *v[] = {"sh", prod, src, "-o", tmp, 0}; int lf = sy_open(nlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            sy_spawn_init(&o); o.argv = v; o.cwd = root; o.pgroup = in_native_worker ? 0 : -1; o.deadline_ms = crem;
+            o.in_fd = SY_STDIO_NULL; o.out_fd = lf >= 0 ? lf : SY_STDIO_NULL; o.err_fd = lf >= 0 ? lf : SY_STDIO_NULL;
+            rc = sy_proc_run(&o, &ex);
+            if (lf >= 0) sy_close(lf); else nlog[0] = 0; }
+    }
     *ms = sy_now_ms() - t0;
     /* 失败时日志留在原处(下次构造同名工具时覆盖),路径与末段由调用方回传 */
+    if (ex.timed_out || sy_now_ms() >= nat_dl) { sy_unlink(tmp); ns_lock_end(lfd); return -ETIMEDOUT; }
     if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); ns_lock_end(lfd); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
     if (nlog[0]) sy_unlink(nlog);
     nlog[0] = 0;
@@ -570,16 +619,25 @@ static int try_connect(long ms) { return sy_unix_connect(sockp, sy_deadline_in(m
 #define MAX_NAT_WORKERS 16
 typedef struct { int ls, c; char line[2048]; } NatWork;
 static int nat_pids[MAX_NAT_WORKERS], n_nat;
+static long nat_t0[MAX_NAT_WORKERS];
 static int native_worker(void *ud) {
     NatWork *w = (NatWork *)ud;
     int dn = sy_open("/dev/null", O_RDWR, 0);
+    char et[32];
+    in_native_worker = 1;
     sy_close(w->ls);
     if (dn >= 0) { if (dn != 1) sy_dup2(dn, 1); if (dn != 2) sy_dup2(dn, 2); if (dn > 2) sy_close(dn); }
     rn = 0; resp[0] = 0; ovf = 0;
     (void)handle(w->line);
     if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; }
-    (void)sy_send_all_until(w->c, resp, rn, sy_deadline_in(58000));
+    (void)sy_send_all_until(w->c, resp, rn, sy_deadline_in(5000));
     sy_close(w->c);
+    F(et, sizeof et, "rc=%d\t", -ETIMEDOUT);
+    if (strstr(resp, et)) {
+        (void)sy_sig_watch(SIGTERM);
+        (void)sy_signal(-sy_pid(), SIGTERM);
+        sy_sleep_ms(20);
+    }
     return 0;
 }
 static int jobs_gc(void);
@@ -603,11 +661,20 @@ static int serve(long ttl, long idle) {
     chomp(info); ev_add("svc.start", info);
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     while (!stop) {
-        long now = sy_now_ms(), k = 0, r;
+        long now = sy_now_ms(), k = 0, r, nmax = native_max_ms();
         for (int wi = 0; wi < n_nat; ) {
             int wex = 0, wcd = 0, wsg = 0;
-            if (sy_wait_status(nat_pids[wi], 1, &wex, &wcd, &wsg) != 0) nat_pids[wi] = nat_pids[--n_nat];
-            else wi++;
+            if (sy_wait_status(nat_pids[wi], 1, &wex, &wcd, &wsg) != 0) {
+                nat_pids[wi] = nat_pids[n_nat - 1];
+                nat_t0[wi] = nat_t0[--n_nat];
+            } else if (now - nat_t0[wi] >= nmax) {
+                char ev[96];
+                F(ev, sizeof ev, "pid=%d\tms=%ld", nat_pids[wi], now - nat_t0[wi]);
+                ev_add("native.timeout", ev);
+                (void)sy_kill(nat_pids[wi]);
+                nat_pids[wi] = nat_pids[n_nat - 1];
+                nat_t0[wi] = nat_t0[--n_nat];
+            } else wi++;
         }
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
         if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
@@ -646,13 +713,14 @@ static int serve(long ttl, long idle) {
                             sy_close(c); last = sy_now_ms(); continue;
                         }
                     }
-                    if (n_nat < MAX_NAT_WORKERS) {
+                    if (!native_no_async() && n_nat < MAX_NAT_WORKERS) {
                         static NatWork nw; int fds[2], wp;
                         nw.ls = ls; nw.c = c;
                         if (!cx_fmt(nw.line, sizeof nw.line, "%s", line)) {
                             wp = sy_fork_session(native_worker, &nw, fds);
                             if (wp > 0) {
                                 sy_close(fds[0]); sy_close(fds[1]);
+                                nat_t0[n_nat] = sy_now_ms();
                                 nat_pids[n_nat++] = wp;
                                 sy_close(c); last = sy_now_ms(); continue;
                             }
@@ -666,6 +734,10 @@ static int serve(long ttl, long idle) {
         }
         sy_close(c);
         last = sy_now_ms();
+    }
+    while (n_nat > 0) {
+        int wpid = nat_pids[--n_nat];
+        (void)sy_kill(wpid);
     }
     sy_close(ls); sy_unlink(sockp); sy_unlink(p);
     return 0;

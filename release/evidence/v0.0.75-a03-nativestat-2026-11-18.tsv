@@ -1,0 +1,13 @@
+# v0.0.75 A-03 (serve 异步 native_get 去阻塞与 nativestat O(1) 命中 + 复核补丁) 实测与负控证据表
+# 编表日期: 2026-11-18; 基线: 5d8ce60ad1 + A-03 复核补丁
+# 证据状态: MEASURED=实测直接产出, PASS=入库单元与隔离服务级负控断言通过
+指标	值	单位	输入或对照命令	证据状态	备注
+a03-cold-ping-block	817->7	ms	5d8ce60ad1 隔离对照: 冷编译进行中并发 ping 阻塞延迟对比	MEASURED	serve() 将 native 请求异步 fork_session 后, 主循环不阻塞 ping/lock/events
+a03-hot-prep-ms	216->0..1	ms	5d8ce60ad1 热命中对比 (devsvc x prep_ms)	MEASURED	nat-*.stat O(1) 命中跳过 -cx-plan 与全文件 SHA256
+neg-ctime-only	PASS	unit	sh ./unisacc.com tools/check-nativestat.cx (ctime-only-chmod-preserves-size-mtime/ctime-only-invalidates-o1)	PASS	chmod 保持 size 与 mtime 不变仅改 ctime -> O(1) 立即失效重算
+neg-concurrent-dedup	PASS	svc	同上 svc-concurrent-two-requests-compile-once (隔离 devsvc, 350ms 窗口双连接)	PASS	2 并发请求均得 OK native, 编译次数严格为 1; lock 超时返回 -ETIMEDOUT 不无锁重编
+neg-failure-not-cached	PASS	svc	同上 svc-bad-first-fails / svc-bad-second-recompiles	PASS	编译失败(bad.cx)返回 ERR native 且第二次请求必须重编(计数 1->2)
+neg-worker-55s-timeout	PASS	svc	同上 svc-timeout-kills-worker-descendants / svc-timeout-event-logged (DEVSVC_NATIVE_MAX_MS=700; 默认 55000ms)	PASS	超时按会话进程组 sy_kill(-wpid) 强杀 worker 与子孙编译树(-ESRCH)并写 native.timeout
+neg-serve-stop-reap	PASS	svc	同上 svc-stop-kills-worker-descendants	PASS	serve() stop 退出时清杀所有在途 native_worker 进程组(-ESRCH), 无孤儿残留
+neg-force-sha-and-periodic	PASS	unit	同上 force-sha-bypasses-nat-stat / force-sha-catches-tampered-bin / periodic-sha-verify-catches-and-unlinks	PASS	UNISACC_NATIVE_FORCE_SHA=1 绕过全部 stat 走全量 SHA; 每 16(或 UNISACC_NATIVE_VERIFY_EVERY)次命中核对 dvnat2 逐文件 SHA 并清理假记录; UNISACC_NATIVE_NO_ASYNC=1 可切回同步
+suite-nativestat	27/0	pass/fail	sh ./unisacc.com tools/check-nativestat.cx	PASS	NATIVESTAT failed=0 passed=27; cx-lint findings=0; ratchets ok=15 fail=0

@@ -1,7 +1,10 @@
-/* tools/check-nativestat.cx -- Self-check for tools/dv/nativestat.cx (O(1) stat hit, racy-2s guard, invalidation on edit/tamper). */
+/* tools/check-nativestat.cx -- Self-check + daemon negative controls for tools/dv/nativestat.cx & async native_get. */
 #pragma unisa use dv.nativestat
+#pragma unisa use net.unix
+#pragma unisa use net.tcp
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.sha
 #pragma unisa use sys.proc
@@ -12,14 +15,161 @@
 #pragma unisa use mem.bytes
 
 static int fails;
+static int passed;
+
 static void chk(int ok, const char *name) {
-    if (ok) sy_printf("PASS\tnativestat.%s\n", name);
+    if (ok) { sy_printf("PASS\tnativestat.%s\n", name); passed++; }
     else { sy_printf("FAIL\tnativestat.%s\n", name); fails++; }
 }
 
+static int ns_read_prod_rel(char *dst, long cap) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long at = 0;
+    if (sy_read_file("tools/devsvc-repo.tsv", &b, &n, 65536) != 0 || !b) return -1;
+    while (at < (long)n) {
+        long le = at;
+        while (le < (long)n && b[le] != '\n' && b[le] != '\r') le++;
+        if (le - at > 8 && memcmp(b + at, "product\t", 8) == 0) {
+            long s = at + 8, e = s;
+            while (e < le && b[e] != '\t') e++;
+            if (e > s && e - s < cap) {
+                mm_copy(dst, (size_t)cap, b + s, (size_t)(e - s));
+                dst[e - s] = 0;
+                free(b);
+                return 0;
+            }
+        }
+        at = le;
+        while (at < (long)n && (b[at] == '\n' || b[at] == '\r')) at++;
+    }
+    free(b);
+    return -1;
+}
+
+static int ns_build_svc_bin(const char *prod_rel, const char *out_bin) {
+    char rel_call[280];
+    sy_spawn_t o;
+    sy_child_t c;
+    sy_exit_t ex;
+    if (cx_fmt(rel_call, sizeof rel_call, "./%s", prod_rel) != 0) return -1;
+    {   char *av[] = {"sh", rel_call, "tools/devsvc-core.cx", "-o", (char *)out_bin, 0};
+        sy_spawn_init(&o);
+        o.argv = av; o.pgroup = -1; o.deadline_ms = 45000;
+        o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+        if (sy_proc_spawn(&o, &c) != 0 || sy_proc_wait(&c, &ex) != 0) return -1;
+        return ex.code == 0 && sy_exists(out_bin) == 1 ? 0 : -1;
+    }
+}
+
+static int ns_svc_req(const char *sock, const char *line, char *out, long cap) {
+    int fd;
+    sy_deadline_t d = sy_deadline_in(15000);
+    long n = 0, r;
+    out[0] = 0;
+    fd = sy_unix_connect(sock, sy_deadline_in(2000));
+    if (fd < 0) return -1;
+    if (sy_send_all_until(fd, line, tx_len(line, 4096), d) ||
+        sy_send_all_until(fd, "\n", 1, d)) {
+        sy_close(fd); return -1;
+    }
+    while (n < cap - 1) {
+        r = sy_recv_until(fd, out + n, cap - 1 - n, d);
+        if (r <= 0) break;
+        n += r;
+    }
+    sy_close(fd);
+    out[n] = 0;
+    return 0;
+}
+
+static int ns_sock_send(const char *sock, const char *line) {
+    int fd = sy_unix_connect(sock, sy_deadline_in(2000));
+    sy_deadline_t d = sy_deadline_in(5000);
+    if (fd < 0) return -1;
+    if (sy_send_all_until(fd, line, tx_len(line, 4096), d) ||
+        sy_send_all_until(fd, "\n", 1, d)) {
+        sy_close(fd); return -1;
+    }
+    return fd;
+}
+
+static int ns_sock_recv_close(int fd, char *out, long cap) {
+    sy_deadline_t d = sy_deadline_in(15000);
+    long n = 0, r;
+    out[0] = 0;
+    while (n < cap - 1) {
+        r = sy_recv_until(fd, out + n, cap - 1 - n, d);
+        if (r <= 0) break;
+        n += r;
+    }
+    sy_close(fd);
+    out[n] = 0;
+    return 0;
+}
+
+static int ns_read_int(const char *path, int *val) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long v = 0, i = 0;
+    *val = 0;
+    if (sy_read_file(path, &b, &n, 1024) != 0 || !b || n <= 0) { if (b) free(b); return -1; }
+    while (i < (long)n && b[i] >= '0' && b[i] <= '9') { v = v * 10 + (long)(b[i] - '0'); i++; }
+    free(b);
+    if (i == 0) return -1;
+    *val = (int)v;
+    return 0;
+}
+
+static int ns_count_lines(const char *path) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int lines = 0;
+    long i;
+    if (sy_read_file(path, &b, &n, 65536) != 0 || !b) { if (b) free(b); return 0; }
+    for (i = 0; i < (long)n; i++) if (b[i] == '\n') lines++;
+    free(b);
+    return lines;
+}
+
+static int ns_find_nat_memo(const char *mdir, char *out, long cap) {
+    sy_dir_t d;
+    int found = 0;
+    if (sy_dir_open(&d, mdir) != 0) return -1;
+    while (sy_dir_next(&d) == 1) {
+        long nl = tx_len(d.name, 512);
+        if (nl > 9 && tx_prefix(d.name, nl, "nat-", 4) && tx_eqz(d.name + nl - 5, ".stat")) {
+            if (cx_fmt(out, (size_t)cap, "%s/%s", mdir, d.name) == 0) found = 1;
+            break;
+        }
+    }
+    sy_dir_close(&d);
+    return found ? 0 : -1;
+}
+
+static int ns_corrupt_memo_f_sha(const char *mp) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pos = -1, i;
+    if (sy_read_file(mp, &b, &n, 1 << 20) != 0 || !b) return -1;
+    for (i = 0; i + 4 < (long)n; i++) {
+        if ((i == 0 || b[i - 1] == '\n') && b[i] == 'F' && b[i + 1] == '\t') {
+            long le = i;
+            while (le < (long)n && b[le] != '\n') le++;
+            if (le - i > 65) { pos = le - 1; break; }
+        }
+    }
+    if (pos < 0) { free(b); return -1; }
+    b[pos] = (b[pos] == 'a') ? 'b' : 'a';
+    {   int rc = sy_write_atomic(mp, (const char *)b, (size_t)n, 0600);
+        free(b);
+        return rc;
+    }
+}
+
 int main(void) {
-    char base[512], mdir[600], prod[600], src[600], bin[600], shaf[620], out[600], plan[2048];
-    char ph1[65], ph2[65];
+    char base[512], mdir[600], prod[600], src[600], bin[600], shaf[620], out[600], plan[2048], nat_mp[700];
+    char ph1[65], ph2[65], prod_rel[256];
     if (cx_fmt(base, sizeof base, "%s/check-nativestat-%d", sy_tmpdir(), sy_pid()) ||
         cx_fmt(mdir, sizeof mdir, "%s/memo", base) ||
         cx_fmt(prod, sizeof prod, "%s/prod", base) ||
@@ -33,12 +183,12 @@ int main(void) {
         if (sy_sha256_hex("BINv1", 5, bh) || cx_write(shaf, bh, 64)) return 2;
     }
 
-    /* Within 2s racy window: ns_save must NOT emit nat-*.stat */
+    /* 1. Within 2s racy window: ns_save must NOT emit nat-*.stat */
     if (cx_fmt(plan, sizeof plan, "u\t%s\n", src)) return 2;
     ns_save(mdir, base, "tool.cx", prod, plan, bin);
     chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "racy-window-blocks-save");
 
-    /* Advance beyond 2s (3s) -> saves cleanly -> O(1) hit succeeds */
+    /* 2. Advance beyond 2s (3s) -> saves cleanly -> O(1) hit succeeds */
     sy_sleep_ms(3000);
     chk(!ns_prod_sha(prod, mdir, ph1) && !ns_prod_sha(prod, mdir, ph2) && tx_eqz(ph1, ph2), "prod-sha-memo");
     chk(ns_bin_ok(bin) == 1, "bin-ok-writes-stat");
@@ -46,17 +196,190 @@ int main(void) {
     out[0] = 0;
     chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) == 0 && tx_eqz(out, bin), "o1-hit-after-2s");
 
-    /* Tamper source file 1 byte -> nat-*.stat immediately invalidates */
+    /* 3. UNISACC_NATIVE_FORCE_SHA=1 bypasses .stat cache */
+    sy_setenv("UNISACC_NATIVE_FORCE_SHA", "1", 1);
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "force-sha-bypasses-nat-stat");
+    sy_unsetenv("UNISACC_NATIVE_FORCE_SHA");
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) == 0, "hit-restored-without-force-sha");
+
+    /* 4. Periodic full SHA cross-check (UNISACC_NATIVE_VERIFY_EVERY=2) catches corrupted SHA in nat-*.stat */
+    chk(ns_find_nat_memo(mdir, nat_mp, (long)sizeof nat_mp) == 0 && ns_corrupt_memo_f_sha(nat_mp) == 0, "corrupt-memo-sha-setup");
+    sy_setenv("UNISACC_NATIVE_VERIFY_EVERY", "2", 1);
+    {   int caught = 0, tries;
+        for (tries = 0; tries < 2; tries++) {
+            if (ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0) { caught = 1; break; }
+        }
+        chk(caught && sy_exists(nat_mp) == 0, "periodic-sha-verify-catches-and-unlinks");
+    }
+    sy_unsetenv("UNISACC_NATIVE_VERIFY_EVERY");
+
+    /* Restore clean memo and wait 2.5s so ctime change test starts from a valid O(1) hit */
+    ns_save(mdir, base, "tool.cx", prod, plan, bin);
+    sy_sleep_ms(2500);
+    ns_save(mdir, base, "tool.cx", prod, plan, bin);
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) == 0, "o1-hit-before-ctime-only");
+
+    /* 5. Only change ctime via chmod (preserving size, dev, ino, mtime) -> MUST invalidate O(1) hit */
+    {   sy_stat_t st_b, st_a;
+        int got_stat = (sy_stat(src, &st_b) == 0);
+        chk(got_stat && sy_chmod(src, 0600) == 0 && sy_chmod(src, 0644) == 0 &&
+            sy_stat(src, &st_a) == 0 && st_a.size == st_b.size && st_a.mtime == st_b.mtime && st_a.ctime >= st_b.ctime,
+            "ctime-only-chmod-preserves-size-mtime");
+        chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "ctime-only-invalidates-o1");
+    }
+
+    /* 6. Tamper source 1 byte & tamper binary 1 byte */
     chk(cx_write(src, "SRCv2", 5) == 0, "write-src-v2");
     chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "source-edit-invalidates-o1");
-
-    /* Tamper binary 1 byte while keeping exact size -> ns_bin_ok detects & unlinks */
     chk(cx_write(bin, "BINvX", 5) == 0, "write-tampered-bin");
-    chk(ns_bin_ok(bin) == 0 && sy_exists(bin) == 0, "tampered-bin-detected-and-unlinked");
+    sy_setenv("UNISACC_NATIVE_FORCE_SHA", "1", 1);
+    chk(ns_bin_ok(bin) == 0 && sy_exists(bin) == 0, "force-sha-catches-tampered-bin");
+    sy_unsetenv("UNISACC_NATIVE_FORCE_SHA");
+
+    /* 7. Real isolated devsvc daemon tests: concurrent dedup, failure non-cache, stop cleanup, 55s/max_ms worker kill */
+    if (sy_exists("tools/devsvc-core.cx") == 1 && ns_read_prod_rel(prod_rel, (long)sizeof prod_rel) == 0) {
+        char svcwd[600], fx[640], fxt[680], sdir[640], ndir[640], binp[640], sock[680], wrap[680], rtsv[680];
+        char slowpid_f[680], goodcnt_f[680], badcnt_f[680], script[4096], rep[680], wrap_src[2048];
+        if (cx_fmt(svcwd, sizeof svcwd, "%s/svc", base) == 0 &&
+            cx_fmt(fx, sizeof fx, "%s/fx", svcwd) == 0 &&
+            cx_fmt(fxt, sizeof fxt, "%s/tools", fx) == 0 &&
+            cx_fmt(sdir, sizeof sdir, "%s/inst", svcwd) == 0 &&
+            cx_fmt(ndir, sizeof ndir, "%s/nat", svcwd) == 0 &&
+            cx_fmt(binp, sizeof binp, "%s/devsvc-bin", svcwd) == 0 &&
+            cx_fmt(sock, sizeof sock, "%s/sock", sdir) == 0 &&
+            cx_fmt(wrap, sizeof wrap, "%s/%s", fx, prod_rel) == 0 &&
+            cx_fmt(rtsv, sizeof rtsv, "%s/tools/devsvc-repo.tsv", fx) == 0 &&
+            cx_fmt(slowpid_f, sizeof slowpid_f, "%s/slow.pid", svcwd) == 0 &&
+            cx_fmt(goodcnt_f, sizeof goodcnt_f, "%s/good.cnt", svcwd) == 0 &&
+            cx_fmt(badcnt_f, sizeof badcnt_f, "%s/bad.cnt", svcwd) == 0 &&
+            sy_mkdir_all(fxt, 0755) == 0 && sy_mkdir_all(sdir, 0700) == 0 && sy_mkdir_all(ndir, 0700) == 0 &&
+            ns_build_svc_bin(prod_rel, binp) == 0) {
+            unsigned char *tb = 0; int64_t tn = 0;
+            if (sy_read_file("tools/devsvc-repo.tsv", &tb, &tn, 65536) == 0 && tb &&
+                sy_write_atomic(rtsv, (const char *)tb, (size_t)tn, 0644) == 0 &&
+                !cx_fmt(wrap_src, sizeof wrap_src, "%s/good.cx", fx) && cx_write(wrap_src, "/* ok */\n", 9) == 0 &&
+                !cx_fmt(wrap_src, sizeof wrap_src, "%s/bad.cx", fx) && cx_write(wrap_src, "/* bad */\n", 10) == 0 &&
+                !cx_fmt(wrap_src, sizeof wrap_src, "%s/slow.cx", fx) && cx_write(wrap_src, "/* slow */\n", 11) == 0) {
+                free(tb); tb = 0;
+                if (cx_fmt(script, sizeof script,
+                           "#!/bin/sh\n"
+                           "if [ \"$1\" = \"-cx-plan\" ]; then\n"
+                           "  printf 'u\\t%%s\\n' \"$2\"\n"
+                           "  exit 0\n"
+                           "fi\n"
+                           "src=\"$1\"; out=\"$3\"\n"
+                           "case \"$src\" in\n"
+                           "  *slow.cx) sleep 25 & sp=$!; echo \"$sp\" > '%s'; wait \"$sp\"; exit 1 ;;\n"
+                           "  *bad.cx) echo 1 >> '%s'; sleep 0.05; echo \"bad compile\" >&2; exit 1 ;;\n"
+                           "  *good.cx) echo 1 >> '%s'; sleep 0.35; printf '#!/bin/sh\\necho ok\\n' > \"$out\" && chmod 755 \"$out\"; exit 0 ;;\n"
+                           "esac\n"
+                           "exit 1\n",
+                           slowpid_f, badcnt_f, goodcnt_f) == 0 &&
+                    sy_write_atomic(wrap, script, (size_t)tx_len(script, sizeof script), 0755) == 0) {
+                    const char *orig_path = sy_env("PATH");
+                    char ed[700], en[700], eh[700], emax[64], ep[4200];
+                    const char *env1[6]; int ei = 0, k;
+                    sy_spawn_t so; sy_child_t srv; sy_exit_t sex;
+                    char *sav[] = {binp, "serve", "--ttl", "60", "--idle", "30", 0};
+                    cx_fmt(ed, sizeof ed, "UNISACC_DEVSVC_DIR=%s", sdir); env1[ei++] = ed;
+                    cx_fmt(en, sizeof en, "DEVSVC_NATIVE_DIR=%s", ndir); env1[ei++] = en;
+                    cx_fmt(eh, sizeof eh, "HOME=%s", svcwd); env1[ei++] = eh;
+                    cx_fmt(emax, sizeof emax, "DEVSVC_NATIVE_MAX_MS=55000"); env1[ei++] = emax;
+                    if (orig_path && orig_path[0]) { cx_fmt(ep, sizeof ep, "PATH=%s", orig_path); env1[ei++] = ep; }
+                    env1[ei] = 0;
+
+                    /* Server round A: concurrent dedup + failure non-cache + stop kills active worker tree */
+                    sy_spawn_init(&so); so.argv = sav; so.env = (char **)env1; so.pgroup = -1;
+                    so.in_fd = SY_STDIO_NULL; so.out_fd = SY_STDIO_NULL; so.err_fd = SY_STDIO_NULL;
+                    if (sy_proc_spawn(&so, &srv) == 0) {
+                        char resp1[4096], resp2[4096], req[1024]; int ready = 0;
+                        for (k = 0; k < 50; k++) {
+                            if (sy_exists(sock) == 1 && ns_svc_req(sock, "ping", resp1, sizeof resp1) == 0 && strstr(resp1, "OK\tpong")) {
+                                ready = 1; break;
+                            }
+                            sy_sleep_ms(20);
+                        }
+                        chk(ready, "svc-a-started");
+                        if (ready && !cx_fmt(req, sizeof req, "native\t%s\tgood.cx", fx)) {
+                            int c1 = ns_sock_send(sock, req), c2 = ns_sock_send(sock, req);
+                            chk(c1 >= 0 && c2 >= 0, "svc-concurrent-connected");
+                            if (c1 >= 0) ns_sock_recv_close(c1, resp1, sizeof resp1);
+                            if (c2 >= 0) ns_sock_recv_close(c2, resp2, sizeof resp2);
+                            chk(strstr(resp1, "OK\tnative\t") && strstr(resp2, "OK\tnative\t") &&
+                                ns_count_lines(goodcnt_f) == 1, "svc-concurrent-two-requests-compile-once");
+
+                            /* Failure is never cached: second bad.cx request compiles again */
+                            cx_fmt(req, sizeof req, "native\t%s\tbad.cx", fx);
+                            chk(ns_svc_req(sock, req, resp1, sizeof resp1) == 0 && strstr(resp1, "ERR\tnative\t") &&
+                                ns_count_lines(badcnt_f) == 1, "svc-bad-first-fails");
+                            chk(ns_svc_req(sock, req, resp2, sizeof resp2) == 0 && strstr(resp2, "ERR\tnative\t") &&
+                                ns_count_lines(badcnt_f) == 2, "svc-bad-second-recompiles");
+
+                            /* Stop while worker is active MUST kill worker's whole process group (sleep grandchild) */
+                            sy_unlink(slowpid_f);
+                            cx_fmt(req, sizeof req, "native\t%s\tslow.cx", fx);
+                            {   int cs = ns_sock_send(sock, req), spid = 0;
+                                for (k = 0; k < 60; k++) {
+                                    if (ns_read_int(slowpid_f, &spid) == 0 && spid > 0) break;
+                                    sy_sleep_ms(25);
+                                }
+                                chk(spid > 0 && sy_signal(spid, 0) == 0, "svc-stop-worker-child-spawned");
+                                chk(ns_svc_req(sock, "stop", resp1, sizeof resp1) == 0 && strstr(resp1, "OK\tstopping"), "svc-stop-issued");
+                                sy_proc_wait(&srv, &sex);
+                                if (cs >= 0) sy_close(cs);
+                                sy_sleep_ms(50);
+                                chk(spid > 0 && sy_signal(spid, 0) == -ESRCH, "svc-stop-kills-worker-descendants");
+                                if (spid > 0 && sy_signal(spid, 0) != -ESRCH) sy_signal(spid, 9);
+                            }
+                        } else {
+                            ns_svc_req(sock, "stop", resp1, sizeof resp1);
+                            sy_proc_wait(&srv, &sex);
+                        }
+                    } else chk(0, "svc-a-spawn");
+
+                    /* Server round B: DEVSVC_NATIVE_MAX_MS=700 bounds worker lifetime and kills descendant group + logs native.timeout */
+                    sy_unlink(slowpid_f);
+                    cx_fmt(emax, sizeof emax, "DEVSVC_NATIVE_MAX_MS=700");
+                    sy_spawn_init(&so); so.argv = sav; so.env = (char **)env1; so.pgroup = -1;
+                    so.in_fd = SY_STDIO_NULL; so.out_fd = SY_STDIO_NULL; so.err_fd = SY_STDIO_NULL;
+                    if (sy_proc_spawn(&so, &srv) == 0) {
+                        char resp1[8192], req[1024]; int ready = 0;
+                        for (k = 0; k < 50; k++) {
+                            if (sy_exists(sock) == 1 && ns_svc_req(sock, "ping", resp1, sizeof resp1) == 0 && strstr(resp1, "OK\tpong")) {
+                                ready = 1; break;
+                            }
+                            sy_sleep_ms(20);
+                        }
+                        chk(ready, "svc-b-started");
+                        if (ready && !cx_fmt(req, sizeof req, "native\t%s\tslow.cx", fx)) {
+                            int cs = ns_sock_send(sock, req), spid = 0, killed = 0;
+                            for (k = 0; k < 60; k++) {
+                                if (ns_read_int(slowpid_f, &spid) == 0 && spid > 0) break;
+                                sy_sleep_ms(25);
+                            }
+                            chk(spid > 0, "svc-timeout-worker-child-spawned");
+                            for (k = 0; k < 80; k++) {
+                                if (spid > 0 && sy_signal(spid, 0) == -ESRCH) { killed = 1; break; }
+                                sy_sleep_ms(30);
+                            }
+                            if (cs >= 0) ns_sock_recv_close(cs, resp1, sizeof resp1);
+                            chk(killed, "svc-timeout-kills-worker-descendants");
+                            chk(ns_svc_req(sock, "events\t0", resp1, sizeof resp1) == 0 && strstr(resp1, "native.timeout") != 0, "svc-timeout-event-logged");
+                            if (spid > 0 && sy_signal(spid, 0) != -ESRCH) sy_signal(spid, 9);
+                        }
+                        ns_svc_req(sock, "stop", resp1, sizeof resp1);
+                        sy_proc_wait(&srv, &sex);
+                    } else chk(0, "svc-b-spawn");
+                }
+            }
+            if (tb) free(tb);
+            (void)rep;
+        } else chk(0, "svc-fixture-setup");
+    } else chk(0, "svc-repo-missing");
 
     {   char *rv[] = {"rm", "-rf", base, 0}; size_t rn = 0; char *ro = 0;
         (void)cx_runv_timeout(rv, 10, &ro, &rn); if (ro) mm_free(ro);
     }
-    sy_printf("NATIVESTAT\tfailed=%d\n", fails);
+    sy_printf("NATIVESTAT\tfailed=%d\tpassed=%d\n", fails, passed);
     return fails ? 1 : 0;
 }
