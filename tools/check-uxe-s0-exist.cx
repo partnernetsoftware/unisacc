@@ -1,10 +1,87 @@
 #pragma unisa use cxlib.ckassert
 #pragma unisa use chrome_dom
 #pragma unisa use sys.sha
+#pragma unisa use text.fmt
 /* tools/check-uxe-s0-exist.cx -- 13 元素包围盒内外色差;规格列哈希锁.
  */
 
 static int failed;
+
+static unsigned d2_grain(int x,int y) {
+    unsigned n=(unsigned)(x+71)*374761393u ^ (unsigned)(y+97)*668265263u;
+    n=(n^(n>>13))*1274126177u;
+    return (n^(n>>16))&255;
+}
+
+static const char *d2_rgb(const char *p,int *rgb) {
+    int i;
+    for(i=0;i<3;i++) {
+        int n=0;
+        if(*p<'0' || *p>'9') return 0;
+        while(*p>='0' && *p<='9') {
+            n=n*10+*p++-'0';
+            if(n>255) return 0;
+        }
+        rgb[i]=n;
+        if(i<2 && *p++!=',') return 0;
+    }
+    return p;
+}
+
+static int check_pixel_water(const char *mutation) {
+    static const int sky[8][3]={{75,65,82},{83,72,113},{47,49,92},{32,70,86},
+        {86,111,149},{42,52,65},{22,28,66},{75,95,122}};
+    static const int lamps[2][3]={{255,240,175},{92,70,61}};
+    char cwd[800],url[2800],profile[120],option[150],*out=0;
+    char *av[]={"google-chrome","--headless=new","--disable-gpu","--disable-background-networking",
+        "--allow-file-access-from-files","--window-size=1280,807","--virtual-time-budget=5000",
+        "--dump-dom",option,url,0};
+    const char *p;
+    size_t size=0;
+    int at,x,y,i,j,n=0,glints=0,lamp=0,bridge=0,progress=0,rc;
+    int shade=(d2_grain(2,0)&3)-1;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d2-pixel-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/demo/water-keeps/pixel.html?%s&probe=0,223,167;0,234,113",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return 2;
+    for(y=139;y<=191;y+=4) for(x=265;x<=301;x+=4) {
+        int w=tx_snprintf(url+at,sizeof url-at,";0,%d,%d",x,y);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+        at+=w; n++;
+    }
+    for(i=0;i<8;i++) {
+        /* Under W, speed approaches 1.65 from .35. Sample 30 units past each frontier. */
+        int sample=i?(i*216+30)*100/165+16:0;
+        int w=tx_snprintf(url+at,sizeof url-at,";%d,5,0",sample);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+        at+=w;
+    }
+    rc=cx_runv_timeout(av,12,&out,&size);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(out); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<2+n+8;i++) {
+        int got[3];
+        p=d2_rgb(p,got);
+        if(!p || (i<2+n+7 && *p++!=',')) { free(out); return 2; }
+        if(i==0) lamp=got[0]==lamps[0][0] && got[1]==lamps[0][1] && got[2]==lamps[0][2];
+        else if(i==1) bridge=got[0]==lamps[1][0] && got[1]==lamps[1][1] && got[2]==lamps[1][2];
+        else if(i<2+n) glints+=got[0]>142 && got[1]>115 && got[2]<180 && got[0]>got[1]+12;
+        else {
+            int different=0;
+            for(j=0;j<3;j++) different|=got[j]!=sky[i-2-n][j]+shade;
+            progress+=!different;
+        }
+    }
+    rc=strncmp(p,"</output>",9)!=0;
+    free(out);
+    if(rc) return 2;
+    printf("D2_PIXEL lantern=%d bridge=%d reflection_samples=%d/%d realms=%d/8\n",lamp,bridge,glints,n,progress);
+    return !lamp || !bridge || glints<12 || progress!=8;
+}
+
 /* 29^2 times the sum of the three channel variances; identical scale for both frames. */
 static long strip_variance(const char *dom) {
     const char *p = dom ? strstr(dom, "<pre id=\"hud\">") : 0;
@@ -38,6 +115,9 @@ int main(int argc, char **argv) {
     const char *pre = "file://";
     const char *suf = "/ujs/plans/demo-v2/look-dev/water-keeps-s0-uxe.html";
     const char *p, *q;
+    if(argc==2 && !strcmp(argv[1],"pixel-water")) return check_pixel_water("");
+    if(argc==2 && (!strcmp(argv[1],"no-lamp") || !strcmp(argv[1],"no-bridge") ||
+        !strcmp(argv[1],"no-reflection") || !strcmp(argv[1],"frozen-course"))) return check_pixel_water(argv[1]);
     if (!getcwd(cwd, sizeof cwd)) return 2;
     tf = fopen("ujs/plans/demo-v2/look-dev/s0-elements.tsv", "r");
     if (!tf) { printf("S0_EXIST_NO_TSV\n"); return 2; }
