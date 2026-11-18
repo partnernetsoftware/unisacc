@@ -1,0 +1,316 @@
+/* tools/net-health.cx -- table-net health census over every recipe net, with a lower-only baseline.  Read only:
+ * it never changes a table, a net or the product.
+ *   sh ./unisacc.com tools/net-health.cx -- [--net NAME]... [--shard K/N] [--par P] [--tsv OUT] [--detail OUT]
+ *                                           [--in ROWS]... [--baseline FILE] [--check] [--write-baseline FILE]
+ *   sh ./unisacc.com tools/net-health.cx -- --delta JSON --stage-dir DIR --name N [...]   (one synthetic net, fixtures)
+ * Nets: the recipes[] table of tools/cxlib/sourcepackage.cx (id, stage, gen flags); for each net it runs
+ * seed-gen STAGE -> delta JSON, then tools/table-lint (read-only) on it, and counts the findings per check:
+ *   total reach stale_r t_keys unwritten maybe_unwritten dead_end sb_read (table-lint checks), errors, warnings,
+ *   load_err (table-lint's delta loader refused the delta, 1/0), dup_rows and conflict_rows (rule tables of the stage
+ *   directory, header `# state<TAB>observation`: an identical repeated row / a repeated key -- every field but the last
+ *   two, next and actions -- with a different remainder).  states edges regs are size, recorded but not gated.
+ * Constructors (seed-gen at -O2 and table-lint) are built once per content key (seed/ files, table-lint.cx, delta.cx,
+ * the product bytes) under $TMPDIR/net-health-UID/ctor/KEY; no lint verdict is cached.  The whole call is bounded to
+ * 55 s (NH_BUDGET_S, 5..55): a net not finished in time is UNMEASURED, never PASS.  Split with --shard/--net and
+ * join the row files with --in.
+ * --check compares every measured net with --baseline (default tests/net-health-baseline.tsv): a gated count above the
+ *   baseline is OVER (rc 1, net and category named); below is UNDER (hint: tighten with --write-baseline, never
+ *   automatic); a measured net without a baseline row, or a baseline net not measured in a full run, is UNMEASURED (rc 1).
+ * Last line: NET_HEALTH nets=N measured=M states= edges= regs= errors= warnings= unwritten= maybe_unwritten= sb_read=
+ *   reach= dead_end= load_err= dup_rows= conflict_rows= over= under= unmeasured= ms= status=PASS|FAIL|UNMEASURED|MEASURED
+ * Check: tools/check-net-health.cx (fixtures only).  Plan: product refactor P1 / N1. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+
+#define PW 4400
+#define MAXN 96
+#define NCOL 19
+/* row columns after net, stage, status */
+static const char *COL[NCOL] = {"states", "edges", "regs", "errors", "warnings", "total", "reach", "stale_r", "t_keys", "unwritten",
+    "maybe_unwritten", "dead_end", "sb_read", "load_err", "dup_rows", "conflict_rows", "gen_ms", "lint_ms", "rc"};
+#define GATE_FROM 3
+#define GATE_TO 16   /* columns [3,16) are gated: errors .. conflict_rows */
+typedef struct { char id[64], stage[96], flags[4][40]; int nf; char status[48]; long v[NCOL]; int done; pid_t pid; char dir[PW]; } Net;
+static Net nets[MAXN]; static int nn;
+static Net base[MAXN]; static int nb;
+static char root[PW], sess[PW], ctor[PW], gen[PW], tl[PW];
+static long T0, budget = 55000;
+
+static void die(const char *s) { fprintf(stderr, "net-health: REFUSE %s\n", s); exit(2); }
+static void cpn(void *d, const void *s, size_t n) { if (n && mm_copy(d, (long)n, s, (long)n)) die("copy"); }
+static void pj(char *o, const char *a, const char *b) { if (cx_fmt(o, PW, "%s/%s", a, b)) die("path-too-long"); }
+static void cpz(char *d, size_t cap, const char *s) { size_t l = strlen(s); if (l >= cap) l = cap - 1; cpn(d, s, l); d[l] = 0; }
+static int isfile(const char *p) { struct stat st; return !stat(p, &st) && S_ISREG(st.st_mode); }
+static void mkp(const char *p) { char b[PW]; size_t n = strlen(p); if (n >= PW) die("path-too-long"); for (size_t i = 1; i <= n; i++) if (p[i] == '/' || !p[i]) { cpn(b, p, i); b[i] = 0; if (mkdir(b, 0700) && errno != EEXIST) die("mkdir"); } }
+static long left(void) { return budget - (sy_now_ms() - T0); }
+static int wordch(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.'; }
+
+/* run argv in cwd with stdout/stderr to files, own process group, killed at the call deadline; rc, 124 timeout, 127 exec */
+static int run(char **av, const char *cwd, const char *out, const char *err, long deadline_ms) {
+    fflush(stdout); fflush(stderr);
+    pid_t p = fork(); if (p < 0) die("fork");
+    if (!p) { setpgid(0, 0); if (cwd && chdir(cwd)) _exit(127);
+        int o = open(out ? out : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0600); int e = err && out && !strcmp(err, out) ? o : open(err ? err : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (o < 0 || e < 0) _exit(127); dup2(o, 1); dup2(e, 2); execvp(av[0], av); _exit(127); }
+    setpgid(p, p);
+    for (;;) { int st = 0; pid_t w = waitpid(p, &st, WNOHANG);
+        if (w == p) return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+        if (sy_now_ms() - T0 > deadline_ms) { kill(-p, SIGKILL); waitpid(p, &st, 0); return 124; }
+        sy_sleep_ms(5); }
+}
+
+/* ---- recipes (single source: tools/cxlib/sourcepackage.cx recipes[], same reader as tools/cx-dev.cx) ---- */
+static void load_recipes(void) {
+    char p[PW], *s, *a; size_t n; pj(p, root, "tools/cxlib/sourcepackage.cx");
+    if (!(s = cx_read(p, &n)) || !(a = strstr(s, "recipes[]={"))) die("recipes-unreadable");
+    a += 11;
+    for (;;) {
+        while (*a == ' ' || *a == ',' || *a == '\n' || *a == '\t' || *a == '\r') a++;
+        if (*a != '{' || nn == MAXN) break;
+        Net *r = &nets[nn]; memset(r, 0, sizeof *r); a++; int k = 0;
+        while (*a && *a != '}') {
+            if (*a == '"') { char *e = strchr(a + 1, '"'); if (!e) die("recipes-syntax"); size_t l = (size_t)(e - a - 1);
+                char *dst = k == 0 ? r->id : k == 1 ? r->stage : r->nf < 4 ? r->flags[r->nf] : 0; size_t cap = k == 0 ? 64 : k == 1 ? 96 : 40;
+                if (!dst || l >= cap) die("recipes-bound"); cpn(dst, a + 1, l); dst[l] = 0; if (k >= 2) r->nf++; k++; a = e + 1; }
+            else a++;
+        }
+        if (*a == '}') a++;
+        while (*a == ' ') a++;
+        if (*a == '}') a++;
+        if (k < 2) die("recipes-syntax");
+        nn++;
+    }
+    free(s); if (nn < 20) die("recipes-too-few");
+}
+
+/* ---- constructors, content keyed ---- */
+static void addfile(char **b, size_t *n, size_t *cap, const char *p) {
+    size_t z; char *s = cx_read(p, &z); if (!s) die("ctor-input-unreadable");
+    size_t need = *n + strlen(p) + 1 + z; if (need > *cap) { *cap = need * 2; *b = realloc(*b, *cap); if (!*b) die("alloc"); }
+    cpn(*b + *n, p, strlen(p) + 1); *n += strlen(p) + 1; cpn(*b + *n, s, z); *n += z; free(s);
+}
+static int cmpstr(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+static void ctor_key(char key[65]) {
+    char *b = 0, p[PW], *names[512]; size_t n = 0, cap = 0; int k = 0; DIR *d; struct dirent *e;
+    pj(p, root, "seed"); if (!(d = opendir(p))) die("seed-missing");
+    while ((e = readdir(d))) { if (e->d_name[0] == '.' || k == 512) continue; char q[PW]; pj(q, p, e->d_name); if (isfile(q)) { names[k] = strdup(e->d_name); if (!names[k]) die("alloc"); k++; } }
+    closedir(d); qsort(names, (size_t)k, sizeof *names, cmpstr);
+    for (int i = 0; i < k; i++) { char q[PW]; pj(q, p, names[i]); addfile(&b, &n, &cap, q); free(names[i]); }
+    pj(p, root, "tools/table-lint.cx"); addfile(&b, &n, &cap, p);
+    pj(p, root, "tools/cxlib/delta.cx"); addfile(&b, &n, &cap, p);
+    pj(p, root, "unisacc.com"); addfile(&b, &n, &cap, p);
+    if (sy_sha256_hex(b, (long)n, key) && cx_sha256_hex(b, n, key)) die("sha256");
+    free(b); key[16] = 0;
+}
+static void ensure_ctors(int need_gen) {
+    char key[65], tmp[PW + 16], log[PW + 16], src[PW]; ctor_key(key);
+    const char *td = getenv("TMPDIR"); if (cx_fmt(sess, PW, "%s/net-health-%d", td && td[0] == '/' ? td : "/tmp", (int)getuid())) die("path-too-long");
+    char rel[64]; if (cx_fmt(rel, sizeof rel, "ctor/%s", key)) die("path-too-long");
+    pj(ctor, sess, rel); mkp(ctor); pj(gen, ctor, "gen"); pj(tl, ctor, "table-lint");
+    const char *want[2] = {tl, gen}; const char *from[2] = {"tools/table-lint.cx", "seed/gen.c"}; pid_t pid[2] = {0, 0};
+    for (int i = 0; i < 2; i++) { if (i == 1 && !need_gen) continue; if (isfile(want[i])) continue;
+        if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", want[i], (int)getpid()) || cx_fmt(log, sizeof log, "%s.log", want[i])) die("path-too-long");
+        pj(src, root, from[i]);
+        fflush(stdout); fflush(stderr);
+        if (!(pid[i] = fork())) { char *av[8]; int k = 0; av[k++] = "sh"; av[k++] = (char *)sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product constructors are built by this checkout's installed product, like tools/cx-dev.cx; UNISACC overrides */ if (i) av[k++] = "-O2"; av[k++] = src; av[k++] = "-o"; av[k++] = tmp; av[k] = 0;
+            int rc = run(av, root, log, log, budget - 3000); if (!rc && rename(tmp, want[i])) rc = 1; if (rc) unlink(tmp); _exit(rc); }
+        if (pid[i] < 0) die("fork"); }
+    for (int i = 0; i < 2; i++) if (pid[i] > 0) { int st = 0; waitpid(pid[i], &st, 0); if (!WIFEXITED(st) || WEXITSTATUS(st)) { fprintf(stderr, "net-health: constructor %s failed (log %s.log)\n", from[i], want[i]); die("constructor-build-failed"); } }
+}
+
+/* ---- rule-table scan of one stage directory (non-recursive) ---- */
+static void scan_rows(const char *stage_dir, long *dup, long *conf) {
+    DIR *d = opendir(stage_dir); struct dirent *e; *dup = *conf = 0; if (!d) return;
+    while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l < 5 || strcmp(e->d_name + l - 4, ".tsv")) continue;
+        char p[PW]; pj(p, stage_dir, e->d_name); size_t n; char *s = cx_read(p, &n); if (!s) continue;
+        if (n < 19 || strncmp(s, "# state\tobservation", 19)) { free(s); continue; }
+        int cap = 1024, m = 0; char **ln = malloc(sizeof(char *) * (size_t)cap); if (!ln) die("alloc");
+        for (char *a = s; a < s + n;) { char *z = memchr(a, '\n', (size_t)(s + n - a)); if (!z) z = s + n; *z = 0;
+            if (*a && *a != '#') { if (m == cap) { cap *= 2; ln = realloc(ln, sizeof(char *) * (size_t)cap); if (!ln) die("alloc"); } ln[m++] = a; }
+            a = z + 1; }
+        /* key = every field but the last two (next, actions): `state observation` and prefixed forms like `guard state observation` */
+        for (int i = 0; i < m; i++) { char *t2 = strrchr(ln[i], '\t'); if (!t2) continue; char *t1 = t2; while (t1 > ln[i] && t1[-1] != '\t') t1--; if (t1 == ln[i]) continue; t2 = t1 - 1; size_t kl = (size_t)(t2 - ln[i]);
+            for (int j = 0; j < i; j++) if (!strncmp(ln[j], ln[i], kl) && ln[j][kl] == '\t') { if (!strcmp(ln[j], ln[i])) (*dup)++; else (*conf)++; break; } }
+        free(ln); free(s); }
+    closedir(d);
+}
+
+/* ---- parse one lint output ---- */
+static int colidx(const char *c) { for (int i = 0; i < NCOL; i++) if (!strcmp(COL[i], c)) return i; return -1; }
+static void parse_lint(Net *r, const char *out, const char *err, int rc) {
+    size_t n; char *s = cx_read(out, &n);
+    if (rc == 2) { size_t en; char *es = cx_read(err, &en); if (es && en > 7 && !strncmp(es, "delta: ", 7)) { r->v[13] = 1; cpz(r->status, sizeof r->status, "lint-not-loadable"); } else cpz(r->status, sizeof r->status, "lint-failed"); free(es); free(s); return; }
+    if (!s) { cpz(r->status, sizeof r->status, "lint-no-output"); return; }
+    int summary = 0;
+    for (char *a = s; a < s + n;) { char *z = memchr(a, '\n', (size_t)(s + n - a)); if (!z) z = s + n; *z = 0;
+        if (!strncmp(a, "SUMMARY\t", 8)) { summary = 1; char *q;
+            if ((q = strstr(a, "states="))) r->v[0] = atol(q + 7);
+            if ((q = strstr(a, "edges="))) r->v[1] = atol(q + 6);
+            if ((q = strstr(a, "registers="))) r->v[2] = atol(q + 10);
+            if ((q = strstr(a, "errors="))) r->v[3] = atol(q + 7);
+            if ((q = strstr(a, "warnings="))) r->v[4] = atol(q + 9); }
+        else { char *t = strchr(a, '\t'); if (t) { char ck[32]; char *t2 = strchr(t + 1, '\t'); size_t l = t2 ? (size_t)(t2 - t - 1) : strlen(t + 1);
+            if (l < sizeof ck) { cpn(ck, t + 1, l); ck[l] = 0; for (char *c = ck; *c; c++) if (*c == '-') *c = '_'; int ci = colidx(ck); if (ci >= 5 && ci <= 12) r->v[ci]++; } } }
+        a = z + 1; }
+    free(s);
+    cpz(r->status, sizeof r->status, summary ? "ok" : "lint-no-summary");
+}
+
+/* first occurrence of TOKEN as a whole word in the stage directory tables (lowest file name): "table<TAB>line" */
+static void locate(const char *stage_dir, const char *tok, char *o, size_t oc) {
+    cpz(o, oc, "-\t-"); DIR *d = opendir(stage_dir); struct dirent *e; if (!d) return; if (!tok[0]) { closedir(d); return; }
+    char *best = 0; long bl = 0; size_t tn = strlen(tok);
+    while ((e = readdir(d))) { size_t l = strlen(e->d_name); if (l < 5 || strcmp(e->d_name + l - 4, ".tsv")) continue;
+        char p[PW]; pj(p, stage_dir, e->d_name); if (best && strcmp(p, best) > 0) continue;
+        size_t n; char *s = cx_read(p, &n); if (!s) continue; long line = 1;
+        for (size_t i = 0; i + tn <= n; i++) { if (s[i] == '\n') { line++; continue; }
+            if (!memcmp(s + i, tok, tn) && (!i || !wordch(s[i - 1])) && (i + tn == n || !wordch(s[i + tn]))) { free(best); best = strdup(p); bl = line; break; } }
+        free(s); }
+    closedir(d);
+    if (best) { size_t rl = strlen(root); const char *rel = strncmp(best, root, rl) ? best : best + rl + 1; if (cx_fmt(o, oc, "%s\t%ld", rel, bl)) cpz(o, oc, "-\t-"); free(best); }
+}
+/* real-defect findings of one net (maybe-unwritten, reach and stale-r are counted, not listed) */
+static void detail_net(FILE *df, Net *r, const char *stage_dir) {
+    char lo[PW], le[PW]; pj(lo, r->dir, "lint.out"); pj(le, r->dir, "lint.err");
+    if (r->v[13]) { size_t n; char *es = cx_read(le, &n); char *z = es ? strchr(es, '\n') : 0; if (z) *z = 0; fprintf(df, "%s\t-\t-\tload_err\tERROR\t%s\n", r->id, es ? es : "-"); free(es); return; }
+    size_t n; char *s = cx_read(lo, &n); if (!s) return;
+    for (char *a = s; a < s + n;) { char *z = memchr(a, '\n', (size_t)(s + n - a)); if (!z) z = s + n; *z = 0;
+        if (strncmp(a, "SUMMARY", 7) && strncmp(a, "WARN\tmaybe-unwritten", 20) && strncmp(a, "WARN\treach", 10) && strncmp(a, "WARN\tstale-r", 12)) {
+            char lv[16] = "", ck[32] = "", st[256] = "", tok[256] = "", loc[PW + 32]; const char *det = "";
+            char *f1 = strchr(a, '\t'), *f2 = f1 ? strchr(f1 + 1, '\t') : 0, *f3 = f2 ? strchr(f2 + 1, '\t') : 0;
+            if (f1 && f2 && f3) { size_t l1 = (size_t)(f1 - a), l2 = (size_t)(f2 - f1 - 1), l3 = (size_t)(f3 - f2 - 1);
+                if (l1 < sizeof lv) { cpn(lv, a, l1); lv[l1] = 0; }
+                if (l2 < sizeof ck) { cpn(ck, f1 + 1, l2); ck[l2] = 0; }
+                if (l3 < sizeof st) { cpn(st, f2 + 1, l3); st[l3] = 0; }
+                det = f3 + 1;
+                if (!strcmp(ck, "unwritten")) { const char *q = strstr(det, "register "); if (q) { q += 9; size_t k = 0; while (q[k] && q[k] != ' ' && k + 1 < sizeof tok) { tok[k] = q[k]; k++; } tok[k] = 0; } }
+                else cpz(tok, sizeof tok, st);
+                locate(stage_dir, tok, loc, sizeof loc);
+                for (char *c = ck; *c; c++) if (*c == '-') *c = '_';
+                fprintf(df, "%s\t%s\t%s\t%s\t%s\n", r->id, loc, ck, lv, det); } }
+        a = z + 1; }
+    free(s);
+}
+
+/* ---- rows io ---- */
+static void put_row(FILE *f, Net *r) { fprintf(f, "%s\t%s\t%s", r->id, r->stage, r->status); for (int i = 0; i < NCOL; i++) fprintf(f, "\t%ld", r->v[i]); fputc('\n', f); }
+static void put_head(FILE *f) { fprintf(f, "# net-health-v1\n# net\tstage\tstatus"); for (int i = 0; i < NCOL; i++) fprintf(f, "\t%s", COL[i]); fputc('\n', f); }
+static int done_status(const char *s) { return !strcmp(s, "ok") || !strcmp(s, "lint-not-loadable"); }
+static int read_rows(const char *p, Net *dst, int *cnt) {
+    size_t n; char *s = cx_read(p, &n); if (!s) return -1;
+    for (char *a = s; a < s + n;) { char *z = memchr(a, '\n', (size_t)(s + n - a)); if (!z) z = s + n; *z = 0;
+        if (*a && *a != '#' && *cnt < MAXN) { Net *r = &dst[*cnt]; memset(r, 0, sizeof *r); char *f[NCOL + 3]; int k = 0; f[k++] = a;
+            for (char *c = a; *c && k < NCOL + 3; c++) if (*c == '\t') { *c = 0; f[k++] = c + 1; }
+            if (k == NCOL + 3) { cpz(r->id, sizeof r->id, f[0]); cpz(r->stage, sizeof r->stage, f[1]); cpz(r->status, sizeof r->status, f[2]); for (int i = 0; i < NCOL; i++) r->v[i] = atol(f[3 + i]); r->done = done_status(r->status); (*cnt)++; } }
+        a = z + 1; }
+    free(s); return 0;
+}
+static void stage_dir_of(Net *r, char *sd) { char st2[PW]; if (cx_fmt(st2, PW, "exec/%s", r->stage)) die("path-too-long"); pj(sd, root, st2); }
+
+int main(int argc, char **argv) {
+    T0 = sy_now_ms();
+    const char *sel[MAXN], *ins[16]; int ns = 0, nin = 0, par = 16, shk = 0, shn = 0, check = 0;
+    const char *tsv = 0, *detail = 0, *bpath = "tests/net-health-baseline.tsv", *wbase = 0, *delta = 0, *sdir = 0, *name = 0;
+    { const char *b = getenv("NH_BUDGET_S"); if (b && b[0]) { long v = atol(b); if (v < 5 || v > 55) die("NH_BUDGET_S-out-of-range"); budget = v * 1000; } }
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i], *nx = i + 1 < argc ? argv[i + 1] : 0;
+        if (!strcmp(a, "--net") && nx && ns < MAXN) { sel[ns++] = nx; i++; }
+        else if (!strcmp(a, "--shard") && nx) { if (sscanf(nx, "%d/%d", &shk, &shn) != 2 || shn < 1 || shk < 1 || shk > shn) die("bad-shard"); i++; }
+        else if (!strcmp(a, "--par") && nx) { par = atoi(nx); if (par < 1 || par > 32) die("bad-par"); i++; }
+        else if (!strcmp(a, "--tsv") && nx) { tsv = nx; i++; }
+        else if (!strcmp(a, "--detail") && nx) { detail = nx; i++; }
+        else if (!strcmp(a, "--baseline") && nx) { bpath = nx; i++; }
+        else if (!strcmp(a, "--write-baseline") && nx) { wbase = nx; i++; }
+        else if (!strcmp(a, "--in") && nx && nin < 16) { ins[nin++] = nx; i++; }
+        else if (!strcmp(a, "--delta") && nx) { delta = nx; i++; }
+        else if (!strcmp(a, "--stage-dir") && nx) { sdir = nx; i++; }
+        else if (!strcmp(a, "--name") && nx) { name = nx; i++; }
+        else if (!strcmp(a, "--check")) check = 1;
+        else { fprintf(stderr, "usage: net-health [--net NAME]... [--shard K/N] [--par P] [--tsv OUT] [--detail OUT] [--in ROWS]... [--baseline FILE] [--check] [--write-baseline FILE] | --delta JSON --stage-dir DIR --name N\n"); return 2; }
+    }
+    if (!getcwd(root, sizeof root)) die("cwd");
+    int full = !ns && !shn && !delta && !nin;
+    if (nin) { for (int i = 0; i < nin; i++) if (read_rows(ins[i], nets, &nn)) die("rows-unreadable"); full = 1; }
+    else if (delta) {
+        if (!sdir || !name) die("--delta needs --stage-dir and --name");
+        ensure_ctors(0);
+        Net *r = &nets[0]; memset(r, 0, sizeof *r); nn = 1; cpz(r->id, sizeof r->id, name); cpz(r->stage, sizeof r->stage, sdir);
+        char rel[160]; if (cx_fmt(rel, sizeof rel, "run-%d/%s", (int)getpid(), name)) die("path-too-long");
+        pj(r->dir, sess, rel); mkp(r->dir);
+        char lo[PW], le[PW]; pj(lo, r->dir, "lint.out"); pj(le, r->dir, "lint.err");
+        char *av[3] = {tl, (char *)delta, 0}; long t = sy_now_ms(); int rc = run(av, root, lo, le, budget - 500); r->v[17] = sy_now_ms() - t; r->v[18] = rc;
+        if (rc == 124) cpz(r->status, sizeof r->status, "UNMEASURED-timeout"); else parse_lint(r, lo, le, rc);
+        scan_rows(sdir, &r->v[14], &r->v[15]); r->done = done_status(r->status);
+        if (detail) { FILE *df = fopen(detail, "w"); if (!df) die("detail-open"); fprintf(df, "# net\ttable\tline\tcategory\tlevel\ttext\n"); if (r->done) detail_net(df, r, sdir); fclose(df); }
+    } else {
+        load_recipes();
+        int keep = 0;
+        for (int i = 0; i < nn; i++) { int ok = 1;
+            if (ns) { ok = 0; for (int k = 0; k < ns; k++) if (!strcmp(sel[k], nets[i].id)) ok = 1; }
+            if (shn && (i % shn) != shk - 1) ok = 0;
+            if (ok) nets[keep++] = nets[i]; }
+        for (int k = 0; k < ns; k++) { int f = 0; for (int i = 0; i < keep; i++) if (!strcmp(sel[k], nets[i].id)) f = 1; if (!f) { fprintf(stderr, "net-health: unknown net %s\n", sel[k]); return 2; } }
+        nn = keep;
+        ensure_ctors(1);
+        char rel[64], rd[PW]; if (cx_fmt(rel, sizeof rel, "run-%d", (int)getpid())) die("path-too-long"); pj(rd, sess, rel); mkp(rd);
+        int started = 0, running = 0;
+        while (started < nn || running) {
+            while (running < par && started < nn && left() > 0) { Net *r = &nets[started++]; pj(r->dir, rd, r->id); mkp(r->dir);
+                fflush(stdout); fflush(stderr);
+                if (!(r->pid = fork())) { setpgid(0, 0);
+                    char js[PW], lo[PW], le[PW], ge[PW], tm[PW]; pj(js, r->dir, "d.json"); pj(lo, r->dir, "lint.out"); pj(le, r->dir, "lint.err"); pj(ge, r->dir, "gen.log"); pj(tm, r->dir, "ms");
+                    char *av[10]; int k = 0; av[k++] = gen; av[k++] = r->stage; av[k++] = js; for (int f = 0; f < r->nf; f++) av[k++] = r->flags[f]; av[k] = 0;
+                    long t = sy_now_ms(); int rc = run(av, root, ge, ge, budget); long gm = sy_now_ms() - t;
+                    if (rc) { FILE *f = fopen(tm, "w"); if (f) { fprintf(f, "gen %d %ld 0\n", rc, gm); fclose(f); } _exit(0); }
+                    char *bv[3] = {tl, js, 0}; t = sy_now_ms(); rc = run(bv, root, lo, le, budget); long lm = sy_now_ms() - t;
+                    FILE *f = fopen(tm, "w"); if (f) { fprintf(f, "lint %d %ld %ld\n", rc, gm, lm); fclose(f); }
+                    unlink(js); _exit(0); }
+                if (r->pid < 0) die("fork");
+                setpgid(r->pid, r->pid); running++; }
+            if (started < nn && left() <= 0 && !running) break;
+            for (int i = 0; i < started; i++) { Net *r = &nets[i]; if (r->pid <= 0) continue; int st = 0; pid_t w = waitpid(r->pid, &st, WNOHANG);
+                if (w == r->pid) { r->pid = 0; running--;
+                    char tm[PW], lo[PW], le[PW], what[8] = "", sd[PW]; int rc = -1; long gm = 0, lm = 0; pj(tm, r->dir, "ms"); pj(lo, r->dir, "lint.out"); pj(le, r->dir, "lint.err");
+                    size_t n; char *s = cx_read(tm, &n); if (s) { sscanf(s, "%7s %d %ld %ld", what, &rc, &gm, &lm); free(s); }
+                    r->v[16] = gm; r->v[17] = lm; r->v[18] = rc;
+                    if (!strcmp(what, "gen")) cpz(r->status, sizeof r->status, rc == 124 ? "UNMEASURED-timeout" : "gen-failed");
+                    else if (!strcmp(what, "lint")) { if (rc == 124) cpz(r->status, sizeof r->status, "UNMEASURED-timeout"); else parse_lint(r, lo, le, rc); }
+                    else cpz(r->status, sizeof r->status, "UNMEASURED-no-record");
+                    stage_dir_of(r, sd); scan_rows(sd, &r->v[14], &r->v[15]);
+                    r->done = done_status(r->status); }
+                else if (left() < 0) { kill(-r->pid, SIGKILL); waitpid(r->pid, &st, 0); r->pid = 0; running--; cpz(r->status, sizeof r->status, "UNMEASURED-timeout"); } }
+            if (running) sy_sleep_ms(10);
+        }
+        for (int i = 0; i < nn; i++) if (!nets[i].status[0]) cpz(nets[i].status, sizeof nets[i].status, "UNMEASURED-not-started");
+        if (detail) { FILE *df = fopen(detail, "w"); if (!df) die("detail-open"); fprintf(df, "# net\ttable\tline\tcategory\tlevel\ttext\n");
+            for (int i = 0; i < nn; i++) if (nets[i].done) { char sd[PW]; stage_dir_of(&nets[i], sd); detail_net(df, &nets[i], sd); }
+            fclose(df); }
+    }
+    put_head(stdout); long sum[NCOL] = {0}; int measured = 0;
+    for (int i = 0; i < nn; i++) { put_row(stdout, &nets[i]); if (nets[i].done) { measured++; for (int c = 0; c < NCOL; c++) sum[c] += nets[i].v[c]; } }
+    if (tsv) { FILE *f = fopen(tsv, "w"); if (!f) die("tsv-open"); put_head(f); for (int i = 0; i < nn; i++) put_row(f, &nets[i]); fclose(f); }
+    int over = 0, under = 0, unm = 0; for (int i = 0; i < nn; i++) if (!nets[i].done) unm++;
+    if (wbase) { if (unm) { fprintf(stderr, "net-health: refusing --write-baseline with %d UNMEASURED nets\n", unm); return 1; }
+        FILE *f = fopen(wbase, "w"); if (!f) die("baseline-open"); put_head(f);
+        for (int i = 0; i < nn; i++) { Net c = nets[i]; c.v[16] = c.v[17] = 0; put_row(f, &c); }   /* timings are not baseline material */
+        fclose(f);
+        printf("NET_HEALTH_BASELINE_WRITTEN\t%s\tnets=%d\n", wbase, nn); }
+    if (check) {
+        int bmiss = read_rows(bpath, base, &nb); if (bmiss) { printf("UNMEASURED\tbaseline-unreadable\t%s\n", bpath); unm++; }
+        for (int i = 0; i < nn; i++) { Net *r = &nets[i]; if (!r->done) { printf("UNMEASURED\t%s\tstatus=%s\n", r->id, r->status); continue; }
+            Net *b = 0; for (int k = 0; k < nb; k++) if (!strcmp(base[k].id, r->id)) b = &base[k];
+            if (!b) { printf("UNMEASURED\t%s\tno-baseline-row\n", r->id); unm++; continue; }
+            for (int c = GATE_FROM; c < GATE_TO; c++) {
+                if (r->v[c] > b->v[c]) { printf("OVER\t%s\t%s\tbaseline=%ld\tnow=%ld\n", r->id, COL[c], b->v[c], r->v[c]); over++; }
+                else if (r->v[c] < b->v[c]) { printf("UNDER\t%s\t%s\tbaseline=%ld\tnow=%ld\thint=tighten-with---write-baseline\n", r->id, COL[c], b->v[c], r->v[c]); under++; } } }
+        if (full && !bmiss) for (int k = 0; k < nb; k++) { int f = 0; for (int i = 0; i < nn; i++) if (!strcmp(base[k].id, nets[i].id)) f = 1; if (!f) { printf("UNMEASURED\t%s\tbaseline-net-not-measured\n", base[k].id); unm++; } }
+    }
+    const char *status = check ? (over ? "FAIL" : unm ? "UNMEASURED" : "PASS") : unm ? "UNMEASURED" : "MEASURED";
+    printf("NET_HEALTH nets=%d measured=%d states=%ld edges=%ld regs=%ld errors=%ld warnings=%ld unwritten=%ld maybe_unwritten=%ld sb_read=%ld reach=%ld dead_end=%ld load_err=%ld dup_rows=%ld conflict_rows=%ld over=%d under=%d unmeasured=%d ms=%ld status=%s\n",
+        nn, measured, sum[0], sum[1], sum[2], sum[3], sum[4], sum[9], sum[10], sum[12], sum[6], sum[11], sum[13], sum[14], sum[15], over, under, unm, sy_now_ms() - T0, status);
+    return over || unm ? 1 : 0;
+}
