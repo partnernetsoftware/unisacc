@@ -66,3 +66,5 @@
 灯舟候选为 `banks-audit.html`。实测上一候选在原起点门只剩 23% 桥宽，原因是近岸芦苇覆盖桥面。先画新苇丛和木桩，再画桥和桥灯，原采样口径恢复到 43%。另从 W 推进轨迹中为 0、3、6、9、12 米选择最近一帧，按原桥色可见像素比例逐帧测得 43%、49%、57%、71%、79%，每帧阈值均为 40%。缩桥时前三帧为 26%、30%、35%。经 `tools/check-uxe-s0-exist.cx -- banks-bridge-approach` 复跑，缩桥追加 `narrow-bridge`。保留原构图、航程、反射和双岸前景门。实拍并排在 `/tmp/audit-d2-bridge-fixed-comparison.png`。
 
 飞行候选为 `d1-coast-audit.html`。近岸陆架由相连的岬角和浅湾组成，远岛仍可分层辨认。`tools/check-uxe-d1-flight.cx -- audit-coast` 先算世界图连通陆块，再按同一陆块的渲染标记算三个固定航向的跨幅。-18、0、18 度依次测得 99、84、70 个采样列，画面总宽 142 列，远岛深度带分别为 3、4、3。切断陆架时最大陆块占陆地比例从约 49% 降至 37%，低于 45% 下限。`-- coast-battle` 对候选实注入操控并复跑战斗和音频门。三联图为 `/tmp/audit-d1-coast-comparison.png`，左参考、中线上、右候选。三栏机位近似配对，右栏使用机器门的固定航向。
+
+W1 继续使用 `d1-coast-audit.html`，`tools/check-uxe-d1-flight.cx -- w1` 独立计算转向过程相机和 30 帧翼迹。W2 的 `d4-smoke-w2.html` 按发射时行程保留烟团世界位置，`tools/check-uxe-d3-geometry.cx -- w2` 检查三档颗粒、三列可见烟柱和拖尾，`-- w2-camera` 复验跟拍。W3 的 `d3-deck-w3.html` 使用相同漫游轨道，`-- w3` 再独立复算定向草风并读取石缝和磨损像素，`-- w3-path` 复验路线。各项并排图为 `/tmp/audit-w1-comparison.png`、`/tmp/audit-w2-comparison.png`、`/tmp/audit-w3-comparison.png`。
