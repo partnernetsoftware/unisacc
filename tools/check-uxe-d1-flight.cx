@@ -582,6 +582,41 @@ static int check_combat(const char *mutation,int published) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+static int check_viewport(const char *mutation) {
+    char cwd[1024],url[1800],profile[160],option[180],path[160],shot[180],*out=0;
+    char *window[]={ "--window-size=1280,807","--window-size=960,1000" };
+    char *bottom[]={ "3x1+639+719","3x1+479+912" };
+    char *chrome[]={"google-chrome","--headless=new","--disable-background-networking",
+        "--allow-file-access-from-files","--no-first-run","--virtual-time-budget=5000",
+        option,shot,0,url,0};
+    char *crop[]={"convert",path,"-crop",0,"+repage","-depth","8","rgb:-",0};
+    size_t size;
+    int i,j,failed=0;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("viewport-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?still=1&%s",cwd,mutation);
+    for(i=0;i<2;i++) {
+        int rc,background=0;
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-viewport-%d-%d",(int)getpid(),i);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        tx_snprintf(path,sizeof path,"%s/viewport.png",profile);
+        tx_snprintf(shot,sizeof shot,"--screenshot=%s",path);
+        chrome[8]=window[i];
+        crop[3]=bottom[i];
+        rc=cx_runv_timeout(chrome,12,&out,&size);
+        if(rc) { chd_wipe(profile); return input_error("viewport-chrome",out); }
+        free(out); out=0;
+        rc=cx_runv_timeout(crop,4,&out,&size);
+        chd_wipe(profile);
+        if(rc || size!=9) return input_error("viewport-pixels",out);
+        for(j=0;j<9;j+=3)
+            background+=(unsigned char)out[j]==34 && (unsigned char)out[j+1]==86 && (unsigned char)out[j+2]==117;
+        printf("D1_VIEWPORT size=%s background_pixels=%d/3\n",window[i]+14,background);
+        failed+=background!=0;
+        free(out); out=0;
+    }
+    return failed!=0;
+}
+
 static int detail_material(int r,int g,int b) {
     static const int paint[4][3]={{121,155,65},{103,168,81},{52,104,56},{174,225,231}};
     static const int haze[3]={173,214,234};
@@ -858,6 +893,8 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"effects")) return check_effects("");
     if(argc==2 && !strcmp(argv[1],"attitude")) return check_attitude("");
     if(argc==2 && !strcmp(argv[1],"detail")) return check_detail("");
+    if(argc==2 && !strcmp(argv[1],"viewport")) return check_viewport("");
+    if(argc==2 && !strcmp(argv[1],"short-canvas")) return check_viewport(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||
         !strcmp(argv[1],"still-waves"))) return check_detail(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"shallow-roll") || !strcmp(argv[1],"flat-pitch") ||
