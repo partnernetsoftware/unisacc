@@ -181,16 +181,27 @@ function townBlock(color,x,y,z,w,h,d,roll) {
   return item;
 }
 const bareBelly=params.has("bare-belly"),heroGear=[];
+let gearPivot=null;
 const mainGear=([kind,,,,w])=>kind==="gear" && w>=2;
 const townCounts=buildTown(layout.filter(row=>row[0]!=="smoke" && !mainGear(row) &&
   (row[0]!=="gear" || row[2]>=deckTop || bareBelly)),{block:townBlock,add,round},mode,
   !params.has("no-u2-fittings"));
 if(!params.has("no-main-gear")) {
   const originalGear=bareBelly || params.has("recessed-main-gear");
-  const hero=layout.filter(mainGear).map(([kind,x,y,z,w,h,d])=>
-    originalGear?[kind,x,y,z,w,h,d]:[kind,x,y-.18,4.76,w*1.48,h*1.48,d]);
+  const hero=layout.filter(mainGear).map(([kind,x,y,z,w,h,d])=>{
+    if(originalGear) return [kind,x,y,z,w,h,d];
+    const center=[x+.45,y+.19,4.45];
+    gearPivot=[center[0],deckTop+(center[1]-deckTop)*townScale/1000,center[2]];
+    return [kind,...center,w*.98,h*.98,d];
+  });
   townCounts.gears+=buildTown(hero,{
-    block:(...args)=>heroGear.push(block(...args)),
+    block:(color,x,y,z,w,h,d,roll=0)=>{
+      if(!gearPivot || !roll) { heroGear.push(block(color,x,y,z,w,h,d,roll)); return; }
+      const source=extraMeshes[box(w,h,d)-allMeshes().length];
+      const c=Math.cos(roll),s=Math.sin(roll);
+      const rotate=values=>values.map((v,i)=>i%3===0?c*v-s*values[i+1]:i%3===1?s*values[i-1]+c*v:v);
+      heroGear.push(add(color,mesh(rotate(source.positions),rotate(source.normals),source.uvs),x,y,z));
+    },
     add:(...args)=>heroGear.push(add(...args)),round
   },mode).gears;
 }
@@ -382,6 +393,18 @@ function renderPose(phase, gaitMode=mode, smokeTick=null) {
   camera.setEye(eye[0]+chase+3.0*wide,eye[1]+.8*wide,eye[2]+15*wide);
   camera.setTarget(target[0]+chase,target[1]-2.25*wide,target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
+  if(gearPivot) {
+    const [gx,gy,gz]=gearPivot.map((v,i)=>v+pose.offset[i]);
+    const [dx,dy,dz]=[camera.eye[0]-gx,camera.eye[1]-gy,camera.eye[2]-gz];
+    const yaw=Math.atan2(dx,Math.hypot(dy,dz))+(params.has("tilted-main-gear")?.74:0);
+    const pitch=-Math.atan2(dy,dz);
+    const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+    for(const item of heroGear) {
+      const [x,y,z]=item.slice(0,3).map((v,i)=>v-gearPivot[i]);
+      const depth=z*cy-x*sy;
+      set(item,[gx+x*cy+z*sy,gy+y*cp-depth*sp,gz+y*sp+depth*cp,item[3],yaw,pitch,0]);
+    }
+  }
   if(smokeTick!==null && !params.has("still-u2c-smoke")) {
     for(let index=0;index<smoke.length;index++) {
       const item=smoke[index],{stack,j,tier}=smokeFacts[index];
@@ -559,7 +582,7 @@ function startPlay() {
     }
     document.querySelector("output").textContent=trace.join(";")+"|"+visible;
   } else if(params.has("main-gear-check")) {
-    const w=400,h=300,x=640,y=25;
+    const w=520,h=300,x=420,y=0;
     const full=new Uint8Array(w*h*4),hidden=new Uint8Array(full.length);
     draw();
     gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,full);
@@ -568,15 +591,19 @@ function startPlay() {
     gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,hidden);
     const rows=[];
     for(let row=0;row<h;row++) {
-      let lit=0;
+      let lit=0,left=w,right=-1;
       for(let col=0;col<w;col++) {
         const i=4*(row*w+col),r=full[i],g=full[i+1],b=full[i+2];
         if(r>115 && r-g>=18 && g-b>=25 &&
-           Math.abs(r-hidden[i])+Math.abs(g-hidden[i+1])+Math.abs(b-hidden[i+2])>=36) lit++;
+           Math.abs(r-hidden[i])+Math.abs(g-hidden[i+1])+Math.abs(b-hidden[i+2])>=36) {
+          lit++;
+          left=Math.min(left,col);
+          right=col;
+        }
       }
-      rows.push(lit);
+      rows.push([lit,left,right].join(","));
     }
-    document.querySelector("output").textContent=rows.join(",");
+    document.querySelector("output").textContent=rows.join(";");
   } else if(params.has("belly-check")) {
     draw();
     document.querySelector("output").textContent=belly.map(({role,part})=>
