@@ -22,6 +22,9 @@ const boat={x:0,z:0,speed:.35,yaw:0,tick:0};
 const keys=new Set(),end=reachLength*reaches.length;
 const river=z=>5.4*Math.sin(z/49)+4.3*Math.sin(z/117);
 const half=z=>13.2+1.9*Math.sin(z/39);
+const bankOffset=(z,side)=>query.has("straight-bank")?0:
+  1.7*Math.sin(z*.077+side*1.7)+.65*Math.sin(z*.21+side*.55);
+const bankEdge=(z,side)=>river(z)+side*(half(z)+bankOffset(z,side));
 const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
 const blend=(a,b,t)=>a.map((n,i)=>Math.round(n+(b[i]-n)*t));
 const css=c=>"rgb("+c.join(",")+")";
@@ -72,7 +75,7 @@ function background(theme) {
   for(let y=0;y<height;y++) {
     const drift=y-horizon;
     const d=1550/Math.max(1,drift),z=boat.z+d;
-    const center=213+(river(z)-boat.x)*155/d,edge=half(z)*155/d;
+    const left=213+(bankEdge(z,-1)-boat.x)*155/d,right=213+(bankEdge(z,1)-boat.x)*155/d;
     const riverColor=blend(nearWater,deepWater,clamp(drift/150,0,1));
     const sky=blend(high,low,Math.min(1,y/horizon));
     const shore=blend(bank,low,.26*Math.max(0,1-drift/72));
@@ -93,11 +96,12 @@ function background(theme) {
         const band=r<23*23?glow:r<48*48 && grain>186?blend(sky,glow,.42):sky;
         channels(at,band,(grain&3)-1);
       } else {
-        const wet=Math.abs(x-center)<edge,seed=noise((x+wave)>>2,Math.floor(z*.64));
+        const wet=x>left && x<right,seed=noise((x+wave)>>2,Math.floor(z*.64));
         const reflected=reflections && Math.abs(x-light-wave)<3+drift*.23;
         if(!wet) {
           const grass=waterLayers && drift>8 && noise(x>>3,y>>2)<Math.min(170,drift+36);
-          channels(at,grass?bankShade:shore,((seed>>4)&7)-3);
+          const fine=Math.min(Math.abs(x-left),Math.abs(x-right));
+          channels(at,fine<3.4 && drift>17?blend(bankShade,shore,.48):grass?bankShade:shore,((seed>>4)&7)-3);
         } else if(reflected && seed>115) channels(at,seed>205?glint:waterLight,(seed&7)-4);
         else if(waterLayers && reflections) {
           const crest=(y+((x>>4)&1)+wave)%6===0;
@@ -297,6 +301,57 @@ function reedBed() {
     }
   }
 }
+function nearBanks(theme,mask=false) {
+  const [, ,fog, ,water,ground,light]=theme;
+  function contour(path,points) {
+    path.moveTo(...points[0]);
+    for(let i=1;i<points.length;i++) path.lineTo(...points[i]);
+    path.closePath();
+  }
+  if(!query.has("bare-reed-verge")) {
+    const first=Math.floor(boat.z/4)*4;
+    for(let strip=19;strip>=0;strip--) for(const side of [-1,1]) {
+      const z=first+13+4*strip,d=z-boat.z;
+      if(d<11) continue;
+      const tint=clamp((d-15)/140,0,.68);
+      const dark=mask?(side<0?"#ff0000":"#00ff00"):css(blend([48,64,36],fog,tint));
+      const bright=mask?dark:css(blend([143,133,69],fog,tint));
+      const stems=new Path2D(),blades=new Path2D(),mirrors=new Path2D();
+      for(let i=0;i<(side<0?13:25);i++) {
+        const n=noise(i,Math.floor(z)+side*71);
+        const shallows=d<22?2.9:1.1;
+        const p=point(bankEdge(z,side)+side*((n%71)/13-shallows),z+(n%3)*.83);
+        if(p.x<-12 || p.x>width+12 || p.y>height+12) continue;
+        const h=p.scale*(1.7+(n%43)/12),w=Math.max(1,p.scale*.09);
+        const lean=(n%2?1:-1)*h*(.16+(n%8)*.037)+Math.sin(boat.tick*.045+i)*p.scale*.21;
+        if(!mask && reflections && n%3===0) mirrors.rect(Math.round(p.x),Math.round(p.y+2),w,h*.27);
+        contour(stems,[[p.x,p.y],[p.x+w,p.y],[p.x+lean+w,p.y-h],[p.x+lean,p.y-h]]);
+        contour(blades,[[p.x+lean*.27,p.y-h*.29],[p.x+lean*.51,p.y-h*.58],
+          [p.x+lean*.77+side*h*.26,p.y-h*.72],[p.x+lean*.52,p.y-h*.55]]);
+        if(n%6===0) blades.rect(Math.round(p.x+lean),Math.round(p.y-h-1),w+1,Math.max(2,h*.13));
+      }
+      if(!mask && reflections) { paint.fillStyle=css(blend(water,ground,.45)); paint.fill(mirrors); }
+      paint.fillStyle=dark; paint.fill(stems);
+      paint.fillStyle=bright; paint.fill(blades);
+    }
+  }
+  if(query.has("bare-moorings")) return;
+  const first=Math.floor(boat.z/8)*8;
+  for(let strip=6;strip>=0;strip--) {
+    const z=first+13+8*strip,d=z-boat.z,n=noise(47,Math.floor(z));
+    if(d<11 || n%7===0) continue;
+    const p=point(bankEdge(z,-1)+.8+(n%17)/13,z);
+    const w=Math.max(2,p.scale*(.39+(n%11)*.014)),h=p.scale*(1.85+(n%15)*.088);
+    const lean=(n%3-1)*w*.61, shade=clamp(d/130,0,.51);
+    const shadow=mask?"#0000ff":css(blend([72,48,32],fog,shade));
+    const grain=mask?shadow:css(blend([154,110,68],light,.13+shade));
+    if(!mask && reflections) pixel(css(blend(water,ground,.43)),p.x-w*.5,p.y+1,w,h*.36);
+    polygon(shadow,[[p.x-w*.52,p.y+2],[p.x+w*.46,p.y+2],[p.x+w*.37+lean,p.y-h],[p.x-w*.47+lean,p.y-h+2]]);
+    polygon(grain,[[p.x+w*.14,p.y+1],[p.x+w*.4,p.y+2],[p.x+w*.37+lean,p.y-h],[p.x+w*.12+lean,p.y-h+2]]);
+    pixel(grain,p.x+lean-w*.50,p.y-h,w,Math.max(1,w*.18));
+    if(!mask && n%3===1) pixel("#b79a67",p.x+lean-w*.56,p.y-h*.6,w*1.07,Math.max(1,w*.13));
+  }
+}
 function fireflies() {
   if(query.has("no-fireflies")) return;
   for(let mote=0;mote<46;mote++) {
@@ -356,6 +411,7 @@ function draw() {
   ridges(theme,realm);
   banks(theme);
   reedBed();
+  nearBanks(theme);
   lilies(theme);
   crossing(theme);
   foregroundLily(theme);
@@ -388,7 +444,52 @@ addEventListener("keydown",event=>{
 });
 addEventListener("keyup",event=>keys.delete(event.code));
 addEventListener("blur",()=>{ keys.clear(); pointer=null; });
-if(query.has("zones")) {
+if(query.has("bridge-approach")) {
+  const trace=[];
+  for(const waypoint of [0,3,6,9,12]) {
+    let previous={...boat};
+    while(boat.z<waypoint) {
+      previous={...boat};
+      step(0,1);
+    }
+    const next={...boat};
+    if(waypoint-previous.z < next.z-waypoint) Object.assign(boat,previous);
+    draw();
+    const depth=24-boat.z;
+    const y=Math.round(horizon+(1550-5*155)/depth+2);
+    const rgba=paint.getImageData(0,y,width,1).data;
+    const row=[];
+    for(let x=0;x<width;x++) row.push(...rgba.subarray(4*x,4*x+3));
+    trace.push(Math.round(1000*boat.z)+","+y+"|"+row.join(","));
+    Object.assign(boat,next);
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=trace.join(";");
+} else if(query.has("bank-audit")) {
+  const trace=[];
+  for(const z of [0,30,58]) {
+    boat.z=z;
+    boat.x=river(z)*.78;
+    paint.fillStyle="#000";
+    paint.fillRect(0,0,width,height);
+    nearBanks(reaches[0],true);
+    const rgba=paint.getImageData(0,0,width,height).data;
+    const shore=[];
+    for(let y=111;y<=225;y+=6) {
+      const d=1550/(y-horizon);
+      shore.push(Math.round(213+(bankEdge(z+d,-1)-boat.x)*155/d),
+        Math.round(213+(bankEdge(z+d,1)-boat.x)*155/d));
+    }
+    let labels="";
+    for(let y=110;y<height;y+=2) for(let x=0;x<width;x+=2) {
+      const at=4*(y*width+x);
+      labels+=String(Number(rgba[at]>127)+2*Number(rgba[at+1]>127)+4*Number(rgba[at+2]>127));
+    }
+    trace.push(shore.join(",")+"|"+labels);
+  }
+  document.querySelector("output").textContent=trace.join(";");
+} else if(query.has("zones")) {
   draw();
   const samples=[],raster=paint.getImageData(0,0,width,height).data;
   for(const zone of query.get("zones").split(";")) {
@@ -421,6 +522,10 @@ if(query.has("zones")) {
   const reach=clamp(Number(query.get("still")) || 1,1,reaches.length);
   const frames=reach>1?Math.ceil(((reach-1)*reachLength+28)/1.65)+16:0;
   for(let i=0;i<frames;i++) step(0,1);
+  if(query.has("at")) {
+    boat.z=clamp(Number(query.get("at"))||0,0,end);
+    boat.x=river(boat.z)*.78;
+  }
   draw();
   if(query.get("auto")==="1") document.title=query.has("bad-auto-title")?"WATER_FAIL":"WATER_OK";
 } else {
@@ -432,11 +537,17 @@ if(query.has("zones")) {
   });
   canvas.addEventListener("pointermove",pointInput);
   canvas.addEventListener("lostpointercapture",()=>pointer=null);
-  let previous=performance.now();
+  let previous=performance.now(),pending=0;
+  const interval=1000/30;
   function animate(now) {
-    if(now-previous>=32) {
-      previous=now;
-      step(...steerInput());
+    pending+=Math.min(240,now-previous);
+    previous=now;
+    if(pending>=interval) {
+      const input=steerInput();
+      while(pending>=interval) {
+        step(...input);
+        pending-=interval;
+      }
       draw();
     }
     requestAnimationFrame(animate);

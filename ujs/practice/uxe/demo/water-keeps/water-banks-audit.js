@@ -1,0 +1,557 @@
+const width=426,height=240,horizon=90,reachLength=216;
+const canvas=document.querySelector("canvas"),paint=canvas.getContext("2d",{alpha:false});
+const image=paint.createImageData(width,height),data=image.data;
+const query=new URLSearchParams(location.search);
+const reflections=!query.has("no-reflection");
+const waterLayers=!query.has("mud-water"),ripples=!query.has("flat-ripples");
+const gradient=!query.has("flat-reflection");
+const inputTest=query.get("input-test")==="1";
+const reaches=[
+  ["苇汀",[151,113,80],[255,187,95],[171,111,63],[105,66,46],[83,57,43],[255,221,151]],
+  ["花浅",[83,72,113],[222,153,156],[113,101,145],[63,58,91],[65,52,72],[255,210,171]],
+  ["紫雾",[47,49,92],[171,151,175],[74,91,130],[41,52,90],[45,43,77],[227,200,190]],
+  ["青峡",[32,70,86],[133,183,157],[57,116,119],[26,71,83],[28,63,70],[244,207,130]],
+  ["雪湾",[86,111,149],[222,227,207],[123,155,177],[51,86,118],[75,92,112],[253,237,176]],
+  ["石灯",[42,52,65],[144,154,137],[70,104,106],[37,63,70],[42,50,58],[249,202,128]],
+  ["星滩",[22,28,66],[116,107,146],[61,78,123],[25,43,79],[35,35,63],[199,243,209]],
+  ["晨浦",[75,95,122],[240,188,152],[100,134,146],[49,89,110],[60,72,84],[255,231,170]]
+];
+const coolDusk=query.has("cool-dusk")?
+  ["苇汀",[75,65,82],[243,175,102],[105,87,102],[60,47,68],[61,48,53],[255,217,145]]:null;
+const boat={x:0,z:0,speed:.35,yaw:0,tick:0};
+const keys=new Set(),end=reachLength*reaches.length;
+const river=z=>5.4*Math.sin(z/49)+4.3*Math.sin(z/117);
+const half=z=>13.2+1.9*Math.sin(z/39);
+const bankOffset=(z,side)=>query.has("straight-bank")?0:
+  1.7*Math.sin(z*.077+side*1.7)+.65*Math.sin(z*.21+side*.55);
+const bankEdge=(z,side)=>river(z)+side*(half(z)+bankOffset(z,side));
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+const blend=(a,b,t)=>a.map((n,i)=>Math.round(n+(b[i]-n)*t));
+const css=c=>"rgb("+c.join(",")+")";
+let pointer=null,shown=-1;
+
+function noise(x,y) {
+  let n=(Math.imul(x+71,374761393)^Math.imul(y+97,668265263))>>>0;
+  n=Math.imul(n^(n>>>13),1274126177)>>>0;
+  return (n^(n>>>16))&255;
+}
+function step(steer,thrust) {
+  const bound=half(boat.z)-.9,center=river(boat.z);
+  boat.yaw+=.13*(steer-boat.yaw);
+  boat.x+=boat.yaw*(.12+boat.speed*.17)+(center-boat.x)*.011;
+  const rubbing=Math.abs(boat.x-center)>bound;
+  boat.x=clamp(boat.x,center-bound,center+bound);
+  const drag=rubbing && !query.has("no-bank-slow");
+  const target=drag?.16:thrust>0?1.65:thrust<0?-.48:.35;
+  boat.speed+=(target-boat.speed)*(drag?.30:.085);
+  if(!query.has("frozen-course")) boat.z=clamp(boat.z+boat.speed,0,end);
+  boat.tick++;
+}
+function pixel(color,x,y,w=1,h=1) {
+  paint.fillStyle=color;
+  paint.fillRect(Math.round(x),Math.round(y),w,h);
+}
+function polygon(color,points) {
+  paint.fillStyle=color;
+  paint.beginPath();
+  paint.moveTo(points[0][0],points[0][1]);
+  for(const [x,y] of points.slice(1)) paint.lineTo(x,y);
+  paint.closePath();
+  paint.fill();
+}
+function point(x,z) {
+  const depth=z-boat.z;
+  return {x:213+(x-boat.x)*155/depth,y:horizon+1550/depth,scale:155/depth};
+}
+function channels(i,color,delta=0) {
+  data[i]=color[0]+delta;
+  data[i+1]=color[1]+delta;
+  data[i+2]=color[2]+delta;
+  data[i+3]=255;
+}
+function background(theme) {
+  const [,high,low,nearWater,deepWater,bank,glow]=theme;
+  const light=282-(boat.x-river(boat.z))*1.8;
+  for(let y=0;y<height;y++) {
+    const drift=y-horizon;
+    const d=1550/Math.max(1,drift),z=boat.z+d;
+    const left=213+(bankEdge(z,-1)-boat.x)*155/d,right=213+(bankEdge(z,1)-boat.x)*155/d;
+    const riverColor=blend(nearWater,deepWater,clamp(drift/150,0,1));
+    const sky=blend(high,low,Math.min(1,y/horizon));
+    const shore=blend(bank,low,.26*Math.max(0,1-drift/72));
+    const glint=blend(riverColor,glow,.73);
+    const waterLight=blend(riverColor,glow,.47);
+    const wave=Math.floor(Math.sin(y*.58+boat.tick*.16)*(2+drift*.025));
+    const mirror=blend(low,high,clamp(.22+drift/166,0,1));
+    const reflectedBody=gradient?blend(riverColor,mirror,clamp(.49-drift*.002,0,.49)):nearWater;
+    const depthTint=blend(deepWater,[39,78,80],.73);
+    const shadow=gradient?blend(reflectedBody,depthTint,clamp((drift-32)/110,0,.82)):nearWater;
+    const striped=blend(reflectedBody,glow,.16);
+    const bankShade=blend(shore,[36,57,43],.52);
+    for(let x=0;x<width;x++) {
+      const at=4*(y*width+x);
+      if(drift<0) {
+        const dx=x-light,dy=y-53,r=dx*dx+dy*dy;
+        const grain=noise(x>>1,y>>1);
+        const band=r<23*23?glow:r<48*48 && grain>186?blend(sky,glow,.42):sky;
+        channels(at,band,(grain&3)-1);
+      } else {
+        const wet=x>left && x<right,seed=noise((x+wave)>>2,Math.floor(z*.64));
+        const reflected=reflections && Math.abs(x-light-wave)<3+drift*.23;
+        if(!wet) {
+          const grass=waterLayers && drift>8 && noise(x>>3,y>>2)<Math.min(170,drift+36);
+          const fine=Math.min(Math.abs(x-left),Math.abs(x-right));
+          channels(at,fine<3.4 && drift>17?blend(bankShade,shore,.48):grass?bankShade:shore,((seed>>4)&7)-3);
+        } else if(reflected && seed>115) channels(at,seed>205?glint:waterLight,(seed&7)-4);
+        else if(waterLayers && reflections) {
+          const crest=(y+((x>>4)&1)+wave)%6===0;
+          const cut=(seed&31)<25, shadeline=(y+(wave>>1))%11<3;
+          const away=Math.abs(x-light-wave)>25+drift*.19;
+          if(ripples && crest && cut && drift>18 && seed>70) channels(at,[233,181,112]);
+          else channels(at,away && (shadeline || drift>108)?shadow:crest && ripples?striped:reflectedBody,(seed&7)-3);
+        } else channels(at,riverColor,(seed>240?23:seed<19?-9:0)+(seed&3));
+      }
+    }
+  }
+  paint.putImageData(image,0,0);
+}
+function clouds(theme) {
+  const [,high,low]=theme;
+  for(const [cx,cy,rx,ry,seed] of [[54,40,62,15,2],[155,59,52,11,3],[356,26,75,17,4],[331,71,60,14,5]]) {
+    for(let y=-ry;y<=ry;y+=2) {
+      const span=rx*Math.sqrt(1-y*y/(ry*ry));
+      for(let x=-span;x<span;x+=3) {
+        const roll=noise(Math.floor(x/7)+seed,Math.floor(y/3));
+        if(roll<70 || Math.abs(x)>span*(.87+(roll&7)/38)) continue;
+        const color=blend(y>1?high:low,low,y>1?.5:.82);
+        pixel(css(color),cx+x-boat.x*.4,cy+y,3,2);
+      }
+    }
+  }
+}
+function ridges(theme,realm) {
+  const [, ,fog, , ,bank,glow]=theme;
+  for(let layer=0;layer<3;layer++) {
+    const color=css(blend(bank,fog,.7-layer*.19));
+    for(let x=0;x<width;x+=2) {
+      const far=Math.max(0,Math.abs(x-213+boat.x*.8)-15-layer*9)/width;
+      const curve=.62+Math.sin(x*.043+layer*2.7+realm)*.27+Math.cos(x*.016-layer)*.18;
+      const rise=Math.round(far*(13+layer*15)*curve);
+      if(rise>0) pixel(color,x,horizon-rise,2,rise);
+    }
+  }
+  if(realm===6) for(let i=0;i<39;i++) {
+    const x=(i*79+13)%426,y=6+noise(i,71)%66;
+    pixel(css(blend(theme[1],glow,.43+(i%4)*.11)),x,y,i%9?1:2,1);
+  }
+}
+function banks(theme) {
+  const [, ,fog, ,water,ground,light]=theme;
+  const first=Math.floor(boat.z/7)*7;
+  for(let offset=343;offset>7;offset-=7) for(const side of [-1,1]) {
+    const z=first+offset,d=z-boat.z;
+    if(d<9) continue;
+    const worldX=river(z)+side*(half(z)+1+noise(offset,side)%4);
+    const p=point(worldX,z);
+    const s=p.scale;
+    if(p.x<-60 || p.x>486 || p.y>height+20) continue;
+    const amount=clamp((d-22)/310,0,.86);
+    const trunk=css(blend(ground,fog,amount)),leaf=css(blend(ground,light,.15+amount*.35));
+    for(let reed=0;reed<6;reed++) {
+      const n=noise(reed,Math.floor(z)+side);
+      const x=p.x+side*(reed*.7*s);
+      const len=Math.max(2,(1.6+n/82)*s);
+      pixel(trunk,x,p.y-len,Math.max(1,s*.16),len);
+      pixel(leaf,x+side,p.y-len-1,Math.max(1,s*.32),Math.max(1,s*.55));
+      if(reflections && reed%2===0)
+        pixel(css(blend(water,ground,.55)),x+(n%3)-1,p.y+1,1,len*.45);
+    }
+    if(Math.floor(z/7)%5) continue;
+    const base=p.y-3.6*s,spread=3.1*s;
+    pixel(trunk,p.x-s*.22,base,Math.max(1,s*.45),p.y-base);
+    for(let row=-4;row<=4;row++) {
+      const reach=spread*(1-Math.abs(row)*.13);
+      pixel(row>0?trunk:leaf,p.x-reach,base+row*s*.58,reach*2,Math.max(1,s*.85));
+    }
+  }
+}
+function crossing(theme) {
+  if(query.has("no-bridge")) return;
+  const first=Math.floor(boat.z/reachLength);
+  for(let segment=first+1;segment>=first;segment--) {
+    const z=segment*reachLength+24,d=z-boat.z;
+    if(d<9 || d>300) continue;
+    const [, ,mist, ,water,bank,glow]=theme;
+    const p=point(river(z),z), span=half(z)*p.scale*(query.has("narrow-bridge")?.62:1);
+    const top=p.y-5*p.scale,deck=Math.max(2,p.scale*.85);
+    const wood=css(blend(blend(bank,[106,58,42],.8),mist,clamp((d-55)/270,0,.58)));
+    const trim=css(blend(bank,glow,.34));
+    for(let i=Math.floor(-span);i<span;i++) {
+      const arch=Math.min(Math.abs(i/span),1);
+      const foot=top+deck+p.scale*4*arch*arch;
+      pixel(wood,p.x+i,top,1,foot-top);
+      pixel(trim,p.x+i,top,1,1);
+      if(i%7===0) pixel(wood,p.x+i,top-7,1,7);
+    }
+    pixel(wood,p.x-span,top-7,Math.round(2*span),1);
+    for(const side of [-1,1]) {
+      const x=p.x+side*span*.77, size=Math.max(2,p.scale*.55);
+      pixel(wood,x-size,p.y-p.scale*5,size*2,p.scale*5);
+    }
+    if(d<135 && !query.has("no-bridge-lights")) for(const lane of [-.84,-.42,0,.42,.84]) {
+      const x=p.x+lane*span,size=Math.max(1,Math.round(p.scale*.47));
+      pixel(wood,x,top-12,1,10);
+      pixel("#ab6742",x-2,top-12,size+2,size+3);
+      pixel("#ffe9a3",x-1,top-11,size,Math.max(1,size+1));
+      if(reflections) for(let stripe=0;stripe<5;stripe++) {
+        const at=p.y+1+stripe*Math.max(1,p.scale*.62);
+        pixel(css(blend(water,glow,.45-stripe*.06)),x+noise(stripe,boat.tick>>2)%3,at,size,1);
+      }
+    }
+    if(d<135 && !query.has("no-lotus")) for(const bunch of [-.48,.02,.50]) {
+      const size=Math.max(1,Math.round(p.scale*.44));
+      for(const petal of [-1,0,1]) {
+        const x=p.x+bunch*span+petal*size*2.6;
+        const y=top+deck+size*(petal?3:4);
+        pixel(wood,x,top+deck,1,y-top-deck);
+        pixel("#8e3732",x-2*size,y+1,4*size,size);
+        pixel("#8e3732",x-size*1.5,y+size,3*size,size);
+        pixel("#d35443",x-size,y-size,2*size,3*size);
+        pixel("#ff7552",x-size*.65,y,Math.max(1,Math.round(1.3*size)),size);
+        pixel("#ffc782",x,y,1,1);
+        if(reflections) for(let stripe=0;stripe<4;stripe++) {
+          const shift=noise(stripe+petal,boat.tick>>1)%5-2;
+          pixel("#cb674d",x-size+shift,p.y+8+stripe*3,size+2,1);
+        }
+      }
+    }
+  }
+}
+function foregroundLily(theme) {
+  if(query.has("no-foreground-lilies")) return;
+  const [, , , ,water,bank,glow]=theme;
+  const green=css(blend(bank,[113,145,72],.83));
+  const first=Math.floor(boat.z/6)*6;
+  for(let ring=7;ring>=0;ring--) {
+    const z=first+13+ring*2;
+    if(z-boat.z<11) continue;
+    for(const side of [-1,1]) {
+      const lane=.53+(noise(ring,side)%20)/100;
+      const p=point(river(z)+side*half(z)*lane,z);
+      if(p.y<158 || p.y>237) continue;
+      const sx=Math.max(3,p.scale*(.75+noise(side,ring)%7/14));
+      const sy=Math.max(2,sx*.33);
+      for(let row=-Math.floor(sy);row<=sy;row++) {
+        const span=sx*Math.sqrt(Math.max(0,1-row*row/(sy*sy)));
+        const notch=row<0 && row>-sy*.8?span*.34:0;
+        if(span>=1) {
+          pixel(css(blend(water,bank,.44)),p.x-span,p.y+row+2,Math.max(1,2*span),1);
+          pixel(green,p.x-span+(side<0?notch:0),p.y+row,Math.max(1,2*span-notch),1);
+        }
+      }
+      if((ring+side)%3===0) {
+        pixel("#54633f",p.x,p.y-p.scale*.75,1,p.scale*.75);
+        pixel("#bc6957",p.x-1,p.y-p.scale*.75-3,3,4);
+        pixel(css(glow),p.x,p.y-p.scale*.75-4,1,2);
+      }
+    }
+  }
+}
+function dock() {
+  if(query.has("no-dock")) return;
+  const z=8+Math.floor(boat.z/reachLength)*reachLength;
+  const near=z+6,far=z+17;
+  if(near-boat.z<7 || far-boat.z>72) return;
+  const edge=d=>river(d)-half(d);
+  const a=point(edge(near)-5,near),b=point(edge(near)+6,near);
+  const c=point(edge(far)+3,far),d=point(edge(far)-5,far);
+  polygon("#77553e",[[a.x,a.y],[b.x,b.y],[c.x,c.y],[d.x,d.y]]);
+  for(let i=0;i<10;i++) {
+    const f=i/10, left=a.x+(d.x-a.x)*f,right=b.x+(c.x-b.x)*f;
+    pixel(i%2?"#8c633f":"#5e4a3c",left,a.y+(d.y-a.y)*f,Math.max(1,right-left),i<4?2:1);
+  }
+  const posts=[point(edge(near)+4,near),point(edge(near+5)+3,near+5),
+    point(edge(far)+2,far),point(edge(near+3)-1,near+3)];
+  for(const p of posts.sort((l,r)=>l.y-r.y)) {
+    const w=Math.max(3,Math.round(p.scale*.44)),h=Math.max(7,p.scale*2.4);
+    if(reflections) pixel("#514b38",p.x-w*.5,p.y+2,w,p.scale*.83);
+    pixel("#463c2e",p.x-w*.5,p.y-h,w,h+4);
+    pixel("#8e6949",p.x+w*.15,p.y-h+2,Math.max(1,w*.25),h*.8);
+    pixel("#bd8e53",p.x-w*.5,p.y-h,w,3);
+  }
+}
+function reedBed() {
+  if(query.has("thin-reeds")) return;
+  const first=Math.floor(boat.z/3)*3;
+  for(let strip=21;strip>=0;strip--) {
+    const z=first+12+strip*3,d=z-boat.z;
+    if(d<11) continue;
+    for(let stem=0;stem<11;stem++) {
+      const n=noise(stem,Math.floor(z));
+      const x=river(z)+half(z)-.8+(n%34)/10;
+      const p=point(x,z);
+      if(p.x>width+12 || p.y>height+12) continue;
+      const h=Math.max(3,p.scale*(1.45+(n%31)/8));
+      const w=Math.max(1,Math.round(p.scale*.14));
+      const leaning=n%3-1;
+      if(reflections && stem%3===0) pixel("#48604a",p.x,p.y+1,1,h*.30);
+      pixel("#384a34",p.x,p.y-h,w,h);
+      pixel("#667045",p.x+leaning,p.y-h,Math.max(1,w*.7),h*.4);
+      if(n%4===0) pixel("#b39755",p.x+leaning,p.y-h-2,1,3);
+    }
+  }
+}
+function nearBanks(theme,mask=false) {
+  const [, ,fog, ,water,ground,light]=theme;
+  function contour(path,points) {
+    path.moveTo(...points[0]);
+    for(let i=1;i<points.length;i++) path.lineTo(...points[i]);
+    path.closePath();
+  }
+  if(!query.has("bare-reed-verge")) {
+    const first=Math.floor(boat.z/4)*4;
+    for(let strip=19;strip>=0;strip--) for(const side of [-1,1]) {
+      const z=first+13+4*strip,d=z-boat.z;
+      if(d<11) continue;
+      const tint=clamp((d-15)/140,0,.68);
+      const dark=mask?(side<0?"#ff0000":"#00ff00"):css(blend([48,64,36],fog,tint));
+      const bright=mask?dark:css(blend([143,133,69],fog,tint));
+      const stems=new Path2D(),blades=new Path2D(),mirrors=new Path2D();
+      for(let i=0;i<(side<0?13:25);i++) {
+        const n=noise(i,Math.floor(z)+side*71);
+        const shallows=d<22?2.9:1.1;
+        const p=point(bankEdge(z,side)+side*((n%71)/13-shallows),z+(n%3)*.83);
+        if(p.x<-12 || p.x>width+12 || p.y>height+12) continue;
+        const h=p.scale*(1.7+(n%43)/12),w=Math.max(1,p.scale*.09);
+        const lean=(n%2?1:-1)*h*(.16+(n%8)*.037)+Math.sin(boat.tick*.045+i)*p.scale*.21;
+        if(!mask && reflections && n%3===0) mirrors.rect(Math.round(p.x),Math.round(p.y+2),w,h*.27);
+        contour(stems,[[p.x,p.y],[p.x+w,p.y],[p.x+lean+w,p.y-h],[p.x+lean,p.y-h]]);
+        contour(blades,[[p.x+lean*.27,p.y-h*.29],[p.x+lean*.51,p.y-h*.58],
+          [p.x+lean*.77+side*h*.26,p.y-h*.72],[p.x+lean*.52,p.y-h*.55]]);
+        if(n%6===0) blades.rect(Math.round(p.x+lean),Math.round(p.y-h-1),w+1,Math.max(2,h*.13));
+      }
+      if(!mask && reflections) { paint.fillStyle=css(blend(water,ground,.45)); paint.fill(mirrors); }
+      paint.fillStyle=dark; paint.fill(stems);
+      paint.fillStyle=bright; paint.fill(blades);
+    }
+  }
+  if(query.has("bare-moorings")) return;
+  const first=Math.floor(boat.z/8)*8;
+  for(let strip=6;strip>=0;strip--) {
+    const z=first+13+8*strip,d=z-boat.z,n=noise(47,Math.floor(z));
+    if(d<11 || n%7===0) continue;
+    const p=point(bankEdge(z,-1)+.8+(n%17)/13,z);
+    const w=Math.max(2,p.scale*(.39+(n%11)*.014)),h=p.scale*(1.85+(n%15)*.088);
+    const lean=(n%3-1)*w*.61, shade=clamp(d/130,0,.51);
+    const shadow=mask?"#0000ff":css(blend([72,48,32],fog,shade));
+    const grain=mask?shadow:css(blend([154,110,68],light,.13+shade));
+    if(!mask && reflections) pixel(css(blend(water,ground,.43)),p.x-w*.5,p.y+1,w,h*.36);
+    polygon(shadow,[[p.x-w*.52,p.y+2],[p.x+w*.46,p.y+2],[p.x+w*.37+lean,p.y-h],[p.x-w*.47+lean,p.y-h+2]]);
+    polygon(grain,[[p.x+w*.14,p.y+1],[p.x+w*.4,p.y+2],[p.x+w*.37+lean,p.y-h],[p.x+w*.12+lean,p.y-h+2]]);
+    pixel(grain,p.x+lean-w*.50,p.y-h,w,Math.max(1,w*.18));
+    if(!mask && n%3===1) pixel("#b79a67",p.x+lean-w*.56,p.y-h*.6,w*1.07,Math.max(1,w*.13));
+  }
+}
+function fireflies() {
+  if(query.has("no-fireflies")) return;
+  for(let mote=0;mote<46;mote++) {
+    const phase=boat.tick+mote*17;
+    if(phase%29>=22) continue;
+    const x=(mote*73+11)%426+Math.sin(phase*.083)*5-boat.x*1.4;
+    const y=93+(mote*47+23)%125+Math.sin(phase*.053)*2;
+    if(mote%7===0) pixel("#f2bc69",x-1,y,3,1);
+    pixel("#ffe4a5",x,y,1,1);
+  }
+}
+function lilies(theme) {
+  const [, , , ,water,bank,glow]=theme;
+  for(let j=22;j>=0;j--) {
+    const z=Math.floor(boat.z/9)*9+13+j*5,d=z-boat.z;
+    if(d<13) continue;
+    const n=noise(Math.floor(z),41),side=n%2?1:-1;
+    const p=point(river(z)+side*(half(z)*(.51+(n%29)/100)),z);
+    const size=Math.max(1,p.scale*(.35+(n%13)/20));
+    pixel(css(blend(water,bank,.48)),p.x-size,p.y+1,size*2,1);
+    pixel(css(blend(bank,[125,137,79],.55)),p.x-size,p.y,size*2,2);
+    if(n>163) {
+      pixel(css(blend(bank,[211,106,99],.75)),p.x,p.y-3,2,3);
+      pixel(css(glow),p.x,p.y-4,1,1);
+    }
+  }
+}
+function prow() {
+  const x=213+boat.yaw*9,y=188+Math.round(Math.sin(boat.tick*.17));
+  polygon("#35252c",[[x,y],[x+27,y+14],[x+68,240],[x-68,240],[x-27,y+14]]);
+  polygon("#63444a",[[x,y+4],[x+21,y+16],[x+54,240],[x-54,240],[x-21,y+16]]);
+  polygon("#47323b",[[x,y+8],[x+16,y+20],[x+42,240],[x-42,240],[x-16,y+20]]);
+  for(let n=0;n<5;n++) {
+    const span=10+n*6,at=y+15+n*8;
+    pixel(n%2?"#93634f":"#775149",x-span,at,span*2,2);
+  }
+  if(query.has("no-lamp")) return;
+  pixel("#362933",x-2,y-30,3,32);
+  pixel("#362933",x-1,y-34,11,3);
+  pixel("#362933",x+9,y-32,3,6);
+  pixel("#a66243",x+6,y-26,9,11);
+  pixel("#ffb568",x+7,y-25,7,8);
+  pixel("#fff0af",x+9,y-23,3,5);
+  if(reflections) for(let n=0;n<9;n++) {
+    const at=y+3+n*3;
+    const ripple=noise(n,boat.tick>>1)%5;
+    pixel(n%3?"#ac745b":"#e6ac72",x+31-n*.5+ripple,at,4+n%4,1);
+  }
+}
+function draw() {
+  const realm=Math.min(reaches.length-1,Math.floor(boat.z/reachLength));
+  const phase=clamp((boat.z-realm*reachLength)/18,0,1);
+  const theme=realm>0 && phase<1?reaches[realm].map((value,index)=>
+    index?blend(reaches[realm-1][index],value,phase*phase*(3-2*phase)):value):reaches[realm];
+  background(realm===0 && coolDusk?coolDusk:theme);
+  clouds(theme);
+  ridges(theme,realm);
+  banks(theme);
+  reedBed();
+  nearBanks(theme);
+  lilies(theme);
+  crossing(theme);
+  foregroundLily(theme);
+  dock();
+  prow();
+  fireflies();
+  if(realm!==shown) {
+    shown=realm;
+    document.querySelector("#reach").textContent=(realm+1)+" / "+reaches.length+"  "+theme[0];
+  }
+  if(inputTest) document.querySelector("output").textContent=
+    [boat.x,boat.z,boat.speed].map(value=>Math.round(value*1000)).concat(boat.tick).join(",");
+}
+function steerInput() {
+  const right=keys.has("KeyD")||keys.has("ArrowRight"),left=keys.has("KeyA")||keys.has("ArrowLeft");
+  const up=keys.has("KeyW")||keys.has("ArrowUp"),down=keys.has("KeyS")||keys.has("ArrowDown");
+  return [Number(right)-Number(left)||(pointer?.steer??0),Number(up)-Number(down)||(pointer?1:0)];
+}
+function pointInput(event) {
+  if(pointer && event.pointerId===pointer.id)
+    pointer.steer=clamp((event.clientX/canvas.clientWidth-.5)*3,-1,1);
+}
+
+const controls=["KeyW","KeyA","KeyS","KeyD","ArrowUp","ArrowLeft","ArrowDown","ArrowRight"];
+addEventListener("keydown",event=>{
+  if(!controls.includes(event.code)) return;
+  if(inputTest && query.has("no-steer-key") && event.code==="KeyD") return;
+  event.preventDefault();
+  keys.add(event.code);
+});
+addEventListener("keyup",event=>keys.delete(event.code));
+addEventListener("blur",()=>{ keys.clear(); pointer=null; });
+if(query.has("bridge-approach")) {
+  const trace=[];
+  for(const waypoint of [0,3,6,9,12]) {
+    let previous={...boat};
+    while(boat.z<waypoint) {
+      previous={...boat};
+      step(0,1);
+    }
+    const next={...boat};
+    if(waypoint-previous.z < next.z-waypoint) Object.assign(boat,previous);
+    draw();
+    const depth=24-boat.z;
+    const y=Math.round(horizon+(1550-5*155)/depth+2);
+    const rgba=paint.getImageData(0,y,width,1).data;
+    const row=[];
+    for(let x=0;x<width;x++) row.push(...rgba.subarray(4*x,4*x+3));
+    trace.push(Math.round(1000*boat.z)+","+y+"|"+row.join(","));
+    Object.assign(boat,next);
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=trace.join(";");
+} else if(query.has("bank-audit")) {
+  const trace=[];
+  for(const z of [0,30,58]) {
+    boat.z=z;
+    boat.x=river(z)*.78;
+    paint.fillStyle="#000";
+    paint.fillRect(0,0,width,height);
+    nearBanks(reaches[0],true);
+    const rgba=paint.getImageData(0,0,width,height).data;
+    const shore=[];
+    for(let y=111;y<=225;y+=6) {
+      const d=1550/(y-horizon);
+      shore.push(Math.round(213+(bankEdge(z+d,-1)-boat.x)*155/d),
+        Math.round(213+(bankEdge(z+d,1)-boat.x)*155/d));
+    }
+    let labels="";
+    for(let y=110;y<height;y+=2) for(let x=0;x<width;x+=2) {
+      const at=4*(y*width+x);
+      labels+=String(Number(rgba[at]>127)+2*Number(rgba[at+1]>127)+4*Number(rgba[at+2]>127));
+    }
+    trace.push(shore.join(",")+"|"+labels);
+  }
+  document.querySelector("output").textContent=trace.join(";");
+} else if(query.has("zones")) {
+  draw();
+  const samples=[],raster=paint.getImageData(0,0,width,height).data;
+  for(const zone of query.get("zones").split(";")) {
+    const [left,top,right,bottom,sx,sy]=zone.split(",").map(Number);
+    for(let y=top;y<bottom;y+=sy) for(let x=left;x<right;x+=sx) {
+      const at=4*(y*width+x);
+      samples.push(raster[at],raster[at+1],raster[at+2]);
+    }
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=samples.join(",");
+} else if(query.has("probe")) {
+  dispatchEvent(new KeyboardEvent("keydown",{code:"KeyW"}));
+  const samples=[];
+  const probes=query.get("probe").split(";").map(p=>p.split(",").map(Number));
+  let sampledTick=-1;
+  for(const [tick,x,y] of probes) {
+    while(boat.tick<tick) step(...steerInput());
+    if(sampledTick!==boat.tick) {
+      draw();
+      sampledTick=boat.tick;
+    }
+    samples.push(...paint.getImageData(x,y,1,1).data.subarray(0,3));
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=samples.join(",");
+} else if(query.has("still") || query.get("auto")==="1") {
+  const reach=clamp(Number(query.get("still")) || 1,1,reaches.length);
+  const frames=reach>1?Math.ceil(((reach-1)*reachLength+28)/1.65)+16:0;
+  for(let i=0;i<frames;i++) step(0,1);
+  if(query.has("at")) {
+    boat.z=clamp(Number(query.get("at"))||0,0,end);
+    boat.x=river(boat.z)*.78;
+  }
+  draw();
+  if(query.get("auto")==="1") document.title=query.has("bad-auto-title")?"WATER_FAIL":"WATER_OK";
+} else {
+  canvas.addEventListener("pointerdown",event=>{
+    if(pointer) return;
+    pointer={id:event.pointerId,steer:0};
+    canvas.setPointerCapture(event.pointerId);
+    pointInput(event);
+  });
+  canvas.addEventListener("pointermove",pointInput);
+  canvas.addEventListener("lostpointercapture",()=>pointer=null);
+  let previous=performance.now(),pending=0;
+  const interval=1000/30;
+  function animate(now) {
+    pending+=Math.min(240,now-previous);
+    previous=now;
+    if(pending>=interval) {
+      const input=steerInput();
+      while(pending>=interval) {
+        step(...input);
+        pending-=interval;
+      }
+      draw();
+    }
+    requestAnimationFrame(animate);
+  }
+  draw();
+  requestAnimationFrame(animate);
+}
