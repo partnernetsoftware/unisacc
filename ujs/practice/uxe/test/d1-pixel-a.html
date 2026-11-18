@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>D1 像素机体开发预览</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;background:#225675;overflow:hidden}
+  canvas{display:block;width:100%;height:100%;object-fit:cover;image-rendering:pixelated}
+  output{display:none}
+</style>
+<canvas width="1278" height="720" aria-label="D1 像素机体开发预览"></canvas>
+<output></output>
+<script src="../demo/host1-runtime.js"></script>
+<script type="module">
+import { drawAircraft } from "./d1-pixel-aircraft.js";
+
+const low=document.createElement("canvas");
+low.width=426;
+low.height=240;
+const buffer=low.getContext("2d");
+const display=document.querySelector("canvas").getContext("2d");
+display.imageSmoothingEnabled=false;
+const result=document.querySelector("output");
+const query=new URLSearchParams(location.search);
+const sky=["#497998","#6393ad","#81a8b9","#9dbbc5","#b8ccd1","#c9d8d5"];
+const sea=["#789dad","#59859b","#426f88","#32637f","#2b5977","#204d68"];
+
+const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
+if(!wasm.ok) throw new Error("D1 飞行核读取失败");
+const {exports:core,meta}=await window.host1Boot(await wasm.arrayBuffer());
+const inputs=["input_turn","input_climb","input_boost"].map(name=>meta.globals.indexOf(name));
+if(inputs.some(index=>index<0)) throw new Error("D1 飞行输入槽缺失");
+let flight,tick=0;
+window.onHostGpuSubmit=bytes=>{
+  const view=new DataView(bytes);
+  if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
+  flight={
+    heading:view.getUint16(1,true), bank:view.getUint8(3)-24, z:view.getUint16(6,true),
+    pitch:view.getUint8(10)-18, speed:view.getUint8(9)
+  };
+};
+function frame(axis,climb,boost) {
+  flight=null;
+  core.host_reset();
+  [axis,climb,boost].forEach((value,i)=>core.host_set_global(inputs[i],core.host_mk_i64(BigInt(value))));
+  core.run_step();
+  if(!flight) throw new Error("D1 飞行核没有提交本帧");
+  tick++;
+  const horizon=120+Math.round(flight.pitch*.45);
+  for(let i=0;i<6;i++) {
+    buffer.fillStyle=sky[i];
+    buffer.fillRect(0,Math.floor(i*horizon/6),426,Math.ceil(horizon/6)+1);
+    buffer.fillStyle=sea[i];
+    buffer.fillRect(0,horizon+Math.floor(i*(240-horizon)/6),426,Math.ceil((240-horizon)/6)+1);
+  }
+  for(let i=0;i<85;i++) {
+    const band=1+((i*59+(4096-flight.z))%119);
+    const y=horizon+Math.floor(band*band*(240-horizon)/14161);
+    const x=(i*137-flight.heading+426)%426;
+    buffer.fillStyle=i%4===0?"#9abcc4":"#517e95";
+    buffer.fillRect(x,y,band>75?2:1,1);
+  }
+  drawAircraft(buffer,213,158,flight.pitch,flight.bank,flight.speed,tick);
+  display.drawImage(low,0,0,1278,720);
+}
+frame(0,0,0);
+if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
+if(query.has("still")) {
+  result.textContent=String(flight.heading);
+} else {
+  const keys=new Set();
+  const controls=["KeyA","KeyD","KeyW","KeyS","ArrowLeft","ArrowRight","ArrowUp","ArrowDown","ShiftLeft","ShiftRight"];
+  addEventListener("keydown",event=>{
+    if(!controls.includes(event.code)) return;
+    event.preventDefault();
+    keys.add(event.code);
+  });
+  addEventListener("keyup",event=>keys.delete(event.code));
+  addEventListener("blur",()=>keys.clear());
+  let last=performance.now();
+  function loop(now) {
+    if(now-last>=1000/30) {
+      last=now-(now-last)%(1000/30);
+      const axis=Number(keys.has("KeyD")||keys.has("ArrowRight"))-Number(keys.has("KeyA")||keys.has("ArrowLeft"));
+      const climb=Number(keys.has("KeyW")||keys.has("ArrowUp"))-Number(keys.has("KeyS")||keys.has("ArrowDown"));
+      frame(axis,climb,Number(keys.has("ShiftLeft")||keys.has("ShiftRight")));
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</html>

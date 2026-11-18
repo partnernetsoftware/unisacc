@@ -7,7 +7,7 @@
 
 - 试玩: `https://remix.ui8.ai/fly` (308 到 `https://forge.ui8.ai/share/frag_1eb8944c-57b1-42ca-a909-5c2d7e517c24`)。标题 Forge / fighter, 版本 fighterv2, 作者 Dash。平台 `https://ui8.ai/forge`, 可 Remix。
 
-- 取证: ccapi 2026-11-18 headless chrome 只读。画布空白, 画面观感 UNMEASURED, 需所有者录屏或关键帧。参数面板可读, 即功能清单。
+- 取证: Remix 跳转入口未稳定出画。作者独立试玩站 fly.ui8.dev 在 Headless Chrome 加虚拟时间预算时读到了完整画面，另有作者视频取样。证据和对照见 [D1 原作与差距](essence/d1-v2.md#线上预览与原作差距)。
 
 ## 体验一句话
 
@@ -56,7 +56,7 @@ Look: Glow (fire, sun, engines, glints) 0.8。
 
 ## 验收
 
-画面观感 UNMEASURED, 禁止 FLY_OK 金值冒充观感。S0 静帧待参考帧到位后再签。
+原作画面已有截图与视频证据。当前预览与后续切片的观感以同类机位并排图交人工签字，FLY_OK 只用于运行回归。
 
 ## 不做什么
 

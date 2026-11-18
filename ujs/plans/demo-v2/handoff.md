@@ -56,6 +56,8 @@ Pages 预览清单为 `ujs/practice/uxe/pages.tsv` 的 `fly-next`。更新 D1 �
 
 S3 横滚和俯仰松手均在第六帧回正。24 个俯仰探针通过，冻结绘制俯仰有 23 个失配。固定帧 /tmp/cdx2-d1-s3-frame.png。Pages 保留旧 fly 条目并另外显示开发预览，HTTPS 发布后以 `tools/check-uxe-d1-flight.cx -- pages-live` 断言 AUTO 终值。下一件为 D4 拱廊和树林。
 
+D1 重做 A 入口为 `ujs/practice/uxe/test/d1-pixel-a.html`，并排图 `/tmp/cdx2-d1-a-comparison.png`。手绘软件像素机体、正后机位、双尾焰与现有飞行核已接通，以人工看图验收。作者站十一张截图和作者视频只留 /tmp。后续 B 先做高度场云海，C 再做可玩闭环。D3 蓝色阴影修订暂停，现有叶形门的旧蓝色分类仍待更新。线上飞行仍为已授权的 S3 开发预览。
+
 ### D4 接手点与 D1 排程
 
 Q4f 已实现世界脚锚点、随行镜头与固定地标。验收用 `tools/check-uxe-d4-skeleton.cx`，提交号可从该路径的最近一次提交取得。97 帧跨两个接缝，净前进 960 毫米、最高离地 800 毫米、连续支撑最大滑移为 0，九次地标像素命中。滑脚负例有 320 次滑移超限，冻结机身负例两次前进检查失败，两者退出 1。固定帧在 /tmp/cdx2-q4f-phase-4.png，待人工签字。D1 第一切片从 G1 提交输入和 G4 持久飞行状态开始，随后接入默认追尾、岛云和 HUD。
