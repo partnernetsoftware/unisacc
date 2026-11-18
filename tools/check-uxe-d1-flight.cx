@@ -217,6 +217,10 @@ static const char *browser(char *url,char **out,int stage) {
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
     int attempt;
+    if(stage==8) {
+        args[2]="--disable-gpu";
+        args[3]="--disable-component-update";
+    }
     for(attempt=1;attempt<=2;attempt++) {
         int rc,complete,error;
         tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-flight-%d-%d-%d",(int)getpid(),stage,attempt);
@@ -635,6 +639,43 @@ static int check_combat(const char *mutation,int published) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+static void pursuing_left(int tick,int *x,int *y) {
+    int phase=(tick-30)%96;
+    int sweep=phase<24?phase:phase<72?48-phase:phase-96;
+    double depth=114.5+tick/3;
+    *x=(int)(213.5+151*(-49+tick%72/6+.65*sweep)/depth);
+    *y=(int)(113.5+151*(-17+.18*sweep)/depth);
+}
+
+static int check_skirmish(const char *mutation) {
+    static const int expected[][3]={{232,234,219},{255,116,106},{226,82,159},
+        {121,220,162},{62,75,92},{62,75,92},{121,220,162},{35,52,77}};
+    char cwd[1024],url[1950],*out=0;
+    int x,y,bolt_x,bolt_y,i,j,failed=0,n=(int)(sizeof expected/sizeof expected[0]);
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("skirmish-cwd",0);
+    pursuing_left(40,&x,&y);
+    bolt_x=(int)(.5+x+(213-x)*15.0/22);
+    bolt_y=(int)(.5+y+(158-y)*15.0/22);
+    pursuing_left(55,&x,&y);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?hold-course&%s&skirmish=18,409,228;55,%d,%d;55,%d,%d;63,376,227;63,380,227;149,352,227;0,380,227;0,409,228",
+        cwd,mutation,x,y-8,bolt_x,bolt_y);
+    p=browser(url,&out,8);
+    if(!p) return input_error("skirmish-browser",out);
+    for(i=0;i<n;i++) {
+        int got[3],bad=0;
+        for(j=0;j<3;j++) {
+            got[j]=take_channel(&p,i+1==n && j==2?0:',');
+            bad|=got[j]!=expected[i][j];
+        }
+        printf("D1_SKIRMISH probe=%d rgb=%d,%d,%d failed=%d\n",i,got[0],got[1],got[2],bad);
+        failed+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("skirmish-trailer",out);
+    free(out);
+    return failed!=0;
+}
+
 static int check_viewport(const char *mutation) {
     char cwd[1024],url[1800],profile[160],option[180],path[160],shot[180],*out=0;
     char *window[]={ "--window-size=1280,807","--window-size=960,1000" };
@@ -948,6 +989,9 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"detail")) return check_detail("");
     if(argc==2 && !strcmp(argv[1],"viewport")) return check_viewport("");
     if(argc==2 && !strcmp(argv[1],"short-canvas")) return check_viewport(argv[1]);
+    if(argc==2 && !strcmp(argv[1],"skirmish")) return check_skirmish("");
+    if(argc==2 && (!strcmp(argv[1],"no-return-fire") || !strcmp(argv[1],"no-maneuver") ||
+        !strcmp(argv[1],"no-restart"))) return check_skirmish(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||
         !strcmp(argv[1],"still-waves"))) return check_detail(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"shallow-roll") || !strcmp(argv[1],"flat-pitch") ||

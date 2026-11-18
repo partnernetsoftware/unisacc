@@ -9,9 +9,19 @@
   output{display:none}
   aside{position:absolute;top:12px;right:14px;padding:5px 8px;background:#18344dd9;
     color:#e5f4f1;font:13px system-ui}
+  section{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);min-width:12rem;
+    padding:20px;background:#182a40f5;border:1px solid #e2529f;color:#f4f1df;
+    text-align:center;font:14px system-ui}
+  section h1{margin:0;font-size:22px}
+  section button{padding:.5rem 1rem;background:#f4f1df;color:#182a40;border:0;font:inherit}
 </style>
 <canvas width="426" height="240" aria-label="D1 飞行。指针或方向键转向，空格开炮，M 发射导弹"></canvas>
 <aside>开发预览</aside>
+<section hidden aria-labelledby="flight-lost">
+  <h1 id="flight-lost">本轮结束</h1>
+  <p></p>
+  <button type="button">重新起飞</button>
+</section>
 <output></output>
 <script src="../demo/host1-runtime.js"></script>
 <script>
@@ -34,20 +44,24 @@ const buffer=low.getContext("2d");
 const display=document.querySelector("canvas").getContext("2d");
 display.imageSmoothingEnabled=false;
 const result=document.querySelector("output");
+const loss=document.querySelector("section"), restartButton=loss.querySelector("button");
 const query=new URLSearchParams(location.search);
 if(query.has("short-canvas")) display.canvas.style.height="calc(100dvh - 87px)";
 const auto=query.get("auto")==="1";
 const inputTest=query.get("input-test")==="1";
 const frameInterval=1000/30;
 const world=pixelWorld(buffer,query);
-const combat=combatModel(buffer,query);
+let combat=combatModel(buffer,query);
 
 const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
 if(!wasm.ok) throw new Error("D1 飞行核读取失败");
-const {exports:core,meta}=await window.host1Boot(await wasm.arrayBuffer());
+const flightProgram=await wasm.arrayBuffer();
+const boot=await window.host1Boot(flightProgram);
+let core=boot.exports;
+const {meta}=boot;
 const inputs=["input_turn","input_climb","input_boost"].map(name=>meta.globals.indexOf(name));
 if(inputs.some(index=>index<0)) throw new Error("D1 飞行输入槽缺失");
-let flight,tick=0,firstFrame=0,minGap=1000,previousFrame=0;
+let flight,tick=0,firstFrame=0,minGap=1000,previousFrame=0,ended=false,restartTask;
 window.onHostGpuSubmit=bytes=>{
   const view=new DataView(bytes);
   if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
@@ -57,7 +71,8 @@ window.onHostGpuSubmit=bytes=>{
     altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
   };
 };
-function frame(axis,climb,boost,gun=false,missile=false,stamp=0) {
+function frame(axis,climb,boost,gun=false,missile=false,stamp=0,paintWorld=true) {
+  if(ended) return;
   flight=null;
   core.host_reset();
   [axis,climb,boost].forEach((value,i)=>core.host_set_global(inputs[i],core.host_mk_i64(BigInt(value))));
@@ -68,11 +83,18 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0) {
     y:158-Math.round(flight.pitch*(query.has("flat-pitch")?.18:.55)),
     roll:flight.bank*(query.has("shallow-roll")?24:52)*Math.PI/(24*180)
   };
-  world.paint(flight,tick);
+  if(paintWorld) world.paint(flight,tick);
+  else buffer.clearRect(0,0,426,240);
   combat.update(flight,tick,gun,missile,attitude);
   drawAircraft(buffer,213,attitude.y,flight.pitch,attitude.roll,flight.speed,tick);
   const hud=combat.hud();
   display.drawImage(low,0,0);
+  if(hud.lost) {
+    ended=true;
+    loss.querySelector("p").textContent="击落 "+hud.kills+" 架";
+    loss.hidden=false;
+    restartButton.focus();
+  }
   if(inputTest && stamp) {
     if(!firstFrame) firstFrame=stamp;
     if(previousFrame) minGap=Math.min(minGap,stamp-previousFrame);
@@ -81,11 +103,49 @@ function frame(axis,climb,boost,gun=false,missile=false,stamp=0) {
       Math.round(stamp-firstFrame),Math.round(minGap*1000)].join(",");
   }
 }
+async function restartFlight() {
+  restartButton.disabled=true;
+  try {
+    core=(await window.host1Boot(flightProgram)).exports;
+    combat=combatModel(buffer,query);
+    tick=firstFrame=previousFrame=0;
+    minGap=1000;
+    ended=false;
+    loss.hidden=true;
+    frame(0,0,0);
+  } finally {
+    restartButton.disabled=false;
+  }
+}
+restartButton.addEventListener("click",()=>{
+  if(ended && !restartButton.disabled && !query.has("no-restart")) {
+    restartTask=restartFlight();
+    restartTask.catch(reportFlightError);
+  }
+});
+function replayCombat(target) {
+  while(!ended && tick<target) frame(0,0,0,false,tick===3,0,tick+1===target);
+}
 frame(0,0,0);
 if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
 if(query.get("still")==="impact") for(let i=1;i<18;i++) frame(0,0,0,false,i===3);
 if(query.get("still")==="bank") for(let i=0;i<6;i++) frame(1,1,0);
-if(query.has("detail")) {
+if(query.get("still")==="skirmish") replayCombat(55);
+if(query.get("still")==="loss") replayCombat(149);
+if(query.has("skirmish")) {
+  const sampled=[];
+  const probes=query.get("skirmish").split(";").map(probe=>probe.split(",").map(Number));
+  for(const [target,x,y] of probes) {
+    if(target===0) {
+      restartButton.click();
+      await restartTask;
+    } else replayCombat(target);
+    const pixel=buffer.getImageData(x,y,1,1).data;
+    sampled.push(pixel[0],pixel[1],pixel[2]);
+  }
+  result.id="pixels";
+  result.textContent=sampled.join(",");
+} else if(query.has("detail")) {
   const dots=query.get("detail").split(";").map(pair=>pair.split(",").map(Number));
   const sampled=[];
   for(const phase of [1,12]) {
@@ -150,6 +210,10 @@ if(query.has("detail")) {
   const canvas=document.querySelector("canvas");
   let pointer=null,buttons=0;
   addEventListener("keydown",event=>{
+    if(ended) {
+      if(event.code==="KeyR") restartButton.click();
+      return;
+    }
     if(!controls.includes(event.code)) return;
     if(inputTest && query.has("wrong-key") && event.code==="KeyD") return;
     event.preventDefault();
