@@ -25,10 +25,11 @@ flowchart LR
     V73["0.0.73 已公开 Latest(冻结 F 3865c7c9e0)<br/>release/evidence/0.0.73/"]
     V74["0.0.74 已公开 Latest(冻结 F 0dae4d3024)<br/>release/evidence/0.0.74/"]
     V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
-    V76["0.0.76 R2 接线并行速度线 Q,分支 v0.0.76<br/>build/version-seq.tsv"]
-    ECO["0.0.77 至 0.0.82 生态门路线(建议,自 0.0.76 起顺延)<br/>G0 推算 0.0.81<br/>prd_cx.md 0.9"]
+    V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
+    V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>plans/v0.0.77.md"]
+    ECO["0.0.78 至 0.0.87 路线(内存安全二段、表网卫生、对象产出合同、netraw、库包、门面、锁文件、DNS 与 inflate、执行器吞吐、链接单元二期,见 build/version-seq.tsv)<br/>G0 推算 0.0.81<br/>prd_cx.md 0.9"]
     PERF["0.0.82 执行器吞吐、0.0.83 链接单元二期<br/>prd.md 候选池 性能新方向"]
-    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> ECO --> PERF
+    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
   end
   subgraph 发布
     REL["发布 12 步与回滚<br/>release/rollback.txt、archive 起链配方节"]
