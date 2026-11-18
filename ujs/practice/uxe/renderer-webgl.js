@@ -106,6 +106,7 @@ uniform float uInk;
 uniform sampler2D uMap;
 uniform float uHasMap;
 uniform float uSurfaceMap;
+uniform float uOutlineEligible;
 uniform float uRadial;
 uniform float uInstColor;
 uniform float uOrtho;
@@ -117,7 +118,7 @@ varying vec2 vUV;
 varying vec4 vColor;
 void main() {
   if (uNormalPass > 0.5) {
-    gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0);
+    gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, uOutlineEligible);
     return;
   }
   if (uHasMap > 0.5 && uSurfaceMap < 0.5) {
@@ -194,12 +195,12 @@ function createOutline(gl, ext) {
     uniform vec2 resolution;
     uniform float width;
     bool edge(vec4 a, vec4 b) {
-      return b.a < 0.5 || distance(a.rgb, b.rgb) > 0.25;
+      return b.a < 0.25 || distance(a.rgb, b.rgb) > 0.25;
     }
     void main() {
       vec2 uv = gl_FragCoord.xy / resolution;
       vec4 center = texture2D(normals, uv);
-      if (center.a < 0.5) discard;
+      if (center.a < 0.75) discard;
       bool boundary = false;
       for (int i = 1; i <= 8; i++) {
         if (float(i) > width) break;
@@ -324,6 +325,7 @@ export function createWebGLRenderer(canvas, opts) {
   const uMetal = u("uMetal"), uRough = u("uRough");
   const uToonLevels = u("uToonLevels");
   const uNormalPass = u("uNormalPass");
+  const uOutlineEligible = u("uOutlineEligible");
   let outline;
   const uAmbient = u("uAmbient"), uAmbI = u("uAmbI");
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
@@ -389,6 +391,7 @@ export function createWebGLRenderer(canvas, opts) {
     const levels = cloud.toonLevels;
     gl.uniform1f(uToonLevels, Number.isInteger(levels) && levels >= 2 && levels <= 16 ? levels : 0);
     gl.uniform1f(uSurfaceMap, cloud.surfaceMap === "masonry" ? 1 : cloud.surfaceMap === "wash" ? 2 : 0);
+    gl.uniform1f(uOutlineEligible, cloud.outlineExcluded ? 0.5 : 1);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
     gl.enableVertexAttribArray(aPos);
