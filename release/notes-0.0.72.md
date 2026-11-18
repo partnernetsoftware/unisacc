@@ -1,6 +1,6 @@
 # unisacc 0.0.72 发布说明
 
-状态:同候选原生 CI 通过:run 44232611754 attempt 1(检出 4361f88787,输入 commit=X 8407329370),六目标全部作业 success,CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0。公开读回在公开后进行,回执见 release/evidence/0.0.72/public-readback.txt。整体裁决 NOT_QUALIFIED:全套 s9 本版未全跑,产品域仍有 FAIL 与 UNKNOWN,不得称全批资格。
+状态:同候选原生 CI 通过:run 44232611754 attempt 1(检出 4361f88787,输入 commit=X 8407329370),六目标全部作业 success,CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0。已公开发布并置 Latest(2026-11-18T03:50:50Z);公开读回(c47-1-readback:元数据、标签、六件下载与 sha、版本、smoke 5 项、COMM、布局与 SHA256SUMS)通过,回执 release/evidence/0.0.72/public-readback.txt。冻结提交到公开实测 43 分 47 秒(0.0.71 为 151 分钟)。整体裁决 NOT_QUALIFIED:全套 s9 本版未全跑,产品域仍有 FAIL 与 UNKNOWN,不得称全批资格。
 
 ## 真实身份
 
