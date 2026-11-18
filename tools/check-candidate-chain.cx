@@ -362,11 +362,43 @@ static char *ms_variant(const char *fall_text, const char *id, const char *repl,
     if (w < 0 || (size_t)w >= cap) { free(m); return 0; }
     return m;
 }
+static int explicit_manager_cases(const char *parent, char *candidate) {
+    const char *labels[] = {"cm-x64-missing", "cm-x64-empty", "cm-arm64-missing", "cm-arm64-empty", "cm-explicit-checkpoint"};
+    for (int k = 0; k < 5; k++) {
+        char dir[4400], x64[4500], arm[4500], checkpoint[4500], refused[4800];
+        if (cx_fmt(dir, sizeof dir, "%s/cm-XXXXXX", parent) || !mkdtemp(dir) ||
+            cx_fmt(x64, sizeof x64, "%s/x64", dir) || cx_fmt(arm, sizeof arm, "%s/arm64", dir) ||
+            cx_fmt(checkpoint, sizeof checkpoint, "%s/phase/checkpoint.tsv", dir)) return 2;
+        if (k != 0 && cx_write(x64, "X", k == 1 ? 0 : 1)) return 2;
+        if (k != 2 && cx_write(arm, "A", k == 3 ? 0 : 1)) return 2;
+        char *av[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", candidate, "--cache-manager-fixture", dir,
+                      "--cache-manager-osx", x64, arm, 0};
+        char *msg = 0; size_t bytes = 0;
+        int rc = cx_runv_timeout(av, 10, &msg, &bytes);
+        if (k < 4) {
+            sy_stat_t st;
+            if (cx_fmt(refused, sizeof refused, "REFUSE explicit --cache-manager-osx missing or empty: %s\n", k < 2 ? x64 : arm)) return 2;
+            ck(rc == 2 && has(msg, refused) && sy_stat(checkpoint, &st) == -ENOENT, labels[k]);
+        } else {
+            size_t n = 0; char *row = cx_read(checkpoint, &n);
+            const char *prefix = "DONE\tcache-manager\t";
+            ck(rc == 0 && has(msg, "RESUME\tcache-manager\texplicit\n") && row && n > strlen(prefix) &&
+               !memcmp(row, prefix, strlen(prefix)) && tx_chr(row, n, '\n') == (long)n - 1, labels[k]);
+            free(row);
+        }
+        free(msg);
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
     char cwd[400], out[65536], *o = 0;
     char native_tool[4400], native_generator[4400];
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
+    if (argc == 4 && tx_eqz(argv[1], "--explicit-managers")) {
+        if (explicit_manager_cases(argv[2], argv[3])) return 2;
+        return failed ? 1 : 0;
+    }
     if (argc == 4 && tx_eqz(argv[1], "--lane-split")) {
         char td[4400], run[4500], phases[4500], candidate[4500], cmd[24000], p[4500], checkpoint[4500], work[4500];
         const char *revision = "979b56e4d918894670a71080970149112499d223";
@@ -1328,7 +1360,8 @@ int main(int argc, char **argv) {
         ck(pt && !has(pt, "\tcache-manager\touter\t90\tcompare\t") && !has(pt, "\tpack\touter\t90\tcache-manager\t"), "cm-and-pack-no-longer-wait-for-compare");
         ck(pt && has(pt, "\tcompare\touter\t90\tgen1-lnx-x86_64,") && has(pt, ",kernels-g2,kernels-g3,") && has(pt, ",g3-win-x86_64,g3-win-arm64\t"), "compare-still-depends-on-g2-g3-and-both-kernels");
         ck(cc && !has(cc, "QQ"), "zz-large-haystack-absent-needle-no-crash");
-        ck(cc && has(cc, "if (cm64 && cmarm) sy_printf(\"RESUME\\tcache-manager\\texplicit"), "cm-explicit-args-take-priority");
+        ck(cc && has(cc, "if (cm64 && cmarm) {\n            explicit_managers(outdir, cm64, cmarm, resume);"), "cm-explicit-args-take-priority");
+        if (explicit_manager_cases(argv[1], native_tool)) return 2;
         ck(cc && has(cc, "cx_fmt(cmx, sizeof cmx, \"%s/cache-manager/x64\"") && has(cc, "cm64 = cmx; cmarm = cma;"), "cm-default-uses-in-chain-products");
         ck(cc && has(cc, "fsize(cm64) <= 0 || fsize(cmarm) <= 0) die(\"REFUSE pack needs cache-manager"), "cm-pack-refuses-missing-products-named");
         ck(cc && has(cc, "b1[0] = ctool; b1[1] = (char *)\"-b\";"), "cm-cache-retain-argv-no-double-dash-x64");
