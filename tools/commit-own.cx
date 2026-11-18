@@ -910,8 +910,40 @@ static void co_pending_collect(void) {
     }
 }
 
+/* A merge in progress (MERGE_HEAD present): the private-index path below would build a one-parent commit and drop
+   the merged side.  Without --merge-continue refuse by name (COMMIT_MERGE_IN_PROGRESS, exit 2, nothing committed).
+   With --merge-continue: require MERGE_HEAD and no unmerged entry (git ls-files -u empty), take no paths, then hand
+   the staged merge result to a plain `git commit -q -m MSG` (tree = the shared index, parents = HEAD and MERGE_HEAD,
+   the pre-commit hook runs, git clears MERGE_HEAD/MERGE_MSG/MERGE_MODE) and verify both parents afterwards.
+   -1 when neither applies: the default path continues byte for byte unchanged. */
+static int co_mergecont(int mcont, const char *msg, int np, int dry) {
+    char mp[4400], mh[64], out[8192], par[200];
+    char *pv[] = {"git", "rev-parse", "--git-path", "MERGE_HEAD", 0}, *hv[] = {"git", "rev-parse", "-q", "--verify", "MERGE_HEAD", 0};
+    if (run(pv, mp, sizeof mp) != 0 || !mp[0]) { if (!mcont) return -1; co_die("setup", "git rev-parse --git-path MERGE_HEAD failed"); }
+    if (sy_exists(mp) != 1) {
+        if (!mcont) return -1;
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_NONE: --merge-continue needs a merge in progress (no MERGE_HEAD; nothing committed)\n"); return 2; }
+    if (!mcont) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present; a path commit would drop the second parent. Resolve, stage, then: devsvc git commit -m MSG --merge-continue (nothing committed)\n"); return 2; }
+    if (np) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_PATHS: --merge-continue commits the whole staged merge result and takes no --whole/--keyed/--registered (nothing committed)\n"); return 2; }
+    {   char *uv[] = {"git", "ls-files", "-u", 0};
+        if (run(uv, out, sizeof out) != 0) co_die("setup", "git ls-files -u failed");
+        if (out[0]) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_UNRESOLVED: unmerged entries remain (git ls-files -u not empty; nothing committed)\n"); return 2; } }
+    if (run(hv, mh, sizeof mh) != 0 || tx_len(mh, sizeof mh) < 40) co_die("setup", "git rev-parse MERGE_HEAD failed");
+    mh[40] = 0;
+    if (dry) { sy_printf("COMMIT_OWN_DRY\trc=0\tmerge_head=%s\n", mh); return 0; }
+    g_bound_s = 55;
+    {   char *cv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
+        if (run(cv, out, sizeof out) != 0) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: git commit (merge) failed: %s\n", out); return 1; } }
+    g_bound_s = 30;
+    {   char *rv[] = {"git", "rev-list", "--parents", "-n", "1", "HEAD", 0};
+        if (run(rv, par, sizeof par) != 0 || tx_len(par, sizeof par) < 122 || !tx_eqz(par + 82, mh)) {
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: COMMIT_MERGE_PARENTS: HEAD parents are not (old HEAD, %s): %s\n", mh, par); return 1; } }
+    if (sy_exists(mp) == 1) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: COMMIT_MERGE_STATE: MERGE_HEAD still present after the commit\n"); return 1; }
+    sy_printf("COMMIT_MERGE\tcommit=%.40s\tparents=2\tsecond=%s\n", par, mh);
+    return 0;
+}
 int main(int argc, char **argv) {
-    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
+    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0, mcont = 0;
     int dry = 0, att = 0, derive = 0, derive_sel = 0, np0 = 0, nder = 0; long t_der = 0;
     const char *prepare = 0, *receipt = 0, *receipt_id = 0;
     static char dpath[CO_MAX][400];   /* --derive: the derived files appended after the commit's own paths */ long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
@@ -927,6 +959,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--derive-prepare") && a + 1 < argc) { prepare = argv[a + 1]; derive = 1; a += 2; }
         else if (tx_eqz(argv[a], "--derive-receipt") && a + 1 < argc) { receipt = argv[a + 1]; derive = 1; a += 2; }
         else if (tx_eqz(argv[a], "--derive-id") && a + 1 < argc) { receipt_id = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--merge-continue")) { mcont = 1; a++; }   /* see co_mergecont */
         else if (tx_eqz(argv[a], "--dry-run")) { dry = 1; a++; }   /* everything up to and including the pre-commit hook, on the private index; no commit */
         else if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--registered")) {
@@ -970,6 +1003,8 @@ int main(int argc, char **argv) {
             path[np] = CO_REG_TABLE[t]; keys[np] = co_regkeys[t]; co_reg_of[np] = t; np++;
         }
     }
+    if (mcont && !msg) co_die("usage", "--merge-continue needs -m MSG");
+    if (msg) { int mr = co_mergecont(mcont, msg, np, dry); if (mr >= 0) return mr; }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
     for (k = 0; k < np; k++) if (keys[k] && co_reg_of[k] < 0) co_ukey_check(path[k], keys[k]);

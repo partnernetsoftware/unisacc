@@ -1,0 +1,98 @@
+/* tools/check-commit-merge.cx -- devsvc git commit with a merge in progress (DEVSVC-COMMIT-DROPS-MERGE-HEAD).
+ *
+ *   sh ./unisacc.com tools/check-commit-merge.cx            (from the repo root)
+ *
+ * tools/commit-own.cx builds every commit on a private index with one parent, so with MERGE_HEAD present it used to
+ * land a one-parent commit and leave the merge state behind (v0.0.76 had to finish with a native git commit).  This
+ * check compiles the working-tree commit-own.cx once and runs it in throwaway git repos (no unisacc tree, no gates
+ * table) under the system temp dir:
+ *   unresolved  conflict not staged: --merge-continue refuses COMMIT_MERGE_UNRESOLVED, rc 2, HEAD unchanged;
+ *   inprogress  resolved and staged: a plain --whole commit refuses COMMIT_MERGE_IN_PROGRESS, rc 2, HEAD unchanged;
+ *   paths       --merge-continue with --whole refuses COMMIT_MERGE_PATHS, rc 2;
+ *   continue    --merge-continue: HEAD has exactly two parents, the second is the old MERGE_HEAD, the first the old
+ *               HEAD, the tree carries the resolution, MERGE_HEAD/MERGE_MSG/MERGE_MODE are gone, message kept;
+ *   none        --merge-continue without a merge refuses COMMIT_MERGE_NONE, rc 2;
+ *   plain-add, plain-modify, plain-delete  no merge: the default --whole path still commits one parent with the
+ *               given message and the expected tree (the new code returns before touching anything).
+ * Prints PASS/FAIL per case and CHECK_COMMIT_MERGE<TAB>failed=N; exit 1 when N > 0, 2 when the fixture fails. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int failed;
+static char base[4096], bin[4400], root[4096];
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-commit-merge.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-commit-merge.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-commit-merge: REFUSE %s\n", s); exit(2); }
+
+/* sh -c SCRIPT, stdout+stderr into OUT, 50 s bound */
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc; char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 50, &o, &on);
+    {   size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); out[m] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+static int has(const char *out, const char *s) { return tx_find(out, tx_len(out, 16384), s, tx_len(s, 4096)) >= 0; }
+
+/* a repo DIR with base -> side (line 2 = B) and main (line 2 = X), merged with a conflict on f.txt */
+#define CM_MK "mk(){ case \"$1\" in \"\"|/|/tmp|/tmp/|\"$HOME\") exit 9;; esac; rm -rf \"$1\" && mkdir -p \"$1\" && cd \"$1\" && git init -q . && ln -s \"$R/unisacc.com\" unisacc.com && echo unisacc.com > .git/info/exclude && git symbolic-ref HEAD refs/heads/main && " \
+    "git config user.email t@t && git config user.name t && git config commit.gpgsign false && " \
+    "printf 'a\\nb\\nc\\nd\\ne\\n' > f.txt && printf 'k\\n' > keep.txt && git add f.txt keep.txt && git commit -qm base && " \
+    "git checkout -qb side && printf 'a\\nB\\nc\\nd\\ne\\n' > f.txt && git commit -qam side && " \
+    "git checkout -q main && printf 'a\\nX\\nc\\nd\\ne\\n' > f.txt && git commit -qam main && " \
+    "{ git merge -q side >/dev/null 2>&1; test -f .git/MERGE_HEAD; }; }; "
+
+int main(void) {
+    char out[16384], s[6000];
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (cx_fmt(base, sizeof base, "%s/check-commit-merge-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(bin, sizeof bin, "%s/commit-own.bin", base)) die("path");
+    if (cx_fmt(s, sizeof s, "rm -rf %s && mkdir -p %s && sh ./unisacc.com tools/commit-own.cx -o %s", base, base, bin) || sh(s, out, sizeof out) != 0) { sy_eprintf("%s\n", out); die("cannot compile tools/commit-own.cx"); }
+
+    /* unresolved, then inprogress, paths, continue in the same repo */
+    if (cx_fmt(s, sizeof s, CM_MK "R=%s; B=%s; mk %s/m || exit 9; h0=$(git rev-parse HEAD); "
+        "$B -m x --merge-continue; echo RC=$?; test \"$(git rev-parse HEAD)\" = \"$h0\" && echo HEAD_SAME", root, bin, base) || sh(s, out, sizeof out) == 9) die("fixture merge");
+    ck(has(out, "COMMIT_MERGE_UNRESOLVED") && has(out, "RC=2\n") && has(out, "HEAD_SAME"), "unresolved");
+    if (cx_fmt(s, sizeof s, "cd %s/m && printf 'a\\nXB\\nc\\nd\\ne\\n' > f.txt && git add f.txt && h0=$(git rev-parse HEAD); "
+        "%s -m x --whole f.txt; echo RC=$?; test \"$(git rev-parse HEAD)\" = \"$h0\" && test -f .git/MERGE_HEAD && echo HEAD_SAME", base, bin)) die("fmt");
+    sh(s, out, sizeof out);
+    ck(has(out, "COMMIT_MERGE_IN_PROGRESS") && has(out, "RC=2\n") && has(out, "HEAD_SAME"), "inprogress");
+    if (cx_fmt(s, sizeof s, "cd %s/m && %s -m x --merge-continue --whole f.txt; echo RC=$?", base, bin)) die("fmt");
+    sh(s, out, sizeof out);
+    ck(has(out, "COMMIT_MERGE_PATHS") && has(out, "RC=2\n"), "paths");
+    if (cx_fmt(s, sizeof s, "cd %s/m && h0=$(git rev-parse HEAD) && m0=$(git rev-parse MERGE_HEAD) && "
+        "%s -m 'merge side' --merge-continue; echo RC=$?; "
+        "test \"$(git rev-list --parents -n 1 HEAD | cut -d' ' -f2-)\" = \"$h0 $m0\" && echo PARENTS_OK; "
+        "ls .git/MERGE_HEAD .git/MERGE_MSG .git/MERGE_MODE >/dev/null 2>&1 || echo STATE_CLEAR; "
+        "test \"$(git show HEAD:f.txt)\" = \"$(printf 'a\\nXB\\nc\\nd\\ne')\" && echo TREE_OK; "
+        "test \"$(git log -1 --format=%%s)\" = 'merge side' && echo MSG_OK; "
+        "test -z \"$(git status --porcelain --untracked-files=no)\" && echo CLEAN", base, bin)) die("fmt");
+    sh(s, out, sizeof out);
+    ck(has(out, "COMMIT_MERGE\t") && has(out, "RC=0\n") && has(out, "PARENTS_OK") && has(out, "STATE_CLEAR") && has(out, "TREE_OK") && has(out, "MSG_OK") && has(out, "CLEAN"), "continue");
+    if (cx_fmt(s, sizeof s, "cd %s/m && %s -m y --merge-continue; echo RC=$?", base, bin)) die("fmt");
+    sh(s, out, sizeof out);
+    ck(has(out, "COMMIT_MERGE_NONE") && has(out, "RC=2\n"), "none");
+
+    /* default path, no merge: add, modify, delete each land one parent with the message and the tree */
+    if (cx_fmt(s, sizeof s, "cd %s/m && "
+        "printf 'n\\n' > new.txt && %s -m add-new --whole new.txt >/dev/null; echo RC1=$?; "
+        "test \"$(git rev-list --parents -n 1 HEAD | wc -w)\" = 2 && test \"$(git log -1 --format=%%B)\" = add-new && test \"$(git show HEAD:new.txt)\" = n && echo ADD_OK; "
+        "printf 'k2\\n' > keep.txt && %s -m mod-keep --whole keep.txt >/dev/null; echo RC2=$?; "
+        "test \"$(git rev-list --parents -n 1 HEAD | wc -w)\" = 2 && test \"$(git log -1 --format=%%B)\" = mod-keep && test \"$(git show HEAD:keep.txt)\" = k2 && echo MOD_OK; "
+        "rm new.txt && %s -m del-new --whole new.txt >/dev/null; echo RC3=$?; "
+        "test \"$(git rev-list --parents -n 1 HEAD | wc -w)\" = 2 && test \"$(git log -1 --format=%%B)\" = del-new && ! git cat-file -e HEAD:new.txt 2>/dev/null && echo DEL_OK",
+        base, bin, bin, bin)) die("fmt");
+    sh(s, out, sizeof out);
+    ck(has(out, "RC1=0") && has(out, "ADD_OK"), "plain-add");
+    ck(has(out, "RC2=0") && has(out, "MOD_OK"), "plain-modify");
+    ck(has(out, "RC3=0") && has(out, "DEL_OK"), "plain-delete");
+
+    if (cx_fmt(s, sizeof s, "rm -rf %s", base) == 0) sh(s, out, sizeof out);
+    sy_printf("CHECK_COMMIT_MERGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
