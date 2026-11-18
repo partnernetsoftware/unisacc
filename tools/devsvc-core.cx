@@ -1341,6 +1341,27 @@ static const char *auto_owner(void) {
     return o;
 }
 static char commit_class[24];   /* git commit 失败类别:取自 commit-own stderr 的 COMMIT_OWN_FAIL<TAB>class=;完成事件带 class= */
+static char commit_range[180] = "old=-\tnew=-\tpaths=unknown";
+/* Count changes between the two observed worktree HEADs. Paths containing
+ * newlines are a single NUL-delimited entry. Observation cannot fail a commit. */
+static void commit_range_note(const char *cwd, char *old, char *now) {
+    char count[32] = "unknown";
+    if (*old && *now) {
+        if (!strcmp(old, now)) count[0] = '0', count[1] = 0;
+        else {
+            char *v[] = {"git", "diff-tree", "--no-commit-id", "-r", "--no-renames", "--name-only", "-z", old, now, "--", 0};
+            np_result res; char why[128]; long paths = 0; size_t i;
+            if (!np_run(v, cwd, 0, 2, &res, why, sizeof why)) {
+                if (!res.rc) {
+                    for (i = 0; i < res.outn; i++) if (!res.out[i]) paths++;
+                    (void)cx_fmt(count, sizeof count, "%ld", paths);
+                }
+                np_free(&res);
+            }
+        }
+    }
+    (void)cx_fmt(commit_range, sizeof commit_range, "old=%s\tnew=%s\tpaths=%s", *old ? old : "-", *now ? now : "-", count);
+}
 static void commit_class_from(const char *path) {
     unsigned char *b = 0; int64_t n = 0; long i, k;
     if (!path[0] || sy_read_file(path, &b, &n, 1 << 24) || !b) return;
@@ -1617,6 +1638,9 @@ static int merge_conflicts(const char *root, const char *rd, const char *br, con
    无冲突:GIT_MERGE rc=0 commit=SHA branch=当前分支。参数错 rc 2。 */
 static int git_argerr;   /* cmd_git 及其子命令在参数解析处退出(尚未启动任何 git 动作)时置 1;入口只在此时贴 usage。
                             git 子进程、commit-own 的真实 rc 2 与具名 REFUSE 的 rc 2 原样返回,不贴 usage(仿 x_ran) */
+static const char *commit_outcome(int rc) {
+    return rc == 0 ? "ok" : rc == 124 ? "timeout" : commit_class[0] ? commit_class : git_argerr ? "args" : "other";
+}
 /* K2/K5 私有索引合并与快进:不经共享索引与工作区算结果,ref 以 update-ref NEW OLD 比较并交换落地(HEAD 被他人移动则重做,至多 3 次),
    落地后 cxlib.gitsync gs_sync 只同步"索引与工作区都等于旧 HEAD"的路径,其余原样保留并逐行报 <前缀>\tSYNC_KEPT path= reason=。
    本机 git 2.34 无 merge-tree --write-tree:GIT_INDEX_FILE 私有索引里 read-tree OURS 后 read-tree -m --aggressive BASE OURS THEIRS,
@@ -2009,6 +2033,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
             char *pv[] = {"--par", "1", "--cwd", (char *)cwd, "--", "git", "push", "origin", rs, 0}; pushed = cmd_x(root, 9, pv) == 0; if (!pushed) rc = 1; } }
     {   char *hv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(hv, sha, sizeof sha) == 0) chomp(sha); else sha[0] = 0; }
+    commit_range_note(cwd ? cwd : root, sha0, sha);
     if (sha0[0] && sha[0] && strcmp(sha0, sha)) pin_prepare_kick(cwd ? cwd : root);
     /* 未产生新提交(rc 非 0 且 HEAD 未动,或取不到 HEAD)时 commit=none,并在行尾加 reason=:
      * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
@@ -2047,7 +2072,7 @@ static int usage(void) {
 static int main2(int argc, char **argv);
 static int in_bg;   /* 本进程是后台作业子进程(bg_child 置 1):前台 commit 不再转作业 */
 static char last_job[48];   /* bg_launch 最近一次起的作业 id */
-typedef struct { int argc; char **argv; char root[PW], jd[PW], id[48], owner[64]; } BgJob;
+typedef struct { int argc, commit; char **argv; char root[PW], jd[PW], id[48], owner[64]; } BgJob;
 static int okjob(const char *s) { long n = 0; for (; s && s[n]; n++) if (!((s[n] >= '0' && s[n] <= '9') || s[n] == '-')) return 0; return n > 2 && n < 40; }
 static int bg_child(void *ud) {
     BgJob *j = (BgJob *)ud; char p[PW + 16], t[400]; int fd, r; long t0 = sy_now_ms();
@@ -2058,6 +2083,9 @@ static int bg_child(void *ud) {
     in_bg = 1;
     r = main2(j->argc, j->argv);
     fflush(stdout); fflush(stderr);
+    if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\t%s",
+                            j->owner, sy_pid(), r, sy_now_ms() - t0, commit_outcome(r), commit_range))
+        request(j->root, t, 0);
     F(t, sizeof t, "%d\t%ld\n", r, sy_now_ms() - t0); F(p, sizeof p, "%s/rc", j->jd); sy_write_atomic(p, t, strlen(t), 0644);
     F(t, sizeof t, "emit\tjob.done\tid=%s\trc=%d\tms=%ld\towner=%s", j->id, r, sy_now_ms() - t0, j->owner); request(j->root, t, 0);
     return r;
@@ -2074,7 +2102,7 @@ static int bg_launch(const char *root, const char *cmd, int oargc, char **oargv,
     static BgJob j; static char *nv[FL_MAX_ARGV + 8]; int i, n = 0, fds[2], pid, rd = 0; char p[PW + 16], t[PW + 200];
     if (oargc > FL_MAX_ARGV + 6) return 2;
     for (i = 0; i < oargc; i++) { if (oargv + i == bgarg) continue; nv[n++] = oargv[i]; if (!strcmp(oargv[i], "-")) rd = 1; }
-    nv[n] = 0; j.argc = n; j.argv = nv;
+    nv[n] = 0; j.argc = n; j.argv = nv; j.commit = !strcmp(cmd, "git");
     F(j.root, sizeof j.root, "%s", root); F(j.id, sizeof j.id, "%ld-%d", sy_now_ms(), sy_pid()); F(j.owner, sizeof j.owner, "%s", auto_owner());
     F(j.jd, sizeof j.jd, "%s/jobs/%s", dir, j.id);
     if (ovf || sy_mkdir_all(j.jd, 0700)) { fprintf(stderr, "devsvc: cannot create job directory\n"); return 3; }
@@ -2325,7 +2353,7 @@ int main(int argc, char **argv) {
         static const char *ev[] = {"f", "x", "flow", "doc", "git", "run", "register", "derive", 0};
         int j; char root[PW], rq[600];
         for (j = 0; ev[j]; j++) if (!strcmp(argv[a], ev[j])) break;
-        if (ev[j] && sy_cwd(root, sizeof root) >= 0) {
+        if (ev[j] && !(last_job[0] && !strcmp(argv[a], "git")) && sy_cwd(root, sizeof root) >= 0) {
             char sub[48] = "-"; int s = a + 1;
             if (!strcmp(argv[a], "x")) {   /* x 事件取工具名:跳过 --timeout-ms N、--cwd D、--owner N、--bg 等选项与 --,再跳过 sh 与 unisacc.com,去目录与 .cx 后缀 */
                 while (s < argc && argv[s][0] == '-') {
@@ -2349,7 +2377,7 @@ int main(int argc, char **argv) {
                 if (u < argc) { for (q = 0; q < 47 && argv[u][q]; q++) sw[q] = argv[u][q]; sw[q] = 0; clean(sw); F(fx, sizeof fx, "\tsub=%s", sw); }
             }
             if (!strcmp(argv[a], "git") && !strcmp(sub, "commit"))   /* K6:class=ok|timeout|<COMMIT_OWN_FAIL 类别>|args(参数错)|other */
-                F(fx, sizeof fx, "\tclass=%s", r == 0 ? "ok" : r == 124 ? "timeout" : commit_class[0] ? commit_class : git_argerr ? "args" : "other");
+                F(fx, sizeof fx, "\tclass=%s\t%s", commit_outcome(r), commit_range);
             if (!strcmp(argv[a], "f") && (!strcmp(sub, "edit") || !strcmp(sub, "write") || !strcmp(sub, "edits")) && argc > a + 2 && !strchr(argv[a + 2], '\t') && !strchr(argv[a + 2], '\n')) {
                 unsigned char *fb = 0; int64_t fn = 0; char hx[65] = "-";
                 if (!sy_read_file(argv[a + 2], &fb, &fn, 1L << 27)) (void)sy_sha256_hex(fb ? (const void *)fb : (const void *)"", (long)fn, hx);
