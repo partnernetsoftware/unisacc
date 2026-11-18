@@ -1,0 +1,62 @@
+/* tools/check-nativestat.cx -- Self-check for tools/dv/nativestat.cx (O(1) stat hit, racy-2s guard, invalidation on edit/tamper). */
+#pragma unisa use dv.nativestat
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int fails;
+static void chk(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tnativestat.%s\n", name);
+    else { sy_printf("FAIL\tnativestat.%s\n", name); fails++; }
+}
+
+int main(void) {
+    char base[512], mdir[600], prod[600], src[600], bin[600], shaf[620], out[600], plan[2048];
+    char ph1[65], ph2[65];
+    if (cx_fmt(base, sizeof base, "%s/check-nativestat-%d", sy_tmpdir(), sy_pid()) ||
+        cx_fmt(mdir, sizeof mdir, "%s/memo", base) ||
+        cx_fmt(prod, sizeof prod, "%s/prod", base) ||
+        cx_fmt(src, sizeof src, "%s/tool.cx", base) ||
+        cx_fmt(bin, sizeof bin, "%s/tool", base) ||
+        cx_fmt(shaf, sizeof shaf, "%s.sha", bin) ||
+        sy_mkdir_all(mdir, 0700)) return 2;
+
+    if (cx_write(prod, "PRODv1", 6) || cx_write(src, "SRCv1", 5) || cx_write(bin, "BINv1", 5)) return 2;
+    {   char bh[65];
+        if (sy_sha256_hex("BINv1", 5, bh) || cx_write(shaf, bh, 64)) return 2;
+    }
+
+    /* Within 2s racy window: ns_save must NOT emit nat-*.stat */
+    if (cx_fmt(plan, sizeof plan, "u\t%s\n", src)) return 2;
+    ns_save(mdir, base, "tool.cx", prod, plan, bin);
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "racy-window-blocks-save");
+
+    /* Advance beyond 2s (3s) -> saves cleanly -> O(1) hit succeeds */
+    sy_sleep_ms(3000);
+    chk(!ns_prod_sha(prod, mdir, ph1) && !ns_prod_sha(prod, mdir, ph2) && tx_eqz(ph1, ph2), "prod-sha-memo");
+    chk(ns_bin_ok(bin) == 1, "bin-ok-writes-stat");
+    ns_save(mdir, base, "tool.cx", prod, plan, bin);
+    out[0] = 0;
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) == 0 && tx_eqz(out, bin), "o1-hit-after-2s");
+
+    /* Tamper source file 1 byte -> nat-*.stat immediately invalidates */
+    chk(cx_write(src, "SRCv2", 5) == 0, "write-src-v2");
+    chk(ns_try_hit(mdir, base, "tool.cx", prod, out, (int)sizeof out) != 0, "source-edit-invalidates-o1");
+
+    /* Tamper binary 1 byte while keeping exact size -> ns_bin_ok detects & unlinks */
+    chk(cx_write(bin, "BINvX", 5) == 0, "write-tampered-bin");
+    chk(ns_bin_ok(bin) == 0 && sy_exists(bin) == 0, "tampered-bin-detected-and-unlinked");
+
+    {   char *rv[] = {"rm", "-rf", base, 0}; size_t rn = 0; char *ro = 0;
+        (void)cx_runv_timeout(rv, 10, &ro, &rn); if (ro) mm_free(ro);
+    }
+    sy_printf("NATIVESTAT\tfailed=%d\n", fails);
+    return fails ? 1 : 0;
+}

@@ -67,6 +67,7 @@
 #pragma unisa use net.sock
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.fd
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -77,6 +78,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.flowexec
 #pragma unisa use dv.timing
+#pragma unisa use dv.nativestat
 #pragma unisa use cxlib.flowfile
 #pragma unisa use cxlib.flowdoc
 #pragma unisa use sys.sigwatch
@@ -359,25 +361,43 @@ static long build_tail(char *dst, long cap) {
     free(b);
     return k;
 }
+static void native_dirs(int bypass, const char *hex, char *kd, int kcap, char *mdir, int mcap) {
+    const char *nd = getenv("DEVSVC_NATIVE_DIR"), *ie = getenv(cfg.inst_env); char home[PW], base[PW];
+    base[0] = 0;
+    if (nd && *nd) F(base, sizeof base, "%s", nd);
+    else if ((ie && *ie) || sy_homedir(home, sizeof home) < 0) F(base, sizeof base, "%s/native", dir);
+    else F(base, sizeof base, "%s/%s/native", home, cfg.cache_sub);
+    if (mdir && cx_fmt(mdir, (size_t)mcap, "%s/memo", base)) ovf++;
+    if (kd) {
+        if (bypass) { if (cx_fmt(kd, (size_t)kcap, "%s/native/bypass", dir)) ovf++; }
+        else { if (cx_fmt(kd, (size_t)kcap, "%s/%s", base, hex)) ovf++; }
+    }
+}
+static int native_try_fast(const char *root, const char *tool, char *bin, int cap, long *ms) {
+    char prod[PW], real[PW], mdir[PW]; long t0 = sy_now_ms();
+    if (!root || !tool || !tool[0] || strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -1;
+    F(prod, sizeof prod, "%s/%s", root, cfg.product);
+    if (ovf || sy_realpath(prod, real, sizeof real) < 0) return -1;
+    native_dirs(0, "-", 0, 0, mdir, sizeof mdir);
+    if (ovf || ns_try_hit(mdir, root, tool, real, bin, cap) != 0) return -1;
+    *ms = sy_now_ms() - t0;
+    return 0;
+}
 static int native_get(const char *root, const char *tool, char *bin, int cap, const char **cache, long *ms) {
-    static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], tmp[PW];
-    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc; const char *base; char *dot;
+    static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], mdir[PW], tmp[PW];
+    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc, lfd = -1; const char *base; char *dot;
     sy_spawn_t o; sy_exit_t ex;
     *ms = 0; *cache = "miss"; nlog[0] = 0;
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
-    /* 键 = 产品字节 sha + 被运行工具 use 传递闭包(产品 -cx-plan 解析)每个文件的工作区内容 sha;
-       闭包外的脏文件或未跟踪文件不影响命中;解析或读失败才 bypass */
     static char cl[1 << 16]; long cn = 0;
     char phex[65]; long rl = (long)strlen(root); int fileref = 0;
-    /* 内容键(v3):键里不含实例根;闭包文件按仓内相对路径记。闭包里出现 __FILE__ 的工具会把源绝对路径编进执行体,
-       这类工具键里保留根,只在同一根复用。缓存目录:DEVSVC_NATIVE_DIR,否则测试实例(inst_env 已设)用实例目录,
-       否则 $HOME 下各实例共用的 native 目录,使不同克隆或工作树共享同内容构造 */
     F(src, sizeof src, "%s/%s", root, tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
     if (sy_exists(src) != 1) return -ENOENT;
     if (sy_realpath(prod, real, sizeof real) < 0) return -ENOENT;
-    if (sy_read_file(real, &b, &n, 1 << 28) || !b) return -ENOENT;
-    if (sy_sha256_hex(b, n, phex)) { free(b); return -EIO; }
-    free(b); b = 0;
+    native_dirs(0, "-", 0, 0, mdir, sizeof mdir);
+    if (ns_try_hit(mdir, root, tool, real, bin, cap) == 0) { *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
+    if (ns_prod_sha(real, mdir, phex)) return -EIO;
+    big[0] = 0;
     {   char *v[] = {"sh", prod, "-cx-plan", src, 0};
         if (runcap(v, big, sizeof big) != 0) bypass = 1; }
     if (!bypass) {
@@ -410,20 +430,18 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     hex[20] = 0;
     base = strrchr(tool, '/'); base = base ? base + 1 : tool;
     F(leaf, sizeof leaf, "%s", base); dot = strrchr(leaf, '.'); if (dot) *dot = 0;
-    {   const char *nd = getenv("DEVSVC_NATIVE_DIR"), *ie = getenv(cfg.inst_env); char home[PW];
-        if (bypass) F(kd, sizeof kd, "%s/native/bypass", dir);   /* bypass 不共享 */
-        else if (nd && *nd) F(kd, sizeof kd, "%s/%s", nd, hex);
-        else if ((ie && *ie) || sy_homedir(home, sizeof home) < 0) F(kd, sizeof kd, "%s/native/%s", dir, hex);
-        else F(kd, sizeof kd, "%s/%s/native/%s", home, cfg.cache_sub, hex); }
+    native_dirs(bypass, hex, kd, sizeof kd, mdir, sizeof mdir);
     if (sy_mkdir_all(kd, 0700) || snprintf(bin, cap, "%s/%s", kd, leaf) >= cap) return -EIO;
-    if (!bypass && sy_exists(bin) == 1) {   /* 命中:每次重算执行体字节 sha 与构造时记下的比对,不符即重建 */
-        char sp[PW + 8], want[80] = "", got[65]; unsigned char *sb = 0; int64_t sn = 0;
-        F(sp, sizeof sp, "%s.sha", bin);
-        if (!sy_read_file(sp, &sb, &sn, 128) && sb && sn >= 64) { mm_copy(want, sizeof want, sb, 64); want[64] = 0; }
-        free(sb); sb = 0;
-        if (want[0] && !sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got) && !strcmp(got, want)) {
-            free(sb); *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
-        free(sb); sy_unlink(bin);
+    if (!bypass && ns_bin_ok(bin)) {
+        ns_save(mdir, root, tool, real, big, bin);
+        *cache = "hit"; *ms = sy_now_ms() - t0; return 0;
+    }
+    if (!bypass && ns_lock_begin(bin, &lfd) == 0) {
+        if (ns_bin_ok(bin)) {
+            ns_lock_end(lfd);
+            ns_save(mdir, root, tool, real, big, bin);
+            *cache = "hit"; *ms = sy_now_ms() - t0; return 0;
+        }
     }
     if (bypass) *cache = "bypass";
     F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
@@ -435,16 +453,19 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
         if (lf >= 0) sy_close(lf); else nlog[0] = 0; }
     *ms = sy_now_ms() - t0;
     /* 失败时日志留在原处(下次构造同名工具时覆盖),路径与末段由调用方回传 */
-    if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
+    if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); ns_lock_end(lfd); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
     if (nlog[0]) sy_unlink(nlog);
     nlog[0] = 0;
-    if (sy_rename(tmp, bin)) { sy_unlink(tmp); return -EIO; }
+    if (sy_rename(tmp, bin)) { sy_unlink(tmp); ns_lock_end(lfd); return -EIO; }
     if (!bypass) {   /* 记下执行体字节 sha,供命中时校验 */
         unsigned char *sb = 0; int64_t sn = 0; char got[65], sp[PW + 8];
         F(sp, sizeof sp, "%s.sha", bin);
         if (!sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got)) (void)sy_write_atomic(sp, got, 64, 0600);
         free(sb);
+        (void)ns_bin_ok(bin);
+        ns_save(mdir, root, tool, real, big, bin);
     }
+    ns_lock_end(lfd);
     return 0;
 }
 
@@ -515,6 +536,21 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
 
 static int try_connect(long ms) { return sy_unix_connect(sockp, sy_deadline_in(ms)); }
 
+#define MAX_NAT_WORKERS 16
+typedef struct { int ls, c; char line[2048]; } NatWork;
+static int nat_pids[MAX_NAT_WORKERS], n_nat;
+static int native_worker(void *ud) {
+    NatWork *w = (NatWork *)ud;
+    int dn = sy_open("/dev/null", O_RDWR, 0);
+    sy_close(w->ls);
+    if (dn >= 0) { if (dn != 1) sy_dup2(dn, 1); if (dn != 2) sy_dup2(dn, 2); if (dn > 2) sy_close(dn); }
+    rn = 0; resp[0] = 0; ovf = 0;
+    (void)handle(w->line);
+    if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; }
+    (void)sy_send_all_until(w->c, resp, rn, sy_deadline_in(58000));
+    sy_close(w->c);
+    return 0;
+}
 static int jobs_gc(void);
 static int flowdir_gc(void);
 static int serve(long ttl, long idle) {
@@ -537,6 +573,11 @@ static int serve(long ttl, long idle) {
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
+        for (int wi = 0; wi < n_nat; ) {
+            int wex = 0, wcd = 0, wsg = 0;
+            if (sy_wait_status(nat_pids[wi], 1, &wex, &wcd, &wsg) != 0) nat_pids[wi] = nat_pids[--n_nat];
+            else wi++;
+        }
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
         if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
         c = sy_tcp_accept(ls, 200);
@@ -552,6 +593,34 @@ static int serve(long ttl, long idle) {
             line[k] = 0; chomp(line); if (strchr(line, '\n')) *strchr(line, '\n') = 0;
             rn = 0; resp[0] = 0;
             ovf = 0;
+            if (k > 0 && !strncmp(line, "native\t", 7)) {
+                char *sp1 = strchr(line + 7, '\t');
+                if (sp1 && !strchr(sp1 + 1, '\t')) {
+                    char bin[PW], rbuf[PW]; long nms = 0;
+                    long rl1 = sp1 - (line + 7);
+                    if (rl1 > 0 && rl1 < (long)sizeof rbuf) {
+                        mm_copy(rbuf, sizeof rbuf, line + 7, (size_t)rl1); rbuf[rl1] = 0;
+                        if (native_try_fast(rbuf, sp1 + 1, bin, sizeof bin, &nms) == 0) {
+                            radd("OK\tnative\t%s\tcache=hit\tms=%ld\n", bin, nms);
+                            if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; }
+                            sy_send_all_until(c, resp, rn, sy_deadline_in(2000));
+                            sy_close(c); last = sy_now_ms(); continue;
+                        }
+                    }
+                    if (n_nat < MAX_NAT_WORKERS) {
+                        static NatWork nw; int fds[2], wp;
+                        nw.ls = ls; nw.c = c;
+                        if (!cx_fmt(nw.line, sizeof nw.line, "%s", line)) {
+                            wp = sy_fork_session(native_worker, &nw, fds);
+                            if (wp > 0) {
+                                sy_close(fds[0]); sy_close(fds[1]);
+                                nat_pids[n_nat++] = wp;
+                                sy_close(c); last = sy_now_ms(); continue;
+                            }
+                        }
+                    }
+                }
+            }
             if (k > 0) stop = handle(line); else radd("ERR\tempty-request\n");
             if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; stop = 0; }
             sy_send_all_until(c, resp, rn, sy_deadline_in(2000));
