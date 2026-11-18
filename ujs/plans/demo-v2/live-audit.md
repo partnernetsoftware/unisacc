@@ -62,3 +62,5 @@
 石桥候选为 `d3-bridge-audit.html`，新轨道开场远看五座桥拱，靠近后从桥头一侧登桥。运行 `tools/check-uxe-d3-geometry.cx -- audit-walk` 比对五个时点的眼位、风动与画布变化。追加 `frozen-path` 时路线断言失败。左线上右候选为 `/tmp/audit-d3-improved-comparison.png`。
 
 城镇候选为 `d4-skeleton-audit.html`，随行程逐步拉远并下移取景目标。在第 170 帧四脚投影完整入画，最小边距 111 像素。运行 `tools/check-uxe-d3-geometry.cx -- audit-town`，追加 `fixed-audit-camera` 时镜头与脚部边距断言失败。左线上右候选为 `/tmp/audit-d4-improved-comparison.png`。
+
+灯舟候选为 `banks-audit.html`。实测上一候选在原起点门只剩 23% 桥宽，原因是近岸芦苇覆盖桥面。先画新苇丛和木桩，再画桥和桥灯，原采样口径恢复到 43%。另从 W 推进轨迹中为 0、3、6、9、12 米选择最近一帧，按原桥色可见像素比例逐帧测得 43%、49%、57%、71%、79%，每帧阈值均为 40%。缩桥时前三帧为 26%、30%、35%。经 `tools/check-uxe-s0-exist.cx -- banks-bridge-approach` 复跑，缩桥追加 `narrow-bridge`。保留原构图、航程、反射和双岸前景门。实拍并排在 `/tmp/audit-d2-bridge-fixed-comparison.png`。

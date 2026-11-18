@@ -303,6 +303,11 @@ function reedBed() {
 }
 function nearBanks(theme,mask=false) {
   const [, ,fog, ,water,ground,light]=theme;
+  function contour(path,points) {
+    path.moveTo(...points[0]);
+    for(let i=1;i<points.length;i++) path.lineTo(...points[i]);
+    path.closePath();
+  }
   if(!query.has("bare-reed-verge")) {
     const first=Math.floor(boat.z/4)*4;
     for(let strip=19;strip>=0;strip--) for(const side of [-1,1]) {
@@ -311,6 +316,7 @@ function nearBanks(theme,mask=false) {
       const tint=clamp((d-15)/140,0,.68);
       const dark=mask?(side<0?"#ff0000":"#00ff00"):css(blend([48,64,36],fog,tint));
       const bright=mask?dark:css(blend([143,133,69],fog,tint));
+      const stems=new Path2D(),blades=new Path2D(),mirrors=new Path2D();
       for(let i=0;i<(side<0?13:25);i++) {
         const n=noise(i,Math.floor(z)+side*71);
         const shallows=d<22?2.9:1.1;
@@ -318,13 +324,15 @@ function nearBanks(theme,mask=false) {
         if(p.x<-12 || p.x>width+12 || p.y>height+12) continue;
         const h=p.scale*(1.7+(n%43)/12),w=Math.max(1,p.scale*.09);
         const lean=(n%2?1:-1)*h*(.16+(n%8)*.037)+Math.sin(boat.tick*.045+i)*p.scale*.21;
-        if(!mask && reflections && n%3===0)
-          pixel(css(blend(water,ground,.45)),p.x,p.y+2,w,h*.27);
-        polygon(dark,[[p.x,p.y],[p.x+w,p.y],[p.x+lean+w,p.y-h],[p.x+lean,p.y-h]]);
-        polygon(bright,[[p.x+lean*.27,p.y-h*.29],[p.x+lean*.51,p.y-h*.58],
+        if(!mask && reflections && n%3===0) mirrors.rect(Math.round(p.x),Math.round(p.y+2),w,h*.27);
+        contour(stems,[[p.x,p.y],[p.x+w,p.y],[p.x+lean+w,p.y-h],[p.x+lean,p.y-h]]);
+        contour(blades,[[p.x+lean*.27,p.y-h*.29],[p.x+lean*.51,p.y-h*.58],
           [p.x+lean*.77+side*h*.26,p.y-h*.72],[p.x+lean*.52,p.y-h*.55]]);
-        if(n%6===0) pixel(bright,p.x+lean,p.y-h-1,w+1,Math.max(2,h*.13));
+        if(n%6===0) blades.rect(Math.round(p.x+lean),Math.round(p.y-h-1),w+1,Math.max(2,h*.13));
       }
+      if(!mask && reflections) { paint.fillStyle=css(blend(water,ground,.45)); paint.fill(mirrors); }
+      paint.fillStyle=dark; paint.fill(stems);
+      paint.fillStyle=bright; paint.fill(blades);
     }
   }
   if(query.has("bare-moorings")) return;
@@ -403,11 +411,11 @@ function draw() {
   ridges(theme,realm);
   banks(theme);
   reedBed();
+  nearBanks(theme);
   lilies(theme);
   crossing(theme);
   foregroundLily(theme);
   dock();
-  nearBanks(theme);
   prow();
   fireflies();
   if(realm!==shown) {
@@ -436,7 +444,29 @@ addEventListener("keydown",event=>{
 });
 addEventListener("keyup",event=>keys.delete(event.code));
 addEventListener("blur",()=>{ keys.clear(); pointer=null; });
-if(query.has("bank-audit")) {
+if(query.has("bridge-approach")) {
+  const trace=[];
+  for(const waypoint of [0,3,6,9,12]) {
+    let previous={...boat};
+    while(boat.z<waypoint) {
+      previous={...boat};
+      step(0,1);
+    }
+    const next={...boat};
+    if(waypoint-previous.z < next.z-waypoint) Object.assign(boat,previous);
+    draw();
+    const depth=24-boat.z;
+    const y=Math.round(horizon+(1550-5*155)/depth+2);
+    const rgba=paint.getImageData(0,y,width,1).data;
+    const row=[];
+    for(let x=0;x<width;x++) row.push(...rgba.subarray(4*x,4*x+3));
+    trace.push(Math.round(1000*boat.z)+","+y+"|"+row.join(","));
+    Object.assign(boat,next);
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=trace.join(";");
+} else if(query.has("bank-audit")) {
   const trace=[];
   for(const z of [0,30,58]) {
     boat.z=z;
@@ -507,11 +537,17 @@ if(query.has("bank-audit")) {
   });
   canvas.addEventListener("pointermove",pointInput);
   canvas.addEventListener("lostpointercapture",()=>pointer=null);
-  let previous=performance.now();
+  let previous=performance.now(),pending=0;
+  const interval=1000/30;
   function animate(now) {
-    if(now-previous>=32) {
-      previous=now;
-      step(...steerInput());
+    pending+=Math.min(240,now-previous);
+    previous=now;
+    if(pending>=interval) {
+      const input=steerInput();
+      while(pending>=interval) {
+        step(...input);
+        pending-=interval;
+      }
       draw();
     }
     requestAnimationFrame(animate);
