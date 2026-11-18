@@ -1,0 +1,122 @@
+/* tools/check-release-packcheck.cx -- fixtures for tools/release-packcheck.cx (Q-07 version slot gate and
+ * PACK_APE_CHANGED gate).  Everything lives in a fresh temp dir: no repo history, no chain output, no network.
+ *   sh ./unisacc.com tools/check-release-packcheck.cx
+ * Positive: one-row slot equal to --version / branch vX.Y.Z passes; identical APE bytes pass; stamping the same
+ * version into two fresh slot copies gives identical bytes (the mechanism by which pack reproduces the chain APE).
+ * Negative (each must be a named refusal, rc 2): slot missing, two data rows, slot version differs from target,
+ * main without --version, APE bytes changed, --allow-repack without a reason; a different version stamps
+ * different bytes.  Ends with RELEASE_PACKCHECK passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseversion
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/release-packcheck.cx under the installed product */
+static int passed, failed;
+static char tmpd[300];
+static const char *HDR = "repo\ttag\tcommit\tversion\tape\n";
+
+/* one verdict row; counts into passed/failed */
+static void ck(int ok, const char *name) {
+    int *tally = ok ? &passed : &failed;
+    (*tally)++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int has(const char *h, const char *w) {
+    size_t wn = strlen(w);
+    if (!h) return 0;
+    for (; *h; h++) if (!strncmp(h, w, wn)) return 1;
+    return 0;
+}
+static int run(char **argv, char *out, int cap) {
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    out[0] = 0;
+    long deadline_ms = 0; (void)deadline_ms;   /* the deadline lives in the ./tools/bound argv prefix */
+    pid = sy_spawn_pipe(argv, 0, 0, &fd, 0);
+    if (pid <= 0) return -1;
+    while (n < cap - 1 && (r = sy_read(fd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0; sy_close(fd);
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
+}
+/* root dir NAME holding release/candidate.tsv = HDR + ROWS */
+static void mkroot(const char *name, const char *rows, char *dir, int cap) {
+    char p[600], body[1024];
+    cx_fmt(dir, (size_t)cap, "%s/%s", tmpd, name); sy_mkdir(dir, 0755);
+    cx_fmt(p, sizeof p, "%s/release", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, sizeof p, "%s/release/candidate.tsv", dir);
+    cx_fmt(body, sizeof body, "%s%s", HDR, rows);
+    if (rows) cx_write(p, body, tx_len(body, sizeof body));
+}
+/* cases are collected, then run in ONE tools/release-packcheck.cx batch process (one compile, cold cache too) */
+#define MAXC 32
+static const char *cname[MAXC], *cfrag[MAXC]; static int cwant[MAXC], ncase;
+static char cases[8192]; static long clen;
+static void pc(const char *name, char **args, int want_rc, const char *frag) {
+    int i;
+    if (ncase == MAXC) { ck(0, "case-capacity"); return; }
+    cname[ncase] = name; cfrag[ncase] = frag; cwant[ncase] = want_rc; ncase++;
+    for (i = 0; args[i]; i++) clen += snprintf(cases + clen, sizeof cases - (size_t)clen, "%s%s", i ? "\t" : "", args[i]);
+    clen += snprintf(cases + clen, sizeof cases - (size_t)clen, "\n");
+}
+static void run_cases(void) {
+    static char out[65536]; char f[400], mark[40]; int i, rc;
+    char *v[] = {"./tools/bound", "50", "sh", UC, "tools/release-packcheck.cx", "--", "batch", f, 0};
+    cx_fmt(f, sizeof f, "%s/cases.tsv", tmpd); cx_write(f, cases, (size_t)clen);
+    rc = run(v, out, sizeof out);
+    ck(rc == 0, "batch-process-rc0");
+    for (i = 0; i < ncase; i++) {
+        long s, e, hn = (long)tx_len(out, sizeof out); char seg[2048]; long k; int got = -1;
+        cx_fmt(mark, sizeof mark, "CASE\t%d\n", i + 1); s = tx_find(out, hn, mark, (long)tx_len(mark, 40));
+        cx_fmt(mark, sizeof mark, "END\t%d\trc=", i + 1); e = tx_find(out, hn, mark, (long)tx_len(mark, 40));
+        seg[0] = 0;
+        if (s >= 0 && e > s) {
+            k = e - s; if (k > (long)sizeof seg - 1) k = (long)sizeof seg - 1;
+            mm_copy(seg, sizeof seg, out + s, (size_t)k); seg[k] = 0;
+            got = out[e + (long)tx_len(mark, 40)] - '0';
+        }
+        ck(got == cwant[i] && has(seg, cfrag[i]), cname[i]);
+        if (got != cwant[i] || !has(seg, cfrag[i])) printf("#\t%s rc=%d out=%s\n", cname[i], got, seg);
+    }
+}
+static void blob(const char *name, const char *ver, char *path, int cap) {
+    /* a fake slice: bytes around one reserved slot; ver 0 leaves the slot unstamped */
+    unsigned char b[256]; int i;
+    for (i = 0; i < 256; i++) b[i] = (unsigned char)(i * 7 + 1);
+    mm_copy(b + 100, 32, "UNISACC_VERSION_SLOT_0000000000", 32);
+    if (ver && rv_inject_slot(b, 256, ver)) { ck(0, "stamp-slot"); }
+    cx_fmt(path, (size_t)cap, "%s/%s", tmpd, name);
+    cx_write(path, (const char *)b, 256);
+}
+
+int main(void) {
+    char r[400], a75[600], b75[600], a71[600];
+    if (sy_mkdtemp(sy_tmpdir(), "release-packcheck-check-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
+    const char *row75 = "o/r\tv0.0.75\tx\t0.0.75\tunisacc.com\n";
+    mkroot("ok", row75, r, sizeof r);
+    { char *a[] = {"slot", r, "--version", "0.0.75", 0}; pc("slot-arg-match-pass", a, 0, "VERSION_SLOT\tOK\tversion=0.0.75"); }
+    { char *a[] = {"slot", r, "--branch", "v0.0.75", 0}; pc("slot-branch-match-pass", a, 0, "source=branch"); }
+    { char *a[] = {"slot", r, "--version", "0.0.76", 0}; pc("slot-differs-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\tslot-version-differs-from-target"); }
+    { char *a[] = {"slot", r, "--branch", "v0.0.71", 0}; pc("slot-branch-differs-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\tslot-version-differs-from-target"); }
+    { char *a[] = {"slot", r, "--branch", "main", 0}; pc("slot-main-no-version-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\ttarget-unknown"); }
+    mkroot("norow", "", r, sizeof r);
+    { char *a[] = {"slot", r, "--version", "0.0.75", 0}; pc("slot-missing-row-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\tslot-missing"); }
+    mkroot("nofile", 0, r, sizeof r);
+    { char *a[] = {"slot", r, "--version", "0.0.75", 0}; pc("slot-missing-file-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\tslot-missing"); }
+    mkroot("tworow", "o/r\tv0.0.75\tx\t0.0.75\tunisacc.com\no/r\tv0.0.76\tx\t0.0.76\tunisacc.com\n", r, sizeof r);
+    { char *a[] = {"slot", r, "--version", "0.0.75", 0}; pc("slot-two-rows-refuse", a, 2, "CHAIN_READY_VERSION_SLOT\tslot-missing"); }
+    /* the pack mechanism: same version into a fresh slot gives the same bytes, another version does not */
+    blob("a75", "0.0.75", a75, sizeof a75); blob("b75", "0.0.75", b75, sizeof b75); blob("a71", "0.0.71", a71, sizeof a71);
+    { char *a[] = {"ape", a75, b75, 0}; pc("ape-same-version-same-bytes-pass", a, 0, "PACK_APE\tSAME"); }
+    { char *a[] = {"ape", a75, a71, 0}; pc("ape-other-version-changed-refuse", a, 2, "PACK_APE_CHANGED\tsha256-differs"); }
+    { char *a[] = {"ape", a75, a71, "--allow-repack", "", 0}; pc("ape-allow-without-reason-refuse", a, 2, "PACK_APE_CHANGED\tallow-repack-needs-reason"); }
+    { char *a[] = {"ape", a75, a71, "--allow-repack", "fixture", 0}; pc("ape-allow-with-reason-recorded", a, 0, "REPACK_ALLOWED"); }
+    { char miss[600]; cx_fmt(miss, sizeof miss, "%s/absent", tmpd);
+      char *a[] = {"ape", a75, miss, 0}; pc("ape-packed-missing-refuse", a, 2, "PACK_APE_CHANGED\tpacked-ape-unreadable"); }
+    run_cases();
+    printf("RELEASE_PACKCHECK\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

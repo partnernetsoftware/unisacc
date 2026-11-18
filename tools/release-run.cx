@@ -37,6 +37,9 @@
  *                    回填写 OUT_DIR/candidate-in.tsv 并打印前后值;已相等时空操作(表与产物字节不变)。
  *                    不给 --commit 时不回填(保持旧语义)。build.json 写出后回读,commit 须等于
  *                    回填值且等于 SID 实核所用快照的提交,否则 RELEASE_PACK_COMMIT_MISMATCH。
+ *     --allow-repack REASON  Q-07:打包完成后 OUT_DIR/layout/<ape> 须与 CHAIN_DIR/ape-final/unisacc-next.com
+ *                    sha256 相同(tools/release-packcheck.cx ape),否则 REFUSE PACK_APE_CHANGED;仅在给出非空
+ *                    原因时放行并打印两份摘要与原因。
  *     --cm-sha X64 ARM64  cache-manager 期望 sha256;缺省读 ROOT/release/evidence/<version>/cache-manager.tsv。
  *     cache-manager 回落:SRC_DIR 下缺失或空文件时,先找持久副本
  *       ($UNISACC_RELEASE_CACHE 或 ~/.cache/unisacc 下 release-*\/cm/<role>、release-*\/<role>、
@@ -75,6 +78,7 @@
 #pragma unisa use cxlib.chainroot
 static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448], snapdir[4096];
 static char chainout[4096];
+static const char *repackwhy;
 static RcCandidate cand;
 /* Commit backfill and cache-manager resolution state (N-05 minimal slice). */
 static char commitarg[64], frozen[64], here[4096], sidcommit[64];
@@ -771,8 +775,9 @@ int main(int argc, char **argv) {
             if(tx_eqz(argv[i],"--snap")){if(snapdir[0]||sy_realpath(argv[i+1],snapdir,sizeof snapdir)<0)die("snap");}
             else if(tx_eqz(argv[i],"--chain-out")){if(chainout[0]||sy_realpath(argv[i+1],chainout,sizeof chainout)<0)die("UNKNOWN chain output");}
             else if(tx_eqz(argv[i],"--commit")){if(commitarg[0]||cx_fmt(commitarg,sizeof commitarg,"%s",argv[i+1]))die("commit");}
+            else if(tx_eqz(argv[i],"--allow-repack")){if(repackwhy||!argv[i+1][0])die("--allow-repack REASON");repackwhy=argv[i+1];}
             else if(tx_eqz(argv[i],"--cm-sha")){if(i+2>=argc||!hexn(argv[i+1],64)||!hexn(argv[i+2],64)||cx_fmt(cmwant[0],65,"%s",argv[i+1])||cx_fmt(cmwant[1],65,"%s",argv[i+2]))die("--cm-sha X64 ARM64 (64 hex each)");i++;}
-            else die("usage --pack requires --chain-out DIR; optional --snap DIR --commit HEX40|HEAD --cm-sha X64 ARM64");
+            else die("usage --pack requires --chain-out DIR; optional --snap DIR --commit HEX40|HEAD --cm-sha X64 ARM64 --allow-repack REASON");
         }
         if(!chainout[0]||strchr(chainout,'\n')||strchr(chainout,'\r'))die("UNKNOWN chain output --chain-out required");
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
@@ -797,6 +802,13 @@ int main(int argc, char **argv) {
         cm_resolve();
         pack_binding(1);
         pack_continue();
+        {   /* Q-07: the published APE must be the chain's APE byte for byte (tools/release-packcheck.cx ape). */
+            char ca[4400], pa[4400]; char *v[] = {"sh", "unisacc.com", /* lint:allow R1 ROOT's own product runs its packcheck, like the other release-run children */
+"tools/release-packcheck.cx", "--", "ape", ca, pa, "--allow-repack", (char *)repackwhy, 0};
+            if (cx_fmt(ca, sizeof ca, "%s/ape-final/unisacc-next.com", chainout) || cx_fmt(pa, sizeof pa, "%s/layout/%s", out, cand.name[0])) die("packcheck path");
+            if (!repackwhy) v[7] = 0;
+            if (child(v, root)) { sy_eprintf("release-run: REFUSE PACK_APE_CHANGED (pass --allow-repack REASON only with a recorded reason)\n"); sy_exit(2); }
+        }
         emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
         return 0;
     }
