@@ -190,3 +190,5 @@ U2b 的构图入口为两张测试页的 `?scale-u2b`。D3 有五座递远石拱
 U2c 用 `?finish-u2c` 预览。D3 调整雾和阴影范围，恢复桥头房的双色墙与灰蓝屋面，桥厚从 3 增至 7.4，远山以圆丘替换三角轮廓。D4 保留 27 团，按三路各三簇塑形，另加铜顶和甲板下的机械腹板。并排图在 `/tmp/cdx2-u2c-d3-comparison.png` 和 `/tmp/cdx2-u2c-d4-comparison.png`。
 
 经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- finish-u2c`。检查从画布像素独立计算房屋暖色亮度分箱与方差，以及城镇上方的烟团颜色面积。分别追加 `bare-u2c-house` 和 `thin-u2c-smoke` 可验证两个反例各退出 1。
+
+D4 开发预览为 `test/d4-skeleton.html?play`。长按 W、S、上下方向键或屏幕按钮控制城镇前后行走，镜头跟随甲板，烟团停步后仍上升。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- d4-play`。Chrome 的合成键盘事件走页面监听器，检查读回五个时点的甲板、镜头和烟团终值。前进 0.960、停步保持、后退归零。分别追加 `fixed-u2c-gait`、`fixed-u2c-camera`、`still-u2c-smoke` 验证各反例。起点与跟拍并排图在 `/tmp/cdx2-d4-play-comparison.png`。

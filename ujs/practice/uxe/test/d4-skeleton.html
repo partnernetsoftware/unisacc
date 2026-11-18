@@ -1,8 +1,19 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>D4 行走城镇骨架</title>
-<style>html,body{margin:0;background:#7bafca}canvas{display:block}output{display:none}</style>
+<style>
+html,body{margin:0;background:#7bafca}canvas{display:block}output{display:none}
+.play canvas{position:fixed;inset:0;width:100dvw;height:100dvh;object-fit:contain}
+.controls{position:fixed;bottom:16px;left:16px;padding:9px;background:#272d35e8;color:#fff4dc;font:14px system-ui}
+.controls button{min-height:42px;padding:0 13px;margin-left:5px;touch-action:none}
+</style>
 <canvas width="1280" height="720"></canvas><output id="pixels"></output>
+<aside class="controls" hidden>
+  <span>按住 W 或 S 驱动城镇</span>
+  <button type="button" data-key="KeyW" aria-label="城镇前进">前进</button>
+  <button type="button" data-key="KeyS" aria-label="城镇后退">后退</button>
+</aside>
 <script type="module">
 import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
@@ -15,7 +26,8 @@ import { archMeshes } from "./d3-arch.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
-const finishU2c=params.has("finish-u2c");
+const play=params.has("play") || params.has("play-check");
+const finishU2c=play || params.has("finish-u2c");
 const enlarged=params.has("scale-u2b") || finishU2c;
 const paper=params.has("paper-u3") || enlarged;
 const dense=params.has("dense-u2") || paper;
@@ -261,12 +273,22 @@ function set(item,values) {
   const [cloud,i]=bindings.get(item);
   cloud.set(i,...values);
 }
-function renderPose(phase, gaitMode=mode) {
+function renderPose(phase, gaitMode=mode, smokeTick=null) {
   const pose=gaitPose(legs,phase,gaitMode);
   const eye=view?.eye ?? [14.4,12,19.2], target=view?.target ?? [0,5,0];
-  camera.setEye(eye[0]+pose.travel,eye[1],eye[2]);
-  camera.setTarget(target[0]+pose.travel,target[1],target[2]);
+  const chase=play && params.has("fixed-u2c-camera")?0:pose.travel;
+  camera.setEye(eye[0]+chase,eye[1],eye[2]);
+  camera.setTarget(target[0]+chase,target[1],target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
+  if(smokeTick!==null && !params.has("still-u2c-smoke")) {
+    for(let index=0;index<smoke.length;index++) {
+      const item=smoke[index], age=((smokeTick+index*11)%120)/120;
+      const [x,y,z,size,yaw,pitch,roll]=item;
+      const fade=Math.min(1,age*12,(1-age)*8);
+      set(item,[x+pose.offset[0]+age*2.3,y+pose.offset[1]+age*1.65,
+        z+pose.offset[2]+age*.61,size*(.64+age*.40)*fade,yaw+age*.7,pitch,roll]);
+    }
+  }
   pose.legs.forEach(([hip,knee,foot],i)=>{
     const parts=legItems[i];
     set(parts.hip,[...hip,...parts.hip.slice(3)]);
@@ -278,16 +300,17 @@ function renderPose(phase, gaitMode=mode) {
     }
   });
   renderer.render(scene,camera,textures);
+  return pose;
 }
-if(!walkProbe && params.has("animate")) {
+if(!play && !walkProbe && params.has("animate")) {
   const start=performance.now();
   const frame=time=>{
     renderPose((time-start)/670,mode || "walk");
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
-} else if(params.has("phase")) renderPose(Number(params.get("phase")));
-else if(!walkProbe) renderer.render(scene,camera,textures);
+} else if(!play && params.has("phase")) renderPose(Number(params.get("phase")));
+else if(!play && !walkProbe) renderer.render(scene,camera,textures);
 const gl=canvas.getContext("webgl");
 const density=params.has("u2c-probe") || ["density","small-town","no-gear","framing","wide-camera"].includes(mode);
 function densityPixels() {
@@ -326,7 +349,75 @@ function walkPixels() {
   });
   return [readGaitPixels(legs,mode,97),...ground].join(";");
 }
-document.querySelector("output").textContent=walkProbe ? walkPixels() :
+function startPlay() {
+  const keyboard=new Set(), pointers=new Map(), panel=document.querySelector(".controls");
+  const keys=["KeyW","KeyS","ArrowUp","ArrowDown"];
+  let phase=0,tick=0;
+  const cap=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  document.body.classList.add("play");
+  document.title="行走城镇 · 开发预览";
+  canvas.setAttribute("aria-label","行走城镇。按住 W 或 S 前进或后退。");
+  panel.hidden=false;
+  addEventListener("keydown",event=>{
+    if(!keys.includes(event.code)) return;
+    event.preventDefault();
+    keyboard.add(event.code);
+  });
+  addEventListener("keyup",event=>keyboard.delete(event.code));
+  addEventListener("blur",()=>{keyboard.clear();pointers.clear();});
+  for(const button of panel.querySelectorAll("button")) {
+    button.addEventListener("pointerdown",event=>{
+      event.preventDefault();
+      pointers.set(event.pointerId,button.dataset.key);
+      button.setPointerCapture(event.pointerId);
+    });
+    for(const type of ["pointerup","pointercancel","lostpointercapture"]) {
+      button.addEventListener(type,event=>pointers.delete(event.pointerId));
+    }
+  }
+  function step() {
+    const down=key=>keyboard.has(key) || Array.from(pointers.values()).includes(key);
+    const direction=Number(down("KeyW")||down("ArrowUp"))-Number(down("KeyS")||down("ArrowDown"));
+    if(!params.has("fixed-u2c-gait")) phase=cap(phase+direction*.20,-200,300);
+    tick++;
+  }
+  function draw() {
+    renderPose(phase,"walk",tick);
+    const [cloud,i]=bindings.get(smoke[0]);
+    const [deck,j]=bindings.get(deckItem);
+    const delta=cloud.xyz[3*i+1]-deck.xyz[3*j+1];
+    return [tick,deck.xyz[3*j],camera.eye[0],delta].map((v,i)=>i?Math.round(1000*v):v).join(",");
+  }
+  if(params.has("play-check")) {
+    const trace=[],key=(type,code)=>dispatchEvent(new KeyboardEvent(type,{code}));
+    for(const frame of [0,40,80,120,160]) {
+      while(tick<frame) step();
+      trace.push(draw());
+      if(frame===40) key("keydown","KeyW");
+      if(frame===80) key("keyup","KeyW");
+      if(frame===120) key("keydown","KeyS");
+      if(frame===160) key("keyup","KeyS");
+    }
+    document.querySelector("output").textContent=trace.join(";");
+  } else if(params.has("still")) {
+    tick=Number(params.get("tick"))||0;
+    phase=cap(Number(params.get("travel"))/.12||0,-200,300);
+    draw();
+  } else {
+    let previous=performance.now(), pending=0;
+    function frame(now) {
+      pending+=Math.min(100,now-previous);
+      previous=now;
+      const first=tick;
+      while(pending>=1000/30) { step(); pending-=1000/30; }
+      if(tick!==first) draw();
+      requestAnimationFrame(frame);
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+}
+if(!play) document.querySelector("output").textContent=walkProbe ? walkPixels() :
   density || finish ? densityPixels() : ["gait","three-air","long-leg"].includes(mode)
   ? readGaitPixels(legs,mode)
   : (params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
@@ -351,4 +442,5 @@ if(params.has("u2b-probe")) {
     ...bounds
   ].join(",");
 }
+if(play) startPlay();
 </script>

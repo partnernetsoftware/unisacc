@@ -294,6 +294,40 @@ static int check_u2b(const char *mutation) {
     return failed?1:0;
 }
 
+static int check_d4_play(const char *mutation) {
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    int i,rc,failed=0;
+    size_t bytes=0;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-skeleton.html?play-check&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-d4-play-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,18,&doc,&bytes);
+    chd_wipe(profile);
+    p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(doc); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<5;i++) {
+        int got[4],used=0,tick=i*40;
+        int move=(i==2 || i==3)?40*20*12/10:0;
+        int lift=4570+((tick%120)*1650+60)/120;
+        int bad;
+        if(sscanf(p,"%d,%d,%d,%d%n",got,got+1,got+2,got+3,&used)!=4 ||
+            p[used]!=(i==4?'<':';')) { free(doc); return 2; }
+        p+=used+1;
+        bad=got[0]!=tick || got[1]!=move || got[2]!=14000+move || got[3]<lift-1 || got[3]>lift+1;
+        failed+=bad;
+        printf("D4 tick=%d deck=%d eye=%d smoke relative=%d expected=%d,%d,%d failed=%d\n",
+            got[0],got[1],got[2],got[3],move,14000+move,lift,bad);
+    }
+    free(doc);
+    return failed?1:0;
+}
+
 static int check_u2c(const char *mutation) {
     char cwd[1024],url[4096],profile[128],option[160],*doc=0;
     const char *region="&region=236,244,39,28,4";
@@ -558,6 +592,7 @@ static int compare_paper(char **paths) {
 }
 
 int main(int argc,char **argv) {
+    if(argc>=2 && argc<=3 && !strcmp(argv[1],"d4-play")) return check_d4_play(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"finish-u2c")) return check_u2c(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"scale-u2b")) return check_u2b(argc==3?argv[2]:"");
     if(argc==6 && !strcmp(argv[1],"paper-u3")) return compare_paper(argv+2);
