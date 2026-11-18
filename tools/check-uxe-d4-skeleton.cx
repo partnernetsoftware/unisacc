@@ -3,9 +3,12 @@
 
 typedef struct { double x,y,z; } Point;
 static Point feet[4], probes[10];
+static Point rest[4][3];
 static int need[10];
 static const int colors[][3]={{187,139,62},{119,74,49},{61,74,92},{185,63,49},{236,239,234}};
 static const char *kinds[]={"joint","foot","chassis","witness","smoke"};
+static const double buildings[][3]={{-3.7,.8,11.6},{-1.35,1.46,8.8},{.95,1.18,8.5},
+    {.05,-1.4,19.7},{-2.7,-1.45,9.1},{3.62,.02,4.2}};
 
 static double twice_area(Point a,Point b,Point c) {
     return (b.x-a.x)*(c.z-a.z)-(b.z-a.z)*(c.x-a.x);
@@ -18,8 +21,6 @@ static int survey(void) {
     double mass=10.6*1.55*6.4;
     Point load={0,0,0};
     /* Nominal uniform-density box approximation for the upper structure. */
-    static const double buildings[][3]={{-3.7,.8,11.6},{-1.35,1.46,8.8},{.95,1.18,8.5},
-        {.05,-1.4,19.7},{-2.7,-1.45,9.1},{3.62,.02,4.2}};
     int i,ok=1;
     for(i=0;i<6;i++) {
         load.x+=buildings[i][0]*buildings[i][2];
@@ -32,6 +33,10 @@ static int survey(void) {
         if(!line || sscanf(line+1,"%23s %d %d %d %d %d %d %d %d %d",label,
             &p[0],&p[1],&p[2],&p[3],&p[4],&p[5],&p[6],&p[7],&p[8])!=10) { ok=0; break; }
         if(p[1]<=p[4] || p[4]<=p[7] || p[7]!=320) ok=0;
+        {
+            int j;
+            for(j=0;j<3;j++) rest[i][j]=(Point){p[3*j]/1000.0,p[3*j+1]/1000.0,p[3*j+2]/1000.0};
+        }
         feet[i]=(Point){p[6]/1000.0,p[7]/1000.0,p[8]/1000.0};
         probes[2*i]=(Point){p[3]/1000.0,p[4]/1000.0,p[5]/1000.0};
         probes[2*i+1]=(Point){feet[i].x,.16,feet[i].z+.62};
@@ -68,20 +73,93 @@ static int identify(int *rgb) {
     return score<=24?best:-1;
 }
 
-int main(int argc,char **argv) {
+static double length_squared(Point a,Point b) {
+    double dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;
+    return dx*dx+dy*dy+dz*dz;
+}
+
+static int byte(const char **p) {
+    int value=0;
+    if(**p<'0'||**p>'9') return -1;
+    while(**p>='0' && **p<='9') {
+        value=value*10+**p-'0';
+        if(value>255) return -1;
+        *p=*p+1;
+    }
+    return value;
+}
+
+static int read_gait(const char *p) {
+    int frame, leg, j, stance_fail=0, length_fail=0, air_fail=0, plant_fail=0;
+    int swings[4]={0}, max_air=0;
+    for(frame=0;frame<48;frame++) {
+        Point pose[4][3], support[4], center={0,0,0};
+        int supports=0,air=0;
+        double super_mass=10.6*1.55*6.4;
+        for(j=0;j<6;j++) {
+            super_mass+=buildings[j][2];
+            center.x+=buildings[j][0]*buildings[j][2];
+            center.z+=buildings[j][1]*buildings[j][2];
+        }
+        for(leg=0;leg<4;leg++) for(j=0;j<3;j++) {
+            double c[3];
+            int axis;
+            for(axis=0;axis<3;axis++) {
+                int hi=byte(&p), lo;
+                if(hi<0 || *p++!=',') return 2;
+                lo=byte(&p);
+                if(lo<0) return 2;
+                if((frame!=47 || leg!=3 || j!=2 || axis!=2) && *p++!=',') return 2;
+                c[axis]=(hi*256+lo)/1024.0-16;
+            }
+            pose[leg][j]=(Point){c[0],c[1],c[2]};
+            center.x+=c[0]; center.z+=c[2];
+        }
+        for(leg=0;leg<4;leg++) {
+            Point foot=pose[leg][2];
+            if(foot.y>rest[leg][2].y+.012) {
+                air++; swings[leg]++;
+            } else {
+                support[supports++]=foot;
+                plant_fail+=length_squared(foot,rest[leg][2])>.0002;
+            }
+            for(j=0;j<2;j++) {
+                double reference=length_squared(rest[leg][j],rest[leg][j+1]);
+                double actual=length_squared(pose[leg][j],pose[leg][j+1]);
+                length_fail+=actual-reference>.025 || reference-actual>.025;
+            }
+            center.x+=super_mass*(pose[leg][0].x-rest[leg][0].x)/4;
+            center.z+=super_mass*(pose[leg][0].z-rest[leg][0].z)/4;
+        }
+        center.x/=super_mass+12; center.z/=super_mass+12;
+        if(air>max_air) max_air=air;
+        air_fail+=air>1;
+        int stable=supports>=3;
+        for(j=0;stable && j<supports;j++) stable=twice_area(support[j],support[(j+1)%supports],center)>=0;
+        stance_fail+=!stable;
+    }
+    if(strncmp(p,"</output>",9)) return 2;
+    for(leg=0;leg<4;leg++) if(swings[leg]<4 || swings[leg]>10) air_fail++;
+    printf("D4_GAIT\tframes=48 max_air=%d stance_fail=%d length_fail=%d air_fail=%d plant_fail=%d swings=%d,%d,%d,%d\n",
+        max_air,stance_fail,length_fail,air_fail,plant_fail,swings[0],swings[1],swings[2],swings[3]);
+    return !!(stance_fail || length_fail || air_fail || plant_fail);
+}
+
+static int check_pose(const char *mode) {
     char cwd[1024],url[1600],profile[128],option[160],*out=0;
     size_t size=0;
-    const char *mode=argc==1?"normal":argv[1],*p;
+    const char *p;
     char *args[]={"google-chrome","--headless=new","--use-angle=swiftshader",
         "--enable-unsafe-swiftshader","--allow-file-access-from-files","--window-size=1280,807",
         "--virtual-time-budget=3000","--no-first-run",option,"--dump-dom",url,0};
     int i,at,rc,failed=0;
-    if(argc>2 || (strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck"))) return 2;
+    int gait=!strcmp(mode,"gait") || !strcmp(mode,"three-air") || !strcmp(mode,"long-leg");
+    if(!gait && strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck")) return 2;
     if(!survey()) { printf("FAIL D4_SUPPORT\n"); return 1; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-skeleton.html?mode=%s&pixels=",cwd,mode);
     if(at<0 || at>=(int)sizeof url) return 2;
-    for(i=0;i<10;i++) {
+    for(i=0;!gait && i<10;i++) {
         double x=probes[i].x-14.4,y=probes[i].y-12,z=probes[i].z-19.2;
         double ground=.6*x+.8*z, depth=-(24*ground+7*y)/25, up=(24*y-7*ground)/25;
         int px=(int)(640+576*(.8*x-.6*z)/depth),py=(int)(360-576*up/depth);
@@ -96,6 +174,12 @@ int main(int argc,char **argv) {
     p=out?strstr(out,"<output id=\"pixels\">"):0;
     if(rc || !p) return 2;
     p+=strlen("<output id=\"pixels\">");
+    if(gait) {
+        rc=read_gait(p);
+        free(out);
+        printf("CHECK_UXE_D4_SKELETON\tmode=%s failed=%d\n",mode,rc);
+        return rc;
+    }
     for(i=0;i<10;i++) {
         int c[3],j,observed;
         for(j=0;j<3;j++) {
@@ -114,4 +198,13 @@ int main(int argc,char **argv) {
     free(out);
     printf("CHECK_UXE_D4_SKELETON\tn=10 failed=%d mode=%s\n",failed,mode);
     return failed?1:0;
+}
+
+int main(int argc,char **argv) {
+    int fixed, dynamic;
+    if(argc==2) return check_pose(argv[1]);
+    if(argc!=1) return 2;
+    fixed=check_pose("normal");
+    dynamic=check_pose("gait");
+    return fixed>dynamic?fixed:dynamic;
 }
