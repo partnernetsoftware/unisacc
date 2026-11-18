@@ -1,0 +1,85 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+/* check-perf-baseline.cx: fixture checks for tools/perf-baseline.cx (no product timing).
+   (1) summarize of a 5-rep raw fixture yields an evidence TSV that check accepts, with the
+       full 13-column header and the five named phases per timed item;
+   (2) negative control: a 4-rep raw fixture is summarized as REFUSE_REPS and check rejects it;
+   (3) negative control: an UNMEASURED row carrying a number is rejected;
+   (4) negative control: a timed item missing a named phase (row count vs phases) is rejected;
+   (5) the row count of the accepted evidence equals per-item phases + 5 named + totals.
+   usage: sh ./unisacc.com tools/check-perf-baseline.cx [-- TOOL]  (TOOL defaults to
+   tools/perf-baseline.cx; temp files under $TMPDIR; product from $UNISACC, default
+   ./unisacc.com). */
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "check-perf-baseline: text too long\n"); exit(2); } } while (0)
+static int bad, pass;
+static const char *tool = "tools/perf-baseline.cx";
+static char dir[4200];
+static void ok(int c, const char *n) { printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (c) pass++; else bad++; }
+static int run(char *a1, char *a2, char *a3, char *a4) {
+    char *prod = (char *)sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product fixture runs the tool under the same-candidate launcher; UNISACC overrides it */
+    char *v[10] = { "sh", prod, (char *)tool, "--", a1, a2, a3, a4, 0, 0 };
+    sy_spawn_t o; sy_exit_t st; sy_spawn_init(&o);
+    o.argv = v; o.pgroup = -1; o.deadline_ms = 50000; o.out_fd = SY_STDIO_NULL;
+    if (sy_proc_run(&o, &st)) return 255;
+    return sy_exit_code(&st);
+}
+static void put(const char *name, const char *text, char *path) {
+    FMT(path, 4200, "%s/%s", dir, name);
+    sy_write_file(path, text, (int64_t)strlen(text), 0644);
+}
+static long lines(const char *path) {
+    unsigned char *b = 0; int64_t n = 0; long k = 0;
+    if (sy_read_file(path, &b, &n, 1 << 24) || !b) return -1;
+    for (int64_t i = 0; i < n; i++) if (b[i] == '\n') k++;
+    free(b); return k;
+}
+static int has(const char *path, const char *needle) {
+    unsigned char *b = 0; int64_t n = 0; int r;
+    if (sy_read_file(path, &b, &n, 1 << 24) || !b) return 0;
+    char *s = realloc(b, n + 1); s[n] = 0; r = strstr(s, needle) != 0; free(s); return r;
+}
+int main(int argc, char **argv) {
+    if (argc > 1) tool = argv[1];
+    const char *td = getenv("TMPDIR"); if (!td || !*td) td = "/tmp";
+    FMT(dir, sizeof dir, "%s/check-perf-baseline-%d", td, (int)getpid());
+    sy_mkdir(dir, 0700);
+    char raw5[4200], raw4[4200], ev5[4200], ev4[4200], evu[4200], evm[4200];
+    char sha[] = "fixturesha";
+    /* two timed unit items (prefix u:) x 5 reps, phases wall + rr.inflate + rr.output */
+    char buf[8000]; int k = 0;
+    for (int it = 0; it < 2; it++) for (int r = 0; r < 5; r++) {
+        FMT(buf + k, sizeof buf - k, "u:%c\t%d\twall\t%d.5\tms\t1.00\t0\n", 'a' + it, r, 10 + r); k += (int)strlen(buf + k);
+        FMT(buf + k, sizeof buf - k, "u:%c\t%d\trr.inflate\t%d.0\tms\t1.00\t0\n", 'a' + it, r, 3 + r); k += (int)strlen(buf + k);
+        FMT(buf + k, sizeof buf - k, "u:%c\t%d\trr.output\t0.1\tms\t1.00\t0\n", 'a' + it, r); k += (int)strlen(buf + k);
+    }
+    for (int r = 0; r < 5; r++) { FMT(buf + k, sizeof buf - k, "sz\t%d\tbytes\t1234\tbytes\t1.00\t0\n", r); k += (int)strlen(buf + k); }
+    put("raw5.tsv", buf, raw5);
+    FMT(ev5, sizeof ev5, "%s/ev5.tsv", dir);
+    ok(run("summarize", raw5, ev5, sha) == 0, "summarize-5-reps");
+    ok(run("check", ev5, 0, 0) == 0, "check-accepts-5-reps");
+    ok(has(ev5, "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"), "header-columns-complete");
+    ok(has(ev5, "u:a\twall\tms\t5\t12.500\t10.500\t14.500\t14.500\t"), "median-min-max-p90-values");
+    ok(has(ev5, "u:a\tparse\tms\t0\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED"), "unmeasured-phase-has-no-number");
+    ok(has(ev5, "u.total\twall\tms\t5\t25.000\t"), "total-sums-per-rep");
+    /* rows: 2 items x (wall, rr.inflate, 5 named) + sz bytes + total (wall + 5 named) = 14 + 1 + 6 = 21, + header */
+    ok(lines(ev5) == 22, "row-count-matches-phases");
+    /* (2) four reps */
+    k = 0;
+    for (int r = 0; r < 4; r++) { FMT(buf + k, sizeof buf - k, "x\t%d\twall\t5.0\tms\t1.00\t0\n", r); k += (int)strlen(buf + k); }
+    put("raw4.tsv", buf, raw4);
+    FMT(ev4, sizeof ev4, "%s/ev4.tsv", dir);
+    run("summarize", raw4, ev4, sha);
+    ok(has(ev4, "REFUSE_REPS"), "four-reps-marked-refuse");
+    ok(run("check", ev4, 0, 0) == 1, "check-rejects-four-reps");
+    /* (3) UNMEASURED with a number */
+    put("evu.tsv", "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"
+        "y\tparse\tms\t0\t3.2\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\ts\t-\n", evu);
+    ok(run("check", evu, 0, 0) == 1, "check-rejects-unmeasured-number");
+    /* (4) timed item missing named phases */
+    put("evm.tsv", "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"
+        "z\twall\tms\t5\t1\t1\t1\t1\t0.1\t0.1\tMEASURED\ts\t-\n", evm);
+    ok(run("check", evm, 0, 0) == 1, "check-rejects-missing-phases");
+    printf("CHECK_PERF_BASELINE\tpass=%d\tfail=%d\n", pass, bad);
+    return bad ? 1 : 0;
+}

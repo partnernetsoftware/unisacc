@@ -1,0 +1,285 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sys.net
+#pragma unisa use mem.bytes
+/* perf-baseline.cx: reproducible wall-clock baseline of the installed unisacc.com
+   (measures only; never changes the product).
+   usage:
+     obs ITEM REPS RAW [--cold DIR] -- CMD...   run CMD REPS times (each bounded 50 s,
+         whole call bounded 52 s), append one wall row plus the product's own
+         UNISACC_RR_TIME phases per rep to RAW.  --cold DIR: before each rep write a
+         fresh, never-seen empty program DIR/cold-PID-REP.cx and substitute it for the
+         literal argument {SRC} (defeats every content cache of the product; the OS page
+         cache is not dropped, that needs root).  load1 > 6 waits up to 20 s first; the
+         load1 seen at the start of each rep is stored per row.
+     size ITEM PATH REPS RAW                    record the byte size of PATH REPS times.
+     summarize RAW OUT SHA                      fold raw rows into the evidence TSV:
+         median/min/max/p90 (nearest rank) per item and phase; PREFIX.total sums each rep
+         over items named PREFIX:UNIT; the five named phases startup/read/parse/gen/output
+         are added for every timed item, UNMEASURED where the product gives no marker.
+     check EVIDENCE                             validate an evidence TSV; rc 1 with REFUSE
+         lines on: bad header or column count, MEASURED with reps < 5, a non-numeric
+         MEASURED value, an UNMEASURED row carrying any number, or a timed item missing
+         one of its named phases.
+   Raw TSV: item rep phase value unit load1 rc.  Phase events go to devsvc timing as
+   cmd=perf when DEVSVC_SOCK is set. */
+
+#define MAXR 20000
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "perf-baseline: REFUSE text too long\n"); exit(2); } } while (0)
+#define HDR "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote"
+static const char *named[5] = { "startup", "read", "parse", "gen", "output" };
+
+static double load1(void) {
+    unsigned char *b = 0; int64_t n = 0; double v = -1;
+    if (!sy_read_file("/proc/loadavg", &b, &n, 4096) && b) { char t[64]; long k = n < 63 ? (long)n : 63; if (mm_copy(t, sizeof t, b, (size_t)k)) { free(b); return -1; } t[k] = 0; v = atof(t); free(b); }
+    return v;
+}
+static double wait_load(void) {
+    long end = sy_now_ms() + 20000; double l = load1();
+    while (l > 6.0 && sy_now_ms() < end) { sy_sleep_ms(1000); l = load1(); }
+    return l;
+}
+static void emit(const char *item, long ms, double l) {
+    const char *s = getenv("DEVSVC_SOCK"); char msg[400];
+    if (!s || !*s) return;
+    int n = snprintf(msg, sizeof msg, "emit\tphase\tcmd=perf\tphase=%s\tms=%ld\tinput=perf-baseline\trc=0\tload1=%.2f\tjob=-\n", item, ms, l);
+    if (n <= 0 || n >= (int)sizeof msg) return;
+    int fd = sy_unix_connect(s, 250); if (fd < 0) return;
+    sy_send(fd, msg, n); char r[64]; sy_recv(fd, r, sizeof r); sy_close(fd);
+}
+
+/* ---- RR_TIME folding: phase name -> summed ms for one rep ---- */
+#define MAXP 64
+static char pn[MAXP][48]; static double pv[MAXP]; static int np;
+static void padd(const char *name, double ms) {
+    for (int i = 0; i < np; i++) if (!strcmp(pn[i], name)) { pv[i] += ms; return; }
+    if (np < MAXP) { FMT(pn[np], 48, "%s", name); pv[np++] = ms; }
+}
+static const char *field(const char *line, const char *key, char *out, int cap) {
+    const char *p = strstr(line, key); int k = 0;
+    if (!p) return 0;
+    p += strlen(key);
+    while (*p && *p != '\t' && *p != '\n' && k < cap - 1) out[k++] = *p++;
+    out[k] = 0; return out;
+}
+static void fold(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    np = 0;
+    if (sy_read_file(path, &b, &n, 1 << 24) || !b) return;
+    char *s = (char *)b, *end = s + n, *line = s;
+    while (line < end) {
+        char *nl = memchr(line, '\n', end - line); if (!nl) nl = end; *nl = 0;
+        if (!strncmp(line, "RR_TIME\t", 8)) {
+            char ns[32], st[32], kind[32]; double ms;
+            if (field(line, "ns=", ns, sizeof ns)) {
+                ms = atof(ns) / 1e6;
+                const char *k = line + 8; int j = 0;
+                while (k[j] && k[j] != '\t' && j < 31) { kind[j] = k[j]; j++; } kind[j] = 0;
+                if (!strcmp(kind, "model")) padd("rr.inflate", ms);
+                else if (!strcmp(kind, "modelphase")) padd("rr.verify-layout", ms);
+                else if (!strcmp(kind, "inference") && field(line, "stage=", st, sizeof st)) { char nm[48]; FMT(nm, sizeof nm, "rr.infer.%s", st); padd(nm, ms); }
+                else if (!strcmp(kind, "construction")) padd("rr.construction", ms);
+                else if (!strcmp(kind, "output")) padd("rr.output", ms);
+                else if (strchr(kind, '=')) padd("rr.lookup", ms);
+                else { char nm[48]; FMT(nm, sizeof nm, "rr.%s", kind); padd(nm, ms); }
+            }
+        }
+        line = nl + 1;
+    }
+    free(b);
+}
+
+static int cmd_obs(int argc, char **argv) {
+    if (argc < 6) { fprintf(stderr, "perf-baseline: REFUSE usage obs ITEM REPS RAW [--cold DIR] -- CMD...\n"); return 2; }
+    const char *item = argv[2], *raw = argv[4], *cold = 0; int reps = atoi(argv[3]), i = 5;
+    if (reps < 1 || reps > 200) { fprintf(stderr, "perf-baseline: REFUSE reps\n"); return 2; }
+    int base = 0;
+    if (i + 1 < argc && !strcmp(argv[i], "--rep-base")) { base = atoi(argv[i + 1]); i += 2; }
+    if (i + 1 < argc && !strcmp(argv[i], "--cold")) { cold = argv[i + 1]; i += 2; }
+    if (i >= argc || strcmp(argv[i], "--")) { fprintf(stderr, "perf-baseline: REFUSE missing --\n"); return 2; }
+    i++;
+    int cn = argc - i; if (cn < 1 || cn > 60) { fprintf(stderr, "perf-baseline: REFUSE command\n"); return 2; }
+    char *cv[64]; char src[4200]; int srcslot = -1;
+    for (int k = 0; k < cn; k++) { cv[k] = argv[i + k]; if (!strcmp(cv[k], "{SRC}")) srcslot = k; }
+    cv[cn] = 0;
+    if (cold && srcslot < 0) { fprintf(stderr, "perf-baseline: REFUSE --cold needs {SRC}\n"); return 2; }
+    FILE *out = fopen(raw, "ab"); if (!out) { fprintf(stderr, "perf-baseline: REFUSE cannot open %s\n", raw); return 2; }
+    char errp[4200]; FMT(errp, sizeof errp, "%s.stderr", raw);
+    setenv("UNISACC_RR_TIME", "1", 1);
+    long until = sy_now_ms() + 52000; int done = 0; double walls[200];
+    for (int r = 0; r < reps; r++) {
+        if (sy_now_ms() > until - 2000) break;
+        double l = wait_load();
+        if (cold) {
+            FMT(src, sizeof src, "%s/cold-%d-%d-%ld.cx", cold, (int)getpid(), r, sy_now_ms());
+            char body[300]; int bn = snprintf(body, sizeof body, "int main(void){return 0;}\n/* %s */\n", src + strlen(cold));
+            if (sy_write_file(src, body, bn, 0644)) { fprintf(stderr, "perf-baseline: REFUSE write %s\n", src); fclose(out); return 2; }
+            cv[srcslot] = src;
+        }
+        int efd = sy_open(errp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        sy_spawn_t o; sy_exit_t st; sy_spawn_init(&o);
+        o.argv = cv; o.pgroup = -1; o.deadline_ms = 50000; o.out_fd = SY_STDIO_NULL; o.err_fd = efd >= 0 ? efd : SY_STDIO_NULL;
+        int64_t t0 = sy_mono_ns();
+        int rr = sy_proc_run(&o, &st);
+        double wall = (double)(sy_mono_ns() - t0) / 1e6;
+        if (efd >= 0) sy_close(efd);
+        int rc = rr ? 255 : sy_exit_code(&st);
+        fold(errp);
+        double acc = 0;
+        fprintf(out, "%s\t%d\twall\t%.3f\tms\t%.2f\t%d\n", item, base + r, wall, l, rc);
+        for (int p = 0; p < np; p++) { fprintf(out, "%s\t%d\t%s\t%.3f\tms\t%.2f\t%d\n", item, base + r, pn[p], pv[p], l, rc); acc += pv[p]; }
+        (void)acc; /* RR_TIME spans nest (inflate covers verify-layout), so no wall-minus-sum residue is derived */
+        walls[done++] = wall;
+        if (rc) fprintf(stderr, "perf-baseline: %s rep %d rc=%d\n", item, r, rc);
+    }
+    fclose(out);
+    double sum = 0; for (int k = 0; k < done; k++) sum += walls[k];
+    if (done) emit(item, (long)(sum / done), load1());
+    printf("OBS\t%s\treps=%d/%d\tmean_wall_ms=%.1f\n", item, done, reps, done ? sum / done : 0.0);
+    return done == reps ? 0 : 3;
+}
+
+static int cmd_size(int argc, char **argv) {
+    if (argc != 6) { fprintf(stderr, "perf-baseline: REFUSE usage size ITEM PATH REPS RAW\n"); return 2; }
+    int reps = atoi(argv[4]); FILE *out = fopen(argv[5], "ab");
+    if (!out || reps < 1) return 2;
+    for (int r = 0; r < reps; r++) {
+        sy_stat_t s; double l = load1();
+        if (sy_stat(argv[3], &s)) { fclose(out); fprintf(stderr, "perf-baseline: REFUSE stat %s\n", argv[3]); return 2; }
+        fprintf(out, "%s\t%d\tbytes\t%ld\tbytes\t%.2f\t0\n", argv[2], r, (long)s.size, l);
+    }
+    fclose(out); printf("SIZE\t%s\n", argv[2]); return 0;
+}
+
+/* ---- summarize ---- */
+typedef struct { char item[96]; int rep; char phase[48]; double v; char unit[8]; double l; int rc; } row_t;
+static row_t *R; static int nr;
+static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; }
+static int load_raw(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 1 << 26) || !b) return 1;
+    R = calloc(MAXR, sizeof *R); nr = 0;
+    char *s = (char *)b, *end = s + n, *line = s;
+    while (line < end && nr < MAXR) {
+        char *nl = memchr(line, '\n', end - line); if (!nl) nl = end; *nl = 0;
+        char *f[8]; int k = 0; f[k++] = line;
+        for (char *p = line; *p && k < 8; p++) if (*p == '\t') { *p = 0; f[k++] = p + 1; }
+        if (k == 7) {
+            row_t *r = &R[nr++];
+            FMT(r->item, sizeof r->item, "%s", f[0]); r->rep = atoi(f[1]); FMT(r->phase, sizeof r->phase, "%s", f[2]);
+            r->v = atof(f[3]); FMT(r->unit, sizeof r->unit, "%s", f[4]); r->l = atof(f[5]); r->rc = atoi(f[6]);
+        }
+        line = nl + 1;
+    }
+    free(b); return 0;
+}
+static void stat_row(FILE *o, const char *item, const char *phase, const char *unit, double *v, int n, double lmin, double lmax, const char *sha, const char *note) {
+    qsort(v, n, sizeof *v, cmpd);
+    double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    int pi = (9 * n + 9) / 10 - 1; if (pi < 0) pi = 0; if (pi > n - 1) pi = n - 1;
+    const char *stt = n >= 5 ? "MEASURED" : "REFUSE_REPS";
+    fprintf(o, "%s\t%s\t%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%.2f\t%.2f\t%s\t%s\t%s\n", item, phase, unit, n, med, v[0], v[n - 1], v[pi], lmin, lmax, stt, sha, note);
+}
+static void unmeasured(FILE *o, const char *item, const char *phase, const char *sha, const char *note) {
+    fprintf(o, "%s\t%s\tms\t0\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%s\t%s\n", item, phase, sha, note);
+}
+static int seen(char (*l)[96], int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(l[i], s)) return 1; return 0; }
+static int cmd_summarize(int argc, char **argv) {
+    if (argc != 5 || load_raw(argv[2])) { fprintf(stderr, "perf-baseline: REFUSE usage summarize RAW OUT SHA\n"); return 2; }
+    const char *sha = argv[4]; FILE *o = fopen(argv[3], "wb"); if (!o) return 2;
+    fprintf(o, "%s\n", HDR);
+    static char items[2000][96]; int ni = 0;
+    static char totals[64][96]; int nt = 0;
+    double *v = malloc(sizeof(double) * MAXR);
+    for (int i = 0; i < nr; i++) if (!seen(items, ni, R[i].item) && ni < 2000) FMT(items[ni++], 96, "%s", R[i].item);
+    for (int a = 0; a < ni; a++) {
+        static char ph[MAXP][96]; int nph = 0, timed = 0, bad = 0;
+        for (int i = 0; i < nr; i++) if (!strcmp(R[i].item, items[a])) { if (!seen(ph, nph, R[i].phase) && nph < MAXP) FMT(ph[nph++], 96, "%s", R[i].phase); if (R[i].rc && !strcmp(R[i].phase, "wall")) bad++; }
+        char note[64]; if (bad) FMT(note, sizeof note, "nonzero_rc=%d", bad); else FMT(note, sizeof note, "-");
+        for (int p = 0; p < nph; p++) {
+            int n = 0; double lmin = 1e9, lmax = -1; char unit[8] = "ms";
+            if (!strcmp(ph[p], "wall")) timed = 1;
+            if (!strcmp(ph[p], "rr.output")) continue; /* reported under the named phase output */
+            for (int i = 0; i < nr; i++) if (!strcmp(R[i].item, items[a]) && !strcmp(R[i].phase, ph[p])) { v[n++] = R[i].v; if (R[i].l < lmin) lmin = R[i].l; if (R[i].l > lmax) lmax = R[i].l; FMT(unit, 8, "%s", R[i].unit); }
+            if (bad && bad == n && !strcmp(ph[p], "wall")) { char nt[80]; FMT(nt, sizeof nt, "all-reps-failed:nonzero_rc=%d", bad); unmeasured(o, items[a], ph[p], sha, nt); continue; }
+            if (n < 5 && strcmp(ph[p], "wall")) { char nt[80]; FMT(nt, sizeof nt, "too-few-observations:n=%d(cache-miss-rep-only)", n); unmeasured(o, items[a], ph[p], sha, nt); continue; }
+            stat_row(o, items[a], ph[p], unit, v, n, lmin, lmax, sha, note);
+        }
+        if (timed) {
+            int no = 0; double lmin = 1e9, lmax = -1;
+            for (int i = 0; i < nr; i++) if (!strcmp(R[i].item, items[a]) && !strcmp(R[i].phase, "rr.output")) { v[no++] = R[i].v; if (R[i].l < lmin) lmin = R[i].l; if (R[i].l > lmax) lmax = R[i].l; }
+            unmeasured(o, items[a], "startup", sha, "no-marker:exec-to-driver-entry");
+            unmeasured(o, items[a], "read", sha, "no-marker:source-read");
+            unmeasured(o, items[a], "parse", sha, "no-marker:rr.infer-stages-not-mapped-to-parse");
+            unmeasured(o, items[a], "gen", sha, "no-marker:rr.infer-stages-not-mapped-to-gen");
+            if (no) stat_row(o, items[a], "output", "ms", v, no, lmin, lmax, sha, "from:RR_TIME-output");
+            else unmeasured(o, items[a], "output", sha, "no-marker:no-output-event");
+        }
+        char *c = strchr(items[a], ':');
+        if (c && timed) { char pre[96]; int k = (int)(c - items[a]); FMT(pre, sizeof pre, "%.*s", k, items[a]); if (!seen(totals, nt, pre) && nt < 64) FMT(totals[nt++], 96, "%s", pre); }
+    }
+    for (int t = 0; t < nt; t++) {
+        static double sums[200]; double lmin = 1e9, lmax = -1; int maxrep = -1, k = (int)strlen(totals[t]);
+        for (int r = 0; r < 200; r++) sums[r] = 0;
+        for (int i = 0; i < nr; i++) if (!strncmp(R[i].item, totals[t], k) && R[i].item[k] == ':' && !strcmp(R[i].phase, "wall") && R[i].rep < 200) { sums[R[i].rep] += R[i].v; if (R[i].rep > maxrep) maxrep = R[i].rep; if (R[i].l < lmin) lmin = R[i].l; if (R[i].l > lmax) lmax = R[i].l; }
+        int n = maxrep + 1; for (int r = 0; r < n; r++) v[r] = sums[r];
+        char item[110]; FMT(item, sizeof item, "%s.total", totals[t]);
+        if (n) stat_row(o, item, "wall", "ms", v, n, lmin, lmax, sha, "sum-over-units-per-rep");
+        unmeasured(o, item, "startup", sha, "aggregate"); unmeasured(o, item, "read", sha, "aggregate");
+        unmeasured(o, item, "parse", sha, "aggregate"); unmeasured(o, item, "gen", sha, "aggregate"); unmeasured(o, item, "output", sha, "aggregate");
+    }
+    fclose(o); free(v);
+    printf("SUMMARIZED\titems=%d\ttotals=%d\traw_rows=%d\n", ni, nt, nr);
+    return 0;
+}
+
+/* ---- check ---- */
+static int isnum(const char *s) {
+    if (!*s) return 0;
+    char *e; strtod(s, &e); return *e == 0;
+}
+static int cmd_check(int argc, char **argv) {
+    unsigned char *b = 0; int64_t n = 0; int refuse = 0, rows = 0;
+    if (argc != 3 || sy_read_file(argv[2], &b, &n, 1 << 26) || !b) { printf("REFUSE\tunreadable\n"); return 1; }
+    char *s = (char *)b, *end = s + n, *line = s; int ln = 0;
+    static char wit[2000][96]; int nw = 0;
+    static char have[8000][150]; int nh = 0;
+    while (line < end) {
+        char *nl = memchr(line, '\n', end - line); if (!nl) nl = end; *nl = 0; ln++;
+        if (ln == 1) { if (strcmp(line, HDR)) { printf("REFUSE\theader\n"); refuse++; } line = nl + 1; continue; }
+        if (!*line) { line = nl + 1; continue; }
+        char *f[16]; int k = 0; f[k++] = line;
+        for (char *p = line; *p; p++) if (*p == '\t') { *p = 0; if (k < 16) f[k] = p + 1; k++; }
+        rows++;
+        if (k != 13) { printf("REFUSE\tline=%d\tcolumns=%d\n", ln, k); refuse++; line = nl + 1; continue; }
+        if (!strcmp(f[10], "UNMEASURED")) {
+            for (int c = 4; c <= 9; c++) if (strcmp(f[c], "UNMEASURED")) { printf("REFUSE\tline=%d\tunmeasured-carries-number\t%s\n", ln, f[c]); refuse++; break; }
+        } else if (!strcmp(f[10], "MEASURED")) {
+            if (atoi(f[3]) < 5) { printf("REFUSE\tline=%d\treps=%s<5\n", ln, f[3]); refuse++; }
+            for (int c = 4; c <= 9; c++) if (!isnum(f[c])) { printf("REFUSE\tline=%d\tnon-numeric\t%s\n", ln, f[c]); refuse++; break; }
+        } else { printf("REFUSE\tline=%d\tstatus=%s\n", ln, f[10]); refuse++; }
+        if (!strcmp(f[1], "wall") && !seen(wit, nw, f[0]) && nw < 2000) FMT(wit[nw++], 96, "%s", f[0]);
+        if (nh < 8000) FMT(have[nh++], 150, "%s\t%s", f[0], f[1]);
+        line = nl + 1;
+    }
+    for (int w = 0; w < nw; w++) for (int p = 0; p < 5; p++) {
+        char key[150]; int hit = 0; FMT(key, sizeof key, "%s\t%s", wit[w], named[p]);
+        for (int h = 0; h < nh; h++) if (!strcmp(have[h], key)) hit++;
+        if (hit != 1) { printf("REFUSE\titem=%s\tphase=%s\tcount=%d\n", wit[w], named[p], hit); refuse++; }
+    }
+    free(b);
+    printf("PERF_CHECK\trows=%d\ttimed_items=%d\trefuse=%d\n", rows, nw, refuse);
+    return refuse ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "obs")) return cmd_obs(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "size")) return cmd_size(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "summarize")) return cmd_summarize(argc, argv);
+    if (argc >= 2 && !strcmp(argv[1], "check")) return cmd_check(argc, argv);
+    fprintf(stderr, "perf-baseline: REFUSE usage obs|size|summarize|check (see header)\n");
+    return 2;
+}
