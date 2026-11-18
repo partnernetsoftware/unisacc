@@ -178,6 +178,87 @@ static void project(Point p,double *px,double *py) {
     *py=360-576*up/depth;
 }
 
+static int read_framing(const char *p) {
+    char *data;
+    const char *line;
+    size_t size=0;
+    int width,height,ref_x0,ref_y0,ref_x1,ref_y1,ex,ey,ez,ty,focal;
+    int i,min_x=1280,max_x=0,min_y=720,max_y=0;
+    double ref_ratio,limit,actual,model_x0=1280,model_x1=0,model_y0=720,model_y1=0;
+    double dx,dz,dy,horizontal,vertical_sin,vertical_cos,distance;
+    data=cx_read("ujs/practice/uxe/test/d4-framing.tsv",&size);
+    line=data?strchr(data,'\n'):0;
+    i=line?sscanf(line+1,"%d %d %d %d %d %d %d %d %d %d %d",
+        &width,&height,&ref_x0,&ref_y0,&ref_x1,&ref_y1,&ex,&ey,&ez,&ty,&focal):0;
+    if(data) free(data);
+    if(i!=11 || width!=1280 || height!=720 || ref_x0<0 || ref_y0<0 ||
+        ref_x1>width || ref_y1>height || ref_x0>=ref_x1 || ref_y0>=ref_y1 || focal<=0) return 2;
+    ref_ratio=(double)((ref_x1-ref_x0)*(ref_y1-ref_y0))/(width*height);
+    limit=ref_ratio*.46;
+    if(limit<.40) limit=.40;
+    dx=ex/1000.0; dz=ez/1000.0; dy=(ey-ty)/1000.0;
+    /* Nominal horizontal eye ratio is 3:4. This avoids depending on browser matrices. */
+    if(ex<=0 || 4*ex!=3*ez) return 2;
+    horizontal=dx*5/3;
+    distance=horizontal;
+    for(i=0;i<8;i++) distance=(distance+(horizontal*horizontal+dy*dy)/distance)/2;
+    vertical_sin=dy/distance; vertical_cos=horizontal/distance;
+    for(i=0;i<town_count+4;i++) {
+        Point center;
+        double w,h,d;
+        int j;
+        if(i<town_count) {
+            TownPart part=town[i];
+            if(part.kind==SMOKE) continue;
+            center=part.center; w=part.w; h=part.h; d=part.d;
+            if(part.kind==HOUSE || part.kind==CLOCK) center.y+=h/2;
+        } else {
+            center=feet[i-town_count]; w=1.42; h=.64; d=1.24;
+        }
+        for(j=0;j<8;j++) {
+            double x=center.x+(j&1?w:-w)/2-dx, y=center.y+(j&2?h:-h)/2-ey/1000.0;
+            double z=center.z+(j&4?d:-d)/2-dz, ground=.6*x+.8*z;
+            double depth=-(vertical_cos*ground+vertical_sin*y), up=vertical_cos*y-vertical_sin*ground;
+            double px,py;
+            if(depth<=0) return 2;
+            px=width/2+focal*(.8*x-.6*z)/depth;
+            py=height/2-focal*up/depth;
+            if(px<model_x0) model_x0=px;
+            if(px>model_x1) model_x1=px;
+            if(py<model_y0) model_y0=py;
+            if(py>model_y1) model_y1=py;
+        }
+    }
+    for(i=0;i<128*72;i++) {
+        int rgb[3],j,x=5+(i%128)*10,y=5+(i/128)*10;
+        for(j=0;j<3;j++) {
+            rgb[j]=byte(&p);
+            if(rgb[j]<0 || (j<2 && *p++!=',')) return 2;
+        }
+        if(i+1<128*72 && *p++!=';') return 2;
+        /* Warm stone, steel, timber or ink. Exclude cool sky, green terrain and near-white smoke. */
+        if((rgb[0]>rgb[1]+12 && rgb[1]>rgb[2]+8) ||
+            (rgb[0]>12 && rgb[0]<110 && rgb[1]>rgb[0]+6 && rgb[2]>rgb[1]+9) ||
+            (rgb[0]>115 && rgb[1]>105 && rgb[1]-rgb[2]>18 && rgb[0]>=rgb[1])) {
+            if(x<min_x) min_x=x;
+            if(x>max_x) max_x=x;
+            if(y<min_y) min_y=y;
+            if(y>max_y) max_y=y;
+        }
+    }
+    if(strncmp(p,"</output>",9)) return 2;
+    if(model_x0<0) model_x0=0;
+    if(model_y0<0) model_y0=0;
+    if(model_x1>width) model_x1=width;
+    if(model_y1>height) model_y1=height;
+    actual=max_x>=min_x && max_y>=min_y?(double)((max_x-min_x+10)*(max_y-min_y+10))/(width*height):0;
+    double model=(model_x1-model_x0)*(model_y1-model_y0)/(width*height);
+    int failed=model<limit || actual<limit;
+    printf("D4_FRAMING\tref_permille=%d model_permille=%d actual_permille=%d min_permille=%d failed=%d\n",
+        (int)(1000*ref_ratio),(int)(1000*model),(int)(1000*actual),(int)(1000*limit),failed);
+    return failed;
+}
+
 static int tone(int r,int g,int b,const int *color) {
     return g>35 && abs(r*color[1]-g*color[0])<g*9 && abs(b*color[1]-g*color[2])<g*9;
 }
@@ -253,13 +334,14 @@ static int check_pose(const char *mode) {
     int i,at,rc,failed=0;
     int gait=!strcmp(mode,"gait") || !strcmp(mode,"three-air") || !strcmp(mode,"long-leg");
     int density=!strcmp(mode,"density") || !strcmp(mode,"small-town") || !strcmp(mode,"no-gear");
-    if(!gait && !density && strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck")) return 2;
+    int framing=!strcmp(mode,"framing") || !strcmp(mode,"wide-camera");
+    if(!gait && !density && !framing && strcmp(mode,"normal") && strcmp(mode,"short-leg") && strcmp(mode,"no-deck")) return 2;
     if(!town_count && !survey_town()) { printf("FAIL D4_TOWN_DATA\n"); return 1; }
     if(!survey()) { printf("FAIL D4_SUPPORT\n"); return 1; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d4-skeleton.html?mode=%s&pixels=",cwd,mode);
     if(at<0 || at>=(int)sizeof url) return 2;
-    for(i=0;!gait && !density && i<10;i++) {
+    for(i=0;!gait && !density && !framing && i<10;i++) {
         double x=probes[i].x-14.4,y=probes[i].y-12,z=probes[i].z-19.2;
         double ground=.6*x+.8*z, depth=-(24*ground+7*y)/25, up=(24*y-7*ground)/25;
         int px=(int)(640+576*(.8*x-.6*z)/depth),py=(int)(360-576*up/depth);
@@ -274,8 +356,8 @@ static int check_pose(const char *mode) {
     p=out?strstr(out,"<output id=\"pixels\">"):0;
     if(rc || !p) return 2;
     p+=strlen("<output id=\"pixels\">");
-    if(gait || density) {
-        rc=gait?read_gait(p):read_town(p);
+    if(gait || density || framing) {
+        rc=gait?read_gait(p):density?read_town(p):read_framing(p);
         free(out);
         printf("CHECK_UXE_D4_SKELETON\tmode=%s failed=%d\n",mode,rc);
         return rc;
@@ -301,12 +383,14 @@ static int check_pose(const char *mode) {
 }
 
 int main(int argc,char **argv) {
-    int fixed, dynamic, density;
+    int fixed, dynamic, density, framing;
     if(argc==2) return check_pose(argv[1]);
     if(argc!=1) return 2;
     fixed=check_pose("normal");
     dynamic=check_pose("gait");
     density=check_pose("density");
+    framing=check_pose("framing");
     if(dynamic>fixed) fixed=dynamic;
-    return fixed>density?fixed:density;
+    if(density>fixed) fixed=density;
+    return fixed>framing?fixed:framing;
 }
