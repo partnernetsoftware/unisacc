@@ -24,6 +24,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckrun
 
 static const char *OUT = 0;
 static const char *PROD = "sh ./unisacc.com";
@@ -32,13 +33,6 @@ static int failed;
 static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\tcheck-run-warm.%s\n", name);
     else { failed++; sy_printf("FAIL\tcheck-run-warm.%s\n", name); }
-}
-static int sh(const char *cmd) {
-    char *v[] = {"sh", "-c", (char *)cmd, 0};
-    char *o = 0; size_t on = 0; int rc;
-    rc = cx_runv_timeout(v, 52, &o, &on);
-    mm_free(o);
-    return rc;
 }
 /* Occurrences of PAT in the captured output of the product call saved at PATH (the bytes the
  * product itself wrote to its stdout/stderr, read back through a process capture). */
@@ -55,7 +49,7 @@ static int run(const char *dir, const char *flags, const char *name) {
     char cmd[4000];
     cx_fmt(cmd, sizeof cmd, "UNISACC_CACHE_DIR=%s DEV_PRODUCT_CACHE=%s UNISACC_RR_TIME=1 %s %s %s/prog.cx >%s/%s.out 2>%s/%s.err",
            dir, dir, PROD, flags, OUT, OUT, name, OUT, name);
-    return sh(cmd);
+    return ckk_sh_t("check-run-warm", cmd, 0, 0, 52);
 }
 static int ran(const char *name) { char p[900]; cx_fmt(p, sizeof p, "%s/%s.out", OUT, name); return count(p, "WARM_RAN"); }
 static int errhas(const char *name, const char *pat) { char p[900]; cx_fmt(p, sizeof p, "%s/%s.err", OUT, name); return count(p, pat); }
@@ -66,7 +60,7 @@ static int entries(const char *dir) {
     char cmd[2400], lst[900]; size_t n = 0, i; char *b; int c = 0;
     cx_fmt(lst, sizeof lst, "%s/entries.lst", OUT);
     cx_fmt(cmd, sizeof cmd, "ls %s 2>/dev/null | grep -v '^uc-' | grep -v '^mc-' > %s; true", dir, lst);
-    sh(cmd);
+    ckk_sh_t("check-run-warm", cmd, 0, 0, 52);
     b = cx_read(lst, &n);
     for (i = 0; b && i < n; i++) if (b[i] == '\n') c++;
     mm_free(b);
@@ -77,7 +71,7 @@ static void mode_of(const char *path, char *m, int cap) {
     char cmd[1400], f[900]; size_t n = 0; char *b;
     cx_fmt(f, sizeof f, "%s/mode.txt", OUT);
     cx_fmt(cmd, sizeof cmd, "stat -c %%a %s > %s 2>/dev/null; true", path, f);
-    sh(cmd);
+    ckk_sh_t("check-run-warm", cmd, 0, 0, 52);
     b = cx_read(f, &n);
     m[0] = 0;
     if (b) { while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == ' ')) n--; if ((long)n < cap) { mm_copy(m, (size_t)cap, b, n); m[n] = 0; } }
@@ -93,7 +87,7 @@ int main(int argc, char **argv) {
     }
     if (!OUT) { sy_printf("usage: check-run-warm.cx -- OUT [--product CMD]\n"); return 2; }
     cx_fmt(cmd, sizeof cmd, "rm -rf %s; mkdir -p %s", OUT, OUT);
-    if (sh(cmd)) { sy_printf("check-run-warm: cannot make %s\n", OUT); return 2; }
+    if (ckk_sh_t("check-run-warm", cmd, 0, 0, 52)) { sy_printf("check-run-warm: cannot make %s\n", OUT); return 2; }
     cx_fmt(cmd, sizeof cmd, "%s/prog.cx", OUT);
     if (cx_write(cmd, "int puts(const char *);\nint main(void){ puts(\"WARM_RAN\"); return 0; }\n",
                  tx_len("int puts(const char *);\nint main(void){ puts(\"WARM_RAN\"); return 0; }\n", 400))) {
@@ -101,7 +95,7 @@ int main(int argc, char **argv) {
 
     /* (1) cold --warm on a 0755 directory of ours */
     cx_fmt(d, sizeof d, "%s/C", OUT);
-    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0755 %s", d, d); sh(cmd);
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0755 %s", d, d); ckk_sh_t("check-run-warm", cmd, 0, 0, 52);
     rc = run(d, "--warm", "w1");
     if (rc != 0 && (errhas("w1", "--warm") > 0 || errhas("w1", "option not migrated") > 0)) { sy_printf("DEFERRED\tcheck-run-warm\tneeds-product-with-warm\n"); return 3; }
     ck(rc == 0, "warm.cold-rc0");
@@ -144,7 +138,7 @@ int main(int argc, char **argv) {
     /* (5) a symlink to a private directory is refused */
     cx_fmt(tgt, sizeof tgt, "%s/T", OUT);
     cx_fmt(lk, sizeof lk, "%s/L", OUT);
-    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0700 %s && ln -s %s %s", tgt, tgt, tgt, lk); sh(cmd);
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s && chmod 0700 %s && ln -s %s %s", tgt, tgt, tgt, lk); ckk_sh_t("check-run-warm", cmd, 0, 0, 52);
     rc = run(lk, "--warm", "s1");
     ck(rc != 0 && errhas("s1", "not a private directory of this user") == 1, "link.refused-rc-nonzero");
     ck(ran("s1") == 0 && entries(tgt) == 0, "link.nothing-stored");
