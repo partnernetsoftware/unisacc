@@ -1,8 +1,12 @@
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
 #pragma unisa use mem.heap
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 /* tools/gen-uxe-pages.cx -- pages.tsv -> docs/uxe/<id>/
  * sh ./unisacc.com tools/gen-uxe-pages.cx -- --check|--write [--only ID]
+ * frozen 的 files 列为 文件名=SHA-256，校验目录与内容且不写入。
  * 不复制 md。legacy 跳过。不改 docs/index.html。
  */
 static int failed, wrote;
@@ -90,6 +94,53 @@ static int same_rewritten(const char *src, const char *dst) {
     mm_free(exp);
     return 1;
 }
+
+static void check_frozen(const char *dir, const char *files) {
+    char names[4096];
+    unsigned char seen[64] = {0};
+    int fd=sy_open_read(dir),n,q=0,i,at;
+    if(fd<0) { printf("FAIL\tfrozen-dir\t%s\n",dir); failed++; return; }
+    n=sy_dir_names(fd,names,sizeof names);
+    sy_close(fd);
+    if(n<1 || n>64) { printf("FAIL\tfrozen-list\t%s\n",dir); failed++; return; }
+    while(files[q]) {
+        char leaf[128],want[65],path[512],got[65];
+        unsigned char *bytes=0;
+        int64_t size=0;
+        int k=0,h=0,ok=1;
+        while(files[q]==' ') q++;
+        if(!files[q]) break;
+        while(files[q] && files[q]!=' ' && files[q]!='=' && k<127) leaf[k++]=files[q++];
+        leaf[k]=0;
+        if(!k || files[q]!='=') {
+            printf("FAIL\tfrozen-pin\t%s\n",dir); failed++; return;
+        }
+        q++;
+        while(files[q] && files[q]!=' ' && h<64) {
+            char c=files[q++];
+            want[h++]=c;
+            ok=ok && ((c>='0' && c<='9') || (c>='a' && c<='f'));
+        }
+        want[h]=0;
+        if(!ok || h!=64 || (files[q] && files[q]!=' ')) {
+            printf("FAIL\tfrozen-pin\t%s/%s\n",dir,leaf); failed++; return;
+        }
+        for(i=0,at=0;i<n && !tx_eqz(leaf,names+at);i++) at+=(int)tx_len(names+at,4096-at)+1;
+        if(i==n) { printf("MISS\t%s/%s\n",dir,leaf); failed++; continue; }
+        if(seen[i]) { printf("FAIL\tfrozen-duplicate\t%s/%s\n",dir,leaf); failed++; continue; }
+        seen[i]=1;
+        tx_snprintf(path,sizeof path,"%s/%s",dir,leaf);
+        if(sy_read_file(path,&bytes,&size,4000000) || sy_sha256_any_hex(bytes,size,got) || !tx_eqz(want,got)) {
+            printf("DIFF\t%s\n",path); failed++;
+        } else printf("FROZEN\t%s\n",path);
+        if(bytes) mm_free(bytes);
+    }
+    for(i=0,at=0;i<n;i++) {
+        if(!seen[i]) { printf("EXTRA\t%s/%s\n",dir,names+at); failed++; }
+        at+=(int)tx_len(names+at,4096-at)+1;
+    }
+}
+
 int main(int argc, char **argv) {
     unsigned char *tb = 0;
     int64_t tn = 0;
@@ -106,8 +157,8 @@ int main(int argc, char **argv) {
     t = (char *)tb;
     p = 0;
     while (p < (int)tn) {
-        char id[64], src[256], entry[256], dest[256], files[1024];
-        int ni = 0, ns = 0, ne = 0, nd = 0, nf = 0, col;
+        char id[64], src[256], entry[256], dest[256], status[16], files[1024];
+        int ni = 0, ns = 0, ne = 0, nd = 0, nt = 0, nf = 0, col;
         if (t[p] == '#' || t[p] == '\n') {
             while (p < (int)tn && t[p] != '\n') p++;
             if (p < (int)tn) p++;
@@ -121,12 +172,18 @@ int main(int argc, char **argv) {
             else if (col == 1 && ns < 255) src[ns++] = t[p];
             else if (col == 2 && ne < 255) entry[ne++] = t[p];
             else if (col == 3 && nd < 255) dest[nd++] = t[p];
+            else if (col == 5 && nt < 15) status[nt++] = t[p];
             else if (col == 6 && nf < 1023) files[nf++] = t[p];
             p++;
         }
-        id[ni] = src[ns] = entry[ne] = dest[nd] = files[nf] = 0;
+        id[ni] = src[ns] = entry[ne] = dest[nd] = status[nt] = files[nf] = 0;
         if (p < (int)tn) p++;
         if (only && !tx_eqz(only,id)) continue;
+        if (tx_eqz(status,"frozen")) {
+            selected++;
+            check_frozen(dest,files);
+            continue;
+        }
         if (src[0] == '-' || files[0] == '-' || !files[0]) {
             printf("SKIP\t%s\tlegacy\n", id);
             continue;

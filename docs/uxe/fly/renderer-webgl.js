@@ -5,31 +5,20 @@ import { allMeshes } from "./meshes.js";
 const VS = `#version 100
 precision mediump float;
 attribute vec3 aPos;
-attribute vec3 aNormal;
-attribute vec2 aUV;
 attribute vec3 aInst;
 attribute float aScale;
-attribute float aScaleY;
-
 attribute float aYaw;
 attribute float aPitch;
 attribute float aRoll;
-attribute vec4 aColor;
 uniform mat4 uVP;
 uniform vec3 uEye;
 uniform float uWave;
 uniform float uTime;
 uniform float uBillboard;
-uniform float uOrtho;
-uniform float uToonLevels;
-uniform float uNormalPass;
-uniform vec2 uScreen;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
-varying vec2 vUV;
-varying vec4 vColor;
 vec3 rotYXZ(vec3 v, float yaw, float pitch, float roll) {
   float cy = cos(yaw), sy = sin(yaw);
   float cp = cos(pitch), sp = sin(pitch);
@@ -46,42 +35,16 @@ vec3 billboardXZ(vec3 v, vec3 eye, vec3 inst) {
   return vec3(v.x * fz + v.z * fx, v.y, -v.x * fx + v.z * fz);
 }
 void main() {
-  if (uOrtho > 0.5) {
-    vec2 px = aInst.xy + vec2(aPos.x * aScale, aPos.y * aScaleY);
-
-
-
-
-
-    float nx = px.x / uScreen.x * 2.0 - 1.0;
-    float ny = 1.0 - px.y / uScreen.y * 2.0;
-    vN = vec3(0.0, 0.0, 1.0);
-    vP = vec3(px, 0.0);
-    vEye = uEye;
-    vFogDepth = 0.0;
-    vUV = vec2(aUV.x, 1.0 - aUV.y);
-
-
-
-    vColor = aColor;
-    gl_Position = vec4(nx, ny, 0.0, 1.0);
-    return;
-  }
   vec3 lp = aPos * aScale;
   vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
   p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
-  vec3 normal = uToonLevels > 1.0 || uNormalPass > 0.5 ? aNormal : aPos;
-  vN = normalize(uBillboard > 0.5 ? billboardXZ(normal, uEye, aInst) : rotYXZ(normal, aYaw, aPitch, aRoll));
+  vN = normalize(uBillboard > 0.5 ? billboardXZ(aPos, uEye, aInst) : rotYXZ(aPos, aYaw, aPitch, aRoll));
   vP = p;
   vEye = uEye;
   vFogDepth = length(p - uEye);
-  vUV = aUV;
-  vColor = aColor;
   gl_Position = uVP * vec4(p, 1.0);
 }
-
-
 `;
 
 const FS = `#version 100
@@ -90,8 +53,6 @@ uniform vec3 uColor;
 uniform vec3 uEmissive;
 uniform float uMetal;
 uniform float uRough;
-uniform float uToonLevels;
-uniform float uNormalPass;
 uniform vec3 uAmbient;
 uniform float uAmbI;
 uniform vec3 uL0Dir;
@@ -103,82 +64,26 @@ uniform float uL1I;
 uniform float uFogD;
 uniform vec3 uFogC;
 uniform float uInk;
-uniform sampler2D uMap;
-uniform float uHasMap;
-uniform float uSurfaceMap;
-uniform float uOutlineEligible;
-uniform float uRadial;
-uniform float uInstColor;
-uniform float uOrtho;
 varying vec3 vN;
 varying vec3 vP;
 varying vec3 vEye;
 varying float vFogDepth;
-varying vec2 vUV;
-varying vec4 vColor;
 void main() {
-  if (uHasMap > 0.5 && uSurfaceMap > 2.5 && uSurfaceMap < 3.5 &&
-      texture2D(uMap, vUV).a < 0.5) discard;
-  if (uNormalPass > 0.5) {
-    gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, uOutlineEligible);
-    return;
-  }
-  if (uHasMap > 0.5 && uSurfaceMap < 0.5) {
-    gl_FragColor = texture2D(uMap, vUV);
-    return;
-  }
-  if (uOrtho > 0.5) {
-    gl_FragColor = vec4(uColor, 1.0);
-    return;
-  }
-
   vec3 n = normalize(vN);
   vec3 amb = uAmbient * uAmbI;
   float d0 = max(dot(n, normalize(uL0Dir)), 0.0);
   float d1 = max(dot(n, normalize(uL1Dir)), 0.0);
-  if (uToonLevels > 1.0) {
-    float top = uToonLevels - 1.0;
-    d0 = min(floor(d0 * uToonLevels), top) / top;
-    d1 = min(floor(d1 * uToonLevels), top) / top;
-  }
   float soft = mix(1.0, 0.55, clamp(uRough, 0.0, 1.0));
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
-  if (uHasMap > 0.5 && uSurfaceMap > 0.5) {
-    // Stone follows mesh UVs; stationary foliage samples a world-space wash.
-    float tint = uSurfaceMap < 1.5
-      ? texture2D(uMap, fract(vUV)).r
-      : texture2D(uMap, fract((vec2(vP.x, vP.z) + vP.yy * vec2(0.17, 0.31)) * 0.6)).g;
-    if (uSurfaceMap > 2.5 && uSurfaceMap < 3.5) tint *= texture2D(uMap, vUV).r;
-    if (uSurfaceMap > 3.5) {
-      float stain = texture2D(uMap, fract(vUV)).g;
-      tint = mix(.62,1.0,smoothstep(.78,.95,stain));
-      base = mix(base * vec3(1.19,.89,.69),base,smoothstep(.79,.915,stain));
-    }
-    if (uSurfaceMap > 4.5) {
-      float board = texture2D(uMap, fract(vUV * vec2(.26, 3.5))).r;
-      tint = mix(.48,1.0,smoothstep(.60,.93,board));
-    }
-    base *= tint;
-  }
   vec3 col = base * (amb + diff) + uEmissive;
-  if (uInstColor > 0.5) col = vColor.rgb;
   vec3 view = normalize(vEye - vP);
   float rim = pow(1.0 - max(dot(n, view), 0.0), 2.4);
   col = mix(col, col * 0.12, clamp(uInk * rim, 0.0, 1.0));
   float fogF = 1.0 - exp(-uFogD * uFogD * vFogDepth * vFogDepth);
   col = mix(col, uFogC, clamp(fogF, 0.0, 1.0));
-  float a = 1.0;
-  if (uRadial > 0.5) {
-    vec2 d = vUV - vec2(0.5, 0.5);
-    float r2 = dot(d, d) * 4.0;
-    a = max(1.0 - r2, 0.0);
-    a = a * a;
-  }
-  if (uInstColor > 0.5) a *= vColor.a;
-  gl_FragColor = vec4(col, a);
+  gl_FragColor = vec4(col, 1.0);
 }
-
 `;
 
 function compile(gl, type, src) {
@@ -195,99 +100,8 @@ function norm3(v) {
   return [v[0] / L, v[1] / L, v[2] / L];
 }
 
-function createOutline(gl, ext) {
-  const program = gl.createProgram();
-  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, `
-    attribute vec2 corner;
-    void main() { gl_Position = vec4(corner, 0.0, 1.0); }
-  `));
-  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, `
-    precision mediump float;
-    uniform sampler2D normals;
-    uniform vec2 resolution;
-    uniform float width;
-    bool edge(vec4 a, vec4 b) {
-      return b.a < 0.25 || distance(a.rgb, b.rgb) > 0.25;
-    }
-    void main() {
-      vec2 uv = gl_FragCoord.xy / resolution;
-      vec4 center = texture2D(normals, uv);
-      if (center.a < 0.75) discard;
-      bool boundary = false;
-      for (int i = 1; i <= 8; i++) {
-        if (float(i) > width) break;
-        vec2 d = float(i) / resolution;
-        boundary = boundary ||
-          edge(center, texture2D(normals, uv + vec2(d.x, 0.0))) ||
-          edge(center, texture2D(normals, uv - vec2(d.x, 0.0))) ||
-          edge(center, texture2D(normals, uv + vec2(0.0, d.y))) ||
-          edge(center, texture2D(normals, uv - vec2(0.0, d.y)));
-      }
-      if (!boundary) discard;
-      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    }
-  `));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
-  const corner = gl.getAttribLocation(program, "corner");
-  const resolution = gl.getUniformLocation(program, "resolution");
-  const width = gl.getUniformLocation(program, "width");
-  const triangle = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
-  const framebuffer = gl.createFramebuffer();
-  const depth = gl.createRenderbuffer();
-  const normals = gl.createTexture();
-  let oldWidth = 0, oldHeight = 0;
-  return {
-    begin(w, h) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.activeTexture(gl.TEXTURE0);
-      if (w !== oldWidth || h !== oldHeight) {
-        gl.bindTexture(gl.TEXTURE_2D, normals);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, normals, 0);
-        gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
-        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
-        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
-        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-          throw new Error("outline framebuffer incomplete");
-        }
-        oldWidth = w;
-        oldHeight = h;
-      }
-      gl.bindTexture(gl.TEXTURE_2D, null);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    },
-    draw(w, h, pixels) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.useProgram(program);
-      gl.disable(gl.DEPTH_TEST);
-      gl.disable(gl.BLEND);
-      gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
-      gl.enableVertexAttribArray(corner);
-      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
-      ext.vertexAttribDivisorANGLE(corner, 0);
-      gl.bindTexture(gl.TEXTURE_2D, normals);
-      gl.uniform2f(resolution, w, h);
-      gl.uniform1f(width, pixels);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.bindTexture(gl.TEXTURE_2D, null);
-      gl.enable(gl.DEPTH_TEST);
-    }
-  };
-}
-
-export function createWebGLRenderer(canvas, opts) {
-  const aa = !(opts && opts.antialias === false);
-  const gl = canvas.getContext("webgl", { antialias: aa, preserveDrawingBuffer: true, powerPreference: "high-performance" });
-
+export function createWebGLRenderer(canvas) {
+  const gl = canvas.getContext("webgl", { antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
   if (!gl) throw new Error("WebGL unavailable");
   const ext = gl.getExtension("ANGLE_instanced_arrays");
   if (!ext) throw new Error("ANGLE_instanced_arrays required");
@@ -299,59 +113,33 @@ export function createWebGLRenderer(canvas, opts) {
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
     throw new Error(gl.getProgramInfoLog(prog) || "link");
 
-  const meshBufs = allMeshes().concat(opts?.extraMeshes || []).map((m) => {
+  const meshBufs = allMeshes().map((m) => {
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, m.positions, gl.STATIC_DRAW);
-    const uvbuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, uvbuf);
-    gl.bufferData(gl.ARRAY_BUFFER, m.uvs || new Float32Array(m.vCount * 2), gl.STATIC_DRAW);
-    const nbuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, nbuf);
-    gl.bufferData(gl.ARRAY_BUFFER, m.normals || m.positions, gl.STATIC_DRAW);
-    return { buf, uvbuf, nbuf, vCount: m.vCount };
+    return { buf, vCount: m.vCount };
   });
 
   const ibo = gl.createBuffer();
   const sbo = gl.createBuffer();
-  const sboY = gl.createBuffer();
-
   const ybo = gl.createBuffer();
   const pbo = gl.createBuffer();
   const rbo = gl.createBuffer();
-  const cbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
-  const aNormal = gl.getAttribLocation(prog, "aNormal");
-  const aUV = gl.getAttribLocation(prog, "aUV");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
-  const aScaleY = gl.getAttribLocation(prog, "aScaleY");
-
   const aYaw = gl.getAttribLocation(prog, "aYaw");
   const aPitch = gl.getAttribLocation(prog, "aPitch");
   const aRoll = gl.getAttribLocation(prog, "aRoll");
-  const aColor = gl.getAttribLocation(prog, "aColor");
   const u = (n) => gl.getUniformLocation(prog, n);
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
   const uMetal = u("uMetal"), uRough = u("uRough");
-  const uToonLevels = u("uToonLevels");
-  const uNormalPass = u("uNormalPass");
-  const uOutlineEligible = u("uOutlineEligible");
-  let outline;
   const uAmbient = u("uAmbient"), uAmbI = u("uAmbI");
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
   const uFogD = u("uFogD"), uFogC = u("uFogC");
   const uWave = u("uWave"), uTime = u("uTime"), uInk = u("uInk"), uBillboard = u("uBillboard");
-  const uMap = u("uMap"), uHasMap = u("uHasMap"), uRadial = u("uRadial"), uInstColor = u("uInstColor");
-  const uSurfaceMap = u("uSurfaceMap");
-  const uOrtho = u("uOrtho"), uScreen = u("uScreen");
-
-
-
-  const texCache = Object.create(null);
-
 
   const P = mat4(), V = mat4(), VP = mat4();
 
@@ -366,73 +154,18 @@ export function createWebGLRenderer(canvas, opts) {
   }
 
   function drawCloud(cloud, wave) {
-    const isPt = (cloud.meshId | 0) === 4;
     const mesh = meshBufs[cloud.meshId] || meshBufs[0];
-
-    if (isPt && cloud.alphaMode) {
-      gl.enable(gl.BLEND);
-      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      gl.depthMask(false);
-    } else if (isPt) {
-      gl.enable(gl.BLEND);
-      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
-      gl.depthMask(false);
-    } else if (cloud.alphaMode) {
-      gl.enable(gl.BLEND);
-      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      gl.depthMask(false);
-    } else {
-      gl.disable(gl.BLEND);
-      gl.depthMask(true);
-    }
     gl.uniform1f(uWave, cloud.meshId === 3 ? wave : 0);
-    gl.uniform1f(uBillboard, (cloud.billboard || isPt) ? 1 : 0);
-    const ss = !!(cloud.screenSpace || ((cloud.flags | 0) & 8));
-    if (uOrtho) gl.uniform1f(uOrtho, ss ? 1 : 0);
-    if (uScreen) gl.uniform2f(uScreen, canvas.width, canvas.height);
-    if (ss) { gl.disable(gl.DEPTH_TEST); gl.depthMask(false); }
-
-
-    if (uRadial) gl.uniform1f(uRadial, (isPt && !ss) ? 1 : 0);
-
+    gl.uniform1f(uBillboard, cloud.billboard ? 1 : 0);
     gl.uniform3fv(uColor, cloud.color);
-
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
     gl.uniform1f(uRough, cloud.roughness ?? 0.5);
-    const levels = cloud.toonLevels;
-    gl.uniform1f(uToonLevels, Number.isInteger(levels) && levels >= 2 && levels <= 16 ? levels : 0);
-    gl.uniform1f(uSurfaceMap, cloud.surfaceMap === "masonry" ? 1 :
-      cloud.surfaceMap === "wash" ? 2 : cloud.surfaceMap === "leaf-cutout" ? 3 :
-      cloud.surfaceMap === "metal-stain" ? 4 : cloud.surfaceMap === "wood-grain" ? 5 : 0);
-    gl.uniform1f(uOutlineEligible, cloud.outlineExcluded ? 0.5 : 1);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
     gl.enableVertexAttribArray(aPos);
     gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aPos, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.nbuf);
-    gl.enableVertexAttribArray(aNormal);
-    gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
-    ext.vertexAttribDivisorANGLE(aNormal, 0);
-    if (aUV >= 0 && mesh.uvbuf) {
-      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.uvbuf);
-      gl.enableVertexAttribArray(aUV);
-      gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
-      ext.vertexAttribDivisorANGLE(aUV, 0);
-    }
-    {
-      const mid = cloud.mapId | 0;
-      const rec = mid ? texCache[mid] : 0;
-      if (rec && rec.tex) {
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, rec.tex);
-        if (uMap) gl.uniform1i(uMap, 0);
-        if (uHasMap) gl.uniform1f(uHasMap, 1);
-      } else if (uHasMap) gl.uniform1f(uHasMap, 0);
-
-    }
-
 
     gl.bindBuffer(gl.ARRAY_BUFFER, ibo);
     gl.bufferData(gl.ARRAY_BUFFER, cloud.xyz.subarray(0, cloud.count * 3), gl.DYNAMIC_DRAW);
@@ -445,15 +178,6 @@ export function createWebGLRenderer(canvas, opts) {
     gl.enableVertexAttribArray(aScale);
     gl.vertexAttribPointer(aScale, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aScale, 1);
-    gl.bindBuffer(gl.ARRAY_BUFFER, sboY);
-    const sy = cloud.scaleY || cloud.scale;
-    gl.bufferData(gl.ARRAY_BUFFER, sy.subarray(0, cloud.count), gl.DYNAMIC_DRAW);
-    if (aScaleY >= 0) {
-      gl.enableVertexAttribArray(aScaleY);
-      gl.vertexAttribPointer(aScaleY, 1, gl.FLOAT, false, 0, 0);
-      ext.vertexAttribDivisorANGLE(aScaleY, 1);
-    }
-
 
     gl.bindBuffer(gl.ARRAY_BUFFER, ybo);
     const yaw = cloud.yaw || new Float32Array(cloud.count);
@@ -475,73 +199,19 @@ export function createWebGLRenderer(canvas, opts) {
     gl.enableVertexAttribArray(aRoll);
     gl.vertexAttribPointer(aRoll, 1, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aRoll, 1);
-
-    if (aColor >= 0) {
-      const ic = cloud.instColor;
-      const has = ic && ic.length >= cloud.count * 4;
-      const f = new Float32Array(cloud.count * 4);
-      for (let i = 0; i < cloud.count; i++) {
-        if (has) {
-          f[i * 4] = ic[i * 4] / 255;
-          f[i * 4 + 1] = ic[i * 4 + 1] / 255;
-          f[i * 4 + 2] = ic[i * 4 + 2] / 255;
-          f[i * 4 + 3] = ic[i * 4 + 3] / 255;
-        } else {
-          f[i * 4] = f[i * 4 + 1] = f[i * 4 + 2] = f[i * 4 + 3] = 1;
-        }
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, cbo);
-      gl.bufferData(gl.ARRAY_BUFFER, f, gl.DYNAMIC_DRAW);
-      gl.enableVertexAttribArray(aColor);
-      gl.vertexAttribPointer(aColor, 4, gl.FLOAT, false, 0, 0);
-      ext.vertexAttribDivisorANGLE(aColor, 1);
-      if (uInstColor) gl.uniform1f(uInstColor, has ? 1 : 0);
-    }
     ext.drawArraysInstancedANGLE(gl.TRIANGLES, 0, mesh.vCount, cloud.count);
     cloud.markClean();
   }
 
-
   return {
     backend: "webgl",
     resize,
-    render(scene, camera, textures) {
-      if (textures && textures.length) {
-        for (let i = 0; i < textures.length; i++) {
-          const t = textures[i];
-          const id = t.id | 0;
-          if (!id) continue;
-          let h = 2166136261;
-          h ^= (t.w | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
-          h ^= (t.h | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
-          h ^= (t.filter | 0) & 255; h = Math.imul(h, 16777619) >>> 0;
-          const src = t.rgba;
-          for (let k = 0; k < src.length; k++) { h ^= src[k]; h = Math.imul(h, 16777619) >>> 0; }
-
-          const rec = texCache[id];
-          if (rec && rec.hash === h && rec.tex) continue;
-          const tex = rec && rec.tex ? rec.tex : gl.createTexture();
-          gl.bindTexture(gl.TEXTURE_2D, tex);
-          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
-          const lin = (t.filter | 0) === 1;
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, lin ? gl.LINEAR : gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, lin ? gl.LINEAR : gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, t.w, t.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
-          texCache[id] = { hash: h, tex: tex };
-
-        }
-      }
+    render(scene, camera) {
       const w = canvas.width, h = canvas.height;
-      gl.viewport(0, 0, w, h);
       const [cr, cg, cb, ca] = scene.clearColor;
       gl.enable(gl.DEPTH_TEST);
       gl.clearColor(cr, cg, cb, ca);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-
 
       perspective(camera.fovy, w / Math.max(1, h), camera.near, camera.far, P);
       const [ex, ey, ez] = camera.eye;
@@ -572,44 +242,9 @@ export function createWebGLRenderer(canvas, opts) {
       gl.uniform3fv(uFogC, fog.color);
 
       const wave = scene.wave || 0;
-      const opaque = [];
-      const trans = [];
-      const ss = [];
-      let li = 0;
       for (const cloud of scene.clouds.values()) {
-        if (cloud.count <= 0) continue;
-        if (cloud.layer === undefined) cloud.layer = li++;
-        const isSS = !!(cloud.screenSpace || ((cloud.flags | 0) & 8));
-        if (isSS) ss.push(cloud);
-        else if (cloud.alphaMode || (cloud.meshId | 0) === 4) trans.push(cloud);
-        else opaque.push(cloud);
+        if (cloud.count > 0) drawCloud(cloud, wave);
       }
-      ss.sort((a, b) => (a.layer | 0) - (b.layer | 0));
-      if (scene.backdrop?.count > 0 && scene.backdrop.screenSpace) {
-        drawCloud(scene.backdrop, wave);
-        gl.enable(gl.DEPTH_TEST);
-      }
-      for (const c of opaque) drawCloud(c, wave);
-      if (Number.isInteger(scene.outlineWidth) && scene.outlineWidth > 0 && opaque.length) {
-        outline ||= createOutline(gl, ext);
-        outline.begin(w, h);
-        gl.uniform1f(uNormalPass, 1);
-        for (const c of opaque) drawCloud(c, wave);
-        gl.uniform1f(uNormalPass, 0);
-        outline.draw(w, h, Math.min(scene.outlineWidth, 8));
-        gl.useProgram(prog);
-      }
-      for (const c of ss) drawCloud(c, wave);
-      trans.sort((a, b) => {
-        const ax = a.xyz[0] - ex, ay = a.xyz[1] - ey, az = a.xyz[2] - ez;
-        const bx = b.xyz[0] - ex, by = b.xyz[1] - ey, bz = b.xyz[2] - ez;
-        return (bx * bx + by * by + bz * bz) - (ax * ax + ay * ay + az * az);
-      });
-      for (const c of trans) drawCloud(c, wave);
-
-      gl.depthMask(true);
-      gl.disable(gl.BLEND);
-
     },
   };
 }
