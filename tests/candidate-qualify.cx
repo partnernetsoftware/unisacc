@@ -69,10 +69,11 @@ static void cq_row(const char *check, const char *status, int rc, long ms, const
 }
 
 /* Runs argv from the root, 55 s for its whole process group.  Returns rc, or -1 when it could not be observed. */
+static char **cq_env;   /* extra environment for the next cq_exec (stream-pipe parts) */
 static int cq_exec(char **argv, np_result *r, char *why, size_t wl) {
     memset(r, 0, sizeof *r);
     why[0] = 0;
-    if (np_run(argv, ".", 0, 55, r, why, wl)) return -1;
+    if (np_run(argv, ".", cq_env, 55, r, why, wl)) return -1;
     if (r->residue) { { if (cx_fmt(why, wl, "residue=%d", r->residue)) why[0] = 0; } return -1; }
     return r->rc;
 }
@@ -272,7 +273,21 @@ static int cq_cell(const char *target, const char *out) {
         cq_row("run", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? "default -run printed the literal" : (rc < 0 ? w : (r.errn ? r.err : "wrong rc or stdout")));
         if (rc >= 0) np_free(&r); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/stdio-crossunit.cx", 0}; cq_batch("stdio-crossunit", v, "STDIO_CROSSUNIT\t"); }
-    {   char *v[] = {"sh", "./unisacc.com", "tests/check-stream-pipe.cx", 0}; cq_batch("stream-pipe", v, "CHECK_STREAM_PIPE\tfailed=0"); }
+    /* stream-pipe runs as two parts, each its own process with its own 55 s limit (0.0.74: the whole
+       check hit 55 s twice on the osx/x86_64 runner); one row, PASS only when both parts pass. */
+    {   char *v[] = {"sh", "./unisacc.com", "tests/check-stream-pipe.cx", 0};
+        static char *e1[] = {"SP_PART=main", 0}, *e2[] = {"SP_PART=e", 0};
+        char **envs[2] = {e1, e2}; const char *nm[2] = {"main", "e"};
+        np_result r; char why[512], detail[500], first[400] = ""; long t0 = sy_now_ms(); int ok = 1;
+        for (int i = 0; i < 2; i++) {
+            long t1 = sy_now_ms(); int rc; cq_env = envs[i]; rc = cq_exec(v, &r, why, sizeof why); cq_env = 0;
+            int g = rc == 0 && cq_marker(&r, "CHECK_STREAM_PIPE\tfailed=0");
+            if (!g && ok) { ok = 0; if (cx_fmt(first, sizeof first, "part=%s rc=%d ms=%ld %.300s", nm[i], rc, sy_now_ms() - t1, rc < 0 ? why : "expected rc0 with CHECK_STREAM_PIPE failed=0")) first[0] = 0; }
+            if (rc >= 0 || r.out || r.err) np_free(&r);
+        }
+        if (ok) { if (cx_fmt(detail, sizeof detail, "CHECK_STREAM_PIPE\tfailed=0 parts=main,e")) detail[0] = 0; }
+        else { if (cx_fmt(detail, sizeof detail, "%s", first)) detail[0] = 0; }
+        cq_row("stream-pipe", ok ? "PASS" : "FAIL", ok ? 0 : 1, sy_now_ms() - t0, detail); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--smoke", 0}; cq_batch("smoke", v, "SMOKE\tassertions=16\tfailed=0"); }
     {   char h[65];
         if (cq_sha_file("unisacc.com", h) || strcmp(h, cq_sha)) { fprintf(cq_out, "%s\tidentity\tFAIL\t1\t0\t%s\t%s\tcandidate changed during the checks\n", cq_t, cq_sha, cq_commit); printf("FAIL\tcandidate changed during the checks\n"); cq_failed = 1; } }
