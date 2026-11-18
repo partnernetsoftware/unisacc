@@ -6,7 +6,11 @@ const palette=[
 const muted=[[29,74,112],[43,108,143],[68,148,164],[216,190,133],
   [94,148,77],[66,123,67],[52,95,62],[111,111,114]];
 const foam=[174,225,231], haze=[173,214,234];
-const islands=[[162,82,44,62],[68,103,32,42],[227,65,32,26],[92,29,40,30],[188,15,58,37]];
+const islands=[
+  [100,106,34,28,113],[163,96,22,18,97],[130,67,12,13,84],
+  [72,56,16,15,100],[187,52,17,13,102],[104,25,16,14,98],
+  [150,20,15,13,103],[215,19,19,13,104]
+];
 const bayer=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
 const clouds=[
   [[93,74,39,18],[202,63,23,14],[155,8,32,15],[55,25,39,18],[231,14,36,17],
@@ -37,13 +41,13 @@ function noise(x,y,step,seed) {
 }
 function elev(x,y,seed) {
   let peak=-49;
-  for(const [cx,cy,rx,ry] of islands) {
+  for(const [cx,cy,rx,ry,summit] of islands) {
     const dx=Math.min(Math.abs(x-cx),MAP-Math.abs(x-cx));
     const dy=Math.min(Math.abs(y-cy),MAP-Math.abs(y-cy));
-    peak=Math.max(peak,93-Math.floor(96*dx*dx/(rx*rx))-Math.floor(96*dy*dy/(ry*ry)));
+    peak=Math.max(peak,summit-Math.floor(116*dx*dx/(rx*rx))-Math.floor(116*dy*dy/(ry*ry)));
   }
-  return peak+Math.floor((noise(x,y,32,seed)-128)*.35)
-    +Math.floor((noise(x,y,8,seed+3)-128)*.20)
+  return peak+Math.floor((noise(x,y,64,seed)-128)*.45)
+    +Math.floor((noise(x,y,16,seed+3)-128)*.25)
     +Math.floor((noise(x,y,2,seed+5)-128)*.07);
 }
 function band(h) {
@@ -74,18 +78,23 @@ export function pixelWorld(context,query) {
     heights[at]=elev(x,y,seed);
     bands[at]=band(heights[at]);
   }
-  const fineSize=MAP*2;
+  const samples=query.has("coarse-relief")?2:4;
+  const fineSize=MAP*samples;
   const relief=new Int16Array(fineSize*fineSize);
   for(let y=0;y<fineSize;y++) for(let x=0;x<fineSize;x++) {
-    const left=x>>1,top=y>>1,right=(left+(x&1))&255,bottom=(top+(y&1))&255;
-    relief[y*fineSize+x]=Math.floor((heights[top*MAP+left]+heights[top*MAP+right]
-      +heights[bottom*MAP+left]+heights[bottom*MAP+right])/4);
+    const left=Math.floor(x/samples),top=Math.floor(y/samples);
+    const right=(left+1)&255,bottom=(top+1)&255;
+    const u=(x%samples)/samples,v=(y%samples)/samples;
+    relief[y*fineSize+x]=Math.floor(
+      (heights[top*MAP+left]*(1-u)+heights[top*MAP+right]*u)*(1-v)
+      +(heights[bottom*MAP+left]*(1-u)+heights[bottom*MAP+right]*u)*v);
   }
   const image=context.createImageData(WIDTH,HEIGHT);
   const pixels=new Uint32Array(image.data.buffer);
   const limit=new Int16Array(WIDTH);
   const stages=Array.from({length:17},(_,step)=>
-    [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87)))]
+    [...colors,foam,...colors.map(color=>color.map(channel=>Math.round(channel*.87))),
+      [121,155,65],[103,168,81],[52,104,56]]
       .map(color=>rgb(mix(color,haze,step/16*.86))));
   const sky=Array.from({length:49},(_,step)=>rgb(mix([42,126,185],[189,229,239],step/48)));
   function cloudLayer(flight,horizon,forwardX,forwardZ,rightX,rightZ,layer) {
@@ -107,7 +116,9 @@ export function pixelWorld(context,query) {
   return {
     paint(flight,tick) {
       const rad=flight.heading*Math.PI/180, fx=Math.sin(rad), fz=-Math.cos(rad),rx=-fz,rz=fx;
-      const horizon=113+Math.round(flight.pitch*.50), cam=flight.altitude+13;
+      const horizon=100+Math.round(flight.pitch*.50), cam=flight.altitude+20;
+      const wavePhase=query.has("still-waves")?0:Math.floor(tick/3);
+      const groundDetail=!query.has("bare-ground");
       for(let y=0;y<HEIGHT;y++) for(let x=0;x<WIDTH;x++) {
         const shade=Math.min(48,48*y/horizon);
         const dither=bayer[((y&3)<<2)|(x&3)]/16;
@@ -115,18 +126,27 @@ export function pixelWorld(context,query) {
       }
       limit.fill(HEIGHT);
       for(let depth=4;depth<=400;depth+=Math.max(.60,depth*.022)) {
-        const fade=Math.max(0,Math.min(16,Math.floor((depth-59)/18)));
+        const fade=Math.max(0,Math.min(16,Math.floor((depth-52)/13)));
         const x0=flight.x+depth*fx,z0=flight.z+depth*fz;
         for(let col=0;col<WIDTH;col++) {
           const lateral=(col+.5-WIDTH/2)*depth/151;
-          const gx=Math.floor(x0+lateral*rx+256)&511,gy=Math.floor(z0+lateral*rz+256)&511;
+          const gx=Math.floor((x0+lateral*rx+256)*samples/2)&(fineSize-1);
+          const gy=Math.floor((z0+lateral*rz+256)*samples/2)&(fineSize-1);
+          const wx=Math.floor((x0+lateral*rx+256)*2)&1023;
+          const wy=Math.floor((z0+lateral*rz+256)*2)&1023;
           const h=relief[gy*fineSize+gx],id=band(h);
           const top=Math.max(0,Math.floor(horizon+(cam-Math.max(0,h)*.22)*151/depth));
           if(top>=limit[col]) continue;
-          const ripples=id<3 && hash(gx,gy,seed+Math.floor(tick/4))>(id===0?250:id===1?245:229);
-          const waterline=id===2 && h>-3 && hash(gx,gy,seed+71)>165;
-          const shade=id>=4 && (h%10<2 || hash(gx,gy,seed+19)>234);
-          const color=stages[fade][ripples || waterline?8:shade?id+9:id];
+          const waveX=(wx+wavePhase)&1023;
+          const ripples=id<3 && hash(waveX>>2,wy>>1,seed+2)>(id===0?250:id===1?245:229);
+          const waterline=id===2 && h>-3 && hash(wx>>1,wy>>1,seed+71)>165;
+          const shade=id>=4 && (h%10<2 || hash(wx,wy,seed+19)>234);
+          let material=ripples || waterline?8:shade?id+9:id;
+          if(groundDetail) {
+            if(id===4 && (wx+2*wy)%13<3 && hash(wx>>5,wy>>5,seed+27)>83) material=17;
+            if((id===5 || id===6) && hash(wx>>1,wy>>1,seed+31)>224) material=(wx+wy)%3?18:19;
+          }
+          const color=stages[fade][material];
           for(let y=top;y<limit[col];y++) pixels[y*WIDTH+col]=color;
           limit[col]=top;
         }
@@ -134,6 +154,13 @@ export function pixelWorld(context,query) {
       context.putImageData(image,0,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,0);
       cloudLayer(flight,horizon,fx,fz,rx,rz,1);
+    },
+    reliefSwatches(target,points) {
+      points.forEach(([x,y],i)=>{
+        const h=128+relief[Math.floor(y*samples/4)*fineSize+Math.floor(x*samples/4)];
+        target.fillStyle="rgb("+h+","+h+","+h+")";
+        target.fillRect(i,0,1,1);
+      });
     },
     swatches(target,points) {
       points.forEach(([x,y],i)=>{
