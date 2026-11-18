@@ -2,6 +2,8 @@ const width=426,height=240,horizon=90,reachLength=216;
 const canvas=document.querySelector("canvas"),paint=canvas.getContext("2d",{alpha:false});
 const image=paint.createImageData(width,height),data=image.data;
 const query=new URLSearchParams(location.search);
+const reflectedTitles=document.querySelector("h1");
+let bridgeMirror=true,titleMirror=true;
 const reflections=!query.has("no-reflection");
 const waterLayers=!query.has("mud-water"),ripples=!query.has("flat-ripples");
 const gradient=!query.has("flat-reflection");
@@ -175,6 +177,39 @@ function banks(theme) {
     }
   }
 }
+function bridgeShimmer(x,y,scale,water,glow) {
+  const length=Math.round(scale*4.8);
+  for(let row=0;row<length;row++) {
+    const fade=1-row/length;
+    const sway=Math.sin((y+row)*.44+boat.tick*.13);
+    const grain=noise(row,Math.round(x));
+    const half=Math.max(1,Math.round(scale*(.11+.23*fade)*(1+.25*sway)));
+    if(grain<36) continue;
+    pixel(css(blend(water,glow,.28+.54*fade)),x-half+sway*2,y+row,2*half+1,1);
+    if(grain>140) pixel(css(blend(water,glow,.42+.49*fade)),x+sway*2,y+row,1,1);
+  }
+}
+
+function titleShimmer() {
+  if(!reflections || query.has("no-title-shimmer")) return;
+  const surface=titleShimmer.surface ??= new OffscreenCanvas(174,36);
+  const lettering=surface.getContext("2d");
+  lettering.clearRect(0,0,surface.width,surface.height);
+  lettering.font="26px Georgia, serif";
+  lettering.textAlign="center";
+  lettering.textBaseline="middle";
+  lettering.fillStyle="#ffd99e";
+  lettering.fillText(reflectedTitles.textContent,surface.width/2,18);
+  paint.save();
+  for(let row=0;row<24;row++) {
+    const wobble=Math.sin(row*.59+boat.tick*.18);
+    paint.globalAlpha=(.32-row*.01)*(.74+.26*wobble);
+    paint.drawImage(surface,0,35-Math.floor(row*1.5),174,1,
+      Math.round((width-174)/2+wobble*3),156+row,174,1);
+  }
+  paint.restore();
+}
+
 function crossing(theme) {
   if(query.has("no-bridge")) return;
   const first=Math.floor(boat.z/reachLength);
@@ -203,10 +238,7 @@ function crossing(theme) {
       pixel(wood,x,top-12,1,10);
       pixel("#ab6742",x-2,top-12,size+2,size+3);
       pixel("#ffe9a3",x-1,top-11,size,Math.max(1,size+1));
-      if(reflections) for(let stripe=0;stripe<5;stripe++) {
-        const at=p.y+1+stripe*Math.max(1,p.scale*.62);
-        pixel(css(blend(water,glow,.45-stripe*.06)),x+noise(stripe,boat.tick>>2)%3,at,size,1);
-      }
+      if(reflections && bridgeMirror && !query.has("no-bridge-shimmer")) bridgeShimmer(x,p.y+2,p.scale,water,glow);
     }
     if(d<135 && !query.has("no-lotus")) for(const bunch of [-.48,.02,.50]) {
       const size=Math.max(1,Math.round(p.scale*.44));
@@ -414,6 +446,7 @@ function draw() {
   nearBanks(theme);
   lilies(theme);
   crossing(theme);
+  if(titleMirror) titleShimmer();
   foregroundLily(theme);
   dock();
   prow();
@@ -444,7 +477,25 @@ addEventListener("keydown",event=>{
 });
 addEventListener("keyup",event=>keys.delete(event.code));
 addEventListener("blur",()=>{ keys.clear(); pointer=null; });
-if(query.has("bridge-approach")) {
+if(query.has("mirror-frames")) {
+  function mask(title,z,tick,top,rows) {
+    boat.z=z;
+    boat.tick=tick;
+    bridgeMirror=false;
+    titleMirror=false;
+    draw();
+    const plain=paint.getImageData(0,top,width,rows).data;
+    bridgeMirror=!title;
+    titleMirror=title;
+    draw();
+    const reflected=paint.getImageData(0,top,width,rows).data;
+    let labels="";
+    for(let at=0;at<plain.length;at+=4) labels+=reflected[at]>plain[at]+9?"1":"0";
+    return labels;
+  }
+  document.querySelector("output").textContent=[mask(false,0,0,155,32),mask(false,36,0,155,32),
+    mask(true,0,0,156,24),mask(true,0,11,156,24)].join(";");
+} else if(query.has("bridge-approach")) {
   const trace=[];
   for(const waypoint of [0,3,6,9,12]) {
     let previous={...boat};

@@ -3,6 +3,11 @@ const course=[
   { x:4,z:-91,y:45,vx:0,kind:1,hull:2,sweep:-1.35,fire:0 },
   { x:53,z:-135,y:50,vx:-1,kind:2,hull:8,sweep:.28,fire:0 }
 ];
+const depthCourse=[
+  {x:-25,z:-53,y:53},
+  {x:4,z:-91,y:45},
+  {x:94,z:-208,y:71}
+];
 const marker="#ff746a", lock="#ffe46b";
 const targets=[
   ["...OW.......WO...","...OW..BBB..WO...","..KOOKMBBBMKOOK..","KKODOOMMMMMOODOKK","KKKDKMMMMMMMDKKKK","...KKO.KKK.OKK..."],
@@ -51,7 +56,7 @@ function screen(flight,enemy,tick,maneuver) {
   };
 }
 function enemySprite(context,enemy,pose,fall=0) {
-  const size=pose.depth<57?2:1;
+  const size=pose.depth<66?2:pose.depth<155?1:.65;
   const sprite=targets[enemy.kind];
   sprite.forEach((row,j)=>{
     [...row].forEach((glyph,i)=>{
@@ -92,10 +97,11 @@ export function combatModel(context,query,event) {
     remaining=Math.min(8,wave+2);
     return Array.from({length:remaining},(_,index)=>{
       const slot=course[index%course.length],group=Math.floor(index/course.length);
-      const x=slot.x+group*30,z=slot.z-group*41;
+      const spread=wave===1 && !query.has("flat-formation")?depthCourse[index]:slot;
+      const x=spread.x+group*30,z=spread.z-group*41;
       const hull=query.has("light-as-heavy") && slot.kind===1?8:
         query.has("weak-heavy") && slot.kind===2?4:slot.hull;
-      return {...slot,x:flight.x+x*c-z*s,z:flight.z+x*s+z*c,y:slot.y+flight.altitude-25+group*3,
+      return {...slot,x:flight.x+x*c-z*s,z:flight.z+x*s+z*c,y:spread.y+flight.altitude-25+group*3,
         hp:hull+Math.min(4,wave-1),fireReady:waveStart+40+group*9};
     });
   }
@@ -190,7 +196,7 @@ export function combatModel(context,query,event) {
       if(!ammo) ammo=96;
       if(!missiles) missiles=3;
     }
-    for(const enemy of visible) if(enemy.hp>0) enemySprite(context,enemy,enemy.pose);
+    for(const enemy of [...visible].sort((a,b)=>b.pose.depth-a.pose.depth)) if(enemy.hp>0) enemySprite(context,enemy,enemy.pose);
     returnFire(visible,flight,tick,attitude);
     if(!query.has("no-fall")) for(const enemy of enemies) {
       const age=tick-enemy.fall;
@@ -249,5 +255,6 @@ export function combatModel(context,query,event) {
     label(context,"KO "+String(kills%100).padStart(2,"0"),392,227,"#e8eadb");
     return {ammo,missiles,locked,lost:health===0,kills};
   }
-  return {update,hud};
+  return {update,hud,depthView:()=>enemies.flatMap(({pose})=>
+    pose?[Math.round(pose.depth),pose.x,pose.y]:[-1,-1,-1])};
 }

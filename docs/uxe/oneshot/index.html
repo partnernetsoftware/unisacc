@@ -26,7 +26,7 @@ import { archMeshes } from "./d3-arch.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
-const release=!location.pathname.endsWith("/d4-smoke-w2.html");
+const release=!location.pathname.endsWith("/d4-belly-x3.html");
 const play=!params.has("v2-probe") && (release || !params.has("static") || params.has("play-check"));
 const finishU2c=true;
 const enlarged=params.has("scale-u2b") || finishU2c;
@@ -134,6 +134,38 @@ block("witness",-.56,4.87,1.92,.64,.42,.65);
 const deckItem=block("wood",0,6.23,0,deckLength/1000,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
+const belly=[];
+if(!params.has("bare-belly")) {
+  const frameZ=[3.28,3.56,3.96];
+  const place=(role,color,x,y,z,w,h,depth,roll=0)=>{
+    const part=block(color,x,y,params.has("flat-belly")?3.73:z,w,h,depth,roll);
+    if(color==="joint") bodies.push(part);
+    belly.push({role,part});
+  };
+  for(const x of [-4.8,-2.4,0,2.4,4.8]) {
+    place("upright","steel",x,5.05,frameZ[0],.19,1.94,.25);
+    place("brace","wood",x,4.70,frameZ[1],.25,1.45,.34,x<0?-.63:.63);
+  }
+  for(const y of [4.42,5.77]) {
+    place("rail","wood",0,y,frameZ[2],10.1,.24,.32);
+    for(const x of [-4.6,-2.3,0,2.3,4.6])
+      place("rivet","copper",x,y,frameZ[2]+.21,.15,.14,.11);
+  }
+  for(const [x,y,r,teeth] of [[-3.7,5.05,.54,12],[-2.56,5.06,.43,10],[-.52,5.04,.61,14],
+    [.77,5.13,.48,12],[3.10,5.07,.57,12],[4.27,5.17,.42,10]]) {
+    const z=frameZ[1]+.17;
+    for(let tooth=0;tooth<teeth;tooth++) {
+      const a=2*Math.PI*tooth/teeth,ux=Math.cos(a),uy=Math.sin(a);
+      place("tooth","gearGold",x+ux*r,y+uy*r,z,.16,.19,.15,a-Math.PI/2);
+      if(tooth%2===0)
+        place("rim","copper",x+ux*r*.78,y+uy*r*.78,z-.04,.20,.23,.16,a-Math.PI/2);
+    }
+    for(const angle of [0,Math.PI/3,2*Math.PI/3])
+      place("spoke","steel",x,y,z,r*.18,r*1.55,.14,angle);
+    place("axle","joint",x,y,z+.15,.24,.24,.25);
+  }
+}
+
 const firstTown=bodies.length;
 const layout=(await townLayout(dense && !params.has("thin-u2-town"))).map(row=>{
   if(!row[0].startsWith("house-")) return row;
@@ -148,8 +180,31 @@ function townBlock(color,x,y,z,w,h,d,roll) {
   if(houseSlots.has(key) && !houseSlots.get(key)) houseSlots.set(key,item);
   return item;
 }
-const townCounts=buildTown(layout.filter(row=>row[0]!=="smoke"),{block:townBlock,add,round},mode,
+const bareBelly=params.has("bare-belly"),heroGear=[];
+let gearPivot=null;
+const mainGear=([kind,,,,w])=>kind==="gear" && w>=2;
+const townCounts=buildTown(layout.filter(row=>row[0]!=="smoke" && !mainGear(row) &&
+  (row[0]!=="gear" || row[2]>=deckTop || bareBelly)),{block:townBlock,add,round},mode,
   !params.has("no-u2-fittings"));
+if(!params.has("no-main-gear")) {
+  const originalGear=bareBelly || params.has("recessed-main-gear");
+  const hero=layout.filter(mainGear).map(([kind,x,y,z,w,h,d])=>{
+    if(originalGear) return [kind,x,y,z,w,h,d];
+    const center=[x+.45,y+.19,4.45];
+    gearPivot=[center[0],deckTop+(center[1]-deckTop)*townScale/1000,center[2]];
+    return [kind,...center,w*.98,h*.98,d];
+  });
+  townCounts.gears+=buildTown(hero,{
+    block:(color,x,y,z,w,h,d,roll=0)=>{
+      if(!gearPivot || !roll) { heroGear.push(block(color,x,y,z,w,h,d,roll)); return; }
+      const source=extraMeshes[box(w,h,d)-allMeshes().length];
+      const c=Math.cos(roll),s=Math.sin(roll);
+      const rotate=values=>values.map((v,i)=>i%3===0?c*v-s*values[i+1]:i%3===1?s*values[i-1]+c*v:v);
+      heroGear.push(add(color,mesh(rotate(source.positions),rotate(source.normals),source.uvs),x,y,z));
+    },
+    add:(...args)=>heroGear.push(add(...args)),round
+  },mode).gears;
+}
 const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
 if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
 const arcadeMeshes=new Map();
@@ -338,6 +393,18 @@ function renderPose(phase, gaitMode=mode, smokeTick=null) {
   camera.setEye(eye[0]+chase+3.0*wide,eye[1]+.8*wide,eye[2]+15*wide);
   camera.setTarget(target[0]+chase,target[1]-2.25*wide,target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
+  if(gearPivot) {
+    const [gx,gy,gz]=gearPivot.map((v,i)=>v+pose.offset[i]);
+    const [dx,dy,dz]=[camera.eye[0]-gx,camera.eye[1]-gy,camera.eye[2]-gz];
+    const yaw=Math.atan2(dx,Math.hypot(dy,dz))+(params.has("tilted-main-gear")?.74:0);
+    const pitch=-Math.atan2(dy,dz);
+    const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+    for(const item of heroGear) {
+      const [x,y,z]=item.slice(0,3).map((v,i)=>v-gearPivot[i]);
+      const depth=z*cy-x*sy;
+      set(item,[gx+x*cy+z*sy,gy+y*cp-depth*sp,gz+y*sp+depth*cp,item[3],yaw,pitch,0]);
+    }
+  }
   if(smokeTick!==null && !params.has("still-u2c-smoke")) {
     for(let index=0;index<smoke.length;index++) {
       const item=smoke[index],{stack,j,tier}=smokeFacts[index];
@@ -514,6 +581,34 @@ function startPlay() {
       visible+=String(Number(pixels[at]>127)+2*Number(pixels[at+1]>127)+4*Number(pixels[at+2]>127));
     }
     document.querySelector("output").textContent=trace.join(";")+"|"+visible;
+  } else if(params.has("main-gear-check")) {
+    const w=520,h=300,x=420,y=0;
+    const full=new Uint8Array(w*h*4),hidden=new Uint8Array(full.length);
+    draw();
+    gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,full);
+    for(const item of heroGear) set(item,[item[0],-90,...item.slice(2)]);
+    renderer.render(scene,camera);
+    gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,hidden);
+    const rows=[];
+    for(let row=0;row<h;row++) {
+      let lit=0,left=w,right=-1;
+      for(let col=0;col<w;col++) {
+        const i=4*(row*w+col),r=full[i],g=full[i+1],b=full[i+2];
+        if(r>115 && r-g>=18 && g-b>=25 &&
+           Math.abs(r-hidden[i])+Math.abs(g-hidden[i+1])+Math.abs(b-hidden[i+2])>=36) {
+          lit++;
+          left=Math.min(left,col);
+          right=col;
+        }
+      }
+      rows.push([lit,left,right].join(","));
+    }
+    document.querySelector("output").textContent=rows.join(";");
+  } else if(params.has("belly-check")) {
+    draw();
+    document.querySelector("output").textContent=belly.map(({role,part})=>
+      [role,...part.slice(0,3).map(v=>Math.round(v*1000)),
+        ...dimensions.get(part).map(v=>Math.round(v*1000))].join(",")).join(";");
   } else if(params.has("audit-check")) {
     const trace=[draw(true)];
     dispatchEvent(new KeyboardEvent("keydown",{code:"KeyW"}));
