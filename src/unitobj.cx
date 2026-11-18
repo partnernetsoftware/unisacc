@@ -1,0 +1,348 @@
+#pragma unisa module unitobj
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+/* USE35 unit object key and store (v0.0.75 R2 W1). Not wired into drive yet (W3).
+   Key = sha256 over a binary blob, fields in fixed order, each field a tag byte
+   plus an 8-byte little-endian length plus its bytes:
+     "USE35\n" 'C' candidate sha256, 'T' target, 'L' opt level, 'M' mode,
+     'P' preprocessed bytes of this unit, 'H' header count then each header
+     identity (sorted, duplicates dropped, each length prefixed).
+   argv, paths and times are never part of the key. The length prefixes make
+   moving a field boundary change the key.
+   Object file <dir>/<key>.uo: magic "USE35OB\n" (8), body length (8 LE),
+   key (64 hex), body sha256 (64 hex), body. Store writes a temp file next to the
+   final name and renames it into place. Load re-hashes the body; any mismatch
+   (magic, length, key, sha) drops the file and reports a refusal, never a crash.
+   Direct libc stays out: cx_read, cx_write, cx_sha256_hex, sy_rename, sy_unlink,
+   sy_pid, sy_mono_ns, mm_alloc/mm_free; string length and compare are local loops. */
+
+#define UO_HEAD 144
+#define UO_MAX_BODY (1L << 28)
+
+static void *uo_alloc(long n) {
+    return mm_alloc(n);
+}
+
+void uo_free(void *p) {
+    if (p) mm_free(p);
+}
+
+static long uo_slen(const char *s) {
+    long n;
+    if (!s) return -1;
+    n = 0;
+    while (s[n]) {
+        n = n + 1;
+        if (n > (1L << 20)) return -1;
+    }
+    return n;
+}
+
+static void uo_le64(unsigned char *p, unsigned long long v) {
+    int i;
+    i = 0;
+    while (i < 8) {
+        p[i] = (unsigned char)(v & 255ull);
+        v = v >> 8;
+        i = i + 1;
+    }
+}
+
+static unsigned long long uo_get64(const unsigned char *p) {
+    unsigned long long v;
+    int i;
+    v = 0;
+    i = 7;
+    while (i >= 0) {
+        v = (v << 8) | (unsigned long long)p[i];
+        i = i - 1;
+    }
+    return v;
+}
+
+/* Append tag, 8-byte length, bytes. dst may be 0 to only count. */
+static long uo_field(unsigned char *dst, long at, int tag, const void *p, long n) {
+    const unsigned char *s;
+    long i;
+    s = (const unsigned char *)p;
+    if (dst) {
+        dst[at] = (unsigned char)tag;
+        uo_le64(dst + at + 1, (unsigned long long)n);
+        i = 0;
+        while (i < n) {
+            dst[at + 9 + i] = s[i];
+            i = i + 1;
+        }
+    }
+    return at + 9 + n;
+}
+
+static int uo_cmp(const char *a, const char *b) {
+    long i;
+    i = 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+}
+
+/* Fill KEY (64 hex + NUL). Returns 0 on success, 1 on bad input or no memory. */
+int uo_key(char key[65], const char *cand, const char *target, int level, int mode,
+           const unsigned char *pp, long ppn, const char *const *hdr, int nh) {
+    const char **ord;
+    unsigned char *blob;
+    unsigned char num[8];
+    long total;
+    long at;
+    long cn;
+    long tn;
+    int i;
+    int j;
+    int m;
+    const char *t;
+    if (!key || !cand || !target || (!pp && ppn) || ppn < 0 || ppn > UO_MAX_BODY || nh < 0 || nh > 4096 || (nh && !hdr)) return 1;
+    cn = uo_slen(cand);
+    tn = uo_slen(target);
+    if (cn < 0 || tn < 0) return 1;
+    ord = 0;
+    if (nh) {
+        ord = (const char **)uo_alloc((long)nh * (long)sizeof(char *));
+        if (!ord) return 1;
+    }
+    /* sorted, deduplicated header identities: the header set, not its order */
+    m = 0;
+    i = 0;
+    while (i < nh) {
+        t = hdr[i];
+        if (!t || uo_slen(t) < 0) {
+            uo_free(ord);
+            return 1;
+        }
+        j = m;
+        while (j > 0 && uo_cmp(ord[j - 1], t) > 0) {
+            ord[j] = ord[j - 1];
+            j = j - 1;
+        }
+        if (j > 0 && uo_cmp(ord[j - 1], t) == 0) {
+            while (j < m) {
+                ord[j] = ord[j + 1];
+                j = j + 1;
+            }
+        } else {
+            ord[j] = t;
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    total = 6;
+    total = uo_field(0, total, 'C', cand, cn);
+    total = uo_field(0, total, 'T', target, tn);
+    total = uo_field(0, total, 'L', num, 8);
+    total = uo_field(0, total, 'M', num, 8);
+    total = uo_field(0, total, 'P', pp, ppn);
+    total = uo_field(0, total, 'H', num, 8);
+    i = 0;
+    while (i < m) {
+        total = uo_field(0, total, 'h', ord[i], uo_slen(ord[i]));
+        i = i + 1;
+    }
+    blob = (unsigned char *)uo_alloc(total);
+    if (!blob) {
+        uo_free(ord);
+        return 1;
+    }
+    blob[0] = 'U'; blob[1] = 'S'; blob[2] = 'E'; blob[3] = '3'; blob[4] = '5'; blob[5] = '\n';
+    at = 6;
+    at = uo_field(blob, at, 'C', cand, cn);
+    at = uo_field(blob, at, 'T', target, tn);
+    uo_le64(num, (unsigned long long)(long long)level);
+    at = uo_field(blob, at, 'L', num, 8);
+    uo_le64(num, (unsigned long long)(long long)mode);
+    at = uo_field(blob, at, 'M', num, 8);
+    at = uo_field(blob, at, 'P', pp, ppn);
+    uo_le64(num, (unsigned long long)m);
+    at = uo_field(blob, at, 'H', num, 8);
+    i = 0;
+    while (i < m) {
+        at = uo_field(blob, at, 'h', ord[i], uo_slen(ord[i]));
+        i = i + 1;
+    }
+    cx_sha256_hex(blob, (size_t)at, key);
+    key[64] = 0;
+    uo_free(blob);
+    uo_free(ord);
+    return at == total ? 0 : 1;
+}
+
+static int uo_cat(char *dst, int cap, int *at, const char *s) {
+    long n;
+    long i;
+    n = uo_slen(s);
+    if (n < 0 || *at < 0 || (long)*at + n + 1 > (long)cap) return 1;
+    i = 0;
+    while (i < n) {
+        dst[*at + i] = s[i];
+        i = i + 1;
+    }
+    *at = *at + (int)n;
+    dst[*at] = 0;
+    return 0;
+}
+
+static int uo_cat_u(char *dst, int cap, int *at, unsigned long long v) {
+    char rev[24];
+    char tmp[24];
+    int r;
+    int i;
+    r = 0;
+    if (v == 0) rev[r++] = '0';
+    while (v) {
+        rev[r++] = (char)('0' + (int)(v % 10));
+        v = v / 10;
+    }
+    i = 0;
+    while (r) tmp[i++] = rev[--r];
+    tmp[i] = 0;
+    return uo_cat(dst, cap, at, tmp);
+}
+
+static int uo_khex(const char *key) {
+    int i;
+    char c;
+    if (!key) return 0;
+    i = 0;
+    while (i < 64) {
+        c = key[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        i = i + 1;
+    }
+    return 1;
+}
+
+/* <dir>/<key>.uo into DST. 0 on success. */
+int uo_path(char *dst, int cap, const char *dir, const char key[65]) {
+    char k[65];
+    int at;
+    int i;
+    if (!dst || cap < 1 || !dir || !uo_khex(key)) return 1;
+    i = 0;
+    while (i < 64) {
+        k[i] = key[i];
+        i = i + 1;
+    }
+    k[64] = 0;
+    at = 0;
+    dst[0] = 0;
+    if (uo_cat(dst, cap, &at, dir) || uo_cat(dst, cap, &at, "/") || uo_cat(dst, cap, &at, k) || uo_cat(dst, cap, &at, ".uo")) return 1;
+    return 0;
+}
+
+/* Atomic store: temp file next to the final name, then rename. 0 on success. */
+int uo_store(const char *dir, const char key[65], const unsigned char *obj, long n) {
+    int sy_rename(const char *, const char *);
+    int sy_unlink(const char *);
+    char path[1024];
+    char tmp[1100];
+    char sha[65];
+    unsigned char *file;
+    int at;
+    int pid;
+    long long ns;
+    long i;
+    if ((!obj && n) || n < 0 || n > UO_MAX_BODY) return 1;
+    if (uo_path(path, 1024, dir, key)) return 1;
+    at = 0;
+    pid = sy_pid();
+    if (pid < 0) pid = 0;
+    ns = (long long)sy_mono_ns();
+    if (ns < 0) ns = 0;
+    if (uo_cat(tmp, 1100, &at, path) || uo_cat(tmp, 1100, &at, ".") || uo_cat_u(tmp, 1100, &at, (unsigned long long)pid) ||
+        uo_cat(tmp, 1100, &at, ".") || uo_cat_u(tmp, 1100, &at, (unsigned long long)ns) || uo_cat(tmp, 1100, &at, ".tmp")) return 1;
+    file = (unsigned char *)uo_alloc(UO_HEAD + n);
+    if (!file) return 1;
+    cx_sha256_hex(obj ? (const void *)obj : (const void *)"", (size_t)n, sha);
+    file[0] = 'U'; file[1] = 'S'; file[2] = 'E'; file[3] = '3'; file[4] = '5'; file[5] = 'O'; file[6] = 'B'; file[7] = '\n';
+    uo_le64(file + 8, (unsigned long long)n);
+    i = 0;
+    while (i < 64) {
+        file[16 + i] = (unsigned char)key[i];
+        file[80 + i] = (unsigned char)sha[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        file[UO_HEAD + i] = obj[i];
+        i = i + 1;
+    }
+    if (cx_write(tmp, file, (size_t)(UO_HEAD + n))) {
+        uo_free(file);
+        sy_unlink(tmp);
+        return 1;
+    }
+    uo_free(file);
+    if (sy_rename(tmp, path)) {
+        sy_unlink(tmp);
+        return 1;
+    }
+    return 0;
+}
+
+/* 0 hit (*obj owned by caller, release with uo_free), 1 miss, 2 refused and dropped. */
+int uo_load(const char *dir, const char key[65], unsigned char **obj, long *n) {
+    int sy_unlink(const char *);
+    char path[1024];
+    char sha[65];
+    unsigned char *file;
+    unsigned char *body;
+    size_t fn;
+    unsigned long long bn;
+    long i;
+    int bad;
+    if (obj) *obj = 0;
+    if (n) *n = 0;
+    if (!obj || !n || uo_path(path, 1024, dir, key)) return 1;
+    file = (unsigned char *)cx_read(path, &fn);
+    if (!file) return 1;
+    bad = 0;
+    if (fn < UO_HEAD) bad = 1;
+    if (!bad && !(file[0] == 'U' && file[1] == 'S' && file[2] == 'E' && file[3] == '3' && file[4] == '5' && file[5] == 'O' && file[6] == 'B' && file[7] == '\n')) bad = 1;
+    bn = 0;
+    if (!bad) {
+        bn = uo_get64(file + 8);
+        if (bn > (unsigned long long)UO_MAX_BODY || (unsigned long long)fn != UO_HEAD + bn) bad = 1;
+    }
+    i = 0;
+    while (!bad && i < 64) {
+        if (file[16 + i] != (unsigned char)key[i]) bad = 1;
+        i = i + 1;
+    }
+    if (!bad) {
+        cx_sha256_hex(file + UO_HEAD, (size_t)bn, sha);
+        i = 0;
+        while (!bad && i < 64) {
+            if (file[80 + i] != (unsigned char)sha[i]) bad = 1;
+            i = i + 1;
+        }
+    }
+    if (bad) {
+        uo_free(file);
+        sy_unlink(path);
+        return 2;
+    }
+    body = (unsigned char *)uo_alloc((long)bn + 1);
+    if (!body) {
+        uo_free(file);
+        return 1;
+    }
+    i = 0;
+    while (i < (long)bn) {
+        body[i] = file[UO_HEAD + i];
+        i = i + 1;
+    }
+    body[bn] = 0;
+    uo_free(file);
+    *obj = body;
+    *n = (long)bn;
+    return 0;
+}
