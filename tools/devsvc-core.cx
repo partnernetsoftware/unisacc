@@ -1463,6 +1463,7 @@ static int git_commit_check(int argc, char **argv) {
         if (!strcmp(a, "--push") || !strcmp(a, "--dry-run") || !strcmp(a, "--bg") || !strcmp(a, "--derive")) continue;   /* --derive: commit-own recomputes the derived tables the commit feeds */
         if (!strcmp(a, "--cwd")) { if (i + 1 >= argc || !argv[i + 1][0]) { fprintf(stderr, "devsvc: git commit: --cwd needs a work tree directory\n"); return 2; } i++; continue; }
         if (!strcmp(a, "--whole") || !strcmp(a, "--keyed") || !strcmp(a, "--registered")) { has_src = 1; continue; }
+        if (!strcmp(a, "--")) { fprintf(stderr, "devsvc: REFUSE paths-need-whole-or-keyed: use --whole PATH or --keyed TABLE KEY, not -- PATH (nothing committed)\n"); return 2; }
         if (a[0] == '-' && a[1]) { fprintf(stderr, "devsvc: git commit: unknown option %s (nothing committed)\n", a); return 2; }
         if (!has_src) { fprintf(stderr, "devsvc: git commit: argument %s before any --whole/--keyed/--registered (nothing committed)\n", a); return 2; }
     }
@@ -2532,15 +2533,15 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "lock") && argc >= 1) {
         const char *ow = opt(argc, argv, "--owner", "");
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
-        if (argc < 2 || !okname(argv[1]) || !okname(ow)) return usage();
+        if (argc < 2 || !okname(argv[1]) || !okname(ow)) { fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME --owner O (NAME and O non-empty, under 64 bytes, no spaces)\n"); return usage(); }
         if (!strcmp(argv[0], "acquire")) F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
         else if (!strcmp(argv[0], "release")) F(req, sizeof req, "lock-release\t%s\t%s", argv[1], ow);
-        else return usage();
+        else { fprintf(stderr, "devsvc: REFUSE lock-args: unknown lock action %s (acquire|release|list)\n", argv[0]); return usage(); }
         return say(request(root, req, 1));
     }
     if (!strcmp(cmd, "events")) {
         if (argc >= 1 && !strcmp(argv[0], "emit")) {
-            if (argc < 3 || !okname(argv[1])) return usage();
+            if (argc < 3 || !okname(argv[1])) { fprintf(stderr, "devsvc: REFUSE events-args: events emit KIND TEXT needs a KIND name (no spaces, under 64 bytes) and a TEXT argument\n"); return usage(); }
             F(req, sizeof req, "emit\t%s\t%.*s", argv[1], EVW - 80, argv[2]);
             {   char *t = strchr(req + 5, '\t'); if (t) { char *q; for (q = t + 1; *q; q++) if (*q == '\n' || *q == '\r') *q = ' '; } }
             return say(request(root, req, 1));
@@ -2550,5 +2551,6 @@ static int main2(int argc, char **argv) {
         F(req, sizeof req, "events\t%ld", atol(opt(argc, argv, "--since", "0")));
         return say(request(root, req, 1));
     }
+    fprintf(stderr, "devsvc: REFUSE unknown-command: %s is not a devsvc command (usage below)\n", cmd);
     return usage();
 }
