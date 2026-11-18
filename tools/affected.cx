@@ -793,11 +793,13 @@ static int native_intact(void) {
     return !sy_lstat(native_runner,&st) && st.kind=='f' && st.uid==sy_uid() &&
            !file_sha(native_runner,got) && !strcmp(got,native_digest);
 }
-static int native_prepare(const char *candidate) {
+static int native_prepare(const char *candidate,const char **reason) {
     char gitdir[4200],dir[4200],key[65],again[65],lock[4400],receipt[4400],temp[4500];
     sy_stat_t st;int rc=0;
-    if(native_key(candidate,key) || cx_fmt(gitdir,sizeof gitdir,"%s/.git",root) ||
-       sy_lstat(gitdir,&st) || st.uid!=sy_uid()) return 0;
+    *reason=candidate_dir?"candidate-input":"input-key";
+    if(native_key(candidate,key))return 0;
+    *reason="worktree";
+    if(cx_fmt(gitdir,sizeof gitdir,"%s/.git",root) || sy_lstat(gitdir,&st) || st.uid!=sy_uid())return 0;
     if(st.kind=='f'){
         /* Git resolves the per-worktree gitdir. Check its backlink before
            creating anything there; never put a worktree cache in common-dir. */
@@ -812,6 +814,7 @@ static int native_prepare(const char *candidate) {
         if(sy_realpath(back,resolved,sizeof resolved)<0 || strcmp(back,resolved) ||
            cx_fmt(gitdir,sizeof gitdir,"%s",resolved) || sy_lstat(gitdir,&st) || st.uid!=sy_uid())return 0;
     }
+    *reason="cache-directory";
     if(st.kind!='d' || cx_fmt(dir,sizeof dir,"%s/unisacc-native-runner",gitdir) ||
        (sy_mkdir(dir,0700) && (sy_lstat(dir,&st) || st.kind!='d' || st.mode!=0700 || st.uid!=sy_uid())) ||
        cx_fmt(native_runner,sizeof native_runner,"%s/%s",dir,key) ||
@@ -819,9 +822,10 @@ static int native_prepare(const char *candidate) {
        cx_fmt(lock,sizeof lock,"%s/prepare.lock",dir) ||
        cx_fmt(temp,sizeof temp,"%s.%d.tmp",native_runner,sy_pid()))return 0;
     int fd=open(lock,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
-    if(fd<0)return 0;
+    *reason="lock-open";if(fd<0)return 0;
     long end=sy_now_ms()+3000;
-    while(sy_flock(fd,6)){if(sy_now_ms()>=end){sy_close(fd);return 0;}sy_sleep_ms(50);}
+    while(sy_flock(fd,6)){if(sy_now_ms()>=end){*reason="lock-timeout";sy_close(fd);return 0;}sy_sleep_ms(50);}
+    *reason="receipt-stat";
     int present=sy_lstat(receipt,&st),repair=0,refuse_current=0;
     if(!present){
         size_t n=0;char *record=st.kind=='f' && st.uid==sy_uid()?cx_read(receipt,&n):0;
@@ -839,6 +843,7 @@ static int native_prepare(const char *candidate) {
         free(record);
     }
     if(present==-ENOENT){
+        *reason="build-failed";
         char *v[]={"sh",(char *)candidate,"tests/run-batch.cx","-o",temp,0};np_result result={0};char why[256];
         if(!np_run(v,root,0,55,&result,why,sizeof why) && !result.rc &&
            !file_sha(temp,native_digest) && !native_key(candidate,again) && !strcmp(again,key) &&
@@ -1361,9 +1366,9 @@ static int run(const int *sel, int nsel, int jobs) {
     /* run-batch.cx accepts an output parent below ROOT/out or below sy_tmpdir()/unisacc-affected-; no repo-local out/ is created */
     if (sy_mkdir(outparent, 0755) < 0) die("cannot make unisacc-affected-PID");
     if(native_requested){
-        native_ready=native_prepare(candidate);
+        const char *why=0;native_ready=native_prepare(candidate,&why);
         if(native_ready<0)die("NATIVE_RUNBATCH_IDENTITY_MISMATCH");
-        if(!native_ready)fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\tprepare failed\n");
+        if(!native_ready)fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=%s\n",why);
     }
     printf("RUN_DIR\t%s\tjobs=%d\n", outparent, jobs);
     {   long k0 = sy_now_ms();
