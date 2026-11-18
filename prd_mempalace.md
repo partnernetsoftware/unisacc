@@ -59,6 +59,7 @@ flowchart LR
   S71["封存复核已在 v0.0.71 修复,待整轮复验<br/>tools/bg-candidate.cx"]
   V71 --> T71 --> Q
   V71 --> S71 --> Q
+    ITER["迭代速度方法学:五条元原则与收口标准<br/>prd_paradigm.md 第 9 节、prd_iteration.md"]
 ```
 
 ## 决定(别人必须遵守)

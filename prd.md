@@ -715,12 +715,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 ## 10. 子文档与归档索引（树）
 
-[prd_paradigm.md](prd_paradigm.md) 记录思维方式与工作范式：结果优先、时间折叠、事实表与以网换逻辑、cx 与显式边界、cx-dev、devsvc、契约先行与模型级联。
+[prd_paradigm.md](prd_paradigm.md) 记录思维方式与工作范式：结果优先、时间折叠、事实表与以网换逻辑、cx 与显式边界、cx-dev、devsvc、契约先行与模型级联、迭代速度方法学(第 9 节,五条元原则)。[prd_iteration.md](prd_iteration.md) 是其展开:度量基线、七条手段的判据与反例、并发协同、造梦与清理、devsvc 的角色、收口标准,逐项标已落地、在途或设想。
 
 ```
 prd.md                 当前状态（本文件，只写当前事实；结构点唯一定义在 §3）
 ├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
 ├─ prd_cx_spec.md      cx 使用规范：怎么运行、module/use、层向、标准库速查、替代 python/shell 对照、实测例子
+├─ prd_paradigm.md     思维方式与工作范式(九节)
+├─ prd_iteration.md    迭代速度方法学：五条元原则、七条手段、收口标准与落地状态
 ├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
 ├─ prd_hist.md         历史完成记录与证据（只读；新记录写 prd_mempalace.md）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
