@@ -1192,11 +1192,16 @@ static int walk_key(ChromeInput *c,LiveWalk *s,int back,int frames) {
 }
 
 static int bridge_route(const LiveWalk *s) {
-    int x=9000+(s->a*5000+3500)/7000;
-    int y=150+(s->a*5050+3500)/7000;
-    int z=16000-(s->a*3500+3500)/7000;
-    return s->a>=0 && s->a<=7000 && s->a%180==0 &&
-        abs(s->b-x)<=1 && abs(s->c-y)<=1 && abs(s->d-z)<=1;
+    if(s->a==30600) return s->b==16000 && s->c==12400 && s->d==8650;
+    return s->a==0 && s->b==15000 && s->c==4000 && s->d==29000;
+}
+
+static int read_town_camera(ChromeInput *c,int *depth,int *margin) {
+    int tick,x,y,target,sx,sy;
+    char value[200];
+    const char *expr="{\"expression\":\"document.querySelector('output').dataset.camera||''\"}";
+    return cdp_call(c,"Runtime.evaluate",expr) && cdp_string(c,"\"value\":\"",value,sizeof value) &&
+        sscanf(value,"%d,%d,%d,%d,%d,%d,%d,%d",&tick,&x,&y,depth,&target,&sx,&sy,margin)==8;
 }
 
 static int town_smoke(const LiveWalk *s) {
@@ -1215,27 +1220,31 @@ static int exercise_walk(ChromeInput *c,int town) {
     if(!ready) {
         char title[120]="";
         if(cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.title\"}")) cdp_string(c,"\"value\":\"",title,sizeof title);
-        printf("P4_AUTO expected=%s title=%s\n",town?"D4_OK":"D3_OK",title);
+        printf("WALK_AUTO expected=%s title=%s\n",town?"D4_OK":"D3_OK",title);
         return 1;
     }
     if(!town) {
-        int moved=walk_key(c,&forward,0,12);
+        int moved=walk_key(c,&forward,0,170);
         printf("D3_OK distance=%d->%d start=%d,%d,%d xyz=%d,%d,%d moved=%d\n",
             start.a,forward.a,start.b,start.c,start.d,forward.b,forward.c,forward.d,moved);
-        return start.a!=0 || !bridge_route(&start) || !moved || forward.a!=12*180 || !bridge_route(&forward);
+        return !bridge_route(&start) || !moved || forward.a!=170*180 || !bridge_route(&forward);
     }
     if(start.b || start.c!=14000 || !town_smoke(&start)) {
         printf("D4 initial tick=%d deck=%d eye=%d smoke=%d\n",start.a,start.b,start.c,start.d);
         return 1;
     }
-    if(!walk_step(c,&held,8) || !walk_key(c,&forward,0,40) || !walk_key(c,&back,1,40))
+    int depth=0,margin=0,back_depth=0,back_margin=0;
+    if(!walk_step(c,&held,8) || !walk_key(c,&forward,0,170) ||
+        !read_town_camera(c,&depth,&margin) || !walk_key(c,&back,1,170) ||
+        !read_town_camera(c,&back_depth,&back_margin))
         return input_error("cdp-walk-step",0);
-    printf("D4_OK eye=%d->%d->%d smoke=%d->%d deck=%d->%d\n",
-        start.c,forward.c,back.c,start.d,held.d,forward.b,back.b);
-    return start.a!=0 || held.a!=8 || forward.a!=48 || back.a!=88 ||
+    printf("D4_OK eye=%d->%d->%d smoke=%d->%d deck=%d->%d depth=%d->%d foot_margin=%d\n",
+        start.c,forward.c,back.c,start.d,held.d,forward.b,back.b,depth,back_depth,margin);
+    return start.a!=0 || held.a!=8 || forward.a!=178 || back.a!=348 ||
         held.b || held.c!=14000 || held.d<=start.d || !town_smoke(&held) ||
         !town_smoke(&forward) || !town_smoke(&back) ||
-        forward.b!=960 || forward.c!=14960 || back.b || back.c!=14000;
+        forward.b!=4080 || forward.c!=21080 || back.b || back.c!=14000 ||
+        depth!=37000 || back_depth!=22000 || margin<30 || back_margin>=0;
 }
 
 static int check_pages_keyboard(const char *mutation,int battle) {

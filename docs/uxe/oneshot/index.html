@@ -26,8 +26,8 @@ import { archMeshes } from "./d3-arch.js";
 import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
-const release=!location.pathname.endsWith("/d4-skeleton-v2.html");
-const play=(release && !params.has("v2-probe")) || params.has("play") || params.has("play-check");
+const release=!location.pathname.endsWith("/d4-skeleton-audit.html");
+const play=!params.has("v2-probe") && (release || !params.has("static") || params.has("play-check"));
 const finishU2c=true;
 const enlarged=params.has("scale-u2b") || finishU2c;
 const paper=params.has("paper-u3") || enlarged;
@@ -330,8 +330,10 @@ function renderPose(phase, gaitMode=mode, smokeTick=null) {
   const pose=gaitPose(legs,phase,gaitMode);
   const eye=view?.eye ?? [14.4,12,19.2], target=view?.target ?? [0,5,0];
   const chase=play && params.has("fixed-u2c-camera")?0:pose.travel;
-  camera.setEye(eye[0]+chase,eye[1],eye[2]);
-  camera.setTarget(target[0]+chase,target[1],target[2]);
+  const progress=params.has("fixed-audit-camera")?0:Math.min(1,Math.abs(pose.travel)/4);
+  const wide=progress*progress*(3-2*progress);
+  camera.setEye(eye[0]+chase+3.0*wide,eye[1]+.8*wide,eye[2]+15*wide);
+  camera.setTarget(target[0]+chase,target[1]-2.25*wide,target[2]);
   for(const item of bodies) set(item,item.map((value,axis)=>axis<3?value+pose.offset[axis]:value));
   if(smokeTick!==null && !params.has("still-u2c-smoke")) {
     for(let index=0;index<smoke.length;index++) {
@@ -439,14 +441,42 @@ function startPlay() {
     if(!params.has("fixed-u2c-gait")) phase=cap(phase+direction*.20,-200,300);
     tick++;
   }
-  function draw() {
-    renderPose(phase,"walk",tick);
+  function draw(audit=false) {
+    const pose=renderPose(phase,"walk",tick);
+    if(audit || params.has("auto")) {
+      const [ex,ey,ez]=camera.eye,[tx,ty,tz]=camera.target;
+      const dx=tx-ex,dy=ty-ey,dz=tz-ez,h=Math.hypot(dx,dz),length=Math.hypot(dx,dy,dz);
+      const focal=360/Math.tan(camera.fovy*.5);
+      function project([x,y,z]) {
+        const along=((x-ex)*dx+(z-ez)*dz)/h, up=y-ey;
+        const depth=(along*h+up*dy)/length;
+        return [640+focal*(-(x-ex)*dz+(z-ez)*dx)/(h*depth),
+          360-focal*(up*h-along*dy)/(length*depth)];
+      }
+      const feet=pose.legs.map(([, ,foot])=>[-1,1].flatMap(sx=>[-1,1].flatMap(sy=>[-1,1].map(sz=>
+        project([foot[0]+sx*.71,foot[1]+sy*.32,foot[2]+sz*.62])))));
+      const margin=Math.min(...feet.flat().map(([x,y])=>Math.min(x,1280-x,y,720-y)));
+      const deck=project(deckItem.slice(0,3).map((v,i)=>v+pose.offset[i]));
+      const trace=[tick,...camera.eye.map(v=>Math.round(1000*v)),Math.round(1000*ty),
+        ...deck.map(Math.round),Math.round(margin),...feet.map(corners=>Math.round(Math.max(...corners.map(p=>p[1]))))].join(",");
+      if(audit) return trace;
+      document.querySelector("output").dataset.camera=trace;
+    }
     const [cloud,i]=bindings.get(smoke[0]);
     const [deck,j]=bindings.get(deckItem);
     const delta=cloud.xyz[3*i+1]-deck.xyz[3*j+1];
     return [tick,deck.xyz[3*j],camera.eye[0],delta].map((v,i)=>i?Math.round(1000*v):v).join(",");
   }
-  if(params.has("play-check")) {
+  if(params.has("audit-check")) {
+    const trace=[draw(true)];
+    dispatchEvent(new KeyboardEvent("keydown",{code:"KeyW"}));
+    for(const frame of [60,170]) {
+      while(tick<frame) step();
+      trace.push(draw(true));
+    }
+    dispatchEvent(new KeyboardEvent("keyup",{code:"KeyW"}));
+    document.querySelector("output").textContent=trace.join(";");
+  } else if(params.has("play-check")) {
     const trace=[],key=(type,code)=>dispatchEvent(new KeyboardEvent(type,{code}));
     for(const frame of [0,40,80,120,160]) {
       while(tick<frame) step();
