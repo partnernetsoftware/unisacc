@@ -1,305 +1,152 @@
 <!doctype html>
 <html lang="zh">
 <meta charset="utf-8">
-<title>D1 追尾飞行开发预览</title>
+<title>D1 像素机体开发预览</title>
 <style>
-  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#86b5be }
-  canvas { display:block; width:100%; height:100%; object-fit:cover; image-rendering:pixelated }
-  #hud { position:absolute; top:22px; left:24px; color:#f6fbfb; font:600 14px system-ui;
-    background:#132b3de6; border:1px solid #b5d9dc80; padding:14px 16px; }
-  #hud strong { font:700 25px ui-monospace,monospace; color:#d6f8f5; margin:0 4px 0 9px }
-  #hud p { margin:0 }
-  #hud p+p { margin-top:8px; color:#cce0e3; font-weight:400 }
-  output { display:none }
+  html,body{margin:0;width:100%;height:100%;background:#225675;overflow:hidden}
+  canvas{display:block;width:100%;height:100%;object-fit:cover;image-rendering:pixelated}
+  output{display:none}
+  aside{position:absolute;top:12px;right:14px;padding:5px 8px;background:#18344dd9;
+    color:#e5f4f1;font:13px system-ui}
 </style>
-<canvas width="1280" height="720" aria-label="方向键或 A、D 转向"></canvas>
-<section id="hud" aria-label="飞行仪表">
-  <p>开发预览</p>
-  <p>速度<strong id="speed"></strong>节　高度<strong id="altitude"></strong>米</p>
-  <p>A D 转向　W S 升降　Shift 加速</p>
-</section>
-<output id="pixels"></output>
+<canvas width="1278" height="720" aria-label="D1 飞行。指针或方向键转向，空格开炮，M 发射导弹"></canvas>
+<aside>开发预览</aside>
+<output></output>
 <script src="./host1-runtime.js"></script>
 <script>
-const flightError=message=>{
-  document.querySelector("output").textContent="ERROR: "+message;
-  if(new URLSearchParams(location.search).get("auto")==="1") document.title="D1_FLY_NEXT_ERROR";
-};
-addEventListener("error",event=>flightError(event.message||"资源读取失败"));
-addEventListener("unhandledrejection",event=>flightError(String(event.reason)));
+function reportFlightError(message) {
+  document.title="D1_FLY_NEXT_ERROR";
+  document.querySelector("output").textContent=String(message);
+}
+addEventListener("error",event=>reportFlightError(event.message||"资源读取失败"));
+addEventListener("unhandledrejection",event=>reportFlightError(event.reason));
 </script>
 <script type="module">
-import { Scene, PerspectiveCamera } from "./scene.js";
-import { MESH_BOX, MESH_PLANE, allMeshes } from "./meshes.js";
-import { createWebGLRenderer } from "./renderer-webgl.js";
-import { leafMesh } from "./d3-foliage.js";
-import { parts, paints, layers } from "./d1-airframe-data.js";
+import { drawAircraft } from "./d1-pixel-aircraft.js";
+import { pixelWorld } from "./d1-pixel-world.js";
+import { combatModel } from "./d1-pixel-combat.js";
 
+const low=document.createElement("canvas");
+low.width=426;
+low.height=240;
+const buffer=low.getContext("2d");
+const display=document.querySelector("canvas").getContext("2d");
+display.imageSmoothingEnabled=false;
+const result=document.querySelector("output");
 const query=new URLSearchParams(location.search);
 const auto=query.get("auto")==="1";
-const probe=query.has("probe");
-const worldProbe=query.has("world");
-const reverse=probe && query.has("reverse");
-const offset=probe && query.has("offset");
-const shortWings=probe && query.has("short-wings");
-const noTails=probe && query.has("no-tails");
-const low=document.createElement("canvas");
-low.width=426; low.height=240;
-const extraMeshes=probe?[]:[leafMesh(.55),...islandMeshes()];
-const renderer=createWebGLRenderer(low,{antialias:false,extraMeshes});
-const canvas=document.querySelector("canvas");
-const output=canvas.getContext("2d",{willReadFrequently:probe});
-output.imageSmoothingEnabled=false;
-const scene=new Scene();
-scene.clearColor=[17/255,28/255,48/255,1];
-scene.fog.density=0;
-scene.ambient={color:[1,1,1],intensity:1};
-scene.lights=[];
-const camera=new PerspectiveCamera(2*Math.atan(.5),.1,probe?300:550);
-const composite=document.createElement("canvas");
-composite.width=426; composite.height=240;
-const backdrop=composite.getContext("2d");
-const sky=backdrop.createLinearGradient(0,0,0,180);
-sky.addColorStop(0,"#467fae");
-sky.addColorStop(.48,"#b5dbdf");
-sky.addColorStop(1,"#f0dfbb");
+const inputTest=query.get("input-test")==="1";
+const frameInterval=1000/30;
+const world=pixelWorld(buffer,query);
+const combat=combatModel(buffer,query);
 
-const lattice=new Map();
-for(const [lowLayer,highLayer,first,last,center,span,increment,paint] of parts) {
-  if(noTails && paint===5 && lowLayer>=5) continue;
-  for(let h=lowLayer;h<=highLayer;h++) for(let row=first;row<=last;row++) {
-    const width=span+(row-first)*increment;
-    for(let col=center-width;col<center+width;col++) {
-      if(shortWings && Math.abs(col-16.5)>10 && (paint===4 || paint===5)) continue;
-      lattice.set(`${h},${row},${col}`,paint);
-    }
-  }
-}
-const occupied=new Map();
-for(const [key,paint] of lattice) {
-  const [h,row,col]=key.split(",").map(Number), [dx,dz]=layers[h];
-  const xyz=[col-16.5+dx+(offset && h>=7?3:0),(reverse?12-h:h)-6,row-22.5+dz];
-  occupied.set(xyz.join(","),{xyz,paint});
-}
-const neighbors=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
-const surface=Array.from({length:paints.length},()=>[]);
-for(const {xyz,paint} of occupied.values()) {
-  if(neighbors.some(delta=>!occupied.has(xyz.map((value,axis)=>value+delta[axis]).join(","))))
-    surface[paint].push(xyz);
-}
-const airframe=surface.slice(1).map((cells,i)=>{
-  const cloud=scene.instances("skin-"+i,cells.length,paints[i+1].map(value=>value/255));
-  cloud.meshId=MESH_BOX;
-  cloud.metalness=0;
-  return {cells,cloud};
-});
-function islandMeshes() {
-  const top=[], cliff=[];
-  const topNormals=[], cliffNormals=[];
-  const heights=[.25,.1,-.24];
-  const radii=[.68,.88,1];
-  const rim=(i,band)=>{
-    const angle=2*Math.PI*i/14, roughness=.82+((31*(i%14)+7)%19)/75;
-    return [Math.cos(angle)*roughness*radii[band],heights[band],Math.sin(angle)*roughness*radii[band]];
-  };
-  for(let i=0;i<14;i++) {
-    top.push(0,.25,0,...rim(i+1,0),...rim(i,0));
-    topNormals.push(0,1,0,0,1,0,0,1,0);
-    for(const band of [0,1]) {
-      const a=rim(i,band), b=rim(i+1,band), c=rim(i,band+1), d=rim(i+1,band+1);
-      for(const [p,q,r] of [[a,b,c],[b,d,c]]) {
-        const [x,y,z]=q.map((value,axis)=>value-p[axis]),[u,v,w]=r.map((value,axis)=>value-p[axis]);
-        const normal=[y*w-z*v,z*u-x*w,x*v-y*u];
-        cliff.push(...p,...q,...r);
-        cliffNormals.push(...normal,...normal,...normal);
-      }
-    }
-  }
-  return [[top,topNormals],[cliff,cliffNormals]].map(([positions,normals])=>({
-    positions:new Float32Array(positions),normals:new Float32Array(normals),vCount:positions.length/3
-  }));
-}
-const scenery=[];
-const periodic=(value,origin)=>value+512*Math.round((origin-value)/512);
-function place(cloud,i,x,y,z,scale,yaw=0) {
-  scenery.push({cloud,i,x,y,z,scale,yaw});
-}
-const speedUI=document.querySelector("#speed"), altitudeUI=document.querySelector("#altitude");
-document.querySelector("#hud").hidden=probe;
-if(!probe) {
-  scene.clearColor=[0,0,0,0];
-  scene.ambient={color:[.88,.94,1],intensity:.83};
-  scene.lights=[{dir:[-.4,.8,.45],color:[1,.90,.73],intensity:.48}];
-  scene.fog={density:.0032,color:[.62,.81,.85]};
-  const sea=scene.instances("sea",1,[.09,.34,.48]);
-  sea.meshId=MESH_PLANE; sea.metalness=0;
-  sea.set(0,0,-25,0,1200);
-  const swell=scene.instances("swell",230,[.35,.65,.71]);
-  swell.meshId=MESH_PLANE; swell.metalness=0;
-  for(let i=0;i<swell.count;i++) {
-    const x=((i*61)%509)-254, z=((i*137)%503)-251;
-    place(swell,i,x,-24.95,z,1+i%4,.1);
-  }
-  const puffs=scene.instances("clouds",30,[.96,.94,.86]);
-  puffs.meshId=allMeshes().length; puffs.metalness=0;
-  for(let i=0;i<puffs.count;i++) {
-    const group=Math.floor(i/6), n=i%6;
-    const [x,y,z]=[[-42,13,-105],[34,17,-141],[-104,18,-87],[83,23,-109],[3,21,-225]][group];
-    place(puffs,i,x+(n-2.5)*7,y+(n%3)*2,z+Math.sin(n*2)*4,8+(n%4)*2);
-  }
-  const land=scene.instances("island-top",4,[.28,.49,.23]);
-  const cliffs=scene.instances("island-cliffs",4,[.58,.42,.29]);
-  const meadows=scene.instances("island-meadows",4,[.58,.89,.19]);
-  land.meshId=allMeshes().length+1;
-  cliffs.meshId=allMeshes().length+2;
-  meadows.meshId=MESH_PLANE;
-  for(const cloud of [land,cliffs,meadows]) cloud.metalness=0;
-  let seed=7;
-  const next=()=>seed=(seed*73+41)%251;
-  [[-60,-102,24],[61,-134,28],[-5,-192,31],[112,-224,32]].forEach(([baseX,baseZ,size],i)=>{
-    const x=baseX+next()%13-6,z=baseZ+next()%17-8,y=-24;
-    place(land,i,x,y,z,size,i*.71);
-    place(cliffs,i,x,y,z,size,i*.71);
-    place(meadows,i,x,y+.25*size+.08,z,4);
-  });
-}
-function draw(heading,bank,x,z,altitude,speed,pitch) {
-  const yaw=-heading*Math.PI/180, roll=bank*Math.PI/180;
-  const tilt=(query.has("frozen-pitch")?0:pitch)*Math.PI/180;
-  const c=Math.cos(yaw), s=Math.sin(yaw), cr=Math.cos(roll), sr=Math.sin(roll);
-  const cp=Math.cos(tilt), sp=Math.sin(tilt);
-  const meshYaw=Math.atan2(s*cr-c*sp*sr,c*cp);
-  const meshPitch=Math.asin(s*sr+c*sp*cr);
-  const meshRoll=Math.atan2(c*sr-s*sp*cr,cp*cr);
-  const sceneX=probe || query.has("frozen-position")?0:x;
-  const sceneY=probe?0:altitude-25, sceneZ=probe || query.has("frozen-position")?0:z;
-  for(const {cells,cloud} of airframe) cells.forEach(([vx,vy,vz],i)=>{
-    const xx=vx*cr-vy*sr, yy=vx*sr+vy*cr;
-    const z2=yy*sp+vz*cp;
-    cloud.set(i,sceneX+xx*c+z2*s,sceneY+yy*cp-vz*sp,sceneZ-xx*s+z2*c,1,meshYaw,meshPitch,meshRoll);
-  });
-  if(probe) {
-    camera.setEye(64*s,48,64*c);
-    camera.setTarget(0,0,0);
-  } else {
-    const chase=yaw-.56;
-    camera.setEye(sceneX+70*Math.sin(chase),sceneY+34,sceneZ+70*Math.cos(chase));
-    camera.setTarget(sceneX-13*s,sceneY+2,sceneZ-13*c);
-    for(const item of scenery) item.cloud.set(item.i,periodic(item.x,sceneX),item.y,
-      periodic(item.z,sceneZ),item.scale,item.yaw);
-    speedUI.textContent=String((query.has("frozen-hud")?12:speed)*5);
-    altitudeUI.textContent=String(altitude*4);
-  }
-  renderer.render(scene,camera);
-  if(probe) output.drawImage(low,1,0,1278,720);
-  else {
-    backdrop.fillStyle=sky;
-    backdrop.fillRect(0,0,426,240);
-    backdrop.drawImage(low,0,0);
-    output.drawImage(composite,1,0,1278,720);
-  }
-}
-
-const image=await fetch(new URL("d1-flight.wasm",import.meta.url));
-if(!image.ok) throw new Error("飞行核读取失败");
-const kernel=await window.host1Boot(await image.arrayBuffer());
-const ex=kernel.exports;
-const inputs=["input_turn","input_climb","input_boost"].map(name=>kernel.meta.globals.indexOf(name));
-if(inputs.some(index=>index<0)) throw new Error("缺少飞行输入槽");
-let submitted;
+const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
+if(!wasm.ok) throw new Error("D1 飞行核读取失败");
+const {exports:core,meta}=await window.host1Boot(await wasm.arrayBuffer());
+const inputs=["input_turn","input_climb","input_boost"].map(name=>meta.globals.indexOf(name));
+if(inputs.some(index=>index<0)) throw new Error("D1 飞行输入槽缺失");
+let flight,tick=0,firstFrame=0,minGap=1000,previousFrame=0;
 window.onHostGpuSubmit=bytes=>{
-  const packet=new DataView(bytes);
-  if(packet.byteLength!==11 || packet.getUint8(0)!==3 || submitted)
-    throw new Error("飞行提交格式错误");
-  submitted=[packet.getUint16(1,true),packet.getUint8(3)-24,
-    (packet.getUint16(4,true)-2048)/8,(packet.getUint16(6,true)-2048)/8,
-    packet.getUint8(8),packet.getUint8(9),packet.getUint8(10)-18];
-};
-function step(axis,climb=0,boost=0) {
-  submitted=null;
-  ex.host_reset();
-  [axis,climb,boost].forEach((value,i)=>ex.host_set_global(inputs[i],ex.host_mk_i64(BigInt(value))));
-  ex.run_step();
-  if(!submitted) throw new Error("飞行核缺少本帧提交");
-  return submitted;
-}
-if(probe) {
-  draw(...step(0));
-  const pixels=(query.get("probe")||"").split(";").filter(Boolean).map(pair=>{
-    const [x,y]=pair.split(",").map(Number);
-    const rgba=output.getImageData(1+3*x,3*y,3,3).data;
-    return Array.from(rgba).join(",");
-  });
-  const full=output.getImageData(0,0,1280,720).data, silhouette=[];
-  for(let y=44;y<=211;y+=3) for(let x=145;x<=280;x+=3) {
-    const at=4*((3*y+1)*1280+3*x+2);
-    silhouette.push(full[at],full[at+1],full[at+2]);
-  }
-  const sequence=[1,1,1,1,1,1,1,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,0,0];
-  ex.host_reset_globals();
-  let pose;
-  for(let i=0;i<6;i++) pose=step(0,1);
-  draw(...pose);
-  const pitched=(query.get("pitch")||"").split(";").filter(Boolean).map(pair=>{
-    const [x,y]=pair.split(",").map(Number);
-    return Array.from(output.getImageData(2+3*x,1+3*y,1,1).data.slice(0,3)).join(",");
-  }).join(";");
-  const replay=()=>{
-    ex.host_reset_globals();
-    return sequence.map((axis,i)=>{
-      const [heading,bank,x,z,altitude,speed,pitch]=step(axis,i<7?1:i>=14 && i<17?-1:0);
-      return [heading,bank,pitch,altitude].join(",");
-    }).join(";");
+  const view=new DataView(bytes);
+  if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
+  flight={
+    heading:view.getUint16(1,true), bank:view.getUint8(3)-24,
+    x:(view.getUint16(4,true)-2048)/8,z:(view.getUint16(6,true)-2048)/8,
+    altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
   };
-  document.querySelector("output").textContent=[pixels.join(";"),silhouette.join(","),pitched,replay(),replay()].join("|");
-} else if(worldProbe) {
-  const regions=query.get("world").split("|");
-  function sample(region) {
-    const image=output.getImageData(0,0,1280,720).data;
-    const values=[speedUI.textContent,altitudeUI.textContent];
-    for(const pair of region.split(";")) {
-      const [cx,cy]=pair.split(",").map(Number);
-      for(let y=cy-4;y<=cy+4;y++) for(let x=cx-4;x<=cx+4;x++) {
-        const at=4*((3*y+1)*1280+3*x+2);
-        values.push(image[at],image[at+1],image[at+2]);
-      }
-    }
-    return values.join(",");
+};
+function frame(axis,climb,boost,gun=false,missile=false,stamp=0) {
+  flight=null;
+  core.host_reset();
+  [axis,climb,boost].forEach((value,i)=>core.host_set_global(inputs[i],core.host_mk_i64(BigInt(value))));
+  core.run_step();
+  if(!flight) throw new Error("D1 飞行核没有提交本帧");
+  tick++;
+  world.paint(flight,tick);
+  combat.update(flight,tick,gun,missile);
+  drawAircraft(buffer,213,158,flight.pitch,flight.bank,flight.speed,tick);
+  const hud=combat.hud();
+  display.drawImage(low,0,0,1278,720);
+  if(inputTest && stamp) {
+    if(!firstFrame) firstFrame=stamp;
+    if(previousFrame) minGap=Math.min(minGap,stamp-previousFrame);
+    previousFrame=stamp;
+    result.textContent=[flight.heading,hud.ammo,hud.missiles,Number(hud.locked),tick,
+      Math.round(stamp-firstFrame),Math.round(minGap*1000)].join(",");
   }
-  draw(...step(0));
-  const first=sample(regions[0]);
-  let state;
-  for(let i=0;i<27;i++) state=step(0,0,1);
-  draw(...state);
-  document.querySelector("output").textContent=first+"|"+sample(regions[1]);
+}
+frame(0,0,0);
+if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
+if(query.get("still")==="impact") for(let i=1;i<18;i++) frame(0,0,0,false,i===3);
+if(query.has("terrain")) {
+  const dots=query.get("terrain").split(";").map(pair=>pair.split(",").map(Number));
+  const grid=buffer.getImageData(0,0,426,240).data, raw=[];
+  for(let y=123;y<240;y+=4) for(let x=1;x<426;x+=4) {
+    const at=4*(y*426+x);
+    raw.push(grid[at],grid[at+1],grid[at+2]);
+  }
+  const swatch=document.createElement("canvas");
+  swatch.width=dots.length; swatch.height=1;
+  const ink=swatch.getContext("2d");
+  world.swatches(ink,dots);
+  const colors=ink.getImageData(0,0,dots.length,1).data, sampled=[];
+  for(let i=0;i<dots.length;i++) sampled.push(colors[4*i],colors[4*i+1],colors[4*i+2]);
+  result.id="pixels";
+  result.textContent=sampled.join(",")+"|"+raw.join(",");
+} else if(query.has("combat")) {
+  const sample=(pairs)=>{
+    const data=buffer.getImageData(0,0,426,240).data, pixels=[];
+    for(const pair of pairs.split(";")) {
+      const [x,y]=pair.split(",").map(Number),at=4*(y*426+x);
+      pixels.push(data[at],data[at+1],data[at+2]);
+    }
+    return pixels.join(",");
+  };
+  const regions=query.get("combat").split("|");
+  const initial=sample(regions[0]);
+  for(let i=1;i<18;i++) frame(0,0,0,i===1,i===3);
+  result.id="pixels";
+  result.textContent=initial+"|"+sample(regions[1]);
+} else if(query.has("still") || auto) {
+  result.textContent=String(flight.heading);
+  if(auto) document.title="D1_FLY_NEXT_READY";
 } else {
   const keys=new Set();
+  const controls=["KeyA","KeyD","KeyW","KeyS","ArrowLeft","ArrowRight","ArrowUp","ArrowDown","ShiftLeft","ShiftRight","Space","KeyF","KeyM"];
+  const canvas=document.querySelector("canvas");
+  let pointer=null,buttons=0;
   addEventListener("keydown",event=>{
-    if(["ArrowLeft","ArrowRight","KeyA","KeyD","ArrowUp","ArrowDown","KeyW","KeyS","ShiftLeft","ShiftRight"].includes(event.code)) {
-      event.preventDefault();
-      keys.add(event.code);
-    }
+    if(!controls.includes(event.code)) return;
+    if(inputTest && query.has("wrong-key") && event.code==="KeyD") return;
+    event.preventDefault();
+    keys.add(event.code);
   });
   addEventListener("keyup",event=>keys.delete(event.code));
-  addEventListener("blur",()=>keys.clear());
+  canvas.addEventListener("pointermove",event=>{
+    const rect=canvas.getBoundingClientRect();
+    pointer={x:2*(event.clientX-rect.left)/rect.width-1,y:2*(event.clientY-rect.top)/rect.height-1};
+    buttons=event.buttons;
+  });
+  canvas.addEventListener("pointerdown",event=>buttons=event.buttons);
+  addEventListener("pointerup",event=>buttons=event.buttons);
+  canvas.addEventListener("pointerleave",()=>{ pointer=null; buttons=0; });
+  canvas.addEventListener("contextmenu",event=>event.preventDefault());
+  addEventListener("blur",()=>{ keys.clear(); pointer=null; buttons=0; });
   let last=performance.now();
-  let initial=step(0);
-  if(query.get("still")==="pitch") for(let i=0;i<6;i++) initial=step(1,1);
-  draw(...initial);
-  if(auto) document.title="D1_FLY_NEXT_READY";
-  function frame(now) {
-    const axis=Number(keys.has("ArrowRight")||keys.has("KeyD"))-
-      Number(keys.has("ArrowLeft")||keys.has("KeyA"));
-    const climb=Number(keys.has("ArrowUp")||keys.has("KeyW"))-
-      Number(keys.has("ArrowDown")||keys.has("KeyS"));
-    const boost=Number(keys.has("ShiftLeft")||keys.has("ShiftRight"));
-    if(now-last>=1000/30) {
-      last=now-(now-last)%(1000/30);
-      draw(...step(axis,climb,boost));
+  function loop(now) {
+    if(now-last+.25>=frameInterval) {
+      last=now;
+      const keyAxis=Number(keys.has("KeyD")||keys.has("ArrowRight"))-Number(keys.has("KeyA")||keys.has("ArrowLeft"));
+      const keyClimb=Number(keys.has("KeyW")||keys.has("ArrowUp"))-Number(keys.has("KeyS")||keys.has("ArrowDown"));
+      const axis=keyAxis||(pointer&&Math.abs(pointer.x)>.2?Math.sign(pointer.x):0);
+      const climb=keyClimb||(pointer&&Math.abs(pointer.y)>.3?-Math.sign(pointer.y):0);
+      frame(axis,climb,Number(keys.has("ShiftLeft")||keys.has("ShiftRight")),
+        (buttons&1)||keys.has("Space")||keys.has("KeyF"),(buttons&2)||keys.has("KeyM"),now);
     }
-    requestAnimationFrame(frame);
+    requestAnimationFrame(loop);
   }
-  if(!auto && !query.has("still")) requestAnimationFrame(frame);
+  if(inputTest) document.title="D1_FLY_NEXT_READY";
+  requestAnimationFrame(loop);
 }
 </script>
 </html>
