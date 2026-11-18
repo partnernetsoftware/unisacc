@@ -238,22 +238,68 @@ static void co_owndiff(const char **path, const char **keys, int np) {
    the hook does not inherit the descriptor).  The product's -run cache is keyed by path: under the old
    TMP/commit-own-PID.root every gate tool compiled cold in every commit (measured 31.8 s of gates for one registered
    set); a slot path makes the second commit warm.  No flock, or all eight slots busy: the PID root as before. */
+#define CO_SLOT_SYNC \
+    "_co_sync(){ " \
+    "_r=$1 _g=$2 _pw=$3 _m=${1%.root}.meta _si=${1%.root}.idx _nt=$(git write-tree) || return 1; " \
+    "_oi=$GIT_INDEX_FILE _ok=0 _ot= _og= _op=; " \
+    "if [ -d \"$_r\" ] && [ -f \"$_m\" ] && [ -f \"$_si\" ]; then " \
+    "{ IFS= read -r _og; IFS= read -r _op; IFS= read -r _ot; } <\"$_m\"; " \
+    "if [ \"$_og\" = \"$_g\" ] && [ \"$_op\" = \"$_pw\" ] && [ -n \"$_ot\" ]; then " \
+    "rm -rf \"$_r/.devsvc\"; " \
+    "if GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" clean -fdxq -e '/.git' >/dev/null 2>&1; then " \
+    "_df=$(GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" diff-files --name-only -- . ':(exclude)archive' 2>/dev/null) || _ot=; " \
+    "if [ -n \"$_ot\" ] && [ -n \"$_df\" ]; then " \
+    "printf '%s\\n' \"$_df\" | GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" checkout-index -f --stdin --prefix=\"$_r/\" >/dev/null 2>&1 && " \
+    "printf '%s\\n' \"$_df\" | GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" update-index --add --stdin >/dev/null 2>&1 || _ot=; fi; " \
+    "if [ -n \"$_ot\" ] && [ \"$_ot\" = \"$_nt\" ]; then _ok=1; " \
+    "elif [ -n \"$_ot\" ]; then " \
+    "_dt=$(git diff-tree --no-commit-id -r --raw --no-renames \"$_ot\" \"$_nt\" 2>/dev/null) || _ot=; " \
+    "if [ -n \"$_ot\" ] && cp \"$_si\" \"$_si.next\" 2>/dev/null; then " \
+    "_nl='\n'; _add=; _del=; _arch=; _chg=; " \
+    "printf '%s\\n' \"$_dt\" >\"$_si.dt\"; " \
+    "while IFS= read -r _ln; do " \
+    "[ -n \"$_ln\" ] || continue; " \
+    "_mt=${_ln%%\t*} _p=${_ln#*\t}; " \
+    "_r1=${_mt#* } _nm=${_r1%% *} _r2=${_r1#* } _r3=${_r2#* } _ns=${_r3%% *} _st=${_r3#* }; " \
+    "case \"$_p\" in " \
+    "archive/*) case \"$_st\" in D) _arch=\"${_arch}0 0000000000000000000000000000000000000000\t${_p}${_nl}\" ;; *) _arch=\"${_arch}${_nm} ${_ns}\t${_p}${_nl}\" ;; esac ;; " \
+    "*) _chg=\"${_chg}${_p}${_nl}\"; case \"$_st\" in D) _del=\"${_del}${_p}${_nl}\" ;; *) _add=\"${_add}${_p}${_nl}\" ;; esac ;; " \
+    "esac; " \
+    "done <\"$_si.dt\"; rm -f \"$_si.dt\"; " \
+    "if [ -n \"$_arch\" ]; then printf '%s' \"$_arch\" | GIT_INDEX_FILE=\"$_si.next\" git update-index --index-info >/dev/null 2>&1 || _ot=; fi; " \
+    "if [ -n \"$_ot\" ] && [ -n \"$_del\" ]; then printf '%s' \"$_del\" | while IFS= read -r _dp; do [ -z \"$_dp\" ] || { rm -rf \"$_r/$_dp\"; rmdir -p \"$_r/${_dp%/*}\" 2>/dev/null || true; }; done; fi; " \
+    "if [ -n \"$_ot\" ] && [ -n \"$_add\" ]; then printf '%s' \"$_add\" | GIT_INDEX_FILE=\"$_oi\" git checkout-index -f --stdin --prefix=\"$_r/\" >/dev/null 2>&1 || _ot=; fi; " \
+    "if [ -n \"$_ot\" ] && [ -n \"$_chg\" ]; then printf '%s' \"$_chg\" | GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si.next\" git -C \"$_r\" update-index --add --remove --stdin >/dev/null 2>&1 || _ot=; fi; " \
+    "if [ -n \"$_ot\" ] && [ \"$(GIT_INDEX_FILE=\"$_si.next\" git write-tree 2>/dev/null)\" = \"$_nt\" ]; then " \
+    "mv \"$_si.next\" \"$_si\" && printf '%s\\n%s\\n%s\\n' \"$_g\" \"$_pw\" \"$_nt\" >\"$_m\" && _ok=1; " \
+    "else rm -f \"$_si.next\"; fi; " \
+    "fi; fi; fi; fi; fi; " \
+    "if [ \"$_ok\" != 1 ]; then " \
+    "rm -rf \"$_r\" \"$_m\" \"$_si\" \"$_si.next\" && mkdir -p \"$_r\" || return 1; " \
+    "GIT_INDEX_FILE=\"$_si\" git read-tree \"$_nt\" && " \
+    "GIT_INDEX_FILE=\"$_si\" git ls-files -z -- . ':(exclude)archive' | GIT_INDEX_FILE=\"$_si\" git checkout-index -f -z --stdin --prefix=\"$_r/\" && " \
+    "GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" update-index -q --refresh && " \
+    "printf '%s\\n%s\\n%s\\n' \"$_g\" \"$_pw\" \"$_nt\" >\"$_m\" || { rm -rf \"$_r\" \"$_m\" \"$_si\"; return 1; }; " \
+    "fi; " \
+    "for _e in * .[!.]*; do [ \"$_e\" = .devsvc ] || [ -e \"$_r/$_e\" ] || [ -L \"$_r/$_e\" ] || [ ! -e \"$_e\" ] || ln -s \"$_pw/$_e\" \"$_r/$_e\"; done; " \
+    "mkdir -p \"$_r/.devsvc\"; for _t in table-index tool-index links iface-hash product-map libc-decls; do [ ! -f \"$_r/build/$_t.tsv\" ] || cp -p \"$_r/build/$_t.tsv\" \"$_r/.devsvc/$_t.tsv\" 2>/dev/null || true; done; " \
+    "return 0; }; "
 #define CO_GATE_SH \
     "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; " \
     "case \"$h\" in /*) ;; *) h=\"$PWD/$h\" ;; esac; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) GIT_INDEX_FILE=\"$PWD/$GIT_INDEX_FILE\"; export GIT_INDEX_FILE ;; esac; " \
-    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; " \
+    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; _slot=0; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3 4 5 6 7; do c=\"${0%/*}/commit-own-s$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 9>&-; r=\"$0\"; }; " \
     "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
-    "rm -rf \"$r\"; mkdir -p \"$r\" || { echo 'commit-own: cannot create the private gate root'; exit 1; }; " \
-    "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || { rm -rf \"$r\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
-    "for e in * .[!.]*; do [ \"$e\" = .devsvc ] || [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
-    "( cd \"$r\" && UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; rm -rf \"$r\"; exit $rc"
+    CO_SLOT_SYNC \
+    "_co_sync \"$r\" \"$g\" \"$PWD\" || { rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
+    "( cd \"$r\" && UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; " \
+    "if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; exit $rc"
 /* --derive: $0 = TMP, "$@" = the commit's paths, GIT_INDEX_FILE = the private index (absolute).  See the header.
    Last line CO_DERIVE<TAB>rc=N<TAB>stage=plan|write|add|check|ok|setup; DERIVED<TAB>PATH per derived file and
-   derive.cx's own DERIVE lines before it.  The root is removed; fd 8 (the slot lock) is not inherited.  The changed
+   derive.cx's own DERIVE lines before it.  The root is kept per flock slot (fd 8 not inherited); fallback PID roots are removed.  The changed
    set is closed first with derive --write --plan (no generator runs: the selected rows' outputs join the set until
    it stops growing, at most 6 rounds), then ONE --write runs in manifest order, so a row whose input another row
    writes runs after it, once (the earlier second --write reran tool-index and links: about 10 s). */
@@ -268,17 +314,16 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "sel=$(while IFS='\t' read -r a b c; do [ \"$a\" = SELECT ] && echo \"$b\"; done <\"$o.p\"); " \
     "bt=$(git write-tree) || fin 2 setup; " \
     "sh ./unisacc.com tools/derive.cx -- --write $m --touched \"$o.t\" 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
-    CO_DERIVE_ADD "ws=$sel; " CO_DERIVE_CHECK
+    CO_DERIVE_ADD "if [ -n \"$m\" ]; then ws=$sel; else ws=; fi; " CO_DERIVE_CHECK
 #define CO_DERIVE_SETUP \
-    "fin(){ [ -z \"$r\" ] || { cd /; rm -rf \"$r\" \"$r.out\".*; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; " \
+    "fin(){ [ -z \"$r\" ] || { cd /; rm -rf \"$r.out\".*; if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; _slot=0; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) fin 2 setup ;; esac; " \
     "g=$(git rev-parse --absolute-git-dir) || fin 2 setup; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3; do c=\"$0/commit-own-d$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 8>&-; r=\"$0/commit-own-d$$.root\"; }; " \
-    "rm -rf \"$r\"; mkdir -p \"$r\" || fin 2 setup; " \
-    "git ls-files -z -- . ':(exclude)archive' | git checkout-index -z --stdin --prefix=\"$r/\" || fin 2 setup; " \
-    "for e in * .[!.]*; do [ \"$e\" = .devsvc ] || [ -e \"$r/$e\" ] || [ -L \"$r/$e\" ] || [ ! -e \"$e\" ] || ln -s \"$PWD/$e\" \"$r/$e\"; done; " \
+    CO_SLOT_SYNC \
+    "_co_sync \"$r\" \"$g\" \"$PWD\" || fin 2 setup; " \
     "[ -f \"$r/tools/derive.cx\" ] || fin 2 setup; " \
     "cd \"$r\" || fin 2 setup; GIT_DIR=\"$g\"; GIT_WORK_TREE=\"$r\"; UNISACC_DEVMETA_DIR=\"$r/.devsvc\"; export GIT_DIR GIT_WORK_TREE UNISACC_DEVMETA_DIR; " \
     "m=; [ -z \"$UNISACC_COMMIT_OWN_DERIVE_MANIFEST\" ] || m=\"--manifest $UNISACC_COMMIT_OWN_DERIVE_MANIFEST\"; " \
@@ -290,7 +335,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "bt=$(git write-tree) || fin 2 setup; " \
     "sh ./unisacc.com tools/derive.cx -- --write $m --changed $cs 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
     CO_DERIVE_ADD \
-    "ws=$(cat \"$o\".w* | while IFS='\t' read -r a b c d; do [ \"$a\" = DERIVE ] && [ \"$c\" = WROTE ] && echo \"$b\"; done | sort -u); " \
+    "if [ -n \"$m\" ]; then ws=$(cat \"$o\".w* | while IFS='\t' read -r a b c d; do [ \"$a\" = DERIVE ] && [ \"$c\" = WROTE ] && echo \"$b\"; done | sort -u); else ws=; fi; " \
     CO_DERIVE_CHECK
 #define CO_DERIVE_ADD \
     "n=$(git diff --name-only -- . ':(exclude)archive'); " \
@@ -395,6 +440,237 @@ static void entry(const char *tree, const char *path, char *blob, char *mode) {
     if (tx_len(out, sizeof out) < 50) return;
     tx_copy(mode, 8, out, 6);
     if (tree) tx_copy(blob, 41, out + 12, 40); else tx_copy(blob, 41, out + 7, 40);
+}
+
+static int co_build_idx(const char *idx, const char *basec, const char **path, int np, const char *link, const char *del, char blob[][64], char *out, long ocap, const char **err_why, const char **err_path) {
+    int k;
+    sy_setenv("GIT_INDEX_FILE", idx, 1);
+    {   char *v[] = {"git", "read-tree", (char *)basec, 0};
+        if (run(v, out, ocap) != 0) { *err_why = "git read-tree failed"; *err_path = 0; return -1; } }
+    for (k = 0; k < np; k++) {
+        char info[4400], hb[48], hm[8];
+        entry(basec, path[k], hb, hm);
+        if (del[k]) {
+            char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0};
+            if (run(v, out, ocap) != 0) { *err_why = "git update-index --force-remove failed"; *err_path = path[k]; return -1; }
+            continue;
+        }
+        if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) {
+            *err_why = "path too long"; *err_path = path[k]; return -1;
+        }
+        {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0};
+            if (run(v, out, ocap) != 0) { *err_why = "git update-index failed"; *err_path = path[k]; return -1; } }
+    }
+    return 0;
+}
+
+static int co_diff_z(const char *a, const char *b, int with_status, char **out_buf, long *out_len) {
+    char *v[] = {"git", "diff-tree", "--no-commit-id", "-r", "--no-renames", "-z", (char *)(with_status ? "--name-status" : "--name-only"), (char *)a, (char *)b, "--", 0};
+    size_t sz = 0; char *o = 0;
+    *out_buf = 0; *out_len = 0;
+    if (cx_runv_timeout(v, (int)g_bound_s, &o, &sz) != 0) { if (o) mm_free(o); return -1; }
+    *out_buf = o; *out_len = (long)sz;
+    return 0;
+}
+
+static int co_is_path(const char *p, long l, const char *exact) {
+    long el = tx_len(exact, 4096);
+    return l == el && tx_same(p, l, exact, el);
+}
+
+static int co_is_dirpref(const char *p, long l, const char *dir) {
+    long dl = tx_len(dir, 4096);
+    if (l == dl && tx_same(p, l, dir, dl)) return 1;
+    return l > dl && p[dl] == '/' && tx_prefix(p, l, dir, dl);
+}
+
+static int co_has_path(const char *p, long l, const char **arr, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (co_is_path(p, l, arr[i])) return 1;
+    return 0;
+}
+
+static int co_std_precommit_hook(void) {
+    char hp[1200]; char *hv[] = {"git", "rev-parse", "--git-path", "hooks/pre-commit", 0};
+    size_t hn = 0; char *hb; int ok;
+    if (sy_exists("tools/precommit.cx") != 1 || sy_exists("tests/precommit-gates.tsv") != 1 || sy_exists("tools/ratchets.cx") != 1) return 0;
+    if (run(hv, hp, sizeof hp) != 0 || !hp[0]) return 0;
+    hb = (char *)cx_read(hp, &hn);
+    if (!hb) return 0;
+    ok = tx_find(hb, (long)hn, "tools/precommit.cx", 18) >= 0;
+    mm_free(hb);
+    return ok;
+}
+
+/* 1 iff all triggered precommit gates have read sets disjoint from basec..new_head and all path[0..np) stayed untouched */
+static int co_gates_disjoint(const char *basec, const char *new_head, const char **path, int np, const char *del, int nreg, char old[][48]) {
+    int k, g_man = 0, g_tab = 0, g_treg = 0, g_run = 0, g_fac = 0, g_led = 0, g_cx = 0;
+    char *dbuf = 0; long dlen = 0, at = 0;
+    if (!co_std_precommit_hook()) return 0;
+    for (k = 0; k < np; k++) {
+        char nb[48], nm[8];
+        entry(new_head, path[k], nb, nm);
+        if (!tx_eqz(nb, old[k])) return 0;
+    }
+    for (k = 0; k < np; k++) {
+        const char *p = path[k]; long pl = tx_len(p, 4096);
+        if (co_is_dirpref(p, pl, "tests/manifests") || co_is_path(p, pl, "tests/batches.tsv") || co_is_path(p, pl, "tests/coverage.tsv")) {
+            g_man = 1; g_tab = 1;
+        }
+        if (co_is_path(p, pl, "tools/batch-packages-gen.cx")) g_man = 1;
+        if (co_is_path(p, pl, "tests/tools-compile-sources.tsv")) g_tab = 1;
+        if (co_is_path(p, pl, "tests/batches.tsv") || co_is_path(p, pl, "tests/coverage.tsv")) g_run = 1;
+        if (co_is_dirpref(p, pl, "include") || co_is_dirpref(p, pl, "exec/facts")) g_fac = 1;
+        if (co_is_path(p, pl, "archive/agentwork-retire-2026-11/ledger.tsv")) g_led = 1;
+        if (pl >= 3 && tx_suffix(p, pl, ".cx", 3)) g_cx = 1;
+        if (co_is_dirpref(p, pl, "tools") && pl >= 3 && tx_suffix(p, pl, ".cx", 3) && (del[k] || !old[k][0])) g_treg = 1;
+    }
+    if (g_tab) g_treg = 1;
+    if (nreg > 0) { g_man = 1; g_tab = 1; g_treg = 1; g_run = 1; }
+    if (co_diff_z(basec, new_head, 0, &dbuf, &dlen) != 0) return 0;
+    while (at < dlen) {
+        const char *d = dbuf + at; long dl = tx_len(d, dlen - at);
+        if (dl <= 0) break;
+        at += dl + 1;
+        if (co_has_path(d, dl, path, np)) { mm_free(dbuf); return 0; }
+        /* global gate infra and runtime helpers */
+        if (co_is_path(d, dl, "tools/precommit.cx") || co_is_path(d, dl, "tools/precommit-flow.cx") ||
+            co_is_path(d, dl, "tests/precommit-gates.tsv") || co_is_path(d, dl, "tools/check-precommit-gates.cx") ||
+            co_is_path(d, dl, "unisacc.com") || co_is_path(d, dl, "cxroot.tsv") ||
+            co_is_path(d, dl, "build/freeze.tsv") || co_is_dirpref(d, dl, "tools/cxlib")) { mm_free(dbuf); return 0; }
+        if (g_man && (co_is_dirpref(d, dl, "tests/manifests") || co_is_path(d, dl, "tests/batches.tsv") ||
+            co_is_path(d, dl, "tests/coverage.tsv") || co_is_path(d, dl, "tools/reg-manifest.cx") ||
+            co_is_path(d, dl, "tools/batch-packages-gen.cx") || co_is_dirpref(d, dl, "build/layer-api") ||
+            co_is_path(d, dl, "build/tlib-packages.tsv") || co_is_path(d, dl, "build/batch-packages.tsv"))) { mm_free(dbuf); return 0; }
+        if (g_tab && (co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "tools/tables-gen.cx"))) { mm_free(dbuf); return 0; }
+        if (g_treg && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests"))) { mm_free(dbuf); return 0; }
+        if (g_run && (co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "tools"))) { mm_free(dbuf); return 0; }
+        if (g_fac && (co_is_dirpref(d, dl, "include") || co_is_dirpref(d, dl, "exec/facts") || co_is_path(d, dl, "tools/facts-gen.cx"))) { mm_free(dbuf); return 0; }
+        if (g_led && (co_is_path(d, dl, "archive/agentwork-retire-2026-11/ledger.tsv") || co_is_path(d, dl, "tools/ledger-add.cx"))) { mm_free(dbuf); return 0; }
+        if (g_cx && ((dl >= 3 && tx_suffix(d, dl, ".cx", 3)) ||
+            co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") || co_is_dirpref(d, dl, "include") ||
+            co_is_dirpref(d, dl, "exec") || co_is_dirpref(d, dl, "src") || co_is_dirpref(d, dl, "build") ||
+            co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "tools"))) { mm_free(dbuf); return 0; }
+    }
+    mm_free(dbuf);
+    return 1;
+}
+
+/* 1 iff derive rows triggered in dout have read sets & outputs disjoint from rb..basec */
+static int co_derive_disjoint(const char *rb, const char *basec, const char *dout, const char **path, int np0, char dpath[][400], int nd) {
+    static const char * const RNAMES[14] = {
+        "batch-domains", "tables-gen", "layer-api", "iface-hash", "batch-packages-gen", "product-map", "tool-index",
+        "table-index", "cx0-three-source", "st-gap", "chain-phases", "links", "libc-decls", "doc-links"
+    };
+    const char *mf = getenv("UNISACC_COMMIT_OWN_DERIVE_MANIFEST");
+    unsigned mask = 0; long at = 0, dn = tx_len(dout, 32768);
+    char *dbuf = 0; long dlen = 0, dp = 0;
+    if (mf && mf[0]) return 0;
+    while (at < dn) {
+        long e = tx_chr(dout + at, dn - at, '\n'), l = e < 0 ? dn - at : e;
+        if (tx_prefix(dout + at, l, "DERIVE\t", 7) && tx_find(dout + at, l, "\tSKIPPED\t", 9) < 0) {
+            long ns = 7, ne = ns; int found = -1, i;
+            while (ne < l && dout[at + ne] != '\t') ne++;
+            for (i = 0; i < 14; i++) if (co_is_path(dout + at + ns, ne - ns, RNAMES[i])) { found = i; break; }
+            if (found < 0) return 0;
+            mask |= (1u << found);
+        }
+        at += l + (e >= 0);
+    }
+    if ((mask & (1u << 4)) || (mask & (1u << 13))) return 0;   /* batch-packages-gen (*, git) and doc-links (*, pathset) */
+    if (co_diff_z(rb, basec, 1, &dbuf, &dlen) != 0) return 0;
+    while (dp < dlen) {
+        long sl = tx_len(dbuf + dp, dlen - dp), dl; const char *d; int j;
+        if (sl <= 0) break;
+        dp += sl + 1;
+        if (dp >= dlen) { mm_free(dbuf); return 0; }
+        d = dbuf + dp; dl = tx_len(d, dlen - dp);
+        if (dl <= 0) break;
+        dp += dl + 1;
+        if (co_has_path(d, dl, path, np0)) { mm_free(dbuf); return 0; }
+        for (j = 0; j < nd; j++) if (co_is_path(d, dl, dpath[j])) { mm_free(dbuf); return 0; }
+        for (at = 0; at < dn; ) {
+            long e2 = tx_chr(dout + at, dn - at, '\n'), l2 = e2 < 0 ? dn - at : e2;
+            if (tx_prefix(dout + at, l2, "DERIVED\t", 8) && l2 - 8 == dl && tx_same(dout + at + 8, dl, d, dl)) {
+                mm_free(dbuf); return 0;
+            }
+            at += l2 + (e2 >= 0);
+        }
+        /* global * inputs */
+        if (co_is_path(d, dl, "cxroot.tsv") || co_is_path(d, dl, "tools/derive.cx") ||
+            co_is_path(d, dl, "tools/cxlib/globspan.cx") || co_is_path(d, dl, "tools/derive-inputs.tsv") ||
+            co_is_path(d, dl, "exec/facts/derive.tsv") || co_is_path(d, dl, "unisacc.com")) { mm_free(dbuf); return 0; }
+        if (mask && (co_is_dirpref(d, dl, "cx/sys") || co_is_dirpref(d, dl, "cx/text") ||
+            co_is_dirpref(d, dl, "cx/mem") || co_is_dirpref(d, dl, "tools/cxlib"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 0)) && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "cx"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 1)) && (co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "tools/tables-gen.cx"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 2)) && (co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") ||
+            co_is_path(d, dl, "build/tlib-packages.tsv") || co_is_dirpref(d, dl, "build/layer-api") ||
+            co_is_path(d, dl, "tools/layer-api.cx"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 3)) && (co_is_dirpref(d, dl, "build/layer-api") || co_is_path(d, dl, "build/iface-hash.tsv") ||
+            co_is_path(d, dl, "tools/iface-hash.cx"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 5)) && (co_is_dirpref(d, dl, "src") || co_is_dirpref(d, dl, "cx") ||
+            co_is_dirpref(d, dl, "ext") || co_is_dirpref(d, dl, "exec") || co_is_dirpref(d, dl, "tools") ||
+            co_is_dirpref(d, dl, "weights") || co_is_dirpref(d, dl, "kernel") || co_is_dirpref(d, dl, "seed") ||
+            co_is_dirpref(d, dl, "iterate") || co_is_dirpref(d, dl, "build") || co_is_path(d, dl, "prd_productmap.md"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 6)) && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "build/tool-index.tsv"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 7)) && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "build"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 8)) && (co_is_path(d, dl, "cx/cx0/plan.cx") || co_is_path(d, dl, "cx/compiler/cxmod.cx") ||
+            co_is_path(d, dl, "src/cxmod.c") || co_is_path(d, dl, "tools/cx0-diff.cx") ||
+            co_is_path(d, dl, ".gitattributes") || co_is_path(d, dl, "build/cx0-three-source-diff.tsv"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 9)) && (co_is_path(d, dl, "exec/facts/st-gap.tsv") || co_is_path(d, dl, "tools/st-gap-gen.cx") ||
+            co_is_path(d, dl, "build/st-gap.tsv") || co_is_path(d, dl, "build/st-gap-chain.txt"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 10)) && (co_is_path(d, dl, "build/chain-facts.tsv") || co_is_path(d, dl, "build/chain-residue.tsv") ||
+            co_is_path(d, dl, "build/chain-phase-outputs.tsv") || co_is_path(d, dl, "build/chain-phases.tsv") ||
+            co_is_path(d, dl, "build/chain-phase-inputs.tsv") || co_is_path(d, dl, "build/chain-phase-fallthrough.tsv") ||
+            co_is_path(d, dl, "tools/chain-phases-gen.cx"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 11)) && (co_is_path(d, dl, "exec/facts/derive.tsv") || co_is_path(d, dl, "tests/batches.tsv") ||
+            co_is_path(d, dl, "tools/links-gen.cx") || co_is_path(d, dl, "build/links.tsv"))) { mm_free(dbuf); return 0; }
+        if ((mask & (1u << 12)) && (co_is_dirpref(d, dl, "include") || co_is_path(d, dl, "exec/facts/libc99posix.tsv") ||
+            co_is_path(d, dl, "tools/libc-decl-scan.cx") || co_is_path(d, dl, "build/libc-decls.tsv"))) { mm_free(dbuf); return 0; }
+    }
+    mm_free(dbuf);
+    return 1;
+}
+
+static int co_apply_derive_diff(const char *ri, const char *rt) {
+    char *dv[] = {"git", "diff-tree", "--no-commit-id", "-r", "--raw", "--no-renames", (char *)ri, (char *)rt, "--", 0};
+    char *dt = 0; size_t dtn = 0; long at = 0; int rc = 0;
+    if (cx_runv_timeout(dv, (int)g_bound_s, &dt, &dtn) != 0) { if (dt) mm_free(dt); return -1; }
+    while (at < (long)dtn) {
+        long e = tx_chr(dt + at, (long)dtn - at, '\n'), l = e < 0 ? (long)dtn - at : e;
+        if (l > 0) {
+            long tb = tx_chr(dt + at, l, '\t');
+            char nmode[16], nsha[48], stc = 0, opout[2048];
+            const char *m = dt + at; long sp = 0, f = 0, i = 0;
+            if (tb <= 0 || tb + 1 >= l) { rc = -1; break; }
+            for (i = 0; i <= tb; i++) {
+                if (i == tb || m[i] == ' ') {
+                    long fl = i - sp;
+                    if (f == 1 && fl > 0 && fl < 15) { tx_copy(nmode, sizeof nmode, m + sp, fl); nmode[fl] = 0; }
+                    else if (f == 3 && fl == 40) { tx_copy(nsha, sizeof nsha, m + sp, 40); nsha[40] = 0; }
+                    else if (f == 4 && fl >= 1) stc = m[sp];
+                    f++; sp = i + 1;
+                }
+            }
+            if (f < 5 || !stc) { rc = -1; break; }
+            {   long pl = l - (tb + 1); char dpath_buf[4096], info[4200];
+                if (pl <= 0 || pl >= (long)sizeof dpath_buf) { rc = -1; break; }
+                tx_copy(dpath_buf, sizeof dpath_buf, dt + at + tb + 1, pl); dpath_buf[pl] = 0;
+                if (stc == 'D') {
+                    char *uv[] = {"git", "update-index", "--force-remove", "--", dpath_buf, 0};
+                    if (run(uv, opout, sizeof opout) != 0) { rc = -1; break; }
+                } else {
+                    if (tx_snprintf(info, sizeof info, "%s,%s,%s", nmode, nsha, dpath_buf) >= (int)sizeof info) { rc = -1; break; }
+                    {   char *uv[] = {"git", "update-index", "--add", "--cacheinfo", info, 0};
+                        if (run(uv, opout, sizeof opout) != 0) { rc = -1; break; } }
+                }
+            }
+        }
+        at += l + (e >= 0);
+    }
+    if (dt) mm_free(dt);
+    return rc;
 }
 
 /* 1 when BLOB is PATH's content in one of the last 50 commits that touched it: an already-committed version left
@@ -686,24 +962,17 @@ int main(int argc, char **argv) {
     t_pend = sy_now_ms() - t0 - t_sel;
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64], basec[64], newfull[64] = "", groot[420]; int rc;
+        static char dout[32768];
         if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
         np0 = np;
 again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
-        np = np0; nder = 0;
+        np = np0; nder = 0; dout[0] = 0;
         {   char *v[] = {"git", "rev-parse", "HEAD", 0}; if (run(v, basec, sizeof basec) != 0 || tx_len(basec, sizeof basec) != 40) co_die("git rev-parse HEAD failed", 0); }
         for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
-        sy_setenv("GIT_INDEX_FILE", idx, 1);
-        {   char *v[] = {"git", "read-tree", basec, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
-        for (k = 0; k < np; k++) {
-            char info[200], hb[48], hm[8];
-            entry(basec, path[k], hb, hm);
-            if (del[k]) {
-                char *v[] = {"git", "update-index", "--force-remove", "--", (char *)path[k], 0};
-                if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index --force-remove failed", path[k]); }
-                continue;
+        {   const char *ew = 0, *ep = 0;
+            if (co_build_idx(idx, basec, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
+                sy_unsetenv("GIT_INDEX_FILE"); co_die(ew, ep);
             }
-            if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
-            {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
         char inputtree[64] = "", runtime_id[65] = "";
         if ((prepare && receipt) || (!!receipt != !!receipt_id)) co_die("usage", "derive receipt requires its identity and cannot prepare simultaneously");
@@ -716,7 +985,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         }
         if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
-            static char dout[32768]; char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
+            char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
             dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = derive_sel ? CO_DERIVE_SEL_SH : CO_DERIVE_SH; dv[n++] = (char *)sy_tmpdir();
             for (k = 0; k < np0; k++) dv[n++] = (char *)path[k];
             dv[n] = 0;
@@ -724,15 +993,60 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             if (receipt) {
                 size_t rn = 0; char *rec = cx_read(receipt, &rn), hash[65], rb[64], ri[64], rt[64], rr[65];
                 char *body = rec ? strchr(rec, '\n') : 0;
-                if (!rec || rn >= sizeof dout || sy_sha256_hex(rec,rn,hash) || !tx_eqz(hash,receipt_id) ||
-                    sscanf(rec,"CO_PREPARED2 %63s %63s %63s %64s",rb,ri,rt,rr)!=4 || !body || !tx_eqz(rb,basec) || !tx_eqz(ri,inputtree) || !tx_eqz(rr,runtime_id)) {
+                if (!rec || rn >= sizeof dout || sy_sha256_hex(rec, rn, hash) || !tx_eqz(hash, receipt_id) ||
+                    sscanf(rec, "CO_PREPARED2 %63s %63s %63s %64s", rb, ri, rt, rr) != 4 || !body || !tx_eqz(rr, runtime_id)) {
+                    if (rec) mm_free(rec);
                     fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
                     sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
                 }
-                char *tv[]={"git","read-tree",rt,0};
-                if(run(tv,out,sizeof out))co_die("derive result tree",rt);
-                tx_copy(dout,sizeof dout,body+1,(long)(rn-(body+1-rec)));dout[rn-(body+1-rec)]=0;drc=0;
-                sy_printf("COMMIT_DERIVE_IDENTITY\tinput=%s\tresult=%s\tsha=%s\tverified=1\n",ri,rt,hash);
+                if (tx_eqz(rb, basec)) {
+                    if (!tx_eqz(ri, inputtree)) {
+                        mm_free(rec);
+                        fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
+                        sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
+                    }
+                    char *tv[]={"git","read-tree",rt,0};
+                    if(run(tv,out,sizeof out))co_die("derive result tree",rt);
+                    tx_copy(dout,sizeof dout,body+1,(long)(rn-(body+1-rec)));dout[rn-(body+1-rec)]=0;drc=0;
+                    sy_printf("COMMIT_DERIVE_IDENTITY\tinput=%s\tresult=%s\tsha=%s\tverified=1\n",ri,rt,hash);
+                } else {
+                    char *av[] = {"git", "merge-base", "--is-ancestor", rb, basec, 0};
+                    char chkidx[420], chk_ri[64]; const char *ew = 0, *ep = 0; int same_in = 0, confl = 0;
+                    if (run(av, out, sizeof out) != 0 ||
+                        tx_snprintf(chkidx, sizeof chkidx, "%s/commit-own-chk-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof chkidx) {
+                        mm_free(rec);
+                        fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
+                        sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
+                    }
+                    if (co_build_idx(chkidx, rb, path, np0, link, del, blob, out, sizeof out, &ew, &ep) == 0) {
+                        char *wtv[] = {"git", "write-tree", 0};
+                        if (run(wtv, chk_ri, sizeof chk_ri) == 0 && tx_eqz(chk_ri, ri)) same_in = 1;
+                    }
+                    sy_setenv("GIT_INDEX_FILE", idx, 1);
+                    sy_unlink(chkidx);
+                    if (!same_in) {
+                        mm_free(rec);
+                        fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
+                        sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
+                    }
+                    for (k = 0; k < np0; k++) {
+                        char rbb[48], rbm[8]; entry(rb, path[k], rbb, rbm);
+                        if (!tx_eqz(rbb, old[k])) { co_conflict(path[k], rb); confl = 1; }
+                    }
+                    if (confl) {
+                        mm_free(rec);
+                        fprintf(stderr,"COMMIT_OWN_FAIL\tclass=head-moved\ncommit-own: REFUSE --derive-receipt: HEAD moved under commit and its paths changed\n");
+                        sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
+                    }
+                    if (co_derive_disjoint(rb, basec, body + 1, path, np0, dpath, 0) && co_apply_derive_diff(ri, rt) == 0) {
+                        tx_copy(dout,sizeof dout,body+1,(long)(rn-(body+1-rec)));dout[rn-(body+1-rec)]=0;drc=0;
+                        sy_printf("COMMIT_DERIVE_IDENTITY\tinput=%s\tresult=%s\trebased_from=%s\tto=%s\tsha=%s\tverified=1\n",ri,rt,rb,basec,hash);
+                    } else {
+                        sy_printf("NOTE\tderive-receipt: HEAD moved (%s -> %s) touching derive read-set; recomputing derive on new HEAD\n", rb, basec);
+                        drc = run(dv, dout, sizeof dout);
+                    }
+                }
+                mm_free(rec);
             } else drc = run(dv, dout, sizeof dout);
             g_bound_s = 30; t_der = sy_now_ms() - tc0;
             dn = tx_len(dout, sizeof dout);
@@ -843,11 +1157,42 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 (void)dv;
                 rc = run(gv, out, sizeof out);
             } else {
+                long gate_ms; int gate_rc;
                 rc = run(gv, out, sizeof out);
-                long gate_ms = sy_now_ms() - tc0;
-                int gate_rc = rc;
-                co_ref_ms=0;co_ref_rc=-1;
+                gate_ms = sy_now_ms() - tc0;
+                gate_rc = rc;
+                co_ref_ms = 0; co_ref_rc = -1;
                 if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
+                while (rc != 0 && att < CO_REPLAY && tx_find(out, tx_len(out, sizeof out), "cannot lock ref 'HEAD'", 22) >= 0) {
+                    char new_head[64]; int own_same = 1, all_same = 1;
+                    char *hv[] = {"git", "rev-parse", "HEAD", 0};
+                    if (run(hv, new_head, sizeof new_head) != 0 || tx_len(new_head, sizeof new_head) != 40) break;
+                    for (k = 0; k < np0; k++) {
+                        char nb[48], nm[8]; entry(new_head, path[k], nb, nm);
+                        if (!tx_eqz(nb, old[k])) { own_same = 0; all_same = 0; break; }
+                    }
+                    if (!own_same) break;
+                    for (k = np0; k < np; k++) {
+                        char nb[48], nm[8]; entry(new_head, path[k], nb, nm);
+                        if (!tx_eqz(nb, old[k])) { all_same = 0; break; }
+                    }
+                    if (all_same && co_gates_disjoint(basec, new_head, path, np, del, nreg, old) &&
+                        (!derive || co_derive_disjoint(basec, new_head, dout, path, np0, dpath, nder))) {
+                        const char *ew = 0, *ep = 0; char oldb[64];
+                        att++;
+                        tx_copy(oldb, sizeof oldb, basec, 40); oldb[40] = 0;
+                        tx_copy(basec, sizeof basec, new_head, 40); basec[40] = 0;
+                        for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
+                        if (co_build_idx(idx, basec, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
+                            sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_die(ew, ep);
+                        }
+                        rc = co_land(msg, basec, newfull, out, sizeof out);
+                        if (rc == 0) {
+                            sy_printf("COMMIT_CAS_REBASE\told=%s\tnew=%s\tattempt=%d\n", oldb, basec, att);
+                            sy_printf("NOTE\tHEAD moved (%s -> %s) and gate read sets are disjoint; CAS rebased on new HEAD without rerunning gates\n", oldb, basec);
+                        }
+                    } else break;
+                }
                 sy_printf("COMMIT_TIMING\tgates_ms=%ld\tgates_rc=%d\tcas_ms=%ld\tcas_rc=%d\n",
                     gate_ms, gate_rc, co_ref_ms, co_ref_rc);
             }
