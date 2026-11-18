@@ -22,6 +22,7 @@ uniform float uTime;
 uniform float uBillboard;
 uniform float uOrtho;
 uniform float uToonLevels;
+uniform float uNormalPass;
 uniform vec2 uScreen;
 varying vec3 vN;
 varying vec3 vP;
@@ -70,7 +71,7 @@ void main() {
   vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
   p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
-  vec3 normal = uToonLevels > 1.0 ? aNormal : aPos;
+  vec3 normal = uToonLevels > 1.0 || uNormalPass > 0.5 ? aNormal : aPos;
   vN = normalize(uBillboard > 0.5 ? billboardXZ(normal, uEye, aInst) : rotYXZ(normal, aYaw, aPitch, aRoll));
   vP = p;
   vEye = uEye;
@@ -90,6 +91,7 @@ uniform vec3 uEmissive;
 uniform float uMetal;
 uniform float uRough;
 uniform float uToonLevels;
+uniform float uNormalPass;
 uniform vec3 uAmbient;
 uniform float uAmbI;
 uniform vec3 uL0Dir;
@@ -113,6 +115,10 @@ varying float vFogDepth;
 varying vec2 vUV;
 varying vec4 vColor;
 void main() {
+  if (uNormalPass > 0.5) {
+    gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0);
+    return;
+  }
   if (uHasMap > 0.5) {
     gl_FragColor = texture2D(uMap, vUV);
     return;
@@ -168,6 +174,95 @@ function norm3(v) {
   return [v[0] / L, v[1] / L, v[2] / L];
 }
 
+function createOutline(gl, ext) {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, `
+    attribute vec2 corner;
+    void main() { gl_Position = vec4(corner, 0.0, 1.0); }
+  `));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, `
+    precision mediump float;
+    uniform sampler2D normals;
+    uniform vec2 resolution;
+    uniform float width;
+    bool edge(vec4 a, vec4 b) {
+      return b.a < 0.5 || distance(a.rgb, b.rgb) > 0.25;
+    }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / resolution;
+      vec4 center = texture2D(normals, uv);
+      if (center.a < 0.5) discard;
+      bool boundary = false;
+      for (int i = 1; i <= 8; i++) {
+        if (float(i) > width) break;
+        vec2 d = float(i) / resolution;
+        boundary = boundary ||
+          edge(center, texture2D(normals, uv + vec2(d.x, 0.0))) ||
+          edge(center, texture2D(normals, uv - vec2(d.x, 0.0))) ||
+          edge(center, texture2D(normals, uv + vec2(0.0, d.y))) ||
+          edge(center, texture2D(normals, uv - vec2(0.0, d.y)));
+      }
+      if (!boundary) discard;
+      gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+  `));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  const corner = gl.getAttribLocation(program, "corner");
+  const resolution = gl.getUniformLocation(program, "resolution");
+  const width = gl.getUniformLocation(program, "width");
+  const triangle = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+  const framebuffer = gl.createFramebuffer();
+  const depth = gl.createRenderbuffer();
+  const normals = gl.createTexture();
+  let oldWidth = 0, oldHeight = 0;
+  return {
+    begin(w, h) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.activeTexture(gl.TEXTURE0);
+      if (w !== oldWidth || h !== oldHeight) {
+        gl.bindTexture(gl.TEXTURE_2D, normals);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, normals, 0);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          throw new Error("outline framebuffer incomplete");
+        }
+        oldWidth = w;
+        oldHeight = h;
+      }
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    },
+    draw(w, h, pixels) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(program);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
+      gl.enableVertexAttribArray(corner);
+      gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
+      ext.vertexAttribDivisorANGLE(corner, 0);
+      gl.bindTexture(gl.TEXTURE_2D, normals);
+      gl.uniform2f(resolution, w, h);
+      gl.uniform1f(width, pixels);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.enable(gl.DEPTH_TEST);
+    }
+  };
+}
+
 export function createWebGLRenderer(canvas, opts) {
   const aa = !(opts && opts.antialias === false);
   const gl = canvas.getContext("webgl", { antialias: aa, preserveDrawingBuffer: true, powerPreference: "high-performance" });
@@ -220,6 +315,8 @@ export function createWebGLRenderer(canvas, opts) {
   const uColor = u("uColor"), uEmissive = u("uEmissive");
   const uMetal = u("uMetal"), uRough = u("uRough");
   const uToonLevels = u("uToonLevels");
+  const uNormalPass = u("uNormalPass");
+  let outline;
   const uAmbient = u("uAmbient"), uAmbI = u("uAmbI");
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
@@ -462,6 +559,15 @@ export function createWebGLRenderer(canvas, opts) {
       }
       ss.sort((a, b) => (a.layer | 0) - (b.layer | 0));
       for (const c of opaque) drawCloud(c, wave);
+      if (Number.isInteger(scene.outlineWidth) && scene.outlineWidth > 0 && opaque.length) {
+        outline ||= createOutline(gl, ext);
+        outline.begin(w, h);
+        gl.uniform1f(uNormalPass, 1);
+        for (const c of opaque) drawCloud(c, wave);
+        gl.uniform1f(uNormalPass, 0);
+        outline.draw(w, h, Math.min(scene.outlineWidth, 8));
+        gl.useProgram(prog);
+      }
       for (const c of ss) drawCloud(c, wave);
       trans.sort((a, b) => {
         const ax = a.xyz[0] - ex, ay = a.xyz[1] - ey, az = a.xyz[2] - ez;

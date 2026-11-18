@@ -1,0 +1,50 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+
+/* Midline projection for the visible corners of a unit cube. */
+static int part(int x) {
+    double center=x+.5;
+    if(center<48-96*.7/4.9 || center>=48+96*.7/5.1) return 0;
+    return center<48+96*.1/4.3 ? 1 : 2;
+}
+int main(int argc,char **argv) {
+    char cwd[1024], url[1400], profile[96], option[120], *out=0;
+    size_t bytes=0;
+    const char *p;
+    int width,x,failed=0,silhouette=0,crease=0,interior=0,rc;
+    int mutate=argc==2 && !strcmp(argv[1],"--mutate");
+    char *args[]={"google-chrome","--headless=new","--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader","--allow-file-access-from-files",
+        "--no-first-run",option,"--dump-dom",url,0};
+    if((argc>1 && !mutate) || !getcwd(cwd,sizeof cwd)) return 2;
+    if(tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/uxe-outline.html%s",
+        cwd,mutate?"?mutate":"") >= (int)sizeof url) return 2;
+    if(tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-outline-%d",(int)getpid()) >= (int)sizeof profile) return 2;
+    if(tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile) >= (int)sizeof option) return 2;
+    rc=cx_runv_timeout(args,25,&out,&bytes);
+    chd_wipe(profile);
+    p=out?strstr(out,"<pre id=\"pixels\">"):0;
+    if(rc || !p) return 2;
+    p+=strlen("<pre id=\"pixels\">");
+    for(width=1;width<=3;width+=2) for(x=0;x<96;x++) {
+        int face=part(x), want=0, color=0;
+        if(face) {
+            int adjacent=part(x-width), opposite=part(x+width);
+            if(!adjacent || !opposite) silhouette++;
+            else if(adjacent!=face || opposite!=face) crease++;
+            else { want=255; interior++; }
+        }
+        if(*p<'0'||*p>'9') return 2;
+        while(*p>='0'&&*p<='9') { color=10*color+*p++-'0'; if(color>255) return 2; }
+        if((width!=3 || x!=95) && *p++!=',') return 2;
+        if(abs(color-want)>2) {
+            printf("FAIL width=%d x=%d want=%d got=%d\n",width,x,want,color);
+            failed++;
+        }
+    }
+    if(strncmp(p,"</pre>",6)) return 2;
+    free(out);
+    printf("CHECK_UXE_OUTLINE\tsilhouette=%d crease=%d interior=%d failed=%d\n",
+        silhouette,crease,interior,failed);
+    return failed?1:0;
+}
