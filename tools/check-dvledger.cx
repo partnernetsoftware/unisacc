@@ -1,0 +1,91 @@
+/* Tool self-check for tools/dvledger.cx on real samples: the committed v0.0.74 strict evidence
+ * release/evidence/v0.0.74-strict-2026-11-18.tsv (30 batches, real dvqualify output with RAW
+ * BATCH_RUN lines) and the real tests/batches.tsv / tests/batch-domain-index.tsv. Ledgers and
+ * the fixture root live under a private mkdtemp; no repo file is written and no batch is run.
+ * Positive: ingest round trip, coverage, near-window list, superseded on re-ingest, delta after a
+ * batch definition change. Negative: other candidate is not reused, changed definition is not
+ * tested, UNKNOWN is not tested, a malformed ledger line is skipped and reported, RAW candidate
+ * mismatch becomes INVALID, PASS without RAW becomes UNKNOWN.
+ * Optional first argument selects a prebuilt dvledger (red/green comparison).
+ * Check: CHECK_DVLEDGER. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.toolprep
+#pragma unisa use mem.bytes
+
+#define SHA "63334e185bb906d5352ff9f8b2c5dfa2c26b8fef1a35f965994ba8c7907cca39"
+#define OTHER "1111111111111111111111111111111111111111111111111111111111111111"
+static char tmp[4096], bin[4200], root[4096], fx[4300], led[4300], led2[4300], ev[4300], evn[4300];
+static char out[262144];
+static int passed, failed;
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvledger\n", yes ? "PASS" : "FAIL", label); }
+static int has(const char *n) { return strstr(out, n) != 0; }
+static int run(int *rc, const char *a0, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, const char *a6, const char *a7, const char *a8) {
+    char *v[12] = {bin, (char *)a0, (char *)a1, (char *)a2, (char *)a3, (char *)a4, (char *)a5, (char *)a6, (char *)a7, (char *)a8, 0};
+    np_result r = {0}; char why[300]; out[0] = 0; *rc = -1;
+    if (np_run(v, 0, 0, 30, &r, why, sizeof why)) return 0;
+    *rc = r.rc; long k = (long)r.outn < (long)sizeof out - 1 ? (long)r.outn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.out, k); out[k > 0 ? k : 0] = 0;
+    long e = (long)r.errn < (long)sizeof out - 1 - k ? (long)r.errn : (long)sizeof out - 1 - k;
+    if (e > 0) { mm_copy(out + k, sizeof out - k, r.err, e); out[k + e] = 0; }
+    np_free(&r); return 1;
+}
+static int copyf(const char *rel, const char *dstdir) {
+    char s[4400], d[4400]; unsigned char *b = 0; int64_t n = 0;
+    cx_fmt(s, sizeof s, "%s/%s", root, rel); cx_fmt(d, sizeof d, "%s/%s", dstdir, rel);
+    if (sy_read_file(s, &b, &n, 64L << 20) || !b) return 1; int r = sy_write_file(d, b, n, 0644); free(b); return r;
+}
+static int count(const char *needle) { int c = 0; const char *p = out; while ((p = strstr(p, needle))) { c++; p++; } return c; }
+
+int main(int argc, char **argv) {
+    char why[512]; int rc = -1;
+    if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvledger-check", tmp, sizeof tmp)) return 2;
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvledger", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvledger.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    cx_fmt(fx, sizeof fx, "%s/fx", tmp); cx_fmt(led, sizeof led, "%s/l1.tsv", tmp); cx_fmt(led2, sizeof led2, "%s/l2.tsv", tmp);
+    cx_fmt(ev, sizeof ev, "%s/release/evidence/v0.0.74-strict-2026-11-18.tsv", root); cx_fmt(evn, sizeof evn, "%s/noraw.tsv", tmp);
+    { char t[4400]; cx_fmt(t, sizeof t, "%s/tests", fx); if (sy_mkdir_all(t, 0700)) return 2;
+      cx_fmt(t, sizeof t, "%s/tools", fx); if (sy_mkdir_all(t, 0700)) return 2; }
+    if (copyf("tests/batches.tsv", fx) || copyf("tests/batch-domain-index.tsv", fx) || copyf("tests/run-batch.cx", fx) || copyf("tools/affected.cx", fx)) return 2;
+    /* L1 ingest the real strict evidence */
+    check("ingest-real-strict", run(&rc, "ingest", "--sha", SHA, "--evidence", ev, "--ledger", led, "--root", fx) && rc == 0 && has("DVLEDGER_INGEST\trows=30\tunknown_or_invalid=1\t"));
+    /* L2 status: coverage, near-window, over-55 s recorded UNKNOWN */
+    check("status-runs", run(&rc, "status", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && rc == 0);
+    check("coverage-product", has("COVERAGE\tproduct-qualification\ttested=26\ttotal="));
+    check("near-window-cx-driver-cli", has("NEAR_WINDOW\tcx-driver-cli\tms_max=54289\tbudget_s=55\tratio=0.99"));
+    check("near-window-pp-cli-includes", has("NEAR_WINDOW\tpp-cli-includes\tms_max=53159\tbudget_s=55\tratio=0.97"));
+    check("not-near-window-accept-a", !has("NEAR_WINDOW\tstruct-member-capacity-accept-a\t"));
+    check("unknown-not-tested", has("UNTESTED\tunit-frontcache-budget\tUNKNOWN\tover-55s-outer"));
+    /* L3 round trip: re-ingest supersedes, coverage unchanged */
+    check("reingest", run(&rc, "ingest", "--sha", SHA, "--evidence", ev, "--ledger", led, "--root", fx) && rc == 0);
+    check("roundtrip-coverage", run(&rc, "status", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && has("COVERAGE\tproduct-qualification\ttested=26\t"));
+    check("superseded-kept", has("rows=60\tcur=30\tsuperseded=30\tskipped_lines=0"));
+    /* L4 delta before and after a definition change of cx-driver-cli */
+    check("delta-before", run(&rc, "delta", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && rc == 1 && !has("NEED\tcx-driver-cli\t") && has("NEED\tunit-frontcache-budget\tUNKNOWN"));
+    /* the harness file named by the cx-driver-cli row changes identity (absent -> present) */
+    { char p[4400]; cx_fmt(p, sizeof p, "%s/tools/check-driver-cli.cx", fx); if (sy_write_file(p, "changed\n", 8, 0644)) return 2; }
+    check("delta-def-changed", run(&rc, "delta", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && rc == 1 && has("NEED\tcx-driver-cli\tdef-changed") && !has("NEED\tpp-cli-includes\t"));
+    check("status-def-changed-untested", run(&rc, "status", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && has("COVERAGE\tproduct-qualification\ttested=25\t") && has("UNTESTED\tcx-driver-cli\tPASS\tdef-changed"));
+    /* harness change invalidates every row (shared harness file in def_sha) */
+    { char p[4400]; cx_fmt(p, sizeof p, "%s/tests/run-batch.cx", fx); if (sy_append_file(p, "\n", 1, 0644)) return 2; }
+    check("harness-change-invalidates", run(&rc, "status", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && has("COVERAGE\tproduct-qualification\ttested=0\t"));
+    /* N1 another candidate does not reuse rows */
+    check("other-candidate-not-reused", run(&rc, "status", "--sha", OTHER, "--ledger", led, "--root", root, 0, 0) && rc == 0 && has("COVERAGE\tproduct-qualification\ttested=0\t"));
+    /* N2 RAW candidate mismatch -> INVALID */
+    check("raw-mismatch-invalid", run(&rc, "ingest", "--sha", OTHER, "--evidence", ev, "--ledger", led2, "--root", root) && rc == 0 && has("rows=30\tunknown_or_invalid=30\t"));
+    check("raw-mismatch-note", run(&rc, "status", "--sha", OTHER, "--ledger", led2, "--root", root, 0, 0) && has("LAST\tcx-driver-cli\tINVALID\t") && has("raw-candidate-mismatch") && !has("\tPASS\t"));
+    /* N3 PASS without RAW -> UNKNOWN */
+    { const char *t = "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\ncx-driver-cli\tproduct-qualification\tPASS\t0\t" SHA "\t1000\t1.00\t0\t-\n";
+      if (sy_write_file(evn, t, strlen(t), 0644)) return 2; }
+    check("pass-without-raw-unknown", run(&rc, "ingest", "--sha", SHA, "--evidence", evn, "--ledger", led2, "--root", root) && has("rows=1\tunknown_or_invalid=1\t"));
+    /* N4 malformed ledger line skipped and reported, no crash */
+    if (sy_append_file(led, "garbage\tline\n", 13, 0644)) return 2;
+    check("malformed-skipped", run(&rc, "status", "--sha", SHA, "--ledger", led, "--root", fx, 0, 0) && rc == 0 && has("DVLEDGER_SKIP\tline=") && has("skipped_lines=1"));
+    /* N5 usage errors */
+    check("usage-no-candidate", run(&rc, "status", "--ledger", led, 0, 0, 0, 0, 0, 0) && rc == 2);
+    (void)count;
+    printf("CHECK_DVLEDGER\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

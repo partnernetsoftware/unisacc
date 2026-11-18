@@ -1,0 +1,275 @@
+/* dvledger: rolling qualification ledger for one candidate APE, filled batch by batch while idle.
+ *   dvledger run    --candidate APE [--domain D] [--budget-s N] [--jobs N] [--root R] [--ledger F]
+ *   dvledger status (--candidate APE | --sha HEX) [--domain D] [--root R] [--ledger F]
+ *   dvledger delta  (--candidate APE | --sha HEX) [--domain D] [--since-rev REV] [--root R] [--ledger F]
+ *   dvledger ingest (--candidate APE | --sha HEX) --evidence TSV [--root R] [--ledger F]
+ * Ledger file (default ~/.cache/unisacc/devsvc/ledger/<sha16>.tsv, never a tracked repo file):
+ *   cand  batch  def_sha  status  ms  ms_max  budget_s  load1  t_ms  raw_sha  state  note
+ * def_sha = sha256 of the tests/batches.tsv row text plus path:sha256 of the harness files the
+ * row names (source and entry columns) and tests/run-batch.cx, tools/affected.cx. A batch counts
+ * as tested only when a cur row has cand == candidate sha256, def_sha == current def_sha and
+ * status PASS or FAIL (the three keys). A new row for the same three keys is appended first,
+ * then the file is rewritten (tmp + rename) with the older row kept and marked superseded.
+ * Rows come only from dvqualify evidence: PASS/FAIL needs the RAW BATCH_RUN line with id= and
+ * candidate= equal to the candidate; otherwise UNKNOWN/INVALID. A final attempt longer than
+ * 55000 ms is recorded UNKNOWN (outer 55 s per batch). ms_max keeps the slowest attempt (cold).
+ * run: waits (bounded) for load1 < 3 before each round, pauses while load1 > 6 (dvqualify gate),
+ * orders batches untested first then oldest t_ms, calls tools/dvqualify.cx --ids with --jobs, one
+ * round bounded by min(300 s, remaining budget), ingests after every round (crash keeps rows).
+ * status: coverage per domain, last status per batch, near-window list (ms_max/budget > 0.6),
+ * never-run and untested lists. delta: batches that need a rerun and why. No conclusion words.
+ * Exit: 0 ok, 1 delta has needs / run recorded UNKNOWN, 2 usage or setup error.
+ * Check: tools/check-dvledger.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+#define MAXR 40000
+#define MAXB 4096
+
+typedef struct { char cand[65], batch[96], def[65], status[12], load[16], raw[65], state[12], note[200]; long ms, msmax, budget, t; } Row;
+typedef struct { char id[96], domain[48], def[65]; long budget; int indomain; } Def;
+static Row *rows; static int nr, nskip;
+static Def defs[MAXB]; static int nd;
+static char root[4096], ledger[4300], sha[65], domain[64] = "product-qualification";
+
+static int die(const char *a, const char *b) { fprintf(stderr, "DVLEDGER_FAIL\t%s%s\n", a, b ? b : ""); return 2; }
+static double load1(void) {
+    unsigned char *b = 0; int64_t n = 0; double v = 99;
+    if (!sy_read_file("/proc/loadavg", &b, &n, 4096) && b) { char t[64]; long k = n < 63 ? n : 63; mm_copy(t, sizeof t, b, k); t[k] = 0; v = atof(t); }
+    free(b); return v;
+}
+static int is_hex64(const char *s) { if (strlen(s) != 64) return 0; for (int i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0; return 1; }
+static int split(char *s, char **f, int max) { int n = 0; f[n++] = s; while (*s && n < max) { if (*s == '\t') { *s = 0; f[n++] = s + 1; } s++; } return n; }
+static void cpy(char *d, int cap, const char *s) { cx_fmt(d, cap, "%s", s ? s : ""); }
+static int file_sha(const char *rel, char *out) {
+    char p[4400]; unsigned char *b = 0; int64_t n = 0; out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel) || sy_read_file(p, &b, &n, 256L << 20) || !b) { cpy(out, 65, "missing"); return 1; }
+    int r = sy_sha256_hex(b, (long)n, out); free(b); return r;
+}
+static Def *def_of(const char *id) { for (int i = 0; i < nd; i++) if (!strcmp(defs[i].id, id)) return &defs[i]; return 0; }
+/* tests/batches.tsv rows -> def_sha; tests/batch-domain-index.tsv -> domain. */
+static int load_defs(void) {
+    char p[4400], run_sha[65], aff_sha[65]; unsigned char *b = 0; int64_t n = 0;
+    file_sha("tests/run-batch.cx", run_sha); file_sha("tools/affected.cx", aff_sha);
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) || sy_read_file(p, &b, &n, 64L << 20) || !b) return die("cannot read ", p);
+    char *s = (char *)b, *end = s + n;
+    while (s < end && nd < MAXB) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+        if (*s && *s != '#' && strncmp(s, "id\t", 3)) {
+            char line[8192], *f[20]; cpy(line, sizeof line, s); int k = split(line, f, 20);
+            Def *d = &defs[nd]; memset(d, 0, sizeof *d); cpy(d->id, sizeof d->id, f[0]); cpy(d->domain, sizeof d->domain, "-");
+            d->budget = k > 6 ? atol(f[6]) : 0;
+            char acc[16384], s1[65] = "-", s2[65] = "-";
+            if (k > 3 && strchr(f[3], '/')) file_sha(f[3], s1);
+            if (k > 8 && strchr(f[8], '/')) file_sha(f[8], s2);
+            cx_fmt(acc, sizeof acc, "%s\n%s:%s\n%s:%s\ntests/run-batch.cx:%s\ntools/affected.cx:%s\n", s, k > 3 ? f[3] : "-", s1, k > 8 ? f[8] : "-", s2, run_sha, aff_sha);
+            sy_sha256_hex(acc, (long)strlen(acc), d->def); nd++;
+        }
+        s = e + 1;
+    }
+    free(b); b = 0;
+    if (cx_fmt(p, sizeof p, "%s/tests/batch-domain-index.tsv", root) || sy_read_file(p, &b, &n, 64L << 20) || !b) return die("cannot read ", p);
+    s = (char *)b; end = s + n;
+    while (s < end) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+        if (*s && *s != '#') { char line[4096], *f[6]; cpy(line, sizeof line, s); int k = split(line, f, 6); Def *d = k > 1 ? def_of(f[0]) : 0; if (d) cpy(d->domain, sizeof d->domain, f[1]); }
+        s = e + 1;
+    }
+    free(b);
+    for (int i = 0; i < nd; i++) defs[i].indomain = !strcmp(domain, "all") || !strcmp(defs[i].domain, domain);
+    return 0;
+}
+static int load_ledger(void) {
+    unsigned char *b = 0; int64_t n = 0; nr = 0; nskip = 0;
+    if (sy_read_file(ledger, &b, &n, 256L << 20) || !b) return 0;   /* absent ledger = empty */
+    char *s = (char *)b, *end = s + n; int ln = 0;
+    while (s < end) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0; ln++;
+        if (*s && *s != '#' && strncmp(s, "cand\t", 5)) {
+            char line[2048], *f[16]; cpy(line, sizeof line, s); int k = split(line, f, 16);
+            int ok = k == 12 && is_hex64(f[0]) && f[1][0] && is_hex64(f[2]) && (!strcmp(f[10], "cur") || !strcmp(f[10], "superseded")) &&
+                     (!strcmp(f[3], "PASS") || !strcmp(f[3], "FAIL") || !strcmp(f[3], "UNKNOWN") || !strcmp(f[3], "INVALID"));
+            if (!ok || nr >= MAXR) { nskip++; fprintf(stderr, "DVLEDGER_SKIP\tline=%d\tmalformed\n", ln); }
+            else { Row *r = &rows[nr++]; cpy(r->cand, 65, f[0]); cpy(r->batch, 96, f[1]); cpy(r->def, 65, f[2]); cpy(r->status, 12, f[3]);
+                   r->ms = atol(f[4]); r->msmax = atol(f[5]); r->budget = atol(f[6]); cpy(r->load, 16, f[7]); r->t = atol(f[8]);
+                   cpy(r->raw, 65, f[9]); cpy(r->state, 12, f[10]); cpy(r->note, 200, f[11]); }
+        }
+        s = e + 1;
+    }
+    free(b); return 0;
+}
+static int fmt_row(char *o, int cap, Row *r) {
+    return cx_fmt(o, cap, "%s\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%s\t%ld\t%s\t%s\t%s\n", r->cand, r->batch, r->def, r->status, r->ms, r->msmax, r->budget, r->load, r->t, r->raw, r->state, r->note);
+}
+/* Append the new rows (crash-safe), then rewrite with superseded marks via tmp + rename. */
+static int commit_rows(Row *nw, int k) {
+    char line[2048];
+    for (int i = 0; i < k; i++) { if (fmt_row(line, sizeof line, &nw[i]) || sy_append_file(ledger, line, strlen(line), 0644)) return die("cannot append ", ledger); }
+    load_ledger();
+    for (int i = 0; i < nr; i++) for (int j = i + 1; j < nr; j++)
+        if (!strcmp(rows[i].cand, rows[j].cand) && !strcmp(rows[i].batch, rows[j].batch) && !strcmp(rows[i].def, rows[j].def)) { cpy(rows[i].state, 12, "superseded"); break; }
+    char tmp[4400]; long cap = 256 + (long)nr * 600, at = 0; char *buf = malloc(cap); if (!buf) return die("oom", 0);
+    at += snprintf(buf, cap, "# dvledger-v1\ncand\tbatch\tdef_sha\tstatus\tms\tms_max\tbudget_s\tload1\tt_ms\traw_sha\tstate\tnote\n");
+    for (int i = 0; i < nr; i++) { if (fmt_row(line, sizeof line, &rows[i])) continue; long l = strlen(line); if (at + l < cap) { mm_copy(buf + at, cap - at, line, l); at += l; } }
+    int r = cx_fmt(tmp, sizeof tmp, "%s.tmp.%d", ledger, sy_pid()) || sy_write_file(tmp, buf, at, 0644) || sy_rename(tmp, ledger);
+    free(buf); return r ? die("cannot rewrite ", ledger) : 0;
+}
+static void kv(const char *line, const char *key, char *dst, int cap) {
+    char k[40]; cx_fmt(k, sizeof k, "\t%s=", key); dst[0] = 0; const char *p = strstr(line, k); if (!p) return; p += strlen(k);
+    long n = 0; while (p[n] && p[n] != '\t' && p[n] != '\n') n++; if (n >= cap) n = cap - 1; mm_copy(dst, cap, p, n); dst[n] = 0;
+}
+/* dvqualify evidence -> ledger rows (one per batch: last attempt row, its RAW, slowest attempt). */
+static int ingest(const char *ev, int *unknown) {
+    unsigned char *b = 0; int64_t n = 0; static Row nw[MAXB]; int k = 0; *unknown = 0;
+    if (sy_read_file(ev, &b, &n, 64L << 20) || !b) return die("cannot read evidence ", ev);
+    char *s = (char *)b, *end = s + n; long now = sy_wall_s() * 1000L;
+    while (s < end) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
+        if (!strncmp(s, "RAW\tBATCH_RUN\t", 14)) {
+            char id[96], cand[72], st[16]; kv(s + 3, "id", id, sizeof id); kv(s + 3, "candidate", cand, sizeof cand); kv(s + 3, "status", st, sizeof st);
+            for (int i = k - 1; i >= 0; i--) if (!strcmp(nw[i].batch, id)) {
+                sy_sha256_hex(s + 4, (long)strlen(s + 4), nw[i].raw);
+                if (strcmp(cand, sha)) { cpy(nw[i].status, 12, "INVALID"); cpy(nw[i].note, 200, "raw-candidate-mismatch"); }
+                else if (strcmp(st, nw[i].status) && (!strcmp(nw[i].status, "PASS") || !strcmp(nw[i].status, "FAIL"))) { cpy(nw[i].status, 12, "INVALID"); cpy(nw[i].note, 200, "raw-status-mismatch"); }
+                break;
+            }
+        } else if (*s && *s != '#' && strncmp(s, "batch\t", 6) && strncmp(s, "SUMMARY", 7) && strncmp(s, "CHECKPOINT", 10) && strncmp(s, "RAW", 3)) {
+            char line[2048], *f[12]; cpy(line, sizeof line, s); int c = split(line, f, 12);
+            if (c >= 9) {
+                Row *r = 0; for (int i = 0; i < k; i++) if (!strcmp(nw[i].batch, f[0])) r = &nw[i];
+                long ms = atol(f[5]);
+                if (!r && k < MAXB) { r = &nw[k++]; memset(r, 0, sizeof *r); cpy(r->batch, 96, f[0]); }
+                if (r) { cpy(r->status, 12, f[2]); if (strcmp(r->status, "PASS") && strcmp(r->status, "FAIL") && strcmp(r->status, "INVALID")) cpy(r->status, 12, "UNKNOWN");
+                         r->ms = ms; if (ms > r->msmax) r->msmax = ms; cpy(r->load, 16, f[6]);
+                         char nt[200]; cx_fmt(nt, sizeof nt, "%s%sattempt:%s:%ld", r->note, r->note[0] ? ";" : "", f[2], ms); cpy(r->note, 200, nt);
+                         cpy(r->raw, 65, "-"); }
+            }
+        }
+        s = e + 1;
+    }
+    free(b);
+    for (int i = 0; i < k; i++) {
+        Row *r = &nw[i]; Def *d = def_of(r->batch);
+        cpy(r->cand, 65, sha); cpy(r->state, 12, "cur"); r->t = now; r->budget = d ? d->budget : 0;
+        cpy(r->def, 65, d ? d->def : "0000000000000000000000000000000000000000000000000000000000000000");
+        if (!d) { cpy(r->status, 12, "INVALID"); cpy(r->note, 200, "batch-not-in-batches.tsv"); }
+        if ((!strcmp(r->status, "PASS") || !strcmp(r->status, "FAIL")) && !strcmp(r->raw, "-")) { cpy(r->status, 12, "UNKNOWN"); cpy(r->note, 200, "no-raw-BATCH_RUN"); }
+        if ((!strcmp(r->status, "PASS") || !strcmp(r->status, "FAIL")) && r->ms > 55000) { char nt[200]; cx_fmt(nt, sizeof nt, "over-55s-outer was=%s;%s", r->status, r->note); cpy(r->note, 200, nt); cpy(r->status, 12, "UNKNOWN"); }
+        if (!r->note[0]) cpy(r->note, 200, "-");
+        if (strcmp(r->status, "PASS") && strcmp(r->status, "FAIL")) (*unknown)++;
+    }
+    printf("DVLEDGER_INGEST\trows=%d\tunknown_or_invalid=%d\tledger=%s\n", k, *unknown, ledger);
+    return k ? commit_rows(nw, k) : 0;
+}
+/* Latest cur row of BATCH for this candidate (any def), and whether it is tested under current def. */
+static Row *latest(const char *id) { Row *r = 0; for (int i = 0; i < nr; i++) if (!strcmp(rows[i].batch, id) && !strcmp(rows[i].cand, sha) && !strcmp(rows[i].state, "cur") && (!r || rows[i].t >= r->t)) r = &rows[i]; return r; }
+static Row *tested(Def *d) {
+    Row *r = 0;
+    for (int i = 0; i < nr; i++) if (!strcmp(rows[i].batch, d->id) && !strcmp(rows[i].cand, sha) && !strcmp(rows[i].def, d->def) && !strcmp(rows[i].state, "cur")) r = &rows[i];
+    return r && (!strcmp(r->status, "PASS") || !strcmp(r->status, "FAIL")) ? r : 0;
+}
+static int cmd_status(void) {
+    char doms[32][48]; int nds = 0, tot[32] = {0}, got[32] = {0};
+    for (int i = 0; i < nd; i++) {
+        int j = 0; for (; j < nds; j++) if (!strcmp(doms[j], defs[i].domain)) break;
+        if (j == nds && nds < 32) cpy(doms[nds++], 48, defs[i].domain);
+        if (j < 32) { tot[j]++; if (tested(&defs[i])) got[j]++; }
+    }
+    int sup = 0; for (int i = 0; i < nr; i++) if (!strcmp(rows[i].state, "superseded")) sup++;
+    printf("DVLEDGER_STATUS\tcandidate=%s\tledger=%s\trows=%d\tcur=%d\tsuperseded=%d\tskipped_lines=%d\n", sha, ledger, nr, nr - sup, sup, nskip);
+    for (int j = 0; j < nds; j++) printf("COVERAGE\t%s\ttested=%d\ttotal=%d\n", doms[j], got[j], tot[j]);
+    int never = 0, unk = 0, near = 0;
+    for (int i = 0; i < nd; i++) {
+        Def *d = &defs[i]; if (!d->indomain) continue;
+        Row *t = tested(d), *l = latest(d->id);
+        if (!l) { printf("NEVER\t%s\n", d->id); never++; continue; }
+        printf("LAST\t%s\t%s\tms=%ld\tms_max=%ld\tbudget_s=%ld\tdef=%s\t%s\n", d->id, l->status, l->ms, l->msmax, d->budget, strcmp(l->def, d->def) ? "stale" : "current", l->note);
+        if (!t) { printf("UNTESTED\t%s\t%s\t%s\n", d->id, l->status, strcmp(l->def, d->def) ? "def-changed" : l->note); unk++; }
+        if (d->budget > 0 && l->msmax * 10 > d->budget * 1000L * 6) { printf("NEAR_WINDOW\t%s\tms_max=%ld\tbudget_s=%ld\tratio=%.2f\n", d->id, l->msmax, d->budget, l->msmax / (d->budget * 1000.0)); near++; }
+    }
+    printf("DVLEDGER_STATUS_END\tdomain=%s\tnever=%d\tuntested=%d\tnear_window=%d\n", domain, never, unk, near);
+    return 0;
+}
+static int changed_since(char changed[][256], int cap, const char *rev) {
+    char *v[] = {"git", "-C", root, "diff", "--name-only", (char *)rev, "--", 0}; np_result r = {0}; char why[300]; int k = 0;
+    if (np_run(v, 0, 0, 30, &r, why, sizeof why) || r.rc) { np_free(&r); return -1; }
+    char *s = r.out, *end = r.out + r.outn;
+    while (s && s < end && k < cap) { char *e = memchr(s, '\n', end - s); if (!e) e = end; long l = e - s; if (l > 0 && l < 256) { mm_copy(changed[k], 256, s, l); changed[k][l] = 0; k++; } s = e + 1; }
+    np_free(&r); return k;
+}
+static int cmd_delta(const char *rev) {
+    static char changed[4096][256]; int nc = 0, need = 0;
+    if (rev && (nc = changed_since(changed, 4096, rev)) < 0) return die("git diff failed for rev ", rev);
+    int bt = 0; for (int i = 0; i < nc; i++) if (!strcmp(changed[i], "tests/batches.tsv") || !strcmp(changed[i], "tests/run-batch.cx") || !strcmp(changed[i], "tools/affected.cx")) bt = 1;
+    for (int i = 0; i < nd; i++) {
+        Def *d = &defs[i]; if (!d->indomain) continue;
+        Row *t = tested(d), *l = latest(d->id); const char *why = 0;
+        if (!l) why = "never"; else if (!t && strcmp(l->def, d->def)) why = "def-changed"; else if (!t) why = l->status;
+        if (!why && rev && bt) why = "harness-or-row-changed-since-rev";   /* conservative: any shared input change reruns */
+        if (why) { printf("NEED\t%s\t%s\n", d->id, why); need++; }
+    }
+    printf("DVLEDGER_DELTA\tcandidate=%s\tdomain=%s\tneed=%d\tsince=%s\n", sha, domain, need, rev ? rev : "-");
+    return need ? 1 : 0;
+}
+static int cmp_order(const void *a, const void *b) { long x = *(const long *)a, y = *(const long *)b; return x < y ? -1 : x > y; }
+static int cmd_run(const char *ape, long budget, int jobs) {
+    long t0 = sy_now_ms(), deadline = t0 + budget * 1000L; int rounds = 0, ran = 0, unk_total = 0;
+    static long order[MAXB][2]; int no = 0;
+    for (int i = 0; i < nd; i++) if (defs[i].indomain) { Row *t = tested(&defs[i]), *l = latest(defs[i].id); order[no][0] = (t ? (1L << 50) : 0) + (l ? l->t / 1000 : 0); order[no][1] = i; no++; }
+    qsort(order, no, sizeof order[0], cmp_order);
+    int pos = 0, per = jobs * 3;
+    while (pos < no) {
+        long rem = (deadline - sy_now_ms()) / 1000; if (rem < 90) break;
+        while (load1() >= 3 && sy_now_ms() < deadline - 90000) sy_sleep_ms(3000);   /* idle gate, bounded by budget */
+        if (load1() >= 3) { printf("DVLEDGER_IDLE_WAIT_EXPIRED\tload1=%.2f\n", load1()); break; }
+        rem = (deadline - sy_now_ms()) / 1000;
+        char ids[16384] = "", ev[4400], js[16], dq[4400], com[4400]; int k = 0;
+        for (; k < per && pos < no; k++, pos++) { long l = strlen(ids); cx_fmt(ids + l, sizeof ids - l, "%s%s", l ? "," : "", defs[order[pos][1]].id); }
+        const char *td = sy_env("TMPDIR"); if (!td || !*td) td = "/tmp";
+        cx_fmt(ev, sizeof ev, "%s/dvledger-%d-r%d.tsv", td, sy_pid(), rounds); cx_fmt(js, sizeof js, "%d", jobs);
+        cx_fmt(dq, sizeof dq, "%s/tools/dvqualify.cx", root); cx_fmt(com, sizeof com, "%s/unisacc.com", root); /* lint:allow R1 repo launcher runs the dvqualify tool; the candidate under test is passed as --candidate */
+        char *v[] = {"sh", com, dq, "--", root, "--candidate", (char *)ape, "--ids", ids, "--out", ev, "--jobs", js, 0};
+        long outer = rem < 300 ? rem : 300; np_result r = {0}; char why[300]; long rt = sy_now_ms();
+        int ex = np_run(v, root, 0, (int)outer, &r, why, sizeof why);
+        printf("DVLEDGER_ROUND\t%d\tbatches=%d\trc=%d\tms=%ld\tload1=%.2f\t%s\n", rounds, k, ex ? -1 : r.rc, sy_now_ms() - rt, load1(), ex ? why : "-");
+        fflush(stdout); np_free(&r); rounds++; ran += k;
+        int u = 0; if (!ingest(ev, &u)) unk_total += u;
+        fflush(stdout); sy_unlink(ev);
+    }
+    printf("DVLEDGER_RUN_END\trounds=%d\tsubmitted=%d\tunknown_or_invalid=%d\tms=%ld\tremaining_order=%d\n", rounds, ran, unk_total, sy_now_ms() - t0, no - pos);
+    return unk_total ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    if (argc < 2) return die("usage: dvledger run|status|delta|ingest ...", 0);
+    const char *cmd = argv[1], *ape = 0, *hex = 0, *ev = 0, *rev = 0, *led = 0, *rt = 0; long budget = 1200; int jobs = 2;
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i], *nx = i + 1 < argc ? argv[i + 1] : 0;
+        if (!nx) return die("missing value for ", a);
+        if (!strcmp(a, "--candidate")) ape = nx; else if (!strcmp(a, "--sha")) hex = nx; else if (!strcmp(a, "--evidence")) ev = nx;
+        else if (!strcmp(a, "--since-rev")) rev = nx; else if (!strcmp(a, "--ledger")) led = nx; else if (!strcmp(a, "--root")) rt = nx;
+        else if (!strcmp(a, "--domain")) cpy(domain, sizeof domain, nx); else if (!strcmp(a, "--budget-s")) budget = atol(nx); else if (!strcmp(a, "--jobs")) jobs = atoi(nx);
+        else return die("unknown option ", a);
+        i++;
+    }
+    if (jobs < 1 || jobs > 8 || budget < 1) return die("bad --jobs or --budget-s", 0);
+    if (rt) { if (sy_realpath(rt, root, sizeof root) < 0) return die("bad --root ", rt); } else if (sy_cwd(root, sizeof root) < 0) return die("cwd", 0);
+    if (ape) { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(ape, &b, &n, 256L << 20) || !b || sy_sha256_hex(b, (long)n, sha)) return die("cannot hash candidate ", ape); free(b); }
+    else if (hex && is_hex64(hex)) cpy(sha, sizeof sha, hex); else return die("need --candidate APE or --sha HEX64", 0);
+    if (!strcmp(cmd, "run") && !ape) return die("run needs --candidate APE", 0);
+    if (led) cpy(ledger, sizeof ledger, led);
+    else { const char *h = sy_env("HOME"); char dir[4200]; if (!h) return die("no HOME", 0); cx_fmt(dir, sizeof dir, "%s/.cache/unisacc/devsvc/ledger", h);
+           if (sy_mkdir_all(dir, 0755)) return die("cannot create ", dir); cx_fmt(ledger, sizeof ledger, "%s/%.16s.tsv", dir, sha); }
+    rows = calloc(MAXR, sizeof *rows); if (!rows) return die("oom", 0);
+    if (load_defs()) return 2;
+    load_ledger();
+    if (!strcmp(cmd, "status")) return cmd_status();
+    if (!strcmp(cmd, "delta")) return cmd_delta(rev);
+    if (!strcmp(cmd, "ingest")) { int u = 0; if (!ev) return die("ingest needs --evidence", 0); return ingest(ev, &u) ? 2 : 0; }
+    if (!strcmp(cmd, "run")) return cmd_run(ape, budget, jobs);
+    return die("unknown command ", cmd);
+}
