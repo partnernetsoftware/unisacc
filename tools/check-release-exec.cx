@@ -18,6 +18,12 @@
  *   G3 DRAFT_READBACK (downloaded byte differs), G4 CI_SUCCESS (job failure), CI_VERDICT (fail=1),
  *   G5 READBACK rc 1 after publish -> rollback commands run (--draft=true, previous --latest),
  *      no release delete, no tag delete
+ *   N3 origin/main ancestor gate: pass at X/Y1/Y2; main advanced before X, during CI (before Y1)
+ *      and during readback (before Y2) each refused MAIN_ADVANCED with both heads, no commit,
+ *      no rollback of public state; no origin/main -> MAIN_UNKNOWN
+ *   N4 --warm: cold compile then cache hit in the readback path forms, receipt hit without
+ *      recompile, step 6 sees READY, identity change rewarms, forged receipt refused, evicted
+ *      cache recompiled, a compile that never caches refused without receipt
  * Marker: CHECK_RELEASE_EXEC. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -62,10 +68,9 @@ static int sh(char **v, const char *cwd, char *o, long cap) {
 /* ================= fake mode ================= */
 static char fdir[4096];
 static void flog(const char *who, int argc, char **argv, int from) {
-    np_buf b = {0}; char p[4400]; size_t n = 0; char *old;
+    /* one O_APPEND write per call: the N4 warm-up runs fake children in parallel */
+    np_buf b = {0}; char p[4400]; int fd;
     cx_fmt(p, sizeof p, "%s/calls.log", fdir);
-    old = cx_read(p, &n);
-    if (old) np_put(&b, old, n);
     np_puts(&b, who);
     /* tool paths are logged without their extension: assertions then never name a source file */
     for (int i = from; i < argc; i++) {
@@ -75,7 +80,9 @@ static void flog(const char *who, int argc, char **argv, int from) {
         else np_puts(&b, argv[i]);
     }
     np_puts(&b, "\n");
-    cx_write(p, b.p, b.n); free(b.p); free(old);
+    fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) { sy_write_all(fd, b.p, (long)b.n); sy_close(fd); }
+    free(b.p);
 }
 static int argi(int argc, char **argv, const char *s) { for (int i = 0; i < argc; i++) if (tx_eqz(argv[i], s)) return i; return -1; }
 static void copy_file(const char *a, const char *b, int corrupt) {
@@ -85,6 +92,18 @@ static void copy_file(const char *a, const char *b, int corrupt) {
     cx_write(b, t, n); free(t);
 }
 static const char *leafs[6] = {"unisacc.com", "pkg.bin", "slice-win-arm64", "unisacc.com.build.json", "build.json", "SHA256SUMS"};
+/* N3 fixture: a commit on top of HEAD becomes the remote main (as if another window pushed) */
+static void advance_main(const char *flag) {
+    char p[4400], repo[4400], tree[128], head[128], c[128], spec[200];
+    cx_fmt(p, sizeof p, "%s/%s", fdir, flag);
+    if (flag[0] && (sy_exists(p) != 1 || sy_unlink(p))) return;
+    cx_fmt(repo, sizeof repo, "%s/repo", fdir);
+    { char *v[] = {"git", "rev-parse", "HEAD^{tree}", 0}; if (sh(v, repo, tree, sizeof tree)) return; }
+    { char *v[] = {"git", "rev-parse", "HEAD", 0}; if (sh(v, repo, head, sizeof head)) return; }
+    { char *v[] = {"git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", tree, "-p", head, "-m", "another window", 0}; if (sh(v, repo, c, sizeof c)) return; }
+    cx_fmt(spec, sizeof spec, "%s:refs/heads/main", c);
+    { char *v[] = {"git", "push", "-q", "origin", spec, 0}; sh(v, repo, 0, 0); }
+}
 static int fake_gh(int argc, char **argv) {
     char p[4400], q[4800]; char *t;
     flog("gh", argc, argv, 3);
@@ -124,7 +143,7 @@ static int fake_gh(int argc, char **argv) {
     if (argi(argc, argv, "list") > 0) { cx_fmt(q,sizeof q,"%s/replacement",fdir);sy_printf("%s\t9999-01-01T00:00:00Z\n",sy_exists(q)==1?"777002":"777001"); return 0; }
     if (argi(argc, argv, "run") > 0 && argi(argc, argv, "view") > 0) {
         if(argi(argc,argv,"status,conclusion")>0){cx_fmt(q,sizeof q,"%s/replacement",fdir);sy_printf("completed\t%s\n",sy_exists(q)==1?"failure":"success");return 0;}
-        if (argi(argc, argv, "--log") > 0) { cx_fmt(q, sizeof q, "%s/ci.log", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
+        if (argi(argc, argv, "--log") > 0) { advance_main("advance-at-ci"); cx_fmt(q, sizeof q, "%s/ci.log", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
         if (argi(argc, argv, "status") > 0) { sy_printf("completed\n"); return 0; }
         cx_fmt(q, sizeof q, "%s/ci.json", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0;
     }
@@ -134,6 +153,24 @@ static int fake_unisacc(int argc, char **argv) {
     char q[4400]; char *t;
     flog("unisacc", argc, argv, 3);
     if (argc < 4) return 3;
+    /* N4 fixture run cache: keyed by the tool path exactly as passed (as the product keys it) */
+    if (argc >= 6 && tx_eqz(argv[4], "--") && (tx_eqz(argv[5], "warm") || tx_eqz(argv[5], "--list-steps"))) {
+        char key[4400]; long i, n = tlen(argv[3]); int existed;
+        if (n > 4000) return 3;
+        for (i = 0; i < n; i++) key[i] = argv[3][i] == '/' ? '_' : argv[3][i];
+        key[n] = 0;
+        cx_fmt(q, sizeof q, "%s/fakecache/%s", fdir, key);
+        existed = sy_exists(q) == 1;
+        { char nc[4400]; char *skip; int uncached; cx_fmt(nc, sizeof nc, "%s/nocache", fdir);
+          skip = slurp(nc); uncached = skip && tx_eqz(skip, argv[3]); free(skip);
+          if (!existed && !uncached && cx_write(q, "compiled\n", 9)) return 3; }
+        if (sy_env("UNISACC_RR_TIME")) {
+            if (existed) sy_eprintf("RR_TIME\tlookup_hit=2\tns=1\n");
+            else sy_eprintf("RR_TIME\tlookup_hit=0\tns=1\nRR_TIME\toutput\tkind=exec-prepare\tbytes=1\tns=1\n");
+        }
+        if (tx_eqz(argv[5], "--list-steps")) { sy_printf("metadata\nzip-members\n"); return 0; }
+        return 2;
+    }
     if(argv[3][0]=='/'){
         const char *tool=strrchr(argv[3],'/')+1;
         if(tx_eqz(tool,"chain-step.cx") || tx_eqz(tool,"check-run-comm.cx")){sy_printf("fixture child %s\n",tool);return 0;}
@@ -177,6 +214,7 @@ static int fake_unisacc(int argc, char **argv) {
             free(first);
             if(sy_unlink(q) || put(fdir,"fresh-output-verified","yes"))return 2;
         }
+        advance_main("advance-at-readback");
         cx_fmt(q, sizeof q, "%s/readback-fail", fdir);
         sy_printf("READBACK_STEP fake %s\n", sy_exists(q) == 1 ? "FAIL" : "PASS");
         if(argc>11 && tx_eqz(argv[11],"zip-members") && sy_exists(q)==0){
@@ -279,6 +317,9 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     put(td, "state", "none"); put(td, "calls.log", "");
     cx_fmt(p, sizeof p, "%s/corrupt-download", td); rmrf(p);
     cx_fmt(p, sizeof p, "%s/readback-fail", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/fakecache", td); rmrf(p); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
+    cx_fmt(p, sizeof p, "%s/advance-at-ci", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/advance-at-readback", td); rmrf(p);
     /* wrappers: fake gh in PATH, fake ./unisacc.com in the fixture root */
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake gh \"$@\"\n",selfbin); put(binp, "gh", t);
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake unisacc \"$@\"\n",selfbin); put(fx, leafs[0], t);
@@ -460,6 +501,130 @@ static void part_b(void) {
     rc = rx("--from-step", "7", 0, "tools/release-run.cx");
     ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "R2.release-run-execute-hook");
 }
+/* lines of t equal to s */
+static int count_lines(const char *t, const char *s) {
+    long n = t ? tlen(t) : 0, at = 0, sn = tlen(s); int k = 0;
+    while (t && at < n) {
+        long e = tx_chr(t + at, n - at, '\n'), ll = e < 0 ? n - at : e;
+        if (ll == sn && !memcmp(t + at, s, (size_t)sn)) k++;
+        at += ll + 1;
+    }
+    return k;
+}
+static char *refsha(const char *ref) { static char o[128]; char *v[] = {"git", "rev-parse", (char *)ref, 0}; if (sh(v, fx, o, sizeof o)) o[0] = 0; return o; }
+/* N3: origin/main must be an ancestor of HEAD before X, Y1 and Y2 */
+static void part_m(void) {
+    int rc; char *c, want[300], om[64], head[64];
+    cx_fmt(fdir, sizeof fdir, "%s", td);
+    fixture(99, 0, 0, 1);
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 0 && has(out, "GATE\t1\tMAIN_ANCESTOR\tPASS") && has(out, "GATE\t4\tMAIN_ANCESTOR\tPASS") && has(out, "GATE\t7\tMAIN_ANCESTOR\tPASS"), "N3.ancestor-pass-x-y1-y2");
+    /* X: another window pushed main before the run */
+    fixture(99, 0, 0, 1); advance_main("");
+    { char *v[] = {"git", "fetch", "-q", "origin", 0}; sh(v, fx, 0, 0); }
+    cx_fmt(om, sizeof om, "%s", refsha("refs/remotes/origin/main")); cx_fmt(head, sizeof head, "%s", refsha("HEAD"));
+    put(td, "calls.log", "");
+    rc = rx(0, 0, 0, 0); c = calls();
+    expect_gate("N3.x-main-advanced", rc, "MAIN_ADVANCED");
+    cx_fmt(want, sizeof want, "origin/main=%s HEAD=%s", om, head);
+    ck(rc == 2 && tlen(om) == 40 && tx_find(out, tlen(out), want, tlen(want)) >= 0 && has(out, "--from-step 1") && has(out, "ROLLBACK\t1\tNONE\tmain moved; candidate and public state untouched") &&
+       c && !has(c, "unisacc tools/devsvc -- git commit") && !has(c, "gh -R example/fixture release create"), "N3.x-names-heads-no-commit-no-merge");
+    free(c);
+    /* Y1: main moves while CI runs */
+    fixture(99, 0, 0, 1); put(td, "advance-at-ci", "1");
+    rc = rx(0, 0, 0, 0); c = calls();
+    expect_gate("N3.y1-main-advanced", rc, "MAIN_ADVANCED");
+    ck(rc == 2 && has(out, "GATE\t1\tMAIN_ANCESTOR\tPASS") && has(out, "--from-step 4") && c && !has(c, "unisacc tools/devsvc -- git commit -m v0.0.99 Y1") &&
+       !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "N3.y1-before-commit-not-published");
+    free(c);
+    /* Y2: main moves during the public readback; public state is not rolled back */
+    fixture(99, 0, 0, 1); put(td, "advance-at-readback", "1");
+    rc = rx(0, 0, 0, 0); c = calls();
+    expect_gate("N3.y2-main-advanced", rc, "MAIN_ADVANCED");
+    ck(rc == 2 && has(out, "GATE\t4\tMAIN_ANCESTOR\tPASS") && has(out, "--from-step 7") && c && has(c, "gh -R example/fixture release edit v0.0.99 --draft=false --latest") &&
+       !has(c, "gh -R example/fixture release edit v0.0.99 --draft=true") && !has(c, "unisacc tools/devsvc -- git commit -m v0.0.99 Y2"), "N3.y2-no-rollback-no-commit");
+    free(c);
+    /* no remote-tracking main (no history): named refusal, never a pass */
+    fixture(99, 0, 0, 1);
+    { char *v[] = {"git", "update-ref", "-d", "refs/remotes/origin/main", 0}; sh(v, fx, 0, 0); }
+    expect_gate("N3.no-origin-main-refused", rx(0, 0, 0, 0), "MAIN_UNKNOWN");
+}
+static int rxw(void) {
+    char ex[4400]; char *v[] = {execbin, "--warm", "release/candidate.tsv", "--layout", lay, "--out", ex, 0}; np_result r = {0}; char why[256]; int rc;
+    char *env[] = {pathenv, fakeenv, 0};
+    cx_fmt(ex, sizeof ex, "%s/xout", td);
+    out[0] = 0;
+    if (np_run(v, fx, env, 55, &r, why, sizeof why)) { np_free(&r); return 125; }
+    { size_t n = 0; for (size_t i = 0; i < r.outn && n + 1 < sizeof out; i++) out[n++] = r.out[i];
+      for (size_t i = 0; i < r.errn && n + 1 < sizeof out; i++) out[n++] = r.err[i]; out[n] = 0; }
+    rc = r.rc; np_free(&r);
+    return rc;
+}
+static void warm_key_of(char *key) {
+    long k = tx_find(out, tlen(out), "WARM\tRECEIPT\t", 13), j = 0; key[0] = 0;
+    if (k < 0) return;
+    k = tx_find(out + k, tlen(out + k), "key=", 4) + k;
+    if (k < 0) return;
+    k += 4; while (j < 64 && out[k + j]) { key[j] = out[k + j]; j++; }
+    key[j] = 0;
+}
+/* N4: readback warm-up of the checkout-product compiles */
+static void part_w(void) {
+    int rc; char *c, line[4800], k1[80], k2[80], p[4800];
+    static const char *forms[5] = {"release/tools/c47-1-readback -- --list-steps", "%s/tools/chain-step -- warm", "tools/release-ape -- warm", "%s/tools/check-run-comm -- warm", "%s/tools/release-layout -- warm"};
+    fixture(99, 0, 0, 1);
+    cx_fmt(p, sizeof p, "%s/release/tools", fx); sy_mkdir(p, 0700);
+    put(fx, "release/tools/c47-1-readback.cx", "readback fixture"); put(fx, "tools/chain-step.cx", "smoke fixture"); put(fx, "tools/release-ape.cx", "ape fixture");
+    put(fx, "tools/check-run-comm.cx", "comm fixture"); put(fx, "tools/release-layout.cx", "layout fixture");
+    put(td, "calls.log", "");
+    rc = rxw(); c = calls(); warm_key_of(k1);
+    { int forms_ok = 1;
+      for (int i = 0; i < 5; i++) { char f[300]; cx_fmt(f, sizeof f, forms[i], fx); cx_fmt(line, sizeof line, "unisacc %s", f); if (count_lines(c, line) != 2) { forms_ok = 0; sy_printf("  warm calls %d: %s\n", count_lines(c, line), line); } }
+      ck(rc == 0 && has(out, "WARM\tRECEIPT\tNEW") && has(out, "WARM\tRESULT\tREADY") && count_lines(out, "WARM\tTARGET\ttools/chain-step.cx\tHIT\tafter-cold") == 1 &&
+         count_lines(out, "WARM\tTARGET\trelease/tools/c47-1-readback.cx\tHIT\tafter-cold") == 1 && forms_ok, "N4.warm-compiles-once-then-hits-readback-forms"); }
+    free(c);
+    put(td, "calls.log", "");
+    rc = rxw(); c = calls(); warm_key_of(k2);
+    cx_fmt(line, sizeof line, "unisacc %s/tools/chain-step -- warm", fx);
+    ck(rc == 0 && has(out, "WARM\tRECEIPT\tHIT") && tx_eqz(k1, k2) && tlen(k1) == 64 && count_lines(c, line) == 1, "N4.same-identity-no-recompile");
+    free(c);
+    rc = rx(0, 0, 0, 0);
+    cx_fmt(line, sizeof line, "WARM\t6\tREADY\tkey=%s", k1);
+    ck(rc == 0 && has(out, line), "N4.readback-step-sees-warm-identity");
+    /* identity changes: one entry tool's bytes */
+    put(fx, "tools/chain-step.cx", "smoke fixture changed");
+    put(td, "calls.log", "");
+    rc = rxw(); c = calls(); warm_key_of(k2);
+    cx_fmt(line, sizeof line, "unisacc %s/tools/chain-step -- warm", fx);
+    ck(rc == 0 && has(out, "WARM\tRECEIPT\tNEW") && !tx_eqz(k1, k2) && count_lines(c, line) == 2, "N4.identity-change-rewarms");
+    free(c);
+    /* receipt bytes changed: refused */
+    cx_fmt(p, sizeof p, "xout/warm-%s.tsv", k2);
+    put(td, p, "WARM\tforged\n");
+    rc = rxw();
+    ck(rc == 2 && has(out, "release-exec: REFUSE RELEASE_EXEC_GATE_WARM_RECEIPT receipt="), "N4.tampered-receipt-refused");
+    /* cache evicted under a valid receipt: the probe misses, the warm-up compiles again */
+    fixture(99, 0, 0, 1);
+    cx_fmt(p, sizeof p, "%s/xout", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/release/tools", fx); sy_mkdir(p, 0700);
+    put(fx, "release/tools/c47-1-readback.cx", "readback fixture"); put(fx, "tools/chain-step.cx", "smoke fixture"); put(fx, "tools/release-ape.cx", "ape fixture");
+    put(fx, "tools/check-run-comm.cx", "comm fixture"); put(fx, "tools/release-layout.cx", "layout fixture");
+    rxw();
+    cx_fmt(p, sizeof p, "%s/fakecache/tools_release-ape.cx", td); rmrf(p);
+    rc = rxw();
+    ck(rc == 0 && has(out, "WARM\tRECEIPT\tHIT") && has(out, "WARM\tTARGET\ttools/release-ape.cx\tMISS\treceipt") && has(out, "WARM\tREWARM\t1 target(s)") &&
+       has(out, "WARM\tTARGET\ttools/release-ape.cx\tHIT\tafter-rewarm"), "N4.evicted-cache-recompiled");
+    /* a compile that never lands in the run cache: refused, no receipt */
+    cx_fmt(p, sizeof p, "%s/xout", td); rmrf(p);
+    put(fx, "tools/release-layout.cx", "layout fixture uncached");
+    { char lp[4600]; cx_fmt(lp, sizeof lp, "%s/tools/release-layout.cx", fx); put(td, "nocache", lp); }
+    cx_fmt(p, sizeof p, "%s/fakecache", td); rmrf(p); sy_mkdir(p, 0700);
+    rc = rxw(); warm_key_of(k2);
+    cx_fmt(p, sizeof p, "%s/xout/warm-%s.tsv", td, k2);
+    ck(rc == 2 && has(out, "WARM\tTARGET\ttools/release-layout.cx\tMISS\tafter-cold") && has(out, "release-exec: REFUSE RELEASE_EXEC_GATE_WARM 1 target(s) not served from the run cache") &&
+       sy_exists(p) == 0, "N4.uncached-compile-refused-no-receipt");
+    cx_fmt(p, sizeof p, "%s/nocache", td); rmrf(p);
+}
 static void part_c(void) {
     int rc; char *c, p[4500];
     /* G3 draft readback */
@@ -491,6 +656,8 @@ static void part_c(void) {
     ck(c && has(c, "gh -R example/fixture release edit v0.0.99 --draft=true") && has(c, "gh -R example/fixture release edit v0.0.98 --latest") &&
        !has(c, "gh -R example/fixture release delete") && !has(c, "unisacc tools/devsvc -- git commit -m v0.0.99 Y2"), "G5.rollback-executed-no-delete");
     free(c);
+    part_m();
+    part_w();
 }
 
 static int oracle(char **args,np_buf *result){
@@ -546,9 +713,12 @@ int main(int argc, char **argv) {
     }
     if ((argc==3 || argc==4 || argc==5) && tx_eqz(argv[1],"--part"))part=argv[2];
     if (sy_cwd(root, sizeof root)) die("cwd");
-    if (cx_fmt(td, sizeof td, "/tmp/check-release-exec-%d", sy_pid())) die("td");
-    rmrf(td);
-    { char *v[] = {"mkdir", "-p", td, 0}; if (sh(v, "/", 0, 0)) die("mkdir td"); }
+    /* fixture repos live in a unique directory under $CLAUDE_JOB_DIR/tmp or $TMPDIR, never directly in /tmp */
+    { char base[4096]; const char *j = sy_env("CLAUDE_JOB_DIR"), *t = sy_env("TMPDIR");
+      if (j && j[0] == '/') { if (cx_fmt(base, sizeof base, "%s/tmp", j)) die("td base"); { char *v[] = {"mkdir", "-p", base, 0}; if (sh(v, "/", 0, 0)) die("td base"); } }
+      else if (t && t[0] == '/' && !tx_eqz(t, "/tmp") && !tx_eqz(t, "/tmp/")) { if (cx_fmt(base, sizeof base, "%s", t)) die("td base"); }
+      else if (cx_fmt(base, sizeof base, "/tmp/check-release-exec-root-%d", sy_uid()) || (sy_mkdir(base, 0700) && sy_exists(base) != 1)) die("td base");
+      if (sy_mkdtemp(base, "check-release-exec-", td, sizeof td)) die("td"); }
     sy_child_t prep,hook;int preparing=0,preparing_hook=0;
     if(strcmp(part,"n")) {
         char self[4096],msg[120];
