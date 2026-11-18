@@ -217,7 +217,7 @@ static const char *browser(char *url,char **out,int stage) {
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
     int attempt;
-    if(stage==8) {
+    if(stage==8 || stage==9) {
         args[2]="--disable-gpu";
         args[3]="--disable-component-update";
     }
@@ -635,6 +635,48 @@ static int check_combat(const char *mutation,int published) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+static int check_audio(const char *mutation) {
+    static const int points[]={2,42,82,202,402,802};
+    char cwd[1024],url[1950],wave[16],*out=0,*facts;
+    size_t size=0;
+    const char *p;
+    int engine,slope,start,end,gain,attack,duration,actual[5],i,failed=0;
+    facts=cx_read("ujs/practice/uxe/test/d1-audio.tsv",&size);
+    if(!facts || !size) return input_error("audio-facts",facts);
+    p=strstr(facts,"\nlock\t");
+    if(!p || sscanf(facts,"engine %15s %d %d",wave,&engine,&slope)!=3 ||
+        sscanf(p," lock %15s %d %d %d %d %d",wave,&start,&end,&gain,&attack,&duration)!=6 ||
+        strcmp(wave,"sine") || start!=800 || end!=800) return input_error("audio-facts",facts);
+    free(facts);
+    if(!getcwd(cwd,sizeof cwd)) return input_error("audio-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?freeze-targets&%s&audio=%d,%d,%d,%d,%d,%d",
+        cwd,mutation,points[0],points[1],points[2],points[3],points[4],points[5]);
+    p=browser(url,&out,9);
+    if(!p) return input_error("audio-browser",out);
+    for(i=0;i<5;i++) actual[i]=take_channel(&p,',');
+    failed=actual[0]!=1 || actual[1]!=1 || actual[2]!=1 || actual[3]!=1 || actual[4]!=engine+28*slope;
+    printf("D1_AUDIO_EVENTS gun=%d missile=%d explosion=%d lock=%d engine_hz=%d failed=%d\n",
+        actual[0],actual[1],actual[2],actual[3],actual[4],failed);
+    for(i=0;i<6;i++) {
+        int got,used=0,n=points[i],rise=attack*8,stop=duration*8;
+        double envelope=n<rise?(double)n/rise:n<stop?(double)(stop-n)/(stop-rise):0;
+        int expected=(int)(.5+gain*10*envelope*.9510565163);
+        int bad;
+        if(sscanf(p,"%d%n",&got,&used)!=1 || used<=0) return input_error("audio-sample",out);
+        p+=used;
+        bad=abs(got-expected)>5;
+        if(i<5) {
+            if(*p!=',') return input_error("audio-sample",out);
+            p++;
+        }
+        printf("D1_AUDIO_PCM n=%d actual=%d expected=%d failed=%d\n",n,got,expected,bad);
+        failed+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("audio-trailer",out);
+    free(out);
+    return failed!=0;
+}
+
 static void pursuing_left(int tick,int *x,int *y) {
     int phase=(tick-30)%96;
     int sweep=phase<24?phase:phase<72?48-phase:phase-96;
@@ -944,6 +986,19 @@ static int exercise_keyboard(ChromeInput *c,const char *url,int battle) {
         if(sy_now_ms()>=end || i>=100) return input_error("cdp-ready",0);
         sy_sleep_ms(35);
     }
+    if(battle==2) {
+        int muted;
+        for(i=1;i>=0;i--) {
+            char value[20];
+            if(!keyboard(c,"n","KeyN",78,1) || !keyboard(c,"n","KeyN",78,0) ||
+                !cdp_call(c,"Runtime.evaluate","{\"expression\":\"String(Number(document.querySelector('aside').textContent.endsWith('静音')))\"}") ||
+                !cdp_string(c,"\"value\":\"",value,sizeof value)) return input_error("cdp-audio-key",0);
+            muted=atoi(value);
+            printf("D1_AUDIO_KEY key=N muted=%d expected=%d\n",muted,i);
+            if(muted!=i) return 1;
+        }
+        return 0;
+    }
     if(battle) {
         LiveBattle initial;
         if(!read_battle(c,&initial)) return input_error("cdp-initial-hud",0);
@@ -992,8 +1047,9 @@ static int check_pages_keyboard(const char *mutation,int battle) {
         "--remote-debugging-pipe","--window-size=1280,807",option,"about:blank",0};
     int rc,n;
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    n=tx_snprintf(url,sizeof url,"file://%s/docs/uxe/fly-next/index.html?input-test=1%s&%s",cwd,
-        battle?"&hold-course":"",mutation);
+    n=tx_snprintf(url,sizeof url,"file://%s/%s?input-test=1%s&%s",cwd,
+        battle==2?"ujs/practice/uxe/test/d1-pixel-a.html":"docs/uxe/fly-next/index.html",
+        battle==1?"&hold-course":"",mutation);
     if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -1039,6 +1095,9 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"viewport")) return check_viewport("");
     if(argc==2 && !strcmp(argv[1],"short-canvas")) return check_viewport(argv[1]);
     if(argc==2 && !strcmp(argv[1],"skirmish")) return check_skirmish("");
+    if(argc==2 && !strcmp(argv[1],"audio")) return check_audio("");
+    if(argc==2 && !strcmp(argv[1],"audio-key")) return check_pages_keyboard("",2);
+    if(argc==2 && (!strcmp(argv[1],"no-lock-sound") || !strcmp(argv[1],"flat-envelope"))) return check_audio(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"no-return-fire") || !strcmp(argv[1],"no-maneuver") ||
         !strcmp(argv[1],"no-restart"))) return check_skirmish(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||

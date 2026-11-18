@@ -74,7 +74,7 @@ function brackets(context,x,y) {
   }
 }
 
-export function combatModel(context,query) {
+export function combatModel(context,query,event) {
   const enemies=course.map(slot=>({...slot,hp:4,respawn:0,fireReady:40+slot.kind*7}));
   const bursts=[], rounds=[], incoming=[];
   const counterfire=!query.has("no-return-fire"), maneuver=!query.has("no-maneuver");
@@ -86,6 +86,7 @@ export function combatModel(context,query) {
     bursts.unshift({tick,x:pose.x,y:pose.y,kind:"smoke"});
     if(enemy.hp<=0) {
       kills++;
+      event("explosion");
       enemy.fall=tick;
       enemy.respawn=tick+110;
       bursts.unshift({tick,x:pose.x,y:pose.y,kind:"burst"});
@@ -134,6 +135,7 @@ export function combatModel(context,query) {
     const acquired=selected && offset(selected)<30*30;
     if(gun && ammo && tick>=cannonReady) {
       ammo--;
+      event("gun");
       lastFire=tick;
       cannonReady=tick+5;
       if(acquired) {
@@ -143,6 +145,7 @@ export function combatModel(context,query) {
     }
     if(missile && missiles && acquired && tick>=missileReady) {
       missiles--;
+      event("missile");
       lastFire=tick;
       missileReady=tick+18;
       rounds.push({start:tick,target:selected});
@@ -166,7 +169,9 @@ export function combatModel(context,query) {
       enemySprite(context,enemy,{...enemy.pose,x,y},.15+age*.025);
     }
     if(acquired && selected.hp>0 && !query.has("no-lock")) brackets(context,selected.pose.x,selected.pose.y);
-    locked=Boolean(acquired && selected.hp>0);
+    const hasLock=Boolean(acquired && selected.hp>0);
+    if(hasLock && !locked) event("lock");
+    locked=hasLock;
     for(const shot of rounds) if(shot.target.pose) {
       const t=(tick-shot.start)/13;
       const x=213+(shot.target.pose.x-213)*t,y=166+(shot.target.pose.y-166)*t;
