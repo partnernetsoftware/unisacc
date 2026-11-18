@@ -4,7 +4,7 @@ const image=paint.createImageData(width,height),data=image.data;
 const query=new URLSearchParams(location.search);
 const reflections=!query.has("no-reflection");
 const reaches=[
-  ["苇汀",[75,65,82],[243,175,102],[105,87,102],[60,47,68],[61,48,53],[255,217,145]],
+  ["苇汀",[151,113,80],[255,187,95],[171,111,63],[105,66,46],[83,57,43],[255,221,151]],
   ["花浅",[83,72,113],[222,153,156],[113,101,145],[63,58,91],[65,52,72],[255,210,171]],
   ["紫雾",[47,49,92],[171,151,175],[74,91,130],[41,52,90],[45,43,77],[227,200,190]],
   ["青峡",[32,70,86],[133,183,157],[57,116,119],[26,71,83],[28,63,70],[244,207,130]],
@@ -13,6 +13,8 @@ const reaches=[
   ["星滩",[22,28,66],[116,107,146],[61,78,123],[25,43,79],[35,35,63],[199,243,209]],
   ["晨浦",[75,95,122],[240,188,152],[100,134,146],[49,89,110],[60,72,84],[255,231,170]]
 ];
+const coolDusk=query.has("cool-dusk")?
+  ["苇汀",[75,65,82],[243,175,102],[105,87,102],[60,47,68],[61,48,53],[255,217,145]]:null;
 const boat={x:0,z:0,speed:.35,yaw:0,tick:0};
 const keys=new Set(),end=reachLength*reaches.length;
 const river=z=>5.4*Math.sin(z/49)+4.3*Math.sin(z/117);
@@ -155,26 +157,80 @@ function crossing(theme) {
   if(query.has("no-bridge")) return;
   const first=Math.floor(boat.z/reachLength);
   for(let segment=first+1;segment>=first;segment--) {
-    const z=segment*reachLength+36,d=z-boat.z;
+    const z=segment*reachLength+24,d=z-boat.z;
     if(d<9 || d>300) continue;
-    const [, ,fog, ,water,bank,glow]=theme;
-    const p=point(river(z),z), span=half(z)*p.scale;
+    const [, ,mist, ,water,bank,glow]=theme;
+    const p=point(river(z),z), span=half(z)*p.scale*(query.has("narrow-bridge")?.62:1);
     const top=p.y-5*p.scale,deck=Math.max(2,p.scale*.85);
-    const stone=css(blend(bank,fog,clamp(d/210,0,.7)));
-    const edge=css(blend(bank,glow,.28));
+    const wood=css(blend(blend(bank,[106,58,42],.8),mist,clamp((d-55)/270,0,.58)));
+    const trim=css(blend(bank,glow,.34));
     for(let i=Math.floor(-span);i<span;i++) {
       const arch=Math.min(Math.abs(i/span),1);
       const foot=top+deck+p.scale*4*arch*arch;
-      pixel(stone,p.x+i,top,1,foot-top);
-      if(i%7===0) pixel(edge,p.x+i,top,1,1);
+      pixel(wood,p.x+i,top,1,foot-top);
+      pixel(trim,p.x+i,top,1,1);
+      if(i%7===0) pixel(wood,p.x+i,top-7,1,7);
     }
+    pixel(wood,p.x-span,top-7,Math.round(2*span),1);
     for(const side of [-1,1]) {
       const x=p.x+side*span*.77, size=Math.max(2,p.scale*.55);
-      pixel(stone,x-size,p.y-p.scale*5,size*2,p.scale*5);
-      pixel(css(glow),x,top-4,size,size);
+      pixel(wood,x-size,p.y-p.scale*5,size*2,p.scale*5);
+    }
+    if(d<135 && !query.has("no-bridge-lights")) for(const lane of [-.84,-.42,0,.42,.84]) {
+      const x=p.x+lane*span,size=Math.max(1,Math.round(p.scale*.47));
+      pixel(wood,x,top-12,1,10);
+      pixel("#ab6742",x-2,top-12,size+2,size+3);
+      pixel("#ffe9a3",x-1,top-11,size,Math.max(1,size+1));
       if(reflections) for(let stripe=0;stripe<5;stripe++) {
-        const at=p.y+1+stripe*p.scale;
-        pixel(css(blend(water,glow,.42-stripe*.05)),x+noise(stripe,boat.tick>>2)%3,at,size,1);
+        const at=p.y+1+stripe*Math.max(1,p.scale*.62);
+        pixel(css(blend(water,glow,.45-stripe*.06)),x+noise(stripe,boat.tick>>2)%3,at,size,1);
+      }
+    }
+    if(d<135 && !query.has("no-lotus")) for(const bunch of [-.48,.02,.50]) {
+      const size=Math.max(1,Math.round(p.scale*.44));
+      for(const petal of [-1,0,1]) {
+        const x=p.x+bunch*span+petal*size*2.6;
+        const y=top+deck+size*(petal?3:4);
+        pixel(wood,x,top+deck,1,y-top-deck);
+        pixel("#8e3732",x-2*size,y+1,4*size,size);
+        pixel("#8e3732",x-size*1.5,y+size,3*size,size);
+        pixel("#d35443",x-size,y-size,2*size,3*size);
+        pixel("#ff7552",x-size*.65,y,Math.max(1,Math.round(1.3*size)),size);
+        pixel("#ffc782",x,y,1,1);
+        if(reflections) for(let stripe=0;stripe<4;stripe++) {
+          const shift=noise(stripe+petal,boat.tick>>1)%5-2;
+          pixel("#cb674d",x-size+shift,p.y+8+stripe*3,size+2,1);
+        }
+      }
+    }
+  }
+}
+function foregroundLily(theme) {
+  if(query.has("no-foreground-lilies")) return;
+  const [, , , ,water,bank,glow]=theme;
+  const green=css(blend(bank,[113,145,72],.83));
+  const first=Math.floor(boat.z/6)*6;
+  for(let ring=7;ring>=0;ring--) {
+    const z=first+13+ring*2;
+    if(z-boat.z<11) continue;
+    for(const side of [-1,1]) {
+      const lane=.53+(noise(ring,side)%20)/100;
+      const p=point(river(z)+side*half(z)*lane,z);
+      if(p.y<158 || p.y>237) continue;
+      const sx=Math.max(3,p.scale*(.75+noise(side,ring)%7/14));
+      const sy=Math.max(2,sx*.33);
+      for(let row=-Math.floor(sy);row<=sy;row++) {
+        const span=sx*Math.sqrt(Math.max(0,1-row*row/(sy*sy)));
+        const notch=row<0 && row>-sy*.8?span*.34:0;
+        if(span>=1) {
+          pixel(css(blend(water,bank,.44)),p.x-span,p.y+row+2,Math.max(1,2*span),1);
+          pixel(green,p.x-span+(side<0?notch:0),p.y+row,Math.max(1,2*span-notch),1);
+        }
+      }
+      if((ring+side)%3===0) {
+        pixel("#54633f",p.x,p.y-p.scale*.75,1,p.scale*.75);
+        pixel("#bc6957",p.x-1,p.y-p.scale*.75-3,3,4);
+        pixel(css(glow),p.x,p.y-p.scale*.75-4,1,2);
       }
     }
   }
@@ -222,12 +278,13 @@ function draw() {
   const phase=clamp((boat.z-realm*reachLength)/18,0,1);
   const theme=realm>0 && phase<1?reaches[realm].map((value,index)=>
     index?blend(reaches[realm-1][index],value,phase*phase*(3-2*phase)):value):reaches[realm];
-  background(theme);
+  background(realm===0 && coolDusk?coolDusk:theme);
   clouds(theme);
   ridges(theme,realm);
   banks(theme);
   lilies(theme);
   crossing(theme);
+  foregroundLily(theme);
   prow();
   if(realm!==shown) {
     shown=realm;
@@ -252,7 +309,20 @@ addEventListener("keydown",event=>{
 });
 addEventListener("keyup",event=>keys.delete(event.code));
 addEventListener("blur",()=>{ keys.clear(); pointer=null; });
-if(query.has("probe")) {
+if(query.has("zones")) {
+  draw();
+  const samples=[],raster=paint.getImageData(0,0,width,height).data;
+  for(const zone of query.get("zones").split(";")) {
+    const [left,top,right,bottom,sx,sy]=zone.split(",").map(Number);
+    for(let y=top;y<bottom;y+=sy) for(let x=left;x<right;x+=sx) {
+      const at=4*(y*width+x);
+      samples.push(raster[at],raster[at+1],raster[at+2]);
+    }
+  }
+  const out=document.querySelector("output");
+  out.id="pixels";
+  out.textContent=samples.join(",");
+} else if(query.has("probe")) {
   dispatchEvent(new KeyboardEvent("keydown",{code:"KeyW"}));
   const samples=[];
   const probes=query.get("probe").split(";").map(p=>p.split(",").map(Number));
