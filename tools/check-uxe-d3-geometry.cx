@@ -112,7 +112,80 @@ static int inspect_leaves(void) {
     return failed;
 }
 
+static int rounded_mm(double x) {
+    int n=(int)(x+.5);
+    return n>x+.5?n-1:n;
+}
+
+static int check_bridge_walk(const char *mutation) {
+    static const int ticks[]={0,60,146,310,340};
+    char cwd[1024],url[1700],profile[128],option[160],*out=0,*facts;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=5000","--dump-dom",option,url,0};
+    const char *p;
+    int route[12][7],n=0,i,j,k,at,advance=0,previous=0,path_fail=0,wind_fail=0,image_changes=0;
+    int old[9]={0};
+    size_t size=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    facts=cx_read("ujs/practice/uxe/test/d3-walk.tsv",&size);
+    p=facts?strchr(facts,'\n'):0;
+    while(p && p[1] && n<12) {
+        int *row=route[n];
+        p++;
+        if(sscanf(p,"%d %d %d %d %d %d %d",row,row+1,row+2,row+3,row+4,row+5,row+6)!=7 ||
+            (n && row[0]<=route[n-1][0])) { free(facts); return 2; }
+        n++;
+        p=strchr(p,'\n');
+    }
+    free(facts);
+    if(n<2 || route[0][0]!=0) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?walk-check=1&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-d3-walk-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    at=cx_runv_timeout(av,18,&out,&size);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output id=\"pixels\">"):0;
+    if(at || !p) { free(out); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<5;i++) {
+        int frame[15],visible=0,path[4];
+        for(j=0;j<15;j++) {
+            int consumed=0;
+            if(sscanf(p,"%d%n",frame+j,&consumed)!=1 || consumed==0) { free(out); return 2; }
+            p+=consumed;
+            if(j<14 && *p++!=',') { free(out); return 2; }
+        }
+        if(i<4 && *p++!=';') { free(out); return 2; }
+        advance+=(i==4?-180:180)*(ticks[i]-previous);
+        previous=ticks[i];
+        if(advance>route[n-1][0]) advance=route[n-1][0];
+        if(advance<0) advance=0;
+        for(k=1;k<n-1 && route[k][0]<advance;k++) {}
+        path[0]=advance;
+        for(j=1;j<4;j++)
+            path[j]=rounded_mm(route[k-1][j]+(route[k][j]-route[k-1][j])*
+                (double)(advance-route[k-1][0])/(route[k][0]-route[k-1][0]));
+        for(j=0;j<4;j++) path_fail+=abs(frame[j]-path[j])>1;
+        wind_fail+=abs(frame[4]-168)>2 || abs(frame[5]-96)>2;
+        for(j=0;j<9;j++) {
+            visible|=abs(frame[6+j]-old[j])>10;
+            old[j]=frame[6+j];
+        }
+        image_changes+=i>0 && visible;
+        printf("D3_WALK tick=%d distance=%d eye=%d,%d,%d grass=%d leaves=%d\n",ticks[i],
+            frame[0],frame[1],frame[2],frame[3],frame[4],frame[5]);
+    }
+    at=strncmp(p,"</output>",9)!=0;
+    free(out);
+    if(at) return 2;
+    printf("D3_WALK_CHECK path_fail=%d wind_fail=%d picture_changes=%d\n",path_fail,wind_fail,image_changes);
+    return path_fail || wind_fail || image_changes<3;
+}
+
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"walk")) return check_bridge_walk("");
+    if(argc==2 && (!strcmp(argv[1],"frozen-path") || !strcmp(argv[1],"still-wind"))) return check_bridge_walk(argv[1]);
     char cwd[1024],url[2200],profile[128],option[160],*out=0;
     size_t size=0;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader",
