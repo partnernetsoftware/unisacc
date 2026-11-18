@@ -262,6 +262,37 @@ static void put_file(const char *dir, const char *rel, const char *text) {
     char p[4400]; FILE *f; pjoin(p, sizeof p, dir, rel);
     f = fopen(p, "wb"); if (!f || fputs(text, f) == EOF || fclose(f)) die("write", p);
 }
+static void candidate_registration(void) {
+    char dev[4096], entry[4400], pkg[4400], nets[4400], launcher[4400];
+    char e[65], p[65], n[65], l[65], product[65], identity[65], text[32768], receipt[512], log[8192];
+    char b[65], c[65], after_b[65], after_c[65];
+    pjoin(dev,sizeof dev,tables,"dev");
+    if(mkdir(dev,0700))die("mkdir",dev);
+    pjoin(entry,sizeof entry,dev,"entry"); pjoin(pkg,sizeof pkg,dev,"pkg");
+    pjoin(nets,sizeof nets,dev,"nets"); pjoin(launcher,sizeof launcher,dev,"unisacc.com");
+    put_file(dev,"entry","#!/bin/sh\necho DEV_MARKER\n");
+    put_file(dev,"pkg","package\n"); put_file(dev,"nets","nets\n");
+    if(cx_fmt(text,sizeof text,"#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=LOCAL (tools/dev-product.cx); lnx/x86_64 only\nexec env UNISA_CONTAINER='%s' UNISACC_LOCAL=1 UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\" '%s' \"$@\"\n",pkg,dev,entry))die("launcher bound",0);
+    put_file(dev,"unisacc.com",text);
+    if(chmod(entry,0700)||chmod(launcher,0700))die("chmod",dev);
+    sha_of(entry,e); sha_of(pkg,p); sha_of(nets,n); sha_of(launcher,l);
+    if(cx_fmt(text,sizeof text,"%s\n%s\n",e,p))die("digest bound",0);
+    cx_sha256_hex(text,strlen(text),product);
+    if(cx_fmt(text,sizeof text,"NOT_RELEASE\tdev-product-v1\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\tLOCAL\n",entry,e,pkg,p,nets,n,launcher,product))die("manifest bound",0);
+    put_file(dev,"receipt.tsv",text);
+    if(cx_fmt(text,sizeof text,"dev-product-v1\nlauncher\t%s\nentry\t%s\npkg\t%s\nnets_pkg\t%s\n",l,e,p,n))die("identity bound",0);
+    cx_sha256_hex(text,strlen(text),identity);
+    if(cx_fmt(receipt,sizeof receipt,"BATCH_RUN\tid=cr-dev\tstatus=PASS\trc=0\ttransport=0\tmarker=DEV_MARKER\tcandidate=%s\t",identity))die("receipt bound",0);
+    char *args[]={"env",envtables,prepared_driver,"cr-dev",fx,"DEV_MARKER","explicit candidate",fx,"--runner",dev,0};
+    int rc=run(args,log,sizeof log);
+    ok(rc==0 && strstr(log,receipt) && strstr(log,"REGISTER\tid=cr-dev\tstatus=REGISTERED\n"),"explicit candidate produces its own PASS receipt and registers");
+    sha_of(bpath,b); sha_of(cpath,c);
+    put_file(dev,"pkg","changed package\n");
+    args[3]="cr-dev-bad";
+    rc=run(args,log,sizeof log);
+    sha_of(bpath,after_b); sha_of(cpath,after_c);
+    ok(rc==1 && strstr(log,"REFUSE candidate members pkg=") && strstr(log,":sha-mismatch") && strstr(log,"REGISTER\tid=cr-dev-bad\tstatus=ROLLED_BACK\trows_removed=2\n") && !strcmp(b,after_b) && !strcmp(c,after_c),"changed candidate rolls back only its own rows");
+}
 static void concurrent_tools(const char *dir,const char *one,const char *two,int right_rc){
     char *left[]={prepared_driver,"--tool",(char*)one,0},*right[]={prepared_driver,"--tool",(char*)two,0};
     char msg[4096];int pid=fork();
@@ -470,6 +501,17 @@ int main(int argc,char **argv) {
     if(tool_only)return tool_check();
 
     if(args_only){
+        candidate_registration();
+        /* A relative dev-product directory must be rejected before registration.
+           The private tables must remain byte-identical even when a candidate is unavailable. */
+        char *invalid_runner[]={"env",envtables,prepared_driver,"cr-relative-runner",fx,
+            "REGISTER_FIXTURE_OK","relative candidate",fx,"interfaces","product","--runner","relative-dir",0};
+        char before_batch[65],before_coverage[65],after[65];
+        sha_of(bpath,before_batch);sha_of(cpath,before_coverage);
+        int runner_rc=run(invalid_runner,abuf,sizeof abuf);
+        ok(runner_rc==2 && strstr(abuf,"--runner requires an absolute dev-product directory"),"relative runner refused by name");
+        sha_of(bpath,after);ok(!strcmp(after,before_batch),"relative runner preserves batch registry bytes");
+        sha_of(cpath,after);ok(!strcmp(after,before_coverage),"relative runner preserves coverage registry bytes");
         char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0,0};
         int rc=run(args,abuf,sizeof abuf);ok(rc==0&&strstr(abuf,"status=REGISTERED"),"explicit two args reach real fixture and marker");size_t n;char *bytes;ok(registry_has(bpath,"\talpha;beta\tinterfaces.cr-args\trc0:REGISTER_FIXTURE_ARGS_OK\tproduct\tcommit\n"),"final registry keeps exact encoded args");
         char hb[65],hc[65],afterb[65],afterc[65];bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,hb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,hc);free(bytes);
