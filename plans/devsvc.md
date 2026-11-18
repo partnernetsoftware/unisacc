@@ -429,3 +429,6 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 (2) 跨平台先试 g2-win-x86_64。chain4 的 attempt 165 为整目标 --until 加 --lane，超时后 172 成功。gen_slice_phase 依次执行 fronts、win span、导入 image；沿已有 units/e3/image 的落盘边界逐段记开始、结束、摘要和恢复点，实测哪个段耗尽窗口，再只调度尚缺子段。macOS 保留 B 的串行依赖。对拍时同时记录作业时间与最后一个前置完成到 compare 的墙钟，区分消掉的重试和被兄弟 lane 遮住的收益。
 
 (3) 放行与回退。建议冷链目标 3300 秒，给 3600 秒作业留 300 秒。real6 配方须净省 452 秒达到该目标，改后墙钟 UNMEASURED。固定冻结输入、工具与管理器来源，用两个空会话做原版和拆分版冷对照，记录 OWNER 到 EXIT、负载、每组 PID 和起止；逐对象、六目标 image 与 APE 字节相同，两边 promote --check 通过。另测中断一组后恢复、少键、重复键、坏摘要均不得完成父相。若计划 id、顺序、依赖或宽度改变，chain-run 的计划身份随之变化，须新开 BASE；相内方案也须绑定分片协议版本，旧 stage 或旧 DONE 不能直接采信。保留原配方和独立输出目录作回退。同配方冷跑达到预算后，才具备 react 真起的耗时证据。
+
+
+更正(2026-11-18):上文"心跳跨度 752 秒、实际作业 41.724 秒"这一对数字里,实际作业 41.724 秒是对的,752 秒是计量伪差,不是调度空等:它由 heartbeat.tsv 相邻 end 行之差得出,而该文件只有 chain-step 子作业写行,中间别的相在跑也不写。kernels-g2 实际约 41 秒,compare 约 26.5 秒;整链(chain4 热)OWNER 到 EXIT 1613 秒,忙碌并集 1574.3 秒,空档仅 8.1 秒,真实浪费在五次 rc124 被杀(合计 440 秒)、降并行宽度、7 次 HOLD 与起链前准备约 30 秒。证据:release/evidence/chain-speedup-2026-11-18.tsv。
