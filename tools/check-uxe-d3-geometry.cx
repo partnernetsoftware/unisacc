@@ -294,6 +294,110 @@ static int check_u2b(const char *mutation) {
     return failed?1:0;
 }
 
+static int check_v1(const char *mutation,int published) {
+    enum { W=160,H=90,N=W*H };
+    unsigned char cells[N];
+    int queue[N],tier[4]={0},lum[3]={0},area[3]={0},largest=0,depth=0,used=0,i,rc;
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    size_t bytes=0;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/%s?v1-probe&%s",cwd,
+        published?"docs/uxe/ink-walk/index.html":"ujs/practice/uxe/test/d3-bridge-v1.html",mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-v1-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,18,&doc,&bytes);
+    chd_wipe(profile);
+    p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(doc); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    if(sscanf(p,"%d|%n",&depth,&used)!=1 || !used || strlen(p+used)<N*7+9 || p[used+N*7]!='<') {
+        free(doc); return 2;
+    }
+    p+=used;
+    for(i=0;i<N;i++) {
+        int code=p[i*7]-'0';
+        if(code!=0 && code!=1 && code!=2 && code!=4 && code!=5) { free(doc); return 2; }
+        cells[i]=(unsigned char)code;
+        if(code==5) tier[3]++;
+        else if(code) {
+            int j=code==4?2:code-1;
+            unsigned r,g,b;
+            if(sscanf(p+i*7+1,"%2x%2x%2x",&r,&g,&b)!=3) { free(doc); return 2; }
+            tier[j]++;
+            lum[j]+=(30*r+59*g+11*b)/100;
+        }
+    }
+    free(doc);
+    for(i=0;i<N;i++) {
+        int color=cells[i],len=1,j;
+        if(!color || color==5) continue;
+        queue[0]=i; cells[i]=0;
+        for(j=0;j<len;j++) {
+            int at=queue[j],k;
+            int adjacent[]={at%W?at-1:-1,at%W+1<W?at+1:-1,at-W,at+W};
+            for(k=0;k<4;k++) {
+                int next=adjacent[k];
+                if(next<0 || next>=N || cells[next]!=color) continue;
+                cells[next]=0; queue[len++]=next;
+            }
+        }
+        area[len<5?0:len<25?1:2]++;
+        if(len>largest) largest=len;
+    }
+    for(i=0;i<3;i++) if(tier[i]) lum[i]/=tier[i];
+    printf("V1 depth_mm=%d shades=%d,%d,%d luma=%d,%d,%d vines=%d components=%d,%d,%d largest=%d\n",
+        depth,tier[0],tier[1],tier[2],lum[0],lum[1],lum[2],tier[3],area[0],area[1],area[2],largest);
+    return depth<9000 || tier[0]<120 || tier[1]<120 || tier[2]<45 || tier[3]<30 ||
+        lum[1]-lum[0]<15 || lum[2]-lum[1]<15 || area[1]<10 || area[2]<3 || largest<50;
+}
+
+static int check_v2(const char *mutation,int published) {
+    enum { N=213*120 };
+    int heights[64]={0},pixels[8]={0},span=0,roofs=0,levels=0,first=32000,last=0,i,used=0,rc;
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    size_t bytes=0;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/%s?v2-probe&%s",cwd,
+        published?"docs/uxe/oneshot/index.html":"ujs/practice/uxe/test/d4-skeleton-v2.html",mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-v2-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,17,&doc,&bytes);
+    chd_wipe(profile);
+    p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(doc); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    if(sscanf(p,"%d%n",&span,&used)!=1 || !used) { free(doc); return 2; }
+    p+=used;
+    while(*p==',') {
+        int h=0;
+        if(++roofs>60 || sscanf(p+1,"%d%n",&h,&used)!=1 || h<0 || h>=32000) { free(doc); return 2; }
+        heights[h/500]++;
+        if(h<first) first=h;
+        if(h>last) last=h;
+        p+=used+1;
+    }
+    if(*p++!='|' || strlen(p)<N+9 || p[N]!='<') { free(doc); return 2; }
+    for(i=0;i<N;i++) {
+        int code=p[i]-'0';
+        if(code<0 || code>7 || code==6 || code==7) { free(doc); return 2; }
+        pixels[code]++;
+    }
+    free(doc);
+    for(i=0;i<64;i++) levels+=heights[i]>=2;
+    printf("V2 roofs=%d levels=%d range_mm=%d wings_mm=%d clock=%d rails=%d flags=%d hoops=%d rust=%d\n",
+        roofs,levels,last-first,span,pixels[1],pixels[2],pixels[4],pixels[3],pixels[5]);
+    return roofs<40 || levels<5 || last-first<3500 || span<7400 ||
+        pixels[1]<18 || pixels[2]<25 || pixels[4]<7 || pixels[3]<18 || pixels[5]<8;
+}
+
 static int check_d4_play(const char *mutation) {
     char cwd[1024],url[4096],profile[128],option[160],*doc=0;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
@@ -592,6 +696,10 @@ static int compare_paper(char **paths) {
 }
 
 int main(int argc,char **argv) {
+    if(argc>=2 && argc<=3 && (!strcmp(argv[1],"v2") || !strcmp(argv[1],"published-v2")))
+        return check_v2(argc==3?argv[2]:"",argv[1][0]=='p');
+    if(argc>=2 && argc<=3 && (!strcmp(argv[1],"v1") || !strcmp(argv[1],"published-v1")))
+        return check_v1(argc==3?argv[2]:"",argv[1][0]=='p');
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"d4-play")) return check_d4_play(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"finish-u2c")) return check_u2c(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && !strcmp(argv[1],"scale-u2b")) return check_u2b(argc==3?argv[2]:"");

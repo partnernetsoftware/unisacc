@@ -1,9 +1,10 @@
 /* dvqualify: strict evidence for one candidate APE in one command (devsvc qualify routes here).
  *   dvqualify ROOT --candidate APE [--set sample|product-qualification] [--ids A,B,..]
  *             [--out FILE | --resume FILE] [--jobs N] [--seed N] [--segment-batches N] [--list]
+ *             (native runner preparation is opt-in via DVQUALIFY_NATIVE_RUN_BATCH=1)
  * (1) Precheck: APE is a regular file, its sha256, and `sh APE --version` actually run.
- * (2) Independent local layout root $TMPDIR/unisacc-qualify-<sha8> (default /tmp), rebuilt
- *     fresh every call: `git -C ROOT archive HEAD` unpacked, ROOT/unisacc.com there is a real
+ * (2) Independent local layout per full candidate SHA and frozen HEAD under TMPDIR. One
+ *     builder unpacks the named commit; each invocation has its own logs. unisacc.com is a real
  *     copy of APE (not a link), then `git init` plus one private commit so the git inventory of
  *     tests/tools-compile.cx works (v0.0.73 found rc 2 "git inventory failed" in a bare archive).
  * (3) Batch set: sample = the 12 named batches of the v0.0.73 strict evidence plus 10 random
@@ -32,11 +33,13 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use sys.net
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.loadavg
+#pragma unisa use cxlib.toolprep
 
 #define MAXB 1024
 #define WINDOW_S 60
@@ -143,20 +146,52 @@ static void classify(Batch *b, const char *path, int timed_out, int code) {
 }
 
 typedef struct { sy_child_t c; int idx; long t0; int fd; } Slot;
-static char *argvs[MAXB][12];
+static int use_native;
+static char layout_product[4400];
+static char prepared_affected[4400];
+static char *argvs[MAXB][13];
 static int launch(Slot *s, int idx, int attempt) {
     Batch *b = &bs[idx];
+    b->raw[0]=0;b->note[0]=0;b->cand[0]=0;b->ms=0;
     char path[4400]; cx_fmt(path, sizeof path, "%s/%s.%d.out", outlog, b->id, attempt);
-    int fd = sy_open_new(path, 0600); if (fd < 0) return 1;
+    int fd = sy_open_new(path, 0600);
+    if (fd < 0) { b->rc=fd;cx_fmt(b->note,sizeof b->note,"log-open-failed rc=%d",fd);return 1; }
     char **v = argvs[idx]; int n = 0;
-    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/affected.cx"; v[n++] = "--"; v[n++] = "--ids"; v[n++] = b->id;
+    if(prepared_affected[0])v[n++]=prepared_affected;
+    else {v[n++] = "sh"; v[n++] = layout_product; v[n++] = "tools/affected.cx"; v[n++] = "--";}
+    v[n++] = "--ids"; v[n++] = b->id;
+    if(use_native) v[n++]="--native-run-batch";
     v[n++] = "--prepare-materials"; v[n++] = "--run"; v[n++] = "-j"; v[n++] = "1"; v[n] = 0;
     sy_spawn_t o; sy_spawn_init(&o); o.argv = v; o.cwd = lay; o.in_fd = SY_STDIO_NULL; o.out_fd = fd; o.err_fd = fd;
     o.pgroup = -1; o.deadline_ms = WINDOW_S * 1000L;
     cx_fmt(b->load, sizeof b->load, "%.2f", tool_load1());
     s->idx = idx; s->t0 = sy_now_ms(); s->fd = fd;
-    if (sy_proc_spawn(&o, &s->c)) { sy_close(fd); return 1; }
+    int sr=sy_proc_spawn(&o,&s->c);
+    if (sr) { sy_close(fd);b->rc=sr;cx_fmt(b->note,sizeof b->note,"spawn-failed rc=%d",sr);return 1; }
     return 0;
+}
+
+/* Material preparation is bounded separately from the first measured batch.
+ * Only an explicitly selected native route calls this; every batch still runs. */
+static void prepare_first(const int *pending,int count,int jobs){
+    if(!use_native || !count)return;
+    char src[4400],why[512],ids[1800]="";
+    if(cx_fmt(src,sizeof src,"%s/tools/affected.cx",lay) ||
+       cx_fmt(prepared_affected,sizeof prepared_affected,"%s/affected",outlog) ||
+       tq_native(lay,src,prepared_affected,why,sizeof why)){
+        prepared_affected[0]=0;use_native=0;
+        fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=selector-preparation\n");return;
+    }
+    for(int i=0;i<count && i<jobs;i++){
+        size_t n=strlen(ids);if(cx_fmt(ids+n,sizeof ids-n,"%s%s",n?",":"",bs[pending[i]].id))return;
+    }
+    char *v[]={prepared_affected,"--ids",ids,"--native-run-batch","--prep-only",0};
+    char receipt[16384];long started=sy_now_ms(); int rc=run(v,lay,55,receipt,sizeof receipt);
+    fprintf(stderr,"QUALIFY_PREP\tfirst=%s\trc=%d\tms=%ld\n",ids,rc,sy_now_ms()-started);
+    if(rc || !strstr(receipt,"PREPARED\tnative-run-batch\t")){
+        use_native=0;
+        fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=runner-preparation\n");
+    }
 }
 /* Run the given indices, at most jobs at once. */
 static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
@@ -169,7 +204,7 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
         int admit = now < deadline && (tool_load1() <= 6.0 || now - admitting_since >= 120000L);
         for (int k = 0; admit && k < jobs && next < count; k++) if (!busy[k]) {
             int i = idx[next++];
-            if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN"); cx_fmt(bs[i].note, sizeof bs[i].note, "spawn-failed"); continue; }
+            if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN");continue; }
             if (now - admitting_since >= 2000L) cx_fmt(bs[i].note, sizeof bs[i].note, "load_wait>6");
             if (next == count || live + 1 == jobs) admitting_since = 0;
             busy[k] = 1; live++;
@@ -194,24 +229,70 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
     return next;
 }
 
-static int build_layout(void) {
-    char tar[4400], out[256]; const char *td = sy_env("TMPDIR");
-    cx_fmt(lay, sizeof lay, "%s/unisacc-qualify-%.8s", td && *td ? td : "/tmp", sha);
-    cx_fmt(tar, sizeof tar, "%s.tar", lay);
-    cx_fmt(outlog, sizeof outlog, "%s.logs", lay);
-    char *rm[] = {"rm", "-rf", lay, tar, outlog, 0}; if (run(rm, 0, 60, 0, 0)) return die("cannot clear ", lay);
-    if (sy_mkdir(lay, 0700) || sy_mkdir(outlog, 0700)) return die("mkdir ", lay);
-    char *ar[] = {"git", "-C", root, "archive", "--format=tar", "-o", tar, "HEAD", 0}; if (run(ar, 0, 60, 0, 0)) return die("git archive ", root);
+static int populate_layout(void) {
+    char tar[4400], out[256];
+    if (cx_fmt(tar, sizeof tar, "%s/frozen.tar", outlog)) return die("archive path ", outlog);
+    char *ar[] = {"git", "-C", root, "archive", "--format=tar", "-o", tar, head, 0}; if (run(ar, 0, 60, 0, 0)) return die("git archive ", root);
     char *x[] = {"tar", "-xf", tar, "-C", lay, 0}; if (run(x, 0, 60, 0, 0)) return die("tar ", tar);
     char *rt[] = {"rm", "-f", tar, 0}; run(rt, 0, 10, 0, 0);
-    char dst[4200]; cx_fmt(dst, sizeof dst, "%s/unisacc.com", lay);
-    char *cp[] = {"cp", "--", ape, dst, 0}; if (run(cp, 0, 30, 0, 0)) return die("copy APE ", dst);
-    sy_chmod(dst, 0755);
+    char dst[4200];sy_stat_t prior;
+    if(cx_fmt(dst,sizeof dst,"%s/unisacc.com",lay) || sy_lstat(dst,&prior)!=-ENOENT ||
+       sy_copy(ape,dst,0755))return die("install real candidate copy ",lay);
     char *gi[] = {"git", "-C", lay, "init", "-q", 0}; if (run(gi, 0, 30, 0, 0)) return die("git init ", lay);
-    char *ga[] = {"git", "-C", lay, "add", "-A", ".", 0}; if (run(ga, 0, 60, 0, 0)) return die("git add (private layout) ", lay);
+    char *ga[] = {"git", "-C", lay, "add", "-Af", "--", ".", ":(exclude)unisacc.com", 0}; if (run(ga, 0, 60, 0, 0)) return die("git add (private layout) ", lay);
     char *gc[] = {"git", "-C", lay, "-c", "user.name=devsvc-qualify", "-c", "user.email=qualify@localhost", "-c", "commit.gpgsign=false",
                   "commit", "-q", "-m", "devsvc qualify layout", 0};
     if (run(gc, 0, 60, out, sizeof out)) return die("git commit (private layout) ", lay);
+    return 0;
+}
+
+/* A new generation is published only after its real APE and private git tree
+ * have been verified. Existing readers retain their generation directory. */
+static int layout_ok(const char *snapshot) {
+    char image[4300], actual[65], tree[64], extra[8];
+    unsigned char *bytes=0; int64_t n=0; sy_stat_t st;
+    if (cx_fmt(image,sizeof image,"%s/unisacc.com",lay) || sy_lstat(image,&st) || st.kind!='f' ||
+        sy_read_file(image,&bytes,&n,256L<<20)) return 0;
+    int match=!sy_sha256_hex(bytes,n,actual) && !strcmp(actual,sha); free(bytes);
+    char *identity[]={"git","rev-parse","HEAD^{tree}",0};
+    char *clean[]={"git","diff","--quiet","HEAD","--",0};
+    char *others[]={"git","ls-files","--others","--",":(exclude)unisacc.com",0};
+    return match && !cx_fmt(layout_product,sizeof layout_product,"%s",image) &&
+           !run(identity,lay,10,tree,sizeof tree) && !strcmp(snapshot,tree) &&
+           !run(clean,lay,30,0,0) && !run(others,lay,15,extra,sizeof extra) && !extra[0];
+}
+static int build_layout(void) {
+    const char *td=sy_env("TMPDIR"); if (!td || !*td) td="/tmp";
+    char cache[4200], lock[4300], receipt[4300], tree[64], row[180]; sy_stat_t st;
+    if (sy_mkdtemp(td,"qualify-log-",outlog,sizeof outlog) ||
+        cx_fmt(cache,sizeof cache,"%s/unisacc-qualify-%s-%s",td,sha,head) ||
+        (sy_mkdir(cache,0700) && (sy_lstat(cache,&st) || st.kind!='d' || st.mode!=0700 || st.uid!=sy_uid())) ||
+        cx_fmt(lock,sizeof lock,"%s/prepare.lock",cache) ||
+        cx_fmt(receipt,sizeof receipt,"%s/ready",cache)) return die("private cache ",td);
+    int fd=open(lock,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(fd<0)return die("cannot open preparation lock ",cache);
+    long until=sy_now_ms()+55000;
+    while(sy_flock(fd,6)) {
+        if(sy_now_ms()>=until){sy_close(fd);return die("layout preparation deadline ",cache);}
+        sy_sleep_ms(100);
+    }
+    size_t n=0;char *record=cx_read(receipt,&n); int reused=0;
+    if(record && n<sizeof row && n>41){
+        char *tab=strchr(record,'\t');
+        if(tab){*tab=0;
+            if(!strncmp(record,"tree-",5) && !strchr(record,'/') &&
+               !cx_fmt(lay,sizeof lay,"%s/%s",cache,record))reused=layout_ok(tab+1);}
+    }
+    free(record);
+    if(!reused){
+        if(sy_mkdtemp(cache,"tree-",lay,sizeof lay) || populate_layout()) {sy_close(fd);return 2;}
+        char *identity[]={"git","rev-parse","HEAD^{tree}",0};
+        if(run(identity,lay,10,tree,sizeof tree) || !layout_ok(tree) ||
+           cx_fmt(row,sizeof row,"%s\t%s",strrchr(lay,'/')+1,tree) ||
+           sy_write_atomic(receipt,row,strlen(row),0600)){sy_close(fd);return die("layout verification ",lay);}
+    }
+    sy_close(fd);
+    fprintf(stderr,"QUALIFY_LAYOUT_MATERIAL\t%s\tsource=%s\tcandidate=%s\n",reused?"reused":"prepared",head,sha);
     return 0;
 }
 
@@ -259,6 +340,7 @@ static void write_batch(FILE *f, const Batch *b) {
 }
 
 int main(int argc, char **argv) {
+    use_native=!strcmp(sy_env_or("DVQUALIFY_NATIVE_RUN_BATCH","0"),"1");
     const char *set = "sample", *ids = 0, *outp = 0, *resume = 0;
     int jobs = 2, list = 0, segment = 0;
     long seed = -1;
@@ -329,6 +411,7 @@ int main(int argc, char **argv) {
     static int pending[MAXB], retry[MAXB];
     int count = 0, completed = 0, number = 0;
     for (int i = 0; i < nb; i++) if (!resumed[i]) pending[count++] = i;
+    prepare_first(pending,count,jobs);
     long stop = t0 + 1720000L;
     while (completed < count && sy_now_ms() < stop) {
         long began = sy_now_ms();

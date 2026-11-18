@@ -31,6 +31,12 @@ static int put(const char *dir, const char *rel, const char *text, int mode) {
     return sy_write_file(p, text, strlen(text), mode);
 }
 static int has(const char *text, const char *needle) { return text && strstr(text, needle) != 0; }
+static int evidence_layout(const char *text,char *path,size_t cap){
+    const char *at=text?strstr(text," layout="):0;
+    const char *end=at?strchr(at+8,' '):0;
+    if(!end || end-at-8>=cap || mm_copy(path,cap,at+8,end-at-8))return 1;
+    path[end-at-8]=0;return 0;
+}
 static int git(char *a, char *b, char *c, char *d, char *e) {
     char *v[12] = {"git", "-C", repo, a, b, c, d, e, 0}; int rc = 1;
     return runv(v, 0, 30, &rc) && rc == 0;
@@ -79,7 +85,7 @@ int main(int argc, char **argv) {
       check("summary-counts", has(e, want));
       cx_fmt(want, sizeof want, "\tape_sha256=%s\tversion=unisacc 9.9.9-fixture\n", sha); check("summary-sha-version", has(e, want));
       /* layout root: private dir under TMPDIR, real file copy, own git inventory */
-      cx_fmt(lay, sizeof lay, "%s/unisacc-qualify-%.8s", tmp, sha);
+      if(evidence_layout(e,lay,sizeof lay))return 2;
       cx_fmt(lc, sizeof lc, "%s/unisacc.com", lay); sy_stat_t st; int reg = !sy_lstat(lc, &st) && st.kind == 'f';
       unsigned char *b = 0; int64_t n = 0; char h[65] = "";
       if (reg && !sy_read_file(lc, &b, &n, 1 << 20)) sy_sha256_hex(b, (long)n, h); free(b);
@@ -90,7 +96,17 @@ int main(int argc, char **argv) {
     /* Q3 valid-only run exits 0 */
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
       char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
-      check("valid-run-rc0", ok && rc == 0 && has(e, "\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\t")); free(e); }
+      check("valid-run-rc0", ok && rc == 0 && has(e, "\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\t"));
+      check("same-input-reuses-layout-and-runs-both",has(out,"QUALIFY_LAYOUT_MATERIAL\treused\t") &&
+            has(out,"QUALIFY_BATCH\talpha\tPASS") && has(out,"QUALIFY_BATCH\tbeta\tPASS"));
+      char path[4400];
+      if(evidence_layout(e,path,sizeof path) || put(path,"tests/batches.tsv","changed after publication\n",0600))return 2;
+      free(e);
+      check("changed-layout-rebuilt",runv(v,0,40,&rc) && rc==0 && has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t"));
+      char *advance[]={"git","-C",repo,"-c","user.name=f","-c","user.email=f@localhost","-c","commit.gpgsign=false","commit","-q","--allow-empty","-m","new source identity",0};
+      if(!runv(advance,0,20,&rc)||rc)return 2;
+      check("same-ape-different-head-new-layout",runv(v,0,40,&rc) && rc==0 &&
+            has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t") && has(out,"QUALIFY_BATCH\talpha\tPASS")); }
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
                    "--segment-batches", "2", 0};
       int ok = runv(v, 0, 40, &rc); char *e = cx_read(ev, 0);
@@ -113,7 +129,8 @@ int main(int argc, char **argv) {
       char changed[4096]; if (cx_fmt(changed, sizeof changed, "%s\n# different candidate\n", ape_text) ||
           sy_write_file(apep, changed, strlen(changed), 0755)) return 2;
       check("resume-different-ape-runs-both", runv(v, 0, 40, &rc) && rc == 0 &&
-            has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t")); }
+            has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t"));
+      check("different-candidate-builds-new-layout",has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t")); }
     {
       char *first[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--out", ev, 0};
       char *again[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--resume", ev, 0};
@@ -127,7 +144,8 @@ int main(int argc, char **argv) {
       char *v[]={timing,tmp,"--kind","qualify","--top","0",0};
       check("timing-includes-qualify",runv(v,root,10,&rc) && rc==0 && has(out,"SUMMARY\tcmd=qualify\tn=1\tp50=123\tp90=123\tsum=123")); }
     /* Q4 the devsvc entry (working copy) routes qualify to this tool (red before the core hook existed) */
-    { char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
+    { const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the real devsvc route check */
+      char *v[] = {"sh", (char*)launcher, "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
       check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }
     { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 0, 30, &rc); }
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n", passed, failed);

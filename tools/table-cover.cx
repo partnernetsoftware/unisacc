@@ -1,0 +1,334 @@
+/* tools/table-cover.cx -- per-table coverage measure for every exec/ TSV table (read-only; changes no table).
+ *
+ *   sh ./unisacc.com tools/table-cover.cx -- [--root DIR] [--list FILE] [--decls FILE] [--samples FILE]
+ *                                             [--net NAME] [--tsv OUT]
+ *       --alt-decls F2: also count every table's cover class under declaration table F2 (a what-if, e.g. an
+ *       emptied table) and print EMPTY_ALT (first ten) and TABLE_COVER_ALT decls=F2 empty=.. coarse_only=..
+ *   sh ./unisacc.com tools/table-cover.cx -- [--root DIR] --groups         group<TAB>representative table
+ *   sh ./unisacc.com tools/table-cover.cx -- [--root DIR] --probe TABLE      one SAMPLE line (runs affected, ~22 s)
+ *
+ * Tables: --list FILE (one path per line, relative to ROOT), else `git -C ROOT ls-files exec` when ROOT/.git
+ * exists, else a walk of ROOT/exec.  A listed path that is not exec/...tsv gets category UNMEASURED and every
+ * measure UNMEASURED (never guessed).
+ * Category: facts (exec/facts/), result (*-result.tsv), manifest (*-manifest.tsv), other.
+ * Measures per table (static unless noted; nothing here runs a generator or a test):
+ *   nets      rows naming the table in ROOT/exec/pipeline/table-deps.tsv (net-deps' MODEL<TAB>table closure)
+ *   gen       generation marker: the first tools/NAME.cx named in the table's first 5 lines, else -
+ *   gen_check yes when that tool's source mentions --check (recognised only, never run)
+ *   decide    yes when ROOT/tests/check-decide.cx names the table (its one() rule set)
+ *   lit       literal hits in tests/ .cx (recursive) and tools/check-*.cx: the exact path, or a directory literal
+ *             of two or more components above it (affected's literal rule; computed paths are not seen);
+ *             litx counts the exact-path hits only.  no_exact = tables with litx 0 and fine 0.
+ *   fine      id rows of the declaration table (--decls, default tests/batch-product-inputs.tsv) whose input
+ *             prefix covers the table and is narrower than the bare exec/
+ *   coarse    id rows naming the bare exec/ prefix (cover every table)
+ *   aff       batches of `affected --files TABLE --list-only`, taken from --samples (lines written by --probe):
+ *             sampled=self when the table itself was probed, sampled=GROUP when the value is that group's
+ *             representative's (group = first two path components + category; representative = first table of
+ *             the group in list order, see --groups), else UNMEASURED.  A self value that differs from its
+ *             group's is printed XCHECK_DIFF (the group sharing is then wrong for that table).
+ *   cover     direct (lit or fine), net (else table-deps rows), coarse-only (else bare exec/ rows), empty (none:
+ *             no static edge selects any batch for it).
+ * Prints EMPTY<TAB>path for the first ten empty tables, then the rows (or writes them to --tsv OUT), then
+ * TABLE_COVER total=.. facts=.. result=.. manifest=.. other=.. unmeasured=.. no_gen=.. no_gen_facts=..
+ *   no_decide=.. result_no_decide=.. no_direct=.. empty=.. coarse_only=.. aff_measured=.. xcheck_diff=..
+ * rc 0, 2 usage or I/O. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+#define TC_MAX 8192
+#define TC_LIT 32768
+#define TC_DLIT 1024
+#define TC_DECL 512
+#define TC_SAMP 1024
+
+typedef struct { char p[256]; int cat, nets, decide, lit, litx, fine, coarse, aff, gchk, rep; char gen[64]; } Tb;
+static Tb tb[TC_MAX];
+static int tn;
+static char lit[TC_LIT][256];
+static int litn;
+static char dlit[TC_DLIT][256];
+static int dlitn;
+static char decl[TC_DECL][256];
+static int decln;
+static char sg[TC_SAMP][96], sp[TC_SAMP][256];
+static int sa[TC_SAMP], sn;
+static char root[2048];
+static char obuf[1 << 21];
+static const char *catn[] = {"facts", "result", "manifest", "other", "UNMEASURED"};
+
+static int pre(const char *s, const char *p) { while (*p) if (*s++ != *p++) return 0; return 1; }
+static int ends(const char *s, const char *e) { long a = tx_len(s, 512), b = tx_len(e, 64); return a >= b && tx_eqz(s + a - b, e); }
+static int ends_tsv(const char *s, long n) { return n > 4 && s[n - 4] == '.' && s[n - 3] == 't' && s[n - 2] == 's' && s[n - 1] == 'v'; }
+static void cpy(char *d, const char *s, long n, long cap) { if (n >= cap) n = cap - 1; if (n < 0) n = 0; d[n] = 0; while (n-- > 0) d[n] = s[n]; }
+static unsigned char *rd(const char *rel, int64_t *n) {
+    char p[4096]; unsigned char *b = 0;
+    if (rel[0] == '/') cpy(p, rel, tx_len(rel, 4095), sizeof p); else tx_snprintf(p, sizeof p, "%s/%s", root, rel);
+    if (sy_read_file(p, &b, n, 64L << 20)) return 0;
+    return b;
+}
+static int cat_of(const char *p) {
+    if (!pre(p, "exec/") || !ends(p, ".tsv")) return 4;
+    if (pre(p, "exec/facts/")) return 0;
+    if (ends(p, "-result.tsv")) return 1;
+    if (ends(p, "-manifest.tsv")) return 2;
+    return 3;
+}
+static void add_tab(const char *s, long n) {
+    if (n <= 0 || n > 250 || tn >= TC_MAX) return;
+    cpy(tb[tn].p, s, n, 256); tb[tn].cat = cat_of(tb[tn].p); tb[tn].aff = -1;
+    tn++;
+}
+/* filt: keep only exec/...tsv (git ls-files lists every tracked file) */
+static void add_lines(const char *b, long n, int filt) {
+    long i = 0, s, e;
+    while (i < n) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        e = i; while (e > s && (b[e - 1] == '\r' || b[e - 1] == ' ')) e--;
+        if (e > s && b[s] != '#' && (!filt || (pre(b + s, "exec/") && ends_tsv(b + s, e - s)))) add_tab(b + s, e - s);
+        i++;
+    }
+}
+static void walk(const char *rel) {
+    char p[4096], q[512]; sy_dir_t d; sy_stat_t st;
+    tx_snprintf(p, sizeof p, "%s/%s", root, rel);
+    if (sy_dir_open(&d, p)) return;
+    while (sy_dir_next(&d) == 1) {
+        tx_snprintf(q, sizeof q, "%s/%s", rel, d.name);
+        tx_snprintf(p, sizeof p, "%s/%s", root, q);
+        if (sy_stat(p, &st)) continue;
+        if (st.kind == 'd') walk(q); else if (ends(q, ".tsv")) add_tab(q, tx_len(q, 512));
+    }
+    sy_dir_close(&d);
+}
+static int idc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/'; }
+/* every exec/... token of a source: exact .tsv literals and directory literals (>= 2 components) */
+static void scan_lits(const unsigned char *b, int64_t n) {
+    int64_t i, j, k; int comp;
+    for (i = 0; i + 5 <= n; i++) {
+        if (b[i] != 'e' || !pre((const char *)b + i, "exec/")) continue;
+        if (i > 0 && idc(b[i - 1]) && !(b[i - 1] == '/' && i > 1 && b[i - 2] == '.')) continue;
+        j = i; while (j < n && idc(b[j])) j++;
+        while (j > i && b[j - 1] == '/') j--;
+        if (j - i > 5 && j - i < 250) {
+            if (ends_tsv((const char *)b + i, j - i)) { if (litn < TC_LIT) cpy(lit[litn++], (const char *)b + i, j - i, 256); }
+            else {
+                for (comp = 1, k = i; k < j; k++) if (b[k] == '/') comp++;
+                if (comp >= 2 && dlitn < TC_DLIT) cpy(dlit[dlitn++], (const char *)b + i, j - i, 256);
+            }
+        }
+        i = j;
+    }
+}
+static void scan_file(const char *rel) { int64_t n; unsigned char *b = rd(rel, &n); if (b) { scan_lits(b, n); mm_free(b); } }
+static void scan_dir(const char *rel, int only_check) {
+    char p[4096], q[512]; sy_dir_t d; sy_stat_t st;
+    tx_snprintf(p, sizeof p, "%s/%s", root, rel);
+    if (sy_dir_open(&d, p)) return;
+    while (sy_dir_next(&d) == 1) {
+        tx_snprintf(q, sizeof q, "%s/%s", rel, d.name);
+        tx_snprintf(p, sizeof p, "%s/%s", root, q);
+        if (sy_stat(p, &st)) continue;
+        if (st.kind == 'd') { if (!only_check) scan_dir(q, 0); continue; }
+        if (!ends(q, ".cx")) continue;
+        if (only_check && !pre(d.name, "check-")) continue;
+        scan_file(q);
+    }
+    sy_dir_close(&d);
+}
+static int find(const char *p) { int i; for (i = 0; i < tn; i++) if (tx_eqz(tb[i].p, p)) return i; return -1; }
+static void group_of(const char *s, int cat, char *g, long cap) {
+    long k = 0; int sl = 0;
+    while (s[k] && k < 200) { if (s[k] == '/' && ++sl == 2) break; k++; }
+    if (sl < 2) k = 4;
+    cpy(g, s, k, cap);
+    tx_snprintf(g + k, cap - k, "+%s", catn[cat]);
+}
+static void field(const char *b, long n, int f, char *out, long cap) {
+    long i = 0, s; int k = 0;
+    out[0] = 0;
+    while (i <= n) { s = i; while (i < n && b[i] != '\t' && b[i] != '\n') i++; if (k == f) { cpy(out, b + s, i - s, cap); return; } k++; i++; }
+}
+static unsigned char *deps; static int64_t depn;
+static void load_nets(void) {
+    int64_t i = 0, s; char p[256]; int x;
+    if (!(deps = rd("exec/pipeline/table-deps.tsv", &depn))) return;
+    while (i < depn) {
+        s = i; while (i < depn && deps[i] != '\n') i++;
+        if (i > s && deps[s] != '#') { field((const char *)deps + s, i - s, 1, p, sizeof p); if ((x = find(p)) >= 0) tb[x].nets++; }
+        i++;
+    }
+}
+static int net_has(const char *net, const char *path) {
+    int64_t i = 0, s; char m[128], p[256];
+    while (deps && i < depn) {
+        s = i; while (i < depn && deps[i] != '\n') i++;
+        field((const char *)deps + s, i - s, 0, m, sizeof m);
+        if (tx_eqz(m, net)) { field((const char *)deps + s, i - s, 1, p, sizeof p); if (tx_eqz(p, path)) return 1; }
+        i++;
+    }
+    return 0;
+}
+static void gen_of(Tb *t) {
+    int64_t n, i, j, k, lim, gn; unsigned char *b = rd(t->p, &n), *g; int lines = 0; char tool[96];
+    if (!b) return;
+    for (lim = 0; lim < n && lines < 5; lim++) if (b[lim] == '\n') lines++;
+    for (i = 0; i + 6 < lim; i++) {
+        if (!pre((const char *)b + i, "tools/")) continue;
+        j = i + 6; while (j < lim && idc(b[j]) && b[j] != '/') j++;
+        if (j - i > 9 && j - i < 90 && b[j - 3] == '.' && b[j - 2] == 'c' && b[j - 1] == 'x') {
+            cpy(tool, (const char *)b + i, j - i, sizeof tool); cpy(t->gen, tool + 6, j - i - 6, 64);
+            if ((g = rd(tool, &gn))) { for (k = 0; k + 7 < gn; k++) if (pre((const char *)g + k, "--check")) { t->gchk = 1; break; } mm_free(g); }
+            break;
+        }
+    }
+    mm_free(b);
+}
+static void load_decls(const char *path) {
+    int64_t n, i = 0, s; unsigned char *b = rd(path, &n); char k[16], in[4096]; long a, c;
+    if (!b) { fprintf(stderr, "table-cover: no declaration table %s (no declared rows)\n", path); return; }
+    while (i < n) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        field((const char *)b + s, i - s, 0, k, sizeof k);
+        if (tx_eqz(k, "id")) {
+            field((const char *)b + s, i - s, 2, in, sizeof in);
+            for (a = 0; in[a];) { c = a; while (in[c] && in[c] != ',') c++; if (c > a && decln < TC_DECL) cpy(decl[decln++], in + a, c - a, 256); a = in[c] ? c + 1 : c; }
+        }
+        i++;
+    }
+    mm_free(b);
+}
+static void decl_hits(const char *p, int from, int to, int *fine, int *coarse) {
+    int k;
+    for (k = from; k < to; k++) {
+        long l = tx_len(decl[k], 256);
+        if (tx_eqz(decl[k], "exec/") || tx_eqz(decl[k], "exec")) (*coarse)++;
+        else if (l > 0 && pre(p, decl[k]) && (decl[k][l - 1] == '/' || p[l] == 0 || p[l] == '/')) (*fine)++;
+    }
+}
+static void load_samples(const char *path) {
+    int64_t n, i = 0, s; unsigned char *b = rd(path, &n); char k[16], v[32];
+    if (!b) { fprintf(stderr, "table-cover: cannot read samples %s\n", path); exit(2); }
+    while (i < n && sn < TC_SAMP) {
+        s = i; while (i < n && b[i] != '\n') i++;
+        field((const char *)b + s, i - s, 0, k, sizeof k);
+        if (tx_eqz(k, "SAMPLE")) {
+            field((const char *)b + s, i - s, 1, sg[sn], 96); field((const char *)b + s, i - s, 2, sp[sn], 256);
+            field((const char *)b + s, i - s, 3, v, sizeof v); sa[sn] = atoi(v); sn++;
+        }
+        i++;
+    }
+    mm_free(b);
+}
+static int count_kind(const char *o, const char *kind) {
+    int c = 0; const char *q = o; long kl = tx_len(kind, 32);
+    while ((q = strstr(q, "\tvia="))) { q += 5; if (pre(q, kind) && (q[kl] == '\n' || q[kl] == '\t' || q[kl] == 0)) c++; }
+    return c;
+}
+static int probe(const char *t) {
+    char *a[] = {"timeout", "55", "sh", "-c", "cd \"$1\" && exec sh ./unisacc.com tools/affected.cx -- --files \"$2\" --list-only",
+                 "table-cover", root, (char *)t, 0};
+    char g[96], *q; int cut = 0, rc, bat = -1, cat = cat_of(t);
+    rc = sy_run(a, obuf, sizeof obuf, &cut);
+    if ((q = strstr(obuf, "AFFECTED_SUMMARY\t")) && (q = strstr(q, "batches="))) bat = atoi(q + 8);
+    group_of(t, cat, g, sizeof g);
+    if (bat < 0 || cut) { printf("SAMPLE_FAIL\t%s\t%s\trc=%d\tcut=%d\n", g, t, rc, cut); return 2; }
+    printf("SAMPLE\t%s\t%s\t%d\tdeclared=%d\ttable=%d\tliteral=%d\tliteral-use=%d\n", g, t, bat,
+           count_kind(obuf, "declared"), count_kind(obuf, "table"), count_kind(obuf, "literal"), count_kind(obuf, "literal-use"));
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int dmain = 0, aempty = 0, aconly = 0, ane = 0;
+    const char *alt = 0, *list = 0, *decls = "tests/batch-product-inputs.tsv", *samples = 0, *net = 0, *out = 0, *pr = 0;
+    int groups = 0, i, j, k, nogen = 0, nogenf = 0, nodec = 0, rnodec = 0, nodir = 0, noexact = 0, empty = 0, conly = 0, affm = 0, xd = 0, ne = 0, sv, gv;
+    int cnt[5] = {0, 0, 0, 0, 0}; long on = 0, ocap = 1 << 21; char *ob; char g[96], h[96], aff[32], samp[96], line[1024];
+    cpy(root, ".", 1, sizeof root);
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) { i++; cpy(root, argv[i], tx_len(argv[i], 2047), sizeof root); }
+        else if (tx_eqz(argv[i], "--list") && i + 1 < argc) list = argv[++i];
+        else if (tx_eqz(argv[i], "--decls") && i + 1 < argc) decls = argv[++i];
+        else if (tx_eqz(argv[i], "--samples") && i + 1 < argc) samples = argv[++i];
+        else if (tx_eqz(argv[i], "--alt-decls") && i + 1 < argc) alt = argv[++i];
+        else if (tx_eqz(argv[i], "--net") && i + 1 < argc) net = argv[++i];
+        else if (tx_eqz(argv[i], "--tsv") && i + 1 < argc) out = argv[++i];
+        else if (tx_eqz(argv[i], "--probe") && i + 1 < argc) pr = argv[++i];
+        else if (tx_eqz(argv[i], "--groups")) groups = 1;
+        else { fprintf(stderr, "usage: table-cover.cx -- [--root DIR] [--list F] [--decls F] [--samples F] [--net NAME] [--tsv OUT] | --groups | --probe TABLE\n"); return 2; }
+    }
+    if (pr) return probe(pr);
+    if (list) { int64_t n; unsigned char *b = rd(list, &n); if (!b) { fprintf(stderr, "table-cover: cannot read %s\n", list); return 2; } add_lines((const char *)b, n, 0); mm_free(b); }
+    else {
+        char *a[] = {"timeout", "20", "git", "-C", root, "ls-files", "exec", 0}; int cut = 0; char gd[4096]; sy_stat_t st;
+        tx_snprintf(gd, sizeof gd, "%s/.git", root);
+        if (!sy_stat(gd, &st) && !sy_run(a, obuf, sizeof obuf, &cut) && !cut) add_lines(obuf, tx_len(obuf, sizeof obuf), 1);
+        if (!tn) walk("exec");
+    }
+    if (!tn) { fprintf(stderr, "table-cover: no tables under %s/exec\n", root); return 2; }
+    for (i = 0; i < tn; i++) {   /* group representative: first table of the group in list order */
+        if (tb[i].cat == 4) { tb[i].rep = -1; continue; }
+        group_of(tb[i].p, tb[i].cat, g, sizeof g); tb[i].rep = i;
+        for (j = 0; j < i; j++) if (tb[j].cat != 4) { group_of(tb[j].p, tb[j].cat, h, sizeof h); if (tx_eqz(g, h)) { tb[i].rep = j; break; } }
+        if (groups && tb[i].rep == i) printf("%s\t%s\n", g, tb[i].p);
+    }
+    if (groups) return 0;
+    scan_dir("tests", 0); scan_dir("tools", 1);
+    { int64_t n; unsigned char *b = rd("tests/check-decide.cx", &n); int l0 = litn, d0 = dlitn;
+      if (b) { scan_lits(b, n); mm_free(b); }
+      for (k = l0; k < litn; k++) if ((j = find(lit[k])) >= 0) tb[j].decide = 1;
+      litn = l0; dlitn = d0; }   /* check-decide was already counted by the tests/ scan */
+    load_nets(); load_decls(decls); dmain = decln;
+    if (alt) load_decls(alt);
+    if (samples) load_samples(samples);
+    ob = (char *)mm_alloc(ocap); if (!ob) return 2;
+    on = tx_snprintf(ob, ocap, "# table-cover v1 (tools/table-cover.cx): measures, not test results; aff is affected --list-only\npath\tcategory\tnets\tgen\tgen_check\tdecide\tlit\tlitx\tfine\tcoarse\taff\tsampled\tcover\n");
+    for (i = 0; i < tn; i++) {
+        Tb *t = &tb[i]; const char *cov;
+        if (net && !net_has(net, t->p)) continue;
+        cnt[t->cat]++;
+        if (t->cat == 4) {
+            on += tx_snprintf(ob + on, ocap - on, "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\t-\tUNMEASURED\n", t->p);
+            continue;
+        }
+        gen_of(t);
+        for (k = 0; k < litn; k++) if (tx_eqz(lit[k], t->p)) { t->lit++; t->litx++; }
+        for (k = 0; k < dlitn; k++) { long l = tx_len(dlit[k], 256); if (pre(t->p, dlit[k]) && t->p[l] == '/') t->lit++; }
+        decl_hits(t->p, 0, dmain, &t->fine, &t->coarse);
+        if (alt) {   /* the same row under the --alt-decls table: only its cover class is counted */
+            int af = 0, ac = 0;
+            decl_hits(t->p, dmain, decln, &af, &ac);
+            if (!t->lit && !af) { if (t->nets) {} else if (ac) aconly++; else { aempty++; if (ane++ < 10) printf("EMPTY_ALT\t%s\n", t->p); } }
+        }
+        group_of(t->p, t->cat, g, sizeof g);
+        sv = -1; gv = -1;
+        for (k = 0; k < sn; k++) { if (tx_eqz(sp[k], t->p)) sv = sa[k]; if (tx_eqz(sp[k], tb[t->rep].p)) gv = sa[k]; }
+        if (sv >= 0) { t->aff = sv; cpy(samp, "self", 4, sizeof samp); if (gv >= 0 && t->rep != i && gv != sv) { printf("XCHECK_DIFF\t%s\tself=%d\tgroup=%s\tgroup_val=%d\n", t->p, sv, g, gv); xd++; } else if (gv >= 0 && t->rep != i) printf("XCHECK_SAME\t%s\tself=%d\tgroup=%s\n", t->p, sv, g); }
+        else if (gv >= 0) { t->aff = gv; cpy(samp, g, tx_len(g, 95), sizeof samp); }
+        else cpy(samp, "-", 1, sizeof samp);
+        if (t->lit || t->fine) cov = "direct"; else if (t->nets) cov = "net"; else if (t->coarse) cov = "coarse-only"; else cov = "empty";
+        if (!t->gen[0]) { nogen++; if (t->cat == 0) nogenf++; }
+        if (!t->decide) { nodec++; if (t->cat == 1) rnodec++; }
+        if (!t->lit && !t->fine) nodir++;
+        if (!t->litx && !t->fine) noexact++;
+        if (cov[0] == 'e') { empty++; if (ne++ < 10) printf("EMPTY\t%s\n", t->p); }
+        if (cov[0] == 'c') conly++;
+        if (t->aff >= 0) { affm++; tx_snprintf(aff, sizeof aff, "%d", t->aff); } else cpy(aff, "UNMEASURED", 10, sizeof aff);
+        if (ocap - on < 1024) break;
+        on += tx_snprintf(ob + on, ocap - on, "%s\t%s\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", t->p, catn[t->cat], t->nets,
+                          t->gen[0] ? t->gen : "-", t->gen[0] ? (t->gchk ? "yes" : "no") : "-", t->decide ? "yes" : "-",
+                          t->lit, t->litx, t->fine, t->coarse, aff, samp, cov);
+    }
+    tx_snprintf(line, sizeof line, "TABLE_COVER\ttotal=%d\tfacts=%d\tresult=%d\tmanifest=%d\tother=%d\tunmeasured=%d\tno_gen=%d\tno_gen_facts=%d\tno_decide=%d\tresult_no_decide=%d\tno_direct=%d\tno_exact=%d\tempty=%d\tcoarse_only=%d\taff_measured=%d\txcheck_diff=%d\n",
+                cnt[0] + cnt[1] + cnt[2] + cnt[3] + cnt[4], cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], nogen, nogenf, nodec, rnodec, nodir, noexact, empty, conly, affm, xd);
+    on += tx_snprintf(ob + on, ocap - on, "# %s", line);
+    if (out) { if (sy_write_atomic(out, ob, on, 0644)) { fprintf(stderr, "table-cover: cannot write %s\n", out); return 2; } }
+    else fwrite(ob, 1, on, stdout);
+    fputs(line, stdout);
+    if (alt) printf("TABLE_COVER_ALT\tdecls=%s\tempty=%d\tcoarse_only=%d\n", alt, aempty, aconly);
+    mm_free(ob);
+    return 0;
+}

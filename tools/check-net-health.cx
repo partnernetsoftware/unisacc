@@ -1,0 +1,114 @@
+/* tools/check-net-health.cx -- fixtures for tools/net-health.cx (no real net is scanned).
+ *   sh ./unisacc.com tools/check-net-health.cx
+ * Builds net-health once (-o, into a private temp dir), writes four synthetic deltas and stage directories and checks
+ * the per-category counts net-health reports for each:
+ *   normal   one state, every key to HALT with ACCEPT, writes x before reading it      -> all gated counts 0
+ *   unw      reads register y that nothing writes                                     -> unwritten=1, warnings=1
+ *   unreach  a second state S9 nobody enters                                          -> reach=1
+ *   duprow   normal delta, stage table with one repeated row and one conflicting key  -> dup_rows=1 conflict_rows=1
+ * Then the baseline gate on the four rows:
+ *   equal baseline                         -> rc 0, status=PASS
+ *   lowered baseline (unw unwritten 1 -> 0) -> rc 1, line `OVER<TAB>unw<TAB>unwritten`, status=FAIL
+ *   baseline without the unreach row       -> rc 1, `UNMEASURED<TAB>unreach<TAB>no-baseline-row`, no REFUSE
+ *   raised baseline (reach 1 -> 3)          -> rc 0, `UNDER<TAB>unreach<TAB>reach`, baseline file unchanged
+ * Last line: CHECK_NET_HEALTH<TAB>ok=N<TAB>failed=M (rc 0 only when failed=0). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+
+#define PW 4400
+static char dir[PW], nh[PW], root[PW];
+static int ok, failed;
+static void die(const char *s) { fprintf(stderr, "check-net-health: REFUSE %s\n", s); exit(2); }
+static void cpn(void *d, const void *s, size_t n) { if (n && mm_copy(d, (long)n, s, (long)n)) die("fixture-copy"); }
+/* substring search over net-health's own output (no source anchors involved) */
+static char *has(const char *h, const char *w) { size_t l = strlen(w); for (const char *p = h; *p; p++) if (!strncmp(p, w, l)) return (char *)p; return 0; }
+static void pj(char *o, const char *a, const char *b) { if (cx_fmt(o, PW, "%s/%s", a, b)) die("fixture-path"); }
+static void put(const char *rel, const char *s) { char p[PW]; pj(p, dir, rel); if (cx_write(p, s, strlen(s))) die("write"); }
+static void expect(int cond, const char *what) { if (cond) { ok++; printf("ok\t%s\n", what); } else { failed++; printf("FAILED\t%s\n", what); } }
+
+static int run(char **av, const char *out) {
+    fflush(stdout); pid_t p = fork(); if (p < 0) die("fork");
+    if (!p) { if (chdir(root)) _exit(127); int o = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600); if (o < 0) _exit(127); dup2(o, 1); dup2(o, 2); execvp(av[0], av); _exit(127); }
+    long t0 = sy_now_ms(); for (;;) { int st = 0; if (waitpid(p, &st, WNOHANG) == p) return WIFEXITED(st) ? WEXITSTATUS(st) : 128; if (sy_now_ms() - t0 > 50000) { kill(p, SIGKILL); waitpid(p, &st, 0); return 124; } sy_sleep_ms(5); }
+}
+static char *slurp(const char *p) { size_t n; char *s = cx_read(p, &n); if (!s) { s = malloc(1); if (!s) die("alloc"); s[0] = 0; } return s; }
+/* the value of column COL in the row of NET in a net-health output */
+static long field(const char *out, const char *net, int col) {
+    char key[128]; if (cx_fmt(key, sizeof key, "\n%s\t", net)) die("text"); const char *a = has(out, key); if (!a) return -99; a++;
+    for (int c = 0; c < col; c++) { a = strchr(a, '\t'); if (!a) return -99; a++; }
+    return atol(a);
+}
+enum { C_ERRORS = 6, C_WARNINGS = 7, C_REACH = 9, C_UNWRITTEN = 12, C_LOADERR = 16, C_DUP = 17, C_CONF = 18 };   /* 0 net, 1 stage, 2 status, 3.. COL[] */
+
+static char *db; static size_t dn, dcap = 32768;
+static void app(const char *s) { size_t l = strlen(s); if (dn + l >= dcap) die("delta-bound"); cpn(db + dn, s, l); dn += l; db[dn] = 0; }
+static void row257(void) { char k[32]; for (int i = 0; i <= 256; i++) { if (cx_fmt(k, sizeof k, "\"%d\":[\"HALT\",0]%s", i, i < 256 ? "," : "")) die("text"); app(k); } }
+static char *delta(const char *seq, int extra) {
+    db = malloc(dcap); if (!db) die("alloc"); dn = 0; db[0] = 0;
+    app("{\"start\":\"S0\",\"states\":{\"S0\":[\"b\",{"); row257(); app("}]");
+    if (extra) { app(",\"S9\":[\"b\",{"); row257(); app("}]"); }
+    app("},\"seqs\":["); app(seq); app("]}");
+    return db;
+}
+static void one(const char *name, const char *json, const char *sd, const char *rows) {
+    char jp[PW], sp[PW], op[PW], rel[64]; if (cx_fmt(rel, sizeof rel, "%s.json", name)) die("text"); put(rel, json);
+    pj(jp, dir, rel); if (cx_fmt(rel, sizeof rel, "stage-%s", sd)) die("text"); pj(sp, dir, rel); mkdir(sp, 0700);
+    if (cx_fmt(rel, sizeof rel, "stage-%s/x-byte.tsv", sd)) die("text"); put(rel, rows);
+    if (cx_fmt(rel, sizeof rel, "%s.rows", name)) die("text"); pj(op, dir, rel);
+    char lo[PW]; if (cx_fmt(rel, sizeof rel, "%s.out", name)) die("text"); pj(lo, dir, rel);
+    char *av[] = {nh, "--delta", jp, "--stage-dir", sp, "--name", (char *)name, "--tsv", op, 0};
+    int rc = run(av, lo); char w[96]; if (cx_fmt(w, sizeof w, "%s: net-health runs (rc %d, 0 or 1)", name, rc)) die("text"); expect(rc == 0 || rc == 1, w);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    if (!getcwd(root, sizeof root)) die("cwd");
+    const char *td = getenv("TMPDIR"); if (cx_fmt(dir, PW, "%s/check-net-health-%d", td && td[0] == '/' ? td : "/tmp", (int)getpid())) die("path");
+    if (mkdir(dir, 0700) && errno != EEXIST) die("mkdir");
+    pj(nh, dir, "net-health");
+    { char lg[PW], src[PW]; pj(lg, dir, "build.log"); pj(src, root, "tools/net-health.cx"); char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), src, "-o", nh, 0}; /* lint:allow R1-product the fixture builds net-health with this checkout's product; UNISACC overrides */ int rc = run(av, lg); expect(rc == 0, "net-health builds"); if (rc) { printf("CHECK_NET_HEALTH\tok=%d\tfailed=%d\n", ok, failed); return 1; } }
+    const char *good = "[[\"LDI\",\"x\",1],[\"CMPI\",\"x\",0],[\"ACCEPT\"]]";
+    const char *clean = "# state\tobservation\tnext\tactions\nS0\t*\tHALT\t[]\n";
+    one("normal", delta(good, 0), "a", clean);
+    one("unw", delta("[[\"CMPI\",\"y\",0],[\"ACCEPT\"]]", 0), "b", clean);
+    one("unreach", delta(good, 1), "c", clean);
+    one("duprow", delta(good, 0), "d", "# state\tobservation\tnext\tactions\nS0\t1\tHALT\t[]\nS0\t1\tHALT\t[]\nS0\t2\tHALT\t[]\nS0\t2\tS0\t[]\nG\tS0\t3\tHALT\t[]\nG\tS1\t3\tHALT\t[]\n");
+    /* join the four row files */
+    char *rows[4]; const char *nm[4] = {"normal", "unw", "unreach", "duprow"};
+    for (int i = 0; i < 4; i++) { char p[PW], rel[64]; if (cx_fmt(rel, sizeof rel, "%s.rows", nm[i])) die("text"); pj(p, dir, rel); rows[i] = slurp(p); }
+    char all[PW]; pj(all, dir, "all.rows");
+    { size_t cap = 1 << 16, n = 0; char *b = malloc(cap); if (!b) die("alloc"); for (int i = 0; i < 4; i++) { size_t l = strlen(rows[i]); if (n + l >= cap) die("bound"); cpn(b + n, rows[i], l); n += l; } if (cx_write(all, b, n)) die("write"); free(b); }
+    char *o = slurp(all); char *o2 = malloc(strlen(o) + 2); if (!o2) die("alloc"); o2[0] = '\n'; cpn(o2 + 1, o, strlen(o) + 1);
+    expect(field(o2, "normal", C_ERRORS) == 0 && field(o2, "normal", C_WARNINGS) == 0 && field(o2, "normal", C_UNWRITTEN) == 0 && field(o2, "normal", C_REACH) == 0 && field(o2, "normal", C_DUP) == 0 && field(o2, "normal", C_CONF) == 0 && field(o2, "normal", C_LOADERR) == 0, "normal: all gated counts 0");
+    expect(field(o2, "unw", C_UNWRITTEN) == 1 && field(o2, "unw", C_WARNINGS) == 1 && field(o2, "unw", C_REACH) == 0, "unw: unwritten=1 warnings=1 reach=0");
+    expect(field(o2, "unreach", C_REACH) == 1 && field(o2, "unreach", C_UNWRITTEN) == 0, "unreach: reach=1 unwritten=0");
+    expect(field(o2, "duprow", C_DUP) == 1 && field(o2, "duprow", C_CONF) == 1 && field(o2, "duprow", C_WARNINGS) == 0, "duprow: dup_rows=1 conflict_rows=1 (prefixed key G S0/G S1 not a conflict)");
+    /* baselines */
+    char bl[PW], out[PW]; pj(bl, dir, "base.tsv"); pj(out, dir, "gate.out");
+    if (cx_write(bl, o, strlen(o))) die("write");
+    { char *av[] = {nh, "--in", all, "--check", "--baseline", bl, 0}; int rc = run(av, out); char *s = slurp(out); expect(rc == 0 && has(s, "status=PASS"), "equal baseline: rc 0 status=PASS"); free(s); }
+    /* lowered: unw unwritten 1 -> 0 (column 12 of its row) */
+    {   char *b = malloc(strlen(o) + 1); if (!b) die("alloc"); cpn(b, o, strlen(o) + 1);
+        char *r = has(b, "\nunw\t"); r = r ? r + 1 : 0; int c = 0; while (r && c < C_UNWRITTEN) { r = strchr(r, '\t'); if (r) r++; c++; }
+        if (!r || *r != '1') die("fixture-row-shape"); *r = '0';
+        if (cx_write(bl, b, strlen(b))) die("write"); free(b);
+        char *av[] = {nh, "--in", all, "--check", "--baseline", bl, 0}; int rc = run(av, out); char *s = slurp(out);
+        expect(rc == 1 && has(s, "OVER\tunw\tunwritten\tbaseline=0\tnow=1") && has(s, "status=FAIL"), "lowered baseline: rc 1, OVER unw unwritten named, status=FAIL"); free(s); }
+    /* baseline missing the unreach row */
+    {   char *b = malloc(strlen(o) + 1); if (!b) die("alloc"); size_t n = 0; const char *a = o;
+        while (*a) { const char *z = strchr(a, '\n'); size_t l = z ? (size_t)(z - a + 1) : strlen(a); if (strncmp(a, "unreach\t", 8)) { cpn(b + n, a, l); n += l; } a += l; }
+        if (cx_write(bl, b, n)) die("write"); free(b);
+        char *av[] = {nh, "--in", all, "--check", "--baseline", bl, 0}; int rc = run(av, out); char *s = slurp(out);
+        expect(rc == 1 && has(s, "UNMEASURED\tunreach\tno-baseline-row") && !has(s, "REFUSE") && has(s, "status=UNMEASURED"), "baseline without a net: rc 1 UNMEASURED named, no crash"); free(s); }
+    /* raised: unreach reach 1 -> 3 -> UNDER hint, baseline file untouched */
+    {   char *b = malloc(strlen(o) + 1); if (!b) die("alloc"); cpn(b, o, strlen(o) + 1);
+        char *r = has(b, "\nunreach\t"); r = r ? r + 1 : 0; int c = 0; while (r && c < C_REACH) { r = strchr(r, '\t'); if (r) r++; c++; }
+        if (!r || *r != '1') die("fixture-row-shape"); *r = '3';
+        if (cx_write(bl, b, strlen(b))) die("write");
+        char *av[] = {nh, "--in", all, "--check", "--baseline", bl, 0}; int rc = run(av, out); char *s = slurp(out), *after = slurp(bl);
+        expect(rc == 0 && has(s, "UNDER\tunreach\treach\tbaseline=3\tnow=1") && !strcmp(after, b), "raised baseline: rc 0, UNDER hint, baseline not rewritten"); free(s); free(after); free(b); }
+    printf("CHECK_NET_HEALTH\tok=%d\tfailed=%d\tms=%ld\n", ok, failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

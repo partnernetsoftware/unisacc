@@ -5,10 +5,12 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.time
 #pragma unisa use sys.env
 #pragma unisa use text.fmt
+#pragma unisa use text.text
 #pragma unisa use mem.heap
 static char repo[4096],root[5000],product[5000],affected[5000],generator[5000];
 static np_result result;static int failed,passed;
@@ -28,6 +30,28 @@ static int command(char**v){np_free(&result);char why[400];int tr=np_run(v,root,
 static int gen(void){char*v[]={"sh",product,generator,"--","--write","--root",root,0};return command(v);}
 static int query(const char*a,const char*b,const char*c,const char*d,const char*e,const char*f){char*v[14]={"sh",product,affected,"--",0};const char*opts[]={a,b,c,d,e,f};int n=4;for(int i=0;i<6&&opts[i];i++)v[n++]=(char*)opts[i];v[n]=0;return command(v);}
 static int selected(const char*id){char want[100];if(cx_fmt(want,sizeof want,"SELECTED\t%s\n",id))return 0;return strstr(result.out,want)!=0;}
+static int native_race(char **args){
+ char gate[5200],lock[5300];sy_spawn_t op;sy_child_t child;sy_exit_t status;
+ if(cx_fmt(gate,sizeof gate,"%s/compiler.lock",root)||cx_fmt(lock,sizeof lock,"%s/.git/unisacc-native-runner/prepare.lock",root)||
+    sy_setenv("FIXTURE_COMPILER",product,1)||sy_setenv("FIXTURE_GATE",gate,1))return 2;
+ /* put replaces only the fixture symlink. The compiler waits at a bounded
+    barrier on -o; the follower's ordinary shell execution can run freely. */
+ if(put("unisacc.com","#!/bin/sh\nif [ \"$2\" = -o ]; then exec flock -s -w 18 \"$FIXTURE_GATE\" sh \"$FIXTURE_COMPILER\" \"$@\"; fi\nexec sh \"$FIXTURE_COMPILER\" \"$@\"\n","","",""))return 2;
+ int hold=open(gate,O_CREAT|O_RDWR|O_CLOEXEC,0600),observe=open(lock,O_RDWR|O_CLOEXEC);
+ if(hold<0||observe<0||sy_flock(hold,2))return 2;
+ sy_spawn_init(&op);op.argv=args;op.cwd=root;op.out_fd=SY_STDIO_PIPE;op.pgroup=-1;op.deadline_ms=24000;
+ if(sy_proc_spawn(&op,&child))return 2;
+ int busy=0;long end=sy_now_ms()+5000;
+ while(sy_now_ms()<end){int c=sy_flock(observe,6);if(c==-EWOULDBLOCK){busy=1;break;}if(c)break;sy_flock(observe,8);sy_sleep_ms(10);}
+ int rc=busy?command(args):-1;
+ ck(busy && !rc && strstr(result.err,"reason=lock-timeout") && strstr(result.out,"runner=sh"),"concurrent-first-build-follower-falls-back");
+ sy_close(observe);sy_close(hold);int wait=sy_proc_wait(&child,&status);
+ char capture[8192];long size=0,r;
+ while(size<sizeof capture && (r=sy_read(child.out_fd,capture+size,sizeof capture-size))>0)size+=r;
+ sy_proc_close(&child);
+ ck(!wait && !sy_exit_code(&status) && tx_find(capture,size,"runner=native",13)>=0,"concurrent-first-builder-finishes");
+ return 0;
+}
 static int native_cases(const char *binary){
  char dir[6000],image[6200],previous[6200];
  const char *src="int main(int argc,char **argv){if(argc<4)return 2;printf(\"BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\tcandidate=fixture\\n\",argv[argc-1]);return 0;}\n";
@@ -59,13 +83,31 @@ static int native_cases(const char *binary){
  octet^=1;if(write(fd,&octet,1)!=1||close(fd))return 2;
  rc=command(native);
  ck(rc==2&&strstr(result.err,"NATIVE_RUNBATCH_IDENTITY_MISMATCH")&&!strstr(result.out,"BATCH_RUN\t"),"tampered-executable-refused");
+ rc=command(native);
+ ck(!rc && strstr(result.out,"runner=native"),"tampered-executable-repaired-for-next-run");
+ if(sy_unlink(image))return 2;
+ rc=command(native);
+ ck(!rc && strstr(result.out,"NATIVE_RUNBATCH_REBUILT") && strstr(result.out,"runner=native"),"missing-executable-rebuilt");
  if(put("tests/run-batch.cx",src,"/* changed source */\n","",""))return 2;
  rc=command(native);
  ck(!rc && strstr(result.out,"runner=native")&&!strstr(result.out,previous),"source-change-builds-new-image");
+ if(put("tests/fixturedep.cx","#pragma unisa module fixturedep\nint fixture_value(void){return 1;}\n","","","")||
+    put("tests/run-batch.cx","#pragma unisa use fixturedep\n",src,"",""))return 2;
+ rc=command(native);p=result.out?strstr(result.out,"\tpath="):0;e=p?strchr(p,'\n'):0;
+ if(rc||!e||cx_fmt(previous,sizeof previous,"%.*s\n",(int)(e-p),p))return 2;
+ if(put("tests/fixturedep.cx","#pragma unisa module fixturedep\nint fixture_value(void){return 2;}\n","","",""))return 2;
+ rc=command(native);
+ ck(!rc && strstr(result.out,"runner=native") && !strstr(result.out,previous),"use-dependency-alone-invalidates");
  if(put("tests/run-batch.cx","invalid fixture compilation\n","","",""))return 2;
  int normal=command(plain);rc=command(native);
  ck(normal!=0 && rc==normal && strstr(result.err,"NATIVE_RUNBATCH_FALLBACK") &&
     !strstr(result.out,"runner=native"),"build-failure-original-sh-verdict");
+ ck(strstr(result.err,"NATIVE_RUNBATCH_FALLBACK\treason=build-failed")!=0,"fallback-reports-build-failure");
+ ck(strstr(result.out,"RUN_REFUSED\ta\t") && strstr(result.out,"\trunner=sh\n"),"refused-fallback-reports-sh");
+ if(put("tests/run-batch.cx","int main(void){return 2;}\n","","",""))return 2;
+ rc=command(native);
+ ck(rc && strstr(result.out,"RUN_REFUSED\ta\t") && strstr(result.out,"\trunner=native\n"),"refused-native-reports-native");
+ if(put("tests/run-batch.cx",src,"/* concurrent first build */\n","","")||native_race(native))return 2;
  printf("CHECK_AFFECTED_DOMAIN\tcase=native\tfailed=%d\tpassed=%d\n",failed,passed);
  return failed?1:0;
 }
