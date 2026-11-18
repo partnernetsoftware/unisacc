@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D3 石桥几何小样</title>
+<style>html,body {margin:0;background:#58a0da} canvas {display:block} output {display:none}</style>
+<canvas id="frame" width="1280" height="720"></canvas>
+<output id="pixels"></output>
+<script type="module">
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { MESH_BOX, MESH_OCTA, MESH_PLANE } from "../meshes.js";
+
+const params = new URLSearchParams(location.search);
+const mode = params.get("mode");
+const scene = new Scene();
+const groups = new Map();
+const colors = {
+  stone:[211,184,140], barrel:[119,113,106], plaster:[246,222,183],
+  leaf:[50,110,62], grass:[140,160,73], roof:[72,91,110],
+  abutment:[151,129,108], timber:[95,65,44], window:[244,160,67],
+  leafLight:[97,148,70], leafDark:[40,90,67]
+};
+function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
+  if (!groups.has(material)) groups.set(material,{mesh,items:[]});
+  groups.get(material).items.push([x,y,z,size,yaw,pitch,roll]);
+}
+
+// The bridge has a three-unit deep barrel. Leave the inside face visible
+// when removing hidden stones from the solid masonry volume.
+const cell = 0.5;
+function masonry(ix,iy,iz) {
+  if (ix<0 || ix>=48 || iy<0 || iy>=16 || iz<0 || iz>=6) return false;
+  if (mode==="sealed") return true;
+  const offset=(ix%16+.5)*cell-4;
+  const aboveSpring=-2+(iy+.5)*cell-2;
+  return Math.hypot(offset,Math.max(0,aboveSpring))>=2.95;
+}
+const neighbors = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+for(let ix=0;ix<48;ix++) for(let iy=0;iy<16;iy++) for(let iz=0;iz<6;iz++) {
+  if (!masonry(ix,iy,iz) || neighbors.every(([a,b,c])=>masonry(ix+a,iy+b,iz+c))) continue;
+  instance(iz===5 || iy===15 ? "stone":"barrel", MESH_BOX,
+    -12+(ix+.5)*cell,-2+(iy+.5)*cell,-.5+(iz+.5)*cell,cell);
+}
+for(let y=-1;y<=5;y+=2) for(let x=-17;x<=-13;x+=2) {
+  for(let z=-.5;z<=1.5;z+=2) instance("abutment",MESH_BOX,x,y,z,2);
+}
+for(let x=-15.5;x<=-12.5;x++) for(let z=-2.5;z<=.5;z++) {
+  for(let y=6.5;y<=8.5;y++) instance("plaster",MESH_BOX,x,y,z,1);
+}
+for (const side of [-1,1]) {
+  instance("roof",MESH_PLANE,-14+side*1.18,9.72,-1,3.4,0,0,-side*Math.PI/4);
+}
+for(let x=-15.75;x<-12;x+=.5) for(let y=9.25;y<11-Math.abs(x+14);y+=.5) {
+  instance("plaster",MESH_BOX,x,y,.45,.5);
+}
+for(let y=10;y<=11.5;y+=.5) instance("barrel",MESH_BOX,-14.7,y,-1.6,.5);
+for(const x of [-15.6,-12.4]) {
+  for(let y=6.25;y<9;y+=.5) instance("timber",MESH_BOX,x,y,1.04,.5);
+}
+for(const x of [-15,-13]) instance("window",MESH_BOX,x,7.8,1.08,.54);
+instance("grass",MESH_PLANE,0,-2.01,0,110);
+if (mode!=="bare") {
+  const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
+  for(const [x,y,z,r] of trees) {
+    instance("leaf",MESH_OCTA,x,y,z,r);
+    instance("leafLight",MESH_OCTA,x-.55*r,y+.3*r,z-.35*r,.75*r);
+    instance("leafDark",MESH_OCTA,x+.58*r,y-.25*r,z-.15*r,.82*r);
+    for(let trunkY=-1.75;trunkY<y;trunkY+=.5) instance("timber",MESH_BOX,x,trunkY,z,.5);
+  }
+}
+for(const [name,{mesh,items}] of groups) {
+  const cloud=scene.instances(name,items.length,colors[name].map(c=>c/255));
+  cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
+  items.forEach((fields,i)=>cloud.set(i,...fields));
+}
+scene.clearColor=[88/255,160/255,218/255,1];
+scene.ambient={color:[1,1,1],intensity:.82};
+scene.lights=[{dir:[-.4,.85,.45],color:[1,1,1],intensity:.30}];
+scene.fog.density=0;
+const camera=new PerspectiveCamera(2*Math.atan(9/16),.1,150);
+camera.setEye(10,1,19);
+camera.setTarget(10-24/41,1+9/41,19-32/41);
+const canvas=document.querySelector("canvas");
+createWebGLRenderer(canvas,{antialias:false}).render(scene,camera);
+const gl=canvas.getContext("webgl");
+const samples=(params.get("pixels")||"").split(";").filter(Boolean).map(pair=>{
+  const [x,y]=pair.split(",").map(Number);
+  const rgba=new Uint8Array(4);
+  gl.readPixels(x,719-y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+  return rgba.slice(0,3).join(",");
+});
+document.querySelector("output").textContent=samples.join(";");
+</script>

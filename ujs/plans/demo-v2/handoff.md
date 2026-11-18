@@ -33,3 +33,7 @@ T1 贴图采样 -> T2 素材加载 -> T3 精灵粒子 -> **T4 NPR(描边、赛�
 - 无 ffmpeg,chrome seek 多数非 0 秒失败。
 - 第三方帧只作仓内对照,不得进 docs/ 与发布页。
 - ujs 工作在 ujs 分支做完再合 main; 不 cherry-pick 代办。
+
+## Q2a 石桥几何
+
+基点 3a9d806，本项提交可用 `git log -1 --format=%h -- tools/check-uxe-d3-geometry.cx` 定位。固定光照与机位的 [1280 x 720 截图](look-dev/d3-q2a.png) 对应三孔桥。运行 `tools/check-uxe-d3-geometry.cx` 的 normal、bare 和 sealed 三种输入；sealed 必须失败，bare 应在前景树冠原像素露出桥墩。取点按解析相机投影，屋顶点取右侧坡面中央，不能取山墙内部。下一步先同步 main 并回归，再做 Q2b 的受光色阶。此帧只验几何，最终风格待固定帧与短横移交所有者签字。

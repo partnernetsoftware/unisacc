@@ -1,0 +1,82 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+
+/* Independent pinhole projection. Each point is inside a visible face or
+   aperture, not on its rasterized edge. The page receives only pixel addresses. */
+typedef struct { const char *name; double x,y,z; int material; } Probe;
+enum { SKY, STONE, BARREL, PLASTER, LEAF, GRASS, ROOF, ABUTMENT };
+static Probe points[] = {
+    {"west-opening",-8,2.5,1,SKY}, {"middle-opening",0,2.6,1,SKY},
+    {"east-opening",8,2.6,1,SKY}, {"middle-vault",0,5,0.7,BARREL},
+    {"sunlit-pier",-4,3.0,2.5,STONE}, {"east-pier-behind-tree",4,2,2.5,LEAF},
+    {"house-wall",-14,8,1,PLASTER}, {"roof",-12.82,9.72,-1,ROOF},
+    {"west-abutment",-14,4,2.5,ABUTMENT}, {"near-meadow",0,-2,9,GRASS}
+};
+/* Mesh shading is ambient .82 plus a positive, bounded directional term.
+   Classify by chromaticity, invariant to this scalar. Sky bypasses shading. */
+static int base[][3] = {{88,160,218},{211,184,140},{119,113,106},
+    {246,222,183},{50,110,62},{140,160,73},{72,91,110},{151,129,108}};
+static int classify(int r,int g,int b) {
+    int k, nearest=-1; double best=1;
+    int sum=r+g+b;
+    if (sum < 45) return -1;
+    for (k=0;k<8;k++) {
+        int norm=base[k][0]+base[k][1]+base[k][2];
+        double dr=(double)r/sum-(double)base[k][0]/norm;
+        double dg=(double)g/sum-(double)base[k][1]/norm;
+        double db=(double)b/sum-(double)base[k][2]/norm;
+        double distance=dr*dr+dg*dg+db*db;
+        if (distance<best) { best=distance; nearest=k; }
+    }
+    return best < 0.00035 ? nearest : -1;
+}
+int main(int argc,char **argv) {
+    char cwd[1024],url[2200],profile[128],option[160],*out=0;
+    size_t size=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader","--allow-file-access-from-files",
+        "--window-size=1280,807","--no-first-run",option,"--dump-dom",url,0};
+    int i, rc, failed=0, used, n=sizeof points/sizeof points[0];
+    const char *mode=argc==1 ? "normal" : argv[1], *p;
+    if(argc>2 || (strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare"))) return 2;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    used=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?mode=%s&pixels=",cwd,mode);
+    if(used<0 || used>=(int)sizeof url) return 2;
+    for(i=0;i<n;i++) {
+        double x=points[i].x-10, y=points[i].y-1, z=points[i].z-19;
+        double across=.8*x-.6*z, ground=.6*x+.8*z;
+        double depth=(9*y-40*ground)/41;
+        double up=(40*y+9*ground)/41;
+        int px=(int)(640+640*across/depth), py=(int)(360-640*up/depth);
+        int w;
+        if(depth<=0 || px<0 || px>=1280 || py<0 || py>=720) return 2;
+        w=tx_snprintf(url+used,sizeof url-used,"%s%d,%d",i?";":"",px,py);
+        if(w<0 || w>=(int)sizeof url-used) return 2;
+        used+=w;
+    }
+    if(tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-d3-%d",(int)getpid())>=(int)sizeof profile) return 2;
+    if(tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile)>=(int)sizeof option) return 2;
+    rc=cx_runv_timeout(av,30,&out,&size);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output id=\"pixels\">"):0;
+    if(rc || !p) { printf("FAIL D3_BROWSER rc=%d\n",rc); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<n;i++) {
+        int c[3], j, observed, want=points[i].material;
+        for(j=0;j<3;j++) {
+            if(*p<'0'||*p>'9') return 2;
+            c[j]=0;
+            while(*p>='0'&&*p<='9') { c[j]=10*c[j]+*p++-'0'; if(c[j]>255) return 2; }
+            if(j<2 && *p++!=',') return 2;
+        }
+        if(i+1<n && *p++!=';') return 2;
+        observed=classify(c[0],c[1],c[2]);
+        if(!strcmp(mode,"bare") && want==LEAF) want=STONE;
+        printf("%s %s rgb=%d,%d,%d want=%d got=%d\n",observed==want?"PASS":"FAIL",points[i].name,c[0],c[1],c[2],want,observed);
+        failed+=observed!=want;
+    }
+    if(strncmp(p,"</output>",9)) return 2;
+    free(out);
+    printf("CHECK_UXE_D3_GEOMETRY\tn=%d failed=%d mode=%s\n",n,failed,mode);
+    return failed?1:0;
+}
