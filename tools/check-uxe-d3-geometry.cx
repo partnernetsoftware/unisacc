@@ -88,10 +88,12 @@ int main(int argc,char **argv) {
     int crowns=!strcmp(mode,"crowns") || !strcmp(mode,"sparse");
     int canopy=!strcmp(mode,"canopy") || !strcmp(mode,"thin-canopy");
     int rails=!strcmp(mode,"rails") || !strcmp(mode,"no-rails");
+    int palette=!strcmp(mode,"palette") || !strcmp(mode,"old-palette");
+    int paint[6][3]={{0}};
     int composition=rails || !strcmp(mode,"composition") || !strcmp(mode,"short-composition");
     int layout[8]={0};
     int ground=!strcmp(mode,"ground") || !strcmp(mode,"flat-ground");
-    if(argc>2 || (!sky && !crowns && !canopy && !ground && !composition && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
+    if(argc>2 || (!sky && !crowns && !canopy && !ground && !composition && !palette && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
     if(!survey()) { printf("FAIL D3_SURVEY\n"); return 2; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     used=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?mode=%s&pixels=",cwd,mode);
@@ -158,7 +160,30 @@ int main(int argc,char **argv) {
             used+=w;
         }
     }
-    for(i=0;!sky && !crowns && !canopy && !ground && i<n;i++) {
+    if(palette) {
+        size_t bytes=0;
+        char *data=cx_read("ujs/practice/uxe/test/d3-palette.tsv",&bytes);
+        char *line=data?strchr(data,'\n'):0;
+        static const char *roles[]={"skyTop","skyHorizon","leafLight","leafDark","stone","barrel"};
+        for(i=0;line && i<6;i++) {
+            char role[32];
+            if(sscanf(line+1,"%31s %d %d %d",role,&paint[i][0],&paint[i][1],&paint[i][2])!=4 ||
+                strcmp(role,roles[i])) break;
+            line=strchr(line+1,'\n');
+        }
+        if(data) free(data);
+        if(i!=6) return 2;
+        n=122;
+        for(i=0;i<n;i++) {
+            int j=i-2;
+            int x=i==0?600:i==1?35:155+j%12*96;
+            int y=i==0?40:i==1?315:188+j/12*53;
+            int w=tx_snprintf(url+used,sizeof url-used,"%s%d,%d",i?";":"",x,y);
+            if(w<0 || w>=(int)sizeof url-used) return 2;
+            used+=w;
+        }
+    }
+    for(i=0;!sky && !crowns && !canopy && !ground && !palette && i<n;i++) {
         double x=points[i].x-10, y=points[i].y-1, z=points[i].z-19;
         double across=.8*x-.6*z, ground=.6*x+.8*z;
         double depth=(9*y-40*ground)/41;
@@ -187,7 +212,7 @@ int main(int argc,char **argv) {
     if(rc || !p) { printf("FAIL D3_BROWSER rc=%d\n",rc); return 2; }
     p+=strlen("<output id=\"pixels\">");
     {
-    int sky_red[4]={0}, leaves=0,dark=0,grass=0,rock=0;
+    int sky_red[4]={0}, leaves=0,dark=0,grass=0,rock=0,paint_hits[6]={0};
     for(i=0;i<n;i++) {
         int c[3], j, observed, want=points[i].material;
         for(j=0;j<3;j++) {
@@ -201,6 +226,25 @@ int main(int argc,char **argv) {
             sky_red[i]=c[0];
             if(i<2) failed+=c[2]<=c[0]+50;
             else failed+=c[2]>c[0]+25 || c[0]<175;
+            continue;
+        }
+        if(palette) {
+            if(i<2) {
+                int row=i==0?5:39;
+                for(j=0;j<3;j++) {
+                    int expected=paint[0][j]+(paint[1][j]-paint[0][j])*row/89;
+                    if(abs(c[j]-expected)>5) failed++;
+                }
+                printf("D3_GRADIENT\t%d\t%d,%d,%d\n",row,c[0],c[1],c[2]);
+            } else if(c[1]>40) {
+                int k;
+                for(k=2;k<6;k++) {
+                    int drift_r=abs(c[0]*paint[k][1]-c[1]*paint[k][0]);
+                    int drift_b=abs(c[2]*paint[k][1]-c[1]*paint[k][2]);
+                    if(drift_r*100<c[1]*paint[k][1]*4 && drift_b*100<c[1]*paint[k][1]*4)
+                        paint_hits[k]++;
+                }
+            }
             continue;
         }
         if(crowns || canopy) {
@@ -251,6 +295,11 @@ int main(int argc,char **argv) {
         failed+=grass<8;
         failed+=rock<10;
         printf("D3_GROUND\tgrass=%d rock=%d failed=%d\n",grass,rock,failed);
+    }
+    if(palette) {
+        for(i=2;i<6;i++) failed+=paint_hits[i]<3;
+        printf("D3_PALETTE\tlight-leaf=%d dark-leaf=%d stone=%d barrel=%d failed=%d\n",
+            paint_hits[2],paint_hits[3],paint_hits[4],paint_hits[5],failed);
     }
     }
     if(strncmp(p,"</output>",9)) return 2;

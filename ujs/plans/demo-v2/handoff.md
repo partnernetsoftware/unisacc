@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3d 的六角色色板见 `d3-palette.tsv`。天顶和地平用更饱和的蓝，树暗部偏群青，石面偏暖奶油色。调整天空渐变时保留云的明暗。`check-uxe-d3-geometry.cx -- palette` 读色板验证两处天空梯度与四类材质，正例 122/0，`old-palette` 为 122/9。Q3c 为 `70c0184`。Q3d 提交用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-palette.tsv` 查得。并排图 /tmp/d3-review-comparison.png。
+
 Q3c 沿桥顶投影栏杆立柱，细线门 `check-uxe-d3-geometry.cx -- rails` 检查立柱中心、立柱旁天空、同面石块和右端是否入画，共 10/0。移除栏杆 `no-rails` 为 10/4。桥顶保留天际余量，屋檐与藤蔓使用一像素描边，叶片和草保留色块。下一项 Q3d 色板。
 
 Q3a `898b11c` 将大树冠改为每团 48 片不规则叶片，三档着色。canopy 覆盖 51/120，暗部 23/51；thin-canopy 覆盖 32/120，暗部 5/32，两项失败。Q3b 把桥高拉到 1.6 倍，采用更低近的机位，添瓦屋面、木阳台、烟囱、崖台岩及远岭。构图规格见 `d3-composition.tsv`，`check-uxe-d3-geometry.cx -- composition` 为 4/0，short-composition 为 4/3。当前并排件在 /tmp/d3-review-comparison.png，左侧参考第 3 秒，右侧为新构图。Q3b 提交可用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-composition.tsv` 查得。下一项 Q3c 细线。

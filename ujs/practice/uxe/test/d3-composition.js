@@ -9,6 +9,35 @@ export async function loadComposition() {
   return {eye:[x,y,z],scale,houseX,width,height,depth};
 }
 
+export async function loadPalette() {
+  const reply = await fetch(new URL("d3-palette.tsv", import.meta.url));
+  if (!reply.ok) throw new Error("色板读取失败");
+  const rows = (await reply.text()).trim().split("\n").slice(1);
+  const roles = ["skyTop","skyHorizon","leafLight","leafDark","stone","barrel"];
+  if (rows.length !== roles.length) throw new Error("色板行数错误");
+  return Object.fromEntries(rows.map((row,i) => {
+    const [role,...fields] = row.split("\t");
+    const rgb = fields.map(Number);
+    if (role !== roles[i] || rgb.length !== 3 ||
+        !rgb.every(v=>Number.isInteger(v) && v>=0 && v<=255)) throw new Error("色板格式错误");
+    return [role,rgb];
+  }));
+}
+
+export function tintSky(rgba, width, height, palette) {
+  for (let y=0; y<height; y++) {
+    const old=[66+y,126+Math.floor(y*3/4),184+Math.floor(y/2)];
+    const delta=palette.skyTop.map((v,j)=>v+(palette.skyHorizon[j]-v)*y/(height-1)-old[j]);
+    for(let x=0;x<width;x++) {
+      const p=(y*width+x)*4;
+      // The generated clouds have a constant blue-to-red difference of 16.
+      // Recover the uncovered fraction before remapping the blue gradient.
+      const clear=Math.max(0,Math.min(1,(rgba[p+2]-rgba[p]-16)/(old[2]-old[0]-16)));
+      for(let j=0;j<3;j++) rgba[p+j]=Math.max(0,Math.min(255,Math.round(rgba[p+j]+clear*delta[j])));
+    }
+  }
+}
+
 export function stretchBridge(mesh, scale, bottom) {
   for (let i=1;i<mesh.positions.length;i+=3) {
     mesh.positions[i] = bottom + (mesh.positions[i]-bottom)*scale;

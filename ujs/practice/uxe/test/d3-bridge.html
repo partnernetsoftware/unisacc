@@ -10,14 +10,15 @@ import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } from "../meshes.js";
 import { archMeshes, loadBays } from "./d3-arch.js";
 import { canopyPatches, crownLobes, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
-import { bridgeLines, buildClifftop, loadComposition, stretchBridge } from "./d3-composition.js";
+import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode");
 const composition = params.get("style") === "study" ||
-  ["composition","short-composition","rails","no-rails"].includes(mode);
+  ["composition","short-composition","rails","no-rails","palette","old-palette"].includes(mode);
 const study = composition || ["canopy","thin-canopy"].includes(mode);
 const layout = composition ? await loadComposition() : null;
+const palette = params.get("style") === "study" || mode === "palette" ? await loadPalette() : null;
 const textured = study || params.get("style") === "masonry" ||
   ["crowns","sparse","ground","flat-ground"].includes(mode);
 const scene = new Scene();
@@ -31,6 +32,10 @@ const colors = {
   cliffShade:[94,108,125], cliffLight:[132,145,158], roofPale:[91,109,125], ridge:[106,135,151],
   iron:[33,40,52], vine:[59,86,46]
 };
+if (palette) {
+  for (const material of ["stone","barrel","leafLight","leafDark"]) colors[material]=palette[material];
+  colors.leaf=palette.leafDark.map((v,i)=>.55*v+.45*palette.leafLight[i]);
+}
 function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
   const key=material+"-"+mesh;
   if (!groups.has(key)) groups.set(key,{material,mesh,items:[]});
@@ -155,6 +160,7 @@ async function loadTexture(file,id,w,h,filter=0) {
   const rgba = new Uint8Array(await reply.arrayBuffer());
   if (rgba.length !== w*h*4) throw new Error("纹理长度错误: " + file);
   textures.push({id,w,h,rgba,filter});
+  return rgba;
 }
 if (textured) {
   await loadTexture("d3-masonry.rgba",1,64,64);
@@ -165,7 +171,8 @@ if (textured) {
   }
 }
 if ((textured || mode === "sky") && mode !== "cloudless") {
-  await loadTexture("d3-sky.rgba",2,160,90,1);
+  const skyPixels=await loadTexture("d3-sky.rgba",2,160,90,1);
+  if (palette) tintSky(skyPixels,160,90,palette);
   const backdrop = new Scene().instances("sky",1);
   backdrop.meshId = MESH_POINTS;
   backdrop.screenSpace = 1;
