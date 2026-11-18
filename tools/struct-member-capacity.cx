@@ -106,19 +106,35 @@ static void reject(const char *name, const char *needle) { size_t nl = strlen(ne
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    /* optional SET: accept (27 assertions: 9 accept fixtures x 3 entries) or reject (15: structs2040one and
+       structs2040 accept x 3, m513 anon501p12 structs2100one refused x 3); no SET runs all 42.  The two sets are
+       the batches struct-member-capacity-accept and struct-member-capacity-reject (split so each stays well inside
+       the 55 s batch limit); the assertion count of the set is checked, a missing fixture fails the run. */
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc) ||
+        (argc == 5 && strcmp(argv[4], "accept") && strcmp(argv[4], "reject"))) { fputs("usage: ROOT ABS_OUT HOST_CC [accept|reject]\n", stderr); return 2; }
+    const char *set = argc == 5 ? argv[4] : 0; int want_n = !set ? 42 : !strcmp(set, "accept") ? 27 : 15;
+    int sa = !set || !strcmp(set, "accept"), sr = !set || !strcmp(set, "reject");
     FMT(outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\n", h, hostcc); }
     const char *only = getenv("SMC_ONLY");
-#define WANT(x) (!only || strstr(only, x))
+    /* SMC_DROP=name[,name] skips fixtures but keeps the assertion-count check (negative control of the count);
+       SMC_ONLY is local probing and turns the count check off */
+    const char *drop = getenv("SMC_DROP");
+#define WANT(x) ((!only || strstr(only, x)) && !(drop && strstr(drop, x)))
+    if (sa) {
     if (WANT("m64,") || (only && !strcmp(only, "m64"))) { one(64); accept("m64"); }
     if (WANT("m65")) { one(65); accept("m65"); } if (WANT("m256")) { one(256); accept("m256"); } if (WANT("m512")) { one(512); accept("m512"); }
     if (WANT("anon500p12")) { anon(500); accept("anon500p12"); } if (WANT("nest512")) { nest(); accept("nest512"); }
-    if (WANT("structs255")) { many(255); accept("structs255"); } if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
+    if (WANT("structs255")) { many(255); accept("structs255"); }
     if (WANT("structs257")) { many(257); accept("structs257"); } if (WANT("structs300")) { many(300); accept("structs300"); }
+    }
+    if (sr) {
+    if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
     if (WANT("structs2040,") || (only && !strcmp(only, "structs2040"))) { many(2040); accept("structs2040"); }
     if (WANT("m513")) { one(513); reject("m513", "structure member capacity"); } if (WANT("anon501p12")) { anon(501); reject("anon501p12", "structure member capacity"); }
     if (WANT("structs2100one")) { onename(2100); reject("structs2100one", "structure id capacity"); }
+    }
+    if (!only && npass + nfail != want_n) { fprintf(res, "FAIL\tstruct.capacity.assertion-count\texpected=%d got=%d set=%s\n", want_n, npass + nfail, set ? set : "all"); nfail++; }
     fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("STRUCT_MEMBER_CAPACITY\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
 }
