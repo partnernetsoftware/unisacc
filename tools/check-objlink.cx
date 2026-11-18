@@ -1,0 +1,361 @@
+/* Check for cx/driver/objlink.cx (v0.0.76 R2 W2c: SHN_COMMON merge and __init_u).
+   Run: sh ./unisacc.com tools/check-objlink.cx   (product under test: $UNISACC, default
+   ./unisacc.com; cold caches UNISACC_RUN_CACHE=0 UNISACC_UNIT_CACHE=0 for every call).
+   Builds the W2 runtime closure (-c -funit -DRT_UNIT), compiles three samples as -funit
+   -DRT_EXTERN objects (hello, strprog, four sources main+u1..u3 where u3 is rewritten), links
+   them with objlink (multi-source -run of cx/driver/objlink.cx and a small driver) and asserts:
+     positive: each linked exe prints the same stdout and rc as the whole-program -run;
+       two links of the same inputs give the same bytes; the process slots
+       _unisa_proc_argc/_argv are SHN_COMMON in every object and merge to one copy;
+       a copy with argc widened to size 64 align 64 links and grows the RW memsz to that
+       (largest size and alignment win);
+     negative: argc turned into a .bss strong definition next to the COMMON ones links
+       (strong wins, no duplicate) and drops one COMMON slot; two such strong copies are
+       refused rc 4 naming _unisa_proc_argc; one relocation type byte set to 0x30 is
+       refused rc 3; _start renamed is refused rc 6; an osx/x86_64 object is refused rc 2.
+   The installed 0.0.71 has no named COMMON slots, so it fails the COMMON assertions. */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static const char *drv_src =
+"int printf(const char *, ...);\n"
+"int sy_write_file(const char *, const void *, long long, int);\n"
+"int ol_link(int n, const char **objs, unsigned char **exe, long *exen);\n"
+"const char *ol_error(void);\n"
+"int main(int argc, char **argv) {\n"
+"    unsigned char *exe; long n; int rc;\n"
+"    if (argc < 3) return 2;\n"
+"    rc = ol_link(argc - 2, (const char **)(argv + 2), &exe, &n);\n"
+"    if (rc) { printf(\"REFUSED\\t%d\\t%s\\n\", rc, ol_error()); return rc; }\n"
+"    if (sy_write_file(argv[1], exe, (long long)n, 0755)) return 1;\n"
+"    printf(\"LINKED\\t%ld\\n\", n);\n"
+"    return 0;\n"
+"}\n";
+
+static const char *hello_c = "#include <stdio.h>\nint main(void){ printf(\"hello %d\\n\", 42); return 3; }\n";
+static const char *str_c =
+"#include <stdio.h>\n#include <string.h>\n"
+"int main(void){ char b[64], p[64]; strcpy(b, \"objlink\"); strcat(b, \"-w2c\");\n"
+"  memcpy(p, b, strlen(b) + 1);\n"
+"  printf(\"%s %d %d\\n\", p, (int)strlen(p), strcmp(p, \"objlink\") > 0); return (int)strlen(b); }\n";
+static const char *main_c = "#include <stdio.h>\n#include \"a.h\"\nint main(void){ int i,s=0; for(i=0;i<100;i++) s+=f1(i)+f2(i)+f3(i); printf(\"%d\\n\",s); return s & 63; }\n";
+static const char *a_h = "int f1(int); int f2(int); int f3(int);\n";
+static const char *u1_c = "#include \"a.h\"\nint f1(int x){ return x*3+1; }\n";
+static const char *u2_c = "#include \"a.h\"\nint f2(int x){ return x*x-2; }\n";
+static const char *u3_c = "#include \"a.h\"\nint f3(int x){ return x+17; }\n";
+
+static char root[4096], dir[512], why[1400];
+static const char *product;
+static int fails, passes;
+
+static void note(int ok, const char *name, const char *detail) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "");
+    if (ok) passes++; else fails++;
+}
+
+static int put(const char *name, const char *s) {
+    char p[700];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) return 1;
+    return cx_write(p, s, (size_t)tx_len(s, 1L << 20)) ? 1 : 0;
+}
+
+/* Run ARGV in DIR with cold caches; returns rc (-1 spawn) and keeps stdout in OUT. */
+static int run(char **v, const char *cwd, char *out, long cap) {
+    np_result r;
+    char *envadd[3];
+    long k;
+    int rc;
+    envadd[0] = "UNISACC_RUN_CACHE=0"; envadd[1] = "UNISACC_UNIT_CACHE=0"; envadd[2] = 0;
+    if (out) out[0] = 0;
+    if (np_run(v, cwd, envadd, 55, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (out) {
+        k = 0;
+        while (k < (long)r.outn && k < cap - 1) { out[k] = r.out[k]; k++; }
+        out[k] = 0;
+    }
+    if (rc && r.errn) fwrite(r.err, 1, r.errn > 400 ? 400 : r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
+static int prod(const char *a1, const char *a2, const char *a3, const char *a4, const char *a5,
+                const char *a6, const char *a7, const char *a8, char *out, long cap) {
+    char *v[11];
+    v[0] = "sh"; v[1] = (char *)product; v[2] = (char *)a1; v[3] = (char *)a2; v[4] = (char *)a3;
+    v[5] = (char *)a4; v[6] = (char *)a5; v[7] = (char *)a6; v[8] = (char *)a7; v[9] = (char *)a8; v[10] = 0;
+    return run(v, dir, out, cap);
+}
+
+static int unitobj(const char *src, const char *obj, const char *def) {
+    return prod("-c", "-b", "lnx/x86_64", "-funit", def, src, "-o", obj, 0, 0);
+}
+
+/* Link OBJS (space separated names in dir, at most 6) into EXE; returns rc, stdout in OUT. */
+static int olink(const char *exe, const char *o1, const char *o2, const char *o3, const char *o4,
+                 const char *o5, char *out, long cap) {
+    char *v[14], ol[700];
+    int i = 0;
+    if (cx_fmt(ol, sizeof ol, "%s/ol.exe", dir)) return -1;
+    v[i++] = ol; v[i++] = (char *)exe;
+    if (o1) v[i++] = (char *)o1;
+    if (o2) v[i++] = (char *)o2;
+    if (o3) v[i++] = (char *)o3;
+    if (o4) v[i++] = (char *)o4;
+    if (o5) v[i++] = (char *)o5;
+    v[i] = 0;
+    return run(v, dir, out, cap);
+}
+
+static int runexe(const char *exe, char *out, long cap) {
+    char p[700];
+    char *v[2];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, exe)) return -1;
+    v[0] = p; v[1] = 0;
+    return run(v, dir, out, cap);
+}
+
+static int load(const char *name, unsigned char **b, long *n) {
+    char p[700];
+    size_t fn = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) return 1;
+    *b = (unsigned char *)cx_read(p, &fn);
+    *n = (long)fn;
+    return *b ? 0 : 1;
+}
+
+static int save(const char *name, const unsigned char *b, long n) {
+    char p[700];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) return 1;
+    return cx_write(p, b, (size_t)n) ? 1 : 0;
+}
+
+static unsigned long long rd(const unsigned char *p, int w) {
+    unsigned long long v = 0;
+    int i;
+    for (i = w - 1; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+static void wr(unsigned char *p, unsigned long long v, int w) {
+    int i;
+    for (i = 0; i < w; i++) { p[i] = (unsigned char)(v & 255); v >>= 8; }
+}
+
+/* Symbol record of NAME in object B (or 0); *STR gets the string table offset. */
+static unsigned char *symrec(unsigned char *b, long n, const char *name, long *stroff) {
+    long shoff = (long)rd(b + 40, 8), i, j;
+    int shnum = (int)rd(b + 60, 2), k;
+    if (n < 64 || shoff + (long)shnum * 64 > n) return 0;
+    for (k = 0; k < shnum; k++) {
+        unsigned char *s = b + shoff + (long)k * 64;
+        if (rd(s + 4, 4) != 2) continue;
+        {
+            long so = (long)rd(s + 24, 8), cnt = (long)rd(s + 32, 8) / 24;
+            unsigned char *ls = b + shoff + (long)rd(s + 40, 4) * 64;
+            long to = (long)rd(ls + 24, 8);
+            *stroff = to;
+            for (i = 1; i < cnt; i++) {
+                unsigned char *e = b + so + i * 24;
+                const char *nm = (const char *)b + to + rd(e, 4);
+                for (j = 0; name[j] && nm[j] == name[j]; j++) {}
+                if (!name[j] && !nm[j]) return e;
+            }
+        }
+    }
+    return 0;
+}
+
+static int section_index(unsigned char *b, const char *name) {
+    long shoff = (long)rd(b + 40, 8);
+    int shnum = (int)rd(b + 60, 2), k, j;
+    unsigned char *ss = b + shoff + (long)rd(b + 62, 2) * 64;
+    long so = (long)rd(ss + 24, 8);
+    for (k = 0; k < shnum; k++) {
+        const char *nm = (const char *)b + so + rd(b + shoff + (long)k * 64, 4);
+        for (j = 0; name[j] && nm[j] == name[j]; j++) {}
+        if (!name[j] && !nm[j]) return k;
+    }
+    return -1;
+}
+
+/* First RELA record of B, or 0. */
+static unsigned char *first_rela(unsigned char *b) {
+    long shoff = (long)rd(b + 40, 8);
+    int shnum = (int)rd(b + 60, 2), k;
+    for (k = 0; k < shnum; k++) {
+        unsigned char *s = b + shoff + (long)k * 64;
+        if (rd(s + 4, 4) == 4 && rd(s + 32, 8) >= 24 && rd(b + shoff + rd(s + 44, 4) * 64 + 8, 8) & 2) return b + rd(s + 24, 8);
+    }
+    return 0;
+}
+
+static long rw_memsz(const char *exe) {
+    unsigned char *b;
+    long n, r;
+    if (load(exe, &b, &n) || n < 64 + 56 * 2) return -1;
+    r = (long)rd(b + 120 + 40, 8);
+    mm_free(b);
+    return r;
+}
+
+static int same_file(const char *a, const char *b) {
+    unsigned char *x, *y;
+    long xn, yn, i;
+    int eq;
+    if (load(a, &x, &xn)) return 0;
+    if (load(b, &y, &yn)) { mm_free(x); return 0; }
+    eq = xn == yn;
+    for (i = 0; eq && i < xn; i++) if (x[i] != y[i]) eq = 0;
+    mm_free(x); mm_free(y);
+    return eq;
+}
+
+static int has(const char *s, const char *pat) {
+    long i, j;
+    for (i = 0; s[i]; i++) {
+        for (j = 0; pat[j] && s[i + j] == pat[j]; j++) {}
+        if (!pat[j]) return 1;
+    }
+    return 0;
+}
+
+/* Whole-program -run of SRCS against the objlink exe: same stdout and same rc. */
+static void pair(const char *tag, const char *exe, const char *s1, const char *s2, const char *s3, const char *s4) {
+    static char a[8192], b[8192], d[300];
+    int ra = prod(s1, s2 ? s2 : 0, s2 && s3 ? s3 : 0, s2 && s3 && s4 ? s4 : 0, 0, 0, 0, 0, a, sizeof a);
+    int rb = runexe(exe, b, sizeof b);
+    long i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    cx_fmt(d, sizeof d, "whole rc=%d exe rc=%d out_equal=%d", ra, rb, a[i] == b[i]);
+    note(ra >= 0 && ra == rb && a[i] == b[i] && a[0], tag, d);
+}
+
+int main(void) {
+    static char out[4096], clo[1024], d[600];
+    unsigned char *b;
+    long n, so, m0, m1;
+    unsigned char *e;
+    int rc, i, com;
+    const char *objs[6] = { "clo.o", "hello.o", "main.o", "u1.o", "u2.o", "u3.o" };
+    if (sy_cwd(root, sizeof root)) { printf("FAIL\tcwd\n"); return 2; }
+    if (cx_fmt(dir, sizeof dir, "/tmp/unisacc-check-objlink-%ld", (long)sy_pid())) return 2;
+    if (sy_mkdir_all(dir, 0700)) { printf("FAIL\tmkdir %s\n", dir); return 2; }
+    product = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product Same-candidate probe launcher; UNISACC overrides it. */
+    if (product[0] != '/') {
+        static char pabs[4300];
+        if (cx_fmt(pabs, sizeof pabs, "%s/%s", root, product)) return 2;
+        product = pabs;
+    }
+    if (put("drv.c", drv_src) || put("hello.c", hello_c) || put("str.c", str_c) || put("main.c", main_c) || put("a.h", a_h)
+        || put("u1.c", u1_c) || put("u2.c", u2_c) || put("u3.c", u3_c) || put("clo.c", "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <ctype.h>\n#include <errno.h>\n")) {
+        printf("FAIL\twrite fixtures\n"); return 2;
+    }
+    rc = unitobj("clo.c", "clo.o", "-DRT_UNIT");
+    if (!rc) rc = unitobj("hello.c", "hello.o", "-DRT_EXTERN");
+    if (!rc) rc = unitobj("str.c", "str.o", "-DRT_EXTERN");
+    if (!rc) rc = unitobj("main.c", "main.o", "-DRT_EXTERN");
+    if (!rc) rc = unitobj("u1.c", "u1.o", "-DRT_EXTERN");
+    if (!rc) rc = unitobj("u2.c", "u2.o", "-DRT_EXTERN");
+    if (!rc) rc = unitobj("u3.c", "u3.o", "-DRT_EXTERN");
+    if (!rc) rc = prod("-c", "-b", "osx/x86_64", "-funit", "-DRT_EXTERN", "u1.c", "-o", "osx.o", 0, 0);
+    if (rc) { printf("FAIL\tcompile objects rc=%d %s\n", rc, why); return 1; }
+    (void)clo;
+    {
+        char *v[8], src[4200], drv[700];
+        if (cx_fmt(src, sizeof src, "%s/cx/driver/objlink.cx", root) || cx_fmt(drv, sizeof drv, "%s/drv.c", dir)) return 2;
+        v[0] = "sh"; v[1] = (char *)product; v[2] = src; v[3] = drv; v[4] = "-o"; v[5] = "ol.exe"; v[6] = 0;
+        rc = run(v, dir, 0, 0);
+        if (rc) { printf("FAIL\tbuild objlink driver rc=%d %s\n", rc, why); return 1; }
+    }
+    /* the process slots are named SHN_COMMON wherever present; closure, hello and main carry them */
+    com = 0;
+    for (i = 0; i < 6; i++) {
+        unsigned char *a, *v;
+        if (load(objs[i], &b, &n)) { com = -99; break; }
+        a = symrec(b, n, "_unisa_proc_argc", &so);
+        v = symrec(b, n, "_unisa_proc_argv", &so);
+        if ((a && rd(a + 6, 2) != 0xfff2) || (v && rd(v + 6, 2) != 0xfff2)) com = -99;
+        if (a && v && rd(a + 16, 8) == 8 && rd(v + 16, 8) == 8) com++;
+        else if (i < 3) com = -99;
+        mm_free(b);
+    }
+    cx_fmt(d, sizeof d, "objects with COMMON argc/argv size 8: %d", com);
+    note(com >= 3, "slots-common", d);
+    /* equal output: hello, strprog, four sources */
+    rc = olink("hello.exe", "hello.o", "clo.o", 0, 0, 0, out, sizeof out);
+    note(rc == 0, "link-hello", out);
+    pair("equal-hello", "hello.exe", "hello.c", 0, 0, 0);
+    rc = olink("str.exe", "str.o", "clo.o", 0, 0, 0, out, sizeof out);
+    note(rc == 0, "link-strprog", out);
+    pair("equal-strprog", "str.exe", "str.c", 0, 0, 0);
+    rc = olink("m.exe", "main.o", "u1.o", "u2.o", "u3.o", "clo.o", out, sizeof out);
+    note(rc == 0, "link-4src", out);
+    pair("equal-4src", "m.exe", "main.c", "u1.c", "u2.c", "u3.c");
+    put("u3.c", "#include \"a.h\"\nint f3(int x){ return x+29; }\n");
+    rc = unitobj("u3.c", "u3.o", "-DRT_EXTERN");
+    rc = rc ? rc : olink("m2.exe", "main.o", "u1.o", "u2.o", "u3.o", "clo.o", out, sizeof out);
+    note(rc == 0, "link-4src-u3edit", out);
+    pair("equal-4src-u3edit", "m2.exe", "main.c", "u1.c", "u2.c", "u3.c");
+    rc = olink("m3.exe", "main.o", "u1.o", "u2.o", "u3.o", "clo.o", out, sizeof out);
+    note(rc == 0 && same_file("m2.exe", "m3.exe"), "link-twice-same-bytes", "m2.exe == m3.exe");
+    m0 = rw_memsz("hello.exe");
+    /* largest size and alignment win: argc widened to 64/64 in a copy of hello.o */
+    if (load("hello.o", &b, &n)) return 1;
+    e = symrec(b, n, "_unisa_proc_argc", &so);
+    if (e) { wr(e + 8, 64, 8); wr(e + 16, 64, 8); save("wide.o", b, n); }
+    mm_free(b);
+    rc = e ? olink("wide.exe", "wide.o", "clo.o", 0, 0, 0, out, sizeof out) : -1;
+    m1 = rw_memsz("wide.exe");
+    cx_fmt(d, sizeof d, "memsz %ld -> %ld", m0, m1);
+    note(rc == 0 && m1 >= m0 + 56, "common-max-size-align", d);
+    pair("equal-hello-wide", "wide.exe", "hello.c", 0, 0, 0);
+    /* strong definition next to COMMON: strong wins, one COMMON slot fewer */
+    for (i = 0; i < 2; i++) {
+        int bs;
+        if (load(i ? "clo.o" : "main.o", &b, &n)) return 1;
+        e = symrec(b, n, "_unisa_proc_argc", &so);
+        bs = section_index(b, ".bss");
+        if (e && bs > 0) { wr(e + 6, (unsigned long long)bs, 2); wr(e + 8, 0, 8); save(i ? "strongc.o" : "strongm.o", b, n); }
+        mm_free(b);
+    }
+    rc = olink("strong.exe", "strongm.o", "u1.o", "u2.o", "u3.o", "clo.o", out, sizeof out);
+    m0 = rw_memsz("m3.exe");
+    m1 = rw_memsz("strong.exe");
+    cx_fmt(d, sizeof d, "rc=%d memsz %ld -> %ld %s", rc, m0, m1, out);
+    note(rc == 0 && m1 < m0, "neg-strong-wins-common", d);
+    rc = olink("dup.exe", "strongm.o", "u1.o", "u2.o", "u3.o", "strongc.o", out, sizeof out);
+    note(rc == 4 && has(out, "duplicate symbol _unisa_proc_argc"), "neg-two-strong-dup", out);
+    /* relocation type byte tampered */
+    if (load("u1.o", &b, &n)) return 1;
+    e = first_rela(b);
+    if (e) { e[8] = 0x30; save("tamper.o", b, n); }
+    mm_free(b);
+    rc = e ? olink("t.exe", "main.o", "tamper.o", "u2.o", "u3.o", "clo.o", out, sizeof out) : -1;
+    note(rc == 3 && has(out, "unknown relocation type"), "neg-reloc-type", out);
+    /* _start renamed in the object that defines it */
+    rc = 0;
+    for (i = 0; i < 2 && !rc; i++) {
+        const char *nm = i ? "clo.o" : "hello.o";
+        if (load(nm, &b, &n)) return 1;
+        e = symrec(b, n, "_start", &so);
+        if (e && rd(e + 6, 2) != 0) {
+            b[so + rd(e, 4) + 3] = 'b';
+            save(i ? "nostart-c.o" : "nostart-h.o", b, n);
+            rc = olink("ns.exe", i ? "hello.o" : "nostart-h.o", i ? "nostart-c.o" : "clo.o", 0, 0, 0, out, sizeof out);
+            if (!rc) rc = -2;
+        }
+        mm_free(b);
+    }
+    note(rc == 6 && has(out, "missing _start"), "neg-missing-start", out);
+    rc = olink("osx.exe", "osx.o", "clo.o", 0, 0, 0, out, sizeof out);
+    note(rc == 2 && has(out, "target mismatch"), "neg-osx-object", out);
+    printf("check-objlink: %s\n", fails ? "FAIL" : "PASS");
+    if (!fails) printf("OBJLINK_OK\tchecks=%d\n", passes);
+    return fails ? 1 : 0;
+}

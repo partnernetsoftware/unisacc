@@ -31,6 +31,7 @@ static char out[65536];
  * Every other replayed input is a committed static evidence file, not a history object. */
 static char fc[48], bjson[160], bjbad[120], ratfc[200], rathead[160], fft[60];
 static int passed, failed, part;
+static char archive_path[4400];
 static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\trelease-prep\n", yes ? "PASS" : "FAIL", label); }
 static int has(const char *hay, const char *s) { return hay && s && strstr(hay, s); }
 static int runv(char **v, int secs, int *rc) {
@@ -59,6 +60,7 @@ static int prep(const char *dir, const char *strict, const char *ratin, const ch
     char *v[16]; int k = 0; v[k++] = bin; v[k++] = "0.0.74"; v[k++] = "--layout"; v[k++] = (char *)layout; v[k++] = "--out"; v[k++] = (char *)dir; /* lint:allow R1-version replay of the committed v0.0.74 evidence */
     if (strict) { v[k++] = "--strict"; v[k++] = (char *)strict; }
     if (ratin) { v[k++] = "--ratchets"; v[k++] = (char *)ratin; }
+    if (part == 4 && archive_path[0]) { v[k++] = "--ratchets-in"; v[k++] = archive_path; }
     v[k] = 0; return runv(v, 58, rc);
 }
 /* lines of TEXT not starting with '#', joined */
@@ -87,7 +89,15 @@ int main(int argc, char **argv) {
     char why[512], d1[4400], d2[4400], d3[4400], d4[4400], d5[4400], d6[4400], rat1[4500], s_unk[4400], s_new[4400], s_cnt[4400]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "release-prep-check", tmp, sizeof tmp)) return 2;
     /* --part pos|neg splits the two halves into separate batches (each under the cold budget) */
-    if (argc >= 3 && !strcmp(argv[1], "--part")) { part = !strcmp(argv[2], "pos") ? 1 : !strcmp(argv[2], "neg") ? 2 : -1; if (part < 0) return 2; argv += 2; argc -= 2; }
+    if (argc >= 3 && !strcmp(argv[1], "--part")) {
+        const char *name = argv[2];
+        if (!strcmp(name, "pos")) part = 1;
+        else if (!strcmp(name, "neg")) part = 2;
+        else if (!strcmp(name, "structure")) part = 3;
+        else if (!strcmp(name, "ratchets")) part = 4;
+        else return 2;
+        argv += 2; argc -= 2;
+    }
     if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/release-prep", tmp) || cx_fmt(s, sizeof s, "%s/tools/release-prep.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build release-prep: %s\n", why); return 2; } }
     if (frozen_pick() || cx_fmt(fft, sizeof fft, "F=T=%s", fc) || cx_fmt(bjson, sizeof bjson, "{\"commit\":\"%s\",\"version\":\"0.0.74\"}\n", fc) || cx_fmt(bjbad, sizeof bjbad, "{\"commit\":\"%s\"}\n", fc) || /* lint:allow R1-version replay of the committed v0.0.74 evidence */
@@ -104,7 +114,22 @@ int main(int argc, char **argv) {
         if (sy_mkdir(d1, 0700) || sy_write_file(rat1, t, strlen(t), 0644)) return 2; goto negatives; }
 
     /* (1) positive: replay 0.0.74 with the real ratchets run on the frozen commit */
-    check("replay-0.0.74-rc0", prep(d1, 0, 0, lay, &rc) && rc == 0 && has(out, "verdict=NOT_QUALIFIED") && has(out, "batches=30\tpass=29\tfail=1\tuncovered=0\tnew_fail=0"));
+    if (part == 3) {
+        /* Only draft structure is observed in this invocation. Supply the fixture
+           input separately; the ratchets batch verifies the real frozen-tree run. */
+        char supplied[4500];
+        if (cx_fmt(supplied, sizeof supplied, "%s/structure-ratchets.tsv", tmp) ||
+            wr(tmp, "structure-ratchets.tsv", ratfc) ||
+            !prep(d1, 0, supplied, lay, &rc) || rc) return 2;
+    } else {
+        if (part == 4) {
+            char *av[] = {bin, "0.0.74", "--layout", lay, "--archive-only", archive_path, 0}; /* lint:allow R1-version replay of the committed v0.0.74 evidence */
+            if (cx_fmt(archive_path, sizeof archive_path, "%s/material", tmp) ||
+                !runv(av, 55, &rc) || rc || !has(out, "PREPARED\tgit-archive\t")) return 2;
+        }
+        check("replay-0.0.74-rc0", prep(d1, 0, 0, lay, &rc) && rc == 0 && has(out, "verdict=NOT_QUALIFIED") && has(out, "batches=30\tpass=29\tfail=1\tuncovered=0\tnew_fail=0"));
+        if (part == 4) goto ratchets;
+    }
     { char *g = rd(d1, "expected-fail.tsv"), *w = rd(root, "release/evidence/0.0.74/expected-fail.tsv");
       check("expected-fail-header-and-columns", g && w && !strncmp(g, "batch\texpected\treason\n", 22) && !strncmp(w, "batch\texpected\treason\n", 22) && tabs_on_line(g, "c-negative\t") == 2 && tabs_on_line(w, "c-negative\t") == 2);
       check("expected-fail-same-batch-and-count", has(g, "\nc-negative\t53/9\t") && has(w, "\nc-negative\t53/9\t") && count_lines(g, "c-negative\t") == 1);
@@ -123,10 +148,12 @@ int main(int argc, char **argv) {
       check("notes-not-qualified-fixed", has(g, "整体裁决 NOT_QUALIFIED") && has(w, "整体裁决 NOT_QUALIFIED") && only_not_qualified(g));
       check("notes-gaps-listed", has(g, "s9 全套本版未跑") && has(g, "(build/pkg-gaps.tsv,OPEN") && has(g, "30 批,PASS 29,FAIL 1,未覆盖 0"));
       free(g); free(w); }
-    { char *g = rd(d1, "ratchets.txt"), *w = rd(root, "release/evidence/0.0.74/ratchets.txt");
+ratchets:
+    if (part != 3) { char *g = rd(d1, "ratchets.txt"), *w = rd(root, "release/evidence/0.0.74/ratchets.txt");
       check("ratchets-source-frozen-commit", g && !strncmp(g, ratfc, 86) && strlen(ratfc) == 86);
       check("ratchets-same-rows-as-committed", has(g, "\nRATCHETS\tok=15\tfail=0\t") && count_lines(g, "RATCHET\t") == count_lines(w, "RATCHET\t") && count_lines(g, "RATCHET\t") == 15 && has(w, "RATCHETS\tok=15\tfail=0"));
       free(g); free(w); }
+    if (part == 4) goto done;
     { char *g = rd(d1, "evidence-rows.tsv"); int ok = g != 0, i;
       const char *rows[] = {"\n1\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n", "\n2\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n", "\n3\tPASS\trelease/evidence/0.0.74/pack-run.out\n",
                             "\n4\tUNKNOWN\t" T_STRICT "\n", "\n5\tPASS\trelease/evidence/0.0.74/pack-run.out\n", "\n6\tPENDING\t", "\n7\tPENDING\t", "\n8\tPENDING\t", 0};
@@ -134,7 +161,7 @@ int main(int argc, char **argv) {
       check("evidence-rows-8-steps-as-committed", ok && count_lines(g, "#") == 1);
       free(g); }
 
-    if (part == 1) goto done;
+    if (part != 0) goto done;
 negatives:
     /* (2) negative: UNKNOWN batch never becomes PASS, it is listed uncovered */
     if (variant("strict-unknown.tsv", "pp-negative\tproduct-qualification\tPASS", "pp-negative\tproduct-qualification\tUNKNOWN", s_unk, sizeof s_unk)) return 2;

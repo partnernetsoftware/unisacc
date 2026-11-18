@@ -1,0 +1,342 @@
+/* tools/check-funit-procslot.cx -- -funit objects export the process slots as named COMMON symbols.
+ *
+ *   sh ./unisacc.com tools/check-funit-procslot.cx -- [--set=main|corpus|arm64] [PRODUCT [REF]]
+ *                                                     (default ./unisacc.com; REF: the product before the
+ *                                                     change, enables case (7))
+ * --set picks one batch (each stays well inside the batch limit on a cold product cache); no --set runs all:
+ *   main    funit-procslot-main    (1)-(4)   6 assertions (2 symbols x 2 objects, merge-run, negctl)
+ *   corpus  funit-procslot-corpus  (5)       1
+ *   arm64   funit-procslot-arm64   (6)(7)    1 (2 with REF)
+ * The assertion count of the set is checked (8, 9 with REF, for all): a case that did not reach its verdict
+ * fails the run as "assertion-count".  FPS_DROP=NAME[,NAME] skips those cases (local negative control only).
+ *
+ * R2 W2a.  The argc and argv cells of the process region used to sit anonymously at the .bss tail of every
+ * -funit object (.bss+off relocations), so two objects linked together got two private copies.  The object
+ * net now writes them as SHN_COMMON symbols _unisa_proc_argc and _unisa_proc_argv (value 8 = alignment,
+ * size 8) and every reference to them is a named relocation, so the system linker merges them into one.
+ * Object: the actual product compiler (the candidate under test), not a repo tool.
+ * Cases, each compiled by PRODUCT with -c -b lnx/x86_64 -funit, linked by /usr/bin/ld:
+ *   (1) common-main   m.o (main) has both symbols, shndx 0xfff2, value 8, size 8
+ *   (2) common-unit   a.o (no main, reads __argc/__argv) has both symbols, same shape
+ *   (3) merge-run     ld s.o a.o (s.o: hand entry with .comm slots), run with "z": a.o sees argc 2, argv[1] "z", rc 21
+ *   (4) negctl        a.o copy with the argc name renamed (_unisa_proc_argX): the two cells no longer merge;
+ *                     the run must NOT give rc 21 (the check reports how it differs); a silent 21 fails the check
+ *   (5) corpus-slot   every examples/apps/*.c (17 real sources, at least 16 must compile) built -c -funit: in
+ *                     .rela.text and .rela.data, a relocation whose symbol lies in .bss with an addend inside
+ *                     [bss_size-128, bss_size-100] (the argc/argv cell window, bss_size = datalen-nzend) is an
+ *                     anonymous process-slot reference the net did not recognise (for example an addend that is
+ *                     not cell-4); each one fails with object, section, offset and addend.  The corpus must also
+ *                     carry at least one named _unisa_proc_* relocation, so an empty scan cannot pass.
+ *   (6) arm64-shape   lnx/arm64 -c and -c -funit objects of 6 real sources: every st_size 0, no _unisa_proc_*
+ *   (7) arm64-bytes   with REF only: those 12 objects are byte-identical to REF's
+ * Compiles of (5)-(7) run in parallel (one child each, each bounded at 50 s).
+ * Exit 0 all hold, 1 a case fails (named), 2 usage or I/O.
+ */
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.lebytes
+
+static int fails;
+static int nas; /* assertions that reached a verdict (PASS or FAIL) */
+static char dir[4096];
+
+
+/* Find NAME in the ELF64 .symtab: 1 found (shndx/value/size out), 0 absent, -1 malformed. */
+static int sym_of(const unsigned char *b, size_t n, const char *name, long *shndx, long *value, long *size) {
+    long shoff, shnum, i;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    shoff = (long)lb_rd(b, 0x28, 8); shnum = (long)lb_rd(b, 0x3c, 2);
+    if (lb_rd(b, 0x3a, 2) != 64 || shoff + shnum * 64 > (long)n) return -1;
+    for (i = 0; i < shnum; i++) {
+        long h = shoff + i * 64, off, sz, ent, link, stroff, j;
+        if (lb_rd(b, h + 4, 4) != 2) continue;
+        off = (long)lb_rd(b, h + 0x18, 8); sz = (long)lb_rd(b, h + 0x20, 8); ent = (long)lb_rd(b, h + 0x38, 8);
+        link = (long)lb_rd(b, h + 0x28, 4);
+        if (ent != 24 || off + sz > (long)n || link >= shnum) return -1;
+        stroff = (long)lb_rd(b, shoff + link * 64 + 0x18, 8);
+        for (j = 0; j < sz / 24; j++) {
+            long s = off + j * 24, nm = (long)lb_rd(b, s, 4);
+            if (stroff + nm + (long)strlen(name) + 1 > (long)n) return -1;
+            if (!memcmp(b + stroff + nm, name, strlen(name) + 1)) {
+                *shndx = (long)lb_rd(b, s + 6, 2); *value = (long)lb_rd(b, s + 8, 8); *size = (long)lb_rd(b, s + 16, 8);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void path(char *p, size_t cap, const char *leaf) { cx_fmt(p, cap, "%s/%s", dir, leaf); }
+
+static int run(char **v, int secs) { char *out = 0; size_t on = 0; int rc = cx_runv_timeout(v, secs, &out, &on); free(out); return rc; }
+
+static int compile(const char *product, const char *name, const char *src) {
+    char c[4200], o[4200], leaf[64]; char *v[12]; int rc;
+    cx_fmt(leaf, sizeof leaf, "%s.c", name); path(c, sizeof c, leaf);
+    cx_fmt(leaf, sizeof leaf, "%s.o", name); path(o, sizeof o, leaf);
+    if (cx_write(c, src, strlen(src))) { fprintf(stderr, "check-funit-procslot: cannot write %s\n", c); exit(2); }
+    v[0] = "sh"; v[1] = (char *)product; v[2] = "-c"; v[3] = "-b"; v[4] = "lnx/x86_64"; v[5] = "-funit";
+    v[6] = c; v[7] = "-o"; v[8] = o; v[9] = 0;
+    rc = run(v, 50);
+    if (rc) { printf("FAIL\tcompile-%s\trc=%d\n", name, rc); fails++; }
+    return rc;
+}
+
+static void common_case(const char *label, const char *leaf) {
+    static const char *syms[] = {"_unisa_proc_argc", "_unisa_proc_argv"};
+    char o[4200]; size_t bn = 0; unsigned char *b; int i;
+    path(o, sizeof o, leaf);
+    b = (unsigned char *)cx_read(o, &bn);
+    if (!b) { printf("FAIL\t%s\tcannot read %s\n", label, o); fails++; nas += 2; return; }
+    for (i = 0; i < 2; i++) {
+        long shndx = 0, value = 0, size = 0; int got = sym_of(b, bn, syms[i], &shndx, &value, &size);
+        nas++;
+        if (got != 1) printf("FAIL\t%s\t%s %s\n", label, syms[i], got < 0 ? "malformed object" : "absent (anonymous slot)");
+        else if (shndx != 0xfff2 || value != 8 || size != 8)
+            printf("FAIL\t%s\t%s shndx=0x%lx value=%ld size=%ld want COMMON 0xfff2 8 8\n", label, syms[i], shndx, value, size);
+        else { printf("PASS\t%s\t%s shndx=0xfff2 value=8 size=8\n", label, syms[i]); continue; }
+        fails++;
+    }
+    free(b);
+}
+
+/* A hand-written entry s.o (assembled by /usr/bin/as) declares the slots with .comm, stores argc and argv
+   into them and exits with ua()*10+uv().  ld s.o UNIT -o EXE, run EXE z; returns the run rc, or -1 when the
+   link fails (link rc in *linkrc).  Two objects each carrying _unisa_proc_argc: the merge is ld's COMMON rule. */
+static const char start_s[] =
+    ".globl _start\n.comm _unisa_proc_argc,8,8\n.comm _unisa_proc_argv,8,8\n.text\n_start:\n"
+    "mov (%rsp),%rax\nmov %rax,_unisa_proc_argc(%rip)\nlea 8(%rsp),%rax\nmov %rax,_unisa_proc_argv(%rip)\n"
+    "call ua\npush %rax\npush %rax\ncall uv\npop %rcx\npop %rcx\nimul $10,%ecx,%ecx\nadd %ecx,%eax\n"
+    "mov %eax,%edi\nmov $60,%eax\nsyscall\n";
+static int link_run(const char *unit, const char *exe, int *linkrc) {
+    char s[4200], so[4200], u[4200], e[4200]; char *v[12];
+    path(s, sizeof s, "s.s"); path(so, sizeof so, "s.o"); path(u, sizeof u, unit); path(e, sizeof e, exe);
+    if (cx_write(s, start_s, strlen(start_s))) { fprintf(stderr, "check-funit-procslot: cannot write %s\n", s); exit(2); }
+    v[0] = "/usr/bin/as"; v[1] = "-o"; v[2] = so; v[3] = s; v[4] = 0;
+    *linkrc = run(v, 30);
+    if (*linkrc) return -1;
+    v[0] = "/usr/bin/ld"; v[1] = "-o"; v[2] = e; v[3] = so; v[4] = u; v[5] = 0;
+    *linkrc = run(v, 30);
+    if (*linkrc) return -1;
+    v[0] = e; v[1] = "z"; v[2] = 0;
+    return run(v, 10);
+}
+
+static void negctl(void) {
+    static const char nm[] = "_unisa_proc_argc";
+    char a[4200], ax[4200]; size_t bn = 0, j; unsigned char *b; int renamed = 0, lrc = 0, rc;
+    nas++;
+    path(a, sizeof a, "a.o"); path(ax, sizeof ax, "ax.o");
+    b = (unsigned char *)cx_read(a, &bn);
+    if (!b) { printf("FAIL\tnegctl\tcannot read %s\n", a); fails++; return; }
+    for (j = 0; j + sizeof nm <= bn; j++) if (!memcmp(b + j, nm, sizeof nm)) { b[j + sizeof nm - 2] = 'X'; renamed++; }
+    if (!renamed || cx_write(ax, b, bn)) { printf("FAIL\tnegctl\tno argc name to rename (renamed=%d)\n", renamed); fails++; free(b); return; }
+    free(b);
+    rc = link_run("ax.o", "max", &lrc);
+    if (rc == 21) { printf("FAIL\tnegctl\trenamed slot still gives rc=21 (silent pass)\n"); fails++; }
+    else printf("PASS\tnegctl\trenamed argc slot detected: linkrc=%d runrc=%d != 21\n", lrc, rc);
+}
+
+/* Section header field of section I. */
+static long sh(const unsigned char *b, long shoff, long i, int off, int n) { return (long)lb_rd(b, shoff + i * 64 + off, n); }
+
+/* Scan one object for anonymous slot relocations; adds named _unisa_proc_* relocations to *named.
+   Returns the anonymous count, -1 when the object is malformed. */
+static int slot_scan(const char *label, const unsigned char *b, size_t n, long *named) {
+    long shoff, shnum, shstr, i, bss = -1, bsssz = 0; int anon = 0;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    shoff = (long)lb_rd(b, 0x28, 8); shnum = (long)lb_rd(b, 0x3c, 2); shstr = (long)lb_rd(b, 0x3e, 2);
+    if (lb_rd(b, 0x3a, 2) != 64 || shoff + shnum * 64 > (long)n || shstr >= shnum) return -1;
+    for (i = 0; i < shnum; i++) {
+        long nm = sh(b, shoff, shstr, 0x18, 8) + sh(b, shoff, i, 0, 4);
+        if (nm + 5 <= (long)n && !memcmp(b + nm, ".bss", 5)) { bss = i; bsssz = sh(b, shoff, i, 0x20, 8); }
+    }
+    if (bss < 0) return 0;
+    for (i = 0; i < shnum; i++) {
+        long nm = sh(b, shoff, shstr, 0x18, 8) + sh(b, shoff, i, 0, 4), off, sz, link, symoff, stroff, j;
+        const char *sec;
+        if (sh(b, shoff, i, 4, 4) != 4) continue;
+        if (nm + 11 <= (long)n && !memcmp(b + nm, ".rela.text", 11)) sec = ".rela.text";
+        else if (nm + 11 <= (long)n && !memcmp(b + nm, ".rela.data", 11)) sec = ".rela.data";
+        else continue;
+        off = sh(b, shoff, i, 0x18, 8); sz = sh(b, shoff, i, 0x20, 8); link = sh(b, shoff, i, 0x28, 4);
+        if (off + sz > (long)n || link >= shnum) return -1;
+        symoff = sh(b, shoff, link, 0x18, 8);
+        stroff = sh(b, shoff, sh(b, shoff, link, 0x28, 4), 0x18, 8);
+        for (j = 0; j < sz / 24; j++) {
+            long e = off + j * 24, sym = (long)(lb_rd(b, e + 8, 8) >> 32), add = (long)lb_rd(b, e + 16, 8), s = symoff + sym * 24;
+            long shndx, snm;
+            if (s + 24 > (long)n) return -1;
+            shndx = (long)lb_rd(b, s + 6, 2); snm = (long)lb_rd(b, s, 4);
+            if (shndx == 0xfff2 && stroff + snm + 12 <= (long)n && !memcmp(b + stroff + snm, "_unisa_proc_", 12)) { (*named)++; continue; }
+            if (shndx != bss) continue;
+            add += (long)lb_rd(b, s + 8, 8);
+            if (add >= bsssz - 128 && add <= bsssz - 100) {
+                printf("FAIL\tcorpus-slot\t%s %s offset=0x%lx addend=%ld bss_size=%ld anonymous slot reference\n",
+                       label, sec, (long)lb_rd(b, e, 8), add, bsssz);
+                anon++;
+            }
+        }
+    }
+    return anon;
+}
+
+static const char *apps[] = {"args", "bf", "calc", "colorpack", "ctour", "dijkstra", "exeinfo", "life", "mandel",
+                             "memmap", "procview", "queens", "sieve", "winlayout", "winlist", "wordfreq", "xgui"};
+
+/* Compile N jobs at once (one child per job, each bounded by run()'s 50 s): job i is examples/apps/SRC[i].c
+   with -c -b TARGET[i] (plus -funit when FUNIT[i]) into DIR/LEAF[i].  RCS[i] gets the compile rc (-1 when
+   the child could not be started or did not exit normally). */
+static void par_compile(const char *product, int n, const char *const *src, const char *const *target,
+                        const int *funit, char leaf[][64], int *rcs) {
+    pid_t pid[64]; int i;
+    for (i = 0; i < n && i < 64; i++) {
+        fflush(stdout); fflush(stderr);
+        pid[i] = fork();
+        if (pid[i] == 0) {
+            char c[4200], o[4200]; char *v[12]; int k = 0;
+            cx_fmt(c, sizeof c, "examples/apps/%s.c", src[i]); path(o, sizeof o, leaf[i]);
+            v[k++] = "sh"; v[k++] = (char *)product; v[k++] = "-c"; v[k++] = "-b"; v[k++] = (char *)target[i];
+            if (funit[i]) v[k++] = "-funit";
+            v[k++] = c; v[k++] = "-o"; v[k++] = o; v[k] = 0;
+            _exit(run(v, 50) & 255);
+        }
+    }
+    for (i = 0; i < n && i < 64; i++) {
+        int st = 0;
+        if (pid[i] < 0 || waitpid(pid[i], &st, 0) < 0 || !WIFEXITED(st)) rcs[i] = -1; else rcs[i] = WEXITSTATUS(st);
+    }
+}
+
+static void corpus(const char *product) {
+    const char *tg[17]; int fu[17], rcs[17]; char leaf[17][64];
+    long named = 0; int i, built = 0, anon = 0, bad = 0;
+    nas++;
+    for (i = 0; i < 17; i++) { tg[i] = "lnx/x86_64"; fu[i] = 1; cx_fmt(leaf[i], sizeof leaf[i], "corpus-%d.o", i); }
+    par_compile(product, 17, apps, tg, fu, leaf, rcs);
+    for (i = 0; i < 17; i++) {
+        char o[4200]; size_t bn = 0; unsigned char *b; int k;
+        path(o, sizeof o, leaf[i]);
+        if (rcs[i]) { printf("NOTE\tcorpus-slot\t%s compile rc=%d\n", apps[i], rcs[i]); unlink(o); continue; }
+        b = (unsigned char *)cx_read(o, &bn);
+        if (!b) { printf("FAIL\tcorpus-slot\tcannot read %s\n", o); bad++; continue; }
+        k = slot_scan(apps[i], b, bn, &named);
+        free(b); unlink(o);
+        if (k < 0) { printf("FAIL\tcorpus-slot\t%s malformed object\n", apps[i]); bad++; continue; }
+        anon += k; built++;
+    }
+    if (built < 16) { printf("FAIL\tcorpus-slot\tonly %d of 17 sources compiled, want at least 16\n", built); fails++; }
+    if (named == 0) { printf("FAIL\tcorpus-slot\tno named _unisa_proc_* relocation in the corpus (vacuous scan)\n"); fails++; }
+    if (anon || bad) fails++;
+    else if (built >= 16 && named) printf("PASS\tcorpus-slot\t%d objects, 0 anonymous slot relocations, %ld named\n", built, named);
+}
+
+/* Symbols of an ELF64 object: count those with st_size != 0 and those named _unisa_proc_*; -1 malformed. */
+static int sym_shape(const unsigned char *b, size_t n, long *sized, long *proc) {
+    long shoff, shnum, i;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    shoff = (long)lb_rd(b, 0x28, 8); shnum = (long)lb_rd(b, 0x3c, 2);
+    if (lb_rd(b, 0x3a, 2) != 64 || shoff + shnum * 64 > (long)n) return -1;
+    for (i = 0; i < shnum; i++) {
+        long off, sz, link, stroff, j;
+        if (sh(b, shoff, i, 4, 4) != 2) continue;
+        off = sh(b, shoff, i, 0x18, 8); sz = sh(b, shoff, i, 0x20, 8); link = sh(b, shoff, i, 0x28, 4);
+        if (off + sz > (long)n || link >= shnum) return -1;
+        stroff = sh(b, shoff, link, 0x18, 8);
+        for (j = 0; j < sz / 24; j++) {
+            long s = off + j * 24, nm = (long)lb_rd(b, s, 4);
+            if (lb_rd(b, s + 16, 8)) (*sized)++;
+            if (stroff + nm + 12 <= (long)n && !memcmp(b + stroff + nm, "_unisa_proc_", 12)) (*proc)++;
+        }
+    }
+    return 0;
+}
+
+/* (6) arm64-shape: lnx/arm64 -c and -c -funit objects of six real sources carry no _unisa_proc_* symbol and
+   every st_size stays 0 (the slot rewrite is x86-only: the arm64 nets take the direct_labels plan d1).
+   (7) arm64-bytes, only with REF: the same twelve objects from REF (the product before the change) are
+   byte-identical to PRODUCT's. */
+static void arm_case(const char *product, const char *ref) {
+    static const char *six[] = {"args", "bf", "calc", "life", "queens", "sieve"};
+    const char *src[24], *tg[24]; int fu[24], rcs[24], i, n = ref ? 24 : 12, bad = 0, same = 0; char leaf[24][64];
+    long sized = 0, proc = 0;
+    nas += ref ? 2 : 1;
+    for (i = 0; i < n; i++) {
+        src[i] = six[(i % 12) / 2]; tg[i] = "lnx/arm64"; fu[i] = i & 1;
+        cx_fmt(leaf[i], sizeof leaf[i], "arm-%d.o", i);
+    }
+    par_compile(product, 12, src, tg, fu, leaf, rcs);
+    if (ref) par_compile(ref, 12, src + 12, tg + 12, fu + 12, leaf + 12, rcs + 12);
+    for (i = 0; i < 12; i++) {
+        char o[4200], r[4200]; size_t bn = 0, rn = 0; unsigned char *b, *rb = 0;
+        path(o, sizeof o, leaf[i]);
+        if (rcs[i]) { printf("FAIL\tarm64-shape\t%s%s compile rc=%d\n", src[i], fu[i] ? " -funit" : "", rcs[i]); bad++; continue; }
+        b = (unsigned char *)cx_read(o, &bn);
+        if (!b || sym_shape(b, bn, &sized, &proc) < 0) { printf("FAIL\tarm64-shape\t%s unreadable or malformed\n", src[i]); bad++; free(b); continue; }
+        if (ref) {
+            path(r, sizeof r, leaf[i + 12]);
+            if (!rcs[i + 12]) rb = (unsigned char *)cx_read(r, &rn);
+            if (rb && rn == bn && !memcmp(rb, b, bn)) same++;
+            else printf("FAIL\tarm64-bytes\t%s%s differs from REF (ref rc=%d)\n", src[i], fu[i] ? " -funit" : "", rcs[i + 12]);
+            free(rb); unlink(r);
+        }
+        free(b); unlink(o);
+    }
+    if (bad || sized || proc) {
+        if (sized || proc) printf("FAIL\tarm64-shape\tsized=%ld proc=%ld want 0 0\n", sized, proc);
+        fails++;
+    } else printf("PASS\tarm64-shape\t12 lnx/arm64 objects (6 sources, -c and -c -funit): st_size all 0, no _unisa_proc_*\n");
+    if (ref) {
+        if (same == 12) printf("PASS\tarm64-bytes\t12 lnx/arm64 objects byte-identical to REF\n");
+        else { printf("FAIL\tarm64-bytes\t%d of 12 identical\n", same); fails++; }
+    }
+}
+
+static int dropped(const char *name) {
+    const char *d = getenv("FPS_DROP"); size_t k = strlen(name);
+    while (d && *d) {
+        if (!strncmp(d, name, k) && (d[k] == ',' || !d[k])) return 1;
+        d = strchr(d, ','); if (d) d++;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    static const char *sets[] = {"main", "corpus", "arm64"};
+    static const int setn[] = {6, 1, 1};
+    const char *tmp = getenv("TMPDIR");
+    static const char *leaves[] = {"m.c", "m.o", "a.c", "a.o", "ax.o", "ma", "max", "s.s", "s.o"};
+    int lrc = 0, rc, i, si = -1, want;
+    const char *product, *ref;
+    if (argc > 1 && !strncmp(argv[1], "--set=", 6)) {
+        for (i = 0; i < 3; i++) if (!strcmp(argv[1] + 6, sets[i])) si = i;
+        if (si < 0) { fprintf(stderr, "check-funit-procslot: unknown set %s\n", argv[1] + 6); return 2; }
+        argv++; argc--;
+    }
+    product = argc > 1 ? argv[1] : "./unisacc.com";
+    ref = argc > 2 ? argv[2] : 0;
+    if (argc > 3) { fprintf(stderr, "usage: check-funit-procslot.cx -- [--set=main|corpus|arm64] [PRODUCT [REF]]\n"); return 2; }
+    want = si < 0 ? 8 : setn[si];
+    if (ref && (si < 0 || si == 2)) want++;
+    cx_fmt(dir, sizeof dir, "%s/check-funit-procslot-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
+    if (mkdir(dir, 0700)) { fprintf(stderr, "check-funit-procslot: cannot create %s\n", dir); return 2; }
+    if ((si < 0 || si == 0) &&
+        !compile(product, "m", "extern int ua(void);\nextern int uv(void);\nint main(void){return ua()*10+uv();}\n") &&
+        !compile(product, "a", "int ua(void){return __argc();}\nint uv(void){char *p=(char *)__argv(1);return p[0]=='z';}\n")) {
+        if (!dropped("common-main")) common_case("common-main", "m.o");
+        if (!dropped("common-unit")) common_case("common-unit", "a.o");
+        if (!dropped("merge-run")) {
+            nas++;
+            rc = link_run("a.o", "ma", &lrc);
+            if (rc == 21) printf("PASS\tmerge-run\tld s.o a.o rc=21 (one argc/argv cell)\n");
+            else { printf("FAIL\tmerge-run\tlinkrc=%d runrc=%d want 21\n", lrc, rc); fails++; }
+        }
+        if (!dropped("negctl")) negctl();
+    }
+    if ((si < 0 || si == 1) && !dropped("corpus-slot")) corpus(product);
+    if ((si < 0 || si == 2) && !dropped("arm64-shape")) arm_case(product, ref);
+    for (i = 0; i < 9; i++) { char p[4200]; path(p, sizeof p, leaves[i]); unlink(p); }
+    rmdir(dir);
+    if (nas != want) { printf("FAIL\tassertion-count\texpected=%d got=%d set=%s\n", want, nas, si < 0 ? "all" : sets[si]); fails++; }
+    printf("CHECK_FUNIT_PROCSLOT\tset=%s\tassertions=%d\tfailed=%d\n", si < 0 ? "all" : sets[si], nas, fails);
+    return fails ? 1 : 0;
+}

@@ -1,0 +1,114 @@
+/* tools/brief-lint.cx -- static lint of a sub-agent brief before it is dispatched (v0.0.77 speed theme A, I-14).
+ *
+ *   sh ./unisacc.com tools/brief-lint.cx -- [--profiles TSV] FILE|- [FILE...]
+ *
+ * Each file ends with its own BRIEF_LINT line (file=F); the exit code is the worst of all files.
+ * Five sections must start a line (after #, -, spaces or a (N) number): 目标, 写域, 验收, 截止, 禁区.
+ * Checks, each finding one line with a paste-ready suggestion:
+ *   MISSING section-NAME     a section is absent
+ *   MISSING profile-ref      no profile name of tests/accept-profiles.tsv (the 验收口径块) is cited
+ *   MISSING deadline-value   the 截止 line carries no number
+ *   REJECT  e3cache          UNISACC_E3CACHE=0 on a line that does not forbid it
+ *   MISSING cold-fresh       a new batch is mentioned outside 禁区 without cold-fresh-layout-33s
+ *   MISSING core-review      a core path (core-path rows) is mentioned outside 禁区 without 独立复核
+ *   MISSING patch-first      a product input path (product-path rows) is mentioned outside 禁区 without 补丁先行
+ * Per file BRIEF_LINT<TAB>missing=N<TAB>reject=M<TAB>file=F; exit 1 when N+M > 0, 2 on usage or read errors. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+static char *prof[64], *core[64], *prod[64]; static int nprof, ncore, nprod;
+static int missing, reject;
+
+static void load(const char *path) {
+    size_t n; char *t = cx_read(path, &n);
+    if (!t) { fprintf(stderr, "brief-lint: cannot read %s\n", path); exit(2); }
+    for (char *p = t, *e; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        char *tab = strchr(p, '\t'); if (!tab) continue;
+        *tab = 0; char *name = tab + 1, *t2 = strchr(name, '\t'); if (t2) *t2 = 0;
+        if (!strcmp(p, "profile") && nprof < 64) prof[nprof++] = strdup(name);
+        if (!strcmp(p, "core-path") && ncore < 64) core[ncore++] = strdup(name);
+        if (!strcmp(p, "product-path") && nprod < 64) prod[nprod++] = strdup(name);
+    }
+    free(t);
+}
+static char *slurp(const char *f) {
+    size_t n;
+    if (strcmp(f, "-")) return cx_read(f, &n);
+    long cap = 1 << 16, k = 0, r; char *b = malloc((size_t)cap + 1);
+    while (b && (r = sy_read(0, b + k, cap - k)) > 0) {
+        k += r;
+        if (k == cap) { char *nb = realloc(b, (size_t)cap * 2 + 1); if (!nb) { free(b); return 0; } b = nb; cap *= 2; }
+    }
+    if (b) b[k] = 0;
+    return b;
+}
+static const char *SEC[] = {"目标", "写域", "验收", "截止", "禁区"};
+/* section index a line opens, or -1 */
+static int opens(const char *l) {
+    while (*l == '#' || *l == '-' || *l == ' ' || *l == '*' || *l == '(' || *l == ')' || (*l >= '0' && *l <= '9') || *l == '.') l++;
+    for (int i = 0; i < 5; i++) if (!strncmp(l, SEC[i], strlen(SEC[i]))) return i;
+    return -1;
+}
+/* a path token: preceded by start, space, backtick, quote or bracket */
+static int mentions_path(const char *l, const char *p) {
+    for (const char *h = l; (h = strstr(h, p)); h++) {
+        if (h == l) return 1;
+        char c = h[-1];
+        if (c == ' ' || c == '`' || c == '"' || c == '(' || c == ',' || c == '\t' || (unsigned char)c >= 0x80) return 1;
+    }
+    return 0;
+}
+static int forbids(const char *l) { return strstr(l, "不得") || strstr(l, "禁止") || strstr(l, "不用") || strstr(l, "不使用") || strstr(l, "禁区"); }
+static void miss(const char *key, const char *say) { missing++; printf("MISSING\t%s\t%s\n", key, say); }
+static int lint(const char *f) {
+    missing = reject = 0;
+    char *t = slurp(f);
+    if (!t) { fprintf(stderr, "brief-lint: cannot read %s\n", f); return 2; }
+    int seen[5] = {0}, sec = -1, deadline_num = 0, profref = 0, newbatch = 0, cold = 0, coretask = 0, corerev = 0, prodtask = 0, patch = 0;
+    char coretok[300] = "", prodtok[300] = "";
+    for (char *p = t, *e; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        int o = opens(p);
+        if (o >= 0) { seen[o] = 1; sec = o; }
+        if (sec == 3) for (const char *q = p; *q; q++) if (*q >= '0' && *q <= '9') deadline_num = 1;
+        for (int i = 0; i < nprof; i++) if (strstr(p, prof[i])) profref = 1;
+        if (strstr(p, "UNISACC_E3CACHE=0") && !forbids(p)) { reject++; printf("REJECT\te3cache\t%s\n", p); }
+        if (strstr(p, "cold-fresh-layout-33s") || (strstr(p, "UNISACC_RUN_CACHE=0") && strstr(p, "UNISACC_UNIT_CACHE=0"))) cold = 1;
+        if (strstr(p, "独立复核") || strstr(p, "core-path-review")) corerev = 1;
+        if (strstr(p, "补丁先行") || strstr(p, "先出补丁") || strstr(p, "patch-first-for-product")) patch = 1;
+        if (sec == 4 || forbids(p)) continue;   /* task detection only outside 禁区 and prohibitions */
+        if ((strstr(p, "新批次") || strstr(p, "新增批次") || strstr(p, "batches.tsv")) ) newbatch = 1;
+        for (int i = 0; i < ncore; i++) if (mentions_path(p, core[i])) { coretask = 1; if (!coretok[0] && cx_fmt(coretok, sizeof coretok, "%s", core[i])) coretok[0] = 0; }
+        for (int i = 0; i < nprod; i++) if (mentions_path(p, prod[i])) { prodtask = 1; if (!prodtok[0] && cx_fmt(prodtok, sizeof prodtok, "%s", prod[i])) prodtok[0] = 0; }
+    }
+    static const char *say[5] = {
+        "目标:一句话写交付物与成功判据。",
+        "写域(只许改这些路径):逐条列路径;写域外一律不改。",
+        "验收命令(含预期值):sh ./unisacc.com tools/handoff-check.cx -- --base BASE,末行 HANDOFF failed=0;另列本单专属命令与预期末行。",
+        "截止:开工后 15 分钟内交付,超过 12 分钟收尾交部分结果。",
+        "禁区:不得改写域外路径,不得删断言,不得放宽时限,不得提交他人路径,不得使用 UNISACC_E3CACHE=0,不绕提交门。"};
+    for (int i = 0; i < 5; i++) if (!seen[i]) { char k[40]; if (cx_fmt(k, sizeof k, "section-%s", SEC[i])) k[0] = 0; miss(k, say[i]); }
+    if (seen[3] && !deadline_num) miss("deadline-value", "截止写成具体分钟数或时刻,例如:截止 15 分钟。");
+    if (!profref) miss("profile-ref", "验收口径块:引用 tests/accept-profiles.tsv 的 profile 名,例如 ratchets-15-0、newcx-0、shards-consistent、no-gate-bypass、local-evidence-only。");
+    if (newbatch && !cold) miss("cold-fresh", "新批次按 cold-fresh-layout-33s 与 fresh-layout-no-history 验收:全新布局冷缓存 UNISACC_RUN_CACHE=0 UNISACC_UNIT_CACHE=0 实跑不超过 33 秒。");
+    if (coretask && !corerev) { char s[600]; if (cx_fmt(s, sizeof s, "核心路径 %s:按 core-path-review,提交由主调度派独立复核,自检不代替复核。", coretok)) s[0] = 0; miss("core-review", s); }
+    if (prodtask && !patch) { char s[600]; if (cx_fmt(s, sizeof s, "产品输入 %s:按 patch-first-for-product 补丁先行,先出补丁给集成者核,不直接提交。", prodtok)) s[0] = 0; miss("patch-first", s); }
+    free(t);
+    printf("BRIEF_LINT\tmissing=%d\treject=%d\tfile=%s\n", missing, reject, f);
+    return missing + reject ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    const char *profiles = "tests/accept-profiles.tsv"; int first = 0, rc = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--profiles") && i + 1 < argc && !first) { profiles = argv[++i]; continue; }
+        if (!first) first = i;
+    }
+    if (!first) { fprintf(stderr, "usage: brief-lint.cx -- [--profiles TSV] FILE|- [FILE...]\n"); return 2; }
+    load(profiles);
+    for (int i = first; i < argc; i++) { int r = lint(argv[i]); if (r > rc) rc = r; }
+    return rc;
+}

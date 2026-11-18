@@ -46,6 +46,7 @@
 #define MAXB 1024
 static char here[4096], ver[32], prev[32], layout[4096], outd[4096], strictp[4400], commit[64], ratin[4400];
 static char apesha[80], prevsha[80];
+static char archive_dir[4096], rat_tree[4096];
 static char bid[MAXB][128], bst[MAXB][16], bnote[MAXB][96];
 static int braw[MAXB], nb, npass, nfail, nnew, nuncov, has_summary;
 static np_buf notes, efail, rat, rb, ev;
@@ -179,6 +180,40 @@ static void draft_expected(void) {
 }
 
 /* ---- ratchets on the frozen tree ---- */
+/* Publish the source material only. A failed attempt has no receipt. */
+static void archive_frozen(const char *dir, char *tree, size_t cap) {
+    char tar[4400]; np_result r = {0}; int rc;
+    if (path2(tree,cap,dir,"frozen-tree") || path2(tar,sizeof tar,dir,"frozen.tar")) die("RATCHETS","archive path");
+    if (sy_mkdir(tree,0700) && sy_exists(tree)!=1) die("RATCHETS","frozen-tree dir");
+    { char *v[]={"git","archive","--format=tar","-o",tar,commit,0}; rc=run(v,here,30,&r);np_free(&r);if(rc)die("RATCHETS","git archive"); }
+    { char *v[]={"tar","-xf",tar,"-C",tree,0}; rc=run(v,here,30,&r);np_free(&r);if(rc)die("RATCHETS","tar extract"); }
+    sy_unlink(tar);
+}
+static void archive_record(char *p,size_t cap,char *row,size_t len,const char *dir) {
+    if(path2(p,cap,dir,"prepared.tsv") || cx_fmt(row,len,"PREPARED\tgit-archive\t%s\t%s\t%s\n",ver,commit,apesha)) die("ARCHIVE_ID","record");
+}
+static void take_archive(char *tree,size_t cap) {
+    char p[4400],row[180],real[4400];size_t n=0;struct stat st;
+    archive_record(p,sizeof p,row,sizeof row,rat_tree);
+    char *s=cx_read(p,&n);
+    if(!s || n!=strlen(row) || memcmp(s,row,n))die("ARCHIVE_ID","missing or different version, commit or candidate");
+    free(s);
+    if(path2(tree,cap,rat_tree,"frozen-tree") || sy_realpath(tree,real,sizeof real)<0 || strcmp(real,tree))die("ARCHIVE_ID","tree path");
+    if(path2(p,sizeof p,rat_tree,"claimed") || sy_mkdir(p,0700))die("ARCHIVE_ID","tree already consumed");
+    if(path2(p,sizeof p,tree,".git") || !lstat(p,&st) || errno!=ENOENT)die("ARCHIVE_ID","unexpected git metadata");
+}
+static void verify_archive(const char *tree) {
+    np_result r={0};
+    char *refresh[]={"git","-c","core.filemode=true","update-index","--really-refresh",0};
+    char *diff[]={"git","-c","core.filemode=true","diff-files","--quiet","--",0};
+    char *extra[]={"git","ls-files","--others","-z",0};
+    if(run(refresh,tree,30,&r))die("ARCHIVE_ID","tracked content missing or changed");
+    np_free(&r);
+    if(run(diff,tree,30,&r))die("ARCHIVE_ID","tracked content or mode changed");
+    np_free(&r);
+    if(run(extra,tree,30,&r)||r.outn)die("ARCHIVE_ID","unexpected path");
+    np_free(&r);
+}
 static void draft_ratchets(void) {
     char want[128]; long wl; cx_fmt(want, sizeof want, "SOURCE\tfrozen-commit\tcommit=%s", commit); wl = tx_len(want, sizeof want);
     if (ratin[0]) {
@@ -187,12 +222,9 @@ static void draft_ratchets(void) {
         if ((long)n < wl || memcmp(t, want, (size_t)wl)) { free(t); die("RATCHETS_SOURCE", "ratchets output does not start with SOURCE frozen-commit of this commit"); }
         np_put(&rat, t, n); free(t); return;
     }
-    { char tree[4400], tar[4400], self[4400], link[4500]; np_result r = {0}; int rc;
-      path2(tree, sizeof tree, outd, "frozen-tree"); path2(tar, sizeof tar, outd, "frozen.tar");
-      if (sy_mkdir(tree, 0700) && sy_exists(tree) != 1) die("RATCHETS", "frozen-tree dir");
-      { char *v[] = {"git", "archive", "--format=tar", "-o", tar, commit, 0}; rc = run(v, here, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git archive"); }
-      { char *v[] = {"tar", "-xf", tar, "-C", tree, 0}; rc = run(v, here, 30, &r); np_free(&r); if (rc) die("RATCHETS", "tar extract"); }
-      sy_unlink(tar);
+    { char tree[4400], self[4400], link[4500]; np_result r = {0}; int rc;
+      if(rat_tree[0])take_archive(tree,sizeof tree);
+      else archive_frozen(outd,tree,sizeof tree);
       /* tools/ratchets.cx inventories through git ls-files: give the archive tree an index */
       { char *v[] = {"git", "init", "-q", 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git init"); }
       { char alt[4500], objs[4400], cdir[4096]; np_result g = {0}; long k;
@@ -205,6 +237,7 @@ static void draft_ratchets(void) {
         path2(alt, sizeof alt, tree, ".git/objects/info/alternates");
         if (cx_fmt(objs, sizeof objs, "%s/objects\n", cdir) || cx_write(alt, objs, (size_t)tx_len(objs, sizeof objs))) die("RATCHETS", "alternates"); }
       { char *v[] = {"git", "read-tree", commit, 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git read-tree"); }
+      if(rat_tree[0])verify_archive(tree);
       path2(self, sizeof self, here, "unisacc.com"); path2(link, sizeof link, tree, "unisacc.com");
       if (sy_exists(link) != 1 && sy_symlink(self, link)) die("RATCHETS", "unisacc.com link");
       /* The fifteen ratchet programs are compiled through the content-keyed run cache (compile products
@@ -324,10 +357,21 @@ int main(int argc, char **argv) {
         else if (tx_eqz(a, "--commit")) { if (cx_fmt(commit, sizeof commit, "%s", v)) die("COMMIT", "too long"); }
         else if (tx_eqz(a, "--prev")) { if (!ver_ok(v) || cx_fmt(prev, sizeof prev, "%s", v)) die("USAGE", "--prev version"); }
         else if (tx_eqz(a, "--ratchets")) { if (sy_realpath(v, ratin, sizeof ratin) < 0) die("RATCHETS_SOURCE", "--ratchets file"); }
+        else if (tx_eqz(a,"--archive-only")) { if(v[0]!='/' || cx_fmt(archive_dir,sizeof archive_dir,"%s",v))die("ARCHIVE_ID","new absolute directory required"); }
+        else if (tx_eqz(a,"--ratchets-in")) { if(v[0]!='/' || sy_realpath(v,rat_tree,sizeof rat_tree)<0 || strcmp(v,rat_tree))die("ARCHIVE_ID","canonical material directory required"); }
         else die("USAGE", a);
     }
     if (!layout[0]) die("USAGE", "--layout DIR required");
     if (!prev[0] && bump_prev()) die("USAGE", "cannot derive previous version; pass --prev");
+    if ((rat_tree[0] && ratin[0]) || (archive_dir[0] && (rat_tree[0] || ratin[0] || outd[0]))) die("USAGE","conflicting ratchets sources");
+    if (archive_dir[0]) {
+        char tree[4400],p[4400],row[180];read_layout();
+        if(sy_mkdir(archive_dir,0700))die("ARCHIVE_ID","fresh directory required");
+        archive_frozen(archive_dir,tree,sizeof tree);
+        archive_record(p,sizeof p,row,sizeof row,archive_dir);
+        if(cx_write(p,row,strlen(row)))die("ARCHIVE_ID","write material receipt");
+        sy_printf("%s",row);return 0;
+    }
     if (!outd[0]) { const char *tmp = sy_env("TMPDIR"); if (cx_fmt(outd, sizeof outd, "%s/unisacc-release-prep-%s-%d", tmp && tmp[0] ? tmp : "/tmp", ver, (int)getpid())) die("OUT", "path"); }
     if (sy_mkdir_all(outd, 0700) && sy_exists(outd) != 1) die("OUT", outd);
     read_layout(); find_strict(); read_strict();

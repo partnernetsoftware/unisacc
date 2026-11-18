@@ -1,0 +1,150 @@
+/* tools/check-modelcache-root.cx -- the run cache root never lands under the current directory.
+ *
+ *   sh ./unisacc.com tools/check-modelcache-root.cx -- [--set=e3|dir] [PRODUCT]      (default ./unisacc.com)
+ *
+ * --set picks one batch by the variable under test; no --set runs all five:
+ *   e3   modelcache-root-e3   cases (1)(2)(3)   3 assertions (an unfixed product fails (1)(3))
+ *   dir  modelcache-root-dir  cases (4)(5)      2 assertions (an unfixed product fails (4))
+ * The assertion count of the set is checked: a case that did not reach its verdict fails the run as
+ * "assertion-count".  MCR_DROP=NAME[,NAME] skips those cases (local negative control only).
+ *
+ * Defect MODELCACHE-ENV-ZERO-WRITES-RELATIVE-DIR: mc_cache_dir took $UNISACC_CACHE_DIR or the compat
+ * $UNISACC_E3CACHE verbatim as the root, so UNISACC_E3CACHE=0 (the old "off" convention) created ./0 in
+ * the caller's cwd and wrote a model cache there.  Now "" and "0" turn the cache off, a relative root is
+ * refused with one line "modelcache: relative cache root ignored: ..." on stderr, and an absolute root
+ * is used as before.
+ * Object: the product compiler (PRODUCT).  Every run happens in a fresh private cwd under $TMPDIR (never
+ * the repository); the cwd holds only p.c, and PRODUCT p.c runs with UNISACC_RUN_CACHE=1 UNISACC_UNIT_CACHE=1.
+ * Cases (each must leave the cwd with exactly p.c, stdout "mc-ok", rc 7):
+ *   (1) e3-zero      UNISACC_E3CACHE=0
+ *   (2) e3-empty     UNISACC_E3CACHE=
+ *   (3) e3-relative  UNISACC_E3CACHE=relroot     and stderr carries the named diagnostic (negative control:
+ *                    the refusal is said, not silent, and does not crash)
+ *   (4) dir-zero     UNISACC_CACHE_DIR=0
+ *   (5) dir-absolute UNISACC_CACHE_DIR=<private abs dir>: the cache is still written there (at least one entry)
+ * Run against an unfixed product, cases (1)(3)(4) fail with the stray entry named.
+ * Exit 0 all hold, 1 a case fails (named), 2 usage or I/O.
+ */
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+
+static int fails;
+static int nas; /* assertions that reached a verdict (PASS or FAIL) */
+static char base[4096];
+
+static int wr(const char *p, const char *s) {
+    FILE *f = fopen(p, "w");
+    if (!f) return 1;
+    fputs(s, f);
+    return fclose(f) != 0;
+}
+
+/* Names in d other than "." "..", joined by ',' into out; returns the count or -1. */
+static int names(const char *d, char *out, size_t cap) {
+    DIR *h = opendir(d);
+    struct dirent *e;
+    int n = 0;
+    size_t at = 0;
+    out[0] = 0;
+    if (!h) return -1;
+    while ((e = readdir(h))) {
+        size_t k;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        n++;
+        k = strlen(e->d_name);
+        if (at + k + 2 < cap) {
+            if (at) out[at++] = ',';
+            if (mm_copy(out + at, cap - at, e->d_name, k)) break;
+            at += k; out[at] = 0;
+        }
+    }
+    closedir(h);
+    return n;
+}
+
+/* Remove a tree the check made itself (depth is small: cache dir + files). */
+static void rmtree(const char *d) {
+    char *v[] = {"rm", "-rf", (char *)d, 0};
+    char *o = 0; size_t on = 0;
+    cx_runv_timeout(v, 10, &o, &on);
+    free(o);
+}
+
+static void one(const char *product, const char *name, const char *setting, int want_diag, const char *absdir) {
+    char cwd[4200], src[4300], errp[4300], listing[2048], cmd[16384];
+    char *out = 0; size_t on = 0;
+    int rc, n, diag = 0;
+    FILE *f;
+    {
+        const char *d = getenv("MCR_DROP"); size_t k = strlen(name);
+        while (d && *d) {
+            if (!strncmp(d, name, k) && (d[k] == ',' || !d[k])) return;
+            d = strchr(d, ','); if (d) d++;
+        }
+    }
+    nas++;
+    cx_fmt(cwd, sizeof cwd, "%s/%s", base, name);
+    cx_fmt(src, sizeof src, "%s/p.c", cwd);
+    cx_fmt(errp, sizeof errp, "%s/%s.err", base, name);
+    if (mkdir(cwd, 0700) || wr(src, "#include <stdio.h>\nint main(void){printf(\"mc-ok\\n\");return 7;}\n")) {
+        printf("FAIL\t%s\tfixture\n", name); fails++; return;
+    }
+    cx_fmt(cmd, sizeof cmd,
+           "cd '%s' && exec env -u UNISACC_CACHE_DIR -u UNISACC_E3CACHE -u DEV_PRODUCT_CACHE "
+           "UNISACC_RUN_CACHE=1 UNISACC_UNIT_CACHE=1 %s sh '%s' p.c 2>'%s'", cwd, setting, product, errp);
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        rc = cx_runv_timeout(v, 50, &out, &on);
+    }
+    n = names(cwd, listing, sizeof listing);
+    f = fopen(errp, "r");
+    if (f) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) if (strstr(line, "modelcache: relative cache root ignored")) diag = 1;
+        fclose(f);
+    }
+    if (n != 1) { printf("FAIL\t%s\tcwd entries=%d (%s), want only p.c\n", name, n, listing); fails++; }
+    else if (rc != 7 || !out || strcmp(out, "mc-ok\n")) { printf("FAIL\t%s\trc=%d stdout=%.40s want rc 7 mc-ok\n", name, rc, out ? out : ""); fails++; }
+    else if (want_diag && !diag) { printf("FAIL\t%s\tno diagnostic line on stderr\n", name); fails++; }
+    else if (absdir && names(absdir, listing, sizeof listing) < 1) { printf("FAIL\t%s\tabsolute root %s got no cache entry\n", name, absdir); fails++; }
+    else printf("PASS\t%s\tcwd=p.c rc=7%s%s\n", name, want_diag ? " diag=said" : "", absdir ? " abs-root=written" : "");
+    free(out);
+    rmtree(cwd);
+    unlink(errp);
+}
+
+int main(int argc, char **argv) {
+    static const char *sets[] = {"e3", "dir"};
+    static const int setn[] = {3, 2};
+    const char *product, *tmp = getenv("TMPDIR");
+    char absdir[4200], setting[4400], prod[4096];
+    int si = -1, i, want;
+    if (argc > 1 && !strncmp(argv[1], "--set=", 6)) {
+        for (i = 0; i < 2; i++) if (!strcmp(argv[1] + 6, sets[i])) si = i;
+        if (si < 0) { fprintf(stderr, "check-modelcache-root: unknown set %s\n", argv[1] + 6); return 2; }
+        argv++; argc--;
+    }
+    product = argc > 1 ? argv[1] : "./unisacc.com";
+    want = si < 0 ? 5 : setn[si];
+    if (argc > 2) { fprintf(stderr, "usage: check-modelcache-root.cx -- [--set=e3|dir] [PRODUCT]\n"); return 2; }
+    if (!realpath(product, prod)) { fprintf(stderr, "check-modelcache-root: no product %s\n", product); return 2; }
+    cx_fmt(base, sizeof base, "%s/check-modelcache-root-%d", tmp && *tmp == '/' ? tmp : "/tmp", (int)getpid());
+    if (mkdir(base, 0700)) { fprintf(stderr, "check-modelcache-root: cannot create %s\n", base); return 2; }
+    if (si < 0 || si == 0) {
+        one(prod, "e3-zero", "UNISACC_E3CACHE=0", 0, 0);
+        one(prod, "e3-empty", "UNISACC_E3CACHE=", 0, 0);
+        one(prod, "e3-relative", "UNISACC_E3CACHE=relroot", 1, 0);
+    }
+    if (si < 0 || si == 1) {
+        /* DEV_PRODUCT_CACHE carries the same value: a tools/dev-product.cx launcher sets UNISACC_CACHE_DIR
+           from it when UNISACC_E3CACHE is unset; an installed product ignores it. */
+        one(prod, "dir-zero", "UNISACC_CACHE_DIR=0 DEV_PRODUCT_CACHE=0", 0, 0);
+        cx_fmt(absdir, sizeof absdir, "%s/abs-cache", base);
+        cx_fmt(setting, sizeof setting, "UNISACC_CACHE_DIR='%s' DEV_PRODUCT_CACHE='%s'", absdir, absdir);
+        one(prod, "dir-absolute", setting, 0, absdir);
+    }
+    rmtree(base);
+    if (nas != want) { printf("FAIL\tassertion-count\texpected=%d got=%d set=%s\n", want, nas, si < 0 ? "all" : sets[si]); fails++; }
+    printf("CHECK_MODELCACHE_ROOT\tset=%s\tassertions=%d\tfailed=%d\n", si < 0 ? "all" : sets[si], nas, fails);
+    return fails ? 1 : 0;
+}

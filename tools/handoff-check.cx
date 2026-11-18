@@ -1,0 +1,325 @@
+/* tools/handoff-check.cx -- delivery self-check for a sub-agent hand-off (v0.0.77 speed theme A).
+ *
+ *   sh ./unisacc.com tools/handoff-check.cx -- [--root DIR] [--base REV] [--files A,B,..] [--item NAME]
+ *       [--static] [--skip-batches] [--candidate ABS_DEV_PRODUCT_DIR] [--allow-product] [--patch FILE]
+ *       [--strict] [--profiles TSV] [--help]
+ *
+ * Changed set: git diff --name-only BASE (default HEAD, i.e. the uncommitted work; pass --base HEAD~1 for
+ * the last commit) plus untracked files, or --files.  Items (profile names from tests/accept-profiles.tsv):
+ *   newcx        (a) newcx-check on changed .cx files                       newcx-0
+ *   ratchets     (b) tools/ratchets.cx, failing ratchet names listed        ratchets-15-0
+ *   shards       (c) tools-compile --shards equals ^tools-compile- rows     shards-consistent
+ *   fresh-cold   (d) batches added in tests/batches.tsv run in a fresh layout (git archive HEAD, private git
+ *                    init, one commit) with UNISACC_RUN_CACHE=0 UNISACC_UNIT_CACHE=0; > 33000 ms FAIL,
+ *                    > 55000 ms FAIL near-window                             cold-fresh-layout-33s
+ *   core-review  (e) changed path under a core-path row -> REVIEW_REQUIRED   core-path-review
+ *   no-bypass    (f) core.hooksPath set, UNISACC_E3CACHE=0 in env -> FAIL; "no-verify" in BASE..HEAD messages
+ *                    -> REVIEW_REQUIRED                                      no-gate-bypass
+ *   patch-first  (g) product-path change without a *.patch/*.diff -> FAIL PATCH_FIRST; --allow-product
+ *                    passes and says so                                     patch-first-for-product
+ *   registry     (h) new tools/X.cx without tools/check-X.cx, a tools-compile-sources row or a prd.md row:
+ *                    UNMEASURED, FAIL with --strict                         tool-registered
+ * --static and --skip-batches turn the heavy items (a b c d / d) into UNMEASURED.  One line per item:
+ *   ITEM<TAB>name<TAB>PASS|FAIL|NOT_APPLICABLE|UNMEASURED|REVIEW_REQUIRED<TAB>ms<TAB>detail
+ * Last line: HANDOFF passed=N failed=N unmeasured=N review=N scope=LOCAL.  The result is local evidence only;
+ * it is never a release qualification.  Exit 1 when failed > 0, 2 on usage, else 0.
+ *   sh ./unisacc.com tools/handoff-check.cx -- batch CASES.tsv   (fixtures: one TAB-separated argument line per
+ *   case, CASE<TAB>i ... END<TAB>i<TAB>rc=N, one process for the table; used by tools/check-handoff-check.cx) */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define UC "./unisacc.com" /* lint:allow R1 handoff-check runs repo tools under the installed product */
+#define MAXF 512
+static const char *root = ".", *base = "HEAD", *only = 0, *cand = 0, *patchf = 0, *profiles = "tests/accept-profiles.tsv";
+static int st_static, skip_batches, allow_product, strict;
+static int passed, failed, unmeasured, review;
+static char *files[MAXF]; static int nfiles;
+static char *added[MAXF]; static int nadded;
+static char *core[64], *prod[64]; static int ncore, nprod;
+
+static int want(const char *name) { return !only || !strcmp(only, name); }
+static void item(const char *name, const char *st, long ms, const char *detail) {
+    if (!strcmp(st, "PASS")) passed++;
+    else if (!strcmp(st, "FAIL")) failed++;
+    else if (!strcmp(st, "UNMEASURED")) unmeasured++;
+    else if (!strcmp(st, "REVIEW_REQUIRED")) review++;
+    printf("ITEM\t%s\t%s\t%ld\t%s\n", name, st, ms, detail && detail[0] ? detail : "-");
+}
+/* run argv (cwd may be 0), capture stdout+stderr tail into out; rc or -1 */
+static int run(char **argv, const char *cwd, char *out, int cap) {
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    long deadline_ms = 0; (void)deadline_ms;   /* every caller passes a ./tools/bound argv prefix */
+    out[0] = 0;
+    pid = sy_spawn_pipe(argv, cwd, 0, &fd, 0);
+    if (pid <= 0) return -1;
+    for (;;) {
+        if (n < cap - 1) { r = sy_read(fd, out + n, cap - 1 - n); if (r <= 0) break; n += r; }
+        else { r = sy_read(fd, junk, sizeof junk); if (r <= 0) break; }
+    }
+    out[n] = 0; sy_close(fd);
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
+}
+static const char *lastline(char *s) {
+    long n = (long)strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) s[--n] = 0;
+    while (n > 0 && s[n - 1] != '\n') n--;
+    return s + n;
+}
+static int has_prefix(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+static int known(char **v, int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(v[i], s)) return 1; return 0; }
+static void push_lines(char *t, char **v, int *n) {
+    for (char *p = t, *e; p && *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0;
+        if (*p && *n < MAXF && !known(v, *n, p)) v[(*n)++] = strdup(p);
+    }
+}
+static int git(char *out, int cap, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
+    char *v[] = {"./tools/bound", "30", "git", "-C", (char *)root, (char *)a1, (char *)a2, (char *)a3, (char *)a4, (char *)a5, 0};
+    return run(v, 0, out, cap);
+}
+static void load_profiles(void) {
+    size_t n; char *t = cx_read(profiles, &n);
+    if (!t) { fprintf(stderr, "handoff-check: cannot read %s\n", profiles); exit(2); }
+    for (char *p = t, *e; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        char *tab = strchr(p, '\t'); if (!tab) continue;
+        *tab = 0; char *name = tab + 1, *t2 = strchr(name, '\t'); if (t2) *t2 = 0;
+        if (!strcmp(p, "core-path") && ncore < 64) core[ncore++] = strdup(name);
+        if (!strcmp(p, "product-path") && nprod < 64) prod[nprod++] = strdup(name);
+    }
+    free(t);
+}
+static void collect(const char *list) {
+    static char out[262144];
+    if (list) {
+        char *c = strdup(list);
+        for (char *p = c, *e; p && *p; p = e) { e = strchr(p, ','); if (e) *e++ = 0; if (*p && nfiles < MAXF) files[nfiles++] = strdup(p); }
+        return;
+    }
+    if (git(out, sizeof out, "diff", "--name-only", base, "--", 0)) { fprintf(stderr, "handoff-check: git diff %s failed\n", base); exit(2); }
+    push_lines(out, files, &nfiles);
+    if (!git(out, sizeof out, "ls-files", "--others", "--exclude-standard", 0, 0)) {
+        char *copy = strdup(out);   /* push_lines cuts its buffer at each newline */
+        push_lines(out, files, &nfiles);
+        if (copy) { push_lines(copy, added, &nadded); free(copy); }
+    }
+    if (!git(out, sizeof out, "diff", "--name-only", "--diff-filter=A", base, "--")) push_lines(out, added, &nadded);
+}
+static const char *under(const char *f, char **v, int n) { for (int i = 0; i < n; i++) if (has_prefix(f, v[i])) return v[i]; return 0; }
+static void cat(char *d, int cap, const char *s) { long k = (long)strlen(d); if (k + (long)strlen(s) + 2 < cap) { if (k) d[k++] = ' '; mm_copy(d + k, (size_t)(cap - k), s, strlen(s) + 1); } }
+
+static void it_newcx(void) {
+    char *v[MAXF + 8]; int c = 0; static char out[65536]; long t0 = sy_now_ms();
+    v[c++] = "./tools/bound"; v[c++] = "55"; v[c++] = "sh"; v[c++] = UC; v[c++] = "tools/newcx-check.cx"; v[c++] = "--";
+    for (int i = 0; i < nfiles; i++) {
+        long k = (long)strlen(files[i]); char p[1200];
+        if (k < 3 || strcmp(files[i] + k - 3, ".cx") || cx_fmt(p, sizeof p, "%s/%s", root, files[i]) || !sy_exists(p)) continue;
+        v[c++] = files[i];
+    }
+    v[c] = 0;
+    if (c == 6) { item("newcx", "NOT_APPLICABLE", 0, "no changed .cx"); return; }
+    if (st_static) { item("newcx", "UNMEASURED", 0, "--static"); return; }
+    int rc = run(v, root, out, sizeof out);
+    item("newcx", rc == 0 ? "PASS" : "FAIL", sy_now_ms() - t0, lastline(out));
+}
+static void it_ratchets(void) {
+    static char out[262144]; char bad[2048] = ""; long t0 = sy_now_ms();
+    if (st_static) { item("ratchets", "UNMEASURED", 0, "--static"); return; }
+    char *v[] = {"./tools/bound", "55", "sh", UC, "tools/ratchets.cx", 0};
+    int rc = run(v, root, out, sizeof out);
+    for (char *p = out; (p = strstr(p, "RATCHET\t")); p++) {
+        char nm[128]; char *a = p + 8, *b = strchr(a, '\t');
+        if (!b || b - a >= (long)sizeof nm) continue;
+        if (has_prefix(b + 1, "FAIL") || has_prefix(b + 1, "ERROR")) { if (cx_fmt(nm, sizeof nm, "%.*s", (int)(b - a), a)) continue; cat(bad, sizeof bad, nm); }
+    }
+    char d[3000];
+    if (cx_fmt(d, sizeof d, "%s%s%s", lastline(out), bad[0] ? " failing=" : "", bad)) d[0] = 0;
+    item("ratchets", rc == 0 && !bad[0] ? "PASS" : "FAIL", sy_now_ms() - t0, rc == 124 ? "ratchets over 55 s: run in segments with --only" : d);
+}
+static void it_shards(void) {
+    static char out[8192]; char p[1200], d[200]; size_t n; long t0 = sy_now_ms(); int rows = 0;
+    if (st_static) { item("shards", "UNMEASURED", 0, "--static"); return; }
+    char *v[] = {"./tools/bound", "55", "sh", UC, "tests/tools-compile.cx", "--", "--shards", ".", 0};
+    int rc = run(v, root, out, sizeof out);
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root)) return;
+    char *t = cx_read(p, &n);
+    if (t) { if (has_prefix(t, "tools-compile-")) rows++; for (char *q = t; (q = strstr(q, "\ntools-compile-")); q++) rows++; free(t); }
+    long sh = rc == 0 ? atol(lastline(out)) : -1;
+    if (cx_fmt(d, sizeof d, "shards=%ld rows=%d", sh, rows)) d[0] = 0;
+    item("shards", rc == 0 && sh == rows ? "PASS" : "FAIL", sy_now_ms() - t0, d);
+}
+/* ids of rows added to tests/batches.tsv against BASE */
+static int new_batches(char ids[][128], int cap) {
+    static char out[262144]; int k = 0;
+    if (git(out, sizeof out, "diff", "--unified=0", base, "--", "tests/batches.tsv")) return 0;
+    for (char *p = out, *e; *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        if (p[0] != '+' || p[1] == '+') continue;
+        char *tab = strchr(p + 1, '\t');
+        if (tab && k < cap && tab - p - 1 < 127 && !cx_fmt(ids[k], 128, "%.*s", (int)(tab - p - 1), p + 1)) k++;
+    }
+    /* untracked whole-file case: no diff possible, nothing to add */
+    return k;
+}
+static int why_(char *why, int wcap, const char *s) { if (cx_fmt(why, (size_t)wcap, "%s", s)) why[0] = 0; return -1; }
+static int layout(char *dir, int cap, char *why, int wcap) {
+    static char out[16384]; char tar[1300], abs[1200], uc[1300], lk[1300];
+    if (sy_mkdtemp(sy_tmpdir(), "handoff-layout-", dir, (size_t)cap)) return why_(why, wcap,"mkdtemp");
+    if (cx_fmt(tar, sizeof tar, "%s.tar", dir)) return -1;
+    { char *v[] = {"./tools/bound", "50", "git", "-C", (char *)root, "archive", "-o", tar, "HEAD", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git archive"); }
+    { char *v[] = {"./tools/bound", "50", "tar", "-xf", tar, "-C", dir, 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"tar"); }
+    sy_unlink(tar);
+    { char *v[] = {"./tools/bound", "30", "git", "-C", dir, "init", "-q", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git init"); }
+    { char *v[] = {"./tools/bound", "50", "git", "-C", dir, "add", "-A", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git add"); }
+    { char *v[] = {"./tools/bound", "50", "git", "-C", dir, "-c", "user.name=handoff", "-c", "user.email=handoff@localhost", "commit", "-qm", "layout", "--no-gpg-sign", 0};
+      if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git commit"); }
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", root) || !sy_realpath(uc, abs, sizeof abs)) return why_(why, wcap,"unisacc.com");
+    if (cx_fmt(lk, sizeof lk, "%s/unisacc.com", dir) || sy_symlink(abs, lk)) return why_(why, wcap,"symlink");
+    return 0;
+}
+static void it_fresh(void) {
+    char ids[32][128]; int n = new_batches(ids, 32);
+    if (!n) { item("fresh-cold", "NOT_APPLICABLE", 0, "no batch row added to tests/batches.tsv"); return; }
+    if (st_static || skip_batches) { item("fresh-cold", "UNMEASURED", 0, "--skip-batches/--static: batches not run"); return; }
+    char dir[1024], why[200] = "", outp[1100];
+    if (layout(dir, sizeof dir, why, sizeof why)) { item("fresh-cold", "FAIL", 0, why); return; }
+    /* run-batch accepts an output parent only below ROOT/out or TMPDIR/unisacc-affected-* */
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-affected-handoff-", outp, sizeof outp)) { item("fresh-cold", "FAIL", 0, "mkdtemp output parent"); return; }
+    for (int i = 0; i < n; i++) {
+        static char out[65536]; char name[200], d[600]; long t0 = sy_now_ms(); int c = 0; char *v[16];
+        v[c++] = "env"; v[c++] = "UNISACC_RUN_CACHE=0"; v[c++] = "UNISACC_UNIT_CACHE=0";
+        v[c++] = "./tools/bound"; v[c++] = "58"; v[c++] = "sh"; v[c++] = UC; v[c++] = "tests/run-batch.cx"; v[c++] = "--";
+        if (cand) { v[c++] = "--candidate"; v[c++] = (char *)cand; }
+        v[c++] = dir; v[c++] = outp; v[c++] = ids[i]; v[c] = 0;
+        int rc = run(v, dir, out, sizeof out); long ms = sy_now_ms() - t0;
+        const char *st = rc == 0 && ms <= 33000 ? "PASS" : "FAIL";
+        if (cx_fmt(name, sizeof name, "fresh-cold:%s", ids[i])) continue;
+        if (cx_fmt(d, sizeof d, "rc=%d%s%s layout=%s %s", rc, ms > 33000 ? " over-33000ms" : "", ms > 55000 ? " near-window" : "", dir, lastline(out))) d[0] = 0;
+        item(name, st, ms, d);
+    }
+}
+static void it_core(void) {
+    char hit[4096] = "";
+    for (int i = 0; i < nfiles; i++) if (under(files[i], core, ncore)) cat(hit, sizeof hit, files[i]);
+    if (hit[0]) item("core-review", "REVIEW_REQUIRED", 0, hit);
+    else item("core-review", "NOT_APPLICABLE", 0, "no core path touched");
+}
+static void it_bypass(void) {
+    static char out[65536]; char d[600] = ""; int bad = 0, rv = 0;
+    if (git(out, sizeof out, "config", "core.hooksPath", 0, 0, 0) == 0 && lastline(out)[0]) { bad = 1; cat(d, sizeof d, "core.hooksPath-set"); }
+    const char *e3 = sy_env("UNISACC_E3CACHE");
+    if (e3 && !strcmp(e3, "0")) { bad = 1; cat(d, sizeof d, "UNISACC_E3CACHE=0-in-env"); }
+    char range[300];
+    if (!cx_fmt(range, sizeof range, "%s..HEAD", base) && strcmp(base, "HEAD") &&
+        git(out, sizeof out, "log", "--format=%h %B", range, 0, 0) == 0 && strstr(out, "no-verify")) { rv = 1; cat(d, sizeof d, "no-verify-in-commit-message"); }
+    item("no-bypass", bad ? "FAIL" : rv ? "REVIEW_REQUIRED" : "PASS", 0, d);
+}
+static void it_patch(void) {
+    char hit[4096] = ""; int patch = 0;
+    for (int i = 0; i < nfiles; i++) {
+        long k = (long)strlen(files[i]);
+        if (under(files[i], prod, nprod)) cat(hit, sizeof hit, files[i]);
+        else if (k > 6 && (!strcmp(files[i] + k - 6, ".patch") || !strcmp(files[i] + k - 5, ".diff"))) patch = 1;
+    }
+    if (patchf && sy_exists(patchf)) patch = 1;
+    if (!hit[0]) { item("patch-first", "NOT_APPLICABLE", 0, "no product input touched"); return; }
+    char d[4200];
+    if (allow_product) { if (cx_fmt(d, sizeof d, "ALLOWED --allow-product %s", hit)) d[0] = 0; item("patch-first", "PASS", 0, d); return; }
+    if (cx_fmt(d, sizeof d, "%s %s", patch ? "patch present" : "PATCH_FIRST", hit)) d[0] = 0;
+    item("patch-first", patch ? "PASS" : "FAIL", 0, d);
+}
+static void it_registry(void) {
+    char miss[4096] = "", p[1200]; size_t n; int any = 0;
+    char *prd = (cx_fmt(p, sizeof p, "%s/prd.md", root) ? 0 : cx_read(p, &n));
+    char *src = (cx_fmt(p, sizeof p, "%s/tests/tools-compile-sources.tsv", root) ? 0 : cx_read(p, &n));
+    for (int i = 0; i < nadded; i++) {
+        const char *f = added[i]; long k = (long)strlen(f); char ck[1200], rowkey[1200];
+        if (!has_prefix(f, "tools/") || k < 4 || strcmp(f + k - 3, ".cx") || strchr(f + 6, '/') || has_prefix(f, "tools/check-")) continue;
+        any = 1;
+        if (cx_fmt(ck, sizeof ck, "%s/tools/check-%s", root, f + 6) || !sy_exists(ck)) { cat(miss, sizeof miss, f); cat(miss, sizeof miss, "no-check"); }
+        if (cx_fmt(rowkey, sizeof rowkey, "%s\t", f) || !src || !strstr(src, rowkey)) { cat(miss, sizeof miss, f); cat(miss, sizeof miss, "no-tools-compile-row"); }
+        if (!prd || !strstr(prd, f)) { cat(miss, sizeof miss, f); cat(miss, sizeof miss, "no-prd-row"); }
+    }
+    free(prd); free(src);
+    if (!any) item("registry", "NOT_APPLICABLE", 0, "no new tool");
+    else if (!miss[0]) item("registry", "PASS", 0, "check, tools-compile row and prd.md row present");
+    else item("registry", strict ? "FAIL" : "UNMEASURED", 0, miss);
+}
+static void help(void) {
+    puts("handoff-check items: newcx ratchets shards fresh-cold core-review no-bypass patch-first registry");
+    puts("profiles: cold-fresh-layout-33s fresh-layout-no-history ratchets-15-0 newcx-0 shards-consistent no-gate-bypass");
+    puts("          patch-first-for-product core-path-review e2e-latency new-tool-name-history tool-registered thaw-on-fail local-evidence-only");
+    puts("options: --root DIR --base REV --files A,B --item NAME --static --skip-batches --candidate DIR --allow-product --patch FILE --strict --profiles TSV");
+    puts("last line: HANDOFF passed=N failed=N unmeasured=N review=N scope=LOCAL (local evidence only)");
+}
+static void reset(void) {
+    root = "."; base = "HEAD"; only = 0; cand = 0; patchf = 0; profiles = "tests/accept-profiles.tsv";
+    st_static = skip_batches = allow_product = strict = 0;
+    passed = failed = unmeasured = review = 0;
+    for (int i = 0; i < nfiles; i++) free(files[i]);
+    for (int i = 0; i < nadded; i++) free(added[i]);
+    for (int i = 0; i < ncore; i++) free(core[i]);
+    for (int i = 0; i < nprod; i++) free(prod[i]);
+    nfiles = nadded = ncore = nprod = 0;
+}
+static int dispatch(int argc, char **argv) {
+    const char *list = 0;
+    reset();
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i]; int more = i + 1 < argc;
+        if (!strcmp(a, "--help")) { help(); return 0; }
+        else if (!strcmp(a, "--static")) st_static = 1;
+        else if (!strcmp(a, "--skip-batches")) skip_batches = 1;
+        else if (!strcmp(a, "--allow-product")) allow_product = 1;
+        else if (!strcmp(a, "--strict")) strict = 1;
+        else if (more && !strcmp(a, "--root")) root = argv[++i];
+        else if (more && !strcmp(a, "--base")) base = argv[++i];
+        else if (more && !strcmp(a, "--files")) list = argv[++i];
+        else if (more && !strcmp(a, "--item")) only = argv[++i];
+        else if (more && !strcmp(a, "--candidate")) cand = argv[++i];
+        else if (more && !strcmp(a, "--patch")) patchf = argv[++i];
+        else if (more && !strcmp(a, "--profiles")) profiles = argv[++i];
+        else { fprintf(stderr, "handoff-check: usage: see --help (%s)\n", a); return 2; }
+    }
+    load_profiles();
+    collect(list);
+    printf("HANDOFF_SCOPE\troot=%s\tbase=%s\tchanged=%d\tnew=%d\n", root, base, nfiles, nadded);
+    if (want("newcx")) it_newcx();
+    if (want("ratchets")) it_ratchets();
+    if (want("shards")) it_shards();
+    if (want("fresh-cold")) it_fresh();
+    if (want("core-review")) it_core();
+    if (want("no-bypass")) it_bypass();
+    if (want("patch-first")) it_patch();
+    if (want("registry")) it_registry();
+    printf("HANDOFF\tpassed=%d\tfailed=%d\tunmeasured=%d\treview=%d\tscope=LOCAL\n", passed, failed, unmeasured, review);
+    return failed ? 1 : 0;
+}
+/* batch FILE: one case per line, arguments TAB-separated; each case prints CASE<TAB>i, its output, then
+ * END<TAB>i<TAB>rc=N.  One process (one compile) for a fixture table. */
+static int do_batch(const char *path) {
+    size_t n; char *t = cx_read(path, &n), *e; int i = 0;
+    if (!t) { fprintf(stderr, "handoff-check: cannot read %s\n", path); return 2; }
+    for (char *p = t; p < t + n && *p; p = e + 1) {
+        char *v[32]; int c = 0;
+        e = strchr(p, '\n'); if (!e) e = t + n; *e = 0;
+        if (!*p) continue;
+        v[c++] = "handoff-check";
+        for (char *q = p; c < 31; ) { char *s = strchr(q, '\t'); v[c++] = q; if (!s) break; *s = 0; q = s + 1; }
+        v[c] = 0;
+        printf("CASE\t%d\n", ++i); fflush(stdout);
+        { int rc = dispatch(c, v); printf("END\t%d\trc=%d\n", i, rc); fflush(stdout); }
+    }
+    free(t);
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "batch")) return do_batch(argv[2]);
+    return dispatch(argc, argv);
+}
