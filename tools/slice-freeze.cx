@@ -24,6 +24,7 @@
  * advisory prints the same lines as enforce and always exits 0, adding one
  * SLICE_FREEZE_WOULD_FAIL line when enforce would have failed. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.globspan
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
@@ -81,18 +82,8 @@ static int line(const char **p, char *d, size_t cap) {
 }
 /* shell glob: '*' any run, '?' one byte, else literal. One '*' per pattern segment is enough
    for tests/slice-freeze.tsv (cx/sys/*, exec/facts/x.tsv, ...). */
-static int glob(const char *pat, const char *s) {
-    while (*pat) {
-        if (*pat == '*') {
-            const char *rest = pat + 1;
-            if (!*rest) return 1;
-            for (;;) { if (glob(rest, s)) return 1; if (!*s) return 0; s++; }
-        }
-        if (!*s) return 0;
-        if (*pat != '?' && *pat != *s) return 0;
-        pat++; s++;
-    }
-    return !*s;
+static int match_path(const char *pat, const char *s) {
+    return glob_span_mode(pat, strlen(pat), s, strlen(s), 1);
 }
 /* is NAME a batch id in tests/batches.tsv field 1? */
 static int batch_exists(const char *name) {
@@ -110,7 +101,7 @@ static void batches_of(const char *path, char *out, size_t cap) {
     int i; size_t at = strlen(out);
     for (i = 0; i < nrow; i++) {
         const char *p;
-        if (!glob(rows[i].glob, path)) continue;
+        if (!match_path(rows[i].glob, path)) continue;
         p = rows[i].batches;
         while (*p) {
             char b[128]; size_t k = 0, bl;
@@ -311,7 +302,7 @@ int main(int argc, char **argv) {
         if (run(v, out, sizeof out) != 0) die("git diff failed");
         for (p = out; line(&p, one, sizeof one);) {
             int r; size_t at;
-            for (r = 0; r < nrow; r++) if (glob(rows[r].glob, one)) break;
+            for (r = 0; r < nrow; r++) if (match_path(rows[r].glob, one)) break;
             if (r == nrow) continue;
             hits++;
             printf("SLICE_HIT\t%s\t%s\t%s\n", one, rows[r].targets, rows[r].batches);

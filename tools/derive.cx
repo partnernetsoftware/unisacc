@@ -28,6 +28,7 @@
  *   derive.cx -- --check --changed <暂存路径...>,只跑输入被改到的生成器;rc 1 提示先 derive --write --only NAME 再提交,rc 2 直接拦下;
  *   新增或删除 tools/ 下文件时加 --index。全量 --check 留给慢车道与 CI。
  * Check: tools/check-derive.cx. */
+#pragma unisa use cxlib.globspan
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -57,14 +58,6 @@ static Snap snaps[MAXSNAP]; static int nsnap;
 static char *snapdirs[MAXR * 4]; static int nsnapdir;
 
 static int seq(const char *a, const char *b) { long n = tx_len(a, 4096); return n == tx_len(b, 4096) && mm_same(a, b, n); }
-static int glob(const char *g, long gn, const char *s, long sn) {
-    while (gn > 0) {
-        if (g[0] == '*') { long k; for (k = 0; k <= sn; k++) if (glob(g + 1, gn - 1, s + k, sn - k)) return 1; return 0; }
-        if (sn <= 0 || g[0] != s[0]) return 0;
-        g++; gn--; s++; sn--;
-    }
-    return sn == 0;
-}
 /* Build artifacts only: no check verdict is stored or reused. --check always recomputes.
  * A hit requires the current input closure AND every output byte to match a completed write.
  * Unmodelled generators, unreadable paths and unsupported directory links rebuild normally. */
@@ -78,13 +71,13 @@ static void hput(const char*s){long n=strlen(s);char len[40];int k=snprintf(len,
 static void hadd(const char*p){if(nhp==32768){hbad=1;return;}long n=strlen(p)+1;hp[nhp]=mm_alloc(n);if(!hp[nhp]){hbad=1;return;}if(mm_copy(hp[nhp],n,p,n))hbad=1;nhp++;}
 static void hwalk(const char*p,const char*pattern){sy_stat_t st;int rc=sy_lstat(p,&st);
     if(rc==-ENOENT)return;if(rc){sy_eprintf("DERIVE_IDENTITY_UNAVAILABLE\t%s\terrno=%d\n",p,rc);hbad=1;return;}
-    if(st.kind=='l'){sy_stat_t target;char real[4400];if(sy_stat(p,&target)||sy_realpath(p,real,sizeof real)<0){hbad=1;return;}if(target.kind=='d'){hadd(p);hwalk(real,0);}else if(target.kind=='f'&&(!pattern||glob(pattern,strlen(pattern),p,strlen(p))))hadd(p);else if(target.kind!='f')hbad=1;return;}
+    if(st.kind=='l'){sy_stat_t target;char real[4400];if(sy_stat(p,&target)||sy_realpath(p,real,sizeof real)<0){hbad=1;return;}if(target.kind=='d'){hadd(p);hwalk(real,0);}else if(target.kind=='f'&&(!pattern||glob_span(pattern,strlen(pattern),p,strlen(p))))hadd(p);else if(target.kind!='f')hbad=1;return;}
     if(st.kind=='d'){sy_dir_t d;char real[4400];if(hdepth==128||sy_realpath(p,real,sizeof real)<0){hbad=1;return;}for(int i=0;i<hdepth;i++)if(!strcmp(real,hstack[i]))return;
         if(mm_copy(hstack[hdepth],sizeof hstack[hdepth],real,strlen(real)+1)){hbad=1;return;}hdepth++;hadd(p);if(sy_dir_open(&d,p)){hdepth--;hbad=1;return;}int next;
         while((next=sy_dir_next(&d))==1){if(!strcmp(d.name,".")||!strcmp(d.name,".."))continue;char q[4400];if(cx_fmt(q,sizeof q,"%s/%s",p,d.name)){hbad=1;break;}hwalk(q,pattern);if(hbad)break;}if(next<0)hbad=1;sy_dir_close(&d);hdepth--;
-    }else if(!pattern||glob(pattern,strlen(pattern),p,strlen(p))){if(st.kind!='f'){hbad=1;return;}hadd(p);}
+    }else if(!pattern||glob_span(pattern,strlen(pattern),p,strlen(p))){if(st.kind!='f'){hbad=1;return;}hadd(p);}
 }
-static void hrootglob(const char*pattern){char*o=0;size_t n=0;char*v[]={"git","ls-files","-z","--cached","--others","--exclude-standard",0};if(cx_runv_timeout(v,20,&o,&n)||!o){hbad=1;free(o);return;}for(size_t i=0;i<n;){size_t j=i;while(j<n&&o[j])j++;if(j==n){hbad=1;break;}if(glob(pattern,strlen(pattern),o+i,j-i))hwalk(o+i,0);i=j+1;}free(o);}
+static void hrootglob(const char*pattern){char*o=0;size_t n=0;char*v[]={"git","ls-files","-z","--cached","--others","--exclude-standard",0};if(cx_runv_timeout(v,20,&o,&n)||!o){hbad=1;free(o);return;}for(size_t i=0;i<n;){size_t j=i;while(j<n&&o[j])j++;if(j==n){hbad=1;break;}if(glob_span(pattern,strlen(pattern),o+i,j-i))hwalk(o+i,0);i=j+1;}free(o);}
 static void hwords(const char*words){const char*p=words;while(*p){while(*p==' ')p++;const char*e=p;while(*e&&*e!=' ')e++;if(e==p)break;char w[4400],base[4400];if(e-p>=(long)sizeof w){hbad=1;return;}if(mm_copy(w,sizeof w,p,e-p)){hbad=1;return;}w[e-p]=0;p=e;if(!strcmp(w,"-"))continue;hput(w);
         char*star=strchr(w,'*');if(star){long n=star-w;while(n>0&&w[n-1]!='/')n--;if(!n){hrootglob(w);continue;}else{if(mm_copy(base,sizeof base,w,n)){hbad=1;return;}base[n]=0;if(n>1)base[n-1]=0;}hwalk(base,w);}
         else {sy_stat_t st;int rc=sy_lstat(w,&st);if(rc==-ENOENT){hput("ENOENT");if(houtputs)hbad=1;continue;}if(rc){hbad=1;continue;}hwalk(w,0);}
@@ -312,7 +305,7 @@ static int word_hit(const char *a, const char *b) {
             while (j < nb && b[j] == ' ') j++;
             t = j; while (j < nb && b[j] != ' ') j++;
             if (j == t) break;
-            if (glob(a + s, i - s, b + t, j - t) || glob(b + t, j - t, a + s, i - s)) return 1;
+            if (glob_span(a + s, i - s, b + t, j - t) || glob_span(b + t, j - t, a + s, i - s)) return 1;
             if (a[i - 1] == '/' && j - t >= i - s && mm_same(a + s, b + t, i - s)) return 1;
             if (b[j - 1] == '/' && i - s >= j - t && mm_same(a + s, b + t, j - t)) return 1;
         }
@@ -405,7 +398,7 @@ static int ins_hit(Row *r, const char *path, long pn, char *word, long wcap) {
         long s;
         while (k < n && r->ins[k] == ' ') k++;
         s = k; while (k < n && r->ins[k] != ' ') k++;
-        if (k > s && glob(r->ins + s, k - s, path, pn)) { if (k - s < wcap) { mm_copy(word, wcap, r->ins + s, k - s); word[k - s] = 0; } return 1; }
+        if (k > s && glob_span(r->ins + s, k - s, path, pn)) { if (k - s < wcap) { mm_copy(word, wcap, r->ins + s, k - s); word[k - s] = 0; } return 1; }
     }
     return 0;
 }
@@ -495,7 +488,7 @@ int main(int argc, char **argv) {
                 while (k < n && r->ins[k] == ' ') k++;
                 s = k;
                 while (k < n && r->ins[k] != ' ') k++;
-                for (c = 0; c < nchanged && !sel; c++) if (k > s && glob(r->ins + s, k - s, changed[c], tx_len(changed[c], 4096))) sel = 1;
+                for (c = 0; c < nchanged && !sel; c++) if (k > s && glob_span(r->ins + s, k - s, changed[c], tx_len(changed[c], 4096))) sel = 1;
             }
         }
         if (index && seq(r->name, "tool-index")) sel = 1;

@@ -375,3 +375,24 @@ affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids�
 ## 派生按读集选表(opt-in,2026-11-18)
 
 derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + derive-inputs.tsv 的全局触发 * 行、cx-runtime 行、本表行)选表,改到输出本身也选,pathset 表在增删文件时选,再做 outputs -> inputs 闭包;query-only 不选。commit-own --derive-selected 用它派生并对选中集合每张表完整 --check;--derive 默认不变,默认切换由集成者决定。真实读集由 tools/check-derive-readset.cx(strace,daily 层)守住,漏登记即 FAIL。全树 derive --check 仍保留在 chain-ready 的 2a 与慢车道,不取消全树覆盖,只换时机。证据 release/evidence/derive-selected-2026-11-18.txt。
+
+## react 阶段一
+
+每个工作树各有一个实例目录。反应器启动即对账，之后每 2 至 5 秒复核。事件或事件文件变化只能提前这一轮。HEAD 用 git rev-parse 取得，index-tree 用私有 index 副本执行 git write-tree，产品读集用 product-map-query --key。读取失败时保留旧记录，标 UNKNOWN；读取期间的版本变化由下一轮对账纠正。冷读集查询须独立作业，以免拖慢已运行作业的取消。
+
+反应表列为 name、identity、dedup、supersede、debounce_s、admit、deadline_s、cmd、prepared。首个候选策略用产品读集、按反应名和身份去重、kill-old、1200 秒稳定期、load1 准入和单候选槽。命令及产物校验器由受信表选择。生产触发待放行，私有树只启动夹具。后续 HEAD 反应可调用 prebuild-self。
+
+每次对账先更新期望身份，再核现有作业。新身份立即撤销旧作业，稳定期从最后一次变化起算。先前 PREPARED 必须重新核对产物字节。监督者持作业锁，先记录意图，再建立独立进程组并登记 boot_id、PID、启动时刻和截止。登记完成才允许执行。取消先核身份再杀组，等进程组清空才发新作业。超载保留期望身份并延迟放行。
+
+作业只写自己的临时目录。退出成功、产物核验通过且期望身份仍相同，才以原子改名发布产物和 prepared.tsv 的对应行。重启先取工作树单例锁，恢复未完成意图，核对存活监督者和产物，再对账。服务或反应器重启不改变输入身份。常驻 TTL 上限 7200 秒，工作截止另算，调用者可重拉；机器重启后重新计去抖。撤回时停止独立反应器即可。
+
+|负控|可观察判据|
+|---|---|
+|重启服务并停事件源|一个对账周期内看到真实 HEAD 变化|
+|丢弃 index 或产品改动事件|仍能分别读到新的树号或读集键|
+|同键重复唤醒|一次作业，一条有效材料记录|
+|杀反应器后重启|存活监督者只接管一次，已完成材料复核后复用，损坏材料重做|
+|连续改变身份|旧组及后代退出，稳定期满只放行最后一项|
+|负载越界再恢复|超载时零启动，恢复后重新核身份再放行|
+
+性能度量分列身份复核、去抖、准入等待及作业墙钟。PREPARED 只表示材料可用，测试仍须实跑。
