@@ -12,13 +12,15 @@ import { gaitPose, readGaitPixels } from "./d4-gait.js";
 import { buildTown, townLayout } from "./d4-town.js";
 import { barrelMesh, closeCamera } from "./d4-framing.js";
 import { archMeshes } from "./d3-arch.js";
+import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params=new URLSearchParams(location.search), mode=params.get("mode");
-const paper=params.has("paper-u3");
+const enlarged=params.has("scale-u2b");
+const paper=params.has("paper-u3") || enlarged;
 const dense=params.has("dense-u2") || paper;
 const walkProbe=["walk","sliding-feet","frozen-body"].includes(mode);
 const finish=["finish","no-texture","single-smoke","sealed-arcade","thin-woodland"].includes(mode);
-const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map();
+const scene=new Scene(), extraMeshes=[], boxes=new Map(), groups=new Map(), dimensions=new Map();
 const bodies=[];
 const paint={
   chassis:[61,74,92], witness:[185,63,49], joint:[187,139,62], link:[119,123,126],
@@ -57,7 +59,11 @@ function add(color,id,x,y,z,size=1,yaw=0,pitch=0,roll=0) {
   if (!["joint","link","foot","darkgrass","farhill","grove","groundMark","pineDark","pineMid","pineLight","trunk"].includes(color) && id!==MESH_PLANE) bodies.push(item);
   return item;
 }
-function block(color,x,y,z,w,h,d,roll=0) { return add(color,box(w,h,d),x,y,z,1,0,0,roll); }
+function block(color,x,y,z,w,h,d,roll=0) {
+  const item=add(color,box(w,h,d),x,y,z,1,0,0,roll);
+  dimensions.set(item,[w,h,d]);
+  return item;
+}
 function linkTransform(a,b,scale=1) {
   const [x,y,z]=b.map((v,i)=>v-a[i]);
   const length=Math.hypot(x,y,z);
@@ -90,12 +96,17 @@ const legItems=legs.map(([hip,knee,foot],i)=>{
   };
 });
 
+const [townScale=1000,deckLength=11000,towerHeight,wingSpan,towerCount,domeCount,puffCount]=
+  enlarged?await loadScaleStudy("d4"):[];
+const deckTop=6.37;
 if(mode!=="no-deck") block("chassis",0,5.4,0,10.6,1.55,6.4);
 block("witness",-.56,4.87,1.92,.64,.42,.65);
-block("wood",0,6.23,0,11,.28,6.7);
+const deckItem=block("wood",0,6.23,0,deckLength/1000,.28,6.7);
 for(let x=-4.5;x<=4.5;x+=1.5) bodies.push(add("joint",round,x,5.45,3.28,.21));
 
-const townCounts=buildTown(await townLayout(dense && !params.has("thin-u2-town")),{block,add,round},mode,
+const firstTown=bodies.length;
+const layout=await townLayout(dense && !params.has("thin-u2-town"));
+const townCounts=buildTown(enlarged?layout.filter(row=>row[0]!=="smoke"):layout,{block,add,round},mode,
   !params.has("no-u2-fittings"));
 const arcadeSpec=await fetch(new URL("d4-arcade.tsv",import.meta.url));
 if(!arcadeSpec.ok) throw new Error("拱廊规格读取失败");
@@ -110,12 +121,56 @@ for(const row of (await arcadeSpec.text()).trim().split("\n").slice(1)) {
   for(const segment of arcadeMeshes.get(key)) add("arcade",segment,x,y,z);
   block("alcove",x,y+.48,z-.32,.91,.90,.10);
 }
+const towers=[],domes=[],smoke=[];
+let blade,actualSpan=0;
+if(enlarged) {
+  const factor=townScale/1000;
+  for(const item of bodies.slice(firstTown)) {
+    item[1]=deckTop+(item[1]-deckTop)*factor;
+    item[3]*=factor;
+  }
+  const height=towerHeight/(params.has("low-u2b")?2000:1000);
+  for(let i=0;i<(params.has("few-u2b-towers")?1:towerCount);i++) {
+    const [x,z,w]=[[2.6,-1.85,1.8],[-3.2,-1.1,1.65],[.15,1.85,1.45]][i];
+    const h=height*[1,.81,.65][i], top=deckTop+h;
+    const shaft=block(i===1?"orange":"white",x,deckTop+(h-.84)/2,z,w,h-.84,w);
+    for(let level=1;level<h-.9;level+=1.25) {
+      block("wood",x,deckTop+level,z,w+.19,.14,w+.19);
+      for(const side of [-1,1]) block("glass",x+side*w*.23,deckTop+level+.43,z+w*.51,.38,.64,.09);
+    }
+    const cap=block("red",x,top-.22,z,w+.33,.44,w+.33);
+    block("glass",x,top-.64,z,w*.76,.40,w*.76);
+    towers.push({shaft,cap});
+  }
+  actualSpan=wingSpan/(params.has("tiny-u2b-wing")?2000:1000);
+  const hub=[-3.2,deckTop+height*.71,.01];
+  block("wood",...hub,.88,.88,.45);
+  blade=[];
+  for(const angle of [.49,.49+Math.PI/2]) {
+    blade.push(block("white",hub[0],hub[1],hub[2]+.28,.26,actualSpan,.17,angle));
+    for(const side of [-1,1]) block("orange",hub[0]-side*Math.sin(angle)*actualSpan*.34,
+      hub[1]+side*Math.cos(angle)*actualSpan*.34,hub[2]+.39,.54,actualSpan*.28,.16,angle);
+  }
+  for(let i=0;i<(params.has("few-u2b-domes")?1:domeCount);i++) {
+    const [x,z]=[[-1.25,2.04],[4.25,1.42]][i];
+    block("alcove",x,9.32,z,1.94,1.45,1.94);
+    domes.push(add("glass",round,x,9.97,z,1.06));
+    block("gearGold",x,11.04,z,.16,.56,.16);
+  }
+  for(let i=0;i<(params.has("flat-u2b-smoke")?3:puffCount);i++) {
+    const layer=Math.floor(i/3), stack=i%3;
+    const x=[-4.9,.65,4.7][stack], y=[10.8,12.6,11.18][stack], z=[-3.5,-3.85,-2.65][stack];
+    if(!layer) block("wood",x,y-.45,z,.49,.9,.51);
+    smoke.push(add("smoke",round,x+layer*.39,y+layer*.43,z+layer*.06,.24+layer*.053));
+  }
+} else {
 for(let i=0;i<8;i++) block(i%2?"white":"red",3.62,6.58+i*.43,.02,1.02,.43,1.02);
 block("glass",3.62,10.12,.02,1.05,.46,1.05);
 block("red",3.62,10.49,.02,1.27,.29,1.27);
 block("wood",-3.35,9.65,2.13,.29,1.5,.36);
 for(const angle of [.51,.51+Math.PI/2]) block("white",-3.35,9.62,2.37,.24,2.7,.12,angle);
 bodies.push(add("joint",round,-3.35,9.62,2.47,.23));
+}
 add("grass",MESH_PLANE,0,-.035,0,130);
 if(walkProbe || params.has("animate")) {
   for(let x=-12;x<=60;x+=3) block("darkgrass",x,-.007,8,.11,.05,1.1);
@@ -171,7 +226,8 @@ if(params.has("render-u1") || dense) {
   if(!params.has("no-u1-grade")) scene.output={exposure:1.12};
   if(!params.has("no-u1-fog")) scene.fog={density:0,start:21,end:96,color:[.54,.70,.77]};
 }
-const view=(!mode || mode==="framing" || finish)?await closeCamera():null;
+const view=enlarged?{eye:[14,11.8,22],target:[0,9.4,0],fovy:2*Math.atan(.34)}:
+  (!mode || mode==="framing" || finish)?await closeCamera():null;
 const camera=new PerspectiveCamera(view?.fovy ?? 2*Math.atan(.625),.1,150);
 camera.setEye(...(view?.eye ?? [14.4,12,19.2]));
 camera.setTarget(...(view?.target ?? [0,5,0]));
@@ -263,5 +319,17 @@ document.querySelector("output").textContent=walkProbe ? walkPixels() :
 if(params.has("u2-probe")) {
   const out=document.querySelector("output");
   out.textContent=Object.values(townCounts).join(",")+"|"+out.textContent;
+}
+if(params.has("u2b-probe")) {
+  const present=item=>bindings.has(item);
+  const [width,,depth]=dimensions.get(deckItem), deckY=deckItem[1]+dimensions.get(deckItem)[1]/2;
+  const top=Math.max(...towers.filter(({shaft,cap})=>present(shaft)&&present(cap))
+    .map(({cap})=>cap[1]+dimensions.get(cap)[1]/2));
+  const bounds=screenBox(camera,[-width/2,deckY,-depth/2],[width/2,top,depth/2]);
+  document.querySelector("output").textContent=[
+    Math.round(1000*(top-deckY)),blade.every(present)?Math.round(1000*dimensions.get(blade[0])[1]):0,
+    towers.filter(tower=>present(tower.cap)).length,domes.filter(present).length,smoke.filter(present).length,
+    ...bounds
+  ].join(",");
 }
 </script>

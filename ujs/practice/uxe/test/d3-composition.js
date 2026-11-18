@@ -52,12 +52,13 @@ function blockMesh(addMesh,w,h,d) {
   return addMesh({positions,vCount:positions.length/3});
 }
 
-export function bridgeLines(deck, addMesh, instance, rails) {
+export function bridgeLines(deck, addMesh, instance, rails, span=24, depthAt=()=>0) {
   if (rails) {
     const post=blockMesh(addMesh,.13,.67,.14);
-    const bar=blockMesh(addMesh,24,.078,.10);
+    const positions=BOX_MESH.map((v,i)=>i%3===2 ? v*.10+depthAt(BOX_MESH[i-2]*span) : v*[span,.078][i%3]);
+    const bar=addMesh({positions,vCount:positions.length/3});
     for(const z of [-.35,2.34]) {
-      for(let x=-12;x<=12;x+=1.5) instance("iron",post,x,deck+.335,z,1);
+      for(let x=-span/2;x<=span/2;x+=1.5) instance("iron",post,x,deck+.335,z+depthAt(x),1);
       instance("iron",bar,0,deck+.6,z,1);
       instance("iron",bar,0,deck+.11,z,1);
     }
@@ -70,7 +71,7 @@ export function bridgeLines(deck, addMesh, instance, rails) {
       const x0=anchor+Math.sin(a*8+index)*.16;
       const x1=anchor+Math.sin(b*8+index)*.16;
       const y0=deck-.15-length*a,y1=deck-.15-length*b;
-      const w=.026+(.055*(1-b)), z=2.53+index*.002;
+      const w=.026+(.055*(1-b)), z=2.53+index*.002+depthAt(anchor);
       positions.push(x0-w,y0,z,x0+w,y0,z,x1+w,y1,z,
         x0-w,y0,z,x1+w,y1,z,x1-w,y1,z);
       if(step%2===0) {
@@ -83,7 +84,7 @@ export function bridgeLines(deck, addMesh, instance, rails) {
 }
 
 export function buildClifftop(layout, deck, addMesh, instance) {
-  const {houseX:x,width,height,depth} = layout;
+  const {houseX:x,width,height,depth,upperFloor} = layout;
   const z=-1, front=z+depth/2;
   const block=(w,h,d)=>blockMesh(addMesh,w,h,d);
   instance("abutment",block(width,deck+2,depth+1.2),x,(deck-2)/2,z,1);
@@ -106,12 +107,20 @@ export function buildClifftop(layout, deck, addMesh, instance) {
   const beam=block(.16,height,.13);
   for (const edge of [-.48,.48]) instance("timber",beam,x+edge*width,deck+height/2,front+.045,1);
   const sill=block(width+.55,.23,1.15);
-  instance("timber",sill,x,deck+.75,front+.46,1);
+  const balcony=deck+(upperFloor?height*.48:.75);
+  instance("timber",sill,x,balcony,front+.46,1);
   const baluster=block(.105,.83,.12);
-  for (let i=-6;i<=6;i++) instance("timber",baluster,x+i*width/13,deck+1.23,front+1,1);
-  instance("timber",block(width,.11,.14),x,deck+1.68,front+1,1);
+  for (let i=-6;i<=6;i++) instance("timber",baluster,x+i*width/13,balcony+.48,front+1,1);
+  instance("timber",block(width,.11,.14),x,balcony+.93,front+1,1);
   const window=block(.66,.96,.12);
   for (const offset of [-.31,.24]) instance("window",window,x+offset*width,deck+height*.49,front+.065,1);
+  if(upperFloor) {
+    instance("timber",block(width,.24,.15),x,balcony,front+.06,1);
+    for(const offset of [-.32,0,.32]) for(const floor of [.25,.72]) {
+      instance("timber",block(1.14,1.83,.19),x+offset*width,deck+height*floor,front+.08,1);
+      instance("window",block(.92,1.60,.16),x+offset*width,deck+height*floor,front+.2,1);
+    }
+  }
   instance("abutment",block(.65,2.2,.7),x+width*.28,deck+height+1.2,z-.48,1);
   for (let i=0;i<14;i++) {
     const widthScale=.68+.11*(i%5);
@@ -121,4 +130,5 @@ export function buildClifftop(layout, deck, addMesh, instance) {
   for(let i=0;i<7;i++) {
     instance("ridge",MESH_OCTA,-36+i*14,-12+3*Math.sin(i*2.5),-46-4*(i%2),16+i%3*2,.4*i);
   }
+  return [[x-width/2,deck,z-depth/2],[x+width/2,deck+height,z+depth/2]];
 }

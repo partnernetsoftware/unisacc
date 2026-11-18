@@ -17,9 +17,11 @@ import { BOX_MESH, MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } fro
 import { archMeshes, loadBays } from "./d3-arch.js";
 import { canopyPatches, crownLobes, cutoutLeafMesh, foliagePatchMesh, grassMesh, leafMesh } from "./d3-foliage.js";
 import { bridgeLines, buildClifftop, loadComposition, loadPalette, stretchBridge, tintSky } from "./d3-composition.js";
+import { loadScaleStudy, screenBox } from "./uxe-u2b.js";
 
 const params = new URLSearchParams(location.search);
-const paper=params.has("paper-u3");
+const enlarged=params.has("scale-u2b");
+const paper=params.has("paper-u3") || enlarged;
 const dense=params.has("dense-u2") || paper;
 const play=params.get("walk")==="1" || params.has("walk-check");
 const style=play || dense?"study":params.get("style");
@@ -62,20 +64,45 @@ function addMesh(mesh) {
   extraMeshes.push(mesh);
   return id;
 }
-const bays=await loadBays();
+const template=await loadBays();
+const [archCount,bayWidth,depthShift,houseX,houseWidth,houseHeight,houseDepth]=enlarged?await loadScaleStudy("d3"):[];
+const recession=x=>enlarged?depthShift*x/1000:0;
+const bays=enlarged?Array.from({length:params.has("short-u2b")?3:archCount},(_,i)=>{
+  const bay=template[0].slice();
+  bay[0]=(i-(archCount-1)/2)*bayWidth/1000;
+  bay[5]=bayWidth/2000;
+  return bay;
+}):template;
+const arches=[];
 const taller=layout && mode!=="short-composition";
 for(const bay of bays) {
   const first=allMeshes().length+extraMeshes.length;
   const meshes=archMeshes(bay,mode);
   extraMeshes.push(...(taller?meshes.map(mesh=>stretchBridge(mesh,layout.scale,bay[7])):meshes));
+  if(enlarged) for(const mesh of meshes) for(let i=0;i<mesh.positions.length;i+=3) {
+    mesh.positions[i+2]+=recession(mesh.positions[i]);
+    mesh.normals[i]-=depthShift/1000*mesh.normals[i+2];
+  }
+  arches.push(first);
   instance("stone",first,0,0,0,1);
   instance("barrel",first+1,0,0,0,1);
 }
+let houseBounds;
 if (taller) {
   const [, , , , , , deck,bottom] = bays[0];
   const bridgeTop=bottom+(deck-bottom)*layout.scale;
-  buildClifftop(layout,bridgeTop,addMesh,instance);
-  bridgeLines(bridgeTop,addMesh,instance,mode!=="no-rails");
+  if(enlarged) {
+    const x=houseX/1000, width=houseWidth/(params.has("small-u2b")?2200:1000);
+    const height=houseHeight/1000, depth=houseDepth/1000, shift=recession(-20);
+    houseBounds=buildClifftop({houseX:x,width,height,depth,upperFloor:true},bridgeTop,addMesh,
+      (material,id,px,y,z,...rest)=>instance(material,id,px,y,z+shift,...rest))
+      .map(([px,y,z])=>[px,y,z+shift]);
+    bridgeLines(bridgeTop,addMesh,instance,true,archCount*bayWidth/1000,recession);
+    for(let i=0;i<12;i++) instance("ridge",MESH_OCTA,-55+i*9,-4+i%3,-43-i%2*13,9+i%4*2,i*.42);
+  } else {
+    buildClifftop(layout,bridgeTop,addMesh,instance);
+    bridgeLines(bridgeTop,addMesh,instance,mode!=="no-rails");
+  }
   if(play) {
     const positions=BOX_MESH.map((v,i)=>v*[5.4,.40,2.7][i%3]);
     const landing=addMesh({positions,vCount:positions.length/3});
@@ -202,6 +229,10 @@ if(layout) {
   camera.setTarget(x-60/169,y+5/13,z-144/169);
   scene.outlineWidth = 1;
 }
+if(enlarged) {
+  camera.setEye(15,4,29);
+  camera.setTarget(3,9,-5);
+}
 const canvas=document.querySelector("canvas");
 const textures = [];
 async function loadTexture(file,id,w,h,filter=0) {
@@ -272,8 +303,10 @@ if(play) {
     const hi=edge<0?route.length-1:edge;
     const a=route[hi-1],b=route[hi],t=(distance-a[0])/(b[0]-a[0]);
     const [x,y,z,dx,dy,dz]=a.slice(1).map((v,i)=>(v+(b[i+1]-v)*t)/1000);
-    camera.setEye(x,y,z);
-    camera.setTarget(x+dx*Math.cos(yaw)-dz*Math.sin(yaw),y+dy+pitch,z+dx*Math.sin(yaw)+dz*Math.cos(yaw));
+    const curve=cap((distance-7000)/8000,0,1);
+    const pz=z+curve*recession(x), heading=dz+curve*recession(dx);
+    camera.setEye(x,y,pz);
+    camera.setTarget(x+dx*Math.cos(yaw)-heading*Math.sin(yaw),y+dy+pitch,pz+dx*Math.sin(yaw)+heading*Math.cos(yaw));
     let grass=0,leaves=0;
     for(const group of wind) {
       const {cloud,items,leaves:isLeaf}=group;
@@ -380,6 +413,8 @@ const counts=[...groups.values()].reduce(([leaves,grass],group)=>[
   leaves+(group.material.startsWith("leaf")?group.items.length:0),
   grass+(group.material.startsWith("meadow")?group.items.length:0)
 ],[0,0]);
-result.textContent=(params.has("u2-probe")?counts.join(",")+"|":"")+samples.join(";");
+result.textContent=params.has("u2b-probe")?
+  [arches.filter(id=>scene.clouds.has("stone-"+id)).length,...screenBox(camera,...houseBounds)].join(","):
+  (params.has("u2-probe")?counts.join(",")+"|":"")+samples.join(";");
 }
 </script>

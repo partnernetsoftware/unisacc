@@ -184,6 +184,116 @@ static int check_u1(const char *mutation) {
     return failed!=0;
 }
 
+static double study_root(double n) {
+    double x=n;
+    int i;
+    for(i=0;i<20;i++) x=(x+n/x)*.5;
+    return x;
+}
+
+static void study_box(const double *eye,const double *target,double focal,
+    const double *lo,const double *hi,int *out) {
+    double x=target[0]-eye[0],y=target[1]-eye[1],z=target[2]-eye[2];
+    double h=study_root(x*x+z*z),len=study_root(h*h+y*y);
+    double min[2]={1280,720},max[2]={0,0};
+    int i,j;
+    for(i=0;i<8;i++) {
+        double dx=((i&1)?hi[0]:lo[0])-eye[0];
+        double dy=((i&2)?hi[1]:lo[1])-eye[1];
+        double dz=((i&4)?hi[2]:lo[2])-eye[2];
+        double along=(dx*x+dz*z)/h, depth=(along*h+dy*y)/len;
+        double xy[2]={640+focal*(-dx*z+dz*x)/(h*depth),
+            360-focal*(dy*h-along*y)/(len*depth)};
+        for(j=0;j<2;j++) {
+            double viewport=j?720:1280;
+            double v=xy[j]<0?0:xy[j]>viewport?viewport:xy[j];
+            if(v<min[j]) min[j]=v;
+            if(v>max[j]) max[j]=v;
+        }
+    }
+    for(j=0;j<2;j++) out[j]=(int)((max[j]-min[j])*1000/(j?720:1280)+.5);
+}
+
+static int check_u2b(const char *mutation) {
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0,*data,*row;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    const double eye3[]={15,4,29},target3[]={3,9,-5},eye4[]={14,11.8,22},target4[]={0,9.4,0};
+    int arches,bay,recede,x,w,h,d,scale,deck,tower,wing,towers,domes,puffs;
+    int expected3[3],expected4[7],scene,failed=0;
+    size_t size=0;
+    data=cx_read("ujs/practice/uxe/test/uxe-u2b.tsv",&size);
+    row=data?strchr(data,'\n'):0;
+    if(!row || sscanf(row+1,"d3 %d %d %d %d %d %d %d d4 %d %d %d %d %d %d %d",
+        &arches,&bay,&recede,&x,&w,&h,&d,&scale,&deck,&tower,&wing,&towers,&domes,&puffs)!=14) {
+        free(data); return 1;
+    }
+    free(data);
+    if(arches<5 || bay<=0 || recede<=0 || w<=0 || h<=0 || d<=0 || scale<1200 ||
+        deck<=0 || tower*5<deck*4 || wing*2<tower || towers<3 || domes<2 || puffs<18) return 1;
+    {
+        int spring,radius,front,back,half,deck3,base;
+        double rise,bottom,shift=(-1.0-20*recede/1000.0),lo[3],hi[3];
+        data=cx_read("ujs/practice/uxe/test/d3-arch.tsv",&size);
+        row=data?strchr(data,'\n'):0;
+        if(!row || sscanf(row+1,"%*d %d %d %d %d %d %d %d",
+            &spring,&radius,&front,&back,&half,&deck3,&base)!=7) { free(data); return 2; }
+        free(data);
+        data=cx_read("ujs/practice/uxe/test/d3-composition.tsv",&size);
+        row=data?strchr(data,'\n'):0;
+        if(!row || sscanf(row+1,"%*d %*d %*d %d",&scale)!=1) { free(data); return 2; }
+        free(data);
+        rise=(deck3-base)*scale/1000000.0;
+        bottom=base/1000.0+rise;
+        lo[0]=(x-w*.5)/1000; lo[1]=bottom; lo[2]=shift-d*.0005;
+        hi[0]=(x+w*.5)/1000; hi[1]=bottom+h*.001; hi[2]=shift+d*.0005;
+        expected3[0]=arches;
+        study_box(eye3,target3,640,lo,hi,expected3+1);
+    }
+    {
+        double lo[]={-deck*.0005,6.37,-3.35},hi[]={deck*.0005,6.37+tower*.001,3.35};
+        expected4[0]=tower; expected4[1]=wing; expected4[2]=towers;
+        expected4[3]=domes; expected4[4]=puffs;
+        study_box(eye4,target4,360/.34,lo,hi,expected4+5);
+    }
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    for(scene=3;scene<=4;scene++) {
+        int got[7]={0},count=scene==3?3:7,used=0,i,rc,bad=0;
+        const int *expected=scene==3?expected3:expected4;
+        const char *p;
+        tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/%s.html?scale-u2b&u2b-probe&%s",
+            cwd,scene==3?"d3-bridge":"d4-skeleton",mutation);
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-u2b-%d-%d",(int)getpid(),scene);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        rc=cx_runv_timeout(av,15,&doc,&size);
+        chd_wipe(profile);
+        p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+        if(!rc && p) {
+            p+=strlen("<output id=\"pixels\">");
+            for(i=0;i<count;i++) {
+                char delimiter=i+1<count?',':'<';
+                if(sscanf(p,"%d%n",got+i,&used)!=1 || p[used]!=delimiter) { bad=1; break; }
+                p+=used+1;
+                if(got[i]!=expected[i]) bad=1;
+            }
+        } else bad=1;
+        free(doc); doc=0;
+        if(scene==3) {
+            bad|=got[0]<5 || got[1]<150;
+            printf("D3 arches=%d house=%d x %d per mille expected=%d,%d,%d failed=%d\n",
+                got[0],got[1],got[2],expected[0],expected[1],expected[2],bad);
+        } else {
+            bad|=got[0]*5<deck*4 || got[1]*2<got[0] || got[2]<3 || got[3]<2 ||
+                got[4]<18 || got[5]<365 || got[6]<590;
+            printf("D4 tower=%d deck=%d wings=%d towers=%d domes=%d smoke=%d box=%d x %d per mille expected box=%d,%d failed=%d\n",
+                got[0],deck,got[1],got[2],got[3],got[4],got[5],got[6],expected[5],expected[6],bad);
+        }
+        failed+=bad;
+    }
+    return failed?1:0;
+}
+
 static int check_u2(const char *mutation) {
     char cwd[1024],url[5000],profile[128],option[160],*out=0,*spec;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
@@ -394,6 +504,7 @@ static int compare_paper(char **paths) {
 }
 
 int main(int argc,char **argv) {
+    if(argc>=2 && argc<=3 && !strcmp(argv[1],"scale-u2b")) return check_u2b(argc==3?argv[2]:"");
     if(argc==6 && !strcmp(argv[1],"paper-u3")) return compare_paper(argv+2);
     if(argc==2 && !strcmp(argv[1],"dense-u2")) return check_u2("");
     if(argc==2 && (!strcmp(argv[1],"thin-u2-town") || !strcmp(argv[1],"plain-u2-bricks") ||

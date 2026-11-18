@@ -182,3 +182,7 @@ D3 漫游 `773b535` 已在 `ujs` 候选，入口为 `test/d3-bridge.html?walk=1`
 U3 用上节的 Chrome 设置分别拍 D3 和 D4，同一机位用 `?paper-u3=1&no-u3-paper` 拍关闭版。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- paper-u3 D3关闭.png D3开启.png D4关闭.png D4开启.png`。检查将画布与两张裁掉白边的参考帧统一到 960 x 540，按 60 x 60 像素分块，共 144 块每场。逐块输出灰度方差、截顶的相邻亮度差及开关平均变化。用关闭截图替换开启截图时应退出 1。
 
 U3 正例两场各有 144 块达到开关差值区间。与参考帧的相邻亮度差指标相比，D3 距离从 20596 增至 21137，D4 从 47971 降至 27786。方差距离分别从 146482 到 146911、155277 到 154553。参考帧构图不同，指标只描述同位置的局部统计。并排图保存在 `/tmp/cdx2-u3-d3-comparison.png` 和 `/tmp/cdx2-u3-d4-comparison.png`。
+
+U2b 的构图入口为两张测试页的 `?scale-u2b`。D3 有五座递远石拱、带二层阳台的桥头房和桥下山层，房屋墙体包围盒占视口宽度 18.4%。D4 最高塔 9.7，甲板长 11，风车叶展 5.7，同用场景单位。城镇塔楼三座、圆顶两个、按三路九层布置烟团 27 个，甲板到塔顶的包围盒占视口 41.7% 宽、70.5% 高。并排图左侧为参考帧，右侧为候选，路径为 `/tmp/cdx2-u2b-d3-comparison.png` 和 `/tmp/cdx2-u2b-d4-comparison.png`。
+
+经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- scale-u2b`。检查从 TSV 独立投影包围盒以及计算比例和数量，随后读取 Chrome 中的布局终值。追加单个带引号的参数 `short-u2b&small-u2b&low-u2b&tiny-u2b-wing&few-u2b-towers&few-u2b-domes&flat-u2b-smoke` 可复现两场均红、退出 1。
