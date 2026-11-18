@@ -33,6 +33,24 @@ static void putf(const char *dir, const char *name, const char *txt) {
     }
 }
 
+static int read_prod_rel(char *dst, long cap) {
+    unsigned char *b = 0; int64_t n = 0; long at = 0;
+    if (sy_read_file("tools/devsvc-repo.tsv", &b, &n, 65536) != 0 || !b) return -1;
+    while (at < (long)n) {
+        long le = at;
+        while (le < (long)n && b[le] != '\n' && b[le] != '\r') le++;
+        if (le - at > 8 && memcmp(b + at, "product\t", 8) == 0) {
+            long s = at + 8, e = s;
+            while (e < le && b[e] != '\t') e++;
+            if (e > s && e - s < cap) { mm_copy(dst, (size_t)cap, b + s, (size_t)(e - s)); dst[e - s] = 0; mm_free(b); return 0; }
+        }
+        at = le;
+        while (at < (long)n && (b[at] == '\n' || b[at] == '\r')) at++;
+    }
+    mm_free(b);
+    return -1;
+}
+
 int main(void) {
     char wd[512], fx[600], svc[600], trk[600], cl[600], bt[600], lk[600], req[4096], rhex[65], stdir[700];
     char *rb = 0;
@@ -138,6 +156,154 @@ int main(void) {
     if (cx_fmt(req, sizeof req, "rel-invalidate\t%s", fx)) return 2;
     chk(rm_handle(req, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trelinvalidated\tn=1"), "rel-invalidate");
     mm_free(rb); rb = 0;
+
+    /* 6. Default input (.devsvc/rel/tracked.txt + .fp) staleness rebuild + new tracked .cx into graph */
+    {
+        char gfx[700], gtdir[720], tr_p[800], fp_p[800], n1[800], n2[800], cmd[1600];
+        char *creq = 0; long creql = 0; int ctm = 0;
+        char *a_wu[] = {"who-uses", "c.cx"};
+        if (cx_fmt(gfx, sizeof gfx, "%s/gitfx", wd) == 0 &&
+            cx_fmt(gtdir, sizeof gtdir, "%s/.devsvc/rel", gfx) == 0 &&
+            cx_fmt(tr_p, sizeof tr_p, "%s/tracked.txt", gtdir) == 0 &&
+            cx_fmt(fp_p, sizeof fp_p, "%s/tracked.txt.fp", gtdir) == 0 &&
+            sy_mkdir_all(gtdir, 0755) == 0) {
+            putf(gfx, "a.cx", "#include \"c.cx\"\nint a(void) { return 0; }\n");
+            putf(gfx, "c.cx", "int c(void) { return 0; }\n");
+            if (cx_fmt(cmd, sizeof cmd,
+                       "cd '%s' && git init -q && git add a.cx c.cx && git -c user.name=rm -c user.email=rm@example.invalid commit -q -m init",
+                       gfx) == 0) {
+                char *gv[] = {"sh", "-c", cmd, 0}; size_t gn = 0; char *go = 0;
+                (void)cx_runv_timeout(gv, 15, &go, &gn); if (go) mm_free(go);
+            }
+            /* Seed stale legacy tracked.txt without .fp (simulating stale snapshot) */
+            putf(gtdir, "tracked.txt", "100644 bb 0\tz.cx\n");
+            chk(sy_exists(fp_p) == 0, "default-legacy-no-fp");
+            chk(rm_cli_prepare(gfx, "prod", 2, a_wu, &creq, &creql, &ctm) == 0 && creq &&
+                sy_exists(fp_p) == 1 &&
+                rm_handle(creq, svc, &rb, &rbl) == 0 && rb &&
+                has(rb, rbl, "USES\ta.cx\n") && has(rb, rbl, "users=1"), "default-stale-rebuilt-into-graph");
+            mm_free(creq); creq = 0; mm_free(rb); rb = 0;
+
+            /* Stage a new .cx file without editing old files -> ls-files fingerprint changes -> rebuilt -> new file enters graph */
+            putf(gfx, "new_staged.cx", "#include \"c.cx\"\nint ns(void) { return 0; }\n");
+            if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add new_staged.cx", gfx) == 0) {
+                char *gv[] = {"sh", "-c", cmd, 0}; size_t gn = 0; char *go = 0;
+                (void)cx_runv_timeout(gv, 15, &go, &gn); if (go) mm_free(go);
+            }
+            chk(rm_cli_prepare(gfx, "prod", 2, a_wu, &creq, &creql, &ctm) == 0 && creq &&
+                rm_handle(creq, svc, &rb, &rbl) == 0 && rb &&
+                has(rb, rbl, "USES\tnew_staged.cx\n") && has(rb, rbl, "users=2"), "default-staged-new-file-enters-graph");
+            mm_free(creq); creq = 0; mm_free(rb); rb = 0;
+
+            /* Commit another new .cx file -> HEAD fingerprint changes -> rebuilt -> enters graph */
+            putf(gfx, "new_commit.cx", "#include \"c.cx\"\nint nc(void) { return 0; }\n");
+            if (cx_fmt(cmd, sizeof cmd,
+                       "cd '%s' && git add new_commit.cx && git -c user.name=rm -c user.email=rm@example.invalid commit -q -m add2",
+                       gfx) == 0) {
+                char *gv[] = {"sh", "-c", cmd, 0}; size_t gn = 0; char *go = 0;
+                (void)cx_runv_timeout(gv, 15, &go, &gn); if (go) mm_free(go);
+            }
+            chk(rm_cli_prepare(gfx, "prod", 2, a_wu, &creq, &creql, &ctm) == 0 && creq &&
+                rm_handle(creq, svc, &rb, &rbl) == 0 && rb &&
+                has(rb, rbl, "USES\tnew_commit.cx\n") && has(rb, rbl, "users=3"), "default-commit-new-file-enters-graph");
+            mm_free(creq); creq = 0; mm_free(rb); rb = 0;
+
+            /* Local rel.cx ensure_default path (UNISACC_REL_NOSVC=1) also rebuilds stale snapshot & tracks commits */
+            {
+                char dm2[720], dm2rel[740], ffp2[760], prod[128], rcom[1200], rtool[1200], cwd[1024];
+                if (sy_cwd(cwd, (int)sizeof cwd) == 0 && read_prod_rel(prod, (long)sizeof prod) == 0 &&
+                    cx_fmt(rcom, sizeof rcom, "%s/%s", cwd, prod) == 0 &&
+                    cx_fmt(rtool, sizeof rtool, "%s/tools/rel.cx", cwd) == 0 &&
+                    cx_fmt(dm2, sizeof dm2, "%s/dm2", wd) == 0 &&
+                    cx_fmt(dm2rel, sizeof dm2rel, "%s/rel", dm2) == 0 &&
+                    cx_fmt(ffp2, sizeof ffp2, "%s/tracked.txt.fp", dm2rel) == 0 &&
+                    sy_mkdir_all(dm2rel, 0755) == 0) {
+                    putf(dm2rel, "tracked.txt", "100644 bb 0\tstale.cx\n");
+                    sy_setenv("UNISACC_DEVMETA_DIR", dm2, 1);
+                    sy_setenv("UNISACC_REL_NOSVC", "1", 1);
+                    {
+                        char *av[] = {"sh", rcom, rtool, "--", "who-uses", "c.cx", "--root", gfx, 0};
+                        size_t rn = 0; char *ro = 0;
+                        int rrc = cx_runv_timeout(av, 25, &ro, &rn);
+                        chk(rrc == 0 && ro && has(ro, (long)rn, "USES\ta.cx\n") &&
+                            has(ro, (long)rn, "users=3") && sy_exists(ffp2) == 1,
+                            "rel-cli-default-stale-rebuilt");
+                        if (ro) mm_free(ro);
+                    }
+                    putf(gfx, "new_cli.cx", "#include \"c.cx\"\nint ncli(void) { return 0; }\n");
+                    if (cx_fmt(cmd, sizeof cmd,
+                               "cd '%s' && git add new_cli.cx && git -c user.name=rm -c user.email=rm@example.invalid commit -q -m add3",
+                               gfx) == 0) {
+                        char *gv[] = {"sh", "-c", cmd, 0}; size_t gn = 0; char *go = 0;
+                        (void)cx_runv_timeout(gv, 15, &go, &gn); if (go) mm_free(go);
+                    }
+                    {
+                        char *av[] = {"sh", rcom, rtool, "--", "who-uses", "c.cx", "--root", gfx, 0};
+                        size_t rn = 0; char *ro = 0;
+                        int rrc = cx_runv_timeout(av, 25, &ro, &rn);
+                        chk(rrc == 0 && ro && has(ro, (long)rn, "USES\tnew_cli.cx\n") &&
+                            has(ro, (long)rn, "users=4"), "rel-cli-default-new-commit-included");
+                        if (ro) mm_free(ro);
+                    }
+                    sy_unsetenv("UNISACC_REL_NOSVC");
+                    sy_unsetenv("UNISACC_DEVMETA_DIR");
+                } else chk(0, "rel-cli-default-setup");
+            }
+        } else {
+            chk(0, "default-gitfx-setup");
+        }
+        (void)tr_p; (void)n1; (void)n2;
+    }
+
+    /* 7. Periodic full-scan cross-check catches real shadowing divergence, refuses with ERR rc=2, evicts & recovers */
+    {
+        char sfx[700], sub[720], subm[740], inc[720], tr_sh[720], sreq[1600];
+        if (cx_fmt(sfx, sizeof sfx, "%s/shfx", wd) == 0 &&
+            cx_fmt(sub, sizeof sub, "%s/sub", sfx) == 0 &&
+            cx_fmt(subm, sizeof subm, "%s/m", sub) == 0 &&
+            cx_fmt(inc, sizeof inc, "%s/inc", sfx) == 0 &&
+            cx_fmt(tr_sh, sizeof tr_sh, "%s/tracked_sh.txt", wd) == 0 &&
+            sy_mkdir_all(sub, 0755) == 0 && sy_mkdir_all(inc, 0755) == 0) {
+            putf(sfx, "cxroot.tsv", "CXROOT1\nR\tm\tinc\n");
+            putf(sub, "a.cx", "#pragma unisa use m.modx\nint sa(void) { return 0; }\n");
+            putf(inc, "modx.cx", "#include \"target.cx\"\nint sm(void) { return 0; }\n");
+            putf(inc, "target.cx", "int st(void) { return 0; }\n");
+            if (sy_write_atomic(tr_sh,
+                                "100644 aa 0\tsub/a.cx\n100644 aa 0\tinc/modx.cx\n100644 aa 0\tinc/target.cx\n",
+                                77, 0644) == 0 &&
+                cx_fmt(sreq, sizeof sreq, "rel-who-uses\t%s\t%s\tinc/target.cx\t0", sfx, tr_sh) == 0) {
+                chk(rm_handle(sreq, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "USES\tsub/a.cx\n") &&
+                    has(rb, rbl, "USES\tinc/modx.cx\n") && has(rb, rbl, "users=2"), "periodic-shadow-cold-build");
+                mm_free(rb); rb = 0;
+
+                /* Create shadowing sub/m/modx.cx WITHOUT modifying tracked files, a.cx, cxroot.tsv, or tracked_sh.txt */
+                if (sy_mkdir_all(subm, 0755) == 0) {
+                    putf(subm, "modx.cx", "int shadowed(void) { return 1; }\n");
+                    sy_setenv("UNISACC_REL_VERIFY_EVERY", "2", 1);
+                    {
+                        int refused = 0, tries;
+                        for (tries = 0; tries < 2; tries++) {
+                            if (rm_handle(sreq, svc, &rb, &rbl) == 0 && rb &&
+                                has(rb, rbl, "ERR\trel\trc=2\t") &&
+                                has(rb, rbl, "periodic full-scan cross-check mismatch")) {
+                                refused = 1;
+                                mm_free(rb); rb = 0;
+                                break;
+                            }
+                            if (rb) { mm_free(rb); rb = 0; }
+                        }
+                        chk(refused, "periodic-crosscheck-refuses-mismatch");
+                    }
+                    sy_unsetenv("UNISACC_REL_VERIFY_EVERY");
+                    /* Evicted slot rebuilds cleanly on next call with true users=1 */
+                    chk(rm_handle(sreq, svc, &rb, &rbl) == 0 && rb && has(rb, rbl, "OK\trel\trc=0\thit=0\t") &&
+                        has(rb, rbl, "USES\tinc/modx.cx\n") && !has(rb, rbl, "USES\tsub/a.cx\n") && has(rb, rbl, "users=1"),
+                        "periodic-crosscheck-evicted-then-recovers");
+                    mm_free(rb); rb = 0;
+                } else chk(0, "periodic-shadow-mkdir");
+            }
+        } else chk(0, "periodic-shadow-setup");
+    }
 
     {
         char *rv[] = {"rm", "-rf", wd, 0}; size_t rn = 0; char *ro = 0;

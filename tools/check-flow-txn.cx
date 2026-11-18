@@ -152,6 +152,18 @@ int main(void) {
         ck(r == 0 && sum.txn == 1 && holds("s.txt", "ccc\n") && o && tx_eqz(o, "ccc\n") && has(rep, "FLOW_TXN\tcommitted\tpaths=1"), "staged-view");
         if (o) mm_free(o); }
 
+    /* exec-staged-view: exec node after file.edit sees staged content via unified view */
+    r = run("exview", "txn 1\ne1\tfile.edit\t-\tpath=s.txt;old=ccc;new=ddd\nex\texec\te1\ta0=cat;a1=s.txt\ne2\tfile.edit\tex\tpath=s.txt;old=ddd;new=eee\n");
+    {   char *o = slurp(pj(pj(pj(wd, "exview"), "out"), "ex.out"));
+        ck(r == 0 && sum.txn == 1 && holds("s.txt", "eee\n") && o && tx_eqz(o, "ddd\n") && has(rep, "FLOW_TXN\tcommitted\tpaths=1"), "exec-staged-view");
+        if (o) mm_free(o); }
+
+    /* exec-staged-abort: exec sees staged write, subsequent failure aborts without touching real disk */
+    r = run("exabort", "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=staged_only%0A\nex1\texec\tw1\ta0=cat;a1=p1.txt\nex2\texec\tex1\ta0=false\n");
+    {   char *o = slurp(pj(pj(pj(wd, "exabort"), "out"), "ex1.out"));
+        ck(r == 1 && sum.txn == 2 && holds("p1.txt", "old1\n") && o && tx_eqz(o, "staged_only\n") && st[0] == FL_FAIL && nrc[0] == 125, "exec-staged-abort");
+        if (o) mm_free(o); }
+
     /* node-fail-abort */
     r = run("nodef", "txn 1\nw1\tfile.write\t-\tpath=p1.txt;content=new1%0A\nx\texec\tw1\ta0=false\n");
     ck(r == 1 && sum.txn == 2 && holds("p1.txt", "old1\n") && has(rep, "TXN_ABORT\treason=ENODE\tnode=x") && has(rep, "FLOW_TXN\taborted\tpaths=0") && st[0] == FL_FAIL && nrc[0] == 125, "node-fail-abort");

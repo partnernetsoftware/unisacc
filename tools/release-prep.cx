@@ -100,7 +100,9 @@ static void read_layout(void) {
     }
     if (tx_len(commit, sizeof commit) != 40 || !is_hex(commit, 40)) die("COMMIT", "frozen commit must be 40 hex");
     { np_result r = {0}; char obj[64]; char *v[] = {"git", "cat-file", "-e", obj, 0}; int rc; cx_fmt(obj, sizeof obj, "%s^{commit}", commit);
-      rc = run(v, here, 30, &r); np_free(&r); if (rc) die("COMMIT", "frozen commit is not a commit object in this repository"); }
+      rc = run(v, here, 30, &r); np_free(&r);
+      if (rc) { /* a layout without the history of that commit (git archive plus one private commit) */
+          char d[200]; cx_fmt(d, sizeof d, "commit=%s (not a commit object in this repository: no history for it)", commit); die("NO_HISTORY", d); } }
 }
 
 /* ---- strict evidence ---- */
@@ -193,8 +195,15 @@ static void draft_ratchets(void) {
       sy_unlink(tar);
       /* tools/ratchets.cx inventories through git ls-files: give the archive tree an index */
       { char *v[] = {"git", "init", "-q", 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git init"); }
-      { char alt[4500], objs[4400]; path2(alt, sizeof alt, tree, ".git/objects/info/alternates");
-        if (cx_fmt(objs, sizeof objs, "%s/.git/objects\n", here) || cx_write(alt, objs, (size_t)tx_len(objs, sizeof objs))) die("RATCHETS", "alternates"); }
+      { char alt[4500], objs[4400], cdir[4096]; np_result g = {0}; long k;
+        /* the object store of HERE: in a linked worktree .git is a file, so ask git for the common dir */
+        char *gv[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
+        if (run(gv, here, 30, &g) || g.outn < 1) { np_free(&g); die("RATCHETS", "git common dir"); }
+        for (k = (long)g.outn; k > 0 && (g.out[k - 1] == '\n' || g.out[k - 1] == '\r'); k--) {}
+        if (k < 1 || k >= (long)sizeof cdir) { np_free(&g); die("RATCHETS", "git common dir"); }
+        mm_copy(cdir, sizeof cdir, g.out, k); cdir[k] = 0; np_free(&g);
+        path2(alt, sizeof alt, tree, ".git/objects/info/alternates");
+        if (cx_fmt(objs, sizeof objs, "%s/objects\n", cdir) || cx_write(alt, objs, (size_t)tx_len(objs, sizeof objs))) die("RATCHETS", "alternates"); }
       { char *v[] = {"git", "read-tree", commit, 0}; rc = run(v, tree, 30, &r); np_free(&r); if (rc) die("RATCHETS", "git read-tree"); }
       path2(self, sizeof self, here, "unisacc.com"); path2(link, sizeof link, tree, "unisacc.com");
       if (sy_exists(link) != 1 && sy_symlink(self, link)) die("RATCHETS", "unisacc.com link");

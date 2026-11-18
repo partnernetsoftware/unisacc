@@ -1,8 +1,11 @@
-/* tools/dv/nativestat.cx -- O(1) stat + racy-2s verification for devsvc native binary cache.
+/* tools/dv/nativestat.cx -- O(1) stat + racy-2s + periodic content SHA verification for devsvc native cache.
  * Keeps content-addressed safety: a cached stat memo is accepted ONLY when every input file
  * (product realpath, optional cxroot.tsv, -cx-plan closure sources, and built image + .sha)
- * matches (size, dev, ino, mtime, ctime) and was recorded at rec >= max(mtime, ctime) + 2s. */
+ * matches (size, dev, ino, mtime, ctime) and was recorded at rec >= max(mtime, ctime) + 2s,
+ * plus periodic SHA verification (every 16 hits or UNISACC_NATIVE_VERIFY_EVERY) and forced
+ * full SHA mode when UNISACC_NATIVE_FORCE_SHA=1. */
 #pragma unisa module nativestat
+#pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.sha
@@ -13,9 +16,30 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-#define NS_MAGIC "dvnat1\t"
+#define NS_MAGIC "dvnat2\t"
 #define NS_PMAGIC "dvnatprod1\t"
 #define NS_BMAGIC "dvnatbin1\t"
+
+static unsigned long ns_hit_seq;
+
+static int ns_force_sha(void) {
+    const char *v = sy_env("UNISACC_NATIVE_FORCE_SHA");
+    return v && v[0] == '1' && v[1] == 0;
+}
+
+static unsigned long ns_verify_every(void) {
+    const char *v = sy_env("UNISACC_NATIVE_VERIFY_EVERY");
+    unsigned long n = 0;
+    long i = 0;
+    if (!v || !v[0]) return 16UL;
+    while (v[i]) {
+        if (v[i] < '0' || v[i] > '9') return 16UL;
+        if (n > (1000000UL - (unsigned long)(v[i] - '0')) / 10UL) return 16UL;
+        n = n * 10UL + (unsigned long)(v[i] - '0');
+        i++;
+    }
+    return n > 0UL ? n : 16UL;
+}
 
 static int ns_hex64(const char *s, long n) {
     long i;
@@ -25,6 +49,18 @@ static int ns_hex64(const char *s, long n) {
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
     }
     return 1;
+}
+
+static int ns_file_sha(const char *path, char hex[65]) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (!path || !path[0]) return -1;
+    if (sy_read_file(path, &b, &n, 1LL << 28) || !b || sy_sha256_hex(b, n, hex)) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    mm_free(b);
+    return 0;
 }
 
 static int ns_eq_stat(const sy_stat_t *a, const sy_stat_t *b) {
@@ -93,20 +129,21 @@ static int ns_parse_stat_fields(const char *ln, long len, int start_f, sy_stat_t
 }
 
 static void ns_write_single_stat(const char *sp, const char *magic, const sy_stat_t *st, const char *hex) {
-    char line[256]; long now = sy_wall_s(); sy_stat_t s2;
+    char line[256]; long now = sy_wall_s();
     if (now < st->ctime + 2 || now < st->mtime + 2) return;
     if (!cx_fmt(line, sizeof line, "%s%ld\t%lu\t%ld\t%ld\t%ld\t%s\tr%010ld\n",
                 magic, st->size, (unsigned long)st->dev, (long)st->ino, st->mtime, st->ctime, hex, now)) {
-        (void)s2;
         (void)sy_write_atomic(sp, line, (size_t)tx_len(line, sizeof line), 0600);
     }
 }
 
-/* Product binary SHA-256 memo in memo_dir. Returns 0 on success. */
+/* Product binary SHA-256 memo in memo_dir. Returns 0 on success.
+   Respects UNISACC_NATIVE_FORCE_SHA=1 by bypassing stat cache and hashing content directly. */
 int ns_prod_sha(const char *real, const char *memo_dir, char phex[65]) {
     sy_stat_t st, s2; char sp[1280]; unsigned char *b = 0; int64_t n = 0;
+    int force = ns_force_sha();
     if (!real || !real[0]) return -1;
-    if (memo_dir && memo_dir[0] && !sy_stat(real, &st) && st.kind == 'f' &&
+    if (!force && memo_dir && memo_dir[0] && !sy_stat(real, &st) && st.kind == 'f' &&
         !ns_key_path(memo_dir, "prod-", real, 0, sp, (long)sizeof sp)) {
         size_t sn = 0; char *sb = (char *)cx_read(sp, &sn);
         if (sb) {
@@ -141,17 +178,19 @@ int ns_prod_sha(const char *real, const char *memo_dir, char phex[65]) {
 }
 
 /* Verify compiled native image BIN against BIN.sha with BIN.stat O(1) fast path.
+ * Respects UNISACC_NATIVE_FORCE_SHA=1 by reading BIN and recomputing full SHA-256.
  * On mismatch or missing .sha/.bin, removes stale bin/stat and returns 0. Returns 1 when valid. */
 int ns_bin_ok(const char *bin) {
     char p[1280], sp[1280], want[80], got[65]; sy_stat_t st, s2, mst;
     unsigned char *sb = 0, *bb = 0; int64_t sn = 0, bn = 0; int has_sha = 0;
+    int force = ns_force_sha();
     if (!bin || !bin[0] || sy_stat(bin, &st) || st.kind != 'f') return 0;
     if (cx_fmt(p, sizeof p, "%s.sha", bin) || cx_fmt(sp, sizeof sp, "%s.stat", bin)) return 0;
     if (!sy_read_file(p, &sb, &sn, 128) && sb && sn >= 64 && ns_hex64((const char *)sb, 64)) {
         mm_copy(want, sizeof want, sb, 64); want[64] = 0; has_sha = 1;
     }
     if (sb) { mm_free(sb); sb = 0; }
-    if (has_sha) {
+    if (has_sha && !force) {
         size_t stn = 0; char *stbuf = (char *)cx_read(sp, &stn);
         if (stbuf) {
             long ln = (long)stn; while (ln > 0 && (stbuf[ln - 1] == '\n' || stbuf[ln - 1] == '\r')) ln--;
@@ -177,14 +216,21 @@ int ns_bin_ok(const char *bin) {
     return 0;
 }
 
-/* Try O(1) stat memo hit for (root, tool). Copies validated binary path into BIN and returns 0 on hit, -1 on miss. */
+/* Try O(1) stat memo hit for (root, tool), with periodic content SHA cross-check every
+ * UNISACC_NATIVE_VERIFY_EVERY (default 16) hits and UNISACC_NATIVE_FORCE_SHA=1 bypass.
+ * Copies validated binary path into BIN and returns 0 on hit, -1 on miss. */
 int ns_try_hit(const char *memo_dir, const char *root, const char *tool, const char *prod_real, char *bin, int cap) {
-    char mp[1280], sha_p[1280], bin_cand[1280]; size_t mn = 0; char *mb;
-    long at = 0, rec = 0; int saw_hdr = 0, saw_p = 0, saw_b = 0, nsrc = 0, ok = 1;
+    char mp[1280], sha_p[1280], bin_cand[1280], got[65]; size_t mn = 0; char *mb;
+    long at = 0, rec = 0; int saw_hdr = 0, saw_p = 0, saw_b = 0, nsrc = 0, ok = 1, bad_bin = 0;
+    unsigned long seq, every; int verify_sha;
+    if (ns_force_sha()) return -1;
     if (!memo_dir || !memo_dir[0] || !root || !tool || !prod_real) return -1;
     if (ns_key_path(memo_dir, "nat-", root, tool, mp, (long)sizeof mp)) return -1;
     mb = (char *)cx_read(mp, &mn);
     if (!mb) return -1;
+    seq = ++ns_hit_seq;
+    every = ns_verify_every();
+    verify_sha = (every == 1UL) || ((seq % every) == 0UL);
     while (ok && at < (long)mn) {
         long e = tx_chr(mb + at, (long)mn - at, '\n'), l = e < 0 ? (long)mn - at : e;
         const char *ln = mb + at;
@@ -208,10 +254,18 @@ int ns_try_hit(const char *memo_dir, const char *root, const char *tool, const c
             continue;
         }
         if ((ln[0] == 'P' || ln[0] == 'F' || ln[0] == 'B') && l > 2 && ln[1] == '\t') {
-            sy_stat_t mst, cur; const char *pp; long pl; char fp[1280];
+            sy_stat_t mst, cur; const char *pp; long pl, so = 0, sl = 0; char fp[1280];
             if (ns_parse_stat_fields(ln, l, 1, &mst, &pp, &pl) || pl >= (long)sizeof fp) { ok = 0; break; }
+            if (tx_field(ln, l, '\t', 7, &so, &sl) || sl != 64 || !ns_hex64(ln + so, 64)) { ok = 0; break; }
             mm_copy(fp, sizeof fp, pp, (size_t)pl); fp[pl] = 0;
             if (sy_stat(fp, &cur) || !ns_eq_stat(&cur, &mst) || rec < cur.ctime + 2 || rec < cur.mtime + 2) { ok = 0; break; }
+            if (verify_sha) {
+                if (ns_file_sha(fp, got) != 0 || !mm_same(got, ln + so, 64)) {
+                    ok = 0;
+                    if (ln[0] == 'B') bad_bin = 1;
+                    break;
+                }
+            }
             if (ln[0] == 'P') { if (!tx_eqz(fp, prod_real)) { ok = 0; break; } saw_p = 1; }
             else if (ln[0] == 'B') { if (!tx_eqz(fp, bin_cand)) { ok = 0; break; } saw_b = 1; }
             else nsrc++;
@@ -220,23 +274,44 @@ int ns_try_hit(const char *memo_dir, const char *root, const char *tool, const c
         ok = 0; break;
     }
     mm_free(mb);
-    if (!ok || !saw_hdr || !saw_p || !saw_b || nsrc <= 0) return -1;
-    if (cx_fmt(sha_p, sizeof sha_p, "%s.sha", bin_cand) || sy_exists(sha_p) != 1) return -1;
+    if (!ok || !saw_hdr || !saw_p || !saw_b || nsrc <= 0) {
+        if (!ok) {
+            sy_unlink(mp);
+            if (bad_bin && bin_cand[0]) sy_unlink(bin_cand);
+        }
+        return -1;
+    }
+    if (cx_fmt(sha_p, sizeof sha_p, "%s.sha", bin_cand) || sy_exists(sha_p) != 1) {
+        sy_unlink(mp);
+        return -1;
+    }
+    if (verify_sha) {
+        unsigned char *sb = 0; int64_t sn = 0;
+        if (sy_read_file(sha_p, &sb, &sn, 128) || !sb || sn < 64 ||
+            ns_file_sha(bin_cand, got) != 0 || !mm_same(got, (const char *)sb, 64)) {
+            if (sb) mm_free(sb);
+            sy_unlink(mp); sy_unlink(bin_cand);
+            return -1;
+        }
+        mm_free(sb);
+    }
     mm_copy(bin, (size_t)cap, bin_cand, (size_t)(tx_len(bin_cand, (long)cap) + 1));
     return 0;
 }
 
-/* Persist nat-*.stat only if all dependency paths + prod_real + bin are non-racy (now >= max(mtime,ctime) + 2s). */
+/* Persist dvnat2 nat-*.stat with per-file SHA-256 only if all dependency paths + prod_real + bin are non-racy. */
 void ns_save(const char *memo_dir, const char *root, const char *tool, const char *prod_real, const char *plan_big, const char *bin) {
-    char mp[1280], cxr[1280], *out; sy_stat_t st; long now = sy_wall_s(), cap = 1 << 16, on = 0, w;
+    char mp[1280], cxr[1280], phex[65], cxh[65], fh[65], bhex[65], *out;
+    sy_stat_t st; long now = sy_wall_s(), cap = 1 << 16, on = 0, w;
     const char *p; int nsrc = 0;
     if (!memo_dir || !memo_dir[0] || !root || !tool || !prod_real || !plan_big || !bin) return;
     if (ns_key_path(memo_dir, "nat-", root, tool, mp, (long)sizeof mp)) return;
     if (sy_stat(prod_real, &st) || st.kind != 'f' || now < st.ctime + 2 || now < st.mtime + 2) return;
+    if (ns_file_sha(prod_real, phex)) return;
     out = mm_alloc((size_t)cap);
     if (!out) return;
-    if (cx_fmt(out, (size_t)cap, "%s%s\t%ld\nP\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\n",
-               NS_MAGIC, bin, now, st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, prod_real)) { mm_free(out); return; }
+    if (cx_fmt(out, (size_t)cap, "%s%s\t%ld\nP\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\t%s\n",
+               NS_MAGIC, bin, now, st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, prod_real, phex)) { mm_free(out); return; }
     on = tx_len(out, cap);
     if (cx_fmt(cxr, sizeof cxr, "%s/cxroot.tsv", root)) { mm_free(out); return; }
     {   int ex = sy_exists(cxr);
@@ -245,8 +320,9 @@ void ns_save(const char *memo_dir, const char *root, const char *tool, const cha
             if (cx_fmt(out + on, (size_t)(cap - on), "A\t%s\n", cxr)) { mm_free(out); return; }
         } else {
             if (sy_stat(cxr, &st) || st.kind != 'f' || now < st.ctime + 2 || now < st.mtime + 2 ||
-                cx_fmt(out + on, (size_t)(cap - on), "F\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\n",
-                       st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, cxr)) { mm_free(out); return; }
+                ns_file_sha(cxr, cxh) ||
+                cx_fmt(out + on, (size_t)(cap - on), "F\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\t%s\n",
+                       st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, cxr, cxh)) { mm_free(out); return; }
         }
         on += tx_len(out + on, cap - on);
     }
@@ -259,22 +335,23 @@ void ns_save(const char *memo_dir, const char *root, const char *tool, const cha
             (void)o2; (void)l2;
             mm_copy(fp, sizeof fp, p + o1, (size_t)l1); fp[l1] = 0;
             if (sy_stat(fp, &st) || st.kind != 'f' || now < st.ctime + 2 || now < st.mtime + 2) { mm_free(out); return; }
-            if (cap - on < 1600) {
+            if (ns_file_sha(fp, fh)) { mm_free(out); return; }
+            if (cap - on < 1800) {
                 long ncap = cap * 2; char *nb = mm_alloc((size_t)ncap);
                 if (!nb) { mm_free(out); return; }
                 mm_copy(nb, (size_t)ncap, out, (size_t)on); nb[on] = 0; mm_free(out); out = nb; cap = ncap;
             }
-            if (cx_fmt(out + on, (size_t)(cap - on), "F\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\n",
-                       st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, fp)) { mm_free(out); return; }
+            if (cx_fmt(out + on, (size_t)(cap - on), "F\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\t%s\n",
+                       st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, fp, fh)) { mm_free(out); return; }
             on += tx_len(out + on, cap - on);
             nsrc++;
         }
         p += l + (e >= 0);
     }
     if (nsrc <= 0 || sy_stat(bin, &st) || st.kind != 'f' || now < st.ctime + 2 || now < st.mtime + 2) { mm_free(out); return; }
-    if (cap - on < 1600) { mm_free(out); return; }
-    w = cx_fmt(out + on, (size_t)(cap - on), "B\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\n",
-               st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, bin);
+    if (ns_file_sha(bin, bhex) || cap - on < 1800) { mm_free(out); return; }
+    w = cx_fmt(out + on, (size_t)(cap - on), "B\t%ld\t%lu\t%ld\t%ld\t%ld\t%s\t%s\n",
+               st.size, (unsigned long)st.dev, (long)st.ino, st.mtime, st.ctime, bin, bhex);
     if (!w) {
         on += tx_len(out + on, cap - on);
         if (!sy_mkdir_all(memo_dir, 0700)) (void)sy_write_atomic(mp, out, (size_t)on, 0600);
@@ -282,19 +359,26 @@ void ns_save(const char *memo_dir, const char *root, const char *tool, const cha
     mm_free(out);
 }
 
-/* Non-blocking lock acquire helper for per-hex cold compile deduplication; returns 0 with *fd_out >= 0 or -1. */
-int ns_lock_begin(const char *bin, int *fd_out) {
-    char lp[1280]; int fd, i;
+/* Lock acquire helper for per-hex cold compile deduplication bounded by WAIT_MS;
+   returns 0 with *fd_out >= 0 or -ETIMEDOUT / -1 on failure (callers must NOT compile unlocked). */
+int ns_lock_begin_ms(const char *bin, int *fd_out, long wait_ms) {
+    char lp[1280]; int fd; long dl;
     *fd_out = -1;
     if (!bin || cx_fmt(lp, sizeof lp, "%s.lock", bin)) return -1;
     fd = sy_open(lp, O_RDWR | O_CREAT, 0600);
     if (fd < 0) return -1;
-    for (i = 0; i <= 450; i++) {
+    dl = sy_now_ms() + (wait_ms > 0 ? wait_ms : 0L);
+    for (;;) {
         if (sy_lockf(fd, 1, 0) == 0) { *fd_out = fd; return 0; }
-        sy_sleep_ms(100);
+        if (sy_now_ms() >= dl) break;
+        sy_sleep_ms(50);
     }
     sy_close(fd);
-    return -1;
+    return -ETIMEDOUT;
+}
+
+int ns_lock_begin(const char *bin, int *fd_out) {
+    return ns_lock_begin_ms(bin, fd_out, 45000L);
 }
 
 void ns_lock_end(int fd) {

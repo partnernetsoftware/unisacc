@@ -378,15 +378,37 @@ static int path_of(const char *a, const char *b) {
  * tracked.txt from `git ls-files -s -- '*.cx'`, closure[-TIER].tsv from `tools/affected.cx -- --closure-dump
  * [--tier TIER]`.  A present file is used as is (a snapshot; delete it to refresh). */
 static void ensure_default(char *out, size_t cap, const char *name, const char *cmd) {
-    char dir[8192], full[12000]; char *o = 0; size_t on = 0;
+    char dir[8192], full[12000], fpcmd[9000], fpp[8400], fp[65];
+    char *o = 0, *fo = 0; size_t on = 0, fn = 0; int has_fp = 0;
     const char *env = sy_env("UNISACC_DEVMETA_DIR");
-    if ((env && *env ? cx_fmt(dir, sizeof dir, "%s/rel", env) : cx_fmt(dir, sizeof dir, "%s/.devsvc/rel", root)) || cx_fmt(out, (long)cap, "%s/%s", dir, name)) die("path too long", 0);
-    if (sy_exists(out) == 1) return;
+    if ((env && *env ? cx_fmt(dir, sizeof dir, "%s/rel", env) : cx_fmt(dir, sizeof dir, "%s/.devsvc/rel", root)) ||
+        cx_fmt(out, (long)cap, "%s/%s", dir, name) ||
+        cx_fmt(fpp, sizeof fpp, "%s.fp", out)) die("path too long", 0);
+    if (!cx_fmt(fpcmd, sizeof fpcmd,
+                "git -C '%s' rev-parse --git-dir >/dev/null 2>&1 && { git -C '%s' rev-parse HEAD 2>/dev/null || echo NO_HEAD; echo '---LS---'; git -C '%s' ls-files -s -- '*.cx' tests/batches.tsv tests/coverage.tsv tests/manifests 2>/dev/null; }",
+                root, root, root) &&
+        cx_run_timeout(fpcmd, 10, &fo, &fn) == 0 && fo && sy_sha256_hex(fo, (long)fn, fp) == 0) {
+        has_fp = 1;
+    }
+    free(fo);
+    if (sy_exists(out) == 1) {
+        unsigned char *fb = 0; int64_t fsz = 0;
+        if (!has_fp) return;
+        if (sy_read_file(fpp, &fb, &fsz, 256) == 0 && fb && fsz >= 64 && !memcmp(fb, fp, 64)) {
+            mm_free(fb);
+            return;
+        }
+        mm_free(fb);
+    }
     if (sy_mkdir_all(dir, 0755) < 0) die("cannot create", dir);
     /* redirected to a file, not captured: the full dump is about 9 MB */
     if (cx_fmt(full, sizeof full, "cd '%s' && %s > '%s.part' 2> '%s.err' && mv '%s.part' '%s'", root, cmd, out, out, out, out)) die("path too long", 0);
     if (cx_run_timeout(full, 55, &o, &on) || sy_exists(out) != 1) { free(o); fprintf(stderr, "rel: generator stderr kept in %s.err\n", out); die("cannot generate default input:", cmd); }
     free(o);
+    if (has_fp) {
+        char fpline[68];
+        if (!cx_fmt(fpline, sizeof fpline, "%s\n", fp)) (void)sy_write_atomic(fpp, fpline, 65, 0644);
+    }
 }
 
 static int svc_sock(char *sock, size_t cap) {
