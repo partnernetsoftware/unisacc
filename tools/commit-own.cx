@@ -17,10 +17,10 @@
  * 收尾: 绝不 git read-tree HEAD 覆盖默认索引。只对刚提交路径补 cacheinfo。
  * 然后 git diff --cached --name-only: 空则 CACHED_QUIET; 含非本批路径则 NOTE 保留(负控:不吞别人暂存)。
  * --registered ID...: the registration set of each batch ID as one unit: tests/manifests/ID.tsv whole, and in
- * tests/batches.tsv / tests/coverage.tsv / build/batch-packages.tsv the keyed lines (batch id, the manifest's
- * coverage id; whole fields).  build/links.tsv, build/tool-index.tsv and build/table-index.tsv are keyed too
+ * tests/batches.tsv / tests/coverage.tsv the keyed lines (batch id, the manifest's
+ * coverage id; whole fields). build/links.tsv and build/table-index.tsv are keyed too
  * (batch id, tool and check path and their basenames) and taken only when that yields a change.  Every selected
- * changed line prints SELECT<TAB>PATH<TAB>+|-LINE.  An added line of the three registry tables that is not
+ * changed line prints SELECT<TAB>PATH<TAB>+|-LINE.  An added line of either registry table that is not
  * byte-for-byte a manifest row (a whole-field match on someone else's row) refuses with exit 1, nothing committed.
  * Before the commit, tools/reg-manifest.cx --check --index runs against the private index -- the same verdict the
  * precommit registration-manifest gate takes -- and any MISSING/MISMATCH line refuses with exit 1.
@@ -408,14 +408,14 @@ static int committed_before(const char *path, const char *blob) {
     return 0;
 }
 
-/* --registered: three registry tables, then links and the table catalog. */
-#define CO_REGT 5
-static const char *CO_REG_TABLE[CO_REGT] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv",
+/* --registered: authoritative registry tables, then links and the table catalog. */
+#define CO_REGT 4
+static const char *CO_REG_TABLE[CO_REGT] = {"tests/batches.tsv", "tests/coverage.tsv",
                                             "build/links.tsv", "build/table-index.tsv"};
-static const char *CO_REG_KIND[3] = {"batch", "coverage", "packages"};
+static const char *CO_REG_KIND[2] = {"batch", "coverage"};
 static char co_regkeys[CO_REGT][4096];   /* comma-separated keys per table */
-static char *co_regrows[3];              /* manifest rows per registry table, '\n'-joined (each row once) */
-static long co_regrown[3];
+static char *co_regrows[2];              /* manifest rows per registry table, '\n'-joined (each row once) */
+static long co_regrown[2];
 static int co_reg_of[CO_MAX];            /* table index of path k, -1 when not a --registered table */
 static char co_manpath[CO_MAX][300];
 
@@ -444,17 +444,17 @@ static long co_field(const char *s, long n, int f, long *len) {
     }
     *len = 0; return -1;
 }
-/* Read manifest keys for the five selected tables and the three registry rows. */
+/* Read manifest keys for the selected tables. */
 static void co_manifest(const char *id, char *mpath, long mcap) {
     size_t n = 0; char *m; long at = 0;
     if (cx_fmt(mpath, mcap, "tests/manifests/%s.tsv", id)) co_die("manifest path", id);
     m = (char *)cx_read(mpath, &n);
     if (!m) co_die("no registration manifest", mpath);
     co_addkey(0, id, tx_len(id, 256)); co_addkey(2, id, tx_len(id, 256));
-    co_addkey(3, id, tx_len(id, 256)); co_addkey(4, id, tx_len(id, 256));
+    co_addkey(3, id, tx_len(id, 256));
     while (at < (long)n) {
         long e = tx_chr(m + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, tab = tx_chr(m + at, ln, '\t'); int t;
-        for (t = 0; t < 3 && tab > 0; t++)
+        for (t = 0; t < 2 && tab > 0; t++)
             if (tab == tx_len(CO_REG_KIND[t], 16) && tx_same(m + at, tab, CO_REG_KIND[t], tab)) {
                 const char *row = m + at + tab + 1; long rl = ln - tab - 1, fl, fs;
                 co_addrow(t, row, rl);
@@ -462,8 +462,8 @@ static void co_manifest(const char *id, char *mpath, long mcap) {
                     if ((fs = co_field(row, rl, 10, &fl)) >= 0 && fl > 1) co_addkey(1, row + fs, fl);
                     {   int f; for (f = 3; f <= 8; f += 5) if ((fs = co_field(row, rl, f, &fl)) >= 0 && fl > 1) {
                             long b = fl; while (b > 0 && row[fs + b - 1] != '/') b--;
-                            co_addkey(3, row + fs, fl); co_addkey(4, row + fs, fl);
-                            if (b > 0) { co_addkey(3, row + fs + b, fl - b); co_addkey(4, row + fs + b, fl - b); }
+                            co_addkey(2, row + fs, fl); co_addkey(3, row + fs, fl);
+                            if (b > 0) { co_addkey(2, row + fs + b, fl - b); co_addkey(3, row + fs + b, fl - b); }
                         } }
                 }
             }
@@ -478,7 +478,7 @@ static int co_isrow(int t, const char *s, long n) {
         if (e == n && tx_same(co_regrows[t] + at, n, s, n)) return 1; at += e + 1; }
     return 0;
 }
-/* list the changed lines of SRC (the emitted file) vs HEAD:PATH as SELECT lines; for a registry table (T < 3)
+/* list the changed lines of SRC (the emitted file) vs HEAD:PATH as SELECT lines; for a registry table (T < 2)
    an added line that is not a manifest row is counted and returned (the caller refuses the commit) */
 static int co_select(const char *path, const char *src, int t, int *changed) {
     char spec[400], *h = 0; size_t hn = 0, wn = 0; char *w; char *hv[] = {"git", "show", spec, 0};
@@ -500,7 +500,7 @@ static int co_select(const char *path, const char *src, int t, int *changed) {
         }
         if (hit >= 0) { used[hit] = 1; from = hit + 1 < nh ? hit + 1 : 0; }
         else {
-            int ok = t >= 3 || co_isrow(t, w + at, ln);
+            int ok = t >= 2 || co_isrow(t, w + at, ln);
             sy_printf("SELECT\t%s\t+%.*s%s\n", path, (int)ln, w + at, ok ? "" : "\t<- not a manifest row");
             (*changed)++; if (!ok) bad++;
         }

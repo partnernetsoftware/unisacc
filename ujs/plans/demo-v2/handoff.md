@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3d `af56a43` 后同步主线。主线提交 `68364f4` 已改为根据登记事实现算批次包层，合并时采用该方案。新增批次按现行 register 流程登记，包层由工具从当前或暂存登记读取。先前记录的 build/batch-packages.tsv 属于旧流程。
+
 Q3d 的六角色色板见 `d3-palette.tsv`。天顶和地平用更饱和的蓝，树暗部偏群青，石面偏暖奶油色。调整天空渐变时保留云的明暗。`check-uxe-d3-geometry.cx -- palette` 读色板验证两处天空梯度与四类材质，正例 122/0，`old-palette` 为 122/9。Q3c 为 `70c0184`。Q3d 提交用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-palette.tsv` 查得。并排图 /tmp/d3-review-comparison.png。
 
 Q3c 沿桥顶投影栏杆立柱，细线门 `check-uxe-d3-geometry.cx -- rails` 检查立柱中心、立柱旁天空、同面石块和右端是否入画，共 10/0。移除栏杆 `no-rails` 为 10/4。桥顶保留天际余量，屋檐与藤蔓使用一像素描边，叶片和草保留色块。下一项 Q3d 色板。

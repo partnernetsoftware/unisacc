@@ -33,7 +33,7 @@
 ## 5 基础版服务
 
 - (1) status:各工作目录的已暂存、未暂存、未跟踪计数(`--paths` 列路径)、在途进程、实例与锁。
-- (2) lock:命名写窗口锁,带属主与截止,自动过期,同属主再拿即续期,落盘跨实例重启。约定名:`registry`(tests/batches.tsv、tests/coverage.tsv、build/batch-packages.tsv 写窗口)、`derive`(派生表写窗口)。锁是协作约定,当前不强制拦截写入。
+- (2) lock:命名写窗口锁,带属主与截止,自动过期,同属主再拿即续期,落盘跨实例重启。约定名:`registry`(tests/batches.tsv、tests/coverage.tsv 写窗口)、`derive`(派生表写窗口)。锁是协作约定,当前不强制拦截写入。
 - (3) run:服务构造并缓存工具的原生执行体,客户端直接执行,stdout 与退出码即工具自己的。缓存键含工具源摘要、产品身份、库源目录的树号与未提交差异摘要;库源目录有未跟踪文件时不缓存。
 - (4) events:容量 256 的环形缓冲,`--since N` 增量轮询。来源:锁的获取、释放、过期,实例启动,`events emit`,`events on-change PATH...`(只读跑 on-change --dry-run 后入环,不改钩子)。
 
@@ -89,7 +89,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
 ### 提交门:新增 tlib 模块与分相派生
 
-新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --keyed build/batch-packages.tsv 批次ID与分片ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
 
 `git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
 
@@ -366,6 +366,8 @@ affected 的 --domain NAME 可重复取并集,再与 --files、--since、--ids�
 |5 build/table-index.tsv|6 个命中。tool-index 的 --tables 生成,--check-tables 核表。关系加载复用 relload,另有 commit-own keyed 路由。check-relstore、check-relload、check-tool-index 分别核导入、显式文件和生成。|F1139 D4,tools 源头注释、tests/batches.tsv、build 表目录和正文。按前四项的逻辑导出清单枚举表,验证有无本地导出时索引一致,避免 fresh checkout 少行。|5 至 8|
 |6 build/batch-packages.tsv|15 个命中。affected --layer、evidence-cover 的两份快照、reg-manifest、register、fixture-gate-tool 读取正文或行。register 和 batch-packages-gen 写,commit-own 选 keyed 行,precommit 选路径。check-affected-domain、check-fixture-gate-tool、check-batch-packages、check-commit-own、check-reg-manifest、check-devsvc、check-tables-gen 均需复核私有夹具。|F3129 仅为部分读集,跟踪下 affected --closure-dump 超时。先拆闭包与投影两相,包含 tools、exec、cx、tests、src 及实际读取的 apps/csih、archive、iterate、release/ci、ujs。门内 manifest 的 packages 行与独立现算逐行比对。读集未闭合前仅可无缓存现算。|8 至 16|
 
+批次包层按当前 tests/batches.tsv 现算，用 `sh ./unisacc.com tools/batch-packages-gen.cx -- --query` 取完整投影，`--row ID` 取单行。暂存登记门用 `--index`，历史证据按各快照选择当时的生成器或已跟踪的表。新检出可直接按层选批。显式导出用 `derive --write --only batch-packages-gen`，全量 `--check` 与独立闭包对拍。回退本次迁移提交即可恢复跟踪及原读者。
+
 六项共用第 10 节的查询合同。键纳入生成器、运行库、启动产品、请求参数、内容清单及所枚举的目录成员。新克隆和链接工作树首次查询在所请求的输入树现算,校验内容后原子发布私有导出。损坏时重算,读入或生成失败向调用者返回具名非零。显式 derive --write --only NAME 保留文件导出。实现按 CLI 调用并保留 rl_load 的显式文件接口,六项预计均无需 tools.cxlib 升版。若改为新增公开库入口,该张表另行预留版本。
 
 六张表在 exec/facts/derive.tsv 各有活动行,因此逐张改 query-only 时,derive --check 须改验查询与独立现算的字节等价。chain-ready.cx 的 2a-derive 直接执行此检查。commit-own --derive 的私有树自动写集合逐张少一个输出,其中 links、table-index、batch-packages 还须先迁 CO_REG_TABLE 的登记和夹具。核对 chain 工具与阶段清单未见六个完整路径的直接消费,整链的间接依赖仍须以新工作树的链前置及冻结快照实跑验收。现有收据只覆盖旧入口。
@@ -380,7 +382,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 每个工作树各有一个实例目录。反应器启动即对账，之后每 2 至 5 秒复核。事件或事件文件变化只能提前这一轮。HEAD 用 git rev-parse 取得，index-tree 用私有 index 副本执行 git write-tree，产品读集用 product-map-query --key。读取失败时保留旧记录，标 UNKNOWN；读取期间的版本变化由下一轮对账纠正。冷读集查询须独立作业，以免拖慢已运行作业的取消。
 
-反应表列为 name、identity、dedup、supersede、debounce_s、admit、deadline_s、cmd、prepared。首个候选策略用产品读集、按反应名和身份去重、kill-old、1200 秒稳定期、load1 准入和单候选槽。命令及产物校验器由受信表选择。生产触发待放行，私有树只启动夹具。后续 HEAD 反应可调用 prebuild-self。
+生产策略见 tools/devsvc-react.tsv。按工作树显式运行 `devsvc react start --dry` 可取一轮真实对账和 would-start 回执。`devsvc react start [--ttl 秒] [--cache-manager-osx X64 ARM64]` 启动常驻，`status` 查运行态和实例目录，`stop` 提交停止请求。产品读集稳定 1200 秒且 load1 小于 6 后调用 bg-candidate start；按整链原合同准备 UNISACC_IDENT_HELPER 和管理器。每次尝试单独分配链目录，先落 active.tsv。取消文件由仍持有子进程的 guard 消费，清理进程组及后代；清理有残留会阻止下一次启动。promote --check 与产物摘要复核成功才写 prepared.tsv。候选构造失败可从尝试目录的 bg.log 与 exit.tsv 查因。撤回时运行 `devsvc react stop` 并核 status。
 
 每次对账先更新期望身份，再核现有作业。新身份立即撤销旧作业，稳定期从最后一次变化起算。先前 PREPARED 必须重新核对产物字节。监督者持作业锁，先记录意图，再建立独立进程组并登记 boot_id、PID、启动时刻和截止。登记完成才允许执行。取消先核身份再杀组，等进程组清空才发新作业。超载保留期望身份并延迟放行。
 
@@ -396,3 +398,37 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 |负载越界再恢复|超载时零启动，恢复后重新核身份再放行|
 
 性能度量分列身份复核、去抖、准入等待及作业墙钟。PREPARED 只表示材料可用，测试仍须实跑。
+
+候选触发键维持产品读集口径。改变打包器、版本注入器、构造工具库的行为，或改变版本和管理器配方时，负责人用新 HEAD 手动起候选并核摘要；即使产品键相同，也要给此次变更单独的构造回执。chain4 固定材料的对照中，六份工具各改一个注释字节，APE 均与原件逐字节相同。把启动器内存下限从 53248 改为 53249 KiB，APE 长度相同、摘要改变。
+
+生产按两步放行。先用满 24 小时的影子观测核误触发和漏触发均为零，通过取代、去重和负载负控后，允许一条有界真实候选。该候选与同冻结输入的手动整链各自通过 promote 检查、产物逐字节相同且 prepared.tsv 与磁盘一致，才放行常规自动构造。原始 dry 行是单次预览，影子统计要独立套用稳定期、准入及材料复用条件。逐项判据与复验命令见 release/evidence/react-candidate-inputs-2026-11-18.tsv。
+
+## 整链提速(2026-11-18)
+
+建议先拆长作业实际占用的写域。real6 的慢点是两代 Linux 对象批，chain4 的慢点已转到跨平台整目标重试。real6 从起到止 3752 秒，链内自产管理器。chain4 显式传两份管理器，OWNER 到 EXIT 为 1613 秒，499/499、rc 0；chain2 首次为 1379 秒，停在 pack；chain3 为 1346 秒，停在 cache-manager 缺 checkpoint。三者都不能替 real6 的同配方冷构造验收。
+
+下表取各会话 `chain-run.tsv` 的 ATTEMPT_TIME 按毫秒降序，各列独立排名，单位秒，保留一次尝试的原墙钟。括号 124 表示该次超时；chain4 这五相后来均以 rc 0 收尾。代号 T 是单个 owner 驱动多步目标构造，可按产物拆；F 是已切出的前端或 stub 子步，内部单进程占比 UNMEASURED；L 是 Linux 闭包准备，J 是多作业组。原始会话在 `/tmp/unisacc-session-v072-chain{2,3,4}/REV/`，chain2/3 的 REV 前缀 ec7fbfdbaf，chain4 为 5cdbd305b1。
+
+|名次|chain2 相 / 秒|chain3 相 / 秒|chain4 相 / 秒|
+|---|---|---|---|
+|1|g2-osx-arm64 T 88.078 (124)|g2-win-arm64 T 88.073 (124)|g2-win-x86_64 T 88.077 (124)|
+|2|gen1-osx-x86_64 T 88.068 (124)|g3-osx-x86_64 T 88.059 (124)|g2-win-arm64 T 88.065 (124)|
+|3|g3-win-x86_64 T 82.801|gen2-osx-arm64-stub F 88.055 (124)|gen1-osx-arm64 T 88.058 (124)|
+|4|gen1-osx-arm64 T 82.374|gen3-osx-arm64-front1 F 85.723|g3-win-x86_64 T 88.046 (124)|
+|5|jobs-gen J 71.474|gen1-osx-x86_64 T 83.577|g2-osx-arm64 T 88.042 (124)|
+|6|gen1-win-arm64 T 71.212|g2-osx-x86_64 T 78.311|g2-osx-x86_64 T 84.038|
+|7|gen1-osx-x86_64-stub F 66.368|g2-lnx-x86_64-closure-prepare L 77.249|gen1-osx-x86_64 T 76.839|
+|8|g2-win-arm64 T 65.271|g2-lnx-arm64-closure-prepare L 76.898|gen1-win-x86_64 T 74.238|
+|9|g2-lnx-arm64-closure-prepare L 64.917|g3-win-x86_64 T 72.513|gen2-osx-arm64-front1 F 71.552|
+|10|g2-lnx-x86_64-closure-prepare L 64.578|gen1-osx-arm64-stub F 69.126|jobs-gen J 66.639|
+
+计时口径影响选相。仓内 release/evidence 的 chain4 表按主心跳相邻 end 计时，kernels-g2 栏的 752 秒包含其他 lane 的工作。该相作业 ATTEMPT_TIME 为 41.724 秒，内部 DONE 为 30.268 秒。五次 88 秒也有重叠，节省量须按关键路径实测。历史 build/phase-times.tsv 的 g3 Linux x86/arm 两相分别为 734.227/733.842 秒，g2 为 725.068/727.361 秒。candidate-chain 的 run_g2_lnx 从 roots 开始计到 closures 结束，给同批各根登记累计时间，obj-43 的 359.750 秒不能归给一个编译进程。chain4 两个 g3 objects 的 DONE 仅 1.478/1.484 秒，此前闭包已有独立作业。
+
+(1) Linux 按目标内对象组拆。run_g_lnx_pair 已支持每代两个架构同时跑，until、限次让出及 parallel=1 走串行分支；chain-run 还能分 lane，chain4 的 g3 两条 closure-prepare 有不同 owner 且执行重叠。计划序号 474 至 481 中，arm 准备依赖两条 g2 完成，x86 准备依赖 g2 x86。保留依赖与唯一链接者。在同目标内沿现有 fp_batch 冷首键、暖探针与预算划组，现行 build/g2-budget.tsv 为 55 秒、暖批最多 5 键，chain-step 暂存上限 8。先试每目标两个互斥键组、全局最多四个 worker。每组自有 stage 和临时目录；现有 OUT.batch-gG-T、目标级 receipt 和 .chain-steps 不能让两个 worker 同写。单一 owner 按原根序核完整键集、逐对象摘要及构造者身份后发布收据，再链接。组崩溃只丢该组未提交暂存。优先把切片放进相内，499 行计划已接近 candidate-chain 的 512 行容量。
+
+(2) 跨平台先试 g2-win-x86_64。chain4 的 attempt 165 为整目标 --until 加 --lane，超时后 172 成功。gen_slice_phase 依次执行 fronts、win span、导入 image；沿已有 units/e3/image 的落盘边界逐段记开始、结束、摘要和恢复点，实测哪个段耗尽窗口，再只调度尚缺子段。macOS 保留 B 的串行依赖。对拍时同时记录作业时间与最后一个前置完成到 compare 的墙钟，区分消掉的重试和被兄弟 lane 遮住的收益。
+
+(3) 放行与回退。建议冷链目标 3300 秒，给 3600 秒作业留 300 秒。real6 配方须净省 452 秒达到该目标，改后墙钟 UNMEASURED。固定冻结输入、工具与管理器来源，用两个空会话做原版和拆分版冷对照，记录 OWNER 到 EXIT、负载、每组 PID 和起止；逐对象、六目标 image 与 APE 字节相同，两边 promote --check 通过。另测中断一组后恢复、少键、重复键、坏摘要均不得完成父相。若计划 id、顺序、依赖或宽度改变，chain-run 的计划身份随之变化，须新开 BASE；相内方案也须绑定分片协议版本，旧 stage 或旧 DONE 不能直接采信。保留原配方和独立输出目录作回退。同配方冷跑达到预算后，才具备 react 真起的耗时证据。
+
+
+更正(2026-11-18):上文"心跳跨度 752 秒、实际作业 41.724 秒"这一对数字里,实际作业 41.724 秒是对的,752 秒是计量伪差,不是调度空等:它由 heartbeat.tsv 相邻 end 行之差得出,而该文件只有 chain-step 子作业写行,中间别的相在跑也不写。kernels-g2 实际约 41 秒,compare 约 26.5 秒;整链(chain4 热)OWNER 到 EXIT 1613 秒,忙碌并集 1574.3 秒,空档仅 8.1 秒,真实浪费在五次 rc124 被杀(合计 440 秒)、降并行宽度、7 次 HOLD 与起链前准备约 30 秒。证据:release/evidence/chain-speedup-2026-11-18.tsv。

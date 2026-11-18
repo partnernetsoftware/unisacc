@@ -153,7 +153,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 工具路径模式匹配 | `#pragma unisa use cxlib.globspan`，检查批次 `globspan` | `glob_span` 按字节长度匹配，星号可跨目录。`glob_span_mode` 的末参置 1 时问号匹配单字节。 |
 | 开发服务反应器夹具 | `tools/dvreact.cx REPO RULES TTL`，批次 `devsvc-react` | 在私有实例目录对账 HEAD、暂存树与产品读集，核对去抖、作业取消与 PREPARED 材料回执。 |
 | 测试域分母派生 | `sh ./unisacc.com tools/batch-domains-gen.cx -- --write/--check [--dump]` | 从批次头部合同与 `tests/batch-domain-rules.tsv` 自动推断六域，`tests/batch-domains.tsv` 仅存有依据的例外；生成 `tests/batch-domain-index.tsv`，报告每域数量及自动/显式比例；批次 `batch-domains`。分类不代表测试通过 |
-| 测试分治粗分：按层选批（0.0.58 草稿） | `sh ./unisacc.com tools/affected.cx -- --layer base\|ext\|stream\|compiler\|driver\|chain\|release\|all [--tier T] [--list-only\|--run]`；表 `build/batch-packages.tsv` 由 `sh ./unisacc.com tools/batch-packages-gen.cx -- --write\|--check` 生成；检查 `tools/check-batch-packages.cx`（批 `batch-packages`） | 层只按批次 id 与源路径前缀切（不做依赖推理），无规则命中的批次归 `all` 层；`--layer L` 选 L 层加 `all` 层加表中未列的批次，拿不准的不丢。2026-11-12 实测 946 批：all 690、release 73、compiler 70、stream 60、chain 20、driver 18、base 12、ext 3。登记新批次后须 `--write` 重新生成。`affected -- --closure-dump` 逐批导出闭包事实；生成器 `--packages` 另填所达包与包层档（conformance/integration/chain），为依赖精化草稿，未入库、affected 尚不读。只是选择事实，不是测试结论 |
+| 测试分治粗分：按层选批（0.0.58 草稿） | `sh ./unisacc.com tools/affected.cx -- --layer base\|ext\|stream\|compiler\|driver\|chain\|release\|all [--tier T] [--list-only\|--run]`；用 `sh ./unisacc.com tools/batch-packages-gen.cx -- --query` 现查粗分表，用 `--check` 对拍闭包；检查 `tools/check-batch-packages.cx`（批 `batch-packages`） | 层只按批次 id 与源路径前缀切（不做依赖推理），无规则命中的批次归 `all` 层；`--layer L` 选 L 层加 `all` 层加表中未列的批次，拿不准的不丢。2026-11-12 实测 946 批：all 690、release 73、compiler 70、stream 60、chain 20、driver 18、base 12、ext 3。登记新批次后查询直接反映新行。`affected -- --closure-dump` 逐批导出闭包事实；生成器 `--packages` 另填所达包与包层档（conformance/integration/chain），为依赖精化草稿，未入库、affected 尚不读。只是选择事实，不是测试结论 |
 | 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry\|post-snap\|pre-p3\|post-p3] [--strict]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;hook 列标挂点;断言 absent/present/exec-if-present/epoch-canonical/release-rev/src-has/src-lacks/pkg-headers/env-set/receipt-if-present),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;PHASE= 只跑该挂点规则,且该挂点应已产出的变量缺失记 FAIL;变量未给的规则记 SKIP 不记 PASS,`--strict` 下有 SKIP 即退出 1;失败退出 1 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
@@ -715,12 +715,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 ## 10. 子文档与归档索引（树）
 
-[prd_paradigm.md](prd_paradigm.md) 记录思维方式与工作范式：结果优先、时间折叠、事实表与以网换逻辑、cx 与显式边界、cx-dev、devsvc、契约先行与模型级联。
+[prd_paradigm.md](prd_paradigm.md) 记录思维方式与工作范式：结果优先、时间折叠、事实表与以网换逻辑、cx 与显式边界、cx-dev、devsvc、契约先行与模型级联、迭代速度方法学(第 9 节,五条元原则)。[prd_iteration.md](prd_iteration.md) 是其展开:度量基线、七条手段的判据与反例、并发协同、造梦与清理、devsvc 的角色、收口标准,逐项标已落地、在途或设想。
 
 ```
 prd.md                 当前状态（本文件，只写当前事实；结构点唯一定义在 §3）
 ├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
 ├─ prd_cx_spec.md      cx 使用规范：怎么运行、module/use、层向、标准库速查、替代 python/shell 对照、实测例子
+├─ prd_paradigm.md     思维方式与工作范式(九节)
+├─ prd_iteration.md    迭代速度方法学：五条元原则、七条手段、收口标准与落地状态
 ├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
 ├─ prd_hist.md         历史完成记录与证据（只读；新记录写 prd_mempalace.md）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实

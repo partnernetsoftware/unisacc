@@ -41,13 +41,10 @@ static int run_sh(const char *script, const char *a1, const char *a2, const char
 }
 
 /* split a file into lines (in place); returns 0 on success */
-static int load_tab(const char *path, Tab *t) {
-    unsigned char *b = 0;
-    int64_t n = 0;
+static int parse_tab(char *b, Tab *t) {
     int cnt = 0;
     char *p;
     t->n = 0; t->lines = 0; t->buf = 0;
-    if (sy_read_file(path, &b, &n, 64 * 1024 * 1024) != 0) return -1;
     t->buf = (char *)b;
     for (p = t->buf; *p; p++) if (*p == '\n') cnt++;
     t->lines = (char **)mm_alloc((size_t)(cnt + 2) * sizeof(char *));
@@ -61,6 +58,36 @@ static int load_tab(const char *path, Tab *t) {
         p = e + 1;
     }
     return 0;
+}
+
+static int load_tab(const char *path, Tab *t) {
+    unsigned char *b=0; int64_t n=0;
+    if(sy_read_file(path,&b,&n,64*1024*1024))return -1;
+    return parse_tab((char *)b,t);
+}
+
+static int load_packages(const char *root, const char *product, Tab *t) {
+    char facts[4400], table[4400], generator[4400], registry[4400];
+    if(cx_fmt(facts,sizeof facts,"%s/exec/facts/derive.tsv",root)||
+       cx_fmt(table,sizeof table,"%s/build/batch-packages.tsv",root))return -1;
+    int present=sy_exists(facts); if(present<0)return -1;
+    Tab manifest;
+    if(present && load_tab(facts,&manifest))return -1;
+    for(int i=0;present && i<manifest.n;i++){
+        char *line=manifest.lines[i];
+        if(strncmp(line,"batch-packages-gen\t",sizeof("batch-packages-gen\t")-1))continue;
+        char *col=line;
+        for(int j=0;j<3;j++){col=strchr(col,'\t');if(!col)return -1;col++;}
+        if(strncmp(col,"query-only ",11))break;
+        if(cx_fmt(generator,sizeof generator,"%s/tools/batch-packages-gen.cx",root)||
+           cx_fmt(registry,sizeof registry,"%s/tests/batches.tsv",root))return -1;
+        char *v[]={"sh","-c","cd \"$1\" && exec sh \"$2\" \"$3\" -- --query --registry \"$4\"",
+                   "sh",(char *)root,(char *)product,generator,registry,0}, *out=0;
+        size_t n=0;
+        if(cx_runv_timeout(v,30,&out,&n)||!n)return -1;
+        return parse_tab(out,t);
+    }
+    return load_tab(table,t);
 }
 
 /* copy tab field K (0-based) of LINE into DST */
@@ -141,7 +168,7 @@ int main(int argc, char **argv) {
     static char dout[OUTCAP / 4];
     static char changed[2 * 1024 * 1024];
     static Row rows[MAXB];
-    Tab bt_a, bt_b, cv_a, cv_b, pk_a, pk_b;
+    Tab bt_a, bt_b, cv_a, cv_b, pk_a = {0}, pk_b = {0};
     int a, i, nrows = 0, covered = 0, rerun = 0, aff_ok = 1, nfiles = 0, tables_ok = 1;
     char *args[4096];
     int ai = 0;
@@ -171,10 +198,9 @@ int main(int argc, char **argv) {
     if (load_tab(path, &cv_a) != 0) tables_ok = 0;
     tx_snprintf(path,sizeof path, "%s/tests/coverage.tsv", db);
     if (load_tab(path, &cv_b) != 0) tables_ok = 0;
-    tx_snprintf(path,sizeof path, "%s/build/batch-packages.tsv", da);
-    if (load_tab(path, &pk_a) != 0) tables_ok = 0;
-    tx_snprintf(path,sizeof path, "%s/build/batch-packages.tsv", db);
-    if (load_tab(path, &pk_b) != 0) tables_ok = 0;
+    if (load_packages(da,self,&pk_a)) tables_ok = 0;
+    if (!strcmp(da,db)) pk_b=pk_a;
+    else if (load_packages(db,self,&pk_b)) tables_ok = 0;
 
     /* changed files between the trees */
     /* git diff --no-index treats symlinks as links (diff -r follows them and trips on loops/dangling ones) */
