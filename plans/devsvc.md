@@ -409,6 +409,8 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 默认做法:保持影子。切真起前要满足三条。(1) 影子常驻满 24 小时,并自动记录事件。(2) 至少一个产品输入提交触发键变化。(3) 一条有界真起候选与同输入的手动整链逐字节相同,两侧 promote --check 都通过。证据见 release/evidence/react-flip-readiness-2026-11-18.tsv。
 
+补测截至 main 的 865ce7472c。按共享检出 main 的 reflog 重建实际前移顺序,十二次更新中十一次未改候选输入,键均未变。从 7ff86082a9 快进到 0dae4d3024 时带入产品事实表和执行表,候选键变化一次。离线回放有了一个正样本。在线影子仍缺连续 24 小时记录,自动与手动候选字节对照仍待实跑。
+
 ## 整链提速(2026-11-18)
 
 建议先拆长作业实际占用的写域。real6 的慢点是两代 Linux 对象批，chain4 的慢点已转到跨平台整目标重试。real6 从起到止 3752 秒，链内自产管理器。chain4 显式传两份管理器，OWNER 到 EXIT 为 1613 秒，499/499、rc 0；chain2 首次为 1379 秒，停在 pack；chain3 为 1346 秒，停在 cache-manager 缺 checkpoint。三者都不能替 real6 的同配方冷构造验收。
