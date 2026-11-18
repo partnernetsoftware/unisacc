@@ -380,7 +380,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 每个工作树各有一个实例目录。反应器启动即对账，之后每 2 至 5 秒复核。事件或事件文件变化只能提前这一轮。HEAD 用 git rev-parse 取得，index-tree 用私有 index 副本执行 git write-tree，产品读集用 product-map-query --key。读取失败时保留旧记录，标 UNKNOWN；读取期间的版本变化由下一轮对账纠正。冷读集查询须独立作业，以免拖慢已运行作业的取消。
 
-反应表列为 name、identity、dedup、supersede、debounce_s、admit、deadline_s、cmd、prepared。首个候选策略用产品读集、按反应名和身份去重、kill-old、1200 秒稳定期、load1 准入和单候选槽。命令及产物校验器由受信表选择。生产触发待放行，私有树只启动夹具。后续 HEAD 反应可调用 prebuild-self。
+生产策略见 tools/devsvc-react.tsv。按工作树显式运行 `devsvc react start --dry` 可取一轮真实对账和 would-start 回执。`devsvc react start [--ttl 秒] [--cache-manager-osx X64 ARM64]` 启动常驻，`status` 查运行态和实例目录，`stop` 提交停止请求。产品读集稳定 1200 秒且 load1 小于 6 后调用 bg-candidate start；按整链原合同准备 UNISACC_IDENT_HELPER 和管理器。每次尝试单独分配链目录，先落 active.tsv。取消文件由仍持有子进程的 guard 消费，清理进程组及后代；清理有残留会阻止下一次启动。promote --check 与产物摘要复核成功才写 prepared.tsv。候选构造失败可从尝试目录的 bg.log 与 exit.tsv 查因。撤回时运行 `devsvc react stop` 并核 status。
 
 每次对账先更新期望身份，再核现有作业。新身份立即撤销旧作业，稳定期从最后一次变化起算。先前 PREPARED 必须重新核对产物字节。监督者持作业锁，先记录意图，再建立独立进程组并登记 boot_id、PID、启动时刻和截止。登记完成才允许执行。取消先核身份再杀组，等进程组清空才发新作业。超载保留期望身份并延迟放行。
 

@@ -1,4 +1,5 @@
-/* Fixture-only stage-one reactor. Run in a private empty instance directory:
+/* devsvc react start [--ttl S] [--dry] [--cache-manager-osx X64 ARM64], status, stop.
+ * The original fixture interface runs in a private empty instance directory:
  * dvreact REPO RULES TTL. Stage one admits one reaction per instance.
  * A test repository declares its entire product read set as fixture.product.
  * Other repositories use product-map-query --key. */
@@ -7,6 +8,8 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.chainroot
+#pragma unisa use sysx.reaper
 #pragma unisa use sys.time
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
@@ -16,6 +19,7 @@ static char name[64], source[40], repo[4096], instance[4096];
 static int debounce, ceiling, budget, job_ms, singleton;
 static long expires;
 static char compiler[4200];
+static int production;
 
 static int repo_product(void) {
     char path[4200];
@@ -56,7 +60,8 @@ static int rule(const char *path) {
         strspn(name,"abcdefghijklmnopqrstuvwxyz0123456789-")==strlen(name) &&
         (!strcmp(source,"head") || !strcmp(source,"index-tree") || !strcmp(source,"readset:product-map")) &&
         !strcmp(dedup,"name+input") && !strcmp(replace,"kill-old") && !strcmp(prepared,"sha256") &&
-        !strcmp(cmd,"fixture-material") && debounce>=0 && debounce<=7200 && ceiling>=0 && budget>0 && budget<=55;
+        !strcmp(cmd,production?"bg-candidate":"fixture-material") && debounce>=0 && debounce<=7200 &&
+        ceiling>=0 && budget>0 && budget<=(production?7200:55);
     free(b); return ok;
 }
 static int capture(char **v,char **env,char *out,int size) {
@@ -90,7 +95,7 @@ static int identity(const char *kind,char key[65]) {
         ok=capture(tree,env,key,65);
     } else {
         /* The fixture adapter is selected explicitly by the isolated check. */
-        if (same("fixture.adapter","single-file-v1\n")) {
+        if (!production && same("fixture.adapter","single-file-v1\n")) {
             if (cx_fmt(path,sizeof path,"%s/fixture.product",repo)) return 0;
             size_t n=0; char *b=cx_read(path,&n); if (!b) return 0;
             ok=!sy_sha256_hex(b,n,key); free(b);
@@ -158,7 +163,201 @@ static int admitted(void) {
     int ok=s && sscanf(s,"%lf",&l)==1 && l<ceiling;
     free(s); return ok;
 }
+/* Production has a separate state directory and never consults fixture adapters.
+ * An attempt gets a fresh chain base. The intent is durable before launching
+ * the guard, so a replacement reactor can finish or cancel the same attempt. */
+static char chain_parent[4200], managers[2][4200];
+static int lifetime;
+static int hex_id(const char *s,size_t n) {
+    return strlen(s)==n && strspn(s,"0123456789abcdef")==n;
+}
+static int phase(const char *s) { return same("status",s) ? 0 : save("status",s); }
+static int verified_material(const char *key) {
+    char record[100],saved_key[65],rev[41],expected[65],base[4400],artifact[4600],actual[65],reaction[64];
+    if(cx_fmt(record,sizeof record,"prepared-%s.tsv",key))return 0;
+    char *row=cx_read(record,0);if(!row)return 0;
+    int ok=sscanf(row,"PREPARED\t%63s\t%64s\t%40s\t%64s\t%4399s",reaction,saved_key,rev,expected,base)==5 &&
+           !strcmp(reaction,name) && !strcmp(saved_key,key) && hex_id(rev,40) && hex_id(expected,64) &&
+           !strncmp(base,chain_parent,strlen(chain_parent)) && !strncmp(base+strlen(chain_parent),"/attempt-",9) &&
+           !strchr(base+strlen(chain_parent)+1,'/') && !cx_fmt(artifact,sizeof artifact,"%s/%s/ape-final/unisacc-next.com",base,rev);
+    size_t n=0;char *ape=ok?cx_read(artifact,&n):0;
+    ok=ape && n && !sy_sha256_hex(ape,n,actual) && !strcmp(actual,expected) &&
+       (same("prepared.tsv",row) || !save("prepared.tsv",row));
+    free(ape);free(row);return ok;
+}
+static int bg(char **argv,np_result *r) {
+    char why[300];
+    return np_run(argv,repo,0,55,r,why,sizeof why) || r->rc;
+}
+static int vector(char head[65],char key[65]) {
+    char tree[65],text[280];
+    if (!identity("head",head) || !identity("index-tree",tree) || !identity("readset:product-map",key) ||
+        !hex_id(head,40) || !hex_id(key,64)) return 0;
+    return !cx_fmt(text,sizeof text,"head\t%s\nindex-tree\t%s\nreadset:product-map\t%s\n",head,tree,key) &&
+           (same("identities.tsv",text) || !save("identities.tsv",text));
+}
+static int launch(const char *key,const char *head) {
+    char base[4400],intent[4800],seconds[24];
+    char *v[]={"sh",compiler,"tools/bg-candidate.cx","--","start","--react-owned","--rev",(char *)head,
+               "--base",base,"--deadline-s",seconds,"--slack-s","1",0,0,0,0,0};
+    np_result r={0};
+    if (sy_mkdir_all(chain_parent,0700) || sy_mkdtemp(chain_parent,"attempt-",base,sizeof base) ||
+        cx_fmt(seconds,sizeof seconds,"%d",budget) || cx_fmt(intent,sizeof intent,"%s\t%s\t%s\n",key,head,base) ||
+        save("active.tsv",intent)) return 2;
+    if (managers[0][0]) {
+        v[14]="--"; v[15]="--cache-manager-osx"; v[16]=managers[0]; v[17]=managers[1];
+    }
+    int rc=bg(v,&r); np_free(&r);
+    return phase(rc?"START_UNCONFIRMED":"RUNNING");
+}
+/* 1 occupied, 0 idle, -1 cannot safely establish the state. */
+static int active(const char *wanted,int stopping) {
+    char *s=cx_read("active.tsv",0);
+    if (!s) { sy_stat_t st; return sy_lstat("active.tsv",&st)==-ENOENT?0:-1; }
+    char key[65],head[41],base[4400],extra,path[4600];
+    int ok=sscanf(s,"%64s %40s %4399s %c",key,head,base,&extra)==3 && hex_id(key,64) && hex_id(head,40);
+    free(s);
+    if (!ok || strncmp(base,chain_parent,strlen(chain_parent)) || strncmp(base+strlen(chain_parent),"/attempt-",9) ||
+        strchr(base+strlen(chain_parent)+1,'/') || cx_fmt(path,sizeof path,"%s/%s/exit.tsv",base,head)) return -1;
+    char *exitrow=cx_read(path,0);
+    if (!exitrow) {
+        if (stopping || strcmp(key,wanted)) {
+            if (cx_fmt(path,sizeof path,"%s/react.cancel",base) || save(path,"cancel\n")) return -1;
+            phase("CANCELLING");
+        }
+        return 1;
+    }
+    int rc=-1; long at=0; int pid=0; char why[80];
+    ok=sscanf(exitrow,"EXIT\t%ld\tpid=%d\trc=%d\twhy=%79s",&at,&pid,&rc,why)==4;
+    free(exitrow);
+    if (!ok || !strcmp(why,"cancel-residue")) { phase("CLEANUP_UNVERIFIED"); return -1; }
+    if (!stopping && !strcmp(key,wanted) && !rc) {
+        char *v[]={"sh",compiler,"tools/bg-candidate.cx","--","promote","--check","--rev",head,"--base",base,0};
+        np_result r={0}; int failed=bg(v,&r);
+        char sha[65],row[4900],fresh[65],record[100]; char *need=r.out?strstr(r.out,"\nNEED\tape\t"):0;
+        char *hash=need?strstr(need,"\tsha="):0;
+        ok=!failed && hash && sscanf(hash,"\tsha=%64[0-9a-f]",sha)==1 && hex_id(sha,64) &&
+           identity("readset:product-map",fresh) && !strcmp(key,fresh) &&
+           !cx_fmt(row,sizeof row,"PREPARED\t%s\t%s\t%s\t%s\t%s\n",name,key,head,sha,base) &&
+           !cx_fmt(record,sizeof record,"prepared-%s.tsv",key) && !save(record,row) && verified_material(key);
+        np_free(&r);
+        if (!ok) { phase("PROMOTE_UNVERIFIED"); return 1; }
+        phase("PREPARED");
+    } else phase(stopping || strcmp(key,wanted)?"CANCELLED":"CHAIN_FAILED");
+    if (rc && !strcmp(key,wanted) && !stopping && save("attempted",key)) return -1;
+    return sy_unlink("active.tsv")?-1:0;
+}
+static int measure(void *unused) {
+    char head[65],key[65]; return vector(head,key)?0:2;
+}
+/* Cold queries run outside the owner. A stop always reaches the chain guard
+ * immediately, even when the product-map query is tracing a cold checkout. */
+static int measured(char head[65],char key[65]) {
+    int fds[2],ex=0,code=0,sig=0;
+    int pid=sy_fork_session(measure,0,fds);if(pid<0)return 0;
+    sy_close(fds[0]);sy_close(fds[1]);
+    long limit=sy_now_ms()+55000;if(limit>expires)limit=expires;
+    for (;;) {
+        int rc=sy_wait_status(pid,1,&ex,&code,&sig);
+        if(rc!=0) {
+            if(rc!=pid || !ex || code)return 0;
+            break;
+        }
+        if(sy_now_ms()>=limit || same("stop","stop")) {
+            active("",1);
+            char report[512];rp_kill_tree(pid,2000,0,0,report,sizeof report);
+            return 0;
+        }
+        sy_sleep_ms(100);
+    }
+    char tree[65]; char *s=cx_read("identities.tsv",0);
+    int ok=s && sscanf(s,"head\t%64s\nindex-tree\t%64s\nreadset:product-map\t%64s",head,tree,key)==3 &&
+           hex_id(head,40) && hex_id(key,64);
+    free(s);return ok;
+}
+static int production_loop(void *unused) {
+    char previous[65]="",head[65],key[65];
+    long stable=0; expires=sy_now_ms()+lifetime*1000;
+    while (sy_now_ms()<expires && !same("stop","stop")) {
+        int known=measured(head,key);
+        if (!known) { key[0]=0; phase("IDENTITY_UNKNOWN"); }
+        if (strcmp(previous,key) || !known) {
+            if (cx_fmt(previous,sizeof previous,"%s",key)) return 2;
+            stable=sy_now_ms();
+        }
+        if (same("stop","stop")) break;
+        int busy=active(key,0);
+        if (busy<0) { phase("OWNER_UNVERIFIED"); break; }
+        if (!busy && known && verified_material(key)) phase("PREPARED");
+        else if (!busy && known && !same("attempted",key)) {
+            if (sy_now_ms()-stable < debounce*1000) phase("DEBOUNCE");
+            else if (!admitted()) phase("WAIT_LOAD");
+            else {
+                char *diff[]={"git","diff","--quiet",head,"--",0}; np_result r={0};
+                int dirty=bg(diff,&r); np_free(&r);
+                if (dirty) phase("WAIT_CLEAN_INPUT");
+                else if (launch(key,head)) break;
+            }
+        }
+        for(int i=0;i<20 && !same("stop","stop") && sy_now_ms()<expires;i++) sy_sleep_ms(100);
+    }
+    int pending=active("",1);
+    if (!pending) phase("STOPPED");
+    return pending<0?2:0;
+}
+static int service(int argc,char **argv) {
+    char rules[4400],key[65],base[4200],chain_id[96];
+    const char *op=argv[3]; int dry=0;
+    production=1; lifetime=7200;
+    if (sy_cwd(repo,sizeof repo)<0 || sy_sha256_hex(repo,strlen(repo),key) ||
+        cx_fmt(base,sizeof base,"%s/react-%s",argv[2],key) || sy_mkdir_all(base,0700) ||
+        sy_realpath(base,instance,sizeof instance)<0 || strcmp(base,instance) ||
+        !strncmp(instance,repo,strlen(repo)) || cx_fmt(chain_id,sizeof chain_id,"react-%s",key) ||
+        cr_dir(repo,"chain",chain_id,0,chain_parent,sizeof chain_parent) ||
+        cx_fmt(rules,sizeof rules,"%s/tools/devsvc-react.tsv",repo) || !rule(rules) || !repo_product()) return 2;
+    for(int i=4;i<argc;i++) {
+        if (strcmp(op,"start")) return 2;
+        if (!strcmp(argv[i],"--dry")) dry=1;
+        else if (!strcmp(argv[i],"--ttl") && ++i<argc && strlen(argv[i])<=4 && *argv[i] &&
+                 strspn(argv[i],"0123456789")==strlen(argv[i])) lifetime=atoi(argv[i]);
+        else if (!strcmp(argv[i],"--cache-manager-osx") && i+2<argc) {
+            for(int j=0;j<2;j++) if(sy_realpath(argv[++i],managers[j],sizeof managers[j])<0 || sy_is_reg(managers[j])!=1)return 2;
+        } else return 2;
+    }
+    sy_stat_t st;
+    if(lifetime<1 || lifetime>7200 || sy_stat(instance,&st) || st.uid!=sy_uid() || (st.mode&077) || sy_chdir(instance) ||
+       sy_mkdir_all("objects",0700)) return 2;
+    singleton=sy_open("daemon.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(singleton<0)return 2;
+    int lock=sy_flock(singleton,6);
+    if(lock && lock!=-EWOULDBLOCK)return 2;
+    if(!strcmp(op,"status")) {
+        char *s=cx_read("status",0); printf("REACT_STATUS\trunning=%d\tstate=%s\tinstance=%s\n",!!lock,s?s:"IDLE",instance);
+        free(s);return 0;
+    }
+    if(!strcmp(op,"stop")) {
+        if(save("stop","stop") || (!lock && active("",1)<0))return 2;
+        printf("REACT_STOP\trequested=1\n");return 0;
+    }
+    if(strcmp(op,"start"))return 2;
+    if(lock){printf("REACT_START\talready-running\n");return dry?2:0;}
+    if(dry) {
+        char head[65],product[65]; expires=sy_now_ms()+55000;
+        if(!vector(head,product)) {fprintf(stderr,"REACT REFUSE dry identity unknown\n");return 2;}
+        char preview[350];
+        if(cx_fmt(preview,sizeof preview,"REACT\twould-start\tname=%s\tkey=%s\trev=%s\tdebounce_s=%d\tadmit=%d\n",name,product,head,debounce,ceiling) ||
+           save("would-start.tsv",preview))return 2;
+        fputs(preview,stdout);
+        return 0;
+    }
+    int rc=sy_unlink("stop"); if(rc && rc!=-ENOENT)return 2;
+    if(phase("STARTING"))return 2;
+    int fds[2];int pid=sy_fork_session(production_loop,0,fds);
+    if(pid<0)return 2; sy_close(fds[0]);sy_close(fds[1]);
+    printf("REACT_START\tpid=%d\tttl=%d\n",pid,lifetime);return 0;
+}
 int main(int argc,char **argv) {
+    if(argc>=4 && !strcmp(argv[1],"--service"))return service(argc,argv);
     if (argc!=4 || !*argv[3] || strspn(argv[3],"0123456789")!=strlen(argv[3])) return 2;
     long ttl=strtol(argv[3],0,10);
     if (ttl<1 || ttl>7200 || sy_realpath(argv[1],repo,sizeof repo)<0 || sy_cwd(instance,sizeof instance)<0 ||
