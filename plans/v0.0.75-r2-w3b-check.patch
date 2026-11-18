@@ -1,0 +1,70 @@
+diff --git a/tools/check-closure-obj.cx b/tools/check-closure-obj.cx
+index a128ada..9a1d0b9 100644
+--- a/tools/check-closure-obj.cx
++++ b/tools/check-closure-obj.cx
+@@ -16,6 +16,12 @@
+      (4) the same flipped bytes handed straight to the product linker -> the product must
+          refuse or the program output must differ (no silent equal output);
+      (5) a closure name whose sha does not match its bytes -> rc 3.
++   W3b (RT_EXTERN_VA, printf-family core in the closure):
++     (6) the closure defines the global _u_vfmt; the hello user object only refers to it
++         (undefined), so the core is not carried per unit;
++     (7) a program with many formats (%d %s %f %x %5.2f %-8s %c %% through printf, a
++         non-literal format, snprintf, fprintf to stdout and stderr) gives the same stdout and
++         rc on both routes.
+    Work goes to $TMPDIR/check-closure-obj-PID (removed at the end on success).  Each child is
+    bounded at 50 s.  Product: $UNISACC_COM, default ./unisacc.com.
+    Prints CHECK lines and CLOSURE_OBJ_CHECK pass=N fail=M; rc 1 on any failure. */
+@@ -82,6 +88,39 @@ static const char *STRP =
+     "FILE *f=fopen(FP,\"w\");if(f){fprintf(f,\"via FILE %d\\n\",v[4]);fclose(f);}f=fopen(FP,\"r\");\n"
+     "if(f&&fgets(b,sizeof b,f))fputs(b,stdout);if(f)fclose(f);return 3;}\n";
+ 
++static const char *FMTP =
++    "#include <stdio.h>\nint main(int argc,char**argv){const char*f=argc>5?argv[1]:\"%d|%s|%x|%c|%%\\n\";char b[64];int n;\n"
++    "printf(\"%d %s %f %x %5.2f %-8s| %c %%\\n\",-42,\"abc\",3.25,255,2.71828,\"left\",'Z');printf(f,7,\"dyn\",0xbeef,'q');\n"
++    "n=snprintf(b,sizeof b,\"%05d/%-4s/%.3f\",12,\"ab\",1.5);fprintf(stdout,\"%s %d\\n\",b,n);fprintf(stderr,\"e %u\\n\",3u);return 3;}\n";
++
++/* 1 when ELF object PATH defines NAME (section index != 0), 0 when it only refers to it or
++   lacks it, -1 when the object cannot be read. */
++static unsigned long long le(const unsigned char *p, int n) {
++    unsigned long long v = 0; int i; for (i = n - 1; i >= 0; i--) v = v << 8 | p[i]; return v;
++}
++static int defines(const char *path, const char *name) {
++    unsigned char *b; long n = slurp(path, &b); int r = 0; size_t nl = strlen(name);
++    if (n < 64 || memcmp(b, "\177ELF\2\1", 6) || le(b + 58, 2) != 64) { free(b); return -1; }
++    unsigned long long sho = le(b + 40, 8), shn = le(b + 60, 2), i, j;
++    if (sho > (unsigned long long)n || shn > ((unsigned long long)n - sho) / 64) { free(b); return -1; }
++    for (i = 0; i < shn; i++) {
++        const unsigned char *s = b + sho + i * 64;
++        if (le(s + 4, 4) != 2) continue;                                   /* SHT_SYMTAB */
++        unsigned long long so = le(s + 24, 8), ss = le(s + 32, 8), lk = le(s + 40, 4);
++        if (lk >= shn || so > (unsigned long long)n || ss > (unsigned long long)n - so) { free(b); return -1; }
++        const unsigned char *t = b + sho + lk * 64;
++        unsigned long long to = le(t + 24, 8), ts = le(t + 32, 8);
++        if (to > (unsigned long long)n || ts > (unsigned long long)n - to) { free(b); return -1; }
++        for (j = 0; j + 24 <= ss; j += 24) {
++            const unsigned char *y = b + so + j; unsigned long long nm = le(y, 4);
++            if (nm + nl + 1 > ts || memcmp(b + to + nm, name, nl + 1)) continue;
++            if (le(y + 6, 2) != 0) r = 1; else if (!r) r = 2;              /* st_shndx */
++        }
++    }
++    free(b);
++    return r == 2 ? 0 : r;
++}
++
+ /* Whole-program -run vs closure link of one source; returns 1 when stdout and rc are equal. */
+ static int compare(const char *tag, const char *body, const char *clo) {
+     char src[2200], wo[2200], exe[2200], lo[2200], lg[2200];
+@@ -119,6 +158,12 @@ int main(void) {
+       cco_expect(n > 0 && !sy_sha256_hex(b, n, hx) && !strcmp(hx, s1), "sha-matches-bytes", "BUILT sha is not the file sha"); free(b); }
+     cco_expect(!r1 && compare("hello", HELLO, p1), "link-eq-whole-hello", "output or rc differ");
+     cco_expect(!r1 && compare("strprog", STRP, p1), "link-eq-whole-strprog", "output or rc differ");
++    cco_expect(!r1 && compare("fmt", FMTP, p1), "link-eq-whole-fmt", "output or rc differ");
++    { char uo[2200]; FMT(uo, sizeof uo, "%s/hello.exe.u.o", W);
++      int dc = r1 ? -1 : defines(p1, "_u_vfmt"), du = defines(uo, "_u_vfmt");
++      printf("INFO\t_u_vfmt closure=%d user=%d\n", dc, du);
++      cco_expect(dc == 1, "closure-defines-vfmt", "closure does not define _u_vfmt");
++      cco_expect(du == 0, "user-object-no-vfmt", "hello user object still carries _u_vfmt"); }
+ 
+     /* tamper: flip one byte in the middle, keep the content name */
+     unsigned char *b; long n = slurp(p1, &b);
