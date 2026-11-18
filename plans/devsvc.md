@@ -444,3 +444,11 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 
 更正(2026-11-18):上文"心跳跨度 752 秒、实际作业 41.724 秒"这一对数字里,实际作业 41.724 秒是对的,752 秒是计量伪差,不是调度空等:它由 heartbeat.tsv 相邻 end 行之差得出,而该文件只有 chain-step 子作业写行,中间别的相在跑也不写。kernels-g2 实际约 41 秒,compare 约 26.5 秒;整链(chain4 热)OWNER 到 EXIT 1613 秒,忙碌并集 1574.3 秒,空档仅 8.1 秒,真实浪费在五次 rc124 被杀(合计 440 秒)、降并行宽度、7 次 HOLD 与起链前准备约 30 秒。证据:release/evidence/chain-speedup-2026-11-18.tsv。
+
+## 链尾反应草案(B4,2026-11-18,只设计,未接真起)
+
+(1) 链:chain.done -> promote --check -> qualify(--resume 续跑分段)-> pack -> release-run --execute --dry。`sh ./unisacc.com tools/release-prep.cx -- --tail-plan COMMIT APE VERSION` 打印五步的命令、前置门与 on_fail=stop,不起任何进程。
+(2) 幂等键 (候选 APE sha256, 冻结提交号):某步对同键已有入仓或会话证据(promote 的 PROMOTE_CHECK OK、qualify 的 SUMMARY ape_sha256=APE、pack 的 SID VERIFIED、--dry 的门表)即记 DONE 不重跑;qualify 只有 CHECKPOINT 时走 --resume,UNKNOWN/INVALID 不得记 PASS。
+(3) 前置门:每步只在上一步证据对同键成立时触发;任何一步 rc 非 0 或门 FAIL 即停,发 react 事件 tail.stop(键、步名、rc、证据路径),不自动重试,同一失败连续两次上报。
+(4) 与 devsvc react 的接口:react 订阅 chain.done(bg-candidate 封条写出)事件,载荷带 rev 与 APE sha;react 只按 --tail-plan 的行顺序逐步调 devsvc x(每步有界 60 秒,pack/qualify 按其自身分段),每步完成发 tail.step(键、步、rc、证据);常驻、锁与截止由 devsvc 现有 react 框架负责,本草案不新起常驻。之后接 release-run --prepare 出草稿,公开仍由 --execute 人工确认触发。
+(5) 未做:react 侧订阅与执行器、同键证据探测的实现、对 0.0.75 实跑计时。
