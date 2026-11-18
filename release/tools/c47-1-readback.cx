@@ -1,10 +1,16 @@
 /* Read-only release rehearsal. ROOT TABLE NEW_OUT OLD_APE DRAFT.
  * TABLE is the single candidate source; no uploads or release edits.
- * NEW_OUT must be absolute and absent. Every child is bounded; stdout/stderr/rc are retained. */
+ * NEW_OUT must be absolute and absent. Every child is bounded; stdout/stderr/rc are retained.
+ * --list-steps lists the ordered names. Append --step NAME to the original five arguments
+ * to execute one step. --resume validates the input digest, prior receipts and material
+ * hashes. A completed step replays its sealed transcript. An incomplete step preserves
+ * its partial files and runs again. inputs.done and NAME.done/report are private to this mode. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 #pragma unisa use text.fmt
@@ -14,28 +20,177 @@ static RcCandidate candidate;
 static void die(const char *s){sy_eprintf("C47_READBACK REFUSED %s\n",s);sy_exit(1);}
 static void join(char *p,size_t cap,const char *dir,const char *file){if(cx_fmt(p,cap,"%s/%s",dir,file))die("path");}
 static void save(const char *label,const char *suffix,const char *b,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s.%s",out,label,suffix))die("receipt path");int fd=sy_open_new(p,0600);if(fd<0)die("receipt create");int rc=sy_write_all(fd,b,(long)n),closed=sy_close(fd);if(rc||closed)die("receipt write");}
-static np_result command(const char *label,char **v,const char *cwd,int bound){np_result r={0};char why[1024],status[64];if(np_run(v,cwd,0,bound,&r,why,sizeof why))die(why);save(label,"stdout",r.out,r.outn);save(label,"stderr",r.err,r.errn);int n=tx_snprintf(status,sizeof status,"rc=%d residue=%d\n",r.rc,r.residue);if(n<0||n>=(int)sizeof status)die("status length");save(label,"status",status,(size_t)n);if(r.outn&&sy_write_all(1,r.out,(long)r.outn))die("stdout");if(r.errn&&sy_write_all(2,r.err,(long)r.errn))die("stderr");if(r.rc||r.residue)die(label);sy_printf("READBACK_STEP %s PASS\n",label);return r;}
+static int segmented;
+static np_buf report;
+static void report_line(const char *fmt,...){
+    va_list ap;va_start(ap,fmt);
+    if(segmented){
+        char line[6000];int n=tx_vsnprintf(line,sizeof line,fmt,ap);
+        if(n<0 || n>=(int)sizeof line)die("report line");
+        np_put(&report,line,(size_t)n);
+    }else sy_vprintf(fmt,ap);
+    va_end(ap);
+}
+static np_result command(const char *label,char **v,const char *cwd,int bound){np_result r={0};char why[1024],status[64];if(np_run(v,cwd,0,bound,&r,why,sizeof why))die(why);save(label,"stdout",r.out,r.outn);save(label,"stderr",r.err,r.errn);int n=tx_snprintf(status,sizeof status,"rc=%d residue=%d\n",r.rc,r.residue);if(n<0||n>=(int)sizeof status)die("status length");save(label,"status",status,(size_t)n);if(segmented){np_put(&report,r.out,r.outn);}else if(r.outn&&sy_write_all(1,r.out,(long)r.outn))die("stdout");if(r.errn&&sy_write_all(2,r.err,(long)r.errn))die("stderr");if(r.rc||r.residue)die(label);report_line("READBACK_STEP %s PASS\n",label);return r;}
 static void run(const char *label,char **v,const char *cwd,int bound){np_result r=command(label,v,cwd,bound);np_free(&r);}
+static const char *steps[]={"metadata","tag","download","asset-sha","version","smoke","comm","layout-generate","layout-check","checksums","zip-members"};
+static char identity[65];
+/* The controller reads and executes these exact checkout paths. */
+static const char *scripts[]={"unisacc.com","tools/chain-step.cx","tools/check-run-comm.cx","tools/release-layout.cx","release/tools/c47-1-readback.cx"};
+static void fingerprint(np_buf *key,const char *file){
+    size_t n=0;char hex[65];char *s=cx_read(file,&n);
+    if(!s || sy_sha256_any_hex(s,(long)n,hex))die("checkpoint input unreadable");
+    mm_free(s);np_puts(key,hex);
+}
+static void bind_inputs(const char *table,const char *baseline,const char *draft){
+    np_buf b={0};char p[4600];
+    const char *args[]={root,table,out,baseline,draft};
+    for(int i=0;i<5;i++){
+        long len=tx_len(args[i],4096);
+        if(len<0 || len>=4096)die("checkpoint argument length");
+        np_put(&b,args[i],(size_t)len+1);
+        join(p,sizeof p,root,scripts[i]);fingerprint(&b,p);
+    }
+    fingerprint(&b,table);fingerprint(&b,baseline);
+    if(sy_sha256_any_hex(b.p,(long)b.n,identity))die("input identity");
+    mm_free(b.p);
+}
+static int has_command(int i,const char *draft){
+    return !(i==1 && tx_eqz(draft,"true")) && !(i==10 && !rcand_has_zip(candidate.version));
+}
+static void checkpoint(int i,int write,const char *draft){
+    char p[4600],seal[65],row[256];np_buf b={0};const char *suffix[]={"stdout","stderr","status"};
+    if(has_command(i,draft))for(int k=0;k<3;k++){
+        if(cx_fmt(p,sizeof p,"%s/%s.%s",out,steps[i],suffix[k]))die("checkpoint receipt path");
+        fingerprint(&b,p);
+    }
+    if(cx_fmt(p,sizeof p,"%s/%s.report",out,steps[i]))die("checkpoint report path");
+    fingerprint(&b,p);
+    if(sy_sha256_any_hex(b.p,(long)b.n,seal))die("checkpoint seal");
+    mm_free(b.p);
+    if(cx_fmt(row,sizeof row,"%s\t%s\t%s\n",steps[i],identity,seal) ||
+       cx_fmt(p,sizeof p,"%s/%s.done",out,steps[i]))die("checkpoint path");
+    if(write){save(steps[i],"done",row,tx_len(row,sizeof row));return;}
+    size_t n;char *s=cx_read(p,&n);
+    if(!s || !tx_same(s,(long)n,row,tx_len(row,sizeof row)))die("checkpoint mismatch");
+    mm_free(s);
+}
+/* An interrupted command may have created only some of its receipts. Keep
+ * those bytes under a fresh name before repeating that one operation. */
+static void preserve_partial(int step){
+    const char *suffix[]={"stdout","stderr","status","report"};
+    char dir[4400]="",leaf[100],src[4600],dst[4600];sy_stat_t st;
+    for(int i=0;i<5;i++){
+        if(i<4){
+            if(cx_fmt(leaf,sizeof leaf,"%s.%s",steps[step],suffix[i]))die("partial receipt name");
+        }else if(step==2 || step==7){
+            if(cx_fmt(leaf,sizeof leaf,"%s",step==2?"download":"layout"))die("partial material name");
+        }else continue;
+        join(src,sizeof src,out,leaf);
+        int err=sy_lstat(src,&st);if(err==-ENOENT)continue;
+        if(err)die("partial receipt stat");
+        if(!dir[0] && sy_mkdtemp(out,"interrupted-",dir,sizeof dir))die("partial receipt directory");
+        join(dst,sizeof dst,dir,leaf);
+        if(sy_rename(src,dst))die("preserve partial receipt");
+    }
+}
 int main(int argc,char **argv){
     char download[4400],layout[4400],p[4600],exe[4400],tool[4400],table[4096],why[1024],query[1024],version[128];int i;
-    if(argc!=6)die("usage: ROOT TABLE NEW_OUT OLD_APE true|false");
+    int step=-1,resume=0;
+    if(argc==2 && tx_eqz(argv[1],"--list-steps")){
+        for(i=0;i<11;i++)sy_printf("%s\n",steps[i]);
+        return 0;
+    }
+    if(argc!=6){
+        if((argc!=8 && argc!=9) || !tx_eqz(argv[6],"--step"))die("usage: ROOT TABLE NEW_OUT OLD_APE true|false");
+        for(i=0;i<11;i++)if(tx_eqz(argv[7],steps[i]))step=i;
+        segmented=1;resume=argc==9;
+        if(step<0 || (resume && !tx_eqz(argv[8],"--resume")))die("invalid readback step");
+    }
     if(sy_realpath(argv[1],root,sizeof root)<0||sy_realpath(argv[2],table,sizeof table)<0||argv[3][0]!='/'||(!tx_eqz(argv[5],"true")&&!tx_eqz(argv[5],"false")))die("arguments");
     if(rcand_load(table,&candidate,why,sizeof why))die(why);
-    if(cx_fmt(out,sizeof out,"%s",argv[3]))die("output path");int made=sy_mkdir(out,0700);if(made){sy_eprintf("NEW_OUT: %s\n",sy_strerror(made));die("NEW_OUT creation");}
+    if(cx_fmt(out,sizeof out,"%s",argv[3]))die("output path");
+    int fresh=step<0 || (step==0 && (!resume || sy_exists(out)==0));
+    if(fresh){
+        int made=sy_mkdir(out,0700);if(made){sy_eprintf("NEW_OUT: %s\n",sy_strerror(made));die("NEW_OUT creation");}
+    }else{sy_stat_t st;if(sy_lstat(out,&st) || st.kind!='d')die("step output directory");}
     join(download,sizeof download,out,"download");join(layout,sizeof layout,out,"layout");
-    if(cx_fmt(query,sizeof query,"if .tagName == \"%s\" and .isDraft == %s and .isPrerelease == false and .targetCommitish == \"%s\" then . else error(\"release metadata mismatch\") end",candidate.tag,argv[5],candidate.commit))die("metadata query");
-    char *metadata[]={"gh","release","view",candidate.tag,"--repo",candidate.repo,"--json","tagName,isDraft,isPrerelease,targetCommitish","--jq",query,0};run("metadata",metadata,root,15);
-    if(tx_eqz(argv[5],"false")){char endpoint[512];if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/git/ref/tags/%s",candidate.repo,candidate.tag))die("tag path");char *v[]={"gh","api",endpoint,"--jq",".object.sha",0};np_result r=command("tag",v,root,15);if(r.outn!=41||!tx_same(r.out,40,candidate.commit,40)||r.out[40]!='\n')die("tag commit");np_free(&r);}
-    char *fetch[]={"gh","release","download",candidate.tag,"--repo",candidate.repo,"--dir",download,"--pattern",candidate.name[0],"--pattern",candidate.name[1],"--pattern",candidate.name[2],"--pattern",candidate.name[3],0};run("download",fetch,root,25);
-    if(rcand_verify(&candidate,download,4,why,sizeof why))die(why);
-    char *hashes[]={"sha256sum","--",candidate.name[0],candidate.name[1],candidate.name[2],candidate.name[3],0};np_result hr=command("asset-sha",hashes,download,10);long pos=0;for(i=0;i<4;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",candidate.sha[i],candidate.name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die(role[i]);pos+=len;sy_printf("READBACK_SHA %s %s\n",candidate.name[i],candidate.sha[i]);}if(pos!=(long)hr.outn)die("asset SHA rows");np_free(&hr);
-    join(exe,sizeof exe,root,"unisacc.com");join(p,sizeof p,download,candidate.name[0]);
-    char *ver[]={"sh",p,"--version",0};np_result r=command("version",ver,root,10);int n=tx_snprintf(version,sizeof version,"unisacc %s\n",candidate.version);if(n<0||(size_t)n>=sizeof version||!tx_same(r.out,(long)r.outn,version,n))die("version mismatch");np_free(&r);
-    join(tool,sizeof tool,root,"tools/chain-step.cx");char *smoke[]={"sh",exe,tool,"--","smoke",p,0};run("smoke",smoke,root,45);
-    join(tool,sizeof tool,root,"tools/check-run-comm.cx");char *comm[]={"sh",exe,tool,"--",root,p,argv[4],0};run("comm",comm,root,45);
-    join(tool,sizeof tool,root,"tools/release-layout.cx");char *generate[]={"sh",exe,tool,"--","--candidate",table,download,layout,0};run("layout-generate",generate,root,45);
-    char *check[]={"sh",exe,tool,"--","--candidate",table,"--check",layout,0};run("layout-check",check,root,45);
-    char *sums[]={"sha256sum","--check",candidate.name[6],0};run("checksums",sums,layout,10);
-    if(rcand_has_zip(candidate.version)){char *members[]={"unzip","-Z1",candidate.name[5],0};r=command("zip-members",members,layout,10);const char *expected="slice-win-arm64\npkg.bin\nrun.cmd\nREADME-win-arm64.txt\n";if(!tx_same(r.out,(long)r.outn,expected,tx_len(expected,128)))die("zip members");np_free(&r);}else sy_printf("READBACK_STEP zip-members NOT_APPLICABLE version=%s no-zip-contract\n",candidate.version);
-    sy_printf("C47_1_READBACK PASS expected_draft=%s tag=%s version=%s commit=%s output=%s\n",argv[5],candidate.tag,candidate.version,candidate.commit,out);return 0;
+    np_result r={0};
+    if(step>=0){
+        bind_inputs(table,argv[4],argv[5]);
+        if(fresh)save("inputs","done",identity,64);
+        else{
+            char session[4600];join(session,sizeof session,out,"inputs.done");
+            size_t n;char *key=cx_read(session,&n);
+            if(!key || !tx_same(key,(long)n,identity,64))die("readback session input mismatch");
+            mm_free(key);
+        }
+        for(i=0;i<step;i++)checkpoint(i,0,argv[5]);
+        if(step>2 && rcand_verify(&candidate,download,4,why,sizeof why))die(why);
+        if(step>7 && rcand_verify(&candidate,layout,7,why,sizeof why))die(why);
+        if(resume){
+            char marker[4600];if(cx_fmt(marker,sizeof marker,"%s/%s.done",out,steps[step]))die("checkpoint path");
+            int exists=sy_exists(marker);
+            if(exists<0)die("checkpoint stat");
+            if(exists){
+                checkpoint(step,0,argv[5]);
+                if(step==2 && rcand_verify(&candidate,download,4,why,sizeof why))die(why);
+                if(step==7 && rcand_verify(&candidate,layout,7,why,sizeof why))die(why);
+                if(cx_fmt(marker,sizeof marker,"%s/%s.report",out,steps[step]))die("checkpoint report path");
+                size_t len;char *saved=cx_read(marker,&len);
+                if(!saved || sy_write_all(1,saved,(long)len))die("checkpoint report replay");
+                mm_free(saved);return 0;
+            }
+            preserve_partial(step);
+        }
+    }
+    if(step<0 || step==0){
+        if(cx_fmt(query,sizeof query,"if .tagName == \"%s\" and .isDraft == %s and .isPrerelease == false and .targetCommitish == \"%s\" then . else error(\"release metadata mismatch\") end",candidate.tag,argv[5],candidate.commit))die("metadata query");
+        char *metadata[]={"gh","release","view",candidate.tag,"--repo",candidate.repo,"--json","tagName,isDraft,isPrerelease,targetCommitish","--jq",query,0};run("metadata",metadata,root,15);
+    }
+    if(step<0 || step==1){
+        if(tx_eqz(argv[5],"false")){char endpoint[512];if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/git/ref/tags/%s",candidate.repo,candidate.tag))die("tag path");char *v[]={"gh","api",endpoint,"--jq",".object.sha",0};np_result r=command("tag",v,root,15);if(r.outn!=41||!tx_same(r.out,40,candidate.commit,40)||r.out[40]!='\n')die("tag commit");np_free(&r);}
+    }
+    if(step<0 || step==2){
+        char *fetch[]={"gh","release","download",candidate.tag,"--repo",candidate.repo,"--dir",download,"--pattern",candidate.name[0],"--pattern",candidate.name[1],"--pattern",candidate.name[2],"--pattern",candidate.name[3],0};run("download",fetch,root,25);
+        if(rcand_verify(&candidate,download,4,why,sizeof why))die(why);
+    }
+    if(step<0 || step==3){
+        char *hashes[]={"sha256sum","--",candidate.name[0],candidate.name[1],candidate.name[2],candidate.name[3],0};np_result hr=command("asset-sha",hashes,download,10);long pos=0;for(i=0;i<4;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",candidate.sha[i],candidate.name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die(role[i]);pos+=len;report_line("READBACK_SHA %s %s\n",candidate.name[i],candidate.sha[i]);}if(pos!=(long)hr.outn)die("asset SHA rows");np_free(&hr);
+    }
+    join(exe,sizeof exe,root,scripts[0]);join(p,sizeof p,download,candidate.name[0]);
+    if(step<0 || step==4){
+        char *ver[]={"sh",p,"--version",0};r=command("version",ver,root,10);int n=tx_snprintf(version,sizeof version,"unisacc %s\n",candidate.version);if(n<0||(size_t)n>=sizeof version||!tx_same(r.out,(long)r.outn,version,n))die("version mismatch");np_free(&r);
+    }
+    if(step<0 || step==5){
+        join(tool,sizeof tool,root,scripts[1]);char *smoke[]={"sh",exe,tool,"--","smoke",p,0};run("smoke",smoke,root,45);
+    }
+    if(step<0 || step==6){
+        join(tool,sizeof tool,root,scripts[2]);char *comm[]={"sh",exe,tool,"--",root,p,argv[4],0};run("comm",comm,root,45);
+    }
+    join(tool,sizeof tool,root,scripts[3]);
+    if(step<0 || step==7){
+        char *generate[]={"sh",exe,tool,"--","--candidate",table,download,layout,0};run("layout-generate",generate,root,45);
+    }
+    if(step<0 || step==8){
+        char *check[]={"sh",exe,tool,"--","--candidate",table,"--check",layout,0};run("layout-check",check,root,45);
+    }
+    if(step<0 || step==9){
+        char *sums[]={"sha256sum","--check",candidate.name[6],0};run("checksums",sums,layout,10);
+    }
+    if(step<0 || step==10){
+        if(rcand_has_zip(candidate.version)){char *members[]={"unzip","-Z1",candidate.name[5],0};r=command("zip-members",members,layout,10);const char *expected="slice-win-arm64\npkg.bin\nrun.cmd\nREADME-win-arm64.txt\n";if(!tx_same(r.out,(long)r.outn,expected,tx_len(expected,128)))die("zip members");np_free(&r);}else report_line("READBACK_STEP zip-members NOT_APPLICABLE version=%s no-zip-contract\n",candidate.version);
+    }
+    if(step<0 || step==10)report_line("C47_1_READBACK PASS expected_draft=%s tag=%s version=%s commit=%s output=%s\n",argv[5],candidate.tag,candidate.version,candidate.commit,out);
+    if(segmented){
+        char prior[65];
+        if(cx_fmt(prior,sizeof prior,"%s",identity))die("checkpoint identity");
+        bind_inputs(table,argv[4],argv[5]);
+        if(!tx_eqz(identity,prior))die("inputs changed during step");
+        save(steps[step],"report",report.p?report.p:"",report.n);
+        checkpoint(step,1,argv[5]);
+        if(sy_write_all(1,report.p,(long)report.n))die("stdout");
+        mm_free(report.p);
+    }
+    return 0;
 }

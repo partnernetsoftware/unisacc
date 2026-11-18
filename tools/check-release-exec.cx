@@ -27,6 +27,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
 
 static int failed;
 static char root[4096], td[4096], fx[4400], lay[4400], binp[4400], pathenv[8192], fakeenv[4500];
@@ -87,6 +88,7 @@ static const char *leafs[6] = {"unisacc.com", "pkg.bin", "slice-win-arm64", "uni
 static int fake_gh(int argc, char **argv) {
     char p[4400], q[4800]; char *t;
     flog("gh", argc, argv, 3);
+    if(argi(argc,argv,"api")>0){sy_printf("1111111111111111111111111111111111111111\n");return 0;}
     cx_fmt(p, sizeof p, "%s/state", fdir);
     if (argi(argc, argv, "view") > 0 && argi(argc, argv, "release") > 0) {
         t = slurp(p);
@@ -104,7 +106,7 @@ static int fake_gh(int argc, char **argv) {
     if (argi(argc, argv, "download") > 0) {
         int d = argi(argc, argv, "-D"); char flag[4400]; int corrupt;
         cx_fmt(flag, sizeof flag, "%s/corrupt-download", fdir); corrupt = sy_exists(flag) == 1;
-        if (d < 0) return 1;
+        if(d<0){d=argi(argc,argv,"--dir");if(d<0 || d+1>=argc || sy_mkdir(argv[d+1],0700))return 1;}
         for (int i = 0; i < 6; i++) {
             char a[4800];
             if (argi(argc, argv, "-p") > 0) { int want = 0; for (int k = 0; k < argc - 1; k++) if (tx_eqz(argv[k], "-p") && tx_eqz(argv[k + 1], leafs[i])) want = 1; if (!want) continue; }
@@ -132,6 +134,21 @@ static int fake_unisacc(int argc, char **argv) {
     char q[4400]; char *t;
     flog("unisacc", argc, argv, 3);
     if (argc < 4) return 3;
+    if(argv[3][0]=='/'){
+        const char *tool=strrchr(argv[3],'/')+1;
+        if(tx_eqz(tool,"chain-step.cx") || tx_eqz(tool,"check-run-comm.cx")){sy_printf("fixture child %s\n",tool);return 0;}
+        if(tx_eqz(tool,"release-layout.cx")){
+            if(argi(argc,argv,"--check")<0){
+                char src[4600],dst[4600];if(sy_mkdir(argv[argc-1],0700))return 1;
+                for(int i=0;i<6;i++){
+                    cx_fmt(src,sizeof src,"%s/layout/%s",fdir,leafs[i]);
+                    cx_fmt(dst,sizeof dst,"%s/%s",argv[argc-1],leafs[i]);
+                    if(sy_copy(src,dst,0600))return 1;
+                }
+            }
+            sy_printf("layout fixture\n");return 0;
+        }
+    }
     if (tx_eqz(argv[3], "tools/ratchets.cx")) { sy_printf("RATCHETS\tok=15\tfail=0\n"); return 0; }
     if (tx_eqz(argv[3], "tools/devsvc.cx")) {
         int mi=argi(argc,argv,"-m");
@@ -146,6 +163,7 @@ static int fake_unisacc(int argc, char **argv) {
     }
     if (tx_eqz(argv[3], "tools/release-decide.cx")) { cx_fmt(q, sizeof q, "%s/decision.txt", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
     if (tx_eqz(argv[3], "release/tools/c47-1-readback.cx")) {
+        if(argi(argc,argv,"--list-steps")>0){sy_printf("metadata\nzip-members\n");return 0;}
         cx_fmt(q,sizeof q,"%s/readback-timeout-once",fdir);
         if(sy_exists(q)==1){
             if(argc<10 || sy_mkdir(argv[7],0700))return 2;
@@ -161,6 +179,11 @@ static int fake_unisacc(int argc, char **argv) {
         }
         cx_fmt(q, sizeof q, "%s/readback-fail", fdir);
         sy_printf("READBACK_STEP fake %s\n", sy_exists(q) == 1 ? "FAIL" : "PASS");
+        if(argc>11 && tx_eqz(argv[11],"zip-members") && sy_exists(q)==0){
+            RcCandidate c;char why[256];
+            if(rcand_load(argv[6],&c,why,sizeof why))return 2;
+            sy_printf("C47_1_READBACK PASS expected_draft=false tag=%s version=%s commit=%s output=%s\n",c.tag,c.version,c.commit,argv[7]);
+        }
         return sy_exists(q) == 1 ? 1 : 0;
     }
     if (tx_eqz(argv[3], "tools/release-exec.cx")) {   /* the release-run hook: forward to the real tool */
@@ -457,15 +480,58 @@ static void part_c(void) {
     free(c);
 }
 
+static int oracle(char **args,np_buf *result){
+    char why[256];char *env[]={pathenv,fakeenv,0};np_result r={0};
+    int rc=np_run(args,fx,env,55,&r,why,sizeof why)?125:r.rc;
+    if(result && !rc)np_put(result,r.out,r.outn);
+    if(rc && r.errn)sy_write_all(2,r.err,(long)r.errn);
+    np_free(&r);return rc;
+}
+static void part_r(void){
+    char image[4600],source[4600],table[4600],dest[4600],saved[4600],p[4600],q[4600],oldape[4600];
+    char *steps[]={"metadata","tag","download","asset-sha","version","smoke","comm","layout-generate","layout-check","checksums","zip-members"};
+    fixture(99,0,0,1);put(td,"state","false");put(td,"oldape","old");
+    cx_fmt(oldape,sizeof oldape,"%s/oldape",td);cx_fmt(table,sizeof table,"%s/release/candidate.tsv",fx);
+    cx_fmt(dest,sizeof dest,"%s/result",td);cx_fmt(saved,sizeof saved,"%s/whole",td);cx_fmt(image,sizeof image,"%s/oracle",td);
+    cx_fmt(source,sizeof source,"%s/release/tools/c47-1-readback.cx",root);
+    char *compile[]={"sh",(char*)leafs[0],source,"-o",image,0};if(sh(compile,root,0,0))die("readback build");
+    cx_fmt(p,sizeof p,"%s/release/tools",fx);if(sy_mkdir(p,0700))die("fixture oracle dir");
+    cx_fmt(q,sizeof q,"%s/c47-1-readback.cx",p);if(sy_copy(source,q,0600))die("fixture oracle");
+    put(fx,"tools/chain-step.cx","smoke fixture");put(fx,"tools/check-run-comm.cx","comm fixture");put(fx,"tools/release-layout.cx","layout fixture");
+    for(int i=0;i<6;i++){cx_fmt(p,sizeof p,"%s/%s",lay,leafs[i]);cx_fmt(q,sizeof q,"%s/remote/%s",td,leafs[i]);if(sy_copy(p,q,0600))die("fixture asset");}
+    char *args[]={image,fx,table,dest,oldape,"false",0,0,0,0};
+    np_buf whole={0},parts={0},replay={0};int rc=oracle(args,&whole);
+    ck(!rc && whole.n && has(whole.p,"C47_1_READBACK PASS "),"readback.whole");
+    if(sy_rename(dest,saved))die("save full evidence");
+    args[6]="--step";args[7]=steps[1];ck(oracle(args,0)!=0,"readback.missing-prerequisite");
+    for(int i=0;i<11 && !rc;i++){
+        args[7]=steps[i];
+        if(i==1){put(dest,"tag.stdout","interrupted");args[8]="--resume";}
+        rc=oracle(args,&parts);
+        if(i==1)ck(!rc,"readback.resume-interrupted-step");
+    }
+    ck(!rc && parts.n==whole.n && !memcmp(parts.p,whole.p,parts.n),"readback.identical-stdout");
+    char *diff[]={"diff","-qr","--exclude=*.done","--exclude=*.report","--exclude=interrupted-*",saved,dest,0};
+    ck(!rc && !sh(diff,root,0,0),"readback.identical-evidence");
+    args[7]=steps[10];args[8]="--resume";int resumed=oracle(args,&replay);
+    ck(!resumed && replay.n && has(replay.p,"C47_1_READBACK PASS "),"readback.resume-complete");
+    put(td,"oldape","different");ck(oracle(args,0)!=0,"readback.changed-input");put(td,"oldape","old");
+    cx_fmt(p,sizeof p,"%s/metadata.done",dest);
+    char *valid=slurp(p);put(dest,"metadata.done","damaged");
+    ck(oracle(args,0)!=0,"readback.damaged-marker");
+    if(valid){put(dest,"metadata.done",valid);free(valid);}
+    put(dest,"metadata.stdout","corrupt");ck(oracle(args,0)!=0,"readback.damaged-receipt");
+    free(whole.p);free(parts.p);free(replay.p);
+}
 int main(int argc, char **argv) {
-    const char *part = "nabc", *path;
+    const char *part = "nabcr", *path;
     if(argc==2 && tx_eqz(argv[1],"--fixture-image")){sy_printf("RELEASE_FIXTURE_IMAGE\n");return 0;}
     if (argc >= 3 && tx_eqz(argv[1], "--fake")) {
         const char *d = sy_env("CHECK_RX_FAKE");
         if (!d || cx_fmt(fdir, sizeof fdir, "%s", d)) return 3;
         return tx_eqz(argv[2], "gh") ? fake_gh(argc, argv) : fake_unisacc(argc, argv);
     }
-    if (argc == 3 && tx_eqz(argv[1], "--part")) part = argv[2];
+    if ((argc==3 || argc==4 || argc==5) && tx_eqz(argv[1],"--part"))part=argv[2];
     if (sy_cwd(root, sizeof root)) die("cwd");
     if (cx_fmt(td, sizeof td, "/tmp/check-release-exec-%d", sy_pid())) die("td");
     rmrf(td);
@@ -481,11 +547,13 @@ int main(int argc, char **argv) {
         }
         char *v[]={"sh",leafs[0],"tools/release-exec.cx","-o",execbin,0};
         sy_spawn_t o;sy_spawn_init(&o);o.argv=v;o.cwd=root;o.pgroup=-1;o.deadline_ms=30000;
-        if(sy_proc_spawn(&o,&prep))die("prepare release executable");preparing=1;
+        if(argc>=4){if(sy_copy(argv[3],execbin,0700))die("release-exec material");}
+        else{if(sy_proc_spawn(&o,&prep))die("prepare release executable");preparing=1;}
         if(strchr(part,'b')){
             if(cx_fmt(hookbin,sizeof hookbin,"%s/hook",td))die("hook path");
             char *h[]={"sh",leafs[0],"tools/release-run.cx","-o",hookbin,0};
-            o.argv=h;if(sy_proc_spawn(&o,&hook))die("prepare hook");preparing_hook=1;
+            if(argc==5){if(sy_realpath(argv[4],hookbin,sizeof hookbin)<0)die("release-run material");}
+            else{o.argv=h;if(sy_proc_spawn(&o,&hook))die("prepare hook");preparing_hook=1;}
         }
     }
     cx_fmt(fx, sizeof fx, "%s/repo", td); cx_fmt(lay, sizeof lay, "%s/layout", td); cx_fmt(binp, sizeof binp, "%s/bin", td);
@@ -497,6 +565,7 @@ int main(int argc, char **argv) {
     if (strchr(part, 'a')) part_a();
     if (strchr(part, 'b')) part_b();
     if (strchr(part, 'c')) part_c();
+    if (strchr(part, 'r')) part_r();
     rmrf(td);
     sy_printf("CHECK_RELEASE_EXEC\t%s\tpart=%s\tfailed=%d\n", failed ? "FAIL" : "PASS", part, failed);
     return failed ? 1 : 0;

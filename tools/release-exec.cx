@@ -745,11 +745,12 @@ static void step_publish(void) {
 static void step_readback(void) {
     char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
     char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
-    char *rb[] = {"sh", checkout_product, "release/tools/c47-1-readback.cx", "--", here, "release/candidate.tsv", nout, baseline, "false", 0};
+    char *rb[] = {"sh", checkout_product, "release/tools/c47-1-readback.cx", "--", here, "release/candidate.tsv", nout, baseline, "false","--step",0,"--resume",0};
     cx_fmt(fresh, sizeof fresh, "%s/fresh", outdir);
     cx_fmt(nout, sizeof nout, "%s/readback", outdir);
     if (dry) {
         int e = evidence_readback_ok("public-readback.txt", 1);
+        rb[10]="NAME";
         show(dl, e == 1 ? "DONE" : "DRY"); show(rb, e == 1 ? "DONE" : "DRY");
         if (e < 0) gate_deferred("READBACK", "no public-readback.txt evidence");
         else if (!e) refuse("READBACK", "public-readback.txt lacks rc=0, isDraft=false or the APE sha");
@@ -769,11 +770,41 @@ static void step_readback(void) {
       if (!seen) refuse("PUBLIC_SHA", "public SHA256SUMS does not list the candidate APE sha"); }
     gate_pass("PUBLIC_SHA", hex);
     cx_fmt(p, sizeof p, "%s/public-readback.txt", evdir);
+    char *list[]={rb[0],rb[1],rb[2],"--","--list-steps",0};
+    char plan[400],pointer[4600],parent[4400];
+    if(run(list,55,plan,sizeof plan) || !plan[0])refuse("READBACK","missing readback plan");
+    if(cx_fmt(pointer,sizeof pointer,"%s/readback-%s.active",outdir,hex))die("readback session path");
     for (attempt = 0; attempt < 2 && rc != 0; attempt++) {
-        char parent[4400];if(sy_mkdtemp(outdir,"readback",parent,sizeof parent) || cx_fmt(nout,sizeof nout,"%s/result",parent))die("fresh readback output directory");
-        show(rb, "RUN");
-        rc = run_to(rb, 55, p);
-        sy_printf("RUN\t%d\treadback\tattempt=%d\trc=%d\n", cur_step, attempt + 1, rc);
+        if(!attempt && from_step>=6 && sy_exists(pointer)==1){
+            char *leaf=slurp(pointer,&sn);
+            if(!leaf || sn!=16 || memcmp(leaf,"readback",8) || strspn(leaf+8,"abcdefghijklmnopqrstuvwxyz0123456789")!=8 ||
+               cx_fmt(parent,sizeof parent,"%s/%s",outdir,leaf))die("invalid readback session");
+            free(leaf);
+            sy_stat_t st;if(sy_lstat(parent,&st) || st.kind!='d')die("invalid readback directory");
+        }else{
+            if(sy_mkdtemp(outdir,"readback",parent,sizeof parent))die("fresh readback output directory");
+            const char *leaf=strrchr(parent,'/')+1;
+            if(sy_write_atomic(pointer,leaf,strlen(leaf),0600))die("readback session save");
+        }
+        if(cx_fmt(nout,sizeof nout,"%s/result",parent))die("readback result path");
+        np_buf transcript={0};long at=0,ll;const char *line;rc=0;
+        while(!rc && line_next(plan,tlen(plan),&at,&line,&ll)){
+            char name[64],log[4600];
+            if(ll<1 || ll>=sizeof name || cx_fmt(name,sizeof name,"%.*s",(int)ll,line) || strspn(name,"abcdefghijklmnopqrstuvwxyz-")!=(size_t)ll ||
+               cx_fmt(log,sizeof log,"%s/%s.log",parent,name))die("invalid readback phase");
+            rb[10]=name;show(rb,"RUN");long start=sy_now_ms();
+            rc=run_to(rb,55,log);
+            sy_printf("RUN\t%d\treadback\tphase=%s\tattempt=%d\tms=%ld\trc=%d\n",cur_step,name,attempt+1,sy_now_ms()-start,rc);
+            if(!rc){long len;char *chunk=slurp(log,&len);if(!chunk)die("missing readback output");np_put(&transcript,chunk,len);free(chunk);}
+        }
+        if(!rc){
+            char final[5200];
+            if(cx_fmt(final,sizeof final,"C47_1_READBACK PASS expected_draft=false tag=%s version=%s commit=%s output=%s\n",cand.tag,cand.version,cand.commit,nout))die("readback verdict length");
+            size_t len=strlen(final);
+            if(transcript.n<len || memcmp(transcript.p+transcript.n-len,final,len))rc=1;
+        }
+        if(cx_write(p,transcript.p?transcript.p:"",transcript.n))die("readback transcript");
+        free(transcript.p);
         if (rc != 124) break;   /* only the documented outer timeout is retried, once */
     }
     { long n; char *t = slurp(p, &n); np_buf b = {0}; now_text();
