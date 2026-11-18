@@ -83,7 +83,8 @@ int main(int argc,char **argv) {
     const char *mode=argc==1 ? "normal" : argv[1], *p;
     int sky=!strcmp(mode,"sky") || !strcmp(mode,"cloudless");
     int crowns=!strcmp(mode,"crowns") || !strcmp(mode,"sparse");
-    if(argc>2 || (!sky && !crowns && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
+    int ground=!strcmp(mode,"ground") || !strcmp(mode,"flat-ground");
+    if(argc>2 || (!sky && !crowns && !ground && strcmp(mode,"normal") && strcmp(mode,"sealed") && strcmp(mode,"bare") && strcmp(mode,"low-crown"))) return 2;
     if(!survey()) { printf("FAIL D3_SURVEY\n"); return 2; }
     if(!getcwd(cwd,sizeof cwd)) return 2;
     used=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d3-bridge.html?mode=%s&pixels=",cwd,mode);
@@ -100,7 +101,18 @@ int main(int argc,char **argv) {
             used+=w;
         }
     }
-    for(i=0;!sky && !crowns && i<n;i++) {
+    if(ground) {
+        n=144;
+        for(i=0;i<n;i++) {
+            int j=i%72;
+            int x=(i<72?215:355)+j%12*(i<72?34:8);
+            int y=(i<72?576:424)+j/12*(i<72?23:25);
+            int w=tx_snprintf(url+used,sizeof url-used,"%s%d,%d",i?";":"",x,y);
+            if(w<0 || w>=(int)sizeof url-used) return 2;
+            used+=w;
+        }
+    }
+    for(i=0;!sky && !crowns && !ground && i<n;i++) {
         double x=points[i].x-10, y=points[i].y-1, z=points[i].z-19;
         double across=.8*x-.6*z, ground=.6*x+.8*z;
         double depth=(9*y-40*ground)/41;
@@ -120,7 +132,7 @@ int main(int argc,char **argv) {
     if(rc || !p) { printf("FAIL D3_BROWSER rc=%d\n",rc); return 2; }
     p+=strlen("<output id=\"pixels\">");
     {
-    int sky_red[4]={0}, leaves=0,dark=0;
+    int sky_red[4]={0}, leaves=0,dark=0,grass=0,rock=0;
     for(i=0;i<n;i++) {
         int c[3], j, observed, want=points[i].material;
         for(j=0;j<3;j++) {
@@ -141,6 +153,11 @@ int main(int argc,char **argv) {
                 leaves++;
                 dark+=c[1]<86;
             }
+            continue;
+        }
+        if(ground) {
+            if(i<72) grass+=c[1]>c[0]+23 && c[0]<106 && c[2]<65;
+            else rock+=c[2]>c[1] && c[1]>c[0] && c[2]-c[0]<42;
             continue;
         }
         observed=classify(c[0],c[1],c[2]);
@@ -166,6 +183,11 @@ int main(int argc,char **argv) {
         failed+=leaves<43;
         failed+=dark*100<leaves*25 || dark*100>leaves*60;
         printf("D3_CROWNS\tlobes_per_tree=%d leaves=%d dark=%d failed=%d\n",rows-1,leaves,dark,failed);
+    }
+    if(ground) {
+        failed+=grass<8;
+        failed+=rock<10;
+        printf("D3_GROUND\tgrass=%d rock=%d failed=%d\n",grass,rock,failed);
     }
     }
     if(strncmp(p,"</output>",9)) return 2;

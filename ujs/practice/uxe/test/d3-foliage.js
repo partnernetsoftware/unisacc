@@ -1,7 +1,7 @@
 // A rounded, slightly flattened lobe. Normals use the ellipsoid gradient.
-export function leafMesh() {
+export function leafMesh(flatten = 0.79) {
   const positions = [], normals = [];
-  const rings = 8, slices = 14, flatten = 0.79;
+  const rings = 8, slices = 14;
   function vertex(ring, slice) {
     const angle = Math.PI * ring / rings;
     const azimuth = 2 * Math.PI * slice / slices;
@@ -16,6 +16,21 @@ export function leafMesh() {
     vertex(ring,slice); vertex(ring+1,slice+1); vertex(ring,slice+1);
   }
   return {positions:new Float32Array(positions),normals:new Float32Array(normals),vCount:positions.length/3};
+}
+
+export function grassMesh() {
+  const positions = [];
+  for (let i=0;i<7;i++) {
+    const angle = 2.4*i;
+    const x = Math.sin(angle), z = Math.cos(angle);
+    const base = .03 + i*.021;
+    positions.push(x*base-z*.043,0,z*base+x*.043,
+      x*base+z*.043,0,z*base-x*.043,
+      x*(base+.22),.34+(i%3)*.08,z*(base+.22));
+  }
+  const normals = new Float32Array(positions.length);
+  for (let i=1;i<normals.length;i+=3) normals[i] = 1;
+  return {positions:new Float32Array(positions),normals,vCount:positions.length/3};
 }
 
 export async function crownLobes() {

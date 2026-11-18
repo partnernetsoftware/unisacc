@@ -9,18 +9,21 @@ import { createWebGLRenderer } from "../renderer-webgl.js";
 import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_BOX, MESH_OCTA, MESH_PLANE, MESH_POINTS, allMeshes } from "../meshes.js";
 import { archMeshes, loadBays } from "./d3-arch.js";
-import { crownLobes, leafMesh } from "./d3-foliage.js";
+import { crownLobes, grassMesh, leafMesh } from "./d3-foliage.js";
 
 const params = new URLSearchParams(location.search);
 const mode = params.get("mode");
-const textured = params.get("style") === "masonry" || mode === "crowns" || mode === "sparse";
+const textured = params.get("style") === "masonry" ||
+  ["crowns","sparse","ground","flat-ground"].includes(mode);
 const scene = new Scene();
 const groups = new Map();
 const colors = {
   stone:[211,184,140], barrel:[119,113,106], plaster:[246,222,183],
   leaf:[50,110,62], grass:[140,160,73], roof:[72,91,110],
   abutment:[151,129,108], timber:[95,65,44], window:[244,160,67],
-  leafLight:[97,148,70], leafDark:[40,90,67]
+  leafLight:[97,148,70], leafDark:[40,90,67],
+  meadowShade:[70,115,45], meadowLight:[160,181,82],
+  cliffShade:[94,108,125], cliffLight:[132,145,158]
 };
 function instance(material, mesh, x,y,z,size, yaw=0,pitch=0,roll=0) {
   const key=material+"-"+mesh;
@@ -53,6 +56,26 @@ for(const x of [-15.6,-12.4]) {
 }
 for(const x of [-15,-13]) instance("window",MESH_BOX,x,7.8,1.08,.54);
 instance("grass",MESH_PLANE,0,-2.01,0,110);
+if (textured && mode !== "flat-ground") {
+  const blades = allMeshes().length + extraMeshes.length;
+  const boulder = blades+1;
+  extraMeshes.push(grassMesh(),leafMesh(.59));
+  let seed=713;
+  const random=()=>{
+    seed=( Math.imul(seed,1664525)+1013904223)>>>0;
+    return seed/4294967296;
+  };
+  for(let row=0;row<23;row++) for(let col=0;col<54;col++) {
+    const x = -22 + .74*(col+random()), z = 2.8+.52*(row+random());
+    instance(random()<.66?"meadowShade":"meadowLight",blades,x,-2.008,z,
+      .7+random()*.75,random()*Math.PI*2);
+  }
+  for(let i=0;i<36;i++) {
+    const x=-17.7+random()*5.25, y=-1.8+random()*5.6;
+    instance(i%3===0?"cliffLight":"cliffShade",boulder,x,y,2.55+random()*.56,
+      .68+random()*.80,random()*Math.PI,random()*.5);
+  }
+}
 if (mode!=="bare") {
   const trees=[[5.5,1.75,6.625,1.4],[11.6,1.1,6.5,2.3],[13,3.1,5.2,3.2],[-10.7,.1,5,1.8]];
   const ellipsoid = allMeshes().length + extraMeshes.length;
@@ -74,10 +97,11 @@ if (mode!=="bare") {
 for(const [name,{material,mesh,items}] of groups) {
   const cloud=scene.instances(name,items.length,colors[material].map(c=>c/255));
   cloud.meshId=mesh; cloud.metalness=0; cloud.roughness=1;
-  if (textured && (material === "stone" || material === "barrel" || material.startsWith("leaf"))) {
-    cloud.surfaceMap = material.startsWith("leaf") ? "wash" : "masonry";
+  if (textured && (material === "stone" || material === "barrel" ||
+      material === "grass" || /^(leaf|meadow|cliff)/.test(material))) {
+    cloud.surfaceMap = material === "stone" || material === "barrel" ? "masonry" : "wash";
     cloud.mapId = 1;
-    cloud.toonLevels = 4;
+    if (material !== "grass") cloud.toonLevels = 4;
   }
   items.forEach((fields,i)=>cloud.set(i,...fields));
 }
