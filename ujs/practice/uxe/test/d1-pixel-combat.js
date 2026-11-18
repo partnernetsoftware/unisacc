@@ -45,15 +45,22 @@ function screen(flight,enemy,tick) {
     depth
   };
 }
-function enemySprite(context,enemy,pose) {
+function enemySprite(context,enemy,pose,fall=0) {
   const size=pose.depth<57?2:1;
   const sprite=targets[enemy.kind];
   sprite.forEach((row,j)=>{
     [...row].forEach((glyph,i)=>{
-      if(paint[glyph]) point(context,paint[glyph],pose.x+(i-8)*size,pose.y+(j-2)*size,size,size);
+      if(paint[glyph]) point(context,paint[glyph],pose.x+(i-8)*size,
+        pose.y+(j-2)*size+(i-8)*fall,size,size);
     });
   });
-  for(let k=-3;k<=3;k++) point(context,marker,pose.x+k,pose.y-11+3-Math.abs(k));
+  if(!fall) for(let k=-3;k<=3;k++) point(context,marker,pose.x+k,pose.y-11+3-Math.abs(k));
+}
+function smoke(context,x,y,age,life) {
+  const radius=1+Math.floor(age/3);
+  const color=age<life/2?"#9ba2af":"#676778";
+  point(context,color,x-radius,y,2*radius+1,2);
+  point(context,color,x-radius+1,y-1,2*radius-1,4);
 }
 function brackets(context,x,y) {
   for(const dx of [-1,1]) for(const dy of [-1,1]) {
@@ -70,9 +77,11 @@ export function combatModel(context,query) {
   function damage(enemy,power,tick,pose) {
     if(enemy.hp<=0) return;
     enemy.hp-=power;
+    bursts.unshift({tick,x:pose.x,y:pose.y,kind:"smoke"});
     if(enemy.hp<=0) {
+      enemy.fall=tick;
       enemy.respawn=tick+110;
-      bursts.push({tick,x:pose.x,y:pose.y,kind:"burst"});
+      bursts.unshift({tick,x:pose.x,y:pose.y,kind:"burst"});
     }
   }
   function update(flight,tick,gun,missile) {
@@ -113,6 +122,12 @@ export function combatModel(context,query) {
       if(!missiles) missiles=3;
     }
     for(const enemy of visible) if(enemy.hp>0) enemySprite(context,enemy,enemy.pose);
+    if(!query.has("no-fall")) for(const enemy of enemies) {
+      const age=tick-enemy.fall;
+      if(enemy.hp>0 || !enemy.pose || age>=29) continue;
+      const x=enemy.pose.x+age*.48, y=enemy.pose.y+age*age*.12;
+      enemySprite(context,enemy,{...enemy.pose,x,y},.15+age*.025);
+    }
     if(acquired && selected.hp>0 && !query.has("no-lock")) brackets(context,selected.pose.x,selected.pose.y);
     locked=Boolean(acquired && selected.hp>0);
     for(const shot of rounds) if(shot.target.pose) {
@@ -120,21 +135,24 @@ export function combatModel(context,query) {
       const x=213+(shot.target.pose.x-213)*t,y=166+(shot.target.pose.y-166)*t;
       point(context,"#f7f1cf",x,y,2,3);
       point(context,"#a9c3c9",x,y+4,1,3);
+      if(!query.has("no-plume")) bursts.push({tick,x,y:y+6,kind:"plume"});
     }
     for(let i=bursts.length-1;i>=0;i--) {
       const event=bursts[i],age=tick-event.tick;
-      if(age>(event.kind==="tracer"?4:30)) { bursts.splice(i,1); continue; }
+      const life={tracer:4,burst:30,smoke:18,plume:11}[event.kind];
+      if(age>life) { bursts.splice(i,1); continue; }
       if(event.kind==="tracer") {
         for(const lane of [-1,1]) {
           const f=.2+age*.18;
           point(context,"#ffeaa3",213+lane*28+(event.x-213-lane*28)*f,162+(event.y-162)*f,1,2);
         }
-      } else {
+      } else if(event.kind==="burst") {
         for(let j=0;j<22;j++) {
           const x=event.x+(j%7-3)*(1+age*.23),y=event.y+(j%5-2)*(1+age*.20)-age*.20;
           point(context,age<9?(j%3===0?"#ffeb86":"#f7793d"):(j%3===0?"#6e6878":"#9790a0"),x,y,2+(j%3),2);
         }
-      }
+      } else if(event.kind==="plume" || !query.has("no-hit-smoke"))
+        smoke(context,event.x+age*.19,event.y-age*.43,age,life);
     }
     for(const wing of [-1,1]) for(let i=0;i<18;i++) {
       const life=(i+tick)%18;
