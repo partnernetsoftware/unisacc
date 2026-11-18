@@ -24,17 +24,18 @@ static int restore_byte(const char *path, int off, unsigned char old) {
     fclose(f);
     return 0;
 }
-static int run_check_only(const char *tool,const char *only) {
+static int run_check_args(const char *tool,const char *option,const char *value) {
     char *av[8];
     char *out = 0;
     size_t on = 0;
     int rc;
     av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = (char *)tool; av[3] = "--"; av[4] = "--check"; av[5] = 0;
-    if(only) { av[5]="--only"; av[6]=(char *)only; av[7]=0; }
+    if(option) { av[5]=(char *)option; av[6]=(char *)value; av[7]=0; }
     rc = cx_runv_timeout(av, 40, &out, &on);
     if (out) { fwrite(out, 1, on, stdout); free(out); }
     return rc;
 }
+static int run_check_only(const char *tool,const char *only) { return run_check_args(tool,only?"--only":0,only); }
 static int run_check(const char *tool) { return run_check_only(tool,0); }
 static void one(const char *lab, const char *file, int off, const char *tool) {
     unsigned char old = 0;
@@ -46,23 +47,37 @@ static void one(const char *lab, const char *file, int off, const char *tool) {
     restore_byte(file, off, old);
 }
 static void d1(void) {
+    const char *audio="ujs/practice/uxe/test/d1-audio-data.js";
+    unsigned char old=0;
+    int rc;
     one("d1-airframe", "ujs/practice/uxe/test/d1-airframe-data.js", 20, "tools/gen-d1-airframe.cx");
     one("d1-flight", "ujs/practice/uxe/test/d1-flight.wasm", 20, "tools/gen-d1-airframe.cx");
     ck_record(&failed, run_check("tools/gen-d1-airframe.cx") == 0, "d1-restored");
+    if(xor_byte(audio,20,&old)) { ck_record(&failed,0,audio); return; }
+    rc=run_check_args("tools/gen-d1-airframe.cx","--audio",0);
+    ck_record(&failed,restore_byte(audio,20,old)==0 && rc==1,audio);
+    ck_record(&failed,run_check_args("tools/gen-d1-airframe.cx","--audio",0)==0,"audio-restored");
 }
-static void pages_next(void) {
-    const char *tool="tools/gen-uxe-pages.cx", *page="fly-next";
-    const char *paths[]={"docs/uxe/fly-next/index.html","docs/uxe/fly-next/d1-pixel-world.js",
-        "docs/uxe/fly-next/d1-flight.wasm"};
+static void pages_assets(const char *page,const char **paths,int count) {
+    const char *tool="tools/gen-uxe-pages.cx";
     int i,rc;
-    ck_record(&failed, run_check_only(tool,page)==0,"fly-next-original");
-    for(i=0;i<3;i++) {
+    ck_record(&failed, run_check_only(tool,page)==0,page);
+    for(i=0;i<count;i++) {
         unsigned char old=0;
         if(xor_byte(paths[i],20,&old)) { ck_record(&failed, 0,paths[i]); continue; }
         rc=run_check_only(tool,page);
         ck_record(&failed, restore_byte(paths[i],20,old)==0 && rc==1,paths[i]);
     }
-    ck_record(&failed, run_check_only(tool,page)==0,"fly-next-restored");
+    ck_record(&failed, run_check_only(tool,page)==0,page);
+}
+static void pages_next(void) {
+    const char *paths[]={"docs/uxe/fly-next/index.html","docs/uxe/fly-next/d1-pixel-world.js",
+        "docs/uxe/fly-next/d1-flight.wasm","docs/uxe/fly-next/d1-audio.js","docs/uxe/fly-next/d1-audio-data.js"};
+    pages_assets("fly-next",paths,5);
+}
+static void pages_water(void) {
+    const char *paths[]={"docs/uxe/water-keeps/index.html","docs/uxe/water-keeps/water-pixel.js"};
+    pages_assets("water-keeps",paths,2);
 }
 int main(int argc, char **argv) {
     if(argc==2 && !strcmp(argv[1],"--d1")) {
@@ -72,6 +87,11 @@ int main(int argc, char **argv) {
     }
     if(argc==2 && !strcmp(argv[1],"--pages-next")) {
         pages_next();
+        printf("CHECK_GEN_SWEEP\tfailed=%d\n", failed);
+        return failed ? 1 : 0;
+    }
+    if(argc==2 && !strcmp(argv[1],"--pages-water")) {
+        pages_water();
         printf("CHECK_GEN_SWEEP\tfailed=%d\n", failed);
         return failed ? 1 : 0;
     }
@@ -89,6 +109,7 @@ int main(int argc, char **argv) {
     ck_record(&failed, run_check("tools/gen-d3-masonry.cx") == 0, "masonry-restored");
     d1();
     pages_next();
+    pages_water();
     printf("CHECK_GEN_SWEEP\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

@@ -16,13 +16,41 @@ static int publish(const char *path, const char *bytes, size_t n, int check) {
     return fclose(file) || written!=n ? 2 : 0;
 }
 
+static int audio(int check) {
+    static const char *names[]={"engine","gun","missile","explosion","lock"};
+    char output[1024],*facts,*line;
+    size_t size=0;
+    int row=0,at,rc;
+    facts=cx_read("ujs/practice/uxe/test/d1-audio.tsv",&size);
+    if(!facts || !size) return 2;
+    at=tx_snprintf(output,sizeof output,"// Generated from d1-audio.tsv.\nexport const sound={\n");
+    for(line=strtok(facts,"\n");line;line=strtok(0,"\n")) {
+        char name[16],wave[16];
+        int from,to,gain,attack,duration,used=0;
+        if(row>=5 || sscanf(line,"%15s %15s %d %d %d %d %d%n",name,wave,&from,&to,&gain,&attack,&duration,&used)!=7 ||
+           line[used] || strcmp(name,names[row]) ||
+           (strcmp(wave,"sine") && strcmp(wave,"triangle") && strcmp(wave,"square") && strcmp(wave,"sawtooth")) ||
+           from<20 || from>4000 || to<1 || to>4000 || gain<1 || gain>300 ||
+           attack<1 || attack>=duration || duration>1000) { free(facts); return 2; }
+        at+=tx_snprintf(output+at,sizeof output-at,"  %s:[\"%s\",%d,%d,%d,%d,%d],\n",name,wave,from,to,gain,attack,duration);
+        row++;
+    }
+    free(facts);
+    if(row!=5) return 2;
+    at+=tx_snprintf(output+at,sizeof output-at,"};\n");
+    rc=publish("ujs/practice/uxe/test/d1-audio-data.js",output,(size_t)at,check);
+    printf("GEN_D1_AUDIO rows=%d failed=%d\n",row,rc);
+    return rc;
+}
+
 int main(int argc, char **argv) {
     char output[4096], wasm[128], *facts, *line, *compiled, *log=0;
     size_t size=0, n=0;
     int layers=0, paints=0, parts=0, at=0, rc, check;
     char *args[]={"sh","./ujs/ujs.com","ujs/tests/d1-flight.ujs","-o",wasm,0};
-    if(argc!=2 || (strcmp(argv[1],"--check") && strcmp(argv[1],"--write"))) return 2;
+    if((argc!=2 && argc!=3) || (strcmp(argv[1],"--check") && strcmp(argv[1],"--write"))) return 2;
     check=!strcmp(argv[1],"--check");
+    if(argc==3) return strcmp(argv[2],"--audio")?2:audio(check);
     facts=cx_read("ujs/practice/uxe/test/d1-airframe.tsv",&size);
     if(!facts || !size) return 2;
     at=tx_snprintf(output,sizeof output,"// Generated from d1-airframe.tsv.\nexport const layers=[\n");

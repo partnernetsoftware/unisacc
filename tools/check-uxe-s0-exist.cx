@@ -1,10 +1,200 @@
 #pragma unisa use cxlib.ckassert
 #pragma unisa use chrome_dom
 #pragma unisa use sys.sha
+#pragma unisa use text.fmt
 /* tools/check-uxe-s0-exist.cx -- 13 元素包围盒内外色差;规格列哈希锁.
  */
 
 static int failed;
+
+static unsigned d2_grain(int x,int y) {
+    unsigned n=(unsigned)(x+71)*374761393u ^ (unsigned)(y+97)*668265263u;
+    n=(n^(n>>13))*1274126177u;
+    return (n^(n>>16))&255;
+}
+
+static const char *d2_rgb(const char *p,int *rgb) {
+    int i;
+    for(i=0;i<3;i++) {
+        int n=0;
+        if(*p<'0' || *p>'9') return 0;
+        while(*p>='0' && *p<='9') {
+            n=n*10+*p++-'0';
+            if(n>255) return 0;
+        }
+        rgb[i]=n;
+        if(i<2 && *p++!=',') return 0;
+    }
+    return p;
+}
+
+static const char *d2_render(const char *url,char **out) {
+    char profile[120],option[150];
+    char *av[]={"google-chrome","--headless=new","--disable-gpu","--disable-background-networking",
+        "--allow-file-access-from-files","--window-size=1280,807","--virtual-time-budget=5000",
+        "--dump-dom",option,(char *)url,0};
+    const char *tag="<output id=\"pixels\">",*p;
+    size_t size=0;
+    int rc;
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d2-pixel-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,12,out,&size);
+    chd_wipe(profile);
+    p=*out?strstr(*out,tag):0;
+    return !rc && p?p+strlen(tag):0;
+}
+
+static int d2_clusters(const int *columns,int gap) {
+    int x,last=-426,groups=0;
+    for(x=0;x<426;x++) if(columns[x]) {
+        groups+=x-last>gap;
+        last=x;
+    }
+    return groups;
+}
+
+static int check_d2_surface(const char *mutation) {
+    static const int region[7][6]={{221,101,248,111,2,2},{200,148,259,166,2,2},
+        {125,212,151,229,2,2},{110,133,303,219,2,2},{42,144,163,225,2,2},
+        {278,119,426,226,2,2},{0,94,426,220,2,2}};
+    static const int ink[4][3]={{233,181,112},{189,142,83},{56,74,52},{255,228,165}};
+    char cwd[800],url[1500],*out=0;
+    int samples[7]={0},counts[7]={0},brightness[3]={0};
+    int at,i,x,y,rc;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/demo/water-keeps/pixel.html?%s&zones=",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return 2;
+    for(i=0;i<7;i++) {
+        const int *r=region[i];
+        int n=tx_snprintf(url+at,sizeof url-at,"%s%d,%d,%d,%d,%d,%d",i?";":"",r[0],r[1],r[2],r[3],r[4],r[5]);
+        if(n<0 || n>=(int)sizeof url-at) return 2;
+        at+=n;
+    }
+    p=d2_render(url,&out);
+    if(!p) { free(out); return 2; }
+    for(i=0;i<7;i++) {
+        const int *r=region[i];
+        for(y=r[1];y<r[3];y+=r[5]) for(x=r[0];x<r[2];x+=r[4]) {
+            int rgb[3];
+            p=d2_rgb(p,rgb);
+            if(!p) { free(out); return 2; }
+            if(i<6 || y+r[5]<r[3] || x+r[4]<r[2]) {
+                if(*p++!=',') { free(out); return 2; }
+            }
+            if(i<3) {
+                brightness[i]+=3*rgb[0]+6*rgb[1]+rgb[2];
+                counts[i]+=i==2?rgb[1]>=rgb[0]-4 && rgb[2]>=55:
+                    rgb[0]-rgb[1]>=14 && rgb[1]-rgb[2]>=12;
+            } else counts[i]+=rgb[0]==ink[i-3][0] && rgb[1]==ink[i-3][1] && rgb[2]==ink[i-3][2];
+            samples[i]++;
+        }
+    }
+    rc=strncmp(p,"</output>",9)!=0;
+    free(out);
+    if(rc) return 2;
+    for(i=0;i<3;i++) brightness[i]/=10*samples[i];
+    printf("D2_SURFACE luma_far_mid_near=%d,%d,%d hue_gold_far_mid=%d,%d hue_teal_near=%d ripple=%d dock=%d reed=%d firefly=%d\n",
+        brightness[0],brightness[1],brightness[2],counts[0]*100/samples[0],
+        counts[1]*100/samples[1],counts[2]*100/samples[2],counts[3],counts[4],counts[5],counts[6]);
+    return brightness[0]<brightness[1]+8 || brightness[1]<brightness[2]+14 ||
+        counts[0]*100<50*samples[0] || counts[1]*100<45*samples[1] || counts[2]*100<50*samples[2] ||
+        counts[3]<40 || counts[4]<6 || counts[5]<45 || counts[6]<4;
+}
+
+static int check_d2_composition(const char *mutation) {
+    static const int region[6][6]={{9,10,420,239,23,13},{1,125,426,126,2,1},
+        {117,110,342,119,1,2},{143,128,337,149,1,2},{143,154,337,175,2,1},{40,180,415,230,3,3}};
+    static const int paint[5][3]={{101,58,42},{255,233,163},{255,117,82},{203,103,77},{108,130,67}};
+    char cwd[800],url[1500],*out=0;
+    int counts[6]={0},samples[6]={0},lamp_columns[426]={0},lotus_columns[426]={0};
+    int at,i,x,y,lamps,lotus,flowers,result;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/demo/water-keeps/pixel.html?%s&zones=",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return 2;
+    for(i=0;i<6;i++) {
+        const int *r=region[i];
+        int n=tx_snprintf(url+at,sizeof url-at,"%s%d,%d,%d,%d,%d,%d",i?";":"",r[0],r[1],r[2],r[3],r[4],r[5]);
+        if(n<0 || n>=(int)sizeof url-at) return 2;
+        at+=n;
+    }
+    p=d2_render(url,&out);
+    if(!p) { free(out); return 2; }
+    for(i=0;i<6;i++) {
+        const int *r=region[i];
+        for(y=r[1];y<r[3];y+=r[5]) for(x=r[0];x<r[2];x+=r[4]) {
+            int rgb[3],visible;
+            p=d2_rgb(p,rgb);
+            if(!p) { free(out); return 2; }
+            if(i<5 || y+r[5]<r[3] || x+r[4]<r[2]) {
+                if(*p++!=',') { free(out); return 2; }
+            }
+            visible=i==0?rgb[0]-rgb[1]>=18 && rgb[1]-rgb[2]>=14:
+                rgb[0]==paint[i-1][0] && rgb[1]==paint[i-1][1] && rgb[2]==paint[i-1][2];
+            samples[i]++;
+            counts[i]+=visible;
+            if(visible && i==2) lamp_columns[x]=1;
+            if(visible && i==3) lotus_columns[x]=1;
+        }
+    }
+    result=strncmp(p,"</output>",9)!=0;
+    free(out);
+    if(result) return 2;
+    lamps=d2_clusters(lamp_columns,2);
+    lotus=d2_clusters(lotus_columns,2);
+    flowers=d2_clusters(lotus_columns,8);
+    printf("D2_COMPOSITION warm_pct=%d bridge_width_pct=%d bridge_lights=%d lotus_clusters=%d lotus_lights=%d lotus_reflection=%d pad_samples=%d/%d\n",
+        counts[0]*100/samples[0],counts[1]*100/samples[1],lamps,flowers,lotus,counts[4],counts[5],samples[5]);
+    return counts[0]*100<65*samples[0] || counts[1]*100<40*samples[1] || lamps<5 ||
+        flowers<3 || lotus<7 || counts[4]<12 || counts[5]<45;
+}
+
+static int check_pixel_water(const char *mutation) {
+    static const int sky[8][3]={{151,113,80},{83,72,113},{47,49,92},{32,70,86},
+        {86,111,149},{42,52,65},{22,28,66},{75,95,122}};
+    static const int lamps[2][3]={{255,240,175},{101,58,42}};
+    char cwd[800],url[2800],*out=0;
+    const char *p;
+    int at,x,y,i,j,n=0,glints=0,lamp=0,bridge=0,progress=0,rc;
+    int shade=(d2_grain(2,0)&3)-1;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/demo/water-keeps/pixel.html?%s&probe=0,223,167;0,234,125",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return 2;
+    for(y=139;y<=191;y+=4) for(x=265;x<=301;x+=4) {
+        int w=tx_snprintf(url+at,sizeof url-at,";0,%d,%d",x,y);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+        at+=w; n++;
+    }
+    for(i=0;i<8;i++) {
+        /* Under W, speed approaches 1.65 from .35. Sample 30 units past each frontier. */
+        int sample=i?(i*216+30)*100/165+16:0;
+        int w=tx_snprintf(url+at,sizeof url-at,";%d,5,0",sample);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+        at+=w;
+    }
+    p=d2_render(url,&out);
+    if(!p) { free(out); return 2; }
+    for(i=0;i<2+n+8;i++) {
+        int got[3];
+        p=d2_rgb(p,got);
+        if(!p || (i<2+n+7 && *p++!=',')) { free(out); return 2; }
+        if(i==0) lamp=got[0]==lamps[0][0] && got[1]==lamps[0][1] && got[2]==lamps[0][2];
+        else if(i==1) bridge=got[0]==lamps[1][0] && got[1]==lamps[1][1] && got[2]==lamps[1][2];
+        else if(i<2+n) glints+=got[0]>196 && got[1]>150 && got[2]<170 && got[0]>got[1]+12;
+        else {
+            int different=0;
+            for(j=0;j<3;j++) different|=got[j]!=sky[i-2-n][j]+shade;
+            progress+=!different;
+        }
+    }
+    rc=strncmp(p,"</output>",9)!=0;
+    free(out);
+    if(rc) return 2;
+    printf("D2_PIXEL lantern=%d bridge=%d reflection_samples=%d/%d realms=%d/8\n",lamp,bridge,glints,n,progress);
+    return !lamp || !bridge || glints<12 || progress!=8;
+}
+
 /* 29^2 times the sum of the three channel variances; identical scale for both frames. */
 static long strip_variance(const char *dom) {
     const char *p = dom ? strstr(dom, "<pre id=\"hud\">") : 0;
@@ -38,6 +228,17 @@ int main(int argc, char **argv) {
     const char *pre = "file://";
     const char *suf = "/ujs/plans/demo-v2/look-dev/water-keeps-s0-uxe.html";
     const char *p, *q;
+    if(argc==2 && !strcmp(argv[1],"pixel-water")) return check_pixel_water("");
+    if(argc==2 && !strcmp(argv[1],"pixel-composition")) return check_d2_composition("");
+    if(argc==2 && !strcmp(argv[1],"pixel-surface")) return check_d2_surface("");
+    if(argc==2 && (!strcmp(argv[1],"mud-water") || !strcmp(argv[1],"flat-ripples") ||
+        !strcmp(argv[1],"flat-reflection") || !strcmp(argv[1],"no-dock") ||
+        !strcmp(argv[1],"thin-reeds") || !strcmp(argv[1],"no-fireflies"))) return check_d2_surface(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"cool-dusk") || !strcmp(argv[1],"narrow-bridge") ||
+        !strcmp(argv[1],"no-bridge-lights") || !strcmp(argv[1],"no-lotus") ||
+        !strcmp(argv[1],"no-foreground-lilies"))) return check_d2_composition(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"no-lamp") || !strcmp(argv[1],"no-bridge") ||
+        !strcmp(argv[1],"no-reflection") || !strcmp(argv[1],"frozen-course"))) return check_pixel_water(argv[1]);
     if (!getcwd(cwd, sizeof cwd)) return 2;
     tf = fopen("ujs/plans/demo-v2/look-dev/s0-elements.tsv", "r");
     if (!tf) { printf("S0_EXIST_NO_TSV\n"); return 2; }

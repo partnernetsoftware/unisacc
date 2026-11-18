@@ -217,7 +217,7 @@ static const char *browser(char *url,char **out,int stage) {
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
     int attempt;
-    if(stage==8) {
+    if(stage==8 || stage==9) {
         args[2]="--disable-gpu";
         args[3]="--disable-component-update";
     }
@@ -635,12 +635,78 @@ static int check_combat(const char *mutation,int published) {
     return marker_fail || lock_fail || hit_fail || ammo_fail;
 }
 
+static int check_audio(const char *mutation) {
+    static const int points[]={2,42,82,202,402,802};
+    char cwd[1024],url[1950],wave[16],*out=0,*facts;
+    size_t size=0;
+    const char *p;
+    int engine,slope,start,end,gain,attack,duration,actual[5],i,failed=0;
+    facts=cx_read("ujs/practice/uxe/test/d1-audio.tsv",&size);
+    if(!facts || !size) return input_error("audio-facts",facts);
+    p=strstr(facts,"\nlock\t");
+    if(!p || sscanf(facts,"engine %15s %d %d",wave,&engine,&slope)!=3 ||
+        sscanf(p," lock %15s %d %d %d %d %d",wave,&start,&end,&gain,&attack,&duration)!=6 ||
+        strcmp(wave,"sine") || start!=800 || end!=800) return input_error("audio-facts",facts);
+    free(facts);
+    if(!getcwd(cwd,sizeof cwd)) return input_error("audio-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?freeze-targets&%s&audio=%d,%d,%d,%d,%d,%d",
+        cwd,mutation,points[0],points[1],points[2],points[3],points[4],points[5]);
+    p=browser(url,&out,9);
+    if(!p) return input_error("audio-browser",out);
+    for(i=0;i<5;i++) actual[i]=take_channel(&p,',');
+    failed=actual[0]!=1 || actual[1]!=1 || actual[2]!=1 || actual[3]!=1 || actual[4]!=engine+28*slope;
+    printf("D1_AUDIO_EVENTS gun=%d missile=%d explosion=%d lock=%d engine_hz=%d failed=%d\n",
+        actual[0],actual[1],actual[2],actual[3],actual[4],failed);
+    for(i=0;i<6;i++) {
+        int got,used=0,n=points[i],rise=attack*8,stop=duration*8;
+        double envelope=n<rise?(double)n/rise:n<stop?(double)(stop-n)/(stop-rise):0;
+        int expected=(int)(.5+gain*10*envelope*.9510565163);
+        int bad;
+        if(sscanf(p,"%d%n",&got,&used)!=1 || used<=0) return input_error("audio-sample",out);
+        p+=used;
+        bad=abs(got-expected)>5;
+        if(i<5) {
+            if(*p!=',') return input_error("audio-sample",out);
+            p++;
+        }
+        printf("D1_AUDIO_PCM n=%d actual=%d expected=%d failed=%d\n",n,got,expected,bad);
+        failed+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("audio-trailer",out);
+    free(out);
+    return failed!=0;
+}
+
 static void pursuing_left(int tick,int *x,int *y) {
     int phase=(tick-30)%96;
     int sweep=phase<24?phase:phase<72?48-phase:phase-96;
     double depth=114.5+tick/3;
     *x=(int)(213.5+151*(-49+tick%72/6+.65*sweep)/depth);
     *y=(int)(113.5+151*(-17+.18*sweep)/depth);
+}
+
+static int check_waves(const char *mutation) {
+    static const int rgb[][3]={{35,52,77},{232,234,219},{232,234,219},{35,52,77},
+        {35,52,77},{232,234,219},{255,116,106}};
+    char cwd[1024],url[1950],*out=0;
+    const char *p;
+    int i,j,wrong=0;
+    int join_x=(int)(213.5+151*(-49+30)/157.0);
+    int join_y=(int)(113.5+151*(38-55-3)/157.0)-8;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("waves-cwd",0);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&waves=1,31,216;35,408,230;52,408,230;53,408,230;88,31,216;89,31,216;89,%d,%d",
+        cwd,mutation,join_x,join_y);
+    p=browser(url,&out,8);
+    if(!p) return input_error("waves-browser",out);
+    for(i=0;i<7;i++) {
+        int bad=0;
+        for(j=0;j<3;j++) bad|=take_channel(&p,i==6 && j==2?0:',')!=rgb[i][j];
+        printf("D1_WAVE probe=%d failed=%d\n",i,bad);
+        wrong+=bad;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("waves-trailer",out);
+    free(out);
+    return wrong!=0;
 }
 
 static int check_skirmish(const char *mutation) {
@@ -654,7 +720,7 @@ static int check_skirmish(const char *mutation) {
     bolt_x=(int)(.5+x+(213-x)*15.0/22);
     bolt_y=(int)(.5+y+(158-y)*15.0/22);
     pursuing_left(55,&x,&y);
-    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?hold-course&%s&skirmish=18,409,228;55,%d,%d;55,%d,%d;63,376,227;63,380,227;149,352,227;0,380,227;0,409,228",
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?hold-course&%s&skirmish=18,409,228;55,%d,%d;55,%d,%d;63,376,227;63,380,227;142,352,227;0,380,227;0,409,228",
         cwd,mutation,x,y-8,bolt_x,bolt_y);
     p=browser(url,&out,8);
     if(!p) return input_error("skirmish-browser",out);
@@ -817,6 +883,8 @@ typedef struct {
 } ChromeInput;
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
+typedef struct { int x,z,speed,tick; } LiveWater;
+enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -914,6 +982,17 @@ static int exercise_battle(ChromeInput *c) {
     return !restarted;
 }
 
+static int read_audio_events(ChromeInput *c) {
+    char text[80];
+    int gun,missile,explosion,lock,failed;
+    if(!cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.querySelector('output').dataset.audio||''\"}") ||
+        !cdp_string(c,"\"value\":\"",text,sizeof text) ||
+        sscanf(text,"%d,%d,%d,%d",&gun,&missile,&explosion,&lock)!=4) return input_error("cdp-audio-events",0);
+    failed=gun!=1 || missile!=1 || explosion!=1 || lock<1;
+    printf("D1_PAGES_AUDIO gun=%d missile=%d explosion=%d lock=%d failed=%d\n",gun,missile,explosion,lock,failed);
+    return failed;
+}
+
 static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int field,LiveFlight *state) {
     int old=field==0?state->heading:field==1?state->ammo:state->missiles;
     int changed=0;
@@ -927,22 +1006,125 @@ static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int
     return changed;
 }
 
-static int exercise_keyboard(ChromeInput *c,const char *url,int battle) {
-    LiveFlight state;
+static int cdp_navigate(ChromeInput *c,const char *url) {
     char target[100],params[1300];
-    int original,turned,ammo,missiles,change,i,failed=0;
-    long end;
     if(!cdp_call(c,"Target.createTarget","{\"url\":\"about:blank\"}") ||
-        !cdp_string(c,"\"targetId\":\"",target,sizeof target)) return input_error("cdp-target",0);
+        !cdp_string(c,"\"targetId\":\"",target,sizeof target)) return 0;
     tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
     if(!cdp_call(c,"Target.attachToTarget",params) ||
-        !cdp_string(c,"\"sessionId\":\"",c->session,sizeof c->session)) return input_error("cdp-attach",0);
+        !cdp_string(c,"\"sessionId\":\"",c->session,sizeof c->session)) return 0;
     tx_snprintf(params,sizeof params,"{\"url\":\"%s\"}",url);
-    if(!cdp_call(c,"Page.navigate",params)) return input_error("cdp-navigate",0);
+    return cdp_call(c,"Page.navigate",params);
+}
+
+static int read_water(ChromeInput *c,LiveWater *water) {
+    char value[100];
+    if(!cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.querySelector('output')?.textContent||''\"}") ||
+        !cdp_string(c,"\"value\":\"",value,sizeof value)) return 0;
+    return sscanf(value,"%d,%d,%d,%d",&water->x,&water->z,&water->speed,&water->tick)==4;
+}
+
+static double water_sine(double x) {
+    double square;
+    while(x>3.14159265359) x-=6.28318530718;
+    if(x>1.570796326795) x=3.14159265359-x;
+    if(x< -1.570796326795) x= -3.14159265359-x;
+    square=x*x;
+    return x*(1-square*(1.0/6-square*(1.0/120-square*(1.0/5040-square/362880))));
+}
+
+static int water_right_edge(int z) {
+    return (int)(12300+5400*water_sine(z/49000.0)+4300*water_sine(z/117000.0)+1900*water_sine(z/39000.0));
+}
+
+static int exercise_water(ChromeInput *c) {
+    LiveWater start,open,at,reverse;
+    int i,forward=0,steered=0,edge=0,braked=0,left=0,back=0;
+    long end=sy_now_ms()+4000;
+    for(i=0;!read_water(c,&start);i++) {
+        if(i>=90 || sy_now_ms()>=end) return input_error("cdp-water-ready",0);
+        sy_sleep_ms(35);
+    }
+    open=start;
+    if(!keyboard(c,"w","KeyW",87,1)) return input_error("cdp-water-accelerate",0);
+    end=sy_now_ms()+2000;
+    for(i=0;i<55 && sy_now_ms()<end;i++) {
+        if(read_water(c,&open) && open.z-start.z>=8000 && open.speed>=950) { forward=1; break; }
+        sy_sleep_ms(35);
+    }
+    if(!keyboard(c,"d","KeyD",68,1)) return input_error("cdp-water-right",0);
+    at=open;
+    end=sy_now_ms()+7200;
+    for(i=0;i<180 && sy_now_ms()<end;i++) {
+        if(read_water(c,&at)) {
+            steered|=at.x-open.x>=4500;
+            if(abs(at.x-water_right_edge(at.z))<=500) {
+                edge=1;
+                if(at.speed<=550 && at.speed+400<open.speed) { braked=1; break; }
+            }
+        }
+        sy_sleep_ms(40);
+    }
+    if(!keyboard(c,"d","KeyD",68,0) || !keyboard(c,"a","KeyA",65,1)) return input_error("cdp-water-left",0);
+    end=sy_now_ms()+1300;
+    for(i=0;i<36 && sy_now_ms()<end;i++) {
+        if(read_water(c,&reverse) && reverse.x<=at.x-600) { left=1; break; }
+        sy_sleep_ms(35);
+    }
+    if(!keyboard(c,"a","KeyA",65,0) || !keyboard(c,"w","KeyW",87,0) ||
+        !keyboard(c,"s","KeyS",83,1)) return input_error("cdp-water-reverse",0);
+    end=sy_now_ms()+1750;
+    reverse=at;
+    for(i=0;i<48 && sy_now_ms()<end;i++) {
+        LiveWater next;
+        if(read_water(c,&next)) {
+            back=next.speed< -100 && next.z<reverse.z;
+            reverse=next;
+            if(back) break;
+        }
+        sy_sleep_ms(35);
+    }
+    if(!keyboard(c,"s","KeyS",83,0)) return input_error("cdp-water-stop",0);
+    printf("D2_PAGES_INPUT W=%d D=%d A=%d S=%d bank=%d braked=%d x=%d->%d z=%d->%d speed=%d->%d\n",
+        forward,steered,left,back,edge,braked,open.x,at.x,start.z,at.z,open.speed,at.speed);
+    return !forward || !steered || !left || !back || !edge || !braked;
+}
+
+static int exercise_water_auto(ChromeInput *c) {
+    int i;
+    long end=sy_now_ms()+4000;
+    char title[100]="";
+    for(i=0;i<80 && sy_now_ms()<end;i++) {
+        if(cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.title\"}") &&
+            cdp_string(c,"\"value\":\"",title,sizeof title) &&
+            (!strcmp(title,"WATER_OK") || !strcmp(title,"WATER_FAIL") || !strcmp(title,"WATER_ERR"))) break;
+        sy_sleep_ms(35);
+    }
+    printf("D2_PAGES_AUTO title=%s expected=WATER_OK\n",title);
+    return strcmp(title,"WATER_OK")!=0;
+}
+
+static int exercise_keyboard(ChromeInput *c,int battle) {
+    LiveFlight state;
+    int original,turned,ammo,missiles,change,i,failed=0;
+    long end;
     end=sy_now_ms()+6000;
     for(i=0;!read_flight(c,&state);i++) {
         if(sy_now_ms()>=end || i>=100) return input_error("cdp-ready",0);
         sy_sleep_ms(35);
+    }
+    if(battle==LIVE_MUTE) {
+        int muted;
+        for(i=1;i>=0;i--) {
+            char value[20];
+            if(!keyboard(c,"n","KeyN",78,1) || !keyboard(c,"n","KeyN",78,0) ||
+                !cdp_call(c,"Runtime.evaluate","{\"expression\":\"String(Number(document.querySelector('aside').textContent.endsWith('静音')))\"}") ||
+                !cdp_string(c,"\"value\":\"",value,sizeof value)) return input_error("cdp-audio-key",0);
+            muted=atoi(value);
+            printf("D1_AUDIO_KEY key=N muted=%d expected=%d\n",muted,i);
+            if(muted!=i) return 1;
+        }
+        return 0;
     }
     if(battle) {
         LiveBattle initial;
@@ -978,8 +1160,9 @@ static int exercise_keyboard(ChromeInput *c,const char *url,int battle) {
     failed+=state.frames<13 || state.elapsed<600 || state.gap<33000;
     printf("D1_PLAY\tframes=%d elapsed_ms=%d fps_milli=%d minimum_frame_us=%d lock_fps=30 failed=%d\n",
         state.frames,state.elapsed,state.elapsed?1000000*(state.frames-2)/state.elapsed:0,state.gap,failed);
-    if(failed) return 1;
-    return battle?exercise_battle(c):0;
+    if(failed || !battle) return !!failed;
+    failed=read_audio_events(c);
+    return failed?failed:exercise_battle(c);
 }
 
 static int check_pages_keyboard(const char *mutation,int battle) {
@@ -992,8 +1175,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
         "--remote-debugging-pipe","--window-size=1280,807",option,"about:blank",0};
     int rc,n;
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    n=tx_snprintf(url,sizeof url,"file://%s/docs/uxe/fly-next/index.html?input-test=1%s&%s",cwd,
-        battle?"&hold-course":"",mutation);
+    n=tx_snprintf(url,sizeof url,"file://%s/%s?%s&%s",cwd,
+        battle>=LIVE_WATER?"docs/uxe/water-keeps/index.html":
+        battle==LIVE_MUTE?"ujs/practice/uxe/test/d1-pixel-a.html":"docs/uxe/fly-next/index.html",
+        battle==LIVE_WATER_AUTO?"auto=1":battle==LIVE_BATTLE?"input-test=1&hold-course":"input-test=1",mutation);
     if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -1003,7 +1188,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
     rc=sy_proc_spawn(&launch,&c.child);
     if(rc) return input_error("cdp-spawn",0);
     c.deadline=sy_now_ms()+22500;
-    rc=exercise_keyboard(&c,url,battle);
+    if(!cdp_navigate(&c,url)) rc=input_error("cdp-navigate",0);
+    else if(battle==LIVE_WATER) rc=exercise_water(&c);
+    else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
+    else rc=exercise_keyboard(&c,battle);
     sy_close(c.child.in_fd);
     sy_close(c.child.out_fd);
     sy_proc_kill(&c.child,9);
@@ -1029,6 +1217,12 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"pages-battle")) return check_pages_keyboard("",1);
     if(argc==2 && !strcmp(argv[1],"pages-no-return-fire")) return check_pages_keyboard("no-return-fire",1);
     if(argc==2 && !strcmp(argv[1],"pages-no-restart")) return check_pages_keyboard("no-restart",1);
+    if(argc==2 && !strcmp(argv[1],"pages-no-lock-sound")) return check_pages_keyboard("no-lock-sound",LIVE_BATTLE);
+    if(argc==2 && !strcmp(argv[1],"water-pages-input")) return check_pages_keyboard("",LIVE_WATER);
+    if(argc==2 && !strcmp(argv[1],"water-pages-no-bank-slow")) return check_pages_keyboard("no-bank-slow",LIVE_WATER);
+    if(argc==2 && !strcmp(argv[1],"water-pages-no-steer-key")) return check_pages_keyboard("no-steer-key",LIVE_WATER);
+    if(argc==2 && !strcmp(argv[1],"water-pages-auto")) return check_pages_keyboard("",LIVE_WATER_AUTO);
+    if(argc==2 && !strcmp(argv[1],"water-pages-bad-auto")) return check_pages_keyboard("bad-auto-title",LIVE_WATER_AUTO);
     if(argc==2 && !strcmp(argv[1],"terrain")) return check_terrain("",0);
     if(argc==2 && (!strcmp(argv[1],"wrong-seed") || !strcmp(argv[1],"wrong-bands") || !strcmp(argv[1],"muted-palette")))
         return check_terrain(argv[1],0);
@@ -1039,6 +1233,12 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"viewport")) return check_viewport("");
     if(argc==2 && !strcmp(argv[1],"short-canvas")) return check_viewport(argv[1]);
     if(argc==2 && !strcmp(argv[1],"skirmish")) return check_skirmish("");
+    if(argc==2 && !strcmp(argv[1],"waves")) return check_waves("");
+    if(argc==2 && (!strcmp(argv[1],"light-as-heavy") || !strcmp(argv[1],"weak-heavy") ||
+        !strcmp(argv[1],"no-wave"))) return check_waves(argv[1]);
+    if(argc==2 && !strcmp(argv[1],"audio")) return check_audio("");
+    if(argc==2 && !strcmp(argv[1],"audio-key")) return check_pages_keyboard("",2);
+    if(argc==2 && (!strcmp(argv[1],"no-lock-sound") || !strcmp(argv[1],"flat-envelope"))) return check_audio(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"no-return-fire") || !strcmp(argv[1],"no-maneuver") ||
         !strcmp(argv[1],"no-restart"))) return check_skirmish(argv[1]);
     if(argc==2 && (!strcmp(argv[1],"coarse-relief") || !strcmp(argv[1],"bare-ground") ||
