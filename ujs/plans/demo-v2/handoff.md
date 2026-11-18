@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q2b 为 UXE WebGL 材质添加 `toonLevels`，范围为 2 至 16 的整数。立方体使用面法线，D3 内拱使用各圆弧段的几何法线。检查 `tools/check-uxe-toon.cx` 在 SwiftShader 下独立算 2 档与 4 档 RGB。加 `--mutate` 将 4 档改为 3 档，原期望保持不变。下一项 Q2c，Q2b 提交可用 `git log -1 --format=%h -- tools/check-uxe-toon.cx` 定位。
+
 接手分支为 `ujs`，工作目录为 `~/repos/unisacc/.claude/worktrees/ujs`。Q2a `271b47b5e7` 建立真三维三孔桥与低机位。Q2a2 `0c8fddc3c5` 改为 16 段圆弧和有厚度的内壁。督导已分别看图复核；所有者最终风格签字仍在 Q2e。本次同步的 main 输入为 `8cf969aeb3`，冲突表按合并后的批次重新生成，工具编译清单为 149 个分片。接手时先核对 `git status --short --branch` 和 `git log -1 --format='%h %p'`。
 
 下一步从 Q2b 开始，每项单独提交，先证失败再做正例，提交说明和信封附同输入的正常、篡改与回归输出。

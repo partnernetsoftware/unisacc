@@ -1,0 +1,47 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+
+int main(int argc, char **argv) {
+    char cwd[1024], url[1400], profile[96], option[120], *out=0;
+    size_t n=0;
+    const char *p;
+    int group, face, failures=0, rc;
+    int mutate=argc==2 && !strcmp(argv[1],"--mutate");
+    int bands[]={4,2};
+    char *args[]={"google-chrome","--headless=new","--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader","--allow-file-access-from-files",
+        "--no-first-run",option,"--dump-dom",url,0};
+    if((argc>1 && !mutate) || !getcwd(cwd,sizeof cwd)) return 2;
+    if(tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/uxe-toon.html%s",
+        cwd,mutate?"?mutate":"") >= (int)sizeof url) return 2;
+    if(tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-toon-%d",(int)getpid()) >= (int)sizeof profile) return 2;
+    if(tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile) >= (int)sizeof option) return 2;
+    rc=cx_runv_timeout(args,25,&out,&n);
+    chd_wipe(profile);
+    p=out?strstr(out,"<pre id=\"pixels\">"):0;
+    if(rc || !p) { printf("FAIL toon-readback rc=%d\n",rc); return 2; }
+    p+=strlen("<pre id=\"pixels\">");
+    for(group=0;group<2;group++) for(face=1;face<=3;face++) {
+        int levels=bands[group], lit=0, channel, pixel[3], ok=1, expected, bin;
+        /* n is a positive coordinate axis; |light|²=14.
+           Compare squared band boundaries with the squared dot product. */
+        for(bin=1;bin<levels;bin++)
+            lit += 14*bin*bin <= face*face*levels*levels;
+        expected=(255*lit+(levels-1)/2)/(levels-1);
+        for(channel=0;channel<3;channel++) {
+            int v=0;
+            if(*p<'0'||*p>'9') return 2;
+            while(*p>='0'&&*p<='9') { v=10*v+*p++-'0'; if(v>255) return 2; }
+            if((group!=1 || face!=3 || channel!=2) && *p++!=',') return 2;
+            pixel[channel]=v;
+            if(abs(v-expected)>2) ok=0;
+        }
+        printf("%s levels=%d axis=%d expected=%d read=%d,%d,%d\n",
+            ok?"PASS":"FAIL",levels,face,expected,pixel[0],pixel[1],pixel[2]);
+        failures+=!ok;
+    }
+    if(strncmp(p,"</pre>",6)) return 2;
+    free(out);
+    printf("CHECK_UXE_TOON\tn=6 failed=%d\n",failures);
+    return failures?1:0;
+}

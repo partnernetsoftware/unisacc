@@ -5,6 +5,7 @@ import { allMeshes } from "./meshes.js";
 const VS = `#version 100
 precision mediump float;
 attribute vec3 aPos;
+attribute vec3 aNormal;
 attribute vec2 aUV;
 attribute vec3 aInst;
 attribute float aScale;
@@ -20,6 +21,7 @@ uniform float uWave;
 uniform float uTime;
 uniform float uBillboard;
 uniform float uOrtho;
+uniform float uToonLevels;
 uniform vec2 uScreen;
 varying vec3 vN;
 varying vec3 vP;
@@ -68,7 +70,8 @@ void main() {
   vec3 rp = uBillboard > 0.5 ? billboardXZ(lp, uEye, aInst) : rotYXZ(lp, aYaw, aPitch, aRoll);
   vec3 p = rp + aInst;
   p.y += uWave * 0.22 * sin(p.x * 0.09 + uTime) * cos(p.z * 0.08 + uTime * 0.7);
-  vN = normalize(uBillboard > 0.5 ? billboardXZ(aPos, uEye, aInst) : rotYXZ(aPos, aYaw, aPitch, aRoll));
+  vec3 normal = uToonLevels > 1.0 ? aNormal : aPos;
+  vN = normalize(uBillboard > 0.5 ? billboardXZ(normal, uEye, aInst) : rotYXZ(normal, aYaw, aPitch, aRoll));
   vP = p;
   vEye = uEye;
   vFogDepth = length(p - uEye);
@@ -86,6 +89,7 @@ uniform vec3 uColor;
 uniform vec3 uEmissive;
 uniform float uMetal;
 uniform float uRough;
+uniform float uToonLevels;
 uniform vec3 uAmbient;
 uniform float uAmbI;
 uniform vec3 uL0Dir;
@@ -122,6 +126,11 @@ void main() {
   vec3 amb = uAmbient * uAmbI;
   float d0 = max(dot(n, normalize(uL0Dir)), 0.0);
   float d1 = max(dot(n, normalize(uL1Dir)), 0.0);
+  if (uToonLevels > 1.0) {
+    float top = uToonLevels - 1.0;
+    d0 = min(floor(d0 * uToonLevels), top) / top;
+    d1 = min(floor(d1 * uToonLevels), top) / top;
+  }
   float soft = mix(1.0, 0.55, clamp(uRough, 0.0, 1.0));
   vec3 diff = uL0Col * uL0I * d0 * soft + uL1Col * uL1I * d1 * soft;
   vec3 base = mix(uColor, uColor * 0.85 + vec3(0.15), clamp(uMetal, 0.0, 1.0));
@@ -181,7 +190,10 @@ export function createWebGLRenderer(canvas, opts) {
     const uvbuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, uvbuf);
     gl.bufferData(gl.ARRAY_BUFFER, m.uvs || new Float32Array(m.vCount * 2), gl.STATIC_DRAW);
-    return { buf, uvbuf, vCount: m.vCount };
+    const nbuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, nbuf);
+    gl.bufferData(gl.ARRAY_BUFFER, m.normals || m.positions, gl.STATIC_DRAW);
+    return { buf, uvbuf, nbuf, vCount: m.vCount };
   });
 
   const ibo = gl.createBuffer();
@@ -193,6 +205,7 @@ export function createWebGLRenderer(canvas, opts) {
   const rbo = gl.createBuffer();
   const cbo = gl.createBuffer();
   const aPos = gl.getAttribLocation(prog, "aPos");
+  const aNormal = gl.getAttribLocation(prog, "aNormal");
   const aUV = gl.getAttribLocation(prog, "aUV");
   const aInst = gl.getAttribLocation(prog, "aInst");
   const aScale = gl.getAttribLocation(prog, "aScale");
@@ -206,6 +219,7 @@ export function createWebGLRenderer(canvas, opts) {
   const uVP = u("uVP"), uEye = u("uEye");
   const uColor = u("uColor"), uEmissive = u("uEmissive");
   const uMetal = u("uMetal"), uRough = u("uRough");
+  const uToonLevels = u("uToonLevels");
   const uAmbient = u("uAmbient"), uAmbI = u("uAmbI");
   const uL0Dir = u("uL0Dir"), uL0Col = u("uL0Col"), uL0I = u("uL0I");
   const uL1Dir = u("uL1Dir"), uL1Col = u("uL1Col"), uL1I = u("uL1I");
@@ -266,11 +280,17 @@ export function createWebGLRenderer(canvas, opts) {
     gl.uniform3fv(uEmissive, cloud.emissive || [0, 0, 0]);
     gl.uniform1f(uMetal, cloud.metalness ?? 0.2);
     gl.uniform1f(uRough, cloud.roughness ?? 0.5);
+    const levels = cloud.toonLevels;
+    gl.uniform1f(uToonLevels, Number.isInteger(levels) && levels >= 2 && levels <= 16 ? levels : 0);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buf);
     gl.enableVertexAttribArray(aPos);
     gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     ext.vertexAttribDivisorANGLE(aPos, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.nbuf);
+    gl.enableVertexAttribArray(aNormal);
+    gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+    ext.vertexAttribDivisorANGLE(aNormal, 0);
     if (aUV >= 0 && mesh.uvbuf) {
       gl.bindBuffer(gl.ARRAY_BUFFER, mesh.uvbuf);
       gl.enableVertexAttribArray(aUV);

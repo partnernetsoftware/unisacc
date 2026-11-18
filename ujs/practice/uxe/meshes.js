@@ -57,6 +57,10 @@ export const BOX_MESH = new Float32Array([
 ]);
 
 export const MESH_BOX = 2;
+const BOX_NORMALS = new Float32Array(
+  [[0,1,0],[0,-1,0],[0,0,1],[0,0,-1],[1,0,0],[-1,0,0]]
+    .flatMap(normal => Array.from({length:6}, () => normal).flat())
+);
 
 /** XZ unit quad (water). */
 export const PLANE_MESH = new Float32Array([
@@ -83,7 +87,7 @@ function zeros2(n) { return new Float32Array(n * 2); }
 const TABLE = [
   { id: MESH_OCTA, positions: OCTA_MESH, uvs: zeros2(OCTA_MESH.length / 3), vCount: OCTA_MESH.length / 3 },
   { id: MESH_SHIP, positions: SHIP_MESH, uvs: zeros2(SHIP_MESH.length / 3), vCount: SHIP_MESH.length / 3 },
-  { id: MESH_BOX, positions: BOX_MESH, uvs: zeros2(BOX_MESH.length / 3), vCount: BOX_MESH.length / 3 },
+  { id: MESH_BOX, positions: BOX_MESH, normals: BOX_NORMALS, uvs: zeros2(BOX_MESH.length / 3), vCount: BOX_MESH.length / 3 },
   { id: MESH_PLANE, positions: PLANE_MESH, uvs: PLANE_UV, vCount: PLANE_MESH.length / 3 },
   { id: MESH_POINTS, positions: POINT_MESH, uvs: POINT_UV, vCount: POINT_MESH.length / 3 },
 ];
