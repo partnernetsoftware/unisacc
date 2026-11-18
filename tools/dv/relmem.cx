@@ -134,6 +134,20 @@ typedef struct {
 static RmGraph rm_gslots[RM_GSLOTS];
 static RmImpact rm_islots[RM_ISLOTS];
 static long rm_clock, rm_wu_hits, rm_wu_misses, rm_imp_hits, rm_imp_misses, rm_reparses;
+static unsigned long rm_wu_verify_seq, rm_imp_verify_seq;
+
+static unsigned long rm_verify_every(void) {
+    const char *v = sy_env("UNISACC_REL_VERIFY_EVERY");
+    unsigned long n = 0UL;
+    if (!v || !v[0]) return 16UL;
+    while (*v) {
+        if (*v < '0' || *v > '9') return 16UL;
+        if (n > 100000UL) return 16UL;
+        n = n * 10UL + (unsigned long)(*v - '0');
+        v++;
+    }
+    return n > 0UL ? n : 16UL;
+}
 
 static unsigned long rm_hash_bytes(const char *s, long n) {
     unsigned long h = 1469598103934665603UL;
@@ -496,6 +510,79 @@ static void rm_persist_store(RmGraph *g, const char *svc_dir) {
     sb_free(eb); sb_free(eout); sb_free(fout);
 }
 
+static int rm_graph_load_cold(RmGraph *g, const char *root_real, long rootn, const char *cxr,
+                              const char *tracked_path, const char *svc_dir, long t0,
+                              long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
+    unsigned char *tb = 0;
+    int64_t tsz = 0;
+    long at = 0, t1 = t0;
+    int ex_tr = 0, ex_cx = 0, i;
+
+    rm_graph_clear(g);
+    mm_fill(g, (long)sizeof(*g), 0, (long)sizeof(*g));
+    cx_fmt(g->root, sizeof g->root, "%s", root_real);
+    g->rootn = rootn;
+    cx_fmt(g->tracked_path, sizeof g->tracked_path, "%s", tracked_path);
+
+    if (sy_read_file(tracked_path, &tb, &tsz, 32LL << 20) != 0 || !tb) {
+        if (tb) mm_free(tb);
+        cx_fmt(why, (size_t)wcap, "cannot read tracked list %s", tracked_path);
+        return -1;
+    }
+    rm_record_meta(tracked_path, &g->tracked_st, &ex_tr, &g->tracked_racy, &g->tracked_scan_s, g->tracked_sha);
+    rm_record_meta(cxr, &g->cxroot_st, &ex_cx, &g->cxroot_racy, &g->cxroot_scan_s, g->cxroot_sha);
+    g->cxroot_exists = ex_cx;
+    {
+        char xraw[256];
+        if (cx_fmt(xraw, sizeof xraw, "relmem-v1\t%s\t%s", g->tracked_sha, g->cxroot_exists ? g->cxroot_sha : "-")) {
+            mm_fill(g->xsha, 65, '0', 64); g->xsha[64] = 0;
+        } else (void)sy_sha256_hex(xraw, tx_len(xraw, sizeof xraw), g->xsha);
+    }
+    g->used = 1;
+    while (at < (long)tsz) {
+        long e = at, t;
+        while (e < (long)tsz && tb[e] != '\n') e++;
+        t = at;
+        while (t < e && tb[t] != '\t') t++;
+        if (t < e && e - t > 1 &&
+            !(t - at >= 6 && !memcmp(tb + at, "120000", 6)) &&
+            !(e - t - 1 >= 8 && !memcmp(tb + t + 1, "archive/", 8))) {
+            char rel[RM_PW], absb[RM_PW];
+            int ni, ri;
+            if (e - t - 1 >= (long)sizeof rel) { mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "path too long in %s", tracked_path); return -1; }
+            mm_copy(rel, sizeof rel, tb + t + 1, e - t - 1);
+            rel[e - t - 1] = 0;
+            if (cx_fmt(absb, sizeof absb, "%s/%s", g->root, rel)) { mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "path too long"); return -1; }
+            ni = rm_file_node(g, absb);
+            if (ni < 0) ni = rm_node_of(g, rel);
+            ri = rm_node_of(g, rel);
+            if (ni < 0 || ri < 0 ||
+                rm_push_int(&g->order, &g->no, &g->co, ni) ||
+                rm_push_int(&g->order, &g->no, &g->co, ri)) {
+                mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "out of memory"); return -1;
+            }
+            g->nd[ni].tracked = 1;
+            g->scanned++;
+        }
+        at = e + 1;
+    }
+    mm_free(tb);
+    t1 = sy_now_ms();
+    for (i = 0; i < g->nn; i++) {
+        if (!g->nd[i].parsed && rm_parse_node(g, i) != 0) {
+            rm_graph_clear(g);
+            cx_fmt(why, (size_t)wcap, "parse error in %s", root_real);
+            return -1;
+        }
+    }
+    rm_rebuild_rev(g);
+    g->lru = ++rm_clock;
+    if (svc_dir) rm_persist_store(g, svc_dir);
+    if (read_ms_out) *read_ms_out = t1 - t0;
+    if (scan_ms_out) *scan_ms_out = sy_now_ms() - t1;
+    return 0;
+}
+
 static int rm_graph_sync(const char *root, const char *tracked_path, const char *svc_dir,
                          RmGraph **out_g, int *hit_out, int *reparsed_out,
                          long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
@@ -567,90 +654,16 @@ static int rm_graph_sync(const char *root, const char *tracked_path, const char 
         }
     }
 
-    /* Cold load / full rebuild */
-    {
-        unsigned char *tb = 0;
-        int64_t tsz = 0;
-        long at = 0;
-        int ex_tr = 0, ex_cx = 0;
-        if (!g) g = &rm_gslots[evict];
-        rm_graph_clear(g);
-        mm_fill(g, (long)sizeof(*g), 0, (long)sizeof(*g));
-        cx_fmt(g->root, sizeof g->root, "%s", root_real);
-        g->rootn = rootn;
-        cx_fmt(g->tracked_path, sizeof g->tracked_path, "%s", tracked_path);
-
-        if (sy_read_file(tracked_path, &tb, &tsz, 32LL << 20) != 0 || !tb) {
-            if (tb) mm_free(tb);
-            cx_fmt(why, (size_t)wcap, "cannot read tracked list %s", tracked_path);
-            return -1;
-        }
-        rm_record_meta(tracked_path, &g->tracked_st, &ex_tr, &g->tracked_racy, &g->tracked_scan_s, g->tracked_sha);
-        rm_record_meta(cxr, &g->cxroot_st, &ex_cx, &g->cxroot_racy, &g->cxroot_scan_s, g->cxroot_sha);
-        g->cxroot_exists = ex_cx;
-        {
-            char xraw[256];
-            if (cx_fmt(xraw, sizeof xraw, "relmem-v1\t%s\t%s", g->tracked_sha, g->cxroot_exists ? g->cxroot_sha : "-")) {
-                mm_fill(g->xsha, 65, '0', 64); g->xsha[64] = 0;
-            } else (void)sy_sha256_hex(xraw, tx_len(xraw, sizeof xraw), g->xsha);
-        }
-        g->used = 1;
-        while (at < (long)tsz) {
-            long e = at, t;
-            while (e < (long)tsz && tb[e] != '\n') e++;
-            t = at;
-            while (t < e && tb[t] != '\t') t++;
-            if (t < e && e - t > 1 &&
-                !(t - at >= 6 && !memcmp(tb + at, "120000", 6)) &&
-                !(e - t - 1 >= 8 && !memcmp(tb + t + 1, "archive/", 8))) {
-                char rel[RM_PW], absb[RM_PW];
-                int ni, ri;
-                if (e - t - 1 >= (long)sizeof rel) { mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "path too long in %s", tracked_path); return -1; }
-                mm_copy(rel, sizeof rel, tb + t + 1, e - t - 1);
-                rel[e - t - 1] = 0;
-                if (cx_fmt(absb, sizeof absb, "%s/%s", g->root, rel)) { mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "path too long"); return -1; }
-                ni = rm_file_node(g, absb);
-                if (ni < 0) ni = rm_node_of(g, rel);
-                ri = rm_node_of(g, rel);
-                if (ni < 0 || ri < 0 ||
-                    rm_push_int(&g->order, &g->no, &g->co, ni) ||
-                    rm_push_int(&g->order, &g->no, &g->co, ri)) {
-                    mm_free(tb); rm_graph_clear(g); cx_fmt(why, (size_t)wcap, "out of memory"); return -1;
-                }
-                g->nd[ni].tracked = 1;
-                g->scanned++;
-            }
-            at = e + 1;
-        }
-        mm_free(tb);
-        t1 = sy_now_ms();
-        for (i = 0; i < g->nn; i++) {
-            if (!g->nd[i].parsed && rm_parse_node(g, i) != 0) {
-                rm_graph_clear(g);
-                cx_fmt(why, (size_t)wcap, "parse error in %s", root_real);
-                return -1;
-            }
-        }
-        rm_rebuild_rev(g);
-        g->lru = ++rm_clock;
-        rm_persist_store(g, svc_dir);
-        rm_wu_misses++;
-        *read_ms_out = t1 - t0;
-        *scan_ms_out = sy_now_ms() - t1;
-        *out_g = g;
-        return 0;
-    }
+    if (!g) g = &rm_gslots[evict];
+    if (rm_graph_load_cold(g, root_real, rootn, cxr, tracked_path, svc_dir, t0, read_ms_out, scan_ms_out, why, wcap) != 0) return -1;
+    rm_wu_misses++;
+    *out_g = g;
+    return 0;
 }
 
-static int rm_who_uses(const char *root, const char *tracked_path, const char *file, const char *svc_dir,
-                       sb *body_out, int *rc_out, int *hit_out, int *rep_out,
-                       long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
-    RmGraph *g = 0;
+static int rm_who_uses_query(RmGraph *g, const char *file, sb *body_out, int *rc_out, char *why, long wcap) {
     char absb[RM_PW];
     int target, *q = 0, nq = 0, cq = 0, h, k, found = 0;
-    if (rm_graph_sync(root, tracked_path, svc_dir, &g, hit_out, rep_out, read_ms_out, scan_ms_out, why, wcap) != 0) {
-        return -1;
-    }
     if (file[0] == '/') {
         if (cx_fmt(absb, sizeof absb, "%s", file)) { cx_fmt(why, (size_t)wcap, "path too long"); return -1; }
     } else {
@@ -695,6 +708,44 @@ static int rm_who_uses(const char *root, const char *tracked_path, const char *f
         }
     }
     *rc_out = found ? 0 : 1;
+    return 0;
+}
+
+static int rm_who_uses(const char *root, const char *tracked_path, const char *file, const char *svc_dir,
+                       sb *body_out, int *rc_out, int *hit_out, int *rep_out,
+                       long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
+    RmGraph *g = 0;
+    unsigned long every, seq;
+    if (rm_graph_sync(root, tracked_path, svc_dir, &g, hit_out, rep_out, read_ms_out, scan_ms_out, why, wcap) != 0) {
+        return -1;
+    }
+    if (rm_who_uses_query(g, file, body_out, rc_out, why, wcap) != 0) return -1;
+    every = rm_verify_every();
+    if (*hit_out == 1) {
+        seq = ++rm_wu_verify_seq;
+        if (every == 1UL || (seq % every) == 0UL) {
+            RmGraph *fg = (RmGraph *)mm_zalloc((long)sizeof(RmGraph));
+            sb *cmp = sb_new();
+            char cxr[RM_PW];
+            int cmp_rc = -1, match = 0;
+            if (fg && cmp && !cx_fmt(cxr, sizeof cxr, "%s/cxroot.tsv", g->root) &&
+                rm_graph_load_cold(fg, g->root, g->rootn, cxr, tracked_path, 0, sy_now_ms(), 0, 0, why, wcap) == 0 &&
+                rm_who_uses_query(fg, file, cmp, &cmp_rc, why, wcap) == 0) {
+                long bl = sb_len(body_out), cl = sb_len(cmp);
+                if (cmp_rc == *rc_out && bl == cl &&
+                    (bl == 0 || mm_same(sb_cstr(body_out), sb_cstr(cmp), (size_t)bl))) {
+                    match = 1;
+                }
+            }
+            if (fg) { rm_graph_clear(fg); mm_free(fg); }
+            sb_free(cmp);
+            if (!match) {
+                rm_graph_clear(g);
+                cx_fmt(why, (size_t)wcap, "periodic full-scan cross-check mismatch");
+                return -1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -802,7 +853,7 @@ static int rm_glob_m(const char *p, long pn, const char *s, long sn) {
 }
 
 static int rm_impact_sync(const char *root, int tier, const char *cl_path, const char *bt_path,
-                          const char *lk_path, int lk_explicit, RmImpact **out_im,
+                          const char *lk_path, int lk_explicit, RmImpact *fresh_out, RmImpact **out_im,
                           int *hit_out, long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
     RmImpact *im = 0;
     int i, evict = 0;
@@ -816,28 +867,30 @@ static int rm_impact_sync(const char *root, int tier, const char *cl_path, const
         return -1;
     }
     rootn = tx_len(root_real, sizeof root_real);
-    for (i = 0; i < RM_ISLOTS; i++) {
-        if (rm_islots[i].used && tx_eqz(rm_islots[i].root, root_real) && rm_islots[i].tier == tier &&
-            tx_eqz(rm_islots[i].closure_path, cl_path) && tx_eqz(rm_islots[i].batches_path, bt_path) &&
-            tx_eqz(rm_islots[i].links_path, lk_path) && rm_islots[i].links_explicit == lk_explicit) {
-            im = &rm_islots[i];
-            break;
+    if (!fresh_out) {
+        for (i = 0; i < RM_ISLOTS; i++) {
+            if (rm_islots[i].used && tx_eqz(rm_islots[i].root, root_real) && rm_islots[i].tier == tier &&
+                tx_eqz(rm_islots[i].closure_path, cl_path) && tx_eqz(rm_islots[i].batches_path, bt_path) &&
+                tx_eqz(rm_islots[i].links_path, lk_path) && rm_islots[i].links_explicit == lk_explicit) {
+                im = &rm_islots[i];
+                break;
+            }
+            if (!rm_islots[i].used) evict = i;
+            else if (rm_islots[i].used && rm_islots[i].lru < rm_islots[evict].lru) evict = i;
         }
-        if (!rm_islots[i].used) evict = i;
-        else if (rm_islots[i].used && rm_islots[i].lru < rm_islots[evict].lru) evict = i;
-    }
-    if (im) {
-        int c_ok = rm_meta_fresh(cl_path, &im->st_cl, 1, &im->cl_racy, &im->cl_scan_s, im->cl_sha);
-        int b_ok = rm_meta_fresh(bt_path, &im->st_bt, 1, &im->bt_racy, &im->bt_scan_s, im->bt_sha);
-        int l_ok = rm_meta_fresh(lk_path, &im->st_lk, im->lk_exists, &im->lk_racy, &im->lk_scan_s, im->lk_sha);
-        if (c_ok && b_ok && l_ok) {
-            im->lru = ++rm_clock;
-            rm_imp_hits++;
-            *hit_out = 1;
-            *read_ms_out = 0;
-            *scan_ms_out = sy_now_ms() - t0;
-            *out_im = im;
-            return 0;
+        if (im) {
+            int c_ok = rm_meta_fresh(cl_path, &im->st_cl, 1, &im->cl_racy, &im->cl_scan_s, im->cl_sha);
+            int b_ok = rm_meta_fresh(bt_path, &im->st_bt, 1, &im->bt_racy, &im->bt_scan_s, im->bt_sha);
+            int l_ok = rm_meta_fresh(lk_path, &im->st_lk, im->lk_exists, &im->lk_racy, &im->lk_scan_s, im->lk_sha);
+            if (c_ok && b_ok && l_ok) {
+                im->lru = ++rm_clock;
+                rm_imp_hits++;
+                *hit_out = 1;
+                *read_ms_out = 0;
+                *scan_ms_out = sy_now_ms() - t0;
+                *out_im = im;
+                return 0;
+            }
         }
     }
 
@@ -852,7 +905,8 @@ static int rm_impact_sync(const char *root, int tier, const char *cl_path, const
         long *bt_idn = 0, *bt_pfn = 0;
         int *bt_h = 0, bt_n = 0, bt_cap = 2048, bt_hcap = 8192;
 
-        if (!im) im = &rm_islots[evict];
+        if (fresh_out) im = fresh_out;
+        else if (!im) im = &rm_islots[evict];
         rm_impact_clear(im);
         cx_fmt(im->root, sizeof im->root, "%s", root_real);
         im->rootn = rootn;
@@ -1079,7 +1133,7 @@ static int rm_impact_sync(const char *root, int tier, const char *cl_path, const
         }
         im->used = 1;
         im->lru = ++rm_clock;
-        rm_imp_misses++;
+        if (!fresh_out) rm_imp_misses++;
         *read_ms_out = t1 - t0;
         *scan_ms_out = sy_now_ms() - t1;
         *out_im = im;
@@ -1087,11 +1141,7 @@ static int rm_impact_sync(const char *root, int tier, const char *cl_path, const
     }
 }
 
-static int rm_impact(const char *root, int tier, const char *cl_path, const char *bt_path,
-                     const char *lk_path, int lk_explicit, char **files, int nf,
-                     sb *body_out, int *rc_out, int *hit_out,
-                     long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
-    RmImpact *im = 0;
+static int rm_impact_query(RmImpact *im, char **files, int nf, sb *body_out, int *rc_out, char *why, long wcap) {
     const char *ch[RM_MAXFILES];
     char *owned[RM_MAXFILES];
     long cl[RM_MAXFILES];
@@ -1100,13 +1150,6 @@ static int rm_impact(const char *root, int tier, const char *cl_path, const char
     int k, b, hit = 0, nna = 0, nt = 0, nn2 = 0;
     const char *tb[256], *nb2[256];
 
-    if (nf <= 0 || nf > RM_MAXFILES) {
-        cx_fmt(why, (size_t)wcap, "usage: need 1..%d files", RM_MAXFILES);
-        return -1;
-    }
-    if (rm_impact_sync(root, tier, cl_path, bt_path, lk_path, lk_explicit, &im, hit_out, read_ms_out, scan_ms_out, why, wcap) != 0) {
-        return -1;
-    }
     for (k = 0; k < nf; k++) {
         char absb[RM_PW], real[RM_PW * 2];
         const char *f = files[k];
@@ -1216,6 +1259,49 @@ static int rm_impact(const char *root, int tier, const char *cl_path, const char
     return 0;
 }
 
+static int rm_impact(const char *root, int tier, const char *cl_path, const char *bt_path,
+                     const char *lk_path, int lk_explicit, char **files, int nf,
+                     sb *body_out, int *rc_out, int *hit_out,
+                     long *read_ms_out, long *scan_ms_out, char *why, long wcap) {
+    RmImpact *im = 0;
+    unsigned long every, seq;
+    if (nf <= 0 || nf > RM_MAXFILES) {
+        cx_fmt(why, (size_t)wcap, "usage: need 1..%d files", RM_MAXFILES);
+        return -1;
+    }
+    if (rm_impact_sync(root, tier, cl_path, bt_path, lk_path, lk_explicit, 0, &im, hit_out, read_ms_out, scan_ms_out, why, wcap) != 0) {
+        return -1;
+    }
+    if (rm_impact_query(im, files, nf, body_out, rc_out, why, wcap) != 0) return -1;
+    every = rm_verify_every();
+    if (*hit_out == 1) {
+        seq = ++rm_imp_verify_seq;
+        if (every == 1UL || (seq % every) == 0UL) {
+            RmImpact *fim = (RmImpact *)mm_zalloc((long)sizeof(RmImpact)), *fres = 0;
+            sb *cmp = sb_new();
+            int cmp_hit = 0, cmp_rc = -1, match = 0;
+            long tr = 0, ts = 0;
+            if (fim && cmp &&
+                rm_impact_sync(root, tier, cl_path, bt_path, lk_path, lk_explicit, fim, &fres, &cmp_hit, &tr, &ts, why, wcap) == 0 &&
+                rm_impact_query(fres, files, nf, cmp, &cmp_rc, why, wcap) == 0) {
+                long bl = sb_len(body_out), cl = sb_len(cmp);
+                if (cmp_rc == *rc_out && bl == cl &&
+                    (bl == 0 || mm_same(sb_cstr(body_out), sb_cstr(cmp), (size_t)bl))) {
+                    match = 1;
+                }
+            }
+            if (fim) { rm_impact_clear(fim); mm_free(fim); }
+            sb_free(cmp);
+            if (!match) {
+                rm_impact_clear(im);
+                cx_fmt(why, (size_t)wcap, "periodic impact cross-check mismatch");
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ---- Server protocol handler ---- */
 
 static int rm_split_tabs(char *s, long slen, char **f, int maxf) {
@@ -1319,18 +1405,47 @@ static long rm_parse_hdr_num(const char *hdr, long hl, const char *key) {
     return p >= 0 ? atol(hdr + p + kl) : -1;
 }
 
+static int rm_tree_fp(const char *root, char hex[65]) {
+    char cmd[RM_PW * 2 + 256];
+    char *av[4];
+    np_result r;
+    char why[200];
+    int ok = 0;
+    if (cx_fmt(cmd, sizeof cmd,
+               "git -C '%s' rev-parse --git-dir >/dev/null 2>&1 && { git -C '%s' rev-parse HEAD 2>/dev/null || echo NO_HEAD; echo '---LS---'; git -C '%s' ls-files -s -- '*.cx' tests/batches.tsv tests/coverage.tsv tests/manifests 2>/dev/null; }",
+               root, root, root)) return -1;
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    if (np_run(av, root, 0, 10, &r, why, sizeof why) == 0 && r.rc == 0 && r.out &&
+        sy_sha256_hex(r.out, (long)r.outn, hex) == 0) {
+        ok = 1;
+    }
+    np_free(&r);
+    return ok ? 0 : -1;
+}
+
 static int rm_ensure_default(const char *root, const char *name, const char *cmd, char *out, long cap) {
-    char dir[RM_PW], full[RM_PW * 2 + 256], part[RM_PW], errp[RM_PW];
+    char dir[RM_PW], full[RM_PW * 2 + 256], part[RM_PW], errp[RM_PW], fpp[RM_PW], fp[65];
     const char *env = sy_env("UNISACC_DEVMETA_DIR");
     char *av[4];
     np_result r;
     char why[200];
-    int rc;
+    int has_fp = 0;
     if ((env && *env ? cx_fmt(dir, sizeof dir, "%s/rel", env) : cx_fmt(dir, sizeof dir, "%s/.devsvc/rel", root)) ||
         cx_fmt(out, (size_t)cap, "%s/%s", dir, name) ||
+        cx_fmt(fpp, sizeof fpp, "%s.fp", out) ||
         cx_fmt(part, sizeof part, "%s.part.%d", out, sy_pid()) ||
         cx_fmt(errp, sizeof errp, "%s.err.%d", out, sy_pid())) return 2;
-    if (sy_exists(out) == 1) return 0;
+    has_fp = (rm_tree_fp(root, fp) == 0);
+    if (sy_exists(out) == 1) {
+        unsigned char *fb = 0;
+        int64_t fsz = 0;
+        if (!has_fp) return 0;
+        if (sy_read_file(fpp, &fb, &fsz, 256) == 0 && fb && fsz >= 64 && mm_same(fb, fp, 64)) {
+            mm_free(fb);
+            return 0;
+        }
+        mm_free(fb);
+    }
     if (sy_mkdir_all(dir, 0755) < 0) return 2;
     if (cx_fmt(full, sizeof full, "cd '%s' && %s > '%s' 2> '%s' && mv '%s' '%s'", root, cmd, part, errp, part, out)) return 2;
     av[0] = "sh"; av[1] = "-c"; av[2] = full; av[3] = 0;
@@ -1342,6 +1457,10 @@ static int rm_ensure_default(const char *root, const char *name, const char *cmd
     }
     sy_unlink(errp);
     np_free(&r);
+    if (has_fp) {
+        char fpline[68];
+        if (!cx_fmt(fpline, sizeof fpline, "%s\n", fp)) (void)sy_write_atomic(fpp, fpline, 65, 0644);
+    }
     return 0;
 }
 
