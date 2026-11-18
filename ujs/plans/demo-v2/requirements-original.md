@@ -27,3 +27,9 @@
 
 无外部参考视频。依赖 D1-D4 完成且 UXE 可替代 three.js。即时渲染动态世界,非静帧。
 
+## D2 更正(2026-11-18,督导核 d2.json)
+
+kevin_t_ngo 推文正文是 `You can play here: https://what-the-water-keeps.vercel.app/`。D2 参考即该可玩站点(旧参考 C),不是独立 x.com 视频。c-vt20000 构图/色调对照与 S0 概念稿/UXE 版仍然有效。headless 无法渲染出完整可玩画面,限制保留。
+
+
+

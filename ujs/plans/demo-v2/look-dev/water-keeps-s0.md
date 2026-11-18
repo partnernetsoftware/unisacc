@@ -1,6 +1,7 @@
 # water-keeps S0
 
-按参考 C 的探索,待所有者确认是否沿用为 D2。D2 所有者来源是 kevin_t_ngo 视频,见 [../requirements-original.md](../requirements-original.md)。
+D2 参考即 what-the-water-keeps。本概念稿与 UXE 版仍然有效。headless 无法渲染完整可玩画面。
+
 
 
 

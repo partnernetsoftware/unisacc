@@ -1,13 +1,35 @@
-# handoff 2026-11-18 D2/D3/D4 视频
+# handoff 2026-11-18 停手等换窗口
 
-先前本机无这些 x.com 视频缓存(搜过 /tmp Downloads .cache; 未把 cursor-agent mp4 当它们)。无 ffmpeg、无 yt-dlp。无 cookie。
+## 原话档
 
-方法: GET https://api.fxtwitter.com/<user>/status/<id> -> tweet.media.videos[].url -> curl mp4。
+`ujs/plans/demo-v2/requirements-original.md`(只增不改)。prd 0.3 以它为准。
 
-| 项 | 视频路径 | sha256 | 帧 |
-|---|---|---|---|
-| D3 | /tmp/ref/d3.mp4 | 679a804c067ac109c6e155051be646776fee9912a8655760a85039f04698e2ea | ref/d3/frames 01 04 07 |
-| D4 | /tmp/ref/d4.mp4 | 5052c61911f2c97ee281dd3bba6a32bcd4b0522599ed3a2fce62904291114371 | ref/d4/frames 01 04 07 10 13 |
-| D2 | 无 mp4 | card /tmp/ref/d2-card.jpg b9758d9ffa46a4c88f3433918335bdb69cd589050307567a001e16741c8e79b1 | ref/d2/frames/01.jpg 仅 card |
+## 视频与帧(不进 docs/)
 
-抽帧: google-chrome --headless --screenshot; 非 0 秒多数 seek 失败(3021B 空白)。ffmpeg 缺口记 build/pkg-gaps.tsv。帧不进 docs/。
+| | 本体 | 仓内 |
+|---|---|---|
+| D2 | 无 mp4。卡片 `/tmp/ref/d2-card.jpg`。可玩站 what-the-water-keeps,headless 出不了完整画面 | `ref/d2/` |
+| D3 | `/tmp/ref/d3.mp4` sha256 679a804c067ac109c6e155051be646776fee9912a8655760a85039f04698e2ea | `ref/d3/frames` 01 04 07 |
+| D4 | `/tmp/ref/d4.mp4` sha256 5052c61911f2c97ee281dd3bba6a32bcd4b0522599ed3a2fce62904291114371 | `ref/d4/frames` 01 04 07 10 13 |
+| JSON | `/tmp/ref/d2.json` `d3.json` `d4.json` | |
+
+无 ffmpeg。本机先前无这些视频缓存。
+
+## 各卡状态
+
+- D1 fly: Forge fighterv2,画面 UNMEASURED(headless 空白)。
+- D2 water-keeps: 参考=vercel 可玩站。S0 概念稿/UXE 与 c-vt20000 仍有效。取消待确认。
+- D3 ink-walk: 视频帧核过多拱石桥小屋阔叶,NPR。仍缺全时长精确抽帧。
+- D4 oneshot: 视频帧核过四足机械城堡丘陵积云白烟,NPR。
+- D5 ghibli-world: 终局,依赖 D1-D4,当前不开工。
+
+## UXE 优先级
+
+T1 贴图采样 -> T2 素材加载 -> T3 精灵粒子 -> **T4 NPR(描边、赛璐璐色阶、手绘纹理阴影、天空云; D3/D4 前置,先于 T5)** -> T5 倒影/后处理 -> D5 动态世界。
+
+## 已知坑
+
+- D2 可玩站 headless 不完整。
+- 无 ffmpeg,chrome seek 多数非 0 秒失败。
+- 第三方帧只作仓内对照,不得进 docs/ 与发布页。
+- ujs 工作在 ujs 分支做完再合 main; 不 cherry-pick 代办。
